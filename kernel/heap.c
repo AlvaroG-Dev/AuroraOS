@@ -9,6 +9,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "paging.h"
+#include "panic.h"
 #include "serial.h"
 #include "slab.h"
 #include "spinlock.h"
@@ -29,6 +30,13 @@ typedef struct __attribute__((aligned(16))) block_header {
 #define HEADER_SIZE sizeof(block_header_t) // == 32
 #define HEAP_GROW 4 // páginas a pedir al VMM cuando se agota el heap
 
+// Límite máximo por una sola allocación. Evita que un kmalloc con
+// un tamaño absurdo (basura, typo, corrupción) intente reservar
+// cientos de MB y agote el PMM. 64 MB es holgado para todo uso
+// razonable del kernel actual; si en el futuro hace falta más,
+// subir el límite aquí.
+#define HEAP_MAX_SINGLE_ALLOC (64 * 1024 * 1024)
+
 static block_header_t *heap_head = NULL; // Primer bloque
 static uint64_t heap_top = 0;            // Próxima dirección virtual libre
 static spinlock_t heap_lock;             // Protege heap_head / heap_top
@@ -38,6 +46,15 @@ static spinlock_t heap_lock;             // Protege heap_head / heap_top
 // ---------------------------------------------------------------------------
 
 static block_header_t *heap_grow_locked(size_t pages) {
+  // [FIX] Rechazar peticiones que excedan el límite. Nadie debería
+  // pedir más de HEAP_MAX_SINGLE_ALLOC de una vez.
+  size_t max_pages = HEAP_MAX_SINGLE_ALLOC / PAGE_SIZE;
+  if (pages > max_pages) {
+    LOG_ERR("[HEAP] petición de %lu páginas excede el límite (%lu)",
+            (unsigned long)pages, (unsigned long)max_pages);
+    return NULL;
+  }
+
   uint64_t vaddr = heap_top;
   if (vmm_alloc_pages(vaddr, pages, PTE_WRITABLE | PTE_NX) != 0) {
     LOG_ERR("[HEAP] ERROR: vmm_alloc_pages fallo");
@@ -75,6 +92,13 @@ static void coalesce(void) {
 }
 
 static void *kmalloc_locked(size_t size) {
+  // [FIX] Rechazar peticiones absurdas antes de tocar el PMM.
+  if (size > HEAP_MAX_SINGLE_ALLOC) {
+    LOG_ERR("[HEAP] kmalloc(%lu) excede el límite de %lu bytes",
+            (unsigned long)size, (unsigned long)HEAP_MAX_SINGLE_ALLOC);
+    return NULL;
+  }
+
   block_header_t *cur = heap_head;
   while (cur) {
     if (cur->is_free && cur->size >= size) {
@@ -115,6 +139,7 @@ static void *kmalloc_locked(size_t size) {
   }
   new_blk->is_free = 0;
   new_blk->magic = HEAP_MAGIC;
+
   return (void *)((uint8_t *)new_blk + HEADER_SIZE);
 }
 
@@ -189,7 +214,9 @@ void heap_init(void) {
   heap_grow_locked(HEAP_GROW);
   spin_unlock_irqrestore(&heap_lock, flags);
 
-  LOG_INFO("[HEAP] Heap inicializado en %p", (void *)HEAP_VMA);
+  LOG_INFO("[HEAP] Heap inicializado en %p (límite por alloc: %lu MB)",
+           (void *)HEAP_VMA,
+           (unsigned long)(HEAP_MAX_SINGLE_ALLOC / (1024 * 1024)));
 
   // Inicializar SLAB después del heap. SLAB no depende del heap para
   // crecer (pide páginas al VMM directamente), pero el orden es natural:
@@ -231,7 +258,15 @@ void kfree(void *ptr) {
 }
 
 void heap_dump(void) {
-  unsigned long flags = spin_lock_irqsave(&heap_lock);
+  // [PANIC] Si estamos en panic, NO coger el lock. Si el panic ocurrió
+  // dentro de kmalloc, heap_lock puede estar cogido y nos colgaríamos
+  // intentando cogerlo otra vez.
+  extern int panic_in_progress(void);
+  int locked = !panic_in_progress();
+  unsigned long flags = 0;
+
+  if (locked)
+    flags = spin_lock_irqsave(&heap_lock);
 
   LOG_INFO("[HEAP] Estado del heap (bloques > %d bytes):", SLAB_MAX_SIZE);
   block_header_t *cur = heap_head;
@@ -243,9 +278,12 @@ void heap_dump(void) {
     cur = cur->next;
   }
 
-  spin_unlock_irqrestore(&heap_lock, flags);
+  if (locked)
+    spin_unlock_irqrestore(&heap_lock, flags);
 
-  slab_dump_stats();
+  // NO llamar a slab_dump_stats() aquí. El SLAB tiene su propio dump
+  // (dump_slab / slab_dump_stats) y ya se invoca por separado desde
+  // panic.c. Evitamos así la duplicación.
 }
 
 // ---------------------------------------------------------------------------
