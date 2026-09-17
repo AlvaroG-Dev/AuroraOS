@@ -370,10 +370,29 @@ int vmm_alloc_pages(uint64_t vaddr, uint64_t num_pages, uint64_t flags) {
 
   for (uint64_t i = 0; i < num_pages; i++) {
     uint64_t phys = pmm_alloc_page();
-    if (!phys)
+    if (!phys) {
+      // Rollback: liberar las páginas ya mapeadas.
+      for (uint64_t j = 0; j < i; j++) {
+        uint64_t v = vaddr + j * PAGE_SIZE;
+        uint64_t p = paging_get_phys(v);
+        if (p) {
+          paging_unmap_page(v);
+          pmm_free_page(p);
+        }
+      }
       return -1;
+    }
     if (paging_map_page(vaddr + i * PAGE_SIZE, phys, flags) != 0) {
       pmm_free_page(phys);
+      // Rollback de las anteriores.
+      for (uint64_t j = 0; j < i; j++) {
+        uint64_t v = vaddr + j * PAGE_SIZE;
+        uint64_t p = paging_get_phys(v);
+        if (p) {
+          paging_unmap_page(v);
+          pmm_free_page(p);
+        }
+      }
       return -1;
     }
   }

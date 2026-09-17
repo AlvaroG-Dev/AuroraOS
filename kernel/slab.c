@@ -292,13 +292,24 @@ size_t slab_usable_size(const void *ptr) {
 }
 
 void slab_dump_stats(void) {
+  extern int panic_in_progress(void);
+  int in_panic = panic_in_progress();
+
   LOG_INFO("[SLAB] Estado de las caches:");
   for (int i = 0; i < SLAB_NUM_CACHES; i++) {
     slab_cache_t *c = &caches[i];
-    unsigned long flags = spin_lock_irqsave(&c->lock);
+
+    // [PANIC] No coger el lock si estamos en panic.
+    int locked = !in_panic;
+    unsigned long flags = 0;
+    if (locked)
+      flags = spin_lock_irqsave(&c->lock);
+
     LOG_INFO("  %s: slabs=%lu used=%lu total=%lu obj=%lu", c->name,
              (unsigned long)c->slabs_count, (unsigned long)c->used_count,
              (unsigned long)c->total_count, (unsigned long)c->obj_size);
-    spin_unlock_irqrestore(&c->lock, flags);
+
+    if (locked)
+      spin_unlock_irqrestore(&c->lock, flags);
   }
 }
