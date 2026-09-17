@@ -4,7 +4,6 @@
 #include "window.h"
 #include <stdint.h>
 
-
 void compositor_init(void);
 void compositor_invalidate_rect(rect_t damage);
 window_t *compositor_create_window(int x, int y, int w, int h,
@@ -12,5 +11,4 @@ window_t *compositor_create_window(int x, int y, int w, int h,
 void compositor_thread(void);
 void compositor_notify_event(void);
 void compositor_notify_clock_tick(void);
-static void compositor_process_events(void);
 void compositor_close_window(window_t *win);
