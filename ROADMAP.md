@@ -140,7 +140,7 @@ Sockets como syscalls.
 **Por qué**: ya tienes `pmm_self_test` y `[HEAP-TEST]`. Formalízalos.
 **Cómo**: `TEST_ASSERT(cond, msg)` + runner que ejecute tests al boot.
 
-### E3. Comandos de debug en panic [ ]
+### E3. Comandos de debug en panic [x]
 **Esfuerzo**: 1 día
 **Por qué**: cuando crashee, querrás dumpear heap, tareas, tablas de páginas.
 **Cómo**: en `isr_handler`, llamar a `heap_dump()`, `sched_dump()`,
@@ -166,7 +166,7 @@ capturar serial y verificar cadenas esperadas.
 **Esfuerzo**: 1h
 **Por qué**: `%p` está bien, pero podrías tener `%MAC`, `%IP`, `%UUID`.
 
-### F3. `panic()` centralizado [ ]
+### F3. `panic()` centralizado [x]
 **Esfuerzo**: 2h
 **Por qué**: hoy `isr_handler` hace todo. Separa `panic(fmt, ...)`.
 
@@ -260,6 +260,32 @@ parte del riesgo.
 No hacer preempt_disable() global alrededor de todo el setup
 porque klog_calibrate_tsc necesita IRQs activas para funcionar
 (hace hlt esperando ticks). Y ps2_thread necesita correr.
+
+## Deuda técnica conocida (para futuras iteraciones)
+
+### heap_dump / slab_dump y locks
+`heap_dump()` y `slab_dump_stats()` consultan `panic_in_progress()`.
+Si están en panic, no cogen locks. Esto es correcto single-CPU pero
+puede dar falsos negativos en SMP (otra CPU podría tener el lock
+realmente cogido y el dump leería estado inconsistente). Cuando
+lleguemos a SMP, revisar este diseño: tal vez usar trylock con
+timeout, o un snapshot atómico del estado.
+
+### serial_lock no se resetea en panic
+Si el panic ocurre mientras un `LOG_*` está escribiendo a serial
+(con `serial_lock` cogido), el dump del panic se cuelga en el
+primer `LOG_INFO`. Mitigación actual: no hacer LOG durante el
+propio panic (usamos `serial_puts`/`serial_hex` directos en
+`panic.c`). Pero los dumps (`dump_scheduler`, `dump_heap`, etc.)
+usan `LOG_*`... inconsistente. Unificar: usar serial directo en
+todos los dumps, o añadir `serial_lock_reset()` que se llame en
+`panic_v` antes de los dumps. Anotado.
+
+### `HEAP_MAX_SINGLE_ALLOC = 64 MB`
+Límite arbitrario. Si en el futuro algún subsistema legítimamente
+necesita `kmalloc` de más de 64 MB, subir el límite o
+implementar un `vmalloc()` (bloques grandes fuera del heap
+lineal). Hoy no hace falta.
 
 **Y sobre los tests**, una nota en el bloque E2 del ROADMAP:
 
