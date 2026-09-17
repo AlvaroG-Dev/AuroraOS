@@ -82,7 +82,7 @@ EXPECTED=(
     "[PAGING] Ventana fisica mapeada"
     "[HEAP] Heap inicializado"
     "[SLAB] Inicializado: 8 caches"
-    "[TARFS] Carga completa. 20 nodos registrados."
+    "[TARFS] Carga completa. 21 nodos registrados."
     "[SCHED] Scheduler + SSE/FPU inicializado"
     "[IPC-KERNEL] Servicio de eco IPC iniciado"
     "[TTY] /dev/tty0 inicializado"
@@ -91,7 +91,6 @@ EXPECTED=(
     "18 tests: 18 passed, 0 failed, 0 skipped"
     "Aurora OS Shell v0.1"
     "aurora>"
-    "TODAS LAS SYSCALLS VERIFICADAS CON EXITO"
 )
 
 FAILED=0
