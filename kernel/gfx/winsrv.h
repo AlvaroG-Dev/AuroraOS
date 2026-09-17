@@ -33,6 +33,15 @@ typedef struct winsrv_event {
     uint32_t data;
 } winsrv_event_t;
 
+// Struct compartida entre kernel y userland para SYS_WIN_BLIT.
+// El usuario pasa un puntero a esta struct. El kernel la copia con
+// stac/clac y luego usa los campos.
+typedef struct {
+    int32_t  win_id;
+    int32_t  x, y, w, h;
+    uint32_t *pixels;   // puntero a userland (w*h uint32)
+} winsrv_blit_args_t;
+
 // Inicializa el winsrv. Llamar desde compositor_init tras crear el
 // backbuffer.
 void winsrv_init(void);
@@ -47,8 +56,8 @@ int winsrv_create_window(task_t *owner, int x, int y, int w, int h,
 // Devuelve 0 si OK, -1 si no existe o no es del owner.
 int winsrv_destroy_window(task_t *owner, int win_id);
 
-// Copia píxeles al content_buffer de la ventana. 'pixels' es un buffer
-// de userland (w*h uint32 en formato 0xAARRGGBB, fila a fila).
+// Copia píxeles al content_buffer de la ventana. 'user_pixels' es un
+// buffer de userland (w*h uint32 en formato 0xAARRGGBB, fila a fila).
 int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
                 const uint32_t *user_pixels);
 
