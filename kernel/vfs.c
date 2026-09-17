@@ -122,20 +122,6 @@ static void fd_init_wqs(file_descriptor_t *fd) {
   wait_queue_init(&fd->write_wq);
 }
 
-// Libera un nodo VFS correctamente, sin tocar nodos estáticos.
-static void vfs_node_free(vfs_node_t *node) {
-  if (!node)
-    return;
-  if (node == &stdin_node || node == &stdout_node || node == &stderr_node)
-    return;
-  vfs_node_t *tty_node = tty_get_node();
-  if (tty_node && node == tty_node)
-    return;
-  if (node->ops && node->ops->close)
-    node->ops->close(node);
-  kfree(node);
-}
-
 file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
   file_descriptor_t *fd =
       (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t));
@@ -146,10 +132,7 @@ file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
   fd_init_wqs(fd);
 
   if (stdio_type == 0) {
-    // [TTY] stdin apunta a /dev/tty si está disponible, para que read()
-    // pueda bloquear. Si no, cae al stdin_node clásico (devuelve 0).
-    vfs_node_t *tnode = tty_get_node();
-    fd->node = tnode ? tnode : &stdin_node;
+    fd->node = &stdin_node;   // ← vuelve al stdin clásico
     fd->flags = O_RDONLY;
   } else if (stdio_type == 1) {
     fd->node = &stdout_node;
