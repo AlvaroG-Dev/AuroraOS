@@ -2,6 +2,7 @@
 #include "syscall.h"
 #include "cpu.h"
 #include "gdt.h"
+#include "gfx/winsrv.h"
 #include "ipc.h"
 #include "klog.h"
 #include "paging.h"
@@ -53,8 +54,6 @@ static size_t copy_string_from_user(char *dst, size_t dst_size,
 
 uint64_t syscall_handler_c(uint64_t num, uint64_t arg1, uint64_t arg2,
                            uint64_t arg3, uint64_t arg4, uint64_t arg5) {
-  (void)arg5;
-
   switch (num) {
   case SYS_PRINT: {
     if (arg1 == 0 || (arg1 >= 0xFFFFFFFF80000000ULL)) {
@@ -209,6 +208,61 @@ uint64_t syscall_handler_c(uint64_t num, uint64_t arg1, uint64_t arg2,
       return (uint64_t)-1;
     int64_t ret = sys_munmap(proc, arg1, arg2);
     return (uint64_t)ret;
+  }
+
+  // -------------------------------------------------------------------------
+  // Window server
+  // -------------------------------------------------------------------------
+  case SYS_WIN_CREATE: {
+    process_t *proc = process_current();
+    if (!proc || !proc->task)
+      return (uint64_t)-1;
+    // arg1=x, arg2=y, arg3=w, arg4=h, arg5=title
+    int win_id = winsrv_create_window(proc->task,
+                                      (int)arg1, (int)arg2,
+                                      (int)arg3, (int)arg4,
+                                      (const char *)arg5);
+    return (uint64_t)win_id;
+  }
+
+  case SYS_WIN_DESTROY: {
+    process_t *proc = process_current();
+    if (!proc || !proc->task)
+      return (uint64_t)-1;
+    return (uint64_t)winsrv_destroy_window(proc->task, (int)arg1);
+  }
+
+  case SYS_WIN_BLIT: {
+    process_t *proc = process_current();
+    if (!proc || !proc->task)
+      return (uint64_t)-1;
+
+    winsrv_blit_args_t args;
+    stac();
+    const winsrv_blit_args_t *u = (const winsrv_blit_args_t *)arg1;
+    if (!u) { clac(); return (uint64_t)-1; }
+    args = *u;
+    clac();
+
+    int rc = winsrv_blit(proc->task, args.win_id, args.x, args.y,
+                         args.w, args.h, args.pixels);
+    return (uint64_t)rc;
+  }
+
+  case SYS_WIN_POLL_EVENT: {
+    process_t *proc = process_current();
+    if (!proc || !proc->task)
+      return (uint64_t)-1;
+    return (uint64_t)winsrv_poll_event(proc->task, (int)arg1,
+                                       (winsrv_event_t *)arg2,
+                                       (int)arg3);
+  }
+
+  case SYS_WIN_REGISTER_CONSOLE: {
+    process_t *proc = process_current();
+    if (!proc || !proc->task)
+      return (uint64_t)-1;
+    return (uint64_t)winsrv_register_console(proc->task, (int)arg1);
   }
 
   default:
