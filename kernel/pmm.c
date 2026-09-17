@@ -1,145 +1,318 @@
 // kernel/pmm.c
 #include "pmm.h"
+#include "buddy.h"
+#include "klog.h"
+#include "paging.h"
 #include "serial.h"
+#include "spinlock.h"
+#include "string.h"
+#include <stddef.h>
 
-extern uint8_t _kernel_end;
+extern uint8_t _kernel_end; // definido en linker script
 
 static uint8_t *bitmap = 0;
-static uint64_t max_blocks = 0;
+static uint64_t bitmap_phys_global = 0; // dirección física del bitmap
+static uint64_t max_blocks = 0;         // número total de páginas gestionadas
+static uint64_t bitmap_size_bytes = 0;
 static uint64_t used_blocks = 0;
-static uint64_t last_alloc_bit = 0; // Pista de búsqueda para Next-Fit
+static uint64_t last_alloc_bit = 0; // pista para búsqueda Next-Fit
 
 #define EFI_CONVENTIONAL_MEMORY 7
 
-void pmm_init(uint64_t memmap, uint64_t memmap_size, uint64_t memmap_desc_size) {
-    if (!memmap || memmap_size == 0) return;
+// Helper interno: comprobar si un bit está dentro del rango
+static inline int bitmap_in_range(uint64_t bit) { return bit < max_blocks; }
 
-    uint8_t *ptr = (uint8_t*)memmap;
-    uint64_t max_phys_addr = 0;
-
-    // Pasada 1: Encontrar la memoria fisica maxima
-    for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
-        uint64_t phys = *(uint64_t*)(ptr + i + 8);
-        uint64_t pages = *(uint64_t*)(ptr + i + 24);
-        uint64_t end_addr = phys + (pages * PAGE_SIZE);
-        if (end_addr > max_phys_addr) {
-            max_phys_addr = end_addr;
-        }
-    }
-
-    max_blocks = max_phys_addr / PAGE_SIZE;
-    uint64_t bitmap_size = max_blocks / 8;
-    if (max_blocks % 8 != 0) bitmap_size++;
-
-    // Pasada 1.5: Buscar memoria fisica libre (< 4GB por el identity-map del bootloader) para el bitmap
-    uint64_t bitmap_phys = 0;
-    for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
-        uint32_t type = *(uint32_t*)(ptr + i + 0);
-        uint64_t phys = *(uint64_t*)(ptr + i + 8);
-        uint64_t pages = *(uint64_t*)(ptr + i + 24);
-        uint64_t size = pages * PAGE_SIZE;
-
-        if (type == EFI_CONVENTIONAL_MEMORY && size >= bitmap_size) {
-            if ((phys + bitmap_size) < 0x100000000ULL) { // Debe estar por debajo de los 4GB
-                bitmap_phys = phys;
-                break;
-            }
-        }
-    }
-
-    if (bitmap_phys == 0) {
-        serial_puts("[PMM] ERROR: No hay RAM por debajo de 4GB para el bitmap!\n");
-        return;
-    }
-
-    // Usar el puntero fisico directamente (aprovechando el identity-map de 4GB)
-    bitmap = (uint8_t*)bitmap_phys;
-
-    // Llenar bitmap de 1s (Ocupado por defecto)
-    for (uint64_t i = 0; i < bitmap_size; i++) {
-        bitmap[i] = 0xFF;
-    }
-    used_blocks = max_blocks;
-
-    // Pasada 2: Marcar memoria convencional como libre (0)
-    for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
-        uint32_t type = *(uint32_t*)(ptr + i + 0);
-        uint64_t phys = *(uint64_t*)(ptr + i + 8);
-        uint64_t pages = *(uint64_t*)(ptr + i + 24);
-
-        // Solo liberamos RAM usable. El Kernel fue alojado por UEFI como EfiLoaderData,
-        // asi que nunca entrara aqui y seguira marcado como Ocupado (1). Magia!
-        if (type == EFI_CONVENTIONAL_MEMORY) {
-            uint64_t start_bit = phys / PAGE_SIZE;
-            for (uint64_t b = 0; b < pages; b++) {
-                BITMAP_CLEAR(bitmap, start_bit + b);
-                used_blocks--;
-            }
-        }
-    }
-
-    // Proteger pagina 0 (Null)
-    BITMAP_SET(bitmap, 0);
-    used_blocks++;
-
-    // Proteger la memoria donde hemos puesto el bitmap
-    uint64_t bmp_start_bit = bitmap_phys / PAGE_SIZE;
-    uint64_t bmp_end_bit = (bitmap_phys + bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    for (uint64_t b = bmp_start_bit; b < bmp_end_bit; b++) {
-        if (!BITMAP_TEST(bitmap, b)) {
-            BITMAP_SET(bitmap, b);
-            used_blocks++;
-        }
-    }
-
-    serial_puts("[PMM] Bitmap inicializado en 0x");
-    serial_hex(bitmap_phys);
-    serial_puts(". Max RAM: ");
-    serial_putn(max_phys_addr / (1024*1024), 10, 0);
-    serial_puts(" MB, Libres: ");
-    serial_putn((max_blocks - used_blocks) * 4 / 1024, 10, 0);
-    serial_puts(" MB\n");
+// Helper seguro: test/set/clear con comprobación de rango
+static inline int bitmap_test_safe(uint8_t *bmp, uint64_t bit) {
+  if (!bmp || !bitmap_in_range(bit))
+    return 1; // fuera de rango => tratado como ocupado
+  return !!(bmp[bit / 8] & (1 << (bit % 8)));
+}
+static inline void bitmap_set_safe(uint8_t *bmp, uint64_t bit) {
+  if (!bmp || !bitmap_in_range(bit))
+    return;
+  bmp[bit / 8] |= (1 << (bit % 8));
+}
+static inline void bitmap_clear_safe(uint8_t *bmp, uint64_t bit) {
+  if (!bmp || !bitmap_in_range(bit))
+    return;
+  bmp[bit / 8] &= ~(1 << (bit % 8));
 }
 
+static spinlock_t pmm_lock;
+
+void pmm_init(uint64_t memmap, uint64_t memmap_size,
+              uint64_t memmap_desc_size) {
+  if (!memmap || memmap_size == 0)
+    return;
+
+  spin_init(&pmm_lock);
+
+  uint8_t *ptr = (uint8_t *)memmap;
+  uint64_t max_phys_addr = 0;
+
+  // Pasada 1: Encontrar la memoria fisica maxima entre regiones USABLE
+  // (EFI_CONVENTIONAL_MEMORY)
+  for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
+    uint32_t type = *(uint32_t *)(ptr + i + 0);
+    if (type != EFI_CONVENTIONAL_MEMORY)
+      continue;
+    uint64_t phys = *(uint64_t *)(ptr + i + 8);
+    uint64_t pages = *(uint64_t *)(ptr + i + 24);
+    uint64_t end_addr = phys + (pages * PAGE_SIZE);
+    if (end_addr > max_phys_addr) {
+      max_phys_addr = end_addr;
+    }
+  }
+
+  if (max_phys_addr == 0) {
+    LOG_ERR("[PMM] ERROR: mapa de memoria invalido (no hay memoria usable)");
+    return;
+  }
+
+  max_blocks = max_phys_addr / PAGE_SIZE;
+  bitmap_size_bytes = (max_blocks + 7) / 8; // bytes necesarios
+
+  // Pasada 1.5: Buscar region de memoria convencional bajo 4GB lo
+  // suficientemente grande para almacenar el bitmap
+  uint64_t bitmap_phys = 0;
+  int bitmap_found = 0;
+  for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
+    uint32_t type = *(uint32_t *)(ptr + i + 0);
+    uint64_t phys = *(uint64_t *)(ptr + i + 8);
+    uint64_t pages = *(uint64_t *)(ptr + i + 24);
+    uint64_t size = pages * PAGE_SIZE;
+
+    if (type == EFI_CONVENTIONAL_MEMORY && phys != 0 &&
+        size >= bitmap_size_bytes) {
+      if ((phys + bitmap_size_bytes) < 0x100000000ULL) {
+        bitmap_phys = phys;
+        bitmap_found = 1;
+        break;
+      }
+    }
+  }
+
+  if (!bitmap_found) {
+    LOG_ERR("[PMM] ERROR: No hay RAM por debajo de 4GB para el bitmap!");
+    return;
+  }
+
+  // DURANTE pmm_init usamos identity mapping: la ventana física aún no está
+  // mapeada (se mapea en paging_init). Después de paging_init, se llama a
+  // pmm_relocate_bitmap() para cambiar a la ventana física.
+  bitmap = (uint8_t *)bitmap_phys;
+  bitmap_phys_global = bitmap_phys;
+
+  // Inicializar bitmap a 0xFF (ocupado) por defecto
+  memset(bitmap, 0xFF, bitmap_size_bytes);
+  used_blocks = max_blocks;
+
+  // Pasada 2: marcar como libres las regiones tipo EFI_CONVENTIONAL_MEMORY
+  for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
+    uint32_t type = *(uint32_t *)(ptr + i + 0);
+    uint64_t phys = *(uint64_t *)(ptr + i + 8);
+    uint64_t pages = *(uint64_t *)(ptr + i + 24);
+
+    if (type == EFI_CONVENTIONAL_MEMORY) {
+      uint64_t start_bit = phys / PAGE_SIZE;
+      for (uint64_t b = 0; b < pages; b++) {
+        if (bitmap_in_range(start_bit + b)) {
+          bitmap_clear_safe(bitmap, start_bit + b);
+          if (used_blocks > 0)
+            used_blocks--;
+        }
+      }
+    }
+  }
+
+  // Proteger pagina 0 (nulo)
+  if (bitmap_in_range(0) && !bitmap_test_safe(bitmap, 0)) {
+    bitmap_set_safe(bitmap, 0);
+    used_blocks++;
+  }
+
+  // Reservar las páginas ocupadas por el bitmap
+  uint64_t bmp_start_bit = bitmap_phys / PAGE_SIZE;
+  uint64_t bmp_end_bit =
+      (bitmap_phys + bitmap_size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  for (uint64_t b = bmp_start_bit; b < bmp_end_bit; b++) {
+    if (bitmap_in_range(b) && !bitmap_test_safe(bitmap, b)) {
+      bitmap_set_safe(bitmap, b);
+      used_blocks++;
+    }
+  }
+
+  // NOTA: buddy_init se llama desde pmm_relocate_bitmap, no aquí.
+  // Así buddy usa el bitmap ya relocalizado a la ventana física.
+
+  LOG_INFO(
+      "[PMM] Bitmap inicializado en %p. Max RAM: %lu MB, Libres: %lu MB",
+      (void *)bitmap_phys, (unsigned long)(max_phys_addr / (1024 * 1024)),
+      (unsigned long)((max_blocks - used_blocks) * PAGE_SIZE / (1024 * 1024)));
+}
+
+// Cambia el bitmap a la ventana física (PHYS_MAP_BASE).
+// Debe llamarse DESPUÉS de paging_init, cuando la ventana está mapeada.
+// Durante pmm_init usamos identity mapping porque la ventana aún no existe.
+void pmm_relocate_bitmap(void) {
+  if (!bitmap_phys_global)
+    return;
+
+  bitmap = (uint8_t *)phys_to_virt(bitmap_phys_global);
+  LOG_INFO("[PMM] Bitmap relocalizado a la ventana física: %p", (void *)bitmap);
+
+  // Inicializar buddy allocator (usa el bitmap ya relocalizado)
+  extern void buddy_init(uint64_t total_pages, uint8_t *bitmap_ptr);
+  buddy_init(max_blocks, bitmap);
+}
+
+// Reservar una única página (4KB)
 uint64_t pmm_alloc_page(void) {
-    uint64_t start_bit = last_alloc_bit;
+  if (!bitmap || max_blocks == 0)
+    return 0;
 
-    // Pasada 1: Desde el último bit asignado hasta el final de la RAM
-    for (uint64_t bit = start_bit; bit < max_blocks; bit++) {
-        if (!BITMAP_TEST(bitmap, bit)) {
-            BITMAP_SET(bitmap, bit);
-            used_blocks++;
-            last_alloc_bit = bit + 1;
-            return bit * PAGE_SIZE;
-        }
+  unsigned long flags = spin_lock_irqsave(&pmm_lock);
+
+  uint64_t start_bit = last_alloc_bit;
+
+  for (uint64_t bit = start_bit; bit < max_blocks; bit++) {
+    if (!bitmap_test_safe(bitmap, bit)) {
+      bitmap_set_safe(bitmap, bit);
+      used_blocks++;
+      last_alloc_bit = bit + 1;
+      spin_unlock_irqrestore(&pmm_lock, flags);
+      return bit * PAGE_SIZE;
     }
+  }
 
-    // Pasada 2: Si no hubo espacio al final, buscar desde el principio hasta start_bit
-    for (uint64_t bit = 0; bit < start_bit; bit++) {
-        if (!BITMAP_TEST(bitmap, bit)) {
-            BITMAP_SET(bitmap, bit);
-            used_blocks++;
-            last_alloc_bit = bit + 1;
-            return bit * PAGE_SIZE;
-        }
+  for (uint64_t bit = 0; bit < start_bit; bit++) {
+    if (!bitmap_test_safe(bitmap, bit)) {
+      bitmap_set_safe(bitmap, bit);
+      used_blocks++;
+      last_alloc_bit = bit + 1;
+      spin_unlock_irqrestore(&pmm_lock, flags);
+      return bit * PAGE_SIZE;
     }
+  }
 
-    serial_puts("[PMM] ERROR CRITICO: Memoria fisica agotada!\n");
-    return 0; // Out of memory
+  spin_unlock_irqrestore(&pmm_lock, flags);
+  LOG_ERR("[PMM] ERROR CRITICO: Memoria fisica agotada!");
+  return 0;
+}
+
+// Reservar 'count' páginas contiguas. Devuelve dirección física o 0 si falla.
+uint64_t pmm_alloc_pages(uint64_t count) {
+  if (count == 0 || !bitmap || max_blocks == 0)
+    return 0;
+
+  unsigned long flags = spin_lock_irqsave(&pmm_lock);
+
+  extern int32_t pages_to_order(uint64_t pages);
+  extern uint64_t buddy_alloc_order(uint32_t order);
+  int32_t order = pages_to_order(count);
+  if (order >= 0) {
+    uint64_t addr = buddy_alloc_order((uint32_t)order);
+    if (addr) {
+      used_blocks += count;
+      spin_unlock_irqrestore(&pmm_lock, flags);
+      return addr;
+    }
+  }
+
+  uint64_t start = last_alloc_bit;
+  uint64_t run = 0;
+
+  for (uint64_t bit = start; bit < max_blocks; bit++) {
+    if (!bitmap_test_safe(bitmap, bit)) {
+      run++;
+      if (run == count) {
+        uint64_t first = bit + 1 - count;
+        for (uint64_t b = 0; b < count; b++) {
+          bitmap_set_safe(bitmap, first + b);
+        }
+        used_blocks += count;
+        last_alloc_bit = first + count;
+        spin_unlock_irqrestore(&pmm_lock, flags);
+        return first * PAGE_SIZE;
+      }
+    } else {
+      run = 0;
+    }
+  }
+
+  run = 0;
+  for (uint64_t bit = 0; bit < start; bit++) {
+    if (!bitmap_test_safe(bitmap, bit)) {
+      run++;
+      if (run == count) {
+        uint64_t first = bit + 1 - count;
+        for (uint64_t b = 0; b < count; b++) {
+          bitmap_set_safe(bitmap, first + b);
+        }
+        used_blocks += count;
+        last_alloc_bit = first + count;
+        spin_unlock_irqrestore(&pmm_lock, flags);
+        return first * PAGE_SIZE;
+      }
+    } else {
+      run = 0;
+    }
+  }
+
+  spin_unlock_irqrestore(&pmm_lock, flags);
+  return 0;
 }
 
 void pmm_free_page(uint64_t phys_addr) {
-    if (phys_addr == 0) return; // Nunca liberar la página nula
-    uint64_t bit = phys_addr / PAGE_SIZE;
+  if (phys_addr == 0 || !bitmap)
+    return;
+  unsigned long flags = spin_lock_irqsave(&pmm_lock);
+  uint64_t bit = phys_addr / PAGE_SIZE;
 
-    if (bit < max_blocks && BITMAP_TEST(bitmap, bit)) {
-        BITMAP_CLEAR(bitmap, bit);
+  if (bitmap_in_range(bit) && bitmap_test_safe(bitmap, bit)) {
+    bitmap_clear_safe(bitmap, bit);
+    if (used_blocks > 0)
+      used_blocks--;
+    if (bit < last_alloc_bit)
+      last_alloc_bit = bit;
+  }
+  spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
+  if (phys_addr == 0 || count == 0 || !bitmap)
+    return;
+  unsigned long flags = spin_lock_irqsave(&pmm_lock);
+
+  extern int32_t pages_to_order(uint64_t pages);
+  extern void buddy_free_order(uint64_t phys_addr, uint32_t order);
+  int32_t order = pages_to_order(count);
+  if (order >= 0) {
+    buddy_free_order(phys_addr, (uint32_t)order);
+    if (used_blocks >= count)
+      used_blocks -= count;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return;
+  }
+
+  uint64_t start_bit = phys_addr / PAGE_SIZE;
+
+  for (uint64_t i = 0; i < count; i++) {
+    uint64_t b = start_bit + i;
+    if (bitmap_in_range(b) && bitmap_test_safe(bitmap, b)) {
+      bitmap_clear_safe(bitmap, b);
+      if (used_blocks > 0)
         used_blocks--;
-
-        // Si liberamos una página con índice menor a la pista actual,
-        // movemos el puntero hacia atrás para reutilizarla inmediatamente.
-        if (bit < last_alloc_bit) {
-            last_alloc_bit = bit;
-        }
     }
+  }
+  if (start_bit < last_alloc_bit)
+    last_alloc_bit = start_bit;
+  spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+uint64_t pmm_total_pages(void) { return max_blocks; }
+
+uint64_t pmm_free_pages_count(void) {
+  return (max_blocks > used_blocks) ? (max_blocks - used_blocks) : 0;
 }

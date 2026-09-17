@@ -1,6 +1,6 @@
 // kernel/bmp.c
 #include "bmp.h"
-#include "serial.h"
+#include "klog.h"
 
 // Referencia externa al framebuffer de main.c / compositor.c
 extern uint32_t *fb_ptr;
@@ -33,7 +33,7 @@ static inline uint32_t blend_pixel(uint32_t src, uint32_t dst) {
 
 int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
     if (!file || !file->data || file->size < sizeof(bmp_file_header_t) + sizeof(bmp_info_header_t)) {
-        serial_puts("[BMP] ERROR: Archivo nulo o inválido\n");
+        LOG_ERR("[BMP] ERROR: Archivo nulo o inválido");
         return -1;
     }
 
@@ -42,13 +42,13 @@ int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
 
     // Validar firma 'BM' (0x4D42 en Little Endian)
     if (file_hdr->type != 0x4D42) {
-        serial_puts("[BMP] ERROR: No es un archivo BMP válido\n");
+        LOG_ERR("[BMP] ERROR: No es un archivo BMP válido");
         return -1;
     }
 
     // Solo soportamos BMP sin compresión (BI_RGB = 0)
     if (info_hdr->compression != 0) {
-        serial_puts("[BMP] ERROR: Compresión BMP no soportada\n");
+        LOG_ERR("[BMP] ERROR: Compresión BMP no soportada");
         return -1;
     }
 
@@ -57,7 +57,7 @@ int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
     int bpp = info_hdr->bpp;
 
     if (bpp != 24 && bpp != 32) {
-        serial_puts("[BMP] ERROR: Solo se soportan BMPs de 24 o 32 bits\n");
+        LOG_ERR("[BMP] ERROR: Solo se soportan BMPs de 24 o 32 bits");
         return -1;
     }
 
@@ -91,9 +91,7 @@ int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
         }
     }
 
-    serial_puts("[BMP] Renderizado: ");
-    serial_puts(file->name);
-    serial_puts("\n");
+    LOG_INFO("[BMP] Renderizado: %s", file->name);
 
     return 0;
 }

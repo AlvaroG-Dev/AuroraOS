@@ -1,0 +1,34 @@
+# Build artifacts
+*.o
+*.elf
+*.bin
+*.img
+*.iso
+*.EFI
+*.a
+
+# Initramfs generado
+kernel/initrd.tar
+sysroot/
+
+# QEMU
+OVMF_VARS.fd
+ovmf_vars.fd
+qemu.log
+serial.log
+out.log
+
+# Sistema
+a.out
+*.bak
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# kernel.bak.string (parece un backup tuyo)
+kernel.bak.string/
+kernel.bak
