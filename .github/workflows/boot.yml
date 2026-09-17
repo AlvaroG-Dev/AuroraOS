@@ -1,0 +1,54 @@
+name: boot
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:   # botón "Run workflow" en la UI
+
+jobs:
+  qemu-smoke-test:
+    name: Arrancar en QEMU y verificar serial
+    runs-on: ubuntu-24.04
+    needs: []    # corre en paralelo con build.yml
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential nasm xorriso mtools \
+            qemu-system-x86 ovmf
+
+      - name: Compilar todo
+        run: make iso
+
+      - name: Verificar que OVMF está en su sitio
+        run: |
+          ls -l /usr/share/OVMF/OVMF_CODE_4M.fd
+          ls -l /usr/share/OVMF/OVMF_VARS_4M.fd
+
+      - name: Arrancar en QEMU y verificar serial
+        run: |
+          chmod +x scripts/check_boot.sh
+          ./scripts/check_boot.sh 40
+
+      - name: Subir serial.log si falla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log-failure
+          path: serial.log
+          retention-days: 7
+
+      - name: Subir qemu.log si falla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-log-failure
+          path: qemu.log
+          retention-days: 7

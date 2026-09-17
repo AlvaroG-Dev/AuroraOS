@@ -38,6 +38,8 @@ typedef struct taskbar_item {
     char icon_symbol[8];
     uint32_t icon_color;
     tar_node_t *icon_bmp_node;
+    uint32_t icon_cache[20 * 20];
+    int has_icon_cache;
     int is_active;
     int width; // 0 = Automático (calculado por contenido). >0 = Ancho explícito indicado.
     void (*on_click)(struct taskbar_item *item);

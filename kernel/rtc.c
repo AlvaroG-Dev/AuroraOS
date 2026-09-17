@@ -1,6 +1,7 @@
 // kernel/rtc.c
 #include "rtc.h"
 #include "serial.h"
+#include "klog.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71
@@ -153,19 +154,10 @@ void rtc_format_date(const rtc_datetime_t *dt, char *out, int out_len) {
 void rtc_init(void) {
   rtc_datetime_t now;
   if (!rtc_read_datetime(&now)) {
-    serial_puts("[RTC] No se pudo leer fecha/hora del CMOS\n");
+    LOG_ERR("[RTC] No se pudo leer fecha/hora del CMOS");
     return;
   }
 
-  serial_puts("[RTC] CMOS RTC detectado: ");
-  serial_putn(now.hour, 10, 2);
-  serial_puts(":");
-  serial_putn(now.minute, 10, 2);
-  serial_puts(" ");
-  serial_putn(now.day, 10, 2);
-  serial_puts("/");
-  serial_putn(now.month, 10, 2);
-  serial_puts("/");
-  serial_putn(now.year, 10, 4);
-  serial_puts("\n");
+  LOG_INFO("[RTC] CMOS RTC detectado: %02u:%02u %02u/%02u/%04u",
+           now.hour, now.minute, now.day, now.month, now.year);
 }

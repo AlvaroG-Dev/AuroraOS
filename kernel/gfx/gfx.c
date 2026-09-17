@@ -1,14 +1,15 @@
 // kernel/gfx/gfx.c
 #include "gfx.h"
-#include "font_manager.h"
 #include "font_aa.h"
+#include "font_manager.h"
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 // Raíz cuadrada entera rápida (Método de Newton) para anti-aliasing
 static inline int int_sqrt(int n) {
-  if (n <= 0) return 0;
+  if (n <= 0)
+    return 0;
   int x = n;
   int y = (x + 1) >> 1;
   while (y < x) {
@@ -19,25 +20,28 @@ static inline int int_sqrt(int n) {
 }
 
 // Función auxiliar de mezcla ponderada para la sombra
-static inline void gfx_blend_shadow_pixel(uint32_t *dst, int x, int y, int stride, uint32_t base_color, uint8_t alpha_factor) {
-    // Aquí puedes integrar tu función estándar de blend o esta optimizada para sombras
-    uint32_t dest_pixel = dst[y * stride + x];
-    
-    // Extraer canales del fondo
-    uint32_t dr = (dest_pixel >> 16) & 0xFF;
-    uint32_t dg = (dest_pixel >> 8) & 0xFF;
-    uint32_t db = dest_pixel & 0xFF;
+static inline void gfx_blend_shadow_pixel(uint32_t *dst, int x, int y,
+                                          int stride, uint32_t base_color,
+                                          uint8_t alpha_factor) {
+  // Aquí puedes integrar tu función estándar de blend o esta optimizada para
+  // sombras
+  uint32_t dest_pixel = dst[y * stride + x];
 
-    // Extraer canales del color de sombra (negro con alpha variable)
-    uint32_t sr = (base_color >> 16) & 0xFF;
-    uint32_t sg = (base_color >> 8) & 0xFF;
-    uint32_t sb = base_color & 0xFF;
+  // Extraer canales del fondo
+  uint32_t dr = (dest_pixel >> 16) & 0xFF;
+  uint32_t dg = (dest_pixel >> 8) & 0xFF;
+  uint32_t db = dest_pixel & 0xFF;
 
-    uint32_t final_r = (sr * alpha_factor + dr * (255 - alpha_factor)) / 255;
-    uint32_t final_g = (sg * alpha_factor + dg * (255 - alpha_factor)) / 255;
-    uint32_t final_b = (sb * alpha_factor + db * (255 - alpha_factor)) / 255;
+  // Extraer canales del color de sombra (negro con alpha variable)
+  uint32_t sr = (base_color >> 16) & 0xFF;
+  uint32_t sg = (base_color >> 8) & 0xFF;
+  uint32_t sb = base_color & 0xFF;
 
-    dst[y * stride + x] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
+  uint32_t final_r = (sr * alpha_factor + dr * (255 - alpha_factor)) / 255;
+  uint32_t final_g = (sg * alpha_factor + dg * (255 - alpha_factor)) / 255;
+  uint32_t final_b = (sb * alpha_factor + db * (255 - alpha_factor)) / 255;
+
+  dst[y * stride + x] = 0xFF000000 | (final_r << 16) | (final_g << 8) | final_b;
 }
 
 rect_t rect_bounding_box(rect_t a, rect_t b) {
@@ -103,14 +107,16 @@ void gfx_blend_rect(uint32_t *dst, int dst_stride, rect_t clip, rect_t rect,
 
 void gfx_fill_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
                            rect_t rect, int radius, uint32_t color) {
-  if (!dst || rect.w <= 0 || rect.h <= 0) return;
+  if (!dst || rect.w <= 0 || rect.h <= 0)
+    return;
 
   int start_x = MAX(rect.x, clip.x);
   int start_y = MAX(rect.y, clip.y);
   int end_x = MIN(rect.x + rect.w, clip.x + clip.w);
   int end_y = MIN(rect.y + rect.h, clip.y + clip.h);
 
-  if (start_x >= end_x || start_y >= end_y) return;
+  if (start_x >= end_x || start_y >= end_y)
+    return;
 
   uint32_t base_alpha = (color >> 24) & 0xFF;
   uint32_t rgb = color & 0x00FFFFFF;
@@ -126,20 +132,29 @@ void gfx_fill_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
       int cx = 0, cy = 0;
 
       if (rx < radius && ry < radius) {
-        cx = radius - rx; cy = radius - ry; in_corner = 1;
+        cx = radius - rx;
+        cy = radius - ry;
+        in_corner = 1;
       } else if (rx >= rect.w - radius && ry < radius) {
-        cx = rx - (rect.w - radius - 1); cy = radius - ry; in_corner = 1;
+        cx = rx - (rect.w - radius - 1);
+        cy = radius - ry;
+        in_corner = 1;
       } else if (rx < radius && ry >= rect.h - radius) {
-        cx = radius - rx; cy = ry - (rect.h - radius - 1); in_corner = 1;
+        cx = radius - rx;
+        cy = ry - (rect.h - radius - 1);
+        in_corner = 1;
       } else if (rx >= rect.w - radius && ry >= rect.h - radius) {
-        cx = rx - (rect.w - radius - 1); cy = ry - (rect.h - radius - 1); in_corner = 1;
+        cx = rx - (rect.w - radius - 1);
+        cy = ry - (rect.h - radius - 1);
+        in_corner = 1;
       }
 
       if (in_corner) {
         int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
         int diff = dist_fp - r_fp;
 
-        if (diff > 128) continue;
+        if (diff > 128)
+          continue;
 
         uint32_t alpha = base_alpha;
         if (diff > -128) {
@@ -156,14 +171,16 @@ void gfx_fill_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
 
 void gfx_fill_top_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
                                rect_t rect, int radius, uint32_t color) {
-  if (!dst || rect.w <= 0 || rect.h <= 0) return;
+  if (!dst || rect.w <= 0 || rect.h <= 0)
+    return;
 
   int start_x = MAX(rect.x, clip.x);
   int start_y = MAX(rect.y, clip.y);
   int end_x = MIN(rect.x + rect.w, clip.x + clip.w);
   int end_y = MIN(rect.y + rect.h, clip.y + clip.h);
 
-  if (start_x >= end_x || start_y >= end_y) return;
+  if (start_x >= end_x || start_y >= end_y)
+    return;
 
   uint32_t base_alpha = (color >> 24) & 0xFF;
   uint32_t rgb = color & 0x00FFFFFF;
@@ -179,16 +196,21 @@ void gfx_fill_top_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
       int cx = 0, cy = 0;
 
       if (rx < radius && ry < radius) {
-        cx = radius - rx; cy = radius - ry; in_corner = 1;
+        cx = radius - rx;
+        cy = radius - ry;
+        in_corner = 1;
       } else if (rx >= rect.w - radius && ry < radius) {
-        cx = rx - (rect.w - radius - 1); cy = radius - ry; in_corner = 1;
+        cx = rx - (rect.w - radius - 1);
+        cy = radius - ry;
+        in_corner = 1;
       }
 
       if (in_corner) {
         int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
         int diff = dist_fp - r_fp;
 
-        if (diff > 128) continue;
+        if (diff > 128)
+          continue;
 
         uint32_t alpha = base_alpha;
         if (diff > -128) {
@@ -217,14 +239,16 @@ void gfx_draw_rect_outline(uint32_t *dst, int dst_stride, rect_t clip,
 
 void gfx_draw_rounded_border(uint32_t *dst, int dst_stride, rect_t clip,
                              rect_t rect, int radius, uint32_t color) {
-  if (!dst || rect.w <= 0 || rect.h <= 0) return;
+  if (!dst || rect.w <= 0 || rect.h <= 0)
+    return;
 
   int start_x = MAX(rect.x, clip.x);
   int start_y = MAX(rect.y, clip.y);
   int end_x = MIN(rect.x + rect.w, clip.x + clip.w);
   int end_y = MIN(rect.y + rect.h, clip.y + clip.h);
 
-  if (start_x >= end_x || start_y >= end_y) return;
+  if (start_x >= end_x || start_y >= end_y)
+    return;
 
   uint32_t base_alpha = (color >> 24) & 0xFF;
   uint32_t rgb = color & 0x00FFFFFF;
@@ -240,13 +264,21 @@ void gfx_draw_rounded_border(uint32_t *dst, int dst_stride, rect_t clip,
       int cx = 0, cy = 0;
 
       if (rx < radius && ry < radius) {
-        cx = radius - rx; cy = radius - ry; in_corner = 1;
+        cx = radius - rx;
+        cy = radius - ry;
+        in_corner = 1;
       } else if (rx >= rect.w - radius && ry < radius) {
-        cx = rx - (rect.w - radius - 1); cy = radius - ry; in_corner = 1;
+        cx = rx - (rect.w - radius - 1);
+        cy = radius - ry;
+        in_corner = 1;
       } else if (rx < radius && ry >= rect.h - radius) {
-        cx = radius - rx; cy = ry - (rect.h - radius - 1); in_corner = 1;
+        cx = radius - rx;
+        cy = ry - (rect.h - radius - 1);
+        in_corner = 1;
       } else if (rx >= rect.w - radius && ry >= rect.h - radius) {
-        cx = rx - (rect.w - radius - 1); cy = ry - (rect.h - radius - 1); in_corner = 1;
+        cx = rx - (rect.w - radius - 1);
+        cy = ry - (rect.h - radius - 1);
+        in_corner = 1;
       }
 
       if (in_corner) {
@@ -268,30 +300,26 @@ void gfx_draw_rounded_border(uint32_t *dst, int dst_stride, rect_t clip,
   }
 }
 
-void gfx_draw_shadow(uint32_t *dst, int dst_stride, rect_t clip, rect_t win_rect, int corner_radius, int shadow_size) {
-    if (!dst || shadow_size <= 0) return;
+void gfx_draw_shadow(uint32_t *dst, int dst_stride, rect_t clip,
+                     rect_t win_rect, int corner_radius, int shadow_size) {
+  if (!dst || shadow_size <= 0)
+    return;
 
-    // Dibujar capas concéntricas difuminadas hacia afuera
-    for (int i = shadow_size; i >= 1; i--) {
-        float progress = (float)i / (float)shadow_size;
-        // Caída logarítmica suave para evitar el efecto "caja negra"
-        uint8_t alpha = (uint8_t)(28 * (1.0f - progress)); 
-        if (alpha == 0) continue;
+  // 4 capas optimizadas para máxima fluidez y suavidad visual
+  for (int i = shadow_size; i >= 4; i -= 5) {
+    float progress = (float)i / (float)shadow_size;
+    uint8_t alpha = (uint8_t)(45 * (1.0f - progress));
+    if (alpha == 0)
+      continue;
 
-        int expand = i;
-        rect_t s_rect = {
-            win_rect.x - expand,
-            win_rect.y - expand + (i / 2), // Suave desplazamiento vertical hacia abajo
-            win_rect.w + (expand * 2),
-            win_rect.h + (expand * 2)
-        };
+    int expand = i;
+    rect_t s_rect = {win_rect.x - expand, win_rect.y - expand + (i / 2),
+                     win_rect.w + (expand * 2), win_rect.h + (expand * 2)};
 
-        int r = corner_radius + expand;
-        
-        // Renderizado optimizado de caja con bordes redondeados para la sombra
-        // Si ya tienes un rectangulo con esquinas redondeadas translúcido, úsalo aquí:
-        gfx_fill_rounded_rect(dst, dst_stride, clip, s_rect, r, ((uint32_t)alpha << 24) | 0x00000000);
-    }
+    int r = corner_radius + expand;
+    gfx_fill_rounded_rect(dst, dst_stride, clip, s_rect, r,
+                          ((uint32_t)alpha << 24) | 0x00000000);
+  }
 }
 
 void gfx_draw_line(uint32_t *dst, int dst_stride, rect_t clip, int x0, int y0,

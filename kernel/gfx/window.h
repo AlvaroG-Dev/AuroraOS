@@ -44,6 +44,8 @@ typedef struct window {
 
   char title[64];
   tar_node_t *icon_bmp_node;
+  uint32_t icon_cache[18 * 18];
+  int has_icon_cache;
   char icon_symbol[8];
   uint32_t icon_bg_color;
   const uint32_t *icon_buffer;

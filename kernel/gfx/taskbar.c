@@ -83,6 +83,14 @@ taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type, const char *label
     taskbar_item_t *item = taskbar_add_item(type, label, "", 0, on_click);
     if (item) {
         item->icon_bmp_node = bmp_file;
+    if (bmp_file) {
+        rect_t clip = {0, 0, 20, 20};
+        for (int i = 0; i < 20 * 20; i++) item->icon_cache[i] = 0;
+        bmp_draw_scaled(bmp_file, item->icon_cache, 20, clip, 0, 0, 20, 20);
+        item->has_icon_cache = 1;
+    } else {
+        item->has_icon_cache = 0;
+    }
     }
     return item;
 }
@@ -458,7 +466,11 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w, int sc
         int content_x = current_x + (layout.item_w - layout.content_w) / 2;
 
         // 1. Dibujar icono (BMP si está disponible, o vectorial Start, o Texto)
-        if (curr->icon_bmp_node) {
+        if (curr->has_icon_cache) {
+            gfx_bit_blat(dst, stride, curr->icon_cache, 20, clip, content_x, center_y - 10, 20, 20);
+            content_x += 20;
+            if (layout.has_label && layout.label_w > 0) content_x += TASKBAR_CONTENT_GAP;
+        } else if (curr->icon_bmp_node) {
             bmp_draw_scaled(curr->icon_bmp_node, dst, stride, clip, content_x, center_y - 10, 20, 20);
             content_x += 20;
             if (layout.has_label && layout.label_w > 0) content_x += TASKBAR_CONTENT_GAP;

@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  compile:
+    name: Compilar kernel + user + ISO
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential nasm xorriso mtools \
+            qemu-system-x86 ovmf
+
+      - name: Compilar bootloader
+        run: make bootloader
+
+      - name: Compilar user
+        run: make user
+
+      - name: Compilar kernel
+        run: make kernel
+
+      - name: Generar ISO
+        run: make iso
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-iso
+          path: aurora.iso
+          retention-days: 14

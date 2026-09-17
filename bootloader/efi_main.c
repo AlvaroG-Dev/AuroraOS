@@ -235,20 +235,19 @@ static EFI_STATUS setup_framebuffer(void) {
 
 static EFI_STATUS build_page_tables(EFI_PHYSICAL_ADDRESS *pml4_out) {
     EFI_STATUS status;
-    EFI_PHYSICAL_ADDRESS pml4_addr = 0, pdpt_addr = 0;
-    EFI_PHYSICAL_ADDRESS pd_addrs[4] = {0};
+    EFI_PHYSICAL_ADDRESS pml4_addr = 0xFFFFFFFF; // Forzar reserva por debajo de 4GB
+    EFI_PHYSICAL_ADDRESS pdpt_addr = 0xFFFFFFFF;
+    EFI_PHYSICAL_ADDRESS pd_addrs[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
 
-    // Asignar PML4
-    status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData, 1, &pml4_addr);
+    // Asignar PML4 por debajo de 4GB para evitar que caiga fuera de la identidad básica
+    status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateMaxAddress, EfiLoaderData, 1, &pml4_addr);
     if (EFI_ERROR(status)) return status;
 
-    // Asignar PDPT (Identity)
-    status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData, 1, &pdpt_addr);
+    status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateMaxAddress, EfiLoaderData, 1, &pdpt_addr);
     if (EFI_ERROR(status)) return status;
 
-    // Asignar 4 tablas PD (cada una mapea 1GB usando paginas de 2MB)
     for (int i = 0; i < 4; i++) {
-        status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData, 1, &pd_addrs[i]);
+        status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateMaxAddress, EfiLoaderData, 1, &pd_addrs[i]);
         if (EFI_ERROR(status)) return status;
     }
 
@@ -259,8 +258,7 @@ static EFI_STATUS build_page_tables(EFI_PHYSICAL_ADDRESS *pml4_out) {
     ZeroMem(pdpt, 4096);
     for (int i = 0; i < 4; i++) ZeroMem((VOID*)pd_addrs[i], 4096);
 
-    // Identity-map primeros 4GB (4 tablas PD x 512 paginas x 2MB = 4GB)
-    // Usamos huge pages (bit 7 = 1)
+    // Mapeo identidad de los primeros 4GB (4 tablas PD x 512 entradas x 2MB)
     pml4[0] = pdpt_addr | 0x03;
     for (int pd_idx = 0; pd_idx < 4; pd_idx++) {
         pdpt[pd_idx] = pd_addrs[pd_idx] | 0x03;
@@ -278,45 +276,48 @@ static EFI_STATUS build_page_tables(EFI_PHYSICAL_ADDRESS *pml4_out) {
 static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle, struct kernel_boot_info *kinfo, EFI_PHYSICAL_ADDRESS pml4_addr) {
     EFI_STATUS status;
 
-    // Copiar memmap a buffer seguro (dentro del identity-map)
-    EFI_PHYSICAL_ADDRESS safe_memmap_addr = 0;
-    status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData,
-                                (mem_map.map_size + 0xFFF) / 0x1000, &safe_memmap_addr);
+    // Copiar memmap a buffer seguro
+    EFI_PHYSICAL_ADDRESS safe_memmap_addr = 0xFFFFFFFF;
+    status = uefi_call_wrapper(BS->AllocatePages, 4, AllocateMaxAddress, EfiLoaderData,
+                                (mem_map.map_size + 0xFFF + 2048) / 0x1000, &safe_memmap_addr);
     if (EFI_ERROR(status)) {
         Print(L"[BOOT] Fallo alocando buffer seguro para memmap\n");
         return;
     }
+
+    Print(L"[BOOT] Salida de Boot Services...\n");
+
+    // 1. Obtener el mapa de memoria más reciente
+    get_memory_map(image_handle);
     CopyMem((VOID*)safe_memmap_addr, mem_map.map, mem_map.map_size);
     kinfo->memmap = safe_memmap_addr;
 
-    Print(L"[BOOT] Tablas de pagina listas. Memmap copiado.\n");
-    Print(L"[BOOT] Saltando al kernel...\n");
-
-    // Deshabilitar interrupciones antes de ExitBootServices
+    // 2. Desactivar interrupciones
     __asm__ volatile ("cli");
 
+    // 3. Salir de los servicios de arranque (bucle necesario para VirtualBox)
     status = uefi_call_wrapper(BS->ExitBootServices, 2, image_handle, mem_map.map_key);
     if (EFI_ERROR(status)) {
-        // Reintentar con mapa actualizado
+        // En VirtualBox ExitBootServices suele fallar en el primer intento si la memoria cambió al invocar CopyMem
         get_memory_map(image_handle);
         CopyMem((VOID*)safe_memmap_addr, mem_map.map, mem_map.map_size);
         kinfo->memmap = safe_memmap_addr;
         status = uefi_call_wrapper(BS->ExitBootServices, 2, image_handle, mem_map.map_key);
-        if (EFI_ERROR(status)) {
-            // No podemos usar Print despues de esto, pero ya fallamos
-            while (1) __asm__ volatile ("hlt");
-        }
     }
 
-    // Ahora cambiamos CR3 (despues de ExitBootServices)
+    // 4. Cambiar el registro CR3 a nuestras tablas de páginas
     __asm__ volatile ("movq %0, %%cr3" : : "r"(pml4_addr) : "memory");
 
-    typedef void (*kernel_fn_t)(struct kernel_boot_info*);
+    // 5. Cargar la función de entrada
+    typedef void (*kernel_fn_t)(struct kernel_boot_info*) __attribute__((sysv_abi));
     kernel_fn_t kmain = (kernel_fn_t)kernel_entry;
 
+    // 6. Saltar al kernel
     kmain(kinfo);
 
-    while (1) __asm__ volatile ("hlt");
+    while (1) {
+        __asm__ volatile ("hlt");
+    }
 }
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {

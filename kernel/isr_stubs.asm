@@ -1,5 +1,13 @@
 ; kernel/isr_stubs.asm
-; Stubs de ISR/IRQ que empujan estado y llaman a handlers en C
+; Stubs de ISR/IRQ que empujan estado y llaman a handlers en C.
+;
+; No usamos swapgs ni GS. El acceso a cpu_local se hace por dirección
+; absoluta / RIP-relative (kernel mapeado en todas las tareas).
+;
+; Alineación ABI System V: antes de cada CALL, RSP debe ser ≡ 0 (mod 16).
+; Con 15 pushes queda ≡ 8; añadimos un push dummy al final (16 pushes)
+; y pasamos al handler RDI = RSP + 8 (saltando el dummy) para que el
+; layout de registers_t sea el esperado por el código C.
 
 section .text
 bits 64
@@ -82,8 +90,10 @@ IRQ 15, 47
 extern isr_handler
 extern irq_handler
 
+; ---------------------------------------------------------------------------
+; isr_common
+; ---------------------------------------------------------------------------
 isr_common:
-    ; Guardar todos los registros
     push rax
     push rcx
     push rdx
@@ -99,11 +109,13 @@ isr_common:
     push r13
     push r14
     push r15
+    push r15                         ; dummy: 16 pushes → alineación a 16
 
-    mov rdi, [rsp + 120]   ; ISR number
-    mov rsi, [rsp + 128]   ; Error code
+    mov rdi, rsp
+    add rdi, 8                       ; saltar el dummy
     call isr_handler
 
+    add rsp, 8                       ; quitar dummy
     pop r15
     pop r14
     pop r13
@@ -119,9 +131,12 @@ isr_common:
     pop rdx
     pop rcx
     pop rax
-    add rsp, 16            ; Limpiar error code + ISR number
+    add rsp, 16                      ; limpiar int_num + error_code
     iretq
 
+; ---------------------------------------------------------------------------
+; irq_common
+; ---------------------------------------------------------------------------
 irq_common:
     push rax
     push rcx
@@ -138,11 +153,13 @@ irq_common:
     push r13
     push r14
     push r15
+    push r15                         ; dummy: 16 pushes → alineación a 16
 
-    mov rdi, [rsp + 120]   ; IRQ number (IDT index)
-    sub rdi, 32            ; Convertir a 0-15
+    mov rdi, rsp
+    add rdi, 8                       ; saltar el dummy
     call irq_handler
 
+    add rsp, 8                       ; quitar dummy
     pop r15
     pop r14
     pop r13
@@ -158,5 +175,5 @@ irq_common:
     pop rdx
     pop rcx
     pop rax
-    add rsp, 16
+    add rsp, 16                      ; limpiar int_num + error_code
     iretq

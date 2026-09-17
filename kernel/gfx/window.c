@@ -10,11 +10,11 @@
 static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip, int x, int y) {
     if (!win) return;
     
-    if (win->icon_bmp_node) {
-        // Dibuja el BMP de la ventana escalado a 18x18px en el Titlebar
-        bmp_draw_scaled(win->icon_bmp_node, dst, stride, clip, x, y, 18, 18);
+    if (win->has_icon_cache) {
+        gfx_bit_blat(dst, stride, win->icon_cache, 18, clip, x, y, 18, 18);
+    } else if (win->icon_buffer) {
+        gfx_bit_blat(dst, stride, win->icon_buffer, 18, clip, x, y, 18, 18);
     } else {
-        // Fallback predeterminado con texto/color
         gfx_fill_rounded_rect(dst, stride, clip, (rect_t){x, y, 18, 18}, 4, win->icon_bg_color);
         gfx_draw_string(dst, stride, clip, x + 5, y, win->icon_symbol, 0xFFFFFFFF, FONT_ID_MONO);
     }
@@ -23,9 +23,16 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
 void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
     if (!win) return;
     win->icon_bmp_node = bmp_file;
+    if (bmp_file) {
+        rect_t clip = {0, 0, 18, 18};
+        for (int i = 0; i < 18 * 18; i++) win->icon_cache[i] = 0;
+        bmp_draw_scaled(bmp_file, win->icon_cache, 18, clip, 0, 0, 18, 18);
+        win->has_icon_cache = 1;
+    } else {
+        win->has_icon_cache = 0;
+    }
     win->dirty = 1;
     
-    // Si la ventana tiene un botón asociado en la barra de tareas, actualiza su icono también
     if (win->taskbar_item) {
         win->taskbar_item->icon_bmp_node = bmp_file;
     }
