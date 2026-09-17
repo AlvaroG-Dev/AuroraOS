@@ -171,4 +171,20 @@ static inline int sys_win_destroy(int win_id) {
 }
 static inline int sys_win_blit(int win_id, int x, int y, int w, int h,
                                const uint32_t *pixels) {
-  wins
+  winsrv_blit_args_t args;
+  args.win_id = win_id;
+  args.x = x; args.y = y; args.w = w; args.h = h;
+  args.pixels = (uint32_t *)pixels;
+  return (int)syscall(SYS_WIN_BLIT, (uint64_t)&args, 0, 0, 0, 0);
+}
+static inline int sys_win_poll_event(int win_id, winsrv_event_t *ev, int blocking) {
+  return (int)syscall(SYS_WIN_POLL_EVENT, (uint64_t)win_id, (uint64_t)ev,
+                      (uint64_t)blocking, 0, 0);
+}
+static inline int sys_win_register_console(int win_id) {
+  return (int)syscall(SYS_WIN_REGISTER_CONSOLE, (uint64_t)win_id, 0, 0, 0, 0);
+}
+
+void sys_exit(int code);
+
+#endif
