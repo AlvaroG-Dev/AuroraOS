@@ -13,6 +13,7 @@
 #include "taskbar.h"
 #include "theme.h"
 #include "window.h"
+#include "winsrv.h"
 #include <emmintrin.h>
 #include <stddef.h>
 
@@ -153,8 +154,9 @@ void compositor_init(void) {
       "[COMPOSITOR] Motor grafico con aceleracion SIMD SSE2 inicializado.");
   taskbar_init();
 
+  winsrv_init();
+
   tar_node_t *start_icon_node = tar_find_file("system/icons/start-icon.bmp");
-  tar_node_t *term_icon_node = tar_find_file("system/icons/terminal-icon.bmp");
   bg_wallpaper_node = tar_find_file("system/wallpapers/default-background.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
@@ -176,13 +178,6 @@ void compositor_init(void) {
   if (start_icon_node) {
     taskbar_add_item_bmp(TASKBAR_ITEM_START_BTN, "Inicio", start_icon_node,
                          on_start_click);
-  }
-
-  window_t *term_win =
-      compositor_create_window(50, 50, 640, 400, "Terminal de Comandos", 0);
-  if (term_win && term_icon_node) {
-    win_set_icon_bmp(term_win, term_icon_node);
-    win_update(term_win);
   }
 }
 
@@ -328,6 +323,12 @@ static void compositor_focus_window(window_t *win) {
 
   preempt_enable();
 
+  // Notificar al winsrv: blur a la vieja, focus a la nueva.
+  if (old_focus) {
+    winsrv_post_event(old_focus, WINSRV_EV_BLUR, 0, 0, 0);
+  }
+  winsrv_post_event(win, WINSRV_EV_FOCUS, 0, 0, 0);
+
   compositor_invalidate_taskbar();
 }
 
@@ -335,8 +336,18 @@ static void compositor_focus_window(window_t *win) {
 // Manejo de eventos de teclado
 // ---------------------------------------------------------------------------
 static void compositor_handle_key(uint8_t scancode, int pressed) {
-  (void)scancode;
-  (void)pressed;
+  if (!pressed)
+    return;
+
+  // Buscar la ventana con foco y notificar al winsrv.
+  window_t *w = window_stack;
+  while (w) {
+    if (!(w->flags & WIN_FLAGS_HIDDEN) && (w->flags & WIN_FLAGS_FOCUSED)) {
+      winsrv_post_event(w, WINSRV_EV_KEY, (int32_t)scancode, 1, 0);
+      break;
+    }
+    w = w->next;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -403,7 +414,11 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
               drag_offset_y = cursor_y - win->y;
             }
           } else {
+            // Click dentro del contenido de la ventana.
             compositor_focus_window(win);
+            int local_x = cursor_x - win->x;
+            int local_y = cursor_y - win->y - WIN11_TITLEBAR_HEIGHT;
+            winsrv_post_event(win, WINSRV_EV_MOUSE, local_x, local_y, 1);
           }
           break;
         }
@@ -421,7 +436,9 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
       if (pressed_btn == WIN_BTN_CLOSE_PRESSED) {
         if (cursor_x >= close_x && cursor_x < close_x + 46 &&
             cursor_y >= pressed_win->y && cursor_y < pressed_win->y + 32) {
-          compositor_close_window(pressed_win);
+          // Notificar CLOSE al winsrv. NO cerramos aquí. La app
+          // decidirá si destruye la ventana.
+          winsrv_post_event(pressed_win, WINSRV_EV_CLOSE, 0, 0, 0);
         }
       } else if (pressed_btn == WIN_BTN_MAXIMIZE_PRESSED) {
         // maximizar (por ahora sin op)
@@ -461,6 +478,9 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
                       drag_window->width + WIN11_SHADOW_SIZE * 2,
                       drag_window->height + WIN11_SHADOW_SIZE * 2};
       compositor_invalidate_rect(rect_bounding_box(old_r, new_r));
+
+      // Notificar MOVE al winsrv.
+      winsrv_post_event(drag_window, WINSRV_EV_MOVE, new_x, new_y, 0);
     }
   }
 
