@@ -22,6 +22,11 @@
 #define SYS_GETPID 16
 #define SYS_MMAP 17
 #define SYS_MUNMAP 18
+#define SYS_WIN_CREATE 19
+#define SYS_WIN_DESTROY 20
+#define SYS_WIN_BLIT 21
+#define SYS_WIN_POLL_EVENT 22
+#define SYS_WIN_REGISTER_CONSOLE 23
 
 #define WNOHANG 1
 
@@ -54,6 +59,30 @@ typedef struct {
   size_t size;
   uint32_t inode;
 } stat_t;
+
+// --- Winsrv (window server) ---
+
+#define WINSRV_EV_NONE    0
+#define WINSRV_EV_CLOSE   1
+#define WINSRV_EV_FOCUS   2
+#define WINSRV_EV_BLUR    3
+#define WINSRV_EV_MOVE    4
+#define WINSRV_EV_KEY     5
+#define WINSRV_EV_MOUSE   6
+#define WINSRV_EV_OUTPUT  7
+
+typedef struct winsrv_event {
+  uint32_t type;
+  int32_t  x;
+  int32_t  y;
+  uint32_t data;
+} winsrv_event_t;
+
+typedef struct {
+  int32_t  win_id;
+  int32_t  x, y, w, h;
+  uint32_t *pixels;
+} winsrv_blit_args_t;
 
 static inline long syscall(uint64_t num, uint64_t arg1, uint64_t arg2,
                            uint64_t arg3, uint64_t arg4, uint64_t arg5) {
@@ -131,6 +160,15 @@ static inline int sys_munmap(uint64_t addr, uint64_t length) {
   return (int)syscall(SYS_MUNMAP, addr, length, 0, 0, 0);
 }
 
-void sys_exit(int code);
+// --- Winsrv wrappers ---
 
-#endif
+static inline int sys_win_create(int x, int y, int w, int h, const char *title) {
+  return (int)syscall(SYS_WIN_CREATE, (uint64_t)x, (uint64_t)y,
+                      (uint64_t)w, (uint64_t)h, (uint64_t)title);
+}
+static inline int sys_win_destroy(int win_id) {
+  return (int)syscall(SYS_WIN_DESTROY, (uint64_t)win_id, 0, 0, 0, 0);
+}
+static inline int sys_win_blit(int win_id, int x, int y, int w, int h,
+                               const uint32_t *pixels) {
+  wins
