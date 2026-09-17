@@ -218,8 +218,9 @@ static void buf_putchar(char c) {
 // ---------------------------------------------------------------------------
 static void draw_char(uint32_t *pixels, int cw, int ch,
                       int x, int y, char c, uint32_t color) {
-    if (c < 32 || c > 127) return;
-    const uint8_t *glyph = font8x8[(int)c - 32];
+    unsigned char uc = (unsigned char)c;
+    if (uc < 32 || uc > 127) return;
+    const uint8_t *glyph = font8x8[(int)uc - 32];
     for (int row = 0; row < 8; row++) {
         uint8_t bits = glyph[row];
         for (int col = 0; col < 8; col++) {
