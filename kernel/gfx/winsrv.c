@@ -1,6 +1,8 @@
 // kernel/gfx/winsrv.c
 #include "winsrv.h"
 #include "compositor.h"
+#include "theme.h"        // ← NUEVO: WIN11_TITLEBAR_HEIGHT
+#include "../cpu.h"       // ← NUEVO: stac / clac
 #include "../heap.h"
 #include "../klog.h"
 #include "../string.h"
