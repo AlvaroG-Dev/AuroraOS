@@ -22,6 +22,11 @@
 #define SYS_GETPID 16
 #define SYS_MMAP 17
 #define SYS_MUNMAP 18
+#define SYS_WIN_CREATE           19
+#define SYS_WIN_DESTROY          20
+#define SYS_WIN_BLIT             21
+#define SYS_WIN_POLL_EVENT       22
+#define SYS_WIN_REGISTER_CONSOLE 23
 
 void syscall_init(void);
 uint64_t syscall_handler_c(uint64_t num, uint64_t arg1, uint64_t arg2,
