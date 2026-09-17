@@ -62,14 +62,15 @@ typedef struct {
 
 // --- Winsrv (window server) ---
 
-#define WINSRV_EV_NONE    0
-#define WINSRV_EV_CLOSE   1
-#define WINSRV_EV_FOCUS   2
-#define WINSRV_EV_BLUR    3
-#define WINSRV_EV_MOVE    4
-#define WINSRV_EV_KEY     5
-#define WINSRV_EV_MOUSE   6
-#define WINSRV_EV_OUTPUT  7
+#define WINSRV_EV_NONE      0
+#define WINSRV_EV_CLOSE     1
+#define WINSRV_EV_FOCUS     2
+#define WINSRV_EV_BLUR      3
+#define WINSRV_EV_MOVE      4
+#define WINSRV_EV_KEY       5
+#define WINSRV_EV_MOUSE     6
+#define WINSRV_EV_OUTPUT    7
+#define WINSRV_EV_TTY_INPUT 8
 
 typedef struct winsrv_event {
   uint32_t type;
