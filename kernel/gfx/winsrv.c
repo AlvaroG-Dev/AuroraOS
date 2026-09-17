@@ -4,7 +4,6 @@
 #include "../heap.h"
 #include "../klog.h"
 #include "../string.h"
-#include "../tty.h"
 
 // ---------------------------------------------------------------------------
 // Tabla de ventanas de usuario
