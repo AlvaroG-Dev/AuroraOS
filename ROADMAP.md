@@ -146,7 +146,7 @@ Sockets como syscalls.
 **Cómo**: en `isr_handler`, llamar a `heap_dump()`, `sched_dump()`,
 `paging_dump()`.
 
-### E4. CI con GitHub Actions [ ]
+### E4. CI con GitHub Actions [x]
 **Esfuerzo**: 1 día
 **Por qué**: cada commit compila y arranca en QEMU headless.
 **Cómo**: workflow con `x86_64-elf-gcc` + QEMU, `-nographic`,
