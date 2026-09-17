@@ -170,6 +170,16 @@ vfs_node_t *vfs_lookup(const char *path) {
   return node;
 }
 
+static void vfs_node_free(vfs_node_t *node) {
+  if (!node)
+    return;
+  if (node == &stdin_node || node == &stdout_node || node == &stderr_node)
+    return;
+  if (node->ops && node->ops->close)
+    node->ops->close(node);
+  kfree(node);
+}
+
 int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   process_t *proc = (process_t *)proc_ptr;
   if (!proc || !path)
