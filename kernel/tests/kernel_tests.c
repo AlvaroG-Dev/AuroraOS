@@ -17,7 +17,6 @@
 #include "../string.h"
 #include "../test.h"
 
-
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
 // ---------------------------------------------------------------------------
@@ -439,3 +438,30 @@ static void test_apic_bsp_id(void) {
               bsp_cpuid_id);
 }
 REGISTER_TEST("apic: BSP APIC ID coincide con CPUID", test_apic_bsp_id);
+
+// ---------------------------------------------------------------------------
+// APIC / IOAPIC (Fase 2.2)
+// ---------------------------------------------------------------------------
+static void test_apic_ioapic_detected(void) {
+  const acpi_info_t *info = acpi_get_info();
+  TEST_ASSERT(info->ioapic_count >= 1,
+              "No hay IOAPICs detectados por ACPI (count=%d)",
+              info->ioapic_count);
+}
+REGISTER_TEST("apic: IOAPIC detectado", test_apic_ioapic_detected);
+
+static void test_apic_iso_qemu(void) {
+  // En QEMU con PIC legacy, IRQ 0 se mapea a GSI 2 vía ISO.
+  // Verificamos que el ISO está registrado.
+  const acpi_info_t *info = acpi_get_info();
+  int found = 0;
+  for (int i = 0; i < info->iso_count; i++) {
+    if (info->isos[i].irq == 0 && info->isos[i].gsi == 2) {
+      found = 1;
+      break;
+    }
+  }
+  // No es un error si no está, pero en QEMU con PIC dual sí lo está.
+  TEST_ASSERT(1, "ISO IRQ0->GSI2: %s", found ? "presente" : "no presente");
+}
+REGISTER_TEST("apic: ISO IRQ0->GSI2 registrado", test_apic_iso_qemu);

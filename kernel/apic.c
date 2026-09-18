@@ -13,12 +13,15 @@
 // Dirección virtual del LAPIC (mapeada en MMIO_MAP_BASE).
 static volatile uint32_t *g_lapic = NULL;
 
+// Punteros virtuales a los IOAPICs mapeados.
+static volatile uint32_t *g_ioapics[ACPI_MAX_IOAPICS];
+
 // APIC ID del BSP, leído al inicializar.
 static uint32_t g_bsp_apic_id = 0;
 
-// Tabla de ISOs del MADT: mapea IRQ legacy → GSI del IOAPIC.
-// Por defecto, irq N → gsi N (identidad). Los ISOs pueden alterarlo.
-// Ej: en muchos sistemas, IRQ 0 → GSI 2.
+// Tabla de IRQ legacy → GSI del IOAPIC. Por defecto identidad. Los ISOs
+// del MADT pueden modificarla (por ejemplo, IRQ 0 → GSI 2).
+// Un valor 0xFF indica que la IRQ NO es ruteable (colisión de GSI).
 static uint8_t g_irq_to_gsi[16];
 
 // Flag para saber si el LAPIC está activo.
@@ -56,26 +59,24 @@ uint32_t lapic_get_bsp_id(void) { return g_bsp_apic_id; }
 // ---------------------------------------------------------------------------
 // Helpers de IOAPIC
 // ---------------------------------------------------------------------------
-static uint32_t ioapic_read(uint32_t ioapic_addr, uint32_t reg) {
-  volatile uint32_t *base = (volatile uint32_t *)ioapic_addr;
+static uint32_t ioapic_read_reg(int ioapic_idx, uint32_t reg) {
+  if (ioapic_idx < 0 || ioapic_idx >= ACPI_MAX_IOAPICS)
+    return 0;
+  volatile uint32_t *base = g_ioapics[ioapic_idx];
+  if (!base)
+    return 0;
   base[IOAPIC_REG_SELECT / 4] = reg;
   return base[IOAPIC_REG_DATA / 4];
 }
 
-static void ioapic_write(uint32_t ioapic_addr, uint32_t reg, uint32_t value) {
-  volatile uint32_t *base = (volatile uint32_t *)ioapic_addr;
+static void ioapic_write_reg(int ioapic_idx, uint32_t reg, uint32_t value) {
+  if (ioapic_idx < 0 || ioapic_idx >= ACPI_MAX_IOAPICS)
+    return;
+  volatile uint32_t *base = g_ioapics[ioapic_idx];
+  if (!base)
+    return;
   base[IOAPIC_REG_SELECT / 4] = reg;
   base[IOAPIC_REG_DATA / 4] = value;
-}
-
-// Escribe una entrada de redirección de 64 bits en el IOAPIC.
-// `irq` es el índice de GSI (global system interrupt).
-static void ioapic_write_redir(uint32_t ioapic_addr, uint32_t gsi,
-                               uint64_t value) {
-  uint32_t low_reg = 0x10 + gsi * 2;
-  uint32_t high_reg = low_reg + 1;
-  ioapic_write(ioapic_addr, low_reg, (uint32_t)(value & 0xFFFFFFFF));
-  ioapic_write(ioapic_addr, high_reg, (uint32_t)(value >> 32));
 }
 
 // ---------------------------------------------------------------------------
@@ -88,8 +89,7 @@ void apic_init(void) {
     return;
   }
 
-  // 1. Mapear el LAPIC en MMIO_MAP_BASE. La página del LAPIC ocupa
-  //    4 KB aunque solo usemos los primeros 0x400 bytes.
+  // 1. Mapear el LAPIC en MMIO_MAP_BASE.
   void *lapic_map = mmio_map(acpi->lapic_address, 0x1000,
                              PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
   if (!lapic_map) {
@@ -101,61 +101,113 @@ void apic_init(void) {
   LOG_INFO("[APIC] LAPIC mapeado en 0x%lx (físico 0x%lx)",
            (unsigned long)lapic_map, (unsigned long)acpi->lapic_address);
 
-  // 2. Activar el LAPIC vía MSR IA32_APIC_BASE (0x1B).
+  // 2. Mapear todos los IOAPICs.
+  for (int i = 0; i < acpi->ioapic_count; i++) {
+    const acpi_ioapic_t *io = &acpi->ioapics[i];
+    void *map =
+        mmio_map(io->address, 0x1000, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
+    if (!map) {
+      LOG_ERR("[APIC] No se pudo mapear IOAPIC 0x%x", io->address);
+      g_ioapics[i] = NULL;
+      continue;
+    }
+    g_ioapics[i] = (volatile uint32_t *)map;
+    LOG_INFO("[APIC] IOAPIC[%d] mapeado en 0x%lx (físico 0x%x)", i,
+             (unsigned long)map, io->address);
+  }
+
+  // 3. Activar el LAPIC vía MSR IA32_APIC_BASE (0x1B).
   uint64_t apic_base = rdmsr(0x1B);
-  apic_base |= (1ULL << 11);  // Bit 11: APIC Global Enable
-  apic_base &= ~(1ULL << 10); // Bit 10: BSP (no cambiar)
+  apic_base |= (1ULL << 11); // Bit 11: APIC Global Enable
   wrmsr(0x1B, apic_base);
 
-  // 3. Leer el APIC ID del LAPIC y comparar con el BSP detectado.
+  // 4. Leer el APIC ID del LAPIC.
   uint32_t lapic_id = lapic_read(LAPIC_REG_ID) >> 24;
   g_bsp_apic_id = lapic_id;
   LOG_INFO("[APIC] LAPIC ID = %u", lapic_id);
 
-  // El ID real del BSP lo habíamos detectado vía CPUID en acpi_init.
-  // Si coinciden, todo bien. Si no, algo va mal.
-  // (No lo comparamos aquí porque ya lo hicimos en acpi_init.)
-
-  // 4. Configurar el SVR: habilitar el LAPIC + vector espurio 0xFF.
-  // El vector espurio es el que se entrega cuando una interrupción
-  // llega "en el momento equivocado". 0xFF es el valor recomendado.
+  // 5. Configurar el SVR: habilitar LAPIC + vector espurio 0xFF.
   lapic_write(LAPIC_REG_SVR, 0xFF | LAPIC_SVR_ENABLE);
 
-  // 5. Poner el TPR (Task Priority Register) a 0: aceptar todas las
-  // interrupciones, sin prioridad mínima.
+  // 6. Poner el TPR a 0.
   lapic_write(LAPIC_REG_TPR, 0);
 
-  // 6. Enmascarar los LVT por defecto, EXCEPTO LINT0.
+  // 7. Configurar los LVT.
   //
-  // LINT0: la línea por la que el PIC 8259 entrega sus IRQs al LAPIC.
-  //        Debe estar en modo ExtINT y DESENMASCARADO para que las
-  //        IRQs del PIC sigan llegando al CPU mientras seguimos
-  //        usando el PIC. Si la enmascaramos, el timer (IRQ 0) y el
-  //        teclado (IRQ 1) dejan de llegar y el kernel se cuelga en
-  //        el primer hlt.
-  //
-  //        Delivery mode ExtINT = 7 << 8.
+  // En sub-fase 2.2 ya NO usamos el PIC. Las IRQs llegan por el IOAPIC
+  // directamente al LAPIC (por el bus APIC interno). El LINT0, que era
+  // el canal del PIC, se enmascara. Si lo dejáramos en ExtINT, el PIC
+  // (aunque enmascarado a nivel de hardware) podría generar interrupciones
+  // espurias por el estado del pin, colgando el kernel.
   lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
   lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
   lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
-  lapic_write(LAPIC_REG_LVT_LINT0, (7 << 8)); // ExtINT, sin máscara
+  lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
   lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
   lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
 
-  // 7. Limpiar el ESR (Error Status Register) leyéndolo y escribiéndolo.
+  // 8. Limpiar el ESR.
   lapic_write(LAPIC_REG_ESR, 0);
   (void)lapic_read(LAPIC_REG_ESR);
 
-  // 8. Configurar la tabla de IRQ → GSI. Por defecto identidad.
+  // 9. Configurar la tabla IRQ → GSI. Por defecto identidad.
   for (int i = 0; i < 16; i++)
     g_irq_to_gsi[i] = (uint8_t)i;
 
-  // 9. Aplicar los ISOs del MADT si los hay. Re-parseamos el MADT
-  //    para extraer los ISOs, o los pedimos a acpi. Aquí simplificamos:
-  //    los ISOs ya se loguearon en acpi_init, pero no los guardamos.
-  //    TODO: extender acpi_info_t para guardar los ISOs y aplicarlos aquí.
+  // 10. Aplicar los ISOs del MADT.
+  for (int i = 0; i < acpi->iso_count; i++) {
+    const acpi_iso_t *iso = &acpi->isos[i];
+    if (iso->irq < 16) {
+      g_irq_to_gsi[iso->irq] = (uint8_t)iso->gsi;
+      LOG_INFO("[APIC] ISO aplicado: IRQ %u -> GSI %u", iso->irq, iso->gsi);
+    }
+  }
+
+  // 10b. Detectar colisiones de GSI.
+  //
+  // Dos IRQs legacy distintas NO pueden apuntar al mismo GSI del IOAPIC:
+  // si lo hacen, la segunda redirección sobrescribe la primera y solo
+  // una de las dos IRQs funcionará. En sistemas con PIC legacy, el ISO
+  // dice "IRQ 0 → GSI 2", pero por defecto "IRQ 2 → GSI 2" también se
+  // cumple (identidad). Esto es una colisión. La IRQ 2 del PIC es la
+  // cascada al PIC slave y NUNCA se usa como IRQ normal en sistemas
+  // con PIC dual. La marcamos como no ruteable.
+  {
+    uint8_t gsi_owner[24];
+    for (int i = 0; i < 24; i++)
+      gsi_owner[i] = 0xFF;
+
+    for (int irq = 0; irq < 16; irq++) {
+      uint8_t gsi = g_irq_to_gsi[irq];
+      if (gsi >= 24)
+        continue;
+      if (gsi_owner[gsi] == 0xFF) {
+        gsi_owner[gsi] = (uint8_t)irq;
+      } else {
+        LOG_WARN("[APIC] IRQ %u colisiona con IRQ %u en GSI %u "
+                 "(marcada como no ruteable)",
+                 irq, gsi_owner[gsi], gsi);
+        g_irq_to_gsi[irq] = 0xFF;
+      }
+    }
+  }
 
   g_apic_initialized = 1;
+
+  // 11. Redirigir todas las IRQs del PIC a sus vectores correspondientes
+  //     en el IOAPIC, enmascaradas por defecto. Los drivers que instalen
+  //     handlers las desenmascararán.
+  for (int irq = 0; irq < 16; irq++) {
+    if (g_irq_to_gsi[irq] == 0xFF)
+      continue; // IRQ no ruteable (colisión)
+    ioapic_redirect_irq(irq, 32 + irq, g_bsp_apic_id, 1); // masked
+  }
+
+  // 12. Enmascarar TODAS las IRQs del PIC para que no interfieran.
+  __asm__ volatile("outb %0, $0x21" : : "a"((uint8_t)0xFF));
+  __asm__ volatile("outb %0, $0xA1" : : "a"((uint8_t)0xFF));
+  LOG_INFO("[APIC] PIC enmascarado completamente");
+
   LOG_INFO("[APIC] LAPIC activo y configurado");
 }
 
@@ -164,104 +216,93 @@ void apic_init(void) {
 // ---------------------------------------------------------------------------
 void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
                          int masked) {
-  if (!g_apic_initialized)
-    return;
-
   const acpi_info_t *acpi = acpi_get_info();
   if (acpi->ioapic_count == 0) {
     LOG_ERR("[APIC] No hay IOAPICs");
     return;
   }
 
-  // Convertir IRQ legacy a GSI usando la tabla.
   uint8_t gsi = g_irq_to_gsi[irq & 0x0F];
+  if (gsi == 0xFF) {
+    LOG_DEBUG("[APIC] IRQ %u sin GSI, redirección ignorada", irq);
+    return;
+  }
 
   // Buscar el IOAPIC que cubre ese GSI.
-  const acpi_ioapic_t *io = NULL;
+  int ioapic_idx = -1;
   for (int i = 0; i < acpi->ioapic_count; i++) {
     const acpi_ioapic_t *cand = &acpi->ioapics[i];
-    // Asumimos un solo IOAPIC o que el GSI cae dentro del rango
-    // del IOAPIC. Rango: [gsi_base, gsi_base + 24) típicamente.
     if (gsi >= cand->gsi_base && gsi < cand->gsi_base + 24) {
-      io = cand;
+      ioapic_idx = i;
       break;
     }
   }
-  if (!io) {
-    LOG_ERR("[APIC] Ningún IOAPIC cubre GSI %u (irq %u)", gsi, irq);
+  if (ioapic_idx < 0 || !g_ioapics[ioapic_idx]) {
+    LOG_ERR("[APIC] IOAPIC no encontrado para GSI %u (irq %u)", gsi, irq);
     return;
   }
 
-  // Mapear el IOAPIC en MMIO si no está ya mapeado.
-  // (Lo haremos una vez por IOAPIC.)
-  void *ioapic_map =
-      mmio_map(io->address, 0x1000, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
-  if (!ioapic_map) {
-    LOG_ERR("[APIC] mmio_map del IOAPIC 0x%x falló", io->address);
-    return;
-  }
-
-  // Construir la entrada de redirección de 64 bits:
-  //   bits 0-7   : vector
-  //   bits 8-10  : delivery mode (0 = fixed)
-  //   bit  11    : destination mode (0 = physical)
-  //   bit  12    : delivery status (ro)
-  //   bit  13    : polarity (0 = active high, 1 = active low)
-  //   bit  14    : remote irr (ro)
-  //   bit  15    : trigger mode (0 = edge, 1 = level)
-  //   bit  16    : masked
-  //   bits 56-63 : destination APIC ID
+  // Construir la entrada de redirección de 64 bits.
   uint64_t entry = 0;
   entry |= (uint64_t)vector;
   entry |= ((uint64_t)dest_apic_id << 56);
+
+  // Aplicar flags del ISO si lo hay. Por defecto: activo alto, edge.
+  for (int i = 0; i < acpi->iso_count; i++) {
+    const acpi_iso_t *s = &acpi->isos[i];
+    if (s->irq == irq) {
+      // Bit 1 de flags: 0 = activo alto, 1 = activo bajo
+      if (s->flags & 0x2)
+        entry |= IOAPIC_REDIR_ACTIVE_LOW;
+      // Bit 3 de flags: 0 = edge, 1 = level
+      if (s->flags & 0x8)
+        entry |= IOAPIC_REDIR_TRIGGER_LEVEL;
+      break;
+    }
+  }
+
   if (masked)
     entry |= IOAPIC_REDIR_MASKED;
 
-  uint32_t gsi_in_ioapic = gsi - io->gsi_base;
+  uint32_t gsi_in_ioapic = gsi - acpi->ioapics[ioapic_idx].gsi_base;
+  uint32_t low_reg = 0x10 + gsi_in_ioapic * 2;
+  uint32_t high_reg = low_reg + 1;
 
-  uint32_t ioapic_virt = (uint32_t)(uintptr_t)ioapic_map;
-  ioapic_write_redir(ioapic_virt, gsi_in_ioapic, entry);
+  ioapic_write_reg(ioapic_idx, low_reg, (uint32_t)(entry & 0xFFFFFFFF));
+  ioapic_write_reg(ioapic_idx, high_reg, (uint32_t)(entry >> 32));
 
-  LOG_INFO("[APIC] IRQ %u -> GSI %u -> vector %u en IOAPIC (dest APIC %u)%s",
-           irq, gsi, vector, dest_apic_id, masked ? " [masked]" : "");
+  LOG_INFO("[APIC] IRQ %u -> GSI %u -> vec %u dest APIC %u%s", irq, gsi, vector,
+           dest_apic_id, masked ? " [masked]" : "");
 }
 
 void ioapic_mask_irq(uint8_t irq, int masked) {
-  if (!g_apic_initialized)
-    return;
-
   const acpi_info_t *acpi = acpi_get_info();
   if (acpi->ioapic_count == 0)
     return;
 
   uint8_t gsi = g_irq_to_gsi[irq & 0x0F];
+  if (gsi == 0xFF)
+    return; // IRQ no ruteable
 
-  const acpi_ioapic_t *io = NULL;
+  int ioapic_idx = -1;
   for (int i = 0; i < acpi->ioapic_count; i++) {
     const acpi_ioapic_t *cand = &acpi->ioapics[i];
     if (gsi >= cand->gsi_base && gsi < cand->gsi_base + 24) {
-      io = cand;
+      ioapic_idx = i;
       break;
     }
   }
-  if (!io)
+  if (ioapic_idx < 0 || !g_ioapics[ioapic_idx])
     return;
 
-  void *ioapic_map =
-      mmio_map(io->address, 0x1000, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
-  if (!ioapic_map)
-    return;
-
-  uint32_t gsi_in_ioapic = gsi - io->gsi_base;
-  uint32_t ioapic_virt = (uint32_t)(uintptr_t)ioapic_map;
-
+  uint32_t gsi_in_ioapic = gsi - acpi->ioapics[ioapic_idx].gsi_base;
   uint32_t low_reg = 0x10 + gsi_in_ioapic * 2;
-  uint32_t low = ioapic_read(ioapic_virt, low_reg);
+  uint32_t low = ioapic_read_reg(ioapic_idx, low_reg);
   if (masked)
     low |= (uint32_t)IOAPIC_REDIR_MASKED;
   else
     low &= ~(uint32_t)IOAPIC_REDIR_MASKED;
-  ioapic_write(ioapic_virt, low_reg, low);
+  ioapic_write_reg(ioapic_idx, low_reg, low);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,4 +319,13 @@ void apic_dump(void) {
   LOG_INFO("  LAPIC version = 0x%x", lapic_read(LAPIC_REG_VERSION) & 0xFF);
   LOG_INFO("  LAPIC SVR = 0x%x", lapic_read(LAPIC_REG_SVR));
   LOG_INFO("  LAPIC TPR = 0x%x", lapic_read(LAPIC_REG_TPR));
+
+  LOG_INFO("  IRQ → GSI:");
+  for (int i = 0; i < 16; i++) {
+    if (g_irq_to_gsi[i] == 0xFF) {
+      LOG_INFO("    IRQ %u -> (no ruteable)", i);
+    } else {
+      LOG_INFO("    IRQ %u -> GSI %u", i, g_irq_to_gsi[i]);
+    }
+  }
 }

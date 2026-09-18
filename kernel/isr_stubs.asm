@@ -177,3 +177,12 @@ irq_common:
     pop rax
     add rsp, 16                      ; limpiar int_num + error_code
     iretq
+
+; ---------------------------------------------------------------------------
+; isr_spurious: stub para el vector espurio del LAPIC (0xFF).
+; No hace nada. Solo iretq. Configurado en la IDT para que el LAPIC
+; no cause un triple fault si entrega una interrupción espuria.
+; ---------------------------------------------------------------------------
+global isr_spurious
+isr_spurious:
+    iretq

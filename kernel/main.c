@@ -151,8 +151,14 @@ static void sse_init(void) {
 // Timer handler
 // ---------------------------------------------------------------------------
 volatile uint64_t tick_count = 0;
+static uint32_t timer_dbg_count = 0;
 static void timer_handler(void) {
   tick_count++;
+  timer_dbg_count++;
+  if (timer_dbg_count <= 5 || timer_dbg_count % 1000 == 0) {
+    LOG_DEBUG("[TIMER] tick=%lu dbg_count=%u", (unsigned long)tick_count,
+              timer_dbg_count);
+  }
   if (tick_count % PIT_HZ == 0) {
     compositor_notify_clock_tick();
   }
@@ -187,12 +193,21 @@ static void ipc_echo_service(void) {
 static void kmain_task(void) {
   LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
 
+  LOG_DEBUG("[KERNEL] antes de sched_create_task");
   sched_create_task(ipc_echo_service);
+  LOG_DEBUG("[KERNEL] despues de sched_create_task");
 
   irq_install_handler(0, timer_handler);
-  __asm__ volatile("sti");
+  LOG_DEBUG("[KERNEL] despues de irq_install_handler");
 
+  __asm__ volatile("sti");
+  LOG_DEBUG("[KERNEL] despues de sti");
+
+  LOG_DEBUG("[KERNEL] antes de klog_calibrate_tsc (tick=%lu)",
+            (unsigned long)tick_count);
   klog_calibrate_tsc(50, 1000);
+  LOG_DEBUG("[KERNEL] despues de klog_calibrate_tsc (tick=%lu)",
+            (unsigned long)tick_count);
   LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
 
   LOG_INFO("[INIT] TTY...");

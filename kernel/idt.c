@@ -81,6 +81,8 @@ extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
 
+extern void isr_spurious(void);
+
 // Implementado en pf.c
 extern int handle_page_fault(registers_t *regs);
 
@@ -174,28 +176,18 @@ void pic_eoi(uint8_t irq) {
 
 void irq_install_handler(uint8_t irq, void (*handler)(void)) {
   irq_handlers[irq] = handler;
-  uint16_t port = (irq < 8) ? 0x21 : 0xA1;
-  uint8_t mask;
 
-  __asm__ volatile("inb %1, %0" : "=a"(mask) : "dN"(port));
-  mask &= ~(1 << (irq & 7));
-  __asm__ volatile("outb %0, %1" : : "a"(mask), "dN"(port));
-
-  if (irq >= 8) {
-    uint8_t master_mask;
-    __asm__ volatile("inb $0x21, %0" : "=a"(master_mask));
-    master_mask &= ~(1 << 2);
-    __asm__ volatile("outb %0, $0x21" : : "a"(master_mask));
-  }
+  // Con IOAPIC, desenmascaramos la IRQ en el IOAPIC.
+  // El PIC ya está enmascarado (apic_init lo hizo).
+  extern void ioapic_mask_irq(uint8_t irq, int masked);
+  ioapic_mask_irq(irq, 0); // desenmascarar
 }
 
 void irq_uninstall_handler(uint8_t irq) {
   irq_handlers[irq] = 0;
-  uint16_t port = (irq < 8) ? 0x21 : 0xA1;
-  uint8_t mask;
-  __asm__ volatile("inb %1, %0" : "=a"(mask) : "dN"(port));
-  mask |= (1 << (irq & 7));
-  __asm__ volatile("outb %0, %1" : : "a"(mask), "dN"(port));
+  // Enmascarar en el IOAPIC.
+  extern void ioapic_mask_irq(uint8_t irq, int masked);
+  ioapic_mask_irq(irq, 1);
 }
 
 void idt_init(void) {
@@ -204,6 +196,10 @@ void idt_init(void) {
   for (uint8_t i = 0; i < 48; i++) {
     idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
   }
+
+  // Vector espurio del LAPIC. Sin handler, el CPU lee la IDT[0xFF],
+  // que está vacía, y triple fault.
+  idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);
 
   pic_init();
   idt_load();
@@ -239,7 +235,13 @@ void isr_handler(registers_t *regs) {
 
 void irq_handler(registers_t *regs) {
   uint8_t irq = (uint8_t)(regs->int_num - 32);
-  pic_eoi(irq);
+
+  // Enviar EOI al LAPIC ANTES de llamar al handler. Si el handler cambia
+  // de tarea (por ejemplo, el timer llama a sched_tick), no queremos que
+  // el EOI se pierda en el cambio de contexto.
+  extern void lapic_eoi(void);
+  lapic_eoi();
+
   if (irq < 16 && irq_handlers[irq]) {
     irq_handlers[irq]();
   }
