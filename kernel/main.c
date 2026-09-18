@@ -3,6 +3,7 @@
 // Punto de entrada del kernel Aurora OS
 
 #include "acpi.h"
+#include "apic.h"
 #include "cpu.h"
 #include "driver.h"
 #include "gdt.h"
@@ -240,6 +241,7 @@ static void kmain_task(void) {
 
   smp_dump();
   acpi_dump();
+  apic_dump();
 
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
@@ -328,6 +330,10 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] ACPI (MADT)...");
   acpi_init(boot.acpi_rsdp);
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] APIC (LAPIC + IOAPIC)...");
+  apic_init();
   LOG_INFO("OK");
 
   LOG_INFO("[INIT] Demand paging (PF handler)...");

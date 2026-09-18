@@ -11,7 +11,16 @@
 - 4 tests nuevos: smp_processor_id, cpu_local_data[0], this_cpu, per_cpu.
 - **Sin cambios funcionales**: el kernel sigue single-CPU.
 
-### Fase 1 — ACPI MADT [ ]
+### Fase 1 — ACPI MADT [x]
+- Bootloader busca el RSDP en la config table de UEFI y lo copia
+  por valor al `kernel_boot_info`.
+- `acpi_init()` parsea el RSDP → XSDT/RSDT → MADT.
+- Extrae: LAPIC base, IOAPIC base, CPUs (apic_id, processor_id,
+  enabled), ISO mappings (IRQ legacy → GSI), BSP.
+- `acpi_dump()` para debug.
+- 4 tests nuevos. Total: 26 tests.
+- **Sin cambios funcionales**: el kernel sigue usando el PIC 8259.
+  Los APs no se arrancan todavía.
 ### Fase 2 — LAPIC + IOAPIC en el BSP [ ]
 ### Fase 3 — Arrancar APs [ ]
 ### Fase 4 — Scheduler SMP [ ]

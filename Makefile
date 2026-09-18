@@ -95,6 +95,30 @@ cpu_max: image
 		-cpu max \
 		-no-reboot -no-shutdown
 
+smp: image
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=OVMF_VARS.fd \
+		-drive format=raw,file=aurora.img \
+		-serial stdio \
+		-smp 4 \
+		-m 512M \
+		-cpu max \
+		-no-reboot -no-shutdown
+
+smp_max: image
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=OVMF_VARS.fd \
+		-drive format=raw,file=aurora.img \
+		-serial stdio \
+		-smp 4 \
+		-m 512M \
+		-cpu max \
+		-no-reboot -no-shutdown
+
 clean:
 	$(MAKE) -C bootloader clean
 	$(MAKE) -C kernel clean

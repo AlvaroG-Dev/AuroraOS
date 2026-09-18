@@ -10,11 +10,13 @@
 //   REGISTER_TEST("mi_cosa", test_mi_cosa);
 
 #include "../acpi.h"
+#include "../apic.h"
 #include "../cpu.h"
 #include "../heap.h"
 #include "../slab.h"
 #include "../string.h"
 #include "../test.h"
+
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -404,3 +406,36 @@ static void test_acpi_bsp_found(void) {
               info->bsp_index);
 }
 REGISTER_TEST("acpi: BSP identificado", test_acpi_bsp_found);
+
+// ---------------------------------------------------------------------------
+// APIC (Fase 2.1)
+// ---------------------------------------------------------------------------
+static void test_apic_lapic_mapped(void) {
+  // Si el LAPIC está mapeado y activo, lapic_get_id() devuelve un valor
+  // no cero. En QEMU con -smp 4, el BSP tiene APIC ID 0, así que
+  // devuelve 0. En otros sistemas puede ser distinto.
+  // Verificamos que el registro VERSION tiene un valor plausible.
+  uint32_t version = lapic_read(LAPIC_REG_VERSION);
+  TEST_ASSERT(version != 0 && version != 0xFFFFFFFF,
+              "LAPIC VERSION = 0x%x (no mapeado o no activo)", version);
+}
+REGISTER_TEST("apic: LAPIC mapeado y activo", test_apic_lapic_mapped);
+
+static void test_apic_svr_enabled(void) {
+  uint32_t svr = lapic_read(LAPIC_REG_SVR);
+  TEST_ASSERT((svr & LAPIC_SVR_ENABLE) != 0,
+              "LAPIC SVR no tiene el bit ENABLE (svr=0x%x)", svr);
+}
+REGISTER_TEST("apic: LAPIC SVR habilitado", test_apic_svr_enabled);
+
+static void test_apic_bsp_id(void) {
+  // El BSP APIC ID debe coincidir con el CPUID de este CPU.
+  uint32_t eax, ebx, ecx, edx;
+  cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+  uint32_t bsp_cpuid_id = (ebx >> 24) & 0xFF;
+  uint32_t bsp_apic_id = lapic_get_bsp_id();
+  TEST_ASSERT(bsp_apic_id == bsp_cpuid_id,
+              "BSP APIC ID = %u, esperado %u (de CPUID)", bsp_apic_id,
+              bsp_cpuid_id);
+}
+REGISTER_TEST("apic: BSP APIC ID coincide con CPUID", test_apic_bsp_id);
