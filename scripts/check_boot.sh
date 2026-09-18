@@ -92,7 +92,7 @@ EXPECTED=(
     "[PS2] Tarea de procesamiento iniciada"
     "[COMP] Compositor thread started"
     "[WINSRV] Inicializado"
-    "33 tests: 33 passed, 0 failed, 0 skipped"
+    "35 tests: 35 passed, 0 failed, 0 skipped"
 )
 
 FAILED=0

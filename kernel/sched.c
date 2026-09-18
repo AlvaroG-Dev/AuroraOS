@@ -1,45 +1,37 @@
 // kernel/sched.c
+// Scheduler preemptivo Round-Robin con soporte SMP
+
 #include "sched.h"
 #include "cpu.h"
 #include "gdt.h"
 #include "heap.h"
 #include "klog.h"
-#include "paging.h"
 #include "panic.h"
-#include "pmm.h"
 #include "serial.h"
+#include "spinlock.h"
 #include "string.h"
-#include "wait.h"
 #include <stddef.h>
 
 extern void task_trampoline(void);
 extern void user_trampoline(void);
 
 // ---------------------------------------------------------------------------
-// Estado per-CPU.
-//
-// Fase 0 de SMP: cpu_local sigue siendo la instancia única usada por todo
-// el código. cpu_local_data[] es el array que se usará con SMP real.
-// smp_init() inicializa cpu_local_data[0] con los mismos valores que
-// cpu_local, para que this_cpu() funcione cuando se use.
-//
-// TODO SMP (Fase 4): eliminar cpu_local y usar solo cpu_local_data[].
+// Estado per-CPU
 // ---------------------------------------------------------------------------
-cpu_local_t cpu_local = {0, 0, 0, 0, NULL, 0};
 cpu_local_t cpu_local_data[MAX_CPUS] = {{0}};
+
+_Static_assert(offsetof(cpu_local_t, cpu_id) == CPU_LOCAL_CPU_ID_OFFSET,
+               "CPU_LOCAL_CPU_ID_OFFSET desincronizado con cpu_local_t");
 
 #define TASK_STACK_SIZE (8 * 1024)
 #define SCHED_INTERVAL 10
 
-static task_t *current_task = NULL;
+static spinlock_t sched_lock;
 static task_t *task_list_head = NULL;
+static task_t *idle_tasks[MAX_CPUS] = {NULL};
 static uint32_t next_id = 0;
-static uint32_t tick_counter = 0;
 static uint64_t kernel_cr3 = 0;
 
-// ---------------------------------------------------------------------------
-// Idle task
-// ---------------------------------------------------------------------------
 static void idle_loop(void) {
   while (1) {
     __asm__ volatile("sti; hlt");
@@ -47,78 +39,66 @@ static void idle_loop(void) {
 }
 
 // ---------------------------------------------------------------------------
-// SMP: Fase 0
+// SMP: Fase 0/3/4
 // ---------------------------------------------------------------------------
 void smp_init(void) {
-  // Inicializar la entrada del CPU 0 en cpu_local_data, copiando los
-  // valores de cpu_local (que es la instancia "viva" hoy).
-  cpu_local_data[0] = cpu_local;
-  cpu_local_data[0].cpu_id = 0;
-  cpu_local_data[0].lapic_id = 0;
-  cpu_local_data[0].current_task = NULL;
-  cpu_local_data[0].tick_counter = 0;
-
-  // Las demás entradas quedan a 0.
-  for (int i = 1; i < MAX_CPUS; i++) {
-    cpu_local_data[i] = (cpu_local_t){0};
+  for (int i = 0; i < MAX_CPUS; i++) {
     cpu_local_data[i].cpu_id = i;
+    if (i > 0) {
+      cpu_local_data[i].kernel_stack = 0;
+      cpu_local_data[i].user_rsp = 0;
+      cpu_local_data[i].lapic_id = 0;
+      cpu_local_data[i].current_task = NULL;
+      cpu_local_data[i].tick_counter = 0;
+    }
   }
 
-  LOG_INFO("[SMP] Fase 0: cpu_local_data[%d] inicializado (cpu_id=0)",
-           MAX_CPUS);
+  wrmsr(MSR_GS_BASE, (uint64_t)&cpu_local_data[0]);
+  wrmsr(MSR_KERNEL_GS_BASE, 0);
+
+  LOG_DEBUG("[SMP] cpu_local_data[0] inicializado, %%gs -> %p",
+            (void *)&cpu_local_data[0]);
+}
+
+void smp_set_bsp_lapic_id(uint32_t lapic_id) {
+  cpu_local_data[0].lapic_id = lapic_id;
 }
 
 void smp_dump(void) {
-  LOG_INFO("[SMP] Estado per-CPU:");
+  LOG_DEBUG("[SMP] Estado per-CPU:");
   for (int i = 0; i < MAX_CPUS; i++) {
     cpu_local_t *c = &cpu_local_data[i];
-    LOG_INFO("  cpu[%d]: cpu_id=%d lapic_id=%d kernel_stack=%p "
-             "user_rsp=%p current_task=%p tick_counter=%lu",
-             i, c->cpu_id, c->lapic_id, (void *)c->kernel_stack,
-             (void *)c->user_rsp, c->current_task,
-             (unsigned long)c->tick_counter);
+    LOG_DEBUG("  cpu[%d]: cpu_id=%d lapic_id=%d kernel_stack=%p "
+              "user_rsp=%p current_task=%p tick_counter=%lu",
+              i, c->cpu_id, c->lapic_id, (void *)c->kernel_stack,
+              (void *)c->user_rsp, c->current_task,
+              (unsigned long)c->tick_counter);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Refcount
+// Refcounting y Preemption
 // ---------------------------------------------------------------------------
 void task_get(task_t *t) {
-  if (!t)
-    return;
-  __sync_fetch_and_add(&t->refcount, 1);
-}
-
-static void task_free(task_t *t) {
-  if (!t)
-    return;
-  if (t->cr3 != kernel_cr3 && t->cr3 != 0) {
-    LOG_DEBUG("[SCHED] Liberando PML4 de usuario en %p", (void *)t->cr3);
-    paging_free_user_space(t->cr3);
+  if (t) {
+    __sync_fetch_and_add(&t->refcount, 1);
   }
-  if (t->stack)
-    kfree(t->stack);
-  kfree(t);
 }
 
 void task_put(task_t *t) {
   if (!t)
     return;
-  int old = __sync_fetch_and_sub(&t->refcount, 1);
-  if (old <= 0) {
-    LOG_PANIC("sched: task_put underflow en task %u (refcount=%d)", t->id,
-              old - 1);
-  }
-  if (old == 1) {
-    task_free(t);
+  if (__sync_sub_and_fetch(&t->refcount, 1) == 0) {
+    if (t->stack) {
+      kfree(t->stack);
+      t->stack = NULL;
+    }
+    kfree(t);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Preemption
-// ---------------------------------------------------------------------------
 void preempt_disable(void) {
-  task_t *cur = current_task;
+  task_t *cur = sched_current();
   if (cur) {
     cur->preempt_count++;
   }
@@ -126,7 +106,7 @@ void preempt_disable(void) {
 }
 
 void preempt_enable(void) {
-  task_t *cur = current_task;
+  task_t *cur = sched_current();
   if (cur && cur->preempt_count > 0) {
     cur->preempt_count--;
   }
@@ -134,28 +114,15 @@ void preempt_enable(void) {
 }
 
 int preempt_count(void) {
-  task_t *cur = current_task;
+  task_t *cur = sched_current();
   return cur ? cur->preempt_count : 0;
 }
 
 // ---------------------------------------------------------------------------
-// Entry wrapper
+// Inicialización común de tarea
 // ---------------------------------------------------------------------------
-void task_entry_wrapper(void (*fn)(void)) {
-  fn();
-  __asm__ volatile("cli");
-  current_task->state = TASK_DEAD;
-  sched_yield();
-  while (1)
-    __asm__ volatile("hlt");
-}
-
-// ---------------------------------------------------------------------------
-// Helper interno
-// ---------------------------------------------------------------------------
-static void task_init_common(task_t *task, uint64_t *stack_ptr, uint64_t cr3) {
-  task->rsp = (uint64_t)stack_ptr;
-  task->stack = (uint64_t *)stack_ptr;
+static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
+  task->rsp = (uint64_t)sp;
   task->id = next_id++;
   task->state = TASK_READY;
   task->cr3 = cr3;
@@ -176,14 +143,14 @@ static void task_init_common(task_t *task, uint64_t *stack_ptr, uint64_t cr3) {
 }
 
 // ---------------------------------------------------------------------------
-// Insertar una tarea en la lista circular
+// Insertar una tarea en la lista circular (con spinlock)
 // ---------------------------------------------------------------------------
 static void task_list_insert(task_t *task) {
-  uint64_t flags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
 
   if (!task_list_head) {
     task_list_head = task;
+    task->next = task;
   } else {
     task_t *tail = task_list_head;
     while (tail->next != task_list_head)
@@ -192,7 +159,7 @@ static void task_list_insert(task_t *task) {
     tail->next = task;
   }
 
-  __asm__ volatile("push %0; popfq" : : "r"(flags));
+  spin_unlock_irqrestore(&sched_lock, flags);
 }
 
 // ---------------------------------------------------------------------------
@@ -200,22 +167,38 @@ static void task_list_insert(task_t *task) {
 // ---------------------------------------------------------------------------
 void sched_init(void) {
   __asm__ volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
+  spin_init(&sched_lock);
 
-  uint64_t cpu_local_ptr = (uint64_t)&cpu_local;
-  wrmsr(MSR_GS_BASE, cpu_local_ptr);
-  wrmsr(MSR_KERNEL_GS_BASE, 0);
+  // Crear una tarea idle para cada CPU
+  for (int i = 0; i < MAX_CPUS; i++) {
+    task_t *idle = (task_t *)kmalloc(sizeof(task_t));
+    if (!idle) {
+      LOG_PANIC("[SCHED] Fallo al crear idle task %d", i);
+    }
+    uint8_t *stack = (uint8_t *)kmalloc(TASK_STACK_SIZE);
+    if (!stack) {
+      LOG_PANIC("[SCHED] Fallo al crear stack para idle task %d", i);
+    }
+    uint64_t *sp = (uint64_t *)(((uint64_t)(stack + TASK_STACK_SIZE)) & ~0xFULL);
+    *(--sp) = (uint64_t)task_trampoline;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = (uint64_t)idle_loop;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
 
-  task_t *idle = sched_create_task(idle_loop);
-  if (!idle) {
-    LOG_ERR("[SCHED] Fallo al crear idle task");
-    return;
+    task_init_common(idle, sp, kernel_cr3);
+    idle->stack = (uint64_t *)stack;
+    idle->is_idle = 1;
+    idle->state = TASK_READY;
+    idle->next = NULL;
+    idle_tasks[i] = idle;
   }
-  idle->is_idle = 1;
-  idle->state = TASK_READY;
-  current_task = idle;
 
-  LOG_INFO("[SCHED] Scheduler + SSE/FPU inicializado (idle task ID=%u)",
-           idle->id);
+  this_cpu(current_task) = idle_tasks[0];
+
+  LOG_INFO("[SCHED] Scheduler + SSE/FPU SMP inicializado (idle tasks creadas)");
 }
 
 // ---------------------------------------------------------------------------
@@ -249,29 +232,48 @@ task_t *sched_create_task(void (*fn)(void)) {
 }
 
 // ---------------------------------------------------------------------------
-// Reap de tareas muertas
+// Reap de tareas muertas (llamado con sched_lock cogido)
 // ---------------------------------------------------------------------------
 static void reap_dead_tasks(void) {
-  if (!current_task)
+  if (!task_list_head)
     return;
 
-  task_t *curr = current_task;
-  for (int i = 0; i < 32; i++) {
-    task_t *next = curr->next;
-    if (next == current_task)
+  task_t *cur = sched_current();
+
+  // Si solo hay un nodo en la lista circular
+  if (task_list_head->next == task_list_head) {
+    if (task_list_head->state == TASK_DEAD && !task_list_head->is_idle && task_list_head != cur) {
+      task_t *dead = task_list_head;
+      task_list_head = NULL;
+      LOG_INFO("[SCHED] Limpiando última tarea zombie ID=%u (refcount=%d)", dead->id, dead->refcount);
+      task_put(dead);
+    }
+    return;
+  }
+
+  // Lista con 2 o más nodos
+  task_t *prev = task_list_head;
+  for (int i = 0; i < 32 && task_list_head; i++) {
+    task_t *target = prev->next;
+    if (!target)
       break;
 
-    if (next->state == TASK_DEAD && !next->is_idle) {
-      curr->next = next->next;
-      if (next == task_list_head)
-        task_list_head = curr->next;
-
-      LOG_INFO("[SCHED] Limpiando tarea zombie ID=%u (refcount=%d)", next->id,
-               next->refcount);
-
-      task_put(next);
+    if (target->state == TASK_DEAD && !target->is_idle && target != cur) {
+      if (target->next == target) {
+        task_list_head = NULL;
+        task_put(target);
+        break;
+      }
+      prev->next = target->next;
+      if (target == task_list_head) {
+        task_list_head = prev->next;
+      }
+      LOG_INFO("[SCHED] Limpiando tarea zombie ID=%u (refcount=%d)", target->id, target->refcount);
+      task_put(target);
     } else {
-      curr = curr->next;
+      prev = prev->next;
+      if (prev == task_list_head)
+        break;
     }
   }
 }
@@ -300,63 +302,110 @@ static void sched_check_invariants(task_t *t) {
 // Tick
 // ---------------------------------------------------------------------------
 void sched_tick(void) {
-  if (!current_task)
+  task_t *curr = (task_t *)this_cpu(current_task);
+  if (!curr)
     return;
 
-  tick_counter++;
-  if (tick_counter < SCHED_INTERVAL)
+  this_cpu(tick_counter)++;
+  if (this_cpu(tick_counter) < SCHED_INTERVAL)
     return;
-  tick_counter = 0;
+  this_cpu(tick_counter) = 0;
 
-  if (current_task->preempt_count > 0)
+  if (curr->preempt_count > 0)
     return;
+
+  uint64_t flags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
+
+  while (__sync_lock_test_and_set(&sched_lock.locked, 1)) {
+    while (sched_lock.locked) {
+      __asm__ volatile("pause");
+    }
+  }
 
   reap_dead_tasks();
 
-  task_t *next = current_task->next;
-  int max = 64;
-  while ((next->state == TASK_DEAD || next->state == TASK_BLOCKED) &&
-         next != current_task && max-- > 0) {
-    next = next->next;
+  int cpu = smp_processor_id();
+
+  // Buscar una tarea en TASK_READY en la lista compartida
+  task_t *next = NULL;
+  if (task_list_head) {
+    task_t *p = task_list_head;
+    task_t *start = p;
+    do {
+      if (p->state == TASK_READY && !p->is_idle) {
+        next = p;
+        // Rotar task_list_head para round-robin equitativo entre CPUs
+        task_list_head = p->next;
+        break;
+      }
+      p = p->next;
+    } while (p && p != start);
   }
 
-  if (next == current_task || next->state != TASK_READY)
+  // Si no hay tareas listas:
+  if (!next) {
+    if (curr->is_idle) {
+      // Ya estamos en idle de este CPU
+      __sync_lock_release(&sched_lock.locked);
+      __asm__ volatile("push %0; popfq" : : "r"(flags));
+      return;
+    }
+    // Si la tarea actual murió o se bloqueó, cambiar a idle
+    if (curr->state == TASK_BLOCKED || curr->state == TASK_DEAD) {
+      next = idle_tasks[cpu];
+    } else {
+      // La tarea actual sigue RUNNING y no hay competencia
+      __sync_lock_release(&sched_lock.locked);
+      __asm__ volatile("push %0; popfq" : : "r"(flags));
+      return;
+    }
+  }
+
+  if (next == curr) {
+    __sync_lock_release(&sched_lock.locked);
+    __asm__ volatile("push %0; popfq" : : "r"(flags));
     return;
+  }
 
   sched_check_invariants(next);
 
-  task_t *old = current_task;
-  current_task = next;
+  task_t *old = curr;
+  if (old->state == TASK_RUNNING && !old->is_idle) {
+    old->state = TASK_READY;
+  }
+  next->state = TASK_RUNNING;
+  this_cpu(current_task) = next;
 
   if (next->stack) {
     uint64_t kstack = (uint64_t)((uint8_t *)next->stack + TASK_STACK_SIZE);
     tss_set_rsp0(kstack);
-    cpu_local.kernel_stack = kstack;
+    this_cpu(kernel_stack) = kstack;
   }
 
-  if (old->state == TASK_RUNNING)
-    old->state = TASK_READY;
-  next->state = TASK_RUNNING;
+  // task_switch liberará sched_lock tan pronto como old esté completamente guardado en RAM
+  task_switch(old, next, &sched_lock);
 
-  task_switch(old, next);
-}
-
-void sched_yield(void) {
-  uint64_t flags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
-  tick_counter = SCHED_INTERVAL;
-  sched_tick();
   __asm__ volatile("push %0; popfq" : : "r"(flags));
 }
 
-task_t *sched_current(void) { return current_task; }
+void sched_yield(void) {
+  this_cpu(tick_counter) = SCHED_INTERVAL;
+  sched_tick();
+}
+
+task_t *sched_current(void) {
+  return (task_t *)this_cpu(current_task);
+}
 
 void sched_make_ready(task_t *t) {
   if (!t)
     return;
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
   if (t->state == TASK_BLOCKED || t->state == TASK_READY) {
     t->state = TASK_READY;
   }
+  spin_unlock_irqrestore(&sched_lock, flags);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,15 +450,21 @@ task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
 // Búsqueda
 // ---------------------------------------------------------------------------
 task_t *sched_find_task(uint32_t task_id) {
-  if (!task_list_head)
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  if (!task_list_head) {
+    spin_unlock_irqrestore(&sched_lock, flags);
     return NULL;
+  }
   task_t *curr = task_list_head;
   do {
     if (curr->id == task_id && curr->state != TASK_DEAD) {
+      spin_unlock_irqrestore(&sched_lock, flags);
       return curr;
     }
     curr = curr->next;
   } while (curr && curr != task_list_head);
+
+  spin_unlock_irqrestore(&sched_lock, flags);
   return NULL;
 }
 
@@ -423,7 +478,7 @@ void task_die_hlt(void) {
 }
 
 // ---------------------------------------------------------------------------
-// sched_start
+// sched_start (BSP)
 // ---------------------------------------------------------------------------
 extern void task_jump_to(task_t *task);
 
@@ -436,21 +491,51 @@ __attribute__((noreturn)) void sched_start(task_t *task) {
               task->state);
   }
 
-  if (current_task && current_task != task) {
-    if (current_task->state == TASK_RUNNING) {
-      current_task->state = TASK_READY;
-    }
-  }
-
   if (task->stack) {
     uint64_t kstack = (uint64_t)((uint8_t *)task->stack + TASK_STACK_SIZE);
     tss_set_rsp0(kstack);
-    cpu_local.kernel_stack = kstack;
+    this_cpu(kernel_stack) = kstack;
   }
 
   task->state = TASK_RUNNING;
-  current_task = task;
+  this_cpu(current_task) = task;
 
   task_jump_to(task);
   __builtin_unreachable();
+}
+
+// ---------------------------------------------------------------------------
+// sched_start_ap (AP)
+// ---------------------------------------------------------------------------
+__attribute__((noreturn)) void sched_start_ap(void) {
+  int cpu = smp_processor_id();
+  task_t *idle = idle_tasks[cpu];
+  if (!idle) {
+    LOG_PANIC("[SCHED] sched_start_ap: idle_task[%d] == NULL", cpu);
+  }
+
+  idle->state = TASK_RUNNING;
+  this_cpu(current_task) = idle;
+
+  uint64_t kstack = (uint64_t)((uint8_t *)idle->stack + TASK_STACK_SIZE);
+  tss_set_rsp0(kstack);
+  this_cpu(kernel_stack) = kstack;
+
+  LOG_INFO("[AP] CPU %d inició scheduler SMP (idle task ID=%u)", cpu, idle->id);
+
+  task_jump_to(idle);
+  __builtin_unreachable();
+}
+
+void task_entry_wrapper(void (*fn)(void)) {
+  fn();
+  __asm__ volatile("cli");
+  task_t *cur = sched_current();
+  if (cur) {
+    cur->state = TASK_DEAD;
+  }
+  sched_yield();
+  while (1) {
+    __asm__ volatile("hlt");
+  }
 }

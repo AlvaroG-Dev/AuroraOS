@@ -11,21 +11,19 @@
 extern uint8_t _kernel_end; // definido en linker script
 
 static uint8_t *bitmap = 0;
-static uint64_t bitmap_phys_global = 0; // dirección física del bitmap
-static uint64_t max_blocks = 0;         // número total de páginas gestionadas
+static uint64_t bitmap_phys_global = 0;
+static uint64_t max_blocks = 0;
 static uint64_t bitmap_size_bytes = 0;
 static uint64_t used_blocks = 0;
-static uint64_t last_alloc_bit = 0; // pista para búsqueda Next-Fit
+static uint64_t last_alloc_bit = 0;
 
 #define EFI_CONVENTIONAL_MEMORY 7
 
-// Helper interno: comprobar si un bit está dentro del rango
 static inline int bitmap_in_range(uint64_t bit) { return bit < max_blocks; }
 
-// Helper seguro: test/set/clear con comprobación de rango
 static inline int bitmap_test_safe(uint8_t *bmp, uint64_t bit) {
   if (!bmp || !bitmap_in_range(bit))
-    return 1; // fuera de rango => tratado como ocupado
+    return 1;
   return !!(bmp[bit / 8] & (1 << (bit % 8)));
 }
 static inline void bitmap_set_safe(uint8_t *bmp, uint64_t bit) {
@@ -51,8 +49,6 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
   uint8_t *ptr = (uint8_t *)memmap;
   uint64_t max_phys_addr = 0;
 
-  // Pasada 1: Encontrar la memoria fisica maxima entre regiones USABLE
-  // (EFI_CONVENTIONAL_MEMORY)
   for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
     uint32_t type = *(uint32_t *)(ptr + i + 0);
     if (type != EFI_CONVENTIONAL_MEMORY)
@@ -71,10 +67,8 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
   }
 
   max_blocks = max_phys_addr / PAGE_SIZE;
-  bitmap_size_bytes = (max_blocks + 7) / 8; // bytes necesarios
+  bitmap_size_bytes = (max_blocks + 7) / 8;
 
-  // Pasada 1.5: Buscar region de memoria convencional bajo 4GB lo
-  // suficientemente grande para almacenar el bitmap
   uint64_t bitmap_phys = 0;
   int bitmap_found = 0;
   for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
@@ -98,17 +92,12 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
     return;
   }
 
-  // DURANTE pmm_init usamos identity mapping: la ventana física aún no está
-  // mapeada (se mapea en paging_init). Después de paging_init, se llama a
-  // pmm_relocate_bitmap() para cambiar a la ventana física.
   bitmap = (uint8_t *)bitmap_phys;
   bitmap_phys_global = bitmap_phys;
 
-  // Inicializar bitmap a 0xFF (ocupado) por defecto
   memset(bitmap, 0xFF, bitmap_size_bytes);
   used_blocks = max_blocks;
 
-  // Pasada 2: marcar como libres las regiones tipo EFI_CONVENTIONAL_MEMORY
   for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
     uint32_t type = *(uint32_t *)(ptr + i + 0);
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
@@ -126,13 +115,11 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
     }
   }
 
-  // Proteger pagina 0 (nulo)
   if (bitmap_in_range(0) && !bitmap_test_safe(bitmap, 0)) {
     bitmap_set_safe(bitmap, 0);
     used_blocks++;
   }
 
-  // Reservar las páginas ocupadas por el bitmap
   uint64_t bmp_start_bit = bitmap_phys / PAGE_SIZE;
   uint64_t bmp_end_bit =
       (bitmap_phys + bitmap_size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -143,18 +130,12 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
     }
   }
 
-  // NOTA: buddy_init se llama desde pmm_relocate_bitmap, no aquí.
-  // Así buddy usa el bitmap ya relocalizado a la ventana física.
-
   LOG_INFO(
       "[PMM] Bitmap inicializado en %p. Max RAM: %lu MB, Libres: %lu MB",
       (void *)bitmap_phys, (unsigned long)(max_phys_addr / (1024 * 1024)),
       (unsigned long)((max_blocks - used_blocks) * PAGE_SIZE / (1024 * 1024)));
 }
 
-// Cambia el bitmap a la ventana física (PHYS_MAP_BASE).
-// Debe llamarse DESPUÉS de paging_init, cuando la ventana está mapeada.
-// Durante pmm_init usamos identity mapping porque la ventana aún no existe.
 void pmm_relocate_bitmap(void) {
   if (!bitmap_phys_global)
     return;
@@ -162,12 +143,10 @@ void pmm_relocate_bitmap(void) {
   bitmap = (uint8_t *)phys_to_virt(bitmap_phys_global);
   LOG_INFO("[PMM] Bitmap relocalizado a la ventana física: %p", (void *)bitmap);
 
-  // Inicializar buddy allocator (usa el bitmap ya relocalizado)
   extern void buddy_init(uint64_t total_pages, uint8_t *bitmap_ptr);
   buddy_init(max_blocks, bitmap);
 }
 
-// Reservar una única página (4KB)
 uint64_t pmm_alloc_page(void) {
   if (!bitmap || max_blocks == 0)
     return 0;
@@ -201,7 +180,6 @@ uint64_t pmm_alloc_page(void) {
   return 0;
 }
 
-// Reservar 'count' páginas contiguas. Devuelve dirección física o 0 si falla.
 uint64_t pmm_alloc_pages(uint64_t count) {
   if (count == 0 || !bitmap || max_blocks == 0)
     return 0;
@@ -309,6 +287,44 @@ void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
   if (start_bit < last_alloc_bit)
     last_alloc_bit = start_bit;
   spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
+// ---------------------------------------------------------------------------
+// [SMP] Reserva un rango físico como USADO.
+//
+// Recorre el bitmap y marca las páginas del rango [start, end) que aún
+// estén libres. Ignora las ya reservadas. `end` es exclusivo.
+//
+// Uso típico: reservar memoria baja para el trampoline SMP antes de
+// copiarlo, para que pmm_alloc_page() no la entregue por error.
+// ---------------------------------------------------------------------------
+void pmm_reserve_range(uint64_t start, uint64_t end) {
+  if (!bitmap || max_blocks == 0) {
+    LOG_WARN("[PMM] reserve_range: bitmap no inicializado");
+    return;
+  }
+  if (end <= start)
+    return;
+
+  unsigned long flags = spin_lock_irqsave(&pmm_lock);
+
+  uint64_t first = start / PAGE_SIZE;
+  uint64_t last = (end + PAGE_SIZE - 1) / PAGE_SIZE;
+
+  uint64_t newly_reserved = 0;
+  for (uint64_t b = first; b < last; b++) {
+    if (bitmap_in_range(b) && !bitmap_test_safe(bitmap, b)) {
+      bitmap_set_safe(bitmap, b);
+      used_blocks++;
+      newly_reserved++;
+    }
+  }
+
+  spin_unlock_irqrestore(&pmm_lock, flags);
+
+  LOG_INFO("[PMM] Reservado rango [0x%llx, 0x%llx) = %lu páginas nuevas",
+           (unsigned long long)start, (unsigned long long)end,
+           (unsigned long)newly_reserved);
 }
 
 uint64_t pmm_total_pages(void) { return max_blocks; }

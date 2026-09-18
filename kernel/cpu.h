@@ -19,82 +19,52 @@
 
 // ---------------------------------------------------------------------------
 // MSR_SFMASK (0xC0000084): máscara de RFLAGS aplicada al entrar en SYSCALL.
-//
-// Cuando se ejecuta SYSCALL, el CPU hace:
-//     RFLAGS &= ~SFMASK
-// antes de saltar a LSTAR. Es decir: los bits puestos a 1 en SFMASK
-// se limpian en el RFLAGS del kernel.
-//
-// 0x257C = 0000 0000 0010 0101 0111 1100
-//
-//   Bit  2  (0x00004)  PF   - Parity Flag
-//   Bit  3  (0x00008)  (reservado, 1)
-//   Bit  4  (0x00010)  AF   - Auxiliary Carry Flag
-//   Bit  5  (0x00020)  (reservado, 1)
-//   Bit  6  (0x00040)  ZF   - Zero Flag
-//   Bit  7  (0x00080)  SF   - Sign Flag
-//   Bit  8  (0x00100)  TF   - Trap Flag (evita single-step en kernel)
-//   Bit 10  (0x00400)  DF   - Direction Flag (garantiza forward en REP)
-//   Bit 12  (0x01000)  IOPL - bit 0
-//   Bit 13  (0x02000)  IOPL - bit 1  → IOPL = 0 (sin port I/O)
-//
-// No se limpia IF (bit 9, 0x200): queremos que las interrupciones sigan
-// llegando durante el handler de syscall.
-// No se limpia CF (bit 0) ni OF (bit 11) porque Linux tampoco lo hace
-// y algunos paths los usan. En la práctica no importa.
-//
-// Este valor es el mismo que usa Linux (arch/x86/entry/entry_64.S).
 // ---------------------------------------------------------------------------
 #define MSR_SFMASK_BITS 0x257CULL
 
 // ---------------------------------------------------------------------------
 // SMP: soporte per-CPU.
 //
-// Estado actual (Fase 0 de SMP):
-//   - MAX_CPUS = 8, pero solo hay 1 CPU corriendo.
-//   - cpu_local (variable global) sigue siendo la única instancia usada.
-//   - cpu_local_data[MAX_CPUS] existe como estructura futura. El CPU 0
-//     es el único que la usa (duplicando cpu_local).
-//   - this_cpu() y per_cpu() acceden al array.
-//   - smp_processor_id() siempre devuelve 0.
-//
-// Plan futuro (Fases 1-4):
-//   - Fase 1: parsear ACPI MADT, descubrir CPUs y APIC IDs.
-//   - Fase 2: activar LAPIC del BSP, cambiar PIC por IOAPIC.
-//   - Fase 3: arrancar APs con INIT-SIPI-SIPI.
-//   - Fase 4: scheduler SMP, per-CPU con %gs:, locks reales.
+// Fase 0 de SMP: MAX_CPUS = 8, pero solo hay 1 CPU corriendo.
+// Fase 3.1: smp_processor_id() lee %gs:cpu_id.
+// Fase 4: scheduler SMP completo.
 // ---------------------------------------------------------------------------
 
-// Número máximo de CPUs soportadas. Con SMP activo, se descubren del
-// ACPI MADT y se limitan a este valor.
+// Número máximo de CPUs soportadas.
 #define MAX_CPUS 8
 
-// ID de la CPU actual. Fase 0: siempre 0.
-// Con SMP (Fase 2+): lee el APIC ID del LAPIC (x2APIC MSR o MMIO).
-static inline int smp_processor_id(void) { return 0; }
+// Offset de cpu_id dentro de cpu_local_t.
+// cpu_local_t: kernel_stack (8) + user_rsp (8) + cpu_id (4) + ...
+#define CPU_LOCAL_CPU_ID_OFFSET 16
+
+// ID de la CPU actual. Lee %gs:cpu_id. El BSP tiene %gs apuntando a
+// cpu_local_data[0] (tras smp_init). Cada AP configura %gs a su propia
+// entrada en ap_entry. Requiere que %gs esté configurado; si no, lee
+// basura. En el boot temprano (antes de smp_init) no llames a esto.
+static inline int smp_processor_id(void) {
+  int id;
+  __asm__ volatile("movl %%gs:%c1, %0"
+                   : "=r"(id)
+                   : "i"(CPU_LOCAL_CPU_ID_OFFSET));
+  return id;
+}
 
 // ---------------------------------------------------------------------------
-// Estructura per-CPU. Cada CPU tiene su propia copia en cpu_local_data[].
-//
-// Hoy solo se usa cpu_local_data[0]. La estructura crece según se
-// necesiten más campos per-CPU en SMP.
+// Estructura per-CPU.
 // ---------------------------------------------------------------------------
 typedef struct {
   uint64_t kernel_stack; // stack de kernel para syscalls/interrupciones
   uint64_t user_rsp;     // RSP del usuario guardado al entrar en syscall
   int cpu_id;            // índice 0..MAX_CPUS-1
-  int lapic_id;          // APIC ID del LAPIC (Fase 2+)
+  int lapic_id;          // APIC ID del LAPIC
   void *current_task;    // task_t* actual (Fase 4, per-CPU)
   uint64_t tick_counter; // contador de ticks per-CPU (Fase 4)
 } cpu_local_t;
 
-// Array de estructuras per-CPU. Hoy solo [0] está activa.
+// Array de estructuras per-CPU.
 extern cpu_local_t cpu_local_data[MAX_CPUS];
 
-// Compatibilidad con el código existente: cpu_local sigue siendo la
-// instancia única usada hoy. En Fase 4 se migrará todo a cpu_local_data[]
-// y cpu_local desaparecerá.
-extern cpu_local_t cpu_local;
+// cpu_local eliminada en Fase 4; todo migrado a cpu_local_data[].
 
 // Acceso a un campo del CPU actual. Ej: this_cpu(kernel_stack).
 #define this_cpu(field) (cpu_local_data[smp_processor_id()].field)

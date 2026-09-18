@@ -17,6 +17,8 @@
 #include "../string.h"
 #include "../test.h"
 #include "../time.h"
+#include "../sched.h"
+#include "../smp_boot.h"
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -493,3 +495,24 @@ static void test_lapic_timer_tick(void) {
               (unsigned long)t1, (unsigned long)t2);
 }
 REGISTER_TEST("lapic-timer: tick_count avanza", test_lapic_timer_tick);
+
+// ---------------------------------------------------------------------------
+// Scheduler SMP y APs (Fase 3 & 4)
+// ---------------------------------------------------------------------------
+static void test_smp_sched_current_valid(void) {
+  task_t *cur = sched_current();
+  TEST_ASSERT(cur != NULL, "sched_current() devolvió NULL");
+  TEST_ASSERT(cur->state == TASK_RUNNING, "sched_current() no está en TASK_RUNNING (state=%d)", cur->state);
+}
+REGISTER_TEST("smp: sched_current() per-CPU válido", test_smp_sched_current_valid);
+
+static void test_smp_aps_status(void) {
+  const acpi_info_t *acpi = acpi_get_info();
+  if (acpi->cpu_count > 1) {
+    int ready = smp_aps_ready();
+    TEST_ASSERT(ready > 0, "Sistema SMP con %d CPUs pero aps_ready=%d", acpi->cpu_count, ready);
+  } else {
+    TEST_ASSERT(smp_aps_ready() == 0, "Sistema uniprocesador pero aps_ready != 0");
+  }
+}
+REGISTER_TEST("smp: estado de APs coherente con ACPI", test_smp_aps_status);

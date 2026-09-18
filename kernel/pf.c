@@ -169,7 +169,7 @@ void kill_current_process(registers_t *regs, const char *reason) {
     regs->rip = (uint64_t)task_die_hlt;
     regs->cs = KERNEL_CS;
     regs->ss = KERNEL_DS;
-    regs->rsp = cpu_local.kernel_stack;
+    regs->rsp = this_cpu(kernel_stack);
     regs->rflags &= ~0x200ULL;
   }
   pf_killed++;

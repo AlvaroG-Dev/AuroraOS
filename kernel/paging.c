@@ -13,19 +13,13 @@ int cpu_smap_enabled = 0;
 // ===========================================================================
 // Helpers de page tables
 // ===========================================================================
-// Durante el boot, antes de que la ventana física esté mapeada, hay que
-// acceder a las page tables usando el identity mapping del bootloader
-// (direcciones físicas como punteros).
-//
-// Después de map_phys_window, se usa phys_to_virt.
-
 static uint64_t *alloc_page_table_early(void) {
   uint64_t phys = pmm_alloc_page();
   if (!phys) {
     LOG_ERR("[PAGING] ERROR: PMM sin páginas libres (early)");
     return NULL;
   }
-  uint64_t *pt = (uint64_t *)phys; // identity mapping
+  uint64_t *pt = (uint64_t *)phys;
   memset(pt, 0, PAGE_SIZE);
   return pt;
 }
@@ -46,7 +40,6 @@ static uint64_t *alloc_page_table(void) {
 // ===========================================================================
 static void pat_init(void) {
   uint64_t pat = rdmsr(IA32_PAT_MSR);
-  // Reconfigurar PAT3 (PWT=1, PCD=1) a Write-Combining (0x01)
   pat &= ~(0xFFULL << 24);
   pat |= (0x01ULL << 24);
   wrmsr(IA32_PAT_MSR, pat);
@@ -135,7 +128,7 @@ static void clear_nx_range(uint64_t start, uint64_t end) {
 }
 
 // ===========================================================================
-// map_phys_window (identity mapping durante el boot)
+// map_phys_window
 // ===========================================================================
 static int paging_map_huge_page_early(uint64_t virt, uint64_t phys,
                                       uint64_t flags) {
@@ -150,7 +143,6 @@ static int paging_map_huge_page_early(uint64_t virt, uint64_t phys,
 
   uint64_t intermediate_flags = PTE_PRESENT | PTE_WRITABLE;
 
-  // --- PML4 ---
   if (!(kernel_pml4[pml4_idx] & PTE_PRESENT)) {
     uint64_t *new_pdpt = alloc_page_table_early();
     if (!new_pdpt)
@@ -160,7 +152,6 @@ static int paging_map_huge_page_early(uint64_t virt, uint64_t phys,
   }
   uint64_t *pdpt = (uint64_t *)(kernel_pml4[pml4_idx] & PTE_FRAME);
 
-  // --- PDPT ---
   if (!(pdpt[pdpt_idx] & PTE_PRESENT)) {
     uint64_t *new_pd = alloc_page_table_early();
     if (!new_pd)
@@ -169,7 +160,6 @@ static int paging_map_huge_page_early(uint64_t virt, uint64_t phys,
   }
   uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & PTE_FRAME);
 
-  // --- PD (entry de 2 MB con PTE_HUGE) ---
   pd[pd_idx] = (phys & ~0x1FFFFFULL) | (flags & 0xFFF) | PTE_PRESENT | PTE_HUGE;
 
   paging_invalidate_tlb(virt);
@@ -255,6 +245,39 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
   kernel_pml4 = (uint64_t *)phys_to_virt(boot_pml4_phys);
   LOG_INFO("[PAGING] kernel_pml4 virtual = %p (físico = %p)",
            (void *)kernel_pml4, (void *)boot_pml4_phys);
+
+  // -------------------------------------------------------------------------
+  // 2b. [SMP] Identity map de 0x7000-0x9000 (2 páginas de 4KB).
+  //
+  // El AP, tras cargar el PML4 del kernel y activar paging, ejecuta
+  // código en 0x7000-0x9000 (dirección lineal baja). Esas direcciones
+  // deben estar mapeadas en el PML4 del kernel o el AP hace #PF y
+  // triple fault.
+  //
+  // Usamos page tables normales (4 KB), NO huge pages. Así no
+  // sobrescribimos la entry del PD que el bootloader ya tenía mapeada
+  // (que el BSP podría necesitar).
+  //
+  // Importante: esta llamada debe ir DESPUÉS de tener kernel_pml4
+  // como virtual, porque paging_map_page_in usa phys_to_virt para
+  // acceder a las page tables.
+  // -------------------------------------------------------------------------
+  {
+    LOG_INFO("[PAGING] Identity map 0x7000-0x9000 (trampoline SMP)");
+    int ok = 1;
+    for (uint64_t pa = 0x7000; pa < 0x9000; pa += PAGE_SIZE) {
+      int rc = paging_map_page_in(kernel_pml4, pa, pa,
+                                  PTE_PRESENT | PTE_WRITABLE | PTE_GLOBAL);
+      if (rc != 0) {
+        LOG_ERR("[PAGING] fallo mapeando 0x%llx (rc=%d)",
+                (unsigned long long)pa, rc);
+        ok = 0;
+      }
+    }
+    if (ok) {
+      LOG_INFO("[PAGING] Identity map 0x7000-0x9000 OK");
+    }
+  }
 
   // -------------------------------------------------------------------------
   // 3. Activar NX
@@ -371,7 +394,6 @@ int vmm_alloc_pages(uint64_t vaddr, uint64_t num_pages, uint64_t flags) {
   for (uint64_t i = 0; i < num_pages; i++) {
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
-      // Rollback: liberar las páginas ya mapeadas.
       for (uint64_t j = 0; j < i; j++) {
         uint64_t v = vaddr + j * PAGE_SIZE;
         uint64_t p = paging_get_phys(v);
@@ -384,7 +406,6 @@ int vmm_alloc_pages(uint64_t vaddr, uint64_t num_pages, uint64_t flags) {
     }
     if (paging_map_page(vaddr + i * PAGE_SIZE, phys, flags) != 0) {
       pmm_free_page(phys);
-      // Rollback de las anteriores.
       for (uint64_t j = 0; j < i; j++) {
         uint64_t v = vaddr + j * PAGE_SIZE;
         uint64_t p = paging_get_phys(v);
@@ -588,34 +609,20 @@ void paging_free_user_space(uint64_t pml4_phys) {
 }
 
 // ===========================================================================
-// MMIO: ventana para MMIO (framebuffer, PCI BARs)
+// MMIO
 // ===========================================================================
-// Mapea una región de MMIO en MMIO_MAP_BASE + phys.
-// La misma dirección física siempre se mapea en la misma dirección virtual.
-//
-// 'size' es el tamaño de la región en bytes. Se redondea hacia arriba a
-// múltiplos de 4 KB.
-//
-// Devuelve un puntero virtual al inicio del mapeo, o NULL si falla.
-//
-// IMPORTANTE: no verifica solapamientos ni conflictos de flags. Si dos
-// drivers mapean la misma phys con flags distintos, el segundo sobreescribe
-// el primero. Para el framebuffer y las BARs, esto no ocurre en la práctica.
 void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   if (size == 0)
     return NULL;
 
-  // Alinear el rango a páginas de 4 KB
   uint64_t start = phys & ~0xFFFULL;
   uint64_t end = (phys + size + 0xFFF) & ~0xFFFULL;
 
-  // Asegurar PTE_PRESENT
   uint64_t pte_flags = flags | PTE_PRESENT;
 
   for (uint64_t page = start; page < end; page += PAGE_SIZE) {
     uint64_t virt = MMIO_MAP_BASE + page;
     if (paging_map_page(virt, page, pte_flags) != 0) {
-      // Rollback de lo ya mapeado
       for (uint64_t p = start; p < page; p += PAGE_SIZE) {
         paging_unmap_page(MMIO_MAP_BASE + p);
       }
@@ -630,7 +637,6 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   return (void *)(MMIO_MAP_BASE + phys);
 }
 
-// Deshace un mapeo hecho con mmio_map.
 void mmio_unmap(uint64_t phys, uint64_t size) {
   if (size == 0)
     return;

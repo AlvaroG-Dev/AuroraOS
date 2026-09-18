@@ -1,44 +1,31 @@
 ; kernel/syscall_entry.asm
 ;
-; TODO SMP (Fase 4): hoy accedemos a cpu_local vía [rel cpu_local + N].
-; Con SMP, cada CPU tiene su propio cpu_local. Hay que migrar a
-; %gs:offset, donde %gs: base apunta a cpu_local_data[cpu] de la CPU
-; actual. Requiere:
-;   - swapgs al entrar/salir (o mantener %gs: base en kernel).
-;   - Cargar %gs: base en cada cambio de tarea si la CPU cambia.
-;   - Guardar/restaurar %gs: base en el contexto de la tarea.
+; Entrada desde Ring 3 vía SYSCALL.
+; %gs: base apunta a cpu_local_data[cpu] de la CPU actual.
 ;
-; Hoy no hacemos nada de esto. Fase 0 es no-op.
 [BITS 64]
 
 extern syscall_handler_c
-extern cpu_local
 
 global syscall_entry
 
 syscall_entry:
     ; ------------------------------------------------------------------
     ; Entrada desde Ring 3 vía SYSCALL.
-    ; No usamos swapgs ni GS. Accedemos a cpu_local con direccionamiento
-    ; RIP-relative (el kernel está mapeado en todas las tareas).
-    ;
     ; Al entrar:
     ;   RCX = RIP usuario, R11 = RFLAGS usuario, RSP = stack usuario,
     ;   RAX = num syscall, RDI/RSI/RDX/R10/R8/R9 = args.
     ; ------------------------------------------------------------------
 
-    ; 1. Guardar RSP usuario y cargar kernel stack.
-    mov [rel cpu_local + 8], rsp     ; cpu_local.user_rsp = RSP usuario
-    mov rsp, [rel cpu_local + 0]     ; RSP = cpu_local.kernel_stack
+    ; 1. Guardar RSP usuario y cargar kernel stack per-CPU (%gs)
+    mov [gs:8], rsp                  ; cpu_local_data[cpu].user_rsp = RSP usuario
+    mov rsp, [gs:0]                  ; RSP = cpu_local_data[cpu].kernel_stack
 
-    ; 2. Alinear RSP a 16 bytes. El ABI System V exige RSP ≡ 0 (mod 16)
-    ;    justo antes de un CALL. kmalloc puede no garantizar alineación
-    ;    a 16 en los stacks de tarea, así que forzamos aquí.
+    ; 2. Alinear RSP a 16 bytes.
     and rsp, ~0xF
 
-    ; 3. Guardar contexto del usuario (16 pushes = 128 bytes, múltiplo de 16,
-    ;    así que RSP ≡ 0 (mod 16) antes del call → correcto).
-    push qword [rel cpu_local + 8]   ; RSP usuario
+    ; 3. Guardar contexto del usuario (16 pushes = 128 bytes, múltiplo de 16)
+    push qword [gs:8]                ; RSP usuario
     push r11                         ; RFLAGS usuario
     push rcx                         ; RIP usuario
 
@@ -87,5 +74,5 @@ syscall_entry:
     pop r11                          ; RFLAGS usuario
     pop rsp                          ; RSP usuario
 
-    ; 6. Retornar al usuario (sin swapgs).
+    ; 6. Retornar al usuario
     o64 sysret
