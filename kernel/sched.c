@@ -337,7 +337,7 @@ void sched_tick(void) {
   if (old->state == TASK_RUNNING)
     old->state = TASK_READY;
   next->state = TASK_RUNNING;
-  LOG_DEBUG("[SCHED] tick: current=%u", current_task->id);
+
   task_switch(old, next);
 }
 

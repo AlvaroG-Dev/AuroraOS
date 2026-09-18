@@ -81,6 +81,8 @@ EXPECTED=(
     "[PMM] Bitmap inicializado"
     "[PAGING] Ventana fisica mapeada"
     "[ACPI] Parseo completo"
+    "[APIC] LAPIC activo y configurado"
+    "[LAPIC-TIMER] Modo periódico"
     "[HEAP] Heap inicializado"
     "[SLAB] Inicializado: 8 caches"
     "[TARFS] Carga completa. 21 nodos registrados."
@@ -90,7 +92,7 @@ EXPECTED=(
     "[PS2] Tarea de procesamiento iniciada"
     "[COMP] Compositor thread started"
     "[WINSRV] Inicializado"
-    "22 tests: 22 passed, 0 failed, 0 skipped"
+    "33 tests: 33 passed, 0 failed, 0 skipped"
 )
 
 FAILED=0

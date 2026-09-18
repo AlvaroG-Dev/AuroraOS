@@ -81,6 +81,10 @@ extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
 
+// LAPIC timer (vector 48).
+extern void irq48(void);
+
+// Vector espurio del LAPIC (0xFF).
 extern void isr_spurious(void);
 
 // Implementado en pf.c
@@ -89,7 +93,7 @@ extern int handle_page_fault(registers_t *regs);
 // ---------------------------------------------------------------------------
 // Tabla de stubs en el mismo orden en que se colocan en la IDT:
 //   0..31  → isr0..isr31   (excepciones CPU)
-//   32..47 → irq0..irq15   (IRQs del PIC)
+//   32..47 → irq0..irq15   (IRQs del IOAPIC)
 // ---------------------------------------------------------------------------
 static const uint64_t isr_stub_table[48] = {
     (uint64_t)isr0,  (uint64_t)isr1,  (uint64_t)isr2,  (uint64_t)isr3,
@@ -180,12 +184,11 @@ void irq_install_handler(uint8_t irq, void (*handler)(void)) {
   // Con IOAPIC, desenmascaramos la IRQ en el IOAPIC.
   // El PIC ya está enmascarado (apic_init lo hizo).
   extern void ioapic_mask_irq(uint8_t irq, int masked);
-  ioapic_mask_irq(irq, 0); // desenmascarar
+  ioapic_mask_irq(irq, 0);
 }
 
 void irq_uninstall_handler(uint8_t irq) {
   irq_handlers[irq] = 0;
-  // Enmascarar en el IOAPIC.
   extern void ioapic_mask_irq(uint8_t irq, int masked);
   ioapic_mask_irq(irq, 1);
 }
@@ -197,8 +200,10 @@ void idt_init(void) {
     idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
   }
 
-  // Vector espurio del LAPIC. Sin handler, el CPU lee la IDT[0xFF],
-  // que está vacía, y triple fault.
+  // Vector 48: LAPIC timer.
+  idt_set_gate(48, (uint64_t)irq48, 0x08, 0x8E);
+
+  // Vector 0xFF: espurio del LAPIC.
   idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);
 
   pic_init();
@@ -208,17 +213,6 @@ void idt_init(void) {
 
 // ---------------------------------------------------------------------------
 // ISR handler principal
-// ---------------------------------------------------------------------------
-// Antes este handler contenía toda la lógica de panic (volcado de registros,
-// stack dump, backtrace, detalles de #PF). Ahora esa lógica vive en panic.c
-// y aquí solo se decide si el fallo es recuperable o no.
-//
-// Flujo:
-//   1. #PF (vector 14): intentar resolver con demand paging.
-//      handle_page_fault devuelve:
-//        1 → resuelto (iretq reintenta la instrucción) o tarea muerta.
-//        0 → no resoluble (kernel bug) → panic.
-//   2. Cualquier otra excepción → panic().
 // ---------------------------------------------------------------------------
 void isr_handler(registers_t *regs) {
   if (regs->int_num == 14) {
@@ -234,14 +228,21 @@ void isr_handler(registers_t *regs) {
 }
 
 void irq_handler(registers_t *regs) {
-  uint8_t irq = (uint8_t)(regs->int_num - 32);
-
   // Enviar EOI al LAPIC ANTES de llamar al handler. Si el handler cambia
   // de tarea (por ejemplo, el timer llama a sched_tick), no queremos que
   // el EOI se pierda en el cambio de contexto.
   extern void lapic_eoi(void);
   lapic_eoi();
 
+  // LAPIC timer (vector 48).
+  if (regs->int_num == 48) {
+    extern void lapic_timer_handler(void);
+    lapic_timer_handler();
+    return;
+  }
+
+  // IRQs del IOAPIC (vectores 32-47).
+  uint8_t irq = (uint8_t)(regs->int_num - 32);
   if (irq < 16 && irq_handlers[irq]) {
     irq_handlers[irq]();
   }

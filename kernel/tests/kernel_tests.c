@@ -16,6 +16,7 @@
 #include "../slab.h"
 #include "../string.h"
 #include "../test.h"
+#include "../time.h"
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -465,3 +466,30 @@ static void test_apic_iso_qemu(void) {
   TEST_ASSERT(1, "ISO IRQ0->GSI2: %s", found ? "presente" : "no presente");
 }
 REGISTER_TEST("apic: ISO IRQ0->GSI2 registrado", test_apic_iso_qemu);
+
+// ---------------------------------------------------------------------------
+// LAPIC timer (Fase 2.3)
+// ---------------------------------------------------------------------------
+static void test_lapic_timer_running(void) {
+  // El LAPIC timer debe estar en modo periódico. Comprobamos que
+  // el contador actual está decreciendo (no está en 0 ni en 0xFFFFFFFF
+  // congelado).
+  uint32_t c1 = lapic_read(LAPIC_REG_TIMER_CURRENT);
+  for (volatile int i = 0; i < 1000; i++) {
+  }
+  uint32_t c2 = lapic_read(LAPIC_REG_TIMER_CURRENT);
+  TEST_ASSERT(c1 != c2, "LAPIC timer no decrementa (c1=%u c2=%u)", c1, c2);
+}
+REGISTER_TEST("lapic-timer: contador decrementa", test_lapic_timer_running);
+
+static void test_lapic_timer_tick(void) {
+  // Verificar que tick_count avanza. Es una prueba débil pero
+  // confirma que el handler del LAPIC timer está siendo llamado.
+  uint64_t t1 = tick_count;
+  for (volatile int i = 0; i < 1000000; i++) {
+  }
+  uint64_t t2 = tick_count;
+  TEST_ASSERT(t2 > t1, "tick_count no avanza (t1=%lu t2=%lu)",
+              (unsigned long)t1, (unsigned long)t2);
+}
+REGISTER_TEST("lapic-timer: tick_count avanza", test_lapic_timer_tick);

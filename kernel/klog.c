@@ -1,13 +1,13 @@
 // kernel/klog.c
 #include "klog.h"
 #include "serial.h"
+#include "time.h"
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define KLOG_RING_SIZE 16384
 
-extern volatile uint64_t tick_count;
+#define KLOG_RING_SIZE 16384
 
 static klog_level_t min_level = KLOG_DEBUG;
 static int klog_ready = 0;
@@ -389,12 +389,7 @@ void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
   uint64_t tsc_start = rdtsc();
   uint64_t target_tick = tick_count + ticks_to_wait;
 
-  int it = 0;
   while (tick_count < target_tick) {
-    if (it++ % 10 == 0) {
-      LOG_DEBUG("[TSC] tick=%lu target=%lu", (unsigned long)tick_count,
-                (unsigned long)target_tick);
-    }
     __asm__ volatile("hlt");
   }
 
