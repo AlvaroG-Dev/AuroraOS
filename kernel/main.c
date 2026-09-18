@@ -29,7 +29,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Estructura pasada desde el bootloader
+// ---------------------------------------------------------------------------
+// Boot info
+// ---------------------------------------------------------------------------
 struct kernel_boot_info {
   uint64_t fb_base;
   uint64_t fb_size;
@@ -44,6 +46,8 @@ struct kernel_boot_info {
 };
 
 static struct kernel_boot_info boot;
+static struct kernel_boot_info g_boot_info; // copia para kmain_task
+
 uint32_t *fb_ptr = NULL;
 uint32_t fb_width = 0;
 uint32_t fb_height = 0;
@@ -51,6 +55,9 @@ uint32_t fb_pitch = 0;
 
 static uint8_t syscall_kernel_stack[8192] __attribute__((aligned(16)));
 
+// ---------------------------------------------------------------------------
+// Framebuffer helpers (solo se usan en kmain_task, tras inicializar la FB)
+// ---------------------------------------------------------------------------
 static void fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch) {
   if (base == 0 || w == 0 || h == 0 || pitch == 0) {
     fb_ptr = NULL;
@@ -59,12 +66,10 @@ static void fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch) {
     fb_pitch = 0;
     return;
   }
-
   fb_ptr = (uint32_t *)base;
   fb_width = w;
   fb_height = h;
   fb_pitch = pitch / 4;
-
   LOG_INFO("[FB] Inicializado en memoria: %p %u x %u pitch=%u", (void *)base, w,
            h, pitch);
 }
@@ -83,31 +88,9 @@ static void fb_fillrect(int x, int y, int w, int h, uint32_t color) {
   }
 }
 
-#include "font.h"
-
-static void fb_puts(int x, int y, const char *str, uint32_t fg, uint32_t bg) {
-  int cx = x;
-  while (*str) {
-    unsigned char c = (unsigned char)*str;
-    if (c < 128) {
-      char *glyph = font8x8_basic[(int)c];
-      for (int row = 0; row < 8; row++) {
-        for (int col = 0; col < 8; col++) {
-          uint32_t color = (glyph[row] & (1 << col)) ? fg : bg;
-          fb_fillrect(cx + col * 2, y + row * 2, 2, 2, color);
-        }
-      }
-    } else {
-      fb_fillrect(cx, y, 16, 16, bg);
-    }
-    cx += 16;
-    str++;
-  }
-}
-
-// EFI_MEMORY_DESCRIPTOR layout en x86_64:
-//   Type(UINT32) @0, Pad(UINT32) @4, PhysicalStart(UINT64) @8,
-//   VirtualStart(UINT64) @16, NumberOfPages(UINT64) @24, Attribute(UINT64) @32
+// ---------------------------------------------------------------------------
+// Memmap parse (solo en kmain, antes de paging_init)
+// ---------------------------------------------------------------------------
 #define EFI_CONVENTIONAL_MEMORY 7
 
 static void parse_memmap(void) {
@@ -135,7 +118,9 @@ static void parse_memmap(void) {
            (unsigned long)(total_usable / (1024 * 1024)));
 }
 
-// PIT: Programmable Interval Timer
+// ---------------------------------------------------------------------------
+// PIT
+// ---------------------------------------------------------------------------
 #define PIT_FREQ 1193182
 #define PIT_HZ 1000
 
@@ -147,45 +132,33 @@ static void pit_init(void) {
   LOG_INFO("[PIT] Configurado a %u Hz", PIT_HZ);
 }
 
-static inline uint64_t sys_call(uint64_t num, uint64_t arg1, uint64_t arg2,
-                                uint64_t arg3, uint64_t arg4, uint64_t arg5) {
-  register uint64_t rax __asm__("rax") = num;
-  register uint64_t rdi __asm__("rdi") = arg1;
-  register uint64_t rsi __asm__("rsi") = arg2;
-  register uint64_t rdx __asm__("rdx") = arg3;
-  register uint64_t r10 __asm__("r10") = arg4;
-  register uint64_t r8 __asm__("r8") = arg5;
-  register uint64_t r9 __asm__("r9") = 0;
-
-  __asm__ volatile("syscall"
-                   : "+r"(rax)
-                   : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10), "r"(r8), "r"(r9)
-                   : "rcx", "r11", "memory");
-  return rax;
-}
-
-// Inicializar SSE (CR4.OSFXSR)
+// ---------------------------------------------------------------------------
+// SSE
+// ---------------------------------------------------------------------------
 static void sse_init(void) {
   uint64_t cr4;
   __asm__ volatile("movq %%cr4, %0" : "=r"(cr4));
-  cr4 |= 0x200; // OSFXSR
-  cr4 |= 0x400; // OSXMMEXCPT
+  cr4 |= 0x200;
+  cr4 |= 0x400;
   __asm__ volatile("movq %0, %%cr4" : : "r"(cr4));
   LOG_INFO("[SSE] OSFXSR + OSXMMEXCPT habilitados");
 }
 
+// ---------------------------------------------------------------------------
+// Timer handler
+// ---------------------------------------------------------------------------
 volatile uint64_t tick_count = 0;
 static void timer_handler(void) {
   tick_count++;
   if (tick_count % PIT_HZ == 0) {
     compositor_notify_clock_tick();
   }
-  sched_tick(); // Preemptive scheduler
+  sched_tick();
 }
 
-// PS/2 keyboard and mouse handled in kernel/ps2.c (ps2_init)
-
-// Servicio IPC en el Kernel para responder peticiones de procesos de usuario
+// ---------------------------------------------------------------------------
+// Servicio IPC de eco (tarea del kernel)
+// ---------------------------------------------------------------------------
 static uint32_t ipc_echo_task_id = 0;
 static void ipc_echo_service(void) {
   task_t *self = sched_current();
@@ -195,21 +168,98 @@ static void ipc_echo_service(void) {
 
   while (1) {
     ipc_msg_t msg;
-    // Recepción bloqueante
     if (ipc_recv(&msg, 0) == 0) {
       LOG_INFO("[IPC-KERNEL] Mensaje recibido de Tarea ID=%u (tipo=%u, "
                "payload='%s')",
                msg.sender, msg.type, (const char *)msg.data);
-
-      // Responder con un mensaje de confirmacion
       const char *reply = "PONG: Hola desde el Kernel (Ring 0)";
       ipc_send(msg.sender, IPC_TYPE_RESPONSE, reply, 36);
     }
   }
 }
 
+// ===========================================================================
+// kmain_task: aquí corre TODO lo que necesita interrupciones activas
+// o drivers inicializados. Es una tarea real del scheduler.
+// ===========================================================================
+static void kmain_task(void) {
+  LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
+
+  // La primera tarea en arrancar tras la idle. Creamos las demás.
+  sched_create_task(ipc_echo_service);
+
+  // Instalar el handler del timer y habilitar interrupciones.
+  irq_install_handler(0, timer_handler);
+  __asm__ volatile("sti");
+
+  klog_calibrate_tsc(50, 1000);
+  LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
+
+  // TTY.
+  LOG_INFO("[INIT] TTY...");
+  tty_init();
+  LOG_INFO("OK");
+
+  input_init();
+
+  driver_register(&ps2_driver);
+  driver_register(&pci_driver);
+  drivers_init_all();
+
+  // Framebuffer.
+  int fb_ok = 0;
+  if (g_boot_info.fb_base != 0 && g_boot_info.fb_width > 0 &&
+      g_boot_info.fb_height > 0) {
+    LOG_INFO(
+        "[FB] Mapeando framebuffer via MMIO_MAP_BASE (Write-Combining)... ");
+    void *fb_virt = mmio_map(g_boot_info.fb_base, g_boot_info.fb_size,
+                             PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
+    if (fb_virt) {
+      LOG_INFO("OK");
+      fb_ok = 1;
+      fb_init((uint64_t)fb_virt, g_boot_info.fb_width, g_boot_info.fb_height,
+              g_boot_info.fb_pitch);
+    } else {
+      LOG_ERR("FALLIDO (mmio_map devolvió NULL)");
+    }
+  }
+  if (!fb_ok) {
+    LOG_ERR("[FB] No hay framebuffer disponible o fallo al mapear");
+  }
+
+  LOG_INFO("[INIT] Aurora OS listo. Multitarea activa.");
+  if (fb_ok) {
+    compositor_init();
+
+    LOG_INFO(
+        "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
+    sched_create_task(compositor_thread);
+  }
+
+  // Tests del kernel.
+  int failed = run_all_tests();
+  if (failed > 0) {
+    LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
+  }
+
+  smp_dump();
+
+  // App de consola gráfica.
+  LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
+  process_load("apps/shell");
+
+  // kmain_task ya ha hecho todo. Cede para siempre.
+  // La idle se encarga del hlt cuando no hay nada más.
+  while (1) {
+    sched_yield();
+  }
+}
+
+// ===========================================================================
+// kmain: setup mínimo que NO necesita interrupciones activas.
+// Tras crear la tarea kmain_task, cede el control y no vuelve.
+// ===========================================================================
 void kmain(struct kernel_boot_info *kinfo) {
-  // Inicializar serial PRIMERO (antes de cualquier operacion que pueda fallar)
   serial_init();
   klog_init();
   LOG_INFO("========================================");
@@ -222,6 +272,8 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("OK");
 
   memcpy(&boot, kinfo, sizeof(boot));
+  // Copia para kmain_task. `boot` en sí mismo no se toca más tras esto.
+  g_boot_info = boot;
 
   LOG_INFO("[BOOT] Framebuffer: %p %u x %u pitch=%u", (void *)boot.fb_base,
            boot.fb_width, boot.fb_height, boot.fb_pitch);
@@ -242,6 +294,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   syscall_init();
   LOG_INFO("OK");
 
+  // Calcular max_phys_addr.
   uint64_t max_phys_addr = 0;
   if (boot.memmap && boot.memmap_size > 0) {
     uint8_t *ptr = (uint8_t *)boot.memmap;
@@ -252,21 +305,15 @@ void kmain(struct kernel_boot_info *kinfo) {
       uint64_t phys = *(uint64_t *)(ptr + i + 8);
       uint64_t pages = *(uint64_t *)(ptr + i + 24);
       uint64_t end = phys + (pages * PAGE_SIZE);
-      if (end > max_phys_addr) {
+      if (end > max_phys_addr)
         max_phys_addr = end;
-      }
     }
   }
   LOG_DEBUG("[INIT] max_phys_addr = %p (%lu MB)", (void *)max_phys_addr,
             (unsigned long)(max_phys_addr / (1024 * 1024)));
 
-  LOG_DEBUG("[DEBUG] boot.memmap=%p size=%lu desc_size=%lu desc_ver=%u",
-            (void *)boot.memmap, (unsigned long)boot.memmap_size,
-            (unsigned long)boot.memmap_desc_size, boot.memmap_desc_ver);
-
   if (boot.memmap == 0 || boot.memmap_size == 0 || boot.memmap_desc_size == 0) {
-    LOG_INFO(
-        "[MEM] Memmap inválido o ausente (0/size/desc_size). Abortando parse.");
+    LOG_INFO("[MEM] Memmap inválido o ausente. Abortando parse.");
   } else if (boot.memmap_size > (1024 * 1024)) {
     LOG_WARN("[MEM] Memmap demasiado grande, posible corrupción (size>%u)",
              1024 * 1024);
@@ -294,7 +341,6 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] Iniciando Heap (kmalloc)...");
   heap_init();
-  // (Los tests de heap ahora se ejecutan vía run_all_tests() más abajo.)
 
   pit_init();
 
@@ -307,9 +353,8 @@ void kmain(struct kernel_boot_info *kinfo) {
   tar_node_t *cfg = tarfs_open("system/config.txt");
   if (cfg) {
     serial_puts("[TARFS] Contenido de system/config.txt:\n    '");
-    for (size_t i = 0; i < cfg->size; i++) {
+    for (size_t i = 0; i < cfg->size; i++)
       serial_putc(cfg->data[i]);
-    }
     serial_puts("'\n");
   }
 
@@ -319,101 +364,20 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] Iniciando Scheduler...");
   sched_init();
-  sched_create_task(ipc_echo_service);
+  smp_init();
 
-  irq_install_handler(0, timer_handler);
-
-  __asm__ volatile("sti");
-
-  klog_calibrate_tsc(50, 1000);
-  LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
-
-  LOG_INFO("[INIT] TTY...");
-  tty_init();
-  LOG_INFO("OK");
-
-  input_init();
-
-  driver_register(&ps2_driver);
-  driver_register(&pci_driver);
-
-  drivers_init_all();
-
-  int fb_ok = 0;
-  if (boot.fb_base != 0 && boot.fb_width > 0 && boot.fb_height > 0) {
-    LOG_INFO(
-        "[FB] Mapeando framebuffer via MMIO_MAP_BASE (Write-Combining)... ");
-
-    void *fb_virt = mmio_map(boot.fb_base, boot.fb_size,
-                             PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
-    if (fb_virt) {
-      LOG_INFO("OK");
-      fb_ok = 1;
-      fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height, boot.fb_pitch);
-    } else {
-      LOG_ERR("FALLIDO (mmio_map devolvió NULL)");
-    }
+  // Crear la tarea kmain_task. NO la ejecutamos todavía.
+  task_t *t = sched_create_task(kmain_task);
+  if (!t) {
+    LOG_PANIC("[KERNEL] no se pudo crear kmain_task");
   }
 
-  if (!fb_ok) {
-    LOG_ERR("[FB] No hay framebuffer disponible o fallo al mapear");
-  }
+  // Saltar directamente a kmain_task. Esto NO retorna. La idle queda
+  // intacta, con su contexto armado, esperando a que el scheduler la
+  // elija por primera vez.
+  LOG_DEBUG("[KERNEL] kmain: saltando a kmain_task");
+  sched_start(t);
 
-  if (fb_ptr && fb_ok) {
-    fb_fillrect(0, 0, fb_width, fb_height, 0x0F0F23);
-    fb_fillrect(0, 0, fb_width, 40, 0x1A1A2E);
-    fb_puts(10, 12, "Aurora OS", 0xFFFFFF, 0x1A1A2E);
-
-    int win_x = 100, win_y = 80;
-    int win_w = 600, win_h = 400;
-    fb_fillrect(win_x + 8, win_y + 8, win_w, win_h, 0x000000);
-    fb_fillrect(win_x, win_y, win_w, 30, 0x2D2D44);
-    fb_fillrect(win_x, win_y + 30, win_w, win_h - 30, 0x1E1E2E);
-    fb_puts(win_x + 10, win_y + 8, "Terminal", 0xFFFFFF, 0x2D2D44);
-    fb_puts(win_x + 10, win_y + 45, "Aurora OS v0.1.0", 0x00FF88, 0x1E1E2E);
-    fb_puts(win_x + 10, win_y + 65, "x86_64 Bare Metal", 0xAAAAAA, 0x1E1E2E);
-    fb_puts(win_x + 10, win_y + 85,
-            "GDT:OK | IDT:OK | PMM:OK | VMM:OK | HEAP:OK | SCHED:OK", 0xAAAAAA,
-            0x1E1E2E);
-    fb_puts(win_x + 10, win_y + 105, "Timer: Running | Keyboard: Active",
-            0xAAAAAA, 0x1E1E2E);
-
-    uint64_t test_page = pmm_alloc_page();
-    if (test_page) {
-      LOG_INFO("[PMM-TEST] Pagina reservada en %p", (void *)test_page);
-      pmm_free_page(test_page);
-    }
-
-    fb_puts(win_x + 10, win_y + 145, "> _", 0x00FF88, 0x1E1E2E);
-    LOG_INFO("[INIT] Entorno grafico inicializado");
-  }
-
-  LOG_INFO("[INIT] Aurora OS listo. Multitarea activa.");
-  if (fb_ok) {
-    compositor_init();
-
-    LOG_INFO("[KERNEL] Ventanas creadas. Cediendo control al compositor...");
-    sched_create_task(compositor_thread);
-  }
-
-  // ---------------------------------------------------------------------------
-  // TEST SUITE — E2
-  //
-  // Corre todos los tests registrados en la sección .tests.
-  // Corre con preemption habilitada. Si algún test falla, se imprime
-  // un resumen al final pero el kernel sigue arrancando.
-  // ---------------------------------------------------------------------------
-  int failed = run_all_tests();
-  if (failed > 0) {
-    LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
-  }
-
-  LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
-  process_load("apps/shell");
-
-  LOG_DEBUG("[KERNEL] kmain: cediendo control al scheduler");
-  while (1) {
-    sched_yield();
-    __asm__ volatile("hlt");
-  }
+  // No se llega aquí.
+  __builtin_unreachable();
 }

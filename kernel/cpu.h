@@ -50,45 +50,58 @@
 // ---------------------------------------------------------------------------
 // SMP: soporte per-CPU.
 //
-// Hoy solo hay una CPU. Estas macros permiten escribir código que ya es
-// SMP-ready sin tener que refactorizarlo después. Cuando se implemente
-// SMP de verdad:
-//   - MAX_CPUS se sube a 8/16/64.
-//   - smp_processor_id() lee el APIC ID real.
-//   - cpu_local (variable global) se migra a cpu_local_data[MAX_CPUS]
-//     accedido vía %gs:.
+// Estado actual (Fase 0 de SMP):
+//   - MAX_CPUS = 8, pero solo hay 1 CPU corriendo.
+//   - cpu_local (variable global) sigue siendo la única instancia usada.
+//   - cpu_local_data[MAX_CPUS] existe como estructura futura. El CPU 0
+//     es el único que la usa (duplicando cpu_local).
+//   - this_cpu() y per_cpu() acceden al array.
+//   - smp_processor_id() siempre devuelve 0.
 //
-// Mientras tanto, todo es no-op.
+// Plan futuro (Fases 1-4):
+//   - Fase 1: parsear ACPI MADT, descubrir CPUs y APIC IDs.
+//   - Fase 2: activar LAPIC del BSP, cambiar PIC por IOAPIC.
+//   - Fase 3: arrancar APs con INIT-SIPI-SIPI.
+//   - Fase 4: scheduler SMP, per-CPU con %gs:, locks reales.
 // ---------------------------------------------------------------------------
 
-// Número máximo de CPUs. Hoy 1.
-#define MAX_CPUS 1
+// Número máximo de CPUs soportadas. Con SMP activo, se descubren del
+// ACPI MADT y se limitan a este valor.
+#define MAX_CPUS 8
 
-// ID de la CPU actual. Hoy siempre 0.
-// Con SMP: lee el APIC ID del LAPIC (x2APIC MSR o MMIO).
+// ID de la CPU actual. Fase 0: siempre 0.
+// Con SMP (Fase 2+): lee el APIC ID del LAPIC (x2APIC MSR o MMIO).
 static inline int smp_processor_id(void) { return 0; }
 
-// Acceso a una variable per-CPU. Hoy no hay array; se documenta el
-// patrón para cuando lo haya. De momento sirve como documentación.
-//
-// Uso futuro:
-//   extern cpu_local_t cpu_local_data[MAX_CPUS];
-//   #define this_cpu(field)  (cpu_local_data[smp_processor_id()].field)
-//   #define per_cpu(field, cpu)  (cpu_local_data[cpu].field)
-//
-// Hoy, para variables globales únicas, no se usa.
-
 // ---------------------------------------------------------------------------
-// Estructura per-CPU. Hoy hay una sola instancia global (cpu_local).
-// Cuando se implemente SMP, se migrará a un array cpu_local_data[MAX_CPUS]
-// y cada CPU tendrá su copia accedida por %gs:.
+// Estructura per-CPU. Cada CPU tiene su propia copia en cpu_local_data[].
+//
+// Hoy solo se usa cpu_local_data[0]. La estructura crece según se
+// necesiten más campos per-CPU en SMP.
 // ---------------------------------------------------------------------------
 typedef struct {
-  uint64_t kernel_stack;
-  uint64_t user_rsp;
+  uint64_t kernel_stack; // stack de kernel para syscalls/interrupciones
+  uint64_t user_rsp;     // RSP del usuario guardado al entrar en syscall
+  int cpu_id;            // índice 0..MAX_CPUS-1
+  int lapic_id;          // APIC ID del LAPIC (Fase 2+)
+  void *current_task;    // task_t* actual (Fase 4, per-CPU)
+  uint64_t tick_counter; // contador de ticks per-CPU (Fase 4)
 } cpu_local_t;
 
+// Array de estructuras per-CPU. Hoy solo [0] está activa.
+extern cpu_local_t cpu_local_data[MAX_CPUS];
+
+// Compatibilidad con el código existente: cpu_local sigue siendo la
+// instancia única usada hoy. En Fase 4 se migrará todo a cpu_local_data[]
+// y cpu_local desaparecerá.
 extern cpu_local_t cpu_local;
+
+// Acceso a un campo del CPU actual. Ej: this_cpu(kernel_stack).
+#define this_cpu(field) (cpu_local_data[smp_processor_id()].field)
+
+// Acceso a un campo de un CPU concreto. Ej: per_cpu(kernel_stack, 2).
+#define per_cpu(field, cpu) (cpu_local_data[cpu].field)
+
 extern int cpu_smap_enabled; // 1 si SMAP está activo
 
 static inline void wrmsr(uint32_t msr, uint64_t val) {

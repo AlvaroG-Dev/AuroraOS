@@ -1,4 +1,14 @@
 ; kernel/syscall_entry.asm
+;
+; TODO SMP (Fase 4): hoy accedemos a cpu_local vía [rel cpu_local + N].
+; Con SMP, cada CPU tiene su propio cpu_local. Hay que migrar a
+; %gs:offset, donde %gs: base apunta a cpu_local_data[cpu] de la CPU
+; actual. Requiere:
+;   - swapgs al entrar/salir (o mantener %gs: base en kernel).
+;   - Cargar %gs: base en cada cambio de tarea si la CPU cambia.
+;   - Guardar/restaurar %gs: base en el contexto de la tarea.
+;
+; Hoy no hacemos nada de esto. Fase 0 es no-op.
 [BITS 64]
 
 extern syscall_handler_c
