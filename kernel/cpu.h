@@ -47,6 +47,42 @@
 // ---------------------------------------------------------------------------
 #define MSR_SFMASK_BITS 0x257CULL
 
+// ---------------------------------------------------------------------------
+// SMP: soporte per-CPU.
+//
+// Hoy solo hay una CPU. Estas macros permiten escribir código que ya es
+// SMP-ready sin tener que refactorizarlo después. Cuando se implemente
+// SMP de verdad:
+//   - MAX_CPUS se sube a 8/16/64.
+//   - smp_processor_id() lee el APIC ID real.
+//   - cpu_local (variable global) se migra a cpu_local_data[MAX_CPUS]
+//     accedido vía %gs:.
+//
+// Mientras tanto, todo es no-op.
+// ---------------------------------------------------------------------------
+
+// Número máximo de CPUs. Hoy 1.
+#define MAX_CPUS 1
+
+// ID de la CPU actual. Hoy siempre 0.
+// Con SMP: lee el APIC ID del LAPIC (x2APIC MSR o MMIO).
+static inline int smp_processor_id(void) { return 0; }
+
+// Acceso a una variable per-CPU. Hoy no hay array; se documenta el
+// patrón para cuando lo haya. De momento sirve como documentación.
+//
+// Uso futuro:
+//   extern cpu_local_t cpu_local_data[MAX_CPUS];
+//   #define this_cpu(field)  (cpu_local_data[smp_processor_id()].field)
+//   #define per_cpu(field, cpu)  (cpu_local_data[cpu].field)
+//
+// Hoy, para variables globales únicas, no se usa.
+
+// ---------------------------------------------------------------------------
+// Estructura per-CPU. Hoy hay una sola instancia global (cpu_local).
+// Cuando se implemente SMP, se migrará a un array cpu_local_data[MAX_CPUS]
+// y cada CPU tendrá su copia accedida por %gs:.
+// ---------------------------------------------------------------------------
 typedef struct {
   uint64_t kernel_stack;
   uint64_t user_rsp;
