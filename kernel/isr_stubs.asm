@@ -69,7 +69,7 @@ ISR_NOERR 29
 ISR_ERR   30
 ISR_NOERR 31
 
-; IRQs (0-15 -> IDT 32-47)
+; IRQs del IOAPIC (0-15 -> IDT 32-47)
 IRQ 0, 32
 IRQ 1, 33
 IRQ 2, 34
@@ -86,6 +86,13 @@ IRQ 12, 44
 IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
+
+; LAPIC timer (vector 48).
+global irq48
+irq48:
+    push 0
+    push 48
+    jmp irq_common
 
 extern isr_handler
 extern irq_handler

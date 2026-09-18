@@ -27,6 +27,7 @@
 #include "syscall.h"
 #include "tarfs.h"
 #include "test.h"
+#include "time.h"
 #include "tty.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -122,20 +123,6 @@ static void parse_memmap(void) {
 }
 
 // ---------------------------------------------------------------------------
-// PIT
-// ---------------------------------------------------------------------------
-#define PIT_FREQ 1193182
-#define PIT_HZ 1000
-
-static void pit_init(void) {
-  uint16_t divisor = PIT_FREQ / PIT_HZ;
-  __asm__ volatile("outb %0, $0x43" : : "a"((uint8_t)0x36));
-  __asm__ volatile("outb %0, $0x40" : : "a"((uint8_t)(divisor & 0xFF)));
-  __asm__ volatile("outb %0, $0x40" : : "a"((uint8_t)((divisor >> 8) & 0xFF)));
-  LOG_INFO("[PIT] Configurado a %u Hz", PIT_HZ);
-}
-
-// ---------------------------------------------------------------------------
 // SSE
 // ---------------------------------------------------------------------------
 static void sse_init(void) {
@@ -145,24 +132,6 @@ static void sse_init(void) {
   cr4 |= 0x400;
   __asm__ volatile("movq %0, %%cr4" : : "r"(cr4));
   LOG_INFO("[SSE] OSFXSR + OSXMMEXCPT habilitados");
-}
-
-// ---------------------------------------------------------------------------
-// Timer handler
-// ---------------------------------------------------------------------------
-volatile uint64_t tick_count = 0;
-static uint32_t timer_dbg_count = 0;
-static void timer_handler(void) {
-  tick_count++;
-  timer_dbg_count++;
-  if (timer_dbg_count <= 5 || timer_dbg_count % 1000 == 0) {
-    LOG_DEBUG("[TIMER] tick=%lu dbg_count=%u", (unsigned long)tick_count,
-              timer_dbg_count);
-  }
-  if (tick_count % PIT_HZ == 0) {
-    compositor_notify_clock_tick();
-  }
-  sched_tick();
 }
 
 // ---------------------------------------------------------------------------
@@ -193,23 +162,24 @@ static void ipc_echo_service(void) {
 static void kmain_task(void) {
   LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
 
-  LOG_DEBUG("[KERNEL] antes de sched_create_task");
+  // Tarea de eco IPC.
   sched_create_task(ipc_echo_service);
-  LOG_DEBUG("[KERNEL] despues de sched_create_task");
 
-  irq_install_handler(0, timer_handler);
-  LOG_DEBUG("[KERNEL] despues de irq_install_handler");
+  // Instalar el handler del timer de la IRQ 0 (PIT) mientras calibramos
+  // el TSC. Después lo sustituimos por el LAPIC timer.
+  extern void time_tick(void);
+  irq_install_handler(0, time_tick);
 
   __asm__ volatile("sti");
-  LOG_DEBUG("[KERNEL] despues de sti");
 
-  LOG_DEBUG("[KERNEL] antes de klog_calibrate_tsc (tick=%lu)",
-            (unsigned long)tick_count);
-  klog_calibrate_tsc(50, 1000);
-  LOG_DEBUG("[KERNEL] despues de klog_calibrate_tsc (tick=%lu)",
-            (unsigned long)tick_count);
+  // Calibrar el TSC contra el PIT (aún activo).
+  klog_calibrate_tsc(50, KERNEL_HZ);
   LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
 
+  // Sustituir el PIT por el LAPIC timer.
+  lapic_timer_init();
+
+  // TTY.
   LOG_INFO("[INIT] TTY...");
   tty_init();
   LOG_INFO("OK");
@@ -220,6 +190,7 @@ static void kmain_task(void) {
   driver_register(&pci_driver);
   drivers_init_all();
 
+  // Framebuffer.
   int fb_ok = 0;
   if (g_boot_info.fb_base != 0 && g_boot_info.fb_width > 0 &&
       g_boot_info.fb_height > 0) {
@@ -249,6 +220,7 @@ static void kmain_task(void) {
     sched_create_task(compositor_thread);
   }
 
+  // Tests del kernel.
   int failed = run_all_tests();
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
@@ -258,6 +230,7 @@ static void kmain_task(void) {
   acpi_dump();
   apic_dump();
 
+  // App de consola gráfica.
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
 
