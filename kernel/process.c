@@ -170,6 +170,8 @@ process_t *process_spawn(const char *name, const void *elf_data,
 
   // [PREEMPT] Publicación atómica en process_list. Cualquier lector
   // que corra concurrentemente verá la lista consistente.
+  // TODO SMP (Fase 5): process_list se modifica sin spinlock. Hoy basta
+  // con preempt_disable(). Con SMP, hace falta spinlock real.
   preempt_disable();
   proc->next = process_list;
   process_list = proc;

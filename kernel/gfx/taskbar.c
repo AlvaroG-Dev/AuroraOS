@@ -86,6 +86,8 @@ taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
     }
   }
 
+  // TODO SMP (Fase 5): taskbar_items es una lista global sin lock. Con
+  // SMP, dos CPUs podrían añadir/quitar items a la vez. Añadir spinlock.
   taskbar_item_t *item = taskbar_add_item(type, label, "", 0, on_click);
   if (item) {
     item->icon_bmp_node = bmp_file;

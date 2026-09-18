@@ -196,6 +196,9 @@ window_t *compositor_create_window(int x, int y, int w, int h,
                                    const char *title, uint32_t flags) {
   // [PREEMPT] Modificamos window_stack: no dejar que el scheduler
   // cambie de tarea a mitad del push.
+  // TODO SMP (Fase 5): window_stack se modifica sin spinlock. Hoy basta
+  // con preempt_disable() porque solo hay una CPU. Con SMP, otra CPU
+  // podría modificar window_stack en paralelo. Añadir spinlock_t.
   preempt_disable();
 
   window_t *win = window_create(x, y, w, h, title, flags);

@@ -1,4 +1,15 @@
 ; kernel/switch.asm
+;
+; TODO SMP (Fase 4): cuando SMP esté activo, este archivo tendrá que
+; gestionar el %gs: per-CPU. Hoy asume single-CPU: el %gs: base es
+; siempre &cpu_local del BSP.
+;
+; Los cambios serán:
+;   - Al cambiar de tarea, si la nueva tarea corre en otra CPU, cargar
+;     su %gs: base (o dejarlo si es la misma CPU).
+;   - Los accesos a cpu_local vía [rel cpu_local + offset] pasarán a
+;     %gs:offset.
+;
 ; Context switch + trampoline para Aurora OS
 ;
 ; task_t offsets (ver sched.h):
@@ -68,6 +79,61 @@ task_switch:
     ret
 
 ; ---------------------------------------------------------------------------
+; task_jump_to(task_t *task)
+;
+; Carga el contexto de `task` y salta a él. NO guarda el contexto actual.
+;
+; Se usa UNA SOLA VEZ, desde el arranque, para saltar de "kmain corriendo
+; en el stack del bootloader" a "kmain_task corriendo en su propio stack".
+; Después de esto, el scheduler usa task_switch (que sí guarda).
+;
+; Argumento: RDI = task_t *
+;
+; El stack de la tarea debe tener el layout armado por sched_create_task:
+;   [rsp+0]  = r15
+;   [rsp+8]  = r14
+;   [rsp+16] = r13
+;   [rsp+24] = r12 (fn)
+;   [rsp+32] = rbp
+;   [rsp+40] = rbx
+;   [rsp+48] = ret address (task_trampoline o user_trampoline)
+; ---------------------------------------------------------------------------
+global task_jump_to
+task_jump_to:
+    ; Restaurar FPU/SSE de la nueva tarea.
+    mov rax, [rdi + 0x18]
+    test rax, rax
+    jz .skip_fxrstor
+    fxrstor64 [rax]
+.skip_fxrstor:
+
+    ; Cargar el RSP de la tarea nueva.
+    mov rsp, [rdi]
+
+    ; Cambiar CR3 si hace falta.
+    mov rax, [rdi + 0x20]
+    test rax, rax
+    jz .skip_cr3
+    mov rdx, cr3
+    cmp rax, rdx
+    je .skip_cr3
+    mov cr3, rax
+.skip_cr3:
+
+    ; Restaurar los registros callee-saved. Orden inverso a los pushes
+    ; de sched_create_task.
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+
+    ; ret salta a task_trampoline o user_trampoline (el primer ret address
+    ; del stack de la tarea).
+    ret
+
+; ---------------------------------------------------------------------------
 ; task_trampoline: punto de entrada inicial de tareas de kernel.
 ; r12 contiene el puntero a la funcion puesto por sched_create_task.
 ; ---------------------------------------------------------------------------
@@ -111,6 +177,5 @@ user_trampoline:
     xor r13, r13
     xor r14, r14
     xor r15, r15
-
 
     iretq

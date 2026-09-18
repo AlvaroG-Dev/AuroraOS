@@ -8,13 +8,25 @@
 #include "panic.h"
 #include "pmm.h"
 #include "serial.h"
+#include "string.h"
 #include "wait.h"
 #include <stddef.h>
 
 extern void task_trampoline(void);
 extern void user_trampoline(void);
 
-cpu_local_t cpu_local = {0, 0};
+// ---------------------------------------------------------------------------
+// Estado per-CPU.
+//
+// Fase 0 de SMP: cpu_local sigue siendo la instancia única usada por todo
+// el código. cpu_local_data[] es el array que se usará con SMP real.
+// smp_init() inicializa cpu_local_data[0] con los mismos valores que
+// cpu_local, para que this_cpu() funcione cuando se use.
+//
+// TODO SMP (Fase 4): eliminar cpu_local y usar solo cpu_local_data[].
+// ---------------------------------------------------------------------------
+cpu_local_t cpu_local = {0, 0, 0, 0, NULL, 0};
+cpu_local_t cpu_local_data[MAX_CPUS] = {{0}};
 
 #define TASK_STACK_SIZE (8 * 1024)
 #define SCHED_INTERVAL 10
@@ -35,6 +47,40 @@ static void idle_loop(void) {
 }
 
 // ---------------------------------------------------------------------------
+// SMP: Fase 0
+// ---------------------------------------------------------------------------
+void smp_init(void) {
+  // Inicializar la entrada del CPU 0 en cpu_local_data, copiando los
+  // valores de cpu_local (que es la instancia "viva" hoy).
+  cpu_local_data[0] = cpu_local;
+  cpu_local_data[0].cpu_id = 0;
+  cpu_local_data[0].lapic_id = 0;
+  cpu_local_data[0].current_task = NULL;
+  cpu_local_data[0].tick_counter = 0;
+
+  // Las demás entradas quedan a 0.
+  for (int i = 1; i < MAX_CPUS; i++) {
+    cpu_local_data[i] = (cpu_local_t){0};
+    cpu_local_data[i].cpu_id = i;
+  }
+
+  LOG_INFO("[SMP] Fase 0: cpu_local_data[%d] inicializado (cpu_id=0)",
+           MAX_CPUS);
+}
+
+void smp_dump(void) {
+  LOG_INFO("[SMP] Estado per-CPU:");
+  for (int i = 0; i < MAX_CPUS; i++) {
+    cpu_local_t *c = &cpu_local_data[i];
+    LOG_INFO("  cpu[%d]: cpu_id=%d lapic_id=%d kernel_stack=%p "
+             "user_rsp=%p current_task=%p tick_counter=%lu",
+             i, c->cpu_id, c->lapic_id, (void *)c->kernel_stack,
+             (void *)c->user_rsp, c->current_task,
+             (unsigned long)c->tick_counter);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Refcount
 // ---------------------------------------------------------------------------
 void task_get(task_t *t) {
@@ -43,18 +89,13 @@ void task_get(task_t *t) {
   __sync_fetch_and_add(&t->refcount, 1);
 }
 
-// Libera los recursos de una tarea. Se llama SOLO cuando refcount == 0.
-// No debe llamarse desde la propia tarea (ver invariantes).
 static void task_free(task_t *t) {
   if (!t)
     return;
-
-  // Liberar el espacio de usuario si la tarea tenía su propio PML4.
   if (t->cr3 != kernel_cr3 && t->cr3 != 0) {
     LOG_DEBUG("[SCHED] Liberando PML4 de usuario en %p", (void *)t->cr3);
     paging_free_user_space(t->cr3);
   }
-
   if (t->stack)
     kfree(t->stack);
   kfree(t);
@@ -65,12 +106,10 @@ void task_put(task_t *t) {
     return;
   int old = __sync_fetch_and_sub(&t->refcount, 1);
   if (old <= 0) {
-    // Refcount underflow. Bug grave: alguien hizo task_put sin task_get.
     LOG_PANIC("sched: task_put underflow en task %u (refcount=%d)", t->id,
               old - 1);
   }
   if (old == 1) {
-    // Última referencia. Liberar.
     task_free(t);
   }
 }
@@ -104,10 +143,6 @@ int preempt_count(void) {
 // ---------------------------------------------------------------------------
 void task_entry_wrapper(void (*fn)(void)) {
   fn();
-
-  // IMPORTANTE: deshabilitar IRQs mientras marcamos la tarea como muerta
-  // y cedemos. Si el timer entra entre estas dos operaciones, el scheduler
-  // podría reaped la tarea ACTUAL (use-after-free del stack).
   __asm__ volatile("cli");
   current_task->state = TASK_DEAD;
   sched_yield();
@@ -116,7 +151,7 @@ void task_entry_wrapper(void (*fn)(void)) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper interno: inicializa los campos comunes de una task_t recién creada.
+// Helper interno
 // ---------------------------------------------------------------------------
 static void task_init_common(task_t *task, uint64_t *stack_ptr, uint64_t cr3) {
   task->rsp = (uint64_t)stack_ptr;
@@ -129,9 +164,6 @@ static void task_init_common(task_t *task, uint64_t *stack_ptr, uint64_t cr3) {
   task->wake_reason = 0;
   task->preempt_count = 0;
   task->next = task;
-
-  // Referencia inicial: el scheduler (la lista de tareas). Se libera en
-  // reap_dead_tasks() con task_put().
   task->refcount = 1;
 
   task->mailbox.head = 0;
@@ -144,7 +176,7 @@ static void task_init_common(task_t *task, uint64_t *stack_ptr, uint64_t cr3) {
 }
 
 // ---------------------------------------------------------------------------
-// Insertar una tarea en la lista circular (con IRQs deshabilitadas)
+// Insertar una tarea en la lista circular
 // ---------------------------------------------------------------------------
 static void task_list_insert(task_t *task) {
   uint64_t flags;
@@ -202,12 +234,12 @@ task_t *sched_create_task(void (*fn)(void)) {
 
   uint64_t *sp = (uint64_t *)(((uint64_t)(stack + TASK_STACK_SIZE)) & ~0xFULL);
   *(--sp) = (uint64_t)task_trampoline;
-  *(--sp) = 0;            // rbx
-  *(--sp) = 0;            // rbp
-  *(--sp) = (uint64_t)fn; // r12
-  *(--sp) = 0;            // r13
-  *(--sp) = 0;            // r14
-  *(--sp) = 0;            // r15
+  *(--sp) = 0;
+  *(--sp) = 0;
+  *(--sp) = (uint64_t)fn;
+  *(--sp) = 0;
+  *(--sp) = 0;
+  *(--sp) = 0;
 
   task_init_common(task, sp, kernel_cr3);
   task->stack = (uint64_t *)stack;
@@ -217,7 +249,7 @@ task_t *sched_create_task(void (*fn)(void)) {
 }
 
 // ---------------------------------------------------------------------------
-// Reap de tareas muertas (llamada solo desde sched_tick, con IRQs off)
+// Reap de tareas muertas
 // ---------------------------------------------------------------------------
 static void reap_dead_tasks(void) {
   if (!current_task)
@@ -230,8 +262,6 @@ static void reap_dead_tasks(void) {
       break;
 
     if (next->state == TASK_DEAD && !next->is_idle) {
-      // Quitar de la lista. El scheduler suelta su referencia con
-      // task_put. Si nadie más tiene una referencia, se libera.
       curr->next = next->next;
       if (next == task_list_head)
         task_list_head = curr->next;
@@ -247,7 +277,7 @@ static void reap_dead_tasks(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Validación de invariantes del scheduler.
+// Invariantes
 // ---------------------------------------------------------------------------
 static void sched_check_invariants(task_t *t) {
   if (!t)
@@ -267,7 +297,7 @@ static void sched_check_invariants(task_t *t) {
 }
 
 // ---------------------------------------------------------------------------
-// Tick del scheduler
+// Tick
 // ---------------------------------------------------------------------------
 void sched_tick(void) {
   if (!current_task)
@@ -311,9 +341,6 @@ void sched_tick(void) {
   task_switch(old, next);
 }
 
-// ---------------------------------------------------------------------------
-// Yield: SIEMPRE cede, ignorando preempt_count.
-// ---------------------------------------------------------------------------
 void sched_yield(void) {
   uint64_t flags;
   __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
@@ -333,7 +360,7 @@ void sched_make_ready(task_t *t) {
 }
 
 // ---------------------------------------------------------------------------
-// Creación de tareas de usuario (Ring 3)
+// Tareas de usuario
 // ---------------------------------------------------------------------------
 task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
                                uint64_t cr3) {

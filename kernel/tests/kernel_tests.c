@@ -9,6 +9,7 @@
 //   }
 //   REGISTER_TEST("mi_cosa", test_mi_cosa);
 
+#include "../cpu.h"
 #include "../heap.h"
 #include "../slab.h"
 #include "../string.h"
@@ -334,3 +335,43 @@ static void test_slab_usable_size(void) {
   kfree(p);
 }
 REGISTER_TEST("slab: usable size", test_slab_usable_size);
+
+// ---------------------------------------------------------------------------
+// SMP (Fase 0)
+// ---------------------------------------------------------------------------
+static void test_smp_processor_id_zero(void) {
+  int cpu = smp_processor_id();
+  TEST_ASSERT(cpu == 0, "smp_processor_id() devolvió %d, esperado 0 en Fase 0",
+              cpu);
+}
+REGISTER_TEST("smp: smp_processor_id() == 0", test_smp_processor_id_zero);
+
+static void test_smp_cpu_local_data_exists(void) {
+  // Verifica que el array existe y que el CPU 0 tiene sus campos
+  // inicializados. Con SMP, cpu_local_data[0].cpu_id debe ser 0.
+  TEST_ASSERT(cpu_local_data[0].cpu_id == 0,
+              "cpu_local_data[0].cpu_id = %d, esperado 0",
+              cpu_local_data[0].cpu_id);
+}
+REGISTER_TEST("smp: cpu_local_data[0] inicializado",
+              test_smp_cpu_local_data_exists);
+
+static void test_smp_this_cpu_macro(void) {
+  // Escribe y lee un campo vía this_cpu() para verificar que el macro
+  // resuelve al mismo slot que cpu_local_data[0].
+  uint64_t saved = this_cpu(tick_counter);
+  this_cpu(tick_counter) = 0xDEADBEEF;
+  TEST_ASSERT(cpu_local_data[0].tick_counter == 0xDEADBEEF,
+              "this_cpu(tick_counter) no escribió en cpu_local_data[0]");
+  this_cpu(tick_counter) = saved;
+}
+REGISTER_TEST("smp: this_cpu() accede al CPU actual", test_smp_this_cpu_macro);
+
+static void test_smp_per_cpu_macro(void) {
+  // Verifica que per_cpu() accede al slot correcto.
+  per_cpu(tick_counter, 3) = 0xCAFEBABE;
+  TEST_ASSERT(cpu_local_data[3].tick_counter == 0xCAFEBABE,
+              "per_cpu(tick_counter, 3) no escribió en cpu_local_data[3]");
+  per_cpu(tick_counter, 3) = 0;
+}
+REGISTER_TEST("smp: per_cpu() accede al slot correcto", test_smp_per_cpu_macro);

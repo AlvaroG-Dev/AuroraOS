@@ -201,12 +201,42 @@ Utilidad real baja. Hacer cuando llegue red (D4).
 ### F3. `panic()` centralizado [x]
 **Hecho**: ver E3.
 
-### F4. Framebuffer console [ ]
-**Esfuerzo**: 1 día
-**Por qué**: hoy el TTY escribe solo a serial. La demo no es visible
-en la ventana gráfica de QEMU.
-**Cómo**: ring de líneas en el compositor, `tty_echo` escribe a serial
-**y** al framebuffer. Cursor parpadeante.
+### F4. Framebuffer console [x]
+**Esfuerzo**: 1 día (ampliado a varias sesiones)
+**Hecho**:
+- **Winsrv** (window server) como capa intermedia entre apps de
+  usuario y compositor: `kernel/gfx/winsrv.{h,c}`.
+- **5 syscalls nuevas**:
+  - `SYS_WIN_CREATE` — crea ventana, devuelve win_id.
+  - `SYS_WIN_DESTROY` — cierra la ventana.
+  - `SYS_WIN_BLIT` — copia píxeles userland → content_buffer.
+  - `SYS_WIN_POLL_EVENT` — espera/bloquea por eventos.
+  - `SYS_WIN_REGISTER_CONSOLE` — registra la ventana como consola.
+- **TTY en modo raw** (sin line discipline): recibe del PS/2, hace eco
+  a serial, y publica cada byte como `WINSRV_EV_TTY_INPUT` a la
+  ventana registrada.
+- **App de usuario** `apps/shell` que ahora es un terminal gráfico
+  con shell embebido:
+  - Crea su ventana y se registra como consola.
+  - Recibe `TTY_INPUT` (teclado) y `OUTPUT` (stdout) como eventos.
+  - Pinta con fuente 8x8 en su propio buffer de píxeles.
+  - Hace blit solo cuando hay cambios.
+  - Ejecuta comandos: `help`, `echo`, `cat`, `spawn`, `clear`, `exit`.
+  - Se cierra limpiamente con la X o con `exit`.
+- **Cierre limpio**: `process_exit` avisa al winsrv
+  (`winsrv_cleanup_task`) para destruir las ventanas de la tarea muerta.
+  Fix de la taskbar con `taskbar_remove_item_ptr` para evitar borrar
+  el item equivocado.
+- **Eventos al winsrv desde el compositor**: focus, blur, close, move,
+  key, mouse, output, tty_input.
+
+**Deuda técnica** (ver sección aparte):
+- Fuentes TTF en vez de la 8x8 bitmap.
+- Cursor parpadeante.
+- Cola de output con ring buffer (hoy es evento por byte).
+- Historial de comandos.
+- Copiar/pegar, selección con ratón.
+- Multi-consola.
 
 ---
 
@@ -257,49 +287,17 @@ en la ventana gráfica de QEMU.
 - `vfs.c`: cada fd con `read_wq`/`write_wq`. `vfs_wait_readable`.
 - `ps2.c`, `compositor.c`: sin polling, todo por wq.
 
+## Pre-SMP (completado)
+- [x] `smp_processor_id` stub + MAX_CPUS.
+- [x] `kmain` como tarea real (`sched_start` + `task_jump_to`).
+  La idle arranca en `idle_loop`, no en un trozo de kmain.
+- [x] refcount en `task_t` (evita use-after-free al despertar tareas
+  desde múltiples CPUs).
+- [x] preempt_count por tarea.
+- [x] Invariantes del scheduler.
 ---
 
 ## Deuda técnica conocida
-
-## Deuda técnica — Consola gráfica (post-F4)
-
-### Fuentes TTF en la consola
-La app usa `font8x8_basic` (8x8 monoespaciada bitmap). Funciona pero
-es fea. El kernel ya tiene cargadas fuentes TTF (Inter, JetBrains) en
-`kernel/gfx/fonts/*.h` con render antialiasing. La app de usuario
-debería usar las mismas:
-- Exponer una syscall `SYS_FONT_RENDER(char, size, &bitmap)` que
-  renderice un glifo con la fuente del kernel.
-- O embeber las fuentes en la app (crece mucho el binario).
-- O leer las fuentes de TarFS y renderizarlas con stb_truetype o
-  similar en la app.
-La primera opción es la más limpia.
-
-### Cursor parpadeante
-La consola pinta el cursor con `_` fijo. Un parpadeo real necesita un
-timer en la app. Opciones:
-- Timer propio con `SYS_NANOSLEEP` (no existe aún).
-- El kernel envía un evento `WINSRV_EV_TICK` cada N ms a las ventanas
-  registradas.
-- La app usa `SYS_YIELD` en bucle y cuenta iteraciones (feo).
-
-### Scroll horizontal
-Si una línea excede `COLS`, se hace wrap. Un terminal real debería
-tener scroll horizontal o wrap más elegante.
-
-### Historial de comandos (flechas arriba/abajo)
-Común en cualquier shell. Requiere almacenar las últimas N líneas y
-navegar con las flechas. Fácil (~50 líneas).
-
-### Selección de texto y copiar/pegar
-Requiere manejo de clicks + drag dentro del área de contenido, y
-un buffer de clipboard. Más complejo. Fase 2.
-
-### Multi-consola
-Solo hay una ventana registrada como consola a la vez. Poder tener
-varias (tty1, tty2, ...) y alternar sería útil.
-
-## Deuda técnica — Winsrv (post-F4)
 
 ### Cola de eventos por byte es ineficiente
 Hoy cada byte escrito a stdout genera un evento WINSRV_EV_OUTPUT. La
@@ -314,36 +312,15 @@ final del output.
 un ring, envía un evento "hay output" cuando se llena un umbral, y la
 app lee el bloque. Es el modelo de `/dev/tty` o de los PTYs.
 
-### kmain no es una tarea del scheduler
-`kmain` corre desde el bootloader con el stack de la idle task, pero
-`current_task` apunta a otras tareas después del primer tick. Cuando
-el timer desaloja, `task_switch` guarda el contexto de kmain como si
-fuera el de `idle`. Al volver, `kmain` continúa donde lo dejó.
 
-Funciona hoy porque `kmain` no comparte recursos con las tareas que
-desaloja, y las tareas se crean en orden tal que ninguna depende de
-otra para arrancar.
-
-**Fix recomendado (antes de SMP)**: convertir `kmain` en una tarea
-real:
-```c
-void kmain_task(void) {
-    kmain_body();
-    while (1) sched_yield();
-}
-// En el entrypoint:
-sched_create_task(kmain_task);
-sched_yield();
-Es el patrón init_task de Linux. Pendiente.
-
-heap_dump / slab_dump y locks
+**heap_dump / slab_dump y locks**
 heap_dump() y slab_dump_stats() consultan panic_in_progress().
 Si están en panic, no cogen locks. Correcto single-CPU. En SMP puede
 dar falsos negativos (otra CPU con el lock cogido → dump inconsistente).
 Revisar al hacer SMP. Opciones: trylock con timeout, o snapshot
 atómico del estado.
 
-serial_lock no se resetea en panic
+**serial_lock no se resetea en panic**
 Si el panic ocurre mientras un LOG_* está escribiendo a serial (con
 serial_lock cogido), el dump del panic se cuelga en el primer
 LOG_INFO. Mitigación actual: en panic.c usamos serial_* directos,
@@ -351,54 +328,47 @@ pero los dumps siguen usando LOG_* → inconsistente.
 Fix futuro: unificar a serial directo en todos los dumps, o añadir
 serial_lock_reset() que se llame en panic_v antes de los dumps.
 
-HEAP_MAX_SINGLE_ALLOC = 64 MB
+**HEAP_MAX_SINGLE_ALLOC = 64 MB**
 Límite arbitrario. Si algún subsistema legítimamente necesita kmalloc
 de más de 64 MB, subir el límite o implementar vmalloc() (bloques
 grandes fuera del heap lineal). Hoy no hace falta.
 
-dump_scheduler no muestra nombre de tarea
+**dump_scheduler no muestra nombre de tarea**
 task_t no tiene campo name. Añadir para debug (especialmente útil
 cuando SMP meta tareas AP). Bajo prioridad.
 
-task_t sin refcount
-Cuando SMP entre, una tarea puede ser liberada mientras otra CPU aún
-tiene un puntero a ella (por ejemplo, en una wait queue). Añadir
-refcount atómico antes de SMP.
-
-smp_processor_id() stub
-Hoy no existe. Aunque sea single-CPU, definir
-static inline int smp_processor_id(void) { return 0; } y
-per_cpu macros prepara el código nuevo para SMP sin refactorizar
-después. Bajo coste, hacer antes de D1.
-
-Orden de tests en .tests
+**Orden de tests en .tests**
 El linker invierte el orden dentro de cada .o. No es un bug, pero
 los tests deben ser independientes. Anotado para futura referencia.
 
-Priorización recomendada (revisada)
-Próxima sesión
-F4 — Framebuffer console (1 día). Alto impacto visual.
-El TTY escribe a serial + framebuffer.
+### process_t ↔ task_t sin refcount
+`process_t.task` apunta a una tarea. No hay refcount entre ellos.
+Hoy funciona porque mueren juntos (`process_exit` → DEAD →
+`process_terminate` → kfree). Con SMP, si `process_terminate` corre
+antes que el reap del scheduler, hay dangling. Revisar cuando SMP.
 
-smp_processor_id stub + per_cpu macros (3h). Pre-SMP barato.
+### `child_wq` y procesos padre
+`child_wq` es un campo del `process_t`. Si el padre muere antes que
+los hijos, los que esperan en `child_wq` quedan colgados. Añadir
+refcount entre `process_t` y sus waiters.
 
-Siguientes 2 semanas
-E1 — /proc y /dev/kmsg (3-4 días). Cierra más ciclos de
-wait queues y da visibilidad al usuario.
+### `TASK_BLOCKED` + `preempt_disable` (SMP)
+Hoy `preempt_disable` no cambia estado. Con SMP, si una tarea hace
+`preempt_disable` y luego duerme, el `preempt_count` queda raro.
+Revisar cuando SMP.
 
-kmain como tarea real (4h). Pre-SMP.
+### `serial_lock` no se resetea en panic (sin cambios)
+Sigue pendiente. Anotado.
 
-refcount en task_t (4h). Pre-SMP.
+**F3 (parcial) — unificar serial_lock en panic (2h).**
 
-F3 (parcial) — unificar serial_lock en panic (2h).
+**vmalloc() para bloques >64 MB (1 día). Opcional.**
 
-vmalloc() para bloques >64 MB (1 día). Opcional.
-
-Mes siguiente
-D1 — SMP + APIC (2-3 semanas). El gran salto.
+**Mes siguiente**
+**D1 — SMP + APIC (2-3 semanas). El gran salto.**
 
 Trimestre siguiente
-D2 — AHCI (1-2 semanas)
+**D2 — AHCI (1-2 semanas)**
 
 D3 — FAT32 (1-2 semanas)
 
