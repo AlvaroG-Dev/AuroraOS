@@ -261,6 +261,59 @@ en la ventana gráfica de QEMU.
 
 ## Deuda técnica conocida
 
+## Deuda técnica — Consola gráfica (post-F4)
+
+### Fuentes TTF en la consola
+La app usa `font8x8_basic` (8x8 monoespaciada bitmap). Funciona pero
+es fea. El kernel ya tiene cargadas fuentes TTF (Inter, JetBrains) en
+`kernel/gfx/fonts/*.h` con render antialiasing. La app de usuario
+debería usar las mismas:
+- Exponer una syscall `SYS_FONT_RENDER(char, size, &bitmap)` que
+  renderice un glifo con la fuente del kernel.
+- O embeber las fuentes en la app (crece mucho el binario).
+- O leer las fuentes de TarFS y renderizarlas con stb_truetype o
+  similar en la app.
+La primera opción es la más limpia.
+
+### Cursor parpadeante
+La consola pinta el cursor con `_` fijo. Un parpadeo real necesita un
+timer en la app. Opciones:
+- Timer propio con `SYS_NANOSLEEP` (no existe aún).
+- El kernel envía un evento `WINSRV_EV_TICK` cada N ms a las ventanas
+  registradas.
+- La app usa `SYS_YIELD` en bucle y cuenta iteraciones (feo).
+
+### Scroll horizontal
+Si una línea excede `COLS`, se hace wrap. Un terminal real debería
+tener scroll horizontal o wrap más elegante.
+
+### Historial de comandos (flechas arriba/abajo)
+Común en cualquier shell. Requiere almacenar las últimas N líneas y
+navegar con las flechas. Fácil (~50 líneas).
+
+### Selección de texto y copiar/pegar
+Requiere manejo de clicks + drag dentro del área de contenido, y
+un buffer de clipboard. Más complejo. Fase 2.
+
+### Multi-consola
+Solo hay una ventana registrada como consola a la vez. Poder tener
+varias (tty1, tty2, ...) y alternar sería útil.
+
+## Deuda técnica — Winsrv (post-F4)
+
+### Cola de eventos por byte es ineficiente
+Hoy cada byte escrito a stdout genera un evento WINSRV_EV_OUTPUT. La
+cola del winsrv tiene un tope de N eventos. Si el output de un comando
+supera N, los primeros eventos se descartan y el usuario solo ve el
+final del output.
+
+**Fix actual**: subir la cola a 2048 eventos (32 KB).
+
+**Fix correcto**: migrar a un ring de output en el kernel + syscall
+`SYS_WIN_READ_OUTPUT(win_id, buf, size)`. El kernel acumula bytes en
+un ring, envía un evento "hay output" cuando se llena un umbral, y la
+app lee el bloque. Es el modelo de `/dev/tty` o de los PTYs.
+
 ### kmain no es una tarea del scheduler
 `kmain` corre desde el bootloader con el stack de la idle task, pero
 `current_task` apunta a otras tareas después del primer tick. Cuando

@@ -436,9 +436,14 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
       if (pressed_btn == WIN_BTN_CLOSE_PRESSED) {
         if (cursor_x >= close_x && cursor_x < close_x + 46 &&
             cursor_y >= pressed_win->y && cursor_y < pressed_win->y + 32) {
-          // Notificar CLOSE al winsrv. NO cerramos aquí. La app
-          // decidirá si destruye la ventana.
-          winsrv_post_event(pressed_win, WINSRV_EV_CLOSE, 0, 0, 0);
+          // Si la ventana pertenece a una app de usuario, enviar CLOSE
+          // y esperar a que la app la destruya.
+          // Si no (ventana del kernel), cerrarla directamente.
+          if (winsrv_has_window(pressed_win)) {
+            winsrv_post_event(pressed_win, WINSRV_EV_CLOSE, 0, 0, 0);
+          } else {
+            compositor_close_window(pressed_win);
+          }
         }
       } else if (pressed_btn == WIN_BTN_MAXIMIZE_PRESSED) {
         // maximizar (por ahora sin op)

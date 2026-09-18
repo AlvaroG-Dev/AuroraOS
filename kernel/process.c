@@ -2,6 +2,7 @@
 #include "process.h"
 #include "cpu.h"
 #include "elf.h"
+#include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
 #include "paging.h"
@@ -293,10 +294,11 @@ void process_exit(process_t *proc, int exit_code) {
     }
   }
 
-  // Despertar al padre (si existe) para que su waitpid re-evalúe
-  // la condición. Aunque el padre esté esperando por un pid
-  // distinto, has_matching_zombie lo filtrará correctamente y el
-  // padre volverá a dormir.
+  // NUEVO: cerrar las ventanas del winsrv propiedad de esta tarea.
+  if (proc->task) {
+    winsrv_cleanup_task(proc->task);
+  }
+
   process_t *parent = process_get_by_pid(proc->ppid);
   if (parent) {
     wake_up_all(&parent->child_wq);

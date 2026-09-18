@@ -1,6 +1,7 @@
 // kernel/vfs.c
 #include "vfs.h"
 #include "cpu.h"
+#include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
 #include "process.h"
@@ -77,8 +78,10 @@ static int64_t console_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
   const char *str = (const char *)buf;
   unsigned long flags;
   serial_lock_acquire(&flags);
-  for (size_t i = 0; i < size; i++)
+  for (size_t i = 0; i < size; i++) {
     serial_putc_locked(str[i]);
+    winsrv_console_output(str[i]); // ← NUEVO
+  }
   serial_lock_release(flags);
   return (int64_t)size;
 }
@@ -132,7 +135,7 @@ file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
   fd_init_wqs(fd);
 
   if (stdio_type == 0) {
-    fd->node = &stdin_node;   // ← vuelve al stdin clásico
+    fd->node = &stdin_node; // ← vuelve al stdin clásico
     fd->flags = O_RDONLY;
   } else if (stdio_type == 1) {
     fd->node = &stdout_node;

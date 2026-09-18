@@ -392,32 +392,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   if (fb_ok) {
     compositor_init();
 
-    window_t *win_term = compositor_create_window(
-        100, 80, 520, 340, "Aurora Terminal - x86_64", WIN_FLAGS_INACTIVE);
-
-    if (win_term) {
-      win_set_icon_text(win_term, ">", WIN11_ACCENT);
-      win_clear(win_term, 0xFF1E1E1E);
-
-      win_draw_string(win_term, 16, 16, "aurora-os:~$ ", WIN11_ACCENT,
-                      FONT_ID_MONO);
-      win_update(win_term);
-    }
-
-    window_t *win_perf = compositor_create_window(
-        300, 180, 420, 260, "System Performance", WIN_FLAGS_FOCUSED);
-
-    if (win_perf) {
-      win_set_icon_text(win_perf, ">", WIN11_ACCENT);
-      win_clear(win_perf, WIN11_SURFACE_CARD);
-
-      win_draw_string(win_perf, 20, 20, "CPU Usage: 3%", WIN11_TEXT_PRIMARY,
-                      FONT_ID_MONO);
-      win_draw_string(win_perf, 20, 40, "RAM Usage: 42MB / 512MB",
-                      WIN11_TEXT_SECONDARY, FONT_ID_MONO);
-      win_update(win_perf);
-    }
-
     LOG_INFO("[KERNEL] Ventanas creadas. Cediendo control al compositor...");
     sched_create_task(compositor_thread);
   }
