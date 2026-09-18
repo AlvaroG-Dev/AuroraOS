@@ -51,14 +51,16 @@ typedef struct task {
   // Contador de preemption. Si > 0, sched_tick() NO desaloja esta tarea
   // (desalojo involuntario). sched_yield() siempre cede, ignorando el
   // contador, porque es un acto voluntario.
-  //
-  // Se usa para proteger secciones críticas que no deben ser
-  // interrumpidas por el scheduler mientras modifican estado compartido
-  // (listas de ventanas, mailboxes, etc.).
-  //
-  // IMPORTANTE: NO protege contra IRQs. Esas ya entran con IF=0 y no
-  // anidan. Solo protege contra el scheduler cambiando de tarea.
   volatile int preempt_count;
+
+  // Contador de referencias atómico. La tarea se libera cuando llega a 0.
+  // Cada sitio que guarda un puntero a la tarea (wq, process_t, etc.)
+  // debe incrementar el contador con task_get() y decrementarlo con
+  // task_put() cuando lo suelta.
+  //
+  // La referencia inicial (refcount = 1) la tiene el scheduler al
+  // crear la tarea. Se libera en reap_dead_tasks().
+  volatile int refcount;
 } task_t;
 
 void sched_init(void);
@@ -78,6 +80,16 @@ void preempt_disable(void);
 void preempt_enable(void);
 int preempt_count(void);
 
+// Refcount de tareas. Atómicos. task_put libera la tarea cuando
+// el contador llega a 0.
+void task_get(task_t *t);
+void task_put(task_t *t);
+
 extern void task_switch(task_t *old_task, task_t *new_task);
 void task_entry_wrapper(void (*fn)(void));
 void task_die_hlt(void);
+
+// Cambia a `task` SIN guardar el contexto actual. Se usa una sola vez
+// en el arranque para saltar del stack del bootloader a la primera
+// tarea real (kmain_task). No retorna.
+__attribute__((noreturn)) void sched_start(task_t *task);

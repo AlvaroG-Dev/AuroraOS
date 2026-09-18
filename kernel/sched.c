@@ -35,16 +35,55 @@ static void idle_loop(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Refcount
+// ---------------------------------------------------------------------------
+void task_get(task_t *t) {
+  if (!t)
+    return;
+  __sync_fetch_and_add(&t->refcount, 1);
+}
+
+// Libera los recursos de una tarea. Se llama SOLO cuando refcount == 0.
+// No debe llamarse desde la propia tarea (ver invariantes).
+static void task_free(task_t *t) {
+  if (!t)
+    return;
+
+  // Liberar el espacio de usuario si la tarea tenía su propio PML4.
+  if (t->cr3 != kernel_cr3 && t->cr3 != 0) {
+    LOG_DEBUG("[SCHED] Liberando PML4 de usuario en %p", (void *)t->cr3);
+    paging_free_user_space(t->cr3);
+  }
+
+  if (t->stack)
+    kfree(t->stack);
+  kfree(t);
+}
+
+void task_put(task_t *t) {
+  if (!t)
+    return;
+  int old = __sync_fetch_and_sub(&t->refcount, 1);
+  if (old <= 0) {
+    // Refcount underflow. Bug grave: alguien hizo task_put sin task_get.
+    LOG_PANIC("sched: task_put underflow en task %u (refcount=%d)", t->id,
+              old - 1);
+  }
+  if (old == 1) {
+    // Última referencia. Liberar.
+    task_free(t);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Preemption
 // ---------------------------------------------------------------------------
 void preempt_disable(void) {
   task_t *cur = current_task;
   if (cur) {
     cur->preempt_count++;
-  } else {
-    // Antes de sched_init(). Caso borde raro; ignorar.
   }
-  __asm__ volatile("" ::: "memory"); // barrera
+  __asm__ volatile("" ::: "memory");
 }
 
 void preempt_enable(void) {
@@ -72,8 +111,6 @@ void task_entry_wrapper(void (*fn)(void)) {
   __asm__ volatile("cli");
   current_task->state = TASK_DEAD;
   sched_yield();
-  // sched_yield no vuelve si la tarea es reapeada. Pero por si acaso,
-  // dejamos un bucle infinito sin interrupciones.
   while (1)
     __asm__ volatile("hlt");
 }
@@ -92,6 +129,10 @@ static void task_init_common(task_t *task, uint64_t *stack_ptr, uint64_t cr3) {
   task->wake_reason = 0;
   task->preempt_count = 0;
   task->next = task;
+
+  // Referencia inicial: el scheduler (la lista de tareas). Se libera en
+  // reap_dead_tasks() con task_put().
+  task->refcount = 1;
 
   task->mailbox.head = 0;
   task->mailbox.tail = 0;
@@ -138,7 +179,7 @@ void sched_init(void) {
     return;
   }
   idle->is_idle = 1;
-  idle->state = TASK_RUNNING;
+  idle->state = TASK_READY;
   current_task = idle;
 
   LOG_INFO("[SCHED] Scheduler + SSE/FPU inicializado (idle task ID=%u)",
@@ -189,20 +230,16 @@ static void reap_dead_tasks(void) {
       break;
 
     if (next->state == TASK_DEAD && !next->is_idle) {
+      // Quitar de la lista. El scheduler suelta su referencia con
+      // task_put. Si nadie más tiene una referencia, se libera.
       curr->next = next->next;
       if (next == task_list_head)
         task_list_head = curr->next;
 
-      LOG_INFO("[SCHED] Limpiando tarea zombie ID=%u", next->id);
+      LOG_INFO("[SCHED] Limpiando tarea zombie ID=%u (refcount=%d)", next->id,
+               next->refcount);
 
-      if (next->cr3 != kernel_cr3) {
-        LOG_DEBUG("[SCHED] Liberando PML4 de usuario en %p", (void *)next->cr3);
-        paging_free_user_space(next->cr3);
-      }
-
-      if (next->stack)
-        kfree(next->stack);
-      kfree(next);
+      task_put(next);
     } else {
       curr = curr->next;
     }
@@ -211,22 +248,21 @@ static void reap_dead_tasks(void) {
 
 // ---------------------------------------------------------------------------
 // Validación de invariantes del scheduler.
-// Si algo se rompe, mejor un panic que un cuelgue silencioso.
 // ---------------------------------------------------------------------------
 static void sched_check_invariants(task_t *t) {
   if (!t)
     return;
-  // BLOCKED ↔ waiting_on != NULL
   if (t->state == TASK_BLOCKED && t->waiting_on == NULL) {
     LOG_PANIC("sched: task %u BLOCKED sin waiting_on", t->id);
   }
-  // READY → waiting_on debe ser NULL
   if (t->state == TASK_READY && t->waiting_on != NULL) {
     LOG_PANIC("sched: task %u READY con waiting_on != NULL", t->id);
   }
-  // RUNNING → waiting_on debe ser NULL
   if (t->state == TASK_RUNNING && t->waiting_on != NULL) {
     LOG_PANIC("sched: task %u RUNNING con waiting_on != NULL", t->id);
+  }
+  if (t->refcount <= 0) {
+    LOG_PANIC("sched: task %u con refcount=%d invalido", t->id, t->refcount);
   }
 }
 
@@ -242,10 +278,6 @@ void sched_tick(void) {
     return;
   tick_counter = 0;
 
-  // Respetar preempt_disable(): si la tarea actual pidió no ser
-  // desalojada, salimos sin hacer nada. El tick se contabiliza igual
-  // (ya lo hicimos arriba) para que la siguiente vez que se pueda
-  // desalojar, el contador esté alineado.
   if (current_task->preempt_count > 0)
     return;
 
@@ -261,7 +293,6 @@ void sched_tick(void) {
   if (next == current_task || next->state != TASK_READY)
     return;
 
-  // Invariantes: no deberíamos llegar aquí con estados raros.
   sched_check_invariants(next);
 
   task_t *old = current_task;
@@ -282,7 +313,6 @@ void sched_tick(void) {
 
 // ---------------------------------------------------------------------------
 // Yield: SIEMPRE cede, ignorando preempt_count.
-// Es un acto voluntario del llamante (típicamente para esperar en una wq).
 // ---------------------------------------------------------------------------
 void sched_yield(void) {
   uint64_t flags;
@@ -326,12 +356,12 @@ task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
   *(--sp) = (uint64_t)fn;
   *(--sp) = (uint64_t)user_trampoline;
 
-  *(--sp) = 0; // rbx
-  *(--sp) = 0; // rbp
-  *(--sp) = 0; // r12
-  *(--sp) = 0; // r13
-  *(--sp) = 0; // r14
-  *(--sp) = 0; // r15
+  *(--sp) = 0;
+  *(--sp) = 0;
+  *(--sp) = 0;
+  *(--sp) = 0;
+  *(--sp) = 0;
+  *(--sp) = 0;
 
   task_init_common(task, sp, cr3);
   task->stack = (uint64_t *)kstack;
@@ -363,4 +393,37 @@ void task_die_hlt(void) {
   while (1) {
     __asm__ volatile("sti; hlt");
   }
+}
+
+// ---------------------------------------------------------------------------
+// sched_start
+// ---------------------------------------------------------------------------
+extern void task_jump_to(task_t *task);
+
+__attribute__((noreturn)) void sched_start(task_t *task) {
+  if (!task) {
+    LOG_PANIC("[SCHED] sched_start: task == NULL");
+  }
+  if (task->state != TASK_READY) {
+    LOG_PANIC("[SCHED] sched_start: task %u no está READY (state=%d)", task->id,
+              task->state);
+  }
+
+  if (current_task && current_task != task) {
+    if (current_task->state == TASK_RUNNING) {
+      current_task->state = TASK_READY;
+    }
+  }
+
+  if (task->stack) {
+    uint64_t kstack = (uint64_t)((uint8_t *)task->stack + TASK_STACK_SIZE);
+    tss_set_rsp0(kstack);
+    cpu_local.kernel_stack = kstack;
+  }
+
+  task->state = TASK_RUNNING;
+  current_task = task;
+
+  task_jump_to(task);
+  __builtin_unreachable();
 }
