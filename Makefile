@@ -45,7 +45,8 @@ run: image
 		-serial stdio \
 		-m 512M \
 		-cpu qemu64 \
-		-no-reboot -no-shutdown
+		-no-reboot -no-shutdown \
+		
 
 iso: image
 	@echo "[Makefile] Generando ISO UEFI/BIOS híbrida (aurora.iso)..."
