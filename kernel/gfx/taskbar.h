@@ -1,7 +1,7 @@
 #pragma once
-#include <stdint.h>
-#include "gfx.h"
 #include "../bmp.h"
+#include "gfx.h"
+#include <stdint.h>
 
 // Taskbar constants (shared with compositor)
 #define TASKBAR_BAR_H 48
@@ -25,38 +25,48 @@
 #define TASKBAR_SEPARATOR_W 1
 
 typedef enum {
-    TASKBAR_ITEM_START_BTN,
-    TASKBAR_ITEM_APP_ICON,
-    TASKBAR_ITEM_WIDGET,
-    TASKBAR_ITEM_TRAY_CLOCK
+  TASKBAR_ITEM_START_BTN,
+  TASKBAR_ITEM_APP_ICON,
+  TASKBAR_ITEM_WIDGET,
+  TASKBAR_ITEM_TRAY_CLOCK
 } taskbar_item_type_t;
 
 typedef struct taskbar_item {
-    uint32_t id;
-    taskbar_item_type_t type;
-    char label[32];
-    char icon_symbol[8];
-    uint32_t icon_color;
-    tar_node_t *icon_bmp_node;
-    uint32_t icon_cache[20 * 20];
-    int has_icon_cache;
-    int is_active;
-    int width; // 0 = Automático (calculado por contenido). >0 = Ancho explícito indicado.
-    void (*on_click)(struct taskbar_item *item);
-    struct taskbar_item *next;
+  uint32_t id;
+  taskbar_item_type_t type;
+  char label[32];
+  char icon_symbol[8];
+  uint32_t icon_color;
+  tar_node_t *icon_bmp_node;
+  uint32_t icon_cache[20 * 20];
+  int has_icon_cache;
+  int is_active;
+  int width; // 0 = Automático (calculado por contenido). >0 = Ancho explícito
+             // indicado.
+  void (*on_click)(struct taskbar_item *item);
+  struct taskbar_item *next;
 } taskbar_item_t;
 
 // API de abstracción de la Taskbar
 void taskbar_init(void);
-taskbar_item_t *taskbar_add_item(taskbar_item_type_t type, const char *label, const char *symbol, uint32_t color, void (*on_click)(taskbar_item_t*));
-taskbar_item_t *taskbar_add_item_custom_width(taskbar_item_type_t type, const char *label, const char *symbol, uint32_t color, int explicit_width, void (*on_click)(taskbar_item_t*));
+taskbar_item_t *taskbar_add_item(taskbar_item_type_t type, const char *label,
+                                 const char *symbol, uint32_t color,
+                                 void (*on_click)(taskbar_item_t *));
+taskbar_item_t *taskbar_add_item_custom_width(
+    taskbar_item_type_t type, const char *label, const char *symbol,
+    uint32_t color, int explicit_width, void (*on_click)(taskbar_item_t *));
 void taskbar_remove_item(uint32_t id);
 rect_t taskbar_get_bounds(int screen_w, int screen_h);
-void taskbar_render(uint32_t *dst, int dst_stride, rect_t clip, int screen_w, int screen_h);
+void taskbar_render(uint32_t *dst, int dst_stride, rect_t clip, int screen_w,
+                    int screen_h);
 // Actualiza el reloj de la taskbar leyendo del RTC
 void taskbar_refresh_clock(void);
 // Establece el ítem activo de la taskbar (por puntero)
 void taskbar_set_active_item(taskbar_item_t *item);
 // Busca el ítem de taskbar bajo las coordenadas (x, y) relativas a la pantalla.
-taskbar_item_t *taskbar_hit_test(int screen_x, int screen_y, int screen_w, int screen_h);
-taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type, const char *label, tar_node_t *bmp_file, void (*on_click)(taskbar_item_t *));
+taskbar_item_t *taskbar_hit_test(int screen_x, int screen_y, int screen_w,
+                                 int screen_h);
+taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
+                                     const char *label, tar_node_t *bmp_file,
+                                     void (*on_click)(taskbar_item_t *));
+void taskbar_remove_item_ptr(taskbar_item_t *item);
