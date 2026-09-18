@@ -23,6 +23,7 @@
 #include "rtc.h"
 #include "sched.h"
 #include "serial.h"
+#include "smp_boot.h"
 #include "string.h"
 #include "syscall.h"
 #include "tarfs.h"
@@ -161,25 +162,20 @@ static void ipc_echo_service(void) {
 // ===========================================================================
 static void kmain_task(void) {
   LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
+  ;
 
-  // Tarea de eco IPC.
   sched_create_task(ipc_echo_service);
 
-  // Instalar el handler del timer de la IRQ 0 (PIT) mientras calibramos
-  // el TSC. Después lo sustituimos por el LAPIC timer.
   extern void time_tick(void);
   irq_install_handler(0, time_tick);
 
   __asm__ volatile("sti");
 
-  // Calibrar el TSC contra el PIT (aún activo).
   klog_calibrate_tsc(50, KERNEL_HZ);
   LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
 
-  // Sustituir el PIT por el LAPIC timer.
   lapic_timer_init();
 
-  // TTY.
   LOG_INFO("[INIT] TTY...");
   tty_init();
   LOG_INFO("OK");
@@ -190,7 +186,6 @@ static void kmain_task(void) {
   driver_register(&pci_driver);
   drivers_init_all();
 
-  // Framebuffer.
   int fb_ok = 0;
   if (g_boot_info.fb_base != 0 && g_boot_info.fb_width > 0 &&
       g_boot_info.fb_height > 0) {
@@ -214,13 +209,11 @@ static void kmain_task(void) {
   LOG_INFO("[INIT] Aurora OS listo. Multitarea activa.");
   if (fb_ok) {
     compositor_init();
-
     LOG_INFO(
         "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
     sched_create_task(compositor_thread);
   }
 
-  // Tests del kernel.
   int failed = run_all_tests();
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
@@ -230,9 +223,24 @@ static void kmain_task(void) {
   acpi_dump();
   apic_dump();
 
-  // App de consola gráfica.
+  // App de consola gráfica (antes del SMP, para que no interfiera).
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
+
+  // ---------------------------------------------------------------------------
+  // [SMP 3.1] Arrancar APs. Al final del boot para no interferir con la
+  // carga de la shell. Solo se inicializan y hacen hlt.
+  // ---------------------------------------------------------------------------
+
+  LOG_DEBUG("[SMP] Inicializando trampoline y APs...");
+  smp_boot_init();
+  smp_boot_aps();
+  smp_dump();
+
+  extern volatile int smp_sched_active;
+  smp_sched_active = 1;
+  LOG_INFO("[SMP] Scheduler SMP activado en todos los núcleos.");
+  // ---------------------------------------------------------------------------
 
   while (1) {
     sched_yield();
@@ -268,9 +276,9 @@ void kmain(struct kernel_boot_info *kinfo) {
   idt_init();
   LOG_INFO("OK");
 
-  cpu_local.kernel_stack =
+  cpu_local_data[0].kernel_stack =
       (uint64_t)(syscall_kernel_stack + sizeof(syscall_kernel_stack));
-  cpu_local.user_rsp = 0;
+  cpu_local_data[0].user_rsp = 0;
 
   LOG_INFO("[INIT] Syscalls... ");
   syscall_init();
@@ -304,6 +312,11 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] Iniciando PMM...");
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
+
+  // [SMP] Reservar las páginas bajas que usará el trampoline ANTES
+  // del auto-test, para que no las ocupe nadie.
+  extern void pmm_reserve_range(uint64_t start, uint64_t end);
+  pmm_reserve_range(0x7000, 0x9000);
 
   extern void pmm_self_test(void);
   pmm_self_test();
@@ -352,8 +365,9 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("OK");
 
   LOG_INFO("[INIT] Iniciando Scheduler...");
-  sched_init();
   smp_init();
+  smp_set_bsp_lapic_id(lapic_get_bsp_id());
+  sched_init();
 
   task_t *t = sched_create_task(kmain_task);
   if (!t) {

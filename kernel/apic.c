@@ -329,3 +329,19 @@ void apic_dump(void) {
     }
   }
 }
+
+void *lapic_get_base(void) { return (void *)g_lapic; }
+void apic_init_ap(void) {
+  uint64_t apic_base = rdmsr(0x1B);
+  apic_base |= (1ULL << 11);
+  wrmsr(0x1B, apic_base);
+
+  lapic_write(LAPIC_REG_SVR, 0xFF | LAPIC_SVR_ENABLE);
+  lapic_write(LAPIC_REG_TPR, 0);
+
+  lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
+  lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
+  lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
+  lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
+  lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
+}

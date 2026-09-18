@@ -9,12 +9,12 @@ ifeq ($(CROSS),)
     CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -mno-red-zone \
              -mcmodel=kernel -fno-stack-protector -fno-asynchronous-unwind-tables \
              -fno-pic -nostdlib -nostartfiles -nodefaultlibs -I. \
-             -fno-omit-frame-pointer
+             -fno-omit-frame-pointer -g -O0
 else
     CC = x86_64-elf-gcc
     CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -mno-red-zone \
              -mcmodel=kernel -fno-stack-protector -I. \
-             -fno-omit-frame-pointer
+             -fno-omit-frame-pointer -g -O0
 endif
 
 LD      = $(CC)
@@ -24,7 +24,8 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
         buddy.o spinlock.o heap.o slab.o sched.o ps2.o rtc.o initrd.o tarfs.o vfs.o ipc.o bmp.o pci.o \
         process.o elf.o klog.o pf.o panic.o driver.o input.o wait.o tty.o test.o acpi.o apic.o time.o gfx/gfx.o gfx/window.o \
         gfx/compositor.o gfx/taskbar.o gfx/font_aa.o gfx/font_manager.o gfx/winsrv.o \
-        tests/pmm_stress.o tests/kernel_tests.o
+        tests/pmm_stress.o tests/kernel_tests.o \
+        smp_trampoline.o smp_boot.o
 TARGET  = kernel.elf
 
 all: $(TARGET)
@@ -38,7 +39,22 @@ $(TARGET): $(OBJS) linker.ld
 %.o: %.asm
 	$(AS) -f elf64 $< -o $@
 
+# ---------------------------------------------------------------------------
+# Trampoline SMP: se ensambla a binario plano y se convierte a .o con
+# objcopy. Los símbolos se renombran a smp_trampoline_{start,end,size}.
+# ---------------------------------------------------------------------------
+smp_trampoline.bin: smp_trampoline.asm
+	$(AS) -f bin $< -o $@
+
+smp_trampoline.o: smp_trampoline.bin
+	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+	        --rename-section .data=.smp_trampoline,alloc,load,readonly,data,contents \
+	        --redefine-sym _binary_smp_trampoline_bin_start=smp_trampoline_start \
+	        --redefine-sym _binary_smp_trampoline_bin_end=smp_trampoline_end \
+	        --redefine-sym _binary_smp_trampoline_bin_size=smp_trampoline_size \
+	        $< $@
+
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) smp_trampoline.bin
 
 .PHONY: all clean

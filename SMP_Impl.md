@@ -22,29 +22,56 @@
 - **Sin cambios funcionales**: el kernel sigue usando el PIC 8259.
   Los APs no se arrancan todavía.
 
-
-### Fase 2 — LAPIC + IOAPIC en el BSP [x]
+### Fase 2 — LAPIC + IOAPIC + LAPIC timer [x]
 
 #### Sub-fase 2.1 — LAPIC [x]
-- LAPIC mapeado en MMIO_MAP_BASE.
-- Habilitado vía MSR IA32_APIC_BASE (bit 11).
-- SVR configurado con vector espurio 0xFF.
-- LINT0 enmascarado (ya no recibimos IRQs del PIC).
-- 3 tests nuevos (LAPIC mapeado, SVR, BSP ID).
-
 #### Sub-fase 2.2 — IOAPIC [x]
-- IOAPIC mapeado en MMIO_MAP_BASE.
-- ISOs del MADT aplicados a la tabla IRQ → GSI.
-- Detección de colisiones de GSI (IRQ 0 y IRQ 2 colisionan en GSI 2).
-- Todas las IRQs del IOAPIC enmascaradas por defecto.
-- PIC enmascarado completamente.
-- `irq_install_handler` desenmascara en IOAPIC (no en PIC).
-- `irq_handler` envía EOI al LAPIC **antes** del handler (evita perder
-  el EOI cuando el handler cambia de tarea).
-- 2 tests nuevos (IOAPIC detectado, ISO IRQ0->GSI2).
-- Total: 31 tests.
-### Fase 3 — Arrancar APs [ ]
-### Fase 4 — Scheduler SMP [ ]
+#### Sub-fase 2.3 — LAPIC timer [x]
+- Calibración del LAPIC timer contra el TSC.
+- Modo periódico a 1 kHz.
+- Vector 48 para el LAPIC timer.
+- PIT desactivado (IRQ 0 enmascarada en el IOAPIC).
+- `tick_count` y `timer_handler` movidos a `kernel/time.{h,c}`.
+- Vector espurio 0xFF con handler real (`isr_spurious`).
+- Total: 33 tests.
+
+**Deuda técnica documentada** (ver sección aparte):
+- EOI antes del handler (posible reentrada).
+- LINT0 enmascarado (complicado volver al PIC).
+- Colisión de GSI específica de QEMU.
+- `cpu_local` vs `cpu_local_data[0]` desincronizados.
+
+### Fase 3 — Arrancar APs [x]
+- Trampoline en memoria baja (0x7000) en modo real -> protegido -> largo (64 bits).
+- Rango [0x7000, 0x9000) reservado en el PMM antes de asignaciones.
+- Secuencia INIT-SIPI-SIPI por hardware usando LAPIC ICR para despertar APs.
+- ap_entry: inicializa CR0/CR4 (SSE/FPU), GDT, IDT, LAPIC local y %gs -> cpu_local_data[cpu].
+- Sincronización con BSP vía smp_boot_params (aps_started, aps_ready).
+- Estado verificado: 7/7 APs operativos en reposo (sti; hlt).
+
+### Fase 4 — Scheduler SMP [/]
+
+#### Sub-fase 4.1 — TSS per-CPU y migración de cpu_local [x]
+- GDT ampliada para alojar 1 TSS por CPU (slots 5 + cpu*2).
+- gdt_ap_init(cpu) carga TSS con ltr para cada CPU.
+- tss_set_rsp0() per-CPU (this_cpu).
+- syscall_entry.asm migrado a %gs: per-CPU con swapgs.
+- Eliminación de la variable global cpu_local.
+
+#### Sub-fase 4.2 — Scheduler Lock, current_task per-CPU y runqueue global [x]
+- sched_lock (spinlock) protegiendo la runqueue y estructuras del scheduler.
+- current_task migrado a this_cpu(current_task).
+- Tareas idle dedicadas por CPU (idle_task[MAX_CPUS]).
+- Prevenir que múltiples CPUs ejecuten la misma tarea (TASK_RUNNING).
+
+#### Sub-fase 4.3 — Timer LAPIC en APs y despacho concurrente [x]
+- Inicialización periódica del LAPIC timer en APs a 1 kHz (lapic_timer_init_ap).
+- Separación de ticks: BSP incrementa tick_count global; cada CPU incrementa this_cpu(tick_counter) y llama a sched_tick().
+- Los APs arrancan el scheduler con sched_start_ap(idle_task[my_cpu]).
+
+#### Sub-fase 4.4 — IPIs de rescheduling remoto [ ]
+- Vector IPI de resched para despertar núcleos inactivos al haber tareas listas.
+
 ### Fase 5 — Auditar drivers y subsistemas [ ]
 
 

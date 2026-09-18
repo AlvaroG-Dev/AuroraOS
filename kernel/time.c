@@ -34,14 +34,15 @@ void pit_init(void) { pit_init_impl(); }
 extern void compositor_notify_clock_tick(void);
 
 void time_tick(void) {
-  tick_count++;
-
-  // Cada segundo, notificar al compositor para que actualice el reloj.
-  if (tick_count % KERNEL_HZ == 0) {
-    compositor_notify_clock_tick();
+  // Solo el BSP incrementa el reloj del sistema global
+  if (smp_processor_id() == 0) {
+    tick_count++;
+    if (tick_count % KERNEL_HZ == 0) {
+      compositor_notify_clock_tick();
+    }
   }
 
-  // Preempción del scheduler.
+  // Preempción del scheduler en el núcleo actual
   sched_tick();
 }
 
@@ -153,3 +154,14 @@ void lapic_timer_init(void) {
 // Handler del LAPIC timer. Llamado desde irq_handler cuando llega el
 // vector 48. Envuelve time_tick() con logs de debug si hiciera falta.
 void lapic_timer_handler(void) { time_tick(); }
+void lapic_timer_init_ap(void) {
+  if (g_lapic_ticks_per_ms == 0)
+    return;
+
+  uint32_t init_count = g_lapic_ticks_per_ms * (1000 / KERNEL_HZ);
+
+  lapic_write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIV_1);
+  lapic_write(LAPIC_REG_LVT_TIMER,
+              LAPIC_TIMER_MODE_PERIODIC | LAPIC_TIMER_VECTOR);
+  lapic_write(LAPIC_REG_TIMER_INIT, init_count);
+}

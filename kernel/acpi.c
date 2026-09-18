@@ -6,10 +6,6 @@
 #include "panic.h"
 #include "string.h"
 
-// ---------------------------------------------------------------------------
-// Estructuras ACPI (subset mínimo)
-// ---------------------------------------------------------------------------
-
 typedef struct __attribute__((packed)) {
   char signature[8];
   uint8_t checksum;
@@ -75,11 +71,18 @@ typedef struct __attribute__((packed)) {
 } madt_entry_lapic_override_t;
 
 // ---------------------------------------------------------------------------
-// Estado global
+// [SMP] Multiprocessor Wakeup Structure (type 0x10).
+// Ref: ACPI 6.4, sección 5.2.12.19.
 // ---------------------------------------------------------------------------
+typedef struct __attribute__((packed)) {
+  madt_entry_header_t header; // type = 0x10
+  uint16_t version;
+  uint32_t reserved;
+  uint64_t mailbox_address; // dirección física del mailbox
+} madt_entry_wakeup_t;
+
 static acpi_info_t g_acpi = {0};
 
-// Verifica el checksum de una tabla ACPI.
 static int acpi_checksum_ok(const void *table, uint32_t length) {
   const uint8_t *p = (const uint8_t *)table;
   uint8_t sum = 0;
@@ -88,7 +91,6 @@ static int acpi_checksum_ok(const void *table, uint32_t length) {
   return sum == 0;
 }
 
-// Busca una tabla con la firma dada en un array de punteros.
 static acpi_sdt_header_t *find_table(uint64_t *root_entries, int count,
                                      int is_64bit, const char *signature) {
   for (int i = 0; i < count; i++) {
@@ -103,7 +105,6 @@ static acpi_sdt_header_t *find_table(uint64_t *root_entries, int count,
   return NULL;
 }
 
-// Parsea el MADT y rellena g_acpi.
 static void parse_madt(const madt_t *madt) {
   g_acpi.lapic_address = madt->local_apic_address;
 
@@ -174,6 +175,24 @@ static void parse_madt(const madt_t *madt) {
                (unsigned long)g_acpi.lapic_address);
       break;
     }
+    // ---------------------------------------------------------------------
+    // [SMP] Multiprocessor Wakeup Structure (ACPI 6.4).
+    // ---------------------------------------------------------------------
+    case 0x10: {
+      const madt_entry_wakeup_t *w = (const madt_entry_wakeup_t *)p;
+      if (eh->length < sizeof(madt_entry_wakeup_t)) {
+        LOG_WARN("[ACPI] Wakeup Structure demasiado corta (%u bytes)",
+                 eh->length);
+        break;
+      }
+      g_acpi.wakeup.present = 1;
+      g_acpi.wakeup.version = w->version;
+      g_acpi.wakeup.mailbox_paddr = w->mailbox_address;
+      LOG_INFO("[ACPI] Multiprocessor Wakeup Structure: version=%u "
+               "mailbox_paddr=0x%llx",
+               w->version, (unsigned long long)w->mailbox_address);
+      break;
+    }
     default:
       break;
     }
@@ -182,9 +201,6 @@ static void parse_madt(const madt_t *madt) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
 void acpi_init(const uint8_t rsdp_bytes[64]) {
   LOG_INFO("[ACPI] Inicializando");
 
@@ -196,7 +212,6 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
 
   const rsdp_t *rsdp = (const rsdp_t *)rsdp_bytes;
 
-  // Imprimir el OEM ID como string (5 chars + terminador).
   char oem_buf[7] = {0};
   for (int i = 0; i < 6; i++)
     oem_buf[i] = rsdp->oem_id[i];
@@ -286,6 +301,13 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
   g_acpi.valid = 1;
   LOG_INFO("[ACPI] Parseo completo: %d CPUs, %d IOAPICs, %d ISOs",
            g_acpi.cpu_count, g_acpi.ioapic_count, g_acpi.iso_count);
+  if (g_acpi.wakeup.present) {
+    LOG_INFO("[ACPI] Multiprocessor Wakeup disponible (mailbox=0x%llx)",
+             (unsigned long long)g_acpi.wakeup.mailbox_paddr);
+  } else {
+    LOG_INFO("[ACPI] Multiprocessor Wakeup NO disponible (usaremos "
+             "INIT-SIPI-SIPI)");
+  }
 }
 
 const acpi_info_t *acpi_get_info(void) { return &g_acpi; }
@@ -315,5 +337,10 @@ void acpi_dump(void) {
     const acpi_iso_t *s = &g_acpi.isos[i];
     LOG_INFO("    [%d] irq=%u -> gsi=%u flags=0x%x", i, s->irq, s->gsi,
              s->flags);
+  }
+  LOG_INFO("  Wakeup: %s", g_acpi.wakeup.present ? "present" : "absent");
+  if (g_acpi.wakeup.present) {
+    LOG_INFO("    version=%u mailbox_paddr=0x%llx", g_acpi.wakeup.version,
+             (unsigned long long)g_acpi.wakeup.mailbox_paddr);
   }
 }

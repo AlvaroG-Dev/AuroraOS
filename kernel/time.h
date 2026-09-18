@@ -27,6 +27,7 @@ void time_tick(void);
 // Tras esta llamada, el LAPIC timer sustituye al PIT como fuente de
 // ticks. La IRQ 0 del IOAPIC queda enmascarada.
 void lapic_timer_init(void);
+void lapic_timer_init_ap(void);
 
 // Handler del LAPIC timer. Llamado desde irq_handler cuando llega el
 // vector 48.

@@ -71,17 +71,19 @@ int preempt_count(void);
 void task_get(task_t *t);
 void task_put(task_t *t);
 
-extern void task_switch(task_t *old_task, task_t *new_task);
+struct spinlock;
+extern void task_switch(task_t *old_task, task_t *new_task, void *lock);
 void task_entry_wrapper(void (*fn)(void));
 void task_die_hlt(void);
 
 __attribute__((noreturn)) void sched_start(task_t *task);
 
 // ---------------------------------------------------------------------------
-// SMP: Fase 0. Inicializa la infraestructura per-CPU (cpu_local_data).
-// Hoy solo llena cpu_local_data[0]. No activa SMP.
+// SMP: Fase 0/3.1
 // ---------------------------------------------------------------------------
 void smp_init(void);
-
-// Debug: imprime el estado del array per-CPU por serial.
 void smp_dump(void);
+void sched_start_ap(void);
+
+// Publica el APIC ID del BSP en cpu_local_data[0]. Llamar tras apic_init.
+void smp_set_bsp_lapic_id(uint32_t lapic_id);

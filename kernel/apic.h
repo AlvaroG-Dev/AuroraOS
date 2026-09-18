@@ -69,6 +69,7 @@
 // ---------------------------------------------------------------------------
 
 void apic_init(void);
+void apic_init_ap(void);
 uint32_t lapic_get_id(void);
 uint32_t lapic_get_bsp_id(void);
 uint32_t lapic_read(uint32_t reg);
@@ -80,5 +81,6 @@ void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
 void ioapic_mask_irq(uint8_t irq, int masked);
 
 void apic_dump(void);
+void *lapic_get_base(void);
 
 #endif
