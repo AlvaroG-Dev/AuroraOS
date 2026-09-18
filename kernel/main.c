@@ -2,6 +2,7 @@
 // kernel/main.c
 // Punto de entrada del kernel Aurora OS
 
+#include "acpi.h"
 #include "cpu.h"
 #include "driver.h"
 #include "gdt.h"
@@ -30,9 +31,9 @@
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
-// Boot info
+// Boot info (MISMO ORDEN Y TIPOS QUE EL BOOTLOADER)
 // ---------------------------------------------------------------------------
-struct kernel_boot_info {
+struct __attribute__((packed)) kernel_boot_info {
   uint64_t fb_base;
   uint64_t fb_size;
   uint32_t fb_width;
@@ -43,10 +44,11 @@ struct kernel_boot_info {
   uint64_t memmap_size;
   uint64_t memmap_desc_size;
   uint32_t memmap_desc_ver;
+  uint8_t acpi_rsdp[64];
 };
 
 static struct kernel_boot_info boot;
-static struct kernel_boot_info g_boot_info; // copia para kmain_task
+static struct kernel_boot_info g_boot_info;
 
 uint32_t *fb_ptr = NULL;
 uint32_t fb_width = 0;
@@ -56,7 +58,7 @@ uint32_t fb_pitch = 0;
 static uint8_t syscall_kernel_stack[8192] __attribute__((aligned(16)));
 
 // ---------------------------------------------------------------------------
-// Framebuffer helpers (solo se usan en kmain_task, tras inicializar la FB)
+// Framebuffer helpers
 // ---------------------------------------------------------------------------
 static void fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch) {
   if (base == 0 || w == 0 || h == 0 || pitch == 0) {
@@ -89,7 +91,7 @@ static void fb_fillrect(int x, int y, int w, int h, uint32_t color) {
 }
 
 // ---------------------------------------------------------------------------
-// Memmap parse (solo en kmain, antes de paging_init)
+// Memmap parse
 // ---------------------------------------------------------------------------
 #define EFI_CONVENTIONAL_MEMORY 7
 
@@ -157,7 +159,7 @@ static void timer_handler(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Servicio IPC de eco (tarea del kernel)
+// Servicio IPC de eco
 // ---------------------------------------------------------------------------
 static uint32_t ipc_echo_task_id = 0;
 static void ipc_echo_service(void) {
@@ -179,23 +181,19 @@ static void ipc_echo_service(void) {
 }
 
 // ===========================================================================
-// kmain_task: aquí corre TODO lo que necesita interrupciones activas
-// o drivers inicializados. Es una tarea real del scheduler.
+// kmain_task
 // ===========================================================================
 static void kmain_task(void) {
   LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
 
-  // La primera tarea en arrancar tras la idle. Creamos las demás.
   sched_create_task(ipc_echo_service);
 
-  // Instalar el handler del timer y habilitar interrupciones.
   irq_install_handler(0, timer_handler);
   __asm__ volatile("sti");
 
   klog_calibrate_tsc(50, 1000);
   LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
 
-  // TTY.
   LOG_INFO("[INIT] TTY...");
   tty_init();
   LOG_INFO("OK");
@@ -206,7 +204,6 @@ static void kmain_task(void) {
   driver_register(&pci_driver);
   drivers_init_all();
 
-  // Framebuffer.
   int fb_ok = 0;
   if (g_boot_info.fb_base != 0 && g_boot_info.fb_width > 0 &&
       g_boot_info.fb_height > 0) {
@@ -236,28 +233,24 @@ static void kmain_task(void) {
     sched_create_task(compositor_thread);
   }
 
-  // Tests del kernel.
   int failed = run_all_tests();
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
 
   smp_dump();
+  acpi_dump();
 
-  // App de consola gráfica.
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
 
-  // kmain_task ya ha hecho todo. Cede para siempre.
-  // La idle se encarga del hlt cuando no hay nada más.
   while (1) {
     sched_yield();
   }
 }
 
 // ===========================================================================
-// kmain: setup mínimo que NO necesita interrupciones activas.
-// Tras crear la tarea kmain_task, cede el control y no vuelve.
+// kmain
 // ===========================================================================
 void kmain(struct kernel_boot_info *kinfo) {
   serial_init();
@@ -272,7 +265,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("OK");
 
   memcpy(&boot, kinfo, sizeof(boot));
-  // Copia para kmain_task. `boot` en sí mismo no se toca más tras esto.
   g_boot_info = boot;
 
   LOG_INFO("[BOOT] Framebuffer: %p %u x %u pitch=%u", (void *)boot.fb_base,
@@ -294,7 +286,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   syscall_init();
   LOG_INFO("OK");
 
-  // Calcular max_phys_addr.
   uint64_t max_phys_addr = 0;
   if (boot.memmap && boot.memmap_size > 0) {
     uint8_t *ptr = (uint8_t *)boot.memmap;
@@ -335,6 +326,10 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   pmm_relocate_bitmap();
 
+  LOG_INFO("[INIT] ACPI (MADT)...");
+  acpi_init(boot.acpi_rsdp);
+  LOG_INFO("OK");
+
   LOG_INFO("[INIT] Demand paging (PF handler)...");
   pf_init();
   LOG_INFO("OK");
@@ -366,18 +361,13 @@ void kmain(struct kernel_boot_info *kinfo) {
   sched_init();
   smp_init();
 
-  // Crear la tarea kmain_task. NO la ejecutamos todavía.
   task_t *t = sched_create_task(kmain_task);
   if (!t) {
     LOG_PANIC("[KERNEL] no se pudo crear kmain_task");
   }
 
-  // Saltar directamente a kmain_task. Esto NO retorna. La idle queda
-  // intacta, con su contexto armado, esperando a que el scheduler la
-  // elija por primera vez.
   LOG_DEBUG("[KERNEL] kmain: saltando a kmain_task");
   sched_start(t);
 
-  // No se llega aquí.
   __builtin_unreachable();
 }

@@ -80,17 +80,17 @@ EXPECTED=(
     "AURORA OS KERNEL x86_64"
     "[PMM] Bitmap inicializado"
     "[PAGING] Ventana fisica mapeada"
+    "[ACPI] Parseo completo"
     "[HEAP] Heap inicializado"
     "[SLAB] Inicializado: 8 caches"
     "[TARFS] Carga completa. 21 nodos registrados."
     "[SCHED] Scheduler + SSE/FPU inicializado"
     "[IPC-KERNEL] Servicio de eco IPC iniciado"
-    "[TTY] /dev/tty0 inicializado"
+    "[TTY] Modo raw inicializado"
     "[PS2] Tarea de procesamiento iniciada"
     "[COMP] Compositor thread started"
-    "18 tests: 18 passed, 0 failed, 0 skipped"
-    "Aurora OS Shell v0.1"
-    "aurora>"
+    "[WINSRV] Inicializado"
+    "22 tests: 22 passed, 0 failed, 0 skipped"
 )
 
 FAILED=0

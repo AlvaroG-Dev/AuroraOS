@@ -9,12 +9,12 @@
 //   }
 //   REGISTER_TEST("mi_cosa", test_mi_cosa);
 
+#include "../acpi.h"
 #include "../cpu.h"
 #include "../heap.h"
 #include "../slab.h"
 #include "../string.h"
 #include "../test.h"
-
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -375,3 +375,32 @@ static void test_smp_per_cpu_macro(void) {
   per_cpu(tick_counter, 3) = 0;
 }
 REGISTER_TEST("smp: per_cpu() accede al slot correcto", test_smp_per_cpu_macro);
+
+// ---------------------------------------------------------------------------
+// ACPI (Fase 1 de SMP)
+// ---------------------------------------------------------------------------
+static void test_acpi_valid(void) {
+  const acpi_info_t *info = acpi_get_info();
+  TEST_ASSERT(info->valid == 1, "ACPI no se inicializó correctamente");
+}
+REGISTER_TEST("acpi: parseo del MADT correcto", test_acpi_valid);
+
+static void test_acpi_cpu_count(void) {
+  const acpi_info_t *info = acpi_get_info();
+  TEST_ASSERT(info->cpu_count >= 1, "ACPI cpu_count = %d, esperado >= 1",
+              info->cpu_count);
+}
+REGISTER_TEST("acpi: al menos 1 CPU detectada", test_acpi_cpu_count);
+
+static void test_acpi_lapic_address(void) {
+  const acpi_info_t *info = acpi_get_info();
+  TEST_ASSERT(info->lapic_address != 0, "ACPI lapic_address = 0");
+}
+REGISTER_TEST("acpi: LAPIC address válida", test_acpi_lapic_address);
+
+static void test_acpi_bsp_found(void) {
+  const acpi_info_t *info = acpi_get_info();
+  TEST_ASSERT(info->bsp_index >= 0, "ACPI no encontró el BSP (bsp_index=%d)",
+              info->bsp_index);
+}
+REGISTER_TEST("acpi: BSP identificado", test_acpi_bsp_found);
