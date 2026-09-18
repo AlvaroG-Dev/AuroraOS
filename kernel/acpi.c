@@ -36,16 +36,6 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
   acpi_sdt_header_t header;
-  uint64_t entries[];
-} xsdt_t;
-
-typedef struct __attribute__((packed)) {
-  acpi_sdt_header_t header;
-  uint32_t entries[];
-} rsdt_t;
-
-typedef struct __attribute__((packed)) {
-  acpi_sdt_header_t header;
   uint32_t local_apic_address;
   uint32_t flags;
 } madt_t;
@@ -89,7 +79,7 @@ typedef struct __attribute__((packed)) {
 // ---------------------------------------------------------------------------
 static acpi_info_t g_acpi = {0};
 
-// Verifica el checksum de una tabla ACPI. Suma todos los bytes; debe ser 0.
+// Verifica el checksum de una tabla ACPI.
 static int acpi_checksum_ok(const void *table, uint32_t length) {
   const uint8_t *p = (const uint8_t *)table;
   uint8_t sum = 0;
@@ -166,6 +156,12 @@ static void parse_madt(const madt_t *madt) {
     }
     case 2: {
       const madt_entry_iso_t *iso = (const madt_entry_iso_t *)p;
+      if (g_acpi.iso_count < ACPI_MAX_ISOS) {
+        acpi_iso_t *s = &g_acpi.isos[g_acpi.iso_count++];
+        s->irq = iso->source;
+        s->gsi = iso->gsi;
+        s->flags = iso->flags;
+      }
       LOG_INFO("[ACPI] ISO: bus=%u irq=%u -> gsi=%u flags=0x%x", iso->bus,
                iso->source, iso->gsi, iso->flags);
       break;
@@ -192,8 +188,6 @@ static void parse_madt(const madt_t *madt) {
 void acpi_init(const uint8_t rsdp_bytes[64]) {
   LOG_INFO("[ACPI] Inicializando");
 
-  // Comprobar la firma del RSDP. Lo tenemos por valor, así que no hay
-  // problemas de direcciones físicas ni de memoria del firmware.
   if (memcmp(rsdp_bytes, "RSD PTR ", 8) != 0) {
     LOG_ERR("[ACPI] RSDP: firma inválida");
     g_acpi.valid = 0;
@@ -202,6 +196,7 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
 
   const rsdp_t *rsdp = (const rsdp_t *)rsdp_bytes;
 
+  // Imprimir el OEM ID como string (5 chars + terminador).
   char oem_buf[7] = {0};
   for (int i = 0; i < 6; i++)
     oem_buf[i] = rsdp->oem_id[i];
@@ -270,7 +265,6 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
 
   parse_madt((const madt_t *)madt_hdr);
 
-  // Determinar el BSP leyendo el APIC ID vía CPUID.
   uint32_t eax, ebx, ecx, edx;
   cpuid(1, 0, &eax, &ebx, &ecx, &edx);
   uint32_t bsp_apic_id = (ebx >> 24) & 0xFF;
@@ -290,8 +284,8 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
   }
 
   g_acpi.valid = 1;
-  LOG_INFO("[ACPI] Parseo completo: %d CPUs, %d IOAPICs", g_acpi.cpu_count,
-           g_acpi.ioapic_count);
+  LOG_INFO("[ACPI] Parseo completo: %d CPUs, %d IOAPICs, %d ISOs",
+           g_acpi.cpu_count, g_acpi.ioapic_count, g_acpi.iso_count);
 }
 
 const acpi_info_t *acpi_get_info(void) { return &g_acpi; }
@@ -315,5 +309,11 @@ void acpi_dump(void) {
     const acpi_ioapic_t *io = &g_acpi.ioapics[i];
     LOG_INFO("    [%d] id=%u addr=0x%x gsi_base=%u", i, io->id, io->address,
              io->gsi_base);
+  }
+  LOG_INFO("  ISOs (%d):", g_acpi.iso_count);
+  for (int i = 0; i < g_acpi.iso_count; i++) {
+    const acpi_iso_t *s = &g_acpi.isos[i];
+    LOG_INFO("    [%d] irq=%u -> gsi=%u flags=0x%x", i, s->irq, s->gsi,
+             s->flags);
   }
 }
