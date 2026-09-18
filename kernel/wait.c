@@ -5,11 +5,7 @@
 #include "sched.h"
 #include <stddef.h>
 
-
 #define EINTR 4
-
-// Declarado en sched.c — lo añadimos allí (ver Paso 5).
-extern void sched_make_ready(task_t *t);
 
 void wait_queue_init(wait_queue_t *wq) {
   spin_init(&wq->lock);
@@ -29,8 +25,13 @@ static void wq_add_locked(wait_queue_t *wq, task_t *t) {
   wq->head = e;
   wq->nr_waiting++;
   t->waiting_on = wq;
+  // Tomar una referencia a la tarea. La soltaremos cuando la saquemos
+  // de la wq (en wq_remove_locked o en wake_up_*).
+  task_get(t);
 }
 
+// Saca una tarea de la wq y suelta su referencia.
+// Se llama con el lock cogido.
 static void wq_remove_locked(wait_queue_t *wq, task_t *t) {
   wait_queue_entry_t **pp = &wq->head;
   while (*pp) {
@@ -40,37 +41,33 @@ static void wq_remove_locked(wait_queue_t *wq, task_t *t) {
       kfree(victim);
       wq->nr_waiting--;
       t->waiting_on = NULL;
+      // Soltar la referencia que tomamos en wq_add_locked.
+      // Lo hacemos DESPUÉS de liberar el entry, para no dejar
+      // referencias colgando.
+      task_put(t);
       return;
     }
     pp = &(*pp)->next;
   }
 }
 
-// El núcleo del wait. IMPORTANTE: el lock de la wq se coge y se suelta
-// en cada iteración, nunca se mantiene mientras se duerme. Esto evita
-// el deadlock con IRQ handlers que también quieren el lock.
 static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
                        bool interruptible) {
   task_t *self = sched_current();
   if (!self)
     return -1;
 
-  // Camino rápido: condición ya cierta.
   if (!cond || cond(arg))
     return 0;
 
   while (1) {
     unsigned long flags = spin_lock_irqsave(&wq->lock);
 
-    // Re-chequear con el lock cogido: cubre la race con wake_up.
     if (cond && cond(arg)) {
       spin_unlock_irqrestore(&wq->lock, flags);
       return 0;
     }
 
-    // Si la tarea ya no está bloqueada (spurious wake, o
-    // alguien la despertó justo antes de coger el lock), no
-    // la añadimos: volvemos a chequear.
     if (self->waiting_on == NULL) {
       self->wake_reason = 0;
       wq_add_locked(wq, self);
@@ -79,13 +76,9 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
 
     spin_unlock_irqrestore(&wq->lock, flags);
 
-    // Dormir. Al volver, alguien nos despertó o nos canceló.
     sched_yield();
 
-    // Re-chequear condición.
     if (cond && cond(arg)) {
-      // Estamos despiertos por condición. Si aún figurábamos
-      // en la wq (wake_up_one no nos sacó), sácanos.
       if (self->waiting_on == wq) {
         flags = spin_lock_irqsave(&wq->lock);
         wq_remove_locked(wq, self);
@@ -102,10 +95,6 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       }
       return -EINTR;
     }
-
-    // Spurious wakeup: volver a dormir.
-    // (No puede pasar en tu implementación porque wake_up_* sólo
-    //  se llama tras hacer un push, pero por seguridad.)
   }
 }
 
@@ -118,6 +107,8 @@ void wait_event(wait_queue_t *wq, bool (*cond)(void *), void *arg) {
   (void)wait_common(wq, cond, arg, false);
 }
 
+// Saca todas las tareas de la wq y las despierta. Cada tarea pierde la
+// referencia que tenía la wq sobre ella.
 void wake_up_all(wait_queue_t *wq) {
   unsigned long flags = spin_lock_irqsave(&wq->lock);
   wait_queue_entry_t *e = wq->head;
@@ -132,6 +123,14 @@ void wake_up_all(wait_queue_t *wq) {
     t->wake_reason = 0;
     sched_make_ready(t);
     kfree(e);
+    // Soltar la referencia de la wq. Si refcount llega a 0, task_put
+    // libera la tarea. PERO: antes de esto, ya hemos llamado a
+    // sched_make_ready(), que pone la tarea en READY y la mete en la
+    // runqueue del scheduler. El scheduler NO tiene una referencia
+    // extra por esto (la referencia del scheduler es la que tenía
+    // desde la creación, contada en refcount=1). Así que está bien
+    // hacer task_put aquí.
+    task_put(t);
     e = next;
   }
 }
@@ -147,10 +146,12 @@ void wake_up_one(wait_queue_t *wq) {
   wq->nr_waiting--;
   spin_unlock_irqrestore(&wq->lock, flags);
 
-  e->task->waiting_on = NULL;
-  e->task->wake_reason = 0;
-  sched_make_ready(e->task);
+  task_t *t = e->task;
+  t->waiting_on = NULL;
+  t->wake_reason = 0;
+  sched_make_ready(t);
   kfree(e);
+  task_put(t);
 }
 
 void wake_up_interruptible_all(wait_queue_t *wq) {
@@ -167,6 +168,7 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
     t->wake_reason = -EINTR;
     sched_make_ready(t);
     kfree(e);
+    task_put(t);
     e = next;
   }
 }
