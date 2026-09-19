@@ -434,8 +434,7 @@ static int64_t sys_win_blit_k(uint64_t a1, uint64_t a2, uint64_t a3,
   if (copy_from_user(&args, (const void *)a1, sizeof(args)) < 0)
     return -EFAULT;
 
-  // Validar el buffer de píxeles: el rango [src_x, src_y) .. [src_x + w,
-  // src_y + h) debe estar dentro del buffer fuente de altura src_stride.
+  // Validar parámetros básicos.
   if (args.w <= 0 || args.h <= 0 || args.src_stride <= 0)
     return -EINVAL;
   if (args.src_x < 0 || args.src_y < 0)
@@ -443,14 +442,40 @@ static int64_t sys_win_blit_k(uint64_t a1, uint64_t a2, uint64_t a3,
   if (args.src_x + args.w > args.src_stride)
     return -EINVAL;
 
-  // Comprobar que la región del buffer fuente está accesible.
-  // La última fila termina en (src_y + h - 1) * src_stride + src_x + w.
-  uint64_t last_row_offset = ((uint64_t)args.src_y + (uint64_t)args.h - 1) *
-                                 (uint64_t)args.src_stride +
-                             (uint64_t)args.src_x + (uint64_t)args.w;
-  if (last_row_offset > (uint64_t)1 << 32) // sanity check
+  // Calcular el tamaño del buffer fuente en bytes y validar overflow.
+  //
+  // El último píxel está en (src_y + h - 1) * src_stride + src_x + w - 1.
+  // El tamaño total en bytes es ese offset + 1, multiplicado por 4.
+  //
+  // Para evitar overflow, comprobamos cada multiplicación con
+  // __builtin_mul_overflow, que devuelve 1 si hay overflow.
+  uint64_t rows = (uint64_t)args.src_y + (uint64_t)args.h; // src_y + h
+  if (rows == 0)  // underflow imposible: src_y >= 0, h > 0
     return -EINVAL;
-  if (!access_ok(args.pixels, (size_t)last_row_offset * sizeof(uint32_t)))
+
+  uint64_t last_row_start;
+  if (__builtin_mul_overflow(rows - 1, (uint64_t)args.src_stride,
+                             &last_row_start))
+    return -EINVAL;
+
+  uint64_t last_pixel_offset;
+  if (__builtin_add_overflow(last_row_start, (uint64_t)args.src_x,
+                             &last_pixel_offset))
+    return -EINVAL;
+  if (__builtin_add_overflow(last_pixel_offset, (uint64_t)args.w,
+                             &last_pixel_offset))
+    return -EINVAL;
+
+  // last_pixel_offset es el offset en píxeles del último píxel + 1.
+  // El tamaño en bytes es last_pixel_offset * sizeof(uint32_t).
+  uint64_t size_bytes;
+  if (__builtin_mul_overflow(last_pixel_offset, sizeof(uint32_t),
+                             &size_bytes))
+    return -EINVAL;
+
+  // access_ok valida que el rango [pixels, pixels + size_bytes) está
+  // dentro del espacio de usuario. Si no, devuelve -EFAULT.
+  if (!access_ok(args.pixels, (size_t)size_bytes))
     return -EFAULT;
 
   int rc = winsrv_blit(proc->task, args.win_id, args.x, args.y, args.w, args.h,
