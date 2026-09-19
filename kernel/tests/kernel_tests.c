@@ -362,22 +362,19 @@ REGISTER_TEST("smp: cpu_local_data[0] inicializado",
               test_smp_cpu_local_data_exists);
 
 static void test_smp_this_cpu_macro(void) {
-  // Escribe y lee un campo vía this_cpu() para verificar que el macro
-  // resuelve al mismo slot que cpu_local_data[0].
-  uint64_t saved = this_cpu(tick_counter);
-  this_cpu(tick_counter) = 0xDEADBEEF;
-  TEST_ASSERT(cpu_local_data[0].tick_counter == 0xDEADBEEF,
-              "this_cpu(tick_counter) no escribió en cpu_local_data[0]");
-  this_cpu(tick_counter) = saved;
+  uint64_t saved = this_cpu(ticks_since_resched);
+  this_cpu(ticks_since_resched) = 0xDEADBEEF;
+  TEST_ASSERT(cpu_local_data[0].ticks_since_resched == 0xDEADBEEF,
+              "this_cpu(ticks_since_resched) no escribió en cpu_local_data[0]");
+  this_cpu(ticks_since_resched) = saved;
 }
 REGISTER_TEST("smp: this_cpu() accede al CPU actual", test_smp_this_cpu_macro);
 
 static void test_smp_per_cpu_macro(void) {
-  // Verifica que per_cpu() accede al slot correcto.
-  per_cpu(tick_counter, 3) = 0xCAFEBABE;
-  TEST_ASSERT(cpu_local_data[3].tick_counter == 0xCAFEBABE,
-              "per_cpu(tick_counter, 3) no escribió en cpu_local_data[3]");
-  per_cpu(tick_counter, 3) = 0;
+  per_cpu(ticks_since_resched, 3) = 0xCAFEBABE;
+  TEST_ASSERT(cpu_local_data[3].ticks_since_resched == 0xCAFEBABE,
+              "per_cpu(ticks_since_resched, 3) no escribió en cpu_local_data[3]");
+  per_cpu(ticks_since_resched, 3) = 0;
 }
 REGISTER_TEST("smp: per_cpu() accede al slot correcto", test_smp_per_cpu_macro);
 
