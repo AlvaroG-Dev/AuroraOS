@@ -34,11 +34,16 @@ task_switch:
     ; 1. Guardar RSP actual en old_task->rsp
     mov [rdi + TASK_OFF_RSP], rsp
 
-    ; 2. Guardar estado FPU/SSE
-    mov rax, [rdi + TASK_OFF_FPU_STATE]
-    test rax, rax
-    jz .skip_fxsave
-    fxsave64 [rax]
+; 2. Guardar estado FPU/SSE
+;
+; FXSAVE64 requiere que la dirección destino esté alineada a 16 bytes.
+; task->fpu_state apunta a task->fpu_raw redondeado hacia arriba a 16.
+; Ver sched.h para el _Static_assert que verifica que el redondeo no
+; desborda el buffer.
+mov rax, [rdi + TASK_OFF_FPU_STATE]
+test rax, rax
+jz .skip_fxsave
+fxsave64 [rax]
 .skip_fxsave:
 
     ; 3. Liberar sched_lock si se pasó en rdx
