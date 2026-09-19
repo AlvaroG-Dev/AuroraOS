@@ -22,7 +22,6 @@ typedef struct process {
   uint64_t heap_start;
   uint64_t heap_end;
   uint64_t heap_max;
-  // VMA y stack info:
   struct vma *vma_list;
   uint64_t stack_base;
   uint64_t stack_low;
@@ -30,10 +29,6 @@ typedef struct process {
   uint64_t stack_guard;
   file_descriptor_t *fds[MAX_PROCESS_FDS];
   struct process *next;
-
-  // Wait queue: aquí duermen los procesos que esperan a que
-  // alguno de SUS hijos muera. wake_up_all lo llama process_exit
-  // cuando un hijo termina.
   wait_queue_t child_wq;
 } process_t;
 
@@ -45,7 +40,14 @@ process_t *process_spawn_child(process_t *parent, const char *path);
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
                     int options);
 
+// [Fase A] Marca el proceso como zombie, cierra fds y ventanas, y
+// despierta al padre. NO mata la tarea. Es la parte "lógica".
 void process_exit(process_t *proc, int exit_code);
+
+// [Fase A] Marca el proceso como zombie, cierra fds/ventanas, despierta
+// al padre, mata la tarea actual y NO retorna. Unifica SYS_EXIT y
+// kill_current_process.
+__attribute__((noreturn)) void process_exit_current(int exit_code);
 
 static inline process_t *process_exec(const char *path) {
   return process_load(path);

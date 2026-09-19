@@ -185,6 +185,68 @@ irq_common:
     add rsp, 16                      ; limpiar int_num + error_code
     iretq
 
+
+; ---------------------------------------------------------------------------
+; [SMP 4.4] Stubs de IPI. Vectores 0xFB (resched), 0xFC (TLB).
+;
+; En kernel-to-kernel IPI no hay cambio de privilegio. El hardware no
+; empuja error_code para estos vectores, así que empujamos un dummy.
+; ---------------------------------------------------------------------------
+extern ipi_handler_resched
+extern ipi_handler_tlb
+
+global ipi_stub_resched
+ipi_stub_resched:
+    push 0
+    push 0xFB
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call ipi_handler_resched
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 16
+    iretq
+
+global ipi_stub_tlb
+ipi_stub_tlb:
+    push 0
+    push 0xFC
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call ipi_handler_tlb
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 16
+    iretq
+    
 ; ---------------------------------------------------------------------------
 ; isr_spurious: stub para el vector espurio del LAPIC (0xFF).
 ; No hace nada. Solo iretq. Configurado en la IDT para que el LAPIC

@@ -13,10 +13,10 @@
 // Selectores
 #define KERNEL_CS 0x08
 #define KERNEL_DS 0x10
-#define USER_DS   0x18
-#define USER_CS   0x20
-#define USER_DS_RING3 (USER_DS | 3)
-#define USER_CS_RING3 (USER_CS | 3)
+#define USER_CS 0x18
+#define USER_DS 0x20
+#define USER_CS_RING3 (USER_CS | 3) // 0x1B
+#define USER_DS_RING3 (USER_DS | 3) // 0x23
 
 // Selector TSS para un CPU dado
 #define TSS_SELECTOR(cpu) ((uint16_t)((5 + ((cpu) * 2)) * 8))

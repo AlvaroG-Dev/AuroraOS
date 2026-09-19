@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 struct wait_queue;
+struct process;
 
 typedef enum {
   TASK_READY = 0,
@@ -45,24 +46,43 @@ typedef struct task {
   int is_idle;
   struct task *next;
 
+  // [Fase A] Enlace directo a la estructura de proceso (NULL para
+  // tareas de kernel e idle). Evita recorrer process_list en cada
+  // syscall y elimina el use-after-free que había.
+  struct process *proc;
+
   struct wait_queue *waiting_on;
   int wake_reason;
 
   volatile int preempt_count;
-
   volatile int refcount;
+
+  volatile int need_resched;
+  int cpu_affinity;
+  volatile int on_cpu;
+  wait_queue_entry_t wait_entry;
 } task_t;
 
 void sched_init(void);
 task_t *sched_create_task(void (*fn)(void));
 task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
                                uint64_t cr3);
+
+// [Fase A] Crea una tarea de usuario pero NO la inserta en la runqueue.
+// El llamante debe inicializar task->proc y llamar a sched_make_ready(task)
+// cuando esté todo listo. Esto evita que un AP ejecute la tarea antes de
+// que process_spawn haya terminado de montarla.
+task_t *sched_create_user_task_stopped(void (*fn)(void),
+                                       uint64_t user_stack_top, uint64_t cr3);
+
 void sched_tick(void);
 void sched_yield(void);
 task_t *sched_current(void);
 task_t *sched_find_task(uint32_t task_id);
 
 void sched_make_ready(task_t *t);
+void sched_mark_need_resched(void);
+void sched_publish_task(task_t *t);
 
 void preempt_disable(void);
 void preempt_enable(void);
@@ -78,12 +98,25 @@ void task_die_hlt(void);
 
 __attribute__((noreturn)) void sched_start(task_t *task);
 
-// ---------------------------------------------------------------------------
-// SMP: Fase 0/3.1
-// ---------------------------------------------------------------------------
 void smp_init(void);
 void smp_dump(void);
 void sched_start_ap(void);
-
-// Publica el APIC ID del BSP en cpu_local_data[0]. Llamar tras apic_init.
 void smp_set_bsp_lapic_id(uint32_t lapic_id);
+
+// ---------------------------------------------------------------------------
+// Asserts de offsets asm↔C.
+//
+// switch.asm usa:
+//   0x00 → rsp
+//   0x18 → fpu_state
+//   0x20 → cr3
+//
+// Si cambias el struct task_t, estos asserts te avisan.
+// ---------------------------------------------------------------------------
+_Static_assert(offsetof(task_t, rsp) == 0x00, "switch.asm: rsp @ 0x00");
+_Static_assert(offsetof(task_t, fpu_state) == 0x18, "switch.asm");
+_Static_assert(offsetof(task_t, cr3) == 0x20, "switch.asm");
+_Static_assert(offsetof(task_t, on_cpu) == 0x78C, "switch.asm TASK_OFF_ON_CPU");
+_Static_assert(offsetof(spinlock_t, locked) == 0 &&
+                   sizeof(((spinlock_t *)0)->locked) == 4,
+               "switch.asm libera el lock con mov dword [rdx], 0");

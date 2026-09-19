@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "gdt.h"
 #include "heap.h"
+#include "ipi.h"
 #include "klog.h"
 #include "panic.h"
 #include "serial.h"
@@ -34,6 +35,11 @@ static uint64_t kernel_cr3 = 0;
 
 static void idle_loop(void) {
   while (1) {
+    task_t *cur = sched_current();
+    if (cur && cur->need_resched) {
+      cur->need_resched = 0;
+      sched_yield();
+    }
     __asm__ volatile("sti; hlt");
   }
 }
@@ -120,18 +126,27 @@ int preempt_count(void) {
 
 // ---------------------------------------------------------------------------
 // Inicialización común de tarea
+//   - id atómico (se llama desde cualquier CPU, p. ej. spawn en una syscall)
+//   - inicializa la entrada de wait queue embebida
 // ---------------------------------------------------------------------------
 static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->rsp = (uint64_t)sp;
-  task->id = next_id++;
+  task->id = __sync_fetch_and_add(&next_id, 1);
   task->state = TASK_READY;
   task->cr3 = cr3;
   task->is_idle = 0;
+  task->proc = NULL;
   task->waiting_on = NULL;
   task->wake_reason = 0;
   task->preempt_count = 0;
   task->next = task;
   task->refcount = 1;
+  task->need_resched = 0;
+  task->cpu_affinity = -1;
+  task->on_cpu = 0;
+
+  task->wait_entry.task = NULL;
+  task->wait_entry.next = NULL;
 
   task->mailbox.head = 0;
   task->mailbox.tail = 0;
@@ -179,7 +194,8 @@ void sched_init(void) {
     if (!stack) {
       LOG_PANIC("[SCHED] Fallo al crear stack para idle task %d", i);
     }
-    uint64_t *sp = (uint64_t *)(((uint64_t)(stack + TASK_STACK_SIZE)) & ~0xFULL);
+    uint64_t *sp =
+        (uint64_t *)(((uint64_t)(stack + TASK_STACK_SIZE)) & ~0xFULL);
     *(--sp) = (uint64_t)task_trampoline;
     *(--sp) = 0;
     *(--sp) = 0;
@@ -193,6 +209,8 @@ void sched_init(void) {
     idle->is_idle = 1;
     idle->state = TASK_READY;
     idle->next = NULL;
+    // La idle de cada CPU solo puede correr en su CPU.
+    idle->cpu_affinity = i;
     idle_tasks[i] = idle;
   }
 
@@ -233,6 +251,11 @@ task_t *sched_create_task(void (*fn)(void)) {
 
 // ---------------------------------------------------------------------------
 // Reap de tareas muertas (llamado con sched_lock cogido)
+//
+// Solo cambia el nivel de log: LOG_INFO -> LOG_TRACE. Escribir por el
+// serial con sched_lock cogido e IRQs off bloquea a TODAS las CPUs que
+// esperen el lock durante milisegundos.
+// Solo se liberan tareas con on_cpu == 0 (otra CPU ya no las usa).
 // ---------------------------------------------------------------------------
 static void reap_dead_tasks(void) {
   if (!task_list_head)
@@ -240,25 +263,26 @@ static void reap_dead_tasks(void) {
 
   task_t *cur = sched_current();
 
-  // Si solo hay un nodo en la lista circular
   if (task_list_head->next == task_list_head) {
-    if (task_list_head->state == TASK_DEAD && !task_list_head->is_idle && task_list_head != cur) {
+    if (task_list_head->state == TASK_DEAD && !task_list_head->is_idle &&
+        task_list_head != cur && task_list_head->on_cpu == 0) {
       task_t *dead = task_list_head;
       task_list_head = NULL;
-      LOG_INFO("[SCHED] Limpiando última tarea zombie ID=%u (refcount=%d)", dead->id, dead->refcount);
+      LOG_TRACE("[SCHED] Limpiando última tarea zombie ID=%u (refcount=%d)",
+                dead->id, dead->refcount);
       task_put(dead);
     }
     return;
   }
 
-  // Lista con 2 o más nodos
   task_t *prev = task_list_head;
   for (int i = 0; i < 32 && task_list_head; i++) {
     task_t *target = prev->next;
     if (!target)
       break;
 
-    if (target->state == TASK_DEAD && !target->is_idle && target != cur) {
+    if (target->state == TASK_DEAD && !target->is_idle && target != cur &&
+        target->on_cpu == 0) {
       if (target->next == target) {
         task_list_head = NULL;
         task_put(target);
@@ -268,7 +292,8 @@ static void reap_dead_tasks(void) {
       if (target == task_list_head) {
         task_list_head = prev->next;
       }
-      LOG_INFO("[SCHED] Limpiando tarea zombie ID=%u (refcount=%d)", target->id, target->refcount);
+      LOG_TRACE("[SCHED] Limpiando tarea zombie ID=%u (refcount=%d)",
+                target->id, target->refcount);
       task_put(target);
     } else {
       prev = prev->next;
@@ -279,7 +304,8 @@ static void reap_dead_tasks(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Invariantes
+// Invariantes (+ nuevo: una tarea que se va a ejecutar no puede seguir
+// ejecutándose en otra CPU)
 // ---------------------------------------------------------------------------
 static void sched_check_invariants(task_t *t) {
   if (!t)
@@ -296,10 +322,21 @@ static void sched_check_invariants(task_t *t) {
   if (t->refcount <= 0) {
     LOG_PANIC("sched: task %u con refcount=%d invalido", t->id, t->refcount);
   }
+  if (t->on_cpu) {
+    LOG_PANIC("sched: task %u elegida con on_cpu=1 (sigue en otra CPU)", t->id);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Tick
+// Tick  (FIX PRINCIPAL)
+//
+//  1) El selector ignora tareas con on_cpu == 1. Antes, una tarea que se
+//     estaba durmiendo en la CPU A (ya BLOCKED, aún ejecutando en su pila)
+//     podía ser marcada READY por un waker en la CPU B y elegida por la CPU
+//     C con su rsp antiguo: dos CPUs sobre la misma pila de kernel.
+//  2) Si la tarea actual fue despertada mientras aún corría (state == READY)
+//     y no hay otra que ejecutar, se normaliza a RUNNING y sigue: no se
+//     pierde el wake-up y no hace falta dormirla.
 // ---------------------------------------------------------------------------
 void sched_tick(void) {
   task_t *curr = (task_t *)this_cpu(current_task);
@@ -307,12 +344,23 @@ void sched_tick(void) {
     return;
 
   this_cpu(tick_counter)++;
-  if (this_cpu(tick_counter) < SCHED_INTERVAL)
+
+  // [SMP 4.4] Si alguien pidió un resched (IPI o wake_up de otra CPU),
+  // forzamos el switch sin esperar a SCHED_INTERVAL.
+  int force = curr->need_resched;
+  curr->need_resched = 0;
+
+  if (!force && this_cpu(tick_counter) < SCHED_INTERVAL)
     return;
   this_cpu(tick_counter) = 0;
 
-  if (curr->preempt_count > 0)
+  if (curr->preempt_count > 0) {
+    // No podemos cambiar de contexto. Si había un resched pendiente, lo
+    // dejamos marcado para procesarlo al salir de la sección crítica.
+    if (force)
+      curr->need_resched = 1;
     return;
+  }
 
   uint64_t flags;
   __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
@@ -327,15 +375,15 @@ void sched_tick(void) {
 
   int cpu = smp_processor_id();
 
-  // Buscar una tarea en TASK_READY en la lista compartida
   task_t *next = NULL;
   if (task_list_head) {
     task_t *p = task_list_head;
     task_t *start = p;
     do {
-      if (p->state == TASK_READY && !p->is_idle) {
+      if (p->state == TASK_READY && !p->is_idle &&
+          __atomic_load_n(&p->on_cpu, __ATOMIC_ACQUIRE) == 0 &&
+          (p->cpu_affinity < 0 || p->cpu_affinity == cpu)) {
         next = p;
-        // Rotar task_list_head para round-robin equitativo entre CPUs
         task_list_head = p->next;
         break;
       }
@@ -343,19 +391,19 @@ void sched_tick(void) {
     } while (p && p != start);
   }
 
-  // Si no hay tareas listas:
   if (!next) {
     if (curr->is_idle) {
-      // Ya estamos en idle de este CPU
       __sync_lock_release(&sched_lock.locked);
       __asm__ volatile("push %0; popfq" : : "r"(flags));
       return;
     }
-    // Si la tarea actual murió o se bloqueó, cambiar a idle
     if (curr->state == TASK_BLOCKED || curr->state == TASK_DEAD) {
       next = idle_tasks[cpu];
     } else {
-      // La tarea actual sigue RUNNING y no hay competencia
+      // curr sigue siendo ejecutable. Si state == READY es que nos
+      // despertaron en la ventana entre "BLOCKED" y este punto.
+      if (curr->state == TASK_READY)
+        curr->state = TASK_RUNNING;
       __sync_lock_release(&sched_lock.locked);
       __asm__ volatile("push %0; popfq" : : "r"(flags));
       return;
@@ -363,6 +411,8 @@ void sched_tick(void) {
   }
 
   if (next == curr) {
+    if (curr->state == TASK_READY)
+      curr->state = TASK_RUNNING;
     __sync_lock_release(&sched_lock.locked);
     __asm__ volatile("push %0; popfq" : : "r"(flags));
     return;
@@ -377,13 +427,15 @@ void sched_tick(void) {
   next->state = TASK_RUNNING;
   this_cpu(current_task) = next;
 
+  // on_cpu lo actualiza task_switch (asm) justo después de cargar el stack
+  // de la nueva tarea (old->on_cpu = 0, new->on_cpu = 1). No tocarlo aquí.
+
   if (next->stack) {
     uint64_t kstack = (uint64_t)((uint8_t *)next->stack + TASK_STACK_SIZE);
     tss_set_rsp0(kstack);
     this_cpu(kernel_stack) = kstack;
   }
 
-  // task_switch liberará sched_lock tan pronto como old esté completamente guardado en RAM
   task_switch(old, next, &sched_lock);
 
   __asm__ volatile("push %0; popfq" : : "r"(flags));
@@ -394,25 +446,95 @@ void sched_yield(void) {
   sched_tick();
 }
 
-task_t *sched_current(void) {
-  return (task_t *)this_cpu(current_task);
+task_t *sched_current(void) { return (task_t *)this_cpu(current_task); }
+
+// ---------------------------------------------------------------------------
+// [SMP 4.4] Marcar need_resched en la tarea actual.
+// ---------------------------------------------------------------------------
+void sched_mark_need_resched(void) {
+  task_t *cur = sched_current();
+  if (cur) {
+    cur->need_resched = 1;
+  }
 }
 
+// ---------------------------------------------------------------------------
+// NUEVA: despierta (IPI) a una CPU idle para que ejecute 't'. Antes esta
+// lógica vivía dentro de sched_make_ready, y sched_publish_task no la
+// alcanzaba porque la tarea ya nacía READY (was_blocked == 0) y salía sin
+// avisar a nadie: la tarea esperaba al siguiente tick.
+// ---------------------------------------------------------------------------
+static void sched_kick_idle_cpu(task_t *t) {
+  int me = smp_processor_id();
+
+  // Afinidad: solo ese CPU.
+  if (t->cpu_affinity >= 0) {
+    int cpu = t->cpu_affinity;
+    if (cpu == me) {
+      task_t *me_task = sched_current();
+      if (me_task && me_task->is_idle) {
+        me_task->need_resched = 1;
+      }
+      return;
+    }
+    task_t *cur = per_cpu(current_task, cpu);
+    if (cur && cur->is_idle) {
+      cur->need_resched = 1;
+      __sync_synchronize();
+      ipi_send(per_cpu(lapic_id, cpu), IPI_VECTOR_RESCHED);
+    }
+    return;
+  }
+
+  // Sin afinidad: buscar un AP idle.
+  static volatile int next_cpu = 0;
+  int start = __sync_fetch_and_add(&next_cpu, 1) % MAX_CPUS;
+
+  for (int i = 0; i < MAX_CPUS; i++) {
+    int cpu = (start + i) % MAX_CPUS;
+    if (cpu == me)
+      continue;
+    task_t *cur = per_cpu(current_task, cpu);
+    if (!cur || !cur->is_idle)
+      continue;
+
+    cur->need_resched = 1;
+    __sync_synchronize();
+    ipi_send(per_cpu(lapic_id, cpu), IPI_VECTOR_RESCHED);
+    return;
+  }
+
+  task_t *me_task = sched_current();
+  if (me_task && me_task->is_idle) {
+    me_task->need_resched = 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// [SMP 4.4] sched_make_ready: solo la transición BLOCKED -> READY (bajo
+// sched_lock) y el aviso a una CPU idle si la tarea estaba dormida.
+// No resucita tareas DEAD ni RUNNING.
+// ---------------------------------------------------------------------------
 void sched_make_ready(task_t *t) {
   if (!t)
     return;
+
   unsigned long flags = spin_lock_irqsave(&sched_lock);
+  int was_blocked = (t->state == TASK_BLOCKED);
   if (t->state == TASK_BLOCKED || t->state == TASK_READY) {
     t->state = TASK_READY;
   }
   spin_unlock_irqrestore(&sched_lock, flags);
+
+  if (was_blocked)
+    sched_kick_idle_cpu(t);
 }
 
 // ---------------------------------------------------------------------------
 // Tareas de usuario
 // ---------------------------------------------------------------------------
-task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
-                               uint64_t cr3) {
+task_t *sched_create_user_task_stopped(void (*fn)(void),
+                                       uint64_t user_stack_top, uint64_t cr3) {
   task_t *task = (task_t *)kmalloc(sizeof(task_t));
   if (!task)
     return NULL;
@@ -441,11 +563,18 @@ task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
 
   task_init_common(task, sp, cr3);
   task->stack = (uint64_t *)kstack;
-  task_list_insert(task);
-
+  // NO se inserta en la runqueue. El caller hará sched_make_ready.
   return task;
 }
 
+task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
+                               uint64_t cr3) {
+  task_t *t = sched_create_user_task_stopped(fn, user_stack_top, cr3);
+  if (!t)
+    return NULL;
+  task_list_insert(t);
+  return t;
+}
 // ---------------------------------------------------------------------------
 // Búsqueda
 // ---------------------------------------------------------------------------
@@ -470,9 +599,14 @@ task_t *sched_find_task(uint32_t task_id) {
 
 // ---------------------------------------------------------------------------
 // task_die_hlt
+//
+// Se llama desde el handler de #PF cuando matamos la tarea actual. La
+// tarea está marcada TASK_DEAD pero sigue corriendo en esta CPU. Debemos
+// ceder para que el scheduler (en cualquier CPU) pueda reapearla.
 // ---------------------------------------------------------------------------
 void task_die_hlt(void) {
   while (1) {
+    sched_yield();
     __asm__ volatile("sti; hlt");
   }
 }
@@ -498,6 +632,7 @@ __attribute__((noreturn)) void sched_start(task_t *task) {
   }
 
   task->state = TASK_RUNNING;
+  task->on_cpu = 1;
   this_cpu(current_task) = task;
 
   task_jump_to(task);
@@ -515,6 +650,7 @@ __attribute__((noreturn)) void sched_start_ap(void) {
   }
 
   idle->state = TASK_RUNNING;
+  idle->on_cpu = 1;
   this_cpu(current_task) = idle;
 
   uint64_t kstack = (uint64_t)((uint8_t *)idle->stack + TASK_STACK_SIZE);
@@ -538,4 +674,15 @@ void task_entry_wrapper(void (*fn)(void)) {
   while (1) {
     __asm__ volatile("hlt");
   }
+}
+
+// ---------------------------------------------------------------------------
+// [Fase A] Publica una tarea recién creada (sched_create_*_stopped) en la
+// runqueue y avisa a una CPU idle. Ahora sí despierta a alguien.
+// ---------------------------------------------------------------------------
+void sched_publish_task(task_t *t) {
+  if (!t)
+    return;
+  task_list_insert(t);
+  sched_kick_idle_cpu(t);
 }

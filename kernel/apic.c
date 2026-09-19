@@ -213,16 +213,27 @@ void apic_init(void) {
 
 // ---------------------------------------------------------------------------
 // IOAPIC: redirecciones
+//
+// NOTA: `irq` se refiere a una IRQ legacy del PIC (0-15). Para IRQs de
+// PCI (16+) habría que usar directamente el GSI del dispositivo, no
+// pasar por g_irq_to_gsi[]. Eso es trabajo futuro.
 // ---------------------------------------------------------------------------
 void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
                          int masked) {
+  // Validar rango. g_irq_to_gsi[] tiene 16 entradas (IRQs legacy).
+  // Si llega una IRQ >= 16, es un bug del llamante.
+  if (irq >= 16) {
+    LOG_ERR("[APIC] ioapic_redirect_irq: IRQ %u fuera de rango (0-15)", irq);
+    return;
+  }
+
   const acpi_info_t *acpi = acpi_get_info();
   if (acpi->ioapic_count == 0) {
     LOG_ERR("[APIC] No hay IOAPICs");
     return;
   }
 
-  uint8_t gsi = g_irq_to_gsi[irq & 0x0F];
+  uint8_t gsi = g_irq_to_gsi[irq];
   if (gsi == 0xFF) {
     LOG_DEBUG("[APIC] IRQ %u sin GSI, redirección ignorada", irq);
     return;
@@ -276,11 +287,16 @@ void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
 }
 
 void ioapic_mask_irq(uint8_t irq, int masked) {
+  if (irq >= 16) {
+    LOG_ERR("[APIC] ioapic_mask_irq: IRQ %u fuera de rango (0-15)", irq);
+    return;
+  }
+
   const acpi_info_t *acpi = acpi_get_info();
   if (acpi->ioapic_count == 0)
     return;
 
-  uint8_t gsi = g_irq_to_gsi[irq & 0x0F];
+  uint8_t gsi = g_irq_to_gsi[irq];
   if (gsi == 0xFF)
     return; // IRQ no ruteable
 

@@ -1,6 +1,5 @@
-volatile int smp_sched_active = 0;
-#include "sched.h"
 // kernel/smp_boot.c
+volatile int smp_sched_active = 0;
 #include "smp_boot.h"
 #include "acpi.h"
 #include "apic.h"
@@ -11,6 +10,7 @@ volatile int smp_sched_active = 0;
 #include "paging.h"
 #include "panic.h"
 #include "pmm.h"
+#include "sched.h"
 #include "serial.h"
 #include "string.h"
 
@@ -69,7 +69,8 @@ static void dump_smp_boot_params(const char *tag) {
 // ---------------------------------------------------------------------------
 // ACPI Multiprocessor Wakeup Mailbox
 // ---------------------------------------------------------------------------
-__attribute__((unused)) static int acpi_mailbox_wakeup_ap(uint32_t apic_id, uint64_t wakeup_virt) {
+__attribute__((unused)) static int
+acpi_mailbox_wakeup_ap(uint32_t apic_id, uint64_t wakeup_virt) {
   if (!g_mailbox)
     return -1;
 
@@ -120,7 +121,6 @@ void smp_boot_init(void) {
   void *dst = phys_to_virt(SMP_TRAMPOLINE_PHYS);
   memcpy(dst, smp_trampoline_start, tramp_size);
 
-
   LOG_DEBUG("[SMP] Trampoline copiado a 0x%llx (%zu bytes)",
             (unsigned long long)SMP_TRAMPOLINE_PHYS, tramp_size);
 
@@ -137,17 +137,12 @@ void smp_boot_init(void) {
 
   // -------------------------------------------------------------------------
   // Parchear el header del trampoline.
-  // El trampoline tiene un header fijo al inicio del binario:
-  //   Offset 0x00-0x07: jmp short + padding (no tocar)
-  //   Offset 0x08:      pml4_phys  (uint64_t) <- leido con mov eax,[0x7008]
-  //   Offset 0x10:      entry_virt (uint64_t) <- leido con mov rax,[0x7010]
-  //   Offset 0x18:      stack_top  (uint64_t) <- leido con mov rsp,[0x7018]
-  //                     stack_top se actualiza por AP antes de cada SIPI.
   // -------------------------------------------------------------------------
   smp_trampoline_header_t *hdr = (smp_trampoline_header_t *)dst;
-  hdr->pml4_phys  = pml4_phys;
+  hdr->pml4_phys = pml4_phys;
   hdr->entry_virt = entry_virt;
-  hdr->stack_top  = 0;  /* se escribe por AP en smp_boot_aps() */
+  hdr->stack_top = 0; /* se escribe por AP en smp_boot_aps() */
+  hdr->ap_index = 0;  /* se escribe por AP en smp_boot_aps() */
 
   LOG_DEBUG("[SMP] Trampoline configurado: pml4=0x%llx entry=0x%llx",
             (unsigned long long)pml4_phys, (unsigned long long)entry_virt);
@@ -170,9 +165,27 @@ void smp_boot_init(void) {
 
 // ---------------------------------------------------------------------------
 // ap_entry
+//
+// El trampoline nos deja en r12 el índice ACPI del AP (ap_index), leído
+// del header en offset 0x20. Es lo PRIMERO que leemos aquí, antes de
+// cualquier call C, para no depender de que r12 se preserve.
+//
+// Antes usábamos smp_boot_params->next_ap_apic_id y buscábamos el APIC
+// ID en acpi->cpus[]. Eso tenía dos problemas:
+//   1) Carrera: el BSP podía sobrescribir next_ap_apic_id antes de que
+//      este AP lo leyera (ventana pequeña pero real).
+//   2) ap_stack_top[] se indexaba con APIC ID en el BSP y con índice
+//      ACPI aquí. Coincidían solo si APIC ID == índice ACPI (QEMU),
+//      pero no en hardware real con APIC IDs no contiguos.
 // ---------------------------------------------------------------------------
-
 void ap_entry(void) {
+  // -----------------------------------------------------------------------
+  // PASO -1: leer el índice ACPI que el trampoline dejó en r12.
+  // -----------------------------------------------------------------------
+  uint64_t ap_index_64;
+  __asm__ volatile("mov %%r12, %0" : "=r"(ap_index_64));
+  uint32_t my_cpu = (uint32_t)ap_index_64;
+
   // ---------------------------------------------------------------------------
   // PASO 0: Activar SSE y FPU. El trampoline ya ha configurado CR4 con
   // OSFXSR y OSXMMEXCPT.
@@ -189,31 +202,35 @@ void ap_entry(void) {
 
   DIAG('A');
 
-  uint32_t my_apic_id = smp_boot_params->next_ap_apic_id;
+  const acpi_info_t *acpi = acpi_get_info();
   DIAG('B');
 
-  const acpi_info_t *acpi = acpi_get_info();
-  DIAG('C');
-
-  int my_cpu = -1;
-  for (int i = 0; i < acpi->cpu_count; i++) {
-    if (acpi->cpus[i].apic_id == my_apic_id) {
-      my_cpu = i;
-      break;
-    }
-  }
-  DIAG('D');
-
-  if (my_cpu < 0 || my_cpu >= MAX_CPUS) {
+  // Validar el índice contra ACPI y contra MAX_CPUS. Si el firmware
+  // enumeró mal, o el trampoline nos pasó un índice inválido, mejor
+  // caer aquí que corromper cpu_local_data de otra CPU.
+  if (my_cpu >= (uint32_t)acpi->cpu_count || my_cpu >= MAX_CPUS) {
     DIAG('X');
+    LOG_ERR("[AP] Índice ACPI inválido: %u (cpu_count=%d, MAX_CPUS=%d)", my_cpu,
+            acpi->cpu_count, MAX_CPUS);
     while (1)
       __asm__ volatile("cli; hlt");
   }
-  DIAG('E');
+
+  // Reconstruimos my_apic_id desde ACPI (solo para logs y para
+  // cpu_local_data[my_cpu].lapic_id).
+  uint32_t my_apic_id = acpi->cpus[my_cpu].apic_id;
+  DIAG('C');
 
   // GDT y IDT para este AP
   gdt_ap_init(my_cpu);
   DIAG('F');
+
+  extern void syscall_init_ap(void);
+  syscall_init_ap();
+  DIAG('S');
+  uint64_t star = rdmsr(MSR_STAR);
+  LOG_DEBUG("[AP] CPU %d STAR=0x%lx (R3_CS=0x%lx)", my_cpu, (unsigned long)star,
+            (unsigned long)((star >> 48) & 0xFFFF));
 
   idt_load();
   DIAG('G');
@@ -241,7 +258,8 @@ void ap_entry(void) {
   __sync_fetch_and_add(&smp_boot_params->aps_ready, 1);
   DIAG('K');
 
-  LOG_INFO("[AP] CPU %d (APIC ID %u) inicializado y listo para scheduler", my_cpu, my_apic_id);
+  LOG_INFO("[AP] CPU %d (APIC ID %u) inicializado y listo para scheduler",
+           my_cpu, my_apic_id);
   DIAG('L');
 
   extern volatile int smp_sched_active;
@@ -289,7 +307,8 @@ void smp_boot_aps(void) {
     return;
   }
 
-  LOG_INFO("[SMP] Arrancando %d procesador(es) de aplicación (AP)...", expected);
+  LOG_INFO("[SMP] Arrancando %d procesador(es) de aplicación (AP)...",
+           expected);
   dump_smp_boot_params("BSP-before");
 
   static uint8_t ap_stacks[MAX_CPUS][16 * 1024] __attribute__((aligned(16)));
@@ -298,34 +317,44 @@ void smp_boot_aps(void) {
     const acpi_cpu_t *c = &acpi->cpus[i];
     if (!c->enabled || c->apic_id == bsp_id)
       continue;
-    if (c->apic_id >= MAX_CPUS)
+    // El índice en ap_stacks y ap_stack_top es el índice ACPI (i),
+    // no el APIC ID. Así BSP y AP usan el mismo espacio de índices,
+    // independientemente de si los APIC IDs son contiguos.
+    if (i >= MAX_CPUS)
       continue;
 
-    uint64_t stack_top =
-        (uint64_t)&ap_stacks[c->apic_id][0] + sizeof(ap_stacks[c->apic_id]);
-    smp_boot_params->ap_stack_top[c->apic_id] = stack_top;
+    uint64_t stack_top = (uint64_t)&ap_stacks[i][0] + sizeof(ap_stacks[i]);
+    smp_boot_params->ap_stack_top[i] = stack_top;
 
-    /* Escribir stack_top en el header del trampoline (offset 0x18)
-     * antes del SIPI, para que el AP lo lea con mov rsp,[0x7018]. */
+    /* Escribir stack_top y ap_index en el header del trampoline
+     * (offsets 0x18 y 0x20) antes del SIPI. El AP los lee con
+     * mov rsp,[0x7018] y mov r12,[0x7020]. */
     smp_trampoline_header_t *hdr =
         (smp_trampoline_header_t *)phys_to_virt(SMP_TRAMPOLINE_PHYS);
     hdr->stack_top = stack_top;
+    hdr->ap_index = (uint64_t)i;
     __sync_synchronize();
 
-    LOG_DEBUG("[SMP] Arrancando AP apic_id=%u (stack_top=0x%016llx)",
-              c->apic_id, (unsigned long long)stack_top);
+    LOG_DEBUG("[SMP] Arrancando AP apic_id=%u idx=%d (stack_top=0x%016llx)",
+              c->apic_id, i, (unsigned long long)stack_top);
     smp_boot_params->next_ap_apic_id = c->apic_id;
     __sync_synchronize();
     dump_smp_boot_params("BSP-after-set-next");
 
     int before = smp_boot_params->aps_ready;
 
-    lapic_send_ipi_raw(c->apic_id, 0x0000C500);
-    lapic_send_ipi_raw(c->apic_id, 0x00008500);
+    // INIT: delivery mode 5, level assert, edge trigger -> 0x00004500.
+    // El original 0x00008500 tenía bit 15 (level trigger) a 1, que es
+    // incorrecto para un INIT. En QEMU colaba; en hardware real, no.
+    lapic_send_ipi_raw(c->apic_id, 0x00004500);
+    // El segundo INIT del par INIT-SIPI-SIPI original tenía el mismo
+    // problema; lo eliminamos y dejamos un solo INIT seguido de dos
+    // SIPIs, que es lo que recomienda el SDM.
     delay_ms(10);
 
     DIAG('P');
     LOG_DEBUG("[SMP] SIPI enviado -> apic_id=%u", c->apic_id);
+    // SIPI: delivery mode 6, edge trigger -> 0x00000600 | vector.
     lapic_send_ipi_raw(c->apic_id, 0x00000600 | SMP_TRAMPOLINE_VECTOR);
     delay_ms(1);
     lapic_send_ipi_raw(c->apic_id, 0x00000600 | SMP_TRAMPOLINE_VECTOR);
@@ -348,10 +377,11 @@ void smp_boot_aps(void) {
   }
 
   if (smp_boot_params->aps_ready == expected) {
-    LOG_INFO("[SMP] %d/%d APs listos y operativos",
-             smp_boot_params->aps_ready, expected);
+    LOG_INFO("[SMP] %d/%d APs listos y operativos", smp_boot_params->aps_ready,
+             expected);
   } else {
     LOG_WARN("[SMP] Solo %d/%d APs respondieron (started=%d)",
-             smp_boot_params->aps_ready, expected, smp_boot_params->aps_started);
+             smp_boot_params->aps_ready, expected,
+             smp_boot_params->aps_started);
   }
 }

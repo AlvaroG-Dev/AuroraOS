@@ -1,6 +1,7 @@
 // kernel/panic.c
 #include "panic.h"
 #include "cpu.h"
+#include "gdt.h"
 #include "heap.h"
 #include "klog.h"
 #include "paging.h"
@@ -236,6 +237,18 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
   dump_paging();
   dump_slab();
   dump_heap();
+
+  uint64_t gs_base = rdmsr(0xC0000101);
+  uint64_t kgs_base = rdmsr(0xC0000102);
+  LOG_PANIC("MSR_GS_BASE=0x%lx MSR_KERNEL_GS_BASE=0x%lx",
+            (unsigned long)gs_base, (unsigned long)kgs_base);
+  LOG_PANIC("cpu_local_data[0]=%p cpu_local_data[1]=%p",
+            (void *)&cpu_local_data[0], (void *)&cpu_local_data[1]);
+
+  uint64_t star = rdmsr(MSR_STAR);
+  uint16_t r3_cs = (uint16_t)((star >> 48) & 0xFFFF);
+  LOG_PANIC("STAR R3_CS=0x%x (expected USER_CS=0x%x)", r3_cs, USER_CS);
+  LOG_PANIC("sysret will load CS=0x%x SS=0x%x", r3_cs | 3, (r3_cs + 8) | 3);
 
   if (regs) {
     serial_puts("\n--- Backtrace ---");

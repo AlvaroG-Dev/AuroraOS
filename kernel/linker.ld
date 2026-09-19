@@ -27,12 +27,20 @@ SECTIONS
     }
 
     /* ------------------------------------------------------------------
+     * Tabla de fixups para uaccess. Pares (fault_rip, fixup_rip) de
+     * 16 bytes cada uno, terminados por (0, 0).
+     * ------------------------------------------------------------------ */
+    . = ALIGN(8);
+    .uaccess_table : AT(ADDR(.uaccess_table) - KERNEL_VMA)
+    {
+        __uaccess_table_start = .;
+        KEEP(*(.uaccess_table))
+        __uaccess_table_end = .;
+    }
+
+    /* ------------------------------------------------------------------
      * Sección de tests. Los símbolos __tests_start / __tests_end
-     * delimitan el array. Cada test_case_t tiene 16 bytes:
-     *   - const char *name  (8 bytes)
-     *   - test_fn_t   fn    (8 bytes)
-     * Alineamos a 8 para que la resta de punteros dé el número
-     * exacto de elementos.
+     * delimitan el array.
      * ------------------------------------------------------------------ */
     . = ALIGN(8);
     .tests : AT(ADDR(.tests) - KERNEL_VMA)
