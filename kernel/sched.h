@@ -120,3 +120,15 @@ _Static_assert(offsetof(task_t, on_cpu) == 0x78C, "switch.asm TASK_OFF_ON_CPU");
 _Static_assert(offsetof(spinlock_t, locked) == 0 &&
                    sizeof(((spinlock_t *)0)->locked) == 4,
                "switch.asm libera el lock con mov dword [rdx], 0");
+
+// FXSAVE64/FXRSTOR64 requieren que la dirección del buffer esté
+// alineada a 16 bytes. task->fpu_state se calcula como
+//   (uint64_t)task->fpu_raw redondeado hacia arriba a 16.
+// Para que esto funcione, fpu_raw debe estar a una distancia tal que
+// el redondeo no desborde el buffer.
+//
+// Verificamos que fpu_raw + 15 (el peor caso del redondeo) siga
+// cabiendo dentro de task_t.
+_Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) + 15
+                   <= sizeof(task_t),
+               "fpu_raw demasiado cerca del final de task_t");
