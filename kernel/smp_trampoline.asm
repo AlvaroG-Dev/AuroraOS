@@ -37,7 +37,7 @@ trampoline_code:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7C00
+    mov sp, 0x6000
 
     mov al, 'a'
     out 0xE9, al
