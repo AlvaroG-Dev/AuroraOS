@@ -8,7 +8,7 @@
 //
 // La razón: el bitmap es el mismo que usa pmm.c para pmm_alloc_page,
 // pmm_free_page, etc. Si buddy_* cogiera su propio lock, habría race
-// con esas funciones (ambos escriben sobre el mismo byte).
+// con esas funciones (ambos escriben sobre el mismo byte del bitmap).
 
 #include "buddy.h"
 #include "pmm.h"
@@ -86,22 +86,26 @@ uint64_t buddy_alloc_order(uint32_t order) {
 
     // Buscar el bloque más pequeño (menor orden) que pueda satisfacer la
     // petición. Empezamos en `order` y subimos.
+    //
+    // Los bloques de orden `o` están alineados a 2^o páginas, así que
+    // iteramos `start` en pasos de 2^o.
     for (uint32_t o = order; o <= buddy_max_order; o++) {
         uint64_t size = (1ULL << o);
-        // Los bloques de orden `o` están alineados a 2^o páginas.
         for (uint64_t start = 0; start + size <= buddy_total_pages;
              start += size) {
             if (range_free(start, size)) {
-                // Encontrado. Asignamos la primera mitad (2^order páginas)
-                // desde `start`. El resto del bloque queda libre, y el
-                // coalescing posterior lo tratará como bloques libres.
+                // Encontrado. Asignamos la primera mitad (2^order
+                // páginas) desde `start`. El resto del bloque queda
+                // libre, y el coalescing posterior lo tratará como
+                // bloques libres.
                 //
                 // Ejemplo: pedimos orden 1 (2 páginas), encontramos un
-                // bloque de orden 3 (8 páginas) en [0,7]. Asignamos [0,1].
-                // [2,3], [4,7] quedan libres. Si luego se libera [0,1],
-                // buddy_free_order fusionará con [2,3] (buddy de orden 1)
-                // y luego con [4,7] (buddy de orden 2), recomponiendo
-                // el bloque original si nadie más lo ha tocado.
+                // bloque de orden 3 (8 páginas) en [0,7]. Asignamos
+                // [0,1]. [2,3] y [4,7] quedan libres. Si luego se libera
+                // [0,1], buddy_free_order fusionará con [2,3] (buddy de
+                // orden 1) y luego con [4,7] (buddy de orden 2),
+                // recomponiendo el bloque original si nadie más lo ha
+                // tocado.
                 uint64_t final_size = (1ULL << order);
                 range_mark_used(start, final_size);
                 return start * PAGE_SIZE;
@@ -113,6 +117,7 @@ uint64_t buddy_alloc_order(uint32_t order) {
 
 void buddy_free_order(uint64_t phys_addr, uint32_t order) {
     if (!buddy_bitmap || order > buddy_max_order) return;
+
     if (phys_addr % PAGE_SIZE != 0) {
         LOG_ERR("[BUDDY] free_order: dirección no alineada a página: 0x%lx",
                 (unsigned long)phys_addr);
@@ -131,6 +136,10 @@ void buddy_free_order(uint64_t phys_addr, uint32_t order) {
     uint32_t cur_order = order;
 
     // Coalescing: subir mientras el buddy esté libre.
+    //
+    // En cada nivel, el buddy de un bloque que empieza en `cur_start` y
+    // tiene orden `cur_order` es el bloque del mismo tamaño que empieza
+    // en `cur_start ^ (1 << cur_order)`.
     while (cur_order < buddy_max_order) {
         uint64_t buddy = cur_start ^ (1ULL << cur_order);
         // El buddy debe estar dentro de los límites.
