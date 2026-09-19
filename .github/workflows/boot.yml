@@ -5,13 +5,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:   # botón "Run workflow" en la UI
+  workflow_dispatch:
 
 jobs:
   qemu-smoke-test:
     name: Arrancar en QEMU y verificar serial
     runs-on: ubuntu-24.04
-    needs: []    # corre en paralelo con build.yml
 
     steps:
       - name: Checkout
@@ -24,18 +23,22 @@ jobs:
             build-essential nasm xorriso mtools \
             qemu-system-x86 ovmf gnu-efi
 
-      - name: Compilar todo
+      - name: Compilar ISO
         run: make iso
 
-      - name: Verificar que OVMF está en su sitio
+      - name: Verificar OVMF
         run: |
           ls -l /usr/share/OVMF/OVMF_CODE_4M.fd
           ls -l /usr/share/OVMF/OVMF_VARS_4M.fd
 
       - name: Arrancar en QEMU y verificar serial
+        env:
+          USE_KVM: no
+          QEMU_SMP: 1
+          TIMEOUT: 120
         run: |
           chmod +x scripts/check_boot.sh
-          ./scripts/check_boot.sh 40
+          ./scripts/check_boot.sh
 
       - name: Subir serial.log si falla
         if: failure()
