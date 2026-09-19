@@ -21,6 +21,11 @@
 #   REQUIRE_SMP    (default: auto)   auto: exige APs si QEMU_SMP>1 Y KVM.
 #                                    yes:  siempre exige APs.
 #                                    no:   nunca exige APs.
+#   SHOW_SERIAL    (default: yes)    yes:  vuelca serial.log al final
+#                                    no:   no vuelca nada
+#                                    on-failure: solo si el script falla
+#   SHOW_SERIAL_LINES (default: 0)   si >0, solo vuelca las últimas N líneas.
+#                                    0 = todo el log.
 #
 # Requiere:
 #   - aurora.iso en la raíz (o se genera con `make iso`).
@@ -45,6 +50,8 @@ QEMU_MEM="${QEMU_MEM:-512M}"
 USE_KVM="${USE_KVM:-auto}"
 KEEP_LOGS="${KEEP_LOGS:-no}"
 REQUIRE_SMP="${REQUIRE_SMP:-auto}"
+SHOW_SERIAL="${SHOW_SERIAL:-yes}"
+SHOW_SERIAL_LINES="${SHOW_SERIAL_LINES:-0}"
 
 cd "$ROOT"
 
@@ -54,8 +61,9 @@ cd "$ROOT"
 if [ -t 1 ]; then
     C_RED=$'\033[0;31m'; C_GRN=$'\033[0;32m'
     C_YLW=$'\033[0;33m'; C_RST=$'\033[0m'
+    C_CYN=$'\033[0;36m'
 else
-    C_RED=""; C_GRN=""; C_YLW=""; C_RST=""
+    C_RED=""; C_GRN=""; C_YLW=""; C_RST=""; C_CYN=""
 fi
 
 log_info()  { echo "[check_boot] $*"; }
@@ -63,6 +71,35 @@ log_ok()    { echo "  ${C_GRN}[OK]${C_RST}   $*"; }
 log_fail()  { echo "  ${C_RED}[FAIL]${C_RST} $*"; }
 log_warn()  { echo "  ${C_YLW}[WARN]${C_RST} $*"; }
 log_error() { echo "${C_RED}[check_boot] ERROR:${C_RST} $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Volcado del serial.log
+#
+# Se llama al final del script, con o sin fallo, según SHOW_SERIAL.
+# ---------------------------------------------------------------------------
+dump_serial() {
+    local force="$1"  # "force" para saltarse el filtro on-failure
+    case "$SHOW_SERIAL" in
+        no) return 0 ;;
+        on-failure) [ "$force" = "force" ] || return 0 ;;
+        yes|*) ;;
+    esac
+
+    if [ ! -f "$SERIAL_LOG" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "${C_CYN}==================== serial.log ====================${C_RST}"
+    if [ "$SHOW_SERIAL_LINES" -gt 0 ]; then
+        echo "${C_CYN}(últimas $SHOW_SERIAL_LINES líneas)${C_RST}"
+        tail -n "$SHOW_SERIAL_LINES" "$SERIAL_LOG"
+    else
+        cat "$SERIAL_LOG"
+    fi
+    echo "${C_CYN}====================================================${C_RST}"
+    echo ""
+}
 
 # ---------------------------------------------------------------------------
 # Detectar KVM
@@ -109,12 +146,14 @@ log_info "QEMU_SMP=$QEMU_SMP, KVM=$kvm_enabled, REQUIRE_SMP=$REQUIRE_SMP"
 # ---------------------------------------------------------------------------
 if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
     log_error "no encuentro $QEMU_BIN en \$PATH"
+    dump_serial force
     exit 1
 fi
 
 for f in "$OVMF_CODE" "$OVMF_VARS_SRC"; do
     if [ ! -f "$f" ]; then
         log_error "no encuentro OVMF: $f"
+        dump_serial force
         exit 1
     fi
 done
@@ -126,6 +165,7 @@ if [ ! -f "$ROOT/aurora.iso" ]; then
     log_info "aurora.iso no existe, generando con 'make iso'..."
     if ! make iso; then
         log_error "'make iso' falló"
+        dump_serial force
         exit 1
     fi
 fi
@@ -160,12 +200,14 @@ set -e
 if [ "$QEMU_EXIT" != "0" ] && [ "$QEMU_EXIT" != "124" ]; then
     log_error "QEMU salió con código $QEMU_EXIT"
     cat "$QEMU_LOG" >&2
+    dump_serial force
     exit 1
 fi
 
 if [ ! -s "$SERIAL_LOG" ]; then
     log_error "serial.log está vacío"
     cat "$QEMU_LOG" >&2
+    dump_serial force
     exit 1
 fi
 
@@ -241,18 +283,7 @@ check_block "arranque" "${EXPECTED_BOOT[@]}"
 check_block "shell"    "${EXPECTED_SHELL[@]}"
 
 # ---------------------------------------------------------------------------
-# Verificar el bloque de tests.
-#
-# No hardcodeamos el número total porque cambia:
-#   - Con SMP:   "36 tests: 36 passed, 0 failed, 0 skipped"
-#   - Sin SMP:   "35 tests: 35 passed, 0 failed, 1 skipped"
-# El total real es passed + failed + skipped = 36 en ambos casos.
-#
-# Verificamos:
-#   - Que aparece el bloque "[TEST] N tests:"
-#   - Que "0 failed" está presente
-#   - Si REQUIRE_SMP=yes, que "0 skipped" (o el número esperado)
-#   - Si REQUIRE_SMP=no, permitimos skipped > 0
+# Verificar el bloque de tests
 # ---------------------------------------------------------------------------
 log_info "  Bloque: tests"
 
@@ -260,7 +291,6 @@ if grep -qE "\[TEST\] [0-9]+ tests:" "$SERIAL_LOG"; then
     tests_line=$(grep -oE "\[TEST\] [0-9]+ tests: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped" "$SERIAL_LOG" | tail -1)
     log_ok "$tests_line"
 
-    # Extraer contadores con regex
     passed=$(echo "$tests_line" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+")
     failed=$(echo "$tests_line" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+")
     skipped=$(echo "$tests_line" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+")
@@ -301,15 +331,18 @@ if [ "$REQUIRE_SMP" = "yes" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Reporte
+# Reporte final
 # ---------------------------------------------------------------------------
 if [ "$FAILED" -gt 0 ]; then
     echo ""
     log_error "$FAILED cadenas no encontradas o verificaciones fallidas"
-    echo "--- serial.log (últimas 200 líneas) ---" >&2
-    tail -n 200 "$SERIAL_LOG" >&2
+    dump_serial force
     exit 1
 fi
 
 log_info "Todas las verificaciones pasaron. ${C_GRN}OK${C_RST}."
+
+# Volcar el serial al final (si SHOW_SERIAL lo permite).
+dump_serial
+
 exit 0
