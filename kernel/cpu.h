@@ -59,7 +59,7 @@ typedef struct {
   int cpu_id;            // índice 0..MAX_CPUS-1
   int lapic_id;          // APIC ID del LAPIC
   void *current_task;    // task_t* actual (Fase 4, per-CPU)
-  uint64_t tick_counter; // contador de ticks per-CPU (Fase 4)
+  uint64_t ticks_since_resched; // contador de ticks desde el último resched
 } cpu_local_t;
 
 // Array de estructuras per-CPU.
