@@ -302,8 +302,19 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
              is_64bit ? "XSDT" : "RSDT");
   }
 
-  int entries_count =
-      (root->length - sizeof(acpi_sdt_header_t)) / (is_64bit ? 8 : 4);
+  // Validar que la tabla tiene al menos el tamaño del header. Si no,
+  // está malformada y no podemos calcular entries_count.
+  if (root->length < sizeof(acpi_sdt_header_t)) {
+    LOG_ERR("[ACPI] %s: length=%u < sizeof(header)=%zu, tabla malformada",
+            is_64bit ? "XSDT" : "RSDT", root->length,
+            sizeof(acpi_sdt_header_t));
+    g_acpi.valid = 0;
+    return;
+  }
+
+  uint32_t entries_bytes = root->length - sizeof(acpi_sdt_header_t);
+  uint32_t entry_size = is_64bit ? 8 : 4;
+  int entries_count = (int)(entries_bytes / entry_size);
   LOG_DEBUG("[ACPI] %d entradas en %s", entries_count,
             is_64bit ? "XSDT" : "RSDT");
 
