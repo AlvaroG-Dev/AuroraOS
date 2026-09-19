@@ -305,8 +305,13 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   // [SMP] Reservar las páginas bajas que usará el trampoline ANTES
   // del auto-test, para que no las ocupe nadie.
+  //
+  // Rango reservado: 0x6000..0x9000.
+  //   0x6000..0x7000: stack temporal del trampoline (16 bits).
+  //   0x7000..0x8000: trampoline (código + header).
+  //   0x8000..0x9000: smp_boot_params.
   extern void pmm_reserve_range(uint64_t start, uint64_t end);
-  pmm_reserve_range(0x7000, 0x9000);
+  pmm_reserve_range(0x6000, 0x9000);
 
   extern void pmm_self_test(void);
   pmm_self_test();
