@@ -33,6 +33,22 @@ static task_t *idle_tasks[MAX_CPUS] = {NULL};
 static uint32_t next_id = 0;
 static uint64_t kernel_cr3 = 0;
 
+static unsigned long sched_lock_irqsave(void) {
+    unsigned long flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    while (__sync_lock_test_and_set(&sched_lock.locked, 1)) {
+        while (sched_lock.locked) {
+            __asm__ volatile("pause");
+        }
+    }
+    return flags;
+}
+
+static void sched_unlock_irqrestore(unsigned long flags) {
+    __sync_lock_release(&sched_lock.locked);
+    __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
+}
+
 static void idle_loop(void) {
   while (1) {
     task_t *cur = sched_current();
@@ -328,7 +344,7 @@ static void sched_check_invariants(task_t *t) {
 }
 
 // ---------------------------------------------------------------------------
-// Tick  (FIX PRINCIPAL)
+// Tick
 //
 //  1) El selector ignora tareas con on_cpu == 1. Antes, una tarea que se
 //     estaba durmiendo en la CPU A (ya BLOCKED, aún ejecutando en su pila)
@@ -362,14 +378,7 @@ void sched_tick(void) {
     return;
   }
 
-  uint64_t flags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
-
-  while (__sync_lock_test_and_set(&sched_lock.locked, 1)) {
-    while (sched_lock.locked) {
-      __asm__ volatile("pause");
-    }
-  }
+  unsigned long flags = sched_lock_irqsave();
 
   reap_dead_tasks();
 
@@ -393,8 +402,7 @@ void sched_tick(void) {
 
   if (!next) {
     if (curr->is_idle) {
-      __sync_lock_release(&sched_lock.locked);
-      __asm__ volatile("push %0; popfq" : : "r"(flags));
+      sched_unlock_irqrestore(flags);
       return;
     }
     if (curr->state == TASK_BLOCKED || curr->state == TASK_DEAD) {
@@ -404,8 +412,7 @@ void sched_tick(void) {
       // despertaron en la ventana entre "BLOCKED" y este punto.
       if (curr->state == TASK_READY)
         curr->state = TASK_RUNNING;
-      __sync_lock_release(&sched_lock.locked);
-      __asm__ volatile("push %0; popfq" : : "r"(flags));
+      sched_unlock_irqrestore(flags);
       return;
     }
   }
@@ -413,8 +420,7 @@ void sched_tick(void) {
   if (next == curr) {
     if (curr->state == TASK_READY)
       curr->state = TASK_RUNNING;
-    __sync_lock_release(&sched_lock.locked);
-    __asm__ volatile("push %0; popfq" : : "r"(flags));
+    sched_unlock_irqrestore(flags);
     return;
   }
 
@@ -436,11 +442,16 @@ void sched_tick(void) {
     this_cpu(kernel_stack) = kstack;
   }
 
+  // task_switch libera sched_lock por su cuenta (en asm, mov dword [rdx], 0).
+  // No llamar a sched_unlock_irqrestore después: el lock ya está libre y
+  // el flag se pierde con el cambio de stack.
   task_switch(old, next, &sched_lock);
 
-  __asm__ volatile("push %0; popfq" : : "r"(flags));
+  // Si volvemos aquí, es que OTRA tarea nos ha cambiado a nosotros. Los
+  // flags que se restauran son los de la tarea actual (this_cpu), no los
+  // que guardamos antes de task_switch. Es correcto: cada tarea tiene su
+  // propio RFLAGS guardado en su stack.
 }
-
 void sched_yield(void) {
   this_cpu(tick_counter) = SCHED_INTERVAL;
   sched_tick();
