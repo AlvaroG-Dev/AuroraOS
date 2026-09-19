@@ -31,10 +31,11 @@ jobs:
           ls -l /usr/share/OVMF/OVMF_CODE_4M.fd
           ls -l /usr/share/OVMF/OVMF_VARS_4M.fd
 
-      - name: Arrancar en QEMU y verificar serial
+      - name: Arrancar en QEMU (TCG, single-CPU)
         env:
           USE_KVM: no
           QEMU_SMP: 1
+          REQUIRE_SMP: no
           TIMEOUT: 120
         run: |
           chmod +x scripts/check_boot.sh
