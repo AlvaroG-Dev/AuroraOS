@@ -36,23 +36,29 @@ jobs:
           USE_KVM: no
           QEMU_SMP: 1
           REQUIRE_SMP: no
-          TIMEOUT: 120
+          TIMEOUT: 60
+          # Mostrar las últimas 200 líneas del serial en el log del job.
+          # El log completo queda como artefacto (ver step siguiente).
+          SHOW_SERIAL: yes
+          SHOW_SERIAL_LINES: 500
         run: |
           chmod +x scripts/check_boot.sh
           ./scripts/check_boot.sh
 
-      - name: Subir serial.log si falla
-        if: failure()
+      - name: Subir serial.log SIEMPRE
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: serial-log-failure
+          name: serial-log
           path: serial.log
-          retention-days: 7
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Subir qemu.log si falla
-        if: failure()
+      - name: Subir qemu.log SIEMPRE
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-log-failure
+          name: qemu-log
           path: qemu.log
-          retention-days: 7
+          if-no-files-found: warn
+          retention-days: 14
