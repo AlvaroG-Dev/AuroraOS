@@ -44,6 +44,8 @@ static tar_node_t *bg_wallpaper_node = NULL;
 static int last_mouse_buttons = 0;
 static void compositor_focus_window(window_t *win);
 
+static spinlock_t compositor_lock;
+
 /* =========== SSE helpers =========== */
 static inline void sse_memset32(uint32_t *dest, uint32_t val, size_t count) {
   size_t i = 0;
@@ -136,6 +138,7 @@ void compositor_notify_clock_tick(void) {
 }
 
 void compositor_init(void) {
+  spin_init(&compositor_lock);
   font_manager_init();
 
   compositor_has_input = 0;
@@ -194,29 +197,19 @@ void compositor_invalidate_rect(rect_t damage) {
 
 window_t *compositor_create_window(int x, int y, int w, int h,
                                    const char *title, uint32_t flags) {
-  // [PREEMPT] Modificamos window_stack: no dejar que el scheduler
-  // cambie de tarea a mitad del push.
-  // TODO SMP (Fase 5): window_stack se modifica sin spinlock. Hoy basta
-  // con preempt_disable() porque solo hay una CPU. Con SMP, otra CPU
-  // podría modificar window_stack en paralelo. Añadir spinlock_t.
-  preempt_disable();
-
   window_t *win = window_create(x, y, w, h, title, flags);
-  if (!win) {
-    preempt_enable();
+  if (!win)
     return NULL;
-  }
 
+  unsigned long irqflags = spin_lock_irqsave(&compositor_lock);
   win->next = window_stack;
   if (window_stack)
     window_stack->prev = win;
   window_stack = win;
+  spin_unlock_irqrestore(&compositor_lock, irqflags);
 
   rect_t damage = {x - WIN11_SHADOW_SIZE, y - WIN11_SHADOW_SIZE,
                    w + WIN11_SHADOW_SIZE * 2, h + WIN11_SHADOW_SIZE * 2};
-
-  // invalidate_rect hace wake_up sobre compositor_wq, lo cual está bien
-  // dentro de preempt_disable (wake_up solo modifica la wq de otros).
   compositor_invalidate_rect(damage);
 
   taskbar_item_t *tb_item =
@@ -224,7 +217,6 @@ window_t *compositor_create_window(int x, int y, int w, int h,
                        win->icon_bg_color, taskbar_item_on_click);
   win->taskbar_item = tb_item;
 
-  preempt_enable();
   return win;
 }
 
@@ -232,7 +224,7 @@ void compositor_close_window(window_t *win) {
   if (!win)
     return;
 
-  preempt_disable();
+  unsigned long irqflags = spin_lock_irqsave(&compositor_lock);
 
   if (drag_window == win)
     drag_window = NULL;
@@ -247,7 +239,7 @@ void compositor_close_window(window_t *win) {
   if (win->next)
     win->next->prev = win->prev;
 
-  preempt_enable();
+  spin_unlock_irqrestore(&compositor_lock, irqflags);
 
   compositor_invalidate_rect((rect_t){
       win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE,

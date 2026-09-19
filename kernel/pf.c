@@ -1,6 +1,4 @@
 // kernel/pf.c
-// Page fault handler con demand paging, VMA y stack growth.
-
 #include "pf.h"
 #include "cpu.h"
 #include "gdt.h"
@@ -12,14 +10,14 @@
 #include "sched.h"
 #include "serial.h"
 #include "string.h"
+#include "uaccess.h"
 #include <stddef.h>
-
 
 // ---------------------------------------------------------------------------
 // Estadísticas
 // ---------------------------------------------------------------------------
-static uint64_t pf_resolved = 0;
-static uint64_t pf_killed = 0;
+static volatile uint64_t pf_resolved = 0;
+static volatile uint64_t pf_killed = 0;
 
 uint64_t pf_stats_resolved(void) { return pf_resolved; }
 uint64_t pf_stats_killed(void) { return pf_killed; }
@@ -75,26 +73,31 @@ void vma_destroy_all(struct process *proc) {
 }
 
 // ---------------------------------------------------------------------------
+// [Fase C.2] Helper para asignar una página de usuario y ponerla a cero.
+// Se usa en try_stack_growth, try_vma_demand, process_sbrk, process_spawn.
+// ---------------------------------------------------------------------------
+static uint64_t alloc_user_page_zeroed(void) {
+  uint64_t phys = pmm_alloc_page();
+  if (!phys)
+    return 0;
+  memset(phys_to_virt(phys), 0, PAGE_SIZE);
+  return phys;
+}
+
+// ---------------------------------------------------------------------------
 // Stack growth
 // ---------------------------------------------------------------------------
-// El stack crece hacia abajo. Si el fallo está por debajo del stack
-// actual pero dentro del rango permitido, mapeamos la página.
 static int try_stack_growth(struct process *proc, uint64_t fault_addr,
                             uint64_t flags) {
   if (!proc || !proc->stack_low)
     return 0;
-
-  // ¿Está la dirección por debajo del stack actual?
   if (fault_addr >= proc->stack_base)
     return 0;
-
-  // ¿Está dentro del rango permitido?
   if (fault_addr < proc->stack_low)
     return 0;
 
-  // Mapear la página del fallo
   uint64_t page = fault_addr & ~0xFFFULL;
-  uint64_t phys = pmm_alloc_page();
+  uint64_t phys = alloc_user_page_zeroed(); // ← [C.2] zeroed
   if (!phys)
     return 0;
 
@@ -116,22 +119,15 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
 // ---------------------------------------------------------------------------
 static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
                           uint64_t err_code) {
-  // ¿Es un fallo por escritura en una VMA no escribible?
   int is_write = (err_code & 0x02) != 0;
   if (is_write && !(vma->flags & PTE_WRITABLE)) {
-    return 0; // violación de permisos
+    return 0;
   }
 
-  // Asignar y mapear la página
   uint64_t page = fault_addr & ~0xFFFULL;
-  uint64_t phys = pmm_alloc_page();
+  uint64_t phys = alloc_user_page_zeroed(); // ← [C.2] zeroed siempre
   if (!phys)
     return 0;
-
-  // Para VMA_ANON y VMA_STACK, inicializar a cero
-  if (vma->type == VMA_ANON || vma->type == VMA_STACK) {
-    memset(phys_to_virt(phys), 0, PAGE_SIZE);
-  }
 
   uint64_t map_flags = vma->flags | PTE_PRESENT;
 
@@ -147,32 +143,39 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
 }
 
 // ---------------------------------------------------------------------------
+// Resolver un fallo como demand paging (para el path de kernel).
+// Devuelve 1 si resolvió, 0 si no.
+// ---------------------------------------------------------------------------
+static int pf_try_demand_paging(struct process *proc, uint64_t cr2,
+                                uint64_t err) {
+  if (!proc)
+    return 0;
+
+  if (try_stack_growth(proc, cr2, err))
+    return 1;
+
+  vma_t *vma = vma_find(proc, cr2);
+  if (vma && try_vma_demand(proc, vma, cr2, err))
+    return 1;
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Matar el proceso actual
 // ---------------------------------------------------------------------------
-extern void task_die_hlt(void);
-
 void kill_current_process(registers_t *regs, const char *reason) {
-  struct process *proc = process_current();
   task_t *task = sched_current();
+  process_t *proc = process_current();
 
   if (task) {
     LOG_ERR("[PF] Matando tarea ID=%u PID=%u: %s", task->id,
             proc ? proc->pid : 0, reason);
-
-    // Marcar el proceso como terminado y despertar al padre
-    if (proc) {
-      process_exit(proc, -1);
-    }
-
-    task->state = TASK_DEAD;
-
-    regs->rip = (uint64_t)task_die_hlt;
-    regs->cs = KERNEL_CS;
-    regs->ss = KERNEL_DS;
-    regs->rsp = this_cpu(kernel_stack);
-    regs->rflags &= ~0x200ULL;
   }
   pf_killed++;
+
+  (void)regs;
+  process_exit_current(-1);
 }
 
 // ---------------------------------------------------------------------------
@@ -186,23 +189,19 @@ static int handle_page_fault_inner(registers_t *regs) {
   int user = err & 0x04;
   int fetch = err & 0x10;
 
-  if (present) {
-    if (user) {
+  // -------------------------------------------------------------------------
+  // 1. Fallo en modo usuario: path clásico.
+  // -------------------------------------------------------------------------
+  if (user) {
+    if (present) {
       kill_current_process(regs, "protection violation");
       return 1;
     }
-    return 0;
-  }
-
-  if (fetch) {
-    if (user) {
+    if (fetch) {
       kill_current_process(regs, "instruction fetch at unmapped");
       return 1;
     }
-    return 0;
-  }
 
-  if (user) {
     struct process *proc = process_current();
     if (!proc) {
       kill_current_process(regs, "no process context");
@@ -228,19 +227,57 @@ static int handle_page_fault_inner(registers_t *regs) {
       kill_current_process(regs, "stack overflow (guard page)");
       return 1;
     }
+    LOG_ERR("[PF] PID=%u addr=%p rip=%p cr2=%p - not in any VMA",
+            proc ? proc->pid : 0, (void *)cr2, (void *)regs->rip, (void *)cr2);
     kill_current_process(regs, "address not in any VMA");
     return 1;
   }
 
+  // -------------------------------------------------------------------------
+  // 2. [Fase C.2] Fallo en modo kernel.
+  //
+  //    Caso típico: uaccess intentando leer/escribir userland que no
+  //    está mapeado todavía (por ejemplo, un mmap perezoso que el
+  //    usuario no ha tocado, o un buffer de stack que aún no se ha
+  //    expandido).
+  //
+  //    Estrategia:
+  //      a) Si cr2 >= USER_LIMIT: es un bug del kernel. Panic.
+  //      b) Si cr2 < USER_LIMIT:
+  //         b.1) Intentar demand paging del proceso actual.
+  //         b.2) Si no, buscar el rip en la tabla de uaccess fixups.
+  //              Si está, saltar al fixup (que devuelve -EFAULT).
+  //         b.3) Si no, es un bug del kernel. Panic.
+  // -------------------------------------------------------------------------
+  if (cr2 >= USER_LIMIT) {
+    // Acceso del kernel a una dirección no canónica o reservada.
+    return 0; // panic
+  }
+
+  // Fallo en kernel con cr2 en el rango de userland.
+  struct process *proc = process_current();
+  if (pf_try_demand_paging(proc, cr2, err)) {
+    pf_resolved++;
+    return 1;
+  }
+
+  // No se pudo resolver como demand paging. ¿Es un acceso recuperable
+  // desde la tabla de fixups?
+  uint64_t fixup = uaccess_lookup_fixup(regs->rip);
+  if (fixup) {
+    LOG_WARN("[PF] uaccess fixup: pid=%u rip=%p cr2=%p -> fixup=%p",
+             proc ? proc->pid : 0, (void *)regs->rip, (void *)cr2,
+             (void *)fixup);
+    regs->rip = fixup;
+    pf_resolved++;
+    return 1;
+  }
+
+  // Fallo real en el kernel.
   return 0;
 }
 
-extern void task_die_hlt(void);
-
 int handle_page_fault(registers_t *regs) {
-  // Ya no hace falta cambiar a kernel CR3: phys_to_virt funciona con
-  // cualquier CR3. Todos los accesos a page tables en handle_page_fault_inner
-  // usan phys_to_virt.
   return handle_page_fault_inner(regs);
 }
 
@@ -256,7 +293,6 @@ void pf_init(void) {
 // ---------------------------------------------------------------------------
 // Syscalls: mmap / munmap
 // ---------------------------------------------------------------------------
-// Próxima dirección anónima por encima del heap.
 static uint64_t next_mmap_addr = 0x0000000060000000ULL;
 
 #define MMAP_PROT_READ 0x1
@@ -272,30 +308,26 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   if (!proc || length == 0)
     return -1;
   if (length > 0x10000000ULL)
-    return -1; // 256 MB máximo por mmap
+    return -1;
 
-  // Alinear
   length = (length + 0xFFF) & ~0xFFFULL;
 
-  // Elegir dirección
   if (addr == 0) {
     addr = next_mmap_addr;
     next_mmap_addr += length;
     if (next_mmap_addr > 0x00007F0000000000ULL) {
-      return -1; // sin espacio
+      return -1;
     }
   } else {
     addr &= ~0xFFFULL;
   }
 
-  // Construir flags PTE
   uint64_t pte_flags = PTE_USER | PTE_PRESENT;
   if (prot & MMAP_PROT_WRITE)
     pte_flags |= PTE_WRITABLE;
   if (!(prot & MMAP_PROT_EXEC))
     pte_flags |= PTE_NX;
 
-  // Crear VMA (lazy: no mapeamos páginas)
   vma_t *v = vma_create(proc, addr, addr + length, pte_flags, VMA_ANON);
   if (!v)
     return -1;
@@ -315,7 +347,6 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
 
   uint64_t end = addr + length;
 
-  // Buscar y eliminar VMA(s) que caigan en el rango
   vma_t **pp = &proc->vma_list;
   int unmapped = 0;
 
@@ -326,9 +357,7 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
       continue;
     }
 
-    // Caso simple: VMA completamente dentro del rango → eliminar
     if (v->start >= addr && v->end <= end) {
-      // Liberar páginas mapeadas
       for (uint64_t p = v->start; p < v->end; p += PAGE_SIZE) {
         uint64_t phys =
             paging_get_phys_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
@@ -343,8 +372,6 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
       continue;
     }
 
-    // Casos parciales: no soportados en Fase 1
-    // (podríamos partir la VMA, pero lo dejamos simple)
     pp = &v->next;
   }
 

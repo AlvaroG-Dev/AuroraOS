@@ -72,16 +72,17 @@ static void gdt_set_tss(int num, uint64_t base, uint32_t limit) {
 }
 
 void gdt_init(void) {
-  gdt_set_gate(0, 0, 0, 0, 0);
-  gdt_set_gate(1, 0, 0, 0x9A, 0xA0);
-  gdt_set_gate(2, 0, 0, 0x92, 0x80);
-  gdt_set_gate(3, 0, 0, 0xF2, 0x80);
-  gdt_set_gate(4, 0, 0, 0xFA, 0xA0);
+  gdt_set_gate(0, 0, 0, 0, 0);       // null
+  gdt_set_gate(1, 0, 0, 0x9A, 0xA0); // KERNEL_CS = 0x08
+  gdt_set_gate(2, 0, 0, 0x92, 0x80); // KERNEL_DS = 0x10
+  gdt_set_gate(3, 0, 0, 0xFA, 0xA0); // USER_CS   = 0x18  ← cambia access
+  gdt_set_gate(4, 0, 0, 0xF2, 0x80); // USER_DS   = 0x20  ← cambia access
 
   for (int i = 0; i < MAX_CPUS; i++) {
     memset(&tss_table[i], 0, sizeof(tss64_t));
     tss_table[i].iopb_offset = sizeof(tss64_t);
-    tss_table[i].ist[0] = (uint64_t)(&ist1_stacks[i][0] + sizeof(ist1_stacks[i]));
+    tss_table[i].ist[0] =
+        (uint64_t)(&ist1_stacks[i][0] + sizeof(ist1_stacks[i]));
     gdt_set_tss(5 + 2 * i, (uint64_t)&tss_table[i], sizeof(tss64_t) - 1);
   }
 

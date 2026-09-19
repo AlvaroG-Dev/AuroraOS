@@ -30,6 +30,13 @@ int wait_event_interruptible(wait_queue_t *wq, bool (*cond)(void *), void *arg);
 void wait_event(wait_queue_t *wq, bool (*cond)(void *), void *arg);
 
 void wake_up_all(wait_queue_t *wq);
+
+// Variante que asume que el lock de la wq ya está cogido por el caller.
+// Útil para hacer atómico el patrón "modificar condición + despertar".
+// El caller debe haber hecho spin_lock_irqsave(&wq->lock, &flags) antes
+// y spin_unlock_irqrestore(&wq->lock, flags) después.
+void wake_up_all_locked(wait_queue_t *wq);
+
 void wake_up_one(wait_queue_t *wq);
 void wake_up_interruptible_all(wait_queue_t *wq);
 

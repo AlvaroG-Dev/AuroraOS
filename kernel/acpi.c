@@ -120,11 +120,36 @@ static void parse_madt(const madt_t *madt) {
 
   while (p + sizeof(madt_entry_header_t) <= end) {
     const madt_entry_header_t *eh = (const madt_entry_header_t *)p;
-    if (eh->length == 0)
+
+    // Validar longitud mínima. Un entry debe medir al menos lo que
+    // su header (type + length). Si no, es un MADT malformado y
+    // avanzar con p += eh->length podría no progresar (bucle
+    // infinito) o desalinear el parser (leer a mitad de estructura).
+    if (eh->length < sizeof(madt_entry_header_t)) {
+      LOG_WARN("[ACPI] MADT: entry type=%u length=%u inválido, "
+               "abortando parseo",
+               eh->type, eh->length);
       break;
+    }
+
+    // Validar que el entry completo cabe en la tabla. Si no, es un
+    // MADT truncado; procesar lo que quede es peligroso.
+    if (p + eh->length > end) {
+      LOG_WARN("[ACPI] MADT: entry type=%u length=%u excede la tabla, "
+               "abortando parseo",
+               eh->type, eh->length);
+      break;
+    }
 
     switch (eh->type) {
     case 0: {
+      // Validar que el entry tiene el tamaño esperado antes de
+      // leer campos más allá del header.
+      if (eh->length < sizeof(madt_entry_lapic_t)) {
+        LOG_WARN("[ACPI] MADT: LAPIC entry demasiado corta (%u bytes)",
+                 eh->length);
+        break;
+      }
       const madt_entry_lapic_t *lapic = (const madt_entry_lapic_t *)p;
       if (g_acpi.cpu_count < ACPI_MAX_CPUS) {
         acpi_cpu_t *cpu = &g_acpi.cpus[g_acpi.cpu_count];
@@ -143,6 +168,11 @@ static void parse_madt(const madt_t *madt) {
       break;
     }
     case 1: {
+      if (eh->length < sizeof(madt_entry_ioapic_t)) {
+        LOG_WARN("[ACPI] MADT: IOAPIC entry demasiado corta (%u bytes)",
+                 eh->length);
+        break;
+      }
       const madt_entry_ioapic_t *io = (const madt_entry_ioapic_t *)p;
       if (g_acpi.ioapic_count < ACPI_MAX_IOAPICS) {
         acpi_ioapic_t *i = &g_acpi.ioapics[g_acpi.ioapic_count];
@@ -152,22 +182,38 @@ static void parse_madt(const madt_t *madt) {
         LOG_INFO("[ACPI] IOAPIC[%d]: id=%u addr=0x%x gsi_base=%u",
                  g_acpi.ioapic_count, i->id, i->address, i->gsi_base);
         g_acpi.ioapic_count++;
+      } else {
+        LOG_WARN("[ACPI] Demasiados IOAPICs (ignorando id=%u)", io->ioapic_id);
       }
       break;
     }
     case 2: {
+      if (eh->length < sizeof(madt_entry_iso_t)) {
+        LOG_WARN("[ACPI] MADT: ISO entry demasiado corta (%u bytes)",
+                 eh->length);
+        break;
+      }
       const madt_entry_iso_t *iso = (const madt_entry_iso_t *)p;
+      // Check antes de incrementar: si la tabla está llena, no
+      // contamos el ISO pero tampoco corrompemos memoria.
       if (g_acpi.iso_count < ACPI_MAX_ISOS) {
         acpi_iso_t *s = &g_acpi.isos[g_acpi.iso_count++];
         s->irq = iso->source;
         s->gsi = iso->gsi;
         s->flags = iso->flags;
+        LOG_INFO("[ACPI] ISO: bus=%u irq=%u -> gsi=%u flags=0x%x", iso->bus,
+                 iso->source, iso->gsi, iso->flags);
+      } else {
+        LOG_WARN("[ACPI] Demasiados ISOs (ignorando irq=%u)", iso->source);
       }
-      LOG_INFO("[ACPI] ISO: bus=%u irq=%u -> gsi=%u flags=0x%x", iso->bus,
-               iso->source, iso->gsi, iso->flags);
       break;
     }
     case 5: {
+      if (eh->length < sizeof(madt_entry_lapic_override_t)) {
+        LOG_WARN("[ACPI] MADT: LAPIC override demasiado corta (%u bytes)",
+                 eh->length);
+        break;
+      }
       const madt_entry_lapic_override_t *lo =
           (const madt_entry_lapic_override_t *)p;
       g_acpi.lapic_address = lo->lapic_address;
@@ -179,12 +225,12 @@ static void parse_madt(const madt_t *madt) {
     // [SMP] Multiprocessor Wakeup Structure (ACPI 6.4).
     // ---------------------------------------------------------------------
     case 0x10: {
-      const madt_entry_wakeup_t *w = (const madt_entry_wakeup_t *)p;
       if (eh->length < sizeof(madt_entry_wakeup_t)) {
         LOG_WARN("[ACPI] Wakeup Structure demasiado corta (%u bytes)",
                  eh->length);
         break;
       }
+      const madt_entry_wakeup_t *w = (const madt_entry_wakeup_t *)p;
       g_acpi.wakeup.present = 1;
       g_acpi.wakeup.version = w->version;
       g_acpi.wakeup.mailbox_paddr = w->mailbox_address;

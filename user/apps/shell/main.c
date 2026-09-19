@@ -10,6 +10,16 @@
 //      pulsar Enter.
 //   4. Los comandos que escriben a stdout generan más eventos OUTPUT,
 //      que la app también pinta.
+//
+// [Performance] Render por regiones:
+//   - Mantenemos una "región sucia" (rectángulo mínimo que engloba
+//     todo lo que ha cambiado desde el último render).
+//   - Cuando toca redibujar, limpiamos y repintamos SOLO esa región.
+//   - El blit al kernel envía SOLO esa región (con src_stride = cw
+//     para que el kernel sepa leer del buffer completo).
+//   - Antes enviábamos el buffer completo (820*568*4 ≈ 1.8 MB) en
+//     cada tecla. Ahora enviamos ~50 KB. En VirtualBox sin KVM se
+//     nota muchísimo.
 
 #include "../../lib/file.h"
 #include "../../lib/malloc.h"
@@ -155,7 +165,72 @@ static console_buf_t g_buf;
 static char g_input[LINE_MAX];
 static int g_input_len = 0;
 
+// ---------------------------------------------------------------------------
+// Región sucia. Rectángulo mínimo que engloba todo lo que ha cambiado
+// desde el último render. Se resetea tras cada render.
+// ---------------------------------------------------------------------------
+#define DIRTY_EMPTY_X0 0x7FFFFFFF
+#define DIRTY_EMPTY_Y0 0x7FFFFFFF
+
+static int g_dirty_x0 = DIRTY_EMPTY_X0;
+static int g_dirty_y0 = DIRTY_EMPTY_Y0;
+static int g_dirty_x1 = 0;
+static int g_dirty_y1 = 0;
+
+static void dirty_reset(void) {
+  g_dirty_x0 = DIRTY_EMPTY_X0;
+  g_dirty_y0 = DIRTY_EMPTY_Y0;
+  g_dirty_x1 = 0;
+  g_dirty_y1 = 0;
+}
+
+static int dirty_empty(void) {
+  return g_dirty_x0 >= g_dirty_x1 || g_dirty_y0 >= g_dirty_y1;
+}
+
+static void dirty_add(int x, int y, int w, int h) {
+  if (x < g_dirty_x0)
+    g_dirty_x0 = x;
+  if (y < g_dirty_y0)
+    g_dirty_y0 = y;
+  if (x + w > g_dirty_x1)
+    g_dirty_x1 = x + w;
+  if (y + h > g_dirty_y1)
+    g_dirty_y1 = y + h;
+}
+
+// Fila visible (0..ROWS_VISIBLE-1) de la línea actual del cursor, o -1
+// si no está visible en el viewport actual.
+static int cursor_row_visible(void) {
+  int bottom = g_buf.count - 1 - g_buf.scroll_offset;
+  if (bottom < 0)
+    bottom = 0;
+  int top = bottom - ROWS_VISIBLE + 1;
+  if (top < 0)
+    top = 0;
+  int logical = g_buf.count - 1;
+  if (logical < top || logical > bottom)
+    return -1;
+  return logical - top;
+}
+
+// Marca la fila donde está el cursor como sucia.
+static void mark_cursor_row_dirty(void) {
+  int r = cursor_row_visible();
+  if (r < 0)
+    return;
+  // La fila de texto empieza en y = r * LINE_HEIGHT + 2.
+  // Ancho = COLS caracteres * CHAR_WIDTH + 4 px de margen a cada lado.
+  dirty_add(0, r * LINE_HEIGHT, COLS * CHAR_WIDTH + 8, LINE_HEIGHT);
+}
+
+// ---------------------------------------------------------------------------
+// Operaciones sobre el buffer de líneas
+// ---------------------------------------------------------------------------
 static void buf_new_line(void) {
+  // Antes de mover el cursor de sitio, marcar la fila donde estaba.
+  mark_cursor_row_dirty();
+
   int next;
   if (g_buf.count < ROWS_BUFFER) {
     next = g_buf.count;
@@ -163,9 +238,15 @@ static void buf_new_line(void) {
   } else {
     next = g_buf.head;
     g_buf.head = (g_buf.head + 1) % ROWS_BUFFER;
+    // Al hacer scroll del buffer (se descarta la primera línea),
+    // toda la pantalla cambia: marcamos todo.
+    dirty_add(0, 0, COLS * CHAR_WIDTH + 8, ROWS_VISIBLE * LINE_HEIGHT);
   }
   g_buf.lines[next].len = 0;
   g_buf.cursor_col = 0;
+
+  // Después, marcar la nueva fila donde está el cursor.
+  mark_cursor_row_dirty();
 }
 
 static int buf_line_idx(int logical) {
@@ -179,17 +260,22 @@ static void buf_init(void) {
   g_buf.cursor_col = 0;
   g_buf.scroll_offset = 0;
   buf_new_line();
+  // buf_new_line ya ha marcado toda la pantalla.
 }
 
 static void buf_putchar(char c) {
+  // Marcar dónde estaba el cursor antes.
+  mark_cursor_row_dirty();
+
   g_buf.scroll_offset = 0;
 
   if (c == '\n') {
     buf_new_line();
-    return;
+    return; // buf_new_line ya marca la nueva fila.
   }
   if (c == '\r') {
     g_buf.cursor_col = 0;
+    mark_cursor_row_dirty();
     return;
   }
   if (c == '\b') {
@@ -202,6 +288,7 @@ static void buf_putchar(char c) {
           l->len--;
       }
     }
+    mark_cursor_row_dirty();
     return;
   }
   if (c < 0x20 || c >= 0x7F)
@@ -219,6 +306,8 @@ static void buf_putchar(char c) {
   if (g_buf.cursor_col + 1 > l->len)
     l->len = g_buf.cursor_col + 1;
   g_buf.cursor_col++;
+
+  mark_cursor_row_dirty();
 }
 
 static void buf_puts(const char *s) {
@@ -248,12 +337,38 @@ static void draw_char(uint32_t *pixels, int cw, int ch, int x, int y,
   }
 }
 
-static void render(uint32_t *pixels, int cw, int ch) {
-  for (int i = 0; i < cw * ch; i++)
-    pixels[i] = 0xFF000000;
+// Redibuja SOLO el rectángulo [rx0, ry0, rw, rh] del buffer `pixels`.
+// Limpia la región con el color de fondo y redibuja los caracteres que
+// intersectan. NO toca los píxeles fuera de la región.
+static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
+                          int rw, int rh) {
+  // Clip a la ventana.
+  if (rx0 < 0) {
+    rw += rx0;
+    rx0 = 0;
+  }
+  if (ry0 < 0) {
+    rh += ry0;
+    ry0 = 0;
+  }
+  if (rx0 + rw > cw)
+    rw = cw - rx0;
+  if (ry0 + rh > ch)
+    rh = ch - ry0;
+  if (rw <= 0 || rh <= 0)
+    return;
+
+  // 1. Limpiar la región con el color de fondo.
+  for (int y = ry0; y < ry0 + rh; y++) {
+    uint32_t *row = &pixels[y * cw + rx0];
+    for (int x = 0; x < rw; x++)
+      row[x] = 0xFF000000;
+  }
+
   if (g_buf.count == 0)
     return;
 
+  // 2. Redibujar los caracteres que intersectan con la región.
   int bottom = g_buf.count - 1 - g_buf.scroll_offset;
   if (bottom < 0)
     bottom = 0;
@@ -268,26 +383,36 @@ static void render(uint32_t *pixels, int cw, int ch) {
     int idx = buf_line_idx(logical);
     line_t *l = &g_buf.lines[idx];
     int y = i * LINE_HEIGHT + 2;
+
+    // Saltar filas totalmente fuera de la región.
+    if (y + 8 < ry0 || y > ry0 + rh)
+      continue;
+
     for (int k = 0; k < l->len; k++) {
       int x = k * CHAR_WIDTH + 4;
+      // Saltar columnas totalmente fuera de la región.
+      if (x + 8 < rx0 || x > rx0 + rw)
+        continue;
       draw_char(pixels, cw, ch, x, y, (unsigned char)l->chars[k], 0xFFFFFFFF);
     }
   }
 
-  // Cursor: subrayado en la posición real del cursor, no fijo abajo.
-  // Solo si estamos viendo la última línea (scroll_offset == 0).
+  // 3. Redibujar el cursor si está dentro de la región.
   if (g_buf.scroll_offset == 0) {
-    // Fila del cursor = posición de la última línea lógica dentro
-    // del viewport visible.
-    int cursor_row_in_view = bottom - top; // 0..ROWS_VISIBLE-1
-    int cursor_x = 4 + g_buf.cursor_col * CHAR_WIDTH;
-    int cursor_y = cursor_row_in_view * LINE_HEIGHT + 2 + 9;
-    for (int dy = 0; dy < 2; dy++) {
-      for (int dx = 0; dx < CHAR_WIDTH; dx++) {
-        int px = cursor_x + dx;
-        int py = cursor_y + dy;
-        if (px >= 0 && px < cw && py >= 0 && py < ch) {
-          pixels[py * cw + px] = 0xFFFFFFFF;
+    int cursor_row_in_view = bottom - top;
+    if (cursor_row_in_view >= 0 && cursor_row_in_view < ROWS_VISIBLE) {
+      int cursor_x = 4 + g_buf.cursor_col * CHAR_WIDTH;
+      int cursor_y = cursor_row_in_view * LINE_HEIGHT + 2 + 9;
+      if (cursor_y + 2 > ry0 && cursor_y < ry0 + rh &&
+          cursor_x + CHAR_WIDTH > rx0 && cursor_x < rx0 + rw) {
+        for (int dy = 0; dy < 2; dy++) {
+          for (int dx = 0; dx < CHAR_WIDTH; dx++) {
+            int px = cursor_x + dx;
+            int py = cursor_y + dy;
+            if (px >= 0 && px < cw && py >= 0 && py < ch) {
+              pixels[py * cw + px] = 0xFFFFFFFF;
+            }
+          }
         }
       }
     }
@@ -363,7 +488,11 @@ static void cmd_spawn(const char *path) {
   printf("console: %s terminó (pid=%d, exit=%d)\n", path, r, status);
 }
 
-static void cmd_clear(void) { buf_init(); }
+static void cmd_clear(void) {
+  buf_init();
+  // buf_init -> buf_new_line -> mark_cursor_row_dirty + dirty_add(0,0,...)
+  // Con eso la región sucia cubre toda la pantalla.
+}
 
 static void run_command(int win_id) {
   g_input[g_input_len] = '\0';
@@ -426,6 +555,8 @@ static void handle_key(char c, int win_id) {
   }
   if (c == '\b') {
     if (g_input_len > 0) {
+      // Marcar la fila antes y después.
+      mark_cursor_row_dirty();
       g_input_len--;
       int idx = buf_line_idx(g_buf.count - 1);
       line_t *l = &g_buf.lines[idx];
@@ -434,6 +565,7 @@ static void handle_key(char c, int win_id) {
         if (g_buf.cursor_col > 0)
           g_buf.cursor_col--;
       }
+      mark_cursor_row_dirty();
     }
     return;
   }
@@ -449,14 +581,18 @@ static void handle_key(char c, int win_id) {
 // Main
 // ---------------------------------------------------------------------------
 int main(void) {
+  sys_print("SHELL: main begin");
   int cw = WIN_W;
   int ch = WIN_H - TITLEBAR_HEIGHT;
 
   int win = sys_win_create(80, 60, WIN_W, WIN_H, "Aurora Console");
+  sys_print("SHELL: after win_create");
   if (win < 0) {
+    sys_print("SHELL: win < 0, aborting");
     puts("console: no se pudo crear la ventana");
     return 1;
   }
+  sys_print("SHELL: win >= 0");
 
   uint32_t *pixels = (uint32_t *)malloc(cw * ch * sizeof(uint32_t));
   if (!pixels) {
@@ -473,10 +609,20 @@ int main(void) {
   buf_puts("============================================\n");
   print_prompt();
 
-  render(pixels, cw, ch);
-  sys_win_blit(win, 0, 0, cw, ch, pixels);
+  // Primer render: toda la pantalla.
+  for (int i = 0; i < cw * ch; i++)
+    pixels[i] = 0xFF000000;
+  dirty_add(0, 0, cw, ch);
+  {
+    int rx0 = 0, ry0 = 0;
+    int rx1 = cw, ry1 = ch;
+    render_region(pixels, cw, ch, rx0, ry0, rx1 - rx0, ry1 - ry0);
+    sys_win_blit(win, rx0, ry0, rx1 - rx0, ry1 - ry0, rx0, ry0, cw, pixels);
+  }
+  dirty_reset();
 
   if (sys_win_register_console(win) < 0) {
+    sys_print("SHELL: register_console failed");
     puts("console: no se pudo registrar como consola");
   }
 
@@ -500,17 +646,21 @@ int main(void) {
     case WINSRV_EV_KEY:
       if (ev.x == 0x49) {
         g_buf.scroll_offset += 5;
+        dirty_add(0, 0, cw, ch);
         needs_redraw = 1;
       } else if (ev.x == 0x51) {
         g_buf.scroll_offset -= 5;
         if (g_buf.scroll_offset < 0)
           g_buf.scroll_offset = 0;
+        dirty_add(0, 0, cw, ch);
         needs_redraw = 1;
       } else if (ev.x == 0x4F) {
         g_buf.scroll_offset = 0;
+        dirty_add(0, 0, cw, ch);
         needs_redraw = 1;
       } else if (ev.x == 0x47) {
         g_buf.scroll_offset = 9999999;
+        dirty_add(0, 0, cw, ch);
         needs_redraw = 1;
       }
       break;
@@ -542,6 +692,7 @@ int main(void) {
       }
     }
 
+    // Clamp de scroll_offset.
     int max_off = g_buf.count - 1;
     if (max_off < 0)
       max_off = 0;
@@ -550,10 +701,42 @@ int main(void) {
     if (g_buf.scroll_offset < 0)
       g_buf.scroll_offset = 0;
 
-    if (needs_redraw) {
-      render(pixels, cw, ch);
-      sys_win_blit(win, 0, 0, cw, ch, pixels);
+    // Redibujar SOLO la región sucia.
+    if (needs_redraw && !dirty_empty()) {
+      // Extender la región a la rejilla de caracteres + margen, para
+      // que draw_char nunca escriba fuera de la región.
+      int rx0 = g_dirty_x0;
+      int ry0 = g_dirty_y0;
+      int rx1 = g_dirty_x1;
+      int ry1 = g_dirty_y1;
+
+      rx0 = (rx0 / CHAR_WIDTH) * CHAR_WIDTH - CHAR_WIDTH;
+      ry0 = (ry0 / LINE_HEIGHT) * LINE_HEIGHT - LINE_HEIGHT;
+      rx1 = ((rx1 + CHAR_WIDTH - 1) / CHAR_WIDTH) * CHAR_WIDTH + CHAR_WIDTH;
+      ry1 = ((ry1 + LINE_HEIGHT - 1) / LINE_HEIGHT) * LINE_HEIGHT + LINE_HEIGHT;
+
+      if (rx0 < 0)
+        rx0 = 0;
+      if (ry0 < 0)
+        ry0 = 0;
+      if (rx1 > cw)
+        rx1 = cw;
+      if (ry1 > ch)
+        ry1 = ch;
+
+      int rw = rx1 - rx0;
+      int rh = ry1 - ry0;
+
+      render_region(pixels, cw, ch, rx0, ry0, rw, rh);
+      // Blit solo de la región. src_stride = cw, porque pixels es el
+      // buffer completo. El rectángulo dentro del buffer es
+      // (src_x=rx0, src_y=ry0), y el destino en la ventana es (x=rx0,
+      // y=ry0). Como la ventana es del mismo tamaño que el buffer,
+      // coinciden.
+      sys_win_blit(win, rx0, ry0, rw, rh, rx0, ry0, cw, pixels);
+
       needs_redraw = 0;
+      dirty_reset();
     }
   }
 

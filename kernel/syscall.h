@@ -2,8 +2,10 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 
+#include "idt.h" // registers_t
 #include <stdint.h>
 
+// Números de syscall.
 #define SYS_PRINT 1
 #define SYS_YIELD 2
 #define SYS_EXIT 3
@@ -22,14 +24,36 @@
 #define SYS_GETPID 16
 #define SYS_MMAP 17
 #define SYS_MUNMAP 18
-#define SYS_WIN_CREATE           19
-#define SYS_WIN_DESTROY          20
-#define SYS_WIN_BLIT             21
-#define SYS_WIN_POLL_EVENT       22
+#define SYS_WIN_CREATE 19
+#define SYS_WIN_DESTROY 20
+#define SYS_WIN_BLIT 21
+#define SYS_WIN_POLL_EVENT 22
 #define SYS_WIN_REGISTER_CONSOLE 23
+#define SYS_GET_SERVICE_ID 24
+
+// Valor de int_num en el frame de syscall. Como los syscalls no son
+// excepciones, usamos un valor imposible para que, si algún día
+// reutilizamos el mismo camino que las interrupciones, se pueda
+// distinguir.
+#define SYSCALL_INT_NUM 0xFFFFFFFFFFFFFFFFULL
 
 void syscall_init(void);
-uint64_t syscall_handler_c(uint64_t num, uint64_t arg1, uint64_t arg2,
-                           uint64_t arg3, uint64_t arg4, uint64_t arg5);
+uint64_t syscall_handler_c(registers_t *regs);
+void syscall_init_ap(void);
+
+// ---------------------------------------------------------------------------
+// Registro de servicios del kernel.
+//
+// Un "servicio" es una tarea del kernel (o de usuario) que ofrece una
+// funcionalidad identificable por nombre (p. ej. "echo"). Las apps de
+// userland pueden descubrir su Task ID con SYS_GET_SERVICE_ID y luego
+// comunicarse con él por IPC.
+//
+// El registro es limitado (KERNEL_SERVICES_MAX slots) y no bloqueante.
+// Se llama desde el propio servicio al arrancar.
+// ---------------------------------------------------------------------------
+#define KERNEL_SERVICES_MAX 8
+
+void syscall_register_service(const char *name, uint32_t task_id);
 
 #endif

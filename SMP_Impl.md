@@ -69,8 +69,25 @@
 - Separación de ticks: BSP incrementa tick_count global; cada CPU incrementa this_cpu(tick_counter) y llama a sched_tick().
 - Los APs arrancan el scheduler con sched_start_ap(idle_task[my_cpu]).
 
-#### Sub-fase 4.4 — IPIs de rescheduling remoto [ ]
-- Vector IPI de resched para despertar núcleos inactivos al haber tareas listas.
+#### Sub-fase 4.4 — IPIs de rescheduling remoto [x]
+- Vectores IPI: 0xFB (resched), 0xFC (TLB), 0xFD (call), 0xFE (halt).
+- `ipi.c`/`ipi.h`: `ipi_send`, `ipi_send_allbutself`, `ipi_send_all`.
+- Handlers `ipi_handler_resched` y `ipi_handler_tlb` registrados en la IDT.
+- Stubs en `isr_stubs.asm` con alineación de RSP robusta antes del call.
+- `task_t.need_resched` + `sched_mark_need_resched()`.
+- `idle_loop` comprueba `need_resched` antes de hlt.
+- `sched_tick` fuerza el switch si `need_resched` está puesto, respetando
+  `preempt_count`.
+- `sched_make_ready` envía IPI a un AP idle cuando la tarea estaba
+  bloqueada.
+
+##### Sub-fase 4.4a — CPU affinity [x]
+- Campo `int cpu_affinity` en `task_t` (-1 = cualquiera).
+- `sched_tick` filtra tareas READY cuya afinidad no coincide con el CPU.
+- `sched_make_ready` con afinidad explícita: solo IPI al CPU target.
+- Las idle tasks tienen afinidad a su propio CPU.
+- Tests: 36 en total. El test `smp: IPI wakeup cross-CPU` valida el flujo
+  completo BSP → AP → BSP con afinidad.
 
 ### Fase 5 — Auditar drivers y subsistemas [ ]
 

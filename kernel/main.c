@@ -13,6 +13,7 @@
 #include "idt.h"
 #include "initrd.h"
 #include "input.h"
+#include "ipi.h"
 #include "klog.h"
 #include "paging.h"
 #include "pci.h"
@@ -79,20 +80,6 @@ static void fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch) {
            h, pitch);
 }
 
-static void fb_putpixel(int x, int y, uint32_t color) {
-  if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height)
-    return;
-  fb_ptr[y * fb_pitch + x] = color;
-}
-
-static void fb_fillrect(int x, int y, int w, int h, uint32_t color) {
-  for (int row = y; row < y + h && row < (int)fb_height; row++) {
-    for (int col = x; col < x + w && col < (int)fb_width; col++) {
-      fb_putpixel(col, row, color);
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Memmap parse
 // ---------------------------------------------------------------------------
@@ -139,9 +126,11 @@ static void sse_init(void) {
 // Servicio IPC de eco
 // ---------------------------------------------------------------------------
 static uint32_t ipc_echo_task_id = 0;
+
 static void ipc_echo_service(void) {
   task_t *self = sched_current();
   ipc_echo_task_id = self->id;
+  syscall_register_service("echo", self->id);
   LOG_INFO("[IPC-KERNEL] Servicio de eco IPC iniciado (Task ID=%u)",
            ipc_echo_task_id);
 
@@ -214,33 +203,34 @@ static void kmain_task(void) {
     sched_create_task(compositor_thread);
   }
 
-  int failed = run_all_tests();
-  if (failed > 0) {
-    LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
-  }
-
-  smp_dump();
-  acpi_dump();
-  apic_dump();
-
   // App de consola gráfica (antes del SMP, para que no interfiera).
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
 
   // ---------------------------------------------------------------------------
-  // [SMP 3.1] Arrancar APs. Al final del boot para no interferir con la
-  // carga de la shell. Solo se inicializan y hacen hlt.
+  // [SMP 4.4] Arrancar APs. Al final del boot para no interferir con la
+  // carga de la shell. Los APs quedan en pause esperando smp_sched_active.
   // ---------------------------------------------------------------------------
-
   LOG_DEBUG("[SMP] Inicializando trampoline y APs...");
   smp_boot_init();
   smp_boot_aps();
-  smp_dump();
 
+  // Activar el scheduler en los APs ANTES de los tests. Algunos tests
+  // (IPI wakeup cross-CPU) requieren que los APs estén en idle_loop,
+  // procesando sched_tick() e IPIs.
   extern volatile int smp_sched_active;
   smp_sched_active = 1;
-  LOG_INFO("[SMP] Scheduler SMP activado en todos los núcleos.");
-  // ---------------------------------------------------------------------------
+
+  smp_dump();
+  acpi_dump();
+  apic_dump();
+
+  ipi_init();
+
+  int failed = run_all_tests();
+  if (failed > 0) {
+    LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
+  }
 
   while (1) {
     sched_yield();
@@ -368,6 +358,10 @@ void kmain(struct kernel_boot_info *kinfo) {
   smp_init();
   smp_set_bsp_lapic_id(lapic_get_bsp_id());
   sched_init();
+
+  LOG_INFO("[INIT] Process subsystem...");
+  extern void process_init(void);
+  process_init();
 
   task_t *t = sched_create_task(kmain_task);
   if (!t) {

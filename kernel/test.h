@@ -15,14 +15,28 @@
 //   REGISTER_TEST("foo", test_foo);
 //
 // El runner (run_all_tests) recorre la sección .tests y ejecuta
-// cada test en orden de enlace. Cada test corre con preempt_disable
-// activo (no puede ser desalojado por el scheduler). No debe bloquearse.
+// cada test en orden de enlace.
+//
+// Flags:
+//   - Por defecto, cada test corre con preempt_disable() activo: no
+//     puede ser desalojado por el scheduler y NO debe bloquearse.
+//   - TEST_FLAG_BLOCKING: el test puede dormir (wait_event, sched_yield
+//     cooperativo, hlt). El runner NO llama a preempt_disable().
+//   - TEST_FLAG_NEEDS_SMP: el test requiere APs arrancados. El runner
+//     lo salta si smp_aps_ready() == 0.
+
+// ---------------------------------------------------------------------------
+// Flags
+// ---------------------------------------------------------------------------
+#define TEST_FLAG_BLOCKING (1u << 0)
+#define TEST_FLAG_NEEDS_SMP (1u << 1)
 
 typedef void (*test_fn_t)(void);
 
 typedef struct test_case {
   const char *name;
   test_fn_t fn;
+  unsigned int flags;
 } test_case_t;
 
 // Pasa un test. Llamado por TEST_ASSERT cuando la condición es cierta.
@@ -44,7 +58,6 @@ void test_begin(const char *name);
 int run_all_tests(void);
 
 // Cuántos tests han pasado/fallado/se han saltado en la última ejecución.
-// Útil si algún día quieres consultarlo desde userland.
 int test_get_passed(void);
 int test_get_failed(void);
 int test_get_skipped(void);
@@ -77,12 +90,16 @@ int test_get_skipped(void);
     }                                                                          \
   } while (0)
 
-// Registra un test. El name es string literal (no se copia).
-// El símbolo se coloca en la sección .tests, que el linker agrupa.
-// El atributo 'used' evita que GCC elimine el símbolo por no usarse.
+// Registra un test sin flags. El name es string literal (no se copia).
 #define REGISTER_TEST(name, fn)                                                \
   __attribute__((used, section(".tests"),                                      \
                  aligned(8))) static const test_case_t _test_##fn = {(name),   \
-                                                                     (fn)}
+                                                                     (fn), 0u}
+
+// Registra un test con flags (combinables con |).
+#define REGISTER_TEST_FLAGS(name, fn, flags_)                                  \
+  __attribute__((used, section(".tests"),                                      \
+                 aligned(8))) static const test_case_t _test_##fn = {          \
+      (name), (fn), (flags_)}
 
 #endif // KERNEL_TEST_H

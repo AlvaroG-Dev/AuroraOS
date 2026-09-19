@@ -2,6 +2,7 @@
 #ifndef CPU_H
 #define CPU_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define MSR_STAR 0xC0000081
@@ -160,5 +161,26 @@ static inline void clac(void) {
     __asm__ volatile("clac" ::: "memory");
   }
 }
+
+// ---------------------------------------------------------------------------
+// Asserts de offsets asm↔C.
+//
+// syscall_entry.asm usa:
+//   [gs:0]  → cpu_local_data[cpu].kernel_stack
+//   [gs:8]  → cpu_local_data[cpu].user_rsp
+//
+// switch.asm usa:
+//   task_t.rsp        (offset 0x00)
+//   task_t.fpu_state  (offset 0x18)
+//   task_t.cr3        (offset 0x20)
+//
+// Si cambias los structs, estos asserts te avisan en compilación.
+// ---------------------------------------------------------------------------
+_Static_assert(offsetof(cpu_local_t, kernel_stack) == 0,
+               "syscall_entry.asm lee [gs:0] como kernel_stack");
+_Static_assert(offsetof(cpu_local_t, user_rsp) == 8,
+               "syscall_entry.asm lee [gs:8] como user_rsp");
+_Static_assert(offsetof(cpu_local_t, cpu_id) == CPU_LOCAL_CPU_ID_OFFSET,
+               "smp_processor_id() lee %gs:cpu_id");
 
 #endif

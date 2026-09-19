@@ -3,10 +3,11 @@
 ;
 ; Se ensambla con `nasm -f bin` y se convierte a .o con objcopy.
 ;
-; El BSP copia el binario a LMPS_TRAMPOLINE_PHYS (0x7000) y escribe en el header:
-;   - Offset 0x08 (u64): pml4_phys (OML4 del kernel en memoria física)
-;   - Offset 0x10 (u64): entry_virt (Dirección virtual de ap_entry)
-;   - Offset 0x18 (u64): stack_top (Top del stack para el AP)
+; El BSP copia el binario a SMP_TRAMPOLINE_PHYS (0x7000) y escribe en el header:
+;   - Offset 0x08 (u64): pml4_phys   (PML4 del kernel en memoria física)
+;   - Offset 0x10 (u64): entry_virt  (Dirección virtual de ap_entry)
+;   - Offset 0x18 (u64): stack_top   (Top del stack para el AP)
+;   - Offset 0x20 (u64): ap_index    (Índice ACPI del AP a arrancar)
 ;
 ; El AP arranca tras la SIPI con CS:IP = 0x0700:0x0000 (físico 0x7000).
 
@@ -23,6 +24,7 @@ smp_trampoline_start:
     trampoline_pml4_phys:    dq 0   ; Offset 0x08
     trampoline_entry_virt:   dq 0   ; Offset 0x10
     trampoline_stack_top:    dq 0   ; Offset 0x18
+    trampoline_ap_index:     dq 0   ; Offset 0x20
 
 trampoline_code:
     cli
@@ -133,6 +135,12 @@ lm_entry:
     ; Cargar stack final del AP desde el header (0x7000 + 0x18)
     mov rsp, [0x7000 + 0x18]
     xor rbp, rbp
+
+    ; Cargar el índice ACPI del AP desde el header (0x7000 + 0x20)
+    ; en r12. El ABI System V x86_64 preserva r12 a través de calls,
+    ; así que ap_entry puede leerlo nada más entrar sin que ninguna
+    ; función intermedia lo pise.
+    mov r12, [0x7000 + 0x20]
 
     mov al, 'n'
     out 0xE9, al

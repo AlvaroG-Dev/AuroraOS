@@ -2,6 +2,7 @@
 // IDT, ISR handlers y PIC
 
 #include "idt.h"
+#include "ipi.h"
 #include "klog.h"
 #include "paging.h"
 #include "panic.h"
@@ -89,6 +90,9 @@ extern void isr_spurious(void);
 
 // Implementado en pf.c
 extern int handle_page_fault(registers_t *regs);
+
+extern void ipi_stub_resched(void);
+extern void ipi_stub_tlb(void);
 
 // ---------------------------------------------------------------------------
 // Tabla de stubs en el mismo orden en que se colocan en la IDT:
@@ -203,6 +207,10 @@ void idt_init(void) {
   // Vector 48: LAPIC timer.
   idt_set_gate(48, (uint64_t)irq48, 0x08, 0x8E);
 
+  // [SMP 4.4] IPIs. Vectores 0xFB (resched) y 0xFC (TLB).
+  idt_set_gate(IPI_VECTOR_RESCHED, (uint64_t)ipi_stub_resched, 0x08, 0x8E);
+  idt_set_gate(IPI_VECTOR_TLB, (uint64_t)ipi_stub_tlb, 0x08, 0x8E);
+
   // Vector 0xFF: espurio del LAPIC.
   idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);
 
@@ -215,24 +223,62 @@ void idt_init(void) {
 // ISR handler principal
 // ---------------------------------------------------------------------------
 void isr_handler(registers_t *regs) {
-  if (regs->int_num == 14) {
+  // [DEBUG] Escribir al puerto 0xE9 sin locks ni buffers.
+  {
+    uint8_t _c = 'I';
+    __asm__ volatile("outb %0, $0xE9" : : "a"(_c));
+  }
+
+  // Guardar el frame en un buffer estático (no en el stack).
+  static registers_t saved_regs;
+  saved_regs = *regs;
+
+  // Log con LOG_DEBUG normal (puede colgar pero es lo que tenemos).
+  LOG_DEBUG("[ISR] int_num=%lu error=0x%lx rip=%p rsp=%p cs=0x%lx ss=0x%lx",
+            (unsigned long)saved_regs.int_num,
+            (unsigned long)saved_regs.error_code, (void *)saved_regs.rip,
+            (void *)saved_regs.rsp, (unsigned long)saved_regs.cs,
+            (unsigned long)saved_regs.ss);
+
+  if (saved_regs.int_num == 14) {
     if (handle_page_fault(regs)) {
       return;
     }
   }
 
-  const char *name = (regs->int_num < 32) ? exception_names[regs->int_num]
-                                          : "unknown exception";
-  panic(regs, "unhandled exception #%lu (%s)", (unsigned long)regs->int_num,
-        name);
+  // Comparar.
+  LOG_ERR("[ISR] ahora: int_num=%lu rip=%p rsp=%p ss=0x%lx",
+          (unsigned long)regs->int_num, (void *)regs->rip, (void *)regs->rsp,
+          (unsigned long)regs->ss);
+
+  panic(&saved_regs, "unhandled exception #%lu (%s)",
+        (unsigned long)saved_regs.int_num,
+        (saved_regs.int_num < 32) ? exception_names[saved_regs.int_num] : "?");
 }
 
 void irq_handler(registers_t *regs) {
-  // Enviar EOI al LAPIC ANTES de llamar al handler. Si el handler cambia
-  // de tarea (por ejemplo, el timer llama a sched_tick), no queremos que
-  // el EOI se pierda en el cambio de contexto.
+  // Enviar EOI al LAPIC ANTES de llamar al handler.
   extern void lapic_eoi(void);
   lapic_eoi();
+
+  // [DEBUG] Detectar frames con SS corrupto (solo para el LAPIC timer).
+  if (regs->int_num == 48) {
+    if (regs->cs == 0x1B || regs->cs == 0x23) {
+      // Viniendo de userland: SS debe ser 0x23.
+      if (regs->ss != 0x23) {
+        LOG_ERR("[IRQ] timer desde userland con SS=0x%lx CS=0x%lx RIP=0x%lx",
+                (unsigned long)regs->ss, (unsigned long)regs->cs,
+                (unsigned long)regs->rip);
+      }
+    } else {
+      // Viniendo de kernel: SS debe ser 0x10 (o 0 si el CPU no lo empujó).
+      if (regs->ss != 0x10 && regs->ss != 0) {
+        LOG_ERR("[IRQ] timer desde kernel con SS=0x%lx CS=0x%lx RIP=0x%lx",
+                (unsigned long)regs->ss, (unsigned long)regs->cs,
+                (unsigned long)regs->rip);
+      }
+    }
+  }
 
   // LAPIC timer (vector 48).
   if (regs->int_num == 48) {

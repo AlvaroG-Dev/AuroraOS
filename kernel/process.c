@@ -23,30 +23,32 @@
 #define USER_HEAP_BASE 0x0000000040000000ULL
 #define USER_HEAP_MAX 0x0000000048000000ULL // 128 MB max
 
-static uint32_t next_pid = 0;
+static uint32_t next_pid = 1; // ← [P0.6] empieza en 1
 static process_t *process_list = NULL;
+static spinlock_t process_lock; // ← [P0.1] nuevo
 static uint64_t next_user_vaddr = 0x0000000000400000ULL;
 
+void process_init(void) { // ← [P0.1] llamar desde el boot
+  spin_init(&process_lock);
+}
+
 process_t *process_current(void) {
-  task_t *cur = sched_current();
-  if (!cur)
-    return NULL;
-  process_t *p = process_list;
-  while (p) {
-    if (p->task == cur)
-      return p;
-    p = p->next;
-  }
-  return NULL;
+  // [Fase A] Enlace directo, sin recorrer la lista.
+  task_t *t = sched_current();
+  return t ? t->proc : NULL;
 }
 
 process_t *process_get_by_pid(uint32_t pid) {
+  unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
   while (p) {
-    if (p->pid == pid)
+    if (p->pid == pid) {
+      spin_unlock_irqrestore(&process_lock, flags);
       return p;
+    }
     p = p->next;
   }
+  spin_unlock_irqrestore(&process_lock, flags);
   return NULL;
 }
 
@@ -61,7 +63,7 @@ process_t *process_spawn(const char *name, const void *elf_data,
     return NULL;
   }
 
-  // 1. Clonar espacio de direcciones del kernel
+  // 1. Clonar PML4
   uint64_t pml4_phys = paging_clone_kernel_space();
   if (!pml4_phys) {
     LOG_ERR("[PROC] Fallo al clonar PML4");
@@ -69,17 +71,24 @@ process_t *process_spawn(const char *name, const void *elf_data,
   }
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
-  // 2. Cargar ELF (soporta auto-posicionamiento para ET_DYN)
-  uint64_t load_base = next_user_vaddr;
+  // 2. Reservar un rango de direcciones virtuales para el ELF.
+  //
+  // __sync_fetch_and_add es atómico: dos process_spawn concurrentes
+  // en distintas CPUs obtienen rangos disjuntos. Si elf_load falla
+  // después, perdemos 2 MB de espacio virtual (fuga despreciable
+  // frente a los 128 TB disponibles). No merece la pena complicar
+  // el código para recuperarlo.
+  uint64_t load_base = __sync_fetch_and_add(&next_user_vaddr, 0x200000ULL);
+
+  // 3. Cargar ELF
   uint64_t entry = 0;
   if (elf_load(elf_data, elf_size, pml4, load_base, &entry) != 0) {
     LOG_ERR("[PROC] Fallo al cargar ELF");
     paging_free_user_space(pml4_phys);
     return NULL;
   }
-  next_user_vaddr += 0x200000ULL;
 
-  // 3. Mapear stack de usuario aislado para este proceso
+  // 4. Mapear stack de usuario (zeroed)
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
   LOG_INFO("[PROC] Mapeando stack de usuario en %p - %p", (void *)stack_base,
@@ -92,6 +101,7 @@ process_t *process_spawn(const char *name, const void *elf_data,
       paging_free_user_space(pml4_phys);
       return NULL;
     }
+    memset(phys_to_virt(phys), 0, PAGE_SIZE);
     if (paging_map_page_in(pml4, stack_base + off, phys,
                            PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
         0) {
@@ -102,23 +112,25 @@ process_t *process_spawn(const char *name, const void *elf_data,
     }
   }
 
-  // 4. Crear la tarea en Ring 3 con el PML4 del proceso
-  task_t *task =
-      sched_create_user_task((void (*)(void))entry, stack_top, pml4_phys);
+  // 5. [Fase A] Crear la tarea PARADA (no runnable todavía)
+  task_t *task = sched_create_user_task_stopped((void (*)(void))entry,
+                                                stack_top, pml4_phys);
   if (!task) {
     LOG_ERR("[PROC] Fallo al crear tarea");
     paging_free_user_space(pml4_phys);
     return NULL;
   }
 
-  // 5. Asignar estructura de proceso
-  process_t *proc = (process_t *)kmalloc(sizeof(process_t));
+  // 6. Asignar process_t
+  process_t *proc = (process_t *)kzalloc(sizeof(process_t));
   if (!proc) {
-    task->state = TASK_DEAD;
+    task_put(task);
+    paging_free_user_space(pml4_phys);
     LOG_ERR("[PROC] Error al asignar process_t");
     return NULL;
   }
-  proc->pid = next_pid++;
+
+  proc->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
   proc->ppid = 0;
   proc->exit_code = 0;
   proc->is_zombie = 0;
@@ -136,46 +148,36 @@ process_t *process_spawn(const char *name, const void *elf_data,
   proc->heap_end = USER_HEAP_BASE;
   proc->heap_max = USER_HEAP_MAX;
 
-  // -------------------------------------------------------------------------
-  // VMA y stack info
-  // -------------------------------------------------------------------------
   proc->vma_list = NULL;
   proc->stack_base = stack_base;
   proc->stack_low = stack_base - MAX_STACK_GROWTH;
   proc->stack_top = stack_top;
-
-  // Guard page: una página no mapeada justo debajo del stack permitido.
-  // Cualquier acceso a esta página dispara #PF fuera de VMA → kill.
   proc->stack_guard = proc->stack_low;
-  proc->stack_low += PAGE_SIZE; // el stack real empieza una página más arriba
+  proc->stack_low += PAGE_SIZE;
 
-  // VMA del ELF (rango aproximado de 2 MB por proceso)
   vma_create(proc, load_base, load_base + 0x200000, PTE_USER | PTE_NX, VMA_ELF);
-
-  // VMA del stack (empieza en stack_low + guard page, termina en stack_top)
   vma_create(proc, proc->stack_low, proc->stack_top,
              PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK);
 
-  // Inicializar tabla de descriptores de archivos con stdin, stdout, stderr
-  for (int f = 0; f < MAX_PROCESS_FDS; f++) {
+  for (int f = 0; f < MAX_PROCESS_FDS; f++)
     proc->fds[f] = NULL;
-  }
-  proc->fds[0] = vfs_create_stdio_fd(0); // stdin
-  proc->fds[1] = vfs_create_stdio_fd(1); // stdout
-  proc->fds[2] = vfs_create_stdio_fd(2); // stderr
+  proc->fds[0] = vfs_create_stdio_fd(0);
+  proc->fds[1] = vfs_create_stdio_fd(1);
+  proc->fds[2] = vfs_create_stdio_fd(2);
 
-  // Init wait queue de hijos ANTES de enlazar en la lista, para que
-  // cualquier process_exit que corra después pueda despertar con seguridad.
   wait_queue_init(&proc->child_wq);
 
-  // [PREEMPT] Publicación atómica en process_list. Cualquier lector
-  // que corra concurrentemente verá la lista consistente.
-  // TODO SMP (Fase 5): process_list se modifica sin spinlock. Hoy basta
-  // con preempt_disable(). Con SMP, hace falta spinlock real.
-  preempt_disable();
+  // 7. Enlazar tarea ↔ proceso ANTES de publicar la tarea.
+  task->proc = proc;
+
+  // 8. Publicar en process_list con lock.
+  unsigned long flags = spin_lock_irqsave(&process_lock);
   proc->next = process_list;
   process_list = proc;
-  preempt_enable();
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  // 9. Lo ÚLTIMO: hacer la tarea runnable.
+  sched_publish_task(task);
 
   LOG_INFO("[PROC] Proceso '%s' creado (PID=%u)", name, proc->pid);
   return proc;
@@ -215,16 +217,22 @@ static bool has_matching_zombie(void *arg) {
   process_t *parent = ctx->parent;
   int32_t pid = ctx->pid;
 
+  unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
+  bool found = false;
   while (p) {
     if ((pid == -1 && p->ppid == parent->pid) ||
-        (pid >= 0 && (uint32_t)pid == p->pid)) {
-      if (p->is_zombie)
-        return true;
+        (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
+      // [P0.6] Solo cuentan hijos MÍOS.
+      if (p->is_zombie) {
+        found = true;
+        break;
+      }
     }
     p = p->next;
   }
-  return false;
+  spin_unlock_irqrestore(&process_lock, flags);
+  return found;
 }
 
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
@@ -235,14 +243,14 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
   waitpid_ctx_t ctx = {.parent = parent, .pid = pid};
 
   while (1) {
-    // ¿Hay ya un hijo zombie que encaje?
     process_t *found_zombie = NULL;
     int has_matching_child = 0;
 
+    unsigned long flags = spin_lock_irqsave(&process_lock);
     process_t *p = process_list;
     while (p) {
       if ((pid == -1 && p->ppid == parent->pid) ||
-          (pid >= 0 && (uint32_t)pid == p->pid)) {
+          (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
         has_matching_child = 1;
         if (p->is_zombie) {
           found_zombie = p;
@@ -251,36 +259,47 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
       }
       p = p->next;
     }
+    spin_unlock_irqrestore(&process_lock, flags);
 
     if (found_zombie) {
       uint32_t zpid = found_zombie->pid;
+      int exit_code = found_zombie->exit_code;
+
+      // Sacar del process_list dentro del lock.
+      unsigned long flags2 = spin_lock_irqsave(&process_lock);
+      process_t **pp = &process_list;
+      while (*pp && *pp != found_zombie)
+        pp = &(*pp)->next;
+      if (*pp == found_zombie)
+        *pp = found_zombie->next;
+      spin_unlock_irqrestore(&process_lock, flags2);
+
       if (status_out) {
         stac();
-        *status_out = found_zombie->exit_code;
+        *status_out = exit_code;
         clac();
       }
-      process_terminate(found_zombie);
+
+      // Cleanup fuera del lock.
+      if (found_zombie->task)
+        found_zombie->task->proc = NULL;
+      if (found_zombie->pml4_phys)
+        paging_free_user_space(found_zombie->pml4_phys);
+      vma_destroy_all(found_zombie);
+      kfree(found_zombie);
+
       return (int)zpid;
     }
 
-    if (!has_matching_child) {
-      return -1; // No existe tal hijo
-    }
+    if (!has_matching_child)
+      return -1;
+    if (options & WNOHANG)
+      return 0;
 
-    if (options & WNOHANG) {
-      return 0; // Hijo en ejecución, no bloquear
-    }
-
-    // Esperar en la wq del padre. La condición se re-evalúa bajo el
-    // lock de la wq cada vez que process_exit hace wake_up_all.
-    // No hay race: si el hijo muere justo entre el escaneo de arriba
-    // y el wait_event, la re-evaluación de la condición lo detecta
-    // (o el wake_up ya nos encontrará en la wq).
     int rc =
         wait_event_interruptible(&parent->child_wq, has_matching_zombie, &ctx);
     if (rc < 0)
       return -1;
-    // Al volver, re-escaneamos desde el principio del while(1).
   }
 }
 
@@ -291,19 +310,35 @@ void process_exit(process_t *proc, int exit_code) {
   proc->is_zombie = 1;
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
-    if (proc->fds[f]) {
+    if (proc->fds[f])
       vfs_close_for_proc(proc, f);
-    }
   }
 
-  // NUEVO: cerrar las ventanas del winsrv propiedad de esta tarea.
-  if (proc->task) {
+  if (proc->task)
     winsrv_cleanup_task(proc->task);
-  }
 
   process_t *parent = process_get_by_pid(proc->ppid);
-  if (parent) {
+  if (parent)
     wake_up_all(&parent->child_wq);
+}
+
+__attribute__((noreturn)) void process_exit_current(int exit_code) {
+  process_t *proc = process_current();
+  task_t *cur = sched_current();
+
+  if (proc)
+    process_exit(proc, exit_code);
+
+  if (cur) {
+    // Marcar DEAD. on_cpu se pondrá a 0 cuando el scheduler cambie
+    // a otra tarea (en sched_tick).
+    cur->state = TASK_DEAD;
+  }
+
+  // Ceder y esperar a que el reaper nos libere.
+  while (1) {
+    sched_yield();
+    __asm__ volatile("sti; hlt");
   }
 }
 
@@ -363,10 +398,26 @@ void process_terminate(process_t *proc) {
     return;
   LOG_INFO("[PROC] Limpiando process_t '%s' (PID=%u)", proc->name, proc->pid);
 
+  // 1. Desvincular tarea ↔ proceso
+  if (proc->task) {
+    proc->task->proc = NULL;
+    // La tarea ya está DEAD y reapeada (o será reapeada por el scheduler).
+    // No hacemos task_put aquí: el scheduler ya lo hizo.
+  }
+
+  // 2. [P1.3] Liberar tablas de página. Solo cuando la tarea está
+  // DEAD y on_cpu == 0, garantizado porque process_terminate se llama
+  // desde waitpid() sobre un hijo ya reapeado.
+  if (proc->pml4_phys) {
+    paging_free_user_space(proc->pml4_phys);
+    proc->pml4_phys = 0;
+  }
+
+  // 3. VMA list
   vma_destroy_all(proc);
 
-  // [PREEMPT] Unlink atómico.
-  preempt_disable();
+  // 4. Desvincular de process_list con lock
+  unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t **p = &process_list;
   while (*p) {
     if (*p == proc) {
@@ -375,7 +426,7 @@ void process_terminate(process_t *proc) {
     }
     p = &(*p)->next;
   }
-  preempt_enable();
+  spin_unlock_irqrestore(&process_lock, flags);
 
   kfree(proc);
 }

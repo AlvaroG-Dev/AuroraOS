@@ -9,6 +9,12 @@
 ;   0x18  fpu_state  (uint64_t)  <- puntero alineado al buffer FPU
 ;   0x20  cr3        (uint64_t)  <- CR3 fisico del espacio de direcciones
 ;   0x28  fpu_raw    (uint8_t[528])
+;   0x78C on_cpu      (volatile int)  <- [FIX] actualizado aquí
+
+%define TASK_OFF_RSP        0x00
+%define TASK_OFF_FPU_STATE  0x18
+%define TASK_OFF_CR3        0x20
+%define TASK_OFF_ON_CPU     0x78C
 
 section .text
 bits 64
@@ -25,34 +31,41 @@ task_switch:
     push r14
     push r15
 
-    ; 1. Guardar RSP actual en old_task->rsp (offset 0x00)
-    mov [rdi], rsp
+    ; 1. Guardar RSP actual en old_task->rsp
+    mov [rdi + TASK_OFF_RSP], rsp
 
-    ; 2. Guardar estado FPU/SSE (offset 0x18 es el puntero al buffer alineado)
-    mov rax, [rdi + 0x18]
+    ; 2. Guardar estado FPU/SSE
+    mov rax, [rdi + TASK_OFF_FPU_STATE]
     test rax, rax
     jz .skip_fxsave
     fxsave64 [rax]
 .skip_fxsave:
 
-    ; 2b. Liberar sched_lock si se pasó en rdx (después de guardar old completamente)
+    ; 3. Liberar sched_lock si se pasó en rdx
     test rdx, rdx
     jz .skip_unlock
     mov dword [rdx], 0
 .skip_unlock:
 
-    ; 3. Restaurar FPU/SSE del nuevo proceso (offset 0x18)
-    mov rax, [rsi + 0x18]
+    ; 4. Restaurar FPU/SSE del nuevo proceso
+    mov rax, [rsi + TASK_OFF_FPU_STATE]
     test rax, rax
     jz .skip_fxrstor
     fxrstor64 [rax]
 .skip_fxrstor:
 
-    ; 4. Cargar nuevo RSP desde new_task->rsp (offset 0x00)
-    mov rsp, [rsi]
+    ; 5. Cargar nuevo RSP
+    mov rsp, [rsi + TASK_OFF_RSP]
 
-    ; 5. Cambiar espacio de direcciones: cargar CR3 de new_task (offset 0x20)
-    mov rax, [rsi + 0x20]
+    ; 5b. [FIX] Ahora estamos en el stack de la nueva tarea. Marcar
+    ; on_cpu de la vieja = 0 y de la nueva = 1. Este es el punto
+    ; seguro: ya no volveremos a tocar el stack viejo, así que otra
+    ; CPU puede reapear `old` sin que nosotros usemos su memoria.
+    mov dword [rdi + TASK_OFF_ON_CPU], 0
+    mov dword [rsi + TASK_OFF_ON_CPU], 1
+
+    ; 6. Cambiar CR3 si hace falta
+    mov rax, [rsi + TASK_OFF_CR3]
     test rax, rax
     jz .skip_cr3
     mov rcx, cr3
@@ -72,15 +85,15 @@ task_switch:
 
 global task_jump_to
 task_jump_to:
-    mov rax, [rdi + 0x18]
+    mov rax, [rdi + TASK_OFF_FPU_STATE]
     test rax, rax
     jz .skip_fxrstor_jump
     fxrstor64 [rax]
 .skip_fxrstor_jump:
 
-    mov rsp, [rdi]
+    mov rsp, [rdi + TASK_OFF_RSP]
 
-    mov rax, [rdi + 0x20]
+    mov rax, [rdi + TASK_OFF_CR3]
     test rax, rax
     jz .skip_cr3_jump
     mov rcx, cr3
@@ -112,7 +125,7 @@ task_trampoline:
 global user_trampoline
 
 user_trampoline:
-    mov ax, 0x1B
+    mov ax, 0x23
     mov ds, ax
     mov es, ax
 

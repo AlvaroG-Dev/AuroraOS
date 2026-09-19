@@ -13,12 +13,13 @@
 #include "../apic.h"
 #include "../cpu.h"
 #include "../heap.h"
+#include "../klog.h"
+#include "../sched.h"
 #include "../slab.h"
+#include "../smp_boot.h"
 #include "../string.h"
 #include "../test.h"
 #include "../time.h"
-#include "../sched.h"
-#include "../smp_boot.h"
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -485,14 +486,28 @@ static void test_lapic_timer_running(void) {
 REGISTER_TEST("lapic-timer: contador decrementa", test_lapic_timer_running);
 
 static void test_lapic_timer_tick(void) {
-  // Verificar que tick_count avanza. Es una prueba débil pero
-  // confirma que el handler del LAPIC timer está siendo llamado.
+  // Leer tick_count global (definido en time.c). El LAPIC timer lo
+  // incrementa a 1 kHz. Como los tests corren con preempt_disable(),
+  // el scheduler no cambia de tarea, pero el handler del LAPIC timer
+  // sí se ejecuta (las IRQs no están enmascaradas por preempt_disable).
+  //
+  // En QEMU con virtualización anidada o bajo carga, un tick puede
+  // tardar más de lo esperado. Usamos un deadline de ~500 ms a 3.6 GHz
+  // (~1.8e9 iteraciones de pause, que es barato).
+  extern volatile uint64_t tick_count;
+
   uint64_t t1 = tick_count;
-  for (volatile int i = 0; i < 1000000; i++) {
+  uint64_t spins = 0;
+  const uint64_t spin_limit = 1800000000ULL;
+
+  while (tick_count == t1 && spins < spin_limit) {
+    __asm__ volatile("pause");
+    spins++;
   }
+
   uint64_t t2 = tick_count;
-  TEST_ASSERT(t2 > t1, "tick_count no avanza (t1=%lu t2=%lu)",
-              (unsigned long)t1, (unsigned long)t2);
+  TEST_ASSERT(t2 > t1, "tick_count no avanza (t1=%lu t2=%lu, spins=%lu)",
+              (unsigned long)t1, (unsigned long)t2, (unsigned long)spins);
 }
 REGISTER_TEST("lapic-timer: tick_count avanza", test_lapic_timer_tick);
 
@@ -502,17 +517,149 @@ REGISTER_TEST("lapic-timer: tick_count avanza", test_lapic_timer_tick);
 static void test_smp_sched_current_valid(void) {
   task_t *cur = sched_current();
   TEST_ASSERT(cur != NULL, "sched_current() devolvió NULL");
-  TEST_ASSERT(cur->state == TASK_RUNNING, "sched_current() no está en TASK_RUNNING (state=%d)", cur->state);
+  TEST_ASSERT(cur->state == TASK_RUNNING,
+              "sched_current() no está en TASK_RUNNING (state=%d)", cur->state);
 }
-REGISTER_TEST("smp: sched_current() per-CPU válido", test_smp_sched_current_valid);
+REGISTER_TEST("smp: sched_current() per-CPU válido",
+              test_smp_sched_current_valid);
 
 static void test_smp_aps_status(void) {
   const acpi_info_t *acpi = acpi_get_info();
   if (acpi->cpu_count > 1) {
     int ready = smp_aps_ready();
-    TEST_ASSERT(ready > 0, "Sistema SMP con %d CPUs pero aps_ready=%d", acpi->cpu_count, ready);
+    TEST_ASSERT(ready > 0, "Sistema SMP con %d CPUs pero aps_ready=%d",
+                acpi->cpu_count, ready);
   } else {
-    TEST_ASSERT(smp_aps_ready() == 0, "Sistema uniprocesador pero aps_ready != 0");
+    TEST_ASSERT(smp_aps_ready() == 0,
+                "Sistema uniprocesador pero aps_ready != 0");
   }
 }
 REGISTER_TEST("smp: estado de APs coherente con ACPI", test_smp_aps_status);
+
+// ---------------------------------------------------------------------------
+// [SMP 4.4] Test serio: wakeup cross-CPU vía IPI.
+//
+// Crea una tarea de kernel que se bloquea en una wait queue. Desde el
+// BSP, marca la condición y llama a sched_make_ready(), que debe enviar
+// una IPI a un AP idle. La tarea corre en el AP, registra en qué CPU
+// ejecutó, y despierta al BSP.
+//
+// Es un test BLOQUEANTE: usa wait_event() y sched_yield(). El runner
+// lo ejecuta sin preempt_disable.
+// ---------------------------------------------------------------------------
+
+static struct wait_queue g_ipi_waiter_wq; // wq donde duerme el waiter
+static struct wait_queue g_ipi_done_wq;   // wq donde duerme el BSP
+static volatile int g_ipi_cond = 0;       // 0=idle, 1=despierta, 2=terminó
+static volatile int g_ipi_done = 0;       // 1 cuando el waiter acabó
+static volatile uint32_t g_ipi_runner_cpu = 0xFFFFFFFF;
+static volatile uint32_t g_ipi_waker_cpu = 0xFFFFFFFF;
+
+static bool ipi_waiter_cond_fn(void *arg) {
+  (void)arg;
+  return g_ipi_cond != 0;
+}
+
+static bool ipi_done_cond_fn(void *arg) {
+  (void)arg;
+  return g_ipi_done != 0;
+}
+
+static void ipi_test_waiter(void) {
+  // Esperar a que el BSP active la condición. Esto nos deja BLOCKED.
+  // El BSP luego llamará a sched_make_ready() para despertarnos.
+  wait_event(&g_ipi_waiter_wq, ipi_waiter_cond_fn, NULL);
+
+  // Aquí ya corremos. Registrar en qué CPU.
+  g_ipi_runner_cpu = (uint32_t)smp_processor_id();
+
+  // Avisar al BSP.
+  g_ipi_done = 1;
+  wake_up_all(&g_ipi_done_wq);
+}
+
+static void test_smp_ipi_wakeup(void) {
+  if (smp_aps_ready() == 0) {
+    TEST_ASSERT(0, "sin APs, el test no puede validar el cross-CPU");
+    return;
+  }
+
+  g_ipi_cond = 0;
+  g_ipi_done = 0;
+  g_ipi_runner_cpu = 0xFFFFFFFF;
+  g_ipi_waker_cpu = 0xFFFFFFFF;
+  wait_queue_init(&g_ipi_waiter_wq);
+  wait_queue_init(&g_ipi_done_wq);
+
+  uint32_t my_cpu = (uint32_t)smp_processor_id();
+  g_ipi_waker_cpu = my_cpu;
+
+  task_t *waiter = sched_create_task(ipi_test_waiter);
+  TEST_ASSERT(waiter != NULL, "sched_create_task falló");
+  if (!waiter)
+    return;
+
+  // ---------------------------------------------------------------
+  // FASE 1: dejar que el waiter corra y se bloquee.
+  //
+  // SIN afinidad, para que cualquier CPU (incluido el BSP) pueda
+  // cogerla y llevarla hasta el wait_event. Si le pusiéramos
+  // afinidad ahora, el BSP la ignoraría y los APs tardarían hasta
+  // 10 ms en tickear, más de lo que dura este bucle.
+  // ---------------------------------------------------------------
+  waiter->cpu_affinity = -1;
+
+  for (int i = 0; i < 5000 && waiter->state != TASK_BLOCKED; i++) {
+    sched_yield();
+    // Si aún no está blocked, darle algo de tiempo real a los APs
+    // para que hagan al menos un tick. pause es barato.
+    for (volatile int k = 0; k < 1000; k++) {
+      __asm__ volatile("pause");
+    }
+  }
+
+  TEST_ASSERT(waiter->state == TASK_BLOCKED,
+              "el waiter no se bloqueó (state=%d)", waiter->state);
+  if (waiter->state != TASK_BLOCKED)
+    return;
+
+  // ---------------------------------------------------------------
+  // FASE 2: elegir un AP y fijarle afinidad para el wakeup.
+  //
+  // A partir de aquí, solo ese AP podrá cogerla. El sched_make_ready
+  // enviará la IPI a ese AP, y el sched_tick del BSP la ignorará.
+  // ---------------------------------------------------------------
+  int ap_cpu = -1;
+  for (int c = 0; c < MAX_CPUS; c++) {
+    if ((uint32_t)c == my_cpu)
+      continue;
+    // Un AP válido: su idle task ya está corriendo.
+    if (per_cpu(current_task, c) != NULL) {
+      ap_cpu = c;
+      break;
+    }
+  }
+  TEST_ASSERT(ap_cpu >= 0, "no se encontró ningún AP con idle task");
+  if (ap_cpu < 0)
+    return;
+
+  waiter->cpu_affinity = ap_cpu;
+
+  // ---------------------------------------------------------------
+  // FASE 3: despertar y esperar a que corra en el AP.
+  // ---------------------------------------------------------------
+  g_ipi_cond = 1;
+  wake_up_all(&g_ipi_waiter_wq);
+
+  wait_event(&g_ipi_done_wq, ipi_done_cond_fn, NULL);
+
+  TEST_ASSERT(g_ipi_done == 1, "g_ipi_done != 1");
+  TEST_ASSERT(g_ipi_runner_cpu == (uint32_t)ap_cpu,
+              "el waiter corrió en cpu=%u, esperado cpu=%d", g_ipi_runner_cpu,
+              ap_cpu);
+
+  LOG_INFO("[TEST] ipi-wakeup: waker=BSP(cpu=%u) runner=cpu[%u] (afinidad=%d)",
+           g_ipi_waker_cpu, g_ipi_runner_cpu, ap_cpu);
+}
+REGISTER_TEST_FLAGS("smp: IPI wakeup cross-CPU", test_smp_ipi_wakeup,
+                    TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
