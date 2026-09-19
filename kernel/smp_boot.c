@@ -245,7 +245,7 @@ void ap_entry(void) {
   cpu_local_data[my_cpu].lapic_id = my_apic_id;
   cpu_local_data[my_cpu].kernel_stack = smp_boot_params->ap_stack_top[my_cpu];
   cpu_local_data[my_cpu].current_task = NULL;
-  cpu_local_data[my_cpu].tick_counter = 0;
+  cpu_local_data[my_cpu].ticks_since_resched = 0;
   DIAG('I');
 
   // Inicializar LAPIC local y su timer
