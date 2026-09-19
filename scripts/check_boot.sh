@@ -76,9 +76,11 @@ log_error() { echo "${C_RED}[check_boot] ERROR:${C_RST} $*" >&2; }
 # Volcado del serial.log
 #
 # Se llama al final del script, con o sin fallo, según SHOW_SERIAL.
+# El primer argumento opcional es "force": si se pasa, ignora el filtro
+# on-failure. Sin argumentos, respeta SHOW_SERIAL.
 # ---------------------------------------------------------------------------
 dump_serial() {
-    local force="$1"  # "force" para saltarse el filtro on-failure
+    local force="${1:-}"  # "force" para saltarse el filtro on-failure
     case "$SHOW_SERIAL" in
         no) return 0 ;;
         on-failure) [ "$force" = "force" ] || return 0 ;;
