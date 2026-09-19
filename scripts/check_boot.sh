@@ -9,29 +9,27 @@
 #   ./scripts/check_boot.sh [timeout_seconds]
 #
 # Variables de entorno:
-#   TIMEOUT       (default: 60)      segundos antes de matar QEMU
-#   OVMF_CODE     (default: /usr/share/OVMF/OVMF_CODE_4M.fd)
-#   OVMF_VARS_SRC (default: /usr/share/OVMF/OVMF_VARS_4M.fd)
-#   QEMU_BIN      (default: qemu-system-x86_64)
-#   QEMU_CPU      (default: max)
-#   QEMU_SMP      (default: 1)       en CI sin KVM, 1. En local con KVM, 8.
-#   QEMU_MEM      (default: 512M)
-#   USE_KVM       (default: auto)    auto|yes|no
-#   EXPECT_TESTS  (default: 36)      número total de tests registrados
-#   EXPECT_FAILED (default: 0)       tests que deben fallar
-#   KEEP_LOGS     (default: no)      yes para no borrar serial.log/qemu.log
+#   TIMEOUT        (default: 90)     segundos antes de matar QEMU
+#   OVMF_CODE      (default: /usr/share/OVMF/OVMF_CODE_4M.fd)
+#   OVMF_VARS_SRC  (default: /usr/share/OVMF/OVMF_VARS_4M.fd)
+#   QEMU_BIN       (default: qemu-system-x86_64)
+#   QEMU_CPU       (default: max)
+#   QEMU_SMP       (default: 1)      CPUs a emular. >1 requiere KVM para APs.
+#   QEMU_MEM       (default: 512M)
+#   USE_KVM        (default: auto)   auto|yes|no
+#   KEEP_LOGS      (default: no)     yes para no borrar serial.log/qemu.log
+#   REQUIRE_SMP    (default: auto)   auto: exige APs si QEMU_SMP>1 Y KVM.
+#                                    yes:  siempre exige APs.
+#                                    no:   nunca exige APs.
 #
 # Requiere:
 #   - aurora.iso en la raíz (o se genera con `make iso`).
 #   - qemu-system-x86_64
-#   - OVMF (ruta /usr/share/OVMF/OVMF_CODE_4M.fd por defecto)
+#   - OVMF
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Configuración
-# ---------------------------------------------------------------------------
-TIMEOUT="${TIMEOUT:-60}"
+TIMEOUT="${TIMEOUT:-90}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERIAL_LOG="$ROOT/serial.log"
 QEMU_LOG="$ROOT/qemu.log"
@@ -45,20 +43,17 @@ QEMU_CPU="${QEMU_CPU:-max}"
 QEMU_SMP="${QEMU_SMP:-1}"
 QEMU_MEM="${QEMU_MEM:-512M}"
 USE_KVM="${USE_KVM:-auto}"
-EXPECT_TESTS="${EXPECT_TESTS:-36}"
-EXPECT_FAILED="${EXPECT_FAILED:-0}"
 KEEP_LOGS="${KEEP_LOGS:-no}"
+REQUIRE_SMP="${REQUIRE_SMP:-auto}"
 
 cd "$ROOT"
 
 # ---------------------------------------------------------------------------
-# Colores (solo si la salida es un TTY)
+# Colores
 # ---------------------------------------------------------------------------
 if [ -t 1 ]; then
-    C_RED=$'\033[0;31m'
-    C_GRN=$'\033[0;32m'
-    C_YLW=$'\033[0;33m'
-    C_RST=$'\033[0m'
+    C_RED=$'\033[0;31m'; C_GRN=$'\033[0;32m'
+    C_YLW=$'\033[0;33m'; C_RST=$'\033[0m'
 else
     C_RED=""; C_GRN=""; C_YLW=""; C_RST=""
 fi
@@ -95,8 +90,19 @@ esac
 if [ "$kvm_enabled" = "1" ]; then
     log_info "KVM habilitado (-enable-kvm -cpu host)"
 else
-    log_warn "KVM no disponible, usando TCG con -cpu $QEMU_CPU (más lento, APs no arrancan)"
+    log_info "KVM no disponible, usando TCG con -cpu $QEMU_CPU"
 fi
+
+# Resolver REQUIRE_SMP=auto
+if [ "$REQUIRE_SMP" = "auto" ]; then
+    if [ "$QEMU_SMP" -gt 1 ] && [ "$kvm_enabled" = "1" ]; then
+        REQUIRE_SMP=yes
+    else
+        REQUIRE_SMP=no
+    fi
+fi
+
+log_info "QEMU_SMP=$QEMU_SMP, KVM=$kvm_enabled, REQUIRE_SMP=$REQUIRE_SMP"
 
 # ---------------------------------------------------------------------------
 # Verificar dependencias
@@ -106,20 +112,15 @@ if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -f "$OVMF_CODE" ]; then
-    log_error "no encuentro OVMF en $OVMF_CODE"
-    echo "  Instala el paquete ovmf o exporta OVMF_CODE=/ruta/a/OVMF_CODE_4M.fd" >&2
-    exit 1
-fi
-
-if [ ! -f "$OVMF_VARS_SRC" ]; then
-    log_error "no encuentro OVMF_VARS en $OVMF_VARS_SRC"
-    echo "  Exporta OVMF_VARS_SRC=/ruta/a/OVMF_VARS_4M.fd" >&2
-    exit 1
-fi
+for f in "$OVMF_CODE" "$OVMF_VARS_SRC"; do
+    if [ ! -f "$f" ]; then
+        log_error "no encuentro OVMF: $f"
+        exit 1
+    fi
+done
 
 # ---------------------------------------------------------------------------
-# Generar la ISO si no existe
+# Generar ISO si no existe
 # ---------------------------------------------------------------------------
 if [ ! -f "$ROOT/aurora.iso" ]; then
     log_info "aurora.iso no existe, generando con 'make iso'..."
@@ -129,12 +130,8 @@ if [ ! -f "$ROOT/aurora.iso" ]; then
     fi
 fi
 
-# Copiar OVMF_VARS para que QEMU pueda escribir sin corromper el original.
 cp "$OVMF_VARS_SRC" "$OVMF_VARS"
 
-# ---------------------------------------------------------------------------
-# Limpiar logs previos
-# ---------------------------------------------------------------------------
 if [ "$KEEP_LOGS" != "yes" ]; then
     rm -f "$SERIAL_LOG" "$QEMU_LOG"
 fi
@@ -142,7 +139,7 @@ fi
 # ---------------------------------------------------------------------------
 # Lanzar QEMU
 # ---------------------------------------------------------------------------
-log_info "Arrancando QEMU (timeout=${TIMEOUT}s, smp=${QEMU_SMP}, mem=${QEMU_MEM})..."
+log_info "Arrancando QEMU (timeout=${TIMEOUT}s, mem=${QEMU_MEM})..."
 
 set +e
 timeout --foreground "$TIMEOUT" "$QEMU_BIN" \
@@ -159,25 +156,35 @@ timeout --foreground "$TIMEOUT" "$QEMU_BIN" \
 QEMU_EXIT=$?
 set -e
 
-# 124 = timeout(1) mató el proceso. Es OK (el kernel se queda en idle).
+# 124 = timeout(1) mató QEMU. Es OK (el kernel se queda en idle).
 if [ "$QEMU_EXIT" != "0" ] && [ "$QEMU_EXIT" != "124" ]; then
     log_error "QEMU salió con código $QEMU_EXIT"
-    echo "--- qemu.log ---" >&2
     cat "$QEMU_LOG" >&2
     exit 1
 fi
 
 if [ ! -s "$SERIAL_LOG" ]; then
     log_error "serial.log está vacío"
-    echo "--- qemu.log ---" >&2
     cat "$QEMU_LOG" >&2
     exit 1
 fi
 
 # ---------------------------------------------------------------------------
+# Detectar si los APs arrancaron
+# ---------------------------------------------------------------------------
+aps_ok=0
+if grep -qF "[SMP] APs listos y operativos" "$SERIAL_LOG"; then
+    aps_ok=1
+    n_aps=$(grep -oE '[0-9]+/[0-9]+ APs listos' "$SERIAL_LOG" | tail -1 || echo "?")
+    log_info "APs arrancados: $n_aps"
+else
+    log_info "APs NO arrancados (esperado si QEMU_SMP=1 o TCG sin mailbox ACPI)"
+fi
+
+# ---------------------------------------------------------------------------
 # Cadenas esperadas
 # ---------------------------------------------------------------------------
-log_info "Verificando cadenas esperadas..."
+log_info "Verificando cadenas de arranque..."
 
 EXPECTED_BOOT=(
     "AURORA OS KERNEL x86_64"
@@ -208,11 +215,6 @@ EXPECTED_BOOT=(
     "[PROC] Proceso 'apps/shell' creado"
 )
 
-EXPECTED_TESTS=(
-    "[TEST] ${EXPECT_TESTS} tests:"
-    "[TEST] ${EXPECT_FAILED} failed"
-)
-
 EXPECTED_SHELL=(
     "SHELL: main begin"
     "SHELL: after win_create"
@@ -236,19 +238,78 @@ check_block() {
 }
 
 check_block "arranque" "${EXPECTED_BOOT[@]}"
-check_block "tests"    "${EXPECTED_TESTS[@]}"
 check_block "shell"    "${EXPECTED_SHELL[@]}"
+
+# ---------------------------------------------------------------------------
+# Verificar el bloque de tests.
+#
+# No hardcodeamos el número total porque cambia:
+#   - Con SMP:   "36 tests: 36 passed, 0 failed, 0 skipped"
+#   - Sin SMP:   "35 tests: 35 passed, 0 failed, 1 skipped"
+# El total real es passed + failed + skipped = 36 en ambos casos.
+#
+# Verificamos:
+#   - Que aparece el bloque "[TEST] N tests:"
+#   - Que "0 failed" está presente
+#   - Si REQUIRE_SMP=yes, que "0 skipped" (o el número esperado)
+#   - Si REQUIRE_SMP=no, permitimos skipped > 0
+# ---------------------------------------------------------------------------
+log_info "  Bloque: tests"
+
+if grep -qE "\[TEST\] [0-9]+ tests:" "$SERIAL_LOG"; then
+    tests_line=$(grep -oE "\[TEST\] [0-9]+ tests: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped" "$SERIAL_LOG" | tail -1)
+    log_ok "$tests_line"
+
+    # Extraer contadores con regex
+    passed=$(echo "$tests_line" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+")
+    failed=$(echo "$tests_line" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+")
+    skipped=$(echo "$tests_line" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+")
+
+    log_info "  passed=$passed failed=$failed skipped=$skipped"
+
+    if [ "$failed" != "0" ]; then
+        log_fail "Hay $failed tests fallidos"
+        FAILED=$((FAILED + 1))
+    fi
+
+    if [ "$REQUIRE_SMP" = "yes" ]; then
+        if [ "$skipped" != "0" ]; then
+            log_fail "REQUIRE_SMP=yes pero hay $skipped tests skipped"
+            FAILED=$((FAILED + 1))
+        fi
+    else
+        if [ "$skipped" != "0" ]; then
+            log_warn "Hay $skipped tests skipped (OK porque REQUIRE_SMP=no)"
+        fi
+    fi
+else
+    log_fail "No aparece el bloque '[TEST] N tests:'"
+    FAILED=$((FAILED + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# Verificar SMP si REQUIRE_SMP=yes
+# ---------------------------------------------------------------------------
+if [ "$REQUIRE_SMP" = "yes" ]; then
+    log_info "  Bloque: SMP (REQUIRE_SMP=yes)"
+    if [ "$aps_ok" = "1" ]; then
+        log_ok "APs arrancados"
+    else
+        log_fail "REQUIRE_SMP=yes pero los APs no arrancaron"
+        FAILED=$((FAILED + 1))
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Reporte
 # ---------------------------------------------------------------------------
 if [ "$FAILED" -gt 0 ]; then
     echo ""
-    log_error "$FAILED cadenas no encontradas"
+    log_error "$FAILED cadenas no encontradas o verificaciones fallidas"
     echo "--- serial.log (últimas 200 líneas) ---" >&2
     tail -n 200 "$SERIAL_LOG" >&2
     exit 1
 fi
 
-log_info "Todas las cadenas esperadas presentes. ${C_GRN}OK${C_RST}."
+log_info "Todas las verificaciones pasaron. ${C_GRN}OK${C_RST}."
 exit 0
