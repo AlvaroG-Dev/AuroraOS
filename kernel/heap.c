@@ -55,6 +55,23 @@ static block_header_t *heap_grow_locked(size_t pages) {
     return NULL;
   }
 
+  // [FIX #20] Validar que no invadimos la región del SLAB.
+  //
+  // HEAP_VMA y SLAB_VMA están separadas por 16 MB. Si el heap crece
+  // más que eso, heap_top alcanzaría SLAB_VMA y vmm_alloc_pages
+  // mapearía páginas en la región del SLAB, corrompiendo las caches.
+  //
+  // SLAB_VMA está definida en slab.h. La incluimos indirectamente a
+  // través de heap.h (que ya incluye slab.h).
+  uint64_t new_top = heap_top + (uint64_t)pages * PAGE_SIZE;
+  if (new_top > SLAB_VMA) {
+    LOG_ERR("[HEAP] heap agotado: heap_top=0x%lx + %lu páginas = 0x%lx "
+            "excede SLAB_VMA=0x%lx",
+            (unsigned long)heap_top, (unsigned long)pages,
+            (unsigned long)new_top, (unsigned long)SLAB_VMA);
+    return NULL;
+  }
+
   uint64_t vaddr = heap_top;
   if (vmm_alloc_pages(vaddr, pages, PTE_WRITABLE | PTE_NX) != 0) {
     LOG_ERR("[HEAP] ERROR: vmm_alloc_pages fallo");
