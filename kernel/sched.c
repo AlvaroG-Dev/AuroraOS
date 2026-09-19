@@ -71,7 +71,7 @@ void smp_init(void) {
       cpu_local_data[i].user_rsp = 0;
       cpu_local_data[i].lapic_id = 0;
       cpu_local_data[i].current_task = NULL;
-      cpu_local_data[i].tick_counter = 0;
+      cpu_local_data[i].ticks_since_resched = 0;
     }
   }
 
@@ -91,10 +91,10 @@ void smp_dump(void) {
   for (int i = 0; i < MAX_CPUS; i++) {
     cpu_local_t *c = &cpu_local_data[i];
     LOG_DEBUG("  cpu[%d]: cpu_id=%d lapic_id=%d kernel_stack=%p "
-              "user_rsp=%p current_task=%p tick_counter=%lu",
+              "user_rsp=%p current_task=%p ticks_since_resched=%lu",
               i, c->cpu_id, c->lapic_id, (void *)c->kernel_stack,
               (void *)c->user_rsp, c->current_task,
-              (unsigned long)c->tick_counter);
+              (unsigned long)c->ticks_since_resched);
   }
 }
 
@@ -359,20 +359,16 @@ void sched_tick(void) {
   if (!curr)
     return;
 
-  this_cpu(tick_counter)++;
+  this_cpu(ticks_since_resched)++;
 
-  // [SMP 4.4] Si alguien pidió un resched (IPI o wake_up de otra CPU),
-  // forzamos el switch sin esperar a SCHED_INTERVAL.
   int force = curr->need_resched;
   curr->need_resched = 0;
 
-  if (!force && this_cpu(tick_counter) < SCHED_INTERVAL)
+  if (!force && this_cpu(ticks_since_resched) < SCHED_INTERVAL)
     return;
-  this_cpu(tick_counter) = 0;
+  this_cpu(ticks_since_resched) = 0;
 
   if (curr->preempt_count > 0) {
-    // No podemos cambiar de contexto. Si había un resched pendiente, lo
-    // dejamos marcado para procesarlo al salir de la sección crítica.
     if (force)
       curr->need_resched = 1;
     return;
@@ -453,7 +449,7 @@ void sched_tick(void) {
   // propio RFLAGS guardado en su stack.
 }
 void sched_yield(void) {
-  this_cpu(tick_counter) = SCHED_INTERVAL;
+  this_cpu(ticks_since_resched) = SCHED_INTERVAL;
   sched_tick();
 }
 
