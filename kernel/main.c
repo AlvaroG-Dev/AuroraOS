@@ -255,7 +255,7 @@ static void kmain_task(void) {
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
-  process_load("apps/hello");
+  process_load("apps/waitpid_stress");
 
   while (1) {
     sched_yield();
