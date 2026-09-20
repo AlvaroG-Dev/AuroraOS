@@ -12,6 +12,7 @@
 #include "../acpi.h"
 #include "../apic.h"
 #include "../cpu.h"
+#include "../block.h"
 #include "../heap.h"
 #include "../klog.h"
 #include "../sched.h"
