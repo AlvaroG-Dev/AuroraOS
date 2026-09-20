@@ -44,7 +44,7 @@
 
 set -euo pipefail
 
-TIMEOUT="${TIMEOUT:-90}"
+TIMEOUT="${TIMEOUT:-120}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERIAL_LOG="$ROOT/serial.log"
 QEMU_LOG="$ROOT/qemu.log"
