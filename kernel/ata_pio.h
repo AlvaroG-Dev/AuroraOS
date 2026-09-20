@@ -19,4 +19,6 @@ int ata_pio_finalize(void);
 
 void ata_dump(void);
 
+int ata_ide_present(void);
+
 #endif

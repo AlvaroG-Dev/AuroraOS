@@ -1,7 +1,8 @@
 # Makefile global - Aurora OS
 
 .PHONY: all bootloader kernel user image run run-debug run-smp run-smp-debug \
-        run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso
+        run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso \
+        run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci run-smp-kvm-ahci-2disk
 
 all: image
 
@@ -79,6 +80,34 @@ QEMU_FLAGS_KVM = \
 QEMU_FLAGS_STORAGE = \
 	-drive format=raw,file=aurora.img \
 	-cdrom aurora.iso
+
+# ---------------------------------------------------------------------------
+# AHCI (Fase 3)
+#
+# El controlador AHCI en QEMU lo expone la máquina `q35` (ICH9). En
+# `-machine pc` (default) solo hay PIIX3 + IDE, y el driver AHCI se
+# queda sin HBA. Por eso estos targets fuerzan `-machine q35`.
+#
+# En Q35, el CD-ROM se conecta a un puerto SATA distinto del disco duro.
+# Usamos `-drive if=none,id=...` + `-device ide-hd/ide-cd,bus=...` para
+# controlar exactamente qué puerto ocupa cada uno.
+#
+# Layout por defecto:
+#   ahci.0 (puerto 0) → disco duro   → sda
+#   ahci.1 (puerto 1) → CD-ROM       → sr0 (por ahora el driver AHCI no
+#                                       detecta ATAPI, así que sr0 sigue
+#                                       viniendo del PIIX3 si estuviera)
+#
+# Nota: el driver AHCI actual NO soporta ATAPI todavía. El CD-ROM en Q35
+# no aparecerá como sr0. Si quieres CD, usa los targets sin `-ahci`.
+# ---------------------------------------------------------------------------
+
+QEMU_FLAGS_Q35_AHCI = \
+	-machine q35 \
+	-device ahci,id=ahci \
+	-drive if=none,id=disk0,format=raw,file=aurora.img \
+	-device ide-hd,drive=disk0,bus=ahci.0
+
 
 # ---------------------------------------------------------------------------
 # TCG (emulación pura por software, sin KVM)
@@ -160,6 +189,57 @@ run-smp-kvm-debug: iso
 	@echo ""
 	@echo "=== Últimas líneas de serial.log ==="
 	@tail -60 serial.log 2>/dev/null || echo "(vacío)"
+
+# 4 CPUs + AHCI + KVM. El target que quieres para probar AHCI en SMP.
+run-smp-kvm-ahci: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		-drive id=disk0,if=none,format=raw,file=aurora.img \
+		-device ide-hd,drive=disk0,bus=ide.0 \
+		-smp 4 \
+		-serial stdio
+
+run-smp-kvm-ahci-debug: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_FLAGS_DEBUG) \
+		-drive id=disk0,if=none,format=raw,file=aurora.img \
+		-device ide-hd,drive=disk0,bus=ide.0 \
+		-smp 4 \
+		-serial file:serial.log
+	@echo ""
+	@echo "=== Trampoline (debug.log) ==="
+	@cat debug.log 2>/dev/null || echo "(vacío)"
+	@echo ""
+	@echo "=== Últimas líneas de serial.log ==="
+	@tail -80 serial.log 2>/dev/null || echo "(vacío)"
+
+# 1 CPU + AHCI + KVM. Útil para aislar problemas de SMP.
+run-kvm-ahci: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_FLAGS_Q35_AHCI) \
+		-serial stdio
+
+# 4 CPUs + AHCI + 2 discos SATA (sda y sdb) para probar múltiples puertos.
+run-smp-kvm-ahci-2disk: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_FLAGS_Q35_AHCI) \
+		-drive if=none,id=disk1,format=raw,file=aurora.img \
+		-device ide-hd,drive=disk1,bus=ahci.1 \
+		-smp 4 \
+		-serial stdio
 
 # ---------------------------------------------------------------------------
 # ISO (para VirtualBox, VMware, etc.)
