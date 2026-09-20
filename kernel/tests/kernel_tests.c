@@ -932,3 +932,122 @@ static void test_atapi_read_oob(void) {
   kfree(buf);
 }
 REGISTER_TEST("atapi: leer fuera de rango falla", test_atapi_read_oob);
+
+// ---------------------------------------------------------------------------
+// ATA DMA
+// ---------------------------------------------------------------------------
+static void test_ata_dma_bmide_ready(void) {
+  extern int ata_dma_is_ready(int channel_idx);
+  TEST_ASSERT(ata_dma_is_ready(0), "BMIDE primario no inicializado");
+  TEST_ASSERT(ata_dma_is_ready(1), "BMIDE secundario no inicializado");
+}
+REGISTER_TEST("ata_dma: BMIDE listo", test_ata_dma_bmide_ready);
+
+static void test_ata_dma_read_4k(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+
+  uint8_t *buf1 = kmalloc(4096);
+  uint8_t *buf2 = kmalloc(4096);
+  if (!buf1 || !buf2) {
+    TEST_ASSERT(0, "kmalloc falló");
+    if (buf1)
+      kfree(buf1);
+    if (buf2)
+      kfree(buf2);
+    return;
+  }
+
+  int rc1 = bdev_read(hda, 0, 8, buf1);
+  TEST_ASSERT(rc1 == 0, "read 4K (1) falló: %d", rc1);
+  if (rc1 != 0) {
+    kfree(buf1);
+    kfree(buf2);
+    return;
+  }
+
+  int rc2 = bdev_read(hda, 0, 8, buf2);
+  TEST_ASSERT(rc2 == 0, "read 4K (2) falló: %d", rc2);
+  if (rc2 != 0) {
+    kfree(buf1);
+    kfree(buf2);
+    return;
+  }
+
+  int same = 1;
+  for (int i = 0; i < 4096; i++) {
+    if (buf1[i] != buf2[i]) {
+      same = 0;
+      break;
+    }
+  }
+  TEST_ASSERT(same, "los dos buffers no coinciden");
+
+  kfree(buf1);
+  kfree(buf2);
+}
+REGISTER_TEST("ata_dma: leer 4KB", test_ata_dma_read_4k);
+
+static void test_ata_dma_write_read(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+
+  uint64_t lba = hda->num_sectors - 8;
+  uint8_t *orig = kmalloc(4096);
+  uint8_t *pattern = kmalloc(4096);
+  uint8_t *readback = kmalloc(4096);
+  if (!orig || !pattern || !readback) {
+    TEST_ASSERT(0, "kmalloc falló");
+    if (orig)
+      kfree(orig);
+    if (pattern)
+      kfree(pattern);
+    if (readback)
+      kfree(readback);
+    return;
+  }
+
+  int rc = bdev_read(hda, lba, 8, orig);
+  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  for (int i = 0; i < 4096; i++)
+    pattern[i] = (uint8_t)(i ^ 0x5A);
+
+  rc = bdev_write(hda, lba, 8, pattern);
+  TEST_ASSERT(rc == 0, "write 4K falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  rc = bdev_flush(hda);
+  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
+
+  rc = bdev_read(hda, lba, 8, readback);
+  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  int same = 1;
+  for (int i = 0; i < 4096; i++) {
+    if (readback[i] != pattern[i]) {
+      same = 0;
+      break;
+    }
+  }
+  TEST_ASSERT(same, "el patrón no coincide");
+
+out:
+  bdev_write(hda, lba, 8, orig);
+  bdev_flush(hda);
+  kfree(orig);
+  kfree(pattern);
+  kfree(readback);
+}
+REGISTER_TEST("ata_dma: escribir y leer 4KB", test_ata_dma_write_read);

@@ -161,6 +161,9 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->cpu_affinity = -1;
   task->on_cpu = 0;
 
+  // [FIX timeout] Sin timeout por defecto.
+  task->wake_deadline = 0;
+
   task->wait_entry.task = NULL;
   task->wait_entry.next = NULL;
 
@@ -696,4 +699,71 @@ void sched_publish_task(task_t *t) {
     return;
   task_list_insert(t);
   sched_kick_idle_cpu(t);
+}
+
+extern volatile uint64_t tick_count;
+uint64_t sched_get_ticks(void) { return tick_count; }
+
+// ---------------------------------------------------------------------------
+// [FIX] Recorre la lista de tareas y despierta las que estén BLOCKED y
+// hayan pasado su wake_deadline. Se llama desde time_tick (a 1000 Hz)
+// en el BSP.
+//
+// IMPORTANTE: no basta con cambiar state a READY. La tarea sigue en la
+// wait queue, y el invariante "state == READY implica waiting_on == NULL"
+// se viola, causando un panic en sched_check_invariants.
+//
+// La solución es llamar a wake_up_all sobre la wq, que quita la tarea
+// de la cola Y la marca READY de forma atómica. Si varias tareas
+// comparten la misma wq, sólo llamamos a wake_up_all una vez.
+//
+// El wake_up_all se hace FUERA de sched_lock para evitar deadlocks con
+// el handler de IRQ del disco (que toma wq->lock y luego sched_lock).
+// ---------------------------------------------------------------------------
+void sched_wake_expired(void) {
+  uint64_t now = sched_get_ticks();
+
+  // Recolectar las wait queues de tareas cuyo deadline expiró.
+  wait_queue_t *wqs[16];
+  int n_wqs = 0;
+
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+
+  if (task_list_head) {
+    task_t *p = task_list_head;
+    task_t *start = p;
+    do {
+      if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
+          now >= p->wake_deadline) {
+        p->wake_deadline = 0;
+        if (n_wqs < 16 && p->waiting_on != NULL) {
+          // Evitar duplicados: si varias tareas comparten wq, sólo
+          // la despertamos una vez.
+          int dup = 0;
+          for (int i = 0; i < n_wqs; i++) {
+            if (wqs[i] == p->waiting_on) {
+              dup = 1;
+              break;
+            }
+          }
+          if (!dup)
+            wqs[n_wqs++] = p->waiting_on;
+        }
+      }
+      p = p->next;
+    } while (p && p != start);
+  }
+
+  spin_unlock_irqrestore(&sched_lock, flags);
+
+  // Despertar cada wq fuera de sched_lock.
+  //
+  // wake_up_all toma wq->lock, quita las tareas de la cola, las marca
+  // READY (manteniendo el invariante waiting_on == NULL) y avisa a un
+  // AP idle. Las tareas que despierten pero cuyo cond() siga siendo
+  // falso volverán a dormirse en la siguiente iteración de wait_common
+  // con su wake_deadline restaurado.
+  for (int i = 0; i < n_wqs; i++) {
+    wake_up_all(wqs[i]);
+  }
 }

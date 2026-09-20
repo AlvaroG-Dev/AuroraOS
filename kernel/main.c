@@ -5,6 +5,7 @@
 #include "acpi.h"
 #include "apic.h"
 #include "ata_common.h"
+#include "ata_dma.h"
 #include "atapi.h"
 #include "block.h"
 #include "cpu.h"
@@ -186,6 +187,14 @@ static void kmain_task(void) {
   driver_register(&ata_pio_driver);
   driver_register(&atapi_driver);
   drivers_init_all();
+
+  // [FIX] Fase C: el ATAPI ya está detectado, ahora se puede aplicar la
+  // compatibilidad de par master/slave y registrar los discos ATA.
+  extern int ata_pio_finalize(void);
+  ata_pio_finalize();
+
+  LOG_INFO("[INIT] DMA dump...");
+  ata_dma_dump();
 
   int fb_ok = 0;
   if (g_boot_info.fb_base != 0 && g_boot_info.fb_width > 0 &&

@@ -6,7 +6,6 @@
 #include "panic.h"
 #include "sched.h"
 
-
 // ---------------------------------------------------------------------------
 // tick_count: contador global de ticks. Lo incrementa el handler del
 // timer (PIT o LAPIC timer). Es la base del scheduler preemptivo.
@@ -33,16 +32,18 @@ void pit_init(void) { pit_init_impl(); }
 // ---------------------------------------------------------------------------
 extern void compositor_notify_clock_tick(void);
 
+extern void sched_wake_expired(void);
+
 void time_tick(void) {
-  // Solo el BSP incrementa el reloj del sistema global
   if (smp_processor_id() == 0) {
     tick_count++;
     if (tick_count % KERNEL_HZ == 0) {
       compositor_notify_clock_tick();
     }
+    // [FIX timeout] Despertar tareas cuyo deadline haya expirado.
+    sched_wake_expired();
   }
 
-  // Preempción del scheduler en el núcleo actual
   sched_tick();
 }
 

@@ -15,8 +15,6 @@ static int g_failed = 0;
 static int g_skipped = 0;
 static int g_current_failed = 0;
 
-// Para los mensajes de test_pass/test_fail dentro del mismo test.
-// No hace falta thread-safety: los tests corren secuencialmente en el BSP.
 static const char *g_current_name = NULL;
 
 void test_begin(const char *name) {
@@ -25,10 +23,7 @@ void test_begin(const char *name) {
   klog_printf(KLOG_INFO, "[TEST] RUN  %s", name);
 }
 
-void test_pass(void) {
-  // No imprime nada por defecto para no inundar el log.
-  // El resultado final del test se imprime al acabar.
-}
+void test_pass(void) {}
 
 void test_fail(const char *file, int line, const char *fmt, ...) {
   g_failed++;
@@ -47,8 +42,8 @@ void test_skip(const char *fmt, ...) {
   g_skipped++;
   va_list ap;
   va_start(ap, fmt);
-  klog_printf(KLOG_WARN, "[TEST] SKIP %s:",
-              g_current_name ? g_current_name : "?");
+  klog_printf(KLOG_WARN,
+              "[TEST] SKIP %s:", g_current_name ? g_current_name : "?");
   klog_vprintf(KLOG_WARN, fmt, ap);
   va_end(ap);
 }
@@ -62,12 +57,10 @@ int run_all_tests(void) {
   if (total < 0)
     total = 0;
 
-  klog_printf(KLOG_INFO,
-              "[TEST] ============================================");
+  klog_printf(KLOG_INFO, "[TEST] ============================================");
   klog_printf(KLOG_INFO, "[TEST] Aurora OS kernel test suite");
   klog_printf(KLOG_INFO, "[TEST] %ld tests registrados", (long)total);
-  klog_printf(KLOG_INFO,
-              "[TEST] ============================================");
+  klog_printf(KLOG_INFO, "[TEST] ============================================");
 
   for (const test_case_t *t = __tests_start; t < __tests_end; t++) {
     if (!t->fn || !t->name) {
@@ -76,7 +69,6 @@ int run_all_tests(void) {
       continue;
     }
 
-    // Si el test necesita SMP y no hay APs arrancados, saltar.
     if ((t->flags & TEST_FLAG_NEEDS_SMP) && smp_aps_ready() == 0) {
       test_begin(t->name);
       test_skip("SMP no disponible (aps_ready=0)");
@@ -86,19 +78,19 @@ int run_all_tests(void) {
     test_begin(t->name);
 
     int failed_before = g_failed;
-    int blocking = (t->flags & TEST_FLAG_BLOCKING) != 0;
 
-    // Por defecto protegemos el test con preempt_disable: el scheduler
-    // no cambia de tarea a mitad. Si el test es BLOQUEANTE, no podemos
-    // hacer eso (wait_event dormiría con preempt_count>0 y el
-    // scheduler se negaría a cambiar de tarea).
-    if (!blocking) {
-      preempt_disable();
-    }
+    // [FIX] El framework ya NO llama a preempt_disable() automáticamente.
+    //
+    // El comportamiento anterior envolvía cada test no-BLOCKING en
+    // preempt_disable(). Eso es peligroso: si el test llama a cualquier
+    // función que haga sched_yield() (por ejemplo ata_chan_acquire
+    // cuando el canal está ocupado, o wait_event_interruptible_timeout),
+    // el scheduler no puede cambiar de tarea y el kernel se cuelga en
+    // un bucle infinito silencioso.
+    //
+    // Los tests que realmente necesitan atomicidad deben llamar a
+    // preempt_disable()/preempt_enable() ellos mismos.
     t->fn();
-    if (!blocking) {
-      preempt_enable();
-    }
 
     if (g_failed == failed_before) {
       g_passed++;
@@ -108,12 +100,10 @@ int run_all_tests(void) {
     }
   }
 
-  klog_printf(KLOG_INFO,
-              "[TEST] ============================================");
+  klog_printf(KLOG_INFO, "[TEST] ============================================");
   klog_printf(KLOG_INFO, "[TEST] %d tests: %d passed, %d failed, %d skipped",
               g_passed + g_failed, g_passed, g_failed, g_skipped);
-  klog_printf(KLOG_INFO,
-              "[TEST] ============================================");
+  klog_printf(KLOG_INFO, "[TEST] ============================================");
 
   return g_failed;
 }
