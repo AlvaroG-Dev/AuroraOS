@@ -30,6 +30,8 @@ static ata_channel_t g_channels[2];
 static ata_device_t *g_devices = NULL;
 static int g_device_count = 0;
 
+static int g_ide_present = 0;
+
 // [FIX] Lista temporal de dispositivos detectados en Fase A, pendientes
 // de que Fase C les asigne modo y los registre.
 static ata_device_t *g_pending_devices = NULL;
@@ -63,6 +65,8 @@ static uint64_t ata_words_to_u64(const uint16_t *w) {
   return ((uint64_t)w[3] << 48) | ((uint64_t)w[2] << 32) |
          ((uint64_t)w[1] << 16) | (uint64_t)w[0];
 }
+
+int ata_ide_present(void) { return g_ide_present; }
 
 static void ata_parse_identify(ata_device_t *dev, const uint16_t *id) {
   ata_copy_string(dev->model, &id[27], 20, sizeof(dev->model));
@@ -1029,52 +1033,49 @@ ata_channel_t *ata_get_channel(int index) {
 int ata_pio_init(void) {
   LOG_INFO("[ATA] Iniciando detección de discos PATA...");
 
+  // Inicializar los canales SIEMPRE, aunque no haya controlador. Así
+  // ata_get_channel() devuelve punteros válidos y atapi_init() puede
+  // comprobar ata_ide_present() antes de tocar los puertos.
   ata_init_channel(&g_channels[0], ATA_PRIMARY_IO, ATA_PRIMARY_CTRL,
                    ATA_PRIMARY_IRQ, "primario");
   ata_init_channel(&g_channels[1], ATA_SECONDARY_IO, ATA_SECONDARY_CTRL,
                    ATA_SECONDARY_IRQ, "secundario");
 
   pci_device_t ide;
-  if (pci_find_device(PCI_CLASS_STORAGE, PCI_SUBCLASS_STORAGE_IDE, &ide) == 0) {
-    LOG_INFO("[ATA] Controlador IDE en %02x:%02x.%x (vendor=0x%04x "
-             "device=0x%04x, progif=0x%02x)",
-             ide.bus, ide.slot, ide.func, ide.vendor_id, ide.device_id,
-             ide.prog_if);
+  if (pci_find_device(PCI_CLASS_STORAGE, PCI_SUBCLASS_STORAGE_IDE, &ide) != 0) {
+    LOG_INFO("[ATA] No hay controlador IDE en PCI; driver ATA deshabilitado");
+    g_ide_present = 0;
+    return 0;
+  }
+  g_ide_present = 1;
 
-    pci_enable_bus_mastering(&ide);
-    pci_enable_io_mem(&ide);
+  LOG_INFO("[ATA] Controlador IDE en %02x:%02x.%x (vendor=0x%04x "
+           "device=0x%04x, progif=0x%02x)",
+           ide.bus, ide.slot, ide.func, ide.vendor_id, ide.device_id,
+           ide.prog_if);
 
-    if (ata_dma_init_channel(0, ide.bus, ide.slot, ide.func) == 0) {
-      extern void irq_install_handler(uint8_t irq, void (*handler)(void));
-      extern void ata_dma_irq14(void);
-      irq_install_handler(14, ata_dma_irq14);
-      LOG_INFO("[ATA] DMA habilitado en canal primario (IRQ 14)");
-    } else {
-      LOG_WARN("[ATA] DMA no disponible en canal primario, usando PIO");
-    }
+  pci_enable_bus_mastering(&ide);
+  pci_enable_io_mem(&ide);
 
-    if (ata_dma_init_channel(1, ide.bus, ide.slot, ide.func) == 0) {
-      extern void irq_install_handler(uint8_t irq, void (*handler)(void));
-      extern void ata_dma_irq15(void);
-      irq_install_handler(15, ata_dma_irq15);
-      LOG_INFO("[ATA] DMA habilitado en canal secundario (IRQ 15)");
-    } else {
-      LOG_WARN("[ATA] DMA no disponible en canal secundario, usando PIO");
-    }
+  if (ata_dma_init_channel(0, ide.bus, ide.slot, ide.func) == 0) {
+    extern void irq_install_handler(uint8_t irq, void (*handler)(void));
+    extern void ata_dma_irq14(void);
+    irq_install_handler(14, ata_dma_irq14);
+    LOG_INFO("[ATA] DMA habilitado en canal primario (IRQ 14)");
   } else {
-    LOG_WARN("[ATA] Controlador IDE no encontrado en PCI, usando PIO");
+    LOG_WARN("[ATA] DMA no disponible en canal primario, usando PIO");
   }
 
-  // [FIX VirtualBox] Soft reset de ambos canales ANTES de habilitar
-  // nIEN=0. El firmware UEFI, al intentar arrancar y fallar, deja los
-  // discos con INTRQ asserted. Si habilitamos nIEN=0 sin resetear, el
-  // disco asserta IRQ 14 (level-triggered) y como el ISR no puede
-  // limpiar el INTRQ del drive equivocado, entra en tormenta de
-  // interrupciones que cuelga el kernel.
-  //
-  // SRST resetea AMBOS drives del canal, limpiando cualquier "operation
-  // complete" pendiente. Tras el reset, no hay INTRQ asserted, y nIEN=0
-  // (que ya deja SRST) es seguro.
+  if (ata_dma_init_channel(1, ide.bus, ide.slot, ide.func) == 0) {
+    extern void irq_install_handler(uint8_t irq, void (*handler)(void));
+    extern void ata_dma_irq15(void);
+    irq_install_handler(15, ata_dma_irq15);
+    LOG_INFO("[ATA] DMA habilitado en canal secundario (IRQ 15)");
+  } else {
+    LOG_WARN("[ATA] DMA no disponible en canal secundario, usando PIO");
+  }
+
+  // Soft reset de ambos canales ANTES de habilitar nIEN=0.
   ata_soft_reset(&g_channels[0]);
   ata_soft_reset(&g_channels[1]);
 
@@ -1082,7 +1083,7 @@ int ata_pio_init(void) {
   outb(g_channels[1].ctrl_base + ATA_CTRL_DEV_CTRL, 0);
   LOG_DEBUG("[ATA] IRQs del disco habilitadas (nIEN=0)");
 
-  // [FIX] Fase A: solo detección.
+  // Fase A: solo detección.
   ata_probe_device_pending(&g_channels[0], 0, "primario");
   ata_probe_device_pending(&g_channels[0], 1, "primario");
   ata_probe_device_pending(&g_channels[1], 0, "secundario");

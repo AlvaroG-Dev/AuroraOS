@@ -3,6 +3,7 @@
 // Punto de entrada del kernel Aurora OS
 
 #include "acpi.h"
+#include "ahci.h"
 #include "apic.h"
 #include "ata_common.h"
 #include "ata_dma.h"
@@ -67,6 +68,7 @@ static uint8_t syscall_kernel_stack[8192] __attribute__((aligned(16)));
 
 extern struct driver ata_pio_driver;
 extern struct driver atapi_driver;
+extern struct driver ahci_driver;
 
 // ---------------------------------------------------------------------------
 // Framebuffer helpers
@@ -186,6 +188,7 @@ static void kmain_task(void) {
   driver_register(&pci_driver);
   driver_register(&ata_pio_driver);
   driver_register(&atapi_driver);
+  driver_register(&ahci_driver);
   drivers_init_all();
 
   // [FIX] Fase C: el ATAPI ya está detectado, ahora se puede aplicar la

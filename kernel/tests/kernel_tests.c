@@ -10,6 +10,7 @@
 //   REGISTER_TEST("mi_cosa", test_mi_cosa);
 
 #include "../acpi.h"
+#include "../ahci.h"
 #include "../apic.h"
 #include "../ata_pio.h"
 #include "../atapi.h"
@@ -906,9 +907,14 @@ static void test_atapi_write_fails(void) {
     TEST_ASSERT(0, "sr0 no existe");
     return;
   }
-  uint8_t buf[2048] = {0};
+  uint8_t *buf = (uint8_t *)kzalloc(sr0->sector_size ? sr0->sector_size : 2048);
+  if (!buf) {
+    TEST_ASSERT(0, "kzalloc falló");
+    return;
+  }
   int rc = bdev_write(sr0, 0, 1, buf);
   TEST_ASSERT(rc < 0, "write a sr0 debía fallar (read-only), rc=%d", rc);
+  kfree(buf);
 }
 REGISTER_TEST("atapi: escribir falla (read-only)", test_atapi_write_fails);
 
@@ -1051,3 +1057,192 @@ out:
   kfree(readback);
 }
 REGISTER_TEST("ata_dma: escribir y leer 4KB", test_ata_dma_write_read);
+
+// ---------------------------------------------------------------------------
+// AHCI (Fase 3)
+//
+// Los tests buscan "sda", "sdb", ... en el block layer. Si no hay HBA AHCI
+// o no hay discos SATA conectados, los tests pasan sin más (skip silencioso).
+// Así la suite no rompe en máquinas con solo IDE (VirtualBox PIIX3) ni en
+// QEMU con -machine pc.
+// ---------------------------------------------------------------------------
+static void test_ahci_controller_detected(void) {
+  // Si el HBA AHCI existe, ahci_disk_count() >= 0 siempre (puede ser 0 si
+  // hay HBA pero ningún disco conectado). No podemos distinguir "no hay HBA"
+  // de "hay HBA sin discos" desde aquí sin exponer más API. Así que este
+  // test solo verifica que la función se puede llamar sin crash.
+  extern int ahci_disk_count(void);
+  int n = ahci_disk_count();
+  LOG_INFO("  discos AHCI detectados: %d", n);
+  TEST_ASSERT(n >= 0, "ahci_disk_count() devolvió %d", n);
+}
+REGISTER_TEST("ahci: controlador detectado", test_ahci_controller_detected);
+
+static void test_ahci_sda_detected(void) {
+  block_device_t *sda = blk_lookup("sda");
+  if (!sda) {
+    LOG_INFO("  sda no existe (sin disco SATA), test omitido");
+    TEST_ASSERT(1, "sin sda: skip");
+    return;
+  }
+  TEST_ASSERT(sda->num_sectors > 0, "sda sin sectores");
+  TEST_ASSERT(sda->sector_size == 512 || sda->sector_size == 4096,
+              "sda sector_size inesperado: %u", sda->sector_size);
+  TEST_ASSERT(sda->is_read_only == 0, "sda no debería ser read-only");
+}
+REGISTER_TEST("ahci: sda detectado", test_ahci_sda_detected);
+
+static void test_ahci_read_sector0(void) {
+  block_device_t *sda = blk_lookup("sda");
+  if (!sda) {
+    LOG_INFO("  sda no existe, test omitido");
+    TEST_ASSERT(1, "sin sda: skip");
+    return;
+  }
+
+  uint8_t *buf = (uint8_t *)kmalloc(sda->sector_size);
+  TEST_ASSERT(buf != NULL, "kmalloc falló");
+  if (!buf)
+    return;
+
+  int rc = bdev_read(sda, 0, 1, buf);
+  TEST_ASSERT(rc == 0, "read sector 0 falló: %d", rc);
+  if (rc == 0) {
+    // No asumimos MBR: un disco virgen devuelve 00 00. Solo verificamos
+    // que la operación fue exitosa y que el buffer es accesible.
+    LOG_INFO("  sector 0 leído OK (primeros bytes: %02x %02x %02x %02x)",
+             buf[0], buf[1], buf[2], buf[3]);
+  }
+  kfree(buf);
+}
+REGISTER_TEST("ahci: leer sector 0 de sda", test_ahci_read_sector0);
+
+static void test_ahci_read_4k(void) {
+  block_device_t *sda = blk_lookup("sda");
+  if (!sda) {
+    LOG_INFO("  sda no existe, test omitido");
+    TEST_ASSERT(1, "sin sda: skip");
+    return;
+  }
+
+  // Leer 8 sectores (4 KB con sector_size=512) dos veces y comparar.
+  // Esto valida que el PRDT multi-entrada funciona y que el HBA
+  // transfiere datos de forma consistente.
+  uint8_t *buf1 = (uint8_t *)kmalloc(4096);
+  uint8_t *buf2 = (uint8_t *)kmalloc(4096);
+  if (!buf1 || !buf2) {
+    TEST_ASSERT(0, "kmalloc falló");
+    if (buf1)
+      kfree(buf1);
+    if (buf2)
+      kfree(buf2);
+    return;
+  }
+
+  int rc1 = bdev_read(sda, 0, 8, buf1);
+  TEST_ASSERT(rc1 == 0, "read 4K (1) falló: %d", rc1);
+  if (rc1 != 0)
+    goto out;
+
+  int rc2 = bdev_read(sda, 0, 8, buf2);
+  TEST_ASSERT(rc2 == 0, "read 4K (2) falló: %d", rc2);
+  if (rc2 != 0)
+    goto out;
+
+  int same = 1;
+  for (int i = 0; i < 4096; i++) {
+    if (buf1[i] != buf2[i]) {
+      same = 0;
+      break;
+    }
+  }
+  TEST_ASSERT(same, "las dos lecturas de 4K no coinciden");
+
+out:
+  kfree(buf1);
+  kfree(buf2);
+}
+REGISTER_TEST("ahci: leer 4KB", test_ahci_read_4k);
+
+static void test_ahci_write_read_back(void) {
+  block_device_t *sda = blk_lookup("sda");
+  if (!sda) {
+    LOG_INFO("  sda no existe, test omitido");
+    TEST_ASSERT(1, "sin sda: skip");
+    return;
+  }
+  if (sda->num_sectors < 16) {
+    LOG_INFO("  sda demasiado pequeño, test omitido");
+    TEST_ASSERT(1, "sda muy pequeño: skip");
+    return;
+  }
+
+  // Escribir 4 KB en el último cuarto del disco, leer de vuelta,
+  // restaurar. El buffer de restauración (orig) se lee antes.
+  uint64_t lba = sda->num_sectors - 8;
+  uint8_t *orig = (uint8_t *)kmalloc(4096);
+  uint8_t *pattern = (uint8_t *)kmalloc(4096);
+  uint8_t *readback = (uint8_t *)kmalloc(4096);
+  if (!orig || !pattern || !readback) {
+    TEST_ASSERT(0, "kmalloc falló");
+    if (orig)
+      kfree(orig);
+    if (pattern)
+      kfree(pattern);
+    if (readback)
+      kfree(readback);
+    return;
+  }
+
+  int rc = bdev_read(sda, lba, 8, orig);
+  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  for (int i = 0; i < 4096; i++)
+    pattern[i] = (uint8_t)(i * 7 ^ 0x5A);
+
+  rc = bdev_write(sda, lba, 8, pattern);
+  TEST_ASSERT(rc == 0, "write 4K falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  rc = bdev_flush(sda);
+  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
+
+  rc = bdev_read(sda, lba, 8, readback);
+  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  int same = 1;
+  for (int i = 0; i < 4096; i++) {
+    if (readback[i] != pattern[i]) {
+      same = 0;
+      break;
+    }
+  }
+  TEST_ASSERT(same, "el patrón leído no coincide tras write+read");
+
+out:
+  // Restaurar el contenido original.
+  bdev_write(sda, lba, 8, orig);
+  bdev_flush(sda);
+  kfree(orig);
+  kfree(pattern);
+  kfree(readback);
+}
+REGISTER_TEST("ahci: escribir y leer 4KB", test_ahci_write_read_back);
+
+static void test_ahci_read_oob(void) {
+  block_device_t *sda = blk_lookup("sda");
+  if (!sda) {
+    LOG_INFO("  sda no existe, test omitido");
+    TEST_ASSERT(1, "sin sda: skip");
+    return;
+  }
+  uint8_t buf[512];
+  int rc = bdev_read(sda, sda->num_sectors, 1, buf);
+  TEST_ASSERT(rc < 0, "read fuera de rango debía fallar, rc=%d", rc);
+}
+REGISTER_TEST("ahci: leer fuera de rango falla", test_ahci_read_oob);

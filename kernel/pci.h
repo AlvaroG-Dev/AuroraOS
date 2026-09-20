@@ -80,10 +80,18 @@
 // ===========================================================================
 // Prog IF (offset 0x09) para IDE.
 // ===========================================================================
-#define PCI_PROGIF_IDE_COMPAT 0x00
-#define PCI_PROGIF_IDE_NATIVE 0x05
-#define PCI_PROGIF_IDE_BUS_MASTER 0x80
-#define PCI_PROGIF_AHCI 0x80
+// ProgIF para subclase IDE (0x01)
+#define PCI_PROGIF_IDE_COMPAT 0x00     // Compatibility mode (PIC)
+#define PCI_PROGIF_IDE_NATIVE 0x05     // Native mode (BARs)
+#define PCI_PROGIF_IDE_BUS_MASTER 0x80 // Bit 7: capaz de bus master
+
+// ProgIF para subclase SATA (0x06)
+#define PCI_PROGIF_SATA_AHCI 0x01 // <-- el que usa el ICH9 de Q35
+#define PCI_PROGIF_SATA_RAID 0x00
+#define PCI_PROGIF_SATA_NVME 0x01
+
+// Alias por compatibilidad con código antiguo (no usar en código nuevo)
+#define PCI_PROGIF_AHCI PCI_PROGIF_SATA_AHCI
 
 // ===========================================================================
 // Tipos de header PCI.

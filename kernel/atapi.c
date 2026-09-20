@@ -760,7 +760,12 @@ static void atapi_probe_device(ata_channel_t *ch, uint8_t drive,
 int atapi_init(void) {
   LOG_INFO("[ATAPI] Iniciando detección de unidades ATAPI...");
 
-  // Los canales ya están inicializados por ata_pio_init.
+  extern int ata_ide_present(void);
+  if (!ata_ide_present()) {
+    LOG_INFO("[ATAPI] No hay IDE legacy; driver ATAPI deshabilitado");
+    return 0;
+  }
+
   extern ata_channel_t *ata_get_channel(int index);
   ata_channel_t *prim = ata_get_channel(0);
   ata_channel_t *sec = ata_get_channel(1);
