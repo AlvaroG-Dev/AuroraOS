@@ -29,6 +29,7 @@
 #define EROFS 30
 #define ERANGE 34
 #define ENOSYS 38
+#define ETIMEDOUT 110
 
 // Comprueba que [p, p+n) está dentro del espacio de usuario.
 static inline bool access_ok(const void *p, size_t n) {
