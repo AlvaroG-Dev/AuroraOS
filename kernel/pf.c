@@ -44,7 +44,9 @@ vma_t *vma_find(struct process *proc, uint64_t addr) {
 
 vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
                   uint64_t flags, uint32_t type) {
-  if (!proc || start >= end)
+  // VMAs are user-space objects.  Never allow an end address above
+  // USER_LIMIT: the upper half of the address space is shared by the kernel.
+  if (!proc || start >= end || start >= USER_LIMIT || end > USER_LIMIT)
     return NULL;
 
   vma_t *v = (vma_t *)kmalloc(sizeof(vma_t));
@@ -310,6 +312,9 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   if (length > 0x10000000ULL)
     return -1;
 
+  // Round up safely; reject lengths whose page rounding would overflow.
+  if (length > UINT64_MAX - 0xFFFULL)
+    return -1;
   length = (length + 0xFFF) & ~0xFFFULL;
 
   if (addr == 0) {
@@ -321,6 +326,11 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   } else {
     addr &= ~0xFFFULL;
   }
+
+  // A fixed mapping must stay entirely below USER_LIMIT.  This is also
+  // checked by vma_create(), but keep the syscall boundary explicit.
+  if (addr >= USER_LIMIT || length > USER_LIMIT - addr)
+    return -1;
 
   uint64_t pte_flags = PTE_USER | PTE_PRESENT;
   if (prot & MMAP_PROT_WRITE)
