@@ -6,102 +6,168 @@
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
-// Capa de bloques (block layer).
+// Block layer.
 //
-// Es la abstracción entre los drivers de disco (ATA, ATAPI, AHCI, USB,
-// NVMe, ...) y los sistemas de archivos (FAT32, ext2, ...).
+// Arquitectura por capas:
 //
-// Un "disco" (block_device_t) expone lecturas y escrituras de sectores.
-// El FS no sabe si el disco es ATA, SATA, USB o NVMe: solo llama a
-// block_read/block_write y recibe sectores.
+//   FS (FAT32, ext2, ...)
+//     ↓  bdev_read / bdev_write
+//   Block I/O (bio)      ← una operación de lectura/escritura
+//     ↓  blk_submit
+//   Block core           ← registro de discos, dispatch
+//     ↓  ops->submit
+//   Driver (ata_pio, ...) ← habla con el hardware
 //
-// CONTRATO:
+// El driver NO sabe de FS ni de caché. Solo ejecuta bios.
+// El FS NO sabe de hardware. Solo construye bios.
 //
-//   - Los drivers de disco registran sus dispositivos con
-//     block_register(). El nombre es único ("hda", "sda", ...).
+// NOMENCLATURA:
+//   bio_*    → operaciones sobre un bio
+//   blk_*    → core del block layer (registro, dispatch)
+//   bdev_*   → operaciones sobre un block_device (read/write)
 //
-//   - Los FS usan block_read/block_write. Estas funciones validan los
-//     parámetros (LBA dentro de rango, count > 0, buf != NULL) y llaman
-//     al método correspondiente del driver.
-//
-//   - read/write son SÍNCRONOS: bloquean hasta que el disco termina.
-//
-//   - El buffer (buf) debe ser del kernel. Si viene de userland, el
-//     llamante debe copiarlo antes (copy_from_user / copy_to_user).
-//
-//   - sector_size típicamente es 512 (discos) o 2048 (CD/DVD).
+// ERRORES: se usan los de uaccess.h (EINVAL, ERANGE, EIO, EROFS, ...).
 // ---------------------------------------------------------------------------
 
-#define BLOCK_MAX_DEVICES 16
-#define BLOCK_NAME_MAX 16
+// ---------------------------------------------------------------------------
+// bio: una operación de I/O.
+//
+// El FS construye un bio, lo envía al block layer, y espera a que termine.
+// El driver lo ejecuta y rellena `error`. Si es asíncrono, llama a
+// bio_endio() cuando termina.
+// ---------------------------------------------------------------------------
 
-struct block_device;
+enum bio_op {
+  BIO_READ = 0,
+  BIO_WRITE = 1,
+  BIO_FLUSH = 2,
+};
 
-// Métodos del driver. Devuelven 0 si OK, negativo si error.
-typedef int (*block_read_fn)(struct block_device *dev, uint64_t lba,
-                             uint32_t count, void *buf);
-typedef int (*block_write_fn)(struct block_device *dev, uint64_t lba,
-                              uint32_t count, const void *buf);
-typedef int (*block_flush_fn)(struct block_device *dev);
+struct bio;
+
+// Callback opcional. El driver lo llama (a través de bio_endio) cuando
+// el bio termina. Puede ser NULL.
+typedef void (*bio_end_io_fn)(struct bio *bio);
+
+typedef struct bio {
+  struct block_device *bdev; // disco destino
+  uint64_t lba;              // sector inicial (en unidades de bdev->sector_size)
+  uint32_t count;            // número de sectores
+  void *buf;                 // buffer del kernel (no userland)
+  int op;                    // enum bio_op
+  int error;                 // 0 = OK, negativo = error
+  bio_end_io_fn end_io;      // callback al terminar (o NULL)
+  void *end_io_data;         // datos para el callback
+  struct bio *next;          // para encadenar bios (futuro)
+} bio_t;
+
+// ---------------------------------------------------------------------------
+// block_device: una instancia montable.
+//
+// Puede ser un disco físico completo (hda) o una partición (hda1).
+// El driver lo rellena y lo registra con blk_register().
+// ---------------------------------------------------------------------------
+
+struct block_ops;
 
 typedef struct block_device {
-  char name[BLOCK_NAME_MAX]; // "hda", "sda", "sr0", ...
-  uint32_t sector_size;      // 512 o 2048
-  uint64_t num_sectors;      // tamaño total en sectores
-  int is_read_only;          // 1 para CDs/DVDs, 0 para discos normales
+  char name[16];        // "hda", "hda1", "sda", "sr0", ...
+  uint64_t num_sectors; // tamaño total en sectores
+  uint32_t sector_size; // 512 (disco) o 2048 (CD/DVD)
+  int is_read_only;     // 1 para CDs/DVDs
+  int is_partition;     // 0 = disco físico, 1 = partición
+  struct block_device *parent; // si es partición, apunta al disco
+  uint64_t start_lba;          // si es partición, offset en el disco
 
-  block_read_fn read;
-  block_write_fn write;      // NULL si is_read_only
-  block_flush_fn flush;      // NULL si no soporta flush
+  struct block_ops *ops; // operaciones del driver
+  void *private_data;    // datos privados del driver
 
-  void *priv;                // datos del driver (ata_device_t*, ...)
   struct block_device *next; // lista enlazada interna
 } block_device_t;
 
 // ---------------------------------------------------------------------------
-// API pública
+// block_ops: lo que un driver implementa.
+//
+// submit: ejecuta el bio. Puede ser síncrono (devuelve al terminar) o
+//         asíncrono (devuelve 0 y llama a bio_endio después).
+//         En ambos casos, el driver debe rellenar bio->error.
+//
+// flush:  fuerza escritura a disco. Opcional (NULL si no aplica).
+//
+// dump:   debug específico del driver. Opcional.
 // ---------------------------------------------------------------------------
 
-// Inicializa el subsistema. Llamar UNA VEZ durante el boot, antes de
-// que los drivers registren discos.
-void block_init(void);
+typedef struct block_ops {
+  int (*submit)(block_device_t *bdev, bio_t *bio);
+  void (*flush)(block_device_t *bdev);
+  void (*dump)(block_device_t *bdev);
+} block_ops_t;
 
-// Registra un disco. Devuelve 0 si OK, -1 si:
-//   - el nombre está duplicado
-//   - no hay hueco en la tabla
-//   - los parámetros son inválidos
-int block_register(block_device_t *dev);
+// ---------------------------------------------------------------------------
+// API del core (blk_*)
+// ---------------------------------------------------------------------------
 
-// Busca un disco por nombre. Devuelve NULL si no existe.
-block_device_t *block_get(const char *name);
+// Inicializa el block layer. Llamar UNA VEZ en el boot, antes de que
+// los drivers registren discos.
+void blk_init(void);
 
-// Devuelve el i-ésimo disco (0-based). NULL si i >= número de discos.
-block_device_t *block_get_by_index(int index);
+// Registra un block_device. Valida:
+//   - name no vacío y único
+//   - sector_size > 0
+//   - num_sectors > 0
+//   - ops != NULL y ops->submit != NULL
+// Devuelve 0 si OK, negativo si error.
+int blk_register(block_device_t *bdev);
+
+// Desregistra un block_device. Busca por puntero.
+// Devuelve 0 si OK, -ENOENT si no estaba registrado.
+int blk_unregister(block_device_t *bdev);
+
+// Busca un disco por nombre. NULL si no existe.
+block_device_t *blk_lookup(const char *name);
+
+// I-ésimo disco (0-based). NULL si i >= blk_count().
+block_device_t *blk_get_by_index(int index);
 
 // Número de discos registrados.
-int block_count(void);
+int blk_count(void);
 
-// Lectura/escritura. Valida los parámetros y llama al driver.
-// Devuelven 0 si OK, negativo si error.
+// Envía un bio al block layer. El block layer busca el driver y llama
+// a ops->submit. Devuelve el resultado de submit.
 //
-// Errores:
-//   -EINVAL   parámetros inválidos (buf NULL, count 0, ...)
-//   -ERANGE   lba + count fuera de rango
-//   -EROFS    disco de solo lectura (write)
-//   -EIO      error del driver
-int block_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf);
-int block_write(block_device_t *dev, uint64_t lba, uint32_t count,
-                const void *buf);
-int block_flush(block_device_t *dev);
+// El bio puede ser síncrono o asíncrono según el driver. Si es asíncrono,
+// el llamante debe esperar a que bio->end_io o bio_endio se llame.
+int blk_submit(bio_t *bio);
 
-// Debug: imprime la lista de discos.
-void block_dump(void);
+// Marca un bio como completado y llama a su end_io (si existe).
+// Los drivers llaman a esta función al terminar un bio asíncrono.
+void bio_endio(bio_t *bio, int error);
 
-// Errores (negativos). Definidos aquí para no depender de uaccess.h.
-#define BLOCK_OK 0
-#define BLOCK_EINVAL (-22)
-#define BLOCK_ERANGE (-34)
-#define BLOCK_EROFS (-30)
-#define BLOCK_EIO (-5)
+// Debug: imprime la lista de discos registrados.
+void blk_dump(void);
+
+// ---------------------------------------------------------------------------
+// API del dispositivo (bdev_*)
+//
+// Son wrappers síncronos sobre blk_submit. Construyen un bio, lo envían,
+// y esperan a que termine (asumiendo drivers síncronos por ahora).
+//
+// En Fase 1 (PIO), todos los drivers son síncronos. En Fase 3 (DMA),
+// estos wrappers pasarán a usar completion.
+// ---------------------------------------------------------------------------
+
+int bdev_read(block_device_t *bdev, uint64_t lba, uint32_t count, void *buf);
+int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
+               const void *buf);
+int bdev_flush(block_device_t *bdev);
+
+// Helpers
+static inline uint64_t bdev_size_bytes(const block_device_t *bdev) {
+  return bdev->num_sectors * (uint64_t)bdev->sector_size;
+}
+
+static inline uint64_t bdev_size_mb(const block_device_t *bdev) {
+  return bdev_size_bytes(bdev) / (1024 * 1024);
+}
 
 #endif
