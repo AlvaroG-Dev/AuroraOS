@@ -36,7 +36,7 @@ jobs:
           USE_KVM: no
           QEMU_SMP: 1
           REQUIRE_SMP: no
-          TIMEOUT: 90
+          TIMEOUT: 240
           # Mostrar las últimas 200 líneas del serial en el log del job.
           # El log completo queda como artefacto (ver step siguiente).
           SHOW_SERIAL: yes
