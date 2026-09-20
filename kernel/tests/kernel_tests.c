@@ -662,25 +662,32 @@ static void test_smp_ipi_wakeup(void) {
 REGISTER_TEST_FLAGS("smp: IPI wakeup cross-CPU", test_smp_ipi_wakeup,
                     TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
-static void test_block_init(void) {
-  // Después de block_init, block_count() debe ser >= 0.
-  TEST_ASSERT(block_count() >= 0, "block_count() < 0");
-}
-REGISTER_TEST("block: init", test_block_init);
 
-static void test_block_no_duplicates(void) {
-  // No debe haber discos duplicados.
-  // Itera y comprueba que no hay nombres repetidos.
-  // (requiere block_get_by_index)
-  int n = block_count();
+// ---------------------------------------------------------------------------
+// Block layer
+// ---------------------------------------------------------------------------
+static void test_blk_init(void) {
+  // Después de blk_init, blk_count() debe ser >= 0.
+  TEST_ASSERT(blk_count() >= 0, "blk_count() < 0");
+}
+REGISTER_TEST("blk: init", test_blk_init);
+
+static void test_blk_no_duplicates(void) {
+  int n = blk_count();
   for (int i = 0; i < n; i++) {
-    block_device_t *a = block_get_by_index(i);
-    TEST_ASSERT(a != NULL, "block_get_by_index(%d) == NULL", i);
+    block_device_t *a = blk_get_by_index(i);
+    TEST_ASSERT(a != NULL, "blk_get_by_index(%d) == NULL", i);
     for (int j = i + 1; j < n; j++) {
-      block_device_t *b = block_get_by_index(j);
+      block_device_t *b = blk_get_by_index(j);
       TEST_ASSERT(strcmp(a->name, b->name) != 0, "nombres duplicados: %s",
                   a->name);
     }
   }
 }
-REGISTER_TEST("block: no duplicados", test_block_no_duplicates);
+REGISTER_TEST("blk: no duplicados", test_blk_no_duplicates);
+
+static void test_blk_lookup_missing(void) {
+  block_device_t *d = blk_lookup("nonexistent");
+  TEST_ASSERT(d == NULL, "blk_lookup('nonexistent') != NULL");
+}
+REGISTER_TEST("blk: lookup de disco inexistente", test_blk_lookup_missing);
