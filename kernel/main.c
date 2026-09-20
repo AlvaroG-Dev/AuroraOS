@@ -29,6 +29,7 @@
 #include "syscall.h"
 #include "tarfs.h"
 #include "test.h"
+#include "block.h"
 #include "time.h"
 #include "tty.h"
 #include <stddef.h>
@@ -167,6 +168,10 @@ static void kmain_task(void) {
 
   LOG_INFO("[INIT] TTY...");
   tty_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] Block layer...");
+  block_init();
   LOG_INFO("OK");
 
   input_init();
