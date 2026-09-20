@@ -16,7 +16,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest shell \
+APPS = hello calc filetest ipctest pftest waitpid_stress shell \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
 
 all: $(APPS)
@@ -77,6 +77,16 @@ pftest: apps/pftest/main.c $(LIB_OBJS)
 	cp pftest ../sysroot/apps/
 
 # ---------------------------------------------------------------------------
+# Stress de lifecycle: spawn + waitpid repetidos
+# ---------------------------------------------------------------------------
+
+waitpid_stress: apps/waitpid_stress/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/waitpid_stress/main.c -o waitpid_stress.o
+	$(LD) -o waitpid_stress $(LIB_OBJS) waitpid_stress.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp waitpid_stress ../sysroot/apps/
+
+# ---------------------------------------------------------------------------
 # Apps de segfault (deben morir por #PF)
 # ---------------------------------------------------------------------------
 
@@ -122,5 +132,5 @@ shell: apps/shell/main.c $(LIB_OBJS)
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f hello calc filetest ipctest pftest
+	rm -f hello calc filetest ipctest pftest waitpid_stress
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
