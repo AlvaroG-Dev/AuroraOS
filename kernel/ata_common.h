@@ -43,9 +43,12 @@
 #define ATA_REG_STATUS 7
 #define ATA_REG_COMMAND 7
 
-// Offsets desde ctrl_base.
+// Offsets desde ctrl_base (0x3F6 / 0x376).
+// OJO: en el control block, Alternate Status (lectura) y Device Control
+// (escritura) comparten el MISMO puerto (offset 0). Con offset 2 el outb caia
+// en 0x3F8 (COM1) / 0x378 (LPT1) y nIEN/SRST nunca llegaban al disco.
 #define ATA_CTRL_ALT_STATUS 0
-#define ATA_CTRL_DEV_CTRL 2
+#define ATA_CTRL_DEV_CTRL 0
 
 // ===========================================================================
 // Bits del status
@@ -120,15 +123,32 @@ enum ata_err {
 
 // ===========================================================================
 // Canal IDE (compartido entre ATA y ATAPI)
+//
+// [FIX] master_is_atapi / slave_is_atapi indican el TIPO de dispositivo
+// en cada slot. Imprescindible porque ata_device_t y atapi_device_t son
+// structs incompatibles: castear ch->master a ata_device_t* y leer
+// peer->is_atapi cuando en realidad es un atapi_device_t lee basura.
+//
+// El puntero almacenado apunta al struct real (ata_device_t para ATA,
+// atapi_device_t para ATAPI). Los flags permiten al consumidor saber
+// qué tipo hay antes de castear.
 // ===========================================================================
 typedef struct ata_channel {
   uint16_t io_base;
   uint16_t ctrl_base;
   uint8_t irq;
-  const char *name; // "primario" o "secundario"
-  spinlock_t lock;  // protege operaciones del canal
+  const char *name;      // "primario" o "secundario"
+  spinlock_t lock;       // protege solo el flag `busy` (seccion critica corta)
+  volatile uint8_t busy; // canal ocupado por una operacion (PIO/DMA/ATAPI)
+
   struct ata_device *master;
   struct ata_device *slave;
+
+  // [FIX] Tipo de dispositivo en cada slot.
+  //   0 = vacío o ATA
+  //   1 = ATAPI
+  uint8_t master_is_atapi;
+  uint8_t slave_is_atapi;
 } ata_channel_t;
 
 // ===========================================================================
@@ -166,5 +186,11 @@ int ata_issue_packet(ata_channel_t *ch, uint8_t drive, const uint8_t *cmd12,
 
 // Lee el registro Error y lo traduce a código semántico.
 int ata_decode_error(uint16_t io_base);
+
+// Exclusion mutua de canal SIN deshabilitar interrupciones durante la
+// operacion (imprescindible para que llegue la IRQ del DMA). Cede la CPU con
+// sched_yield() mientras el canal esta ocupado. Solo desde contexto de tarea.
+void ata_chan_acquire(ata_channel_t *ch);
+void ata_chan_release(ata_channel_t *ch);
 
 #endif

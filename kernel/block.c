@@ -64,9 +64,17 @@ int blk_register(block_device_t *bdev) {
     return -ENOMEM;
   }
 
-  // Insertar al principio de la lista.
-  bdev->next = g_devices;
-  g_devices = bdev;
+  // Insertar AL FINAL: blk_get_by_index(0) es el primer dispositivo
+  // registrado (orden de deteccion), y blk_dump lista en ese mismo orden.
+  bdev->next = NULL;
+  if (!g_devices) {
+    g_devices = bdev;
+  } else {
+    block_device_t *tail = g_devices;
+    while (tail->next)
+      tail = tail->next;
+    tail->next = bdev;
+  }
   g_device_count++;
 
   uint64_t size_mb = bdev_size_mb(bdev);

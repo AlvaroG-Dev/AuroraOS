@@ -61,6 +61,11 @@ typedef struct task {
   int cpu_affinity;
   volatile int on_cpu;
   wait_queue_entry_t wait_entry;
+  // [FIX timeout] Tick absoluto en el que la tarea debe despertar aunque
+  // nadie la despierte explícitamente. 0 = sin timeout (espera indefinida).
+  // Lo usa wait_event_interruptible_timeout para que el scheduler la
+  // despierte al expirar, en vez de quedarse dormida para siempre.
+  uint64_t wake_deadline;
 } task_t;
 
 void sched_init(void);
@@ -80,6 +85,10 @@ void sched_yield(void);
 task_t *sched_current(void);
 task_t *sched_find_task(uint32_t task_id);
 
+// [FIX] Contador monótono de ticks desde el arranque. Lo incrementa el
+// handler del LAPIC timer a 1000 Hz. Usado por wait_event_*_timeout.
+uint64_t sched_get_ticks(void);
+
 void sched_make_ready(task_t *t);
 void sched_mark_need_resched(void);
 void sched_publish_task(task_t *t);
@@ -95,6 +104,10 @@ struct spinlock;
 extern void task_switch(task_t *old_task, task_t *new_task, void *lock);
 void task_entry_wrapper(void (*fn)(void));
 void task_die_hlt(void);
+
+// [FIX timeout] Despierta tareas BLOCKED cuyo wake_deadline haya expirado.
+// Lo llama time_tick a 1000 Hz en el BSP.
+void sched_wake_expired(void);
 
 __attribute__((noreturn)) void sched_start(task_t *task);
 
@@ -129,6 +142,7 @@ _Static_assert(offsetof(spinlock_t, locked) == 0 &&
 //
 // Verificamos que fpu_raw + 15 (el peor caso del redondeo) siga
 // cabiendo dentro de task_t.
-_Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) + 15
-                   <= sizeof(task_t),
+_Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) +
+                       15 <=
+                   sizeof(task_t),
                "fpu_raw demasiado cerca del final de task_t");

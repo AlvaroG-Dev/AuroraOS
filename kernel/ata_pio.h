@@ -2,13 +2,21 @@
 #ifndef KERNEL_ATA_PIO_H
 #define KERNEL_ATA_PIO_H
 
+#include "ata_common.h"
 #include "driver.h"
 
-// Driver ATA PIO. Detecta discos ATA y los registra en el block layer.
-// Lee/escribe con PIO (LBA28 + LBA48).
+struct ata_device;
+
+// [FIX] Devuelve el otro drive del mismo canal, o NULL si no hay.
+struct ata_device *ata_dev_pair(struct ata_device *dev);
+
 extern struct driver ata_pio_driver;
 
-// Debug: imprime el estado de todos los discos ATA.
+// [FIX] Fase C: llamar DESPUÉS de atapi_init(). Selecciona modo (con
+// compatibilidad de par master/slave) y registra los discos ATA en el
+// block layer.
+int ata_pio_finalize(void);
+
 void ata_dump(void);
 
 #endif

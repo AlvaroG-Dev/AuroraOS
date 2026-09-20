@@ -220,8 +220,6 @@ void apic_init(void) {
 // ---------------------------------------------------------------------------
 void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
                          int masked) {
-  // Validar rango. g_irq_to_gsi[] tiene 16 entradas (IRQs legacy).
-  // Si llega una IRQ >= 16, es un bug del llamante.
   if (irq >= 16) {
     LOG_ERR("[APIC] ioapic_redirect_irq: IRQ %u fuera de rango (0-15)", irq);
     return;
@@ -259,18 +257,25 @@ void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
   entry |= ((uint64_t)dest_apic_id << 56);
 
   // Aplicar flags del ISO si lo hay. Por defecto: activo alto, edge.
+  int is_level = 0;
   for (int i = 0; i < acpi->iso_count; i++) {
     const acpi_iso_t *s = &acpi->isos[i];
     if (s->irq == irq) {
-      // Bit 1 de flags: 0 = activo alto, 1 = activo bajo
       if (s->flags & 0x2)
         entry |= IOAPIC_REDIR_ACTIVE_LOW;
-      // Bit 3 de flags: 0 = edge, 1 = level
       if (s->flags & 0x8)
-        entry |= IOAPIC_REDIR_TRIGGER_LEVEL;
+        is_level = 1;
       break;
     }
   }
+
+  // IRQs legacy del IDE (14, 15): el BMIDE genera IRQs level-triggered.
+  // Si el IOAPIC está configurado para edge, la IRQ puede perderse.
+  if (irq == 14 || irq == 15)
+    is_level = 1;
+
+  if (is_level)
+    entry |= IOAPIC_REDIR_TRIGGER_LEVEL;
 
   if (masked)
     entry |= IOAPIC_REDIR_MASKED;
@@ -282,8 +287,9 @@ void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
   ioapic_write_reg(ioapic_idx, low_reg, (uint32_t)(entry & 0xFFFFFFFF));
   ioapic_write_reg(ioapic_idx, high_reg, (uint32_t)(entry >> 32));
 
-  LOG_INFO("[APIC] IRQ %u -> GSI %u -> vec %u dest APIC %u%s", irq, gsi, vector,
-           dest_apic_id, masked ? " [masked]" : "");
+  LOG_INFO("[APIC] IRQ %u -> GSI %u -> vec %u dest APIC %u%s%s", irq, gsi,
+           vector, dest_apic_id, masked ? " [masked]" : "",
+           is_level ? " [level]" : " [edge]");
 }
 
 void ioapic_mask_irq(uint8_t irq, int masked) {

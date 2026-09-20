@@ -27,7 +27,6 @@
 #include "string.h"
 #include "uaccess.h"
 
-
 // ===========================================================================
 // Comandos SCSI
 // ===========================================================================
@@ -152,8 +151,13 @@ static int atapi_send_cmd(atapi_device_t *dev, const uint8_t *cmd12,
   // 4. Longitud de transferencia en LBA1/LBA2 (16 bits).
   //    LBA2 = byte alto, LBA1 = byte bajo.
   //    Si data_len es 0, no hay transferencia de datos.
-  uint8_t len_lo = (uint8_t)(data_len & 0xFF);
-  uint8_t len_hi = (uint8_t)((data_len >> 8) & 0xFF);
+  //    El registro es de 16 bits (maximo 0xFFFE, par) y fija el tamano maximo
+  //    de CADA bloque DRQ; el total (data_len) puede ser mayor porque abajo se
+  //    lee palabra a palabra esperando DRQ. Antes se truncaba data_len >= 64 KB
+  //    (p.ej. 65536 => 0) y el comando fallaba.
+  uint32_t bc = data_len > 0xFFFE ? 0xFFFE : data_len;
+  uint8_t len_lo = (uint8_t)(bc & 0xFF);
+  uint8_t len_hi = (uint8_t)((bc >> 8) & 0xFF);
   outb(io + ATA_REG_LBA0, 0);
   outb(io + ATA_REG_LBA1, len_lo);
   outb(io + ATA_REG_LBA2, len_hi);
@@ -383,105 +387,92 @@ static int atapi_detect_media(atapi_device_t *dev) {
 }
 
 // ===========================================================================
-// IDENTIFY PACKET DEVICE (detección ATAPI)
+// IDENTIFY PACKET DEVICE.
 //
-// Estrategia (basada en libata de Linux, ata_dev_classify):
+// Clasificación por FIRMA, como libata:
 //
 //   1. Seleccionar el drive.
-//   2. Si status == 0x00 → no hay dispositivo.
-//   3. Esperar BSY=0.
-//   4. Resetear los registros Sector Count, LBA0, LBA1, LBA2.
-//   5. Enviar IDENTIFY PACKET DEVICE (0xA1).
-//   6. Leer status.
-//   7. Si status == 0x00 → no hay dispositivo.
-//   8. Clasificar el dispositivo con lógica híbrida:
+//   2. Leer status. Solo filtrar 0x7F (VirtualBox slot vacío) y
+//      0xFF (bus flotante). 0x00 es válido: un ATAPI en reposo puede
+//      no activar DRDY.
+//   3. Leer la firma (LBA1/LBA2):
+//        - 0x14/0xEB => es ATAPI. Enviar IDENTIFY PACKET.
+//        - Otros     => no es ATAPI. Hacer SRST y reintentar la firma
+//                       una vez. Si sigue sin ser 0x14/0xEB, NODEV.
+//   4. Enviar IDENTIFY PACKET (0xA1), esperar DRQ, drenar 256 words.
 //
-//      a. Leer LBA1 (Mid) y LBA2 (High) inmediatamente.
-//      b. Si LBA1 == 0x14 && LBA2 == 0xEB → es ATAPI (firma estándar).
-//      c. Si NO hay firma pero status tiene DRQ=1 y ERR=0 → es ATAPI.
-//      d. Si status tiene ERR=1 → no es ATAPI (probablemente ATA).
-//      e. Si status == 0x00 → no hay dispositivo.
-//
-//   9. Si es ATAPI: esperar DRQ=1 y drenar el buffer del IDENTIFY.
-//
-// Referencia: Linux drivers/ata/libata-core.c, ata_dev_classify().
+// El SRST condicional es necesario porque un IDENTIFY DEVICE previo
+// (hecho por ata_pio en Fase A) puede haber dejado al ATAPI en un
+// estado donde la firma no es 0x14/0xEB. El SRST la restaura.
 // ===========================================================================
 static int atapi_identify_packet(atapi_device_t *dev) {
   uint16_t io = dev->channel->io_base;
+  uint16_t ctrl = dev->channel->ctrl_base;
   uint64_t timeout = ata_timeout_iters();
   int rc;
 
   LOG_DEBUG("[ATAPI] identify_packet: io=0x%x drive=%u", io, dev->drive);
 
-  // 1. Seleccionar el drive.
   ata_select_drive(dev->channel, dev->drive);
 
-  // 2. Leer status.
   uint8_t status = inb(io + ATA_REG_STATUS);
   LOG_DEBUG("[ATAPI]   status tras select = 0x%02x", status);
-  if (status == 0)
-    return ATA_ERR_NODEV;
 
-  // 3. Esperar BSY=0.
-  rc = ata_wait_not_busy(io, timeout);
-  LOG_DEBUG("[ATAPI]   wait_not_busy (1) = %d", rc);
-  if (rc != ATA_OK)
-    return rc;
-
-  // 4. Resetear registros.
-  outb(io + ATA_REG_SECCOUNT, 0);
-  outb(io + ATA_REG_LBA0, 0);
-  outb(io + ATA_REG_LBA1, 0);
-  outb(io + ATA_REG_LBA2, 0);
-
-  // 5. Enviar IDENTIFY PACKET DEVICE.
-  outb(io + ATA_REG_COMMAND, ATA_CMD_IDENTIFY_PACKET);
-
-  // 6. Leer status.
-  status = inb(io + ATA_REG_STATUS);
-  LOG_DEBUG("[ATAPI]   status tras IDENTIFY_PACKET = 0x%02x", status);
-  if (status == 0)
-    return ATA_ERR_NODEV;
-
-  // 7. Leer LBA1/LBA2 INMEDIATAMENTE.
-  uint8_t lba1 = inb(io + ATA_REG_LBA1);
-  uint8_t lba2 = inb(io + ATA_REG_LBA2);
-  LOG_DEBUG("[ATAPI]   lba1=0x%02x lba2=0x%02x", lba1, lba2);
-
-  // 8. Clasificar el dispositivo (lógica híbrida, como Linux).
-  int is_atapi = 0;
-
-  if (lba1 == 0x14 && lba2 == 0xEB) {
-    LOG_DEBUG("[ATAPI]   firma ATAPI detectada (0x14/0xEB)");
-    is_atapi = 1;
-  } else if (!(status & ATA_SR_ERR) && (status & ATA_SR_DRQ)) {
-    LOG_DEBUG("[ATAPI]   sin firma pero status coherente con ATAPI "
-              "(DRQ=1, ERR=0)");
-    is_atapi = 1;
-  } else if (status & ATA_SR_ERR) {
-    LOG_DEBUG("[ATAPI]   ERR=1, no es ATAPI (probablemente ATA)");
-    return ATA_ERR_NODEV;
-  } else {
-    LOG_DEBUG("[ATAPI]   estado inesperado (status=0x%02x), no es ATAPI",
-              status);
+  // [FIX] Solo filtrar 0x7F y 0xFF. NO filtrar 0x00: un ATAPI en
+  // reposo puede devolver 0x00 legítimamente (no activa DRDY hasta
+  // recibir un comando).
+  if (status == 0x7F || status == 0xFF) {
+    LOG_DEBUG("[ATAPI]   slot vacío (status=0x%02x)", status);
     return ATA_ERR_NODEV;
   }
 
-  if (!is_atapi)
-    return ATA_ERR_NODEV;
-
-  // 9. Esperar BSY=0 y DRQ=1.
   rc = ata_wait_not_busy(io, timeout);
-  LOG_DEBUG("[ATAPI]   wait_not_busy (2) = %d", rc);
-  if (rc != ATA_OK)
+  if (rc != ATA_OK) {
+    LOG_DEBUG("[ATAPI]   wait_not_busy (1) = %d", rc);
     return rc;
+  }
+
+  // -------------------------------------------------------------------------
+  // Leer la firma. Si no es 0x14/0xEB, hacer SRST y reintentar.
+  //
+  // La firma 0x14/0xEB la pone el dispositivo tras un reset o tras un
+  // IDENTIFY PACKET. Un IDENTIFY DEVICE previo (de ata_pio en Fase A)
+  // puede haberla borrado, dejándola en 0x00/0x00. El SRST la restaura.
+  // -------------------------------------------------------------------------
+  uint8_t lba1 = inb(io + ATA_REG_LBA1);
+  uint8_t lba2 = inb(io + ATA_REG_LBA2);
+  LOG_DEBUG("[ATAPI]   firma lba1=0x%02x lba2=0x%02x", lba1, lba2);
+
+  if (!(lba1 == 0x14 && lba2 == 0xEB)) {
+    LOG_DEBUG("[ATAPI]   firma no ATAPI, haciendo soft reset");
+    ata_soft_reset(dev->channel);
+    ata_select_drive(dev->channel, dev->drive);
+    rc = ata_wait_not_busy(io, timeout);
+    if (rc != ATA_OK)
+      return rc;
+
+    lba1 = inb(io + ATA_REG_LBA1);
+    lba2 = inb(io + ATA_REG_LBA2);
+    LOG_DEBUG("[ATAPI]   firma tras SRST lba1=0x%02x lba2=0x%02x", lba1, lba2);
+
+    if (!(lba1 == 0x14 && lba2 == 0xEB)) {
+      LOG_DEBUG("[ATAPI]   no es ATAPI tras SRST");
+      return ATA_ERR_NODEV;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Enviar IDENTIFY PACKET DEVICE (0xA1).
+  // -------------------------------------------------------------------------
+  outb(io + ATA_REG_COMMAND, ATA_CMD_IDENTIFY_PACKET);
+  ata_io_delay(ctrl);
 
   rc = ata_wait_drq(io, timeout);
   LOG_DEBUG("[ATAPI]   wait_drq = %d", rc);
   if (rc != ATA_OK)
     return rc;
 
-  // 10. Drenar los 256 words (512 bytes) del buffer del IDENTIFY.
+  // Drenar los 256 words (512 bytes) del buffer del IDENTIFY.
   for (int i = 0; i < 256; i++)
     (void)inw(io + ATA_REG_DATA);
 
@@ -538,7 +529,9 @@ static int atapi_submit(block_device_t *bdev, bio_t *bio) {
     return -ENODEV;
 
   ata_channel_t *ch = dev->channel;
-  unsigned long flags = spin_lock_irqsave(&ch->lock);
+  // Mismo mecanismo que ata_pio: sin cli durante la operación y excluyente
+  // con el driver ATA/DMA del mismo canal.
+  ata_chan_acquire(ch);
   int rc;
 
   switch (bio->op) {
@@ -551,8 +544,13 @@ static int atapi_submit(block_device_t *bdev, bio_t *bio) {
     uint8_t *ptr = (uint8_t *)bio->buf;
     uint64_t lba = bio->lba;
     uint32_t remaining = bio->count;
+    // Cada READ(10) transfiere como mucho 0xFFFE bytes (31 bloques de 2048).
+    uint32_t ssz = dev->sector_size ? dev->sector_size : 2048;
+    uint32_t max_chunk = 0xFFFE / ssz;
+    if (max_chunk == 0)
+      max_chunk = 1;
     while (remaining > 0) {
-      uint32_t chunk = remaining > 0xFFFF ? 0xFFFF : remaining;
+      uint32_t chunk = remaining > max_chunk ? max_chunk : remaining;
       rc = atapi_read_with_retry(dev, lba, chunk, ptr);
       if (rc != ATA_OK)
         break;
@@ -573,7 +571,7 @@ static int atapi_submit(block_device_t *bdev, bio_t *bio) {
     break;
   }
 
-  spin_unlock_irqrestore(&ch->lock, flags);
+  ata_chan_release(ch);
 
   if (rc == -EROFS || rc == -EINVAL)
     bio->error = rc;
@@ -667,23 +665,38 @@ static int atapi_register_device(atapi_device_t *dev, const char *name) {
 // ===========================================================================
 // Detección
 // ===========================================================================
+// ===========================================================================
+// Detección de una unidad ATAPI en un slot concreto.
+//
+// [FIX] No saltamos slots basándonos en ch->master/ch->slave. Esos
+// punteros solo están rellenos para ATA (Fase A). Un ATAPI legítimo
+// nunca los toca. La clasificación real se hace en atapi_identify_packet
+// leyendo la firma, no adivinando por el puntero.
+// ===========================================================================
 static void atapi_probe_device(ata_channel_t *ch, uint8_t drive,
                                const char *channel_name) {
+  const char *drive_name = drive ? "slave" : "master";
+
+  // [FIX] NO saltar por ch->master/ch->slave != NULL.
+  //
+  // Esos punteros solo los rellena ata_pio para ATA. Un ATAPI real
+  // nunca los toca. Si saltáramos cuando están rellenos, un ATAPI
+  // en el otro slot del canal nunca se detectaría. Peor aún, si
+  // un ATA falló la detección y dejó ch->master a un puntero
+  // inválido... la guarda no ayudaría y además bloquearía la
+  // detección legítima.
+  //
+  // La única forma fiable de saber si hay un ATAPI en un slot es
+  // llamar a atapi_identify_packet y leer la firma.
+
   atapi_device_t *dev = (atapi_device_t *)kzalloc(sizeof(atapi_device_t));
   if (!dev)
     return;
   dev->channel = ch;
   dev->drive = drive;
-  dev->sector_size = 2048; // default para CD
-
-  // Reset del canal ANTES de IDENTIFY PACKET.
-  // El IDENTIFY DEVICE previo (de ata_pio_init) pudo dejar ERR=1
-  // en el drive, y eso interfiere con la detección de ATAPI.
-  ata_soft_reset(ch);
+  dev->sector_size = 2048;
 
   int rc = atapi_identify_packet(dev);
-  const char *drive_name = drive ? "slave" : "master";
-
   if (rc != ATA_OK) {
     kfree(dev);
     return;
@@ -697,7 +710,7 @@ static void atapi_probe_device(ata_channel_t *ch, uint8_t drive,
     // Continuar igualmente, con identidad vacía.
   }
 
-  // Comprobar tipo SCSI.
+  // Comprobar tipo SCSI. Aceptamos CD-ROM, WORM, óptico y changer.
   if (dev->scsi_type != SCSI_TYPE_CDROM && dev->scsi_type != SCSI_TYPE_WORM &&
       dev->scsi_type != SCSI_TYPE_OPTICAL &&
       dev->scsi_type != SCSI_TYPE_MEDIUM_CHANGER) {
@@ -723,6 +736,17 @@ static void atapi_probe_device(ata_channel_t *ch, uint8_t drive,
   if (atapi_register_device(dev, name) != 0) {
     kfree(dev);
     return;
+  }
+
+  // [FIX] Publicar el ATAPI en el canal. Los flags master_is_atapi /
+  // slave_is_atapi permiten a ata_apply_pair_compat del disco ATA
+  // saber que su peer es ATAPI y degradar a PIO.
+  if (drive == 0) {
+    ch->master = (void *)dev;
+    ch->master_is_atapi = 1;
+  } else {
+    ch->slave = (void *)dev;
+    ch->slave_is_atapi = 1;
   }
 
   dev->next = g_devices;

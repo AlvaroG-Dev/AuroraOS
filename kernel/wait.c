@@ -43,32 +43,58 @@ static void wq_remove_locked(wait_queue_t *wq, task_t *t) {
   }
 }
 
-static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
-                       bool interruptible) {
+// ---------------------------------------------------------------------------
+// [FIX] Núcleo común con timeout. timeout_ticks == 0 => sin timeout.
+//
+// Devuelve:
+//   >0  condición cumplida (ticks restantes, o 1 si no había timeout)
+//    0   timeout
+//   <0  interrumpida (-EINTR)
+//
+// El contador de ticks se obtiene de sched_get_ticks() (declarado en sched.h
+// como extern). Lo incrementa el handler del LAPIC timer a 1000 Hz.
+// ---------------------------------------------------------------------------
+static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
+                        bool interruptible, uint64_t timeout_ticks) {
   task_t *self = sched_current();
   if (!self)
     return -1;
 
   if (!cond || cond(arg))
-    return 0;
+    return (timeout_ticks == 0) ? 1 : (long)timeout_ticks;
+
+  uint64_t deadline = 0;
+  if (timeout_ticks > 0)
+    deadline = sched_get_ticks() + timeout_ticks;
 
   while (1) {
     unsigned long flags = spin_lock_irqsave(&wq->lock);
 
     if (cond && cond(arg)) {
       spin_unlock_irqrestore(&wq->lock, flags);
-      return 0;
+      if (timeout_ticks == 0)
+        return 1;
+      uint64_t now = sched_get_ticks();
+      long remaining = (deadline > now) ? (long)(deadline - now) : 1;
+      return remaining;
     }
 
     if (self->waiting_on == NULL) {
       self->wake_reason = 0;
       wq_add_locked(wq, self);
       self->state = TASK_BLOCKED;
+      // [FIX timeout] Publicar el deadline para que el scheduler nos
+      // despierte si nadie lo hace antes.
+      self->wake_deadline = deadline;
     }
 
     spin_unlock_irqrestore(&wq->lock, flags);
 
     sched_yield();
+
+    // [FIX timeout] Si despertamos por deadline, hay que limpiarlo
+    // (sched_wake_expired ya lo hace, pero por si acaso).
+    self->wake_deadline = 0;
 
     if (cond && cond(arg)) {
       if (self->waiting_on == wq) {
@@ -76,7 +102,11 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
         wq_remove_locked(wq, self);
         spin_unlock_irqrestore(&wq->lock, flags);
       }
-      return 0;
+      if (timeout_ticks == 0)
+        return 1;
+      uint64_t now = sched_get_ticks();
+      long remaining = (deadline > now) ? (long)(deadline - now) : 1;
+      return remaining;
     }
 
     if (interruptible && self->wake_reason == -EINTR) {
@@ -87,22 +117,39 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       }
       return -EINTR;
     }
+
+    if (timeout_ticks > 0) {
+      uint64_t now = sched_get_ticks();
+      if (now >= deadline) {
+        if (self->waiting_on == wq) {
+          flags = spin_lock_irqsave(&wq->lock);
+          wq_remove_locked(wq, self);
+          spin_unlock_irqrestore(&wq->lock, flags);
+        }
+        return 0;
+      }
+    }
   }
+}
+
+// [FIX] Implementación de la nueva API con timeout.
+long wait_event_interruptible_timeout(wait_queue_t *wq, bool (*cond)(void *),
+                                      void *arg, uint64_t timeout_ticks) {
+  return wait_common(wq, cond, arg, true, timeout_ticks);
 }
 
 int wait_event_interruptible(wait_queue_t *wq, bool (*cond)(void *),
                              void *arg) {
-  return wait_common(wq, cond, arg, true);
+  long r = wait_common(wq, cond, arg, true, 0);
+  return (r < 0) ? (int)r : 0;
 }
 
 void wait_event(wait_queue_t *wq, bool (*cond)(void *), void *arg) {
-  (void)wait_common(wq, cond, arg, false);
+  (void)wait_common(wq, cond, arg, false, 0);
 }
 
 // ---------------------------------------------------------------------------
-// wake_up_all_locked: variante que asume el lock cogido.
-// Saca todas las tareas de la wq y las despierta. Cada tarea pierde la
-// referencia que tenía la wq sobre ella.
+// wake_up_all_locked y amigos (sin cambios)
 // ---------------------------------------------------------------------------
 void wake_up_all_locked(wait_queue_t *wq) {
   wait_queue_entry_t *e = wq->head;
