@@ -302,7 +302,7 @@ EXPECTED_BOOT=(
     "[TTY] Modo raw inicializado"
     "[INPUT] Subsistema de input inicializado"
     "[PS2] Tarea de procesamiento iniciada"
-    "[PCI] Enumeracion completada."
+    "[PCI] Enumeracion completada"
     "[BLK] Block layer inicializado"
     "[ATA] Iniciando detección de discos PATA..."
     "[ATA] Detección completada"
