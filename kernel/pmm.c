@@ -37,8 +37,6 @@ static inline void bitmap_clear_safe(uint8_t *bmp, uint64_t bit) {
   bmp[bit / 8] &= ~(1 << (bit % 8));
 }
 
-// Protege el bitmap Y el estado de buddy (que comparte el mismo bitmap).
-// Cualquier operación que lea o escriba el bitmap DEBE tener este lock.
 static spinlock_t pmm_lock;
 
 void pmm_init(uint64_t memmap, uint64_t memmap_size,
@@ -142,24 +140,13 @@ void pmm_relocate_bitmap(void) {
   if (!bitmap_phys_global)
     return;
 
-  // Este código corre UNA VEZ durante el boot del BSP, con las
-  // interrupciones deshabilitadas y sin concurrencia. No hace falta
-  // pmm_lock, pero lo documentamos.
   bitmap = (uint8_t *)phys_to_virt(bitmap_phys_global);
   LOG_INFO("[PMM] Bitmap relocalizado a la ventana física: %p", (void *)bitmap);
 
-  // buddy_init inicializa el estado interno del buddy allocator.
-  // Comparte el bitmap con pmm.c.
+  extern void buddy_init(uint64_t total_pages, uint8_t *bitmap_ptr);
   buddy_init(max_blocks, bitmap);
 }
 
-// ---------------------------------------------------------------------------
-// pmm_alloc_page: asigna UNA página.
-//
-// No usa buddy porque buddy opera sobre bloques de 2^order páginas.
-// Para una sola página, marcar el bit directamente es más rápido y
-// evita el overhead de buddy_alloc_order(0).
-// ---------------------------------------------------------------------------
 uint64_t pmm_alloc_page(void) {
   if (!bitmap || max_blocks == 0)
     return 0;
@@ -193,20 +180,14 @@ uint64_t pmm_alloc_page(void) {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// pmm_alloc_pages: asigna `count` páginas contiguas.
-//
-// Si `count` es potencia de 2, usa buddy (rápido, da bloques alineados).
-// Si no, fallback a búsqueda lineal de un run contiguo.
-//
-// buddy_alloc_order REQUIERE pmm_lock cogido, que ya tenemos.
-// ---------------------------------------------------------------------------
 uint64_t pmm_alloc_pages(uint64_t count) {
   if (count == 0 || !bitmap || max_blocks == 0)
     return 0;
 
   unsigned long flags = spin_lock_irqsave(&pmm_lock);
 
+  extern int32_t pages_to_order(uint64_t pages);
+  extern uint64_t buddy_alloc_order(uint32_t order);
   int32_t order = pages_to_order(count);
   if (order >= 0) {
     uint64_t addr = buddy_alloc_order((uint32_t)order);
@@ -215,9 +196,6 @@ uint64_t pmm_alloc_pages(uint64_t count) {
       spin_unlock_irqrestore(&pmm_lock, flags);
       return addr;
     }
-    // Si buddy falla (fragmentación), caemos al fallback lineal.
-    // No es un error: buddy puede no encontrar un bloque contiguo
-    // alineado aunque haya `count` páginas libres dispersas.
   }
 
   uint64_t start = last_alloc_bit;
@@ -264,27 +242,14 @@ uint64_t pmm_alloc_pages(uint64_t count) {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// pmm_free_page: libera UNA página.
-//
-// Usa buddy_free_order(phys, 0) para que se aplique coalescing. Así el
-// bitmap se mantiene compacto y buddy_alloc_order puede encontrar
-// bloques grandes más fácilmente.
-//
-// buddy_free_order REQUIERE pmm_lock cogido, que ya tenemos.
-// ---------------------------------------------------------------------------
 void pmm_free_page(uint64_t phys_addr) {
   if (phys_addr == 0 || !bitmap)
     return;
   unsigned long flags = spin_lock_irqsave(&pmm_lock);
-
   uint64_t bit = phys_addr / PAGE_SIZE;
 
   if (bitmap_in_range(bit) && bitmap_test_safe(bitmap, bit)) {
-    // Estaba usado. Liberar con coalescing (buddy_free_order marca el
-    // bit como libre y fusiona con el buddy si está libre).
-    buddy_free_order(phys_addr, 0);
-
+    bitmap_clear_safe(bitmap, bit);
     if (used_blocks > 0)
       used_blocks--;
     if (bit < last_alloc_bit)
@@ -293,32 +258,22 @@ void pmm_free_page(uint64_t phys_addr) {
   spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
-// ---------------------------------------------------------------------------
-// pmm_free_pages: libera `count` páginas contiguas.
-//
-// Si `count` es potencia de 2, usa buddy (coalescing). Si no, libera
-// página a página.
-//
-// buddy_free_order REQUIERE pmm_lock cogido, que ya tenemos.
-// ---------------------------------------------------------------------------
 void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
   if (phys_addr == 0 || count == 0 || !bitmap)
     return;
   unsigned long flags = spin_lock_irqsave(&pmm_lock);
 
+  extern int32_t pages_to_order(uint64_t pages);
+  extern void buddy_free_order(uint64_t phys_addr, uint32_t order);
   int32_t order = pages_to_order(count);
   if (order >= 0) {
     buddy_free_order(phys_addr, (uint32_t)order);
     if (used_blocks >= count)
       used_blocks -= count;
-    uint64_t start_bit = phys_addr / PAGE_SIZE;
-    if (start_bit < last_alloc_bit)
-      last_alloc_bit = start_bit;
     spin_unlock_irqrestore(&pmm_lock, flags);
     return;
   }
 
-  // Fallback: liberar página a página.
   uint64_t start_bit = phys_addr / PAGE_SIZE;
 
   for (uint64_t i = 0; i < count; i++) {
