@@ -11,12 +11,23 @@
 #define USER_LIMIT 0x0000800000000000ULL
 
 // errnos básicos (negativos).
-#define EFAULT 14
-#define EINVAL 22
-#define ENOMEM 12
+#define EPERM 1
 #define ENOENT 2
+#define EIO 5
 #define EBADF 9
-#define EINTR 4
+#define EAGAIN 11
+#define ENOMEM 12
+#define EACCES 13
+#define EFAULT 14
+#define EBUSY 16
+#define EEXIST 17
+#define ENODEV 19
+#define ENOTDIR 20
+#define EISDIR 21
+#define EINVAL 22
+#define ENOSPC 28
+#define EROFS 30
+#define ERANGE 34
 #define ENOSYS 38
 
 // Comprueba que [p, p+n) está dentro del espacio de usuario.
