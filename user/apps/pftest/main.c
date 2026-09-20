@@ -265,6 +265,29 @@ static void test_mmap_fixed_addr(void) {
 // ---------------------------------------------------------------------------
 // Test 8: Verificar que las syscalls siguen funcionando después de mmap
 // ---------------------------------------------------------------------------
+static void test_mmap_kernel_boundary(void) {
+  sys_print("[pftest] Test 8: mmap fuera de USER_LIMIT (debe fallar)...\\n");
+
+  const uint64_t kernel_addr = 0xFFFFFFFF80000000ULL;
+  const uint64_t boundary_addr = 0x0000800000000000ULL;
+
+  void *p1 = (void *)sys_mmap(kernel_addr, 4096,
+                              MMAP_PROT_READ | MMAP_PROT_WRITE, 0, -1, 0);
+  void *p2 = (void *)sys_mmap(boundary_addr, 4096,
+                              MMAP_PROT_READ | MMAP_PROT_WRITE, 0, -1, 0);
+
+  if ((long)p1 >= 0 || (long)p2 >= 0) {
+    sys_print("[pftest]   mmap kernel/boundary: FALLO (aceptado)\\n");
+    failed++;
+  } else {
+    sys_print("[pftest]   mmap kernel/boundary: OK (rechazado)\\n");
+    passed++;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Verificar que las syscalls siguen funcionando después de mmap
+// ---------------------------------------------------------------------------
 static void test_syscalls_after_mmap(void) {
   sys_print("[pftest] Test 8: Syscalls tras mmap...\n");
 
@@ -539,6 +562,7 @@ int main(void) {
   test_mmap_zeroed();
   test_mmap_multiple();
   test_mmap_fixed_addr();
+  test_mmap_kernel_boundary();
   test_syscalls_after_mmap();
   test_mmap_zero_length();
   test_mmap_too_large();
