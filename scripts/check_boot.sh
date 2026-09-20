@@ -5,6 +5,14 @@
 # las cadenas esperadas aparecen. Falla con exit code != 0 si algo no
 # está presente.
 #
+# Dispositivos que se conectan a QEMU:
+#   - aurora.img como disco duro (primario master → hda)
+#   - aurora.iso como CD (secundario master → sr0)
+#
+# El disco es necesario para que el driver ATA PIO detecte hda y los
+# tests de block/ATA pasen. El CD se usa en Fase 2 (ATAPI) y como
+# "medio de instalación" en Fase 8.
+#
 # Uso:
 #   ./scripts/check_boot.sh [timeout_seconds]
 #
@@ -21,6 +29,8 @@
 #   REQUIRE_SMP    (default: auto)   auto: exige APs si QEMU_SMP>1 Y KVM.
 #                                    yes:  siempre exige APs.
 #                                    no:   nunca exige APs.
+#   REQUIRE_DISK   (default: yes)    yes:  exige que hda exista.
+#                                    no:   no exige disco.
 #   SHOW_SERIAL    (default: yes)    yes:  vuelca serial.log al final
 #                                    no:   no vuelca nada
 #                                    on-failure: solo si el script falla
@@ -28,7 +38,7 @@
 #                                    0 = todo el log.
 #
 # Requiere:
-#   - aurora.iso en la raíz (o se genera con `make iso`).
+#   - aurora.img en la raíz (o se genera con `make iso`).
 #   - qemu-system-x86_64
 #   - OVMF
 
@@ -50,6 +60,7 @@ QEMU_MEM="${QEMU_MEM:-512M}"
 USE_KVM="${USE_KVM:-auto}"
 KEEP_LOGS="${KEEP_LOGS:-no}"
 REQUIRE_SMP="${REQUIRE_SMP:-auto}"
+REQUIRE_DISK="${REQUIRE_DISK:-yes}"
 SHOW_SERIAL="${SHOW_SERIAL:-yes}"
 SHOW_SERIAL_LINES="${SHOW_SERIAL_LINES:-0}"
 
@@ -80,7 +91,7 @@ log_error() { echo "${C_RED}[check_boot] ERROR:${C_RST} $*" >&2; }
 # on-failure. Sin argumentos, respeta SHOW_SERIAL.
 # ---------------------------------------------------------------------------
 dump_serial() {
-    local force="${1:-}"  # "force" para saltarse el filtro on-failure
+    local force="${1:-}"
     case "$SHOW_SERIAL" in
         no) return 0 ;;
         on-failure) [ "$force" = "force" ] || return 0 ;;
@@ -141,7 +152,7 @@ if [ "$REQUIRE_SMP" = "auto" ]; then
     fi
 fi
 
-log_info "QEMU_SMP=$QEMU_SMP, KVM=$kvm_enabled, REQUIRE_SMP=$REQUIRE_SMP"
+log_info "QEMU_SMP=$QEMU_SMP, KVM=$kvm_enabled, REQUIRE_SMP=$REQUIRE_SMP, REQUIRE_DISK=$REQUIRE_DISK"
 
 # ---------------------------------------------------------------------------
 # Verificar dependencias
@@ -161,15 +172,32 @@ for f in "$OVMF_CODE" "$OVMF_VARS_SRC"; do
 done
 
 # ---------------------------------------------------------------------------
-# Generar ISO si no existe
+# Generar aurora.img / aurora.iso si no existen.
+#
+# `make iso` depende de `image`, que a su vez depende de `kernel` y
+# `bootloader`. Al terminar, tenemos:
+#   - aurora.img (disco FAT32 con el bootloader y el kernel)
+#   - aurora.iso (ISO híbrida con aurora.img embebido como efi.img)
 # ---------------------------------------------------------------------------
-if [ ! -f "$ROOT/aurora.iso" ]; then
-    log_info "aurora.iso no existe, generando con 'make iso'..."
+if [ ! -f "$ROOT/aurora.img" ] || [ ! -f "$ROOT/aurora.iso" ]; then
+    log_info "aurora.img/aurora.iso no existen, generando con 'make iso'..."
     if ! make iso; then
         log_error "'make iso' falló"
         dump_serial force
         exit 1
     fi
+fi
+
+# Sanity check: ambos deben existir después del build.
+if [ ! -f "$ROOT/aurora.img" ]; then
+    log_error "aurora.img no existe después de 'make iso'"
+    dump_serial force
+    exit 1
+fi
+if [ ! -f "$ROOT/aurora.iso" ]; then
+    log_error "aurora.iso no existe después de 'make iso'"
+    dump_serial force
+    exit 1
 fi
 
 cp "$OVMF_VARS_SRC" "$OVMF_VARS"
@@ -180,17 +208,27 @@ fi
 
 # ---------------------------------------------------------------------------
 # Lanzar QEMU
+#
+# Pasamos DOS dispositivos de almacenamiento:
+#   - aurora.img como disco duro (primario master → hda)
+#   - aurora.iso como CD (secundario master → sr0)
+#
+# El disco es el que necesita el driver ATA PIO para detectar hda.
+# El CD se usa en Fase 2 (ATAPI) y como "medio de instalación" en Fase 8.
 # ---------------------------------------------------------------------------
 log_info "Arrancando QEMU (timeout=${TIMEOUT}s, mem=${QEMU_MEM})..."
+log_info "  disco: $ROOT/aurora.img"
+log_info "  CD:    $ROOT/aurora.iso"
 
 set +e
 timeout --foreground "$TIMEOUT" "$QEMU_BIN" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
+    -drive format=raw,file="$ROOT/aurora.img" \
+    -cdrom "$ROOT/aurora.iso" \
     "${kvm_args[@]}" \
     -smp "$QEMU_SMP" \
     -m "$QEMU_MEM" \
-    -cdrom "$ROOT/aurora.iso" \
     -serial file:"$SERIAL_LOG" \
     -display none \
     -no-reboot -no-shutdown \
@@ -226,6 +264,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Detectar si hay disco
+# ---------------------------------------------------------------------------
+disk_ok=0
+if grep -qF "[BLK] Registrado hda:" "$SERIAL_LOG"; then
+    disk_ok=1
+    n_disks=$(grep -cE '^\[.*\] INFO +\[BLK\] Registrado ' "$SERIAL_LOG" || echo "0")
+    log_info "Discos registrados: $n_disks"
+else
+    log_info "No se detectó ningún disco (hda no registrado)"
+fi
+
+# ---------------------------------------------------------------------------
 # Cadenas esperadas
 # ---------------------------------------------------------------------------
 log_info "Verificando cadenas de arranque..."
@@ -253,6 +303,9 @@ EXPECTED_BOOT=(
     "[INPUT] Subsistema de input inicializado"
     "[PS2] Tarea de procesamiento iniciada"
     "[PCI] Enumeracion completada."
+    "[BLK] Block layer inicializado"
+    "[ATA] Iniciando detección de discos PATA..."
+    "[ATA] Detección completada"
     "[FB] Inicializado en memoria"
     "[COMP] Compositor thread started"
     "[WINSRV] Inicializado"
@@ -262,6 +315,10 @@ EXPECTED_BOOT=(
 EXPECTED_SHELL=(
     "SHELL: main begin"
     "SHELL: after win_create"
+)
+
+EXPECTED_DISK=(
+    "[BLK] Registrado hda:"
 )
 
 FAILED=0
@@ -283,6 +340,10 @@ check_block() {
 
 check_block "arranque" "${EXPECTED_BOOT[@]}"
 check_block "shell"    "${EXPECTED_SHELL[@]}"
+
+if [ "$REQUIRE_DISK" = "yes" ]; then
+    check_block "disco" "${EXPECTED_DISK[@]}"
+fi
 
 # ---------------------------------------------------------------------------
 # Verificar el bloque de tests
