@@ -171,7 +171,7 @@ static void kmain_task(void) {
   LOG_INFO("OK");
 
   LOG_INFO("[INIT] Block layer...");
-  block_init();
+  blk_init();
   LOG_INFO("OK");
 
   input_init();
