@@ -34,19 +34,19 @@ static uint32_t next_id = 0;
 static uint64_t kernel_cr3 = 0;
 
 static unsigned long sched_lock_irqsave(void) {
-    unsigned long flags;
-    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
-    while (__sync_lock_test_and_set(&sched_lock.locked, 1)) {
-        while (sched_lock.locked) {
-            __asm__ volatile("pause");
-        }
+  unsigned long flags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+  while (__sync_lock_test_and_set(&sched_lock.locked, 1)) {
+    while (sched_lock.locked) {
+      __asm__ volatile("pause");
     }
-    return flags;
+  }
+  return flags;
 }
 
 static void sched_unlock_irqrestore(unsigned long flags) {
-    __sync_lock_release(&sched_lock.locked);
-    __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
+  __sync_lock_release(&sched_lock.locked);
+  __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 }
 
 static void idle_loop(void) {
@@ -438,16 +438,20 @@ void sched_tick(void) {
     this_cpu(kernel_stack) = kstack;
   }
 
-  // task_switch libera sched_lock por su cuenta (en asm, mov dword [rdx], 0).
-  // No llamar a sched_unlock_irqrestore después: el lock ya está libre y
-  // el flag se pierde con el cambio de stack.
   task_switch(old, next, &sched_lock);
 
-  // Si volvemos aquí, es que OTRA tarea nos ha cambiado a nosotros. Los
-  // flags que se restauran son los de la tarea actual (this_cpu), no los
-  // que guardamos antes de task_switch. Es correcto: cada tarea tiene su
-  // propio RFLAGS guardado en su stack.
+  // Restaurar los flags de la tarea que retoma el control.
+  //
+  // task_switch libera sched_lock por su cuenta (en asm, mov dword [rdx], 0),
+  // pero NO toca RFLAGS. Cada tarea guardó sus flags en su stack cuando
+  // llamó a sched_lock_irqsave, y los restaura aquí al volver de task_switch.
+  //
+  // SIN ESTO, IF queda en 0 tras el primer context switch y el sistema
+  // deja de recibir interrupciones (timer, teclado, mouse). El sistema
+  // parece funcionar 1-5 segundos y luego se cuelga.
+  __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 }
+
 void sched_yield(void) {
   this_cpu(ticks_since_resched) = SCHED_INTERVAL;
   sched_tick();
