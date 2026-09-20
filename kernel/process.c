@@ -285,7 +285,6 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
       // vivo el task_t aunque el scheduler haya retirado su referencia.
       uint32_t zpid = found_zombie->pid;
       int exit_code = found_zombie->exit_code;
-      spin_unlock_irqrestore(&process_lock, flags);
 
       if (status_out) {
         stac();
