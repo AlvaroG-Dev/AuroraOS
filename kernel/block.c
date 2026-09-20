@@ -1,10 +1,11 @@
 // kernel/block.c
 //
-// Implementación de la capa de bloques. Ver block.h para el contrato.
+// Implementación del block layer. Ver block.h para el contrato.
 
 #include "block.h"
 #include "klog.h"
 #include "string.h"
+#include "uaccess.h" // EINVAL, ERANGE, EIO, EROFS, ENOENT
 
 // ---------------------------------------------------------------------------
 // Estado global
@@ -15,74 +16,90 @@ static int g_device_count = 0;
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-void block_init(void) {
+void blk_init(void) {
   g_devices = NULL;
   g_device_count = 0;
-  LOG_INFO("[BLOCK] Subsistema de bloques inicializado");
+  LOG_INFO("[BLK] Block layer inicializado");
 }
 
 // ---------------------------------------------------------------------------
 // Registro
 // ---------------------------------------------------------------------------
-int block_register(block_device_t *dev) {
-  if (!dev) {
-    LOG_ERR("[BLOCK] register: dev == NULL");
-    return -1;
-  }
-  if (dev->name[0] == '\0') {
-    LOG_ERR("[BLOCK] register: nombre vacío");
-    return -1;
-  }
-  if (dev->sector_size == 0) {
-    LOG_ERR("[BLOCK] register(%s): sector_size == 0", dev->name);
-    return -1;
-  }
-  if (dev->num_sectors == 0) {
-    LOG_ERR("[BLOCK] register(%s): num_sectors == 0", dev->name);
-    return -1;
-  }
-  if (!dev->read) {
-    LOG_ERR("[BLOCK] register(%s): read == NULL", dev->name);
-    return -1;
-  }
-  if (!dev->is_read_only && !dev->write) {
-    LOG_ERR("[BLOCK] register(%s): write == NULL pero no es read-only",
-            dev->name);
-    return -1;
-  }
-  if (g_device_count >= BLOCK_MAX_DEVICES) {
-    LOG_ERR("[BLOCK] register(%s): tabla llena (%d/%d)", dev->name,
-            g_device_count, BLOCK_MAX_DEVICES);
-    return -1;
-  }
+static int validate_device(block_device_t *bdev) {
+  if (!bdev)
+    return -EINVAL;
+  if (bdev->name[0] == '\0')
+    return -EINVAL;
+  if (bdev->sector_size == 0)
+    return -EINVAL;
+  if (bdev->num_sectors == 0)
+    return -EINVAL;
+  if (!bdev->ops || !bdev->ops->submit)
+    return -EINVAL;
+  if (!bdev->is_read_only && !bdev->ops->submit) // redundante, pero explícito
+    return -EINVAL;
+  return 0;
+}
 
-  // Comprobar nombre duplicado.
+static int name_exists(const char *name) {
   for (block_device_t *p = g_devices; p; p = p->next) {
-    if (strcmp(p->name, dev->name) == 0) {
-      LOG_ERR("[BLOCK] register: nombre duplicado '%s'", dev->name);
-      return -1;
-    }
+    if (strcmp(p->name, name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+int blk_register(block_device_t *bdev) {
+  int rc = validate_device(bdev);
+  if (rc < 0) {
+    LOG_ERR("[BLK] register: dispositivo inválido (rc=%d)", rc);
+    return rc;
+  }
+  if (name_exists(bdev->name)) {
+    LOG_ERR("[BLK] register: nombre duplicado '%s'", bdev->name);
+    return -EINVAL;
+  }
+  if (g_device_count >= 16) {
+    LOG_ERR("[BLK] register(%s): tabla llena", bdev->name);
+    return -ENOMEM;
   }
 
   // Insertar al principio de la lista.
-  dev->next = g_devices;
-  g_devices = dev;
+  bdev->next = g_devices;
+  g_devices = bdev;
   g_device_count++;
 
-  // Log informativo. El tamaño se calcula en MB.
-  uint64_t size_bytes = dev->num_sectors * (uint64_t)dev->sector_size;
-  uint64_t size_mb = size_bytes / (1024 * 1024);
-  LOG_INFO("[BLOCK] Registrado %s: %lu sectores de %u bytes (%lu MB)%s",
-           dev->name, (unsigned long)dev->num_sectors, dev->sector_size,
-           (unsigned long)size_mb, dev->is_read_only ? " [RO]" : "");
+  uint64_t size_mb = bdev_size_mb(bdev);
+  LOG_INFO("[BLK] Registrado %s: %lu sectores de %u bytes (%lu MB)%s%s",
+           bdev->name, (unsigned long)bdev->num_sectors, bdev->sector_size,
+           (unsigned long)size_mb, bdev->is_read_only ? " [RO]" : "",
+           bdev->is_partition ? " [partición]" : "");
 
   return 0;
+}
+
+int blk_unregister(block_device_t *bdev) {
+  if (!bdev)
+    return -EINVAL;
+
+  block_device_t **pp = &g_devices;
+  while (*pp) {
+    if (*pp == bdev) {
+      *pp = bdev->next;
+      bdev->next = NULL;
+      g_device_count--;
+      LOG_INFO("[BLK] Desregistrado %s", bdev->name);
+      return 0;
+    }
+    pp = &(*pp)->next;
+  }
+  return -ENOENT;
 }
 
 // ---------------------------------------------------------------------------
 // Búsqueda
 // ---------------------------------------------------------------------------
-block_device_t *block_get(const char *name) {
+block_device_t *blk_lookup(const char *name) {
   if (!name)
     return NULL;
   for (block_device_t *p = g_devices; p; p = p->next) {
@@ -92,7 +109,7 @@ block_device_t *block_get(const char *name) {
   return NULL;
 }
 
-block_device_t *block_get_by_index(int index) {
+block_device_t *blk_get_by_index(int index) {
   if (index < 0)
     return NULL;
   int i = 0;
@@ -104,75 +121,150 @@ block_device_t *block_get_by_index(int index) {
   return NULL;
 }
 
-int block_count(void) { return g_device_count; }
+int blk_count(void) { return g_device_count; }
 
 // ---------------------------------------------------------------------------
-// Helpers de validación
+// Dispatch
 // ---------------------------------------------------------------------------
-static int validate_lba(block_device_t *dev, uint64_t lba, uint32_t count) {
-  // count == 0 no tiene sentido.
+int blk_submit(bio_t *bio) {
+  if (!bio || !bio->bdev) {
+    LOG_ERR("[BLK] submit: bio inválido");
+    return -EINVAL;
+  }
+  block_device_t *bdev = bio->bdev;
+  if (!bdev->ops || !bdev->ops->submit) {
+    LOG_ERR("[BLK] submit: %s sin ops->submit", bdev->name);
+    return -EINVAL;
+  }
+  return bdev->ops->submit(bdev, bio);
+}
+
+void bio_endio(bio_t *bio, int error) {
+  if (!bio)
+    return;
+  bio->error = error;
+  if (bio->end_io) {
+    bio->end_io(bio);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wrappers síncronos (bdev_*)
+//
+// En Fase 1, todos los drivers son síncronos: ops->submit devuelve cuando
+// el bio ha terminado. Así que no hace falta completion.
+//
+// En Fase 3 (DMA), estos wrappers cambiarán a usar completion:
+//   - inicializan una completion,
+//   - ponen bio->end_io = completion_callback,
+//   - llaman a blk_submit,
+//   - esperan con wait_for_completion.
+// La estructura del bio ya lo permite.
+// ---------------------------------------------------------------------------
+
+static int validate_io(block_device_t *bdev, uint64_t lba, uint32_t count) {
   if (count == 0)
-    return BLOCK_EINVAL;
-  // Overflow en lba + count.
-  if (lba > dev->num_sectors)
-    return BLOCK_ERANGE;
-  if (count > dev->num_sectors - lba)
-    return BLOCK_ERANGE;
-  return BLOCK_OK;
+    return -EINVAL;
+  if (lba > bdev->num_sectors)
+    return -ERANGE;
+  if (count > bdev->num_sectors - lba)
+    return -ERANGE;
+  return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Read / Write / Flush
-// ---------------------------------------------------------------------------
-int block_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf) {
-  if (!dev || !buf)
-    return BLOCK_EINVAL;
+int bdev_read(block_device_t *bdev, uint64_t lba, uint32_t count, void *buf) {
+  if (!bdev || !buf)
+    return -EINVAL;
 
-  int rc = validate_lba(dev, lba, count);
-  if (rc != BLOCK_OK)
+  int rc = validate_io(bdev, lba, count);
+  if (rc < 0)
     return rc;
 
-  return dev->read(dev, lba, count, buf);
+  bio_t bio = {
+      .bdev = bdev,
+      .lba = lba,
+      .count = count,
+      .buf = buf,
+      .op = BIO_READ,
+      .error = 0,
+      .end_io = NULL,
+      .end_io_data = NULL,
+      .next = NULL,
+  };
+
+  rc = blk_submit(&bio);
+  if (rc < 0)
+    return rc;
+  return bio.error;
 }
 
-int block_write(block_device_t *dev, uint64_t lba, uint32_t count,
-                const void *buf) {
-  if (!dev || !buf)
-    return BLOCK_EINVAL;
+int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
+               const void *buf) {
+  if (!bdev || !buf)
+    return -EINVAL;
+  if (bdev->is_read_only)
+    return -EROFS;
 
-  if (dev->is_read_only)
-    return BLOCK_EROFS;
-
-  int rc = validate_lba(dev, lba, count);
-  if (rc != BLOCK_OK)
+  int rc = validate_io(bdev, lba, count);
+  if (rc < 0)
     return rc;
 
-  if (!dev->write)
-    return BLOCK_EIO;
+  bio_t bio = {
+      .bdev = bdev,
+      .lba = lba,
+      .count = count,
+      .buf = (void *)buf, // el driver no debe modificarlo en writes
+      .op = BIO_WRITE,
+      .error = 0,
+      .end_io = NULL,
+      .end_io_data = NULL,
+      .next = NULL,
+  };
 
-  return dev->write(dev, lba, count, buf);
+  rc = blk_submit(&bio);
+  if (rc < 0)
+    return rc;
+  return bio.error;
 }
 
-int block_flush(block_device_t *dev) {
-  if (!dev)
-    return BLOCK_EINVAL;
-  if (dev->is_read_only)
-    return BLOCK_OK; // Nada que flushear.
-  if (!dev->flush)
-    return BLOCK_OK; // El driver no lo necesita.
-  return dev->flush(dev);
+int bdev_flush(block_device_t *bdev) {
+  if (!bdev)
+    return -EINVAL;
+  if (bdev->is_read_only)
+    return 0;
+  if (!bdev->ops || !bdev->ops->flush)
+    return 0; // El driver no necesita flush.
+
+  bio_t bio = {
+      .bdev = bdev,
+      .lba = 0,
+      .count = 0,
+      .buf = NULL,
+      .op = BIO_FLUSH,
+      .error = 0,
+      .end_io = NULL,
+      .end_io_data = NULL,
+      .next = NULL,
+  };
+
+  int rc = blk_submit(&bio);
+  if (rc < 0)
+    return rc;
+  return bio.error;
 }
 
 // ---------------------------------------------------------------------------
 // Debug
 // ---------------------------------------------------------------------------
-void block_dump(void) {
-  LOG_INFO("[BLOCK] Discos registrados (%d):", g_device_count);
+void blk_dump(void) {
+  LOG_INFO("[BLK] Discos registrados (%d):", g_device_count);
   for (block_device_t *p = g_devices; p; p = p->next) {
-    uint64_t size_bytes = p->num_sectors * (uint64_t)p->sector_size;
-    uint64_t size_mb = size_bytes / (1024 * 1024);
-    LOG_INFO("  %s: %lu sectores, %u bytes/sector, %lu MB%s", p->name,
+    LOG_INFO("  %s: %lu sectores, %u bytes/sector, %lu MB%s%s", p->name,
              (unsigned long)p->num_sectors, p->sector_size,
-             (unsigned long)size_mb, p->is_read_only ? " [RO]" : "");
+             (unsigned long)bdev_size_mb(p), p->is_read_only ? " [RO]" : "",
+             p->is_partition ? " [partición]" : "");
+    if (p->ops && p->ops->dump) {
+      p->ops->dump(p);
+    }
   }
 }
