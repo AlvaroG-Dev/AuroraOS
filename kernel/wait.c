@@ -61,8 +61,6 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     }
 
     if (self->waiting_on == NULL) {
-      // Resetear wake_reason bajo el lock de la wq. El waker también
-      // lo modifica bajo el lock, así que no hay race.
       self->wake_reason = 0;
       wq_add_locked(wq, self);
       self->state = TASK_BLOCKED;
@@ -72,10 +70,6 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
 
     sched_yield();
 
-    // Después del yield, la condición puede haber cambiado. La
-    // comprobamos sin lock porque cond() es una función pura sobre
-    // el estado compartido (protegido por otro lock). Si es cierta,
-    // nos quitamos de la wq con lock.
     if (cond && cond(arg)) {
       if (self->waiting_on == wq) {
         flags = spin_lock_irqsave(&wq->lock);
@@ -85,12 +79,7 @@ static int wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       return 0;
     }
 
-    // Comprobar wake_reason con lectura atómica. El waker lo escribe
-    // bajo el lock de la wq; nosotros lo leemos sin lock, así que
-    // necesitamos una barrera de memoria para evitar reordenamientos.
-    // __atomic_load_n con ACQUIRE es suficiente.
-    if (interruptible &&
-        __atomic_load_n(&self->wake_reason, __ATOMIC_ACQUIRE) == -EINTR) {
+    if (interruptible && self->wake_reason == -EINTR) {
       if (self->waiting_on == wq) {
         flags = spin_lock_irqsave(&wq->lock);
         wq_remove_locked(wq, self);
@@ -124,10 +113,7 @@ void wake_up_all_locked(wait_queue_t *wq) {
     wait_queue_entry_t *next = e->next;
     task_t *t = e->task;
     t->waiting_on = NULL;
-    // El waker también modifica wake_reason bajo el lock. El waiter
-    // lo lee con __atomic_load_n ACQUIRE sin lock. La barrera ACQUIRE
-    // garantiza que la escritura del waker es visible.
-    __atomic_store_n(&t->wake_reason, 0, __ATOMIC_RELEASE);
+    t->wake_reason = 0;
     sched_make_ready(t);
     kfree(e);
     task_put(t);
@@ -153,7 +139,7 @@ void wake_up_one(wait_queue_t *wq) {
 
   task_t *t = e->task;
   t->waiting_on = NULL;
-  __atomic_store_n(&t->wake_reason, 0, __ATOMIC_RELEASE);
+  t->wake_reason = 0;
   sched_make_ready(t);
   kfree(e);
   task_put(t);
@@ -171,7 +157,7 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
     wait_queue_entry_t *next = e->next;
     task_t *t = e->task;
     t->waiting_on = NULL;
-    __atomic_store_n(&t->wake_reason, -EINTR, __ATOMIC_RELEASE);
+    t->wake_reason = -EINTR;
     sched_make_ready(t);
     kfree(e);
     task_put(t);
