@@ -21,6 +21,7 @@
 #include "../string.h"
 #include "../test.h"
 #include "../time.h"
+#include "../ata_pio.h"
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -691,3 +692,25 @@ static void test_blk_lookup_missing(void) {
   TEST_ASSERT(d == NULL, "blk_lookup('nonexistent') != NULL");
 }
 REGISTER_TEST("blk: lookup de disco inexistente", test_blk_lookup_missing);
+
+// ---------------------------------------------------------------------------
+// ATA PIO (Fase 1, parte 1)
+// ---------------------------------------------------------------------------
+static void test_blk_count_positive(void) {
+  TEST_ASSERT(blk_count() >= 1,
+              "no hay discos detectados (blk_count=%d)", blk_count());
+}
+REGISTER_TEST("blk: al menos 1 disco detectado", test_blk_count_positive);
+
+static void test_blk_hda_exists(void) {
+  block_device_t *d = blk_lookup("hda");
+  TEST_ASSERT(d != NULL, "hda no encontrado en el block layer");
+  if (!d)
+    return;
+  TEST_ASSERT(d->num_sectors > 0, "hda tiene 0 sectores");
+  TEST_ASSERT(d->sector_size == 512, "hda sector_size=%u, esperado 512",
+              d->sector_size);
+  TEST_ASSERT(d->ops != NULL, "hda sin ops");
+  TEST_ASSERT(d->private_data != NULL, "hda sin private_data");
+}
+REGISTER_TEST("blk: hda existe y es válido", test_blk_hda_exists);
