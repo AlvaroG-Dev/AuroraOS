@@ -13,6 +13,7 @@
 #include "idt.h"
 #include "initrd.h"
 #include "input.h"
+#include "ata_pio.h"
 #include "ipi.h"
 #include "klog.h"
 #include "paging.h"
@@ -61,6 +62,8 @@ uint32_t fb_height = 0;
 uint32_t fb_pitch = 0;
 
 static uint8_t syscall_kernel_stack[8192] __attribute__((aligned(16)));
+
+extern struct driver ata_pio_driver;
 
 // ---------------------------------------------------------------------------
 // Framebuffer helpers
@@ -178,6 +181,7 @@ static void kmain_task(void) {
 
   driver_register(&ps2_driver);
   driver_register(&pci_driver);
+  driver_register(&ata_pio_driver);
   drivers_init_all();
 
   int fb_ok = 0;
