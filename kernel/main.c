@@ -4,6 +4,8 @@
 
 #include "acpi.h"
 #include "apic.h"
+#include "ata_pio.h"
+#include "block.h"
 #include "cpu.h"
 #include "driver.h"
 #include "gdt.h"
@@ -13,7 +15,6 @@
 #include "idt.h"
 #include "initrd.h"
 #include "input.h"
-#include "ata_pio.h"
 #include "ipi.h"
 #include "klog.h"
 #include "paging.h"
@@ -30,7 +31,6 @@
 #include "syscall.h"
 #include "tarfs.h"
 #include "test.h"
-#include "block.h"
 #include "time.h"
 #include "tty.h"
 #include <stddef.h>
