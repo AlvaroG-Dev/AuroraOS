@@ -450,6 +450,13 @@ uint64_t paging_clone_kernel_space(void) {
 int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
                        uint64_t flags) {
   uint64_t pml4_idx = PML4_INDEX(virt);
+
+  // User mappings are restricted to the lower canonical half.  Process
+  // address spaces share the kernel's upper PML4 entries, so allowing a
+  // PTE_USER mapping there would let a user process modify kernel page
+  // tables (PML4 entries 256..511).
+  if ((flags & PTE_USER) && pml4_idx >= 256)
+    return -1;
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
   uint64_t pt_idx = PT_INDEX(virt);
