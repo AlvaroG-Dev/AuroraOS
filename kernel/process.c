@@ -421,11 +421,14 @@ void process_terminate(process_t *proc) {
     return;
   LOG_INFO("[PROC] Limpiando process_t '%s' (PID=%u)", proc->name, proc->pid);
 
-  // 1. Desvincular tarea ↔ proceso
+  // 1. Desvincular tarea ↔ proceso y liberar la referencia que
+  // process_t adquirió en process_spawn(). La referencia del scheduler
+  // es independiente y la libera reap_dead_tasks().
   if (proc->task) {
-    proc->task->proc = NULL;
-    // La tarea ya está DEAD y reapeada (o será reapeada por el scheduler).
-    // No hacemos task_put aquí: el scheduler ya lo hizo.
+    task_t *task = proc->task;
+    proc->task = NULL;
+    task->proc = NULL;
+    task_put(task);
   }
 
   // 2. [P1.3] Liberar tablas de página. Solo cuando la tarea está
