@@ -11,8 +11,9 @@
 
 #include "../acpi.h"
 #include "../apic.h"
-#include "../cpu.h"
+#include "../ata_pio.h"
 #include "../block.h"
+#include "../cpu.h"
 #include "../heap.h"
 #include "../klog.h"
 #include "../sched.h"
@@ -21,7 +22,6 @@
 #include "../string.h"
 #include "../test.h"
 #include "../time.h"
-#include "../ata_pio.h"
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -374,8 +374,9 @@ REGISTER_TEST("smp: this_cpu() accede al CPU actual", test_smp_this_cpu_macro);
 
 static void test_smp_per_cpu_macro(void) {
   per_cpu(ticks_since_resched, 3) = 0xCAFEBABE;
-  TEST_ASSERT(cpu_local_data[3].ticks_since_resched == 0xCAFEBABE,
-              "per_cpu(ticks_since_resched, 3) no escribió en cpu_local_data[3]");
+  TEST_ASSERT(
+      cpu_local_data[3].ticks_since_resched == 0xCAFEBABE,
+      "per_cpu(ticks_since_resched, 3) no escribió en cpu_local_data[3]");
   per_cpu(ticks_since_resched, 3) = 0;
 }
 REGISTER_TEST("smp: per_cpu() accede al slot correcto", test_smp_per_cpu_macro);
@@ -663,7 +664,6 @@ static void test_smp_ipi_wakeup(void) {
 REGISTER_TEST_FLAGS("smp: IPI wakeup cross-CPU", test_smp_ipi_wakeup,
                     TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
-
 // ---------------------------------------------------------------------------
 // Block layer
 // ---------------------------------------------------------------------------
@@ -694,23 +694,128 @@ static void test_blk_lookup_missing(void) {
 REGISTER_TEST("blk: lookup de disco inexistente", test_blk_lookup_missing);
 
 // ---------------------------------------------------------------------------
-// ATA PIO (Fase 1, parte 1)
+// ATA (driver completo)
 // ---------------------------------------------------------------------------
-static void test_blk_count_positive(void) {
-  TEST_ASSERT(blk_count() >= 1,
-              "no hay discos detectados (blk_count=%d)", blk_count());
+static void test_ata_hda_detected(void) {
+  block_device_t *hda = blk_lookup("hda");
+  TEST_ASSERT(hda != NULL, "hda no detectado");
 }
-REGISTER_TEST("blk: al menos 1 disco detectado", test_blk_count_positive);
+REGISTER_TEST("ata: hda detectado", test_ata_hda_detected);
 
-static void test_blk_hda_exists(void) {
-  block_device_t *d = blk_lookup("hda");
-  TEST_ASSERT(d != NULL, "hda no encontrado en el block layer");
-  if (!d)
+static void test_ata_hda_capacity(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
     return;
-  TEST_ASSERT(d->num_sectors > 0, "hda tiene 0 sectores");
-  TEST_ASSERT(d->sector_size == 512, "hda sector_size=%u, esperado 512",
-              d->sector_size);
-  TEST_ASSERT(d->ops != NULL, "hda sin ops");
-  TEST_ASSERT(d->private_data != NULL, "hda sin private_data");
+  }
+  TEST_ASSERT(hda->num_sectors > 0, "hda sin sectores");
+  TEST_ASSERT(hda->sector_size == 512 || hda->sector_size == 4096,
+              "sector_size inesperado: %u", hda->sector_size);
 }
-REGISTER_TEST("blk: hda existe y es válido", test_blk_hda_exists);
+REGISTER_TEST("ata: capacidad de hda coherente", test_ata_hda_capacity);
+
+static void test_ata_read_sector0(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+  uint8_t buf[512];
+  int rc = bdev_read(hda, 0, 1, buf);
+  TEST_ASSERT(rc == 0, "read sector 0 falló: %d", rc);
+  if (rc != 0)
+    return;
+  TEST_ASSERT(buf[510] == 0x55 && buf[511] == 0xAA,
+              "sector 0 sin firma 0x55AA: %02x %02x", buf[510], buf[511]);
+}
+REGISTER_TEST("ata: leer sector 0 (firma 0x55AA)", test_ata_read_sector0);
+
+static void test_ata_multi_sector_read(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+
+  uint8_t *buf = (uint8_t *)kmalloc(512 * 4);
+  TEST_ASSERT(buf != NULL, "kmalloc falló");
+  if (!buf)
+    return;
+
+  int rc = bdev_read(hda, 0, 4, buf);
+  TEST_ASSERT(rc == 0, "read 4 sectores falló: %d", rc);
+  if (rc == 0) {
+    TEST_ASSERT(buf[510] == 0x55 && buf[511] == 0xAA, "sector 0 sin firma");
+  }
+  kfree(buf);
+}
+REGISTER_TEST("ata: leer 4 sectores contiguos", test_ata_multi_sector_read);
+
+static void test_ata_write_read_back(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+
+  uint64_t lba = hda->num_sectors - 1;
+  uint8_t orig[512], pattern[512], readback[512];
+
+  int rc = bdev_read(hda, lba, 1, orig);
+  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
+  if (rc != 0)
+    return;
+
+  for (int i = 0; i < 512; i++)
+    pattern[i] = (uint8_t)(i ^ 0xA5);
+
+  rc = bdev_write(hda, lba, 1, pattern);
+  TEST_ASSERT(rc == 0, "write falló: %d", rc);
+  if (rc != 0)
+    return;
+
+  rc = bdev_flush(hda);
+  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
+
+  rc = bdev_read(hda, lba, 1, readback);
+  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
+  if (rc != 0)
+    return;
+
+  int ok = 1;
+  for (int i = 0; i < 512; i++) {
+    if (readback[i] != pattern[i]) {
+      ok = 0;
+      break;
+    }
+  }
+  TEST_ASSERT(ok, "el patrón leído no coincide");
+
+  bdev_write(hda, lba, 1, orig);
+  bdev_flush(hda);
+}
+REGISTER_TEST("ata: escribir y leer de vuelta", test_ata_write_read_back);
+
+static void test_ata_read_oob(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+  uint8_t buf[512];
+  int rc = bdev_read(hda, hda->num_sectors, 1, buf);
+  TEST_ASSERT(rc < 0, "read fuera de rango debía fallar");
+}
+REGISTER_TEST("ata: leer fuera de rango falla", test_ata_read_oob);
+
+static void test_ata_write_oob(void) {
+  block_device_t *hda = blk_lookup("hda");
+  if (!hda) {
+    TEST_ASSERT(0, "hda no existe");
+    return;
+  }
+  uint8_t buf[512];
+  int rc = bdev_write(hda, hda->num_sectors, 1, buf);
+  TEST_ASSERT(rc < 0, "write fuera de rango debía fallar");
+}
+REGISTER_TEST("ata: escribir fuera de rango falla", test_ata_write_oob);
