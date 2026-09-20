@@ -142,6 +142,10 @@ process_t *process_spawn(const char *name, const void *elf_data,
   }
   proc->name[i] = '\0';
   proc->task = task;
+  // process_t mantiene una referencia propia al task_t. El scheduler posee
+  // la referencia inicial; esta segunda referencia impide que el reaper
+  // pueda liberar task_t mientras process_t siga exponiendo proc->task.
+  task_get(task);
   proc->pml4_phys = pml4_phys;
   proc->load_base = load_base;
   proc->heap_start = USER_HEAP_BASE;
@@ -244,6 +248,7 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
 
   while (1) {
     process_t *found_zombie = NULL;
+    task_t *zombie_task = NULL;
     int has_matching_child = 0;
 
     unsigned long flags = spin_lock_irqsave(&process_lock);
@@ -253,7 +258,20 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
           (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
         has_matching_child = 1;
         if (p->is_zombie) {
+          // Reap atómico: sacar el proceso de process_list y adquirir la
+          // referencia del task mientras aún tenemos process_lock. Esto
+          // evita que otro waitpid() recoja el mismo zombie y garantiza que
+          // task_t siga vivo después de soltar el lock.
           found_zombie = p;
+          zombie_task = p->task;
+          if (zombie_task)
+            task_get(zombie_task);
+
+          process_t **pp = &process_list;
+          while (*pp && *pp != found_zombie)
+            pp = &(*pp)->next;
+          if (*pp == found_zombie)
+            *pp = found_zombie->next;
           break;
         }
       }
@@ -262,17 +280,12 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
     spin_unlock_irqrestore(&process_lock, flags);
 
     if (found_zombie) {
+      // found_zombie ya no está publicado en process_list. El proceso
+      // pertenece exclusivamente a este waitpid(), y zombie_task mantiene
+      // vivo el task_t aunque el scheduler haya retirado su referencia.
       uint32_t zpid = found_zombie->pid;
       int exit_code = found_zombie->exit_code;
-
-      // Sacar del process_list dentro del lock.
-      unsigned long flags2 = spin_lock_irqsave(&process_lock);
-      process_t **pp = &process_list;
-      while (*pp && *pp != found_zombie)
-        pp = &(*pp)->next;
-      if (*pp == found_zombie)
-        *pp = found_zombie->next;
-      spin_unlock_irqrestore(&process_lock, flags2);
+      spin_unlock_irqrestore(&process_lock, flags);
 
       if (status_out) {
         stac();
@@ -280,12 +293,22 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         clac();
       }
 
-      // Cleanup fuera del lock.
-      if (found_zombie->task)
-        found_zombie->task->proc = NULL;
+      // Cleanup fuera del lock. No se toca ningún task_t después de
+      // liberar la referencia adquirida arriba.
+      if (zombie_task) {
+        zombie_task->proc = NULL;
+        // Liberar la referencia temporal de waitpid. La referencia propia
+        // del process_t se libera inmediatamente antes de destruir proc.
+        task_put(zombie_task);
+        zombie_task = NULL;
+      }
       if (found_zombie->pml4_phys)
         paging_free_user_space(found_zombie->pml4_phys);
       vma_destroy_all(found_zombie);
+      if (found_zombie->task) {
+        task_put(found_zombie->task);
+        found_zombie->task = NULL;
+      }
       kfree(found_zombie);
 
       return (int)zpid;
