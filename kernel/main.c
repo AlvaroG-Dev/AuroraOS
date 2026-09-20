@@ -255,6 +255,7 @@ static void kmain_task(void) {
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
+  process_load("apps/pftest");
 
   while (1) {
     sched_yield();
