@@ -68,47 +68,60 @@ QEMU_FLAGS_KVM = \
 	-cpu host
 
 # ---------------------------------------------------------------------------
+# Dispositivos de almacenamiento
+#
+# Todos los targets pasan:
+#   - aurora.img como disco duro (primario master → hda)
+#   - aurora.iso como CD (secundario master → sr0)
+#
+# Así podemos probar ATA (hda) y ATAPI (sr0) en el mismo boot.
+# ---------------------------------------------------------------------------
+QEMU_FLAGS_STORAGE = \
+	-drive format=raw,file=aurora.img \
+	-cdrom aurora.iso
+
+# ---------------------------------------------------------------------------
 # TCG (emulación pura por software, sin KVM)
 # ---------------------------------------------------------------------------
 
 # 1 CPU, sin debug.
-run: image
+run: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_STORAGE) \
 		-cpu max \
-		-drive format=raw,file=aurora.img \
 		-serial stdio
 
 # 1 CPU con debug.
-run-debug: image
+run-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		-cpu max \
+		$(QEMU_FLAGS_STORAGE) \
 		$(QEMU_FLAGS_DEBUG) \
-		-drive format=raw,file=aurora.img \
+		-cpu max \
 		-serial file:serial.log
 
 # 4 CPUs sin debug (TCG, no arrancará APs).
-run-smp: image
+run-smp: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_STORAGE) \
 		-cpu max \
 		-smp 4 \
-		-drive format=raw,file=aurora.img \
 		-serial stdio
 
 # 4 CPUs con debug (TCG, no arrancará APs, solo para diagnóstico).
-run-smp-debug: image
+run-smp-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		-cpu max \
+		$(QEMU_FLAGS_STORAGE) \
 		$(QEMU_FLAGS_DEBUG) \
+		-cpu max \
 		-smp 4 \
-		-drive format=raw,file=aurora.img \
 		-serial file:serial.log
 	@echo ""
 	@echo "=== Trampoline (debug.log) ==="
@@ -121,25 +134,25 @@ run-smp-debug: image
 # KVM (virtualización por hardware). ESTE es el que quieres para SMP.
 # ---------------------------------------------------------------------------
 
-# 4 CPUs con KVM. El que quieres para probar SMP de verdad.
-run-smp-kvm: image
+# 8 CPUs con KVM. El que quieres para probar SMP de verdad.
+run-smp-kvm: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_STORAGE) \
 		$(QEMU_FLAGS_KVM) \
 		-smp 8 \
-		-drive format=raw,file=aurora.img \
 		-serial stdio
 
-# 4 CPUs con KVM y debug. El que quieres para depurar SMP con logs.
-run-smp-kvm-debug: image
+# 8 CPUs con KVM y debug. El que quieres para depurar SMP con logs.
+run-smp-kvm-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_STORAGE) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
-		-smp 4 \
-		-drive format=raw,file=aurora.img \
+		-smp 8 \
 		-serial file:serial.log
 	@echo ""
 	@echo "=== Trampoline (debug.log) ==="
@@ -165,6 +178,9 @@ iso: image
 	@rm -rf iso_root
 	@echo "[Makefile] ISO regenerada para VirtualBox: aurora.iso"
 
+# Arrancar solo desde el CD (sin disco duro).
+# Útil para probar que el sistema arranca desde un Live CD sin necesidad
+# de un disco. NO tiene hda, así que los tests de ATA se saltan.
 run-iso: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
@@ -178,5 +194,5 @@ clean:
 	$(MAKE) -C bootloader clean
 	$(MAKE) -C kernel clean
 	$(MAKE) -C user clean
-	rm -rf sysroot kernel/initrd.tar aurora.img esp
+	rm -rf sysroot kernel/initrd.tar aurora.img aurora.iso esp
 	rm -f serial.log debug.log qemu_debug.log

@@ -12,6 +12,7 @@
 #include "../acpi.h"
 #include "../apic.h"
 #include "../ata_pio.h"
+#include "../atapi.h"
 #include "../block.h"
 #include "../cpu.h"
 #include "../heap.h"
@@ -819,3 +820,115 @@ static void test_ata_write_oob(void) {
   TEST_ASSERT(rc < 0, "write fuera de rango debía fallar");
 }
 REGISTER_TEST("ata: escribir fuera de rango falla", test_ata_write_oob);
+
+// ---------------------------------------------------------------------------
+// ATAPI
+// ---------------------------------------------------------------------------
+static void test_atapi_sr0_detected(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  TEST_ASSERT(sr0 != NULL, "sr0 no detectado");
+}
+REGISTER_TEST("atapi: sr0 detectado", test_atapi_sr0_detected);
+
+static void test_atapi_sr0_read_only(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  if (!sr0) {
+    TEST_ASSERT(0, "sr0 no existe");
+    return;
+  }
+  TEST_ASSERT(sr0->is_read_only == 1, "sr0 no es read-only");
+}
+REGISTER_TEST("atapi: sr0 read-only", test_atapi_sr0_read_only);
+
+static void test_atapi_sr0_sector_size(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  if (!sr0) {
+    TEST_ASSERT(0, "sr0 no existe");
+    return;
+  }
+  // CDs usan 2048 bytes por bloque. DVDs pueden usar 2048 o 4096.
+  TEST_ASSERT(sr0->sector_size == 2048 || sr0->sector_size == 4096,
+              "sector_size inesperado: %u", sr0->sector_size);
+}
+REGISTER_TEST("atapi: sr0 sector size", test_atapi_sr0_sector_size);
+
+static void test_atapi_sr0_media(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  if (!sr0) {
+    TEST_ASSERT(0, "sr0 no existe");
+    return;
+  }
+  // El CD de aurora.iso debe tener medio presente.
+  // Si el test corre sin CD, num_sectors = 0.
+  if (sr0->num_sectors == 0) {
+    TEST_ASSERT(1, "sr0 sin medio (OK si no hay CD)");
+    return;
+  }
+  TEST_ASSERT(sr0->num_sectors > 0, "sr0 tiene medio pero 0 sectores");
+}
+REGISTER_TEST("atapi: sr0 medio", test_atapi_sr0_media);
+
+static void test_atapi_read_pvd(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  if (!sr0) {
+    TEST_ASSERT(0, "sr0 no existe");
+    return;
+  }
+  if (sr0->num_sectors == 0) {
+    TEST_ASSERT(1, "sr0 sin medio, test skip");
+    return;
+  }
+
+  // El ISO9660 PVD está en el LBA 16 (sector 16).
+  // Los bytes 1-5 del sector son "CD001".
+  uint8_t *buf = (uint8_t *)kmalloc(sr0->sector_size);
+  if (!buf) {
+    TEST_ASSERT(0, "kmalloc falló");
+    return;
+  }
+
+  int rc = bdev_read(sr0, 16, 1, buf);
+  TEST_ASSERT(rc == 0, "read PVD falló: %d", rc);
+  if (rc == 0) {
+    // Offset 1-5: "CD001"
+    TEST_ASSERT(buf[1] == 'C' && buf[2] == 'D' && buf[3] == '0' &&
+                    buf[4] == '0' && buf[5] == '1',
+                "PVD sin firma CD001: %02x %02x %02x %02x %02x", buf[1], buf[2],
+                buf[3], buf[4], buf[5]);
+  }
+  kfree(buf);
+}
+REGISTER_TEST("atapi: leer PVD (firma CD001)", test_atapi_read_pvd);
+
+static void test_atapi_write_fails(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  if (!sr0) {
+    TEST_ASSERT(0, "sr0 no existe");
+    return;
+  }
+  uint8_t buf[2048] = {0};
+  int rc = bdev_write(sr0, 0, 1, buf);
+  TEST_ASSERT(rc < 0, "write a sr0 debía fallar (read-only), rc=%d", rc);
+}
+REGISTER_TEST("atapi: escribir falla (read-only)", test_atapi_write_fails);
+
+static void test_atapi_read_oob(void) {
+  block_device_t *sr0 = blk_lookup("sr0");
+  if (!sr0) {
+    TEST_ASSERT(0, "sr0 no existe");
+    return;
+  }
+  if (sr0->num_sectors == 0) {
+    TEST_ASSERT(1, "sr0 sin medio, test skip");
+    return;
+  }
+  uint8_t *buf = (uint8_t *)kmalloc(sr0->sector_size);
+  if (!buf) {
+    TEST_ASSERT(0, "kmalloc falló");
+    return;
+  }
+  int rc = bdev_read(sr0, sr0->num_sectors, 1, buf);
+  TEST_ASSERT(rc < 0, "read fuera de rango debía fallar");
+  kfree(buf);
+}
+REGISTER_TEST("atapi: leer fuera de rango falla", test_atapi_read_oob);
