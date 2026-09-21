@@ -301,6 +301,13 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
       // Cleanup fuera del lock. No se toca ningún task_t después de
       // liberar la referencia adquirida arriba.
       if (zombie_task) {
+        // El zombie puede haber publicado su salida en una CPU mientras
+        // todavía está terminando process_exit_current() en otra. No se
+        // puede liberar su address space mientras el task siga ejecutando
+        // con ese CR3.
+        while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
+          __asm__ volatile("pause");
+
         zombie_task->proc = NULL;
         // Liberar la referencia temporal de waitpid. La referencia propia
         // del process_t se libera inmediatamente antes de destruir proc.
