@@ -114,7 +114,7 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
     return 0;
 
   uint64_t page = fault_addr & ~0xFFFULL;
-  uint64_t phys = alloc_user_page_zeroed(); // ← [C.2] zeroed
+  uint64_t phys = alloc_user_page_zeroed();
   if (!phys)
     return 0;
 
@@ -142,7 +142,8 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   }
 
   uint64_t page = fault_addr & ~0xFFFULL;
-  uint64_t phys = alloc_user_page_zeroed(); // ← [C.2] zeroed siempre
+  uint64_t phys = alloc_user_page_zeroed();
+
   if (!phys)
     return 0;
 
@@ -252,34 +253,17 @@ static int handle_page_fault_inner(registers_t *regs) {
 
   // -------------------------------------------------------------------------
   // 2. [Fase C.2] Fallo en modo kernel.
-  //
-  //    Caso típico: uaccess intentando leer/escribir userland que no
-  //    está mapeado todavía (por ejemplo, un mmap perezoso que el
-  //    usuario no ha tocado, o un buffer de stack que aún no se ha
-  //    expandido).
-  //
-  //    Estrategia:
-  //      a) Si cr2 >= USER_LIMIT: es un bug del kernel. Panic.
-  //      b) Si cr2 < USER_LIMIT:
-  //         b.1) Intentar demand paging del proceso actual.
-  //         b.2) Si no, buscar el rip en la tabla de uaccess fixups.
-  //              Si está, saltar al fixup (que devuelve -EFAULT).
-  //         b.3) Si no, es un bug del kernel. Panic.
   // -------------------------------------------------------------------------
   if (cr2 >= USER_LIMIT) {
-    // Acceso del kernel a una dirección no canónica o reservada.
-    return 0; // panic
+    return 0;
   }
 
-  // Fallo en kernel con cr2 en el rango de userland.
   struct process *proc = process_current();
   if (pf_try_demand_paging(proc, cr2, err)) {
     pf_resolved++;
     return 1;
   }
 
-  // No se pudo resolver como demand paging. ¿Es un acceso recuperable
-  // desde la tabla de fixups?
   uint64_t fixup = uaccess_lookup_fixup(regs->rip);
   if (fixup) {
     LOG_WARN("[PF] uaccess fixup: pid=%u rip=%p cr2=%p -> fixup=%p",
@@ -290,7 +274,6 @@ static int handle_page_fault_inner(registers_t *regs) {
     return 1;
   }
 
-  // Fallo real en el kernel.
   return 0;
 }
 
@@ -332,9 +315,6 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   length = (length + 0xFFF) & ~0xFFFULL;
 
   if (addr == 0) {
-    // Automatic mmap addresses come from a global allocator. On SMP, two
-    // CPUs can enter sys_mmap() concurrently, so the read/update of
-    // next_mmap_addr must be atomic with respect to other callers.
     unsigned long lock_flags = spin_lock_irqsave(&mmap_addr_lock);
     addr = next_mmap_addr;
     uint64_t next = addr + length;
@@ -348,8 +328,6 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     addr &= ~0xFFFULL;
   }
 
-  // A fixed mapping must stay entirely below USER_LIMIT.  This is also
-  // checked by vma_create(), but keep the syscall boundary explicit.
   if (addr >= USER_LIMIT || length > USER_LIMIT - addr)
     return -1;
 
@@ -373,14 +351,47 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
   if (!proc || length == 0)
     return -1;
 
+  // Align the requested interval to pages, but do all arithmetic with
+  // overflow checks.  munmap operates on the half-open interval [addr, end).
+  if (length > UINT64_MAX - 0xFFFULL)
+    return -1;
   addr &= ~0xFFFULL;
-  length = (length + 0xFFF) & ~0xFFFULL;
+  length = (length + 0xFFFULL) & ~0xFFFULL;
+  if (addr >= USER_LIMIT || length > USER_LIMIT - addr)
+    return -1;
 
   uint64_t end = addr + length;
 
-  vma_t **pp = &proc->vma_list;
+  // A partial unmap can split a VMA into two independent VMAs.  Allocate all
+  // required right-hand VMA nodes first so an allocation failure leaves the
+  // VMA list and mappings untouched.
+  vma_t *new_vmas = NULL;
+  for (vma_t *v = proc->vma_list; v; v = v->next) {
+    if (v->end <= addr || v->start >= end)
+      continue;
+    if (addr > v->start && end < v->end) {
+      vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
+      if (!right) {
+        while (new_vmas) {
+          vma_t *next = new_vmas->next;
+          kfree(new_vmas);
+          new_vmas = next;
+        }
+        return -1;
+      }
+      right->start = end;
+      right->end = v->end;
+      right->flags = v->flags;
+      right->type = v->type;
+      right->pad = 0;
+      right->next = new_vmas;
+      new_vmas = right;
+    }
+  }
+
   int unmapped = 0;
 
+  vma_t **pp = &proc->vma_list;
   while (*pp) {
     vma_t *v = *pp;
     if (v->end <= addr || v->start >= end) {
@@ -388,22 +399,59 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
       continue;
     }
 
-    if (v->start >= addr && v->end <= end) {
-      for (uint64_t p = v->start; p < v->end; p += PAGE_SIZE) {
-        uint64_t phys =
-            paging_get_phys_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
-        if (phys) {
-          paging_unmap_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
-          pmm_free_page(phys);
-        }
+    uint64_t unmap_start = addr > v->start ? addr : v->start;
+    uint64_t unmap_end = end < v->end ? end : v->end;
+
+    // Free every page covered by the requested interval.  VMA boundaries
+    // are page aligned, so this covers exactly the removed portion.
+    for (uint64_t p = unmap_start; p < unmap_end; p += PAGE_SIZE) {
+      uint64_t phys =
+          paging_get_phys_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
+      if (phys) {
+        paging_unmap_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
+        pmm_free_page(phys);
       }
+    }
+
+    if (addr <= v->start && end >= v->end) {
+      // Entire VMA removed.
       *pp = v->next;
       kfree(v);
       unmapped++;
       continue;
     }
 
-    pp = &v->next;
+    if (addr <= v->start) {
+      // Trim the left edge: keep [end, old_end).
+      v->start = end;
+      unmapped++;
+      pp = &v->next;
+      continue;
+    }
+
+    if (end >= v->end) {
+      // Trim the right edge: keep [old_start, addr).
+      v->end = addr;
+      unmapped++;
+      pp = &v->next;
+      continue;
+    }
+
+    // Middle split: keep the original VMA as the left part and insert the
+    // preallocated right part immediately after it.
+    vma_t *right = new_vmas;
+    new_vmas = new_vmas->next;
+    right->next = v->next;
+    v->end = addr;
+    v->next = right;
+    unmapped++;
+    pp = &right->next;
+  }
+
+  while (new_vmas) {
+    vma_t *next = new_vmas->next;
+    kfree(new_vmas);
+    new_vmas = next;
   }
 
   LOG_TRACE("[MUNMAP] PID=%u addr=%p len=%lu -> %d VMAs", proc->pid,
