@@ -21,7 +21,7 @@
 // ---------------------------------------------------------------------------
 // MSR_SFMASK (0xC0000084): máscara de RFLAGS aplicada al entrar en SYSCALL.
 // ---------------------------------------------------------------------------
-#define MSR_SFMASK_BITS 0x257CULL
+#define MSR_SFMASK_BITS 0x277CULL // + IF (0x200)
 
 // ---------------------------------------------------------------------------
 // SMP: soporte per-CPU.
@@ -54,11 +54,11 @@ static inline int smp_processor_id(void) {
 // Estructura per-CPU.
 // ---------------------------------------------------------------------------
 typedef struct {
-  uint64_t kernel_stack; // stack de kernel para syscalls/interrupciones
-  uint64_t user_rsp;     // RSP del usuario guardado al entrar en syscall
-  int cpu_id;            // índice 0..MAX_CPUS-1
-  int lapic_id;          // APIC ID del LAPIC
-  void *current_task;    // task_t* actual (Fase 4, per-CPU)
+  uint64_t kernel_stack;        // stack de kernel para syscalls/interrupciones
+  uint64_t user_rsp;            // RSP del usuario guardado al entrar en syscall
+  int cpu_id;                   // índice 0..MAX_CPUS-1
+  int lapic_id;                 // APIC ID del LAPIC
+  void *current_task;           // task_t* actual (Fase 4, per-CPU)
   uint64_t ticks_since_resched; // contador de ticks desde el último resched
 } cpu_local_t;
 
