@@ -1,6 +1,5 @@
 // kernel/wait.c
 #include "wait.h"
-#include "heap.h"
 #include "klog.h"
 #include "sched.h"
 #include <stddef.h>
@@ -14,11 +13,12 @@ void wait_queue_init(wait_queue_t *wq) {
 }
 
 // --- helpers, llamar con wq->lock cogido ---
+// La entrada de cada tarea vive dentro de task_t. Así bloquear una tarea
+// nunca depende de una asignación dinámica que pueda fallar justo antes
+// de publicar TASK_BLOCKED.
 static void wq_add_locked(wait_queue_t *wq, task_t *t) {
-  wait_queue_entry_t *e = (wait_queue_entry_t *)kmalloc(sizeof(*e));
-  if (!e) {
-    return;
-  }
+  wait_queue_entry_t *e = &t->wait_entry;
+
   e->task = t;
   e->next = wq->head;
   wq->head = e;
@@ -33,9 +33,10 @@ static void wq_remove_locked(wait_queue_t *wq, task_t *t) {
     if ((*pp)->task == t) {
       wait_queue_entry_t *victim = *pp;
       *pp = victim->next;
-      kfree(victim);
       wq->nr_waiting--;
       t->waiting_on = NULL;
+      victim->task = NULL;
+      victim->next = NULL;
       task_put(t);
       return;
     }
@@ -45,6 +46,7 @@ static void wq_remove_locked(wait_queue_t *wq, task_t *t) {
 
 // ---------------------------------------------------------------------------
 // [FIX] Núcleo común con timeout. timeout_ticks == 0 => sin timeout.
+// ---------------------------------------------------------------------------
 //
 // Devuelve:
 //   >0  condición cumplida (ticks restantes, o 1 si no había timeout)
@@ -162,7 +164,8 @@ void wake_up_all_locked(wait_queue_t *wq) {
     t->waiting_on = NULL;
     t->wake_reason = 0;
     sched_make_ready(t);
-    kfree(e);
+    e->task = NULL;
+    e->next = NULL;
     task_put(t);
     e = next;
   }
@@ -187,8 +190,9 @@ void wake_up_one(wait_queue_t *wq) {
   task_t *t = e->task;
   t->waiting_on = NULL;
   t->wake_reason = 0;
+  e->task = NULL;
+  e->next = NULL;
   sched_make_ready(t);
-  kfree(e);
   task_put(t);
 
   spin_unlock_irqrestore(&wq->lock, flags);
@@ -206,7 +210,8 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
     t->waiting_on = NULL;
     t->wake_reason = -EINTR;
     sched_make_ready(t);
-    kfree(e);
+    e->task = NULL;
+    e->next = NULL;
     task_put(t);
     e = next;
   }
