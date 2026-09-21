@@ -16,7 +16,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker shell \
+APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap shell \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
 
 all: $(APPS)
@@ -92,6 +92,12 @@ mmap_race: apps/mmap_race/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp mmap_race ../sysroot/apps/
 
+vma_overlap: apps/vma_overlap/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/vma_overlap/main.c -o vma_overlap.o
+	$(LD) -o vma_overlap $(LIB_OBJS) vma_overlap.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp vma_overlap ../sysroot/apps/
+
 waitpid_stress: apps/waitpid_stress/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/waitpid_stress/main.c -o waitpid_stress.o
 	$(LD) -o waitpid_stress $(LIB_OBJS) waitpid_stress.o $(LDFLAGS)
@@ -144,5 +150,5 @@ shell: apps/shell/main.c $(LIB_OBJS)
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker
+	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
