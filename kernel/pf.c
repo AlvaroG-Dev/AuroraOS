@@ -51,11 +51,24 @@ vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
   if (!proc || start >= end || start >= USER_LIMIT || end > USER_LIMIT)
     return NULL;
 
+  // VMAs must never overlap.  vma_find() returns the first matching
+  // VMA, so allowing an overlap could hide an existing ELF/stack/heap
+  // region and make page-fault handling use the wrong permissions/type.
+  uint64_t vma_start = start & ~0xFFFULL;
+  uint64_t vma_end = (end + 0xFFFULL) & ~0xFFFULL;
+  if (vma_end <= vma_start)
+    return NULL;
+
+  for (vma_t *curr = proc->vma_list; curr; curr = curr->next) {
+    if (vma_start < curr->end && vma_end > curr->start)
+      return NULL;
+  }
+
   vma_t *v = (vma_t *)kmalloc(sizeof(vma_t));
   if (!v)
     return NULL;
-  v->start = start & ~0xFFFULL;
-  v->end = (end + 0xFFF) & ~0xFFFULL;
+  v->start = vma_start;
+  v->end = vma_end;
   v->flags = flags;
   v->type = type;
   v->pad = 0;
