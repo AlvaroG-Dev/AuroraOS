@@ -3,7 +3,8 @@ ENTRY(_start)
 
 PHDRS
 {
-    all PT_LOAD FLAGS(7);   /* RWX - lectura, escritura, ejecución */
+    text PT_LOAD FLAGS(5);  /* R-X */
+    data PT_LOAD FLAGS(6);  /* RW- */
 }
 
 SECTIONS
@@ -12,22 +13,24 @@ SECTIONS
 
     .text : {
         *(.text*)
-    } :all
+    } :text
 
     .rodata : {
         *(.rodata*)
-        *(.rodata.*)          /* Captura .rodata.str1.8, etc. */
-    } :all
+        *(.rodata.*)
+    } :text
+
+    /* Keep writable data on a separate page from executable/readonly data. */
+    . = ALIGN(0x1000);
 
     .data : {
         *(.data*)
-    } :all
+    } :data
 
     .bss : {
         *(.bss*)
         *(COMMON)
-    } :all
+    } :data
 
-    /* Extiende el segmento hasta el límite de página */
     . = ALIGN(0x1000);
 }
