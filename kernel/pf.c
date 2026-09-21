@@ -366,6 +366,7 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
   // required right-hand VMA nodes first so an allocation failure leaves the
   // VMA list and mappings untouched.
   vma_t *new_vmas = NULL;
+  vma_t **new_vmas_tail = &new_vmas;
   for (vma_t *v = proc->vma_list; v; v = v->next) {
     if (v->end <= addr || v->start >= end)
       continue;
@@ -384,8 +385,9 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
       right->flags = v->flags;
       right->type = v->type;
       right->pad = 0;
-      right->next = new_vmas;
-      new_vmas = right;
+      right->next = NULL;
+      *new_vmas_tail = right;
+      new_vmas_tail = &right->next;
     }
   }
 
