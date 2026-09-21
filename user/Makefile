@@ -16,7 +16,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation shell \
+APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest shell \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
 
 all: $(APPS)
@@ -127,6 +127,22 @@ elf_validation: apps/elf_validation/main.c $(LIB_OBJS)
 	cp elf_validation ../sysroot/apps/
 
 # ---------------------------------------------------------------------------
+# Regression de permisos PT_LOAD ELF
+# ---------------------------------------------------------------------------
+
+elf_rotest: apps/elf_rotest/main.c apps/elf_rotest/link.ld $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/elf_rotest/main.c -o elf_rotest.o
+	$(LD) -o elf_rotest $(LIB_OBJS) elf_rotest.o -T apps/elf_rotest/link.ld -nostdlib -m64
+	mkdir -p ../sysroot/apps
+	cp elf_rotest ../sysroot/apps/
+
+elf_permtest: apps/elf_permtest/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/elf_permtest/main.c -o elf_permtest.o
+	$(LD) -o elf_permtest $(LIB_OBJS) elf_permtest.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp elf_permtest ../sysroot/apps/
+
+# ---------------------------------------------------------------------------
 # Apps de segfault (deben morir por #PF)
 # ---------------------------------------------------------------------------
 
@@ -172,5 +188,5 @@ shell: apps/shell/main.c $(LIB_OBJS)
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation
+	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
