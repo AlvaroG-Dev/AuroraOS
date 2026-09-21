@@ -31,6 +31,14 @@
 ;
 ; Total: 22 pushes = 176 bytes (múltiplo de 16).
 ;
+; IMPORTANTE:
+; SYSCALL es una instrucción especial y no restaura automáticamente los
+; registros de propósito general al volver. El ABI SysV permite que una
+; función preserve RBX/RBP/R12-R15 entre llamadas, y el compilador de
+; userland puede mantener variables vivas en ellos a través de una syscall.
+; Por tanto, debemos restaurar TODOS los GPR originales desde el frame antes
+; de iretq, dejando únicamente RAX con el valor de retorno de la syscall.
+
 [BITS 64]
 
 extern syscall_handler_c
@@ -46,63 +54,74 @@ syscall_entry:
     cli
 
     ; --- Guardar RSP del usuario y cargar kernel stack ---
-    mov [gs:8], rsp              ; cpu_local_data[cpu].user_rsp = RSP usuario
-    mov rsp, [gs:0]              ; RSP = kernel_stack
-    and rsp, ~0xF                ; alinear a 16
+    mov [gs:8], rsp
+    mov rsp, [gs:0]
+    and rsp, ~0xF
 
     ; --- Construir el frame de registers_t ---
-    ; Empujamos en orden INVERSO al layout del struct, porque cada push
-    ; va a una dirección MENOR.
+    ; Hardware frame para iretq.
+    push qword 0x23
+    push qword [gs:8]
+    push r11
+    push qword 0x1B
+    push rcx
 
-    ; Primero: el "hardware frame" del iretq (ss, rsp, rflags, cs, rip).
-    push qword 0x23              ; ss        = USER_DS_RING3
-    push qword [gs:8]            ; rsp       = RSP usuario
-    push r11                     ; rflags    = RFLAGS usuario
-    push qword 0x1B              ; cs        = USER_CS_RING3
-    push rcx                     ; rip       = RIP usuario (en RCX al entrar)
+    ; int_num + error_code.
+    push qword 0
+    push qword -1
 
-    ; Segundo: int_num, error_code (dummies para homogeneidad con ISRs).
-    push qword 0                 ; error_code = 0
-    push qword -1                ; int_num    = SYSCALL_INT_NUM (0xFFFFFFFFFFFFFFFF)
+    ; GPR del usuario, en el orden inverso del struct registers_t.
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
-    ; Tercero: los 15 registros del userland. Los que ya tenemos en
-    ; registros los usamos directamente. RBX, RBP, R12-R15 los
-    ; empujamos tal cual (SYSCALL no los ha tocado).
-    push rax                     ; rax = número de syscall
-    push rcx                     ; rcx = ya está en el frame, pero lo empujamos de nuevo
-    push rdx                     ; rdx = arg3 original
-    push rbx                     ; rbx = valor del userland
-    push rbp                     ; rbp = valor del userland
-    push rsi                     ; rsi = arg2 original
-    push rdi                     ; rdi = arg1 original
-    push r8                      ; r8  = arg5 original
-    push r9                      ; r9  = valor del userland
-    push r10                     ; r10 = arg4 original
-    push r11                     ; r11 = ya está en el frame
-    push r12                     ; r12 = valor del userland
-    push r13                     ; r13 = valor del userland
-    push r14                     ; r14 = valor del userland
-    push r15                     ; r15 = valor del userland
-
-    ; Ahora RSP apunta al inicio del frame (que es r15 en el struct).
     mov rdi, rsp
     call syscall_handler_c
 
-    ; --- Retorno ---
-    ; El handler devuelve uint64_t en RAX. Lo guardamos en el slot rax
-    ; del frame (offset 0x70 desde rsp), por si el handler también lo
-    ; tocó a través de regs->rax.
+    ; RAX = retorno de la syscall.
     mov [rsp + 0x70], rax
 
-    ; Saltamos rsp al inicio del frame de iretq (offset 0x88 = rip).
+    ; ------------------------------------------------------------------
+    ; Restaurar el contexto GPR del userland.
+    ;
+    ; Dejamos RAX para el valor de retorno. Todos los demás registros
+    ; vuelven exactamente al estado que tenían antes de SYSCALL.
+    ; ------------------------------------------------------------------
+    mov r15, [rsp + 0x00]
+    mov r14, [rsp + 0x08]
+    mov r13, [rsp + 0x10]
+    mov r12, [rsp + 0x18]
+    mov r11, [rsp + 0x20]
+    mov r10, [rsp + 0x28]
+    mov r9,  [rsp + 0x30]
+    mov r8,  [rsp + 0x38]
+    mov rdi, [rsp + 0x40]
+    mov rsi, [rsp + 0x48]
+    mov rbp, [rsp + 0x50]
+    mov rbx, [rsp + 0x58]
+    mov rdx, [rsp + 0x60]
+    mov rcx, [rsp + 0x68]
+    mov rax, [rsp + 0x70]
+
+    ; Saltar al hardware frame de iretq.
     add rsp, 0x88
 
-    ; Limpiar IOPL del RFLAGS que vamos a restaurar (offset 0x10 desde
-    ; rsp ahora: rsp+0x00=rip, rsp+0x08=cs, rsp+0x10=rflags).
+    ; Limpiar IOPL del RFLAGS.
     and qword [rsp + 0x10], ~0x3000
 
     ; Forzar IF=1 para que el userland reciba interrupciones.
     or  qword [rsp + 0x10], 0x200
 
-    ; Volver al userland.
-    o64 iretq
+    iretq
