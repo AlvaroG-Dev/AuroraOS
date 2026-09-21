@@ -12,7 +12,10 @@ else
 endif
 
 LD      = $(CC)
-LDFLAGS = -nostdlib -T link.ld -no-pie -m64
+# Keep PT_LOAD segments page-aligned to AuroraOS's 4 KiB paging model.
+# GNU ld on x86_64 otherwise uses a 2 MiB maximum page size, which can
+# make the R-X and RW PT_LOAD virtual addresses share the same 2 MiB base.
+LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
