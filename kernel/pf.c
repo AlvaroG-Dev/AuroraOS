@@ -298,9 +298,6 @@ void pf_init(void) {
 // ---------------------------------------------------------------------------
 // Syscalls: mmap / munmap
 // ---------------------------------------------------------------------------
-static uint64_t next_mmap_addr = 0x0000000060000000ULL;
-static spinlock_t mmap_addr_lock;
-
 #define MMAP_PROT_READ 0x1
 #define MMAP_PROT_WRITE 0x2
 #define MMAP_PROT_EXEC 0x4
