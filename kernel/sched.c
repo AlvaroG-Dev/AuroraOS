@@ -339,7 +339,7 @@ static void sched_check_invariants(task_t *t) {
     LOG_PANIC("sched: task %u RUNNING con waiting_on != NULL", t->id);
   }
   if (t->refcount <= 0) {
-    LOG_PANIC("sched: task %u con refcount=%d invalido", t->id, t->refcount);
+    LOG_PANIC("sched: task %u con refcount=%d invalido", t->id);
   }
   if (t->on_cpu) {
     LOG_PANIC("sched: task %u elegida con on_cpu=1 (sigue en otra CPU)", t->id);
@@ -407,8 +407,6 @@ void sched_tick(void) {
     if (curr->state == TASK_BLOCKED || curr->state == TASK_DEAD) {
       next = idle_tasks[cpu];
     } else {
-      // curr sigue siendo ejecutable. Si state == READY es que nos
-      // despertaron en la ventana entre "BLOCKED" y este punto.
       if (curr->state == TASK_READY)
         curr->state = TASK_RUNNING;
       sched_unlock_irqrestore(flags);
@@ -426,14 +424,10 @@ void sched_tick(void) {
   sched_check_invariants(next);
 
   task_t *old = curr;
-  if (old->state == TASK_RUNNING && !old->is_idle) {
+  if (old->state == TASK_RUNNING && !old->is_idle)
     old->state = TASK_READY;
-  }
   next->state = TASK_RUNNING;
   this_cpu(current_task) = next;
-
-  // on_cpu lo actualiza task_switch (asm) justo después de cargar el stack
-  // de la nueva tarea (old->on_cpu = 0, new->on_cpu = 1). No tocarlo aquí.
 
   if (next->stack) {
     uint64_t kstack = (uint64_t)((uint8_t *)next->stack + TASK_STACK_SIZE);
@@ -443,15 +437,6 @@ void sched_tick(void) {
 
   task_switch(old, next, &sched_lock);
 
-  // Restaurar los flags de la tarea que retoma el control.
-  //
-  // task_switch libera sched_lock por su cuenta (en asm, mov dword [rdx], 0),
-  // pero NO toca RFLAGS. Cada tarea guardó sus flags en su stack cuando
-  // llamó a sched_lock_irqsave, y los restaura aquí al volver de task_switch.
-  //
-  // SIN ESTO, IF queda en 0 tras el primer context switch y el sistema
-  // deja de recibir interrupciones (timer, teclado, mouse). El sistema
-  // parece funcionar 1-5 segundos y luego se cuelga.
   __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 }
 
@@ -462,33 +447,21 @@ void sched_yield(void) {
 
 task_t *sched_current(void) { return (task_t *)this_cpu(current_task); }
 
-// ---------------------------------------------------------------------------
-// [SMP 4.4] Marcar need_resched en la tarea actual.
-// ---------------------------------------------------------------------------
 void sched_mark_need_resched(void) {
   task_t *cur = sched_current();
-  if (cur) {
+  if (cur)
     cur->need_resched = 1;
-  }
 }
 
-// ---------------------------------------------------------------------------
-// NUEVA: despierta (IPI) a una CPU idle para que ejecute 't'. Antes esta
-// lógica vivía dentro de sched_make_ready, y sched_publish_task no la
-// alcanzaba porque la tarea ya nacía READY (was_blocked == 0) y salía sin
-// avisar a nadie: la tarea esperaba al siguiente tick.
-// ---------------------------------------------------------------------------
 static void sched_kick_idle_cpu(task_t *t) {
   int me = smp_processor_id();
 
-  // Afinidad: solo ese CPU.
   if (t->cpu_affinity >= 0) {
     int cpu = t->cpu_affinity;
     if (cpu == me) {
       task_t *me_task = sched_current();
-      if (me_task && me_task->is_idle) {
+      if (me_task && me_task->is_idle)
         me_task->need_resched = 1;
-      }
       return;
     }
     task_t *cur = per_cpu(current_task, cpu);
@@ -500,7 +473,6 @@ static void sched_kick_idle_cpu(task_t *t) {
     return;
   }
 
-  // Sin afinidad: buscar un AP idle.
   static volatile int next_cpu = 0;
   int start = __sync_fetch_and_add(&next_cpu, 1) % MAX_CPUS;
 
@@ -519,34 +491,24 @@ static void sched_kick_idle_cpu(task_t *t) {
   }
 
   task_t *me_task = sched_current();
-  if (me_task && me_task->is_idle) {
+  if (me_task && me_task->is_idle)
     me_task->need_resched = 1;
-  }
 }
 
-// ---------------------------------------------------------------------------
-// [SMP 4.4] sched_make_ready: solo la transición BLOCKED -> READY (bajo
-// sched_lock) y el aviso a una CPU idle si la tarea estaba dormida.
-// No resucita tareas DEAD ni RUNNING.
-// ---------------------------------------------------------------------------
 void sched_make_ready(task_t *t) {
   if (!t)
     return;
 
   unsigned long flags = spin_lock_irqsave(&sched_lock);
   int was_blocked = (t->state == TASK_BLOCKED);
-  if (t->state == TASK_BLOCKED || t->state == TASK_READY) {
+  if (t->state == TASK_BLOCKED || t->state == TASK_READY)
     t->state = TASK_READY;
-  }
   spin_unlock_irqrestore(&sched_lock, flags);
 
   if (was_blocked)
     sched_kick_idle_cpu(t);
 }
 
-// ---------------------------------------------------------------------------
-// Tareas de usuario
-// ---------------------------------------------------------------------------
 task_t *sched_create_user_task_stopped(void (*fn)(void),
                                        uint64_t user_stack_top, uint64_t cr3) {
   task_t *task = (task_t *)kmalloc(sizeof(task_t));
@@ -577,7 +539,6 @@ task_t *sched_create_user_task_stopped(void (*fn)(void),
 
   task_init_common(task, sp, cr3);
   task->stack = (uint64_t *)kstack;
-  // NO se inserta en la runqueue. El caller hará sched_make_ready.
   return task;
 }
 
@@ -589,9 +550,7 @@ task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
   task_list_insert(t);
   return t;
 }
-// ---------------------------------------------------------------------------
-// Búsqueda
-// ---------------------------------------------------------------------------
+
 task_t *sched_find_task(uint32_t task_id) {
   unsigned long flags = spin_lock_irqsave(&sched_lock);
   if (!task_list_head) {
@@ -611,13 +570,34 @@ task_t *sched_find_task(uint32_t task_id) {
   return NULL;
 }
 
-// ---------------------------------------------------------------------------
-// task_die_hlt
-//
-// Se llama desde el handler de #PF cuando matamos la tarea actual. La
-// tarea está marcada TASK_DEAD pero sigue corriendo en esta CPU. Debemos
-// ceder para que el scheduler (en cualquier CPU) pueda reapearla.
-// ---------------------------------------------------------------------------
+/*
+ * Busca una tarea y adquiere una referencia mientras sched_lock sigue
+ * protegido. Esto evita que el reaper pueda liberar el task entre la
+ * búsqueda y el primer acceso del llamante.
+ *
+ * El llamante debe hacer task_put() cuando termine de usar la referencia.
+ */
+task_t *sched_find_task_get(uint32_t task_id) {
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  if (!task_list_head) {
+    spin_unlock_irqrestore(&sched_lock, flags);
+    return NULL;
+  }
+
+  task_t *curr = task_list_head;
+  do {
+    if (curr->id == task_id && curr->state != TASK_DEAD) {
+      task_get(curr);
+      spin_unlock_irqrestore(&sched_lock, flags);
+      return curr;
+    }
+    curr = curr->next;
+  } while (curr && curr != task_list_head);
+
+  spin_unlock_irqrestore(&sched_lock, flags);
+  return NULL;
+}
+
 void task_die_hlt(void) {
   while (1) {
     sched_yield();
@@ -625,19 +605,14 @@ void task_die_hlt(void) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// sched_start (BSP)
-// ---------------------------------------------------------------------------
 extern void task_jump_to(task_t *task);
 
 __attribute__((noreturn)) void sched_start(task_t *task) {
-  if (!task) {
+  if (!task)
     LOG_PANIC("[SCHED] sched_start: task == NULL");
-  }
-  if (task->state != TASK_READY) {
+  if (task->state != TASK_READY)
     LOG_PANIC("[SCHED] sched_start: task %u no está READY (state=%d)", task->id,
               task->state);
-  }
 
   if (task->stack) {
     uint64_t kstack = (uint64_t)((uint8_t *)task->stack + TASK_STACK_SIZE);
@@ -653,15 +628,11 @@ __attribute__((noreturn)) void sched_start(task_t *task) {
   __builtin_unreachable();
 }
 
-// ---------------------------------------------------------------------------
-// sched_start_ap (AP)
-// ---------------------------------------------------------------------------
 __attribute__((noreturn)) void sched_start_ap(void) {
   int cpu = smp_processor_id();
   task_t *idle = idle_tasks[cpu];
-  if (!idle) {
+  if (!idle)
     LOG_PANIC("[SCHED] sched_start_ap: idle_task[%d] == NULL", cpu);
-  }
 
   idle->state = TASK_RUNNING;
   idle->on_cpu = 1;
@@ -681,19 +652,13 @@ void task_entry_wrapper(void (*fn)(void)) {
   fn();
   __asm__ volatile("cli");
   task_t *cur = sched_current();
-  if (cur) {
+  if (cur)
     cur->state = TASK_DEAD;
-  }
   sched_yield();
-  while (1) {
+  while (1)
     __asm__ volatile("hlt");
-  }
 }
 
-// ---------------------------------------------------------------------------
-// [Fase A] Publica una tarea recién creada (sched_create_*_stopped) en la
-// runqueue y avisa a una CPU idle. Ahora sí despierta a alguien.
-// ---------------------------------------------------------------------------
 void sched_publish_task(task_t *t) {
   if (!t)
     return;
@@ -704,26 +669,8 @@ void sched_publish_task(task_t *t) {
 extern volatile uint64_t tick_count;
 uint64_t sched_get_ticks(void) { return tick_count; }
 
-// ---------------------------------------------------------------------------
-// [FIX] Recorre la lista de tareas y despierta las que estén BLOCKED y
-// hayan pasado su wake_deadline. Se llama desde time_tick (a 1000 Hz)
-// en el BSP.
-//
-// IMPORTANTE: no basta con cambiar state a READY. La tarea sigue en la
-// wait queue, y el invariante "state == READY implica waiting_on == NULL"
-// se viola, causando un panic en sched_check_invariants.
-//
-// La solución es llamar a wake_up_all sobre la wq, que quita la tarea
-// de la cola Y la marca READY de forma atómica. Si varias tareas
-// comparten la misma wq, sólo llamamos a wake_up_all una vez.
-//
-// El wake_up_all se hace FUERA de sched_lock para evitar deadlocks con
-// el handler de IRQ del disco (que toma wq->lock y luego sched_lock).
-// ---------------------------------------------------------------------------
 void sched_wake_expired(void) {
   uint64_t now = sched_get_ticks();
-
-  // Recolectar las wait queues de tareas cuyo deadline expiró.
   wait_queue_t *wqs[16];
   int n_wqs = 0;
 
@@ -737,8 +684,6 @@ void sched_wake_expired(void) {
           now >= p->wake_deadline) {
         p->wake_deadline = 0;
         if (n_wqs < 16 && p->waiting_on != NULL) {
-          // Evitar duplicados: si varias tareas comparten wq, sólo
-          // la despertamos una vez.
           int dup = 0;
           for (int i = 0; i < n_wqs; i++) {
             if (wqs[i] == p->waiting_on) {
@@ -756,14 +701,6 @@ void sched_wake_expired(void) {
 
   spin_unlock_irqrestore(&sched_lock, flags);
 
-  // Despertar cada wq fuera de sched_lock.
-  //
-  // wake_up_all toma wq->lock, quita las tareas de la cola, las marca
-  // READY (manteniendo el invariante waiting_on == NULL) y avisa a un
-  // AP idle. Las tareas que despierten pero cuyo cond() siga siendo
-  // falso volverán a dormirse en la siguiente iteración de wait_common
-  // con su wake_deadline restaurado.
-  for (int i = 0; i < n_wqs; i++) {
+  for (int i = 0; i < n_wqs; i++)
     wake_up_all(wqs[i]);
-  }
 }
