@@ -43,7 +43,7 @@ int main(void) {
     failed++;
   } else {
     sys_print("[vma_overlap] OK: mapping adyacente aceptado\n");
-    sys_munmap((void *)0x600000, 4096);
+    sys_munmap(0x600000, 4096);
   }
 
   sys_print("[vma_overlap] ====================================\n");
