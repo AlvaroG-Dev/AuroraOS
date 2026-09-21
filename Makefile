@@ -22,7 +22,17 @@ bootloader:
 user:
 	$(MAKE) -C user all
 
-initrd.tar: sysroot user
+
+# ---------------------------------------------------------------------------
+# ELF malformado para probar p_offset + p_filesz fuera del archivo.
+# Se parte de un ELF real y se corrompe p_filesz del primer PT_LOAD.
+# ---------------------------------------------------------------------------
+elf_malformed: user
+	@mkdir -p sysroot/apps
+	@cp sysroot/apps/filetest sysroot/apps/elf_malformed
+	@printf '\\377\\377\\377\\377\\377\\377\\377\\377' | dd of=sysroot/apps/elf_malformed bs=1 seek=96 count=8 conv=notrunc status=none
+
+initrd.tar: sysroot user elf_malformed
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar -cf kernel/initrd.tar -C sysroot .
 
