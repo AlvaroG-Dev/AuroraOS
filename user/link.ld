@@ -11,7 +11,7 @@ SECTIONS
 {
     . = 0x400000;
 
-    /* All read-only allocatable sections belong to the R-X segment. */
+    /* Read-only/executable sections belong exclusively to the R-X segment. */
     .text : {
         *(.text*)
     } :text
@@ -30,12 +30,11 @@ SECTIONS
     } :text
 
     /*
-     * Start the writable segment at an explicit 4 KiB boundary.
-     * Do not rely on orphan-section placement between .rodata and .data:
-     * an orphan such as .eh_frame can otherwise become the first section
-     * of the RW PT_LOAD and make both segments start at 0x400000.
+     * Start the writable segment after the complete R-X image.
+     * ALIGN is deliberately relative to the current location: .text can
+     * extend beyond 0x401000, so a fixed address there would overlap it.
      */
-    . = 0x401000;
+    . = ALIGN(0x1000);
 
     .data : {
         *(.data*)
