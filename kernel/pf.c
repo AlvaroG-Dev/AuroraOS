@@ -18,6 +18,8 @@
 // ---------------------------------------------------------------------------
 static volatile uint64_t pf_resolved = 0;
 static volatile uint64_t pf_killed = 0;
+static uint64_t next_mmap_addr = 0x0000000060000000ULL;
+static spinlock_t mmap_addr_lock;
 
 uint64_t pf_stats_resolved(void) { return pf_resolved; }
 uint64_t pf_stats_killed(void) { return pf_killed; }
