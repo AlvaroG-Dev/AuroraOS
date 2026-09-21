@@ -24,9 +24,50 @@ static int elf_validate_header(const Elf64_Ehdr *hdr) {
 }
 
 int elf_validate(const void *data, size_t size) {
-  if (size < sizeof(Elf64_Ehdr))
+  if (!data || size < sizeof(Elf64_Ehdr))
     return -1;
-  return elf_validate_header((const Elf64_Ehdr *)data);
+
+  const Elf64_Ehdr *hdr = (const Elf64_Ehdr *)data;
+  if (elf_validate_header(hdr) != 0)
+    return -1;
+
+  // The program-header table itself must fit completely inside the ELF.
+  // Check multiplication/addition separately so malformed values cannot
+  // wrap around and make the bounds check succeed.
+  if (hdr->e_phentsize != sizeof(Elf64_Phdr) || hdr->e_phnum == 0)
+    return -1;
+  if (hdr->e_phoff > size)
+    return -1;
+  if ((uint64_t)hdr->e_phnum >
+      (UINT64_MAX - hdr->e_phoff) / sizeof(Elf64_Phdr))
+    return -1;
+
+  uint64_t ph_end =
+      hdr->e_phoff + (uint64_t)hdr->e_phnum * sizeof(Elf64_Phdr);
+  if (ph_end > size)
+    return -1;
+
+  const Elf64_Phdr *phdrs =
+      (const Elf64_Phdr *)((const uint8_t *)data + hdr->e_phoff);
+
+  for (uint16_t i = 0; i < hdr->e_phnum; i++) {
+    const Elf64_Phdr *ph = &phdrs[i];
+    if (ph->p_type != PT_LOAD)
+      continue;
+
+    // ELF requires the file image to fit inside the file and the memory
+    // image to be at least as large as the initialized file image.
+    if (ph->p_offset > size || ph->p_filesz > size - ph->p_offset)
+      return -1;
+    if (ph->p_filesz > ph->p_memsz)
+      return -1;
+
+    // Reject virtual-address ranges that wrap around.
+    if (ph->p_memsz > UINT64_MAX - ph->p_vaddr)
+      return -1;
+  }
+
+  return 0;
 }
 
 static int map_page_in_pml4(uint64_t *pml4, uint64_t virt, uint64_t flags) {
@@ -43,12 +84,15 @@ static int map_page_in_pml4(uint64_t *pml4, uint64_t virt, uint64_t flags) {
 int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
              uint64_t *entry_out) {
   const Elf64_Ehdr *hdr = (const Elf64_Ehdr *)data;
-  if (elf_validate_header(hdr) != 0) {
-    LOG_ERR("[ELF] Cabecera inválida");
+  if (elf_validate(data, size) != 0) {
+    LOG_ERR("[ELF] Imagen ELF inválida");
     return -1;
   }
 
-  if (size < hdr->e_phoff + hdr->e_phnum * sizeof(Elf64_Phdr)) {
+  if (hdr->e_phoff > size ||
+      (uint64_t)hdr->e_phnum >
+          (UINT64_MAX - hdr->e_phoff) / sizeof(Elf64_Phdr) ||
+      hdr->e_phoff + (uint64_t)hdr->e_phnum * sizeof(Elf64_Phdr) > size) {
     LOG_ERR("[ELF] Tamaño insuficiente para program headers");
     return -1;
   }
