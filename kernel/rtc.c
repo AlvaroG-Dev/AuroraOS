@@ -27,7 +27,10 @@ static inline uint8_t inb(uint16_t port) {
 }
 
 static uint8_t cmos_read(uint8_t reg) {
-  outb(CMOS_ADDR, reg | 0x80); // Mantener NMI deshabilitada durante el acceso CMOS.
+  // Port 0x70 bit 7 controls the external NMI mask. Preserve its previous
+  // state instead of unconditionally leaving NMI disabled after the read.
+  uint8_t nmi_state = inb(CMOS_ADDR) & 0x80;
+  outb(CMOS_ADDR, nmi_state | (reg & 0x7F));
   return inb(CMOS_DATA);
 }
 
@@ -100,7 +103,9 @@ int rtc_read_datetime(rtc_datetime_t *out) {
       }
 
       if (!(status_b & 0x02) && pm) {
-        out->hour = (uint8_t)((out->hour + 12) % 24);
+        out->hour = (out->hour == 12) ? 12 : (uint8_t)(out->hour + 12);
+      } else if (!(status_b & 0x02) && !pm && out->hour == 12) {
+        out->hour = 0;
       }
 
       if (out->century) {
