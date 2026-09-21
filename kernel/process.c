@@ -52,8 +52,9 @@ process_t *process_get_by_pid(uint32_t pid) {
   return NULL;
 }
 
-process_t *process_spawn(const char *name, const void *elf_data,
-                         size_t elf_size) {
+static process_t *process_spawn_with_ppid(const char *name,
+                                      const void *elf_data, size_t elf_size,
+                                      uint32_t ppid) {
   if (!elf_data || elf_size < sizeof(Elf64_Ehdr)) {
     LOG_ERR("[PROC] Datos ELF inválidos");
     return NULL;
@@ -131,7 +132,9 @@ process_t *process_spawn(const char *name, const void *elf_data,
   }
 
   proc->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
-  proc->ppid = 0;
+  // El PPID se fija antes de publicar la tarea. El hijo no puede quedar
+  // runnable con una relación padre incorrecta.
+  proc->ppid = ppid;
   proc->exit_code = 0;
   proc->is_zombie = 0;
 
@@ -187,17 +190,12 @@ process_t *process_spawn(const char *name, const void *elf_data,
   return proc;
 }
 
-process_t *process_spawn_child(process_t *parent, const char *path) {
-  process_t *child = process_load(path);
-  if (child) {
-    if (parent) {
-      child->ppid = parent->pid;
-    }
-  }
-  return child;
+process_t *process_spawn(const char *name, const void *elf_data,
+                         size_t elf_size) {
+  return process_spawn_with_ppid(name, elf_data, elf_size, 0);
 }
 
-process_t *process_load(const char *path) {
+static process_t *process_load_with_ppid(const char *path, uint32_t ppid) {
   tar_node_t *node = tarfs_open(path);
   if (!node || node->is_dir) {
     LOG_ERR("[PROC] No se encontró el archivo: %s", path);
@@ -205,7 +203,15 @@ process_t *process_load(const char *path) {
   }
   LOG_INFO("[PROC] Cargando archivo: %s (tamaño=%lu)", path,
            (unsigned long)node->size);
-  return process_spawn(path, node->data, node->size);
+  return process_spawn_with_ppid(path, node->data, node->size, ppid);
+}
+
+process_t *process_spawn_child(process_t *parent, const char *path) {
+  return process_load_with_ppid(path, parent ? parent->pid : 0);
+}
+
+process_t *process_load(const char *path) {
+  return process_load_with_ppid(path, 0);
 }
 
 // ---------------------------------------------------------------------------
