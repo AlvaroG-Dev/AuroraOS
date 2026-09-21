@@ -16,7 +16,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink shell \
+APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial shell \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
 
 all: $(APPS)
@@ -97,6 +97,12 @@ vma_overlap: apps/vma_overlap/main.c $(LIB_OBJS)
 	$(LD) -o vma_overlap $(LIB_OBJS) vma_overlap.o $(LDFLAGS)
 	mkdir -p ../sysroot/apps
 	cp vma_overlap ../sysroot/apps/
+
+munmap_partial: apps/munmap_partial/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/munmap_partial/main.c -o munmap_partial.o
+	$(LD) -o munmap_partial $(LIB_OBJS) munmap_partial.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp munmap_partial ../sysroot/apps/
 
 vma_isolation_worker: apps/vma_isolation_worker/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/vma_isolation_worker/main.c -o vma_isolation_worker.o
