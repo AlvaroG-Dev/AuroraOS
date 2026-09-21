@@ -154,7 +154,7 @@ sbrk_shrink: apps/sbrk_shrink/main.c $(LIB_OBJS)
 
 elf_rotest: apps/elf_rotest/main.c apps/elf_rotest/link.ld $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/elf_rotest/main.c -o elf_rotest.o
-	$(LD) -o elf_rotest $(LIB_OBJS) elf_rotest.o -T apps/elf_rotest/link.ld -nostdlib -m64
+	$(LD) -o elf_rotest $(LIB_OBJS) elf_rotest.o -T apps/elf_rotest/link.ld $(LDFLAGS)
 	mkdir -p ../sysroot/apps
 	cp elf_rotest ../sysroot/apps/
 
