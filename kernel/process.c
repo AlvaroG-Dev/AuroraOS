@@ -335,13 +335,9 @@ void process_exit(process_t *proc, int exit_code) {
   if (!proc)
     return;
 
-  proc->exit_code = exit_code;
-
   // El proceso NO se hace visible como zombie hasta que su cleanup haya
-  // terminado. Además, la tarea actual debe quedar DEAD antes de despertar
-  // al padre: de lo contrario waitpid() puede ejecutarse inmediatamente,
-  // liberar process_t/pml4 mientras esta misma tarea todavía está retornando
-  // de process_exit_current().
+  // terminado. Además, la tarea actual debe quedar DEAD antes de publicar
+  // el zombie al padre.
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fds[f])
       vfs_close_for_proc(proc, f);
@@ -350,16 +346,31 @@ void process_exit(process_t *proc, int exit_code) {
   if (proc->task)
     winsrv_cleanup_task(proc->task);
 
-  proc->is_zombie = 1;
-
   task_t *cur = sched_current();
   if (cur && cur == proc->task)
     cur->state = TASK_DEAD;
 
-  // El padre solo puede observar/reapear el zombie después de que la tarea
-  // haya quedado DEAD. Esto evita que waitpid() libere proc mientras el hijo
-  // sigue ejecutando código de salida.
-  process_t *parent = process_get_by_pid(proc->ppid);
+  // Publicar exit_code + is_zombie bajo process_lock. waitpid() consulta
+  // ambos campos bajo el mismo lock; antes, is_zombie se escribía fuera
+  // de process_lock, creando una carrera SMP entre el hijo que termina y
+  // el padre que intenta observar/reapear el zombie.
+  process_t *parent = NULL;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  proc->exit_code = exit_code;
+  proc->is_zombie = 1;
+
+  process_t *p = process_list;
+  while (p) {
+    if (p->pid == proc->ppid) {
+      parent = p;
+      break;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  // El padre solo puede observar/reapear el zombie después de que la
+  // publicación anterior haya quedado ordenada por process_lock.
   if (parent)
     wake_up_all(&parent->child_wq);
 }
