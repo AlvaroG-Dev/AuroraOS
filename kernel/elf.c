@@ -115,7 +115,11 @@ int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
     uint64_t end_page = (vaddr + memsz + 0xFFF) & ~0xFFFULL;
     size_t num_pages = (end_page - start_page) / PAGE_SIZE;
 
-    uint64_t page_flags = PTE_USER | PTE_PRESENT | PTE_WRITABLE;
+    // Derive page permissions directly from the ELF segment flags.
+    // In particular, do not make read-only/executable segments writable.
+    uint64_t page_flags = PTE_USER | PTE_PRESENT;
+    if (ph->p_flags & PF_W)
+      page_flags |= PTE_WRITABLE;
     if (!(ph->p_flags & PF_X))
       page_flags |= PTE_NX;
 
