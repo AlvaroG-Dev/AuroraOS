@@ -468,18 +468,18 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     return (void *)-1;
 
   uint64_t old_brk = proc->heap_end;
-  if (increment == 0) {
+  if (increment == 0)
     return (void *)old_brk;
-  }
 
   if (increment > 0) {
     uint64_t new_brk = old_brk + (uint64_t)increment;
-    if (new_brk > proc->heap_max || new_brk < old_brk) {
+    if (new_brk > proc->heap_max || new_brk < old_brk)
       return (void *)-1;
-    }
 
-    uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-    uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+    uint64_t start_page =
+        (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+    uint64_t end_page =
+        (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
 
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
@@ -503,15 +503,32 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 
     proc->heap_end = new_brk;
     return (void *)old_brk;
-  } else {
-    uint64_t decr = (uint64_t)(-increment);
-    if (decr > (old_brk - proc->heap_start)) {
-      return (void *)-1;
-    }
-    uint64_t new_brk = old_brk - decr;
-    proc->heap_end = new_brk;
-    return (void *)old_brk;
   }
+
+  // Shrinking the heap must release every page that is completely beyond
+  // the new break. A page containing new_brk remains mapped because the
+  // byte range below new_brk still belongs to the heap.
+  uint64_t decr = (uint64_t)(-(increment + 1)) + 1;
+  if (decr > (old_brk - proc->heap_start))
+    return (void *)-1;
+
+  uint64_t new_brk = old_brk - decr;
+  uint64_t old_end_page =
+      (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+  uint64_t new_end_page =
+      (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  for (uint64_t page = new_end_page; page < old_end_page; page += PAGE_SIZE) {
+    uint64_t phys = paging_get_phys_in(pml4, page);
+    if (phys) {
+      if (paging_unmap_page_in(pml4, page) == 0)
+        pmm_free_page(phys);
+    }
+  }
+
+  proc->heap_end = new_brk;
+  return (void *)old_brk;
 }
 
 void process_terminate(process_t *proc) {
