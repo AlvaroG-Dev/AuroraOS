@@ -23,6 +23,9 @@
 #include "string.h"
 #include "wait.h"
 
+// Devuelve una referencia propia al task mientras sched_lock está protegido.
+extern task_t *sched_find_task_get(uint32_t task_id);
+
 void ipc_init(void) {
   LOG_INFO("[IPC] Subsistema de Paso de Mensajes inicializado.");
 }
@@ -54,7 +57,7 @@ int ipc_send(uint32_t target_id, uint32_t type, const void *data, size_t size) {
   if (!current)
     return -1;
 
-  task_t *target = sched_find_task(target_id);
+  task_t *target = sched_find_task_get(target_id);
   if (!target)
     return -1;
 
@@ -70,6 +73,7 @@ int ipc_send(uint32_t target_id, uint32_t type, const void *data, size_t size) {
 
   if (target->mailbox.count >= IPC_MAILBOX_SIZE) {
     mailbox_unlock(target, flags);
+    task_put(target);
     return -2;
   }
 
@@ -91,6 +95,7 @@ int ipc_send(uint32_t target_id, uint32_t type, const void *data, size_t size) {
   wake_up_all_locked(&target->mailbox.wq);
 
   mailbox_unlock(target, flags);
+  task_put(target);
   return 0;
 }
 
