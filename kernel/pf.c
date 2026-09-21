@@ -289,6 +289,7 @@ int handle_page_fault(registers_t *regs) {
 void pf_init(void) {
   pf_resolved = 0;
   pf_killed = 0;
+  spin_init(&mmap_addr_lock);
   LOG_INFO("[PF] Demand paging inicializado");
 }
 
@@ -296,6 +297,7 @@ void pf_init(void) {
 // Syscalls: mmap / munmap
 // ---------------------------------------------------------------------------
 static uint64_t next_mmap_addr = 0x0000000060000000ULL;
+static spinlock_t mmap_addr_lock;
 
 #define MMAP_PROT_READ 0x1
 #define MMAP_PROT_WRITE 0x2
@@ -318,11 +320,18 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   length = (length + 0xFFF) & ~0xFFFULL;
 
   if (addr == 0) {
+    // Automatic mmap addresses come from a global allocator. On SMP, two
+    // CPUs can enter sys_mmap() concurrently, so the read/update of
+    // next_mmap_addr must be atomic with respect to other callers.
+    unsigned long lock_flags = spin_lock_irqsave(&mmap_addr_lock);
     addr = next_mmap_addr;
-    next_mmap_addr += length;
-    if (next_mmap_addr > 0x00007F0000000000ULL) {
+    uint64_t next = addr + length;
+    if (next < addr || next > 0x00007F0000000000ULL) {
+      spin_unlock_irqrestore(&mmap_addr_lock, lock_flags);
       return -1;
     }
+    next_mmap_addr = next;
+    spin_unlock_irqrestore(&mmap_addr_lock, lock_flags);
   } else {
     addr &= ~0xFFFULL;
   }
