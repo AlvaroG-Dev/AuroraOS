@@ -3,8 +3,8 @@ ENTRY(_start)
 
 PHDRS
 {
-    text PT_LOAD FLAGS(5);  /* R-X */
-    data PT_LOAD FLAGS(6);  /* RW- */
+    text PT_LOAD FLAGS(5);
+    data PT_LOAD FLAGS(6);
 }
 
 SECTIONS
@@ -20,15 +20,32 @@ SECTIONS
         *(.rodata.*)
     } :text
 
+    .eh_frame : {
+        *(.eh_frame*)
+    } :text
+
+    .gcc_except_table : {
+        *(.gcc_except_table*)
+    } :text
+
     . = ALIGN(0x1000);
 
     .data : {
         *(.data*)
+        *(.data.rel.ro*)
     } :data
 
     .bss : {
         *(.bss*)
         *(COMMON)
+    } :data
+
+    .init_array : {
+        *(.init_array*)
+    } :data
+
+    .fini_array : {
+        *(.fini_array*)
     } :data
 
     . = ALIGN(0x1000);
