@@ -30,6 +30,13 @@
 #define SYS_WIN_POLL_EVENT 22
 #define SYS_WIN_REGISTER_CONSOLE 23
 #define SYS_GET_SERVICE_ID 24
+#define SYS_VM_DEBUG_INFO 25
+
+typedef struct {
+  uint64_t cr3_phys;
+  uint64_t virt;
+  uint64_t phys;
+} vm_debug_info_t;
 
 // Valor de int_num en el frame de syscall. Como los syscalls no son
 // excepciones, usamos un valor imposible para que, si algún día
@@ -41,17 +48,6 @@ void syscall_init(void);
 uint64_t syscall_handler_c(registers_t *regs);
 void syscall_init_ap(void);
 
-// ---------------------------------------------------------------------------
-// Registro de servicios del kernel.
-//
-// Un "servicio" es una tarea del kernel (o de usuario) que ofrece una
-// funcionalidad identificable por nombre (p. ej. "echo"). Las apps de
-// userland pueden descubrir su Task ID con SYS_GET_SERVICE_ID y luego
-// comunicarse con él por IPC.
-//
-// El registro es limitado (KERNEL_SERVICES_MAX slots) y no bloqueante.
-// Se llama desde el propio servicio al arrancar.
-// ---------------------------------------------------------------------------
 #define KERNEL_SERVICES_MAX 8
 
 void syscall_register_service(const char *name, uint32_t task_id);
