@@ -12,10 +12,9 @@ else
 endif
 
 LD      = $(CC)
-# Keep PT_LOAD segments page-aligned to AuroraOS's 4 KiB paging model.
-# GNU ld on x86_64 otherwise uses a 2 MiB maximum page size, which can
-# make the R-X and RW PT_LOAD virtual addresses share the same 2 MiB base.
-LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000
+# AuroraOS uses 4 KiB pages. Force both the maximum and common ELF page
+# sizes to 4 KiB so separate PT_LOAD segments cannot share a 2 MiB base.
+LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000,-z,common-page-size=0x1000
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
@@ -44,10 +43,6 @@ crt0.o: crt0.asm
 
 syscall.o: syscall.c syscall.h
 	$(CC) $(CFLAGS) -c $< -o $@
-
-# ---------------------------------------------------------------------------
-# Apps "normales" (terminan con SYS_EXIT)
-# ---------------------------------------------------------------------------
 
 hello: apps/hello/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/hello/main.c -o hello.o
@@ -78,10 +73,6 @@ pftest: apps/pftest/main.c $(LIB_OBJS)
 	$(LD) -o pftest $(LIB_OBJS) pftest.o $(LDFLAGS)
 	mkdir -p ../sysroot/apps
 	cp pftest ../sysroot/apps/
-
-# ---------------------------------------------------------------------------
-# Stress de lifecycle: spawn + waitpid repetidos
-# ---------------------------------------------------------------------------
 
 mmap_race_worker: apps/mmap_race_worker/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/mmap_race_worker/main.c -o mmap_race_worker.o
@@ -125,19 +116,11 @@ waitpid_stress: apps/waitpid_stress/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp waitpid_stress ../sysroot/apps/
 
-# ---------------------------------------------------------------------------
-# Regression del cargador ELF
-# ---------------------------------------------------------------------------
-
 elf_validation: apps/elf_validation/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/elf_validation/main.c -o elf_validation.o
 	$(LD) -o elf_validation $(LIB_OBJS) elf_validation.o $(LDFLAGS)
 	mkdir -p ../sysroot/apps
 	cp elf_validation ../sysroot/apps/
-
-# ---------------------------------------------------------------------------
-# Regression de sbrk al reducir el heap
-# ---------------------------------------------------------------------------
 
 sbrk_shrink_test: apps/sbrk_shrink_test/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/sbrk_shrink_test/main.c -o sbrk_shrink_test.o
@@ -151,10 +134,6 @@ sbrk_shrink: apps/sbrk_shrink/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp sbrk_shrink ../sysroot/apps/
 
-# ---------------------------------------------------------------------------
-# Regression de permisos PT_LOAD ELF
-# ---------------------------------------------------------------------------
-
 elf_rotest: apps/elf_rotest/main.c apps/elf_rotest/link.ld $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/elf_rotest/main.c -o elf_rotest.o
 	$(LD) -o elf_rotest $(LIB_OBJS) elf_rotest.o -T apps/elf_rotest/link.ld $(LDFLAGS)
@@ -166,10 +145,6 @@ elf_permtest: apps/elf_permtest/main.c $(LIB_OBJS)
 	$(LD) -o elf_permtest $(LIB_OBJS) elf_permtest.o $(LDFLAGS)
 	mkdir -p ../sysroot/apps
 	cp elf_permtest ../sysroot/apps/
-
-# ---------------------------------------------------------------------------
-# Apps de segfault (deben morir por #PF)
-# ---------------------------------------------------------------------------
 
 segvtest: apps/segvtest/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/segvtest/main.c -o segvtest.o
@@ -206,10 +181,6 @@ shell: apps/shell/main.c $(LIB_OBJS)
 	$(LD) -o shell $(LIB_OBJS) shell.o $(LDFLAGS)
 	mkdir -p ../sysroot/apps
 	cp shell ../sysroot/apps/
-
-# ---------------------------------------------------------------------------
-# Clean
-# ---------------------------------------------------------------------------
 
 clean:
 	rm -f *.o lib/*.o
