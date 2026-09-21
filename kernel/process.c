@@ -328,9 +328,14 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
 void process_exit(process_t *proc, int exit_code) {
   if (!proc)
     return;
-  proc->exit_code = exit_code;
-  proc->is_zombie = 1;
 
+  proc->exit_code = exit_code;
+
+  // El proceso NO se hace visible como zombie hasta que su cleanup haya
+  // terminado. Además, la tarea actual debe quedar DEAD antes de despertar
+  // al padre: de lo contrario waitpid() puede ejecutarse inmediatamente,
+  // liberar process_t/pml4 mientras esta misma tarea todavía está retornando
+  // de process_exit_current().
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fds[f])
       vfs_close_for_proc(proc, f);
@@ -339,6 +344,15 @@ void process_exit(process_t *proc, int exit_code) {
   if (proc->task)
     winsrv_cleanup_task(proc->task);
 
+  proc->is_zombie = 1;
+
+  task_t *cur = sched_current();
+  if (cur && cur == proc->task)
+    cur->state = TASK_DEAD;
+
+  // El padre solo puede observar/reapear el zombie después de que la tarea
+  // haya quedado DEAD. Esto evita que waitpid() libere proc mientras el hijo
+  // sigue ejecutando código de salida.
   process_t *parent = process_get_by_pid(proc->ppid);
   if (parent)
     wake_up_all(&parent->child_wq);
