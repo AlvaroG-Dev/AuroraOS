@@ -12,9 +12,9 @@ else
 endif
 
 LD      = $(CC)
-# AuroraOS uses 4 KiB pages. Force both the maximum and common ELF page
-# sizes to 4 KiB so separate PT_LOAD segments cannot share a 2 MiB base.
-LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000,-z,common-page-size=0x1000
+# AuroraOS uses 4 KiB pages. Keep PT_LOAD segments page-aligned and do not
+# emit a linker-generated build-id note into the loadable image.
+LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000,-z,common-page-size=0x1000,--build-id=none
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
@@ -184,5 +184,5 @@ shell: apps/shell/main.c $(LIB_OBJS)
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink
+	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
