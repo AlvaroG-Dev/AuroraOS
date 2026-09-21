@@ -386,6 +386,40 @@ static int64_t sys_mmap_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   return sys_mmap(proc, a1, a2, a3, flags, fd, a5);
 }
 
+static int64_t sys_vm_debug_info_k(uint64_t a1, uint64_t a2, uint64_t a3,
+                                  uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  process_t *proc = process_current();
+  if (!proc || proc->pml4_phys == 0)
+    return -EFAULT;
+
+  if (a1 >= 0x0000800000000000ULL ||
+      !access_ok((const void *)a2, sizeof(vm_debug_info_t)))
+    return -EFAULT;
+
+  uint64_t phys =
+      paging_get_phys_in((uint64_t *)phys_to_virt(proc->pml4_phys), a1);
+  if (phys == 0)
+    return -EFAULT;
+
+  vm_debug_info_t info = {
+      .cr3_phys = proc->pml4_phys,
+      .virt = a1,
+      .phys = phys,
+  };
+
+  LOG_INFO("[VMTEST] PID=%u CR3=%p VA=%p -> PA=%p", proc->pid,
+           (void *)info.cr3_phys, (void *)info.virt, (void *)info.phys);
+
+  if (copy_to_user((void *)a2, &info, sizeof(info)) < 0)
+    return -EFAULT;
+
+  return 0;
+}
+
 static int64_t sys_munmap_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                             uint64_t a5) {
   (void)a3;
@@ -568,6 +602,7 @@ static const syscall_entry_t syscall_table[] = {
     [SYS_GETPID] = {sys_getpid_k, "getpid"},
     [SYS_MMAP] = {sys_mmap_k, "mmap"},
     [SYS_MUNMAP] = {sys_munmap_k, "munmap"},
+    [SYS_VM_DEBUG_INFO] = {sys_vm_debug_info_k, "vm_debug_info"},
     [SYS_WIN_CREATE] = {sys_win_create_k, "win_create"},
     [SYS_WIN_DESTROY] = {sys_win_destroy_k, "win_destroy"},
     [SYS_WIN_BLIT] = {sys_win_blit_k, "win_blit"},
