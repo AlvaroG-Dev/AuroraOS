@@ -16,7 +16,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest shell \
+APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink shell \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
 
 all: $(APPS)
@@ -127,6 +127,22 @@ elf_validation: apps/elf_validation/main.c $(LIB_OBJS)
 	cp elf_validation ../sysroot/apps/
 
 # ---------------------------------------------------------------------------
+# Regression de sbrk al reducir el heap
+# ---------------------------------------------------------------------------
+
+sbrk_shrink_test: apps/sbrk_shrink_test/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/sbrk_shrink_test/main.c -o sbrk_shrink_test.o
+	$(LD) -o sbrk_shrink_test $(LIB_OBJS) sbrk_shrink_test.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp sbrk_shrink_test ../sysroot/apps/
+
+sbrk_shrink: apps/sbrk_shrink/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/sbrk_shrink/main.c -o sbrk_shrink.o
+	$(LD) -o sbrk_shrink $(LIB_OBJS) sbrk_shrink.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp sbrk_shrink ../sysroot/apps/
+
+# ---------------------------------------------------------------------------
 # Regression de permisos PT_LOAD ELF
 # ---------------------------------------------------------------------------
 
@@ -188,5 +204,5 @@ shell: apps/shell/main.c $(LIB_OBJS)
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest
+	rm -f hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
