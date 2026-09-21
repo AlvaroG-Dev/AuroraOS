@@ -28,20 +28,17 @@
 #define SYS_WIN_POLL_EVENT 22
 #define SYS_WIN_REGISTER_CONSOLE 23
 #define SYS_GET_SERVICE_ID 24
+#define SYS_VM_DEBUG_INFO 25
 
 #define WNOHANG 1
-
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
 #define O_RDWR 0x0002
 #define O_CREAT 0x0040
-
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
-
 #define IPC_MAX_PAYLOAD 64
-
 #define IPC_TYPE_RAW 0
 #define IPC_TYPE_TEXT 1
 #define IPC_TYPE_EVENT 2
@@ -61,7 +58,11 @@ typedef struct {
   uint32_t inode;
 } stat_t;
 
-// --- Winsrv (window server) ---
+typedef struct {
+  uint64_t cr3_phys;
+  uint64_t virt;
+  uint64_t phys;
+} vm_debug_info_t;
 
 #define WINSRV_EV_NONE 0
 #define WINSRV_EV_CLOSE 1
@@ -80,13 +81,6 @@ typedef struct winsrv_event {
   uint32_t data;
 } winsrv_event_t;
 
-// Struct compartida con el kernel para SYS_WIN_BLIT.
-//
-// Semántica:
-//   - x, y, w, h   : rectángulo DESTINO dentro de la ventana.
-//   - src_x, src_y : offset dentro del buffer fuente.
-//   - src_stride   : ancho del buffer fuente en píxeles.
-//   - pixels       : puntero al inicio del buffer fuente.
 typedef struct {
   int32_t win_id;
   int32_t x, y, w, h;
@@ -164,12 +158,13 @@ static inline void *sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
   return (void *)syscall(SYS_MMAP, addr, length, prot,
                          (flags & 0xFFFFFFFF) | ((uint64_t)fd << 32), offset);
 }
-
 static inline int sys_munmap(uint64_t addr, uint64_t length) {
   return (int)syscall(SYS_MUNMAP, addr, length, 0, 0, 0);
 }
 
-// --- Winsrv wrappers ---
+static inline int sys_vm_debug_info(uint64_t virt, vm_debug_info_t *info) {
+  return (int)syscall(SYS_VM_DEBUG_INFO, virt, (uint64_t)info, 0, 0, 0);
+}
 
 static inline int sys_win_create(int x, int y, int w, int h,
                                  const char *title) {
@@ -179,23 +174,15 @@ static inline int sys_win_create(int x, int y, int w, int h,
 static inline int sys_win_destroy(int win_id) {
   return (int)syscall(SYS_WIN_DESTROY, (uint64_t)win_id, 0, 0, 0, 0);
 }
-
 static inline int sys_win_blit(int win_id, int x, int y, int w, int h,
                                int src_x, int src_y, int src_stride,
                                const uint32_t *pixels) {
   winsrv_blit_args_t args;
-  args.win_id = win_id;
-  args.x = x;
-  args.y = y;
-  args.w = w;
-  args.h = h;
-  args.src_x = src_x;
-  args.src_y = src_y;
-  args.src_stride = src_stride;
+  args.win_id = win_id; args.x = x; args.y = y; args.w = w; args.h = h;
+  args.src_x = src_x; args.src_y = src_y; args.src_stride = src_stride;
   args.pixels = (uint32_t *)pixels;
   return (int)syscall(SYS_WIN_BLIT, (uint64_t)&args, 0, 0, 0, 0);
 }
-
 static inline int sys_win_poll_event(int win_id, winsrv_event_t *ev,
                                      int blocking) {
   return (int)syscall(SYS_WIN_POLL_EVENT, (uint64_t)win_id, (uint64_t)ev,
@@ -204,11 +191,6 @@ static inline int sys_win_poll_event(int win_id, winsrv_event_t *ev,
 static inline int sys_win_register_console(int win_id) {
   return (int)syscall(SYS_WIN_REGISTER_CONSOLE, (uint64_t)win_id, 0, 0, 0, 0);
 }
-
-// --- Servicios del kernel ---
-
-// Devuelve el Task ID del servicio, o negativo en error.
-// Ejemplo: int echo = sys_get_service_id("echo");
 static inline int sys_get_service_id(const char *name) {
   return (int)syscall(SYS_GET_SERVICE_ID, (uint64_t)name, 0, 0, 0, 0);
 }
