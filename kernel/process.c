@@ -162,9 +162,70 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
 
-  vma_create(proc, load_base, load_base + 0x200000, PTE_USER | PTE_NX, VMA_ELF);
-  vma_create(proc, proc->stack_low, proc->stack_top,
-             PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK);
+  // The ELF VMA must describe the addresses actually occupied by PT_LOAD
+  // segments. ET_EXEC images use their fixed p_vaddr (normally 0x400000),
+  // while ET_DYN images are relocated by load_base. Using load_base
+  // unconditionally would leave the real ELF pages outside the VMA and
+  // could let mmap() place another VMA over the executable.
+  const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)elf_data;
+  uint64_t elf_vma_start = ~0ULL;
+  uint64_t elf_vma_end = 0;
+  const Elf64_Phdr *phdrs =
+      (const Elf64_Phdr *)((const uint8_t *)elf_data + ehdr->e_phoff);
+
+  for (uint16_t pi = 0; pi < ehdr->e_phnum; pi++) {
+    const Elf64_Phdr *ph = &phdrs[pi];
+    if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
+      continue;
+
+    uint64_t seg_start = ph->p_vaddr;
+    uint64_t seg_end = ph->p_vaddr + ph->p_memsz;
+    if (seg_end < seg_start)
+      continue;
+
+    if (ehdr->e_type == ET_DYN) {
+      uint64_t relocated_start = seg_start + load_base;
+      uint64_t relocated_end = seg_end + load_base;
+      if (relocated_start < seg_start || relocated_end < seg_end)
+        continue;
+      seg_start = relocated_start;
+      seg_end = relocated_end;
+    }
+
+    seg_start &= ~0xFFFULL;
+    if (seg_end > ~0xFFFULL)
+      seg_end = ~0ULL;
+    else
+      seg_end = (seg_end + 0xFFFULL) & ~0xFFFULL;
+
+    if (seg_end <= seg_start)
+      continue;
+
+    if (seg_start < elf_vma_start)
+      elf_vma_start = seg_start;
+    if (seg_end > elf_vma_end)
+      elf_vma_end = seg_end;
+  }
+
+  if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
+      !vma_create(proc, elf_vma_start, elf_vma_end,
+                   PTE_USER | PTE_NX, VMA_ELF)) {
+    LOG_ERR("[PROC] No se pudo crear VMA ELF");
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
+
+  if (!vma_create(proc, proc->stack_low, proc->stack_top,
+                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
+    LOG_ERR("[PROC] No se pudo crear VMA stack");
+    vma_destroy_all(proc);
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++)
     proc->fds[f] = NULL;
