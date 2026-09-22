@@ -114,9 +114,17 @@ int rtc_read_datetime(rtc_datetime_t *out) {
         out->hour = hour_raw & 0x7F;
       }
 
-      /* Bug #11 only concerns the NMI state; leave Bug #12 unchanged. */
-      if (!(status_b & 0x02) && pm) {
-        out->hour = (uint8_t)((out->hour + 12) % 24);
+      /*
+       * In 12-hour mode, 12 AM is midnight (00), while PM hours get +12
+       * except 12 PM, which remains 12.
+       */
+      if (!(status_b & 0x02)) {
+        if (pm) {
+          if (out->hour != 12)
+            out->hour = (uint8_t)(out->hour + 12);
+        } else if (out->hour == 12) {
+          out->hour = 0;
+        }
       }
 
       if (out->century) {
