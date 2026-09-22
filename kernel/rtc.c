@@ -16,6 +16,16 @@
 #define RTC_REG_STATUS_B 0x0B
 #define RTC_REG_CENTURY 0x32
 
+/*
+ * Bit 7 of CMOS_ADDR controls the external NMI mask. Port 0x70 is an index
+ * register and is not a reliable source for reading the current NMI state on
+ * all PC-compatible hardware, so keep the state in software instead.
+ *
+ * AuroraOS does not otherwise write CMOS_ADDR, so the state is initially
+ * enabled (the normal state before the kernel performs a CMOS access).
+ */
+static uint8_t cmos_nmi_mask;
+
 static inline void outb(uint16_t port, uint8_t val) {
   __asm__ volatile("outb %0, %1" : : "a"(val), "dN"(port));
 }
@@ -27,10 +37,12 @@ static inline uint8_t inb(uint16_t port) {
 }
 
 static uint8_t cmos_read(uint8_t reg) {
-  // Port 0x70 bit 7 controls the external NMI mask. Preserve its previous
-  // state instead of unconditionally leaving NMI disabled after the read.
-  uint8_t nmi_state = inb(CMOS_ADDR) & 0x80;
-  outb(CMOS_ADDR, nmi_state | (reg & 0x7F));
+  /*
+   * Select the CMOS register while preserving the NMI mask that AuroraOS
+   * previously selected. Do not read port 0x70 to recover bit 7: that read
+   * is not portable across the MC146818-compatible implementations.
+   */
+  outb(CMOS_ADDR, cmos_nmi_mask | (reg & 0x7F));
   return inb(CMOS_DATA);
 }
 
@@ -102,10 +114,12 @@ int rtc_read_datetime(rtc_datetime_t *out) {
         out->hour = hour_raw & 0x7F;
       }
 
+      /*
+       * Bug #11 only concerns the NMI state; leave the existing 12-hour
+       * conversion untouched here so Bug #12 can be handled separately.
+       */
       if (!(status_b & 0x02) && pm) {
-        out->hour = (out->hour == 12) ? 12 : (uint8_t)(out->hour + 12);
-      } else if (!(status_b & 0x02) && !pm && out->hour == 12) {
-        out->hour = 0;
+        out->hour = (uint8_t)((out->hour + 12) % 24);
       }
 
       if (out->century) {
