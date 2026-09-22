@@ -18,7 +18,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000,-z,commo
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial shell \
+APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow shell \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
 
 all: $(APPS)
@@ -176,6 +176,12 @@ segvtest_kernel: apps/segvtest_kernel/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp segvtest_kernel ../sysroot/apps/
 
+calloc_overflow: apps/calloc_overflow/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/calloc_overflow/main.c -o calloc_overflow.o
+	$(LD) -o calloc_overflow $(LIB_OBJS) calloc_overflow.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp calloc_overflow ../sysroot/apps/
+
 shell: apps/shell/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/shell/main.c -o shell.o
 	$(LD) -o shell $(LIB_OBJS) shell.o $(LDFLAGS)
@@ -184,5 +190,5 @@ shell: apps/shell/main.c $(LIB_OBJS)
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink
+	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
