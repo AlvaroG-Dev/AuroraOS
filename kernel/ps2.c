@@ -125,7 +125,8 @@ static const char scancode_ascii_shift[128] = {
     '>', '?',  0,    '*', 0,   ' ', 0,   0,   0,   0,   0,   0,
 };
 
-static int shift_pressed = 0;
+static int left_shift_pressed = 0;
+static int right_shift_pressed = 0;
 
 // ===========================================================================
 // Procesamiento de bytes → eventos de input + TTY
@@ -143,14 +144,20 @@ static void process_keyboard_byte(uint8_t sc) {
   int pressed = !(sc & 0x80);
   uint8_t code = sc & 0x7F;
 
-  if (code == 0x2A || code == 0x36) {
-    shift_pressed = pressed;
+  if (code == 0x2A) {
+    left_shift_pressed = pressed;
+    return;
+  }
+
+  if (code == 0x36) {
+    right_shift_pressed = pressed;
     return;
   }
 
   if (!pressed)
     return;
 
+  int shift_pressed = left_shift_pressed || right_shift_pressed;
   char c = shift_pressed ? scancode_ascii_shift[code] : scancode_ascii[code];
   if (c == 0)
     return;
