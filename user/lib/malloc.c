@@ -105,6 +105,9 @@ void free(void *ptr) {
 }
 
 void *calloc(size_t num, size_t size) {
+  if (num != 0 && size > (size_t)-1 / num)
+    return NULL;
+
   size_t total = num * size;
   void *ptr = malloc(total);
   if (ptr) {
