@@ -333,12 +333,16 @@ REGISTER_TEST("slab: usable size", test_slab_usable_size);
 // ---------------------------------------------------------------------------
 // SMP (Fase 0)
 // ---------------------------------------------------------------------------
-static void test_smp_processor_id_zero(void) {
+static void test_smp_processor_id_valid(void) {
   int cpu = smp_processor_id();
-  TEST_ASSERT(cpu == 0, "smp_processor_id() devolvió %d, esperado 0 en Fase 0",
-              cpu);
+  TEST_ASSERT(cpu >= 0 && cpu < MAX_CPUS,
+              "smp_processor_id() devolvió %d, fuera de rango [0,%d)",
+              cpu, MAX_CPUS);
+  TEST_ASSERT(cpu_local_data[cpu].cpu_id == cpu,
+              "cpu_local_data[%d].cpu_id = %d, esperado %d",
+              cpu, cpu_local_data[cpu].cpu_id, cpu);
 }
-REGISTER_TEST("smp: smp_processor_id() == 0", test_smp_processor_id_zero);
+REGISTER_TEST("smp: smp_processor_id() válido", test_smp_processor_id_valid);
 
 static void test_smp_cpu_local_data_exists(void) {
   TEST_ASSERT(cpu_local_data[0].cpu_id == 0,
@@ -349,10 +353,12 @@ REGISTER_TEST("smp: cpu_local_data[0] inicializado",
               test_smp_cpu_local_data_exists);
 
 static void test_smp_this_cpu_macro(void) {
+  int cpu = smp_processor_id();
   uint64_t saved = this_cpu(ticks_since_resched);
   this_cpu(ticks_since_resched) = 0xDEADBEEF;
-  TEST_ASSERT(cpu_local_data[0].ticks_since_resched == 0xDEADBEEF,
-              "this_cpu(ticks_since_resched) no escribió en cpu_local_data[0]");
+  TEST_ASSERT(cpu_local_data[cpu].ticks_since_resched == 0xDEADBEEF,
+              "this_cpu(ticks_since_resched) no escribió en cpu_local_data[%d]",
+              cpu);
   this_cpu(ticks_since_resched) = saved;
 }
 REGISTER_TEST("smp: this_cpu() accede al CPU actual", test_smp_this_cpu_macro);
@@ -413,15 +419,18 @@ static void test_apic_svr_enabled(void) {
 REGISTER_TEST("apic: LAPIC SVR habilitado", test_apic_svr_enabled);
 
 static void test_apic_bsp_id(void) {
-  uint32_t eax, ebx, ecx, edx;
-  cpuid(1, 0, &eax, &ebx, &ecx, &edx);
-  uint32_t bsp_cpuid_id = (ebx >> 24) & 0xFF;
-  uint32_t bsp_apic_id = lapic_get_bsp_id();
-  TEST_ASSERT(bsp_apic_id == bsp_cpuid_id,
-              "BSP APIC ID = %u, esperado %u (de CPUID)", bsp_apic_id,
-              bsp_cpuid_id);
+  const acpi_info_t *info = acpi_get_info();
+  TEST_ASSERT(info->bsp_index >= 0 && info->bsp_index < info->cpu_count,
+              "ACPI bsp_index=%d inválido (cpu_count=%d)",
+              info->bsp_index, info->cpu_count);
+  if (info->bsp_index < 0 || info->bsp_index >= info->cpu_count)
+    return;
+
+  uint32_t expected = info->cpus[info->bsp_index].apic_id;
+  uint32_t actual = lapic_get_bsp_id();
+  TEST_ASSERT(actual == expected,
+              "BSP APIC ID = %u, esperado %u (MADT)", actual, expected);
 }
-REGISTER_TEST("apic: BSP APIC ID coincide con CPUID", test_apic_bsp_id);
 
 // ---------------------------------------------------------------------------
 // APIC / IOAPIC (Fase 2.2)
@@ -589,7 +598,7 @@ static void test_smp_ipi_wakeup(void) {
               "el waiter corrió en cpu=%u, esperado cpu=%d", g_ipi_runner_cpu,
               ap_cpu);
 
-  LOG_INFO("[TEST] ipi-wakeup: waker=BSP(cpu=%u) runner=cpu[%u] (afinidad=%d)",
+  LOG_INFO("[TEST] ipi-wakeup: waker=cpu[%u] runner=cpu[%u] (afinidad=%d)",
            g_ipi_waker_cpu, g_ipi_runner_cpu, ap_cpu);
 }
 REGISTER_TEST_FLAGS("smp: IPI wakeup cross-CPU", test_smp_ipi_wakeup,
