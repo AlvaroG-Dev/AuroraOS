@@ -65,6 +65,7 @@ void vmm_free_pages(uint64_t vaddr, uint64_t num_pages);
 uint64_t paging_clone_kernel_space(void);
 int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
                        uint64_t flags);
+void paging_test_set_alloc_fail_after(int successful_allocs);
 int paging_unmap_page_in(uint64_t *pml4, uint64_t virt);
 uint64_t paging_get_phys_in(uint64_t *pml4, uint64_t virt);
 void paging_free_user_space(uint64_t pml4_phys);
