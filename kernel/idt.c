@@ -27,7 +27,9 @@ struct idt_ptr {
 
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idt_ptr;
-static void (*irq_handlers[16])(void) = {0};
+static void (*irq_ack_handlers[16])(void) = {NULL};
+static void (*irq_process_handlers[16])(void) = {NULL};
+static void (*irq_handlers[16])(void) = {NULL}; // legacy
 
 // ---------------------------------------------------------------------------
 // Stubs de ISR/IRQ (definidos en isr_stubs.asm).
@@ -93,6 +95,10 @@ extern int handle_page_fault(registers_t *regs);
 
 extern void ipi_stub_resched(void);
 extern void ipi_stub_tlb(void);
+
+extern void ioapic_mask_irq(uint8_t irq, int masked);
+
+extern void msi_stub_0x60(void);
 
 // ---------------------------------------------------------------------------
 // Tabla de stubs en el mismo orden en que se colocan en la IDT:
@@ -187,13 +193,11 @@ void irq_install_handler(uint8_t irq, void (*handler)(void)) {
 
   // Con IOAPIC, desenmascaramos la IRQ en el IOAPIC.
   // El PIC ya está enmascarado (apic_init lo hizo).
-  extern void ioapic_mask_irq(uint8_t irq, int masked);
   ioapic_mask_irq(irq, 0);
 }
 
 void irq_uninstall_handler(uint8_t irq) {
   irq_handlers[irq] = 0;
-  extern void ioapic_mask_irq(uint8_t irq, int masked);
   ioapic_mask_irq(irq, 1);
 }
 
@@ -213,6 +217,9 @@ void idt_init(void) {
 
   // Vector 0xFF: espurio del LAPIC.
   idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);
+
+  // Vector MSI para el AHCI (0x60).
+  idt_set_gate(0x60, (uint64_t)msi_stub_0x60, 0x08, 0x8E);
 
   pic_init();
   idt_load();
@@ -256,40 +263,94 @@ void isr_handler(registers_t *regs) {
         (saved_regs.int_num < 32) ? exception_names[saved_regs.int_num] : "?");
 }
 
+void irq_install_handler_ex(uint8_t irq, void (*ack)(void),
+                            void (*process)(void)) {
+  if (irq >= 16)
+    return;
+  irq_ack_handlers[irq] = ack;
+  irq_process_handlers[irq] = process;
+  // No tocar irq_handlers[irq] (legacy), o ponerlo a NULL.
+  irq_handlers[irq] = NULL;
+  ioapic_mask_irq(irq, 0); // desenmascarar
+}
+
 void irq_handler(registers_t *regs) {
-  // Enviar EOI al LAPIC ANTES de llamar al handler.
-  extern void lapic_eoi(void);
-  lapic_eoi();
-
-  // [DEBUG] Detectar frames con SS corrupto (solo para el LAPIC timer).
-  if (regs->int_num == 48) {
-    if (regs->cs == 0x1B || regs->cs == 0x23) {
-      // Viniendo de userland: SS debe ser 0x23.
-      if (regs->ss != 0x23) {
-        LOG_ERR("[IRQ] timer desde userland con SS=0x%lx CS=0x%lx RIP=0x%lx",
-                (unsigned long)regs->ss, (unsigned long)regs->cs,
-                (unsigned long)regs->rip);
-      }
-    } else {
-      // Viniendo de kernel: SS debe ser 0x10 (o 0 si el CPU no lo empujó).
-      if (regs->ss != 0x10 && regs->ss != 0) {
-        LOG_ERR("[IRQ] timer desde kernel con SS=0x%lx CS=0x%lx RIP=0x%lx",
-                (unsigned long)regs->ss, (unsigned long)regs->cs,
-                (unsigned long)regs->rip);
-      }
-    }
-  }
-
-  // LAPIC timer (vector 48).
+  // [FIX] LAPIC timer (vector 48): EOI ANTES del handler.
+  //
+  // lapic_timer_handler() llama a sched_tick(), que puede hacer un
+  // task_switch. Si el switch ocurre, la instrucción lapic_eoi() NO se
+  // ejecuta hasta que la tarea original vuelva a este punto de la pila.
+  // Mientras tanto, el bit del vector 48 sigue puesto en el ISR del
+  // LAPIC, y esa CPU NO recibe más ticks del timer.
+  //
+  // El caso patológico: la tarea original se marca TASK_DEAD y su pila
+  // se libera. El lapic_eoi() pendiente se pierde con la pila. Esa CPU
+  // deja de recibir ticks para siempre: sin preemption, sin timeouts,
+  // sin sched_wake_expired. Si le pasa a las 4 CPUs, el sistema se
+  // congela sin panic, sin PF, sin logs.
+  //
+  // El LAPIC timer es edge-triggered: la línea ya está desasertada
+  // cuando llega el handler. El EOI solo limpia el ISR. Enviarlo antes
+  // es correcto y elimina la ventana.
   if (regs->int_num == 48) {
     extern void lapic_timer_handler(void);
-    lapic_timer_handler();
+    extern void lapic_eoi(void);
+    lapic_eoi();           // [FIX] PRIMERO
+    lapic_timer_handler(); // luego el handler (que puede cambiar de tarea)
     return;
   }
 
-  // IRQs del IOAPIC (vectores 32-47).
+  // IRQs del IOAPIC (32..47). Aquí el patrón ack → EOI → process es
+  // correcto para IRQs level-triggered: el ack silencia la fuente
+  // antes de enviar el EOI, así el IOAPIC no re-dispara.
   uint8_t irq = (uint8_t)(regs->int_num - 32);
-  if (irq < 16 && irq_handlers[irq]) {
-    irq_handlers[irq]();
+
+  if (irq < 16) {
+    if (irq_ack_handlers[irq]) {
+      irq_ack_handlers[irq]();
+    } else if (irq_handlers[irq]) {
+      irq_handlers[irq]();
+    }
   }
+
+  extern void lapic_eoi(void);
+  lapic_eoi();
+
+  if (irq < 16 && irq_process_handlers[irq]) {
+    irq_process_handlers[irq]();
+  }
+}
+
+// ===========================================================================
+// MSI handlers.
+// ===========================================================================
+static void (*msi_handlers[MSI_VECTOR_COUNT])(void) = {NULL};
+
+void msi_install_handler(uint8_t vector, void (*handler)(void)) {
+  if (vector < MSI_VECTOR_BASE || vector > MSI_VECTOR_END)
+    return;
+  msi_handlers[vector - MSI_VECTOR_BASE] = handler;
+}
+
+void msi_dispatch(uint8_t vector) {
+  if (vector < MSI_VECTOR_BASE || vector > MSI_VECTOR_END)
+    return;
+  if (msi_handlers[vector - MSI_VECTOR_BASE])
+    msi_handlers[vector - MSI_VECTOR_BASE]();
+}
+
+// ===========================================================================
+// msi_handler: entrada del stub MSI (msi_stub_0x60).
+//
+// El stub empuja int_num=0x60 en el stack y salta a msi_common, que
+// salva los registros y llama aquí con el registers_t en RDI.
+//
+// Este handler despacha el vector MSI al handler registrado y manda
+// el EOI al LAPIC.
+// ===========================================================================
+void msi_handler(registers_t *regs) {
+  uint8_t vector = (uint8_t)(regs->int_num & 0xFF);
+  msi_dispatch(vector);
+  extern void lapic_eoi(void);
+  lapic_eoi();
 }

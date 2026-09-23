@@ -66,6 +66,13 @@ typedef struct task {
   // Lo usa wait_event_interruptible_timeout para que el scheduler la
   // despierte al expirar, en vez de quedarse dormida para siempre.
   uint64_t wake_deadline;
+
+  // [FIX sched_yield] Marca que la tarea pidió ceder explícitamente
+  // (vía sched_yield) y que, aunque siga RUNNING, sched_tick debe
+  // saltar al idle si no hay otra tarea READY. Sin esto, sched_yield
+  // no cede en absoluto cuando todas las demás tareas han migrado a
+  // otros CPUs, y la tarea actual se queda en un busy-loop.
+  volatile int yield_requested;
 } task_t;
 
 void sched_init(void);

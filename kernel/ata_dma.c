@@ -140,42 +140,47 @@ void ata_dma_irq_handler(int channel_idx) {
   if (!dma->initialized)
     return;
 
-  uint16_t io = (channel_idx == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
-
-  // [FIX] Leer el STATUS del disco ANTES de cualquier otra cosa. Si el
-  // bus está flotante (0xFF) o no hay dispositivo (0x00), la IRQ es
-  // espuria y no hay un INTRQ que limpiar. En ese caso, limpiar el
-  // BMIDE y retornar sin despertar a nadie.
-  uint8_t disk_status = inb(io + ATA_REG_STATUS);
-  if (disk_status == 0x00 || disk_status == 0xFF) {
-    uint8_t bm = inb(dma->bmide_base + BM_STATUS);
-    outb(dma->bmide_base + BM_STATUS, bm | BM_STATUS_IRQ | BM_STATUS_ERROR);
+  // [FIX] Leer BM_STATUS PRIMERO. Es la fuente de verdad de "esta IRQ es
+  // mía". Si el BMIDE no tiene IRQ ni error pendiente, la IRQ es
+  // compartida o espuria, y no tocamos nada.
+  uint8_t bm = inb(dma->bmide_base + BM_STATUS);
+  if (!(bm & (BM_STATUS_IRQ | BM_STATUS_ERROR))) {
+    // IRQ no es del BMIDE. Puede ser de otro dispositivo que comparte
+    // la línea (SMBus, etc). Salir sin tocar nada.
     return;
   }
 
-  // Leer BM Status y limpiar los bits de IRQ y error.
-  uint8_t status = inb(dma->bmide_base + BM_STATUS);
-  outb(dma->bmide_base + BM_STATUS, status | BM_STATUS_IRQ | BM_STATUS_ERROR);
+  // Limpiar los bits del BMIDE (esto desaserta la línea del IOAPIC).
+  outb(dma->bmide_base + BM_STATUS, bm | BM_STATUS_IRQ | BM_STATUS_ERROR);
 
-  // -------------------------------------------------------------------------
-  // [FIX race SMP] Modificar irq_pending/irq_error/irq_count y despertar
-  // a la tarea bajo el MISMO lock que wait_common usa para comprobar la
-  // condición y encolarse (wq->lock). Esto cierra la ventana en la que
-  // el IRQ llegaba justo después de que el waiter hubiese comprobado
-  // cond()==false pero antes de encolarse: el wakeup se perdía y la
-  // tarea dormía hasta el timeout.
+  // [FIX] NO descartar por disk_status == 0x00. En VirtualBox PIIX3, el
+  // disco baja DRDY/DRQ inmediatamente tras completar un WRITE_DMA, y
+  // leer 0x00 NO significa IRQ espuria: significa que el disco terminó.
+  // El código anterior descartaba la IRQ y dejaba al waiter colgado
+  // hasta el timeout de 5 s.
   //
-  // Las IRQs solo se deshabilitan durante este bloque (microsegundos),
-  // nunca durante la espera.
-  // -------------------------------------------------------------------------
+  // Solo descartamos si el bus está claramente flotante (0xFF), que
+  // indica que el controlador no responde.
+  uint16_t io = (channel_idx == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
+  uint8_t disk_status = inb(io + ATA_REG_STATUS);
+  if (disk_status == 0xFF) {
+    // Bus flotante: no hay dispositivo. La IRQ es espuria, ya limpiamos
+    // el BMIDE arriba, salimos sin despertar a nadie.
+    return;
+  }
+
+  // ---------------------------------------------------------------------
+  // Actualizar el estado de completación bajo el mismo lock que usa
+  // wait_common para comprobar la condición y encolarse. Cierra la
+  // ventana en la que el IRQ llegaba justo después de que el waiter
+  // hubiese comprobado cond()==false pero antes de encolarse.
+  // ---------------------------------------------------------------------
   unsigned long flags = spin_lock_irqsave(&dma->irq_wq.lock);
 
   dma->irq_pending = 1;
-  dma->irq_error = (status & BM_STATUS_ERROR) ? 1 : 0;
+  dma->irq_error = (bm & BM_STATUS_ERROR) ? 1 : 0;
   dma->irq_count++;
 
-  // Variante _locked: el llamante ya tiene wq->lock cogido. Evita el
-  // deadlock que provocaría wake_up_all() al intentar tomarlo de nuevo.
   wake_up_all_locked(&dma->irq_wq);
 
   spin_unlock_irqrestore(&dma->irq_wq.lock, flags);

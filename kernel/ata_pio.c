@@ -36,6 +36,7 @@ static int g_ide_present = 0;
 // de que Fase C les asigne modo y los registre.
 static ata_device_t *g_pending_devices = NULL;
 static int g_pending_count = 0;
+static int ata_flush(ata_device_t *dev);
 
 // ===========================================================================
 // Parseo del IDENTIFY
@@ -741,7 +742,24 @@ static int ata_write(ata_device_t *dev, uint64_t lba, uint32_t count,
       count -= chunk;
     }
   }
-  return ATA_OK;
+
+  // [FIX] FLUSH CACHE al final de toda la escritura PIO.
+  //
+  // VirtualBox PIIX3 (y otros emuladores/hardware real) pueden devolver
+  // datos viejos en un read inmediato si no forzamos el flush: el disco
+  // sirve la lectura desde su caché interna volátil, que aún no ha sido
+  // volcada al medio. El síntoma es un test de "write + read back" que
+  // falla con "el patrón leído no coincide" aunque el write haya
+  // devuelto ATA_OK.
+  //
+  // Es exactamente el mismo fix que ata_dma_xfer() aplica tras un WRITE
+  // DMA (ver ata_dma.c). Sin esto, el path PIO era incoherente con el
+  // path DMA y el test de escritura fallaba en VirtualBox PIIX3.
+  //
+  // ata_flush() elige FLUSH CACHE EXT (0xEA) o FLUSH CACHE (0xE7) según
+  // use_lba48, y ya verifica el bit ERR del status. Propaga el error si
+  // el flush falla.
+  return ata_flush(dev);
 }
 
 static int ata_flush(ata_device_t *dev) {

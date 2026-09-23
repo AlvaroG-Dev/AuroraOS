@@ -43,4 +43,7 @@ void wake_up_all_locked(wait_queue_t *wq);
 void wake_up_one(wait_queue_t *wq);
 void wake_up_interruptible_all(wait_queue_t *wq);
 
+// [NUEVO] Versión de wake_up_one que asume wq->lock ya cogido.
+void wake_up_one_locked(wait_queue_t *wq);
+
 #endif

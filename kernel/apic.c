@@ -59,7 +59,7 @@ uint32_t lapic_get_bsp_id(void) { return g_bsp_apic_id; }
 // ---------------------------------------------------------------------------
 // Helpers de IOAPIC
 // ---------------------------------------------------------------------------
-static uint32_t ioapic_read_reg(int ioapic_idx, uint32_t reg) {
+uint32_t ioapic_read_reg(int ioapic_idx, uint32_t reg) {
   if (ioapic_idx < 0 || ioapic_idx >= ACPI_MAX_IOAPICS)
     return 0;
   volatile uint32_t *base = g_ioapics[ioapic_idx];
@@ -366,4 +366,72 @@ void apic_init_ap(void) {
   lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
   lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
   lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
+}
+
+// ---------------------------------------------------------------------------
+// [NUEVO] Wrappers de conveniencia sobre ioapic_mask_irq.
+//
+// ioapic_mask_irq(irq, masked) ya hace todo el trabajo. Estos atajos
+// existen porque en el código de los drivers es más legible
+// "ioapic_unmask_irq(10)" que "ioapic_mask_irq(10, 0)".
+// ---------------------------------------------------------------------------
+
+void ioapic_unmask_irq(uint8_t irq) { ioapic_mask_irq(irq, 0); }
+
+void ioapic_mask_only_irq(uint8_t irq) { ioapic_mask_irq(irq, 1); }
+
+void ioapic_redirect_irq_ex(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
+                            int masked, int level_triggered, int active_low) {
+  if (irq >= 16) {
+    LOG_ERR("[APIC] ioapic_redirect_irq_ex: IRQ %u fuera de rango (0-15)", irq);
+    return;
+  }
+
+  const acpi_info_t *acpi = acpi_get_info();
+  if (acpi->ioapic_count == 0) {
+    LOG_ERR("[APIC] No hay IOAPICs");
+    return;
+  }
+
+  uint8_t gsi = g_irq_to_gsi[irq];
+  if (gsi == 0xFF) {
+    LOG_DEBUG("[APIC] IRQ %u sin GSI, redirección ignorada", irq);
+    return;
+  }
+
+  int ioapic_idx = -1;
+  for (int i = 0; i < acpi->ioapic_count; i++) {
+    const acpi_ioapic_t *cand = &acpi->ioapics[i];
+    if (gsi >= cand->gsi_base && gsi < cand->gsi_base + 24) {
+      ioapic_idx = i;
+      break;
+    }
+  }
+  if (ioapic_idx < 0 || !g_ioapics[ioapic_idx]) {
+    LOG_ERR("[APIC] IOAPIC no encontrado para GSI %u (irq %u)", gsi, irq);
+    return;
+  }
+
+  uint64_t entry = 0;
+  entry |= (uint64_t)vector;
+  entry |= ((uint64_t)dest_apic_id << 56);
+
+  if (active_low)
+    entry |= IOAPIC_REDIR_ACTIVE_LOW;
+  if (level_triggered)
+    entry |= IOAPIC_REDIR_TRIGGER_LEVEL;
+  if (masked)
+    entry |= IOAPIC_REDIR_MASKED;
+
+  uint32_t gsi_in_ioapic = gsi - acpi->ioapics[ioapic_idx].gsi_base;
+  uint32_t low_reg = 0x10 + gsi_in_ioapic * 2;
+  uint32_t high_reg = low_reg + 1;
+
+  ioapic_write_reg(ioapic_idx, low_reg, (uint32_t)(entry & 0xFFFFFFFF));
+  ioapic_write_reg(ioapic_idx, high_reg, (uint32_t)(entry >> 32));
+
+  LOG_INFO("[APIC] IRQ %u -> GSI %u -> vec %u dest APIC %u%s%s%s (ex)", irq,
+           gsi, vector, dest_apic_id, masked ? " [masked]" : "",
+           level_triggered ? " [level]" : " [edge]",
+           active_low ? " [active-low]" : " [active-high]");
 }

@@ -86,7 +86,7 @@ El scheduler nunca la reapea.
 
 ## Bloque D — Subsistemas que faltan
 
-### D1. SMP + APIC + IOAPIC + LAPIC timer [ ]
+### D1. SMP + APIC + IOAPIC + LAPIC timer [x]
 **Esfuerzo**: 2-3 semanas
 **Por qué**: estás atado a un solo CPU y al PIC 8259.
 **Cómo**:

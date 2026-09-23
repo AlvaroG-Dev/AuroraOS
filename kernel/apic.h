@@ -76,11 +76,35 @@ uint32_t lapic_read(uint32_t reg);
 void lapic_write(uint32_t reg, uint32_t value);
 void lapic_eoi(void);
 
+uint32_t ioapic_read_reg(int ioapic_idx, uint32_t reg);
+
 void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
                          int masked);
 void ioapic_mask_irq(uint8_t irq, int masked);
 
 void apic_dump(void);
 void *lapic_get_base(void);
+
+// Enmascara o desenmascara una IRQ legacy en el IOAPIC.
+//   masked = 1 -> enmascarar (no llegan IRQs)
+//   masked = 0 -> desenmascarar (las IRQs llegan al LAPIC)
+void ioapic_mask_irq(uint8_t irq, int masked);
+
+// [NUEVO] Atajo para desenmascarar una IRQ legacy.
+// Equivale a ioapic_mask_irq(irq, 0).
+void ioapic_unmask_irq(uint8_t irq);
+
+// [NUEVO] Atajo para enmascarar una IRQ legacy.
+// Equivale a ioapic_mask_irq(irq, 1).
+void ioapic_mask_only_irq(uint8_t irq);
+
+// Igual que ioapic_redirect_irq, pero permite forzar explícitamente
+// trigger mode y polaridad en vez de depender de las ISOs de la MADT
+// o del hardcode legacy de IRQ 14/15. Imprescindible para IRQs de
+// dispositivos PCI (conventional INTx#), que son SIEMPRE level-triggered,
+// active-low según la spec PCI — a diferencia de las IRQs ISA, que son
+// edge/active-high por defecto salvo ISO.
+void ioapic_redirect_irq_ex(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
+                            int masked, int level_triggered, int active_low);
 
 #endif

@@ -437,6 +437,82 @@ static int pci_init_impl(void) {
   return 0;
 }
 
+// ===========================================================================
+// Capability list y MSI.
+// ===========================================================================
+
+// Busca la capability con el ID dado en la lista enlazada.
+// Devuelve el offset en config space, o 0 si no existe.
+uint8_t pci_find_capability(uint8_t bus, uint8_t slot, uint8_t func,
+                            uint8_t cap_id) {
+  // El bit 4 del Status (offset 0x06) indica si hay capability list.
+  uint16_t status = pci_read_config_word(bus, slot, func, 0x06);
+  if (!(status & PCI_STATUS_CAP_LIST))
+    return 0;
+
+  // El offset de la primera capability está en 0x34 (byte).
+  uint8_t cap_ptr = pci_read_config_byte(bus, slot, func, 0x34) & 0xFC;
+
+  int guard = 0;
+  while (cap_ptr != 0 && guard < 48) {
+    uint8_t id = pci_read_config_byte(bus, slot, func, cap_ptr);
+    if (id == cap_id)
+      return cap_ptr;
+
+    cap_ptr = pci_read_config_byte(bus, slot, func, cap_ptr + 1) & 0xFC;
+    guard++;
+  }
+
+  return 0;
+}
+
+// Habilita MSI para un dispositivo.
+//   vector:     vector del IDT a usar (ej. 0x60).
+//   lapic_id:   APIC ID del LAPIC destino.
+// Devuelve 0 si OK, -1 si no soporta MSI.
+int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
+                   uint8_t lapic_id) {
+  uint8_t cap = pci_find_capability(bus, slot, func, 0x05); // MSI cap
+  if (!cap) {
+    LOG_WARN("[PCI] %02x:%02x.%x: sin capability MSI", bus, slot, func);
+    return -1;
+  }
+
+  // Leer Message Control (word en cap+2).
+  uint16_t msg_ctrl = pci_read_config_word(bus, slot, func, cap + 2);
+  int is_64 = (msg_ctrl >> 7) & 1;
+
+  // Construir Message Address: 0xFEE00000 | (LAPIC_ID << 12).
+  uint32_t addr_lo = 0xFEE00000U | ((uint32_t)lapic_id << 12);
+  uint32_t addr_hi = 0;
+  uint16_t data = vector;
+
+  // Escribir registros.
+  pci_write_config_dword(bus, slot, func, cap + 4, addr_lo);
+  if (is_64)
+    pci_write_config_dword(bus, slot, func, cap + 8, addr_hi);
+  pci_write_config_word(bus, slot, func, cap + (is_64 ? 12 : 8), data);
+
+  // Habilitar MSI: bit 0 de Message Control.
+  msg_ctrl |= 0x0001;
+  pci_write_config_word(bus, slot, func, cap + 2, msg_ctrl);
+
+  LOG_INFO("[PCI] %02x:%02x.%x: MSI habilitado (cap=0x%02x, vec=0x%02x, "
+           "addr=0x%08x, 64bit=%d)",
+           bus, slot, func, cap, vector, addr_lo, is_64);
+  return 0;
+}
+
+// Deshabilita MSI para un dispositivo.
+void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func) {
+  uint8_t cap = pci_find_capability(bus, slot, func, 0x05);
+  if (!cap)
+    return;
+  uint16_t msg_ctrl = pci_read_config_word(bus, slot, func, cap + 2);
+  msg_ctrl &= ~0x0001;
+  pci_write_config_word(bus, slot, func, cap + 2, msg_ctrl);
+}
+
 struct driver pci_driver = {
     .name = "pci",
     .init = pci_init_impl,

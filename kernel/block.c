@@ -3,6 +3,7 @@
 // Implementación del block layer. Ver block.h para el contrato.
 
 #include "block.h"
+#include "completion.h"
 #include "klog.h"
 #include "string.h"
 #include "uaccess.h" // EINVAL, ERANGE, EIO, EROFS, ENOENT
@@ -12,6 +13,38 @@
 // ---------------------------------------------------------------------------
 static block_device_t *g_devices = NULL;
 static int g_device_count = 0;
+
+// Callback que se ejecuta cuando el driver termina el bio.
+// Marca la completion asociada.
+static void bdev_completion_cb(bio_t *bio) {
+  completion_t *comp = (completion_t *)bio->end_io_data;
+  if (comp)
+    complete(comp);
+}
+
+// Helper común para bdev_read/bdev_write.
+// Devuelve 0 si OK, <0 si error. Asume validate_io ya hecho.
+static int bdev_submit_sync(bio_t *bio) {
+  completion_t comp;
+  completion_init(&comp);
+
+  bio->end_io = bdev_completion_cb;
+  bio->end_io_data = &comp;
+  bio->error = 0;
+
+  int rc = blk_submit(bio);
+
+  // Si el driver es síncrono, rc == 0 o <0 (nunca -EINPROGRESS) y
+  // bio_endio ya se llamó (o no hacía falta).
+  if (rc == -EINPROGRESS) {
+    // El driver completará el bio más tarde.
+    wait_for_completion(&comp);
+    return bio->error;
+  }
+
+  // Síncrono: el driver ya rellenó bio->error.
+  return (rc < 0) ? rc : bio->error;
+}
 
 // ---------------------------------------------------------------------------
 // Init
@@ -200,10 +233,7 @@ int bdev_read(block_device_t *bdev, uint64_t lba, uint32_t count, void *buf) {
       .next = NULL,
   };
 
-  rc = blk_submit(&bio);
-  if (rc < 0)
-    return rc;
-  return bio.error;
+  return bdev_submit_sync(&bio);
 }
 
 int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
@@ -221,7 +251,7 @@ int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
       .bdev = bdev,
       .lba = lba,
       .count = count,
-      .buf = (void *)buf, // el driver no debe modificarlo en writes
+      .buf = (void *)buf,
       .op = BIO_WRITE,
       .error = 0,
       .end_io = NULL,
@@ -229,10 +259,7 @@ int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
       .next = NULL,
   };
 
-  rc = blk_submit(&bio);
-  if (rc < 0)
-    return rc;
-  return bio.error;
+  return bdev_submit_sync(&bio);
 }
 
 int bdev_flush(block_device_t *bdev) {
@@ -241,7 +268,7 @@ int bdev_flush(block_device_t *bdev) {
   if (bdev->is_read_only)
     return 0;
   if (!bdev->ops || !bdev->ops->flush)
-    return 0; // El driver no necesita flush.
+    return 0;
 
   bio_t bio = {
       .bdev = bdev,
@@ -255,10 +282,7 @@ int bdev_flush(block_device_t *bdev) {
       .next = NULL,
   };
 
-  int rc = blk_submit(&bio);
-  if (rc < 0)
-    return rc;
-  return bio.error;
+  return bdev_submit_sync(&bio);
 }
 
 // ---------------------------------------------------------------------------
