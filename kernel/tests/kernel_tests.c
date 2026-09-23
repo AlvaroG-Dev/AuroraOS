@@ -577,12 +577,36 @@ static void test_smp_ipi_wakeup(void) {
   for (int c = 0; c < MAX_CPUS; c++) {
     if ((uint32_t)c == my_cpu)
       continue;
-    if (per_cpu(current_task, c) != NULL) {
+    task_t *cur = per_cpu(current_task, c);
+    if (cur && cur->is_idle) {
       ap_cpu = c;
       break;
     }
   }
-  TEST_ASSERT(ap_cpu >= 0, "no se encontró ningún AP con idle task");
+
+  /*
+   * Regression for sched_kick_idle_cpu(): the target must really be idle
+   * when the waiter is woken. Otherwise the scheduler can simply pick the
+   * READY task on a later timer tick and the test would not exercise the
+   * remote-idle IPI path.
+   */
+  for (int i = 0; i < 5000 && ap_cpu < 0; i++) {
+    sched_yield();
+    for (volatile int k = 0; k < 1000; k++)
+      __asm__ volatile("pause");
+
+    for (int c = 0; c < MAX_CPUS; c++) {
+      if ((uint32_t)c == my_cpu)
+        continue;
+      task_t *cur = per_cpu(current_task, c);
+      if (cur && cur->is_idle) {
+        ap_cpu = c;
+        break;
+      }
+    }
+  }
+
+  TEST_ASSERT(ap_cpu >= 0, "no se encontró ningún AP idle");
   if (ap_cpu < 0)
     return;
 
