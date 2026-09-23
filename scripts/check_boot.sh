@@ -428,10 +428,17 @@ if grep -qE "\[TEST\] [0-9]+ tests:" "$SERIAL_LOG"; then
         FAILED=$((FAILED + 1))
     fi
 
+    # REQUIRE_SMP solo debe exigir que los tests que dependen de SMP
+    # no sean omitidos por falta de APs. Otros skips pueden ser legítimos
+    # por hardware opcional (por ejemplo, AHCI sin controlador SATA).
+    smp_skipped=$(grep -cE '\\[TEST\\] SKIP .*SMP no disponible \\(aps_ready=0\\)' "$SERIAL_LOG" || true)
+
     if [ "$REQUIRE_SMP" = "yes" ]; then
-        if [ "$skipped" != "0" ]; then
-            log_fail "REQUIRE_SMP=yes pero hay $skipped tests skipped"
+        if [ "$smp_skipped" != "0" ]; then
+            log_fail "REQUIRE_SMP=yes pero hay $smp_skipped tests SMP skipped por falta de APs"
             FAILED=$((FAILED + 1))
+        elif [ "$skipped" != "0" ]; then
+            log_info "  $skipped tests skipped por otras condiciones (no relacionadas con SMP)"
         fi
     else
         if [ "$skipped" != "0" ]; then
