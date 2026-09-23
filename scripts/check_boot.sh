@@ -65,7 +65,7 @@ KEEP_LOGS="${KEEP_LOGS:-no}"
 REQUIRE_SMP="${REQUIRE_SMP:-auto}"
 REQUIRE_DISK="${REQUIRE_DISK:-yes}"
 SHOW_SERIAL="${SHOW_SERIAL:-yes}"
-SHOW_SERIAL_LINES="\${SHOW_SERIAL_LINES:-0}"
+SHOW_SERIAL_LINES="${SHOW_SERIAL_LINES:-0}"
 
 # ---------------------------------------------------------------------------
 # Argumentos CLI
@@ -318,9 +318,9 @@ fi
 # Detectar si los APs arrancaron
 # ---------------------------------------------------------------------------
 aps_ok=0
-if grep -qF "[SMP] APs listos y operativos" "$SERIAL_LOG"; then
+if grep -qE "\\[SMP\\] [0-9]+/[0-9]+ APs listos y operativos" "$SERIAL_LOG"; then
     aps_ok=1
-    n_aps=$(grep -oE '[0-9]+/[0-9]+ APs listos' "$SERIAL_LOG" | tail -1 || echo "?")
+    n_aps=$(grep -oE '[0-9]+/[0-9]+ APs listos y operativos' "$SERIAL_LOG" | tail -1 || echo "?")
     log_info "APs arrancados: $n_aps"
 else
     log_info "APs NO arrancados (esperado si QEMU_SMP=1 o TCG sin mailbox ACPI)"
