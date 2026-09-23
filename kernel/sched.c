@@ -917,15 +917,34 @@ void sched_wake_expired(void) {
             wqs[n_wqs++] = wq;
           }
 
-          /*
-           * Sólo consumimos el deadline después de haber garantizado que
-           * la wait queue está registrada en la lista a despertar.
-           */
-          p->wake_deadline = 0;
         }
 
         p = p->next;
       } while (p && p != start_task);
+    }
+
+    if (!overflow) {
+      /*
+       * Ahora que sabemos que todas las wait queues caben en el array,
+       * consumimos los deadlines bajo el mismo sched_lock. Así un overflow
+       * nunca puede dejar una tarea sin deadline y sin wakeup.
+       */
+      if (task_list_head) {
+        task_t *p = task_list_head;
+        task_t *start_task = p;
+        do {
+          if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
+              now >= p->wake_deadline && p->waiting_on != NULL) {
+            for (size_t i = 0; i < n_wqs; i++) {
+              if (wqs[i] == p->waiting_on) {
+                p->wake_deadline = 0;
+                break;
+              }
+            }
+          }
+          p = p->next;
+        } while (p && p != start_task);
+      }
     }
 
     spin_unlock_irqrestore(&sched_lock, flags);
