@@ -19,6 +19,7 @@
 #include "../heap.h"
 #include "../klog.h"
 #include "../paging.h"
+#include "../pmm.h"
 #include "../sched.h"
 #include "../slab.h"
 #include "../smp_boot.h"
@@ -329,6 +330,51 @@ static void test_slab_usable_size(void) {
   kfree(p);
 }
 REGISTER_TEST("slab: usable size", test_slab_usable_size);
+
+// ---------------------------------------------------------------------------
+// Paging: rollback de tablas ante fallo de asignación
+// ---------------------------------------------------------------------------
+static void test_paging_map_rollback(void) {
+  const uint64_t virt = 0x0000001000000000ULL;
+  uint64_t pml4_phys = pmm_alloc_page();
+  TEST_ASSERT(pml4_phys != 0, "no se pudo reservar PML4 de prueba");
+  if (!pml4_phys)
+    return;
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  memset(pml4, 0, PAGE_SIZE);
+
+  uint64_t mapped_phys = pmm_alloc_page();
+  TEST_ASSERT(mapped_phys != 0, "no se pudo reservar página hoja de prueba");
+  if (!mapped_phys) {
+    pmm_free_page(pml4_phys);
+    return;
+  }
+
+  uint64_t baseline = pmm_free_pages_count();
+  for (int fail_after = 0; fail_after < 3; fail_after++) {
+    memset(pml4, 0, PAGE_SIZE);
+    paging_test_set_alloc_fail_after(fail_after);
+    int rc = paging_map_page_in(pml4, virt, mapped_phys,
+                                PTE_WRITABLE | PTE_NX);
+    paging_test_set_alloc_fail_after(-1);
+
+    TEST_ASSERT(rc != 0, "fallo inyectado #%d no produjo error", fail_after);
+    TEST_ASSERT(pml4[PML4_INDEX(virt)] == 0,
+                "rollback #%d dejó PML4[%lu] = 0x%llx", fail_after,
+                (unsigned long)PML4_INDEX(virt),
+                (unsigned long long)pml4[PML4_INDEX(virt)]);
+    TEST_ASSERT(pmm_free_pages_count() == baseline,
+                "rollback #%d perdió páginas: libres=%lu esperado=%lu",
+                fail_after, (unsigned long)pmm_free_pages_count(),
+                (unsigned long)baseline);
+  }
+
+  pmm_free_page(mapped_phys);
+  pmm_free_page(pml4_phys);
+}
+REGISTER_TEST("paging: rollback de tablas en fallo de alloc",
+              test_paging_map_rollback);
 
 // ---------------------------------------------------------------------------
 // SMP (Fase 0)
