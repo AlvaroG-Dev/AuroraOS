@@ -523,44 +523,56 @@ void sched_mark_need_resched(void) {
 static void sched_kick_idle_cpu(task_t *t) {
   int me = smp_processor_id();
 
-  // --- Caso 1: la tarea tiene afinidad a una CPU concreta ---
+  /*
+   * El estado current_task/idle de otra CPU debe observarse bajo
+   * sched_lock. Sin esto había una carrera entre este código y
+   * sched_tick(): podíamos leer una CPU como no-idle justo antes de que
+   * entrase en idle y perder el IPI, dejando una tarea READY esperando
+   * hasta el siguiente evento del scheduler.
+   *
+   * También mantenemos la comprobación de self-IPI bajo el mismo lock.
+   * Ojo: me es el índice lógico de CPU, no el APIC ID; la comparación
+   * correcta es contra per_cpu(lapic_id, me).
+   *
+   * El IPI se envía DESPUÉS de soltar sched_lock. Así no introducimos
+   * una espera por sched_lock desde el handler de IPI ni retenemos el
+   * lock durante el acceso al LAPIC.
+   */
+
+  int target_cpu = -1;
+  uint32_t dest_lapic = 0;
+  int send_ipi = 0;
+
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+
   if (t->cpu_affinity >= 0) {
     int cpu = t->cpu_affinity;
 
     if (cpu == me) {
-      task_t *me_task = sched_current();
-      if (me_task && me_task->is_idle) {
-        me_task->need_resched = 1;
+      task_t *cur = per_cpu(current_task, me);
+      if (cur && cur->is_idle)
+        cur->need_resched = 1;
+    } else if (cpu >= 0 && cpu < MAX_CPUS) {
+      task_t *cur = per_cpu(current_task, cpu);
+      if (cur && cur->is_idle) {
+        cur->need_resched = 1;
+        target_cpu = cpu;
+        dest_lapic = per_cpu(lapic_id, cpu);
+
+        if (dest_lapic != per_cpu(lapic_id, me))
+          send_ipi = 1;
       }
-      return;
     }
 
-    task_t *cur = per_cpu(current_task, cpu);
-    if (cur && cur->is_idle) {
-      cur->need_resched = 1;
-      __sync_synchronize();
+    spin_unlock_irqrestore(&sched_lock, flags);
 
-      // [FIX self-IPI] Si el lapic_id de la CPU destino coincide con
-      // el nuestro, el IPI sería descartado por el LAPIC. En su lugar,
-      // despertamos nuestra propia idle task (o forzamos un resched
-      // local si no somos idle).
-      uint32_t dest_lapic = per_cpu(lapic_id, cpu);
-      if (dest_lapic == (uint32_t)me) {
-        task_t *me_task = sched_current();
-        if (me_task && me_task->is_idle) {
-          me_task->need_resched = 1;
-        } else {
-          sched_mark_need_resched();
-        }
-        return;
-      }
-
+    if (send_ipi)
       ipi_send(dest_lapic, IPI_VECTOR_RESCHED);
-    }
+
     return;
   }
 
-  // --- Caso 2: sin afinidad, buscar cualquier AP idle ---
+  // --- Caso 2: sin afinidad, buscar cualquier CPU idle ---
   static volatile int next_cpu = 0;
   int start = __sync_fetch_and_add(&next_cpu, 1) % MAX_CPUS;
 
@@ -574,31 +586,29 @@ static void sched_kick_idle_cpu(task_t *t) {
       continue;
 
     cur->need_resched = 1;
-    __sync_synchronize();
+    target_cpu = cpu;
+    dest_lapic = per_cpu(lapic_id, cpu);
 
-    // [FIX self-IPI] Mismo check que arriba. Si el lapic_id del
-    // destino coincide con el nuestro, no enviamos el IPI (el LAPIC
-    // lo descarta) y en su lugar despertamos nuestra propia idle.
-    uint32_t dest_lapic = per_cpu(lapic_id, cpu);
-    if (dest_lapic == (uint32_t)me) {
-      task_t *me_task = sched_current();
-      if (me_task && me_task->is_idle) {
-        me_task->need_resched = 1;
-      } else {
-        sched_mark_need_resched();
-      }
-      return;
-    }
+    if (dest_lapic != per_cpu(lapic_id, me))
+      send_ipi = 1;
+    break;
+  }
 
+  /*
+   * Si el LAPIC destino resulta ser el nuestro, no enviamos un self-IPI.
+   * La tarea ya queda READY; si la CPU local es idle, el fallback local
+   * asegura que pueda ejecutar en su siguiente tick.
+   */
+  if (!send_ipi) {
+    task_t *me_task = per_cpu(current_task, me);
+    if (me_task && me_task->is_idle)
+      me_task->need_resched = 1;
+  }
+
+  spin_unlock_irqrestore(&sched_lock, flags);
+
+  if (send_ipi)
     ipi_send(dest_lapic, IPI_VECTOR_RESCHED);
-    return;
-  }
-
-  // --- Fallback: no hay ninguna CPU idle. Despertar a la actual. ---
-  task_t *me_task = sched_current();
-  if (me_task && me_task->is_idle) {
-    me_task->need_resched = 1;
-  }
 }
 
 // ---------------------------------------------------------------------------
