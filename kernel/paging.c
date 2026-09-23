@@ -10,6 +10,13 @@
 static uint64_t *kernel_pml4 = NULL;
 int cpu_smap_enabled = 0;
 
+/* Test-only allocation fault injection. -1 disables it; 0 fails now. */
+static int paging_test_fail_alloc_after = -1;
+
+void paging_test_set_alloc_fail_after(int successful_allocs) {
+  paging_test_fail_alloc_after = successful_allocs;
+}
+
 // ===========================================================================
 // Helpers de page tables
 // ===========================================================================
@@ -25,6 +32,11 @@ static uint64_t *alloc_page_table_early(void) {
 }
 
 static uint64_t *alloc_page_table(void) {
+  if (paging_test_fail_alloc_after == 0)
+    return NULL;
+  if (paging_test_fail_alloc_after > 0)
+    paging_test_fail_alloc_after--;
+
   uint64_t phys = pmm_alloc_page();
   if (!phys) {
     LOG_ERR("[PAGING] ERROR: PMM sin páginas libres");
@@ -449,14 +461,13 @@ uint64_t paging_clone_kernel_space(void) {
 
 int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
                        uint64_t flags) {
-  uint64_t pml4_idx = PML4_INDEX(virt);
+  if (!pml4)
+    return -1;
 
-  // User mappings are restricted to the lower canonical half.  Process
-  // address spaces share the kernel's upper PML4 entries, so allowing a
-  // PTE_USER mapping there would let a user process modify kernel page
-  // tables (PML4 entries 256..511).
+  uint64_t pml4_idx = PML4_INDEX(virt);
   if ((flags & PTE_USER) && pml4_idx >= 256)
     return -1;
+
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
   uint64_t pt_idx = PT_INDEX(virt);
@@ -465,12 +476,17 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
   if (flags & PTE_USER)
     intermediate_flags |= PTE_USER;
 
-  // --- PML4 ---
-  if (!(pml4[pml4_idx] & PTE_PRESENT)) {
+  uint64_t old_pml4 = pml4[pml4_idx];
+  uint64_t old_pdpt = 0;
+  int created_pml4 = 0;
+  int created_pdpt = 0;
+
+  if (!(old_pml4 & PTE_PRESENT)) {
     uint64_t *new_pdpt = alloc_page_table();
     if (!new_pdpt)
       return -1;
     pml4[pml4_idx] = (virt_to_phys(new_pdpt) & PTE_FRAME) | intermediate_flags;
+    created_pml4 = 1;
   } else {
     if (flags & PTE_USER)
       pml4[pml4_idx] |= PTE_USER;
@@ -478,13 +494,19 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
       pml4[pml4_idx] |= PTE_WRITABLE;
   }
   uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & PTE_FRAME);
+  old_pdpt = pdpt[pdpt_idx];
 
-  // --- PDPT ---
-  if (!(pdpt[pdpt_idx] & PTE_PRESENT)) {
+  if (!(old_pdpt & PTE_PRESENT)) {
     uint64_t *new_pd = alloc_page_table();
-    if (!new_pd)
+    if (!new_pd) {
+      if (created_pml4) {
+        pmm_free_page(pml4[pml4_idx] & PTE_FRAME);
+        pml4[pml4_idx] = old_pml4;
+      }
       return -1;
+    }
     pdpt[pdpt_idx] = (virt_to_phys(new_pd) & PTE_FRAME) | intermediate_flags;
+    created_pdpt = 1;
   } else {
     if (flags & PTE_USER)
       pdpt[pdpt_idx] |= PTE_USER;
@@ -495,15 +517,32 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
 
   if ((pd[pd_idx] & PTE_PRESENT) && (pd[pd_idx] & PTE_HUGE)) {
     uint64_t *split_pt = split_huge_page(pd, pd_idx);
-    if (!split_pt)
+    if (!split_pt) {
+      if (created_pdpt) {
+        pmm_free_page(pdpt[pdpt_idx] & PTE_FRAME);
+        pdpt[pdpt_idx] = old_pdpt;
+      }
+      if (created_pml4) {
+        pmm_free_page(pml4[pml4_idx] & PTE_FRAME);
+        pml4[pml4_idx] = old_pml4;
+      }
       return -1;
+    }
   }
 
-  // --- PD ---
   if (!(pd[pd_idx] & PTE_PRESENT)) {
     uint64_t *new_pt = alloc_page_table();
-    if (!new_pt)
+    if (!new_pt) {
+      if (created_pdpt) {
+        pmm_free_page(pdpt[pdpt_idx] & PTE_FRAME);
+        pdpt[pdpt_idx] = old_pdpt;
+      }
+      if (created_pml4) {
+        pmm_free_page(pml4[pml4_idx] & PTE_FRAME);
+        pml4[pml4_idx] = old_pml4;
+      }
       return -1;
+    }
     pd[pd_idx] = (virt_to_phys(new_pt) & PTE_FRAME) | intermediate_flags;
   } else {
     if (flags & PTE_USER)
@@ -513,9 +552,7 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
   }
   uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & PTE_FRAME);
 
-  // --- PT (hoja) ---
   pt[pt_idx] = (phys & PTE_FRAME) | (flags & (0xFFF | PTE_NX)) | PTE_PRESENT;
-
   paging_invalidate_tlb(virt);
   return 0;
 }
