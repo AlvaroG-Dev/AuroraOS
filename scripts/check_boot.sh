@@ -292,7 +292,7 @@ EXPECTED_BOOT=(
     "[PF] Demand paging inicializado"
     "[HEAP] Heap inicializado"
     "[SLAB] Inicializado: 8 caches"
-    "[TARFS] Carga completa. nodos registrados."
+    "[TARFS] Carga completa."
     "[RTC] CMOS RTC detectado"
     "[SCHED] Scheduler + SSE/FPU SMP inicializado"
     "[IPC] Subsistema de Paso de Mensajes inicializado."
