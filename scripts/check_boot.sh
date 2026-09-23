@@ -15,6 +15,9 @@
 #
 # Uso:
 #   ./scripts/check_boot.sh [timeout_seconds]
+#   ./scripts/check_boot.sh --smp 2
+#   ./scripts/check_boot.sh --smp 4
+#   ./scripts/check_boot.sh 180 --smp 4
 #
 # Variables de entorno:
 #   TIMEOUT        (default: 90)     segundos antes de matar QEMU
@@ -22,7 +25,7 @@
 #   OVMF_VARS_SRC  (default: /usr/share/OVMF/OVMF_VARS_4M.fd)
 #   QEMU_BIN       (default: qemu-system-x86_64)
 #   QEMU_CPU       (default: max)
-#   QEMU_SMP       (default: 1)      CPUs a emular. >1 requiere KVM para APs.
+#   QEMU_SMP       (default: 1)      CPUs a emular. Normalmente 1, 2 o 4.
 #   QEMU_MEM       (default: 512M)
 #   USE_KVM        (default: auto)   auto|yes|no
 #   KEEP_LOGS      (default: no)     yes para no borrar serial.log/qemu.log
@@ -62,7 +65,67 @@ KEEP_LOGS="${KEEP_LOGS:-no}"
 REQUIRE_SMP="${REQUIRE_SMP:-auto}"
 REQUIRE_DISK="${REQUIRE_DISK:-yes}"
 SHOW_SERIAL="${SHOW_SERIAL:-yes}"
-SHOW_SERIAL_LINES="${SHOW_SERIAL_LINES:-0}"
+SHOW_SERIAL_LINES="\${SHOW_SERIAL_LINES:-0}"
+
+# ---------------------------------------------------------------------------
+# Argumentos CLI
+# ---------------------------------------------------------------------------
+# La interfaz existente mantiene el primer argumento numérico como timeout.
+# --smp 2/4 es un atajo explícito para ejecutar la misma prueba de boot con
+# varios CPUs y, al usarse, exige que los APs arranquen correctamente.
+CLI_SMP=""
+CLI_TIMEOUT=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --smp)
+            if [ "$#" -lt 2 ]; then
+                log_error "--smp requiere 2 o 4"
+                exit 2
+            fi
+            case "$2" in
+                2|4) CLI_SMP="$2" ;;
+                *)
+                    log_error "--smp solo admite 2 o 4 CPUs"
+                    exit 2
+                    ;;
+            esac
+            shift 2
+            ;;
+        --smp=2|--smp=4)
+            CLI_SMP="${1#*=}"
+            shift
+            ;;
+        --help|-h)
+            sed -n '1,45p' "$0"
+            exit 0
+            ;;
+        ''|*[!0-9]*)
+            log_error "argumento no reconocido: $1"
+            log_info "Uso: $0 [timeout_seconds] [--smp 2|4]"
+            exit 2
+            ;;
+        *)
+            if [ -n "$CLI_TIMEOUT" ]; then
+                log_error "timeout especificado más de una vez"
+                exit 2
+            fi
+            CLI_TIMEOUT="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -n "$CLI_TIMEOUT" ]; then
+    TIMEOUT="$CLI_TIMEOUT"
+fi
+if [ -n "$CLI_SMP" ]; then
+    QEMU_SMP="$CLI_SMP"
+    # La opción --smp significa explícitamente "prueba SMP": no basta con
+    # que QEMU cree vCPUs; queremos verificar que Aurora arranca sus APs.
+    if [ "${REQUIRE_SMP:-auto}" = "auto" ]; then
+        REQUIRE_SMP=yes
+    fi
+fi
 
 cd "$ROOT"
 
