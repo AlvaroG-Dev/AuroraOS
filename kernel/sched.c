@@ -668,14 +668,6 @@ task_t *sched_create_user_task_stopped(void (*fn)(void),
   return task;
 }
 
-task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
-                               uint64_t cr3) {
-  task_t *t = sched_create_user_task_stopped(fn, user_stack_top, cr3);
-  if (!t)
-    return NULL;
-  task_list_insert(t);
-  return t;
-}
 // ---------------------------------------------------------------------------
 // Búsqueda
 // ---------------------------------------------------------------------------
