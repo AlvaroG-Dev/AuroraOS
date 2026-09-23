@@ -612,11 +612,14 @@ REGISTER_TEST_FLAGS("smp: IPI wakeup cross-CPU", test_smp_ipi_wakeup,
 // different queues, the 17th queue was never awakened and its task could
 // remain BLOCKED forever.
 //
-// The test deliberately puts all 17 tasks into distinct wait queues, then
-// forces all deadlines to be expired before making exactly one call to
-// sched_wake_expired(). This makes the old 16-queue cap fail deterministically.
+// The test deliberately puts all 17 tasks into distinct wait queues. Once
+// every waiter is blocked, it advances the kernel tick counter past the
+// common timeout while interrupts are disabled and calls sched_wake_expired()
+// exactly once. This keeps the test deterministic while preserving the real
+// wait_event_interruptible_timeout() deadline used by each waiter.
 // ---------------------------------------------------------------------------
 #define TIMEOUT_WQ_TEST_COUNT 17
+#define TIMEOUT_WQ_TEST_TIMEOUT 100
 
 typedef struct timeout_wq_test_slot {
   wait_queue_t wq;
@@ -659,7 +662,7 @@ static void timeout_wq_test_waiter(void) {
 
   slot->result =
       wait_event_interruptible_timeout(&slot->wq, timeout_wq_never_ready,
-                                       NULL, 1000000);
+                                       NULL, TIMEOUT_WQ_TEST_TIMEOUT);
   slot->completed = 1;
   __sync_fetch_and_add(&g_timeout_wq_completed, 1);
 }
@@ -675,13 +678,18 @@ static void test_sched_timeout_more_than_16_queues(void) {
     g_timeout_wq_slots[i].result = -1;
   }
 
-  // Create all waiters. They use a very long timeout so none can expire
-  // naturally before all 17 tasks have reached TASK_BLOCKED.
+  // Create all waiters. They all use the same finite timeout. We will
+  // advance tick_count after all 17 have reached TASK_BLOCKED, so no waiter
+  // can expire naturally before the complete set is ready.
   for (int i = 0; i < TIMEOUT_WQ_TEST_COUNT; i++) {
     task_t *task = sched_create_task(timeout_wq_test_waiter);
-    TEST_ASSERT(task != NULL, "sched_create_task falló en waiter %d", i);
-    if (!task)
+    if (!task) {
+      TEST_ASSERT(0, "sched_create_task falló en waiter %d", i);
+      // Avoid leaving already-created waiters permanently blocked.
+      for (int j = 0; j < i; j++)
+        wake_up_all(&g_timeout_wq_slots[j].wq);
       return;
+    }
 
     g_timeout_wq_slots[i].task = task;
     g_timeout_wq_slots[i].task_id = task->id;
@@ -704,56 +712,63 @@ static void test_sched_timeout_more_than_16_queues(void) {
     if (sched_get_ticks() >= block_deadline) {
       TEST_ASSERT(0, "solo %d/%d waiters llegaron a TASK_BLOCKED", blocked,
                   TIMEOUT_WQ_TEST_COUNT);
+      for (int i = 0; i < TIMEOUT_WQ_TEST_COUNT; i++)
+        wake_up_all(&g_timeout_wq_slots[i].wq);
       return;
     }
 
     sched_yield();
   }
 
-  // Stop timer interrupts on the BSP while we make the 17 deadlines expired
-  // and invoke sched_wake_expired exactly once. APs do not call this function:
-  // time_tick() restricts it to CPU 0.
-  uint64_t now;
-  do {
-    now = sched_get_ticks();
-    if (now == 0)
-      sched_yield();
-  } while (now == 0);
-
+  /*
+   * Make all real wait_event() deadlines expire simultaneously.
+   *
+   * We deliberately advance tick_count rather than overwriting each task's
+   * wake_deadline. wait_common() keeps its own local deadline, so changing
+   * only task->wake_deadline would wake the task but make wait_common() think
+   * its timeout had not elapsed; that was the flaw in the first version of
+   * this regression test.
+   *
+   * Disabling interrupts prevents the normal timer handler from racing with
+   * the single explicit sched_wake_expired() call below.
+   */
   unsigned long flags;
   __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
 
-  uint64_t expired_deadline = now - 1;
-  for (int i = 0; i < TIMEOUT_WQ_TEST_COUNT; i++) {
-    g_timeout_wq_slots[i].task->wake_deadline = expired_deadline;
-  }
+  uint64_t now = tick_count;
+  tick_count = now + TIMEOUT_WQ_TEST_TIMEOUT + 1;
 
   // With the old implementation this wakes only 16 distinct queues.
   sched_wake_expired();
 
   __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 
-  // Every waiter must observe a timeout return (0), not remain blocked.
+  // Every waiter must actually run after being made READY and observe a
+  // timeout return (0), not remain blocked or re-enter the wait.
   uint64_t done_deadline = sched_get_ticks() + 2000;
   while (g_timeout_wq_completed < TIMEOUT_WQ_TEST_COUNT &&
          sched_get_ticks() < done_deadline) {
     sched_yield();
   }
 
-  TEST_ASSERT(g_timeout_wq_completed == TIMEOUT_WQ_TEST_COUNT,
-              "solo %d/%d waiters completaron tras despertar por timeout",
-              g_timeout_wq_completed, TIMEOUT_WQ_TEST_COUNT);
-
+  // Aggregate the result into one assertion so one broken scheduler path
+  // produces one failing test rather than dozens of failures.
+  int completed = g_timeout_wq_completed;
+  int bad_results = 0;
   for (int i = 0; i < TIMEOUT_WQ_TEST_COUNT; i++) {
-    TEST_ASSERT(g_timeout_wq_slots[i].completed == 1,
-                "waiter %d no completó", i);
-    TEST_ASSERT(g_timeout_wq_slots[i].result == 0,
-                "waiter %d devolvió %ld, esperado timeout=0", i,
-                g_timeout_wq_slots[i].result);
+    if (g_timeout_wq_slots[i].completed != 1 ||
+        g_timeout_wq_slots[i].result != 0)
+      bad_results++;
   }
 
-  LOG_INFO("[TEST] timeout-wq: %d/%d colas distintas despertadas correctamente",
-           TIMEOUT_WQ_TEST_COUNT, TIMEOUT_WQ_TEST_COUNT);
+  TEST_ASSERT(completed == TIMEOUT_WQ_TEST_COUNT && bad_results == 0,
+              "timeout wakeup incorrect: completed=%d/%d, resultados_invalidos=%d",
+              completed, TIMEOUT_WQ_TEST_COUNT, bad_results);
+
+  if (completed == TIMEOUT_WQ_TEST_COUNT && bad_results == 0) {
+    LOG_INFO("[TEST] timeout-wq: %d/%d waiters despertados y retornaron timeout",
+             TIMEOUT_WQ_TEST_COUNT, TIMEOUT_WQ_TEST_COUNT);
+  }
 }
 REGISTER_TEST_FLAGS("sched: timeout wakeup >16 wait queues",
                     test_sched_timeout_more_than_16_queues, TEST_FLAG_BLOCKING);
