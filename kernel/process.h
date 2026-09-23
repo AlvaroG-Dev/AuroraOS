@@ -49,13 +49,8 @@ void process_exit(process_t *proc, int exit_code);
 // kill_current_process.
 __attribute__((noreturn)) void process_exit_current(int exit_code);
 
-static inline process_t *process_exec(const char *path) {
-  return process_load(path);
-}
 
 process_t *process_current(void);
-process_t *process_get_by_pid(uint32_t pid);
 void *process_sbrk(process_t *proc, int64_t increment);
-void process_terminate(process_t *proc);
 
 #endif // PROCESS_H
