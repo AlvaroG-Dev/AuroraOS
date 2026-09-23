@@ -77,8 +77,6 @@ typedef struct task {
 
 void sched_init(void);
 task_t *sched_create_task(void (*fn)(void));
-task_t *sched_create_user_task(void (*fn)(void), uint64_t user_stack_top,
-                               uint64_t cr3);
 
 // [Fase A] Crea una tarea de usuario pero NO la inserta en la runqueue.
 // El llamante debe inicializar task->proc y llamar a sched_make_ready(task)
