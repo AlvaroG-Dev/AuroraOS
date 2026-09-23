@@ -9,7 +9,7 @@ on:
 
 jobs:
   qemu-smoke-test:
-    name: Arrancar en QEMU (\${{ matrix.smp }} CPU)
+    name: Arrancar en QEMU (${{ matrix.smp }} CPU)
     runs-on: ubuntu-24.04
 
     strategy:
@@ -36,11 +36,11 @@ jobs:
           ls -l /usr/share/OVMF/OVMF_CODE_4M.fd
           ls -l /usr/share/OVMF/OVMF_VARS_4M.fd
 
-      - name: Arrancar en QEMU (TCG, \${{ matrix.smp }} CPU)
+      - name: Arrancar en QEMU (TCG, ${{ matrix.smp }} CPU)
         env:
           USE_KVM: no
-          QEMU_SMP: \${{ matrix.smp }}
-          REQUIRE_SMP: \${{ matrix.smp == 1 && 'no' || 'yes' }}
+          QEMU_SMP: ${{ matrix.smp }}
+          REQUIRE_SMP: ${{ matrix.smp == 1 && 'no' || 'yes' }}
           TIMEOUT: 30
           SHOW_SERIAL: yes
           SHOW_SERIAL_LINES: 500
@@ -52,7 +52,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: serial-log-\${{ matrix.smp }}cpu
+          name: serial-log-${{ matrix.smp }}cpu
           path: serial.log
           if-no-files-found: warn
           retention-days: 14
@@ -61,7 +61,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-log-\${{ matrix.smp }}cpu
+          name: qemu-log-${{ matrix.smp }}cpu
           path: qemu.log
           if-no-files-found: warn
           retention-days: 14
