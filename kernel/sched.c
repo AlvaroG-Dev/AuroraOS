@@ -829,65 +829,123 @@ void sched_wake_expired(void) {
   uint64_t now = sched_get_ticks();
 
   /*
-   * No usamos una lista de tamaño fijo aquí.
+   * No usamos un array fijo en la pila.
    *
-   * Antes se almacenaban como máximo 16 wait queues en un array local.
-   * Si expiraban más de 16 colas distintas en el mismo tick, las tareas
-   * adicionales perdían su deadline y podían quedar bloqueadas para siempre.
+   * Antes había 16 entradas y, si expiraban más de 16 wait queues distintas
+   * en el mismo tick, las tareas restantes perdían su wake_deadline sin que
+   * su cola llegara a despertarse. Eso podía dejarlas bloqueadas para siempre.
    *
-   * Tampoco conviene sustituir 16 por un número grande (p. ej. 1200):
-   * este array vive en la pila del kernel. 1200 punteros ya son ~9.6 KiB,
-   * más que TASK_STACK_SIZE (8 KiB), y además seguiría existiendo un límite
-   * arbitrario.
+   * Tampoco basta con cambiar 16 por 1200: 1200 punteros son ~9.6 KiB,
+   * más que TASK_STACK_SIZE (8 KiB), y seguiría siendo un límite arbitrario.
    *
-   * En su lugar procesamos una cola cada vez. Cada iteración encuentra una
-   * tarea con timeout expirado, publica wake_deadline=0 bajo sched_lock,
-   * suelta el lock y despierta la wait queue fuera de sched_lock. Al hacer
-   * wake_up_all(), todas las tareas de esa cola salen de la cola de espera,
-   * por lo que la siguiente iteración avanza hacia la siguiente cola
-   * pendiente sin necesitar ningún límite.
+   * Construimos la lista de wait queues en el heap. La capacidad inicial es
+   * el número de tareas existente bajo sched_lock, que es una cota superior
+   * al número de wait queues distintas. Si se crean tareas concurrentemente
+   * antes de la segunda pasada, detectamos overflow y reintentamos con una
+   * capacidad mayor.
    *
-   * Mantener wake_up_all() fuera de sched_lock es importante: la ruta de
-   * wakeup toma wq->lock y sched_make_ready() toma sched_lock.
+   * Importante: recopilamos cada wait queue como máximo una vez por llamada.
+   * Una tarea despertada puede volver a bloquearse antes de que termine esta
+   * función; si se volviera a escanear sin recordar las colas ya procesadas,
+   * podría despertarse repetidamente en el mismo tick por un deadline
+   * absoluto que sigue vencido.
    */
-  while (1) {
-    wait_queue_t *expired_wq = NULL;
 
+  size_t capacity = 0;
+
+  while (1) {
     unsigned long flags = spin_lock_irqsave(&sched_lock);
 
+    size_t task_count = 0;
     if (task_list_head) {
       task_t *p = task_list_head;
-      task_t *start = p;
-
+      task_t *start_task = p;
       do {
-        if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
-            now >= p->wake_deadline) {
-          /*
-           * Publicar la expiración bajo sched_lock. Si waiting_on es NULL,
-           * la tarea está en una transición concurrente de wakeup; no hay
-           * una cola que podamos despertar desde aquí.
-           */
-          p->wake_deadline = 0;
-          expired_wq = p->waiting_on;
-          if (expired_wq != NULL)
-            break;
-        }
-
+        task_count++;
         p = p->next;
-      } while (p && p != start);
+      } while (p && p != start_task);
     }
 
     spin_unlock_irqrestore(&sched_lock, flags);
 
-    if (expired_wq == NULL) {
+    if (task_count == 0)
+      return;
+
+    if (capacity < task_count)
+      capacity = task_count;
+
+    wait_queue_t **wqs =
+        (wait_queue_t **)kmalloc(capacity * sizeof(*wqs));
+    if (!wqs) {
       /*
-       * No quedan colas con timeout expirado que podamos procesar.
-       * Una tarea observada en transición (waiting_on == NULL) será
-       * completada por el waker que inició esa transición.
+       * No podemos construir una lista completa. No consumimos ningún
+       * deadline aquí; se reintentará en el siguiente tick. Es preferible
+       * retrasar un timeout que perderlo definitivamente.
        */
-      break;
+      LOG_WARN("[SCHED] Sin memoria para procesar timeouts (%zu tareas)",
+               task_count);
+      return;
     }
 
-    wake_up_all(expired_wq);
+    size_t n_wqs = 0;
+    int overflow = 0;
+
+    flags = spin_lock_irqsave(&sched_lock);
+
+    if (task_list_head) {
+      task_t *p = task_list_head;
+      task_t *start_task = p;
+
+      do {
+        if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
+            now >= p->wake_deadline && p->waiting_on != NULL) {
+          wait_queue_t *wq = p->waiting_on;
+
+          int dup = 0;
+          for (size_t i = 0; i < n_wqs; i++) {
+            if (wqs[i] == wq) {
+              dup = 1;
+              break;
+            }
+          }
+
+          if (!dup) {
+            if (n_wqs >= capacity) {
+              overflow = 1;
+              break;
+            }
+            wqs[n_wqs++] = wq;
+          }
+
+          /*
+           * Sólo consumimos el deadline después de haber garantizado que
+           * la wait queue está registrada en la lista a despertar.
+           */
+          p->wake_deadline = 0;
+        }
+
+        p = p->next;
+      } while (p && p != start_task);
+    }
+
+    spin_unlock_irqrestore(&sched_lock, flags);
+
+    if (overflow) {
+      kfree(wqs);
+      /*
+       * Puede haber entrado una tarea nueva entre las dos pasadas.
+       * Aumentamos la capacidad y repetimos sin modificar deadlines.
+       */
+      capacity *= 2;
+      if (capacity < task_count + 1)
+        capacity = task_count + 1;
+      continue;
+    }
+
+    for (size_t i = 0; i < n_wqs; i++)
+      wake_up_all(wqs[i]);
+
+    kfree(wqs);
+    return;
   }
 }
