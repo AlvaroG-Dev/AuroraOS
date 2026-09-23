@@ -828,47 +828,66 @@ uint64_t sched_get_ticks(void) { return tick_count; }
 void sched_wake_expired(void) {
   uint64_t now = sched_get_ticks();
 
-  // Recolectar las wait queues de tareas cuyo deadline expiró.
-  wait_queue_t *wqs[16];
-  int n_wqs = 0;
+  /*
+   * No usamos una lista de tamaño fijo aquí.
+   *
+   * Antes se almacenaban como máximo 16 wait queues en un array local.
+   * Si expiraban más de 16 colas distintas en el mismo tick, las tareas
+   * adicionales perdían su deadline y podían quedar bloqueadas para siempre.
+   *
+   * Tampoco conviene sustituir 16 por un número grande (p. ej. 1200):
+   * este array vive en la pila del kernel. 1200 punteros ya son ~9.6 KiB,
+   * más que TASK_STACK_SIZE (8 KiB), y además seguiría existiendo un límite
+   * arbitrario.
+   *
+   * En su lugar procesamos una cola cada vez. Cada iteración encuentra una
+   * tarea con timeout expirado, publica wake_deadline=0 bajo sched_lock,
+   * suelta el lock y despierta la wait queue fuera de sched_lock. Al hacer
+   * wake_up_all(), todas las tareas de esa cola salen de la cola de espera,
+   * por lo que la siguiente iteración avanza hacia la siguiente cola
+   * pendiente sin necesitar ningún límite.
+   *
+   * Mantener wake_up_all() fuera de sched_lock es importante: la ruta de
+   * wakeup toma wq->lock y sched_make_ready() toma sched_lock.
+   */
+  while (1) {
+    wait_queue_t *expired_wq = NULL;
 
-  unsigned long flags = spin_lock_irqsave(&sched_lock);
+    unsigned long flags = spin_lock_irqsave(&sched_lock);
 
-  if (task_list_head) {
-    task_t *p = task_list_head;
-    task_t *start = p;
-    do {
-      if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
-          now >= p->wake_deadline) {
-        p->wake_deadline = 0;
-        if (n_wqs < 16 && p->waiting_on != NULL) {
-          // Evitar duplicados: si varias tareas comparten wq, sólo
-          // la despertamos una vez.
-          int dup = 0;
-          for (int i = 0; i < n_wqs; i++) {
-            if (wqs[i] == p->waiting_on) {
-              dup = 1;
-              break;
-            }
-          }
-          if (!dup)
-            wqs[n_wqs++] = p->waiting_on;
+    if (task_list_head) {
+      task_t *p = task_list_head;
+      task_t *start = p;
+
+      do {
+        if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
+            now >= p->wake_deadline) {
+          /*
+           * Publicar la expiración bajo sched_lock. Si waiting_on es NULL,
+           * la tarea está en una transición concurrente de wakeup; no hay
+           * una cola que podamos despertar desde aquí.
+           */
+          p->wake_deadline = 0;
+          expired_wq = p->waiting_on;
+          if (expired_wq != NULL)
+            break;
         }
-      }
-      p = p->next;
-    } while (p && p != start);
-  }
 
-  spin_unlock_irqrestore(&sched_lock, flags);
+        p = p->next;
+      } while (p && p != start);
+    }
 
-  // Despertar cada wq fuera de sched_lock.
-  //
-  // wake_up_all toma wq->lock, quita las tareas de la cola, las marca
-  // READY (manteniendo el invariante waiting_on == NULL) y avisa a un
-  // AP idle. Las tareas que despierten pero cuyo cond() siga siendo
-  // falso volverán a dormirse en la siguiente iteración de wait_common
-  // con su wake_deadline restaurado.
-  for (int i = 0; i < n_wqs; i++) {
-    wake_up_all(wqs[i]);
+    spin_unlock_irqrestore(&sched_lock, flags);
+
+    if (expired_wq == NULL) {
+      /*
+       * No quedan colas con timeout expirado que podamos procesar.
+       * Una tarea observada en transición (waiting_on == NULL) será
+       * completada por el waker que inició esa transición.
+       */
+      break;
+    }
+
+    wake_up_all(expired_wq);
   }
 }
