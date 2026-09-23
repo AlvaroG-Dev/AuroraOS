@@ -30,6 +30,7 @@
 #define ERANGE 34
 #define ENOSYS 38
 #define ETIMEDOUT 110
+#define EINPROGRESS 115
 
 // Comprueba que [p, p+n) está dentro del espacio de usuario.
 static inline bool access_ok(const void *p, size_t n) {
@@ -65,5 +66,9 @@ extern const uint64_t __uaccess_table_end[];
 
 // Busca (fault_rip, fixup_rip) en la tabla. Devuelve el fixup o 0.
 uint64_t uaccess_lookup_fixup(uint64_t fault_rip);
+
+// Parchea stac/clac a NOP si la CPU no soporta SMAP. Llamar una vez
+// desde kmain() tras paging_init().
+void uaccess_init(void);
 
 #endif

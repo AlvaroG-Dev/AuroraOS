@@ -179,22 +179,7 @@ void wake_up_all(wait_queue_t *wq) {
 
 void wake_up_one(wait_queue_t *wq) {
   unsigned long flags = spin_lock_irqsave(&wq->lock);
-  if (!wq->head) {
-    spin_unlock_irqrestore(&wq->lock, flags);
-    return;
-  }
-  wait_queue_entry_t *e = wq->head;
-  wq->head = e->next;
-  wq->nr_waiting--;
-
-  task_t *t = e->task;
-  t->waiting_on = NULL;
-  t->wake_reason = 0;
-  e->task = NULL;
-  e->next = NULL;
-  sched_make_ready(t);
-  task_put(t);
-
+  wake_up_one_locked(wq);
   spin_unlock_irqrestore(&wq->lock, flags);
 }
 
@@ -217,4 +202,20 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
   }
 
   spin_unlock_irqrestore(&wq->lock, flags);
+}
+
+void wake_up_one_locked(wait_queue_t *wq) {
+  if (!wq->head)
+    return;
+  wait_queue_entry_t *e = wq->head;
+  wq->head = e->next;
+  wq->nr_waiting--;
+
+  task_t *t = e->task;
+  t->waiting_on = NULL;
+  t->wake_reason = 0;
+  e->task = NULL;
+  e->next = NULL;
+  sched_make_ready(t);
+  task_put(t);
 }

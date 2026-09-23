@@ -63,13 +63,14 @@ image: bootloader kernel
 QEMU_FLAGS_COMMON = \
 	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 	-drive if=pflash,format=raw,file=OVMF_VARS.fd \
-	-m 512M \
+	-m 5G \
 	-no-reboot -no-shutdown
 
 QEMU_FLAGS_DEBUG = \
 	-debugcon file:debug.log \
 	-d int,cpu_reset \
-	-D qemu_debug.log
+	-D qemu_debug.log \
+	-s -S
 
 # Flags para KVM: -enable-kvm usa la aceleración, -cpu host expone la CPU
 # real del host (con SMEP, SMAP, VT-x, etc.). Con esto, INIT-SIPI-SIPI

@@ -247,6 +247,65 @@ ipi_stub_tlb:
     add rsp, 16
     iretq
     
+
+; ---------------------------------------------------------------------------
+; MSI stubs. Un solo vector (0x60) para el AHCI.
+;
+; Igual que irq_common, pero con int_num hardcodeado a 0x60.
+; Lo usamos en lugar de una macro porque solo necesitamos uno.
+; ---------------------------------------------------------------------------
+extern msi_handler
+
+global msi_stub_0x60
+msi_stub_0x60:
+    push 0          ; dummy error code
+    push 0x60       ; int_num = 0x60
+    jmp msi_common
+
+; ---------------------------------------------------------------------------
+; msi_common: como irq_common, pero llama a msi_handler en vez de irq_handler.
+; ---------------------------------------------------------------------------
+msi_common:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    push r15                         ; dummy: alineación a 16
+
+    mov rdi, rsp
+    add rdi, 8                       ; saltar el dummy
+    call msi_handler
+
+    add rsp, 8                       ; quitar dummy
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 16                      ; limpiar int_num + error_code
+    iretq
+
 ; ---------------------------------------------------------------------------
 ; isr_spurious: stub para el vector espurio del LAPIC (0xFF).
 ; No hace nada. Solo iretq. Configurado en la IDT para que el LAPIC

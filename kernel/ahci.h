@@ -2,7 +2,7 @@
 #ifndef KERNEL_AHCI_H
 #define KERNEL_AHCI_H
 
-#include "ata_common.h" // reutilizamos ATA_OK, ATA_ERR_*, ATA_CMD_*
+#include "ata_common.h"
 #include "block.h"
 #include "driver.h"
 #include "pci.h"
@@ -10,49 +10,22 @@
 #include "wait.h"
 #include <stdint.h>
 
-// ---------------------------------------------------------------------------
-// AHCI 1.3.1 — Advanced Host Controller Interface
-//
-// Controlador SATA nativo. Un HBA gestiona hasta 32 puertos; cada puerto
-// tiene:
-//   - Una Command List (32 slots de Command Header, 32 B cada uno).
-//   - Una Received FIS Structure (256 B mínimo) donde el HBA escribe los
-//     FIS que devuelve el dispositivo.
-//   - Una Command Table por slot (con FIS H2D + PRDT).
-//
-// El driver actual usa el slot 0 de la Command List de cada puerto y espera
-// la IRQ del HBA para completar. Sin NCQ por ahora.
-//
-// Referencias:
-//   - AHCI 1.3.1 spec (Intel, 2012).
-//   - Serial ATA 3.0 (AHCI usa FIS de SATA).
-// ---------------------------------------------------------------------------
-
 // ===========================================================================
 // Constantes
 // ===========================================================================
-
 #define AHCI_CMD_LIST_ENTRIES 32
 #define AHCI_CMD_HEADER_SIZE 32
 #define AHCI_CMD_TABLE_SIZE (0x80 + 16 * AHCI_PRDT_ENTRIES)
 #define AHCI_RX_FIS_SIZE 256
 #define AHCI_PRDT_ENTRIES 32
 
-// Flags del PRDT. El bit 31 es IOC (Interrupt On Completion), los
-// bits 0..21 son el DBC (Data Byte Count - 1).
 #define AHCI_PRDT_IOC (1u << 31)
-
-// Bytes máximos por entrada PRD (spec: 4 MB) y por comando (limitamos a
-// 64 KB para que el PRDT nunca se llene aunque el buffer no esté
-// físicamente contiguo).
 #define AHCI_PRD_MAX_BYTES (4u * 1024 * 1024)
 #define AHCI_MAX_XFER_BYTES (64u * 1024)
 
-// Bits de DW0 del Command Header (campo `flags`).
-//   bits 4:0 = CFL (longitud del FIS en dwords), bit 6 = W (H2D data).
 #define AHCI_CMD_WRITE (1u << 6)
 
-// Puerto: bits de PxCMD.
+// PxCMD
 #define AHCI_PxCMD_ST (1u << 0)
 #define AHCI_PxCMD_SUD (1u << 1)
 #define AHCI_PxCMD_POD (1u << 2)
@@ -62,7 +35,7 @@
 #define AHCI_PxCMD_FR (1u << 14)
 #define AHCI_PxCMD_CR (1u << 15)
 
-// Puerto: bits de PxIS.
+// PxIS
 #define AHCI_PxIS_DHRS (1u << 0)
 #define AHCI_PxIS_PSS (1u << 1)
 #define AHCI_PxIS_DSS (1u << 2)
@@ -81,19 +54,18 @@
 #define AHCI_PxIS_TFES (1u << 30)
 #define AHCI_PxIS_CPDS (1u << 31)
 
-// Errores fatales: el HBA para el puerto (CR=0) y hay que recuperarlo.
 #define AHCI_PxIS_FATAL                                                        \
   (AHCI_PxIS_TFES | AHCI_PxIS_HBFS | AHCI_PxIS_HBDS | AHCI_PxIS_IFS |          \
    AHCI_PxIS_OFS)
 
-// Puerto: bits de PxSSTS.
+// PxSSTS
 #define AHCI_SSTS_DET_MASK 0x0F
 #define AHCI_SSTS_DET_NONE 0x00
 #define AHCI_SSTS_DET_PHY 0x01
 #define AHCI_SSTS_DET_READY 0x03
 #define AHCI_SSTS_DET_OFF 0x04
 
-// Tipo de FIS.
+// FIS
 #define FIS_TYPE_REG_H2D 0x27
 #define FIS_TYPE_REG_D2H 0x34
 #define FIS_TYPE_DMA_ACT 0x39
@@ -103,15 +75,27 @@
 #define FIS_TYPE_PIO_SETUP 0x5F
 #define FIS_TYPE_DEV_BITS 0xA1
 
+#define CAP_S64A (1u << 31)
+
 // ===========================================================================
-// Estructuras de memoria compartida con el HBA
+// [AHCI] Umbrales de robustez.
 // ===========================================================================
 
-// Command Header (AHCI 1.3.1, 4.2.2). 32 bytes.
-//   DW0: bits 4:0 CFL, 5 A, 6 W, 7 P, 8 R, 9 B, 10 C, 15:12 PMP,
-//        bits 31:16 PRDTL (16 bits).
-//   DW1: PRDBC (lo escribe el HBA).
-//   DW2/DW3: CTBA / CTBAU (Command Table, alineada a 128 B).
+// Número máximo de IRQs espurias consecutivas (HBA_IS == 0) antes de
+// considerar que la IRQ está compartida con otro dispositivo que
+// mantiene la línea asertada. Al superarlo, la IRQ se queda enmascarada
+// y el polling se encarga. Se recupera reiniciando el sistema.
+#define AHCI_SPURIOUS_LIMIT 32
+
+// Ticks de scheduler (1 ms cada uno) que esperamos antes de que el
+// polling rescate un comando. El IRQ handler en producción tarda
+// <100 us; 2 ms es margen de sobra y minimiza la latencia cuando la
+// IRQ no llega (enmascarada, perdida, storm).
+#define AHCI_POLL_DELAY_TICKS 2
+
+// ===========================================================================
+// Estructuras de memoria compartida
+// ===========================================================================
 typedef struct __attribute__((packed)) {
   uint16_t flags;
   uint16_t prdtl;
@@ -177,47 +161,56 @@ typedef struct ahci_port {
   uint8_t implemented;
   uint8_t initialized;
   uint8_t has_device;
+  uint8_t dead;
 
-  // Command List (1 página, 32 entradas de 32 B).
   uint64_t cmd_list_phys;
   ahci_cmd_header_t *cmd_list;
 
-  // Received FIS (1 página, primeros 256 B usados).
   uint64_t rx_fis_phys;
   ahci_rx_fis_t *rx_fis;
 
-  // Command Table (1 página, 256 B usados para slot 0).
   uint64_t cmd_table_phys;
   ahci_cmd_table_t *cmd_table;
 
-  // Buffer del IDENTIFY. 1 página propia, físicamente contigua y
-  // alineada a 4 KB. El PRDT lo describe con una sola entrada.
   uint64_t identify_phys;
   uint16_t *identify;
 
-  // Serialización del slot 0: `busy` se protege con `lock` (spinlock, solo
-  // para el flag; NUNCA se duerme con él cogido). Los que esperan el slot
-  // duermen en `slot_wq`.
   spinlock_t lock;
   volatile int busy;
   wait_queue_t slot_wq;
 
-  // Comando en vuelo (slot 0): la IRQ despierta a `irq_wq`.
   wait_queue_t irq_wq;
   volatile int irq_pending;
   volatile uint32_t irq_status;
 
-  // Identidad del dispositivo.
+  uint32_t cmd_timeout_ms;
+
+  uint8_t eh_level;
+
+  uint8_t ncq_depth;
+  uint8_t ncq_enabled;
+
+  // [FASE 3] Bio en vuelo
+  struct bio *inflight_bio;
+  uint64_t xfer_lba;
+  uint32_t xfer_left;
+  uint8_t *xfer_buf;
+  int xfer_is_read;
+  int xfer_need_flush;
+  int xfer_error;
+  int xfer_started;
+  uint8_t xfer_state;
+
   uint64_t num_sectors;
   uint32_t sector_size;
 
-  // Enlace al block layer.
   block_device_t *bdev;
 
-  // Debug.
   uint32_t cmd_count;
   uint32_t error_count;
   uint32_t timeout_count;
+  uint64_t
+      last_cmd_tick; // tick del scheduler cuando se lanzó el último comando
 } ahci_port_t;
 
 // ===========================================================================
@@ -238,14 +231,25 @@ typedef struct ahci_hba {
   uint8_t num_ports_impl;
 
   uint8_t initialized;
+
+  // IRQ del controlador.
+  uint8_t irq;
+
+  // [NUEVO] Modo de interrupción activo.
+  uint8_t using_msi;  // 1 si MSI, 0 si IRQ legacy
+  uint8_t irq_masked; // 1 si la IRQ legacy está enmascarada
+
+  // [NUEVO] Detección de storm.
+  uint32_t irq_spurious_count;
+  uint32_t irq_count;
+
+  // [NUEVO] Vector MSI asignado.
+  uint8_t msi_vector;
 } ahci_hba_t;
 
-// ===========================================================================
-// API pública
-// ===========================================================================
 extern struct driver ahci_driver;
-
 void ahci_dump(void);
 int ahci_disk_count(void);
+void ahci_poll_ports(void);
 
 #endif

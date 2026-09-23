@@ -12,6 +12,8 @@ ifeq ($(CROSS),)
              -fno-asynchronous-unwind-tables -fno-pic \
              -nostdlib -nostartfiles -nodefaultlibs -I. \
              -fno-omit-frame-pointer -g -O0 \
+             -march=x86-64 -mtune=generic \
+             -mno-avx -mno-avx2 -mno-avx512f \
              -Wno-unused-parameter -Wframe-larger-than=2048
 else
     CC = x86_64-elf-gcc
@@ -19,6 +21,8 @@ else
              -fno-exceptions -mno-red-zone -mcmodel=kernel \
              -fno-stack-protector -I. \
              -fno-omit-frame-pointer -g -O0 \
+             -march=x86-64 -mtune=generic \
+             -mno-avx -mno-avx2 -mno-avx512f \
              -Wno-unused-parameter -Wframe-larger-than=2048
 endif
 
@@ -28,7 +32,7 @@ LDFLAGS = -nostdlib -T linker.ld -no-pie -Wl,--build-id=none
 OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o serial.o gdt.o idt.o paging.o pmm.o \
         buddy.o spinlock.o heap.o slab.o sched.o ps2.o rtc.o initrd.o tarfs.o vfs.o ipc.o bmp.o pci.o \
         process.o elf.o klog.o pf.o panic.o driver.o input.o wait.o tty.o test.o acpi.o apic.o time.o block.o ata_pio.o \
-        ata_common.o atapi.o ata_dma.o ahci.o gfx/gfx.o gfx/window.o \
+        ata_common.o atapi.o ata_dma.o ahci.o completion.o gfx/gfx.o gfx/window.o \
         ipi.o gfx/compositor.o gfx/taskbar.o gfx/font_aa.o gfx/font_manager.o gfx/winsrv.o \
         uaccess.o uaccess_asm.o uaccess_faults.o \
         tests/pmm_stress.o tests/kernel_tests.o \

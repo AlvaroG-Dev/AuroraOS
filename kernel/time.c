@@ -34,6 +34,8 @@ extern void compositor_notify_clock_tick(void);
 
 extern void sched_wake_expired(void);
 
+extern void ahci_poll_ports(void);
+
 void time_tick(void) {
   if (smp_processor_id() == 0) {
     tick_count++;
@@ -42,6 +44,7 @@ void time_tick(void) {
     }
     // [FIX timeout] Despertar tareas cuyo deadline haya expirado.
     sched_wake_expired();
+    ahci_poll_ports();
   }
 
   sched_tick();

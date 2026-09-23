@@ -98,8 +98,16 @@ pm_entry:
     mov al, 'i'
     out 0xE9, al
 
-    ; 4. Activar Paging (CR0.PG = 1)
+    ; 4. Activar Paging (CR0.PG = 1) limpiando antes CD y NW.
+    ;
+    ; Estado post-reset de x86: CR0 = 0x60000010 con CD=1 (Cache
+    ; Disable) y NW=1 (Not Write-through). Si activamos PG sin
+    ; limpiarlos, el AP arranca con la caché deshabilitada: cada
+    ; acceso a memoria va a RAM física. En KVM apenas se nota; en
+    ; TCG (emulación por software) es catastrófico y, combinado con
+    ; SMP, expone bugs de timing en la inicialización de los APs.
     mov eax, cr0
+    and eax, 0x9FFFFFFF     ; clear CD (bit 30) y NW (bit 29)
     or  eax, 0x80000000     ; CR0.PG
     mov cr0, eax
 

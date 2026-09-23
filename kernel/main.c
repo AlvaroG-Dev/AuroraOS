@@ -227,10 +227,6 @@ static void kmain_task(void) {
     sched_create_task(compositor_thread);
   }
 
-  // App de consola gráfica (antes del SMP, para que no interfiera).
-  LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
-  process_load("apps/shell");
-
   // ---------------------------------------------------------------------------
   // [SMP 4.4] Arrancar APs. Al final del boot para no interferir con la
   // carga de la shell. Los APs quedan en pause esperando smp_sched_active.
@@ -255,11 +251,27 @@ static void kmain_task(void) {
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
+
+  // App de consola gráfica (antes del SMP, para que no interfiera).
+  LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
+  process_load("apps/shell");
   process_load("apps/ipctest");
 
-  while (1) {
-    sched_yield();
-  }
+  // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
+  //
+  // Ese bucle convierte a kmain_task en un busy-loop del BSP cuando
+  // no hay otra tarea READY en la runqueue. Con SMP, las tareas de
+  // usuario (shell, compositor) son absorbidas por los APs vía
+  // sched_kick_idle_cpu, que salta al BSP (me==0 → continue). El
+  // BSP nunca ve un READY en la lista, sched_tick retorna sin
+  // task_switch, y kmain_task gira a 100% CPU para siempre.
+  //
+  // La forma correcta: terminar la tarea. task_entry_wrapper
+  // (switch.asm) se encarga: marca TASK_DEAD, llama a sched_yield,
+  // y sched_tick saltará al idle del BSP, que hace `sti; hlt` y
+  // deja el CPU libre para las IRQs. A partir de ahí el BSP
+  // repartirá tareas normalmente como cualquier otro CPU.
+  return;
 }
 
 // ===========================================================================
@@ -348,6 +360,12 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("OK");
 
   pmm_relocate_bitmap();
+
+  // [FIX SMAP] Parchear stac/clac a NOP si la CPU no soporta SMAP.
+  // Debe ejecutarse ANTES de cualquier código que use uaccess (syscalls,
+  // copy_from_user, etc.) y ANTES de cargar ningún proceso de usuario.
+  // Tras paging_init ya está decidido cpu_smap_enabled.
+  uaccess_init();
 
   LOG_INFO("[INIT] ACPI (MADT)...");
   acpi_init(boot.acpi_rsdp);

@@ -2,6 +2,7 @@
 #ifndef KERNEL_BLOCK_H
 #define KERNEL_BLOCK_H
 
+#include "uaccess.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -51,14 +52,14 @@ typedef void (*bio_end_io_fn)(struct bio *bio);
 
 typedef struct bio {
   struct block_device *bdev; // disco destino
-  uint64_t lba;              // sector inicial (en unidades de bdev->sector_size)
-  uint32_t count;            // número de sectores
-  void *buf;                 // buffer del kernel (no userland)
-  int op;                    // enum bio_op
-  int error;                 // 0 = OK, negativo = error
-  bio_end_io_fn end_io;      // callback al terminar (o NULL)
-  void *end_io_data;         // datos para el callback
-  struct bio *next;          // para encadenar bios (futuro)
+  uint64_t lba;         // sector inicial (en unidades de bdev->sector_size)
+  uint32_t count;       // número de sectores
+  void *buf;            // buffer del kernel (no userland)
+  int op;               // enum bio_op
+  int error;            // 0 = OK, negativo = error
+  bio_end_io_fn end_io; // callback al terminar (o NULL)
+  void *end_io_data;    // datos para el callback
+  struct bio *next;     // para encadenar bios (futuro)
 } bio_t;
 
 // ---------------------------------------------------------------------------
@@ -71,11 +72,11 @@ typedef struct bio {
 struct block_ops;
 
 typedef struct block_device {
-  char name[16];        // "hda", "hda1", "sda", "sr0", ...
-  uint64_t num_sectors; // tamaño total en sectores
-  uint32_t sector_size; // 512 (disco) o 2048 (CD/DVD)
-  int is_read_only;     // 1 para CDs/DVDs
-  int is_partition;     // 0 = disco físico, 1 = partición
+  char name[16];               // "hda", "hda1", "sda", "sr0", ...
+  uint64_t num_sectors;        // tamaño total en sectores
+  uint32_t sector_size;        // 512 (disco) o 2048 (CD/DVD)
+  int is_read_only;            // 1 para CDs/DVDs
+  int is_partition;            // 0 = disco físico, 1 = partición
   struct block_device *parent; // si es partición, apunta al disco
   uint64_t start_lba;          // si es partición, offset en el disco
 
@@ -86,15 +87,29 @@ typedef struct block_device {
 } block_device_t;
 
 // ---------------------------------------------------------------------------
-// block_ops: lo que un driver implementa.
+// Contrato de bio->end_io y ops->submit.
 //
-// submit: ejecuta el bio. Puede ser síncrono (devuelve al terminar) o
-//         asíncrono (devuelve 0 y llama a bio_endio después).
-//         En ambos casos, el driver debe rellenar bio->error.
+// Un driver puede ser:
 //
-// flush:  fuerza escritura a disco. Opcional (NULL si no aplica).
+//   SÍNCRONO:
+//     - Hace el trabajo completo dentro de submit().
+//     - Rellena bio->error.
+//     - Devuelve 0 (OK) o <0 (error, nunca -EINPROGRESS).
+//     - El block layer llama a bio_endio() al final (si end_io != NULL).
 //
-// dump:   debug específico del driver. Opcional.
+//   ASÍNCRONO:
+//     - Arranca el trabajo y devuelve -EINPROGRESS.
+//     - Rellena bio->error más tarde.
+//     - Llama a bio_endio(bio, error) cuando termina, desde cualquier
+//       contexto (IRQ handler, workqueue, ...).
+//     - El llamante NO debe tocar el bio hasta que se llame end_io.
+//
+// El llamante que use blk_submit directamente debe:
+//   - Poner end_io si espera -EINPROGRESS.
+//   - Tratar cualquier otro retorno como "ya terminado".
+//
+// Los wrappers bdev_read/bdev_write/bdev_flush son SIEMPRE síncronos:
+// internamente usan completion para esperar al end_io.
 // ---------------------------------------------------------------------------
 
 typedef struct block_ops {
@@ -132,15 +147,20 @@ block_device_t *blk_get_by_index(int index);
 // Número de discos registrados.
 int blk_count(void);
 
-// Envía un bio al block layer. El block layer busca el driver y llama
-// a ops->submit. Devuelve el resultado de submit.
+// Envía un bio al block layer.
 //
-// El bio puede ser síncrono o asíncrono según el driver. Si es asíncrono,
-// el llamante debe esperar a que bio->end_io o bio_endio se llame.
+// Devuelve:
+//   0             el bio terminó bien (driver síncrono).
+//   <0, != -EINPROGRESS   error al enviar o al ejecutar.
+//   -EINPROGRESS  el bio está en vuelo; el driver llamará a end_io.
+//
+// Si devuelve -EINPROGRESS y bio->end_io es NULL, el comportamiento
+// es indefinido (el bio se pierde).
 int blk_submit(bio_t *bio);
 
 // Marca un bio como completado y llama a su end_io (si existe).
-// Los drivers llaman a esta función al terminar un bio asíncrono.
+// Los drivers asíncronos llaman a esta función al terminar.
+// Es seguro llamarla desde IRQ handler.
 void bio_endio(bio_t *bio, int error);
 
 // Debug: imprime la lista de discos registrados.

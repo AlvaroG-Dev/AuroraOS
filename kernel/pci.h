@@ -212,6 +212,13 @@ void pci_enable_io_mem(const pci_device_t *dev);
 // Devuelve el IRQ line del dispositivo (0xFF si no tiene).
 uint8_t pci_get_irq(const pci_device_t *dev);
 
+// Capability list y MSI.
+uint8_t pci_find_capability(uint8_t bus, uint8_t slot, uint8_t func,
+                            uint8_t cap_id);
+int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
+                   uint8_t lapic_id);
+void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func);
+
 // ===========================================================================
 // Driver.
 // ===========================================================================

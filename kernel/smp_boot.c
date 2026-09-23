@@ -187,14 +187,20 @@ void ap_entry(void) {
   uint32_t my_cpu = (uint32_t)ap_index_64;
 
   // ---------------------------------------------------------------------------
-  // PASO 0: Activar SSE y FPU. El trampoline ya ha configurado CR4 con
-  // OSFXSR y OSXMMEXCPT.
+  // PASO 0: Activar SSE y FPU, y limpiar CD/NW del CR0.
+  //
+  // El trampoline ya limpia CD/NW antes de activar PG (ver
+  // smp_trampoline.asm), pero lo repetimos aquí como defensa en
+  // profundidad: si alguien modifica el trampoline y olvida ese paso,
+  // los APs arrancarían con cache deshabilitada sin que se note en
+  // KVM (donde el hardware lo ignora) pero ralentizando ~50x en TCG.
   // ---------------------------------------------------------------------------
   {
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~((1ULL << 2) | (1ULL << 3)); // clear EM, TS
-    cr0 |= (1ULL << 1);                  // set MP
+    cr0 &= ~((1ULL << 2) | (1ULL << 3));   // clear EM, TS
+    cr0 &= ~((1ULL << 29) | (1ULL << 30)); // clear NW, CD  [FIX]
+    cr0 |= (1ULL << 1);                    // set MP
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     __asm__ volatile("fninit");

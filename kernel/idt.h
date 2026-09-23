@@ -31,6 +31,30 @@ void idt_load(void);
 
 void isr_handler(registers_t *regs);
 void irq_handler(registers_t *regs);
+void msi_handler(registers_t *regs);
+
+// Instala un handler que se ejecuta en dos fases:
+//   ack:     se llama ANTES del EOI. Debe silenciar la fuente de IRQ
+//            (limpiar PxIS, leer el registro de status, etc.).
+//   process: se llama DESPUÉS del EOI. Hace el trabajo real.
+//
+// Si ack es NULL, se usa process como único handler (comportamiento
+// clásico, EOI después).
+void irq_install_handler_ex(uint8_t irq, void (*ack)(void),
+                            void (*process)(void));
+
+// Rango de vectores MSI (0x60-0x6F). 16 vectores disponibles.
+#define MSI_VECTOR_BASE 0x60
+#define MSI_VECTOR_COUNT 16
+#define MSI_VECTOR_END (MSI_VECTOR_BASE + MSI_VECTOR_COUNT - 1)
+
+// Instala un handler para un vector MSI.
+// El handler recibe el vector y lo usa para indexar.
+void msi_install_handler(uint8_t vector, void (*handler)(void));
+
+// Wrapper que llama al handler MSI correspondiente.
+// Lo usa el dispatcher de IRQ cuando el int_num está en el rango MSI.
+void msi_dispatch(uint8_t vector);
 
 // ---------------------------------------------------------------------------
 // Asserts del layout de registers_t frente al orden de pushes de
