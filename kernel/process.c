@@ -534,30 +534,57 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 void process_terminate(process_t *proc) {
   if (!proc)
     return;
+
+  /*
+   * Destrucción definitiva: esta función NO es una ruta de terminación.
+   * Solo puede ejecutarse después de que process_exit() haya marcado la
+   * tarea DEAD y el scheduler haya dejado de ejecutarla.
+   *
+   * Liberar el PML4 de una tarea RUNNING o todavía on_cpu sería una
+   * corrupción grave: esa CPU podría seguir usando el CR3 mientras
+   * paging_free_user_space() libera sus tablas y páginas de usuario.
+   *
+   * waitpid() ya garantiza esta condición antes de hacer el reap. La
+   * comprobación aquí es deliberada: process_terminate() es parte de la
+   * API del kernel y no debe convertir un uso incorrecto en un UAF/CR3
+   * use-after-free.
+   */
+  task_t *task = proc->task;
+  if (task) {
+    task_state_t state = task->state;
+    int on_cpu = __atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE);
+
+    if (state != TASK_DEAD || on_cpu) {
+      LOG_WARN("[PROC] Rechazando terminación destructiva de PID=%u: "
+               "task state=%d on_cpu=%d",
+               proc->pid, (int)state, on_cpu);
+      return;
+    }
+  }
+
   LOG_INFO("[PROC] Limpiando process_t '%s' (PID=%u)", proc->name, proc->pid);
 
-  // 1. Desvincular tarea ↔ proceso y liberar la referencia que
-  // process_t adquirió en process_spawn(). La referencia del scheduler
-  // es independiente y la libera reap_dead_tasks().
-  if (proc->task) {
-    task_t *task = proc->task;
+  /*
+   * 1. Desvincular tarea ↔ proceso y liberar la referencia que process_t
+   * adquirió en process_spawn(). La referencia del scheduler es
+   * independiente y la libera reap_dead_tasks().
+   */
+  if (task) {
     proc->task = NULL;
     task->proc = NULL;
     task_put(task);
   }
 
-  // 2. [P1.3] Liberar tablas de página. Solo cuando la tarea está
-  // DEAD y on_cpu == 0, garantizado porque process_terminate se llama
-  // desde waitpid() sobre un hijo ya reapeado.
+  /* 2. Liberar tablas de página solo después de validar DEAD + !on_cpu. */
   if (proc->pml4_phys) {
     paging_free_user_space(proc->pml4_phys);
     proc->pml4_phys = 0;
   }
 
-  // 3. VMA list
+  /* 3. Liberar VMAs. */
   vma_destroy_all(proc);
 
-  // 4. Desvincular de process_list con lock
+  /* 4. Desvincular de process_list con lock, si todavía está publicado. */
   unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t **p = &process_list;
   while (*p) {
