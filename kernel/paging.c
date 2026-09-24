@@ -13,13 +13,15 @@ int cpu_smap_enabled = 0;
 /* Test-only allocation fault injection. -1 disables it; 0 fails now. */
 static int paging_test_fail_alloc_after = -1;
 
+static inline int paging_is_canonical(uint64_t virt) {
+  return virt <= 0x00007FFFFFFFFFFFULL ||
+         virt >= 0xFFFF800000000000ULL;
+}
+
 void paging_test_set_alloc_fail_after(int successful_allocs) {
   paging_test_fail_alloc_after = successful_allocs;
 }
 
-// ===========================================================================
-// Helpers de page tables
-// ===========================================================================
 static uint64_t *alloc_page_table_early(void) {
   uint64_t phys = pmm_alloc_page();
   if (!phys) {
@@ -47,9 +49,6 @@ static uint64_t *alloc_page_table(void) {
   return pt;
 }
 
-// ===========================================================================
-// PAT
-// ===========================================================================
 static void pat_init(void) {
   uint64_t pat = rdmsr(IA32_PAT_MSR);
   pat &= ~(0xFFULL << 24);
@@ -58,9 +57,6 @@ static void pat_init(void) {
   LOG_INFO("[PAGING] IA32_PAT MSR: PAT3 = Write-Combining (WC)");
 }
 
-// ===========================================================================
-// split_huge_page
-// ===========================================================================
 static uint64_t *split_huge_page(uint64_t *pd, uint64_t pd_idx) {
   uint64_t huge_entry = pd[pd_idx];
   uint64_t huge_phys_base = huge_entry & ~((uint64_t)0x1FFFFF);
@@ -82,9 +78,6 @@ static uint64_t *split_huge_page(uint64_t *pd, uint64_t pd_idx) {
   return new_pt;
 }
 
-// ===========================================================================
-// clear_nx_range
-// ===========================================================================
 static void clear_nx_range(uint64_t start, uint64_t end) {
   uint64_t pages_found = 0;
   uint64_t pages_cleared = 0;
@@ -139,9 +132,6 @@ static void clear_nx_range(uint64_t start, uint64_t end) {
            (unsigned long)pages_found, (unsigned long)pages_cleared);
 }
 
-// ===========================================================================
-// map_phys_window
-// ===========================================================================
 static int paging_map_huge_page_early(uint64_t virt, uint64_t phys,
                                       uint64_t flags) {
   if ((virt & 0x1FFFFF) != 0 || (phys & 0x1FFFFF) != 0) {
@@ -203,18 +193,12 @@ static void map_phys_window(uint64_t max_phys_addr) {
            (unsigned long)(size / 0x200000));
 }
 
-// ===========================================================================
-// paging_init
-// ===========================================================================
 void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
   kernel_pml4 = boot_pml4;
   uint64_t boot_pml4_phys = (uint64_t)boot_pml4;
 
   pat_init();
 
-  // -------------------------------------------------------------------------
-  // 0. Comprobar y desactivar features problemáticas de CR4
-  // -------------------------------------------------------------------------
   {
     uint64_t cr4 = read_cr4();
     LOG_INFO("[PAGING] CR4 inicial = %p (LA57=%d PCIDE=%d SMEP=%d SMAP=%d)",
@@ -246,34 +230,12 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 1. Mapear la ventana física (kernel_pml4 es físico aquí).
-  // -------------------------------------------------------------------------
   map_phys_window(max_phys_addr);
 
-  // -------------------------------------------------------------------------
-  // 2. La ventana está mapeada. kernel_pml4 pasa a virtual.
-  // -------------------------------------------------------------------------
   kernel_pml4 = (uint64_t *)phys_to_virt(boot_pml4_phys);
   LOG_INFO("[PAGING] kernel_pml4 virtual = %p (físico = %p)",
            (void *)kernel_pml4, (void *)boot_pml4_phys);
 
-  // -------------------------------------------------------------------------
-  // 2b. [SMP] Identity map de 0x7000-0x9000 (2 páginas de 4KB).
-  //
-  // El AP, tras cargar el PML4 del kernel y activar paging, ejecuta
-  // código en 0x7000-0x9000 (dirección lineal baja). Esas direcciones
-  // deben estar mapeadas en el PML4 del kernel o el AP hace #PF y
-  // triple fault.
-  //
-  // Usamos page tables normales (4 KB), NO huge pages. Así no
-  // sobrescribimos la entry del PD que el bootloader ya tenía mapeada
-  // (que el BSP podría necesitar).
-  //
-  // Importante: esta llamada debe ir DESPUÉS de tener kernel_pml4
-  // como virtual, porque paging_map_page_in usa phys_to_virt para
-  // acceder a las page tables.
-  // -------------------------------------------------------------------------
   {
     LOG_INFO("[PAGING] Identity map 0x7000-0x9000 (trampoline SMP)");
     int ok = 1;
@@ -291,9 +253,6 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 3. Activar NX
-  // -------------------------------------------------------------------------
   if (cpu_has_nx()) {
     uint64_t efer = rdmsr(MSR_EFER);
     efer |= EFER_NXE;
@@ -311,9 +270,6 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
   clear_nx_range((uint64_t)&__text_start, (uint64_t)&__text_end);
   LOG_INFO("[PAGING] .text del kernel marcado como ejecutable");
 
-  // -------------------------------------------------------------------------
-  // 4. Activar SMEP
-  // -------------------------------------------------------------------------
   if (cpu_has_smep()) {
     uint64_t cr4 = read_cr4();
     cr4 |= (1ULL << 20);
@@ -323,9 +279,6 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
     LOG_WARN("[PAGING] CPU sin soporte SMEP");
   }
 
-  // -------------------------------------------------------------------------
-  // 5. Activar SMAP
-  // -------------------------------------------------------------------------
   if (cpu_has_smap()) {
     uint64_t cr4 = read_cr4();
     cr4 |= (1ULL << 21);
@@ -336,9 +289,6 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
     LOG_WARN("[PAGING] CPU sin soporte SMAP");
   }
 
-  // -------------------------------------------------------------------------
-  // 6. Verificación final
-  // -------------------------------------------------------------------------
   uint64_t cr4_final = read_cr4();
   LOG_INFO("[PAGING] CR4 final = %p (LA57=%d PCIDE=%d SMEP=%d SMAP=%d)",
            (void *)cr4_final, (int)((cr4_final >> 12) & 1),
@@ -349,12 +299,11 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
            (void *)kernel_pml4);
 }
 
-// ===========================================================================
-// API pública
-// ===========================================================================
 uint64_t *paging_get_pml4(void) { return kernel_pml4; }
 
 int paging_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
+  if (!paging_is_canonical(virt))
+    return -1;
   return paging_map_page_in(kernel_pml4, virt, phys, flags);
 }
 
@@ -363,8 +312,6 @@ int paging_map_range(uint64_t virt, uint64_t phys, uint64_t size,
   if (size == 0)
     return 0;
 
-  // La operación debe cubrir un rango que no desborde ninguna de las dos
-  // direcciones y cuyos extremos físicos quepan en una entrada PTE.
   uint64_t last_virt = virt + size - 1;
   uint64_t last_phys = phys + size - 1;
   if (last_virt < virt || last_phys < phys)
@@ -372,16 +319,13 @@ int paging_map_range(uint64_t virt, uint64_t phys, uint64_t size,
   if (last_phys > PTE_FRAME + PAGE_SIZE - 1)
     return -1;
 
-  // x86-64 no permite atravesar el hueco entre las dos mitades canónicas.
-  // Tampoco aceptamos una dirección inicial/final no canónica.
-  const uint64_t USER_CANON_MAX = 0x00007FFFFFFFFFFFULL;
-  const uint64_t KERNEL_CANON_MIN = 0xFFFF800000000000ULL;
-  int virt_low = virt <= USER_CANON_MAX;
-  int last_virt_low = last_virt <= USER_CANON_MAX;
-  int virt_high = virt >= KERNEL_CANON_MIN;
-  int last_virt_high = last_virt >= KERNEL_CANON_MIN;
-  if ((!virt_low && !virt_high) || (!last_virt_low && !last_virt_high) ||
-      virt_low != last_virt_low || virt_high != last_virt_high)
+  if (!paging_is_canonical(virt) || !paging_is_canonical(last_virt))
+    return -1;
+  int virt_low = virt <= 0x00007FFFFFFFFFFFULL;
+  int last_virt_low = last_virt <= 0x00007FFFFFFFFFFFULL;
+  int virt_high = virt >= 0xFFFF800000000000ULL;
+  int last_virt_high = last_virt >= 0xFFFF800000000000ULL;
+  if (virt_low != last_virt_low || virt_high != last_virt_high)
     return -1;
 
   for (uint64_t off = 0; off < size; off += PAGE_SIZE) {
@@ -392,6 +336,8 @@ int paging_map_range(uint64_t virt, uint64_t phys, uint64_t size,
 }
 
 int paging_unmap_page(uint64_t virt) {
+  if (!paging_is_canonical(virt))
+    return -1;
   uint64_t pml4_idx = PML4_INDEX(virt);
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
@@ -416,6 +362,8 @@ int paging_unmap_page(uint64_t virt) {
 }
 
 uint64_t paging_get_phys(uint64_t virt) {
+  if (!paging_is_canonical(virt))
+    return 0;
   return paging_get_phys_in(kernel_pml4, virt);
 }
 
@@ -485,7 +433,7 @@ uint64_t paging_clone_kernel_space(void) {
 
 int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
                        uint64_t flags) {
-  if (!pml4)
+  if (!pml4 || !paging_is_canonical(virt))
     return -1;
 
   uint64_t pml4_idx = PML4_INDEX(virt);
@@ -582,12 +530,14 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
 }
 
 int paging_unmap_page_in(uint64_t *pml4, uint64_t virt) {
+  if (!pml4 || !paging_is_canonical(virt))
+    return -1;
   uint64_t pml4_idx = PML4_INDEX(virt);
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
   uint64_t pt_idx = PT_INDEX(virt);
 
-  if (!pml4 || !(pml4[pml4_idx] & PTE_PRESENT))
+  if (!(pml4[pml4_idx] & PTE_PRESENT))
     return -1;
   uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & PTE_FRAME);
   if (!(pdpt[pdpt_idx] & PTE_PRESENT))
@@ -607,12 +557,14 @@ int paging_unmap_page_in(uint64_t *pml4, uint64_t virt) {
 }
 
 uint64_t paging_get_phys_in(uint64_t *pml4, uint64_t virt) {
+  if (!pml4 || !paging_is_canonical(virt))
+    return 0;
   uint64_t pml4_idx = PML4_INDEX(virt);
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
   uint64_t pt_idx = PT_INDEX(virt);
 
-  if (!pml4 || !(pml4[pml4_idx] & PTE_PRESENT))
+  if (!(pml4[pml4_idx] & PTE_PRESENT))
     return 0;
   uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & PTE_FRAME);
 
@@ -676,23 +628,16 @@ void paging_free_user_space(uint64_t pml4_phys) {
   pmm_free_page(pml4_phys);
 }
 
-// ===========================================================================
-// MMIO
-// ===========================================================================
 void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   if (size == 0)
     return NULL;
 
-  // La PTE puede representar más memoria física que la ventana virtual
-  // MMIO_MAP_BASE. El límite efectivo es el tamaño de esa ventana (una PML4
-  // entry = 512 GiB), además del límite de PTE_FRAME.
   const uint64_t pte_max_phys = PTE_FRAME + PAGE_SIZE - 1;
   const uint64_t mmio_window_size = (1ULL << 39);
   const uint64_t mmio_max_phys = mmio_window_size - 1;
   const uint64_t max_phys =
       pte_max_phys < mmio_max_phys ? pte_max_phys : mmio_max_phys;
 
-  // Validamos el último byte antes de hacer cualquier redondeo.
   if (phys > max_phys || size - 1 > max_phys - phys)
     return NULL;
 
@@ -700,8 +645,6 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   uint64_t start = phys & ~0xFFFULL;
   uint64_t end = (last_phys & ~0xFFFULL) + PAGE_SIZE;
 
-  // 'end' puede ser exactamente el tamaño de la ventana: el mapeo termina
-  // en la última dirección canónica válida de la ventana.
   if (end > mmio_window_size)
     return NULL;
 
@@ -728,7 +671,6 @@ void mmio_unmap(uint64_t phys, uint64_t size) {
   if (size == 0)
     return;
 
-  // Mantener las mismas precondiciones de rango que mmio_map().
   const uint64_t pte_max_phys = PTE_FRAME + PAGE_SIZE - 1;
   const uint64_t mmio_window_size = (1ULL << 39);
   const uint64_t mmio_max_phys = mmio_window_size - 1;
