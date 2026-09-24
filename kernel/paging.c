@@ -168,11 +168,31 @@ static int paging_map_huge_page_early(uint64_t virt, uint64_t phys,
   return 0;
 }
 
+uint64_t paging_phys_window_size(uint64_t max_phys_addr) {
+  if (max_phys_addr == 0)
+    return 0;
+
+  if (max_phys_addr >= PHYS_MAP_MAX_SIZE)
+    return PHYS_MAP_MAX_SIZE;
+
+  uint64_t remainder = max_phys_addr & 0x1FFFFFULL;
+  if (remainder != 0)
+    max_phys_addr += 0x200000ULL - remainder;
+
+  return max_phys_addr;
+}
+
 static void map_phys_window(uint64_t max_phys_addr) {
-  uint64_t size = (max_phys_addr + 0x1FFFFF) & ~0x1FFFFFULL;
+  uint64_t size = paging_phys_window_size(max_phys_addr);
   if (size == 0) {
     LOG_WARN("[PAGING] map_phys_window: max_phys_addr == 0, no se mapea nada");
     return;
+  }
+
+  if (max_phys_addr > PHYS_MAP_MAX_SIZE) {
+    LOG_WARN("[PAGING] RAM física excede la ventana directa: "
+             "limitando el mapeo a %lu GB",
+             (unsigned long)(PHYS_MAP_MAX_SIZE / (1024 * 1024 * 1024)));
   }
 
   LOG_INFO("[PAGING] Mapeando ventana fisica: %p - %p (%lu MB)",
