@@ -374,6 +374,8 @@ int paging_unmap_page(uint64_t virt) {
 
   if (!(pd[pd_idx] & PTE_PRESENT))
     return -1;
+  if (pd[pd_idx] & PTE_HUGE)
+    return -1;
   uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & PTE_FRAME);
 
   pt[pt_idx] = 0;
