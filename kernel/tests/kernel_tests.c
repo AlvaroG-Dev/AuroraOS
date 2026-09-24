@@ -406,6 +406,40 @@ REGISTER_TEST("paging: rechaza overflow en map_range",
               test_paging_map_range_overflow);
 
 // ---------------------------------------------------------------------------
+// MMIO: rechazo de rangos físicos que desbordan PTE_FRAME
+// ---------------------------------------------------------------------------
+static void test_mmio_map_overflow(void) {
+  const uint64_t max_phys = PTE_FRAME + PAGE_SIZE - 1;
+
+  // El último byte representable es válido si se solicita solo ese byte.
+  void *ok = mmio_map(max_phys, 1, PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(ok != NULL, "mmio_map rechazó el último byte físico válido");
+  if (ok)
+    mmio_unmap(max_phys, 1);
+
+  // El rango de 4 KB empezando en el último marco ya excede el máximo físico.
+  void *bad = mmio_map(PTE_FRAME, PAGE_SIZE, PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(bad == NULL,
+              "mmio_map aceptó un rango que excede PTE_FRAME");
+
+  // El cálculo phys + size + 0xFFF no puede envolver.
+  bad = mmio_map(UINT64_MAX - 0x7FFULL, 0x1000,
+                 PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(bad == NULL,
+              "mmio_map permitió overflow de phys + size");
+
+  // Un tamaño que termina exactamente en el máximo físico sigue siendo válido.
+  ok = mmio_map(max_phys - 0xFFFULL, 0x1000,
+                PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(ok != NULL,
+              "mmio_map rechazó el último frame físico completo");
+  if (ok)
+    mmio_unmap(max_phys - 0xFFFULL, 0x1000);
+}
+REGISTER_TEST("paging: mmio_map rechaza overflow físico",
+              test_mmio_map_overflow);
+
+// ---------------------------------------------------------------------------
 // SMP (Fase 0)
 // ---------------------------------------------------------------------------
 static void test_smp_processor_id_valid(void) {
