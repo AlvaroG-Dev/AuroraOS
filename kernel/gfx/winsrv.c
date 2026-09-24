@@ -255,25 +255,42 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
    * dependa del src_stride. Cada fila se valida/copia mediante copy_from_user()
    * antes de tocar la fila correspondiente de la ventana.
    */
-  uint32_t row_buf[2048];
-  size_t row_bytes = (size_t)copy_w * sizeof(uint32_t);
-  if (copy_w > (int)(sizeof(row_buf) / sizeof(row_buf[0]))) {
-    spin_unlock_irqrestore(&winsrv_lock, flags);
-    return -1;
-  }
+  /*
+   * Mantener el buffer temporal pequeño es importante: winsrv_blit() puede
+   * ejecutarse desde el contexto de un syscall con una pila de kernel
+   * limitada. No reservamos un buffer proporcional al ancho de la ventana.
+   * Copiamos cada fila en bloques pequeños mediante copy_from_user().
+   */
+  uint32_t row_buf[256];
+  const int chunk_pixels = (int)(sizeof(row_buf) / sizeof(row_buf[0]));
 
   for (int row = 0; row < copy_h; row++) {
-    const uint32_t *src =
-        user_pixels + (local_src_y + row) * src_stride + local_src_x;
-    if (copy_from_user(row_buf, src, row_bytes) < 0) {
-      spin_unlock_irqrestore(&winsrv_lock, flags);
-      return -EFAULT;
-    }
+    int copied = 0;
+    while (copied < copy_w) {
+      int chunk = copy_w - copied;
+      if (chunk > chunk_pixels)
+        chunk = chunk_pixels;
 
-    uint32_t *dst =
-        win->content_buffer + (dst_y + row) * win->content_w + dst_x;
-    for (int col = 0; col < copy_w; col++)
-      dst[col] = row_buf[col];
+      const uint32_t *src =
+          user_pixels +
+          (local_src_y + row) * src_stride +
+          local_src_x + copied;
+      size_t chunk_bytes = (size_t)chunk * sizeof(uint32_t);
+
+      if (copy_from_user(row_buf, src, chunk_bytes) < 0) {
+        spin_unlock_irqrestore(&winsrv_lock, flags);
+        return -EFAULT;
+      }
+
+      uint32_t *dst =
+          win->content_buffer +
+          (dst_y + row) * win->content_w +
+          dst_x + copied;
+      for (int col = 0; col < chunk; col++)
+        dst[col] = row_buf[col];
+
+      copied += chunk;
+    }
   }
   win->dirty = 1;
 
