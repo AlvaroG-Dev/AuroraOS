@@ -446,6 +446,106 @@ REGISTER_TEST("paging: mmio_map rechaza overflow físico",
               test_mmio_map_overflow);
 
 // ---------------------------------------------------------------------------
+// Paging: rechazo de direcciones virtuales no canónicas
+// ---------------------------------------------------------------------------
+static void test_paging_noncanonical_addresses(void) {
+  const uint64_t noncanonical_low = 0x0000800000000000ULL;
+  const uint64_t noncanonical_high = 0xFFFF7FFFFFFFFFFFULL;
+  const uint64_t valid_low = 0x00007FFFFFFFFFFFULL;
+  const uint64_t valid_high = 0xFFFF800000000000ULL;
+
+  uint64_t pml4_phys = pmm_alloc_page();
+  TEST_ASSERT(pml4_phys != 0, "no se pudo reservar PML4 de prueba");
+  if (!pml4_phys)
+    return;
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  memset(pml4, 0, PAGE_SIZE);
+  uint64_t baseline = pmm_free_pages_count();
+
+  TEST_ASSERT(paging_map_page_in(pml4, noncanonical_low, 0x1000,
+                                 PTE_WRITABLE | PTE_NX) != 0,
+              "paging_map_page_in aceptó dirección no canónica baja");
+  TEST_ASSERT(paging_map_page_in(pml4, noncanonical_high, 0x1000,
+                                 PTE_WRITABLE | PTE_NX) != 0,
+              "paging_map_page_in aceptó dirección no canónica alta");
+  TEST_ASSERT(pml4[0] == 0 && pml4[511] == 0,
+              "una dirección no canónica modificó el PML4");
+  TEST_ASSERT(pmm_free_pages_count() == baseline,
+              "dirección no canónica consumió páginas de tablas");
+
+  TEST_ASSERT(paging_map_page(noncanonical_low, 0x1000,
+                              PTE_WRITABLE | PTE_NX) != 0,
+              "paging_map_page aceptó dirección no canónica baja");
+  TEST_ASSERT(paging_map_page(noncanonical_high, 0x1000,
+                              PTE_WRITABLE | PTE_NX) != 0,
+              "paging_map_page aceptó dirección no canónica alta");
+
+  TEST_ASSERT(paging_unmap_page_in(pml4, noncanonical_low) != 0,
+              "paging_unmap_page_in aceptó dirección no canónica");
+  TEST_ASSERT(paging_get_phys_in(pml4, noncanonical_low) == 0,
+              "paging_get_phys_in aceptó dirección no canónica");
+  TEST_ASSERT(paging_unmap_page(noncanonical_low) != 0,
+              "paging_unmap_page aceptó dirección no canónica");
+  TEST_ASSERT(paging_get_phys(noncanonical_low) == 0,
+              "paging_get_phys aceptó dirección no canónica");
+
+  TEST_ASSERT(paging_map_page_in(pml4, valid_low, 0x1000,
+                                 PTE_WRITABLE | PTE_NX) == 0,
+              "paging_map_page_in rechazó el máximo bajo canónico");
+  TEST_ASSERT(paging_unmap_page_in(pml4, valid_low) == 0,
+              "no se pudo desmapear el máximo bajo canónico");
+
+  TEST_ASSERT(paging_map_page_in(pml4, valid_high, 0x1000,
+                                 PTE_WRITABLE | PTE_NX) == 0,
+              "paging_map_page_in rechazó el mínimo alto canónico");
+  TEST_ASSERT(paging_unmap_page_in(pml4, valid_high) == 0,
+              "no se pudo desmapear el mínimo alto canónico");
+
+  uint64_t pml4_entry = pml4[PML4_INDEX(valid_low)];
+  if (pml4_entry) {
+    uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4_entry & PTE_FRAME);
+    uint64_t pdpt_entry = pdpt[PDPT_INDEX(valid_low)];
+    if (pdpt_entry) {
+      uint64_t *pd = (uint64_t *)phys_to_virt(pdpt_entry & PTE_FRAME);
+      uint64_t pd_entry = pd[PD_INDEX(valid_low)];
+      if (pd_entry) {
+        pmm_free_page(pd_entry & PTE_FRAME);
+        pd[PD_INDEX(valid_low)] = 0;
+      }
+      pmm_free_page(pdpt_entry & PTE_FRAME);
+      pdpt[PDPT_INDEX(valid_low)] = 0;
+    }
+    pmm_free_page(pml4_entry & PTE_FRAME);
+    pml4[PML4_INDEX(valid_low)] = 0;
+  }
+
+  pml4_entry = pml4[PML4_INDEX(valid_high)];
+  if (pml4_entry) {
+    uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4_entry & PTE_FRAME);
+    uint64_t pdpt_entry = pdpt[PDPT_INDEX(valid_high)];
+    if (pdpt_entry) {
+      uint64_t *pd = (uint64_t *)phys_to_virt(pdpt_entry & PTE_FRAME);
+      uint64_t pd_entry = pd[PD_INDEX(valid_high)];
+      if (pd_entry) {
+        pmm_free_page(pd_entry & PTE_FRAME);
+        pd[PD_INDEX(valid_high)] = 0;
+      }
+      pmm_free_page(pdpt_entry & PTE_FRAME);
+      pdpt[PDPT_INDEX(valid_high)] = 0;
+    }
+    pmm_free_page(pml4_entry & PTE_FRAME);
+    pml4[PML4_INDEX(valid_high)] = 0;
+  }
+
+  TEST_ASSERT(pmm_free_pages_count() == baseline,
+              "el test dejó tablas de páginas sin liberar");
+  pmm_free_page(pml4_phys);
+}
+REGISTER_TEST("paging: rechaza direcciones no canónicas",
+              test_paging_noncanonical_addresses);
+
+// ---------------------------------------------------------------------------
 // SMP (Fase 0)
 // ---------------------------------------------------------------------------
 static void test_smp_processor_id_valid(void) {
