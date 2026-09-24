@@ -148,9 +148,10 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
       end_bit = max_blocks;
 
     for (uint64_t bit = start_bit; bit < end_bit; bit++) {
-      if (!bitmap_test_safe(bitmap, bit)) {
-        bitmap_set_safe(bitmap, bit);
-        used_blocks++;
+      if (bitmap_test_safe(bitmap, bit)) {
+        bitmap_clear_safe(bitmap, bit);
+        if (used_blocks > 0)
+          used_blocks--;
       }
     }
   }
