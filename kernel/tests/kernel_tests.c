@@ -409,32 +409,38 @@ REGISTER_TEST("paging: rechaza overflow en map_range",
 // MMIO: rechazo de rangos físicos que desbordan PTE_FRAME
 // ---------------------------------------------------------------------------
 static void test_mmio_map_overflow(void) {
-  const uint64_t max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  const uint64_t mmio_window_size = (1ULL << 39);
+  const uint64_t mmio_max_phys = mmio_window_size - 1;
 
-  // El último byte representable es válido si se solicita solo ese byte.
-  void *ok = mmio_map(max_phys, 1, PTE_NOCACHE | PTE_NX);
-  TEST_ASSERT(ok != NULL, "mmio_map rechazó el último byte físico válido");
+  // El último byte de la ventana MMIO es válido.
+  void *ok = mmio_map(mmio_max_phys, 1, PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(ok != NULL, "mmio_map rechazó el último byte de la ventana");
   if (ok)
-    mmio_unmap(max_phys, 1);
+    mmio_unmap(mmio_max_phys, 1);
 
-  // El rango de 4 KB empezando en el último marco ya excede el máximo físico.
-  void *bad = mmio_map(PTE_FRAME, PAGE_SIZE, PTE_NOCACHE | PTE_NX);
+  // Un rango que exceda la ventana virtual debe rechazarse.
+  void *bad = mmio_map(mmio_max_phys, 2, PTE_NOCACHE | PTE_NX);
   TEST_ASSERT(bad == NULL,
-              "mmio_map aceptó un rango que excede PTE_FRAME");
+              "mmio_map aceptó un rango fuera de la ventana MMIO");
 
-  // El cálculo phys + size + 0xFFF no puede envolver.
+  // La PTE admite direcciones físicas mayores que la ventana MMIO.
+  bad = mmio_map(PTE_FRAME, 1, PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(bad == NULL,
+              "mmio_map aceptó una dirección física fuera de la ventana");
+
+  // El cálculo phys + size no puede envolver.
   bad = mmio_map(UINT64_MAX - 0x7FFULL, 0x1000,
                  PTE_NOCACHE | PTE_NX);
   TEST_ASSERT(bad == NULL,
               "mmio_map permitió overflow de phys + size");
 
-  // Un tamaño que termina exactamente en el máximo físico sigue siendo válido.
-  ok = mmio_map(max_phys - 0xFFFULL, 0x1000,
+  // El último frame de 4 KiB de la ventana también es válido.
+  ok = mmio_map(mmio_max_phys - 0xFFFULL, 0x1000,
                 PTE_NOCACHE | PTE_NX);
   TEST_ASSERT(ok != NULL,
-              "mmio_map rechazó el último frame físico completo");
+              "mmio_map rechazó el último frame de la ventana");
   if (ok)
-    mmio_unmap(max_phys - 0xFFFULL, 0x1000);
+    mmio_unmap(mmio_max_phys - 0xFFFULL, 0x1000);
 }
 REGISTER_TEST("paging: mmio_map rechaza overflow físico",
               test_mmio_map_overflow);
