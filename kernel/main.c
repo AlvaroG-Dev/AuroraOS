@@ -255,7 +255,7 @@ static void kmain_task(void) {
   // App de consola gráfica (antes del SMP, para que no interfiera).
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
-  process_load("apps/ipctest");
+  process_load("apps/win_blit_fault");
 
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
   //
