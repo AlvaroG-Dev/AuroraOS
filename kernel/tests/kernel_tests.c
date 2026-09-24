@@ -16,6 +16,7 @@
 #include "../atapi.h"
 #include "../block.h"
 #include "../cpu.h"
+#include "../elf.h"
 #include "../heap.h"
 #include "../klog.h"
 #include "../paging.h"
@@ -330,6 +331,67 @@ static void test_slab_usable_size(void) {
   kfree(p);
 }
 REGISTER_TEST("slab: usable size", test_slab_usable_size);
+
+// ---------------------------------------------------------------------------
+// ELF: rechazo de overflow al reubicar segmentos ET_DYN
+// ---------------------------------------------------------------------------
+static void test_elf_relocation_overflow(void) {
+  uint8_t image[sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr)];
+  memset(image, 0, sizeof(image));
+
+  Elf64_Ehdr *hdr = (Elf64_Ehdr *)image;
+  hdr->e_ident[EI_MAG0] = ELFMAG0;
+  hdr->e_ident[EI_MAG1] = ELFMAG1;
+  hdr->e_ident[EI_MAG2] = ELFMAG2;
+  hdr->e_ident[EI_MAG3] = ELFMAG3;
+  hdr->e_ident[EI_CLASS] = ELFCLASS64;
+  hdr->e_ident[EI_DATA] = ELFDATA2LSB;
+  hdr->e_ident[EI_VERSION] = EV_CURRENT;
+  hdr->e_type = ET_DYN;
+  hdr->e_machine = EM_X86_64;
+  hdr->e_version = EV_CURRENT;
+  hdr->e_entry = 0x1000;
+  hdr->e_phoff = sizeof(Elf64_Ehdr);
+  hdr->e_ehsize = sizeof(Elf64_Ehdr);
+  hdr->e_phentsize = sizeof(Elf64_Phdr);
+  hdr->e_phnum = 1;
+
+  Elf64_Phdr *ph = (Elf64_Phdr *)(image + sizeof(Elf64_Ehdr));
+  ph->p_type = PT_LOAD;
+  ph->p_flags = PF_R | PF_X;
+  ph->p_offset = sizeof(image);
+  ph->p_vaddr = 0x1000;
+  ph->p_filesz = 0;
+  ph->p_memsz = 0x1000;
+
+  uint64_t pml4_phys = pmm_alloc_page();
+  TEST_ASSERT(pml4_phys != 0, "no se pudo reservar PML4 de prueba");
+  if (!pml4_phys)
+    return;
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  memset(pml4, 0, PAGE_SIZE);
+  uint64_t baseline = pmm_free_pages_count();
+
+  /*
+   * 0x1000 + (UINT64_MAX - 0xFFF) = 2^64: el código antiguo hacía wrap
+   * y podía convertir un ELF válido estructuralmente en un rango absurdo.
+   */
+  uint64_t load_base = UINT64_MAX - 0xFFFULL;
+  uint64_t entry = 0;
+  int rc = elf_load(image, sizeof(image), pml4, load_base, &entry);
+
+  TEST_ASSERT(rc != 0,
+              "elf_load aceptó overflow en p_vaddr + load_base");
+  TEST_ASSERT(pml4[PML4_INDEX(0x1000)] == 0,
+              "ELF inválido modificó el PML4 antes de ser rechazado");
+  TEST_ASSERT(pmm_free_pages_count() == baseline,
+              "ELF inválido consumió páginas antes de ser rechazado");
+
+  pmm_free_page(pml4_phys);
+}
+REGISTER_TEST("elf: rechaza overflow de relocación ET_DYN",
+              test_elf_relocation_overflow);
 
 // ---------------------------------------------------------------------------
 // Paging: rollback de tablas ante fallo de asignación
