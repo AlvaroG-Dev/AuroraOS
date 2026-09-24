@@ -360,6 +360,30 @@ int paging_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 
 int paging_map_range(uint64_t virt, uint64_t phys, uint64_t size,
                      uint64_t flags) {
+  if (size == 0)
+    return 0;
+
+  // La operación debe cubrir un rango que no desborde ninguna de las dos
+  // direcciones y cuyos extremos físicos quepan en una entrada PTE.
+  uint64_t last_virt = virt + size - 1;
+  uint64_t last_phys = phys + size - 1;
+  if (last_virt < virt || last_phys < phys)
+    return -1;
+  if (last_phys > PTE_FRAME + PAGE_SIZE - 1)
+    return -1;
+
+  // x86-64 no permite atravesar el hueco entre las dos mitades canónicas.
+  // Tampoco aceptamos una dirección inicial/final no canónica.
+  const uint64_t USER_CANON_MAX = 0x00007FFFFFFFFFFFULL;
+  const uint64_t KERNEL_CANON_MIN = 0xFFFF800000000000ULL;
+  int virt_low = virt <= USER_CANON_MAX;
+  int last_virt_low = last_virt <= USER_CANON_MAX;
+  int virt_high = virt >= KERNEL_CANON_MIN;
+  int last_virt_high = last_virt >= KERNEL_CANON_MIN;
+  if ((!virt_low && !virt_high) || (!last_virt_low && !last_virt_high) ||
+      virt_low != last_virt_low || virt_high != last_virt_high)
+    return -1;
+
   for (uint64_t off = 0; off < size; off += PAGE_SIZE) {
     if (paging_map_page(virt + off, phys + off, flags) != 0)
       return -1;
