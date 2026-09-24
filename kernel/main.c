@@ -320,7 +320,16 @@ void kmain(struct kernel_boot_info *kinfo) {
         continue;
       uint64_t phys = *(uint64_t *)(ptr + i + 8);
       uint64_t pages = *(uint64_t *)(ptr + i + 24);
-      uint64_t end = phys + (pages * PAGE_SIZE);
+      if (pages > UINT64_MAX / PAGE_SIZE) {
+        LOG_WARN("[MEM] Descriptor EFI con tamaño de páginas inválido, ignorado");
+        continue;
+      }
+      uint64_t size = pages * PAGE_SIZE;
+      if (phys > UINT64_MAX - size) {
+        LOG_WARN("[MEM] Descriptor EFI con rango físico desbordado, ignorado");
+        continue;
+      }
+      uint64_t end = phys + size;
       if (end > max_phys_addr)
         max_phys_addr = end;
     }
