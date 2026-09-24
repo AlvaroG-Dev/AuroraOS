@@ -55,7 +55,12 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
       continue;
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
-    uint64_t end_addr = phys + (pages * PAGE_SIZE);
+    if (pages > UINT64_MAX / PAGE_SIZE)
+      continue;
+    uint64_t size = pages * PAGE_SIZE;
+    if (phys > UINT64_MAX - size)
+      continue;
+    uint64_t end_addr = phys + size;
     if (end_addr > max_phys_addr) {
       max_phys_addr = end_addr;
     }
