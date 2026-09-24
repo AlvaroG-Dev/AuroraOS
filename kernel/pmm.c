@@ -80,16 +80,32 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
     uint32_t type = *(uint32_t *)(ptr + i + 0);
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
-    uint64_t size = pages * PAGE_SIZE;
 
-    if (type == EFI_CONVENTIONAL_MEMORY && phys != 0 &&
-        size >= bitmap_size_bytes) {
-      if ((phys + bitmap_size_bytes) < 0x100000000ULL) {
-        bitmap_phys = phys;
-        bitmap_found = 1;
-        break;
-      }
-    }
+    /*
+     * This is a second pass over the EFI map. Do not assume descriptors
+     * validated by the first pass are still safe here: malformed entries
+     * must never wrap pages * PAGE_SIZE or phys + bitmap_size_bytes.
+     */
+    if (type != EFI_CONVENTIONAL_MEMORY || phys == 0)
+      continue;
+    if (pages > UINT64_MAX / PAGE_SIZE)
+      continue;
+
+    uint64_t size = pages * PAGE_SIZE;
+    if (phys > UINT64_MAX - size)
+      continue;
+    if (size < bitmap_size_bytes)
+      continue;
+    if (phys > UINT64_MAX - bitmap_size_bytes)
+      continue;
+
+    uint64_t bitmap_end = phys + bitmap_size_bytes;
+    if (bitmap_end <= phys || bitmap_end > 0x100000000ULL)
+      continue;
+
+    bitmap_phys = phys;
+    bitmap_found = 1;
+    break;
   }
 
   if (!bitmap_found) {
@@ -108,14 +124,26 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
 
-    if (type == EFI_CONVENTIONAL_MEMORY) {
-      uint64_t start_bit = phys / PAGE_SIZE;
-      for (uint64_t b = 0; b < pages; b++) {
-        if (bitmap_in_range(start_bit + b)) {
-          bitmap_clear_safe(bitmap, start_bit + b);
-          if (used_blocks > 0)
-            used_blocks--;
-        }
+    if (type != EFI_CONVENTIONAL_MEMORY)
+      continue;
+    if (pages > UINT64_MAX / PAGE_SIZE)
+      continue;
+
+    uint64_t size = pages * PAGE_SIZE;
+    if (phys > UINT64_MAX - size)
+      continue;
+
+    uint64_t start_bit = phys / PAGE_SIZE;
+    uint64_t end_bit = start_bit + pages;
+    if (end_bit < start_bit)
+      continue;
+    if (end_bit > max_blocks)
+      end_bit = max_blocks;
+
+    for (uint64_t bit = start_bit; bit < end_bit; bit++) {
+      if (!bitmap_test_safe(bitmap, bit)) {
+        bitmap_set_safe(bitmap, bit);
+        used_blocks++;
       }
     }
   }
@@ -126,8 +154,13 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
   }
 
   uint64_t bmp_start_bit = bitmap_phys / PAGE_SIZE;
-  uint64_t bmp_end_bit =
-      (bitmap_phys + bitmap_size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  uint64_t bitmap_end = bitmap_phys + bitmap_size_bytes;
+  if (bitmap_end < bitmap_phys ||
+      bitmap_end > UINT64_MAX - (PAGE_SIZE - 1)) {
+    LOG_ERR("[PMM] ERROR: rango del bitmap desbordado");
+    return;
+  }
+  uint64_t bmp_end_bit = (bitmap_end + PAGE_SIZE - 1) / PAGE_SIZE;
   for (uint64_t b = bmp_start_bit; b < bmp_end_bit; b++) {
     if (bitmap_in_range(b) && !bitmap_test_safe(bitmap, b)) {
       bitmap_set_safe(bitmap, b);
