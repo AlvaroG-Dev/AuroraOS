@@ -723,8 +723,15 @@ void mmio_unmap(uint64_t phys, uint64_t size) {
   if (size == 0)
     return;
 
+  // Mantener las mismas precondiciones de rango que mmio_map(). Sin esta
+  // validación, phys + size + 0xFFF puede envolver y dejar páginas mapeadas.
+  const uint64_t max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  if (phys > max_phys || size - 1 > max_phys - phys)
+    return;
+
+  uint64_t last_phys = phys + size - 1;
   uint64_t start = phys & ~0xFFFULL;
-  uint64_t end = (phys + size + 0xFFF) & ~0xFFFULL;
+  uint64_t end = (last_phys & ~0xFFFULL) + PAGE_SIZE;
 
   for (uint64_t page = start; page < end; page += PAGE_SIZE) {
     paging_unmap_page(MMIO_MAP_BASE + page);
