@@ -377,6 +377,35 @@ REGISTER_TEST("paging: rollback de tablas en fallo de alloc",
               test_paging_map_rollback);
 
 // ---------------------------------------------------------------------------
+// Paging: rechazo de rangos con overflow / direcciones no canónicas
+// ---------------------------------------------------------------------------
+static void test_paging_map_range_overflow(void) {
+  // Todos estos casos deben fallar antes de tocar ninguna tabla de páginas.
+  int rc = paging_map_range(0x00007FFFFFFFF000ULL, 0x1000, 0x2000,
+                            PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc != 0,
+              "paging_map_range permitió cruzar el hueco no canónico x86-64");
+
+  rc = paging_map_range(0xFFFFFFFFFFFFF000ULL, 0x2000, 0x2000,
+                        PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc != 0,
+              "paging_map_range permitió overflow de dirección virtual");
+
+  rc = paging_map_range(0x0000001000000000ULL,
+                        0x000FFFFFFFFFF000ULL, 0x2000,
+                        PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc != 0,
+              "paging_map_range permitió overflow/límite físico de PTE");
+
+  rc = paging_map_range(0x0000001000000000ULL, 0x1000, UINT64_MAX,
+                        PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc != 0,
+              "paging_map_range aceptó un tamaño que desborda el rango");
+}
+REGISTER_TEST("paging: rechaza overflow en map_range",
+              test_paging_map_range_overflow);
+
+// ---------------------------------------------------------------------------
 // SMP (Fase 0)
 // ---------------------------------------------------------------------------
 static void test_smp_processor_id_valid(void) {
