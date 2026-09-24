@@ -333,6 +333,30 @@ static void test_slab_usable_size(void) {
 REGISTER_TEST("slab: usable size", test_slab_usable_size);
 
 // ---------------------------------------------------------------------------
+// PMM: validación de rangos físicos EFI
+// ---------------------------------------------------------------------------
+static void test_pmm_efi_range_overflow(void) {
+  uint64_t size = 0;
+
+  TEST_ASSERT(pmm_test_validate_efi_range(0x1000, 1, &size),
+              "rango EFI válido fue rechazado");
+  TEST_ASSERT(size == PAGE_SIZE, "tamaño EFI válido incorrecto");
+
+  TEST_ASSERT(!pmm_test_validate_efi_range(0, UINT64_MAX / PAGE_SIZE + 1,
+                                            &size),
+              "overflow pages * PAGE_SIZE no fue rechazado");
+
+  TEST_ASSERT(!pmm_test_validate_efi_range(UINT64_MAX - PAGE_SIZE + 2, 1,
+                                            &size),
+              "overflow phys + size no fue rechazado");
+
+  TEST_ASSERT(!pmm_test_validate_efi_range(UINT64_MAX, 1, &size),
+              "rango físico al final de uint64 no fue rechazado");
+}
+REGISTER_TEST("pmm: rechaza overflow de rangos EFI",
+              test_pmm_efi_range_overflow);
+
+// ---------------------------------------------------------------------------
 // ELF: rechazo de overflow al reubicar segmentos ET_DYN
 // ---------------------------------------------------------------------------
 static void test_elf_relocation_overflow(void) {
