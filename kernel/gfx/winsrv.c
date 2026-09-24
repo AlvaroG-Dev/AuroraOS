@@ -252,9 +252,8 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
    * #PF llegue al camino fatal del kernel.
    *
    * Usamos un buffer de una sola fila para no reservar un bloque cuyo tamaño
-   * dependa del src_stride. Primero copiamos TODAS las filas a salvo y solo
-   * después modificamos la ventana: así un fallo a mitad del blit no deja un
-   * rectángulo parcialmente actualizado.
+   * dependa del src_stride. Cada fila se valida/copia mediante copy_from_user()
+   * antes de tocar la fila correspondiente de la ventana.
    */
   uint32_t row_buf[2048];
   size_t row_bytes = (size_t)copy_w * sizeof(uint32_t);
