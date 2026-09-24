@@ -19,6 +19,21 @@ static uint64_t last_alloc_bit = 0;
 
 #define EFI_CONVENTIONAL_MEMORY 7
 
+static int pmm_validate_efi_range(uint64_t phys, uint64_t pages,
+                                     uint64_t *size_out) {
+  if (pages > UINT64_MAX / PAGE_SIZE)
+    return 0;
+
+  uint64_t size = pages * PAGE_SIZE;
+  if (phys > UINT64_MAX - size)
+    return 0;
+
+  if (size_out)
+    *size_out = size;
+  return 1;
+}
+
+
 static inline int bitmap_in_range(uint64_t bit) { return bit < max_blocks; }
 
 static inline int bitmap_test_safe(uint8_t *bmp, uint64_t bit) {
@@ -55,10 +70,8 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
       continue;
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
-    if (pages > UINT64_MAX / PAGE_SIZE)
-      continue;
-    uint64_t size = pages * PAGE_SIZE;
-    if (phys > UINT64_MAX - size)
+    uint64_t size;
+    if (!pmm_validate_efi_range(phys, pages, &size))
       continue;
     uint64_t end_addr = phys + size;
     if (end_addr > max_phys_addr) {
@@ -88,11 +101,8 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
      */
     if (type != EFI_CONVENTIONAL_MEMORY || phys == 0)
       continue;
-    if (pages > UINT64_MAX / PAGE_SIZE)
-      continue;
-
-    uint64_t size = pages * PAGE_SIZE;
-    if (phys > UINT64_MAX - size)
+    uint64_t size;
+    if (!pmm_validate_efi_range(phys, pages, &size))
       continue;
     if (size < bitmap_size_bytes)
       continue;
@@ -126,11 +136,8 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
 
     if (type != EFI_CONVENTIONAL_MEMORY)
       continue;
-    if (pages > UINT64_MAX / PAGE_SIZE)
-      continue;
-
-    uint64_t size = pages * PAGE_SIZE;
-    if (phys > UINT64_MAX - size)
+    uint64_t size;
+    if (!pmm_validate_efi_range(phys, pages, &size))
       continue;
 
     uint64_t start_bit = phys / PAGE_SIZE;
@@ -369,4 +376,9 @@ uint64_t pmm_total_pages(void) { return max_blocks; }
 
 uint64_t pmm_free_pages_count(void) {
   return (max_blocks > used_blocks) ? (max_blocks - used_blocks) : 0;
+}
+
+int pmm_test_validate_efi_range(uint64_t phys, uint64_t pages,
+                                uint64_t *size_out) {
+  return pmm_validate_efi_range(phys, pages, size_out);
 }
