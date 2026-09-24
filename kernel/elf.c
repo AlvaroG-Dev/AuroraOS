@@ -100,19 +100,75 @@ int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
   const Elf64_Phdr *phdrs =
       (const Elf64_Phdr *)((uint8_t *)data + hdr->e_phoff);
 
+  /*
+   * Preflight all PT_LOAD segments before allocating or mapping anything.
+   * A malformed ET_DYN can otherwise overflow p_vaddr + load_base and make
+   * the page-range arithmetic wrap into a different address space.
+   */
+  const uint64_t user_canon_max = 0x00007FFFFFFFFFFFULL;
+  const uint64_t user_canon_limit = 0x0000800000000000ULL;
+
+  for (uint16_t i = 0; i < hdr->e_phnum; i++) {
+    const Elf64_Phdr *ph = &phdrs[i];
+    if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
+      continue;
+
+    uint64_t vaddr = ph->p_vaddr;
+    if (hdr->e_type == ET_DYN) {
+      if (vaddr > UINT64_MAX - load_base) {
+        LOG_ERR("[ELF] Overflow en relocación de segmento");
+        return -1;
+      }
+      vaddr += load_base;
+    }
+
+    if (vaddr > user_canon_max ||
+        ph->p_memsz > user_canon_limit - vaddr) {
+      LOG_ERR("[ELF] Segmento fuera del espacio de usuario");
+      return -1;
+    }
+
+    /*
+     * mem_end is exclusive. Because it is bounded to the user canonical
+     * range above, rounding it up to a page cannot overflow.
+     */
+    uint64_t mem_end = vaddr + ph->p_memsz;
+    uint64_t start_page = vaddr & ~0xFFFULL;
+    uint64_t end_page = (mem_end + 0xFFFULL) & ~0xFFFULL;
+    if (end_page < start_page) {
+      LOG_ERR("[ELF] Overflow calculando rango de páginas");
+      return -1;
+    }
+  }
+
+  uint64_t entry = hdr->e_entry;
+  if (hdr->e_type == ET_DYN) {
+    if (entry > UINT64_MAX - load_base) {
+      LOG_ERR("[ELF] Overflow en entry point");
+      return -1;
+    }
+    entry += load_base;
+  }
+  if (entry > user_canon_max) {
+    LOG_ERR("[ELF] Entry point fuera del espacio de usuario");
+    return -1;
+  }
+
   for (uint16_t i = 0; i < hdr->e_phnum; i++) {
     const Elf64_Phdr *ph = &phdrs[i];
     if (ph->p_type != PT_LOAD)
       continue;
 
-    uint64_t vaddr =
-        (hdr->e_type == ET_DYN) ? (ph->p_vaddr + load_base) : ph->p_vaddr;
+    uint64_t vaddr = ph->p_vaddr;
+    if (hdr->e_type == ET_DYN)
+      vaddr += load_base;
+
     uint64_t memsz = ph->p_memsz;
     uint64_t filesz = ph->p_filesz;
     uint64_t offset = ph->p_offset;
 
     uint64_t start_page = vaddr & ~0xFFFULL;
-    uint64_t end_page = (vaddr + memsz + 0xFFF) & ~0xFFFULL;
+    uint64_t end_page = (vaddr + memsz + 0xFFFULL) & ~0xFFFULL;
     size_t num_pages = (end_page - start_page) / PAGE_SIZE;
 
     // Derive page permissions directly from the ELF segment flags.
@@ -181,8 +237,7 @@ int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
     }
   }
 
-  *entry_out =
-      (hdr->e_type == ET_DYN) ? (hdr->e_entry + load_base) : hdr->e_entry;
+  *entry_out = entry;
   LOG_INFO("[ELF] Entry point: %p", (void *)*entry_out);
   return 0;
 }
