@@ -683,8 +683,22 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   if (size == 0)
     return NULL;
 
+  // PTE_FRAME define el mayor marco físico que puede representar una PTE.
+  // Validamos el último byte antes de hacer cualquier redondeo para evitar
+  // overflow en phys + size y en el cálculo de la página final.
+  const uint64_t max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  if (phys > max_phys || size - 1 > max_phys - phys)
+    return NULL;
+
+  uint64_t last_phys = phys + size - 1;
   uint64_t start = phys & ~0xFFFULL;
-  uint64_t end = (phys + size + 0xFFF) & ~0xFFFULL;
+  uint64_t end = (last_phys & ~0xFFFULL) + PAGE_SIZE;
+
+  // MMIO_MAP_BASE + end debe permanecer dentro de la mitad canónica alta.
+  // Con el límite físico anterior, esta suma no puede desbordar uint64_t,
+  // pero la comprobamos explícitamente para mantener la precondición local.
+  if (end > UINT64_MAX - MMIO_MAP_BASE)
+    return NULL;
 
   uint64_t pte_flags = flags | PTE_PRESENT;
 
