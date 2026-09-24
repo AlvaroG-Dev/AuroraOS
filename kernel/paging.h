@@ -48,6 +48,7 @@
 #define PD_INDEX(v) (((v) >> 21) & 0x1FF)
 #define PT_INDEX(v) (((v) >> 12) & 0x1FF)
 
+uint64_t paging_phys_window_size(uint64_t max_phys_addr);
 void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr);
 uint64_t *paging_get_pml4(void);
 int paging_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
