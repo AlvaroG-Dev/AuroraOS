@@ -19,7 +19,7 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000,-z,commo
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
 APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow shell \
-       segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel
+       segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel win_blit_fault
 
 all: $(APPS)
 
@@ -188,7 +188,13 @@ shell: apps/shell/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp shell ../sysroot/apps/
 
+win_blit_fault: apps/win_blit_fault/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/win_blit_fault/main.c -o win_blit_fault.o
+	$(LD) -o win_blit_fault $(LIB_OBJS) win_blit_fault.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp win_blit_fault ../sysroot/apps/
+
 clean:
 	rm -f *.o lib/*.o
 	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow
-	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel shell
+	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel win_blit_fault shell
