@@ -244,18 +244,38 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
     return -1;
   }
 
-  stac();
+  /*
+   * Nunca acceder directamente al buffer de userland desde Ring 0.
+   * access_ok() solo valida el rango de direcciones; la página puede estar
+   * sin mapear o puede fallar durante un acceso. copy_from_user() usa la
+   * tabla de exception-fixup y devuelve -EFAULT en vez de dejar que el
+   * #PF llegue al camino fatal del kernel.
+   *
+   * Usamos un buffer de una sola fila para no reservar un bloque cuyo tamaño
+   * dependa del src_stride. Primero copiamos TODAS las filas a salvo y solo
+   * después modificamos la ventana: así un fallo a mitad del blit no deja un
+   * rectángulo parcialmente actualizado.
+   */
+  uint32_t row_buf[2048];
+  size_t row_bytes = (size_t)copy_w * sizeof(uint32_t);
+  if (copy_w > (int)(sizeof(row_buf) / sizeof(row_buf[0]))) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+
   for (int row = 0; row < copy_h; row++) {
-    // La fila del buffer fuente empieza en (local_src_y + row) * src_stride.
     const uint32_t *src =
         user_pixels + (local_src_y + row) * src_stride + local_src_x;
+    if (copy_from_user(row_buf, src, row_bytes) < 0) {
+      spin_unlock_irqrestore(&winsrv_lock, flags);
+      return -EFAULT;
+    }
+
     uint32_t *dst =
         win->content_buffer + (dst_y + row) * win->content_w + dst_x;
-    for (int col = 0; col < copy_w; col++) {
-      dst[col] = src[col];
-    }
+    for (int col = 0; col < copy_w; col++)
+      dst[col] = row_buf[col];
   }
-  clac();
   win->dirty = 1;
 
   int inv_x = win->x + dst_x;
