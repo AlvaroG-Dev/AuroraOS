@@ -631,6 +631,65 @@ static void test_paging_noncanonical_addresses(void) {
 REGISTER_TEST("paging: rechaza direcciones no canónicas",
               test_paging_noncanonical_addresses);
 
+static void test_paging_unmap_rejects_huge_page(void) {
+  /*
+   * PHYS_MAP_BASE se construye con páginas de 2 MiB. Un unmap genérico
+   * no puede tratar una entrada PDE con PTE_HUGE como si apuntara a una PT:
+   * el frame físico de la huge page no es una tabla de 512 PTEs.
+   */
+  TEST_ASSERT(paging_unmap_page(PHYS_MAP_BASE) != 0,
+              "paging_unmap_page aceptó una página huge de 2 MiB");
+
+  /*
+   * Repetimos la comprobación con un PML4 aislado para garantizar que
+   * paging_unmap_page_in() conserva la entrada PDE huge intacta.
+   */
+  uint64_t pml4_phys = pmm_alloc_page();
+  TEST_ASSERT(pml4_phys != 0, "no se pudo reservar PML4 de prueba");
+  if (!pml4_phys)
+    return;
+
+  uint64_t pdpt_phys = pmm_alloc_page();
+  uint64_t pd_phys = pmm_alloc_page();
+  if (!pdpt_phys || !pd_phys) {
+    TEST_ASSERT(0, "no se pudieron reservar tablas de prueba");
+    if (pd_phys)
+      pmm_free_page(pd_phys);
+    if (pdpt_phys)
+      pmm_free_page(pdpt_phys);
+    pmm_free_page(pml4_phys);
+    return;
+  }
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  uint64_t *pdpt = (uint64_t *)phys_to_virt(pdpt_phys);
+  uint64_t *pd = (uint64_t *)phys_to_virt(pd_phys);
+  memset(pml4, 0, PAGE_SIZE);
+  memset(pdpt, 0, PAGE_SIZE);
+  memset(pd, 0, PAGE_SIZE);
+
+  const uint64_t virt = 0x0000004000000000ULL;
+  const uint64_t huge_phys = 0x00200000ULL;
+  const uint64_t huge_entry =
+      huge_phys | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
+
+  pml4[PML4_INDEX(virt)] = pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
+  pdpt[PDPT_INDEX(virt)] = pd_phys | PTE_PRESENT | PTE_WRITABLE;
+  pd[PD_INDEX(virt)] = huge_entry;
+
+  int rc = paging_unmap_page_in(pml4, virt);
+  TEST_ASSERT(rc != 0,
+              "paging_unmap_page_in aceptó una PDE huge de 2 MiB");
+  TEST_ASSERT(pd[PD_INDEX(virt)] == huge_entry,
+              "unmap modificó una PDE huge en lugar de rechazarla");
+
+  pmm_free_page(pd_phys);
+  pmm_free_page(pdpt_phys);
+  pmm_free_page(pml4_phys);
+}
+REGISTER_TEST("paging: unmap rechaza huge pages",
+              test_paging_unmap_rejects_huge_page);
+
 // ---------------------------------------------------------------------------
 // Paging: cálculo seguro de la ventana física
 // ---------------------------------------------------------------------------
