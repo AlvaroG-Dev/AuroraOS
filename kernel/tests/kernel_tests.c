@@ -546,6 +546,33 @@ REGISTER_TEST("paging: rechaza direcciones no canónicas",
               test_paging_noncanonical_addresses);
 
 // ---------------------------------------------------------------------------
+// Paging: cálculo seguro de la ventana física
+// ---------------------------------------------------------------------------
+static void test_paging_phys_window_size(void) {
+  const uint64_t max_window = PHYS_MAP_MAX_SIZE;
+  const uint64_t huge = UINT64_MAX;
+
+  TEST_ASSERT(paging_phys_window_size(0) == 0,
+              "max_phys_addr=0 no debería mapear RAM");
+  TEST_ASSERT(paging_phys_window_size(1) == 0x200000ULL,
+              "1 byte debería redondear a 2 MiB");
+  TEST_ASSERT(paging_phys_window_size(0x200001ULL) == 0x400000ULL,
+              "2 MiB+1 debería redondear a 4 MiB");
+  TEST_ASSERT(paging_phys_window_size(max_window - 1) == max_window,
+              "RAM justo por debajo de 512 GiB debería quedar limitada a 512 GiB");
+  TEST_ASSERT(paging_phys_window_size(max_window) == max_window,
+              "512 GiB debería caber exactamente en la ventana");
+  TEST_ASSERT(paging_phys_window_size(max_window + 1) == max_window,
+              "RAM superior a 512 GiB debería quedar limitada a 512 GiB");
+  TEST_ASSERT(paging_phys_window_size(huge) == max_window,
+              "UINT64_MAX no debería provocar overflow ni superar la ventana");
+}
+REGISTER_TEST("paging: ventana física sin overflow",
+              test_paging_phys_window_size);
+
+
+
+// ---------------------------------------------------------------------------
 // SMP (Fase 0)
 // ---------------------------------------------------------------------------
 static void test_smp_processor_id_valid(void) {
