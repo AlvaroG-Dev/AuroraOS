@@ -683,10 +683,16 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   if (size == 0)
     return NULL;
 
-  // PTE_FRAME define el mayor marco físico que puede representar una PTE.
-  // Validamos el último byte antes de hacer cualquier redondeo para evitar
-  // overflow en phys + size y en el cálculo de la página final.
-  const uint64_t max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  // La PTE puede representar más memoria física que la ventana virtual
+  // MMIO_MAP_BASE. El límite efectivo es el tamaño de esa ventana (una PML4
+  // entry = 512 GiB), además del límite de PTE_FRAME.
+  const uint64_t pte_max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  const uint64_t mmio_window_size = (1ULL << 39);
+  const uint64_t mmio_max_phys = mmio_window_size - 1;
+  const uint64_t max_phys =
+      pte_max_phys < mmio_max_phys ? pte_max_phys : mmio_max_phys;
+
+  // Validamos el último byte antes de hacer cualquier redondeo.
   if (phys > max_phys || size - 1 > max_phys - phys)
     return NULL;
 
@@ -694,10 +700,9 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
   uint64_t start = phys & ~0xFFFULL;
   uint64_t end = (last_phys & ~0xFFFULL) + PAGE_SIZE;
 
-  // MMIO_MAP_BASE + end debe permanecer dentro de la mitad canónica alta.
-  // Con el límite físico anterior, esta suma no puede desbordar uint64_t,
-  // pero la comprobamos explícitamente para mantener la precondición local.
-  if (end > UINT64_MAX - MMIO_MAP_BASE)
+  // 'end' puede ser exactamente el tamaño de la ventana: el mapeo termina
+  // en la última dirección canónica válida de la ventana.
+  if (end > mmio_window_size)
     return NULL;
 
   uint64_t pte_flags = flags | PTE_PRESENT;
@@ -723,15 +728,22 @@ void mmio_unmap(uint64_t phys, uint64_t size) {
   if (size == 0)
     return;
 
-  // Mantener las mismas precondiciones de rango que mmio_map(). Sin esta
-  // validación, phys + size + 0xFFF puede envolver y dejar páginas mapeadas.
-  const uint64_t max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  // Mantener las mismas precondiciones de rango que mmio_map().
+  const uint64_t pte_max_phys = PTE_FRAME + PAGE_SIZE - 1;
+  const uint64_t mmio_window_size = (1ULL << 39);
+  const uint64_t mmio_max_phys = mmio_window_size - 1;
+  const uint64_t max_phys =
+      pte_max_phys < mmio_max_phys ? pte_max_phys : mmio_max_phys;
+
   if (phys > max_phys || size - 1 > max_phys - phys)
     return;
 
   uint64_t last_phys = phys + size - 1;
   uint64_t start = phys & ~0xFFFULL;
   uint64_t end = (last_phys & ~0xFFFULL) + PAGE_SIZE;
+
+  if (end > mmio_window_size)
+    return;
 
   for (uint64_t page = start; page < end; page += PAGE_SIZE) {
     paging_unmap_page(MMIO_MAP_BASE + page);
