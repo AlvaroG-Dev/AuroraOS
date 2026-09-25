@@ -564,5 +564,21 @@ int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
     return -EINVAL;
   }
 
+  /*
+   * Diagnóstico de extremo a extremo: si aquí la cache ya contiene píxeles
+   * no transparentes, cualquier fallback visible posteriormente pertenece
+   * al camino de renderizado y no a TarFS/BMP.
+   */
+  uint32_t center = win->icon_cache[9 * 18 + 9];
+  uint32_t corner = win->icon_cache[0];
+  LOG_INFO("[WINSRV] set_icon: cache ventana OK has=%d center=%08x corner=%08x",
+           win->has_icon_cache, center, corner);
+  if (win->taskbar_item) {
+    uint32_t tb_center = win->taskbar_item->icon_cache[10 * 20 + 10];
+    uint32_t tb_corner = win->taskbar_item->icon_cache[0];
+    LOG_INFO("[WINSRV] set_icon: cache taskbar has=%d center=%08x corner=%08x",
+             win->taskbar_item->has_icon_cache, tb_center, tb_corner);
+  }
+
   return 0;
 }
