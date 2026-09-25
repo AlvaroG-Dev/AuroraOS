@@ -75,8 +75,7 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
       rect_t clip20 = {0, 0, 20, 20};
       for (int i = 0; i < 20 * 20; i++)
         win->taskbar_item->icon_cache[i] = 0;
-      int rc20 = bmp_draw_scaled(bmp_file, win->taskbar_item->icon_cache, 20,
-                                 clip20, 0, 0, 20, 20);
+      int rc20 = bmp_draw_icon_scaled(bmp_file, win->taskbar_item->icon_cache, 20, 20);
       if (rc20 < 0) {
         LOG_ERR("[WINDOW] BMP de icono rechazado para '%s' (20x20)",
                 bmp_file->name);
