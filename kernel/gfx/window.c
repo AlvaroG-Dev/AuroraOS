@@ -60,10 +60,10 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
     }
   } else {
     rect_t clip18 = {0, 0, 18, 18};
+    (void)clip18;
     for (int i = 0; i < 18 * 18; i++)
       win->icon_cache[i] = 0;
-    int rc18 = bmp_draw_scaled(bmp_file, win->icon_cache, 18, clip18, 0, 0,
-                               18, 18);
+    int rc18 = bmp_draw_icon_scaled(bmp_file, win->icon_cache, 18, 18);
     if (rc18 < 0) {
       LOG_ERR("[WINDOW] BMP de icono rechazado para '%s' (18x18)",
               bmp_file->name);
