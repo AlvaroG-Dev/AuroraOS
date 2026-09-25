@@ -86,11 +86,10 @@ taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
         // has_icon_cache=0 e icon_bmp_node!=NULL (el estado "roto" que
         // taskbar_render tenía que parchear en tiempo de render).
         if (bmp_file) {
-          rect_t clip = {0, 0, 20, 20};
           for (int i2 = 0; i2 < 20 * 20; i2++)
             curr->icon_cache[i2] = 0;
-          bmp_draw_icon_scaled(bmp_file, curr->icon_cache, 20, 20);
-          curr->has_icon_cache = 1;
+          curr->has_icon_cache =
+              (bmp_draw_icon_scaled(bmp_file, curr->icon_cache, 20, 20) == 0);
         } else {
           curr->has_icon_cache = 0;
         }
@@ -106,11 +105,10 @@ taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
   if (item) {
     item->icon_bmp_node = bmp_file;
     if (bmp_file) {
-      rect_t clip = {0, 0, 20, 20};
       for (int i = 0; i < 20 * 20; i++)
         item->icon_cache[i] = 0;
-      bmp_draw_icon_scaled(bmp_file, item->icon_cache, 20, 20);
-      item->has_icon_cache = 1;
+      item->has_icon_cache =
+          (bmp_draw_icon_scaled(bmp_file, item->icon_cache, 20, 20) == 0);
     } else {
       item->has_icon_cache = 0;
     }
@@ -566,11 +564,10 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
       // resto de iconos de la barra. Además dejamos el item "curado"
       // (has_icon_cache=1) para que los siguientes frames usen la vía
       // rápida de arriba sin volver a decodificar el BMP.
-      rect_t icon_clip = {0, 0, 20, 20};
       for (int i = 0; i < 20 * 20; i++)
         curr->icon_cache[i] = 0;
-      bmp_draw_icon_scaled(curr->icon_bmp_node, curr->icon_cache, 20, 20);
-      curr->has_icon_cache = 1;
+      curr->has_icon_cache =
+          (bmp_draw_icon_scaled(curr->icon_bmp_node, curr->icon_cache, 20, 20) == 0);
       gfx_bit_blat(dst, stride, curr->icon_cache, 20, clip, content_x,
                    center_y - 10, 20, 20);
       content_x += 20;
