@@ -273,13 +273,8 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
   uint8_t *pixels = file->data + fh->offset;
   int bottom_up = ih->height > 0;
 
-  /*
-   * Icon BMPs commonly contain transparent margins around the artwork.
-   * Scaling the whole canvas makes a 500x500 icon whose artwork occupies only
-   * the middle appear as a tiny/incorrect icon. Find the visible alpha bounds
-   * first, then scale the artwork itself into the destination with a 1px
-   * safety margin.
-   */
+  /* Ignore transparent margins, but preserve the source pixel colors exactly.
+   * Icons are tiny, so filtering/averaging can visibly shift their colors. */
   uint64_t min_x = 0, min_y = 0, max_x = width, max_y = height;
   if (bytes_per_pixel == 4) {
     min_x = width;
@@ -290,125 +285,62 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
       uint64_t src_y = bottom_up ? height - 1 - sy : sy;
       uint8_t *row = pixels + src_y * row_stride;
       for (uint64_t sx = 0; sx < width; sx++) {
-        uint8_t a = row[sx * bytes_per_pixel + 3];
-        if (a > 8) {
-          if (sx < min_x)
-            min_x = sx;
-          if (sy < min_y)
-            min_y = sy;
-          if (sx + 1 > max_x)
-            max_x = sx + 1;
-          if (sy + 1 > max_y)
-            max_y = sy + 1;
+        if (row[sx * bytes_per_pixel + 3] > 8) {
+          if (sx < min_x) min_x = sx;
+          if (sy < min_y) min_y = sy;
+          if (sx + 1 > max_x) max_x = sx + 1;
+          if (sy + 1 > max_y) max_y = sy + 1;
         }
       }
     }
 
     if (min_x >= max_x || min_y >= max_y) {
-      min_x = 0;
-      min_y = 0;
-      max_x = width;
-      max_y = height;
+      min_x = 0; min_y = 0; max_x = width; max_y = height;
     }
   }
 
   uint64_t src_w = max_x - min_x;
   uint64_t src_h = max_y - min_y;
-  if (src_w == 0 || src_h == 0)
+  int pad_x = dst_w > 2 ? 1 : 0;
+  int pad_y = dst_h > 2 ? 1 : 0;
+  int inner_w = dst_w - pad_x * 2;
+  int inner_h = dst_h - pad_y * 2;
+  uint64_t fit_w = (uint64_t)inner_w;
+  uint64_t fit_h = (src_h * fit_w) / src_w;
+  if (fit_h > (uint64_t)inner_h) {
+    fit_h = (uint64_t)inner_h;
+    fit_w = (src_w * fit_h) / src_h;
+  }
+  if (fit_w == 0 || fit_h == 0)
     return -1;
+
+  uint64_t off_x = ((uint64_t)inner_w - fit_w) / 2;
+  uint64_t off_y = ((uint64_t)inner_h - fit_h) / 2;
 
   for (int dy = 0; dy < dst_h; dy++) {
     for (int dx = 0; dx < dst_w; dx++) {
       dst[dy * dst_w + dx] = 0;
-
-      int pad_x = (dst_w > 2) ? 1 : 0;
-      int pad_y = (dst_h > 2) ? 1 : 0;
-      int inner_w = dst_w - pad_x * 2;
-      int inner_h = dst_h - pad_y * 2;
-      if (dx < pad_x || dx >= pad_x + inner_w ||
-          dy < pad_y || dy >= pad_y + inner_h)
+      int ux = dx - pad_x;
+      int uy = dy - pad_y;
+      if (ux < 0 || uy < 0 ||
+          (uint64_t)ux < off_x || (uint64_t)uy < off_y ||
+          (uint64_t)ux >= off_x + fit_w ||
+          (uint64_t)uy >= off_y + fit_h)
         continue;
 
-      uint64_t ux = (uint64_t)(dx - pad_x);
-      uint64_t uy = (uint64_t)(dy - pad_y);
+      uint64_t tx = (uint64_t)ux - off_x;
+      uint64_t ty = (uint64_t)uy - off_y;
+      uint64_t sx = min_x + (tx * src_w) / fit_w;
+      uint64_t sy = min_y + (ty * src_h) / fit_h;
+      if (sx >= max_x) sx = max_x - 1;
+      if (sy >= max_y) sy = max_y - 1;
 
-      /*
-       * Preserve the source aspect ratio. Center the artwork in the
-       * destination rather than stretching a non-square BMP.
-       */
-      uint64_t target_w = (uint64_t)inner_w;
-      uint64_t target_h = (uint64_t)inner_h;
-      uint64_t fit_w = target_w;
-      uint64_t fit_h = (src_h * fit_w) / src_w;
-      if (fit_h > target_h) {
-        fit_h = target_h;
-        fit_w = (src_w * fit_h) / src_h;
-      }
-      if (fit_w == 0 || fit_h == 0)
-        continue;
-
-      uint64_t off_x = ((uint64_t)inner_w - fit_w) / 2;
-      uint64_t off_y = ((uint64_t)inner_h - fit_h) / 2;
-      if (ux < off_x || ux >= off_x + fit_w ||
-          uy < off_y || uy >= off_y + fit_h)
-        continue;
-
-      uint64_t tx = ux - off_x;
-      uint64_t ty = uy - off_y;
-
-      uint64_t sx0 = min_x + (tx * src_w) / fit_w;
-      uint64_t sx1 = min_x + (((tx + 1) * src_w) + fit_w - 1) / fit_w;
-      uint64_t sy0 = min_y + (ty * src_h) / fit_h;
-      uint64_t sy1 = min_y + (((ty + 1) * src_h) + fit_h - 1) / fit_h;
-
-      if (sx1 > max_x)
-        sx1 = max_x;
-      if (sy1 > max_y)
-        sy1 = max_y;
-      if (sx1 <= sx0)
-        sx1 = sx0 + 1;
-      if (sy1 <= sy0)
-        sy1 = sy0 + 1;
-
-      uint64_t a_sum = 0;
-      uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
-      uint64_t count = 0;
-
-      for (uint64_t sy = sy0; sy < sy1; sy++) {
-        uint64_t src_y = bottom_up ? height - 1 - sy : sy;
-        uint8_t *row = pixels + src_y * row_stride;
-
-        for (uint64_t sx = sx0; sx < sx1; sx++) {
-          uint8_t *p = row + sx * bytes_per_pixel;
-          uint32_t a = (bytes_per_pixel == 4) ? p[3] : 255;
-
-          a_sum += a;
-          r_sum += (uint64_t)p[2] * a;
-          g_sum += (uint64_t)p[1] * a;
-          b_sum += (uint64_t)p[0] * a;
-          count++;
-        }
-      }
-
-      if (count == 0 || a_sum == 0)
-        continue;
-
-      uint32_t a = (uint32_t)(a_sum / count);
-      uint32_t r = (uint32_t)((r_sum * 255ULL) / a_sum);
-      uint32_t g = (uint32_t)((g_sum * 255ULL) / a_sum);
-      uint32_t b = (uint32_t)((b_sum * 255ULL) / a_sum);
-
-      if (a > 255)
-        a = 255;
-      if (r > 255)
-        r = 255;
-      if (g > 255)
-        g = 255;
-      if (b > 255)
-        b = 255;
-
+      uint64_t src_y = bottom_up ? height - 1 - sy : sy;
+      uint8_t *p = pixels + src_y * row_stride + sx * bytes_per_pixel;
+      uint32_t a = bytes_per_pixel == 4 ? p[3] : 255;
       dst[dy * dst_w + dx] =
-          (a << 24) | (r << 16) | (g << 8) | b;
+          (a << 24) | ((uint32_t)p[2] << 16) |
+          ((uint32_t)p[1] << 8) | p[0];
     }
   }
 
