@@ -19,20 +19,31 @@ static void fb_putpixel(int x, int y, uint32_t color) {
 
 // Auxiliar interna para Alpha Blending rápido (ARGB)
 static inline uint32_t blend_pixel(uint32_t src, uint32_t dst) {
-  uint32_t alpha = (src >> 24) & 0xFF;
-  if (alpha == 255)
-    return src;
-  if (alpha == 0)
+  uint32_t sa = (src >> 24) & 0xFF;
+  if (sa == 0)
     return dst;
+  if (sa == 255)
+    return src;
 
-  uint32_t inv_alpha = 255 - alpha;
-  uint32_t r =
-      (((src >> 16) & 0xFF) * alpha + ((dst >> 16) & 0xFF) * inv_alpha) / 255;
-  uint32_t g =
-      (((src >> 8) & 0xFF) * alpha + ((dst >> 8) & 0xFF) * inv_alpha) / 255;
-  uint32_t b = ((src & 0xFF) * alpha + (dst & 0xFF) * inv_alpha) / 255;
+  // Source-over ARGB. No fuerces el alpha de salida a 0xFF: los caches
+  // de iconos se decodifican sobre un canvas transparente.
+  uint32_t da = (dst >> 24) & 0xFF;
+  uint32_t inv_sa = 255 - sa;
+  uint32_t out_a = sa + (da * inv_sa) / 255;
 
-  return (0xFF000000) | (r << 16) | (g << 8) | b;
+  uint32_t sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
+  uint32_t dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
+
+  uint32_t r, g, b;
+  if (out_a == 0) {
+    r = g = b = 0;
+  } else {
+    r = (sr * sa + dr * da * inv_sa / 255) / out_a;
+    g = (sg * sa + dg * da * inv_sa / 255) / out_a;
+    b = (sb * sa + db * da * inv_sa / 255) / out_a;
+  }
+
+  return (out_a << 24) | (r << 16) | (g << 8) | b;
 }
 
 int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
@@ -182,29 +193,41 @@ int bmp_draw_scaled(tar_node_t *file, uint32_t *dst, int dst_stride,
       if (sx1 <= sx0)
         sx1 = sx0 + 1;
 
-      uint32_t r_sum = 0, g_sum = 0, b_sum = 0, a_sum = 0;
+      // Promediar en espacio premultiplicado evita halos oscuros
+      // alrededor de iconos transparentes.
+      uint64_t r_premul = 0, g_premul = 0, b_premul = 0, a_sum = 0;
       int count = 0;
 
       for (int sy = sy0; sy < sy1; sy++) {
         int src_y = bottom_up ? (height - 1 - sy) : sy;
         uint8_t *row = pixel_data + (src_y * row_stride);
         for (int sx = sx0; sx < sx1; sx++) {
-          b_sum += row[sx * bytes_per_pixel + 0];
-          g_sum += row[sx * bytes_per_pixel + 1];
-          r_sum += row[sx * bytes_per_pixel + 2];
-          a_sum += (bpp == 32) ? row[sx * bytes_per_pixel + 3] : 0xFF;
+          uint8_t b = row[sx * bytes_per_pixel + 0];
+          uint8_t g = row[sx * bytes_per_pixel + 1];
+          uint8_t r = row[sx * bytes_per_pixel + 2];
+          uint8_t a = (bpp == 32) ? row[sx * bytes_per_pixel + 3] : 0xFF;
+          r_premul += (uint32_t)r * a;
+          g_premul += (uint32_t)g * a;
+          b_premul += (uint32_t)b * a;
+          a_sum += a;
           count++;
         }
       }
       if (count == 0)
         continue;
 
-      uint8_t a = a_sum / count;
-      uint8_t r = r_sum / count;
-      uint8_t g = g_sum / count;
-      uint8_t b = b_sum / count;
-      uint32_t src_color =
-          ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+      uint32_t a = (uint32_t)(a_sum / count);
+      uint32_t r = 0, g = 0, b = 0;
+      if (a != 0) {
+        r = (uint32_t)(r_premul / count) * 255 / a;
+        g = (uint32_t)(g_premul / count) * 255 / a;
+        b = (uint32_t)(b_premul / count) * 255 / a;
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+      }
+
+      uint32_t src_color = (a << 24) | (r << 16) | (g << 8) | b;
       dst_row[px] = blend_pixel(src_color, dst_row[px]);
     }
   }
