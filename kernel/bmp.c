@@ -255,91 +255,50 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
     return -1;
   if ((ih->bpp != 24 && ih->bpp != 32) || ih->width <= 0 || ih->height == 0)
     return -1;
-  if (fh->offset < sizeof(bmp_file_header_t) + sizeof(bmp_info_header_t) ||
-      fh->offset >= file->size)
+  if (fh->offset < sizeof(bmp_file_header_t) || fh->offset >= file->size)
     return -1;
 
   uint64_t width = (uint64_t)ih->width;
   uint64_t height =
       (uint64_t)(ih->height < 0 ? -(int64_t)ih->height : ih->height);
-  uint64_t bpp = (uint64_t)ih->bpp;
-  uint64_t bytes_per_pixel = bpp / 8;
-  uint64_t row_stride = ((width * bpp + 31) / 32) * 4;
-  uint64_t pixel_bytes = row_stride * height;
+  uint64_t bytes_per_pixel = (uint64_t)ih->bpp / 8;
+  uint64_t row_stride = ((width * (uint64_t)ih->bpp + 31) / 32) * 4;
 
-  if (row_stride == 0 || pixel_bytes > file->size - fh->offset)
+  if (row_stride == 0 || height > (UINT64_MAX / row_stride))
+    return -1;
+  uint64_t pixel_bytes = row_stride * height;
+  if (pixel_bytes > file->size - fh->offset)
     return -1;
 
   uint8_t *pixels = file->data + fh->offset;
   int bottom_up = ih->height > 0;
 
   /*
-   * Downsample directly into a transparent cache. Unlike bmp_draw_scaled(),
-   * this function never blends against the destination: the cache must remain
-   * a straight-alpha image until gfx_bit_blat() composites it onto the
-   * titlebar/taskbar background.
-   *
-   * We use an area average rather than a single nearest-neighbour sample.
-   * A 500x500 icon reduced to 18x18 can contain thin strokes that a single
-   * sample would miss completely.
+   * Icons are opaque/transparent ARGB images. Use a single representative
+   * source pixel for each destination pixel, but choose the center of the
+   * corresponding source cell. This preserves the actual BMP colors and
+   * avoids averaging white transparent/background pixels into the icon.
    */
   for (int dy = 0; dy < dst_h; dy++) {
-    uint64_t sy0 = ((uint64_t)dy * height) / (uint64_t)dst_h;
-    uint64_t sy1 =
-        ((uint64_t)(dy + 1) * height) / (uint64_t)dst_h;
-    if (sy1 <= sy0)
-      sy1 = sy0 + 1;
-    if (sy1 > height)
-      sy1 = height;
+    uint64_t sy = ((uint64_t)(2 * dy + 1) * height) /
+                  (uint64_t)(2 * dst_h);
+    if (sy >= height)
+      sy = height - 1;
+    uint64_t src_y = bottom_up ? height - 1 - sy : sy;
+    uint8_t *row = pixels + src_y * row_stride;
 
     for (int dx = 0; dx < dst_w; dx++) {
-      uint64_t sx0 = ((uint64_t)dx * width) / (uint64_t)dst_w;
-      uint64_t sx1 =
-          ((uint64_t)(dx + 1) * width) / (uint64_t)dst_w;
-      if (sx1 <= sx0)
-        sx1 = sx0 + 1;
-      if (sx1 > width)
-        sx1 = width;
+      uint64_t sx = ((uint64_t)(2 * dx + 1) * width) /
+                    (uint64_t)(2 * dst_w);
+      if (sx >= width)
+        sx = width - 1;
 
-      uint64_t a_sum = 0;
-      uint64_t r_premul = 0;
-      uint64_t g_premul = 0;
-      uint64_t b_premul = 0;
-      uint64_t count = 0;
-
-      for (uint64_t sy = sy0; sy < sy1; sy++) {
-        uint64_t src_y = bottom_up ? (height - 1 - sy) : sy;
-        uint8_t *row = pixels + src_y * row_stride;
-
-        for (uint64_t sx = sx0; sx < sx1; sx++) {
-          uint8_t *p = row + sx * bytes_per_pixel;
-          uint32_t a = (bytes_per_pixel == 4) ? p[3] : 255;
-
-          a_sum += a;
-          r_premul += (uint64_t)p[2] * a;
-          g_premul += (uint64_t)p[1] * a;
-          b_premul += (uint64_t)p[0] * a;
-          count++;
-        }
-      }
-
-      if (count == 0 || a_sum == 0) {
-        dst[dy * dst_w + dx] = 0;
-        continue;
-      }
-
-      uint32_t a = (uint32_t)(a_sum / count);
-      uint32_t r = (uint32_t)((r_premul * 255ULL) / a_sum);
-      uint32_t g = (uint32_t)((g_premul * 255ULL) / a_sum);
-      uint32_t b = (uint32_t)((b_premul * 255ULL) / a_sum);
-
-      if (a > 255) a = 255;
-      if (r > 255) r = 255;
-      if (g > 255) g = 255;
-      if (b > 255) b = 255;
+      uint8_t *p = row + sx * bytes_per_pixel;
+      uint32_t a = (bytes_per_pixel == 4) ? p[3] : 255;
 
       dst[dy * dst_w + dx] =
-          (a << 24) | (r << 16) | (g << 8) | b;
+          (a << 24) | ((uint32_t)p[2] << 16) |
+          ((uint32_t)p[1] << 8) | p[0];
     }
   }
 
