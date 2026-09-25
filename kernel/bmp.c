@@ -264,7 +264,7 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
   uint64_t bytes_per_pixel = (uint64_t)ih->bpp / 8;
   uint64_t row_stride = ((width * (uint64_t)ih->bpp + 31) / 32) * 4;
 
-  if (row_stride == 0 || height > (UINT64_MAX / row_stride))
+  if (row_stride == 0 || height > UINT64_MAX / row_stride)
     return -1;
   uint64_t pixel_bytes = row_stride * height;
   if (pixel_bytes > file->size - fh->offset)
@@ -274,31 +274,59 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
   int bottom_up = ih->height > 0;
 
   /*
-   * Icons are opaque/transparent ARGB images. Use a single representative
-   * source pixel for each destination pixel, but choose the center of the
-   * corresponding source cell. This preserves the actual BMP colors and
-   * avoids averaging white transparent/background pixels into the icon.
+   * Area downsample with premultiplied alpha. Transparent source pixels do
+   * not contribute RGB, preventing transparent/white BMP background pixels
+   * from tinting the icon edges.
    */
   for (int dy = 0; dy < dst_h; dy++) {
-    uint64_t sy = ((uint64_t)(2 * dy + 1) * height) /
-                  (uint64_t)(2 * dst_h);
-    if (sy >= height)
-      sy = height - 1;
-    uint64_t src_y = bottom_up ? height - 1 - sy : sy;
-    uint8_t *row = pixels + src_y * row_stride;
+    uint64_t sy0 = ((uint64_t)dy * height) / (uint64_t)dst_h;
+    uint64_t sy1 = ((uint64_t)(dy + 1) * height) / (uint64_t)dst_h;
+    if (sy1 <= sy0) sy1 = sy0 + 1;
+    if (sy1 > height) sy1 = height;
 
     for (int dx = 0; dx < dst_w; dx++) {
-      uint64_t sx = ((uint64_t)(2 * dx + 1) * width) /
-                    (uint64_t)(2 * dst_w);
-      if (sx >= width)
-        sx = width - 1;
+      uint64_t sx0 = ((uint64_t)dx * width) / (uint64_t)dst_w;
+      uint64_t sx1 = ((uint64_t)(dx + 1) * width) / (uint64_t)dst_w;
+      if (sx1 <= sx0) sx1 = sx0 + 1;
+      if (sx1 > width) sx1 = width;
 
-      uint8_t *p = row + sx * bytes_per_pixel;
-      uint32_t a = (bytes_per_pixel == 4) ? p[3] : 255;
+      uint64_t a_sum = 0;
+      uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
+      uint64_t count = 0;
+
+      for (uint64_t sy = sy0; sy < sy1; sy++) {
+        uint64_t src_y = bottom_up ? height - 1 - sy : sy;
+        uint8_t *row = pixels + src_y * row_stride;
+
+        for (uint64_t sx = sx0; sx < sx1; sx++) {
+          uint8_t *p = row + sx * bytes_per_pixel;
+          uint32_t a = (bytes_per_pixel == 4) ? p[3] : 255;
+
+          a_sum += a;
+          r_sum += (uint64_t)p[2] * a;
+          g_sum += (uint64_t)p[1] * a;
+          b_sum += (uint64_t)p[0] * a;
+          count++;
+        }
+      }
+
+      if (count == 0 || a_sum == 0) {
+        dst[dy * dst_w + dx] = 0;
+        continue;
+      }
+
+      uint32_t a = (uint32_t)(a_sum / count);
+      uint32_t r = (uint32_t)((r_sum * 255ULL) / a_sum);
+      uint32_t g = (uint32_t)((g_sum * 255ULL) / a_sum);
+      uint32_t b = (uint32_t)((b_sum * 255ULL) / a_sum);
+
+      if (a > 255) a = 255;
+      if (r > 255) r = 255;
+      if (g > 255) g = 255;
+      if (b > 255) b = 255;
 
       dst[dy * dst_w + dx] =
-          (a << 24) | ((uint32_t)p[2] << 16) |
-          ((uint32_t)p[1] << 8) | p[0];
+          (a << 24) | (r << 16) | (g << 8) | b;
     }
   }
 
