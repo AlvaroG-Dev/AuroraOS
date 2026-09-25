@@ -20,7 +20,7 @@ static uint64_t last_alloc_bit = 0;
 #define EFI_CONVENTIONAL_MEMORY 7
 
 static int pmm_validate_efi_range(uint64_t phys, uint64_t pages,
-                                     uint64_t *size_out) {
+                                  uint64_t *size_out) {
   if (pages > UINT64_MAX / PAGE_SIZE)
     return 0;
 
@@ -32,7 +32,6 @@ static int pmm_validate_efi_range(uint64_t phys, uint64_t pages,
     *size_out = size;
   return 1;
 }
-
 
 static inline int bitmap_in_range(uint64_t bit) { return bit < max_blocks; }
 
@@ -163,8 +162,7 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
 
   uint64_t bmp_start_bit = bitmap_phys / PAGE_SIZE;
   uint64_t bitmap_end = bitmap_phys + bitmap_size_bytes;
-  if (bitmap_end < bitmap_phys ||
-      bitmap_end > UINT64_MAX - (PAGE_SIZE - 1)) {
+  if (bitmap_end < bitmap_phys || bitmap_end > UINT64_MAX - (PAGE_SIZE - 1)) {
     LOG_ERR("[PMM] ERROR: rango del bitmap desbordado");
     return;
   }
@@ -300,6 +298,12 @@ void pmm_free_page(uint64_t phys_addr) {
       used_blocks--;
     if (bit < last_alloc_bit)
       last_alloc_bit = bit;
+  } else if (bitmap_in_range(bit)) {
+    // [H5] La página ya estaba libre. Suele indicar un bug del llamante
+    // (doble free, o free de una dirección nunca asignada). Avisamos,
+    // pero no abortamos: en producción el sistema sigue.
+    LOG_WARN("[PMM] doble free: phys=%p bit=%lu", (void *)phys_addr,
+             (unsigned long)bit);
   }
   spin_unlock_irqrestore(&pmm_lock, flags);
 }
@@ -313,6 +317,33 @@ void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
   extern void buddy_free_order(uint64_t phys_addr, uint32_t order);
   int32_t order = pages_to_order(count);
   if (order >= 0) {
+    // [H5] Detectar doble free ANTES de llamar al buddy.
+    //
+    // buddy_free_order() es idempotente (range_mark_free vuelve a
+    // poner a cero bits que ya están a cero), así que sin este
+    // chequeo un segundo free del mismo rango decrementa used_blocks
+    // por debajo del valor real. Si todas las páginas del rango ya
+    // están libres, no hacemos nada y avisamos.
+    uint64_t first_bit = phys_addr / PAGE_SIZE;
+    int all_free = 1;
+    for (uint64_t i = 0; i < count; i++) {
+      uint64_t b = first_bit + i;
+      if (!bitmap_in_range(b)) {
+        all_free = 0;
+        break;
+      }
+      if (bitmap_test_safe(bitmap, b)) { // bit=1 → usada
+        all_free = 0;
+        break;
+      }
+    }
+    if (all_free) {
+      LOG_WARN("[PMM] doble free (rango buddy): phys=%p count=%lu",
+               (void *)phys_addr, (unsigned long)count);
+      spin_unlock_irqrestore(&pmm_lock, flags);
+      return;
+    }
+
     buddy_free_order(phys_addr, (uint32_t)order);
     if (used_blocks >= count)
       used_blocks -= count;
@@ -324,10 +355,15 @@ void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
 
   for (uint64_t i = 0; i < count; i++) {
     uint64_t b = start_bit + i;
-    if (bitmap_in_range(b) && bitmap_test_safe(bitmap, b)) {
+    if (!bitmap_in_range(b))
+      continue;
+    if (bitmap_test_safe(bitmap, b)) {
       bitmap_clear_safe(bitmap, b);
       if (used_blocks > 0)
         used_blocks--;
+    } else {
+      LOG_WARN("[PMM] doble free (rango): phys=%p bit=%lu",
+               (void *)(b * PAGE_SIZE), (unsigned long)b);
     }
   }
   if (start_bit < last_alloc_bit)

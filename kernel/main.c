@@ -11,6 +11,7 @@
 #include "block.h"
 #include "cpu.h"
 #include "driver.h"
+#include "fat32.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
 #include "gfx/theme.h"
@@ -21,6 +22,7 @@
 #include "ipi.h"
 #include "klog.h"
 #include "paging.h"
+#include "part.h"
 #include "pci.h"
 #include "pf.h"
 #include "pmm.h"
@@ -196,6 +198,24 @@ static void kmain_task(void) {
   extern int ata_pio_finalize(void);
   ata_pio_finalize();
 
+  // [FASE 2] Escanear tablas de particiones en todos los discos.
+  LOG_INFO("[INIT] Partition layer...");
+  part_scan_all();
+  LOG_INFO("OK");
+
+  // [FASE 2.2] Intentar montar el disco de boot como FAT32 (aurora.img
+  // es un FAT32 crudo, sin tabla de particiones). Best-effort: si no es
+  // FAT32, se ignora.
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || b->is_partition || b->is_read_only)
+      continue;
+    if (fat32_mount_bdev(b->name, "/boot") == 0) {
+      LOG_INFO("[INIT] Montado %s en /boot", b->name);
+      break;
+    }
+  }
+
   LOG_INFO("[INIT] DMA dump...");
   ata_dma_dump();
 
@@ -247,11 +267,15 @@ static void kmain_task(void) {
 
   ipi_init();
 
+  extern void __sched_canary_arm(void);
+  __sched_canary_arm();
+
   int failed = run_all_tests();
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
 
+  __sched_canary_check();
   // App de consola gráfica (antes del SMP, para que no interfiera).
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
@@ -321,7 +345,8 @@ void kmain(struct kernel_boot_info *kinfo) {
       uint64_t phys = *(uint64_t *)(ptr + i + 8);
       uint64_t pages = *(uint64_t *)(ptr + i + 24);
       if (pages > UINT64_MAX / PAGE_SIZE) {
-        LOG_WARN("[MEM] Descriptor EFI con tamaño de páginas inválido, ignorado");
+        LOG_WARN(
+            "[MEM] Descriptor EFI con tamaño de páginas inválido, ignorado");
         continue;
       }
       uint64_t size = pages * PAGE_SIZE;
@@ -424,6 +449,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   if (!t) {
     LOG_PANIC("[KERNEL] no se pudo crear kmain_task");
   }
+  t->cpu_affinity = 0; // ← FIX: task 8 solo corre en CPU 0
 
   LOG_DEBUG("[KERNEL] kmain: saltando a kmain_task");
   sched_start(t);

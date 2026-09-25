@@ -29,6 +29,10 @@
 #define SYS_WIN_REGISTER_CONSOLE 23
 #define SYS_GET_SERVICE_ID 24
 #define SYS_VM_DEBUG_INFO 25
+#define SYS_READDIR 26
+#define SYS_MKDIR 27
+#define SYS_UNLINK 28
+#define SYS_WIN_SET_ICON 29
 
 #define WNOHANG 1
 #define O_RDONLY 0x0000
@@ -63,6 +67,13 @@ typedef struct {
   uint64_t virt;
   uint64_t phys;
 } vm_debug_info_t;
+
+typedef struct {
+  char name[128];
+  uint32_t type;
+  uint32_t _pad;
+  uint64_t size;
+} dirent_t;
 
 #define WINSRV_EV_NONE 0
 #define WINSRV_EV_CLOSE 1
@@ -178,8 +189,14 @@ static inline int sys_win_blit(int win_id, int x, int y, int w, int h,
                                int src_x, int src_y, int src_stride,
                                const uint32_t *pixels) {
   winsrv_blit_args_t args;
-  args.win_id = win_id; args.x = x; args.y = y; args.w = w; args.h = h;
-  args.src_x = src_x; args.src_y = src_y; args.src_stride = src_stride;
+  args.win_id = win_id;
+  args.x = x;
+  args.y = y;
+  args.w = w;
+  args.h = h;
+  args.src_x = src_x;
+  args.src_y = src_y;
+  args.src_stride = src_stride;
   args.pixels = (uint32_t *)pixels;
   return (int)syscall(SYS_WIN_BLIT, (uint64_t)&args, 0, 0, 0, 0);
 }
@@ -193,6 +210,21 @@ static inline int sys_win_register_console(int win_id) {
 }
 static inline int sys_get_service_id(const char *name) {
   return (int)syscall(SYS_GET_SERVICE_ID, (uint64_t)name, 0, 0, 0, 0);
+}
+
+static inline int sys_readdir(const char *path, uint64_t index, dirent_t *out) {
+  return (int)syscall(SYS_READDIR, (uint64_t)path, index, (uint64_t)out, 0, 0);
+}
+static inline int sys_mkdir(const char *path) {
+  return (int)syscall(SYS_MKDIR, (uint64_t)path, 0, 0, 0, 0);
+}
+static inline int sys_unlink(const char *path) {
+  return (int)syscall(SYS_UNLINK, (uint64_t)path, 0, 0, 0, 0);
+}
+
+static inline int sys_win_set_icon(int win_id, const char *path) {
+  return (int)syscall(SYS_WIN_SET_ICON, (uint64_t)win_id, (uint64_t)path, 0, 0,
+                      0);
 }
 
 void sys_exit(int code);

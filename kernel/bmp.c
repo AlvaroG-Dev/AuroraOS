@@ -8,142 +8,205 @@ extern uint32_t fb_width;
 extern uint32_t fb_height;
 extern uint32_t fb_pitch;
 
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-#define MAX(a,b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 static void fb_putpixel(int x, int y, uint32_t color) {
-    if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height)
-        return;
-    fb_ptr[y * fb_pitch + x] = color;
+  if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height)
+    return;
+  fb_ptr[y * fb_pitch + x] = color;
 }
 
 // Auxiliar interna para Alpha Blending rápido (ARGB)
 static inline uint32_t blend_pixel(uint32_t src, uint32_t dst) {
-    uint32_t alpha = (src >> 24) & 0xFF;
-    if (alpha == 255) return src;
-    if (alpha == 0)   return dst;
+  uint32_t alpha = (src >> 24) & 0xFF;
+  if (alpha == 255)
+    return src;
+  if (alpha == 0)
+    return dst;
 
-    uint32_t inv_alpha = 255 - alpha;
-    uint32_t r = (((src >> 16) & 0xFF) * alpha + ((dst >> 16) & 0xFF) * inv_alpha) / 255;
-    uint32_t g = (((src >> 8) & 0xFF) * alpha + ((dst >> 8) & 0xFF) * inv_alpha) / 255;
-    uint32_t b = ((src & 0xFF) * alpha + (dst & 0xFF) * inv_alpha) / 255;
+  uint32_t inv_alpha = 255 - alpha;
+  uint32_t r =
+      (((src >> 16) & 0xFF) * alpha + ((dst >> 16) & 0xFF) * inv_alpha) / 255;
+  uint32_t g =
+      (((src >> 8) & 0xFF) * alpha + ((dst >> 8) & 0xFF) * inv_alpha) / 255;
+  uint32_t b = ((src & 0xFF) * alpha + (dst & 0xFF) * inv_alpha) / 255;
 
-    return (0xFF000000) | (r << 16) | (g << 8) | b;
+  return (0xFF000000) | (r << 16) | (g << 8) | b;
 }
 
 int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
-    if (!file || !file->data || file->size < sizeof(bmp_file_header_t) + sizeof(bmp_info_header_t)) {
-        LOG_ERR("[BMP] ERROR: Archivo nulo o inválido");
-        return -1;
+  if (!file || !file->data ||
+      file->size < sizeof(bmp_file_header_t) + sizeof(bmp_info_header_t)) {
+    LOG_ERR("[BMP] ERROR: Archivo nulo o inválido");
+    return -1;
+  }
+
+  bmp_file_header_t *file_hdr = (bmp_file_header_t *)file->data;
+  bmp_info_header_t *info_hdr =
+      (bmp_info_header_t *)(file->data + sizeof(bmp_file_header_t));
+
+  // Validar firma 'BM' (0x4D42 en Little Endian)
+  if (file_hdr->type != 0x4D42) {
+    LOG_ERR("[BMP] ERROR: No es un archivo BMP válido");
+    return -1;
+  }
+
+  // Solo soportamos BMP sin compresión (BI_RGB = 0)
+  if (info_hdr->compression != 0) {
+    LOG_ERR("[BMP] ERROR: Compresión BMP no soportada");
+    return -1;
+  }
+
+  int width = info_hdr->width;
+  int height = info_hdr->height;
+  int bpp = info_hdr->bpp;
+
+  if (bpp != 24 && bpp != 32) {
+    LOG_ERR("[BMP] ERROR: Solo se soportan BMPs de 24 o 32 bits");
+    return -1;
+  }
+
+  // En BMP, la altura positiva indica almacenamiento de abajo hacia arriba
+  // (Bottom-Up)
+  int bottom_up = 1;
+  if (height < 0) {
+    height = -height;
+    bottom_up = 0;
+  }
+
+  uint8_t *pixel_data = file->data + file_hdr->offset;
+  int bytes_per_pixel = bpp / 8;
+
+  // Cada línea en un BMP está alineada a múltiplos de 4 bytes (Stride)
+  int row_stride = ((width * bpp + 31) / 32) * 4;
+
+  for (int y = 0; y < height; y++) {
+    // Calcular la fila real de destino
+    int src_y = bottom_up ? (height - 1 - y) : y;
+    uint8_t *row = pixel_data + (src_y * row_stride);
+
+    for (int x = 0; x < width; x++) {
+      uint8_t b = row[x * bytes_per_pixel + 0];
+      uint8_t g = row[x * bytes_per_pixel + 1];
+      uint8_t r = row[x * bytes_per_pixel + 2];
+
+      // Convertir BGR a 0x00RRGGBB
+      uint32_t color = (r << 16) | (g << 8) | b;
+
+      fb_putpixel(dest_x + x, dest_y + y, color);
     }
+  }
 
-    bmp_file_header_t *file_hdr = (bmp_file_header_t *)file->data;
-    bmp_info_header_t *info_hdr = (bmp_info_header_t *)(file->data + sizeof(bmp_file_header_t));
+  LOG_INFO("[BMP] Renderizado: %s", file->name);
 
-    // Validar firma 'BM' (0x4D42 en Little Endian)
-    if (file_hdr->type != 0x4D42) {
-        LOG_ERR("[BMP] ERROR: No es un archivo BMP válido");
-        return -1;
-    }
-
-    // Solo soportamos BMP sin compresión (BI_RGB = 0)
-    if (info_hdr->compression != 0) {
-        LOG_ERR("[BMP] ERROR: Compresión BMP no soportada");
-        return -1;
-    }
-
-    int width = info_hdr->width;
-    int height = info_hdr->height;
-    int bpp = info_hdr->bpp;
-
-    if (bpp != 24 && bpp != 32) {
-        LOG_ERR("[BMP] ERROR: Solo se soportan BMPs de 24 o 32 bits");
-        return -1;
-    }
-
-    // En BMP, la altura positiva indica almacenamiento de abajo hacia arriba (Bottom-Up)
-    int bottom_up = 1;
-    if (height < 0) {
-        height = -height;
-        bottom_up = 0;
-    }
-
-    uint8_t *pixel_data = file->data + file_hdr->offset;
-    int bytes_per_pixel = bpp / 8;
-    
-    // Cada línea en un BMP está alineada a múltiplos de 4 bytes (Stride)
-    int row_stride = ((width * bpp + 31) / 32) * 4;
-
-    for (int y = 0; y < height; y++) {
-        // Calcular la fila real de destino
-        int src_y = bottom_up ? (height - 1 - y) : y;
-        uint8_t *row = pixel_data + (src_y * row_stride);
-
-        for (int x = 0; x < width; x++) {
-            uint8_t b = row[x * bytes_per_pixel + 0];
-            uint8_t g = row[x * bytes_per_pixel + 1];
-            uint8_t r = row[x * bytes_per_pixel + 2];
-
-            // Convertir BGR a 0x00RRGGBB
-            uint32_t color = (r << 16) | (g << 8) | b;
-
-            fb_putpixel(dest_x + x, dest_y + y, color);
-        }
-    }
-
-    LOG_INFO("[BMP] Renderizado: %s", file->name);
-
-    return 0;
+  return 0;
 }
 
-int bmp_draw_scaled(tar_node_t *file, uint32_t *dst, int dst_stride, rect_t clip, int dest_x, int dest_y, int dest_w, int dest_h) {
-    if (!file || !file->data || !dst || dest_w <= 0 || dest_h <= 0) return -1;
+int bmp_draw_scaled(tar_node_t *file, uint32_t *dst, int dst_stride,
+                    rect_t clip, int dest_x, int dest_y, int dest_w,
+                    int dest_h) {
+  if (!file || !file->data || !dst || dest_w <= 0 || dest_h <= 0)
+    return -1;
 
-    bmp_file_header_t *file_hdr = (bmp_file_header_t *)file->data;
-    bmp_info_header_t *info_hdr = (bmp_info_header_t *)(file->data + sizeof(bmp_file_header_t));
+  bmp_file_header_t *file_hdr = (bmp_file_header_t *)file->data;
+  bmp_info_header_t *info_hdr =
+      (bmp_info_header_t *)(file->data + sizeof(bmp_file_header_t));
 
-    if (file_hdr->type != 0x4D42 || info_hdr->compression != 0) return -1;
+  if (file_hdr->type != 0x4D42 || info_hdr->compression != 0)
+    return -1;
 
-    int width = info_hdr->width;
-    int height = info_hdr->height;
-    int bpp = info_hdr->bpp;
-    if (bpp != 24 && bpp != 32) return -1;
+  int width = info_hdr->width;
+  int height = info_hdr->height;
+  int bpp = info_hdr->bpp;
+  if (bpp != 24 && bpp != 32)
+    return -1;
 
-    int bottom_up = 1;
-    if (height < 0) {
-        height = -height;
-        bottom_up = 0;
-    }
+  int bottom_up = 1;
+  if (height < 0) {
+    height = -height;
+    bottom_up = 0;
+  }
 
-    uint8_t *pixel_data = file->data + file_hdr->offset;
-    int bytes_per_pixel = bpp / 8;
-    int row_stride = ((width * bpp + 31) / 32) * 4;
+  uint8_t *pixel_data = file->data + file_hdr->offset;
+  int bytes_per_pixel = bpp / 8;
+  int row_stride = ((width * bpp + 31) / 32) * 4;
 
-    int start_y = MAX(dest_y, clip.y);
-    int end_y   = MIN(dest_y + dest_h, clip.y + clip.h);
-    int start_x = MAX(dest_x, clip.x);
-    int end_x   = MIN(dest_x + dest_w, clip.x + clip.w);
+  int start_y = MAX(dest_y, clip.y);
+  int end_y = MIN(dest_y + dest_h, clip.y + clip.h);
+  int start_x = MAX(dest_x, clip.x);
+  int end_x = MIN(dest_x + dest_w, clip.x + clip.w);
 
-    if (start_x >= end_x || start_y >= end_y) return 0;
+  if (start_x >= end_x || start_y >= end_y)
+    return 0;
 
+  // Box filter cuando reducimos >4x en cualquier eje. Nearest neighbor
+  // en caso contrario (mantiene la nitidez en escalados moderados).
+  int use_box = (width / dest_w > 4) || (height / dest_h > 4);
+
+  if (!use_box) {
+    // Camino original: nearest neighbor.
     for (int py = start_y; py < end_y; py++) {
-        int sy = ((py - dest_y) * height) / dest_h;
+      int sy = ((py - dest_y) * height) / dest_h;
+      int src_y = bottom_up ? (height - 1 - sy) : sy;
+      uint8_t *row = pixel_data + (src_y * row_stride);
+      uint32_t *dst_row = &dst[py * dst_stride];
+
+      for (int px = start_x; px < end_x; px++) {
+        int sx = ((px - dest_x) * width) / dest_w;
+        uint8_t b = row[sx * bytes_per_pixel + 0];
+        uint8_t g = row[sx * bytes_per_pixel + 1];
+        uint8_t r = row[sx * bytes_per_pixel + 2];
+        uint8_t a = (bpp == 32) ? row[sx * bytes_per_pixel + 3] : 0xFF;
+        uint32_t src_color =
+            ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+        dst_row[px] = blend_pixel(src_color, dst_row[px]);
+      }
+    }
+    return 0;
+  }
+
+  // Box filter: promedio de todos los píxeles fuente que caen dentro
+  // del píxel destino. Elimina el aliasing en reducciones fuertes.
+  for (int py = start_y; py < end_y; py++) {
+    int sy0 = ((py - dest_y) * height) / dest_h;
+    int sy1 = ((py - dest_y + 1) * height) / dest_h;
+    if (sy1 <= sy0)
+      sy1 = sy0 + 1;
+
+    uint32_t *dst_row = &dst[py * dst_stride];
+
+    for (int px = start_x; px < end_x; px++) {
+      int sx0 = ((px - dest_x) * width) / dest_w;
+      int sx1 = ((px - dest_x + 1) * width) / dest_w;
+      if (sx1 <= sx0)
+        sx1 = sx0 + 1;
+
+      uint32_t r_sum = 0, g_sum = 0, b_sum = 0, a_sum = 0;
+      int count = 0;
+
+      for (int sy = sy0; sy < sy1; sy++) {
         int src_y = bottom_up ? (height - 1 - sy) : sy;
         uint8_t *row = pixel_data + (src_y * row_stride);
-        uint32_t *dst_row = &dst[py * dst_stride];
-
-        for (int px = start_x; px < end_x; px++) {
-            int sx = ((px - dest_x) * width) / dest_w;
-            
-            uint8_t b = row[sx * bytes_per_pixel + 0];
-            uint8_t g = row[sx * bytes_per_pixel + 1];
-            uint8_t r = row[sx * bytes_per_pixel + 2];
-            uint8_t a = (bpp == 32) ? row[sx * bytes_per_pixel + 3] : 0xFF;
-
-            uint32_t src_color = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-            dst_row[px] = blend_pixel(src_color, dst_row[px]);
+        for (int sx = sx0; sx < sx1; sx++) {
+          b_sum += row[sx * bytes_per_pixel + 0];
+          g_sum += row[sx * bytes_per_pixel + 1];
+          r_sum += row[sx * bytes_per_pixel + 2];
+          a_sum += (bpp == 32) ? row[sx * bytes_per_pixel + 3] : 0xFF;
+          count++;
         }
-    }
-    return 0;
-}
+      }
+      if (count == 0)
+        continue;
 
+      uint8_t a = a_sum / count;
+      uint8_t r = r_sum / count;
+      uint8_t g = g_sum / count;
+      uint8_t b = b_sum / count;
+      uint32_t src_color =
+          ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+      dst_row[px] = blend_pixel(src_color, dst_row[px]);
+    }
+  }
+  return 0;
+}

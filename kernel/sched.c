@@ -24,7 +24,7 @@ cpu_local_t cpu_local_data[MAX_CPUS] = {{0}};
 _Static_assert(offsetof(cpu_local_t, cpu_id) == CPU_LOCAL_CPU_ID_OFFSET,
                "CPU_LOCAL_CPU_ID_OFFSET desincronizado con cpu_local_t");
 
-#define TASK_STACK_SIZE (8 * 1024)
+#define TASK_STACK_SIZE (32 * 1024)
 #define SCHED_INTERVAL 10
 
 static spinlock_t sched_lock;
@@ -371,8 +371,17 @@ void sched_tick(void) {
 
   this_cpu(ticks_since_resched)++;
 
-  int force = curr->need_resched;
-  curr->need_resched = 0;
+  // [C3] Antes: read + write separados. Un sched_kick_idle_cpu() en otra
+  // CPU podía escribir need_resched=1 en la ventana entre el read y el
+  // write, y la petición se perdía. xchg es atómico y captura el valor
+  // anterior.
+  //
+  // need_resched es 'volatile int' en task_t; casteamos para usar el
+  // builtin atómico (el volatile no aporta nada aquí, todas las
+  // escrituras ya pasan por xchg o por escrituras locales de la propia
+  // CPU).
+  int force =
+      __atomic_exchange_n((int *)&curr->need_resched, 0, __ATOMIC_ACQ_REL);
 
   if (!force && this_cpu(ticks_since_resched) < SCHED_INTERVAL)
     return;
@@ -505,39 +514,69 @@ void sched_mark_need_resched(void) {
   }
 }
 
+// [C4] Publicación atómica de (state=BLOCKED, wake_deadline) bajo
+// sched_lock. Antes se hacía en wait.c bajo wq->lock, con el lector
+// (sched_wake_expired) leyendo bajo sched_lock. En x86 TSO la race
+// era benigna, pero hacerla explícita evita que un cambio futuro de
+// orden de escrituras introduzca un bug sutil.
+void sched_set_blocked_deadline(task_t *t, uint64_t deadline) {
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  t->state = TASK_BLOCKED;
+  t->wake_deadline = deadline;
+  spin_unlock_irqrestore(&sched_lock, flags);
+}
+
+// ===========================================================================
+// Lectura atómica del current_task de otra CPU.
+//
+// El campo se escribe desde la propia CPU en sched_tick/sched_start/
+// sched_start_ap. En x86-64 una escritura de 8 bytes alineados es atómica,
+// pero necesitamos la barrera de adquisición para que un lector en otra
+// CPU observe el task_t completo antes de tocar sus campos (state,
+// is_idle, need_resched).
+// ===========================================================================
+static inline task_t *sched_read_current(int cpu) {
+  if (cpu < 0 || cpu >= MAX_CPUS)
+    return NULL;
+  return (task_t *)__atomic_load_n(
+      (task_t *volatile *)&cpu_local_data[cpu].current_task, __ATOMIC_ACQUIRE);
+}
+
+// ===========================================================================
+// [HARDENING] Validar que un task_t vive dentro del rango del SLAB.
+//
+// Las task_t se allocan con kmalloc(sizeof(task_t)) en sched_init y
+// sched_create_task. sizeof(task_t) > 512 B (por fpu_raw), así que caen
+// en la cache slab-1024. Cualquier puntero fuera de [SLAB_VMA, slab_top)
+// indica lectura stale de current_task o corrupción.
+//
+// La validación NO arregla el race si existe, pero convierte una escritura
+// silenciosa a memoria arbitraria en un LOG_WARN visible.
+// ===========================================================================
+static int sched_task_ptr_valid(const task_t *t) {
+  if (!t)
+    return 0;
+  extern uint64_t slab_vma_start(void);
+  extern uint64_t slab_vma_end(void);
+  uint64_t lo = slab_vma_start();
+  uint64_t hi = slab_vma_end();
+  if (lo == 0 || hi <= lo)
+    return 1; // SLAB no inicializado todavía, aceptar
+  uintptr_t p = (uintptr_t)t;
+  return p >= (uintptr_t)lo && p < (uintptr_t)hi;
+}
+
 // ---------------------------------------------------------------------------
 // [SMP 4.4] Despierta (IPI) a una CPU idle para que ejecute 't'.
 //
-// [FIX self-IPI] El LAPIC x86 descarta silenciosamente los IPIs cuyo
-// destino es el propio LAPIC. Si por cualquier razón el lapic_id de la
-// CPU destino coincide con el nuestro (bug de inicialización, APIC ID
-// duplicado en ACPI, AP aún no booteado), el IPI se pierde y la tarea
-// nunca despierta: el sistema queda idle para siempre.
-//
-// La comprobación extra `per_cpu(lapic_id, cpu) != me` evita ese caso.
-// Si el destino "sería yo mismo", en lugar de mandar el IPI marcamos
-// need_resched en nuestra propia idle task (si la tenemos) o forzamos
-// un resched local. El efecto es el mismo: la tarea READY se ejecuta
-// en el siguiente tick, sin depender del IPI.
+// [FIX] Todas las lecturas de per_cpu(current_task, cpu) usan
+// sched_read_current() (carga atómica con barrera de adquisición) y
+// validan el puntero antes de escribir. Además, se toma sched_lock
+// durante TODO el bucle, no solo durante la parte final, para que
+// task_switch no cambie current_task en medio.
 // ---------------------------------------------------------------------------
 static void sched_kick_idle_cpu(task_t *t) {
   int me = smp_processor_id();
-
-  /*
-   * El estado current_task/idle de otra CPU debe observarse bajo
-   * sched_lock. Sin esto había una carrera entre este código y
-   * sched_tick(): podíamos leer una CPU como no-idle justo antes de que
-   * entrase en idle y perder el IPI, dejando una tarea READY esperando
-   * hasta el siguiente evento del scheduler.
-   *
-   * También mantenemos la comprobación de self-IPI bajo el mismo lock.
-   * Ojo: me es el índice lógico de CPU, no el APIC ID; la comparación
-   * correcta es contra per_cpu(lapic_id, me).
-   *
-   * El IPI se envía DESPUÉS de soltar sched_lock. Así no introducimos
-   * una espera por sched_lock desde el handler de IPI ni retenemos el
-   * lock durante el acceso al LAPIC.
-   */
 
   int target_cpu = -1;
   uint32_t dest_lapic = 0;
@@ -545,22 +584,26 @@ static void sched_kick_idle_cpu(task_t *t) {
 
   unsigned long flags = spin_lock_irqsave(&sched_lock);
 
+  // --- Caso 1: t tiene afinidad fija ---
   if (t->cpu_affinity >= 0) {
     int cpu = t->cpu_affinity;
 
     if (cpu == me) {
-      task_t *cur = per_cpu(current_task, me);
-      if (cur && cur->is_idle)
+      task_t *cur = sched_read_current(me);
+      if (cur && cur->is_idle && sched_task_ptr_valid(cur))
         cur->need_resched = 1;
     } else if (cpu >= 0 && cpu < MAX_CPUS) {
-      task_t *cur = per_cpu(current_task, cpu);
-      if (cur && cur->is_idle) {
+      task_t *cur = sched_read_current(cpu);
+      if (cur && cur->is_idle && sched_task_ptr_valid(cur)) {
         cur->need_resched = 1;
         target_cpu = cpu;
         dest_lapic = per_cpu(lapic_id, cpu);
 
         if (dest_lapic != per_cpu(lapic_id, me))
           send_ipi = 1;
+      } else if (cur && !sched_task_ptr_valid(cur)) {
+        LOG_WARN("[SCHED] kick_idle: current_task[%d]=%p fuera de SLAB", cpu,
+                 (void *)cur);
       }
     }
 
@@ -581,9 +624,15 @@ static void sched_kick_idle_cpu(task_t *t) {
     if (cpu == me)
       continue;
 
-    task_t *cur = per_cpu(current_task, cpu);
+    task_t *cur = sched_read_current(cpu);
     if (!cur || !cur->is_idle)
       continue;
+
+    if (!sched_task_ptr_valid(cur)) {
+      LOG_WARN("[SCHED] kick_idle: current_task[%d]=%p fuera de SLAB", cpu,
+               (void *)cur);
+      continue;
+    }
 
     cur->need_resched = 1;
     target_cpu = cpu;
@@ -594,14 +643,11 @@ static void sched_kick_idle_cpu(task_t *t) {
     break;
   }
 
-  /*
-   * Si el LAPIC destino resulta ser el nuestro, no enviamos un self-IPI.
-   * La tarea ya queda READY; si la CPU local es idle, el fallback local
-   * asegura que pueda ejecutar en su siguiente tick.
-   */
+  // Si el target resultó ser el propio CPU (o no encontramos idle), marcar
+  // la idle local para que el siguiente tick haga el switch.
   if (!send_ipi) {
-    task_t *me_task = per_cpu(current_task, me);
-    if (me_task && me_task->is_idle)
+    task_t *me_task = sched_read_current(me);
+    if (me_task && me_task->is_idle && sched_task_ptr_valid(me_task))
       me_task->need_resched = 1;
   }
 
@@ -876,8 +922,7 @@ void sched_wake_expired(void) {
     if (capacity < task_count)
       capacity = task_count;
 
-    wait_queue_t **wqs =
-        (wait_queue_t **)kmalloc(capacity * sizeof(*wqs));
+    wait_queue_t **wqs = (wait_queue_t **)kmalloc(capacity * sizeof(*wqs));
     if (!wqs) {
       /*
        * No podemos construir una lista completa. No consumimos ningún
@@ -918,7 +963,6 @@ void sched_wake_expired(void) {
             }
             wqs[n_wqs++] = wq;
           }
-
         }
 
         p = p->next;
@@ -968,5 +1012,27 @@ void sched_wake_expired(void) {
 
     kfree(wqs);
     return;
+  }
+}
+
+void __sched_canary_arm(void) {
+  task_t *me = sched_current();
+  if (!me || !me->stack)
+    return;
+  uint8_t *base = (uint8_t *)me->stack;
+  for (int i = 0; i < 128; i++)
+    base[i] = 0xAA;
+}
+
+void __sched_canary_check(void) {
+  task_t *me = sched_current();
+  if (!me || !me->stack)
+    return;
+  uint8_t *base = (uint8_t *)me->stack;
+  for (int i = 0; i < 128; i++) {
+    if (base[i] != 0xAA) {
+      LOG_PANIC("[CANARY] stack task %u roto en byte %d (0x%02x)", me->id, i,
+                base[i]);
+    }
   }
 }

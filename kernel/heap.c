@@ -399,3 +399,6 @@ char *kstrndup(const char *s, size_t n) {
   copy[len] = '\0';
   return copy;
 }
+
+uint64_t heap_vma_start(void) { return HEAP_VMA; }
+uint64_t heap_vma_end(void) { return heap_top; }

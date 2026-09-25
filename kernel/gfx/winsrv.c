@@ -272,9 +272,7 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
         chunk = chunk_pixels;
 
       const uint32_t *src =
-          user_pixels +
-          (local_src_y + row) * src_stride +
-          local_src_x + copied;
+          user_pixels + (local_src_y + row) * src_stride + local_src_x + copied;
       size_t chunk_bytes = (size_t)chunk * sizeof(uint32_t);
 
       if (copy_from_user(row_buf, src, chunk_bytes) < 0) {
@@ -283,9 +281,7 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
       }
 
       uint32_t *dst =
-          win->content_buffer +
-          (dst_y + row) * win->content_w +
-          dst_x + copied;
+          win->content_buffer + (dst_y + row) * win->content_w + dst_x + copied;
       for (int col = 0; col < chunk; col++)
         dst[col] = row_buf[col];
 
@@ -505,4 +501,59 @@ void winsrv_cleanup_task(task_t *owner) {
     LOG_INFO("[WINSRV] limpieza: ventana %d de task %u muerta", closed_slots[i],
              owner->id);
   }
+}
+
+int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
+  if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || !path)
+    return -1;
+
+  char kpath[128];
+  long n = strncpy_from_user(kpath, path, sizeof(kpath));
+  if (n < 0)
+    return -1;
+  if (n == 0)
+    return -1;
+
+  // Buscar el BMP en tarfs. Fuera del lock: no es compartido.
+  //
+  // [FIX] Antes solo se probaba tarfs_open(kpath). El icono del botón de
+  // Inicio (que sí se ve bien) se busca en compositor_init() con
+  // tar_find_file(), una función distinta. Si ambas rutas de búsqueda no
+  // normalizan igual (barra inicial, mayúsculas, etc.) un path como
+  // "system/icons/terminal-icon.bmp" puede fallar por tarfs_open() y
+  // funcionar por tar_find_file(), o viceversa. Antes, si tarfs_open
+  // fallaba, se devolvía -ENOENT SIN loguear nada, así que el fallo era
+  // invisible: la ventana se quedaba con el icono por defecto sin ningún
+  // rastro en el log. Ahora se prueba con las dos y se loguea el fallo.
+  tar_node_t *node = tarfs_open(kpath);
+  if (!node) {
+    node = tar_find_file(kpath);
+    if (node) {
+      LOG_WARN("[WINSRV] set_icon: '%s' no se encontró via tarfs_open() pero "
+               "si via tar_find_file() (revisar normalización de paths en "
+               "tarfs)",
+               kpath);
+    }
+  }
+  if (!node || node->is_dir) {
+    LOG_ERR("[WINSRV] set_icon: no se encontró el icono '%s' en tarfs "
+            "(win_id=%d) - ¿está empaquetado en el initrd?",
+            kpath, win_id);
+    return -ENOENT;
+  }
+
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  winsrv_entry_t *e = &g_windows[win_id];
+  if (!e->in_use || e->owner != owner || !e->win) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+  window_t *win = e->win;
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+
+  // win_set_icon_bmp actualiza win->icon_cache, win->icon_bmp_node y
+  // (tras el fix de abajo) el taskbar_item.
+  win_set_icon_bmp(win, node);
+
+  return 0;
 }

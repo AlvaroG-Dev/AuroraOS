@@ -80,17 +80,45 @@ QEMU_FLAGS_KVM = \
 	-cpu host
 
 # ---------------------------------------------------------------------------
-# Dispositivos de almacenamiento
+# Almacenamiento
 #
-# Todos los targets pasan:
-#   - aurora.img como disco duro (primario master → hda)
-#   - aurora.iso como CD (secundario master → sr0)
+# aurora.img SOLO debe aparecer UNA VEZ por target. El patrón correcto es:
+#   -drive if=none,id=DISK,format=raw,file=IMAGE
+#   -device ide-hd,drive=DISK,bus=BUS[,unit=N]
 #
-# Así podemos probar ATA (hda) y ATAPI (sr0) en el mismo boot.
+# En `-machine pc` (default, PIIX3): los buses ide.0 (primario) e ide.1
+# (secundario) admiten DOS unidades cada uno (master=unit 0, slave=unit 1).
+#
+# En `-machine q35` (ICH9 AHCI): los buses ide.0 .. ide.5 son los 6 puertos
+# SATA del controlador integrado, y cada uno admite UN SOLO dispositivo
+# (unit 0). No hay un id= asignable para el controlador integrado; solo
+# existe si añades `-device ich9-ahci,id=ahciN`, y en ese caso tu driver
+# NO lo ve (pci_find_device devuelve el built-in primero).
 # ---------------------------------------------------------------------------
-QEMU_FLAGS_STORAGE = \
-	-drive format=raw,file=aurora.img \
-	-cdrom aurora.iso
+
+# --- PIIX3 (default `pc`) ---
+#   ide.0 unit 0 → aurora.img    (hda)
+#   ide.1 unit 0 → aurora.iso    (sr0)
+#   ide.1 unit 1 → test_disk.img (hdb)
+QEMU_STORAGE_PC = \
+	-drive if=none,id=disk0,format=raw,file=aurora.img \
+	-device ide-hd,drive=disk0,bus=ide.0,unit=0 \
+	-drive if=none,id=cdrom0,format=raw,file=aurora.iso \
+	-device ide-cd,drive=cdrom0,bus=ide.1,unit=0 \
+	-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+	-device ide-hd,drive=testdisk,bus=ide.1,unit=1
+
+# --- Q35 (ICH9 AHCI) ---
+#   ide.0 → aurora.img         (sda)
+#   ide.1 → tests/test_disk.img (sdb)
+#   ide.2 → aurora.iso         (ignorado: el driver AHCI no soporta ATAPI)
+QEMU_STORAGE_Q35 = \
+	-drive if=none,id=disk0,format=raw,file=aurora.img \
+	-device ide-hd,drive=disk0,bus=ide.0 \
+	-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+	-device ide-hd,drive=testdisk,bus=ide.1 \
+	-drive if=none,id=cdrom0,format=raw,file=aurora.iso \
+	-device ide-cd,drive=cdrom0,bus=ide.2
 
 # ---------------------------------------------------------------------------
 # AHCI (Fase 3)
@@ -129,7 +157,7 @@ run: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_STORAGE) \
+		$(QEMU_STORAGE_PC) \
 		-cpu max \
 		-serial stdio
 
@@ -138,7 +166,7 @@ run-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_STORAGE) \
+		$(QEMU_STORAGE_PC) \
 		$(QEMU_FLAGS_DEBUG) \
 		-cpu max \
 		-serial file:serial.log
@@ -148,7 +176,7 @@ run-smp: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_STORAGE) \
+		$(QEMU_STORAGE_PC) \
 		-cpu max \
 		-smp 4 \
 		-serial stdio
@@ -158,7 +186,7 @@ run-smp-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_STORAGE) \
+		$(QEMU_STORAGE_PC) \
 		$(QEMU_FLAGS_DEBUG) \
 		-cpu max \
 		-smp 4 \
@@ -179,7 +207,7 @@ run-smp-kvm: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_STORAGE) \
+		$(QEMU_STORAGE_PC) \
 		$(QEMU_FLAGS_KVM) \
 		-smp 8 \
 		-serial stdio
@@ -189,7 +217,7 @@ run-smp-kvm-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_STORAGE) \
+		$(QEMU_STORAGE_PC) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
 		-smp 8 \
@@ -201,27 +229,25 @@ run-smp-kvm-debug: iso
 	@echo "=== Últimas líneas de serial.log ==="
 	@tail -60 serial.log 2>/dev/null || echo "(vacío)"
 
-# 4 CPUs + AHCI + KVM. El target que quieres para probar AHCI en SMP.
-run-smp-kvm-ahci: iso
+# 4 CPUs + AHCI + KVM. El target para probar AHCI en SMP con 2 discos.
+run-smp-kvm-ahci: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		-drive id=disk0,if=none,format=raw,file=aurora.img \
-		-device ide-hd,drive=disk0,bus=ide.0 \
+		$(QEMU_STORAGE_Q35) \
 		-smp 4 \
 		-serial stdio
 
-run-smp-kvm-ahci-debug: iso
+run-smp-kvm-ahci-debug: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
-		-drive id=disk0,if=none,format=raw,file=aurora.img \
-		-device ide-hd,drive=disk0,bus=ide.0 \
+		$(QEMU_STORAGE_Q35) \
 		-smp 4 \
 		-serial file:serial.log
 	@echo ""
@@ -231,24 +257,28 @@ run-smp-kvm-ahci-debug: iso
 	@echo "=== Últimas líneas de serial.log ==="
 	@tail -80 serial.log 2>/dev/null || echo "(vacío)"
 
-# 1 CPU + AHCI + KVM. Útil para aislar problemas de SMP.
-run-kvm-ahci: iso
+# 1 CPU + AHCI + KVM. Para aislar problemas de SMP.
+run-kvm-ahci: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
+		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		$(QEMU_FLAGS_Q35_AHCI) \
+		$(QEMU_STORAGE_Q35) \
 		-serial stdio
 
-# 4 CPUs + AHCI + 2 discos SATA (sda y sdb) para probar múltiples puertos.
-run-smp-kvm-ahci-2disk: iso
+# 4 CPUs + AHCI + 3 discos (aurora.img, test_disk.img, extra_disk.img).
+# El tercer disco ocupa ide.3. Si no existe extra_disk.img, se crea de
+# 32 MB vacío (sin GPT) para probar el caso "disco sin tabla".
+run-smp-kvm-ahci-3disk: iso tests/test_disk.img tests/extra_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
+		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		$(QEMU_FLAGS_Q35_AHCI) \
-		-drive if=none,id=disk1,format=raw,file=aurora.img \
-		-device ide-hd,drive=disk1,bus=ahci.1 \
+		$(QEMU_STORAGE_Q35) \
+		-drive if=none,id=disk2,format=raw,file=tests/extra_disk.img \
+		-device ide-hd,drive=disk2,bus=ide.3 \
 		-smp 4 \
 		-serial stdio
 

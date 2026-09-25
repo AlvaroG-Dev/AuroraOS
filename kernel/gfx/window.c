@@ -17,10 +17,32 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
   } else if (win->icon_buffer) {
     gfx_bit_blat(dst, stride, win->icon_buffer, 18, clip, x, y, 18, 18);
   } else {
+    // [FIX] El texto/símbolo de fallback se dibujaba siempre en (x+5, y),
+    // sin tener en cuenta el ancho real del símbolo ni el alto de la
+    // fuente: en símbolos de más de un carácter quedaba descentrado y
+    // pegado al borde superior de la pastilla en vez de centrado. Se
+    // aproxima el ancho con el "advance" típico de FONT_ID_MONO (14px) y
+    // se centra tanto en X como en Y dentro del cuadrado de 18x18.
     gfx_fill_rounded_rect(dst, stride, clip, (rect_t){x, y, 18, 18}, 4,
                           win->icon_bg_color);
-    gfx_draw_string(dst, stride, clip, x + 5, y, win->icon_symbol, 0xFFFFFFFF,
-                    FONT_ID_MONO);
+    // Realce sutil en el borde superior (efecto "glass"/bisel) para que la
+    // pastilla del icono no se vea plana.
+    gfx_blend_rect(dst, stride, clip, (rect_t){x + 2, y + 1, 14, 1},
+                   0x40FFFFFF);
+    gfx_draw_rounded_border(dst, stride, clip, (rect_t){x, y, 18, 18}, 4,
+                            0x2AFFFFFF);
+
+    int len = 0;
+    while (win->icon_symbol[len] && len < 7)
+      len++;
+    int approx_char_w = 8; // ancho medio aproximado de un glifo en MONO 14px
+    int text_w = len * approx_char_w;
+    int text_x = x + (18 - text_w) / 2;
+    if (text_x < x)
+      text_x = x;
+    int text_y = y + 2; // deja ~2px de margen arriba, centrado visual en 18px
+    gfx_draw_string(dst, stride, clip, text_x, text_y, win->icon_symbol,
+                    0xFFFFFFFF, FONT_ID_MONO);
   }
 }
 
@@ -28,6 +50,7 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
   if (!win)
     return;
   win->icon_bmp_node = bmp_file;
+
   if (bmp_file) {
     rect_t clip = {0, 0, 18, 18};
     for (int i = 0; i < 18 * 18; i++)
@@ -37,11 +60,30 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
   } else {
     win->has_icon_cache = 0;
   }
-  win->dirty = 1;
 
+  // Propagar al taskbar_item.
   if (win->taskbar_item) {
     win->taskbar_item->icon_bmp_node = bmp_file;
+    if (bmp_file) {
+      rect_t clip = {0, 0, 20, 20};
+      for (int i = 0; i < 20 * 20; i++)
+        win->taskbar_item->icon_cache[i] = 0;
+      bmp_draw_scaled(bmp_file, win->taskbar_item->icon_cache, 20, clip, 0, 0,
+                      20, 20);
+      win->taskbar_item->has_icon_cache = 1;
+    } else {
+      win->taskbar_item->has_icon_cache = 0;
+    }
   }
+
+  // [FIX] Invalidar la ventana completa. Sin esto, el compositor no
+  // re-renderiza la titlebar y el icono nunca aparece hasta que algo
+  // más dañe esa región (drag, focus, etc.).
+  win->dirty = 1;
+  rect_t damage = {win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE,
+                   win->width + WIN11_SHADOW_SIZE * 2,
+                   win->height + WIN11_SHADOW_SIZE * 2};
+  compositor_invalidate_rect(damage);
 }
 
 window_t *window_create(int x, int y, int w, int h, const char *title,
