@@ -237,3 +237,44 @@ int bmp_draw_scaled(tar_node_t *file, uint32_t *dst, int dst_stride,
   }
   return 0;
 }
+/* Escalado para iconos: copia muestras exactas del BMP al cache transparente.
+ * No mezcla contra el destino; la composición se hace después por gfx_bit_blat.
+ * Esto evita que el filtro de reducción altere los colores del icono. */
+int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
+                         int dst_h) {
+  if (!file || !file->data || !dst || dst_w <= 0 || dst_h <= 0)
+    return -1;
+
+  bmp_file_header_t *fh = (bmp_file_header_t *)file->data;
+  bmp_info_header_t *ih =
+      (bmp_info_header_t *)(file->data + sizeof(bmp_file_header_t));
+  if (fh->type != 0x4D42 || ih->compression != 0)
+    return -1;
+  if (ih->bpp != 24 && ih->bpp != 32 || ih->width <= 0 || ih->height == 0)
+    return -1;
+
+  int width = ih->width;
+  int height = ih->height < 0 ? -ih->height : ih->height;
+  int bottom_up = ih->height > 0;
+  int bpp = ih->bpp / 8;
+  int row_stride = ((width * ih->bpp + 31) / 32) * 4;
+  uint8_t *pixels = file->data + fh->offset;
+
+  for (int y = 0; y < dst_h; y++) {
+    int sy = ((2 * y + 1) * height) / (2 * dst_h);
+    if (sy >= height) sy = height - 1;
+    int src_y = bottom_up ? height - 1 - sy : sy;
+    uint8_t *row = pixels + (size_t)src_y * row_stride;
+    for (int x = 0; x < dst_w; x++) {
+      int sx = ((2 * x + 1) * width) / (2 * dst_w);
+      if (sx >= width) sx = width - 1;
+      uint8_t *p = row + (size_t)sx * bpp;
+      uint8_t a = (bpp == 4) ? p[3] : 0xFF;
+      dst[y * dst_w + x] = ((uint32_t)a << 24) |
+                           ((uint32_t)p[2] << 16) |
+                           ((uint32_t)p[1] << 8) | p[0];
+    }
+  }
+  return 0;
+}
+
