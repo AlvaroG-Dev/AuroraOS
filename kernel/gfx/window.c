@@ -14,14 +14,6 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
     return;
 
   if (win->has_icon_cache) {
-    static window_t *last_logged_icon_win = NULL;
-    if (last_logged_icon_win != win) {
-      LOG_INFO("[WINDOW] draw_app_icon: BMP cache win=%p p00=%08x p99=%08x p1717=%08x",
-               (void *)win, win->icon_cache[0],
-               win->icon_cache[9 * 18 + 9],
-               win->icon_cache[17 * 18 + 17]);
-      last_logged_icon_win = win;
-    }
     gfx_bit_blat(dst, stride, win->icon_cache, 18, clip, x, y, 18, 18);
   } else if (win->icon_buffer) {
     gfx_bit_blat(dst, stride, win->icon_buffer, 18, clip, x, y, 18, 18);
