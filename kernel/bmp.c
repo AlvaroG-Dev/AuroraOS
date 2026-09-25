@@ -219,9 +219,13 @@ int bmp_draw_scaled(tar_node_t *file, uint32_t *dst, int dst_stride,
       uint32_t a = (uint32_t)(a_sum / count);
       uint32_t r = 0, g = 0, b = 0;
       if (a != 0) {
-        r = (uint32_t)(r_premul / count) * 255 / a;
-        g = (uint32_t)(g_premul / count) * 255 / a;
-        b = (uint32_t)(b_premul / count) * 255 / a;
+        // Mantener toda la precisión del acumulado premultiplicado.
+        // Dividir primero entre count introducía truncamiento fuerte al
+        // reducir un BMP grande a un icono pequeño, desplazando los colores
+        // de los píxeles semitransparentes.
+        r = (uint32_t)((r_premul * 255ULL) / a_sum);
+        g = (uint32_t)((g_premul * 255ULL) / a_sum);
+        b = (uint32_t)((b_premul * 255ULL) / a_sum);
         if (r > 255) r = 255;
         if (g > 255) g = 255;
         if (b > 255) b = 255;
