@@ -15,9 +15,26 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
 
   if (win->has_icon_cache) {
     gfx_bit_blat(dst, stride, win->icon_cache, 18, clip, x, y, 18, 18);
+  } else if (win->icon_bmp_node) {
+    /*
+     * A BMP icon has priority over the symbolic fallback even if its cache
+     * was invalidated between frames. Rebuild the cache here instead of
+     * silently showing the fallback icon.
+     */
+    for (int i = 0; i < 18 * 18; i++)
+      win->icon_cache[i] = 0;
+    if (bmp_draw_icon_scaled(win->icon_bmp_node, win->icon_cache, 18, 18) == 0) {
+      win->has_icon_cache = 1;
+      gfx_bit_blat(dst, stride, win->icon_cache, 18, clip, x, y, 18, 18);
+    } else if (win->icon_buffer) {
+      gfx_bit_blat(dst, stride, win->icon_buffer, 18, clip, x, y, 18, 18);
+    } else {
+      goto draw_symbol_fallback;
+    }
   } else if (win->icon_buffer) {
     gfx_bit_blat(dst, stride, win->icon_buffer, 18, clip, x, y, 18, 18);
   } else {
+draw_symbol_fallback:
     // [FIX] El texto/símbolo de fallback se dibujaba siempre en (x+5, y),
     // sin tener en cuenta el ancho real del símbolo ni el alto de la
     // fuente: en símbolos de más de un carácter quedaba descentrado y
