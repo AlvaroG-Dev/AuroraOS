@@ -274,21 +274,101 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
   int bottom_up = ih->height > 0;
 
   /*
-   * Area downsample with premultiplied alpha. Transparent source pixels do
-   * not contribute RGB, preventing transparent/white BMP background pixels
-   * from tinting the icon edges.
+   * Icon BMPs commonly contain transparent margins around the artwork.
+   * Scaling the whole canvas makes a 500x500 icon whose artwork occupies only
+   * the middle appear as a tiny/incorrect icon. Find the visible alpha bounds
+   * first, then scale the artwork itself into the destination with a 1px
+   * safety margin.
    */
-  for (int dy = 0; dy < dst_h; dy++) {
-    uint64_t sy0 = ((uint64_t)dy * height) / (uint64_t)dst_h;
-    uint64_t sy1 = ((uint64_t)(dy + 1) * height) / (uint64_t)dst_h;
-    if (sy1 <= sy0) sy1 = sy0 + 1;
-    if (sy1 > height) sy1 = height;
+  uint64_t min_x = 0, min_y = 0, max_x = width, max_y = height;
+  if (bytes_per_pixel == 4) {
+    min_x = width;
+    min_y = height;
+    max_x = max_y = 0;
 
+    for (uint64_t sy = 0; sy < height; sy++) {
+      uint64_t src_y = bottom_up ? height - 1 - sy : sy;
+      uint8_t *row = pixels + src_y * row_stride;
+      for (uint64_t sx = 0; sx < width; sx++) {
+        uint8_t a = row[sx * bytes_per_pixel + 3];
+        if (a > 8) {
+          if (sx < min_x)
+            min_x = sx;
+          if (sy < min_y)
+            min_y = sy;
+          if (sx + 1 > max_x)
+            max_x = sx + 1;
+          if (sy + 1 > max_y)
+            max_y = sy + 1;
+        }
+      }
+    }
+
+    if (min_x >= max_x || min_y >= max_y) {
+      min_x = 0;
+      min_y = 0;
+      max_x = width;
+      max_y = height;
+    }
+  }
+
+  uint64_t src_w = max_x - min_x;
+  uint64_t src_h = max_y - min_y;
+  if (src_w == 0 || src_h == 0)
+    return -1;
+
+  for (int dy = 0; dy < dst_h; dy++) {
     for (int dx = 0; dx < dst_w; dx++) {
-      uint64_t sx0 = ((uint64_t)dx * width) / (uint64_t)dst_w;
-      uint64_t sx1 = ((uint64_t)(dx + 1) * width) / (uint64_t)dst_w;
-      if (sx1 <= sx0) sx1 = sx0 + 1;
-      if (sx1 > width) sx1 = width;
+      dst[dy * dst_w + dx] = 0;
+
+      int pad_x = (dst_w > 2) ? 1 : 0;
+      int pad_y = (dst_h > 2) ? 1 : 0;
+      int inner_w = dst_w - pad_x * 2;
+      int inner_h = dst_h - pad_y * 2;
+      if (dx < pad_x || dx >= pad_x + inner_w ||
+          dy < pad_y || dy >= pad_y + inner_h)
+        continue;
+
+      uint64_t ux = (uint64_t)(dx - pad_x);
+      uint64_t uy = (uint64_t)(dy - pad_y);
+
+      /*
+       * Preserve the source aspect ratio. Center the artwork in the
+       * destination rather than stretching a non-square BMP.
+       */
+      uint64_t target_w = (uint64_t)inner_w;
+      uint64_t target_h = (uint64_t)inner_h;
+      uint64_t fit_w = target_w;
+      uint64_t fit_h = (src_h * fit_w) / src_w;
+      if (fit_h > target_h) {
+        fit_h = target_h;
+        fit_w = (src_w * fit_h) / src_h;
+      }
+      if (fit_w == 0 || fit_h == 0)
+        continue;
+
+      uint64_t off_x = ((uint64_t)inner_w - fit_w) / 2;
+      uint64_t off_y = ((uint64_t)inner_h - fit_h) / 2;
+      if (ux < off_x || ux >= off_x + fit_w ||
+          uy < off_y || uy >= off_y + fit_h)
+        continue;
+
+      uint64_t tx = ux - off_x;
+      uint64_t ty = uy - off_y;
+
+      uint64_t sx0 = min_x + (tx * src_w) / fit_w;
+      uint64_t sx1 = min_x + (((tx + 1) * src_w) + fit_w - 1) / fit_w;
+      uint64_t sy0 = min_y + (ty * src_h) / fit_h;
+      uint64_t sy1 = min_y + (((ty + 1) * src_h) + fit_h - 1) / fit_h;
+
+      if (sx1 > max_x)
+        sx1 = max_x;
+      if (sy1 > max_y)
+        sy1 = max_y;
+      if (sx1 <= sx0)
+        sx1 = sx0 + 1;
+      if (sy1 <= sy0)
+        sy1 = sy0 + 1;
 
       uint64_t a_sum = 0;
       uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
@@ -310,20 +390,22 @@ int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w,
         }
       }
 
-      if (count == 0 || a_sum == 0) {
-        dst[dy * dst_w + dx] = 0;
+      if (count == 0 || a_sum == 0)
         continue;
-      }
 
       uint32_t a = (uint32_t)(a_sum / count);
       uint32_t r = (uint32_t)((r_sum * 255ULL) / a_sum);
       uint32_t g = (uint32_t)((g_sum * 255ULL) / a_sum);
       uint32_t b = (uint32_t)((b_sum * 255ULL) / a_sum);
 
-      if (a > 255) a = 255;
-      if (r > 255) r = 255;
-      if (g > 255) g = 255;
-      if (b > 255) b = 255;
+      if (a > 255)
+        a = 255;
+      if (r > 255)
+        r = 255;
+      if (g > 255)
+        g = 255;
+      if (b > 255)
+        b = 255;
 
       dst[dy * dst_w + dx] =
           (a << 24) | (r << 16) | (g << 8) | b;
