@@ -2,6 +2,7 @@
 #include "window.h"
 #include "../bmp.h"
 #include "../heap.h"
+#include "../klog.h"
 #include "compositor.h"
 #include "taskbar.h"
 #include "theme.h"
@@ -49,36 +50,48 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
 void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
   if (!win)
     return;
-  win->icon_bmp_node = bmp_file;
 
-  if (bmp_file) {
-    rect_t clip = {0, 0, 18, 18};
-    for (int i = 0; i < 18 * 18; i++)
-      win->icon_cache[i] = 0;
-    bmp_draw_scaled(bmp_file, win->icon_cache, 18, clip, 0, 0, 18, 18);
-    win->has_icon_cache = 1;
-  } else {
+  if (!bmp_file) {
+    win->icon_bmp_node = NULL;
     win->has_icon_cache = 0;
-  }
-
-  // Propagar al taskbar_item.
-  if (win->taskbar_item) {
-    win->taskbar_item->icon_bmp_node = bmp_file;
-    if (bmp_file) {
-      rect_t clip = {0, 0, 20, 20};
-      for (int i = 0; i < 20 * 20; i++)
-        win->taskbar_item->icon_cache[i] = 0;
-      bmp_draw_scaled(bmp_file, win->taskbar_item->icon_cache, 20, clip, 0, 0,
-                      20, 20);
-      win->taskbar_item->has_icon_cache = 1;
-    } else {
+    if (win->taskbar_item) {
+      win->taskbar_item->icon_bmp_node = NULL;
       win->taskbar_item->has_icon_cache = 0;
     }
+  } else {
+    rect_t clip18 = {0, 0, 18, 18};
+    for (int i = 0; i < 18 * 18; i++)
+      win->icon_cache[i] = 0;
+    int rc18 = bmp_draw_scaled(bmp_file, win->icon_cache, 18, clip18, 0, 0,
+                               18, 18);
+    if (rc18 < 0) {
+      LOG_ERR("[WINDOW] BMP de icono rechazado para '%s' (18x18)",
+              bmp_file->name);
+      win->has_icon_cache = 0;
+      return;
+    }
+
+    if (win->taskbar_item) {
+      rect_t clip20 = {0, 0, 20, 20};
+      for (int i = 0; i < 20 * 20; i++)
+        win->taskbar_item->icon_cache[i] = 0;
+      int rc20 = bmp_draw_scaled(bmp_file, win->taskbar_item->icon_cache, 20,
+                                 clip20, 0, 0, 20, 20);
+      if (rc20 < 0) {
+        LOG_ERR("[WINDOW] BMP de icono rechazado para '%s' (20x20)",
+                bmp_file->name);
+        win->has_icon_cache = 0;
+        win->taskbar_item->has_icon_cache = 0;
+        return;
+      }
+      win->taskbar_item->icon_bmp_node = bmp_file;
+      win->taskbar_item->has_icon_cache = 1;
+    }
+
+    win->icon_bmp_node = bmp_file;
+    win->has_icon_cache = 1;
   }
 
-  // [FIX] Invalidar la ventana completa. Sin esto, el compositor no
-  // re-renderiza la titlebar y el icono nunca aparece hasta que algo
-  // más dañe esa región (drag, focus, etc.).
   win->dirty = 1;
   rect_t damage = {win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE,
                    win->width + WIN11_SHADOW_SIZE * 2,
@@ -101,6 +114,10 @@ window_t *window_create(int x, int y, int w, int h, const char *title,
   win->next = NULL;
   win->prev = NULL;
 
+  win->icon_bmp_node = NULL;
+  for (int i = 0; i < 18 * 18; i++)
+    win->icon_cache[i] = 0;
+  win->has_icon_cache = 0;
   win->icon_symbol[0] = '>';
   win->icon_symbol[1] = '\0';
   win->icon_bg_color = 0xFF0078D4;
