@@ -94,6 +94,11 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
                    win->width + WIN11_SHADOW_SIZE * 2,
                    win->height + WIN11_SHADOW_SIZE * 2};
   compositor_invalidate_rect(damage);
+
+  /* El icono también vive en la taskbar. Su cache se actualiza aquí,
+   * después de crear la ventana, por lo que hay que invalidar explícitamente
+   * la zona de taskbar para que no conserve el fallback del primer frame. */
+  compositor_invalidate_taskbar();
 }
 
 window_t *window_create(int x, int y, int w, int h, const char *title,
