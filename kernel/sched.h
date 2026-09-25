@@ -98,6 +98,12 @@ void sched_make_ready(task_t *t);
 void sched_mark_need_resched(void);
 void sched_publish_task(task_t *t);
 
+// [C4] Publica atómicamente la transición a TASK_BLOCKED junto con el
+// wake_deadline, bajo sched_lock. Debe llamarse después de insertar
+// la tarea en la wait queue (t->waiting_on != NULL). El consumidor
+// (sched_wake_expired) lee ambos campos bajo el mismo lock.
+void sched_set_blocked_deadline(task_t *t, uint64_t deadline);
+
 void preempt_disable(void);
 void preempt_enable(void);
 int preempt_count(void);
@@ -121,6 +127,8 @@ void smp_dump(void);
 void sched_start_ap(void);
 void smp_set_bsp_lapic_id(uint32_t lapic_id);
 
+void __sched_canary_arm(void);
+void __sched_canary_check(void);
 // ---------------------------------------------------------------------------
 // Asserts de offsets asm↔C.
 //

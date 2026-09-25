@@ -39,8 +39,8 @@ process_t *process_current(void) {
 }
 
 static process_t *process_spawn_with_ppid(const char *name,
-                                      const void *elf_data, size_t elf_size,
-                                      uint32_t ppid) {
+                                          const void *elf_data, size_t elf_size,
+                                          uint32_t ppid) {
   if (!elf_data || elf_size < sizeof(Elf64_Ehdr)) {
     LOG_ERR("[PROC] Datos ELF inválidos");
     return NULL;
@@ -194,8 +194,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   }
 
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
-      !vma_create(proc, elf_vma_start, elf_vma_end,
-                   PTE_USER | PTE_NX, VMA_ELF)) {
+      !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
+                  VMA_ELF)) {
     LOG_ERR("[PROC] No se pudo crear VMA ELF");
     task_put(task);
     paging_free_user_space(pml4_phys);
@@ -243,14 +243,21 @@ process_t *process_spawn(const char *name, const void *elf_data,
 }
 
 static process_t *process_load_with_ppid(const char *path, uint32_t ppid) {
-  tar_node_t *node = tarfs_open(path);
-  if (!node || node->is_dir) {
-    LOG_ERR("[PROC] No se encontró el archivo: %s", path);
+  // [FASE 2] Cargar a través del VFS en vez de tarfs_open directamente,
+  // para poder cargar ELFs desde FAT32 cuando esté disponible.
+  void *buf = NULL;
+  size_t size = 0;
+  int rc = vfs_read_all(path, &buf, &size);
+  if (rc != 0) {
+    LOG_ERR("[PROC] No se pudo leer '%s': %d", path, rc);
     return NULL;
   }
   LOG_INFO("[PROC] Cargando archivo: %s (tamaño=%lu)", path,
-           (unsigned long)node->size);
-  return process_spawn_with_ppid(path, node->data, node->size, ppid);
+           (unsigned long)size);
+
+  process_t *p = process_spawn_with_ppid(path, buf, size, ppid);
+  kfree(buf);
+  return p;
 }
 
 process_t *process_spawn_child(process_t *parent, const char *path) {
@@ -462,10 +469,8 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     if (new_brk > proc->heap_max || new_brk < old_brk)
       return (void *)-1;
 
-    uint64_t start_page =
-        (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-    uint64_t end_page =
-        (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+    uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+    uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
 
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
@@ -499,10 +504,8 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     return (void *)-1;
 
   uint64_t new_brk = old_brk - decr;
-  uint64_t old_end_page =
-      (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-  uint64_t new_end_page =
-      (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+  uint64_t old_end_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
+  uint64_t new_end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
 
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
   for (uint64_t page = new_end_page; page < old_end_page; page += PAGE_SIZE) {
@@ -516,4 +519,3 @@ void *process_sbrk(process_t *proc, int64_t increment) {
   proc->heap_end = new_brk;
   return (void *)old_brk;
 }
-

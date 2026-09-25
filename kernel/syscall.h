@@ -31,6 +31,10 @@
 #define SYS_WIN_REGISTER_CONSOLE 23
 #define SYS_GET_SERVICE_ID 24
 #define SYS_VM_DEBUG_INFO 25
+#define SYS_READDIR 26
+#define SYS_MKDIR 27
+#define SYS_UNLINK 28
+#define SYS_WIN_SET_ICON 29
 
 typedef struct {
   uint64_t cr3_phys;

@@ -58,6 +58,14 @@ int paging_unmap_page(uint64_t virt);
 uint64_t paging_get_phys(uint64_t virt);
 void paging_invalidate_tlb(uint64_t virt);
 
+// [H3] Invalida el TLB de la página 'virt' en TODOS los CPUs online.
+// Usar cuando se modifica un mapeo que puede estar cacheado en otras
+// CPUs: páginas globales (PTE_GLOBAL), o mapeos del kernel (que están
+// en todas las PML4 de proceso). Debe llamarse con IRQs ON.
+//
+// Si no hay APs activos, degenera en paging_invalidate_tlb.
+void paging_invalidate_tlb_global(uint64_t virt);
+
 // VMM: Aloja/libera páginas virtuales continuas usando el PMM
 int vmm_alloc_pages(uint64_t vaddr, uint64_t num_pages, uint64_t flags);
 void vmm_free_pages(uint64_t vaddr, uint64_t num_pages);

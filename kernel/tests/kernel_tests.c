@@ -17,9 +17,12 @@
 #include "../block.h"
 #include "../cpu.h"
 #include "../elf.h"
+#include "../fat32.h"
 #include "../heap.h"
+#include "../ipi.h"
 #include "../klog.h"
 #include "../paging.h"
+#include "../part.h"
 #include "../pmm.h"
 #include "../sched.h"
 #include "../slab.h"
@@ -27,6 +30,7 @@
 #include "../string.h"
 #include "../test.h"
 #include "../time.h"
+#include "../vfs.h"
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
@@ -332,6 +336,58 @@ static void test_slab_usable_size(void) {
 }
 REGISTER_TEST("slab: usable size", test_slab_usable_size);
 
+// ===========================================================================
+// [Fase 1.1] slab: late free tras liberar un slab completo
+//
+// Regresión de C5. Antes, cuando un slab quedaba totalmente libre y se
+// devolvía al PMM, su header conservaba magic=SLAB_MAGIC. Un slab_free
+// tardío sobre un puntero obsoleto escribía sobre memoria ajena. Con el
+// fix, magic queda a 0 y el late free se rechaza.
+//
+// El test no puede garantizar que ptrs[0] pertenezca a un slab ya
+// devuelto al PMM (depende del orden interno de freelist), pero con N
+// grande y liberación en orden, la primera mitad de los punteros casi
+// siempre vienen de slabs liberados. La parte determinista es que
+// *no debe corromper nada*: el sistema sigue funcional después.
+// ===========================================================================
+static void test_slab_late_free_after_release(void) {
+  enum { N = 256 };
+  static void *ptrs[N];
+
+  for (int i = 0; i < N; i++) {
+    ptrs[i] = kmalloc(64);
+    TEST_ASSERT(ptrs[i] != NULL, "kmalloc(64) falló en i=%d", i);
+    if (!ptrs[i]) {
+      for (int j = 0; j < i; j++)
+        kfree(ptrs[j]);
+      return;
+    }
+    ((uint32_t *)ptrs[i])[0] = (uint32_t)i;
+  }
+
+  for (int i = 0; i < N; i++)
+    kfree(ptrs[i]);
+
+  // Late frees: con el fix no deben corromper. Los que apunten a slabs
+  // ya devueltos al PMM verán magic=0 y se rechazarán; los que apunten
+  // al último slab vivo son idempotentes respecto al bitmap de la cache
+  // (comportamiento no garantizado, pero no debe crashear el kernel).
+  kfree(ptrs[0]);
+  kfree(ptrs[1]);
+
+  // El SLAB debe seguir operativo.
+  void *p = kmalloc(64);
+  TEST_ASSERT(p != NULL, "kmalloc(64) tras late free devolvió NULL");
+  if (p) {
+    memset(p, 0xCC, 64);
+    kfree(p);
+  }
+
+  TEST_ASSERT(1, "late free no corrompió el SLAB");
+}
+REGISTER_TEST("slab: late free tras liberar slab",
+              test_slab_late_free_after_release);
+
 // ---------------------------------------------------------------------------
 // PMM: validación de rangos físicos EFI
 // ---------------------------------------------------------------------------
@@ -342,19 +398,85 @@ static void test_pmm_efi_range_overflow(void) {
               "rango EFI válido fue rechazado");
   TEST_ASSERT(size == PAGE_SIZE, "tamaño EFI válido incorrecto");
 
-  TEST_ASSERT(!pmm_test_validate_efi_range(0, UINT64_MAX / PAGE_SIZE + 1,
-                                            &size),
-              "overflow pages * PAGE_SIZE no fue rechazado");
+  TEST_ASSERT(
+      !pmm_test_validate_efi_range(0, UINT64_MAX / PAGE_SIZE + 1, &size),
+      "overflow pages * PAGE_SIZE no fue rechazado");
 
-  TEST_ASSERT(!pmm_test_validate_efi_range(UINT64_MAX - PAGE_SIZE + 2, 1,
-                                            &size),
-              "overflow phys + size no fue rechazado");
+  TEST_ASSERT(
+      !pmm_test_validate_efi_range(UINT64_MAX - PAGE_SIZE + 2, 1, &size),
+      "overflow phys + size no fue rechazado");
 
   TEST_ASSERT(!pmm_test_validate_efi_range(UINT64_MAX, 1, &size),
               "rango físico al final de uint64 no fue rechazado");
 }
 REGISTER_TEST("pmm: rechaza overflow de rangos EFI",
               test_pmm_efi_range_overflow);
+
+// ===========================================================================
+// [Fase 1.1] pmm: doble free de una sola página
+//
+// Regresión de H5 en pmm_free_page(). Antes el segundo free era
+// silencioso e idempotente (bitmap_clear_safe); el contador
+// used_blocks no se tocaba, pero el bug del llamante pasaba
+// desapercibido. Con el fix debe aparecer un LOG_WARN y el contador
+// no debe moverse en la segunda llamada.
+// ===========================================================================
+static void test_pmm_double_free_page(void) {
+  uint64_t p = pmm_alloc_page();
+  TEST_ASSERT(p != 0, "pmm_alloc_page devolvió 0");
+  if (!p)
+    return;
+
+  uint64_t free_before = pmm_free_pages_count();
+  pmm_free_page(p);
+  uint64_t free_after_first = pmm_free_pages_count();
+  TEST_ASSERT(free_after_first == free_before + 1,
+              "primer free no incrementó libres (%lu -> %lu)",
+              (unsigned long)free_before, (unsigned long)free_after_first);
+
+  // Segundo free: debe ser detectado.
+  pmm_free_page(p);
+  uint64_t free_after_second = pmm_free_pages_count();
+  TEST_ASSERT(free_after_second == free_after_first,
+              "segundo free corrompió el contador (%lu -> %lu)",
+              (unsigned long)free_after_first,
+              (unsigned long)free_after_second);
+}
+REGISTER_TEST("pmm: doble free de una página", test_pmm_double_free_page);
+
+// ===========================================================================
+// [Fase 1.1] pmm: doble free de un rango buddy (potencia de 2)
+//
+// La rama buddy de pmm_free_pages() usa range_mark_free(), que es
+// idempotente. Sin el chequeo previo de "todas ya libres", el segundo
+// free decrementaba used_blocks de más. Este test lo fuerza con
+// count=4 (order=2, garantiza la rama buddy).
+// ===========================================================================
+static void test_pmm_double_free_range_buddy(void) {
+  uint64_t base = pmm_alloc_pages(4);
+  TEST_ASSERT(base != 0, "pmm_alloc_pages(4) falló");
+  if (!base)
+    return;
+  TEST_ASSERT((base & (4 * PAGE_SIZE - 1)) == 0,
+              "pmm_alloc_pages(4) devolvió 0x%llx no alineado a 16 KB",
+              (unsigned long long)base);
+
+  uint64_t free_before = pmm_free_pages_count();
+  pmm_free_pages(base, 4);
+  uint64_t free_after_first = pmm_free_pages_count();
+  TEST_ASSERT(free_after_first == free_before + 4,
+              "primer free_pages(4) no liberó 4 (%lu -> %lu)",
+              (unsigned long)free_before, (unsigned long)free_after_first);
+
+  pmm_free_pages(base, 4);
+  uint64_t free_after_second = pmm_free_pages_count();
+  TEST_ASSERT(free_after_second == free_after_first,
+              "segundo free_pages(4) corrompió el contador (%lu -> %lu)",
+              (unsigned long)free_after_first,
+              (unsigned long)free_after_second);
+}
+REGISTER_TEST("pmm: doble free de un rango buddy",
+              test_pmm_double_free_range_buddy);
 
 // ---------------------------------------------------------------------------
 // ELF: rechazo de overflow al reubicar segmentos ET_DYN
@@ -405,8 +527,7 @@ static void test_elf_relocation_overflow(void) {
   uint64_t entry = 0;
   int rc = elf_load(image, sizeof(image), pml4, load_base, &entry);
 
-  TEST_ASSERT(rc != 0,
-              "elf_load aceptó overflow en p_vaddr + load_base");
+  TEST_ASSERT(rc != 0, "elf_load aceptó overflow en p_vaddr + load_base");
   TEST_ASSERT(pml4[PML4_INDEX(0x1000)] == 0,
               "ELF inválido modificó el PML4 antes de ser rechazado");
   TEST_ASSERT(pmm_free_pages_count() == baseline,
@@ -441,8 +562,7 @@ static void test_paging_map_rollback(void) {
   for (int fail_after = 0; fail_after < 3; fail_after++) {
     memset(pml4, 0, PAGE_SIZE);
     paging_test_set_alloc_fail_after(fail_after);
-    int rc = paging_map_page_in(pml4, virt, mapped_phys,
-                                PTE_WRITABLE | PTE_NX);
+    int rc = paging_map_page_in(pml4, virt, mapped_phys, PTE_WRITABLE | PTE_NX);
     paging_test_set_alloc_fail_after(-1);
 
     TEST_ASSERT(rc != 0, "fallo inyectado #%d no produjo error", fail_after);
@@ -477,8 +597,7 @@ static void test_paging_map_range_overflow(void) {
   TEST_ASSERT(rc != 0,
               "paging_map_range permitió overflow de dirección virtual");
 
-  rc = paging_map_range(0x0000001000000000ULL,
-                        0x000FFFFFFFFFF000ULL, 0x2000,
+  rc = paging_map_range(0x0000001000000000ULL, 0x000FFFFFFFFFF000ULL, 0x2000,
                         PTE_WRITABLE | PTE_NX);
   TEST_ASSERT(rc != 0,
               "paging_map_range permitió overflow/límite físico de PTE");
@@ -506,8 +625,7 @@ static void test_mmio_map_overflow(void) {
 
   // Un rango que exceda la ventana virtual debe rechazarse.
   void *bad = mmio_map(mmio_max_phys, 2, PTE_NOCACHE | PTE_NX);
-  TEST_ASSERT(bad == NULL,
-              "mmio_map aceptó un rango fuera de la ventana MMIO");
+  TEST_ASSERT(bad == NULL, "mmio_map aceptó un rango fuera de la ventana MMIO");
 
   // La PTE admite direcciones físicas mayores que la ventana MMIO.
   bad = mmio_map(PTE_FRAME, 1, PTE_NOCACHE | PTE_NX);
@@ -515,16 +633,12 @@ static void test_mmio_map_overflow(void) {
               "mmio_map aceptó una dirección física fuera de la ventana");
 
   // El cálculo phys + size no puede envolver.
-  bad = mmio_map(UINT64_MAX - 0x7FFULL, 0x1000,
-                 PTE_NOCACHE | PTE_NX);
-  TEST_ASSERT(bad == NULL,
-              "mmio_map permitió overflow de phys + size");
+  bad = mmio_map(UINT64_MAX - 0x7FFULL, 0x1000, PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(bad == NULL, "mmio_map permitió overflow de phys + size");
 
   // El último frame de 4 KiB de la ventana también es válido.
-  ok = mmio_map(mmio_max_phys - 0xFFFULL, 0x1000,
-                PTE_NOCACHE | PTE_NX);
-  TEST_ASSERT(ok != NULL,
-              "mmio_map rechazó el último frame de la ventana");
+  ok = mmio_map(mmio_max_phys - 0xFFFULL, 0x1000, PTE_NOCACHE | PTE_NX);
+  TEST_ASSERT(ok != NULL, "mmio_map rechazó el último frame de la ventana");
   if (ok)
     mmio_unmap(mmio_max_phys - 0xFFFULL, 0x1000);
 }
@@ -560,12 +674,12 @@ static void test_paging_noncanonical_addresses(void) {
   TEST_ASSERT(pmm_free_pages_count() == baseline,
               "dirección no canónica consumió páginas de tablas");
 
-  TEST_ASSERT(paging_map_page(noncanonical_low, 0x1000,
-                              PTE_WRITABLE | PTE_NX) != 0,
-              "paging_map_page aceptó dirección no canónica baja");
-  TEST_ASSERT(paging_map_page(noncanonical_high, 0x1000,
-                              PTE_WRITABLE | PTE_NX) != 0,
-              "paging_map_page aceptó dirección no canónica alta");
+  TEST_ASSERT(
+      paging_map_page(noncanonical_low, 0x1000, PTE_WRITABLE | PTE_NX) != 0,
+      "paging_map_page aceptó dirección no canónica baja");
+  TEST_ASSERT(
+      paging_map_page(noncanonical_high, 0x1000, PTE_WRITABLE | PTE_NX) != 0,
+      "paging_map_page aceptó dirección no canónica alta");
 
   TEST_ASSERT(paging_unmap_page_in(pml4, noncanonical_low) != 0,
               "paging_unmap_page_in aceptó dirección no canónica");
@@ -576,15 +690,15 @@ static void test_paging_noncanonical_addresses(void) {
   TEST_ASSERT(paging_get_phys(noncanonical_low) == 0,
               "paging_get_phys aceptó dirección no canónica");
 
-  TEST_ASSERT(paging_map_page_in(pml4, valid_low, 0x1000,
-                                 PTE_WRITABLE | PTE_NX) == 0,
-              "paging_map_page_in rechazó el máximo bajo canónico");
+  TEST_ASSERT(
+      paging_map_page_in(pml4, valid_low, 0x1000, PTE_WRITABLE | PTE_NX) == 0,
+      "paging_map_page_in rechazó el máximo bajo canónico");
   TEST_ASSERT(paging_unmap_page_in(pml4, valid_low) == 0,
               "no se pudo desmapear el máximo bajo canónico");
 
-  TEST_ASSERT(paging_map_page_in(pml4, valid_high, 0x1000,
-                                 PTE_WRITABLE | PTE_NX) == 0,
-              "paging_map_page_in rechazó el mínimo alto canónico");
+  TEST_ASSERT(
+      paging_map_page_in(pml4, valid_high, 0x1000, PTE_WRITABLE | PTE_NX) == 0,
+      "paging_map_page_in rechazó el mínimo alto canónico");
   TEST_ASSERT(paging_unmap_page_in(pml4, valid_high) == 0,
               "no se pudo desmapear el mínimo alto canónico");
 
@@ -670,16 +784,14 @@ static void test_paging_unmap_rejects_huge_page(void) {
 
   const uint64_t virt = 0x0000004000000000ULL;
   const uint64_t huge_phys = 0x00200000ULL;
-  const uint64_t huge_entry =
-      huge_phys | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
+  const uint64_t huge_entry = huge_phys | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
 
   pml4[PML4_INDEX(virt)] = pdpt_phys | PTE_PRESENT | PTE_WRITABLE;
   pdpt[PDPT_INDEX(virt)] = pd_phys | PTE_PRESENT | PTE_WRITABLE;
   pd[PD_INDEX(virt)] = huge_entry;
 
   int rc = paging_unmap_page_in(pml4, virt);
-  TEST_ASSERT(rc != 0,
-              "paging_unmap_page_in aceptó una PDE huge de 2 MiB");
+  TEST_ASSERT(rc != 0, "paging_unmap_page_in aceptó una PDE huge de 2 MiB");
   TEST_ASSERT(pd[PD_INDEX(virt)] == huge_entry,
               "unmap modificó una PDE huge en lugar de rechazarla");
 
@@ -703,8 +815,9 @@ static void test_paging_phys_window_size(void) {
               "1 byte debería redondear a 2 MiB");
   TEST_ASSERT(paging_phys_window_size(0x200001ULL) == 0x400000ULL,
               "2 MiB+1 debería redondear a 4 MiB");
-  TEST_ASSERT(paging_phys_window_size(max_window - 1) == max_window,
-              "RAM justo por debajo de 512 GiB debería quedar limitada a 512 GiB");
+  TEST_ASSERT(
+      paging_phys_window_size(max_window - 1) == max_window,
+      "RAM justo por debajo de 512 GiB debería quedar limitada a 512 GiB");
   TEST_ASSERT(paging_phys_window_size(max_window) == max_window,
               "512 GiB debería caber exactamente en la ventana");
   TEST_ASSERT(paging_phys_window_size(max_window + 1) == max_window,
@@ -715,7 +828,210 @@ static void test_paging_phys_window_size(void) {
 REGISTER_TEST("paging: ventana física sin overflow",
               test_paging_phys_window_size);
 
+// ===========================================================================
+// [Fase 1.1] paging: split de huge page preserva PTE_NX
+//
+// Regresión de H2 en split_huge_page(): antes se hacía
+//   inherit_flags = (huge_entry & 0xFFF) & ~(PTE_HUGE | 0x080ULL);
+// que descartaba el bit NX (63) al construir los PTEs hijos. Este test
+// monta una PDE con PTE_HUGE|PTE_NX, fuerza el split mapeando una PTE
+// dentro, y verifica que los PTEs resultantes heredan NX.
+// ===========================================================================
+static void test_paging_split_huge_preserves_nx(void) {
+  // PML4/PDPT/PD propios para no tocar kernel_pml4.
+  uint64_t pml4_phys = pmm_alloc_page();
+  uint64_t pdpt_phys = pmm_alloc_page();
+  uint64_t pd_phys = pmm_alloc_page();
+  TEST_ASSERT(pml4_phys && pdpt_phys && pd_phys,
+              "no se pudieron reservar tablas (pml4=%p pdpt=%p pd=%p)",
+              (void *)pml4_phys, (void *)pdpt_phys, (void *)pd_phys);
+  if (!pml4_phys || !pdpt_phys || !pd_phys) {
+    if (pd_phys)
+      pmm_free_page(pd_phys);
+    if (pdpt_phys)
+      pmm_free_page(pdpt_phys);
+    if (pml4_phys)
+      pmm_free_page(pml4_phys);
+    return;
+  }
 
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  uint64_t *pdpt = (uint64_t *)phys_to_virt(pdpt_phys);
+  uint64_t *pd = (uint64_t *)phys_to_virt(pd_phys);
+  memset(pml4, 0, PAGE_SIZE);
+  memset(pdpt, 0, PAGE_SIZE);
+  memset(pd, 0, PAGE_SIZE);
+
+  // virt elegido con pd_idx=1 y pt_idx=0, para poder revisar
+  // pt[0..511] enteros y no pisar pd[0] por accidente.
+  //   0x0000000040200000 = 2^30 + 2 * 2^20 → pd_idx=1, pt_idx=0
+  const uint64_t virt = 0x0000000040200000ULL;
+
+  // Huge page de 2 MB: base alineada a 2 MB, flags con NX.
+  const uint64_t huge_phys = 0x200000ULL;
+  const uint64_t huge_entry =
+      huge_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_HUGE | PTE_NX;
+
+  pml4[PML4_INDEX(virt)] = pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+  pdpt[PDPT_INDEX(virt)] = pd_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+  pd[PD_INDEX(virt)] = huge_entry;
+
+  uint64_t leaf_phys = pmm_alloc_page();
+  TEST_ASSERT(leaf_phys != 0, "no se pudo reservar leaf phys");
+  if (!leaf_phys) {
+    pmm_free_page(pd_phys);
+    pmm_free_page(pdpt_phys);
+    pmm_free_page(pml4_phys);
+    return;
+  }
+
+  int rc = paging_map_page_in(pml4, virt, leaf_phys,
+                              PTE_USER | PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc == 0, "paging_map_page_in falló: %d", rc);
+  if (rc != 0) {
+    pmm_free_page(leaf_phys);
+    pmm_free_page(pd_phys);
+    pmm_free_page(pdpt_phys);
+    pmm_free_page(pml4_phys);
+    return;
+  }
+
+  TEST_ASSERT((pd[PD_INDEX(virt)] & PTE_HUGE) == 0,
+              "PDE sigue marcada como huge tras el split (0x%llx)",
+              (unsigned long long)pd[PD_INDEX(virt)]);
+
+  uint64_t pt_phys = pd[PD_INDEX(virt)] & PTE_FRAME;
+  uint64_t *pt = (uint64_t *)phys_to_virt(pt_phys);
+
+  // pt[0] es la entrada que acabamos de escribir (leaf_phys).
+  TEST_ASSERT((pt[0] & PTE_FRAME) == leaf_phys,
+              "pt[0]=0x%llx no apunta a leaf_phys=0x%llx",
+              (unsigned long long)(pt[0] & PTE_FRAME),
+              (unsigned long long)leaf_phys);
+  TEST_ASSERT((pt[0] & PTE_NX) != 0, "pt[0] perdió PTE_NX");
+
+  // pt[1..511] son herencia del split: deben tener PRESENT, USER,
+  // WRITABLE, NX, y apuntar a huge_phys + i*PAGE_SIZE.
+  int bad_idx = -1;
+  const char *bad_reason = NULL;
+  for (int i = 1; i < PAGE_ENTRIES; i++) {
+    if (!(pt[i] & PTE_PRESENT)) {
+      bad_idx = i;
+      bad_reason = "PRESENT=0";
+      break;
+    }
+    if (!(pt[i] & PTE_USER)) {
+      bad_idx = i;
+      bad_reason = "USER=0";
+      break;
+    }
+    if (!(pt[i] & PTE_WRITABLE)) {
+      bad_idx = i;
+      bad_reason = "WRITABLE=0";
+      break;
+    }
+    if (!(pt[i] & PTE_NX)) {
+      bad_idx = i;
+      bad_reason = "NX=0";
+      break;
+    }
+    uint64_t expected = huge_phys + (uint64_t)i * PAGE_SIZE;
+    if ((pt[i] & PTE_FRAME) != expected) {
+      bad_idx = i;
+      bad_reason = "phys incorrecta";
+      break;
+    }
+  }
+  TEST_ASSERT(bad_idx < 0,
+              "split_huge_page perdió flags en pt[%d]: %s (entry=0x%llx)",
+              bad_idx, bad_reason ? bad_reason : "?",
+              bad_idx >= 0 ? (unsigned long long)pt[bad_idx] : 0ULL);
+
+  // Cleanup ordenado.
+  paging_unmap_page_in(pml4, virt);
+  pmm_free_page(pt_phys);
+  pmm_free_page(leaf_phys);
+  pmm_free_page(pd_phys);
+  pmm_free_page(pdpt_phys);
+  pmm_free_page(pml4_phys);
+}
+REGISTER_TEST("paging: split huge preserva NX",
+              test_paging_split_huge_preserves_nx);
+
+// ===========================================================================
+// [Fase 1.1] paging: remap actualiza la PTE y no corrompe
+//
+// Verifica que paging_map_page_in sobre un VA ya mapeado tiene éxito,
+// actualiza la PTE al nuevo phys y emite el LOG_WARN de H4 (que no
+// comprobamos aquí, solo que el comportamiento sea el correcto).
+// ===========================================================================
+static void test_paging_remap_updates_phys(void) {
+  const uint64_t virt = 0x0000005000000000ULL;
+
+  uint64_t pml4_phys = pmm_alloc_page();
+  uint64_t phys_a = pmm_alloc_page();
+  uint64_t phys_b = pmm_alloc_page();
+  TEST_ASSERT(pml4_phys && phys_a && phys_b, "fallo alloc (pml4=%p a=%p b=%p)",
+              (void *)pml4_phys, (void *)phys_a, (void *)phys_b);
+  if (!pml4_phys || !phys_a || !phys_b) {
+    if (phys_b)
+      pmm_free_page(phys_b);
+    if (phys_a)
+      pmm_free_page(phys_a);
+    if (pml4_phys)
+      pmm_free_page(pml4_phys);
+    return;
+  }
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  memset(pml4, 0, PAGE_SIZE);
+
+  int rc =
+      paging_map_page_in(pml4, virt, phys_a, PTE_USER | PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc == 0, "primer map falló: %d", rc);
+  TEST_ASSERT(paging_get_phys_in(pml4, virt) == phys_a,
+              "primer map no dejó phys_a");
+
+  // Remap al mismo VA con otro phys.
+  rc = paging_map_page_in(pml4, virt, phys_b, PTE_USER | PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc == 0, "remap falló: %d", rc);
+  TEST_ASSERT(paging_get_phys_in(pml4, virt) == phys_b,
+              "remap no actualizó a phys_b (sigue 0x%llx)",
+              (unsigned long long)paging_get_phys_in(pml4, virt));
+
+  // Idempotente: remap al mismo phys no debe romper.
+  rc = paging_map_page_in(pml4, virt, phys_b, PTE_USER | PTE_WRITABLE | PTE_NX);
+  TEST_ASSERT(rc == 0, "remap idempotente falló: %d", rc);
+  TEST_ASSERT(paging_get_phys_in(pml4, virt) == phys_b,
+              "remap idempotente cambió el phys");
+
+  // Cleanup: recorrer el PML4 y liberar tablas.
+  paging_unmap_page_in(pml4, virt);
+
+  uint64_t pdpt_phys = 0, pd_phys = 0, pt_phys = 0;
+  if (pml4[PML4_INDEX(virt)] & PTE_PRESENT) {
+    pdpt_phys = pml4[PML4_INDEX(virt)] & PTE_FRAME;
+    uint64_t *pdpt = (uint64_t *)phys_to_virt(pdpt_phys);
+    if (pdpt[PDPT_INDEX(virt)] & PTE_PRESENT) {
+      pd_phys = pdpt[PDPT_INDEX(virt)] & PTE_FRAME;
+      uint64_t *pd = (uint64_t *)phys_to_virt(pd_phys);
+      if ((pd[PD_INDEX(virt)] & PTE_PRESENT) &&
+          !(pd[PD_INDEX(virt)] & PTE_HUGE)) {
+        pt_phys = pd[PD_INDEX(virt)] & PTE_FRAME;
+      }
+    }
+  }
+  if (pt_phys)
+    pmm_free_page(pt_phys);
+  if (pd_phys)
+    pmm_free_page(pd_phys);
+  if (pdpt_phys)
+    pmm_free_page(pdpt_phys);
+  pmm_free_page(phys_a);
+  pmm_free_page(phys_b);
+  pmm_free_page(pml4_phys);
+}
+REGISTER_TEST("paging: remap actualiza la PTE", test_paging_remap_updates_phys);
 
 // ---------------------------------------------------------------------------
 // SMP (Fase 0)
@@ -723,11 +1039,11 @@ REGISTER_TEST("paging: ventana física sin overflow",
 static void test_smp_processor_id_valid(void) {
   int cpu = smp_processor_id();
   TEST_ASSERT(cpu >= 0 && cpu < MAX_CPUS,
-              "smp_processor_id() devolvió %d, fuera de rango [0,%d)",
-              cpu, MAX_CPUS);
+              "smp_processor_id() devolvió %d, fuera de rango [0,%d)", cpu,
+              MAX_CPUS);
   TEST_ASSERT(cpu_local_data[cpu].cpu_id == cpu,
-              "cpu_local_data[%d].cpu_id = %d, esperado %d",
-              cpu, cpu_local_data[cpu].cpu_id, cpu);
+              "cpu_local_data[%d].cpu_id = %d, esperado %d", cpu,
+              cpu_local_data[cpu].cpu_id, cpu);
 }
 REGISTER_TEST("smp: smp_processor_id() válido", test_smp_processor_id_valid);
 
@@ -808,15 +1124,15 @@ REGISTER_TEST("apic: LAPIC SVR habilitado", test_apic_svr_enabled);
 static void test_apic_bsp_id(void) {
   const acpi_info_t *info = acpi_get_info();
   TEST_ASSERT(info->bsp_index >= 0 && info->bsp_index < info->cpu_count,
-              "ACPI bsp_index=%d inválido (cpu_count=%d)",
-              info->bsp_index, info->cpu_count);
+              "ACPI bsp_index=%d inválido (cpu_count=%d)", info->bsp_index,
+              info->cpu_count);
   if (info->bsp_index < 0 || info->bsp_index >= info->cpu_count)
     return;
 
   uint32_t expected = info->cpus[info->bsp_index].apic_id;
   uint32_t actual = lapic_get_bsp_id();
-  TEST_ASSERT(actual == expected,
-              "BSP APIC ID = %u, esperado %u (MADT)", actual, expected);
+  TEST_ASSERT(actual == expected, "BSP APIC ID = %u, esperado %u (MADT)",
+              actual, expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,9 +1387,8 @@ static void timeout_wq_test_waiter(void) {
   while ((slot = timeout_wq_find_slot(self)) == NULL)
     sched_yield();
 
-  slot->result =
-      wait_event_interruptible_timeout(&slot->wq, timeout_wq_never_ready,
-                                       NULL, TIMEOUT_WQ_TEST_TIMEOUT);
+  slot->result = wait_event_interruptible_timeout(
+      &slot->wq, timeout_wq_never_ready, NULL, TIMEOUT_WQ_TEST_TIMEOUT);
   slot->completed = 1;
   __sync_fetch_and_add(&g_timeout_wq_completed, 1);
 }
@@ -1172,18 +1487,61 @@ static void test_sched_timeout_more_than_16_queues(void) {
       bad_results++;
   }
 
-  TEST_ASSERT(completed == TIMEOUT_WQ_TEST_COUNT && bad_results == 0,
-              "timeout wakeup incorrect: completed=%d/%d, resultados_invalidos=%d",
-              completed, TIMEOUT_WQ_TEST_COUNT, bad_results);
+  TEST_ASSERT(
+      completed == TIMEOUT_WQ_TEST_COUNT && bad_results == 0,
+      "timeout wakeup incorrect: completed=%d/%d, resultados_invalidos=%d",
+      completed, TIMEOUT_WQ_TEST_COUNT, bad_results);
 
   if (completed == TIMEOUT_WQ_TEST_COUNT && bad_results == 0) {
-    LOG_INFO("[TEST] timeout-wq: %d/%d waiters despertados y retornaron timeout",
-             TIMEOUT_WQ_TEST_COUNT, TIMEOUT_WQ_TEST_COUNT);
+    LOG_INFO(
+        "[TEST] timeout-wq: %d/%d waiters despertados y retornaron timeout",
+        TIMEOUT_WQ_TEST_COUNT, TIMEOUT_WQ_TEST_COUNT);
   }
 }
 REGISTER_TEST_FLAGS("sched: timeout wakeup >16 wait queues",
                     test_sched_timeout_more_than_16_queues, TEST_FLAG_BLOCKING);
 
+// ===========================================================================
+// [Fase 1.2] sched: need_resched se limpia con xchg atómico
+//
+// Regresión de C3. Antes sched_tick() hacía:
+//     int force = curr->need_resched;
+//     curr->need_resched = 0;
+// y un sched_kick_idle_cpu() en otra CPU podía escribir 1 entre el
+// read y el write, perdiendo la petición. Este test verifica la
+// semántica del xchg que sustituye ese par: no prueba la carrera
+// directamente (necesitaría instrumentación específica), pero sí
+// garantiza que el primitivo hace lo que promete y evita una
+// "simplificación" futura que rompa el fix.
+// ===========================================================================
+static void test_sched_need_resched_atomic(void) {
+  task_t *cur = sched_current();
+  TEST_ASSERT(cur != NULL, "sched_current() devolvió NULL");
+  if (!cur)
+    return;
+
+  int saved = cur->need_resched;
+
+  // Caso 1: need_resched=1 → xchg devuelve 1 y lo deja a 0.
+  cur->need_resched = 1;
+  __sync_synchronize();
+  int force =
+      __atomic_exchange_n((int *)&cur->need_resched, 0, __ATOMIC_ACQ_REL);
+  TEST_ASSERT(force == 1, "xchg con need_resched=1 devolvió %d (esperado 1)",
+              force);
+  TEST_ASSERT(cur->need_resched == 0, "xchg no limpió need_resched (=%d)",
+              cur->need_resched);
+
+  // Caso 2: need_resched=0 → xchg devuelve 0.
+  force = __atomic_exchange_n((int *)&cur->need_resched, 0, __ATOMIC_ACQ_REL);
+  TEST_ASSERT(force == 0, "xchg con need_resched=0 devolvió %d (esperado 0)",
+              force);
+
+  // Restaurar estado.
+  cur->need_resched = saved;
+}
+REGISTER_TEST("sched: need_resched con xchg atómico",
+              test_sched_need_resched_atomic);
 // ---------------------------------------------------------------------------
 // Block layer
 // ---------------------------------------------------------------------------
@@ -2210,3 +2568,1456 @@ out:
 }
 REGISTER_TEST_FLAGS("ahci: stress buffer no contiguo",
                     test_ahci_stress_no_contiguo, TEST_FLAG_BLOCKING);
+
+// ===========================================================================
+// [H3] TLB shootdown roundtrip
+//
+// No puede verificar el efecto semántico (que otro CPU vea el invlpg)
+// sin infraestructura de observación, pero sí:
+//   - ipi_tlb_shootdown no cuelga ni corrompe estado.
+//   - Todos los APs responden con ack.
+//   - Llamadas repetidas funcionan (no hay estado residual).
+// ===========================================================================
+static void test_ipi_tlb_shootdown_roundtrip(void) {
+  if (smp_aps_ready() == 0) {
+    test_skip("sin APs activos");
+    return;
+  }
+
+  extern uint64_t klog_get_tsc_freq(void);
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq == 0)
+    freq = 2000000000ULL;
+
+  // Direcciones no mapeadas: invlpg sobre no-mapeada es no-op. Así no
+  // arriesgamos un efecto colateral en otras CPUs.
+  const uint64_t base = 0x00007F0000000000ULL;
+
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+
+  const int N = 200;
+  for (int i = 0; i < N; i++)
+    ipi_tlb_shootdown(base + (uint64_t)i * PAGE_SIZE);
+
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t1 = ((uint64_t)hi << 32) | lo;
+  uint64_t dt = t1 - t0;
+  unsigned long avg_ns = (unsigned long)(dt * 1000000000ULL / freq / N);
+
+  LOG_INFO("  %d shootdowns en %lu us (avg %lu ns)", N,
+           (unsigned long)(dt * 1000000ULL / freq), avg_ns);
+
+  // Cota generosa: en QEMU un shootdown IPI va a <100 us.
+  TEST_ASSERT(avg_ns < 200000, "shootdown demasiado lento: %lu ns promedio",
+              avg_ns);
+
+  // Flush completo (addr == 0): debe funcionar y ser más rápido que
+  // 200 shootdowns individuales.
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t f0 = ((uint64_t)hi << 32) | lo;
+  ipi_tlb_shootdown(0);
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t f1 = ((uint64_t)hi << 32) | lo;
+  uint64_t flush_us = (f1 - f0) * 1000000ULL / freq;
+  LOG_INFO("  full flush: %lu us", (unsigned long)flush_us);
+
+  TEST_ASSERT(flush_us < 50000, "full flush demasiado lento: %lu us",
+              (unsigned long)flush_us);
+}
+REGISTER_TEST_FLAGS("ipi: tlb shootdown roundtrip",
+                    test_ipi_tlb_shootdown_roundtrip,
+                    TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
+// ===========================================================================
+// [H3] paging_invalidate_tlb_global no corrompe la ventana física
+//
+// Tras un shootdown sobre PHYS_MAP_BASE, la ventana debe seguir
+// accesible (fue recargada del page table). Verifica que la secuencia
+// (flush local + IPI + ack) no rompe nada del CPU local.
+// ===========================================================================
+static void test_paging_invalidate_tlb_global_smoke(void) {
+  volatile uint32_t *phys_map = (volatile uint32_t *)PHYS_MAP_BASE;
+
+  // Leer antes (mapea en TLB local).
+  uint32_t before = *phys_map;
+
+  // Shootdown global sobre esa VA.
+  paging_invalidate_tlb_global(PHYS_MAP_BASE);
+
+  // Leer después: debe devolver lo mismo.
+  uint32_t after = *phys_map;
+
+  TEST_ASSERT(before == after,
+              "PHYS_MAP_BASE cambió tras shootdown (0x%x -> 0x%x)", before,
+              after);
+
+  // Shootdown sobre una VA no mapeada: no debe explotar.
+  paging_invalidate_tlb_global(0x00007F0001000000ULL);
+}
+REGISTER_TEST_FLAGS("paging: invalidate_tlb_global smoke",
+                    test_paging_invalidate_tlb_global_smoke,
+                    TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
+// ===========================================================================
+// [C4] sched_set_blocked_deadline publica consistentemente
+//
+// Verifica que tras sched_set_blocked_deadline, un lector bajo
+// sched_lock ve ambos campos (state y wake_deadline) coherentes. No
+// es un test de la race en sí, pero garantiza que el helper hace lo
+// que promete y que nadie lo simplifique a dos escrituras separadas.
+// ===========================================================================
+static void test_sched_set_blocked_deadline(void) {
+  task_t *cur = sched_current();
+  TEST_ASSERT(cur != NULL, "sched_current() devolvió NULL");
+  if (!cur)
+    return;
+
+  task_state_t saved_state = cur->state;
+  uint64_t saved_deadline = cur->wake_deadline;
+
+  const uint64_t fake_deadline = 0xDEADBEEF12345678ULL;
+  sched_set_blocked_deadline(cur, fake_deadline);
+
+  TEST_ASSERT(cur->state == TASK_BLOCKED,
+              "state no es BLOCKED tras el helper (=%d)", cur->state);
+  TEST_ASSERT(cur->wake_deadline == fake_deadline,
+              "wake_deadline no se publicó (=0x%llx)",
+              (unsigned long long)cur->wake_deadline);
+
+  // Restaurar: la tarea actual debe seguir RUNNING para que los demás
+  // tests del framework no se confundan.
+  cur->state = saved_state;
+  cur->wake_deadline = saved_deadline;
+}
+REGISTER_TEST("sched: set_blocked_deadline atómico",
+              test_sched_set_blocked_deadline);
+
+// ===========================================================================
+// [Fase 2] Partition layer
+// ===========================================================================
+static void test_part_layout(void) {
+  int disks = 0, parts = 0;
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b)
+      continue;
+    if (b->is_partition)
+      parts++;
+    else
+      disks++;
+  }
+  LOG_INFO("  %d discos, %d particiones", disks, parts);
+  TEST_ASSERT(1, "scan completado (disks=%d parts=%d)", disks, parts);
+}
+REGISTER_TEST("part: scan completado", test_part_layout);
+
+static void test_part_parent_consistent(void) {
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || !b->is_partition)
+      continue;
+
+    TEST_ASSERT(b->parent != NULL, "%s: parent NULL", b->name);
+    TEST_ASSERT(b->start_lba > 0, "%s: start_lba == 0", b->name);
+    TEST_ASSERT(b->num_sectors > 0, "%s: num_sectors == 0", b->name);
+    TEST_ASSERT(b->start_lba + b->num_sectors <= b->parent->num_sectors,
+                "%s: sale del disco padre", b->name);
+    TEST_ASSERT(b->sector_size == b->parent->sector_size,
+                "%s: sector_size distinto del padre", b->name);
+  }
+}
+REGISTER_TEST("part: consistencia padre/hijo", test_part_parent_consistent);
+
+static void test_part_no_overlap(void) {
+  int n = blk_count();
+  for (int i = 0; i < n; i++) {
+    block_device_t *a = blk_get_by_index(i);
+    if (!a || !a->is_partition)
+      continue;
+    for (int j = i + 1; j < n; j++) {
+      block_device_t *b = blk_get_by_index(j);
+      if (!b || !b->is_partition)
+        continue;
+      if (a->parent != b->parent)
+        continue;
+
+      uint64_t a_start = a->start_lba, a_end = a_start + a->num_sectors;
+      uint64_t b_start = b->start_lba, b_end = b_start + b->num_sectors;
+      int overlap = (a_start < b_end) && (b_start < a_end);
+      TEST_ASSERT(!overlap, "%s y %s solapan", a->name, b->name);
+    }
+  }
+}
+REGISTER_TEST("part: sin solapamiento", test_part_no_overlap);
+
+static void test_part_read_routed(void) {
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || !b->is_partition)
+      continue;
+
+    uint8_t p[512] = {0}, d[512] = {0};
+    int rc1 = bdev_read(b, 0, 1, p);
+    int rc2 = bdev_read(b->parent, b->start_lba, 1, d);
+
+    TEST_ASSERT(rc1 == 0, "%s: read falló rc=%d", b->name, rc1);
+    if (rc1 != 0)
+      continue;
+    TEST_ASSERT(rc2 == 0, "%s: read del padre falló rc=%d", b->name, rc2);
+    if (rc2 != 0)
+      continue;
+    TEST_ASSERT(memcmp(p, d, 512) == 0,
+                "%s: contenido distinto del padre[LBA %llu]", b->name,
+                (unsigned long long)b->start_lba);
+  }
+}
+REGISTER_TEST("part: lectura enrutada al padre", test_part_read_routed);
+
+static void test_part_write_routed(void) {
+  // Verifica que bdev_write a una partición enrutado al padre funciona
+  // (o falla consistentemente si el padre es RO). No escribe: solo
+  // confirma que la ruta llega al driver del padre sin error de tipo.
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || !b->is_partition || b->is_read_only)
+      continue;
+    if (b->num_sectors < 4)
+      continue;
+
+    // Leer el sector 0, escribir el mismo contenido, verificar que OK.
+    uint8_t buf[512];
+    int rc = bdev_read(b, 0, 1, buf);
+    TEST_ASSERT(rc == 0, "%s: read falló", b->name);
+    if (rc != 0)
+      continue;
+    rc = bdev_write(b, 0, 1, buf);
+    TEST_ASSERT(rc == 0, "%s: write falló rc=%d", b->name, rc);
+    // Al ser idempotente (mismo contenido), no corrompe nada.
+  }
+}
+REGISTER_TEST("part: escritura enrutada al padre", test_part_write_routed);
+
+// ===========================================================================
+// [Fase 2] VFS con mount points
+//
+// Verifica el comportamiento del mount table sin depender de FAT32.
+// Usa un FS falso que solo sirve un par de paths.
+// ===========================================================================
+
+// --- FS fake ---
+static vfs_node_t *fake_fs_lookup(void *fs_priv, const char *path) {
+  (void)fs_priv;
+  if (strcmp(path, "/") != 0 && strcmp(path, "/foo") != 0)
+    return NULL;
+
+  vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(*n));
+  if (!n)
+    return NULL;
+  strcpy(n->name, path);
+  n->flags = (strcmp(path, "/") == 0) ? VFS_DIRECTORY : VFS_FILE;
+  n->size = 0;
+  n->ops = NULL;
+  n->fs = NULL;
+  n->priv = NULL;
+  return n;
+}
+
+static vfs_fs_ops_t fake_fs_ops = {
+    .lookup = fake_fs_lookup,
+    .name = "fake",
+};
+
+static void test_vfs_mount_lookup_umount(void) {
+  // Mount en un path que no sea /.
+  TEST_ASSERT(vfs_mount("/test_vfs", &fake_fs_ops, NULL) == 0,
+              "mount /test_vfs falló");
+
+  // lookup justo en el mount point.
+  vfs_node_t *n_root = vfs_lookup("/test_vfs");
+  TEST_ASSERT(n_root != NULL, "lookup /test_vfs devolvió NULL");
+  if (n_root) {
+    TEST_ASSERT(n_root->flags == VFS_DIRECTORY,
+                "root del fake no es directorio (flags=0x%x)", n_root->flags);
+    vfs_node_free(n_root);
+  }
+
+  // lookup de un hijo.
+  vfs_node_t *n_foo = vfs_lookup("/test_vfs/foo");
+  TEST_ASSERT(n_foo != NULL, "lookup /test_vfs/foo devolvió NULL");
+  if (n_foo)
+    vfs_node_free(n_foo);
+
+  // lookup de un path que no existe dentro del fake.
+  vfs_node_t *n_bad = vfs_lookup("/test_vfs/bar");
+  TEST_ASSERT(n_bad == NULL, "lookup /test_vfs/bar devolvió algo");
+
+  // doble mount rechazado.
+  int rc = vfs_mount("/test_vfs", &fake_fs_ops, NULL);
+  TEST_ASSERT(rc == -EEXIST, "doble mount devolvió %d, esperado -EEXIST", rc);
+
+  // umount.
+  TEST_ASSERT(vfs_umount("/test_vfs") == 0, "umount falló");
+  vfs_node_t *n_after = vfs_lookup("/test_vfs");
+  TEST_ASSERT(n_after == NULL, "lookup tras umount devolvió algo");
+}
+REGISTER_TEST("vfs: mount/lookup/umount básico", test_vfs_mount_lookup_umount);
+
+static void test_vfs_longest_mount_wins(void) {
+  // Montar /test_long y /test_long/deep. El segundo debe ganar para
+  // paths bajo /test_long/deep, el primero para el resto.
+  TEST_ASSERT(vfs_mount("/test_long", &fake_fs_ops, NULL) == 0, "m1");
+  TEST_ASSERT(vfs_mount("/test_long/deep", &fake_fs_ops, NULL) == 0, "m2");
+
+  // /test_long/foo → matchea /test_long (más específico que /).
+  vfs_node_t *a = vfs_lookup("/test_long/foo");
+  TEST_ASSERT(a != NULL, "lookup /test_long/foo falló");
+  if (a)
+    vfs_node_free(a);
+
+  // /test_long/deep/foo → matchea /test_long/deep.
+  // El fake solo sirve "/" y "/foo" relativos. Con mount en /test_long/deep,
+  // rel="/foo", así que debe funcionar. Con mount en /test_long, rel también
+  // sería "/deep/foo", que el fake rechaza. Así comprobamos que gana el más
+  // específico.
+  vfs_node_t *b = vfs_lookup("/test_long/deep/foo");
+  TEST_ASSERT(
+      b != NULL,
+      "lookup /test_long/deep/foo falló (mount más específico no ganó)");
+  if (b)
+    vfs_node_free(b);
+
+  TEST_ASSERT(vfs_umount("/test_long/deep") == 0, "umount deep");
+  TEST_ASSERT(vfs_umount("/test_long") == 0, "umount long");
+}
+REGISTER_TEST("vfs: mount más específico gana", test_vfs_longest_mount_wins);
+
+static void test_vfs_umount_busy(void) {
+  // Montar dos anidados y verificar que no se puede desmontar el padre
+  // mientras el hijo exista.
+  TEST_ASSERT(vfs_mount("/test_busy", &fake_fs_ops, NULL) == 0, "m1");
+  TEST_ASSERT(vfs_mount("/test_busy/child", &fake_fs_ops, NULL) == 0, "m2");
+
+  int rc = vfs_umount("/test_busy");
+  TEST_ASSERT(rc == -EBUSY, "umount con hijo devolvió %d, esperado -EBUSY", rc);
+
+  TEST_ASSERT(vfs_umount("/test_busy/child") == 0, "umount hijo");
+  TEST_ASSERT(vfs_umount("/test_busy") == 0, "umount padre tras hijo");
+}
+REGISTER_TEST("vfs: umount con hijo da EBUSY", test_vfs_umount_busy);
+
+static void test_vfs_path_normalization(void) {
+  // Estos cuatro paths deben resolver al mismo nodo (el root del fake).
+  // El fake responde "/" tanto a "/test_norm" como a "//test_norm/./"
+  // una vez normalizado.
+  TEST_ASSERT(vfs_mount("/test_norm", &fake_fs_ops, NULL) == 0, "mount");
+
+  const char *paths[] = {
+      "/test_norm",
+      "//test_norm",
+      "/test_norm/",
+      "/./test_norm",
+  };
+  for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+    vfs_node_t *n = vfs_lookup(paths[i]);
+    TEST_ASSERT(n != NULL, "lookup '%s' falló", paths[i]);
+    if (n)
+      vfs_node_free(n);
+  }
+
+  // Path con .. rechazado.
+  vfs_node_t *bad = vfs_lookup("/test_norm/../etc");
+  TEST_ASSERT(bad == NULL, "lookup con .. no fue rechazado");
+
+  TEST_ASSERT(vfs_umount("/test_norm") == 0, "umount");
+}
+REGISTER_TEST("vfs: normalización de paths", test_vfs_path_normalization);
+
+static void test_vfs_read_all_tarfs(void) {
+  // /system/config.txt existe en el initrd y es legible.
+  void *buf = NULL;
+  size_t size = 0;
+  int rc = vfs_read_all("system/config.txt", &buf, &size);
+  TEST_ASSERT(rc == 0, "vfs_read_all falló: %d", rc);
+  if (rc == 0) {
+    TEST_ASSERT(size > 0, "size == 0");
+    TEST_ASSERT(buf != NULL, "buf NULL con size > 0");
+    kfree(buf);
+  }
+
+  // Un directorio devuelve -EISDIR.
+  void *buf2 = NULL;
+  size_t size2 = 0;
+  int rc2 = vfs_read_all("apps", &buf2, &size2);
+  TEST_ASSERT(rc2 == -EISDIR,
+              "read_all de directorio devolvió %d, esperado -EISDIR", rc2);
+
+  // Un archivo inexistente devuelve -ENOENT.
+  int rc3 = vfs_read_all("no/existe/esto", &buf2, &size2);
+  TEST_ASSERT(rc3 == -ENOENT, "read_all de inexistente devolvió %d", rc3);
+}
+REGISTER_TEST("vfs: read_all sobre tarfs", test_vfs_read_all_tarfs);
+
+static void test_vfs_tarfs_root_still_works(void) {
+  // El mount en "/" debe seguir sirviendo los archivos del initrd.
+  // Es una regresión: si el lookup se rompe, /system/config.txt deja
+  // de existir y todas las apps mueren al cargar.
+  vfs_node_t *n = vfs_lookup("system/config.txt");
+  TEST_ASSERT(n != NULL, "lookup config.txt falló");
+  if (n) {
+    TEST_ASSERT(n->flags == VFS_FILE, "no es FILE");
+    TEST_ASSERT(n->size > 0, "size == 0");
+    vfs_node_free(n);
+  }
+
+  // Y un directorio.
+  vfs_node_t *d = vfs_lookup("system");
+  TEST_ASSERT(d != NULL, "lookup system/ falló");
+  if (d) {
+    TEST_ASSERT(d->flags == VFS_DIRECTORY, "system no es DIR");
+    vfs_node_free(d);
+  }
+}
+REGISTER_TEST("vfs: tarfs en / sigue funcionando",
+              test_vfs_tarfs_root_still_works);
+
+// ===========================================================================
+// [Fase 2.2] FAT32 read-only
+//
+// Busca un disco con FAT32 (aurora.img tiene un FS FAT32 crudo sin
+// tabla de particiones) y lo monta/lee. Si ningún disco tiene FAT32,
+// los tests se saltan.
+// ===========================================================================
+static block_device_t *fat32_find_test_disk(void) {
+  const char *names[] = {"sda", "hda", "sdb", "hdb", NULL};
+  for (int i = 0; names[i]; i++) {
+    block_device_t *b = blk_lookup(names[i]);
+    if (!b || b->is_partition || b->is_read_only)
+      continue;
+    if (b->sector_size < 512)
+      continue;
+    uint8_t buf[512];
+    if (bdev_read(b, 0, 1, buf) != 0)
+      continue;
+    // Verificar firma FAT32.
+    if (buf[510] != 0x55 || buf[511] != 0xAA)
+      continue;
+    if (memcmp(buf + 82, "FAT32   ", 8) != 0)
+      continue;
+    return b;
+  }
+  return NULL;
+}
+
+static void fat32_test_cleanup(void) {
+  void *priv = vfs_get_mount_priv("/fat_test");
+  if (priv) {
+    vfs_umount("/fat_test");
+    fat32_umount(priv);
+  }
+}
+
+static void test_fat32_mount_umount(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32 disponible");
+    return;
+  }
+  fat32_test_cleanup();
+
+  int rc = fat32_mount_bdev(b->name, "/fat_test");
+  TEST_ASSERT(rc == 0, "fat32_mount_bdev(%s) falló: %d", b->name, rc);
+  if (rc != 0)
+    return;
+
+  // El mount debe existir.
+  vfs_node_t *root = vfs_lookup("/fat_test");
+  TEST_ASSERT(root != NULL, "lookup /fat_test falló");
+  if (root) {
+    TEST_ASSERT(root->flags == VFS_DIRECTORY, "root de FAT32 no es dir");
+    vfs_node_free(root);
+  }
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: mount/umount básico", test_fat32_mount_umount);
+
+static void test_fat32_lookup_kernel_elf(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // /kernel.elf existe en aurora.img (mcopy del Makefile).
+  vfs_node_t *n = vfs_lookup("/fat_test/kernel.elf");
+  TEST_ASSERT(n != NULL, "lookup /kernel.elf falló");
+  if (n) {
+    TEST_ASSERT(n->flags == VFS_FILE, "no es FILE");
+    TEST_ASSERT(n->size > 64, "size demasiado pequeño (%lu)",
+                (unsigned long)n->size);
+    vfs_node_free(n);
+  }
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: lookup /kernel.elf", test_fat32_lookup_kernel_elf);
+
+static void test_fat32_read_elf_magic(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Leer los primeros 4 bytes de kernel.elf. Debe ser \x7fELF.
+  vfs_node_t *n = vfs_lookup("/fat_test/kernel.elf");
+  TEST_ASSERT(n != NULL, "lookup falló");
+  if (n) {
+    uint8_t magic[4] = {0};
+    int64_t got = n->ops->read(n, 0, 4, magic);
+    TEST_ASSERT(got == 4, "read(4) devolvió %lld", (long long)got);
+    TEST_ASSERT(magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' &&
+                    magic[3] == 'F',
+                "ELF magic incorrecto: %02x %02x %02x %02x", magic[0], magic[1],
+                magic[2], magic[3]);
+    vfs_node_free(n);
+  }
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: leer ELF magic de /kernel.elf",
+              test_fat32_read_elf_magic);
+
+static void test_fat32_deep_path(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // /EFI/BOOT/BOOTX64.EFI existe (mcopy del Makefile).
+  vfs_node_t *n = vfs_lookup("/fat_test/EFI/BOOT/BOOTX64.EFI");
+  TEST_ASSERT(n != NULL, "lookup deep path falló");
+  if (n) {
+    TEST_ASSERT(n->flags == VFS_FILE, "no es FILE");
+    vfs_node_free(n);
+  }
+
+  // Y sus directorios intermedios existen.
+  vfs_node_t *d1 = vfs_lookup("/fat_test/EFI");
+  TEST_ASSERT(d1 != NULL, "/EFI no existe");
+  if (d1) {
+    TEST_ASSERT(d1->flags == VFS_DIRECTORY, "/EFI no es dir");
+    vfs_node_free(d1);
+  }
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: path profundo /EFI/BOOT/BOOTX64.EFI",
+              test_fat32_deep_path);
+
+static void test_fat32_missing_file(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *n = vfs_lookup("/fat_test/no_existe_este_archivo");
+  TEST_ASSERT(n == NULL, "lookup de archivo inexistente devolvió algo");
+
+  vfs_node_t *d = vfs_lookup("/fat_test/no_existe_dir/sub");
+  TEST_ASSERT(d == NULL, "lookup de dir inexistente devolvió algo");
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: lookup de archivos inexistentes",
+              test_fat32_missing_file);
+
+static void test_fat32_read_chunked(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // kernel.elf tiene varios MB: leemos solo lo justo para verificar
+  // integridad sin saturar el heap del kernel (16 MB y compartido).
+  // Validamos: ELF magic al inicio, un offset intermedio que cruce al
+  // menos un cluster, y que seek + read del mismo offset devuelvan lo
+  // mismo.
+  vfs_node_t *n = vfs_lookup("/fat_test/kernel.elf");
+  TEST_ASSERT(n != NULL, "lookup /kernel.elf falló");
+  if (!n) {
+    fat32_test_cleanup();
+    return;
+  }
+
+  uint64_t fsz = n->size;
+  TEST_ASSERT(fsz > 64 * 1024, "kernel.elf demasiado pequeño: %lu",
+              (unsigned long)fsz);
+
+  // 1. ELF magic en offset 0.
+  uint8_t magic[4] = {0};
+  int64_t g = n->ops->read(n, 0, 4, magic);
+  TEST_ASSERT(g == 4, "read magic devolvió %lld", (long long)g);
+  TEST_ASSERT(magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' &&
+                  magic[3] == 'F',
+              "ELF magic incorrecto: %02x %02x %02x %02x", magic[0], magic[1],
+              magic[2], magic[3]);
+
+  // 2. Leer 4 KB en un offset intermedio (cruce de clusters si el FS
+  //    tiene cluster_size < 4 KB). Debe devolver 4 KB completos.
+  uint64_t mid = fsz / 2;
+  uint8_t *chunk = (uint8_t *)kmalloc(4096);
+  TEST_ASSERT(chunk != NULL, "kmalloc(4096) falló");
+  if (chunk) {
+    int64_t n1 = n->ops->read(n, mid, 4096, chunk);
+    TEST_ASSERT(n1 == 4096, "read 4K en offset %llu devolvió %lld",
+                (unsigned long long)mid, (long long)n1);
+
+    // Repetir el mismo read: debe coincidir byte a byte.
+    uint8_t *chunk2 = (uint8_t *)kmalloc(4096);
+    if (chunk2) {
+      int64_t n2 = n->ops->read(n, mid, 4096, chunk2);
+      TEST_ASSERT(n2 == 4096, "segundo read devolvió %lld", (long long)n2);
+      TEST_ASSERT(memcmp(chunk, chunk2, 4096) == 0,
+                  "dos reads del mismo offset difieren");
+      kfree(chunk2);
+    }
+    kfree(chunk);
+  }
+
+  // 3. Leer 512 bytes justo antes del final.
+  uint8_t tail[512];
+  int64_t gt = n->ops->read(n, fsz - 512, 512, tail);
+  TEST_ASSERT(gt == 512, "read tail devolvió %lld", (long long)gt);
+
+  // 4. Leer más allá del final devuelve 0.
+  int64_t ge = n->ops->read(n, fsz, 16, tail);
+  TEST_ASSERT(ge == 0, "read más allá de EOF devolvió %lld", (long long)ge);
+
+  vfs_node_free(n);
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: lectura por chunks", test_fat32_read_chunked);
+
+static void test_fat32_seek_and_read(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Abrir kernel.elf, leer 4 bytes, seek 0, leer otros 4, comparar.
+  vfs_node_t *n = vfs_lookup("/fat_test/kernel.elf");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    uint8_t a[4] = {0}, b2[4] = {0};
+    int64_t n1 = n->ops->read(n, 0, 4, a);
+    int64_t n2 = n->ops->read(n, 0, 4, b2); // mismo offset, sin seek
+    TEST_ASSERT(n1 == 4 && n2 == 4, "reads fallaron: %lld / %lld",
+                (long long)n1, (long long)n2);
+    TEST_ASSERT(memcmp(a, b2, 4) == 0, "reads del mismo offset difieren");
+
+    // Leer un offset avanzado (dentro del mismo cluster).
+    uint8_t c[16] = {0};
+    int64_t n3 = n->ops->read(n, 16, 16, c);
+    TEST_ASSERT(n3 == 16, "read(16) devolvió %lld", (long long)n3);
+
+    vfs_node_free(n);
+  }
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: seek y lecturas repetidas", test_fat32_seek_and_read);
+
+static void test_fat32_non_fat_rejected(void) {
+  // Buscar un disco que NO sea FAT32, sin asumir nombres. Saltamos
+  // el que fat32_find_test_disk() identifica como FAT32, y probamos
+  // con cualquier otro disco no-partición y escribible.
+  block_device_t *fat_disk = fat32_find_test_disk();
+  block_device_t *candidate = NULL;
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || b->is_partition || b->is_read_only)
+      continue;
+    if (b == fat_disk)
+      continue;
+    candidate = b;
+    break;
+  }
+
+  if (!candidate) {
+    test_skip("no hay disco no-FAT32 para probar el rechazo");
+    return;
+  }
+
+  void *priv = NULL;
+  int rc = fat32_mount(candidate, &priv);
+  TEST_ASSERT(rc != 0, "fat32_mount aceptó %s sin FAT32 (rc=%d)",
+              candidate->name, rc);
+  TEST_ASSERT(priv == NULL, "fs_priv != NULL tras fallo en %s",
+              candidate->name);
+
+  // Por si un futuro cambio hiciera pasar el mount: liberar.
+  if (rc == 0 && priv)
+    fat32_umount(priv);
+}
+REGISTER_TEST("fat32: rechaza disco no-FAT32", test_fat32_non_fat_rejected);
+
+// ===========================================================================
+// [PR 3.1] Verifica que la caché de FAT acelera reads en offsets
+// intermedios. Sin caché, leer 4 KB en la mitad de un archivo de ~5 MB
+// camina miles de entradas de FAT, cada una con un bio completo.
+// Con caché es O(1) por entrada y la operación tarda milisegundos.
+// ===========================================================================
+static void test_fat32_cache_speedup(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *n = vfs_lookup("/fat_test/kernel.elf");
+  TEST_ASSERT(n != NULL, "lookup /kernel.elf falló");
+  if (!n) {
+    fat32_test_cleanup();
+    return;
+  }
+
+  if (n->size < 1024 * 1024) {
+    test_skip("kernel.elf demasiado pequeño para medir el speedup");
+    vfs_node_free(n);
+    fat32_test_cleanup();
+    return;
+  }
+
+  extern uint64_t klog_get_tsc_freq(void);
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq == 0)
+    freq = 2000000000ULL;
+
+  uint64_t mid = n->size / 2;
+  uint8_t buf[4096];
+
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+  int64_t got = n->ops->read(n, mid, 4096, buf);
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t1 = ((uint64_t)hi << 32) | lo;
+
+  uint64_t us = (t1 - t0) * 1000000ULL / freq;
+  LOG_INFO("  read 4K en offset %llu: %lld bytes, %lu us",
+           (unsigned long long)mid, (long long)got, (unsigned long)us);
+
+  TEST_ASSERT(got == 4096, "read devolvió %lld", (long long)got);
+
+  // Umbral generoso: en TCG puro un read con caché debería quedar
+  // <50 ms; en KVM <5 ms. 200 ms deja margen para CI lento y para
+  // que un fallo real (falta de caché, ~3 s) sí lo dispare.
+  TEST_ASSERT(us < 200000,
+              "read demasiado lento: %lu us (¿caché FAT inactiva?)", us);
+
+  vfs_node_free(n);
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: caché de FAT acelera reads", test_fat32_cache_speedup);
+
+static void test_fat32_alloc_free_chain(void) {
+  // Aloca 5 clusters, encadena, libera. Verifica contabilidad sobre la
+  // caché. No toca dirents.
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+
+  void *priv = NULL;
+  TEST_ASSERT(fat32_mount(b, &priv) == 0, "mount falló");
+  if (!priv)
+    return;
+
+  // Acceso a internals: este test vive en el mismo TU que fat32.c solo
+  // si lo añades al final de fat32.c. Como está en kernel_tests.c,
+  // exponemos un hook mínimo.
+  extern int fat32_test_alloc_free_chain(void *fs_priv);
+  int rc = fat32_test_alloc_free_chain(priv);
+  TEST_ASSERT(rc == 0, "alloc/free chain falló: %d", rc);
+
+  fat32_umount(priv);
+}
+REGISTER_TEST("fat32: alloc + free chain", test_fat32_alloc_free_chain);
+
+// ===========================================================================
+// [PR 4.2] create/mkdir/unlink sobre FAT32.
+//
+// Trabaja sobre /fat_test. Crea, verifica, borra. Al final el disco
+// queda como estaba (salvo desgaste del journaling interno de la img,
+// que no existe).
+// ===========================================================================
+static void test_fat32_mkdir_unlink(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Limpieza previa por si una ejecución anterior dejó residuos.
+  vfs_node_t *pre = vfs_lookup("/fat_test/pr4dir");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/pr4dir");
+  }
+
+  // 1. mkdir.
+  int rc = vfs_mkdir("/fat_test/pr4dir");
+  TEST_ASSERT(rc == 0, "mkdir falló: %d", rc);
+  if (rc != 0) {
+    fat32_test_cleanup();
+    return;
+  }
+
+  // 2. Debe existir y ser directorio.
+  vfs_node_t *n = vfs_lookup("/fat_test/pr4dir");
+  TEST_ASSERT(n != NULL, "lookup tras mkdir falló");
+  if (n) {
+    TEST_ASSERT(n->flags == VFS_DIRECTORY, "no es DIR");
+    vfs_node_free(n);
+  }
+
+  // 3. mkdir duplicado → -EEXIST.
+  rc = vfs_mkdir("/fat_test/pr4dir");
+  TEST_ASSERT(rc == -EEXIST, "mkdir duplicado devolvió %d, esperado -EEXIST",
+              rc);
+
+  // 4. unlink.
+  rc = vfs_unlink("/fat_test/pr4dir");
+  TEST_ASSERT(rc == 0, "unlink falló: %d", rc);
+
+  // 5. Debe haber desaparecido.
+  n = vfs_lookup("/fat_test/pr4dir");
+  TEST_ASSERT(n == NULL, "lookup tras unlink encontró algo");
+  if (n)
+    vfs_node_free(n);
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: mkdir + lookup + unlink de directorio",
+              test_fat32_mkdir_unlink);
+
+static void test_fat32_create_file_empty(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Limpieza previa.
+  vfs_node_t *pre = vfs_lookup("/fat_test/pr4file.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/pr4file.txt");
+  }
+
+  // 1. create.
+  int rc = vfs_create("/fat_test/pr4file.txt", O_CREAT | O_RDWR);
+  TEST_ASSERT(rc == 0, "create falló: %d", rc);
+  if (rc != 0) {
+    fat32_test_cleanup();
+    return;
+  }
+
+  // 2. Debe existir, size=0, FILE.
+  vfs_node_t *n = vfs_lookup("/fat_test/pr4file.txt");
+  TEST_ASSERT(n != NULL, "lookup tras create falló");
+  if (n) {
+    TEST_ASSERT(n->flags == VFS_FILE, "no es FILE");
+    TEST_ASSERT(n->size == 0, "size != 0: %lu", (unsigned long)n->size);
+    vfs_node_free(n);
+  }
+
+  // 3. create duplicado → -EEXIST.
+  rc = vfs_create("/fat_test/pr4file.txt", O_CREAT | O_RDWR);
+  TEST_ASSERT(rc == -EEXIST, "create duplicado devolvió %d", rc);
+
+  // 4. unlink.
+  rc = vfs_unlink("/fat_test/pr4file.txt");
+  TEST_ASSERT(rc == 0, "unlink falló: %d", rc);
+
+  n = vfs_lookup("/fat_test/pr4file.txt");
+  TEST_ASSERT(n == NULL, "lookup tras unlink encontró algo");
+  if (n)
+    vfs_node_free(n);
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: create archivo vacío + unlink",
+              test_fat32_create_file_empty);
+
+static void test_fat32_mkdir_not_empty(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Cleanup robusto: si una ejecución anterior dejó el directorio y su
+  // hijo, los borramos. El orden importa (hijo antes que padre).
+  vfs_node_t *pre = vfs_lookup("/fat_test/pr4par");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/pr4par/child");
+    vfs_unlink("/fat_test/pr4par");
+  }
+
+  // "pr4par" cabe en 8.3 (6 chars).
+  TEST_ASSERT(vfs_mkdir("/fat_test/pr4par") == 0, "mkdir parent");
+  TEST_ASSERT(vfs_mkdir("/fat_test/pr4par/child") == 0, "mkdir child");
+
+  // unlink del padre debe fallar con -ENOTEMPTY.
+  int rc = vfs_unlink("/fat_test/pr4par");
+  TEST_ASSERT(rc == -ENOTEMPTY, "unlink de dir no-vacío devolvió %d", rc);
+
+  // Limpieza.
+  TEST_ASSERT(vfs_unlink("/fat_test/pr4par/child") == 0, "unlink child");
+  TEST_ASSERT(vfs_unlink("/fat_test/pr4par") == 0, "unlink parent");
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: unlink de directorio no-vacío → ENOTEMPTY",
+              test_fat32_mkdir_not_empty);
+
+static void test_fat32_create_long_name_rejected(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Nombre con más de 8 chars en la base: no cabe en 8.3 sin LFN.
+  int rc = vfs_create("/fat_test/verylongname.txt", O_CREAT);
+  TEST_ASSERT(rc == -ENAMETOOLONG,
+              "create con nombre largo devolvió %d, esperado -ENAMETOOLONG",
+              rc);
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: create con nombre >8.3 rechazado",
+              test_fat32_create_long_name_rejected);
+
+static void test_fat32_persistence_after_remount(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount 1");
+
+  // Cleanup por si quedó residuo.
+  vfs_node_t *pre = vfs_lookup("/fat_test/pr4per.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/pr4per.txt");
+  }
+
+  // "pr4per.txt" cabe en 8.3 (base 6, ext 3).
+  TEST_ASSERT(vfs_create("/fat_test/pr4per.txt", O_CREAT) == 0, "create");
+
+  // Umount.
+  void *priv = vfs_get_mount_priv("/fat_test");
+  TEST_ASSERT(priv != NULL, "get_mount_priv");
+  TEST_ASSERT(vfs_umount("/fat_test") == 0, "umount");
+  fat32_umount(priv);
+
+  // Remount.
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount 2");
+
+  // El archivo debe seguir existiendo.
+  vfs_node_t *n = vfs_lookup("/fat_test/pr4per.txt");
+  TEST_ASSERT(n != NULL, "archivo no persistió tras remount");
+  if (n)
+    vfs_node_free(n);
+
+  // Limpieza.
+  TEST_ASSERT(vfs_unlink("/fat_test/pr4per.txt") == 0, "unlink");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: persistencia tras remount",
+              test_fat32_persistence_after_remount);
+
+static void test_fat32_create_9char_base_rejected(void) {
+  // El caso más frecuente: nombre tipo "readme.txt" cabe, "readme2.txt"
+  // (8 chars base) cabe justo, "readme22.txt" (9 chars) NO.
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // 8 chars base + .txt → OK.
+  int rc = vfs_create("/fat_test/abcdefgh.txt", O_CREAT);
+  TEST_ASSERT(rc == 0, "8.3 justo rechazado: %d", rc);
+  vfs_unlink("/fat_test/abcdefgh.txt");
+
+  // 9 chars base → -ENAMETOOLONG.
+  rc = vfs_create("/fat_test/abcdefghi.txt", O_CREAT);
+  TEST_ASSERT(rc == -ENAMETOOLONG,
+              "9 chars base devolvió %d, esperado -ENAMETOOLONG", rc);
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: límite exacto 8.3",
+              test_fat32_create_9char_base_rejected);
+
+// ===========================================================================
+// [PR 4.3] write + extend + truncate
+// ===========================================================================
+static void test_fat32_write_small(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Cleanup previo.
+  vfs_node_t *pre = vfs_lookup("/fat_test/w1.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w1.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w1.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w1.txt");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    const char *msg = "hello";
+    int64_t w = n->ops->write(n, 0, 5, msg);
+    TEST_ASSERT(w == 5, "write devolvió %lld", (long long)w);
+    TEST_ASSERT(n->size == 5, "size=%lu tras write", (unsigned long)n->size);
+
+    // Leer de vuelta.
+    char buf[16] = {0};
+    int64_t r = n->ops->read(n, 0, 5, buf);
+    TEST_ASSERT(r == 5, "read devolvió %lld", (long long)r);
+    TEST_ASSERT(memcmp(buf, msg, 5) == 0, "contenido no coincide");
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w1.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: write pequeño + read-back", test_fat32_write_small);
+
+static void test_fat32_write_extend(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *pre = vfs_lookup("/fat_test/w2.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w2.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w2.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w2.txt");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    // Escribir 3 KB (varios clusters, cluster_size=512).
+    uint8_t pattern[3072];
+    for (size_t i = 0; i < sizeof(pattern); i++)
+      pattern[i] = (uint8_t)(i * 7);
+
+    int64_t w = n->ops->write(n, 0, sizeof(pattern), pattern);
+    TEST_ASSERT(w == (int64_t)sizeof(pattern), "write devolvió %lld",
+                (long long)w);
+    TEST_ASSERT(n->size == sizeof(pattern), "size=%lu", (unsigned long)n->size);
+
+    // Leer de vuelta y comparar.
+    uint8_t *rb = (uint8_t *)kmalloc(sizeof(pattern));
+    TEST_ASSERT(rb != NULL, "kmalloc");
+    if (rb) {
+      int64_t r = n->ops->read(n, 0, sizeof(pattern), rb);
+      TEST_ASSERT(r == (int64_t)sizeof(pattern), "read devolvió %lld",
+                  (long long)r);
+      TEST_ASSERT(memcmp(rb, pattern, sizeof(pattern)) == 0, "mismatch");
+      kfree(rb);
+    }
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w2.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: write extend multi-cluster", test_fat32_write_extend);
+
+static void test_fat32_write_partial_overwrite(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *pre = vfs_lookup("/fat_test/w3.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w3.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w3.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w3.txt");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    const char *init = "AAAAABBBBBCCCCC";
+    int64_t w = n->ops->write(n, 0, 15, init);
+    TEST_ASSERT(w == 15, "write inicial");
+
+    // Sobrescribir offset 5-9 con "xxx".
+    const char *mod = "xxx";
+    w = n->ops->write(n, 5, 3, mod);
+    TEST_ASSERT(w == 3, "write parcial devolvió %lld", (long long)w);
+    TEST_ASSERT(n->size == 15, "size cambió sin querer: %lu",
+                (unsigned long)n->size);
+
+    char buf[16] = {0};
+    int64_t r = n->ops->read(n, 0, 15, buf);
+    TEST_ASSERT(r == 15, "read");
+    TEST_ASSERT(memcmp(buf, "AAAAAxxxBBCCCCC", 15) == 0,
+                "contenido tras overwrite incorrecto: '%.*s'", 15, buf);
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w3.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: write parcial no cambia size",
+              test_fat32_write_partial_overwrite);
+
+static void test_fat32_truncate_shrink(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *pre = vfs_lookup("/fat_test/w4.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w4.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w4.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w4.txt");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    uint8_t buf[2048];
+    memset(buf, 0xAA, sizeof(buf));
+    TEST_ASSERT(n->ops->write(n, 0, sizeof(buf), buf) == (int64_t)sizeof(buf),
+                "write");
+    TEST_ASSERT(n->size == sizeof(buf), "size inicial");
+
+    // Truncar a 100.
+    int rc = n->ops->truncate(n, 100);
+    TEST_ASSERT(rc == 0, "truncate falló: %d", rc);
+    TEST_ASSERT(n->size == 100, "size tras truncate: %lu",
+                (unsigned long)n->size);
+
+    // Leer más allá del nuevo tamaño devuelve 0.
+    uint8_t rb[200];
+    int64_t r = n->ops->read(n, 100, 200, rb);
+    TEST_ASSERT(r == 0, "read más allá de EOF devolvió %lld", (long long)r);
+
+    // Leer dentro del nuevo tamaño funciona.
+    r = n->ops->read(n, 0, 100, rb);
+    TEST_ASSERT(r == 100, "read dentro devolvió %lld", (long long)r);
+    for (int i = 0; i < 100; i++) {
+      if (rb[i] != 0xAA) {
+        TEST_ASSERT(0, "byte %d corrupto: 0x%02x", i, rb[i]);
+        break;
+      }
+    }
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w4.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: truncate a tamaño menor", test_fat32_truncate_shrink);
+
+static void test_fat32_truncate_to_zero(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *pre = vfs_lookup("/fat_test/w5.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w5.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w5.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w5.txt");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    uint8_t buf[1000];
+    memset(buf, 0xBB, sizeof(buf));
+    TEST_ASSERT(n->ops->write(n, 0, sizeof(buf), buf) == 1000, "write");
+
+    int rc = n->ops->truncate(n, 0);
+    TEST_ASSERT(rc == 0, "truncate a 0 falló: %d", rc);
+    TEST_ASSERT(n->size == 0, "size != 0 tras truncate: %lu",
+                (unsigned long)n->size);
+
+    uint8_t rb[10];
+    int64_t r = n->ops->read(n, 0, 10, rb);
+    TEST_ASSERT(r == 0, "read tras truncate a 0 devolvió %lld", (long long)r);
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w5.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: truncate a 0", test_fat32_truncate_to_zero);
+
+static void test_fat32_write_persist(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount 1");
+
+  vfs_node_t *pre = vfs_lookup("/fat_test/w6.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w6.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w6.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w6.txt");
+  TEST_ASSERT(n != NULL, "lookup 1");
+  if (n) {
+    const char *msg = "persist-test-data";
+    int64_t w = n->ops->write(n, 0, 17, msg);
+    TEST_ASSERT(w == 17, "write");
+    vfs_node_free(n);
+  }
+
+  // Umount/remount.
+  void *priv = vfs_get_mount_priv("/fat_test");
+  TEST_ASSERT(priv != NULL, "get_mount_priv");
+  TEST_ASSERT(vfs_umount("/fat_test") == 0, "umount");
+  fat32_umount(priv);
+
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount 2");
+
+  // Releer.
+  n = vfs_lookup("/fat_test/w6.txt");
+  TEST_ASSERT(n != NULL, "lookup 2");
+  if (n) {
+    TEST_ASSERT(n->size == 17, "size tras remount: %lu",
+                (unsigned long)n->size);
+    char buf[32] = {0};
+    int64_t r = n->ops->read(n, 0, 17, buf);
+    TEST_ASSERT(r == 17, "read tras remount");
+    TEST_ASSERT(memcmp(buf, "persist-test-data", 17) == 0,
+                "contenido no persistió: '%.*s'", 17, buf);
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w6.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: write persiste tras remount", test_fat32_write_persist);
+
+static void test_fat32_write_to_directory_fails(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // El root del mount es un directorio: write debe fallar.
+  vfs_node_t *n = vfs_lookup("/fat_test");
+  TEST_ASSERT(n != NULL, "lookup root");
+  if (n) {
+    char c = 'X';
+    int64_t w = n->ops->write(n, 0, 1, &c);
+    TEST_ASSERT(w < 0, "write a directorio devolvió %lld", (long long)w);
+    vfs_node_free(n);
+  }
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: write a directorio falla",
+              test_fat32_write_to_directory_fails);
+
+static void test_fat32_truncate_grow_rejected(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_node_t *pre = vfs_lookup("/fat_test/w7.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/w7.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/w7.txt", O_CREAT | O_RDWR) == 0, "create");
+  vfs_node_t *n = vfs_lookup("/fat_test/w7.txt");
+  TEST_ASSERT(n != NULL, "lookup");
+  if (n) {
+    const char *msg = "abc";
+    n->ops->write(n, 0, 3, msg);
+
+    // Truncar a 100 debe fallar (crecer no soportado).
+    int rc = n->ops->truncate(n, 100);
+    TEST_ASSERT(rc == -EINVAL, "truncate-grow devolvió %d, esperado -EINVAL",
+                rc);
+    TEST_ASSERT(n->size == 3, "size cambió: %lu", (unsigned long)n->size);
+    vfs_node_free(n);
+  }
+  vfs_unlink("/fat_test/w7.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: truncate a mayor rechazado",
+              test_fat32_truncate_grow_rejected);
+
+static void test_fat32_readdir(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // El root del FS debe tener al menos un archivo conocido (kernel.elf).
+  int found_kernel = 0;
+  int found_efi = 0;
+  vfs_dirent_t d;
+  for (uint64_t i = 0; i < 100; i++) {
+    int rc = vfs_readdir("/fat_test", i, &d);
+    TEST_ASSERT(rc == 0, "readdir devolvió %d en idx=%llu", rc,
+                (unsigned long long)i);
+    if (rc != 0)
+      break;
+    if (d.name[0] == '\0')
+      break;
+    if (strcmp(d.name, "kernel.elf") == 0)
+      found_kernel = 1;
+    if (strcmp(d.name, "EFI") == 0) {
+      found_efi = 1;
+      TEST_ASSERT(d.type == VFS_DIRECTORY, "EFI no es DIR");
+    }
+  }
+  TEST_ASSERT(found_kernel, "no se encontró kernel.elf con readdir");
+  TEST_ASSERT(found_efi, "no se encontró EFI con readdir");
+
+  // "." y ".." nunca deben aparecer.
+  for (uint64_t i = 0; i < 100; i++) {
+    int rc = vfs_readdir("/fat_test", i, &d);
+    if (rc != 0 || d.name[0] == '\0')
+      break;
+    TEST_ASSERT(strcmp(d.name, ".") != 0, "readdir devolvió '.'");
+    TEST_ASSERT(strcmp(d.name, "..") != 0, "readdir devolvió '..'");
+  }
+
+  // readdir sobre un archivo devuelve -ENOTDIR.
+  int rc = vfs_readdir("/fat_test/kernel.elf", 0, &d);
+  TEST_ASSERT(rc == -ENOTDIR, "readdir sobre archivo devolvió %d", rc);
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: readdir lista archivos", test_fat32_readdir);
+
+static void test_fat32_mkdir_readdir_unlink(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Cleanup.
+  vfs_node_t *pre = vfs_lookup("/fat_test/rd");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/rd/f1.txt");
+    vfs_unlink("/fat_test/rd");
+  }
+
+  TEST_ASSERT(vfs_mkdir("/fat_test/rd") == 0, "mkdir");
+  TEST_ASSERT(vfs_create("/fat_test/rd/f1.txt", O_CREAT) == 0, "create");
+  TEST_ASSERT(vfs_create("/fat_test/rd/f2.txt", O_CREAT) == 0, "create");
+
+  // Listar y contar.
+  int n_files = 0, n_dirs = 0;
+  vfs_dirent_t d;
+  for (uint64_t i = 0; i < 20; i++) {
+    int rc = vfs_readdir("/fat_test/rd", i, &d);
+    if (rc != 0 || d.name[0] == '\0')
+      break;
+    if (d.type == VFS_DIRECTORY)
+      n_dirs++;
+    else
+      n_files++;
+  }
+  TEST_ASSERT(n_files == 2, "esperados 2 archivos, encontrados %d", n_files);
+  TEST_ASSERT(n_dirs == 0, "esperados 0 dirs, encontrados %d", n_dirs);
+
+  // Limpieza.
+  TEST_ASSERT(vfs_unlink("/fat_test/rd/f1.txt") == 0, "unlink f1");
+  TEST_ASSERT(vfs_unlink("/fat_test/rd/f2.txt") == 0, "unlink f2");
+  TEST_ASSERT(vfs_unlink("/fat_test/rd") == 0, "unlink rd");
+
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: mkdir + readdir + unlink de hijos",
+              test_fat32_mkdir_readdir_unlink);

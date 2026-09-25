@@ -68,4 +68,6 @@ int winsrv_has_window(window_t *win);
 
 void winsrv_cleanup_task(task_t *owner);
 
+int winsrv_set_icon(task_t *owner, int win_id, const char *path);
+
 #endif

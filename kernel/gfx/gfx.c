@@ -19,6 +19,50 @@ static inline int int_sqrt(int n) {
   return x;
 }
 
+// ---------------------------------------------------------------------------
+// [MEJORA] Anti-aliasing suave para bordes de esquinas redondeadas.
+//
+// La versión anterior usaba una rampa LINEAL de ~0.5px de ancho
+// (coverage = 128 - diff, corte duro en diff > 128), lo que en pantalla se
+// notaba como "escalones" (staircase) en los bordes redondeados, sobre todo
+// en radios pequeños como los de los botones de la taskbar.
+//
+// Esta versión usa un smoothstep clásico (3t² - 2t³) sobre una banda de
+// ~1px de ancho, que da una transición de opacidad mucho más suave y
+// "cara" sin tocar la geometría (mismo dist_fp/r_fp de siempre).
+//
+// dist_fp / r_fp están en fixed-point 8.8 (ver int_sqrt(... << 16) y
+// radius << 8 en las funciones de abajo). Ya se usa `float` en este mismo
+// archivo (ver gfx_draw_shadow), así que no introduce ningún requisito
+// nuevo de FPU/SSE.
+// ---------------------------------------------------------------------------
+static inline uint32_t smooth_edge_alpha(int dist_fp, int r_fp,
+                                         uint32_t base_alpha) {
+  float diff_px =
+      (float)(dist_fp - r_fp) / 256.0f; // distancia al borde, en píxeles
+  if (diff_px >= 1.0f)
+    return 0; // claramente fuera
+  if (diff_px <= -1.0f)
+    return base_alpha; // claramente dentro
+
+  float t = (1.0f - diff_px) * 0.5f;   // 0 (fuera) .. 1 (dentro)
+  float s = t * t * (3.0f - 2.0f * t); // smoothstep
+  return (uint32_t)(base_alpha * s);
+}
+
+// Igual que arriba pero para un ANILLO (borde), donde la banda de alpha
+// máximo está centrada en dist == radio y se desvanece a ambos lados.
+static inline uint32_t smooth_ring_alpha(int diff_fp, uint32_t base_alpha) {
+  const float half_width_px = 1.1f; // medio-ancho del borde, en píxeles
+  float diff_px = (float)diff_fp / 256.0f;
+  float adiff = (diff_px < 0.0f) ? -diff_px : diff_px;
+  if (adiff >= half_width_px)
+    return 0;
+  float t = 1.0f - (adiff / half_width_px);
+  float s = t * t * (3.0f - 2.0f * t);
+  return (uint32_t)(base_alpha * s);
+}
+
 // Función auxiliar de mezcla ponderada para la sombra
 static inline void gfx_blend_shadow_pixel(uint32_t *dst, int x, int y,
                                           int stride, uint32_t base_color,
@@ -151,16 +195,9 @@ void gfx_fill_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
 
       if (in_corner) {
         int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
-        int diff = dist_fp - r_fp;
-
-        if (diff > 128)
+        uint32_t alpha = smooth_edge_alpha(dist_fp, r_fp, base_alpha);
+        if (alpha == 0)
           continue;
-
-        uint32_t alpha = base_alpha;
-        if (diff > -128) {
-          int coverage = 128 - diff;
-          alpha = (base_alpha * coverage) >> 8;
-        }
         row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
       } else {
         row[px] = blend_pixel_fast(color, row[px]);
@@ -207,16 +244,9 @@ void gfx_fill_top_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
 
       if (in_corner) {
         int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
-        int diff = dist_fp - r_fp;
-
-        if (diff > 128)
+        uint32_t alpha = smooth_edge_alpha(dist_fp, r_fp, base_alpha);
+        if (alpha == 0)
           continue;
-
-        uint32_t alpha = base_alpha;
-        if (diff > -128) {
-          int coverage = 128 - diff;
-          alpha = (base_alpha * coverage) >> 8;
-        }
         row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
       } else {
         row[px] = blend_pixel_fast(color, row[px]);
@@ -284,13 +314,10 @@ void gfx_draw_rounded_border(uint32_t *dst, int dst_stride, rect_t clip,
       if (in_corner) {
         int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
         int diff = dist_fp - r_fp;
-
-        int abs_diff = (diff < 0) ? -diff : diff;
-        if (abs_diff <= 256) {
-          int coverage = 256 - abs_diff;
-          uint32_t alpha = (base_alpha * coverage) >> 8;
-          row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
-        }
+        uint32_t alpha = smooth_ring_alpha(diff, base_alpha);
+        if (alpha == 0)
+          continue;
+        row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
       } else {
         if (rx == 0 || rx == rect.w - 1 || ry == 0 || ry == rect.h - 1) {
           row[px] = blend_pixel_fast(color, row[px]);
@@ -305,10 +332,13 @@ void gfx_draw_shadow(uint32_t *dst, int dst_stride, rect_t clip,
   if (!dst || shadow_size <= 0)
     return;
 
-  // 4 capas optimizadas para máxima fluidez y suavidad visual
-  for (int i = shadow_size; i >= 4; i -= 5) {
+  // [MEJORA] Más capas (paso de 3 en vez de 5) para un degradado de sombra
+  // más suave y "caro" visualmente, con una curva de caída cuadrática en
+  // vez de lineal (se ve más parecido a una sombra real tipo Win11/macOS).
+  for (int i = shadow_size; i >= 3; i -= 3) {
     float progress = (float)i / (float)shadow_size;
-    uint8_t alpha = (uint8_t)(45 * (1.0f - progress));
+    float falloff = 1.0f - progress;
+    uint8_t alpha = (uint8_t)(42.0f * falloff * falloff + 6.0f * falloff);
     if (alpha == 0)
       continue;
 

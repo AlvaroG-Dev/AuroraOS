@@ -27,4 +27,20 @@ void ipi_send_all(uint8_t vector);
 void ipi_handler_resched(void);
 void ipi_handler_tlb(void);
 
+// [H3] TLB shootdown cross-CPU.
+//
+// Invalida el TLB en todos los CPUs online (local + IPI a los demás,
+// esperando sus acks):
+//   - addr != 0: invalida la página concreta (invlpg) en cada CPU.
+//   - addr == 0: flush completo del TLB (reload CR3) en cada CPU.
+//
+// Devuelve cuando todos los CPUs han hecho el ack. Sin APs activos
+// degenera en una invalidación local.
+//
+// IMPORTANTE: debe llamarse con IRQs HABILITADOS. La espera del ack
+// requiere atender las IPIs de otros CPUs que puedan estar haciendo
+// su propio shootdown; con IRQs off hay riesgo de deadlock entre dos
+// shootdowns concurrentes.
+void ipi_tlb_shootdown(uint64_t addr);
+
 #endif

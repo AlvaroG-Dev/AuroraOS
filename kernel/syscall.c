@@ -36,6 +36,15 @@ typedef struct {
   uint32_t task_id; // 0 = slot libre
 } kernel_service_t;
 
+// Estructura que userland usa para readdir. Debe coincidir con
+// `struct vfs_dirent` de kernel/vfs.h.
+typedef struct {
+  char name[128];
+  uint32_t type;
+  uint32_t _pad;
+  uint64_t size;
+} user_dirent_t;
+
 static kernel_service_t g_services[KERNEL_SERVICES_MAX];
 static spinlock_t g_services_lock;
 
@@ -387,7 +396,7 @@ static int64_t sys_mmap_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 }
 
 static int64_t sys_vm_debug_info_k(uint64_t a1, uint64_t a2, uint64_t a3,
-                                  uint64_t a4, uint64_t a5) {
+                                   uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
@@ -484,7 +493,7 @@ static int64_t sys_win_blit_k(uint64_t a1, uint64_t a2, uint64_t a3,
   // Para evitar overflow, comprobamos cada multiplicación con
   // __builtin_mul_overflow, que devuelve 1 si hay overflow.
   uint64_t rows = (uint64_t)args.src_y + (uint64_t)args.h; // src_y + h
-  if (rows == 0)  // underflow imposible: src_y >= 0, h > 0
+  if (rows == 0) // underflow imposible: src_y >= 0, h > 0
     return -EINVAL;
 
   uint64_t last_row_start;
@@ -503,8 +512,7 @@ static int64_t sys_win_blit_k(uint64_t a1, uint64_t a2, uint64_t a3,
   // last_pixel_offset es el offset en píxeles del último píxel + 1.
   // El tamaño en bytes es last_pixel_offset * sizeof(uint32_t).
   uint64_t size_bytes;
-  if (__builtin_mul_overflow(last_pixel_offset, sizeof(uint32_t),
-                             &size_bytes))
+  if (__builtin_mul_overflow(last_pixel_offset, sizeof(uint32_t), &size_bytes))
     return -EINVAL;
 
   // access_ok valida que el rango [pixels, pixels + size_bytes) está
@@ -580,6 +588,92 @@ static int64_t sys_get_service_id_k(uint64_t a1, uint64_t a2, uint64_t a3,
   return id ? (int64_t)id : -ENOENT;
 }
 
+static int64_t sys_readdir_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                             uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  if (!a1 || !a3)
+    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
+  if (n < 0)
+    return -EFAULT;
+  if (n == 0)
+    return -EINVAL;
+
+  if (!access_ok((void *)a3, sizeof(user_dirent_t)))
+    return -EFAULT;
+
+  vfs_dirent_t kout;
+  int rc = vfs_readdir(path, a2, &kout);
+  if (rc != 0)
+    return rc;
+
+  user_dirent_t uout;
+  size_t l = strlen(kout.name);
+  if (l >= sizeof(uout.name))
+    l = sizeof(uout.name) - 1;
+  for (size_t i = 0; i < l; i++)
+    uout.name[i] = kout.name[i];
+  uout.name[l] = '\0';
+  uout.type = kout.type;
+  uout._pad = 0;
+  uout.size = kout.size;
+
+  if (copy_to_user((void *)a3, &uout, sizeof(uout)) < 0)
+    return -EFAULT;
+
+  // Devolver 1 si hay entry, 0 si es el final.
+  return kout.name[0] ? 1 : 0;
+}
+
+static int64_t sys_mkdir_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!a1)
+    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
+  if (n < 0)
+    return -EFAULT;
+  if (n == 0)
+    return -EINVAL;
+  return vfs_mkdir(path);
+}
+
+static int64_t sys_unlink_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!a1)
+    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
+  if (n < 0)
+    return -EFAULT;
+  if (n == 0)
+    return -EINVAL;
+  return vfs_unlink(path);
+}
+
+static int64_t sys_win_set_icon_k(uint64_t a1, uint64_t a2, uint64_t a3,
+                                  uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  if (a2 == 0)
+    return -EINVAL;
+  return winsrv_set_icon(proc->task, (int)a1, (const char *)a2);
+}
+
 // ===========================================================================
 // Tabla de syscalls
 // ===========================================================================
@@ -610,6 +704,10 @@ static const syscall_entry_t syscall_table[] = {
     [SYS_WIN_REGISTER_CONSOLE] = {sys_win_register_console_k,
                                   "win_register_console"},
     [SYS_GET_SERVICE_ID] = {sys_get_service_id_k, "get_service_id"},
+    [SYS_READDIR] = {sys_readdir_k, "readdir"},
+    [SYS_MKDIR] = {sys_mkdir_k, "mkdir"},
+    [SYS_UNLINK] = {sys_unlink_k, "unlink"},
+    [SYS_WIN_SET_ICON] = {sys_win_set_icon_k, "win_set_icon"},
 };
 
 // ===========================================================================

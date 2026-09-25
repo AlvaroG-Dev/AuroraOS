@@ -594,6 +594,20 @@ int main(void) {
   }
   sys_print("SHELL: win >= 0");
 
+  // [FIX] Pedir al kernel que ponga el icono del terminal a la ventana.
+  // El kernel carga el BMP desde tarfs y lo cachea tanto para la barra
+  // de título como para el taskbar.
+  //
+  // Antes se ignoraba el valor de retorno: si el BMP no se encontraba en
+  // el tarfs (o no estaba empaquetado en el initrd), la ventana se
+  // quedaba con el icono por defecto SIN ningún aviso visible. Ahora se
+  // comprueba y se avisa por sys_print para poder depurarlo.
+  int icon_rc = sys_win_set_icon(win, "/system/icons/terminal-icon.bmp");
+  if (icon_rc < 0) {
+    sys_print("SHELL: sys_win_set_icon FALLO (system/icons/terminal-icon.bmp "
+              "no encontrado en tarfs?)");
+  }
+
   uint32_t *pixels = (uint32_t *)malloc(cw * ch * sizeof(uint32_t));
   if (!pixels) {
     puts("console: sin memoria");

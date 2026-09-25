@@ -30,5 +30,8 @@ char *kstrdup(const char *s);
 // Si s tiene menos de n bytes, copia hasta el NUL.
 char *kstrndup(const char *s, size_t n);
 
+uint64_t heap_vma_start(void);
+uint64_t heap_vma_end(void);
+
 // Debug: imprimir estado del heap por serial
 void heap_dump(void);

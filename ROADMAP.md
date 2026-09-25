@@ -30,29 +30,28 @@ La prioridad ahora debe pasar de "hacer que exista el subsistema" a **hacer que 
 Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas.
 
 ### 1.1 Auditoría profunda de memoria y paging
-- [ ] Revisar todas las APIs de paging para overflow, canonicalidad, permisos y rollback.
-- [ ] Auditar creación/destrucción de tablas intermedias.
-- [ ] Revisar correctamente los flags USER, WRITABLE, NX y páginas huge durante errores parciales.
-- [ ] Auditar PMM frente a mapas EFI malformados: tamaños, strides, límites y overflow.
-- [ ] Revisar fugas y dobles liberaciones en todas las rutas de error.
-- [ ] Añadir tests de fault injection donde sea útil.
+- [x] Revisar todas las APIs de paging para overflow, canonicalidad, permisos y rollback.
+- [x] Auditar creación/destrucción de tablas intermedias. (C1: paging_lock global)
+- [x] Revisar correctamente los flags USER, WRITABLE, NX y páginas huge durante errores parciales. (H2: split_huge_page conserva NX)
+- [x] Auditar PMM frente a mapas EFI malformados: tamaños, strides, límites y overflow.
+- [x] Revisar fugas y dobles liberaciones en todas las rutas de error. (H5: detección de doble free)
+- [x] Añadir tests de fault injection donde sea útil.
 
 ### 1.2 Auditoría SMP y concurrencia
-- [ ] Revisar todos los locks y su orden global.
-- [ ] Buscar deadlocks entre scheduler, VFS, winsrv, PMM y paging.
-- [ ] Auditar accesos a estado compartido sin lock.
-- [ ] Revisar IRQ/preemption contexts.
-- [ ] Revisar TLB shootdown y cambios de address space concurrentes.
-- [ ] Revisar lifecycle de task_t y process_t.
-- [ ] Revisar wait queues bajo carreras de wake/block/timeout.
-- [ ] Evaluar estructuras lock-free/per-CPU solo donde aporten una ventaja real.
-- [ ] Documentar invariantes importantes del scheduler y memoria.
+- [x] Revisar todos los locks y su orden global.
+- [x] Buscar deadlocks entre scheduler, VFS, winsrv, PMM y paging.
+- [x] Auditar accesos a estado compartido sin lock. (C3, C4)
+- [x] Revisar IRQ/preemption contexts.
+- [x] Revisar TLB shootdown y cambios de address space concurrentes. (H3)
+- [x] Revisar lifecycle de task_t y process_t.
+- [x] Revisar wait queues bajo carreras de wake/block/timeout. (C4)
+- [ ] Documentar invariantes importantes del scheduler y memoria. (parcial)
 
 ### 1.3 Testing y CI
-- [ ] Mantener regresiones para cada bug crítico corregido.
+- [x] Mantener regresiones para cada bug crítico corregido.
 - [ ] Ampliar la matriz de QEMU/CPU y configuraciones relevantes.
 - [ ] Añadir tests de stress de scheduler, memoria, IPC y VFS.
-- [ ] Añadir pruebas de errores y recursos agotados.
+- [x] Añadir pruebas de errores y recursos agotados. (doble free, remap, late free)
 - [ ] Evitar que los tests dependan accidentalmente del orden de ejecución.
 - [ ] Mejorar diagnósticos de CI cuando QEMU falle.
 
@@ -91,6 +90,15 @@ Objetivo: pasar de un sistema que carga un initrd a un sistema operativo que pue
 - [ ] Utilidades básicas: ls, mkdir, rm, cp, mv, pwd.
 - [ ] Persistir configuración y programas.
 - [ ] Boot desde un filesystem persistente cuando sea viable.
+
+Fase 2.3 — Loader debe evitar vfs_read_all para ELFs.
+process_load_with_ppid asume que el archivo cabe en un buffer contiguo del heap (16 MB). Funciona para apps pequeñas del initrd, pero cuando el root sea un FS persistente o un ELF grande, kmalloc fallará. Dos caminos:
+
+Chunked read: leer en bloques de, p. ej., 64 KB y pasarlos al ELF parser por streaming. Requiere refactorizar elf_load a un modelo incremental.
+
+mmap del archivo: mapear el ELF al address space del proceso directamente (FAT32 con mmap file-backed), y que elf_load recorra las secciones mapeadas. Es el modelo Linux.
+
+Opción 2 es la correcta a largo plazo. Opción 1 es un parche si hace falta cargar ELFs grandes pronto.
 
 ---
 

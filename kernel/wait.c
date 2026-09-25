@@ -84,10 +84,11 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     if (self->waiting_on == NULL) {
       self->wake_reason = 0;
       wq_add_locked(wq, self);
-      self->state = TASK_BLOCKED;
-      // [FIX timeout] Publicar el deadline para que el scheduler nos
-      // despierte si nadie lo hace antes.
-      self->wake_deadline = deadline;
+      // [C4] Publicación atómica de (state, wake_deadline) bajo
+      // sched_lock, para que sched_wake_expired (que lee ambos campos
+      // bajo el mismo lock) nunca vea una tarea BLOCKED con deadline
+      // aún sin escribir, ni al revés.
+      sched_set_blocked_deadline(self, deadline);
     }
 
     spin_unlock_irqrestore(&wq->lock, flags);
@@ -96,7 +97,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
 
     // [FIX timeout] Si despertamos por deadline, hay que limpiarlo
     // (sched_wake_expired ya lo hace, pero por si acaso).
-    self->wake_deadline = 0;
+    __atomic_store_n(&self->wake_deadline, 0, __ATOMIC_RELEASE);
 
     if (cond && cond(arg)) {
       if (self->waiting_on == wq) {

@@ -24,7 +24,13 @@ static void bdev_completion_cb(bio_t *bio) {
 
 // Helper común para bdev_read/bdev_write.
 // Devuelve 0 si OK, <0 si error. Asume validate_io ya hecho.
+// Helper común para bdev_read/bdev_write.
+// Devuelve 0 si OK, <0 si error. Asume validate_io ya hecho.
 static int bdev_submit_sync(bio_t *bio) {
+  // [DEBUG RBP] Capturar RBP al entrar.
+  uint64_t rbp_in;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_in));
+
   completion_t comp;
   completion_init(&comp);
 
@@ -34,11 +40,33 @@ static int bdev_submit_sync(bio_t *bio) {
 
   int rc = blk_submit(bio);
 
+  // [DEBUG RBP] Verificar que RBP no cambió tras blk_submit.
+  uint64_t rbp_post_submit;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_post_submit));
+  if (rbp_in != rbp_post_submit) {
+    LOG_ERR("[BSYNC] RBP cambió en blk_submit: %p -> %p", (void *)rbp_in,
+            (void *)rbp_post_submit);
+    __asm__ volatile("mov %0, %%rbp" : : "r"(rbp_in));
+  }
+
   // Si el driver es síncrono, rc == 0 o <0 (nunca -EINPROGRESS) y
   // bio_endio ya se llamó (o no hacía falta).
   if (rc == -EINPROGRESS) {
-    // El driver completará el bio más tarde.
+    // [DEBUG RBP] Capturar antes de esperar.
+    uint64_t rbp_before_wait;
+    __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_before_wait));
+
     wait_for_completion(&comp);
+
+    // [DEBUG RBP] Capturar después de esperar.
+    uint64_t rbp_after_wait;
+    __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_after_wait));
+    if (rbp_before_wait != rbp_after_wait) {
+      LOG_ERR("[BSYNC] RBP cambió en wait_for_completion: %p -> %p",
+              (void *)rbp_before_wait, (void *)rbp_after_wait);
+      // Restaurar para poder seguir.
+      __asm__ volatile("mov %0, %%rbp" : : "r"(rbp_before_wait));
+    }
     return bio->error;
   }
 
@@ -233,7 +261,24 @@ int bdev_read(block_device_t *bdev, uint64_t lba, uint32_t count, void *buf) {
       .next = NULL,
   };
 
-  return bdev_submit_sync(&bio);
+  // [DEBUG RBP] Capturar RBP justo antes de la llamada.
+  uint64_t rbp_before;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_before));
+
+  rc = bdev_submit_sync(&bio);
+
+  // [DEBUG RBP] Verificar que RBP no cambió durante la llamada.
+  uint64_t rbp_after;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_after));
+  if (rbp_before != rbp_after) {
+    LOG_ERR("[BDEV_READ] RBP cambió: %p -> %p (lba=%llu count=%u)",
+            (void *)rbp_before, (void *)rbp_after, (unsigned long long)lba,
+            count);
+    // Restaurar antes del leave, si no crasheamos en el próximo frame.
+    __asm__ volatile("mov %0, %%rbp" : : "r"(rbp_before));
+  }
+
+  return rc;
 }
 
 int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
@@ -259,7 +304,24 @@ int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
       .next = NULL,
   };
 
-  return bdev_submit_sync(&bio);
+  // [DEBUG RBP] Capturar RBP justo antes de la llamada.
+  uint64_t rbp_before;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_before));
+
+  rc = bdev_submit_sync(&bio);
+
+  // [DEBUG RBP] Verificar que RBP no cambió durante la llamada.
+  uint64_t rbp_after;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp_after));
+  if (rbp_before != rbp_after) {
+    LOG_ERR("[BDEV_WRITE] RBP cambió: %p -> %p (lba=%llu count=%u)",
+            (void *)rbp_before, (void *)rbp_after, (unsigned long long)lba,
+            count);
+    // Restaurar antes del leave.
+    __asm__ volatile("mov %0, %%rbp" : : "r"(rbp_before));
+  }
+
+  return rc;
 }
 
 int bdev_flush(block_device_t *bdev) {

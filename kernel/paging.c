@@ -1,8 +1,10 @@
 #include "paging.h"
 #include "cpu.h"
+#include "ipi.h"
 #include "klog.h"
 #include "pmm.h"
 #include "serial.h"
+#include "spinlock.h"
 #include "string.h"
 #include <stddef.h>
 
@@ -10,12 +12,17 @@
 static uint64_t *kernel_pml4 = NULL;
 int cpu_smap_enabled = 0;
 
+// [C1] Protege el walk + creación de tablas intermedias en paging_map_page_in
+// y la modificación de PTEs en paging_unmap_page_in. Orden de adquisición:
+//   paging_lock -> pmm_lock
+// (nunca al revés; pmm.c no llama a paging).
+static spinlock_t paging_lock;
+
 /* Test-only allocation fault injection. -1 disables it; 0 fails now. */
 static int paging_test_fail_alloc_after = -1;
 
 static inline int paging_is_canonical(uint64_t virt) {
-  return virt <= 0x00007FFFFFFFFFFFULL ||
-         virt >= 0xFFFF800000000000ULL;
+  return virt <= 0x00007FFFFFFFFFFFULL || virt >= 0xFFFF800000000000ULL;
 }
 
 void paging_test_set_alloc_fail_after(int successful_allocs) {
@@ -60,15 +67,19 @@ static void pat_init(void) {
 static uint64_t *split_huge_page(uint64_t *pd, uint64_t pd_idx) {
   uint64_t huge_entry = pd[pd_idx];
   uint64_t huge_phys_base = huge_entry & ~((uint64_t)0x1FFFFF);
-  uint64_t inherit_flags = (huge_entry & 0xFFF) & ~(PTE_HUGE | 0x080ULL);
+
+  // [H2] Conservar bits bajos (PRESENT/WRITABLE/USER/PWT/PCD/A/D/GLOBAL)
+  // Y el bit NX (bit 63), que antes se perdía al hacer & 0xFFF.
+  uint64_t inherit_low = (huge_entry & 0xFFF) & ~PTE_HUGE;
+  uint64_t inherit_high = huge_entry & PTE_NX;
 
   uint64_t *new_pt = alloc_page_table();
   if (!new_pt)
     return NULL;
 
   for (int i = 0; i < PAGE_ENTRIES; i++) {
-    new_pt[i] = (huge_phys_base + (uint64_t)i * PAGE_SIZE) |
-                (inherit_flags | PTE_PRESENT);
+    new_pt[i] = (huge_phys_base + (uint64_t)i * PAGE_SIZE) | inherit_low |
+                inherit_high | PTE_PRESENT;
   }
 
   uint64_t new_pt_phys = virt_to_phys(new_pt);
@@ -214,6 +225,7 @@ static void map_phys_window(uint64_t max_phys_addr) {
 }
 
 void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
+  spin_init(&paging_lock); // <-- NUEVO (antes de cualquier paging_map_page_in)
   kernel_pml4 = boot_pml4;
   uint64_t boot_pml4_phys = (uint64_t)boot_pml4;
 
@@ -393,6 +405,10 @@ void paging_invalidate_tlb(uint64_t virt) {
   __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
 }
 
+// [H3] Versión cross-CPU. Wrapper sobre ipi_tlb_shootdown para que los
+// llamantes de paging no tengan que saber de IPIs.
+void paging_invalidate_tlb_global(uint64_t virt) { ipi_tlb_shootdown(virt); }
+
 int vmm_alloc_pages(uint64_t vaddr, uint64_t num_pages, uint64_t flags) {
   if (num_pages == 0)
     return -1;
@@ -462,6 +478,9 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
   if ((flags & PTE_USER) && pml4_idx >= 256)
     return -1;
 
+  unsigned long lock_flags = spin_lock_irqsave(&paging_lock);
+  int ret = -1;
+
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
   uint64_t pt_idx = PT_INDEX(virt);
@@ -478,7 +497,7 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
   if (!(old_pml4 & PTE_PRESENT)) {
     uint64_t *new_pdpt = alloc_page_table();
     if (!new_pdpt)
-      return -1;
+      goto out;
     pml4[pml4_idx] = (virt_to_phys(new_pdpt) & PTE_FRAME) | intermediate_flags;
     created_pml4 = 1;
   } else {
@@ -497,7 +516,7 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
         pmm_free_page(pml4[pml4_idx] & PTE_FRAME);
         pml4[pml4_idx] = old_pml4;
       }
-      return -1;
+      goto out;
     }
     pdpt[pdpt_idx] = (virt_to_phys(new_pd) & PTE_FRAME) | intermediate_flags;
     created_pdpt = 1;
@@ -520,7 +539,7 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
         pmm_free_page(pml4[pml4_idx] & PTE_FRAME);
         pml4[pml4_idx] = old_pml4;
       }
-      return -1;
+      goto out;
     }
   }
 
@@ -535,7 +554,7 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
         pmm_free_page(pml4[pml4_idx] & PTE_FRAME);
         pml4[pml4_idx] = old_pml4;
       }
-      return -1;
+      goto out;
     }
     pd[pd_idx] = (virt_to_phys(new_pt) & PTE_FRAME) | intermediate_flags;
   } else {
@@ -546,36 +565,60 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
   }
   uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & PTE_FRAME);
 
+  // [H4] Avisar si estamos sobrescribiendo un mapeo existente con otra
+  // página física. Silencioso si es el mismo phys (idempotente) o si
+  // la PTE estaba vacía.
+  uint64_t old_entry = pt[pt_idx];
+  if ((old_entry & PTE_PRESENT) &&
+      ((old_entry & PTE_FRAME) != (phys & PTE_FRAME))) {
+    LOG_WARN("[PAGING] remap: virt=%p old_phys=%p new_phys=%p", (void *)virt,
+             (void *)(old_entry & PTE_FRAME), (void *)(phys & PTE_FRAME));
+  }
+
   pt[pt_idx] = (phys & PTE_FRAME) | (flags & (0xFFF | PTE_NX)) | PTE_PRESENT;
-  paging_invalidate_tlb(virt);
-  return 0;
+  ret = 0;
+
+out:
+  spin_unlock_irqrestore(&paging_lock, lock_flags);
+  if (ret == 0)
+    paging_invalidate_tlb(virt);
+  return ret;
 }
 
 int paging_unmap_page_in(uint64_t *pml4, uint64_t virt) {
   if (!pml4 || !paging_is_canonical(virt))
     return -1;
+
+  unsigned long lock_flags = spin_lock_irqsave(&paging_lock);
+  int ret = -1;
+
   uint64_t pml4_idx = PML4_INDEX(virt);
   uint64_t pdpt_idx = PDPT_INDEX(virt);
   uint64_t pd_idx = PD_INDEX(virt);
   uint64_t pt_idx = PT_INDEX(virt);
 
   if (!(pml4[pml4_idx] & PTE_PRESENT))
-    return -1;
+    goto out;
   uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & PTE_FRAME);
   if (!(pdpt[pdpt_idx] & PTE_PRESENT))
-    return -1;
+    goto out;
   uint64_t *pd = (uint64_t *)phys_to_virt(pdpt[pdpt_idx] & PTE_FRAME);
   if (!(pd[pd_idx] & PTE_PRESENT))
-    return -1;
+    goto out;
   if (pd[pd_idx] & PTE_HUGE)
-    return -1;
+    goto out;
   uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & PTE_FRAME);
   if (!(pt[pt_idx] & PTE_PRESENT))
-    return -1;
+    goto out;
 
   pt[pt_idx] = 0;
-  paging_invalidate_tlb(virt);
-  return 0;
+  ret = 0;
+
+out:
+  spin_unlock_irqrestore(&paging_lock, lock_flags);
+  if (ret == 0)
+    paging_invalidate_tlb(virt);
+  return ret;
 }
 
 uint64_t paging_get_phys_in(uint64_t *pml4, uint64_t virt) {

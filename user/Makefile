@@ -18,8 +18,12 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64 -Wl,-z,max-page-size=0x1000,-z,commo
 
 LIB_OBJS = crt0.o syscall.o lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
 
-APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow shell \
-       segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel win_blit_fault
+APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race \
+       mmap_race_worker vma_overlap vma_isolation vma_isolation_worker \
+       munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test \
+       sbrk_shrink calloc_overflow shell ls cat \
+       segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel \
+       win_blit_fault
 
 all: $(APPS)
 
@@ -194,6 +198,18 @@ win_blit_fault: apps/win_blit_fault/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp win_blit_fault ../sysroot/apps/
 
+ls: apps/ls/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/ls/main.c -o ls.o
+	$(LD) -o ls $(LIB_OBJS) ls.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp ls ../sysroot/apps/
+
+cat: apps/cat/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/cat/main.c -o cat.o
+	$(LD) -o cat $(LIB_OBJS) cat.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp cat ../sysroot/apps/
+	
 clean:
 	rm -f *.o lib/*.o
 	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow

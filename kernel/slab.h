@@ -51,6 +51,12 @@ int slab_is_slab_ptr(const void *ptr);
 // Tamaño usable del objeto (útil para krealloc). 0 si ptr no es SLAB.
 size_t slab_usable_size(const void *ptr);
 
+// [HARDENING] Límites del rango virtual del SLAB. Usados por sched.c
+// para validar que un puntero a task_t cae dentro del allocator antes
+// de escribir en él.
+uint64_t slab_vma_start(void);
+uint64_t slab_vma_end(void);
+
 // Debug
 void slab_dump_stats(void);
 

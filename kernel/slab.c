@@ -41,6 +41,15 @@ static uint64_t slab_top = SLAB_VMA;
 static spinlock_t slab_top_lock;
 static int slab_ready = 0;
 
+// [C5-fix] Lista global de slabs vacíos. Sus VAs siguen mapeadas (nunca
+// se llama a vmm_free_pages), así que un kfree tardío sobre un puntero
+// obsoleto puede leer hdr->magic sin fault. El header conserva
+// magic=SLAB_MAGIC y cache=último dueño; slab_free detecta el caso
+// "objeto ya libre" vía objs_free >= objs_total.
+//
+// Protegida por slab_top_lock.
+static slab_header_t *g_empty_slabs = NULL;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -112,25 +121,34 @@ void slab_init(void) {
 // ---------------------------------------------------------------------------
 // Se llama SIN el lock del cache cogido.
 static slab_header_t *slab_grow(slab_cache_t *c) {
-  // Reservar la dirección virtual y mapear una página.
-  // slab_top es global, hay que protegerlo.
+  slab_header_t *hdr;
+
   unsigned long tf = spin_lock_irqsave(&slab_top_lock);
 
-  // ¿Hay sitio entre SLAB_VMA y MMIO_MAP_BASE?
-  // MMIO_MAP_BASE = 0xFFFFC00000000000. Tenemos mucho hueco.
-  uint64_t vaddr = slab_top;
-  slab_top += PAGE_SIZE;
+  if (g_empty_slabs) {
+    // Reutilizar una VA ya mapeada de la lista global.
+    hdr = g_empty_slabs;
+    g_empty_slabs = hdr->next;
+    spin_unlock_irqrestore(&slab_top_lock, tf);
+  } else {
+    // No hay slabs vacíos: pedir VA+page nueva.
+    //
+    // [H6] slab_top es un bump pointer que NUNCA se reutiliza, ni
+    // siquiera en error. Si vmm_alloc_pages falla, la VA reservada se
+    // descarta: no es leak de memoria física (nunca se mapeó), solo
+    // de espacio virtual del rango SLAB, que es abundante.
+    uint64_t vaddr = slab_top;
+    slab_top += PAGE_SIZE;
+    spin_unlock_irqrestore(&slab_top_lock, tf);
 
-  spin_unlock_irqrestore(&slab_top_lock, tf);
-
-  if (vmm_alloc_pages(vaddr, 1, PTE_WRITABLE | PTE_NX) != 0) {
-    LOG_ERR("[SLAB] vmm_alloc_pages fallo en %p", (void *)vaddr);
-    return NULL;
+    if (vmm_alloc_pages(vaddr, 1, PTE_WRITABLE | PTE_NX) != 0) {
+      LOG_ERR("[SLAB] vmm_alloc_pages fallo en %p", (void *)vaddr);
+      return NULL;
+    }
+    hdr = (slab_header_t *)vaddr;
   }
 
-  slab_header_t *hdr = (slab_header_t *)vaddr;
   memset(hdr, 0, HEADER_SIZE);
-
   hdr->magic = SLAB_MAGIC;
   hdr->obj_size = (uint32_t)c->obj_size;
   hdr->objs_total = (uint16_t)c->objs_per_slab;
@@ -138,9 +156,6 @@ static slab_header_t *slab_grow(slab_cache_t *c) {
   hdr->cache = c;
   hdr->freelist = NULL;
 
-  // Construir la free list enlazando los objetos entre sí.
-  // Cada objeto libre guarda, en sus primeros 8 bytes, un puntero
-  // al siguiente objeto libre.
   uint8_t *base = (uint8_t *)hdr + HEADER_SIZE;
   for (size_t i = 0; i < c->objs_per_slab; i++) {
     void *obj = base + i * c->obj_size;
@@ -148,7 +163,6 @@ static slab_header_t *slab_grow(slab_cache_t *c) {
     hdr->freelist = obj;
   }
 
-  // Enlazar en la lista de slabs del cache.
   unsigned long cf = spin_lock_irqsave(&c->lock);
   hdr->next = c->slabs;
   hdr->prev = NULL;
@@ -239,18 +253,34 @@ void slab_free(void *ptr) {
 
   unsigned long flags = spin_lock_irqsave(&c->lock);
 
-  // Devolver el objeto a la freelist del slab.
+  // [C5-fix] Detectar kfree sobre un objeto ya libre. Es la firma de
+  // un puntero obsoleto (doble free, o free tras liberar el slab
+  // entero). Sin este chequeo, incrementaríamos objs_free por encima
+  // de objs_total y corromperíamos la contabilidad. No tocamos nada,
+  // solo rechazamos.
+  if (hdr->objs_free >= hdr->objs_total) {
+    LOG_ERR("[SLAB] kfree con objeto ya libre (slab vacío): %p", ptr);
+    spin_unlock_irqrestore(&c->lock, flags);
+    return;
+  }
+
   *(void **)ptr = hdr->freelist;
   hdr->freelist = ptr;
   hdr->objs_free++;
   if (c->used_count > 0)
     c->used_count--;
 
-  // ¿Está el slab completamente libre? Devolverlo al PMM.
-  // Pero solo si hay otros slabs en la lista (nunca liberar el último,
-  // porque podría dejar la cache sin memoria disponible).
+  // ¿Está el slab completamente libre? Desenlazarlo de c->slabs y
+  // empujarlo a la lista global de slabs vacíos.
+  //
+  // [C5-fix] NO llamar a vmm_free_pages aquí. Mantener la VA mapeada
+  // es lo que evita el #PF cuando un llamante con un puntero obsoleto
+  // lee hdr->magic. La página física se reutiliza vía slab_grow.
+  //
+  // El header NO se invalida (magic sigue a SLAB_MAGIC, cache sigue
+  // apuntando a c). La detección de late frees se hace con el chequeo
+  // objs_free >= objs_total de arriba.
   if (hdr->objs_free == hdr->objs_total && c->slabs_count > 1) {
-    // Desenlazar de la lista
     if (hdr->prev)
       hdr->prev->next = hdr->next;
     else
@@ -262,10 +292,12 @@ void slab_free(void *ptr) {
 
     spin_unlock_irqrestore(&c->lock, flags);
 
-    // Devolver la página al PMM. No hace falta tocar slab_top
-    // (es un bump pointer, no se reutiliza en esta versión simple).
-    uint64_t vaddr = (uint64_t)hdr;
-    vmm_free_pages(vaddr, 1);
+    unsigned long tf = spin_lock_irqsave(&slab_top_lock);
+    hdr->next = g_empty_slabs;
+    hdr->prev = NULL;
+    g_empty_slabs = hdr;
+    spin_unlock_irqrestore(&slab_top_lock, tf);
+
     return;
   }
 
@@ -286,7 +318,7 @@ size_t slab_usable_size(const void *ptr) {
   if (!slab_is_slab_ptr(ptr))
     return 0;
   slab_header_t *hdr = header_of((void *)ptr);
-  if (hdr->magic != SLAB_MAGIC)
+  if (hdr->magic != SLAB_MAGIC || hdr->cache == NULL)
     return 0;
   return hdr->obj_size;
 }
@@ -313,3 +345,6 @@ void slab_dump_stats(void) {
       spin_unlock_irqrestore(&c->lock, flags);
   }
 }
+
+uint64_t slab_vma_start(void) { return SLAB_VMA; }
+uint64_t slab_vma_end(void) { return slab_top; }

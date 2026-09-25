@@ -1,5 +1,6 @@
 #include "taskbar.h"
 #include "../heap.h"
+#include "../string.h"
 #include "font_aa.h"
 #include "font_manager.h"
 #include "rtc.h"
@@ -80,6 +81,19 @@ taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
           i++;
         }
         curr->label[i] = '\0';
+        // [FIX] Igual que abajo: si nos pasan un bmp_file, hay que
+        // decodificarlo YA en la cache, o el item se queda con
+        // has_icon_cache=0 e icon_bmp_node!=NULL (el estado "roto" que
+        // taskbar_render tenía que parchear en tiempo de render).
+        if (bmp_file) {
+          rect_t clip = {0, 0, 20, 20};
+          for (int i2 = 0; i2 < 20 * 20; i2++)
+            curr->icon_cache[i2] = 0;
+          bmp_draw_scaled(bmp_file, curr->icon_cache, 20, clip, 0, 0, 20, 20);
+          curr->has_icon_cache = 1;
+        } else {
+          curr->has_icon_cache = 0;
+        }
         return curr;
       }
       curr = curr->next;
@@ -417,6 +431,11 @@ taskbar_item_t *taskbar_add_item_custom_width(
   if (!item)
     return NULL;
 
+  // [FIX] kmalloc no zeroa. Sin esto, has_icon_cache/icon_bmp_node/icon_cache
+  // arrancan con basura del heap y taskbar_render elige un branch al azar
+  // entre "blit de basura", "draw BMP aleatorio" o "no dibujar".
+  memset(item, 0, sizeof(*item));
+
   item->id = next_item_id++;
   item->type = type;
   item->icon_color = color;
@@ -534,8 +553,27 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
       if (layout.has_label && layout.label_w > 0)
         content_x += TASKBAR_CONTENT_GAP;
     } else if (curr->icon_bmp_node) {
-      bmp_draw_scaled(curr->icon_bmp_node, dst, stride, clip, content_x,
-                      center_y - 10, 20, 20);
+      // [FIX PRINCIPAL] Antes se llamaba a bmp_draw_scaled directamente
+      // sobre "dst" (el backbuffer ya compuesto con el fondo de la
+      // pastilla redondeada). bmp_draw_scaled no garantiza mezcla alfa
+      // correcta contra lo que ya hay pintado debajo -> el icono salía
+      // con un recuadro/artefacto en vez de fundirse con el fondo, y
+      // además se recalculaba en CADA frame en vez de una sola vez.
+      //
+      // Ahora: decodificamos a un buffer local 20x20 (igual que hace
+      // taskbar_add_item_bmp normalmente) y componemos con gfx_bit_blat,
+      // que sí hace blending correcto (blend_pixel_fast) igual que el
+      // resto de iconos de la barra. Además dejamos el item "curado"
+      // (has_icon_cache=1) para que los siguientes frames usen la vía
+      // rápida de arriba sin volver a decodificar el BMP.
+      rect_t icon_clip = {0, 0, 20, 20};
+      for (int i = 0; i < 20 * 20; i++)
+        curr->icon_cache[i] = 0;
+      bmp_draw_scaled(curr->icon_bmp_node, curr->icon_cache, 20, icon_clip, 0,
+                      0, 20, 20);
+      curr->has_icon_cache = 1;
+      gfx_bit_blat(dst, stride, curr->icon_cache, 20, clip, content_x,
+                   center_y - 10, 20, 20);
       content_x += 20;
       if (layout.has_label && layout.label_w > 0)
         content_x += TASKBAR_CONTENT_GAP;
