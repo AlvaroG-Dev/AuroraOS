@@ -551,9 +551,18 @@ int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
   window_t *win = e->win;
   spin_unlock_irqrestore(&winsrv_lock, flags);
 
-  // win_set_icon_bmp actualiza win->icon_cache, win->icon_bmp_node y
-  // (tras el fix de abajo) el taskbar_item.
+  LOG_INFO("[WINSRV] set_icon: encontrado '%s' (%llu bytes, first=%02x %02x)",
+           node->name, (unsigned long long)node->size,
+           node->size > 0 ? node->data[0] : 0,
+           node->size > 1 ? node->data[1] : 0);
+
   win_set_icon_bmp(win, node);
+
+  if (!win->has_icon_cache) {
+    LOG_ERR("[WINSRV] set_icon: '%s' no pudo decodificarse como BMP",
+            node->name);
+    return -EINVAL;
+  }
 
   return 0;
 }
