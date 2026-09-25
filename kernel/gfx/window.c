@@ -70,7 +70,6 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
     }
 
     if (win->taskbar_item) {
-      rect_t clip20 = {0, 0, 20, 20};
       for (int i = 0; i < 20 * 20; i++)
         win->taskbar_item->icon_cache[i] = 0;
       int rc20 = bmp_draw_icon_scaled(bmp_file, win->taskbar_item->icon_cache, 20, 20);
@@ -98,7 +97,6 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
   /* El icono también vive en la taskbar. Su cache se actualiza aquí,
    * después de crear la ventana, por lo que hay que invalidar explícitamente
    * la zona de taskbar para que no conserve el fallback del primer frame. */
-  compositor_invalidate_taskbar();
 }
 
 window_t *window_create(int x, int y, int w, int h, const char *title,
