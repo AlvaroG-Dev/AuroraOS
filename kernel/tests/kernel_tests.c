@@ -15,6 +15,7 @@
 #include "../ata_pio.h"
 #include "../atapi.h"
 #include "../block.h"
+#include "../bmp.h"
 #include "../cpu.h"
 #include "../elf.h"
 #include "../fat32.h"
@@ -31,6 +32,62 @@
 #include "../test.h"
 #include "../time.h"
 #include "../vfs.h"
+
+
+// ---------------------------------------------------------------------------
+// BMP: alpha y reducción de iconos
+// ---------------------------------------------------------------------------
+static void test_bmp_scaled_preserves_transparent_alpha(void) {
+  uint8_t raw[54 + 8 * 8 * 4];
+  memset(raw, 0, sizeof(raw));
+
+  bmp_file_header_t *fh = (bmp_file_header_t *)raw;
+  bmp_info_header_t *ih = (bmp_info_header_t *)(raw + sizeof(*fh));
+
+  fh->type = 0x4D42;
+  fh->size = sizeof(raw);
+  fh->offset = 54;
+
+  ih->size = 40;
+  ih->width = 8;
+  ih->height = 8;
+  ih->planes = 1;
+  ih->bpp = 32;
+  ih->compression = 0;
+  ih->image_size = 8 * 8 * 4;
+
+  // BMP bottom-up. Todas las muestras son transparentes salvo una,
+  // que es rojo opaco. Al reducir 8x8 -> 1x1, el resultado correcto
+  // conserva un rojo prácticamente puro con alpha muy bajo.
+  uint8_t *pixels = raw + 54;
+  pixels[3] = 0xFF;       // BGRA: B=0, G=0, R=0, A=255 por defecto?
+  pixels[0] = 0;
+  pixels[1] = 0;
+  pixels[2] = 0xFF;
+  pixels[3] = 0xFF;
+
+  tar_node_t node;
+  memset(&node, 0, sizeof(node));
+  node.data = raw;
+  node.size = sizeof(raw);
+
+  uint32_t dst = 0;
+  rect_t clip = {0, 0, 1, 1};
+  TEST_ASSERT(bmp_draw_scaled(&node, &dst, 1, clip, 0, 0, 1, 1) == 0,
+              "bmp_draw_scaled rechazó un BMP 32-bit válido");
+
+  uint32_t alpha = (dst >> 24) & 0xFF;
+  uint32_t red = (dst >> 16) & 0xFF;
+  uint32_t green = (dst >> 8) & 0xFF;
+  uint32_t blue = dst & 0xFF;
+
+  TEST_ASSERT(alpha >= 2 && alpha <= 5,
+              "alpha reducido incorrecto: %u", alpha);
+  TEST_ASSERT(red >= 240 && green == 0 && blue == 0,
+              "RGB del icono se contaminó al reducir: %08x", dst);
+}
+REGISTER_TEST("bmp: preserva alpha al escalar iconos",
+              test_bmp_scaled_preserves_transparent_alpha);
 
 // ---------------------------------------------------------------------------
 // Heap: kmalloc/kfree básicos
