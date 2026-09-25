@@ -36,5 +36,6 @@ int bmp_draw(tar_node_t *file, int dest_x, int dest_y);
 // Funciones extendidas para renderizar desde TarFS hacia búferes con Clipping y Alpha Blending
 int bmp_draw_to_buffer(tar_node_t *file, uint32_t *dst, int dst_stride, rect_t clip, int dest_x, int dest_y);
 int bmp_draw_scaled(tar_node_t *file, uint32_t *dst, int dst_stride, rect_t clip, int dest_x, int dest_y, int dest_w, int dest_h);
+int bmp_draw_icon_scaled(tar_node_t *file, uint32_t *dst, int dst_w, int dst_h);
 
 #endif
