@@ -59,8 +59,6 @@ void win_set_icon_bmp(window_t *win, tar_node_t *bmp_file) {
       win->taskbar_item->has_icon_cache = 0;
     }
   } else {
-    rect_t clip18 = {0, 0, 18, 18};
-    (void)clip18;
     for (int i = 0; i < 18 * 18; i++)
       win->icon_cache[i] = 0;
     int rc18 = bmp_draw_icon_scaled(bmp_file, win->icon_cache, 18, 18);
