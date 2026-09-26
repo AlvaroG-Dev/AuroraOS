@@ -96,7 +96,7 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
 
   uint64_t bitmap_phys = 0;
   int bitmap_found = 0;
-  for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
+  for (uint64_t i = 0; i <= memmap_size - memmap_desc_size; i += memmap_desc_size) {
     uint32_t type = *(uint32_t *)(ptr + i + 0);
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
@@ -136,7 +136,7 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
   memset(bitmap, 0xFF, bitmap_size_bytes);
   used_blocks = max_blocks;
 
-  for (uint64_t i = 0; i < memmap_size; i += memmap_desc_size) {
+  for (uint64_t i = 0; i <= memmap_size - memmap_desc_size; i += memmap_desc_size) {
     uint32_t type = *(uint32_t *)(ptr + i + 0);
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
