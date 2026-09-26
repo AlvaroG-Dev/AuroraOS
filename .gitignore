@@ -23,6 +23,7 @@ a.out
 *.bak
 *.swp
 *~
+*:Zone.Identifier
 
 # IDE
 .vscode/
