@@ -939,9 +939,17 @@ uint64_t syscall_handler_c(registers_t *regs) {
     return err(ENOSYS);
   }
 
-  // [SIG] Aplica señales pendientes antes de volver a userland.
+  // [SIG] Entrega señales ya pendientes antes de ejecutar el syscall.
   // Si la acción es fatal, no retorna.
   signal_check_pending();
 
-  return (uint64_t)syscall_table[num].fn(arg1, arg2, arg3, arg4, arg5);
+  uint64_t ret = (uint64_t)syscall_table[num].fn(arg1, arg2, arg3, arg4, arg5);
+
+  // Una señal puede llegar mientras el syscall está bloqueado. En ese caso
+  // wait_queue_interrupt_task() despierta al proceso, pero la señal sigue
+  // pendiente; comprobar aquí garantiza que SIGKILL y otras señales fatales
+  // no puedan devolver al proceso a Ring 3 sin ser entregadas.
+  signal_check_pending();
+
+  return ret;
 }
