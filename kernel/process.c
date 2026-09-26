@@ -28,6 +28,13 @@ static process_t *process_list = NULL;
 static spinlock_t process_lock; // ← [P0.1] nuevo
 static uint64_t next_user_vaddr = 0x0000000000400000ULL;
 
+// Reader ELF sobre un vfs_node_t ya resuelto. No toca fds ni offset de
+// fichero: usa directamente node->ops->read(node, offset, ...). El nodo
+// se mantiene vivo por el llamante durante toda la carga.
+struct elf_vfs_ctx {
+  vfs_node_t *node;
+};
+
 void process_init(void) { // ← [P0.1] llamar desde el boot
   spin_init(&process_lock);
 }
@@ -38,6 +45,124 @@ process_t *process_current(void) {
   return t ? t->proc : NULL;
 }
 
+static int64_t elf_read_vfs(void *ctx, uint64_t offset, size_t size,
+                            void *buf) {
+  struct elf_vfs_ctx *c = (struct elf_vfs_ctx *)ctx;
+  if (!c->node || !c->node->ops || !c->node->ops->read)
+    return -1;
+  return c->node->ops->read(c->node, offset, size, buf);
+}
+
+// ---------------------------------------------------------------------------
+// [cwd] Inicializa proc->cwd a partir de `src`. Si `src` es NULL o vacío,
+// usa "/". Trunca si hace falta (no debería: cwd viene de otro proceso
+// o de la constante "/").
+// ---------------------------------------------------------------------------
+static void process_set_cwd(process_t *proc, const char *src) {
+  if (!proc)
+    return;
+  const char *s = (src && src[0]) ? src : "/";
+  size_t n = strlen(s);
+  if (n >= sizeof(proc->cwd))
+    n = sizeof(proc->cwd) - 1;
+  for (size_t i = 0; i < n; i++)
+    proc->cwd[i] = s[i];
+  proc->cwd[n] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+// [Fase 3.2] Construcción del arg block en el stack del hijo.
+//
+// Layout (de menor a mayor dirección, rsp apunta al primer campo):
+//
+//   [rsp + 0]              = argc        (uint64_t)
+//   [rsp + 8]              = argv[0]     (puntero a string en el mismo stack)
+//   ...
+//   [rsp + 8*argc]         = argv[argc-1]
+//   [rsp + 8*(argc+1)]     = NULL        (terminador de argv)
+//   [rsp + 8*(argc+2)]     = NULL        (terminador de envp, por ahora vacío)
+//   [rsp + str_off]        = "arg0\0arg1\0..."
+//
+// Convención System V (simplificada, sin envp real). crt0.asm lee argc
+// de [rsp] y argv de rsp+8.
+//
+// Devuelve el nuevo RSP o 0 en error.
+// ---------------------------------------------------------------------------
+static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
+                                const char *const *argv) {
+  if (argc < 0 || argc > PROCESS_ARGV_MAX)
+    return 0;
+  if (argc > 0 && !argv)
+    return 0;
+
+  // Calcular tamaño total de strings.
+  uint64_t strings_total = 0;
+  for (int i = 0; i < argc; i++) {
+    if (!argv[i])
+      return 0;
+    size_t n = strlen(argv[i]) + 1;
+    if (n > 4096)
+      return 0;
+    strings_total += n;
+  }
+  strings_total = (strings_total + 7) & ~7ULL;
+
+  // argc + argc punteros + NULL argv + NULL envp + strings.
+  uint64_t block = 8 + (uint64_t)argc * 8 + 8 + 8 + strings_total;
+  block = (block + 15) & ~15ULL; // alinear a 16 bytes
+
+  if (block > stack_top)
+    return 0;
+  uint64_t new_rsp = (stack_top - block) & ~0xFULL;
+
+  // Construir el bloque en un buffer temporal de kernel.
+  uint8_t *scratch = (uint8_t *)kmalloc(block);
+  if (!scratch)
+    return 0;
+  memset(scratch, 0, block);
+
+  *(uint64_t *)(scratch + 0) = (uint64_t)argc;
+
+  uint64_t str_off = 8 + (uint64_t)argc * 8 + 8 + 8;
+  for (int i = 0; i < argc; i++) {
+    size_t n = strlen(argv[i]) + 1;
+    memcpy(scratch + str_off, argv[i], n);
+    *(uint64_t *)(scratch + 8 + i * 8) = new_rsp + str_off;
+    str_off += n;
+  }
+  // argv terminator en offset 8 + argc*8  (ya es 0)
+  // envp terminator en offset 8 + (argc+1)*8  (ya es 0)
+
+  // Copiar al stack del hijo translateando VA->PA.
+  uint64_t va = new_rsp;
+  uint64_t src = 0;
+  while (src < block) {
+    uint64_t page_va = va & ~0xFFFULL;
+    uint64_t page_off = va & 0xFFFULL;
+    uint64_t avail = PAGE_SIZE - page_off;
+    uint64_t chunk = block - src;
+    if (chunk > avail)
+      chunk = avail;
+
+    uint64_t phys = paging_get_phys_in(pml4, page_va);
+    if (!phys) {
+      LOG_ERR("[PROC] setup_arg_block: VA %p sin mapear", (void *)page_va);
+      kfree(scratch);
+      return 0;
+    }
+    memcpy((uint8_t *)phys_to_virt(phys) + page_off, scratch + src, chunk);
+    va += chunk;
+    src += chunk;
+  }
+
+  kfree(scratch);
+  return new_rsp;
+}
+
+// ---------------------------------------------------------------------------
+// Spawn desde un buffer ELF contiguo (path clásico, sin argv ni cwd
+// heredado). Se mantiene para tests y para futuros exec().
+// ---------------------------------------------------------------------------
 static process_t *process_spawn_with_ppid(const char *name,
                                           const void *elf_data, size_t elf_size,
                                           uint32_t ppid) {
@@ -59,12 +184,6 @@ static process_t *process_spawn_with_ppid(const char *name,
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
   // 2. Reservar un rango de direcciones virtuales para el ELF.
-  //
-  // __sync_fetch_and_add es atómico: dos process_spawn concurrentes
-  // en distintas CPUs obtienen rangos disjuntos. Si elf_load falla
-  // después, perdemos 2 MB de espacio virtual (fuga despreciable
-  // frente a los 128 TB disponibles). No merece la pena complicar
-  // el código para recuperarlo.
   uint64_t load_base = __sync_fetch_and_add(&next_user_vaddr, 0x200000ULL);
 
   // 3. Cargar ELF
@@ -118,8 +237,6 @@ static process_t *process_spawn_with_ppid(const char *name,
   }
 
   proc->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
-  // El PPID se fija antes de publicar la tarea. El hijo no puede quedar
-  // runnable con una relación padre incorrecta.
   proc->ppid = ppid;
   proc->exit_code = 0;
   proc->is_zombie = 0;
@@ -131,9 +248,6 @@ static process_t *process_spawn_with_ppid(const char *name,
   }
   proc->name[i] = '\0';
   proc->task = task;
-  // process_t mantiene una referencia propia al task_t. El scheduler posee
-  // la referencia inicial; esta segunda referencia impide que el reaper
-  // pueda liberar task_t mientras process_t siga exponiendo proc->task.
   task_get(task);
   proc->pml4_phys = pml4_phys;
   proc->load_base = load_base;
@@ -148,11 +262,9 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
 
-  // The ELF VMA must describe the addresses actually occupied by PT_LOAD
-  // segments. ET_EXEC images use their fixed p_vaddr (normally 0x400000),
-  // while ET_DYN images are relocated by load_base. Using load_base
-  // unconditionally would leave the real ELF pages outside the VMA and
-  // could let mmap() place another VMA over the executable.
+  // [cwd] Este path no hereda cwd. Arranca en "/".
+  process_set_cwd(proc, "/");
+
   const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)elf_data;
   uint64_t elf_vma_start = ~0ULL;
   uint64_t elf_vma_end = 0;
@@ -197,9 +309,6 @@ static process_t *process_spawn_with_ppid(const char *name,
       !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
                   VMA_ELF)) {
     LOG_ERR("[PROC] No se pudo crear VMA ELF");
-    // task tiene dos referencias: la del creador y la que habría
-    // pertenecido a process_t. Como proc aún no se publica, hay que
-    // liberar ambas referencias en esta ruta de rollback.
     task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
@@ -211,8 +320,6 @@ static process_t *process_spawn_with_ppid(const char *name,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
     LOG_ERR("[PROC] No se pudo crear VMA stack");
     vma_destroy_all(proc);
-    // Igual que arriba: proc->task ya adquirió su referencia propia,
-    // pero el proceso aún no está publicado ni la tarea es runnable.
     task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
@@ -249,26 +356,241 @@ process_t *process_spawn(const char *name, const void *elf_data,
   return process_spawn_with_ppid(name, elf_data, elf_size, 0);
 }
 
-static process_t *process_load_with_ppid(const char *path, uint32_t ppid) {
-  // [FASE 2] Cargar a través del VFS en vez de tarfs_open directamente,
-  // para poder cargar ELFs desde FAT32 cuando esté disponible.
-  void *buf = NULL;
-  size_t size = 0;
-  int rc = vfs_read_all(path, &buf, &size);
-  if (rc != 0) {
-    LOG_ERR("[PROC] No se pudo leer '%s': %d", path, rc);
+// ---------------------------------------------------------------------------
+// [Fase 3.2] Spawn con reader streaming + argv + cwd heredado.
+// ---------------------------------------------------------------------------
+static process_t *process_spawn_streaming_with_ppid_args_cwd(
+    const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
+    int argc, const char *const *argv, const char *inherited_cwd,
+    uint32_t ppid) {
+  if (!read) {
+    LOG_ERR("[PROC] reader ELF nulo");
     return NULL;
   }
-  LOG_INFO("[PROC] Cargando archivo: %s (tamaño=%lu)", path,
-           (unsigned long)size);
 
-  process_t *p = process_spawn_with_ppid(path, buf, size, ppid);
-  kfree(buf);
+  // 1. Clonar PML4
+  uint64_t pml4_phys = paging_clone_kernel_space();
+  if (!pml4_phys) {
+    LOG_ERR("[PROC] Fallo al clonar PML4");
+    return NULL;
+  }
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+
+  // 2. Reservar rango de VA
+  uint64_t load_base = __sync_fetch_and_add(&next_user_vaddr, 0x200000ULL);
+
+  // 3. Cargar ELF por streaming
+  uint64_t entry = 0;
+  uint64_t elf_vma_start = ~0ULL;
+  uint64_t elf_vma_end = 0;
+  if (elf_load_streaming(read, read_ctx, file_size, pml4, load_base, &entry,
+                         &elf_vma_start, &elf_vma_end) != 0) {
+    LOG_ERR("[PROC] Fallo al cargar ELF (streaming)");
+    paging_free_user_space(pml4_phys);
+    return NULL;
+  }
+
+  // 4. Stack de usuario (zeroed)
+  uint64_t stack_base = USER_STACK_BASE;
+  uint64_t stack_top = stack_base + USER_STACK_SIZE;
+  LOG_INFO("[PROC] Mapeando stack de usuario en %p - %p", (void *)stack_base,
+           (void *)stack_top);
+
+  for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
+    uint64_t phys = pmm_alloc_page();
+    if (!phys) {
+      LOG_ERR("[PROC] Fallo al asignar página física para stack");
+      paging_free_user_space(pml4_phys);
+      return NULL;
+    }
+    memset(phys_to_virt(phys), 0, PAGE_SIZE);
+    if (paging_map_page_in(pml4, stack_base + off, phys,
+                           PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
+        0) {
+      pmm_free_page(phys);
+      LOG_ERR("[PROC] Fallo al mapear página de stack");
+      paging_free_user_space(pml4_phys);
+      return NULL;
+    }
+  }
+
+  // 4b. [Fase 3.2] Montar el arg block y obtener el user_rsp final.
+  uint64_t user_rsp = setup_arg_block(pml4, stack_top, argc, argv);
+  if (!user_rsp) {
+    LOG_ERR("[PROC] setup_arg_block falló");
+    paging_free_user_space(pml4_phys);
+    return NULL;
+  }
+
+  // 5. Tarea detenida (rsp apunta al arg block si hay argv).
+  task_t *task = sched_create_user_task_stopped((void (*)(void))entry, user_rsp,
+                                                pml4_phys);
+  if (!task) {
+    LOG_ERR("[PROC] Fallo al crear tarea");
+    paging_free_user_space(pml4_phys);
+    return NULL;
+  }
+
+  // 6. process_t
+  process_t *proc = (process_t *)kzalloc(sizeof(process_t));
+  if (!proc) {
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    LOG_ERR("[PROC] Error al asignar process_t");
+    return NULL;
+  }
+
+  proc->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
+  proc->ppid = ppid;
+  proc->exit_code = 0;
+  proc->is_zombie = 0;
+
+  size_t i = 0;
+  while (name[i] && i < sizeof(proc->name) - 1) {
+    proc->name[i] = name[i];
+    i++;
+  }
+  proc->name[i] = '\0';
+  proc->task = task;
+  task_get(task);
+  proc->pml4_phys = pml4_phys;
+  proc->load_base = load_base;
+  proc->heap_start = USER_HEAP_BASE;
+  proc->heap_end = USER_HEAP_BASE;
+  proc->heap_max = USER_HEAP_MAX;
+
+  proc->vma_list = NULL;
+  proc->stack_base = stack_base;
+  proc->stack_low = stack_base - MAX_STACK_GROWTH;
+  proc->stack_top = stack_top;
+  proc->stack_guard = proc->stack_low;
+  proc->stack_low += PAGE_SIZE;
+
+  // [cwd] Heredar del padre o "/".
+  process_set_cwd(proc, inherited_cwd);
+
+  // VMA ELF
+  if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
+      !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
+                  VMA_ELF)) {
+    LOG_ERR("[PROC] No se pudo crear VMA ELF (start=%p end=%p)",
+            (void *)elf_vma_start, (void *)elf_vma_end);
+    task_put(task);
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
+
+  if (!vma_create(proc, proc->stack_low, proc->stack_top,
+                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
+    LOG_ERR("[PROC] No se pudo crear VMA stack");
+    vma_destroy_all(proc);
+    task_put(task);
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
+
+  for (int f = 0; f < MAX_PROCESS_FDS; f++)
+    proc->fds[f] = NULL;
+  proc->fds[0] = vfs_create_stdio_fd(0);
+  proc->fds[1] = vfs_create_stdio_fd(1);
+  proc->fds[2] = vfs_create_stdio_fd(2);
+
+  wait_queue_init(&proc->child_wq);
+
+  task->proc = proc;
+
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  proc->next = process_list;
+  process_list = proc;
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  sched_publish_task(task);
+
+  LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, argc=%d, cwd='%s', streaming)",
+           name, proc->pid, argc, proc->cwd);
+  return proc;
+}
+
+// Wrapper con la firma antigua (sin cwd): arranca en "/".
+// Se mantiene para no romper llamantes existentes que aún no pasan cwd.
+static process_t *process_spawn_streaming_with_ppid_args(
+    const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
+    int argc, const char *const *argv, uint32_t ppid) {
+  return process_spawn_streaming_with_ppid_args_cwd(
+      name, read, read_ctx, file_size, argc, argv, "/", ppid);
+}
+
+// Wrapper sin argv: mantiene el ABI de las llamadas existentes.
+static process_t *process_spawn_streaming_with_ppid(const char *name,
+                                                    elf_read_fn read,
+                                                    void *read_ctx,
+                                                    uint64_t file_size,
+                                                    uint32_t ppid) {
+  return process_spawn_streaming_with_ppid_args_cwd(
+      name, read, read_ctx, file_size, 0, NULL, "/", ppid);
+}
+
+// ---------------------------------------------------------------------------
+// Carga desde VFS con/sin argv, y con/sin cwd heredado.
+// ---------------------------------------------------------------------------
+static process_t *process_load_with_ppid_args_cwd(const char *path, int argc,
+                                                  const char *const *argv,
+                                                  const char *inherited_cwd,
+                                                  uint32_t ppid) {
+  vfs_node_t *node = vfs_lookup(path);
+  if (!node) {
+    LOG_ERR("[PROC] No se pudo abrir '%s'", path);
+    return NULL;
+  }
+  if (node->flags & VFS_DIRECTORY) {
+    vfs_node_free(node);
+    LOG_ERR("[PROC] '%s' es un directorio", path);
+    return NULL;
+  }
+  if (!node->ops || !node->ops->read) {
+    vfs_node_free(node);
+    LOG_ERR("[PROC] '%s' no es legible", path);
+    return NULL;
+  }
+
+  struct elf_vfs_ctx ctx = {.node = node};
+  uint64_t file_size = node->size;
+
+  LOG_INFO("[PROC] Cargando '%s' (%llu bytes, argc=%d, streaming)", path,
+           (unsigned long long)file_size, argc);
+
+  process_t *p = process_spawn_streaming_with_ppid_args_cwd(
+      path, elf_read_vfs, &ctx, file_size, argc, argv, inherited_cwd, ppid);
+
+  vfs_node_free(node);
   return p;
 }
 
+static process_t *process_load_with_ppid_args(const char *path, int argc,
+                                              const char *const *argv,
+                                              uint32_t ppid) {
+  return process_load_with_ppid_args_cwd(path, argc, argv, "/", ppid);
+}
+
+static process_t *process_load_with_ppid(const char *path, uint32_t ppid) {
+  return process_load_with_ppid_args(path, 0, NULL, ppid);
+}
+
 process_t *process_spawn_child(process_t *parent, const char *path) {
-  return process_load_with_ppid(path, parent ? parent->pid : 0);
+  const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
+  return process_load_with_ppid_args_cwd(path, 0, NULL, cwd,
+                                         parent ? parent->pid : 0);
+}
+
+process_t *process_spawn_child_args(process_t *parent, const char *path,
+                                    int argc, const char *const *argv) {
+  const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
+  return process_load_with_ppid_args_cwd(path, argc, argv, cwd,
+                                         parent ? parent->pid : 0);
 }
 
 process_t *process_load(const char *path) {
@@ -294,7 +616,6 @@ static bool has_matching_zombie(void *arg) {
   while (p) {
     if ((pid == -1 && p->ppid == parent->pid) ||
         (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
-      // [P0.6] Solo cuentan hijos MÍOS.
       if (p->is_zombie) {
         found = true;
         break;
@@ -325,10 +646,6 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
           (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
         has_matching_child = 1;
         if (p->is_zombie) {
-          // Reap atómico: sacar el proceso de process_list y adquirir la
-          // referencia del task mientras aún tenemos process_lock. Esto
-          // evita que otro waitpid() recoja el mismo zombie y garantiza que
-          // task_t siga vivo después de soltar el lock.
           found_zombie = p;
           zombie_task = p->task;
           if (zombie_task)
@@ -347,9 +664,6 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
     spin_unlock_irqrestore(&process_lock, flags);
 
     if (found_zombie) {
-      // found_zombie ya no está publicado en process_list. El proceso
-      // pertenece exclusivamente a este waitpid(), y zombie_task mantiene
-      // vivo el task_t aunque el scheduler haya retirado su referencia.
       uint32_t zpid = found_zombie->pid;
       int exit_code = found_zombie->exit_code;
 
@@ -359,19 +673,11 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         clac();
       }
 
-      // Cleanup fuera del lock. No se toca ningún task_t después de
-      // liberar la referencia adquirida arriba.
       if (zombie_task) {
-        // El zombie puede haber publicado su salida en una CPU mientras
-        // todavía está terminando process_exit_current() en otra. No se
-        // puede liberar su address space mientras el task siga ejecutando
-        // con ese CR3.
         while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
           __asm__ volatile("pause");
 
         zombie_task->proc = NULL;
-        // Liberar la referencia temporal de waitpid. La referencia propia
-        // del process_t se libera inmediatamente antes de destruir proc.
         task_put(zombie_task);
         zombie_task = NULL;
       }
@@ -403,9 +709,6 @@ void process_exit(process_t *proc, int exit_code) {
   if (!proc)
     return;
 
-  // El proceso NO se hace visible como zombie hasta que su cleanup haya
-  // terminado. Además, la tarea actual debe quedar DEAD antes de publicar
-  // el zombie al padre.
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fds[f])
       vfs_close_for_proc(proc, f);
@@ -418,10 +721,6 @@ void process_exit(process_t *proc, int exit_code) {
   if (cur && cur == proc->task)
     cur->state = TASK_DEAD;
 
-  // Publicar exit_code + is_zombie bajo process_lock. waitpid() consulta
-  // ambos campos bajo el mismo lock; antes, is_zombie se escribía fuera
-  // de process_lock, creando una carrera SMP entre el hijo que termina y
-  // el padre que intenta observar/reapear el zombie.
   process_t *parent = NULL;
   unsigned long flags = spin_lock_irqsave(&process_lock);
   proc->exit_code = exit_code;
@@ -437,8 +736,6 @@ void process_exit(process_t *proc, int exit_code) {
   }
   spin_unlock_irqrestore(&process_lock, flags);
 
-  // El padre solo puede observar/reapear el zombie después de que la
-  // publicación anterior haya quedado ordenada por process_lock.
   if (parent)
     wake_up_all(&parent->child_wq);
 }
@@ -451,12 +748,9 @@ __attribute__((noreturn)) void process_exit_current(int exit_code) {
     process_exit(proc, exit_code);
 
   if (cur) {
-    // Marcar DEAD. on_cpu se pondrá a 0 cuando el scheduler cambie
-    // a otra tarea (en sched_tick).
     cur->state = TASK_DEAD;
   }
 
-  // Ceder y esperar a que el reaper nos libere.
   while (1) {
     sched_yield();
     __asm__ volatile("sti; hlt");
@@ -503,9 +797,6 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     return (void *)old_brk;
   }
 
-  // Shrinking the heap must release every page that is completely beyond
-  // the new break. A page containing new_brk remains mapped because the
-  // byte range below new_brk still belongs to the heap.
   uint64_t decr = (uint64_t)(-(increment + 1)) + 1;
   if (decr > (old_brk - proc->heap_start))
     return (void *)-1;

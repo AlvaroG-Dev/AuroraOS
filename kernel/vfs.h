@@ -69,6 +69,8 @@ typedef struct vfs_ops {
   //   >=0                     → OK, *out rellenado
   //   <0                      → error
   int (*readdir)(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out);
+  int (*rename)(vfs_node_t *src_dir, const char *src_name, vfs_node_t *dst_dir,
+                const char *dst_name);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -157,12 +159,24 @@ int vfs_truncate(const char *path, uint64_t new_size);
 //   -ENOENT    si el path no existe
 int vfs_readdir(const char *path, uint64_t index, vfs_dirent_t *out);
 
+// [PR RENAME] Renombra o mueve `oldpath` a `newpath`.
+//   -ENOENT   src no existe
+//   -EEXIST   dst ya existe (no soportamos overwrite todavía)
+//   -EXDEV    src y dst en FS distintos
+//   -EINVAL   path inválido
+int vfs_rename(const char *oldpath, const char *newpath);
+
 // Libera un nodo devuelto por vfs_lookup. Llamar a ops->close y kfree.
 void vfs_node_free(vfs_node_t *node);
 
 // Lee el archivo entero en un buffer kmalloc'd. El llamante hace kfree.
 // Devuelve 0 si OK, negativo en error (incluido -EISDIR).
 int vfs_read_all(const char *path, void **out_buf, size_t *out_size);
+
+// [cwd] Resuelve `in` contra `cwd`. Si `in` es absoluto, ignora `cwd`.
+// Si es relativo, une `cwd + "/" + in` y normaliza. Resuelve "." y "..".
+// Devuelve 0 si OK, negativo si el path es inválido o no cabe.
+int vfs_resolve_path(const char *cwd, const char *in, char *out, size_t outlen);
 
 // --- FDs por proceso ---
 int vfs_open_for_proc(void *proc_ptr, const char *path, int flags);

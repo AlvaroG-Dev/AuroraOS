@@ -35,6 +35,11 @@
 #define SYS_MKDIR 27
 #define SYS_UNLINK 28
 #define SYS_WIN_SET_ICON 29
+#define SYS_CREATE 30
+#define SYS_SPAWN_ARGS 31
+#define SYS_RENAME 32
+#define SYS_CHDIR 33
+#define SYS_GETCWD 34
 
 typedef struct {
   uint64_t cr3_phys;
@@ -42,10 +47,6 @@ typedef struct {
   uint64_t phys;
 } vm_debug_info_t;
 
-// Valor de int_num en el frame de syscall. Como los syscalls no son
-// excepciones, usamos un valor imposible para que, si algún día
-// reutilizamos el mismo camino que las interrupciones, se pueda
-// distinguir.
 #define SYSCALL_INT_NUM 0xFFFFFFFFFFFFFFFFULL
 
 void syscall_init(void);

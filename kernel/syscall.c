@@ -19,6 +19,11 @@
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
+// [Fase 3.2] Límites de argv en SYS_SPAWN_ARGS. Deben coincidir con
+// PROCESS_ARGV_MAX de process.h.
+#define SPAWN_ARGS_MAX PROCESS_ARGV_MAX
+#define SPAWN_ARG_STR_MAX 128
+
 extern void syscall_entry(void);
 
 // ---------------------------------------------------------------------------
@@ -158,6 +163,25 @@ typedef struct {
 // Implementación de cada syscall
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// [cwd] Copia `uptr` desde userland y lo resuelve contra el cwd del
+// proceso actual. Devuelve 0 si OK, negativo si falla. `out` debe tener
+// al menos VFS_PATH_MAX bytes.
+// ---------------------------------------------------------------------------
+static int resolve_user_path(process_t *proc, const char *uptr, char *out,
+                             size_t outlen) {
+  if (!uptr || !out || outlen < 2)
+    return -EINVAL;
+  char raw[VFS_PATH_MAX];
+  long n = strncpy_from_user(raw, uptr, sizeof(raw));
+  if (n < 0)
+    return -EFAULT;
+  if (n == 0)
+    return -EINVAL;
+  const char *cwd = (proc && proc->cwd[0]) ? proc->cwd : "/";
+  return vfs_resolve_path(cwd, raw, out, outlen);
+}
+
 static int64_t sys_print_k(uint64_t arg1, uint64_t arg2, uint64_t arg3,
                            uint64_t arg4, uint64_t arg5) {
   (void)arg2;
@@ -213,12 +237,22 @@ static int64_t sys_open_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-  char path[256];
-  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
-  if (n < 0)
-    return -EFAULT;
-  if (n == 0)
-    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+
+  // [DEBUG] Traza para diagnosticar paths relativos. Cambia a LOG_INFO
+  // temporalmente si necesitas verlo, luego vuelve a LOG_TRACE.
+  {
+    char raw_dbg[VFS_PATH_MAX];
+    long n_dbg = strncpy_from_user(raw_dbg, (const char *)a1, sizeof(raw_dbg));
+    if (n_dbg < 0)
+      raw_dbg[0] = '?', raw_dbg[1] = '\0';
+    LOG_TRACE("[OPEN] raw='%s' cwd='%s' resolved='%s' rc=%d", raw_dbg,
+              proc->cwd, rc == 0 ? path : "(err)", rc);
+  }
+
+  if (rc != 0)
+    return rc;
   return vfs_open_for_proc(proc, path, (int)a2);
 }
 
@@ -344,12 +378,12 @@ static int64_t sys_spawn_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
-  char path[256];
-  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
-  if (n < 0)
+  if (!proc)
     return -EFAULT;
-  if (n == 0)
-    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (rc != 0)
+    return rc;
   process_t *child = process_spawn_child(proc, path);
   return child ? (int64_t)child->pid : -ENOENT;
 }
@@ -594,12 +628,13 @@ static int64_t sys_readdir_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a5;
   if (!a1 || !a3)
     return -EINVAL;
-  char path[VFS_PATH_MAX];
-  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
-  if (n < 0)
+  process_t *proc = process_current();
+  if (!proc)
     return -EFAULT;
-  if (n == 0)
-    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  int prc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (prc != 0)
+    return prc;
 
   if (!access_ok((void *)a3, sizeof(user_dirent_t)))
     return -EFAULT;
@@ -633,15 +668,30 @@ static int64_t sys_mkdir_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  if (!a1)
-    return -EINVAL;
-  char path[VFS_PATH_MAX];
-  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
-  if (n < 0)
+  process_t *proc = process_current();
+  if (!proc)
     return -EFAULT;
-  if (n == 0)
-    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (rc != 0)
+    return rc;
   return vfs_mkdir(path);
+}
+
+static int64_t sys_create_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return vfs_create(path, 0);
 }
 
 static int64_t sys_unlink_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -650,14 +700,13 @@ static int64_t sys_unlink_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  if (!a1)
-    return -EINVAL;
-  char path[VFS_PATH_MAX];
-  long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
-  if (n < 0)
+  process_t *proc = process_current();
+  if (!proc)
     return -EFAULT;
-  if (n == 0)
-    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (rc != 0)
+    return rc;
   return vfs_unlink(path);
 }
 
@@ -671,7 +720,124 @@ static int64_t sys_win_set_icon_k(uint64_t a1, uint64_t a2, uint64_t a3,
     return -EFAULT;
   if (a2 == 0)
     return -EINVAL;
-  return winsrv_set_icon(proc->task, (int)a1, (const char *)a2);
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a2, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return winsrv_set_icon(proc->task, (int)a1, path);
+}
+
+static int64_t sys_spawn_args_k(uint64_t a1, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !a1)
+    return -EFAULT;
+
+  char path[VFS_PATH_MAX];
+  int prc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (prc != 0)
+    return prc;
+
+  int argc = (int)a3;
+  if (argc < 0 || argc > SPAWN_ARGS_MAX)
+    return -EINVAL;
+
+  char storage[SPAWN_ARGS_MAX][SPAWN_ARG_STR_MAX];
+  const char *kargv[SPAWN_ARGS_MAX];
+
+  if (argc > 0) {
+    if (!a2)
+      return -EINVAL;
+    if (!access_ok((void *)a2, (size_t)argc * sizeof(uint64_t)))
+      return -EFAULT;
+    uint64_t uargv[SPAWN_ARGS_MAX];
+    if (copy_from_user(uargv, (void *)a2, (size_t)argc * sizeof(uint64_t)) < 0)
+      return -EFAULT;
+
+    for (int i = 0; i < argc; i++) {
+      if (!uargv[i])
+        return -EINVAL;
+      long m = strncpy_from_user(storage[i], (const char *)uargv[i],
+                                 SPAWN_ARG_STR_MAX);
+      if (m < 0)
+        return -EFAULT;
+      kargv[i] = storage[i];
+    }
+  }
+
+  process_t *child = process_spawn_child_args(proc, path, argc, kargv);
+  return child ? (int64_t)child->pid : -ENOENT;
+}
+
+static int64_t sys_rename_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char oldpath[VFS_PATH_MAX];
+  char newpath[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, oldpath, sizeof(oldpath));
+  if (rc != 0)
+    return rc;
+  rc = resolve_user_path(proc, (const char *)a2, newpath, sizeof(newpath));
+  if (rc != 0)
+    return rc;
+  return vfs_rename(oldpath, newpath);
+}
+
+static int64_t sys_chdir_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+
+  vfs_node_t *node = vfs_lookup(path);
+  if (!node)
+    return -ENOENT;
+  if (!(node->flags & VFS_DIRECTORY)) {
+    vfs_node_free(node);
+    return -ENOTDIR;
+  }
+  vfs_node_free(node);
+
+  size_t plen = strlen(path);
+  if (plen >= sizeof(proc->cwd))
+    return -ENAMETOOLONG;
+  for (size_t i = 0; i < plen; i++)
+    proc->cwd[i] = path[i];
+  proc->cwd[plen] = '\0';
+  return 0;
+}
+
+static int64_t sys_getcwd_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!a1 || a2 == 0)
+    return -EINVAL;
+  size_t len = strlen(proc->cwd) + 1;
+  if (len > (size_t)a2)
+    return -ERANGE;
+  if (copy_to_user((void *)a1, proc->cwd, len) < 0)
+    return -EFAULT;
+  return (int64_t)len;
 }
 
 // ===========================================================================
@@ -708,6 +874,11 @@ static const syscall_entry_t syscall_table[] = {
     [SYS_MKDIR] = {sys_mkdir_k, "mkdir"},
     [SYS_UNLINK] = {sys_unlink_k, "unlink"},
     [SYS_WIN_SET_ICON] = {sys_win_set_icon_k, "win_set_icon"},
+    [SYS_CREATE] = {sys_create_k, "create"},
+    [SYS_SPAWN_ARGS] = {sys_spawn_args_k, "spawn_args"},
+    [SYS_RENAME] = {sys_rename_k, "rename"},
+    [SYS_CHDIR] = {sys_chdir_k, "chdir"},
+    [SYS_GETCWD] = {sys_getcwd_k, "getcwd"},
 };
 
 // ===========================================================================

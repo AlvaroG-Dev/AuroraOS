@@ -9,15 +9,18 @@ extern sys_exit
 
 global _start
 _start:
-    ; En sistemas ELF64, no hay argumentos en argc/argv en este entorno bare-metal
-    ; Llamamos a main() sin argumentos
+    ; El kernel deja el arg block en el tope del stack:
+    ;   [rsp]   = argc
+    ;   [rsp+8] = argv[0]
+    ;   ...
+    mov rdi, [rsp]        ; argc
+    lea rsi, [rsp + 8]    ; argv
+
     call main
 
-    ; main retorna -> pasar su resultado a sys_exit
-    mov rdi, rax
+    mov rdi, rax          ; exit code
     call sys_exit
 
-    ; Nunca se llega aquí
 .hang:
     hlt
     jmp .hang

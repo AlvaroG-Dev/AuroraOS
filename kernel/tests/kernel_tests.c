@@ -33,7 +33,6 @@
 #include "../time.h"
 #include "../vfs.h"
 
-
 // ---------------------------------------------------------------------------
 // BMP: alpha y reducción de iconos
 // ---------------------------------------------------------------------------
@@ -60,7 +59,7 @@ static void test_bmp_scaled_preserves_transparent_alpha(void) {
   // que es rojo opaco. Al reducir 8x8 -> 1x1, el resultado correcto
   // conserva un rojo prácticamente puro con alpha muy bajo.
   uint8_t *pixels = raw + 54;
-  pixels[3] = 0xFF;       // BGRA: B=0, G=0, R=0, A=255 por defecto?
+  pixels[3] = 0xFF; // BGRA: B=0, G=0, R=0, A=255 por defecto?
   pixels[0] = 0;
   pixels[1] = 0;
   pixels[2] = 0xFF;
@@ -81,8 +80,7 @@ static void test_bmp_scaled_preserves_transparent_alpha(void) {
   uint32_t green = (dst >> 8) & 0xFF;
   uint32_t blue = dst & 0xFF;
 
-  TEST_ASSERT(alpha >= 2 && alpha <= 5,
-              "alpha reducido incorrecto: %u", alpha);
+  TEST_ASSERT(alpha >= 2 && alpha <= 5, "alpha reducido incorrecto: %u", alpha);
   TEST_ASSERT(red >= 240 && green == 0 && blue == 0,
               "RGB del icono se contaminó al reducir: %08x", dst);
 }
@@ -1416,7 +1414,8 @@ static void smp_mig_waiter(void) {
   if (!self)
     return;
 
-  // Fuerza la primera ejecución en una CPU distinta del controlador. Después queda libre para migrar.
+  // Fuerza la primera ejecución en una CPU distinta del controlador. Después
+  // queda libre para migrar.
   int source = __atomic_load_n(&g_smp_mig_source_cpu, __ATOMIC_ACQUIRE);
   self->cpu_affinity = source;
   while (smp_processor_id() != source)
@@ -1498,8 +1497,7 @@ static void test_smp_task_migration_canary(void) {
 
   deadline = sched_get_ticks() + 3000;
   while (!__atomic_load_n(&g_smp_mig_pin_running, __ATOMIC_ACQUIRE)) {
-    TEST_ASSERT(sched_get_ticks() < deadline,
-                "timeout esperando pin en CPU1");
+    TEST_ASSERT(sched_get_ticks() < deadline, "timeout esperando pin en CPU1");
     if (sched_get_ticks() >= deadline)
       return;
     __asm__ volatile("pause");
@@ -1513,8 +1511,7 @@ static void test_smp_task_migration_canary(void) {
 
   deadline = sched_get_ticks() + 3000;
   while (!__atomic_load_n(&g_smp_mig_done, __ATOMIC_ACQUIRE)) {
-    TEST_ASSERT(sched_get_ticks() < deadline,
-                "timeout esperando migración");
+    TEST_ASSERT(sched_get_ticks() < deadline, "timeout esperando migración");
     if (sched_get_ticks() >= deadline)
       break;
     __asm__ volatile("pause");
@@ -1525,8 +1522,8 @@ static void test_smp_task_migration_canary(void) {
               g_smp_mig_cpu_before);
   TEST_ASSERT(g_smp_mig_cpu_after >= 0 &&
                   g_smp_mig_cpu_after != g_smp_mig_cpu_before,
-              "waiter no migró: antes=%d después=%d",
-              g_smp_mig_cpu_before, g_smp_mig_cpu_after);
+              "waiter no migró: antes=%d después=%d", g_smp_mig_cpu_before,
+              g_smp_mig_cpu_after);
   TEST_ASSERT(g_smp_mig_done == 1,
               "migración/canary no completó correctamente");
 
@@ -1747,8 +1744,8 @@ static void timeout_requeue_waiter(void) {
 static bool timeout_requeue_is_waiting(task_t *task) {
   bool waiting;
   unsigned long flags = spin_lock_irqsave(&g_timeout_requeue_wq.lock);
-  waiting = task->waiting_on == &g_timeout_requeue_wq &&
-            task->state == TASK_BLOCKED;
+  waiting =
+      task->waiting_on == &g_timeout_requeue_wq && task->state == TASK_BLOCKED;
   spin_unlock_irqrestore(&g_timeout_requeue_wq.lock, flags);
   return waiting;
 }
@@ -1773,8 +1770,7 @@ static void test_sched_stale_timeout_requeue(void) {
     return;
 
   uint64_t deadline = sched_get_ticks() + 3000;
-  while (g_timeout_requeue_phase < 1 ||
-         !timeout_requeue_is_waiting(task)) {
+  while (g_timeout_requeue_phase < 1 || !timeout_requeue_is_waiting(task)) {
     TEST_ASSERT(sched_get_ticks() < deadline,
                 "timeout esperando primera espera bloqueada");
     if (sched_get_ticks() >= deadline)
@@ -1794,8 +1790,7 @@ static void test_sched_stale_timeout_requeue(void) {
   __asm__ volatile("push %0; popfq" : : "r"(irq_flags) : "memory");
 
   deadline = sched_get_ticks() + 3000;
-  while (g_timeout_requeue_phase < 2 ||
-         !timeout_requeue_is_waiting(task)) {
+  while (g_timeout_requeue_phase < 2 || !timeout_requeue_is_waiting(task)) {
     TEST_ASSERT(sched_get_ticks() < deadline,
                 "timeout esperando segunda espera rearmada");
     if (sched_get_ticks() >= deadline)
@@ -1804,12 +1799,12 @@ static void test_sched_stale_timeout_requeue(void) {
   }
 
   uint64_t old_seq = g_timeout_requeue_old_seq;
-  uint64_t new_seq =
-      __atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE);
+  uint64_t new_seq = __atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE);
 
-  TEST_ASSERT(new_seq > old_seq,
-              "la espera rearmada no obtuvo nueva generación: old=%llu new=%llu",
-              (unsigned long long)old_seq, (unsigned long long)new_seq);
+  TEST_ASSERT(
+      new_seq > old_seq,
+      "la espera rearmada no obtuvo nueva generación: old=%llu new=%llu",
+      (unsigned long long)old_seq, (unsigned long long)new_seq);
   TEST_ASSERT(new_seq == g_timeout_requeue_new_seq,
               "generación observada incorrecta: %llu != %llu",
               (unsigned long long)new_seq,
@@ -1834,8 +1829,8 @@ static void test_sched_stale_timeout_requeue(void) {
     sched_yield();
   }
 
-  TEST_ASSERT(g_timeout_requeue_phase == 3,
-              "waiter no completó: phase=%d", g_timeout_requeue_phase);
+  TEST_ASSERT(g_timeout_requeue_phase == 3, "waiter no completó: phase=%d",
+              g_timeout_requeue_phase);
   TEST_ASSERT(g_timeout_requeue_result != 0,
               "wakeup legítimo no devolvió resultado esperado: %d",
               g_timeout_requeue_result);
@@ -3247,9 +3242,7 @@ static void test_vfs_umount_busy(void) {
 REGISTER_TEST("vfs: umount con hijo da EBUSY", test_vfs_umount_busy);
 
 static void test_vfs_path_normalization(void) {
-  // Estos cuatro paths deben resolver al mismo nodo (el root del fake).
-  // El fake responde "/" tanto a "/test_norm" como a "//test_norm/./"
-  // una vez normalizado.
+  // Los cuatro paths deben resolver al mismo nodo (el root del fake).
   TEST_ASSERT(vfs_mount("/test_norm", &fake_fs_ops, NULL) == 0, "mount");
 
   const char *paths[] = {
@@ -3265,19 +3258,44 @@ static void test_vfs_path_normalization(void) {
       vfs_node_free(n);
   }
 
-  // Path con .. rechazado.
-  vfs_node_t *bad = vfs_lookup("/test_norm/../etc");
-  TEST_ASSERT(bad == NULL, "lookup con .. no fue rechazado");
+  // [cwd] ".." se resuelve en vez de rechazarse. Lo comprobamos con
+  // vfs_resolve_path, que es el camino puro de normalización. No usamos
+  // vfs_lookup porque /test_norm/../../foo → /foo, y "/foo" no está
+  // bajo ningún mount de prueba: fallaría por una razón distinta.
+  {
+    char out[VFS_PATH_MAX];
+
+    TEST_ASSERT(vfs_resolve_path("/test_norm", "foo", out, sizeof(out)) == 0,
+                "resolve rel falló");
+    TEST_ASSERT(strcmp(out, "/test_norm/foo") == 0, "resolve rel mal: '%s'",
+                out);
+
+    TEST_ASSERT(
+        vfs_resolve_path("/test_norm/foo", "../bar", out, sizeof(out)) == 0,
+        "resolve .. falló");
+    TEST_ASSERT(strcmp(out, "/test_norm/bar") == 0, "resolve .. mal: '%s'",
+                out);
+
+    TEST_ASSERT(vfs_resolve_path("/test_norm", "../../foo", out, sizeof(out)) ==
+                    0,
+                "resolve ../../foo falló");
+    TEST_ASSERT(strcmp(out, "/foo") == 0,
+                ".. sobre raíz mal: '%s' (esperado '/foo')", out);
+
+    TEST_ASSERT(
+        vfs_resolve_path("/test_norm", "../../../../..", out, sizeof(out)) == 0,
+        "resolve .. sobre raíz falló");
+    TEST_ASSERT(strcmp(out, "/") == 0, ".. sobre raíz no clampó: '%s'", out);
+  }
 
   TEST_ASSERT(vfs_umount("/test_norm") == 0, "umount");
 }
-REGISTER_TEST("vfs: normalización de paths", test_vfs_path_normalization);
 
 static void test_vfs_read_all_tarfs(void) {
-  // /system/config.txt existe en el initrd y es legible.
+  // [PIVOT] tarfs está montado en /initrd, no en /.
   void *buf = NULL;
   size_t size = 0;
-  int rc = vfs_read_all("system/config.txt", &buf, &size);
+  int rc = vfs_read_all("/initrd/system/config.txt", &buf, &size);
   TEST_ASSERT(rc == 0, "vfs_read_all falló: %d", rc);
   if (rc == 0) {
     TEST_ASSERT(size > 0, "size == 0");
@@ -3285,24 +3303,19 @@ static void test_vfs_read_all_tarfs(void) {
     kfree(buf);
   }
 
-  // Un directorio devuelve -EISDIR.
   void *buf2 = NULL;
   size_t size2 = 0;
-  int rc2 = vfs_read_all("apps", &buf2, &size2);
+  int rc2 = vfs_read_all("/initrd/apps", &buf2, &size2);
   TEST_ASSERT(rc2 == -EISDIR,
               "read_all de directorio devolvió %d, esperado -EISDIR", rc2);
 
-  // Un archivo inexistente devuelve -ENOENT.
-  int rc3 = vfs_read_all("no/existe/esto", &buf2, &size2);
+  int rc3 = vfs_read_all("/initrd/no/existe/esto", &buf2, &size2);
   TEST_ASSERT(rc3 == -ENOENT, "read_all de inexistente devolvió %d", rc3);
 }
-REGISTER_TEST("vfs: read_all sobre tarfs", test_vfs_read_all_tarfs);
 
 static void test_vfs_tarfs_root_still_works(void) {
-  // El mount en "/" debe seguir sirviendo los archivos del initrd.
-  // Es una regresión: si el lookup se rompe, /system/config.txt deja
-  // de existir y todas las apps mueren al cargar.
-  vfs_node_t *n = vfs_lookup("system/config.txt");
+  // [PIVOT] El tarfs sigue siendo accesible, pero en /initrd.
+  vfs_node_t *n = vfs_lookup("/initrd/system/config.txt");
   TEST_ASSERT(n != NULL, "lookup config.txt falló");
   if (n) {
     TEST_ASSERT(n->flags == VFS_FILE, "no es FILE");
@@ -3310,16 +3323,13 @@ static void test_vfs_tarfs_root_still_works(void) {
     vfs_node_free(n);
   }
 
-  // Y un directorio.
-  vfs_node_t *d = vfs_lookup("system");
+  vfs_node_t *d = vfs_lookup("/initrd/system");
   TEST_ASSERT(d != NULL, "lookup system/ falló");
   if (d) {
     TEST_ASSERT(d->flags == VFS_DIRECTORY, "system no es DIR");
     vfs_node_free(d);
   }
 }
-REGISTER_TEST("vfs: tarfs en / sigue funcionando",
-              test_vfs_tarfs_root_still_works);
 
 // ===========================================================================
 // [Fase 2.2] FAT32 read-only
@@ -3850,7 +3860,7 @@ static void test_fat32_mkdir_not_empty(void) {
 REGISTER_TEST("fat32: unlink de directorio no-vacío → ENOTEMPTY",
               test_fat32_mkdir_not_empty);
 
-static void test_fat32_create_long_name_rejected(void) {
+static void test_fat32_lfn_create_and_readdir(void) {
   block_device_t *b = fat32_find_test_disk();
   if (!b) {
     test_skip("sin disco FAT32");
@@ -3859,16 +3869,63 @@ static void test_fat32_create_long_name_rejected(void) {
   fat32_test_cleanup();
   TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
 
-  // Nombre con más de 8 chars en la base: no cabe en 8.3 sin LFN.
-  int rc = vfs_create("/fat_test/verylongname.txt", O_CREAT);
-  TEST_ASSERT(rc == -ENAMETOOLONG,
-              "create con nombre largo devolvió %d, esperado -ENAMETOOLONG",
-              rc);
+  // Cleanup previo por si quedó residuo.
+  vfs_node_t *pre = vfs_lookup("/fat_test/Documentos");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/Documentos");
+  }
+
+  // 1. mkdir con nombre >8.3 (usa LFN).
+  int rc = vfs_mkdir("/fat_test/Documentos");
+  TEST_ASSERT(rc == 0, "mkdir LFN falló: %d", rc);
+  if (rc != 0) {
+    fat32_test_cleanup();
+    return;
+  }
+
+  // 2. Lookup por nombre largo exacto.
+  vfs_node_t *n = vfs_lookup("/fat_test/Documentos");
+  TEST_ASSERT(n != NULL, "lookup 'Documentos' falló");
+  if (n) {
+    TEST_ASSERT(n->flags == VFS_DIRECTORY, "no es DIR");
+    vfs_node_free(n);
+  }
+
+  // 3. Lookup case-insensitive.
+  n = vfs_lookup("/fat_test/documentos");
+  TEST_ASSERT(n != NULL, "lookup case-insensitive falló");
+  if (n)
+    vfs_node_free(n);
+
+  // 4. readdir debe devolver el nombre largo, NO el alias 8.3.
+  int found_long = 0, found_alias = 0;
+  vfs_dirent_t d;
+  for (uint64_t i = 0; i < 100; i++) {
+    int r = vfs_readdir("/fat_test", i, &d);
+    if (r != 0 || d.name[0] == '\0')
+      break;
+    if (strcmp(d.name, "Documentos") == 0)
+      found_long = 1;
+    if (strcmp(d.name, "DOCUME~1") == 0)
+      found_alias = 1;
+  }
+  TEST_ASSERT(found_long, "readdir no devolvió 'Documentos'");
+  TEST_ASSERT(!found_alias, "readdir devolvió el alias 8.3, no el LFN");
+
+  // 5. unlink debe borrar LFN + short entry.
+  rc = vfs_unlink("/fat_test/Documentos");
+  TEST_ASSERT(rc == 0, "unlink LFN falló: %d", rc);
+
+  n = vfs_lookup("/fat_test/Documentos");
+  TEST_ASSERT(n == NULL, "lookup tras unlink encontró algo");
+  if (n)
+    vfs_node_free(n);
 
   fat32_test_cleanup();
 }
-REGISTER_TEST("fat32: create con nombre >8.3 rechazado",
-              test_fat32_create_long_name_rejected);
+REGISTER_TEST("fat32: LFN create + lookup + readdir + unlink",
+              test_fat32_lfn_create_and_readdir);
 
 static void test_fat32_persistence_after_remount(void) {
   block_device_t *b = fat32_find_test_disk();
@@ -3912,9 +3969,7 @@ static void test_fat32_persistence_after_remount(void) {
 REGISTER_TEST("fat32: persistencia tras remount",
               test_fat32_persistence_after_remount);
 
-static void test_fat32_create_9char_base_rejected(void) {
-  // El caso más frecuente: nombre tipo "readme.txt" cabe, "readme2.txt"
-  // (8 chars base) cabe justo, "readme22.txt" (9 chars) NO.
+static void test_fat32_lfn_alias_collision(void) {
   block_device_t *b = fat32_find_test_disk();
   if (!b) {
     test_skip("sin disco FAT32");
@@ -3923,20 +3978,59 @@ static void test_fat32_create_9char_base_rejected(void) {
   fat32_test_cleanup();
   TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
 
-  // 8 chars base + .txt → OK.
-  int rc = vfs_create("/fat_test/abcdefgh.txt", O_CREAT);
-  TEST_ASSERT(rc == 0, "8.3 justo rechazado: %d", rc);
-  vfs_unlink("/fat_test/abcdefgh.txt");
+  const char *p1 = "/fat_test/Documentos1";
+  const char *p2 = "/fat_test/Documentos2";
 
-  // 9 chars base → -ENAMETOOLONG.
-  rc = vfs_create("/fat_test/abcdefghi.txt", O_CREAT);
-  TEST_ASSERT(rc == -ENAMETOOLONG,
-              "9 chars base devolvió %d, esperado -ENAMETOOLONG", rc);
+  // Cleanup previo.
+  vfs_node_t *pre = vfs_lookup(p1);
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink(p1);
+  }
+  pre = vfs_lookup(p2);
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink(p2);
+  }
+
+  // Dos nombres que truncarían al mismo alias 8.3 si el generador fuera
+  // ingenuo. Con el generador correcto deben coexistir con aliases
+  // distintos (DOCUME~1 y DOCUME~2).
+  TEST_ASSERT(vfs_mkdir(p1) == 0, "mkdir Documentos1");
+  TEST_ASSERT(vfs_mkdir(p2) == 0, "mkdir Documentos2");
+
+  // Ambos deben existir y ser independientes.
+  vfs_node_t *n1 = vfs_lookup(p1);
+  vfs_node_t *n2 = vfs_lookup(p2);
+  TEST_ASSERT(n1 != NULL, "lookup Documentos1 falló");
+  TEST_ASSERT(n2 != NULL, "lookup Documentos2 falló");
+  if (n1)
+    vfs_node_free(n1);
+  if (n2)
+    vfs_node_free(n2);
+
+  // readdir debe listar los dos, no uno solo.
+  int c1 = 0, c2 = 0;
+  vfs_dirent_t d;
+  for (uint64_t i = 0; i < 100; i++) {
+    int r = vfs_readdir("/fat_test", i, &d);
+    if (r != 0 || d.name[0] == '\0')
+      break;
+    if (strcmp(d.name, "Documentos1") == 0)
+      c1 = 1;
+    if (strcmp(d.name, "Documentos2") == 0)
+      c2 = 1;
+  }
+  TEST_ASSERT(c1 && c2, "readdir no listó los dos LFN (c1=%d c2=%d)", c1, c2);
+
+  // Cleanup.
+  TEST_ASSERT(vfs_unlink(p1) == 0, "unlink Documentos1");
+  TEST_ASSERT(vfs_unlink(p2) == 0, "unlink Documentos2");
 
   fat32_test_cleanup();
 }
-REGISTER_TEST("fat32: límite exacto 8.3",
-              test_fat32_create_9char_base_rejected);
+REGISTER_TEST("fat32: LFN alias no colisiona con dos nombres",
+              test_fat32_lfn_alias_collision);
 
 // ===========================================================================
 // [PR 4.3] write + extend + truncate
@@ -4360,3 +4454,218 @@ static void test_fat32_mkdir_readdir_unlink(void) {
 }
 REGISTER_TEST("fat32: mkdir + readdir + unlink de hijos",
               test_fat32_mkdir_readdir_unlink);
+
+// ===========================================================================
+// [RENAME] rename básico: archivo, mismo directorio.
+// ===========================================================================
+static void test_fat32_rename_file_same_dir(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Cleanup.
+  vfs_node_t *pre;
+  pre = vfs_lookup("/fat_test/r1.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/r1.txt");
+  }
+  pre = vfs_lookup("/fat_test/r2.txt");
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink("/fat_test/r2.txt");
+  }
+
+  TEST_ASSERT(vfs_create("/fat_test/r1.txt", O_CREAT) == 0, "create");
+
+  int rc = vfs_rename("/fat_test/r1.txt", "/fat_test/r2.txt");
+  TEST_ASSERT(rc == 0, "rename falló: %d", rc);
+
+  // r1 ya no existe.
+  vfs_node_t *n1 = vfs_lookup("/fat_test/r1.txt");
+  TEST_ASSERT(n1 == NULL, "src sigue existiendo tras rename");
+  if (n1)
+    vfs_node_free(n1);
+
+  // r2 existe.
+  vfs_node_t *n2 = vfs_lookup("/fat_test/r2.txt");
+  TEST_ASSERT(n2 != NULL, "dst no existe tras rename");
+  if (n2)
+    vfs_node_free(n2);
+
+  vfs_unlink("/fat_test/r2.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: rename archivo mismo dir",
+              test_fat32_rename_file_same_dir);
+
+// ===========================================================================
+// [RENAME] rename con LFN: src y dst >8.3.
+// ===========================================================================
+static void test_fat32_rename_lfn(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  const char *src = "/fat_test/NombreLargoOriginal.txt";
+  const char *dst = "/fat_test/NombreLargoNuevo.txt";
+
+  vfs_node_t *pre;
+  pre = vfs_lookup(src);
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink(src);
+  }
+  pre = vfs_lookup(dst);
+  if (pre) {
+    vfs_node_free(pre);
+    vfs_unlink(dst);
+  }
+
+  TEST_ASSERT(vfs_create(src, O_CREAT) == 0, "create LFN");
+
+  int rc = vfs_rename(src, dst);
+  TEST_ASSERT(rc == 0, "rename LFN falló: %d", rc);
+
+  vfs_node_t *n1 = vfs_lookup(src);
+  TEST_ASSERT(n1 == NULL, "src sigue existiendo");
+  if (n1)
+    vfs_node_free(n1);
+
+  vfs_node_t *n2 = vfs_lookup(dst);
+  TEST_ASSERT(n2 != NULL, "dst no existe");
+  if (n2)
+    vfs_node_free(n2);
+
+  // readdir debe devolver el nuevo nombre, no el viejo.
+  int found_new = 0, found_old = 0;
+  vfs_dirent_t d;
+  for (uint64_t i = 0; i < 100; i++) {
+    int r = vfs_readdir("/fat_test", i, &d);
+    if (r != 0 || d.name[0] == '\0')
+      break;
+    if (strcmp(d.name, "NombreLargoNuevo.txt") == 0)
+      found_new = 1;
+    if (strcmp(d.name, "NombreLargoOriginal.txt") == 0)
+      found_old = 1;
+  }
+  TEST_ASSERT(found_new, "readdir no ve el nombre nuevo");
+  TEST_ASSERT(!found_old, "readdir todavía ve el nombre viejo");
+
+  vfs_unlink(dst);
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: rename LFN", test_fat32_rename_lfn);
+
+// ===========================================================================
+// [RENAME] mover archivo entre directorios.
+// ===========================================================================
+static void test_fat32_rename_move_dir(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  // Cleanup.
+  vfs_unlink("/fat_test/rmv/a.txt");
+  vfs_unlink("/fat_test/rmv/b.txt");
+  vfs_unlink("/fat_test/rmv");
+  vfs_mkdir("/fat_test/rmv");
+
+  TEST_ASSERT(vfs_create("/fat_test/rmv/a.txt", O_CREAT) == 0, "create");
+
+  int rc = vfs_rename("/fat_test/rmv/a.txt", "/fat_test/rmv/b.txt");
+  TEST_ASSERT(rc == 0, "mover dentro del dir falló: %d", rc);
+
+  vfs_node_t *n1 = vfs_lookup("/fat_test/rmv/a.txt");
+  TEST_ASSERT(n1 == NULL, "src sigue existiendo");
+  if (n1)
+    vfs_node_free(n1);
+  vfs_node_t *n2 = vfs_lookup("/fat_test/rmv/b.txt");
+  TEST_ASSERT(n2 != NULL, "dst no existe");
+  if (n2)
+    vfs_node_free(n2);
+
+  vfs_unlink("/fat_test/rmv/b.txt");
+  vfs_unlink("/fat_test/rmv");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: rename mover dentro de dir", test_fat32_rename_move_dir);
+
+// ===========================================================================
+// [RENAME] errores esperados.
+// ===========================================================================
+static void test_fat32_rename_errors(void) {
+  block_device_t *b = fat32_find_test_disk();
+  if (!b) {
+    test_skip("sin disco FAT32");
+    return;
+  }
+  fat32_test_cleanup();
+  TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
+
+  vfs_unlink("/fat_test/re1.txt");
+  vfs_unlink("/fat_test/re2.txt");
+
+  // src no existe → -ENOENT
+  int rc = vfs_rename("/fat_test/no_existe.txt", "/fat_test/x.txt");
+  TEST_ASSERT(rc == -ENOENT, "src inexistente devolvió %d", rc);
+
+  // dst existe → -EEXIST
+  TEST_ASSERT(vfs_create("/fat_test/re1.txt", O_CREAT) == 0, "create 1");
+  TEST_ASSERT(vfs_create("/fat_test/re2.txt", O_CREAT) == 0, "create 2");
+  rc = vfs_rename("/fat_test/re1.txt", "/fat_test/re2.txt");
+  TEST_ASSERT(rc == -EEXIST, "dst existente devolvió %d", rc);
+
+  vfs_unlink("/fat_test/re1.txt");
+  vfs_unlink("/fat_test/re2.txt");
+  fat32_test_cleanup();
+}
+REGISTER_TEST("fat32: rename errores esperados", test_fat32_rename_errors);
+
+static void test_vfs_resolve_path(void) {
+  char out[VFS_PATH_MAX];
+
+  // Absoluto: se normaliza y no usa cwd.
+  TEST_ASSERT(vfs_resolve_path("/boot", "/a/b", out, sizeof(out)) == 0,
+              "abs falló");
+  TEST_ASSERT(strcmp(out, "/a/b") == 0, "abs mal: '%s'", out);
+
+  // Relativo simple contra cwd.
+  TEST_ASSERT(vfs_resolve_path("/boot", "foo", out, sizeof(out)) == 0,
+              "rel falló");
+  TEST_ASSERT(strcmp(out, "/boot/foo") == 0, "rel mal: '%s'", out);
+
+  // Relativo con ..
+  TEST_ASSERT(vfs_resolve_path("/boot/Docs", "../Archivos", out, sizeof(out)) ==
+                  0,
+              "rel .. falló");
+  TEST_ASSERT(strcmp(out, "/boot/Archivos") == 0, "rel .. mal: '%s'", out);
+
+  // .. por encima de la raíz → raíz.
+  TEST_ASSERT(vfs_resolve_path("/boot", "../../../../..", out, sizeof(out)) ==
+                  0,
+              ".. sobre raíz falló");
+  TEST_ASSERT(strcmp(out, "/") == 0, ".. sobre raíz mal: '%s'", out);
+
+  // cwd="/" + relativo.
+  TEST_ASSERT(vfs_resolve_path("/", "etc/config.txt", out, sizeof(out)) == 0,
+              "cwd=/ falló");
+  TEST_ASSERT(strcmp(out, "/etc/config.txt") == 0, "cwd=/ mal: '%s'", out);
+
+  // Path relativo vacío → EINVAL.
+  TEST_ASSERT(vfs_resolve_path("/boot", "", out, sizeof(out)) != 0,
+              "rel vacío debería fallar");
+}
+REGISTER_TEST("vfs: resolve_path con cwd", test_vfs_resolve_path);

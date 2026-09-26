@@ -39,7 +39,7 @@ initrd.tar: sysroot user elf_malformed
 kernel: initrd.tar
 	$(MAKE) -C kernel
 
-image: bootloader kernel
+image: bootloader kernel user
 	mkdir -p esp/EFI/BOOT
 	cp bootloader/BOOTX64.EFI esp/EFI/BOOT/
 	cp kernel/kernel.elf esp/
@@ -47,6 +47,14 @@ image: bootloader kernel
 	mkfs.fat -F 32 aurora.img
 	mcopy -i aurora.img -s esp/EFI ::
 	mcopy -i aurora.img -s esp/kernel.elf ::
+	# [TEST] Copiar binarios userland al FS persistente para validar
+	# elf_load_streaming sobre FAT32. Nombres 8.3 hasta que haya LFN.
+	@if [ -f sysroot/apps/ls ]; then \
+		mcopy -i aurora.img sysroot/apps/ls ::/LS.ELF; \
+	fi
+	@if [ -f sysroot/apps/cat ]; then \
+		mcopy -i aurora.img sysroot/apps/cat ::/CAT.ELF; \
+	fi
 
 # ---------------------------------------------------------------------------
 # QEMU targets

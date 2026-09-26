@@ -33,6 +33,11 @@
 #define SYS_MKDIR 27
 #define SYS_UNLINK 28
 #define SYS_WIN_SET_ICON 29
+#define SYS_CREATE 30
+#define SYS_SPAWN_ARGS 31
+#define SYS_RENAME 32
+#define SYS_CHDIR 33
+#define SYS_GETCWD 34
 
 #define WNOHANG 1
 #define O_RDONLY 0x0000
@@ -225,6 +230,28 @@ static inline int sys_unlink(const char *path) {
 static inline int sys_win_set_icon(int win_id, const char *path) {
   return (int)syscall(SYS_WIN_SET_ICON, (uint64_t)win_id, (uint64_t)path, 0, 0,
                       0);
+}
+
+static inline int sys_create(const char *path) {
+  return (int)syscall(SYS_CREATE, (uint64_t)path, 0, 0, 0, 0);
+}
+
+static inline int sys_spawn_args(const char *path, char *const argv[],
+                                 int argc) {
+  return (int)syscall(SYS_SPAWN_ARGS, (uint64_t)path, (uint64_t)argv,
+                      (uint64_t)argc, 0, 0);
+}
+
+static inline int sys_rename(const char *oldpath, const char *newpath) {
+  return (int)syscall(SYS_RENAME, (uint64_t)oldpath, (uint64_t)newpath, 0, 0,
+                      0);
+}
+
+static inline int sys_chdir(const char *path) {
+  return (int)syscall(SYS_CHDIR, (uint64_t)path, 0, 0, 0, 0);
+}
+static inline int sys_getcwd(char *buf, size_t size) {
+  return (int)syscall(SYS_GETCWD, (uint64_t)buf, (uint64_t)size, 0, 0, 0);
 }
 
 void sys_exit(int code);

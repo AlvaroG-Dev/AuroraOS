@@ -11,15 +11,17 @@
 //   4. Los comandos que escriben a stdout generan más eventos OUTPUT,
 //      que la app también pinta.
 //
-// [Performance] Render por regiones:
-//   - Mantenemos una "región sucia" (rectángulo mínimo que engloba
-//     todo lo que ha cambiado desde el último render).
-//   - Cuando toca redibujar, limpiamos y repintamos SOLO esa región.
-//   - El blit al kernel envía SOLO esa región (con src_stride = cw
-//     para que el kernel sepa leer del buffer completo).
-//   - Antes enviábamos el buffer completo (820*568*4 ≈ 1.8 MB) en
-//     cada tecla. Ahora enviamos ~50 KB. En VirtualBox sin KVM se
-//     nota muchísimo.
+// [Fase 3.2] argv + cwd:
+//   - El shell mantiene una COPIA del cwd en g_cwd para el prompt.
+//     La fuente de verdad es el cwd del proceso en el kernel.
+//   - cd/pwd son built-ins: un hijo no puede cambiar el cwd del padre.
+//   - Los paths de argv viajan tal cual al kernel: sys_open/sys_mkdir/
+//     etc. los resuelven contra el cwd del proceso hijo, que hereda
+//     del shell en spawn.
+//   - El shell solo resuelve el NOMBRE del binario (fallback /apps y
+//     /boot), no los argumentos.
+//
+// [Performance] Render por regiones.
 
 #include "../../lib/file.h"
 #include "../../lib/malloc.h"
@@ -41,7 +43,7 @@
 #define CHAR_WIDTH 8
 
 #define LINE_MAX 256
-#define MAX_ARGS 8
+#define MAX_ARGS 16
 
 // ---------------------------------------------------------------------------
 // Fuente 8x8 (ASCII 32..127)
@@ -165,9 +167,23 @@ static console_buf_t g_buf;
 static char g_input[LINE_MAX];
 static int g_input_len = 0;
 
+// [cwd] El kernel mantiene el cwd real. Aquí solo cacheamos una copia
+// para el prompt. Cualquier operación de path va por syscalls, que
+// resuelven contra el cwd del proceso.
+static char g_cwd[256] = "/";
+
+static void refresh_cwd(void) {
+  char tmp[256];
+  if (getcwd(tmp, sizeof(tmp)) > 0) {
+    size_t n = strlen(tmp);
+    if (n < sizeof(g_cwd)) {
+      memcpy(g_cwd, tmp, n + 1);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Región sucia. Rectángulo mínimo que engloba todo lo que ha cambiado
-// desde el último render. Se resetea tras cada render.
+// Región sucia
 // ---------------------------------------------------------------------------
 #define DIRTY_EMPTY_X0 0x7FFFFFFF
 #define DIRTY_EMPTY_Y0 0x7FFFFFFF
@@ -199,8 +215,6 @@ static void dirty_add(int x, int y, int w, int h) {
     g_dirty_y1 = y + h;
 }
 
-// Fila visible (0..ROWS_VISIBLE-1) de la línea actual del cursor, o -1
-// si no está visible en el viewport actual.
 static int cursor_row_visible(void) {
   int bottom = g_buf.count - 1 - g_buf.scroll_offset;
   if (bottom < 0)
@@ -214,21 +228,17 @@ static int cursor_row_visible(void) {
   return logical - top;
 }
 
-// Marca la fila donde está el cursor como sucia.
 static void mark_cursor_row_dirty(void) {
   int r = cursor_row_visible();
   if (r < 0)
     return;
-  // La fila de texto empieza en y = r * LINE_HEIGHT + 2.
-  // Ancho = COLS caracteres * CHAR_WIDTH + 4 px de margen a cada lado.
   dirty_add(0, r * LINE_HEIGHT, COLS * CHAR_WIDTH + 8, LINE_HEIGHT);
 }
 
 // ---------------------------------------------------------------------------
-// Operaciones sobre el buffer de líneas
+// Buffer ops
 // ---------------------------------------------------------------------------
 static void buf_new_line(void) {
-  // Antes de mover el cursor de sitio, marcar la fila donde estaba.
   mark_cursor_row_dirty();
 
   int next;
@@ -238,14 +248,11 @@ static void buf_new_line(void) {
   } else {
     next = g_buf.head;
     g_buf.head = (g_buf.head + 1) % ROWS_BUFFER;
-    // Al hacer scroll del buffer (se descarta la primera línea),
-    // toda la pantalla cambia: marcamos todo.
     dirty_add(0, 0, COLS * CHAR_WIDTH + 8, ROWS_VISIBLE * LINE_HEIGHT);
   }
   g_buf.lines[next].len = 0;
   g_buf.cursor_col = 0;
 
-  // Después, marcar la nueva fila donde está el cursor.
   mark_cursor_row_dirty();
 }
 
@@ -260,18 +267,16 @@ static void buf_init(void) {
   g_buf.cursor_col = 0;
   g_buf.scroll_offset = 0;
   buf_new_line();
-  // buf_new_line ya ha marcado toda la pantalla.
 }
 
 static void buf_putchar(char c) {
-  // Marcar dónde estaba el cursor antes.
   mark_cursor_row_dirty();
 
   g_buf.scroll_offset = 0;
 
   if (c == '\n') {
     buf_new_line();
-    return; // buf_new_line ya marca la nueva fila.
+    return;
   }
   if (c == '\r') {
     g_buf.cursor_col = 0;
@@ -337,12 +342,8 @@ static void draw_char(uint32_t *pixels, int cw, int ch, int x, int y,
   }
 }
 
-// Redibuja SOLO el rectángulo [rx0, ry0, rw, rh] del buffer `pixels`.
-// Limpia la región con el color de fondo y redibuja los caracteres que
-// intersectan. NO toca los píxeles fuera de la región.
 static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
                           int rw, int rh) {
-  // Clip a la ventana.
   if (rx0 < 0) {
     rw += rx0;
     rx0 = 0;
@@ -358,7 +359,6 @@ static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
   if (rw <= 0 || rh <= 0)
     return;
 
-  // 1. Limpiar la región con el color de fondo.
   for (int y = ry0; y < ry0 + rh; y++) {
     uint32_t *row = &pixels[y * cw + rx0];
     for (int x = 0; x < rw; x++)
@@ -368,7 +368,6 @@ static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
   if (g_buf.count == 0)
     return;
 
-  // 2. Redibujar los caracteres que intersectan con la región.
   int bottom = g_buf.count - 1 - g_buf.scroll_offset;
   if (bottom < 0)
     bottom = 0;
@@ -384,20 +383,17 @@ static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
     line_t *l = &g_buf.lines[idx];
     int y = i * LINE_HEIGHT + 2;
 
-    // Saltar filas totalmente fuera de la región.
     if (y + 8 < ry0 || y > ry0 + rh)
       continue;
 
     for (int k = 0; k < l->len; k++) {
       int x = k * CHAR_WIDTH + 4;
-      // Saltar columnas totalmente fuera de la región.
       if (x + 8 < rx0 || x > rx0 + rw)
         continue;
       draw_char(pixels, cw, ch, x, y, (unsigned char)l->chars[k], 0xFFFFFFFF);
     }
   }
 
-  // 3. Redibujar el cursor si está dentro de la región.
   if (g_buf.scroll_offset == 0) {
     int cursor_row_in_view = bottom - top;
     if (cursor_row_in_view >= 0 && cursor_row_in_view < ROWS_VISIBLE) {
@@ -422,9 +418,11 @@ static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
 // ---------------------------------------------------------------------------
 // Shell embebido
 // ---------------------------------------------------------------------------
-static const char *PROMPT = "aurora> ";
-
-static void print_prompt(void) { buf_puts(PROMPT); }
+static void print_prompt(void) {
+  buf_puts("aurora:");
+  buf_puts(g_cwd);
+  buf_puts("> ");
+}
 
 static int parse_line(char *line, char *argv[MAX_ARGS]) {
   int argc = 0;
@@ -446,13 +444,22 @@ static int parse_line(char *line, char *argv[MAX_ARGS]) {
 }
 
 static void cmd_help(void) {
-  puts("Comandos disponibles:");
-  puts("  help        - esta ayuda");
-  puts("  echo <str>  - imprime el texto");
-  puts("  cat <file>  - muestra un archivo");
-  puts("  spawn <p>   - ejecuta el binario en <p>");
-  puts("  clear       - limpia la consola");
-  puts("  exit        - salir");
+  puts("Comandos built-in:");
+  puts("  help              - esta ayuda");
+  puts("  echo <str>        - imprime el texto");
+  puts("  cat <file>...     - muestra archivos");
+  puts("  cd <dir>          - cambia el directorio actual");
+  puts("  pwd               - imprime el directorio actual");
+  puts("  spawn <p> [args]  - ejecuta el binario en <p>");
+  puts("  clear             - limpia la consola");
+  puts("  exit              - salir");
+  puts("");
+  puts("Comandos externos (buscados en cwd, /initrd/apps y /):");
+  puts("  ls [path]         - lista un directorio");
+  puts("  mkdir <path>...   - crea directorios");
+  puts("  rm <path>...      - borra archivos/dirs");
+  puts("  cp <src> <dst>    - copia un archivo");
+  puts("  mv <src> <dst>    - renombra o mueve");
 }
 
 static void cmd_echo(int argc, char *argv[]) {
@@ -464,34 +471,105 @@ static void cmd_echo(int argc, char *argv[]) {
   write(1, "\n", 1);
 }
 
-static void cmd_cat(const char *path) {
-  int fd = open(path, O_RDONLY);
-  if (fd < 0) {
-    printf("cat: no existe %s\n", path);
+static void cmd_pwd(void) {
+  char buf[256];
+  if (getcwd(buf, sizeof(buf)) <= 0) {
+    puts("(error)");
     return;
   }
-  char buf[512];
-  int64_t n;
-  while ((n = read(fd, buf, sizeof(buf))) > 0)
-    write(1, buf, n);
-  close(fd);
+  puts(buf);
 }
 
-static void cmd_spawn(const char *path) {
-  int pid = spawn(path);
-  if (pid < 0) {
-    printf("console: no se pudo ejecutar %s\n", path);
+static void cmd_cd(const char *arg) {
+  if (!arg || !arg[0]) {
+    sys_chdir("/");
     return;
   }
+  int rc = sys_chdir(arg);
+  if (rc != 0) {
+    printf("cd: no se pudo cambiar a '%s' (%d)\n", arg, rc);
+  }
+}
+
+static void cmd_cat(int argc, char *argv[]) {
+  if (argc < 2) {
+    puts("uso: cat <file>...");
+    return;
+  }
+  for (int i = 1; i < argc; i++) {
+    int fd = open(argv[i], O_RDONLY);
+    if (fd < 0) {
+      printf("cat: no existe %s\n", argv[i]);
+      continue;
+    }
+    char buf[512];
+    int64_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0)
+      write(1, buf, n);
+    close(fd);
+  }
+}
+
+static void cmd_clear(void) { buf_init(); }
+
+// [Fase 3.2] Resolución del binario. Los argumentos viajan tal cual al
+// kernel, que los resuelve contra el cwd del proceso hijo.
+//
+// Intenta, en orden:
+//   1. spawn(cmd)              — absoluto o relativo resuelto por kernel
+//   2. spawn("/apps/" + cmd)   — tarfs
+//   3. spawn("/boot/" + CMD + ".ELF") — FAT32 8.3 en mayúsculas
+static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[]) {
+  int pid;
+
+  // 1. Tal cual (absoluto, o relativo resuelto por el kernel contra cwd).
+  pid = spawn_args(cmd, argv, argc);
+  if (pid >= 0)
+    goto run;
+
+  // 2. Fallback tarfs (/initrd/apps/<cmd>).
+  {
+    char buf[160];
+    if (strlen(cmd) + 14 < sizeof(buf)) {
+      strcpy(buf, "/initrd/apps/");
+      strcpy(buf + 13, cmd);
+      pid = spawn_args(buf, argv, argc);
+      if (pid >= 0)
+        goto run;
+    }
+  }
+
+  // 3. Fallback FAT32 raíz (/<CMD>.ELF).
+  {
+    char buf[128];
+    if (strlen(cmd) + 6 < sizeof(buf)) {
+      size_t n = 0;
+      buf[n++] = '/';
+      for (int i = 0; cmd[i] && n < sizeof(buf) - 6; i++) {
+        char c = cmd[i];
+        if (c >= 'a' && c <= 'z')
+          c -= 32;
+        buf[n++] = c;
+      }
+      buf[n++] = '.';
+      buf[n++] = 'E';
+      buf[n++] = 'L';
+      buf[n++] = 'F';
+      buf[n] = '\0';
+      pid = spawn_args(buf, argv, argc);
+      if (pid >= 0)
+        goto run;
+    }
+  }
+
+  printf("console: no se pudo ejecutar %s\n", cmd);
+  return;
+
+run: {
   int status = 0;
   int r = waitpid(pid, &status, 0);
-  printf("console: %s terminó (pid=%d, exit=%d)\n", path, r, status);
+  printf("console: %s terminó (pid=%d, exit=%d)\n", cmd, r, status);
 }
-
-static void cmd_clear(void) {
-  buf_init();
-  // buf_init -> buf_new_line -> mark_cursor_row_dirty + dirty_add(0,0,...)
-  // Con eso la región sucia cubre toda la pantalla.
 }
 
 static void run_command(int win_id) {
@@ -507,31 +585,30 @@ static void run_command(int win_id) {
         cmd_help();
       else if (strcmp(cmd, "echo") == 0)
         cmd_echo(argc, argv);
-      else if (strcmp(cmd, "cat") == 0) {
+      else if (strcmp(cmd, "cd") == 0)
+        cmd_cd(argc > 1 ? argv[1] : NULL);
+      else if (strcmp(cmd, "pwd") == 0)
+        cmd_pwd();
+      else if (strcmp(cmd, "cat") == 0)
+        cmd_cat(argc, argv);
+      else if (strcmp(cmd, "spawn") == 0) {
         if (argc < 2)
-          puts("uso: cat <path>");
+          puts("uso: spawn <path> [args]");
         else
-          cmd_cat(argv[1]);
-      } else if (strcmp(cmd, "spawn") == 0) {
-        if (argc < 2)
-          puts("uso: spawn <path>");
-        else
-          cmd_spawn(argv[1]);
+          cmd_spawn_resolved(argv[1], argc - 1, &argv[1]);
       } else if (strcmp(cmd, "clear") == 0) {
         cmd_clear();
       } else if (strcmp(cmd, "exit") == 0) {
         puts("Adiós.");
         sys_exit(0);
       } else {
-        cmd_spawn(cmd);
+        cmd_spawn_resolved(cmd, argc, argv);
       }
     }
   }
 
   g_input_len = 0;
 
-  // Drenar los OUTPUT que el comando haya generado. Esto garantiza
-  // que el output aparezca ANTES del prompt.
   winsrv_event_t ev;
   while (sys_win_poll_event(win_id, &ev, 0) > 0) {
     if (ev.type == WINSRV_EV_OUTPUT) {
@@ -542,6 +619,7 @@ static void run_command(int win_id) {
     }
   }
 
+  refresh_cwd();
   print_prompt();
 }
 
@@ -555,7 +633,6 @@ static void handle_key(char c, int win_id) {
   }
   if (c == '\b') {
     if (g_input_len > 0) {
-      // Marcar la fila antes y después.
       mark_cursor_row_dirty();
       g_input_len--;
       int idx = buf_line_idx(g_buf.count - 1);
@@ -580,7 +657,10 @@ static void handle_key(char c, int win_id) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-int main(void) {
+int main(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
   sys_print("SHELL: main begin");
   int cw = WIN_W;
   int ch = WIN_H - TITLEBAR_HEIGHT;
@@ -594,19 +674,10 @@ int main(void) {
   }
   sys_print("SHELL: win >= 0");
 
-  // [FIX] Pedir al kernel que ponga el icono del terminal a la ventana.
-  // El kernel carga el BMP desde tarfs y lo cachea tanto para la barra
-  // de título como para el taskbar.
-  //
-  // Antes se ignoraba el valor de retorno: si el BMP no se encontraba en
-  // el tarfs (o no estaba empaquetado en el initrd), la ventana se
-  // quedaba con el icono por defecto SIN ningún aviso visible. Ahora se
-  // comprueba y se avisa por sys_print para poder depurarlo.
-  int icon_rc = sys_win_set_icon(win, "system/icons/terminal-window-dark.bmp");
+  int icon_rc =
+      sys_win_set_icon(win, "/initrd/system/icons/terminal-window-dark.bmp");
   if (icon_rc < 0) {
-    sys_print(
-        "SHELL: sys_win_set_icon FALLO (system/icons/terminal-window-dark.bmp "
-        "no encontrado en tarfs?)");
+    sys_print("SHELL: sys_win_set_icon FALLO");
   }
 
   uint32_t *pixels = (uint32_t *)malloc(cw * ch * sizeof(uint32_t));
@@ -622,9 +693,9 @@ int main(void) {
   buf_puts("  Aurora OS Console v0.1\n");
   buf_puts("  Escribe 'help' para ver los comandos.\n");
   buf_puts("============================================\n");
+  refresh_cwd();
   print_prompt();
 
-  // Primer render: toda la pantalla.
   for (int i = 0; i < cw * ch; i++)
     pixels[i] = 0xFF000000;
   dirty_add(0, 0, cw, ch);
@@ -687,7 +758,6 @@ int main(void) {
       break;
     }
 
-    // Drenar cola sin bloquear.
     while (sys_win_poll_event(win, &ev, 0) > 0) {
       switch (ev.type) {
       case WINSRV_EV_TTY_INPUT:
@@ -707,7 +777,6 @@ int main(void) {
       }
     }
 
-    // Clamp de scroll_offset.
     int max_off = g_buf.count - 1;
     if (max_off < 0)
       max_off = 0;
@@ -716,10 +785,7 @@ int main(void) {
     if (g_buf.scroll_offset < 0)
       g_buf.scroll_offset = 0;
 
-    // Redibujar SOLO la región sucia.
     if (needs_redraw && !dirty_empty()) {
-      // Extender la región a la rejilla de caracteres + margen, para
-      // que draw_char nunca escriba fuera de la región.
       int rx0 = g_dirty_x0;
       int ry0 = g_dirty_y0;
       int rx1 = g_dirty_x1;
@@ -743,11 +809,6 @@ int main(void) {
       int rh = ry1 - ry0;
 
       render_region(pixels, cw, ch, rx0, ry0, rw, rh);
-      // Blit solo de la región. src_stride = cw, porque pixels es el
-      // buffer completo. El rectángulo dentro del buffer es
-      // (src_x=rx0, src_y=ry0), y el destino en la ventana es (x=rx0,
-      // y=ry0). Como la ventana es del mismo tamaño que el buffer,
-      // coinciden.
       sys_win_blit(win, rx0, ry0, rw, rh, rx0, ry0, cw, pixels);
 
       needs_redraw = 0;
