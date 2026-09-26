@@ -569,6 +569,10 @@ static int64_t sys_win_poll_event_k(uint64_t a1, uint64_t a2, uint64_t a3,
     return -EFAULT;
   if (!access_ok((void *)a2, sizeof(winsrv_event_t)))
     return -EFAULT;
+  // Mantener la salida en memoria de kernel hasta que el syscall pueda
+  // usar copy_to_user(), que dispone de exception-fixup para páginas de
+  // userland no mapeadas. No pasar directamente a winsrv_poll_event() el
+  // puntero proporcionado por userland.
   winsrv_event_t ev;
   int rc = winsrv_poll_event(proc->task, (int)a1, &ev, (int)a3);
   if (rc <= 0)
