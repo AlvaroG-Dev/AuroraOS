@@ -118,10 +118,10 @@ syscall_entry:
     ; Saltar al hardware frame de iretq.
     add rsp, 0x88
 
-    ; Limpiar IOPL del RFLAGS.
-    and qword [rsp + 0x10], ~0x3000
-
-    ; Forzar IF=1 para que el userland reciba interrupciones.
-    or  qword [rsp + 0x10], 0x200
+    ; Sanitizar RFLAGS antes de iretq. Solo conservamos flags que
+    ; userland puede controlar legítimamente; IOPL/NT/VIP/VIF y bits
+    ; reservados no pueden llegar al frame de retorno.
+    and qword [rsp + 0x10], 0x240FD7
+    or  qword [rsp + 0x10], 0x202
 
     iretq

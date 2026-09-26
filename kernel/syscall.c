@@ -920,7 +920,21 @@ static const syscall_entry_t syscall_table[] = {
 // ===========================================================================
 // Handler principal
 // ===========================================================================
+static bool syscall_user_addr_valid(uint64_t addr) {
+  // Canonical lower-half user address, strictly below USER_LIMIT.
+  return addr < USER_LIMIT && addr <= 0x00007FFFFFFFFFFFULL;
+}
+
 uint64_t syscall_handler_c(registers_t *regs) {
+  // RCX/RSP become the user RIP/RSP used by iretq. Reject malformed
+  // syscall return frames before reaching the architectural return path.
+  if (!regs || !syscall_user_addr_valid(regs->rip) ||
+      !syscall_user_addr_valid(regs->rsp)) {
+    LOG_WARN("[SYSCALL] frame de retorno user inválido: rip=%p rsp=%p",
+             regs ? (void *)regs->rip : 0, regs ? (void *)regs->rsp : 0);
+    process_exit_current(-EINVAL);
+  }
+
   uint64_t num = regs->rax;
   uint64_t arg1 = regs->rdi;
   uint64_t arg2 = regs->rsi;
