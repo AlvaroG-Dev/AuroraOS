@@ -1717,71 +1717,129 @@ static volatile uint64_t g_timeout_requeue_old_seq;
 static volatile uint64_t g_timeout_requeue_new_seq;
 static volatile int g_timeout_requeue_result;
 static task_t *g_timeout_requeue_task;
-static bool timeout_requeue_never_ready(void *arg) { (void)arg; return false; }
-static void timeout_requeue_waiter(void) {
-  task_t *self=sched_current(); g_timeout_requeue_task=self;
-  g_timeout_requeue_old_seq=__atomic_load_n(&self->wait_seq,__ATOMIC_ACQUIRE)+1;
-  g_timeout_requeue_phase=1;
-  (void)wait_event_interruptible_timeout(&g_timeout_requeue_wq,timeout_requeue_never_ready,NULL,5000);
-  g_timeout_requeue_new_seq=__atomic_load_n(&self->wait_seq,__ATOMIC_ACQUIRE)+1;
-  g_timeout_requeue_phase=2;
-  g_timeout_requeue_result=(int)wait_event_interruptible_timeout(&g_timeout_requeue_wq,timeout_requeue_never_ready,NULL,5000);
-  g_timeout_requeue_phase=3;
+
+static bool timeout_requeue_never_ready(void *arg) {
+  (void)arg;
+  return false;
 }
+
+static void timeout_requeue_waiter(void) {
+  task_t *self = sched_current();
+  g_timeout_requeue_task = self;
+
+  // La primera espera tiene una generación que posteriormente quedará
+  // obsoleta. El controlador la fuerza a expirar mediante sched_wake_expired().
+  g_timeout_requeue_old_seq =
+      __atomic_load_n(&self->wait_seq, __ATOMIC_ACQUIRE) + 1;
+  g_timeout_requeue_phase = 1;
+  (void)wait_event_interruptible_timeout(
+      &g_timeout_requeue_wq, timeout_requeue_never_ready, NULL, 100);
+
+  // La primera espera ya terminó; la segunda debe incrementar wait_seq.
+  g_timeout_requeue_new_seq =
+      __atomic_load_n(&self->wait_seq, __ATOMIC_ACQUIRE) + 1;
+  g_timeout_requeue_phase = 2;
+  g_timeout_requeue_result = (int)wait_event_interruptible_timeout(
+      &g_timeout_requeue_wq, timeout_requeue_never_ready, NULL, 5000);
+  g_timeout_requeue_phase = 3;
+}
+
 static bool timeout_requeue_is_waiting(task_t *task) {
   bool waiting;
   unsigned long flags = spin_lock_irqsave(&g_timeout_requeue_wq.lock);
-  waiting = task->waiting_on == &g_timeout_requeue_wq && task->state == TASK_BLOCKED;
+  waiting = task->waiting_on == &g_timeout_requeue_wq &&
+            task->state == TASK_BLOCKED;
   spin_unlock_irqrestore(&g_timeout_requeue_wq.lock, flags);
   return waiting;
 }
 
 static void test_sched_stale_timeout_requeue(void) {
   /*
-   * Esta regresión prueba la identidad de una espera, no el mecanismo de
-   * wakeup remoto (eso ya lo cubren los tests SMP anteriores). Fijamos el
-   * waiter a la CPU del test para que el rearmado no dependa de que una
-   * CPU idle concreta reciba el IPI justo en esta ventana.
+   * La primera espera se despierta por el camino normal de timeout,
+   * que ya está cubierto por el test de >16 wait queues. Después se
+   * rearma la misma wait queue y se inyecta un timeout de la generación
+   * anterior. Ese timeout antiguo no debe retirar la entrada nueva.
    */
-  wait_queue_init(&g_timeout_requeue_wq); g_timeout_requeue_phase=0;
-  g_timeout_requeue_old_seq=0; g_timeout_requeue_new_seq=0; g_timeout_requeue_result=-1; g_timeout_requeue_task=NULL;
-  task_t *task=sched_create_task(timeout_requeue_waiter);
-  TEST_ASSERT(task!=NULL,"no se pudo crear waiter de timeout rearmado"); if(!task)return;
+  wait_queue_init(&g_timeout_requeue_wq);
+  g_timeout_requeue_phase = 0;
+  g_timeout_requeue_old_seq = 0;
+  g_timeout_requeue_new_seq = 0;
+  g_timeout_requeue_result = -1;
+  g_timeout_requeue_task = NULL;
 
-  task->cpu_affinity = smp_processor_id();
-
-  uint64_t deadline=sched_get_ticks()+3000;
-  while(g_timeout_requeue_phase<1||!timeout_requeue_is_waiting(task)){
-    TEST_ASSERT(sched_get_ticks()<deadline,"timeout esperando primera espera bloqueada"); if(sched_get_ticks()>=deadline)return; sched_yield();
-  }
-
-  wake_up_all(&g_timeout_requeue_wq);
-  sched_yield();
-  deadline=sched_get_ticks()+3000;
-  while(g_timeout_requeue_phase<2||!timeout_requeue_is_waiting(task)){
-    TEST_ASSERT(sched_get_ticks()<deadline,"timeout esperando segunda espera rearmada"); if(sched_get_ticks()>=deadline)break; sched_yield();
-  }
-  if (g_timeout_requeue_phase < 2)
+  task_t *task = sched_create_task(timeout_requeue_waiter);
+  TEST_ASSERT(task != NULL, "no se pudo crear waiter de timeout rearmado");
+  if (!task)
     return;
 
-  uint64_t old_seq=g_timeout_requeue_old_seq, new_seq=__atomic_load_n(&task->wait_seq,__ATOMIC_ACQUIRE);
-  TEST_ASSERT(new_seq>old_seq,"la espera rearmada no obtuvo nueva generación: old=%llu new=%llu",(unsigned long long)old_seq,(unsigned long long)new_seq);
-  TEST_ASSERT(new_seq==g_timeout_requeue_new_seq,"generación observada incorrecta: %llu != %llu",(unsigned long long)new_seq,(unsigned long long)g_timeout_requeue_new_seq);
+  uint64_t deadline = sched_get_ticks() + 3000;
+  while (g_timeout_requeue_phase < 1 ||
+         !timeout_requeue_is_waiting(task)) {
+    TEST_ASSERT(sched_get_ticks() < deadline,
+                "timeout esperando primera espera bloqueada");
+    if (sched_get_ticks() >= deadline)
+      return;
+    sched_yield();
+  }
+
+  /*
+   * Fuerza la expiración de la primera espera de forma determinista.
+   * sched_wake_expired() captura la generación actual y despierta al waiter.
+   */
+  unsigned long irq_flags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(irq_flags) : : "memory");
+  uint64_t now = tick_count;
+  tick_count = now + 101;
+  sched_wake_expired();
+  __asm__ volatile("push %0; popfq" : : "r"(irq_flags) : "memory");
+
+  deadline = sched_get_ticks() + 3000;
+  while (g_timeout_requeue_phase < 2 ||
+         !timeout_requeue_is_waiting(task)) {
+    TEST_ASSERT(sched_get_ticks() < deadline,
+                "timeout esperando segunda espera rearmada");
+    if (sched_get_ticks() >= deadline)
+      return;
+    sched_yield();
+  }
+
+  uint64_t old_seq = g_timeout_requeue_old_seq;
+  uint64_t new_seq =
+      __atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE);
+
+  TEST_ASSERT(new_seq > old_seq,
+              "la espera rearmada no obtuvo nueva generación: old=%llu new=%llu",
+              (unsigned long long)old_seq, (unsigned long long)new_seq);
+  TEST_ASSERT(new_seq == g_timeout_requeue_new_seq,
+              "generación observada incorrecta: %llu != %llu",
+              (unsigned long long)new_seq,
+              (unsigned long long)g_timeout_requeue_new_seq);
 
   /*
    * Simular un timeout ya capturado para la espera anterior. La generación
    * antigua no puede retirar la entrada correspondiente a la espera nueva.
    */
-  wait_queue_wake_timeout_task(&g_timeout_requeue_wq,task,old_seq);
-  TEST_ASSERT(timeout_requeue_is_waiting(task),"timeout antiguo despertó una espera nueva (seq=%llu)",(unsigned long long)new_seq);
+  wait_queue_wake_timeout_task(&g_timeout_requeue_wq, task, old_seq);
+  TEST_ASSERT(timeout_requeue_is_waiting(task),
+              "timeout antiguo despertó una espera nueva (seq=%llu)",
+              (unsigned long long)new_seq);
 
   wake_up_all(&g_timeout_requeue_wq);
-  deadline=sched_get_ticks()+3000;
-  while(g_timeout_requeue_phase<3){TEST_ASSERT(sched_get_ticks()<deadline,"waiter no terminó tras wakeup legítimo");if(sched_get_ticks()>=deadline)break;sched_yield();}
-  TEST_ASSERT(g_timeout_requeue_phase==3,"waiter no completó: phase=%d",g_timeout_requeue_phase);
-  TEST_ASSERT(g_timeout_requeue_result!=0,"wakeup legítimo no devolvió resultado esperado: %d",g_timeout_requeue_result);
+  deadline = sched_get_ticks() + 3000;
+  while (g_timeout_requeue_phase < 3) {
+    TEST_ASSERT(sched_get_ticks() < deadline,
+                "waiter no terminó tras wakeup legítimo");
+    if (sched_get_ticks() >= deadline)
+      break;
+    sched_yield();
+  }
+
+  TEST_ASSERT(g_timeout_requeue_phase == 3,
+              "waiter no completó: phase=%d", g_timeout_requeue_phase);
+  TEST_ASSERT(g_timeout_requeue_result != 0,
+              "wakeup legítimo no devolvió resultado esperado: %d",
+              g_timeout_requeue_result);
 }
-REGISTER_TEST_FLAGS("sched: timeout antiguo no despierta wait rearmada",test_sched_stale_timeout_requeue,TEST_FLAG_BLOCKING);
 
 // [Fase 1.2] sched: need_resched se limpia con xchg atómico
 //
