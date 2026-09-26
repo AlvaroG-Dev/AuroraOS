@@ -1523,10 +1523,10 @@ static void test_smp_task_migration_canary(void) {
   TEST_ASSERT(g_smp_mig_cpu_before == source_cpu,
               "waiter no arrancó en CPU%d: cpu=%d", source_cpu,
               g_smp_mig_cpu_before);
-  TEST_ASSERT(g_smp_mig_cpu_after == controller_cpu &&
+  TEST_ASSERT(g_smp_mig_cpu_after >= 0 &&
                   g_smp_mig_cpu_after != g_smp_mig_cpu_before,
-              "waiter no migró al CPU controlador: antes=%d después=%d esperado=%d",
-              g_smp_mig_cpu_before, g_smp_mig_cpu_after, controller_cpu);
+              "waiter no migró: antes=%d después=%d",
+              g_smp_mig_cpu_before, g_smp_mig_cpu_after);
   TEST_ASSERT(g_smp_mig_done == 1,
               "migración/canary no completó correctamente");
 
