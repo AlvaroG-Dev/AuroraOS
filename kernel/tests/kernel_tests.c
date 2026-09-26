@@ -1759,7 +1759,9 @@ static void test_sched_stale_timeout_requeue(void) {
   }
 
   wake_up_all(&g_timeout_requeue_wq);
+  LOG_INFO("[TEST] timeout-requeue: tras wake state=%d on_cpu=%d waiting_on=%p current_cpu=%d", task->state, __atomic_load_n(&task->on_cpu,__ATOMIC_ACQUIRE), (void *)task->waiting_on, smp_processor_id());
   sched_yield();
+  LOG_INFO("[TEST] timeout-requeue: tras yield state=%d on_cpu=%d waiting_on=%p phase=%d", task->state, __atomic_load_n(&task->on_cpu,__ATOMIC_ACQUIRE), (void *)task->waiting_on, g_timeout_requeue_phase);
   deadline=sched_get_ticks()+3000;
   while(g_timeout_requeue_phase<2||!timeout_requeue_is_waiting(task)){
     TEST_ASSERT(sched_get_ticks()<deadline,"timeout esperando segunda espera rearmada"); if(sched_get_ticks()>=deadline)break; sched_yield();
