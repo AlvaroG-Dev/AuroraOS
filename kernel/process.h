@@ -71,4 +71,8 @@ process_t *process_spawn_child_args(process_t *parent, const char *path,
 // con cuidado (procesos solo se liberan desde waitpid).
 process_t *process_find_by_pid(uint32_t pid);
 
+// [SIG] Envía una señal a un PID manteniendo process_lock durante la
+// publicación y devuelve una referencia propia a la tarea destino.
+task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask);
+
 #endif // PROCESS_H
