@@ -1722,9 +1722,11 @@ static void timeout_requeue_waiter(void) {
   task_t *self=sched_current(); g_timeout_requeue_task=self;
   g_timeout_requeue_old_seq=__atomic_load_n(&self->wait_seq,__ATOMIC_ACQUIRE)+1;
   g_timeout_requeue_phase=1;
-  (void)wait_event_interruptible_timeout(&g_timeout_requeue_wq,timeout_requeue_never_ready,NULL,5000);
+  long first_result = wait_event_interruptible_timeout(&g_timeout_requeue_wq,timeout_requeue_never_ready,NULL,5000);
+  LOG_INFO("[TEST] timeout-requeue: waiter reanudado cpu=%d first_result=%ld waiting_on=%p state=%d seq=%llu", smp_processor_id(), first_result, (void *)self->waiting_on, self->state, (unsigned long long)__atomic_load_n(&self->wait_seq,__ATOMIC_ACQUIRE));
   g_timeout_requeue_new_seq=__atomic_load_n(&self->wait_seq,__ATOMIC_ACQUIRE)+1;
   g_timeout_requeue_phase=2;
+  LOG_INFO("[TEST] timeout-requeue: iniciando segunda espera cpu=%d seq=%llu", smp_processor_id(), (unsigned long long)__atomic_load_n(&self->wait_seq,__ATOMIC_ACQUIRE));
   g_timeout_requeue_result=(int)wait_event_interruptible_timeout(&g_timeout_requeue_wq,timeout_requeue_never_ready,NULL,5000);
   g_timeout_requeue_phase=3;
 }
