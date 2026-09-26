@@ -233,6 +233,16 @@ static void kmain_task(void) {
     }
   }
 
+  // [libc] Punto de montaje /dev: crearlo como dir vacío en FAT32 para
+  // que `ls /` lo liste. Igual que /initrd: el VFS enruta /dev/* a
+  // devfs, pero el FS subyacente necesita una entry física.
+  int rc_dev = vfs_mkdir("/dev");
+  if (rc_dev == 0) {
+    LOG_INFO("[PIVOT] Punto de montaje /dev creado en FAT32");
+  } else if (rc_dev != -EEXIST) {
+    LOG_DEBUG("[PIVOT] /dev no creado (rc=%d)", rc_dev);
+  }
+
   LOG_INFO("[INIT] DMA dump...");
   ata_dma_dump();
 

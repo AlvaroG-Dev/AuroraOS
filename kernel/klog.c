@@ -6,7 +6,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
 #define KLOG_RING_SIZE 16384
 
 static klog_level_t min_level = KLOG_DEBUG;
@@ -403,15 +402,38 @@ void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
 // Acceso al ring
 // ---------------------------------------------------------------------------
 size_t klog_read(char *out, size_t max_len) {
+  if (!out || max_len == 0)
+    return 0;
+  // [libc] Lock: klog_read la llaman /dev/kmsg y potencialmente varias
+  // CPUs a la vez. Modifica ring_tail y ring_count sin protección en la
+  // versión anterior.
+  unsigned long flags;
+  serial_lock_acquire(&flags);
   size_t n = 0;
   while (n < max_len && ring_count > 0) {
     out[n++] = ring[ring_tail];
     ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
     ring_count--;
   }
+  serial_lock_release(flags);
   return n;
 }
 
 size_t klog_available(void) { return ring_count; }
 
 void klog_clear(void) { ring_head = ring_tail = ring_count = 0; }
+
+// ---------------------------------------------------------------------------
+// [libc] Escritura cruda (sin prefijo ni timestamp) al ring+serial.
+// Usado por /dev/kmsg::write. La longitud está acotada por el caller
+// (sys_write ya validó access_ok).
+// ---------------------------------------------------------------------------
+void klog_write_raw(const char *buf, size_t n) {
+  if (!klog_ready || !buf || n == 0)
+    return;
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  for (size_t i = 0; i < n; i++)
+    out_char(buf[i]);
+  serial_lock_release(flags);
+}

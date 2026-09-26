@@ -127,6 +127,7 @@ static const char scancode_ascii_shift[128] = {
 
 static int left_shift_pressed = 0;
 static int right_shift_pressed = 0;
+static int ctrl_pressed = 0;
 
 // ===========================================================================
 // Procesamiento de bytes → eventos de input + TTY
@@ -154,6 +155,11 @@ static void process_keyboard_byte(uint8_t sc) {
     return;
   }
 
+  if (code == 0x1D) {
+    ctrl_pressed = pressed;
+    return;
+  }
+
   if (!pressed)
     return;
 
@@ -161,6 +167,15 @@ static void process_keyboard_byte(uint8_t sc) {
   char c = shift_pressed ? scancode_ascii_shift[code] : scancode_ascii[code];
   if (c == 0)
     return;
+
+  // [Ctrl] Convención ASCII: Ctrl+letra → 0x01..0x1A.
+  if (ctrl_pressed) {
+    char lower = c;
+    if (lower >= 'A' && lower <= 'Z')
+      lower = (char)(lower + 32);
+    if (lower >= 'a' && lower <= 'z')
+      c = (char)(lower - 'a' + 1);
+  }
 
   tty_t *tty = tty_default();
   if (tty)

@@ -815,6 +815,207 @@ int vfs_read_all(const char *path, void **out_buf, size_t *out_size) {
 }
 
 // ===========================================================================
+// devfs: sistema de ficheros virtual para /dev.
+//
+// Registra nodos estáticos en una tabla. vfs_lookup() lo consulta cuando
+// el path cae bajo /dev (mount más específico que /). readdir del
+// directorio raíz devuelve los nombres de la tabla.
+// ===========================================================================
+
+static int64_t dev_null_read(vfs_node_t *node, uint64_t offset, size_t size,
+                             void *buf) {
+  (void)node;
+  (void)offset;
+  (void)size;
+  (void)buf;
+  return 0; // EOF inmediato
+}
+
+static int64_t dev_null_write(vfs_node_t *node, uint64_t offset, size_t size,
+                              const void *buf) {
+  (void)node;
+  (void)offset;
+  (void)buf;
+  return (int64_t)size; // descarta
+}
+
+static vfs_ops_t dev_null_ops = {
+    .read = dev_null_read,
+    .write = dev_null_write,
+    .open = NULL,
+    .close = NULL,
+    .readable = NULL,
+};
+
+static int64_t dev_zero_read(vfs_node_t *node, uint64_t offset, size_t size,
+                             void *buf) {
+  (void)node;
+  (void)offset;
+  if (!buf)
+    return -EINVAL;
+  memset(buf, 0, size);
+  return (int64_t)size;
+}
+
+static int64_t dev_zero_write(vfs_node_t *node, uint64_t offset, size_t size,
+                              const void *buf) {
+  (void)node;
+  (void)offset;
+  (void)buf;
+  return (int64_t)size;
+}
+
+static vfs_ops_t dev_zero_ops = {
+    .read = dev_zero_read,
+    .write = dev_zero_write,
+    .open = NULL,
+    .close = NULL,
+    .readable = NULL,
+};
+
+static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
+                             void *buf) {
+  (void)node;
+  (void)offset;
+  if (!buf)
+    return -EINVAL;
+  return (int64_t)klog_read((char *)buf, size);
+}
+
+static int64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset, size_t size,
+                              const void *buf) {
+  (void)node;
+  (void)offset;
+  if (!buf || size == 0)
+    return 0;
+  // El caller (vfs_write_for_proc) hace stac() alrededor, así que
+  // podemos leer directamente del buffer de userland.
+  klog_write_raw((const char *)buf, size);
+  return (int64_t)size;
+}
+
+static vfs_ops_t dev_kmsg_ops = {
+    .read = dev_kmsg_read,
+    .write = dev_kmsg_write,
+    .open = NULL,
+    .close = NULL,
+    .readable = NULL,
+};
+
+typedef struct {
+  const char *name;
+  vfs_ops_t *ops;
+} devfs_entry_t;
+
+static const devfs_entry_t devfs_entries[] = {
+    {"null", &dev_null_ops},
+    {"zero", &dev_zero_ops},
+    {"kmsg", &dev_kmsg_ops},
+};
+
+static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
+  if (!dir || !out)
+    return -EINVAL;
+  if (!(dir->flags & VFS_DIRECTORY))
+    return -ENOTDIR;
+
+  // Solo el directorio raíz de devfs tiene entradas.
+  if (!(dir->name[0] == '/' && dir->name[1] == '\0')) {
+    out->name[0] = '\0';
+    return 0;
+  }
+
+  size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
+  if (index >= n_entries) {
+    out->name[0] = '\0';
+    out->type = 0;
+    out->size = 0;
+    return 0;
+  }
+
+  const char *name = devfs_entries[index].name;
+  size_t len = strlen(name);
+  if (len >= sizeof(out->name))
+    len = sizeof(out->name) - 1;
+  for (size_t i = 0; i < len; i++)
+    out->name[i] = name[i];
+  out->name[len] = '\0';
+  out->type = VFS_CHARDEVICE;
+  out->size = 0;
+  return 0;
+}
+
+static vfs_ops_t devfs_dir_ops = {
+    .read = NULL,
+    .write = NULL,
+    .open = NULL,
+    .close = NULL,
+    .readable = NULL,
+    .readdir = devfs_readdir,
+};
+
+static vfs_fs_ops_t devfs_fs_ops;
+
+static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
+  (void)fs_priv;
+
+  // [PIVOT-style] rel puede ser "/" (raíz del mount) o "/<name>".
+  if (!path || path[0] != '/')
+    return NULL;
+
+  // Raíz.
+  if (path[1] == '\0') {
+    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!node)
+      return NULL;
+    node->name[0] = '/';
+    node->name[1] = '\0';
+    node->flags = VFS_DIRECTORY;
+    node->size = 0;
+    node->inode = 0;
+    node->ops = &devfs_dir_ops;
+    node->fs = &devfs_fs_ops;
+    node->priv = NULL;
+    return node;
+  }
+
+  const char *name = path + 1;
+  // Sin subdirectorios.
+  for (const char *p = name; *p; p++) {
+    if (*p == '/')
+      return NULL;
+  }
+
+  size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
+  for (size_t i = 0; i < n_entries; i++) {
+    if (strcmp(name, devfs_entries[i].name) == 0) {
+      vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+      if (!node)
+        return NULL;
+      size_t nlen = strlen(name);
+      if (nlen >= sizeof(node->name))
+        nlen = sizeof(node->name) - 1;
+      for (size_t k = 0; k < nlen; k++)
+        node->name[k] = name[k];
+      node->name[nlen] = '\0';
+      node->flags = VFS_CHARDEVICE;
+      node->size = 0;
+      node->inode = 0;
+      node->ops = devfs_entries[i].ops;
+      node->fs = &devfs_fs_ops;
+      node->priv = NULL;
+      return node;
+    }
+  }
+  return NULL;
+}
+
+static vfs_fs_ops_t devfs_fs_ops = {
+    .lookup = devfs_lookup,
+    .name = "devfs",
+};
+
+// ===========================================================================
 // Init
 // ===========================================================================
 void vfs_init(void) {
@@ -844,6 +1045,13 @@ void vfs_init(void) {
     LOG_ERR("[VFS] fallo al montar tarfs en /initrd: %d", rc);
   } else {
     LOG_INFO("[VFS] VFS inicializado (tarfs en /initrd)");
+  }
+  // [libc] devfs en /dev. Registra null, zero, kmsg.
+  int rc2 = vfs_mount("/dev", &devfs_fs_ops, NULL);
+  if (rc2 != 0) {
+    LOG_ERR("[VFS] fallo al montar devfs en /dev: %d", rc2);
+  } else {
+    LOG_INFO("[VFS] devfs montado en /dev");
   }
 }
 

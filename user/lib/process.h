@@ -21,4 +21,7 @@ static inline int spawn_args(const char *path, char *const argv[], int argc) {
   return sys_spawn_args(path, argv, argc);
 }
 
+// [SIG] Envía una señal a otro proceso (o a sí mismo con pid=0).
+static inline int kill(int pid, int sig) { return sys_kill(pid, sig); }
+
 #endif

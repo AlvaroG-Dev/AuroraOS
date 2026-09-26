@@ -151,3 +151,167 @@ int rename_path(const char *oldpath, const char *newpath) {
 
 int chdir(const char *path) { return sys_chdir(path); }
 int getcwd(char *buf, size_t size) { return sys_getcwd(buf, size); }
+
+// ---------------------------------------------------------------------------
+// [libc] printf-family formateado a buffer.
+//
+// Implementación compacta: soporta %s %d %i %u %x %X %c %p %%,
+// modificadores l/ll/z y width con cero a la izquierda (%02x, %08x...).
+// No soporta flags complejos (justificación, precisión de floats, etc.).
+// ---------------------------------------------------------------------------
+struct outbuf {
+  char *buf;
+  size_t cap;
+  size_t pos;
+};
+
+static void ob_char(struct outbuf *o, char c) {
+  if (o->pos + 1 < o->cap)
+    o->buf[o->pos] = c;
+  o->pos++;
+}
+
+static void ob_str(struct outbuf *o, const char *s) {
+  while (*s)
+    ob_char(o, *s++);
+}
+
+static void ob_uint(struct outbuf *o, uint64_t val, int base, int min_digits,
+                    int upper) {
+  const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+  char tmp[32];
+  int i = 0;
+  if (val == 0)
+    tmp[i++] = '0';
+  else
+    while (val) {
+      tmp[i++] = digits[val % base];
+      val /= base;
+    }
+  while (i < min_digits)
+    tmp[i++] = '0';
+  while (i-- > 0)
+    ob_char(o, tmp[i]);
+}
+
+static void ob_int(struct outbuf *o, int64_t v, int min_digits) {
+  if (v < 0) {
+    ob_char(o, '-');
+    ob_uint(o, (uint64_t)(-v), 10, min_digits, 0);
+  } else {
+    ob_uint(o, (uint64_t)v, 10, min_digits, 0);
+  }
+}
+
+int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
+  struct outbuf o = {buf, cap, 0};
+  if (!buf || cap == 0) {
+    // Contar longitud sin escribir.
+    o.buf = NULL;
+    o.cap = 0;
+  }
+  while (*fmt) {
+    if (*fmt != '%') {
+      ob_char(&o, *fmt++);
+      continue;
+    }
+    fmt++;
+
+    int min_digits = 0;
+    int is_long = 0, is_llong = 0, is_size = 0;
+
+    while (*fmt >= '0' && *fmt <= '9') {
+      min_digits = min_digits * 10 + (*fmt - '0');
+      fmt++;
+    }
+    while (*fmt == 'l') {
+      if (is_long)
+        is_llong = 1;
+      is_long = 1;
+      fmt++;
+    }
+    if (*fmt == 'z') {
+      is_size = 1;
+      fmt++;
+    }
+
+    switch (*fmt) {
+    case 'd':
+    case 'i': {
+      int64_t v;
+      if (is_llong || is_long)
+        v = va_arg(ap, int64_t);
+      else if (is_size)
+        v = (int64_t)va_arg(ap, size_t);
+      else
+        v = va_arg(ap, int);
+      ob_int(&o, v, min_digits);
+      break;
+    }
+    case 'u': {
+      uint64_t v;
+      if (is_llong || is_long)
+        v = va_arg(ap, uint64_t);
+      else if (is_size)
+        v = va_arg(ap, size_t);
+      else
+        v = va_arg(ap, unsigned int);
+      ob_uint(&o, v, 10, min_digits, 0);
+      break;
+    }
+    case 'x':
+    case 'X': {
+      uint64_t v;
+      if (is_llong || is_long)
+        v = va_arg(ap, uint64_t);
+      else if (is_size)
+        v = va_arg(ap, size_t);
+      else
+        v = va_arg(ap, unsigned int);
+      ob_uint(&o, v, 16, min_digits ? min_digits : 1, *fmt == 'X');
+      break;
+    }
+    case 'p': {
+      uint64_t v = (uint64_t)va_arg(ap, void *);
+      ob_char(&o, '0');
+      ob_char(&o, 'x');
+      ob_uint(&o, v, 16, 16, 0);
+      break;
+    }
+    case 'c':
+      ob_char(&o, (char)va_arg(ap, int));
+      break;
+    case 's': {
+      const char *s = va_arg(ap, const char *);
+      if (!s)
+        s = "(null)";
+      ob_str(&o, s);
+      break;
+    }
+    case '%':
+      ob_char(&o, '%');
+      break;
+    default:
+      ob_char(&o, '%');
+      ob_char(&o, *fmt);
+      break;
+    }
+    if (*fmt)
+      fmt++;
+  }
+
+  // Terminador. Si cap>0, siempre escribimos '\0'.
+  if (cap > 0) {
+    size_t term = (o.pos < cap) ? o.pos : cap - 1;
+    buf[term] = '\0';
+  }
+  return (int)o.pos;
+}
+
+int snprintf(char *buf, size_t size, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vsnprintf(buf, size, fmt, ap);
+  va_end(ap);
+  return r;
+}

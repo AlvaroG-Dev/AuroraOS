@@ -24,7 +24,7 @@ APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race \
        sbrk_shrink calloc_overflow shell ls cat app_mkdir app_rm app_cp app_pwd \
        app_mv \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel \
-       win_blit_fault
+       win_blit_fault app_kill 
 
 all: $(APPS)
 
@@ -241,8 +241,14 @@ app_mv: apps/mv/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp mv ../sysroot/apps/
 
+app_kill: apps/kill/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/kill/main.c -o kill.o
+	$(LD) -o kill $(LIB_OBJS) kill.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp kill ../sysroot/apps/
+
 clean:
 	rm -f *.o lib/*.o
 	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel win_blit_fault shell ls cat
-	rm -f mkdir rm cp pwd mv
+	rm -f mkdir rm cp pwd mv kill

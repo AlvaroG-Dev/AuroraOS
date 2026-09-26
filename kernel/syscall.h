@@ -40,6 +40,7 @@
 #define SYS_RENAME 32
 #define SYS_CHDIR 33
 #define SYS_GETCWD 34
+#define SYS_KILL 35
 
 typedef struct {
   uint64_t cr3_phys;

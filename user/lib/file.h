@@ -2,6 +2,7 @@
 #define USER_FILE_H
 
 #include "../syscall.h"
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -34,5 +35,11 @@ int rename_path(const char *oldpath, const char *newpath);
 
 int chdir(const char *path);
 int getcwd(char *buf, size_t size);
+
+// [libc] printf-family formateado a buffer.
+// Soporta %s %d %i %u %x %X %c %p %% y width con cero a la izquierda
+// (%02x, %08x...). Modificadores l, ll, z.
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
 #endif

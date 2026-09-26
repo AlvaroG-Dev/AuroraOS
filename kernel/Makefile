@@ -34,7 +34,7 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
         process.o elf.o klog.o pf.o panic.o driver.o input.o wait.o tty.o test.o acpi.o apic.o time.o block.o ata_pio.o \
         ata_common.o atapi.o ata_dma.o ahci.o completion.o part.o fat32.o gfx/gfx.o gfx/window.o \
         ipi.o gfx/compositor.o gfx/taskbar.o gfx/font_aa.o gfx/font_manager.o gfx/winsrv.o gfx/gfx_filter.o \
-        uaccess.o uaccess_asm.o uaccess_faults.o \
+        uaccess.o uaccess_asm.o uaccess_faults.o signal.o \
         tests/pmm_stress.o tests/kernel_tests.o \
         smp_trampoline.o smp_boot.o
 TARGET  = kernel.elf

@@ -38,6 +38,12 @@
 #define SYS_RENAME 32
 #define SYS_CHDIR 33
 #define SYS_GETCWD 34
+#define SYS_KILL 35
+
+#define SIGHUP 1
+#define SIGINT 2
+#define SIGKILL 9
+#define SIGTERM 15
 
 #define WNOHANG 1
 #define O_RDONLY 0x0000
@@ -252,6 +258,10 @@ static inline int sys_chdir(const char *path) {
 }
 static inline int sys_getcwd(char *buf, size_t size) {
   return (int)syscall(SYS_GETCWD, (uint64_t)buf, (uint64_t)size, 0, 0, 0);
+}
+
+static inline int sys_kill(int pid, int sig) {
+  return (int)syscall(SYS_KILL, (uint64_t)(int64_t)pid, (uint64_t)sig, 0, 0, 0);
 }
 
 void sys_exit(int code);

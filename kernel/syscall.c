@@ -10,6 +10,7 @@
 #include "process.h"
 #include "sched.h"
 #include "serial.h"
+#include "signal.h"
 #include "spinlock.h"
 #include "string.h"
 #include "uaccess.h"
@@ -840,6 +841,40 @@ static int64_t sys_getcwd_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   return (int64_t)len;
 }
 
+static int64_t sys_kill_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  int32_t pid = (int32_t)a1;
+  int sig = (int)a2;
+  if (sig < 1 || sig >= SIG_MAX)
+    return -EINVAL;
+
+  process_t *target = NULL;
+  if (pid > 0) {
+    target = process_find_by_pid((uint32_t)pid);
+  } else if (pid == 0) {
+    target = process_current();
+  } else {
+    return -EINVAL;
+  }
+  if (!target)
+    return -ENOENT;
+
+  __atomic_fetch_or(&target->pending_signals, 1ULL << sig, __ATOMIC_RELEASE);
+
+  // Si la tarea destino está bloqueada en una wait queue, despertarla
+  // para que retorne del syscall y vea la señal pendiente. En este MVP
+  // solo las wait queues del proceso (child_wq) se despiertan; no hay
+  // canales de bloqueo más complejos.
+  if (target->task) {
+    wake_up_all(&target->child_wq);
+  }
+
+  return 0;
+}
+
 // ===========================================================================
 // Tabla de syscalls
 // ===========================================================================
@@ -879,6 +914,7 @@ static const syscall_entry_t syscall_table[] = {
     [SYS_RENAME] = {sys_rename_k, "rename"},
     [SYS_CHDIR] = {sys_chdir_k, "chdir"},
     [SYS_GETCWD] = {sys_getcwd_k, "getcwd"},
+    [SYS_KILL] = {sys_kill_k, "kill"},
 };
 
 // ===========================================================================
@@ -900,6 +936,10 @@ uint64_t syscall_handler_c(registers_t *regs) {
     LOG_WARN("[SYSCALL] num desconocido: %lu", (unsigned long)num);
     return err(ENOSYS);
   }
+
+  // [SIG] Aplica señales pendientes antes de volver a userland.
+  // Si la acción es fatal, no retorna.
+  signal_check_pending();
 
   return (uint64_t)syscall_table[num].fn(arg1, arg2, arg3, arg4, arg5);
 }

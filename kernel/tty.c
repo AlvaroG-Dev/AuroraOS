@@ -32,6 +32,7 @@ void tty_receive_char(tty_t *tty, char c) {
   if (!tty || !tty_ready)
     return;
 
+  LOG_DEBUG("[TTY-IN] byte=0x%02x", (unsigned)(uint8_t)c); // <-- añade esto
   // Eco a serial (debug).
   unsigned long flags = spin_lock_irqsave(&tty->lock);
   tty_echo_serial(c);
