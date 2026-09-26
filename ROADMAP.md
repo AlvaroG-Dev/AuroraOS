@@ -51,9 +51,11 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [ ] Documentar invariantes importantes del scheduler y memoria.
 
 **Deuda técnica de 1.2 (obligatoria antes de Fase 5 — Networking):**
-- `sched_kick_idle_cpu`: leer `per_cpu(current_task, cpu)` con `__atomic_load_n(ACQUIRE)`.
-- `sched_tick`: escribir `this_cpu(current_task)` con `__atomic_store_n(RELEASE)`.
-- Test de regresión: task migrando con `cpu_affinity=-1` y canary de stack verificado tras cada wake.
+- [x] `sched_kick_idle_cpu`: leer `per_cpu(current_task, cpu)` con `__atomic_load_n(ACQUIRE)`.
+- [x] `sched_tick`: publicar `this_cpu(current_task)` con `__atomic_store_n(RELEASE)`.
+- [x] `need_resched`: publicación/consumo atómico con ACQUIRE/RELEASE + exchange.
+- [x] `on_cpu`: transición de context switch publicada atómicamente con `xchg`.
+- [x] Test de regresión: task migrando con `cpu_affinity=-1` y stack canary verificado tras la migración.
 
 ### 1.3 Testing y CI
 - [x] Mantener regresiones para cada bug crítico corregido.

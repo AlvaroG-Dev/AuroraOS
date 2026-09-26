@@ -66,8 +66,10 @@ fxsave64 [rax]
     ; on_cpu de la vieja = 0 y de la nueva = 1. Este es el punto
     ; seguro: ya no volveremos a tocar el stack viejo, así que otra
     ; CPU puede reapear `old` sin que nosotros usemos su memoria.
-    mov dword [rdi + TASK_OFF_ON_CPU], 0
-    mov dword [rsi + TASK_OFF_ON_CPU], 1
+    xor eax, eax
+    xchg dword [rdi + TASK_OFF_ON_CPU], eax
+    mov eax, 1
+    xchg dword [rsi + TASK_OFF_ON_CPU], eax
 
     ; 6. Cambiar CR3 si hace falta
     mov rax, [rsi + TASK_OFF_CR3]
