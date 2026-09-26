@@ -326,20 +326,29 @@ void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
     // están libres, no hacemos nada y avisamos.
     uint64_t first_bit = phys_addr / PAGE_SIZE;
     int all_free = 1;
+    int all_used = 1;
     for (uint64_t i = 0; i < count; i++) {
       uint64_t b = first_bit + i;
       if (!bitmap_in_range(b)) {
         all_free = 0;
+        all_used = 0;
         break;
       }
-      if (bitmap_test_safe(bitmap, b)) { // bit=1 → usada
+      if (bitmap_test_safe(bitmap, b)) {
         all_free = 0;
-        break;
+      } else {
+        all_used = 0;
       }
     }
     if (all_free) {
       LOG_WARN("[PMM] doble free (rango buddy): phys=%p count=%lu",
                (void *)phys_addr, (unsigned long)count);
+      spin_unlock_irqrestore(&pmm_lock, flags);
+      return;
+    }
+    if (!all_used) {
+      LOG_ERR("[PMM] free de rango buddy parcialmente usado: phys=%p count=%lu",
+              (void *)phys_addr, (unsigned long)count);
       spin_unlock_irqrestore(&pmm_lock, flags);
       return;
     }
