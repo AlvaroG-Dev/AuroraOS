@@ -373,9 +373,11 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("OK");
 
   uint64_t max_phys_addr = 0;
-  if (boot.memmap && boot.memmap_size > 0) {
+  if (boot.memmap && boot.memmap_size > 0 &&
+      boot.memmap_desc_size >= 32 &&
+      boot.memmap_desc_size <= boot.memmap_size) {
     uint8_t *ptr = (uint8_t *)boot.memmap;
-    for (uint64_t i = 0; i < boot.memmap_size; i += boot.memmap_desc_size) {
+    for (uint64_t i = 0; i <= boot.memmap_size - boot.memmap_desc_size; i += boot.memmap_desc_size) {
       uint32_t type = *(uint32_t *)(ptr + i + 0);
       if (type != EFI_CONVENTIONAL_MEMORY)
         continue;
