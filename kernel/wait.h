@@ -47,3 +47,5 @@ void wake_up_interruptible_all(wait_queue_t *wq);
 void wake_up_one_locked(wait_queue_t *wq);
 
 #endif
+void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
+                                  uint64_t wait_seq);
