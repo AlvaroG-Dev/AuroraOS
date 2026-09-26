@@ -214,12 +214,14 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
     return -1;
   }
 
-  // Ajustar src_x/src_y si el rectángulo destino se sale de la ventana
-  // por la izquierda/arriba.
-  int local_src_x = src_x;
-  int local_src_y = src_y;
-  int dst_x = x, dst_y = y;
-  int copy_w = w, copy_h = h;
+  // Hacer todo el clipping en 64 bits: x/y/w/h llegan desde userland
+  // y las sumas signed de int podrían desbordar antes de comprobar límites.
+  int64_t local_src_x = src_x;
+  int64_t local_src_y = src_y;
+  int64_t dst_x = x;
+  int64_t dst_y = y;
+  int64_t copy_w = w;
+  int64_t copy_h = h;
 
   if (dst_x < 0) {
     local_src_x += -dst_x;
@@ -232,9 +234,9 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
     dst_y = 0;
   }
   if (dst_x + copy_w > win->content_w)
-    copy_w = win->content_w - dst_x;
+    copy_w = (int64_t)win->content_w - dst_x;
   if (dst_y + copy_h > win->content_h)
-    copy_h = win->content_h - dst_y;
+    copy_h = (int64_t)win->content_h - dst_y;
   if (copy_w <= 0 || copy_h <= 0) {
     spin_unlock_irqrestore(&winsrv_lock, flags);
     return 0;
@@ -244,7 +246,6 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
     spin_unlock_irqrestore(&winsrv_lock, flags);
     return -1;
   }
-
   /*
    * Nunca acceder directamente al buffer de userland desde Ring 0.
    * access_ok() solo valida el rango de direcciones; la página puede estar
@@ -265,10 +266,10 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
   uint32_t row_buf[256];
   const int chunk_pixels = (int)(sizeof(row_buf) / sizeof(row_buf[0]));
 
-  for (int row = 0; row < copy_h; row++) {
-    int copied = 0;
+  for (int64_t row = 0; row < copy_h; row++) {
+    int64_t copied = 0;
     while (copied < copy_w) {
-      int chunk = copy_w - copied;
+      int64_t chunk = copy_w - copied;
       if (chunk > chunk_pixels)
         chunk = chunk_pixels;
 
