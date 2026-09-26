@@ -594,7 +594,7 @@ static void sched_kick_idle_cpu(task_t *t) {
     } else if (cpu >= 0 && cpu < MAX_CPUS) {
       task_t *cur = sched_read_current(cpu);
       if (cur && cur->is_idle && sched_task_ptr_valid(cur)) {
-        cur->need_resched = 1;
+        __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
         target_cpu = cpu;
         dest_lapic = per_cpu(lapic_id, cpu);
 
