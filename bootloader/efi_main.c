@@ -362,9 +362,11 @@ static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
   EFI_STATUS status;
 
   EFI_PHYSICAL_ADDRESS safe_memmap_addr = 0xFFFFFFFF;
+  UINTN safe_memmap_capacity =
+      (mem_map.map_size + 0xFFF + 2048) & ~((UINTN)0xFFF);
   status = uefi_call_wrapper(
       BS->AllocatePages, 4, AllocateMaxAddress, EfiLoaderData,
-      (mem_map.map_size + 0xFFF + 2048) / 0x1000, &safe_memmap_addr);
+      safe_memmap_capacity / 0x1000, &safe_memmap_addr);
   if (EFI_ERROR(status)) {
     Print(L"[BOOT] Fallo alocando buffer seguro para memmap\n");
     return;
@@ -372,20 +374,48 @@ static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
 
   Print(L"[BOOT] Salida de Boot Services...\n");
 
-  get_memory_map(image_handle);
+  status = get_memory_map(image_handle);
+  if (EFI_ERROR(status)) {
+    Print(L"[BOOT] Error obteniendo el memmap final: %r\n", status);
+    return;
+  }
+  if (mem_map.map_size > safe_memmap_capacity) {
+    Print(L"[BOOT] Memmap final demasiado grande para el buffer seguro\n");
+    return;
+  }
   CopyMem((VOID *)safe_memmap_addr, mem_map.map, mem_map.map_size);
   kinfo->memmap = safe_memmap_addr;
+  kinfo->memmap_size = mem_map.map_size;
+  kinfo->memmap_desc_size = mem_map.desc_size;
+  kinfo->memmap_desc_ver = mem_map.desc_version;
 
   __asm__ volatile("cli");
 
   status =
       uefi_call_wrapper(BS->ExitBootServices, 2, image_handle, mem_map.map_key);
   if (EFI_ERROR(status)) {
-    get_memory_map(image_handle);
+    status = get_memory_map(image_handle);
+    if (EFI_ERROR(status)) {
+      Print(L"[BOOT] Error renovando el memmap tras fallo de ExitBootServices: %r\n",
+            status);
+      return;
+    }
+    if (mem_map.map_size > safe_memmap_capacity) {
+      Print(L"[BOOT] Memmap renovado demasiado grande para el buffer seguro\n");
+      return;
+    }
     CopyMem((VOID *)safe_memmap_addr, mem_map.map, mem_map.map_size);
     kinfo->memmap = safe_memmap_addr;
+    kinfo->memmap_size = mem_map.map_size;
+    kinfo->memmap_desc_size = mem_map.desc_size;
+    kinfo->memmap_desc_ver = mem_map.desc_version;
     status = uefi_call_wrapper(BS->ExitBootServices, 2, image_handle,
                                mem_map.map_key);
+    if (EFI_ERROR(status)) {
+      Print(L"[BOOT] ExitBootServices fallo en el segundo intento: %r\n",
+            status);
+      return;
+    }
   }
 
   __asm__ volatile("movq %0, %%cr3" : : "r"(pml4_addr) : "memory");
