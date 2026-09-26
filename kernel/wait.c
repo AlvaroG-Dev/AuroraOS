@@ -20,6 +20,7 @@ static void wq_add_locked(wait_queue_t *wq, task_t *t) {
   wait_queue_entry_t *e = &t->wait_entry;
 
   e->task = t;
+  __atomic_fetch_add(&t->wait_seq, 1, __ATOMIC_ACQ_REL);
   e->next = wq->head;
   wq->head = e;
   wq->nr_waiting++;
@@ -219,4 +220,30 @@ void wake_up_one_locked(wait_queue_t *wq) {
   e->next = NULL;
   sched_make_ready(t);
   task_put(t);
+}
+void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
+                                  uint64_t wait_seq) {
+  if (!wq || !task) return;
+  int removed = 0;
+  unsigned long flags = spin_lock_irqsave(&wq->lock);
+  if (task->waiting_on == wq &&
+      __atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE) == wait_seq &&
+      task->state == TASK_BLOCKED) {
+    wait_queue_entry_t **pp = &wq->head;
+    while (*pp) {
+      if ((*pp)->task == task) {
+        wait_queue_entry_t *victim = *pp;
+        *pp = victim->next;
+        wq->nr_waiting--;
+        task->waiting_on = NULL;
+        victim->task = NULL;
+        victim->next = NULL;
+        removed = 1;
+        break;
+      }
+      pp = &(*pp)->next;
+    }
+  }
+  spin_unlock_irqrestore(&wq->lock, flags);
+  if (removed) { sched_make_ready(task); task_put(task); }
 }

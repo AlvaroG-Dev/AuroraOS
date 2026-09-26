@@ -168,6 +168,7 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
 
   task->wait_entry.task = NULL;
   task->wait_entry.next = NULL;
+  task->wait_seq = 0;
 
   task->mailbox.head = 0;
   task->mailbox.tail = 0;
@@ -874,143 +875,32 @@ uint64_t sched_get_ticks(void) { return tick_count; }
 // ---------------------------------------------------------------------------
 void sched_wake_expired(void) {
   uint64_t now = sched_get_ticks();
-
-  /*
-   * No usamos un array fijo en la pila.
-   *
-   * Antes había 16 entradas y, si expiraban más de 16 wait queues distintas
-   * en el mismo tick, las tareas restantes perdían su wake_deadline sin que
-   * su cola llegara a despertarse. Eso podía dejarlas bloqueadas para siempre.
-   *
-   * Tampoco basta con cambiar 16 por 1200: 1200 punteros son ~9.6 KiB,
-   * más que TASK_STACK_SIZE (8 KiB), y seguiría siendo un límite arbitrario.
-   *
-   * Construimos la lista de wait queues en el heap. La capacidad inicial es
-   * el número de tareas existente bajo sched_lock, que es una cota superior
-   * al número de wait queues distintas. Si se crean tareas concurrentemente
-   * antes de la segunda pasada, detectamos overflow y reintentamos con una
-   * capacidad mayor.
-   *
-   * Importante: recopilamos cada wait queue como máximo una vez por llamada.
-   * Una tarea despertada puede volver a bloquearse antes de que termine esta
-   * función; si se volviera a escanear sin recordar las colas ya procesadas,
-   * podría despertarse repetidamente en el mismo tick por un deadline
-   * absoluto que sigue vencido.
-   */
-
+  typedef struct { task_t *task; wait_queue_t *wq; uint64_t wait_seq; } timeout_target_t;
   size_t capacity = 0;
-
   while (1) {
     unsigned long flags = spin_lock_irqsave(&sched_lock);
-
     size_t task_count = 0;
-    if (task_list_head) {
-      task_t *p = task_list_head;
-      task_t *start_task = p;
-      do {
-        task_count++;
-        p = p->next;
-      } while (p && p != start_task);
-    }
-
+    if (task_list_head) { task_t *p=task_list_head,*s=p; do { task_count++; p=p->next; } while(p&&p!=s); }
     spin_unlock_irqrestore(&sched_lock, flags);
-
-    if (task_count == 0)
-      return;
-
-    if (capacity < task_count)
-      capacity = task_count;
-
-    wait_queue_t **wqs = (wait_queue_t **)kmalloc(capacity * sizeof(*wqs));
-    if (!wqs) {
-      /*
-       * No podemos construir una lista completa. No consumimos ningún
-       * deadline aquí; se reintentará en el siguiente tick. Es preferible
-       * retrasar un timeout que perderlo definitivamente.
-       */
-      LOG_WARN("[SCHED] Sin memoria para procesar timeouts (%zu tareas)",
-               task_count);
-      return;
-    }
-
-    size_t n_wqs = 0;
-    int overflow = 0;
-
-    flags = spin_lock_irqsave(&sched_lock);
-
-    if (task_list_head) {
-      task_t *p = task_list_head;
-      task_t *start_task = p;
-
-      do {
-        if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
-            now >= p->wake_deadline && p->waiting_on != NULL) {
-          wait_queue_t *wq = p->waiting_on;
-
-          int dup = 0;
-          for (size_t i = 0; i < n_wqs; i++) {
-            if (wqs[i] == wq) {
-              dup = 1;
-              break;
-            }
-          }
-
-          if (!dup) {
-            if (n_wqs >= capacity) {
-              overflow = 1;
-              break;
-            }
-            wqs[n_wqs++] = wq;
-          }
-        }
-
-        p = p->next;
-      } while (p && p != start_task);
-    }
-
-    if (!overflow) {
-      /*
-       * Ahora que sabemos que todas las wait queues caben en el array,
-       * consumimos los deadlines bajo el mismo sched_lock. Así un overflow
-       * nunca puede dejar una tarea sin deadline y sin wakeup.
-       */
-      if (task_list_head) {
-        task_t *p = task_list_head;
-        task_t *start_task = p;
-        do {
-          if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
-              now >= p->wake_deadline && p->waiting_on != NULL) {
-            for (size_t i = 0; i < n_wqs; i++) {
-              if (wqs[i] == p->waiting_on) {
-                p->wake_deadline = 0;
-                break;
-              }
-            }
-          }
-          p = p->next;
-        } while (p && p != start_task);
+    if (!task_count) return;
+    if (capacity < task_count) capacity = task_count;
+    timeout_target_t *targets=(timeout_target_t*)kmalloc(capacity*sizeof(*targets));
+    if (!targets) { LOG_WARN("[SCHED] Sin memoria para procesar timeouts (%zu tareas)",task_count); return; }
+    size_t n=0; int overflow=0;
+    flags=spin_lock_irqsave(&sched_lock);
+    if(task_list_head){ task_t *p=task_list_head,*s=p; do{
+      if(p->state==TASK_BLOCKED && p->wake_deadline>0 && now>=p->wake_deadline && p->waiting_on){
+        if(n>=capacity){overflow=1;break;}
+        targets[n].task=p; targets[n].wq=p->waiting_on;
+        targets[n].wait_seq=__atomic_load_n(&p->wait_seq,__ATOMIC_ACQUIRE);
+        p->wake_deadline=0; task_get(p); n++;
       }
-    }
-
-    spin_unlock_irqrestore(&sched_lock, flags);
-
-    if (overflow) {
-      kfree(wqs);
-      /*
-       * Puede haber entrado una tarea nueva entre las dos pasadas.
-       * Aumentamos la capacidad y repetimos sin modificar deadlines.
-       */
-      capacity *= 2;
-      if (capacity < task_count + 1)
-        capacity = task_count + 1;
-      continue;
-    }
-
-    for (size_t i = 0; i < n_wqs; i++)
-      wake_up_all(wqs[i]);
-
-    kfree(wqs);
-    return;
+      p=p->next;
+    }while(p&&p!=s); }
+    spin_unlock_irqrestore(&sched_lock,flags);
+    if(overflow){ for(size_t i=0;i<n;i++) task_put(targets[i].task); kfree(targets); capacity*=2; if(capacity<task_count+1) capacity=task_count+1; continue; }
+    for(size_t i=0;i<n;i++){ wait_queue_wake_timeout_task(targets[i].wq,targets[i].task,targets[i].wait_seq); task_put(targets[i].task); }
+    kfree(targets); return;
   }
 }
 

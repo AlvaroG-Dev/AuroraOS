@@ -61,6 +61,7 @@ typedef struct task {
   int cpu_affinity;
   volatile int on_cpu;
   wait_queue_entry_t wait_entry;
+  volatile uint64_t wait_seq;
   // [FIX timeout] Tick absoluto en el que la tarea debe despertar aunque
   // nadie la despierte explícitamente. 0 = sin timeout (espera indefinida).
   // Lo usa wait_event_interruptible_timeout para que el scheduler la
