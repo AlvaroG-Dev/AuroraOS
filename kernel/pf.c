@@ -112,6 +112,8 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
     return 0;
   if (fault_addr < proc->stack_low)
     return 0;
+  if (flags & 0x10) // instruction fetch: the user stack is NX
+    return 0;
 
   uint64_t page = fault_addr & ~0xFFFULL;
   uint64_t phys = alloc_user_page_zeroed();
@@ -137,9 +139,11 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
 static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
                           uint64_t err_code) {
   int is_write = (err_code & 0x02) != 0;
-  if (is_write && !(vma->flags & PTE_WRITABLE)) {
+  int is_fetch = (err_code & 0x10) != 0;
+  if (is_write && !(vma->flags & PTE_WRITABLE))
     return 0;
-  }
+  if (is_fetch && (vma->flags & PTE_NX))
+    return 0;
 
   uint64_t page = fault_addr & ~0xFFFULL;
   uint64_t phys = alloc_user_page_zeroed();
@@ -213,10 +217,6 @@ static int handle_page_fault_inner(registers_t *regs) {
   if (user) {
     if (present) {
       kill_current_process(regs, "protection violation");
-      return 1;
-    }
-    if (fetch) {
-      kill_current_process(regs, "instruction fetch at unmapped");
       return 1;
     }
 
