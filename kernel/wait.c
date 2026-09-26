@@ -247,3 +247,34 @@ void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
   spin_unlock_irqrestore(&wq->lock, flags);
   if (removed) { sched_make_ready(task); task_put(task); }
 }
+
+void wait_queue_interrupt_task(task_t *task) {
+  if (!task)
+    return;
+
+  wait_queue_t *wq = task->waiting_on;
+  if (!wq)
+    return;
+
+  unsigned long flags = spin_lock_irqsave(&wq->lock);
+  if (task->waiting_on == wq && task->state == TASK_BLOCKED) {
+    wait_queue_entry_t **pp = &wq->head;
+    while (*pp) {
+      if ((*pp)->task == task) {
+        wait_queue_entry_t *victim = *pp;
+        *pp = victim->next;
+        wq->nr_waiting--;
+        task->waiting_on = NULL;
+        task->wake_reason = -EINTR;
+        victim->task = NULL;
+        victim->next = NULL;
+        sched_make_ready(task);
+        spin_unlock_irqrestore(&wq->lock, flags);
+        task_put(task);
+        return;
+      }
+      pp = &(*pp)->next;
+    }
+  }
+  spin_unlock_irqrestore(&wq->lock, flags);
+}

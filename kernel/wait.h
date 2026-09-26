@@ -49,4 +49,5 @@ void wake_up_one_locked(wait_queue_t *wq);
 
 void wait_queue_wake_timeout_task(wait_queue_t *wq, struct task *task,
                                   uint64_t wait_seq);
+void wait_queue_interrupt_task(struct task *task);
 #endif
