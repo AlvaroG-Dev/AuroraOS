@@ -52,8 +52,7 @@ static void sched_unlock_irqrestore(unsigned long flags) {
 static void idle_loop(void) {
   while (1) {
     task_t *cur = sched_current();
-    if (cur && cur->need_resched) {
-      cur->need_resched = 0;
+    if (cur && __atomic_exchange_n((int *)&cur->need_resched, 0, __ATOMIC_ACQ_REL)) {
       sched_yield();
     }
     __asm__ volatile("sti; hlt");
@@ -236,7 +235,7 @@ void sched_init(void) {
     idle_tasks[i] = idle;
   }
 
-  this_cpu(current_task) = idle_tasks[0];
+  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), idle_tasks[0], __ATOMIC_RELEASE);
 
   LOG_INFO("[SCHED] Scheduler + SSE/FPU SMP inicializado (idle tasks creadas)");
 }
@@ -287,7 +286,7 @@ static void reap_dead_tasks(void) {
 
   if (task_list_head->next == task_list_head) {
     if (task_list_head->state == TASK_DEAD && !task_list_head->is_idle &&
-        task_list_head != cur && task_list_head->on_cpu == 0) {
+        task_list_head != cur && __atomic_load_n(&task_list_head->on_cpu, __ATOMIC_ACQUIRE) == 0) {
       task_t *dead = task_list_head;
       task_list_head = NULL;
       LOG_TRACE("[SCHED] Limpiando última tarea zombie ID=%u (refcount=%d)",
@@ -344,7 +343,7 @@ static void sched_check_invariants(task_t *t) {
   if (t->refcount <= 0) {
     LOG_PANIC("sched: task %u con refcount=%d invalido", t->id, t->refcount);
   }
-  if (t->on_cpu) {
+  if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
     LOG_PANIC("sched: task %u elegida con on_cpu=1 (sigue en otra CPU)", t->id);
   }
 }
@@ -389,7 +388,7 @@ void sched_tick(void) {
 
   if (curr->preempt_count > 0) {
     if (force)
-      curr->need_resched = 1;
+      __atomic_store_n((int *)&curr->need_resched, 1, __ATOMIC_RELEASE);
     return;
   }
 
@@ -461,7 +460,7 @@ void sched_tick(void) {
   }
   next->state = TASK_RUNNING;
   next->yield_requested = 0;
-  this_cpu(current_task) = next;
+  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), next, __ATOMIC_RELEASE);
 
   // on_cpu lo actualiza task_switch (asm) justo después de cargar el stack
   // de la nueva tarea (old->on_cpu = 0, new->on_cpu = 1). No tocarlo aquí.
@@ -510,7 +509,7 @@ task_t *sched_current(void) { return (task_t *)this_cpu(current_task); }
 void sched_mark_need_resched(void) {
   task_t *cur = sched_current();
   if (cur) {
-    cur->need_resched = 1;
+    __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
   }
 }
 
@@ -591,7 +590,7 @@ static void sched_kick_idle_cpu(task_t *t) {
     if (cpu == me) {
       task_t *cur = sched_read_current(me);
       if (cur && cur->is_idle && sched_task_ptr_valid(cur))
-        cur->need_resched = 1;
+        __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
     } else if (cpu >= 0 && cpu < MAX_CPUS) {
       task_t *cur = sched_read_current(cpu);
       if (cur && cur->is_idle && sched_task_ptr_valid(cur)) {
@@ -634,7 +633,7 @@ static void sched_kick_idle_cpu(task_t *t) {
       continue;
     }
 
-    cur->need_resched = 1;
+    __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
     target_cpu = cpu;
     dest_lapic = per_cpu(lapic_id, cpu);
 
@@ -648,7 +647,7 @@ static void sched_kick_idle_cpu(task_t *t) {
   if (!send_ipi) {
     task_t *me_task = sched_read_current(me);
     if (me_task && me_task->is_idle && sched_task_ptr_valid(me_task))
-      me_task->need_resched = 1;
+      __atomic_store_n((int *)&me_task->need_resched, 1, __ATOMIC_RELEASE);
   }
 
   spin_unlock_irqrestore(&sched_lock, flags);
@@ -800,7 +799,7 @@ __attribute__((noreturn)) void sched_start(task_t *task) {
 
   task->state = TASK_RUNNING;
   task->on_cpu = 1;
-  this_cpu(current_task) = task;
+__atomic_store_n((task_t *volatile *)&this_cpu(current_task), task, __ATOMIC_RELEASE);
 
   task_jump_to(task);
   __builtin_unreachable();
@@ -818,7 +817,7 @@ __attribute__((noreturn)) void sched_start_ap(void) {
 
   idle->state = TASK_RUNNING;
   idle->on_cpu = 1;
-  this_cpu(current_task) = idle;
+__atomic_store_n((task_t *volatile *)&this_cpu(current_task), idle, __ATOMIC_RELEASE);
 
   uint64_t kstack = (uint64_t)((uint8_t *)idle->stack + TASK_STACK_SIZE);
   tss_set_rsp0(kstack);
