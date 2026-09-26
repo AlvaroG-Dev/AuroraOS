@@ -86,3 +86,26 @@ void gfx_bit_blat_rounded(uint32_t *dst, int dst_stride, const uint32_t *src,
                           int src_w, int src_h, rect_t clip, int dst_x,
                           int dst_y, int win_x, int win_y, int win_w, int win_h,
                           int radius);
+
+// ---------------------------------------------------------------------------
+// Aurora compositing helpers
+// ---------------------------------------------------------------------------
+/* Relleno con gradiente vertical entre dos colores. */
+void gfx_gradient_rect_v(uint32_t *dst, int dst_stride, rect_t clip,
+                         rect_t rect, uint32_t top_color,
+                         uint32_t bottom_color);
+
+/* Relleno con gradiente horizontal entre dos colores. */
+void gfx_gradient_rect_h(uint32_t *dst, int dst_stride, rect_t clip,
+                         rect_t rect, uint32_t left_color,
+                         uint32_t right_color);
+
+/* Relleno redondeado con gradiente vertical. */
+void gfx_fill_rounded_rect_gradient_v(uint32_t *dst, int dst_stride,
+                                      rect_t clip, rect_t rect, int radius,
+                                      uint32_t top_color,
+                                      uint32_t bottom_color);
+
+/* Sombra en dos capas (cercana + lejana), tinte azulado sutil. */
+void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
+                            rect_t win_rect, int corner_radius);

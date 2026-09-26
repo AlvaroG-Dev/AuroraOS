@@ -441,6 +441,8 @@ taskbar_item_t *taskbar_add_item_custom_width(
   item->width = explicit_width; // 0 para automático, >0 para explícito
   item->on_click = on_click;
   item->next = NULL;
+  item->hover_t = 0;
+  item->is_hovered = 0;
 
   int i = 0;
   while (label && label[i] && i < 31) {
@@ -502,11 +504,17 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
   rect_t bar_rect = taskbar_get_bounds(screen_w, screen_h);
   int item_y = bar_rect.y + (TASKBAR_BAR_H - TASKBAR_ITEM_H) / 2;
 
-  gfx_blend_rect(dst, stride, clip, bar_rect, 0xEE202026);
+  /* --- Fondo de la barra: gradiente vertical sutil (Mica) --- */
+  uint32_t bar_top = AURORA_TASKBAR_BG;
+  uint32_t bar_bot = 0xE8151520;
+  gfx_gradient_rect_v(dst, stride, clip, bar_rect, bar_top, bar_bot);
+
+  /* Línea de luz superior */
   gfx_blend_rect(dst, stride, clip, (rect_t){0, bar_rect.y, screen_w, 1},
-                 0x30FFFFFF);
+                 AURORA_TASKBAR_TOPLIGHT);
+  /* Segunda línea (por dentro, oscura) */
   gfx_blend_rect(dst, stride, clip, (rect_t){0, bar_rect.y + 1, screen_w, 1},
-                 0x12000000);
+                 0x10000000);
 
   int item_count = 0;
   int items_w = taskbar_items_block_width(fonts, &item_count);
@@ -531,19 +539,29 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
     int center_x = current_x + layout.item_w / 2;
     int center_y = item_y + TASKBAR_ITEM_H / 2;
 
+    /* --- Fondo del item con hover animado --- */
+    uint32_t base_a =
+        curr->is_active ? TASKBAR_ACTIVE_ALPHA : TASKBAR_INACTIVE_ALPHA;
+    int hv = curr->hover_t;
+    if (hv < 0)
+      hv = 0;
+    if (hv > 256)
+      hv = 256;
+    uint32_t a =
+        base_a +
+        (uint32_t)(((int)TASKBAR_HOVER_ALPHA - (int)base_a) * hv) / 256;
+
+    gfx_fill_rounded_rect(dst, stride, clip, item_rect, TASKBAR_ITEM_RADIUS,
+                          (a << 24) | 0x00FFFFFF);
+
     if (curr->is_active) {
-      gfx_fill_rounded_rect(dst, stride, clip, item_rect, TASKBAR_ITEM_RADIUS,
-                            0x24FFFFFF);
       gfx_draw_rounded_border(dst, stride, clip, item_rect, TASKBAR_ITEM_RADIUS,
                               0x18FFFFFF);
-    } else {
-      gfx_fill_rounded_rect(dst, stride, clip, item_rect, TASKBAR_ITEM_RADIUS,
-                            0x06FFFFFF);
     }
 
     int content_x = current_x + (layout.item_w - layout.content_w) / 2;
 
-    // 1. Dibujar icono (BMP si está disponible, o vectorial Start, o Texto)
+    /* --- Icono --- */
     if (curr->has_icon_cache) {
       gfx_bit_blat(dst, stride, curr->icon_cache, 20, clip, content_x,
                    center_y - 10, 20, 20);
@@ -551,31 +569,37 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
       if (layout.has_label && layout.label_w > 0)
         content_x += TASKBAR_CONTENT_GAP;
     } else if (curr->icon_bmp_node) {
-      // [FIX PRINCIPAL] Antes se llamaba a bmp_draw_scaled directamente
-      // sobre "dst" (el backbuffer ya compuesto con el fondo de la
-      // pastilla redondeada). bmp_draw_scaled no garantiza mezcla alfa
-      // correcta contra lo que ya hay pintado debajo -> el icono salía
-      // con un recuadro/artefacto en vez de fundirse con el fondo, y
-      // además se recalculaba en CADA frame en vez de una sola vez.
-      //
-      // Ahora: decodificamos a un buffer local 20x20 (igual que hace
-      // taskbar_add_item_bmp normalmente) y componemos con gfx_bit_blat,
-      // que sí hace blending correcto (blend_pixel_fast) igual que el
-      // resto de iconos de la barra. Además dejamos el item "curado"
-      // (has_icon_cache=1) para que los siguientes frames usen la vía
-      // rápida de arriba sin volver a decodificar el BMP.
       for (int i = 0; i < 20 * 20; i++)
         curr->icon_cache[i] = 0;
       curr->has_icon_cache =
-          (bmp_draw_icon_scaled(curr->icon_bmp_node, curr->icon_cache, 20, 20) == 0);
+          (bmp_draw_icon_scaled(curr->icon_bmp_node, curr->icon_cache, 20,
+                                20) == 0);
       gfx_bit_blat(dst, stride, curr->icon_cache, 20, clip, content_x,
                    center_y - 10, 20, 20);
       content_x += 20;
       if (layout.has_label && layout.label_w > 0)
         content_x += TASKBAR_CONTENT_GAP;
     } else if (layout.has_start_icon) {
-      taskbar_draw_start_icon(dst, stride, clip, content_x, center_y,
-                              curr->icon_color);
+      /* Logo Start: 4 cuadrados. Azul (principal), blanco, 2 grises. */
+      int sz = TASKBAR_START_ICON_SQ;
+      int gap = TASKBAR_START_ICON_GAP;
+      int left = content_x;
+      int top = center_y - TASKBAR_START_ICON_SIZE / 2;
+
+      uint32_t c_blue = 0xFF3B82F6;  /* azul */
+      uint32_t c_white = 0xFFFFFFFF; /* blanco */
+      uint32_t c_gray = 0xFF808090;  /* gris medio */
+
+      gfx_fill_rounded_rect(dst, stride, clip, (rect_t){left, top, sz, sz}, 2,
+                            c_blue);
+      gfx_fill_rounded_rect(dst, stride, clip,
+                            (rect_t){left + sz + gap, top, sz, sz}, 2, c_white);
+      gfx_fill_rounded_rect(dst, stride, clip,
+                            (rect_t){left, top + sz + gap, sz, sz}, 2, c_gray);
+      gfx_fill_rounded_rect(dst, stride, clip,
+                            (rect_t){left + sz + gap, top + sz + gap, sz, sz},
+                            2, c_gray);
+
       content_x += TASKBAR_START_ICON_SIZE;
       if (layout.has_label && layout.label_w > 0)
         content_x += TASKBAR_CONTENT_GAP;
@@ -589,25 +613,30 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
         content_x += TASKBAR_CONTENT_GAP;
     }
 
-    // 2. Dibujar texto de la etiqueta
+    /* --- Etiqueta --- */
     if (layout.has_label && layout.label_w > 0) {
-      taskbar_draw_text_centered(dst, stride, clip,
-                                 content_x + layout.label_w / 2, center_y,
-                                 curr->label, 0xFFF4F4F6, FONT_ID_MAIN_BOLD,
-                                 fonts.label_font, layout.label_metrics);
+      taskbar_draw_text_centered(
+          dst, stride, clip, content_x + layout.label_w / 2, center_y,
+          curr->label, AURORA_TEXT_PRIMARY, FONT_ID_MAIN_BOLD, fonts.label_font,
+          layout.label_metrics);
     }
 
-    // 3. Indicador inferior para app activa
+    /* --- Indicador inferior de app activa --- */
     if (curr->is_active) {
-      rect_t indicator = {center_x - 8, bar_rect.y + TASKBAR_BAR_H - 4, 16, 3};
-      gfx_fill_rounded_rect(dst, stride, clip, indicator, 2, WIN11_ACCENT);
+      int ind_w = 16;
+      int ind_h = 3;
+      int ind_x = center_x - ind_w / 2;
+      int ind_y = bar_rect.y + TASKBAR_BAR_H - 5;
+      gfx_fill_rounded_rect(dst, stride, clip,
+                            (rect_t){ind_x, ind_y, ind_w, ind_h}, 2,
+                            0xFFFFFFFF);
     }
 
     current_x += layout.item_w + TASKBAR_ITEM_GAP;
     curr = curr->next;
   }
 
-  // Dibujar área de reloj...
+  /* --- Reloj --- */
   gfx_blend_rect(dst, stride, clip,
                  (rect_t){clock_area_x - TASKBAR_CLOCK_GAP / 2, bar_rect.y + 9,
                           TASKBAR_SEPARATOR_W, TASKBAR_BAR_H - 18},
@@ -621,14 +650,14 @@ void taskbar_render(uint32_t *dst, int stride, rect_t clip, int screen_w,
       taskbar_measure_text(fonts.clock_font, clock_time_buffer);
   taskbar_text_metrics_t date_metrics =
       taskbar_measure_text(fonts.clock_font, clock_date_buffer);
-  int center_x = clock_area_x + clock_area_w / 2;
+  int clock_center_x = clock_area_x + clock_area_w / 2;
   int time_y = bar_rect.y + TASKBAR_BAR_H / 2 - 6;
   int date_y = bar_rect.y + TASKBAR_BAR_H / 2 + 6;
-  taskbar_draw_text_centered(dst, stride, clip, center_x, time_y,
-                             clock_time_buffer, 0xFFD7D7DE, FONT_ID_MONO_BOLD,
+  taskbar_draw_text_centered(dst, stride, clip, clock_center_x, time_y,
+                             clock_time_buffer, 0xFFEEEEF5, FONT_ID_MONO_BOLD,
                              fonts.clock_font, time_metrics);
-  taskbar_draw_text_centered(dst, stride, clip, center_x, date_y,
-                             clock_date_buffer, 0xFFD7D7DE, FONT_ID_MONO_BOLD,
+  taskbar_draw_text_centered(dst, stride, clip, clock_center_x, date_y,
+                             clock_date_buffer, 0xCCDDDDE8, FONT_ID_MONO_BOLD,
                              fonts.clock_font, date_metrics);
 }
 
@@ -649,4 +678,90 @@ void taskbar_remove_item_ptr(taskbar_item_t *item) {
     prev = curr;
     curr = curr->next;
   }
+}
+
+void taskbar_set_hover(taskbar_item_t *item, int hovered) {
+  if (!item)
+    return;
+  item->is_hovered = hovered ? 1 : 0;
+}
+
+int taskbar_tick_hover(int dt_ms) {
+  int step = (256 * dt_ms) / 90;
+  if (step < 4)
+    step = 4;
+
+  int changed = 0;
+  taskbar_item_t *it = taskbar_items;
+  while (it) {
+    if (it->is_hovered && it->hover_t < 256) {
+      it->hover_t += step;
+      if (it->hover_t > 256)
+        it->hover_t = 256;
+      changed = 1;
+    } else if (!it->is_hovered && it->hover_t > 0) {
+      it->hover_t -= step;
+      if (it->hover_t < 0)
+        it->hover_t = 0;
+      changed = 1;
+    }
+    it = it->next;
+  }
+  return changed;
+}
+
+rect_t taskbar_item_get_bounds(taskbar_item_t *item, int screen_w,
+                               int screen_h) {
+  if (!item)
+    return (rect_t){0, 0, 0, 0};
+
+  taskbar_fonts_t fonts = taskbar_get_fonts();
+  rect_t bar_rect = taskbar_get_bounds(screen_w, screen_h);
+  int item_y = bar_rect.y + (TASKBAR_BAR_H - TASKBAR_ITEM_H) / 2;
+
+  int item_count = 0;
+  int items_w = taskbar_items_block_width(fonts, &item_count);
+  int clock_area_w = taskbar_clock_area_width(fonts);
+  int clock_area_x = screen_w - TASKBAR_BAR_PADDING_X - clock_area_w;
+  int centered_x = (screen_w - items_w) / 2;
+  int max_items_x = clock_area_x - TASKBAR_CLOCK_GAP - items_w;
+  int current_x = centered_x;
+
+  if (current_x < TASKBAR_BAR_PADDING_X)
+    current_x = TASKBAR_BAR_PADDING_X;
+  if (item_count > 0 && current_x > max_items_x)
+    current_x = max_items_x;
+  if (current_x < TASKBAR_BAR_PADDING_X)
+    current_x = TASKBAR_BAR_PADDING_X;
+
+  taskbar_item_t *curr = taskbar_items;
+  while (curr) {
+    taskbar_item_layout_t layout = taskbar_measure_item(curr, fonts);
+    if (curr == item) {
+      return (rect_t){current_x, item_y, layout.item_w, TASKBAR_ITEM_H};
+    }
+    current_x += layout.item_w + TASKBAR_ITEM_GAP;
+    curr = curr->next;
+  }
+  return (rect_t){0, 0, 0, 0};
+}
+
+taskbar_item_t *taskbar_get_item_at(int sx, int sy, int sw, int sh) {
+  return taskbar_hit_test(sx, sy, sw, sh);
+}
+
+taskbar_item_t *taskbar_items_head(void) { return taskbar_items; }
+
+int taskbar_has_active_hover(void) {
+  taskbar_item_t *it = taskbar_items;
+  while (it) {
+    if (it->hover_t > 0 && it->hover_t < 256)
+      return 1;
+    if (it->is_hovered && it->hover_t < 256)
+      return 1;
+    if (!it->is_hovered && it->hover_t > 0)
+      return 1;
+    it = it->next;
+  }
+  return 0;
 }

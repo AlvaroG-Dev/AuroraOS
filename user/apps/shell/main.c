@@ -602,10 +602,11 @@ int main(void) {
   // el tarfs (o no estaba empaquetado en el initrd), la ventana se
   // quedaba con el icono por defecto SIN ningún aviso visible. Ahora se
   // comprueba y se avisa por sys_print para poder depurarlo.
-  int icon_rc = sys_win_set_icon(win, "system/icons/terminal-icon.bmp");
+  int icon_rc = sys_win_set_icon(win, "system/icons/terminal-window-dark.bmp");
   if (icon_rc < 0) {
-    sys_print("SHELL: sys_win_set_icon FALLO (system/icons/terminal-icon.bmp "
-              "no encontrado en tarfs?)");
+    sys_print(
+        "SHELL: sys_win_set_icon FALLO (system/icons/terminal-window-dark.bmp "
+        "no encontrado en tarfs?)");
   }
 
   uint32_t *pixels = (uint32_t *)malloc(cw * ch * sizeof(uint32_t));

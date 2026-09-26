@@ -234,6 +234,13 @@ void ap_entry(void) {
   extern void syscall_init_ap(void);
   syscall_init_ap();
   DIAG('S');
+
+  /* [SIMD] Habilitar OSXSAVE + XCR0 en ESTE core. Es per-core, no basta
+   * con lo que hace el BSP. Sin esto, el primer _mm256_* dará #UD. */
+  extern void cpu_simd_init(void);
+  cpu_simd_init();
+  DIAG('s'); /* s minúscula para diferenciar del 'S' anterior */
+
   uint64_t star = rdmsr(MSR_STAR);
   LOG_DEBUG("[AP] CPU %d STAR=0x%lx (R3_CS=0x%lx)", my_cpu, (unsigned long)star,
             (unsigned long)((star >> 48) & 0xFFFF));

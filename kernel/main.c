@@ -31,6 +31,7 @@
 #include "rtc.h"
 #include "sched.h"
 #include "serial.h"
+#include "simd.h"
 #include "smp_boot.h"
 #include "string.h"
 #include "syscall.h"
@@ -279,7 +280,6 @@ static void kmain_task(void) {
   // App de consola gráfica (antes del SMP, para que no interfiera).
   LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
   process_load("apps/shell");
-  process_load("apps/win_blit_fault");
 
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
   //
@@ -311,6 +311,11 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] SSE... ");
   sse_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] SIMD... ");
+  cpu_simd_init();
+  simd_init();
   LOG_INFO("OK");
 
   memcpy(&boot, kinfo, sizeof(boot));
