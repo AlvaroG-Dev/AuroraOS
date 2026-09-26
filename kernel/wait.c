@@ -2,6 +2,7 @@
 #include "wait.h"
 #include "klog.h"
 #include "sched.h"
+#include "process.h"
 #include <stddef.h>
 
 #define EINTR 4
