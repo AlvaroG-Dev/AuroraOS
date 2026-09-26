@@ -197,6 +197,10 @@ static process_t *process_spawn_with_ppid(const char *name,
       !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
                   VMA_ELF)) {
     LOG_ERR("[PROC] No se pudo crear VMA ELF");
+    // task tiene dos referencias: la del creador y la que habría
+    // pertenecido a process_t. Como proc aún no se publica, hay que
+    // liberar ambas referencias en esta ruta de rollback.
+    task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
     kfree(proc);
@@ -207,6 +211,9 @@ static process_t *process_spawn_with_ppid(const char *name,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
     LOG_ERR("[PROC] No se pudo crear VMA stack");
     vma_destroy_all(proc);
+    // Igual que arriba: proc->task ya adquirió su referencia propia,
+    // pero el proceso aún no está publicado ni la tarea es runnable.
+    task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
     kfree(proc);
