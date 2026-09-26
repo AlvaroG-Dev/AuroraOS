@@ -584,6 +584,27 @@ process_t *process_find_by_pid(uint32_t pid) {
   return found;
 }
 
+// Publica una señal bajo process_lock y toma una referencia de la tarea
+// antes de soltarlo. Así waitpid() no puede liberar el process_t entre la
+// búsqueda del PID y el acceso a pending_signals/task.
+task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask) {
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  while (p) {
+    if (p->pid == pid && !p->is_zombie) {
+      task_t *task = p->task;
+      if (task)
+        task_get(task);
+      __atomic_fetch_or(&p->pending_signals, signal_mask, __ATOMIC_RELEASE);
+      spin_unlock_irqrestore(&process_lock, flags);
+      return task;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+  return NULL;
+}
+
 // ---------------------------------------------------------------------------
 // Condición de despertar: ¿existe algún hijo zombie que satisfaga el filtro?
 // ---------------------------------------------------------------------------
