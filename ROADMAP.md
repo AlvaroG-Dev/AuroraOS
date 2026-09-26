@@ -23,7 +23,7 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] Framework de tests del kernel + regresiones userland
 - [x] CI de build y boot con QEMU, incluyendo 1/2/4 CPU
 
-La prioridad ahora debe pasar de "hacer que exista el subsistema" a **hacer que Aurora OS sea robusto, usable y capaz de funcionar sobre hardware real**.
+La prioridad ahora es completar userland y filesystem, después networking/USB, y seguir validando Aurora OS sobre hardware real.
 
 ---
 
@@ -47,10 +47,10 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [x] Revisar TLB shootdown y cambios de address space concurrentes. (H3: ipi_tlb_shootdown)
 - [x] Revisar lifecycle de task_t y process_t.
 - [x] Revisar wait queues bajo carreras de wake/block/timeout. (C4)
-- [x] Resolver race de migración de tasks entre CPUs en `wait_common` + `task_switch` (mitigado con `cpu_affinity` en kmain_task; deuda anotada abajo).
+- [x] Resolver race de migración de tasks entre CPUs en `wait_common` + `task_switch` (corregido con publicación atómica de `current_task`/`need_resched` y transición atómica de `on_cpu`; regresión con migración y stack canary).
 - [ ] Documentar invariantes importantes del scheduler y memoria.
 
-**Deuda técnica de 1.2 (obligatoria antes de Fase 5 — Networking):**
+**Deuda técnica restante de 1.2:**
 - [x] `sched_kick_idle_cpu`: leer `per_cpu(current_task, cpu)` con `__atomic_load_n(ACQUIRE)`.
 - [x] `sched_tick`: publicar `this_cpu(current_task)` con `__atomic_store_n(RELEASE)`.
 - [x] `need_resched`: publicación/consumo atómico con ACQUIRE/RELEASE + exchange.
@@ -187,7 +187,7 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 
 Objetivo: dotar al sistema de conectividad real.
 
-**Bloqueador:** cerrar la deuda técnica de Fase 1.2 (lecturas/escrituras atómicas de `current_task`) antes de empezar. La red mueve tasks entre CPUs constantemente y puede reabrir el race de migración.
+**Nota:** la auditoría SMP y sus correcciones críticas ya están integradas. Networking queda pendiente por falta de drivers y pila de red, no por el antiguo race de `current_task`.
 
 ### 5.1 Hardware
 - [ ] Abstracción de NIC.
@@ -352,8 +352,8 @@ Objetivo: mantener el proyecto mantenible mientras crece.
 
 # Orden recomendado de alto nivel
 
-1. **Robustez del kernel + auditoría SMP** — ✅ completada (con deuda 1.2 anotada)
-2. **Storage persistente + filesystem** — ✅ completada (FAT32 con write; LFN y rename pendientes)
+1. **Robustez del kernel + auditoría SMP** — ✅ completada (solo quedan tareas de documentación/debugging, no bugs SMP conocidos)
+2. **Storage persistente + filesystem** — ⏳ en progreso (FAT32 persistente funcional; LFN, rename, recuperación y boot desde FS pendientes)
 3. **Userland/libc/shell** — ⏳ siguiente
 4. **Escritorio y window manager**
 5. **Networking**
@@ -368,9 +368,9 @@ La idea es evitar implementar muchas funciones superficiales a la vez. Primero h
 ## Objetivos de largo plazo
 
 - [x] Aurora OS arranca de forma fiable en QEMU con 1/2/4 CPU.
-- [ ] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 read/write existe; boot desde FS no)
-- [ ] Aurora OS puede crear, modificar y conservar archivos. (syscalls y FS listos; falta userland cómodo)
-- [ ] Aurora OS puede ejecutar múltiples aplicaciones aisladas.
+- [ ] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 read/write existe; el bootloader todavía carga el kernel desde la ruta de boot, no desde un filesystem como raíz)
+- [x] Aurora OS puede crear, modificar y conservar archivos. (FAT32 persistente + syscalls de archivo; faltan herramientas userland cómodas como `mkdir/rm/cp/mv`)
+- [x] Aurora OS puede ejecutar múltiples aplicaciones aisladas.
 - [x] Aurora OS dispone de terminal y escritorio utilizables.
 - [ ] Aurora OS puede comunicarse por red.
 - [ ] Aurora OS puede utilizar teclado/ratón USB.
