@@ -762,18 +762,35 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
+    uint64_t mapped_start = start_page;
     for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
       if (!paging_get_phys_in(pml4, page)) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
-          LOG_ERR("[PROC] sbrk: sin memoria física libre");
+          LOG_ERR("[PROC] sbrk: sin memoria física libre; haciendo rollback");
+          for (uint64_t rollback = mapped_start; rollback < page;
+               rollback += PAGE_SIZE) {
+            uint64_t old_phys = paging_get_phys_in(pml4, rollback);
+            if (old_phys &&
+                paging_unmap_page_in(pml4, rollback) == 0) {
+              pmm_free_page(old_phys);
+            }
+          }
           return (void *)-1;
         }
         if (paging_map_page_in(pml4, page, phys,
                                PTE_USER | PTE_WRITABLE | PTE_PRESENT |
                                    PTE_NX) != 0) {
           pmm_free_page(phys);
-          LOG_ERR("[PROC] sbrk: error mapeando página");
+          LOG_ERR("[PROC] sbrk: error mapeando página; haciendo rollback");
+          for (uint64_t rollback = mapped_start; rollback < page;
+               rollback += PAGE_SIZE) {
+            uint64_t old_phys = paging_get_phys_in(pml4, rollback);
+            if (old_phys &&
+                paging_unmap_page_in(pml4, rollback) == 0) {
+              pmm_free_page(old_phys);
+            }
+          }
           return (void *)-1;
         }
         memset(phys_to_virt(phys), 0, PAGE_SIZE);
