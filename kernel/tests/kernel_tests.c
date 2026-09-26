@@ -1739,16 +1739,17 @@ static bool timeout_requeue_is_waiting(task_t *task) {
 static void test_sched_stale_timeout_requeue(void) {
   /*
    * Esta regresión prueba la identidad de una espera, no el mecanismo de
-   * wakeup remoto (eso ya lo cubren los tests SMP anteriores). Fijamos el
-   * waiter a la CPU del test para que el rearmado no dependa de que una
-   * CPU idle concreta reciba el IPI justo en esta ventana.
+   * wakeup remoto. No fijamos cpu_affinity después de crear la tarea:
+   * sched_create_task() publica la tarea inmediatamente y, en SMP, un AP
+   * puede empezar a ejecutarla antes de que el caller pueda modificarla.
+   * Dejamos que el scheduler gestione la CPU y hacemos que el test espere
+   * explícitamente a las fases publicadas por el waiter.
    */
   wait_queue_init(&g_timeout_requeue_wq); g_timeout_requeue_phase=0;
   g_timeout_requeue_old_seq=0; g_timeout_requeue_new_seq=0; g_timeout_requeue_result=-1; g_timeout_requeue_task=NULL;
   task_t *task=sched_create_task(timeout_requeue_waiter);
   TEST_ASSERT(task!=NULL,"no se pudo crear waiter de timeout rearmado"); if(!task)return;
 
-  task->cpu_affinity = smp_processor_id();
 
   uint64_t deadline=sched_get_ticks()+3000;
   while(g_timeout_requeue_phase<1||!timeout_requeue_is_waiting(task)){
