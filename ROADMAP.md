@@ -14,7 +14,9 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] Scheduler preemptivo + wait queues + procesos/hilos
 - [x] SMP con ACPI/MADT, LAPIC/IOAPIC, AP startup, IPIs y per-CPU
 - [x] PS/2, PCI, AHCI/ATA, block layer
-- [x] VFS + TarFS/initrd
+- [x] Partition layer (MBR + GPT + EBR chain)
+- [x] VFS con mount points
+- [x] FAT32 persistente (mount, read, write, create, mkdir, unlink, truncate, readdir)
 - [x] Ring 3 + ELF loader + syscalls + libc propia parcial
 - [x] IPC por mailboxes
 - [x] Framebuffer compositor + window server + terminal gráfico
@@ -40,17 +42,23 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 ### 1.2 Auditoría SMP y concurrencia
 - [x] Revisar todos los locks y su orden global.
 - [x] Buscar deadlocks entre scheduler, VFS, winsrv, PMM y paging.
-- [x] Auditar accesos a estado compartido sin lock. (C3, C4)
+- [x] Auditar accesos a estado compartido sin lock. (C3: need_resched con xchg; C4: state+deadline atómicos)
 - [x] Revisar IRQ/preemption contexts.
-- [x] Revisar TLB shootdown y cambios de address space concurrentes. (H3)
+- [x] Revisar TLB shootdown y cambios de address space concurrentes. (H3: ipi_tlb_shootdown)
 - [x] Revisar lifecycle de task_t y process_t.
 - [x] Revisar wait queues bajo carreras de wake/block/timeout. (C4)
-- [ ] Documentar invariantes importantes del scheduler y memoria. (parcial)
+- [x] Resolver race de migración de tasks entre CPUs en `wait_common` + `task_switch` (mitigado con `cpu_affinity` en kmain_task; deuda anotada abajo).
+- [ ] Documentar invariantes importantes del scheduler y memoria.
+
+**Deuda técnica de 1.2 (obligatoria antes de Fase 5 — Networking):**
+- `sched_kick_idle_cpu`: leer `per_cpu(current_task, cpu)` con `__atomic_load_n(ACQUIRE)`.
+- `sched_tick`: escribir `this_cpu(current_task)` con `__atomic_store_n(RELEASE)`.
+- Test de regresión: task migrando con `cpu_affinity=-1` y canary de stack verificado tras cada wake.
 
 ### 1.3 Testing y CI
 - [x] Mantener regresiones para cada bug crítico corregido.
-- [ ] Ampliar la matriz de QEMU/CPU y configuraciones relevantes.
-- [ ] Añadir tests de stress de scheduler, memoria, IPC y VFS.
+- [x] Ampliar la matriz de QEMU/CPU y configuraciones relevantes (1/2/4 CPU, KVM, TCG, VirtualBox; AHCI y PIIX3).
+- [x] Añadir tests de stress de scheduler, memoria, IPC y VFS (AHCI stress 1MB, multi-LBA, buffer no contiguo).
 - [x] Añadir pruebas de errores y recursos agotados. (doble free, remap, late free)
 - [ ] Evitar que los tests dependan accidentalmente del orden de ejecución.
 - [ ] Mejorar diagnósticos de CI cuando QEMU falle.
@@ -59,7 +67,7 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [ ] Mejorar dumps de scheduler/procesos.
 - [ ] Añadir nombres legibles a tareas/procesos.
 - [ ] Revisar el comportamiento de panic cuando existen locks tomados.
-- [ ] Hacer los dumps de panic seguros en SMP.
+- [ ] Hacer los dumps de panic seguros en SMP. (panic_handler actual solo detiene el CPU que falla)
 - [ ] Mejorar backtraces y diagnóstico de page faults.
 
 ---
@@ -76,29 +84,31 @@ Objetivo: pasar de un sistema que carga un initrd a un sistema operativo que pue
 - [ ] Añadir cache/buffer cache si resulta necesario.
 
 ### 2.2 Sistema de archivos persistente
-- [ ] Implementar un filesystem persistente sencillo, inicialmente FAT32 o ext2.
-- [ ] Lectura de particiones/volúmenes.
-- [ ] Directorios reales.
-- [ ] Crear/eliminar/renombrar archivos.
-- [ ] Escritura y truncado.
-- [ ] Montaje/desmontaje.
-- [ ] Integrarlo con VFS.
-- [ ] Tests de corrupción, límites y apagado durante escritura.
+- [x] Implementar FAT32.
+- [x] Lectura de particiones/volúmenes (part.c: MBR + GPT + EBR chain).
+- [x] Directorios reales.
+- [x] Crear/eliminar archivos y directorios (mkdir, unlink). Rename pendiente.
+- [x] Escritura y truncado.
+- [x] Montaje/desmontaje.
+- [x] Integrarlo con VFS (mount points con longest-match).
+- [x] Caché de FAT en memoria (rendimiento read/write).
+- [ ] Tests de corrupción, límites y apagado durante escritura (parcial: tests de límite 8.3, ENOTEMPTY, non-FAT rechazo).
+- [ ] LFN (nombres largos) en FAT32: crear y preservar.
 
 ### 2.3 Userland sobre disco
 - [ ] Acceso real a /dev desde userland.
-- [ ] Utilidades básicas: ls, mkdir, rm, cp, mv, pwd.
+- [x] `ls` (lee directorios vía readdir).
+- [x] `cat` (abre y lee archivos).
+- [ ] `mkdir`, `rm`, `cp`, `mv`, `pwd` como apps userland (syscalls existen, faltan apps).
 - [ ] Persistir configuración y programas.
 - [ ] Boot desde un filesystem persistente cuando sea viable.
 
-Fase 2.3 — Loader debe evitar vfs_read_all para ELFs.
-process_load_with_ppid asume que el archivo cabe en un buffer contiguo del heap (16 MB). Funciona para apps pequeñas del initrd, pero cuando el root sea un FS persistente o un ELF grande, kmalloc fallará. Dos caminos:
+**Deuda técnica de 2.3 — Loader debe evitar `vfs_read_all` para ELFs.**
+`process_load_with_ppid` asume que el archivo cabe en un buffer contiguo del heap (16 MB). Funciona para apps pequeñas del initrd, pero cuando el root sea un FS persistente o un ELF grande, `kmalloc` fallará. Dos caminos:
+- **Chunked read**: leer en bloques y alimentar al ELF parser por streaming.
+- **mmap file-backed**: mapear el ELF al address space del proceso y recorrer PT_LOADs. Es el modelo Linux.
 
-Chunked read: leer en bloques de, p. ej., 64 KB y pasarlos al ELF parser por streaming. Requiere refactorizar elf_load a un modelo incremental.
-
-mmap del archivo: mapear el ELF al address space del proceso directamente (FAT32 con mmap file-backed), y que elf_load recorra las secciones mapeadas. Es el modelo Linux.
-
-Opción 2 es la correcta a largo plazo. Opción 1 es un parche si hace falta cargar ELFs grandes pronto.
+La opción 2 es la correcta a largo plazo. La 1 es un parche si hace falta cargar ELFs grandes pronto.
 
 ---
 
@@ -114,8 +124,7 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [ ] Definir claramente qué parte es propia y qué parte pretende compatibilidad POSIX.
 
 ### 3.2 Procesos y ejecución
-- [ ] Mejorar exec y el entorno de procesos.
-- [ ] Argumentos/entorno completos.
+- [ ] Argumentos/entorno en `spawn`/`exec` (necesario para que `cat file` funcione).
 - [ ] Señales, si se decide que forman parte del modelo de Aurora.
 - [ ] Pipes y redirecciones.
 - [ ] PTYs para terminales.
@@ -175,6 +184,8 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 # Fase 5 — Networking
 
 Objetivo: dotar al sistema de conectividad real.
+
+**Bloqueador:** cerrar la deuda técnica de Fase 1.2 (lecturas/escrituras atómicas de `current_task`) antes de empezar. La red mueve tasks entre CPUs constantemente y puede reabrir el race de migración.
 
 ### 5.1 Hardware
 - [ ] Abstracción de NIC.
@@ -240,6 +251,7 @@ Objetivo: aumentar el aislamiento y reducir la superficie de ataque.
 - [ ] CFI o mecanismo equivalente.
 - [ ] ASLR/KASLR.
 - [ ] Hardening adicional de syscalls.
+- [ ] Parcheo quirúrgico de `stac`/`clac` en `uaccess_init` (deuda de 1.1: hoy escanea `.text` buscando bytes `0F 01 CB/CA` y podría tener falsos positivos).
 
 ### 7.2 Modelo de seguridad
 - [ ] Usuarios y grupos.
@@ -265,7 +277,7 @@ Objetivo: ampliar hardware soportado sin convertir el kernel en una colección d
 
 - [ ] Arquitectura común de drivers.
 - [ ] Mejorar abstracción PCI.
-- [ ] MSI/MSI-X.
+- [ ] MSI/MSI-X (hay MSI puntual para AHCI, falta generalizar).
 - [ ] HDA/Audio.
 - [ ] RTC/clocksource más completo.
 - [ ] NVMe.
@@ -285,13 +297,15 @@ Objetivo: que el sistema siga siendo razonablemente eficiente al crecer.
 - [ ] Benchmarks de allocators.
 - [ ] Benchmarks de IPC.
 - [ ] Benchmarks de VFS/storage.
-- [ ] Mejorar afinidad CPU.
+- [ ] Mejorar afinidad CPU (hoy kmain_task forzada a CPU 0 como mitigación).
 - [ ] Per-CPU allocators donde sean útiles.
-- [ ] Reducir contención global.
+- [ ] Reducir contención global (paging_lock es global; posibles per-PML4 o per-PDPT).
 - [ ] RCU u otros mecanismos solo donde exista una necesidad medida.
 - [ ] NUMA si el hardware objetivo lo justifica.
 - [ ] Huge pages correctamente integradas.
 - [ ] vmalloc/virtual allocations para objetos grandes si el límite actual del heap sigue siendo una restricción.
+- [ ] Buddy allocator: free lists por orden en vez de scan lineal sobre bitmap.
+- [ ] Migrar LAPIC MMIO → x2APIC MSR para reducir latencia de IPIs.
 
 ---
 
@@ -321,23 +335,24 @@ Objetivo: mantener el proyecto mantenible mientras crece.
 - [ ] Documentar arquitectura.
 - [ ] Documentar ABI/syscalls.
 - [ ] Documentar formato de estructuras internas importantes.
-- [ ] Documentar invariantes de concurrencia.
+- [ ] Documentar invariantes de concurrencia (ver deuda 1.2).
 - [ ] Documentar proceso de boot.
 - [ ] Documentar cómo escribir drivers.
 - [ ] Documentar cómo escribir aplicaciones.
 - [ ] Ampliar CI con tests de regresión.
-- [ ] Sanitización/fuzzing de parsers cuando sea posible.
+- [ ] Sanitización/fuzzing de parsers cuando sea posible (candidatos: BPB parser, GPT parser, ELF loader).
 - [ ] Revisar warnings del compilador.
 - [ ] Reducir deuda técnica periódicamente.
 - [ ] Mantener commits pequeños y funcionalmente aislados.
+- [ ] Añadir dependencias de headers al Makefile del kernel (`$(wildcard *.o): $(wildcard *.h)`) para evitar builds incrementales desincronizados.
 
 ---
 
 # Orden recomendado de alto nivel
 
-1. **Robustez del kernel + auditoría SMP**
-2. **Storage persistente + filesystem**
-3. **Userland/libc/shell**
+1. **Robustez del kernel + auditoría SMP** — ✅ completada (con deuda 1.2 anotada)
+2. **Storage persistente + filesystem** — ✅ completada (FAT32 con write; LFN y rename pendientes)
+3. **Userland/libc/shell** — ⏳ siguiente
 4. **Escritorio y window manager**
 5. **Networking**
 6. **USB**
@@ -350,11 +365,11 @@ La idea es evitar implementar muchas funciones superficiales a la vez. Primero h
 
 ## Objetivos de largo plazo
 
-- [ ] Aurora OS arranca de forma fiable en QEMU con 1/2/4 CPU.
-- [ ] Aurora OS puede instalarse/arrancar desde almacenamiento persistente.
-- [ ] Aurora OS puede crear, modificar y conservar archivos.
+- [x] Aurora OS arranca de forma fiable en QEMU con 1/2/4 CPU.
+- [ ] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 read/write existe; boot desde FS no)
+- [ ] Aurora OS puede crear, modificar y conservar archivos. (syscalls y FS listos; falta userland cómodo)
 - [ ] Aurora OS puede ejecutar múltiples aplicaciones aisladas.
-- [ ] Aurora OS dispone de terminal y escritorio utilizables.
+- [x] Aurora OS dispone de terminal y escritorio utilizables.
 - [ ] Aurora OS puede comunicarse por red.
 - [ ] Aurora OS puede utilizar teclado/ratón USB.
 - [ ] Aurora OS dispone de un modelo de seguridad coherente.

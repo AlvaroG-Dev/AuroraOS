@@ -6,16 +6,20 @@
 #include "../klog.h"
 #include "../sched.h"
 #include "../serial.h"
+#include "../simd.h"
 #include "../tarfs.h"
+#include "../time.h"
 #include "../wait.h"
 #include "font_manager.h"
 #include "gfx.h"
+#include "gfx_filter.h"
 #include "taskbar.h"
 #include "theme.h"
 #include "window.h"
 #include "winsrv.h"
 #include <emmintrin.h>
 #include <stddef.h>
+#include <stdint.h>
 
 extern uint32_t *fb_ptr;
 extern uint32_t fb_width;
@@ -48,33 +52,12 @@ static spinlock_t compositor_lock;
 
 /* =========== SSE helpers =========== */
 static inline void sse_memset32(uint32_t *dest, uint32_t val, size_t count) {
-  size_t i = 0;
-  while (((uintptr_t)&dest[i] & 15) != 0 && i < count) {
-    dest[i] = val;
-    i++;
-  }
-  __m128i val_vec = _mm_set1_epi32((int)val);
-  for (; i + 4 <= count; i += 4) {
-    _mm_store_si128((__m128i *)&dest[i], val_vec);
-  }
-  for (; i < count; i++)
-    dest[i] = val;
+  simd_fill_row(dest, val, count);
 }
 
 static inline void sse_memcpy_vram(uint32_t *dest, const uint32_t *src,
                                    size_t count) {
-  size_t i = 0;
-  while (((uintptr_t)&dest[i] & 15) != 0 && i < count) {
-    dest[i] = src[i];
-    i++;
-  }
-  for (; i + 4 <= count; i += 4) {
-    __m128i chunk = _mm_loadu_si128((const __m128i *)&src[i]);
-    _mm_stream_si128((__m128i *)&dest[i], chunk);
-  }
-  for (; i < count; i++)
-    dest[i] = src[i];
-  _mm_sfence();
+  simd_copy_to_vram(dest, src, count);
 }
 
 static void compositor_invalidate_taskbar(void) {
@@ -84,6 +67,51 @@ static void compositor_invalidate_taskbar(void) {
   compositor_invalidate_rect(damage);
 }
 
+static inline uint64_t comp_rdtsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+extern uint64_t klog_get_tsc_freq(void);
+
+/* ============================================================================
+ * [NUEVO] Diagnóstico de rendimiento por frame.
+ * Acumula ciclos gastados en compositor_render() y loguea la media cada
+ * N frames. Con el TSC calibrado, la conversión a ms es exacta. Sirve para
+ * saber si el cuello de botella está en el render, en el blend, o en el
+ * blit final a VRAM.
+ * ==========================================================================*/
+#define COMP_FRAME_LOG_INTERVAL 120 /* cada ~2 segundos a 60fps */
+
+static uint64_t g_frame_cycles_sum = 0;
+static uint32_t g_frame_count = 0;
+static uint64_t g_frame_cycles_max = 0;
+
+static void compositor_report_frame_stats(uint64_t elapsed_cycles) {
+  g_frame_cycles_sum += elapsed_cycles;
+  if (elapsed_cycles > g_frame_cycles_max)
+    g_frame_cycles_max = elapsed_cycles;
+  g_frame_count++;
+
+  if (g_frame_count >= COMP_FRAME_LOG_INTERVAL) {
+    uint64_t freq = klog_get_tsc_freq();
+    if (freq > 0) {
+      /* Calcular en microsegundos, enteros. 1 ms = 1000 us. */
+      uint64_t avg_us =
+          (g_frame_cycles_sum / g_frame_count) * 1000000ULL / freq;
+      uint64_t max_us = g_frame_cycles_max * 1000000ULL / freq;
+      LOG_DEBUG(
+          "[COMP-PERF] render: avg=%u.%03u ms, max=%u.%03u ms (%u frames)",
+          (unsigned)(avg_us / 1000), (unsigned)(avg_us % 1000),
+          (unsigned)(max_us / 1000), (unsigned)(max_us % 1000),
+          (unsigned)g_frame_count);
+    }
+    g_frame_cycles_sum = 0;
+    g_frame_cycles_max = 0;
+    g_frame_count = 0;
+  }
+}
+
 static void taskbar_item_on_click(taskbar_item_t *item) {
   if (!item)
     return;
@@ -91,17 +119,10 @@ static void taskbar_item_on_click(taskbar_item_t *item) {
   while (win) {
     if (win->taskbar_item == item) {
       if (window_is_visible(win) && (win->flags & WIN_FLAGS_FOCUSED)) {
-        window_set_visible(win, 0);
-        win->flags &= ~WIN_FLAGS_FOCUSED;
-        win->flags |= WIN_FLAGS_INACTIVE;
+        compositor_minimize_window(win);
         taskbar_set_active_item(NULL);
-        compositor_invalidate_rect(
-            (rect_t){win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE,
-                     win->width + WIN11_SHADOW_SIZE * 2,
-                     win->height + WIN11_SHADOW_SIZE * 2});
         compositor_invalidate_taskbar();
       } else {
-        window_set_visible(win, 1);
         compositor_focus_window(win);
       }
       break;
@@ -115,18 +136,14 @@ static void on_start_click(taskbar_item_t *item) {
   LOG_INFO("[COMPOSITOR] Botón de Inicio pulsado");
 }
 
-// ---------------------------------------------------------------------------
-// Condición para despertar al compositor.
-// ---------------------------------------------------------------------------
+static int compositor_has_active_animations(void);
 static bool compositor_has_work(void *arg) {
   (void)arg;
   return compositor_has_input || compositor_needs_clock ||
-         (global_damage.w > 0 && global_damage.h > 0);
+         (global_damage.w > 0 && global_damage.h > 0) ||
+         taskbar_has_active_hover() || compositor_has_active_animations();
 }
 
-// ---------------------------------------------------------------------------
-// Notificaciones desde otros subsistemas (input, timer, etc.)
-// ---------------------------------------------------------------------------
 void compositor_notify_event(void) {
   compositor_has_input = 1;
   wake_up_all(&compositor_wq);
@@ -160,20 +177,76 @@ void compositor_init(void) {
   winsrv_init();
 
   tar_node_t *start_icon_node = tar_find_file("system/icons/start-icon.bmp");
-  bg_wallpaper_node = tar_find_file("system/wallpapers/default-background.bmp");
+  bg_wallpaper_node = tar_find_file("system/wallpapers/wallpaper-main.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
   if (wallpaper_cache) {
+    /* [FIX] kmalloc no zeroa. Si el BMP tiene alpha=0 en algunos píxeles
+     * (típico de BMPs generados desde JPEG), blend_pixel devuelve el dst
+     * sin tocarlo, y ese dst es basura del heap. En QEMU suele ser cero,
+     * en VirtualBox es ruido. Inicializamos a negro opaco: los píxeles
+     * con alpha=0 quedan negros en vez de basura. */
+    for (size_t i = 0; i < (size_t)fb_width * fb_height; i++)
+      wallpaper_cache[i] = 0xFF000000;
+
+    int drawn = 0;
     if (bg_wallpaper_node) {
       rect_t full_clip = {0, 0, (int)fb_width, (int)fb_height};
-      bmp_draw_scaled(bg_wallpaper_node, wallpaper_cache, fb_width, full_clip,
-                      0, 0, fb_width, fb_height);
-    } else {
+      if (bmp_draw_scaled(bg_wallpaper_node, wallpaper_cache, fb_width,
+                          full_clip, 0, 0, fb_width, fb_height) == 0) {
+        drawn = 1;
+      }
+    }
+    if (!drawn) {
       for (int y = 0; y < (int)fb_height; y++) {
-        uint8_t factor = (y * 30) / fb_height;
-        uint32_t bg_color = 0xFF000000 | ((0x20 - (factor / 2)) << 16) |
-                            ((0x22 - (factor / 2)) << 8) | (0x28 - factor);
-        sse_memset32(&wallpaper_cache[y * fb_width], bg_color, fb_width);
+        int t = (y * 256) / (int)fb_height;
+        uint32_t top = 0xFF060612;
+        uint32_t bot = 0xFF12102A;
+        uint32_t base = ((uint32_t)(((top >> 24) & 0xFF) * (256 - t) / 256 +
+                                    ((bot >> 24) & 0xFF) * t / 256)
+                         << 24) |
+                        ((uint32_t)(((top >> 16) & 0xFF) * (256 - t) / 256 +
+                                    ((bot >> 16) & 0xFF) * t / 256)
+                         << 16) |
+                        ((uint32_t)(((top >> 8) & 0xFF) * (256 - t) / 256 +
+                                    ((bot >> 8) & 0xFF) * t / 256)
+                         << 8) |
+                        (uint32_t)(((top & 0xFF) * (256 - t) / 256 +
+                                    (bot & 0xFF) * t / 256));
+        sse_memset32(&wallpaper_cache[y * fb_width], base, fb_width);
+      }
+
+      struct {
+        int yc;
+        int amp;
+        uint32_t color;
+        int thick;
+      } bands[] = {
+          {(int)fb_height * 28 / 100, 40, 0x1800D4FF, 120},
+          {(int)fb_height * 42 / 100, 55, 0x147C4DFF, 140},
+          {(int)fb_height * 55 / 100, 70, 0x10FF4DD2, 160},
+      };
+      for (int b = 0; b < 3; b++) {
+        for (int y = 0; y < (int)fb_height; y++) {
+          int dy = y - bands[b].yc;
+          if (dy < -bands[b].thick || dy > bands[b].thick)
+            continue;
+          for (int x = 0; x < (int)fb_width; x++) {
+            int wave = (x * 6 / (int)fb_width) * 2;
+            int offset = (dy + ((x / 32) % 3) * 3 - 3 + wave);
+            int ad = offset < 0 ? -offset : offset;
+            if (ad > bands[b].thick)
+              continue;
+            int a = (bands[b].thick - ad) * 255 / bands[b].thick;
+            int alpha = ((bands[b].color >> 24) & 0xFF) * a / 255;
+            if (alpha <= 1)
+              continue;
+            uint32_t c =
+                ((uint32_t)alpha << 24) | (bands[b].color & 0x00FFFFFF);
+            wallpaper_cache[y * fb_width + x] =
+                blend_pixel_fast(c, wallpaper_cache[y * fb_width + x]);
+          }
+        }
       }
     }
   }
@@ -217,6 +290,8 @@ window_t *compositor_create_window(int x, int y, int w, int h,
                        win->icon_bg_color, taskbar_item_on_click);
   win->taskbar_item = tb_item;
 
+  compositor_has_input = 1;
+  wake_up_all(&compositor_wq);
   return win;
 }
 
@@ -224,7 +299,8 @@ void compositor_close_window(window_t *win) {
   if (!win)
     return;
 
-  unsigned long irqflags = spin_lock_irqsave(&compositor_lock);
+  window_start_close_animation(win);
+  win->pending_destroy = 1;
 
   if (drag_window == win)
     drag_window = NULL;
@@ -232,43 +308,140 @@ void compositor_close_window(window_t *win) {
     pressed_win = NULL;
     pressed_btn = WIN_BTN_NONE;
   }
+
+  rect_t damage = {
+      win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE + win->anim_dy,
+      win->width + WIN11_SHADOW_SIZE * 2, win->height + WIN11_SHADOW_SIZE * 2};
+  compositor_invalidate_rect(damage);
+
+  compositor_has_input = 1;
+  wake_up_all(&compositor_wq);
+}
+
+void compositor_minimize_window(window_t *win) {
+  if (!win)
+    return;
+
+  window_start_minimize_animation(win);
+  win->pending_destroy = 0;
+
+  if (win->flags & WIN_FLAGS_FOCUSED) {
+    win->flags &= ~WIN_FLAGS_FOCUSED;
+    win->flags |= WIN_FLAGS_INACTIVE;
+    win->dirty = 1;
+    winsrv_post_event(win, WINSRV_EV_BLUR, 0, 0, 0);
+    compositor_invalidate_taskbar();
+  }
+
+  if (drag_window == win)
+    drag_window = NULL;
+  if (pressed_win == win) {
+    pressed_win = NULL;
+    pressed_btn = WIN_BTN_NONE;
+  }
+
+  rect_t damage = {
+      win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE + win->anim_dy,
+      win->width + WIN11_SHADOW_SIZE * 2, win->height + WIN11_SHADOW_SIZE * 2};
+  compositor_invalidate_rect(damage);
+
+  compositor_has_input = 1;
+  wake_up_all(&compositor_wq);
+}
+
+static void compositor_do_close_window(window_t *win) {
+  if (!win)
+    return;
+
+  unsigned long irqflags = spin_lock_irqsave(&compositor_lock);
   if (win->prev)
     win->prev->next = win->next;
   else
     window_stack = win->next;
   if (win->next)
     win->next->prev = win->prev;
-
   spin_unlock_irqrestore(&compositor_lock, irqflags);
 
-  compositor_invalidate_rect((rect_t){
-      win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE,
-      win->width + WIN11_SHADOW_SIZE * 2, win->height + WIN11_SHADOW_SIZE * 2});
+  rect_t damage = {win->x - WIN11_SHADOW_SIZE, win->y - WIN11_SHADOW_SIZE,
+                   win->width + WIN11_SHADOW_SIZE * 2,
+                   win->height + WIN11_SHADOW_SIZE * 2};
+  compositor_invalidate_rect(damage);
   window_destroy(win);
 }
 
+#define CURSOR_W 12
+#define CURSOR_H 19
+
+static const uint8_t g_cursor_arrow[19][12] = {
+    {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0},
+    {2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0}, {2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0},
+    {2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0}, {2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0},
+    {2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0}, {2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0},
+    {2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 0, 0}, {2, 1, 1, 2, 1, 1, 1, 2, 0, 0, 0, 0},
+    {2, 1, 2, 0, 2, 1, 1, 1, 2, 0, 0, 0}, {2, 2, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0},
+    {0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0}, {0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0},
+    {0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0}, {0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0},
+};
+
 static void draw_cursor_overlay(uint32_t *dst, int stride, rect_t clip) {
-  rect_t cursor_rect = {cursor_x - 16, cursor_y - 16, 32, 32};
-  if (rect_intersects(clip, cursor_rect)) {
-    rect_t c_clip = rect_clip(clip, cursor_rect);
-    gfx_fill_rounded_rect(dst, stride, c_clip,
-                          (rect_t){cursor_x - 8, cursor_y - 8, 16, 16}, 4,
-                          0xCCFFFFFF);
-    gfx_fill_rounded_rect(dst, stride, c_clip,
-                          (rect_t){cursor_x - 4, cursor_y - 4, 8, 8}, 2,
-                          0xFF000000);
+  int cx = cursor_x;
+  int cy = cursor_y;
+
+  for (int y = 0; y < CURSOR_H; y++) {
+    int py = cy + y;
+    if (py < clip.y || py >= clip.y + clip.h)
+      continue;
+    const uint8_t *row = g_cursor_arrow[y];
+    for (int x = 0; x < CURSOR_W; x++) {
+      uint8_t v = row[x];
+      if (v == 0)
+        continue;
+      int px = cx + x;
+      if (px < clip.x || px >= clip.x + clip.w)
+        continue;
+      uint32_t c = (v == 1) ? 0xFFFFFFFF : 0xFF000000;
+      dst[py * stride + px] = c;
+    }
   }
 }
 
 static void compositor_focus_window(window_t *win) {
   if (!win)
     return;
-  if (win->flags & WIN_FLAGS_HIDDEN)
-    window_set_visible(win, 1);
+
+  int need_restore = (win->flags & WIN_FLAGS_HIDDEN) ||
+                     (win->anim_state == WIN_ANIM_MINIMIZING);
+
+  if (win->anim_state == WIN_ANIM_CLOSING)
+    return;
+
+  if (need_restore) {
+    win->flags &= ~WIN_FLAGS_HIDDEN;
+    win->flags &= ~WIN_FLAGS_INACTIVE;
+
+    if (win->anim_state == WIN_ANIM_MINIMIZING) {
+      win->anim_state = WIN_ANIM_NONE;
+    }
+
+    if (win->anim_state != WIN_ANIM_OPENING) {
+      window_start_open_animation(win);
+    }
+    win->dirty = 1;
+
+    compositor_invalidate_rect((rect_t){win->x - WIN11_SHADOW_SIZE,
+                                        win->y - WIN11_SHADOW_SIZE,
+                                        win->width + WIN11_SHADOW_SIZE * 2,
+                                        win->height + WIN11_SHADOW_SIZE * 2});
+
+    compositor_has_input = 1;
+    wake_up_all(&compositor_wq);
+  }
+
   if (window_stack == win && (win->flags & WIN_FLAGS_FOCUSED))
     return;
 
-  // [PREEMPT] Toda la reordenación de window_stack bajo preempt_disable.
   preempt_disable();
 
   window_t *old_focus = NULL;
@@ -318,7 +491,6 @@ static void compositor_focus_window(window_t *win) {
 
   preempt_enable();
 
-  // Notificar al winsrv: blur a la vieja, focus a la nueva.
   if (old_focus) {
     winsrv_post_event(old_focus, WINSRV_EV_BLUR, 0, 0, 0);
   }
@@ -327,14 +499,33 @@ static void compositor_focus_window(window_t *win) {
   compositor_invalidate_taskbar();
 }
 
-// ---------------------------------------------------------------------------
-// Manejo de eventos de teclado
-// ---------------------------------------------------------------------------
+static void compositor_unfocus_all(void) {
+  int changed = 0;
+  window_t *curr = window_stack;
+  while (curr) {
+    if (curr->flags & WIN_FLAGS_FOCUSED) {
+      curr->flags &= ~WIN_FLAGS_FOCUSED;
+      curr->flags |= WIN_FLAGS_INACTIVE;
+      curr->dirty = 1;
+      compositor_invalidate_rect(
+          (rect_t){curr->x - WIN11_SHADOW_SIZE, curr->y - WIN11_SHADOW_SIZE,
+                   curr->width + WIN11_SHADOW_SIZE * 2,
+                   curr->height + WIN11_SHADOW_SIZE * 2});
+      winsrv_post_event(curr, WINSRV_EV_BLUR, 0, 0, 0);
+      changed = 1;
+    }
+    curr = curr->next;
+  }
+  if (changed) {
+    taskbar_set_active_item(NULL);
+    compositor_invalidate_taskbar();
+  }
+}
+
 static void compositor_handle_key(uint8_t scancode, int pressed) {
   if (!pressed)
     return;
 
-  // Buscar la ventana con foco y notificar al winsrv.
   window_t *w = window_stack;
   while (w) {
     if (!(w->flags & WIN_FLAGS_HIDDEN) && (w->flags & WIN_FLAGS_FOCUSED)) {
@@ -345,9 +536,6 @@ static void compositor_handle_key(uint8_t scancode, int pressed) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Manejo de eventos de ratón
-// ---------------------------------------------------------------------------
 static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
   int old_x = cursor_x, old_y = cursor_y;
   int mouse_moved = 0;
@@ -370,6 +558,80 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
   int pressed = buttons & 0x01;
   int released = (last_mouse_buttons & 0x01) && !pressed;
 
+  /* ------------------------------------------------------------------
+   * 0. Hover de la taskbar
+   * ------------------------------------------------------------------ */
+  {
+    taskbar_item_t *hit =
+        taskbar_hit_test(cursor_x, cursor_y, (int)fb_width, (int)fb_height);
+    taskbar_item_t *it = taskbar_items_head();
+    int changed = 0;
+    while (it) {
+      int should = (it == hit) ? 1 : 0;
+      if (it->is_hovered != should) {
+        it->is_hovered = should;
+        changed = 1;
+        rect_t r = taskbar_item_get_bounds(it, (int)fb_width, (int)fb_height);
+        compositor_invalidate_rect(
+            (rect_t){r.x - 4, r.y - 4, r.w + 8, r.h + 8});
+      }
+      it = it->next;
+    }
+    if (changed) {
+      compositor_has_input = 1;
+      wake_up_all(&compositor_wq);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * 0.5 Hover de botones de ventana (min/max/close)
+   * ------------------------------------------------------------------ */
+  {
+    window_t *w = window_stack;
+    int dirty_any = 0;
+    while (w) {
+      int old_btn = w->hover_btn;
+      int old_ctrl = w->hover_controls;
+      w->hover_btn = 0;
+      w->hover_controls = 0;
+
+      if (!(w->flags & WIN_FLAGS_HIDDEN) && w->anim_state == WIN_ANIM_NONE) {
+        int in_x = (cursor_x >= w->x && cursor_x < w->x + w->width);
+        int in_y =
+            (cursor_y >= w->y && cursor_y < w->y + WIN11_TITLEBAR_HEIGHT);
+        if (in_x && in_y) {
+          w->hover_controls = 1;
+          int base_x = w->x + w->width;
+          int close_x = base_x - 46;
+          int max_x = close_x - 46;
+          int min_x = max_x - 46;
+          if (cursor_x >= close_x)
+            w->hover_btn = 3;
+          else if (cursor_x >= max_x)
+            w->hover_btn = 2;
+          else if (cursor_x >= min_x)
+            w->hover_btn = 1;
+        }
+      }
+      if (w->hover_btn != old_btn || w->hover_controls != old_ctrl) {
+        w->dirty = 1;
+        compositor_invalidate_rect((rect_t){w->x - WIN11_SHADOW_SIZE,
+                                            w->y - WIN11_SHADOW_SIZE,
+                                            w->width + WIN11_SHADOW_SIZE * 2,
+                                            w->height + WIN11_SHADOW_SIZE * 2});
+        dirty_any = 1;
+      }
+      w = w->next;
+    }
+    if (dirty_any) {
+      compositor_has_input = 1;
+      wake_up_all(&compositor_wq);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * 1. Click izquierdo pulsado
+   * ------------------------------------------------------------------ */
   if (pressed && !(last_mouse_buttons & 0x01)) {
     rect_t bar_rect = taskbar_get_bounds(fb_width, fb_height);
     if (cursor_y >= bar_rect.y && cursor_y < bar_rect.y + TASKBAR_BAR_H) {
@@ -379,14 +641,24 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
         item->on_click(item);
     } else {
       window_t *win = window_stack;
+      int hit_any = 0;
+
       while (win) {
         if (win->flags & WIN_FLAGS_HIDDEN) {
+          win = win->next;
+          continue;
+        }
+        if (win->anim_state == WIN_ANIM_OPENING ||
+            win->anim_state == WIN_ANIM_CLOSING ||
+            win->anim_state == WIN_ANIM_MINIMIZING) {
           win = win->next;
           continue;
         }
 
         if (cursor_x >= win->x && cursor_x < win->x + win->width &&
             cursor_y >= win->y && cursor_y < win->y + win->height) {
+
+          hit_any = 1;
 
           int close_x = win->x + win->width - 46;
           int max_x = win->x + win->width - 92;
@@ -409,7 +681,6 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
               drag_offset_y = cursor_y - win->y;
             }
           } else {
-            // Click dentro del contenido de la ventana.
             compositor_focus_window(win);
             int local_x = cursor_x - win->x;
             int local_y = cursor_y - win->y - WIN11_TITLEBAR_HEIGHT;
@@ -419,9 +690,16 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
         }
         win = win->next;
       }
+
+      if (!hit_any) {
+        compositor_unfocus_all();
+      }
     }
   }
 
+  /* ------------------------------------------------------------------
+   * 2. Click izquierdo soltado
+   * ------------------------------------------------------------------ */
   if (released) {
     if (pressed_win && pressed_btn != WIN_BTN_NONE) {
       int close_x = pressed_win->x + pressed_win->width - 46;
@@ -431,9 +709,6 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
       if (pressed_btn == WIN_BTN_CLOSE_PRESSED) {
         if (cursor_x >= close_x && cursor_x < close_x + 46 &&
             cursor_y >= pressed_win->y && cursor_y < pressed_win->y + 32) {
-          // Si la ventana pertenece a una app de usuario, enviar CLOSE
-          // y esperar a que la app la destruya.
-          // Si no (ventana del kernel), cerrarla directamente.
           if (winsrv_has_window(pressed_win)) {
             winsrv_post_event(pressed_win, WINSRV_EV_CLOSE, 0, 0, 0);
           } else {
@@ -441,19 +716,12 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
           }
         }
       } else if (pressed_btn == WIN_BTN_MAXIMIZE_PRESSED) {
-        // maximizar (por ahora sin op)
+        /* TODO: maximizar */
       } else if (pressed_btn == WIN_BTN_MINIMIZE_PRESSED) {
         if (cursor_x >= min_x && cursor_x < max_x &&
             cursor_y >= pressed_win->y && cursor_y < pressed_win->y + 32) {
-          window_set_visible(pressed_win, 0);
-          pressed_win->flags &= ~WIN_FLAGS_FOCUSED;
-          pressed_win->flags |= WIN_FLAGS_INACTIVE;
+          compositor_minimize_window(pressed_win);
           taskbar_set_active_item(NULL);
-          compositor_invalidate_rect(
-              (rect_t){pressed_win->x - WIN11_SHADOW_SIZE,
-                       pressed_win->y - WIN11_SHADOW_SIZE,
-                       pressed_win->width + WIN11_SHADOW_SIZE * 2,
-                       pressed_win->height + WIN11_SHADOW_SIZE * 2});
           compositor_invalidate_taskbar();
         }
       }
@@ -463,6 +731,9 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
     pressed_btn = WIN_BTN_NONE;
   }
 
+  /* ------------------------------------------------------------------
+   * 3. Drag de ventana
+   * ------------------------------------------------------------------ */
   if (pressed && drag_window) {
     int new_x = cursor_x - drag_offset_x;
     int new_y = cursor_y - drag_offset_y;
@@ -479,38 +750,38 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
                       drag_window->height + WIN11_SHADOW_SIZE * 2};
       compositor_invalidate_rect(rect_bounding_box(old_r, new_r));
 
-      // Notificar MOVE al winsrv.
       winsrv_post_event(drag_window, WINSRV_EV_MOVE, new_x, new_y, 0);
     }
   }
 
   last_mouse_buttons = buttons;
 
-  // Refresco inmediato del cursor
+  /* ==================================================================
+   * 4. Refresco del cursor — VÍA SISTEMA DE DAÑO
+   *
+   * La versión anterior copiaba directamente del backbuffer a fb en cada
+   * evento. Durante un drag rápido, el backbuffer aún contenía la ventana
+   * en su posición VIEJA, así que esa copia pintaba trozos de la ventana
+   * antigua en la pantalla → ghosting.
+   *
+   * Ahora solo metemos el cursor en el sistema de daño. El compositor lo
+   * pintará en el próximo frame, cuando el backbuffer esté coherente.
+   * El cursor se actualiza a 60 FPS mientras hay input, sin lag visible.
+   * ================================================================== */
   if (mouse_moved && (old_x != cursor_x || old_y != cursor_y)) {
-    if (fb_ptr) {
-      rect_t old_rect = {old_x - 16, old_y - 16, 32, 32};
-      rect_t clip_old =
-          rect_clip(old_rect, (rect_t){0, 0, (int)fb_width, (int)fb_height});
-      if (clip_old.w > 0 && clip_old.h > 0) {
-        for (int y = clip_old.y; y < clip_old.y + clip_old.h; y++) {
-          sse_memcpy_vram(&fb_ptr[y * fb_pitch + clip_old.x],
-                          &backbuffer[y * fb_width + clip_old.x], clip_old.w);
-        }
-      }
-      rect_t new_rect = {cursor_x - 16, cursor_y - 16, 32, 32};
-      rect_t clip_new =
-          rect_clip(new_rect, (rect_t){0, 0, (int)fb_width, (int)fb_height});
-      if (clip_new.w > 0 && clip_new.h > 0) {
-        draw_cursor_overlay(fb_ptr, fb_pitch, clip_new);
-      }
-    }
+    /* Zona antigua (con margen de 2 px por si el redondeo del área nueva
+     * tapa parcialmente la vieja). */
+    compositor_invalidate_rect(
+        (rect_t){old_x - 2, old_y - 2, CURSOR_W + 4, CURSOR_H + 4});
+    /* Zona nueva */
+    compositor_invalidate_rect(
+        (rect_t){cursor_x, cursor_y, CURSOR_W, CURSOR_H});
+
+    compositor_has_input = 1;
+    wake_up_all(&compositor_wq);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Procesar todos los eventos de input pendientes
-// ---------------------------------------------------------------------------
 static void compositor_process_events(void) {
   input_event_t ev;
   while (input_pop(&ev)) {
@@ -527,9 +798,6 @@ static void compositor_process_events(void) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Cuerpo de render
-// ---------------------------------------------------------------------------
 static void compositor_render(void) {
   if (global_damage.w <= 0 || global_damage.h <= 0)
     return;
@@ -541,19 +809,19 @@ static void compositor_render(void) {
   if (clip.w <= 0 || clip.h <= 0)
     return;
 
-  // 1. Wallpaper
+  /* 1. Wallpaper (backbuffer ← wallpaper_cache, memoria normal) */
   if (wallpaper_cache) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
-      sse_memcpy_vram(&backbuffer[y * fb_width + clip.x],
-                      &wallpaper_cache[y * fb_width + clip.x], clip.w);
+      simd_copy_normal(&backbuffer[y * fb_width + clip.x],
+                       &wallpaper_cache[y * fb_width + clip.x], clip.w);
     }
   } else {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
-      sse_memset32(&backbuffer[y * fb_width + clip.x], 0xFF1E1E2E, clip.w);
+      simd_fill_row(&backbuffer[y * fb_width + clip.x], 0xFF1E1E2E, clip.w);
     }
   }
 
-  // 2. Ventanas de atrás hacia adelante
+  /* 2. Ventanas, de atrás hacia adelante */
   window_t *curr = window_stack;
   while (curr && curr->next)
     curr = curr->next;
@@ -572,7 +840,7 @@ static void compositor_render(void) {
     curr = curr->prev;
   }
 
-  // 3. Taskbar
+  /* 3. Taskbar */
   rect_t taskbar_rect = taskbar_get_bounds(fb_width, fb_height);
   rect_t taskbar_damage = {taskbar_rect.x - 16, taskbar_rect.y - 16,
                            taskbar_rect.w + 32, taskbar_rect.h + 32};
@@ -580,25 +848,109 @@ static void compositor_render(void) {
     taskbar_render(backbuffer, fb_width, clip, fb_width, fb_height);
   }
 
-  // 4. Copiar a VRAM + cursor
+  /* 4. Blit a VRAM (non-temporal) + cursor */
   if (fb_ptr) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
-      sse_memcpy_vram(&fb_ptr[y * fb_pitch + clip.x],
-                      &backbuffer[y * fb_width + clip.x], clip.w);
+      simd_copy_to_vram(&fb_ptr[y * fb_pitch + clip.x],
+                        &backbuffer[y * fb_width + clip.x], clip.w);
     }
-    draw_cursor_overlay(fb_ptr, fb_pitch, clip);
+    rect_t cursor_rect = {cursor_x, cursor_y, CURSOR_W, CURSOR_H};
+    rect_t c_clip = rect_clip(clip, cursor_rect);
+    if (c_clip.w > 0 && c_clip.h > 0) {
+      draw_cursor_overlay(fb_ptr, fb_pitch, c_clip);
+    }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Thread principal del compositor
-// ---------------------------------------------------------------------------
+static int compositor_has_active_animations(void) {
+  window_t *w = window_stack;
+  while (w) {
+    if (w->anim_state != WIN_ANIM_NONE)
+      return 1;
+    w = w->next;
+  }
+  return 0;
+}
+
+static int compositor_tick_animations(int dt_ms) {
+  window_t *w = window_stack;
+  while (w) {
+    window_t *next = w->next;
+
+    if (w->anim_state != WIN_ANIM_NONE) {
+      window_advance_animation(w, dt_ms);
+
+      rect_t damage = {
+          w->x - WIN11_SHADOW_SIZE, w->y - WIN11_SHADOW_SIZE + w->anim_dy,
+          w->width + WIN11_SHADOW_SIZE * 2, w->height + WIN11_SHADOW_SIZE * 2};
+      rect_t damage2 = {w->x - WIN11_SHADOW_SIZE, w->y - WIN11_SHADOW_SIZE,
+                        w->width + WIN11_SHADOW_SIZE * 2,
+                        w->height + WIN11_SHADOW_SIZE * 2};
+      compositor_invalidate_rect(rect_bounding_box(damage, damage2));
+
+      if (w->anim_state == WIN_ANIM_NONE) {
+        if (w->pending_destroy) {
+          w->pending_destroy = 0;
+          compositor_do_close_window(w);
+        } else if (w->anim_alpha == 0 && !(w->flags & WIN_FLAGS_HIDDEN)) {
+          w->flags |= WIN_FLAGS_HIDDEN;
+          w->flags &= ~WIN_FLAGS_FOCUSED;
+          w->flags |= WIN_FLAGS_INACTIVE;
+          w->dirty = 1;
+        }
+      }
+    }
+    w = next;
+  }
+  return compositor_has_active_animations();
+}
+
+static void compositor_frame_delay(void) {
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq > 0) {
+    uint64_t target = freq / 60;
+    uint64_t start = comp_rdtsc();
+    while (comp_rdtsc() - start < target) {
+      sched_yield();
+    }
+  } else {
+    uint64_t target = tick_count + 16;
+    while (tick_count < target) {
+      sched_yield();
+    }
+  }
+}
+
+static void compositor_frame_delay_30fps(void) {
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq > 0) {
+    uint64_t target = freq / 30;
+    uint64_t start = comp_rdtsc();
+    while (comp_rdtsc() - start < target) {
+      sched_yield();
+    }
+  } else {
+    uint64_t target = tick_count + 33;
+    while (tick_count < target)
+      sched_yield();
+  }
+}
+
 void compositor_thread(void) {
   compositor_task_ref = sched_current();
   LOG_INFO("[COMP] Compositor thread started");
 
+  uint64_t tsc_freq = klog_get_tsc_freq();
+  uint64_t last_tsc = comp_rdtsc();
+
   while (1) {
-    wait_event(&compositor_wq, compositor_has_work, NULL);
+    int animations_active = compositor_has_active_animations();
+    int hover_active = taskbar_has_active_hover();
+
+    if (!animations_active && !hover_active) {
+      wait_event(&compositor_wq, compositor_has_work, NULL);
+      last_tsc = comp_rdtsc();
+    }
 
     if (compositor_has_input) {
       compositor_has_input = 0;
@@ -611,6 +963,44 @@ void compositor_thread(void) {
       compositor_invalidate_taskbar();
     }
 
+    uint64_t now_tsc = comp_rdtsc();
+    int dt;
+    if (tsc_freq > 0) {
+      dt = (int)(((now_tsc - last_tsc) * 1000) / tsc_freq);
+    } else {
+      dt = 1;
+    }
+    last_tsc = now_tsc;
+    if (dt < 1)
+      dt = 1;
+    if (dt > 33)
+      dt = 33;
+
+    int still_animating = compositor_tick_animations(dt);
+
+    int hover_changed = taskbar_tick_hover(dt);
+    if (hover_changed) {
+      taskbar_item_t *it = taskbar_items_head();
+      while (it) {
+        if (it->hover_t > 0 && it->hover_t < 256) {
+          rect_t r = taskbar_item_get_bounds(it, (int)fb_width, (int)fb_height);
+          compositor_invalidate_rect(
+              (rect_t){r.x - 4, r.y - 4, r.w + 8, r.h + 8});
+        }
+        it = it->next;
+      }
+    }
+
+    /* [NUEVO] Diagnóstico: mide el tiempo real de compositor_render(). */
+    uint64_t t_render_start = comp_rdtsc();
     compositor_render();
+    uint64_t t_render_end = comp_rdtsc();
+    compositor_report_frame_stats(t_render_end - t_render_start);
+
+    if (still_animating) {
+      compositor_frame_delay();
+    } else if (hover_changed) {
+      compositor_frame_delay_30fps();
+    }
   }
 }

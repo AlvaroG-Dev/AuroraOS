@@ -162,6 +162,44 @@ static inline void clac(void) {
   }
 }
 
+// ============================================================================
+// CPU feature detection + SIMD dispatch
+// ============================================================================
+
+typedef struct {
+  // SSE family
+  int sse2, sse3, ssse3, sse41, sse42;
+  // AVX family
+  int avx, avx2, fma;
+  // AVX-512
+  int avx512f, avx512bw, avx512vl, avx512dq;
+  // OS state
+  int osxsave;
+  int xsave_enabled;  // XCR0 configurado (AVX usable)
+  int avx512_enabled; // XCR0 bits 5..7 (ZMM usable)
+  // Nivel de dispatch elegido (0..4)
+  int level;
+} cpu_features_t;
+
+extern cpu_features_t g_cpu_features;
+
+#define CPU_SIMD_SCALAR 0
+#define CPU_SIMD_SSE2 1
+#define CPU_SIMD_SSE41 2
+#define CPU_SIMD_AVX2 3
+#define CPU_SIMD_AVX512 4
+
+void cpu_simd_init(void);
+
+static inline int cpu_has_sse2(void) { return g_cpu_features.sse2; }
+static inline int cpu_has_sse41(void) { return g_cpu_features.sse41; }
+static inline int cpu_has_avx2(void) {
+  return g_cpu_features.level >= CPU_SIMD_AVX2;
+}
+static inline int cpu_has_avx512(void) {
+  return g_cpu_features.level >= CPU_SIMD_AVX512;
+}
+
 // ---------------------------------------------------------------------------
 // Asserts de offsets asm↔C.
 //

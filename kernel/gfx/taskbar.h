@@ -24,6 +24,11 @@
 #define TASKBAR_CLOCK_GAP 12
 #define TASKBAR_SEPARATOR_W 1
 
+/* Animación de hover */
+#define TASKBAR_HOVER_ALPHA 0x28
+#define TASKBAR_INACTIVE_ALPHA 0x06
+#define TASKBAR_ACTIVE_ALPHA 0x24
+
 typedef enum {
   TASKBAR_ITEM_START_BTN,
   TASKBAR_ITEM_APP_ICON,
@@ -45,6 +50,9 @@ typedef struct taskbar_item {
              // indicado.
   void (*on_click)(struct taskbar_item *item);
   struct taskbar_item *next;
+
+  int hover_t;    // 0..256 (0 = sin hover, 256 = hover completo)
+  int is_hovered; // 1 si el ratón está encima
 } taskbar_item_t;
 
 // API de abstracción de la Taskbar
@@ -70,3 +78,11 @@ taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
                                      const char *label, tar_node_t *bmp_file,
                                      void (*on_click)(taskbar_item_t *));
 void taskbar_remove_item_ptr(taskbar_item_t *item);
+
+void taskbar_set_hover(taskbar_item_t *item, int hovered);
+int taskbar_tick_hover(int dt_ms); /* cambia void → int */
+rect_t taskbar_item_get_bounds(taskbar_item_t *item, int screen_w,
+                               int screen_h);
+taskbar_item_t *taskbar_get_item_at(int sx, int sy, int sw, int sh);
+taskbar_item_t *taskbar_items_head(void);
+int taskbar_has_active_hover(void);
