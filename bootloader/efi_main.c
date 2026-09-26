@@ -376,11 +376,11 @@ static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
 
   status = get_memory_map(image_handle);
   if (EFI_ERROR(status)) {
-    Print(L"[BOOT] Error obteniendo el memmap final: %r\\n", status);
+    Print(L"[BOOT] Error obteniendo el memmap final: %r\n", status);
     return;
   }
   if (mem_map.map_size > safe_memmap_capacity) {
-    Print(L"[BOOT] Memmap final demasiado grande para el buffer seguro\\n");
+    Print(L"[BOOT] Memmap final demasiado grande para el buffer seguro\n");
     return;
   }
   CopyMem((VOID *)safe_memmap_addr, mem_map.map, mem_map.map_size);
@@ -396,12 +396,12 @@ static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
   if (EFI_ERROR(status)) {
     status = get_memory_map(image_handle);
     if (EFI_ERROR(status)) {
-      Print(L"[BOOT] Error renovando el memmap tras fallo de ExitBootServices: %r\\n",
+      Print(L"[BOOT] Error renovando el memmap tras fallo de ExitBootServices: %r\n",
             status);
       return;
     }
     if (mem_map.map_size > safe_memmap_capacity) {
-      Print(L"[BOOT] Memmap renovado demasiado grande para el buffer seguro\\n");
+      Print(L"[BOOT] Memmap renovado demasiado grande para el buffer seguro\n");
       return;
     }
     CopyMem((VOID *)safe_memmap_addr, mem_map.map, mem_map.map_size);
@@ -411,6 +411,11 @@ static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
     kinfo->memmap_desc_ver = mem_map.desc_version;
     status = uefi_call_wrapper(BS->ExitBootServices, 2, image_handle,
                                mem_map.map_key);
+    if (EFI_ERROR(status)) {
+      Print(L"[BOOT] ExitBootServices fallo en el segundo intento: %r\n",
+            status);
+      return;
+    }
   }
 
   __asm__ volatile("movq %0, %%cr3" : : "r"(pml4_addr) : "memory");
