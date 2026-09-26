@@ -851,30 +851,29 @@ static int64_t sys_kill_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   if (sig < 1 || sig >= SIG_MAX)
     return -EINVAL;
 
-  process_t *target = NULL;
+  task_t *target_task = NULL;
   if (pid > 0) {
-    target = process_find_by_pid((uint32_t)pid);
+    // La búsqueda, publicación de la señal y adquisición de la referencia
+    // de la tarea se hacen bajo process_lock. Evita un UAF si otro CPU hace
+    // waitpid() y libera el process_t justo después de la búsqueda.
+    target_task = process_signal_pid((uint32_t)pid, 1ULL << sig);
+    if (!target_task)
+      return -ENOENT;
   } else if (pid == 0) {
-    target = process_current();
+    process_t *target = process_current();
+    if (!target || !target->task)
+      return -ENOENT;
+    target_task = target->task;
+    task_get(target_task);
+    __atomic_fetch_or(&target->pending_signals, 1ULL << sig, __ATOMIC_RELEASE);
   } else {
     return -EINVAL;
   }
-  if (!target)
-    return -ENOENT;
 
-  __atomic_fetch_or(&target->pending_signals, 1ULL << sig, __ATOMIC_RELEASE);
-
-  // Si la tarea destino está bloqueada en una wait queue, despertarla
-  // para que retorne del syscall y vea la señal pendiente. En este MVP
-  // solo las wait queues del proceso (child_wq) se despiertan; no hay
-  // canales de bloqueo más complejos.
-  if (target->task) {
-    // Despertar también al objetivo si está bloqueado en cualquier wait queue.
-    // wait_queue_interrupt_task() elimina la entrada y marca -EINTR, de modo
-    // que SIGKILL/SIGTERM no queden pendientes indefinidamente en un sleep.
-    wait_queue_interrupt_task(target->task);
-  }
-
+  // Despertar también al objetivo si está bloqueado en cualquier wait queue.
+  // La referencia tomada arriba mantiene viva la task_t durante esta llamada.
+  wait_queue_interrupt_task(target_task);
+  task_put(target_task);
   return 0;
 }
 
