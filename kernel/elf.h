@@ -66,4 +66,26 @@ int elf_validate(const void *data, size_t size);
 int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
              uint64_t *entry_out);
 
+// ---------------------------------------------------------------------------
+// Loader streaming: lee el ELF a través de un callback en vez de asumir
+// que está en un buffer contiguo. Útil para cargar desde VFS/FAT32 sin
+// consumir heap proporcional al tamaño del binario.
+//
+// Contrato del callback:
+//   - read(ctx, offset, size, buf) debe copiar EXACTAMENTE `size` bytes
+//     desde `offset` del fichero a `buf`.
+//   - Devuelve `size` en éxito, negativo en error.
+//   - Un retorno != size se considera error (no se soporta short reads).
+//
+// vma_start_out / vma_end_out: rango [start, end) page-aligned que cubre
+// todos los PT_LOAD del ELF ya relocalizados. Si no hay PT_LOAD, se
+// devuelve start = ~0ULL, end = 0 (mismo sentinel que usa process.c).
+// ---------------------------------------------------------------------------
+typedef int64_t (*elf_read_fn)(void *ctx, uint64_t offset, size_t size,
+                               void *buf);
+
+int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
+                       uint64_t *pml4, uint64_t load_base, uint64_t *entry_out,
+                       uint64_t *vma_start_out, uint64_t *vma_end_out);
+
 #endif

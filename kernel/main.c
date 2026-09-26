@@ -204,16 +204,32 @@ static void kmain_task(void) {
   part_scan_all();
   LOG_INFO("OK");
 
-  // [FASE 2.2] Intentar montar el disco de boot como FAT32 (aurora.img
-  // es un FAT32 crudo, sin tabla de particiones). Best-effort: si no es
-  // FAT32, se ignora.
+  // [PIVOT] FAT32 es ahora la raíz.
   for (int i = 0; i < blk_count(); i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
       continue;
-    if (fat32_mount_bdev(b->name, "/boot") == 0) {
-      LOG_INFO("[INIT] Montado %s en /boot", b->name);
+    if (fat32_mount_bdev(b->name, "/") == 0) {
+      LOG_INFO("[INIT] Montado %s en /", b->name);
       break;
+    }
+  }
+
+  // [PIVOT] Crear el punto de montaje /initrd en FAT32 para que
+  // `ls /` lo liste. En el VFS, /initrd está montado sobre tarfs
+  // (longest-match), pero el FS subyacente (FAT32) necesita una
+  // entry física para que readdir("/") la muestre, igual que en
+  // Linux /mnt es un directorio real antes de montar nada encima.
+  //
+  // Si ya existe (reboot anterior), vfs_mkdir devuelve -EEXIST y se
+  // ignora. Si no hay FAT32 montado, falla con -ENOENT y también se
+  // ignora: en ese caso solo tienes tarfs.
+  {
+    int rc = vfs_mkdir("/initrd");
+    if (rc == 0) {
+      LOG_INFO("[PIVOT] Punto de montaje /initrd creado en FAT32");
+    } else if (rc != -EEXIST) {
+      LOG_DEBUG("[PIVOT] /initrd no creado (rc=%d) - ¿sin FAT32?", rc);
     }
   }
 
@@ -277,9 +293,9 @@ static void kmain_task(void) {
   }
 
   __sched_canary_check();
-  // App de consola gráfica (antes del SMP, para que no interfiera).
-  LOG_INFO("[INIT] Cargando shell interactivo 'apps/shell'...");
-  process_load("apps/shell");
+  // [PIVOT] El shell vive en tarfs, ahora montado en /initrd.
+  LOG_INFO("[INIT] Cargando shell interactivo '/initrd/apps/shell'...");
+  process_load("/initrd/apps/shell");
 
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
   //

@@ -1,56 +1,26 @@
-// apps/ls/main.c
 #include "../../lib/file.h"
-#include "../../lib/string.h"
-#include "../../syscall.h"
 
+int main(int argc, char **argv) {
+  const char *path = (argc > 1) ? argv[1] : ".";
 
-int main(void) {
-  const char *path = "/boot";
-  dirent_t d;
-  int idx = 0;
-  int n = 0;
+  printf("[ls] listando %s\n", path);
 
-  sys_print("[ls] listando ");
-  sys_print(path);
-  sys_print("\n");
-
-  while (1) {
-    int rc = readdir(path, idx, &d);
-    if (rc < 0) {
-      char buf[32];
-      sys_print("[ls] error: ");
-      itoa(rc, buf, 10);
-      sys_print(buf);
-      sys_print("\n");
-      sys_exit(1);
+  dirent_t ent;
+  int count = 0;
+  for (uint64_t i = 0;; i++) {
+    int r = readdir(path, i, &ent);
+    if (r < 0) {
+      printf("[ls] error %d en %s\n", r, path);
+      return 1;
     }
-    if (rc == 0 || d.name[0] == '\0')
+    if (r == 0 || ent.name[0] == '\0')
       break;
-
-    // Formato: "[DIR] name/" o "[FILE] name (size)".
-    if (d.type == 2) { // VFS_DIRECTORY
-      sys_print("  [DIR]  ");
-      sys_print(d.name);
-      sys_print("/\n");
-    } else {
-      sys_print("  [FILE] ");
-      sys_print(d.name);
-      sys_print(" (");
-      char buf[32];
-      itoa((int64_t)d.size, buf, 10);
-      sys_print(buf);
-      sys_print(")\n");
-    }
-    idx++;
-    n++;
+    if (ent.type == 2 /* VFS_DIRECTORY */)
+      printf("  [DIR]  %s/\n", ent.name);
+    else
+      printf("  [FILE] %s (%u)\n", ent.name, (unsigned int)ent.size);
+    count++;
   }
-
-  char buf[32];
-  sys_print("[ls] ");
-  itoa(n, buf, 10);
-  sys_print(buf);
-  sys_print(" entries\n");
-
-  sys_exit(0);
+  printf("[ls] %d entries\n", count);
   return 0;
 }

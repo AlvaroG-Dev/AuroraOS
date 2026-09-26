@@ -4,6 +4,7 @@
 
 int mkdir(const char *path) { return sys_mkdir(path); }
 int unlink(const char *path) { return sys_unlink(path); }
+int create(const char *path) { return sys_create(path); }
 int readdir(const char *path, uint64_t index, dirent_t *out) {
   return sys_readdir(path, index, out);
 }
@@ -93,3 +94,60 @@ void printf(const char *fmt, ...) {
 
   va_end(args);
 }
+
+int copy_file(const char *src, const char *dst) {
+  if (!src || !dst)
+    return -1;
+
+  int in = open(src, 0x0000 /* O_RDONLY */);
+  if (in < 0)
+    return -1;
+
+  // Intenta abrir el destino. Si no existe, lo crea y reintenta.
+  int out = open(dst, 0x0001 /* O_WRONLY */);
+  if (out < 0) {
+    if (create(dst) != 0) {
+      close(in);
+      return -1;
+    }
+    out = open(dst, 0x0001 /* O_WRONLY */);
+    if (out < 0) {
+      close(in);
+      return -1;
+    }
+  }
+
+  char buf[4096];
+  int rc = 0;
+  for (;;) {
+    int64_t n = read(in, buf, sizeof(buf));
+    if (n < 0) {
+      rc = -1;
+      break;
+    }
+    if (n == 0)
+      break;
+
+    int64_t written = 0;
+    while (written < n) {
+      int64_t w = write(out, buf + written, (size_t)(n - written));
+      if (w <= 0) {
+        rc = -1;
+        goto done;
+      }
+      written += w;
+    }
+  }
+
+done:
+  close(in);
+  close(out);
+  return rc;
+}
+
+int rename_path(const char *oldpath, const char *newpath) {
+  return sys_rename(oldpath, newpath);
+}
+
+int chdir(const char *path) { return sys_chdir(path); }
+int getcwd(char *buf, size_t size) { return sys_getcwd(buf, size); }

@@ -21,4 +21,18 @@ int readdir(const char *path, uint64_t index, dirent_t *out);
 void puts(const char *str);
 void printf(const char *fmt, ...);
 
+// [PR A] Crea un fichero vacío. Devuelve 0 si OK, negativo si falla.
+int create(const char *path);
+
+// [PR A] Copia src a dst. Devuelve 0 si OK, -1 si falla.
+// Reutiliza un buffer de 4 KB en pila; no usa heap.
+int copy_file(const char *src, const char *dst);
+
+// [PR RENAME] Renombra o mueve dentro del mismo FS.
+// Devuelve 0 si OK, negativo si falla.
+int rename_path(const char *oldpath, const char *newpath);
+
+int chdir(const char *path);
+int getcwd(char *buf, size_t size);
+
 #endif

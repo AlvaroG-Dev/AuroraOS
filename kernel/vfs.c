@@ -14,24 +14,27 @@
                      // ENAMETOOLONG
 #include <stddef.h>
 
-#define EINTR 4
+// ===========================================================================
+// Node-level ops de TarFS.
+//
+// tarfs es un FS plano (los ficheros del tar son "apps/shell",
+// "system/config.txt"...). Cuando se monta, el VFS le pasa paths
+// relativos al mount; los normaliza y delega en estas ops.
+// ===========================================================================
 
-// ===========================================================================
-// Node-level ops de TarFS. Cada nodo devuelto por tarfs_fs_lookup lleva
-// estos ops. Son específicos de TarFS y no dependen del mount.
-// ===========================================================================
 static int64_t tar_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
                             void *buf) {
   if (!node || !node->priv || !buf)
     return -1;
   tar_node_t *tn = (tar_node_t *)node->priv;
+  if (tn->is_dir)
+    return -EISDIR;
   if (offset >= tn->size)
     return 0;
 
   size_t to_read = size;
-  if (offset + to_read > tn->size) {
+  if (offset + to_read > tn->size)
     to_read = tn->size - offset;
-  }
   memcpy(buf, tn->data + offset, to_read);
   return (int64_t)to_read;
 }
@@ -42,13 +45,14 @@ static int64_t tar_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
   (void)offset;
   (void)size;
   (void)buf;
-  return -1;
+  return -EROFS;
 }
 
 static int tar_vfs_open(vfs_node_t *node, int flags) {
   (void)node;
+  // tarfs es read-only.
   if ((flags & O_WRONLY) || (flags & O_RDWR))
-    return -1;
+    return -EROFS;
   return 0;
 }
 
@@ -57,6 +61,101 @@ static int tar_vfs_close(vfs_node_t *node) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// [PIVOT] readdir de tarfs.
+//
+// Itera los nodos del tar y devuelve los hijos DIRECTOS del directorio
+// `dir` (dir->priv es un tar_node_t* con is_dir=1). Un nodo hijo es
+// directo si:
+//   - su nombre empieza por "<dir_name>/" (o por nada, si es la raíz)
+//   - el resto no contiene '/'
+// ---------------------------------------------------------------------------
+static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
+  if (!dir || !dir->priv || !out)
+    return -EINVAL;
+  tar_node_t *tn = (tar_node_t *)dir->priv;
+  if (!tn->is_dir)
+    return -ENOTDIR;
+
+  // Prefijo a matchear. Para la raíz ("") es cadena vacía.
+  size_t plen = strlen(tn->name);
+  char prefix[260];
+  size_t prefix_len;
+  if (plen == 0) {
+    prefix[0] = '\0';
+    prefix_len = 0;
+  } else {
+    if (plen + 2 > sizeof(prefix))
+      return -ENAMETOOLONG;
+    memcpy(prefix, tn->name, plen);
+    prefix[plen] = '/';
+    prefix[plen + 1] = '\0';
+    prefix_len = plen + 1;
+  }
+
+  size_t n = tarfs_get_node_count();
+  uint64_t seen = 0;
+  for (size_t i = 0; i < n; i++) {
+    tar_node_t *child = tarfs_get_node(i);
+    if (!child)
+      continue;
+    if (child == tn)
+      continue;
+
+    const char *name = child->name;
+    if (prefix_len > 0) {
+      if (strncmp(name, prefix, prefix_len) != 0)
+        continue;
+      name += prefix_len;
+    }
+    if (*name == '\0')
+      continue;
+    int has_slash = 0;
+    for (const char *p = name; *p; p++) {
+      if (*p == '/') {
+        has_slash = 1;
+        break;
+      }
+    }
+    if (has_slash)
+      continue;
+
+    if (seen == index) {
+      size_t rlen = strlen(name);
+      if (rlen >= sizeof(out->name))
+        rlen = sizeof(out->name) - 1;
+      for (size_t k = 0; k < rlen; k++)
+        out->name[k] = name[k];
+      out->name[rlen] = '\0';
+      out->type = child->is_dir ? VFS_DIRECTORY : VFS_FILE;
+      out->size = child->is_dir ? 0 : child->size;
+      return 0;
+    }
+    seen++;
+  }
+
+  // Fin de directorio: nombre vacío.
+  out->name[0] = '\0';
+  out->type = 0;
+  out->size = 0;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [PIVOT] Nodo sintético para la raíz de tarfs ("/initrd").
+//
+// tarfs no tiene entry para "". Lo fabricamos estáticamente. Vive en
+// .data y no se libera nunca.
+// ---------------------------------------------------------------------------
+static tar_node_t g_tarfs_root = {
+    .name = "",
+    .data = NULL,
+    .size = 0,
+    .is_dir = 1,
+};
+
+// Ops para ficheros y directorios de tarfs. Los directorios llevan
+// readdir; los ficheros, no. read/write/open/close son los mismos.
 static vfs_ops_t tar_ops = {
     .read = tar_vfs_read,
     .write = tar_vfs_write,
@@ -65,17 +164,40 @@ static vfs_ops_t tar_ops = {
     .readable = NULL,
 };
 
-// ---------------------------------------------------------------------------
-// Adapter: tar_node_t → vfs_node_t. Crea un vfs_node_t nuevo kmalloc'd.
-// El VFS es responsable de liberarlo (vfs_node_free → kfree).
-// ---------------------------------------------------------------------------
-// Forward declaration: tarfs_fs_lookup() asigna node->fs = &tarfs_fs_ops,
-// pero el struct se rellena al final del archivo. Declaramos aquí para
-// que el compilador conozca el símbolo.
+static vfs_ops_t tar_dir_ops = {
+    .read = tar_vfs_read,
+    .write = tar_vfs_write,
+    .open = tar_vfs_open,
+    .close = tar_vfs_close,
+    .readable = NULL,
+    .readdir = tar_vfs_readdir,
+};
+
+// Forward declaration: tarfs_fs_lookup asigna node->fs = &tarfs_fs_ops,
+// pero el struct se define al final del fichero.
 static vfs_fs_ops_t tarfs_fs_ops;
 
 static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
   (void)fs_priv;
+
+  // Caso raíz del mount: rel es "/" o "". Devolvemos un directorio
+  // sintético sobre g_tarfs_root, con tar_dir_ops para poder listarlo.
+  if (!path || path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
+    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!node)
+      return NULL;
+    node->name[0] = '/';
+    node->name[1] = '\0';
+    node->flags = VFS_DIRECTORY;
+    node->size = 0;
+    node->inode = 0;
+    node->ops = &tar_dir_ops;
+    node->fs = &tarfs_fs_ops;
+    node->priv = &g_tarfs_root;
+    return node;
+  }
+
+  // Path normal: buscar el nodo real en el tar.
   tar_node_t *tn = tarfs_open(path);
   if (!tn)
     return NULL;
@@ -94,7 +216,7 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
   node->flags = tn->is_dir ? VFS_DIRECTORY : VFS_FILE;
   node->size = tn->size;
   node->inode = 0;
-  node->ops = &tar_ops;
+  node->ops = tn->is_dir ? &tar_dir_ops : &tar_ops;
   node->fs = &tarfs_fs_ops;
   node->priv = tn;
   return node;
@@ -155,16 +277,11 @@ static struct vfs_mount *g_mounts = NULL;
 static spinlock_t g_mounts_lock;
 
 // ===========================================================================
-// Path normalization
+// Normalización de paths
 //
-// Reglas:
-//   - El resultado siempre empieza por '/' y no termina por '/' (excepto "/").
-//   - Múltiples '/' se colapsan.
-//   - "./" y "/." se eliminan.
-//   - ".." se rechaza (no permitimos upward traversal en el VFS todavía).
-//   - Si el path de entrada es vacío o solo '/', el resultado es "/".
-//
-// Devuelve 0 si OK, negativo en error.
+// Colapsa //, elimina ".", resuelve ".." subiendo un nivel (sin pasar
+// de "/"). Resultado siempre empieza por '/', no termina por '/' salvo
+// que sea exactamente "/".
 // ===========================================================================
 static int normalize_path(const char *in, char *out, size_t outlen) {
   if (!in || !out || outlen < 2)
@@ -189,8 +306,15 @@ static int normalize_path(const char *in, char *out, size_t outlen) {
       continue;
     if (seglen == 1 && seg[0] == '.')
       continue;
-    if (seglen == 2 && seg[0] == '.' && seg[1] == '.')
-      return -EINVAL;
+    if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
+      while (o > 1 && out[o - 1] != '/')
+        o--;
+      if (o > 1)
+        o--;
+      else
+        o = 1;
+      continue;
+    }
 
     if (o > 1) {
       if (o + 1 >= outlen)
@@ -204,6 +328,29 @@ static int normalize_path(const char *in, char *out, size_t outlen) {
   }
   out[o] = '\0';
   return 0;
+}
+
+int vfs_resolve_path(const char *cwd, const char *in, char *out,
+                     size_t outlen) {
+  if (!in || !in[0] || !out || outlen < 2)
+    return -EINVAL;
+
+  if (in[0] == '/')
+    return normalize_path(in, out, outlen);
+
+  const char *base = (cwd && cwd[0]) ? cwd : "/";
+  size_t blen = strlen(base);
+  size_t ilen = strlen(in);
+  char tmp[VFS_PATH_MAX * 2];
+  if (blen + 1 + ilen >= sizeof(tmp))
+    return -ENAMETOOLONG;
+  for (size_t i = 0; i < blen; i++)
+    tmp[i] = base[i];
+  tmp[blen] = '/';
+  for (size_t i = 0; i < ilen; i++)
+    tmp[blen + 1 + i] = in[i];
+  tmp[blen + 1 + ilen] = '\0';
+  return normalize_path(tmp, out, outlen);
 }
 
 // ===========================================================================
@@ -220,7 +367,6 @@ int vfs_mount(const char *path, vfs_fs_ops_t *ops, void *fs_priv) {
 
   unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
 
-  // ¿Ya hay un mount en esa ruta exacta?
   for (struct vfs_mount *m = g_mounts; m; m = m->next) {
     if (strcmp(m->path, norm) == 0) {
       spin_unlock_irqrestore(&g_mounts_lock, flags);
@@ -234,7 +380,6 @@ int vfs_mount(const char *path, vfs_fs_ops_t *ops, void *fs_priv) {
     return -ENOMEM;
   }
 
-  // norm cabe en VFS_PATH_MAX (verificado por normalize_path).
   size_t plen = strlen(norm);
   for (size_t i = 0; i < plen; i++)
     m->path[i] = norm[i];
@@ -263,12 +408,10 @@ int vfs_umount(const char *path) {
 
   size_t nlen = strlen(norm);
 
-  // Comprobar si hay mounts anidados bajo este path. Caso especial:
-  // unmount de "/" prohibido si hay otros mounts.
+  // Comprobar mounts anidados.
   for (struct vfs_mount *m = g_mounts; m; m = m->next) {
     if (strcmp(m->path, norm) == 0)
       continue;
-    // ¿m->path empieza con norm + '/'? (o norm == "/" y m->path != "/")
     if (norm[0] == '/' && nlen == 1) {
       if (m->path[0] == '/' && m->path[1] != '\0') {
         spin_unlock_irqrestore(&g_mounts_lock, flags);
@@ -280,7 +423,6 @@ int vfs_umount(const char *path) {
     }
   }
 
-  // Buscar y desenlazar.
   struct vfs_mount **pp = &g_mounts;
   while (*pp) {
     if (strcmp((*pp)->path, norm) == 0) {
@@ -320,9 +462,8 @@ void *vfs_get_mount_priv(const char *path) {
 // ===========================================================================
 // Lookup
 //
-// Estrategia: encontrar el mount cuyo path es el prefijo más largo de
-// `path` que matchea con frontera de componente ("/mnt" matchea "/mnt/foo"
-// pero no "/mntx"). Delegar en fs->lookup con el path relativo.
+// Encuentra el mount cuyo path es prefijo más largo del path consultado,
+// delega en fs->lookup con el path relativo al mount.
 // ===========================================================================
 vfs_node_t *vfs_lookup(const char *path) {
   if (!path)
@@ -332,7 +473,6 @@ vfs_node_t *vfs_lookup(const char *path) {
   if (normalize_path(path, norm, sizeof(norm)) != 0)
     return NULL;
 
-  // Buscar el mount más específico.
   unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
   struct vfs_mount *best = NULL;
   size_t best_len = 0;
@@ -341,10 +481,6 @@ vfs_node_t *vfs_lookup(const char *path) {
   for (struct vfs_mount *m = g_mounts; m; m = m->next) {
     size_t ml = strlen(m->path);
     if (ml > best_len) {
-      // Matchea si:
-      //   m->path == "/" (root, todo matchea)
-      //   O strncmp(norm, m->path, ml) == 0 con frontera:
-      //     norm[ml] == '\0' (mismo path) o norm[ml] == '/'
       int match = 0;
       if (ml == 1 && m->path[0] == '/') {
         match = 1;
@@ -368,38 +504,54 @@ vfs_node_t *vfs_lookup(const char *path) {
   void *fs_priv = best->fs_priv;
   spin_unlock_irqrestore(&g_mounts_lock, flags);
 
-  // Path relativo al mount, empezando por '/'.
-  const char *rel = norm + best_len;
-  if (*rel == '\0')
-    rel = "/";
-  // Si best_len == 1 (root), rel ya apunta al siguiente char.
-  // Si best->path == "/mnt/x" y norm == "/mnt/x", rel = "" → "/".
-  // Si norm == "/mnt/x/foo", rel = "/foo".
+  // [FIX] Cuando el mount está en "/" (best_len==1), no podemos hacer
+  // norm + best_len porque perderíamos el '/' inicial. En ese caso
+  // pasamos el path normalizado completo (que sí lo lleva). Para
+  // mounts anidados (best_len>1) el norm+best_len ya da un path que
+  // empieza por '/'.
+  const char *rel;
+  if (best_len == 1 && best->path[0] == '/') {
+    rel = norm;
+  } else {
+    rel = norm + best_len;
+    if (*rel == '\0')
+      rel = "/";
+  }
 
-  if (!ops->lookup)
-    return NULL;
-  return ops->lookup(fs_priv, rel);
+  if (ops->lookup) {
+    vfs_node_t *node = ops->lookup(fs_priv, rel);
+    if (node)
+      return node;
+  }
+
+  // Fallback: directorio sintético para la raíz del VFS ("/") cuando
+  // el FS montado ahí no expone entry para "". Hoy en día FAT32 sí la
+  // expone, pero esto cubre escenarios donde "/" no tiene FS montado
+  // todavía (por ejemplo, entre vfs_init y el mount de FAT32).
+  if (strcmp(norm, "/") == 0) {
+    vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!root)
+      return NULL;
+    root->name[0] = '/';
+    root->name[1] = '\0';
+    root->flags = VFS_DIRECTORY;
+    root->ops = NULL;
+    root->fs = NULL;
+    root->priv = NULL;
+    return root;
+  }
+
+  return NULL;
 }
 
 // ===========================================================================
-// [PR 4.2] Split de un path normalizado en (dirname, basename).
-//
-// Asume que `path` ya pasó por normalize_path: empieza por '/', no
-// termina por '/', sin '.' ni '..'.
-//
-// Ejemplos:
-//   "/foo"        → ("/",    "foo")
-//   "/a/b/c"      → ("/a/b", "c")
-//
-// Devuelve 0 si OK, -EINVAL si path es "/" o termina en '/' (no
-// debería pasar tras normalize), -ENAMETOOLONG si algo no cabe.
+// Split de path normalizado en (dirname, basename).
 // ===========================================================================
 static int split_dirname(const char *path, char *dir_out, size_t dir_outlen,
                          char *base_out, size_t base_outlen) {
   if (!path || path[0] != '/' || !dir_out || !base_out)
     return -EINVAL;
 
-  // Buscar el último '/'.
   const char *last = NULL;
   for (const char *p = path; *p; p++) {
     if (*p == '/')
@@ -410,7 +562,7 @@ static int split_dirname(const char *path, char *dir_out, size_t dir_outlen,
 
   const char *base_start = last + 1;
   if (*base_start == '\0')
-    return -EINVAL; // path termina en '/'
+    return -EINVAL;
 
   size_t blen = strlen(base_start);
   if (blen + 1 > base_outlen)
@@ -419,10 +571,9 @@ static int split_dirname(const char *path, char *dir_out, size_t dir_outlen,
     base_out[i] = base_start[i];
   base_out[blen] = '\0';
 
-  // dir = path[0..last]. Si last == path, dir = "/".
   size_t dlen = (size_t)(last - path);
   if (dlen == 0)
-    dlen = 1; // raíz
+    dlen = 1;
   if (dlen + 1 > dir_outlen)
     return -ENAMETOOLONG;
   for (size_t i = 0; i < dlen; i++)
@@ -432,8 +583,7 @@ static int split_dirname(const char *path, char *dir_out, size_t dir_outlen,
   return 0;
 }
 
-// Helper común: split + lookup del padre + dispatch.
-// Devuelve el nodo del padre o NULL con *rc_out rellenado.
+// Helper común: split + lookup del padre.
 static vfs_node_t *resolve_parent(const char *path, char *base_out,
                                   size_t base_outlen, int *rc_out) {
   char norm[VFS_PATH_MAX];
@@ -443,8 +593,6 @@ static vfs_node_t *resolve_parent(const char *path, char *base_out,
     return NULL;
   }
 
-  // Casos triviales: "/", "/foo/" no llegan aquí porque normalize los
-  // colapsa o rechaza, pero por si acaso.
   if (strcmp(norm, "/") == 0) {
     *rc_out = -EINVAL;
     return NULL;
@@ -471,6 +619,9 @@ static vfs_node_t *resolve_parent(const char *path, char *base_out,
   return parent;
 }
 
+// ===========================================================================
+// Operaciones de namespace
+// ===========================================================================
 int vfs_create(const char *path, int flags) {
   if (!path)
     return -EINVAL;
@@ -567,6 +718,44 @@ int vfs_readdir(const char *path, uint64_t index, vfs_dirent_t *out) {
   return rc;
 }
 
+int vfs_rename(const char *oldpath, const char *newpath) {
+  if (!oldpath || !newpath)
+    return -EINVAL;
+
+  char src_base[VFS_PATH_MAX];
+  char dst_base[VFS_PATH_MAX];
+  int rc;
+
+  vfs_node_t *src_parent =
+      resolve_parent(oldpath, src_base, sizeof(src_base), &rc);
+  if (!src_parent)
+    return rc;
+
+  vfs_node_t *dst_parent =
+      resolve_parent(newpath, dst_base, sizeof(dst_base), &rc);
+  if (!dst_parent) {
+    vfs_node_free(src_parent);
+    return rc;
+  }
+
+  if (src_parent->fs != dst_parent->fs) {
+    vfs_node_free(src_parent);
+    vfs_node_free(dst_parent);
+    return -EXDEV;
+  }
+
+  if (!src_parent->ops || !src_parent->ops->rename) {
+    vfs_node_free(src_parent);
+    vfs_node_free(dst_parent);
+    return -EROFS;
+  }
+
+  rc = src_parent->ops->rename(src_parent, src_base, dst_parent, dst_base);
+  vfs_node_free(src_parent);
+  vfs_node_free(dst_parent);
+  return rc;
+}
+
 // ===========================================================================
 // Free de nodo
 // ===========================================================================
@@ -582,9 +771,6 @@ void vfs_node_free(vfs_node_t *node) {
 
 // ===========================================================================
 // read_all
-//
-// Abre `path` vía vfs_lookup, lee el archivo entero a un buffer kmalloc'd,
-// libera el nodo. El llamante debe kfree(out_buf) cuando termine.
 // ===========================================================================
 int vfs_read_all(const char *path, void **out_buf, size_t *out_size) {
   if (!path || !out_buf || !out_size)
@@ -650,12 +836,14 @@ void vfs_init(void) {
   spin_init(&g_mounts_lock);
   g_mounts = NULL;
 
-  // Montar TarFS en /.
-  int rc = vfs_mount("/", &tarfs_fs_ops, NULL);
+  // [PIVOT] tarfs en /initrd. La raíz "/" queda sin FS hasta que
+  // kmain_task monte FAT32 ahí. vfs_lookup("/") devuelve un directorio
+  // sintético mientras tanto (fallback en vfs_lookup).
+  int rc = vfs_mount("/initrd", &tarfs_fs_ops, NULL);
   if (rc != 0) {
-    LOG_ERR("[VFS] fallo al montar tarfs en /: %d", rc);
+    LOG_ERR("[VFS] fallo al montar tarfs en /initrd: %d", rc);
   } else {
-    LOG_INFO("[VFS] VFS inicializado (root=tarfs).");
+    LOG_INFO("[VFS] VFS inicializado (tarfs en /initrd)");
   }
 }
 
@@ -871,7 +1059,7 @@ void vfs_notify_writable(file_descriptor_t *fd) {
 }
 
 // ===========================================================================
-// Definición del fs_ops de TarFS (forward declared arriba).
+// Definición del fs_ops de TarFS (forward-declared arriba).
 // ===========================================================================
 static vfs_fs_ops_t tarfs_fs_ops = {
     .lookup = tarfs_fs_lookup,

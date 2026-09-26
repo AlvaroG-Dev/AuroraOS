@@ -7,6 +7,7 @@
 #include "../string.h"
 #include "../tty.h"
 #include "../uaccess.h"
+#include "../vfs.h"
 #include "compositor.h"
 #include "theme.h"
 
@@ -506,69 +507,68 @@ void winsrv_cleanup_task(task_t *owner) {
 int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
   if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || !path)
     return -1;
-
-  char kpath[128];
-  long n = strncpy_from_user(kpath, path, sizeof(kpath));
-  if (n < 0)
-    return -1;
-  if (n == 0)
+  if (!path[0])
     return -1;
 
-  // Buscar el BMP en tarfs. Fuera del lock: no es compartido.
+  // [PIVOT] `path` viene resuelto y validado por sys_win_set_icon_k
+  // (resolve_user_path). Es un puntero de KERNEL, con '/' inicial, tipo
+  // "/initrd/system/icons/terminal-window-dark.bmp". Lo resolvemos por
+  // VFS: el mount de tarfs en /initrd lo encuentra.
   //
-  // [FIX] Antes solo se probaba tarfs_open(kpath). El icono del botón de
-  // Inicio (que sí se ve bien) se busca en compositor_init() con
-  // tar_find_file(), una función distinta. Si ambas rutas de búsqueda no
-  // normalizan igual (barra inicial, mayúsculas, etc.) un path como
-  // "system/icons/terminal-icon.bmp" puede fallar por tarfs_open() y
-  // funcionar por tar_find_file(), o viceversa. Antes, si tarfs_open
-  // fallaba, se devolvía -ENOENT SIN loguear nada, así que el fallo era
-  // invisible: la ventana se quedaba con el icono por defecto sin ningún
-  // rastro en el log. Ahora se prueba con las dos y se loguea el fallo.
-  tar_node_t *node = tarfs_open(kpath);
-  if (!node) {
-    node = tar_find_file(kpath);
-    if (node) {
-      LOG_WARN("[WINSRV] set_icon: '%s' no se encontró via tarfs_open() pero "
-               "si via tar_find_file() (revisar normalización de paths en "
-               "tarfs)",
-               kpath);
-    }
-  }
-  if (!node || node->is_dir) {
-    LOG_ERR("[WINSRV] set_icon: no se encontró el icono '%s' en tarfs "
-            "(win_id=%d) - ¿está empaquetado en el initrd?",
-            kpath, win_id);
+  // [NOTA] win_set_icon_bmp() guarda el puntero `icon_bmp_node` en la
+  // ventana. Aunque has_icon_cache=1 hace que no se vuelva a leer (ver
+  // draw_app_icon), dejarlo apuntando a memoria liberada es UB.
+  // Allocamos node + data con kmalloc y los dejamos vivos. Es un leak
+  // bounded (máx WINSRV_MAX_WINDOWS iconos), aceptable mientras la API
+  // no cambie a "decode-and-copy".
+  void *buf = NULL;
+  size_t size = 0;
+  int rc = vfs_read_all(path, &buf, &size);
+  if (rc != 0) {
+    LOG_ERR("[WINSRV] set_icon: vfs_read_all('%s') falló: %d", path, rc);
     return -ENOENT;
+  }
+
+  tar_node_t *node = (tar_node_t *)kzalloc(sizeof(tar_node_t));
+  if (!node) {
+    kfree(buf);
+    return -ENOMEM;
+  }
+  node->data = (uint8_t *)buf;
+  node->size = size;
+  node->is_dir = 0;
+  {
+    size_t plen = strlen(path);
+    if (plen >= sizeof(node->name))
+      plen = sizeof(node->name) - 1;
+    for (size_t i = 0; i < plen; i++)
+      node->name[i] = path[i];
+    node->name[plen] = '\0';
   }
 
   unsigned long flags = spin_lock_irqsave(&winsrv_lock);
   winsrv_entry_t *e = &g_windows[win_id];
   if (!e->in_use || e->owner != owner || !e->win) {
     spin_unlock_irqrestore(&winsrv_lock, flags);
+    kfree(node);
+    kfree(buf);
     return -1;
   }
   window_t *win = e->win;
   spin_unlock_irqrestore(&winsrv_lock, flags);
 
-  LOG_INFO("[WINSRV] set_icon: encontrado '%s' (%llu bytes, first=%02x %02x)",
-           node->name, (unsigned long long)node->size,
-           node->size > 0 ? node->data[0] : 0,
-           node->size > 1 ? node->data[1] : 0);
+  LOG_INFO("[WINSRV] set_icon: '%s' (%llu bytes, first=%02x %02x)", path,
+           (unsigned long long)size, size > 0 ? node->data[0] : 0,
+           size > 1 ? node->data[1] : 0);
 
   win_set_icon_bmp(win, node);
 
   if (!win->has_icon_cache) {
-    LOG_ERR("[WINSRV] set_icon: '%s' no pudo decodificarse como BMP",
-            node->name);
+    LOG_ERR("[WINSRV] set_icon: '%s' no pudo decodificarse como BMP", path);
+    // node y buf quedan huérfanos: leak bounded, ver nota arriba.
     return -EINVAL;
   }
 
-  /*
-   * Diagnóstico de extremo a extremo: si aquí la cache ya contiene píxeles
-   * no transparentes, cualquier fallback visible posteriormente pertenece
-   * al camino de renderizado y no a TarFS/BMP.
-   */
   uint32_t center = win->icon_cache[9 * 18 + 9];
   uint32_t corner = win->icon_cache[0];
   LOG_INFO("[WINSRV] set_icon: cache ventana OK has=%d center=%08x corner=%08x",

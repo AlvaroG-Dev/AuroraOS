@@ -10,6 +10,8 @@
 
 #define WNOHANG 1
 
+#define PROCESS_ARGV_MAX 16
+
 typedef struct process {
   uint32_t pid;
   uint32_t ppid;
@@ -30,6 +32,7 @@ typedef struct process {
   file_descriptor_t *fds[MAX_PROCESS_FDS];
   struct process *next;
   wait_queue_t child_wq;
+  char cwd[VFS_PATH_MAX];
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,
@@ -49,8 +52,10 @@ void process_exit(process_t *proc, int exit_code);
 // kill_current_process.
 __attribute__((noreturn)) void process_exit_current(int exit_code);
 
-
 process_t *process_current(void);
 void *process_sbrk(process_t *proc, int64_t increment);
+
+process_t *process_spawn_child_args(process_t *parent, const char *path,
+                                    int argc, const char *const *argv);
 
 #endif // PROCESS_H
