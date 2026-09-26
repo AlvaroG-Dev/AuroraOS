@@ -612,6 +612,56 @@ int paging_unmap_page_in(uint64_t *pml4, uint64_t virt) {
     goto out;
 
   pt[pt_idx] = 0;
+
+  /*
+   * User address spaces own their lower-half page-table hierarchy.  Once the
+   * last PTE in a PT is removed, reclaim empty intermediate tables as well.
+   * Kernel page tables are shared and are deliberately left untouched here.
+   */
+  if (pml4[pml4_idx] & PTE_USER) {
+    int pt_empty = 1;
+    for (int i = 0; i < PAGE_ENTRIES; i++) {
+      if (pt[i] & PTE_PRESENT) {
+        pt_empty = 0;
+        break;
+      }
+    }
+
+    if (pt_empty) {
+      uint64_t pt_phys = pd[pd_idx] & PTE_FRAME;
+      pd[pd_idx] = 0;
+      pmm_free_page(pt_phys);
+
+      int pd_empty = 1;
+      for (int i = 0; i < PAGE_ENTRIES; i++) {
+        if (pd[i] & PTE_PRESENT) {
+          pd_empty = 0;
+          break;
+        }
+      }
+
+      if (pd_empty) {
+        uint64_t pd_phys = pdpt[pdpt_idx] & PTE_FRAME;
+        pdpt[pdpt_idx] = 0;
+        pmm_free_page(pd_phys);
+
+        int pdpt_empty = 1;
+        for (int i = 0; i < PAGE_ENTRIES; i++) {
+          if (pdpt[i] & PTE_PRESENT) {
+            pdpt_empty = 0;
+            break;
+          }
+        }
+
+        if (pdpt_empty) {
+          uint64_t pdpt_phys = pml4[pml4_idx] & PTE_FRAME;
+          pml4[pml4_idx] = 0;
+          pmm_free_page(pdpt_phys);
+        }
+      }
+    }
+  }
+
   ret = 0;
 
 out:
