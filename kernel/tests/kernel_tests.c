@@ -1446,7 +1446,7 @@ static void smp_mig_pin(void) {
 
   g_smp_mig_pin_running = 1;
   while (!__atomic_load_n(&g_smp_mig_pin_stop, __ATOMIC_ACQUIRE))
-    sched_yield();
+    __asm__ volatile("pause");
   g_smp_mig_pin_running = 0;
 }
 
