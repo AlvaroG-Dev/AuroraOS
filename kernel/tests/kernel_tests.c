@@ -1389,6 +1389,149 @@ REGISTER_TEST_FLAGS("smp: IPI wakeup cross-CPU", test_smp_ipi_wakeup,
                     TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
 // ---------------------------------------------------------------------------
+// SMP: migración real + canary de stack
+//
+// Obliga a una tarea a bloquearse en CPU1, mantiene CPU1 ocupada con otra
+// tarea y después la despierta con cpu_affinity=-1. La tarea debe reaparecer
+// en una CPU distinta y conservar intacto su canary de stack.
+// ---------------------------------------------------------------------------
+static wait_queue_t g_smp_mig_wq;
+static volatile int g_smp_mig_generation;
+static volatile int g_smp_mig_blocked;
+static volatile int g_smp_mig_done;
+static volatile int g_smp_mig_cpu_before;
+static volatile int g_smp_mig_cpu_after;
+static volatile int g_smp_mig_pin_running;
+static volatile int g_smp_mig_pin_stop;
+static volatile int g_smp_mig_pin_cpu;
+
+static bool smp_mig_cond(void *arg) {
+  int seen = (int)(uintptr_t)arg;
+  return __atomic_load_n(&g_smp_mig_generation, __ATOMIC_ACQUIRE) != seen;
+}
+
+static void smp_mig_waiter(void) {
+  task_t *self = sched_current();
+  if (!self)
+    return;
+
+  // Fuerza la primera ejecución en un AP. Después queda libre para migrar.
+  self->cpu_affinity = 1;
+  while (smp_processor_id() != 1)
+    sched_yield();
+  self->cpu_affinity = -1;
+
+  __sched_canary_arm();
+  g_smp_mig_cpu_before = smp_processor_id();
+  int seen = 0;
+  g_smp_mig_blocked = 1;
+  wait_event(&g_smp_mig_wq, smp_mig_cond, (void *)(uintptr_t)seen);
+  g_smp_mig_blocked = 0;
+
+  seen = __atomic_load_n(&g_smp_mig_generation, __ATOMIC_ACQUIRE);
+  g_smp_mig_cpu_after = smp_processor_id();
+  __sched_canary_check();
+  g_smp_mig_done = (g_smp_mig_cpu_after != g_smp_mig_cpu_before);
+}
+
+static void smp_mig_pin(void) {
+  task_t *self = sched_current();
+  if (!self)
+    return;
+
+  int target = __atomic_load_n(&g_smp_mig_pin_cpu, __ATOMIC_ACQUIRE);
+  self->cpu_affinity = target;
+  while (smp_processor_id() != target)
+    sched_yield();
+
+  g_smp_mig_pin_running = 1;
+  while (!__atomic_load_n(&g_smp_mig_pin_stop, __ATOMIC_ACQUIRE))
+    sched_yield();
+  g_smp_mig_pin_running = 0;
+}
+
+static void test_smp_task_migration_canary(void) {
+  if (smp_aps_ready() == 0) {
+    TEST_ASSERT(0, "se necesita al menos un AP para probar migración SMP");
+    return;
+  }
+
+  task_t *controller = sched_current();
+  if (controller)
+    controller->cpu_affinity = 0;
+
+  wait_queue_init(&g_smp_mig_wq);
+  g_smp_mig_generation = 0;
+  g_smp_mig_blocked = 0;
+  g_smp_mig_done = 0;
+  g_smp_mig_cpu_before = -1;
+  g_smp_mig_cpu_after = -1;
+  g_smp_mig_pin_running = 0;
+  g_smp_mig_pin_stop = 0;
+  g_smp_mig_pin_cpu = 1;
+
+  task_t *waiter = sched_create_task(smp_mig_waiter);
+  TEST_ASSERT(waiter != NULL, "no se pudo crear waiter de migración");
+  if (!waiter)
+    return;
+
+  // Esperar a que el waiter haya llegado a CPU1 y esté realmente bloqueado.
+  uint64_t deadline = sched_get_ticks() + 3000;
+  while (!__atomic_load_n(&g_smp_mig_blocked, __ATOMIC_ACQUIRE)) {
+    TEST_ASSERT(sched_get_ticks() < deadline,
+                "timeout esperando waiter BLOCKED");
+    if (sched_get_ticks() >= deadline)
+      return;
+    __asm__ volatile("pause");
+  }
+
+  task_t *pin = sched_create_task(smp_mig_pin);
+  TEST_ASSERT(pin != NULL, "no se pudo crear pin task");
+  if (!pin)
+    return;
+
+  deadline = sched_get_ticks() + 3000;
+  while (!__atomic_load_n(&g_smp_mig_pin_running, __ATOMIC_ACQUIRE)) {
+    TEST_ASSERT(sched_get_ticks() < deadline,
+                "timeout esperando pin en CPU1");
+    if (sched_get_ticks() >= deadline)
+      return;
+    __asm__ volatile("pause");
+  }
+
+  // Despertar con afinidad libre. CPU1 está ocupada por pin, así que el
+  // scheduler debe elegir otra CPU; con 2 CPUs, el yield del controller
+  // permite que el waiter pase a CPU0.
+  g_smp_mig_generation = 1;
+  wake_up_all(&g_smp_mig_wq);
+  sched_yield();
+
+  deadline = sched_get_ticks() + 3000;
+  while (!__atomic_load_n(&g_smp_mig_done, __ATOMIC_ACQUIRE)) {
+    TEST_ASSERT(sched_get_ticks() < deadline,
+                "timeout esperando migración");
+    if (sched_get_ticks() >= deadline)
+      break;
+    __asm__ volatile("pause");
+  }
+
+  TEST_ASSERT(g_smp_mig_cpu_before == 1,
+              "waiter no arrancó en CPU1: cpu=%d", g_smp_mig_cpu_before);
+  TEST_ASSERT(g_smp_mig_cpu_after >= 0 &&
+                  g_smp_mig_cpu_after != g_smp_mig_cpu_before,
+              "waiter no migró: antes=%d después=%d", g_smp_mig_cpu_before,
+              g_smp_mig_cpu_after);
+  TEST_ASSERT(g_smp_mig_done == 1,
+              "migración/canary no completó correctamente");
+
+  g_smp_mig_pin_stop = 1;
+  sched_yield();
+}
+REGISTER_TEST_FLAGS("smp: migración cpu_affinity=-1 + stack canary",
+                    test_smp_task_migration_canary,
+                    TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
+// ---------------------------------------------------------------------------
 // Scheduler: timeout wakeup with >16 distinct wait queues
 //
 // Regression test for sched_wake_expired(): the old implementation kept a
