@@ -1426,9 +1426,7 @@ static void smp_mig_waiter(void) {
   __sched_canary_arm();
   g_smp_mig_cpu_before = smp_processor_id();
   int seen = 0;
-  g_smp_mig_blocked = 1;
   wait_event(&g_smp_mig_wq, smp_mig_cond, (void *)(uintptr_t)seen);
-  g_smp_mig_blocked = 0;
 
   seen = __atomic_load_n(&g_smp_mig_generation, __ATOMIC_ACQUIRE);
   g_smp_mig_cpu_after = smp_processor_id();
@@ -1480,11 +1478,14 @@ static void test_smp_task_migration_canary(void) {
   if (!waiter)
     return;
 
-  // Esperar a que el waiter haya llegado a la CPU fuente y esté realmente bloqueado.
+  // Esperar a que wait_common() haya publicado realmente la entrada en la
+  // wait queue. Esto evita despertar demasiado pronto, entre el flag local
+  // del test y wq_add_locked().
   uint64_t deadline = sched_get_ticks() + 3000;
-  while (!__atomic_load_n(&g_smp_mig_blocked, __ATOMIC_ACQUIRE)) {
+  while (__atomic_load_n((task_t *volatile *)&waiter->waiting_on,
+                         __ATOMIC_ACQUIRE) != &g_smp_mig_wq) {
     TEST_ASSERT(sched_get_ticks() < deadline,
-                "timeout esperando waiter BLOCKED");
+                "timeout esperando waiter en la wait queue");
     if (sched_get_ticks() >= deadline)
       return;
     __asm__ volatile("pause");
