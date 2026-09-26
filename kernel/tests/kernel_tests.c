@@ -1459,8 +1459,8 @@ static void test_smp_task_migration_canary(void) {
   }
 
   task_t *controller = sched_current();
-  if (controller)
-    controller->cpu_affinity = 0;
+  if (!controller)
+    return;
 
   wait_queue_init(&g_smp_mig_wq);
   g_smp_mig_generation = 0;
@@ -1480,7 +1480,7 @@ static void test_smp_task_migration_canary(void) {
   if (!waiter)
     return;
 
-  // Esperar a que el waiter haya llegado a CPU1 y esté realmente bloqueado.
+  // Esperar a que el waiter haya llegado a la CPU fuente y esté realmente bloqueado.
   uint64_t deadline = sched_get_ticks() + 3000;
   while (!__atomic_load_n(&g_smp_mig_blocked, __ATOMIC_ACQUIRE)) {
     TEST_ASSERT(sched_get_ticks() < deadline,
@@ -1504,9 +1504,8 @@ static void test_smp_task_migration_canary(void) {
     __asm__ volatile("pause");
   }
 
-  // Despertar con afinidad libre. CPU1 está ocupada por pin, así que el
-  // scheduler debe elegir otra CPU; con 2 CPUs, el yield del controller
-  // permite que el waiter pase a CPU0.
+  // Despertar con afinidad libre. La CPU fuente está ocupada por pin, así que
+  // el yield del controller fuerza al waiter a ejecutarse en otra CPU.
   g_smp_mig_generation = 1;
   wake_up_all(&g_smp_mig_wq);
   sched_yield();
