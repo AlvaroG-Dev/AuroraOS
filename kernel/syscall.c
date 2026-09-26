@@ -869,7 +869,10 @@ static int64_t sys_kill_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   // solo las wait queues del proceso (child_wq) se despiertan; no hay
   // canales de bloqueo más complejos.
   if (target->task) {
-    wake_up_all(&target->child_wq);
+    // Despertar también al objetivo si está bloqueado en cualquier wait queue.
+    // wait_queue_interrupt_task() elimina la entrada y marca -EINTR, de modo
+    // que SIGKILL/SIGTERM no queden pendientes indefinidamente en un sleep.
+    wait_queue_interrupt_task(target->task);
   }
 
   return 0;
