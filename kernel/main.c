@@ -102,11 +102,17 @@ static void parse_memmap(void) {
     LOG_PANIC("[MEM] No hay mapa de memoria disponible");
     return;
   }
+  if (boot.memmap_desc_size < 32 ||
+      boot.memmap_desc_size > boot.memmap_size) {
+    LOG_PANIC("[MEM] Tamaño de descriptor EFI inválido: %lu",
+              (unsigned long)boot.memmap_desc_size);
+    return;
+  }
   LOG_INFO("[MEM] Mapa de memoria EFI:");
   uint8_t *ptr = (uint8_t *)boot.memmap;
   uint64_t total_usable = 0;
 
-  for (uint64_t i = 0; i < boot.memmap_size; i += boot.memmap_desc_size) {
+  for (uint64_t i = 0; i <= boot.memmap_size - boot.memmap_desc_size; i += boot.memmap_desc_size) {
     uint32_t type = *(uint32_t *)(ptr + i + 0);
     uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
