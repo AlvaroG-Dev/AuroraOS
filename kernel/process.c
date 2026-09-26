@@ -23,9 +23,9 @@
 #define USER_HEAP_BASE 0x0000000040000000ULL
 #define USER_HEAP_MAX 0x0000000048000000ULL // 128 MB max
 
-static uint32_t next_pid = 1; // ← [P0.6] empieza en 1
+static uint32_t next_pid = 1;
 static process_t *process_list = NULL;
-static spinlock_t process_lock; // ← [P0.1] nuevo
+static spinlock_t process_lock;
 static uint64_t next_user_vaddr = 0x0000000000400000ULL;
 
 // Reader ELF sobre un vfs_node_t ya resuelto. No toca fds ni offset de
@@ -35,12 +35,9 @@ struct elf_vfs_ctx {
   vfs_node_t *node;
 };
 
-void process_init(void) { // ← [P0.1] llamar desde el boot
-  spin_init(&process_lock);
-}
+void process_init(void) { spin_init(&process_lock); }
 
 process_t *process_current(void) {
-  // [Fase A] Enlace directo, sin recorrer la lista.
   task_t *t = sched_current();
   return t ? t->proc : NULL;
 }
@@ -55,8 +52,7 @@ static int64_t elf_read_vfs(void *ctx, uint64_t offset, size_t size,
 
 // ---------------------------------------------------------------------------
 // [cwd] Inicializa proc->cwd a partir de `src`. Si `src` es NULL o vacío,
-// usa "/". Trunca si hace falta (no debería: cwd viene de otro proceso
-// o de la constante "/").
+// usa "/". Trunca si hace falta.
 // ---------------------------------------------------------------------------
 static void process_set_cwd(process_t *proc, const char *src) {
   if (!proc)
@@ -71,20 +67,25 @@ static void process_set_cwd(process_t *proc, const char *src) {
 }
 
 // ---------------------------------------------------------------------------
+// [SIG] Inicializa el estado de señales de un proceso recién creado.
+// ---------------------------------------------------------------------------
+static void process_init_signals(process_t *proc) {
+  if (!proc)
+    return;
+  proc->pending_signals = 0;
+  proc->blocked_signals = 0;
+}
+
+// ---------------------------------------------------------------------------
 // [Fase 3.2] Construcción del arg block en el stack del hijo.
 //
-// Layout (de menor a mayor dirección, rsp apunta al primer campo):
-//
-//   [rsp + 0]              = argc        (uint64_t)
-//   [rsp + 8]              = argv[0]     (puntero a string en el mismo stack)
+//   [rsp + 0]              = argc
+//   [rsp + 8]              = argv[0]
 //   ...
 //   [rsp + 8*argc]         = argv[argc-1]
 //   [rsp + 8*(argc+1)]     = NULL        (terminador de argv)
-//   [rsp + 8*(argc+2)]     = NULL        (terminador de envp, por ahora vacío)
+//   [rsp + 8*(argc+2)]     = NULL        (terminador de envp)
 //   [rsp + str_off]        = "arg0\0arg1\0..."
-//
-// Convención System V (simplificada, sin envp real). crt0.asm lee argc
-// de [rsp] y argv de rsp+8.
 //
 // Devuelve el nuevo RSP o 0 en error.
 // ---------------------------------------------------------------------------
@@ -95,7 +96,6 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
   if (argc > 0 && !argv)
     return 0;
 
-  // Calcular tamaño total de strings.
   uint64_t strings_total = 0;
   for (int i = 0; i < argc; i++) {
     if (!argv[i])
@@ -107,15 +107,13 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
   }
   strings_total = (strings_total + 7) & ~7ULL;
 
-  // argc + argc punteros + NULL argv + NULL envp + strings.
   uint64_t block = 8 + (uint64_t)argc * 8 + 8 + 8 + strings_total;
-  block = (block + 15) & ~15ULL; // alinear a 16 bytes
+  block = (block + 15) & ~15ULL;
 
   if (block > stack_top)
     return 0;
   uint64_t new_rsp = (stack_top - block) & ~0xFULL;
 
-  // Construir el bloque en un buffer temporal de kernel.
   uint8_t *scratch = (uint8_t *)kmalloc(block);
   if (!scratch)
     return 0;
@@ -130,10 +128,7 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
     *(uint64_t *)(scratch + 8 + i * 8) = new_rsp + str_off;
     str_off += n;
   }
-  // argv terminator en offset 8 + argc*8  (ya es 0)
-  // envp terminator en offset 8 + (argc+1)*8  (ya es 0)
 
-  // Copiar al stack del hijo translateando VA->PA.
   uint64_t va = new_rsp;
   uint64_t src = 0;
   while (src < block) {
@@ -175,7 +170,6 @@ static process_t *process_spawn_with_ppid(const char *name,
     return NULL;
   }
 
-  // 1. Clonar PML4
   uint64_t pml4_phys = paging_clone_kernel_space();
   if (!pml4_phys) {
     LOG_ERR("[PROC] Fallo al clonar PML4");
@@ -183,10 +177,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   }
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
-  // 2. Reservar un rango de direcciones virtuales para el ELF.
   uint64_t load_base = __sync_fetch_and_add(&next_user_vaddr, 0x200000ULL);
 
-  // 3. Cargar ELF
   uint64_t entry = 0;
   if (elf_load(elf_data, elf_size, pml4, load_base, &entry) != 0) {
     LOG_ERR("[PROC] Fallo al cargar ELF");
@@ -194,7 +186,6 @@ static process_t *process_spawn_with_ppid(const char *name,
     return NULL;
   }
 
-  // 4. Mapear stack de usuario (zeroed)
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
   LOG_INFO("[PROC] Mapeando stack de usuario en %p - %p", (void *)stack_base,
@@ -218,7 +209,6 @@ static process_t *process_spawn_with_ppid(const char *name,
     }
   }
 
-  // 5. [Fase A] Crear la tarea PARADA (no runnable todavía)
   task_t *task = sched_create_user_task_stopped((void (*)(void))entry,
                                                 stack_top, pml4_phys);
   if (!task) {
@@ -227,7 +217,6 @@ static process_t *process_spawn_with_ppid(const char *name,
     return NULL;
   }
 
-  // 6. Asignar process_t
   process_t *proc = (process_t *)kzalloc(sizeof(process_t));
   if (!proc) {
     task_put(task);
@@ -264,6 +253,8 @@ static process_t *process_spawn_with_ppid(const char *name,
 
   // [cwd] Este path no hereda cwd. Arranca en "/".
   process_set_cwd(proc, "/");
+  // [SIG] Estado de señales inicial.
+  process_init_signals(proc);
 
   const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)elf_data;
   uint64_t elf_vma_start = ~0ULL;
@@ -335,16 +326,16 @@ static process_t *process_spawn_with_ppid(const char *name,
 
   wait_queue_init(&proc->child_wq);
 
-  // 7. Enlazar tarea ↔ proceso ANTES de publicar la tarea.
+  // Enlazar tarea ↔ proceso ANTES de publicar la tarea.
   task->proc = proc;
 
-  // 8. Publicar en process_list con lock.
+  // Publicar en process_list con lock.
   unsigned long flags = spin_lock_irqsave(&process_lock);
   proc->next = process_list;
   process_list = proc;
   spin_unlock_irqrestore(&process_lock, flags);
 
-  // 9. Lo ÚLTIMO: hacer la tarea runnable.
+  // Lo ÚLTIMO: hacer la tarea runnable.
   sched_publish_task(task);
 
   LOG_INFO("[PROC] Proceso '%s' creado (PID=%u)", name, proc->pid);
@@ -368,7 +359,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
     return NULL;
   }
 
-  // 1. Clonar PML4
   uint64_t pml4_phys = paging_clone_kernel_space();
   if (!pml4_phys) {
     LOG_ERR("[PROC] Fallo al clonar PML4");
@@ -376,10 +366,8 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
   }
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
-  // 2. Reservar rango de VA
   uint64_t load_base = __sync_fetch_and_add(&next_user_vaddr, 0x200000ULL);
 
-  // 3. Cargar ELF por streaming
   uint64_t entry = 0;
   uint64_t elf_vma_start = ~0ULL;
   uint64_t elf_vma_end = 0;
@@ -390,7 +378,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
     return NULL;
   }
 
-  // 4. Stack de usuario (zeroed)
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
   LOG_INFO("[PROC] Mapeando stack de usuario en %p - %p", (void *)stack_base,
@@ -414,7 +401,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
     }
   }
 
-  // 4b. [Fase 3.2] Montar el arg block y obtener el user_rsp final.
   uint64_t user_rsp = setup_arg_block(pml4, stack_top, argc, argv);
   if (!user_rsp) {
     LOG_ERR("[PROC] setup_arg_block falló");
@@ -422,7 +408,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
     return NULL;
   }
 
-  // 5. Tarea detenida (rsp apunta al arg block si hay argv).
   task_t *task = sched_create_user_task_stopped((void (*)(void))entry, user_rsp,
                                                 pml4_phys);
   if (!task) {
@@ -431,7 +416,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
     return NULL;
   }
 
-  // 6. process_t
   process_t *proc = (process_t *)kzalloc(sizeof(process_t));
   if (!proc) {
     task_put(task);
@@ -468,8 +452,9 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
 
   // [cwd] Heredar del padre o "/".
   process_set_cwd(proc, inherited_cwd);
+  // [SIG] Estado de señales inicial.
+  process_init_signals(proc);
 
-  // VMA ELF
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
       !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
                   VMA_ELF)) {
@@ -513,25 +498,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
   LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, argc=%d, cwd='%s', streaming)",
            name, proc->pid, argc, proc->cwd);
   return proc;
-}
-
-// Wrapper con la firma antigua (sin cwd): arranca en "/".
-// Se mantiene para no romper llamantes existentes que aún no pasan cwd.
-static process_t *process_spawn_streaming_with_ppid_args(
-    const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
-    int argc, const char *const *argv, uint32_t ppid) {
-  return process_spawn_streaming_with_ppid_args_cwd(
-      name, read, read_ctx, file_size, argc, argv, "/", ppid);
-}
-
-// Wrapper sin argv: mantiene el ABI de las llamadas existentes.
-static process_t *process_spawn_streaming_with_ppid(const char *name,
-                                                    elf_read_fn read,
-                                                    void *read_ctx,
-                                                    uint64_t file_size,
-                                                    uint32_t ppid) {
-  return process_spawn_streaming_with_ppid_args_cwd(
-      name, read, read_ctx, file_size, 0, NULL, "/", ppid);
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +561,27 @@ process_t *process_spawn_child_args(process_t *parent, const char *path,
 
 process_t *process_load(const char *path) {
   return process_load_with_ppid(path, 0);
+}
+
+// ---------------------------------------------------------------------------
+// [SIG] Búsqueda de proceso por PID. Solo devuelve procesos vivos (no
+// zombies). Se usa en sys_kill_k. El llamante no tiene refcount propio;
+// el PID solo se recicla tras reaper, así que mientras exista este
+// proceso en process_list, es válido.
+// ---------------------------------------------------------------------------
+process_t *process_find_by_pid(uint32_t pid) {
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  process_t *found = NULL;
+  while (p) {
+    if (p->pid == pid && !p->is_zombie) {
+      found = p;
+      break;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+  return found;
 }
 
 // ---------------------------------------------------------------------------

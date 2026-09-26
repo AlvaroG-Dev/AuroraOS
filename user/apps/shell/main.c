@@ -15,11 +15,17 @@
 //   - El shell mantiene una COPIA del cwd en g_cwd para el prompt.
 //     La fuente de verdad es el cwd del proceso en el kernel.
 //   - cd/pwd son built-ins: un hijo no puede cambiar el cwd del padre.
-//   - Los paths de argv viajan tal cual al kernel: sys_open/sys_mkdir/
-//     etc. los resuelven contra el cwd del proceso hijo, que hereda
-//     del shell en spawn.
-//   - El shell solo resuelve el NOMBRE del binario (fallback /apps y
-//     /boot), no los argumentos.
+//   - Los paths de argv viajan tal cual al kernel.
+//   - El shell solo resuelve el NOMBRE del binario (fallback /initrd/apps
+//     y /<CMD>.ELF), no los argumentos.
+//
+// [SIG] Ctrl+C:
+//   - Mientras espera a un hijo, el shell hace polling con WNOHANG y
+//     procesa eventos. Si llega TTY_INPUT con byte 0x03, envía SIGINT
+//     al hijo vía sys_kill.
+//   - El kernel aplica la acción por defecto (terminar) tras el siguiente
+//     syscall del hijo. Por eso `cat /dev/zero` (que hace read/write en
+//     bucle) muere rápido con Ctrl+C.
 //
 // [Performance] Render por regiones.
 
@@ -447,7 +453,6 @@ static void cmd_help(void) {
   puts("Comandos built-in:");
   puts("  help              - esta ayuda");
   puts("  echo <str>        - imprime el texto");
-  puts("  cat <file>...     - muestra archivos");
   puts("  cd <dir>          - cambia el directorio actual");
   puts("  pwd               - imprime el directorio actual");
   puts("  spawn <p> [args]  - ejecuta el binario en <p>");
@@ -456,10 +461,14 @@ static void cmd_help(void) {
   puts("");
   puts("Comandos externos (buscados en cwd, /initrd/apps y /):");
   puts("  ls [path]         - lista un directorio");
+  puts("  cat <file>...     - muestra archivos");
   puts("  mkdir <path>...   - crea directorios");
   puts("  rm <path>...      - borra archivos/dirs");
   puts("  cp <src> <dst>    - copia un archivo");
   puts("  mv <src> <dst>    - renombra o mueve");
+  puts("  kill [-sig] <pid> - envía una señal");
+  puts("");
+  puts("Ctrl+C mientras corre un comando envía SIGINT al hijo.");
 }
 
 static void cmd_echo(int argc, char *argv[]) {
@@ -491,56 +500,36 @@ static void cmd_cd(const char *arg) {
   }
 }
 
-static void cmd_cat(int argc, char *argv[]) {
-  if (argc < 2) {
-    puts("uso: cat <file>...");
-    return;
-  }
-  for (int i = 1; i < argc; i++) {
-    int fd = open(argv[i], O_RDONLY);
-    if (fd < 0) {
-      printf("cat: no existe %s\n", argv[i]);
-      continue;
-    }
-    char buf[512];
-    int64_t n;
-    while ((n = read(fd, buf, sizeof(buf))) > 0)
-      write(1, buf, n);
-    close(fd);
-  }
-}
-
 static void cmd_clear(void) { buf_init(); }
 
-// [Fase 3.2] Resolución del binario. Los argumentos viajan tal cual al
-// kernel, que los resuelve contra el cwd del proceso hijo.
+// ---------------------------------------------------------------------------
+// [Fase 3.2 + SIG] Ejecuta un comando externo.
 //
-// Intenta, en orden:
-//   1. spawn(cmd)              — absoluto o relativo resuelto por kernel
-//   2. spawn("/apps/" + cmd)   — tarfs
-//   3. spawn("/boot/" + CMD + ".ELF") — FAT32 8.3 en mayúsculas
-static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[]) {
+//   - Resuelve el path del binario (cwd, /initrd/apps, /<CMD>.ELF).
+//   - Hace polling de waitpid(WNOHANG) y poll_event(0) hasta que el hijo
+//     termine. Mientras corre, procesa output y Ctrl+C.
+//   - Ctrl+C (byte 0x03) envía SIGINT al hijo.
+//   - Cierre de ventana mata al hijo con SIGKILL.
+// ---------------------------------------------------------------------------
+static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[],
+                               int win_id) {
   int pid;
 
-  // 1. Tal cual (absoluto, o relativo resuelto por el kernel contra cwd).
+  // 1. Tal cual (absoluto o relativo resuelto por el kernel contra cwd).
   pid = spawn_args(cmd, argv, argc);
-  if (pid >= 0)
-    goto run;
 
   // 2. Fallback tarfs (/initrd/apps/<cmd>).
-  {
+  if (pid < 0) {
     char buf[160];
     if (strlen(cmd) + 14 < sizeof(buf)) {
       strcpy(buf, "/initrd/apps/");
       strcpy(buf + 13, cmd);
       pid = spawn_args(buf, argv, argc);
-      if (pid >= 0)
-        goto run;
     }
   }
 
   // 3. Fallback FAT32 raíz (/<CMD>.ELF).
-  {
+  if (pid < 0) {
     char buf[128];
     if (strlen(cmd) + 6 < sizeof(buf)) {
       size_t n = 0;
@@ -557,19 +546,49 @@ static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[]) {
       buf[n++] = 'F';
       buf[n] = '\0';
       pid = spawn_args(buf, argv, argc);
-      if (pid >= 0)
-        goto run;
     }
   }
 
-  printf("console: no se pudo ejecutar %s\n", cmd);
-  return;
+  if (pid < 0) {
+    printf("console: no se pudo ejecutar %s\n", cmd);
+    return;
+  }
 
-run: {
+  // [SIG] Esperar al hijo procesando eventos mientras tanto.
   int status = 0;
-  int r = waitpid(pid, &status, 0);
-  printf("console: %s terminó (pid=%d, exit=%d)\n", cmd, r, status);
-}
+  for (;;) {
+    int r = waitpid(pid, &status, WNOHANG);
+    if (r == pid) {
+      printf("console: %s terminó (pid=%d, exit=%d)\n", cmd, r, status);
+      return;
+    }
+    if (r < 0) {
+      printf("console: %s waitpid falló\n", cmd);
+      return;
+    }
+
+    winsrv_event_t ev;
+    int got_event = 0;
+    while (sys_win_poll_event(win_id, &ev, 0) > 0) {
+      got_event = 1;
+      if (ev.type == WINSRV_EV_OUTPUT) {
+        buf_putchar((char)ev.x);
+      } else if (ev.type == WINSRV_EV_TTY_INPUT) {
+        char c = (char)ev.x;
+        if (c == 0x03) {
+          // Ctrl+C: enviar SIGINT al hijo.
+          kill(pid, SIGINT);
+        }
+        // Otro input ignorado mientras corre un comando.
+      } else if (ev.type == WINSRV_EV_CLOSE) {
+        kill(pid, SIGKILL);
+        sys_win_destroy(win_id);
+        sys_exit(0);
+      }
+    }
+    if (!got_event)
+      sys_yield();
+  }
 }
 
 static void run_command(int win_id) {
@@ -589,20 +608,18 @@ static void run_command(int win_id) {
         cmd_cd(argc > 1 ? argv[1] : NULL);
       else if (strcmp(cmd, "pwd") == 0)
         cmd_pwd();
-      else if (strcmp(cmd, "cat") == 0)
-        cmd_cat(argc, argv);
       else if (strcmp(cmd, "spawn") == 0) {
         if (argc < 2)
           puts("uso: spawn <path> [args]");
         else
-          cmd_spawn_resolved(argv[1], argc - 1, &argv[1]);
+          cmd_spawn_resolved(argv[1], argc - 1, &argv[1], win_id);
       } else if (strcmp(cmd, "clear") == 0) {
         cmd_clear();
       } else if (strcmp(cmd, "exit") == 0) {
         puts("Adiós.");
         sys_exit(0);
       } else {
-        cmd_spawn_resolved(cmd, argc, argv);
+        cmd_spawn_resolved(cmd, argc, argv, win_id);
       }
     }
   }
@@ -627,6 +644,7 @@ static void run_command(int win_id) {
 // Manejo de teclado
 // ---------------------------------------------------------------------------
 static void handle_key(char c, int win_id) {
+  (void)win_id;
   if (c == '\n') {
     run_command(win_id);
     return;

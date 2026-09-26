@@ -89,26 +89,27 @@ Objetivo: pasar de un sistema que carga un initrd a un sistema operativo que pue
 - [x] Implementar FAT32.
 - [x] Lectura de particiones/volúmenes (part.c: MBR + GPT + EBR chain).
 - [x] Directorios reales.
-- [x] Crear/eliminar archivos y directorios (mkdir, unlink). Rename pendiente.
+- [x] Crear/eliminar archivos y directorios (mkdir, unlink).
+- [x] Rename (mismo FS, mismo dir y entre dirs; con LFN).
 - [x] Escritura y truncado.
 - [x] Montaje/desmontaje.
 - [x] Integrarlo con VFS (mount points con longest-match).
 - [x] Caché de FAT en memoria (rendimiento read/write).
 - [ ] Tests de corrupción, límites y apagado durante escritura (parcial: tests de límite 8.3, ENOTEMPTY, non-FAT rechazo).
-- [ ] LFN (nombres largos) en FAT32: crear y preservar.
+- [x] LFN (nombres largos) en FAT32: crear, listar, borrar, preservar tras remount.
+- [ ] Colisión de alias 8.3: crear `DOCUME~1` después de `Documentos` puede pisar el alias autogenerado. Preexistente, no urgente.
 
 ### 2.3 Userland sobre disco
 - [ ] Acceso real a /dev desde userland.
-- [x] `ls` (lee directorios vía readdir).
+- [x] `ls` (lee directorios vía readdir, respeta cwd).
 - [x] `cat` (abre y lee archivos).
-- [ ] `mkdir`, `rm`, `cp`, `mv`, `pwd` como apps userland (syscalls existen, faltan apps).
-- [ ] Persistir configuración y programas.
-- [ ] Boot desde un filesystem persistente cuando sea viable.
+- [x] `mkdir`, `rm`, `cp`, `mv`, `pwd` como apps userland con argv.
+- [x] Persistir configuración y programas. (FAT32 montado en /; apps del sistema en /initrd, datos del usuario en /).
+- [ ] Boot desde un filesystem persistente: el bootloader sigue leyendo `/kernel.elf` desde la ruta fija de FAT32; sería necesario un cargador que lea un `/etc/aurora.conf` con la ruta del kernel o migrar a un formato de arranque configurable.
 
-**Deuda técnica de 2.3 — Loader debe evitar `vfs_read_all` para ELFs.**
-`process_load_with_ppid` asume que el archivo cabe en un buffer contiguo del heap (16 MB). Funciona para apps pequeñas del initrd, pero cuando el root sea un FS persistente o un ELF grande, `kmalloc` fallará. Dos caminos:
-- **Chunked read**: leer en bloques y alimentar al ELF parser por streaming.
-- **mmap file-backed**: mapear el ELF al address space del proceso y recorrer PT_LOADs. Es el modelo Linux.
+**Deuda técnica de 2.3 — Loader.**
+Resuelto parcialmente: `elf_load_streaming` lee el ELF en chunks vía callback (`read(ctx, offset, size, buf)`), así que no necesita buffer contiguo de 16 MB. `process_load_with_ppid` ya lo usa. Pendiente:
+- **mmap file-backed**: en vez de copiar las páginas del ELF al address space del hijo, mapearlas directamente al fichero con un VMA de tipo `VMA_FILE`. Modelo Linux; desbloquea `dlopen`, `mmap(PROT_EXEC)` de ficheros y carga perezosa. Siguiente PR de Fase 3.5+.
 
 La opción 2 es la correcta a largo plazo. La 1 es un parche si hace falta cargar ELFs grandes pronto.
 
@@ -126,7 +127,9 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [ ] Definir claramente qué parte es propia y qué parte pretende compatibilidad POSIX.
 
 ### 3.2 Procesos y ejecución
-- [ ] Argumentos/entorno en `spawn`/`exec` (necesario para que `cat file` funcione).
+- [x] Argumentos en `spawn`/`exec`: `SYS_SPAWN_ARGS`, arg block en el stack del hijo (convención System V), `crt0.asm` lee `argc`/`argv`. Entorno (`envp`) todavía vacío.
+- [x] cwd por proceso: `SYS_CHDIR`, `SYS_GETCWD`, `proc->cwd`, herencia en `spawn`, resolución de paths relativos y `..` contra cwd.
+- [ ] Variables de entorno (`envp`, `getenv`/`setenv`).
 - [ ] Señales, si se decide que forman parte del modelo de Aurora.
 - [ ] Pipes y redirecciones.
 - [ ] PTYs para terminales.
@@ -137,6 +140,8 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [ ] /dev/kmsg.
 - [ ] /dev/null, /dev/zero y dispositivos básicos.
 - [ ] Mejorar permisos y metadatos de archivos.
+- [x] (Pivot root) FAT32 en `/`, tarfs en `/initrd`. Punto de montaje `/initrd` se crea como dir vacío en FAT32 al arrancar para que `ls /` lo liste (mismo modelo que Linux).
+- [ ] `pivot_root`/`switch_root` genéricos: hoy el layout es fijo (FAT32 raíz + tarfs en /initrd); sería útil soportar cambiar la raíz en runtime tras montar otro FS.
 
 ### 3.4 Shell
 - [ ] Historial.
@@ -353,8 +358,8 @@ Objetivo: mantener el proyecto mantenible mientras crece.
 # Orden recomendado de alto nivel
 
 1. **Robustez del kernel + auditoría SMP** — ✅ completada (solo quedan tareas de documentación/debugging, no bugs SMP conocidos)
-2. **Storage persistente + filesystem** — ⏳ en progreso (FAT32 persistente funcional; LFN, rename, recuperación y boot desde FS pendientes)
-3. **Userland/libc/shell** — ⏳ siguiente
+2. **Storage persistente + filesystem** — ✅ en gran parte (FAT32 persistente con LFN, rename, mount en `/`; pendiente: buffer cache, tests de corrupción, boot configurable).
+3. **Userland/libc/shell** — ⏳ en progreso (argv y cwd listos; siguientes: libc, pipes/redirecciones, /dev, shell con historial).
 4. **Escritorio y window manager**
 5. **Networking**
 6. **USB**
@@ -368,8 +373,8 @@ La idea es evitar implementar muchas funciones superficiales a la vez. Primero h
 ## Objetivos de largo plazo
 
 - [x] Aurora OS arranca de forma fiable en QEMU con 1/2/4 CPU.
-- [ ] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 read/write existe; el bootloader todavía carga el kernel desde la ruta de boot, no desde un filesystem como raíz)
-- [x] Aurora OS puede crear, modificar y conservar archivos. (FAT32 persistente + syscalls de archivo; faltan herramientas userland cómodas como `mkdir/rm/cp/mv`)
+- [~] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 es la raíz del VFS y el usuario escribe ahí; el bootloader sigue cargando el kernel desde una ruta fija. Falta instalador + boot configurable).
+- [x] Aurora OS puede crear, modificar y conservar archivos. (FAT32 persistente, LFN, rename y apps userland completas: `mkdir/rm/cp/mv/pwd`).
 - [x] Aurora OS puede ejecutar múltiples aplicaciones aisladas.
 - [x] Aurora OS dispone de terminal y escritorio utilizables.
 - [ ] Aurora OS puede comunicarse por red.

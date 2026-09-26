@@ -33,6 +33,14 @@ typedef struct process {
   struct process *next;
   wait_queue_t child_wq;
   char cwd[VFS_PATH_MAX];
+
+  // [SIG] Bitmask de señales pendientes y bloqueadas. Bit N = señal N.
+  // pendiente:  aún no entregada.
+  // bloqueada:  el proceso pidió posponerla (sigprocmask futuro).
+  // Solo se entregan en signal_check_pending(), llamada desde el
+  // retorno a userland de cada syscall.
+  uint64_t pending_signals;
+  uint64_t blocked_signals;
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,
@@ -57,5 +65,10 @@ void *process_sbrk(process_t *proc, int64_t increment);
 
 process_t *process_spawn_child_args(process_t *parent, const char *path,
                                     int argc, const char *const *argv);
+
+// [SIG] Busca un proceso por PID. Devuelve NULL si no existe o es zombie.
+// El puntero devuelto NO tiene refcount propio: el llamante debe usarlo
+// con cuidado (procesos solo se liberan desde waitpid).
+process_t *process_find_by_pid(uint32_t pid);
 
 #endif // PROCESS_H

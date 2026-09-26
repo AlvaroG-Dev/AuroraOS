@@ -3003,27 +3003,25 @@ REGISTER_TEST_FLAGS("paging: invalidate_tlb_global smoke",
 // que promete y que nadie lo simplifique a dos escrituras separadas.
 // ===========================================================================
 static void test_sched_set_blocked_deadline(void) {
-  task_t *cur = sched_current();
-  TEST_ASSERT(cur != NULL, "sched_current() devolvió NULL");
-  if (!cur)
-    return;
-
-  task_state_t saved_state = cur->state;
-  uint64_t saved_deadline = cur->wake_deadline;
+  // [FIX] No usar sched_current(). El helper pone t->state = TASK_BLOCKED
+  // y si un tick del LAPIC entra entre la llamada y la restauración,
+  // sched_tick vería la tarea actual BLOCKED y la abandonaría.
+  //
+  // sched_set_blocked_deadline solo hace dos asignaciones bajo sched_lock,
+  // así que un task_t dummy en la pila basta para verificar la semántica.
+  task_t dummy;
+  memset(&dummy, 0, sizeof(dummy));
+  dummy.state = TASK_RUNNING;
+  dummy.wake_deadline = 0;
 
   const uint64_t fake_deadline = 0xDEADBEEF12345678ULL;
-  sched_set_blocked_deadline(cur, fake_deadline);
+  sched_set_blocked_deadline(&dummy, fake_deadline);
 
-  TEST_ASSERT(cur->state == TASK_BLOCKED,
-              "state no es BLOCKED tras el helper (=%d)", cur->state);
-  TEST_ASSERT(cur->wake_deadline == fake_deadline,
+  TEST_ASSERT(dummy.state == TASK_BLOCKED,
+              "state no es BLOCKED tras el helper (=%d)", dummy.state);
+  TEST_ASSERT(dummy.wake_deadline == fake_deadline,
               "wake_deadline no se publicó (=0x%llx)",
-              (unsigned long long)cur->wake_deadline);
-
-  // Restaurar: la tarea actual debe seguir RUNNING para que los demás
-  // tests del framework no se confundan.
-  cur->state = saved_state;
-  cur->wake_deadline = saved_deadline;
+              (unsigned long long)dummy.wake_deadline);
 }
 REGISTER_TEST("sched: set_blocked_deadline atómico",
               test_sched_set_blocked_deadline);

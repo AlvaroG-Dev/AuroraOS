@@ -7,9 +7,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Bits independientes. Un nodo tiene EXACTAMENTE uno de estos.
+// VFS_CHARDEVICE era 0x03 (== FILE|DIRECTORY), lo que hacía que
+// `flags & VFS_DIRECTORY` diera true en un chardevice y rompía
+// vfs_readdir/vfs_truncate. Ahora es un bit propio.
 #define VFS_FILE 0x01
 #define VFS_DIRECTORY 0x02
-#define VFS_CHARDEVICE 0x03
+#define VFS_CHARDEVICE 0x04
 
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
