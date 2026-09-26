@@ -303,7 +303,7 @@ static void reap_dead_tasks(void) {
       break;
 
     if (target->state == TASK_DEAD && !target->is_idle && target != cur &&
-        target->on_cpu == 0) {
+        __atomic_load_n(&target->on_cpu, __ATOMIC_ACQUIRE) == 0) {
       if (target->next == target) {
         task_list_head = NULL;
         task_put(target);
