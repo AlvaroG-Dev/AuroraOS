@@ -1404,6 +1404,7 @@ static volatile int g_smp_mig_cpu_after;
 static volatile int g_smp_mig_pin_running;
 static volatile int g_smp_mig_pin_stop;
 static volatile int g_smp_mig_pin_cpu;
+static volatile int g_smp_mig_source_cpu;
 
 static bool smp_mig_cond(void *arg) {
   int seen = (int)(uintptr_t)arg;
@@ -1415,9 +1416,10 @@ static void smp_mig_waiter(void) {
   if (!self)
     return;
 
-  // Fuerza la primera ejecución en un AP. Después queda libre para migrar.
-  self->cpu_affinity = 1;
-  while (smp_processor_id() != 1)
+  // Fuerza la primera ejecución en una CPU distinta del controlador. Después queda libre para migrar.
+  int source = __atomic_load_n(&g_smp_mig_source_cpu, __ATOMIC_ACQUIRE);
+  self->cpu_affinity = source;
+  while (smp_processor_id() != source)
     sched_yield();
   self->cpu_affinity = -1;
 
@@ -1468,7 +1470,10 @@ static void test_smp_task_migration_canary(void) {
   g_smp_mig_cpu_after = -1;
   g_smp_mig_pin_running = 0;
   g_smp_mig_pin_stop = 0;
-  g_smp_mig_pin_cpu = 1;
+  int controller_cpu = smp_processor_id();
+  int source_cpu = (controller_cpu == 0) ? 1 : 0;
+  g_smp_mig_source_cpu = source_cpu;
+  g_smp_mig_pin_cpu = source_cpu;
 
   task_t *waiter = sched_create_task(smp_mig_waiter);
   TEST_ASSERT(waiter != NULL, "no se pudo crear waiter de migración");
@@ -1515,12 +1520,13 @@ static void test_smp_task_migration_canary(void) {
     __asm__ volatile("pause");
   }
 
-  TEST_ASSERT(g_smp_mig_cpu_before == 1,
-              "waiter no arrancó en CPU1: cpu=%d", g_smp_mig_cpu_before);
-  TEST_ASSERT(g_smp_mig_cpu_after >= 0 &&
+  TEST_ASSERT(g_smp_mig_cpu_before == source_cpu,
+              "waiter no arrancó en CPU%d: cpu=%d", source_cpu,
+              g_smp_mig_cpu_before);
+  TEST_ASSERT(g_smp_mig_cpu_after == controller_cpu &&
                   g_smp_mig_cpu_after != g_smp_mig_cpu_before,
-              "waiter no migró: antes=%d después=%d", g_smp_mig_cpu_before,
-              g_smp_mig_cpu_after);
+              "waiter no migró al CPU controlador: antes=%d después=%d esperado=%d",
+              g_smp_mig_cpu_before, g_smp_mig_cpu_after, controller_cpu);
   TEST_ASSERT(g_smp_mig_done == 1,
               "migración/canary no completó correctamente");
 
