@@ -64,81 +64,39 @@ long strncpy_from_user(char *dst, const char *src, size_t max) {
 }
 
 // ---------------------------------------------------------------------------
-// put/get de tamaños fijos. Sin tabla de fixups: usan stac/clac y una
-// comprobación previa con access_ok. Un puntero válido por access_ok
-// puede aún fallar si la página no está mapeada, pero en ese caso el
-// usuario merece un -EFAULT y aquí no lo detectamos: preferimos que el
-// handler de #PF lo resuelva como demand paging (ver pf.c).
-//
-// En la práctica, para puntos que sabemos que el usuario va a tocar
-// (return values de syscalls, etc.), es mejor usar copy_to_user.
+// put/get de tamaños fijos.
+// Reutilizan copy_to_user/copy_from_user para obtener la misma validación
+// de rango y exception-fixup que las copias generales. Así un puntero que
+// pasa access_ok pero no tiene una página/VMA válida devuelve -EFAULT en vez
+// de convertir un #PF de user access desde Ring 0 en un fallo fatal.
 // ---------------------------------------------------------------------------
 long put_user_u8(uint8_t *dst, uint8_t val) {
-  if (!access_ok(dst, 1))
-    return -EFAULT;
-  stac();
-  *dst = val;
-  clac();
-  return 0;
+  return copy_to_user(dst, &val, sizeof(val));
 }
 long put_user_u16(uint16_t *dst, uint16_t val) {
-  if (!access_ok(dst, 2))
-    return -EFAULT;
-  stac();
-  *dst = val;
-  clac();
-  return 0;
+  return copy_to_user(dst, &val, sizeof(val));
 }
 long put_user_u32(uint32_t *dst, uint32_t val) {
-  if (!access_ok(dst, 4))
-    return -EFAULT;
-  stac();
-  *dst = val;
-  clac();
-  return 0;
+  return copy_to_user(dst, &val, sizeof(val));
 }
 long put_user_u64(uint64_t *dst, uint64_t val) {
-  if (!access_ok(dst, 8))
-    return -EFAULT;
-  stac();
-  *dst = val;
-  clac();
-  return 0;
+  return copy_to_user(dst, &val, sizeof(val));
 }
 long get_user_u8(uint8_t *dst, const uint8_t *src) {
-  if (!access_ok(src, 1))
-    return -EFAULT;
-  stac();
-  *dst = *src;
-  clac();
-  return 0;
+  return copy_from_user(dst, src, sizeof(*src));
 }
 long get_user_u16(uint16_t *dst, const uint16_t *src) {
-  if (!access_ok(src, 2))
-    return -EFAULT;
-  stac();
-  *dst = *src;
-  clac();
-  return 0;
+  return copy_from_user(dst, src, sizeof(*src));
 }
 long get_user_u32(uint32_t *dst, const uint32_t *src) {
-  if (!access_ok(src, 4))
-    return -EFAULT;
-  stac();
-  *dst = *src;
-  clac();
-  return 0;
+  return copy_from_user(dst, src, sizeof(*src));
 }
 long get_user_u64(uint64_t *dst, const uint64_t *src) {
-  if (!access_ok(src, 8))
-    return -EFAULT;
-  stac();
-  *dst = *src;
-  clac();
-  return 0;
+  return copy_from_user(dst, src, sizeof(*src));
 }
 
 // ---------------------------------------------------------------------------
+
 // [FIX SMAP] Parchear `stac`/`clac` a NOP cuando la CPU no soporta SMAP.
 //
 // `stac` y `clac` son instrucciones SMAP-only. En CPUs sin SMAP
