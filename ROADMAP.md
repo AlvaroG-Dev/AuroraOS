@@ -131,7 +131,7 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [x] cwd por proceso: `SYS_CHDIR`, `SYS_GETCWD`, `proc->cwd`, herencia en `spawn`, resolución de paths relativos y `..` contra cwd.
 - [ ] Variables de entorno (`envp`, `getenv`/`setenv`).
 - [ ] Señales, si se decide que forman parte del modelo de Aurora.
-- [ ] Pipes y redirecciones.
+- [x] Pipes y redirecciones.
 - [ ] PTYs para terminales.
 - [ ] Job control del shell.
 

@@ -22,9 +22,10 @@ APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race \
        mmap_race_worker vma_overlap vma_isolation vma_isolation_worker \
        munmap_partial elf_validation elf_rotest elf_permtest sbrk_shrink_test \
        sbrk_shrink calloc_overflow shell ls cat app_mkdir app_rm app_cp app_pwd \
-       app_mv \
+       app_mv app_kill echo \
+       touch wc head grep tee sort \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel \
-       win_blit_fault app_kill echo 
+       win_blit_fault
 
 all: $(APPS)
 
@@ -253,8 +254,44 @@ echo: apps/echo/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp echo ../sysroot/apps/
 
+touch: apps/touch/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/touch/main.c -o touch.o
+	$(LD) -o touch $(LIB_OBJS) touch.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp touch ../sysroot/apps/
+
+wc: apps/wc/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/wc/main.c -o wc.o
+	$(LD) -o wc $(LIB_OBJS) wc.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp wc ../sysroot/apps/
+
+head: apps/head/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/head/main.c -o head.o
+	$(LD) -o head $(LIB_OBJS) head.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp head ../sysroot/apps/
+
+grep: apps/grep/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/grep/main.c -o grep.o
+	$(LD) -o grep $(LIB_OBJS) grep.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp grep ../sysroot/apps/
+
+tee: apps/tee/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/tee/main.c -o tee.o
+	$(LD) -o tee $(LIB_OBJS) tee.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp tee ../sysroot/apps/
+
+sort: apps/sort/main.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -c apps/sort/main.c -o sort.o
+	$(LD) -o sort $(LIB_OBJS) sort.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp sort ../sysroot/apps/
+
 clean:
 	rm -f *.o lib/*.o
 	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel win_blit_fault shell ls cat
-	rm -f mkdir rm cp pwd mv kill echo
+	rm -f mkdir rm cp pwd mv kill echo touch wc head grep tee sort
