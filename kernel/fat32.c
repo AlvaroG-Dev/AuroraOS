@@ -11,6 +11,7 @@
 #include "fat32.h"
 #include "heap.h"
 #include "klog.h"
+#include "spinlock.h"
 #include "string.h"
 #include "uaccess.h" // EINVAL, EIO, ENOMEM, ENOENT, EISDIR, ENAMETOOLONG,
                      // EEXIST, ENOTEMPTY, ENOSPC
@@ -92,6 +93,7 @@ _Static_assert(sizeof(struct fat32_dirent) == 32, "fat32_dirent != 32 bytes");
 // ===========================================================================
 typedef struct {
   block_device_t *bdev;
+  spinlock_t lock;
 
   uint32_t bytes_per_sector;
   uint32_t sectors_per_cluster;
@@ -522,7 +524,7 @@ static int fat32_fat_set(fat32_fs_t *fs, uint32_t cluster, uint32_t value) {
   return 0;
 }
 
-int fat32_sync(void *fs_priv) {
+static int fat32_sync_locked(fat32_fs_t *fs) {
   if (!fs_priv)
     return -EINVAL;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
@@ -552,6 +554,16 @@ int fat32_sync(void *fs_priv) {
             (unsigned long long)((uint64_t)fs->fat_size_sectors *
                                  fs->bytes_per_sector / 1024));
   return 0;
+}
+
+int fat32_sync(void *fs_priv) {
+  if (!fs_priv)
+    return -EINVAL;
+  fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
+  unsigned long flags = spin_lock_irqsave(&fs->lock);
+  int rc = fat32_sync_locked(fs);
+  spin_unlock_irqrestore(&fs->lock, flags);
+  return rc;
 }
 
 static uint32_t fat32_alloc_cluster(fat32_fs_t *fs) {
@@ -1087,7 +1099,7 @@ static int64_t fat32_write_data(fat32_node_priv_t *np, uint64_t offset,
   }
   kfree(cbuf);
 
-  if (fat32_sync(fs) != 0)
+  if (fat32_sync_locked(fs) != 0)
     return -EIO;
 
   if (np->dirent_lba != 0) {
@@ -1149,7 +1161,7 @@ static int fat32_truncate_impl(fat32_node_priv_t *np, uint32_t new_size) {
                               dirent_update_size, &sctx) != 0)
         return -EIO;
     }
-    return fat32_sync(fs);
+    return fat32_sync_locked(fs);
   }
 
   uint32_t keep_clusters = (new_size + fs->cluster_size - 1) / fs->cluster_size;
@@ -1176,7 +1188,7 @@ static int fat32_truncate_impl(fat32_node_priv_t *np, uint32_t new_size) {
                             dirent_update_size, &sctx) != 0)
       return -EIO;
   }
-  return fat32_sync(fs);
+  return fat32_sync_locked(fs);
 }
 
 static int fat32_node_truncate(vfs_node_t *node, uint64_t new_size) {
@@ -1566,7 +1578,7 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
 
   // Sync de la FAT antes de escribir el dirent para evitar huérfanos.
   if (is_dir && first_cluster) {
-    if (fat32_sync(fs) != 0) {
+    if (fat32_sync_locked(fs) != 0) {
       fat32_free_chain(fs, first_cluster);
       return -EIO;
     }
@@ -1786,7 +1798,7 @@ static int fat32_delete_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     fat32_free_chain(fs, ctx.first_cluster);
   }
 
-  return fat32_sync(fs);
+  return fat32_sync_locked(fs);
 }
 
 // ===========================================================================
@@ -2335,6 +2347,7 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
   fat32_fs_t *fs = (fat32_fs_t *)kzalloc(sizeof(*fs));
   if (!fs)
     return -ENOMEM;
+  spin_init(&fs->lock);
 
   fs->bdev = bdev;
   fs->bytes_per_sector = bpb->bytes_per_sector;
@@ -2392,7 +2405,7 @@ void fat32_umount(void *fs_priv) {
     return;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
   if (fs->fat_cache && fs->fat_dirty)
-    (void)fat32_sync(fs);
+    (void)fat32_sync_locked(fs);
   if (fs->fat_cache)
     kfree(fs->fat_cache);
   kfree(fs);
