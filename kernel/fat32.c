@@ -2470,6 +2470,7 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
   if (!fs || !fs->fat_cache)
     return -1;
+  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
 
   uint32_t clusters[5] = {0};
   for (int i = 0; i < 5; i++) {
@@ -2527,5 +2528,6 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
       return -9;
   }
 
+  spin_unlock_irqrestore(&fs->lock, lock_flags);
   return 0;
 }
