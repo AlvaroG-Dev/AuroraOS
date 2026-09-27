@@ -502,22 +502,22 @@ vfs_node_t *vfs_lookup(const char *path) {
 
   vfs_fs_ops_t *ops = best->ops;
   void *fs_priv = best->fs_priv;
+  char mount_path[VFS_PATH_MAX];
+  memcpy(mount_path, best->path, sizeof(mount_path));
+  mount_path[sizeof(mount_path) - 1] = '\0';
+  bool mount_is_root = (best_len == 1 && mount_path[0] == '/');
   spin_unlock_irqrestore(&g_mounts_lock, flags);
 
-  // [FIX] Cuando el mount está en "/" (best_len==1), no podemos hacer
-  // norm + best_len porque perderíamos el '/' inicial. En ese caso
-  // pasamos el path normalizado completo (que sí lo lleva). Para
-  // mounts anidados (best_len>1) el norm+best_len ya da un path que
-  // empieza por '/'.
+  // Copiar toda la metadata necesaria antes de soltar el lock permite
+  // que vfs_umount() libere best sin dejar un acceso posterior a él.
   const char *rel;
-  if (best_len == 1 && best->path[0] == '/') {
+  if (mount_is_root) {
     rel = norm;
   } else {
     rel = norm + best_len;
     if (*rel == '\0')
       rel = "/";
   }
-
   if (ops->lookup) {
     vfs_node_t *node = ops->lookup(fs_priv, rel);
     if (node)
