@@ -2,6 +2,7 @@
 #include "wait.h"
 #include "klog.h"
 #include "sched.h"
+#include "process.h"
 #include <stddef.h>
 
 #define EINTR 4
@@ -90,6 +91,18 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       // bajo el mismo lock) nunca vea una tarea BLOCKED con deadline
       // aún sin escribir, ni al revés.
       sched_set_blocked_deadline(self, deadline);
+
+      // [FIX signal race] Publicar primero la entrada y comprobar después
+      // las señales, manteniendo wq->lock. Si kill() llega antes, vemos la
+      // señal aquí; si llega después, ya encontrará waiting_on != NULL y
+      // podrá despertarnos mediante wait_queue_interrupt_task().
+      if (interruptible && self->proc &&
+          __atomic_load_n(&self->proc->pending_signals, __ATOMIC_ACQUIRE) !=
+              0) {
+        self->wake_reason = -EINTR;
+        wq_remove_locked(wq, self);
+        sched_make_ready(self);
+      }
     }
 
     spin_unlock_irqrestore(&wq->lock, flags);
