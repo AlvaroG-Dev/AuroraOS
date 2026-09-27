@@ -329,20 +329,27 @@ static inline int sys_get_service_id(const char *name) {
 static inline int sys_spawn(const char *path) {
   return (int)syscall(ASYS_SPAWN, (uint64_t)path, 0, 0, 0, 0);
 }
-static inline int sys_spawn_args(const char *path, char *const argv[],
-                                 int argc) {
+
+// [ENV] 4º argumento (a4 → r10) es el envp del hijo. Pasar NULL es válido.
+static inline int sys_spawn_args(const char *path, char *const argv[], int argc,
+                                 char *const envp[]) {
   return (int)syscall(ASYS_SPAWN_ARGS, (uint64_t)path, (uint64_t)argv,
-                      (uint64_t)argc, 0, 0);
+                      (uint64_t)argc, (uint64_t)envp, 0);
 }
+
+// [ENV] 5º argumento (a5 → r8) es el envp del hijo. Pasar NULL es válido.
 static inline int sys_spawn_args_fds(const char *path, char *const argv[],
-                                     int argc, const spawn_fds_t *fds) {
+                                     int argc, const spawn_fds_t *fds,
+                                     char *const envp[]) {
   return (int)syscall(ASYS_SPAWN_ARGS_FDS, (uint64_t)path, (uint64_t)argv,
-                      (uint64_t)argc, (uint64_t)fds, 0);
+                      (uint64_t)argc, (uint64_t)fds, (uint64_t)envp);
 }
+
 static inline int sys_waitpid(int pid, int *status, int options) {
   return (int)syscall(ASYS_WAITPID, (uint64_t)pid, (uint64_t)status,
                       (uint64_t)options, 0, 0);
 }
+
 static inline uint32_t sys_get_task_id(void) {
   return (uint32_t)syscall(ASYS_GET_TASK_ID, 0, 0, 0, 0, 0);
 }

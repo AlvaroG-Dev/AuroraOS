@@ -2,6 +2,7 @@
 #define LIB_PROCESS_H
 
 #include "../syscall.h"
+#include "env.h"
 
 // Spawn a new process from a TarFS path. Returns child PID or -1 on error.
 static inline int spawn(const char *path) { return sys_spawn(path); }
@@ -17,17 +18,32 @@ static inline int wait(int *status) { return sys_waitpid(-1, status, 0); }
 // Get current process PID.
 static inline int getpid(void) { return sys_getpid(); }
 
+// Spawn con el entorno del proceso actual (environ).
 static inline int spawn_args(const char *path, char *const argv[], int argc) {
-  return sys_spawn_args(path, argv, argc);
+  return sys_spawn_args(path, argv, argc, environ);
+}
+
+// Spawn con entorno explícito.
+static inline int spawn_args_env(const char *path, char *const argv[], int argc,
+                                 char *const envp[]) {
+  return sys_spawn_args(path, argv, argc, envp);
 }
 
 // [SIG] Envía una señal a otro proceso (o a sí mismo con pid=0).
 static inline int kill(int pid, int sig) { return sys_kill(pid, sig); }
 
-// [pipe] Spawn con fds explícitos para stdio del hijo.
+// [pipe] Spawn con fds explícitos para stdio del hijo, con el entorno
+// del proceso actual.
 static inline int spawn_args_fds(const char *path, char *const argv[], int argc,
                                  const spawn_fds_t *fds) {
-  return sys_spawn_args_fds(path, argv, argc, fds);
+  return sys_spawn_args_fds(path, argv, argc, fds, environ);
+}
+
+// [pipe] Spawn con fds y entorno explícitos.
+static inline int spawn_args_fds_env(const char *path, char *const argv[],
+                                     int argc, const spawn_fds_t *fds,
+                                     char *const envp[]) {
+  return sys_spawn_args_fds(path, argv, argc, fds, envp);
 }
 
 #endif

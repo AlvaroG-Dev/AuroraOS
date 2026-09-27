@@ -1,0 +1,1166 @@
+Output of:
+../../toolchain/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc -malign-data=abi -Wall -Wshadow -Wwrite-strings -Wundef -Wstrict-prototypes -Wunused -Wunused-parameter -Wunused-function -Wunused-value -Wmissing-prototypes -Wmissing-declarations -Wno-format-security -Wdeclaration-after-statement -Wold-style-definition -finline-limit=0 -fno-builtin-strlen -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-guess-branch-probability -funsigned-char -static-libgcc -falign-functions=1 -falign-jumps=1 -falign-labels=1 -falign-loops=1 -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-builtin-printf -Os -static -o busybox_unstripped -Wl,--sort-common -Wl,--sort-section,alignment -Wl,--gc-sections -Wl,--start-group applets/built-in.o archival/lib.a archival/libarchive/lib.a console-tools/lib.a coreutils/lib.a coreutils/libcoreutils/lib.a debianutils/lib.a klibc-utils/lib.a e2fsprogs/lib.a editors/lib.a findutils/lib.a init/lib.a libbb/lib.a libpwdgrp/lib.a loginutils/lib.a mailutils/lib.a miscutils/lib.a modutils/lib.a networking/lib.a networking/libiproute/lib.a networking/udhcp/lib.a printutils/lib.a procps/lib.a runit/lib.a selinux/lib.a shell/lib.a sysklogd/lib.a util-linux/lib.a util-linux/volume_id/lib.a archival/built-in.o archival/libarchive/built-in.o console-tools/built-in.o coreutils/built-in.o coreutils/libcoreutils/built-in.o debianutils/built-in.o klibc-utils/built-in.o e2fsprogs/built-in.o editors/built-in.o findutils/built-in.o init/built-in.o libbb/built-in.o libpwdgrp/built-in.o loginutils/built-in.o mailutils/built-in.o miscutils/built-in.o modutils/built-in.o networking/built-in.o networking/libiproute/built-in.o networking/udhcp/built-in.o printutils/built-in.o procps/built-in.o runit/built-in.o selinux/built-in.o shell/built-in.o sysklogd/built-in.o util-linux/built-in.o util-linux/volume_id/built-in.o -Wl,--end-group -Wl,--warn-common -Wl,-Map,busybox_unstripped.map -Wl,--verbose
+==========
+GNU ld (GNU Binutils) 2.37
+  Supported emulations:
+   elf_x86_64
+   elf32_x86_64
+   elf_i386
+   elf_iamcu
+   elf_l1om
+   elf_k1om
+using internal linker script:
+==================================================
+/* Script for -pie -z combreloc */
+/* Copyright (C) 2014-2021 Free Software Foundation, Inc.
+   Copying and distribution of this script, with or without modification,
+   are permitted in any medium without royalty provided the copyright
+   notice and this notice are preserved.  */
+OUTPUT_FORMAT("elf64-x86-64", "elf64-x86-64",
+	      "elf64-x86-64")
+OUTPUT_ARCH(i386:x86-64)
+ENTRY(_start)
+SEARCH_DIR("=/x86_64-linux-musl/lib64"); SEARCH_DIR("=/usr/local/lib64"); SEARCH_DIR("=/lib64"); SEARCH_DIR("=/usr/lib64"); SEARCH_DIR("=/x86_64-linux-musl/lib"); SEARCH_DIR("=/usr/local/lib"); SEARCH_DIR("=/lib"); SEARCH_DIR("=/usr/lib");
+SECTIONS
+{
+  /* Read-only sections, merged into text segment: */
+  PROVIDE (__executable_start = SEGMENT_START("text-segment", 0)); . = SEGMENT_START("text-segment", 0) + SIZEOF_HEADERS;
+  .interp         : { *(.interp) }
+  .note.gnu.build-id  : { *(.note.gnu.build-id) }
+  .hash           : { *(.hash) }
+  .gnu.hash       : { *(.gnu.hash) }
+  .dynsym         : { *(.dynsym) }
+  .dynstr         : { *(.dynstr) }
+  .gnu.version    : { *(.gnu.version) }
+  .gnu.version_d  : { *(.gnu.version_d) }
+  .gnu.version_r  : { *(.gnu.version_r) }
+  .rela.dyn       :
+    {
+      *(.rela.init)
+      *(.rela.text .rela.text.* .rela.gnu.linkonce.t.*)
+      *(.rela.fini)
+      *(.rela.rodata .rela.rodata.* .rela.gnu.linkonce.r.*)
+      *(.rela.data .rela.data.* .rela.gnu.linkonce.d.*)
+      *(.rela.tdata .rela.tdata.* .rela.gnu.linkonce.td.*)
+      *(.rela.tbss .rela.tbss.* .rela.gnu.linkonce.tb.*)
+      *(.rela.ctors)
+      *(.rela.dtors)
+      *(.rela.got)
+      *(.rela.bss .rela.bss.* .rela.gnu.linkonce.b.*)
+      *(.rela.ldata .rela.ldata.* .rela.gnu.linkonce.l.*)
+      *(.rela.lbss .rela.lbss.* .rela.gnu.linkonce.lb.*)
+      *(.rela.lrodata .rela.lrodata.* .rela.gnu.linkonce.lr.*)
+      *(.rela.ifunc)
+    }
+  .rela.plt       :
+    {
+      *(.rela.plt)
+      *(.rela.iplt)
+    }
+  .init           :
+  {
+    KEEP (*(SORT_NONE(.init)))
+  }
+  .plt            : { *(.plt) *(.iplt) }
+.plt.got        : { *(.plt.got) }
+.plt.sec        : { *(.plt.sec) }
+  .text           :
+  {
+    *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+    *(.text.exit .text.exit.*)
+    *(.text.startup .text.startup.*)
+    *(.text.hot .text.hot.*)
+    *(SORT(.text.sorted.*))
+    *(.text .stub .text.* .gnu.linkonce.t.*)
+    /* .gnu.warning sections are handled specially by elf.em.  */
+    *(.gnu.warning)
+  }
+  .fini           :
+  {
+    KEEP (*(SORT_NONE(.fini)))
+  }
+  PROVIDE (__etext = .);
+  PROVIDE (_etext = .);
+  PROVIDE (etext = .);
+  .rodata         : { *(.rodata .rodata.* .gnu.linkonce.r.*) }
+  .rodata1        : { *(.rodata1) }
+  .eh_frame_hdr   : { *(.eh_frame_hdr) *(.eh_frame_entry .eh_frame_entry.*) }
+  .eh_frame       : ONLY_IF_RO { KEEP (*(.eh_frame)) *(.eh_frame.*) }
+  .gcc_except_table   : ONLY_IF_RO { *(.gcc_except_table .gcc_except_table.*) }
+  .gnu_extab   : ONLY_IF_RO { *(.gnu_extab*) }
+  /* These sections are generated by the Sun/Oracle C++ compiler.  */
+  .exception_ranges   : ONLY_IF_RO { *(.exception_ranges*) }
+  /* Adjust the address for the data segment.  We want to adjust up to
+     the same address within the page on the next page up.  */
+  . = DATA_SEGMENT_ALIGN (CONSTANT (MAXPAGESIZE), CONSTANT (COMMONPAGESIZE));
+  /* Exception handling  */
+  .eh_frame       : ONLY_IF_RW { KEEP (*(.eh_frame)) *(.eh_frame.*) }
+  .gnu_extab      : ONLY_IF_RW { *(.gnu_extab) }
+  .gcc_except_table   : ONLY_IF_RW { *(.gcc_except_table .gcc_except_table.*) }
+  .exception_ranges   : ONLY_IF_RW { *(.exception_ranges*) }
+  /* Thread Local Storage sections  */
+  .tdata	  :
+   {
+     PROVIDE_HIDDEN (__tdata_start = .);
+     *(.tdata .tdata.* .gnu.linkonce.td.*)
+   }
+  .tbss		  : { *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon) }
+  .preinit_array    :
+  {
+    PROVIDE_HIDDEN (__preinit_array_start = .);
+    KEEP (*(.preinit_array))
+    PROVIDE_HIDDEN (__preinit_array_end = .);
+  }
+  .init_array    :
+  {
+    PROVIDE_HIDDEN (__init_array_start = .);
+    KEEP (*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
+    KEEP (*(.init_array EXCLUDE_FILE (*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o ) .ctors))
+    PROVIDE_HIDDEN (__init_array_end = .);
+  }
+  .fini_array    :
+  {
+    PROVIDE_HIDDEN (__fini_array_start = .);
+    KEEP (*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
+    KEEP (*(.fini_array EXCLUDE_FILE (*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o ) .dtors))
+    PROVIDE_HIDDEN (__fini_array_end = .);
+  }
+  .ctors          :
+  {
+    /* gcc uses crtbegin.o to find the start of
+       the constructors, so we make sure it is
+       first.  Because this is a wildcard, it
+       doesn't matter if the user does not
+       actually link against crtbegin.o; the
+       linker won't look for a file to match a
+       wildcard.  The wildcard also means that it
+       doesn't matter which directory crtbegin.o
+       is in.  */
+    KEEP (*crtbegin.o(.ctors))
+    KEEP (*crtbegin?.o(.ctors))
+    /* We don't want to include the .ctor section from
+       the crtend.o file until after the sorted ctors.
+       The .ctor section from the crtend file contains the
+       end of ctors marker and it must be last */
+    KEEP (*(EXCLUDE_FILE (*crtend.o *crtend?.o ) .ctors))
+    KEEP (*(SORT(.ctors.*)))
+    KEEP (*(.ctors))
+  }
+  .dtors          :
+  {
+    KEEP (*crtbegin.o(.dtors))
+    KEEP (*crtbegin?.o(.dtors))
+    KEEP (*(EXCLUDE_FILE (*crtend.o *crtend?.o ) .dtors))
+    KEEP (*(SORT(.dtors.*)))
+    KEEP (*(.dtors))
+  }
+  .jcr            : { KEEP (*(.jcr)) }
+  .data.rel.ro : { *(.data.rel.ro.local* .gnu.linkonce.d.rel.ro.local.*) *(.data.rel.ro .data.rel.ro.* .gnu.linkonce.d.rel.ro.*) }
+  .dynamic        : { *(.dynamic) }
+  .got            : { *(.got) *(.igot) }
+  . = DATA_SEGMENT_RELRO_END (SIZEOF (.got.plt) >= 24 ? 24 : 0, .);
+  .got.plt        : { *(.got.plt) *(.igot.plt) }
+  .data           :
+  {
+    *(.data .data.* .gnu.linkonce.d.*)
+    SORT(CONSTRUCTORS)
+  }
+  .data1          : { *(.data1) }
+  _edata = .; PROVIDE (edata = .);
+  . = .;
+  __bss_start = .;
+  .bss            :
+  {
+   *(.dynbss)
+   *(.bss .bss.* .gnu.linkonce.b.*)
+   *(COMMON)
+   /* Align here to ensure that the .bss section occupies space up to
+      _end.  Align after .bss to ensure correct alignment even if the
+      .bss section disappears because there are no input sections.
+      FIXME: Why do we need it? When there is no .bss section, we do not
+      pad the .data section.  */
+   . = ALIGN(. != 0 ? 64 / 8 : 1);
+  }
+  .lbss   :
+  {
+    *(.dynlbss)
+    *(.lbss .lbss.* .gnu.linkonce.lb.*)
+    *(LARGE_COMMON)
+  }
+  . = ALIGN(64 / 8);
+  . = SEGMENT_START("ldata-segment", .);
+  .lrodata   ALIGN(CONSTANT (MAXPAGESIZE)) + (. & (CONSTANT (MAXPAGESIZE) - 1)) :
+  {
+    *(.lrodata .lrodata.* .gnu.linkonce.lr.*)
+  }
+  .ldata   ALIGN(CONSTANT (MAXPAGESIZE)) + (. & (CONSTANT (MAXPAGESIZE) - 1)) :
+  {
+    *(.ldata .ldata.* .gnu.linkonce.l.*)
+    . = ALIGN(. != 0 ? 64 / 8 : 1);
+  }
+  . = ALIGN(64 / 8);
+  _end = .; PROVIDE (end = .);
+  . = DATA_SEGMENT_END (.);
+  /* Stabs debugging sections.  */
+  .stab          0 : { *(.stab) }
+  .stabstr       0 : { *(.stabstr) }
+  .stab.excl     0 : { *(.stab.excl) }
+  .stab.exclstr  0 : { *(.stab.exclstr) }
+  .stab.index    0 : { *(.stab.index) }
+  .stab.indexstr 0 : { *(.stab.indexstr) }
+  .comment       0 : { *(.comment) }
+  .gnu.build.attributes : { *(.gnu.build.attributes .gnu.build.attributes.*) }
+  /* DWARF debug sections.
+     Symbols in the DWARF debugging sections are relative to the beginning
+     of the section so we begin them at 0.  */
+  /* DWARF 1.  */
+  .debug          0 : { *(.debug) }
+  .line           0 : { *(.line) }
+  /* GNU DWARF 1 extensions.  */
+  .debug_srcinfo  0 : { *(.debug_srcinfo) }
+  .debug_sfnames  0 : { *(.debug_sfnames) }
+  /* DWARF 1.1 and DWARF 2.  */
+  .debug_aranges  0 : { *(.debug_aranges) }
+  .debug_pubnames 0 : { *(.debug_pubnames) }
+  /* DWARF 2.  */
+  .debug_info     0 : { *(.debug_info .gnu.linkonce.wi.*) }
+  .debug_abbrev   0 : { *(.debug_abbrev) }
+  .debug_line     0 : { *(.debug_line .debug_line.* .debug_line_end) }
+  .debug_frame    0 : { *(.debug_frame) }
+  .debug_str      0 : { *(.debug_str) }
+  .debug_loc      0 : { *(.debug_loc) }
+  .debug_macinfo  0 : { *(.debug_macinfo) }
+  /* SGI/MIPS DWARF 2 extensions.  */
+  .debug_weaknames 0 : { *(.debug_weaknames) }
+  .debug_funcnames 0 : { *(.debug_funcnames) }
+  .debug_typenames 0 : { *(.debug_typenames) }
+  .debug_varnames  0 : { *(.debug_varnames) }
+  /* DWARF 3.  */
+  .debug_pubtypes 0 : { *(.debug_pubtypes) }
+  .debug_ranges   0 : { *(.debug_ranges) }
+  /* DWARF 5.  */
+  .debug_addr     0 : { *(.debug_addr) }
+  .debug_line_str 0 : { *(.debug_line_str) }
+  .debug_loclists 0 : { *(.debug_loclists) }
+  .debug_macro    0 : { *(.debug_macro) }
+  .debug_names    0 : { *(.debug_names) }
+  .debug_rnglists 0 : { *(.debug_rnglists) }
+  .debug_str_offsets 0 : { *(.debug_str_offsets) }
+  .debug_sup      0 : { *(.debug_sup) }
+  .gnu.attributes 0 : { KEEP (*(.gnu.attributes)) }
+  /DISCARD/ : { *(.note.GNU-stack) *(.gnu_debuglink) *(.gnu.lto_*) }
+}
+
+
+==================================================
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/bin/ld: mode elf_x86_64
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/rcrt1.o succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/rcrt1.o
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crti.o succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crti.o
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtbeginS.o succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtbeginS.o
+attempt to open applets/built-in.o succeeded
+applets/built-in.o
+attempt to open archival/lib.a succeeded
+archival/lib.a
+attempt to open archival/libarchive/lib.a succeeded
+archival/libarchive/lib.a
+attempt to open console-tools/lib.a succeeded
+console-tools/lib.a
+attempt to open coreutils/lib.a succeeded
+coreutils/lib.a
+attempt to open coreutils/libcoreutils/lib.a succeeded
+coreutils/libcoreutils/lib.a
+attempt to open debianutils/lib.a succeeded
+debianutils/lib.a
+attempt to open klibc-utils/lib.a succeeded
+klibc-utils/lib.a
+attempt to open e2fsprogs/lib.a succeeded
+e2fsprogs/lib.a
+attempt to open editors/lib.a succeeded
+editors/lib.a
+attempt to open findutils/lib.a succeeded
+findutils/lib.a
+attempt to open init/lib.a succeeded
+init/lib.a
+attempt to open libbb/lib.a succeeded
+libbb/lib.a
+(libbb/lib.a)appletlib.o
+(libbb/lib.a)compare_string_array.o
+(libbb/lib.a)default_error_retval.o
+(libbb/lib.a)get_last_path_component.o
+(libbb/lib.a)last_char_is.o
+(libbb/lib.a)messages.o
+(libbb/lib.a)ptr_to_globals.o
+(libbb/lib.a)vfork_daemon_rexec.o
+(libbb/lib.a)xfunc_die.o
+(libbb/lib.a)xfuncs.o
+(libbb/lib.a)xfuncs_printf.o
+(libbb/lib.a)copyfd.o
+(libbb/lib.a)executable.o
+(libbb/lib.a)full_write.o
+(libbb/lib.a)getopt32.o
+(libbb/lib.a)llist.o
+(libbb/lib.a)perror_msg.o
+(libbb/lib.a)read.o
+(libbb/lib.a)safe_strncpy.o
+(libbb/lib.a)safe_write.o
+(libbb/lib.a)signals.o
+(libbb/lib.a)time.o
+(libbb/lib.a)verror_msg.o
+(libbb/lib.a)xatonum.o
+(libbb/lib.a)bb_strtonum.o
+(libbb/lib.a)concat_path_file.o
+attempt to open libpwdgrp/lib.a succeeded
+libpwdgrp/lib.a
+attempt to open loginutils/lib.a succeeded
+loginutils/lib.a
+attempt to open mailutils/lib.a succeeded
+mailutils/lib.a
+attempt to open miscutils/lib.a succeeded
+miscutils/lib.a
+(miscutils/lib.a)ascii.o
+(miscutils/lib.a)bc.o
+(miscutils/lib.a)strings.o
+(miscutils/lib.a)time.o
+(miscutils/lib.a)tree.o
+(miscutils/lib.a)ts.o
+attempt to open modutils/lib.a succeeded
+modutils/lib.a
+attempt to open networking/lib.a succeeded
+networking/lib.a
+attempt to open networking/libiproute/lib.a succeeded
+networking/libiproute/lib.a
+attempt to open networking/udhcp/lib.a succeeded
+networking/udhcp/lib.a
+attempt to open printutils/lib.a succeeded
+printutils/lib.a
+attempt to open procps/lib.a succeeded
+procps/lib.a
+(procps/lib.a)kill.o
+attempt to open runit/lib.a succeeded
+runit/lib.a
+attempt to open selinux/lib.a succeeded
+selinux/lib.a
+attempt to open shell/lib.a succeeded
+shell/lib.a
+(shell/lib.a)ash.o
+(shell/lib.a)ash_ptr_hack.o
+(shell/lib.a)hush.o
+(shell/lib.a)match.o
+(shell/lib.a)math.o
+(shell/lib.a)random.o
+(shell/lib.a)shell_common.o
+attempt to open sysklogd/lib.a succeeded
+sysklogd/lib.a
+attempt to open util-linux/lib.a succeeded
+util-linux/lib.a
+(util-linux/lib.a)cal.o
+(util-linux/lib.a)getopt.o
+(util-linux/lib.a)hexdump.o
+(util-linux/lib.a)hexdump_xxd.o
+(util-linux/lib.a)rev.o
+attempt to open util-linux/volume_id/lib.a succeeded
+util-linux/volume_id/lib.a
+attempt to open archival/built-in.o succeeded
+archival/built-in.o
+attempt to open archival/libarchive/built-in.o succeeded
+archival/libarchive/built-in.o
+attempt to open console-tools/built-in.o succeeded
+console-tools/built-in.o
+attempt to open coreutils/built-in.o succeeded
+coreutils/built-in.o
+attempt to open coreutils/libcoreutils/built-in.o succeeded
+coreutils/libcoreutils/built-in.o
+attempt to open debianutils/built-in.o succeeded
+debianutils/built-in.o
+attempt to open klibc-utils/built-in.o succeeded
+klibc-utils/built-in.o
+attempt to open e2fsprogs/built-in.o succeeded
+e2fsprogs/built-in.o
+attempt to open editors/built-in.o succeeded
+editors/built-in.o
+attempt to open findutils/built-in.o succeeded
+findutils/built-in.o
+attempt to open init/built-in.o succeeded
+init/built-in.o
+attempt to open libbb/built-in.o succeeded
+libbb/built-in.o
+attempt to open libpwdgrp/built-in.o succeeded
+libpwdgrp/built-in.o
+attempt to open loginutils/built-in.o succeeded
+loginutils/built-in.o
+attempt to open mailutils/built-in.o succeeded
+mailutils/built-in.o
+attempt to open miscutils/built-in.o succeeded
+miscutils/built-in.o
+attempt to open modutils/built-in.o succeeded
+modutils/built-in.o
+attempt to open networking/built-in.o succeeded
+networking/built-in.o
+attempt to open networking/libiproute/built-in.o succeeded
+networking/libiproute/built-in.o
+attempt to open networking/udhcp/built-in.o succeeded
+networking/udhcp/built-in.o
+attempt to open printutils/built-in.o succeeded
+printutils/built-in.o
+attempt to open procps/built-in.o succeeded
+procps/built-in.o
+attempt to open runit/built-in.o succeeded
+runit/built-in.o
+attempt to open selinux/built-in.o succeeded
+selinux/built-in.o
+attempt to open shell/built-in.o succeeded
+shell/built-in.o
+attempt to open sysklogd/built-in.o succeeded
+sysklogd/built-in.o
+attempt to open util-linux/built-in.o succeeded
+util-linux/built-in.o
+attempt to open util-linux/volume_id/built-in.o succeeded
+util-linux/volume_id/built-in.o
+archival/lib.a
+(archival/lib.a)bbunzip.o
+(archival/lib.a)bzip2.o
+(archival/lib.a)cpio.o
+(archival/lib.a)dpkg.o
+(archival/lib.a)dpkg_deb.o
+(archival/lib.a)gzip.o
+(archival/lib.a)lzop.o
+(archival/lib.a)rpm.o
+(archival/lib.a)tar.o
+(archival/lib.a)unzip.o
+(archival/lib.a)chksum_and_xwrite_tar_header.o
+archival/libarchive/lib.a
+(archival/libarchive/lib.a)common.o
+(archival/libarchive/lib.a)data_extract_all.o
+(archival/libarchive/lib.a)data_extract_to_command.o
+(archival/libarchive/lib.a)data_extract_to_stdout.o
+(archival/libarchive/lib.a)data_skip.o
+(archival/libarchive/lib.a)decompress_bunzip2.o
+(archival/libarchive/lib.a)decompress_gunzip.o
+(archival/libarchive/lib.a)decompress_unlzma.o
+(archival/libarchive/lib.a)decompress_unxz.o
+(archival/libarchive/lib.a)filter_accept_list.o
+(archival/libarchive/lib.a)filter_accept_list_reassign.o
+(archival/libarchive/lib.a)filter_accept_reject_list.o
+(archival/libarchive/lib.a)find_list_entry.o
+(archival/libarchive/lib.a)get_header_cpio.o
+(archival/libarchive/lib.a)get_header_tar.o
+(archival/libarchive/lib.a)get_header_tar_bz2.o
+(archival/libarchive/lib.a)get_header_tar_gz.o
+(archival/libarchive/lib.a)get_header_tar_lzma.o
+(archival/libarchive/lib.a)get_header_tar_xz.o
+(archival/libarchive/lib.a)header_list.o
+(archival/libarchive/lib.a)header_verbose_list.o
+(archival/libarchive/lib.a)init_handle.o
+(archival/libarchive/lib.a)lzo1x_1.o
+(archival/libarchive/lib.a)lzo1x_1o.o
+(archival/libarchive/lib.a)lzo1x_d.o
+(archival/libarchive/lib.a)open_transformer.o
+(archival/libarchive/lib.a)seek_by_jump.o
+(archival/libarchive/lib.a)seek_by_read.o
+(archival/libarchive/lib.a)unpack_ar_archive.o
+(archival/libarchive/lib.a)unsafe_prefix.o
+(archival/libarchive/lib.a)unsafe_symlink_target.o
+(archival/libarchive/lib.a)data_align.o
+(archival/libarchive/lib.a)filter_accept_all.o
+(archival/libarchive/lib.a)get_header_ar.o
+(archival/libarchive/lib.a)header_skip.o
+console-tools/lib.a
+(console-tools/lib.a)clear.o
+(console-tools/lib.a)reset.o
+(console-tools/lib.a)resize.o
+coreutils/lib.a
+(coreutils/lib.a)basename.o
+(coreutils/lib.a)cat.o
+(coreutils/lib.a)chgrp.o
+(coreutils/lib.a)chmod.o
+(coreutils/lib.a)chown.o
+(coreutils/lib.a)chroot.o
+(coreutils/lib.a)cksum.o
+(coreutils/lib.a)comm.o
+(coreutils/lib.a)cp.o
+(coreutils/lib.a)cut.o
+(coreutils/lib.a)date.o
+(coreutils/lib.a)dd.o
+(coreutils/lib.a)df.o
+(coreutils/lib.a)dirname.o
+(coreutils/lib.a)dos2unix.o
+(coreutils/lib.a)du.o
+(coreutils/lib.a)echo.o
+(coreutils/lib.a)env.o
+(coreutils/lib.a)expand.o
+(coreutils/lib.a)expr.o
+(coreutils/lib.a)factor.o
+(coreutils/lib.a)false.o
+(coreutils/lib.a)fold.o
+(coreutils/lib.a)head.o
+(coreutils/lib.a)hostid.o
+(coreutils/lib.a)id.o
+(coreutils/lib.a)install.o
+(coreutils/lib.a)link.o
+(coreutils/lib.a)ln.o
+(coreutils/lib.a)logname.o
+(coreutils/lib.a)ls.o
+(coreutils/lib.a)md5_sha1_sum.o
+(coreutils/lib.a)mkdir.o
+(coreutils/lib.a)mkfifo.o
+(coreutils/lib.a)mknod.o
+(coreutils/lib.a)mktemp.o
+(coreutils/lib.a)mv.o
+(coreutils/lib.a)nice.o
+(coreutils/lib.a)nl.o
+(coreutils/lib.a)nohup.o
+(coreutils/lib.a)nproc.o
+(coreutils/lib.a)od.o
+(coreutils/lib.a)paste.o
+(coreutils/lib.a)printenv.o
+(coreutils/lib.a)printf.o
+(coreutils/lib.a)pwd.o
+(coreutils/lib.a)readlink.o
+(coreutils/lib.a)realpath.o
+(coreutils/lib.a)rm.o
+(coreutils/lib.a)rmdir.o
+(coreutils/lib.a)seq.o
+(coreutils/lib.a)shred.o
+(coreutils/lib.a)shuf.o
+(coreutils/lib.a)sleep.o
+(coreutils/lib.a)sort.o
+(coreutils/lib.a)split.o
+(coreutils/lib.a)stat.o
+(coreutils/lib.a)sum.o
+(coreutils/lib.a)sync.o
+(coreutils/lib.a)tac.o
+(coreutils/lib.a)tail.o
+(coreutils/lib.a)tee.o
+(coreutils/lib.a)test.o
+(coreutils/lib.a)test_ptr_hack.o
+(coreutils/lib.a)timeout.o
+(coreutils/lib.a)touch.o
+(coreutils/lib.a)tr.o
+(coreutils/lib.a)true.o
+(coreutils/lib.a)truncate.o
+(coreutils/lib.a)tsort.o
+(coreutils/lib.a)uname.o
+(coreutils/lib.a)uniq.o
+(coreutils/lib.a)unlink.o
+(coreutils/lib.a)usleep.o
+(coreutils/lib.a)uudecode.o
+(coreutils/lib.a)uuencode.o
+(coreutils/lib.a)wc.o
+(coreutils/lib.a)whoami.o
+(coreutils/lib.a)yes.o
+coreutils/libcoreutils/lib.a
+(coreutils/libcoreutils/lib.a)cp_mv_stat.o
+(coreutils/libcoreutils/lib.a)getopt_mk_fifo_nod.o
+debianutils/lib.a
+(debianutils/lib.a)pipe_progress.o
+(debianutils/lib.a)run_parts.o
+(debianutils/lib.a)start_stop_daemon.o
+(debianutils/lib.a)which.o
+klibc-utils/lib.a
+e2fsprogs/lib.a
+editors/lib.a
+(editors/lib.a)awk.o
+(editors/lib.a)cmp.o
+(editors/lib.a)diff.o
+(editors/lib.a)ed.o
+(editors/lib.a)patch.o
+(editors/lib.a)sed.o
+(editors/lib.a)vi.o
+findutils/lib.a
+(findutils/lib.a)find.o
+(findutils/lib.a)grep.o
+(findutils/lib.a)xargs.o
+init/lib.a
+libbb/lib.a
+(libbb/lib.a)ask_confirmation.o
+(libbb/lib.a)auto_string.o
+(libbb/lib.a)bb_cat.o
+(libbb/lib.a)bb_do_delay.o
+(libbb/lib.a)bb_getgroups.o
+(libbb/lib.a)bb_pwd.o
+(libbb/lib.a)bb_qsort.o
+(libbb/lib.a)change_identity.o
+(libbb/lib.a)chomp.o
+(libbb/lib.a)common_bufsiz.o
+(libbb/lib.a)concat_subpath_file.o
+(libbb/lib.a)copy_file.o
+(libbb/lib.a)crc32.o
+(libbb/lib.a)dump.o
+(libbb/lib.a)duration.o
+(libbb/lib.a)endofname.o
+(libbb/lib.a)fclose_nonstdin.o
+(libbb/lib.a)fflush_stdout_and_exit.o
+(libbb/lib.a)fgets_str.o
+(libbb/lib.a)find_mount_point.o
+(libbb/lib.a)find_pid_by_name.o
+(libbb/lib.a)get_line_from_file.o
+(libbb/lib.a)get_shell_name.o
+(libbb/lib.a)hash_md5_sha.o
+(libbb/lib.a)hash_md5_sha256_x86-64_shaNI.o
+(libbb/lib.a)hash_md5_sha_x86-64_shaNI.o
+(libbb/lib.a)human_readable.o
+(libbb/lib.a)inode_hash.o
+(libbb/lib.a)isdirectory.o
+(libbb/lib.a)isqrt.o
+(libbb/lib.a)lineedit.o
+(libbb/lib.a)lineedit_ptr_hack.o
+(libbb/lib.a)make_directory.o
+(libbb/lib.a)mode_string.o
+(libbb/lib.a)parse_mode.o
+(libbb/lib.a)perror_nomsg_and_die.o
+(libbb/lib.a)pidfile.o
+(libbb/lib.a)print_numbered_lines.o
+(libbb/lib.a)printable.o
+(libbb/lib.a)printable_string.o
+(libbb/lib.a)process_escape_sequence.o
+(libbb/lib.a)procps.o
+(libbb/lib.a)read_key.o
+(libbb/lib.a)read_printf.o
+(libbb/lib.a)recursive_action.o
+(libbb/lib.a)remove_file.o
+(libbb/lib.a)replace.o
+(libbb/lib.a)safe_gethostname.o
+(libbb/lib.a)safe_poll.o
+(libbb/lib.a)single_argv.o
+(libbb/lib.a)skip_whitespace.o
+(libbb/lib.a)sysconf.o
+(libbb/lib.a)trim.o
+(libbb/lib.a)u_signal_names.o
+(libbb/lib.a)unicode.o
+(libbb/lib.a)uuencode.o
+(libbb/lib.a)wfopen.o
+(libbb/lib.a)wfopen_input.o
+(libbb/lib.a)xgetcwd.o
+(libbb/lib.a)xreadlink.o
+(libbb/lib.a)xrealloc_vector.o
+(libbb/lib.a)xregcomp.o
+libpwdgrp/lib.a
+(libpwdgrp/lib.a)uidgid_get.o
+loginutils/lib.a
+mailutils/lib.a
+miscutils/lib.a
+modutils/lib.a
+networking/lib.a
+networking/libiproute/lib.a
+networking/udhcp/lib.a
+printutils/lib.a
+procps/lib.a
+runit/lib.a
+selinux/lib.a
+shell/lib.a
+sysklogd/lib.a
+util-linux/lib.a
+util-linux/volume_id/lib.a
+archival/built-in.o
+archival/libarchive/built-in.o
+console-tools/built-in.o
+coreutils/built-in.o
+coreutils/libcoreutils/built-in.o
+debianutils/built-in.o
+klibc-utils/built-in.o
+e2fsprogs/built-in.o
+editors/built-in.o
+findutils/built-in.o
+init/built-in.o
+libbb/built-in.o
+libpwdgrp/built-in.o
+loginutils/built-in.o
+mailutils/built-in.o
+miscutils/built-in.o
+modutils/built-in.o
+networking/built-in.o
+networking/libiproute/built-in.o
+networking/udhcp/built-in.o
+printutils/built-in.o
+procps/built-in.o
+runit/built-in.o
+selinux/built-in.o
+shell/built-in.o
+sysklogd/built-in.o
+util-linux/built-in.o
+util-linux/volume_id/built-in.o
+archival/lib.a
+archival/libarchive/lib.a
+console-tools/lib.a
+coreutils/lib.a
+coreutils/libcoreutils/lib.a
+debianutils/lib.a
+klibc-utils/lib.a
+e2fsprogs/lib.a
+editors/lib.a
+findutils/lib.a
+init/lib.a
+libbb/lib.a
+libpwdgrp/lib.a
+loginutils/lib.a
+mailutils/lib.a
+miscutils/lib.a
+modutils/lib.a
+networking/lib.a
+networking/libiproute/lib.a
+networking/udhcp/lib.a
+printutils/lib.a
+procps/lib.a
+runit/lib.a
+selinux/lib.a
+shell/lib.a
+sysklogd/lib.a
+util-linux/lib.a
+util-linux/volume_id/lib.a
+archival/built-in.o
+archival/libarchive/built-in.o
+console-tools/built-in.o
+coreutils/built-in.o
+coreutils/libcoreutils/built-in.o
+debianutils/built-in.o
+klibc-utils/built-in.o
+e2fsprogs/built-in.o
+editors/built-in.o
+findutils/built-in.o
+init/built-in.o
+libbb/built-in.o
+libpwdgrp/built-in.o
+loginutils/built-in.o
+mailutils/built-in.o
+miscutils/built-in.o
+modutils/built-in.o
+networking/built-in.o
+networking/libiproute/built-in.o
+networking/udhcp/built-in.o
+printutils/built-in.o
+procps/built-in.o
+runit/built-in.o
+selinux/built-in.o
+shell/built-in.o
+sysklogd/built-in.o
+util-linux/built-in.o
+util-linux/volume_id/built-in.o
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libc.a failed
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/libc.a failed
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sysconf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)alphasort.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)closedir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)opendir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)readdir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)scandir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__environ.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__libc_start_main.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)clearenv.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getenv.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)putenv.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setenv.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)unsetenv.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__errno_location.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strerror.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)exit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)creat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fcntl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)open.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)defsysinfo.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)libc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)syscall_ret.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)chroot.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)prctl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sendfile.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setgroups.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)settimeofday.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)syncfs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sysinfo.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)utimes.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wait3.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wait4.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__lctrans.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcoll.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)calloc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)free.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)lite_malloc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)free.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)malloc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)realloc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)replaced.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)atan2.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)cos.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)exp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)exp_data.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)log.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)log_data.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pow.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pow_data.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sin.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fabs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sqrt.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)dirname.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)gethostid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getopt.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getopt_long.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpriority.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getrlimit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)initgroups.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ioctl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mntent.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)realpath.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setpriority.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setrlimit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)uname.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)madvise.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mmap.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mprotect.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)munmap.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mblen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mbtowc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)bind.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)listen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sendto.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)socket.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getgrent.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getgrent_a.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getgrouplist.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpwent.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpwent_a.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)nscd_query.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)rand.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)execl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)execlp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)execv.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)execve.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)execvp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fork.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)system.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wait.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)waitpid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vfork.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fnmatch.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)glob.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)regcomp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)regerror.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)regexec.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)tre-mem.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)affinity.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)poll.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)longjmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setjmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)block.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)kill.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)killpg.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)raise.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigaction.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigaddset.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigdelset.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigemptyset.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigfillset.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigisemptyset.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigismember.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)siglongjmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)signal.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigprocmask.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigrtmax.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigrtmin.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigsuspend.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)restore.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigsetjmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)chmod.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fchmod.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fstat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fstatat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)futimens.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)futimesat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)lstat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mkdir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mkfifo.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mknod.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)stat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)statvfs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)umask.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)utimensat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__fdopen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__lockfile.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__stdio_close.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__stdio_read.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__stdio_seek.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__stdio_write.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)clearerr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)dprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fclose.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)feof.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ferror.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fflush.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fgets.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fileno.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fopen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fputs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fread.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)freopen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fscanf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fseek.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fwrite.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getc_unlocked.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getchar_unlocked.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getline.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ofl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ofl_add.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pclose.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)popen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)printf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)putc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)putc_unlocked.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)putchar_unlocked.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)puts.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)rename.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)scanf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setbuf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setvbuf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)snprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sscanf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)stderr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)stdin.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)stdout.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ungetc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vasprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vdprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vfprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vfscanf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vscanf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vsnprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vsprintf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vsscanf.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)atof.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)atoi.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)bsearch.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)qsort_nr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strtod.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strtol.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)memchr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)memcmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)memrchr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)stpcpy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)stpncpy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcasecmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcasestr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcat.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strchr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strchrnul.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcpy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strcspn.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strdup.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strlen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strncasecmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strncmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strncpy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strndup.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strnlen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strpbrk.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strrchr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strsep.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strsignal.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strspn.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strstr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strtok_r.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strverscmp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)memcpy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)memmove.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)memset.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mkdtemp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mkstemp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mktemp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)tcgetattr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)tcsetattr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__lock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__syscall_cp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)lock_ptc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_rdlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_timedrdlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_tryrdlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_unlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_wrlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_setcancelstate.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_sigmask.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_testcancel.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)synccall.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__tz.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__year_to_secs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)clock_gettime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)clock_settime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ctime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)gettimeofday.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)localtime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)localtime_r.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mktime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)nanosleep.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strftime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)strptime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)time.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)times.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)_exit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)access.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)alarm.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)chdir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)chown.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)close.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)dup.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)dup2.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)dup3.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fchdir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fchown.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fdatasync.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fsync.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ftruncate.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getcwd.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getegid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)geteuid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getgid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getgroups.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getlogin_r.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpgrp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getppid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getsid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getuid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)isatty.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)lchown.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)link.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)lseek.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pipe.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pipe2.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)read.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)readlink.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)rmdir.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setegid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)seteuid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setgid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setpgid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setpgrp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setsid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setuid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setxid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sleep.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)symlink.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sync.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)tcgetpgrp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)tcsetpgrp.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)ttyname_r.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)unlink.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)usleep.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)write.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswalnum.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswalpha.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswctype.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswgraph.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswlower.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswprint.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswpunct.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswspace.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswupper.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswxdigit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)tolower.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)towctrans.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__init_tls.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)_Exit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)abort_lock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)floatscan.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)intscan.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)procfdname.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)shgetc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)vdso.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)langinfo.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)realloc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__cos.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__fpclassifyl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__math_divzero.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__math_invalid.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__math_oflow.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__math_uflow.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__math_xflow.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__rem_pio2.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__rem_pio2_large.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__signbitl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__sin.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)atan.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)copysignl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)floor.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)frexpl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)scalbn.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)scalbnl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fabsl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)fmodl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mremap.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)internal.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mbrtowc.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mbsinit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wctomb.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)connect.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sendmsg.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getgr_a.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpw_a.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getpw_r.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)_Fork.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawn.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawn_file_actions_addclose.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawn_file_actions_adddup2.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawn_file_actions_destroy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawn_file_actions_init.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawnattr_destroy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawnattr_init.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawnattr_setflags.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawnattr_setsigdefault.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)posix_spawnattr_setsigmask.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)setitimer.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sigsetjmp_tail.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__fmodeflags.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__overflow.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__stdout_write.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__toread.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__towrite.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__uflow.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getdelim.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)qsort.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wcschr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wcslen.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__randname.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)mkostemps.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__timedwait.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)default_attr.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_timedwrlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_rwlock_trywrlock.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sem_destroy.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sem_init.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sem_post.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sem_wait.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__set_thread_area.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)clone.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__map_file.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__month_to_secs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__secs_to_tm.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__tm_to_secs.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)asctime.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)asctime_r.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)clock_nanosleep.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)getlogin.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswblank.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)iswcntrl.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)c_locale.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)wcrtomb.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)__stdio_exit.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sem_timedwait.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)sem_trywait.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)isblank.lo
+(/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a)pthread_cleanup_push.lo
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.a
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtendS.o succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtendS.o
+attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crtn.o succeeded
+/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crtn.o

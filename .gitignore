@@ -24,6 +24,7 @@ a.out
 *.swp
 *~
 *:Zone.Identifier
+.tgz
 
 # IDE
 .vscode/

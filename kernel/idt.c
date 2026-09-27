@@ -240,12 +240,18 @@ void isr_handler(registers_t *regs) {
   static registers_t saved_regs;
   saved_regs = *regs;
 
-  // Log con LOG_DEBUG normal (puede colgar pero es lo que tenemos).
-  LOG_DEBUG("[ISR] int_num=%lu error=0x%lx rip=%p rsp=%p cs=0x%lx ss=0x%lx",
-            (unsigned long)saved_regs.int_num,
-            (unsigned long)saved_regs.error_code, (void *)saved_regs.rip,
-            (void *)saved_regs.rsp, (unsigned long)saved_regs.cs,
-            (unsigned long)saved_regs.ss);
+  // [LOG] Solo loggear excepciones que NO son page faults, o page
+  // faults que el handler no va a resolver. Los #PF que el demand
+  // pager cubre (el 99%) se resuelven silenciosamente: son el
+  // comportamiento normal, no un evento raro, y saturan el log
+  // cuando corre busybox.
+  if (saved_regs.int_num != 14) {
+    LOG_DEBUG("[ISR] int_num=%lu error=0x%lx rip=%p rsp=%p cs=0x%lx ss=0x%lx",
+              (unsigned long)saved_regs.int_num,
+              (unsigned long)saved_regs.error_code, (void *)saved_regs.rip,
+              (void *)saved_regs.rsp, (unsigned long)saved_regs.cs,
+              (unsigned long)saved_regs.ss);
+  }
 
   if (saved_regs.int_num == 14) {
     if (handle_page_fault(regs)) {

@@ -130,6 +130,28 @@ task_trampoline:
     hlt
     jmp .hang
 
+global user_fork_return
+
+; Continúa la ejecución en userland a partir del frame construido por
+; sched_create_forked_user_task(). rsp apunta a r11 (task_jump_to ya
+; restauró r15..rbx y saltó aquí con ret).
+user_fork_return:
+    mov ax, 0x23
+    mov ds, ax
+    mov es, ax
+
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rax
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+
+    iretq
+    
 global user_trampoline
 
 user_trampoline:

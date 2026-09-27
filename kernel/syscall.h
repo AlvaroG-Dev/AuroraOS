@@ -42,6 +42,11 @@
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
 #define SYS_GETPID 39
+#define SYS_CLONE 56
+#define SYS_FORK 57
+#define SYS_VFORK 58
+#define SYS_EXECVE 59
+#define SYS_WAIT4 61
 #define SYS_KILL 62
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
@@ -63,6 +68,7 @@
 #define SYS_GETSID 124
 #define SYS_PRCTL 157
 #define SYS_ARCH_PRCTL 158
+#define SYS_GETTID 186
 #define SYS_GETDENTS64 217
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_CLOCK_GETTIME 228

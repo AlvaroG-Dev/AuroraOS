@@ -355,7 +355,7 @@ void window_redraw_surface(window_t *win) {
   }
 
   int title_x = icon_x + WIN_ICON_SIZE + ICON_TEXT_GAP;
-  int title_y = WIN11_SHADOW_SIZE + (WIN11_TITLEBAR_HEIGHT - font_h - 4) / 2;
+  int title_y = WIN11_SHADOW_SIZE + (WIN11_TITLEBAR_HEIGHT - font_h - 8) / 2;
   gfx_draw_string(
       win->surface, win->surface_w, s_clip, title_x, title_y, win->title,
       focused ? AURORA_TEXT_PRIMARY : AURORA_TEXT_SECONDARY, FONT_ID_MAIN_BOLD);

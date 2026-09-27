@@ -1,5 +1,6 @@
 // kernel/sched.h
 #pragma once
+#include "idt.h"
 #include "wait.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -76,6 +77,14 @@ typedef struct task {
   volatile int yield_requested;
 
   uint64_t fs_base; // [musl] FS segment base (TLS). 0 si no lo usa.
+                    // [FIX-SMP] Trap frame del syscall en curso para ESTA
+                    // tarea. Antes
+  // era un global compartido: con SMP, k_execve escribía regs->rip
+  // en el frame de OTRA tarea concurrente (la que estaba en waitpid),
+  // y ni una ni otra volvían a un rip válido → PF en ambas.
+  // Per-task sobrevive incluso si la tarea migra de CPU durante la
+  // syscall.
+  registers_t *syscall_regs;
 } task_t;
 
 void sched_init(void);
@@ -100,6 +109,12 @@ uint64_t sched_get_ticks(void);
 void sched_make_ready(task_t *t);
 void sched_mark_need_resched(void);
 void sched_publish_task(task_t *t);
+
+// [fork] Crea la tarea del hijo. El frame de kernel se construye a partir
+// de `parent_regs` (el registers_t del padre en el momento del syscall),
+// de forma que al saltar a userland el hijo vea los mismos registros que
+// el padre excepto rax = 0.
+task_t *sched_create_forked_user_task(registers_t *parent_regs, uint64_t cr3);
 
 // [C4] Publica atómicamente la transición a TASK_BLOCKED junto con el
 // wake_deadline, bajo sched_lock. Debe llamarse después de insertar

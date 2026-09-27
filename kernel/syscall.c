@@ -32,6 +32,15 @@
 
 extern void syscall_entry(void);
 
+// ---------------------------------------------------------------------------
+// Trap frame del syscall en curso. Almacenamiento per-task. Ver
+// sched.h:task_t.syscall_regs para el porqué del cambio desde global.
+// ---------------------------------------------------------------------------
+registers_t *syscall_current_regs(void) {
+  task_t *t = sched_current();
+  return t ? t->syscall_regs : NULL;
+}
+
 // ---------- helper de sleep ----------
 //
 // Duerme `ticks` sin wait queue permanente. Registra la tarea en una wq
@@ -79,6 +88,34 @@ struct k_iovec {
   uint64_t iov_base;
   uint64_t iov_len;
 };
+
+// ---------------------------------------------------------------------------
+// struct rusage de Linux x86_64. Layout exacto, 144 bytes.
+// ---------------------------------------------------------------------------
+struct k_timeval_rs {
+  int64_t tv_sec;
+  int64_t tv_usec;
+};
+
+struct k_rusage {
+  struct k_timeval_rs ru_utime; // 0x00
+  struct k_timeval_rs ru_stime; // 0x10
+  int64_t ru_maxrss;            // 0x20
+  int64_t ru_ixrss;             // 0x28
+  int64_t ru_idrss;             // 0x30
+  int64_t ru_isrss;             // 0x38
+  int64_t ru_minflt;            // 0x40
+  int64_t ru_majflt;            // 0x48
+  int64_t ru_nswap;             // 0x50
+  int64_t ru_inblock;           // 0x58
+  int64_t ru_oublock;           // 0x60
+  int64_t ru_msgsnd;            // 0x68
+  int64_t ru_msgrcv;            // 0x70
+  int64_t ru_nsignals;          // 0x78
+  int64_t ru_nvcsw;             // 0x80
+  int64_t ru_nivcsw;            // 0x88
+};
+_Static_assert(sizeof(struct k_rusage) == 144, "rusage layout x86_64");
 
 // ---------------------------------------------------------------------------
 // Servicios IPC (Aurora-specific)
@@ -590,24 +627,16 @@ static int64_t k_getcwd(uint64_t buf, uint64_t size, uint64_t a3, uint64_t a4,
 // ---------- mmap / munmap / mprotect / brk ----------
 static int64_t k_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                       uint64_t flags, uint64_t a5) {
-  (void)flags;
   (void)a5;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
 
-  // prot es Linux (PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4).
-  uint64_t pte_flags = 0;
-  if (prot & 0x2) // PROT_WRITE → página escribible
-    pte_flags |= PTE_WRITABLE;
-  if (!(prot & 0x4)) // !PROT_EXEC → NX
-    pte_flags |= PTE_NX;
-
-  LOG_DEBUG("[MMAP] addr=%p len=%p prot=%lx flags=%lx pte=%lx", (void *)addr,
-            (void *)length, prot, flags, pte_flags);
-
-  int64_t r = sys_mmap(proc, addr, length, pte_flags, 0, -1, 0);
-  return r;
+  // sys_mmap() recibe `prot` y `flags` de Linux tal cual: los traduce
+  // internamente a PTE_*. Antes este wrapper hacía la traducción y
+  // sys_mmap recibía solo flags PTE, perdiendo MAP_FIXED,
+  // MAP_ANONYMOUS y MAP_SHARED.
+  return sys_mmap(proc, addr, length, prot, flags, -1, 0);
 }
 
 static int64_t k_munmap(uint64_t addr, uint64_t length, uint64_t a3,
@@ -1778,6 +1807,219 @@ static int64_t k_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a3,
   return 0;
 }
 
+// ---------- fork / clone / wait4 ----------
+static int64_t k_fork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return sys_fork();
+}
+
+// ---------------------------------------------------------------------------
+// vfork (syscall 58).
+//
+// En Linux comparte el address space del padre y lo bloquea hasta que
+// el hijo hace execve() o _exit(). Busybox lo usa en `time`, `nice`,
+// y el spawn de ash para ahorrar la copia de memoria en el caso
+// "fork + execve inmediato".
+//
+// Aquí lo implementamos como fork(). El hijo tendrá su propia copia
+// del espacio, lo cual es correcto y algo más lento pero sin efectos
+// observables para el patrón fork+execve: el hijo llama a execve
+// justo después y descarta su copia.
+//
+// La diferencia real (padre bloqueado hasta execve) la omitimos por
+// ahora: busybox `time` espera con wait4 inmediatamente después, así
+// que no depende de ese bloqueo.
+// ---------------------------------------------------------------------------
+static int64_t k_vfork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return sys_fork();
+}
+
+// En x86_64 Linux, clone(flags, stack, ptid, tls, ctid). Solo soportamos
+// el caso "fork-like": flags cuyo byte bajo es la señal de salida y
+// ningún bit CLONE_* activo. Cualquier otro uso devuelve -ENOSYS.
+#define CLONE_FLAG_MASK 0xFFFFFF00ULL // bits ≥ 8
+
+static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
+                       uint64_t tls, uint64_t ctid) {
+  (void)stack;
+  (void)ptid;
+  (void)tls;
+  (void)ctid;
+  if (flags & CLONE_FLAG_MASK) {
+    LOG_WARN("[CLONE] flags=%lx no soportados", (unsigned long)flags);
+    return -ENOSYS;
+  }
+  return sys_fork();
+}
+
+static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
+                       uint64_t rusage_ptr, uint64_t a5) {
+  (void)a5;
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+
+  int32_t aurora_status = 0;
+  proc_rusage_t ru = {0};
+  int r =
+      process_waitpid(self, (int32_t)pid, &aurora_status, &ru, (int)options);
+  if (r < 0)
+    return r;
+
+  // r == 0 → WNOHANG sin hijos listos. No tocar status/rusage.
+  // r > 0 → pid de un hijo recogido.
+  if (r > 0) {
+    if (status_ptr) {
+      if (!access_ok((void *)status_ptr, sizeof(int32_t)))
+        return -EFAULT;
+      // Formato Linux: exit status = ((code & 0xff) << 8).
+      // Asumimos siempre salida normal (no señales reales aún).
+      int32_t linux_status = (aurora_status & 0xff) << 8;
+      if (put_user_u32((uint32_t *)status_ptr, (uint32_t)linux_status) < 0)
+        return -EFAULT;
+    }
+    if (rusage_ptr) {
+      if (!access_ok((void *)rusage_ptr, sizeof(struct k_rusage)))
+        return -EFAULT;
+
+      struct k_rusage kr;
+      memset(&kr, 0, sizeof(kr));
+
+      // Kernel HZ = 1000 (LAPIC a 1 kHz).
+      //   ticks → timeval = (sec = ticks/1000, usec = (ticks%1000)*1000)
+      kr.ru_utime.tv_sec = (int64_t)(ru.utime_ticks / 1000);
+      kr.ru_utime.tv_usec = (int64_t)((ru.utime_ticks % 1000) * 1000);
+      kr.ru_stime.tv_sec = (int64_t)(ru.stime_ticks / 1000);
+      kr.ru_stime.tv_usec = (int64_t)((ru.stime_ticks % 1000) * 1000);
+      kr.ru_maxrss = ru.maxrss_kb;
+      kr.ru_minflt = (int64_t)ru.minflt;
+      kr.ru_majflt = (int64_t)ru.majflt;
+      kr.ru_nvcsw = (int64_t)ru.nvcsw;
+      kr.ru_nivcsw = (int64_t)ru.nivcsw;
+
+      if (copy_to_user((void *)rusage_ptr, &kr, sizeof(kr)) < 0)
+        return -EFAULT;
+    }
+  }
+  return r;
+}
+
+// ---------- execve ----------
+//
+// Reemplaza el binario del proceso actual. No crea tarea nueva.
+// El "retorno" del syscall aterriza en el entry point del nuevo ELF:
+// el dispatcher devuelve 0 → RAX=0, y regs->rip/rsp redirigen el
+// sysretq/iretq final.
+static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
+                        uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+
+  // Buffers en heap: 16*128 + 32*256 = 10 KB no caben cómodos en el
+  // stack de kernel sin disparar -Wframe-larger-than.
+  enum {
+    ARGV_BYTES = PROCESS_ARGV_MAX * SPAWN_ARG_STR_MAX,
+    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+  };
+  char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
+  if (!buf)
+    return -ENOMEM;
+  char *argv_storage = buf;
+  char *env_storage = buf + ARGV_BYTES;
+
+  const char *kargv[PROCESS_ARGV_MAX];
+  int argc = 0;
+  if (argv_ptr) {
+    for (int i = 0; i < PROCESS_ARGV_MAX; i++) {
+      uint64_t uptr;
+      if (get_user_u64(&uptr, (const uint64_t *)(argv_ptr + (uint64_t)i * 8)) <
+          0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      if (uptr == 0)
+        break;
+      long m = strncpy_from_user(&argv_storage[i * SPAWN_ARG_STR_MAX],
+                                 (const char *)uptr, SPAWN_ARG_STR_MAX);
+      if (m < 0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
+      argc++;
+    }
+  }
+
+  const char *kenvp[PROCESS_ENVP_MAX];
+  int envc = 0;
+  if (envp_ptr) {
+    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+      uint64_t uptr;
+      if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
+          0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      if (uptr == 0)
+        break;
+      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
+                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      if (m < 0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      envc++;
+    }
+  }
+
+  uint64_t new_entry = 0, new_rsp = 0;
+  rc = process_execve_prepare(path, argc, kargv, envc, kenvp, &new_entry,
+                              &new_rsp);
+  kfree(buf);
+  if (rc != 0)
+    return rc;
+
+  registers_t *regs = syscall_current_regs();
+  if (!regs)
+    return -EINVAL;
+  regs->rip = new_entry;
+  regs->rsp = new_rsp;
+
+  return 0;
+}
+
+// ---------- gettid ----------
+static int64_t k_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  return proc ? (int64_t)proc->pid : -EFAULT;
+}
+
 // ===========================================================================
 //  AURORA-ONLY HANDLERS  (rango 0x1000+)
 // ===========================================================================
@@ -1825,8 +2067,7 @@ static int64_t a_spawn(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
 }
 
 static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
-                            uint64_t a4, uint64_t a5) {
-  (void)a4;
+                            uint64_t envp_ptr, uint64_t a5) {
   (void)a5;
   process_t *proc = process_current();
   if (!proc || !path)
@@ -1841,35 +2082,78 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
   if (ac < 0 || ac > SPAWN_ARGS_MAX)
     return -EINVAL;
 
-  char storage[SPAWN_ARGS_MAX][SPAWN_ARG_STR_MAX];
-  const char *kargv[SPAWN_ARGS_MAX];
+  enum {
+    ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
+    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+  };
+  char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
+  if (!buf)
+    return -ENOMEM;
+  char *argv_storage = buf;
+  char *env_storage = buf + ARGV_BYTES;
 
+  const char *kargv[SPAWN_ARGS_MAX];
   if (ac > 0) {
-    if (!argv)
+    if (!argv) {
+      kfree(buf);
       return -EINVAL;
-    if (!access_ok((void *)argv, (size_t)ac * sizeof(uint64_t)))
+    }
+    if (!access_ok((void *)argv, (size_t)ac * sizeof(uint64_t))) {
+      kfree(buf);
       return -EFAULT;
+    }
     uint64_t uargv[SPAWN_ARGS_MAX];
-    if (copy_from_user(uargv, (void *)argv, (size_t)ac * sizeof(uint64_t)) < 0)
+    if (copy_from_user(uargv, (void *)argv, (size_t)ac * sizeof(uint64_t)) <
+        0) {
+      kfree(buf);
       return -EFAULT;
+    }
     for (int i = 0; i < ac; i++) {
-      if (!uargv[i])
+      if (!uargv[i]) {
+        kfree(buf);
         return -EINVAL;
-      long m = strncpy_from_user(storage[i], (const char *)uargv[i],
-                                 SPAWN_ARG_STR_MAX);
-      if (m < 0)
+      }
+      long m = strncpy_from_user(&argv_storage[i * SPAWN_ARG_STR_MAX],
+                                 (const char *)uargv[i], SPAWN_ARG_STR_MAX);
+      if (m < 0) {
+        kfree(buf);
         return -EFAULT;
-      kargv[i] = storage[i];
+      }
+      kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
     }
   }
 
-  process_t *child = process_spawn_child_args(proc, p, ac, kargv);
+  const char *kenvp[PROCESS_ENVP_MAX];
+  int envc = 0;
+  if (envp_ptr) {
+    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+      uint64_t uptr;
+      if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
+          0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      if (uptr == 0)
+        break;
+      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
+                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      if (m < 0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      envc++;
+    }
+  }
+
+  process_t *child =
+      process_spawn_child_args_env(proc, p, ac, kargv, envc, kenvp);
+  kfree(buf);
   return child ? (int64_t)child->pid : -ENOENT;
 }
 
 static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
-                                uint64_t fds_ptr, uint64_t a5) {
-  (void)a5;
+                                uint64_t fds_ptr, uint64_t envp_ptr) {
   process_t *proc = process_current();
   if (!proc || !path)
     return -EFAULT;
@@ -1901,29 +2185,73 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
                             !proc->fds[kfds.fd_err]))
     return -EBADF;
 
-  char storage[SPAWN_ARGS_MAX][SPAWN_ARG_STR_MAX];
-  const char *kargv[SPAWN_ARGS_MAX];
+  enum {
+    ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
+    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+  };
+  char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
+  if (!buf)
+    return -ENOMEM;
+  char *argv_storage = buf;
+  char *env_storage = buf + ARGV_BYTES;
 
+  const char *kargv[SPAWN_ARGS_MAX];
   if (ac > 0) {
-    if (!argv)
+    if (!argv) {
+      kfree(buf);
       return -EINVAL;
-    if (!access_ok((void *)argv, (size_t)ac * sizeof(uint64_t)))
+    }
+    if (!access_ok((void *)argv, (size_t)ac * sizeof(uint64_t))) {
+      kfree(buf);
       return -EFAULT;
+    }
     uint64_t uargv[SPAWN_ARGS_MAX];
-    if (copy_from_user(uargv, (void *)argv, (size_t)ac * sizeof(uint64_t)) < 0)
+    if (copy_from_user(uargv, (void *)argv, (size_t)ac * sizeof(uint64_t)) <
+        0) {
+      kfree(buf);
       return -EFAULT;
+    }
     for (int i = 0; i < ac; i++) {
-      if (!uargv[i])
+      if (!uargv[i]) {
+        kfree(buf);
         return -EINVAL;
-      long m = strncpy_from_user(storage[i], (const char *)uargv[i],
-                                 SPAWN_ARG_STR_MAX);
-      if (m < 0)
+      }
+      long m = strncpy_from_user(&argv_storage[i * SPAWN_ARG_STR_MAX],
+                                 (const char *)uargv[i], SPAWN_ARG_STR_MAX);
+      if (m < 0) {
+        kfree(buf);
         return -EFAULT;
-      kargv[i] = storage[i];
+      }
+      kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
     }
   }
 
-  process_t *child = process_spawn_child_args_fds(proc, p, ac, kargv, &kfds);
+  const char *kenvp[PROCESS_ENVP_MAX];
+  int envc = 0;
+  if (envp_ptr) {
+    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+      uint64_t uptr;
+      if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
+          0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      if (uptr == 0)
+        break;
+      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
+                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      if (m < 0) {
+        kfree(buf);
+        return -EFAULT;
+      }
+      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      envc++;
+    }
+  }
+
+  process_t *child =
+      process_spawn_child_args_fds_env(proc, p, ac, kargv, envc, kenvp, &kfds);
+  kfree(buf);
   return child ? (int64_t)child->pid : -ENOENT;
 }
 
@@ -1935,7 +2263,7 @@ static int64_t a_waitpid(uint64_t pid, uint64_t status, uint64_t options,
   if (!proc)
     return -EFAULT;
   int32_t kstatus = 0;
-  int res = process_waitpid(proc, (int32_t)pid, &kstatus, (int)options);
+  int res = process_waitpid(proc, (int32_t)pid, &kstatus, NULL, (int)options);
   if (res < 0)
     return res;
   if (status != 0) {
@@ -2236,6 +2564,12 @@ static const syscall_entry_t linux_table[] = {
     [SYS_PRLIMIT64] = {k_prlimit64, "prlimit64"},
     [SYS_GETRANDOM] = {k_getrandom, "getrandom"},
     [SYS_RSEQ] = {k_rseq, "rseq"},
+    [SYS_CLONE] = {k_clone, "clone"},
+    [SYS_FORK] = {k_fork, "fork"},
+    [SYS_VFORK] = {k_vfork, "vfork"},
+    [SYS_EXECVE] = {k_execve, "execve"},
+    [SYS_GETTID] = {k_gettid, "gettid"},
+    [SYS_WAIT4] = {k_wait4, "wait4"},
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 
@@ -2281,7 +2615,6 @@ uint64_t syscall_handler_c(registers_t *regs) {
             (void *)arg2);
 
   syscall_fn_t fn = NULL;
-
   if (num < (uint64_t)LINUX_TABLE_N) {
     fn = linux_table[num].fn;
   } else if (num >= ASYS_BASE && num < ASYS_MAX) {
@@ -2297,7 +2630,16 @@ uint64_t syscall_handler_c(registers_t *regs) {
 
   signal_check_pending();
 
+  // [FIX-SMP] Guardar el trap frame en la tarea actual, no en un global.
+  task_t *cur = sched_current();
+  registers_t *saved = cur ? cur->syscall_regs : NULL;
+  if (cur)
+    cur->syscall_regs = regs;
+
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
+
+  if (cur)
+    cur->syscall_regs = saved;
 
   signal_check_pending();
 

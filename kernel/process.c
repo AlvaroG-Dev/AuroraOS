@@ -12,6 +12,7 @@
 #include "serial.h"
 #include "string.h"
 #include "tarfs.h"
+#include "uaccess.h"
 #include "vfs.h"
 #include "wait.h"
 #include <stddef.h>
@@ -36,6 +37,83 @@ struct elf_vfs_ctx {
 };
 
 void process_init(void) { spin_init(&process_lock); }
+
+// ---------------------------------------------------------------------------
+// [ENV] Helpers de entorno por proceso.
+// ---------------------------------------------------------------------------
+void process_clear_envp(process_t *proc) {
+  if (!proc)
+    return;
+  for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    if (proc->envp[i]) {
+      kfree(proc->envp[i]);
+      proc->envp[i] = NULL;
+    }
+  }
+}
+
+int process_set_envp(process_t *proc, int envc, const char *const *envp) {
+  if (!proc)
+    return -EINVAL;
+  if (envc < 0 || envc >= PROCESS_ENVP_MAX)
+    return -EINVAL;
+
+  process_clear_envp(proc);
+  if (!envp || envc == 0)
+    return 0;
+
+  for (int i = 0; i < envc; i++) {
+    if (!envp[i]) {
+      process_clear_envp(proc);
+      return -EINVAL;
+    }
+    size_t n = strlen(envp[i]);
+    if (n == 0 || n >= PROCESS_ENV_STR_MAX) {
+      process_clear_envp(proc);
+      return -E2BIG;
+    }
+    char *copy = (char *)kmalloc(n + 1);
+    if (!copy) {
+      process_clear_envp(proc);
+      return -ENOMEM;
+    }
+    memcpy(copy, envp[i], n + 1);
+    proc->envp[i] = copy;
+  }
+  return 0;
+}
+
+int process_inherit_envp(const process_t *parent, process_t *child) {
+  if (!parent || !child)
+    return -EINVAL;
+  process_clear_envp(child);
+  for (int i = 0; i < PROCESS_ENVP_MAX && parent->envp[i]; i++) {
+    size_t n = strlen(parent->envp[i]);
+    char *copy = (char *)kmalloc(n + 1);
+    if (!copy) {
+      process_clear_envp(child);
+      return -ENOMEM;
+    }
+    memcpy(copy, parent->envp[i], n + 1);
+    child->envp[i] = copy;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [RUSAGE] Contabilidad de CPU por proceso.
+//
+// La tarea solo corre en una CPU a la vez (garantizado por on_cpu y
+// el scheduler), así que un `++` sin lock sobre proc->cpu_ticks_user
+// es correcto: nadie más escribe este campo concurrentemente.
+//
+// Solo cuentan tareas con proc != NULL. Las idle y kmain_task no son
+// procesos y no aparecen en wait4.
+// ---------------------------------------------------------------------------
+void process_account_tick(task_t *t) {
+  if (t && t->proc)
+    t->proc->cpu_ticks_user++;
+}
 
 process_t *process_current(void) {
   task_t *t = sched_current();
@@ -494,8 +572,9 @@ process_t *process_spawn(const char *name, const void *elf_data,
 // ---------------------------------------------------------------------------
 static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
-    int argc, const char *const *argv, const char *inherited_cwd,
-    const spawn_fds_t *fds, process_t *parent, uint32_t ppid) {
+    int argc, const char *const *argv, int envc, const char *const *envp,
+    const char *inherited_cwd, const spawn_fds_t *fds, process_t *parent,
+    uint32_t ppid) {
   if (!read) {
     LOG_ERR("[PROC] reader ELF nulo");
     return NULL;
@@ -553,8 +632,10 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
       .phnum = phnum,
       .phent = phent,
   };
+  // [ENV] Pasamos envc/envp al arg block, que los colocará en el stack
+  // del usuario. Ahora sí.
   uint64_t user_rsp =
-      setup_arg_block(pml4, stack_top, argc, argv, 0, NULL, &ai, name);
+      setup_arg_block(pml4, stack_top, argc, argv, envc, envp, &ai, name);
   if (!user_rsp) {
     LOG_ERR("[PROC] setup_arg_block falló");
     paging_free_user_space(pml4_phys);
@@ -595,6 +676,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->heap_start = USER_HEAP_BASE;
   proc->heap_end = USER_HEAP_BASE;
   proc->heap_max = USER_HEAP_MAX;
+  proc->next_mmap_addr = 0x0000000060000000ULL;
 
   proc->vma_list = NULL;
   proc->stack_base = stack_base;
@@ -604,27 +686,26 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->stack_low += PAGE_SIZE;
 
   proc->fs_base = 0;
-  // [cwd] Heredar del padre o "/".
   process_set_cwd(proc, inherited_cwd);
-  // [SIG] Estado de señales inicial.
   process_init_signals(proc);
 
-  // El VMA del ELF cubre TODOS los PT_LOAD del binario, incluyendo los
-  // huecos entre ellos (que el demand pager rellena bajo demanda). En esos
-  // huecos el demand pager usa los flags del VMA, así que si el binario
-  // tiene un segmento RW (bss, data), el VMA debe incluir PTE_WRITABLE o
-  // cualquier acceso de escritura del proceso a una página del hueco
-  // provoca un fault loop (kernel intenta escribir la página recién
-  // demandada y la encuentra RO).
-  //
-  // Los PT_LOAD reales ya se mapean con sus flags propios en
-  // elf_load_streaming, así que añadir WRITE al VMA no relaja las
-  // protecciones de los segmentos ya cargados.
+  // [ENV] Copiar el entorno al proceso. Se almacena para que fork lo
+  // herede y para que execve lo pueda reemplazar.
+  if (process_set_envp(proc, envc, envp) != 0) {
+    LOG_ERR("[PROC] No se pudo copiar el entorno");
+    task_put(task);
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
+
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
       !vma_create(proc, elf_vma_start, elf_vma_end,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
     LOG_ERR("[PROC] No se pudo crear VMA ELF (start=%p end=%p)",
             (void *)elf_vma_start, (void *)elf_vma_end);
+    process_clear_envp(proc);
     task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
@@ -635,6 +716,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   if (!vma_create(proc, proc->stack_low, proc->stack_top,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
     LOG_ERR("[PROC] No se pudo crear VMA stack");
+    process_clear_envp(proc);
     vma_destroy_all(proc);
     task_put(task);
     task_put(task);
@@ -646,9 +728,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   for (int f = 0; f < MAX_PROCESS_FDS; f++)
     proc->fds[f] = NULL;
 
-  // [pipe] Stdio del hijo. Si el llamante pasó fds concretos, los
-  // compartimos con el padre (mismo file_descriptor_t, ref_count++).
-  // Si no, creamos stdio nuevo apuntando a los nodos globales.
   if (fds && parent) {
     if (fds->fd_in != -1) {
       file_descriptor_t *fd = parent->fds[fds->fd_in];
@@ -688,30 +767,31 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
 
   sched_publish_task(task);
 
-  LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, argc=%d, cwd='%s', streaming)",
-           name, proc->pid, argc, proc->cwd);
+  LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, argc=%d, envc=%d, cwd='%s', "
+           "streaming)",
+           name, proc->pid, argc, envc, proc->cwd);
   return proc;
 }
 
 static process_t *process_spawn_streaming_with_ppid_args_cwd(
     const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
-    int argc, const char *const *argv, const char *inherited_cwd,
-    uint32_t ppid) {
+    int argc, const char *const *argv, int envc, const char *const *envp,
+    const char *inherited_cwd, uint32_t ppid) {
   return process_spawn_streaming_with_ppid_args_cwd_fds(
-      name, read, read_ctx, file_size, argc, argv, inherited_cwd, NULL, NULL,
-      ppid);
+      name, read, read_ctx, file_size, argc, argv, envc, envp, inherited_cwd,
+      NULL, NULL, ppid);
 }
 
 // ---------------------------------------------------------------------------
 // Carga desde VFS con/sin argv, y con/sin cwd heredado.
 // ---------------------------------------------------------------------------
 static process_t *process_load_with_ppid_args_cwd_fds(
-    const char *path, int argc, const char *const *argv,
-    const char *inherited_cwd, const spawn_fds_t *fds, process_t *parent,
-    uint32_t ppid) {
+    const char *path, int argc, const char *const *argv, int envc,
+    const char *const *envp, const char *inherited_cwd, const spawn_fds_t *fds,
+    process_t *parent, uint32_t ppid) {
   vfs_node_t *node = vfs_lookup(path);
   if (!node) {
-    LOG_ERR("[PROC] No se pudo abrir '%s'", path);
+    LOG_TRACE("[PROC] No se pudo abrir '%s'", path);
     return NULL;
   }
   if (node->flags & VFS_DIRECTORY) {
@@ -728,54 +808,69 @@ static process_t *process_load_with_ppid_args_cwd_fds(
   struct elf_vfs_ctx ctx = {.node = node};
   uint64_t file_size = node->size;
 
-  LOG_INFO("[PROC] Cargando '%s' (%llu bytes, argc=%d, streaming)", path,
-           (unsigned long long)file_size, argc);
+  LOG_INFO("[PROC] Cargando '%s' (%llu bytes, argc=%d, envc=%d, streaming)",
+           path, (unsigned long long)file_size, argc, envc);
 
   process_t *p = process_spawn_streaming_with_ppid_args_cwd_fds(
-      path, elf_read_vfs, &ctx, file_size, argc, argv, inherited_cwd, fds,
-      parent, ppid);
+      path, elf_read_vfs, &ctx, file_size, argc, argv, envc, envp,
+      inherited_cwd, fds, parent, ppid);
 
   vfs_node_free(node);
   return p;
 }
 
-static process_t *process_load_with_ppid_args_cwd(const char *path, int argc,
-                                                  const char *const *argv,
-                                                  const char *inherited_cwd,
-                                                  uint32_t ppid) {
-  return process_load_with_ppid_args_cwd_fds(path, argc, argv, inherited_cwd,
-                                             NULL, NULL, ppid);
+static process_t *process_load_with_ppid_args_cwd(
+    const char *path, int argc, const char *const *argv, int envc,
+    const char *const *envp, const char *inherited_cwd, uint32_t ppid) {
+  return process_load_with_ppid_args_cwd_fds(path, argc, argv, envc, envp,
+                                             inherited_cwd, NULL, NULL, ppid);
 }
 
 static process_t *process_load_with_ppid_args(const char *path, int argc,
-                                              const char *const *argv,
+                                              const char *const *argv, int envc,
+                                              const char *const *envp,
                                               uint32_t ppid) {
-  return process_load_with_ppid_args_cwd(path, argc, argv, "/", ppid);
+  return process_load_with_ppid_args_cwd(path, argc, argv, envc, envp, "/",
+                                         ppid);
 }
 
 static process_t *process_load_with_ppid(const char *path, uint32_t ppid) {
-  return process_load_with_ppid_args(path, 0, NULL, ppid);
+  return process_load_with_ppid_args(path, 0, NULL, 0, NULL, ppid);
 }
 
 process_t *process_spawn_child(process_t *parent, const char *path) {
   const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
-  return process_load_with_ppid_args_cwd(path, 0, NULL, cwd,
+  return process_load_with_ppid_args_cwd(path, 0, NULL, 0, NULL, cwd,
                                          parent ? parent->pid : 0);
 }
 
 process_t *process_spawn_child_args(process_t *parent, const char *path,
                                     int argc, const char *const *argv) {
+  return process_spawn_child_args_env(parent, path, argc, argv, 0, NULL);
+}
+
+process_t *process_spawn_child_args_env(process_t *parent, const char *path,
+                                        int argc, const char *const *argv,
+                                        int envc, const char *const *envp) {
   const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
-  return process_load_with_ppid_args_cwd(path, argc, argv, cwd,
+  return process_load_with_ppid_args_cwd(path, argc, argv, envc, envp, cwd,
                                          parent ? parent->pid : 0);
 }
 
 process_t *process_spawn_child_args_fds(process_t *parent, const char *path,
                                         int argc, const char *const *argv,
                                         const spawn_fds_t *fds) {
+  return process_spawn_child_args_fds_env(parent, path, argc, argv, 0, NULL,
+                                          fds);
+}
+
+process_t *process_spawn_child_args_fds_env(process_t *parent, const char *path,
+                                            int argc, const char *const *argv,
+                                            int envc, const char *const *envp,
+                                            const spawn_fds_t *fds) {
   const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
-  return process_load_with_ppid_args_cwd_fds(path, argc, argv, cwd, fds, parent,
-                                             parent ? parent->pid : 0);
+  return process_load_with_ppid_args_cwd_fds(
+      path, argc, argv, envc, envp, cwd, fds, parent, parent ? parent->pid : 0);
 }
 
 process_t *process_load(const char *path) {
@@ -855,7 +950,7 @@ static bool has_matching_zombie(void *arg) {
 }
 
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
-                    int options) {
+                    proc_rusage_t *rusage_out, int options) {
   if (!parent)
     return -1;
 
@@ -900,6 +995,19 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         clac();
       }
 
+      // [RUSAGE] Volcar contadores ANTES de liberar el process_t.
+      // Los que no contabilizamos todavía van a 0 (default del struct
+      // en el llamante; aquí solo copiamos lo que tenemos).
+      if (rusage_out) {
+        rusage_out->utime_ticks = found_zombie->cpu_ticks_user;
+        rusage_out->stime_ticks = 0;
+        rusage_out->minflt = 0;
+        rusage_out->majflt = 0;
+        rusage_out->nvcsw = 0;
+        rusage_out->nivcsw = 0;
+        rusage_out->maxrss_kb = 0;
+      }
+
       if (zombie_task) {
         while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
           __asm__ volatile("pause");
@@ -936,6 +1044,9 @@ void process_exit(process_t *proc, int exit_code) {
   if (!proc)
     return;
 
+  // [ENV] Liberar el entorno.
+  process_clear_envp(proc);
+
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fds[f])
       vfs_close_for_proc(proc, f);
@@ -956,9 +1067,6 @@ void process_exit(process_t *proc, int exit_code) {
   process_t *p = process_list;
   while (p) {
     if (p->pid == proc->ppid) {
-      // Mantener viva la task del padre permite despertar su wait queue
-      // después de soltar process_lock sin conservar un process_t que
-      // pueda ser liberado por el reaper concurrentemente.
       parent_task = p->task;
       if (parent_task)
         task_get(parent_task);
@@ -1050,4 +1158,381 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 
   proc->heap_end = new_brk;
   return (void *)old_brk;
+}
+
+// ---------------------------------------------------------------------------
+// [fork] Clonar el espacio de usuario: copia cada PTE presente del padre
+// a páginas físicas nuevas en el hijo. Sin COW — lento pero simple.
+//
+// Se hace con walk manual (no paging_get_phys_in por VA, que sería
+// 256*512*512 iteraciones): recorremos las tablas directamente y
+// saltamos ramas ausentes en un solo test.
+// ---------------------------------------------------------------------------
+static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
+  for (int i = 0; i < 256; i++) {
+    uint64_t pml4e = parent_pml4[i];
+    if (!(pml4e & PTE_PRESENT))
+      continue;
+    if (pml4e & PTE_HUGE) {
+      LOG_WARN("[FORK] huge page en PML4 (ignorada)");
+      continue;
+    }
+    uint64_t *pdpt_parent = (uint64_t *)phys_to_virt(pml4e & PTE_FRAME);
+
+    for (int j = 0; j < 512; j++) {
+      uint64_t pdpte = pdpt_parent[j];
+      if (!(pdpte & PTE_PRESENT))
+        continue;
+      if (pdpte & PTE_HUGE) {
+        LOG_WARN("[FORK] 1GB huge page en user space (ignorada)");
+        continue;
+      }
+      uint64_t *pd_parent = (uint64_t *)phys_to_virt(pdpte & PTE_FRAME);
+
+      for (int k = 0; k < 512; k++) {
+        uint64_t pde = pd_parent[k];
+        if (!(pde & PTE_PRESENT))
+          continue;
+        if (pde & PTE_HUGE) {
+          LOG_WARN("[FORK] 2MB huge page en user space (ignorada)");
+          continue;
+        }
+        uint64_t *pt_parent = (uint64_t *)phys_to_virt(pde & PTE_FRAME);
+
+        for (int l = 0; l < 512; l++) {
+          uint64_t pte = pt_parent[l];
+          if (!(pte & PTE_PRESENT))
+            continue;
+
+          uint64_t old_phys = pte & PTE_FRAME;
+          uint64_t new_phys = pmm_alloc_page();
+          if (!new_phys) {
+            LOG_ERR("[FORK] sin memoria clonando página");
+            return -1;
+          }
+          memcpy(phys_to_virt(new_phys), phys_to_virt(old_phys), PAGE_SIZE);
+
+          uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                          ((uint64_t)k << 21) | ((uint64_t)l << 12);
+          // paging_map_page_in enmascara flags con (0xFFF | PTE_NX). Le
+          // pasamos el pte entero (con el frame) y ya lo filtra.
+          if (paging_map_page_in(child_pml4, virt, new_phys, pte) != 0) {
+            pmm_free_page(new_phys);
+            LOG_ERR("[FORK] paging_map_page_in falló en %p", (void *)virt);
+            return -1;
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [fork] Clonar la lista de VMAs del padre al hijo.
+// ---------------------------------------------------------------------------
+static int clone_vmas(process_t *parent, process_t *child) {
+  child->vma_list = NULL;
+  vma_t **tail = &child->vma_list;
+
+  for (vma_t *v = parent->vma_list; v; v = v->next) {
+    vma_t *nv = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!nv) {
+      vma_destroy_all(child);
+      return -1;
+    }
+    nv->start = v->start;
+    nv->end = v->end;
+    nv->flags = v->flags;
+    nv->type = v->type;
+    nv->pad = 0;
+    nv->next = NULL;
+    *tail = nv;
+    tail = &nv->next;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [fork] sys_fork: implementación.
+//
+// Requiere que el dispatcher haya dejado los regs del syscall accesibles
+// vía syscall_current_regs(). Ver syscall.c.
+// ---------------------------------------------------------------------------
+extern registers_t *syscall_current_regs(void);
+
+int64_t sys_fork(void) {
+  process_t *parent = process_current();
+  if (!parent) {
+    LOG_ERR("[FORK] sin proceso actual");
+    return -EINVAL;
+  }
+
+  registers_t *regs = syscall_current_regs();
+  if (!regs) {
+    LOG_ERR("[FORK] sin registers del syscall");
+    return -EINVAL;
+  }
+
+  // 1. Clonar PML4 (kernel half compartido).
+  uint64_t child_pml4_phys = paging_clone_kernel_space();
+  if (!child_pml4_phys) {
+    LOG_ERR("[FORK] paging_clone_kernel_space falló");
+    return -ENOMEM;
+  }
+  uint64_t *parent_pml4 = (uint64_t *)phys_to_virt(parent->pml4_phys);
+  uint64_t *child_pml4 = (uint64_t *)phys_to_virt(child_pml4_phys);
+
+  // 2. Copiar user space.
+  if (clone_user_space(parent_pml4, child_pml4) != 0) {
+    paging_free_user_space(child_pml4_phys);
+    return -ENOMEM;
+  }
+
+  // 3. Crear tarea del hijo con los regs del padre.
+  task_t *child_task = sched_create_forked_user_task(regs, child_pml4_phys);
+  if (!child_task) {
+    LOG_ERR("[FORK] sched_create_forked_user_task falló");
+    paging_free_user_space(child_pml4_phys);
+    return -ENOMEM;
+  }
+  child_task->fs_base = parent->fs_base;
+
+  // 4. process_t del hijo.
+  process_t *child = (process_t *)kzalloc(sizeof(process_t));
+  if (!child) {
+    LOG_ERR("[FORK] sin memoria para process_t");
+    paging_free_user_space(child_pml4_phys);
+    // El child_task no está publicado; liberar a mano.
+    if (child_task->stack)
+      kfree(child_task->stack);
+    kfree(child_task);
+    return -ENOMEM;
+  }
+
+  child->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
+  child->ppid = parent->pid;
+  child->exit_code = 0;
+  child->is_zombie = 0;
+
+  // Nombre: prefijo con el del padre.
+  {
+    size_t i = 0;
+    while (parent->name[i] && i < sizeof(child->name) - 1) {
+      child->name[i] = parent->name[i];
+      i++;
+    }
+    child->name[i] = '\0';
+  }
+
+  child->task = child_task;
+  task_get(child_task);
+  child->pml4_phys = child_pml4_phys;
+  child->load_base = parent->load_base;
+  child->heap_start = parent->heap_start;
+  child->heap_end = parent->heap_end;
+  child->heap_max = parent->heap_max;
+  child->next_mmap_addr = parent->next_mmap_addr;
+  child->stack_base = parent->stack_base;
+  child->stack_low = parent->stack_low;
+  child->stack_top = parent->stack_top;
+  child->stack_guard = parent->stack_guard;
+
+  child->fs_base = parent->fs_base;
+
+  process_set_cwd(child, parent->cwd);
+  process_init_signals(child);
+
+  // [ENV] Heredar entorno del padre.
+  if (process_inherit_envp(parent, child) != 0) {
+    LOG_ERR("[FORK] process_inherit_envp falló");
+    paging_free_user_space(child_pml4_phys);
+    if (child_task->stack)
+      kfree(child_task->stack);
+    kfree(child_task);
+    kfree(child);
+    return -ENOMEM;
+  }
+
+  // 5. VMAs.
+  if (clone_vmas(parent, child) != 0) {
+    LOG_ERR("[FORK] clone_vmas falló");
+    paging_free_user_space(child_pml4_phys);
+    if (child_task->stack)
+      kfree(child_task->stack);
+    kfree(child_task);
+    kfree(child);
+    return -ENOMEM;
+  }
+
+  // 6. Fds compartidos (misma file_descriptor_t, ref_count++).
+  for (int f = 0; f < MAX_PROCESS_FDS; f++) {
+    child->fds[f] = parent->fds[f];
+    if (child->fds[f])
+      child->fds[f]->ref_count++;
+  }
+
+  wait_queue_init(&child->child_wq);
+  child_task->proc = child;
+
+  // 7. Publicar.
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  child->next = process_list;
+  process_list = child;
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  sched_publish_task(child_task);
+
+  LOG_INFO("[FORK] '%s' (PID=%u) clonado a PID=%u", parent->name, parent->pid,
+           child->pid);
+
+  return (int64_t)child->pid;
+}
+
+// ---------------------------------------------------------------------------
+// [execve] Reemplazo in-place del espacio de usuario.
+//
+// No crea proceso nuevo: muta el actual. Conserva PID, fds, cwd.
+// En éxito deja *new_entry / *new_rsp listos para que k_execve escriba
+// el trap frame del syscall (rip/rsp) y el iretq aterrice en el nuevo
+// entry point con el CR3 ya cargado.
+//
+// En error devuelve un errno negativo y NO toca el proceso.
+// ---------------------------------------------------------------------------
+int process_execve_prepare(const char *path, int argc, const char *const *argv,
+                           int envc, const char *const *envp,
+                           uint64_t *new_entry, uint64_t *new_rsp) {
+  process_t *proc = process_current();
+  if (!proc || !path || !new_entry || !new_rsp)
+    return -EINVAL;
+  if (argc < 0 || argc > PROCESS_ARGV_MAX)
+    return -EINVAL;
+  if (envc < 0 || envc > PROCESS_ENVP_MAX)
+    return -EINVAL;
+
+  vfs_node_t *node = vfs_lookup(path);
+  if (!node)
+    return -ENOENT;
+  if (node->flags & VFS_DIRECTORY) {
+    vfs_node_free(node);
+    return -EISDIR;
+  }
+  if (!node->ops || !node->ops->read) {
+    vfs_node_free(node);
+    return -EACCES;
+  }
+
+  uint64_t new_pml4_phys = paging_clone_kernel_space();
+  if (!new_pml4_phys) {
+    vfs_node_free(node);
+    return -ENOMEM;
+  }
+  uint64_t *new_pml4 = (uint64_t *)phys_to_virt(new_pml4_phys);
+
+  uint64_t load_base = 0x555555554000ULL;
+
+  struct elf_vfs_ctx ctx = {.node = node};
+  uint64_t entry = 0, vma_start = ~0ULL, vma_end = 0;
+  uint64_t phdr_vaddr = 0;
+  uint16_t phnum = 0, phent = 0;
+  int rc = elf_load_streaming(elf_read_vfs, &ctx, node->size, new_pml4,
+                              load_base, &entry, &vma_start, &vma_end,
+                              &phdr_vaddr, &phnum, &phent);
+  vfs_node_free(node);
+  if (rc != 0) {
+    paging_free_user_space(new_pml4_phys);
+    return rc == -ENOMEM ? -ENOMEM : -ENOEXEC;
+  }
+
+  uint64_t stack_base = USER_STACK_BASE;
+  uint64_t stack_top = stack_base + USER_STACK_SIZE;
+  for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
+    uint64_t phys = pmm_alloc_page();
+    if (!phys) {
+      paging_free_user_space(new_pml4_phys);
+      return -ENOMEM;
+    }
+    memset(phys_to_virt(phys), 0, PAGE_SIZE);
+    if (paging_map_page_in(new_pml4, stack_base + off, phys,
+                           PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
+        0) {
+      pmm_free_page(phys);
+      paging_free_user_space(new_pml4_phys);
+      return -ENOMEM;
+    }
+  }
+
+  proc_auxv_info_t ai = {
+      .phdr_vaddr = phdr_vaddr,
+      .entry = entry,
+      .phnum = phnum,
+      .phent = phent,
+  };
+  uint64_t user_rsp =
+      setup_arg_block(new_pml4, stack_top, argc, argv, envc, envp, &ai, path);
+  if (!user_rsp) {
+    paging_free_user_space(new_pml4_phys);
+    return -ENOMEM;
+  }
+
+  // ===== COMMIT =====
+  uint64_t old_pml4_phys = proc->pml4_phys;
+
+  vma_destroy_all(proc);
+
+  proc->pml4_phys = new_pml4_phys;
+  if (proc->task)
+    proc->task->cr3 = new_pml4_phys;
+
+  proc->load_base = load_base;
+  proc->heap_start = USER_HEAP_BASE;
+  proc->heap_end = USER_HEAP_BASE;
+  proc->heap_max = USER_HEAP_MAX;
+  proc->next_mmap_addr = 0x0000000060000000ULL;
+  proc->stack_base = stack_base;
+  proc->stack_low = stack_base - MAX_STACK_GROWTH;
+  proc->stack_top = stack_top;
+  proc->stack_guard = proc->stack_low;
+  proc->stack_low += PAGE_SIZE;
+
+  proc->fs_base = 0;
+  if (proc->task)
+    proc->task->fs_base = 0;
+
+  {
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+      if (*p == '/')
+        base = p + 1;
+    size_t n = 0;
+    while (base[n] && n < sizeof(proc->name) - 1) {
+      proc->name[n] = base[n];
+      n++;
+    }
+    proc->name[n] = '\0';
+  }
+
+  if (!vma_create(proc, vma_start, vma_end, PTE_USER | PTE_WRITABLE | PTE_NX,
+                  VMA_ELF))
+    LOG_ERR("[EXECVE] vma_create ELF falló tras commit");
+  if (!vma_create(proc, proc->stack_low, proc->stack_top,
+                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK))
+    LOG_ERR("[EXECVE] vma_create stack falló tras commit");
+
+  // [ENV] Reemplazar el entorno. Si falla, conservamos el anterior
+  // (degradación mejor que abortar tras el commit).
+  if (process_set_envp(proc, envc, envp) != 0)
+    LOG_WARN("[EXECVE] process_set_envp falló, entorno conservado");
+
+  write_cr3(new_pml4_phys);
+  wrmsr(0xC0000100, 0);
+
+  paging_free_user_space(old_pml4_phys);
+
+  *new_entry = entry;
+  *new_rsp = user_rsp;
+
+  LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d)", path,
+           (void *)entry, (void *)user_rsp, argc, envc);
+  return 0;
 }

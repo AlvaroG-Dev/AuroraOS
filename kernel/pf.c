@@ -18,8 +18,6 @@
 // ---------------------------------------------------------------------------
 static volatile uint64_t pf_resolved = 0;
 static volatile uint64_t pf_killed = 0;
-static uint64_t next_mmap_addr = 0x0000000060000000ULL;
-static spinlock_t mmap_addr_lock;
 
 uint64_t pf_stats_resolved(void) { return pf_resolved; }
 uint64_t pf_stats_killed(void) { return pf_killed; }
@@ -307,7 +305,6 @@ int handle_page_fault(registers_t *regs) {
 void pf_init(void) {
   pf_resolved = 0;
   pf_killed = 0;
-  spin_init(&mmap_addr_lock);
   LOG_INFO("[PF] Demand paging inicializado");
 }
 
@@ -318,79 +315,36 @@ void pf_init(void) {
 #define MMAP_PROT_WRITE 0x2
 #define MMAP_PROT_EXEC 0x4
 
-int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
-                 uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
-  (void)flags;
-  (void)fd;
-  (void)offset;
+#define MMAP_MAP_SHARED 0x01
+#define MMAP_MAP_PRIVATE 0x02
+#define MMAP_MAP_FIXED 0x10
+#define MMAP_MAP_ANONYMOUS 0x20
 
-  if (!proc || length == 0)
-    return -1;
-  if (length > 0x10000000ULL)
-    return -1;
+// ---------------------------------------------------------------------------
+// vma_unmap_range — primitiva común de munmap y mmap(MAP_FIXED).
+//
+// Libera todos los VMAs (y sus páginas físicas) que se solapen con
+// [start, end). start y end deben estar alineados a página.
+//
+// Devuelve:
+//   >= 0  número de VMAs tocados (0 si el rango estaba libre, que NO
+//         es error: MAP_FIXED sobre hueco es lo normal).
+//   < 0   -ENOMEM si falla el split de un VMA (nada se modifica).
+// ---------------------------------------------------------------------------
+int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
+  if (!proc || start >= end)
+    return -EINVAL;
+  if (start >= USER_LIMIT || end > USER_LIMIT)
+    return -EINVAL;
 
-  // Round up safely; reject lengths whose page rounding would overflow.
-  if (length > UINT64_MAX - 0xFFFULL)
-    return -1;
-  length = (length + 0xFFF) & ~0xFFFULL;
-
-  if (addr == 0) {
-    unsigned long lock_flags = spin_lock_irqsave(&mmap_addr_lock);
-    addr = next_mmap_addr;
-    uint64_t next = addr + length;
-    if (next < addr || next > 0x00007F0000000000ULL) {
-      spin_unlock_irqrestore(&mmap_addr_lock, lock_flags);
-      return -1;
-    }
-    next_mmap_addr = next;
-    spin_unlock_irqrestore(&mmap_addr_lock, lock_flags);
-  } else {
-    addr &= ~0xFFFULL;
-  }
-
-  if (addr >= USER_LIMIT || length > USER_LIMIT - addr)
-    return -1;
-
-  uint64_t pte_flags = PTE_USER | PTE_PRESENT;
-  if (prot & MMAP_PROT_WRITE)
-    pte_flags |= PTE_WRITABLE;
-  if (!(prot & MMAP_PROT_EXEC))
-    pte_flags |= PTE_NX;
-
-  vma_t *v = vma_create(proc, addr, addr + length, pte_flags, VMA_ANON);
-  if (!v)
-    return -1;
-
-  LOG_TRACE("[MMAP] PID=%u addr=%p len=%lu prot=%lx", proc->pid, (void *)addr,
-            (unsigned long)length, (unsigned long)prot);
-
-  return (int64_t)addr;
-}
-
-int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
-  if (!proc || length == 0)
-    return -1;
-
-  // Align the requested interval to pages, but do all arithmetic with
-  // overflow checks.  munmap operates on the half-open interval [addr, end).
-  if (length > UINT64_MAX - 0xFFFULL)
-    return -1;
-  addr &= ~0xFFFULL;
-  length = (length + 0xFFFULL) & ~0xFFFULL;
-  if (addr >= USER_LIMIT || length > USER_LIMIT - addr)
-    return -1;
-
-  uint64_t end = addr + length;
-
-  // A partial unmap can split a VMA into two independent VMAs.  Allocate all
-  // required right-hand VMA nodes first so an allocation failure leaves the
-  // VMA list and mappings untouched.
+  // Preasignar los VMAs "right" que puedan hacer falta para splits.
+  // Si un split falla, abortamos SIN tocar nada.
   vma_t *new_vmas = NULL;
   vma_t **new_vmas_tail = &new_vmas;
   for (vma_t *v = proc->vma_list; v; v = v->next) {
-    if (v->end <= addr || v->start >= end)
+    if (v->end <= start || v->start >= end)
       continue;
-    if (addr > v->start && end < v->end) {
+    if (start > v->start && end < v->end) {
       vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
       if (!right) {
         while (new_vmas) {
@@ -398,7 +352,7 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
           kfree(new_vmas);
           new_vmas = next;
         }
-        return -1;
+        return -ENOMEM;
       }
       right->start = end;
       right->end = v->end;
@@ -411,21 +365,18 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
     }
   }
 
-  int unmapped = 0;
-
+  int touched = 0;
   vma_t **pp = &proc->vma_list;
   while (*pp) {
     vma_t *v = *pp;
-    if (v->end <= addr || v->start >= end) {
+    if (v->end <= start || v->start >= end) {
       pp = &v->next;
       continue;
     }
 
-    uint64_t unmap_start = addr > v->start ? addr : v->start;
+    uint64_t unmap_start = start > v->start ? start : v->start;
     uint64_t unmap_end = end < v->end ? end : v->end;
 
-    // Free every page covered by the requested interval.  VMA boundaries
-    // are page aligned, so this covers exactly the removed portion.
     for (uint64_t p = unmap_start; p < unmap_end; p += PAGE_SIZE) {
       uint64_t phys =
           paging_get_phys_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
@@ -435,38 +386,34 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
       }
     }
 
-    if (addr <= v->start && end >= v->end) {
-      // Entire VMA removed.
+    if (start <= v->start && end >= v->end) {
+      // VMA completamente cubierto: eliminar.
       *pp = v->next;
       kfree(v);
-      unmapped++;
+      touched++;
       continue;
     }
-
-    if (addr <= v->start) {
-      // Trim the left edge: keep [end, old_end).
+    if (start <= v->start) {
+      // Recortar por la izquierda: queda [end, v->end).
       v->start = end;
-      unmapped++;
+      touched++;
       pp = &v->next;
       continue;
     }
-
     if (end >= v->end) {
-      // Trim the right edge: keep [old_start, addr).
-      v->end = addr;
-      unmapped++;
+      // Recortar por la derecha: queda [v->start, start).
+      v->end = start;
+      touched++;
       pp = &v->next;
       continue;
     }
-
-    // Middle split: keep the original VMA as the left part and insert the
-    // preallocated right part immediately after it.
+    // Split por el medio: queda [v->start, start) + [end, v->end).
     vma_t *right = new_vmas;
     new_vmas = new_vmas->next;
     right->next = v->next;
-    v->end = addr;
+    v->end = start;
     v->next = right;
-    unmapped++;
+    touched++;
     pp = &right->next;
   }
 
@@ -475,8 +422,133 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
     kfree(new_vmas);
     new_vmas = next;
   }
+  return touched;
+}
 
-  LOG_TRACE("[MUNMAP] PID=%u addr=%p len=%lu -> %d VMAs", proc->pid,
-            (void *)addr, (unsigned long)length, unmapped);
-  return unmapped > 0 ? 0 : -1;
+// ---------------------------------------------------------------------------
+// munmap(addr, length)
+//
+// Linux devuelve 0 siempre que la operación sea válida, incluso si el
+// rango no tenía nada mapeado. La versión anterior devolvía -1 en ese
+// caso: incorrecto y rompía el patrón "reserva con mmap, libera
+// parcialmente" que usa musl al final de algunas rutas.
+// ---------------------------------------------------------------------------
+int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
+  if (!proc || length == 0)
+    return -EINVAL;
+  if (length > UINT64_MAX - 0xFFFULL)
+    return -EINVAL;
+
+  addr &= ~0xFFFULL;
+  length = (length + 0xFFFULL) & ~0xFFFULL;
+  if (addr >= USER_LIMIT || length > USER_LIMIT - addr)
+    return -EINVAL;
+
+  int64_t r = vma_unmap_range(proc, addr, addr + length);
+  if (r < 0)
+    return r;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// mmap(addr, length, prot, flags, fd, offset)
+//
+// Soporta únicamente mapeos anónimos. File-backed devolverá -ENODEV
+// hasta que exista VMA_FILE y el demand pager sepa leer del inodo.
+//
+// Diferencias clave entre las dos formas:
+//
+//   MAP_FIXED:  addr y length deben estar alineados a página.
+//               El rango [addr, addr+length) se usa EXACTAMENTE.
+//               Si había algo, se descarta (como un munmap previo).
+//
+//   Sin MAP_FIXED y con addr != 0: addr es un HINT. Si el rango está
+//               libre, se usa. Si no, se elige otra dirección desde
+//               proc->next_mmap_addr.
+//
+//   Sin MAP_FIXED y addr == 0: el kernel elige.
+// ---------------------------------------------------------------------------
+int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
+                 uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
+  (void)fd;
+  (void)offset;
+
+  if (!proc || length == 0)
+    return -EINVAL;
+
+  // Por ahora solo mapeos anónimos. File-backed requiere VMA_FILE.
+  if (!(flags & MMAP_MAP_ANONYMOUS))
+    return -ENODEV;
+
+  // Rango alineado y con overflow comprobado.
+  if (length > UINT64_MAX - 0xFFFULL)
+    return -EINVAL;
+  uint64_t len = (length + 0xFFFULL) & ~0xFFFULL;
+  if (len == 0)
+    return -EINVAL;
+
+  // Protecciones → PTE.
+  uint64_t pte_flags = PTE_USER | PTE_PRESENT;
+  if (prot & MMAP_PROT_WRITE)
+    pte_flags |= PTE_WRITABLE;
+  if (!(prot & MMAP_PROT_EXEC))
+    pte_flags |= PTE_NX;
+
+  uint64_t base;
+
+  if (flags & MMAP_MAP_FIXED) {
+    // Alineación obligatoria, como en Linux.
+    if ((addr & 0xFFFULL) != 0 || (length & 0xFFFULL) != 0)
+      return -EINVAL;
+    if (addr >= USER_LIMIT || len > USER_LIMIT - addr)
+      return -EINVAL;
+    base = addr;
+
+    // MAP_FIXED: descartar lo que hubiera.
+    int64_t ur = vma_unmap_range(proc, base, base + len);
+    if (ur < 0)
+      return ur;
+  } else {
+    // addr != 0 es un hint; addr == 0 deja al kernel elegir.
+    base = 0;
+    if (addr != 0) {
+      uint64_t hint = addr & ~0xFFFULL;
+      if (hint < USER_LIMIT && len <= USER_LIMIT - hint) {
+        uint64_t hint_end = hint + len;
+        vma_t *v = proc->vma_list;
+        int collision = 0;
+        while (v) {
+          if (hint < v->end && hint_end > v->start) {
+            collision = 1;
+            break;
+          }
+          v = v->next;
+        }
+        if (!collision)
+          base = hint;
+      }
+    }
+
+    if (base == 0) {
+      uint64_t next = proc->next_mmap_addr;
+      if (next < 0x0000000040000000ULL)
+        next = 0x0000000060000000ULL;
+      uint64_t candidate = (next + 0xFFFULL) & ~0xFFFULL;
+      uint64_t end = candidate + len;
+      if (end < candidate || end > 0x00007F0000000000ULL)
+        return -ENOMEM;
+      base = candidate;
+      proc->next_mmap_addr = end;
+    }
+  }
+
+  vma_t *v = vma_create(proc, base, base + len, pte_flags, VMA_ANON);
+  if (!v)
+    return -ENOMEM;
+
+  LOG_TRACE("[MMAP] PID=%u base=%p len=%lu prot=%lx flags=%lx", proc->pid,
+            (void *)base, (unsigned long)len, (unsigned long)prot,
+            (unsigned long)flags);
+
+  return (int64_t)base;
 }

@@ -39,6 +39,14 @@ vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
                   uint64_t flags, uint32_t type);
 void vma_destroy_all(struct process *proc);
 
+// [MMAP] Desmapea todos los VMAs que se solapen con [start, end) y
+// libera sus páginas físicas. start y end deben estar alineados a
+// página. Es la primitiva común de sys_munmap y sys_mmap(MAP_FIXED).
+//
+// Devuelve el número de VMAs tocados (>=0) o un errno negativo (solo
+// -ENOMEM, si falla el kmalloc del split de un VMA).
+int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end);
+
 // Syscalls
 int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
                  uint64_t prot, uint64_t flags, int fd, uint64_t offset);

@@ -54,7 +54,11 @@ elf_malformed: user
 			conv=notrunc status=none; \
 	fi
 
+# Añadir en el Makefile raíz, ANTES de initrd.tar
 initrd.tar: sysroot user elf_malformed
+	@if [ -f third_party/busybox-1.36.1/busybox ]; then \
+		cp third_party/busybox-1.36.1/busybox sysroot/apps/busybox; \
+	fi
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar -cf kernel/initrd.tar -C sysroot .
 

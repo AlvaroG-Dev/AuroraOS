@@ -12,7 +12,6 @@ static tty_t tty0;
 static void *g_console_win = NULL;
 static int tty_ready = 0;
 
-// Termios por defecto: canon + echo + isig + icrnl.
 static void tty_apply_defaults(tty_t *tty) {
   tty->iflag = TTY_IFLAG_ICRNL;
   tty->oflag = TTY_OFLAG_OPOST | TTY_OFLAG_ONLCR;
@@ -33,12 +32,9 @@ static void tty_apply_defaults(tty_t *tty) {
   tty->cc[TTY_CC_VTIME] = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers internos. Llamar con tty->lock cogido.
-// ---------------------------------------------------------------------------
 static void tty_push_byte_locked(tty_t *tty, uint8_t c) {
   if (tty->count >= TTY_BUF_SIZE)
-    return; // descartar
+    return;
   tty->buf[tty->tail] = c;
   tty->tail = (tty->tail + 1) % TTY_BUF_SIZE;
   tty->count++;
@@ -52,7 +48,6 @@ static void tty_push_line_locked(tty_t *tty) {
 }
 
 static void tty_canon_input_locked(tty_t *tty, uint8_t c) {
-  // ICRNL
   if ((tty->iflag & TTY_IFLAG_ICRNL) && c == '\r')
     c = '\n';
 
@@ -80,8 +75,6 @@ static void tty_canon_input_locked(tty_t *tty, uint8_t c) {
     return;
   }
 
-  // Ctrl+C / Ctrl+\ / Ctrl+Z: hoy no entregamos señales reales.
-  // El shell nativo sigue haciendo Ctrl+C → kill() al hijo.
   if ((tty->lflag & TTY_LFLAG_ISIG) &&
       (c == tty->cc[TTY_CC_VINTR] || c == tty->cc[TTY_CC_VQUIT] ||
        c == tty->cc[TTY_CC_VSUSP])) {
@@ -92,9 +85,6 @@ static void tty_canon_input_locked(tty_t *tty, uint8_t c) {
     tty->canon_buf[tty->canon_len++] = c;
 }
 
-// ---------------------------------------------------------------------------
-// Eco a serial (debug).
-// ---------------------------------------------------------------------------
 static void tty_echo_serial(char c) {
   if (c == '\n') {
     serial_putc('\r');
@@ -109,7 +99,20 @@ static void tty_echo_serial(char c) {
 }
 
 // ---------------------------------------------------------------------------
-// Recepción desde el driver de teclado.
+// [FIX v3] Recepción desde el driver de teclado.
+//
+// Modelo:
+//   - El TTY SIEMPRE acumula el byte (canon_buf o ring buffer).
+//   - El TTY SIEMPRE hace eco al console si ECHO está activo. Este es el
+//     ÚNICO punto que dibuja la tecla; el shell nativo NO hace eco por
+//     su cuenta cuando recibe WINSRV_EV_TTY_INPUT.
+//   - El TTY SIEMPRE avisa al shell nativo (WINSRV_EV_TTY_INPUT) en modo
+//     canonical, y también para Ctrl+C en modo raw.
+//
+// Para evitar que el próximo lector (busybox, cat) lea comandos ya
+// tecleados en el shell nativo, el shell debe llamar a
+// ioctl(0, TCFLSH, TCIFLUSH) antes de spawnear. Es el shell quien
+// decide cuándo limpiar, no el TTY quien intenta adivinar si hay lector.
 // ---------------------------------------------------------------------------
 void tty_receive_char(tty_t *tty, char c) {
   if (!tty || !tty_ready)
@@ -119,26 +122,20 @@ void tty_receive_char(tty_t *tty, char c) {
 
   unsigned long flags = spin_lock_irqsave(&tty->lock);
 
-  // Eco a serial solo en modo canonical (prompt del shell nativo, que
-  // no escribe a serial por sí mismo). En modo raw el proceso que lee
-  // del tty (ash, vi, ...) hace su propio eco vía write(1), que ya pasa
-  // por tty_write → serial_putc_locked. Duplicarlo aquí daría dos copias
-  // de cada tecla en serial.
-  if (tty->lflag & TTY_LFLAG_ICANON)
+  int canon = (tty->lflag & TTY_LFLAG_ICANON) != 0;
+
+  // Eco a serial (debug).
+  if (canon)
     tty_echo_serial(c);
 
-  int canon = (tty->lflag & TTY_LFLAG_ICANON) != 0;
+  // Acumular SIEMPRE, sin condiciones. El shell limpia con TCFLSH antes
+  // de spawnear, así que el buffer nunca arrastra comandos viejos.
   if (canon)
     tty_canon_input_locked(tty, byte);
   else
     tty_push_byte_locked(tty, byte);
 
-  // Eco al console SOLO si:
-  //   - ECHO está activo, y
-  //   - hay un lector bloqueado en read() (nadie leyendo → no hace falta eco).
-  int echo_to_console =
-      (tty->lflag & TTY_LFLAG_ECHO) &&
-      (__atomic_load_n(&tty->read_wq.nr_waiting, __ATOMIC_ACQUIRE) > 0);
+  int echo_to_console = (tty->lflag & TTY_LFLAG_ECHO);
 
   spin_unlock_irqrestore(&tty->lock, flags);
 
@@ -155,27 +152,14 @@ void tty_receive_char(tty_t *tty, char c) {
     }
   }
 
-  // Despertar lectores (tty_read / poll).
   wake_up_all(&tty->read_wq);
 
-  // [FIX DOBLE ECO] Avisar al shell nativo vía WINSRV_EV_TTY_INPUT SOLO
-  // cuando el shell nativo es quien debe procesar el teclado:
-  //
-  //   - Modo canonical: el shell nativo tiene su propio line editor y
-  //     lee los WINSRV_EV_TTY_INPUT. Es el caso del prompt de Aurora.
-  //
-  //   - Modo raw: hay un proceso (ash, vi, ...) leyendo del tty. Ese
-  //     proceso hace su propio eco vía write(1). Si además el shell
-  //     nativo procesara el byte, se duplicaría la tecla en pantalla.
-  //
-  // Excepción: Ctrl+C (0x03) en modo raw. El shell nativo lo necesita
-  // para mandar SIGINT al hijo (no tenemos señales reales todavía).
+  // Avisar al shell nativo: en canonical siempre, en raw solo Ctrl+C.
   int post_to_shell = 0;
   int32_t post_byte = (int32_t)byte;
 
   if (canon) {
     post_to_shell = 1;
-    // El shell nativo usa 0x08 para backspace, no 0x7F. Normalizamos.
     if (byte == 0x7F)
       post_byte = 0x08;
   } else if (byte == 0x03) {
@@ -188,6 +172,21 @@ void tty_receive_char(tty_t *tty, char c) {
       winsrv_post_event(win, WINSRV_EV_TTY_INPUT, post_byte, 0, 0);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// [NEW] Vaciar el buffer de entrada.
+// ---------------------------------------------------------------------------
+void tty_flush_input(tty_t *tty) {
+  if (!tty)
+    return;
+  unsigned long flags = spin_lock_irqsave(&tty->lock);
+  tty->head = 0;
+  tty->tail = 0;
+  tty->count = 0;
+  tty->canon_len = 0;
+  tty->eof_pending = 0;
+  spin_unlock_irqrestore(&tty->lock, flags);
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +237,6 @@ int64_t tty_write(tty_t *tty, uint64_t offset, size_t size, const void *buf) {
   serial_lock_acquire(&flags);
   for (size_t i = 0; i < size; i++) {
     char c = s[i];
-    // ONLCR: \n → \r\n
     if ((tty->oflag & TTY_OFLAG_ONLCR) && c == '\n') {
       serial_putc_locked('\r');
       winsrv_console_output('\r');
@@ -265,16 +263,10 @@ int tty_poll(tty_t *tty, short events) {
   return revents;
 }
 
-// TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ (x86_64).
 #define TCGETS 0x5401
 #define TCSETS 0x5402
 #define TIOCGWINSZ 0x5413
 #define TIOCSWINSZ 0x5414
-// Los musl's tcsetattr() usan TCSETS + act.
-//   act=0 (TCSANOW)   → TCSETS   = 0x5402
-//   act=1 (TCSADRAIN) → TCSETSW  = 0x5403
-//   act=2 (TCSAFLUSH) → TCSETSF  = 0x5404
-// Los tratamos igual: no tenemos queue de output que flushar.
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
 #define TIOCGPGRP 0x540F
@@ -284,9 +276,6 @@ int tty_poll(tty_t *tty, short events) {
 #define TCFLSH 0x540B
 #define TCXONC 0x540A
 
-// Layout compatible con musl/glibc x86_64. Importante: NO añadir
-// padding explícito. GCC inserta 3 bytes de padding automático tras
-// c_cc[32] para alinear c_ispeed a 4 bytes. Total: 60 bytes.
 struct ktty_termios {
   uint32_t c_iflag;
   uint32_t c_oflag;
@@ -368,9 +357,6 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     return 0;
   }
   case TIOCGPGRP: {
-    // Devolvemos el pid del proceso actual como "foreground process
-    // group" del terminal. Es falso (todos los procesos son su propio
-    // group), pero hace feliz a ash.
     process_t *proc = process_current();
     int32_t pgrp = proc ? (int32_t)proc->pid : 0;
     if (!access_ok((void *)arg, sizeof(pgrp)))
@@ -380,8 +366,6 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     return 0;
   }
   case TIOCSPGRP:
-    // Aceptamos el set sin recordarlo. Necesitaría un campo pgrp en
-    // el tty + getpgid/setpgid reales para tener job control de verdad.
     return 0;
   case TIOCGSID: {
     process_t *proc = process_current();
@@ -393,27 +377,27 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     return 0;
   }
   case TIOCNOTTY:
-    // "Desconéctate del tty de control". No tenemos sesiones, no-op.
     return 0;
-  case TCFLSH:
+  case TCFLSH: {
+    // arg: 0 = TCIFLUSH (input), 1 = TCOFLUSH (output), 2 = TCIOFLUSH.
+    // Solo implementamos input. Output no tenemos buffer propio.
+    int que = (int)arg;
+    if (que == 0 || que == 2)
+      tty_flush_input(tty);
+    return 0;
+  }
   case TCXONC:
-    // Flush de input/output queue y control de flujo XON/XOFF.
-    // Sin buffers de output propios, no-op.
     return 0;
   default:
     return -ENOTTY;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
 void tty_init(void) {
   memset(&tty0, 0, sizeof(tty0));
   spin_init(&tty0.lock);
   wait_queue_init(&tty0.read_wq);
   tty_apply_defaults(&tty0);
-  // Tamaño por defecto: coincide con COLS/ROWS_VISIBLE del shell.
   tty0.winsize_cols = 100;
   tty0.winsize_rows = 35;
   g_console_win = NULL;

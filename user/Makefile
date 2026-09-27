@@ -2,8 +2,7 @@
 #
 # Solo compila las apps que siguen en user/apps/. Las que se han movido
 # a user/musl/apps/ se detectan por ausencia de apps/<name>/main.c y se
-# saltan automáticamente. Así no hay que tocar este Makefile al portar
-# una app a musl: basta con mover el directorio.
+# saltan automáticamente.
 
 AS = nasm
 
@@ -28,9 +27,6 @@ LDFLAGS = -nostdlib -T link.ld -no-pie -m64 \
 
 SYSDIR := ../sysroot/apps
 
-# Lista "ideal" de apps nativas. Se filtra por existencia de
-# apps/<name>/main.c para permitir mover apps a user/musl/ sin tocar
-# este Makefile.
 NATIVE_ALL = hello calc filetest ipctest pftest waitpid_stress \
              mmap_race mmap_race_worker vma_overlap vma_isolation \
              vma_isolation_worker munmap_partial \
@@ -42,6 +38,7 @@ NATIVE_ALL = hello calc filetest ipctest pftest waitpid_stress \
              mkdir rm cp pwd mv kill
 
 CORE_APPS := $(foreach a,$(NATIVE_ALL),$(if $(wildcard apps/$a/main.c),$a))
+CORE_APPS := $(filter-out shell,$(CORE_APPS))
 
 STANDALONE_APPS = syscall_linux_test
 SPECIAL_APPS = elf_rotest
@@ -49,9 +46,12 @@ SPECIAL_APPS = elf_rotest
 APPS = $(CORE_APPS) $(STANDALONE_APPS) $(SPECIAL_APPS)
 
 LIB_OBJS = crt0.o syscall.o \
-           lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o
+           lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o \
+           lib/env.o
 
-all: $(APPS)
+SHELL_LIBS = $(LIB_OBJS) lib/font_system.o
+
+all: $(APPS) shell
 
 crt0.o: crt0.asm
 	$(AS) -f elf64 $< -o $@
@@ -62,30 +62,55 @@ syscall.o: syscall.c syscall.h
 lib/%.o: lib/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Pattern rule para apps nativas (linkean LIB_OBJS + link.ld).
+lib/font_system.o: lib/font_system.c lib/font_system.h lib/font_aa.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+lib/env.o: lib/env.c lib/env.h lib/string.h lib/malloc.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(CORE_APPS): %: apps/%/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $(LIB_OBJS) $@.o $(LDFLAGS)
 	@mkdir -p $(SYSDIR)
 	cp $@ $(SYSDIR)/
 
-# Standalone: define su propio _start, sin LIB_OBJS ni crt0.
+shell: apps/shell/main.c $(SHELL_LIBS)
+	$(CC) $(CFLAGS) -c $< -o $@.o
+	$(LD) -o $@ $(SHELL_LIBS) $@.o $(LDFLAGS)
+	@mkdir -p $(SYSDIR)
+	cp $@ $(SYSDIR)/
+
 syscall_linux_test: apps/syscall_linux_test/main.c
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $@.o $(LDFLAGS)
 	@mkdir -p $(SYSDIR)
 	cp $@ $(SYSDIR)/
 
-# elf_rotest: link.ld propio para forzar segmentos RO.
 elf_rotest: apps/elf_rotest/main.c apps/elf_rotest/link.ld $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/elf_rotest/main.c -o $@.o
 	$(LD) -o $@ $(LIB_OBJS) $@.o -T apps/elf_rotest/link.ld $(LDFLAGS)
 	@mkdir -p $(SYSDIR)
 	cp $@ $(SYSDIR)/
 
+.PHONY: regen-font
+regen-font:
+	@mkdir -p lib
+	@{ \
+	  echo '// user/lib/font_system.c — GENERADO. No editar a mano.'; \
+	  echo '// Regenerar con: make -C user regen-font'; \
+	  echo '#include "font_system.h"'; \
+	  sed -e 's|#include "../font_aa.h"||' \
+	      ../kernel/gfx/fonts/font_jetbrains_regular14.h; \
+	  echo ''; \
+	  echo 'const font_aa_t *font_system_mono(void) {'; \
+	  echo '  return &font_jetbrainsmono_regular_regular_14;'; \
+	  echo '}'; \
+	} > lib/font_system.c
+	@echo "[font] lib/font_system.c regenerado"
+
 clean:
 	rm -f *.o lib/*.o
-	rm -f $(APPS)
-	rm -f $(addprefix $(SYSDIR)/,$(APPS))
+	rm -f $(APPS) shell
+	rm -f $(addprefix $(SYSDIR)/,$(APPS)) $(SYSDIR)/shell
 
-.PHONY: all clean
+.PHONY: all clean regen-font

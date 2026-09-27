@@ -12,6 +12,9 @@
 
 #define PROCESS_ARGV_MAX 16
 
+#define PROCESS_ENVP_MAX 32
+#define PROCESS_ENV_STR_MAX 256
+
 // [pipe] Fds que el shell quiere asignar al hijo. -1 significa
 // "usar el stdio por defecto" (stdin/stdout/stderr del kernel).
 typedef struct {
@@ -19,6 +22,21 @@ typedef struct {
   int fd_out;
   int fd_err;
 } spawn_fds_t;
+
+// ---------------------------------------------------------------------------
+// [RUSAGE] Contadores de recursos por proceso. Los llena process_waitpid
+// al reapear un zombie; k_wait4 los traduce al struct rusage de Linux.
+// Los que no contabilizamos todavía van a 0.
+// ---------------------------------------------------------------------------
+typedef struct {
+  uint64_t utime_ticks; // tiempo CPU en userland (ticks de 1 ms)
+  uint64_t stime_ticks; // tiempo CPU en kernel (siempre 0 por ahora)
+  uint64_t minflt;      // page faults resueltos sin I/O (0)
+  uint64_t majflt;      // page faults con I/O (0)
+  uint64_t nvcsw;       // context switches voluntarios (0)
+  uint64_t nivcsw;      // context switches involuntarios (0)
+  int64_t maxrss_kb;    // RSS máximo en KB (0)
+} proc_rusage_t;
 
 typedef struct process {
   uint32_t pid;
@@ -32,6 +50,13 @@ typedef struct process {
   uint64_t heap_start;
   uint64_t heap_end;
   uint64_t heap_max;
+
+  // [MMAP] Próxima dirección sugerida para mmap(NULL, ...) y para el
+  // fallback cuando un hint no se puede satisfacer. Per-process: el
+  // espacio virtual es privado, así que no tiene sentido un contador
+  // global.
+  uint64_t next_mmap_addr;
+
   struct vma *vma_list;
   uint64_t stack_base;
   uint64_t stack_low;
@@ -53,6 +78,15 @@ typedef struct process {
   // [musl] FS segment base (TLS). Se guarda también en task_t para que
   // switch.asm lo restaure al cambiar de tarea.
   uint64_t fs_base;
+  // [RUSAGE] Tiempo de CPU acumulado en ticks (1000 Hz). Lo incrementa
+  // sched_tick() cada vez que la tarea de este proceso corre. Al reapear
+  // el proceso, process_waitpid lo vuelca a proc_rusage_t.
+  uint64_t cpu_ticks_user;
+
+  // [ENV] Variables de entorno. Array NULL-terminated de strings
+  // "KEY=VALUE" kmalloc'd. Cada uno liberado por process_clear_envp.
+  // Los hereda fork y los reemplaza execve.
+  char *envp[PROCESS_ENVP_MAX];
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,
@@ -61,7 +95,7 @@ process_t *process_load(const char *path);
 process_t *process_spawn_child(process_t *parent, const char *path);
 
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
-                    int options);
+                    proc_rusage_t *rusage_out, int options);
 
 // [Fase A] Marca el proceso como zombie, cierra fds y ventanas, y
 // despierta al padre. NO mata la tarea. Es la parte "lógica".
@@ -94,4 +128,40 @@ process_t *process_spawn_child_args_fds(process_t *parent, const char *path,
                                         int argc, const char *const *argv,
                                         const spawn_fds_t *fds);
 
+// [fork] Duplica el proceso actual. Devuelve el pid del hijo al padre,
+// 0 al hijo (vía frame de iretq), o negativo en error.
+int64_t sys_fork(void);
+
+// [execve] Reemplaza el espacio de usuario del proceso actual con el
+// binario `path`. En éxito devuelve 0 y rellena *new_entry / *new_rsp
+// con el punto de entrada del nuevo ELF y el RSP inicial con argv
+// ya construido. El llamante (syscall.c) es quien reescribe los regs
+// del trap frame para aterrizar en ese (rip, rsp).
+//
+// NO crea proceso nuevo: muta el actual in-place. Conserva PID, fds,
+// cwd, y cierra... (FD_CLOEXEC no soportado aún; todos los fds
+// sobreviven, que es lo correcto para busybox sh → applet).
+//
+// En error devuelve un errno negativo y NO toca el proceso.
+int process_execve_prepare(const char *path, int argc, const char *const *argv,
+                           int envc, const char *const *envp,
+                           uint64_t *new_entry, uint64_t *new_rsp);
+
+// [RUSAGE] Contabiliza un tick de CPU (1 ms) al proceso de la tarea
+// indicada. La llama sched_tick() en cada tick del LAPIC. No hace nada
+// si `t` es NULL o si la tarea no pertenece a un proceso (idle, kmain).
+void process_account_tick(task_t *t);
+
+int process_set_envp(process_t *proc, int envc, const char *const *envp);
+void process_clear_envp(process_t *proc);
+int process_inherit_envp(const process_t *parent, process_t *child);
+
+// Variantes con envp explícito.
+process_t *process_spawn_child_args_env(process_t *parent, const char *path,
+                                        int argc, const char *const *argv,
+                                        int envc, const char *const *envp);
+process_t *process_spawn_child_args_fds_env(process_t *parent, const char *path,
+                                            int argc, const char *const *argv,
+                                            int envc, const char *const *envp,
+                                            const spawn_fds_t *fds);
 #endif // PROCESS_H

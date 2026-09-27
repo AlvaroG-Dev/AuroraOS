@@ -15,6 +15,7 @@
 
 extern void task_trampoline(void);
 extern void user_trampoline(void);
+extern void process_account_tick(task_t *t);
 
 // ---------------------------------------------------------------------------
 // Estado per-CPU
@@ -160,6 +161,7 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->need_resched = 0;
   task->cpu_affinity = -1;
   task->on_cpu = 0;
+  task->syscall_regs = NULL;
 
   // [musl] FS_BASE por defecto 0. Hasta que un proceso llame a
   // arch_prctl(ARCH_SET_FS), no debe tener TLS. Si no lo ponemos
@@ -377,6 +379,9 @@ void sched_tick(void) {
   task_t *curr = (task_t *)this_cpu(current_task);
   if (!curr)
     return;
+
+  // [RUSAGE] Contabilizar este tick al proceso de la tarea actual.
+  process_account_tick(curr);
 
   this_cpu(ticks_since_resched)++;
 
@@ -721,6 +726,89 @@ task_t *sched_create_user_task_stopped(void (*fn)(void),
   task_init_common(task, sp, cr3);
   task->stack = (uint64_t *)kstack;
   // NO se inserta en la runqueue. El caller hará sched_make_ready.
+  return task;
+}
+
+// ---------------------------------------------------------------------------
+// [fork] Tarea de usuario que retoma en el mismo punto que el padre.
+//
+// El stack de kernel que construimos aquí debe casar con:
+//   - task_jump_to (asm): pop r15, r14, r13, r12, rbp, rbx, ret
+//   - user_fork_return (asm): pop r11, r10, r9, r8, rax, rcx, rdx, rsi,
+//     rdi, iretq
+//
+// Por eso el layout desde [task->rsp] es:
+//   [sp+0]  = r15 (del padre)
+//   [sp+8]  = r14
+//   [sp+16] = r13
+//   [sp+24] = r12
+//   [sp+32] = rbp
+//   [sp+40] = rbx
+//   [sp+48] = &user_fork_return        ← ret de task_jump_to
+//   [sp+56] = r11
+//   [sp+64] = r10
+//   [sp+72] = r9
+//   [sp+80] = r8
+//   [sp+88] = rax = 0                  ← el hijo ve fork()=0
+//   [sp+96] = rcx
+//   [sp+104]= rdx
+//   [sp+112]= rsi
+//   [sp+120]= rdi
+//   [sp+128]= rip                      ← iretq frame
+//   [sp+136]= cs (0x1B)
+//   [sp+144]= rflags
+//   [sp+152]= rsp
+//   [sp+160]= ss (0x23)
+// ---------------------------------------------------------------------------
+extern void user_fork_return(void);
+
+task_t *sched_create_forked_user_task(registers_t *regs, uint64_t cr3) {
+  if (!regs)
+    return NULL;
+
+  task_t *task = (task_t *)kmalloc(sizeof(task_t));
+  if (!task)
+    return NULL;
+
+  uint8_t *kstack = (uint8_t *)kmalloc(TASK_STACK_SIZE);
+  if (!kstack) {
+    kfree(task);
+    return NULL;
+  }
+
+  uint64_t *sp = (uint64_t *)(((uint64_t)(kstack + TASK_STACK_SIZE)) & ~0xFULL);
+
+  // iretq frame (lo consume iretq al final de user_fork_return).
+  *(--sp) = USER_DS_RING3; // SS
+  *(--sp) = regs->rsp;     // RSP
+  *(--sp) = regs->rflags;  // RFLAGS
+  *(--sp) = USER_CS_RING3; // CS
+  *(--sp) = regs->rip;     // RIP
+
+  // Registros consumidos por user_fork_return.
+  *(--sp) = regs->rdi;
+  *(--sp) = regs->rsi;
+  *(--sp) = regs->rdx;
+  *(--sp) = regs->rcx;
+  *(--sp) = 0; // rax = 0 para el hijo
+  *(--sp) = regs->r8;
+  *(--sp) = regs->r9;
+  *(--sp) = regs->r10;
+  *(--sp) = regs->r11;
+
+  // Retorno de task_jump_to.
+  *(--sp) = (uint64_t)user_fork_return;
+
+  // Registros que task_jump_to restaura por su cuenta.
+  *(--sp) = regs->rbx;
+  *(--sp) = regs->rbp;
+  *(--sp) = regs->r12;
+  *(--sp) = regs->r13;
+  *(--sp) = regs->r14;
+  *(--sp) = regs->r15;
+
+  task_init_common(task, sp, cr3);
+  task->stack = (uint64_t *)kstack;
   return task;
 }
 
