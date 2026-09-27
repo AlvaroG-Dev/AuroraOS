@@ -32,6 +32,24 @@
 
 extern void syscall_entry(void);
 
+// ---------- helper de sleep ----------
+//
+// Duerme `ticks` sin wait queue permanente. Registra la tarea en una wq
+// local que nunca cumple condición: solo sale por timeout del scheduler
+// (sched_wake_expired, vía wait_event_interruptible_timeout).
+static bool sleep_never_true(void *arg) {
+  (void)arg;
+  return false;
+}
+
+static void sched_sleep_ticks(uint64_t ticks) {
+  if (ticks == 0)
+    return;
+  wait_queue_t wq;
+  wait_queue_init(&wq);
+  wait_event_interruptible_timeout(&wq, sleep_never_true, NULL, ticks);
+}
+
 // ---------------------------------------------------------------------------
 // Estructuras auxiliares
 // ---------------------------------------------------------------------------
@@ -662,6 +680,161 @@ static int64_t k_set_tid_address(uint64_t a1, uint64_t a2, uint64_t a3,
   return proc ? (int64_t)proc->pid : -EFAULT;
 }
 
+// ---------- getuid/getgid/geteuid/getegid ----------
+//
+// Aurora no tiene usuarios. Todos los procesos son "root" (uid 0).
+// Busybox usa estas en whoami, id, ls -l, sh. Devolver 0 es correcto.
+static int64_t k_getuid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+static int64_t k_getgid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+static int64_t k_geteuid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+static int64_t k_getegid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+// ---------- getppid ----------
+static int64_t k_getppid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  return proc ? (int64_t)proc->ppid : -EFAULT;
+}
+
+// ---------- process groups / sessions (stubs) ----------
+//
+// Aurora no tiene process groups ni sessions reales. Cada proceso es su
+// propio pgid y su propia session, y coincide con su pid. Ash llama a
+// estas al arrancar para activar job control. Devolver el pid propio
+// las satisface y evita que entre en bucle.
+static int64_t k_setpgid(uint64_t pid, uint64_t pgid, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)pid;
+  (void)pgid;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+static int64_t k_getpgid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  // pid 0 o pid == propio: devolvemos el pid.
+  if (pid == 0 || (int32_t)pid == (int32_t)proc->pid)
+    return (int64_t)proc->pid;
+  // pid externo: no tenemos noción de grupos de otros procesos,
+  // devolvemos el mismo pid por simplicidad.
+  return (int64_t)(int32_t)pid;
+}
+static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (pid == 0 || (int32_t)pid == (int32_t)proc->pid)
+    return (int64_t)proc->pid;
+  return (int64_t)(int32_t)pid;
+}
+static int64_t k_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  return proc ? (int64_t)proc->pid : -EFAULT;
+}
+
+// Aurora no tiene grupos suplementarios. Con size==0 devolvemos 0 (no
+// hay ninguno). Con size>0 devolvemos 0 (no escribimos nada).
+static int64_t k_getgroups(uint64_t size, uint64_t list, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)list;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+// ---------- prctl ----------
+//
+// Multiplexado. Aurora no tiene namespaces, capabilities, core dumps
+// ni nombres de thread. Aceptamos todo con 0 (éxito), salvo
+// PR_GET_DUMPABLE (3) que devolvemos 1 como hace Linux por defecto.
+//
+// Opciones que musl/busybox usan realmente:
+//   1  PR_SET_PDEATHSIG   → ignorar
+//   3  PR_GET_DUMPABLE    → devolver 1
+//   4  PR_SET_DUMPABLE    → ignorar
+//   15 PR_SET_NAME        → ignorar
+//   16 PR_GET_NAME        → escribir "" en el buffer del usuario
+//   38 PR_SET_NO_NEW_PRIVS → ignorar
+static int64_t k_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
+                       uint64_t arg4, uint64_t arg5) {
+  (void)arg3;
+  (void)arg4;
+  (void)arg5;
+  switch (option) {
+  case 3: /* PR_GET_DUMPABLE */
+    return 1;
+  case 16: /* PR_GET_NAME */ {
+    if (arg2 && access_ok((void *)arg2, 16)) {
+      // Copiamos 16 bytes de ceros (Linux pone el nombre del proceso
+      // ahí, 16 bytes con terminador).
+      char empty[16] = {0};
+      if (copy_to_user((void *)arg2, empty, 16) < 0)
+        return -EFAULT;
+    }
+    return 0;
+  }
+  default:
+    return 0;
+  }
+}
+
 // ---------- kill ----------
 static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
                       uint64_t a5) {
@@ -1055,12 +1228,15 @@ static int64_t k_readlink(uint64_t path, uint64_t buf, uint64_t bufsiz,
 // ---------- ioctl ----------
 static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
                        uint64_t a5) {
-  (void)fd;
-  (void)req;
-  (void)arg;
   (void)a4;
   (void)a5;
-  return -ENOTTY;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int kfd = (int)fd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+    return -EBADF;
+  return vfs_node_ioctl(proc->fds[kfd]->node, (unsigned long)req, arg);
 }
 
 // ---------- rt_sigaction / rt_sigprocmask (stubs) ----------
@@ -1222,6 +1398,384 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
   default:
     return -EINVAL;
   }
+}
+
+// ---------- poll / ppoll / select / pselect6 ----------
+
+struct k_pollfd {
+  int32_t fd;
+  int16_t events;
+  int16_t revents;
+};
+
+struct k_timespec {
+  int64_t tv_sec;
+  int64_t tv_nsec;
+};
+
+// POLL* bits (Linux).
+#define POLLIN 0x0001
+#define POLLPRI 0x0002
+#define POLLOUT 0x0004
+#define POLLERR 0x0008
+#define POLLHUP 0x0010
+#define POLLNVAL 0x0020
+
+static uint64_t ts_to_ticks(int64_t sec, int64_t nsec) {
+  if (sec < 0 || nsec < 0)
+    return 0;
+  uint64_t s = (uint64_t)sec;
+  uint64_t ns = (uint64_t)nsec;
+  // KERNEL_HZ = 1000 en Aurora.
+  uint64_t ticks = s * 1000ULL + ns / 1000000ULL;
+  return ticks;
+}
+
+// Cond para wait_event: ¿alguno de los fds está listo?
+struct poll_ctx {
+  struct k_pollfd *fds;
+  uint32_t nfds;
+  int any_ready;
+};
+
+static bool poll_any_ready(void *arg) {
+  struct poll_ctx *ctx = (struct poll_ctx *)arg;
+  ctx->any_ready = 0;
+  for (uint32_t i = 0; i < ctx->nfds; i++) {
+    if (ctx->fds[i].fd < 0)
+      continue;
+    if (ctx->fds[i].revents) {
+      ctx->any_ready = 1;
+      break;
+    }
+  }
+  return ctx->any_ready;
+}
+
+// Núcleo. timeouts en ticks: 0 = no bloquear, >0 = bloquear hasta N ticks,
+// UINT64_MAX = bloquear indefinidamente.
+#define POLL_BLOCK_FOREVER UINT64_MAX
+
+static int64_t do_poll_common(struct k_pollfd *kfds, uint32_t nfds,
+                              uint64_t timeout_ticks) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  int forever = (timeout_ticks == POLL_BLOCK_FOREVER);
+  uint64_t deadline = 0;
+  if (!forever)
+    deadline = sched_get_ticks() + timeout_ticks;
+
+  for (;;) {
+    int ready_count = 0;
+    wait_queue_t *wq = NULL;
+
+    for (uint32_t i = 0; i < nfds; i++) {
+      int32_t fd = kfds[i].fd;
+      kfds[i].revents = 0;
+      if (fd < 0)
+        continue;
+      if (fd >= MAX_PROCESS_FDS || !proc->fds[fd]) {
+        kfds[i].revents = POLLNVAL;
+        ready_count++;
+        continue;
+      }
+      file_descriptor_t *f = proc->fds[fd];
+      int rev = vfs_node_poll(f->node, kfds[i].events);
+      if (rev) {
+        kfds[i].revents = (int16_t)rev;
+        ready_count++;
+      } else if (!wq && f->node && f->node->ops && f->node->ops->poll) {
+        // Primera wq disponible. Dormimos sobre ella y re-polleamos al
+        // despertar. No es lo más eficiente (con múltiples fds activos
+        // conviene una wq por fd), pero para tty + pipes puntuales basta.
+        wq = &f->read_wq;
+      }
+    }
+
+    if (ready_count > 0)
+      return ready_count;
+
+    // Nadie listo. Calcular cuánto dormir sin perder el deadline.
+    uint64_t now = sched_get_ticks();
+    uint64_t wait_ticks;
+    if (forever) {
+      wait_ticks = 100; // 100 ms máx por iteración, para no quedar atrapados
+                        // si la wq nunca se despierta por otra vía.
+    } else {
+      if (now >= deadline)
+        return 0;
+      wait_ticks = deadline - now;
+      if (wait_ticks > 100)
+        wait_ticks = 100;
+    }
+
+    if (wq) {
+      struct poll_ctx ctx = {.fds = kfds, .nfds = nfds, .any_ready = 0};
+      long r = wait_event_interruptible_timeout(wq, poll_any_ready, &ctx,
+                                                wait_ticks);
+      if (r < 0)
+        return -EINTR;
+    } else {
+      sched_sleep_ticks(wait_ticks);
+    }
+
+    // Si el timeout total ya se agotó, salir.
+    if (!forever && sched_get_ticks() >= deadline)
+      return 0;
+  }
+}
+
+static int64_t k_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
+                      uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  if (nfds == 0) {
+    // Poll sin fds: solo esperar.
+    uint64_t t = (int64_t)timeout_ms < 0 ? POLL_BLOCK_FOREVER
+                                         : (uint64_t)(int64_t)timeout_ms;
+    if (t == POLL_BLOCK_FOREVER)
+      return 0;
+    sched_sleep_ticks(t);
+    return 0;
+  }
+  if (nfds > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)fds_ptr, nfds * sizeof(struct k_pollfd)))
+    return -EFAULT;
+  struct k_pollfd kfds[16];
+  struct k_pollfd *big = NULL;
+  if (nfds > 16) {
+    big = (struct k_pollfd *)kmalloc(nfds * sizeof(struct k_pollfd));
+    if (!big)
+      return -ENOMEM;
+  }
+  struct k_pollfd *dst = big ? big : kfds;
+  if (copy_from_user(dst, (void *)fds_ptr, nfds * sizeof(struct k_pollfd)) <
+      0) {
+    if (big)
+      kfree(big);
+    return -EFAULT;
+  }
+  uint64_t ticks;
+  int64_t t = (int64_t)timeout_ms;
+  if (t < 0)
+    ticks = POLL_BLOCK_FOREVER;
+  else
+    ticks = (uint64_t)t; /* ms == ticks en Aurora (1000 Hz) */
+  int64_t r = do_poll_common(dst, (uint32_t)nfds, ticks);
+  if (r >= 0) {
+    if (copy_to_user((void *)fds_ptr, dst, nfds * sizeof(struct k_pollfd)) < 0)
+      r = -EFAULT;
+  }
+  if (big)
+    kfree(big);
+  return r;
+}
+
+static int64_t k_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t ts_ptr,
+                       uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5; /* a4=sigmask, a5=sigsetsize: ignorados */
+  uint64_t ticks = POLL_BLOCK_FOREVER;
+  if (ts_ptr) {
+    if (!access_ok((void *)ts_ptr, sizeof(struct k_timespec)))
+      return -EFAULT;
+    struct k_timespec ts;
+    if (copy_from_user(&ts, (void *)ts_ptr, sizeof(ts)) < 0)
+      return -EFAULT;
+    ticks = ts_to_ticks(ts.tv_sec, ts.tv_nsec);
+  }
+  if (nfds == 0) {
+    if (ticks == POLL_BLOCK_FOREVER)
+      return 0;
+    sched_sleep_ticks(ticks);
+    return 0;
+  }
+  if (nfds > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)fds_ptr, nfds * sizeof(struct k_pollfd)))
+    return -EFAULT;
+  struct k_pollfd kfds[16];
+  struct k_pollfd *big = NULL;
+  if (nfds > 16) {
+    big = (struct k_pollfd *)kmalloc(nfds * sizeof(struct k_pollfd));
+    if (!big)
+      return -ENOMEM;
+  }
+  struct k_pollfd *dst = big ? big : kfds;
+  if (copy_from_user(dst, (void *)fds_ptr, nfds * sizeof(struct k_pollfd)) <
+      0) {
+    if (big)
+      kfree(big);
+    return -EFAULT;
+  }
+  int64_t r = do_poll_common(dst, (uint32_t)nfds, ticks);
+  if (r >= 0)
+    if (copy_to_user((void *)fds_ptr, dst, nfds * sizeof(struct k_pollfd)) < 0)
+      r = -EFAULT;
+  if (big)
+    kfree(big);
+  return r;
+}
+
+// select/pselect6: convertimos fd_set a un array de pollfd y reusamos
+// do_poll_common. No implementamos el enmascarado de señales (sigmask
+// se ignora). El tamaño de fd_set en x86_64 Linux es 128 bytes (1024 bits).
+#define FD_SET_BYTES 128
+
+static int64_t do_select_common(uint64_t nfds, uint64_t readfds,
+                                uint64_t writefds, uint64_t exceptfds,
+                                uint64_t ticks) {
+  if (nfds == 0) {
+    if (ticks == POLL_BLOCK_FOREVER)
+      return 0;
+    sched_sleep_ticks(ticks);
+    return 0;
+  }
+  if (nfds > 1024)
+    nfds = 1024;
+
+  uint8_t kr[FD_SET_BYTES], kw[FD_SET_BYTES], ke[FD_SET_BYTES];
+  memset(kr, 0, sizeof(kr));
+  memset(kw, 0, sizeof(kw));
+  memset(ke, 0, sizeof(ke));
+  if (readfds)
+    if (copy_from_user(kr, (void *)readfds, sizeof(kr)) < 0)
+      return -EFAULT;
+  if (writefds)
+    if (copy_from_user(kw, (void *)writefds, sizeof(kw)) < 0)
+      return -EFAULT;
+  if (exceptfds)
+    if (copy_from_user(ke, (void *)exceptfds, sizeof(ke)) < 0)
+      return -EFAULT;
+
+  // Contar fds únicos y construir pollfds.
+  struct k_pollfd *pfds = (struct k_pollfd *)kmalloc(nfds * sizeof(*pfds));
+  if (!pfds)
+    return -ENOMEM;
+  uint32_t npfd = 0;
+  for (uint64_t i = 0; i < nfds; i++) {
+    short ev = 0;
+    if (readfds && (kr[i / 8] & (1u << (i % 8))))
+      ev |= POLLIN;
+    if (writefds && (kw[i / 8] & (1u << (i % 8))))
+      ev |= POLLOUT;
+    if (exceptfds && (ke[i / 8] & (1u << (i % 8))))
+      ev |= POLLPRI;
+    if (!ev)
+      continue;
+    pfds[npfd].fd = (int32_t)i;
+    pfds[npfd].events = ev;
+    pfds[npfd].revents = 0;
+    npfd++;
+  }
+
+  int64_t r = do_poll_common(pfds, npfd, ticks);
+  if (r < 0) {
+    kfree(pfds);
+    return r;
+  }
+
+  // Escribir de vuelta los fd_sets.
+  uint8_t or_[FD_SET_BYTES], ow[FD_SET_BYTES], oe[FD_SET_BYTES];
+  memset(or_, 0, sizeof(or_));
+  memset(ow, 0, sizeof(ow));
+  memset(oe, 0, sizeof(oe));
+  int total = 0;
+  for (uint32_t k = 0; k < npfd; k++) {
+    int fd = pfds[k].fd;
+    int rev = pfds[k].revents;
+    if (!rev)
+      continue;
+    if ((rev & (POLLIN | POLLHUP | POLLERR)) && readfds) {
+      or_[fd / 8] |= (1u << (fd % 8));
+      total++;
+    }
+    if ((rev & POLLOUT) && writefds) {
+      ow[fd / 8] |= (1u << (fd % 8));
+      total++;
+    }
+    if ((rev & POLLPRI) && exceptfds) {
+      oe[fd / 8] |= (1u << (fd % 8));
+      total++;
+    }
+  }
+  if (readfds && copy_to_user((void *)readfds, or_, sizeof(or_)) < 0) {
+    kfree(pfds);
+    return -EFAULT;
+  }
+  if (writefds && copy_to_user((void *)writefds, ow, sizeof(ow)) < 0) {
+    kfree(pfds);
+    return -EFAULT;
+  }
+  if (exceptfds && copy_to_user((void *)exceptfds, oe, sizeof(oe)) < 0) {
+    kfree(pfds);
+    return -EFAULT;
+  }
+  kfree(pfds);
+  return total;
+}
+
+static int64_t k_select(uint64_t nfds, uint64_t r, uint64_t w, uint64_t e,
+                        uint64_t tv_ptr) {
+  uint64_t ticks = POLL_BLOCK_FOREVER;
+  if (tv_ptr) {
+    if (!access_ok((void *)tv_ptr, 16))
+      return -EFAULT;
+    struct {
+      int64_t sec;
+      int64_t usec;
+    } tv;
+    if (copy_from_user(&tv, (void *)tv_ptr, sizeof(tv)) < 0)
+      return -EFAULT;
+    if (tv.sec < 0 || tv.usec < 0)
+      return -EINVAL;
+    ticks = (uint64_t)tv.sec * 1000ULL + (uint64_t)tv.usec / 1000ULL;
+  }
+  return do_select_common(nfds, r, w, e, ticks);
+}
+
+static int64_t k_pselect6(uint64_t nfds, uint64_t r, uint64_t w, uint64_t e,
+                          uint64_t ts_ptr) {
+  /* sigmask (r9 en el ABI) ignorado: no entregamos señales todavía. */
+  uint64_t ticks = POLL_BLOCK_FOREVER;
+  if (ts_ptr) {
+    if (!access_ok((void *)ts_ptr, sizeof(struct k_timespec)))
+      return -EFAULT;
+    struct k_timespec ts;
+    if (copy_from_user(&ts, (void *)ts_ptr, sizeof(ts)) < 0)
+      return -EFAULT;
+    ticks = ts_to_ticks(ts.tv_sec, ts.tv_nsec);
+  }
+  return do_select_common(nfds, r, w, e, ticks);
+}
+
+// ---------- nanosleep ----------
+static int64_t k_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!access_ok((void *)req_ptr, sizeof(struct k_timespec)))
+    return -EFAULT;
+  struct k_timespec ts;
+  if (copy_from_user(&ts, (void *)req_ptr, sizeof(ts)) < 0)
+    return -EFAULT;
+  if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+    return -EINVAL;
+
+  uint64_t ticks = ts_to_ticks(ts.tv_sec, ts.tv_nsec);
+  if (ticks > 0)
+    sched_sleep_ticks(ticks);
+
+  if (rem_ptr) {
+    struct k_timespec zero = {0, 0};
+    if (copy_to_user((void *)rem_ptr, &zero, sizeof(zero)) < 0)
+      return -EFAULT;
+  }
+  return 0;
 }
 
 // ===========================================================================
@@ -1636,6 +2190,11 @@ static const syscall_entry_t linux_table[] = {
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},
     [SYS_RT_SIGPROCMASK] = {k_rt_sigprocmask, "rt_sigprocmask"},
     [SYS_IOCTL] = {k_ioctl, "ioctl"},
+    [SYS_POLL] = {k_poll, "poll"},
+    [SYS_SELECT] = {k_select, "select"},
+    [SYS_NANOSLEEP] = {k_nanosleep, "nanosleep"},
+    [SYS_PSELECT6] = {k_pselect6, "pselect6"},
+    [SYS_PPOLL] = {k_ppoll, "ppoll"},
     [SYS_FCNTL] = {k_fcntl, "fcntl"},
     [SYS_RENAME] = {k_rename, "rename"},
     [SYS_MKDIR] = {k_mkdir, "mkdir"},
@@ -1647,6 +2206,17 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SCHED_YIELD] = {k_sched_yield, "sched_yield"},
     [SYS_DUP2] = {k_dup2, "dup2"},
     [SYS_GETPID] = {k_getpid, "getpid"},
+    [SYS_GETUID] = {k_getuid, "getuid"},
+    [SYS_GETGID] = {k_getgid, "getgid"},
+    [SYS_GETEUID] = {k_geteuid, "geteuid"},
+    [SYS_GETEGID] = {k_getegid, "getegid"},
+    [SYS_GETPPID] = {k_getppid, "getppid"},
+    [SYS_SETPGID] = {k_setpgid, "setpgid"},
+    [SYS_GETPGID] = {k_getpgid, "getpgid"},
+    [SYS_GETSID] = {k_getsid, "getsid"},
+    [SYS_SETSID] = {k_setsid, "setsid"},
+    [SYS_GETGROUPS] = {k_getgroups, "getgroups"},
+    [SYS_PRCTL] = {k_prctl, "prctl"},
     [SYS_KILL] = {k_kill, "kill"},
     [SYS_UNAME] = {k_uname, "uname"},
     [SYS_GETCWD] = {k_getcwd, "getcwd"},

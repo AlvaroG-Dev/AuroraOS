@@ -28,6 +28,12 @@
 //     bucle) muere rápido con Ctrl+C.
 //
 // [Performance] Render por regiones.
+//
+// [FIX-TTY] El render se ha extraído a shell_render() y se llama también
+// desde los bucles que esperan a hijos (cmd_spawn_resolved, run_pipeline).
+// Sin esto, mientras corre un comando (por ejemplo `busybox sh`) el shell
+// nativo bufferizaba el output pero no lo pintaba, y la ventana parecía
+// congelada hasta que el hijo moría.
 
 #include "../../lib/file.h"
 #include "../../lib/malloc.h"
@@ -178,6 +184,32 @@ static int g_input_len = 0;
 // resuelven contra el cwd del proceso.
 static char g_cwd[256] = "/";
 
+// ---------------------------------------------------------------------------
+// [FIX-TTY] Estado del render a file-scope.
+//
+// Antes vivían como locales de main(). Los bucles que esperan a hijos
+// (cmd_spawn_resolved, run_pipeline) necesitan pintar sin volver al bucle
+// principal, así que los promovemos a estáticos y extraemos shell_render().
+// ---------------------------------------------------------------------------
+static uint32_t *g_pixels = NULL;
+static int g_cw = 0;
+static int g_ch = 0;
+static int g_win = -1;
+static int g_needs_redraw = 0;
+
+// [FIX-ANSI] Parser de secuencias de escape CSI (ESC [ ...).
+// ash las emite para mover el cursor y borrar; sin parser se dibujan
+// como texto literal (`[D`, `[K`, `[J`).
+static int g_ansi_state = 0; // 0=normal, 1=visto ESC, 2=dentro de CSI
+static int g_ansi_num = 0;
+static int g_ansi_has_num = 0;
+
+static void ansi_reset(void) {
+  g_ansi_state = 0;
+  g_ansi_num = 0;
+  g_ansi_has_num = 0;
+}
+
 static void refresh_cwd(void) {
   char tmp[256];
   if (getcwd(tmp, sizeof(tmp)) > 0) {
@@ -289,8 +321,110 @@ static void buf_init(void) {
 }
 
 static void buf_putchar(char c) {
-  mark_cursor_row_dirty();
+  // [FIX-ANSI] Secuencias CSI: ESC [ <params> <final>.
+  // Solo parseamos las más comunes que emite busybox ash.
+  if (g_ansi_state == 0) {
+    if (c == 0x1B) {
+      g_ansi_state = 1;
+      return;
+    }
+  } else if (g_ansi_state == 1) {
+    if (c == '[') {
+      g_ansi_state = 2;
+      g_ansi_num = 0;
+      g_ansi_has_num = 0;
+      return;
+    }
+    // ESC-x no-CSI: ignorar.
+    ansi_reset();
+    return;
+  } else { // g_ansi_state == 2
+    if (c >= '0' && c <= '9') {
+      g_ansi_num = g_ansi_num * 10 + (c - '0');
+      g_ansi_has_num = 1;
+      return;
+    }
+    if (c == ';' || c == '?') {
+      // Multi-parámetro o modo privado. Ignoramos los params y
+      // esperamos al final char.
+      g_ansi_has_num = 0;
+      return;
+    }
 
+    int n = g_ansi_has_num ? g_ansi_num : 1;
+    int idx = buf_line_idx(g_buf.count - 1);
+    line_t *l = &g_buf.lines[idx];
+
+    switch (c) {
+    case 'D': // cursor left
+      if (n < 1)
+        n = 1;
+      if (g_buf.cursor_col >= n)
+        g_buf.cursor_col -= n;
+      else
+        g_buf.cursor_col = 0;
+      mark_cursor_row_dirty();
+      break;
+    case 'C': // cursor right
+      if (n < 1)
+        n = 1;
+      g_buf.cursor_col += n;
+      if (g_buf.cursor_col > (int)l->len)
+        g_buf.cursor_col = (int)l->len;
+      mark_cursor_row_dirty();
+      break;
+    case 'G': // cursor to column (1-based)
+      if (n < 1)
+        n = 1;
+      g_buf.cursor_col = n - 1;
+      if (g_buf.cursor_col > (int)l->len)
+        g_buf.cursor_col = (int)l->len;
+      mark_cursor_row_dirty();
+      break;
+    case 'H': // cursor home
+      g_buf.cursor_col = 0;
+      mark_cursor_row_dirty();
+      break;
+    case 'K': // erase in line (from cursor to end)
+      l->len = (uint16_t)g_buf.cursor_col;
+      mark_cursor_row_dirty();
+      break;
+    case 'J': // erase in display (aproximado: solo la línea actual)
+      l->len = (uint16_t)g_buf.cursor_col;
+      mark_cursor_row_dirty();
+      break;
+    case 'P': // delete n chars
+      if (n < 1)
+        n = 1;
+      {
+        int start = g_buf.cursor_col;
+        int end = start + n;
+        if (end > (int)l->len)
+          end = (int)l->len;
+        int move = l->len - end;
+        for (int i = 0; i < move; i++)
+          l->chars[start + i] = l->chars[end + i];
+        l->len -= (end - start);
+      }
+      mark_cursor_row_dirty();
+      break;
+    case 'm': // SGR (colores): ignorar
+    case 'h': // set mode: ignorar
+    case 'l': // reset mode: ignorar
+    case '~': // teclas especiales: ignorar
+    case 'A': // cursor up: ignorar (una sola línea visible)
+    case 'B': // cursor down: ignorar
+      break;
+    default:
+      // Desconocido: ignorar.
+      break;
+    }
+    ansi_reset();
+    return;
+  }
+
+  // -------------------- resto igual que antes --------------------
+  mark_cursor_row_dirty();
   g_buf.scroll_offset = 0;
 
   if (c == '\n') {
@@ -307,7 +441,7 @@ static void buf_putchar(char c) {
       g_buf.cursor_col--;
       int idx = buf_line_idx(g_buf.count - 1);
       line_t *l = &g_buf.lines[idx];
-      if (g_buf.cursor_col < l->len) {
+      if (g_buf.cursor_col < (int)l->len) {
         if (g_buf.cursor_col == l->len - 1)
           l->len--;
       }
@@ -320,17 +454,15 @@ static void buf_putchar(char c) {
 
   int idx = buf_line_idx(g_buf.count - 1);
   line_t *l = &g_buf.lines[idx];
-
   if (g_buf.cursor_col >= COLS - 1) {
     buf_new_line();
     idx = buf_line_idx(g_buf.count - 1);
     l = &g_buf.lines[idx];
   }
   l->chars[g_buf.cursor_col] = c;
-  if (g_buf.cursor_col + 1 > l->len)
-    l->len = g_buf.cursor_col + 1;
+  if (g_buf.cursor_col + 1 > (int)l->len)
+    l->len = (uint16_t)(g_buf.cursor_col + 1);
   g_buf.cursor_col++;
-
   mark_cursor_row_dirty();
 }
 
@@ -435,6 +567,55 @@ static void render_region(uint32_t *pixels, int cw, int ch, int rx0, int ry0,
 }
 
 // ---------------------------------------------------------------------------
+// [FIX-TTY] shell_render
+//
+// Pinta la región sucia sobre el buffer de la ventana. Es idempotente:
+// si no hay nada que pintar, no hace nada. Se llama tanto desde el bucle
+// principal como desde los bucles que esperan a hijos.
+// ---------------------------------------------------------------------------
+static void shell_render(void) {
+  if (!g_needs_redraw || !g_pixels)
+    return;
+  if (dirty_empty()) {
+    g_needs_redraw = 0;
+    return;
+  }
+
+  int rx0 = g_dirty_x0;
+  int ry0 = g_dirty_y0;
+  int rx1 = g_dirty_x1;
+  int ry1 = g_dirty_y1;
+
+  rx0 = (rx0 / CHAR_WIDTH) * CHAR_WIDTH - CHAR_WIDTH;
+  ry0 = (ry0 / LINE_HEIGHT) * LINE_HEIGHT - LINE_HEIGHT;
+  rx1 = ((rx1 + CHAR_WIDTH - 1) / CHAR_WIDTH) * CHAR_WIDTH + CHAR_WIDTH;
+  ry1 = ((ry1 + LINE_HEIGHT - 1) / LINE_HEIGHT) * LINE_HEIGHT + LINE_HEIGHT;
+
+  if (rx0 < 0)
+    rx0 = 0;
+  if (ry0 < 0)
+    ry0 = 0;
+  if (rx1 > g_cw)
+    rx1 = g_cw;
+  if (ry1 > g_ch)
+    ry1 = g_ch;
+
+  int rw = rx1 - rx0;
+  int rh = ry1 - ry0;
+  if (rw <= 0 || rh <= 0) {
+    g_needs_redraw = 0;
+    dirty_reset();
+    return;
+  }
+
+  render_region(g_pixels, g_cw, g_ch, rx0, ry0, rw, rh);
+  sys_win_blit(g_win, rx0, ry0, rw, rh, rx0, ry0, g_cw, g_pixels);
+
+  g_needs_redraw = 0;
+  dirty_reset();
+}
+
+// ---------------------------------------------------------------------------
 // Shell embebido
 // ---------------------------------------------------------------------------
 static void print_prompt(void) {
@@ -443,30 +624,10 @@ static void print_prompt(void) {
   buf_puts("> ");
 }
 
-static int parse_line(char *line, char *argv[MAX_ARGS]) {
-  int argc = 0;
-  char *p = line;
-  while (*p && argc < MAX_ARGS) {
-    while (*p == ' ' || *p == '\t')
-      p++;
-    if (!*p)
-      break;
-    argv[argc++] = p;
-    while (*p && *p != ' ' && *p != '\t')
-      p++;
-    if (*p) {
-      *p = '\0';
-      p++;
-    }
-  }
-  return argc;
-}
-
 static void cmd_help(void) {
   puts("Comandos built-in:");
   puts("  help                    - esta ayuda");
   puts("  cd <dir>                - cambia el directorio");
-  puts("  pwd                     - imprime el cwd");
   puts("  clear                   - limpia la consola");
   puts("  exit                    - salir");
   puts("");
@@ -478,24 +639,6 @@ static void cmd_help(void) {
   puts("");
   puts("Cmd externos: ls cat mkdir rm cp mv kill echo spawn");
   puts("Ctrl+C envía SIGINT al pipeline en ejecución.");
-}
-
-static void cmd_echo(int argc, char *argv[]) {
-  for (int i = 1; i < argc; i++) {
-    if (i > 1)
-      write(1, " ", 1);
-    write(1, argv[i], strlen(argv[i]));
-  }
-  write(1, "\n", 1);
-}
-
-static void cmd_pwd(void) {
-  char buf[256];
-  if (getcwd(buf, sizeof(buf)) <= 0) {
-    puts("(error)");
-    return;
-  }
-  puts(buf);
 }
 
 static void cmd_cd(const char *arg) {
@@ -519,6 +662,9 @@ static void cmd_clear(void) { buf_init(); }
 //     termine. Mientras corre, procesa output y Ctrl+C.
 //   - Ctrl+C (byte 0x03) envía SIGINT al hijo.
 //   - Cierre de ventana mata al hijo con SIGKILL.
+//
+// [FIX-TTY] Llama a shell_render() tras cada ronda de eventos para que el
+// output del hijo aparezca en pantalla en tiempo real.
 // ---------------------------------------------------------------------------
 static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[],
                                int win_id) {
@@ -569,10 +715,12 @@ static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[],
     int r = waitpid(pid, &status, WNOHANG);
     if (r == pid) {
       printf("console: %s terminó (pid=%d, exit=%d)\n", cmd, r, status);
+      shell_render();
       return;
     }
     if (r < 0) {
       printf("console: %s waitpid falló\n", cmd);
+      shell_render();
       return;
     }
 
@@ -582,6 +730,7 @@ static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[],
       got_event = 1;
       if (ev.type == WINSRV_EV_OUTPUT) {
         buf_putchar((char)ev.x);
+        g_needs_redraw = 1;
       } else if (ev.type == WINSRV_EV_TTY_INPUT) {
         char c = (char)ev.x;
         if (c == 0x03) {
@@ -595,6 +744,10 @@ static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[],
         sys_exit(0);
       }
     }
+
+    // [FIX-TTY] Pintar lo que hayamos bufferizado en esta ronda.
+    shell_render();
+
     if (!got_event)
       sys_yield();
   }
@@ -734,6 +887,7 @@ static void run_pipeline(pipeline_stage_t *stages, int n, int win_id) {
   for (int i = 0; i < n_pipes; i++) {
     if (pipe(pipefds[i]) != 0) {
       puts("pipe: fallo");
+      shell_render();
       return;
     }
   }
@@ -815,6 +969,7 @@ static void run_pipeline(pipeline_stage_t *stages, int n, int win_id) {
     while (sys_win_poll_event(win_id, &ev, 0) > 0) {
       if (ev.type == WINSRV_EV_OUTPUT) {
         buf_putchar((char)ev.x);
+        g_needs_redraw = 1;
       } else if (ev.type == WINSRV_EV_TTY_INPUT) {
         if ((char)ev.x == 0x03) {
           for (int i = 0; i < n; i++) {
@@ -831,6 +986,10 @@ static void run_pipeline(pipeline_stage_t *stages, int n, int win_id) {
         sys_exit(0);
       }
     }
+
+    // [FIX-TTY] Pintar lo acumulado en esta ronda antes de ceder.
+    shell_render();
+
     if (remaining > 0)
       sys_yield();
   }
@@ -866,10 +1025,6 @@ static void run_command(int win_id) {
         cmd_help();
       } else if (strcmp(cmd, "cd") == 0) {
         cmd_cd(stages[0].argc > 1 ? stages[0].argv[1] : NULL);
-      } else if (strcmp(cmd, "pwd") == 0) {
-        cmd_pwd();
-      } else if (strcmp(cmd, "echo") == 0) {
-        cmd_echo(stages[0].argc, stages[0].argv);
       } else if (strcmp(cmd, "clear") == 0) {
         cmd_clear();
       } else if (strcmp(cmd, "exit") == 0) {
@@ -894,6 +1049,7 @@ static void run_command(int win_id) {
   while (sys_win_poll_event(win_id, &ev, 0) > 0) {
     if (ev.type == WINSRV_EV_OUTPUT) {
       buf_putchar((char)ev.x);
+      g_needs_redraw = 1;
     } else if (ev.type == WINSRV_EV_CLOSE) {
       sys_win_destroy(win_id);
       sys_exit(0);
@@ -902,6 +1058,11 @@ static void run_command(int win_id) {
 
   refresh_cwd();
   print_prompt();
+  g_needs_redraw = 1;
+  // Pintar el prompt inmediatamente para que el usuario lo vea sin esperar
+  // al próximo evento. Si no, la pantalla puede quedarse desactualizada
+  // tras un comando largo.
+  shell_render();
 }
 
 // ---------------------------------------------------------------------------
@@ -962,12 +1123,18 @@ int main(int argc, char **argv) {
     sys_print("SHELL: sys_win_set_icon FALLO");
   }
 
-  uint32_t *pixels = (uint32_t *)malloc(cw * ch * sizeof(uint32_t));
-  if (!pixels) {
+  // [FIX-TTY] Publicar estado de render a file-scope antes de nada, para
+  // que shell_render() funcione desde cualquier sitio.
+  g_cw = cw;
+  g_ch = ch;
+  g_win = win;
+  g_pixels = (uint32_t *)malloc(cw * ch * sizeof(uint32_t));
+  if (!g_pixels) {
     puts("console: sin memoria");
     sys_win_destroy(win);
     return 1;
   }
+  uint32_t *pixels = g_pixels; // alias local por comodidad
 
   buf_init();
 
@@ -994,8 +1161,6 @@ int main(int argc, char **argv) {
     puts("console: no se pudo registrar como consola");
   }
 
-  int needs_redraw = 0;
-
   while (1) {
     winsrv_event_t ev;
     int r = sys_win_poll_event(win, &ev, 1);
@@ -1005,36 +1170,36 @@ int main(int argc, char **argv) {
     switch (ev.type) {
     case WINSRV_EV_TTY_INPUT:
       handle_key((char)ev.x, win);
-      needs_redraw = 1;
+      g_needs_redraw = 1;
       break;
     case WINSRV_EV_OUTPUT:
       buf_putchar((char)ev.x);
-      needs_redraw = 1;
+      g_needs_redraw = 1;
       break;
     case WINSRV_EV_KEY:
       if (ev.x == 0x49) {
         g_buf.scroll_offset += 5;
         dirty_add(0, 0, cw, ch);
-        needs_redraw = 1;
+        g_needs_redraw = 1;
       } else if (ev.x == 0x51) {
         g_buf.scroll_offset -= 5;
         if (g_buf.scroll_offset < 0)
           g_buf.scroll_offset = 0;
         dirty_add(0, 0, cw, ch);
-        needs_redraw = 1;
+        g_needs_redraw = 1;
       } else if (ev.x == 0x4F) {
         g_buf.scroll_offset = 0;
         dirty_add(0, 0, cw, ch);
-        needs_redraw = 1;
+        g_needs_redraw = 1;
       } else if (ev.x == 0x47) {
         g_buf.scroll_offset = 9999999;
         dirty_add(0, 0, cw, ch);
-        needs_redraw = 1;
+        g_needs_redraw = 1;
       }
       break;
     case WINSRV_EV_CLOSE:
       sys_win_destroy(win);
-      free(pixels);
+      free(g_pixels);
       return 0;
     default:
       break;
@@ -1044,15 +1209,15 @@ int main(int argc, char **argv) {
       switch (ev.type) {
       case WINSRV_EV_TTY_INPUT:
         handle_key((char)ev.x, win);
-        needs_redraw = 1;
+        g_needs_redraw = 1;
         break;
       case WINSRV_EV_OUTPUT:
         buf_putchar((char)ev.x);
-        needs_redraw = 1;
+        g_needs_redraw = 1;
         break;
       case WINSRV_EV_CLOSE:
         sys_win_destroy(win);
-        free(pixels);
+        free(g_pixels);
         return 0;
       default:
         break;
@@ -1067,35 +1232,7 @@ int main(int argc, char **argv) {
     if (g_buf.scroll_offset < 0)
       g_buf.scroll_offset = 0;
 
-    if (needs_redraw && !dirty_empty()) {
-      int rx0 = g_dirty_x0;
-      int ry0 = g_dirty_y0;
-      int rx1 = g_dirty_x1;
-      int ry1 = g_dirty_y1;
-
-      rx0 = (rx0 / CHAR_WIDTH) * CHAR_WIDTH - CHAR_WIDTH;
-      ry0 = (ry0 / LINE_HEIGHT) * LINE_HEIGHT - LINE_HEIGHT;
-      rx1 = ((rx1 + CHAR_WIDTH - 1) / CHAR_WIDTH) * CHAR_WIDTH + CHAR_WIDTH;
-      ry1 = ((ry1 + LINE_HEIGHT - 1) / LINE_HEIGHT) * LINE_HEIGHT + LINE_HEIGHT;
-
-      if (rx0 < 0)
-        rx0 = 0;
-      if (ry0 < 0)
-        ry0 = 0;
-      if (rx1 > cw)
-        rx1 = cw;
-      if (ry1 > ch)
-        ry1 = ch;
-
-      int rw = rx1 - rx0;
-      int rh = ry1 - ry0;
-
-      render_region(pixels, cw, ch, rx0, ry0, rw, rh);
-      sys_win_blit(win, rx0, ry0, rw, rh, rx0, ry0, cw, pixels);
-
-      needs_redraw = 0;
-      dirty_reset();
-    }
+    shell_render();
   }
 
   return 0;

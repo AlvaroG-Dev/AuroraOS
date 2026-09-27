@@ -225,30 +225,30 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
 // ===========================================================================
 // Consola: stdin/stdout/stderr
 // ===========================================================================
+// El nodo consola ahora delega TODO en el tty. La lógica de blocking,
+// ring buffer, canonical, echo, ioctl y poll vive en tty.c.
+
 static int64_t console_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
                                 void *buf) {
   (void)node;
-  (void)offset;
-  (void)size;
-  (void)buf;
-  return 0;
+  return tty_read(tty_default(), offset, size, buf);
 }
 
 static int64_t console_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
                                  const void *buf) {
   (void)node;
-  (void)offset;
-  if (!buf || size == 0)
-    return 0;
-  const char *str = (const char *)buf;
-  unsigned long flags;
-  serial_lock_acquire(&flags);
-  for (size_t i = 0; i < size; i++) {
-    serial_putc_locked(str[i]);
-    winsrv_console_output(str[i]);
-  }
-  serial_lock_release(flags);
-  return (int64_t)size;
+  return tty_write(tty_default(), offset, size, buf);
+}
+
+static int console_vfs_poll(vfs_node_t *node, short events) {
+  (void)node;
+  return tty_poll(tty_default(), events);
+}
+
+static int64_t console_vfs_ioctl(vfs_node_t *node, unsigned long req,
+                                 uint64_t arg) {
+  (void)node;
+  return tty_ioctl(tty_default(), req, arg);
 }
 
 static vfs_ops_t console_ops = {
@@ -257,6 +257,8 @@ static vfs_ops_t console_ops = {
     .open = NULL,
     .close = NULL,
     .readable = NULL,
+    .poll = console_vfs_poll,
+    .ioctl = console_vfs_ioctl,
 };
 
 static vfs_node_t stdin_node;
@@ -911,6 +913,7 @@ static const devfs_entry_t devfs_entries[] = {
     {"null", &dev_null_ops},
     {"zero", &dev_zero_ops},
     {"kmsg", &dev_kmsg_ops},
+    {"tty", &console_ops},
 };
 
 static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
@@ -1206,7 +1209,7 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
 }
 
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
-                            size_t count) {
+                           size_t count) {
   process_t *proc = (process_t *)proc_ptr;
   if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || !buf)
     return -1;
@@ -1239,8 +1242,7 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       break;
     }
 
-    int64_t bytes =
-        f->node->ops->write(f->node, f->offset, chunk, kbuf);
+    int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
       if (total == 0) {
         kfree(kbuf);
@@ -1343,6 +1345,26 @@ void vfs_notify_writable(file_descriptor_t *fd) {
   if (!fd)
     return;
   wake_up_all(&fd->write_wq);
+}
+
+int vfs_node_poll(vfs_node_t *node, short events) {
+  if (!node)
+    return 0;
+  if (node->ops && node->ops->poll)
+    return node->ops->poll(node, events);
+  // Fichero regular: siempre listo para leer y escribir.
+  int r = 0;
+  if (events & 1 /*POLLIN*/)
+    r |= 1;
+  if (events & 4 /*POLLOUT*/)
+    r |= 4;
+  return r;
+}
+
+int64_t vfs_node_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
+  if (!node || !node->ops || !node->ops->ioctl)
+    return -ENOTTY;
+  return node->ops->ioctl(node, req, arg);
 }
 
 // ===========================================================================

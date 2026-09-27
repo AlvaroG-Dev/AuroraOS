@@ -24,6 +24,7 @@
 #define SYS_STAT 4
 #define SYS_FSTAT 5
 #define SYS_LSTAT 6
+#define SYS_POLL 7
 #define SYS_LSEEK 8
 #define SYS_MMAP 9
 #define SYS_MPROTECT 10
@@ -36,8 +37,10 @@
 #define SYS_WRITEV 20
 #define SYS_ACCESS 21
 #define SYS_PIPE 22
+#define SYS_SELECT 23
 #define SYS_SCHED_YIELD 24
 #define SYS_DUP2 33
+#define SYS_NANOSLEEP 35
 #define SYS_GETPID 39
 #define SYS_KILL 62
 #define SYS_UNAME 63
@@ -48,6 +51,17 @@
 #define SYS_MKDIR 83
 #define SYS_UNLINK 87
 #define SYS_READLINK 89
+#define SYS_GETUID 102
+#define SYS_GETGID 104
+#define SYS_GETEUID 107
+#define SYS_GETEGID 108
+#define SYS_SETPGID 109
+#define SYS_GETPPID 110
+#define SYS_SETSID 112
+#define SYS_GETGROUPS 115
+#define SYS_GETPGID 121
+#define SYS_GETSID 124
+#define SYS_PRCTL 157
 #define SYS_ARCH_PRCTL 158
 #define SYS_GETDENTS64 217
 #define SYS_SET_TID_ADDRESS 218
@@ -58,6 +72,8 @@
 #define SYS_FSTATAT 262
 #define SYS_UNLINKAT 263
 #define SYS_RENAMEAT 264
+#define SYS_PSELECT6 270
+#define SYS_PPOLL 271
 #define SYS_SET_ROBUST_LIST 273
 #define SYS_PRLIMIT64 302
 #define SYS_GETRANDOM 318

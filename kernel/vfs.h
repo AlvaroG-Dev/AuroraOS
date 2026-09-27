@@ -64,17 +64,21 @@ typedef struct vfs_ops {
   int (*mkdir)(vfs_node_t *dir, const char *name);
   int (*unlink)(vfs_node_t *dir, const char *name);
 
-  // [PR 4.3] Cambia el tamaño del archivo. Reducir libera clusters;
-  // crecer requiere que el FS lo soporte (FAT32 devuelve -EINVAL).
   int (*truncate)(vfs_node_t *node, uint64_t new_size);
 
-  // [PR 4.4] Lee la entry `index` del directorio.
-  //   *out->name[0] = '\0'    → fin del directorio (devolver 0)
-  //   >=0                     → OK, *out rellenado
-  //   <0                      → error
   int (*readdir)(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out);
   int (*rename)(vfs_node_t *src_dir, const char *src_name, vfs_node_t *dst_dir,
                 const char *dst_name);
+
+  // NUEVOS:
+  // Devuelve una máscara con POLLIN (1), POLLOUT (4), POLLERR (8), etc.
+  // Si NULL, el VFS asume (POLLIN|POLLOUT) siempre listo (ficheros regulares).
+  int (*poll)(vfs_node_t *node, short events);
+
+  // req es el request de ioctl; arg es un puntero de USERLAND sin validar.
+  // El handler de ioctl debe hacer access_ok/copy_to_user.
+  // Si NULL, devuelve -ENOTTY.
+  int64_t (*ioctl)(vfs_node_t *node, unsigned long req, uint64_t arg);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -201,5 +205,11 @@ file_descriptor_t *vfs_create_stdio_fd(int stdio_type);
 // Declaración aquí para que syscall.c pueda llamarla sin incluir
 // kernel/pipe.h directamente.
 int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end);
+
+// poll del nodo. Si node->ops->poll es NULL, devuelve (POLLIN|POLLOUT) siempre.
+int vfs_node_poll(vfs_node_t *node, short events);
+
+// ioctl del nodo. Si NULL, devuelve -ENOTTY.
+int64_t vfs_node_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg);
 
 #endif
