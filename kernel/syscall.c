@@ -50,6 +50,18 @@ typedef struct {
 static kernel_service_t g_services[KERNEL_SERVICES_MAX];
 static spinlock_t g_services_lock;
 
+// ---------- readv / writev ----------
+//
+// struct iovec { void *iov_base; size_t iov_len; }  // 16 bytes en x86_64
+//
+// Los usa musl en __stdio_read/__stdio_write. Si no existen, printf() no
+// vuelca (falla silenciosamente porque el error se ignora) y fgets() no
+// funciona en absoluto.
+struct k_iovec {
+  uint64_t iov_base;
+  uint64_t iov_len;
+};
+
 // ---------------------------------------------------------------------------
 // Servicios IPC (Aurora-specific)
 // ---------------------------------------------------------------------------
@@ -764,6 +776,98 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
   return nfd;
 }
 
+static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
+                        uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)iov_uptr, iovcnt * sizeof(struct k_iovec)))
+    return -EFAULT;
+
+  struct k_iovec local[16];
+  int64_t total = 0;
+  uint64_t done = 0;
+  while (done < iovcnt) {
+    uint64_t batch = iovcnt - done;
+    if (batch > 16)
+      batch = 16;
+    if (copy_from_user(local,
+                       (void *)(iov_uptr + done * sizeof(struct k_iovec)),
+                       batch * sizeof(struct k_iovec)) < 0)
+      return total > 0 ? total : -EFAULT;
+
+    for (uint64_t i = 0; i < batch; i++) {
+      if (local[i].iov_len == 0)
+        continue;
+      if (!access_ok((void *)local[i].iov_base, (size_t)local[i].iov_len))
+        return total > 0 ? total : -EFAULT;
+      int64_t r =
+          vfs_write_for_proc(proc, (int)fd, (const void *)local[i].iov_base,
+                             (size_t)local[i].iov_len);
+      if (r < 0)
+        return total > 0 ? total : r;
+      total += r;
+      // Short write: paramos y devolvemos lo que llevamos.
+      if ((uint64_t)r < local[i].iov_len)
+        return total;
+    }
+    done += batch;
+  }
+  return total;
+}
+
+static int64_t k_readv(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
+                       uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)iov_uptr, iovcnt * sizeof(struct k_iovec)))
+    return -EFAULT;
+
+  struct k_iovec local[16];
+  int64_t total = 0;
+  uint64_t done = 0;
+  while (done < iovcnt) {
+    uint64_t batch = iovcnt - done;
+    if (batch > 16)
+      batch = 16;
+    if (copy_from_user(local,
+                       (void *)(iov_uptr + done * sizeof(struct k_iovec)),
+                       batch * sizeof(struct k_iovec)) < 0)
+      return total > 0 ? total : -EFAULT;
+
+    for (uint64_t i = 0; i < batch; i++) {
+      if (local[i].iov_len == 0)
+        continue;
+      if (!access_ok((void *)local[i].iov_base, (size_t)local[i].iov_len))
+        return total > 0 ? total : -EFAULT;
+      int64_t r = vfs_read_for_proc(proc, (int)fd, (void *)local[i].iov_base,
+                                    (size_t)local[i].iov_len);
+      if (r < 0)
+        return total > 0 ? total : r;
+      total += r;
+      if (r == 0)
+        return total; // EOF
+      if ((uint64_t)r < local[i].iov_len)
+        return total;
+    }
+    done += batch;
+  }
+  return total;
+}
+
 // ---------- sched_yield ----------
 static int64_t k_sched_yield(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                              uint64_t a5) {
@@ -1457,6 +1561,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},
     [SYS_RT_SIGPROCMASK] = {k_rt_sigprocmask, "rt_sigprocmask"},
     [SYS_IOCTL] = {k_ioctl, "ioctl"},
+    [SYS_READV] = {k_readv, "readv"},
+    [SYS_WRITEV] = {k_writev, "writev"},
     [SYS_ACCESS] = {k_access, "access"},
     [SYS_PIPE] = {k_pipe, "pipe"},
     [SYS_SCHED_YIELD] = {k_sched_yield, "sched_yield"},

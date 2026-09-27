@@ -103,13 +103,21 @@ static int64_t elf_buf_read(void *ctx, uint64_t offset, size_t size,
 
 int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
                        uint64_t *pml4, uint64_t load_base, uint64_t *entry_out,
-                       uint64_t *vma_start_out, uint64_t *vma_end_out) {
+                       uint64_t *vma_start_out, uint64_t *vma_end_out,
+                       uint64_t *phdr_vaddr_out, uint16_t *phnum_out,
+                       uint16_t *phent_out) {
   if (!read || !pml4 || !entry_out || !vma_start_out || !vma_end_out)
     return -1;
 
   *entry_out = 0;
   *vma_start_out = ~0ULL;
   *vma_end_out = 0;
+  if (phdr_vaddr_out)
+    *phdr_vaddr_out = 0;
+  if (phnum_out)
+    *phnum_out = 0;
+  if (phent_out)
+    *phent_out = 0;
 
   // --- 1. Leer Elf64_Ehdr ---------------------------------------------------
   if (file_size < sizeof(Elf64_Ehdr)) {
@@ -173,8 +181,6 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
   const uint64_t user_canon_limit = 0x0000800000000000ULL;
 
   // --- 4. Preflight de todos los PT_LOAD -----------------------------------
-  // Mismo criterio que la versión buffer: nada se mapea hasta saber que
-  // TODOS los segmentos son válidos y canónicos.
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     const Elf64_Phdr *ph = &phdrs[i];
     if (ph->p_type != PT_LOAD)
@@ -229,10 +235,46 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     *entry_out = entry;
   }
 
+  // --- 5b. AT_PHDR: vaddr de runtime donde viven los program headers -------
+  //
+  // La tabla de phdrs está en el FICHERO en [e_phoff, e_phoff + ph_bytes).
+  // Alguien (nosotros) tiene que decidir en qué dirección virtual aparece
+  // ese rango tras el mapeo. La convención es:
+  //
+  //   Para el PT_LOAD que CONTIENE e_phoff en el fichero:
+  //       phdr_vaddr = (p_vaddr + load_bias) + (e_phoff - p_offset)
+  //
+  // con load_bias = 0 para ET_EXEC y load_bias = load_base para ET_DYN.
+  //
+  // Esto es lo que musl espera leer en AT_PHDR. Si no hay ningún PT_LOAD
+  // que contenga e_phoff, dejamos phdr_vaddr = 0; musl lo detectará y
+  // fallará limpiamente (mejor que mentirle con un valor basura).
+  {
+    uint64_t load_bias = (ehdr.e_type == ET_DYN) ? load_base : 0;
+    uint64_t phdr_vaddr = 0;
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+      const Elf64_Phdr *ph = &phdrs[i];
+      if (ph->p_type != PT_LOAD)
+        continue;
+      if (ehdr.e_phoff < ph->p_offset)
+        continue;
+      uint64_t seg_end_off = ph->p_offset + ph->p_filesz;
+      if (seg_end_off < ph->p_offset)
+        continue; // overflow
+      if (ph_end > seg_end_off)
+        continue;
+      phdr_vaddr = ph->p_vaddr + load_bias + (ehdr.e_phoff - ph->p_offset);
+      break;
+    }
+    if (phdr_vaddr_out)
+      *phdr_vaddr_out = phdr_vaddr;
+    if (phnum_out)
+      *phnum_out = ehdr.e_phnum;
+    if (phent_out)
+      *phent_out = ehdr.e_phentsize;
+  }
+
   // --- 6. Mapear y copiar cada PT_LOAD -------------------------------------
-  // Buffer temporal de lectura. Reutilizado entre segmentos.
-  // PAGE_SIZE es suficiente porque cada chunk que pedimos está acotado
-  // por el borde de página.
   uint8_t *tmp = (uint8_t *)kmalloc(PAGE_SIZE);
   if (!tmp) {
     rc = -ENOMEM;
@@ -259,7 +301,6 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     uint64_t end_page = (vaddr + memsz + 0xFFFULL) & ~0xFFFULL;
     size_t num_pages = (end_page - start_page) / PAGE_SIZE;
 
-    // Acumular el rango VMA global.
     if (start_page < vma_start)
       vma_start = start_page;
     if (end_page > vma_end)
@@ -285,7 +326,6 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
       }
     }
 
-    // Copiar datos del fichero a las páginas mapeadas, leyendo por chunks.
     for (uint64_t off = 0; off < filesz;) {
       uint64_t page_vaddr = (vaddr + off) & ~0xFFFULL;
       uint64_t page_offset = (vaddr + off) & 0xFFFULL;
@@ -313,7 +353,6 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
       off += chunk;
     }
 
-    // Rellenar BSS.
     if (memsz > filesz) {
       uint64_t bss_start = vaddr + filesz;
       uint64_t bss_end = vaddr + memsz;
@@ -342,6 +381,9 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
   *vma_end_out = vma_end;
   LOG_INFO("[ELF] Entry point: %p (VMA %p - %p)", (void *)*entry_out,
            (void *)vma_start, (void *)vma_end);
+  if (phdr_vaddr_out)
+    LOG_INFO("[ELF] AT_PHDR = %p, phnum=%u phent=%u", (void *)*phdr_vaddr_out,
+             phnum_out ? *phnum_out : 0, phent_out ? *phent_out : 0);
   rc = 0;
 
 out:
@@ -356,5 +398,5 @@ int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
   struct elf_buf_ctx ctx = {.data = (const uint8_t *)data, .size = size};
   uint64_t vma_s, vma_e;
   return elf_load_streaming(elf_buf_read, &ctx, size, pml4, load_base,
-                            entry_out, &vma_s, &vma_e);
+                            entry_out, &vma_s, &vma_e, NULL, NULL, NULL);
 }

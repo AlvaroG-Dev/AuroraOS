@@ -77,65 +77,205 @@ static void process_init_signals(process_t *proc) {
 }
 
 // ---------------------------------------------------------------------------
-// [Fase 3.2] Construcción del arg block en el stack del hijo.
+// [musl] Info necesaria para construir el auxv. La rellena
+// process_spawn_streaming_* justo después de elf_load_streaming.
+// ---------------------------------------------------------------------------
+typedef struct {
+  uint64_t phdr_vaddr; // AT_PHDR
+  uint64_t entry;      // AT_ENTRY
+  uint16_t phnum;      // AT_PHNUM
+  uint16_t phent;      // AT_PHENT
+} proc_auxv_info_t;
+
+// ---------------------------------------------------------------------------
+// [Fase 3.2 / musl] Construcción del arg block + envp + auxv en el stack.
 //
-//   [rsp + 0]              = argc
-//   [rsp + 8]              = argv[0]
+// Layout al entrar al entry point (x86_64 SysV, Linux ABI):
+//
+//   [rsp + 0]                   = argc
+//   [rsp + 8]                   = argv[0]
 //   ...
-//   [rsp + 8*argc]         = argv[argc-1]
-//   [rsp + 8*(argc+1)]     = NULL        (terminador de argv)
-//   [rsp + 8*(argc+2)]     = NULL        (terminador de envp)
-//   [rsp + str_off]        = "arg0\0arg1\0..."
+//   [rsp + 8*(argc+1)]          = NULL                (terminador argv)
+//   [rsp + 8*(argc+2)]          = envp[0]
+//   ...
+//   [rsp + 8*(argc+2+envc)]     = NULL                (terminador envp)
+//   [rsp + 8*(argc+3+envc)]     = auxv[0].type
+//   [rsp + 8*(argc+3+envc)+8]   = auxv[0].val
+//   ...
+//   [rsp + ...]                 = AT_NULL (0), 0
+//   [rsp + ...]                 = "arg0\0arg1\0...\0execfn\0" + 16 bytes random
 //
-// Devuelve el nuevo RSP o 0 en error.
+// El puntero de AT_RANDOM apunta a 16 bytes aleatorios en la zona de strings.
+// El puntero de AT_EXECFN apunta al path del binario.
+//
+// Devuelve el nuevo RSP (16-byte aligned) o 0 en error.
 // ---------------------------------------------------------------------------
 static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
-                                const char *const *argv) {
+                                const char *const *argv, int envc,
+                                const char *const *envp,
+                                const proc_auxv_info_t *ai,
+                                const char *execfn) {
   if (argc < 0 || argc > PROCESS_ARGV_MAX)
     return 0;
   if (argc > 0 && !argv)
     return 0;
+  if (envc < 0 || envc > 32)
+    return 0;
+  if (envc > 0 && !envp)
+    return 0;
 
-  uint64_t strings_total = 0;
+  // --- Medir strings ---
+  uint64_t argv_strings = 0;
   for (int i = 0; i < argc; i++) {
     if (!argv[i])
       return 0;
     size_t n = strlen(argv[i]) + 1;
     if (n > 4096)
       return 0;
-    strings_total += n;
+    argv_strings += n;
   }
-  strings_total = (strings_total + 7) & ~7ULL;
+  uint64_t envp_strings = 0;
+  for (int i = 0; i < envc; i++) {
+    if (!envp[i])
+      return 0;
+    size_t n = strlen(envp[i]) + 1;
+    if (n > 4096)
+      return 0;
+    envp_strings += n;
+  }
+  uint64_t execfn_len = execfn ? (strlen(execfn) + 1) : 1;
+  if (execfn_len > 4096)
+    execfn_len = 4096;
 
-  uint64_t block = 8 + (uint64_t)argc * 8 + 8 + 8 + strings_total;
-  block = (block + 15) & ~15ULL;
+  // --- Tamaños de cada zona ---
+  const int N_AUXV_TOTAL = 18; // 17 entradas reales + AT_NULL
 
-  if (block > stack_top)
+  uint64_t argc_sz = 8;
+  uint64_t argv_sz = ((uint64_t)argc + 1) * 8;
+  uint64_t envp_sz = ((uint64_t)envc + 1) * 8;
+  uint64_t auxv_sz = (uint64_t)N_AUXV_TOTAL * 16;
+  uint64_t strings_sz = argv_strings + envp_strings + execfn_len + 16;
+  strings_sz = (strings_sz + 7) & ~7ULL;
+
+  uint64_t total = argc_sz + argv_sz + envp_sz + auxv_sz + strings_sz;
+  total = (total + 15) & ~15ULL;
+  if (total > stack_top)
     return 0;
-  uint64_t new_rsp = (stack_top - block) & ~0xFULL;
+  uint64_t new_rsp = (stack_top - total) & ~0xFULL;
 
-  uint8_t *scratch = (uint8_t *)kmalloc(block);
+  uint8_t *scratch = (uint8_t *)kmalloc(total);
   if (!scratch)
     return 0;
-  memset(scratch, 0, block);
+  memset(scratch, 0, total);
 
-  *(uint64_t *)(scratch + 0) = (uint64_t)argc;
+  uint64_t off = 0;
+  *(uint64_t *)(scratch + off) = (uint64_t)argc;
+  off += 8;
 
-  uint64_t str_off = 8 + (uint64_t)argc * 8 + 8 + 8;
+  // La zona de strings empieza justo después del auxv.
+  uint64_t str_off = argc_sz + argv_sz + envp_sz + auxv_sz;
+
+  // --- argv[] ---
   for (int i = 0; i < argc; i++) {
     size_t n = strlen(argv[i]) + 1;
     memcpy(scratch + str_off, argv[i], n);
-    *(uint64_t *)(scratch + 8 + i * 8) = new_rsp + str_off;
+    *(uint64_t *)(scratch + off) = new_rsp + str_off;
+    off += 8;
     str_off += n;
   }
+  *(uint64_t *)(scratch + off) = 0; // argv terminator
+  off += 8;
 
+  // --- envp[] ---
+  for (int i = 0; i < envc; i++) {
+    size_t n = strlen(envp[i]) + 1;
+    memcpy(scratch + str_off, envp[i], n);
+    *(uint64_t *)(scratch + off) = new_rsp + str_off;
+    off += 8;
+    str_off += n;
+  }
+  *(uint64_t *)(scratch + off) = 0; // envp terminator
+  off += 8;
+
+  // --- 16 bytes random para AT_RANDOM ---
+  uint64_t random_va = new_rsp + str_off;
+  {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t r = ((uint64_t)hi << 32) | lo;
+    r ^= 0x9E3779B97F4A7C15ULL;
+    r ^= (r << 13);
+    r ^= (r >> 7);
+    r ^= (r << 17);
+    memcpy(scratch + str_off, &r, 8);
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t r2 = ((uint64_t)hi << 32) | lo;
+    r2 ^= 0xBF58476D1CE4E5B9ULL;
+    memcpy(scratch + str_off + 8, &r2, 8);
+  }
+  str_off += 16;
+
+  // --- AT_EXECFN string ---
+  uint64_t execfn_va = new_rsp + str_off;
+  if (execfn) {
+    size_t n = strlen(execfn) + 1;
+    memcpy(scratch + str_off, execfn, n);
+    str_off += n;
+  } else {
+    scratch[str_off] = '\0';
+    str_off += 1;
+  }
+
+// --- auxv ---
+#define PUSH_AUXV(t, v)                                                        \
+  do {                                                                         \
+    *(uint64_t *)(scratch + off) = (uint64_t)(t);                              \
+    off += 8;                                                                  \
+    *(uint64_t *)(scratch + off) = (uint64_t)(v);                              \
+    off += 8;                                                                  \
+  } while (0)
+
+  PUSH_AUXV(3, ai ? ai->phdr_vaddr : 0);      // AT_PHDR
+  PUSH_AUXV(4, ai ? (uint64_t)ai->phent : 0); // AT_PHENT
+  PUSH_AUXV(5, ai ? (uint64_t)ai->phnum : 0); // AT_PHNUM
+  PUSH_AUXV(6, PAGE_SIZE);                    // AT_PAGESZ
+  PUSH_AUXV(7, 0);                            // AT_BASE (no ld.so)
+  PUSH_AUXV(8, 0);                            // AT_FLAGS
+  PUSH_AUXV(9, ai ? ai->entry : 0);           // AT_ENTRY
+  PUSH_AUXV(11, 0);                           // AT_UID
+  PUSH_AUXV(12, 0);                           // AT_EUID
+  PUSH_AUXV(13, 0);                           // AT_GID
+  PUSH_AUXV(14, 0);                           // AT_EGID
+  PUSH_AUXV(16, 0);                           // AT_HWCAP
+  PUSH_AUXV(17, 100);                         // AT_CLKTCK
+  PUSH_AUXV(23, 0);                           // AT_SECURE
+  PUSH_AUXV(25, random_va);                   // AT_RANDOM
+  PUSH_AUXV(26, 0);                           // AT_HWCAP2
+  PUSH_AUXV(31, execfn_va);                   // AT_EXECFN
+  PUSH_AUXV(0, 0);                            // AT_NULL
+#undef PUSH_AUXV
+
+  // Los dos "carriles" (off = punteros, str_off = strings) son
+  // independientes. off termina exactamente en
+  // argc_sz+argv_sz+envp_sz+auxv_sz. str_off termina en eso + los bytes
+  // reales de strings, que puede ser < strings_sz por el redondeo a 8.
+  // Lo único que hay que garantizar es que str_off no se salga del buffer.
+  if (off > total || str_off > total) {
+    LOG_ERR("[PROC] setup_arg_block: overflow off=%llu str_off=%llu total=%llu",
+            (unsigned long long)off, (unsigned long long)str_off,
+            (unsigned long long)total);
+    kfree(scratch);
+    return 0;
+  }
+
+  // --- Copiar al stack del usuario ---
   uint64_t va = new_rsp;
   uint64_t src = 0;
-  while (src < block) {
+  while (src < total) {
     uint64_t page_va = va & ~0xFFFULL;
     uint64_t page_off = va & 0xFFFULL;
     uint64_t avail = PAGE_SIZE - page_off;
-    uint64_t chunk = block - src;
+    uint64_t chunk = total - src;
     if (chunk > avail)
       chunk = avail;
 
@@ -373,8 +513,12 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   uint64_t entry = 0;
   uint64_t elf_vma_start = ~0ULL;
   uint64_t elf_vma_end = 0;
+  uint64_t phdr_vaddr = 0;
+  uint16_t phnum = 0;
+  uint16_t phent = 0;
   if (elf_load_streaming(read, read_ctx, file_size, pml4, load_base, &entry,
-                         &elf_vma_start, &elf_vma_end) != 0) {
+                         &elf_vma_start, &elf_vma_end, &phdr_vaddr, &phnum,
+                         &phent) != 0) {
     LOG_ERR("[PROC] Fallo al cargar ELF (streaming)");
     paging_free_user_space(pml4_phys);
     return NULL;
@@ -403,7 +547,14 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     }
   }
 
-  uint64_t user_rsp = setup_arg_block(pml4, stack_top, argc, argv);
+  proc_auxv_info_t ai = {
+      .phdr_vaddr = phdr_vaddr,
+      .entry = entry,
+      .phnum = phnum,
+      .phent = phent,
+  };
+  uint64_t user_rsp =
+      setup_arg_block(pml4, stack_top, argc, argv, 0, NULL, &ai, name);
   if (!user_rsp) {
     LOG_ERR("[PROC] setup_arg_block falló");
     paging_free_user_space(pml4_phys);

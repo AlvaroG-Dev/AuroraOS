@@ -315,6 +315,15 @@ static void kmain_task(void) {
   } else {
     LOG_INFO("[TEST] OK: syscall_linux_test cargado (PID=%u)", abi_proc->pid);
   }
+
+  // [PR 3b] Hello world con musl. Requiere auxv (AT_PHDR/AT_ENTRY/...).
+  LOG_INFO("[TEST] Lanzando /initrd/apps/hello_musl...");
+  process_t *musl_proc = process_load("/initrd/apps/hello_musl");
+  if (!musl_proc) {
+    LOG_ERR("[TEST] FALLO cargando hello_musl");
+  } else {
+    LOG_INFO("[TEST] OK: hello_musl cargado (PID=%u)", musl_proc->pid);
+  }
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
   //
   // Ese bucle convierte a kmain_task en un busy-loop del BSP cuando

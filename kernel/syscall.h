@@ -32,6 +32,8 @@
 #define SYS_RT_SIGACTION 13
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_IOCTL 16
+#define SYS_READV 19
+#define SYS_WRITEV 20
 #define SYS_ACCESS 21
 #define SYS_PIPE 22
 #define SYS_SCHED_YIELD 24
