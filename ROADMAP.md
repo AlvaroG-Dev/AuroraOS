@@ -18,6 +18,12 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] VFS con mount points
 - [x] FAT32 persistente (mount, read, write, create, mkdir, unlink, truncate, readdir)
 - [x] Ring 3 + ELF loader + syscalls + libc propia parcial
+- [x] ABI Linux x86_64 dual (Linux + Aurora)
+- [x] Primeros binarios estáticos compilados con musl
+- [x] `execve` in-place + `wait4/rusage` + variables de entorno
+- [x] Pipes + `dup2` + redirecciones + pipelines
+- [x] TTY real + line discipline + `poll/select`
+- [x] `busybox sh` interactivo
 - [x] IPC por mailboxes
 - [x] Framebuffer compositor + window server + terminal gráfico
 - [x] Framework de tests del kernel + regresiones userland
@@ -119,26 +125,41 @@ La opción 2 es la correcta a largo plazo. La 1 es un parche si hace falta carga
 
 Objetivo: convertir el kernel en una plataforma para aplicaciones.
 
-### 3.1 libc
-- [ ] Ampliar la libc propia.
-- [ ] Mejorar manejo de errores y errno.
-- [ ] Añadir APIs de tiempo, procesos, archivos y memoria que falten.
-- [ ] Headers y ABI más completos.
-- [ ] Definir claramente qué parte es propia y qué parte pretende compatibilidad POSIX.
+### 3.1 libc y ABI Linux
 
-### 3.2 Procesos y ejecución
-- [x] Argumentos en `spawn`/`exec`: `SYS_SPAWN_ARGS`, arg block en el stack del hijo (convención System V), `crt0.asm` lee `argc`/`argv`. Entorno (`envp`) todavía vacío.
-- [x] cwd por proceso: `SYS_CHDIR`, `SYS_GETCWD`, `proc->cwd`, herencia en `spawn`, resolución de paths relativos y `..` contra cwd.
-- [x] `execve` (SYS_EXECVE 59): reemplazo in-place del espacio de usuario (nuevo PML4, ELF cargado, stack y arg block construidos, sin crear proceso nuevo). Incluye dos correcciones acopladas:
-  - actualización de **ambos** `proc->pml4_phys` y `proc->task->cr3`, porque `task_switch()` recarga CR3 desde `task->cr3` en cada cambio de contexto;
-  - eliminación del race SMP de `syscall_current_regs()`: era un puntero global compartido, ahora vive en `task_t.syscall_regs` (per-task). Sin esto, `k_execve` escribía el trap frame del proceso equivocado y ambos morían con PF de instruction fetch.
-- [x] `wait4` con `struct rusage` real: `ru_utime`/`ru_stime` contabilizados por `sched_tick()` (1 tick = 1 ms, LAPIC a 1 kHz). Contador per-process en `process_t.cpu_ticks_user`, volcado a `struct rusage` en `k_wait4`. `ru_maxrss`, `ru_minflt`, `ru_majflt`, `ru_nvcsw`, `ru_nivcsw` a 0 por ahora.
-- [x] `busybox sh` interactivo: arranca, ejecuta applets externos (`cat`, `ls`, `echo`, `clear`, `grep`, ...) vía `fork` + `execve`, y sobrevive a los comandos.
-- [ ] Variables de entorno (`envp`, `getenv`/`setenv`).
-- [ ] Señales, si se decide que forman parte del modelo de Aurora.
-- [x] Pipes y redirecciones.
-- [ ] PTYs para terminales.
-- [ ] Job control del shell.
+- [x] Definir ABI Linux x86_64 en paralelo a la ABI Aurora.
+- [x] Dispatcher dual de syscalls.
+- [x] `arch_prctl(SET_FS/GET_FS)` + `fs_base` per-task.
+- [x] Layout Linux de `struct stat`.
+- [x] `writev/readv`, `fcntl`, `getdents64` y primeras syscalls POSIX/Linux.
+- [x] Primer binario estático compilado con musl ejecutándose en Aurora.
+- [x] Apps básicas compiladas con musl.
+- [x] Utilidades adicionales compiladas con musl: `wc`, `head`, `grep`, `tee`, `sort`, `cp`, `mv`, `rm`, `mkdir`, `kill`, `calc`.
+- [ ] Ampliar la libc propia.
+- [ ] Completar `errno`, tiempo, procesos, archivos y memoria.
+- [ ] Headers y ABI estable documentados.
+- [ ] Compatibilidad POSIX más amplia.
+
+### 3.2 Procesos, ejecución y shell
+
+- [x] Argumentos en `spawn`/`exec`.
+- [x] cwd por proceso y herencia.
+- [x] `execve` in-place con nuevo address space.
+- [x] `wait4` con `struct rusage` y contabilidad de CPU por proceso.
+- [x] Variables de entorno: `envp`, `environ`, `getenv/setenv`.
+- [x] `MAP_FIXED` y `next_mmap_addr` por proceso.
+- [x] Pipes anónimos, `dup2` y asignación de FDs al hijo.
+- [x] Redirecciones `<`, `>`, `>>` y pipelines.
+- [x] TTY real con line discipline canonical/raw.
+- [x] `poll`, `select`, `pselect6`, `ppoll` y `nanosleep`.
+- [x] ioctls básicos de TTY y `/dev/tty`.
+- [x] `busybox sh` interactivo mediante fork/exec.
+- [x] Fuente antialiased y mejoras ANSI de la consola.
+- [ ] PTYs.
+- [ ] Job control completo.
+- [ ] Señales POSIX completas.
+- [ ] Background/jobs del shell.
+- [ ] Historial y autocompletado.
 
 ### 3.3 VFS y /dev
 - [ ] /proc para observabilidad.
@@ -158,19 +179,23 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [ ] Mejor manejo de errores.
 
 ### 3.5 BusyBox completo
-Objetivo: pasar de "`busybox sh` arranca y ejecuta algunos applets" a un BusyBox completo (`defconfig` o cercano) como userland base, al estilo de una distro Linux minimalista.
 
-Estado actual: `sh`, `cat`, `ls`, `echo`, `clear`, `grep`, etc. funcionan vía `fork`+`execve` sobre la ABI propia de Aurora. Lo que falta no es "más applets", sino superficie de syscall/libc que BusyBox da por hecha:
+Objetivo: convertir BusyBox en una base de userland mucho más completa.
 
-- [ ] `stat`/`fstat`/`lstat` con `struct stat` completo (muchos applets lo usan para permisos, tamaño, tipo de fichero).
-- [ ] `dup`/`dup2`/`pipe`/`fcntl` (ya hay pipes en 3.2; falta exponerlos con la semántica que BusyBox espera).
-- [ ] `ioctl` mínimo de terminal (`TCGETS`/`TCSETS`, tamaño de ventana) para `sh` en modo raw, `vi`, `top`, `less`.
-- [ ] `chmod`/`chown`/`umask` como no-ops coherentes mientras no exista modelo de permisos (Fase 7.2), en vez de fallar.
-- [ ] `symlink`/`readlink`: FAT32 no soporta symlinks; decidir si se emulan a nivel VFS o se devuelve `ENOSYS` de forma consistente.
-- [ ] `utime`/`futimes`, `sync`.
-- [ ] `/proc` mínimo (`uptime`, `meminfo`, `version`) — bastantes applets (`free`, `ps`, `top`) lo consultan directamente en vez de usar syscalls.
-- [ ] Variables de entorno reales (bloqueado por 3.2 `envp`).
-- [ ] Decidir base de libc para el build de BusyBox: seguir enlazando contra la libc propia de Aurora (más trabajo de libc, ABI 100% propia) o compilar BusyBox estático contra **musl** cruzado a la ABI de syscalls de Aurora (menos trabajo de libc, pero exige que la tabla de syscalls de Aurora sea estable). Recomendado: musl estático — es también el camino más corto hacia 3.6.
+Estado actual:
+- [x] `busybox sh` interactivo.
+- [x] Ejecución de applets externos mediante `fork` + `execve`.
+- [x] Apps/utilidades equivalentes ya portadas a musl: `echo`, `cat`, `ls`, `touch`, `pwd`, `wc`, `head`, `grep`, `tee`, `sort`, `cp`, `mv`, `rm`, `mkdir`, `kill`, `calc`.
+- [x] Pipes y redirecciones necesarios para el shell básico.
+- [ ] Completar superficie syscall/libc para un build BusyBox amplio.
+- [ ] `stat/fstat/lstat` y metadatos completos.
+- [ ] `dup/dup2/pipe/fcntl` con semántica suficiente para más applets.
+- [ ] `ioctl` de terminal más completo.
+- [ ] `chmod/chown/umask` coherentes con el futuro modelo de permisos.
+- [ ] `symlink/readlink` o política explícita de no soporte en FAT32.
+- [ ] `sync`, timestamps y APIs restantes.
+- [ ] `/proc` mínimo para applets como `ps`, `top`, `free`.
+- [ ] Job control y PTYs.
 
 ### 3.6 Ejecutar binarios Linux (ELF) — "personalidad Linux"
 Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bash, etc.) sin recompilarlos contra la ABI de Aurora, mediante una capa de traducción de syscalls — el mismo enfoque que WSL1 (Linux sobre un kernel no-Linux) en vez de un hipervisor o VM.
@@ -406,7 +431,7 @@ Objetivo: mantener el proyecto mantenible mientras crece.
 
 1. **Robustez del kernel + auditoría SMP** — ✅ completada (solo quedan tareas de documentación/debugging, no bugs SMP conocidos)
 2. **Storage persistente + filesystem** — ✅ en gran parte (FAT32 persistente con LFN, rename, mount en `/`; pendiente: buffer cache, tests de corrupción, boot configurable).
-3. **Userland/libc/shell** — ⏳ en progreso (argv y cwd listos; siguientes: libc, pipes/redirecciones, /dev, shell con historial).
+3. **Userland/libc/shell** — ⏳ en progreso avanzado (ABI Linux, musl, TTY, pipes, redirecciones y `busybox sh` ya funcionan; quedan libc/POSIX, PTY, job control y superficie BusyBox).
 4. **Escritorio y window manager**
 5. **Networking**
 6. **USB**
@@ -430,7 +455,7 @@ La idea es evitar implementar muchas funciones superficiales a la vez. Primero h
 - [ ] Aurora OS puede utilizar teclado/ratón USB.
 - [ ] Aurora OS dispone de un modelo de seguridad coherente.
 - [ ] Aurora OS tiene SDK/documentación suficientes para desarrollar aplicaciones de terceros.
-- [~] Aurora OS ejecuta un userland tipo BusyBox completo. (`busybox sh` interactivo con applets básicos ya funciona; falta la superficie de syscall/libc para un build `defconfig`, ver 3.5)
+- [~] Aurora OS ejecuta un userland tipo BusyBox completo. (`busybox sh` interactivo y una colección creciente de applets sobre musl ya funcionan; falta ampliar la superficie hasta un build completo, ver 3.5)
 - [ ] Aurora OS puede ejecutar binarios Linux (ELF) reales sin recompilar, al menos estáticos/musl (ver 3.6).
 - [ ] Aurora OS puede ejecutar un subconjunto acotado de ejecutables Windows de consola (PE/x64), sin pretender compatibilidad Win32 completa (ver 3.7).
 
