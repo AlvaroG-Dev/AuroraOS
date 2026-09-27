@@ -729,7 +729,7 @@ void process_exit(process_t *proc, int exit_code) {
   if (cur && cur == proc->task)
     cur->state = TASK_DEAD;
 
-  process_t *parent = NULL;
+  task_t *parent_task = NULL;
   unsigned long flags = spin_lock_irqsave(&process_lock);
   proc->exit_code = exit_code;
   proc->is_zombie = 1;
@@ -737,15 +737,22 @@ void process_exit(process_t *proc, int exit_code) {
   process_t *p = process_list;
   while (p) {
     if (p->pid == proc->ppid) {
-      parent = p;
+      // Mantener viva la task del padre permite despertar su wait queue
+      // después de soltar process_lock sin conservar un process_t que
+      // pueda ser liberado por el reaper concurrentemente.
+      parent_task = p->task;
+      if (parent_task)
+        task_get(parent_task);
       break;
     }
     p = p->next;
   }
   spin_unlock_irqrestore(&process_lock, flags);
 
-  if (parent)
-    wake_up_all(&parent->child_wq);
+  if (parent_task) {
+    wait_queue_wake_task(parent_task);
+    task_put(parent_task);
+  }
 }
 
 __attribute__((noreturn)) void process_exit_current(int exit_code) {
