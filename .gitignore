@@ -24,7 +24,14 @@ a.out
 *.swp
 *~
 *:Zone.Identifier
-.tgz
+toolchain/*.tgz
+toolchain/*.tar.gz
+toolchain/*.tar.bz2
+third_party/*.tar.bz2
+third_party/*.tar.gz
+*.tar.bz2
+*.tar.gz
+*.tgz
 
 # IDE
 .vscode/
