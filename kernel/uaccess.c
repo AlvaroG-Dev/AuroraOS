@@ -60,7 +60,10 @@ long strncpy_from_user(char *dst, const char *src, size_t max) {
   // No validamos max bytes porque la string puede terminar antes; el
   // asm hace las lecturas byte a byte y cada una tiene su fixup.
   long n = raw_strncpy_from_user(dst, src, max);
-  retu// ---------------------------------------------------------------------------
+  return n; // >=0 OK, -EFAULT si falló
+}
+
+// ---------------------------------------------------------------------------
 // put/get de tamaños fijos.
 // Reutilizan copy_to_user/copy_from_user para obtener la misma validación
 // de rango y exception-fixup que las copias generales. Así un puntero que
