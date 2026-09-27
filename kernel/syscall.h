@@ -44,6 +44,9 @@
 #define SYS_FCNTL 72
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
+#define SYS_RENAME 82
+#define SYS_MKDIR 83
+#define SYS_UNLINK 87
 #define SYS_READLINK 89
 #define SYS_ARCH_PRCTL 158
 #define SYS_GETDENTS64 217
