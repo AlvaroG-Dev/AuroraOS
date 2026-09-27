@@ -1260,7 +1260,7 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
   }
 
   kfree(kbuf);
-  return total == (size_t)-1 ? -EFAULT : (int64_t)total;
+  return (int64_t)total;
 }
 
 int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
