@@ -1155,18 +1155,55 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
   file_descriptor_t *f = proc->fds[fd];
   if (!f->node || !f->node->ops || !f->node->ops->read)
     return -1;
+  if (count == 0)
+    return 0;
 
-  stac();
-  int64_t bytes = f->node->ops->read(f->node, f->offset, count, buf);
-  clac();
+  // Las operaciones de filesystem escriben sobre memoria de kernel.
+  // Copiar después al buffer de userland evita que un #PF por una página
+  // ausente/no válida llegue al handler fatal del kernel.
+  const size_t chunk_size = 4096;
+  uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
+  if (!kbuf)
+    return -ENOMEM;
 
-  if (bytes > 0)
+  size_t total = 0;
+  while (total < count) {
+    size_t chunk = count - total;
+    if (chunk > chunk_size)
+      chunk = chunk_size;
+
+    int64_t bytes = f->node->ops->read(f->node, f->offset, chunk, kbuf);
+    if (bytes < 0) {
+      if (total == 0)
+        total = (size_t)-1;
+      break;
+    }
+    if (bytes == 0)
+      break;
+    if ((uint64_t)bytes > chunk) {
+      if (total == 0)
+        total = (size_t)-1;
+      break;
+    }
+
+    if (copy_to_user((uint8_t *)buf + total, kbuf, (size_t)bytes) < 0) {
+      if (total == 0)
+        total = (size_t)-1;
+      break;
+    }
+
     f->offset += (uint64_t)bytes;
-  return bytes;
+    total += (size_t)bytes;
+    if ((size_t)bytes < chunk)
+      break;
+  }
+
+  kfree(kbuf);
+  return total == (size_t)-1 ? -EFAULT : (int64_t)total;
 }
 
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
-                           size_t count) {
+                            size_t count) {
   process_t *proc = (process_t *)proc_ptr;
   if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || !buf)
     return -1;
@@ -1174,14 +1211,50 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
   file_descriptor_t *f = proc->fds[fd];
   if (!f->node || !f->node->ops || !f->node->ops->write)
     return -1;
+  if (count == 0)
+    return 0;
 
-  stac();
-  int64_t bytes = f->node->ops->write(f->node, f->offset, count, buf);
-  clac();
+  // Copiar primero a memoria de kernel. Así una fuente de userland
+  // inválida devuelve -EFAULT mediante exception-fixup antes de entrar
+  // en la operación del filesystem.
+  const size_t chunk_size = 4096;
+  uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
+  if (!kbuf)
+    return -ENOMEM;
 
-  if (bytes > 0)
+  size_t total = 0;
+  while (total < count) {
+    size_t chunk = count - total;
+    if (chunk > chunk_size)
+      chunk = chunk_size;
+
+    if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
+      if (total == 0)
+        total = (size_t)-1;
+      break;
+    }
+
+    int64_t bytes =
+        f->node->ops->write(f->node, f->offset, chunk, kbuf);
+    if (bytes < 0) {
+      if (total == 0)
+        total = (size_t)-1;
+      break;
+    }
+    if ((uint64_t)bytes > chunk) {
+      if (total == 0)
+        total = (size_t)-1;
+      break;
+    }
+
     f->offset += (uint64_t)bytes;
-  return bytes;
+    total += (size_t)bytes;
+    if ((size_t)bytes < chunk)
+      break;
+  }
+
+  kfree(kbuf);
+  return total == (size_t)-1 ? -EFAULT : (int64_t)total;
 }
 
 int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
