@@ -24,6 +24,7 @@ APPS = hello calc filetest ipctest pftest waitpid_stress mmap_race \
        sbrk_shrink calloc_overflow shell ls cat app_mkdir app_rm app_cp app_pwd \
        app_mv app_kill echo \
        touch wc head grep tee sort \
+       syscall_linux_test \
        segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel \
        win_blit_fault
 
@@ -290,8 +291,14 @@ sort: apps/sort/main.c $(LIB_OBJS)
 	mkdir -p ../sysroot/apps
 	cp sort ../sysroot/apps/
 
+syscall_linux_test: apps/syscall_linux_test/main.c
+	$(CC) $(CFLAGS) -c apps/syscall_linux_test/main.c -o syscall_linux_test.o
+	$(LD) -o syscall_linux_test syscall_linux_test.o $(LDFLAGS)
+	mkdir -p ../sysroot/apps
+	cp syscall_linux_test ../sysroot/apps/
+
 clean:
 	rm -f *.o lib/*.o
 	rm -f hello calc filetest ipctest waitpid_stress mmap_race mmap_race_worker vma_overlap vma_isolation vma_isolation_worker elf_validation elf_rotest elf_permtest sbrk_shrink_test sbrk_shrink munmap_partial calloc_overflow
 	rm -f segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel win_blit_fault shell ls cat
-	rm -f mkdir rm cp pwd mv kill echo touch wc head grep tee sort
+	rm -f mkdir rm cp pwd mv kill echo touch wc head grep tee sort syscall_linux_test

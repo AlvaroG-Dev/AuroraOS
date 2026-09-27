@@ -307,6 +307,14 @@ static void kmain_task(void) {
   LOG_INFO("[INIT] Cargando shell interactivo '/initrd/apps/shell'...");
   process_load("/initrd/apps/shell");
 
+  // [PR 3a] Test del ABI Linux desde userland.
+  LOG_INFO("[TEST] Lanzando /initrd/apps/syscall_linux_test...");
+  process_t *abi_proc = process_load("/initrd/apps/syscall_linux_test");
+  if (!abi_proc) {
+    LOG_ERR("[TEST] FALLO cargando syscall_linux_test");
+  } else {
+    LOG_INFO("[TEST] OK: syscall_linux_test cargado (PID=%u)", abi_proc->pid);
+  }
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
   //
   // Ese bucle convierte a kmain_task en un busy-loop del BSP cuando
