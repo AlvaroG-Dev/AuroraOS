@@ -2530,9 +2530,10 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   fat32_free_chain(fs, clusters[0]);
 
   for (int i = 0; i < 5; i++) {
-    if (fs->fat_cache[clusters[i]] != 0)
+    if (fs->fat_cache[clusters[i]] != 0) {
       spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -9;
+    }
   }
 
   spin_unlock_irqrestore(&fs->lock, lock_flags);
