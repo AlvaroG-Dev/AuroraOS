@@ -525,9 +525,8 @@ static int fat32_fat_set(fat32_fs_t *fs, uint32_t cluster, uint32_t value) {
 }
 
 static int fat32_sync_locked(fat32_fs_t *fs) {
-  if (!fs_priv)
+  if (!fs)
     return -EINVAL;
-  fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
   if (!fs->fat_cache || !fs->fat_dirty)
     return 0;
 
@@ -1196,12 +1195,12 @@ static int fat32_node_truncate(vfs_node_t *node, uint64_t new_size) {
     return -EINVAL;
   if (new_size > 0xFFFFFFFFULL)
     return -EINVAL;
-  int rc =
-      fat32_truncate_impl((fat32_node_priv_t *)node->priv, (uint32_t)new_size);
-  if (rc == 0) {
-    fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
+  fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  int rc = fat32_truncate_impl(np, (uint32_t)new_size);
+  if (rc == 0)
     node->size = np->size;
-  }
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
   return rc;
 }
 
@@ -2478,11 +2477,13 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
     if (clusters[i] == 0) {
       if (i > 0)
         fat32_free_chain(fs, clusters[0]);
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -2;
     }
     for (int j = 0; j < i; j++) {
       if (clusters[j] == clusters[i]) {
         fat32_free_chain(fs, clusters[0]);
+        spin_unlock_irqrestore(&fs->lock, lock_flags);
         return -3;
       }
     }
@@ -2491,6 +2492,7 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   for (int i = 0; i < 4; i++) {
     if (fat32_fat_set(fs, clusters[i], clusters[i + 1]) != 0) {
       fat32_free_chain(fs, clusters[0]);
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -4;
     }
   }
@@ -2500,23 +2502,27 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   for (int i = 0; i < 5; i++) {
     if (!FAT_IS_VALID(cur)) {
       fat32_free_chain(fs, clusters[0]);
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -5;
     }
     walked[i] = cur;
     int64_t next = fat32_fat_get(fs, cur);
     if (next < 0) {
       fat32_free_chain(fs, clusters[0]);
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -6;
     }
     cur = (uint32_t)next;
   }
   if (cur < FAT_EOC_MIN) {
     fat32_free_chain(fs, clusters[0]);
+    spin_unlock_irqrestore(&fs->lock, lock_flags);
     return -7;
   }
   for (int i = 0; i < 5; i++) {
     if (walked[i] != clusters[i]) {
       fat32_free_chain(fs, clusters[0]);
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -8;
     }
   }
@@ -2525,6 +2531,7 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
 
   for (int i = 0; i < 5; i++) {
     if (fs->fat_cache[clusters[i]] != 0)
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return -9;
   }
 
