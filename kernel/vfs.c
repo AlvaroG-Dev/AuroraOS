@@ -1174,21 +1174,24 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
 
     int64_t bytes = f->node->ops->read(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
-      if (total == 0)
-        total = (size_t)-1;
+      if (total == 0) {
+        kfree(kbuf);
+        return bytes;
+      }
       break;
     }
     if (bytes == 0)
       break;
     if ((uint64_t)bytes > chunk) {
-      if (total == 0)
-        total = (size_t)-1;
-      break;
+      kfree(kbuf);
+      return total > 0 ? (int64_t)total : -EIO;
     }
 
     if (copy_to_user((uint8_t *)buf + total, kbuf, (size_t)bytes) < 0) {
-      if (total == 0)
-        total = (size_t)-1;
+      if (total == 0) {
+        kfree(kbuf);
+        return -EFAULT;
+      }
       break;
     }
 
@@ -1199,7 +1202,7 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
   }
 
   kfree(kbuf);
-  return total == (size_t)-1 ? -EFAULT : (int64_t)total;
+  return (int64_t)total;
 }
 
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
@@ -1229,22 +1232,25 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       chunk = chunk_size;
 
     if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
-      if (total == 0)
-        total = (size_t)-1;
+      if (total == 0) {
+        kfree(kbuf);
+        return -EFAULT;
+      }
       break;
     }
 
     int64_t bytes =
         f->node->ops->write(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
-      if (total == 0)
-        total = (size_t)-1;
+      if (total == 0) {
+        kfree(kbuf);
+        return bytes;
+      }
       break;
     }
     if ((uint64_t)bytes > chunk) {
-      if (total == 0)
-        total = (size_t)-1;
-      break;
+      kfree(kbuf);
+      return total > 0 ? (int64_t)total : -EIO;
     }
 
     f->offset += (uint64_t)bytes;
