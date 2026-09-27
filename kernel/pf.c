@@ -252,14 +252,17 @@ static int handle_page_fault_inner(registers_t *regs) {
   }
 
   // -------------------------------------------------------------------------
-  // 2. [Fase C.2] Fallo en modo kernel.
+  // 2. Fallo en modo kernel.
   // -------------------------------------------------------------------------
   if (cr2 >= USER_LIMIT) {
     return 0;
   }
 
   struct process *proc = process_current();
-  if (pf_try_demand_paging(proc, cr2, err)) {
+
+  // Solo demand-page si la página NO está presente. Un fallo sobre una
+  // página presente-pero-RO (bit 0 = 1) NO se resuelve remapeando.
+  if ((err & 0x01) == 0 && pf_try_demand_paging(proc, cr2, err)) {
     pf_resolved++;
     return 1;
   }
@@ -271,6 +274,23 @@ static int handle_page_fault_inner(registers_t *regs) {
              (void *)fixup);
     regs->rip = fixup;
     pf_resolved++;
+    return 1;
+  }
+
+  // Fallo de kernel sin fixup y con la página presente. Dos casos:
+  //   a) SMAP bloqueó un acceso a userland sin stac() (bug en un path
+  //      que NO es uaccess; p.ej. paging_map_page_in escribiendo la
+  //      VA del usuario en vez de phys_to_virt(phys)).
+  //   b) La instrucción está dentro de uaccess pero no en la tabla
+  //      de fixups (bug en uaccess_faults.asm: falta registrar esa IP).
+  //
+  // En cualquiera de los dos, es un bug del kernel que NO debe tirar
+  // todo el sistema. Matamos el proceso actual y seguimos.
+  if ((err & 0x01) != 0 && proc) {
+    LOG_ERR("[PF] kernel access to user page without fixup: "
+            "pid=%u rip=%p cr2=%p err=%lx - matando proceso",
+            proc->pid, (void *)regs->rip, (void *)cr2, err);
+    kill_current_process(regs, "kernel access to user page (no fixup)");
     return 1;
   }
 

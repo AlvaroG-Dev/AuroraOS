@@ -609,9 +609,20 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   // [SIG] Estado de señales inicial.
   process_init_signals(proc);
 
+  // El VMA del ELF cubre TODOS los PT_LOAD del binario, incluyendo los
+  // huecos entre ellos (que el demand pager rellena bajo demanda). En esos
+  // huecos el demand pager usa los flags del VMA, así que si el binario
+  // tiene un segmento RW (bss, data), el VMA debe incluir PTE_WRITABLE o
+  // cualquier acceso de escritura del proceso a una página del hueco
+  // provoca un fault loop (kernel intenta escribir la página recién
+  // demandada y la encuentra RO).
+  //
+  // Los PT_LOAD reales ya se mapean con sus flags propios en
+  // elf_load_streaming, así que añadir WRITE al VMA no relaja las
+  // protecciones de los segmentos ya cargados.
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
-      !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
-                  VMA_ELF)) {
+      !vma_create(proc, elf_vma_start, elf_vma_end,
+                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
     LOG_ERR("[PROC] No se pudo crear VMA ELF (start=%p end=%p)",
             (void *)elf_vma_start, (void *)elf_vma_end);
     task_put(task);

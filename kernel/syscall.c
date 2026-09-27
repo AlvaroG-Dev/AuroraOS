@@ -577,10 +577,17 @@ static int64_t k_mmap(uint64_t addr, uint64_t length, uint64_t prot,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+
   // prot es Linux (PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4).
   uint64_t pte_flags = 0;
-  if (!(prot & 0x4))
+  if (prot & 0x2) // PROT_WRITE → página escribible
+    pte_flags |= PTE_WRITABLE;
+  if (!(prot & 0x4)) // !PROT_EXEC → NX
     pte_flags |= PTE_NX;
+
+  LOG_DEBUG("[MMAP] addr=%p len=%p prot=%lx flags=%lx pte=%lx", (void *)addr,
+            (void *)length, prot, flags, pte_flags);
+
   int64_t r = sys_mmap(proc, addr, length, pte_flags, 0, -1, 0);
   return r;
 }
@@ -930,6 +937,12 @@ static int64_t k_arch_prctl(uint64_t code, uint64_t addr, uint64_t a3,
 }
 
 // ---------- getdents64 ----------
+//
+// Escribe el linux_dirent64 en un buffer del kernel y lo copia con
+// copy_to_user. Escribir directamente al VA del usuario (memcpy o
+// asignación de campos) funciona en CPUs sin SMAP, pero en CPUs con
+// SMAP (Haswell+, o QEMU con -cpu host) dispara un #PF en modo kernel
+// porque el kernel no puede tocar páginas de userland sin stac().
 static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
                             uint64_t a4, uint64_t a5) {
   (void)a4;
@@ -949,7 +962,9 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
   if (!access_ok((void *)dirp, count))
     return -EFAULT;
 
-  uint8_t *dst = (uint8_t *)dirp;
+  // Buffer en pila para un linux_dirent64 con nombre de hasta
+  // VFS_PATH_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 128 + padding ≈ 160.
+  uint8_t kbuf[256];
   size_t pos = 0;
   uint64_t index = f->offset;
 
@@ -966,8 +981,11 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     reclen = (reclen + 7) & ~7ULL;
     if (pos + reclen > count)
       break;
+    if (reclen > sizeof(kbuf))
+      break; // nombre imposible, no debería pasar
 
-    linux_dirent64_t *d = (linux_dirent64_t *)(dst + pos);
+    memset(kbuf, 0, reclen);
+    linux_dirent64_t *d = (linux_dirent64_t *)kbuf;
     d->d_ino = (uint64_t)(index + 1);
     d->d_off = (int64_t)(index + 1);
     d->d_reclen = (uint16_t)reclen;
@@ -979,9 +997,11 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
       d->d_type = DT_REG;
     memcpy(d->d_name, ent.name, namelen);
     d->d_name[namelen] = '\0';
-    size_t pad = reclen - (sizeof(linux_dirent64_t) + namelen + 1);
-    if (pad > 0)
-      memset(dst + pos + sizeof(linux_dirent64_t) + namelen + 1, 0, pad);
+
+    // Copia al VA de userland. copy_to_user usa stac/clac y, si la
+    // página no es accesible, el fixup devuelve -EFAULT sin panickear.
+    if (copy_to_user((uint8_t *)dirp + pos, kbuf, reclen) < 0)
+      return pos > 0 ? (int64_t)pos : -EFAULT;
 
     pos += reclen;
     index++;
@@ -1147,6 +1167,61 @@ static int64_t k_rseq(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a4;
   (void)a5;
   return -ENOSYS;
+}
+
+// ---------- fcntl ----------
+//
+// musl lo usa en __stdio_init_file (F_GETFD, F_GETFL) y en las rutas de
+// dup2/O_APPEND/O_NONBLOCK. Sin él, printf() inicializa el FILE con
+// flags basura y revienta al primer flush.
+//
+// Comandos Linux x86_64:
+//   F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4,
+//   F_DUPFD_CLOEXEC=1030.
+static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                       uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int kfd = (int)fd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+    return -EBADF;
+
+  file_descriptor_t *f = proc->fds[kfd];
+
+  switch (cmd) {
+  case 0:    /* F_DUPFD */
+  case 1030: /* F_DUPFD_CLOEXEC */
+  {
+    int minfd = (int)arg;
+    if (minfd < 0 || minfd >= MAX_PROCESS_FDS)
+      return -EINVAL;
+    int free_fd = -1;
+    for (int i = minfd; i < MAX_PROCESS_FDS; i++) {
+      if (!proc->fds[i]) {
+        free_fd = i;
+        break;
+      }
+    }
+    if (free_fd < 0)
+      return -EMFILE;
+    f->ref_count++;
+    proc->fds[free_fd] = f;
+    return (int64_t)free_fd;
+  }
+  case 1: /* F_GETFD */
+    return 0;
+  case 2: /* F_SETFD */
+    return 0;
+  case 3: /* F_GETFL */
+    return (int64_t)f->flags;
+  case 4: /* F_SETFL */
+    return 0;
+  default:
+    return -EINVAL;
+  }
 }
 
 // ===========================================================================
@@ -1561,6 +1636,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},
     [SYS_RT_SIGPROCMASK] = {k_rt_sigprocmask, "rt_sigprocmask"},
     [SYS_IOCTL] = {k_ioctl, "ioctl"},
+    [SYS_FCNTL] = {k_fcntl, "fcntl"},
     [SYS_READV] = {k_readv, "readv"},
     [SYS_WRITEV] = {k_writev, "writev"},
     [SYS_ACCESS] = {k_access, "access"},
