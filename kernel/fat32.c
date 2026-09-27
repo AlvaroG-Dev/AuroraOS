@@ -1808,19 +1808,23 @@ static int64_t fat32_node_read(vfs_node_t *node, uint64_t offset, size_t size,
                                void *buf) {
   if (!node || !node->priv)
     return -EINVAL;
-  return fat32_read_data((fat32_node_priv_t *)node->priv, offset, size, buf);
+  fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  int64_t rc = fat32_read_data(np, offset, size, buf);
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  return rc;
 }
 
 static int64_t fat32_node_write(vfs_node_t *node, uint64_t offset, size_t size,
                                 const void *buf) {
   if (!node || !node->priv || !buf)
     return -EINVAL;
-  int64_t rc =
-      fat32_write_data((fat32_node_priv_t *)node->priv, offset, size, buf);
-  if (rc >= 0) {
-    fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
+  fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  int64_t rc = fat32_write_data(np, offset, size, buf);
+  if (rc >= 0)
     node->size = np->size;
-  }
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
   return rc;
 }
 
@@ -1850,7 +1854,10 @@ static int fat32_node_create(vfs_node_t *dir_node, const char *name,
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
-  return fat32_create_entry(np->fs, np->start_cluster, name, 0);
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  int rc = fat32_create_entry(np->fs, np->start_cluster, name, 0);
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  return rc;
 }
 
 static int fat32_node_mkdir(vfs_node_t *dir_node, const char *name) {
@@ -1859,7 +1866,10 @@ static int fat32_node_mkdir(vfs_node_t *dir_node, const char *name) {
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
-  return fat32_create_entry(np->fs, np->start_cluster, name, 1);
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  int rc = fat32_create_entry(np->fs, np->start_cluster, name, 1);
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  return rc;
 }
 
 static int fat32_node_unlink(vfs_node_t *dir_node, const char *name) {
@@ -1868,7 +1878,10 @@ static int fat32_node_unlink(vfs_node_t *dir_node, const char *name) {
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
-  return fat32_delete_entry(np->fs, np->start_cluster, name);
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  int rc = fat32_delete_entry(np->fs, np->start_cluster, name);
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  return rc;
 }
 
 // ===========================================================================
@@ -1929,7 +1942,9 @@ static int fat32_node_readdir(vfs_node_t *dir_node, uint64_t index,
       .out = out,
       .found = 0,
   };
+  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
   int rc = fat32_iter_dir(np->fs, np->start_cluster, fat32_readdir_cb, &ctx);
+  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
   if (rc < 0)
     return rc;
   return 0;
@@ -1945,8 +1960,11 @@ static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
     return -ENOTDIR;
   if (snp->fs != dnp->fs)
     return -EXDEV;
-  return fat32_rename(snp->fs, snp->start_cluster, src_name, dnp->start_cluster,
-                      dst_name);
+  unsigned long lock_flags = spin_lock_irqsave(&snp->fs->lock);
+  int rc = fat32_rename(snp->fs, snp->start_cluster, src_name,
+                        dnp->start_cluster, dst_name);
+  spin_unlock_irqrestore(&snp->fs->lock, lock_flags);
+  return rc;
 }
 
 static vfs_ops_t fat32_node_ops = {.read = fat32_node_read,
@@ -2208,6 +2226,7 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
   if (!fs || !path || path[0] != '/')
     return NULL;
 
+  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
   const char *orig = path;
   path++;
 
@@ -2217,28 +2236,37 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
   uint64_t dirent_lba = 0;
   uint32_t dirent_off = 0;
 
-  if (*path == '\0')
-    return fat32_make_node(fs, cluster, 0, 1, orig, 0, 0);
+  if (*path == '\0') {
+    vfs_node_t *node = fat32_make_node(fs, cluster, 0, 1, orig, 0, 0);
+    spin_unlock_irqrestore(&fs->lock, lock_flags);
+    return node;
+  }
 
   char comp[256];
   while (*path) {
-    if (!is_dir)
+    if (!is_dir) {
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return NULL;
+    }
 
     const char *end = path;
     while (*end && *end != '/')
       end++;
     size_t clen = (size_t)(end - path);
-    if (clen == 0 || clen >= sizeof(comp))
+    if (clen == 0 || clen >= sizeof(comp)) {
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return NULL;
+    }
     for (size_t i = 0; i < clen; i++)
       comp[i] = path[i];
     comp[clen] = '\0';
 
     fat32_lookup_ctx_t ctx = {.name = comp};
     int rc = fat32_iter_dir(fs, cluster, fat32_lookup_cb, &ctx);
-    if (rc < 0 || !ctx.found)
+    if (rc < 0 || !ctx.found) {
+      spin_unlock_irqrestore(&fs->lock, lock_flags);
       return NULL;
+    }
 
     cluster = ctx.cluster;
     size = ctx.size;
@@ -2251,8 +2279,10 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
       path++;
   }
 
-  return fat32_make_node(fs, cluster, size, is_dir, orig, dirent_lba,
-                         dirent_off);
+  vfs_node_t *node = fat32_make_node(fs, cluster, size, is_dir, orig,
+                                      dirent_lba, dirent_off);
+  spin_unlock_irqrestore(&fs->lock, lock_flags);
+  return node;
 }
 
 static vfs_fs_ops_t fat32_fs_ops = {
@@ -2404,10 +2434,12 @@ void fat32_umount(void *fs_priv) {
   if (!fs_priv)
     return;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
+  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
   if (fs->fat_cache && fs->fat_dirty)
     (void)fat32_sync_locked(fs);
   if (fs->fat_cache)
     kfree(fs->fat_cache);
+  spin_unlock_irqrestore(&fs->lock, lock_flags);
   kfree(fs);
 }
 
