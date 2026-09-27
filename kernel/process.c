@@ -350,10 +350,10 @@ process_t *process_spawn(const char *name, const void *elf_data,
 // ---------------------------------------------------------------------------
 // [Fase 3.2] Spawn con reader streaming + argv + cwd heredado.
 // ---------------------------------------------------------------------------
-static process_t *process_spawn_streaming_with_ppid_args_cwd(
+static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
     int argc, const char *const *argv, const char *inherited_cwd,
-    uint32_t ppid) {
+    const spawn_fds_t *fds, process_t *parent, uint32_t ppid) {
   if (!read) {
     LOG_ERR("[PROC] reader ELF nulo");
     return NULL;
@@ -480,9 +480,37 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++)
     proc->fds[f] = NULL;
-  proc->fds[0] = vfs_create_stdio_fd(0);
-  proc->fds[1] = vfs_create_stdio_fd(1);
-  proc->fds[2] = vfs_create_stdio_fd(2);
+
+  // [pipe] Stdio del hijo. Si el llamante pasó fds concretos, los
+  // compartimos con el padre (mismo file_descriptor_t, ref_count++).
+  // Si no, creamos stdio nuevo apuntando a los nodos globales.
+  if (fds && parent) {
+    if (fds->fd_in != -1) {
+      file_descriptor_t *fd = parent->fds[fds->fd_in];
+      fd->ref_count++;
+      proc->fds[0] = fd;
+    } else {
+      proc->fds[0] = vfs_create_stdio_fd(0);
+    }
+    if (fds->fd_out != -1) {
+      file_descriptor_t *fd = parent->fds[fds->fd_out];
+      fd->ref_count++;
+      proc->fds[1] = fd;
+    } else {
+      proc->fds[1] = vfs_create_stdio_fd(1);
+    }
+    if (fds->fd_err != -1) {
+      file_descriptor_t *fd = parent->fds[fds->fd_err];
+      fd->ref_count++;
+      proc->fds[2] = fd;
+    } else {
+      proc->fds[2] = vfs_create_stdio_fd(2);
+    }
+  } else {
+    proc->fds[0] = vfs_create_stdio_fd(0);
+    proc->fds[1] = vfs_create_stdio_fd(1);
+    proc->fds[2] = vfs_create_stdio_fd(2);
+  }
 
   wait_queue_init(&proc->child_wq);
 
@@ -500,13 +528,22 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd(
   return proc;
 }
 
+static process_t *process_spawn_streaming_with_ppid_args_cwd(
+    const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
+    int argc, const char *const *argv, const char *inherited_cwd,
+    uint32_t ppid) {
+  return process_spawn_streaming_with_ppid_args_cwd_fds(
+      name, read, read_ctx, file_size, argc, argv, inherited_cwd, NULL, NULL,
+      ppid);
+}
+
 // ---------------------------------------------------------------------------
 // Carga desde VFS con/sin argv, y con/sin cwd heredado.
 // ---------------------------------------------------------------------------
-static process_t *process_load_with_ppid_args_cwd(const char *path, int argc,
-                                                  const char *const *argv,
-                                                  const char *inherited_cwd,
-                                                  uint32_t ppid) {
+static process_t *process_load_with_ppid_args_cwd_fds(
+    const char *path, int argc, const char *const *argv,
+    const char *inherited_cwd, const spawn_fds_t *fds, process_t *parent,
+    uint32_t ppid) {
   vfs_node_t *node = vfs_lookup(path);
   if (!node) {
     LOG_ERR("[PROC] No se pudo abrir '%s'", path);
@@ -529,11 +566,20 @@ static process_t *process_load_with_ppid_args_cwd(const char *path, int argc,
   LOG_INFO("[PROC] Cargando '%s' (%llu bytes, argc=%d, streaming)", path,
            (unsigned long long)file_size, argc);
 
-  process_t *p = process_spawn_streaming_with_ppid_args_cwd(
-      path, elf_read_vfs, &ctx, file_size, argc, argv, inherited_cwd, ppid);
+  process_t *p = process_spawn_streaming_with_ppid_args_cwd_fds(
+      path, elf_read_vfs, &ctx, file_size, argc, argv, inherited_cwd, fds,
+      parent, ppid);
 
   vfs_node_free(node);
   return p;
+}
+
+static process_t *process_load_with_ppid_args_cwd(const char *path, int argc,
+                                                  const char *const *argv,
+                                                  const char *inherited_cwd,
+                                                  uint32_t ppid) {
+  return process_load_with_ppid_args_cwd_fds(path, argc, argv, inherited_cwd,
+                                             NULL, NULL, ppid);
 }
 
 static process_t *process_load_with_ppid_args(const char *path, int argc,
@@ -557,6 +603,14 @@ process_t *process_spawn_child_args(process_t *parent, const char *path,
   const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
   return process_load_with_ppid_args_cwd(path, argc, argv, cwd,
                                          parent ? parent->pid : 0);
+}
+
+process_t *process_spawn_child_args_fds(process_t *parent, const char *path,
+                                        int argc, const char *const *argv,
+                                        const spawn_fds_t *fds) {
+  const char *cwd = (parent && parent->cwd[0]) ? parent->cwd : "/";
+  return process_load_with_ppid_args_cwd_fds(path, argc, argv, cwd, fds, parent,
+                                             parent ? parent->pid : 0);
 }
 
 process_t *process_load(const char *path) {

@@ -41,6 +41,9 @@
 #define SYS_CHDIR 33
 #define SYS_GETCWD 34
 #define SYS_KILL 35
+#define SYS_PIPE 36
+#define SYS_DUP2 37
+#define SYS_SPAWN_ARGS_FDS 38
 
 typedef struct {
   uint64_t cr3_phys;

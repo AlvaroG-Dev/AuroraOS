@@ -24,4 +24,10 @@ static inline int spawn_args(const char *path, char *const argv[], int argc) {
 // [SIG] Envía una señal a otro proceso (o a sí mismo con pid=0).
 static inline int kill(int pid, int sig) { return sys_kill(pid, sig); }
 
+// [pipe] Spawn con fds explícitos para stdio del hijo.
+static inline int spawn_args_fds(const char *path, char *const argv[], int argc,
+                                 const spawn_fds_t *fds) {
+  return sys_spawn_args_fds(path, argv, argc, fds);
+}
+
 #endif

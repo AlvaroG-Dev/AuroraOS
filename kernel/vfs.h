@@ -197,4 +197,9 @@ void vfs_notify_writable(file_descriptor_t *fd);
 
 file_descriptor_t *vfs_create_stdio_fd(int stdio_type);
 
+// [pipe] Crea una pareja de nodos VFS conectados por un pipe.
+// Declaración aquí para que syscall.c pueda llamarla sin incluir
+// kernel/pipe.h directamente.
+int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end);
+
 #endif

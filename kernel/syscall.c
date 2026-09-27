@@ -3,10 +3,12 @@
 #include "cpu.h"
 #include "gdt.h"
 #include "gfx/winsrv.h"
+#include "heap.h"
 #include "ipc.h"
 #include "klog.h"
 #include "paging.h"
 #include "pf.h"
+#include "pipe.h" // no, en realidad no; vfs.h ya declara vfs_pipe_create
 #include "process.h"
 #include "sched.h"
 #include "serial.h"
@@ -877,6 +879,177 @@ static int64_t sys_kill_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// [pipe] SYS_PIPE: crea un pipe y escribe los fds [read, write] en el
+// array de userland `int fds[2]`.
+// ---------------------------------------------------------------------------
+static int64_t sys_pipe_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!a1)
+    return -EINVAL;
+  if (!access_ok((void *)a1, 2 * sizeof(int)))
+    return -EFAULT;
+
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  int rd = -1, wr = -1;
+  for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+    if (!proc->fds[i]) {
+      if (rd < 0) {
+        rd = i;
+      } else {
+        wr = i;
+        break;
+      }
+    }
+  }
+  if (rd < 0 || wr < 0)
+    return -EMFILE;
+
+  vfs_node_t *re = NULL, *we = NULL;
+  int rc = vfs_pipe_create(&re, &we);
+  if (rc != 0)
+    return rc;
+
+  file_descriptor_t *rfd = (file_descriptor_t *)kzalloc(sizeof(*rfd));
+  file_descriptor_t *wfd = (file_descriptor_t *)kzalloc(sizeof(*wfd));
+  if (!rfd || !wfd) {
+    kfree(rfd);
+    kfree(wfd);
+    vfs_node_free(re);
+    vfs_node_free(we);
+    return -ENOMEM;
+  }
+  rfd->node = re;
+  rfd->flags = O_RDONLY;
+  rfd->ref_count = 1;
+  wait_queue_init(&rfd->read_wq);
+  wait_queue_init(&rfd->write_wq);
+
+  wfd->node = we;
+  wfd->flags = O_WRONLY;
+  wfd->ref_count = 1;
+  wait_queue_init(&wfd->read_wq);
+  wait_queue_init(&wfd->write_wq);
+
+  proc->fds[rd] = rfd;
+  proc->fds[wr] = wfd;
+
+  int user_fds[2] = {rd, wr};
+  if (copy_to_user((void *)a1, user_fds, sizeof(user_fds)) < 0) {
+    vfs_close_for_proc(proc, rd);
+    vfs_close_for_proc(proc, wr);
+    return -EFAULT;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [pipe] SYS_DUP2: dup2(old, new). Cierra `new` si estaba ocupado, comparte
+// el file_descriptor_t de `old` con `new` (ref_count++).
+// ---------------------------------------------------------------------------
+static int64_t sys_dup2_k(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  int oldfd = (int)a1;
+  int newfd = (int)a2;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (oldfd < 0 || oldfd >= MAX_PROCESS_FDS || !proc->fds[oldfd])
+    return -EBADF;
+  if (newfd < 0 || newfd >= MAX_PROCESS_FDS)
+    return -EBADF;
+  if (oldfd == newfd)
+    return newfd;
+
+  if (proc->fds[newfd])
+    vfs_close_for_proc(proc, newfd);
+
+  proc->fds[oldfd]->ref_count++;
+  proc->fds[newfd] = proc->fds[oldfd];
+  return newfd;
+}
+
+// ---------------------------------------------------------------------------
+// [pipe] SYS_SPAWN_ARGS_FDS: como SYS_SPAWN_ARGS pero con fds concretos
+// para stdin/stdout/stderr del hijo.
+//
+// a1 = path
+// a2 = argv
+// a3 = argc
+// a4 = puntero a spawn_fds_t
+// ---------------------------------------------------------------------------
+static int64_t sys_spawn_args_fds_k(uint64_t a1, uint64_t a2, uint64_t a3,
+                                    uint64_t a4, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !a1)
+    return -EFAULT;
+
+  char path[VFS_PATH_MAX];
+  int prc = resolve_user_path(proc, (const char *)a1, path, sizeof(path));
+  if (prc != 0)
+    return prc;
+
+  int argc = (int)a3;
+  if (argc < 0 || argc > SPAWN_ARGS_MAX)
+    return -EINVAL;
+
+  spawn_fds_t kfds = {-1, -1, -1};
+  if (a4) {
+    if (!access_ok((void *)a4, sizeof(spawn_fds_t)))
+      return -EFAULT;
+    if (copy_from_user(&kfds, (void *)a4, sizeof(kfds)) < 0)
+      return -EFAULT;
+  }
+
+  // Validar fds.
+  if (kfds.fd_in != -1 && (kfds.fd_in < 0 || kfds.fd_in >= MAX_PROCESS_FDS ||
+                           !proc->fds[kfds.fd_in]))
+    return -EBADF;
+  if (kfds.fd_out != -1 && (kfds.fd_out < 0 || kfds.fd_out >= MAX_PROCESS_FDS ||
+                            !proc->fds[kfds.fd_out]))
+    return -EBADF;
+  if (kfds.fd_err != -1 && (kfds.fd_err < 0 || kfds.fd_err >= MAX_PROCESS_FDS ||
+                            !proc->fds[kfds.fd_err]))
+    return -EBADF;
+
+  char storage[SPAWN_ARGS_MAX][SPAWN_ARG_STR_MAX];
+  const char *kargv[SPAWN_ARGS_MAX];
+  if (argc > 0) {
+    if (!a2)
+      return -EINVAL;
+    if (!access_ok((void *)a2, (size_t)argc * sizeof(uint64_t)))
+      return -EFAULT;
+    uint64_t uargv[SPAWN_ARGS_MAX];
+    if (copy_from_user(uargv, (void *)a2, (size_t)argc * sizeof(uint64_t)) < 0)
+      return -EFAULT;
+
+    for (int i = 0; i < argc; i++) {
+      if (!uargv[i])
+        return -EINVAL;
+      long m = strncpy_from_user(storage[i], (const char *)uargv[i],
+                                 SPAWN_ARG_STR_MAX);
+      if (m < 0)
+        return -EFAULT;
+      kargv[i] = storage[i];
+    }
+  }
+
+  process_t *child =
+      process_spawn_child_args_fds(proc, path, argc, kargv, &kfds);
+  return child ? (int64_t)child->pid : -ENOENT;
+}
+
 // ===========================================================================
 // Tabla de syscalls
 // ===========================================================================
@@ -917,6 +1090,9 @@ static const syscall_entry_t syscall_table[] = {
     [SYS_CHDIR] = {sys_chdir_k, "chdir"},
     [SYS_GETCWD] = {sys_getcwd_k, "getcwd"},
     [SYS_KILL] = {sys_kill_k, "kill"},
+    [SYS_PIPE] = {sys_pipe_k, "pipe"},
+    [SYS_DUP2] = {sys_dup2_k, "dup2"},
+    [SYS_SPAWN_ARGS_FDS] = {sys_spawn_args_fds_k, "spawn_args_fds"},
 };
 
 // ===========================================================================

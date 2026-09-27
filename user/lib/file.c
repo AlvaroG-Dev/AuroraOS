@@ -315,3 +315,6 @@ int snprintf(char *buf, size_t size, const char *fmt, ...) {
   va_end(ap);
   return r;
 }
+
+int pipe(int fds[2]) { return sys_pipe(fds); }
+int dup2(int oldfd, int newfd) { return sys_dup2(oldfd, newfd); }

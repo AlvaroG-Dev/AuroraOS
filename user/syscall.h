@@ -39,6 +39,9 @@
 #define SYS_CHDIR 33
 #define SYS_GETCWD 34
 #define SYS_KILL 35
+#define SYS_PIPE 36
+#define SYS_DUP2 37
+#define SYS_SPAWN_ARGS_FDS 38
 
 #define SIGHUP 1
 #define SIGINT 2
@@ -85,6 +88,12 @@ typedef struct {
   uint32_t _pad;
   uint64_t size;
 } dirent_t;
+
+typedef struct {
+  int fd_in;
+  int fd_out;
+  int fd_err;
+} spawn_fds_t;
 
 #define WINSRV_EV_NONE 0
 #define WINSRV_EV_CLOSE 1
@@ -262,6 +271,18 @@ static inline int sys_getcwd(char *buf, size_t size) {
 
 static inline int sys_kill(int pid, int sig) {
   return (int)syscall(SYS_KILL, (uint64_t)(int64_t)pid, (uint64_t)sig, 0, 0, 0);
+}
+
+static inline int sys_pipe(int fds[2]) {
+  return (int)syscall(SYS_PIPE, (uint64_t)fds, 0, 0, 0, 0);
+}
+static inline int sys_dup2(int oldfd, int newfd) {
+  return (int)syscall(SYS_DUP2, (uint64_t)oldfd, (uint64_t)newfd, 0, 0, 0);
+}
+static inline int sys_spawn_args_fds(const char *path, char *const argv[],
+                                     int argc, const spawn_fds_t *fds) {
+  return (int)syscall(SYS_SPAWN_ARGS_FDS, (uint64_t)path, (uint64_t)argv,
+                      (uint64_t)argc, (uint64_t)fds, 0);
 }
 
 void sys_exit(int code);

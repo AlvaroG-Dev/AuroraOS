@@ -42,4 +42,8 @@ int getcwd(char *buf, size_t size);
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
+// [pipe] Crea un pipe. fds[0]=read, fds[1]=write. 0 si OK.
+int pipe(int fds[2]);
+int dup2(int oldfd, int newfd);
+
 #endif

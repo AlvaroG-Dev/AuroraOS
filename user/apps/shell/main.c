@@ -189,6 +189,19 @@ static void refresh_cwd(void) {
 }
 
 // ---------------------------------------------------------------------------
+// [pipe] Parser y ejecutor de pipelines.
+// ---------------------------------------------------------------------------
+#define MAX_PIPELINE 8
+
+typedef struct {
+  char *argv[MAX_ARGS];
+  int argc;
+  char *in_file;
+  char *out_file;
+  int append;
+} pipeline_stage_t;
+
+// ---------------------------------------------------------------------------
 // Región sucia
 // ---------------------------------------------------------------------------
 #define DIRTY_EMPTY_X0 0x7FFFFFFF
@@ -451,24 +464,20 @@ static int parse_line(char *line, char *argv[MAX_ARGS]) {
 
 static void cmd_help(void) {
   puts("Comandos built-in:");
-  puts("  help              - esta ayuda");
-  puts("  echo <str>        - imprime el texto");
-  puts("  cd <dir>          - cambia el directorio actual");
-  puts("  pwd               - imprime el directorio actual");
-  puts("  spawn <p> [args]  - ejecuta el binario en <p>");
-  puts("  clear             - limpia la consola");
-  puts("  exit              - salir");
+  puts("  help                    - esta ayuda");
+  puts("  cd <dir>                - cambia el directorio");
+  puts("  pwd                     - imprime el cwd");
+  puts("  clear                   - limpia la consola");
+  puts("  exit                    - salir");
   puts("");
-  puts("Comandos externos (buscados en cwd, /initrd/apps y /):");
-  puts("  ls [path]         - lista un directorio");
-  puts("  cat <file>...     - muestra archivos");
-  puts("  mkdir <path>...   - crea directorios");
-  puts("  rm <path>...      - borra archivos/dirs");
-  puts("  cp <src> <dst>    - copia un archivo");
-  puts("  mv <src> <dst>    - renombra o mueve");
-  puts("  kill [-sig] <pid> - envía una señal");
+  puts("Operadores:");
+  puts("  cmd arg | cmd arg       - pipe");
+  puts("  cmd < file              - stdin desde archivo");
+  puts("  cmd > file              - stdout a archivo (truncar)");
+  puts("  cmd >> file             - stdout a archivo (append)");
   puts("");
-  puts("Ctrl+C mientras corre un comando envía SIGINT al hijo.");
+  puts("Cmd externos: ls cat mkdir rm cp mv kill echo spawn");
+  puts("Ctrl+C envía SIGINT al pipeline en ejecución.");
 }
 
 static void cmd_echo(int argc, char *argv[]) {
@@ -591,36 +600,291 @@ static void cmd_spawn_resolved(const char *cmd, int argc, char *argv[],
   }
 }
 
+static int parse_pipeline(char *line, pipeline_stage_t *stages,
+                          int max_stages) {
+  int n = 0;
+  char *p = line;
+  while (*p && n < max_stages) {
+    while (*p == ' ' || *p == '\t')
+      p++;
+    if (!*p)
+      break;
+
+    pipeline_stage_t *s = &stages[n];
+    s->argc = 0;
+    s->in_file = NULL;
+    s->out_file = NULL;
+    s->append = 0;
+
+    while (*p && *p != '|') {
+      while (*p == ' ' || *p == '\t')
+        p++;
+      if (!*p || *p == '|')
+        break;
+
+      if (*p == '<') {
+        p++;
+        while (*p == ' ' || *p == '\t')
+          p++;
+        char *start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '|')
+          p++;
+        if (*p) {
+          *p = '\0';
+          p++;
+        }
+        s->in_file = start;
+        continue;
+      }
+      if (*p == '>') {
+        p++;
+        s->append = 0;
+        if (*p == '>') {
+          s->append = 1;
+          p++;
+        }
+        while (*p == ' ' || *p == '\t')
+          p++;
+        char *start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '|')
+          p++;
+        if (*p) {
+          *p = '\0';
+          p++;
+        }
+        s->out_file = start;
+        continue;
+      }
+
+      char *start = p;
+      while (*p && *p != ' ' && *p != '\t' && *p != '|')
+        p++;
+      if (*p) {
+        *p = '\0';
+        p++;
+      }
+      if (s->argc < MAX_ARGS)
+        s->argv[s->argc++] = start;
+    }
+    if (*p == '|')
+      p++;
+    if (s->argc > 0 || s->in_file || s->out_file)
+      n++;
+  }
+  return n;
+}
+
+// Abre un archivo para escritura. `append==0` trunca; `append==1` posiciona
+// al final. Devuelve fd o -1.
+static int open_for_write(const char *path, int append) {
+  if (!append) {
+    unlink(path); // best effort; si no existe, da igual
+    create(path);
+  }
+  int fd = open(path, O_WRONLY);
+  if (fd < 0) {
+    if (create(path) != 0)
+      return -1;
+    fd = open(path, O_WRONLY);
+    if (fd < 0)
+      return -1;
+  }
+  if (append)
+    lseek(fd, 0, SEEK_END);
+  return fd;
+}
+
+// Resuelve el binario (cwd, /initrd/apps, /<CMD>.ELF) y spawnea.
+static int spawn_stage(pipeline_stage_t *s, const spawn_fds_t *fds) {
+  int pid = spawn_args_fds(s->argv[0], s->argv, s->argc, fds);
+  if (pid >= 0)
+    return pid;
+
+  char buf[160];
+  if (strlen(s->argv[0]) + 14 < sizeof(buf)) {
+    strcpy(buf, "/initrd/apps/");
+    strcpy(buf + 13, s->argv[0]);
+    pid = spawn_args_fds(buf, s->argv, s->argc, fds);
+    if (pid >= 0)
+      return pid;
+  }
+
+  if (strlen(s->argv[0]) + 6 < sizeof(buf)) {
+    size_t n = 0;
+    buf[n++] = '/';
+    for (int i = 0; s->argv[0][i] && n < sizeof(buf) - 6; i++) {
+      char c = s->argv[0][i];
+      if (c >= 'a' && c <= 'z')
+        c -= 32;
+      buf[n++] = c;
+    }
+    buf[n++] = '.';
+    buf[n++] = 'E';
+    buf[n++] = 'L';
+    buf[n++] = 'F';
+    buf[n] = '\0';
+    pid = spawn_args_fds(buf, s->argv, s->argc, fds);
+  }
+  return pid;
+}
+
+static void run_pipeline(pipeline_stage_t *stages, int n, int win_id) {
+  int pipefds[MAX_PIPELINE - 1][2];
+  int n_pipes = (n > 0) ? (n - 1) : 0;
+  for (int i = 0; i < n_pipes; i++) {
+    if (pipe(pipefds[i]) != 0) {
+      puts("pipe: fallo");
+      return;
+    }
+  }
+
+  int pids[MAX_PIPELINE];
+  for (int i = 0; i < n; i++)
+    pids[i] = -1;
+
+  int spawned = 0;
+
+  for (int i = 0; i < n; i++) {
+    int in_fd = -1;
+    int out_fd = -1;
+
+    if (i == 0) {
+      if (stages[i].in_file) {
+        in_fd = open(stages[i].in_file, O_RDONLY);
+        if (in_fd < 0) {
+          printf("no se puede abrir %s\n", stages[i].in_file);
+          goto fail;
+        }
+      }
+    } else {
+      in_fd = pipefds[i - 1][0];
+    }
+
+    if (i == n - 1) {
+      if (stages[i].out_file) {
+        out_fd = open_for_write(stages[i].out_file, stages[i].append);
+        if (out_fd < 0) {
+          printf("no se puede escribir %s\n", stages[i].out_file);
+          goto fail;
+        }
+      }
+    } else {
+      out_fd = pipefds[i][1];
+    }
+
+    spawn_fds_t sf = {in_fd, out_fd, out_fd};
+
+    int pid = spawn_stage(&stages[i], &sf);
+    if (pid < 0) {
+      printf("console: no se pudo ejecutar %s\n", stages[i].argv[0]);
+      goto fail;
+    }
+    pids[i] = pid;
+    spawned++;
+
+    // Cerrar los fds que abrimos solo para el spawn (no los pipes
+    // todavía, que se cierran todos al final).
+    if (i == 0 && in_fd != -1)
+      close(in_fd);
+    if (i == n - 1 && out_fd != -1)
+      close(out_fd);
+  }
+
+  // Cerrar TODOS los extremos de pipes en el padre. Los hijos tienen sus
+  // propias referencias (ref_count incrementado en spawn).
+  for (int i = 0; i < n_pipes; i++) {
+    close(pipefds[i][0]);
+    close(pipefds[i][1]);
+  }
+
+  // Esperar a todos los hijos, procesando eventos.
+  int remaining = spawned;
+  while (remaining > 0) {
+    for (int i = 0; i < n; i++) {
+      if (pids[i] < 0)
+        continue;
+      int status = 0;
+      int r = waitpid(pids[i], &status, WNOHANG);
+      if (r == pids[i]) {
+        pids[i] = -1;
+        remaining--;
+      }
+    }
+
+    winsrv_event_t ev;
+    while (sys_win_poll_event(win_id, &ev, 0) > 0) {
+      if (ev.type == WINSRV_EV_OUTPUT) {
+        buf_putchar((char)ev.x);
+      } else if (ev.type == WINSRV_EV_TTY_INPUT) {
+        if ((char)ev.x == 0x03) {
+          for (int i = 0; i < n; i++) {
+            if (pids[i] > 0)
+              kill(pids[i], SIGINT);
+          }
+        }
+      } else if (ev.type == WINSRV_EV_CLOSE) {
+        for (int i = 0; i < n; i++) {
+          if (pids[i] > 0)
+            kill(pids[i], SIGKILL);
+        }
+        sys_win_destroy(win_id);
+        sys_exit(0);
+      }
+    }
+    if (remaining > 0)
+      sys_yield();
+  }
+  return;
+
+fail:
+  // Matar los hijos ya spawneados.
+  for (int i = 0; i < n; i++) {
+    if (pids[i] > 0)
+      kill(pids[i], SIGKILL);
+  }
+  // Cerrar todos los fds que abrimos.
+  for (int i = 0; i < n_pipes; i++) {
+    close(pipefds[i][0]);
+    close(pipefds[i][1]);
+  }
+}
+
 static void run_command(int win_id) {
   g_input[g_input_len] = '\0';
   buf_putchar('\n');
 
   if (g_input_len > 0) {
-    char *argv[MAX_ARGS];
-    int argc = parse_line(g_input, argv);
-    if (argc > 0) {
-      const char *cmd = argv[0];
-      if (strcmp(cmd, "help") == 0)
+    pipeline_stage_t stages[MAX_PIPELINE];
+    int n = parse_pipeline(g_input, stages, MAX_PIPELINE);
+
+    if (n == 0) {
+      /* nada */
+    } else if (n == 1 && !stages[0].in_file && !stages[0].out_file) {
+      // Builtin único sin redirecciones.
+      const char *cmd = stages[0].argv[0];
+      if (strcmp(cmd, "help") == 0) {
         cmd_help();
-      else if (strcmp(cmd, "echo") == 0)
-        cmd_echo(argc, argv);
-      else if (strcmp(cmd, "cd") == 0)
-        cmd_cd(argc > 1 ? argv[1] : NULL);
-      else if (strcmp(cmd, "pwd") == 0)
+      } else if (strcmp(cmd, "cd") == 0) {
+        cmd_cd(stages[0].argc > 1 ? stages[0].argv[1] : NULL);
+      } else if (strcmp(cmd, "pwd") == 0) {
         cmd_pwd();
-      else if (strcmp(cmd, "spawn") == 0) {
-        if (argc < 2)
-          puts("uso: spawn <path> [args]");
-        else
-          cmd_spawn_resolved(argv[1], argc - 1, &argv[1], win_id);
+      } else if (strcmp(cmd, "echo") == 0) {
+        cmd_echo(stages[0].argc, stages[0].argv);
       } else if (strcmp(cmd, "clear") == 0) {
         cmd_clear();
       } else if (strcmp(cmd, "exit") == 0) {
         puts("Adiós.");
         sys_exit(0);
+      } else if (strcmp(cmd, "spawn") == 0) {
+        if (stages[0].argc < 2)
+          puts("uso: spawn <path> [args]");
+        else
+          run_pipeline(&stages[0], 1, win_id);
       } else {
-        cmd_spawn_resolved(cmd, argc, argv, win_id);
+        run_pipeline(stages, 1, win_id);
       }
+    } else {
+      run_pipeline(stages, n, win_id);
     }
   }
 

@@ -12,6 +12,14 @@
 
 #define PROCESS_ARGV_MAX 16
 
+// [pipe] Fds que el shell quiere asignar al hijo. -1 significa
+// "usar el stdio por defecto" (stdin/stdout/stderr del kernel).
+typedef struct {
+  int fd_in;
+  int fd_out;
+  int fd_err;
+} spawn_fds_t;
+
 typedef struct process {
   uint32_t pid;
   uint32_t ppid;
@@ -74,5 +82,12 @@ process_t *process_find_by_pid(uint32_t pid);
 // [SIG] Envía una señal a un PID manteniendo process_lock durante la
 // publicación y devuelve una referencia propia a la tarea destino.
 task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask);
+
+// [pipe] Variante de process_spawn_child_args que asigna fds concretos
+// (heredados del padre, compartiendo file_descriptor_t) a stdin/stdout/
+// stderr del hijo. Los fds del struct deben ser válidos en `parent`.
+process_t *process_spawn_child_args_fds(process_t *parent, const char *path,
+                                        int argc, const char *const *argv,
+                                        const spawn_fds_t *fds);
 
 #endif // PROCESS_H
