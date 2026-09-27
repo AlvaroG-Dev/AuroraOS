@@ -52,7 +52,8 @@ static void sched_unlock_irqrestore(unsigned long flags) {
 static void idle_loop(void) {
   while (1) {
     task_t *cur = sched_current();
-    if (cur && __atomic_exchange_n((int *)&cur->need_resched, 0, __ATOMIC_ACQ_REL)) {
+    if (cur &&
+        __atomic_exchange_n((int *)&cur->need_resched, 0, __ATOMIC_ACQ_REL)) {
       sched_yield();
     }
     __asm__ volatile("sti; hlt");
@@ -160,6 +161,12 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->cpu_affinity = -1;
   task->on_cpu = 0;
 
+  // [musl] FS_BASE por defecto 0. Hasta que un proceso llame a
+  // arch_prctl(ARCH_SET_FS), no debe tener TLS. Si no lo ponemos
+  // explícitamente, tomamos el valor que dejara el SLAB, y switch.asm
+  // lo escribirá en el MSR → #GP si es no canónico.
+  task->fs_base = 0;
+
   // [FIX timeout] Sin timeout por defecto.
   task->wake_deadline = 0;
 
@@ -236,7 +243,8 @@ void sched_init(void) {
     idle_tasks[i] = idle;
   }
 
-  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), idle_tasks[0], __ATOMIC_RELEASE);
+  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), idle_tasks[0],
+                   __ATOMIC_RELEASE);
 
   LOG_INFO("[SCHED] Scheduler + SSE/FPU SMP inicializado (idle tasks creadas)");
 }
@@ -287,7 +295,8 @@ static void reap_dead_tasks(void) {
 
   if (task_list_head->next == task_list_head) {
     if (task_list_head->state == TASK_DEAD && !task_list_head->is_idle &&
-        task_list_head != cur && __atomic_load_n(&task_list_head->on_cpu, __ATOMIC_ACQUIRE) == 0) {
+        task_list_head != cur &&
+        __atomic_load_n(&task_list_head->on_cpu, __ATOMIC_ACQUIRE) == 0) {
       task_t *dead = task_list_head;
       task_list_head = NULL;
       LOG_TRACE("[SCHED] Limpiando última tarea zombie ID=%u (refcount=%d)",
@@ -461,7 +470,8 @@ void sched_tick(void) {
   }
   next->state = TASK_RUNNING;
   next->yield_requested = 0;
-  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), next, __ATOMIC_RELEASE);
+  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), next,
+                   __ATOMIC_RELEASE);
 
   // on_cpu lo actualiza task_switch (asm) justo después de cargar el stack
   // de la nueva tarea (old->on_cpu = 0, new->on_cpu = 1). No tocarlo aquí.
@@ -800,7 +810,8 @@ __attribute__((noreturn)) void sched_start(task_t *task) {
 
   task->state = TASK_RUNNING;
   task->on_cpu = 1;
-__atomic_store_n((task_t *volatile *)&this_cpu(current_task), task, __ATOMIC_RELEASE);
+  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), task,
+                   __ATOMIC_RELEASE);
 
   task_jump_to(task);
   __builtin_unreachable();
@@ -818,7 +829,8 @@ __attribute__((noreturn)) void sched_start_ap(void) {
 
   idle->state = TASK_RUNNING;
   idle->on_cpu = 1;
-__atomic_store_n((task_t *volatile *)&this_cpu(current_task), idle, __ATOMIC_RELEASE);
+  __atomic_store_n((task_t *volatile *)&this_cpu(current_task), idle,
+                   __ATOMIC_RELEASE);
 
   uint64_t kstack = (uint64_t)((uint8_t *)idle->stack + TASK_STACK_SIZE);
   tss_set_rsp0(kstack);
@@ -875,32 +887,73 @@ uint64_t sched_get_ticks(void) { return tick_count; }
 // ---------------------------------------------------------------------------
 void sched_wake_expired(void) {
   uint64_t now = sched_get_ticks();
-  typedef struct { task_t *task; wait_queue_t *wq; uint64_t wait_seq; } timeout_target_t;
+  typedef struct {
+    task_t *task;
+    wait_queue_t *wq;
+    uint64_t wait_seq;
+  } timeout_target_t;
   size_t capacity = 0;
   while (1) {
     unsigned long flags = spin_lock_irqsave(&sched_lock);
     size_t task_count = 0;
-    if (task_list_head) { task_t *p=task_list_head,*s=p; do { task_count++; p=p->next; } while(p&&p!=s); }
+    if (task_list_head) {
+      task_t *p = task_list_head, *s = p;
+      do {
+        task_count++;
+        p = p->next;
+      } while (p && p != s);
+    }
     spin_unlock_irqrestore(&sched_lock, flags);
-    if (!task_count) return;
-    if (capacity < task_count) capacity = task_count;
-    timeout_target_t *targets=(timeout_target_t*)kmalloc(capacity*sizeof(*targets));
-    if (!targets) { LOG_WARN("[SCHED] Sin memoria para procesar timeouts (%zu tareas)",task_count); return; }
-    size_t n=0; int overflow=0;
-    flags=spin_lock_irqsave(&sched_lock);
-    if(task_list_head){ task_t *p=task_list_head,*s=p; do{
-      if(p->state==TASK_BLOCKED && p->wake_deadline>0 && now>=p->wake_deadline && p->waiting_on){
-        if(n>=capacity){overflow=1;break;}
-        targets[n].task=p; targets[n].wq=p->waiting_on;
-        targets[n].wait_seq=__atomic_load_n(&p->wait_seq,__ATOMIC_ACQUIRE);
-        p->wake_deadline=0; task_get(p); n++;
-      }
-      p=p->next;
-    }while(p&&p!=s); }
-    spin_unlock_irqrestore(&sched_lock,flags);
-    if(overflow){ for(size_t i=0;i<n;i++) task_put(targets[i].task); kfree(targets); capacity*=2; if(capacity<task_count+1) capacity=task_count+1; continue; }
-    for(size_t i=0;i<n;i++){ wait_queue_wake_timeout_task(targets[i].wq,targets[i].task,targets[i].wait_seq); task_put(targets[i].task); }
-    kfree(targets); return;
+    if (!task_count)
+      return;
+    if (capacity < task_count)
+      capacity = task_count;
+    timeout_target_t *targets =
+        (timeout_target_t *)kmalloc(capacity * sizeof(*targets));
+    if (!targets) {
+      LOG_WARN("[SCHED] Sin memoria para procesar timeouts (%zu tareas)",
+               task_count);
+      return;
+    }
+    size_t n = 0;
+    int overflow = 0;
+    flags = spin_lock_irqsave(&sched_lock);
+    if (task_list_head) {
+      task_t *p = task_list_head, *s = p;
+      do {
+        if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
+            now >= p->wake_deadline && p->waiting_on) {
+          if (n >= capacity) {
+            overflow = 1;
+            break;
+          }
+          targets[n].task = p;
+          targets[n].wq = p->waiting_on;
+          targets[n].wait_seq = __atomic_load_n(&p->wait_seq, __ATOMIC_ACQUIRE);
+          p->wake_deadline = 0;
+          task_get(p);
+          n++;
+        }
+        p = p->next;
+      } while (p && p != s);
+    }
+    spin_unlock_irqrestore(&sched_lock, flags);
+    if (overflow) {
+      for (size_t i = 0; i < n; i++)
+        task_put(targets[i].task);
+      kfree(targets);
+      capacity *= 2;
+      if (capacity < task_count + 1)
+        capacity = task_count + 1;
+      continue;
+    }
+    for (size_t i = 0; i < n; i++) {
+      wait_queue_wake_timeout_task(targets[i].wq, targets[i].task,
+                                   targets[i].wait_seq);
+      task_put(targets[i].task);
+    }
+    kfree(targets);
+    return;
   }
 }
 

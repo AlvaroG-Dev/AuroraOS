@@ -49,6 +49,10 @@ typedef struct process {
   // retorno a userland de cada syscall.
   uint64_t pending_signals;
   uint64_t blocked_signals;
+
+  // [musl] FS segment base (TLS). Se guarda también en task_t para que
+  // switch.asm lo restaure al cambiar de tarea.
+  uint64_t fs_base;
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,

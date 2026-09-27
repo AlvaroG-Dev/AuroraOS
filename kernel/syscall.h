@@ -2,49 +2,161 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 
-#include "idt.h" // registers_t
+#include "idt.h"
 #include <stdint.h>
 
-// Números de syscall.
-#define SYS_PRINT 1
-#define SYS_YIELD 2
-#define SYS_EXIT 3
-#define SYS_SBRK 4
-#define SYS_OPEN 5
-#define SYS_CLOSE 6
-#define SYS_READ 7
-#define SYS_WRITE 8
-#define SYS_SEEK 9
-#define SYS_FSTAT 10
-#define SYS_IPC_SEND 11
-#define SYS_IPC_RECV 12
-#define SYS_GET_TASK_ID 13
-#define SYS_SPAWN 14
-#define SYS_WAITPID 15
-#define SYS_GETPID 16
-#define SYS_MMAP 17
-#define SYS_MUNMAP 18
-#define SYS_WIN_CREATE 19
-#define SYS_WIN_DESTROY 20
-#define SYS_WIN_BLIT 21
-#define SYS_WIN_POLL_EVENT 22
-#define SYS_WIN_REGISTER_CONSOLE 23
-#define SYS_GET_SERVICE_ID 24
-#define SYS_VM_DEBUG_INFO 25
-#define SYS_READDIR 26
-#define SYS_MKDIR 27
-#define SYS_UNLINK 28
-#define SYS_WIN_SET_ICON 29
-#define SYS_CREATE 30
-#define SYS_SPAWN_ARGS 31
-#define SYS_RENAME 32
-#define SYS_CHDIR 33
-#define SYS_GETCWD 34
-#define SYS_KILL 35
-#define SYS_PIPE 36
-#define SYS_DUP2 37
-#define SYS_SPAWN_ARGS_FDS 38
+// ===========================================================================
+// ABI doble.
+//
+//  - Rango 0..500       : números exactos de Linux x86_64. Toda syscall
+//                         que musl/los programas de Linux esperan va aquí.
+//  - Rango 0x1000..     : Aurora-only. Window server, IPC, service registry
+//                         y spawn (no hay clone todavía).
+//
+// El dispatcher en syscall.c decide por rango.
+// ===========================================================================
 
+// ---- Linux ABI (no tocar los números) ----
+#define SYS_READ 0
+#define SYS_WRITE 1
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_STAT 4
+#define SYS_FSTAT 5
+#define SYS_LSTAT 6
+#define SYS_LSEEK 8
+#define SYS_MMAP 9
+#define SYS_MPROTECT 10
+#define SYS_MUNMAP 11
+#define SYS_BRK 12
+#define SYS_RT_SIGACTION 13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_IOCTL 16
+#define SYS_ACCESS 21
+#define SYS_PIPE 22
+#define SYS_SCHED_YIELD 24
+#define SYS_DUP2 33
+#define SYS_GETPID 39
+#define SYS_KILL 62
+#define SYS_UNAME 63
+#define SYS_GETCWD 79
+#define SYS_CHDIR 80
+#define SYS_READLINK 89
+#define SYS_ARCH_PRCTL 158
+#define SYS_GETDENTS64 217
+#define SYS_SET_TID_ADDRESS 218
+#define SYS_CLOCK_GETTIME 228
+#define SYS_EXIT_GROUP 231
+#define SYS_OPENAT 257
+#define SYS_MKDIRAT 258
+#define SYS_FSTATAT 262
+#define SYS_UNLINKAT 263
+#define SYS_RENAMEAT 264
+#define SYS_SET_ROBUST_LIST 273
+#define SYS_PRLIMIT64 302
+#define SYS_GETRANDOM 318
+#define SYS_RSEQ 334
+
+// ---- Aurora-only ----
+#define ASYS_BASE 0x1000
+
+#define ASYS_SPAWN (ASYS_BASE + 0x00)
+#define ASYS_WAITPID (ASYS_BASE + 0x01)
+#define ASYS_SPAWN_ARGS (ASYS_BASE + 0x02)
+#define ASYS_SPAWN_ARGS_FDS (ASYS_BASE + 0x03)
+#define ASYS_GET_TASK_ID (ASYS_BASE + 0x04)
+#define ASYS_READDIR_LEGACY (ASYS_BASE + 0x05)
+
+#define ASYS_WIN_CREATE (ASYS_BASE + 0x10)
+#define ASYS_WIN_DESTROY (ASYS_BASE + 0x11)
+#define ASYS_WIN_BLIT (ASYS_BASE + 0x12)
+#define ASYS_WIN_POLL_EVENT (ASYS_BASE + 0x13)
+#define ASYS_WIN_REGISTER_CONSOLE (ASYS_BASE + 0x14)
+#define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
+
+#define ASYS_IPC_SEND (ASYS_BASE + 0x20)
+#define ASYS_IPC_RECV (ASYS_BASE + 0x21)
+#define ASYS_GET_SERVICE_ID (ASYS_BASE + 0x22)
+
+#define ASYS_VM_DEBUG_INFO (ASYS_BASE + 0x30)
+
+#define ASYS_PRINT (ASYS_BASE + 0x40)
+
+#define ASYS_MAX (ASYS_BASE + 0x100)
+
+// ---------------------------------------------------------------------------
+// Constantes Linux que el kernel necesita.
+// ---------------------------------------------------------------------------
+#define AT_FDCWD (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_REMOVEDIR 0x200
+
+#define ARCH_SET_GS 0x1001
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+#define ARCH_GET_GS 0x1004
+
+#define LINUX_O_ACCMODE 0x0003
+#define LINUX_O_RDONLY 0x0000
+#define LINUX_O_WRONLY 0x0001
+#define LINUX_O_RDWR 0x0002
+#define LINUX_O_CREAT 0x0040
+#define LINUX_O_TRUNC 0x0200
+#define LINUX_O_APPEND 0x0400
+
+// ---------------------------------------------------------------------------
+// struct stat de Linux x86_64, layout byte a byte.
+// ---------------------------------------------------------------------------
+typedef struct {
+  int64_t st_dev;
+  uint64_t st_ino;
+  uint64_t st_nlink;
+  uint32_t st_mode;
+  uint32_t st_uid;
+  uint32_t st_gid;
+  uint32_t __pad0;
+  int64_t st_rdev;
+  int64_t st_size;
+  int64_t st_blksize;
+  int64_t st_blocks;
+  int64_t st_atime_sec;
+  int64_t st_atime_nsec;
+  int64_t st_mtime_sec;
+  int64_t st_mtime_nsec;
+  int64_t st_ctime_sec;
+  int64_t st_ctime_nsec;
+  int64_t __unused[3];
+} linux_stat_t;
+
+typedef struct {
+  uint64_t d_ino;
+  int64_t d_off;
+  uint16_t d_reclen;
+  uint8_t d_type;
+  char d_name[];
+} linux_dirent64_t;
+
+#define DT_UNKNOWN 0
+#define DT_FIFO 1
+#define DT_CHR 2
+#define DT_DIR 4
+#define DT_BLK 6
+#define DT_REG 8
+#define DT_LNK 10
+#define DT_SOCK 12
+
+#define S_IFMT 0170000
+#define S_IFSOCK 0140000
+#define S_IFLNK 0120000
+#define S_IFREG 0100000
+#define S_IFBLK 0060000
+#define S_IFDIR 0040000
+#define S_IFCHR 0020000
+#define S_IFIFO 0010000
+
+// ---------------------------------------------------------------------------
+// Tipos auxiliares varios.
+// ---------------------------------------------------------------------------
 typedef struct {
   uint64_t cr3_phys;
   uint64_t virt;
@@ -58,7 +170,6 @@ uint64_t syscall_handler_c(registers_t *regs);
 void syscall_init_ap(void);
 
 #define KERNEL_SERVICES_MAX 8
-
 void syscall_register_service(const char *name, uint32_t task_id);
 
 #endif

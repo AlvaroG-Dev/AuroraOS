@@ -74,6 +74,8 @@ typedef struct task {
   // no cede en absoluto cuando todas las demás tareas han migrado a
   // otros CPUs, y la tarea actual se queda en un busy-loop.
   volatile int yield_requested;
+
+  uint64_t fs_base; // [musl] FS segment base (TLS). 0 si no lo usa.
 } task_t;
 
 void sched_init(void);
@@ -160,3 +162,4 @@ _Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) +
                        15 <=
                    sizeof(task_t),
                "fpu_raw demasiado cerca del final de task_t");
+_Static_assert(offsetof(task_t, fs_base) == 0x7B8, "switch.asm: fs_base");

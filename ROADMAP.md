@@ -137,8 +137,8 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 
 ### 3.3 VFS y /dev
 - [ ] /proc para observabilidad.
-- [ ] /dev/kmsg.
-- [ ] /dev/null, /dev/zero y dispositivos básicos.
+- [x] /dev/kmsg.
+- [x] /dev/null, /dev/zero y dispositivos básicos.
 - [ ] Mejorar permisos y metadatos de archivos.
 - [x] (Pivot root) FAT32 en `/`, tarfs en `/initrd`. Punto de montaje `/initrd` se crea como dir vacío en FAT32 al arrancar para que `ls /` lo liste (mismo modelo que Linux).
 - [ ] `pivot_root`/`switch_root` genéricos: hoy el layout es fijo (FAT32 raíz + tarfs en /initrd); sería útil soportar cambiar la raíz en runtime tras montar otro FS.

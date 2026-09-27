@@ -251,6 +251,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
 
+  proc->fs_base = 0;
+
   // [cwd] Este path no hereda cwd. Arranca en "/".
   process_set_cwd(proc, "/");
   // [SIG] Estado de señales inicial.
@@ -450,6 +452,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
 
+  proc->fs_base = 0;
   // [cwd] Heredar del padre o "/".
   process_set_cwd(proc, inherited_cwd);
   // [SIG] Estado de señales inicial.
