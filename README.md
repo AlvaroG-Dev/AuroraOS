@@ -4,7 +4,7 @@ Aurora OS es un sistema operativo **bare-metal x86_64** desarrollado desde cero,
 
 El proyecto está orientado a aprender y construir un sistema operativo real a bajo nivel: boot, memoria, scheduler, interrupciones, drivers, VFS, userland, IPC y gráficos forman parte del mismo sistema.
 
-> **Estado actual:** Aurora OS ya supera la fase de kernel experimental. El núcleo, SMP, memoria virtual, almacenamiento FAT32, userland básico y entorno gráfico están funcionalmente integrados y cuentan con regresiones automatizadas. Networking, USB y varias partes de POSIX/seguridad avanzada siguen pendientes.
+> **Estado actual:** Aurora OS ya supera la fase de kernel experimental. El núcleo, SMP, memoria virtual, almacenamiento FAT32 y entorno gráfico están integrados. El userland ha avanzado hasta una **ABI Linux x86_64 compatible en progreso**, ejecución de binarios estáticos compilados con **musl**, TTY real, `poll/select`, pipes, redirecciones y `busybox sh` interactivo. Networking, USB y partes avanzadas de POSIX/seguridad siguen pendientes.
 
 ## Características implementadas
 
@@ -72,24 +72,27 @@ La auditoría SMP realizada durante el desarrollo cubre scheduler, migración, w
 - Ejecución de aplicaciones en **Ring 3**.
 - ELF loader.
 - ELF loader streaming desde VFS, evitando depender de un buffer contiguo gigante.
-- `spawn()` / `exec` básico.
-- Argumentos `argc/argv`.
-- `waitpid()`.
-- `getpid()`.
-- `exit()`.
-- `kill()` y soporte inicial de señales.
-- `sbrk()`.
-- `mmap()` / `munmap()`.
-- CWD por proceso.
-- `chdir()` / `getcwd()`.
-- Libc propia parcial.
-- `malloc()` / `free()` / `calloc()`.
-- Syscalls de archivos.
+- `spawn()` / `execve()` in-place.
+- Argumentos `argc/argv` y bloque de argumentos compatible con el ABI Linux.
+- Variables de entorno (`envp`, `environ`, `getenv()` / `setenv()`).
+- `waitpid()` / `wait4()` con `struct rusage` y contabilidad de CPU.
+- `getpid()`, `exit()`, `kill()`.
+- Soporte inicial de señales y `rt_sigaction`/`rt_sigprocmask`.
+- `sbrk()`, `brk()`, `mmap()` / `munmap()`, incluido `MAP_FIXED`.
+- CWD por proceso: `chdir()` / `getcwd()`.
+- ABI Linux x86_64 en progreso, con tabla dual Linux/Aurora.
+- `arch_prctl(SET_FS/GET_FS)` y `fs_base` per-task.
+- `stat` Linux x86_64 y traducción desde los metadatos VFS.
+- `readv()` / `writev()`, `getdents64()`, `fcntl()` y syscalls POSIX/Linux adicionales.
+- Pipes anónimos, `dup2()`, redirecciones y pipelines.
+- TTY real con line discipline, modo canonical/raw, echo, señales de terminal, `poll/select/pselect6/ppoll` e ioctls básicos.
+- Libc propia parcial + soporte para binarios estáticos compilados con **musl**.
+- `malloc()` / `free()` / `calloc()` / `realloc()` mediante el userland soportado.
 - IPC mediante mailboxes.
 - Identificación de tareas y servicios.
 - Syscalls gráficas para crear/destruir ventanas, blit y eventos.
 
-Syscalls actualmente definidas incluyen operaciones de procesos, memoria, archivos, directorios, IPC, ventanas, servicios, cwd y señales.
+El kernel mantiene una ABI Aurora y una compatibilidad Linux x86_64 en paralelo. La compatibilidad Linux está orientada inicialmente a binarios estáticos y se amplía progresivamente según las necesidades de musl/BusyBox.
 
 ### Storage
 
@@ -125,8 +128,9 @@ El loader puede ejecutar ELFs directamente desde VFS/FAT32 mediante lectura stre
 
 ### Aplicaciones y shell
 
-El sistema incluye aplicaciones userland como:
+El userland actual incluye aplicaciones nativas y una colección creciente de programas compilados con musl:
 
+**Nativas / sistema**
 - `shell`
 - `ls`
 - `cat`
@@ -138,22 +142,66 @@ El sistema incluye aplicaciones userland como:
 - `calc`
 - aplicaciones de prueba de memoria, ELF, VMA, IPC, procesos y filesystem.
 
-El shell gráfico soporta actualmente:
+**Userland sobre musl**
+- `hello_musl`
+- `echo`
+- `cat`
+- `ls`
+- `touch`
+- `pwd`
+- `wc`
+- `head`
+- `grep`
+- `tee`
+- `sort`
+- `cp`
+- `mv`
+- `rm`
+- `mkdir`
+- `kill`
+- `calc`
 
-- comandos built-in;
-- argumentos;
-- cwd;
-- ejecución de programas;
-- `cd`;
-- `pwd`;
-- `spawn`;
-- `help`;
-- `echo`;
-- `clear`;
-- `exit`;
+### Shell y TTY
+
+Aurora dispone de dos capas de terminal:
+
+- consola gráfica/nativa;
+- TTY real compatible con las necesidades de un shell tipo Linux.
+
+El shell actual soporta:
+
+- argumentos y cwd;
+- ejecución de programas mediante `fork` + `execve`;
+- `cd`, `pwd`, `help`, `echo`, `clear`, `exit`;
+- pipes `|`;
+- redirecciones `<`, `>`, `>>`;
+- pipelines de varias etapas;
 - `Ctrl+C` mediante SIGINT;
-- terminación de hijos;
-- salida de procesos integrada en la consola.
+- espera y terminación de hijos;
+- parser ANSI CSI;
+- fuente JetBrains Mono antialiased.
+
+El TTY implementa line discipline con modos canonical/raw, echo, `VINTR`, `VERASE`, `VEOF`, `VSUSP`, `ICRNL`, `ONLCR`, wait queues, `poll/select` y varios ioctls de terminal. `/dev/tty` se expone mediante devfs.
+
+### ABI Linux x86_64
+
+Aurora incorpora una capa de compatibilidad Linux en progreso:
+
+- números de syscall Linux x86_64 en el rango correspondiente;
+- syscalls Aurora adicionales en un espacio separado;
+- `arch_prctl` y TLS mediante `FS_BASE`;
+- `struct stat` Linux;
+- `writev/readv`;
+- `getdents64`;
+- `open/openat/stat/fstat/lstat/fstatat/access`;
+- `mkdirat/unlinkat/renameat`;
+- `brk/mmap/munmap`;
+- `clock_gettime/getrandom`;
+- `wait4`;
+- `rt_sigaction/rt_sigprocmask`;
+- ABI probado con un binario de regresión que usa directamente números de syscall Linux.
+
+Esto permite ejecutar binarios estáticos compilados con musl sin recompilarlos contra la libc propia de Aurora.
 
 ### Gráficos y escritorio
 
@@ -402,18 +450,20 @@ También se puede utilizar `aurora.iso` con otros hipervisores compatibles con U
 | ATA / DMA / AHCI | ✅ |
 | MBR / GPT / EBR | ✅ |
 | VFS | ✅ |
-| FAT32 persistente | ✅ |
-| LFN / rename | ✅ |
+| FAT32 persistente + LFN + rename | ✅ |
 | ELF streaming desde VFS | ✅ |
-| Syscalls | ✅ |
-| IPC | ✅ |
+| Syscalls Aurora | ✅ |
+| ABI Linux x86_64 | 🟡 En expansión |
+| musl estático | 🟡 Funcional |
+| TTY / poll / select | 🟡 Funcional |
+| Pipes / redirecciones / pipelines | 🟡 Funcional |
+| BusyBox sh interactivo | 🟡 Funcional |
 | libc propia | 🟡 Parcial |
-| Shell y aplicaciones básicas | 🟡 Funcional, en expansión |
+| Shell y aplicaciones | 🟡 En expansión |
 | Escritorio framebuffer | 🟡 Funcional, sin GPU |
 | Networking | ⬜ Pendiente |
 | USB | ⬜ Pendiente |
 | GPU acceleration | ⬜ Pendiente |
-| POSIX completo | ⬜ No es el objetivo actual |
 | ASLR/KASLR | ⬜ Pendiente |
 | Seguridad avanzada | ⬜ En desarrollo |
 
@@ -421,14 +471,16 @@ También se puede utilizar `aurora.iso` con otros hipervisores compatibles con U
 
 El desarrollo posterior se centra en:
 
-1. **Memoria virtual y paging:** continuar la auditoría profunda de page faults, VMA, `mmap/munmap`, uaccess y liberación de memoria.
-2. **Userland/libc:** ampliar la libc, errno, APIs de procesos/tiempo/memoria y compatibilidad.
-3. **Shell:** historial, autocompletado, variables de entorno, pipes/redirecciones y job control.
-4. **Filesystem:** robustez ante corrupción y apagados durante escritura, alias 8.3 y boot configurable desde filesystem.
-5. **Desktop:** resize, focus/input routing, ventanas, clipboard y workspaces.
-6. **Networking:** NIC, Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP y DNS.
-7. **USB:** xHCI, HID y almacenamiento USB.
-8. **Seguridad avanzada y hardware moderno.**
+1. **Compatibilidad Linux / BusyBox:** ampliar la superficie syscall/libc para ejecutar más applets y binarios estáticos reales.
+2. **Userland:** completar entorno, señales, job control, PTY y APIs POSIX/Linux necesarias.
+3. **Filesystem:** robustez ante corrupción/apagados durante escritura, alias 8.3 y boot configurable desde filesystem.
+4. **Desktop:** resize, focus/input routing, ventanas, clipboard y workspaces.
+5. **Networking:** NIC, Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP y DNS.
+6. **USB:** xHCI, HID y almacenamiento USB.
+7. **Seguridad avanzada:** ASLR/KASLR, permisos, usuarios/grupos y sandboxing.
+8. **Drivers y hardware moderno.**
+9. **Performance y escalabilidad.**
+10. **SDK/toolchain y documentación.**
 
 Para conocer el estado detallado de cada tarea, consultar **[ROADMAP.md](ROADMAP.md)**.
 
