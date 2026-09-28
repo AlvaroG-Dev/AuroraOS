@@ -1,8 +1,8 @@
 // kernel/wait.c
 #include "wait.h"
 #include "klog.h"
-#include "sched.h"
 #include "process.h"
+#include "sched.h"
 #include <stddef.h>
 
 #define EINTR 4
@@ -92,16 +92,21 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       // aún sin escribir, ni al revés.
       sched_set_blocked_deadline(self, deadline);
 
-      // [FIX signal race] Publicar primero la entrada y comprobar después
-      // las señales, manteniendo wq->lock. Si kill() llega antes, vemos la
-      // señal aquí; si llega después, ya encontrará waiting_on != NULL y
-      // podrá despertarnos mediante wait_queue_interrupt_task().
-      if (interruptible && self->proc &&
-          __atomic_load_n(&self->proc->pending_signals, __ATOMIC_ACQUIRE) !=
-              0) {
-        self->wake_reason = -EINTR;
-        wq_remove_locked(wq, self);
-        sched_make_ready(self);
+      // [FIX signal] Solo EINTR si la señal es realmente entregable
+      // (no bloqueada). Antes mirábamos pending_signals != 0, lo que
+      // incluía señales bloqueadas: cualquier proceso con SIGCHLD
+      // pendiente y bloqueado salía del wait con EINTR espurio. Ash
+      // bloquea SIGCHLD en secciones críticas, así que esto ocurría
+      // en la práctica constantemente.
+      if (interruptible && self->proc) {
+        uint64_t pend =
+            __atomic_load_n(&self->proc->pending_signals, __ATOMIC_ACQUIRE);
+        uint64_t blk = self->proc->blocked_signals;
+        if ((pend & ~blk) != 0) {
+          self->wake_reason = -EINTR;
+          wq_remove_locked(wq, self);
+          sched_make_ready(self);
+        }
       }
     }
 
@@ -127,12 +132,25 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     }
 
     if (interruptible && self->wake_reason == -EINTR) {
-      if (self->waiting_on == wq) {
-        flags = spin_lock_irqsave(&wq->lock);
-        wq_remove_locked(wq, self);
-        spin_unlock_irqrestore(&wq->lock, flags);
+      // [FIX signal] Re-verificar que sigue habiendo una señal
+      // entregable. Si fue un wake_up_interruptible_all() por una señal
+      // que ya está bloqueada o ya consumida, reanudamos el wait en
+      // vez de devolver EINTR espurio.
+      uint64_t pend = self->proc ? __atomic_load_n(&self->proc->pending_signals,
+                                                   __ATOMIC_ACQUIRE)
+                                 : 0;
+      uint64_t blk = self->proc ? self->proc->blocked_signals : 0;
+      if ((pend & ~blk) == 0) {
+        self->wake_reason = 0;
+        // volver al top del loop: re-add a la wq y seguir durmiendo
+      } else {
+        if (self->waiting_on == wq) {
+          flags = spin_lock_irqsave(&wq->lock);
+          wq_remove_locked(wq, self);
+          spin_unlock_irqrestore(&wq->lock, flags);
+        }
+        return -EINTR;
       }
-      return -EINTR;
     }
 
     if (timeout_ticks > 0) {
@@ -236,7 +254,8 @@ void wake_up_one_locked(wait_queue_t *wq) {
 }
 void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
                                   uint64_t wait_seq) {
-  if (!wq || !task) return;
+  if (!wq || !task)
+    return;
   int removed = 0;
   unsigned long flags = spin_lock_irqsave(&wq->lock);
   if (task->waiting_on == wq &&
@@ -258,7 +277,10 @@ void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
     }
   }
   spin_unlock_irqrestore(&wq->lock, flags);
-  if (removed) { sched_make_ready(task); task_put(task); }
+  if (removed) {
+    sched_make_ready(task);
+    task_put(task);
+  }
 }
 
 void wait_queue_wake_task(task_t *task) {

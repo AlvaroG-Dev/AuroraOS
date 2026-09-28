@@ -6,7 +6,10 @@
 #include "klog.h"
 #include "paging.h"
 #include "panic.h"
+#include "process.h"
+#include "sched.h"
 #include "serial.h"
+#include "signal.h"
 #include "string.h"
 #include <stdint.h>
 
@@ -280,29 +283,60 @@ void irq_install_handler_ex(uint8_t irq, void (*ack)(void),
   ioapic_mask_irq(irq, 0); // desenmascarar
 }
 
+// ---------------------------------------------------------------------------
+// [SIG] Entrega de señales pendientes al proceso actual si la IRQ va a
+// volver a ring 3.
+//
+// Motivo: signal_check_pending() solo se llamaba desde syscall_handler_c,
+// así que un proceso CPU-bound que nunca hace syscalls (p. ej.
+// `for(;;) x++;`) nunca veía SIGINT/SIGSTOP/SIGCONT. Linux lo resuelve
+// con TIF_SIGPENDING: se comprueba en CUALQUIER retorno a userland, no
+// solo en syscalls. Aquí replicamos eso para el camino de IRQ.
+//
+// El LAPIC timer nos trae a este punto 1000 veces por segundo, así que
+// un busy-loop reacciona a señales con latencia sub-milisegundo.
+//
+// syscall_current_regs() vive en task_t, así que lo guardamos y lo
+// restauramos alrededor de la llamada. Si deliver() cambia de tarea
+// (p. ej. SIGSTOP → process_stop_current), el frame de IRQ que hay en
+// esta pila se conserva hasta que SIGCONT reactive la tarea; al volver,
+// regs sigue apuntando al frame de userland correcto.
+// ---------------------------------------------------------------------------
+static void irq_try_deliver_signals(registers_t *regs) {
+  // Solo si volvemos a userland. IRQs tomadas en ring 0 no entregan
+  // señales de userland (no las hay pendientes para el kernel).
+  if (!regs || (regs->cs & 3) != 3)
+    return;
+
+  task_t *cur = sched_current();
+  if (!cur || !cur->proc)
+    return;
+
+  // Fast path: sin señales pendientes, ni tocamos syscall_regs.
+  if (__atomic_load_n(&cur->proc->pending_signals, __ATOMIC_ACQUIRE) == 0)
+    return;
+
+  registers_t *saved = cur->syscall_regs;
+  cur->syscall_regs = regs;
+  signal_check_pending();
+  cur->syscall_regs = saved;
+}
+
 void irq_handler(registers_t *regs) {
   // [FIX] LAPIC timer (vector 48): EOI ANTES del handler.
-  //
-  // lapic_timer_handler() llama a sched_tick(), que puede hacer un
-  // task_switch. Si el switch ocurre, la instrucción lapic_eoi() NO se
-  // ejecuta hasta que la tarea original vuelva a este punto de la pila.
-  // Mientras tanto, el bit del vector 48 sigue puesto en el ISR del
-  // LAPIC, y esa CPU NO recibe más ticks del timer.
-  //
-  // El caso patológico: la tarea original se marca TASK_DEAD y su pila
-  // se libera. El lapic_eoi() pendiente se pierde con la pila. Esa CPU
-  // deja de recibir ticks para siempre: sin preemption, sin timeouts,
-  // sin sched_wake_expired. Si le pasa a las 4 CPUs, el sistema se
-  // congela sin panic, sin PF, sin logs.
-  //
-  // El LAPIC timer es edge-triggered: la línea ya está desasertada
-  // cuando llega el handler. El EOI solo limpia el ISR. Enviarlo antes
-  // es correcto y elimina la ventana.
+  // (comentario original sin cambios)
   if (regs->int_num == 48) {
     extern void lapic_timer_handler(void);
     extern void lapic_eoi(void);
-    lapic_eoi();           // [FIX] PRIMERO
+    lapic_eoi();           // PRIMERO
     lapic_timer_handler(); // luego el handler (que puede cambiar de tarea)
+
+    // [SIG] El timer acaba de darnos la oportunidad de entregar
+    // señales pendientes al proceso interrumpido. Si lapic_timer_handler
+    // cambió de tarea, regs sigue apuntando al frame de la tarea que
+    // fue interrumpida (está en SU pila de kernel), así que es el
+    // frame correcto.
+    irq_try_deliver_signals(regs);
     return;
   }
 
@@ -325,6 +359,13 @@ void irq_handler(registers_t *regs) {
   if (irq < 16 && irq_process_handlers[irq]) {
     irq_process_handlers[irq]();
   }
+
+  // [SIG] Misma lógica que en el camino del timer: cualquier IRQ que
+  // devuelva el control a userland es una oportunidad para entregar
+  // señales. Sin esto, un busy-loop que solo es interrumpido por
+  // IRQs de dispositivo (p. ej. teclado) vería la señal con latencia
+  // de segundos.
+  irq_try_deliver_signals(regs);
 }
 
 // ===========================================================================

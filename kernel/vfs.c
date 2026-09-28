@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "process.h"
+#include "pty.h"
 #include "serial.h"
 #include "spinlock.h"
 #include "string.h"
@@ -231,24 +232,24 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
 static int64_t console_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
                                 void *buf) {
   (void)node;
-  return tty_read(tty_default(), offset, size, buf);
+  return tty_read(tty_console(), offset, size, buf);
 }
 
 static int64_t console_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
                                  const void *buf) {
   (void)node;
-  return tty_write(tty_default(), offset, size, buf);
+  return tty_write(tty_console(), offset, size, buf);
 }
 
 static int console_vfs_poll(vfs_node_t *node, short events) {
   (void)node;
-  return tty_poll(tty_default(), events);
+  return tty_poll(tty_console(), events);
 }
 
 static int64_t console_vfs_ioctl(vfs_node_t *node, unsigned long req,
                                  uint64_t arg) {
   (void)node;
-  return tty_ioctl(tty_default(), req, arg);
+  return tty_ioctl(tty_console(), req, arg);
 }
 
 static vfs_ops_t console_ops = {
@@ -272,6 +273,8 @@ struct vfs_mount {
   char path[VFS_PATH_MAX];
   vfs_fs_ops_t *ops;
   void *fs_priv;
+  int is_bind;
+  char bind_source[VFS_PATH_MAX];
   struct vfs_mount *next;
 };
 
@@ -397,6 +400,58 @@ int vfs_mount(const char *path, vfs_fs_ops_t *ops, void *fs_priv) {
   return 0;
 }
 
+int vfs_mount_bind(const char *mount_path, const char *source_path) {
+  if (!mount_path || !source_path)
+    return -EINVAL;
+
+  char norm_mount[VFS_PATH_MAX];
+  char norm_source[VFS_PATH_MAX];
+  if (normalize_path(mount_path, norm_mount, sizeof(norm_mount)) != 0)
+    return -EINVAL;
+  if (normalize_path(source_path, norm_source, sizeof(norm_source)) != 0)
+    return -EINVAL;
+
+  // Verificar que source_path existe y es directorio.
+  vfs_node_t *src = vfs_lookup(norm_source);
+  if (!src)
+    return -ENOENT;
+  if (!(src->flags & VFS_DIRECTORY)) {
+    vfs_node_free(src);
+    return -ENOTDIR;
+  }
+  vfs_node_free(src);
+
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    if (strcmp(m->path, norm_mount) == 0) {
+      spin_unlock_irqrestore(&g_mounts_lock, flags);
+      return -EEXIST;
+    }
+  }
+
+  struct vfs_mount *m = (struct vfs_mount *)kzalloc(sizeof(*m));
+  if (!m) {
+    spin_unlock_irqrestore(&g_mounts_lock, flags);
+    return -ENOMEM;
+  }
+  size_t ml = strlen(norm_mount);
+  for (size_t i = 0; i < ml; i++)
+    m->path[i] = norm_mount[i];
+  m->path[ml] = '\0';
+  m->is_bind = 1;
+  size_t sl = strlen(norm_source);
+  for (size_t i = 0; i < sl; i++)
+    m->bind_source[i] = norm_source[i];
+  m->bind_source[sl] = '\0';
+  m->next = g_mounts;
+  g_mounts = m;
+
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+
+  LOG_INFO("[VFS] bind mount '%s' -> '%s'", norm_mount, norm_source);
+  return 0;
+}
+
 int vfs_umount(const char *path) {
   if (!path)
     return -EINVAL;
@@ -467,7 +522,9 @@ void *vfs_get_mount_priv(const char *path) {
 // Encuentra el mount cuyo path es prefijo más largo del path consultado,
 // delega en fs->lookup con el path relativo al mount.
 // ===========================================================================
-vfs_node_t *vfs_lookup(const char *path) {
+static vfs_node_t *vfs_lookup_rec(const char *path, int depth) {
+  if (depth > 8)
+    return NULL;
   if (!path)
     return NULL;
 
@@ -502,6 +559,12 @@ vfs_node_t *vfs_lookup(const char *path) {
     return NULL;
   }
 
+  int is_bind = best->is_bind;
+  char bind_source[VFS_PATH_MAX];
+  if (is_bind) {
+    memcpy(bind_source, best->bind_source, sizeof(bind_source));
+    bind_source[sizeof(bind_source) - 1] = '\0';
+  }
   vfs_fs_ops_t *ops = best->ops;
   void *fs_priv = best->fs_priv;
   char mount_path[VFS_PATH_MAX];
@@ -510,8 +573,19 @@ vfs_node_t *vfs_lookup(const char *path) {
   bool mount_is_root = (best_len == 1 && mount_path[0] == '/');
   spin_unlock_irqrestore(&g_mounts_lock, flags);
 
-  // Copiar toda la metadata necesaria antes de soltar el lock permite
-  // que vfs_umount() libere best sin dejar un acceso posterior a él.
+  // [BIND] Reescribir path y recurrir.
+  if (is_bind) {
+    size_t src_len = strlen(bind_source);
+    size_t suffix_len = norm_len - best_len;
+    if (src_len + suffix_len + 1 > sizeof(bind_source))
+      return NULL;
+    char new_path[VFS_PATH_MAX];
+    memcpy(new_path, bind_source, src_len);
+    memcpy(new_path + src_len, norm + best_len, suffix_len);
+    new_path[src_len + suffix_len] = '\0';
+    return vfs_lookup_rec(new_path, depth + 1);
+  }
+
   const char *rel;
   if (mount_is_root) {
     rel = norm;
@@ -526,10 +600,6 @@ vfs_node_t *vfs_lookup(const char *path) {
       return node;
   }
 
-  // Fallback: directorio sintético para la raíz del VFS ("/") cuando
-  // el FS montado ahí no expone entry para "". Hoy en día FAT32 sí la
-  // expone, pero esto cubre escenarios donde "/" no tiene FS montado
-  // todavía (por ejemplo, entre vfs_init y el mount de FAT32).
   if (strcmp(norm, "/") == 0) {
     vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     if (!root)
@@ -545,6 +615,8 @@ vfs_node_t *vfs_lookup(const char *path) {
 
   return NULL;
 }
+
+vfs_node_t *vfs_lookup(const char *path) { return vfs_lookup_rec(path, 0); }
 
 // ===========================================================================
 // Split de path normalizado en (dirname, basename).
@@ -907,13 +979,106 @@ static vfs_ops_t dev_kmsg_ops = {
 typedef struct {
   const char *name;
   vfs_ops_t *ops;
+  uint32_t type; // VFS_CHARDEVICE o VFS_DIRECTORY
 } devfs_entry_t;
 
+// [PTY] readdir de /dev/pts: solo los slots en uso.
+static int devfs_pts_readdir(vfs_node_t *dir, uint64_t index,
+                             vfs_dirent_t *out) {
+  (void)dir;
+  if (!out)
+    return -EINVAL;
+
+  uint64_t seen = 0;
+  for (int i = 0; i < PTY_MAX; i++) {
+    if (!pty_is_in_use(i))
+      continue;
+    if (seen == index) {
+      // formatear "%d"
+      char tmp[8];
+      int t = 0;
+      int v = i;
+      if (v == 0)
+        tmp[t++] = '0';
+      while (v > 0) {
+        tmp[t++] = (char)('0' + v % 10);
+        v /= 10;
+      }
+      int k = 0;
+      while (t > 0 && k < (int)sizeof(out->name) - 1)
+        out->name[k++] = tmp[--t];
+      out->name[k] = '\0';
+      out->type = VFS_CHARDEVICE;
+      out->size = 0;
+      return 0;
+    }
+    seen++;
+  }
+  out->name[0] = '\0';
+  out->type = 0;
+  out->size = 0;
+  return 0;
+}
+
+static vfs_ops_t devfs_pts_dir_ops = {
+    .readdir = devfs_pts_readdir,
+};
+
+// ---------------------------------------------------------------------------
+// [CTTY] /dev/tty: nodo mágico que resuelve al terminal de control del
+// proceso actual en cada operación. Si no hay ctty, ENXIO.
+// ---------------------------------------------------------------------------
+static struct tty *dev_tty_resolve(void) {
+  process_t *p = process_current();
+  return p ? p->ctty : NULL;
+}
+
+static int64_t dev_tty_read(vfs_node_t *n, uint64_t off, size_t sz, void *buf) {
+  (void)n;
+  struct tty *t = dev_tty_resolve();
+  if (!t)
+    return -ENXIO;
+  return tty_read(t, off, sz, buf);
+}
+
+static int64_t dev_tty_write(vfs_node_t *n, uint64_t off, size_t sz,
+                             const void *buf) {
+  (void)n;
+  struct tty *t = dev_tty_resolve();
+  if (!t)
+    return -ENXIO;
+  return tty_write(t, off, sz, buf);
+}
+
+static int dev_tty_poll(vfs_node_t *n, short events) {
+  (void)n;
+  struct tty *t = dev_tty_resolve();
+  if (!t)
+    return 0;
+  return tty_poll(t, events);
+}
+
+static int64_t dev_tty_ioctl(vfs_node_t *n, unsigned long req, uint64_t arg) {
+  (void)n;
+  struct tty *t = dev_tty_resolve();
+  if (!t)
+    return -ENOTTY;
+  return tty_ioctl(t, req, arg);
+}
+
+static vfs_ops_t dev_tty_ops = {
+    .read = dev_tty_read,
+    .write = dev_tty_write,
+    .poll = dev_tty_poll,
+    .ioctl = dev_tty_ioctl,
+};
+
 static const devfs_entry_t devfs_entries[] = {
-    {"null", &dev_null_ops},
-    {"zero", &dev_zero_ops},
-    {"kmsg", &dev_kmsg_ops},
-    {"tty", &console_ops},
+    {"null", &dev_null_ops, VFS_CHARDEVICE},
+    {"zero", &dev_zero_ops, VFS_CHARDEVICE},
+    {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE},
+    {"tty", &dev_tty_ops, VFS_CHARDEVICE},
+    {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY},
 };
 
 static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
@@ -943,7 +1108,7 @@ static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   for (size_t i = 0; i < len; i++)
     out->name[i] = name[i];
   out->name[len] = '\0';
-  out->type = VFS_CHARDEVICE;
+  out->type = devfs_entries[index].type;
   out->size = 0;
   return 0;
 }
@@ -961,53 +1126,74 @@ static vfs_fs_ops_t devfs_fs_ops;
 
 static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
   (void)fs_priv;
-
-  // [PIVOT-style] rel puede ser "/" (raíz del mount) o "/<name>".
   if (!path || path[0] != '/')
     return NULL;
 
-  // Raíz.
+  // Raíz
   if (path[1] == '\0') {
-    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!node)
+    vfs_node_t *n = kzalloc(sizeof(vfs_node_t));
+    if (!n)
       return NULL;
-    node->name[0] = '/';
-    node->name[1] = '\0';
-    node->flags = VFS_DIRECTORY;
-    node->size = 0;
-    node->inode = 0;
-    node->ops = &devfs_dir_ops;
-    node->fs = &devfs_fs_ops;
-    node->priv = NULL;
-    return node;
+    n->name[0] = '/';
+    n->name[1] = '\0';
+    n->flags = VFS_DIRECTORY;
+    n->ops = &devfs_dir_ops;
+    return n;
   }
 
   const char *name = path + 1;
-  // Sin subdirectorios.
+
+  // [PTY] /pts/N
+  if (strncmp(name, "pts/", 4) == 0) {
+    const char *num = name + 4;
+    if (*num == '\0')
+      return NULL;
+    int idx = 0;
+    while (*num >= '0' && *num <= '9') {
+      idx = idx * 10 + (*num - '0');
+      if (idx >= PTY_MAX)
+        return NULL;
+      num++;
+    }
+    if (*num != '\0')
+      return NULL;
+    if (!pty_is_in_use(idx))
+      return NULL;
+
+    vfs_node_t *n = kzalloc(sizeof(vfs_node_t));
+    if (!n)
+      return NULL;
+    size_t nl = strlen(name);
+    if (nl >= sizeof(n->name))
+      nl = sizeof(n->name) - 1;
+    memcpy(n->name, name, nl);
+    n->name[nl] = '\0';
+    n->flags = VFS_CHARDEVICE;
+    n->ops = NULL;
+    return n;
+  }
+
+  // Sin subdirectorios más allá de pts/N.
   for (const char *p = name; *p; p++) {
     if (*p == '/')
       return NULL;
   }
 
+  // Entradas estáticas.
   size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
   for (size_t i = 0; i < n_entries; i++) {
     if (strcmp(name, devfs_entries[i].name) == 0) {
-      vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-      if (!node)
+      vfs_node_t *n = kzalloc(sizeof(vfs_node_t));
+      if (!n)
         return NULL;
       size_t nlen = strlen(name);
-      if (nlen >= sizeof(node->name))
-        nlen = sizeof(node->name) - 1;
-      for (size_t k = 0; k < nlen; k++)
-        node->name[k] = name[k];
-      node->name[nlen] = '\0';
-      node->flags = VFS_CHARDEVICE;
-      node->size = 0;
-      node->inode = 0;
-      node->ops = devfs_entries[i].ops;
-      node->fs = &devfs_fs_ops;
-      node->priv = NULL;
-      return node;
+      if (nlen >= sizeof(n->name))
+        nlen = sizeof(n->name) - 1;
+      memcpy(n->name, name, nlen);
+      n->name[nlen] = '\0';
+      n->flags = devfs_entries[i].type;
+      n->ops = devfs_entries[i].ops;
+      return n;
     }
   }
   return NULL;
@@ -1040,14 +1226,11 @@ void vfs_init(void) {
   spin_init(&g_mounts_lock);
   g_mounts = NULL;
 
-  // [PIVOT] tarfs en /initrd. La raíz "/" queda sin FS hasta que
-  // kmain_task monte FAT32 ahí. vfs_lookup("/") devuelve un directorio
-  // sintético mientras tanto (fallback en vfs_lookup).
-  int rc = vfs_mount("/initrd", &tarfs_fs_ops, NULL);
+  int rc = vfs_mount("/", &tarfs_fs_ops, NULL);
   if (rc != 0) {
-    LOG_ERR("[VFS] fallo al montar tarfs en /initrd: %d", rc);
+    LOG_ERR("[VFS] fallo al montar tarfs en /: %d", rc);
   } else {
-    LOG_INFO("[VFS] VFS inicializado (tarfs en /initrd)");
+    LOG_INFO("[VFS] VFS inicializado (tarfs en /)");
   }
   // [libc] devfs en /dev. Registra null, zero, kmsg.
   int rc2 = vfs_mount("/dev", &devfs_fs_ops, NULL);
@@ -1105,6 +1288,32 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   }
   if (free_fd == -1)
     return -1;
+
+  // [PTY Fase 3] /dev/ptmx y /dev/pts/N necesitan recursos frescos en
+  // cada open (un PTY nuevo, o un incremento de refcount del slave).
+  // vfs_lookup devuelve un nodo nuevo cada vez, pero no hay forma de
+  // pasar un contexto por-open a ops->open con la firma actual, así
+  // que interceptamos aquí y delegamos a pty.c.
+  if (strcmp(path, "/dev/ptmx") == 0) {
+    int rc = pty_open_master_fd(proc, free_fd);
+    return rc == 0 ? free_fd : rc;
+  }
+  if (strncmp(path, "/dev/pts/", 9) == 0) {
+    const char *p = path + 9;
+    if (*p < '0' || *p > '9')
+      return -1;
+    int idx = 0;
+    while (*p >= '0' && *p <= '9') {
+      idx = idx * 10 + (*p - '0');
+      if (idx > 1000)
+        return -1;
+      p++;
+    }
+    if (*p != '\0')
+      return -1;
+    int rc = pty_open_slave_fd(proc, free_fd, idx);
+    return rc == 0 ? free_fd : rc;
+  }
 
   vfs_node_t *node = vfs_lookup(path);
   if (!node)

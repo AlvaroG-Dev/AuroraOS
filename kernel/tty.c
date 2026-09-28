@@ -1,4 +1,30 @@
 // kernel/tty.c
+//
+// [PTY Fase 1] Refactor hacia multi-instancia.
+//
+// Este fichero sigue manejando un único tty global (tty0, el "console
+// tty"). Lo que cambia en esta fase es la PREPARACIÓN para soportar N
+// ttys:
+//
+//   1. tty_t gana un campo `pty` (forward-declared) que será != NULL
+//      cuando el tty sea el slave de un PTY. Se define y gestiona en
+//      kernel/pty.c (Fase 2).
+//
+//   2. tty_default() pasa a llamarse tty_console(). Se mantiene un
+//      alias inline en tty.h para no romper llamantes antiguos.
+//
+//   3. Se añade tty_slave_receive(): la entrada del slave de un PTY
+//      (bytes que llegan por el master fd) se procesa igual que la del
+//      PS/2 (canon/push), pero NO hace eco al console ni postea
+//      WINSRV_EV_TTY_INPUT. Esa responsabilidad es del console tty.
+//
+//   4. tty_write() gana un early-return para el caso slave: cuando
+//      tty->pty != NULL, la salida va al master del PTY (buffer), no a
+//      winsrv/serial. En Fase 1 ningún tty tiene pty != NULL, así que
+//      la rama es muerta pero sirve como punto de enganche para Fase 2.
+//
+// Nada de esto cambia el comportamiento observable del sistema.
+
 #include "tty.h"
 #include "gfx/window.h"
 #include "gfx/winsrv.h"
@@ -9,15 +35,14 @@
 #include "uaccess.h"
 
 static tty_t tty0;
-static void *g_console_win = NULL;
 static int tty_ready = 0;
 
-static void tty_apply_defaults(tty_t *tty) {
+void tty_set_defaults(tty_t *tty) {
   tty->iflag = TTY_IFLAG_ICRNL;
   tty->oflag = TTY_OFLAG_OPOST | TTY_OFLAG_ONLCR;
   tty->cflag = TTY_CFLAG_CREAD | TTY_CFLAG_CS8 | TTY_CFLAG_B38400;
   tty->lflag = TTY_LFLAG_ISIG | TTY_LFLAG_ICANON | TTY_LFLAG_ECHO |
-               TTY_LFLAG_ECHOE | TTY_LFLAG_ECHOK;
+               TTY_LFLAG_ECHOE | TTY_LFLAG_ECHOK | TTY_LFLAG_ECHOCTL;
 
   memset(tty->cc, 0, sizeof(tty->cc));
   tty->cc[TTY_CC_VINTR] = 0x03;
@@ -32,6 +57,9 @@ static void tty_apply_defaults(tty_t *tty) {
   tty->cc[TTY_CC_VTIME] = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Helpers internos. Llamar con tty->lock cogido.
+// ---------------------------------------------------------------------------
 static void tty_push_byte_locked(tty_t *tty, uint8_t c) {
   if (tty->count >= TTY_BUF_SIZE)
     return;
@@ -99,83 +127,108 @@ static void tty_echo_serial(char c) {
 }
 
 // ---------------------------------------------------------------------------
-// [FIX v3] Recepción desde el driver de teclado.
+// [PTY Fase 6] tty_receive_char: entrada del PS/2 al console tty.
 //
-// Modelo:
-//   - El TTY SIEMPRE acumula el byte (canon_buf o ring buffer).
-//   - El TTY SIEMPRE hace eco al console si ECHO está activo. Este es el
-//     ÚNICO punto que dibuja la tecla; el shell nativo NO hace eco por
-//     su cuenta cuando recibe WINSRV_EV_TTY_INPUT.
-//   - El TTY SIEMPRE avisa al shell nativo (WINSRV_EV_TTY_INPUT) en modo
-//     canonical, y también para Ctrl+C en modo raw.
+// En el modelo PTY, el console tty ya NO procesa canonical, NO hace eco,
+// NO acumula en su ring buffer, y NO pinta en pantalla. Es un simple
+// distribuidor: cada byte se convierte en un WINSRV_EV_TTY_INPUT que
+// va al terminal enfocado. Ese terminal escribe el byte en el master
+// de su PTY, y el slave del PTY (con canon+echo) hace todo el trabajo.
 //
-// Para evitar que el próximo lector (busybox, cat) lea comandos ya
-// tecleados en el shell nativo, el shell debe llamar a
-// ioctl(0, TCFLSH, TCIFLUSH) antes de spawnear. Es el shell quien
-// decide cuándo limpiar, no el TTY quien intenta adivinar si hay lector.
+// El eco a serial se mantiene para debug (no afecta al usuario).
 // ---------------------------------------------------------------------------
 void tty_receive_char(tty_t *tty, char c) {
   if (!tty || !tty_ready)
     return;
 
-  uint8_t byte = (uint8_t)c;
+  // Debug por serial (no visible en la ventana).
+  tty_echo_serial(c);
+
+  winsrv_post_to_focused(WINSRV_EV_TTY_INPUT, (int32_t)(uint8_t)c, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// [PTY Fase 2] tty_slave_receive: entrada del slave de un PTY.
+//
+// Llamado desde pty_master_write cuando el terminal app escribe a su
+// master fd. El byte entra al slave y se procesa como si viniera del
+// teclado, PERO:
+//
+//   - El eco NO va al console: va al master del PTY, para que el
+//     terminal app lo reciba por su read().
+//   - No postea WINSRV_EV_TTY_INPUT (ese canal es del console tty).
+//
+// El eco lo hace el propio slave: si ECHO está activo, emite el byte
+// (o la secuencia correspondiente a \b, \n, etc.) de vuelta al master
+// vía pty_slave_emit.
+// ---------------------------------------------------------------------------
+
+void tty_slave_receive(tty_t *tty, uint8_t byte) {
+  if (!tty || !tty_ready)
+    return;
 
   unsigned long flags = spin_lock_irqsave(&tty->lock);
 
   int canon = (tty->lflag & TTY_LFLAG_ICANON) != 0;
+  int echo = (tty->lflag & TTY_LFLAG_ECHO) != 0;
+  int isig = (tty->lflag & TTY_LFLAG_ISIG) != 0;
 
-  // Eco a serial (debug).
-  if (canon)
-    tty_echo_serial(c);
+  uint8_t cc_vintr = tty->cc[TTY_CC_VINTR];
+  uint8_t cc_vquit = tty->cc[TTY_CC_VQUIT];
+  uint8_t cc_vsusp = tty->cc[TTY_CC_VSUSP];
+  uint32_t fg_pgid = tty->fg_pgid;
 
-  // Acumular SIEMPRE, sin condiciones. El shell limpia con TCFLSH antes
-  // de spawnear, así que el buffer nunca arrastra comandos viejos.
   if (canon)
     tty_canon_input_locked(tty, byte);
   else
     tty_push_byte_locked(tty, byte);
 
-  int echo_to_console = (tty->lflag & TTY_LFLAG_ECHO);
+  // [NOFLSH] No exponemos NOFLSH a userland, así que aplicamos el
+  // comportamiento por defecto: al recibir VINTR/VQUIT/VSUSP con ISIG
+  // activo, vaciamos el input pendiente (buffer + línea canonical)
+  // antes de enviar la señal. Sin esto, tras un Ctrl+C el shell vería
+  // basura tecleada antes del ^C.
+  if (isig && (byte == cc_vintr || byte == cc_vquit || byte == cc_vsusp)) {
+    tty->head = 0;
+    tty->tail = 0;
+    tty->count = 0;
+    tty->canon_len = 0;
+    tty->eof_pending = 0;
+  }
 
   spin_unlock_irqrestore(&tty->lock, flags);
 
-  if (echo_to_console) {
+  wake_up_all(&tty->read_wq);
+
+  if (echo && tty->pty) {
     if (byte == '\n') {
-      winsrv_console_output('\r');
-      winsrv_console_output('\n');
+      pty_slave_emit(tty->pty, "\r\n", 2);
     } else if (byte == '\b' || byte == 0x7F) {
-      winsrv_console_output('\b');
-      winsrv_console_output(' ');
-      winsrv_console_output('\b');
-    } else {
-      winsrv_console_output((char)byte);
+      pty_slave_emit(tty->pty, "\b \b", 3);
+    } else if (byte >= 0x20 && byte < 0x7F) {
+      pty_slave_emit(tty->pty, &byte, 1);
+    } else if ((tty->lflag & TTY_LFLAG_ECHOCTL) && byte < 0x20 &&
+               byte != '\t') {
+      // ^X para todos los controles excepto TAB.
+      char seq[2] = {'^', (char)(byte + '@')};
+      pty_slave_emit(tty->pty, seq, 2);
     }
   }
 
-  wake_up_all(&tty->read_wq);
-
-  // Avisar al shell nativo: en canonical siempre, en raw solo Ctrl+C.
-  int post_to_shell = 0;
-  int32_t post_byte = (int32_t)byte;
-
-  if (canon) {
-    post_to_shell = 1;
-    if (byte == 0x7F)
-      post_byte = 0x08;
-  } else if (byte == 0x03) {
-    post_to_shell = 1;
-  }
-
-  if (post_to_shell && g_console_win) {
-    window_t *win = (window_t *)g_console_win;
-    if (!(win->flags & WIN_FLAGS_HIDDEN) && (win->flags & WIN_FLAGS_FOCUSED)) {
-      winsrv_post_event(win, WINSRV_EV_TTY_INPUT, post_byte, 0, 0);
+  // [JOB] Señales de control al foreground pgrp.
+  if (isig && fg_pgid) {
+    if (byte == cc_vintr) {
+      process_signal_pgrp(fg_pgid, 1ULL << SIGINT);
+    } else if (byte == cc_vquit) {
+      process_signal_pgrp(fg_pgid, 1ULL << SIGQUIT);
+    } else if (byte == cc_vsusp) {
+      process_signal_pgrp(fg_pgid, 1ULL << SIGTSTP);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// [NEW] Vaciar el buffer de entrada.
+// Vaciar el buffer de entrada.
 // ---------------------------------------------------------------------------
 void tty_flush_input(tty_t *tty) {
   if (!tty)
@@ -226,12 +279,35 @@ int64_t tty_read(tty_t *tty, uint64_t offset, size_t size, void *buf) {
   return (int64_t)n;
 }
 
+// ---------------------------------------------------------------------------
+// tty_write: salida del proceso que tiene el fd abierto.
+//
+// Dos casos:
+//
+//   1. Console tty (tty->pty == NULL):
+//      escribe a serial + winsrv. Es el modo original.
+//
+//   2. Slave de un PTY (tty->pty != NULL):
+//      los bytes van al buffer del master del par, no a winsrv ni a
+//      serial. El terminal app (que tiene el master fd abierto) los lee
+//      y los dibuja en su propia ventana.
+//
+// En Fase 1 ningún tty tiene pty != NULL, así que la rama 2 nunca se
+// ejecuta. Se deja preparada para Fase 2.
+// ---------------------------------------------------------------------------
 int64_t tty_write(tty_t *tty, uint64_t offset, size_t size, const void *buf) {
-  (void)tty;
   (void)offset;
-  if (!buf || size == 0)
+  if (!tty || !buf || size == 0)
     return 0;
 
+  if (tty->pty) {
+    // El slave escribe: emitir al buffer del master. El terminal app
+    // (que tiene el master fd) lo leerá y lo pintará.
+    pty_slave_emit(tty->pty, buf, size);
+    return (int64_t)size;
+  }
+
+  // Console tty: escribir a serial + winsrv.
   const char *s = (const char *)buf;
   unsigned long flags;
   serial_lock_acquire(&flags);
@@ -275,6 +351,7 @@ int tty_poll(tty_t *tty, short events) {
 #define TIOCNOTTY 0x5422
 #define TCFLSH 0x540B
 #define TCXONC 0x540A
+#define TIOCSCTTY 0x540E
 
 struct ktty_termios {
   uint32_t c_iflag;
@@ -357,16 +434,41 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     return 0;
   }
   case TIOCGPGRP: {
-    process_t *proc = process_current();
-    int32_t pgrp = proc ? (int32_t)proc->pid : 0;
-    if (!access_ok((void *)arg, sizeof(pgrp)))
+    int32_t pg = (int32_t)tty->fg_pgid;
+    if (!access_ok((void *)arg, sizeof(pg)))
       return -EFAULT;
-    if (copy_to_user((void *)arg, &pgrp, sizeof(pgrp)) < 0)
+    if (copy_to_user((void *)arg, &pg, sizeof(pg)) < 0)
       return -EFAULT;
     return 0;
   }
-  case TIOCSPGRP:
+  case TIOCSPGRP: {
+    if (!access_ok((void *)arg, sizeof(int32_t)))
+      return -EFAULT;
+    int32_t pg;
+    if (copy_from_user(&pg, (void *)arg, sizeof(pg)) < 0)
+      return -EFAULT;
+    // [JOB] Validación mínima: el pgrp debe existir. Comprobamos
+    // con process_pgrp_exists. Si no, EPERM.
+    if (pg > 0 && !process_pgrp_exists((uint32_t)pg))
+      return -EPERM;
+    tty->fg_pgid = (uint32_t)pg;
     return 0;
+  }
+  case TIOCSCTTY: {
+    // [JOB] Tomar posesión de este tty como terminal de control.
+    // Solo un session leader puede hacerlo.
+    process_t *p = process_current();
+    if (!p)
+      return -EFAULT;
+    if (p->sid != p->pid)
+      return -EPERM;
+    if (tty->session_leader_pid != 0 && tty->session_leader_pid != p->pid)
+      return -EPERM;
+    tty->session_leader_pid = p->pid;
+    tty->fg_pgid = p->pgid;
+    p->ctty = tty;
+    return 0;
+  }
   case TIOCGSID: {
     process_t *proc = process_current();
     int32_t sid = proc ? (int32_t)proc->pid : 0;
@@ -376,11 +478,13 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
       return -EFAULT;
     return 0;
   }
-  case TIOCNOTTY:
+  case TIOCNOTTY: {
+    process_t *p = process_current();
+    if (p)
+      p->ctty = NULL;
+  }
     return 0;
   case TCFLSH: {
-    // arg: 0 = TCIFLUSH (input), 1 = TCOFLUSH (output), 2 = TCIOFLUSH.
-    // Solo implementamos input. Output no tenemos buffer propio.
     int que = (int)arg;
     if (que == 0 || que == 2)
       tty_flush_input(tty);
@@ -393,18 +497,23 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
 void tty_init(void) {
   memset(&tty0, 0, sizeof(tty0));
   spin_init(&tty0.lock);
   wait_queue_init(&tty0.read_wq);
-  tty_apply_defaults(&tty0);
+  tty_set_defaults(&tty0);
   tty0.winsize_cols = 100;
   tty0.winsize_rows = 35;
-  g_console_win = NULL;
+  // [PTY Fase 1] tty0 es el console tty, no el slave de ningún PTY.
+  // memset ya lo dejó a NULL, lo repetimos explícito por claridad.
+  tty0.pty = NULL;
   tty_ready = 1;
   LOG_INFO("[TTY] Inicializado (canon+echo+isig, 100x35)");
 }
 
-tty_t *tty_default(void) { return tty_ready ? &tty0 : NULL; }
+tty_t *tty_console(void) { return tty_ready ? &tty0 : NULL; }
 
-void tty_set_console_window(void *win) { g_console_win = win; }
+void tty_set_console_window(void *win) { (void)win; }

@@ -28,6 +28,7 @@
 #include "pmm.h"
 #include "process.h"
 #include "ps2.h"
+#include "pty.h"
 #include "rtc.h"
 #include "sched.h"
 #include "serial.h"
@@ -181,6 +182,10 @@ static void kmain_task(void) {
   tty_init();
   LOG_INFO("OK");
 
+  LOG_INFO("[INIT] PTY pool...");
+  pty_init();
+  LOG_INFO("OK");
+
   LOG_INFO("[INIT] Block layer...");
   blk_init();
   LOG_INFO("OK");
@@ -204,43 +209,17 @@ static void kmain_task(void) {
   part_scan_all();
   LOG_INFO("OK");
 
-  // [PIVOT] FAT32 es ahora la raíz.
+  // [PIVOT] La raíz / es tarfs (read-only, montado por vfs_init).
+  // FAT32 va a /data: el modelo LiveUSB clásico — sistema inmutable
+  // en la "imagen", datos persistentes en el disco.
   for (int i = 0; i < blk_count(); i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
       continue;
-    if (fat32_mount_bdev(b->name, "/") == 0) {
-      LOG_INFO("[INIT] Montado %s en /", b->name);
+    if (fat32_mount_bdev(b->name, "/data") == 0) {
+      LOG_INFO("[INIT] Montado %s en /data", b->name);
       break;
     }
-  }
-
-  // [PIVOT] Crear el punto de montaje /initrd en FAT32 para que
-  // `ls /` lo liste. En el VFS, /initrd está montado sobre tarfs
-  // (longest-match), pero el FS subyacente (FAT32) necesita una
-  // entry física para que readdir("/") la muestre, igual que en
-  // Linux /mnt es un directorio real antes de montar nada encima.
-  //
-  // Si ya existe (reboot anterior), vfs_mkdir devuelve -EEXIST y se
-  // ignora. Si no hay FAT32 montado, falla con -ENOENT y también se
-  // ignora: en ese caso solo tienes tarfs.
-  {
-    int rc = vfs_mkdir("/initrd");
-    if (rc == 0) {
-      LOG_INFO("[PIVOT] Punto de montaje /initrd creado en FAT32");
-    } else if (rc != -EEXIST) {
-      LOG_DEBUG("[PIVOT] /initrd no creado (rc=%d) - ¿sin FAT32?", rc);
-    }
-  }
-
-  // [libc] Punto de montaje /dev: crearlo como dir vacío en FAT32 para
-  // que `ls /` lo liste. Igual que /initrd: el VFS enruta /dev/* a
-  // devfs, pero el FS subyacente necesita una entry física.
-  int rc_dev = vfs_mkdir("/dev");
-  if (rc_dev == 0) {
-    LOG_INFO("[PIVOT] Punto de montaje /dev creado en FAT32");
-  } else if (rc_dev != -EEXIST) {
-    LOG_DEBUG("[PIVOT] /dev no creado (rc=%d)", rc_dev);
   }
 
   LOG_INFO("[INIT] DMA dump...");
@@ -303,27 +282,10 @@ static void kmain_task(void) {
   }
 
   __sched_canary_check();
-  // [PIVOT] El shell vive en tarfs, ahora montado en /initrd.
-  LOG_INFO("[INIT] Cargando shell interactivo '/initrd/apps/shell'...");
-  process_load("/initrd/apps/shell");
 
-  // [PR 3a] Test del ABI Linux desde userland.
-  LOG_INFO("[TEST] Lanzando /initrd/apps/syscall_linux_test...");
-  process_t *abi_proc = process_load("/initrd/apps/syscall_linux_test");
-  if (!abi_proc) {
-    LOG_ERR("[TEST] FALLO cargando syscall_linux_test");
-  } else {
-    LOG_INFO("[TEST] OK: syscall_linux_test cargado (PID=%u)", abi_proc->pid);
-  }
+  LOG_INFO("[INIT] Cargando terminal '/apps/shell'...");
+  process_load("/apps/shell");
 
-  // [PR 3b] Hello world con musl. Requiere auxv (AT_PHDR/AT_ENTRY/...).
-  LOG_INFO("[TEST] Lanzando /initrd/apps/hello_musl...");
-  process_t *musl_proc = process_load("/initrd/apps/hello_musl");
-  if (!musl_proc) {
-    LOG_ERR("[TEST] FALLO cargando hello_musl");
-  } else {
-    LOG_INFO("[TEST] OK: hello_musl cargado (PID=%u)", musl_proc->pid);
-  }
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
   //
   // Ese bucle convierte a kmain_task en un busy-loop del BSP cuando
@@ -471,14 +433,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   tarfs_init(initrd_start, initrd_size);
   vfs_init();
   ipc_init();
-  tarfs_list("");
-  tar_node_t *cfg = tarfs_open("system/config.txt");
-  if (cfg) {
-    serial_puts("[TARFS] Contenido de system/config.txt:\n    '");
-    for (size_t i = 0; i < cfg->size; i++)
-      serial_putc(cfg->data[i]);
-    serial_puts("'\n");
-  }
 
   LOG_INFO("[INIT] RTC CMOS... ");
   rtc_init();

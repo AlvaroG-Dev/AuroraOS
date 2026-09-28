@@ -1,1 +1,1 @@
-cmd_libbb/built-in.o :=  rm -f libbb/built-in.o; ar rcs libbb/built-in.o
+cmd_libbb/built-in.o :=  rm -f libbb/built-in.o; x86_64-linux-musl-ar rcs libbb/built-in.o

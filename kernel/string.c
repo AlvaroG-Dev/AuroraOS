@@ -146,3 +146,179 @@ char *strchr(const char *s, int c) {
   }
   return NULL;
 }
+
+// ---------------------------------------------------------------------------
+// snprintf / vsnprintf
+//
+// Implementación compacta sin dependencias de libc. Soporta:
+//   %s %d %i %u %x %X %c %p %%
+//   modificadores l, ll, z
+//   width con cero a la izquierda (%02x, %08x, %5d)
+//
+// No soporta floats, precisión, justificación con espacios, ni flags
+// complejos. Es suficiente para logs y mensajes internos del kernel.
+// ---------------------------------------------------------------------------
+
+struct ksn_out {
+  char *buf;
+  size_t cap;
+  size_t pos;
+};
+
+static void ksn_char(struct ksn_out *o, char c) {
+  if (o->pos + 1 < o->cap)
+    o->buf[o->pos] = c;
+  o->pos++;
+}
+
+static void ksn_str(struct ksn_out *o, const char *s) {
+  while (*s)
+    ksn_char(o, *s++);
+}
+
+static void ksn_uint(struct ksn_out *o, uint64_t val, int base, int min_digits,
+                     int upper) {
+  const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+  char tmp[32];
+  int i = 0;
+
+  if (val == 0) {
+    tmp[i++] = '0';
+  } else {
+    while (val > 0 && i < (int)sizeof(tmp)) {
+      tmp[i++] = digits[val % (uint64_t)base];
+      val /= (uint64_t)base;
+    }
+  }
+  while (i < min_digits && i < (int)sizeof(tmp))
+    tmp[i++] = '0';
+  while (i-- > 0)
+    ksn_char(o, tmp[i]);
+}
+
+static void ksn_int(struct ksn_out *o, int64_t v, int min_digits) {
+  if (v < 0) {
+    ksn_char(o, '-');
+    // Manejo del INT64_MIN sin overflow (aunque es raro en el kernel).
+    uint64_t u = (uint64_t)(-(v + 1)) + 1;
+    ksn_uint(o, u, 10, min_digits, 0);
+  } else {
+    ksn_uint(o, (uint64_t)v, 10, min_digits, 0);
+  }
+}
+
+int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
+  struct ksn_out o = {buf, cap, 0};
+
+  if (!buf || cap == 0) {
+    o.buf = NULL;
+    o.cap = 0;
+  }
+
+  while (*fmt) {
+    if (*fmt != '%') {
+      ksn_char(&o, *fmt++);
+      continue;
+    }
+    fmt++;
+
+    int min_digits = 0;
+    int is_long = 0;
+    int is_llong = 0;
+    int is_size = 0;
+
+    while (*fmt >= '0' && *fmt <= '9') {
+      min_digits = min_digits * 10 + (*fmt - '0');
+      fmt++;
+    }
+    while (*fmt == 'l') {
+      if (is_long)
+        is_llong = 1;
+      is_long = 1;
+      fmt++;
+    }
+    if (*fmt == 'z') {
+      is_size = 1;
+      fmt++;
+    }
+
+    switch (*fmt) {
+    case 'd':
+    case 'i': {
+      int64_t v;
+      if (is_llong || is_long)
+        v = va_arg(ap, int64_t);
+      else if (is_size)
+        v = (int64_t)va_arg(ap, size_t);
+      else
+        v = va_arg(ap, int);
+      ksn_int(&o, v, min_digits);
+      break;
+    }
+    case 'u': {
+      uint64_t v;
+      if (is_llong || is_long)
+        v = va_arg(ap, uint64_t);
+      else if (is_size)
+        v = va_arg(ap, size_t);
+      else
+        v = va_arg(ap, unsigned int);
+      ksn_uint(&o, v, 10, min_digits, 0);
+      break;
+    }
+    case 'x':
+    case 'X': {
+      uint64_t v;
+      if (is_llong || is_long)
+        v = va_arg(ap, uint64_t);
+      else if (is_size)
+        v = va_arg(ap, size_t);
+      else
+        v = va_arg(ap, unsigned int);
+      ksn_uint(&o, v, 16, min_digits ? min_digits : 1, *fmt == 'X');
+      break;
+    }
+    case 'p': {
+      uint64_t v = (uint64_t)va_arg(ap, void *);
+      ksn_char(&o, '0');
+      ksn_char(&o, 'x');
+      ksn_uint(&o, v, 16, 16, 0);
+      break;
+    }
+    case 'c':
+      ksn_char(&o, (char)va_arg(ap, int));
+      break;
+    case 's': {
+      const char *s = va_arg(ap, const char *);
+      if (!s)
+        s = "(null)";
+      ksn_str(&o, s);
+      break;
+    }
+    case '%':
+      ksn_char(&o, '%');
+      break;
+    default:
+      ksn_char(&o, '%');
+      ksn_char(&o, *fmt);
+      break;
+    }
+
+    if (*fmt)
+      fmt++;
+  }
+
+  if (cap > 0) {
+    size_t term = (o.pos < cap) ? o.pos : cap - 1;
+    buf[term] = '\0';
+  }
+  return (int)o.pos;
+}
+
+int snprintf(char *buf, size_t cap, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vsnprintf(buf, cap, fmt, ap);
+  va_end(ap);
+  return r;
+}

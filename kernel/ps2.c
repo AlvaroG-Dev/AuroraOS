@@ -182,7 +182,7 @@ static void process_keyboard_byte(uint8_t sc) {
       c = (char)(lower - 'a' + 1);
   }
 
-  tty_t *tty = tty_default();
+  tty_t *tty = tty_console();
   if (tty)
     tty_receive_char(tty, c);
 }

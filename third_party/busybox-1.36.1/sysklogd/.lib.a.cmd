@@ -1,1 +1,1 @@
-cmd_sysklogd/lib.a := rm -f sysklogd/lib.a; ar  rcs sysklogd/lib.a 
+cmd_sysklogd/lib.a := rm -f sysklogd/lib.a; x86_64-linux-musl-ar  rcs sysklogd/lib.a 

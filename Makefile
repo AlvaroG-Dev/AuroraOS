@@ -56,8 +56,16 @@ elf_malformed: user
 
 # Añadir en el Makefile raíz, ANTES de initrd.tar
 initrd.tar: sysroot user elf_malformed
-	@if [ -f third_party/busybox-1.36.1/busybox ]; then \
-		cp third_party/busybox-1.36.1/busybox sysroot/apps/busybox; \
+	@echo "[Makefile] Copiando busybox al tarfs..."
+	@mkdir -p sysroot/bin sysroot/sbin \
+	          sysroot/usr/bin sysroot/usr/sbin \
+	          sysroot/data
+	@if [ -f third_party/busybox-1.36.1/_install/bin/busybox ]; then \
+		cp -a third_party/busybox-1.36.1/_install/bin/. sysroot/bin/; \
+		cp -a third_party/busybox-1.36.1/_install/usr/. sysroot/usr/; \
+		if [ -d third_party/busybox-1.36.1/_install/sbin ]; then \
+			cp -a third_party/busybox-1.36.1/_install/sbin/. sysroot/sbin/; \
+		fi; \
 	fi
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar -cf kernel/initrd.tar -C sysroot .

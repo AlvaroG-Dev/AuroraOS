@@ -70,4 +70,9 @@ void winsrv_cleanup_task(task_t *owner);
 
 int winsrv_set_icon(task_t *owner, int win_id, const char *path);
 
+// Postea un evento a la ventana que tiene el foco. Si no hay ninguna
+// enfocada, no hace nada. Se usa para input de teclado: el TTY recibe
+// los bytes del PS/2 y los enruta al terminal que tiene el foco.
+void winsrv_post_to_focused(uint32_t type, int32_t x, int32_t y, uint32_t data);
+
 #endif

@@ -318,3 +318,13 @@ int snprintf(char *buf, size_t size, const char *fmt, ...) {
 
 int pipe(int fds[2]) { return sys_pipe(fds); }
 int dup2(int oldfd, int newfd) { return sys_dup2(oldfd, newfd); }
+
+int poll(struct pollfd *fds, unsigned int nfds, int timeout_ms) {
+  return sys_poll(fds, nfds, timeout_ms);
+}
+
+int ioctl(int fd, unsigned long req, void *arg) {
+  return sys_ioctl(fd, req, arg);
+}
+
+int fcntl(int fd, int cmd, int arg) { return sys_fcntl(fd, cmd, arg); }

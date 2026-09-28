@@ -12,7 +12,9 @@ typedef enum {
   TASK_READY = 0,
   TASK_RUNNING = 1,
   TASK_BLOCKED = 2,
-  TASK_DEAD = 3,
+  TASK_STOPPED = 3, // [JOB] Detenido por SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU.
+                    // Solo SIGCONT lo saca de este estado.
+  TASK_DEAD = 4,
 } task_state_t;
 
 #define IPC_MAX_PAYLOAD 64
@@ -109,6 +111,15 @@ uint64_t sched_get_ticks(void);
 void sched_make_ready(task_t *t);
 void sched_mark_need_resched(void);
 void sched_publish_task(task_t *t);
+
+// [JOB CONTROL] Transiciona una tarea viva a TASK_STOPPED. La tarea
+// permanece en la runqueue pero el selector la ignora. Solo
+// sched_cont_task la reactiva.
+void sched_stop_task(task_t *t);
+
+// [JOB CONTROL] Contraparte de sched_stop_task: STOPPED -> READY.
+// No hace nada si la tarea no estaba STOPPED.
+void sched_cont_task(task_t *t);
 
 // [fork] Crea la tarea del hijo. El frame de kernel se construye a partir
 // de `parent_regs` (el registers_t del padre en el momento del syscall),

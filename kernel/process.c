@@ -8,6 +8,7 @@
 #include "paging.h"
 #include "pf.h"
 #include "pmm.h"
+#include "pty.h"
 #include "sched.h"
 #include "serial.h"
 #include "string.h"
@@ -152,6 +153,12 @@ static void process_init_signals(process_t *proc) {
     return;
   proc->pending_signals = 0;
   proc->blocked_signals = 0;
+  for (int i = 0; i < SIG_MAX; i++) {
+    proc->sigactions[i].handler = SIG_DFL;
+    proc->sigactions[i].flags = 0;
+    proc->sigactions[i].restorer = NULL;
+    proc->sigactions[i].mask = 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +454,7 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->ppid = ppid;
   proc->exit_code = 0;
   proc->is_zombie = 0;
+  proc->ctty = NULL;
 
   size_t i = 0;
   while (name[i] && i < sizeof(proc->name) - 1) {
@@ -660,8 +668,11 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
 
   proc->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
   proc->ppid = ppid;
+  proc->pgid = proc->pid; // ← NUEVO
+  proc->sid = proc->pid;  // ← NUEVO
   proc->exit_code = 0;
   proc->is_zombie = 0;
+  proc->ctty = NULL;
 
   size_t i = 0;
   while (name[i] && i < sizeof(proc->name) - 1) {
@@ -733,6 +744,19 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
       file_descriptor_t *fd = parent->fds[fds->fd_in];
       fd->ref_count++;
       proc->fds[0] = fd;
+
+      struct tty_pty *pty = pty_slave_from_fd(fd);
+      if (pty) {
+        pty_set_fg_pgid(pty, proc->pid);
+
+        // [CTTY] Si el slave es virgen (nadie lo ha reclamado), el
+        // nuevo proceso se convierte en session leader y toma el
+        // terminal de control. Sustituye a setsid+TIOCSCTTY de login.
+        if (pty->slave.session_leader_pid == 0) {
+          pty->slave.session_leader_pid = proc->pid;
+          proc->ctty = &pty->slave;
+        }
+      }
     } else {
       proc->fds[0] = vfs_create_stdio_fd(0);
     }
@@ -899,9 +923,14 @@ process_t *process_find_by_pid(uint32_t pid) {
 }
 
 // Publica una señal bajo process_lock y toma una referencia de la tarea
-// antes de soltarlo. Así waitpid() no puede liberar el process_t entre la
-// búsqueda del PID y el acceso a pending_signals/task.
-task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask) {
+// antes de soltarlo. `*need_interrupt` (si no es NULL) vale 1 solo si quedó
+// alguna señal realmente entregable, es decir, si hay que sacar a la tarea
+// de un wait interrumpible.
+task_t *process_signal_pid_ex(uint32_t pid, uint64_t signal_mask,
+                              int *need_interrupt) {
+  if (need_interrupt)
+    *need_interrupt = 0;
+
   unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
   while (p) {
@@ -909,8 +938,44 @@ task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask) {
       task_t *task = p->task;
       if (task)
         task_get(task);
-      __atomic_fetch_or(&p->pending_signals, signal_mask, __ATOMIC_RELEASE);
+
+      // [JOB] SIGCONT despierta a un proceso parado. Consumimos el
+      // SIGCONT de la máscara: su efecto (reanudar) se aplica aquí.
+      int notify_parent = 0;
+      uint32_t ppid = p->ppid;
+      if ((signal_mask & (1ULL << SIGCONT)) && p->stopped) {
+        p->stopped = 0;
+        p->stop_event_pending = 0;
+        p->cont_event_pending = 1;
+        notify_parent = 1;
+        signal_mask &= ~(1ULL << SIGCONT);
+      } else if ((signal_mask & (1ULL << SIGKILL)) && p->stopped) {
+        // SIGKILL a un proceso parado lo despierta para que muera en
+        // su próximo syscall. SIGKILL sigue pendiente.
+        p->stopped = 0;
+        p->stop_event_pending = 0;
+        notify_parent = 1;
+      }
+
+      // [FIX] Las señales ignoradas se descartan aquí (como en Linux).
+      uint64_t before = signal_mask;
+      signal_mask = signal_filter_ignored(p, signal_mask);
+      if (before != signal_mask)
+        LOG_DEBUG("[SIG] pid=%u: descartadas señales ignoradas 0x%lx", p->pid,
+                  (unsigned long)(before & ~signal_mask));
+
+      if (signal_mask)
+        __atomic_fetch_or(&p->pending_signals, signal_mask, __ATOMIC_RELEASE);
       spin_unlock_irqrestore(&process_lock, flags);
+
+      if (need_interrupt)
+        *need_interrupt = (signal_mask != 0);
+
+      if (notify_parent) {
+        if (task)
+          sched_cont_task(task);
+        process_wake_parent(ppid);
+      }
       return task;
     }
     p = p->next;
@@ -919,26 +984,59 @@ task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask) {
   return NULL;
 }
 
+// Wrapper de compatibilidad (misma firma que antes).
+task_t *process_signal_pid(uint32_t pid, uint64_t signal_mask) {
+  return process_signal_pid_ex(pid, signal_mask, NULL);
+}
+
 // ---------------------------------------------------------------------------
 // Condición de despertar: ¿existe algún hijo zombie que satisfaga el filtro?
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// [JOB] Condición de despertar del padre: ¿hay un evento listo?
+//   - zombie (siempre)
+//   - stop    (solo si options & WUNTRACED)
+//   - cont    (solo si options & WCONTINUED)
 // ---------------------------------------------------------------------------
 typedef struct {
   process_t *parent;
   int32_t pid;
+  int options;
 } waitpid_ctx_t;
 
-static bool has_matching_zombie(void *arg) {
+// [JOB] Filter extendido: pid>0, pid==0, pid==-1, pid<-1.
+static bool wait_pid_matches(process_t *p, process_t *parent, int32_t pid) {
+  if (p->ppid != parent->pid)
+    return false;
+  if (pid > 0)
+    return (uint32_t)pid == p->pid;
+  if (pid == -1)
+    return true;
+  if (pid == 0)
+    return p->pgid == parent->pgid;
+  return p->pgid == (uint32_t)(-pid);
+}
+
+static bool has_matching_event(void *arg) {
   waitpid_ctx_t *ctx = (waitpid_ctx_t *)arg;
   process_t *parent = ctx->parent;
   int32_t pid = ctx->pid;
+  int options = ctx->options;
 
   unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
   bool found = false;
   while (p) {
-    if ((pid == -1 && p->ppid == parent->pid) ||
-        (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
+    if (wait_pid_matches(p, parent, pid)) {
       if (p->is_zombie) {
+        found = true;
+        break;
+      }
+      if ((options & WUNTRACED) && p->stop_event_pending) {
+        found = true;
+        break;
+      }
+      if ((options & WCONTINUED) && p->cont_event_pending) {
         found = true;
         break;
       }
@@ -949,24 +1047,42 @@ static bool has_matching_zombie(void *arg) {
   return found;
 }
 
+// ---------------------------------------------------------------------------
+// [JOB] process_waitpid.
+//
+// Devuelve:
+//   >0  PID del hijo cuyo evento se reporta. status_out contiene el
+//       código de estado YA en formato Linux:
+//         exited:    (code & 0xff) << 8
+//         stopped:   ((sig & 0xff) << 8) | 0x7f
+//         continued: 0xffff
+//    0  WNOHANG sin eventos listos.
+//   -1  no hay hijos que cumplan el filtro.
+// ---------------------------------------------------------------------------
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
                     proc_rusage_t *rusage_out, int options) {
   if (!parent)
     return -1;
 
-  waitpid_ctx_t ctx = {.parent = parent, .pid = pid};
+  waitpid_ctx_t ctx = {.parent = parent, .pid = pid, .options = options};
 
   while (1) {
     process_t *found_zombie = NULL;
+    process_t *found_stopped = NULL;
+    process_t *found_continued = NULL;
     task_t *zombie_task = NULL;
     int has_matching_child = 0;
+    int stopped_sig = 0;
 
     unsigned long flags = spin_lock_irqsave(&process_lock);
     process_t *p = process_list;
     while (p) {
-      if ((pid == -1 && p->ppid == parent->pid) ||
-          (pid >= 0 && (uint32_t)pid == p->pid && p->ppid == parent->pid)) {
+      // [JOB] Antes: (pid == -1 && ...) || (pid >= 0 && ...) — no cubría
+      // pid < -1. BusyBox ash usa wait4(-pgid, WUNTRACED) en fg, así que
+      // ese caso es la norma, no la excepción.
+      if (wait_pid_matches(p, parent, pid)) {
         has_matching_child = 1;
+
         if (p->is_zombie) {
           found_zombie = p;
           zombie_task = p->task;
@@ -980,6 +1096,17 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
             *pp = found_zombie->next;
           break;
         }
+
+        if (!found_stopped && (options & WUNTRACED) && p->stop_event_pending) {
+          found_stopped = p;
+          stopped_sig = p->stop_signal;
+          p->stop_event_pending = 0;
+        }
+        if (!found_stopped && !found_continued && (options & WCONTINUED) &&
+            p->cont_event_pending) {
+          found_continued = p;
+          p->cont_event_pending = 0;
+        }
       }
       p = p->next;
     }
@@ -988,16 +1115,15 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
     if (found_zombie) {
       uint32_t zpid = found_zombie->pid;
       int exit_code = found_zombie->exit_code;
+      LOG_INFO("[WAITPID] reaping pid=%u exit_code=%d", zpid,
+               exit_code); // ← NUEVO
 
       if (status_out) {
         stac();
-        *status_out = exit_code;
+        *status_out = (exit_code & 0xff) << 8; // WIFEXITED
         clac();
       }
 
-      // [RUSAGE] Volcar contadores ANTES de liberar el process_t.
-      // Los que no contabilizamos todavía van a 0 (default del struct
-      // en el llamante; aquí solo copiamos lo que tenemos).
       if (rusage_out) {
         rusage_out->utime_ticks = found_zombie->cpu_ticks_user;
         rusage_out->stime_ticks = 0;
@@ -1009,6 +1135,9 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
       }
 
       if (zombie_task) {
+        // [CONCURRENCIA] Esperar a que la tarea no esté en ningún CPU.
+        // on_cpu se limpia en task_switch, así que esto es la barrera
+        // mínima antes de soltar la referencia.
         while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
           __asm__ volatile("pause");
 
@@ -1024,17 +1153,50 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         found_zombie->task = NULL;
       }
       kfree(found_zombie);
-
       return (int)zpid;
     }
 
-    if (!has_matching_child)
+    if (found_stopped) {
+      uint32_t spid = found_stopped->pid;
+      if (status_out) {
+        stac();
+        *status_out = ((stopped_sig & 0xff) << 8) | 0x7f; // WIFSTOPPED
+        clac();
+      }
+      if (rusage_out)
+        memset(rusage_out, 0, sizeof(*rusage_out));
+      return (int)spid;
+    }
+
+    if (found_continued) {
+      uint32_t cpid = found_continued->pid;
+      if (status_out) {
+        stac();
+        *status_out = 0xffff; // WIFCONTINUED
+        clac();
+      }
+      if (rusage_out)
+        memset(rusage_out, 0, sizeof(*rusage_out));
+      return (int)cpid;
+    }
+
+    if (!has_matching_child) {
+      LOG_INFO("[WAITPID] pid=%d: no matching child. process_list:", pid);
+      unsigned long lf = spin_lock_irqsave(&process_lock);
+      process_t *q = process_list;
+      while (q) {
+        LOG_INFO("  pid=%u ppid=%u pgid=%u sid=%u zombie=%d stopped=%d", q->pid,
+                 q->ppid, q->pgid, q->sid, q->is_zombie, q->stopped);
+        q = q->next;
+      }
+      spin_unlock_irqrestore(&process_lock, lf);
       return -1;
+    }
     if (options & WNOHANG)
       return 0;
 
     int rc =
-        wait_event_interruptible(&parent->child_wq, has_matching_zombie, &ctx);
+        wait_event_interruptible(&parent->child_wq, has_matching_event, &ctx);
     if (rc < 0)
       return -1;
   }
@@ -1043,6 +1205,19 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
 void process_exit(process_t *proc, int exit_code) {
   if (!proc)
     return;
+
+  // [CONCURRENCIA] Idempotente: si dos rutas concurrentes (p.ej. SIGTERM
+  // + exit_group) llegan a la vez, la segunda es no-op.
+  if (proc->is_zombie)
+    return;
+
+  // [DIAG] Quién sale, con qué código y qué señales tenía pendientes.
+  LOG_INFO(
+      "[EXIT] pid=%u ppid=%u pgid=%u name='%s' code=%d pending=0x%lx "
+      "blocked=0x%lx",
+      proc->pid, proc->ppid, proc->pgid, proc->name, exit_code,
+      (unsigned long)__atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE),
+      (unsigned long)proc->blocked_signals);
 
   // [ENV] Liberar el entorno.
   process_clear_envp(proc);
@@ -1084,11 +1259,18 @@ void process_exit(process_t *proc, int exit_code) {
 
 __attribute__((noreturn)) void process_exit_current(int exit_code) {
   process_t *proc = process_current();
-  task_t *cur = sched_current();
 
   if (proc)
     process_exit(proc, exit_code);
 
+  // [FIX] Releer cur DESPUÉS de process_exit. El panic anterior mostró
+  // que el local `cur` puede quedar corrupto durante la llamada (wild
+  // write desde process_clear_envp con un `proc` stale o similar). Releer
+  // el current_task real elimina la dependencia del valor guardado y, si
+  // sigue corrupto, al menos el fallo se traslada a un sitio donde el
+  // valor viene directamente de %gs, no de una pila potencialmente
+  // pisada.
+  task_t *cur = sched_current();
   if (cur) {
     cur->state = TASK_DEAD;
   }
@@ -1312,8 +1494,11 @@ int64_t sys_fork(void) {
 
   child->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
   child->ppid = parent->pid;
+  child->pgid = parent->pgid; // ← NUEVO: hereda grupo del padre
+  child->sid = parent->sid;   // ← NUEVO: hereda sesión
   child->exit_code = 0;
   child->is_zombie = 0;
+  child->ctty = parent->ctty; // [CTTY] hereda el terminal de control
 
   // Nombre: prefijo con el del padre.
   {
@@ -1342,6 +1527,11 @@ int64_t sys_fork(void) {
 
   process_set_cwd(child, parent->cwd);
   process_init_signals(child);
+  // Heredar handlers y máscara del padre.
+  for (int i = 0; i < SIG_MAX; i++)
+    child->sigactions[i] = parent->sigactions[i];
+  child->blocked_signals = parent->blocked_signals;
+  child->pending_signals = 0;
 
   // [ENV] Heredar entorno del padre.
   if (process_inherit_envp(parent, child) != 0) {
@@ -1495,6 +1685,16 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
 
+  // Resetear handlers a default (excepto SIG_IGN), según POSIX.
+  for (int i = 0; i < SIG_MAX; i++) {
+    if (proc->sigactions[i].handler != SIG_IGN)
+      proc->sigactions[i].handler = SIG_DFL;
+    proc->sigactions[i].flags = 0;
+    proc->sigactions[i].restorer = NULL;
+    proc->sigactions[i].mask = 0;
+  }
+  // blocked_signals y pending_signals se preservan.
+
   proc->fs_base = 0;
   if (proc->task)
     proc->task->fs_base = 0;
@@ -1535,4 +1735,166 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d)", path,
            (void *)entry, (void *)user_rsp, argc, envc);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [JOB CONTROL] Helpers
+// ---------------------------------------------------------------------------
+int process_is_in_pgrp(process_t *p, uint32_t pgid) {
+  if (!p)
+    return 0;
+  return p->pgid == pgid;
+}
+
+int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
+  if (pgid_arg == 0)
+    return -ESRCH;
+
+#define SIGPGRP_MAX 32
+  task_t *tasks[SIGPGRP_MAX];
+  uint32_t ppids[SIGPGRP_MAX];
+  int resume_flags[SIGPGRP_MAX];
+  int intr_flags[SIGPGRP_MAX];
+  int n = 0;
+
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  while (p && n < SIGPGRP_MAX) {
+    if (p->pgid == pgid_arg && !p->is_zombie && p->task) {
+      task_t *t = p->task;
+      task_get(t);
+
+      int resume = 0;
+      uint64_t mask = signal_mask;
+      if ((mask & (1ULL << SIGCONT)) && p->stopped) {
+        p->stopped = 0;
+        p->stop_event_pending = 0;
+        p->cont_event_pending = 1;
+        resume = 1;
+        mask &= ~(1ULL << SIGCONT);
+      } else if ((mask & (1ULL << SIGKILL)) && p->stopped) {
+        p->stopped = 0;
+        p->stop_event_pending = 0;
+        resume = 1;
+      }
+
+      // [FIX] Descartar señales ignoradas: no se encolan ni interrumpen.
+      uint64_t before = mask;
+      mask = signal_filter_ignored(p, mask);
+      if (before != mask)
+        LOG_DEBUG("[SIG] pgrp=%u pid=%u: descartadas señales ignoradas 0x%lx",
+                  pgid_arg, p->pid, (unsigned long)(before & ~mask));
+
+      if (mask)
+        __atomic_fetch_or(&p->pending_signals, mask, __ATOMIC_RELEASE);
+
+      tasks[n] = t;
+      ppids[n] = p->ppid;
+      resume_flags[n] = resume;
+      intr_flags[n] = (mask != 0);
+      n++;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  for (int i = 0; i < n; i++) {
+    if (resume_flags[i]) {
+      sched_cont_task(tasks[i]);
+      process_wake_parent(ppids[i]);
+    }
+    // [FIX] Solo interrumpir si quedó una señal entregable.
+    if (intr_flags[i])
+      wait_queue_interrupt_task(tasks[i]);
+    task_put(tasks[i]);
+  }
+  return n > 0 ? n : -ESRCH;
+}
+
+int process_pgrp_exists(uint32_t pgid) {
+  if (pgid == 0)
+    return 0;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  int found = 0;
+  while (p) {
+    if (p->pgid == pgid && !p->is_zombie) {
+      found = 1;
+      break;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+  return found;
+}
+
+void process_clear_ctty_for(struct tty *t) {
+  if (!t)
+    return;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  while (p) {
+    if (p->ctty == t)
+      p->ctty = NULL;
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+}
+
+// ---------------------------------------------------------------------------
+// [JOB CONTROL] Parar el proceso actual hasta que llegue SIGCONT.
+//
+// El proceso queda en TASK_STOPPED en la runqueue. El selector del
+// scheduler lo ignora. Solo sched_cont_task lo devuelve a READY.
+//
+// El bucle `while (proc->stopped)` es la clave: cuando SIGCONT llega
+// desde otro proceso (process_signal_pid/pgrp), se pone stopped=0 y se
+// llama a sched_cont_task. Al despertar, salimos del bucle.
+// ---------------------------------------------------------------------------
+void process_stop_current(int sig) {
+  process_t *proc = process_current();
+  task_t *cur = sched_current();
+  if (!proc || !cur)
+    return;
+
+  proc->stopped = 1;
+  proc->stop_signal = sig;
+  proc->stop_event_pending = 1;
+
+  // Avisar al padre para que su waitpid(WUNTRACED) vea el evento.
+  process_wake_parent(proc->ppid);
+
+  while (proc->stopped) {
+    cur->state = TASK_STOPPED;
+    sched_yield();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// [JOB CONTROL] Despertar al padre (por PID) para que su child_wq
+// re-evalúe la condición. Si el padre no está en waitpid, la llamada a
+// wait_queue_wake_task es no-op.
+// ---------------------------------------------------------------------------
+void process_wake_parent(uint32_t parent_pid) {
+  if (parent_pid == 0)
+    return;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  task_t *parent_task = NULL;
+  while (p) {
+    if (p->pid == parent_pid && !p->is_zombie) {
+      if (p->task) {
+        parent_task = p->task;
+        task_get(parent_task);
+      }
+      break;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  if (parent_task) {
+    wait_queue_wake_task(parent_task);
+    task_put(parent_task);
+  }
 }

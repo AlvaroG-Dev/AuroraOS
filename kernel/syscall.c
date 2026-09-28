@@ -762,50 +762,73 @@ static int64_t k_getppid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   return proc ? (int64_t)proc->ppid : -EFAULT;
 }
 
-// ---------- process groups / sessions (stubs) ----------
-//
-// Aurora no tiene process groups ni sessions reales. Cada proceso es su
-// propio pgid y su propia session, y coincide con su pid. Ash llama a
-// estas al arrancar para activar job control. Devolver el pid propio
-// las satisface y evita que entre en bucle.
+// ---------- process groups / sessions ----------
+
 static int64_t k_setpgid(uint64_t pid, uint64_t pgid, uint64_t a3, uint64_t a4,
                          uint64_t a5) {
-  (void)pid;
-  (void)pgid;
   (void)a3;
   (void)a4;
   (void)a5;
+
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+
+  uint32_t target_pid = (pid == 0) ? self->pid : (uint32_t)pid;
+  uint32_t target_pgid = (pgid == 0) ? target_pid : (uint32_t)pgid;
+
+  LOG_INFO("[SETPGID] self=%u target=%u pgid=%u", self->pid, target_pid,
+           target_pgid);
+
+  if (target_pgid == 0)
+    return -EINVAL;
+
+  process_t *target = process_find_by_pid(target_pid);
+  if (!target)
+    return -ESRCH;
+
+  // Solo puedes cambiar tu propio grupo, o el de un hijo directo.
+  if (target_pid != self->pid && target->ppid != self->pid)
+    return -EPERM;
+
+  // No puedes mover un proceso a otra sesión.
+  if (target->sid != self->sid)
+    return -EPERM;
+
+  // Un session leader no puede cambiar su grupo.
+  if (target->sid == target->pid)
+    return -EPERM;
+
+  // El pgid debe existir: o es el pid del target mismo (crea grupo),
+  // o hay algún proceso en ese grupo dentro de la misma sesión.
+  if (target_pgid != target_pid) {
+    process_t *p = process_find_by_pid(target_pgid);
+    if (!p || p->pgid != target_pgid || p->sid != target->sid)
+      return -EPERM;
+  }
+
+  target->pgid = target_pgid;
+  LOG_INFO("[SETPGID] -> OK pid=%u pgid=%u", target_pid, target_pgid);
   return 0;
 }
+
 static int64_t k_getpgid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
                          uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
+  process_t *self = process_current();
+  if (!self)
     return -EFAULT;
-  // pid 0 o pid == propio: devolvemos el pid.
-  if (pid == 0 || (int32_t)pid == (int32_t)proc->pid)
-    return (int64_t)proc->pid;
-  // pid externo: no tenemos noción de grupos de otros procesos,
-  // devolvemos el mismo pid por simplicidad.
-  return (int64_t)(int32_t)pid;
+
+  uint32_t target_pid = (pid == 0) ? self->pid : (uint32_t)pid;
+  process_t *target = process_find_by_pid(target_pid);
+  if (!target)
+    return -ESRCH;
+  return (int64_t)target->pgid;
 }
-static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
-                        uint64_t a5) {
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
-    return -EFAULT;
-  if (pid == 0 || (int32_t)pid == (int32_t)proc->pid)
-    return (int64_t)proc->pid;
-  return (int64_t)(int32_t)pid;
-}
+
 static int64_t k_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a1;
@@ -813,8 +836,35 @@ static int64_t k_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  return proc ? (int64_t)proc->pid : -EFAULT;
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+
+  // Si ya es líder de sesión, no puede volver a crearla.
+  if (self->sid == self->pid)
+    return -EPERM;
+
+  self->sid = self->pid;
+  self->pgid = self->pid;
+  self->ctty = NULL; // [CTTY] setsid desasocia el terminal de control
+  return (int64_t)self->pid;
+}
+
+static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+
+  uint32_t target_pid = (pid == 0) ? self->pid : (uint32_t)pid;
+  process_t *target = process_find_by_pid(target_pid);
+  if (!target)
+    return -ESRCH;
+  return (int64_t)target->sid;
 }
 
 // Aurora no tiene grupos suplementarios. Con size==0 devolvemos 0 (no
@@ -872,28 +922,52 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
   (void)a5;
   int32_t kpid = (int32_t)pid;
   int ksig = (int)sig;
+
+  // Señal 0 = comprobar existencia, sin enviar. Linux la acepta.
+  if (ksig == 0) {
+    if (kpid > 0)
+      return process_find_by_pid((uint32_t)kpid) ? 0 : -ESRCH;
+    if (kpid == 0)
+      return process_current() ? 0 : -ESRCH;
+    return process_pgrp_exists((uint32_t)(-kpid)) ? 0 : -ESRCH;
+  }
+
   if (ksig < 1 || ksig >= SIG_MAX)
     return -EINVAL;
 
-  task_t *target_task = NULL;
+  process_t *self = process_current();
+  LOG_INFO("[KILL] self=%u kpid=%d sig=%d", self ? self->pid : 0, (int)kpid,
+           ksig);
+
   if (kpid > 0) {
-    target_task = process_signal_pid((uint32_t)kpid, 1ULL << ksig);
-    if (!target_task)
-      return -ENOENT;
-  } else if (kpid == 0) {
+    int need_intr = 0;
+    task_t *t = process_signal_pid_ex((uint32_t)kpid, 1ULL << ksig, &need_intr);
+    if (!t)
+      return -ESRCH;
+    if (need_intr)
+      wait_queue_interrupt_task(t);
+    task_put(t);
+    return 0;
+  }
+  if (kpid == 0) {
     process_t *target = process_current();
     if (!target || !target->task)
-      return -ENOENT;
-    target_task = target->task;
-    task_get(target_task);
-    __atomic_fetch_or(&target->pending_signals, 1ULL << ksig, __ATOMIC_RELEASE);
-  } else {
-    return -EINVAL;
+      return -ESRCH;
+    task_t *t = target->task;
+    task_get(t);
+    uint64_t mask = signal_filter_ignored(target, 1ULL << ksig);
+    if (mask) {
+      __atomic_fetch_or(&target->pending_signals, mask, __ATOMIC_RELEASE);
+      wait_queue_interrupt_task(t);
+    }
+    task_put(t);
+    return 0;
   }
 
-  wait_queue_interrupt_task(target_task);
-  task_put(target_task);
-  return 0;
+  // kpid < 0: enviar a todos los procesos del grupo -kpid.
+  uint32_t grp = (uint32_t)(-kpid);
+  int n = process_signal_pgrp(grp, 1ULL << ksig);
+  return n < 0 ? n : 0;
 }
 
 // ---------- pipe / dup2 ----------
@@ -1265,27 +1339,13 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
   int kfd = (int)fd;
   if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
     return -EBADF;
-  return vfs_node_ioctl(proc->fds[kfd]->node, (unsigned long)req, arg);
-}
-
-// ---------- rt_sigaction / rt_sigprocmask (stubs) ----------
-static int64_t k_rt_sigaction(uint64_t a1, uint64_t a2, uint64_t a3,
-                              uint64_t a4, uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
-}
-static int64_t k_rt_sigprocmask(uint64_t a1, uint64_t a2, uint64_t a3,
-                                uint64_t a4, uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
+  // [ioctl] musl pasa `req` como int (sign-extended en x86_64). Los
+  // ioctls con bit 31 puesto (todos los _IOR/_IOW modernos, p. ej.
+  // TIOCGPTN, TIOCSPTLCK, DRM, V4L2, ...) llegan como
+  // 0xffffffffXXXXXXXX. Truncamos a 32 bits, que es lo que hacen
+  // Linux y cualquier kernel POSIX en el syscall ioctl.
+  unsigned long kreq = (unsigned long)(uint32_t)req;
+  return vfs_node_ioctl(proc->fds[kfd]->node, kreq, arg);
 }
 
 // ---------- clock_gettime ----------
@@ -1516,10 +1576,10 @@ static int64_t do_poll_common(struct k_pollfd *kfds, uint32_t nfds,
         kfds[i].revents = (int16_t)rev;
         ready_count++;
       } else if (!wq && f->node && f->node->ops && f->node->ops->poll) {
-        // Primera wq disponible. Dormimos sobre ella y re-polleamos al
-        // despertar. No es lo más eficiente (con múltiples fds activos
-        // conviene una wq por fd), pero para tty + pipes puntuales basta.
-        wq = &f->read_wq;
+        if (f->node->ops->poll_wq)
+          wq = f->node->ops->poll_wq(f->node);
+        if (!wq)
+          wq = &f->read_wq;
       }
     }
 
@@ -1796,15 +1856,57 @@ static int64_t k_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a3,
     return -EINVAL;
 
   uint64_t ticks = ts_to_ticks(ts.tv_sec, ts.tv_nsec);
-  if (ticks > 0)
-    sched_sleep_ticks(ticks);
+  uint64_t deadline = sched_get_ticks() + ticks;
+  int interrupted = 0;
+
+  process_t *self = process_current();
+  uint32_t spid = self ? self->pid : 0;
+
+  // Bucle hasta agotar el deadline. Si se interrumpe, devolvemos en rem el
+  // tiempo REAL restante para que BusyBox retome donde lo dejó.
+  while (1) {
+    uint64_t now = sched_get_ticks();
+    if (now >= deadline)
+      break;
+    uint64_t remaining = deadline - now;
+
+    wait_queue_t wq;
+    wait_queue_init(&wq);
+    long r = wait_event_interruptible_timeout(&wq, sleep_never_true, NULL,
+                                              remaining);
+    if (r < 0) {
+      interrupted = 1;
+      break;
+    }
+  }
+
+  uint64_t now_end = sched_get_ticks();
+  uint64_t left = (now_end < deadline) ? (deadline - now_end) : 0;
+
+  // [DIAG] Si esto sale con left≈100000 e interrupted=0 el bug está en el
+  // wait; con interrupted=1 fue una señal (mira pending/blocked).
+  LOG_INFO("[NANOSLEEP] pid=%u req=%lu ticks left=%lu interrupted=%d "
+           "pending=0x%lx blocked=0x%lx",
+           spid, (unsigned long)ticks, (unsigned long)left, interrupted,
+           self ? (unsigned long)__atomic_load_n(&self->pending_signals,
+                                                 __ATOMIC_ACQUIRE)
+                : 0UL,
+           self ? (unsigned long)self->blocked_signals : 0UL);
 
   if (rem_ptr) {
-    struct k_timespec zero = {0, 0};
-    if (copy_to_user((void *)rem_ptr, &zero, sizeof(zero)) < 0)
+    struct k_timespec rem;
+    if (interrupted) {
+      rem.tv_sec = (int64_t)(left / 1000);
+      rem.tv_nsec = (int64_t)((left % 1000) * 1000000);
+    } else {
+      rem.tv_sec = 0;
+      rem.tv_nsec = 0;
+    }
+    if (copy_to_user((void *)rem_ptr, &rem, sizeof(rem)) < 0)
       return -EFAULT;
   }
-  return 0;
+
+  return interrupted ? -EINTR : 0;
 }
 
 // ---------- fork / clone / wait4 ----------
@@ -1870,10 +1972,14 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
   if (!self)
     return -EFAULT;
 
+  LOG_INFO("[WAIT4] self=%u pid=%ld options=0x%lx", self->pid,
+           (long)(int32_t)pid, (unsigned long)options);
+
   int32_t aurora_status = 0;
   proc_rusage_t ru = {0};
   int r =
       process_waitpid(self, (int32_t)pid, &aurora_status, &ru, (int)options);
+  LOG_INFO("[WAIT4] -> %d", r);
   if (r < 0)
     return r;
 
@@ -1883,10 +1989,11 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
     if (status_ptr) {
       if (!access_ok((void *)status_ptr, sizeof(int32_t)))
         return -EFAULT;
-      // Formato Linux: exit status = ((code & 0xff) << 8).
-      // Asumimos siempre salida normal (no señales reales aún).
-      int32_t linux_status = (aurora_status & 0xff) << 8;
-      if (put_user_u32((uint32_t *)status_ptr, (uint32_t)linux_status) < 0)
+      // process_waitpid ya escribió el status en formato Linux:
+      //   exited:    (code & 0xff) << 8
+      //   stopped:   ((sig & 0xff) << 8) | 0x7f
+      //   continued: 0xffff
+      if (put_user_u32((uint32_t *)status_ptr, (uint32_t)aurora_status) < 0)
         return -EFAULT;
     }
     if (rusage_ptr) {
@@ -2018,6 +2125,50 @@ static int64_t k_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a5;
   process_t *proc = process_current();
   return proc ? (int64_t)proc->pid : -EFAULT;
+}
+
+static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
+                          uint64_t count, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int)out_fd < 0 || (int)out_fd >= MAX_PROCESS_FDS || !proc->fds[out_fd])
+    return -EBADF;
+  if ((int)in_fd < 0 || (int)in_fd >= MAX_PROCESS_FDS || !proc->fds[in_fd])
+    return -EBADF;
+
+  file_descriptor_t *out = proc->fds[out_fd];
+  file_descriptor_t *in = proc->fds[in_fd];
+  if (!out->node || !out->node->ops || !out->node->ops->write)
+    return -EINVAL;
+  if (!in->node || !in->node->ops || !in->node->ops->read)
+    return -EINVAL;
+
+  // Ignoramos offset_ptr por simplicidad: usamos el offset del fd de
+  // entrada (que es lo que hace sendfile con offset==NULL).
+  uint8_t buf[4096];
+  size_t total = 0;
+  while (total < count) {
+    size_t chunk = count - total;
+    if (chunk > sizeof(buf))
+      chunk = sizeof(buf);
+    int64_t r = in->node->ops->read(in->node, in->offset, chunk, buf);
+    if (r <= 0)
+      break;
+    int64_t w = out->node->ops->write(out->node, out->offset, r, buf);
+    if (w < 0) {
+      if (total == 0)
+        return w;
+      break;
+    }
+    in->offset += r;
+    out->offset += w;
+    total += w;
+    if (w < r)
+      break;
+  }
+  return (int64_t)total;
 }
 
 // ===========================================================================
@@ -2516,6 +2667,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_MUNMAP] = {k_munmap, "munmap"},
     [SYS_BRK] = {k_brk, "brk"},
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},
+    [SYS_RT_SIGRETURN] = {k_rt_sigreturn, "rt_sigreturn"},
     [SYS_RT_SIGPROCMASK] = {k_rt_sigprocmask, "rt_sigprocmask"},
     [SYS_IOCTL] = {k_ioctl, "ioctl"},
     [SYS_POLL] = {k_poll, "poll"},
@@ -2534,6 +2686,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SCHED_YIELD] = {k_sched_yield, "sched_yield"},
     [SYS_DUP2] = {k_dup2, "dup2"},
     [SYS_GETPID] = {k_getpid, "getpid"},
+    [SYS_SENDFILE] = {k_sendfile, "sendfile"},
     [SYS_GETUID] = {k_getuid, "getuid"},
     [SYS_GETGID] = {k_getgid, "getgid"},
     [SYS_GETEUID] = {k_geteuid, "geteuid"},
@@ -2610,10 +2763,6 @@ uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t arg4 = regs->r10;
   uint64_t arg5 = regs->r8;
 
-  LOG_TRACE("[SYSCALL] cpu=%u num=%lu arg1=%p arg2=%p",
-            (unsigned)smp_processor_id(), (unsigned long)num, (void *)arg1,
-            (void *)arg2);
-
   syscall_fn_t fn = NULL;
   if (num < (uint64_t)LINUX_TABLE_N) {
     fn = linux_table[num].fn;
@@ -2628,9 +2777,6 @@ uint64_t syscall_handler_c(registers_t *regs) {
     return err(ENOSYS);
   }
 
-  signal_check_pending();
-
-  // [FIX-SMP] Guardar el trap frame en la tarea actual, no en un global.
   task_t *cur = sched_current();
   registers_t *saved = cur ? cur->syscall_regs : NULL;
   if (cur)
@@ -2638,10 +2784,17 @@ uint64_t syscall_handler_c(registers_t *regs) {
 
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
 
-  if (cur)
-    cur->syscall_regs = saved;
+  // Publicar el valor de retorno en el trap frame ANTES de la entrega
+  // de señales, para que el ucontext que construyamos capture el rax
+  // correcto (valor de retorno de la syscall).
+  regs->rax = ret;
 
   signal_check_pending();
 
-  return ret;
+  if (cur)
+    cur->syscall_regs = saved;
+
+  // Devolvemos regs->rax (que pudo cambiar si k_rt_sigreturn restauró
+  // un rax distinto). El asm lo escribirá en [frame+0x70].
+  return regs->rax;
 }

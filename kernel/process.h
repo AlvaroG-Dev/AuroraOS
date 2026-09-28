@@ -3,17 +3,22 @@
 #define PROCESS_H
 
 #include "sched.h"
+#include "signal.h"
 #include "vfs.h"
 #include "wait.h"
 #include <stddef.h>
 #include <stdint.h>
 
 #define WNOHANG 1
+#define WUNTRACED 2
+#define WCONTINUED 8
 
 #define PROCESS_ARGV_MAX 16
 
 #define PROCESS_ENVP_MAX 32
 #define PROCESS_ENV_STR_MAX 256
+
+struct tty;
 
 // [pipe] Fds que el shell quiere asignar al hijo. -1 significa
 // "usar el stdio por defecto" (stdin/stdout/stderr del kernel).
@@ -41,8 +46,39 @@ typedef struct {
 typedef struct process {
   uint32_t pid;
   uint32_t ppid;
+
+  // [JOB CONTROL] Process group ID. Un proceso con pgid == pid es
+  // líder de su grupo. Los hijos heredan el pgid del padre y pueden
+  // cambiarlo con setpgid() mientras el padre lo permita (misma sesión).
+  uint32_t pgid;
+
+  // [JOB CONTROL] Session ID. Un proceso con sid == pid es líder de
+  // sesión. Un terminal tiene una sesión asociada (fg_pgid la gestiona
+  // en tty.c), y los procesos que abren un terminal pasan a pertenecer
+  // a su sesión vía setsid() + TIOCSCTTY.
+  uint32_t sid;
+
+  // [CTTY] Terminal de control del proceso. NULL si no tiene.
+  // Lo setea TIOCSCTTY, lo limpia setsid/TIOCNOTTY, y process_clear_ctty_for
+  // cuando el tty subyacente se libera. Todos los procesos de una misma
+  // sesión comparten ctty.
+  struct tty *ctty;
+
   int exit_code;
   int is_zombie;
+
+  // [JOB CONTROL] Estado de parada por SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU.
+  //   stopped            1 si el proceso está parado ahora mismo.
+  //   stop_signal        señal que lo paró (para WIFSTOPPED).
+  //   stop_event_pending 1 si hay un evento "stopped" aún no reportado
+  //                      al padre vía waitpid(WUNTRACED).
+  //   cont_event_pending 1 si hay un evento "continued" aún no reportado
+  //                      al padre vía waitpid(WCONTINUED).
+  int stopped;
+  int stop_signal;
+  int stop_event_pending;
+  int cont_event_pending;
+
   char name[64];
   task_t *task;
   uint64_t pml4_phys;
@@ -67,13 +103,9 @@ typedef struct process {
   wait_queue_t child_wq;
   char cwd[VFS_PATH_MAX];
 
-  // [SIG] Bitmask de señales pendientes y bloqueadas. Bit N = señal N.
-  // pendiente:  aún no entregada.
-  // bloqueada:  el proceso pidió posponerla (sigprocmask futuro).
-  // Solo se entregan en signal_check_pending(), llamada desde el
-  // retorno a userland de cada syscall.
   uint64_t pending_signals;
   uint64_t blocked_signals;
+  k_sigaction_t sigactions[SIG_MAX];
 
   // [musl] FS segment base (TLS). Se guarda también en task_t para que
   // switch.asm lo restaure al cambiar de tarea.
@@ -100,6 +132,17 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
 // [Fase A] Marca el proceso como zombie, cierra fds y ventanas, y
 // despierta al padre. NO mata la tarea. Es la parte "lógica".
 void process_exit(process_t *proc, int exit_code);
+
+// [JOB CONTROL] Para el proceso actual: marca stopped=1, notifica al
+// padre (child_wq), y cede la CPU en bucle hasta que SIGCONT la
+// reactive (stopped=0). Se llama desde signal.c (deliver) cuando
+// SIGTSTP/SIGSTOP/SIGTTIN/SIGTTOU tienen acción por defecto.
+// No es noreturn: retorna cuando el proceso es continuado.
+void process_stop_current(int sig);
+
+// [JOB CONTROL] Despierta al padre (por PID) para que su child_wq
+// re-evalúe la condición (stop/cont nuevos). No-op si no espera.
+void process_wake_parent(uint32_t parent_pid);
 
 // [Fase A] Marca el proceso como zombie, cierra fds/ventanas, despierta
 // al padre, mata la tarea actual y NO retorna. Unifica SYS_EXIT y
@@ -146,6 +189,27 @@ int64_t sys_fork(void);
 int process_execve_prepare(const char *path, int argc, const char *const *argv,
                            int envc, const char *const *envp,
                            uint64_t *new_entry, uint64_t *new_rsp);
+
+// [JOB CONTROL] Devuelve 1 si el proceso `pid` pertenece al grupo
+// `pgid`. Un pid 0 o pgid 0 se interpretan como "el proceso actual".
+// No toma locks internamente: el llamante debe tener cuidado si los
+// campos pueden cambiar concurrentemente.
+int process_is_in_pgrp(process_t *p, uint32_t pgid);
+
+// [JOB CONTROL] Envía señal a todos los procesos vivos (no zombie) con
+// pgid == pgid_arg. Ignora a zombies. Devuelve el número de procesos
+// señalados, o -ESRCH si no existe ningún proceso en ese grupo.
+int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask);
+
+task_t *process_signal_pid_ex(uint32_t pid, uint64_t signal_mask,
+                              int *need_interrupt);
+
+// Devuelve 1 si existe algún proceso vivo en el grupo `pgid`. 0 si no.
+int process_pgrp_exists(uint32_t pgid);
+
+// [CTTY] Recorre process_list y pone a NULL el ctty de cualquier proceso
+// que apunte a `t`. Se llama desde pty_free cuando un PTY se libera.
+void process_clear_ctty_for(struct tty *t);
 
 // [RUSAGE] Contabiliza un tick de CPU (1 ms) al proceso de la tarea
 // indicada. La llama sched_tick() en cada tick del LAPIC. No hace nada

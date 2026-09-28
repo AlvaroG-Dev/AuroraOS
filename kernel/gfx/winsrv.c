@@ -557,9 +557,9 @@ int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
   window_t *win = e->win;
   spin_unlock_irqrestore(&winsrv_lock, flags);
 
-  LOG_INFO("[WINSRV] set_icon: '%s' (%llu bytes, first=%02x %02x)", path,
-           (unsigned long long)size, size > 0 ? node->data[0] : 0,
-           size > 1 ? node->data[1] : 0);
+  LOG_DEBUG("[WINSRV] set_icon: '%s' (%llu bytes, first=%02x %02x)", path,
+            (unsigned long long)size, size > 0 ? node->data[0] : 0,
+            size > 1 ? node->data[1] : 0);
 
   win_set_icon_bmp(win, node);
 
@@ -571,14 +571,37 @@ int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
 
   uint32_t center = win->icon_cache[9 * 18 + 9];
   uint32_t corner = win->icon_cache[0];
-  LOG_INFO("[WINSRV] set_icon: cache ventana OK has=%d center=%08x corner=%08x",
-           win->has_icon_cache, center, corner);
+  LOG_DEBUG(
+      "[WINSRV] set_icon: cache ventana OK has=%d center=%08x corner=%08x",
+      win->has_icon_cache, center, corner);
   if (win->taskbar_item) {
     uint32_t tb_center = win->taskbar_item->icon_cache[10 * 20 + 10];
     uint32_t tb_corner = win->taskbar_item->icon_cache[0];
-    LOG_INFO("[WINSRV] set_icon: cache taskbar has=%d center=%08x corner=%08x",
-             win->taskbar_item->has_icon_cache, tb_center, tb_corner);
+    LOG_DEBUG("[WINSRV] set_icon: cache taskbar has=%d center=%08x corner=%08x",
+              win->taskbar_item->has_icon_cache, tb_center, tb_corner);
   }
 
   return 0;
+}
+
+void winsrv_post_to_focused(uint32_t type, int32_t x, int32_t y,
+                            uint32_t data) {
+  if (!g_ready)
+    return;
+
+  window_t *found = NULL;
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  for (int i = 0; i < WINSRV_MAX_WINDOWS; i++) {
+    if (!g_windows[i].in_use || !g_windows[i].win)
+      continue;
+    window_t *w = g_windows[i].win;
+    if ((w->flags & WIN_FLAGS_FOCUSED) && !(w->flags & WIN_FLAGS_HIDDEN)) {
+      found = w;
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+
+  if (found)
+    winsrv_post_event(found, type, x, y, data);
 }

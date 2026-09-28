@@ -358,6 +358,9 @@ static void sched_check_invariants(task_t *t) {
   if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
     LOG_PANIC("sched: task %u elegida con on_cpu=1 (sigue en otra CPU)", t->id);
   }
+  if (t->state == TASK_STOPPED && t->waiting_on != NULL) {
+    LOG_PANIC("sched: task %u STOPPED con waiting_on != NULL", t->id);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +440,8 @@ void sched_tick(void) {
       sched_unlock_irqrestore(flags);
       return;
     }
-    if (curr->state == TASK_BLOCKED || curr->state == TASK_DEAD) {
+    if (curr->state == TASK_BLOCKED || curr->state == TASK_STOPPED ||
+        curr->state == TASK_DEAD) {
       next = idle_tasks[cpu];
     } else if (curr->yield_requested) {
       // [FIX sched_yield] La tarea actual pidió ceder explícitamente.
@@ -689,6 +693,37 @@ void sched_make_ready(task_t *t) {
   spin_unlock_irqrestore(&sched_lock, flags);
 
   if (was_blocked)
+    sched_kick_idle_cpu(t);
+}
+
+// ---------------------------------------------------------------------------
+// [JOB CONTROL] Stop / continue.
+//
+// sched_stop_task: READY/RUNNING -> STOPPED. No toca la runqueue: la
+// tarea sigue enlazada pero el selector del tick exige TASK_READY.
+//
+// sched_cont_task: STOPPED -> READY. Kickeamos una idle CPU para que
+// la elija en el siguiente tick.
+// ---------------------------------------------------------------------------
+void sched_stop_task(task_t *t) {
+  if (!t)
+    return;
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  if (t->state == TASK_RUNNING || t->state == TASK_READY) {
+    t->state = TASK_STOPPED;
+  }
+  spin_unlock_irqrestore(&sched_lock, flags);
+}
+
+void sched_cont_task(task_t *t) {
+  if (!t)
+    return;
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  int was_stopped = (t->state == TASK_STOPPED);
+  if (was_stopped)
+    t->state = TASK_READY;
+  spin_unlock_irqrestore(&sched_lock, flags);
+  if (was_stopped)
     sched_kick_idle_cpu(t);
 }
 

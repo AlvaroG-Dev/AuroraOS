@@ -1,1 +1,1 @@
-cmd_miscutils/lib.a := rm -f miscutils/lib.a; ar  rcs miscutils/lib.a miscutils/ascii.o miscutils/bc.o miscutils/strings.o miscutils/time.o miscutils/tree.o miscutils/ts.o
+cmd_miscutils/lib.a := rm -f miscutils/lib.a; x86_64-linux-musl-ar  rcs miscutils/lib.a miscutils/ascii.o miscutils/bc.o miscutils/strings.o miscutils/time.o miscutils/tree.o miscutils/ts.o

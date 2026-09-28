@@ -1,1 +1,1 @@
-cmd_findutils/built-in.o :=  rm -f findutils/built-in.o; ar rcs findutils/built-in.o
+cmd_findutils/built-in.o :=  rm -f findutils/built-in.o; x86_64-linux-musl-ar rcs findutils/built-in.o

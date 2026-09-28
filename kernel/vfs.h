@@ -75,6 +75,13 @@ typedef struct vfs_ops {
   // Si NULL, el VFS asume (POLLIN|POLLOUT) siempre listo (ficheros regulares).
   int (*poll)(vfs_node_t *node, short events);
 
+  // [PTY fix] Wait queue sobre la que dormir cuando poll() no está listo.
+  // Si NULL, el VFS usa la wq del file_descriptor_t (comportamiento
+  // antiguo). Los PTYs devuelven &pty->m_read_wq del master (o el
+  // read_wq del slave tty) para que pty_slave_emit() despierte al
+  // poller directamente.
+  wait_queue_t *(*poll_wq)(vfs_node_t *node);
+
   // req es el request de ioctl; arg es un puntero de USERLAND sin validar.
   // El handler de ioctl debe hacer access_ok/copy_to_user.
   // Si NULL, devuelve -ENOTTY.
@@ -129,6 +136,19 @@ int vfs_mount(const char *path, vfs_fs_ops_t *ops, void *fs_priv);
 // Desmonta el FS en `path`. Devuelve 0 si OK, -ENOENT si no existe,
 // -EBUSY si hay otro mount anidado bajo ese path.
 int vfs_umount(const char *path);
+
+// [BIND] Monta `source_path` sobre `mount_path`. Ambos deben existir en
+// el VFS. mount_path debe ser un directorio (o un punto de montaje
+// válido). source_path debe ser un directorio.
+//
+// Uso típico: vfs_mount_bind("/bin", "/initrd/bin") para exponer el
+// árbol de busybox en /bin sin duplicar binarios. Después de esto,
+// vfs_lookup("/bin/ls") redirige a "/initrd/bin/ls".
+//
+// Devuelve 0 si OK, -EEXIST si ya hay algo montado en mount_path,
+// -ENOENT si source_path no existe, -ENOTDIR si source_path no es
+// directorio, -EINVAL si los paths son inválidos, -ENOMEM.
+int vfs_mount_bind(const char *mount_path, const char *source_path);
 
 // Devuelve el fs_priv asociado al mount en `path`, o NULL si no existe.
 // El puntero es válido hasta que se llame a vfs_umount sobre ese mount.

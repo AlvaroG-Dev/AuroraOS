@@ -20,8 +20,6 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
   static int icon_dbg_done = 0;
   if (!icon_dbg_done && win->has_icon_cache && win->title[0] == 'A') {
     icon_dbg_done = 1;
-    LOG_DEBUG("[ICON-DBG] '%s' %dx%d:", win->title, WIN_ICON_SIZE,
-              WIN_ICON_SIZE);
     for (int y = 0; y < WIN_ICON_SIZE; y++) {
       char line[WIN_ICON_SIZE + 1];
       for (int x = 0; x < WIN_ICON_SIZE; x++) {
@@ -30,7 +28,6 @@ static void draw_app_icon(window_t *win, uint32_t *dst, int stride, rect_t clip,
         line[x] = (a > 128) ? '#' : (a > 32) ? '+' : (a > 8) ? '.' : ' ';
       }
       line[WIN_ICON_SIZE] = '\0';
-      LOG_DEBUG("[ICON-DBG] |%s|", line);
     }
   }
 

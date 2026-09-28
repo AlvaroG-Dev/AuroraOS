@@ -32,6 +32,7 @@
 #define SYS_BRK 12
 #define SYS_RT_SIGACTION 13
 #define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN 15
 #define SYS_IOCTL 16
 #define SYS_READV 19
 #define SYS_WRITEV 20
@@ -42,6 +43,7 @@
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
 #define SYS_GETPID 39
+#define SYS_SENDFILE 40
 #define SYS_CLONE 56
 #define SYS_FORK 57
 #define SYS_VFORK 58

@@ -1,1 +1,1 @@
-cmd_printutils/built-in.o :=  rm -f printutils/built-in.o; ar rcs printutils/built-in.o
+cmd_printutils/built-in.o :=  rm -f printutils/built-in.o; x86_64-linux-musl-ar rcs printutils/built-in.o
