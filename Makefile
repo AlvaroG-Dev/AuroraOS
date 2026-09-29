@@ -74,13 +74,15 @@ kernel: initrd.tar
 	$(MAKE) -C kernel
 
 image: bootloader kernel user
-	mkdir -p esp/EFI/BOOT
+	mkdir -p esp/EFI/BOOT esp/etc
 	cp bootloader/BOOTX64.EFI esp/EFI/BOOT/
 	cp kernel/kernel.elf esp/
+	cp bootloader/aurora.conf esp/etc/aurora.conf
 	dd if=/dev/zero of=aurora.img bs=1M count=64
 	mkfs.fat -F 32 aurora.img
 	mcopy -i aurora.img -s esp/EFI ::
 	mcopy -i aurora.img -s esp/kernel.elf ::
+	mcopy -i aurora.img -s esp/etc ::
 	@if [ -f sysroot/apps/ls ]; then \
 		mcopy -i aurora.img sysroot/apps/ls ::/LS.ELF; \
 	fi

@@ -5,7 +5,13 @@
 #include <efilib.h>
 #include <stdint.h>
 
-#define KERNEL_PATH L"\\kernel.elf"
+// [2.1] Ruta por defecto. Si /etc/aurora.conf no existe o no define
+// kernel=, se usa esta. Si define una ruta que no existe, se avisa y se
+// cae a esta (opción C del diseño).
+#define KERNEL_PATH_DEFAULT L"\\kernel.elf"
+#define CONFIG_PATH L"\\etc\\aurora.conf"
+#define CONFIG_MAX_SIZE 4096
+#define KERNEL_PATH_MAX 256
 #define ET_EXEC 2
 
 // Definiciones ELF64
@@ -139,13 +145,174 @@ static EFI_STATUS map_page_4k(UINT64 *pml4, EFI_PHYSICAL_ADDRESS virt,
   return EFI_SUCCESS;
 }
 
-static EFI_STATUS load_kernel(EFI_FILE *root, VOID **entry_point,
-                              UINT64 *pml4) {
+// ---------------------------------------------------------------------------
+// [2.1] Parser del boot config.
+//
+// Formato (key=value, INI-lite):
+//   # comentario
+//   kernel=\boot\kernel.elf
+//
+// Reglas:
+//   - Whitespace al inicio/fin de línea y de valor se recorta.
+//   - Líneas vacías o que empiezan por '#' se ignoran.
+//   - Claves desconocidas se ignoran (permite extender el formato).
+//   - Se normaliza '/' a '\' (UEFI trabaja con backslashes).
+//   - Si la ruta no empieza por '\', se prefija (rutas absolutas en ESP).
+//
+// Todo con arrays estáticos: el bootloader corre sin heap cómoda y no
+// queremos fragmentar antes de ExitBootServices.
+// ---------------------------------------------------------------------------
+
+// Convierte ASCII a CHAR16 (los valores del .conf son ASCII).
+static VOID ascii_to_utf16(const CHAR8 *src, UINTN src_len, CHAR16 *dst,
+                           UINTN dst_max) {
+  UINTN i = 0;
+  while (i < src_len && i + 1 < dst_max) {
+    CHAR8 c = src[i];
+    if (c == '/')
+      c = '\\';
+    dst[i] = (CHAR16)c;
+    i++;
+  }
+  dst[i] = 0;
+}
+
+// Busca "kernel=<ruta>" en el buffer. Devuelve TRUE si encuentra la clave.
+static BOOLEAN parse_kernel_key(const CHAR8 *buf, UINTN size, CHAR16 *out,
+                                UINTN out_max) {
+  static const CHAR8 want[] = "kernel";
+  const UINTN want_len = 6;
+  UINTN i = 0;
+
+  while (i < size) {
+    UINTN line_start = i;
+    while (i < size && buf[i] != '\n')
+      i++;
+    UINTN line_end = i;
+    if (i < size)
+      i++;
+
+    // Recortar '\r' al final de línea.
+    while (line_end > line_start && buf[line_end - 1] == '\r')
+      line_end--;
+
+    // Recortar whitespace al inicio.
+    while (line_start < line_end &&
+           (buf[line_start] == ' ' || buf[line_start] == '\t'))
+      line_start++;
+
+    if (line_start >= line_end)
+      continue; // línea vacía
+    if (buf[line_start] == '#')
+      continue; // comentario
+
+    // Buscar '='.
+    UINTN eq = line_start;
+    while (eq < line_end && buf[eq] != '=')
+      eq++;
+    if (eq >= line_end)
+      continue; // sin '=', se ignora
+
+    // Recortar la clave (antes del '=').
+    UINTN key_end = eq;
+    while (key_end > line_start &&
+           (buf[key_end - 1] == ' ' || buf[key_end - 1] == '\t'))
+      key_end--;
+    UINTN key_len = key_end - line_start;
+    if (key_len != want_len)
+      continue;
+    BOOLEAN key_match = TRUE;
+    for (UINTN k = 0; k < want_len; k++) {
+      if (buf[line_start + k] != want[k]) {
+        key_match = FALSE;
+        break;
+      }
+    }
+    if (!key_match)
+      continue;
+
+    // Recortar el valor (después del '=').
+    UINTN val_start = eq + 1;
+    while (val_start < line_end &&
+           (buf[val_start] == ' ' || buf[val_start] == '\t'))
+      val_start++;
+    UINTN val_end = line_end;
+    while (val_end > val_start &&
+           (buf[val_end - 1] == ' ' || buf[val_end - 1] == '\t'))
+      val_end--;
+    if (val_start >= val_end)
+      continue; // valor vacío
+
+    // Prefijar '\' si la ruta no es absoluta.
+    UINTN oi = 0;
+    if (buf[val_start] != '\\' && buf[val_start] != '/') {
+      if (oi + 1 < out_max)
+        out[oi++] = '\\';
+    }
+    ascii_to_utf16(buf + val_start, val_end - val_start, out + oi,
+                   out_max - oi);
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+// Lee /etc/aurora.conf del ESP y rellena out_path con la ruta del kernel.
+// Si no existe el fichero, deja out_path con la ruta por defecto.
+// Si el fichero existe pero no define kernel=, igual.
+static VOID load_boot_config(EFI_FILE *root, CHAR16 *out_path, UINTN out_max) {
+  // Rellenar con el default primero.
+  UINTN i = 0;
+  while (KERNEL_PATH_DEFAULT[i] && i + 1 < out_max) {
+    out_path[i] = KERNEL_PATH_DEFAULT[i];
+    i++;
+  }
+  out_path[i] = 0;
+
   EFI_FILE *file = NULL;
-  EFI_STATUS status = uefi_call_wrapper(root->Open, 5, root, &file, KERNEL_PATH,
+  EFI_STATUS status = uefi_call_wrapper(root->Open, 5, root, &file, CONFIG_PATH,
                                         EFI_FILE_MODE_READ, 0);
+  if (EFI_ERROR(status) || !file) {
+    Print(L"[BOOT] %s no existe, usando %s\n", CONFIG_PATH,
+          KERNEL_PATH_DEFAULT);
+    return;
+  }
+
+  // Buffer estático: 4 KB es sobra para este fichero.
+  static CHAR8 buf[CONFIG_MAX_SIZE];
+  UINTN size = sizeof(buf) - 1;
+  status = uefi_call_wrapper(file->Read, 3, file, &size, buf);
+  uefi_call_wrapper(file->Close, 1, file);
+  if (EFI_ERROR(status) || size == 0) {
+    Print(L"[BOOT] WARN: %s vacío o ilegible, usando %s\n", CONFIG_PATH,
+          KERNEL_PATH_DEFAULT);
+    return;
+  }
+  buf[size] = 0;
+
+  CHAR16 parsed[KERNEL_PATH_MAX];
+  if (parse_kernel_key(buf, size, parsed, KERNEL_PATH_MAX)) {
+    UINTN j = 0;
+    while (parsed[j] && j + 1 < out_max) {
+      out_path[j] = parsed[j];
+      j++;
+    }
+    out_path[j] = 0;
+    Print(L"[BOOT] Config: kernel=%s\n", out_path);
+  } else {
+    Print(L"[BOOT] Config: sin clave 'kernel', usando %s\n",
+          KERNEL_PATH_DEFAULT);
+  }
+}
+
+static EFI_STATUS load_kernel(EFI_FILE *root, const CHAR16 *kernel_path,
+                              VOID **entry_point, UINT64 *pml4) {
+  EFI_FILE *file = NULL;
+  EFI_STATUS status = uefi_call_wrapper(
+      root->Open, 5, root, &file, (CHAR16 *)kernel_path, EFI_FILE_MODE_READ, 0);
+
   if (EFI_ERROR(status)) {
-    Print(L"[BOOT] Error abriendo kernel.elf: %r\n", status);
+    Print(L"[BOOT] Error abriendo %s: %r\n", kernel_path, status);
     return status;
   }
 
@@ -441,11 +608,25 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle,
     return status;
   }
 
+  // [2.1] Leer /etc/aurora.conf (si existe). Fallback: KERNEL_PATH_DEFAULT.
+  CHAR16 kernel_path[KERNEL_PATH_MAX];
+  load_boot_config(root, kernel_path, KERNEL_PATH_MAX);
+
   VOID *kernel_entry = NULL;
-  status = load_kernel(root, &kernel_entry, (UINT64 *)pml4_addr);
+  status = load_kernel(root, kernel_path, &kernel_entry, (UINT64 *)pml4_addr);
   if (EFI_ERROR(status)) {
-    Print(L"[BOOT] Fallo al cargar kernel\n");
-    return status;
+    // Opción C: si la ruta era custom, intentar el default con warning.
+    BOOLEAN is_default = (StrCmp(kernel_path, KERNEL_PATH_DEFAULT) == 0);
+    if (!is_default) {
+      Print(L"[BOOT] WARN: %s no existe, probando %s\n", kernel_path,
+            KERNEL_PATH_DEFAULT);
+      status = load_kernel(root, KERNEL_PATH_DEFAULT, &kernel_entry,
+                           (UINT64 *)pml4_addr);
+    }
+    if (EFI_ERROR(status)) {
+      Print(L"[BOOT] Fallo al cargar kernel\n");
+      return status;
+    }
   }
 
   status = get_memory_map(image_handle);
