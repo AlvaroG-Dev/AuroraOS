@@ -18,6 +18,8 @@
 #define PROCESS_ENVP_MAX 32
 #define PROCESS_ENV_STR_MAX 256
 
+#define NGROUPS_MAX 32
+
 struct tty;
 
 // [pipe] Fds que el shell quiere asignar al hijo. -1 significa
@@ -102,6 +104,29 @@ typedef struct process {
   struct process *next;
   wait_queue_t child_wq;
   char cwd[VFS_PATH_MAX];
+
+  // -------------------------------------------------------------------------
+  // [3.4.b] Credenciales POSIX.
+  //
+  // Sin usuarios reales (arranca todo root), pero con la semántica
+  // correcta: root bypasea comprobaciones, no-root solo puede cambiar
+  // a valores que ya tenga.
+  //
+  // uid/euid/suid/fsuid, gid/egid/sgid/fsgid: ver setresuid(2).
+  // umask: se aplica en create/mkdir (3.4.c).
+  // groups: grupos suplementarios. Por ahora 0 (nadie los usa).
+  // -------------------------------------------------------------------------
+  uint32_t uid;
+  uint32_t euid;
+  uint32_t suid;
+  uint32_t fsuid;
+  uint32_t gid;
+  uint32_t egid;
+  uint32_t sgid;
+  uint32_t fsgid;
+  uint32_t umask;
+  uint32_t groups[NGROUPS_MAX];
+  int ngroups;
 
   uint64_t pending_signals;
   uint64_t blocked_signals;

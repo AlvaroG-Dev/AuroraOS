@@ -26,6 +26,8 @@
 #define EM_X86_64 62
 
 #define PT_LOAD 1
+#define PT_DYNAMIC 2
+#define PT_INTERP 3
 
 #define PF_X 1
 #define PF_W 2
@@ -62,14 +64,10 @@ typedef struct {
   uint64_t p_align;
 } Elf64_Phdr;
 
+/* --- estructuras Elf64_Ehdr y Elf64_Phdr sin cambios --- */
+
 int elf_validate(const void *data, size_t size);
 
-// ---------------------------------------------------------------------------
-// Loader streaming + info de phdrs para exponer como AT_PHDR/AT_PHNUM/AT_PHENT.
-//
-// Los out-params phdr_vaddr_out, phnum_out y phent_out pueden ser NULL si el
-// llamante no necesita construir un auxv.
-// ---------------------------------------------------------------------------
 typedef int64_t (*elf_read_fn)(void *ctx, uint64_t offset, size_t size,
                                void *buf);
 
@@ -77,7 +75,8 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
                        uint64_t *pml4, uint64_t load_base, uint64_t *entry_out,
                        uint64_t *vma_start_out, uint64_t *vma_end_out,
                        uint64_t *phdr_vaddr_out, uint16_t *phnum_out,
-                       uint16_t *phent_out);
+                       uint16_t *phent_out, char *interp_path,
+                       size_t interp_max, size_t *interp_len_out);
 
 int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
              uint64_t *entry_out);

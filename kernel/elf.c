@@ -105,7 +105,8 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
                        uint64_t *pml4, uint64_t load_base, uint64_t *entry_out,
                        uint64_t *vma_start_out, uint64_t *vma_end_out,
                        uint64_t *phdr_vaddr_out, uint16_t *phnum_out,
-                       uint16_t *phent_out) {
+                       uint16_t *phent_out, char *interp_path,
+                       size_t interp_max, size_t *interp_len_out) {
   if (!read || !pml4 || !entry_out || !vma_start_out || !vma_end_out)
     return -1;
 
@@ -118,8 +119,12 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     *phnum_out = 0;
   if (phent_out)
     *phent_out = 0;
+  if (interp_path && interp_max > 0)
+    interp_path[0] = '\0';
+  if (interp_len_out)
+    *interp_len_out = 0;
 
-  // --- 1. Leer Elf64_Ehdr ---------------------------------------------------
+  /* --- 1. Leer Elf64_Ehdr --- */
   if (file_size < sizeof(Elf64_Ehdr)) {
     LOG_ERR("[ELF] Imagen demasiado pequeña (%llu < %llu)",
             (unsigned long long)file_size,
@@ -136,7 +141,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     return -1;
   }
 
-  // --- 2. Validar tabla de program headers ---------------------------------
+  /* --- 2. Validar tabla de program headers --- */
   if (ehdr.e_phentsize != sizeof(Elf64_Phdr) || ehdr.e_phnum == 0) {
     LOG_ERR("[ELF] e_phentsize/e_phnum inválidos");
     return -1;
@@ -156,7 +161,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     return -1;
   }
 
-  // --- 3. Leer program headers ---------------------------------------------
+  /* --- 3. Leer program headers --- */
   size_t ph_bytes = (size_t)ehdr.e_phnum * sizeof(Elf64_Phdr);
   Elf64_Phdr local_phdrs[ELF_PHDR_STACK];
   Elf64_Phdr *phdrs = local_phdrs;
@@ -176,11 +181,36 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     return -1;
   }
 
+  /* --- 3b. Leer PT_INTERP si existe --- */
+  if (interp_path && interp_max > 0) {
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+      if (phdrs[i].p_type != PT_INTERP)
+        continue;
+      if (phdrs[i].p_offset > file_size ||
+          phdrs[i].p_filesz > file_size - phdrs[i].p_offset) {
+        LOG_ERR("[ELF] PT_INTERP fuera del fichero");
+        goto out;
+      }
+      size_t n = (size_t)phdrs[i].p_filesz;
+      if (n >= interp_max)
+        n = interp_max - 1;
+      if (read(ctx, phdrs[i].p_offset, n, interp_path) != (int64_t)n) {
+        LOG_ERR("[ELF] No se pudo leer PT_INTERP");
+        goto out;
+      }
+      interp_path[n] = '\0';
+      if (interp_len_out)
+        *interp_len_out = n;
+      LOG_INFO("[ELF] PT_INTERP = '%s'", interp_path);
+      break;
+    }
+  }
+
+  /* --- 4. Preflight PT_LOAD --- */
   int rc = -1;
   const uint64_t user_canon_max = 0x00007FFFFFFFFFFFULL;
   const uint64_t user_canon_limit = 0x0000800000000000ULL;
 
-  // --- 4. Preflight de todos los PT_LOAD -----------------------------------
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     const Elf64_Phdr *ph = &phdrs[i];
     if (ph->p_type != PT_LOAD)
@@ -218,7 +248,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     }
   }
 
-  // --- 5. Entry point -------------------------------------------------------
+  /* --- 5. Entry point --- */
   {
     uint64_t entry = ehdr.e_entry;
     if (ehdr.e_type == ET_DYN) {
@@ -235,20 +265,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     *entry_out = entry;
   }
 
-  // --- 5b. AT_PHDR: vaddr de runtime donde viven los program headers -------
-  //
-  // La tabla de phdrs está en el FICHERO en [e_phoff, e_phoff + ph_bytes).
-  // Alguien (nosotros) tiene que decidir en qué dirección virtual aparece
-  // ese rango tras el mapeo. La convención es:
-  //
-  //   Para el PT_LOAD que CONTIENE e_phoff en el fichero:
-  //       phdr_vaddr = (p_vaddr + load_bias) + (e_phoff - p_offset)
-  //
-  // con load_bias = 0 para ET_EXEC y load_bias = load_base para ET_DYN.
-  //
-  // Esto es lo que musl espera leer en AT_PHDR. Si no hay ningún PT_LOAD
-  // que contenga e_phoff, dejamos phdr_vaddr = 0; musl lo detectará y
-  // fallará limpiamente (mejor que mentirle con un valor basura).
+  /* --- 5b. AT_PHDR --- */
   {
     uint64_t load_bias = (ehdr.e_type == ET_DYN) ? load_base : 0;
     uint64_t phdr_vaddr = 0;
@@ -260,7 +277,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
         continue;
       uint64_t seg_end_off = ph->p_offset + ph->p_filesz;
       if (seg_end_off < ph->p_offset)
-        continue; // overflow
+        continue;
       if (ph_end > seg_end_off)
         continue;
       phdr_vaddr = ph->p_vaddr + load_bias + (ehdr.e_phoff - ph->p_offset);
@@ -274,7 +291,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
       *phent_out = ehdr.e_phentsize;
   }
 
-  // --- 6. Mapear y copiar cada PT_LOAD -------------------------------------
+  /* --- 6. Mapear y copiar cada PT_LOAD --- */
   uint8_t *tmp = (uint8_t *)kmalloc(PAGE_SIZE);
   if (!tmp) {
     rc = -ENOMEM;
@@ -335,14 +352,13 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
 
       uint64_t phys = paging_get_phys_in(pml4, page_vaddr);
       if (!phys) {
-        LOG_ERR("[ELF] Física no encontrada para copia");
+        LOG_ERR("[ELF] Física no encontrada");
         kfree(tmp);
         goto out;
       }
 
       if (read(ctx, offset + off, chunk, tmp) != (int64_t)chunk) {
-        LOG_ERR("[ELF] Short read copiando segmento (off=%llu chunk=%llu)",
-                (unsigned long long)(offset + off), (unsigned long long)chunk);
+        LOG_ERR("[ELF] Short read copiando segmento");
         kfree(tmp);
         rc = -EIO;
         goto out;
@@ -365,7 +381,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
 
         uint64_t phys = paging_get_phys_in(pml4, page_vaddr);
         if (!phys) {
-          LOG_ERR("[ELF] Física no encontrada para BSS");
+          LOG_ERR("[ELF] Física no encontrada (BSS)");
           kfree(tmp);
           goto out;
         }
@@ -398,5 +414,6 @@ int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
   struct elf_buf_ctx ctx = {.data = (const uint8_t *)data, .size = size};
   uint64_t vma_s, vma_e;
   return elf_load_streaming(elf_buf_read, &ctx, size, pml4, load_base,
-                            entry_out, &vma_s, &vma_e, NULL, NULL, NULL);
+                            entry_out, &vma_s, &vma_e, NULL, NULL, NULL, NULL,
+                            0, NULL);
 }

@@ -59,13 +59,22 @@ initrd.tar: sysroot user elf_malformed
 	@echo "[Makefile] Copiando busybox al tarfs..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
-	          sysroot/data
+	          sysroot/data sysroot/lib
 	@if [ -f third_party/busybox-1.36.1/_install/bin/busybox ]; then \
 		cp -a third_party/busybox-1.36.1/_install/bin/. sysroot/bin/; \
 		cp -a third_party/busybox-1.36.1/_install/usr/. sysroot/usr/; \
 		if [ -d third_party/busybox-1.36.1/_install/sbin ]; then \
 			cp -a third_party/busybox-1.36.1/_install/sbin/. sysroot/sbin/; \
 		fi; \
+	fi
+	@echo "[Makefile] Copiando dynamic linker de musl a sysroot/lib/..."
+	@MUSL_LIB=toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/lib; \
+	if [ -f $$MUSL_LIB/libc.so ]; then \
+		cp -f $$MUSL_LIB/libc.so sysroot/lib/ld-musl-x86_64.so.1; \
+		cp -f $$MUSL_LIB/libc.so sysroot/lib/libc.so; \
+		echo "[Makefile]   ld-musl-x86_64.so.1 + libc.so copiados"; \
+	else \
+		echo "[Makefile] WARN: $$MUSL_LIB/libc.so no existe, los dinamicos fallaran"; \
 	fi
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar -cf kernel/initrd.tar -C sysroot .

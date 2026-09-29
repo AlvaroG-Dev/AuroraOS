@@ -293,8 +293,8 @@ typedef struct {
 static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
                                 const char *const *argv, int envc,
                                 const char *const *envp,
-                                const proc_auxv_info_t *ai,
-                                const char *execfn) {
+                                const proc_auxv_info_t *ai, const char *execfn,
+                                uint64_t at_base) {
   if (argc < 0 || argc > PROCESS_ARGV_MAX)
     return 0;
   if (argc > 0 && !argv)
@@ -419,7 +419,7 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
   PUSH_AUXV(4, ai ? (uint64_t)ai->phent : 0); // AT_PHENT
   PUSH_AUXV(5, ai ? (uint64_t)ai->phnum : 0); // AT_PHNUM
   PUSH_AUXV(6, PAGE_SIZE);                    // AT_PAGESZ
-  PUSH_AUXV(7, 0);                            // AT_BASE (no ld.so)
+  PUSH_AUXV(7, at_base);                      // AT_BASE ← CAMBIO
   PUSH_AUXV(8, 0);                            // AT_FLAGS
   PUSH_AUXV(9, ai ? ai->entry : 0);           // AT_ENTRY
   PUSH_AUXV(11, 0);                           // AT_UID
@@ -472,6 +472,27 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
 
   kfree(scratch);
   return new_rsp;
+}
+
+// ---------------------------------------------------------------------------
+// [3.4.b] Inicializa las credenciales de un proceso recién creado.
+// Todo arranca como root con umask 022 (default POSIX).
+// ---------------------------------------------------------------------------
+static void process_init_creds(process_t *proc) {
+  if (!proc)
+    return;
+  proc->uid = 0;
+  proc->euid = 0;
+  proc->suid = 0;
+  proc->fsuid = 0;
+  proc->gid = 0;
+  proc->egid = 0;
+  proc->sgid = 0;
+  proc->fsgid = 0;
+  proc->umask = 022;
+  proc->ngroups = 0;
+  for (int i = 0; i < NGROUPS_MAX; i++)
+    proc->groups[i] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +594,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   process_set_cwd(proc, "/");
   // [SIG] Estado de señales inicial.
   process_init_signals(proc);
+
+  process_init_creds(proc);
 
   const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)elf_data;
   uint64_t elf_vma_start = ~0ULL;
@@ -691,25 +714,64 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   uint64_t elf_vma_start = ~0ULL;
   uint64_t elf_vma_end = 0;
   uint64_t phdr_vaddr = 0;
-  uint16_t phnum = 0;
-  uint16_t phent = 0;
+  uint16_t phnum = 0, phent = 0;
+  char interp_path[VFS_PATH_MAX];
+  size_t interp_len = 0;
+
   if (elf_load_streaming(read, read_ctx, file_size, pml4, load_base, &entry,
                          &elf_vma_start, &elf_vma_end, &phdr_vaddr, &phnum,
-                         &phent) != 0) {
+                         &phent, interp_path, sizeof(interp_path),
+                         &interp_len) != 0) {
     LOG_ERR("[PROC] Fallo al cargar ELF (streaming)");
     paging_free_user_space(pml4_phys);
     return NULL;
   }
 
+  // --- Cargar intérprete si PT_INTERP ---
+  uint64_t at_base = 0;
+  uint64_t final_entry = entry;
+  uint64_t interp_vma_start = 0, interp_vma_end = 0;
+
+  if (interp_len > 0) {
+    LOG_INFO("[PROC] Cargando intérprete '%s'", interp_path);
+
+    vfs_node_t *inode = vfs_lookup(interp_path);
+    if (!inode || !inode->ops || !inode->ops->read) {
+      if (inode)
+        vfs_node_free(inode);
+      LOG_ERR("[PROC] Intérprete no accesible");
+      paging_free_user_space(pml4_phys);
+      return NULL;
+    }
+
+    struct elf_vfs_ctx ictx = {.node = inode};
+    uint64_t interp_load_base = 0x00007f0000000000ULL;
+    uint64_t interp_entry = 0, interp_phdr = 0;
+    uint16_t interp_phnum = 0, interp_phent = 0;
+
+    int irc = elf_load_streaming(
+        elf_read_vfs, &ictx, inode->size, pml4, interp_load_base, &interp_entry,
+        &interp_vma_start, &interp_vma_end, &interp_phdr, &interp_phnum,
+        &interp_phent, NULL, 0, NULL);
+    vfs_node_free(inode);
+    if (irc != 0) {
+      LOG_ERR("[PROC] Fallo al cargar intérprete");
+      paging_free_user_space(pml4_phys);
+      return NULL;
+    }
+
+    at_base = interp_load_base;
+    final_entry = interp_entry;
+    LOG_INFO("[PROC] AT_BASE=%p, entry final=%p", (void *)at_base,
+             (void *)final_entry);
+  }
+
+  // --- Stack ---
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
-  LOG_INFO("[PROC] Mapeando stack de usuario en %p - %p", (void *)stack_base,
-           (void *)stack_top);
-
   for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
-      LOG_ERR("[PROC] Fallo al asignar página física para stack");
       paging_free_user_space(pml4_phys);
       return NULL;
     }
@@ -718,32 +780,29 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
                            PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
         0) {
       pmm_free_page(phys);
-      LOG_ERR("[PROC] Fallo al mapear página de stack");
       paging_free_user_space(pml4_phys);
       return NULL;
     }
   }
 
+  // --- auxv ---
   proc_auxv_info_t ai = {
       .phdr_vaddr = phdr_vaddr,
       .entry = entry,
       .phnum = phnum,
       .phent = phent,
   };
-  // [ENV] Pasamos envc/envp al arg block, que los colocará en el stack
-  // del usuario. Ahora sí.
-  uint64_t user_rsp =
-      setup_arg_block(pml4, stack_top, argc, argv, envc, envp, &ai, name);
+  uint64_t user_rsp = setup_arg_block(pml4, stack_top, argc, argv, envc, envp,
+                                      &ai, name, at_base);
   if (!user_rsp) {
-    LOG_ERR("[PROC] setup_arg_block falló");
     paging_free_user_space(pml4_phys);
     return NULL;
   }
 
-  task_t *task = sched_create_user_task_stopped((void (*)(void))entry, user_rsp,
-                                                pml4_phys);
+  // --- Tarea ---
+  task_t *task = sched_create_user_task_stopped((void (*)(void))final_entry,
+                                                user_rsp, pml4_phys);
   if (!task) {
-    LOG_ERR("[PROC] Fallo al crear tarea");
     paging_free_user_space(pml4_phys);
     return NULL;
   }
@@ -752,18 +811,14 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   if (!proc) {
     task_put(task);
     paging_free_user_space(pml4_phys);
-    LOG_ERR("[PROC] Error al asignar process_t");
     return NULL;
   }
 
   proc->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
   proc->ppid = ppid;
-  proc->pgid = proc->pid; // ← NUEVO
-  proc->sid = proc->pid;  // ← NUEVO
-  proc->exit_code = 0;
-  proc->is_zombie = 0;
+  proc->pgid = proc->pid;
+  proc->sid = proc->pid;
   proc->ctty = NULL;
-
   set_proc_name_from_path(proc, name);
   proc->task = task;
   task_get(task);
@@ -780,26 +835,16 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->stack_top = stack_top;
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
-
   proc->fs_base = 0;
   process_set_cwd(proc, inherited_cwd);
   process_init_signals(proc);
 
-  // [ENV] Copiar el entorno al proceso. Se almacena para que fork lo
-  // herede y para que execve lo pueda reemplazar.
-  if (process_set_envp(proc, envc, envp) != 0) {
-    LOG_ERR("[PROC] No se pudo copiar el entorno");
-    task_put(task);
-    task_put(task);
-    paging_free_user_space(pml4_phys);
-    kfree(proc);
-    return NULL;
-  }
+  process_init_creds(proc);
 
-  // [3.3.d] Copiar argv para /proc/<pid>/cmdline.
-  if (process_set_argv(proc, argc, argv) != 0) {
-    LOG_ERR("[PROC] No se pudo copiar argv");
+  if (process_set_envp(proc, envc, envp) != 0 ||
+      process_set_argv(proc, argc, argv) != 0) {
     process_clear_envp(proc);
+    process_clear_argv(proc);
     task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
@@ -810,9 +855,21 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
       !vma_create(proc, elf_vma_start, elf_vma_end,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
-    LOG_ERR("[PROC] No se pudo crear VMA ELF (start=%p end=%p)",
-            (void *)elf_vma_start, (void *)elf_vma_end);
+    LOG_ERR("[PROC] No se pudo crear VMA ELF");
     process_clear_envp(proc);
+    process_clear_argv(proc);
+    task_put(task);
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
+
+  if (interp_len > 0 &&
+      !vma_create(proc, interp_vma_start, interp_vma_end,
+                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
+    LOG_ERR("[PROC] No se pudo crear VMA intérprete");
+    vma_destroy_all(proc);
     task_put(task);
     task_put(task);
     paging_free_user_space(pml4_phys);
@@ -823,7 +880,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   if (!vma_create(proc, proc->stack_low, proc->stack_top,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
     LOG_ERR("[PROC] No se pudo crear VMA stack");
-    process_clear_envp(proc);
     vma_destroy_all(proc);
     task_put(task);
     task_put(task);
@@ -840,14 +896,9 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
       file_descriptor_t *fd = parent->fds[fds->fd_in];
       fd->ref_count++;
       proc->fds[0] = fd;
-
       struct tty_pty *pty = pty_slave_from_fd(fd);
       if (pty) {
         pty_set_fg_pgid(pty, proc->pid);
-
-        // [CTTY] Si el slave es virgen (nadie lo ha reclamado), el
-        // nuevo proceso se convierte en session leader y toma el
-        // terminal de control. Sustituye a setsid+TIOCSCTTY de login.
         if (pty->slave.session_leader_pid == 0) {
           pty->slave.session_leader_pid = proc->pid;
           proc->ctty = &pty->slave;
@@ -877,7 +928,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   }
 
   wait_queue_init(&proc->child_wq);
-
   task->proc = proc;
 
   unsigned long flags = spin_lock_irqsave(&process_lock);
@@ -887,9 +937,8 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
 
   sched_publish_task(task);
 
-  LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, argc=%d, envc=%d, cwd='%s', "
-           "streaming)",
-           name, proc->pid, argc, envc, proc->cwd);
+  LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, at_base=%p)", name, proc->pid,
+           (void *)at_base);
   return proc;
 }
 
@@ -1158,7 +1207,7 @@ static bool has_matching_event(void *arg) {
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
                     proc_rusage_t *rusage_out, int options) {
   if (!parent)
-    return -1;
+    return -EINVAL;
 
   waitpid_ctx_t ctx = {.parent = parent, .pid = pid, .options = options};
 
@@ -1211,8 +1260,7 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
     if (found_zombie) {
       uint32_t zpid = found_zombie->pid;
       int exit_code = found_zombie->exit_code;
-      LOG_INFO("[WAITPID] reaping pid=%u exit_code=%d", zpid,
-               exit_code); // ← NUEVO
+      LOG_TRACE("[WAITPID] reaping pid=%u exit_code=%d", zpid, exit_code);
 
       if (status_out) {
         stac();
@@ -1277,16 +1325,12 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
     }
 
     if (!has_matching_child) {
-      LOG_INFO("[WAITPID] pid=%d: no matching child. process_list:", pid);
-      unsigned long lf = spin_lock_irqsave(&process_lock);
-      process_t *q = process_list;
-      while (q) {
-        LOG_INFO("  pid=%u ppid=%u pgid=%u sid=%u zombie=%d stopped=%d", q->pid,
-                 q->ppid, q->pgid, q->sid, q->is_zombie, q->stopped);
-        q = q->next;
-      }
-      spin_unlock_irqrestore(&process_lock, lf);
-      return -1;
+      // [FIX ECHILD] Linux: wait4(-1) sin hijos vivos -> ECHILD sin
+      // bloquear. Antes devolvíamos -1 (= EPERM), y init entraba en un
+      // bucle de "waitpid: Operation not permitted" cada segundo.
+      // El dump de process_list que había aquí era útil durante el
+      // desarrollo de D; ahora solo genera ruido.
+      return -ECHILD;
     }
     if (options & WNOHANG)
       return 0;
@@ -1294,7 +1338,7 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
     int rc =
         wait_event_interruptible(&parent->child_wq, has_matching_event, &ctx);
     if (rc < 0)
-      return -1;
+      return -EINTR;
   }
 }
 
@@ -1302,12 +1346,9 @@ void process_exit(process_t *proc, int exit_code) {
   if (!proc)
     return;
 
-  // [CONCURRENCIA] Idempotente: si dos rutas concurrentes (p.ej. SIGTERM
-  // + exit_group) llegan a la vez, la segunda es no-op.
   if (proc->is_zombie)
     return;
 
-  // [DIAG] Quién sale, con qué código y qué señales tenía pendientes.
   LOG_INFO(
       "[EXIT] pid=%u ppid=%u pgid=%u name='%s' code=%d pending=0x%lx "
       "blocked=0x%lx",
@@ -1315,10 +1356,7 @@ void process_exit(process_t *proc, int exit_code) {
       (unsigned long)__atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE),
       (unsigned long)proc->blocked_signals);
 
-  // [ENV] Liberar el entorno.
   process_clear_envp(proc);
-
-  // [3.3.d] Liberar argv.
   process_clear_argv(proc);
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
@@ -1334,25 +1372,69 @@ void process_exit(process_t *proc, int exit_code) {
     cur->state = TASK_DEAD;
 
   task_t *parent_task = NULL;
+  task_t *init_task = NULL;
+
   unsigned long flags = spin_lock_irqsave(&process_lock);
   proc->exit_code = exit_code;
   proc->is_zombie = 1;
 
+  const uint32_t my_pid = proc->pid;
+  const uint32_t my_ppid = proc->ppid;
+
+  // -------------------------------------------------------------------
+  // [BLOQUE D] Reparentar huérfanos a PID 1 y localizar al padre.
+  //
+  // Una sola pasada por process_list:
+  //   - Si p es el padre del que muere, tomamos ref a su task.
+  //   - Si p es hijo del que muere, lo reparentamos a PID 1.
+  //
+  // Si el que muere ES PID 1, no reparentamos (en Linux sería panic;
+  // aquí solo avisamos, los hijos quedan con ppid=1 muerto).
+  // -------------------------------------------------------------------
+  int reparented = 0;
   process_t *p = process_list;
   while (p) {
-    if (p->pid == proc->ppid) {
+    if (p->pid == my_ppid) {
       parent_task = p->task;
       if (parent_task)
         task_get(parent_task);
-      break;
+    }
+    if (my_pid != 1 && p->ppid == my_pid && p->pid != my_pid) {
+      p->ppid = 1;
+      reparented = 1;
     }
     p = p->next;
   }
+
+  if (my_pid == 1) {
+    LOG_ERR("[INIT] PID 1 ha salido. El sistema queda sin reaper.");
+  }
+
+  // Si reparentamos algo, init necesita enterarse:
+  //   - huérfano vivo: puede estar esperando WUNTRACED/WCONTINUED.
+  //   - huérfano zombie: init debe reapearlo vía waitpid(-1).
+  // En ambos casos, despertar a init es la acción correcta.
+  if (reparented) {
+    p = process_list;
+    while (p) {
+      if (p->pid == 1 && p->task) {
+        init_task = p->task;
+        task_get(init_task);
+        break;
+      }
+      p = p->next;
+    }
+  }
+
   spin_unlock_irqrestore(&process_lock, flags);
 
   if (parent_task) {
     wait_queue_wake_task(parent_task);
     task_put(parent_task);
+  }
+  if (init_task) {
+    wait_queue_wake_task(init_task);
+    task_put(init_task);
   }
 }
 
@@ -1640,6 +1722,20 @@ int64_t sys_fork(void) {
   child->blocked_signals = parent->blocked_signals;
   child->pending_signals = 0;
 
+  // [3.4.b] Heredar credenciales completas (fork no cambia uid/gid).
+  child->uid = parent->uid;
+  child->euid = parent->euid;
+  child->suid = parent->suid;
+  child->fsuid = parent->fsuid;
+  child->gid = parent->gid;
+  child->egid = parent->egid;
+  child->sgid = parent->sgid;
+  child->fsgid = parent->fsgid;
+  child->umask = parent->umask;
+  child->ngroups = parent->ngroups;
+  for (int i = 0; i < NGROUPS_MAX; i++)
+    child->groups[i] = parent->groups[i];
+
   // [ENV] Heredar entorno del padre.
   if (process_inherit_envp(parent, child) != 0) {
     LOG_ERR("[FORK] process_inherit_envp falló");
@@ -1730,6 +1826,19 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     return -EACCES;
   }
 
+  // [3.4.d] Requerir bit x para execve, incluso si euid==0.
+  // Linux hace lo mismo: root no puede ejecutar un fichero sin ningún
+  // bit x (ni siquiera con CAP_DAC_OVERRIDE).
+  if ((node->mode & 0111) == 0) {
+    vfs_node_free(node);
+    return -EACCES;
+  }
+
+  // [3.4.b/3.4.d] Capturar bits setuid/setgid antes de liberar el nodo.
+  uint32_t new_mode = node->mode;
+  uint32_t new_uid = node->uid;
+  uint32_t new_gid = node->gid;
+
   uint64_t new_pml4_phys = paging_clone_kernel_space();
   if (!new_pml4_phys) {
     vfs_node_free(node);
@@ -1743,13 +1852,59 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   uint64_t entry = 0, vma_start = ~0ULL, vma_end = 0;
   uint64_t phdr_vaddr = 0;
   uint16_t phnum = 0, phent = 0;
-  int rc = elf_load_streaming(elf_read_vfs, &ctx, node->size, new_pml4,
-                              load_base, &entry, &vma_start, &vma_end,
-                              &phdr_vaddr, &phnum, &phent);
+  char interp_path[VFS_PATH_MAX];
+  size_t interp_len = 0;
+
+  int rc =
+      elf_load_streaming(elf_read_vfs, &ctx, node->size, new_pml4, load_base,
+                         &entry, &vma_start, &vma_end, &phdr_vaddr, &phnum,
+                         &phent, interp_path, sizeof(interp_path), &interp_len);
   vfs_node_free(node);
   if (rc != 0) {
     paging_free_user_space(new_pml4_phys);
     return rc == -ENOMEM ? -ENOMEM : -ENOEXEC;
+  }
+
+  uint64_t at_base = 0;
+  uint64_t final_entry = entry;
+  uint64_t interp_vma_start = 0, interp_vma_end = 0;
+
+  if (interp_len > 0) {
+    LOG_INFO("[EXECVE] Cargando intérprete '%s'", interp_path);
+
+    vfs_node_t *inode = vfs_lookup(interp_path);
+    if (!inode) {
+      LOG_ERR("[EXECVE] Intérprete no encontrado: %s", interp_path);
+      paging_free_user_space(new_pml4_phys);
+      return -ENOENT;
+    }
+    if (!inode->ops || !inode->ops->read) {
+      vfs_node_free(inode);
+      paging_free_user_space(new_pml4_phys);
+      return -EACCES;
+    }
+
+    struct elf_vfs_ctx ictx = {.node = inode};
+    uint64_t interp_load_base = 0x00007f0000000000ULL;
+    uint64_t interp_entry = 0;
+    uint64_t interp_phdr = 0;
+    uint16_t interp_phnum = 0, interp_phent = 0;
+
+    int irc = elf_load_streaming(
+        elf_read_vfs, &ictx, inode->size, new_pml4, interp_load_base,
+        &interp_entry, &interp_vma_start, &interp_vma_end, &interp_phdr,
+        &interp_phnum, &interp_phent, NULL, 0, NULL);
+    vfs_node_free(inode);
+    if (irc != 0) {
+      LOG_ERR("[EXECVE] Fallo al cargar intérprete");
+      paging_free_user_space(new_pml4_phys);
+      return irc == -ENOMEM ? -ENOMEM : -ENOEXEC;
+    }
+
+    at_base = interp_load_base;
+    final_entry = interp_entry;
+    LOG_INFO("[EXECVE] AT_BASE = %p, intérprete entry = %p", (void *)at_base,
+             (void *)interp_entry);
   }
 
   uint64_t stack_base = USER_STACK_BASE;
@@ -1776,8 +1931,8 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
       .phnum = phnum,
       .phent = phent,
   };
-  uint64_t user_rsp =
-      setup_arg_block(new_pml4, stack_top, argc, argv, envc, envp, &ai, path);
+  uint64_t user_rsp = setup_arg_block(new_pml4, stack_top, argc, argv, envc,
+                                      envp, &ai, path, at_base);
   if (!user_rsp) {
     paging_free_user_space(new_pml4_phys);
     return -ENOMEM;
@@ -1803,7 +1958,6 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   proc->stack_guard = proc->stack_low;
   proc->stack_low += PAGE_SIZE;
 
-  // Resetear handlers a default (excepto SIG_IGN), según POSIX.
   for (int i = 0; i < SIG_MAX; i++) {
     if (proc->sigactions[i].handler != SIG_IGN)
       proc->sigactions[i].handler = SIG_DFL;
@@ -1811,7 +1965,33 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     proc->sigactions[i].restorer = NULL;
     proc->sigactions[i].mask = 0;
   }
-  // blocked_signals y pending_signals se preservan.
+
+  // [3.4.b] Aplicar setuid/setgid del nuevo binario.
+  //
+  // Reglas POSIX (simplificadas, sin capabilities):
+  //   - S_ISUID: euid = node->uid. Si el proceso era root, además
+  //     uid = suid = euid (Linux "privilege drop completo"). Si no
+  //     era root, solo cambia euid.
+  //   - S_ISGID: idem con egid/gid/sgid.
+  //
+  // Si no hay bits, euid/egid se preservan.
+  int was_root = (proc->euid == 0);
+  if (new_mode & S_ISUID) {
+    proc->euid = new_uid;
+    proc->fsuid = new_uid;
+    if (was_root) {
+      proc->uid = new_uid;
+      proc->suid = new_uid;
+    }
+  }
+  if (new_mode & S_ISGID) {
+    proc->egid = new_gid;
+    proc->fsgid = new_gid;
+    if (was_root) {
+      proc->gid = new_gid;
+      proc->sgid = new_gid;
+    }
+  }
 
   proc->fs_base = 0;
   if (proc->task)
@@ -1832,17 +2012,16 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
   if (!vma_create(proc, vma_start, vma_end, PTE_USER | PTE_WRITABLE | PTE_NX,
                   VMA_ELF))
-    LOG_ERR("[EXECVE] vma_create ELF falló tras commit");
+    LOG_ERR("[EXECVE] vma_create ELF falló");
+  if (interp_len > 0 && !vma_create(proc, interp_vma_start, interp_vma_end,
+                                    PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF))
+    LOG_ERR("[EXECVE] vma_create intérprete falló");
   if (!vma_create(proc, proc->stack_low, proc->stack_top,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK))
-    LOG_ERR("[EXECVE] vma_create stack falló tras commit");
+    LOG_ERR("[EXECVE] vma_create stack falló");
 
-  // [ENV] Reemplazar el entorno. Si falla, conservamos el anterior
-  // (degradación mejor que abortar tras el commit).
   if (process_set_envp(proc, envc, envp) != 0)
     LOG_WARN("[EXECVE] process_set_envp falló, entorno conservado");
-
-  // [3.3.d] Reemplazar argv.
   if (process_set_argv(proc, argc, argv) != 0)
     LOG_WARN("[EXECVE] process_set_argv falló, argv conservado");
 
@@ -1851,11 +2030,12 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
   paging_free_user_space(old_pml4_phys);
 
-  *new_entry = entry;
+  *new_entry = final_entry;
   *new_rsp = user_rsp;
 
-  LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d)", path,
-           (void *)entry, (void *)user_rsp, argc, envc);
+  LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d at_base=%p)",
+           path, (void *)final_entry, (void *)user_rsp, argc, envc,
+           (void *)at_base);
   return 0;
 }
 

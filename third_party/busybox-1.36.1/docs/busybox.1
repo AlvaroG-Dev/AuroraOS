@@ -55,7 +55,7 @@
 .\" ========================================================================
 .\"
 .IX Title "BUSYBOX 1"
-.TH BUSYBOX 1 2026-09-28 "version 1.36.1" busybox
+.TH BUSYBOX 1 2026-09-29 "version 1.36.1" busybox
 .\" For nroff, turn off justification.  Always turn off hyphenation; it makes
 .\" way too many mistakes in technical documents.
 .if n .ad l
@@ -146,18 +146,18 @@ Currently available applets include:
 \&        bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
 \&        cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
 \&        dos2unix, dpkg, dpkg\-deb, du, echo, ed, egrep, env, expand, expr,
-\&        factor, false, fgrep, find, fold, fsync, getopt, grep, groups,
+\&        factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
 \&        gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
 \&        killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-\&        mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, od, paste,
-\&        patch, pipe_progress, printenv, printf, pwd, readlink, realpath,
-\&        reset, resize, rev, rm, rmdir, rpm, rpm2cpio, run\-parts, sed, seq,
-\&        sh, sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep,
-\&        sort, split, start\-stop\-daemon, stat, strings, sum, sync, tac, tail,
-\&        tar, tee, test, time, timeout, touch, tr, tree, true, truncate, ts,
-\&        tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
-\&        usleep, uudecode, uuencode, vi, wc, which, whoami, xargs, xxd, xz,
-\&        xzcat, yes, zcat
+\&        mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
+\&        nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
+\&        printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
+\&        rpm, rpm2cpio, run\-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
+\&        sha512sum, shred, shuf, sleep, sort, split, start\-stop\-daemon, stat,
+\&        strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
+\&        touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
+\&        unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
+\&        uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat
 .Ve
 .SH "COMMAND DESCRIPTIONS"
 .IX Header "COMMAND DESCRIPTIONS"
@@ -755,6 +755,11 @@ Wrap input lines in FILEs (or stdin), writing to stdout
 \&        \-s      Break at spaces
 \&        \-w      Use WIDTH columns instead of 80
 .Ve
+.IP \fBfree\fR 4
+.IX Item "free"
+free
+.Sp
+Display free and used memory
 .IP \fBfsync\fR 4
 .IX Item "fsync"
 fsync [\-d] FILE...
@@ -1069,6 +1074,24 @@ Print or check MD5 checksums
 \&        \-s      Don\*(Aqt output anything, status code shows success
 \&        \-w      Warn about improperly formatted checksum lines
 .Ve
+.IP \fBmdev\fR 4
+.IX Item "mdev"
+mdev [\-vS] [\-s]
+.Sp
+.Vb 3
+\&        \-v      Verbose
+\&        \-S      Log to syslog too
+\&        \-s      Scan /sys and populate /dev
+.Ve
+.Sp
+Bare mdev is a kernel hotplug helper. To activate it:
+	echo /sbin/mdev >/proc/sys/kernel/hotplug
+.Sp
+If /dev/mdev.seq file exists, mdev will wait for its value
+to match \f(CW$SEQNUM\fR variable. This prevents plug/unplug races.
+To activate this feature, create empty /dev/mdev.seq at boot.
+.Sp
+If /dev/mdev.log file exists, debug log will be appended to it.
 .IP \fBmkdir\fR 4
 .IX Item "mkdir"
 mkdir [\-m MODE] [\-p] DIRECTORY...
@@ -1118,6 +1141,36 @@ Without TEMPLATE, \-t tmp.XXXXXX is assumed.
 .Ve
 .Sp
 Base directory is: \-p DIR, else \f(CW$TMPDIR\fR, else /tmp
+.IP \fBmount\fR 4
+.IX Item "mount"
+mount [OPTIONS] [\-o OPT] DEVICE NODE
+.Sp
+Mount a filesystem. Filesystem autodetection requires /proc.
+.Sp
+.Vb 10
+\&        \-a              Mount all filesystems in fstab
+\&        \-r              Read\-only mount
+\&        \-t FSTYPE[,...] Filesystem type(s)
+\&        \-O OPT          Mount only filesystems with option OPT (\-a only)
+\&\-o OPT:
+\&        [a]sync         Writes are [a]synchronous
+\&        [no]atime       Disable/enable updates to inode access times
+\&        [no]diratime    Disable/enable atime updates to directories
+\&        [no]relatime    Disable/enable atime updates relative to modification time
+\&        [no]dev         (Dis)allow use of special device files
+\&        [no]exec        (Dis)allow use of executable files
+\&        [no]suid        (Dis)allow set\-user\-id\-root programs
+\&        [r]shared       Convert [recursively] to a shared subtree
+\&        [r]slave        Convert [recursively] to a slave subtree
+\&        [r]private      Convert [recursively] to a private subtree
+\&        [un]bindable    Make mount point [un]able to be bind mounted
+\&        [r]bind         Bind a file or directory [recursively] to another location
+\&        move            Relocate an existing mount point
+\&        remount         Remount a mounted filesystem, changing flags
+\&        ro              Same as \-r
+.Ve
+.Sp
+There are filesystem-specific \-o flags.
 .IP \fBmv\fR 4
 .IX Item "mv"
 mv [\-finT] SOURCE DEST
@@ -1196,6 +1249,12 @@ patch [\-RNE] [\-p N] [\-i DIFF] [ORIGFILE [PATCHFILE]]
 \&        \-E      Remove output files if they become empty
 \&        \-\-dry\-run       Don\*(Aqt actually change files
 .Ve
+.IP \fBpivot_root\fR 4
+.IX Item "pivot_root"
+pivot_root NEW_ROOT PUT_OLD
+.Sp
+Move the current root file system to PUT_OLD and make NEW_ROOT
+the new root file system
 .IP \fBprintenv\fR 4
 .IX Item "printenv"
 printenv [VARIABLE]...
@@ -1207,6 +1266,16 @@ If no VARIABLE specified, print all.
 printf FORMAT [ARG]...
 .Sp
 Format and print ARG(s) according to FORMAT (a\-la C printf)
+.IP \fBps\fR 4
+.IX Item "ps"
+ps
+.Sp
+Show list of processes
+.Sp
+.Vb 2
+\&        w       Wide output
+\&        l       Long output
+.Ve
 .IP \fBpwd\fR 4
 .IX Item "pwd"
 pwd
@@ -1650,6 +1719,19 @@ timeout [\-s SIG] [\-k KILL_SECS] SECS PROG ARGS
 .Sp
 Run PROG. Send SIG to it if it is not gone in SECS seconds.
 Default SIG: TERM.If it still exists in KILL_SECS seconds, send KILL.
+.IP \fBtop\fR 4
+.IX Item "top"
+top [\-b] [\-n COUNT] [\-d SECONDS]
+.Sp
+Show a view of process activity in real time.
+Read the status of all processes from /proc each SECONDS
+and show a screenful of them.
+.Sp
+.Vb 3
+\&        \-b      Batch mode
+\&        \-n N    Exit after N iterations
+\&        \-d SEC  Delay between updates
+.Ve
 .IP \fBtouch\fR 4
 .IX Item "touch"
 touch [\-cham] [\-d DATE] [\-t DATE] [\-r FILE] FILE...
@@ -1803,6 +1885,11 @@ Extract FILEs from ZIP archive
 \&        \-x FILE Exclude FILEs
 \&        \-d DIR  Extract into DIR
 .Ve
+.IP \fBuptime\fR 4
+.IX Item "uptime"
+uptime
+.Sp
+Display the time since the last boot
 .IP \fBusleep\fR 4
 .IX Item "usleep"
 usleep N

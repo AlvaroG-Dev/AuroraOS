@@ -64,18 +64,18 @@
 bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
 cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
 dos2unix, dpkg, dpkg-deb, du, echo, ed, egrep, env, expand, expr,
-factor, false, fgrep, find, fold, fsync, getopt, grep, groups,
+factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
 gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
 killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, od, paste,
-patch, pipe_progress, printenv, printf, pwd, readlink, realpath,
-reset, resize, rev, rm, rmdir, rpm, rpm2cpio, run-parts, sed, seq,
-sh, sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep,
-sort, split, start-stop-daemon, stat, strings, sum, sync, tac, tail,
-tar, tee, test, time, timeout, touch, tr, tree, true, truncate, ts,
-tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
-usleep, uudecode, uuencode, vi, wc, which, whoami, xargs, xxd, xz,
-xzcat, yes, zcat</code></pre>
+mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
+nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
+printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
+rpm, rpm2cpio, run-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
+sha512sum, shred, shuf, sleep, sort, split, start-stop-daemon, stat,
+strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
+touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
+unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
+uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
@@ -713,6 +713,14 @@ If none of the following actions is specified, -print is assumed
 -w      Use WIDTH columns instead of 80</code></pre>
 
 </dd>
+<dt id="free"><b>free</b></dt>
+<dd>
+
+<p>free</p>
+
+<p>Display free and used memory</p>
+
+</dd>
 <dt id="fsync"><b>fsync</b></dt>
 <dd>
 
@@ -1051,6 +1059,22 @@ If none of the following actions is specified, -print is assumed
 -w      Warn about improperly formatted checksum lines</code></pre>
 
 </dd>
+<dt id="mdev"><b>mdev</b></dt>
+<dd>
+
+<p>mdev [-vS] [-s]</p>
+
+<pre><code>-v      Verbose
+-S      Log to syslog too
+-s      Scan /sys and populate /dev</code></pre>
+
+<p>Bare mdev is a kernel hotplug helper. To activate it: echo /sbin/mdev &gt;/proc/sys/kernel/hotplug</p>
+
+<p>If /dev/mdev.seq file exists, mdev will wait for its value to match $SEQNUM variable. This prevents plug/unplug races. To activate this feature, create empty /dev/mdev.seq at boot.</p>
+
+<p>If /dev/mdev.log file exists, debug log will be appended to it.</p>
+
+</dd>
 <dt id="mkdir"><b>mkdir</b></dt>
 <dd>
 
@@ -1100,6 +1124,37 @@ TYPE:
 -u      Do not create anything; print a name</code></pre>
 
 <p>Base directory is: -p DIR, else $TMPDIR, else /tmp</p>
+
+</dd>
+<dt id="mount"><b>mount</b></dt>
+<dd>
+
+<p>mount [OPTIONS] [-o OPT] DEVICE NODE</p>
+
+<p>Mount a filesystem. Filesystem autodetection requires /proc.</p>
+
+<pre><code>        -a              Mount all filesystems in fstab
+        -r              Read-only mount
+        -t FSTYPE[,...] Filesystem type(s)
+        -O OPT          Mount only filesystems with option OPT (-a only)
+-o OPT:
+        [a]sync         Writes are [a]synchronous
+        [no]atime       Disable/enable updates to inode access times
+        [no]diratime    Disable/enable atime updates to directories
+        [no]relatime    Disable/enable atime updates relative to modification time
+        [no]dev         (Dis)allow use of special device files
+        [no]exec        (Dis)allow use of executable files
+        [no]suid        (Dis)allow set-user-id-root programs
+        [r]shared       Convert [recursively] to a shared subtree
+        [r]slave        Convert [recursively] to a slave subtree
+        [r]private      Convert [recursively] to a private subtree
+        [un]bindable    Make mount point [un]able to be bind mounted
+        [r]bind         Bind a file or directory [recursively] to another location
+        move            Relocate an existing mount point
+        remount         Remount a mounted filesystem, changing flags
+        ro              Same as -r</code></pre>
+
+<p>There are filesystem-specific -o flags.</p>
 
 </dd>
 <dt id="mv"><b>mv</b></dt>
@@ -1191,6 +1246,14 @@ TYPE:
 --dry-run       Don&#39;t actually change files</code></pre>
 
 </dd>
+<dt id="pivot_root"><b>pivot_root</b></dt>
+<dd>
+
+<p>pivot_root NEW_ROOT PUT_OLD</p>
+
+<p>Move the current root file system to PUT_OLD and make NEW_ROOT the new root file system</p>
+
+</dd>
 <dt id="printenv"><b>printenv</b></dt>
 <dd>
 
@@ -1205,6 +1268,17 @@ TYPE:
 <p>printf FORMAT [ARG]...</p>
 
 <p>Format and print ARG(s) according to FORMAT (a-la C printf)</p>
+
+</dd>
+<dt id="ps"><b>ps</b></dt>
+<dd>
+
+<p>ps</p>
+
+<p>Show list of processes</p>
+
+<pre><code>w       Wide output
+l       Long output</code></pre>
 
 </dd>
 <dt id="pwd"><b>pwd</b></dt>
@@ -1692,6 +1766,18 @@ t       List
 <p>Run PROG. Send SIG to it if it is not gone in SECS seconds. Default SIG: TERM.If it still exists in KILL_SECS seconds, send KILL.</p>
 
 </dd>
+<dt id="top"><b>top</b></dt>
+<dd>
+
+<p>top [-b] [-n COUNT] [-d SECONDS]</p>
+
+<p>Show a view of process activity in real time. Read the status of all processes from /proc each SECONDS and show a screenful of them.</p>
+
+<pre><code>-b      Batch mode
+-n N    Exit after N iterations
+-d SEC  Delay between updates</code></pre>
+
+</dd>
 <dt id="touch"><b>touch</b></dt>
 <dd>
 
@@ -1859,6 +1945,14 @@ t       List
 -K      Do not clear SUID bit
 -x FILE Exclude FILEs
 -d DIR  Extract into DIR</code></pre>
+
+</dd>
+<dt id="uptime"><b>uptime</b></dt>
+<dd>
+
+<p>uptime</p>
+
+<p>Display the time since the last boot</p>
 
 </dd>
 <dt id="usleep"><b>usleep</b></dt>

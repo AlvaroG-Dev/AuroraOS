@@ -148,6 +148,11 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
     int is_dir = (hdr->typeflag == '5');
     int is_symlink = (hdr->typeflag == '2');
 
+    // [3.4.a] Parsear mode/uid/gid del header ustar (octal).
+    uint32_t file_mode = (uint32_t)parse_octal(hdr->mode, sizeof(hdr->mode));
+    uint32_t file_uid = (uint32_t)parse_octal(hdr->uid, sizeof(hdr->uid));
+    uint32_t file_gid = (uint32_t)parse_octal(hdr->gid, sizeof(hdr->gid));
+
     char full_path[256];
     size_t pos = 0;
 
@@ -192,6 +197,11 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
         node->size = file_size;
         node->is_dir = is_dir;
         node->is_symlink = is_symlink;
+
+        // [3.4.a] Propagar metadatos del header.
+        node->mode = file_mode & 07777;
+        node->uid = file_uid;
+        node->gid = file_gid;
 
         if (is_symlink) {
           size_t i;
@@ -430,6 +440,9 @@ static vfs_ops_t tar_file_ops = {
     .open = tar_vfs_open,
     .close = tar_vfs_close,
     .readable = NULL,
+    // [3.4.c] RO: chmod/chown devuelven -EROFS.
+    .chmod = NULL,
+    .chown = NULL,
 };
 
 static vfs_ops_t tar_dir_ops = {
@@ -439,6 +452,9 @@ static vfs_ops_t tar_dir_ops = {
     .close = tar_vfs_close,
     .readable = NULL,
     .readdir = tar_vfs_readdir,
+    // [3.4.c] RO: chmod/chown devuelven -EROFS.
+    .chmod = NULL,
+    .chown = NULL,
 };
 
 // ===========================================================================
@@ -462,8 +478,12 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
     node->size = 0;
     node->inode = 0;
     node->ops = &tar_dir_ops;
-    node->fs = NULL; // el FS se asigna en vfs_lookup_rec si hace falta
+    node->fs = NULL;
     node->priv = &g_tarfs_root;
+    // [3.4.a] Raíz tarfs: root:root 0755.
+    node->mode = S_IFDIR | 0755;
+    node->uid = 0;
+    node->gid = 0;
     return node;
   }
 
@@ -500,6 +520,17 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
     memcpy(node->link_target, tn->linkname, tlen);
     node->link_target[tlen] = '\0';
   }
+
+  // [3.4.a] Propagar mode/uid/gid. Los S_IF* los añadimos aquí.
+  if (tn->is_symlink) {
+    node->mode = S_IFLNK | 0777;
+  } else if (tn->is_dir) {
+    node->mode = S_IFDIR | (tn->mode & 07777);
+  } else {
+    node->mode = S_IFREG | (tn->mode & 07777);
+  }
+  node->uid = tn->uid;
+  node->gid = tn->gid;
 
   return node;
 }

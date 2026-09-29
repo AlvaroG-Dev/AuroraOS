@@ -136,9 +136,13 @@
 /usr/bin/time
 /usr/bin/tree
 /usr/bin/ts
+/usr/bin/free
 /bin/kill
 /usr/bin/killall
 /usr/sbin/killall5
+/bin/ps
+/usr/bin/top
+/usr/bin/uptime
 /bin/ash
 /bin/sh
 /bin/hush
@@ -147,4 +151,7 @@
 /usr/bin/hexdump
 /usr/bin/hd
 /usr/bin/xxd
+/sbin/mdev
+/bin/mount
+/sbin/pivot_root
 /bin/rev

@@ -242,19 +242,22 @@ static int resolve_user_path(process_t *proc, const char *uptr, char *out,
 static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size,
                               linux_stat_t *out) {
   memset(out, 0, sizeof(*out));
-  uint32_t mode;
-  if (vs->flags & VFS_DIRECTORY)
-    mode = S_IFDIR | 0755;
-  else if (vs->flags & VFS_CHARDEVICE)
-    mode = S_IFCHR | 0666;
-  else
-    mode = S_IFREG | 0644;
+  // [3.4.a] El FS decide el modo. Fallback por si algún FS no lo rellena.
+  uint32_t mode = vs->mode;
+  if (mode == 0) {
+    if (vs->flags & VFS_DIRECTORY)
+      mode = S_IFDIR | 0755;
+    else if (vs->flags & VFS_CHARDEVICE)
+      mode = S_IFCHR | 0666;
+    else
+      mode = S_IFREG | 0644;
+  }
   out->st_dev = 1;
   out->st_ino = vs->inode;
   out->st_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
   out->st_mode = mode;
-  out->st_uid = 0;
-  out->st_gid = 0;
+  out->st_uid = vs->uid;
+  out->st_gid = vs->gid;
   out->st_size = (int64_t)size;
   out->st_blksize = 512;
   out->st_blocks = (int64_t)((size + 511) / 512);
@@ -332,19 +335,37 @@ static int64_t do_open_common(process_t *proc, const char *raw_path,
     break;
   }
 
+  // [FIX 3.4.a] O_CREAT: solo crear si el fichero NO existe.
+  //
+  // Antes llamábamos siempre a vfs_create, y devolvía -EROFS en FS sin
+  // op create (devfs, procfs, tarfs). Eso hacía que `2>/dev/null`
+  // fallara con "Read-only file system" aunque /dev/null ya existiera.
+  //
+  // Linux: O_CREAT sin O_EXCL sobre un fichero existente simplemente
+  // lo abre. Con O_EXCL sí devuelve EEXIST.
   int created_here = 0;
   if (linux_flags & LINUX_O_CREAT) {
-    int crc = vfs_create(path, linux_flags);
-    if (crc == 0) {
-      created_here = 1;
-    } else if (crc != -EEXIST) {
-      return crc;
+    vfs_node_t *probe = vfs_lookup(path);
+    if (probe) {
+      // Ya existe. Solo es error si O_EXCL está puesto.
+      vfs_node_free(probe);
+      if (linux_flags & LINUX_O_EXCL)
+        return -EEXIST;
+    } else {
+      // [3.4.c] Aplicar umask al modo de creación.
+      uint32_t create_mode = 0666 & ~proc->umask;
+      int crc = vfs_create(path, create_mode);
+      if (crc == 0) {
+        created_here = 1;
+      } else if (crc != -EEXIST) {
+        return crc;
+      }
     }
   }
 
   int fd = vfs_open_for_proc(proc, path, aflags);
   if (fd < 0)
-    return -ENOENT;
+    return fd; // [3.4.d] propaga el errno real (-EACCES, -ENOENT, ...)
 
   if (!created_here && (linux_flags & LINUX_O_TRUNC)) {
     file_descriptor_t *f = proc->fds[fd];
@@ -427,7 +448,6 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
   if (rc != 0)
     return rc;
 
-  // [3.1] lstat/AT_SYMLINK_NOFOLLOW: no seguir el symlink final.
   int no_follow = (flags & AT_SYMLINK_NOFOLLOW) ? 1 : 0;
   vfs_node_t *node = no_follow ? vfs_lookup_nofollow(path) : vfs_lookup(path);
   if (!node)
@@ -438,14 +458,14 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .size = node->size,
       .inode = node->inode,
       .mtime_sec = node->mtime_sec,
+      .mode = node->mode,
+      .uid = node->uid,
+      .gid = node->gid,
   };
-  int is_symlink = node->is_symlink;
   vfs_node_free(node);
 
   linux_stat_t ls;
   vfs_to_linux_stat(&vs, vs.size, &ls);
-  if (is_symlink)
-    ls.st_mode = S_IFLNK | 0777;
   if (copy_to_user((void *)statbuf, &ls, sizeof(ls)) < 0)
     return -EFAULT;
   return 0;
@@ -487,7 +507,6 @@ static int64_t k_fstatat(uint64_t dfd, uint64_t path, uint64_t statbuf,
 // ---------- access ----------
 static int64_t k_access(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
-  (void)mode;
   (void)a3;
   (void)a4;
   (void)a5;
@@ -503,14 +522,18 @@ static int64_t k_access(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
   vfs_node_t *node = vfs_lookup(p);
   if (!node)
     return -ENOENT;
+
+  // [3.4.d] access(2) usa REAL uid/gid, no efectivos. Como hoy no hay
+  // setuid activo, euid == uid siempre; cuando lo haya, habrá que
+  // cambiar vfs_check_access para aceptar un flag.
+  int acc = vfs_check_access(node, (int)mode);
   vfs_node_free(node);
-  return 0;
+  return acc;
 }
 
 // ---------- mkdir / unlink / rename ----------
 static int64_t k_mkdir(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
-  (void)mode;
   (void)a3;
   (void)a4;
   (void)a5;
@@ -521,7 +544,13 @@ static int64_t k_mkdir(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
   int rc = resolve_user_path(proc, (const char *)path, p, sizeof(p));
   if (rc != 0)
     return rc;
-  return vfs_mkdir(p);
+  // [3.4.c] El mode de mkdir(2) ya viene filtrado por umask. Si el
+  // caller pasa 0, usamos 0777 & ~umask (como hace glibc).
+  uint32_t m = (uint32_t)mode;
+  if (m == 0)
+    m = 0777;
+  m &= ~proc->umask;
+  return vfs_mkdir(p, m);
 }
 
 static int64_t k_mkdirat(uint64_t dfd, uint64_t path, uint64_t mode,
@@ -608,6 +637,14 @@ static int64_t k_chdir(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
     vfs_node_free(node);
     return -ENOTDIR;
   }
+
+  // [3.4.d] Requerir X para entrar al directorio.
+  int acc = vfs_check_access(node, VFS_X_OK);
+  if (acc != 0) {
+    vfs_node_free(node);
+    return acc;
+  }
+
   vfs_node_free(node);
 
   size_t plen = strlen(p);
@@ -776,10 +813,12 @@ static int64_t k_sysinfo(uint64_t info_ptr, uint64_t a2, uint64_t a3,
   return 0;
 }
 
-// ---------- getuid/getgid/geteuid/getegid ----------
+// ---------- get/set uid/gid (POSIX) ----------
 //
-// Aurora no tiene usuarios. Todos los procesos son "root" (uid 0).
-// Busybox usa estas en whoami, id, ls -l, sh. Devolver 0 es correcto.
+// [3.4.b] Aurora arranca como root. La semántica es la de Linux sin
+// capabilities: uid==0 puede todo; el resto solo puede cambiar a
+// valores que ya tiene.
+
 static int64_t k_getuid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a1;
@@ -787,17 +826,10 @@ static int64_t k_getuid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  return 0;
+  process_t *p = process_current();
+  return p ? (int64_t)p->uid : -EFAULT;
 }
-static int64_t k_getgid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                        uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
-}
+
 static int64_t k_geteuid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                          uint64_t a5) {
   (void)a1;
@@ -805,8 +837,21 @@ static int64_t k_geteuid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  return 0;
+  process_t *p = process_current();
+  return p ? (int64_t)p->euid : -EFAULT;
 }
+
+static int64_t k_getgid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  return p ? (int64_t)p->gid : -EFAULT;
+}
+
 static int64_t k_getegid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                          uint64_t a5) {
   (void)a1;
@@ -814,7 +859,335 @@ static int64_t k_getegid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
+  process_t *p = process_current();
+  return p ? (int64_t)p->egid : -EFAULT;
+}
+
+// setuid(uid). Linux x86_64:
+//   - root: uid = euid = suid = uid_new
+//   - no-root, uid_new == uid || euid || suid: euid = uid_new
+//   - no-root, otro: EPERM
+static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t u = (uint32_t)uid;
+  if (p->euid == 0) {
+    p->uid = u;
+    p->euid = u;
+    p->suid = u;
+    p->fsuid = u;
+    return 0;
+  }
+  if (u == p->uid || u == p->euid || u == p->suid) {
+    p->euid = u;
+    p->fsuid = u;
+    return 0;
+  }
+  return -EPERM;
+}
+
+static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t g = (uint32_t)gid;
+  if (p->euid == 0) {
+    p->gid = g;
+    p->egid = g;
+    p->sgid = g;
+    p->fsgid = g;
+    return 0;
+  }
+  if (g == p->gid || g == p->egid || g == p->sgid) {
+    p->egid = g;
+    p->fsgid = g;
+    return 0;
+  }
+  return -EPERM;
+}
+
+// setreuid(ruid, euid). -1 significa "no cambiar".
+static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  int32_t r = (int32_t)ruid;
+  int32_t e = (int32_t)euid;
+  int was_root = (p->euid == 0);
+
+  if (r != -1) {
+    if (!was_root && (uint32_t)r != p->uid && (uint32_t)r != p->euid)
+      return -EPERM;
+    p->uid = (uint32_t)r;
+    // Linux actualiza suid si ruid != old euid o euid cambia.
+    if (was_root || (uint32_t)r != p->suid)
+      p->suid = (uint32_t)r;
+  }
+  if (e != -1) {
+    if (!was_root && (uint32_t)e != p->uid && (uint32_t)e != p->euid &&
+        (uint32_t)e != p->suid)
+      return -EPERM;
+    p->euid = (uint32_t)e;
+    p->fsuid = (uint32_t)e;
+  }
   return 0;
+}
+
+static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  int32_t r = (int32_t)rgid;
+  int32_t e = (int32_t)egid;
+  int was_root = (p->euid == 0);
+
+  if (r != -1) {
+    if (!was_root && (uint32_t)r != p->gid && (uint32_t)r != p->egid)
+      return -EPERM;
+    p->gid = (uint32_t)r;
+    if (was_root || (uint32_t)r != p->sgid)
+      p->sgid = (uint32_t)r;
+  }
+  if (e != -1) {
+    if (!was_root && (uint32_t)e != p->gid && (uint32_t)e != p->egid &&
+        (uint32_t)e != p->sgid)
+      return -EPERM;
+    p->egid = (uint32_t)e;
+    p->fsgid = (uint32_t)e;
+  }
+  return 0;
+}
+
+// setresuid(ruid, euid, suid). -1 = no cambiar.
+// Linux: si el proceso no es root, cada valor solo puede ir a uid/euid/suid
+// actuales. Si lo es, puede ir a cualquier valor.
+static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
+                           uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  int32_t r = (int32_t)ruid, e = (int32_t)euid, s = (int32_t)suid;
+  int was_root = (p->euid == 0);
+
+  if (!was_root) {
+    // Cada valor debe estar entre los uid/euid/suid actuales.
+    if (r != -1 && (uint32_t)r != p->uid && (uint32_t)r != p->euid &&
+        (uint32_t)r != p->suid)
+      return -EPERM;
+    if (e != -1 && (uint32_t)e != p->uid && (uint32_t)e != p->euid &&
+        (uint32_t)e != p->suid)
+      return -EPERM;
+    if (s != -1 && (uint32_t)s != p->uid && (uint32_t)s != p->euid &&
+        (uint32_t)s != p->suid)
+      return -EPERM;
+  }
+  if (r != -1)
+    p->uid = (uint32_t)r;
+  if (e != -1) {
+    p->euid = (uint32_t)e;
+    p->fsuid = (uint32_t)e;
+  }
+  if (s != -1)
+    p->suid = (uint32_t)s;
+  return 0;
+}
+
+static int64_t k_setresgid(uint64_t rgid, uint64_t egid, uint64_t sgid,
+                           uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  int32_t r = (int32_t)rgid, e = (int32_t)egid, s = (int32_t)sgid;
+  int was_root = (p->euid == 0);
+
+  if (!was_root) {
+    if (r != -1 && (uint32_t)r != p->gid && (uint32_t)r != p->egid &&
+        (uint32_t)r != p->sgid)
+      return -EPERM;
+    if (e != -1 && (uint32_t)e != p->gid && (uint32_t)e != p->egid &&
+        (uint32_t)e != p->sgid)
+      return -EPERM;
+    if (s != -1 && (uint32_t)s != p->gid && (uint32_t)s != p->egid &&
+        (uint32_t)s != p->sgid)
+      return -EPERM;
+  }
+  if (r != -1)
+    p->gid = (uint32_t)r;
+  if (e != -1) {
+    p->egid = (uint32_t)e;
+    p->fsgid = (uint32_t)e;
+  }
+  if (s != -1)
+    p->sgid = (uint32_t)s;
+  return 0;
+}
+
+// getresuid(&ruid, &euid, &suid): escribe tres uint32_t en userland.
+static int64_t k_getresuid(uint64_t r_ptr, uint64_t e_ptr, uint64_t s_ptr,
+                           uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t vals[3] = {p->uid, p->euid, p->suid};
+  uint64_t ptrs[3] = {r_ptr, e_ptr, s_ptr};
+  for (int i = 0; i < 3; i++) {
+    if (ptrs[i] == 0)
+      continue;
+    if (!access_ok((void *)ptrs[i], sizeof(uint32_t)))
+      return -EFAULT;
+    if (copy_to_user((void *)ptrs[i], &vals[i], sizeof(uint32_t)) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+static int64_t k_getresgid(uint64_t r_ptr, uint64_t e_ptr, uint64_t s_ptr,
+                           uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t vals[3] = {p->gid, p->egid, p->sgid};
+  uint64_t ptrs[3] = {r_ptr, e_ptr, s_ptr};
+  for (int i = 0; i < 3; i++) {
+    if (ptrs[i] == 0)
+      continue;
+    if (!access_ok((void *)ptrs[i], sizeof(uint32_t)))
+      return -EFAULT;
+    if (copy_to_user((void *)ptrs[i], &vals[i], sizeof(uint32_t)) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+// setfsuid / setfsgid. Solo un proceso con euid==0 puede cambiarlos a
+// algo distinto de los uid/gid actuales. Los usan algunas libc para
+// cambiar credenciales temporalmente.
+static int64_t k_setfsuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t old = p->fsuid;
+  uint32_t u = (uint32_t)uid;
+  if (p->euid == 0 || u == p->uid || u == p->euid || u == p->suid ||
+      u == p->fsuid)
+    p->fsuid = u;
+  return (int64_t)old; // Linux devuelve el valor anterior
+}
+
+static int64_t k_setfsgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t old = p->fsgid;
+  uint32_t g = (uint32_t)gid;
+  if (p->euid == 0 || g == p->gid || g == p->egid || g == p->sgid ||
+      g == p->fsgid)
+    p->fsgid = g;
+  return (int64_t)old;
+}
+
+// getgroups(size, list). Sin grupos suplementarios, size==0 devuelve 0.
+// Con size>0 devuelve -EINVAL si size < ngroups, o escribe los grupos.
+static int64_t k_getgroups(uint64_t size, uint64_t list, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  if (size == 0)
+    return p->ngroups;
+  if ((int)size < p->ngroups)
+    return -EINVAL;
+  if (p->ngroups == 0)
+    return 0;
+  if (!access_ok((void *)list, (size_t)p->ngroups * sizeof(uint32_t)))
+    return -EFAULT;
+  if (copy_to_user((void *)list, p->groups,
+                   (size_t)p->ngroups * sizeof(uint32_t)) < 0)
+    return -EFAULT;
+  return p->ngroups;
+}
+
+// setgroups(size, list). Solo root. Máximo NGROUPS_MAX.
+static int64_t k_setgroups(uint64_t size, uint64_t list, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  if (p->euid != 0)
+    return -EPERM;
+  if (size > NGROUPS_MAX)
+    return -EINVAL;
+  if (size == 0) {
+    p->ngroups = 0;
+    return 0;
+  }
+  if (!access_ok((void *)list, (size_t)size * sizeof(uint32_t)))
+    return -EFAULT;
+  uint32_t tmp[NGROUPS_MAX];
+  if (copy_from_user(tmp, (void *)list, (size_t)size * sizeof(uint32_t)) < 0)
+    return -EFAULT;
+  for (uint64_t i = 0; i < size; i++)
+    p->groups[i] = tmp[i];
+  p->ngroups = (int)size;
+  return 0;
+}
+
+// umask(mask): devuelve el anterior y establece el nuevo.
+static int64_t k_umask(uint64_t mask, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  uint32_t old = p->umask;
+  p->umask = (uint32_t)mask & 0777;
+  return (int64_t)old;
 }
 
 // ---------- getppid ----------
@@ -932,17 +1305,6 @@ static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
   if (!target)
     return -ESRCH;
   return (int64_t)target->sid;
-}
-
-// Aurora no tiene grupos suplementarios. Con size==0 devolvemos 0 (no
-// hay ninguno). Con size>0 devolvemos 0 (no escribimos nada).
-static int64_t k_getgroups(uint64_t size, uint64_t list, uint64_t a3,
-                           uint64_t a4, uint64_t a5) {
-  (void)list;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
 }
 
 // ---------- prctl ----------
@@ -1439,6 +1801,63 @@ static int64_t k_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
     return rc;
 
   return vfs_symlink(target, linkpath);
+}
+
+// ---------- tkill ----------
+//
+// En Linux, tkill(tid, sig) envía a un thread concreto. Aurora es
+// single-threaded: tid == pid. BusyBox ash lo usa en job control.
+static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_kill(tid, sig, 0, 0, 0);
+}
+
+// ---------- readlinkat ----------
+//
+// readlinkat(dirfd, path, buf, bufsiz). AT_FDCWD o dirfd numérico.
+// Reutilizamos k_readlink resolviendo el path con el cwd correcto.
+static int64_t k_readlinkat(uint64_t dirfd, uint64_t path, uint64_t buf,
+                            uint64_t bufsiz, uint64_t a5) {
+  (void)a5;
+  if ((int64_t)dirfd != AT_FDCWD) {
+    // Path relativo a un dirfd abierto: no soportado todavía.
+    // BusyBox rara vez lo usa (suele pasar AT_FDCWD).
+    return -EINVAL;
+  }
+  return k_readlink(path, buf, bufsiz, 0, 0);
+}
+
+// ---------- faccessat ----------
+//
+// faccessat(dirfd, path, mode, flags). Con flags=0 se comporta como
+// access(path, mode). Con AT_EACCESS no cambia nada aquí porque todo
+// corre como root. Ignoramos `mode` como hace k_access (no hay permisos
+// reales, todo es accesible si existe).
+static int64_t k_faccessat(uint64_t dirfd, uint64_t path, uint64_t mode,
+                           uint64_t flags, uint64_t a5) {
+  (void)flags;
+  (void)a5;
+  if ((int64_t)dirfd != AT_FDCWD)
+    return -EINVAL;
+  return k_access(path, mode, 0, 0, 0);
+}
+
+// ---------- pipe2 ----------
+//
+// pipe2(fds, flags). Los flags (O_CLOEXEC, O_NONBLOCK) los ignoramos:
+// no hay FD_CLOEXEC ni O_NONBLOCK real en el VFS. Es correcto porque
+// ningún programa que dependa de ellos va a colgarse por su ausencia;
+// a lo sumo tendrá una race benigna al hacer fork+exec sin cerrar.
+static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
+                       uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_pipe(fds_ptr, 0, 0, 0, 0);
 }
 
 // [3.2] Hard link. No soportado todavía. FAT32 no los tiene y tarfs es
@@ -2021,13 +2440,13 @@ static int64_t k_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a3,
 
   // [DIAG] Si esto sale con left≈100000 e interrupted=0 el bug está en el
   // wait; con interrupted=1 fue una señal (mira pending/blocked).
-  LOG_INFO("[NANOSLEEP] pid=%u req=%lu ticks left=%lu interrupted=%d "
-           "pending=0x%lx blocked=0x%lx",
-           spid, (unsigned long)ticks, (unsigned long)left, interrupted,
-           self ? (unsigned long)__atomic_load_n(&self->pending_signals,
-                                                 __ATOMIC_ACQUIRE)
-                : 0UL,
-           self ? (unsigned long)self->blocked_signals : 0UL);
+  LOG_TRACE("[NANOSLEEP] pid=%u req=%lu ticks left=%lu interrupted=%d "
+            "pending=0x%lx blocked=0x%lx",
+            spid, (unsigned long)ticks, (unsigned long)left, interrupted,
+            self ? (unsigned long)__atomic_load_n(&self->pending_signals,
+                                                  __ATOMIC_ACQUIRE)
+                 : 0UL,
+            self ? (unsigned long)self->blocked_signals : 0UL);
 
   if (rem_ptr) {
     struct k_timespec rem;
@@ -2199,14 +2618,14 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
   if (!self)
     return -EFAULT;
 
-  LOG_INFO("[WAIT4] self=%u pid=%ld options=0x%lx", self->pid,
-           (long)(int32_t)pid, (unsigned long)options);
+  LOG_TRACE("[WAIT4] self=%u pid=%ld options=0x%lx", self->pid,
+            (long)(int32_t)pid, (unsigned long)options);
 
   int32_t aurora_status = 0;
   proc_rusage_t ru = {0};
   int r =
       process_waitpid(self, (int32_t)pid, &aurora_status, &ru, (int)options);
-  LOG_INFO("[WAIT4] -> %d", r);
+  LOG_TRACE("[WAIT4] -> %d", r);
   if (r < 0)
     return r;
 
@@ -2414,18 +2833,28 @@ static int64_t k_fsync(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
   return 0;
 }
 
-static int64_t k_chmod(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                       uint64_t a5) {
-  (void)a1;
-  (void)a2;
+// ---------- chmod / fchmod / fchmodat ----------
+//
+// [3.4.c] Implementación real. El VFS comprueba permisos:
+// root o owner pueden chmod. FS sin soporte devuelven -EPERM/-EROFS.
+
+static int64_t k_chmod(uint64_t path_ptr, uint64_t mode, uint64_t a3,
+                       uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
-  return 0;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return vfs_chmod(path, (uint32_t)mode);
 }
+
 static int64_t k_fchmod(uint64_t fd, uint64_t mode, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
-  (void)mode;
   (void)a3;
   (void)a4;
   (void)a5;
@@ -2434,21 +2863,38 @@ static int64_t k_fchmod(uint64_t fd, uint64_t mode, uint64_t a3, uint64_t a4,
     return -EFAULT;
   if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
     return -EBADF;
-  return 0;
+  return vfs_fchmod(proc->fds[fd], (uint32_t)mode);
 }
-static int64_t k_chown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                       uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
+
+static int64_t k_fchmodat(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
+                          uint64_t flags, uint64_t a5) {
+  (void)flags;
+  (void)a5;
+  if ((int64_t)dfd != AT_FDCWD)
+    return -EINVAL;
+  return k_chmod(path_ptr, mode, 0, 0, 0);
+}
+
+// ---------- chown / fchown / lchown ----------
+//
+// [3.4.c] uid/gid = -1 deja el campo intacto. Solo root.
+
+static int64_t k_chown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
+                       uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  return 0;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return vfs_chown(path, (uint32_t)uid, (uint32_t)gid);
 }
+
 static int64_t k_fchown(uint64_t fd, uint64_t uid, uint64_t gid, uint64_t a4,
                         uint64_t a5) {
-  (void)uid;
-  (void)gid;
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
@@ -2456,16 +2902,14 @@ static int64_t k_fchown(uint64_t fd, uint64_t uid, uint64_t gid, uint64_t a4,
     return -EFAULT;
   if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
     return -EBADF;
-  return 0;
+  return vfs_fchown(proc->fds[fd], (uint32_t)uid, (uint32_t)gid);
 }
-static int64_t k_lchown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                        uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
+
+static int64_t k_lchown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
+                        uint64_t a4, uint64_t a5) {
+  // lchown == chown para FS que no soportan symlink-follow at chown.
+  // tarfs es RO, así que devolverá -EROFS igual.
+  return k_chown(path_ptr, uid, gid, a4, a5);
 }
 
 // ---------- [4.2] utimensat ----------
@@ -2559,7 +3003,11 @@ static int64_t k_mknod(uint64_t path_uptr, uint64_t mode, uint64_t dev,
         resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
     if (rc != 0)
       return rc;
-    return vfs_create(path, O_CREAT);
+    // [3.4.c] mknod(PATH, mode) usa `mode & 0777` filtrado por umask.
+    uint32_t m = ((uint32_t)mode & 0777) & ~proc->umask;
+    if (m == 0)
+      m = 0666 & ~proc->umask;
+    return vfs_create(path, m);
   }
   return -EPERM;
 }
@@ -3177,6 +3625,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CLOSE] = {k_close, "close"},
     [SYS_STAT] = {k_stat, "stat"},
     [SYS_FSTAT] = {k_fstat, "fstat"},
+    [SYS_FCHMODAT] = {k_fchmodat, "fchmodat"},
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},
@@ -3227,7 +3676,19 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETPGID] = {k_getpgid, "getpgid"},
     [SYS_GETSID] = {k_getsid, "getsid"},
     [SYS_SETSID] = {k_setsid, "setsid"},
+    [SYS_UMASK] = {k_umask, "umask"},
+    [SYS_SETUID] = {k_setuid, "setuid"},
+    [SYS_SETGID] = {k_setgid, "setgid"},
+    [SYS_SETREUID] = {k_setreuid, "setreuid"},
+    [SYS_SETREGID] = {k_setregid, "setregid"},
     [SYS_GETGROUPS] = {k_getgroups, "getgroups"},
+    [SYS_SETGROUPS] = {k_setgroups, "setgroups"},
+    [SYS_SETRESUID] = {k_setresuid, "setresuid"},
+    [SYS_GETRESUID] = {k_getresuid, "getresuid"},
+    [SYS_SETRESGID] = {k_setresgid, "setresgid"},
+    [SYS_GETRESGID] = {k_getresgid, "getresgid"},
+    [SYS_SETFSUID] = {k_setfsuid, "setfsuid"},
+    [SYS_SETFSGID] = {k_setfsgid, "setfsgid"},
     [SYS_PRCTL] = {k_prctl, "prctl"},
     [SYS_KILL] = {k_kill, "kill"},
     [SYS_UNAME] = {k_uname, "uname"},
@@ -3236,6 +3697,10 @@ static const syscall_entry_t linux_table[] = {
     [SYS_LINK] = {k_link, "link"},
     [SYS_SYMLINK] = {k_symlink, "symlink"},
     [SYS_READLINK] = {k_readlink, "readlink"},
+    [SYS_TKILL] = {k_tkill, "tkill"},
+    [SYS_READLINKAT] = {k_readlinkat, "readlinkat"},
+    [SYS_FACCESSAT] = {k_faccessat, "faccessat"},
+    [SYS_PIPE2] = {k_pipe2, "pipe2"},
     [SYS_ARCH_PRCTL] = {k_arch_prctl, "arch_prctl"},
     [SYS_GETDENTS64] = {k_getdents64, "getdents64"},
     [SYS_SET_TID_ADDRESS] = {k_set_tid_address, "set_tid_address"},

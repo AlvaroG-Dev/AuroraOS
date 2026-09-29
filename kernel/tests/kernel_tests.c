@@ -3740,7 +3740,7 @@ static void test_fat32_mkdir_unlink(void) {
   }
 
   // 1. mkdir.
-  int rc = vfs_mkdir("/fat_test/pr4dir");
+  int rc = vfs_mkdir("/fat_test/pr4dir", 0755);
   TEST_ASSERT(rc == 0, "mkdir falló: %d", rc);
   if (rc != 0) {
     fat32_test_cleanup();
@@ -3756,7 +3756,7 @@ static void test_fat32_mkdir_unlink(void) {
   }
 
   // 3. mkdir duplicado → -EEXIST.
-  rc = vfs_mkdir("/fat_test/pr4dir");
+  rc = vfs_mkdir("/fat_test/pr4dir", 0755);
   TEST_ASSERT(rc == -EEXIST, "mkdir duplicado devolvió %d, esperado -EEXIST",
               rc);
 
@@ -3845,8 +3845,8 @@ static void test_fat32_mkdir_not_empty(void) {
   }
 
   // "pr4par" cabe en 8.3 (6 chars).
-  TEST_ASSERT(vfs_mkdir("/fat_test/pr4par") == 0, "mkdir parent");
-  TEST_ASSERT(vfs_mkdir("/fat_test/pr4par/child") == 0, "mkdir child");
+  TEST_ASSERT(vfs_mkdir("/fat_test/pr4par", 0755) == 0, "mkdir parent");
+  TEST_ASSERT(vfs_mkdir("/fat_test/pr4par/child", 0755) == 0, "mkdir child");
 
   // unlink del padre debe fallar con -ENOTEMPTY.
   int rc = vfs_unlink("/fat_test/pr4par");
@@ -3878,7 +3878,7 @@ static void test_fat32_lfn_create_and_readdir(void) {
   }
 
   // 1. mkdir con nombre >8.3 (usa LFN).
-  int rc = vfs_mkdir("/fat_test/Documentos");
+  int rc = vfs_mkdir("/fat_test/Documentos", 0755);
   TEST_ASSERT(rc == 0, "mkdir LFN falló: %d", rc);
   if (rc != 0) {
     fat32_test_cleanup();
@@ -3997,8 +3997,8 @@ static void test_fat32_lfn_alias_collision(void) {
   // Dos nombres que truncarían al mismo alias 8.3 si el generador fuera
   // ingenuo. Con el generador correcto deben coexistir con aliases
   // distintos (DOCUME~1 y DOCUME~2).
-  TEST_ASSERT(vfs_mkdir(p1) == 0, "mkdir Documentos1");
-  TEST_ASSERT(vfs_mkdir(p2) == 0, "mkdir Documentos2");
+  TEST_ASSERT(vfs_mkdir(p1, 0755) == 0, "mkdir Documentos1");
+  TEST_ASSERT(vfs_mkdir(p2, 0755) == 0, "mkdir Documentos2");
 
   // Ambos deben existir y ser independientes.
   vfs_node_t *n1 = vfs_lookup(p1);
@@ -4427,7 +4427,7 @@ static void test_fat32_mkdir_readdir_unlink(void) {
     vfs_unlink("/fat_test/rd");
   }
 
-  TEST_ASSERT(vfs_mkdir("/fat_test/rd") == 0, "mkdir");
+  TEST_ASSERT(vfs_mkdir("/fat_test/rd", 0755) == 0, "mkdir");
   TEST_ASSERT(vfs_create("/fat_test/rd/f1.txt", O_CREAT) == 0, "create");
   TEST_ASSERT(vfs_create("/fat_test/rd/f2.txt", O_CREAT) == 0, "create");
 
@@ -4582,7 +4582,7 @@ static void test_fat32_rename_move_dir(void) {
   vfs_unlink("/fat_test/rmv/a.txt");
   vfs_unlink("/fat_test/rmv/b.txt");
   vfs_unlink("/fat_test/rmv");
-  vfs_mkdir("/fat_test/rmv");
+  vfs_mkdir("/fat_test/rmv", 0755);
 
   TEST_ASSERT(vfs_create("/fat_test/rmv/a.txt", O_CREAT) == 0, "create");
 
@@ -4984,3 +4984,96 @@ static void test_pty_pts_listable(void) {
   memset(&fake, 0, sizeof(fake));
 }
 REGISTER_TEST("pty: /dev/pts listable", test_pty_pts_listable);
+
+// ===========================================================================
+// [3.4.d] Comprobación de permisos con uid/gid simulados.
+//
+// kmain_task no tiene proc, así que montamos un process_t fake y lo
+// asociamos temporalmente a la tarea actual. Restauramos al terminar.
+// ===========================================================================
+static void test_vfs_check_access_owner_group_other(void) {
+  task_t *cur = sched_current();
+  TEST_ASSERT(cur != NULL, "sin tarea actual");
+  if (!cur)
+    return;
+
+  process_t *saved_proc = cur->proc;
+
+  static process_t fake;
+  memset(&fake, 0, sizeof(fake));
+  cur->proc = &fake;
+
+  vfs_node_t n;
+  memset(&n, 0, sizeof(n));
+  n.mode = S_IFREG | 0640; // owner rw, group r, other none
+  n.uid = 1000;
+  n.gid = 1000;
+
+  // 1. Root: todo OK.
+  fake.euid = 0;
+  fake.egid = 0;
+  fake.ngroups = 0;
+  TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "root R");
+  TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "root W");
+  TEST_ASSERT(vfs_check_access(&n, VFS_X_OK) == 0, "root X (bypass)");
+
+  // 2. Owner uid=1000: rw-.
+  fake.euid = 1000;
+  fake.egid = 1000;
+  TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "owner R");
+  TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "owner W");
+  TEST_ASSERT(vfs_check_access(&n, VFS_X_OK) != 0, "owner X debe fallar");
+
+  // 3. Group gid=1000, uid distinto: r--.
+  fake.euid = 2000;
+  fake.egid = 1000;
+  TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "group R");
+  TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) != 0, "group W debe fallar");
+
+  // 4. Otro uid/gid: ---.
+  fake.euid = 3000;
+  fake.egid = 3000;
+  TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) != 0, "other R debe fallar");
+
+  // 5. Grupo suplementario: egid=3000 pero groups[0]=1000.
+  fake.euid = 3000;
+  fake.egid = 3000;
+  fake.groups[0] = 1000;
+  fake.ngroups = 1;
+  TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "suppl group R");
+
+  cur->proc = saved_proc;
+}
+REGISTER_TEST("vfs: check_access owner/group/other",
+              test_vfs_check_access_owner_group_other);
+
+static void test_vfs_check_access_root_x_file(void) {
+  task_t *cur = sched_current();
+  TEST_ASSERT(cur != NULL, "sin tarea actual");
+  if (!cur)
+    return;
+
+  process_t *saved_proc = cur->proc;
+
+  static process_t fake;
+  memset(&fake, 0, sizeof(fake));
+  cur->proc = &fake;
+
+  vfs_node_t n;
+  memset(&n, 0, sizeof(n));
+  n.mode = S_IFREG | 0000; // sin ningún bit
+
+  fake.euid = 0;
+  fake.egid = 0;
+
+  // Root bypasea R/W aunque no tenga bits...
+  TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "root R sobre 0000");
+  TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "root W sobre 0000");
+  // ...pero el bit X para execve lo comprueba process_execve_prepare
+  // aparte (Linux hace lo mismo: root no ejecuta sin ningún x).
+  TEST_ASSERT(vfs_check_access(&n, VFS_X_OK) == 0, "root X bypass");
+
+  cur->proc = saved_proc;
+}
+REGISTER_TEST("vfs: root bypasea check_access",
+              test_vfs_check_access_root_x_file);

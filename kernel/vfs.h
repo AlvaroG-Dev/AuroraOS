@@ -24,6 +24,34 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+// ---------------------------------------------------------------------------
+// [3.4.a] Bits POSIX de modo. Mismos valores que Linux x86_64.
+// El tipo (S_IFDIR/S_IFREG/S_IFCHR) va en mode; la abstracción rápida
+// de Aurora sigue en flags (VFS_FILE/VFS_DIRECTORY/VFS_CHARDEVICE).
+// ---------------------------------------------------------------------------
+#define S_IFMT 0170000
+#define S_IFSOCK 0140000
+#define S_IFLNK 0120000
+#define S_IFREG 0100000
+#define S_IFBLK 0060000
+#define S_IFDIR 0040000
+#define S_IFCHR 0020000
+#define S_IFIFO 0010000
+
+#define S_ISUID 04000
+#define S_ISGID 02000
+#define S_ISVTX 01000
+#define S_IRWXU 00700
+#define S_IRWXG 00070
+#define S_IRWXO 00007
+
+// [3.4.d] Bits de acceso para access(2) y vfs_check_access.
+// Coinciden con Linux x86_64.
+#define VFS_F_OK 0
+#define VFS_X_OK 1
+#define VFS_W_OK 2
+#define VFS_R_OK 4
+
 #define MAX_PROCESS_FDS 32
 
 // Longitud máxima de un path normalizado (coincide con name[] de vfs_node).
@@ -56,6 +84,10 @@ typedef struct vfs_stat {
   size_t size;
   uint32_t inode;
   int64_t mtime_sec;
+  // [3.4.a] Copia directa de node->mode/uid/gid. VFS genérico.
+  uint32_t mode;
+  uint32_t uid;
+  uint32_t gid;
 } vfs_stat_t;
 
 typedef struct vfs_dirent {
@@ -80,8 +112,8 @@ typedef struct vfs_ops {
   int (*close)(vfs_node_t *node);
   bool (*readable)(vfs_node_t *node);
 
-  int (*create)(vfs_node_t *dir, const char *name, int flags);
-  int (*mkdir)(vfs_node_t *dir, const char *name);
+  int (*create)(vfs_node_t *dir, const char *name, uint32_t mode);
+  int (*mkdir)(vfs_node_t *dir, const char *name, uint32_t mode);
   int (*unlink)(vfs_node_t *dir, const char *name);
 
   int (*truncate)(vfs_node_t *node, uint64_t new_size);
@@ -119,6 +151,14 @@ typedef struct vfs_ops {
   // Si NULL, vfs_utimes() devuelve 0 (no-op silencioso como Linux en FS
   // sin timestamps).
   int (*utimes)(vfs_node_t *node, int64_t mtime_sec);
+
+  // [3.4.c] Cambia el modo del nodo. Solo el dueño o root pueden
+  // llamar; el VFS ya lo comprueba. FS sin soporte dejan NULL.
+  int (*chmod)(vfs_node_t *node, uint32_t mode);
+
+  // [3.4.c] Cambia owner/group. uid/gid = (uint32_t)-1 → no cambiar
+  // ese campo. Solo root puede llamar. FS sin soporte dejan NULL.
+  int (*chown)(vfs_node_t *node, uint32_t uid, uint32_t gid);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -136,6 +176,12 @@ struct vfs_node {
 
   // [4.2] mtime en epoch UNIX (0 si el FS no lo soporta).
   int64_t mtime_sec;
+
+  // [3.4.a] Modo POSIX completo (S_IF* | permisos | setuid/setgid/sticky).
+  // Lo rellena cada FS. Sin fallback: si un FS no lo hace, sale 0.
+  uint32_t mode;
+  uint32_t uid;
+  uint32_t gid;
 };
 
 // ---------------------------------------------------------------------------
@@ -250,8 +296,8 @@ int vfs_symlink(const char *target, const char *linkpath);
 //   -EROFS       el FS es read-only
 //   -ENAMETOOLONG nombre no cabe (p.ej. >8.3 en FAT32 sin LFN)
 //   -EINVAL      path inválido (raíz, "..", etc.)
-int vfs_create(const char *path, int flags);
-int vfs_mkdir(const char *path);
+int vfs_create(const char *path, uint32_t mode);
+int vfs_mkdir(const char *path, uint32_t mode);
 int vfs_unlink(const char *path);
 
 // [PR 4.3] Trunca el archivo en `path` a `new_size` bytes.
@@ -337,5 +383,26 @@ int vfs_statfs(const char *path, struct vfs_statfs *out);
 
 // [4.2] Aplica mtime a un nodo. Path puede ser symlink (no lo sigue).
 int vfs_utimes(const char *path, int64_t mtime_sec);
+
+// [3.4.c] Cambia permisos. Comprueba euid==0 o euid==node->uid.
+// Los bits S_ISUID/S_ISGID solo los puede poner root (simplificado).
+// Devuelve -EPERM / -EROFS / -ENOENT.
+int vfs_chmod(const char *path, uint32_t mode);
+
+// [3.4.c] Cambia owner/group. Solo root. uid o gid = (uint32_t)-1
+// deja el campo intacto. Devuelve -EPERM / -EROFS / -ENOENT.
+int vfs_chown(const char *path, uint32_t uid, uint32_t gid);
+
+// [3.4.c] Variantes sobre un fd abierto (fchmod/fchown).
+int vfs_fchmod(file_descriptor_t *fd, uint32_t mode);
+int vfs_fchown(file_descriptor_t *fd, uint32_t uid, uint32_t gid);
+
+// [3.4.d] Comprueba si el proceso actual puede acceder al nodo con los
+// bits pedidos. mask = combinación de VFS_R_OK|W_OK|X_OK (o VFS_F_OK).
+//
+// Devuelve 0 si permitido, -EACCES si no, -EINVAL si node==NULL.
+// Root (euid==0) bypasea; el bit X de ficheros regulares se comprueba
+// aparte en execve (Linux hace lo mismo: root no ejecuta sin ningún x).
+int vfs_check_access(vfs_node_t *node, int mask);
 
 #endif

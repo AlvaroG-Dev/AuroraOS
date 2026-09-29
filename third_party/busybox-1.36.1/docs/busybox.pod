@@ -85,18 +85,18 @@ Currently available applets include:
 	bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
 	cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
 	dos2unix, dpkg, dpkg-deb, du, echo, ed, egrep, env, expand, expr,
-	factor, false, fgrep, find, fold, fsync, getopt, grep, groups,
+	factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
 	gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
 	killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-	mkdir, mkfifo, mknod, mktemp, mv, nice, nl, nohup, nproc, od, paste,
-	patch, pipe_progress, printenv, printf, pwd, readlink, realpath,
-	reset, resize, rev, rm, rmdir, rpm, rpm2cpio, run-parts, sed, seq,
-	sh, sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep,
-	sort, split, start-stop-daemon, stat, strings, sum, sync, tac, tail,
-	tar, tee, test, time, timeout, touch, tr, tree, true, truncate, ts,
-	tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
-	usleep, uudecode, uuencode, vi, wc, which, whoami, xargs, xxd, xz,
-	xzcat, yes, zcat
+	mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
+	nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
+	printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
+	rpm, rpm2cpio, run-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
+	sha512sum, shred, shuf, sleep, sort, split, start-stop-daemon, stat,
+	strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
+	touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
+	unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
+	uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat
 
 =head1 COMMAND DESCRIPTIONS
 
@@ -672,6 +672,12 @@ Wrap input lines in FILEs (or stdin), writing to stdout
 	-s	Break at spaces
 	-w	Use WIDTH columns instead of 80
 
+=item B<free>
+
+free 
+
+Display free and used memory
+
 =item B<fsync>
 
 fsync [-d] FILE...
@@ -977,6 +983,23 @@ Print or check MD5 checksums
 	-s	Don't output anything, status code shows success
 	-w	Warn about improperly formatted checksum lines
 
+=item B<mdev>
+
+mdev [-vS] [-s]
+
+	-v	Verbose
+	-S	Log to syslog too
+	-s	Scan /sys and populate /dev
+
+Bare mdev is a kernel hotplug helper. To activate it:
+	echo /sbin/mdev >/proc/sys/kernel/hotplug
+
+If /dev/mdev.seq file exists, mdev will wait for its value
+to match $SEQNUM variable. This prevents plug/unplug races.
+To activate this feature, create empty /dev/mdev.seq at boot.
+
+If /dev/mdev.log file exists, debug log will be appended to it.
+
 =item B<mkdir>
 
 mkdir [-m MODE] [-p] DIRECTORY...
@@ -1021,6 +1044,35 @@ Without TEMPLATE, -t tmp.XXXXXX is assumed.
 	-u	Do not create anything; print a name
 
 Base directory is: -p DIR, else $TMPDIR, else /tmp
+
+=item B<mount>
+
+mount [OPTIONS] [-o OPT] DEVICE NODE
+
+Mount a filesystem. Filesystem autodetection requires /proc.
+
+	-a		Mount all filesystems in fstab
+	-r		Read-only mount
+	-t FSTYPE[,...]	Filesystem type(s)
+	-O OPT		Mount only filesystems with option OPT (-a only)
+-o OPT:
+	[a]sync		Writes are [a]synchronous
+	[no]atime	Disable/enable updates to inode access times
+	[no]diratime	Disable/enable atime updates to directories
+	[no]relatime	Disable/enable atime updates relative to modification time
+	[no]dev		(Dis)allow use of special device files
+	[no]exec	(Dis)allow use of executable files
+	[no]suid	(Dis)allow set-user-id-root programs
+	[r]shared	Convert [recursively] to a shared subtree
+	[r]slave	Convert [recursively] to a slave subtree
+	[r]private	Convert [recursively] to a private subtree
+	[un]bindable	Make mount point [un]able to be bind mounted
+	[r]bind		Bind a file or directory [recursively] to another location
+	move		Relocate an existing mount point
+	remount		Remount a mounted filesystem, changing flags
+	ro		Same as -r
+
+There are filesystem-specific -o flags.
 
 =item B<mv>
 
@@ -1096,6 +1148,13 @@ patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
 	-E	Remove output files if they become empty
 	--dry-run	Don't actually change files
 
+=item B<pivot_root>
+
+pivot_root NEW_ROOT PUT_OLD
+
+Move the current root file system to PUT_OLD and make NEW_ROOT
+the new root file system
+
 =item B<printenv>
 
 printenv [VARIABLE]...
@@ -1108,6 +1167,15 @@ If no VARIABLE specified, print all.
 printf FORMAT [ARG]...
 
 Format and print ARG(s) according to FORMAT (a-la C printf)
+
+=item B<ps>
+
+ps 
+
+Show list of processes
+
+	w	Wide output
+	l	Long output
 
 =item B<pwd>
 
@@ -1537,6 +1605,18 @@ Run PROG. Send SIG to it if it is not gone in SECS seconds.
 Default SIG: TERM.If it still exists in KILL_SECS seconds, send KILL.
 
 
+=item B<top>
+
+top [-b] [-n COUNT] [-d SECONDS]
+
+Show a view of process activity in real time.
+Read the status of all processes from /proc each SECONDS
+and show a screenful of them.
+
+	-b	Batch mode
+	-n N	Exit after N iterations
+	-d SEC	Delay between updates
+
 =item B<touch>
 
 touch [-cham] [-d DATE] [-t DATE] [-r FILE] FILE...
@@ -1680,6 +1760,12 @@ Extract FILEs from ZIP archive
 	-K	Do not clear SUID bit
 	-x FILE	Exclude FILEs
 	-d DIR	Extract into DIR
+
+=item B<uptime>
+
+uptime 
+
+Display the time since the last boot
 
 =item B<usleep>
 

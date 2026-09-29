@@ -655,7 +655,7 @@ static vfs_node_t *resolve_parent(const char *path, char *base_out,
 // ===========================================================================
 // Operaciones de namespace
 // ===========================================================================
-int vfs_create(const char *path, int flags) {
+int vfs_create(const char *path, uint32_t mode) {
   if (!path)
     return -EINVAL;
 
@@ -664,17 +664,24 @@ int vfs_create(const char *path, int flags) {
   vfs_node_t *parent = resolve_parent(path, base, sizeof(base), &rc);
   if (!parent)
     return rc;
+
+  // [3.4.d] Requerir W+X en el directorio padre.
+  int acc = vfs_check_access(parent, VFS_W_OK | VFS_X_OK);
+  if (acc != 0) {
+    vfs_node_free(parent);
+    return acc;
+  }
 
   if (!parent->ops || !parent->ops->create) {
     vfs_node_free(parent);
     return -EROFS;
   }
-  rc = parent->ops->create(parent, base, flags);
+  rc = parent->ops->create(parent, base, mode & 07777);
   vfs_node_free(parent);
   return rc;
 }
 
-int vfs_mkdir(const char *path) {
+int vfs_mkdir(const char *path, uint32_t mode) {
   if (!path)
     return -EINVAL;
 
@@ -684,11 +691,18 @@ int vfs_mkdir(const char *path) {
   if (!parent)
     return rc;
 
+  // [3.4.d] Requerir W+X en el directorio padre.
+  int acc = vfs_check_access(parent, VFS_W_OK | VFS_X_OK);
+  if (acc != 0) {
+    vfs_node_free(parent);
+    return acc;
+  }
+
   if (!parent->ops || !parent->ops->mkdir) {
     vfs_node_free(parent);
     return -EROFS;
   }
-  rc = parent->ops->mkdir(parent, base);
+  rc = parent->ops->mkdir(parent, base, mode & 07777);
   vfs_node_free(parent);
   return rc;
 }
@@ -702,6 +716,13 @@ int vfs_unlink(const char *path) {
   vfs_node_t *parent = resolve_parent(path, base, sizeof(base), &rc);
   if (!parent)
     return rc;
+
+  // [3.4.d] Requerir W+X en el directorio padre.
+  int acc = vfs_check_access(parent, VFS_W_OK | VFS_X_OK);
+  if (acc != 0) {
+    vfs_node_free(parent);
+    return acc;
+  }
 
   if (!parent->ops || !parent->ops->unlink) {
     vfs_node_free(parent);
@@ -1005,6 +1026,186 @@ int vfs_symlink(const char *target, const char *linkpath) {
   return rc;
 }
 
+// ---------------------------------------------------------------------------
+// [3.4.c] chmod / chown.
+//
+// Comprobación de permisos contra el proceso actual:
+//   - root (euid==0): puede todo.
+//   - owner (euid == node->uid): puede cambiar bits 0777.
+//   - nadie más.
+//
+// Los bits S_ISUID/S_ISGID solo los puede poner root (versión
+// simplificada de Linux con CAP_FSETID). Un no-root que los tenga en
+// un fichero puede quitárselos.
+// ---------------------------------------------------------------------------
+int vfs_chmod(const char *path, uint32_t mode) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EPERM;
+
+  vfs_node_t *node = vfs_lookup_nofollow(path);
+  if (!node)
+    return -ENOENT;
+
+  int is_root = (proc->euid == 0);
+  int is_owner = (proc->euid == node->uid);
+
+  if (!is_root && !is_owner) {
+    vfs_node_free(node);
+    return -EPERM;
+  }
+
+  uint32_t filtered = mode & 07777;
+  if (!is_root && (filtered & (S_ISUID | S_ISGID))) {
+    // Un no-root solo puede mantener esos bits si ya los tenía.
+    uint32_t already = node->mode & (S_ISUID | S_ISGID);
+    if ((filtered & (S_ISUID | S_ISGID)) != already) {
+      vfs_node_free(node);
+      return -EPERM;
+    }
+  }
+
+  if (!node->ops || !node->ops->chmod) {
+    vfs_node_free(node);
+    return -EROFS;
+  }
+  int rc = node->ops->chmod(node, filtered);
+  if (rc == 0)
+    node->mode = (node->mode & S_IFMT) | filtered;
+  vfs_node_free(node);
+  return rc;
+}
+
+int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EPERM;
+
+  // Solo root puede cambiar el owner en Aurora (sin CAP_CHOWN por ahora).
+  if (proc->euid != 0)
+    return -EPERM;
+
+  vfs_node_t *node = vfs_lookup_nofollow(path);
+  if (!node)
+    return -ENOENT;
+
+  if (!node->ops || !node->ops->chown) {
+    vfs_node_free(node);
+    return -EROFS;
+  }
+  int rc = node->ops->chown(node, uid, gid);
+  if (rc == 0) {
+    if (uid != (uint32_t)-1)
+      node->uid = uid;
+    if (gid != (uint32_t)-1)
+      node->gid = gid;
+  }
+  vfs_node_free(node);
+  return rc;
+}
+
+int vfs_fchmod(file_descriptor_t *f, uint32_t mode) {
+  if (!f || !f->node)
+    return -EBADF;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EPERM;
+
+  int is_root = (proc->euid == 0);
+  int is_owner = (proc->euid == f->node->uid);
+  if (!is_root && !is_owner)
+    return -EPERM;
+
+  uint32_t filtered = mode & 07777;
+  if (!is_root && (filtered & (S_ISUID | S_ISGID))) {
+    uint32_t already = f->node->mode & (S_ISUID | S_ISGID);
+    if ((filtered & (S_ISUID | S_ISGID)) != already)
+      return -EPERM;
+  }
+
+  if (!f->node->ops || !f->node->ops->chmod)
+    return -EROFS;
+  int rc = f->node->ops->chmod(f->node, filtered);
+  if (rc == 0)
+    f->node->mode = (f->node->mode & S_IFMT) | filtered;
+  return rc;
+}
+
+int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
+  if (!f || !f->node)
+    return -EBADF;
+  process_t *proc = process_current();
+  if (!proc || proc->euid != 0)
+    return -EPERM;
+
+  if (!f->node->ops || !f->node->ops->chown)
+    return -EROFS;
+  int rc = f->node->ops->chown(f->node, uid, gid);
+  if (rc == 0) {
+    if (uid != (uint32_t)-1)
+      f->node->uid = uid;
+    if (gid != (uint32_t)-1)
+      f->node->gid = gid;
+  }
+  return rc;
+}
+
+// ---------------------------------------------------------------------------
+// [3.4.d] Comprobación de permisos POSIX.
+//
+// Reglas (sin capabilities, como Linux sin CAP_DAC_*):
+//   - root (euid == 0): bypass total. El bit X de execve se comprueba
+//     aparte en process_execve_prepare.
+//   - owner (euid == node->uid): bits (mode >> 6) & 7.
+//   - group (egid == node->gid, o node->gid en groups[]): (mode >> 3) & 7.
+//   - other: mode & 7.
+//
+// No sigue symlinks: se llama con el nodo ya resuelto por vfs_lookup.
+// ---------------------------------------------------------------------------
+int vfs_check_access(vfs_node_t *node, int mask) {
+  if (!node)
+    return -EINVAL;
+  if (mask == VFS_F_OK)
+    return 0;
+
+  process_t *proc = process_current();
+  // Contexto kernel (tests, kmain_task): permitir.
+  if (!proc)
+    return 0;
+
+  // Root bypasea todo.
+  if (proc->euid == 0)
+    return 0;
+
+  uint32_t bits;
+  if (proc->euid == node->uid) {
+    bits = (node->mode >> 6) & 7;
+  } else if (proc->egid == node->gid) {
+    bits = (node->mode >> 3) & 7;
+  } else {
+    int in_group = 0;
+    for (int i = 0; i < proc->ngroups; i++) {
+      if (proc->groups[i] == node->gid) {
+        in_group = 1;
+        break;
+      }
+    }
+    bits = in_group ? ((node->mode >> 3) & 7) : (node->mode & 7);
+  }
+
+  uint32_t need = 0;
+  if (mask & VFS_R_OK)
+    need |= 4;
+  if (mask & VFS_W_OK)
+    need |= 2;
+  if (mask & VFS_X_OK)
+    need |= 1;
+
+  if ((bits & need) == need)
+    return 0;
+  return -EACCES;
+}
+
 // ===========================================================================
 // Free de nodo
 // ===========================================================================
@@ -1284,6 +1485,9 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     n->name[1] = '\0';
     n->flags = VFS_DIRECTORY;
     n->ops = &devfs_dir_ops;
+    n->mode = S_IFDIR | 0755;
+    n->uid = 0;
+    n->gid = 0;
     return n;
   }
 
@@ -1316,6 +1520,10 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     n->name[nl] = '\0';
     n->flags = VFS_CHARDEVICE;
     n->ops = NULL;
+    // [3.4.a] /dev/pts/N: root:tty 0620 como Linux.
+    n->mode = S_IFCHR | 0620;
+    n->uid = 0;
+    n->gid = 5;
     return n;
   }
 
@@ -1337,6 +1545,14 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       n->name[nlen] = '\0';
       n->flags = devfs_entries[i].type;
       n->ops = devfs_entries[i].ops;
+      // [3.4.a] Chardev 0666, dir 0755.
+      if (devfs_entries[i].type & VFS_DIRECTORY) {
+        n->mode = S_IFDIR | 0755;
+      } else {
+        n->mode = S_IFCHR | 0666;
+      }
+      n->uid = 0;
+      n->gid = 0;
       return n;
     }
   }
@@ -1380,16 +1596,25 @@ void vfs_init(void) {
   strcpy(stdin_node.name, "stdin");
   stdin_node.flags = VFS_CHARDEVICE;
   stdin_node.ops = &console_ops;
+  stdin_node.mode = S_IFCHR | 0666;
+  stdin_node.uid = 0;
+  stdin_node.gid = 0;
 
   memset(&stdout_node, 0, sizeof(stdout_node));
   strcpy(stdout_node.name, "stdout");
   stdout_node.flags = VFS_CHARDEVICE;
   stdout_node.ops = &console_ops;
+  stdout_node.mode = S_IFCHR | 0666;
+  stdout_node.uid = 0;
+  stdout_node.gid = 0;
 
   memset(&stderr_node, 0, sizeof(stderr_node));
   strcpy(stderr_node.name, "stderr");
   stderr_node.flags = VFS_CHARDEVICE;
   stderr_node.ops = &console_ops;
+  stderr_node.mode = S_IFCHR | 0666;
+  stderr_node.uid = 0;
+  stderr_node.gid = 0;
 
   spin_init(&g_mounts_lock);
   g_mounts = NULL;
@@ -1450,7 +1675,7 @@ file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
 int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   process_t *proc = (process_t *)proc_ptr;
   if (!proc || !path)
-    return -1;
+    return -EINVAL;
 
   int free_fd = -1;
   for (int i = 0; i < MAX_PROCESS_FDS; i++) {
@@ -1460,7 +1685,7 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
     }
   }
   if (free_fd == -1)
-    return -1;
+    return -EMFILE;
 
   // /dev/ptmx y /dev/pts/N crean recursos frescos en cada open. La
   // firma de ops->open no permite pasar contexto por-open, así que
@@ -1472,28 +1697,37 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   if (strncmp(path, "/dev/pts/", 9) == 0) {
     const char *p = path + 9;
     if (*p < '0' || *p > '9')
-      return -1;
+      return -ENOENT;
     int idx = 0;
     while (*p >= '0' && *p <= '9') {
       idx = idx * 10 + (*p - '0');
       if (idx > 1000)
-        return -1;
+        return -ENOENT;
       p++;
     }
     if (*p != '\0')
-      return -1;
+      return -ENOENT;
     int rc = pty_open_slave_fd(proc, free_fd, idx);
     return rc == 0 ? free_fd : rc;
   }
 
   vfs_node_t *node = vfs_lookup(path);
   if (!node)
-    return -1;
+    return -ENOENT;
+
+  // [3.4.d] Comprobar permiso según los flags de apertura.
+  int acc_mask = (flags & (O_WRONLY | O_RDWR)) ? VFS_W_OK : VFS_R_OK;
+  int acc_rc = vfs_check_access(node, acc_mask);
+  if (acc_rc != 0) {
+    vfs_node_free(node);
+    return acc_rc;
+  }
 
   if (node->ops && node->ops->open) {
-    if (node->ops->open(node, flags) != 0) {
+    int orc = node->ops->open(node, flags);
+    if (orc != 0) {
       vfs_node_free(node);
-      return -1;
+      return orc;
     }
   }
 
@@ -1501,7 +1735,7 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
       (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t));
   if (!fd_entry) {
     vfs_node_free(node);
-    return -1;
+    return -ENOMEM;
   }
 
   fd_entry->node = node;
@@ -1682,6 +1916,9 @@ int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st) {
   st->size = f->node->size;
   st->inode = f->node->inode;
   st->mtime_sec = f->node->mtime_sec;
+  st->mode = f->node->mode;
+  st->uid = f->node->uid;
+  st->gid = f->node->gid;
   clac();
   return 0;
 }

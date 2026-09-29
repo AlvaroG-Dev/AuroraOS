@@ -105,21 +105,52 @@ static size_t kfmt_u64(char *out, size_t cap, uint64_t v) {
   return o;
 }
 
-static size_t kfmt_str(char *out, size_t cap, const char *s) {
-  size_t o = 0;
-  while (*s && o + 1 < cap)
-    out[o++] = *s++;
-  out[o] = '\0';
-  return o;
+static size_t kfmt_i64(char *out, size_t cap, int64_t v) {
+  if (v < 0) {
+    if (cap < 2)
+      return 0;
+    out[0] = '-';
+    size_t n = kfmt_u64(out + 1, cap - 1, (uint64_t)(-v));
+    return n + 1;
+  }
+  return kfmt_u64(out, cap, (uint64_t)v);
 }
 
-// Escribe `s` al final del buffer (respeta cap). Devuelve la nueva
-// longitud o `cap` si se truncó.
 static size_t kappend(char *buf, size_t len, size_t cap, const char *s) {
   while (*s && len + 1 < cap)
     buf[len++] = *s++;
   buf[len] = '\0';
   return len;
+}
+
+// ===========================================================================
+// Estado del proceso en formato Linux.
+//
+//   R running        (RUNNING o READY)
+//   S sleeping       (BLOCKED)
+//   T stopped        (job control)
+//   Z zombie
+// ===========================================================================
+static char procfs_state_char(const process_t *p, const char **desc_out) {
+  if (p->is_zombie) {
+    if (desc_out)
+      *desc_out = "zombie";
+    return 'Z';
+  }
+  if (p->stopped) {
+    if (desc_out)
+      *desc_out = "stopped";
+    return 'T';
+  }
+  task_state_t ts = p->task ? p->task->state : TASK_RUNNING;
+  if (ts == TASK_BLOCKED) {
+    if (desc_out)
+      *desc_out = "sleeping";
+    return 'S';
+  }
+  if (desc_out)
+    *desc_out = "running";
+  return 'R';
 }
 
 // ===========================================================================
@@ -162,7 +193,6 @@ static char *gen_version(size_t *out_len) {
 }
 
 static char *gen_meminfo(size_t *out_len) {
-  // 16 KiB es de sobra para ~15 líneas.
   const size_t CAP = 16 * 1024;
   char *buf = (char *)kmalloc(CAP);
   if (!buf)
@@ -247,10 +277,6 @@ static int count_loadavg_cb(process_t *p, void *arg) {
   if (p->is_zombie || p->stopped)
     return 0;
 
-  // Solo cuentan procesos en la runqueue (running o ready).
-  // Un proceso bloqueado en read()/IPC/nanosleep NO está corriendo.
-  // Lectura sin sched_lock: la race es benigna (si justo cambia de
-  // estado, el valor difiere en ±1, aceptable para loadavg).
   if (p->task &&
       (p->task->state == TASK_RUNNING || p->task->state == TASK_READY))
     c->running++;
@@ -268,10 +294,8 @@ static char *gen_loadavg(size_t *out_len) {
   process_for_each(count_loadavg_cb, &c);
 
   size_t o = 0;
-  // loads
   o = kappend(buf, o, CAP, "0.00 0.00 0.00 ");
 
-  // running/total
   if (c.running == 0)
     buf[o++] = '0';
   else
@@ -282,8 +306,7 @@ static char *gen_loadavg(size_t *out_len) {
   else
     o += kfmt_u64(buf + o, CAP - o, c.total);
 
-  // last_pid: usamos el pid del último proceso creado. No lo llevamos,
-  // así que ponemos 1.
+  // last_pid: no lo llevamos, ponemos 1.
   o = kappend(buf, o, CAP, " 1\n");
 
   buf[o] = '\0';
@@ -305,21 +328,35 @@ struct pid_ctx {
 };
 
 // ---------------------------------------------------------------------------
-// /proc/<pid>/stat: formato Linux de 52 campos. Solo los primeros son
-// reales; el resto van a 0. BusyBox `ps` usa [0]=pid, [1]=comm,
-// [2]=state, [3]=ppid, [22]=vsize, [23]=rss.
+// /proc/<pid>/stat: formato Linux de EXACTAMENTE 52 campos.
+//
+// Campos reales: pid, comm, state, ppid, pgrp, session, utime, stime.
+// El resto van a 0. BusyBox `ps` los lee como columnas; contar mal
+// desplaza todos los campos siguientes.
+//
+// Posiciones:
+//   1 pid, 2 comm, 3 state, 4 ppid, 5 pgrp, 6 session,
+//   7 tty_nr, 8 tpgid, 9 flags, 10 minflt, 11 cminflt, 12 majflt, 13 cmajflt,
+//   14 utime, 15 stime,
+//   16 cutime, 17 cstime, 18 priority, 19 nice, 20 num_threads,
+//   21 itrealvalue, 22 starttime,
+//   23 vsize, 24 rss,
+//   25..52 (28 campos) relleno.
 // ---------------------------------------------------------------------------
 static int gen_pid_stat_cb(process_t *p, void *arg) {
   struct pid_ctx *c = (struct pid_ctx *)arg;
-  if (p->pid != c->target_pid || p->is_zombie)
+  if (p->pid != c->target_pid)
     return 0;
 
-  size_t o = 0;
   char *buf = c->buf;
   size_t cap = c->cap;
+  size_t o = 0;
 
+  // 1: pid
   o += kfmt_u64(buf + o, cap - o, p->pid);
-  buf[o++] = ' ';
+  o = kappend(buf, o, cap, " ");
+
+  // 2: comm (entre paréntesis). Hasta 15 chars + paréntesis.
   buf[o++] = '(';
   size_t nl = strlen(p->name);
   if (nl > 15)
@@ -327,40 +364,39 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
   for (size_t i = 0; i < nl && o + 2 < cap; i++)
     buf[o++] = p->name[i];
   buf[o++] = ')';
-  buf[o++] = ' ';
+  o = kappend(buf, o, cap, " ");
 
-  char state = 'R';
-  if (p->is_zombie)
-    state = 'Z';
-  else if (p->stopped)
-    state = 'T';
-  buf[o++] = state;
-  buf[o++] = ' ';
+  // 3: state
+  char st = procfs_state_char(p, NULL);
+  buf[o++] = st;
+  o = kappend(buf, o, cap, " ");
 
+  // 4: ppid
   o += kfmt_u64(buf + o, cap - o, p->ppid);
   o = kappend(buf, o, cap, " ");
+  // 5: pgrp
   o += kfmt_u64(buf + o, cap - o, p->pgid);
   o = kappend(buf, o, cap, " ");
+  // 6: session
   o += kfmt_u64(buf + o, cap - o, p->sid);
-  o = kappend(buf, o, cap, " ");
-
-  // 22 campos más hasta vsize, todos 0.
-  for (int i = 0; i < 19; i++)
-    o = kappend(buf, o, cap, "0 ");
-  // utime, stime en ticks (campos 14, 15).
-  // (Reconstruimos: los anteriores ya están, ahora los 19 ceros cubren
-  //  tty_nr..starttime; añadimos utime/stime reales.)
+  // 7..13: tty_nr tpgid flags minflt cminflt majflt cmajflt (7 campos)
+  o = kappend(buf, o, cap, " 0 0 0 0 0 0 0 ");
+  // 14: utime (ticks)
   o += kfmt_u64(buf + o, cap - o, p->cpu_ticks_user);
   o = kappend(buf, o, cap, " ");
+  // 15: stime
   o = kappend(buf, o, cap, "0 ");
-
-  // vsize (campo 23) — en bytes. No medimos RSS, ponemos 0.
+  // 16..22: cutime cstime priority nice num_threads itrealvalue starttime
+  // (7 campos). priority=20, nice=0, num_threads=1 como un proceso normal.
+  o = kappend(buf, o, cap, "0 0 20 0 1 0 0 ");
+  // 23: vsize (bytes). No lo medimos.
   o = kappend(buf, o, cap, "0 ");
-  // rss (campo 24) — en pages.
+  // 24: rss (pages). No lo medimos.
   o = kappend(buf, o, cap, "0 ");
-  // Relleno hasta 52 campos.
-  for (int i = 0; i < 27; i++)
+  // 25..52: 28 campos más a 0.
+  for (int i = 0; i < 28; i++)
     o = kappend(buf, o, cap, "0 ");
+  // Quitar el último espacio colgante y cerrar con '\n'.
   if (o > 0 && buf[o - 1] == ' ')
     o--;
   buf[o++] = '\n';
@@ -371,25 +407,29 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
 }
 
 // ---------------------------------------------------------------------------
-// /proc/<pid>/status: key:value multi-línea. BusyBox ps no lo usa pero
-// `top` y algunos scripts sí.
+// /proc/<pid>/status: key:value multi-línea.
 // ---------------------------------------------------------------------------
 static int gen_pid_status_cb(process_t *p, void *arg) {
   struct pid_ctx *c = (struct pid_ctx *)arg;
-  if (p->pid != c->target_pid || p->is_zombie)
+  if (p->pid != c->target_pid)
     return 0;
 
   char *buf = c->buf;
   size_t cap = c->cap;
   size_t o = 0;
 
+  const char *desc = "running";
+  char st = procfs_state_char(p, &desc);
+
   o = kappend(buf, o, cap, "Name:\t");
   o = kappend(buf, o, cap, p->name);
   o = kappend(buf, o, cap, "\n");
 
   o = kappend(buf, o, cap, "State:\t");
-  buf[o++] = p->stopped ? 'T' : 'R';
-  o = kappend(buf, o, cap, " (running)\n");
+  buf[o++] = st;
+  o = kappend(buf, o, cap, " (");
+  o = kappend(buf, o, cap, desc);
+  o = kappend(buf, o, cap, ")\n");
 
   o = kappend(buf, o, cap, "Tgid:\t");
   o += kfmt_u64(buf + o, cap - o, p->pid);
@@ -403,8 +443,26 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
   o += kfmt_u64(buf + o, cap - o, p->ppid);
   o = kappend(buf, o, cap, "\n");
 
-  o = kappend(buf, o, cap, "Uid:\t0\t0\t0\t0\n");
-  o = kappend(buf, o, cap, "Gid:\t0\t0\t0\t0\n");
+  // [3.4.b] Uid real/effective/saved/fs.
+  o = kappend(buf, o, cap, "Uid:\t");
+  o += kfmt_u64(buf + o, cap - o, p->uid);
+  o = kappend(buf, o, cap, "\t");
+  o += kfmt_u64(buf + o, cap - o, p->euid);
+  o = kappend(buf, o, cap, "\t");
+  o += kfmt_u64(buf + o, cap - o, p->suid);
+  o = kappend(buf, o, cap, "\t");
+  o += kfmt_u64(buf + o, cap - o, p->fsuid);
+  o = kappend(buf, o, cap, "\n");
+
+  o = kappend(buf, o, cap, "Gid:\t");
+  o += kfmt_u64(buf + o, cap - o, p->gid);
+  o = kappend(buf, o, cap, "\t");
+  o += kfmt_u64(buf + o, cap - o, p->egid);
+  o = kappend(buf, o, cap, "\t");
+  o += kfmt_u64(buf + o, cap - o, p->sgid);
+  o = kappend(buf, o, cap, "\t");
+  o += kfmt_u64(buf + o, cap - o, p->fsgid);
+  o = kappend(buf, o, cap, "\n");
   o = kappend(buf, o, cap, "Threads:\t1\n");
   o = kappend(buf, o, cap, "VmSize:\t0 kB\n");
   o = kappend(buf, o, cap, "VmRSS:\t0 kB\n");
@@ -419,7 +477,7 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
 // ---------------------------------------------------------------------------
 static int gen_pid_cmdline_cb(process_t *p, void *arg) {
   struct pid_ctx *c = (struct pid_ctx *)arg;
-  if (p->pid != c->target_pid || p->is_zombie)
+  if (p->pid != c->target_pid)
     return 0;
 
   char *buf = c->buf;
@@ -427,7 +485,7 @@ static int gen_pid_cmdline_cb(process_t *p, void *arg) {
   size_t o = 0;
 
   if (p->argc == 0) {
-    // Proceso sin argv: Linux devuelve solo un \0.
+    // Proceso sin argv: Linux devuelve un único \0.
     buf[0] = '\0';
     c->len = 1;
     c->found = 1;
@@ -448,10 +506,48 @@ static int gen_pid_cmdline_cb(process_t *p, void *arg) {
   return 1;
 }
 
+// ---------------------------------------------------------------------------
+// /proc/<pid>/comm: nombre del proceso, terminado en '\n', hasta 15
+// chars + '\n'. BusyBox `ps` prefiere comm sobre cmdline cuando está
+// disponible.
+// ---------------------------------------------------------------------------
+static int gen_pid_comm_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid)
+    return 0;
+
+  size_t n = strlen(p->name);
+  if (n > 15)
+    n = 15;
+  if (n + 1 > c->cap)
+    n = c->cap - 1;
+  memcpy(c->buf, p->name, n);
+  c->buf[n] = '\n';
+  c->len = n + 1;
+  c->found = 1;
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// /proc/<pid>/statm: 7 enteros en una línea:
+//   size resident shared text lib data dt
+// Todo en páginas. Los dejamos a 0 hasta medir RSS.
+// ---------------------------------------------------------------------------
+static int gen_pid_statm_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid)
+    return 0;
+
+  size_t o = kappend(c->buf, 0, c->cap, "0 0 0 0 0 0 0\n");
+  c->len = o;
+  c->found = 1;
+  return 1;
+}
+
 // Envoltorio común: reserva buffer, itera bajo lock, devuelve el
 // contenido o NULL si el pid no existe.
 static char *gen_pid_file(uint32_t pid, size_t *out_len, process_iter_cb_t cb) {
-  const size_t CAP = 1024;
+  const size_t CAP = 2048;
   char *buf = (char *)kmalloc(CAP);
   if (!buf)
     return NULL;
@@ -483,9 +579,7 @@ static int parse_pid(const char *s, uint32_t *out) {
 }
 
 // ---------------------------------------------------------------------------
-// [3.3.c] /proc/mounts. Formato clásico: <device> <mountpoint> <fstype>
-// <options> <dump> <pass>. device="none" (Aurora no tiene concepto de
-// device en la mount table). options = "ro" para tarfs, "rw" el resto.
+// [3.3.c] /proc/mounts.
 // ---------------------------------------------------------------------------
 struct mounts_ctx {
   char *buf;
@@ -571,7 +665,9 @@ static int procfs_root_pid_cb(process_t *p, void *arg) {
   return 0;
 }
 
-static const char *procfs_pid_entries[] = {"stat", "status", "cmdline"};
+static const char *procfs_pid_entries[] = {
+    "stat", "status", "cmdline", "comm", "statm",
+};
 #define PROCFS_N_PID_ENTRIES                                                   \
   (sizeof(procfs_pid_entries) / sizeof(procfs_pid_entries[0]))
 
@@ -584,7 +680,6 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   // [3.3.d] ¿Es /proc raíz o /proc/<pid>?
   uint32_t pid;
   if (strncmp(dir->name, "/proc/", 6) == 0 && parse_pid(dir->name + 6, &pid)) {
-    // /proc/<pid> — entradas estáticas.
     if (index >= PROCFS_N_PID_ENTRIES) {
       out->name[0] = '\0';
       out->type = 0;
@@ -600,7 +695,6 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     return 0;
   }
 
-  // /proc raíz — estáticos + pids.
   if (index < PROCFS_N_ROOT_ENTRIES) {
     const char *n = procfs_root_entries[index];
     size_t l = strlen(n);
@@ -643,6 +737,9 @@ static vfs_node_t *make_root_node(void) {
   n->name[1] = '\0';
   n->flags = VFS_DIRECTORY;
   n->ops = &procfs_dir_ops;
+  n->mode = S_IFDIR | 0555;
+  n->uid = 0;
+  n->gid = 0;
   return n;
 }
 
@@ -672,6 +769,9 @@ static vfs_node_t *make_file_node(const char *name, char *buf, size_t len) {
   n->size = len;
   n->ops = &procfs_file_ops;
   n->priv = pd;
+  n->mode = S_IFREG | 0444;
+  n->uid = 0;
+  n->gid = 0;
   return n;
 }
 
@@ -683,13 +783,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
   if (!path || path[0] != '/')
     return NULL;
 
-  // Raíz.
   if (path[1] == '\0')
     return make_root_node();
 
   const char *name = path + 1;
 
-  // [3.3.d] ¿<pid> o <pid>/<file>?
   const char *slash = NULL;
   for (const char *p = name; *p; p++) {
     if (*p == '/') {
@@ -707,9 +805,6 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     memcpy(pidbuf, name, plen);
     pidbuf[plen] = '\0';
     uint32_t pid;
-    // [3.3.d] "self" se resuelve al pid del proceso llamante en cada
-    // lookup, como en Linux. Sin esto, /proc/self/stat no resuelve
-    // porque "self" no es numérico.
     if (strcmp(pidbuf, "self") == 0) {
       process_t *cur = process_current();
       if (!cur)
@@ -720,7 +815,6 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     }
 
     const char *file = slash + 1;
-    // Solo aceptamos un componente más.
     for (const char *p = file; *p; p++)
       if (*p == '/')
         return NULL;
@@ -739,11 +833,18 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
       buf = gen_pid_file(pid, &len, gen_pid_cmdline_cb);
       return buf ? make_file_node("cmdline", buf, len) : NULL;
     }
+    if (strcmp(file, "comm") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_comm_cb);
+      return buf ? make_file_node("comm", buf, len) : NULL;
+    }
+    if (strcmp(file, "statm") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_statm_cb);
+      return buf ? make_file_node("statm", buf, len) : NULL;
+    }
     return NULL;
   }
 
   // Un solo componente.
-  // Estáticos primero.
   if (strcmp(name, "uptime") == 0) {
     size_t len = 0;
     char *b = gen_uptime(&len);
@@ -769,6 +870,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     char *b = gen_mounts(&len);
     return make_file_node("mounts", b, len);
   }
+  if (strcmp(name, "loadavg") == 0) {
+    size_t len = 0;
+    char *b = gen_loadavg(&len);
+    return make_file_node("loadavg", b, len);
+  }
   if (strcmp(name, "self") == 0) {
     process_t *p = process_current();
     if (!p)
@@ -785,13 +891,14 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
       n->link_target[o++] = *pfx++;
     o += kfmt_u64(n->link_target + o, sizeof(n->link_target) - o, p->pid);
     n->link_target[o] = '\0';
+    n->mode = S_IFLNK | 0777;
+    n->uid = 0;
+    n->gid = 0;
     return n;
   }
 
-  // [3.3.d] ¿<pid>?
   uint32_t pid;
   if (parse_pid(name, &pid)) {
-    // Verificar que existe.
     process_t *p = process_find_by_pid(pid);
     if (!p)
       return NULL;
@@ -804,13 +911,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     memcpy(n->name, name, l);
     n->name[l] = '\0';
     n->flags = VFS_DIRECTORY;
-    n->ops = &procfs_dir_ops; // reusa el readdir que ya distingue
+    n->ops = &procfs_dir_ops;
+    n->mode = S_IFDIR | 0555;
+    n->uid = 0;
+    n->gid = 0;
     return n;
-  }
-  if (strcmp(name, "loadavg") == 0) {
-    size_t len = 0;
-    char *b = gen_loadavg(&len);
-    return make_file_node("loadavg", b, len);
   }
 
   return NULL;

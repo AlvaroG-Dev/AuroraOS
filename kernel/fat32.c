@@ -16,7 +16,7 @@
 #include "string.h"
 #include "uaccess.h" // EINVAL, EIO, ENOMEM, ENOENT, EISDIR, ENAMETOOLONG,
 
-                     // EEXIST, ENOTEMPTY, ENOSPC
+// EEXIST, ENOTEMPTY, ENOSPC
 #include <stddef.h>
 
 // ===========================================================================
@@ -109,15 +109,26 @@ typedef struct {
   uint32_t data_start_sector; // = reserved + num_fats * fat_size
   uint32_t total_clusters;
 
-  // [PR 3.1] Caché de la FAT#1 en memoria. NULL → path lento (bios por
-  // consulta). Con caché, cada fat_get es un load de memoria.
+  // [PR 3.1] Caché de la FAT#1 en memoria. NULL → path lento.
   uint32_t *fat_cache;
   uint32_t fat_entries;
 
   // [PR 4] Estado de escritura.
-  int fat_dirty;           // 1 si fat_cache difiere del disco
-  int use_second_fat;      // 1 si ext_flags bit 7 no está puesto
-  uint32_t fs_info_sector; // sector de FSInfo (no usado por ahora)
+  int fat_dirty;
+  int use_second_fat;
+  uint32_t fs_info_sector;
+
+  // [3.4.c] Mapa temporal de modos en RAM, indexado por la posición
+  // física del short entry (dirent_lba, dirent_off). FAT32 no tiene
+  // campo de modo, así que guardamos aquí lo que el proceso pidió en
+  // create/mkdir. Se pierde al desmontar (y no debería persistir —
+  // Linux vfat hace lo mismo sin máscaras).
+  struct {
+    uint64_t lba;
+    uint32_t off;
+    uint32_t mode;
+  } ram_modes[128];
+  int ram_modes_n;
 } fat32_fs_t;
 
 typedef struct {
@@ -176,9 +187,27 @@ struct rename_src_ctx {
 // ===========================================================================
 static vfs_fs_ops_t fat32_fs_ops;
 static vfs_ops_t fat32_node_ops;
+
+// [3.4.c] Forward declarations. fat32_rename (la nueva versión, con el
+// bloque de preservar modo) usa estos helpers que están definidos más
+// abajo, y fat32_delete_entry usa fat32_ram_mode_del.
 static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
                         const char *src_name, uint32_t dst_parent_cluster,
                         const char *dst_name);
+static void fat32_ram_mode_set(fat32_fs_t *fs, uint64_t lba, uint32_t off,
+                               uint32_t mode);
+static uint32_t fat32_ram_mode_get(fat32_fs_t *fs, uint64_t lba, uint32_t off);
+static void fat32_ram_mode_del(fat32_fs_t *fs, uint64_t lba, uint32_t off);
+static int fat32_rename_find_cb(const char *name, const struct fat32_dirent *e,
+                                uint64_t lba, uint32_t off,
+                                const dirent_pos_t *chain, int chain_len,
+                                void *arg);
+static int fat32_is_ancestor_of(fat32_fs_t *fs, uint32_t src_cluster,
+                                uint32_t candidate);
+static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
+                               uint32_t new_parent_cluster);
+static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
+                             vfs_node_t *dst_dir, const char *dst_name);
 
 // ===========================================================================
 // Helpers básicos
@@ -1677,7 +1706,8 @@ static int fat32_write_dirent_chain(fat32_fs_t *fs, uint32_t slot_cluster,
 // N entries LFN (orden inverso) + 1 short entry.
 // ===========================================================================
 static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
-                              const char *name, int is_dir) {
+                              const char *name, int is_dir, uint32_t mode) {
+
   uint8_t name11[11];
   uint8_t nt = 0;
   int lfn_needed = 0;
@@ -1874,9 +1904,19 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     kfree(dbuf);
   }
 
+  // [3.4.c] Registrar el modo en el mapa RAM asociado al short entry.
+  // El short entry está en el slot lfn_count*32 dentro del bloque
+  // reservado por fat32_find_free_dirents.
+  {
+    uint32_t short_off_in_cluster = slot_off + (uint32_t)lfn_count * 32;
+    uint64_t short_lba = cluster_to_sector(fs, slot_cluster) +
+                         short_off_in_cluster / fs->bytes_per_sector;
+    uint32_t short_off = short_off_in_cluster % fs->bytes_per_sector;
+    fat32_ram_mode_set(fs, short_lba, short_off, mode & 07777);
+  }
+
   return 0;
 }
-
 // ===========================================================================
 // [LFN] Localizar y borrar una entry (con su cadena LFN).
 // ===========================================================================
@@ -1952,6 +1992,9 @@ static int fat32_delete_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     int dummy;
   } ignored;
 
+  // [3.4.c] Olvidar el modo RAM asociado al short entry antes de borrarlo.
+  fat32_ram_mode_del(fs, ctx.short_lba, ctx.short_off);
+
   // Marcar las LFN entries (si las hay).
   for (int i = 0; i < ctx.lfn_count; i++) {
     rc = fat32_modify_dirent(fs, ctx.lfn[i].lba, ctx.lfn[i].off,
@@ -2018,27 +2061,29 @@ static int fat32_node_close(vfs_node_t *node) {
 }
 
 static int fat32_node_create(vfs_node_t *dir_node, const char *name,
-                             int flags) {
-  (void)flags;
+                             uint32_t mode) {
   if (!dir_node || !dir_node->priv || !name)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
   unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
-  int rc = fat32_create_entry(np->fs, np->start_cluster, name, 0);
+  // [3.4.c] FAT32 no persiste modo en disco, pero lo guardamos en RAM
+  // para que `ls -l` lo muestre durante esta sesión.
+  int rc = fat32_create_entry(np->fs, np->start_cluster, name, 0, mode);
   spin_unlock_irqrestore(&np->fs->lock, lock_flags);
   return rc;
 }
 
-static int fat32_node_mkdir(vfs_node_t *dir_node, const char *name) {
+static int fat32_node_mkdir(vfs_node_t *dir_node, const char *name,
+                            uint32_t mode) {
   if (!dir_node || !dir_node->priv || !name)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
   unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
-  int rc = fat32_create_entry(np->fs, np->start_cluster, name, 1);
+  int rc = fat32_create_entry(np->fs, np->start_cluster, name, 1, mode);
   spin_unlock_irqrestore(&np->fs->lock, lock_flags);
   return rc;
 }
@@ -2118,160 +2163,6 @@ static int fat32_node_readdir(vfs_node_t *dir_node, uint64_t index,
   spin_unlock_irqrestore(&np->fs->lock, lock_flags);
   if (rc < 0)
     return rc;
-  return 0;
-}
-
-static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
-                             vfs_node_t *dst_dir, const char *dst_name) {
-  if (!src_dir || !src_dir->priv || !dst_dir || !dst_dir->priv)
-    return -EINVAL;
-  fat32_node_priv_t *snp = (fat32_node_priv_t *)src_dir->priv;
-  fat32_node_priv_t *dnp = (fat32_node_priv_t *)dst_dir->priv;
-  if (!snp->is_dir || !dnp->is_dir)
-    return -ENOTDIR;
-  if (snp->fs != dnp->fs)
-    return -EXDEV;
-  unsigned long lock_flags = spin_lock_irqsave(&snp->fs->lock);
-  int rc = fat32_rename(snp->fs, snp->start_cluster, src_name,
-                        dnp->start_cluster, dst_name);
-  spin_unlock_irqrestore(&snp->fs->lock, lock_flags);
-  return rc;
-}
-
-static vfs_ops_t fat32_node_ops = {.read = fat32_node_read,
-                                   .write = fat32_node_write,
-                                   .open = fat32_node_open,
-                                   .close = fat32_node_close,
-                                   .readable = NULL,
-                                   .create = fat32_node_create,
-                                   .mkdir = fat32_node_mkdir,
-                                   .unlink = fat32_node_unlink,
-                                   .rename = fat32_node_rename,
-                                   .truncate = fat32_node_truncate,
-                                   .utimes = fat32_node_utimes,
-                                   .readdir = fat32_node_readdir};
-
-// ===========================================================================
-// Construcción de nodos
-// ===========================================================================
-static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
-                                   uint32_t size, int is_dir,
-                                   const char *full_path, uint32_t mtime_sec,
-                                   uint64_t dirent_lba, uint32_t dirent_off) {
-  vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-  if (!n)
-    return NULL;
-  fat32_node_priv_t *np = (fat32_node_priv_t *)kzalloc(sizeof(*np));
-  if (!np) {
-    kfree(n);
-    return NULL;
-  }
-  np->fs = fs;
-  np->start_cluster = cluster;
-  np->size = size;
-  np->is_dir = is_dir;
-  np->dirent_lba = dirent_lba;
-  np->dirent_off = dirent_off;
-  np->mtime_sec = mtime_sec;
-
-  size_t plen = strlen(full_path);
-  if (plen >= sizeof(n->name))
-    plen = sizeof(n->name) - 1;
-  for (size_t i = 0; i < plen; i++)
-    n->name[i] = full_path[i];
-  n->name[plen] = '\0';
-
-  n->flags = is_dir ? VFS_DIRECTORY : VFS_FILE;
-  n->size = size;
-  n->ops = &fat32_node_ops;
-  n->fs = &fat32_fs_ops;
-  n->priv = np;
-  n->mtime_sec = (int64_t)mtime_sec;
-  return n;
-}
-
-static int fat32_rename_find_cb(const char *name, const struct fat32_dirent *e,
-                                uint64_t lba, uint32_t off,
-                                const dirent_pos_t *chain, int chain_len,
-                                void *arg) {
-  struct rename_src_ctx *ctx = (struct rename_src_ctx *)arg;
-  if (!fat32_name_eq(name, ctx->name))
-    return 0;
-  ctx->found = 1;
-  ctx->short_lba = lba;
-  ctx->short_off = off;
-  ctx->lfn_count =
-      (chain_len < FAT32_LFN_MAX_ENTRIES) ? chain_len : FAT32_LFN_MAX_ENTRIES;
-  for (int i = 0; i < ctx->lfn_count; i++)
-    ctx->lfn[i] = chain[i];
-  ctx->first_cluster =
-      ((uint32_t)e->first_cluster_hi << 16) | e->first_cluster_lo;
-  ctx->size = e->file_size;
-  ctx->attr = e->attr;
-  return 1;
-}
-
-// Actualiza la entrada ".." del directorio en dir_cluster para apuntar
-// a new_parent_cluster. Si new_parent es la raíz, escribe 0.
-static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
-                               uint32_t new_parent_cluster) {
-  // La entry ".." está en el offset 32 del primer cluster del directorio.
-  uint64_t lba = cluster_to_sector(fs, dir_cluster);
-
-  uint8_t buf[512];
-  if (fs->bytes_per_sector > sizeof(buf))
-    return -EINVAL;
-  if (bdev_read(fs->bdev, lba, 1, buf) != 0)
-    return -EIO;
-
-  // Verificar que buf[32..43] es "..".
-  if (buf[32] != '.' || buf[33] != '.')
-    return -EIO;
-  if ((buf[32 + 11] & FAT_ATTR_DIRECTORY) == 0)
-    return -EIO;
-
-  uint32_t parent =
-      (new_parent_cluster == fs->root_cluster) ? 0 : new_parent_cluster;
-  buf[32 + 20] = (uint8_t)((parent >> 16) & 0xFF);
-  buf[32 + 21] = (uint8_t)((parent >> 24) & 0xFF);
-  buf[32 + 26] = (uint8_t)(parent & 0xFF);
-  buf[32 + 27] = (uint8_t)((parent >> 8) & 0xFF);
-
-  if (bdev_write(fs->bdev, lba, 1, buf) != 0)
-    return -EIO;
-  (void)bdev_flush(fs->bdev);
-  return 0;
-}
-
-// ¿Es `candidate` (o alguno de sus ancestros) el propio src_cluster?
-// Se usa para rechazar mv /a /a/b y evitar ciclos.
-static int fat32_is_ancestor_of(fat32_fs_t *fs, uint32_t src_cluster,
-                                uint32_t candidate) {
-  uint32_t cur = candidate;
-  int guard = 0;
-  while (FAT_IS_VALID(cur) && guard < 0x100000) {
-    guard++;
-    if (cur == src_cluster)
-      return 1;
-    if (cur == fs->root_cluster)
-      return 0;
-    // Leer ".." del directorio actual.
-    uint64_t lba = cluster_to_sector(fs, cur);
-    uint8_t buf[512];
-    if (fs->bytes_per_sector > sizeof(buf))
-      return -1;
-    if (bdev_read(fs->bdev, lba, 1, buf) != 0)
-      return -1;
-    if (buf[32] != '.' || buf[33] != '.')
-      return -1;
-    uint16_t hi = (uint16_t)(buf[32 + 20] | (buf[32 + 21] << 8));
-    uint16_t lo = (uint16_t)(buf[32 + 26] | (buf[32 + 27] << 8));
-    uint32_t parent = ((uint32_t)hi << 16) | lo;
-    if (parent == 0)
-      cur = fs->root_cluster;
-    else
-      cur = parent;
-  }
   return 0;
 }
 
@@ -2366,6 +2257,19 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
   if (rc != 0)
     return rc;
 
+  // [3.4.c] Preservar el modo RAM del src en el dst.
+  // Calculamos la posición física del nuevo short entry y copiamos.
+  {
+    uint32_t old_mode = fat32_ram_mode_get(fs, src.short_lba, src.short_off);
+    if (old_mode != 0) {
+      uint32_t new_off_in_cluster = slot_off + (uint32_t)lfn_count * 32;
+      uint64_t new_lba = cluster_to_sector(fs, slot_cluster) +
+                         new_off_in_cluster / fs->bytes_per_sector;
+      uint32_t new_off = new_off_in_cluster % fs->bytes_per_sector;
+      fat32_ram_mode_set(fs, new_lba, new_off, old_mode);
+    }
+  }
+
   // 9. Borrar el dirent viejo (LFN + short).
   struct {
     int d;
@@ -2381,6 +2285,9 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
   if (rc != 0)
     return rc;
 
+  // [3.4.c] Olvidar el modo del src (ya está copiado al dst).
+  fat32_ram_mode_del(fs, src.short_lba, src.short_off);
+
   // 10. Si es dir y cambió de padre, actualizar ".." del directorio movido.
   if (is_dir && src_parent_cluster != dst_parent_cluster) {
     rc = fat32_update_dotdot(fs, src.first_cluster, dst_parent_cluster);
@@ -2390,6 +2297,244 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
 
   (void)bdev_flush(fs->bdev);
   return 0;
+}
+
+// [3.4.c] FAT32 no persiste modo/owner. Linux con vfat sin dmask/fmask
+// devuelve -EPERM al intentar chmod. Vamos con eso.
+static int fat32_node_chmod(vfs_node_t *node, uint32_t mode) {
+  (void)node;
+  (void)mode;
+  return -EPERM;
+}
+
+static int fat32_node_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
+  (void)node;
+  (void)uid;
+  (void)gid;
+  return -EPERM;
+}
+
+static vfs_ops_t fat32_node_ops = {
+    .read = fat32_node_read,
+    .write = fat32_node_write,
+    .open = fat32_node_open,
+    .close = fat32_node_close,
+    .readable = NULL,
+    .create = fat32_node_create,
+    .mkdir = fat32_node_mkdir,
+    .unlink = fat32_node_unlink,
+    .rename = fat32_node_rename,
+    .truncate = fat32_node_truncate,
+    .utimes = fat32_node_utimes,
+    .readdir = fat32_node_readdir,
+    // [3.4.c]
+    .chmod = fat32_node_chmod,
+    .chown = fat32_node_chown,
+};
+
+// ===========================================================================
+// Construcción de nodos
+// ===========================================================================
+
+// [3.4.c] Guarda el modo asociado a un short entry en el mapa en RAM.
+// Sin lock propio: el llamante debe tener fs->lock.
+static void fat32_ram_mode_set(fat32_fs_t *fs, uint64_t lba, uint32_t off,
+                               uint32_t mode) {
+  if (!fs)
+    return;
+  for (int i = 0; i < fs->ram_modes_n; i++) {
+    if (fs->ram_modes[i].lba == lba && fs->ram_modes[i].off == off) {
+      fs->ram_modes[i].mode = mode;
+      return;
+    }
+  }
+  int cap = (int)(sizeof(fs->ram_modes) / sizeof(fs->ram_modes[0]));
+  if (fs->ram_modes_n < cap) {
+    int i = fs->ram_modes_n++;
+    fs->ram_modes[i].lba = lba;
+    fs->ram_modes[i].off = off;
+    fs->ram_modes[i].mode = mode;
+  }
+  // Si la tabla está llena, cae silenciosamente al default (0644/0755).
+}
+
+// [3.4.c] Devuelve el modo asociado, o 0 si no hay override.
+static uint32_t fat32_ram_mode_get(fat32_fs_t *fs, uint64_t lba, uint32_t off) {
+  if (!fs)
+    return 0;
+  for (int i = 0; i < fs->ram_modes_n; i++) {
+    if (fs->ram_modes[i].lba == lba && fs->ram_modes[i].off == off)
+      return fs->ram_modes[i].mode;
+  }
+  return 0;
+}
+
+// [3.4.c] Borra la entrada del mapa (al hacer unlink/rename).
+static void fat32_ram_mode_del(fat32_fs_t *fs, uint64_t lba, uint32_t off) {
+  if (!fs)
+    return;
+  for (int i = 0; i < fs->ram_modes_n; i++) {
+    if (fs->ram_modes[i].lba == lba && fs->ram_modes[i].off == off) {
+      int last = --fs->ram_modes_n;
+      if (i != last)
+        fs->ram_modes[i] = fs->ram_modes[last];
+      return;
+    }
+  }
+}
+
+static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
+                                   uint32_t size, int is_dir,
+                                   const char *full_path, uint32_t mtime_sec,
+                                   uint64_t dirent_lba, uint32_t dirent_off) {
+  vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+  if (!n)
+    return NULL;
+  fat32_node_priv_t *np = (fat32_node_priv_t *)kzalloc(sizeof(*np));
+  if (!np) {
+    kfree(n);
+    return NULL;
+  }
+  np->fs = fs;
+  np->start_cluster = cluster;
+  np->size = size;
+  np->is_dir = is_dir;
+  np->dirent_lba = dirent_lba;
+  np->dirent_off = dirent_off;
+  np->mtime_sec = mtime_sec;
+
+  size_t plen = strlen(full_path);
+  if (plen >= sizeof(n->name))
+    plen = sizeof(n->name) - 1;
+  for (size_t i = 0; i < plen; i++)
+    n->name[i] = full_path[i];
+  n->name[plen] = '\0';
+
+  n->flags = is_dir ? VFS_DIRECTORY : VFS_FILE;
+  n->size = size;
+  n->ops = &fat32_node_ops;
+  n->fs = &fat32_fs_ops;
+  n->priv = np;
+  n->mtime_sec = (int64_t)mtime_sec;
+
+  // [3.4.c] Si este dirent tiene un modo guardado en RAM (creado en
+  // esta sesión), lo usamos. Si no, defaults tipo vfat: 0755 dir,
+  // 0644 file, root:root.
+  uint32_t ram_mode = 0;
+  if (dirent_lba != 0)
+    ram_mode = fat32_ram_mode_get(fs, dirent_lba, dirent_off);
+
+  if (ram_mode != 0)
+    n->mode = (is_dir ? S_IFDIR : S_IFREG) | (ram_mode & 07777);
+  else
+    n->mode = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+  n->uid = 0;
+  n->gid = 0;
+  return n;
+}
+
+static int fat32_rename_find_cb(const char *name, const struct fat32_dirent *e,
+                                uint64_t lba, uint32_t off,
+                                const dirent_pos_t *chain, int chain_len,
+                                void *arg) {
+  struct rename_src_ctx *ctx = (struct rename_src_ctx *)arg;
+  if (!fat32_name_eq(name, ctx->name))
+    return 0;
+  ctx->found = 1;
+  ctx->short_lba = lba;
+  ctx->short_off = off;
+  ctx->lfn_count =
+      (chain_len < FAT32_LFN_MAX_ENTRIES) ? chain_len : FAT32_LFN_MAX_ENTRIES;
+  for (int i = 0; i < ctx->lfn_count; i++)
+    ctx->lfn[i] = chain[i];
+  ctx->first_cluster =
+      ((uint32_t)e->first_cluster_hi << 16) | e->first_cluster_lo;
+  ctx->size = e->file_size;
+  ctx->attr = e->attr;
+  return 1;
+}
+
+// Actualiza la entrada ".." del directorio en dir_cluster para apuntar
+// a new_parent_cluster. Si new_parent es la raíz, escribe 0.
+static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
+                               uint32_t new_parent_cluster) {
+  // La entry ".." está en el offset 32 del primer cluster del directorio.
+  uint64_t lba = cluster_to_sector(fs, dir_cluster);
+
+  uint8_t buf[512];
+  if (fs->bytes_per_sector > sizeof(buf))
+    return -EINVAL;
+  if (bdev_read(fs->bdev, lba, 1, buf) != 0)
+    return -EIO;
+
+  // Verificar que buf[32..43] es "..".
+  if (buf[32] != '.' || buf[33] != '.')
+    return -EIO;
+  if ((buf[32 + 11] & FAT_ATTR_DIRECTORY) == 0)
+    return -EIO;
+
+  uint32_t parent =
+      (new_parent_cluster == fs->root_cluster) ? 0 : new_parent_cluster;
+  buf[32 + 20] = (uint8_t)((parent >> 16) & 0xFF);
+  buf[32 + 21] = (uint8_t)((parent >> 24) & 0xFF);
+  buf[32 + 26] = (uint8_t)(parent & 0xFF);
+  buf[32 + 27] = (uint8_t)((parent >> 8) & 0xFF);
+
+  if (bdev_write(fs->bdev, lba, 1, buf) != 0)
+    return -EIO;
+  (void)bdev_flush(fs->bdev);
+  return 0;
+}
+
+// ¿Es `candidate` (o alguno de sus ancestros) el propio src_cluster?
+// Se usa para rechazar mv /a /a/b y evitar ciclos.
+static int fat32_is_ancestor_of(fat32_fs_t *fs, uint32_t src_cluster,
+                                uint32_t candidate) {
+  uint32_t cur = candidate;
+  int guard = 0;
+  while (FAT_IS_VALID(cur) && guard < 0x100000) {
+    guard++;
+    if (cur == src_cluster)
+      return 1;
+    if (cur == fs->root_cluster)
+      return 0;
+    // Leer ".." del directorio actual.
+    uint64_t lba = cluster_to_sector(fs, cur);
+    uint8_t buf[512];
+    if (fs->bytes_per_sector > sizeof(buf))
+      return -1;
+    if (bdev_read(fs->bdev, lba, 1, buf) != 0)
+      return -1;
+    if (buf[32] != '.' || buf[33] != '.')
+      return -1;
+    uint16_t hi = (uint16_t)(buf[32 + 20] | (buf[32 + 21] << 8));
+    uint16_t lo = (uint16_t)(buf[32 + 26] | (buf[32 + 27] << 8));
+    uint32_t parent = ((uint32_t)hi << 16) | lo;
+    if (parent == 0)
+      cur = fs->root_cluster;
+    else
+      cur = parent;
+  }
+  return 0;
+}
+
+// [RENAME] Wrapper VFS para fat32_rename: comprueba que ambos nodos
+// son directorios del mismo FS, y delega con fs->lock tomado.
+static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
+                             vfs_node_t *dst_dir, const char *dst_name) {
+  if (!src_dir || !src_dir->priv || !dst_dir || !dst_dir->priv)
+    return -EINVAL;
+  fat32_node_priv_t *snp = (fat32_node_priv_t *)src_dir->priv;
+  fat32_node_priv_t *dnp = (fat32_node_priv_t *)dst_dir->priv;
+  if (!snp->is_dir || !dnp->is_dir)
+    return -ENOTDIR;
+  if (snp->fs != dnp->fs)
+    return -EXDEV;
+  unsigned long lock_flags = spin_lock_irqsave(&snp->fs->lock);
+  int rc = fat32_rename(snp->fs, snp->start_cluster, src_name,
+                        dnp->start_cluster, dst_name);
+  spin_unlock_irqrestore(&snp->fs->lock, lock_flags);
+  return rc;
 }
 
 // ===========================================================================

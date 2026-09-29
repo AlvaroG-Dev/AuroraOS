@@ -2,7 +2,7 @@
  * Automatically generated C config: don't edit
  * Busybox version: 1.36.1
  */
-#define AUTOCONF_TIMESTAMP "2026-09-28 14:17:51 CEST"
+#define AUTOCONF_TIMESTAMP "2026-09-29 19:11:21 CEST"
 
 #define CONFIG_HAVE_DOT_CONFIG 1
 #define ENABLE_HAVE_DOT_CONFIG 1
@@ -144,7 +144,7 @@
 # define IF_FEATURE_PREFER_APPLETS(...) __VA_ARGS__
 #endif
 #define IF_NOT_FEATURE_PREFER_APPLETS(...)
-#define CONFIG_BUSYBOX_EXEC_PATH "/initrd/apps/busybox"
+#define CONFIG_BUSYBOX_EXEC_PATH "/bin/busybox"
 #define ENABLE_BUSYBOX_EXEC_PATH 1
 #ifdef MAKE_SUID
 # define IF_BUSYBOX_EXEC_PATH(...) __VA_ARGS__ "CONFIG_BUSYBOX_EXEC_PATH"
@@ -172,18 +172,18 @@
 /*
  * Build Options
  */
-#define CONFIG_STATIC 1
-#define ENABLE_STATIC 1
+#undef CONFIG_STATIC
+#define ENABLE_STATIC 0
+#define IF_STATIC(...)
+#define IF_NOT_STATIC(...) __VA_ARGS__
+#define CONFIG_PIE 1
+#define ENABLE_PIE 1
 #ifdef MAKE_SUID
-# define IF_STATIC(...) __VA_ARGS__ "CONFIG_STATIC"
+# define IF_PIE(...) __VA_ARGS__ "CONFIG_PIE"
 #else
-# define IF_STATIC(...) __VA_ARGS__
+# define IF_PIE(...) __VA_ARGS__
 #endif
-#define IF_NOT_STATIC(...)
-#undef CONFIG_PIE
-#define ENABLE_PIE 0
-#define IF_PIE(...)
-#define IF_NOT_PIE(...) __VA_ARGS__
+#define IF_NOT_PIE(...)
 #undef CONFIG_NOMMU
 #define ENABLE_NOMMU 0
 #define IF_NOMMU(...)
@@ -204,7 +204,7 @@
 #define ENABLE_FEATURE_SHARED_BUSYBOX 0
 #define IF_FEATURE_SHARED_BUSYBOX(...)
 #define IF_NOT_FEATURE_SHARED_BUSYBOX(...) __VA_ARGS__
-#define CONFIG_CROSS_COMPILER_PREFIX ""
+#define CONFIG_CROSS_COMPILER_PREFIX "x86_64-linux-musl-"
 #define ENABLE_CROSS_COMPILER_PREFIX 1
 #ifdef MAKE_SUID
 # define IF_CROSS_COMPILER_PREFIX(...) __VA_ARGS__ "CONFIG_CROSS_COMPILER_PREFIX"
@@ -3616,10 +3616,14 @@
 #define ENABLE_LSUSB 0
 #define IF_LSUSB(...)
 #define IF_NOT_LSUSB(...) __VA_ARGS__
-#undef CONFIG_MDEV
-#define ENABLE_MDEV 0
-#define IF_MDEV(...)
-#define IF_NOT_MDEV(...) __VA_ARGS__
+#define CONFIG_MDEV 1
+#define ENABLE_MDEV 1
+#ifdef MAKE_SUID
+# define IF_MDEV(...) __VA_ARGS__ "CONFIG_MDEV"
+#else
+# define IF_MDEV(...) __VA_ARGS__
+#endif
+#define IF_NOT_MDEV(...)
 #undef CONFIG_FEATURE_MDEV_CONF
 #define ENABLE_FEATURE_MDEV_CONF 0
 #define IF_FEATURE_MDEV_CONF(...)
@@ -3692,10 +3696,14 @@
 #define ENABLE_MORE 0
 #define IF_MORE(...)
 #define IF_NOT_MORE(...) __VA_ARGS__
-#undef CONFIG_MOUNT
-#define ENABLE_MOUNT 0
-#define IF_MOUNT(...)
-#define IF_NOT_MOUNT(...) __VA_ARGS__
+#define CONFIG_MOUNT 1
+#define ENABLE_MOUNT 1
+#ifdef MAKE_SUID
+# define IF_MOUNT(...) __VA_ARGS__ "CONFIG_MOUNT"
+#else
+# define IF_MOUNT(...) __VA_ARGS__
+#endif
+#define IF_NOT_MOUNT(...)
 #undef CONFIG_FEATURE_MOUNT_FAKE
 #define ENABLE_FEATURE_MOUNT_FAKE 0
 #define IF_FEATURE_MOUNT_FAKE(...)
@@ -3720,14 +3728,22 @@
 #define ENABLE_FEATURE_MOUNT_CIFS 0
 #define IF_FEATURE_MOUNT_CIFS(...)
 #define IF_NOT_FEATURE_MOUNT_CIFS(...) __VA_ARGS__
-#undef CONFIG_FEATURE_MOUNT_FLAGS
-#define ENABLE_FEATURE_MOUNT_FLAGS 0
-#define IF_FEATURE_MOUNT_FLAGS(...)
-#define IF_NOT_FEATURE_MOUNT_FLAGS(...) __VA_ARGS__
-#undef CONFIG_FEATURE_MOUNT_FSTAB
-#define ENABLE_FEATURE_MOUNT_FSTAB 0
-#define IF_FEATURE_MOUNT_FSTAB(...)
-#define IF_NOT_FEATURE_MOUNT_FSTAB(...) __VA_ARGS__
+#define CONFIG_FEATURE_MOUNT_FLAGS 1
+#define ENABLE_FEATURE_MOUNT_FLAGS 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_MOUNT_FLAGS(...) __VA_ARGS__ "CONFIG_FEATURE_MOUNT_FLAGS"
+#else
+# define IF_FEATURE_MOUNT_FLAGS(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_MOUNT_FLAGS(...)
+#define CONFIG_FEATURE_MOUNT_FSTAB 1
+#define ENABLE_FEATURE_MOUNT_FSTAB 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_MOUNT_FSTAB(...) __VA_ARGS__ "CONFIG_FEATURE_MOUNT_FSTAB"
+#else
+# define IF_FEATURE_MOUNT_FSTAB(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_MOUNT_FSTAB(...)
 #undef CONFIG_FEATURE_MOUNT_OTHERTAB
 #define ENABLE_FEATURE_MOUNT_OTHERTAB 0
 #define IF_FEATURE_MOUNT_OTHERTAB(...)
@@ -3748,10 +3764,14 @@
 #define ENABLE_NSENTER 0
 #define IF_NSENTER(...)
 #define IF_NOT_NSENTER(...) __VA_ARGS__
-#undef CONFIG_PIVOT_ROOT
-#define ENABLE_PIVOT_ROOT 0
-#define IF_PIVOT_ROOT(...)
-#define IF_NOT_PIVOT_ROOT(...) __VA_ARGS__
+#define CONFIG_PIVOT_ROOT 1
+#define ENABLE_PIVOT_ROOT 1
+#ifdef MAKE_SUID
+# define IF_PIVOT_ROOT(...) __VA_ARGS__ "CONFIG_PIVOT_ROOT"
+#else
+# define IF_PIVOT_ROOT(...) __VA_ARGS__
+#endif
+#define IF_NOT_PIVOT_ROOT(...)
 #undef CONFIG_RDATE
 #define ENABLE_RDATE 0
 #define IF_RDATE(...)
@@ -3876,6 +3896,10 @@
 #define ENABLE_WALL 0
 #define IF_WALL(...)
 #define IF_NOT_WALL(...) __VA_ARGS__
+
+/*
+ * Common options for mount/umount
+ */
 #undef CONFIG_FEATURE_MOUNT_LOOP
 #define ENABLE_FEATURE_MOUNT_LOOP 0
 #define IF_FEATURE_MOUNT_LOOP(...)
@@ -5244,10 +5268,14 @@
 #define ENABLE_FEATURE_SHOW_THREADS 0
 #define IF_FEATURE_SHOW_THREADS(...)
 #define IF_NOT_FEATURE_SHOW_THREADS(...) __VA_ARGS__
-#undef CONFIG_FREE
-#define ENABLE_FREE 0
-#define IF_FREE(...)
-#define IF_NOT_FREE(...) __VA_ARGS__
+#define CONFIG_FREE 1
+#define ENABLE_FREE 1
+#ifdef MAKE_SUID
+# define IF_FREE(...) __VA_ARGS__ "CONFIG_FREE"
+#else
+# define IF_FREE(...) __VA_ARGS__
+#endif
+#define IF_NOT_FREE(...)
 #undef CONFIG_FUSER
 #define ENABLE_FUSER 0
 #define IF_FUSER(...)
@@ -5324,18 +5352,30 @@
 #define ENABLE_FEATURE_POWERTOP_INTERACTIVE 0
 #define IF_FEATURE_POWERTOP_INTERACTIVE(...)
 #define IF_NOT_FEATURE_POWERTOP_INTERACTIVE(...) __VA_ARGS__
-#undef CONFIG_PS
-#define ENABLE_PS 0
-#define IF_PS(...)
-#define IF_NOT_PS(...) __VA_ARGS__
-#undef CONFIG_FEATURE_PS_WIDE
-#define ENABLE_FEATURE_PS_WIDE 0
-#define IF_FEATURE_PS_WIDE(...)
-#define IF_NOT_FEATURE_PS_WIDE(...) __VA_ARGS__
-#undef CONFIG_FEATURE_PS_LONG
-#define ENABLE_FEATURE_PS_LONG 0
-#define IF_FEATURE_PS_LONG(...)
-#define IF_NOT_FEATURE_PS_LONG(...) __VA_ARGS__
+#define CONFIG_PS 1
+#define ENABLE_PS 1
+#ifdef MAKE_SUID
+# define IF_PS(...) __VA_ARGS__ "CONFIG_PS"
+#else
+# define IF_PS(...) __VA_ARGS__
+#endif
+#define IF_NOT_PS(...)
+#define CONFIG_FEATURE_PS_WIDE 1
+#define ENABLE_FEATURE_PS_WIDE 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_PS_WIDE(...) __VA_ARGS__ "CONFIG_FEATURE_PS_WIDE"
+#else
+# define IF_FEATURE_PS_WIDE(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_PS_WIDE(...)
+#define CONFIG_FEATURE_PS_LONG 1
+#define ENABLE_FEATURE_PS_LONG 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_PS_LONG(...) __VA_ARGS__ "CONFIG_FEATURE_PS_LONG"
+#else
+# define IF_FEATURE_PS_LONG(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_PS_LONG(...)
 #undef CONFIG_FEATURE_PS_TIME
 #define ENABLE_FEATURE_PS_TIME 0
 #define IF_FEATURE_PS_TIME(...)
@@ -5364,10 +5404,14 @@
 #define ENABLE_BB_SYSCTL 0
 #define IF_BB_SYSCTL(...)
 #define IF_NOT_BB_SYSCTL(...) __VA_ARGS__
-#undef CONFIG_TOP
-#define ENABLE_TOP 0
-#define IF_TOP(...)
-#define IF_NOT_TOP(...) __VA_ARGS__
+#define CONFIG_TOP 1
+#define ENABLE_TOP 1
+#ifdef MAKE_SUID
+# define IF_TOP(...) __VA_ARGS__ "CONFIG_TOP"
+#else
+# define IF_TOP(...) __VA_ARGS__
+#endif
+#define IF_NOT_TOP(...)
 #undef CONFIG_FEATURE_TOP_INTERACTIVE
 #define ENABLE_FEATURE_TOP_INTERACTIVE 0
 #define IF_FEATURE_TOP_INTERACTIVE(...)
@@ -5396,10 +5440,14 @@
 #define ENABLE_FEATURE_TOPMEM 0
 #define IF_FEATURE_TOPMEM(...)
 #define IF_NOT_FEATURE_TOPMEM(...) __VA_ARGS__
-#undef CONFIG_UPTIME
-#define ENABLE_UPTIME 0
-#define IF_UPTIME(...)
-#define IF_NOT_UPTIME(...) __VA_ARGS__
+#define CONFIG_UPTIME 1
+#define ENABLE_UPTIME 1
+#ifdef MAKE_SUID
+# define IF_UPTIME(...) __VA_ARGS__ "CONFIG_UPTIME"
+#else
+# define IF_UPTIME(...) __VA_ARGS__
+#endif
+#define IF_NOT_UPTIME(...)
 #undef CONFIG_FEATURE_UPTIME_UTMP_SUPPORT
 #define ENABLE_FEATURE_UPTIME_UTMP_SUPPORT 0
 #define IF_FEATURE_UPTIME_UTMP_SUPPORT(...)

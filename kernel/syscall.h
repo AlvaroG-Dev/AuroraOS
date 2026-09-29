@@ -66,18 +66,30 @@
 #define SYS_CHOWN 92
 #define SYS_FCHOWN 93
 #define SYS_LCHOWN 94
+#define SYS_UMASK 95
 #define SYS_GETRUSAGE 98
 #define SYS_SYSINFO 99
 #define SYS_TIMES 100
 #define SYS_GETUID 102
 #define SYS_GETGID 104
+#define SYS_SETUID 105
+#define SYS_SETGID 106
 #define SYS_GETEUID 107
 #define SYS_GETEGID 108
 #define SYS_SETPGID 109
 #define SYS_GETPPID 110
 #define SYS_SETSID 112
+#define SYS_SETREUID 113
+#define SYS_SETREGID 114
 #define SYS_GETGROUPS 115
+#define SYS_SETGROUPS 116
+#define SYS_SETRESUID 117
+#define SYS_GETRESUID 118
+#define SYS_SETRESGID 119
+#define SYS_GETRESGID 120
 #define SYS_GETPGID 121
+#define SYS_SETFSUID 122
+#define SYS_SETFSGID 123
 #define SYS_GETSID 124
 #define SYS_MKNOD 133
 #define SYS_STATFS 137
@@ -87,6 +99,7 @@
 #define SYS_ARCH_PRCTL 158
 #define SYS_SETHOSTNAME 170
 #define SYS_GETTID 186
+#define SYS_TKILL 200
 #define SYS_GETDENTS64 217
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_CLOCK_GETTIME 228
@@ -96,10 +109,14 @@
 #define SYS_FSTATAT 262
 #define SYS_UNLINKAT 263
 #define SYS_RENAMEAT 264
+#define SYS_READLINKAT 267
+#define SYS_FCHMODAT 268
+#define SYS_FACCESSAT 269
 #define SYS_PSELECT6 270
 #define SYS_PPOLL 271
 #define SYS_SET_ROBUST_LIST 273
 #define SYS_UTIMENSAT 280
+#define SYS_PIPE2 293
 #define SYS_PRLIMIT64 302
 #define SYS_GETRANDOM 318
 #define SYS_RSEQ 334
@@ -150,6 +167,7 @@
 #define LINUX_O_CREAT 0x0040
 #define LINUX_O_TRUNC 0x0200
 #define LINUX_O_APPEND 0x0400
+#define LINUX_O_EXCL 0x0080
 
 // ---------------------------------------------------------------------------
 // struct stat de Linux x86_64, layout byte a byte.
@@ -191,15 +209,6 @@ typedef struct {
 #define DT_REG 8
 #define DT_LNK 10
 #define DT_SOCK 12
-
-#define S_IFMT 0170000
-#define S_IFSOCK 0140000
-#define S_IFLNK 0120000
-#define S_IFREG 0100000
-#define S_IFBLK 0060000
-#define S_IFDIR 0040000
-#define S_IFCHR 0020000
-#define S_IFIFO 0010000
 
 // ---------------------------------------------------------------------------
 // Tipos auxiliares varios.
