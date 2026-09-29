@@ -147,6 +147,9 @@ deps_archival/libarchive/lzo1x_1o.o := \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/sys/statvfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/statfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/arpa/inet.h \
+  include/pwd_.h \
+  include/grp_.h \
+  include/shadow_.h \
   include/xatonum.h \
   archival/libarchive/liblzo.h \
   include/liblzo_interface.h \

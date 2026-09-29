@@ -147,6 +147,9 @@ deps_libbb/bb_cat.o := \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/sys/statvfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/statfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/arpa/inet.h \
+  include/pwd_.h \
+  include/grp_.h \
+  include/shadow_.h \
   include/xatonum.h \
 
 libbb/bb_cat.o: $(deps_libbb/bb_cat.o)

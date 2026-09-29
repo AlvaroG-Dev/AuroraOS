@@ -148,6 +148,9 @@ deps_libbb/compare_string_array.o := \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/sys/statvfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/statfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/arpa/inet.h \
+  include/pwd_.h \
+  include/grp_.h \
+  include/shadow_.h \
   include/xatonum.h \
 
 libbb/compare_string_array.o: $(deps_libbb/compare_string_array.o)

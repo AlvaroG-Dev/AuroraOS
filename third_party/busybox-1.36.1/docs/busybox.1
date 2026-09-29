@@ -143,21 +143,24 @@ Currently available applets include:
 .PP
 .Vb 10
 \&        [, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
-\&        bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
-\&        cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
-\&        dos2unix, dpkg, dpkg\-deb, du, echo, ed, egrep, env, expand, expr,
-\&        factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
-\&        gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
-\&        killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-\&        mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
-\&        nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
-\&        printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
-\&        rpm, rpm2cpio, run\-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
-\&        sha512sum, shred, shuf, sleep, sort, split, start\-stop\-daemon, stat,
-\&        strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
-\&        touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
-\&        unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
-\&        uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat
+\&        busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
+\&        clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
+\&        diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg\-deb, du, echo,
+\&        ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
+\&        free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
+\&        hexdump, hexedit, hostid, hostname, hush, id, install, kill,
+\&        killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
+\&        md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
+\&        mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
+\&        pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
+\&        readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
+\&        run\-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
+\&        sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
+\&        start\-stop\-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
+\&        tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
+\&        tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
+\&        uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
+\&        xargs, xxd, xz, xzcat, yes, zcat
 .Ve
 .SH "COMMAND DESCRIPTIONS"
 .IX Header "COMMAND DESCRIPTIONS"
@@ -403,6 +406,20 @@ Main operation mode:
 crc32 FILE...
 .Sp
 Calculate CRC32 checksum of FILEs
+.IP \fBcttyhack\fR 4
+.IX Item "cttyhack"
+cttyhack [PROG ARGS]
+.Sp
+Give PROG a controlling tty if possible.
+Example for /etc/inittab (for busybox init):
+	::respawn:/bin/cttyhack /bin/sh
+Giving controlling tty to shell running with PID 1:
+	$ exec cttyhack sh
+Starting interactive shell from boot shell script:
+.Sp
+.Vb 1
+\&        setsid cttyhack sh
+.Ve
 .IP \fBcut\fR 4
 .IX Item "cut"
 cut [OPTIONS] [FILE]...
@@ -769,6 +786,19 @@ Write all buffered blocks in FILEs to disk
 .Vb 1
 \&        \-d      Avoid syncing metadata
 .Ve
+.IP \fBfuser\fR 4
+.IX Item "fuser"
+fuser [\-msk46] [\-SIGNAL] FILE or PORT/PROTO
+.Sp
+Find processes which use FILEs or PORTs
+.Sp
+.Vb 5
+\&        \-m      Find processes which use same fs as FILEs
+\&        \-4,\-6   Search only IPv4/IPv6 space
+\&        \-s      Don\*(Aqt display PIDs
+\&        \-k      Kill found processes
+\&        \-SIGNAL Signal to send (default: KILL)
+.Ve
 .IP \fBgetopt\fR 4
 .IX Item "getopt"
 getopt [OPTIONS] [\-\-] OPTSTRING PARAMS
@@ -901,11 +931,29 @@ Display FILEs (or stdin) in a user specified format
 \&        \-n LENGTH       Show only first LENGTH bytes
 \&        \-s OFFSET       Skip OFFSET bytes
 .Ve
+.IP \fBhexedit\fR 4
+.IX Item "hexedit"
+hexedit FILE
+.Sp
+Edit FILE in hexadecimal
 .IP \fBhostid\fR 4
 .IX Item "hostid"
 hostid
 .Sp
 Print out a unique 32\-bit identifier for the machine
+.IP \fBhostname\fR 4
+.IX Item "hostname"
+hostname [\-sidf] [HOSTNAME | \-F FILE]
+.Sp
+Show or set hostname or DNS domain name
+.Sp
+.Vb 5
+\&        \-s      Short
+\&        \-i      Addresses for the hostname
+\&        \-d      DNS domain name
+\&        \-f      Fully qualified domain name
+\&        \-F FILE Use FILE\*(Aqs content as hostname
+.Ve
 .IP \fBhush\fR 4
 .IX Item "hush"
 hush [\-enxl] [\-c 'SCRIPT' [ARG0 ARGS] | FILE ARGS | \-s ARGS]
@@ -969,6 +1017,23 @@ Send a signal (default: TERM) to all processes outside current session
 .Vb 2
 \&        \-l      List all signal names and numbers
 \&        \-o PID  Don\*(Aqt signal this PID
+.Ve
+.IP \fBless\fR 4
+.IX Item "less"
+less [\-EFIMmNSRh~] [FILE]...
+.Sp
+View FILE (or stdin) one screenful at a time
+.Sp
+.Vb 9
+\&        \-E      Quit once the end of a file is reached
+\&        \-F      Quit if entire file fits on first screen
+\&        \-I      Ignore case in all searches
+\&        \-M,\-m   Display status line with line numbers
+\&                and percentage through the file
+\&        \-N      Prefix line number to each line
+\&        \-S      Truncate long lines
+\&        \-R      Remove color escape codes in input
+\&        \-~      Suppress ~s displayed past EOF
 .Ve
 .IP \fBlink\fR 4
 .IX Item "link"
@@ -1141,6 +1206,11 @@ Without TEMPLATE, \-t tmp.XXXXXX is assumed.
 .Ve
 .Sp
 Base directory is: \-p DIR, else \f(CW$TMPDIR\fR, else /tmp
+.IP \fBmore\fR 4
+.IX Item "more"
+more [FILE]...
+.Sp
+View FILE (or stdin) one screenful at a time
 .IP \fBmount\fR 4
 .IX Item "mount"
 mount [OPTIONS] [\-o OPT] DEVICE NODE
@@ -1171,6 +1241,18 @@ Mount a filesystem. Filesystem autodetection requires /proc.
 .Ve
 .Sp
 There are filesystem-specific \-o flags.
+.IP \fBmountpoint\fR 4
+.IX Item "mountpoint"
+mountpoint [\-q] { [\-dn] DIR | \-x DEVICE }
+.Sp
+Check if DIR is a mountpoint
+.Sp
+.Vb 4
+\&        \-q      Quiet
+\&        \-d      Print major:minor of the filesystem
+\&        \-n      Print device name of the filesystem
+\&        \-x      Print major:minor of DEVICE
+.Ve
 .IP \fBmv\fR 4
 .IX Item "mv"
 mv [\-finT] SOURCE DEST
@@ -1249,12 +1331,57 @@ patch [\-RNE] [\-p N] [\-i DIFF] [ORIGFILE [PATCHFILE]]
 \&        \-E      Remove output files if they become empty
 \&        \-\-dry\-run       Don\*(Aqt actually change files
 .Ve
+.IP \fBpgrep\fR 4
+.IX Item "pgrep"
+pgrep [\-flanovx] [\-s SID|\-P PPID|PATTERN]
+.Sp
+Display process(es) selected by regex PATTERN
+.Sp
+.Vb 9
+\&        \-l      Show command name too
+\&        \-a      Show command line too
+\&        \-f      Match against entire command line
+\&        \-n      Show the newest process only
+\&        \-o      Show the oldest process only
+\&        \-v      Negate the match
+\&        \-x      Match whole name (not substring)
+\&        \-s      Match session ID (0 for current)
+\&        \-P      Match parent process ID
+.Ve
+.IP \fBpidof\fR 4
+.IX Item "pidof"
+pidof [\-s] [\-o PID] [NAME]...
+.Sp
+List PIDs of all processes with names that match NAMEs
+.Sp
+.Vb 3
+\&        \-s      Show only one PID
+\&        \-o PID  Omit given pid
+\&                Use %PPID to omit pid of pidof\*(Aqs parent
+.Ve
 .IP \fBpivot_root\fR 4
 .IX Item "pivot_root"
 pivot_root NEW_ROOT PUT_OLD
 .Sp
 Move the current root file system to PUT_OLD and make NEW_ROOT
 the new root file system
+.IP \fBpkill\fR 4
+.IX Item "pkill"
+pkill [\-l|\-SIGNAL] [\-xfvnoe] [\-s SID|\-P PPID|PATTERN]
+.Sp
+Send signal to processes selected by regex PATTERN
+.Sp
+.Vb 9
+\&        \-l      List all signals
+\&        \-x      Match whole name (not substring)
+\&        \-f      Match against entire command line
+\&        \-s SID  Match session ID (0 for current)
+\&        \-P PPID Match parent process ID
+\&        \-v      Negate the match
+\&        \-n      Signal the newest process only
+\&        \-o      Signal the oldest process only
+\&        \-e      Display name and PID of the process being killed
+.Ve
 .IP \fBprintenv\fR 4
 .IX Item "printenv"
 printenv [VARIABLE]...
@@ -1368,6 +1495,23 @@ Run a bunch of scripts in DIRECTORY
 \&        \-\-exit\-on\-error Exit if a script exits with non\-zero
 \&        \-\-list          Print names of matching files even if they are not executable
 .Ve
+.IP \fBscript\fR 4
+.IX Item "script"
+script [\-afq] [\-t[FILE]] [\-c PROG] [OUTFILE]
+.Sp
+Default OUTFILE is 'typescript'
+.Sp
+.Vb 4
+\&        \-a      Append output
+\&        \-c PROG Run PROG, not shell
+\&        \-q      Quiet
+\&        \-t[FILE] Send timing to stderr or FILE
+.Ve
+.IP \fBscriptreplay\fR 4
+.IX Item "scriptreplay"
+scriptreplay TIMINGFILE [TYPESCRIPT [DIVISOR]]
+.Sp
+Play back typescripts, using timing information
 .IP \fBsed\fR 4
 .IX Item "sed"
 sed [\-i[SFX]] [\-nrE] [\-f FILE]... [\-e CMD]... [FILE]...
@@ -1394,6 +1538,16 @@ FIRST, INC default to 1.
 .Vb 2
 \&        \-w      Pad to last with leading zeros
 \&        \-s SEP  String separator
+.Ve
+.IP \fBsetsid\fR 4
+.IX Item "setsid"
+setsid [\-c] PROG ARGS
+.Sp
+Run PROG in a new session. PROG will have no controlling terminal
+and will not be affected by keyboard signals (^C etc).
+.Sp
+.Vb 1
+\&        \-c      Set controlling terminal to stdin
 .Ve
 .IP \fBsh\fR 4
 .IX Item "sh"
@@ -1616,6 +1770,19 @@ Display printable strings in a binary file
 \&        \-o              Precede strings with octal offsets
 \&        \-t o|d|x        Precede strings with offsets in base 8/10/16
 \&        \-n LEN          At least LEN characters form a string (default 4)
+.Ve
+.IP \fBstty\fR 4
+.IX Item "stty"
+stty [\-a|g] [\-F DEVICE] [SETTING]...
+.Sp
+Without arguments, prints baud rate, line discipline,
+and deviations from stty sane
+.Sp
+.Vb 4
+\&        \-F DEVICE       Open device instead of stdin
+\&        \-a              Print all current settings in human\-readable form
+\&        \-g              Print in stty\-readable form
+\&        [SETTING]       See manpage
 .Ve
 .IP \fBsum\fR 4
 .IX Item "sum"
@@ -1920,6 +2087,16 @@ Edit FILE
 \&        \-c CMD  Initial command to run ($EXINIT and ~/.exrc also available)
 \&        \-R      Read\-only
 \&        \-H      List available features
+.Ve
+.IP \fBwatch\fR 4
+.IX Item "watch"
+watch [\-n SEC] [\-t] PROG ARGS
+.Sp
+Run PROG periodically
+.Sp
+.Vb 2
+\&        \-n SEC  Period (default 2)
+\&        \-t      Don\*(Aqt print header
 .Ve
 .IP \fBwc\fR 4
 .IX Item "wc"

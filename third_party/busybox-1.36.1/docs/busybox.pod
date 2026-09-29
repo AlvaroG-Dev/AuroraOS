@@ -82,21 +82,24 @@ been enabled, more detailed usage information will also be available.
 Currently available applets include:
 
 	[, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
-	bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
-	cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
-	dos2unix, dpkg, dpkg-deb, du, echo, ed, egrep, env, expand, expr,
-	factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
-	gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
-	killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-	mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
-	nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
-	printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
-	rpm, rpm2cpio, run-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
-	sha512sum, shred, shuf, sleep, sort, split, start-stop-daemon, stat,
-	strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
-	touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
-	unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
-	uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat
+	busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
+	clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
+	diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg-deb, du, echo,
+	ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
+	free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
+	hexdump, hexedit, hostid, hostname, hush, id, install, kill,
+	killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
+	md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
+	mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
+	pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
+	readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
+	run-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
+	sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
+	start-stop-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
+	tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
+	tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
+	uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
+	xargs, xxd, xz, xzcat, yes, zcat
 
 =head1 COMMAND DESCRIPTIONS
 
@@ -334,6 +337,19 @@ Options:
 crc32 FILE...
 
 Calculate CRC32 checksum of FILEs
+
+=item B<cttyhack>
+
+cttyhack [PROG ARGS]
+
+Give PROG a controlling tty if possible.
+Example for /etc/inittab (for busybox init):
+	::respawn:/bin/cttyhack /bin/sh
+Giving controlling tty to shell running with PID 1:
+	$ exec cttyhack sh
+Starting interactive shell from boot shell script:
+
+	setsid cttyhack sh
 
 =item B<cut>
 
@@ -686,6 +702,18 @@ Write all buffered blocks in FILEs to disk
 
 	-d	Avoid syncing metadata
 
+=item B<fuser>
+
+fuser [-msk46] [-SIGNAL] FILE or PORT/PROTO
+
+Find processes which use FILEs or PORTs
+
+	-m	Find processes which use same fs as FILEs
+	-4,-6	Search only IPv4/IPv6 space
+	-s	Don't display PIDs
+	-k	Kill found processes
+	-SIGNAL	Signal to send (default: KILL)
+
 =item B<getopt>
 
 getopt [OPTIONS] [--] OPTSTRING PARAMS
@@ -815,11 +843,29 @@ Display FILEs (or stdin) in a user specified format
 	-n LENGTH	Show only first LENGTH bytes
 	-s OFFSET	Skip OFFSET bytes
 
+=item B<hexedit>
+
+hexedit FILE
+
+Edit FILE in hexadecimal
+
 =item B<hostid>
 
 hostid 
 
 Print out a unique 32-bit identifier for the machine
+
+=item B<hostname>
+
+hostname [-sidf] [HOSTNAME | -F FILE]
+
+Show or set hostname or DNS domain name
+
+	-s	Short
+	-i	Addresses for the hostname
+	-d	DNS domain name
+	-f	Fully qualified domain name
+	-F FILE	Use FILE's content as hostname
 
 =item B<hush>
 
@@ -880,6 +926,22 @@ Send a signal (default: TERM) to all processes outside current session
 
 	-l	List all signal names and numbers
 	-o PID	Don't signal this PID
+
+=item B<less>
+
+less [-EFIMmNSRh~] [FILE]...
+
+View FILE (or stdin) one screenful at a time
+
+	-E	Quit once the end of a file is reached
+	-F	Quit if entire file fits on first screen
+	-I	Ignore case in all searches
+	-M,-m	Display status line with line numbers
+		and percentage through the file
+	-N	Prefix line number to each line
+	-S	Truncate long lines
+	-R	Remove color escape codes in input
+	-~	Suppress ~s displayed past EOF
 
 =item B<link>
 
@@ -1045,6 +1107,12 @@ Without TEMPLATE, -t tmp.XXXXXX is assumed.
 
 Base directory is: -p DIR, else $TMPDIR, else /tmp
 
+=item B<more>
+
+more [FILE]...
+
+View FILE (or stdin) one screenful at a time
+
 =item B<mount>
 
 mount [OPTIONS] [-o OPT] DEVICE NODE
@@ -1073,6 +1141,17 @@ Mount a filesystem. Filesystem autodetection requires /proc.
 	ro		Same as -r
 
 There are filesystem-specific -o flags.
+
+=item B<mountpoint>
+
+mountpoint [-q] { [-dn] DIR | -x DEVICE }
+
+Check if DIR is a mountpoint
+
+	-q	Quiet
+	-d	Print major:minor of the filesystem
+	-n	Print device name of the filesystem
+	-x	Print major:minor of DEVICE
 
 =item B<mv>
 
@@ -1148,12 +1227,54 @@ patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
 	-E	Remove output files if they become empty
 	--dry-run	Don't actually change files
 
+=item B<pgrep>
+
+pgrep [-flanovx] [-s SID|-P PPID|PATTERN]
+
+Display process(es) selected by regex PATTERN
+
+	-l	Show command name too
+	-a	Show command line too
+	-f	Match against entire command line
+	-n	Show the newest process only
+	-o	Show the oldest process only
+	-v	Negate the match
+	-x	Match whole name (not substring)
+	-s	Match session ID (0 for current)
+	-P	Match parent process ID
+
+=item B<pidof>
+
+pidof [-s] [-o PID] [NAME]...
+
+List PIDs of all processes with names that match NAMEs
+
+	-s	Show only one PID
+	-o PID	Omit given pid
+		Use %PPID to omit pid of pidof's parent
+
 =item B<pivot_root>
 
 pivot_root NEW_ROOT PUT_OLD
 
 Move the current root file system to PUT_OLD and make NEW_ROOT
 the new root file system
+
+=item B<pkill>
+
+pkill [-l|-SIGNAL] [-xfvnoe] [-s SID|-P PPID|PATTERN]
+
+Send signal to processes selected by regex PATTERN
+
+	-l	List all signals
+	-x	Match whole name (not substring)
+	-f	Match against entire command line
+	-s SID	Match session ID (0 for current)
+	-P PPID	Match parent process ID
+	-v	Negate the match
+	-n	Signal the newest process only
+	-o	Signal the oldest process only
+	-e	Display name and PID of the process being killed
 
 =item B<printenv>
 
@@ -1270,6 +1391,23 @@ Run a bunch of scripts in DIRECTORY
 	--exit-on-error	Exit if a script exits with non-zero
 	--list		Print names of matching files even if they are not executable
 
+=item B<script>
+
+script [-afq] [-t[FILE]] [-c PROG] [OUTFILE]
+
+Default OUTFILE is 'typescript'
+
+	-a	Append output
+	-c PROG	Run PROG, not shell
+	-q	Quiet
+	-t[FILE] Send timing to stderr or FILE
+
+=item B<scriptreplay>
+
+scriptreplay TIMINGFILE [TYPESCRIPT [DIVISOR]]
+
+Play back typescripts, using timing information
+
 =item B<sed>
 
 sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]...
@@ -1294,6 +1432,15 @@ FIRST, INC default to 1.
 
 	-w	Pad to last with leading zeros
 	-s SEP	String separator
+
+=item B<setsid>
+
+setsid [-c] PROG ARGS
+
+Run PROG in a new session. PROG will have no controlling terminal
+and will not be affected by keyboard signals (^C etc).
+
+	-c	Set controlling terminal to stdin
 
 =item B<sh>
 
@@ -1503,6 +1650,18 @@ Display printable strings in a binary file
 	-o		Precede strings with octal offsets
 	-t o|d|x	Precede strings with offsets in base 8/10/16
 	-n LEN		At least LEN characters form a string (default 4)
+
+=item B<stty>
+
+stty [-a|g] [-F DEVICE] [SETTING]...
+
+Without arguments, prints baud rate, line discipline,
+and deviations from stty sane
+
+	-F DEVICE	Open device instead of stdin
+	-a		Print all current settings in human-readable form
+	-g		Print in stty-readable form
+	[SETTING]	See manpage
 
 =item B<sum>
 
@@ -1797,6 +1956,15 @@ Edit FILE
 	-c CMD	Initial command to run ($EXINIT and ~/.exrc also available)
 	-R	Read-only
 	-H	List available features
+
+=item B<watch>
+
+watch [-n SEC] [-t] PROG ARGS
+
+Run PROG periodically
+
+	-n SEC	Period (default 2)
+	-t	Don't print header
 
 =item B<wc>
 

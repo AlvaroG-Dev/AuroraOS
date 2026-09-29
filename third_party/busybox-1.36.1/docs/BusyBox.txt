@@ -77,21 +77,24 @@ COMMANDS
     Currently available applets include:
 
             [, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
-            bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
-            cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
-            dos2unix, dpkg, dpkg-deb, du, echo, ed, egrep, env, expand, expr,
-            factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
-            gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
-            killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-            mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
-            nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
-            printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
-            rpm, rpm2cpio, run-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
-            sha512sum, shred, shuf, sleep, sort, split, start-stop-daemon, stat,
-            strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
-            touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
-            unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
-            uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat
+            busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
+            clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
+            diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg-deb, du, echo,
+            ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
+            free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
+            hexdump, hexedit, hostid, hostname, hush, id, install, kill,
+            killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
+            md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
+            mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
+            pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
+            readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
+            run-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
+            sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
+            start-stop-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
+            tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
+            tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
+            uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
+            xargs, xxd, xz, xzcat, yes, zcat
 
 COMMAND DESCRIPTIONS
     arch
@@ -299,6 +302,16 @@ COMMAND DESCRIPTIONS
         crc32 FILE...
 
         Calculate CRC32 checksum of FILEs
+
+    cttyhack
+        cttyhack [PROG ARGS]
+
+        Give PROG a controlling tty if possible. Example for /etc/inittab
+        (for busybox init): ::respawn:/bin/cttyhack /bin/sh Giving
+        controlling tty to shell running with PID 1: $ exec cttyhack sh
+        Starting interactive shell from boot shell script:
+
+                setsid cttyhack sh
 
     cut cut [OPTIONS] [FILE]...
 
@@ -620,6 +633,17 @@ COMMAND DESCRIPTIONS
 
                 -d      Avoid syncing metadata
 
+    fuser
+        fuser [-msk46] [-SIGNAL] FILE or PORT/PROTO
+
+        Find processes which use FILEs or PORTs
+
+                -m      Find processes which use same fs as FILEs
+                -4,-6   Search only IPv4/IPv6 space
+                -s      Don't display PIDs
+                -k      Kill found processes
+                -SIGNAL Signal to send (default: KILL)
+
     getopt
         getopt [OPTIONS] [--] OPTSTRING PARAMS
 
@@ -732,10 +756,26 @@ COMMAND DESCRIPTIONS
                 -n LENGTH       Show only first LENGTH bytes
                 -s OFFSET       Skip OFFSET bytes
 
+    hexedit
+        hexedit FILE
+
+        Edit FILE in hexadecimal
+
     hostid
         hostid
 
         Print out a unique 32-bit identifier for the machine
+
+    hostname
+        hostname [-sidf] [HOSTNAME | -F FILE]
+
+        Show or set hostname or DNS domain name
+
+                -s      Short
+                -i      Addresses for the hostname
+                -d      DNS domain name
+                -f      Fully qualified domain name
+                -F FILE Use FILE's content as hostname
 
     hush
         hush [-enxl] [-c 'SCRIPT' [ARG0 ARGS] | FILE ARGS | -s ARGS]
@@ -791,6 +831,21 @@ COMMAND DESCRIPTIONS
 
                 -l      List all signal names and numbers
                 -o PID  Don't signal this PID
+
+    less
+        less [-EFIMmNSRh~] [FILE]...
+
+        View FILE (or stdin) one screenful at a time
+
+                -E      Quit once the end of a file is reached
+                -F      Quit if entire file fits on first screen
+                -I      Ignore case in all searches
+                -M,-m   Display status line with line numbers
+                        and percentage through the file
+                -N      Prefix line number to each line
+                -S      Truncate long lines
+                -R      Remove color escape codes in input
+                -~      Suppress ~s displayed past EOF
 
     link
         link FILE LINK
@@ -941,6 +996,11 @@ COMMAND DESCRIPTIONS
 
         Base directory is: -p DIR, else $TMPDIR, else /tmp
 
+    more
+        more [FILE]...
+
+        View FILE (or stdin) one screenful at a time
+
     mount
         mount [OPTIONS] [-o OPT] DEVICE NODE
 
@@ -968,6 +1028,16 @@ COMMAND DESCRIPTIONS
                 ro              Same as -r
 
         There are filesystem-specific -o flags.
+
+    mountpoint
+        mountpoint [-q] { [-dn] DIR | -x DEVICE }
+
+        Check if DIR is a mountpoint
+
+                -q      Quiet
+                -d      Print major:minor of the filesystem
+                -n      Print device name of the filesystem
+                -x      Print major:minor of DEVICE
 
     mv  mv [-finT] SOURCE DEST or: mv [-fin] SOURCE... { -t DIRECTORY |
         DIRECTORY }
@@ -1032,11 +1102,50 @@ COMMAND DESCRIPTIONS
                 -E      Remove output files if they become empty
                 --dry-run       Don't actually change files
 
+    pgrep
+        pgrep [-flanovx] [-s SID|-P PPID|PATTERN]
+
+        Display process(es) selected by regex PATTERN
+
+                -l      Show command name too
+                -a      Show command line too
+                -f      Match against entire command line
+                -n      Show the newest process only
+                -o      Show the oldest process only
+                -v      Negate the match
+                -x      Match whole name (not substring)
+                -s      Match session ID (0 for current)
+                -P      Match parent process ID
+
+    pidof
+        pidof [-s] [-o PID] [NAME]...
+
+        List PIDs of all processes with names that match NAMEs
+
+                -s      Show only one PID
+                -o PID  Omit given pid
+                        Use %PPID to omit pid of pidof's parent
+
     pivot_root
         pivot_root NEW_ROOT PUT_OLD
 
         Move the current root file system to PUT_OLD and make NEW_ROOT the
         new root file system
+
+    pkill
+        pkill [-l|-SIGNAL] [-xfvnoe] [-s SID|-P PPID|PATTERN]
+
+        Send signal to processes selected by regex PATTERN
+
+                -l      List all signals
+                -x      Match whole name (not substring)
+                -f      Match against entire command line
+                -s SID  Match session ID (0 for current)
+                -P PPID Match parent process ID
+                -v      Negate the match
+                -n      Signal the newest process only
+                -o      Signal the oldest process only
+                -e      Display name and PID of the process being killed
 
     printenv
         printenv [VARIABLE]...
@@ -1134,6 +1243,21 @@ COMMAND DESCRIPTIONS
                 --exit-on-error Exit if a script exits with non-zero
                 --list          Print names of matching files even if they are not executable
 
+    script
+        script [-afq] [-t[FILE]] [-c PROG] [OUTFILE]
+
+        Default OUTFILE is 'typescript'
+
+                -a      Append output
+                -c PROG Run PROG, not shell
+                -q      Quiet
+                -t[FILE] Send timing to stderr or FILE
+
+    scriptreplay
+        scriptreplay TIMINGFILE [TYPESCRIPT [DIVISOR]]
+
+        Play back typescripts, using timing information
+
     sed sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]... or: sed
         [-i[SFX]] [-nrE] CMD [FILE]...
 
@@ -1154,6 +1278,14 @@ COMMAND DESCRIPTIONS
 
                 -w      Pad to last with leading zeros
                 -s SEP  String separator
+
+    setsid
+        setsid [-c] PROG ARGS
+
+        Run PROG in a new session. PROG will have no controlling terminal
+        and will not be affected by keyboard signals (^C etc).
+
+                -c      Set controlling terminal to stdin
 
     sh  sh [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] |
         FILE ARGS | -s ARGS]
@@ -1351,6 +1483,17 @@ COMMAND DESCRIPTIONS
                 -o              Precede strings with octal offsets
                 -t o|d|x        Precede strings with offsets in base 8/10/16
                 -n LEN          At least LEN characters form a string (default 4)
+
+    stty
+        stty [-a|g] [-F DEVICE] [SETTING]...
+
+        Without arguments, prints baud rate, line discipline, and deviations
+        from stty sane
+
+                -F DEVICE       Open device instead of stdin
+                -a              Print all current settings in human-readable form
+                -g              Print in stty-readable form
+                [SETTING]       See manpage
 
     sum sum [-rs] [FILE]...
 
@@ -1608,6 +1751,14 @@ COMMAND DESCRIPTIONS
                 -c CMD  Initial command to run ($EXINIT and ~/.exrc also available)
                 -R      Read-only
                 -H      List available features
+
+    watch
+        watch [-n SEC] [-t] PROG ARGS
+
+        Run PROG periodically
+
+                -n SEC  Period (default 2)
+                -t      Don't print header
 
     wc  wc [-cmlwL] [FILE]...
 

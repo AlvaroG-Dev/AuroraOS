@@ -61,21 +61,24 @@
 <p>Currently available applets include:</p>
 
 <pre><code>[, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
-bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum, clear,
-cmp, comm, cp, cpio, crc32, cut, date, dc, dd, df, diff, dirname,
-dos2unix, dpkg, dpkg-deb, du, echo, ed, egrep, env, expand, expr,
-factor, false, fgrep, find, fold, free, fsync, getopt, grep, groups,
-gunzip, gzip, hd, head, hexdump, hostid, hush, id, install, kill,
-killall, killall5, link, ln, logname, ls, lzcat, lzma, lzop, md5sum,
-mdev, mkdir, mkfifo, mknod, mktemp, mount, mv, nice, nl, nohup,
-nproc, od, paste, patch, pipe_progress, pivot_root, printenv,
-printf, ps, pwd, readlink, realpath, reset, resize, rev, rm, rmdir,
-rpm, rpm2cpio, run-parts, sed, seq, sh, sha1sum, sha256sum, sha3sum,
-sha512sum, shred, shuf, sleep, sort, split, start-stop-daemon, stat,
-strings, sum, sync, tac, tail, tar, tee, test, time, timeout, top,
-touch, tr, tree, true, truncate, ts, tsort, uname, unexpand, uniq,
-unix2dos, unlink, unlzma, unxz, unzip, uptime, usleep, uudecode,
-uuencode, vi, wc, which, whoami, xargs, xxd, xz, xzcat, yes, zcat</code></pre>
+busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
+clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
+diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg-deb, du, echo,
+ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
+free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
+hexdump, hexedit, hostid, hostname, hush, id, install, kill,
+killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
+md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
+mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
+pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
+readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
+run-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
+sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
+start-stop-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
+tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
+tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
+uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
+xargs, xxd, xz, xzcat, yes, zcat</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
@@ -356,6 +359,16 @@ Options:
 <p>crc32 FILE...</p>
 
 <p>Calculate CRC32 checksum of FILEs</p>
+
+</dd>
+<dt id="cttyhack"><b>cttyhack</b></dt>
+<dd>
+
+<p>cttyhack [PROG ARGS]</p>
+
+<p>Give PROG a controlling tty if possible. Example for /etc/inittab (for busybox init): ::respawn:/bin/cttyhack /bin/sh Giving controlling tty to shell running with PID 1: $ exec cttyhack sh Starting interactive shell from boot shell script:</p>
+
+<pre><code>setsid cttyhack sh</code></pre>
 
 </dd>
 <dt id="cut"><b>cut</b></dt>
@@ -731,6 +744,20 @@ If none of the following actions is specified, -print is assumed
 <pre><code>-d      Avoid syncing metadata</code></pre>
 
 </dd>
+<dt id="fuser"><b>fuser</b></dt>
+<dd>
+
+<p>fuser [-msk46] [-SIGNAL] FILE or PORT/PROTO</p>
+
+<p>Find processes which use FILEs or PORTs</p>
+
+<pre><code>-m      Find processes which use same fs as FILEs
+-4,-6   Search only IPv4/IPv6 space
+-s      Don&#39;t display PIDs
+-k      Kill found processes
+-SIGNAL Signal to send (default: KILL)</code></pre>
+
+</dd>
 <dt id="getopt"><b>getopt</b></dt>
 <dd>
 
@@ -861,12 +888,34 @@ If none of the following actions is specified, -print is assumed
 -s OFFSET       Skip OFFSET bytes</code></pre>
 
 </dd>
+<dt id="hexedit"><b>hexedit</b></dt>
+<dd>
+
+<p>hexedit FILE</p>
+
+<p>Edit FILE in hexadecimal</p>
+
+</dd>
 <dt id="hostid"><b>hostid</b></dt>
 <dd>
 
 <p>hostid</p>
 
 <p>Print out a unique 32-bit identifier for the machine</p>
+
+</dd>
+<dt id="hostname"><b>hostname</b></dt>
+<dd>
+
+<p>hostname [-sidf] [HOSTNAME | -F FILE]</p>
+
+<p>Show or set hostname or DNS domain name</p>
+
+<pre><code>-s      Short
+-i      Addresses for the hostname
+-d      DNS domain name
+-f      Fully qualified domain name
+-F FILE Use FILE&#39;s content as hostname</code></pre>
 
 </dd>
 <dt id="hush"><b>hush</b></dt>
@@ -939,6 +988,24 @@ If none of the following actions is specified, -print is assumed
 
 <pre><code>-l      List all signal names and numbers
 -o PID  Don&#39;t signal this PID</code></pre>
+
+</dd>
+<dt id="less"><b>less</b></dt>
+<dd>
+
+<p>less [-EFIMmNSRh~] [FILE]...</p>
+
+<p>View FILE (or stdin) one screenful at a time</p>
+
+<pre><code>-E      Quit once the end of a file is reached
+-F      Quit if entire file fits on first screen
+-I      Ignore case in all searches
+-M,-m   Display status line with line numbers
+        and percentage through the file
+-N      Prefix line number to each line
+-S      Truncate long lines
+-R      Remove color escape codes in input
+-~      Suppress ~s displayed past EOF</code></pre>
 
 </dd>
 <dt id="link"><b>link</b></dt>
@@ -1126,6 +1193,14 @@ TYPE:
 <p>Base directory is: -p DIR, else $TMPDIR, else /tmp</p>
 
 </dd>
+<dt id="more"><b>more</b></dt>
+<dd>
+
+<p>more [FILE]...</p>
+
+<p>View FILE (or stdin) one screenful at a time</p>
+
+</dd>
 <dt id="mount"><b>mount</b></dt>
 <dd>
 
@@ -1155,6 +1230,19 @@ TYPE:
         ro              Same as -r</code></pre>
 
 <p>There are filesystem-specific -o flags.</p>
+
+</dd>
+<dt id="mountpoint"><b>mountpoint</b></dt>
+<dd>
+
+<p>mountpoint [-q] { [-dn] DIR | -x DEVICE }</p>
+
+<p>Check if DIR is a mountpoint</p>
+
+<pre><code>-q      Quiet
+-d      Print major:minor of the filesystem
+-n      Print device name of the filesystem
+-x      Print major:minor of DEVICE</code></pre>
 
 </dd>
 <dt id="mv"><b>mv</b></dt>
@@ -1246,12 +1334,60 @@ TYPE:
 --dry-run       Don&#39;t actually change files</code></pre>
 
 </dd>
+<dt id="pgrep"><b>pgrep</b></dt>
+<dd>
+
+<p>pgrep [-flanovx] [-s SID|-P PPID|PATTERN]</p>
+
+<p>Display process(es) selected by regex PATTERN</p>
+
+<pre><code>-l      Show command name too
+-a      Show command line too
+-f      Match against entire command line
+-n      Show the newest process only
+-o      Show the oldest process only
+-v      Negate the match
+-x      Match whole name (not substring)
+-s      Match session ID (0 for current)
+-P      Match parent process ID</code></pre>
+
+</dd>
+<dt id="pidof"><b>pidof</b></dt>
+<dd>
+
+<p>pidof [-s] [-o PID] [NAME]...</p>
+
+<p>List PIDs of all processes with names that match NAMEs</p>
+
+<pre><code>-s      Show only one PID
+-o PID  Omit given pid
+        Use %PPID to omit pid of pidof&#39;s parent</code></pre>
+
+</dd>
 <dt id="pivot_root"><b>pivot_root</b></dt>
 <dd>
 
 <p>pivot_root NEW_ROOT PUT_OLD</p>
 
 <p>Move the current root file system to PUT_OLD and make NEW_ROOT the new root file system</p>
+
+</dd>
+<dt id="pkill"><b>pkill</b></dt>
+<dd>
+
+<p>pkill [-l|-SIGNAL] [-xfvnoe] [-s SID|-P PPID|PATTERN]</p>
+
+<p>Send signal to processes selected by regex PATTERN</p>
+
+<pre><code>-l      List all signals
+-x      Match whole name (not substring)
+-f      Match against entire command line
+-s SID  Match session ID (0 for current)
+-P PPID Match parent process ID
+-v      Negate the match
+-n      Signal the newest process only
+-o      Signal the oldest process only
+-e      Display name and PID of the process being killed</code></pre>
 
 </dd>
 <dt id="printenv"><b>printenv</b></dt>
@@ -1396,6 +1532,27 @@ l       Long output</code></pre>
 --list          Print names of matching files even if they are not executable</code></pre>
 
 </dd>
+<dt id="script"><b>script</b></dt>
+<dd>
+
+<p>script [-afq] [-t[FILE]] [-c PROG] [OUTFILE]</p>
+
+<p>Default OUTFILE is &#39;typescript&#39;</p>
+
+<pre><code>-a      Append output
+-c PROG Run PROG, not shell
+-q      Quiet
+-t[FILE] Send timing to stderr or FILE</code></pre>
+
+</dd>
+<dt id="scriptreplay"><b>scriptreplay</b></dt>
+<dd>
+
+<p>scriptreplay TIMINGFILE [TYPESCRIPT [DIVISOR]]</p>
+
+<p>Play back typescripts, using timing information</p>
+
+</dd>
 <dt id="sed"><b>sed</b></dt>
 <dd>
 
@@ -1420,6 +1577,16 @@ l       Long output</code></pre>
 
 <pre><code>-w      Pad to last with leading zeros
 -s SEP  String separator</code></pre>
+
+</dd>
+<dt id="setsid"><b>setsid</b></dt>
+<dd>
+
+<p>setsid [-c] PROG ARGS</p>
+
+<p>Run PROG in a new session. PROG will have no controlling terminal and will not be affected by keyboard signals (^C etc).</p>
+
+<pre><code>-c      Set controlling terminal to stdin</code></pre>
 
 </dd>
 <dt id="sh"><b>sh</b></dt>
@@ -1652,6 +1819,19 @@ Other:
 -o              Precede strings with octal offsets
 -t o|d|x        Precede strings with offsets in base 8/10/16
 -n LEN          At least LEN characters form a string (default 4)</code></pre>
+
+</dd>
+<dt id="stty"><b>stty</b></dt>
+<dd>
+
+<p>stty [-a|g] [-F DEVICE] [SETTING]...</p>
+
+<p>Without arguments, prints baud rate, line discipline, and deviations from stty sane</p>
+
+<pre><code>-F DEVICE       Open device instead of stdin
+-a              Print all current settings in human-readable form
+-g              Print in stty-readable form
+[SETTING]       See manpage</code></pre>
 
 </dd>
 <dt id="sum"><b>sum</b></dt>
@@ -1991,6 +2171,17 @@ t       List
 <pre><code>-c CMD  Initial command to run ($EXINIT and ~/.exrc also available)
 -R      Read-only
 -H      List available features</code></pre>
+
+</dd>
+<dt id="watch"><b>watch</b></dt>
+<dd>
+
+<p>watch [-n SEC] [-t] PROG ARGS</p>
+
+<p>Run PROG periodically</p>
+
+<pre><code>-n SEC  Period (default 2)
+-t      Don&#39;t print header</code></pre>
 
 </dd>
 <dt id="wc"><b>wc</b></dt>

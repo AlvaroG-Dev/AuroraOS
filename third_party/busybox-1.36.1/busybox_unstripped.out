@@ -322,6 +322,8 @@ attempt to open miscutils/lib.a succeeded
 miscutils/lib.a
 (miscutils/lib.a)ascii.o
 (miscutils/lib.a)bc.o
+(miscutils/lib.a)hexedit.o
+(miscutils/lib.a)less.o
 (miscutils/lib.a)strings.o
 (miscutils/lib.a)time.o
 (miscutils/lib.a)tree.o
@@ -330,6 +332,7 @@ attempt to open modutils/lib.a succeeded
 modutils/lib.a
 attempt to open networking/lib.a succeeded
 networking/lib.a
+(networking/lib.a)hostname.o
 attempt to open networking/libiproute/lib.a succeeded
 networking/libiproute/lib.a
 attempt to open networking/udhcp/lib.a succeeded
@@ -339,10 +342,14 @@ printutils/lib.a
 attempt to open procps/lib.a succeeded
 procps/lib.a
 (procps/lib.a)free.o
+(procps/lib.a)fuser.o
 (procps/lib.a)kill.o
+(procps/lib.a)pgrep.o
+(procps/lib.a)pidof.o
 (procps/lib.a)ps.o
 (procps/lib.a)top.o
 (procps/lib.a)uptime.o
+(procps/lib.a)watch.o
 attempt to open runit/lib.a succeeded
 runit/lib.a
 attempt to open selinux/lib.a succeeded
@@ -351,6 +358,7 @@ attempt to open shell/lib.a succeeded
 shell/lib.a
 (shell/lib.a)ash.o
 (shell/lib.a)ash_ptr_hack.o
+(shell/lib.a)cttyhack.o
 (shell/lib.a)hush.o
 (shell/lib.a)match.o
 (shell/lib.a)math.o
@@ -365,9 +373,14 @@ util-linux/lib.a
 (util-linux/lib.a)hexdump.o
 (util-linux/lib.a)hexdump_xxd.o
 (util-linux/lib.a)mdev.o
+(util-linux/lib.a)more.o
 (util-linux/lib.a)mount.o
+(util-linux/lib.a)mountpoint.o
 (util-linux/lib.a)pivot_root.o
 (util-linux/lib.a)rev.o
+(util-linux/lib.a)script.o
+(util-linux/lib.a)scriptreplay.o
+(util-linux/lib.a)setsid.o
 attempt to open util-linux/volume_id/lib.a succeeded
 util-linux/volume_id/lib.a
 attempt to open archival/built-in.o succeeded
@@ -536,6 +549,7 @@ coreutils/lib.a
 (coreutils/lib.a)sort.o
 (coreutils/lib.a)split.o
 (coreutils/lib.a)stat.o
+(coreutils/lib.a)stty.o
 (coreutils/lib.a)sum.o
 (coreutils/lib.a)sync.o
 (coreutils/lib.a)tac.o
@@ -603,9 +617,11 @@ libbb/lib.a
 (libbb/lib.a)fgets_str.o
 (libbb/lib.a)find_mount_point.o
 (libbb/lib.a)find_pid_by_name.o
+(libbb/lib.a)find_root_device.o
 (libbb/lib.a)get_line_from_file.o
 (libbb/lib.a)get_shell_name.o
 (libbb/lib.a)getopt_allopts.o
+(libbb/lib.a)getpty.o
 (libbb/lib.a)hash_md5_sha.o
 (libbb/lib.a)hash_md5_sha256_x86-64_shaNI.o
 (libbb/lib.a)hash_md5_sha_x86-64_shaNI.o
@@ -619,6 +635,7 @@ libbb/lib.a
 (libbb/lib.a)make_directory.o
 (libbb/lib.a)match_fstype.o
 (libbb/lib.a)mode_string.o
+(libbb/lib.a)parse_config.o
 (libbb/lib.a)parse_mode.o
 (libbb/lib.a)perror_nomsg_and_die.o
 (libbb/lib.a)pidfile.o
@@ -637,6 +654,7 @@ libbb/lib.a
 (libbb/lib.a)simplify_path.o
 (libbb/lib.a)single_argv.o
 (libbb/lib.a)skip_whitespace.o
+(libbb/lib.a)speed_table.o
 (libbb/lib.a)sysconf.o
 (libbb/lib.a)trim.o
 (libbb/lib.a)u_signal_names.o
@@ -646,10 +664,13 @@ libbb/lib.a
 (libbb/lib.a)wfopen_input.o
 (libbb/lib.a)xconnect.o
 (libbb/lib.a)xgetcwd.o
+(libbb/lib.a)xgethostbyname.o
 (libbb/lib.a)xreadlink.o
 (libbb/lib.a)xrealloc_vector.o
 (libbb/lib.a)xregcomp.o
+(libbb/lib.a)herror_msg.o
 libpwdgrp/lib.a
+(libpwdgrp/lib.a)pwd_grp.o
 (libpwdgrp/lib.a)uidgid_get.o
 loginutils/lib.a
 mailutils/lib.a

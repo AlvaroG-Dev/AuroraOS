@@ -149,6 +149,9 @@ deps_libbb/u_signal_names.o := \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/sys/statvfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/statfs.h \
   /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/arpa/inet.h \
+  include/pwd_.h \
+  include/grp_.h \
+  include/shadow_.h \
   include/xatonum.h \
 
 libbb/u_signal_names.o: $(deps_libbb/u_signal_names.o)
