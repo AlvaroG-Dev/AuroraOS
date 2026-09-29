@@ -532,6 +532,17 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
   if (ops->lookup)
     node = ops->lookup(fs_priv, rel);
 
+  // [3.3.c] El nodo debe llevar el path COMPLETO (visto por el usuario)
+  // en node->name, no el relativo al mount. k_getdents64 lo necesita
+  // para mergear mounts hijas sin volver a hacer lookup.
+  if (node) {
+    size_t plen = strlen(norm);
+    if (plen >= sizeof(node->name))
+      plen = sizeof(node->name) - 1;
+    memcpy(node->name, norm, plen);
+    node->name[plen] = '\0';
+  }
+
   if (!node) {
     if (strcmp(norm, "/") == 0) {
       vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
@@ -721,21 +732,127 @@ int vfs_truncate(const char *path, uint64_t new_size) {
   return rc;
 }
 
+// [3.3.c] Recolecta los basenames de las mounts cuyo padre es `norm`.
+// Devuelve el número escrito en out_names (max MAX_SYNTH_MOUNTS).
+#define MAX_SYNTH_MOUNTS 16
+
+static size_t collect_child_mounts(const char *norm,
+                                   char out_names[][VFS_PATH_MAX], size_t max) {
+  size_t count = 0;
+  size_t nlen = strlen(norm);
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m && count < max; m = m->next) {
+    const char *mp = m->path;
+    const char *base = NULL;
+
+    if (nlen == 1 && norm[0] == '/') {
+      if (mp[0] == '/' && mp[1] != '\0')
+        base = mp + 1;
+    } else {
+      if (strncmp(mp, norm, nlen) == 0 && mp[nlen] == '/')
+        base = mp + nlen + 1;
+    }
+    if (!base || base[0] == '\0')
+      continue;
+
+    // Solo hijos DIRECTOS: sin '/' en `base`.
+    int has_slash = 0;
+    for (const char *p = base; *p; p++) {
+      if (*p == '/') {
+        has_slash = 1;
+        break;
+      }
+    }
+    if (has_slash)
+      continue;
+
+    size_t bl = strlen(base);
+    if (bl >= VFS_PATH_MAX)
+      bl = VFS_PATH_MAX - 1;
+    memcpy(out_names[count], base, bl);
+    out_names[count][bl] = '\0';
+    count++;
+  }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  return count;
+}
+
+int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
+  if (!node || !out)
+    return -EINVAL;
+  if (!(node->flags & VFS_DIRECTORY))
+    return -ENOTDIR;
+
+  char mount_names[MAX_SYNTH_MOUNTS][VFS_PATH_MAX];
+  size_t mount_count =
+      collect_child_mounts(node->name, mount_names, MAX_SYNTH_MOUNTS);
+
+  // Primero servimos los nombres de mounts sintéticas.
+  if (index < mount_count) {
+    size_t bl = strlen(mount_names[index]);
+    if (bl >= sizeof(out->name))
+      bl = sizeof(out->name) - 1;
+    memcpy(out->name, mount_names[index], bl);
+    out->name[bl] = '\0';
+    out->type = VFS_DIRECTORY;
+    out->size = 0;
+    return 0;
+  }
+
+  // Si el FS no tiene readdir (p. ej. un dir de mount sin backing) y
+  // ya pasamos los índices de mounts, EOF.
+  if (!node->ops || !node->ops->readdir) {
+    out->name[0] = '\0';
+    out->type = 0;
+    out->size = 0;
+    return 0;
+  }
+
+  // Delegamos al FS saltando entries cuya basename coincida con una
+  // mount (ya la servimos arriba). Búsqueda lineal — los directorios
+  // tienen pocas entradas.
+  uint64_t inner = index - mount_count;
+  uint64_t seen = 0;
+  uint64_t probe = 0;
+
+  for (;;) {
+    vfs_dirent_t e;
+    int rc = node->ops->readdir(node, probe, &e);
+    if (rc != 0)
+      return rc;
+    if (e.name[0] == '\0') {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    probe++;
+
+    int shadowed = 0;
+    for (size_t i = 0; i < mount_count; i++) {
+      if (strcmp(e.name, mount_names[i]) == 0) {
+        shadowed = 1;
+        break;
+      }
+    }
+    if (shadowed)
+      continue;
+
+    if (seen == inner) {
+      *out = e;
+      return 0;
+    }
+    seen++;
+  }
+}
+
 int vfs_readdir(const char *path, uint64_t index, vfs_dirent_t *out) {
   if (!path || !out)
     return -EINVAL;
   vfs_node_t *node = vfs_lookup(path);
   if (!node)
     return -ENOENT;
-  if (!(node->flags & VFS_DIRECTORY)) {
-    vfs_node_free(node);
-    return -ENOTDIR;
-  }
-  if (!node->ops || !node->ops->readdir) {
-    vfs_node_free(node);
-    return -EROFS;
-  }
-  int rc = node->ops->readdir(node, index, out);
+  int rc = vfs_readdir_node(node, index, out);
   vfs_node_free(node);
   return rc;
 }
@@ -1069,11 +1186,6 @@ static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   if (!(dir->flags & VFS_DIRECTORY))
     return -ENOTDIR;
 
-  if (!(dir->name[0] == '/' && dir->name[1] == '\0')) {
-    out->name[0] = '\0';
-    return 0;
-  }
-
   size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
   if (index >= n_entries) {
     out->name[0] = '\0';
@@ -1174,6 +1286,19 @@ static vfs_fs_ops_t devfs_fs_ops = {
     .lookup = devfs_lookup,
     .name = "devfs",
 };
+
+// [3.3.c] Itera la mount table. El callback recibe cada mount.
+void vfs_for_each_mount(vfs_mount_iter_cb_t cb, void *arg) {
+  if (!cb)
+    return;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    const char *name = (m->ops && m->ops->name) ? m->ops->name : "unknown";
+    if (cb(m->path, name, m->is_bind, m->bind_source, arg) != 0)
+      break;
+  }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+}
 
 // ===========================================================================
 // Init

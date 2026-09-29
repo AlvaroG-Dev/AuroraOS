@@ -228,11 +228,57 @@ static char *gen_stat(size_t *out_len) {
   return buf;
 }
 
+// ---------------------------------------------------------------------------
+// [3.3.c] /proc/mounts. Formato clásico: <device> <mountpoint> <fstype>
+// <options> <dump> <pass>. device="none" (Aurora no tiene concepto de
+// device en la mount table). options = "ro" para tarfs, "rw" el resto.
+// ---------------------------------------------------------------------------
+struct mounts_ctx {
+  char *buf;
+  size_t len;
+  size_t cap;
+};
+
+static int append_mount_line(const char *path, const char *fs_name, int is_bind,
+                             const char *bind_source, void *arg) {
+  struct mounts_ctx *mc = (struct mounts_ctx *)arg;
+  const char *opts = (strcmp(fs_name, "tarfs") == 0) ? "ro" : "rw";
+
+  mc->len = kappend(mc->buf, mc->len, mc->cap, "none ");
+  mc->len = kappend(mc->buf, mc->len, mc->cap, path);
+  mc->len = kappend(mc->buf, mc->len, mc->cap, " ");
+  mc->len = kappend(mc->buf, mc->len, mc->cap, fs_name);
+  mc->len = kappend(mc->buf, mc->len, mc->cap, " ");
+  mc->len = kappend(mc->buf, mc->len, mc->cap, opts);
+  mc->len = kappend(mc->buf, mc->len, mc->cap, " 0 0\n");
+
+  if (is_bind && bind_source && bind_source[0]) {
+    mc->len = kappend(mc->buf, mc->len, mc->cap, "# bind: ");
+    mc->len = kappend(mc->buf, mc->len, mc->cap, path);
+    mc->len = kappend(mc->buf, mc->len, mc->cap, " <- ");
+    mc->len = kappend(mc->buf, mc->len, mc->cap, bind_source);
+    mc->len = kappend(mc->buf, mc->len, mc->cap, "\n");
+  }
+  return 0;
+}
+
+static char *gen_mounts(size_t *out_len) {
+  const size_t CAP = 4096;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+  buf[0] = '\0';
+  struct mounts_ctx mc = {.buf = buf, .len = 0, .cap = CAP};
+  vfs_for_each_mount(append_mount_line, &mc);
+  *out_len = mc.len;
+  return buf;
+}
+
 // ===========================================================================
 // readdir: solo el directorio raíz tiene entradas estáticas.
 // ===========================================================================
 static const char *procfs_root_entries[] = {
-    "uptime", "version", "meminfo", "stat", "self",
+    "uptime", "version", "meminfo", "stat", "self", "mounts",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -242,13 +288,6 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     return -EINVAL;
   if (!(dir->flags & VFS_DIRECTORY))
     return -ENOTDIR;
-
-  // Solo el directorio raíz. Subdirectorios (/proc/<pid>) llegarán en
-  // 3.3.d.
-  if (!(dir->name[0] == '/' && dir->name[1] == '\0')) {
-    out->name[0] = '\0';
-    return 0;
-  }
 
   if (index >= PROCFS_N_ROOT_ENTRIES) {
     out->name[0] = '\0';
@@ -385,6 +424,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     o += kfmt_u64(n->link_target + o, sizeof(n->link_target) - o, p->pid);
     n->link_target[o] = '\0';
     return n;
+  }
+  if (strcmp(name, "mounts") == 0) {
+    size_t len = 0;
+    char *buf = gen_mounts(&len);
+    return make_file_node("mounts", buf, len);
   }
 
   return NULL;

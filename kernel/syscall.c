@@ -411,7 +411,6 @@ static int64_t k_fstat(uint64_t fd, uint64_t statbuf, uint64_t a3, uint64_t a4,
 
 static int64_t do_stat_path(process_t *proc, const char *upath,
                             uint64_t statbuf, uint64_t flags) {
-  (void)flags;
   if (!access_ok((void *)statbuf, sizeof(linux_stat_t)))
     return -EFAULT;
 
@@ -420,7 +419,10 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
   if (rc != 0)
     return rc;
 
-  vfs_node_t *node = vfs_lookup(path);
+  // [3.1] AT_SYMLINK_NOFOLLOW (lstat) → no seguir el symlink final.
+  // Sin esto, lstat() devuelve la info del destino, no del symlink.
+  int no_follow = (flags & AT_SYMLINK_NOFOLLOW) ? 1 : 0;
+  vfs_node_t *node = no_follow ? vfs_lookup_nofollow(path) : vfs_lookup(path);
   if (!node)
     return -ENOENT;
 
@@ -429,10 +431,13 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .size = node->size,
       .inode = node->inode,
   };
+  int is_symlink = node->is_symlink;
   vfs_node_free(node);
 
   linux_stat_t ls;
   vfs_to_linux_stat(&vs, vs.size, &ls);
+  if (is_symlink)
+    ls.st_mode = S_IFLNK | 0777;
   if (copy_to_user((void *)statbuf, &ls, sizeof(ls)) < 0)
     return -EFAULT;
   return 0;
@@ -1232,8 +1237,6 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
   file_descriptor_t *f = proc->fds[fd];
   if (!f->node || !(f->node->flags & VFS_DIRECTORY))
     return -ENOTDIR;
-  if (!f->node->ops || !f->node->ops->readdir)
-    return -ENOSYS;
 
   if (!access_ok((void *)dirp, count))
     return -EFAULT;
@@ -1246,7 +1249,9 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
 
   while (pos + sizeof(linux_dirent64_t) + 8 <= count) {
     vfs_dirent_t ent;
-    int rc = f->node->ops->readdir(f->node, index, &ent);
+    // [3.3.c] vía vfs_readdir_node (no node->ops->readdir directo)
+    // para que las mounts hijas (/dev, /proc) aparezcan en `ls /`.
+    int rc = vfs_readdir_node(f->node, index, &ent);
     if (rc != 0)
       break;
     if (ent.name[0] == '\0')
@@ -1320,12 +1325,70 @@ static int64_t k_uname(uint64_t buf, uint64_t a2, uint64_t a3, uint64_t a4,
 // ---------- readlink ----------
 static int64_t k_readlink(uint64_t path, uint64_t buf, uint64_t bufsiz,
                           uint64_t a4, uint64_t a5) {
-  (void)path;
-  (void)buf;
-  (void)bufsiz;
   (void)a4;
   (void)a5;
-  return -ENOENT;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!buf || bufsiz == 0)
+    return -EINVAL;
+  if (!access_ok((void *)buf, bufsiz))
+    return -EFAULT;
+
+  char p[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path, p, sizeof(p));
+  if (rc != 0)
+    return rc;
+
+  char target[VFS_PATH_MAX];
+  rc = vfs_readlink(p, target, sizeof(target));
+  if (rc < 0)
+    return rc;
+
+  size_t n = (size_t)rc;
+  if (n > bufsiz)
+    n = bufsiz;
+  if (copy_to_user((void *)buf, target, n) < 0)
+    return -EFAULT;
+  return (int64_t)n;
+}
+
+// [3.1] symlink(target, linkpath).
+static int64_t k_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  char target[VFS_PATH_MAX];
+  long tl = strncpy_from_user(target, (const char *)target_ptr, sizeof(target));
+  if (tl < 0)
+    return -EFAULT;
+  if (tl == 0)
+    return -EINVAL;
+
+  char linkpath[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)linkpath_ptr, linkpath,
+                             sizeof(linkpath));
+  if (rc != 0)
+    return rc;
+
+  return vfs_symlink(target, linkpath);
+}
+
+// [3.2] Hard link. No soportado todavía. FAT32 no los tiene y tarfs es
+// RO. Se registra para que musl/busybox no se coman un ENOSYS genérico.
+static int64_t k_link(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -EPERM;
 }
 
 // ---------- ioctl ----------
@@ -2725,6 +2788,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_UNAME] = {k_uname, "uname"},
     [SYS_GETCWD] = {k_getcwd, "getcwd"},
     [SYS_CHDIR] = {k_chdir, "chdir"},
+    [SYS_LINK] = {k_link, "link"},
+    [SYS_SYMLINK] = {k_symlink, "symlink"},
     [SYS_READLINK] = {k_readlink, "readlink"},
     [SYS_ARCH_PRCTL] = {k_arch_prctl, "arch_prctl"},
     [SYS_GETDENTS64] = {k_getdents64, "getdents64"},

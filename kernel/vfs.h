@@ -70,6 +70,14 @@ typedef struct vfs_ops {
   int (*rename)(vfs_node_t *src_dir, const char *src_name, vfs_node_t *dst_dir,
                 const char *dst_name);
 
+  // [3.1] Lee el target de un symlink. Devuelve la longitud copiada
+  // (sin NUL) o negativo. Si NULL, el VFS usa node->link_target.
+  int (*readlink)(vfs_node_t *node, char *buf, size_t bufsize);
+
+  // [3.1] Crea un symlink `name` -> `target` en el directorio `dir`.
+  // Solo FS RW lo implementan. tarfs (RO) lo deja NULL.
+  int (*symlink)(vfs_node_t *dir, const char *name, const char *target);
+
   // NUEVOS:
   // Devuelve una máscara con POLLIN (1), POLLOUT (4), POLLERR (8), etc.
   // Si NULL, el VFS asume (POLLIN|POLLOUT) siempre listo (ficheros regulares).
@@ -89,13 +97,21 @@ typedef struct vfs_ops {
 } vfs_ops_t;
 
 struct vfs_node {
-  char name[VFS_PATH_MAX]; // path completo (en este diseño simplificado)
+  char name[VFS_PATH_MAX];
   uint32_t flags;
   size_t size;
   uint32_t inode;
   vfs_ops_t *ops;
-  vfs_fs_ops_t *fs; // FS que produjo este nodo (para dispatch futuro)
-  void *priv;       // datos específicos del FS
+  vfs_fs_ops_t *fs;
+  void *priv;
+
+  // [3.1] Si is_symlink != 0, este nodo representa un symlink y
+  // link_target contiene su destino tal cual está en el tar (puede ser
+  // absoluto o relativo). El FS que lo produce debe rellenar ambos.
+  // vfs_lookup() sigue el symlink automáticamente; vfs_lookup_nofollow()
+  // lo devuelve tal cual.
+  int is_symlink;
+  char link_target[VFS_PATH_MAX];
 };
 
 // ---------------------------------------------------------------------------
@@ -182,6 +198,20 @@ void *vfs_get_mount_priv(const char *path);
 // vfs_node_free) o NULL si no existe. El path se normaliza internamente.
 vfs_node_t *vfs_lookup(const char *path);
 
+// [3.1] Igual que vfs_lookup() pero NO sigue el symlink final. Si el
+// path apunta a un symlink, devuelve el nodo del symlink con
+// is_symlink=1 y link_target relleno. Se usa para lstat() y readlink().
+vfs_node_t *vfs_lookup_nofollow(const char *path);
+
+// [3.1] Lee el target de un symlink en `path`. Escribe hasta bufsize-1
+// bytes + NUL. Devuelve la longitud SIN NUL, o -EINVAL si no es
+// symlink, -ENOENT si no existe.
+int vfs_readlink(const char *path, char *buf, size_t bufsize);
+
+// [3.1] Crea un symlink `linkpath` -> `target`. `target` no se
+// resuelve ni se valida. Devuelve -EROFS si el FS no lo soporta.
+int vfs_symlink(const char *target, const char *linkpath);
+
 // [PR 4.2] Operaciones de nombre (namespace).
 // Estas funciones resuelven el path, localizan el directorio padre y
 // delegan en el FS montado. No requieren un proceso (no tocan fds).
@@ -254,5 +284,25 @@ int vfs_node_poll(vfs_node_t *node, short events);
 
 // ioctl del nodo. Si NULL, devuelve -ENOTTY.
 int64_t vfs_node_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg);
+
+// ---------------------------------------------------------------------------
+// [3.3.c] Iteración de mounts + readdir con merge de mounts hijas.
+// ---------------------------------------------------------------------------
+
+// Callback para vfs_for_each_mount. Devuelve 0 para continuar,
+// != 0 para parar. Los punteros solo son válidos durante la llamada.
+typedef int (*vfs_mount_iter_cb_t)(const char *path, const char *fs_name,
+                                   int is_bind, const char *bind_source,
+                                   void *arg);
+void vfs_for_each_mount(vfs_mount_iter_cb_t cb, void *arg);
+
+// [3.3.c] Variante de vfs_readdir que opera sobre un nodo ya resuelto.
+// El nodo debe tener node->name = path completo (lo garantiza
+// vfs_lookup_rec). Esta variante es la que usa k_getdents64().
+//
+// A diferencia de vfs_readdir(path, ...), esta mergea las mounts cuyo
+// padre es el directorio listado, para que `ls /` vea /dev y /proc
+// aunque no existan como entries del FS subyacente.
+int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out);
 
 #endif
