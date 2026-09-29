@@ -56,8 +56,11 @@
 #define SYS_CHDIR 80
 #define SYS_RENAME 82
 #define SYS_MKDIR 83
+#define SYS_LINK 86
 #define SYS_UNLINK 87
+#define SYS_SYMLINK 88
 #define SYS_READLINK 89
+#define SYS_SYSINFO 99
 #define SYS_GETUID 102
 #define SYS_GETGID 104
 #define SYS_GETEUID 107

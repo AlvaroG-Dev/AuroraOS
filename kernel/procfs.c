@@ -228,6 +228,69 @@ static char *gen_stat(size_t *out_len) {
   return buf;
 }
 
+// ---------------------------------------------------------------------------
+// [3.3.b] /proc/loadavg.
+//
+// Formato Linux: "load1 load5 load15 running/total last_pid".
+// Como no medimos load average, reportamos 0.00 en los tres. La pareja
+// running/total es útil para top/busybox.
+// ---------------------------------------------------------------------------
+struct loadavg_ctx {
+  uint32_t total;
+  uint32_t running;
+};
+
+static int count_loadavg_cb(process_t *p, void *arg) {
+  struct loadavg_ctx *c = (struct loadavg_ctx *)arg;
+  c->total++;
+
+  if (p->is_zombie || p->stopped)
+    return 0;
+
+  // Solo cuentan procesos en la runqueue (running o ready).
+  // Un proceso bloqueado en read()/IPC/nanosleep NO está corriendo.
+  // Lectura sin sched_lock: la race es benigna (si justo cambia de
+  // estado, el valor difiere en ±1, aceptable para loadavg).
+  if (p->task &&
+      (p->task->state == TASK_RUNNING || p->task->state == TASK_READY))
+    c->running++;
+
+  return 0;
+}
+
+static char *gen_loadavg(size_t *out_len) {
+  const size_t CAP = 64;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+
+  struct loadavg_ctx c = {0, 0};
+  process_for_each(count_loadavg_cb, &c);
+
+  size_t o = 0;
+  // loads
+  o = kappend(buf, o, CAP, "0.00 0.00 0.00 ");
+
+  // running/total
+  if (c.running == 0)
+    buf[o++] = '0';
+  else
+    o += kfmt_u64(buf + o, CAP - o, c.running);
+  buf[o++] = '/';
+  if (c.total == 0)
+    buf[o++] = '0';
+  else
+    o += kfmt_u64(buf + o, CAP - o, c.total);
+
+  // last_pid: usamos el pid del último proceso creado. No lo llevamos,
+  // así que ponemos 1.
+  o = kappend(buf, o, CAP, " 1\n");
+
+  buf[o] = '\0';
+  *out_len = o;
+  return buf;
+}
+
 // ===========================================================================
 // [3.3.d] /proc/<pid>/*.
 // ===========================================================================
@@ -469,7 +532,7 @@ static char *gen_mounts(size_t *out_len) {
 // readdir: solo el directorio raíz tiene entradas estáticas.
 // ===========================================================================
 static const char *procfs_root_entries[] = {
-    "uptime", "version", "meminfo", "stat", "self", "mounts",
+    "uptime", "version", "meminfo", "stat", "self", "mounts", "loadavg",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -743,6 +806,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     n->flags = VFS_DIRECTORY;
     n->ops = &procfs_dir_ops; // reusa el readdir que ya distingue
     return n;
+  }
+  if (strcmp(name, "loadavg") == 0) {
+    size_t len = 0;
+    char *b = gen_loadavg(&len);
+    return make_file_node("loadavg", b, len);
   }
 
   return NULL;

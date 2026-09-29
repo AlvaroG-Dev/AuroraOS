@@ -14,6 +14,7 @@
 #include "klog.h"
 #include "paging.h"
 #include "pf.h"
+#include "pmm.h"
 #include "process.h"
 #include "sched.h"
 #include "serial.h"
@@ -712,6 +713,67 @@ static int64_t k_set_tid_address(uint64_t a1, uint64_t a2, uint64_t a3,
   (void)a5;
   process_t *proc = process_current();
   return proc ? (int64_t)proc->pid : -EFAULT;
+}
+
+// ---------- sysinfo (99) ----------
+//
+// Estructura Linux x86_64, 112 bytes. Rellenamos uptime, totalram,
+// freeram, procs. loads[] a 0 (no medimos load average real). Los
+// campos que no tocamos van a 0.
+struct k_sysinfo {
+  int64_t uptime;
+  uint64_t loads[3];
+  uint64_t totalram;
+  uint64_t freeram;
+  uint64_t sharedram;
+  uint64_t bufferram;
+  uint64_t totalswap;
+  uint64_t freeswap;
+  uint16_t procs;
+  uint16_t pad;
+  uint64_t totalhigh;
+  uint64_t freehigh;
+  uint32_t mem_unit;
+  uint8_t _f[0];
+};
+_Static_assert(sizeof(struct k_sysinfo) == 112, "sysinfo layout x86_64");
+
+struct count_ctx {
+  uint32_t n;
+};
+static int count_proc_cb(process_t *p, void *arg) {
+  (void)p;
+  ((struct count_ctx *)arg)->n++;
+  return 0;
+}
+
+static int64_t k_sysinfo(uint64_t info_ptr, uint64_t a2, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!info_ptr)
+    return -EFAULT;
+  if (!access_ok((void *)info_ptr, sizeof(struct k_sysinfo)))
+    return -EFAULT;
+
+  struct k_sysinfo si;
+  memset(&si, 0, sizeof(si));
+  si.uptime = (int64_t)(sched_get_ticks() / 1000);
+  si.loads[0] = si.loads[1] = si.loads[2] = 0;
+  si.totalram = pmm_total_pages() * (uint64_t)PAGE_SIZE;
+  si.freeram = pmm_free_pages_count() * (uint64_t)PAGE_SIZE;
+  si.mem_unit = 1;
+
+  struct count_ctx cc = {.n = 0};
+  extern void process_for_each(int (*cb)(process_t *, void *), void *arg);
+  process_for_each(count_proc_cb, &cc);
+  si.procs = (uint16_t)(cc.n > 0xFFFF ? 0xFFFF : cc.n);
+
+  if (copy_to_user((void *)info_ptr, &si, sizeof(si)) < 0)
+    return -EFAULT;
+  return 0;
 }
 
 // ---------- getuid/getgid/geteuid/getegid ----------
@@ -2773,6 +2835,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_DUP2] = {k_dup2, "dup2"},
     [SYS_GETPID] = {k_getpid, "getpid"},
     [SYS_SENDFILE] = {k_sendfile, "sendfile"},
+    [SYS_SYSINFO] = {k_sysinfo, "sysinfo"},
     [SYS_GETUID] = {k_getuid, "getuid"},
     [SYS_GETGID] = {k_getgid, "getgid"},
     [SYS_GETEUID] = {k_geteuid, "geteuid"},

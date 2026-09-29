@@ -37,6 +37,19 @@ struct elf_vfs_ctx {
   vfs_node_t *node;
 };
 
+static void set_proc_name_from_path(process_t *proc, const char *path) {
+  const char *base = path;
+  for (const char *p = path; *p; p++)
+    if (*p == '/')
+      base = p + 1;
+  size_t n = 0;
+  while (base[n] && n < sizeof(proc->name) - 1) {
+    proc->name[n] = base[n];
+    n++;
+  }
+  proc->name[n] = '\0';
+}
+
 void process_init(void) { spin_init(&process_lock); }
 
 // ---------------------------------------------------------------------------
@@ -538,12 +551,7 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->is_zombie = 0;
   proc->ctty = NULL;
 
-  size_t i = 0;
-  while (name[i] && i < sizeof(proc->name) - 1) {
-    proc->name[i] = name[i];
-    i++;
-  }
-  proc->name[i] = '\0';
+  set_proc_name_from_path(proc, name);
   proc->task = task;
   task_get(task);
   proc->pml4_phys = pml4_phys;
@@ -756,12 +764,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->is_zombie = 0;
   proc->ctty = NULL;
 
-  size_t i = 0;
-  while (name[i] && i < sizeof(proc->name) - 1) {
-    proc->name[i] = name[i];
-    i++;
-  }
-  proc->name[i] = '\0';
+  set_proc_name_from_path(proc, name);
   proc->task = task;
   task_get(task);
   proc->pml4_phys = pml4_phys;
