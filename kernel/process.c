@@ -102,6 +102,88 @@ int process_inherit_envp(const process_t *parent, process_t *child) {
 }
 
 // ---------------------------------------------------------------------------
+// [3.3.d] argv del proceso.
+// ---------------------------------------------------------------------------
+void process_clear_argv(process_t *proc) {
+  if (!proc)
+    return;
+  for (int i = 0; i < PROCESS_ARGV_MAX; i++) {
+    if (proc->argv[i]) {
+      kfree(proc->argv[i]);
+      proc->argv[i] = NULL;
+    }
+  }
+  proc->argc = 0;
+}
+
+int process_set_argv(process_t *proc, int argc, const char *const *argv) {
+  if (!proc)
+    return -EINVAL;
+  if (argc < 0 || argc > PROCESS_ARGV_MAX)
+    return -EINVAL;
+
+  process_clear_argv(proc);
+  if (!argv || argc == 0)
+    return 0;
+
+  for (int i = 0; i < argc; i++) {
+    if (!argv[i]) {
+      process_clear_argv(proc);
+      return -EINVAL;
+    }
+    size_t n = strlen(argv[i]);
+    if (n == 0 || n >= PROCESS_ENV_STR_MAX) {
+      process_clear_argv(proc);
+      return -E2BIG;
+    }
+    char *copy = (char *)kmalloc(n + 1);
+    if (!copy) {
+      process_clear_argv(proc);
+      return -ENOMEM;
+    }
+    memcpy(copy, argv[i], n + 1);
+    proc->argv[i] = copy;
+  }
+  proc->argc = argc;
+  return 0;
+}
+
+int process_inherit_argv(const process_t *parent, process_t *child) {
+  if (!parent || !child)
+    return -EINVAL;
+  process_clear_argv(child);
+  for (int i = 0; i < parent->argc && i < PROCESS_ARGV_MAX; i++) {
+    if (!parent->argv[i])
+      break;
+    size_t n = strlen(parent->argv[i]);
+    char *copy = (char *)kmalloc(n + 1);
+    if (!copy) {
+      process_clear_argv(child);
+      return -ENOMEM;
+    }
+    memcpy(copy, parent->argv[i], n + 1);
+    child->argv[i] = copy;
+  }
+  child->argc = parent->argc;
+  return 0;
+}
+
+// [3.3.d] Iterador de process_list. cb bajo process_lock.
+void process_for_each(process_iter_cb_t cb, void *arg) {
+  if (!cb)
+    return;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  while (p) {
+    process_t *next = p->next; // por si cb alterase algo (no debería)
+    if (cb(p, arg) != 0)
+      break;
+    p = next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+}
+
+// ---------------------------------------------------------------------------
 // [RUSAGE] Contabilidad de CPU por proceso.
 //
 // La tarea solo corre en una CPU a la vez (garantizado por on_cpu y
@@ -711,6 +793,17 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     return NULL;
   }
 
+  // [3.3.d] Copiar argv para /proc/<pid>/cmdline.
+  if (process_set_argv(proc, argc, argv) != 0) {
+    LOG_ERR("[PROC] No se pudo copiar argv");
+    process_clear_envp(proc);
+    task_put(task);
+    task_put(task);
+    paging_free_user_space(pml4_phys);
+    kfree(proc);
+    return NULL;
+  }
+
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
       !vma_create(proc, elf_vma_start, elf_vma_end,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
@@ -1222,6 +1315,9 @@ void process_exit(process_t *proc, int exit_code) {
   // [ENV] Liberar el entorno.
   process_clear_envp(proc);
 
+  // [3.3.d] Liberar argv.
+  process_clear_argv(proc);
+
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fds[f])
       vfs_close_for_proc(proc, f);
@@ -1544,6 +1640,17 @@ int64_t sys_fork(void) {
     return -ENOMEM;
   }
 
+  if (process_inherit_argv(parent, child) != 0) {
+    LOG_ERR("[FORK] process_inherit_argv falló");
+    process_clear_envp(child);
+    paging_free_user_space(child_pml4_phys);
+    if (child_task->stack)
+      kfree(child_task->stack);
+    kfree(child_task);
+    kfree(child);
+    return -ENOMEM;
+  }
+
   // 5. VMAs.
   if (clone_vmas(parent, child) != 0) {
     LOG_ERR("[FORK] clone_vmas falló");
@@ -1723,6 +1830,10 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   // (degradación mejor que abortar tras el commit).
   if (process_set_envp(proc, envc, envp) != 0)
     LOG_WARN("[EXECVE] process_set_envp falló, entorno conservado");
+
+  // [3.3.d] Reemplazar argv.
+  if (process_set_argv(proc, argc, argv) != 0)
+    LOG_WARN("[EXECVE] process_set_argv falló, argv conservado");
 
   write_cr3(new_pml4_phys);
   wrmsr(0xC0000100, 0);

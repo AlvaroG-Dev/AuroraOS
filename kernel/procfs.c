@@ -228,6 +228,197 @@ static char *gen_stat(size_t *out_len) {
   return buf;
 }
 
+// ===========================================================================
+// [3.3.d] /proc/<pid>/*.
+// ===========================================================================
+
+// Genera contenido bajo process_lock. cb corre bajo lock: no debe dormir.
+struct pid_ctx {
+  uint32_t target_pid;
+  char *buf;
+  size_t cap;
+  size_t len;
+  int found;
+};
+
+// ---------------------------------------------------------------------------
+// /proc/<pid>/stat: formato Linux de 52 campos. Solo los primeros son
+// reales; el resto van a 0. BusyBox `ps` usa [0]=pid, [1]=comm,
+// [2]=state, [3]=ppid, [22]=vsize, [23]=rss.
+// ---------------------------------------------------------------------------
+static int gen_pid_stat_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid || p->is_zombie)
+    return 0;
+
+  size_t o = 0;
+  char *buf = c->buf;
+  size_t cap = c->cap;
+
+  o += kfmt_u64(buf + o, cap - o, p->pid);
+  buf[o++] = ' ';
+  buf[o++] = '(';
+  size_t nl = strlen(p->name);
+  if (nl > 15)
+    nl = 15;
+  for (size_t i = 0; i < nl && o + 2 < cap; i++)
+    buf[o++] = p->name[i];
+  buf[o++] = ')';
+  buf[o++] = ' ';
+
+  char state = 'R';
+  if (p->is_zombie)
+    state = 'Z';
+  else if (p->stopped)
+    state = 'T';
+  buf[o++] = state;
+  buf[o++] = ' ';
+
+  o += kfmt_u64(buf + o, cap - o, p->ppid);
+  o = kappend(buf, o, cap, " ");
+  o += kfmt_u64(buf + o, cap - o, p->pgid);
+  o = kappend(buf, o, cap, " ");
+  o += kfmt_u64(buf + o, cap - o, p->sid);
+  o = kappend(buf, o, cap, " ");
+
+  // 22 campos más hasta vsize, todos 0.
+  for (int i = 0; i < 19; i++)
+    o = kappend(buf, o, cap, "0 ");
+  // utime, stime en ticks (campos 14, 15).
+  // (Reconstruimos: los anteriores ya están, ahora los 19 ceros cubren
+  //  tty_nr..starttime; añadimos utime/stime reales.)
+  o += kfmt_u64(buf + o, cap - o, p->cpu_ticks_user);
+  o = kappend(buf, o, cap, " ");
+  o = kappend(buf, o, cap, "0 ");
+
+  // vsize (campo 23) — en bytes. No medimos RSS, ponemos 0.
+  o = kappend(buf, o, cap, "0 ");
+  // rss (campo 24) — en pages.
+  o = kappend(buf, o, cap, "0 ");
+  // Relleno hasta 52 campos.
+  for (int i = 0; i < 27; i++)
+    o = kappend(buf, o, cap, "0 ");
+  if (o > 0 && buf[o - 1] == ' ')
+    o--;
+  buf[o++] = '\n';
+
+  c->len = o;
+  c->found = 1;
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// /proc/<pid>/status: key:value multi-línea. BusyBox ps no lo usa pero
+// `top` y algunos scripts sí.
+// ---------------------------------------------------------------------------
+static int gen_pid_status_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid || p->is_zombie)
+    return 0;
+
+  char *buf = c->buf;
+  size_t cap = c->cap;
+  size_t o = 0;
+
+  o = kappend(buf, o, cap, "Name:\t");
+  o = kappend(buf, o, cap, p->name);
+  o = kappend(buf, o, cap, "\n");
+
+  o = kappend(buf, o, cap, "State:\t");
+  buf[o++] = p->stopped ? 'T' : 'R';
+  o = kappend(buf, o, cap, " (running)\n");
+
+  o = kappend(buf, o, cap, "Tgid:\t");
+  o += kfmt_u64(buf + o, cap - o, p->pid);
+  o = kappend(buf, o, cap, "\n");
+
+  o = kappend(buf, o, cap, "Pid:\t");
+  o += kfmt_u64(buf + o, cap - o, p->pid);
+  o = kappend(buf, o, cap, "\n");
+
+  o = kappend(buf, o, cap, "PPid:\t");
+  o += kfmt_u64(buf + o, cap - o, p->ppid);
+  o = kappend(buf, o, cap, "\n");
+
+  o = kappend(buf, o, cap, "Uid:\t0\t0\t0\t0\n");
+  o = kappend(buf, o, cap, "Gid:\t0\t0\t0\t0\n");
+  o = kappend(buf, o, cap, "Threads:\t1\n");
+  o = kappend(buf, o, cap, "VmSize:\t0 kB\n");
+  o = kappend(buf, o, cap, "VmRSS:\t0 kB\n");
+
+  c->len = o;
+  c->found = 1;
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// /proc/<pid>/cmdline: argv[0]\0argv[1]\0...\0
+// ---------------------------------------------------------------------------
+static int gen_pid_cmdline_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid || p->is_zombie)
+    return 0;
+
+  char *buf = c->buf;
+  size_t cap = c->cap;
+  size_t o = 0;
+
+  if (p->argc == 0) {
+    // Proceso sin argv: Linux devuelve solo un \0.
+    buf[0] = '\0';
+    c->len = 1;
+    c->found = 1;
+    return 1;
+  }
+  for (int i = 0; i < p->argc && i < PROCESS_ARGV_MAX; i++) {
+    if (!p->argv[i])
+      break;
+    size_t n = strlen(p->argv[i]);
+    if (o + n + 1 > cap)
+      n = (o + 1 < cap) ? (cap - o - 1) : 0;
+    memcpy(buf + o, p->argv[i], n);
+    o += n;
+    buf[o++] = '\0';
+  }
+  c->len = o;
+  c->found = 1;
+  return 1;
+}
+
+// Envoltorio común: reserva buffer, itera bajo lock, devuelve el
+// contenido o NULL si el pid no existe.
+static char *gen_pid_file(uint32_t pid, size_t *out_len, process_iter_cb_t cb) {
+  const size_t CAP = 1024;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+  struct pid_ctx c = {.target_pid = pid, .buf = buf, .cap = CAP};
+  process_for_each(cb, &c);
+  if (!c.found) {
+    kfree(buf);
+    return NULL;
+  }
+  *out_len = c.len;
+  return buf;
+}
+
+// ===========================================================================
+// Parser de "<digits>"
+// ===========================================================================
+static int parse_pid(const char *s, uint32_t *out) {
+  if (!s || !*s)
+    return 0;
+  uint32_t v = 0;
+  while (*s) {
+    if (*s < '0' || *s > '9')
+      return 0;
+    v = v * 10 + (uint32_t)(*s - '0');
+    s++;
+  }
+  *out = v;
+  return 1;
+}
+
 // ---------------------------------------------------------------------------
 // [3.3.c] /proc/mounts. Formato clásico: <device> <mountpoint> <fstype>
 // <options> <dump> <pass>. device="none" (Aurora no tiene concepto de
@@ -283,27 +474,94 @@ static const char *procfs_root_entries[] = {
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
 
+struct procfs_root_iter {
+  uint64_t target;
+  uint64_t current;
+  vfs_dirent_t *out;
+  int found;
+};
+
+static int procfs_root_pid_cb(process_t *p, void *arg) {
+  struct procfs_root_iter *it = (struct procfs_root_iter *)arg;
+  if (p->is_zombie)
+    return 0;
+  if (it->current == it->target) {
+    int n = 0;
+    char tmp[12];
+    uint32_t v = p->pid;
+    if (v == 0)
+      tmp[n++] = '0';
+    while (v > 0) {
+      tmp[n++] = (char)('0' + (v % 10));
+      v /= 10;
+    }
+    int i = 0;
+    while (n > 0 && i < (int)sizeof(it->out->name) - 1)
+      it->out->name[i++] = tmp[--n];
+    it->out->name[i] = '\0';
+    it->out->type = VFS_DIRECTORY;
+    it->out->size = 0;
+    it->found = 1;
+    return 1;
+  }
+  it->current++;
+  return 0;
+}
+
+static const char *procfs_pid_entries[] = {"stat", "status", "cmdline"};
+#define PROCFS_N_PID_ENTRIES                                                   \
+  (sizeof(procfs_pid_entries) / sizeof(procfs_pid_entries[0]))
+
 static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   if (!dir || !out)
     return -EINVAL;
   if (!(dir->flags & VFS_DIRECTORY))
     return -ENOTDIR;
 
-  if (index >= PROCFS_N_ROOT_ENTRIES) {
-    out->name[0] = '\0';
-    out->type = 0;
+  // [3.3.d] ¿Es /proc raíz o /proc/<pid>?
+  uint32_t pid;
+  if (strncmp(dir->name, "/proc/", 6) == 0 && parse_pid(dir->name + 6, &pid)) {
+    // /proc/<pid> — entradas estáticas.
+    if (index >= PROCFS_N_PID_ENTRIES) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    const char *n = procfs_pid_entries[index];
+    size_t l = strlen(n);
+    memcpy(out->name, n, l);
+    out->name[l] = '\0';
+    out->type = VFS_FILE;
     out->size = 0;
     return 0;
   }
 
-  const char *n = procfs_root_entries[index];
-  size_t len = strlen(n);
-  if (len >= sizeof(out->name))
-    len = sizeof(out->name) - 1;
-  memcpy(out->name, n, len);
-  out->name[len] = '\0';
-  out->type = VFS_FILE;
-  out->size = 0;
+  // /proc raíz — estáticos + pids.
+  if (index < PROCFS_N_ROOT_ENTRIES) {
+    const char *n = procfs_root_entries[index];
+    size_t l = strlen(n);
+    if (l >= sizeof(out->name))
+      l = sizeof(out->name) - 1;
+    memcpy(out->name, n, l);
+    out->name[l] = '\0';
+    out->type = VFS_FILE;
+    out->size = 0;
+    return 0;
+  }
+
+  struct procfs_root_iter it = {
+      .target = index - PROCFS_N_ROOT_ENTRIES,
+      .current = 0,
+      .out = out,
+      .found = 0,
+  };
+  process_for_each(procfs_root_pid_cb, &it);
+  if (!it.found) {
+    out->name[0] = '\0';
+    out->type = 0;
+    out->size = 0;
+  }
   return 0;
 }
 
@@ -366,57 +624,98 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
   if (path[1] == '\0')
     return make_root_node();
 
-  // Sin subdirectorios todavía. Un '/' extra → rechazar.
-  for (const char *p = path + 1; *p; p++) {
-    if (*p == '/')
-      return NULL;
-  }
-
   const char *name = path + 1;
 
-  // [FIX] Evaluar en dos líneas separadas. El orden de evaluación de
-  // argumentos en C no está garantizado: si `*len_out` se evalúa antes
-  // que `gen_XXX(len_out)`, se pasa un `len` sin inicializar y el
-  // fichero queda truncado a basura.
+  // [3.3.d] ¿<pid> o <pid>/<file>?
+  const char *slash = NULL;
+  for (const char *p = name; *p; p++) {
+    if (*p == '/') {
+      slash = p;
+      break;
+    }
+  }
+
+  if (slash) {
+    // <pid>/<file>
+    char pidbuf[16];
+    size_t plen = (size_t)(slash - name);
+    if (plen == 0 || plen >= sizeof(pidbuf))
+      return NULL;
+    memcpy(pidbuf, name, plen);
+    pidbuf[plen] = '\0';
+    uint32_t pid;
+    // [3.3.d] "self" se resuelve al pid del proceso llamante en cada
+    // lookup, como en Linux. Sin esto, /proc/self/stat no resuelve
+    // porque "self" no es numérico.
+    if (strcmp(pidbuf, "self") == 0) {
+      process_t *cur = process_current();
+      if (!cur)
+        return NULL;
+      pid = cur->pid;
+    } else if (!parse_pid(pidbuf, &pid)) {
+      return NULL;
+    }
+
+    const char *file = slash + 1;
+    // Solo aceptamos un componente más.
+    for (const char *p = file; *p; p++)
+      if (*p == '/')
+        return NULL;
+
+    size_t len = 0;
+    char *buf = NULL;
+    if (strcmp(file, "stat") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_stat_cb);
+      return buf ? make_file_node("stat", buf, len) : NULL;
+    }
+    if (strcmp(file, "status") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_status_cb);
+      return buf ? make_file_node("status", buf, len) : NULL;
+    }
+    if (strcmp(file, "cmdline") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_cmdline_cb);
+      return buf ? make_file_node("cmdline", buf, len) : NULL;
+    }
+    return NULL;
+  }
+
+  // Un solo componente.
+  // Estáticos primero.
   if (strcmp(name, "uptime") == 0) {
     size_t len = 0;
-    char *buf = gen_uptime(&len);
-    return make_file_node("uptime", buf, len);
+    char *b = gen_uptime(&len);
+    return make_file_node("uptime", b, len);
   }
   if (strcmp(name, "version") == 0) {
     size_t len = 0;
-    char *buf = gen_version(&len);
-    return make_file_node("version", buf, len);
+    char *b = gen_version(&len);
+    return make_file_node("version", b, len);
   }
   if (strcmp(name, "meminfo") == 0) {
     size_t len = 0;
-    char *buf = gen_meminfo(&len);
-    return make_file_node("meminfo", buf, len);
+    char *b = gen_meminfo(&len);
+    return make_file_node("meminfo", b, len);
   }
   if (strcmp(name, "stat") == 0) {
     size_t len = 0;
-    char *buf = gen_stat(&len);
-    return make_file_node("stat", buf, len);
+    char *b = gen_stat(&len);
+    return make_file_node("stat", b, len);
+  }
+  if (strcmp(name, "mounts") == 0) {
+    size_t len = 0;
+    char *b = gen_mounts(&len);
+    return make_file_node("mounts", b, len);
   }
   if (strcmp(name, "self") == 0) {
-    // [3.3.a] /proc/self: symlink al pid del proceso actual. La
-    // resolución la hará vfs_lookup_rec() cuando llegue a un
-    // /proc/<pid>/... real; por ahora devolvemos el nodo del symlink
-    // con is_symlink=1 y link_target relleno.
     process_t *p = process_current();
     if (!p)
       return NULL;
     vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     if (!n)
       return NULL;
-    n->name[0] = 's';
-    n->name[1] = 'e';
-    n->name[2] = 'l';
-    n->name[3] = 'f';
-    n->name[4] = '\0';
+    memcpy(n->name, "self", 5);
     n->flags = VFS_FILE;
     n->is_symlink = 1;
-    // "/proc/" + pid
     size_t o = 0;
     const char *pfx = "/proc/";
     while (*pfx && o + 1 < sizeof(n->link_target))
@@ -425,10 +724,25 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     n->link_target[o] = '\0';
     return n;
   }
-  if (strcmp(name, "mounts") == 0) {
-    size_t len = 0;
-    char *buf = gen_mounts(&len);
-    return make_file_node("mounts", buf, len);
+
+  // [3.3.d] ¿<pid>?
+  uint32_t pid;
+  if (parse_pid(name, &pid)) {
+    // Verificar que existe.
+    process_t *p = process_find_by_pid(pid);
+    if (!p)
+      return NULL;
+    vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!n)
+      return NULL;
+    size_t l = strlen(name);
+    if (l >= sizeof(n->name))
+      l = sizeof(n->name) - 1;
+    memcpy(n->name, name, l);
+    n->name[l] = '\0';
+    n->flags = VFS_DIRECTORY;
+    n->ops = &procfs_dir_ops; // reusa el readdir que ya distingue
+    return n;
   }
 
   return NULL;

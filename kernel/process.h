@@ -119,6 +119,15 @@ typedef struct process {
   // "KEY=VALUE" kmalloc'd. Cada uno liberado por process_clear_envp.
   // Los hereda fork y los reemplaza execve.
   char *envp[PROCESS_ENVP_MAX];
+
+  // [3.3.d] argv del proceso. Array de argc strings kmalloc'd. Los llena
+  // process_set_argv() en spawn y execve; los libera process_clear_argv()
+  // en exit y antes de sobrescribirlos en execve. El cmdline de
+  // /proc/<pid> los lee tal cual (formato Linux: strings NUL-separated,
+  // terminados en NUL extra).
+  char *argv[PROCESS_ARGV_MAX];
+  int argc;
+
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,
@@ -216,9 +225,16 @@ void process_clear_ctty_for(struct tty *t);
 // si `t` es NULL o si la tarea no pertenece a un proceso (idle, kmain).
 void process_account_tick(task_t *t);
 
-int process_set_envp(process_t *proc, int envc, const char *const *envp);
-void process_clear_envp(process_t *proc);
-int process_inherit_envp(const process_t *parent, process_t *child);
+// [3.3.d] argv del proceso.
+int process_set_argv(process_t *proc, int argc, const char *const *argv);
+void process_clear_argv(process_t *proc);
+int process_inherit_argv(const process_t *parent, process_t *child);
+
+// [3.3.d] Iterador de process_list. cb corre bajo process_lock: no
+// debe dormir, ni llamar a ninguna función que tome process_lock.
+// Devolver != 0 desde cb detiene la iteración.
+typedef int (*process_iter_cb_t)(process_t *p, void *arg);
+void process_for_each(process_iter_cb_t cb, void *arg);
 
 // Variantes con envp explícito.
 process_t *process_spawn_child_args_env(process_t *parent, const char *path,
