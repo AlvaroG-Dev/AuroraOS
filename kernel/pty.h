@@ -32,10 +32,11 @@ struct process;
 
 typedef struct tty_pty {
   int in_use;
-  uint32_t index;   // N para /dev/pts/N
-  int slave_locked; // TIOCSPTLCK: 1 = slave cerrado a open()
-  int master_open;  // refcount del master (0 = nadie tiene el fd)
-  int slave_open;   // refcount del slave
+  uint32_t index;        // N para /dev/pts/N
+  int slave_locked;      // TIOCSPTLCK: 1 = slave cerrado a open()
+  int master_open;       // refcount del master (0 = nadie tiene el fd)
+  int slave_open;        // refcount del slave
+  int slave_ever_opened; // [FIX EOF] 1 si el slave fue abierto alguna vez
 
   // Slave: tty_t completo (canon, echo, isig, winsize, termios).
   // tty.slave.pty apunta a este mismo struct.
@@ -49,6 +50,7 @@ typedef struct tty_pty {
   size_t m_count;
   spinlock_t m_lock;
   wait_queue_t m_read_wq;
+
 } tty_pty_t;
 
 // Constantes Linux para ioctls del master.

@@ -50,6 +50,7 @@ tty_pty_t *pty_alloc(void) {
   found->slave_locked = 0;
   found->master_open = 0;
   found->slave_open = 0;
+  found->slave_ever_opened = 0;
   found->slave.fg_pgid = 0;
   found->slave.session_leader_pid = 0;
 
@@ -101,10 +102,15 @@ void pty_release_slave(void *pty_ptr) {
   unsigned long flags = spin_lock_irqsave(&g_pty_lock);
   if (pty->slave_open > 0)
     pty->slave_open--;
+  int became_eof = (pty->slave_open == 0);
   int free_it = (pty->master_open == 0 && pty->slave_open == 0);
   spin_unlock_irqrestore(&g_pty_lock, flags);
-  if (free_it)
+
+  if (free_it) {
     pty_free(pty);
+  } else if (became_eof) {
+    wake_up_all(&pty->m_read_wq);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,37 +157,68 @@ void pty_slave_emit(struct tty_pty *pty_opaque, const void *buf, size_t size) {
 // ---------------------------------------------------------------------------
 // Read del master
 // ---------------------------------------------------------------------------
+//
+// [FIX EOF] Condición de despertar del master:
+//   - hay datos en m_buf → true
+//   - slave ya fue abierto y ahora no tiene ningún fd abierto → true (EOF)
+//   - en cualquier otro caso → false
+//
+// El "slave_ever_opened" evita que, durante la ventana entre
+// open(master) y open(slave), la condición dé EOF falso.
 static bool pty_master_has_data(void *arg) {
   tty_pty_t *pty = (tty_pty_t *)arg;
+
   unsigned long flags = spin_lock_irqsave(&pty->m_lock);
-  bool ok = pty->m_count > 0;
+  bool has_data = pty->m_count > 0;
   spin_unlock_irqrestore(&pty->m_lock, flags);
-  return ok;
+  if (has_data)
+    return true;
+
+  unsigned long flags2 = spin_lock_irqsave(&g_pty_lock);
+  bool eof = (pty->slave_ever_opened && pty->slave_open == 0);
+  spin_unlock_irqrestore(&g_pty_lock, flags2);
+  return eof;
 }
 
 int64_t pty_master_read(tty_pty_t *pty, void *buf, size_t size) {
   if (!pty || !buf || size == 0)
     return 0;
 
-  int rc = wait_event_interruptible(&pty->m_read_wq, pty_master_has_data, pty);
-  if (rc < 0)
-    return -EINTR;
+  for (;;) {
+    int rc =
+        wait_event_interruptible(&pty->m_read_wq, pty_master_has_data, pty);
+    if (rc < 0)
+      return -EINTR;
 
-  unsigned long flags = spin_lock_irqsave(&pty->m_lock);
-  size_t n = pty->m_count < size ? pty->m_count : size;
-  uint8_t *out = (uint8_t *)buf;
-  for (size_t i = 0; i < n; i++) {
-    out[i] = pty->m_buf[pty->m_head];
-    pty->m_head = (pty->m_head + 1) % PTY_M_BUF_SIZE;
+    unsigned long flags = spin_lock_irqsave(&pty->m_lock);
+    size_t n = pty->m_count < size ? pty->m_count : size;
+    uint8_t *out = (uint8_t *)buf;
+    for (size_t i = 0; i < n; i++) {
+      out[i] = pty->m_buf[pty->m_head];
+      pty->m_head = (pty->m_head + 1) % PTY_M_BUF_SIZE;
+    }
+    pty->m_count -= n;
+    spin_unlock_irqrestore(&pty->m_lock, flags);
+
+    if (n > 0)
+      return (int64_t)n;
+
+    unsigned long flags2 = spin_lock_irqsave(&g_pty_lock);
+    bool eof = (pty->slave_ever_opened && pty->slave_open == 0);
+    spin_unlock_irqrestore(&g_pty_lock, flags2);
+    if (eof)
+      return 0;
   }
-  pty->m_count -= n;
-  spin_unlock_irqrestore(&pty->m_lock, flags);
-  return (int64_t)n;
 }
 
 // ---------------------------------------------------------------------------
 // Condiciones para poll
 // ---------------------------------------------------------------------------
+//
+// [FIX EOF] SIN CAMBIOS respecto a la versión original. Solo mira m_count.
+// Añadir aquí la condición de EOF hacía que poll() del terminal app
+// devolviera POLLIN antes de que el slave estuviera listo, causando un
+// busy-loop en el render loop.
 bool pty_master_readable(tty_pty_t *pty) {
   if (!pty)
     return false;
@@ -222,12 +259,18 @@ static int64_t pty_master_write_op(vfs_node_t *n, uint64_t off, size_t sz,
 static int pty_master_poll_op(vfs_node_t *n, short events) {
   tty_pty_t *p = (tty_pty_t *)n->priv;
   int rev = 0;
-  if (events & 1 /*POLLIN*/) {
-    if (pty_master_readable(p))
-      rev |= 1;
-  }
+
+  if ((events & 1 /*POLLIN*/) && pty_master_readable(p))
+    rev |= 1;
   if (events & 4 /*POLLOUT*/)
     rev |= 4;
+
+  unsigned long flags = spin_lock_irqsave(&g_pty_lock);
+  bool eof = (p->slave_ever_opened && p->slave_open == 0);
+  spin_unlock_irqrestore(&g_pty_lock, flags);
+  if (eof)
+    rev |= 0x10; // POLLHUP
+
   return rev;
 }
 
@@ -416,6 +459,7 @@ int pty_open_slave_fd(struct process *proc, int fd_num, int index) {
     return -ENXIO;
   }
   p->slave_open++;
+  p->slave_ever_opened = 1; // [FIX EOF]
   spin_unlock_irqrestore(&g_pty_lock, flags);
 
   int rc = pty_install_fd(proc, fd_num, p, &pty_slave_ops, "pts");
