@@ -29,6 +29,23 @@ void pf_dump_stats(void) {
 }
 
 // ---------------------------------------------------------------------------
+// [3.5] vma_release_fd: libera la referencia al file_descriptor_t de un
+// VMA_FILE. Si ref_count llega a 0, libera el nodo y el fd (igual que
+// vfs_close_for_proc pero sin tocar la tabla del proceso).
+// ---------------------------------------------------------------------------
+static void vma_release_fd(vma_t *v) {
+  if (!v || !v->file_fd)
+    return;
+  v->file_fd->ref_count--;
+  if (v->file_fd->ref_count <= 0) {
+    if (v->file_fd->node)
+      vfs_node_free(v->file_fd->node);
+    kfree(v->file_fd);
+  }
+  v->file_fd = NULL;
+}
+
+// ---------------------------------------------------------------------------
 // VMA list
 // ---------------------------------------------------------------------------
 vma_t *vma_find(struct process *proc, uint64_t addr) {
@@ -63,7 +80,7 @@ vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
       return NULL;
   }
 
-  vma_t *v = (vma_t *)kmalloc(sizeof(vma_t));
+  vma_t *v = (vma_t *)kzalloc(sizeof(vma_t));
   if (!v)
     return NULL;
   v->start = vma_start;
@@ -76,12 +93,30 @@ vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
   return v;
 }
 
+// ---------------------------------------------------------------------------
+// [3.5] vma_create_file: como vma_create pero para VMA_FILE. Toma una
+// referencia al file_descriptor_t (que sobrevive al close del usuario).
+// ---------------------------------------------------------------------------
+vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
+                       uint64_t flags, struct file_descriptor *fd,
+                       uint64_t file_offset) {
+  vma_t *v = vma_create(proc, start, end, flags, VMA_FILE);
+  if (!v)
+    return NULL;
+  v->file_fd = fd;
+  v->file_offset = file_offset;
+  if (fd)
+    fd->ref_count++;
+  return v;
+}
+
 void vma_destroy_all(struct process *proc) {
   if (!proc)
     return;
   vma_t *v = proc->vma_list;
   while (v) {
     vma_t *next = v->next;
+    vma_release_fd(v);
     kfree(v);
     v = next;
   }
@@ -142,12 +177,29 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
 
   uint64_t page = fault_addr & ~0xFFFULL;
   uint64_t phys = alloc_user_page_zeroed();
-
   if (!phys)
     return 0;
 
-  uint64_t map_flags = vma->flags | PTE_PRESENT;
+  // [3.5] VMA_FILE: leer la página del fichero.
+  if (vma->type == VMA_FILE && vma->file_fd) {
+    file_descriptor_t *f = vma->file_fd;
+    if (!f->node || !f->node->ops || !f->node->ops->read) {
+      pmm_free_page(phys);
+      return 0;
+    }
+    // file_offset ya está alineado a página (sys_mmap lo valida).
+    // page >= vma->start, así que file_off >= file_offset.
+    uint64_t file_off = vma->file_offset + (page - vma->start);
+    int64_t r =
+        f->node->ops->read(f->node, file_off, PAGE_SIZE, phys_to_virt(phys));
+    if (r < 0) {
+      pmm_free_page(phys);
+      return 0;
+    }
+    // Si r < PAGE_SIZE, el resto queda a 0 (alloc_user_page_zeroed).
+  }
 
+  uint64_t map_flags = vma->flags | PTE_PRESENT;
   if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), page, phys,
                          map_flags) != 0) {
     pmm_free_page(phys);
@@ -343,17 +395,18 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     return -EINVAL;
 
   // Preasignar los VMAs "right" que puedan hacer falta para splits.
-  // Si un split falla, abortamos SIN tocar nada.
   vma_t *new_vmas = NULL;
   vma_t **new_vmas_tail = &new_vmas;
   for (vma_t *v = proc->vma_list; v; v = v->next) {
     if (v->end <= start || v->start >= end)
       continue;
     if (start > v->start && end < v->end) {
-      vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
+      // [3.5] kzalloc en vez de kmalloc para file_fd=NULL.
+      vma_t *right = (vma_t *)kzalloc(sizeof(vma_t));
       if (!right) {
         while (new_vmas) {
           vma_t *next = new_vmas->next;
+          vma_release_fd(new_vmas);
           kfree(new_vmas);
           new_vmas = next;
         }
@@ -365,6 +418,12 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       right->type = v->type;
       right->pad = 0;
       right->next = NULL;
+      // [3.5] Propagar file_fd si es VMA_FILE.
+      if (v->type == VMA_FILE && v->file_fd) {
+        right->file_fd = v->file_fd;
+        right->file_fd->ref_count++;
+        right->file_offset = v->file_offset + (end - v->start);
+      }
       *new_vmas_tail = right;
       new_vmas_tail = &right->next;
     }
@@ -394,12 +453,16 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     if (start <= v->start && end >= v->end) {
       // VMA completamente cubierto: eliminar.
       *pp = v->next;
+      vma_release_fd(v); // [3.5]
       kfree(v);
       touched++;
       continue;
     }
     if (start <= v->start) {
       // Recortar por la izquierda: queda [end, v->end).
+      // [3.5] Ajustar file_offset.
+      if (v->type == VMA_FILE && v->file_fd)
+        v->file_offset += (end - v->start);
       v->start = end;
       touched++;
       pp = &v->next;
@@ -424,6 +487,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
 
   while (new_vmas) {
     vma_t *next = new_vmas->next;
+    vma_release_fd(new_vmas);
     kfree(new_vmas);
     new_vmas = next;
   }
@@ -504,15 +568,17 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   for (vma_t *v = proc->vma_list; v; v = v->next) {
     if (v->end <= addr || v->start >= end)
       continue;
+    // [FIX] El caso "cubre rango entero" necesita 2 VMAs nuevos
+    // (mid + right), no 1. Sin esto, pool se agota antes de tiempo.
     if (addr > v->start && end < v->end)
-      need++; // cubre rango entero: 2 splits
+      need += 2;
     else if (addr > v->start || end < v->end)
-      need++; // un solo split
+      need += 1;
   }
 
   vma_t *pool = NULL;
   for (int i = 0; i < need; i++) {
-    vma_t *p = (vma_t *)kmalloc(sizeof(vma_t));
+    vma_t *p = (vma_t *)kzalloc(sizeof(vma_t));
     if (!p) {
       while (pool) {
         vma_t *n = pool->next;
@@ -533,16 +599,15 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       continue;
     }
 
-    int left_cov = (v->start >= addr); // v->start dentro del rango
-    int right_cov = (v->end <= end);   // v->end dentro del rango
+    int left_cov = (v->start >= addr);
+    int right_cov = (v->end <= end);
 
     if (left_cov && right_cov) {
       // VMA completamente dentro: solo flags.
       v->flags = new_flags;
       pp = &v->next;
     } else if (left_cov) {
-      // Se extiende hacia la derecha. Split: [v->start, end) nuevos,
-      // [end, v->end) viejos.
+      // Split: [v->start, end) nuevos, [end, v->end) viejos.
       vma_t *right = pool;
       pool = pool->next;
       right->start = end;
@@ -551,14 +616,19 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->type = v->type;
       right->pad = 0;
       right->next = v->next;
+      // [3.5] file_fd propagation
+      if (v->type == VMA_FILE && v->file_fd) {
+        right->file_fd = v->file_fd;
+        right->file_fd->ref_count++;
+        right->file_offset = v->file_offset + (end - v->start);
+      }
 
       v->end = end;
       v->flags = new_flags;
       v->next = right;
       pp = &right->next;
     } else if (right_cov) {
-      // Se extiende hacia la izquierda. Split: [v->start, addr) viejos,
-      // [addr, v->end) nuevos.
+      // Split: [v->start, addr) viejos, [addr, v->end) nuevos.
       vma_t *mid = pool;
       pool = pool->next;
       mid->start = addr;
@@ -567,6 +637,12 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->type = v->type;
       mid->pad = 0;
       mid->next = v->next;
+      // [3.5] file_fd propagation
+      if (v->type == VMA_FILE && v->file_fd) {
+        mid->file_fd = v->file_fd;
+        mid->file_fd->ref_count++;
+        mid->file_offset = v->file_offset + (addr - v->start);
+      }
 
       v->end = addr;
       v->next = mid;
@@ -591,6 +667,16 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->type = v->type;
       right->pad = 0;
       right->next = v->next;
+      // [3.5] file_fd propagation para ambos
+      if (v->type == VMA_FILE && v->file_fd) {
+        mid->file_fd = v->file_fd;
+        mid->file_fd->ref_count++;
+        mid->file_offset = v->file_offset + (addr - v->start);
+
+        right->file_fd = v->file_fd;
+        right->file_fd->ref_count++;
+        right->file_offset = v->file_offset + (end - v->start);
+      }
 
       v->end = addr;
       v->next = mid;
@@ -623,41 +709,40 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
 // ---------------------------------------------------------------------------
 // mmap(addr, length, prot, flags, fd, offset)
 //
-// Soporta únicamente mapeos anónimos. File-backed devolverá -ENODEV
-// hasta que exista VMA_FILE y el demand pager sepa leer del inodo.
+// Soporta mapeos anónimos y file-backed.
 //
-// Diferencias clave entre las dos formas:
+//   is_anon  = flags & MAP_ANONYMOUS != 0   → VMA_ANON
+//   is_file  = !is_anon && fd >= 0          → VMA_FILE
 //
-//   MAP_FIXED:  addr y length deben estar alineados a página.
-//               El rango [addr, addr+length) se usa EXACTAMENTE.
-//               Si había algo, se descarta (como un munmap previo).
+// [3.5] File-backed: el VMA guarda el file_descriptor_t (con ref_count++)
+// y el offset dentro del fichero. El demand pager lee la página del
+// inodo cuando ocurre el #PF.
 //
-//   Sin MAP_FIXED y con addr != 0: addr es un HINT. Si el rango está
-//               libre, se usa. Si no, se elige otra dirección desde
-//               proc->next_mmap_addr.
-//
-//   Sin MAP_FIXED y addr == 0: el kernel elige.
+// MAP_SHARED file-backed requiere writeback; devolvemos -ENODEV hasta
+// que exista esa infraestructura. Solo MAP_PRIVATE por ahora.
 // ---------------------------------------------------------------------------
 int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
                  uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
-  (void)fd;
-  (void)offset;
-
   if (!proc || length == 0)
     return -EINVAL;
 
-  // Por ahora solo mapeos anónimos. File-backed requiere VMA_FILE.
-  if (!(flags & MMAP_MAP_ANONYMOUS))
-    return -ENODEV;
+  int is_anon = (flags & MMAP_MAP_ANONYMOUS) != 0;
+  int is_file = !is_anon && fd >= 0;
 
-  // Rango alineado y con overflow comprobado.
+  if (!is_anon && !is_file)
+    return -EINVAL; // ni anónimo ni file-backed
+
+  if (is_file && (flags & MMAP_MAP_SHARED)) {
+    // MAP_SHARED file-backed: requiere writeback, no soportado todavía.
+    return -ENODEV;
+  }
+
   if (length > UINT64_MAX - 0xFFFULL)
     return -EINVAL;
   uint64_t len = (length + 0xFFFULL) & ~0xFFFULL;
   if (len == 0)
     return -EINVAL;
 
-  // Protecciones → PTE.
   uint64_t pte_flags = PTE_USER | PTE_PRESENT;
   if (prot & MMAP_PROT_WRITE)
     pte_flags |= PTE_WRITABLE;
@@ -667,19 +752,15 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   uint64_t base;
 
   if (flags & MMAP_MAP_FIXED) {
-    // Alineación obligatoria, como en Linux.
     if ((addr & 0xFFFULL) != 0 || (length & 0xFFFULL) != 0)
       return -EINVAL;
     if (addr >= USER_LIMIT || len > USER_LIMIT - addr)
       return -EINVAL;
     base = addr;
-
-    // MAP_FIXED: descartar lo que hubiera.
     int64_t ur = vma_unmap_range(proc, base, base + len);
     if (ur < 0)
       return ur;
   } else {
-    // addr != 0 es un hint; addr == 0 deja al kernel elegir.
     base = 0;
     if (addr != 0) {
       uint64_t hint = addr & ~0xFFFULL;
@@ -698,7 +779,6 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
           base = hint;
       }
     }
-
     if (base == 0) {
       uint64_t next = proc->next_mmap_addr;
       if (next < 0x0000000040000000ULL)
@@ -712,13 +792,26 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     }
   }
 
-  vma_t *v = vma_create(proc, base, base + len, pte_flags, VMA_ANON);
-  if (!v)
-    return -ENOMEM;
-
-  LOG_TRACE("[MMAP] PID=%u base=%p len=%lu prot=%lx flags=%lx", proc->pid,
-            (void *)base, (unsigned long)len, (unsigned long)prot,
-            (unsigned long)flags);
+  if (is_anon) {
+    vma_t *v = vma_create(proc, base, base + len, pte_flags, VMA_ANON);
+    if (!v)
+      return -ENOMEM;
+  } else {
+    if (fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+      return -EBADF;
+    file_descriptor_t *f = proc->fds[fd];
+    if (!f->node || !(f->node->flags & VFS_FILE))
+      return -EINVAL;
+    if (!f->node->ops || !f->node->ops->read) {
+      return -EINVAL;
+    }
+    if (offset & 0xFFFULL) {
+      return -EINVAL;
+    }
+    vma_t *v = vma_create_file(proc, base, base + len, pte_flags, f, offset);
+    if (!v)
+      return -ENOMEM;
+  }
 
   return (int64_t)base;
 }

@@ -638,18 +638,23 @@ static int64_t k_getcwd(uint64_t buf, uint64_t size, uint64_t a3, uint64_t a4,
 }
 
 // ---------- mmap / munmap / mprotect / brk ----------
+//
+// Linux x86_64: mmap(addr, length, prot, flags, fd, offset)
+//   rdi=addr, rsi=length, rdx=prot, r10=flags, r8=fd, r9=offset
+//
+// El dispatcher pasa 5 args (rdi,rsi,rdx,r10,r8) → fd llega como a5.
+// El offset (r9) hay que leerlo desde el trap frame; el dispatcher no
+// lo propaga.
 static int64_t k_mmap(uint64_t addr, uint64_t length, uint64_t prot,
-                      uint64_t flags, uint64_t a5) {
-  (void)a5;
+                      uint64_t flags, uint64_t fd) {
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
 
-  // sys_mmap() recibe `prot` y `flags` de Linux tal cual: los traduce
-  // internamente a PTE_*. Antes este wrapper hacía la traducción y
-  // sys_mmap recibía solo flags PTE, perdiendo MAP_FIXED,
-  // MAP_ANONYMOUS y MAP_SHARED.
-  return sys_mmap(proc, addr, length, prot, flags, -1, 0);
+  registers_t *regs = syscall_current_regs();
+  uint64_t offset = regs ? regs->r9 : 0;
+
+  return sys_mmap(proc, addr, length, prot, flags, (int)fd, offset);
 }
 
 static int64_t k_munmap(uint64_t addr, uint64_t length, uint64_t a3,

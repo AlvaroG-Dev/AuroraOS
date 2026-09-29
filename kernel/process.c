@@ -1517,7 +1517,7 @@ static int clone_vmas(process_t *parent, process_t *child) {
   vma_t **tail = &child->vma_list;
 
   for (vma_t *v = parent->vma_list; v; v = v->next) {
-    vma_t *nv = (vma_t *)kmalloc(sizeof(vma_t));
+    vma_t *nv = (vma_t *)kzalloc(sizeof(vma_t));
     if (!nv) {
       vma_destroy_all(child);
       return -1;
@@ -1528,6 +1528,14 @@ static int clone_vmas(process_t *parent, process_t *child) {
     nv->type = v->type;
     nv->pad = 0;
     nv->next = NULL;
+
+    // [3.5] Compartir el file_descriptor_t con el padre: tomar ref.
+    if (v->type == VMA_FILE && v->file_fd) {
+      nv->file_fd = v->file_fd;
+      nv->file_fd->ref_count++;
+      nv->file_offset = v->file_offset;
+    }
+
     *tail = nv;
     tail = &nv->next;
   }

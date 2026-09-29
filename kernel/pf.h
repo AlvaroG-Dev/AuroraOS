@@ -9,20 +9,35 @@
 #define VMA_ANON 0
 #define VMA_STACK 1
 #define VMA_ELF 2
+#define VMA_FILE 3 // [3.5] mmap file-backed
 
 struct process;
+struct file_descriptor;
 
 // Límites
 #define MAX_STACK_GROWTH (64 * 1024) // 64 KB de stack growth permitido
 
 typedef struct vma {
-  uint64_t start; // inicio (inclusive)
-  uint64_t end;   // fin (exclusive)
-  uint64_t flags; // PTE_USER | PTE_WRITABLE | PTE_NX
-  uint32_t type;  // VMA_ANON, VMA_STACK, VMA_ELF
+  uint64_t start;
+  uint64_t end;
+  uint64_t flags;
+  uint32_t type;
   uint32_t pad;
   struct vma *next;
+
+  // [3.5] Solo VMA_FILE. Puntero al file_descriptor_t del fichero
+  // backing. El VMA mantiene una referencia (ref_count++) para que
+  // el fichero sobreviva al close() del usuario.
+  struct file_descriptor *file_fd;
+
+  // [3.5] Offset del byte 0 del VMA dentro del fichero. Alineado a
+  // página (Linux exige offset alineado en mmap).
+  uint64_t file_offset;
 } vma_t;
+
+vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
+                       uint64_t flags, struct file_descriptor *fd,
+                       uint64_t file_offset);
 
 // Inicialización
 void pf_init(void);
