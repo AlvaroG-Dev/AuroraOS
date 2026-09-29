@@ -9,6 +9,7 @@
 #include "process.h"
 #include "sched.h"
 #include "serial.h"
+#include "signal.h"
 #include "string.h"
 #include "uaccess.h"
 #include <stddef.h>
@@ -210,11 +211,15 @@ static int handle_page_fault_inner(registers_t *regs) {
   // -------------------------------------------------------------------------
   if (user) {
     if (present) {
-      kill_current_process(regs, "protection violation");
+      // [4.3] Violación de permisos (escribir a R, leer a PROT_NONE, ...).
+      // Si el proceso tiene handler, se entrega SIGSEGV. Si no, mata.
+      signal_deliver_from_exception(SIGSEGV, regs);
+      pf_resolved++;
       return 1;
     }
     if (fetch) {
-      kill_current_process(regs, "instruction fetch at unmapped");
+      signal_deliver_from_exception(SIGSEGV, regs);
+      pf_resolved++;
       return 1;
     }
 
@@ -483,7 +488,12 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   if (end < addr || end > USER_LIMIT)
     return -ENOMEM;
 
-  uint64_t new_flags = PTE_USER | PTE_PRESENT;
+  // [4.3] En x86 no hay bit "no read": PROT_NONE se representa
+  // quitando PTE_USER. Userland accede → #PF(protection violation)
+  // → SIGSEGV.
+  uint64_t new_flags = PTE_PRESENT;
+  if (prot & (MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
+    new_flags |= PTE_USER;
   if (prot & MMAP_PROT_WRITE)
     new_flags |= PTE_WRITABLE;
   if (!(prot & MMAP_PROT_EXEC))

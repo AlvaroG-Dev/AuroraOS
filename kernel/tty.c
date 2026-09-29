@@ -447,10 +447,12 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     int32_t pg;
     if (copy_from_user(&pg, (void *)arg, sizeof(pg)) < 0)
       return -EFAULT;
-    // [JOB] Validación mínima: el pgrp debe existir. Comprobamos
-    // con process_pgrp_exists. Si no, EPERM.
+    if (pg < 0)
+      return -EINVAL;
+    // Linux: ESRCH si el pgrp no existe; EPERM solo si pertenece a otra
+    // sesión. No validamos sesión todavía.
     if (pg > 0 && !process_pgrp_exists((uint32_t)pg))
-      return -EPERM;
+      return -ESRCH;
     tty->fg_pgid = (uint32_t)pg;
     return 0;
   }

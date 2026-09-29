@@ -11,9 +11,11 @@
 #include "fat32.h"
 #include "heap.h"
 #include "klog.h"
+#include "rtc.h"
 #include "spinlock.h"
 #include "string.h"
 #include "uaccess.h" // EINVAL, EIO, ENOMEM, ENOENT, EISDIR, ENAMETOOLONG,
+
                      // EEXIST, ENOTEMPTY, ENOSPC
 #include <stddef.h>
 
@@ -130,6 +132,9 @@ typedef struct {
   // (la raíz del FS o un nodo sintético).
   uint64_t dirent_lba;
   uint32_t dirent_off;
+
+  // [4.2] mtime del dirent, en epoch UNIX. 0 si no está.
+  uint32_t mtime_sec;
 } fat32_node_priv_t;
 
 // Resultado de iterar un directorio buscando un nombre.
@@ -141,6 +146,9 @@ typedef struct {
   int found;
   uint64_t lba; // [PR 4.3] ubicación del dirent corto
   uint32_t off;
+
+  // [4.2] mtime del dirent, en epoch UNIX.
+  uint32_t mtime_sec;
 } fat32_lookup_ctx_t;
 
 // [LFN] Posición física (LBA + offset) de una entry de 32 bytes.
@@ -1282,7 +1290,38 @@ static void unix_to_fat_ts(int64_t secs, uint16_t *out_time,
   *out_time = (uint16_t)((hour << 11) | (min << 5) | (sec / 2));
 }
 
+// [4.2] Convierte un timestamp FAT (date+time) a epoch UNIX.
+static int64_t fat_ts_to_unix(uint16_t date, uint16_t time) {
+  if (date == 0)
+    return 0;
+  int year = ((date >> 9) & 0x7F) + 1980;
+  int month = (date >> 5) & 0x0F;
+  int day = date & 0x1F;
+  int hour = (time >> 11) & 0x1F;
+  int min = (time >> 5) & 0x3F;
+  int sec = (time & 0x1F) * 2;
+  if (month < 1 || month > 12 || day < 1 || day > 31)
+    return 0;
+  if (hour > 23 || min > 59)
+    return 0;
+
+  int64_t days = 0;
+  for (int y = 1970; y < year; y++) {
+    int leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+    days += leap ? 366 : 365;
+  }
+  static const int md[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+  for (int m = 0; m < month - 1; m++)
+    days += md[m] + ((m == 1 && leap) ? 1 : 0);
+  days += day - 1;
+
+  return days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
 static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
+  LOG_INFO("[FAT32-UTIMES] entry node=%p mtime=%lld", (void *)node,
+           (long long)mtime_sec);
   if (!node || !node->priv)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
@@ -1309,8 +1348,11 @@ static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
   buf[np->dirent_off + 25] = (uint8_t)(d >> 8);
 
   int rc = (bdev_write(np->fs->bdev, np->dirent_lba, 1, buf) == 0) ? 0 : -EIO;
-  if (rc == 0)
+  if (rc == 0) {
     (void)bdev_flush(np->fs->bdev);
+    np->mtime_sec = (uint32_t)mtime_sec;
+    node->mtime_sec = mtime_sec;
+  }
 
   spin_unlock_irqrestore(&np->fs->lock, flags);
   return rc;
@@ -1333,6 +1375,8 @@ static int fat32_lookup_cb(const char *name, const struct fat32_dirent *e,
   ctx->is_dir = (e->attr & FAT_ATTR_DIRECTORY) ? 1 : 0;
   ctx->lba = lba;
   ctx->off = off;
+  ctx->mtime_sec =
+      (uint32_t)fat_ts_to_unix(e->write_date, e->write_time); // ← NUEVO
   ctx->found = 1;
   return 1;
 }
@@ -1504,19 +1548,35 @@ static void dirent_write_full(uint8_t *e, void *ctx) {
   memcpy(e, c->name11, 11);
   e[11] = c->attr;
   e[12] = c->nt_flags;
-  e[13] = 0;
-  e[14] = 0;
-  e[15] = 0;
-  e[16] = 0x21; // 1980-01-01
-  e[17] = 0x00;
-  e[18] = 0x21;
-  e[19] = 0x00;
+
+  // [4.2] Set create/modify time to NOW (from RTC) instead of the
+  // hardcoded 1980-01-01. Sin esto, cualquier fichero creado con
+  // touch sin `-d` se queda con mtime=1980 hasta que un utimensat
+  // posterior lo sobreescriba — y ese utimensat puede fallar si el
+  // fichero aún no es visible por el path.
+  uint16_t t = 0, d = 0;
+  int64_t epoch = rtc_get_epoch();
+  if (epoch > 0)
+    unix_to_fat_ts(epoch, &t, &d);
+  else {
+    // Fallback: 1980-01-01 si el RTC no responde.
+    d = (uint16_t)((0 << 9) | (1 << 5) | 1);
+    t = 0;
+  }
+
+  e[13] = 0;                   // create_time_tenths
+  e[14] = (uint8_t)(t & 0xFF); // create_time
+  e[15] = (uint8_t)(t >> 8);
+  e[16] = (uint8_t)(d & 0xFF); // create_date
+  e[17] = (uint8_t)(d >> 8);
+  e[18] = (uint8_t)(d & 0xFF); // last_access_date
+  e[19] = (uint8_t)(d >> 8);
   e[20] = (uint8_t)((c->first_cluster >> 16) & 0xFF);
   e[21] = (uint8_t)((c->first_cluster >> 24) & 0xFF);
-  e[22] = 0;
-  e[23] = 0;
-  e[24] = 0x21;
-  e[25] = 0x00;
+  e[22] = (uint8_t)(t & 0xFF); // write_time
+  e[23] = (uint8_t)(t >> 8);
+  e[24] = (uint8_t)(d & 0xFF); // write_date
+  e[25] = (uint8_t)(d >> 8);
   e[26] = (uint8_t)(c->first_cluster & 0xFF);
   e[27] = (uint8_t)((c->first_cluster >> 8) & 0xFF);
   e[28] = (uint8_t)(c->size & 0xFF);
@@ -2096,8 +2156,8 @@ static vfs_ops_t fat32_node_ops = {.read = fat32_node_read,
 // ===========================================================================
 static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
                                    uint32_t size, int is_dir,
-                                   const char *full_path, uint64_t dirent_lba,
-                                   uint32_t dirent_off) {
+                                   const char *full_path, uint32_t mtime_sec,
+                                   uint64_t dirent_lba, uint32_t dirent_off) {
   vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
   if (!n)
     return NULL;
@@ -2112,6 +2172,7 @@ static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
   np->is_dir = is_dir;
   np->dirent_lba = dirent_lba;
   np->dirent_off = dirent_off;
+  np->mtime_sec = mtime_sec;
 
   size_t plen = strlen(full_path);
   if (plen >= sizeof(n->name))
@@ -2125,6 +2186,7 @@ static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
   n->ops = &fat32_node_ops;
   n->fs = &fat32_fs_ops;
   n->priv = np;
+  n->mtime_sec = (int64_t)mtime_sec;
   return n;
 }
 
@@ -2347,9 +2409,10 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
   int is_dir = 1;
   uint64_t dirent_lba = 0;
   uint32_t dirent_off = 0;
+  uint32_t mtime_sec = 0;
 
   if (*path == '\0') {
-    vfs_node_t *node = fat32_make_node(fs, cluster, 0, 1, orig, 0, 0);
+    vfs_node_t *node = fat32_make_node(fs, cluster, 0, 1, orig, 0, 0, 0);
     spin_unlock_irqrestore(&fs->lock, lock_flags);
     return node;
   }
@@ -2385,14 +2448,15 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
     is_dir = ctx.is_dir;
     dirent_lba = ctx.lba;
     dirent_off = ctx.off;
+    mtime_sec = ctx.mtime_sec;
 
     path = end;
     if (*path == '/')
       path++;
   }
 
-  vfs_node_t *node =
-      fat32_make_node(fs, cluster, size, is_dir, orig, dirent_lba, dirent_off);
+  vfs_node_t *node = fat32_make_node(fs, cluster, size, is_dir, orig, mtime_sec,
+                                     dirent_lba, dirent_off);
   spin_unlock_irqrestore(&fs->lock, lock_flags);
   return node;
 }

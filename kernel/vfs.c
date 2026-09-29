@@ -976,8 +976,9 @@ int vfs_utimes(const char *path, int64_t mtime_sec) {
   if (!path)
     return -EINVAL;
   vfs_node_t *node = vfs_lookup_nofollow(path);
-  if (!node)
+  if (!node) {
     return -ENOENT;
+  }
   int rc = 0;
   if (node->ops && node->ops->utimes)
     rc = node->ops->utimes(node, mtime_sec);
@@ -1680,6 +1681,7 @@ int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st) {
   st->flags = f->node->flags;
   st->size = f->node->size;
   st->inode = f->node->inode;
+  st->mtime_sec = f->node->mtime_sec;
   clac();
   return 0;
 }

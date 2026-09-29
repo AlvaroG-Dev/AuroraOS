@@ -1,6 +1,7 @@
 #ifndef KERNEL_SIGNAL_H
 #define KERNEL_SIGNAL_H
 
+#include "idt.h"
 #include <stdint.h>
 
 #define SIGHUP 1
@@ -85,4 +86,8 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                        uint64_t a5);
 int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
                          uint64_t sigsetsize, uint64_t a5);
+
+// [4.3] Entrega una señal al proceso actual usando los regs del fault.
+int signal_deliver_from_exception(int sig, registers_t *regs);
+
 #endif

@@ -271,6 +271,23 @@ void signal_check_pending(void) {
 }
 
 // ---------------------------------------------------------------------------
+// [4.3] Entrega inmediata de una señal usando los registers del fault.
+// La usa pf.c cuando una excepción (#PF, #GP, #UD...) en userland debe
+// convertirse en señal para el proceso actual.
+//
+// Si el handler está instalado, redirige el trap frame al handler y
+// retorna 1 (el fault ya está resuelto).
+// Si es SIG_DFL, actúa según la acción por defecto (típicamente matar)
+// y NO retorna.
+// ---------------------------------------------------------------------------
+int signal_deliver_from_exception(int sig, registers_t *regs) {
+  process_t *proc = process_current();
+  if (!proc || !regs)
+    return 0;
+  return deliver(proc, sig, regs);
+}
+
+// ---------------------------------------------------------------------------
 // Syscalls
 // ---------------------------------------------------------------------------
 int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,

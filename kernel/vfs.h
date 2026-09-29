@@ -47,10 +47,15 @@ struct vfs_statfs {
   uint64_t f_frsize;  // fragment size
 };
 
+// ---------------------------------------------------------------------------
+// vfs_stat: metadatos de un nodo. mtime_sec en epoch UNIX (0 = sin
+// soporte, p.ej. tarfs/devfs/procfs).
+// ---------------------------------------------------------------------------
 typedef struct vfs_stat {
   uint32_t flags;
   size_t size;
   uint32_t inode;
+  int64_t mtime_sec;
 } vfs_stat_t;
 
 typedef struct vfs_dirent {
@@ -125,13 +130,12 @@ struct vfs_node {
   vfs_fs_ops_t *fs;
   void *priv;
 
-  // [3.1] Si is_symlink != 0, este nodo representa un symlink y
-  // link_target contiene su destino tal cual está en el tar (puede ser
-  // absoluto o relativo). El FS que lo produce debe rellenar ambos.
-  // vfs_lookup() sigue el symlink automáticamente; vfs_lookup_nofollow()
-  // lo devuelve tal cual.
+  // [3.1] Symlink: destino tal cual.
   int is_symlink;
   char link_target[VFS_PATH_MAX];
+
+  // [4.2] mtime en epoch UNIX (0 si el FS no lo soporta).
+  int64_t mtime_sec;
 };
 
 // ---------------------------------------------------------------------------

@@ -17,3 +17,7 @@ void rtc_init(void);
 int rtc_read_datetime(rtc_datetime_t *out);
 void rtc_format_time(const rtc_datetime_t *dt, char *out, int out_len);
 void rtc_format_date(const rtc_datetime_t *dt, char *out, int out_len);
+
+// [4.2] Devuelve el epoch UNIX actual (segundos desde 1970-01-01 00:00 UTC).
+// Devuelve 0 si el RTC no se puede leer.
+int64_t rtc_get_epoch(void);

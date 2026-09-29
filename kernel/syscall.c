@@ -16,6 +16,7 @@
 #include "pf.h"
 #include "pmm.h"
 #include "process.h"
+#include "rtc.h"
 #include "sched.h"
 #include "serial.h"
 #include "signal.h"
@@ -257,6 +258,12 @@ static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size,
   out->st_size = (int64_t)size;
   out->st_blksize = 512;
   out->st_blocks = (int64_t)((size + 511) / 512);
+  out->st_mtime_sec = vs->mtime_sec;
+  out->st_mtime_nsec = 0;
+  out->st_atime_sec = vs->mtime_sec;
+  out->st_atime_nsec = 0;
+  out->st_ctime_sec = vs->mtime_sec;
+  out->st_ctime_nsec = 0;
 }
 
 // ===========================================================================
@@ -420,8 +427,7 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
   if (rc != 0)
     return rc;
 
-  // [3.1] AT_SYMLINK_NOFOLLOW (lstat) → no seguir el symlink final.
-  // Sin esto, lstat() devuelve la info del destino, no del symlink.
+  // [3.1] lstat/AT_SYMLINK_NOFOLLOW: no seguir el symlink final.
   int no_follow = (flags & AT_SYMLINK_NOFOLLOW) ? 1 : 0;
   vfs_node_t *node = no_follow ? vfs_lookup_nofollow(path) : vfs_lookup(path);
   if (!node)
@@ -431,6 +437,7 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .flags = node->flags,
       .size = node->size,
       .inode = node->inode,
+      .mtime_sec = node->mtime_sec,
   };
   int is_symlink = node->is_symlink;
   vfs_node_free(node);
@@ -1462,22 +1469,44 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
 }
 
 // ---------- clock_gettime ----------
+//
+// CLOCK_REALTIME (0) debe devolver epoch UNIX — es lo que usan
+// touch/date/gettimeofday para saber "ahora".
+// CLOCK_MONOTONIC (1), CLOCK_PROCESS_CPUTIME_ID (2), CLOCK_BOOTTIME (7)
+// devuelven tiempo desde el boot, que es lo que ya hacíamos.
+#define CLOCK_REALTIME_ 0
+#define CLOCK_MONOTONIC_ 1
+
 static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
                                uint64_t a4, uint64_t a5) {
-  (void)clockid;
   (void)a3;
   (void)a4;
   (void)a5;
   if (!access_ok((void *)tp, 16))
     return -EFAULT;
+
   struct {
     int64_t sec;
     int64_t nsec;
   } ts;
-  extern uint64_t sched_get_ticks(void);
-  uint64_t ticks = sched_get_ticks();
-  ts.sec = (int64_t)(ticks / 1000);
-  ts.nsec = (int64_t)((ticks % 1000) * 1000000);
+
+  if (clockid == CLOCK_REALTIME_) {
+    int64_t epoch = rtc_get_epoch();
+    if (epoch == 0) {
+      // RTC no disponible: cae a segundos desde boot. Mejor que 0.
+      uint64_t t = sched_get_ticks();
+      ts.sec = (int64_t)(t / 1000);
+      ts.nsec = (int64_t)((t % 1000) * 1000000);
+    } else {
+      ts.sec = epoch;
+      ts.nsec = 0;
+    }
+  } else {
+    uint64_t t = sched_get_ticks();
+    ts.sec = (int64_t)(t / 1000);
+    ts.nsec = (int64_t)((t % 1000) * 1000000);
+  }
+
   if (copy_to_user((void *)tp, &ts, sizeof(ts)) < 0)
     return -EFAULT;
   return 0;
@@ -2449,15 +2478,8 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-  if ((int64_t)dfd != AT_FDCWD)
-    return -EINVAL;
   if (flags & ~0x100ULL)
     return -EINVAL; // solo AT_SYMLINK_NOFOLLOW
-
-  char path[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
-  if (rc != 0)
-    return rc;
 
   int64_t mtime_sec = 0;
   if (times_uptr) {
@@ -2469,13 +2491,38 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     if (times[1].tv_nsec == UTIME_OMIT)
       return 0;
     if (times[1].tv_nsec == UTIME_NOW)
-      mtime_sec = (int64_t)(sched_get_ticks() / 1000);
+      mtime_sec = rtc_get_epoch();
     else
       mtime_sec = times[1].tv_sec;
   } else {
-    mtime_sec = (int64_t)(sched_get_ticks() / 1000);
+    mtime_sec = rtc_get_epoch();
   }
 
+  // [4.2] futimens(fd, times) → utimensat(fd, NULL, times, 0).
+  // BusyBox touch abre el fichero con O_CREAT y luego aplica futimens.
+  // Sin este path, dfd != AT_FDCWD → EINVAL → mtime se queda en 1980.
+  if ((int64_t)dfd != AT_FDCWD) {
+    if (path_uptr != 0)
+      return -EINVAL; // path relativo a dfd: no soportado todavía
+    int kfd = (int)dfd;
+    if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+      return -EBADF;
+    vfs_node_t *node = proc->fds[kfd]->node;
+    if (!node)
+      return -EBADF;
+    if (node->ops && node->ops->utimes)
+      return node->ops->utimes(node, mtime_sec);
+    return 0;
+  }
+
+  if (path_uptr == 0)
+    return -EINVAL;
+
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  if (rc != 0) {
+    return rc;
+  }
   return vfs_utimes(path, mtime_sec);
 }
 
@@ -3128,6 +3175,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},
+    [SYS_MPROTECT] = {k_mprotect, "mprotect"},
     [SYS_FSTATFS] = {k_fstatfs, "fstatfs"},
     [SYS_STATFS] = {k_statfs, "statfs"},
     [SYS_FSYNC] = {k_fsync, "fsync"},

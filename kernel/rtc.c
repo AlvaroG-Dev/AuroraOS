@@ -1,20 +1,20 @@
 // kernel/rtc.c
 #include "rtc.h"
-#include "serial.h"
 #include "klog.h"
+#include "serial.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71
 
 #define RTC_REG_SECONDS 0x00
 #define RTC_REG_MINUTES 0x02
-#define RTC_REG_HOURS   0x04
-#define RTC_REG_DAY     0x07
-#define RTC_REG_MONTH   0x08
-#define RTC_REG_YEAR    0x09
+#define RTC_REG_HOURS 0x04
+#define RTC_REG_DAY 0x07
+#define RTC_REG_MONTH 0x08
+#define RTC_REG_YEAR 0x09
 #define RTC_REG_STATUS_A 0x0A
 #define RTC_REG_STATUS_B 0x0B
-#define RTC_REG_CENTURY  0x32
+#define RTC_REG_CENTURY 0x32
 
 /*
  * Bit 7 of CMOS_ADDR controls the external NMI mask. Port 0x70 is an index
@@ -56,12 +56,14 @@ static uint8_t rtc_bcd_to_bin(uint8_t value) {
 
 static int rtc_wait_stable(void) {
   for (int i = 0; i < 100000; i++) {
-    if (!rtc_update_in_progress()) return 1;
+    if (!rtc_update_in_progress())
+      return 1;
   }
   return 0;
 }
 
-static void rtc_read_raw(rtc_datetime_t *dt, uint8_t *status_b, uint8_t *raw_hour) {
+static void rtc_read_raw(rtc_datetime_t *dt, uint8_t *status_b,
+                         uint8_t *raw_hour) {
   dt->second = cmos_read(RTC_REG_SECONDS);
   dt->minute = cmos_read(RTC_REG_MINUTES);
   *raw_hour = cmos_read(RTC_REG_HOURS);
@@ -74,17 +76,14 @@ static void rtc_read_raw(rtc_datetime_t *dt, uint8_t *status_b, uint8_t *raw_hou
 }
 
 static int rtc_same_snapshot(const rtc_datetime_t *a, const rtc_datetime_t *b) {
-  return a->second == b->second &&
-         a->minute == b->minute &&
-         a->hour == b->hour &&
-         a->day == b->day &&
-         a->month == b->month &&
-         a->year == b->year &&
-         a->century == b->century;
+  return a->second == b->second && a->minute == b->minute &&
+         a->hour == b->hour && a->day == b->day && a->month == b->month &&
+         a->year == b->year && a->century == b->century;
 }
 
 int rtc_read_datetime(rtc_datetime_t *out) {
-  if (!out) return 0;
+  if (!out)
+    return 0;
 
   rtc_datetime_t a;
   rtc_datetime_t b;
@@ -92,9 +91,11 @@ int rtc_read_datetime(rtc_datetime_t *out) {
   uint8_t raw_hour = 0;
 
   for (int attempt = 0; attempt < 8; attempt++) {
-    if (!rtc_wait_stable()) return 0;
+    if (!rtc_wait_stable())
+      return 0;
     rtc_read_raw(&a, &status_b, &raw_hour);
-    if (!rtc_wait_stable()) return 0;
+    if (!rtc_wait_stable())
+      return 0;
     rtc_read_raw(&b, &status_b, &raw_hour);
 
     if (rtc_same_snapshot(&a, &b)) {
@@ -109,7 +110,8 @@ int rtc_read_datetime(rtc_datetime_t *out) {
         out->day = rtc_bcd_to_bin(out->day);
         out->month = rtc_bcd_to_bin(out->month);
         out->year = rtc_bcd_to_bin((uint8_t)out->year);
-        if (out->century) out->century = rtc_bcd_to_bin(out->century);
+        if (out->century)
+          out->century = rtc_bcd_to_bin(out->century);
       } else {
         out->hour = hour_raw & 0x7F;
       }
@@ -145,7 +147,8 @@ static void write_two_digits(char *out, uint8_t value) {
 }
 
 void rtc_format_time(const rtc_datetime_t *dt, char *out, int out_len) {
-  if (!out || out_len <= 0) return;
+  if (!out || out_len <= 0)
+    return;
   if (!dt || out_len < 6) {
     out[0] = '\0';
     return;
@@ -158,7 +161,8 @@ void rtc_format_time(const rtc_datetime_t *dt, char *out, int out_len) {
 }
 
 void rtc_format_date(const rtc_datetime_t *dt, char *out, int out_len) {
-  if (!out || out_len <= 0) return;
+  if (!out || out_len <= 0)
+    return;
   if (!dt || out_len < 11) {
     out[0] = '\0';
     return;
@@ -175,6 +179,32 @@ void rtc_format_date(const rtc_datetime_t *dt, char *out, int out_len) {
   out[10] = '\0';
 }
 
+// ---------------------------------------------------------------------------
+// [4.2] Epoch UNIX actual, leído del CMOS.
+// ---------------------------------------------------------------------------
+int64_t rtc_get_epoch(void) {
+  rtc_datetime_t dt;
+  if (!rtc_read_datetime(&dt))
+    return 0;
+  if (dt.month < 1 || dt.month > 12 || dt.day < 1 || dt.day > 31)
+    return 0;
+
+  int year = dt.year;
+  int64_t days = 0;
+  for (int y = 1970; y < year; y++) {
+    int leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+    days += leap ? 366 : 365;
+  }
+  static const int md[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+  for (int m = 0; m < dt.month - 1; m++)
+    days += md[m] + ((m == 1 && leap) ? 1 : 0);
+  days += dt.day - 1;
+
+  return days * 86400 + (int64_t)dt.hour * 3600 + (int64_t)dt.minute * 60 +
+         (int64_t)dt.second;
+}
+
 void rtc_init(void) {
   rtc_datetime_t now;
   if (!rtc_read_datetime(&now)) {
@@ -182,6 +212,6 @@ void rtc_init(void) {
     return;
   }
 
-  LOG_INFO("[RTC] CMOS RTC detectado: %02u:%02u %02u/%02u/%04u",
-           now.hour, now.minute, now.day, now.month, now.year);
+  LOG_INFO("[RTC] CMOS RTC detectado: %02u:%02u %02u/%02u/%04u", now.hour,
+           now.minute, now.day, now.month, now.year);
 }
