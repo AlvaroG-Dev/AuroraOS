@@ -1,9 +1,25 @@
 // kernel/tarfs.c
+//
+// TarFS: sistema de ficheros read-only sobre un tar empaquetado en
+// .rodata. Sin escritura, sin creación, sin borrado. Los symlinks
+// (typeflag '2') se exponen vía vfs_node.is_symlink/link_target, y el
+// VFS genérico decide si seguirlos o no.
+//
+// Este fichero NO conoce nada de mount table, lookup recursivo, ni
+// FDs. Solo implementa las ops a nivel de nodo y el lookup de paths
+// relativos al mount.
+
 #include "tarfs.h"
+#include "heap.h"
 #include "klog.h"
 #include "serial.h"
 #include "string.h"
+#include "uaccess.h" // EISDIR, EROFS, ENOTDIR, EINVAL, ENAMETOOLONG
+#include "vfs.h"     // vfs_node_t, vfs_ops_t, vfs_fs_ops_t, vfs_dirent_t
 
+// ===========================================================================
+// Parsing del tar
+// ===========================================================================
 typedef struct {
   char filename[100];
   char mode[8];
@@ -29,6 +45,12 @@ typedef struct {
 static tar_node_t nodes[MAX_NODES];
 static size_t node_count = 0;
 
+// ---------------------------------------------------------------------------
+// Helpers de paths. Estos operan sobre paths RELATIVOS al tar, no
+// paths VFS. Su semántica es distinta de vfs.c:normalize_path.
+//   - tarfs_normalize: quita "./" y "/" iniciales.
+//   - collapse_path:   resuelve ".." sin salir de raíz, no devuelve '/'.
+// ---------------------------------------------------------------------------
 static size_t parse_octal(const char *str, size_t max_len) {
   size_t n = 0;
   for (size_t i = 0; i < max_len && str[i] >= '0' && str[i] <= '7'; i++)
@@ -36,7 +58,7 @@ static size_t parse_octal(const char *str, size_t max_len) {
   return n;
 }
 
-static const char *normalize_path(const char *path) {
+static const char *tarfs_normalize(const char *path) {
   while (*path) {
     if (path[0] == '.' && path[1] == '/') {
       path += 2;
@@ -49,8 +71,6 @@ static const char *normalize_path(const char *path) {
   return path;
 }
 
-// Colapsa //, elimina ".", resuelve ".." sin pasar de raíz. out nunca
-// empieza por '/'. Si el path queda vacío, out = "".
 static void collapse_path(const char *in, char *out, size_t outlen) {
   if (!in || !out || outlen < 2) {
     if (outlen)
@@ -58,7 +78,6 @@ static void collapse_path(const char *in, char *out, size_t outlen) {
     return;
   }
 
-  // Split en segmentos manualmente.
   const char *p = in;
   size_t o = 0;
 
@@ -77,11 +96,10 @@ static void collapse_path(const char *in, char *out, size_t outlen) {
       continue;
 
     if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
-      // Subir: quitar el último segmento de out.
       while (o > 0 && out[o - 1] != '/')
         o--;
       if (o > 0)
-        o--; // quitar la barra
+        o--;
       continue;
     }
 
@@ -106,6 +124,9 @@ static tar_node_t *find_by_name(const char *name) {
   return NULL;
 }
 
+// ===========================================================================
+// Init y utilidades públicas
+// ===========================================================================
 void tarfs_init(const void *tar_addr, size_t tar_size) {
   node_count = 0;
   uint8_t *ptr = (uint8_t *)tar_addr;
@@ -142,7 +163,7 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
       full_path[pos++] = hdr->filename[i];
     full_path[pos] = '\0';
 
-    const char *clean_path = normalize_path(full_path);
+    const char *clean_path = tarfs_normalize(full_path);
 
     if (clean_path[0] != '\0') {
       if (node_count >= MAX_NODES) {
@@ -195,11 +216,13 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
            (unsigned long)node_count);
 }
 
-// Resuelve symlinks siguiendo el target hasta un nodo no-symlink.
-// Detiene tras 8 saltos para evitar ciclos.
+// Resolución de symlinks del tar (uso interno / legacy).
+// El VFS ya no llama aquí para hacer lookup: prefiere find_by_name +
+// seguir el symlink él mismo, para no duplicar la lógica de "nofollow".
+// Esta función se mantiene porque tar_find_file la usa.
 tar_node_t *tarfs_open(const char *path) {
   char current[256];
-  const char *norm = normalize_path(path);
+  const char *norm = tarfs_normalize(path);
   collapse_path(norm, current, sizeof(current));
 
   for (int depth = 0; depth < 8; depth++) {
@@ -212,10 +235,8 @@ tar_node_t *tarfs_open(const char *path) {
     const char *target = node->linkname;
     char next[256];
     if (target[0] == '/') {
-      // Absoluto. Se interpreta contra la raíz del tar.
       collapse_path(target, next, sizeof(next));
     } else {
-      // Relativo al directorio del symlink.
       char dir[256];
       size_t clen = strlen(current);
       size_t last_slash = 0;
@@ -245,7 +266,6 @@ tar_node_t *tarfs_open(const char *path) {
       collapse_path(next, current, sizeof(current));
       continue;
     }
-    // Solo llegamos aquí si target[0]=='/':
     strncpy(current, next, sizeof(current) - 1);
     current[sizeof(current) - 1] = '\0';
   }
@@ -255,7 +275,7 @@ tar_node_t *tarfs_open(const char *path) {
 }
 
 void tarfs_list(const char *dir_path) {
-  const char *target = normalize_path(dir_path);
+  const char *target = tarfs_normalize(dir_path);
   size_t tlen = strlen(target);
 
   LOG_TRACE("[TARFS] Listando directorio: '/%s':", target);
@@ -281,3 +301,232 @@ tar_node_t *tarfs_get_node(size_t index) {
 }
 
 tar_node_t *tar_find_file(const char *path) { return tarfs_open(path); }
+
+// ===========================================================================
+// Node ops (vfs_ops_t)
+// ===========================================================================
+static int64_t tar_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
+                            void *buf) {
+  if (!node || !node->priv || !buf)
+    return -EINVAL;
+  tar_node_t *tn = (tar_node_t *)node->priv;
+  if (tn->is_dir)
+    return -EISDIR;
+  if (offset >= tn->size)
+    return 0;
+
+  size_t to_read = size;
+  if (offset + to_read > tn->size)
+    to_read = tn->size - offset;
+  memcpy(buf, tn->data + offset, to_read);
+  return (int64_t)to_read;
+}
+
+static int64_t tar_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
+                             const void *buf) {
+  (void)node;
+  (void)offset;
+  (void)size;
+  (void)buf;
+  return -EROFS;
+}
+
+static int tar_vfs_open(vfs_node_t *node, int flags) {
+  (void)node;
+  // tarfs es read-only.
+  if ((flags & O_WRONLY) || (flags & O_RDWR))
+    return -EROFS;
+  return 0;
+}
+
+static int tar_vfs_close(vfs_node_t *node) {
+  (void)node;
+  return 0;
+}
+
+// readdir: recorre todos los nodos del tar y devuelve los hijos
+// directos del directorio `dir`. Un hijo es directo si:
+//   - su nombre empieza por "<dir_name>/" (o por nada, si es raíz)
+//   - el resto no contiene '/'
+static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
+  if (!dir || !dir->priv || !out)
+    return -EINVAL;
+  tar_node_t *tn = (tar_node_t *)dir->priv;
+  if (!tn->is_dir)
+    return -ENOTDIR;
+
+  size_t plen = strlen(tn->name);
+  char prefix[260];
+  size_t prefix_len;
+  if (plen == 0) {
+    prefix[0] = '\0';
+    prefix_len = 0;
+  } else {
+    if (plen + 2 > sizeof(prefix))
+      return -ENAMETOOLONG;
+    memcpy(prefix, tn->name, plen);
+    prefix[plen] = '/';
+    prefix[plen + 1] = '\0';
+    prefix_len = plen + 1;
+  }
+
+  size_t n = tarfs_get_node_count();
+  uint64_t seen = 0;
+  for (size_t i = 0; i < n; i++) {
+    tar_node_t *child = tarfs_get_node(i);
+    if (!child || child == tn)
+      continue;
+
+    const char *name = child->name;
+    if (prefix_len > 0) {
+      if (strncmp(name, prefix, prefix_len) != 0)
+        continue;
+      name += prefix_len;
+    }
+    if (*name == '\0')
+      continue;
+    int has_slash = 0;
+    for (const char *p = name; *p; p++) {
+      if (*p == '/') {
+        has_slash = 1;
+        break;
+      }
+    }
+    if (has_slash)
+      continue;
+
+    if (seen == index) {
+      size_t rlen = strlen(name);
+      if (rlen >= sizeof(out->name))
+        rlen = sizeof(out->name) - 1;
+      for (size_t k = 0; k < rlen; k++)
+        out->name[k] = name[k];
+      out->name[rlen] = '\0';
+      out->type = child->is_dir ? VFS_DIRECTORY : VFS_FILE;
+      out->size = child->is_dir ? 0 : child->size;
+      return 0;
+    }
+    seen++;
+  }
+
+  out->name[0] = '\0';
+  out->type = 0;
+  out->size = 0;
+  return 0;
+}
+
+// Nodo sintético para la raíz de tarfs. tarfs no tiene entry para "".
+// Vive en .data y no se libera nunca.
+static tar_node_t g_tarfs_root = {
+    .name = "",
+    .data = NULL,
+    .size = 0,
+    .is_dir = 1,
+};
+
+static vfs_ops_t tar_file_ops = {
+    .read = tar_vfs_read,
+    .write = tar_vfs_write,
+    .open = tar_vfs_open,
+    .close = tar_vfs_close,
+    .readable = NULL,
+};
+
+static vfs_ops_t tar_dir_ops = {
+    .read = tar_vfs_read,
+    .write = tar_vfs_write,
+    .open = tar_vfs_open,
+    .close = tar_vfs_close,
+    .readable = NULL,
+    .readdir = tar_vfs_readdir,
+};
+
+// ===========================================================================
+// fs lookup (vfs_fs_ops_t)
+//
+// Path RELATIVO al mount (empieza por '/'). NUNCA sigue symlinks:
+// devuelve el nodo del symlink con is_symlink=1 y link_target relleno.
+// vfs_lookup_rec() decide si seguirlo.
+// ===========================================================================
+static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
+  (void)fs_priv;
+
+  // Caso raíz: directorio sintético sobre g_tarfs_root.
+  if (!path || path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
+    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!node)
+      return NULL;
+    node->name[0] = '/';
+    node->name[1] = '\0';
+    node->flags = VFS_DIRECTORY;
+    node->size = 0;
+    node->inode = 0;
+    node->ops = &tar_dir_ops;
+    node->fs = NULL; // el FS se asigna en vfs_lookup_rec si hace falta
+    node->priv = &g_tarfs_root;
+    return node;
+  }
+
+  char collapsed[256];
+  const char *norm = tarfs_normalize(path);
+  collapse_path(norm, collapsed, sizeof(collapsed));
+
+  tar_node_t *tn = find_by_name(collapsed);
+  if (!tn)
+    return NULL;
+
+  vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+  if (!node)
+    return NULL;
+
+  size_t nlen = strlen(tn->name);
+  if (nlen >= sizeof(node->name))
+    nlen = sizeof(node->name) - 1;
+  memcpy(node->name, tn->name, nlen);
+  node->name[nlen] = '\0';
+
+  node->flags = tn->is_dir ? VFS_DIRECTORY : VFS_FILE;
+  node->size = tn->size;
+  node->inode = 0;
+  node->ops = tn->is_dir ? &tar_dir_ops : &tar_file_ops;
+  node->priv = tn;
+
+  // [3.1] Exponer el symlink si lo es.
+  if (tn->is_symlink) {
+    node->is_symlink = 1;
+    size_t tlen = strlen(tn->linkname);
+    if (tlen >= sizeof(node->link_target))
+      tlen = sizeof(node->link_target) - 1;
+    memcpy(node->link_target, tn->linkname, tlen);
+    node->link_target[tlen] = '\0';
+  }
+
+  return node;
+}
+
+// [4.1] tarfs es in-memory. Reportamos bloques = 0 (nada contable) y
+// files = número de nodos del tar.
+static int tarfs_statfs(void *fs_priv, struct vfs_statfs *out) {
+  (void)fs_priv;
+  memset(out, 0, sizeof(*out));
+  out->f_type = 0x01021994; // TMPFS_MAGIC
+  out->f_bsize = 512;
+  out->f_frsize = 512;
+  out->f_blocks = 0;
+  out->f_bfree = 0;
+  out->f_bavail = 0;
+  out->f_files = tarfs_get_node_count();
+  out->f_ffree = 0;
+  out->f_namelen = 255;
+  return 0;
+}
+
+static vfs_fs_ops_t tarfs_fs_ops = {
+    .lookup = tarfs_fs_lookup,
+    .statfs = tarfs_statfs,
+    .name = "tarfs",
+};
+
+struct vfs_fs_ops *tarfs_get_vfs_ops(void) {
+  return (struct vfs_fs_ops *)&tarfs_fs_ops;
+}

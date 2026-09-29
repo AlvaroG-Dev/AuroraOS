@@ -52,6 +52,7 @@
 #define SYS_KILL 62
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
+#define SYS_FSYNC 74
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
 #define SYS_RENAME 82
@@ -60,7 +61,14 @@
 #define SYS_UNLINK 87
 #define SYS_SYMLINK 88
 #define SYS_READLINK 89
+#define SYS_CHMOD 90
+#define SYS_FCHMOD 91
+#define SYS_CHOWN 92
+#define SYS_FCHOWN 93
+#define SYS_LCHOWN 94
+#define SYS_GETRUSAGE 98
 #define SYS_SYSINFO 99
+#define SYS_TIMES 100
 #define SYS_GETUID 102
 #define SYS_GETGID 104
 #define SYS_GETEUID 107
@@ -71,9 +79,13 @@
 #define SYS_GETGROUPS 115
 #define SYS_GETPGID 121
 #define SYS_GETSID 124
+#define SYS_MKNOD 133
+#define SYS_STATFS 137
+#define SYS_FSTATFS 138
 #define SYS_PIVOT_ROOT 155
 #define SYS_PRCTL 157
 #define SYS_ARCH_PRCTL 158
+#define SYS_SETHOSTNAME 170
 #define SYS_GETTID 186
 #define SYS_GETDENTS64 217
 #define SYS_SET_TID_ADDRESS 218
@@ -87,6 +99,7 @@
 #define SYS_PSELECT6 270
 #define SYS_PPOLL 271
 #define SYS_SET_ROBUST_LIST 273
+#define SYS_UTIMENSAT 280
 #define SYS_PRLIMIT64 302
 #define SYS_GETRANDOM 318
 #define SYS_RSEQ 334

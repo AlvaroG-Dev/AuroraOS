@@ -816,8 +816,19 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
   return NULL;
 }
 
+static int procfs_statfs(void *fs_priv, struct vfs_statfs *out) {
+  (void)fs_priv;
+  memset(out, 0, sizeof(*out));
+  out->f_type = 0x9fa0; // PROC_SUPER_MAGIC
+  out->f_bsize = 4096;
+  out->f_frsize = 4096;
+  out->f_namelen = 255;
+  return 0;
+}
+
 static vfs_fs_ops_t procfs_fs_ops = {
     .lookup = procfs_lookup,
+    .statfs = procfs_statfs,
     .name = "procfs",
 };
 

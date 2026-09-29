@@ -451,6 +451,166 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
 }
 
 // ---------------------------------------------------------------------------
+// [4.3] mprotect.
+//
+// 1. Alinea addr/len.
+// 2. Traduce PROT_* a flags PTE.
+// 3. Recorre los VMAs que solapan [addr, end):
+//      - completamente dentro → cambia flags
+//      - solapa izquierda (v->start < addr < v->end ≤ end) → split,
+//        derecha [addr, v->end) con nuevos flags
+//      - solapa derecha (v->start ≥ addr, v->end > end) → split,
+//        izquierda [v->start, end) con nuevos flags
+//      - cubre rango entero → split en 3
+// 4. Para cada página presente en [addr, end), actualiza la PTE.
+// 5. TLB shootdown de cada página tocada.
+//
+// No crea páginas nuevas. Las páginas no presentes se demand-page-arán
+// con los flags del VMA cuando se toquen.
+// ---------------------------------------------------------------------------
+int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
+                     uint64_t prot) {
+  if (!proc)
+    return -EINVAL;
+  if (length == 0)
+    return 0;
+  if ((addr & 0xFFFULL) != 0)
+    return -EINVAL;
+  if (length > UINT64_MAX - 0xFFFULL)
+    return -EINVAL;
+  uint64_t len = (length + 0xFFFULL) & ~0xFFFULL;
+  uint64_t end = addr + len;
+  if (end < addr || end > USER_LIMIT)
+    return -ENOMEM;
+
+  uint64_t new_flags = PTE_USER | PTE_PRESENT;
+  if (prot & MMAP_PROT_WRITE)
+    new_flags |= PTE_WRITABLE;
+  if (!(prot & MMAP_PROT_EXEC))
+    new_flags |= PTE_NX;
+
+  // Preasignar hasta 2 VMAs nuevos por cada VMA que solape.
+  int need = 0;
+  for (vma_t *v = proc->vma_list; v; v = v->next) {
+    if (v->end <= addr || v->start >= end)
+      continue;
+    if (addr > v->start && end < v->end)
+      need++; // cubre rango entero: 2 splits
+    else if (addr > v->start || end < v->end)
+      need++; // un solo split
+  }
+
+  vma_t *pool = NULL;
+  for (int i = 0; i < need; i++) {
+    vma_t *p = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!p) {
+      while (pool) {
+        vma_t *n = pool->next;
+        kfree(pool);
+        pool = n;
+      }
+      return -ENOMEM;
+    }
+    p->next = pool;
+    pool = p;
+  }
+
+  vma_t **pp = &proc->vma_list;
+  while (*pp) {
+    vma_t *v = *pp;
+    if (v->end <= addr || v->start >= end) {
+      pp = &v->next;
+      continue;
+    }
+
+    int left_cov = (v->start >= addr); // v->start dentro del rango
+    int right_cov = (v->end <= end);   // v->end dentro del rango
+
+    if (left_cov && right_cov) {
+      // VMA completamente dentro: solo flags.
+      v->flags = new_flags;
+      pp = &v->next;
+    } else if (left_cov) {
+      // Se extiende hacia la derecha. Split: [v->start, end) nuevos,
+      // [end, v->end) viejos.
+      vma_t *right = pool;
+      pool = pool->next;
+      right->start = end;
+      right->end = v->end;
+      right->flags = v->flags;
+      right->type = v->type;
+      right->pad = 0;
+      right->next = v->next;
+
+      v->end = end;
+      v->flags = new_flags;
+      v->next = right;
+      pp = &right->next;
+    } else if (right_cov) {
+      // Se extiende hacia la izquierda. Split: [v->start, addr) viejos,
+      // [addr, v->end) nuevos.
+      vma_t *mid = pool;
+      pool = pool->next;
+      mid->start = addr;
+      mid->end = v->end;
+      mid->flags = new_flags;
+      mid->type = v->type;
+      mid->pad = 0;
+      mid->next = v->next;
+
+      v->end = addr;
+      v->next = mid;
+      pp = &mid->next;
+    } else {
+      // Cubre el rango entero: split en 3.
+      vma_t *mid = pool;
+      pool = pool->next;
+      vma_t *right = pool;
+      pool = pool->next;
+
+      mid->start = addr;
+      mid->end = end;
+      mid->flags = new_flags;
+      mid->type = v->type;
+      mid->pad = 0;
+      mid->next = right;
+
+      right->start = end;
+      right->end = v->end;
+      right->flags = v->flags;
+      right->type = v->type;
+      right->pad = 0;
+      right->next = v->next;
+
+      v->end = addr;
+      v->next = mid;
+      pp = &right->next;
+    }
+  }
+
+  // Devolver pool sobrante.
+  while (pool) {
+    vma_t *n = pool->next;
+    kfree(pool);
+    pool = n;
+  }
+
+  // Actualizar PTEs de las páginas presentes.
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  for (uint64_t p = addr; p < end; p += PAGE_SIZE) {
+    uint64_t phys = paging_get_phys_in(pml4, p);
+    if (phys) {
+      paging_map_page_in(pml4, p, phys & PTE_FRAME, new_flags);
+      paging_invalidate_tlb_global(p);
+    }
+  }
+
+  LOG_TRACE("[MPROTECT] PID=%u [%p, %p) prot=%lx", proc->pid, (void *)addr,
+            (void *)end, (unsigned long)prot);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // mmap(addr, length, prot, flags, fd, offset)
 //
 // Soporta únicamente mapeos anónimos. File-backed devolverá -ENODEV

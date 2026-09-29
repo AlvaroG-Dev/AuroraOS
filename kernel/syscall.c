@@ -656,18 +656,6 @@ static int64_t k_munmap(uint64_t addr, uint64_t length, uint64_t a3,
   return sys_munmap(proc, addr, length);
 }
 
-static int64_t k_mprotect(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                          uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  // Aurora no cambia permisos post-mmap todavía. musl lo usa para
-  // protección de stack/páginas; devolver 0 es suficiente para arrancar.
-  return 0;
-}
-
 static int64_t k_brk(uint64_t addr, uint64_t a2, uint64_t a3, uint64_t a4,
                      uint64_t a5) {
   (void)a2;
@@ -1506,17 +1494,6 @@ static int64_t k_set_robust_list(uint64_t a1, uint64_t a2, uint64_t a3,
   return 0;
 }
 
-// ---------- prlimit64 ----------
-static int64_t k_prlimit64(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                           uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return -ENOSYS;
-}
-
 // ---------- getrandom ----------
 static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
                            uint64_t a4, uint64_t a5) {
@@ -2034,6 +2011,74 @@ static int64_t k_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a3,
   return interrupted ? -EINTR : 0;
 }
 
+// ---------- [4.1] statfs / fstatfs ----------
+struct k_statfs {
+  int64_t f_type;
+  int64_t f_bsize;
+  uint64_t f_blocks;
+  uint64_t f_bfree;
+  uint64_t f_bavail;
+  uint64_t f_files;
+  uint64_t f_ffree;
+  int32_t f_fsid[2];
+  int64_t f_namelen;
+  int64_t f_frsize;
+  int64_t f_flags;
+  int64_t f_spare[4];
+};
+_Static_assert(sizeof(struct k_statfs) == 120, "statfs layout x86_64");
+
+static int64_t do_statfs_path(const char *path, uint64_t buf_uptr) {
+  if (!access_ok((void *)buf_uptr, sizeof(struct k_statfs)))
+    return -EFAULT;
+  struct vfs_statfs vs;
+  int rc = vfs_statfs(path, &vs);
+  if (rc != 0)
+    return rc;
+  struct k_statfs ks;
+  memset(&ks, 0, sizeof(ks));
+  ks.f_type = (int64_t)vs.f_type;
+  ks.f_bsize = (int64_t)vs.f_bsize;
+  ks.f_blocks = vs.f_blocks;
+  ks.f_bfree = vs.f_bfree;
+  ks.f_bavail = vs.f_bavail;
+  ks.f_files = vs.f_files;
+  ks.f_ffree = vs.f_ffree;
+  ks.f_namelen = (int64_t)vs.f_namelen;
+  ks.f_frsize = (int64_t)vs.f_frsize;
+  if (copy_to_user((void *)buf_uptr, &ks, sizeof(ks)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+static int64_t k_statfs(uint64_t path_uptr, uint64_t buf_uptr, uint64_t a3,
+                        uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return do_statfs_path(path, buf_uptr);
+}
+
+static int64_t k_fstatfs(uint64_t fd, uint64_t buf_uptr, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+    return -EBADF;
+  return do_statfs_path(proc->fds[fd]->node->name, buf_uptr);
+}
+
 // ---------- fork / clone / wait4 ----------
 static int64_t k_fork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                       uint64_t a5) {
@@ -2317,6 +2362,278 @@ static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
       break;
   }
   return (int64_t)total;
+}
+
+// ---------- [4.2] fsync / chmod / fchmod / chown / fchown ----------
+static int64_t k_fsync(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+    return -EBADF;
+  // FAT32 sincroniza en cada write. tarfs es RO. Nada que hacer.
+  return 0;
+}
+
+static int64_t k_chmod(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+static int64_t k_fchmod(uint64_t fd, uint64_t mode, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)mode;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+    return -EBADF;
+  return 0;
+}
+static int64_t k_chown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+static int64_t k_fchown(uint64_t fd, uint64_t uid, uint64_t gid, uint64_t a4,
+                        uint64_t a5) {
+  (void)uid;
+  (void)gid;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+    return -EBADF;
+  return 0;
+}
+static int64_t k_lchown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+// ---------- [4.2] utimensat ----------
+#define UTIME_NOW 0x3FFFFFFFLL
+#define UTIME_OMIT 0x3FFFFFFELL
+
+struct k_ts64 {
+  int64_t tv_sec;
+  int64_t tv_nsec;
+};
+
+static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
+                           uint64_t times_uptr, uint64_t flags, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int64_t)dfd != AT_FDCWD)
+    return -EINVAL;
+  if (flags & ~0x100ULL)
+    return -EINVAL; // solo AT_SYMLINK_NOFOLLOW
+
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+
+  int64_t mtime_sec = 0;
+  if (times_uptr) {
+    struct k_ts64 times[2];
+    if (!access_ok((void *)times_uptr, sizeof(times)))
+      return -EFAULT;
+    if (copy_from_user(times, (void *)times_uptr, sizeof(times)) < 0)
+      return -EFAULT;
+    if (times[1].tv_nsec == UTIME_OMIT)
+      return 0;
+    if (times[1].tv_nsec == UTIME_NOW)
+      mtime_sec = (int64_t)(sched_get_ticks() / 1000);
+    else
+      mtime_sec = times[1].tv_sec;
+  } else {
+    mtime_sec = (int64_t)(sched_get_ticks() / 1000);
+  }
+
+  return vfs_utimes(path, mtime_sec);
+}
+
+// ---------- [4.3] mprotect ----------
+static int64_t k_mprotect(uint64_t addr, uint64_t length, uint64_t prot,
+                          uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return sys_mprotect(proc, addr, length, prot);
+}
+
+// ---------- [4.4] mknod ----------
+static int64_t k_mknod(uint64_t path_uptr, uint64_t mode, uint64_t dev,
+                       uint64_t a4, uint64_t a5) {
+  (void)dev;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  int type = (int)(mode & S_IFMT);
+  if (type == 0 || type == S_IFREG) {
+    char path[VFS_PATH_MAX];
+    int rc =
+        resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_create(path, O_CREAT);
+  }
+  return -EPERM;
+}
+
+// ---------- [4.5] prlimit64 ----------
+struct k_rlimit64 {
+  uint64_t rlim_cur;
+  uint64_t rlim_max;
+};
+#define RLIM_INFINITY 0xFFFFFFFFFFFFFFFFULL
+
+static int64_t k_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_uptr,
+                           uint64_t old_uptr, uint64_t a5) {
+  (void)a5;
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+  if (pid != 0 && (uint32_t)pid != self->pid)
+    return -ESRCH;
+
+  uint64_t cur, max;
+  switch (resource) {
+  case 7: // RLIMIT_NOFILE
+    cur = MAX_PROCESS_FDS;
+    max = MAX_PROCESS_FDS;
+    break;
+  case 3: // RLIMIT_STACK
+    cur = 8 * 1024 * 1024;
+    max = RLIM_INFINITY;
+    break;
+  default:
+    cur = RLIM_INFINITY;
+    max = RLIM_INFINITY;
+    break;
+  }
+
+  if (new_uptr) {
+    if (!access_ok((void *)new_uptr, sizeof(struct k_rlimit64)))
+      return -EFAULT;
+    struct k_rlimit64 nr;
+    if (copy_from_user(&nr, (void *)new_uptr, sizeof(nr)) < 0)
+      return -EFAULT;
+    // No-op: no almacenamos límites.
+  }
+  if (old_uptr) {
+    if (!access_ok((void *)old_uptr, sizeof(struct k_rlimit64)))
+      return -EFAULT;
+    struct k_rlimit64 o = {cur, max};
+    if (copy_to_user((void *)old_uptr, &o, sizeof(o)) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+// ---------- [4.6] sethostname / getrusage / times ----------
+static char g_hostname[64] = "aurora";
+
+static int64_t k_sethostname(uint64_t name_uptr, uint64_t len, uint64_t a3,
+                             uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (len > sizeof(g_hostname) - 1)
+    return -EINVAL;
+  if (len == 0)
+    return -EINVAL;
+  if (!access_ok((void *)name_uptr, len))
+    return -EFAULT;
+  char buf[64];
+  if (copy_from_user(buf, (void *)name_uptr, len) < 0)
+    return -EFAULT;
+  if (memchr(buf, '\0', len))
+    return -EINVAL;
+  memcpy(g_hostname, buf, len);
+  g_hostname[len] = '\0';
+  return 0;
+}
+
+static int64_t k_getrusage(uint64_t who, uint64_t usage_ptr, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!access_ok((void *)usage_ptr, sizeof(struct k_rusage)))
+    return -EFAULT;
+  struct k_rusage ru;
+  memset(&ru, 0, sizeof(ru));
+  if (who == 0 || who == 1) {
+    uint64_t ticks = proc->cpu_ticks_user;
+    ru.ru_utime.tv_sec = (int64_t)(ticks / 1000);
+    ru.ru_utime.tv_usec = (int64_t)((ticks % 1000) * 1000);
+  }
+  if (copy_to_user((void *)usage_ptr, &ru, sizeof(ru)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+struct k_tms {
+  int64_t tms_utime;
+  int64_t tms_stime;
+  int64_t tms_cutime;
+  int64_t tms_cstime;
+};
+
+static int64_t k_times(uint64_t buf_uptr, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (buf_uptr) {
+    if (!access_ok((void *)buf_uptr, sizeof(struct k_tms)))
+      return -EFAULT;
+    struct k_tms t = {0};
+    t.tms_utime = (int64_t)proc->cpu_ticks_user;
+    if (copy_to_user((void *)buf_uptr, &t, sizeof(t)) < 0)
+      return -EFAULT;
+  }
+  extern uint64_t sched_get_ticks(void);
+  return (int64_t)sched_get_ticks();
 }
 
 // ===========================================================================
@@ -2811,7 +3128,19 @@ static const syscall_entry_t linux_table[] = {
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},
-    [SYS_MPROTECT] = {k_mprotect, "mprotect"},
+    [SYS_FSTATFS] = {k_fstatfs, "fstatfs"},
+    [SYS_STATFS] = {k_statfs, "statfs"},
+    [SYS_FSYNC] = {k_fsync, "fsync"},
+    [SYS_CHMOD] = {k_chmod, "chmod"},
+    [SYS_FCHMOD] = {k_fchmod, "fchmod"},
+    [SYS_CHOWN] = {k_chown, "chown"},
+    [SYS_FCHOWN] = {k_fchown, "fchown"},
+    [SYS_LCHOWN] = {k_lchown, "lchown"},
+    [SYS_GETRUSAGE] = {k_getrusage, "getrusage"},
+    [SYS_TIMES] = {k_times, "times"},
+    [SYS_MKNOD] = {k_mknod, "mknod"},
+    [SYS_SETHOSTNAME] = {k_sethostname, "sethostname"},
+    [SYS_UTIMENSAT] = {k_utimensat, "utimensat"},
     [SYS_MUNMAP] = {k_munmap, "munmap"},
     [SYS_BRK] = {k_brk, "brk"},
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},

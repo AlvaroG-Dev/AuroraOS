@@ -32,6 +32,21 @@
 typedef struct vfs_node vfs_node_t;
 typedef struct vfs_fs_ops vfs_fs_ops_t;
 
+// ---------------------------------------------------------------------------
+// [4.1] statfs: información del FS montado en un path.
+// ---------------------------------------------------------------------------
+struct vfs_statfs {
+  uint64_t f_type;    // magic del FS
+  uint64_t f_bsize;   // optimal transfer block size
+  uint64_t f_blocks;  // total de bloques
+  uint64_t f_bfree;   // bloques libres
+  uint64_t f_bavail;  // bloques libres para no-privilegiados
+  uint64_t f_files;   // inodos totales
+  uint64_t f_ffree;   // inodos libres
+  uint64_t f_namelen; // longitud máx de nombre
+  uint64_t f_frsize;  // fragment size
+};
+
 typedef struct vfs_stat {
   uint32_t flags;
   size_t size;
@@ -94,6 +109,11 @@ typedef struct vfs_ops {
   // El handler de ioctl debe hacer access_ok/copy_to_user.
   // Si NULL, devuelve -ENOTTY.
   int64_t (*ioctl)(vfs_node_t *node, unsigned long req, uint64_t arg);
+
+  // [4.2] Cambia mtime del nodo. `mtime_sec` en epoch (0 = no soportado).
+  // Si NULL, vfs_utimes() devuelve 0 (no-op silencioso como Linux en FS
+  // sin timestamps).
+  int (*utimes)(vfs_node_t *node, int64_t mtime_sec);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -130,6 +150,9 @@ struct vfs_node {
 struct vfs_fs_ops {
   vfs_node_t *(*lookup)(void *fs_priv, const char *path);
   const char *name; // para logs
+
+  // [4.1] Rellena `out` con info del FS. Opcional.
+  int (*statfs)(void *fs_priv, struct vfs_statfs *out);
 };
 
 typedef struct file_descriptor {
@@ -304,5 +327,11 @@ void vfs_for_each_mount(vfs_mount_iter_cb_t cb, void *arg);
 // padre es el directorio listado, para que `ls /` vea /dev y /proc
 // aunque no existan como entries del FS subyacente.
 int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out);
+
+// [4.1] Info del FS montado que cubre `path`.
+int vfs_statfs(const char *path, struct vfs_statfs *out);
+
+// [4.2] Aplica mtime a un nodo. Path puede ser symlink (no lo sigue).
+int vfs_utimes(const char *path, int64_t mtime_sec);
 
 #endif

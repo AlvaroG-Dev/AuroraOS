@@ -1204,6 +1204,118 @@ static int fat32_node_truncate(vfs_node_t *node, uint64_t new_size) {
   return rc;
 }
 
+// ---------------------------------------------------------------------------
+// [4.1] statfs de FAT32. Recorre fat_cache para contar clusters libres.
+// ---------------------------------------------------------------------------
+static int fat32_statfs(void *fs_priv, struct vfs_statfs *out) {
+  if (!fs_priv || !out)
+    return -EINVAL;
+  fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
+  unsigned long flags = spin_lock_irqsave(&fs->lock);
+
+  memset(out, 0, sizeof(*out));
+  out->f_type = 0x4d44; // MSDOS_SUPER_MAGIC
+  out->f_bsize = fs->cluster_size;
+  out->f_frsize = fs->cluster_size;
+  out->f_blocks = fs->total_clusters;
+
+  uint64_t free_c = 0;
+  if (fs->fat_cache) {
+    for (uint32_t i = 2; i < fs->fat_entries; i++) {
+      if (fs->fat_cache[i] == 0)
+        free_c++;
+    }
+  }
+  out->f_bfree = free_c;
+  out->f_bavail = free_c;
+  out->f_files = 0;
+  out->f_ffree = 0;
+  out->f_namelen = 255;
+
+  spin_unlock_irqrestore(&fs->lock, flags);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [4.2] utimes: convierte epoch UNIX a timestamp FAT y lo escribe en el
+// dirent del nodo. Solo afecta a write_time/write_date (offset 22-25).
+// ---------------------------------------------------------------------------
+static void unix_to_fat_ts(int64_t secs, uint16_t *out_time,
+                           uint16_t *out_date) {
+  if (secs < 0)
+    secs = 0;
+  uint32_t days = (uint32_t)((uint64_t)secs / 86400);
+  uint32_t rem = (uint32_t)((uint64_t)secs % 86400);
+  uint32_t hour = rem / 3600;
+  rem %= 3600;
+  uint32_t min = rem / 60;
+  uint32_t sec = rem % 60;
+
+  int year = 1970;
+  while (1) {
+    int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+    int dy = leap ? 366 : 365;
+    if (days < (uint32_t)dy)
+      break;
+    days -= dy;
+    year++;
+  }
+  int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+  static const int md[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int mon = 0;
+  while (mon < 12) {
+    int d = md[mon] + ((mon == 1 && leap) ? 1 : 0);
+    if ((int)days < d)
+      break;
+    days -= d;
+    mon++;
+  }
+  int day = (int)days + 1;
+  int month = mon + 1;
+
+  if (year < 1980)
+    year = 1980;
+  if (year > 2107)
+    year = 2107;
+
+  *out_date = (uint16_t)(((year - 1980) << 9) | (month << 5) | day);
+  *out_time = (uint16_t)((hour << 11) | (min << 5) | (sec / 2));
+}
+
+static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
+  if (!node || !node->priv)
+    return -EINVAL;
+  fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
+  if (np->dirent_lba == 0)
+    return 0; // sin dirent (raíz): no-op
+
+  unsigned long flags = spin_lock_irqsave(&np->fs->lock);
+
+  uint8_t buf[512];
+  if (np->fs->bytes_per_sector > sizeof(buf)) {
+    spin_unlock_irqrestore(&np->fs->lock, flags);
+    return -EINVAL;
+  }
+  if (bdev_read(np->fs->bdev, np->dirent_lba, 1, buf) != 0) {
+    spin_unlock_irqrestore(&np->fs->lock, flags);
+    return -EIO;
+  }
+
+  uint16_t t, d;
+  unix_to_fat_ts(mtime_sec, &t, &d);
+  buf[np->dirent_off + 22] = (uint8_t)(t & 0xFF);
+  buf[np->dirent_off + 23] = (uint8_t)(t >> 8);
+  buf[np->dirent_off + 24] = (uint8_t)(d & 0xFF);
+  buf[np->dirent_off + 25] = (uint8_t)(d >> 8);
+
+  int rc = (bdev_write(np->fs->bdev, np->dirent_lba, 1, buf) == 0) ? 0 : -EIO;
+  if (rc == 0)
+    (void)bdev_flush(np->fs->bdev);
+
+  spin_unlock_irqrestore(&np->fs->lock, flags);
+  return rc;
+}
+
 // ===========================================================================
 // Callbacks comunes (firma extendida con LFN chain)
 // ===========================================================================
@@ -1976,6 +2088,7 @@ static vfs_ops_t fat32_node_ops = {.read = fat32_node_read,
                                    .unlink = fat32_node_unlink,
                                    .rename = fat32_node_rename,
                                    .truncate = fat32_node_truncate,
+                                   .utimes = fat32_node_utimes,
                                    .readdir = fat32_node_readdir};
 
 // ===========================================================================
@@ -2278,14 +2391,15 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
       path++;
   }
 
-  vfs_node_t *node = fat32_make_node(fs, cluster, size, is_dir, orig,
-                                      dirent_lba, dirent_off);
+  vfs_node_t *node =
+      fat32_make_node(fs, cluster, size, is_dir, orig, dirent_lba, dirent_off);
   spin_unlock_irqrestore(&fs->lock, lock_flags);
   return node;
 }
 
 static vfs_fs_ops_t fat32_fs_ops = {
     .lookup = fat32_lookup,
+    .statfs = fat32_statfs,
     .name = "fat32",
 };
 

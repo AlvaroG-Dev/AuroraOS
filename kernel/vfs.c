@@ -777,6 +777,50 @@ static size_t collect_child_mounts(const char *norm,
   return count;
 }
 
+// ---------------------------------------------------------------------------
+// [4.1] vfs_statfs: busca el mount más específico y delega en fs->statfs.
+// ---------------------------------------------------------------------------
+int vfs_statfs(const char *path, struct vfs_statfs *out) {
+  if (!path || !out)
+    return -EINVAL;
+  char norm[VFS_PATH_MAX];
+  int rc = normalize_path(path, norm, sizeof(norm));
+  if (rc != 0)
+    return rc;
+
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  struct vfs_mount *best = NULL;
+  size_t best_len = 0;
+  size_t norm_len = strlen(norm);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    size_t ml = strlen(m->path);
+    if (ml > best_len) {
+      int match = 0;
+      if (ml == 1 && m->path[0] == '/')
+        match = 1;
+      else if (ml <= norm_len && strncmp(norm, m->path, ml) == 0) {
+        if (norm[ml] == '\0' || norm[ml] == '/')
+          match = 1;
+      }
+      if (match) {
+        best = m;
+        best_len = ml;
+      }
+    }
+  }
+  if (!best) {
+    spin_unlock_irqrestore(&g_mounts_lock, flags);
+    return -ENOENT;
+  }
+  vfs_fs_ops_t *ops = best->ops;
+  void *fs_priv = best->fs_priv;
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+
+  if (!ops || !ops->statfs)
+    return -ENOSYS;
+  return ops->statfs(fs_priv, out);
+}
+
 int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
   if (!node || !out)
     return -EINVAL;
@@ -921,6 +965,22 @@ int vfs_readlink(const char *path, char *buf, size_t bufsize) {
     buf[n] = '\0';
     rc = (int)n;
   }
+  vfs_node_free(node);
+  return rc;
+}
+
+// ---------------------------------------------------------------------------
+// [4.2] vfs_utimes: aplica mtime al nodo. Si el FS no lo soporta, 0.
+// ---------------------------------------------------------------------------
+int vfs_utimes(const char *path, int64_t mtime_sec) {
+  if (!path)
+    return -EINVAL;
+  vfs_node_t *node = vfs_lookup_nofollow(path);
+  if (!node)
+    return -ENOENT;
+  int rc = 0;
+  if (node->ops && node->ops->utimes)
+    rc = node->ops->utimes(node, mtime_sec);
   vfs_node_free(node);
   return rc;
 }
@@ -1282,8 +1342,19 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
   return NULL;
 }
 
+static int devfs_statfs(void *fs_priv, struct vfs_statfs *out) {
+  (void)fs_priv;
+  memset(out, 0, sizeof(*out));
+  out->f_type = 0x01021994;
+  out->f_bsize = 4096;
+  out->f_frsize = 4096;
+  out->f_namelen = 255;
+  return 0;
+}
+
 static vfs_fs_ops_t devfs_fs_ops = {
     .lookup = devfs_lookup,
+    .statfs = devfs_statfs,
     .name = "devfs",
 };
 

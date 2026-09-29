@@ -52,6 +52,10 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
                  uint64_t prot, uint64_t flags, int fd, uint64_t offset);
 int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length);
 
+// [4.3] mprotect(addr, len, prot). Actualiza los VMAs y las PTEs.
+int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
+                     uint64_t prot);
+
 // Estadísticas
 uint64_t pf_stats_resolved(void);
 uint64_t pf_stats_killed(void);

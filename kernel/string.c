@@ -81,6 +81,16 @@ int memcmp(const void *a, const void *b, size_t n) {
   return 0;
 }
 
+void *memchr(const void *s, int c, size_t n) {
+  const unsigned char *p = (const unsigned char *)s;
+  unsigned char target = (unsigned char)c;
+  for (size_t i = 0; i < n; i++) {
+    if (p[i] == target)
+      return (void *)(p + i);
+  }
+  return NULL;
+}
+
 // ===========================================================================
 // Strings
 // ===========================================================================

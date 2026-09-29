@@ -1932,7 +1932,11 @@ int process_pgrp_exists(uint32_t pgid) {
   process_t *p = process_list;
   int found = 0;
   while (p) {
-    if (p->pgid == pgid && !p->is_zombie) {
+    // [3.3] Un pgrp existe mientras haya CUALQUIER proceso (vivo o
+    // zombie) con ese pgid. Linux usa find_vpid(), que respeta zombies.
+    // Filtrar zombies aquí hacía fallar tcsetpgrp() en fg sobre jobs
+    // recién muertos.
+    if (p->pgid == pgid) {
       found = 1;
       break;
     }

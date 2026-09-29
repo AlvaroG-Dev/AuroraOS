@@ -5,12 +5,12 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-
 // Memoria
 void *memset(void *dest, int c, size_t n);
 void *memcpy(void *dest, const void *src, size_t n);
 void *memmove(void *dest, const void *src, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
+void *memchr(const void *s, int c, size_t n);
 
 // Strings
 size_t strlen(const char *s);
