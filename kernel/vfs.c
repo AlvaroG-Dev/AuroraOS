@@ -1,234 +1,36 @@
 // kernel/vfs.c
+//
+// VFS genérico: mount table plana, lookup recursivo, symlinks,
+// namespace ops, devfs, fds por proceso. NO conoce implementaciones
+// concretas de FS; cada FS provee sus vfs_fs_ops y las registra con
+// vfs_mount().
+//
+// tarfs, fat32, devfs y futuros FS viven en sus propios ficheros.
+// vfs_init() solo monta tarfs en / y devfs en /dev, y delega todo el
+// resto.
+
 #include "vfs.h"
 #include "cpu.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
 #include "process.h"
+#include "procfs.h"
 #include "pty.h"
 #include "serial.h"
 #include "spinlock.h"
 #include "string.h"
-#include "tarfs.h"
+#include "tarfs.h" // solo por tarfs_get_vfs_ops()
 #include "tty.h"
-#include "uaccess.h" // EINVAL, EEXIST, ENOENT, ENOMEM, EISDIR, EIO, EBUSY,
-                     // ENAMETOOLONG
+#include "uaccess.h"
 #include <stddef.h>
 
 // ===========================================================================
-// Node-level ops de TarFS.
-//
-// tarfs es un FS plano (los ficheros del tar son "apps/shell",
-// "system/config.txt"...). Cuando se monta, el VFS le pasa paths
-// relativos al mount; los normaliza y delega en estas ops.
-// ===========================================================================
-
-static int64_t tar_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
-                            void *buf) {
-  if (!node || !node->priv || !buf)
-    return -1;
-  tar_node_t *tn = (tar_node_t *)node->priv;
-  if (tn->is_dir)
-    return -EISDIR;
-  if (offset >= tn->size)
-    return 0;
-
-  size_t to_read = size;
-  if (offset + to_read > tn->size)
-    to_read = tn->size - offset;
-  memcpy(buf, tn->data + offset, to_read);
-  return (int64_t)to_read;
-}
-
-static int64_t tar_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
-                             const void *buf) {
-  (void)node;
-  (void)offset;
-  (void)size;
-  (void)buf;
-  return -EROFS;
-}
-
-static int tar_vfs_open(vfs_node_t *node, int flags) {
-  (void)node;
-  // tarfs es read-only.
-  if ((flags & O_WRONLY) || (flags & O_RDWR))
-    return -EROFS;
-  return 0;
-}
-
-static int tar_vfs_close(vfs_node_t *node) {
-  (void)node;
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// [PIVOT] readdir de tarfs.
-//
-// Itera los nodos del tar y devuelve los hijos DIRECTOS del directorio
-// `dir` (dir->priv es un tar_node_t* con is_dir=1). Un nodo hijo es
-// directo si:
-//   - su nombre empieza por "<dir_name>/" (o por nada, si es la raíz)
-//   - el resto no contiene '/'
-// ---------------------------------------------------------------------------
-static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
-  if (!dir || !dir->priv || !out)
-    return -EINVAL;
-  tar_node_t *tn = (tar_node_t *)dir->priv;
-  if (!tn->is_dir)
-    return -ENOTDIR;
-
-  // Prefijo a matchear. Para la raíz ("") es cadena vacía.
-  size_t plen = strlen(tn->name);
-  char prefix[260];
-  size_t prefix_len;
-  if (plen == 0) {
-    prefix[0] = '\0';
-    prefix_len = 0;
-  } else {
-    if (plen + 2 > sizeof(prefix))
-      return -ENAMETOOLONG;
-    memcpy(prefix, tn->name, plen);
-    prefix[plen] = '/';
-    prefix[plen + 1] = '\0';
-    prefix_len = plen + 1;
-  }
-
-  size_t n = tarfs_get_node_count();
-  uint64_t seen = 0;
-  for (size_t i = 0; i < n; i++) {
-    tar_node_t *child = tarfs_get_node(i);
-    if (!child)
-      continue;
-    if (child == tn)
-      continue;
-
-    const char *name = child->name;
-    if (prefix_len > 0) {
-      if (strncmp(name, prefix, prefix_len) != 0)
-        continue;
-      name += prefix_len;
-    }
-    if (*name == '\0')
-      continue;
-    int has_slash = 0;
-    for (const char *p = name; *p; p++) {
-      if (*p == '/') {
-        has_slash = 1;
-        break;
-      }
-    }
-    if (has_slash)
-      continue;
-
-    if (seen == index) {
-      size_t rlen = strlen(name);
-      if (rlen >= sizeof(out->name))
-        rlen = sizeof(out->name) - 1;
-      for (size_t k = 0; k < rlen; k++)
-        out->name[k] = name[k];
-      out->name[rlen] = '\0';
-      out->type = child->is_dir ? VFS_DIRECTORY : VFS_FILE;
-      out->size = child->is_dir ? 0 : child->size;
-      return 0;
-    }
-    seen++;
-  }
-
-  // Fin de directorio: nombre vacío.
-  out->name[0] = '\0';
-  out->type = 0;
-  out->size = 0;
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// [PIVOT] Nodo sintético para la raíz de tarfs ("/initrd").
-//
-// tarfs no tiene entry para "". Lo fabricamos estáticamente. Vive en
-// .data y no se libera nunca.
-// ---------------------------------------------------------------------------
-static tar_node_t g_tarfs_root = {
-    .name = "",
-    .data = NULL,
-    .size = 0,
-    .is_dir = 1,
-};
-
-// Ops para ficheros y directorios de tarfs. Los directorios llevan
-// readdir; los ficheros, no. read/write/open/close son los mismos.
-static vfs_ops_t tar_ops = {
-    .read = tar_vfs_read,
-    .write = tar_vfs_write,
-    .open = tar_vfs_open,
-    .close = tar_vfs_close,
-    .readable = NULL,
-};
-
-static vfs_ops_t tar_dir_ops = {
-    .read = tar_vfs_read,
-    .write = tar_vfs_write,
-    .open = tar_vfs_open,
-    .close = tar_vfs_close,
-    .readable = NULL,
-    .readdir = tar_vfs_readdir,
-};
-
-// Forward declaration: tarfs_fs_lookup asigna node->fs = &tarfs_fs_ops,
-// pero el struct se define al final del fichero.
-static vfs_fs_ops_t tarfs_fs_ops;
-
-static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
-  (void)fs_priv;
-
-  // Caso raíz del mount: rel es "/" o "". Devolvemos un directorio
-  // sintético sobre g_tarfs_root, con tar_dir_ops para poder listarlo.
-  if (!path || path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
-    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!node)
-      return NULL;
-    node->name[0] = '/';
-    node->name[1] = '\0';
-    node->flags = VFS_DIRECTORY;
-    node->size = 0;
-    node->inode = 0;
-    node->ops = &tar_dir_ops;
-    node->fs = &tarfs_fs_ops;
-    node->priv = &g_tarfs_root;
-    return node;
-  }
-
-  // Path normal: buscar el nodo real en el tar.
-  tar_node_t *tn = tarfs_open(path);
-  if (!tn)
-    return NULL;
-
-  vfs_node_t *node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-  if (!node)
-    return NULL;
-
-  memset(node, 0, sizeof(vfs_node_t));
-  size_t nlen = 0;
-  while (tn->name[nlen] && nlen < sizeof(node->name) - 1) {
-    node->name[nlen] = tn->name[nlen];
-    nlen++;
-  }
-  node->name[nlen] = '\0';
-  node->flags = tn->is_dir ? VFS_DIRECTORY : VFS_FILE;
-  node->size = tn->size;
-  node->inode = 0;
-  node->ops = tn->is_dir ? &tar_dir_ops : &tar_ops;
-  node->fs = &tarfs_fs_ops;
-  node->priv = tn;
-  return node;
-}
-
-// ===========================================================================
 // Consola: stdin/stdout/stderr
-// ===========================================================================
-// El nodo consola ahora delega TODO en el tty. La lógica de blocking,
+//
+// El nodo consola delega TODO en tty_console(). La lógica de blocking,
 // ring buffer, canonical, echo, ioctl y poll vive en tty.c.
-
+// ===========================================================================
 static int64_t console_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
                                 void *buf) {
   (void)node;
@@ -411,7 +213,6 @@ int vfs_mount_bind(const char *mount_path, const char *source_path) {
   if (normalize_path(source_path, norm_source, sizeof(norm_source)) != 0)
     return -EINVAL;
 
-  // Verificar que source_path existe y es directorio.
   vfs_node_t *src = vfs_lookup(norm_source);
   if (!src)
     return -ENOENT;
@@ -465,7 +266,6 @@ int vfs_umount(const char *path) {
 
   size_t nlen = strlen(norm);
 
-  // Comprobar mounts anidados.
   for (struct vfs_mount *m = g_mounts; m; m = m->next) {
     if (strcmp(m->path, norm) == 0)
       continue;
@@ -500,14 +300,12 @@ int vfs_umount(const char *path) {
 // ---------------------------------------------------------------------------
 // [2.2] pivot_root.
 //
-// Ver vfs.h para la semántica. La implementación es puramente una
-// reescritura de la tabla de mounts: no toca inodos, ni fds, ni el
-// árbol de nodos. El "árbol" del VFS es virtual y se reconstruye en
-// cada vfs_lookup(), así que basta con actualizar los paths.
+// Reescribe la tabla de mounts: el mount exacto en new_root pasa a '/',
+// los mounts bajo new_root pierden el prefijo, el antiguo '/' se mueve
+// a put_old, y el resto de mounts se reubican bajo put_old + path.
 //
-// El proceso llamante conserva su cwd como string; si apuntaba a la
-// antigua raíz, el usuario debe chdir("/") después (Linux también hace
-// cosas raras aquí, no merece la pena replicarlas).
+// No toca inodos, fds, ni cwd del llamante: el árbol se reconstruye
+// en cada vfs_lookup().
 // ---------------------------------------------------------------------------
 int vfs_pivot_root(const char *new_root, const char *put_old) {
   if (!new_root || !put_old)
@@ -522,18 +320,15 @@ int vfs_pivot_root(const char *new_root, const char *put_old) {
   if (rc != 0)
     return rc;
 
-  // 1. new_root no puede ser la raíz actual.
   if (strcmp(nr, "/") == 0)
     return -EINVAL;
 
-  // 2. put_old debe estar estrictamente bajo new_root.
   size_t nrlen = strlen(nr);
   if (strncmp(po, nr, nrlen) != 0)
     return -EINVAL;
   if (po[nrlen] != '/')
     return -EINVAL;
 
-  // 3. Debe existir un mount exactamente en new_root.
   {
     unsigned long lf = spin_lock_irqsave(&g_mounts_lock);
     struct vfs_mount *found = NULL;
@@ -548,8 +343,6 @@ int vfs_pivot_root(const char *new_root, const char *put_old) {
       return -EINVAL;
   }
 
-  // 4. put_old debe existir y ser directorio (lookup fuera del lock,
-  //    para no deadlockear con el spinlock de mounts).
   vfs_node_t *po_node = vfs_lookup(po);
   if (!po_node)
     return -ENOENT;
@@ -559,24 +352,19 @@ int vfs_pivot_root(const char *new_root, const char *put_old) {
   }
   vfs_node_free(po_node);
 
-  // 5. po_rel = po con el prefijo nr quitado, e.g. "/oldroot".
   const char *po_rel = po + nrlen;
 
-  // 6. Reescribir tabla de mounts.
   unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
   for (struct vfs_mount *m = g_mounts; m; m = m->next) {
     if (strcmp(m->path, nr) == 0) {
-      // El mount promovido pasa a ser "/".
       m->path[0] = '/';
       m->path[1] = '\0';
     } else if (strncmp(m->path, nr, nrlen) == 0 && m->path[nrlen] == '/') {
-      // Mount bajo new_root: quitar el prefijo (conserva el '/' inicial).
       const char *suffix = m->path + nrlen;
       size_t slen = strlen(suffix);
       for (size_t i = 0; i <= slen; i++)
         m->path[i] = suffix[i];
     } else if (strcmp(m->path, "/") == 0) {
-      // Root antiguo: exactamente en put_old_rel (sin sufijo extra).
       size_t polen = strlen(po_rel);
       if (polen >= sizeof(m->path)) {
         spin_unlock_irqrestore(&g_mounts_lock, flags);
@@ -585,7 +373,6 @@ int vfs_pivot_root(const char *new_root, const char *put_old) {
       for (size_t i = 0; i <= polen; i++)
         m->path[i] = po_rel[i];
     } else {
-      // Cualquier otro mount: mover bajo put_old_rel + su path.
       char newpath[VFS_PATH_MAX];
       size_t polen = strlen(po_rel);
       size_t mplen = strlen(m->path);
@@ -625,11 +412,51 @@ void *vfs_get_mount_priv(const char *path) {
 
 // ===========================================================================
 // Lookup
-//
-// Encuentra el mount cuyo path es prefijo más largo del path consultado,
-// delega en fs->lookup con el path relativo al mount.
 // ===========================================================================
-static vfs_node_t *vfs_lookup_rec(const char *path, int depth) {
+
+// Resuelve el target de un symlink a un path absoluto normalizado.
+//   - `symlink_path`: path normalizado del propio symlink.
+//   - `target`: contenido del symlink (absoluto o relativo).
+static int resolve_symlink_target(const char *symlink_path, const char *target,
+                                  char *out, size_t outlen) {
+  if (!target || !target[0])
+    return -EINVAL;
+
+  if (target[0] == '/')
+    return normalize_path(target, out, outlen);
+
+  char dir[VFS_PATH_MAX];
+  const char *last_slash = NULL;
+  for (const char *p = symlink_path; *p; p++)
+    if (*p == '/')
+      last_slash = p;
+  if (!last_slash) {
+    dir[0] = '/';
+    dir[1] = '\0';
+  } else {
+    size_t dlen = (size_t)(last_slash - symlink_path);
+    if (dlen == 0)
+      dlen = 1;
+    if (dlen >= sizeof(dir))
+      return -ENAMETOOLONG;
+    memcpy(dir, symlink_path, dlen);
+    dir[dlen] = '\0';
+  }
+
+  char tmp[VFS_PATH_MAX * 2];
+  size_t dl = strlen(dir);
+  size_t tl = strlen(target);
+  if (dl + 1 + tl + 1 > sizeof(tmp))
+    return -ENAMETOOLONG;
+  memcpy(tmp, dir, dl);
+  tmp[dl] = '/';
+  memcpy(tmp + dl + 1, target, tl + 1);
+  return normalize_path(tmp, out, outlen);
+}
+
+// Recorre la mount table buscando el mount más específico, delega el
+// path relativo al FS, y sigue symlinks si no estamos en no_follow.
+static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
   if (depth > 8)
     return NULL;
   if (!path)
@@ -680,7 +507,6 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth) {
   bool mount_is_root = (best_len == 1 && mount_path[0] == '/');
   spin_unlock_irqrestore(&g_mounts_lock, flags);
 
-  // [BIND] Reescribir path y recurrir.
   if (is_bind) {
     size_t src_len = strlen(bind_source);
     size_t suffix_len = norm_len - best_len;
@@ -690,7 +516,7 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth) {
     memcpy(new_path, bind_source, src_len);
     memcpy(new_path + src_len, norm + best_len, suffix_len);
     new_path[src_len + suffix_len] = '\0';
-    return vfs_lookup_rec(new_path, depth + 1);
+    return vfs_lookup_rec(new_path, depth + 1, no_follow);
   }
 
   const char *rel;
@@ -701,29 +527,45 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth) {
     if (*rel == '\0')
       rel = "/";
   }
-  if (ops->lookup) {
-    vfs_node_t *node = ops->lookup(fs_priv, rel);
-    if (node)
-      return node;
+
+  vfs_node_t *node = NULL;
+  if (ops->lookup)
+    node = ops->lookup(fs_priv, rel);
+
+  if (!node) {
+    if (strcmp(norm, "/") == 0) {
+      vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+      if (!root)
+        return NULL;
+      root->name[0] = '/';
+      root->name[1] = '\0';
+      root->flags = VFS_DIRECTORY;
+      return root;
+    }
+    return NULL;
   }
 
-  if (strcmp(norm, "/") == 0) {
-    vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!root)
+  // [3.1] Symlink: seguir si no estamos en no-follow.
+  if (node->is_symlink && !no_follow) {
+    char target_path[VFS_PATH_MAX];
+    int rc = resolve_symlink_target(norm, node->link_target, target_path,
+                                    sizeof(target_path));
+    if (rc != 0) {
+      vfs_node_free(node);
       return NULL;
-    root->name[0] = '/';
-    root->name[1] = '\0';
-    root->flags = VFS_DIRECTORY;
-    root->ops = NULL;
-    root->fs = NULL;
-    root->priv = NULL;
-    return root;
+    }
+    vfs_node_free(node);
+    return vfs_lookup_rec(target_path, depth + 1, no_follow);
   }
 
-  return NULL;
+  return node;
 }
 
-vfs_node_t *vfs_lookup(const char *path) { return vfs_lookup_rec(path, 0); }
+vfs_node_t *vfs_lookup(const char *path) { return vfs_lookup_rec(path, 0, 0); }
+
+vfs_node_t *vfs_lookup_nofollow(const char *path) {
+  return vfs_lookup_rec(path, 0, 1);
+}
 
 // ===========================================================================
 // Split de path normalizado en (dirname, basename).
@@ -764,7 +606,6 @@ static int split_dirname(const char *path, char *dir_out, size_t dir_outlen,
   return 0;
 }
 
-// Helper común: split + lookup del padre.
 static vfs_node_t *resolve_parent(const char *path, char *base_out,
                                   size_t base_outlen, int *rc_out) {
   char norm[VFS_PATH_MAX];
@@ -937,6 +778,55 @@ int vfs_rename(const char *oldpath, const char *newpath) {
   return rc;
 }
 
+// ---------------------------------------------------------------------------
+// [3.1] readlink / symlink.
+// ---------------------------------------------------------------------------
+int vfs_readlink(const char *path, char *buf, size_t bufsize) {
+  if (!path || !buf || bufsize == 0)
+    return -EINVAL;
+
+  vfs_node_t *node = vfs_lookup_nofollow(path);
+  if (!node)
+    return -ENOENT;
+  if (!node->is_symlink) {
+    vfs_node_free(node);
+    return -EINVAL;
+  }
+
+  int rc;
+  if (node->ops && node->ops->readlink) {
+    rc = node->ops->readlink(node, buf, bufsize);
+  } else {
+    size_t n = strlen(node->link_target);
+    if (n >= bufsize)
+      n = bufsize - 1;
+    memcpy(buf, node->link_target, n);
+    buf[n] = '\0';
+    rc = (int)n;
+  }
+  vfs_node_free(node);
+  return rc;
+}
+
+int vfs_symlink(const char *target, const char *linkpath) {
+  if (!target || !linkpath)
+    return -EINVAL;
+
+  char base[VFS_PATH_MAX];
+  int rc;
+  vfs_node_t *parent = resolve_parent(linkpath, base, sizeof(base), &rc);
+  if (!parent)
+    return rc;
+
+  if (!parent->ops || !parent->ops->symlink) {
+    vfs_node_free(parent);
+    return -EROFS;
+  }
+  rc = parent->ops->symlink(parent, base, target);
+  vfs_node_free(parent);
+  return rc;
+}
+
 // ===========================================================================
 // Free de nodo
 // ===========================================================================
@@ -998,9 +888,9 @@ int vfs_read_all(const char *path, void **out_buf, size_t *out_size) {
 // ===========================================================================
 // devfs: sistema de ficheros virtual para /dev.
 //
-// Registra nodos estáticos en una tabla. vfs_lookup() lo consulta cuando
-// el path cae bajo /dev (mount más específico que /). readdir del
-// directorio raíz devuelve los nombres de la tabla.
+// Registra nodos estáticos en una tabla. readdir del directorio raíz
+// devuelve los nombres de la tabla. Los nodos se construyen on-demand
+// en cada lookup.
 // ===========================================================================
 
 static int64_t dev_null_read(vfs_node_t *node, uint64_t offset, size_t size,
@@ -1009,7 +899,7 @@ static int64_t dev_null_read(vfs_node_t *node, uint64_t offset, size_t size,
   (void)offset;
   (void)size;
   (void)buf;
-  return 0; // EOF inmediato
+  return 0;
 }
 
 static int64_t dev_null_write(vfs_node_t *node, uint64_t offset, size_t size,
@@ -1017,15 +907,12 @@ static int64_t dev_null_write(vfs_node_t *node, uint64_t offset, size_t size,
   (void)node;
   (void)offset;
   (void)buf;
-  return (int64_t)size; // descarta
+  return (int64_t)size;
 }
 
 static vfs_ops_t dev_null_ops = {
     .read = dev_null_read,
     .write = dev_null_write,
-    .open = NULL,
-    .close = NULL,
-    .readable = NULL,
 };
 
 static int64_t dev_zero_read(vfs_node_t *node, uint64_t offset, size_t size,
@@ -1049,9 +936,6 @@ static int64_t dev_zero_write(vfs_node_t *node, uint64_t offset, size_t size,
 static vfs_ops_t dev_zero_ops = {
     .read = dev_zero_read,
     .write = dev_zero_write,
-    .open = NULL,
-    .close = NULL,
-    .readable = NULL,
 };
 
 static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
@@ -1069,8 +953,6 @@ static int64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset, size_t size,
   (void)offset;
   if (!buf || size == 0)
     return 0;
-  // El caller (vfs_write_for_proc) hace stac() alrededor, así que
-  // podemos leer directamente del buffer de userland.
   klog_write_raw((const char *)buf, size);
   return (int64_t)size;
 }
@@ -1078,15 +960,12 @@ static int64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset, size_t size,
 static vfs_ops_t dev_kmsg_ops = {
     .read = dev_kmsg_read,
     .write = dev_kmsg_write,
-    .open = NULL,
-    .close = NULL,
-    .readable = NULL,
 };
 
 typedef struct {
   const char *name;
   vfs_ops_t *ops;
-  uint32_t type; // VFS_CHARDEVICE o VFS_DIRECTORY
+  uint32_t type;
 } devfs_entry_t;
 
 // [PTY] readdir de /dev/pts: solo los slots en uso.
@@ -1101,7 +980,6 @@ static int devfs_pts_readdir(vfs_node_t *dir, uint64_t index,
     if (!pty_is_in_use(i))
       continue;
     if (seen == index) {
-      // formatear "%d"
       char tmp[8];
       int t = 0;
       int v = i;
@@ -1131,10 +1009,7 @@ static vfs_ops_t devfs_pts_dir_ops = {
     .readdir = devfs_pts_readdir,
 };
 
-// ---------------------------------------------------------------------------
-// [CTTY] /dev/tty: nodo mágico que resuelve al terminal de control del
-// proceso actual en cada operación. Si no hay ctty, ENXIO.
-// ---------------------------------------------------------------------------
+// /dev/tty: nodo mágico, resuelve al ctty del proceso en cada operación.
 static struct tty *dev_tty_resolve(void) {
   process_t *p = process_current();
   return p ? p->ctty : NULL;
@@ -1194,7 +1069,6 @@ static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   if (!(dir->flags & VFS_DIRECTORY))
     return -ENOTDIR;
 
-  // Solo el directorio raíz de devfs tiene entradas.
   if (!(dir->name[0] == '/' && dir->name[1] == '\0')) {
     out->name[0] = '\0';
     return 0;
@@ -1221,22 +1095,14 @@ static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
 }
 
 static vfs_ops_t devfs_dir_ops = {
-    .read = NULL,
-    .write = NULL,
-    .open = NULL,
-    .close = NULL,
-    .readable = NULL,
     .readdir = devfs_readdir,
 };
-
-static vfs_fs_ops_t devfs_fs_ops;
 
 static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
   (void)fs_priv;
   if (!path || path[0] != '/')
     return NULL;
 
-  // Raíz
   if (path[1] == '\0') {
     vfs_node_t *n = kzalloc(sizeof(vfs_node_t));
     if (!n)
@@ -1250,7 +1116,7 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
 
   const char *name = path + 1;
 
-  // [PTY] /pts/N
+  // /pts/N
   if (strncmp(name, "pts/", 4) == 0) {
     const char *num = name + 4;
     if (*num == '\0')
@@ -1280,13 +1146,11 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     return n;
   }
 
-  // Sin subdirectorios más allá de pts/N.
   for (const char *p = name; *p; p++) {
     if (*p == '/')
       return NULL;
   }
 
-  // Entradas estáticas.
   size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
   for (size_t i = 0; i < n_entries; i++) {
     if (strcmp(name, devfs_entries[i].name) == 0) {
@@ -1333,23 +1197,28 @@ void vfs_init(void) {
   spin_init(&g_mounts_lock);
   g_mounts = NULL;
 
-  int rc = vfs_mount("/", &tarfs_fs_ops, NULL);
+  int rc = vfs_mount("/", tarfs_get_vfs_ops(), NULL);
   if (rc != 0) {
     LOG_ERR("[VFS] fallo al montar tarfs en /: %d", rc);
   } else {
     LOG_INFO("[VFS] VFS inicializado (tarfs en /)");
   }
-  // [libc] devfs en /dev. Registra null, zero, kmsg.
   int rc2 = vfs_mount("/dev", &devfs_fs_ops, NULL);
   if (rc2 != 0) {
     LOG_ERR("[VFS] fallo al montar devfs en /dev: %d", rc2);
   } else {
     LOG_INFO("[VFS] devfs montado en /dev");
   }
+  int rc3 = vfs_mount("/proc", procfs_get_vfs_ops(), NULL);
+  if (rc3 != 0) {
+    LOG_ERR("[VFS] fallo al montar procfs en /proc: %d", rc3);
+  } else {
+    LOG_INFO("[VFS] procfs montado en /proc");
+  }
 }
 
 // ===========================================================================
-// Helpers internos
+// Helpers internos de FDs
 // ===========================================================================
 static void fd_init_wqs(file_descriptor_t *fd) {
   wait_queue_init(&fd->read_wq);
@@ -1396,11 +1265,9 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   if (free_fd == -1)
     return -1;
 
-  // [PTY Fase 3] /dev/ptmx y /dev/pts/N necesitan recursos frescos en
-  // cada open (un PTY nuevo, o un incremento de refcount del slave).
-  // vfs_lookup devuelve un nodo nuevo cada vez, pero no hay forma de
-  // pasar un contexto por-open a ops->open con la firma actual, así
-  // que interceptamos aquí y delegamos a pty.c.
+  // /dev/ptmx y /dev/pts/N crean recursos frescos en cada open. La
+  // firma de ops->open no permite pasar contexto por-open, así que
+  // interceptamos aquí.
   if (strcmp(path, "/dev/ptmx") == 0) {
     int rc = pty_open_master_fd(proc, free_fd);
     return rc == 0 ? free_fd : rc;
@@ -1477,9 +1344,6 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
   if (count == 0)
     return 0;
 
-  // Las operaciones de filesystem escriben sobre memoria de kernel.
-  // Copiar después al buffer de userland evita que un #PF por una página
-  // ausente/no válida llegue al handler fatal del kernel.
   const size_t chunk_size = 4096;
   uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
   if (!kbuf)
@@ -1536,9 +1400,6 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
   if (count == 0)
     return 0;
 
-  // Copiar primero a memoria de kernel. Así una fuente de userland
-  // inválida devuelve -EFAULT mediante exception-fixup antes de entrar
-  // en la operación del filesystem.
   const size_t chunk_size = 4096;
   uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
   if (!kbuf)
@@ -1668,11 +1529,10 @@ int vfs_node_poll(vfs_node_t *node, short events) {
     return 0;
   if (node->ops && node->ops->poll)
     return node->ops->poll(node, events);
-  // Fichero regular: siempre listo para leer y escribir.
   int r = 0;
-  if (events & 1 /*POLLIN*/)
+  if (events & 1)
     r |= 1;
-  if (events & 4 /*POLLOUT*/)
+  if (events & 4)
     r |= 4;
   return r;
 }
@@ -1682,11 +1542,3 @@ int64_t vfs_node_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     return -ENOTTY;
   return node->ops->ioctl(node, req, arg);
 }
-
-// ===========================================================================
-// Definición del fs_ops de TarFS (forward-declared arriba).
-// ===========================================================================
-static vfs_fs_ops_t tarfs_fs_ops = {
-    .lookup = tarfs_fs_lookup,
-    .name = "tarfs",
-};
