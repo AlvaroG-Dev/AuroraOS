@@ -1947,6 +1947,29 @@ static int64_t k_vfork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   return sys_fork();
 }
 
+// ---------- pivot_root ----------
+static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  char nr[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)new_root_uptr, nr, sizeof(nr));
+  if (rc != 0)
+    return rc;
+
+  char po[VFS_PATH_MAX];
+  rc = resolve_user_path(proc, (const char *)put_old_uptr, po, sizeof(po));
+  if (rc != 0)
+    return rc;
+
+  return vfs_pivot_root(nr, po);
+}
+
 // En x86_64 Linux, clone(flags, stack, ptid, tls, ctid). Solo soportamos
 // el caso "fork-like": flags cuyo byte bajo es la señal de salida y
 // ningún bit CLONE_* activo. Cualquier otro uso devuelve -ENOSYS.
@@ -2720,6 +2743,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CLONE] = {k_clone, "clone"},
     [SYS_FORK] = {k_fork, "fork"},
     [SYS_VFORK] = {k_vfork, "vfork"},
+    [SYS_PIVOT_ROOT] = {k_pivot_root, "pivot_root"},
     [SYS_EXECVE] = {k_execve, "execve"},
     [SYS_GETTID] = {k_gettid, "gettid"},
     [SYS_WAIT4] = {k_wait4, "wait4"},

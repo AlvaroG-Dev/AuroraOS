@@ -497,6 +497,113 @@ int vfs_umount(const char *path) {
   return -ENOENT;
 }
 
+// ---------------------------------------------------------------------------
+// [2.2] pivot_root.
+//
+// Ver vfs.h para la semántica. La implementación es puramente una
+// reescritura de la tabla de mounts: no toca inodos, ni fds, ni el
+// árbol de nodos. El "árbol" del VFS es virtual y se reconstruye en
+// cada vfs_lookup(), así que basta con actualizar los paths.
+//
+// El proceso llamante conserva su cwd como string; si apuntaba a la
+// antigua raíz, el usuario debe chdir("/") después (Linux también hace
+// cosas raras aquí, no merece la pena replicarlas).
+// ---------------------------------------------------------------------------
+int vfs_pivot_root(const char *new_root, const char *put_old) {
+  if (!new_root || !put_old)
+    return -EINVAL;
+
+  char nr[VFS_PATH_MAX];
+  char po[VFS_PATH_MAX];
+  int rc = normalize_path(new_root, nr, sizeof(nr));
+  if (rc != 0)
+    return rc;
+  rc = normalize_path(put_old, po, sizeof(po));
+  if (rc != 0)
+    return rc;
+
+  // 1. new_root no puede ser la raíz actual.
+  if (strcmp(nr, "/") == 0)
+    return -EINVAL;
+
+  // 2. put_old debe estar estrictamente bajo new_root.
+  size_t nrlen = strlen(nr);
+  if (strncmp(po, nr, nrlen) != 0)
+    return -EINVAL;
+  if (po[nrlen] != '/')
+    return -EINVAL;
+
+  // 3. Debe existir un mount exactamente en new_root.
+  {
+    unsigned long lf = spin_lock_irqsave(&g_mounts_lock);
+    struct vfs_mount *found = NULL;
+    for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+      if (strcmp(m->path, nr) == 0) {
+        found = m;
+        break;
+      }
+    }
+    spin_unlock_irqrestore(&g_mounts_lock, lf);
+    if (!found)
+      return -EINVAL;
+  }
+
+  // 4. put_old debe existir y ser directorio (lookup fuera del lock,
+  //    para no deadlockear con el spinlock de mounts).
+  vfs_node_t *po_node = vfs_lookup(po);
+  if (!po_node)
+    return -ENOENT;
+  if (!(po_node->flags & VFS_DIRECTORY)) {
+    vfs_node_free(po_node);
+    return -ENOTDIR;
+  }
+  vfs_node_free(po_node);
+
+  // 5. po_rel = po con el prefijo nr quitado, e.g. "/oldroot".
+  const char *po_rel = po + nrlen;
+
+  // 6. Reescribir tabla de mounts.
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    if (strcmp(m->path, nr) == 0) {
+      // El mount promovido pasa a ser "/".
+      m->path[0] = '/';
+      m->path[1] = '\0';
+    } else if (strncmp(m->path, nr, nrlen) == 0 && m->path[nrlen] == '/') {
+      // Mount bajo new_root: quitar el prefijo (conserva el '/' inicial).
+      const char *suffix = m->path + nrlen;
+      size_t slen = strlen(suffix);
+      for (size_t i = 0; i <= slen; i++)
+        m->path[i] = suffix[i];
+    } else if (strcmp(m->path, "/") == 0) {
+      // Root antiguo: exactamente en put_old_rel (sin sufijo extra).
+      size_t polen = strlen(po_rel);
+      if (polen >= sizeof(m->path)) {
+        spin_unlock_irqrestore(&g_mounts_lock, flags);
+        return -ENAMETOOLONG;
+      }
+      for (size_t i = 0; i <= polen; i++)
+        m->path[i] = po_rel[i];
+    } else {
+      // Cualquier otro mount: mover bajo put_old_rel + su path.
+      char newpath[VFS_PATH_MAX];
+      size_t polen = strlen(po_rel);
+      size_t mplen = strlen(m->path);
+      if (polen + mplen + 1 > sizeof(newpath)) {
+        spin_unlock_irqrestore(&g_mounts_lock, flags);
+        return -ENAMETOOLONG;
+      }
+      memcpy(newpath, po_rel, polen);
+      memcpy(newpath + polen, m->path, mplen + 1);
+      memcpy(m->path, newpath, sizeof(m->path));
+    }
+  }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+
+  LOG_INFO("[VFS] pivot_root('%s', '%s') OK", nr, po);
+  return 0;
+}
+
 void *vfs_get_mount_priv(const char *path) {
   if (!path)
     return NULL;

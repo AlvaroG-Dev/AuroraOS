@@ -137,6 +137,29 @@ int vfs_mount(const char *path, vfs_fs_ops_t *ops, void *fs_priv);
 // -EBUSY si hay otro mount anidado bajo ese path.
 int vfs_umount(const char *path);
 
+// [2.2] pivot_root.
+//
+// Cambia la raíz del VFS: el mount que está exactamente en `new_root`
+// pasa a ser `/`, y todo lo que estaba bajo él se reescribe quitando el
+// prefijo. El antiguo `/` (y cualquier otro mount fuera de new_root) se
+// mueve bajo `put_old` (que debe estar estrictamente bajo new_root).
+//
+// Semántica Linux-like, adaptada a la tabla de mounts plana de Aurora:
+//   new_root = "/data", put_old = "/data/oldroot":
+//     - mount "/data"   -> "/"
+//     - mount "/"       -> "/oldroot"
+//     - mount "/dev"    -> "/oldroot/dev"
+//     - mount "/data/x" -> "/x"
+//
+// Restricciones:
+//   - new_root no puede ser "/".
+//   - put_old debe estar estrictamente bajo new_root.
+//   - put_old debe existir y ser directorio.
+//   - debe existir un mount exactamente en new_root.
+//
+// Devuelve 0 si OK, negativo en error (-EINVAL/-ENOENT/-ENOTDIR/-ENAMETOOLONG).
+int vfs_pivot_root(const char *new_root, const char *put_old);
+
 // [BIND] Monta `source_path` sobre `mount_path`. Ambos deben existir en
 // el VFS. mount_path debe ser un directorio (o un punto de montaje
 // válido). source_path debe ser un directorio.
