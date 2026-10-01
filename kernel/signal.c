@@ -423,6 +423,27 @@ uint64_t signal_filter_ignored(process_t *p, uint64_t mask) {
       continue;
     if (sig == SIGKILL || sig == SIGSTOP)
       continue;
+
+    // [FIX JOB] SIGCHLD nunca se filtra. Aunque su acción por defecto
+    // sea IGN, el shell necesita que le llegue la interrupción para
+    // despertar de read() y llamar a wait4(WNOHANG). Linux hace lo
+    // mismo: do_notify_parent() envía SIGCHLD al padre y despierta
+    // su wait queue incondicionalmente.
+    //
+    // Sin este caso especial, `kill %1` sobre un job stopped dejaba
+    // el zombie vivo en process_list y `jobs` seguía mostrando el
+    // job como Running.
+    if (sig == SIGCHLD)
+      continue;
+
+    // [FIX JOB] SIGCONT tampoco. Si el proceso estaba stopped,
+    // process_signal_pid_ex ya lo reanudó antes de llegar aquí; si
+    // no, es un no-op que Linux descarta sin encolarlo. Filtrarlo
+    // aquí evita un EINTR espurio en wait_common (bug original de
+    // nanosleep + bg).
+    if (sig == SIGCONT)
+      continue;
+
     void (*h)(int) = p->sigactions[sig].handler;
     if (h == SIG_IGN ||
         (h == SIG_DFL && signal_default_action(sig) == SIG_ACT_IGN))

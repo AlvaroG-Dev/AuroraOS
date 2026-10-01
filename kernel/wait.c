@@ -7,6 +7,19 @@
 
 #define EINTR 4
 
+// [FIX JOB] Señales que el wait debe procesar internamente, sin
+// devolver EINTR. Linux hace lo mismo: nanosleep/pause/read no
+// retornan EINTR por SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU/SIGCONT.
+//
+//   - Las cuatro de parada: el wait pasa a TASK_STOPPED y solo sale
+//     cuando llega SIGCONT (que lo reactiva).
+//   - SIGCONT: no-op si no estaba stopped, y si lo estaba ya lo
+//     reanudó process_signal_pid_ex. En ambos casos, el wait debe
+//     seguir durmiendo sin devolver EINTR.
+#define SIG_STOP_CONT_MASK                                                     \
+  ((1ULL << SIGSTOP) | (1ULL << SIGTSTP) | (1ULL << SIGTTIN) |                 \
+   (1ULL << SIGTTOU) | (1ULL << SIGCONT))
+
 void wait_queue_init(wait_queue_t *wq) {
   spin_init(&wq->lock);
   wq->head = NULL;
@@ -140,10 +153,53 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
                                                    __ATOMIC_ACQUIRE)
                                  : 0;
       uint64_t blk = self->proc ? self->proc->blocked_signals : 0;
-      if ((pend & ~blk) == 0) {
+      uint64_t deliverable = pend & ~blk;
+
+      if (deliverable == 0) {
         self->wake_reason = 0;
         // volver al top del loop: re-add a la wq y seguir durmiendo
+      } else if ((deliverable & ~SIG_STOP_CONT_MASK) == 0 && self->proc) {
+        // [FIX JOB] Solo señales de parada o SIGCONT pendientes.
+        //
+        // En Linux, nanosleep/pause/read NO devuelven EINTR por
+        // SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU ni por SIGCONT no-op. La
+        // parada se procesa DENTRO del wait (equivalente a
+        // do_signal_stop() en kernel/signal.c de Linux), y el wait
+        // se reanuda al llegar SIGCONT.
+        uint64_t stops = deliverable & ~(1ULL << SIGCONT);
+        uint64_t cont_only = deliverable & (1ULL << SIGCONT);
+
+        if (stops != 0) {
+          // Hay al menos una señal de parada. Consumirla del pending
+          // y parar el proceso actual. ctzll devuelve el bit más bajo,
+          // que es lo que Linux reporta como stop_signal (una sola).
+          __atomic_fetch_and(&self->proc->pending_signals, ~stops,
+                             __ATOMIC_ACQ_REL);
+          int stop_sig = __builtin_ctzll(stops);
+
+          // Sacar la tarea de la wq para que no aparezca "durmiendo"
+          // en la cola mientras está STOPPED. Al reanudar por SIGCONT
+          // volverá a añadirse en la siguiente iteración.
+          if (self->waiting_on == wq) {
+            flags = spin_lock_irqsave(&wq->lock);
+            wq_remove_locked(wq, self);
+            spin_unlock_irqrestore(&wq->lock, flags);
+          }
+          self->wake_reason = 0;
+
+          process_stop_current(stop_sig); // retorna tras SIGCONT
+          continue;
+        }
+
+        // Solo SIGCONT pendiente: era un no-op (el proceso no estaba
+        // stopped). Consumirlo y reanudar el wait sin más.
+        __atomic_fetch_and(&self->proc->pending_signals, ~cont_only,
+                           __ATOMIC_ACQ_REL);
+        self->wake_reason = 0;
+        continue;
       } else {
+        // Hay una señal no-parada, no-SIGCONT pendiente: devolver
+        // EINTR como antes.
         if (self->waiting_on == wq) {
           flags = spin_lock_irqsave(&wq->lock);
           wq_remove_locked(wq, self);

@@ -1376,6 +1376,7 @@ void process_exit(process_t *proc, int exit_code) {
     cur->state = TASK_DEAD;
 
   task_t *parent_task = NULL;
+  process_t *parent_proc = NULL;
   task_t *init_task = NULL;
 
   unsigned long flags = spin_lock_irqsave(&process_lock);
@@ -1385,21 +1386,15 @@ void process_exit(process_t *proc, int exit_code) {
   const uint32_t my_pid = proc->pid;
   const uint32_t my_ppid = proc->ppid;
 
-  // -------------------------------------------------------------------
-  // [BLOQUE D] Reparentar huérfanos a PID 1 y localizar al padre.
-  //
   // Una sola pasada por process_list:
-  //   - Si p es el padre del que muere, tomamos ref a su task.
+  //   - Si p es el padre, capturamos su task Y su process_t.
   //   - Si p es hijo del que muere, lo reparentamos a PID 1.
-  //
-  // Si el que muere ES PID 1, no reparentamos (en Linux sería panic;
-  // aquí solo avisamos, los hijos quedan con ppid=1 muerto).
-  // -------------------------------------------------------------------
   int reparented = 0;
   process_t *p = process_list;
   while (p) {
     if (p->pid == my_ppid) {
       parent_task = p->task;
+      parent_proc = p;
       if (parent_task)
         task_get(parent_task);
     }
@@ -1414,10 +1409,6 @@ void process_exit(process_t *proc, int exit_code) {
     LOG_ERR("[INIT] PID 1 ha salido. El sistema queda sin reaper.");
   }
 
-  // Si reparentamos algo, init necesita enterarse:
-  //   - huérfano vivo: puede estar esperando WUNTRACED/WCONTINUED.
-  //   - huérfano zombie: init debe reapearlo vía waitpid(-1).
-  // En ambos casos, despertar a init es la acción correcta.
   if (reparented) {
     p = process_list;
     while (p) {
@@ -1433,6 +1424,21 @@ void process_exit(process_t *proc, int exit_code) {
   spin_unlock_irqrestore(&process_lock, flags);
 
   if (parent_task) {
+    // [FIX SIGCHLD] Empujar SIGCHLD al padre ANTES de despertarlo.
+    //
+    // Sin esto, el padre solo se enteraba del hijo muerto si estaba
+    // bloqueado en wait4(). Un shell interactivo está bloqueado en
+    // read() sobre el PTY, así que el wake lo devolvía a dormir sin
+    // reapear. El zombie se quedaba vivo y `jobs` seguía mostrando
+    // el job.
+    //
+    // Con SIGCHLD pendiente, el read() del padre retorna EINTR,
+    // signal_check_pending entrega SIGCHLD (busybox tiene handler),
+    // y el shell llama a dowait() para reapear.
+    if (parent_proc) {
+      __atomic_fetch_or(&parent_proc->pending_signals, 1ULL << SIGCHLD,
+                        __ATOMIC_RELEASE);
+    }
     wait_queue_wake_task(parent_task);
     task_put(parent_task);
   }
