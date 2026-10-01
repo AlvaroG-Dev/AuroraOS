@@ -10,12 +10,17 @@ all: image
 
 sysroot:
 	@mkdir -p sysroot/system/icons sysroot/system/wallpapers
+	@mkdir -p sysroot/etc
 	@if [ ! -f sysroot/system/config.txt ]; then \
 		echo "Aurora OS v0.1.0 Initramfs Config" > sysroot/system/config.txt; \
 	fi
 	@if [ -d assets ]; then \
 		echo "[Makefile] Copiando assets a sysroot..."; \
 		cp -r assets/* sysroot/ 2>/dev/null || true; \
+	fi
+	@if [ -d etc ]; then \
+		echo "[Makefile] Copiando etc/ a sysroot/etc/..."; \
+		cp -f etc/passwd etc/group etc/shadow sysroot/etc/ 2>/dev/null || true; \
 	fi
 
 bootloader:
@@ -77,7 +82,7 @@ initrd.tar: sysroot user elf_malformed
 		echo "[Makefile] WARN: $$MUSL_LIB/libc.so no existe, los dinamicos fallaran"; \
 	fi
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
-	tar --format=ustar -cf kernel/initrd.tar -C sysroot .
+	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 
 kernel: initrd.tar
 	$(MAKE) -C kernel

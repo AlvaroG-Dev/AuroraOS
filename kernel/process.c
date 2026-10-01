@@ -490,8 +490,12 @@ static void process_init_creds(process_t *proc) {
   proc->sgid = 0;
   proc->fsgid = 0;
   proc->umask = 022;
-  proc->ngroups = 0;
-  for (int i = 0; i < NGROUPS_MAX; i++)
+  // [5.1] Coherente con Linux: el proceso inicial arranca con el grupo
+  // root como suplementario. Sin esto, `id` omite `groups=` y algunos
+  // applets que iteran getgroups() ven una lista vacía.
+  proc->ngroups = 1;
+  proc->groups[0] = 0;
+  for (int i = 1; i < NGROUPS_MAX; i++)
     proc->groups[i] = 0;
 }
 
