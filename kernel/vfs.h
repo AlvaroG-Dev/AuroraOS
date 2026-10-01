@@ -88,6 +88,7 @@ typedef struct vfs_stat {
   uint32_t mode;
   uint32_t uid;
   uint32_t gid;
+  uint32_t rdev; // [4.4] Nuevo
 } vfs_stat_t;
 
 typedef struct vfs_dirent {
@@ -182,6 +183,12 @@ struct vfs_node {
   uint32_t mode;
   uint32_t uid;
   uint32_t gid;
+
+  // [4.4] Device number para char/block devices. Formato Linux
+  // (major<<8 | minor) para majors < 256, o (major<<20 | minor) para
+  // majors grandes. Lo lee stat(2) para st_rdev. 0 para ficheros
+  // regulares y directorios.
+  uint32_t rdev;
 };
 
 // ---------------------------------------------------------------------------

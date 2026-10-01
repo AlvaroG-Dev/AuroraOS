@@ -1345,6 +1345,7 @@ typedef struct {
   const char *name;
   vfs_ops_t *ops;
   uint32_t type;
+  uint32_t rdev; // [4.4] (major << 8) | minor, 0 si no aplica
 } devfs_entry_t;
 
 // [PTY] readdir de /dev/pts: solo los slots en uso.
@@ -1435,11 +1436,11 @@ static vfs_ops_t dev_tty_ops = {
 };
 
 static const devfs_entry_t devfs_entries[] = {
-    {"null", &dev_null_ops, VFS_CHARDEVICE},
-    {"zero", &dev_zero_ops, VFS_CHARDEVICE},
-    {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE},
-    {"tty", &dev_tty_ops, VFS_CHARDEVICE},
-    {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY},
+    {"null", &dev_null_ops, VFS_CHARDEVICE, (1u << 8) | 3},
+    {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
+    {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
+    {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
+    {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
 };
 
 static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
@@ -1520,10 +1521,11 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     n->name[nl] = '\0';
     n->flags = VFS_CHARDEVICE;
     n->ops = NULL;
-    // [3.4.a] /dev/pts/N: root:tty 0620 como Linux.
     n->mode = S_IFCHR | 0620;
     n->uid = 0;
     n->gid = 5;
+    // [4.4] PTY slaves usan major 136 en Linux.
+    n->rdev = (136u << 8) | (uint32_t)idx;
     return n;
   }
 
@@ -1545,7 +1547,6 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       n->name[nlen] = '\0';
       n->flags = devfs_entries[i].type;
       n->ops = devfs_entries[i].ops;
-      // [3.4.a] Chardev 0666, dir 0755.
       if (devfs_entries[i].type & VFS_DIRECTORY) {
         n->mode = S_IFDIR | 0755;
       } else {
@@ -1553,6 +1554,7 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       }
       n->uid = 0;
       n->gid = 0;
+      n->rdev = devfs_entries[i].rdev; // [4.4]
       return n;
     }
   }
@@ -1919,6 +1921,7 @@ int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st) {
   st->mode = f->node->mode;
   st->uid = f->node->uid;
   st->gid = f->node->gid;
+  st->rdev = f->node->rdev;
   clac();
   return 0;
 }

@@ -258,6 +258,7 @@ static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size,
   out->st_mode = mode;
   out->st_uid = vs->uid;
   out->st_gid = vs->gid;
+  out->st_rdev = (int64_t)vs->rdev; // [4.4]
   out->st_size = (int64_t)size;
   out->st_blksize = 512;
   out->st_blocks = (int64_t)((size + 511) / 512);
@@ -461,6 +462,7 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .mode = node->mode,
       .uid = node->uid,
       .gid = node->gid,
+      .rdev = node->rdev, // [4.4]
   };
   vfs_node_free(node);
 
