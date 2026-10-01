@@ -712,7 +712,10 @@ static int fat32_gen_short_alias(fat32_fs_t *fs, uint32_t parent_cluster,
       out11[i] = base[i];
     for (int i = 0; i < elen; i++)
       out11[8 + i] = ext[i];
-    if (!fat32_short_name_exists(fs, parent_cluster, out11)) {
+    int ex = fat32_short_name_exists(fs, parent_cluster, out11);
+    if (ex < 0)
+      return ex; // [FIX] propaga error de E/S
+    if (ex == 0) {
       *out_nt = 0;
       return 0;
     }
@@ -744,7 +747,10 @@ static int fat32_gen_short_alias(fat32_fs_t *fs, uint32_t parent_cluster,
     for (int i = 0; i < elen; i++)
       out11[8 + i] = ext[i];
 
-    if (!fat32_short_name_exists(fs, parent_cluster, out11)) {
+    int ex = fat32_short_name_exists(fs, parent_cluster, out11);
+    if (ex < 0)
+      return ex; // [FIX]
+    if (ex == 0) {
       *out_nt = 0;
       return 0;
     }

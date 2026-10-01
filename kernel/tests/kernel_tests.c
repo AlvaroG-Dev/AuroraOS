@@ -5077,3 +5077,413 @@ static void test_vfs_check_access_root_x_file(void) {
 }
 REGISTER_TEST("vfs: root bypasea check_access",
               test_vfs_check_access_root_x_file);
+
+typedef struct {
+  block_device_t bdev;
+  block_ops_t ops;
+  uint8_t *data;
+  uint64_t num_sectors;
+  // [C] -1 = nunca falla. 0 = falla el próximo bio. N = falla el
+  // (N+1)-ésimo. Cuenta bios READ y WRITE (no FLUSH). Una vez
+  // disparado se queda en -1.
+  int64_t fail_after_bios;
+} mock_bdev_t;
+
+static int mock_submit(block_device_t *bd, bio_t *bio) {
+  mock_bdev_t *m = (mock_bdev_t *)bd->private_data;
+  if (!m || !bio)
+    return -EINVAL;
+
+  if (bio->op == BIO_FLUSH)
+    return 0;
+
+  uint64_t off = bio->lba * bd->sector_size;
+  uint64_t bytes = (uint64_t)bio->count * bd->sector_size;
+  if (off > m->num_sectors * bd->sector_size ||
+      bytes > m->num_sectors * bd->sector_size - off)
+    return -ERANGE;
+
+  // [C] Contamos TODOS los bios (read y write). El bcache hace que la
+  // mayoría de las escrituras se acumulen en RAM, así que "fallar la
+  // escritura N" no sirve de nada: hay que fallar un read.
+  if (m->fail_after_bios >= 0) {
+    if (m->fail_after_bios == 0) {
+      m->fail_after_bios = -1;
+      return -EIO;
+    }
+    m->fail_after_bios--;
+  }
+
+  if (bio->op == BIO_WRITE) {
+    memcpy(m->data + off, bio->buf, bytes);
+    return 0;
+  }
+  // READ
+  memcpy(bio->buf, m->data + off, bytes);
+  return 0;
+}
+
+static void mock_flush(block_device_t *bd) { (void)bd; }
+static void mock_dump(block_device_t *bd) { (void)bd; }
+
+static mock_bdev_t *mock_alloc(uint64_t num_sectors) {
+  mock_bdev_t *m = (mock_bdev_t *)kzalloc(sizeof(*m));
+  if (!m)
+    return NULL;
+  m->num_sectors = num_sectors;
+  m->data = (uint8_t *)kzalloc(num_sectors * 512);
+  if (!m->data) {
+    kfree(m);
+    return NULL;
+  }
+  m->fail_after_bios = -1;
+  m->ops.submit = mock_submit;
+  m->ops.flush = mock_flush;
+  m->ops.dump = mock_dump;
+  const char *nm = "mock0";
+  for (int i = 0; i < 5; i++)
+    m->bdev.name[i] = nm[i];
+  m->bdev.name[5] = '\0';
+  m->bdev.num_sectors = num_sectors;
+  m->bdev.sector_size = 512;
+  m->bdev.is_read_only = 0;
+  m->bdev.is_partition = 0;
+  m->bdev.parent = NULL;
+  m->bdev.start_lba = 0;
+  m->bdev.ops = &m->ops;
+  m->bdev.private_data = m;
+  m->bdev.next = NULL;
+  return m;
+}
+
+static void mock_free(mock_bdev_t *m) {
+  if (!m)
+    return;
+  if (m->data)
+    kfree(m->data);
+  kfree(m);
+}
+
+// Escribe un BPB FAT32 mínimo válido en el mock. Layout:
+//   sector 0: BPB
+//   sector 1: FSInfo
+//   sectors 32..47: FAT#1
+//   sectors 48..63: FAT#2
+//   sectors 64..: data clusters (root en cluster 2)
+// Los primeros 64 sectores son metadata. El resto son clusters.
+// Requiere al menos 1024 sectores en el mock.
+static int mock_format_fat32(mock_bdev_t *m) {
+  const uint32_t bps = 512;
+  const uint32_t reserved = 32;
+  const uint32_t nfats = 2;
+  const uint32_t fat_size = 16;
+  const uint32_t total = 1024;
+  const uint32_t data_start = reserved + nfats * fat_size;
+  const uint32_t root_cluster = 2;
+
+  if (m->num_sectors < total)
+    return -1;
+  memset(m->data, 0, total * bps);
+
+  // --- BPB (bytes por offset, sin struct) ---
+  uint8_t *b = m->data;
+  b[0] = 0xEB;
+  b[1] = 0x58;
+  b[2] = 0x90;
+  // OEM en 3..10
+  *(uint16_t *)(b + 11) = bps;
+  b[13] = 1; // sectors_per_cluster
+  *(uint16_t *)(b + 14) = reserved;
+  b[16] = nfats;
+  *(uint16_t *)(b + 17) = 0; // root_entry_count (FAT32)
+  *(uint16_t *)(b + 19) = 0; // total_sectors_16 (FAT32)
+  *(uint32_t *)(b + 32) = total;
+  *(uint32_t *)(b + 36) = fat_size;
+  *(uint32_t *)(b + 44) = root_cluster;
+  *(uint16_t *)(b + 48) = 1; // fs_info_sector
+  // fs_type "FAT32   " en 82..89
+  const char *ft = "FAT32   ";
+  for (int i = 0; i < 8; i++)
+    b[82 + i] = (uint8_t)ft[i];
+  *(uint16_t *)(b + 510) = 0xAA55;
+
+  // --- FSInfo en sector 1 ---
+  uint8_t *fsi = m->data + 1 * bps;
+  *(uint32_t *)(fsi + 0) = 0x41615252u;
+  *(uint32_t *)(fsi + 484) = 0x61417272u;
+  *(uint32_t *)(fsi + 488) = 0xFFFFFFFFu; // free_count desconocido
+  *(uint32_t *)(fsi + 492) = 3;           // next_free
+  *(uint32_t *)(fsi + 508) = 0xAA550000u;
+
+  // --- FAT#1 y FAT#2 ---
+  uint32_t *f1 = (uint32_t *)(m->data + reserved * bps);
+  uint32_t *f2 = (uint32_t *)(m->data + (reserved + fat_size) * bps);
+  uint32_t entries = fat_size * bps / 4;
+  for (uint32_t i = 0; i < entries; i++) {
+    f1[i] = 0;
+    f2[i] = 0;
+  }
+  f1[0] = f2[0] = 0x0FFFFFF8;
+  f1[1] = f2[1] = 0x0FFFFFFF;
+  f1[root_cluster] = f2[root_cluster] = 0x0FFFFFFF; // EOC (raíz)
+
+  // --- Root cluster: directorio vacío ---
+  uint64_t root_lba = data_start + (root_cluster - 2);
+  memset(m->data + root_lba * bps, 0, bps);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: fuzz del BPB. fat32_mount con bytes aleatorios como boot
+// sector debe rechazar siempre (o casi siempre) sin crashear.
+// ---------------------------------------------------------------------------
+static void test_fat32_bpb_fuzz(void) {
+  mock_bdev_t *m = mock_alloc(1024);
+  TEST_ASSERT(m != NULL, "mock_alloc falló");
+  if (!m)
+    return;
+
+  uint32_t state = 0xDEADBEEF;
+  int rejected = 0;
+  const int N = 32;
+
+  for (int it = 0; it < N; it++) {
+    for (uint64_t i = 0; i < 512; i++) {
+      state = state * 1103515245u + 12345u;
+      m->data[i] = (uint8_t)(state >> 16);
+    }
+    // 1 de cada 4 deja la firma 0xAA55 para pasar la primera barrera.
+    if (it % 4 == 0) {
+      m->data[510] = 0x55;
+      m->data[511] = 0xAA;
+    }
+
+    void *priv = NULL;
+    int rc = fat32_mount(&m->bdev, &priv);
+    if (rc != 0) {
+      rejected++;
+      TEST_ASSERT(priv == NULL, "priv != NULL tras fallo");
+    } else {
+      fat32_umount(priv);
+    }
+  }
+
+  TEST_ASSERT(rejected >= N - 1, "solo %d/%d BPBs aleatorios rechazados",
+              rejected, N);
+  mock_free(m);
+}
+REGISTER_TEST("fat32-corrupt: BPB fuzz (32 semillas)", test_fat32_bpb_fuzz);
+
+// ---------------------------------------------------------------------------
+// Test 2: ciclo en la cadena FAT. fat32_check debe detectarlo.
+// ---------------------------------------------------------------------------
+static void test_fat32_fat_cycle_detect(void) {
+  mock_bdev_t *m = mock_alloc(1024);
+  TEST_ASSERT(m != NULL, "mock_alloc");
+  if (!m)
+    return;
+  TEST_ASSERT(mock_format_fat32(m) == 0, "format");
+
+  // Ciclo 2 → 10 → 11 → 2. root_cluster es 2, así que el walk desde
+  // root entra directo al ciclo.
+  uint32_t *f1 = (uint32_t *)(m->data + 32 * 512);
+  f1[2] = 10;
+  f1[10] = 11;
+  f1[11] = 2;
+
+  void *priv = NULL;
+  int rc = fat32_mount(&m->bdev, &priv);
+  TEST_ASSERT(rc == 0, "mount: %d", rc);
+  if (rc != 0) {
+    mock_free(m);
+    return;
+  }
+
+  struct fat32_check_result res;
+  memset(&res, 0, sizeof(res));
+  rc = fat32_check(priv, &res);
+  TEST_ASSERT(rc == 0, "check: %d", rc);
+  TEST_ASSERT(res.loops_detected > 0, "no detectó el ciclo (loops=%llu)",
+              (unsigned long long)res.loops_detected);
+  TEST_ASSERT(res.broken_chains == 0, "falsos positivos de cadena rota (%llu)",
+              (unsigned long long)res.broken_chains);
+
+  fat32_umount(priv);
+  mock_free(m);
+}
+REGISTER_TEST("fat32-corrupt: detecta ciclo en FAT",
+              test_fat32_fat_cycle_detect);
+
+// ---------------------------------------------------------------------------
+// Test 3: dirent con first_cluster out-of-range.
+// ---------------------------------------------------------------------------
+static void test_fat32_cluster_out_of_range(void) {
+  mock_bdev_t *m = mock_alloc(1024);
+  TEST_ASSERT(m != NULL, "mock_alloc");
+  if (!m)
+    return;
+  TEST_ASSERT(mock_format_fat32(m) == 0, "format");
+
+  // Dirent en el root (LBA 64, offset 0).
+  uint8_t *e = m->data + 64 * 512;
+  // name = "BAD     TXT" (11 bytes, space-padded)
+  const char *nm = "BAD     TXT";
+  for (int i = 0; i < 11; i++)
+    e[i] = (uint8_t)nm[i];
+  e[11] = 0x20; // ATTR_ARCHIVE
+  uint32_t bad = 9999;
+  e[20] = (uint8_t)((bad >> 16) & 0xFF);
+  e[21] = (uint8_t)((bad >> 24) & 0xFF);
+  e[26] = (uint8_t)(bad & 0xFF);
+  e[27] = (uint8_t)((bad >> 8) & 0xFF);
+  *(uint32_t *)(e + 28) = 100;
+
+  void *priv = NULL;
+  int rc = fat32_mount(&m->bdev, &priv);
+  TEST_ASSERT(rc == 0, "mount: %d", rc);
+  if (rc != 0) {
+    mock_free(m);
+    return;
+  }
+
+  struct fat32_check_result res;
+  memset(&res, 0, sizeof(res));
+  rc = fat32_check(priv, &res);
+  TEST_ASSERT(rc == 0, "check: %d", rc);
+  TEST_ASSERT(res.broken_chains > 0,
+              "no detectó cluster out-of-range (broken=%llu)",
+              (unsigned long long)res.broken_chains);
+
+  fat32_umount(priv);
+  mock_free(m);
+}
+REGISTER_TEST("fat32-corrupt: detecta cluster fuera de rango",
+              test_fat32_cluster_out_of_range);
+
+// ---------------------------------------------------------------------------
+// Test 4a: crash a mitad de create. La FAT tiene un cluster marcado
+// como EOC pero ningún dirent lo referencia. fat32_check debe verlo
+// como huérfano.
+// ---------------------------------------------------------------------------
+static void test_fat32_orphan_detect(void) {
+  mock_bdev_t *m = mock_alloc(1024);
+  TEST_ASSERT(m != NULL, "mock_alloc");
+  if (!m)
+    return;
+  TEST_ASSERT(mock_format_fat32(m) == 0, "format");
+
+  // Simular un crash entre el sync de la FAT (cluster 3 = EOC) y la
+  // escritura del dirent. El cluster 3 queda huérfano.
+  uint32_t *f1 = (uint32_t *)(m->data + 32 * 512);
+  uint32_t *f2 = (uint32_t *)(m->data + 48 * 512);
+  f1[3] = 0x0FFFFFFF;
+  f2[3] = 0x0FFFFFFF;
+
+  void *priv = NULL;
+  int rc = fat32_mount(&m->bdev, &priv);
+  TEST_ASSERT(rc == 0, "mount tras crash: %d", rc);
+  if (rc != 0) {
+    mock_free(m);
+    return;
+  }
+
+  struct fat32_check_result res;
+  memset(&res, 0, sizeof(res));
+  rc = fat32_check(priv, &res);
+  TEST_ASSERT(rc == 0, "check: %d", rc);
+  TEST_ASSERT(res.clusters_orphan == 1, "esperado 1 huérfano, encontrados %llu",
+              (unsigned long long)res.clusters_orphan);
+  TEST_ASSERT(res.broken_chains == 0, "falsos positivos: broken=%llu",
+              (unsigned long long)res.broken_chains);
+  TEST_ASSERT(res.loops_detected == 0, "falsos positivos: loops=%llu",
+              (unsigned long long)res.loops_detected);
+
+  // Desmontar ordenadamente. El huérfano persiste en el mock porque
+  // fat32_umount solo hace sync si fat_dirty está puesto, y en este
+  // caso no hemos tocado la FAT en memoria (solo el disco).
+  fat32_umount(priv);
+  mock_free(m);
+}
+REGISTER_TEST("fat32-corrupt: detecta huérfano tras crash",
+              test_fat32_orphan_detect);
+
+// ---------------------------------------------------------------------------
+// Test 4b: fallo de E/S a mitad de create. vfs_create debe devolver
+// error negativo, no colgarse ni devolver 0.
+// ---------------------------------------------------------------------------
+static void test_fat32_io_error_propagated(void) {
+  mock_bdev_t *m = mock_alloc(1024);
+  TEST_ASSERT(m != NULL, "mock_alloc");
+  if (!m)
+    return;
+  TEST_ASSERT(mock_format_fat32(m) == 0, "format");
+
+  void *priv = NULL;
+  int rc = fat32_mount(&m->bdev, &priv);
+  TEST_ASSERT(rc == 0, "mount: %d", rc);
+  if (rc != 0) {
+    mock_free(m);
+    return;
+  }
+  TEST_ASSERT(vfs_mount("/mock", fat32_get_vfs_ops(), priv) == 0, "vfs_mount");
+
+  // Tras mount el bcache está vacío. El primer bio del create será un
+  // read del cluster root (desde fat32_short_name_exists dentro de
+  // fat32_gen_short_alias, porque "ioerr.txt" lleva lowercase y por
+  // tanto va por la rama LFN). Lo fallamos.
+  m->fail_after_bios = 0;
+
+  int crc = vfs_create("/mock/ioerr.txt", 0644);
+  TEST_ASSERT(crc != 0, "create con E/S fallando devolvió %d", crc);
+
+  vfs_umount("/mock");
+  fat32_umount(priv);
+  mock_free(m);
+}
+REGISTER_TEST("fat32-corrupt: propaga E/S a create",
+              test_fat32_io_error_propagated);
+
+// ---------------------------------------------------------------------------
+// Test 4c: reparación. Partimos del estado de 4a (huérfano) y
+// "limpiamos" la FAT a mano. fat32_check debe ver 0 huérfanos.
+// ---------------------------------------------------------------------------
+static void test_fat32_orphan_repair(void) {
+  mock_bdev_t *m = mock_alloc(1024);
+  TEST_ASSERT(m != NULL, "mock_alloc");
+  if (!m)
+    return;
+  TEST_ASSERT(mock_format_fat32(m) == 0, "format");
+
+  // Estado con huérfano (como 4a).
+  uint32_t *f1 = (uint32_t *)(m->data + 32 * 512);
+  uint32_t *f2 = (uint32_t *)(m->data + 48 * 512);
+  f1[3] = 0x0FFFFFFF;
+  f2[3] = 0x0FFFFFFF;
+
+  // "Reparar": poner el cluster 3 a libre. En un fsck real esto lo
+  // haría la herramienta; aquí lo simulamos.
+  f1[3] = 0;
+  f2[3] = 0;
+
+  void *priv = NULL;
+  int rc = fat32_mount(&m->bdev, &priv);
+  TEST_ASSERT(rc == 0, "mount tras reparar: %d", rc);
+  if (rc != 0) {
+    mock_free(m);
+    return;
+  }
+
+  struct fat32_check_result res;
+  memset(&res, 0, sizeof(res));
+  rc = fat32_check(priv, &res);
+  TEST_ASSERT(rc == 0, "check: %d", rc);
+  TEST_ASSERT(res.clusters_orphan == 0, "tras reparar quedan %llu huérfanos",
+              (unsigned long long)res.clusters_orphan);
+  TEST_ASSERT(res.broken_chains == 0, "broken=%llu",
+              (unsigned long long)res.broken_chains);
+
+  fat32_umount(priv);
+  mock_free(m);
+}
+REGISTER_TEST("fat32-corrupt: reparación limpia huérfanos",
+              test_fat32_orphan_repair);
