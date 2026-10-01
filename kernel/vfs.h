@@ -160,6 +160,11 @@ typedef struct vfs_ops {
   // [3.4.c] Cambia owner/group. uid/gid = (uint32_t)-1 → no cambiar
   // ese campo. Solo root puede llamar. FS sin soporte dejan NULL.
   int (*chown)(vfs_node_t *node, uint32_t uid, uint32_t gid);
+
+  // [3.2] Crea un hard link `name` → `target` en `dir`. Solo FS con
+  // soporte real (ext2, tmpfs) lo implementan. tarfs (RO) deja NULL
+  // → EROFS. FAT32 no puede → EPERM.
+  int (*link)(vfs_node_t *dir, const char *name, vfs_node_t *target);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -326,6 +331,12 @@ int vfs_readdir(const char *path, uint64_t index, vfs_dirent_t *out);
 //   -EXDEV    src y dst en FS distintos
 //   -EINVAL   path inválido
 int vfs_rename(const char *oldpath, const char *newpath);
+
+// [3.2] Crea `newpath` como hard link a `oldpath`. El inodo de
+// oldpath se comparte con newpath. Si el FS no lo soporta:
+//   - RO  → -EROFS
+//   - resto → -EPERM
+int vfs_link(const char *oldpath, const char *newpath);
 
 // Libera un nodo devuelto por vfs_lookup. Llamar a ops->close y kfree.
 void vfs_node_free(vfs_node_t *node);

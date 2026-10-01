@@ -1862,16 +1862,33 @@ static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
   return k_pipe(fds_ptr, 0, 0, 0, 0);
 }
 
-// [3.2] Hard link. No soportado todavía. FAT32 no los tiene y tarfs es
-// RO. Se registra para que musl/busybox no se coman un ENOSYS genérico.
-static int64_t k_link(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+// [3.2] link(oldpath, newpath): hard link. FAT32 → -EPERM, tarfs → -EROFS.
+static int64_t k_link(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
                       uint64_t a5) {
-  (void)a1;
-  (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  return -EPERM;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char op[VFS_PATH_MAX], np[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)oldp, op, sizeof(op));
+  if (rc != 0)
+    return rc;
+  rc = resolve_user_path(proc, (const char *)newp, np, sizeof(np));
+  if (rc != 0)
+    return rc;
+  return vfs_link(op, np);
+}
+
+// linkat(olddirfd, oldpath, newdirfd, newpath, flags).
+// Ignoramos flags (AT_SYMLINK_FOLLOW, AT_EMPTY_PATH no soportados).
+static int64_t k_linkat(uint64_t olddfd, uint64_t oldp, uint64_t newdfd,
+                        uint64_t newp, uint64_t flags) {
+  (void)flags;
+  if ((int64_t)olddfd != AT_FDCWD || (int64_t)newdfd != AT_FDCWD)
+    return -EINVAL;
+  return k_link(oldp, newp, 0, 0, 0);
 }
 
 // ---------- ioctl ----------
@@ -3742,6 +3759,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETCWD] = {k_getcwd, "getcwd"},
     [SYS_CHDIR] = {k_chdir, "chdir"},
     [SYS_LINK] = {k_link, "link"},
+    [SYS_LINKAT] = {k_linkat, "linkat"},
     [SYS_SYMLINK] = {k_symlink, "symlink"},
     [SYS_READLINK] = {k_readlink, "readlink"},
     [SYS_TKILL] = {k_tkill, "tkill"},

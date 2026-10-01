@@ -354,6 +354,15 @@ static int tar_vfs_close(vfs_node_t *node) {
   return 0;
 }
 
+// [3.2] Hard links no soportados en tarfs (RO). Devolvemos EROFS
+// explícito para que vfs_link no tenga que adivinar el tipo de FS.
+static int tar_vfs_link(vfs_node_t *dir, const char *name, vfs_node_t *target) {
+  (void)dir;
+  (void)name;
+  (void)target;
+  return -EROFS;
+}
+
 // readdir: recorre todos los nodos del tar y devuelve los hijos
 // directos del directorio `dir`. Un hijo es directo si:
 //   - su nombre empieza por "<dir_name>/" (o por nada, si es raíz)
@@ -452,6 +461,7 @@ static vfs_ops_t tar_dir_ops = {
     .close = tar_vfs_close,
     .readable = NULL,
     .readdir = tar_vfs_readdir,
+    .link = tar_vfs_link, // [3.2]
     // [3.4.c] RO: chmod/chown devuelven -EROFS.
     .chmod = NULL,
     .chown = NULL,

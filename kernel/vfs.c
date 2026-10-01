@@ -1027,6 +1027,57 @@ int vfs_symlink(const char *target, const char *linkpath) {
 }
 
 // ---------------------------------------------------------------------------
+// [3.2] Hard link. Crea `newpath` apuntando al mismo inodo que `oldpath`.
+//
+// El FS destino debe implementar `.link`. Ningún FS de Aurora lo hace
+// todavía, así que en la práctica siempre devuelve -EPERM/-EROFS. Pero
+// la infraestructura queda lista para un ext2 o un tmpfs futuro.
+// ---------------------------------------------------------------------------
+int vfs_link(const char *oldpath, const char *newpath) {
+  if (!oldpath || !newpath)
+    return -EINVAL;
+
+  char old_norm[VFS_PATH_MAX];
+  char new_norm[VFS_PATH_MAX];
+  if (normalize_path(oldpath, old_norm, sizeof(old_norm)) != 0)
+    return -EINVAL;
+  if (normalize_path(newpath, new_norm, sizeof(new_norm)) != 0)
+    return -EINVAL;
+  if (strcmp(old_norm, new_norm) == 0)
+    return -EEXIST;
+
+  vfs_node_t *target = vfs_lookup(old_norm);
+  if (!target)
+    return -ENOENT;
+  if (target->flags & VFS_DIRECTORY) {
+    vfs_node_free(target);
+    return -EPERM; // Linux: EPERM para hard link a directorio
+  }
+
+  char new_base[VFS_PATH_MAX];
+  int rc;
+  vfs_node_t *parent =
+      resolve_parent(new_norm, new_base, sizeof(new_base), &rc);
+  if (!parent) {
+    vfs_node_free(target);
+    return rc;
+  }
+
+  // El FS destino decide. Sin `.link` → EPERM (como FAT32 en Linux).
+  // Los FS RO (tarfs) implementan `.link` devolviendo -EROFS.
+  if (!parent->ops || !parent->ops->link) {
+    vfs_node_free(parent);
+    vfs_node_free(target);
+    return -EPERM;
+  }
+
+  rc = parent->ops->link(parent, new_base, target);
+  vfs_node_free(parent);
+  vfs_node_free(target);
+  return rc;
+}
+
+// ---------------------------------------------------------------------------
 // [3.4.c] chmod / chown.
 //
 // Comprobación de permisos contra el proceso actual:
