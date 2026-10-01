@@ -130,44 +130,159 @@ static const char scancode_ascii_shift[128] = {
     '>', '?',  0,    '*', 0,   ' ', 0,   0,   0,   0,   0,   0,
 };
 
+// [6.1] Secuencias ANSI para teclas extendidas (0xE0 + code). Mismos
+// códigos que emite un terminal Linux xterm con TERM=linux. Los
+// consumidores reales son vi, less, top, ash (edición de línea).
+static const char *ps2_extended_seq(uint8_t code) {
+  switch (code) {
+  case 0x48:
+    return "\x1b[A"; // Up
+  case 0x50:
+    return "\x1b[B"; // Down
+  case 0x4D:
+    return "\x1b[C"; // Right
+  case 0x4B:
+    return "\x1b[D"; // Left
+  case 0x47:
+    return "\x1b[H"; // Home
+  case 0x4F:
+    return "\x1b[F"; // End
+  case 0x49:
+    return "\x1b[5~"; // Page Up
+  case 0x51:
+    return "\x1b[6~"; // Page Down
+  case 0x53:
+    return "\x1b[3~"; // Delete
+  case 0x52:
+    return "\x1b[2~"; // Insert
+  case 0x57:
+    return "\x1b[23~"; // F11
+  case 0x58:
+    return "\x1b[24~"; // F12
+  case 0x1C:
+    return "\r"; // Keypad Enter
+  case 0x35:
+    return "/"; // Keypad /
+  default:
+    return NULL;
+  }
+}
+
+// [6.1] Secuencias ANSI para teclas no extendidas que no son ASCII:
+// F1-F10, que en Set 1 van con scancodes propios (0x3B-0x44).
+static const char *ps2_plain_seq(uint8_t code) {
+  switch (code) {
+  case 0x3B:
+    return "\x1bOP"; // F1
+  case 0x3C:
+    return "\x1bOQ"; // F2
+  case 0x3D:
+    return "\x1bOR"; // F3
+  case 0x3E:
+    return "\x1bOS"; // F4
+  case 0x3F:
+    return "\x1b[15~"; // F5
+  case 0x40:
+    return "\x1b[17~"; // F6
+  case 0x41:
+    return "\x1b[18~"; // F7
+  case 0x42:
+    return "\x1b[19~"; // F8
+  case 0x43:
+    return "\x1b[20~"; // F9
+  case 0x44:
+    return "\x1b[21~"; // F10
+  default:
+    return NULL;
+  }
+}
+
 static int left_shift_pressed = 0;
 static int right_shift_pressed = 0;
 static int ctrl_pressed = 0;
+
+// [6.1] Prefijo 0xE0 (scancode extendido). Set 1 usa 0xE0 delante de
+// las teclas que no caben en la tabla original: flechas, Home/End,
+// Page Up/Down, Delete, Insert, F11/F12, teclado numérico extendido.
+// Cuando llega 0xE0 marcamos este flag; el siguiente byte se decodifica
+// contra la tabla extendida en vez de la normal.
+static int extended_pending = 0;
 
 // ===========================================================================
 // Procesamiento de bytes → eventos de input + TTY
 // ===========================================================================
 static void process_keyboard_byte(uint8_t sc) {
-  input_event_t ev;
-  ev.type = INPUT_EV_KEY;
-  ev.code = sc;
-  ev.value = (sc & 0x80) ? 0 : 1;
-  ev.value2 = 0;
-  ev.timestamp = (uint32_t)tick_count;
-  input_push(&ev);
-
-  // [TTY] traducción a ASCII y entrega.
   int pressed = !(sc & 0x80);
   uint8_t code = sc & 0x7F;
 
+  // [6.1] Prefijo de scancode extendido. Consumir y esperar el
+  // siguiente byte. No emitimos ningún evento al input subsystem por
+  // el 0xE0 en sí; el code real llega en la siguiente iteración.
+  if (sc == 0xE0) {
+    extended_pending = 1;
+    return;
+  }
+
+  // [6.1] Publicar evento en input subsystem solo en press. Es lo que
+  // consume el compositor (aunque hoy solo mira el ratón; el teclado
+  // va por tty). En release no hay evento.
+  if (pressed) {
+    input_event_t ev;
+    ev.type = INPUT_EV_KEY;
+    ev.code = code;
+    ev.value = 1;
+    ev.value2 = 0;
+    ev.timestamp = (uint32_t)tick_count;
+    input_push(&ev);
+  }
+
+  // Modificadores: se actualizan tanto en press como en release.
   if (code == 0x2A) {
     left_shift_pressed = pressed;
+    extended_pending = 0;
     return;
   }
-
   if (code == 0x36) {
     right_shift_pressed = pressed;
+    extended_pending = 0;
     return;
   }
-
   if (code == 0x1D) {
     ctrl_pressed = pressed;
+    extended_pending = 0;
     return;
   }
 
-  if (!pressed)
+  // Todo lo demás solo importa en press.
+  if (!pressed) {
+    extended_pending = 0;
     return;
+  }
 
+  tty_t *tty = tty_console();
+  if (!tty) {
+    extended_pending = 0;
+    return;
+  }
+
+  // [6.1] Secuencias ANSI. Se procesan antes que la traducción ASCII
+  // porque el code puede coincidir con una letra (0x48 = 'H' sin E0,
+  // 0x47 = 'G' sin E0, etc.): la única diferencia es el prefijo 0xE0,
+  // que extended_pending ya ha capturado.
+  const char *seq =
+      extended_pending ? ps2_extended_seq(code) : ps2_plain_seq(code);
+  extended_pending = 0;
+
+  if (seq) {
+    // Emitir cada byte de la secuencia al TTY. El terminal app los
+    // reenvía al master PTY, el slave los entrega al proceso lector
+    // (shell, vi, less, top).
+    for (const char *p = seq; *p; p++)
+      tty_receive_char(tty, *p);
+    return;
+  }
+
+  // Traducción ASCII normal (letras, dígitos, símbolos, espacio...).
   int shift_pressed = left_shift_pressed || right_shift_pressed;
   char c = shift_pressed ? scancode_ascii_shift[code] : scancode_ascii[code];
   if (c == 0)
@@ -182,9 +297,7 @@ static void process_keyboard_byte(uint8_t sc) {
       c = (char)(lower - 'a' + 1);
   }
 
-  tty_t *tty = tty_console();
-  if (tty)
-    tty_receive_char(tty, c);
+  tty_receive_char(tty, c);
 }
 
 static void process_mouse_byte(uint8_t data) {
