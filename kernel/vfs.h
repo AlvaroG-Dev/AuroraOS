@@ -423,4 +423,8 @@ int vfs_fchown(file_descriptor_t *fd, uint32_t uid, uint32_t gid);
 // aparte en execve (Linux hace lo mismo: root no ejecuta sin ningún x).
 int vfs_check_access(vfs_node_t *node, int mask);
 
+// [2.4] Devuelve el fs_ops del mount más específico que cubre `path`.
+// NULL si no hay ningún mount aplicable.
+struct vfs_fs_ops *vfs_get_mount_ops(const char *path);
+
 #endif

@@ -561,6 +561,51 @@ static int fat32_fat_set(fat32_fs_t *fs, uint32_t cluster, uint32_t value) {
   return 0;
 }
 
+static int fat32_update_fsinfo_locked(fat32_fs_t *fs) {
+  if (!fs || fs->fs_info_sector == 0 || fs->fs_info_sector == 0xFFFF)
+    return 0;
+  if (!fs->fat_cache)
+    return 0;
+
+  // Contar clusters libres. O(n) pero solo corre en sync, no en cada
+  // write pequeño.
+  uint32_t free_c = 0;
+  uint32_t next_free_hint = 0xFFFFFFFFu;
+  for (uint32_t c = 2; c < fs->fat_entries; c++) {
+    if (fs->fat_cache[c] == 0) {
+      free_c++;
+      if (next_free_hint == 0xFFFFFFFFu)
+        next_free_hint = c;
+    }
+  }
+
+  uint8_t sbuf[512];
+  if (bdev_read(fs->bdev, fs->fs_info_sector, 1, sbuf) != 0) {
+    LOG_WARN("[FAT32] no se pudo leer FSInfo para actualizar");
+    return -EIO;
+  }
+
+  // Verificar firmas antes de escribir.
+  uint32_t sig1 = *(uint32_t *)(sbuf + 0);
+  uint32_t sig2 = *(uint32_t *)(sbuf + 484);
+  uint32_t sig3 = *(uint32_t *)(sbuf + 508);
+  if (sig1 != 0x41615252u || sig2 != 0x61417272u || sig3 != 0xAA550000u) {
+    LOG_WARN("[FAT32] FSInfo con firmas invalidas, no se actualiza");
+    return 0;
+  }
+
+  *(uint32_t *)(sbuf + 488) = free_c;
+  *(uint32_t *)(sbuf + 492) = next_free_hint;
+
+  if (bdev_write(fs->bdev, fs->fs_info_sector, 1, sbuf) != 0) {
+    LOG_WARN("[FAT32] no se pudo escribir FSInfo");
+    return -EIO;
+  }
+  LOG_DEBUG("[FAT32] FSInfo actualizado: free=%u next=%u", free_c,
+            next_free_hint);
+  return 0;
+}
+
 static int fat32_sync_locked(fat32_fs_t *fs) {
   if (!fs)
     return -EINVAL;
@@ -580,6 +625,11 @@ static int fat32_sync_locked(fat32_fs_t *fs) {
       return -EIO;
     }
   }
+
+  // [2.4] Actualizar FSInfo para que un fsck no reporte el hint
+  // desfasado. Linux lo hace al desmontar limpio y al sync.
+  (void)fat32_update_fsinfo_locked(fs);
+
   if (bdev_flush(fs->bdev) != 0) {
     LOG_ERR("[FAT32] sync flush falló");
     return -EIO;
@@ -2606,6 +2656,175 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
   return node;
 }
 
+// ===========================================================================
+// [2.4] Scan activo.
+// ===========================================================================
+
+typedef struct {
+  fat32_fs_t *fs;
+  uint8_t *visited;
+  int depth;
+  struct fat32_check_result *res;
+} fat32_check_ctx_t;
+
+// Marca la cadena de clusters empezando por `start`. Devuelve:
+//   0  OK
+//   -ELOOP  si encuentra un cluster ya marcado (loop)
+//   -EIO    si la FAT dice algo imposible
+static int fat32_check_mark_chain(fat32_fs_t *fs, uint32_t start,
+                                  uint8_t *visited,
+                                  struct fat32_check_result *res) {
+  uint32_t cur = start;
+  int guard = 0;
+  while (FAT_IS_VALID(cur) && guard < 0x1000000) {
+    guard++;
+    if (cur >= fs->fat_entries) {
+      res->broken_chains++;
+      return -EIO;
+    }
+    uint32_t byte = cur / 8;
+    uint8_t bit = (uint8_t)(1u << (cur % 8));
+    if (visited[byte] & bit) {
+      res->loops_detected++;
+      return -ELOOP;
+    }
+    visited[byte] |= bit;
+    res->clusters_reachable++;
+
+    int64_t next = fat32_fat_get(fs, cur);
+    if (next < 0) {
+      res->broken_chains++;
+      return -EIO;
+    }
+    uint32_t n32 = (uint32_t)next;
+    if (n32 >= FAT_EOC_MIN || n32 == FAT_BAD)
+      return 0;
+    cur = n32;
+  }
+  return 0;
+}
+
+static int fat32_check_dir_recurse(fat32_fs_t *fs, uint32_t dir_cluster,
+                                   uint8_t *visited, int depth,
+                                   struct fat32_check_result *res);
+
+// Callback para fat32_iter_dir. Se llama por cada entry corta del dir.
+static int fat32_check_dir_cb(const char *name, const struct fat32_dirent *e,
+                              uint64_t lba, uint32_t off,
+                              const dirent_pos_t *lfn_chain, int lfn_count,
+                              void *arg) {
+  (void)lba;
+  (void)off;
+  (void)lfn_chain;
+  (void)lfn_count;
+  fat32_check_ctx_t *ctx = (fat32_check_ctx_t *)arg;
+
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+    return 0;
+
+  uint32_t fc = ((uint32_t)e->first_cluster_hi << 16) | e->first_cluster_lo;
+  int is_dir = (e->attr & FAT_ATTR_DIRECTORY) != 0;
+
+  // Fichero vacío o dir sin cluster: nada que marcar.
+  if (fc == 0) {
+    if (!is_dir)
+      ctx->res->files_visited++;
+    return 0;
+  }
+
+  if (!FAT_IS_VALID(fc) || fc >= ctx->fs->fat_entries) {
+    ctx->res->broken_chains++;
+    return 0;
+  }
+
+  // El cluster debe estar usado (FAT[fc] != 0).
+  if (ctx->fs->fat_cache && ctx->fs->fat_cache[fc] == 0) {
+    ctx->res->broken_chains++;
+    return 0;
+  }
+
+  if (is_dir) {
+    ctx->res->dirs_visited++;
+    fat32_check_dir_recurse(ctx->fs, fc, ctx->visited, ctx->depth + 1,
+                            ctx->res);
+  } else {
+    ctx->res->files_visited++;
+    fat32_check_mark_chain(ctx->fs, fc, ctx->visited, ctx->res);
+  }
+  return 0;
+}
+
+static int fat32_check_dir_recurse(fat32_fs_t *fs, uint32_t dir_cluster,
+                                   uint8_t *visited, int depth,
+                                   struct fat32_check_result *res) {
+  if (depth > 64) {
+    LOG_WARN("[FAT32-CHECK] profundidad > 64 en cluster %u", dir_cluster);
+    return 0;
+  }
+  if (fat32_check_mark_chain(fs, dir_cluster, visited, res) != 0)
+    return 0;
+  fat32_check_ctx_t ctx = {
+      .fs = fs, .visited = visited, .depth = depth, .res = res};
+  return fat32_iter_dir(fs, dir_cluster, fat32_check_dir_cb, &ctx);
+}
+
+int fat32_check(void *fs_priv, struct fat32_check_result *out) {
+  fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
+  if (!fs || !out)
+    return -EINVAL;
+  if (!fs->fat_cache)
+    return -EIO;
+
+  memset(out, 0, sizeof(*out));
+  out->clusters_total = fs->fat_entries;
+
+  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
+
+  // Contar libres/usados.
+  for (uint32_t c = 2; c < fs->fat_entries; c++) {
+    if (fs->fat_cache[c] == 0)
+      out->clusters_free++;
+    else
+      out->clusters_used++;
+  }
+
+  // Bitmap de visitados. 1 bit por cluster.
+  size_t bytes = (fs->fat_entries + 7) / 8;
+  uint8_t *visited = (uint8_t *)kzalloc(bytes);
+  if (!visited) {
+    spin_unlock_irqrestore(&fs->lock, lock_flags);
+    return -ENOMEM;
+  }
+
+  // Walk desde root.
+  fat32_check_dir_recurse(fs, fs->root_cluster, visited, 0, out);
+
+  if (out->clusters_used >= out->clusters_reachable)
+    out->clusters_orphan = out->clusters_used - out->clusters_reachable;
+
+  // FSInfo: leer free_count/next_free.
+  if (fs->fs_info_sector != 0 && fs->fs_info_sector != 0xFFFF) {
+    uint8_t sbuf[512];
+    if (bdev_read(fs->bdev, fs->fs_info_sector, 1, sbuf) == 0) {
+      uint32_t sig1 = *(uint32_t *)(sbuf + 0);
+      uint32_t sig2 = *(uint32_t *)(sbuf + 484);
+      uint32_t sig3 = *(uint32_t *)(sbuf + 508);
+      if (sig1 == 0x41615252u && sig2 == 0x61417272u && sig3 == 0xAA550000u) {
+        uint32_t free_c = *(uint32_t *)(sbuf + 488);
+        uint32_t next_f = *(uint32_t *)(sbuf + 492);
+        out->fsinfo_free = free_c;
+        out->fsinfo_next = next_f;
+        if (free_c != 0xFFFFFFFFu)
+          out->fsinfo_matches = (free_c == out->clusters_free) ? 1 : 0;
+      }
+    }
+  }
+
+  kfree(visited);
+  spin_unlock_irqrestore(&fs->lock, lock_flags);
+  return 0;
+}
+
 static vfs_fs_ops_t fat32_fs_ops = {
     .lookup = fat32_lookup,
     .statfs = fat32_statfs,
@@ -2613,6 +2832,53 @@ static vfs_fs_ops_t fat32_fs_ops = {
 };
 
 vfs_fs_ops_t *fat32_get_vfs_ops(void) { return &fat32_fs_ops; }
+
+// ---------------------------------------------------------------------------
+// [2.4] Validación pasiva al montar. Detecta corrupción obvia sin
+// bloquear el mount (Linux con errors=continue hace lo mismo). Los
+// problemas se reportan por klog para que `dmesg`/`aurora-fsck` los
+// vean.
+// ---------------------------------------------------------------------------
+static void fat32_validate_on_mount(fat32_fs_t *fs) {
+  // 1. FAT[0] y FAT[1] deben tener valores reservados conocidos.
+  //    FAT[0]: 0x0FFFFFF8 | media_byte (típicamente 0xF8)
+  //    FAT[1]: 0x0FFFFFFF (EOC)
+  if (fs->fat_cache && fs->fat_entries >= 2) {
+    uint32_t f0 = fs->fat_cache[0] & 0x0FFFFFFF;
+    uint32_t f1 = fs->fat_cache[1] & 0x0FFFFFFF;
+    if ((f0 & 0x0FFFFFF8) != 0x0FFFFFF8) {
+      LOG_WARN("[FAT32-VALIDATE] FAT[0]=0x%08x no tiene los bits "
+               "reservados 0x0FFFFFF8",
+               f0);
+    }
+    if (f1 != 0x0FFFFFFF) {
+      LOG_WARN("[FAT32-VALIDATE] FAT[1]=0x%08x != 0x0FFFFFFF (EOC)", f1);
+    }
+  }
+
+  // 2. Root cluster en rango válido.
+  if (fs->root_cluster < 2 || fs->root_cluster >= fs->fat_entries) {
+    LOG_WARN("[FAT32-VALIDATE] root_cluster=%u fuera de [2, %u)",
+             fs->root_cluster, fs->fat_entries);
+  }
+
+  // 3. FSInfo sector: firmas y coherencia de free_count.
+  if (fs->fs_info_sector != 0 && fs->fs_info_sector != 0xFFFF) {
+    uint8_t sbuf[512];
+    if (bdev_read(fs->bdev, fs->fs_info_sector, 1, sbuf) == 0) {
+      uint32_t sig1 = *(uint32_t *)(sbuf + 0);
+      uint32_t sig2 = *(uint32_t *)(sbuf + 484);
+      uint32_t sig3 = *(uint32_t *)(sbuf + 508);
+      if (sig1 != 0x41615252u || sig2 != 0x61417272u || sig3 != 0xAA550000u) {
+        LOG_WARN("[FAT32-VALIDATE] FSInfo sector %u con firmas invalidas "
+                 "(0x%08x 0x%08x 0x%08x)",
+                 fs->fs_info_sector, sig1, sig2, sig3);
+      }
+    }
+  }
+
+  LOG_INFO("[FAT32-VALIDATE] validacion pasiva completada");
+}
 
 // ===========================================================================
 // Mount / umount
@@ -2747,6 +3013,9 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
     LOG_WARN("[FAT32] FAT demasiado grande (%llu KB), usando path lento",
              (unsigned long long)(fat_bytes / 1024));
   }
+
+  // [2.4] Validación pasiva (no bloquea el mount, solo avisa).
+  fat32_validate_on_mount(fs);
 
   *fs_priv_out = fs;
   return 0;

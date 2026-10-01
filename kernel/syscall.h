@@ -133,22 +133,18 @@
 #define ASYS_SPAWN_ARGS_FDS (ASYS_BASE + 0x03)
 #define ASYS_GET_TASK_ID (ASYS_BASE + 0x04)
 #define ASYS_READDIR_LEGACY (ASYS_BASE + 0x05)
-
 #define ASYS_WIN_CREATE (ASYS_BASE + 0x10)
 #define ASYS_WIN_DESTROY (ASYS_BASE + 0x11)
 #define ASYS_WIN_BLIT (ASYS_BASE + 0x12)
 #define ASYS_WIN_POLL_EVENT (ASYS_BASE + 0x13)
 #define ASYS_WIN_REGISTER_CONSOLE (ASYS_BASE + 0x14)
 #define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
-
 #define ASYS_IPC_SEND (ASYS_BASE + 0x20)
 #define ASYS_IPC_RECV (ASYS_BASE + 0x21)
 #define ASYS_GET_SERVICE_ID (ASYS_BASE + 0x22)
-
 #define ASYS_VM_DEBUG_INFO (ASYS_BASE + 0x30)
-
 #define ASYS_PRINT (ASYS_BASE + 0x40)
-
+#define ASYS_FS_CHECK (ASYS_BASE + 0x50)
 #define ASYS_MAX (ASYS_BASE + 0x100)
 
 // ---------------------------------------------------------------------------

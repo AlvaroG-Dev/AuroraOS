@@ -7,6 +7,7 @@
 
 #include "syscall.h"
 #include "cpu.h"
+#include "fat32.h"
 #include "gdt.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
@@ -3679,6 +3680,42 @@ static int64_t a_vm_debug_info(uint64_t virt, uint64_t info_ptr, uint64_t a3,
   return 0;
 }
 
+// [2.4] Scan activo de un FS montado. Por ahora solo FAT32 lo
+// implementa. Resultado en struct fat32_check_result (definido en
+// fat32.h; el binario aurora-fsck replica el mismo layout).
+static int64_t a_fs_check(uint64_t path_ptr, uint64_t result_ptr, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!result_ptr)
+    return -EINVAL;
+
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+
+  struct vfs_fs_ops *ops = vfs_get_mount_ops(path);
+  void *priv = vfs_get_mount_priv(path);
+  if (!ops || !priv)
+    return -ENOENT;
+  if (!ops->name || strcmp(ops->name, "fat32") != 0)
+    return -ENOTSUP;
+
+  struct fat32_check_result res;
+  rc = fat32_check(priv, &res);
+  if (rc != 0)
+    return rc;
+
+  if (copy_to_user((void *)result_ptr, &res, sizeof(res)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
 // ===========================================================================
 // Tablas y dispatcher
 // ===========================================================================
@@ -3809,14 +3846,12 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_WIN_REGISTER_CONSOLE -
         ASYS_BASE] = {a_win_register_console, "asys_win_register_console"},
     [ASYS_WIN_SET_ICON - ASYS_BASE] = {a_win_set_icon, "asys_win_set_icon"},
-
     [ASYS_IPC_SEND - ASYS_BASE] = {a_ipc_send, "asys_ipc_send"},
     [ASYS_IPC_RECV - ASYS_BASE] = {a_ipc_recv, "asys_ipc_recv"},
     [ASYS_GET_SERVICE_ID -
         ASYS_BASE] = {a_get_service_id, "asys_get_service_id"},
-
     [ASYS_VM_DEBUG_INFO - ASYS_BASE] = {a_vm_debug_info, "asys_vm_debug_info"},
-
+    [ASYS_FS_CHECK - ASYS_BASE] = {a_fs_check, "asys_fs_check"},
     [ASYS_PRINT - ASYS_BASE] = {a_print, "asys_print"},
 };
 #define AURORA_TABLE_N ((int)ARRAY_SIZE(aurora_table))

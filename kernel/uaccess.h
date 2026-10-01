@@ -47,6 +47,7 @@
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOPNOTSUPP 95
+#define ENOTSUP EOPNOTSUPP
 #define ETIMEDOUT 110
 #define EINPROGRESS 115
 

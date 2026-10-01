@@ -6,21 +6,29 @@
 #include "vfs.h"
 
 // ---------------------------------------------------------------------------
-// FAT32 read-only.
-//
-// Monta un filesystem FAT32 sobre un block_device y expone sus archivos
-// y directorios como nodos del VFS. Soporta:
-//   - BPB parsing con validación (bytes_per_sector, cluster size, FAT size).
-//   - Chain walking vía FAT.
-//   - Directorios con 8.3 + Long File Name (LFN) entries.
-//   - Lectura de archivos (offset + size).
-//
-// No soporta (todavía):
-//   - Escritura, creación, borrado, rename.
-//   - FAT12 / FAT16 (solo FAT32, detectable por fs_type en el BPB).
-//   - Mirrors de FAT (usa la primera FAT).
-//   - Bad cluster marking (0x0FFFFFF7) más allá de rechazar el acceso.
+// [2.4] Resultado de un scan activo. Reporta inconsistencias sin
+// arreglarlas. Lo consume aurora-fsck vía syscall ASYS_FS_CHECK.
 // ---------------------------------------------------------------------------
+struct fat32_check_result {
+  uint64_t clusters_total;     // fat_entries
+  uint64_t clusters_free;      // libres según FAT
+  uint64_t clusters_used;      // no-libres según FAT
+  uint64_t clusters_reachable; // alcanzables desde root
+  uint64_t clusters_orphan;    // = used - reachable
+  uint64_t dirs_visited;
+  uint64_t files_visited;
+  uint64_t broken_chains; // dirent apunta a cluster libre/inválido
+  uint64_t loops_detected;
+  uint64_t fsinfo_free; // valor reportado por FSInfo (si existe)
+  uint64_t fsinfo_next; // valor reportado por FSInfo
+  int fsinfo_matches;   // 1 si free_count coincide con clusters_free
+  int _pad[3];
+};
+
+// Scan activo. Recorre el árbol desde root, marca clusters alcanzables,
+// cuenta huérfanos/loops/cadenas rotas. Devuelve 0 si el scan corrió
+// (aunque encuentre problemas), negativo en error de E/S.
+int fat32_check(void *fs_priv, struct fat32_check_result *out);
 
 // Monta un FS FAT32 sobre `bdev`. Verifica el BPB. Devuelve 0 si OK y
 // rellena `*fs_priv_out` con un puntero opaco que el llamante debe pasar

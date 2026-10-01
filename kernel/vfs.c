@@ -391,6 +391,38 @@ int vfs_pivot_root(const char *new_root, const char *put_old) {
   return 0;
 }
 
+struct vfs_fs_ops *vfs_get_mount_ops(const char *path) {
+  if (!path)
+    return NULL;
+  char norm[VFS_PATH_MAX];
+  if (normalize_path(path, norm, sizeof(norm)) != 0)
+    return NULL;
+
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  struct vfs_mount *best = NULL;
+  size_t best_len = 0;
+  size_t norm_len = strlen(norm);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    size_t ml = strlen(m->path);
+    if (ml > best_len) {
+      int match = 0;
+      if (ml == 1 && m->path[0] == '/')
+        match = 1;
+      else if (ml <= norm_len && strncmp(norm, m->path, ml) == 0) {
+        if (norm[ml] == '\0' || norm[ml] == '/')
+          match = 1;
+      }
+      if (match) {
+        best = m;
+        best_len = ml;
+      }
+    }
+  }
+  struct vfs_fs_ops *ret = best ? best->ops : NULL;
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  return ret;
+}
+
 void *vfs_get_mount_priv(const char *path) {
   if (!path)
     return NULL;
