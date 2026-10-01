@@ -67,6 +67,7 @@
 #define SYS_FCHOWN 93
 #define SYS_LCHOWN 94
 #define SYS_UMASK 95
+#define SYS_GETRLIMIT 97
 #define SYS_GETRUSAGE 98
 #define SYS_SYSINFO 99
 #define SYS_TIMES 100
@@ -97,6 +98,7 @@
 #define SYS_PIVOT_ROOT 155
 #define SYS_PRCTL 157
 #define SYS_ARCH_PRCTL 158
+#define SYS_SETRLIMIT 160
 #define SYS_SETHOSTNAME 170
 #define SYS_GETTID 186
 #define SYS_TKILL 200

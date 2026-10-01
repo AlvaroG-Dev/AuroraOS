@@ -3019,47 +3019,92 @@ struct k_rlimit64 {
 };
 #define RLIM_INFINITY 0xFFFFFFFFFFFFFFFFULL
 
+// ---------- [4.5] prlimit64 / getrlimit / setrlimit ----------
+//
+// Linux x86_64: prlimit64(pid, resource, new_limit, old_limit).
+//   pid == 0 → el actual.
+//   resource >= RLIM_NLIMITS → EINVAL.
+//   new_limit: si != NULL, escribir rlim_cur/rlim_max.
+//   old_limit: si != NULL, copiar los actuales antes de cambiar.
+//
+// Reglas:
+//   - new.rlim_cur > new.rlim_max → EINVAL.
+//   - new.rlim_max > old.rlim_max → EPERM (solo CAP_SYS_RESOURCE).
+//     Sin capabilities, todos somos root → permitido.
+//   - RLIMIT_NOFILE: aplicar cambio si cur > MAX_PROCESS_FDS? No
+//     podemos bajar fds abiertos. Linux permite poner cualquier
+//     valor hasta rlim_max. Aquí, si cur > MAX_PROCESS_FDS, hay que
+//     rechazar o clamp. Clampeamos a MAX_PROCESS_FDS.
 static int64_t k_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_uptr,
                            uint64_t old_uptr, uint64_t a5) {
   (void)a5;
   process_t *self = process_current();
   if (!self)
     return -EFAULT;
-  if (pid != 0 && (uint32_t)pid != self->pid)
-    return -ESRCH;
 
-  uint64_t cur, max;
-  switch (resource) {
-  case 7: // RLIMIT_NOFILE
-    cur = MAX_PROCESS_FDS;
-    max = MAX_PROCESS_FDS;
-    break;
-  case 3: // RLIMIT_STACK
-    cur = 8 * 1024 * 1024;
-    max = RLIM_INFINITY;
-    break;
-  default:
-    cur = RLIM_INFINITY;
-    max = RLIM_INFINITY;
-    break;
+  if (resource >= RLIM_NLIMITS)
+    return -EINVAL;
+
+  process_t *target = self;
+  if (pid != 0) {
+    if ((uint32_t)pid != self->pid)
+      return -ESRCH;
+  }
+  (void)target;
+
+  // Copia de los actuales si el caller lo pide.
+  if (old_uptr) {
+    if (!access_ok((void *)old_uptr, sizeof(struct k_rlimit64)))
+      return -EFAULT;
+    struct k_rlimit64 o = {
+        .rlim_cur = self->rlimits[resource].rlim_cur,
+        .rlim_max = self->rlimits[resource].rlim_max,
+    };
+    if (copy_to_user((void *)old_uptr, &o, sizeof(o)) < 0)
+      return -EFAULT;
   }
 
+  // Aplicar nuevo valor.
   if (new_uptr) {
     if (!access_ok((void *)new_uptr, sizeof(struct k_rlimit64)))
       return -EFAULT;
     struct k_rlimit64 nr;
     if (copy_from_user(&nr, (void *)new_uptr, sizeof(nr)) < 0)
       return -EFAULT;
-    // No-op: no almacenamos límites.
-  }
-  if (old_uptr) {
-    if (!access_ok((void *)old_uptr, sizeof(struct k_rlimit64)))
-      return -EFAULT;
-    struct k_rlimit64 o = {cur, max};
-    if (copy_to_user((void *)old_uptr, &o, sizeof(o)) < 0)
-      return -EFAULT;
+    if (nr.rlim_cur > nr.rlim_max)
+      return -EINVAL;
+    // NOFILE: clamp a MAX_PROCESS_FDS. Sin capabilities, no podemos
+    // rechazar solo por bajar max; pero no podemos permitir cur >
+    // MAX_PROCESS_FDS porque rompería vfs_open_for_proc.
+    if (resource == RLIMIT_NOFILE) {
+      if (nr.rlim_cur > MAX_PROCESS_FDS)
+        nr.rlim_cur = MAX_PROCESS_FDS;
+      if (nr.rlim_max > MAX_PROCESS_FDS)
+        nr.rlim_max = MAX_PROCESS_FDS;
+    }
+    self->rlimits[resource].rlim_cur = nr.rlim_cur;
+    self->rlimits[resource].rlim_max = nr.rlim_max;
   }
   return 0;
+}
+
+// Linux: getrlimit(resource, &rlim). rlim es 2x uint64 (16 bytes).
+// Deprecado en x86_64 (musl usa prlimit64), pero algunos binarios
+// viejos lo llaman directo.
+static int64_t k_getrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_prlimit64(0, resource, 0, rlim_ptr, 0);
+}
+
+static int64_t k_setrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_prlimit64(0, resource, rlim_ptr, 0, 0);
 }
 
 // ---------- [4.6] sethostname / getrusage / times ----------
@@ -3713,6 +3758,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_RENAMEAT] = {k_renameat, "renameat"},
     [SYS_SET_ROBUST_LIST] = {k_set_robust_list, "set_robust_list"},
     [SYS_PRLIMIT64] = {k_prlimit64, "prlimit64"},
+    [SYS_GETRLIMIT] = {k_getrlimit, "getrlimit"},
+    [SYS_SETRLIMIT] = {k_setrlimit, "setrlimit"},
     [SYS_GETRANDOM] = {k_getrandom, "getrandom"},
     [SYS_RSEQ] = {k_rseq, "rseq"},
     [SYS_CLONE] = {k_clone, "clone"},

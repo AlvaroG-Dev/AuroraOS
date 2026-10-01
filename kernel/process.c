@@ -37,6 +37,23 @@ struct elf_vfs_ctx {
   vfs_node_t *node;
 };
 
+// [4.5] Defaults POSIX. NOFILE limitado a MAX_PROCESS_FDS; NPROC
+// acotado para que un fork bomb no llene la tabla. El resto infinito.
+static void process_init_rlimits(process_t *proc) {
+  if (!proc)
+    return;
+  for (int i = 0; i < RLIM_NLIMITS; i++) {
+    proc->rlimits[i].rlim_cur = RLIM_INFINITY;
+    proc->rlimits[i].rlim_max = RLIM_INFINITY;
+  }
+  proc->rlimits[RLIMIT_NOFILE].rlim_cur = MAX_PROCESS_FDS;
+  proc->rlimits[RLIMIT_NOFILE].rlim_max = MAX_PROCESS_FDS;
+  proc->rlimits[RLIMIT_NPROC].rlim_cur = 256;
+  proc->rlimits[RLIMIT_NPROC].rlim_max = 256;
+  proc->rlimits[RLIMIT_STACK].rlim_cur = 8 * 1024 * 1024;
+  proc->rlimits[RLIMIT_STACK].rlim_max = RLIM_INFINITY;
+}
+
 static void set_proc_name_from_path(process_t *proc, const char *path) {
   const char *base = path;
   for (const char *p = path; *p; p++)
@@ -497,6 +514,8 @@ static void process_init_creds(process_t *proc) {
   proc->groups[0] = 0;
   for (int i = 1; i < NGROUPS_MAX; i++)
     proc->groups[i] = 0;
+
+  process_init_rlimits(proc);
 }
 
 // ---------------------------------------------------------------------------
@@ -1767,6 +1786,10 @@ int64_t sys_fork(void) {
     kfree(child);
     return -ENOMEM;
   }
+
+  // [4.5] Heredar rlimits. Los hijos los heredan tal cual.
+  for (int i = 0; i < RLIM_NLIMITS; i++)
+    child->rlimits[i] = parent->rlimits[i];
 
   // 5. VMAs.
   if (clone_vmas(parent, child) != 0) {
