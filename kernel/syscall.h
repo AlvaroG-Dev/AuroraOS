@@ -40,6 +40,8 @@
 #define SYS_PIPE 22
 #define SYS_SELECT 23
 #define SYS_SCHED_YIELD 24
+#define SYS_MREMAP 25
+#define SYS_MADVISE 28
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
 #define SYS_GETPID 39

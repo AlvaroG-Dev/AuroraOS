@@ -708,6 +708,32 @@ static int64_t k_munmap(uint64_t addr, uint64_t length, uint64_t a3,
   return sys_munmap(proc, addr, length);
 }
 
+static int64_t k_mremap(uint64_t old_addr, uint64_t old_size, uint64_t new_size,
+                        uint64_t flags, uint64_t new_addr) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return sys_mremap(proc, old_addr, old_size, new_size, flags, new_addr);
+}
+
+// ---------- madvise ----------
+//
+// madvise(addr, len, advice). Linux lo usa para hints de VM. Ninguno
+// de los advices cambia el comportamiento visible para Aurora hoy:
+//   MADV_NORMAL/RANDOM/SEQUENTIAL/WILLNEED: hints, no-op.
+//   MADV_DONTNEED/MADV_FREE: liberar páginas. Implementarlo bien
+//   requiere partir VMAs a nivel de página. De momento aceptamos y no
+//   hacemos nada (el contenido sigue accesible — degradación benigna).
+static int64_t k_madvise(uint64_t addr, uint64_t len, uint64_t advice,
+                         uint64_t a4, uint64_t a5) {
+  (void)addr;
+  (void)len;
+  (void)advice;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
 static int64_t k_brk(uint64_t addr, uint64_t a2, uint64_t a3, uint64_t a4,
                      uint64_t a5) {
   (void)a2;
@@ -3730,7 +3756,9 @@ static const syscall_entry_t linux_table[] = {
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},
+    [SYS_MREMAP] = {k_mremap, "mremap"},
     [SYS_MPROTECT] = {k_mprotect, "mprotect"},
+    [SYS_MADVISE] = {k_madvise, "madvise"},
     [SYS_FSTATFS] = {k_fstatfs, "fstatfs"},
     [SYS_STATFS] = {k_statfs, "statfs"},
     [SYS_FSYNC] = {k_fsync, "fsync"},

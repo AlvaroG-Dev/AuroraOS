@@ -129,6 +129,9 @@ typedef struct {
     uint32_t mode;
   } ram_modes[128];
   int ram_modes_n;
+  // [B] Buffer cache de sectores de datos. NULL si la asignación falló
+  // al montar (fallback a bdev_* directo).
+  struct fat32_bcache *bcache;
 } fat32_fs_t;
 
 typedef struct {
@@ -208,13 +211,215 @@ static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
                                uint32_t new_parent_cluster);
 static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
                              vfs_node_t *dst_dir, const char *dst_name);
-
+// [B] Buffer cache de sectores de datos.
+static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count, void *buf);
+static int fat32_bwrite(fat32_fs_t *fs, uint64_t lba, uint32_t count,
+                        const void *buf);
 // ===========================================================================
 // Helpers básicos
 // ===========================================================================
 static inline uint64_t cluster_to_sector(const fat32_fs_t *fs, uint32_t c) {
   return (uint64_t)fs->data_start_sector +
          (uint64_t)(c - 2) * fs->sectors_per_cluster;
+}
+
+// ===========================================================================
+// [B] Buffer cache de sectores de datos.
+//
+// Medido: bdev_read a AHCI tarda ~150 µs por sector. grep -r sobre /data
+// hace decenas de miles de accesos de 512 B, y el cuello es el driver.
+//
+// Cache LRU de 256 slots × 512 B (128 KB) indexado por LBA con hash
+// table. Todos los accesos a datos van por aquí. La FAT ya estaba
+// cacheada entera; FSInfo/superbloque siguen directos a bdev_*.
+//
+// Coherencia: las escrituras marcan el slot dirty. Se vuelcan a disco en
+// fat32_sync_locked (datos → FAT → FSInfo → flush) y en fat32_umount.
+// Todos los accesos al cache están ya bajo fs->lock.
+// ===========================================================================
+
+#define FAT32_BCACHE_SLOTS 256
+#define FAT32_BCACHE_HASH_BUCKETS 512
+#define FAT32_BCACHE_SECTOR 512
+
+typedef struct fat32_bcache_slot {
+  uint64_t lba; // UINT64_MAX = slot libre
+  uint32_t last_used;
+  uint8_t dirty;
+  uint8_t data[FAT32_BCACHE_SECTOR];
+  struct fat32_bcache_slot *hnext;
+} fat32_bcache_slot_t;
+
+typedef struct fat32_bcache {
+  fat32_bcache_slot_t slots[FAT32_BCACHE_SLOTS];
+  fat32_bcache_slot_t *hash[FAT32_BCACHE_HASH_BUCKETS];
+  uint32_t clock;
+  uint32_t hits;
+  uint32_t misses;
+  uint32_t evictions;
+  uint32_t dirty_slots;
+} fat32_bcache_t;
+
+static inline uint32_t bcache_hash(uint64_t lba) {
+  return (uint32_t)((lba * 2654435761ULL) >> 23) &
+         (FAT32_BCACHE_HASH_BUCKETS - 1);
+}
+
+static fat32_bcache_slot_t *bcache_lookup(fat32_bcache_t *c, uint64_t lba) {
+  uint32_t h = bcache_hash(lba);
+  for (fat32_bcache_slot_t *s = c->hash[h]; s; s = s->hnext) {
+    if (s->lba == lba)
+      return s;
+  }
+  return NULL;
+}
+
+static void bcache_unlink(fat32_bcache_t *c, fat32_bcache_slot_t *s) {
+  uint32_t h = bcache_hash(s->lba);
+  fat32_bcache_slot_t **pp = &c->hash[h];
+  while (*pp) {
+    if (*pp == s) {
+      *pp = s->hnext;
+      s->hnext = NULL;
+      return;
+    }
+    pp = &(*pp)->hnext;
+  }
+}
+
+static void bcache_link(fat32_bcache_t *c, fat32_bcache_slot_t *s) {
+  uint32_t h = bcache_hash(s->lba);
+  s->hnext = c->hash[h];
+  c->hash[h] = s;
+}
+
+// Devuelve un slot libre (o el LRU, volcándolo si estaba sucio).
+static fat32_bcache_slot_t *bcache_evict(fat32_fs_t *fs) {
+  fat32_bcache_t *c = fs->bcache;
+  for (int i = 0; i < FAT32_BCACHE_SLOTS; i++) {
+    if (c->slots[i].lba == UINT64_MAX)
+      return &c->slots[i];
+  }
+  // Todos ocupados: el LRU.
+  fat32_bcache_slot_t *victim = NULL;
+  uint32_t oldest = UINT32_MAX;
+  for (int i = 0; i < FAT32_BCACHE_SLOTS; i++) {
+    if (c->slots[i].last_used < oldest) {
+      oldest = c->slots[i].last_used;
+      victim = &c->slots[i];
+    }
+  }
+  if (!victim)
+    return NULL;
+  if (victim->dirty) {
+    if (bdev_write(fs->bdev, victim->lba, 1, victim->data) != 0)
+      return NULL;
+    victim->dirty = 0;
+    if (c->dirty_slots > 0)
+      c->dirty_slots--;
+    c->evictions++;
+  }
+  bcache_unlink(c, victim);
+  victim->lba = UINT64_MAX;
+  return victim;
+}
+
+static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
+                       void *buf) {
+  if (!fs || !buf || count == 0)
+    return -EINVAL;
+  if (!fs->bcache || fs->bytes_per_sector != FAT32_BCACHE_SECTOR)
+    return bdev_read(fs->bdev, lba, count, buf);
+
+  fat32_bcache_t *c = fs->bcache;
+  uint8_t *out = (uint8_t *)buf;
+  for (uint32_t i = 0; i < count; i++) {
+    uint64_t l = lba + i;
+    fat32_bcache_slot_t *s = bcache_lookup(c, l);
+    if (s) {
+      c->hits++;
+      s->last_used = ++c->clock;
+      memcpy(out + i * FAT32_BCACHE_SECTOR, s->data, FAT32_BCACHE_SECTOR);
+      continue;
+    }
+    c->misses++;
+    s = bcache_evict(fs);
+    if (!s)
+      return -EIO;
+    if (bdev_read(fs->bdev, l, 1, s->data) != 0)
+      return -EIO;
+    s->lba = l;
+    s->dirty = 0;
+    s->last_used = ++c->clock;
+    bcache_link(c, s);
+    memcpy(out + i * FAT32_BCACHE_SECTOR, s->data, FAT32_BCACHE_SECTOR);
+  }
+  return 0;
+}
+
+static int fat32_bwrite(fat32_fs_t *fs, uint64_t lba, uint32_t count,
+                        const void *buf) {
+  if (!fs || !buf || count == 0)
+    return -EINVAL;
+  if (!fs->bcache || fs->bytes_per_sector != FAT32_BCACHE_SECTOR)
+    return bdev_write(fs->bdev, lba, count, buf);
+  fat32_bcache_t *c = fs->bcache;
+  const uint8_t *in = (const uint8_t *)buf;
+  for (uint32_t i = 0; i < count; i++) {
+    uint64_t l = lba + i;
+    fat32_bcache_slot_t *s = bcache_lookup(c, l);
+    if (!s) {
+      c->misses++;
+      s = bcache_evict(fs);
+      if (!s)
+        return -EIO;
+      s->lba = l;
+      s->dirty = 0;
+      bcache_link(c, s);
+    } else {
+      c->hits++;
+    }
+    memcpy(s->data, in + i * FAT32_BCACHE_SECTOR, FAT32_BCACHE_SECTOR);
+    s->last_used = ++c->clock;
+    if (!s->dirty) {
+      s->dirty = 1;
+      c->dirty_slots++;
+    }
+  }
+  return 0;
+}
+
+static int fat32_bcache_flush(fat32_fs_t *fs) {
+  fat32_bcache_t *c = fs->bcache;
+  if (!c)
+    return 0;
+  for (int i = 0; i < FAT32_BCACHE_SLOTS; i++) {
+    fat32_bcache_slot_t *s = &c->slots[i];
+    if (s->lba == UINT64_MAX || !s->dirty)
+      continue;
+    if (bdev_write(fs->bdev, s->lba, 1, s->data) != 0)
+      return -EIO;
+    s->dirty = 0;
+  }
+  c->dirty_slots = 0;
+  return 0;
+}
+
+static fat32_bcache_t *fat32_bcache_alloc(void) {
+  fat32_bcache_t *c = (fat32_bcache_t *)kzalloc(sizeof(*c));
+  if (!c)
+    return NULL;
+  for (int i = 0; i < FAT32_BCACHE_SLOTS; i++)
+    c->slots[i].lba = UINT64_MAX;
+  return c;
+}
+
+static void fat32_bcache_free(fat32_fs_t *fs) {
+  if (!fs || !fs->bcache)
+    return;
+  (void)fat32_bcache_flush(fs);
+  kfree(fs->bcache);
+  fs->bcache = NULL;
 }
 
 // Lee el siguiente cluster de la FAT. Devuelve <0 en error.
@@ -240,7 +445,7 @@ static int64_t fat32_fat_get(const fat32_fs_t *fs, uint32_t cluster) {
       return -ENOMEM;
     heap = 1;
   }
-  if (bdev_read(fs->bdev, sector, 1, buf) != 0) {
+  if (fat32_bread(fs, sector, 1, buf) != 0) {
     if (heap)
       kfree(buf);
     return -EIO;
@@ -445,7 +650,7 @@ static int fat32_short_name_exists(fat32_fs_t *fs, uint32_t dir_cluster,
   while (FAT_IS_VALID(cluster) && guard < 0x100000) {
     guard++;
     uint64_t lba = cluster_to_sector(fs, cluster);
-    if (bdev_read(fs->bdev, lba, fs->sectors_per_cluster, cbuf) != 0) {
+    if (fat32_bread(fs, lba, fs->sectors_per_cluster, cbuf) != 0) {
       kfree(cbuf);
       return -EIO;
     }
@@ -612,6 +817,13 @@ static int fat32_sync_locked(fat32_fs_t *fs) {
   if (!fs->fat_cache || !fs->fat_dirty)
     return 0;
 
+  // [B] Volcar datos sucios antes de tocar la FAT. Orden correcto para
+  // recuperación tras crash: datos primero, FAT después.
+  if (fat32_bcache_flush(fs) != 0) {
+    LOG_ERR("[FAT32] sync bcache flush falló");
+    return -EIO;
+  }
+
   if (bdev_write(fs->bdev, fs->fat_start_sector, fs->fat_size_sectors,
                  fs->fat_cache) != 0) {
     LOG_ERR("[FAT32] sync FAT#1 falló");
@@ -700,12 +912,12 @@ static int fat32_modify_dirent(fat32_fs_t *fs, uint64_t lba, uint32_t off,
   if (!buf)
     return -ENOMEM;
 
-  if (bdev_read(fs->bdev, lba, 1, buf) != 0) {
+  if (fat32_bread(fs, lba, 1, buf) != 0) {
     kfree(buf);
     return -EIO;
   }
   mod(buf + off, ctx);
-  int rc = (bdev_write(fs->bdev, lba, 1, buf) == 0) ? 0 : -EIO;
+  int rc = (fat32_bwrite(fs, lba, 1, buf) == 0) ? 0 : -EIO;
   kfree(buf);
   if (rc == 0)
     (void)bdev_flush(fs->bdev);
@@ -826,7 +1038,7 @@ static int fat32_iter_dir(fat32_fs_t *fs, uint32_t start_cluster,
   while (FAT_IS_VALID(cluster) && guard < 65536) {
     guard++;
     uint64_t cluster_lba = cluster_to_sector(fs, cluster);
-    if (bdev_read(fs->bdev, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
+    if (fat32_bread(fs, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
       rc = -EIO;
       break;
     }
@@ -1048,7 +1260,7 @@ static int64_t fat32_read_data(fat32_node_priv_t *np, uint64_t offset,
 
   while (remaining > 0 && FAT_IS_VALID(cluster)) {
     uint64_t sector = cluster_to_sector(fs, cluster);
-    if (bdev_read(fs->bdev, sector, fs->sectors_per_cluster, cbuf) != 0) {
+    if (fat32_bread(fs, sector, fs->sectors_per_cluster, cbuf) != 0) {
       kfree(cbuf);
       return -EIO;
     }
@@ -1145,14 +1357,14 @@ static int64_t fat32_write_data(fat32_node_priv_t *np, uint64_t offset,
   while (remaining > 0) {
     uint64_t sector = cluster_to_sector(fs, cur);
 
-    if (bdev_read(fs->bdev, sector, fs->sectors_per_cluster, cbuf) != 0) {
+    if (fat32_bread(fs, sector, fs->sectors_per_cluster, cbuf) != 0) {
       kfree(cbuf);
       return -EIO;
     }
     size_t avail = fs->cluster_size - within;
     size_t to_copy = remaining < avail ? remaining : avail;
     memcpy(cbuf + within, in, to_copy);
-    if (bdev_write(fs->bdev, sector, fs->sectors_per_cluster, cbuf) != 0) {
+    if (fat32_bwrite(fs, sector, fs->sectors_per_cluster, cbuf) != 0) {
       kfree(cbuf);
       return -EIO;
     }
@@ -1414,7 +1626,7 @@ static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
     spin_unlock_irqrestore(&np->fs->lock, flags);
     return -EINVAL;
   }
-  if (bdev_read(np->fs->bdev, np->dirent_lba, 1, buf) != 0) {
+  if (fat32_bread(np->fs, np->dirent_lba, 1, buf) != 0) {
     spin_unlock_irqrestore(&np->fs->lock, flags);
     return -EIO;
   }
@@ -1426,7 +1638,7 @@ static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
   buf[np->dirent_off + 24] = (uint8_t)(d & 0xFF);
   buf[np->dirent_off + 25] = (uint8_t)(d >> 8);
 
-  int rc = (bdev_write(np->fs->bdev, np->dirent_lba, 1, buf) == 0) ? 0 : -EIO;
+  int rc = (fat32_bwrite(np->fs, np->dirent_lba, 1, buf) == 0) ? 0 : -EIO;
   if (rc == 0) {
     (void)bdev_flush(np->fs->bdev);
     np->mtime_sec = (uint32_t)mtime_sec;
@@ -1541,7 +1753,7 @@ static int fat32_find_free_dirents(fat32_fs_t *fs, uint32_t dir_cluster,
     uint8_t *cbuf = (uint8_t *)kmalloc(fs->cluster_size);
     if (!cbuf)
       return -ENOMEM;
-    if (bdev_read(fs->bdev, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
+    if (fat32_bread(fs, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
       kfree(cbuf);
       return -EIO;
     }
@@ -1589,7 +1801,7 @@ static int fat32_find_free_dirents(fat32_fs_t *fs, uint32_t dir_cluster,
         return -ENOMEM;
       }
       uint64_t zsec = cluster_to_sector(fs, new_c);
-      if (bdev_write(fs->bdev, zsec, fs->sectors_per_cluster, zbuf) != 0) {
+      if (fat32_bwrite(fs, zsec, fs->sectors_per_cluster, zbuf) != 0) {
         kfree(zbuf);
         fat32_free_chain(fs, new_c);
         return -EIO;
@@ -1677,7 +1889,7 @@ static int fat32_write_dirent_chain(fat32_fs_t *fs, uint32_t slot_cluster,
   if (!cbuf)
     return -ENOMEM;
   uint64_t cluster_lba = cluster_to_sector(fs, slot_cluster);
-  if (bdev_read(fs->bdev, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
+  if (fat32_bread(fs, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
     kfree(cbuf);
     return -EIO;
   }
@@ -1738,10 +1950,9 @@ static int fat32_write_dirent_chain(fat32_fs_t *fs, uint32_t slot_cluster,
     dirent_write_full(e, &wctx);
   }
 
-  int rc =
-      (bdev_write(fs->bdev, cluster_lba, fs->sectors_per_cluster, cbuf) == 0)
-          ? 0
-          : -EIO;
+  int rc = (fat32_bwrite(fs, cluster_lba, fs->sectors_per_cluster, cbuf) == 0)
+               ? 0
+               : -EIO;
   kfree(cbuf);
   if (rc == 0)
     (void)bdev_flush(fs->bdev);
@@ -1844,7 +2055,7 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     return -ENOMEM;
   }
   uint64_t cluster_lba = cluster_to_sector(fs, slot_cluster);
-  if (bdev_read(fs->bdev, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
+  if (fat32_bread(fs, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
     kfree(cbuf);
     if (is_dir && first_cluster)
       fat32_free_chain(fs, first_cluster);
@@ -1908,7 +2119,7 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     dirent_write_full(e, &wctx);
   }
 
-  if (bdev_write(fs->bdev, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
+  if (fat32_bwrite(fs, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
     kfree(cbuf);
     if (is_dir && first_cluster)
       fat32_free_chain(fs, first_cluster);
@@ -1947,7 +2158,7 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     dbuf[32 + 26] = (uint8_t)(parent_for_dd & 0xFF);
     dbuf[32 + 27] = (uint8_t)((parent_for_dd >> 8) & 0xFF);
 
-    if (bdev_write(fs->bdev, dir_lba, fs->sectors_per_cluster, dbuf) != 0) {
+    if (fat32_bwrite(fs, dir_lba, fs->sectors_per_cluster, dbuf) != 0) {
       kfree(dbuf);
       return -EIO;
     }
@@ -2514,7 +2725,7 @@ static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
   uint8_t buf[512];
   if (fs->bytes_per_sector > sizeof(buf))
     return -EINVAL;
-  if (bdev_read(fs->bdev, lba, 1, buf) != 0)
+  if (fat32_bread(fs, lba, 1, buf) != 0)
     return -EIO;
 
   // Verificar que buf[32..43] es "..".
@@ -2530,7 +2741,7 @@ static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
   buf[32 + 26] = (uint8_t)(parent & 0xFF);
   buf[32 + 27] = (uint8_t)((parent >> 8) & 0xFF);
 
-  if (bdev_write(fs->bdev, lba, 1, buf) != 0)
+  if (fat32_bwrite(fs, lba, 1, buf) != 0)
     return -EIO;
   (void)bdev_flush(fs->bdev);
   return 0;
@@ -2553,7 +2764,7 @@ static int fat32_is_ancestor_of(fat32_fs_t *fs, uint32_t src_cluster,
     uint8_t buf[512];
     if (fs->bytes_per_sector > sizeof(buf))
       return -1;
-    if (bdev_read(fs->bdev, lba, 1, buf) != 0)
+    if (fat32_bread(fs, lba, 1, buf) != 0)
       return -1;
     if (buf[32] != '.' || buf[33] != '.')
       return -1;
@@ -2967,6 +3178,10 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
     return -ENOMEM;
   spin_init(&fs->lock);
 
+  fs->bcache = fat32_bcache_alloc();
+  if (!fs->bcache)
+    LOG_WARN("[FAT32] sin memoria para buffer cache, usando path directo");
+
   fs->bdev = bdev;
   fs->bytes_per_sector = bpb->bytes_per_sector;
   fs->sectors_per_cluster = bpb->sectors_per_cluster;
@@ -3030,6 +3245,7 @@ void fat32_umount(void *fs_priv) {
     (void)fat32_sync_locked(fs);
   if (fs->fat_cache)
     kfree(fs->fat_cache);
+  fat32_bcache_free(fs);
   spin_unlock_irqrestore(&fs->lock, lock_flags);
   kfree(fs);
 }
