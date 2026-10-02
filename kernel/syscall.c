@@ -1435,12 +1435,7 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
 }
 
 // ---------- pipe / dup2 ----------
-static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
-                      uint64_t a5) {
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
+static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
   if (!fds_ptr)
     return -EINVAL;
   if (!access_ok((void *)fds_ptr, 2 * sizeof(int)))
@@ -1479,11 +1474,13 @@ static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
     vfs_node_free(we);
     return -ENOMEM;
   }
+
   rfd->node = re;
   rfd->flags = O_RDONLY;
   rfd->ref_count = 1;
   wait_queue_init(&rfd->read_wq);
   wait_queue_init(&rfd->write_wq);
+
   wfd->node = we;
   wfd->flags = O_WRONLY;
   wfd->ref_count = 1;
@@ -1499,7 +1496,21 @@ static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
     vfs_close_for_proc(proc, wr);
     return -EFAULT;
   }
+
+  if (out_rd)
+    *out_rd = rd;
+  if (out_wr)
+    *out_wr = wr;
   return 0;
+}
+
+static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3,
+                      uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_pipe_impl(fds_ptr, NULL, NULL);
 }
 
 static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
@@ -1904,9 +1915,9 @@ static int64_t k_faccessat(uint64_t dirfd, uint64_t path, uint64_t mode,
 // ---------- pipe2 ----------
 //
 // Implementamos O_CLOEXEC de verdad porque los descriptores de un pipe
-// se usan normalmente como fds temporales de un pipeline. Sin este flag,
-// un proceso creado con fork()+execve() puede conservar accidentalmente
-// el extremo de escritura y retrasar el EOF del lector.
+// se usan normalmente como fds temporales de un pipeline. Así, un
+// fork()+execve() no puede conservar accidentalmente un extremo del pipe
+// y retrasar el EOF del lector.
 //
 // O_NONBLOCK todavía no está implementado por el pipe/VFS; devolver EINVAL
 // es preferible a fingir que la operación es no bloqueante.
@@ -1920,35 +1931,17 @@ static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
   if (flags & ~supported)
     return -EINVAL;
 
-  int64_t rc = k_pipe(fds_ptr, 0, 0, 0, 0);
-  if (rc < 0)
-    return rc;
-
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
 
-  int user_fds[2];
-  if (copy_from_user(user_fds, (const void *)fds_ptr, sizeof(user_fds)) < 0) {
-    vfs_close_for_proc(proc, user_fds[0]);
-    vfs_close_for_proc(proc, user_fds[1]);
-    return -EFAULT;
-  }
-
-  if (user_fds[0] < 0 || user_fds[0] >= MAX_PROCESS_FDS ||
-      user_fds[1] < 0 || user_fds[1] >= MAX_PROCESS_FDS ||
-      !proc->fds[user_fds[0]] || !proc->fds[user_fds[1]]) {
-    if (user_fds[0] >= 0 && user_fds[0] < MAX_PROCESS_FDS &&
-        proc->fds[user_fds[0]])
-      vfs_close_for_proc(proc, user_fds[0]);
-    if (user_fds[1] >= 0 && user_fds[1] < MAX_PROCESS_FDS &&
-        proc->fds[user_fds[1]])
-      vfs_close_for_proc(proc, user_fds[1]);
-    return -EFAULT;
-  }
+  int rd = -1, wr = -1;
+  int64_t rc = k_pipe_impl(fds_ptr, &rd, &wr);
+  if (rc < 0)
+    return rc;
 
   if (flags & LINUX_O_CLOEXEC)
-    proc->fd_cloexec_mask |= (1u << user_fds[0]) | (1u << user_fds[1]);
+    proc->fd_cloexec_mask |= (1u << rd) | (1u << wr);
 
   return 0;
 }
