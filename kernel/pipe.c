@@ -55,20 +55,32 @@ typedef struct {
 // ---------------------------------------------------------------------------
 static bool pipe_has_data(void *arg) {
   pipe_t *p = (pipe_t *)arg;
-  unsigned long flags = spin_lock_irqsave(&p->lock);
-  bool has = (p->count > 0) || (p->writers == 0);
-  spin_unlock_irqrestore(&p->lock, flags);
-  return has;
+
+  /*
+   * wait_common() evalúa la condición mientras mantiene wq->lock.
+   * No debemos tomar p->lock aquí: además de introducir una segunda
+   * jerarquía de locks en el camino de wait/wake, la condición solo
+   * necesita una observación consistente de estos campos.
+   *
+   * Los escritores actualizan count/writers bajo p->lock. Las cargas
+   * acquire hacen explícita la publicación de esos cambios entre CPUs;
+   * el camino que realmente consume datos vuelve a comprobar count bajo
+   * p->lock antes de tocar el ring.
+   */
+  size_t count = __atomic_load_n(&p->count, __ATOMIC_ACQUIRE);
+  int writers = __atomic_load_n(&p->writers, __ATOMIC_ACQUIRE);
+  return count > 0 || writers == 0;
 }
 
 static bool pipe_has_space(void *arg) {
   pipe_t *p = (pipe_t *)arg;
-  unsigned long flags = spin_lock_irqsave(&p->lock);
-  bool has = (p->count < PIPE_BUF_SIZE) || (p->readers == 0);
-  spin_unlock_irqrestore(&p->lock, flags);
-  return has;
-}
 
+  /* Esta función también se ejecuta con wq->lock cogido por
+   * wait_common(), así que nunca toma p->lock. */
+  size_t count = __atomic_load_n(&p->count, __ATOMIC_ACQUIRE);
+  int readers = __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE);
+  return count < PIPE_BUF_SIZE || readers == 0;
+}
 // ---------------------------------------------------------------------------
 // Ops
 // ---------------------------------------------------------------------------
