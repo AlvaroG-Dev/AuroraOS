@@ -31,6 +31,24 @@ task_switch:
     fxsave64 [rax]
 .skip_fxsave:
 
+    ; Publicar el nuevo propietario de la CPU ANTES de soltar sched_lock.
+    ;
+    ; La versión anterior liberaba sched_lock mientras new_task seguía
+    ; con on_cpu=0 y old_task seguía con on_cpu=1. En SMP otra CPU podía
+    ; observar una transición incompleta entre current_task/state/on_cpu.
+    ; En particular, new_task ya estaba publicado como TASK_RUNNING en
+    ; sched.c, pero todavía no estaba publicado como "en CPU".
+    ;
+    ; Orden correcto:
+    ;   1) new->on_cpu = 1 mientras sched_lock sigue cogido.
+    ;   2) liberar sched_lock.
+    ;   3) cambiar a la pila de new.
+    ;   4) old->on_cpu = 0 ya desde la pila de new.
+    ;
+    ; Así ninguna CPU puede seleccionar new durante la transición y old
+    ; permanece protegido hasta que hemos abandonado su stack.
+    mov dword [rsi + TASK_OFF_ON_CPU], 1
+
     test rdx, rdx
     jz .skip_unlock
     mov dword [rdx], 0
@@ -44,10 +62,10 @@ task_switch:
 
     mov rsp, [rsi + TASK_OFF_RSP]
 
-    xor eax, eax
-    xchg dword [rdi + TASK_OFF_ON_CPU], eax
-    mov eax, 1
-    xchg dword [rsi + TASK_OFF_ON_CPU], eax
+    ; Ya estamos ejecutando sobre la pila de new_task. A partir de aquí
+    ; old_task ya no está siendo usado por esta CPU y puede publicarse
+    ; como libre para que otra CPU lo seleccione.
+    mov dword [rdi + TASK_OFF_ON_CPU], 0
 
     mov rax, [rsi + TASK_OFF_CR3]
     test rax, rax
