@@ -5487,7 +5487,7 @@ openhere(union node *redir)
 	int pip[2];
 	size_t len = 0;
 
-	if (pipe(pip) < 0)
+	if (pipe2(pip, O_CLOEXEC) < 0)
 		ash_msg_and_raise_perror("can't create pipe");
 
 	p = redir->nhere.doc->narg.text;
@@ -6605,7 +6605,7 @@ evalbackcmd(union node *n, struct backcmd *result
 		goto out;
 	}
 
-	if (pipe(pip) < 0)
+	if (pipe2(pip, O_CLOEXEC) < 0)
 		ash_msg_and_raise_perror("can't create pipe");
 	/* process substitution uses NULL job/node, like openhere() */
 	jp = (ctl == CTLBACKQ) ? makejob(/*n,*/ 1) : NULL;
@@ -9696,7 +9696,7 @@ evalpipe(union node *n, int flags)
 		prehash(lp->n);
 		pip[1] = -1;
 		if (lp->next) {
-			if (pipe(pip) < 0) {
+			if (pipe2(pip, O_CLOEXEC) < 0) {
 				close(prevfd);
 				ash_msg_and_raise_perror("can't create pipe");
 			}
