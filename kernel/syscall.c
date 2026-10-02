@@ -1903,17 +1903,54 @@ static int64_t k_faccessat(uint64_t dirfd, uint64_t path, uint64_t mode,
 
 // ---------- pipe2 ----------
 //
-// pipe2(fds, flags). Los flags (O_CLOEXEC, O_NONBLOCK) los ignoramos:
-// no hay FD_CLOEXEC ni O_NONBLOCK real en el VFS. Es correcto porque
-// ningún programa que dependa de ellos va a colgarse por su ausencia;
-// a lo sumo tendrá una race benigna al hacer fork+exec sin cerrar.
+// Implementamos O_CLOEXEC de verdad porque los descriptores de un pipe
+// se usan normalmente como fds temporales de un pipeline. Sin este flag,
+// un proceso creado con fork()+execve() puede conservar accidentalmente
+// el extremo de escritura y retrasar el EOF del lector.
+//
+// O_NONBLOCK todavía no está implementado por el pipe/VFS; devolver EINVAL
+// es preferible a fingir que la operación es no bloqueante.
 static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
                        uint64_t a4, uint64_t a5) {
-  (void)flags;
   (void)a3;
   (void)a4;
   (void)a5;
-  return k_pipe(fds_ptr, 0, 0, 0, 0);
+
+  const uint64_t supported = LINUX_O_CLOEXEC;
+  if (flags & ~supported)
+    return -EINVAL;
+
+  int64_t rc = k_pipe(fds_ptr, 0, 0, 0, 0);
+  if (rc < 0)
+    return rc;
+
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  int user_fds[2];
+  if (copy_from_user(user_fds, (const void *)fds_ptr, sizeof(user_fds)) < 0) {
+    vfs_close_for_proc(proc, user_fds[0]);
+    vfs_close_for_proc(proc, user_fds[1]);
+    return -EFAULT;
+  }
+
+  if (user_fds[0] < 0 || user_fds[0] >= MAX_PROCESS_FDS ||
+      user_fds[1] < 0 || user_fds[1] >= MAX_PROCESS_FDS ||
+      !proc->fds[user_fds[0]] || !proc->fds[user_fds[1]]) {
+    if (user_fds[0] >= 0 && user_fds[0] < MAX_PROCESS_FDS &&
+        proc->fds[user_fds[0]])
+      vfs_close_for_proc(proc, user_fds[0]);
+    if (user_fds[1] >= 0 && user_fds[1] < MAX_PROCESS_FDS &&
+        proc->fds[user_fds[1]])
+      vfs_close_for_proc(proc, user_fds[1]);
+    return -EFAULT;
+  }
+
+  if (flags & LINUX_O_CLOEXEC)
+    proc->fd_cloexec_mask |= (1u << user_fds[0]) | (1u << user_fds[1]);
+
+  return 0;
 }
 
 // [3.2] link(oldpath, newpath): hard link. FAT32 → -EPERM, tarfs → -EROFS.
