@@ -110,7 +110,7 @@ static int64_t pipe_read(vfs_node_t *node, uint64_t offset, size_t size,
         ((uint8_t *)buf)[i] = p->buf[p->tail];
         p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
       }
-      p->count -= to_read;
+      __atomic_fetch_sub(&p->count, to_read, __ATOMIC_RELEASE);
       spin_unlock_irqrestore(&p->lock, flags);
 
       wake_up_all(&p->write_wq);
@@ -156,7 +156,7 @@ static int64_t pipe_write(vfs_node_t *node, uint64_t offset, size_t size,
         p->buf[p->head] = ((const uint8_t *)buf)[i];
         p->head = (p->head + 1) % PIPE_BUF_SIZE;
       }
-      p->count += to_write;
+      __atomic_fetch_add(&p->count, to_write, __ATOMIC_RELEASE);
       spin_unlock_irqrestore(&p->lock, flags);
 
       wake_up_all(&p->read_wq);
@@ -181,9 +181,9 @@ static int pipe_close(vfs_node_t *node) {
 
   unsigned long flags = spin_lock_irqsave(&p->lock);
   if (is_write)
-    p->writers--;
+    __atomic_fetch_sub(&p->writers, 1, __ATOMIC_RELEASE);
   else
-    p->readers--;
+    __atomic_fetch_sub(&p->readers, 1, __ATOMIC_RELEASE);
   int new_readers = p->readers;
   int new_writers = p->writers;
   spin_unlock_irqrestore(&p->lock, flags);
