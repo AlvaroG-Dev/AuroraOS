@@ -1,228 +1,179 @@
-Bloque 1 — Cerrar job control (2-3 sesiones)
-Sin esto, Ctrl+C funciona pero Ctrl+Z, fg, bg, jobs y & no.
-
-1.1 TASK_STOPPED en el scheduler (~2 h)
-sched.h: añadir TASK_STOPPED al enum task_state_t.
-
-sched.c: sched_tick no elige tareas STOPPED. sched_make_ready las ignora (solo SIGCONT las saca).
-
-Nuevo helper sched_stop_task(t) / sched_cont_task(t).
-
-1.2 SIGTSTP/SIGCONT reales (~3 h)
-signal.c: signal_default_action(SIGTSTP/SIGTTIN/SIGTTOU) → STOP real.
-
-Al recibir SIGTSTP: proc->state = TASK_STOPPED, quitar de la runqueue, dejar task->on_cpu=0, sched_yield().
-
-Al recibir SIGCONT: si estaba STOPPED, hacerla READY y despertar a su padre con un flag child_continued.
-
-1.3 waitpid con WUNTRACED/WCONTINUED (~2 h)
-process_waitpid acepta los flags.
-
-process_t gana was_stopped y was_continued.
-
-La wq del padre se despierta también cuando el hijo cambia de estado stopped/continued.
-
-k_wait4 los traduce al status Linux: ((sig) << 8) | 0x7f para stopped, 0xffff para continued.
-
-1.4 NOFLSH (~30 min)
-En tty_slave_receive, cuando llega VINTR/VQUIT/VSUSP y ISIG está activo, hacer canon_len=0 y count=0 antes de emitir la señal.
-
-Solo si NOFLSH no está en lflag. Como no exponemos NOFLSH a userland, se aplica siempre.
-
-1.5 Tests (~2 h)
-sched: TASK_STOPPED no elegida por el scheduler
-
-signal: SIGTSTP para el proceso
-
-signal: SIGCONT lo reanuda
-
-waitpid: WUNTRACED detecta stop
-
-tty: NOFLSH limpia canon_buf en Ctrl+C
-
-Cierre: sh -c 'sleep 100' &, jobs, fg, bg, Ctrl+Z, kill %1. Y vi/top pueden instalarse sin colgarse.
-
-Bloque 2 — Boot configurable y pivot (~2-3 sesiones)
-Cierra el último [~] del ROADMAP original.
-
-2.1 /etc/aurora.conf (~2 h)
-Bootloader lee /etc/aurora.conf de FAT32 antes de cargar el kernel.
-
-Formato key=value. Clave inicial: kernel=/boot/kernel.elf.
-
-Fallback a la ruta hardcoded actual si no existe.
-
-2.2 pivot_root / switch_root (~4 h)
-Syscall SYS_PIVOT_ROOT (Linux 155).
-
-Mover la raíz del VFS: new_root pasa a ser /, el antiguo / se mueve a /oldroot.
-
-El kernel arranca con FAT32 en /, monta tarfs en /initrd, hace pivot_root("/initrd", "/oldroot"), y luego umount /oldroot.
-
-Resultado: / es tarfs (RO), /data es FAT32 (RW), sin /initrd visible.
-
-2.3 Layout final (~1 h)
-text
-/         tarfs (RO)     ← sistema, /bin, /usr, /apps, /system
-/data     FAT32 (RW)     ← datos de usuario
-/dev      devfs
-/proc     procfs (bloque 3.3)
-El shell arranca en / (RO). cd /data para escribir.
-
-Sin /initrd. Sin bind mounts.
-
-2.4 Script de rescate (~1 h)
-Un shell script /sbin/aurora-fsck para verificar FAT32 tras un crash.
-
-Detección de "unclean shutdown" al montar: si FAT32 no está limpio, correr fsck mínimo.
-
-Cierre: el sistema tiene la estructura de un Linux real.
-
-Bloque 3 — Completitud VFS/FS (~3-4 sesiones)
-3.1 Symlinks (~2 h)
-SYS_SYMLINK (88), SYS_READLINK (89, hoy stub).
-
-vfs_lookup sigue symlinks del tarfs (ya funciona) y de FAT32 (no soportado por FAT).
-
-line_t... no, perdón, esto es kernel.
-
-vfs_ops_t gana .symlink y .readlink.
-
-Tarfs ya emite typeflag='2', solo falta exponerlo a userland.
-
-3.2 Hard links (~1 h)
-SYS_LINK (86).
-
-FAT32 no los soporta: -EPERM salvo en tarfs (RO, no tiene sentido crear).
-
-3.3 /proc mínimo (~1 día)
-procfs.c: árbol dinámico generado on-demand.
-
-/proc/self/ → symlink a /proc/<pid>/.
-
-/proc/<pid>/{stat,status,cmdline,exe,fds/}.
-
-/proc/mounts, /proc/uptime, /proc/meminfo.
-
-Sin esto, ps, top, free no funcionan.
-
-3.4 Permisos y metadatos (~3 h)
-chmod, chown reales sobre process_t->uid/gid (ya son 0, extenderlos).
-
-umask por proceso.
-
-S_ISUID/S_ISGID (setuid/setgid al execve).
-
-3.5 mmap file-backed / VMA_FILE (~1 día)
-sys_mmap con fd != -1 crea un VMA de tipo VMA_FILE.
-
-El demand pager lee del inodo al tocar página.
-
-Desbloquea dlopen, mmap(PROT_EXEC) de binarios, mmap de libc.
-
-3.6 Buffer cache FAT32 (~1 día)
-Cache de clusters en RAM (LRU).
-
-Reduce I/O en operaciones repetidas (grep -r, find, etc.).
-
-3.7 Tests de corrupción FAT32 (~2 h)
-Fuzzing del BPB parser con datos aleatorios.
-
-Detección de ciclos en la cadena FAT.
-
-Manejo de cluster out-of-range.
-
-Simular "apagado durante escritura" y verificar recuperación.
-
-Cierre: el FS se comporta como un FS POSIX completo (salvo symlinks en FAT32, que es imposible).
-
-Bloque 4 — Syscalls de relleno (~1-2 sesiones)
-4.1 statfs/fstatfs (~1 h)
-Devuelve f_blocks, f_bfree, f_bavail, f_bsize.
-
-Lo usa df, stat -f.
-
-4.2 utimensat, fsync, fchmod, fchown (~2 h)
-utimensat (280): timestamps. FAT32 tiene 2 s de granularidad.
-
-fsync (74): flush del FS (FAT32 ya lo tiene, exponerlo).
-
-fchmod/fchown: -EPERM en FAT32, no-op en tarfs.
-
-4.3 mprotect real (~2 h)
-Recorrer los VMAs y actualizar PTEs.
-
-Lo usan dlopen, mprotect(PROT_NONE) para guard pages.
-
-4.4 mknod real (~1 h)
-Crear nodos char/block en devfs.
-
-Lo usa mdev si algún día añades hotplug.
-
-4.5 getrlimit/setrlimit (~1 h)
-prlimit64 (302) hoy devuelve -ENOSYS.
-
-Implementar con valores por defecto (RLIMIT_NOFILE=256, RLIMIT_STACK=8MB).
-
-4.6 Syscalls varias (~2 h)
-sethostname, setdomainname.
-
-getrusage (98).
-
-times (100).
+Bloque 1 — Cerrar job control ✅ CERRADO
+
+1.1 TASK_STOPPED en el scheduler ✅
+1.2 SIGTSTP/SIGCONT reales ✅
+   Fix clave: wait_common procesa SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU y
+   SIGCONT internamente sin devolver EINTR (equivalente a
+   do_signal_stop de Linux). Evita que un `bg` mate un nanosleep.
+1.3 waitpid con WUNTRACED/WCONTINUED ✅
+1.4 NOFLSH ✅
+1.5 Tests ✅
+   Fix extra: signal_filter_ignored no filtra SIGCHLD (el shell lo
+   necesita para reapear tras read bloqueado) ni SIGCONT.
+   Fix extra: process_exit empuja SIGCHLD al padre antes del wake.
+
+Verificado end-to-end: `sleep 100 &` + `jobs` + `fg` + `Ctrl+Z` +
+`bg` + `kill %1` + `kill -9 %1` con exit codes 137/143 correctos.
+
+---
+
+Bloque 2 — Boot configurable y pivot
+
+2.1 /etc/aurora.conf ✅
+2.2 pivot_root / switch_root ⚠️
+   `vfs_pivot_root` implementado y `SYS_PIVOT_ROOT` registrado, pero
+   el modelo LiveUSB (tarfs RO en `/`, FAT32 RW en `/data`) no lo usa.
+   Se mantiene como infraestructura para un futuro layout alternativo.
+2.3 Layout final ⚠️ → equivalente alcanzado
+   /         tarfs RO (sistema, /bin, /apps, /system)
+   /data     FAT32 RW
+   /dev      devfs
+   /proc     procfs
+   Sin /initrd. Sin bind mounts.
+   El modelo del TODO (pivot_root a FAT32 como raíz) fue sustituido
+   por el modelo LiveUSB, más limpio y sin necesidad de pivot_root.
+2.4 aurora-fsck ✅
+   Binario /apps/aurora-fsck que usa ASYS_FS_CHECK. Detecta ciclos,
+   cadenas rotas, huérfanos, y compara FSInfo con la FAT.
+   Validación pasiva en mount (FAT[0], FAT[1], root_cluster, firmas
+   FSInfo). FSInfo se actualiza en cada sync.
+
+---
+
+Bloque 3 — Completitud VFS/FS ✅ CERRADO
+
+3.1 Symlinks ✅
+3.2 Hard links ✅
+   vfs_ops_t.link + vfs_link + k_link/k_linkat.
+   tarfs devuelve -EROFS, FAT32 -EPERM.
+3.3 /proc mínimo ✅
+   /proc/{uptime,version,meminfo,stat,mounts,loadavg,self}
+   /proc/<pid>/{stat,status,cmdline,comm,statm}
+3.4 Permisos y metadatos ✅
+   3.4.a mode/uid/gid en vfs_node_t y vfs_stat_t.
+   3.4.b credenciales POSIX completas + umask + groups.
+   3.4.c chmod/chown/umask reales + mapa RAM FAT32.
+   3.4.d vfs_check_access en open/execve/access/chdir.
+   3.4.e setuid/setgid en execve.
+3.5 mmap file-backed / VMA_FILE ✅
+3.6 Buffer cache FAT32 ✅
+   LRU de 256 sectores × 512 B, hash por LBA. Todos los accesos a
+   datos pasan por el cache. La FAT y FSInfo siguen directos.
+   Dirty slots se vuelcan en sync.
+3.7 Tests de corrupción FAT32 ✅
+   Mock block device en RAM. 6 tests nuevos (135 → 141):
+   - BPB fuzz con 32 semillas
+   - Detección de ciclo en FAT
+   - Cluster out-of-range
+   - Huérfano tras crash simulado
+   - Propagación de E/S durante create
+   - Reparación limpia huérfanos
+   Bug encontrado y corregido: fat32_gen_short_alias se tragaba
+   silenciosamente los -EIO de fat32_short_name_exists.
+
+---
+
+Bloque 4 — Syscalls de relleno ✅ CERRADO
+
+4.1 statfs/fstatfs ✅
+4.2 utimensat, fsync, fchmod, fchown ✅
+4.3 mprotect real ✅
+4.4 mknod real ✅
+   rdev expuesto para char/block. devfs: null=1:3, zero=1:5,
+   kmsg=1:11, tty=5:0, pts/N=136:N.
+   Pendiente (opcional): mknod en devfs que cree nodos con ops
+   conectadas por major/minor. Hoy solo guarda rdev.
+4.5 getrlimit/setrlimit ✅
+   rlimits[16] por proceso, heredados en fork, preservados en execve.
+   prlimit64 real con validaciones. ulimit -a funciona.
+4.6 Syscalls varias ✅
+   sethostname, getrusage, times. madvise (no-op), mremap.
 
 Cierre: busybox df, stat, ulimit completos.
 
-Bloque 5 — Userland / SO (~2-3 sesiones)
-5.1 /etc/passwd, /etc/group (~1 h)
-Ficheros en el tarfs.
+---
 
-Silencia whoami, id, ls -l (que hoy dicen "uid 0" pero sin nombre).
+Bloque 5 — Userland / SO
 
-5.2 init (PID 1) (~3 h)
-Un binario /sbin/init que:
+5.1 /etc/passwd, /etc/group, /etc/shadow ✅
+5.2 init (PID 1) ✅
+   /apps/init con fork+exec+respawn (relanza el terminal si muere
+   anormalmente, sale limpio con exit 0).
+5.3 Reaper de zombies sin padre ✅
+   Reparent a PID 1 en process_exit + waitpid(-1) en init.
+5.4 getty minimal ⏳ PENDIENTE
+   Alternativa ya operativa: /apps/init lanza directamente /apps/shell,
+   que abre un PTY y lanza /bin/sh. No hace falta login.
 
-Monta /proc, /sys, /tmp.
+Cierre: el sistema tiene init real. Los huérfanos no se acumulan.
 
-Lanza getty/terminal en /dev/tty1.
+---
 
-Reparenta huérfanos (reaper).
+Bloque 6 — Mejoras de input/terminal
 
-Reap de zombies sin padre.
+6.1 Scancodes extendidos ✅
+   extended_pending para 0xE0. Flechas, F1-F12, Home/End, PgUp/PgDn,
+   Del, Ins. Verificado con ash (historial, Home/End).
+6.2 Copy/paste ⏳ PENDIENTE
+6.3 Cursor parpadeante ⏳ PENDIENTE
+6.4 Serial como consola interactiva ⏳ PENDIENTE
 
-Hoy el shell es directamente PID 1, sin reaper.
+### Bloque 7 — futex + clone(CLONE_THREAD) ✅ CERRADO
 
-5.3 Reaper de zombies sin padre (~2 h)
-En process_exit, si el padre ya ha muerto, el proceso pasa a ser hijo de init.
+7.1 futex (WAIT/WAKE/REQUEUE básico) ✅
+   Tabla hash (uaddr, pml4) → wait queues. Solo PRIVATE.
+   wake_up_one + wait_queue_add/remove_locked como primitivas.
+   REQUEUE/WAKE_OP/BITSET devuelven -ENOSYS (musl no los usa en el
+   fast path).
 
-init recoge zombies automáticamente (waitpid(-1) en loop).
+7.2 clone(CLONE_VM|CLONE_THREAD|CLONE_SETTLS|...) ✅
+   - task_t gana clear_child_tid.
+   - process_t gana team_size.
+   - process_clone_thread: comparte process_t con el padre.
+   - CLONE_PARENT_SETTID / CHILD_SETTID / CHILD_CLEARTID tratados
+     como flags independientes (bug: antes se mezclaban y se escribía
+     el tid en __thread_list_lock de musl, corrompiendo su mutex).
+   - Hijo forzado al mismo CPU del padre (cpu_affinity) para evitar
+     que otro CPU lo programe antes de que el padre termine la
+     inserción en la lista de musl.
 
-5.4 getty minimal (~2 h)
-Abre el terminal, hace login (o directo sh sin password).
+7.3 pthread_create/join funcional ✅
+   - test_thread: 4 tests (basic, many, mutex_cond, stress 50 iter).
+   - 60 clone events sin PF ni panic.
 
-Alternativa: -noshell en /etc/aurora.conf para arrancar sin login.
+**Deuda conocida (no bloquea el cierre):**
+- [ ] Señales per-thread (blocked_signals compartido entre hilos).
+- [ ] kill(tid, sig) / pthread_kill dirigido a un thread.
+- [ ] execve desde thread no-líder no mata los demás del team.
+- [ ] Futex robusto (FUTEX_LOCK_PI) → -ENOSYS.
+- [ ] CLONE_VFORK real.
 
-Cierre: el sistema tiene un init real. Los huérfanos no se acumulan.
+---
 
-Bloque 6 — Mejoras de input/terminal (~1-2 sesiones)
-6.1 Scancodes extendidos (~2 h)
-0xE0 0x48 → flecha arriba → emitir \e[A al TTY.
+# Estado global
 
-Lo mismo para F1..F12, Page Up/Down, Home/End.
+| Bloque | Estado |
+|---|---|
+| 1 Job control | ✅ |
+| 2.1 aurora.conf | ✅ |
+| 2.2 pivot_root | ⚠️ infra lista, no en uso |
+| 2.3 Layout | ✅ equivalente alcanzado |
+| 2.4 aurora-fsck | ✅ |
+| 3 VFS/FS completo | ✅ |
+| 4 Syscalls relleno | ✅ |
+| 5.1 /etc/passwd | ✅ |
+| 5.2 init | ✅ |
+| 5.3 reaper | ✅ |
+| 5.4 getty | ⏳ |
+| 6.1 scancodes | ✅ |
+| 6.2-6.4 | ⏳ |
+| 7 futex+clone | ✅ |
 
-vi, top, less usan estas secuencias.
+**Lo que queda del TODO**: 5.4 (getty — opcional, cubierto por init),
+6.2-6.4 (input/terminal avanzado), y el item opcional de mknod por
+major/minor. Todo lo demás está cerrado o equivalente.
 
-6.2 Copy/paste (~1 día, opcional)
-Modo "selección" en el terminal app (Shift+flechas o clic+drag).
-
-Buffer interno en la app (no kernel).
-
-6.3 Cursor parpadeante (~1 h)
-El terminal app alterna el cursor cada 500 ms.
-
-Requiere redibujar la fila del cursor en cada tick.
-
-6.4 Serial como consola interactiva (~2 h, opcional)
-Redirigir input del UART al PTY y viceversa.
-
-Útil para -nographic en QEMU.
+**Siguiente bloque sugerido**: Terminal 2D (Fase 4.3 del ROADMAP), que
+desbloquea `vi`, `less` y `top` con render completo. Requiere ~8-10 h
+de trabajo: matriz de celdas, parser CSI completo, scroll region,
+alternate screen, render diferencial y SIGWINCH.

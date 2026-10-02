@@ -815,3 +815,97 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
 
   return (int64_t)base;
 }
+
+// ---------------------------------------------------------------------------
+// [B] mremap. Musl lo usa en realloc() de bloques mmap'd.
+//
+//   mremap(old_addr, old_size, new_size, flags, new_addr)
+//
+// Flags Linux: MREMAP_MAYMOVE=1, MREMAP_FIXED=2, MREMAP_DONTUNMAP=4.
+// MREMAP_FIXED exige new_addr alineado y libre → lo rechazamos con
+// EINVAL hasta que alguien lo necesite.
+// ---------------------------------------------------------------------------
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED 2
+
+int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
+                   uint64_t new_size, uint64_t flags, uint64_t new_addr) {
+  if (!proc || old_size == 0)
+    return -EINVAL;
+  if (flags & MREMAP_FIXED)
+    return -EINVAL; // no soportado
+  if (old_addr & 0xFFF)
+    return -EINVAL;
+
+  old_size = (old_size + 0xFFF) & ~0xFFF;
+  new_size = (new_size + 0xFFF) & ~0xFFF;
+
+  // Linux: new_size == 0 equivale a munmap(old_addr, old_size).
+  if (new_size == 0) {
+    (void)sys_munmap(proc, old_addr, old_size);
+    return -EINVAL;
+  }
+  if (old_addr >= USER_LIMIT || old_size > USER_LIMIT - old_addr)
+    return -EINVAL;
+  if (new_size > USER_LIMIT - old_addr)
+    return -ENOMEM;
+
+  vma_t *v = vma_find(proc, old_addr);
+  if (!v || old_addr + old_size > v->end)
+    return -EFAULT;
+
+  if (new_size == old_size)
+    return (int64_t)old_addr;
+
+  // --- Shrink: recortar la cola del VMA ---
+  if (new_size < old_size) {
+    (void)vma_unmap_range(proc, old_addr + new_size, old_addr + old_size);
+    return (int64_t)old_addr;
+  }
+
+  // --- Grow: ¿hay hueco contiguo detrás? ---
+  uint64_t new_end = old_addr + new_size;
+  int can_extend = 1;
+  for (vma_t *q = proc->vma_list; q; q = q->next) {
+    if (q == v)
+      continue;
+    // Colisión si [v->end, new_end) intersecta [q->start, q->end).
+    if (q->end > v->end && q->start < new_end) {
+      can_extend = 0;
+      break;
+    }
+  }
+  if (can_extend) {
+    // Extender in-place. Los PTEs nuevos los demanda el PF handler.
+    v->end = new_end;
+    return (int64_t)old_addr;
+  }
+
+  // --- Move + copy: mmap anónimo nuevo, memcpy, munmap viejo ---
+  if (!(flags & MREMAP_MAYMOVE))
+    return -ENOMEM;
+
+  int prot = 0;
+  if (v->flags & PTE_WRITABLE)
+    prot |= MMAP_PROT_WRITE;
+  prot |= MMAP_PROT_READ;
+  // Los VMAs siempre son legibles en Aurora, aunque no haya bit.
+
+  int64_t dst = sys_mmap(proc, 0, new_size, prot,
+                         MMAP_MAP_PRIVATE | MMAP_MAP_ANONYMOUS, -1, 0);
+  if (dst < 0)
+    return dst;
+
+  // Copiar el contenido página a página. Las páginas no presentes se
+  // quedan a cero en el destino (equivalente a "no estaban").
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
+    uint64_t sp = paging_get_phys_in(pml4, old_addr + off);
+    uint64_t dp = paging_get_phys_in(pml4, (uint64_t)dst + off);
+    if (sp && dp)
+      memcpy(phys_to_virt(dp), phys_to_virt(sp), PAGE_SIZE);
+  }
+
+  (void)sys_munmap(proc, old_addr, old_size);
+  return dst;
+}

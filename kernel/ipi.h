@@ -43,4 +43,14 @@ void ipi_handler_tlb(void);
 // shootdowns concurrentes.
 void ipi_tlb_shootdown(uint64_t addr);
 
+// [SMP-FIX] Full TLB shootdown cross-CPU. Equivalente a
+// ipi_tlb_shootdown(0): recarga CR3 en todos los CPUs online para
+// invalidar todo el TLB no-global.
+//
+// IMPORTANTE: mismas restricciones que ipi_tlb_shootdown. Requiere
+// IRQs HABILITADOS. Si se llama con IRQs off y otro CPU está a punto
+// de mandarnos una IPI de shootdown, ambos se quedan esperando ack
+// mutuamente → deadlock.
+void ipi_tlb_shootdown_all(void);
+
 #endif

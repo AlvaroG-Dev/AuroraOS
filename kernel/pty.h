@@ -26,7 +26,7 @@
 #include <stdint.h>
 
 #define PTY_MAX 16
-#define PTY_M_BUF_SIZE 4096
+#define PTY_M_BUF_SIZE (64 * 1024)
 
 struct process;
 
@@ -49,7 +49,7 @@ typedef struct tty_pty {
   size_t m_tail;
   size_t m_count;
   spinlock_t m_lock;
-  wait_queue_t m_read_wq;
+  wait_queue_t m_read_wq;  // lectores esperando datos
 
 } tty_pty_t;
 

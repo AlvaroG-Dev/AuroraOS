@@ -30,7 +30,7 @@ void wait_queue_init(wait_queue_t *wq) {
 // La entrada de cada tarea vive dentro de task_t. Así bloquear una tarea
 // nunca depende de una asignación dinámica que pueda fallar justo antes
 // de publicar TASK_BLOCKED.
-static void wq_add_locked(wait_queue_t *wq, task_t *t) {
+void wait_queue_add_locked(wait_queue_t *wq, task_t *t) {
   wait_queue_entry_t *e = &t->wait_entry;
 
   e->task = t;
@@ -42,7 +42,7 @@ static void wq_add_locked(wait_queue_t *wq, task_t *t) {
   task_get(t);
 }
 
-static void wq_remove_locked(wait_queue_t *wq, task_t *t) {
+void wait_queue_remove_locked(wait_queue_t *wq, task_t *t) {
   wait_queue_entry_t **pp = &wq->head;
   while (*pp) {
     if ((*pp)->task == t) {
@@ -98,7 +98,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
 
     if (self->waiting_on == NULL) {
       self->wake_reason = 0;
-      wq_add_locked(wq, self);
+      wait_queue_add_locked(wq, self);
       // [C4] Publicación atómica de (state, wake_deadline) bajo
       // sched_lock, para que sched_wake_expired (que lee ambos campos
       // bajo el mismo lock) nunca vea una tarea BLOCKED con deadline
@@ -117,7 +117,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
         uint64_t blk = self->proc->blocked_signals;
         if ((pend & ~blk) != 0) {
           self->wake_reason = -EINTR;
-          wq_remove_locked(wq, self);
+          wait_queue_remove_locked(wq, self);
           sched_make_ready(self);
         }
       }
@@ -134,7 +134,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     if (cond && cond(arg)) {
       if (self->waiting_on == wq) {
         flags = spin_lock_irqsave(&wq->lock);
-        wq_remove_locked(wq, self);
+        wait_queue_remove_locked(wq, self);
         spin_unlock_irqrestore(&wq->lock, flags);
       }
       if (timeout_ticks == 0)
@@ -182,7 +182,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
           // volverá a añadirse en la siguiente iteración.
           if (self->waiting_on == wq) {
             flags = spin_lock_irqsave(&wq->lock);
-            wq_remove_locked(wq, self);
+            wait_queue_remove_locked(wq, self);
             spin_unlock_irqrestore(&wq->lock, flags);
           }
           self->wake_reason = 0;
@@ -202,7 +202,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
         // EINTR como antes.
         if (self->waiting_on == wq) {
           flags = spin_lock_irqsave(&wq->lock);
-          wq_remove_locked(wq, self);
+          wait_queue_remove_locked(wq, self);
           spin_unlock_irqrestore(&wq->lock, flags);
         }
         return -EINTR;
@@ -214,7 +214,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       if (now >= deadline) {
         if (self->waiting_on == wq) {
           flags = spin_lock_irqsave(&wq->lock);
-          wq_remove_locked(wq, self);
+          wait_queue_remove_locked(wq, self);
           spin_unlock_irqrestore(&wq->lock, flags);
         }
         return 0;

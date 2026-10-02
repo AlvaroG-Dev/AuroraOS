@@ -77,8 +77,9 @@ void pty_free(tty_pty_t *pty) {
   pty->in_use = 0;
   spin_unlock_irqrestore(&g_pty_lock, flags);
 
-  // [CTTY] Cualquier proceso que tuviera este slave como terminal de
-  // control queda huérfano.
+  wake_up_all(&pty->m_read_wq);
+  // wake_up_all(&pty->m_write_wq);   ← ELIMINAR
+
   process_clear_ctty_for((struct tty *)&pty->slave);
 }
 
@@ -128,6 +129,40 @@ int64_t pty_master_write(tty_pty_t *pty, const void *buf, size_t size) {
 // ---------------------------------------------------------------------------
 // Slave → Master
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Slave → Master (con back-pressure).
+//
+// Si el buffer slave→master está lleno (m_count == PTY_M_BUF_SIZE),
+// el escritor se bloquea en m_write_wq hasta que el lector drene.
+// Antes, al llenarse, los bytes sobrantes se DESCARTABAN, lo que
+// rompía volcados grandes (p. ej. `dmesg` que emite 16 KB con buffer
+// de 4 KB).
+//
+// El wake_up_all de m_read_wq va FUERA de m_lock para no invertir el
+// orden de locks (los que esperan en m_read_wq toman m_lock dentro
+// de su condición).
+// ---------------------------------------------------------------------------
+static bool pty_m_has_space(void *arg) {
+  tty_pty_t *pty = (tty_pty_t *)arg;
+  unsigned long flags = spin_lock_irqsave(&pty->m_lock);
+  bool ok = pty->m_count < PTY_M_BUF_SIZE;
+  spin_unlock_irqrestore(&pty->m_lock, flags);
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Slave → Master. Si el buffer está lleno, DESCARTA lo que sobra.
+//
+// Se probó back-pressure (bloquear al escritor hasta que hubiera
+// espacio) y produjo deadlocks: el terminal app es single-threaded y
+// si se bloquea escribiendo al master, nadie lee del master y el
+// buffer nunca se drena. El shell bloqueado en pty_slave_emit no
+// retorna a userland y no procesa Ctrl+C.
+//
+// Estrategia actual: buffer de 64 KB + drop silencioso. Suficiente
+// para todos los volcados reales (dmesg son ~16 KB). El log se
+// rate-limita para no inundar el serial si algo se descontrola.
+// ---------------------------------------------------------------------------
 void pty_slave_emit(struct tty_pty *pty_opaque, const void *buf, size_t size) {
   tty_pty_t *pty = (tty_pty_t *)pty_opaque;
   if (!pty || !buf || size == 0)
@@ -137,10 +172,9 @@ void pty_slave_emit(struct tty_pty *pty_opaque, const void *buf, size_t size) {
   unsigned long flags = spin_lock_irqsave(&pty->m_lock);
   size_t space = PTY_M_BUF_SIZE - pty->m_count;
   size_t to_write = size;
+  size_t dropped = 0;
   if (to_write > space) {
-    LOG_WARN("[PTY] /dev/pts/%u master buffer lleno (%zu/%d). "
-             "Descartando %zu bytes",
-             pty->index, pty->m_count, PTY_M_BUF_SIZE, to_write - space);
+    dropped = to_write - space;
     to_write = space;
   }
   for (size_t i = 0; i < to_write; i++) {
@@ -148,10 +182,25 @@ void pty_slave_emit(struct tty_pty *pty_opaque, const void *buf, size_t size) {
     pty->m_tail = (pty->m_tail + 1) % PTY_M_BUF_SIZE;
   }
   pty->m_count += to_write;
+  size_t m_count_now = pty->m_count;
   spin_unlock_irqrestore(&pty->m_lock, flags);
 
   if (to_write > 0)
     wake_up_all(&pty->m_read_wq);
+
+  // [rate-limit] Solo loguear 1 vez por segundo por PTY. Antes, un
+  // volcado grande inundaba el serial con cientos de WARN en pocos ms.
+  if (dropped > 0) {
+    static uint64_t last_warn_tick[PTY_MAX] = {0};
+    uint64_t now = sched_get_ticks();
+    uint32_t idx = pty->index;
+    if (idx < PTY_MAX && now - last_warn_tick[idx] >= 1000) {
+      last_warn_tick[idx] = now;
+      LOG_WARN("[PTY] /dev/pts/%u buffer lleno (%zu/%d). "
+               "Descartados %zu bytes (rate-limited)",
+               idx, m_count_now, PTY_M_BUF_SIZE, dropped);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -150,6 +150,7 @@
 /usr/bin/pkill
 /bin/pidof
 /bin/ps
+/usr/bin/pstree
 /usr/bin/top
 /usr/bin/uptime
 /bin/watch
@@ -158,11 +159,14 @@
 /bin/cttyhack
 /bin/hush
 /usr/bin/cal
+/bin/dmesg
+/usr/bin/flock
 /bin/getopt
 /usr/bin/hexdump
 /usr/bin/hd
 /usr/bin/xxd
 /sbin/mdev
+/usr/bin/mesg
 /bin/more
 /bin/mount
 /bin/mountpoint

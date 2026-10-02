@@ -2,6 +2,7 @@
 #include "process.h"
 #include "cpu.h"
 #include "elf.h"
+#include "futex.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
@@ -161,8 +162,11 @@ int process_set_argv(process_t *proc, int argc, const char *const *argv) {
       process_clear_argv(proc);
       return -EINVAL;
     }
+    // [FIX] argv[i] puede ser "" (string vacío). Linux lo permite:
+    // `grep "" fichero`, `awk '...' ""`, etc. Solo rechazamos si
+    // excede el límite o es NULL (ya filtrado arriba).
     size_t n = strlen(argv[i]);
-    if (n == 0 || n >= PROCESS_ENV_STR_MAX) {
+    if (n >= PROCESS_ENV_STR_MAX) {
       process_clear_argv(proc);
       return -E2BIG;
     }
@@ -593,6 +597,7 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->ppid = ppid;
   proc->exit_code = 0;
   proc->is_zombie = 0;
+  proc->team_size = 1;
   proc->ctty = NULL;
 
   set_proc_name_from_path(proc, name);
@@ -687,6 +692,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->fds[0] = vfs_create_stdio_fd(0);
   proc->fds[1] = vfs_create_stdio_fd(1);
   proc->fds[2] = vfs_create_stdio_fd(2);
+
+  proc->fd_cloexec_mask = 0;
 
   wait_queue_init(&proc->child_wq);
 
@@ -841,6 +848,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->ppid = ppid;
   proc->pgid = proc->pid;
   proc->sid = proc->pid;
+  proc->team_size = 1;
   proc->ctty = NULL;
   set_proc_name_from_path(proc, name);
   proc->task = task;
@@ -914,10 +922,12 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   for (int f = 0; f < MAX_PROCESS_FDS; f++)
     proc->fds[f] = NULL;
 
+  proc->fd_cloexec_mask = 0;
+
   if (fds && parent) {
     if (fds->fd_in != -1) {
       file_descriptor_t *fd = parent->fds[fds->fd_in];
-      fd->ref_count++;
+      __atomic_fetch_add(&fd->ref_count, 1, __ATOMIC_ACQ_REL);
       proc->fds[0] = fd;
       struct tty_pty *pty = pty_slave_from_fd(fd);
       if (pty) {
@@ -932,14 +942,14 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     }
     if (fds->fd_out != -1) {
       file_descriptor_t *fd = parent->fds[fds->fd_out];
-      fd->ref_count++;
+      __atomic_fetch_add(&fd->ref_count, 1, __ATOMIC_ACQ_REL);
       proc->fds[1] = fd;
     } else {
       proc->fds[1] = vfs_create_stdio_fd(1);
     }
     if (fds->fd_err != -1) {
       file_descriptor_t *fd = parent->fds[fds->fd_err];
-      fd->ref_count++;
+      __atomic_fetch_add(&fd->ref_count, 1, __ATOMIC_ACQ_REL);
       proc->fds[2] = fd;
     } else {
       proc->fds[2] = vfs_create_stdio_fd(2);
@@ -1387,12 +1397,15 @@ void process_exit(process_t *proc, int exit_code) {
       vfs_close_for_proc(proc, f);
   }
 
-  if (proc->task)
-    winsrv_cleanup_task(proc->task);
-
+  // [CLONE] Limpiar ventanas del thread ACTUAL, no de proc->task.
+  // Si el líder murió antes que otros threads del team, proc->task
+  // apunta a una task ya DEAD; limpiar ahí sería un doble cleanup.
+  // El último thread en salir es el que tiene ventanas vivas.
   task_t *cur = sched_current();
-  if (cur && cur == proc->task)
+  if (cur && cur->proc == proc) {
+    winsrv_cleanup_task(cur);
     cur->state = TASK_DEAD;
+  }
 
   task_t *parent_task = NULL;
   process_t *parent_proc = NULL;
@@ -1405,9 +1418,6 @@ void process_exit(process_t *proc, int exit_code) {
   const uint32_t my_pid = proc->pid;
   const uint32_t my_ppid = proc->ppid;
 
-  // Una sola pasada por process_list:
-  //   - Si p es el padre, capturamos su task Y su process_t.
-  //   - Si p es hijo del que muere, lo reparentamos a PID 1.
   int reparented = 0;
   process_t *p = process_list;
   while (p) {
@@ -1443,17 +1453,6 @@ void process_exit(process_t *proc, int exit_code) {
   spin_unlock_irqrestore(&process_lock, flags);
 
   if (parent_task) {
-    // [FIX SIGCHLD] Empujar SIGCHLD al padre ANTES de despertarlo.
-    //
-    // Sin esto, el padre solo se enteraba del hijo muerto si estaba
-    // bloqueado en wait4(). Un shell interactivo está bloqueado en
-    // read() sobre el PTY, así que el wake lo devolvía a dormir sin
-    // reapear. El zombie se quedaba vivo y `jobs` seguía mostrando
-    // el job.
-    //
-    // Con SIGCHLD pendiente, el read() del padre retorna EINTR,
-    // signal_check_pending entrega SIGCHLD (busybox tiene handler),
-    // y el shell llama a dowait() para reapear.
     if (parent_proc) {
       __atomic_fetch_or(&parent_proc->pending_signals, 1ULL << SIGCHLD,
                         __ATOMIC_RELEASE);
@@ -1469,18 +1468,47 @@ void process_exit(process_t *proc, int exit_code) {
 
 __attribute__((noreturn)) void process_exit_current(int exit_code) {
   process_t *proc = process_current();
-
-  if (proc)
-    process_exit(proc, exit_code);
-
-  // [FIX] Releer cur DESPUÉS de process_exit. El panic anterior mostró
-  // que el local `cur` puede quedar corrupto durante la llamada (wild
-  // write desde process_clear_envp con un `proc` stale o similar). Releer
-  // el current_task real elimina la dependencia del valor guardado y, si
-  // sigue corrupto, al menos el fallo se traslada a un sitio donde el
-  // valor viene directamente de %gs, no de una pila potencialmente
-  // pisada.
   task_t *cur = sched_current();
+
+  // [CLONE_CHILD_CLEARTID] Escribir 0 en *clear_child_tid y futex_wake
+  // a quien espere (pthread_join). Esto va ANTES de cualquier otra
+  // cosa: el joiner puede estar bloqueado en futex_wait esperando
+  // justo esta escritura.
+  if (cur && cur->clear_child_tid) {
+    put_user_u32(cur->clear_child_tid, 0);
+    if (proc && proc->pml4_phys)
+      futex_wake_user((uint64_t)cur->clear_child_tid, 1, proc->pml4_phys);
+    cur->clear_child_tid = NULL;
+  }
+
+  if (proc) {
+    // [CLONE_THREAD] ¿Somos el último thread del team?
+    // Si no, decrementar y limpiar solo lo nuestro. Si sí, hacer
+    // el exit "real" del proceso (fds, zombie, SIGCHLD al padre).
+    int last;
+    unsigned long flags = spin_lock_irqsave(&process_lock);
+    if (proc->team_size > 1) {
+      proc->team_size--;
+      last = 0;
+    } else {
+      proc->team_size = 0;
+      last = 1;
+    }
+    spin_unlock_irqrestore(&process_lock, flags);
+
+    if (last) {
+      process_exit(proc, exit_code);
+    } else {
+      // Salida de un thread no-líder. Limpiar sus ventanas (su task
+      // muere, sus ventanas también) pero NO tocar fds/argv/envp.
+      if (cur)
+        winsrv_cleanup_task(cur);
+    }
+  }
+
+  // Releer cur — process_exit puede haber cambiado el current_task si
+  // la tarea estaba siendo reemplazada por el scheduler.
+  cur = sched_current();
   if (cur) {
     cur->state = TASK_DEAD;
   }
@@ -1643,7 +1671,7 @@ static int clone_vmas(process_t *parent, process_t *child) {
     // [3.5] Compartir el file_descriptor_t con el padre: tomar ref.
     if (v->type == VMA_FILE && v->file_fd) {
       nv->file_fd = v->file_fd;
-      nv->file_fd->ref_count++;
+      __atomic_fetch_add(&nv->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
       nv->file_offset = v->file_offset;
     }
 
@@ -1703,7 +1731,6 @@ int64_t sys_fork(void) {
   if (!child) {
     LOG_ERR("[FORK] sin memoria para process_t");
     paging_free_user_space(child_pml4_phys);
-    // El child_task no está publicado; liberar a mano.
     if (child_task->stack)
       kfree(child_task->stack);
     kfree(child_task);
@@ -1712,11 +1739,12 @@ int64_t sys_fork(void) {
 
   child->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
   child->ppid = parent->pid;
-  child->pgid = parent->pgid; // ← NUEVO: hereda grupo del padre
-  child->sid = parent->sid;   // ← NUEVO: hereda sesión
+  child->pgid = parent->pgid;
+  child->sid = parent->sid;
   child->exit_code = 0;
   child->is_zombie = 0;
-  child->ctty = parent->ctty; // [CTTY] hereda el terminal de control
+  child->team_size = 1; // ← AÑADIR
+  child->ctty = parent->ctty;
 
   // Nombre: prefijo con el del padre.
   {
@@ -1745,13 +1773,11 @@ int64_t sys_fork(void) {
 
   process_set_cwd(child, parent->cwd);
   process_init_signals(child);
-  // Heredar handlers y máscara del padre.
   for (int i = 0; i < SIG_MAX; i++)
     child->sigactions[i] = parent->sigactions[i];
   child->blocked_signals = parent->blocked_signals;
   child->pending_signals = 0;
 
-  // [3.4.b] Heredar credenciales completas (fork no cambia uid/gid).
   child->uid = parent->uid;
   child->euid = parent->euid;
   child->suid = parent->suid;
@@ -1765,7 +1791,6 @@ int64_t sys_fork(void) {
   for (int i = 0; i < NGROUPS_MAX; i++)
     child->groups[i] = parent->groups[i];
 
-  // [ENV] Heredar entorno del padre.
   if (process_inherit_envp(parent, child) != 0) {
     LOG_ERR("[FORK] process_inherit_envp falló");
     paging_free_user_space(child_pml4_phys);
@@ -1787,11 +1812,9 @@ int64_t sys_fork(void) {
     return -ENOMEM;
   }
 
-  // [4.5] Heredar rlimits. Los hijos los heredan tal cual.
   for (int i = 0; i < RLIM_NLIMITS; i++)
     child->rlimits[i] = parent->rlimits[i];
 
-  // 5. VMAs.
   if (clone_vmas(parent, child) != 0) {
     LOG_ERR("[FORK] clone_vmas falló");
     paging_free_user_space(child_pml4_phys);
@@ -1802,17 +1825,16 @@ int64_t sys_fork(void) {
     return -ENOMEM;
   }
 
-  // 6. Fds compartidos (misma file_descriptor_t, ref_count++).
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     child->fds[f] = parent->fds[f];
     if (child->fds[f])
-      child->fds[f]->ref_count++;
+      __atomic_fetch_add(&child->fds[f]->ref_count, 1, __ATOMIC_ACQ_REL);
   }
+  child->fd_cloexec_mask = parent->fd_cloexec_mask;
 
   wait_queue_init(&child->child_wq);
   child_task->proc = child;
 
-  // 7. Publicar.
   unsigned long flags = spin_lock_irqsave(&process_lock);
   child->next = process_list;
   process_list = child;
@@ -1824,6 +1846,60 @@ int64_t sys_fork(void) {
            child->pid);
 
   return (int64_t)child->pid;
+}
+
+task_t *process_clone_thread(process_t *parent, registers_t *regs,
+                             uint64_t stack, uint64_t tls, uint64_t *ptid_out,
+                             uint64_t *ctid_set_out, uint64_t *ctid_clear_out) {
+  if (!parent || !regs)
+    return NULL;
+
+  task_t *child_task =
+      sched_create_forked_user_task_ex(regs, parent->pml4_phys, stack);
+  if (!child_task) {
+    LOG_ERR("[CLONE] sched_create_forked_user_task_ex falló");
+    return NULL;
+  }
+
+  child_task->fs_base = tls ? tls : parent->fs_base;
+  child_task->cpu_affinity = smp_processor_id();
+
+  task_get(child_task);
+  child_task->proc = parent;
+
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  parent->team_size++;
+  int new_size = parent->team_size;
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  uint32_t tid = child_task->id;
+
+  // CLONE_PARENT_SETTID: escribe el tid en el padre (musl usa &self->tid).
+  if (ptid_out) {
+    if (put_user_u32((uint32_t *)ptid_out, tid) < 0)
+      LOG_WARN("[CLONE] PARENT_SETTID falló (tid=%u)", tid);
+  }
+
+  // CLONE_CHILD_SETTID: escribe el tid en el hijo. musl 1.2.x NO usa
+  // este flag (solo CLEARTID), pero otros libcs sí.
+  if (ctid_set_out) {
+    if (put_user_u32((uint32_t *)ctid_set_out, tid) < 0)
+      LOG_WARN("[CLONE] CHILD_SETTID falló (tid=%u)", tid);
+  }
+
+  // CLONE_CHILD_CLEARTID: registra la dirección donde el kernel
+  // escribirá 0 al morir el hilo (con futex-wake). musl usa
+  // &__thread_list_lock. NO escribir nada aquí — solo guardar el
+  // puntero para process_exit_current.
+  if (ctid_clear_out) {
+    child_task->clear_child_tid = (uint32_t *)ctid_clear_out;
+  }
+
+  sched_publish_task(child_task);
+
+  LOG_INFO("[CLONE] thread tid=%u team pid=%u cpu=%d (team_size=%d)", tid,
+           parent->pid, child_task->cpu_affinity, new_size);
+  return child_task;
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,6 +1923,8 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   if (envc < 0 || envc > PROCESS_ENVP_MAX)
     return -EINVAL;
 
+  uint32_t tpid = proc->pid;
+
   vfs_node_t *node = vfs_lookup(path);
   if (!node)
     return -ENOENT;
@@ -1859,15 +1937,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     return -EACCES;
   }
 
-  // [3.4.d] Requerir bit x para execve, incluso si euid==0.
-  // Linux hace lo mismo: root no puede ejecutar un fichero sin ningún
-  // bit x (ni siquiera con CAP_DAC_OVERRIDE).
   if ((node->mode & 0111) == 0) {
     vfs_node_free(node);
     return -EACCES;
   }
 
-  // [3.4.b/3.4.d] Capturar bits setuid/setgid antes de liberar el nodo.
   uint32_t new_mode = node->mode;
   uint32_t new_uid = node->uid;
   uint32_t new_gid = node->gid;
@@ -1894,9 +1968,13 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
                          &phent, interp_path, sizeof(interp_path), &interp_len);
   vfs_node_free(node);
   if (rc != 0) {
+    LOG_WARN("[EXECVE-TRACE] pid=%u elf_load_streaming failed rc=%d", tpid, rc);
     paging_free_user_space(new_pml4_phys);
     return rc == -ENOMEM ? -ENOMEM : -ENOEXEC;
   }
+
+  LOG_INFO("[EXECVE-TRACE] pid=%u elf loaded, interp_len=%zu", tpid,
+           interp_len);
 
   uint64_t at_base = 0;
   uint64_t final_entry = entry;
@@ -1940,15 +2018,24 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
              (void *)interp_entry);
   }
 
+  LOG_INFO("[EXECVE-TRACE] pid=%u before stack mapping", tpid);
+
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
   for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
+    LOG_INFO("[EXECVE-TRACE] pid=%u stack page off=%lu before pmm_alloc", tpid,
+             (unsigned long)off);
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
       paging_free_user_space(new_pml4_phys);
       return -ENOMEM;
     }
+    LOG_INFO("[EXECVE-TRACE] pid=%u stack page off=%lu pmm_alloc=%p", tpid,
+             (unsigned long)off, (void *)phys);
     memset(phys_to_virt(phys), 0, PAGE_SIZE);
+    LOG_INFO(
+        "[EXECVE-TRACE] pid=%u stack page off=%lu before paging_map_page_in",
+        tpid, (unsigned long)off);
     if (paging_map_page_in(new_pml4, stack_base + off, phys,
                            PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
         0) {
@@ -1956,7 +2043,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
       paging_free_user_space(new_pml4_phys);
       return -ENOMEM;
     }
+    LOG_INFO("[EXECVE-TRACE] pid=%u stack page off=%lu mapped", tpid,
+             (unsigned long)off);
   }
+
+  LOG_INFO("[EXECVE-TRACE] pid=%u before setup_arg_block", tpid);
 
   proc_auxv_info_t ai = {
       .phdr_vaddr = phdr_vaddr,
@@ -1967,14 +2058,22 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   uint64_t user_rsp = setup_arg_block(new_pml4, stack_top, argc, argv, envc,
                                       envp, &ai, path, at_base);
   if (!user_rsp) {
+    LOG_WARN("[EXECVE-TRACE] pid=%u setup_arg_block failed", tpid);
     paging_free_user_space(new_pml4_phys);
     return -ENOMEM;
   }
+  LOG_INFO("[EXECVE-TRACE] pid=%u setup_arg_block done rsp=%p", tpid,
+           (void *)user_rsp);
+
+  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE COMMIT old=%p new=%p", tpid,
+           (void *)proc->pml4_phys, (void *)new_pml4_phys);
 
   // ===== COMMIT =====
   uint64_t old_pml4_phys = proc->pml4_phys;
 
+  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE vma_destroy_all", tpid);
   vma_destroy_all(proc);
+  LOG_INFO("[EXECVE-TRACE] pid=%u AFTER vma_destroy_all", tpid);
 
   proc->pml4_phys = new_pml4_phys;
   if (proc->task)
@@ -1999,15 +2098,6 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     proc->sigactions[i].mask = 0;
   }
 
-  // [3.4.b] Aplicar setuid/setgid del nuevo binario.
-  //
-  // Reglas POSIX (simplificadas, sin capabilities):
-  //   - S_ISUID: euid = node->uid. Si el proceso era root, además
-  //     uid = suid = euid (Linux "privilege drop completo"). Si no
-  //     era root, solo cambia euid.
-  //   - S_ISGID: idem con egid/gid/sgid.
-  //
-  // Si no hay bits, euid/egid se preservan.
   int was_root = (proc->euid == 0);
   if (new_mode & S_ISUID) {
     proc->euid = new_uid;
@@ -2043,6 +2133,8 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     proc->name[n] = '\0';
   }
 
+  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE vma_create x3", tpid);
+
   if (!vma_create(proc, vma_start, vma_end, PTE_USER | PTE_WRITABLE | PTE_NX,
                   VMA_ELF))
     LOG_ERR("[EXECVE] vma_create ELF falló");
@@ -2053,18 +2145,57 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK))
     LOG_ERR("[EXECVE] vma_create stack falló");
 
+  LOG_INFO("[EXECVE-TRACE] pid=%u AFTER vma_create x3", tpid);
+
   if (process_set_envp(proc, envc, envp) != 0)
     LOG_WARN("[EXECVE] process_set_envp falló, entorno conservado");
   if (process_set_argv(proc, argc, argv) != 0)
     LOG_WARN("[EXECVE] process_set_argv falló, argv conservado");
 
+  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE write_cr3(new=%p)", tpid,
+           (void *)new_pml4_phys);
   write_cr3(new_pml4_phys);
-  wrmsr(0xC0000100, 0);
 
+  // [TEST] Verificar que la pila de kernel sigue mapeada tras cambiar CR3.
+  // Si este código no llega a ejecutarse, la pila se ha perdido.
+  {
+    uint64_t rsp_val;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp_val));
+    uint64_t *new_pml4_v = (uint64_t *)phys_to_virt(new_pml4_phys);
+    uint64_t phys_of_rsp = paging_get_phys_in(new_pml4_v, rsp_val);
+    LOG_INFO("[EXECVE-POST-CR3] pid=%u rsp=%p phys=%p ok=%d", tpid,
+             (void *)rsp_val, (void *)phys_of_rsp, phys_of_rsp != 0);
+  }
+
+  // [TEST] Y también que podemos leer de la pila sin #PF
+  {
+    volatile uint64_t probe = 0;
+    uint64_t rsp_val;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp_val));
+    probe = *(volatile uint64_t *)rsp_val;
+    LOG_INFO("[EXECVE-POST-CR3] pid=%u rsp[0]=%p (leído OK)", tpid,
+             (void *)probe);
+  }
+
+  wrmsr(0xC0000100, 0);
   paging_free_user_space(old_pml4_phys);
+  LOG_INFO("[EXECVE-POST-FREE] pid=%u still alive rsp=%p", tpid, (void *)&tpid);
+
+  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE fd_cloexec loop", tpid);
+  for (int f = 0; f < MAX_PROCESS_FDS; f++) {
+    if (proc->fd_cloexec_mask & (1u << f)) {
+      proc->fd_cloexec_mask &= ~(1u << f);
+      if (proc->fds[f])
+        vfs_close_for_proc(proc, f);
+    }
+  }
+  LOG_INFO("[EXECVE-TRACE] pid=%u AFTER fd_cloexec loop", tpid);
 
   *new_entry = final_entry;
   *new_rsp = user_rsp;
+
+  LOG_INFO("[EXECVE-TRACE] pid=%u DONE entry=%p rsp=%p", tpid,
+           (void *)final_entry, (void *)user_rsp);
 
   LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d at_base=%p)",
            path, (void *)final_entry, (void *)user_rsp, argc, envc,

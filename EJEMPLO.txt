@@ -1,0 +1,4 @@
+﻿Este es un archivo de ejemplo creado por Codex.
+
+Proyecto: Aurora OS
+Propósito: verificar que el directorio compartido permite crear archivos.

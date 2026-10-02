@@ -20,7 +20,7 @@ sysroot:
 	fi
 	@if [ -d etc ]; then \
 		echo "[Makefile] Copiando etc/ a sysroot/etc/..."; \
-		cp -f etc/passwd etc/group etc/shadow sysroot/etc/ 2>/dev/null || true; \
+		cp -f etc/passwd etc/group etc/shadow etc/hosts etc/resolv.conf sysroot/etc/ 2>/dev/null || true; \
 	fi
 
 bootloader:

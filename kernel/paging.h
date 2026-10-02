@@ -113,4 +113,9 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags);
 // Deshace un mapeo hecho con mmio_map.
 void mmio_unmap(uint64_t phys, uint64_t size);
 
+// [SMP-FIX] Invalida TODO el TLB de todos los CPUs online.
+// Se usa tras cambiar CR3 y antes de liberar las tablas de páginas
+// del CR3 viejo. Si virt==0, se interpreta como "full flush".
+void paging_invalidate_tlb_global(uint64_t virt);
+
 #endif

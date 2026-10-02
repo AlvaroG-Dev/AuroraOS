@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
 // Niveles de log (menor número = más severo)
 typedef enum {
   KLOG_PANIC = 0, // sistema inservible, se cuelga
@@ -55,3 +54,12 @@ void klog_write_raw(const char *buf, size_t n);
 size_t klog_read(char *out, size_t max_len); // lee todo lo disponible
 size_t klog_available(void);                 // bytes pendientes
 void klog_clear(void);                       // limpia el buffer
+
+// [klogctl] Lectura NO destructiva (peek). Copia hasta max_len bytes
+// del ring sin consumirlos. Devuelve los bytes copiados.
+// Lo usa klogctl(SYSLOG_ACTION_READ_ALL) — dmesg no debe vaciar el ring.
+size_t klog_peek(char *out, size_t max_len);
+
+// [klogctl] Capacidad total del ring (KLOG_RING_SIZE). Para
+// SYSLOG_ACTION_SIZE_BUFFER.
+size_t klog_size(void);

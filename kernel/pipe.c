@@ -20,6 +20,7 @@
 #include "pipe.h"
 #include "heap.h"
 #include "klog.h"
+#include "process.h"
 #include "sched.h"
 #include "spinlock.h"
 #include "string.h"
@@ -38,8 +39,9 @@ typedef struct pipe {
   size_t count; // bytes en el buffer
   int readers;
   int writers;
-  wait_queue_t read_wq;  // lectores esperan aquí
-  wait_queue_t write_wq; // escritores esperan aquí
+  int refs; // extremos VFS vivos (2 al crear). Controla el kfree(pipe_t).
+  wait_queue_t read_wq;
+  wait_queue_t write_wq;
   spinlock_t lock;
 } pipe_t;
 
@@ -163,23 +165,31 @@ static int pipe_close(vfs_node_t *node) {
   if (!end)
     return 0;
   pipe_t *p = end->pipe;
+  int is_write = end->is_write;
 
   unsigned long flags = spin_lock_irqsave(&p->lock);
-  if (end->is_write)
+  if (is_write)
     p->writers--;
   else
     p->readers--;
-  int free_pipe = (p->readers == 0 && p->writers == 0);
+  int new_readers = p->readers;
+  int new_writers = p->writers;
   spin_unlock_irqrestore(&p->lock, flags);
+
+  LOG_TRACE("[PIPE-CLOSE] is_write=%d -> readers=%d writers=%d", is_write,
+            new_readers, new_writers);
 
   kfree(end);
   node->priv = NULL;
 
   // Despertar al otro extremo para que vea EOF o -EPIPE.
+  // p sigue vivo: todavía tenemos nuestra referencia (refs).
   wake_up_all(&p->read_wq);
   wake_up_all(&p->write_wq);
 
-  if (free_pipe)
+  // Solo el último extremo en llegar aquí libera pipe_t. Se hace
+  // DESPUÉS de los wake_up, así nadie toca p tras el kfree.
+  if (__atomic_sub_fetch(&p->refs, 1, __ATOMIC_ACQ_REL) == 0)
     kfree(p);
   return 0;
 }
@@ -226,6 +236,7 @@ int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end) {
   spin_init(&p->lock);
   p->readers = 1;
   p->writers = 1;
+  p->refs = 2; // [FIX] un ref por extremo
 
   re->pipe = p;
   re->is_write = 0;

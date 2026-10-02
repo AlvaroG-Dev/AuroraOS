@@ -2,7 +2,7 @@
  * Automatically generated C config: don't edit
  * Busybox version: 1.36.1
  */
-#define AUTOCONF_TIMESTAMP "2026-09-29 20:06:19 CEST"
+#define AUTOCONF_TIMESTAMP "2026-10-01 18:21:54 CEST"
 
 #define CONFIG_HAVE_DOT_CONFIG 1
 #define ENABLE_HAVE_DOT_CONFIG 1
@@ -3468,14 +3468,22 @@
 #define ENABLE_CHRT 0
 #define IF_CHRT(...)
 #define IF_NOT_CHRT(...) __VA_ARGS__
-#undef CONFIG_DMESG
-#define ENABLE_DMESG 0
-#define IF_DMESG(...)
-#define IF_NOT_DMESG(...) __VA_ARGS__
-#undef CONFIG_FEATURE_DMESG_PRETTY
-#define ENABLE_FEATURE_DMESG_PRETTY 0
-#define IF_FEATURE_DMESG_PRETTY(...)
-#define IF_NOT_FEATURE_DMESG_PRETTY(...) __VA_ARGS__
+#define CONFIG_DMESG 1
+#define ENABLE_DMESG 1
+#ifdef MAKE_SUID
+# define IF_DMESG(...) __VA_ARGS__ "CONFIG_DMESG"
+#else
+# define IF_DMESG(...) __VA_ARGS__
+#endif
+#define IF_NOT_DMESG(...)
+#define CONFIG_FEATURE_DMESG_PRETTY 1
+#define ENABLE_FEATURE_DMESG_PRETTY 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_DMESG_PRETTY(...) __VA_ARGS__ "CONFIG_FEATURE_DMESG_PRETTY"
+#else
+# define IF_FEATURE_DMESG_PRETTY(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_DMESG_PRETTY(...)
 #undef CONFIG_EJECT
 #define ENABLE_EJECT 0
 #define IF_EJECT(...)
@@ -3548,10 +3556,14 @@
 #define ENABLE_FINDFS 0
 #define IF_FINDFS(...)
 #define IF_NOT_FINDFS(...) __VA_ARGS__
-#undef CONFIG_FLOCK
-#define ENABLE_FLOCK 0
-#define IF_FLOCK(...)
-#define IF_NOT_FLOCK(...) __VA_ARGS__
+#define CONFIG_FLOCK 1
+#define ENABLE_FLOCK 1
+#ifdef MAKE_SUID
+# define IF_FLOCK(...) __VA_ARGS__ "CONFIG_FLOCK"
+#else
+# define IF_FLOCK(...) __VA_ARGS__
+#endif
+#define IF_NOT_FLOCK(...)
 #undef CONFIG_FDFLUSH
 #define ENABLE_FDFLUSH 0
 #define IF_FDFLUSH(...)
@@ -3684,14 +3696,22 @@
 #define ENABLE_FEATURE_MDEV_DAEMON 0
 #define IF_FEATURE_MDEV_DAEMON(...)
 #define IF_NOT_FEATURE_MDEV_DAEMON(...) __VA_ARGS__
-#undef CONFIG_MESG
-#define ENABLE_MESG 0
-#define IF_MESG(...)
-#define IF_NOT_MESG(...) __VA_ARGS__
-#undef CONFIG_FEATURE_MESG_ENABLE_ONLY_GROUP
-#define ENABLE_FEATURE_MESG_ENABLE_ONLY_GROUP 0
-#define IF_FEATURE_MESG_ENABLE_ONLY_GROUP(...)
-#define IF_NOT_FEATURE_MESG_ENABLE_ONLY_GROUP(...) __VA_ARGS__
+#define CONFIG_MESG 1
+#define ENABLE_MESG 1
+#ifdef MAKE_SUID
+# define IF_MESG(...) __VA_ARGS__ "CONFIG_MESG"
+#else
+# define IF_MESG(...) __VA_ARGS__
+#endif
+#define IF_NOT_MESG(...)
+#define CONFIG_FEATURE_MESG_ENABLE_ONLY_GROUP 1
+#define ENABLE_FEATURE_MESG_ENABLE_ONLY_GROUP 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_MESG_ENABLE_ONLY_GROUP(...) __VA_ARGS__ "CONFIG_FEATURE_MESG_ENABLE_ONLY_GROUP"
+#else
+# define IF_FEATURE_MESG_ENABLE_ONLY_GROUP(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_MESG_ENABLE_ONLY_GROUP(...)
 #undef CONFIG_MKE2FS
 #define ENABLE_MKE2FS 0
 #define IF_MKE2FS(...)
@@ -5528,10 +5548,14 @@
 #define ENABLE_FEATURE_PS_ADDITIONAL_COLUMNS 0
 #define IF_FEATURE_PS_ADDITIONAL_COLUMNS(...)
 #define IF_NOT_FEATURE_PS_ADDITIONAL_COLUMNS(...) __VA_ARGS__
-#undef CONFIG_PSTREE
-#define ENABLE_PSTREE 0
-#define IF_PSTREE(...)
-#define IF_NOT_PSTREE(...) __VA_ARGS__
+#define CONFIG_PSTREE 1
+#define ENABLE_PSTREE 1
+#ifdef MAKE_SUID
+# define IF_PSTREE(...) __VA_ARGS__ "CONFIG_PSTREE"
+#else
+# define IF_PSTREE(...) __VA_ARGS__
+#endif
+#define IF_NOT_PSTREE(...)
 #undef CONFIG_PWDX
 #define ENABLE_PWDX 0
 #define IF_PWDX(...)

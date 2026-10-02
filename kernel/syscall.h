@@ -46,14 +46,31 @@
 #define SYS_NANOSLEEP 35
 #define SYS_GETPID 39
 #define SYS_SENDFILE 40
+#define SYS_SOCKET 41
+#define SYS_CONNECT 42
+#define SYS_ACCEPT 43
+#define SYS_SENDTO 44
+#define SYS_RECVFROM 45
+#define SYS_SENDMSG 46
+#define SYS_RECVMSG 47
+#define SYS_SHUTDOWN 48
+#define SYS_BIND 49
+#define SYS_LISTEN 50
+#define SYS_GETSOCKNAME 51
+#define SYS_GETPEERNAME 52
+#define SYS_SOCKETPAIR 53
+#define SYS_SETSOCKOPT 54
+#define SYS_GETSOCKOPT 55
 #define SYS_CLONE 56
 #define SYS_FORK 57
 #define SYS_VFORK 58
 #define SYS_EXECVE 59
+#define SYS_EXIT 60
 #define SYS_WAIT4 61
 #define SYS_KILL 62
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
+#define SYS_FLOCK 73
 #define SYS_FSYNC 74
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
@@ -74,6 +91,7 @@
 #define SYS_SYSINFO 99
 #define SYS_TIMES 100
 #define SYS_GETUID 102
+#define SYS_KLOGCTL 103
 #define SYS_GETGID 104
 #define SYS_SETUID 105
 #define SYS_SETGID 106
@@ -102,12 +120,15 @@
 #define SYS_ARCH_PRCTL 158
 #define SYS_SETRLIMIT 160
 #define SYS_SETHOSTNAME 170
+#define SYS_SETDOMAINNAME 171
 #define SYS_GETTID 186
 #define SYS_TKILL 200
+#define SYS_FUTEX 202
 #define SYS_GETDENTS64 217
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_CLOCK_GETTIME 228
 #define SYS_EXIT_GROUP 231
+#define SYS_WAITID 247
 #define SYS_OPENAT 257
 #define SYS_MKDIRAT 258
 #define SYS_FSTATAT 262
@@ -121,10 +142,19 @@
 #define SYS_PPOLL 271
 #define SYS_SET_ROBUST_LIST 273
 #define SYS_UTIMENSAT 280
+#define SYS_ACCEPT4 288
 #define SYS_PIPE2 293
 #define SYS_PRLIMIT64 302
 #define SYS_GETRANDOM 318
 #define SYS_RSEQ 334
+
+#define FD_CLOEXEC 1
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#define F_DUPFD_CLOEXEC 1030
 
 // ---- Aurora-only ----
 #define ASYS_BASE 0x1000

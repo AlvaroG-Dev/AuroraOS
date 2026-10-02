@@ -137,3 +137,5 @@ void ipi_tlb_shootdown(uint64_t addr) {
   tlb_addr = 0;
   __sync_lock_release(&tlb_shootdown_lock.locked);
 }
+
+void ipi_tlb_shootdown_all(void) { ipi_tlb_shootdown(0); }

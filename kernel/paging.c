@@ -25,6 +25,17 @@ static inline int paging_is_canonical(uint64_t virt) {
   return virt <= 0x00007FFFFFFFFFFFULL || virt >= 0xFFFF800000000000ULL;
 }
 
+void paging_invalidate_tlb_global(uint64_t virt) {
+  if (virt == 0) {
+    // Full flush: recargar CR3 en todos los CPUs. Es lo más simple
+    // que garantiza que ningún TLB tiene entradas colgando.
+    ipi_tlb_shootdown_all();
+  } else {
+    // Por página: usar el existente.
+    ipi_tlb_shootdown(virt);
+  }
+}
+
 void paging_test_set_alloc_fail_after(int successful_allocs) {
   paging_test_fail_alloc_after = successful_allocs;
 }
@@ -405,10 +416,6 @@ void paging_invalidate_tlb(uint64_t virt) {
   __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
 }
 
-// [H3] Versión cross-CPU. Wrapper sobre ipi_tlb_shootdown para que los
-// llamantes de paging no tengan que saber de IPIs.
-void paging_invalidate_tlb_global(uint64_t virt) { ipi_tlb_shootdown(virt); }
-
 int vmm_alloc_pages(uint64_t vaddr, uint64_t num_pages, uint64_t flags) {
   if (num_pages == 0)
     return -1;
@@ -649,9 +656,35 @@ uint64_t paging_get_phys_in(uint64_t *pml4, uint64_t virt) {
   return (pt[pt_idx] & PTE_FRAME) | (virt & 0xFFF);
 }
 
+// ---------------------------------------------------------------------------
+// paging_free_user_space: libera todas las páginas de usuario y las
+// tablas intermedias del PML4 dado, y el propio PML4.
+//
+// [SMP-FIX] Antes se ejecutaba SIN paging_lock. Con dos execve
+// concurrentes en CPUs distintas (uno por cada hijo del pipe), las
+// siguientes operaciones se entrelazaban:
+//
+//   CPU A: pmm_free_page(P)   ← P va al free-list
+//   CPU B: pmm_alloc_page()   ← devuelve P
+//   CPU B: paging_map_page_in(...)  ← escribe PTE en su PML4
+//   CPU A: pmm_free_page(Q)   ← pero Q apunta a datos que B ya tocó
+//
+// El sintoma: ambos procesos terminan execve (rc=0) pero nunca
+// ejecutan una instrucción en userland. El iretq aterriza bien pero
+// el código mapeado ya no es el esperado. Con -smp 1 desaparece.
+//
+// El lock serializa el free con cualquier paging_map_page_in
+// concurrente. NO hace falta TLB shootdown: write_cr3() ya invalidó
+// las entradas no-globales del TLB de la CPU que hizo el execve, y
+// las globales (kernel) son compartidas y no se liberan aquí.
+// ---------------------------------------------------------------------------
 void paging_free_user_space(uint64_t pml4_phys) {
   if (!pml4_phys)
     return;
+
+  // [SMP-FIX] Tomar el lock ANTES del walk. Orden de locks:
+  // paging_lock -> pmm_lock (consistente con paging_map_page_in).
+  unsigned long lock_flags = spin_lock_irqsave(&paging_lock);
 
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
@@ -691,6 +724,8 @@ void paging_free_user_space(uint64_t pml4_phys) {
     pml4[i] = 0;
   }
   pmm_free_page(pml4_phys);
+
+  spin_unlock_irqrestore(&paging_lock, lock_flags);
 }
 
 void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {

@@ -5,7 +5,7 @@
 %define TASK_OFF_FPU_STATE  0x18
 %define TASK_OFF_CR3        0x20
 %define TASK_OFF_ON_CPU     0x78C
-%define TASK_OFF_FS_BASE    0x7B8   ; <-- DEBE COINCIDIR con offsetof(task_t, fs_base)
+%define TASK_OFF_FS_BASE    0x7B8
 
 %define MSR_FS_BASE 0xC0000100
 
@@ -58,18 +58,31 @@ task_switch:
     mov cr3, rax
 .skip_cr3:
 
-    ; [musl] Restaurar FS_BASE de la tarea nueva.
-    ; Solo escribimos el MSR si el valor no es 0 (procesos kernel lo dejan
-    ; a 0 y no queremos pisar el %fs del kernel sin motivo).
-    mov rdi, [rsi + TASK_OFF_FS_BASE]
-    test rdi, rdi
-    jz .skip_fs
-    mov rax, rdi
-    shr rdi, 32
-    mov rdx, rdi
+    ; [fs_base] Escribir SIEMPRE, aunque el valor sea 0.
+    ; Si no lo hacemos, un kernel thread con fs_base=0 hereda el MSR
+    ; del thread anterior (TLS de usuario), lo que corrompe %fs en
+    ; tareas sin TLS. En SMP esto contamina CPUs.
+    mov rdx, [rsi + TASK_OFF_FS_BASE]
+    mov rax, rdx
+    shr rdx, 32
     mov ecx, MSR_FS_BASE
     wrmsr
-.skip_fs:
+
+    ; Verificación: leer el MSR de vuelta y comparar.
+    push rdx
+    mov ecx, MSR_FS_BASE
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    pop rdx
+    cmp rax, [rsi + TASK_OFF_FS_BASE]
+    je .fs_ok
+    ; mismatch: log por serial
+    push rax
+    mov al, '!'
+    out 0x3F8, al
+    pop rax
+.fs_ok:
 
     pop r15
     pop r14
@@ -99,16 +112,12 @@ task_jump_to:
     mov cr3, rax
 .skip_cr3_jump:
 
-    ; [musl] FS_BASE también al saltar por primera vez a la tarea.
-    mov rdi, [rdi + TASK_OFF_FS_BASE]
-    test rdi, rdi
-    jz .skip_fs_jump
-    mov rax, rdi
-    shr rdi, 32
-    mov rdx, rdi
+    ; [fs_base] Idem: escribir siempre.
+    mov rdx, [rdi + TASK_OFF_FS_BASE]
+    mov rax, rdx
+    shr rdx, 32
     mov ecx, MSR_FS_BASE
     wrmsr
-.skip_fs_jump:
 
     pop r15
     pop r14
@@ -133,8 +142,7 @@ task_trampoline:
 global user_fork_return
 
 ; Continúa la ejecución en userland a partir del frame construido por
-; sched_create_forked_user_task(). rsp apunta a r11 (task_jump_to ya
-; restauró r15..rbx y saltó aquí con ret).
+; sched_create_forked_user_task().
 user_fork_return:
     mov ax, 0x23
     mov ds, ax
@@ -151,7 +159,7 @@ user_fork_return:
     pop rdi
 
     iretq
-    
+
 global user_trampoline
 
 user_trampoline:

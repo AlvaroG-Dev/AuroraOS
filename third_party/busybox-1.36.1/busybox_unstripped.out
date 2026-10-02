@@ -347,6 +347,7 @@ procps/lib.a
 (procps/lib.a)pgrep.o
 (procps/lib.a)pidof.o
 (procps/lib.a)ps.o
+(procps/lib.a)pstree.o
 (procps/lib.a)top.o
 (procps/lib.a)uptime.o
 (procps/lib.a)watch.o
@@ -369,10 +370,13 @@ sysklogd/lib.a
 attempt to open util-linux/lib.a succeeded
 util-linux/lib.a
 (util-linux/lib.a)cal.o
+(util-linux/lib.a)dmesg.o
+(util-linux/lib.a)flock.o
 (util-linux/lib.a)getopt.o
 (util-linux/lib.a)hexdump.o
 (util-linux/lib.a)hexdump_xxd.o
 (util-linux/lib.a)mdev.o
+(util-linux/lib.a)mesg.o
 (util-linux/lib.a)more.o
 (util-linux/lib.a)mount.o
 (util-linux/lib.a)mountpoint.o

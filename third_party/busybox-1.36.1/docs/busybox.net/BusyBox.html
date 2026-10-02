@@ -63,22 +63,22 @@
 <pre><code>[, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
 busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
 clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
-diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg-deb, du, echo,
-ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
-free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
-hexdump, hexedit, hostid, hostname, hush, id, install, kill,
-killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
-md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
-mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
-pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
-readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
-run-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
-sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
-start-stop-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
-tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
-tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
-uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
-xargs, xxd, xz, xzcat, yes, zcat</code></pre>
+diff, dirname, dmesg, dnsdomainname, dos2unix, dpkg, dpkg-deb, du,
+echo, ed, egrep, env, expand, expr, factor, false, fgrep, find,
+flock, fold, free, fsync, fuser, getopt, grep, groups, gunzip, gzip,
+hd, head, hexdump, hexedit, hostid, hostname, hush, id, install,
+kill, killall, killall5, less, link, ln, logname, ls, lzcat, lzma,
+lzop, md5sum, mdev, mesg, mkdir, mkfifo, mknod, mktemp, more, mount,
+mountpoint, mv, nice, nl, nohup, nproc, od, paste, patch, pgrep,
+pidof, pipe_progress, pivot_root, pkill, printenv, printf, ps,
+pstree, pwd, readlink, realpath, reset, resize, rev, rm, rmdir, rpm,
+rpm2cpio, run-parts, script, scriptreplay, sed, seq, setsid, sh,
+sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort,
+split, start-stop-daemon, stat, strings, stty, sum, sync, tac, tail,
+tar, tee, test, time, timeout, top, touch, tr, tree, true, truncate,
+ts, tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz,
+unzip, uptime, usleep, uudecode, uuencode, vi, watch, wc, which,
+whoami, xargs, xxd, xz, xzcat, yes, zcat</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
@@ -506,6 +506,19 @@ status=none     Suppress all output</code></pre>
 <p>Strip non-directory suffix from FILENAME</p>
 
 </dd>
+<dt id="dmesg"><b>dmesg</b></dt>
+<dd>
+
+<p>dmesg [-cr] [-n LEVEL] [-s SIZE]</p>
+
+<p>Print or control the kernel ring buffer</p>
+
+<pre><code>-c              Clear ring buffer after printing
+-n LEVEL        Set console logging level
+-s SIZE         Buffer size
+-r              Print raw message buffer</code></pre>
+
+</dd>
 <dt id="dos2unix"><b>dos2unix</b></dt>
 <dd>
 
@@ -712,6 +725,19 @@ If none of the following actions is specified, -print is assumed
         -exec CMD ARG + Run CMD with {} replaced by list of file names
         -delete         Delete current file/directory. Turns on -depth option
         -quit           Exit</code></pre>
+
+</dd>
+<dt id="flock"><b>flock</b></dt>
+<dd>
+
+<p>flock [-sxun] FD | { FILE [-c] PROG ARGS }</p>
+
+<p>[Un]lock file descriptor, or lock FILE, run PROG</p>
+
+<pre><code>-s      Shared lock
+-x      Exclusive lock (default)
+-u      Unlock FD
+-n      Fail rather than wait</code></pre>
 
 </dd>
 <dt id="fold"><b>fold</b></dt>
@@ -1142,6 +1168,14 @@ If none of the following actions is specified, -print is assumed
 <p>If /dev/mdev.log file exists, debug log will be appended to it.</p>
 
 </dd>
+<dt id="mesg"><b>mesg</b></dt>
+<dd>
+
+<p>mesg [y|n]</p>
+
+<p>Control write access to your terminal y Allow write access to your terminal n Disallow write access to your terminal</p>
+
+</dd>
 <dt id="mkdir"><b>mkdir</b></dt>
 <dd>
 
@@ -1415,6 +1449,16 @@ TYPE:
 
 <pre><code>w       Wide output
 l       Long output</code></pre>
+
+</dd>
+<dt id="pstree"><b>pstree</b></dt>
+<dd>
+
+<p>pstree [-p] [PID|USER]</p>
+
+<p>Display process tree, optionally start from USER or PID</p>
+
+<pre><code>-p      Show pids</code></pre>
 
 </dd>
 <dt id="pwd"><b>pwd</b></dt>

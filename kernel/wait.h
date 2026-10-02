@@ -46,9 +46,17 @@ void wake_up_interruptible_all(wait_queue_t *wq);
 // [NUEVO] Versión de wake_up_one que asume wq->lock ya cogido.
 void wake_up_one_locked(wait_queue_t *wq);
 
-
 void wait_queue_wake_timeout_task(wait_queue_t *wq, struct task *task,
                                   uint64_t wait_seq);
 void wait_queue_interrupt_task(struct task *task);
 void wait_queue_wake_task(struct task *task);
+
+// [futex] Añade t a wq y toma una referencia. wq->lock debe estar cogido.
+// El llamante debe llamar a sched_set_blocked_deadline() antes de soltar
+// el lock, para que la transición a BLOCKED sea atómica con la inserción.
+void wait_queue_add_locked(wait_queue_t *wq, struct task *t);
+
+// [futex] Quita t de wq. wq->lock debe estar cogido.
+void wait_queue_remove_locked(wait_queue_t *wq, struct task *t);
+
 #endif

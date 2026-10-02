@@ -71,6 +71,12 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length);
 int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
                      uint64_t prot);
 
+// [B] mremap. Crece/encoge/realoca un rango mmap'd existente.
+// Soporta crecimiento in-place si hay hueco contiguo, o move+copy si
+// MREMAP_MAYMOVE. No soporta MREMAP_FIXED.
+int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
+                   uint64_t new_size, uint64_t flags, uint64_t new_addr);
+
 // Estadísticas
 uint64_t pf_stats_resolved(void);
 uint64_t pf_stats_killed(void);

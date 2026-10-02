@@ -90,6 +90,12 @@ typedef struct process {
   int exit_code;
   int is_zombie;
 
+  // [clone] Número de tareas vivas en este team (hilos). 1 para
+  // procesos sin hilos. Cuando llega a 0, el proceso se marca zombie
+  // y se envía SIGCHLD al padre. Mientras sea > 1, la muerte de una
+  // tarea solo la marca DEAD.
+  int team_size;
+
   // [JOB CONTROL] Estado de parada por SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU.
   //   stopped            1 si el proceso está parado ahora mismo.
   //   stop_signal        señal que lo paró (para WIFSTOPPED).
@@ -181,6 +187,14 @@ typedef struct process {
   char *argv[PROCESS_ARGV_MAX];
   int argc;
 
+  // [FD_CLOEXEC] Bitmap (un bit por fd) de fds marcados close-on-exec.
+  // execve() cerrará los fds cuyo bit esté a 1.
+  //
+  // POSIX: el flag es POR FD, no por file_descriptor_t compartido.
+  // Dos procesos que comparten el mismo file_descriptor_t (vía fork)
+  // tienen bitmaps independientes. Por eso vive en process_t, no en fd.
+  uint32_t fd_cloexec_mask;
+
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,
@@ -237,6 +251,16 @@ process_t *process_spawn_child_args_fds(process_t *parent, const char *path,
 // 0 al hijo (vía frame de iretq), o negativo en error.
 int64_t sys_fork(void);
 
+// [clone] Crea un thread del proceso actual. Comparte process_t,
+// mm, fds, cwd, signal actions y credenciales con el padre.
+//
+// ptid_out       → CLONE_PARENT_SETTID: se escribe el tid aquí
+// ctid_set_out   → CLONE_CHILD_SETTID:  se escribe el tid aquí
+// ctid_clear_out → CLONE_CHILD_CLEARTID: se limpia a 0 al morir el hijo
+//                  (+ futex wake)
+task_t *process_clone_thread(process_t *parent, registers_t *regs,
+                             uint64_t stack, uint64_t tls, uint64_t *ptid_out,
+                             uint64_t *ctid_set_out, uint64_t *ctid_clear_out);
 // [execve] Reemplaza el espacio de usuario del proceso actual con el
 // binario `path`. En éxito devuelve 0 y rellena *new_entry / *new_rsp
 // con el punto de entrada del nuevo ELF y el RSP inicial con argv

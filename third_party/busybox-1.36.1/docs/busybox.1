@@ -55,7 +55,7 @@
 .\" ========================================================================
 .\"
 .IX Title "BUSYBOX 1"
-.TH BUSYBOX 1 2026-09-29 "version 1.36.1" busybox
+.TH BUSYBOX 1 2026-10-01 "version 1.36.1" busybox
 .\" For nroff, turn off justification.  Always turn off hyphenation; it makes
 .\" way too many mistakes in technical documents.
 .if n .ad l
@@ -145,22 +145,22 @@ Currently available applets include:
 \&        [, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
 \&        busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
 \&        clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
-\&        diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg\-deb, du, echo,
-\&        ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
-\&        free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
-\&        hexdump, hexedit, hostid, hostname, hush, id, install, kill,
-\&        killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
-\&        md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
-\&        mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
-\&        pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
-\&        readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
-\&        run\-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
-\&        sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
-\&        start\-stop\-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
-\&        tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
-\&        tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
-\&        uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
-\&        xargs, xxd, xz, xzcat, yes, zcat
+\&        diff, dirname, dmesg, dnsdomainname, dos2unix, dpkg, dpkg\-deb, du,
+\&        echo, ed, egrep, env, expand, expr, factor, false, fgrep, find,
+\&        flock, fold, free, fsync, fuser, getopt, grep, groups, gunzip, gzip,
+\&        hd, head, hexdump, hexedit, hostid, hostname, hush, id, install,
+\&        kill, killall, killall5, less, link, ln, logname, ls, lzcat, lzma,
+\&        lzop, md5sum, mdev, mesg, mkdir, mkfifo, mknod, mktemp, more, mount,
+\&        mountpoint, mv, nice, nl, nohup, nproc, od, paste, patch, pgrep,
+\&        pidof, pipe_progress, pivot_root, pkill, printenv, printf, ps,
+\&        pstree, pwd, readlink, realpath, reset, resize, rev, rm, rmdir, rpm,
+\&        rpm2cpio, run\-parts, script, scriptreplay, sed, seq, setsid, sh,
+\&        sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort,
+\&        split, start\-stop\-daemon, stat, strings, stty, sum, sync, tac, tail,
+\&        tar, tee, test, time, timeout, top, touch, tr, tree, true, truncate,
+\&        ts, tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz,
+\&        unzip, uptime, usleep, uudecode, uuencode, vi, watch, wc, which,
+\&        whoami, xargs, xxd, xz, xzcat, yes, zcat
 .Ve
 .SH "COMMAND DESCRIPTIONS"
 .IX Header "COMMAND DESCRIPTIONS"
@@ -559,6 +559,18 @@ This implementation supports unified diffs only.
 dirname FILENAME
 .Sp
 Strip non-directory suffix from FILENAME
+.IP \fBdmesg\fR 4
+.IX Item "dmesg"
+dmesg [\-cr] [\-n LEVEL] [\-s SIZE]
+.Sp
+Print or control the kernel ring buffer
+.Sp
+.Vb 4
+\&        \-c              Clear ring buffer after printing
+\&        \-n LEVEL        Set console logging level
+\&        \-s SIZE         Buffer size
+\&        \-r              Print raw message buffer
+.Ve
 .IP \fBdos2unix\fR 4
 .IX Item "dos2unix"
 dos2unix [\-ud] [FILE]
@@ -760,6 +772,18 @@ Actions:
 \&        \-exec CMD ARG + Run CMD with {} replaced by list of file names
 \&        \-delete         Delete current file/directory. Turns on \-depth option
 \&        \-quit           Exit
+.Ve
+.IP \fBflock\fR 4
+.IX Item "flock"
+flock [\-sxun] FD | { FILE [\-c] PROG ARGS }
+.Sp
+[Un]lock file descriptor, or lock FILE, run PROG
+.Sp
+.Vb 4
+\&        \-s      Shared lock
+\&        \-x      Exclusive lock (default)
+\&        \-u      Unlock FD
+\&        \-n      Fail rather than wait
 .Ve
 .IP \fBfold\fR 4
 .IX Item "fold"
@@ -1157,6 +1181,13 @@ to match \f(CW$SEQNUM\fR variable. This prevents plug/unplug races.
 To activate this feature, create empty /dev/mdev.seq at boot.
 .Sp
 If /dev/mdev.log file exists, debug log will be appended to it.
+.IP \fBmesg\fR 4
+.IX Item "mesg"
+mesg [y|n]
+.Sp
+Control write access to your terminal
+	y	Allow write access to your terminal
+	n	Disallow write access to your terminal
 .IP \fBmkdir\fR 4
 .IX Item "mkdir"
 mkdir [\-m MODE] [\-p] DIRECTORY...
@@ -1402,6 +1433,15 @@ Show list of processes
 .Vb 2
 \&        w       Wide output
 \&        l       Long output
+.Ve
+.IP \fBpstree\fR 4
+.IX Item "pstree"
+pstree [\-p] [PID|USER]
+.Sp
+Display process tree, optionally start from USER or PID
+.Sp
+.Vb 1
+\&        \-p      Show pids
 .Ve
 .IP \fBpwd\fR 4
 .IX Item "pwd"

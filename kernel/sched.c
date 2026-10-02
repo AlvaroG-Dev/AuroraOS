@@ -168,6 +168,7 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   // explícitamente, tomamos el valor que dejara el SLAB, y switch.asm
   // lo escribirá en el MSR → #GP si es no canónico.
   task->fs_base = 0;
+  task->clear_child_tid = NULL;
 
   // [FIX timeout] Sin timeout por defecto.
   task->wake_deadline = 0;
@@ -797,7 +798,8 @@ task_t *sched_create_user_task_stopped(void (*fn)(void),
 // ---------------------------------------------------------------------------
 extern void user_fork_return(void);
 
-task_t *sched_create_forked_user_task(registers_t *regs, uint64_t cr3) {
+task_t *sched_create_forked_user_task_ex(registers_t *regs, uint64_t cr3,
+                                         uint64_t rsp_override) {
   if (!regs)
     return NULL;
 
@@ -814,11 +816,11 @@ task_t *sched_create_forked_user_task(registers_t *regs, uint64_t cr3) {
   uint64_t *sp = (uint64_t *)(((uint64_t)(kstack + TASK_STACK_SIZE)) & ~0xFULL);
 
   // iretq frame (lo consume iretq al final de user_fork_return).
-  *(--sp) = USER_DS_RING3; // SS
-  *(--sp) = regs->rsp;     // RSP
-  *(--sp) = regs->rflags;  // RFLAGS
-  *(--sp) = USER_CS_RING3; // CS
-  *(--sp) = regs->rip;     // RIP
+  *(--sp) = USER_DS_RING3;                           // SS
+  *(--sp) = rsp_override ? rsp_override : regs->rsp; // ← cambio     // RSP
+  *(--sp) = regs->rflags;                            // RFLAGS
+  *(--sp) = USER_CS_RING3;                           // CS
+  *(--sp) = regs->rip;                               // RIP
 
   // Registros consumidos por user_fork_return.
   *(--sp) = regs->rdi;
@@ -845,6 +847,10 @@ task_t *sched_create_forked_user_task(registers_t *regs, uint64_t cr3) {
   task_init_common(task, sp, cr3);
   task->stack = (uint64_t *)kstack;
   return task;
+}
+
+task_t *sched_create_forked_user_task(registers_t *regs, uint64_t cr3) {
+  return sched_create_forked_user_task_ex(regs, cr3, 0);
 }
 
 // ---------------------------------------------------------------------------

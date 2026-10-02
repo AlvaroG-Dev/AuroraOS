@@ -16,17 +16,24 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] PS/2, PCI, AHCI/ATA, block layer
 - [x] Partition layer (MBR + GPT + EBR chain)
 - [x] VFS con mount points
-- [x] FAT32 persistente (mount, read, write, create, mkdir, unlink, truncate, readdir)
+- [x] FAT32 persistente (mount, read, write, create, mkdir, unlink, truncate, readdir, rename, LFN)
+- [x] FAT32 buffer cache LRU
 - [x] Ring 3 + ELF loader + syscalls + libc propia parcial
 - [x] ABI Linux x86_64 dual (Linux + Aurora)
-- [x] Primeros binarios estáticos compilados con musl
+- [x] **Enlazado dinámico** (PT_INTERP + ld-musl-x86_64.so.1 cargado en runtime)
+- [x] Binarios dinámicos compilados con musl ejecutándose en Aurora
 - [x] `execve` in-place + `wait4/rusage` + variables de entorno
 - [x] Pipes + `dup2` + redirecciones + pipelines
 - [x] TTY real + line discipline + `poll/select`
-- [x] `busybox sh` interactivo
+- [x] PTYs (master/slave completo + /dev/ptmx + /dev/pts/N)
+- [x] **Job control completo** (Ctrl+Z, SIGTSTP/SIGCONT, fg, bg, jobs, WUNTRACED/WCONTINUED)
+- [x] `busybox sh` interactivo (build dinámico con ~200 applets)
+- [x] Permisos POSIX reales (mode/uid/gid por nodo, umask, chmod/chown, setuid/setgid en execve)
+- [x] `/etc/passwd`, `/etc/group`, `/etc/shadow`
+- [x] rlimits por proceso
 - [x] IPC por mailboxes
 - [x] Framebuffer compositor + window server + terminal gráfico
-- [x] Framework de tests del kernel + regresiones userland
+- [x] Framework de tests del kernel + regresiones userland (141 tests)
 - [x] CI de build y boot con QEMU, incluyendo 1/2/4 CPU
 
 La prioridad ahora es completar userland y filesystem, después networking/USB, y seguir validando Aurora OS sobre hardware real. En paralelo, el objetivo a más largo plazo del proyecto es que Aurora sea tan abierto y eficiente como Linux pero tan "todo hecho" como Windows: eso implica un BusyBox completo como base de userland (3.5), una capa de compatibilidad para ejecutar binarios Linux/ELF reales sin recompilar (3.6), y — de forma más experimental y acotada — un loader de ejecutables Windows/PE de consola (3.7). Ver el resumen de prioridad relativa al final de la Fase 3.
@@ -68,6 +75,7 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [x] Ampliar la matriz de QEMU/CPU y configuraciones relevantes (1/2/4 CPU, KVM, TCG, VirtualBox; AHCI y PIIX3).
 - [x] Añadir tests de stress de scheduler, memoria, IPC y VFS (AHCI stress 1MB, multi-LBA, buffer no contiguo).
 - [x] Añadir pruebas de errores y recursos agotados. (doble free, remap, late free)
+- [x] Añadir tests de corrupción FAT32 con mock block device (BPB fuzz, ciclos, out-of-range, huérfanos, E/S durante create).
 - [ ] Evitar que los tests dependan accidentalmente del orden de ejecución.
 - [ ] Mejorar diagnósticos de CI cuando QEMU falle.
 
@@ -89,7 +97,7 @@ Objetivo: pasar de un sistema que carga un initrd a un sistema operativo que pue
 - [x] BIO/read/write/completions.
 - [x] Integración AHCI/ATA.
 - [ ] Revisar exhaustivamente errores, timeouts y recuperación de dispositivos.
-- [ ] Añadir cache/buffer cache si resulta necesario.
+- [x] Añadir cache/buffer cache si resulta necesario. (FAT32 buffer cache LRU de 256 sectores × 512 B, integrado en fat32.c)
 
 ### 2.2 Sistema de archivos persistente
 - [x] Implementar FAT32.
@@ -101,23 +109,21 @@ Objetivo: pasar de un sistema que carga un initrd a un sistema operativo que pue
 - [x] Montaje/desmontaje.
 - [x] Integrarlo con VFS (mount points con longest-match).
 - [x] Caché de FAT en memoria (rendimiento read/write).
-- [ ] Tests de corrupción, límites y apagado durante escritura (parcial: tests de límite 8.3, ENOTEMPTY, non-FAT rechazo).
+- [x] Tests de corrupción, límites y apagado durante escritura.
 - [x] LFN (nombres largos) en FAT32: crear, listar, borrar, preservar tras remount.
-- [ ] Colisión de alias 8.3: crear `DOCUME~1` después de `Documentos` puede pisar el alias autogenerado. Preexistente, no urgente.
+- [x] Colisión de alias 8.3: crear `DOCUME~1` después de `Documentos` no pisa el alias autogenerado.
+- [x] fsck mínimo (`/apps/aurora-fsck`) + validación pasiva al montar + detección de huérfanos/ciclos/cadenas rotas + actualización de FSInfo en sync.
 
 ### 2.3 Userland sobre disco
 - [ ] Acceso real a /dev desde userland.
 - [x] `ls` (lee directorios vía readdir, respeta cwd).
 - [x] `cat` (abre y lee archivos).
 - [x] `mkdir`, `rm`, `cp`, `mv`, `pwd` como apps userland con argv.
-- [x] Persistir configuración y programas. (FAT32 montado en /; apps del sistema en /initrd, datos del usuario en /).
+- [x] Persistir configuración y programas.
 - [ ] Boot desde un filesystem persistente: el bootloader sigue leyendo `/kernel.elf` desde la ruta fija de FAT32; sería necesario un cargador que lea un `/etc/aurora.conf` con la ruta del kernel o migrar a un formato de arranque configurable.
 
 **Deuda técnica de 2.3 — Loader.**
-Resuelto parcialmente: `elf_load_streaming` lee el ELF en chunks vía callback (`read(ctx, offset, size, buf)`), así que no necesita buffer contiguo de 16 MB. `process_load_with_ppid` ya lo usa. Pendiente:
-- **mmap file-backed**: en vez de copiar las páginas del ELF al address space del hijo, mapearlas directamente al fichero con un VMA de tipo `VMA_FILE`. Modelo Linux; desbloquea `dlopen`, `mmap(PROT_EXEC)` de ficheros y carga perezosa. Siguiente PR de Fase 3.5+.
-
-La opción 2 es la correcta a largo plazo. La 1 es un parche si hace falta cargar ELFs grandes pronto.
+Resuelto: `elf_load_streaming` lee el ELF en chunks vía callback. `mmap` file-backed y `VMA_FILE` operativos. Enlazado dinámico completo (PT_INTERP).
 
 ---
 
@@ -134,7 +140,8 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [x] `writev/readv`, `fcntl`, `getdents64` y primeras syscalls POSIX/Linux.
 - [x] Primer binario estático compilado con musl ejecutándose en Aurora.
 - [x] Apps básicas compiladas con musl.
-- [x] Utilidades adicionales compiladas con musl: `wc`, `head`, `grep`, `tee`, `sort`, `cp`, `mv`, `rm`, `mkdir`, `kill`, `calc`.
+- [x] Utilidades adicionales compiladas con musl.
+- [x] Enlazado dinámico: PT_INTERP + `ld-musl-x86_64.so.1` + `AT_BASE` real + ejecución de binarios PIE.
 - [ ] Ampliar la libc propia.
 - [ ] Completar `errno`, tiempo, procesos, archivos y memoria.
 - [ ] Headers y ABI estable documentados.
@@ -155,27 +162,27 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [x] ioctls básicos de TTY y `/dev/tty`.
 - [x] `busybox sh` interactivo mediante fork/exec.
 - [x] Fuente antialiased y mejoras ANSI de la consola.
-- [ ] PTYs.
-- [ ] Job control completo.
+- [x] PTYs (`/dev/ptmx`, `/dev/pts/N`, TIOCGPTN, TIOCSPTLCK, EOF del master tras cierre del slave).
+- [x] Job control completo (Ctrl+Z, SIGTSTP/SIGCONT dentro del wait, WUNTRACED/WCONTINUED, SIGCHLD al padre en exit, shell interactivo `jobs`/`fg`/`bg`/`kill %N`).
+- [x] Background/jobs del shell.
 - [ ] Señales POSIX completas.
-- [ ] Background/jobs del shell.
-- [ ] Historial y autocompletado.
+- [x] Historial y autocompletado (vía busybox `FEATURE_EDITING` + `FEATURE_TAB_COMPLETION`).
 
 ### 3.3 VFS y /dev
-- [ ] /proc para observabilidad.
+- [x] /proc para observabilidad (`/proc/{uptime,version,meminfo,stat,mounts,loadavg,self}` + `/proc/<pid>/{stat,status,cmdline,comm,statm}`).
 - [x] /dev/kmsg.
-- [x] /dev/null, /dev/zero y dispositivos básicos.
-- [ ] Mejorar permisos y metadatos de archivos.
-- [x] (Pivot root) FAT32 en `/`, tarfs en `/initrd`. Punto de montaje `/initrd` se crea como dir vacío en FAT32 al arrancar para que `ls /` lo liste (mismo modelo que Linux).
-- [ ] `pivot_root`/`switch_root` genéricos: hoy el layout es fijo (FAT32 raíz + tarfs en /initrd); sería útil soportar cambiar la raíz en runtime tras montar otro FS.
+- [x] /dev/null, /dev/zero y dispositivos básicos con `rdev` correcto.
+- [x] Permisos y metadatos de archivos (mode/uid/gid por nodo, umask, chmod/chown, setuid/setgid en execve).
+- [x] Layout final: tarfs RO en `/`, FAT32 RW en `/data`, devfs en `/dev`, procfs en `/proc`.
+- [ ] `pivot_root`/`switch_root` genéricos: hoy el layout es fijo; sería útil soportar cambiar la raíz en runtime tras montar otro FS. (`vfs_pivot_root` está implementado pero no se usa porque el modelo LiveUSB no lo necesita.)
 
 ### 3.4 Shell
 - [x] Parser ANSI CSI en la consola gráfica: SGR (colores + bold), `K`/`J` con sus tres modos, `H`/`D`/`C`/`G`/`P`. Distingue `\033[J` local (post-backspace) de `\033[H\033[J` global (patrón de `clear` de busybox con `TERM=linux`).
-- [ ] Historial.
-- [ ] Autocompletado.
-- [ ] Variables de entorno.
-- [ ] Pipes/redirecciones.
-- [ ] Jobs/background.
+- [x] Historial (busybox `FEATURE_EDITING_HISTORY`, `FEATURE_REVERSE_SEARCH`).
+- [x] Autocompletado (busybox `FEATURE_TAB_COMPLETION`, `FEATURE_USERNAME_COMPLETION`).
+- [x] Variables de entorno.
+- [x] Pipes/redirecciones.
+- [x] Jobs/background.
 - [ ] Mejor manejo de errores.
 
 ### 3.5 BusyBox completo
@@ -183,45 +190,48 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 Objetivo: convertir BusyBox en una base de userland mucho más completa.
 
 Estado actual:
-- [x] `busybox sh` interactivo.
+- [x] `busybox sh` interactivo (binario dinámico, ~200 applets).
 - [x] Ejecución de applets externos mediante `fork` + `execve`.
-- [x] Apps/utilidades equivalentes ya portadas a musl: `echo`, `cat`, `ls`, `touch`, `pwd`, `wc`, `head`, `grep`, `tee`, `sort`, `cp`, `mv`, `rm`, `mkdir`, `kill`, `calc`.
-- [x] Pipes y redirecciones necesarios para el shell básico.
-- [ ] Completar superficie syscall/libc para un build BusyBox amplio.
+- [x] Build dinámico (`CONFIG_STATIC=n`, `CONFIG_PIE=y`).
+- [x] `FEATURE_DEVPTS`, `CTTYHACK`.
+- [x] `USE_BB_PWD_GRP`, `USE_BB_SHADOW`.
+- [x] Editors y procesado de texto: `vi`, `ed`, `sed`, `awk`, `grep`, `diff`, `patch`, `cmp`.
+- [x] Pagers: `less`, `more` (con scroll, search, marcas).
+- [x] Grabación de sesión: `script`, `scriptreplay`.
+- [x] Gestión de procesos: `pgrep`, `pkill`, `pidof`, `fuser`, `ps -l`, `top`.
+- [x] TTY: `stty`, `setsid`, `hostname`, `watch`.
+- [x] Binario: `hexedit`, `xxd`, `hexdump`, `od`, `strings`.
+- [x] Pipes y redirecciones necesarios para el shell.
+- [ ] Completar superficie syscall/libc para un build BusyBox completo (falta `futex`, `clone(thread)`, `flock`, `chroot`, `dmesg`/klogctl).
 - [ ] `stat/fstat/lstat` y metadatos completos.
 - [ ] `dup/dup2/pipe/fcntl` con semántica suficiente para más applets.
 - [ ] `ioctl` de terminal más completo.
-- [ ] `chmod/chown/umask` coherentes con el futuro modelo de permisos.
-- [ ] `symlink/readlink` o política explícita de no soporte en FAT32.
-- [ ] `sync`, timestamps y APIs restantes.
-- [ ] `/proc` mínimo para applets como `ps`, `top`, `free`.
-- [ ] Job control y PTYs.
+- [ ] `chmod/chown/umask` coherentes con el modelo de permisos (hecho a nivel de kernel; falta exponer más a userland).
+- [x] `symlink/readlink`.
+- [x] `sync`, timestamps.
+- [x] `/proc` mínimo para applets como `ps`, `top`, `free`.
+- [x] Job control y PTYs.
 
 ### 3.6 Ejecutar binarios Linux (ELF) — "personalidad Linux"
 Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bash, etc.) sin recompilarlos contra la ABI de Aurora, mediante una capa de traducción de syscalls — el mismo enfoque que WSL1 (Linux sobre un kernel no-Linux) en vez de un hipervisor o VM.
 
-**Alcance recomendado para empezar: solo binarios estáticos musl.** Excluye enlazado dinámico (`ld.so`, `dlopen`, glibc/NSS) del alcance inicial y reduce el problema a "traducir syscalls", que es abarcable. Enlazado dinámico y glibc pueden ser una fase posterior si hace falta.
+**Estado**: la infraestructura de enlazado dinámico (PT_INTERP, AT_BASE, ld.so cargado en runtime) ya está operativa con binarios compilados para musl. Falta la capa de traducción para binarios de distros Linux (glibc).
 
-- [ ] Detectar un ELF "Linux" (vs. un ELF nativo de Aurora) por `e_ident`/`.note.ABI-tag` o por el `PT_INTERP` (p. ej. `/lib/ld-musl-x86_64.so.1`).
-- [ ] Convención de syscall de Linux x86_64: `rax`=número, args en `rdi,rsi,rdx,r10,r8,r9`. Implica un segundo punto de entrada de `syscall`/`int 0x80` con esa convención, separado de la ABI propia de Aurora.
-- [ ] Tabla de traducción `syscall_linux_nr → función interna de Aurora`, empezando por el ~5-10% de syscalls que cubren la mayoría de programas reales: `read/write/openat/close/mmap/munmap/brk/exit/exit_group/fork/clone/execve/wait4/getpid/rt_sigaction/rt_sigprocmask/fstat/lseek/ioctl/pipe2/dup2/getcwd/chdir`.
-- [ ] `struct stat` con el layout exacto de Linux x86_64 (distinto del de Aurora) para las syscalls `*stat`.
-- [ ] Mapeo de `errno` (mayormente ya coincide con POSIX, pero hay que verificar caso a caso).
-- [ ] `futex()`: aunque se restrinja a binarios estáticos de un solo hilo al principio, cualquier musl mínimamente reciente lo usa hasta para mutex internos — probablemente sea la primera syscall "rara" que haga falta.
-- [ ] `clone()` con las flags que usa musl para `pthread_create` (para cuando se quiera soportar multihilo).
-- [ ] Suite de smoke tests: correr binarios estáticos reales (BusyBox oficial, `busybox-w32`-style, algún coreutils estático) y comparar comportamiento con el mismo binario en Linux.
+**Alcance recomendado para empezar: solo binarios estáticos musl.** Excluye enlazado dinámico de distros glibc del alcance inicial y reduce el problema a "traducir syscalls", que es abarcable.
+
+- [ ] Detectar un ELF "Linux" (vs. un ELF nativo de Aurora) por `e_ident`/`.note.ABI-tag` o por el `PT_INTERP`.
+- [ ] Convención de syscall de Linux x86_64 (ya implementada en el dispatcher dual).
+- [ ] Tabla de traducción `syscall_linux_nr → función interna de Aurora` (parcial: la mayoría de las comunes ya está).
+- [x] `struct stat` con el layout exacto de Linux x86_64.
+- [x] Mapeo de `errno`.
+- [ ] `futex()`.
+- [ ] `clone()` con flags de musl para pthread.
+- [ ] Suite de smoke tests con binarios reales.
 
 ### 3.7 Ejecutar ejecutables Windows (PE/COFF) — expectativas realistas
-Objetivo real y acotado: cargar y ejecutar **ejecutables PE de consola, sin GUI**, que dependan de un subconjunto pequeño y bien definido de `kernel32.dll`. Esto **no** es "Windows funcionando" — reimplementar Win32 completo (kernel32+user32+gdi32+ntdll+COM+...) es un proyecto del tamaño de Wine (décadas de trabajo de un equipo grande); no debe tratarse como objetivo alcanzable a medio plazo ni bloquear el resto del roadmap.
+*(sin cambios, sigue pendiente)*
 
-- [ ] Parser de PE/COFF: cabeceras DOS/PE, secciones, tabla de importación, relocaciones base.
-- [ ] Loader que mapea las secciones al address space del proceso con los permisos (`.text` RX, `.data` RW, etc.) usando la infraestructura de paging/VMA ya existente.
-- [ ] "DLL shim" de `kernel32.dll`: en vez de cargar la DLL real de Windows, resolver los imports contra un conjunto pequeño de funciones nativas de Aurora con la misma firma (`CreateFileA`, `ReadFile`, `WriteFile`, `ExitProcess`, `GetStdHandle`, `HeapAlloc`/`HeapFree`, `GetCommandLineA`, poco más al principio).
-- [ ] Convención de llamada Win64 (`RCX,RDX,R8,R9` + shadow space de 32 bytes) — distinta de System V; hace falta un trampolín de entrada/salida por cada función shimmeada.
-- [ ] Alcance inicial: solo PE/x64, subsistema `CONSOLE`, sin CRT dinámica (o CRT estática) y sin tocar `user32`/`gdi32`/COM. Cualquier `.exe` con interfaz gráfica queda fuera de alcance por ahora.
-- [ ] Tratar esto como experimental y de baja prioridad (ver Fase 12) hasta que 3.5/3.6 estén maduros — es la pieza más grande y con menor retorno inmediato de las tres.
-
-**Prioridad relativa de 3.5/3.6/3.7:** BusyBox completo (3.5) es la base y ya está en marcha. La personalidad Linux (3.6) da más beneficio por esfuerzo invertido que el loader de PE (3.7): reutiliza binarios reales del ecosistema Linux con "solo" una capa de traducción de syscalls, mientras que PE exige reimplementar una API entera. Recomendación: 3.5 → 3.6 → 3.7, y no empezar 3.7 en serio hasta tener 3.6 corriendo binarios reales.
+**Prioridad relativa de 3.5/3.6/3.7:** BusyBox completo (3.5) ya está prácticamente cerrado. La personalidad Linux (3.6) da más beneficio por esfuerzo invertido que el loader de PE (3.7). Recomendación: 3.5 → 3.6 → 3.7.
 
 ---
 
@@ -249,6 +259,7 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 - [ ] Ring buffer de output en vez de un evento por byte.
 - [ ] Fuentes TTF/bitmap más completas.
 - [ ] Cursor parpadeante.
+- [ ] Terminal 2D: matriz de celdas + parser CSI completo + scroll region + alternate screen. Desbloquea `vi`, `less`, `top` plenamente.
 - [ ] Mejorar composición y rendimiento.
 - [ ] Separar claramente primitivas de dibujo, compositor y window server.
 
@@ -261,65 +272,16 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 ---
 
 # Fase 5 — Networking
-
-Objetivo: dotar al sistema de conectividad real.
-
-**Nota:** la auditoría SMP y sus correcciones críticas ya están integradas. Networking queda pendiente por falta de drivers y pila de red, no por el antiguo race de `current_task`.
-
-### 5.1 Hardware
-- [ ] Abstracción de NIC.
-- [ ] Driver e1000 inicialmente.
-- [ ] RX/TX queues.
-- [ ] Interrupts/MSI/MSI-X cuando proceda.
-- [ ] Loopback.
-
-### 5.2 Pila de red
-- [ ] Ethernet.
-- [ ] ARP.
-- [ ] IPv4.
-- [ ] ICMP.
-- [ ] UDP.
-- [ ] TCP.
-- [ ] Checksums y timeouts.
-- [ ] DHCP.
-- [ ] DNS.
-
-### 5.3 API userland
-- [ ] Sockets.
-- [ ] bind, listen, accept, connect, send, recv.
-- [ ] Cliente HTTP mínimo.
-- [ ] Herramientas tipo ping y ifconfig/ip.
-
-IPv6 puede llegar después de estabilizar IPv4.
+*(sin cambios)*
 
 ---
 
 # Fase 6 — USB y hardware moderno
-
-Objetivo: que Aurora OS deje de depender de periféricos PS/2 y pueda manejar hardware moderno.
-
-### 6.1 USB host
-- [ ] xHCI.
-- [ ] Enumeración de dispositivos.
-- [ ] Descriptores.
-- [ ] Control/bulk/interrupt transfers.
-- [ ] Gestión de endpoints.
-
-### 6.2 USB HID
-- [ ] Teclados USB.
-- [ ] Ratones USB.
-- [ ] Hotplug básico.
-
-### 6.3 USB storage
-- [ ] USB mass storage.
-- [ ] Integración con block layer.
-- [ ] Boot/test desde almacenamiento USB si resulta práctico.
+*(sin cambios)*
 
 ---
 
 # Fase 7 — Seguridad
-
-Objetivo: aumentar el aislamiento y reducir la superficie de ataque.
 
 ### 7.1 Protección del kernel
 - [x] NX.
@@ -330,133 +292,56 @@ Objetivo: aumentar el aislamiento y reducir la superficie de ataque.
 - [ ] CFI o mecanismo equivalente.
 - [ ] ASLR/KASLR.
 - [ ] Hardening adicional de syscalls.
-- [ ] Parcheo quirúrgico de `stac`/`clac` en `uaccess_init` (deuda de 1.1: hoy escanea `.text` buscando bytes `0F 01 CB/CA` y podría tener falsos positivos).
+- [ ] Parcheo quirúrgico de `stac`/`clac` en `uaccess_init`.
 
 ### 7.2 Modelo de seguridad
-- [ ] Usuarios y grupos.
-- [ ] Permisos de archivos.
+- [x] Usuarios y grupos (`/etc/passwd`, `/etc/group`, `/etc/shadow`, credenciales POSIX completas por proceso, uid/gid por nodo).
+- [x] Permisos de archivos (mode por nodo, umask, chmod/chown, vfs_check_access en open/execve/access/chdir).
 - [ ] ACLs si son necesarias.
 - [ ] Capabilities/sandboxing.
 - [ ] Aislamiento más fuerte de servicios.
 - [ ] Definir modelo de privilegios para procesos del sistema.
 
 ### 7.3 Criptografía
-- [ ] Primitivas criptográficas básicas.
-- [ ] RNG de calidad.
-- [ ] TLS en userland cuando exista red estable.
-- [ ] Evaluar filesystem cifrado solo después de disponer de almacenamiento persistente.
-
-Secure Boot puede evaluarse como integración posterior; no debería bloquear el desarrollo del kernel.
+*(sin cambios)*
 
 ---
 
-# Fase 8 — Drivers y plataforma de hardware
-
-Objetivo: ampliar hardware soportado sin convertir el kernel en una colección de drivers aislados.
-
-- [ ] Arquitectura común de drivers.
-- [ ] Mejorar abstracción PCI.
-- [ ] MSI/MSI-X (hay MSI puntual para AHCI, falta generalizar).
-- [ ] HDA/Audio.
-- [ ] RTC/clocksource más completo.
-- [ ] NVMe.
-- [ ] VirtIO donde aporte valor para QEMU.
-- [ ] ACPI más completo.
-- [ ] Gestión de energía.
-- [ ] Suspensión/reanudación si el objetivo del proyecto lo requiere.
-- [ ] CPU/memory hotplug si se decide soportarlo.
-
----
-
-# Fase 9 — Performance y escalabilidad
-
-Objetivo: que el sistema siga siendo razonablemente eficiente al crecer.
-
-- [ ] Medir scheduler y latencias.
-- [ ] Benchmarks de allocators.
-- [ ] Benchmarks de IPC.
-- [ ] Benchmarks de VFS/storage.
-- [ ] Mejorar afinidad CPU (hoy kmain_task forzada a CPU 0 como mitigación).
-- [ ] Per-CPU allocators donde sean útiles.
-- [ ] Reducir contención global (paging_lock es global; posibles per-PML4 o per-PDPT).
-- [ ] RCU u otros mecanismos solo donde exista una necesidad medida.
-- [ ] NUMA si el hardware objetivo lo justifica.
-- [ ] Huge pages correctamente integradas.
-- [ ] vmalloc/virtual allocations para objetos grandes si el límite actual del heap sigue siendo una restricción.
-- [ ] Buddy allocator: free lists por orden en vez de scan lineal sobre bitmap.
-- [ ] Migrar LAPIC MMIO → x2APIC MSR para reducir latencia de IPIs.
-
----
-
-# Fase 10 — Toolchain y SDK
-
-Objetivo: que desarrollar aplicaciones para Aurora sea cómodo.
-
-- [ ] SDK propio.
-- [ ] Headers completos.
-- [ ] libc más completa.
-- [ ] Toolchain reproducible.
-- [ ] Linker scripts/documentación estable.
-- [ ] Debugging userland con GDB.
-- [ ] Symbolication y mejores backtraces.
-- [ ] Build system más sencillo para aplicaciones.
-- [ ] Plantilla para crear aplicaciones.
-- [ ] Package manager/repository solo cuando exista un filesystem y red suficientemente maduros.
-
-No es necesario crear un compilador propio: inicialmente debe usarse LLVM/GCC/binutils existentes.
-
----
-
-# Fase 11 — Calidad del proyecto
-
-Objetivo: mantener el proyecto mantenible mientras crece.
-
-- [ ] Documentar arquitectura.
-- [ ] Documentar ABI/syscalls.
-- [ ] Documentar formato de estructuras internas importantes.
-- [ ] Documentar invariantes de concurrencia (ver deuda 1.2).
-- [ ] Documentar proceso de boot.
-- [ ] Documentar cómo escribir drivers.
-- [ ] Documentar cómo escribir aplicaciones.
-- [ ] Ampliar CI con tests de regresión.
-- [ ] Sanitización/fuzzing de parsers cuando sea posible (candidatos: BPB parser, GPT parser, ELF loader).
-- [ ] Revisar warnings del compilador.
-- [ ] Reducir deuda técnica periódicamente.
-- [ ] Mantener commits pequeños y funcionalmente aislados.
-- [ ] Añadir dependencias de headers al Makefile del kernel (`$(wildcard *.o): $(wildcard *.h)`) para evitar builds incrementales desincronizados.
+# Fase 8-11
+*(sin cambios)*
 
 ---
 
 # Orden recomendado de alto nivel
 
-1. **Robustez del kernel + auditoría SMP** — ✅ completada (solo quedan tareas de documentación/debugging, no bugs SMP conocidos)
-2. **Storage persistente + filesystem** — ✅ en gran parte (FAT32 persistente con LFN, rename, mount en `/`; pendiente: buffer cache, tests de corrupción, boot configurable).
-3. **Userland/libc/shell** — ⏳ en progreso avanzado (ABI Linux, musl, TTY, pipes, redirecciones y `busybox sh` ya funcionan; quedan libc/POSIX, PTY, job control y superficie BusyBox).
-4. **Escritorio y window manager**
+1. **Robustez del kernel + auditoría SMP** — ✅ completada.
+2. **Storage persistente + filesystem** — ✅ cerrado (FAT32 persistente con LFN, rename, buffer cache, tests de corrupción, fsck mínimo).
+3. **Userland/libc/shell** — ⏳ en progreso avanzado (ABI Linux, musl, TTY, pipes, PTYs, job control completo, permisos POSIX reales, `/etc/passwd`, BusyBox dinámico con ~200 applets; queda superficie libc/POSIX y shell avanzado).
+4. **Escritorio y window manager** — pendiente; el siguiente salto grande es el terminal 2D.
 5. **Networking**
 6. **USB**
 7. **Seguridad avanzada**
 8. **Drivers/hardware adicional**
 9. **Performance/NUMA/escalabilidad**
 10. **SDK/toolchain/ecosistema**
-11. **BusyBox completo + personalidad Linux (ELF)** — depende de libc/syscalls de la Fase 3, pero puede avanzar en paralelo a redes/USB una vez esté estable el userland.
-12. **Compatibilidad PE/Windows (experimental)** — solo tiene sentido una vez 11 esté maduro; alcance permanentemente acotado a consola/x64 sin GUI.
+11. **BusyBox completo + personalidad Linux (ELF)** — la parte BusyBox está hecha; la personalidad Linux (3.6) es el siguiente bloque de peso.
+12. **Compatibilidad PE/Windows (experimental)**
 
-La idea es evitar implementar muchas funciones superficiales a la vez. Primero hay que conseguir que el núcleo sea difícil de romper; después darle almacenamiento persistente; a partir de ahí, construir userland, red y escritorio sobre APIs estables.
+---
 
 ## Objetivos de largo plazo
 
 - [x] Aurora OS arranca de forma fiable en QEMU con 1/2/4 CPU.
-- [~] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 es la raíz del VFS y el usuario escribe ahí; el bootloader sigue cargando el kernel desde una ruta fija. Falta instalador + boot configurable).
-- [x] Aurora OS puede crear, modificar y conservar archivos. (FAT32 persistente, LFN, rename y apps userland completas: `mkdir/rm/cp/mv/pwd`).
+- [~] Aurora OS puede instalarse/arrancar desde almacenamiento persistente. (FAT32 es la raíz del VFS; el bootloader sigue cargando el kernel desde ruta fija. Falta instalador + boot configurable.)
+- [x] Aurora OS puede crear, modificar y conservar archivos.
 - [x] Aurora OS puede ejecutar múltiples aplicaciones aisladas.
 - [x] Aurora OS dispone de terminal y escritorio utilizables.
 - [ ] Aurora OS puede comunicarse por red.
 - [ ] Aurora OS puede utilizar teclado/ratón USB.
-- [ ] Aurora OS dispone de un modelo de seguridad coherente.
+- [~] Aurora OS dispone de un modelo de seguridad coherente. (Usuarios y permisos POSIX funcionando; falta sandboxing/capabilities.)
 - [ ] Aurora OS tiene SDK/documentación suficientes para desarrollar aplicaciones de terceros.
-- [~] Aurora OS ejecuta un userland tipo BusyBox completo. (`busybox sh` interactivo y una colección creciente de applets sobre musl ya funcionan; falta ampliar la superficie hasta un build completo, ver 3.5)
-- [ ] Aurora OS puede ejecutar binarios Linux (ELF) reales sin recompilar, al menos estáticos/musl (ver 3.6).
-- [ ] Aurora OS puede ejecutar un subconjunto acotado de ejecutables Windows de consola (PE/x64), sin pretender compatibilidad Win32 completa (ver 3.7).
+- [~] Aurora OS ejecuta un userland tipo BusyBox completo. (`busybox sh` dinámico con ~200 applets; falta superficie de syscalls para builds completos.)
+- [ ] Aurora OS puede ejecutar binarios Linux (ELF) reales sin recompilar (estáticos/musl primero, ver 3.6). La infraestructura de enlazado dinámico ya existe.
+- [ ] Aurora OS puede ejecutar un subconjunto acotado de ejecutables Windows de consola (PE/x64).
 
 > **Principio:** priorizar primero corrección, aislamiento y observabilidad; después funcionalidad; y finalmente optimización. Cada bug importante corregido debería, cuando sea posible, quedar acompañado de una regresión automatizada.

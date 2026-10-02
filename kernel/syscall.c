@@ -8,6 +8,7 @@
 #include "syscall.h"
 #include "cpu.h"
 #include "fat32.h"
+#include "futex.h"
 #include "gdt.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
@@ -79,6 +80,9 @@ typedef struct {
 
 static kernel_service_t g_services[KERNEL_SERVICES_MAX];
 static spinlock_t g_services_lock;
+// [setdomainname] Dominio del sistema. Cosmético: NIS lo usa, pero
+// nada en Aurora depende de él. Lo devuelve k_uname().
+static char g_domainname[64] = "(none)";
 
 // ---------- readv / writev ----------
 //
@@ -770,15 +774,17 @@ static int64_t k_getpid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   return proc ? (int64_t)proc->pid : -EFAULT;
 }
 
-static int64_t k_set_tid_address(uint64_t a1, uint64_t a2, uint64_t a3,
+static int64_t k_set_tid_address(uint64_t tidptr, uint64_t a2, uint64_t a3,
                                  uint64_t a4, uint64_t a5) {
-  (void)a1;
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  return proc ? (int64_t)proc->pid : -EFAULT;
+  task_t *t = sched_current();
+  if (!t)
+    return -EFAULT;
+  t->clear_child_tid = (uint32_t *)tidptr;
+  return (int64_t)t->id;
 }
 
 // ---------- sysinfo (99) ----------
@@ -1458,6 +1464,7 @@ static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
   if (rd < 0 || wr < 0)
     return -EMFILE;
 
+  LOG_INFO("[PIPE-CREATE] pid=%u rd=%d wr=%d", proc->pid, rd, wr);
   vfs_node_t *re = NULL, *we = NULL;
   int rc = vfs_pipe_create(&re, &we);
   if (rc != 0)
@@ -1510,10 +1517,26 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
     return -EBADF;
   if (ofd == nfd)
     return nfd;
-  if (proc->fds[nfd])
+
+  file_descriptor_t *f = proc->fds[ofd];
+
+  // Tomar la referencia ANTES de cerrar nfd: si nfd apuntaba al mismo
+  // file_descriptor_t, el contador no puede llegar a 0 por el camino.
+  __atomic_fetch_add(&f->ref_count, 1, __ATOMIC_ACQ_REL);
+
+  if (proc->fds[nfd]) {
+    LOG_INFO("[DUP2] pid=%u closing nfd=%d (oldfd=%d)", proc->pid, nfd, ofd);
     vfs_close_for_proc(proc, nfd);
-  proc->fds[ofd]->ref_count++;
-  proc->fds[nfd] = proc->fds[ofd];
+  }
+
+  proc->fds[nfd] = f;
+  proc->fd_cloexec_mask &= ~(1u << nfd);
+  // [FIX] ELIMINADA esta línea: el ref ya se incrementó arriba con
+  // __atomic_fetch_add. Antes estaba duplicada y cada dup2 dejaba el
+  // file_descriptor_t con un ref huérfano, así que el write end de un
+  // pipe nunca llegaba a 0 y el reader bloqueaba en read() para siempre
+  // (dmesg | wc -c).
+  // f->ref_count++;
   return nfd;
 }
 
@@ -1766,7 +1789,11 @@ static int64_t k_uname(uint64_t buf, uint64_t a2, uint64_t a3, uint64_t a4,
   strcpy(u.release, "0.1.0");
   strcpy(u.version, "Aurora OS v0.1.0");
   strcpy(u.machine, "x86_64");
-  u.domainname[0] = '\0';
+  size_t dnl = strlen(g_domainname);
+  if (dnl >= sizeof(u.domainname))
+    dnl = sizeof(u.domainname) - 1;
+  memcpy(u.domainname, g_domainname, dnl);
+  u.domainname[dnl] = '\0';
 
   if (!access_ok((void *)buf, sizeof(u)))
     return -EFAULT;
@@ -2058,9 +2085,8 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
   file_descriptor_t *f = proc->fds[kfd];
 
   switch (cmd) {
-  case 0:    /* F_DUPFD */
-  case 1030: /* F_DUPFD_CLOEXEC */
-  {
+  case F_DUPFD:
+  case F_DUPFD_CLOEXEC: {
     int minfd = (int)arg;
     if (minfd < 0 || minfd >= MAX_PROCESS_FDS)
       return -EINVAL;
@@ -2073,17 +2099,27 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     }
     if (free_fd < 0)
       return -EMFILE;
-    f->ref_count++;
+    __atomic_fetch_add(&f->ref_count, 1, __ATOMIC_ACQ_REL);
     proc->fds[free_fd] = f;
+    // [FD_CLOEXEC] POSIX: F_DUPFD limpia CLOEXEC en el nuevo fd.
+    // F_DUPFD_CLOEXEC lo pone.
+    if (cmd == F_DUPFD_CLOEXEC)
+      proc->fd_cloexec_mask |= (1u << free_fd);
+    else
+      proc->fd_cloexec_mask &= ~(1u << free_fd);
     return (int64_t)free_fd;
   }
-  case 1: /* F_GETFD */
+  case F_GETFD:
+    return (proc->fd_cloexec_mask & (1u << kfd)) ? FD_CLOEXEC : 0;
+  case F_SETFD:
+    if ((int)arg & FD_CLOEXEC)
+      proc->fd_cloexec_mask |= (1u << kfd);
+    else
+      proc->fd_cloexec_mask &= ~(1u << kfd);
     return 0;
-  case 2: /* F_SETFD */
-    return 0;
-  case 3: /* F_GETFL */
+  case F_GETFL:
     return (int64_t)f->flags;
-  case 4: /* F_SETFL */
+  case F_SETFL:
     return 0;
   default:
     return -EINVAL;
@@ -2642,19 +2678,101 @@ static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
 // En x86_64 Linux, clone(flags, stack, ptid, tls, ctid). Solo soportamos
 // el caso "fork-like": flags cuyo byte bajo es la señal de salida y
 // ningún bit CLONE_* activo. Cualquier otro uso devuelve -ENOSYS.
-#define CLONE_FLAG_MASK 0xFFFFFF00ULL // bits ≥ 8
+// ---------------------------------------------------------------------------
+// clone(2) x86_64.
+//   rdi = flags
+//   rsi = stack
+//   rdx = parent_tidptr
+//   r10 = child_tidptr
+//   r8  = tls
+//
+// Flags soportados:
+//   CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+//   CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
+//   CLONE_CHILD_CLEARTID
+// Cualquier otro bit (namespaces, CLONE_VFORK, CLONE_PTRACE, ...) → -EINVAL.
+//
+// El byte bajo son los bits de señal de salida (SIGCHLD típicamente);
+// los ignoramos porque ya enviamos SIGCHLD al padre en process_exit.
+//
+// Sin CLONE_THREAD (aunque tenga CLONE_VM) → fork() normal.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// clone(2) x86_64.
+//   rdi = flags
+//   rsi = stack
+//   rdx = parent_tidptr
+//   r10 = child_tidptr
+//   r8  = tls
+//
+// Convención musl 1.2.x: además de esos 5 args del syscall, musl deja
+// r9 = fn (el entrypoint del thread) y el arg en [stack]. El kernel
+// solo tiene que preservar los registros tal cual (los pasa al hijo
+// vía sched_create_forked_user_task_ex) y poner rax=0 en el hijo. El
+// hijo ejecuta `call *%r9` él solo.
+// ---------------------------------------------------------------------------
+#define CLONE_VM 0x00000100ULL
+#define CLONE_FS 0x00000200ULL
+#define CLONE_FILES 0x00000400ULL
+#define CLONE_SIGHAND 0x00000800ULL
+#define CLONE_THREAD 0x00010000ULL
+#define CLONE_SYSVSEM 0x00040000ULL
+#define CLONE_SETTLS 0x00080000ULL
+#define CLONE_PARENT_SETTID 0x00100000ULL
+#define CLONE_CHILD_CLEARTID 0x00200000ULL
+#define CLONE_DETACHED 0x00400000ULL
+#define CLONE_CHILD_SETTID 0x01000000ULL
 
 static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
-                       uint64_t tls, uint64_t ctid) {
-  (void)stack;
-  (void)ptid;
-  (void)tls;
-  (void)ctid;
-  if (flags & CLONE_FLAG_MASK) {
-    LOG_WARN("[CLONE] flags=%lx no soportados", (unsigned long)flags);
-    return -ENOSYS;
+                       uint64_t ctid, uint64_t tls) {
+  process_t *parent = process_current();
+  if (!parent)
+    return -EINVAL;
+  registers_t *r = syscall_current_regs();
+  if (!r)
+    return -EINVAL;
+
+  uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+                       CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |
+                       CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
+                       CLONE_CHILD_CLEARTID | CLONE_DETACHED;
+  uint64_t unknown = flags & ~(supported | 0xffULL);
+  if (unknown) {
+    LOG_WARN("[CLONE] flags no soportados: 0x%lx", (unsigned long)unknown);
+    return -EINVAL;
   }
-  return sys_fork();
+
+  if (!(flags & CLONE_THREAD))
+    return sys_fork();
+  if (!(flags & CLONE_VM))
+    return -EINVAL;
+
+  uint64_t tls_val = (flags & CLONE_SETTLS) ? tls : 0;
+  uint64_t *ptid_ptr = (flags & CLONE_PARENT_SETTID) ? (uint64_t *)ptid : NULL;
+  // [FIX] CHILD_SETTID y CHILD_CLEARTID son flags INDEPENDIENTES:
+  //   CHILD_SETTID   → escribe el tid al clonar
+  //   CHILD_CLEARTID → limpia a 0 y futex-wake al morir
+  // Antes los mezclábamos y machacábamos __thread_list_lock de musl.
+  uint64_t *ctid_set_ptr =
+      (flags & CLONE_CHILD_SETTID) ? (uint64_t *)ctid : NULL;
+  uint64_t *ctid_clear_ptr =
+      (flags & CLONE_CHILD_CLEARTID) ? (uint64_t *)ctid : NULL;
+
+  task_t *child = process_clone_thread(parent, r, stack, tls_val, ptid_ptr,
+                                       ctid_set_ptr, ctid_clear_ptr);
+  if (!child)
+    return -ENOMEM;
+  return (int64_t)child->id;
+}
+
+static int64_t k_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_exit_current((int)code);
+  // no retorna
 }
 
 static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
@@ -2714,12 +2832,13 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
   return r;
 }
 
-// ---------- execve ----------
-//
-// Reemplaza el binario del proceso actual. No crea tarea nueva.
-// El "retorno" del syscall aterriza en el entry point del nuevo ELF:
-// el dispatcher devuelve 0 → RAX=0, y regs->rip/rsp redirigen el
-// sysretq/iretq final.
+// [EXECVE-LOCK] Test temporal para confirmar que el fallo de
+// `dmesg | wc -c` es una race entre dos execve concurrentes en CPUs
+// distintas. Serializa todos los execve del sistema. Si con esto el
+// pipeline ya no se cuelga, la causa está en process_execve_prepare.
+static spinlock_t g_execve_lock;
+static int g_execve_lock_ready = 0;
+
 static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                         uint64_t a4, uint64_t a5) {
   (void)a4;
@@ -2728,10 +2847,21 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   if (!proc)
     return -EFAULT;
 
+  if (!g_execve_lock_ready) {
+    spin_init(&g_execve_lock);
+    g_execve_lock_ready = 1;
+  }
+
+  unsigned long exec_flags = spin_lock_irqsave(&g_execve_lock);
+  int64_t ret = -EFAULT;
+
   char path[VFS_PATH_MAX];
   int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
-  if (rc != 0)
-    return rc;
+  if (rc != 0) {
+    ret = rc;
+    goto out;
+  }
+  LOG_INFO("[EXECVE] pid=%u path=%s", proc->pid, path);
 
   // Buffers en heap: 16*128 + 32*256 = 10 KB no caben cómodos en el
   // stack de kernel sin disparar -Wframe-larger-than.
@@ -2740,8 +2870,10 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
     ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
-  if (!buf)
-    return -ENOMEM;
+  if (!buf) {
+    ret = -ENOMEM;
+    goto out;
+  }
   char *argv_storage = buf;
   char *env_storage = buf + ARGV_BYTES;
 
@@ -2753,7 +2885,8 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       if (get_user_u64(&uptr, (const uint64_t *)(argv_ptr + (uint64_t)i * 8)) <
           0) {
         kfree(buf);
-        return -EFAULT;
+        ret = -EFAULT;
+        goto out;
       }
       if (uptr == 0)
         break;
@@ -2761,7 +2894,8 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                                  (const char *)uptr, SPAWN_ARG_STR_MAX);
       if (m < 0) {
         kfree(buf);
-        return -EFAULT;
+        ret = -EFAULT;
+        goto out;
       }
       kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
       argc++;
@@ -2776,7 +2910,8 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
         kfree(buf);
-        return -EFAULT;
+        ret = -EFAULT;
+        goto out;
       }
       if (uptr == 0)
         break;
@@ -2784,7 +2919,8 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                                  (const char *)uptr, PROCESS_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
-        return -EFAULT;
+        ret = -EFAULT;
+        goto out;
       }
       kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
       envc++;
@@ -2795,16 +2931,25 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   rc = process_execve_prepare(path, argc, kargv, envc, kenvp, &new_entry,
                               &new_rsp);
   kfree(buf);
-  if (rc != 0)
-    return rc;
+  if (rc != 0) {
+    ret = rc;
+    goto out;
+  }
+  LOG_INFO("[EXECVE] pid=%u rc=%lld", proc->pid, (long long)rc);
 
   registers_t *regs = syscall_current_regs();
-  if (!regs)
-    return -EINVAL;
+  if (!regs) {
+    ret = -EINVAL;
+    goto out;
+  }
   regs->rip = new_entry;
   regs->rsp = new_rsp;
 
-  return 0;
+  ret = 0;
+
+out:
+  spin_unlock_irqrestore(&g_execve_lock, exec_flags);
+  return ret;
 }
 
 // ---------- gettid ----------
@@ -2815,8 +2960,8 @@ static int64_t k_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  return proc ? (int64_t)proc->pid : -EFAULT;
+  task_t *t = sched_current();
+  return t ? (int64_t)t->id : -EFAULT;
 }
 
 static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
@@ -3225,6 +3370,389 @@ static int64_t k_times(uint64_t buf_uptr, uint64_t a2, uint64_t a3, uint64_t a4,
   }
   extern uint64_t sched_get_ticks(void);
   return (int64_t)sched_get_ticks();
+}
+
+// ---------- klogctl / syslog (103) ----------
+//
+// Es la syscall que busybox `dmesg` usa para leer el ring de klog.
+// Tipos (Linux <sys/klog.h>):
+//   0 CLOSE            no-op
+//   1 OPEN             no-op
+//   2 READ             destructivo, lee y consume hasta len bytes
+//   3 READ_ALL         no destructivo, copia todo el ring (hasta len)
+//   4 READ_CLEAR       destructivo
+//   5 CLEAR            vacía el ring
+//   6 CONSOLE_OFF      no-op
+//   7 CONSOLE_ON       no-op
+//   8 CONSOLE_LEVEL    no-op
+//   9 SIZE_UNREAD      bytes pendientes
+//  10 SIZE_BUFFER      capacidad total del ring
+#define SYSLOG_ACTION_CLOSE 0
+#define SYSLOG_ACTION_OPEN 1
+#define SYSLOG_ACTION_READ 2
+#define SYSLOG_ACTION_READ_ALL 3
+#define SYSLOG_ACTION_READ_CLEAR 4
+#define SYSLOG_ACTION_CLEAR 5
+#define SYSLOG_ACTION_CONSOLE_OFF 6
+#define SYSLOG_ACTION_CONSOLE_ON 7
+#define SYSLOG_ACTION_CONSOLE_LEVEL 8
+#define SYSLOG_ACTION_SIZE_UNREAD 9
+#define SYSLOG_ACTION_SIZE_BUFFER 10
+
+static int64_t k_klogctl(uint64_t type, uint64_t buf, uint64_t len, uint64_t a4,
+                         uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  LOG_INFO("[KLOGCTL] enter type=%d len=%lu buf=%p", (int)type,
+           (unsigned long)len, (void *)buf);
+  switch ((int)type) {
+  case SYSLOG_ACTION_CLOSE:
+  case SYSLOG_ACTION_OPEN:
+  case SYSLOG_ACTION_CONSOLE_OFF:
+  case SYSLOG_ACTION_CONSOLE_ON:
+  case SYSLOG_ACTION_CONSOLE_LEVEL:
+    return 0;
+
+  case SYSLOG_ACTION_READ:
+  case SYSLOG_ACTION_READ_ALL:
+  case SYSLOG_ACTION_READ_CLEAR: {
+    if (len == 0) {
+      LOG_INFO("[KLOGCTL] len=0");
+      return 0;
+    }
+    if (!buf) {
+      LOG_INFO("[KLOGCTL] buf=null");
+      return -EINVAL;
+    }
+    if (!access_ok((void *)buf, (size_t)len)) {
+      LOG_INFO("[KLOGCTL] access_ok failed");
+      return -EFAULT;
+    }
+    LOG_INFO("[KLOGCTL] before kmalloc(%lu)", (unsigned long)len);
+    size_t n = (size_t)len;
+    if (n > 16384)
+      n = 16384;
+    char *tmp = (char *)kmalloc(n);
+    if (!tmp) {
+      LOG_INFO("[KLOGCTL] kmalloc failed");
+      return -ENOMEM;
+    }
+    LOG_INFO("[KLOGCTL] before peek, n=%lu", (unsigned long)n);
+    size_t got;
+    if ((int)type == SYSLOG_ACTION_READ_ALL)
+      got = klog_peek(tmp, n);
+    else
+      got = klog_read(tmp, n);
+    LOG_INFO("[KLOGCTL] peek returned %lu", (unsigned long)got);
+    int rc = 0;
+    if (got > 0 && copy_to_user((void *)buf, tmp, got) < 0)
+      rc = -EFAULT;
+    kfree(tmp);
+    LOG_INFO("[KLOGCTL] exit rc=%d got=%lu", rc, (unsigned long)got);
+    return rc ? rc : (int64_t)got;
+  }
+
+  case SYSLOG_ACTION_CLEAR:
+    klog_clear();
+    return 0;
+
+  case SYSLOG_ACTION_SIZE_UNREAD:
+    return (int64_t)klog_available();
+
+  case SYSLOG_ACTION_SIZE_BUFFER:
+    return (int64_t)klog_size();
+
+  default:
+    return -EINVAL;
+  }
+}
+
+// ---------- setdomainname (171) ----------
+//
+// Cosmético. Guardamos el valor para que uname lo devuelva; nada más
+// depende de él. Si len == 0, limpia el dominio.
+static int64_t k_setdomainname(uint64_t name_uptr, uint64_t len, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (len >= sizeof(g_domainname))
+    return -EINVAL;
+  if (len == 0) {
+    g_domainname[0] = '\0';
+    return 0;
+  }
+  if (!access_ok((void *)name_uptr, (size_t)len))
+    return -EFAULT;
+  if (copy_from_user(g_domainname, (void *)name_uptr, (size_t)len) < 0)
+    return -EFAULT;
+  g_domainname[len] = '\0';
+  return 0;
+}
+
+// ---------- waitid (247) ----------
+//
+// Traducción directa a process_waitpid + relleno de siginfo_t.
+// idtype:  0=P_ALL, 1=P_PID, 2=P_PGID
+// options: WNOHANG(1) | WSTOPPED(2) | WEXITED(4) | WCONTINUED(8) |
+//          WNOWAIT(0x01000000, no soportado → ignorado)
+//
+// siginfo_t Linux x86_64 (128 bytes):
+//   0  si_signo   (int)
+//   4  si_errno   (int)
+//   8  si_code    (int)
+//  12  __pad0
+//  16  si_pid     (_sigchld)
+//  20  si_uid
+//  24  si_status
+//  28  (pad)
+//  32  si_utime
+//  40  si_stime
+//  48..127 relleno
+#define P_ALL_ 0
+#define P_PID_ 1
+#define P_PGID_ 2
+
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#define CLD_DUMPED 3
+#define CLD_TRAPPED 4
+#define CLD_STOPPED 5
+#define CLD_CONTINUED 6
+
+#define WNOHANG_ 0x00000001
+#define WSTOPPED_ 0x00000002
+#define WEXITED_ 0x00000004
+#define WCONTINUED_ 0x00000008
+#define WNOWAIT_ 0x01000000
+
+static int64_t k_waitid(uint64_t idtype, uint64_t id, uint64_t infop,
+                        uint64_t options, uint64_t a5) {
+  (void)a5;
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+  if (!infop)
+    return -EINVAL;
+
+  // Linux x86_64: waitid exige (options & (WEXITED|WSTOPPED|WCONTINUED))
+  // != 0, salvo que WNOHANG solo no cuenta. BusyBox pasa WEXITED|WNOWAIT.
+  // Somos laxos: si no hay ningún bit de evento, asumimos WEXITED.
+  if ((options & (WEXITED_ | WSTOPPED_ | WCONTINUED_)) == 0)
+    options |= WEXITED_;
+
+  int32_t pid_filter;
+  switch ((int)idtype) {
+  case P_ALL_:
+    pid_filter = -1;
+    break;
+  case P_PID_:
+    pid_filter = (int32_t)id;
+    break;
+  case P_PGID_:
+    pid_filter = -(int32_t)id;
+    break;
+  default:
+    return -EINVAL;
+  }
+
+  int woptions = 0;
+  if (options & WNOHANG_)
+    woptions |= WNOHANG;
+  if (options & WSTOPPED_)
+    woptions |= WUNTRACED;
+  if (options & WCONTINUED_)
+    woptions |= WCONTINUED;
+  // WNOWAIT: no soportado. Ignoramos (reapamos igual). Documentado.
+
+  int status = 0;
+  proc_rusage_t ru = {0};
+  int r = process_waitpid(self, pid_filter, &status, &ru, woptions);
+  if (r < 0)
+    return r;
+  if (r == 0)
+    return 0; // WNOHANG sin hijos listos
+
+  // r es el pid del hijo. Decodificar status Linux.
+  int si_code, si_status;
+  if (status == 0xffff) {
+    si_code = CLD_CONTINUED;
+    si_status = SIGCONT;
+  } else if ((status & 0xff) == 0x7f) {
+    si_code = CLD_STOPPED;
+    si_status = (status >> 8) & 0xff;
+  } else if ((status & 0x7f) == 0) {
+    si_code = CLD_EXITED;
+    si_status = (status >> 8) & 0xff;
+  } else {
+    si_code = CLD_KILLED;
+    si_status = status & 0x7f;
+  }
+
+  // Construir siginfo en buffer local y copiar. Escribir campo a campo
+  // en userland directamente se rompe con SMAP.
+  uint8_t info[128];
+  memset(info, 0, sizeof(info));
+  *(int32_t *)(info + 0) = SIGCHLD;
+  *(int32_t *)(info + 4) = 0;
+  *(int32_t *)(info + 8) = si_code;
+  *(int32_t *)(info + 16) = (int32_t)r; // si_pid
+  *(int32_t *)(info + 20) = 0;          // si_uid
+  *(int32_t *)(info + 24) = si_status;
+  *(int64_t *)(info + 32) = (int64_t)ru.utime_ticks; // si_utime (ticks)
+  *(int64_t *)(info + 40) = (int64_t)ru.stime_ticks; // si_stime
+
+  if (!access_ok((void *)infop, sizeof(info)))
+    return -EFAULT;
+  if (copy_to_user((void *)infop, info, sizeof(info)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+// ---------- flock (73) ----------
+//
+// Advisory lock por fd. NO es fcntl(F_SETLK): flock es un lock entero
+// sobre el inode, no byte-range, y no es POSIX.
+//
+// Implementación: el modo vive en file_descriptor_t.flock_mode (0/1/2).
+// Para detectar conflictos escaneamos los fds de TODOS los procesos
+// vía process_for_each() y comparamos (node->fs, node->inode). No hay
+// tabla global aparte — el coste del scan es despreciable con <100 fds.
+//
+// Semántica soportada:
+//   LOCK_SH        compartido. Coexiste con otros SH. Bloquea EX.
+//   LOCK_EX        exclusivo. Bloquea SH y EX de otros.
+//   LOCK_UN        libera.
+//   LOCK_NB        falla con EWOULDBLOCK si hay conflicto.
+//
+// No soportado (documentado):
+//   - No hay wake-up dirigido: si un flock sin NB encuentra conflicto,
+//     hace polling cada 10 ms. Funciona pero es menos elegante que
+//     una wait queue por inode. Aceptable para scripts.
+//   - No se limpia al cerrar el fd: un fd cerrado con flock_mode != 0
+//     seguirá apareciendo como lockholder. Mitigación: cerrar con
+//     flock(fd, LOCK_UN) explícito o dejar morir al proceso. Pendiente
+//     un cleanup en vfs_close_for_proc si se necesita.
+#define LINUX_LOCK_SH 1
+#define LINUX_LOCK_EX 2
+#define LINUX_LOCK_NB 4
+#define LINUX_LOCK_UN 8
+
+struct flock_scan_ctx {
+  vfs_node_t *node;
+  int want_mode; // 1=SH, 2=EX
+  process_t *self;
+  file_descriptor_t *self_fd;
+  int conflict;
+};
+
+static int flock_scan_cb(process_t *p, void *arg) {
+  struct flock_scan_ctx *ctx = (struct flock_scan_ctx *)arg;
+  for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+    file_descriptor_t *f = p->fds[i];
+    if (!f || !f->node || f->flock_mode == 0)
+      continue;
+    if (p == ctx->self && f == ctx->self_fd)
+      continue;
+    if (f->node->inode != ctx->node->inode)
+      continue;
+    if (f->node->fs != ctx->node->fs)
+      continue;
+    // Mismo inodo, otro fd con lock.
+    if (f->flock_mode == 2) { // EX ajeno
+      ctx->conflict = 1;
+      return 1;
+    }
+    if (ctx->want_mode == 2 && f->flock_mode == 1) { // quiero EX, hay SH
+      ctx->conflict = 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int flock_has_conflict(process_t *proc, file_descriptor_t *fd,
+                              vfs_node_t *node, int want_mode) {
+  struct flock_scan_ctx ctx = {
+      .node = node,
+      .want_mode = want_mode,
+      .self = proc,
+      .self_fd = fd,
+      .conflict = 0,
+  };
+  process_for_each(flock_scan_cb, &ctx);
+  return ctx.conflict;
+}
+
+static int64_t k_flock(uint64_t fd, uint64_t operation, uint64_t a3,
+                       uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int kfd = (int)fd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+    return -EBADF;
+  file_descriptor_t *f = proc->fds[kfd];
+  if (!f->node)
+    return -EBADF;
+
+  int op = (int)operation;
+  int want = op & (LINUX_LOCK_SH | LINUX_LOCK_EX);
+  int nb = (op & LINUX_LOCK_NB) != 0;
+
+  if (op & LINUX_LOCK_UN) {
+    f->flock_mode = 0;
+    return 0;
+  }
+  if (want != LINUX_LOCK_SH && want != LINUX_LOCK_EX)
+    return -EINVAL;
+
+  int want_mode = (want == LINUX_LOCK_EX) ? 2 : 1;
+
+  // Soltar el lock previo antes de re-chequear. Si vamos a subir
+  // SH→EX, esto libera momentáneamente el SH, pero es la única forma
+  // sin mantener un estado de "upgrade pendiente".
+  f->flock_mode = 0;
+
+  for (;;) {
+    if (!flock_has_conflict(proc, f, f->node, want_mode)) {
+      f->flock_mode = want_mode;
+      return 0;
+    }
+    if (nb)
+      return -EAGAIN;      // == EWOULDBLOCK
+    sched_sleep_ticks(10); // 10 ms, cede CPU
+  }
+}
+
+// ---------- Familia socket (Fase 5 pendiente) ----------
+//
+// Aurora no tiene stack de red todavía. Devolvemos -EAFNOSUPPORT
+// (el errno que da Linux cuando no hay familia de direcciones soportada)
+// en lugar de -ENOSYS: así dnsdomainname, hostname -d, getaddrinfo y
+// demás reciben un error informativo y tienen oportunidad de caer a un
+// fallback limpio, en vez de "syscall desconocida".
+//
+// Cuando Fase 5 (networking) llegue, se sustituye esto por la
+// implementación real; los números de syscall ya están reservados.
+static int64_t k_net_nosupport(uint64_t a1, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -EAFNOSUPPORT;
+}
+
+static int64_t k_futex(uint64_t uaddr, uint64_t op, uint64_t val,
+                       uint64_t timeout, uint64_t uaddr2) {
+  registers_t *regs = syscall_current_regs();
+  uint64_t val3 = regs ? regs->r9 : 0;
+  return sys_futex(uaddr, op, val, timeout, uaddr2, val3);
 }
 
 // ===========================================================================
@@ -3772,6 +4300,22 @@ static const syscall_entry_t linux_table[] = {
     [SYS_MKNOD] = {k_mknod, "mknod"},
     [SYS_SETHOSTNAME] = {k_sethostname, "sethostname"},
     [SYS_UTIMENSAT] = {k_utimensat, "utimensat"},
+    [SYS_SOCKET] = {k_net_nosupport, "socket"},
+    [SYS_CONNECT] = {k_net_nosupport, "connect"},
+    [SYS_ACCEPT] = {k_net_nosupport, "accept"},
+    [SYS_SENDTO] = {k_net_nosupport, "sendto"},
+    [SYS_RECVFROM] = {k_net_nosupport, "recvfrom"},
+    [SYS_SENDMSG] = {k_net_nosupport, "sendmsg"},
+    [SYS_RECVMSG] = {k_net_nosupport, "recvmsg"},
+    [SYS_SHUTDOWN] = {k_net_nosupport, "shutdown"},
+    [SYS_BIND] = {k_net_nosupport, "bind"},
+    [SYS_LISTEN] = {k_net_nosupport, "listen"},
+    [SYS_GETSOCKNAME] = {k_net_nosupport, "getsockname"},
+    [SYS_GETPEERNAME] = {k_net_nosupport, "getpeername"},
+    [SYS_SOCKETPAIR] = {k_net_nosupport, "socketpair"},
+    [SYS_SETSOCKOPT] = {k_net_nosupport, "setsockopt"},
+    [SYS_GETSOCKOPT] = {k_net_nosupport, "getsockopt"},
+    [SYS_ACCEPT4] = {k_net_nosupport, "accept4"},
     [SYS_MUNMAP] = {k_munmap, "munmap"},
     [SYS_BRK] = {k_brk, "brk"},
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},
@@ -3835,6 +4379,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETDENTS64] = {k_getdents64, "getdents64"},
     [SYS_SET_TID_ADDRESS] = {k_set_tid_address, "set_tid_address"},
     [SYS_CLOCK_GETTIME] = {k_clock_gettime, "clock_gettime"},
+    [SYS_EXIT] = {k_exit, "exit"},
     [SYS_EXIT_GROUP] = {k_exit_group, "exit_group"},
     [SYS_OPENAT] = {k_openat, "openat"},
     [SYS_MKDIRAT] = {k_mkdirat, "mkdirat"},
@@ -3854,6 +4399,11 @@ static const syscall_entry_t linux_table[] = {
     [SYS_EXECVE] = {k_execve, "execve"},
     [SYS_GETTID] = {k_gettid, "gettid"},
     [SYS_WAIT4] = {k_wait4, "wait4"},
+    [SYS_FLOCK] = {k_flock, "flock"},
+    [SYS_KLOGCTL] = {k_klogctl, "klogctl"},
+    [SYS_SETDOMAINNAME] = {k_setdomainname, "setdomainname"},
+    [SYS_WAITID] = {k_waitid, "waitid"},
+    [SYS_FUTEX] = {k_futex, "futex"},
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 

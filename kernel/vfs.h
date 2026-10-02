@@ -222,6 +222,12 @@ typedef struct file_descriptor {
   uint64_t offset;
   int flags;
   int ref_count;
+  // [flock] Modo de advisory lock. 0 = sin lock, 1 = LOCK_SH, 2 = LOCK_EX.
+  // Se aplica a nivel de (fs, inode) — dos fds distintos del mismo nodo
+  // colisionan. El VFS no lo toca; solo syscall.c lo lee/escribe.
+  // Al cerrar el fd no hay cleanup especial: el próximo flock sobre el
+  // mismo inode ignora entradas con flock_mode == 0.
+  int flock_mode;
   wait_queue_t read_wq;
   wait_queue_t write_wq;
 } file_descriptor_t;

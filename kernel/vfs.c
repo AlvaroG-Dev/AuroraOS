@@ -1730,6 +1730,7 @@ void vfs_init(void) {
 static void fd_init_wqs(file_descriptor_t *fd) {
   wait_queue_init(&fd->read_wq);
   wait_queue_init(&fd->write_wq);
+  fd->flock_mode = 0; // [flock]
 }
 
 file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
@@ -1841,8 +1842,11 @@ int vfs_close_for_proc(void *proc_ptr, int fd) {
   file_descriptor_t *f = proc->fds[fd];
   proc->fds[fd] = NULL;
 
-  f->ref_count--;
-  if (f->ref_count <= 0) {
+  int new_rc = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
+  LOG_INFO("[CLOSE] pid=%u fd=%d ref %d->%d node=%p name='%s'", proc->pid, fd,
+           new_rc + 1, new_rc, (void *)f->node, f->node ? f->node->name : "?");
+
+  if (new_rc == 0) {
     vfs_node_free(f->node);
     kfree(f);
   }
@@ -1926,6 +1930,8 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
     size_t chunk = count - total;
     if (chunk > chunk_size)
       chunk = chunk_size;
+    LOG_INFO("[WRITE-CHUNK] total=%lu chunk=%lu", (unsigned long)total,
+             (unsigned long)chunk);
 
     if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
       if (total == 0) {
@@ -1936,6 +1942,7 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
     }
 
     int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
+    LOG_INFO("[WRITE-CHUNK] -> %lld", (long long)bytes);
     if (bytes < 0) {
       if (total == 0) {
         kfree(kbuf);

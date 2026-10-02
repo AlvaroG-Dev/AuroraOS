@@ -437,3 +437,25 @@ void klog_write_raw(const char *buf, size_t n) {
     out_char(buf[i]);
   serial_lock_release(flags);
 }
+
+// ---------------------------------------------------------------------------
+// [klogctl] Peek no destructivo del ring.
+// ---------------------------------------------------------------------------
+size_t klog_peek(char *out, size_t max_len) {
+  if (!out || max_len == 0)
+    return 0;
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  size_t n = 0;
+  size_t tail = ring_tail;
+  size_t count = ring_count;
+  while (n < max_len && count > 0) {
+    out[n++] = ring[tail];
+    tail = (tail + 1) % KLOG_RING_SIZE;
+    count--;
+  }
+  serial_lock_release(flags);
+  return n;
+}
+
+size_t klog_size(void) { return KLOG_RING_SIZE; }

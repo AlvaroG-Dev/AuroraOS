@@ -79,22 +79,22 @@ COMMANDS
             [, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
             busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
             clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
-            diff, dirname, dnsdomainname, dos2unix, dpkg, dpkg-deb, du, echo,
-            ed, egrep, env, expand, expr, factor, false, fgrep, find, fold,
-            free, fsync, fuser, getopt, grep, groups, gunzip, gzip, hd, head,
-            hexdump, hexedit, hostid, hostname, hush, id, install, kill,
-            killall, killall5, less, link, ln, logname, ls, lzcat, lzma, lzop,
-            md5sum, mdev, mkdir, mkfifo, mknod, mktemp, more, mount, mountpoint,
-            mv, nice, nl, nohup, nproc, od, paste, patch, pgrep, pidof,
-            pipe_progress, pivot_root, pkill, printenv, printf, ps, pwd,
-            readlink, realpath, reset, resize, rev, rm, rmdir, rpm, rpm2cpio,
-            run-parts, script, scriptreplay, sed, seq, setsid, sh, sha1sum,
-            sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort, split,
-            start-stop-daemon, stat, strings, stty, sum, sync, tac, tail, tar,
-            tee, test, time, timeout, top, touch, tr, tree, true, truncate, ts,
-            tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip,
-            uptime, usleep, uudecode, uuencode, vi, watch, wc, which, whoami,
-            xargs, xxd, xz, xzcat, yes, zcat
+            diff, dirname, dmesg, dnsdomainname, dos2unix, dpkg, dpkg-deb, du,
+            echo, ed, egrep, env, expand, expr, factor, false, fgrep, find,
+            flock, fold, free, fsync, fuser, getopt, grep, groups, gunzip, gzip,
+            hd, head, hexdump, hexedit, hostid, hostname, hush, id, install,
+            kill, killall, killall5, less, link, ln, logname, ls, lzcat, lzma,
+            lzop, md5sum, mdev, mesg, mkdir, mkfifo, mknod, mktemp, more, mount,
+            mountpoint, mv, nice, nl, nohup, nproc, od, paste, patch, pgrep,
+            pidof, pipe_progress, pivot_root, pkill, printenv, printf, ps,
+            pstree, pwd, readlink, realpath, reset, resize, rev, rm, rmdir, rpm,
+            rpm2cpio, run-parts, script, scriptreplay, sed, seq, setsid, sh,
+            sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort,
+            split, start-stop-daemon, stat, strings, stty, sum, sync, tac, tail,
+            tar, tee, test, time, timeout, top, touch, tr, tree, true, truncate,
+            ts, tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz,
+            unzip, uptime, usleep, uudecode, uuencode, vi, watch, wc, which,
+            whoami, xargs, xxd, xz, xzcat, yes, zcat
 
 COMMAND DESCRIPTIONS
     arch
@@ -433,6 +433,16 @@ COMMAND DESCRIPTIONS
 
         Strip non-directory suffix from FILENAME
 
+    dmesg
+        dmesg [-cr] [-n LEVEL] [-s SIZE]
+
+        Print or control the kernel ring buffer
+
+                -c              Clear ring buffer after printing
+                -n LEVEL        Set console logging level
+                -s SIZE         Buffer size
+                -r              Print raw message buffer
+
     dos2unix
         dos2unix [-ud] [FILE]
 
@@ -611,6 +621,16 @@ COMMAND DESCRIPTIONS
                 -exec CMD ARG + Run CMD with {} replaced by list of file names
                 -delete         Delete current file/directory. Turns on -depth option
                 -quit           Exit
+
+    flock
+        flock [-sxun] FD | { FILE [-c] PROG ARGS }
+
+        [Un]lock file descriptor, or lock FILE, run PROG
+
+                -s      Shared lock
+                -x      Exclusive lock (default)
+                -u      Unlock FD
+                -n      Fail rather than wait
 
     fold
         fold [-bs] [-w WIDTH] [FILE]...
@@ -955,6 +975,12 @@ COMMAND DESCRIPTIONS
 
         If /dev/mdev.log file exists, debug log will be appended to it.
 
+    mesg
+        mesg [y|n]
+
+        Control write access to your terminal y Allow write access to your
+        terminal n Disallow write access to your terminal
+
     mkdir
         mkdir [-m MODE] [-p] DIRECTORY...
 
@@ -1163,6 +1189,13 @@ COMMAND DESCRIPTIONS
 
                 w       Wide output
                 l       Long output
+
+    pstree
+        pstree [-p] [PID|USER]
+
+        Display process tree, optionally start from USER or PID
+
+                -p      Show pids
 
     pwd pwd
 

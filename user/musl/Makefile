@@ -5,7 +5,7 @@ SYSDIR  := ../../sysroot/apps
 
 MUSL_CFLAGS := -static -no-pie -Os -fno-stack-protector \
                -ffunction-sections -fdata-sections \
-               -Wl,--gc-sections
+               -Wl,--gc-sections -pthread
 
 # Auto-detecta apps/<name>/main.c
 MUSL_APPS := $(patsubst apps/%/main.c,%,$(wildcard apps/*/main.c))

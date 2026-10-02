@@ -87,6 +87,13 @@ typedef struct task {
   // Per-task sobrevive incluso si la tarea migra de CPU durante la
   // syscall.
   registers_t *syscall_regs;
+
+  // [clone] Puntero al tid del usuario. CLONE_CHILD_CLEARTID:
+  // cuando esta tarea muere, escribimos 0 en *clear_child_tid y
+  // futex_wake() sobre esa dirección. Lo pone set_tid_address().
+  // NULL si nunca se llamó.
+  uint32_t *clear_child_tid;
+
 } task_t;
 
 void sched_init(void);
@@ -132,6 +139,12 @@ task_t *sched_create_forked_user_task(registers_t *parent_regs, uint64_t cr3);
 // la tarea en la wait queue (t->waiting_on != NULL). El consumidor
 // (sched_wake_expired) lee ambos campos bajo el mismo lock.
 void sched_set_blocked_deadline(task_t *t, uint64_t deadline);
+
+// [clone] Como sched_create_forked_user_task, pero permite sobrescribir
+// el RSP del usuario (stack argument de clone). rsp_override == 0
+// significa "usa regs->rsp" (comportamiento fork).
+task_t *sched_create_forked_user_task_ex(registers_t *regs, uint64_t cr3,
+                                         uint64_t rsp_override);
 
 void preempt_disable(void);
 void preempt_enable(void);
