@@ -2862,12 +2862,13 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
   return r;
 }
 
-// [EXECVE-LOCK] Test temporal para confirmar que el fallo de
-// `dmesg | wc -c` es una race entre dos execve concurrentes en CPUs
-// distintas. Serializa todos los execve del sistema. Si con esto el
-// pipeline ya no se cuelga, la causa está en process_execve_prepare.
-static spinlock_t g_execve_lock;
-static int g_execve_lock_ready = 0;
+// [EXECVE-LOCK] process_execve_prepare cambia el address space del
+// proceso actual y toca estructuras VMA/PMM compartidas. Mantener los
+// execve serializados evita que dos CPUs entren simultáneamente en esa
+// ruta. El lock se inicializa estáticamente: NO puede haber un "lazy init"
+// concurrente que reinicialice el spinlock mientras otra CPU ya lo está
+// usando.
+static spinlock_t g_execve_lock = {0};
 
 static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                         uint64_t a4, uint64_t a5) {
@@ -2876,11 +2877,6 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-
-  if (!g_execve_lock_ready) {
-    spin_init(&g_execve_lock);
-    g_execve_lock_ready = 1;
-  }
 
   unsigned long exec_flags = spin_lock_irqsave(&g_execve_lock);
   int64_t ret = -EFAULT;
