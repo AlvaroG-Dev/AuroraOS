@@ -41,3 +41,5 @@ third_party/*.tar.gz
 # kernel.bak.string (parece un backup tuyo)
 kernel.bak.string/
 kernel.bak
+debug.log
+qemu_debug.log
