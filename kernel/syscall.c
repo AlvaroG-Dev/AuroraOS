@@ -2970,6 +2970,8 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   }
   regs->rip = new_entry;
   regs->rsp = new_rsp;
+  LOG_INFO("[EXECVE-IRET] pid=%u rip=%p rsp=%p", proc->pid, (void *)regs->rip,
+           (void *)regs->rsp);
 
   ret = 0;
 

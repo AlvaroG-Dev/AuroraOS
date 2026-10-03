@@ -1973,15 +1973,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     return rc == -ENOMEM ? -ENOMEM : -ENOEXEC;
   }
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u elf loaded, interp_len=%zu", tpid,
-           interp_len);
-
   uint64_t at_base = 0;
   uint64_t final_entry = entry;
   uint64_t interp_vma_start = 0, interp_vma_end = 0;
 
   if (interp_len > 0) {
-    LOG_INFO("[EXECVE] Cargando intérprete '%s'", interp_path);
 
     vfs_node_t *inode = vfs_lookup(interp_path);
     if (!inode) {
@@ -2014,28 +2010,17 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
     at_base = interp_load_base;
     final_entry = interp_entry;
-    LOG_INFO("[EXECVE] AT_BASE = %p, intérprete entry = %p", (void *)at_base,
-             (void *)interp_entry);
   }
-
-  LOG_INFO("[EXECVE-TRACE] pid=%u before stack mapping", tpid);
 
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
   for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
-    LOG_INFO("[EXECVE-TRACE] pid=%u stack page off=%lu before pmm_alloc", tpid,
-             (unsigned long)off);
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
       paging_free_user_space(new_pml4_phys);
       return -ENOMEM;
     }
-    LOG_INFO("[EXECVE-TRACE] pid=%u stack page off=%lu pmm_alloc=%p", tpid,
-             (unsigned long)off, (void *)phys);
     memset(phys_to_virt(phys), 0, PAGE_SIZE);
-    LOG_INFO(
-        "[EXECVE-TRACE] pid=%u stack page off=%lu before paging_map_page_in",
-        tpid, (unsigned long)off);
     if (paging_map_page_in(new_pml4, stack_base + off, phys,
                            PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
         0) {
@@ -2043,11 +2028,7 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
       paging_free_user_space(new_pml4_phys);
       return -ENOMEM;
     }
-    LOG_INFO("[EXECVE-TRACE] pid=%u stack page off=%lu mapped", tpid,
-             (unsigned long)off);
   }
-
-  LOG_INFO("[EXECVE-TRACE] pid=%u before setup_arg_block", tpid);
 
   proc_auxv_info_t ai = {
       .phdr_vaddr = phdr_vaddr,
@@ -2062,18 +2043,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     paging_free_user_space(new_pml4_phys);
     return -ENOMEM;
   }
-  LOG_INFO("[EXECVE-TRACE] pid=%u setup_arg_block done rsp=%p", tpid,
-           (void *)user_rsp);
-
-  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE COMMIT old=%p new=%p", tpid,
-           (void *)proc->pml4_phys, (void *)new_pml4_phys);
 
   // ===== COMMIT =====
   uint64_t old_pml4_phys = proc->pml4_phys;
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE vma_destroy_all", tpid);
   vma_destroy_all(proc);
-  LOG_INFO("[EXECVE-TRACE] pid=%u AFTER vma_destroy_all", tpid);
 
   proc->pml4_phys = new_pml4_phys;
   if (proc->task)
@@ -2133,8 +2107,6 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     proc->name[n] = '\0';
   }
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE vma_create x3", tpid);
-
   if (!vma_create(proc, vma_start, vma_end, PTE_USER | PTE_WRITABLE | PTE_NX,
                   VMA_ELF))
     LOG_ERR("[EXECVE] vma_create ELF falló");
@@ -2145,15 +2117,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK))
     LOG_ERR("[EXECVE] vma_create stack falló");
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u AFTER vma_create x3", tpid);
-
   if (process_set_envp(proc, envc, envp) != 0)
     LOG_WARN("[EXECVE] process_set_envp falló, entorno conservado");
   if (process_set_argv(proc, argc, argv) != 0)
     LOG_WARN("[EXECVE] process_set_argv falló, argv conservado");
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE write_cr3(new=%p)", tpid,
-           (void *)new_pml4_phys);
   write_cr3(new_pml4_phys);
 
   // [TEST] Verificar que la pila de kernel sigue mapeada tras cambiar CR3.
@@ -2179,9 +2147,8 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
   wrmsr(0xC0000100, 0);
   paging_free_user_space(old_pml4_phys);
-  LOG_INFO("[EXECVE-POST-FREE] pid=%u still alive rsp=%p", tpid, (void *)&tpid);
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u BEFORE fd_cloexec loop", tpid);
+  LOG_DEBUG("[EXECVE-TRACE] pid=%u BEFORE fd_cloexec loop", tpid);
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fd_cloexec_mask & (1u << f)) {
       proc->fd_cloexec_mask &= ~(1u << f);
@@ -2189,13 +2156,12 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
         vfs_close_for_proc(proc, f);
     }
   }
-  LOG_INFO("[EXECVE-TRACE] pid=%u AFTER fd_cloexec loop", tpid);
 
   *new_entry = final_entry;
   *new_rsp = user_rsp;
 
-  LOG_INFO("[EXECVE-TRACE] pid=%u DONE entry=%p rsp=%p", tpid,
-           (void *)final_entry, (void *)user_rsp);
+  LOG_DEBUG("[EXECVE-TRACE] pid=%u DONE entry=%p rsp=%p", tpid,
+            (void *)final_entry, (void *)user_rsp);
 
   LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d at_base=%p)",
            path, (void *)final_entry, (void *)user_rsp, argc, envc,

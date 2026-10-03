@@ -693,11 +693,15 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
 
   // Actualizar PTEs de las páginas presentes.
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  int multi = (proc->team_size > 1);
   for (uint64_t p = addr; p < end; p += PAGE_SIZE) {
     uint64_t phys = paging_get_phys_in(pml4, p);
     if (phys) {
       paging_map_page_in(pml4, p, phys & PTE_FRAME, new_flags);
-      paging_invalidate_tlb_global(p);
+      if (multi)
+        paging_invalidate_tlb_global(p);
+      else
+        paging_invalidate_tlb(p);
     }
   }
 

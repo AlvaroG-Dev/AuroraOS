@@ -47,7 +47,8 @@ task_switch:
     ;
     ; Así ninguna CPU puede seleccionar new durante la transición y old
     ; permanece protegido hasta que hemos abandonado su stack.
-    mov dword [rsi + TASK_OFF_ON_CPU], 1
+    mov eax, 1
+    xchg eax, [rsi + TASK_OFF_ON_CPU]
 
     test rdx, rdx
     jz .skip_unlock
@@ -65,7 +66,8 @@ task_switch:
     ; Ya estamos ejecutando sobre la pila de new_task. A partir de aquí
     ; old_task ya no está siendo usado por esta CPU y puede publicarse
     ; como libre para que otra CPU lo seleccione.
-    mov dword [rdi + TASK_OFF_ON_CPU], 0
+    xor eax, eax
+    xchg eax, [rdi + TASK_OFF_ON_CPU]
 
     mov rax, [rsi + TASK_OFF_CR3]
     test rax, rax

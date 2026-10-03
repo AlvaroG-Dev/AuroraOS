@@ -221,7 +221,7 @@ static void map_phys_window(uint64_t max_phys_addr) {
            (void *)PHYS_MAP_BASE, (void *)(PHYS_MAP_BASE + size),
            (unsigned long)(size / (1024 * 1024)));
 
-  uint64_t flags = PTE_WRITABLE | PTE_NOCACHE | PTE_GLOBAL | PTE_NX;
+  uint64_t flags = PTE_WRITABLE | PTE_GLOBAL | PTE_NX; // RAM = Write-Back
 
   for (uint64_t off = 0; off < size; off += 0x200000) {
     if (paging_map_huge_page_early(PHYS_MAP_BASE + off, off, flags) != 0) {

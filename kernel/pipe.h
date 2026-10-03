@@ -5,7 +5,7 @@
 #include "vfs.h"
 
 // Tamaño del buffer circular de cada pipe.
-#define PIPE_BUF_SIZE 4096
+#define PIPE_BUF_SIZE 65536
 
 // Crea una pareja de nodos VFS conectados por un pipe.
 // El llamante debe hacer vfs_node_free() sobre cada extremo cuando

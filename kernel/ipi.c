@@ -16,18 +16,31 @@
 #define ICR_DEST_ALL_INCL_SELF (2 << 18)
 #define ICR_DELIVERY_PENDING (1 << 12)
 
-// [H3] Estado del shootdown en vuelo.
+// ---------------------------------------------------------------------------
+// [H3] TLB shootdown.
 //
-// Solo un shootdown a la vez, serializado por tlb_shootdown_lock.
-// tlb_addr es el valor que el handler remoto lee; tlb_ack_count es el
-// número de CPUs que ya han hecho su invalidación.
+// Protocolo (sin deadlock aunque el llamante tenga IRQs apagadas):
 //
-// tlb_shootdown_lock es un spinlock PLANO (sin irqsave). Si
-// deshabilitásemos IRQs dentro del shootdown, otro CPU que también
-// estuviera en ipi_tlb_shootdown no podría recibir nuestra IPI
-// (necesaria para el ack) → deadlock.
+//   - Solo un shootdown a la vez, serializado por tlb_shootdown_lock
+//     (spinlock PLANO, sin irqsave).
+//   - tlb_addr es la dirección a invalidar (0 = flush completo).
+//   - tlb_pending es una máscara: el bit i está a 1 mientras la CPU i
+//     todavía no ha invalidado. El emisor la rellena con las CPUs
+//     destino y espera a que llegue a 0.
+//   - Una CPU atiende su bit desde tlb_service(), que se llama:
+//       * desde el handler de la IPI (ipi_handler_tlb), y
+//       * desde los bucles de espera del propio shootdown.
+//     Esto último es lo que evita el deadlock: una CPU que gira
+//     esperando tlb_shootdown_lock con IRQs apagadas ya no necesita
+//     recibir la IPI para dar su ack; atiende la petición ella misma.
+//
+// tlb_service() es idempotente: si la IPI llega después de que la CPU ya
+// atendió su bit por polling, no hace nada.
+//
+// Suposición: las CPUs online son los ids 0..ncpus-1 y ncpus <= 64.
+// ---------------------------------------------------------------------------
 static volatile uint64_t tlb_addr = 0;
-static volatile int tlb_ack_count = 0;
+static volatile uint64_t tlb_pending = 0;
 static spinlock_t tlb_shootdown_lock;
 
 static void icr_wait(void) {
@@ -38,6 +51,8 @@ static void icr_wait(void) {
 
 void ipi_init(void) {
   spin_init(&tlb_shootdown_lock);
+  tlb_addr = 0;
+  tlb_pending = 0;
   LOG_INFO("[IPI] Subsistema de IPIs inicializado (vectores 0x%x, 0x%x, "
            "0x%x, 0x%x)",
            IPI_VECTOR_RESCHED, IPI_VECTOR_TLB, IPI_VECTOR_CALL,
@@ -73,69 +88,90 @@ void ipi_handler_resched(void) {
   sched_mark_need_resched();
 }
 
-void ipi_handler_tlb(void) {
-  lapic_eoi();
-
-  // Snapshot del addr. El handler corre con IRQs off, así que no
-  // puede ser reinterrumpido por otro IPI hasta hacer el ack.
-  uint64_t addr = tlb_addr;
-
+// Invalida el TLB de la CPU actual. addr == 0 => flush completo de las
+// entradas no globales (recargar CR3).
+static inline void tlb_flush_local(uint64_t addr) {
   if (addr == 0) {
-    // Full TLB flush: recargar CR3 fuerza invalidación de todas las
-    // entradas no-globales.
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
   } else {
     __asm__ volatile("invlpg (%0)" : : "r"(addr) : "memory");
   }
+}
 
-  // Barrera: el ack no puede publicarse antes que la invalidación.
-  __sync_synchronize();
-  __sync_fetch_and_add(&tlb_ack_count, 1);
+// Atiende la petición pendiente de ESTA CPU, si existe. Segura desde el
+// handler de la IPI y desde bucles de espera con IRQs apagadas.
+static void tlb_service(void) {
+  uint64_t bit = 1ULL << smp_processor_id();
+  if (!(__atomic_load_n(&tlb_pending, __ATOMIC_ACQUIRE) & bit))
+    return;
+
+  // El emisor escribe tlb_addr ANTES de publicar tlb_pending con
+  // release, y nosotros hemos leído el bit con acquire: tlb_addr es
+  // el valor de esta ronda.
+  tlb_flush_local(tlb_addr);
+
+  // El ack (limpiar el bit) no puede publicarse antes que la
+  // invalidación.
+  __atomic_fetch_and(&tlb_pending, ~bit, __ATOMIC_RELEASE);
+}
+
+void ipi_handler_tlb(void) {
+  lapic_eoi();
+  tlb_service();
 }
 
 // [H3] TLB shootdown cross-CPU.
 void ipi_tlb_shootdown(uint64_t addr) {
-  // Invalidación local primero. Siempre, aunque no haya APs.
-  if (addr == 0) {
-    uint64_t cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
-  } else {
-    __asm__ volatile("invlpg (%0)" : : "r"(addr) : "memory");
-  }
+  // smp_processor_id() debe ser estable mientras dura el protocolo:
+  // si la tarea migrase, calcularíamos mal la máscara de destinos.
+  preempt_disable();
 
-  // Cuántos CPUs online. Si solo estamos nosotros, hemos terminado.
+  // Invalidación local primero. Siempre, aunque no haya APs.
+  tlb_flush_local(addr);
+
+  // Cuántas CPUs online. Si solo estamos nosotros, hemos terminado.
   int ncpus = 1;
   if (smp_boot_params) {
     ncpus = smp_boot_params->aps_ready + 1;
     if (ncpus > MAX_CPUS)
       ncpus = MAX_CPUS;
   }
-  if (ncpus <= 1)
+  if (ncpus <= 1) {
+    preempt_enable();
     return;
+  }
 
-  // Serializar shootdowns concurrentes.
+  uint64_t me = 1ULL << smp_processor_id();
+  uint64_t targets = ((1ULL << ncpus) - 1) & ~me;
+
+  // Serializar shootdowns concurrentes. Mientras giramos atendemos las
+  // peticiones ajenas: así otro CPU que sostiene el lock y espera
+  // nuestro ack lo recibe aunque nosotros tengamos IRQs apagadas.
   while (__sync_lock_test_and_set(&tlb_shootdown_lock.locked, 1)) {
+    tlb_service();
     __asm__ volatile("pause");
   }
 
   tlb_addr = addr;
-  tlb_ack_count = 0;
-  __sync_synchronize();
-
-  int expect = ncpus - 1;
+  __atomic_store_n(&tlb_pending, targets, __ATOMIC_RELEASE);
   ipi_send_allbutself(IPI_VECTOR_TLB);
 
-  while (__atomic_load_n(&tlb_ack_count, __ATOMIC_ACQUIRE) < expect) {
+  // Esperar a que todas las CPUs destino hayan invalidado.
+  uint64_t spins = 0;
+  while (__atomic_load_n(&tlb_pending, __ATOMIC_ACQUIRE) != 0) {
     __asm__ volatile("pause");
+    if (++spins == 400000000ULL) {
+      LOG_ERR("[IPI] shootdown atascado: pending=0x%lx addr=0x%lx cpu=%d",
+              (unsigned long)tlb_pending, (unsigned long)addr,
+              (int)smp_processor_id());
+      spins = 0;
+    }
   }
 
-  // Limpiar para el próximo shootdown. tlb_addr = 0 sería un flush
-  // completo si alguien lo leyera ahora, que es seguro de todos modos.
-  tlb_addr = 0;
   __sync_lock_release(&tlb_shootdown_lock.locked);
+  preempt_enable();
 }
 
 void ipi_tlb_shootdown_all(void) { ipi_tlb_shootdown(0); }

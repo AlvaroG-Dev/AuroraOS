@@ -1930,8 +1930,6 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
     size_t chunk = count - total;
     if (chunk > chunk_size)
       chunk = chunk_size;
-    LOG_INFO("[WRITE-CHUNK] total=%lu chunk=%lu", (unsigned long)total,
-             (unsigned long)chunk);
 
     if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
       if (total == 0) {
@@ -1942,7 +1940,6 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
     }
 
     int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
-    LOG_INFO("[WRITE-CHUNK] -> %lld", (long long)bytes);
     if (bytes < 0) {
       if (total == 0) {
         kfree(kbuf);
