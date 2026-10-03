@@ -1843,8 +1843,6 @@ int vfs_close_for_proc(void *proc_ptr, int fd) {
   proc->fds[fd] = NULL;
 
   int new_rc = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
-  LOG_INFO("[CLOSE] pid=%u fd=%d ref %d->%d node=%p name='%s'", proc->pid, fd,
-           new_rc + 1, new_rc, (void *)f->node, f->node ? f->node->name : "?");
 
   if (new_rc == 0) {
     vfs_node_free(f->node);

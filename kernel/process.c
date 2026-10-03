@@ -2124,31 +2124,9 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
   write_cr3(new_pml4_phys);
 
-  // [TEST] Verificar que la pila de kernel sigue mapeada tras cambiar CR3.
-  // Si este código no llega a ejecutarse, la pila se ha perdido.
-  {
-    uint64_t rsp_val;
-    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp_val));
-    uint64_t *new_pml4_v = (uint64_t *)phys_to_virt(new_pml4_phys);
-    uint64_t phys_of_rsp = paging_get_phys_in(new_pml4_v, rsp_val);
-    LOG_INFO("[EXECVE-POST-CR3] pid=%u rsp=%p phys=%p ok=%d", tpid,
-             (void *)rsp_val, (void *)phys_of_rsp, phys_of_rsp != 0);
-  }
-
-  // [TEST] Y también que podemos leer de la pila sin #PF
-  {
-    volatile uint64_t probe = 0;
-    uint64_t rsp_val;
-    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp_val));
-    probe = *(volatile uint64_t *)rsp_val;
-    LOG_INFO("[EXECVE-POST-CR3] pid=%u rsp[0]=%p (leído OK)", tpid,
-             (void *)probe);
-  }
-
   wrmsr(0xC0000100, 0);
   paging_free_user_space(old_pml4_phys);
 
-  LOG_DEBUG("[EXECVE-TRACE] pid=%u BEFORE fd_cloexec loop", tpid);
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     if (proc->fd_cloexec_mask & (1u << f)) {
       proc->fd_cloexec_mask &= ~(1u << f);
@@ -2159,9 +2137,6 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
   *new_entry = final_entry;
   *new_rsp = user_rsp;
-
-  LOG_DEBUG("[EXECVE-TRACE] pid=%u DONE entry=%p rsp=%p", tpid,
-            (void *)final_entry, (void *)user_rsp);
 
   LOG_INFO("[EXECVE] '%s' cargado (entry=%p rsp=%p argc=%d envc=%d at_base=%p)",
            path, (void *)final_entry, (void *)user_rsp, argc, envc,

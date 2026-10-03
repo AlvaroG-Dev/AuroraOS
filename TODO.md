@@ -148,6 +148,54 @@ Bloque 6 — Mejoras de input/terminal
 - [ ] Futex robusto (FUTEX_LOCK_PI) → -ENOSYS.
 - [ ] CLONE_VFORK real.
 
+Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
+
+8.1 Syscalls Linux adicionales ✅
+   - klogctl(103): dmesg funciona (`dmesg`, `dmesg -c`, `dmesg | head`).
+   - flock(73): advisory lock por fd con scan de todos los procesos.
+   - waitid(247): wrapper de process_waitpid + relleno de siginfo_t.
+   - setdomainname(171): cosmético, lo devuelve uname().
+   Cierra el ⚠️ de 3.5 del ROADMAP (superficie syscall para BusyBox).
+
+8.2 Bugs SMP reales cazados con `dmesg | wc -c` ✅
+   - **Deadlock de `ipi_tlb_shootdown`**: dos CPUs concurrentes en
+     ld.so (mprotect RELRO). CPU A tenía `tlb_shootdown_lock` esperando
+     acks; CPU B giraba en el mismo lock sin poder atender la IPI que
+     A le mandaba. Deadlock mutuo. Fix: `tlb_pending` bitmask + 
+     `tlb_service` por polling + `preempt_disable` durante el protocolo.
+   - **`isr_handler` con `saved_regs` static**: dos CPUs en #PF
+     concurrente corrompían el frame la una de la otra. Fix: usar el
+     frame propio (parámetro `regs`).
+   - **Ventana física en UC vs WB**: la ventana directa mapeaba RAM
+     como NOCACHE mientras las páginas de usuario mapeaban los mismos
+     frames como WB. En x86 esto es aliasing indefinido. Fix: ventana
+     como Write-Back.
+   - **`ref_count` de file_descriptor_t no atómico**: `dup2`, `fork`,
+     clonado de VMAs y `vfs_close_for_proc` usaban `++`/`--` sin
+     `__atomic_*`. Cuando dmesg/wc/shell cierran el mismo fd a la vez,
+     se perdían decrementos y el write end del pipe nunca llegaba a 0.
+   - **Use-after-free en `pipe_close`**: dos extremos cerrando a la vez
+     en CPUs distintas hacían `wake_up_all(&p->...)` sobre `pipe_t`
+     ya liberado. Fix: contador `refs` (2 al crear) + `kfree` solo
+     cuando llega a 0.
+   - **`FD_CLOEXEC` no implementado**: `k_fcntl(F_SETFD)`,
+     `k_dup2` y `execve` ignoraban el bit. Busybox ash filtraba
+     extremos de pipe sobrantes. Fix: `fd_cloexec_mask` por proceso,
+     `execve` cierra los marcados.
+
+8.3 Regresión ✅
+   - `dmesg | wc -c` × 15 iteraciones × 3 paralelos con `-smp 2` y
+     `-smp 4` sin cuelgues.
+   - `test_thread` sigue OK después de todos los cambios.
+
+**Deuda conocida (no bloquea el cierre):**
+- [ ] Señales per-thread (blocked_signals compartido entre hilos).
+- [ ] `kill(tid, sig)` / `pthread_kill` dirigido a un thread.
+- [ ] `execve` desde thread no-líder no mata los demás del team.
+- [ ] Futex robusto (`FUTEX_LOCK_PI`, `FUTEX_REQUEUE`, `FUTEX_WAKE_OP`).
+- [ ] `CLONE_VFORK` real.
+- [ ] `mknod` en devfs por major/minor (hoy solo guarda rdev).
+
 ---
 
 # Estado global
@@ -168,10 +216,16 @@ Bloque 6 — Mejoras de input/terminal
 | 6.1 scancodes | ✅ |
 | 6.2-6.4 | ⏳ |
 | 7 futex+clone | ✅ |
+| 8 SMP + syscalls Linux | ✅ |
 
 **Lo que queda del TODO**: 5.4 (getty — opcional, cubierto por init),
 6.2-6.4 (input/terminal avanzado), y el item opcional de mknod por
 major/minor. Todo lo demás está cerrado o equivalente.
+
+Deudas conocidas del Bloque 7 (no bloquean nada hoy, todas acotadas):
+señales per-thread, `pthread_kill` dirigido, futex robusto,
+`CLONE_VFORK`. Ninguna impide que busybox o binarios musl básicos
+funcionen.
 
 **Siguiente bloque sugerido**: Terminal 2D (Fase 4.3 del ROADMAP), que
 desbloquea `vi`, `less` y `top` con render completo. Requiere ~8-10 h

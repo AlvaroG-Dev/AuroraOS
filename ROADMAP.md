@@ -35,6 +35,9 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] Framebuffer compositor + window server + terminal gráfico
 - [x] Framework de tests del kernel + regresiones userland (141 tests)
 - [x] CI de build y boot con QEMU, incluyendo 1/2/4 CPU
+- [x] Syscalls Linux: `futex`, `clone(CLONE_THREAD)`, `flock`, `klogctl`, `waitid`, `setdomainname`
+- [x] `pthread_create` / `pthread_join` funcional (stress 50 iteraciones, 60 clone events sin PF)
+- [x] Deadlock del TLB shootdown SMP resuelto (bitmask `tlb_pending` + polling en vez de IPI)
 
 La prioridad ahora es completar userland y filesystem, después networking/USB, y seguir validando Aurora OS sobre hardware real. En paralelo, el objetivo a más largo plazo del proyecto es que Aurora sea tan abierto y eficiente como Linux pero tan "todo hecho" como Windows: eso implica un BusyBox completo como base de userland (3.5), una capa de compatibilidad para ejecutar binarios Linux/ELF reales sin recompilar (3.6), y — de forma más experimental y acotada — un loader de ejecutables Windows/PE de consola (3.7). Ver el resumen de prioridad relativa al final de la Fase 3.
 
@@ -58,6 +61,7 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [x] Auditar accesos a estado compartido sin lock. (C3: need_resched con xchg; C4: state+deadline atómicos)
 - [x] Revisar IRQ/preemption contexts.
 - [x] Revisar TLB shootdown y cambios de address space concurrentes. (H3: ipi_tlb_shootdown)
+- [x] **Deadlock de `ipi_tlb_shootdown` con dos CPUs concurrentes**. Cazado con `dmesg | wc -c` (ld.so hace `mprotect(RELRO)` en dos procesos a la vez). Fix: bitmask `tlb_pending` (un bit por CPU) + `tlb_service` por polling; cada CPU que gira en `tlb_shootdown_lock` atiende su propia invalidación sin depender de recibir la IPI con IRQs on. `preempt_disable` durante el protocolo.
 - [x] Revisar lifecycle de task_t y process_t.
 - [x] Revisar wait queues bajo carreras de wake/block/timeout. (C4)
 - [x] Resolver race de migración de tasks entre CPUs en `wait_common` + `task_switch` (corregido con publicación atómica de `current_task`/`need_resched` y transición atómica de `on_cpu`; regresión con migración y stack canary).
@@ -69,6 +73,8 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [x] `need_resched`: publicación/consumo atómico con ACQUIRE/RELEASE + exchange.
 - [x] `on_cpu`: transición de context switch publicada atómicamente con `xchg`.
 - [x] Test de regresión: task migrando con `cpu_affinity=-1` y stack canary verificado tras la migración.
+- [x] `isr_handler` usaba un `registers_t` static compartido entre CPUs. Reemplazado por el frame propio de cada invocación.
+- [x] Ventana física de RAM en Write-Back (antes NOCACHE causaba aliasing UC/WB sobre los mismos frames cuando el proceso mapeaba RAM con WB).
 
 ### 1.3 Testing y CI
 - [x] Mantener regresiones para cada bug crítico corregido.
@@ -76,6 +82,7 @@ Objetivo: eliminar clases de bugs antes de seguir añadiendo grandes subsistemas
 - [x] Añadir tests de stress de scheduler, memoria, IPC y VFS (AHCI stress 1MB, multi-LBA, buffer no contiguo).
 - [x] Añadir pruebas de errores y recursos agotados. (doble free, remap, late free)
 - [x] Añadir tests de corrupción FAT32 con mock block device (BPB fuzz, ciclos, out-of-range, huérfanos, E/S durante create).
+- [x] Regresión de concurrencia SMP: lanzar `dmesg | wc -c` en bucle (15 iteraciones × 3 paralelos) con 2 y 4 CPUs.
 - [ ] Evitar que los tests dependan accidentalmente del orden de ejecución.
 - [ ] Mejorar diagnósticos de CI cuando QEMU falle.
 
@@ -202,7 +209,8 @@ Estado actual:
 - [x] TTY: `stty`, `setsid`, `hostname`, `watch`.
 - [x] Binario: `hexedit`, `xxd`, `hexdump`, `od`, `strings`.
 - [x] Pipes y redirecciones necesarios para el shell.
-- [ ] Completar superficie syscall/libc para un build BusyBox completo (falta `futex`, `clone(thread)`, `flock`, `chroot`, `dmesg`/klogctl).
+- [x] `futex` (WAIT/WAKE), `clone(CLONE_THREAD)`, `flock`, `klogctl` (dmesg), `waitid`, `setdomainname`.
+- [ ] Completar superficie syscall/libc para un build BusyBox completo (queda `chroot`, `futex` robusto, `clone` con más flags).
 - [ ] `stat/fstat/lstat` y metadatos completos.
 - [ ] `dup/dup2/pipe/fcntl` con semántica suficiente para más applets.
 - [ ] `ioctl` de terminal más completo.
@@ -224,8 +232,9 @@ Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bas
 - [ ] Tabla de traducción `syscall_linux_nr → función interna de Aurora` (parcial: la mayoría de las comunes ya está).
 - [x] `struct stat` con el layout exacto de Linux x86_64.
 - [x] Mapeo de `errno`.
-- [ ] `futex()`.
-- [ ] `clone()` con flags de musl para pthread.
+- [x] `futex()` (WAIT/WAKE, PRIVATE).
+- [x] `clone()` con flags de musl para pthread (CLONE_VM|CLONE_THREAD|CLONE_SETTLS|...).
+- [x] `pthread_create` / `pthread_join` / `pthread_mutex` / `pthread_cond` operativos.
 - [ ] Suite de smoke tests con binarios reales.
 
 ### 3.7 Ejecutar ejecutables Windows (PE/COFF) — expectativas realistas
@@ -316,7 +325,7 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 
 1. **Robustez del kernel + auditoría SMP** — ✅ completada.
 2. **Storage persistente + filesystem** — ✅ cerrado (FAT32 persistente con LFN, rename, buffer cache, tests de corrupción, fsck mínimo).
-3. **Userland/libc/shell** — ⏳ en progreso avanzado (ABI Linux, musl, TTY, pipes, PTYs, job control completo, permisos POSIX reales, `/etc/passwd`, BusyBox dinámico con ~200 applets; queda superficie libc/POSIX y shell avanzado).
+3. **Userland/libc/shell** — ⏳ en progreso avanzado (ABI Linux, musl, TTY, pipes, PTYs, job control completo, permisos POSIX reales, `/etc/passwd`, BusyBox dinámico con ~200 applets, futex+clone, `flock`, `dmesg`; queda superficie libc/POSIX, señales per-thread y shell avanzado).
 4. **Escritorio y window manager** — pendiente; el siguiente salto grande es el terminal 2D.
 5. **Networking**
 6. **USB**
@@ -340,7 +349,7 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 - [ ] Aurora OS puede utilizar teclado/ratón USB.
 - [~] Aurora OS dispone de un modelo de seguridad coherente. (Usuarios y permisos POSIX funcionando; falta sandboxing/capabilities.)
 - [ ] Aurora OS tiene SDK/documentación suficientes para desarrollar aplicaciones de terceros.
-- [~] Aurora OS ejecuta un userland tipo BusyBox completo. (`busybox sh` dinámico con ~200 applets; falta superficie de syscalls para builds completos.)
+- [~] Aurora OS ejecuta un userland tipo BusyBox completo. (`busybox sh` dinámico con ~200 applets, futex+clone, pthreads funcional; falta superficie de syscalls para builds completos.)
 - [ ] Aurora OS puede ejecutar binarios Linux (ELF) reales sin recompilar (estáticos/musl primero, ver 3.6). La infraestructura de enlazado dinámico ya existe.
 - [ ] Aurora OS puede ejecutar un subconjunto acotado de ejecutables Windows de consola (PE/x64).
 

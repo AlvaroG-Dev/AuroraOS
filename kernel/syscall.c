@@ -1459,7 +1459,6 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
   if (rd < 0 || wr < 0)
     return -EMFILE;
 
-  LOG_INFO("[PIPE-CREATE] pid=%u rd=%d wr=%d", proc->pid, rd, wr);
   vfs_node_t *re = NULL, *we = NULL;
   int rc = vfs_pipe_create(&re, &we);
   if (rc != 0)
@@ -1504,8 +1503,8 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
   return 0;
 }
 
-static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3,
-                      uint64_t a4, uint64_t a5) {
+static int64_t k_pipe(uint64_t fds_ptr, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;
@@ -1536,7 +1535,6 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
   __atomic_fetch_add(&f->ref_count, 1, __ATOMIC_ACQ_REL);
 
   if (proc->fds[nfd]) {
-    LOG_INFO("[DUP2] pid=%u closing nfd=%d (oldfd=%d)", proc->pid, nfd, ofd);
     vfs_close_for_proc(proc, nfd);
   }
 
@@ -3431,8 +3429,7 @@ static int64_t k_klogctl(uint64_t type, uint64_t buf, uint64_t len, uint64_t a4,
                          uint64_t a5) {
   (void)a4;
   (void)a5;
-  LOG_INFO("[KLOGCTL] enter type=%d len=%lu buf=%p", (int)type,
-           (unsigned long)len, (void *)buf);
+
   switch ((int)type) {
   case SYSLOG_ACTION_CLOSE:
   case SYSLOG_ACTION_OPEN:
@@ -3465,18 +3462,15 @@ static int64_t k_klogctl(uint64_t type, uint64_t buf, uint64_t len, uint64_t a4,
       LOG_INFO("[KLOGCTL] kmalloc failed");
       return -ENOMEM;
     }
-    LOG_INFO("[KLOGCTL] before peek, n=%lu", (unsigned long)n);
     size_t got;
     if ((int)type == SYSLOG_ACTION_READ_ALL)
       got = klog_peek(tmp, n);
     else
       got = klog_read(tmp, n);
-    LOG_INFO("[KLOGCTL] peek returned %lu", (unsigned long)got);
     int rc = 0;
     if (got > 0 && copy_to_user((void *)buf, tmp, got) < 0)
       rc = -EFAULT;
     kfree(tmp);
-    LOG_INFO("[KLOGCTL] exit rc=%d got=%lu", rc, (unsigned long)got);
     return rc ? rc : (int64_t)got;
   }
 
