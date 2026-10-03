@@ -31,7 +31,7 @@ typedef struct __attribute__((packed)) {
 #define ATA_DMA_PRD_EOT (1 << 15)
 
 // Timeout para operaciones DMA.
-#define ATA_DMA_TIMEOUT_SECONDS 5
+#define ATA_DMA_TIMEOUT_SECONDS 1
 
 typedef struct {
   uint16_t bmide_base;

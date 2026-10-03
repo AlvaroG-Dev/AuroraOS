@@ -286,8 +286,8 @@ static void kmain_task(void) {
   LOG_INFO("[INIT] Cargando init '/apps/init'...");
   process_t *init_proc = process_load("/apps/init");
   if (!init_proc) {
-    LOG_WARN("[INIT] /apps/init no encontrado, fallback a /apps/shell");
-    process_load("/apps/shell");
+    LOG_WARN("[INIT] /apps/init no encontrado, fallback a /apps/terminal");
+    process_load("/apps/terminal");
   }
 
   // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.

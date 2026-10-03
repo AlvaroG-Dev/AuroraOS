@@ -3,7 +3,7 @@ cmd_libbb/hash_md5_sha256_x86-64_shaNI.o := x86_64-linux-musl-gcc -Wp,-MD,libbb/
 deps_libbb/hash_md5_sha256_x86-64_shaNI.o := \
   libbb/hash_md5_sha256_x86-64_shaNI.S \
     $(wildcard include/config/sha256/hwaccel.h) \
-  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
+  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
 
 libbb/hash_md5_sha256_x86-64_shaNI.o: $(deps_libbb/hash_md5_sha256_x86-64_shaNI.o)
 

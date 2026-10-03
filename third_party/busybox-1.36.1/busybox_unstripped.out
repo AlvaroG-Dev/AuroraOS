@@ -253,13 +253,13 @@ SECTIONS
 
 
 ==================================================
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/bin/ld: mode elf_x86_64
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/Scrt1.o succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/Scrt1.o
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crti.o succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crti.o
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtbeginS.o succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtbeginS.o
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/bin/ld: mode elf_x86_64
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/Scrt1.o succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/Scrt1.o
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crti.o succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crti.o
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtbeginS.o succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtbeginS.o
 attempt to open applets/built-in.o succeeded
 applets/built-in.o
 attempt to open archival/lib.a succeeded
@@ -775,25 +775,25 @@ shell/built-in.o
 sysklogd/built-in.o
 util-linux/built-in.o
 util-linux/volume_id/built-in.o
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.so failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.so failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libc.so failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libc.a failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/libc.so failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/libc.a failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.so succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.so
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.so failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.so failed
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtendS.o succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtendS.o
-attempt to open /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crtn.o succeeded
-/home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crtn.o
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.so failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.so failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libc.so failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libc.a failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/libc.so failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/libc.a failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.so succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/libc.so
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.so failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc.a
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.so failed
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/libgcc_eh.a
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtendS.o succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/crtendS.o
+attempt to open /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crtn.o succeeded
+/home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/bin/../lib/gcc/x86_64-linux-musl/11.2.1/../../../../x86_64-linux-musl/lib/crtn.o

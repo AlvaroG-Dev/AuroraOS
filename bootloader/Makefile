@@ -1,61 +1,51 @@
 # bootloader/Makefile
-# Compila el bootloader UEFI usando gcc + objcopy
+# Bootloader UEFI de Aurora OS — versión sin gnu-efi.
+# Compilado con clang + lld-link, target Windows MSVC (MS ABI nativa UEFI).
 
 TARGET  = BOOTX64.EFI
 SRC     = efi_main.c
 
-CC      = gcc
-OBJCOPY = objcopy
+CC      = clang
+LD      = lld-link
 
-# === Detectar rutas de gnu-efi ===
-EFI_INC := $(shell pkg-config --cflags-only-I gnu-efi 2>/dev/null | sed 's/-I//')
-ifeq ($(EFI_INC),)
-    ifneq (,$(wildcard /usr/include/efi/efi.h))
-        EFI_INC = /usr/include/efi
-    else ifneq (,$(wildcard /usr/local/include/efi/efi.h))
-        EFI_INC = /usr/local/include/efi
-    endif
-endif
+CLANG_TARGET = x86_64-pc-windows-msvc
 
-EFI_ARCH_INC := $(EFI_INC)/x86_64
+# -ffreestanding:      sin libc
+# -fno-stack-protector: sin __stack_chk_*
+# -fshort-wchar:        wchar_t = 16 bits (CHAR16 UEFI)
+# -mno-red-zone:        sin red zone
+# -mno-stack-arg-probe: sin llamada a __chkstk
+CFLAGS = -target $(CLANG_TARGET) \
+         -ffreestanding -fno-stack-protector -fshort-wchar \
+         -mno-red-zone -mno-stack-arg-probe \
+         -Wall -Wextra \
+         -g0 -O2
 
-EFI_LIB := $(shell pkg-config --libs-only-L gnu-efi 2>/dev/null | sed 's/-L//')
-ifeq ($(EFI_LIB),)
-    ifneq (,$(wildcard /usr/lib/crt0-efi-x86_64.o))
-        EFI_LIB = /usr/lib
-    else ifneq (,$(wildcard /usr/lib64/crt0-efi-x86_64.o))
-        EFI_LIB = /usr/lib64
-    endif
-endif
-
-# === Flags ===
-CFLAGS = -I$(EFI_INC) -I$(EFI_ARCH_INC) -I$(EFI_INC)/protocol \
-    -ffreestanding -fno-stack-protector -fpic -fshort-wchar \
-    -mno-red-zone -maccumulate-outgoing-args \
-    -DEFI_FUNCTION_WRAPPER
-
-LDFLAGS = -nostdlib -Wl,-T,$(EFI_LIB)/elf_x86_64_efi.lds \
-    -Wl,-shared -Wl,-Bsymbolic -L$(EFI_LIB) \
-    $(EFI_LIB)/crt0-efi-x86_64.o
-
-LIBS = -lefi -lgnuefi
-
-OBJCOPY_FLAGS = -j .text -j .sdata -j .data -j .dynamic -j .dynsym \
-                -j .rel -j .rela -j .reloc \
-                --target efi-app-x86_64
+# -subsystem:efi_application: Subsystem = 10 (EFI Application)
+# -entry:efi_main:            punto de entrada
+# -nodefaultlib:              sin CRT
+# -dll:                       formato PE/DLL (es lo que UEFI espera)
+# -filealign:512:             alineación de fichero que OVMF acepta
+LDFLAGS = -subsystem:efi_application \
+          -entry:efi_main \
+          -nodefaultlib \
+          -dll \
+          -filealign:512
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@.so $< $(LIBS)
-	$(OBJCOPY) $(OBJCOPY_FLAGS) $@.so $@
-	rm -f $@.so
+$(TARGET): $(SRC) efi_min.h
+	@echo "  [clang]    target  = $(CLANG_TARGET)"
+	@echo "  [lld-link] subsys  = efi_application"
+	$(CC) $(CFLAGS) -c $(SRC) -o efi_main.o
+	$(LD) $(LDFLAGS) efi_main.o -out:$(TARGET)
+	rm -f efi_main.o
 
 install: $(TARGET)
 	mkdir -p ../esp/EFI/BOOT
 	cp $(TARGET) ../esp/EFI/BOOT/BOOTX64.EFI
 
 clean:
-	rm -f $(TARGET) *.so
+	rm -f $(TARGET) *.o
 
 .PHONY: all install clean

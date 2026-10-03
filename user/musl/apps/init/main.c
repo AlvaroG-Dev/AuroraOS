@@ -25,7 +25,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define TERMINAL_PATH "/apps/shell"
+#define TERMINAL_PATH "/apps/terminal"
 #define RESPAWN_DELAY_SEC 1
 
 static char *default_envp[] = {

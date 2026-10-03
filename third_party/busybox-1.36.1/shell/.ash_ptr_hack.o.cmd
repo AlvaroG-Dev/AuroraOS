@@ -2,7 +2,7 @@ cmd_shell/ash_ptr_hack.o := x86_64-linux-musl-gcc -Wp,-MD,shell/.ash_ptr_hack.o.
 
 deps_shell/ash_ptr_hack.o := \
   shell/ash_ptr_hack.c \
-  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
+  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
 
 shell/ash_ptr_hack.o: $(deps_shell/ash_ptr_hack.o)
 

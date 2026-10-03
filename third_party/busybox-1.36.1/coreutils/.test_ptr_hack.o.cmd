@@ -2,7 +2,7 @@ cmd_coreutils/test_ptr_hack.o := x86_64-linux-musl-gcc -Wp,-MD,coreutils/.test_p
 
 deps_coreutils/test_ptr_hack.o := \
   coreutils/test_ptr_hack.c \
-  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
+  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
 
 coreutils/test_ptr_hack.o: $(deps_coreutils/test_ptr_hack.o)
 

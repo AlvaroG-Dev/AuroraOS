@@ -242,12 +242,29 @@ static inline uint64_t cluster_to_sector(const fat32_fs_t *fs, uint32_t c) {
 #define FAT32_BCACHE_HASH_BUCKETS 512
 #define FAT32_BCACHE_SECTOR 512
 
-typedef struct fat32_bcache_slot {
-  uint64_t lba; // UINT64_MAX = slot libre
-  uint32_t last_used;
-  uint8_t dirty;
-  uint8_t data[FAT32_BCACHE_SECTOR];
-  struct fat32_bcache_slot *hnext;
+// [FIX] `data` va PRIMERO y la struct está alineada a 16 bytes.
+//
+// El bus master IDE (BMIDE) exige que el campo `base` de cada entrada
+// del PRD esté alineado a 2 bytes. El campo `data` estaba en el offset
+// 13 de la struct, así que siempre salía impar. Con la comprobación de
+// alineación que quitamos de ata_dma_xfer, esos buffers llegaban al PRD
+// con base impar: el BMIDE no transfería y el DMA acababa en timeout de
+// 5 s, desactivándose globalmente.
+//
+// Con `data` al offset 0 y `aligned(16)` en la struct, cada slot de la
+// tabla queda con `data` a 16-byte aligned. El compilador rellena hasta
+// 544 bytes (múltiplo de 16) para que todos los slots siguientes
+// mantengan la misma alineación.
+typedef struct __attribute__((aligned(16))) fat32_bcache_slot {
+  uint8_t  data[FAT32_BCACHE_SECTOR]; // offset 0   (512 bytes, alineado)
+  uint64_t lba;                       // offset 512
+  uint32_t last_used;                 // offset 520
+  uint8_t  dirty;                     // offset 524
+  // El compilador añade 3 bytes de padding aquí para alinear `hnext` a 8.
+  struct fat32_bcache_slot *hnext;    // offset 528
+  // El compilador añade 8 bytes más de padding para que sizeof == 544,
+  // múltiplo de la alineación 16. Así `data` de slots consecutivos
+  // siempre cae en dirección múltiplo de 16.
 } fat32_bcache_slot_t;
 
 typedef struct fat32_bcache {
@@ -817,35 +834,62 @@ static int fat32_update_fsinfo_locked(fat32_fs_t *fs) {
   return 0;
 }
 
+// Vuelca la FAT cacheada a disco. Antes hacía un bdev_write por CADA
+// sector de FAT (1008 en tu FS). Cada bdev_write es una transacción
+// DMA completa; el bus master solo progresa entre transacciones, así
+// que en QEMU el coste es ~1008 × 4.8 ms = 4.8 s POR SYNC.
+//
+// El driver ATA-DMA (ata_dma_rw) ya divide internamente en trozos de
+// <= 64 KB para respetar el límite de la PRDT (una página de 4 KB = 512
+// entradas × 128 B con EOT). 64 KB / 512 B = 128 sectores por
+// transacción, así que pedir la FAT completa en un solo bdev_write
+// son ~8-16 transacciones en vez de 1008. Ganancia ~60×.
 static int fat32_sync_locked(fat32_fs_t *fs) {
   if (!fs)
     return -EINVAL;
   if (!fs->fat_cache || !fs->fat_dirty)
     return 0;
 
-  // [B] Volcar datos sucios antes de tocar la FAT. Orden correcto para
-  // recuperación tras crash: datos primero, FAT después.
+  // Volcar datos sucios antes que la FAT (recuperación tras crash).
   if (fat32_bcache_flush(fs) != 0) {
     LOG_ERR("[FAT32] sync bcache flush falló");
     return -EIO;
   }
 
-  if (bdev_write(fs->bdev, fs->fat_start_sector, fs->fat_size_sectors,
-                 fs->fat_cache) != 0) {
-    LOG_ERR("[FAT32] sync FAT#1 falló");
-    return -EIO;
-  }
-  if (fs->use_second_fat) {
-    uint64_t fat2_start = fs->fat_start_sector + fs->fat_size_sectors;
-    if (bdev_write(fs->bdev, fat2_start, fs->fat_size_sectors, fs->fat_cache) !=
-        0) {
-      LOG_ERR("[FAT32] sync FAT#2 falló");
+  // [FIX] Escribir la FAT completa en UN bdev_write, no sector a sector.
+  // ata_dma_rw() se encarga de dividir en trozos de <= 64 KB.
+  //
+  // Límite: 16 MB de FAT por llamada. Si tu FS crece por encima (no es
+  // el caso hoy, son 504 KB), habrá que trocear a mano en bloques de
+  // 64 KB desde aquí y quitar el límite de 0x10000 en ata_dma_xfer.
+  const uint32_t MAX_SYNC_SECTORS = (64u * 1024u) / fs->bytes_per_sector;
+
+  uint64_t remaining = fs->fat_size_sectors;
+  uint64_t lba = fs->fat_start_sector;
+  uint32_t *buf = fs->fat_cache;
+
+  while (remaining > 0) {
+    uint32_t chunk = (remaining > MAX_SYNC_SECTORS)
+                       ? MAX_SYNC_SECTORS
+                       : (uint32_t)remaining;
+    if (bdev_write(fs->bdev, lba, chunk, buf) != 0) {
+      LOG_ERR("[FAT32] sync FAT#1 falló (lba=%llu count=%u)",
+              (unsigned long long)lba, chunk);
       return -EIO;
     }
+    if (fs->use_second_fat) {
+      uint64_t fat2_lba = lba + fs->fat_size_sectors;
+      if (bdev_write(fs->bdev, fat2_lba, chunk, buf) != 0) {
+        LOG_ERR("[FAT32] sync FAT#2 falló (lba=%llu count=%u)",
+                (unsigned long long)fat2_lba, chunk);
+        return -EIO;
+      }
+    }
+    lba += chunk;
+    buf += (uint64_t)chunk * fs->bytes_per_sector / sizeof(uint32_t);
+    remaining -= chunk;
   }
 
-  // [2.4] Actualizar FSInfo para que un fsck no reporte el hint
-  // desfasado. Linux lo hace al desmontar limpio y al sync.
   (void)fat32_update_fsinfo_locked(fs);
 
   if (bdev_flush(fs->bdev) != 0) {
@@ -925,8 +969,9 @@ static int fat32_modify_dirent(fat32_fs_t *fs, uint64_t lba, uint32_t off,
   mod(buf + off, ctx);
   int rc = (fat32_bwrite(fs, lba, 1, buf) == 0) ? 0 : -EIO;
   kfree(buf);
-  if (rc == 0)
-    (void)bdev_flush(fs->bdev);
+  // [FIX] No flush aquí. Todas las rutas de escritura llaman a
+  // fat32_sync_locked() al final, que ya hace el flush. Con FAT
+  // llena esto son varios flush por operación que se anulan.
   return rc;
 }
 
@@ -3215,8 +3260,31 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
   if (fat_bytes > 0 && fat_bytes <= 16 * 1024 * 1024) {
     fs->fat_cache = (uint32_t *)kmalloc((size_t)fat_bytes);
     if (fs->fat_cache) {
-      if (bdev_read(fs->bdev, fs->fat_start_sector, fs->fat_size_sectors,
-                    fs->fat_cache) == 0) {
+      // [FIX] Leer la FAT en trozos de <= 64 KB (límite de la PRDT del
+      // ATA-DMA). Antes se leía sector a sector con un bdev_read por
+      // sector, lo que en QEMU lento son ~2.5 s por mount. Con trozos
+      // de 64 KB son ~8-16 transacciones.
+      const uint32_t MAX_READ_SECTORS = (64u * 1024u) / fs->bytes_per_sector;
+
+      uint64_t remaining = fs->fat_size_sectors;
+      uint64_t lba = fs->fat_start_sector;
+      uint8_t *buf = (uint8_t *)fs->fat_cache;
+      int read_ok = 1;
+
+      while (remaining > 0) {
+        uint32_t chunk = (remaining > MAX_READ_SECTORS)
+                           ? MAX_READ_SECTORS
+                           : (uint32_t)remaining;
+        if (bdev_read(fs->bdev, lba, chunk, buf) != 0) {
+          read_ok = 0;
+          break;
+        }
+        lba += chunk;
+        buf += (uint64_t)chunk * fs->bytes_per_sector;
+        remaining -= chunk;
+      }
+
+      if (read_ok) {
         fs->fat_entries = (uint32_t)(fat_bytes / 4);
         LOG_INFO("[FAT32] FAT cacheada: %u KB, %u entradas",
                  (unsigned)(fat_bytes / 1024), fs->fat_entries);

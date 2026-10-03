@@ -43,6 +43,20 @@ extern uint64_t paging_get_phys(uint64_t virt);
 // ===========================================================================
 static ata_dma_state_t g_dma[2];
 
+// ===========================================================================
+// Bounce buffer por canal.
+//
+// El BMIDE exige que el campo `base` del PRD esté alineado a 2 bytes. Si
+// el buffer del llamante no lo está (por ejemplo, un campo dentro de una
+// struct cuya alineación no controlamos), copiamos a este buffer
+// alineado antes de lanzar el DMA. En lecturas, copiamos del bounce al
+// buffer original después de que el DMA complete.
+//
+// 64 KB por canal = tamaño máximo de transferencia (ver
+// ata_dma_xfer). Vive en .bss, sin coste en runtime.
+// ===========================================================================
+static uint8_t g_bounce[2][0x10000] __attribute__((aligned(4096)));
+
 // Registros del BMIDE (offsets desde bmide_base).
 #define BM_CMD 0x00
 #define BM_STATUS 0x02
@@ -347,7 +361,12 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
 // ===========================================================================
 // Operación DMA común.
 //
-// [FIX SMP + TIMEOUT REAL + ESCRITURA]
+// [FIX SMP + TIMEOUT REAL + ESCRITURA + BOUNCE]
+//
+//   - Bounce buffer: si el buffer del llamante no está alineado a 2 bytes,
+//     usamos g_bounce[ch_idx] para el DMA y copiamos en la dirección
+//     adecuada antes/después. El BMIDE exige base par en el PRD; sin esto,
+//     el transfer se queda mudo y salta el timeout de 5 s.
 //
 //   - Espera la IRQ del BMIDE con wait_event_interruptible_timeout (o
 //     polling si estamos en contexto atómico con preempt_count > 0).
@@ -356,10 +375,6 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
 //     escribir los datos al medio (BSY=0). La IRQ del BMIDE se genera
 //     cuando el bus master termina de transferir los datos a su buffer
 //     interno, NO cuando el disco ha completado la escritura al medio.
-//     Sin esta espera, el siguiente comando (flush, read de vuelta)
-//     puede ejecutarse antes de que los datos estén en el medio, y el
-//     test lee datos viejos. QEMU idealiza este timing; VirtualBox lo
-//     emula fielmente y por eso el bug solo aparece en VirtualBox.
 // ===========================================================================
 static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
                         void *buf, int is_read) {
@@ -375,32 +390,51 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
     return ATA_ERR_UNKNOWN;
   }
 
-  if (((uintptr_t)buf & 0x1) != 0) {
-    LOG_ERR("[ATA-DMA] buffer no alineado a 2 bytes: %p", buf);
-    return ATA_ERR_UNKNOWN;
+  // -------------------------------------------------------------------------
+  // Bounce buffer si el buffer no está alineado a 2 bytes.
+  //
+  // El BMIDE requiere base del PRD par. La mayoría de buffers del kernel
+  // lo están (kmalloc devuelve 16-aligned), pero el bcache de FAT32 tenía
+  // `data` en offset impar. Con el reordenamiento de fat32_bcache_slot_t
+  // ya no ocurre, pero el bounce es la red de seguridad.
+  // -------------------------------------------------------------------------
+  uint8_t *bounce = NULL;
+  void *dma_buf = buf;
+
+  if (((uintptr_t)buf & 1) != 0) {
+    if (byte_count > sizeof(g_bounce[0])) {
+      LOG_ERR("[ATA-DMA] buffer impar demasiado grande para bounce: %u",
+              byte_count);
+      return ATA_ERR_UNKNOWN;
+    }
+    bounce = g_bounce[ch_idx];
+    dma_buf = bounce;
   }
 
   // =========================================================================
   // Fase 1: preparar PRDT + BMIDE + comando ATA bajo dma->lock.
-  //
-  // dma->lock protege los registros del BMIDE (incluido el PRDT), no el
-  // estado de completación. El estado de completación se protege con
-  // dma->irq_wq.lock, que es el que usa el IRQ handler.
   //
   // Orden de locks (siempre en este orden): dma->lock → dma->irq_wq.lock.
   // Nunca al revés.
   // =========================================================================
   unsigned long flags = spin_lock_irqsave(&dma->lock);
 
-  if (ata_dma_build_prdt(dma, buf, byte_count) != 0) {
-    LOG_ERR("[ATA-DMA] no se pudo construir la PRDT para %p (%u bytes)", buf,
-            byte_count);
+  // Si usamos bounce y es escritura, copiamos el contenido ANTES del DMA,
+  // bajo lock (protege g_bounce[ch_idx] contra otras escrituras al mismo
+  // canal).
+  if (bounce && !is_read) {
+    memcpy(bounce, buf, byte_count);
+  }
+
+  if (ata_dma_build_prdt(dma, dma_buf, byte_count) != 0) {
+    LOG_ERR("[ATA-DMA] no se pudo construir la PRDT para %p (%u bytes)",
+            dma_buf, byte_count);
     spin_unlock_irqrestore(&dma->lock, flags);
     return ATA_ERR_UNKNOWN;
   }
 
   DMA_LOG("[ATA-DMA] xfer: lba=%lu count=%u buf=%p read=%d", (unsigned long)lba,
-          count, buf, is_read);
+          count, dma_buf, is_read);
 
   ata_dma_setup_bmide(dma, is_read);
 
@@ -419,43 +453,23 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
     return rc;
   }
 
-  // -------------------------------------------------------------------------
-  // [FIX race SMP] Resetear el estado de completación bajo el MISMO lock
-  // que el IRQ handler. Todavía no hemos arrancado el bus master, así
-  // que ningún IRQ puede dispararse en este punto, pero usamos el lock
-  // correcto para que el estado sea coherente con las lecturas que
-  // haremos en Fase 3.
-  // -------------------------------------------------------------------------
   unsigned long wf = spin_lock_irqsave(&dma->irq_wq.lock);
   dma->irq_pending = 0;
   dma->irq_error = 0;
   uint32_t irq_count_before = dma->irq_count;
   spin_unlock_irqrestore(&dma->irq_wq.lock, wf);
 
-  // Arrancar el bus master. A partir de aquí el IRQ puede dispararse en
-  // cualquier núcleo. Seguimos con dma->lock cogido para serializar el
-  // acceso al registro BM_CMD.
   ata_dma_start_bmide(dma, is_read);
 
   spin_unlock_irqrestore(&dma->lock, flags);
 
   // =========================================================================
   // Fase 2: dormir hasta que la IRQ marque irq_pending, con timeout real.
-  //
-  // Las IRQs están HABILITADAS durante esta espera. El lock de la wait
-  // queue se toma y se suelta dentro de wait_common solo durante los
-  // breves instantes en los que se comprueba la condición y se encola/
-  // desencola la tarea. El sched_yield() posterior ocurre con IRQs
-  // habilitadas, por lo que el LAPIC timer y el IRQ handler del DMA
-  // pueden ejecutarse en cualquier núcleo.
   // =========================================================================
   uint64_t timeout_ticks = (uint64_t)ATA_DMA_TIMEOUT_SECONDS * 1000ULL;
 
   long w;
   if (preempt_count() > 0) {
-    // Contexto atómico: no podemos dormir, hacemos polling. La IRQ
-    // puede llegar igualmente (preempt_count no enmascara IRQs), así
-    // que irq_pending se pondrá a 1 tarde o temprano.
     uint64_t deadline = sched_get_ticks() + timeout_ticks;
     w = 0;
     while (!dma->irq_pending) {
@@ -466,21 +480,12 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
     if (dma->irq_pending)
       w = 1;
   } else {
-    // El lock wq->lock se toma/suelta internamente; el sueño ocurre con
-    // IRQs habilitadas.
     w = wait_event_interruptible_timeout(&dma->irq_wq, ata_dma_irq_cond, dma,
                                          timeout_ticks);
   }
 
   // =========================================================================
   // Fase 3: evaluar el resultado.
-  //
-  // Tomamos dma->lock para el cleanup del BMIDE y las operaciones sobre
-  // los registros del disco. El estado de completación (irq_count,
-  // irq_error) lo leemos bajo dma->irq_wq.lock, consistente con el
-  // handler y con la Fase 1.
-  //
-  // Orden: dma->lock → dma->irq_wq.lock (igual que en Fase 1).
   // =========================================================================
   flags = spin_lock_irqsave(&dma->lock);
 
@@ -528,12 +533,6 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
   // [FIX VirtualBox] Tras una ESCRITURA DMA, forzar un FLUSH CACHE para
   // asegurar que los datos han llegado al medio antes de dar la operación
   // por completada.
-  //
-  // VirtualBox emula el PIIX3 de forma que la IRQ de finalización de DMA
-  // puede llegar antes de que el disco haya persistido los datos. Aunque
-  // esperemos a BSY=0, el disco puede haber liberado BSY sin haber
-  // flusheado su caché interna. El siguiente comando (read de vuelta)
-  // lee datos obsoletos.
   // -------------------------------------------------------------------------
   if (!is_read) {
     ata_select_drive(dev->channel, dev->drive);
@@ -566,6 +565,15 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
       spin_unlock_irqrestore(&dma->lock, flags);
       return rc;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Bounce de lectura: copiar del bounce al buffer original del llamante.
+  // Solo si el DMA completó OK y era una lectura (en escritura ya copiamos
+  // al bounce ANTES del DMA, en la Fase 1).
+  // -------------------------------------------------------------------------
+  if (bounce && is_read) {
+    memcpy(buf, bounce, byte_count);
   }
 
   ata_dma_cleanup_bmide(dma);
