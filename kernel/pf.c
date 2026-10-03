@@ -36,13 +36,17 @@ void pf_dump_stats(void) {
 static void vma_release_fd(vma_t *v) {
   if (!v || !v->file_fd)
     return;
-  v->file_fd->ref_count--;
-  if (v->file_fd->ref_count <= 0) {
-    if (v->file_fd->node)
-      vfs_node_free(v->file_fd->node);
-    kfree(v->file_fd);
-  }
+  file_descriptor_t *f = v->file_fd;
   v->file_fd = NULL;
+
+  int left = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
+  if (left == 0) {
+    if (f->node)
+      vfs_node_free(f->node);
+    kfree(f);
+  } else if (left < 0) {
+    LOG_ERR("[PF] ref_count underflow fd=%p (%d)", (void *)f, left);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +110,7 @@ vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
   v->file_fd = fd;
   v->file_offset = file_offset;
   if (fd)
-    fd->ref_count++;
+    __atomic_fetch_add(&fd->ref_count, 1, __ATOMIC_ACQ_REL);
   return v;
 }
 
@@ -421,7 +425,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       // [3.5] Propagar file_fd si es VMA_FILE.
       if (v->type == VMA_FILE && v->file_fd) {
         right->file_fd = v->file_fd;
-        right->file_fd->ref_count++;
+        __atomic_fetch_add(&right->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
         right->file_offset = v->file_offset + (end - v->start);
       }
       *new_vmas_tail = right;
@@ -619,7 +623,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       // [3.5] file_fd propagation
       if (v->type == VMA_FILE && v->file_fd) {
         right->file_fd = v->file_fd;
-        right->file_fd->ref_count++;
+        __atomic_fetch_add(&right->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
         right->file_offset = v->file_offset + (end - v->start);
       }
 
@@ -640,7 +644,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       // [3.5] file_fd propagation
       if (v->type == VMA_FILE && v->file_fd) {
         mid->file_fd = v->file_fd;
-        mid->file_fd->ref_count++;
+        __atomic_fetch_add(&mid->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
         mid->file_offset = v->file_offset + (addr - v->start);
       }
 
@@ -670,11 +674,11 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       // [3.5] file_fd propagation para ambos
       if (v->type == VMA_FILE && v->file_fd) {
         mid->file_fd = v->file_fd;
-        mid->file_fd->ref_count++;
+        __atomic_fetch_add(&mid->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
         mid->file_offset = v->file_offset + (addr - v->start);
 
         right->file_fd = v->file_fd;
-        right->file_fd->ref_count++;
+        __atomic_fetch_add(&right->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
         right->file_offset = v->file_offset + (end - v->start);
       }
 
