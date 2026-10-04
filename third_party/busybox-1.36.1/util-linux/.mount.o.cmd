@@ -23,6 +23,8 @@ deps_util-linux/mount.o := \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/mntent.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/alltypes.h \
+  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/syslog.h \
+  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/features.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/sys/mount.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/sys/ioctl.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/ioctl.h \
@@ -103,7 +105,6 @@ deps_util-linux/mount.o := \
     $(wildcard include/config/little/endian.h) \
     $(wildcard include/config/nommu.h) \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/limits.h \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/features.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/limits.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/byteswap.h \
   /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdint.h \

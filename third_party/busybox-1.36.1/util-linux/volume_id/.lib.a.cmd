@@ -1,1 +1,1 @@
-cmd_util-linux/volume_id/lib.a := rm -f util-linux/volume_id/lib.a; x86_64-linux-musl-ar  rcs util-linux/volume_id/lib.a 
+cmd_util-linux/volume_id/lib.a := rm -f util-linux/volume_id/lib.a; x86_64-linux-musl-ar  rcs util-linux/volume_id/lib.a util-linux/volume_id/get_devname.o util-linux/volume_id/util.o util-linux/volume_id/volume_id.o

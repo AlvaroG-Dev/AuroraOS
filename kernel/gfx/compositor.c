@@ -48,6 +48,24 @@ static tar_node_t *bg_wallpaper_node = NULL;
 static int last_mouse_buttons = 0;
 static void compositor_focus_window(window_t *win);
 
+// [FIX #6/#8] Estado del resize en curso. Cuando resize_window != NULL,
+// estamos redimensionando esa ventana arrastrando un borde.
+static window_t *resize_window = NULL;
+static int resize_edge = 0;         // bitmask RESIZE_EDGE_*
+static int resize_origin_x = 0;     // cursor al iniciar
+static int resize_origin_y = 0;
+static int resize_win_w = 0;        // tamaño de la ventana al iniciar
+static int resize_win_h = 0;
+
+// [FIX] Tamaño propuesto durante el drag (para el outline).
+static int resize_new_w = 0;
+static int resize_new_h = 0;
+
+#define RESIZE_BORDER 6
+#define RESIZE_EDGE_NONE   0
+#define RESIZE_EDGE_RIGHT  (1 << 0)
+#define RESIZE_EDGE_BOTTOM (1 << 1)
+
 static spinlock_t compositor_lock;
 
 /* =========== SSE helpers =========== */
@@ -109,6 +127,44 @@ static void compositor_report_frame_stats(uint64_t elapsed_cycles) {
     g_frame_cycles_sum = 0;
     g_frame_cycles_max = 0;
     g_frame_count = 0;
+  }
+}
+
+// [FIX] Outline punteado para el resize en curso. Se pinta directamente
+// sobre el backbuffer tras las ventanas. Solo cuando resize_window != NULL.
+static void draw_resize_outline(uint32_t *dst, int stride, rect_t clip) {
+  if (!resize_window) return;
+  if (resize_new_w <= 0 || resize_new_h <= 0) return;
+
+  int x0 = resize_window->x;
+  int y0 = resize_window->y;
+  int x1 = x0 + resize_new_w - 1;
+  int y1 = y0 + resize_new_h - 1;
+
+  const uint32_t C1 = 0xFFFFFFFF;
+  const uint32_t C2 = 0xFF1E1E2E;
+
+  // Borde superior e inferior.
+  for (int x = x0; x <= x1; x++) {
+    if (y0 >= clip.y && y0 < clip.y + clip.h &&
+        x >= clip.x && x < clip.x + clip.w) {
+      dst[y0 * stride + x] = ((x / 4) & 1) ? C1 : C2;
+    }
+    if (y1 >= clip.y && y1 < clip.y + clip.h &&
+        x >= clip.x && x < clip.x + clip.w) {
+      dst[y1 * stride + x] = ((x / 4) & 1) ? C1 : C2;
+    }
+  }
+  // Bordes izquierdo y derecho.
+  for (int y = y0; y <= y1; y++) {
+    if (x0 >= clip.x && x0 < clip.x + clip.w &&
+        y >= clip.y && y < clip.y + clip.h) {
+      dst[y * stride + x0] = ((y / 4) & 1) ? C1 : C2;
+    }
+    if (x1 >= clip.x && x1 < clip.x + clip.w &&
+        y >= clip.y && y < clip.y + clip.h) {
+      dst[y * stride + x1] = ((y / 4) & 1) ? C1 : C2;
+    }
   }
 }
 
@@ -543,24 +599,26 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
   cursor_x += dx;
   cursor_y += dy;
 
-  if (cursor_x < 0)
-    cursor_x = 0;
-  if (cursor_x >= (int)fb_width)
-    cursor_x = fb_width - 1;
-  if (cursor_y < 0)
-    cursor_y = 0;
-  if (cursor_y >= (int)fb_height)
-    cursor_y = fb_height - 1;
+  if (cursor_x < 0) cursor_x = 0;
+  if (cursor_x >= (int)fb_width) cursor_x = fb_width - 1;
+  if (cursor_y < 0) cursor_y = 0;
+  if (cursor_y >= (int)fb_height) cursor_y = fb_height - 1;
 
-  if (dx != 0 || dy != 0)
-    mouse_moved = 1;
+  if (dx != 0 || dy != 0) mouse_moved = 1;
 
   int pressed = buttons & 0x01;
   int released = (last_mouse_buttons & 0x01) && !pressed;
 
-  /* ------------------------------------------------------------------
-   * 0. Hover de la taskbar
-   * ------------------------------------------------------------------ */
+  // Formato de winsrv_event_t::data para MOUSE:
+  //   bits 0-7  : button (0=left 1=middle 2=right 64=wheel_up 65=wheel_down)
+  //   bit  8    : release (1 = soltar)
+  //   bit  9    : motion  (1 = movimiento con botón pulsado)
+  //   bits 16-18: mods    (1=shift 2=alt 4=ctrl) — sin datos por ahora
+  #define MOUSE_BUTTON_LEFT  0u
+  #define MOUSE_BIT_RELEASE  (1u << 8)
+  #define MOUSE_BIT_MOTION   (1u << 9)
+
+  /* ---------- 0. Hover de la taskbar ---------- */
   {
     taskbar_item_t *hit =
         taskbar_hit_test(cursor_x, cursor_y, (int)fb_width, (int)fb_height);
@@ -583,9 +641,7 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
     }
   }
 
-  /* ------------------------------------------------------------------
-   * 0.5 Hover de botones de ventana (min/max/close)
-   * ------------------------------------------------------------------ */
+  /* ---------- 0.5 Hover de botones de ventana ---------- */
   {
     window_t *w = window_stack;
     int dirty_any = 0;
@@ -629,9 +685,7 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
     }
   }
 
-  /* ------------------------------------------------------------------
-   * 1. Click izquierdo pulsado
-   * ------------------------------------------------------------------ */
+  /* ---------- 1. Press izquierdo ---------- */
   if (pressed && !(last_mouse_buttons & 0x01)) {
     rect_t bar_rect = taskbar_get_bounds(fb_width, fb_height);
     if (cursor_y >= bar_rect.y && cursor_y < bar_rect.y + TASKBAR_BAR_H) {
@@ -644,27 +698,41 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
       int hit_any = 0;
 
       while (win) {
-        if (win->flags & WIN_FLAGS_HIDDEN) {
-          win = win->next;
-          continue;
-        }
-        if (win->anim_state == WIN_ANIM_OPENING ||
-            win->anim_state == WIN_ANIM_CLOSING ||
-            win->anim_state == WIN_ANIM_MINIMIZING) {
-          win = win->next;
-          continue;
-        }
+        if (win->flags & WIN_FLAGS_HIDDEN) { win = win->next; continue; }
+        if (win->anim_state != WIN_ANIM_NONE) { win = win->next; continue; }
 
         if (cursor_x >= win->x && cursor_x < win->x + win->width &&
             cursor_y >= win->y && cursor_y < win->y + win->height) {
 
           hit_any = 1;
 
+          // --- [FIX #8] Detección de zona de resize ---
+          // Solo borde derecho, inferior, y esquina inferior-derecha.
+          // El top se omite porque el titlebar está ahí y ya tiene
+          // su propia zona de drag.
+          int edge = 0;
+          int near_right = (cursor_x >= win->x + win->width - RESIZE_BORDER);
+          int near_bottom = (cursor_y >= win->y + win->height - RESIZE_BORDER);
+          if (near_right) edge |= RESIZE_EDGE_RIGHT;
+          if (near_bottom) edge |= RESIZE_EDGE_BOTTOM;
+
+          if (edge != 0) {
+            resize_window = win;
+            resize_edge = edge;
+            resize_origin_x = cursor_x;
+            resize_origin_y = cursor_y;
+            resize_win_w = win->width;
+            resize_win_h = win->height;
+            compositor_focus_window(win);
+            break;
+          }
+
+          // --- Titlebar: botones o drag ---
           int close_x = win->x + win->width - 46;
           int max_x = win->x + win->width - 92;
           int min_x = win->x + win->width - 138;
 
-          if (cursor_y >= win->y && cursor_y < win->y + 32) {
+          if (cursor_y >= win->y && cursor_y < win->y + WIN11_TITLEBAR_HEIGHT) {
             if (cursor_x >= close_x && cursor_x < close_x + 46) {
               pressed_win = win;
               pressed_btn = WIN_BTN_CLOSE_PRESSED;
@@ -681,10 +749,12 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
               drag_offset_y = cursor_y - win->y;
             }
           } else {
+            // Área de cliente: focus + evento al cliente.
             compositor_focus_window(win);
             int local_x = cursor_x - win->x;
             int local_y = cursor_y - win->y - WIN11_TITLEBAR_HEIGHT;
-            winsrv_post_event(win, WINSRV_EV_MOUSE, local_x, local_y, 1);
+            winsrv_post_event(win, WINSRV_EV_MOUSE, local_x, local_y,
+                              MOUSE_BUTTON_LEFT);
           }
           break;
         }
@@ -697,10 +767,49 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
     }
   }
 
-  /* ------------------------------------------------------------------
-   * 2. Click izquierdo soltado
-   * ------------------------------------------------------------------ */
+  /* ---------- 2. Release ---------- */
   if (released) {
+    // [FIX] Resize: aplicar el cambio AHORA (una sola vez). Antes se
+    // hacía durante el drag y saturaba el heap.
+    if (resize_window) {
+      int final_w = resize_new_w;
+      int final_h = resize_new_h;
+
+      if (final_w != resize_window->width ||
+          final_h != resize_window->height) {
+        rect_t old_r = { resize_window->x - WIN11_SHADOW_SIZE,
+                         resize_window->y - WIN11_SHADOW_SIZE,
+                         resize_window->width + WIN11_SHADOW_SIZE * 2,
+                         resize_window->height + WIN11_SHADOW_SIZE * 2 };
+
+        window_resize(resize_window, final_w, final_h);
+
+        if (resize_window->width == final_w &&
+            resize_window->height == final_h) {
+          // Éxito: avisar al cliente del nuevo tamaño.
+          rect_t new_r = { resize_window->x - WIN11_SHADOW_SIZE,
+                           resize_window->y - WIN11_SHADOW_SIZE,
+                           resize_window->width + WIN11_SHADOW_SIZE * 2,
+                           resize_window->height + WIN11_SHADOW_SIZE * 2 };
+          compositor_invalidate_rect(rect_bounding_box(old_r, new_r));
+
+          winsrv_post_event(resize_window, WINSRV_EV_RESIZE,
+                            resize_window->content_w,
+                            resize_window->content_h, 0);
+        } else {
+          // Falló (kmalloc). No avisamos al cliente. Redibujamos la
+          // ventana para limpiar el outline.
+          compositor_invalidate_rect(old_r);
+        }
+      }
+
+      resize_window = NULL;
+      resize_edge = 0;
+      resize_new_w = 0;
+      resize_new_h = 0;
+    }
+
+    // Botones de ventana.
     if (pressed_win && pressed_btn != WIN_BTN_NONE) {
       int close_x = pressed_win->x + pressed_win->width - 46;
       int max_x = pressed_win->x + pressed_win->width - 92;
@@ -715,8 +824,6 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
             compositor_close_window(pressed_win);
           }
         }
-      } else if (pressed_btn == WIN_BTN_MAXIMIZE_PRESSED) {
-        /* TODO: maximizar */
       } else if (pressed_btn == WIN_BTN_MINIMIZE_PRESSED) {
         if (cursor_x >= min_x && cursor_x < max_x &&
             cursor_y >= pressed_win->y && cursor_y < pressed_win->y + 32) {
@@ -726,14 +833,81 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
         }
       }
     }
+
+    // Release al cliente si el cursor está sobre área de cliente.
+    {
+      window_t *win = window_stack;
+      while (win) {
+        if (win->flags & WIN_FLAGS_HIDDEN) { win = win->next; continue; }
+        if (cursor_x >= win->x && cursor_x < win->x + win->width &&
+            cursor_y >= win->y + WIN11_TITLEBAR_HEIGHT &&
+            cursor_y < win->y + win->height) {
+          int local_x = cursor_x - win->x;
+          int local_y = cursor_y - win->y - WIN11_TITLEBAR_HEIGHT;
+          winsrv_post_event(win, WINSRV_EV_MOUSE, local_x, local_y,
+                            MOUSE_BUTTON_LEFT | MOUSE_BIT_RELEASE);
+          break;
+        }
+        win = win->next;
+      }
+    }
+
     drag_window = NULL;
     pressed_win = NULL;
     pressed_btn = WIN_BTN_NONE;
   }
 
-  /* ------------------------------------------------------------------
-   * 3. Drag de ventana
-   * ------------------------------------------------------------------ */
+  /* ---------- 3. Resize en curso ---------- */
+  //
+  // [FIX] Durante el drag NO redimensionamos la ventana. Solo
+  // calculamos el tamaño propuesto y lo guardamos. El compositor
+  // pintará un outline en compositor_render(). Al soltar (en el
+  // bloque de release, más abajo) se aplica el resize real una sola
+  // vez.
+  //
+  // Antes: llamada a window_resize + winsrv_post_event(RESIZE) en
+  // cada frame del drag. Eso hacía 60 reallocs de 4 MB/s en el
+  // kernel y 60 reallocs de 4 MB/s en el terminal, agotaba el heap
+  // en <1 s y corrompía memoria (bug de las 's').
+  if (pressed && resize_window) {
+    int ddx = cursor_x - resize_origin_x;
+    int ddy = cursor_y - resize_origin_y;
+    int new_w = resize_win_w;
+    int new_h = resize_win_h;
+
+    if (resize_edge & RESIZE_EDGE_RIGHT)  new_w = resize_win_w + ddx;
+    if (resize_edge & RESIZE_EDGE_BOTTOM) new_h = resize_win_h + ddy;
+
+    if (new_w < 200)  new_w = 200;
+    if (new_h < 150)  new_h = 150;
+    if (new_w > 2048) new_w = 2048;
+    if (new_h > 2048) new_h = 2048;
+
+    if (new_w != resize_new_w || new_h != resize_new_h) {
+      // Invalidar el rect del outline viejo y el nuevo para que se
+      // repinten las zonas donde estaba el borde punteado anterior.
+      rect_t old_outline = {
+          resize_window->x + resize_new_w - 2,
+          resize_window->y + resize_new_h - 2,
+          4, 4 };
+      rect_t new_outline = {
+          resize_window->x + new_w - 2,
+          resize_window->y + new_h - 2,
+          4, 4 };
+      resize_new_w = new_w;
+      resize_new_h = new_h;
+      compositor_invalidate_rect(rect_bounding_box(old_outline, new_outline));
+      // Invalidar también los bordes enteros para que el outline se
+      // dibuje completo en el próximo frame.
+      compositor_invalidate_rect((rect_t){
+          resize_window->x, resize_window->y, new_w, new_h });
+
+      compositor_has_input = 1;
+      wake_up_all(&compositor_wq);
+    }
+  }
+
+  /* ---------- 4. Drag de ventana por titlebar ---------- */
   if (pressed && drag_window) {
     int new_x = cursor_x - drag_offset_x;
     int new_y = cursor_y - drag_offset_y;
@@ -754,32 +928,41 @@ static void compositor_handle_mouse(int16_t dx, int16_t dy, uint8_t buttons) {
     }
   }
 
+  /* ---------- 5. Motion sobre cliente con botón pulsado ---------- */
+  // Solo si NO estamos redimensionando ni arrastrando el titlebar.
+  if (pressed && mouse_moved && !drag_window && !resize_window) {
+    window_t *win = window_stack;
+    while (win) {
+      if (!(win->flags & WIN_FLAGS_HIDDEN) &&
+          cursor_x >= win->x && cursor_x < win->x + win->width &&
+          cursor_y >= win->y + WIN11_TITLEBAR_HEIGHT &&
+          cursor_y < win->y + win->height) {
+        int local_x = cursor_x - win->x;
+        int local_y = cursor_y - win->y - WIN11_TITLEBAR_HEIGHT;
+        winsrv_post_event(win, WINSRV_EV_MOUSE, local_x, local_y,
+                          MOUSE_BUTTON_LEFT | MOUSE_BIT_MOTION);
+        break;
+      }
+      win = win->next;
+    }
+  }
+
   last_mouse_buttons = buttons;
 
-  /* ==================================================================
-   * 4. Refresco del cursor — VÍA SISTEMA DE DAÑO
-   *
-   * La versión anterior copiaba directamente del backbuffer a fb en cada
-   * evento. Durante un drag rápido, el backbuffer aún contenía la ventana
-   * en su posición VIEJA, así que esa copia pintaba trozos de la ventana
-   * antigua en la pantalla → ghosting.
-   *
-   * Ahora solo metemos el cursor en el sistema de daño. El compositor lo
-   * pintará en el próximo frame, cuando el backbuffer esté coherente.
-   * El cursor se actualiza a 60 FPS mientras hay input, sin lag visible.
-   * ================================================================== */
+  /* ---------- 6. Refresco del cursor ---------- */
   if (mouse_moved && (old_x != cursor_x || old_y != cursor_y)) {
-    /* Zona antigua (con margen de 2 px por si el redondeo del área nueva
-     * tapa parcialmente la vieja). */
     compositor_invalidate_rect(
         (rect_t){old_x - 2, old_y - 2, CURSOR_W + 4, CURSOR_H + 4});
-    /* Zona nueva */
     compositor_invalidate_rect(
         (rect_t){cursor_x, cursor_y, CURSOR_W, CURSOR_H});
 
     compositor_has_input = 1;
     wake_up_all(&compositor_wq);
   }
+
+  #undef MOUSE_BUTTON_LEFT
+  #undef MOUSE_BIT_RELEASE
+  #undef MOUSE_BIT_MOTION
 }
 
 static void compositor_process_events(void) {
@@ -846,6 +1029,11 @@ static void compositor_render(void) {
                            taskbar_rect.w + 32, taskbar_rect.h + 32};
   if (rect_intersects(clip, taskbar_damage)) {
     taskbar_render(backbuffer, fb_width, clip, fb_width, fb_height);
+  }
+
+  /* 3.5. Outline de resize (si hay uno en curso). */
+  if (resize_window) {
+    draw_resize_outline(backbuffer, fb_width, clip);
   }
 
   /* 4. Blit a VRAM (non-temporal) + cursor */

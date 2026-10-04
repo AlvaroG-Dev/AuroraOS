@@ -142,25 +142,28 @@ been enabled, more detailed usage information will also be available.
 Currently available applets include:
 .PP
 .Vb 10
-\&        [, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
-\&        busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
-\&        clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
-\&        diff, dirname, dmesg, dnsdomainname, dos2unix, dpkg, dpkg\-deb, du,
-\&        echo, ed, egrep, env, expand, expr, factor, false, fgrep, find,
-\&        flock, fold, free, fsync, fuser, getopt, grep, groups, gunzip, gzip,
-\&        hd, head, hexdump, hexedit, hostid, hostname, hush, id, install,
-\&        kill, killall, killall5, less, link, ln, logname, ls, lzcat, lzma,
-\&        lzop, md5sum, mdev, mesg, mkdir, mkfifo, mknod, mktemp, more, mount,
+\&        [, [[, arch, ascii, ash, awk, base32, base64, basename, bc, blkid,
+\&        bunzip2, busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown,
+\&        chroot, cksum, clear, cmp, comm, cp, cpio, crc32, cttyhack, cut,
+\&        date, dc, dd, df, diff, dirname, dmesg, dnsdomainname, dos2unix,
+\&        dpkg, dpkg\-deb, du, echo, ed, egrep, env, expand, expr, factor,
+\&        false, fdisk, fgrep, find, flock, fold, free, fsck, fsck.minix,
+\&        fsync, fuser, getopt, grep, groups, gunzip, gzip, halt, hd, head,
+\&        hexdump, hexedit, hostid, hostname, hush, hwclock, id, install,
+\&        kill, killall, killall5, klogd, less, link, ln, logger, logname, ls,
+\&        lsof, lspci, lsusb, lzcat, lzma, lzop, md5sum, mdev, mesg, mkdir,
+\&        mkdosfs, mkfifo, mkfs.minix, mknod, mkswap, mktemp, more, mount,
 \&        mountpoint, mv, nice, nl, nohup, nproc, od, paste, patch, pgrep,
-\&        pidof, pipe_progress, pivot_root, pkill, printenv, printf, ps,
-\&        pstree, pwd, readlink, realpath, reset, resize, rev, rm, rmdir, rpm,
-\&        rpm2cpio, run\-parts, script, scriptreplay, sed, seq, setsid, sh,
-\&        sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort,
-\&        split, start\-stop\-daemon, stat, strings, stty, sum, sync, tac, tail,
-\&        tar, tee, test, time, timeout, top, touch, tr, tree, true, truncate,
-\&        ts, tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz,
-\&        unzip, uptime, usleep, uudecode, uuencode, vi, watch, wc, which,
-\&        whoami, xargs, xxd, xz, xzcat, yes, zcat
+\&        pidof, pipe_progress, pivot_root, pkill, pmap, poweroff, printenv,
+\&        printf, ps, pstree, pwd, readlink, realpath, reboot, reset, resize,
+\&        rev, rm, rmdir, rpm, rpm2cpio, run\-parts, script, scriptreplay, sed,
+\&        seq, setsid, sh, sha1sum, sha256sum, sha3sum, sha512sum, shred,
+\&        shuf, sleep, sort, split, start\-stop\-daemon, stat, strings, stty,
+\&        sum, swapoff, swapon, sync, tac, tail, tar, tee, test, time,
+\&        timeout, top, touch, tr, tree, true, truncate, ts, tsort, uname,
+\&        unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip, uptime,
+\&        usleep, uudecode, uuencode, vi, watch, wc, which, whoami, xargs,
+\&        xxd, xz, xzcat, yes, zcat
 .Ve
 .SH "COMMAND DESCRIPTIONS"
 .IX Header "COMMAND DESCRIPTIONS"
@@ -228,6 +231,11 @@ Arbitrary precision calculator
 .Ve
 .Sp
 \&\f(CW$BC_LINE_LENGTH\fR changes output width
+.IP \fBblkid\fR 4
+.IX Item "blkid"
+blkid [BLOCKDEV]...
+.Sp
+Print UUIDs of all filesystems
 .IP \fBbunzip2\fR 4
 .IX Item "bunzip2"
 bunzip2 [\-cfk] [FILE]...
@@ -710,6 +718,20 @@ of characters matched or 0.
 factor [NUMBER]...
 .Sp
 Print prime factors
+.IP \fBfdisk\fR 4
+.IX Item "fdisk"
+fdisk [\-ul] [\-C CYLINDERS] [\-H HEADS] [\-S SECTORS] [\-b SSZ] DISK
+.Sp
+Change partition table
+.Sp
+.Vb 6
+\&        \-u              Start and End are in sectors (instead of cylinders)
+\&        \-l              Show partition table for each DISK, then exit
+\&        \-b 2048         (for certain MO disks) use 2048\-byte sectors
+\&        \-C CYLINDERS    Set number of cylinders/heads/sectors
+\&        \-H HEADS        Typically 255
+\&        \-S SECTORS      Typically 63
+.Ve
 .IP \fBfind\fR 4
 .IX Item "find"
 find [\-HL] [PATH]... [OPTIONS] [ACTIONS]
@@ -801,6 +823,36 @@ Wrap input lines in FILEs (or stdin), writing to stdout
 free
 .Sp
 Display free and used memory
+.IP \fBfsck\fR 4
+.IX Item "fsck"
+fsck [\-ANPRTV] [\-t FSTYPE] [FS_OPTS] [BLOCKDEV]...
+.Sp
+Check and repair filesystems
+.Sp
+.Vb 7
+\&        \-A      Walk /etc/fstab and check all filesystems
+\&        \-N      Don\*(Aqt execute, just show what would be done
+\&        \-P      With \-A, check filesystems in parallel
+\&        \-R      With \-A, skip the root filesystem
+\&        \-T      Don\*(Aqt show title on startup
+\&        \-V      Verbose
+\&        \-t TYPE List of filesystem types to check
+.Ve
+.IP \fBfsck.minix\fR 4
+.IX Item "fsck.minix"
+fsck.minix [\-larvsmf] BLOCKDEV
+.Sp
+Check MINIX filesystem
+.Sp
+.Vb 7
+\&        \-l      List all filenames
+\&        \-r      Perform interactive repairs
+\&        \-a      Perform automatic repairs
+\&        \-v      Verbose
+\&        \-s      Output superblock information
+\&        \-m      Show "mode not cleared" warnings
+\&        \-f      Force file system check
+.Ve
 .IP \fBfsync\fR 4
 .IX Item "fsync"
 fsync [\-d] FILE...
@@ -916,6 +968,17 @@ Compress FILEs (or stdin)
 \&        \-k      Keep input files
 \&        \-t      Test integrity
 .Ve
+.IP \fBhalt\fR 4
+.IX Item "halt"
+halt [\-d DELAY] [\-nf]
+.Sp
+Halt the system
+.Sp
+.Vb 3
+\&        \-d SEC  Delay interval
+\&        \-n      Do not sync
+\&        \-f      Force (don\*(Aqt go through init)
+.Ve
 .IP \fBhd\fR 4
 .IX Item "hd"
 hd FILE...
@@ -983,6 +1046,22 @@ Show or set hostname or DNS domain name
 hush [\-enxl] [\-c 'SCRIPT' [ARG0 ARGS] | FILE ARGS | \-s ARGS]
 .Sp
 Unix shell interpreter
+.IP \fBhwclock\fR 4
+.IX Item "hwclock"
+hwclock [\-swul] [\-\-systz] [\-f DEV]
+.Sp
+Show or set hardware clock (RTC)
+.Sp
+.Vb 8
+\&        \-s      Set system time from RTC
+\&        \-w      Set RTC from system time
+\&        \-\-systz Set in\-kernel timezone, correct system time
+\&                if RTC is kept in local time
+\&        \-f DEV  Use specified device (e.g. /dev/rtc2)
+\&        \-u      Assume RTC is kept in UTC
+\&        \-l      Assume RTC is kept in local time
+\&                (if neither is given, read from /etc/adjtime)
+.Ve
 .IP \fBid\fR 4
 .IX Item "id"
 id [\-ugGnr] [USER]
@@ -1042,6 +1121,16 @@ Send a signal (default: TERM) to all processes outside current session
 \&        \-l      List all signal names and numbers
 \&        \-o PID  Don\*(Aqt signal this PID
 .Ve
+.IP \fBklogd\fR 4
+.IX Item "klogd"
+klogd [\-c N] [\-n]
+.Sp
+Log kernel messages to syslog
+.Sp
+.Vb 2
+\&        \-c N    Print to console messages more urgent than prio N (1\-8)
+\&        \-n      Run in foreground
+.Ve
 .IP \fBless\fR 4
 .IX Item "less"
 less [\-EFIMmNSRh~] [FILE]...
@@ -1078,6 +1167,17 @@ Create a link LINK or DIR/TARGET to the specified TARGET(s)
 \&        \-S SUF  Use suffix instead of ~ when making backup files
 \&        \-T      Treat LINK as a file, not DIR
 \&        \-v      Verbose
+.Ve
+.IP \fBlogger\fR 4
+.IX Item "logger"
+logger [\-s] [\-t TAG] [\-p PRIO] [MESSAGE]
+.Sp
+Write MESSAGE (or stdin) to syslog
+.Sp
+.Vb 3
+\&        \-s      Log to stderr as well as the system log
+\&        \-t TAG  Log using the specified tag (defaults to user name)
+\&        \-p PRIO Priority (number or FACILITY.LEVEL pair)
 .Ve
 .IP \fBlogname\fR 4
 .IX Item "logname"
@@ -1119,6 +1219,21 @@ List directory contents
 \&        \-r      Reverse sort order
 \&        \-w N    Format N columns wide
 \&        \-\-color[={always,never,auto}]
+.Ve
+.IP \fBlsof\fR 4
+.IX Item "lsof"
+lsof
+.Sp
+Show all open files
+.IP \fBlspci\fR 4
+.IX Item "lspci"
+lspci [\-mk]
+.Sp
+List all PCI devices
+.Sp
+.Vb 2
+\&        \-m      Parsable output
+\&        \-k      Show driver
 .Ve
 .IP \fBlzcat\fR 4
 .IX Item "lzcat"
@@ -1198,6 +1313,16 @@ Create DIRECTORY
 \&        \-m MODE Mode
 \&        \-p      No error if exists; make parent directories as needed
 .Ve
+.IP \fBmkdosfs\fR 4
+.IX Item "mkdosfs"
+mkdosfs [\-v] [\-n LABEL] BLOCKDEV [KBYTES]
+.Sp
+Make a FAT32 filesystem
+.Sp
+.Vb 2
+\&        \-v      Verbose
+\&        \-n LBL  Volume label
+.Ve
 .IP \fBmkfifo\fR 4
 .IX Item "mkfifo"
 mkfifo [\-m MODE] NAME
@@ -1206,6 +1331,19 @@ Create named pipe
 .Sp
 .Vb 1
 \&        \-m MODE Mode (default a=rw)
+.Ve
+.IP \fBmkfs.minix\fR 4
+.IX Item "mkfs.minix"
+mkfs.minix [\-c | \-l FILE] [\-nXX] [\-iXX] BLOCKDEV [KBYTES]
+.Sp
+Make a MINIX filesystem
+.Sp
+.Vb 5
+\&        \-c              Check device for bad blocks
+\&        \-n [14|30]      Maximum length of filenames
+\&        \-i INODES       Number of inodes for the filesystem
+\&        \-l FILE         Read bad blocks list from FILE
+\&        \-v              Make version 2 filesystem
 .Ve
 .IP \fBmknod\fR 4
 .IX Item "mknod"
@@ -1219,6 +1357,15 @@ Create a special file (block, character, or pipe)
 \&        b       Block device
 \&        c or u  Character device
 \&        p       Named pipe (MAJOR MINOR must be omitted)
+.Ve
+.IP \fBmkswap\fR 4
+.IX Item "mkswap"
+mkswap [\-L LBL] BLOCKDEV [KBYTES]
+.Sp
+Prepare BLOCKDEV to be used as swap partition
+.Sp
+.Vb 1
+\&        \-L LBL  Label
 .Ve
 .IP \fBmktemp\fR 4
 .IX Item "mktemp"
@@ -1413,6 +1560,27 @@ Send signal to processes selected by regex PATTERN
 \&        \-o      Signal the oldest process only
 \&        \-e      Display name and PID of the process being killed
 .Ve
+.IP \fBpmap\fR 4
+.IX Item "pmap"
+pmap [\-xq] PID...
+.Sp
+Display process memory usage
+.Sp
+.Vb 2
+\&        \-x      Show details
+\&        \-q      Quiet
+.Ve
+.IP \fBpoweroff\fR 4
+.IX Item "poweroff"
+poweroff [\-d DELAY] [\-nf]
+.Sp
+Halt and shut off power
+.Sp
+.Vb 3
+\&        \-d SEC  Delay interval
+\&        \-n      Do not sync
+\&        \-f      Force (don\*(Aqt go through init)
+.Ve
 .IP \fBprintenv\fR 4
 .IX Item "printenv"
 printenv [VARIABLE]...
@@ -1464,6 +1632,17 @@ Display the value of a symlink
 realpath FILE...
 .Sp
 Print absolute pathnames of FILEs
+.IP \fBreboot\fR 4
+.IX Item "reboot"
+reboot [\-d DELAY] [\-nf]
+.Sp
+Reboot the system
+.Sp
+.Vb 3
+\&        \-d SEC  Delay interval
+\&        \-n      Do not sync
+\&        \-f      Force (don\*(Aqt go through init)
+.Ve
 .IP \fBreset\fR 4
 .IX Item "reset"
 reset
@@ -1833,6 +2012,25 @@ Checksum and count the blocks in a file
 .Vb 2
 \&        \-r      Use BSD sum algorithm (1K blocks)
 \&        \-s      Use System V sum algorithm (512byte blocks)
+.Ve
+.IP \fBswapoff\fR 4
+.IX Item "swapoff"
+swapoff [\-a] [DEVICE]
+.Sp
+Stop swapping on DEVICE
+.Sp
+.Vb 1
+\&        \-a      Stop swapping on all swap devices
+.Ve
+.IP \fBswapon\fR 4
+.IX Item "swapon"
+swapon [\-a] [\-e] [DEVICE]
+.Sp
+Start swapping on DEVICE
+.Sp
+.Vb 2
+\&        \-a      Start swapping on all swap devices
+\&        \-e      Silently skip devices that do not exist
 .Ve
 .IP \fBsync\fR 4
 .IX Item "sync"

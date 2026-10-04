@@ -210,24 +210,34 @@ typedef struct {
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
-/* ---- Boot Services ---- */
+/* ---- Boot Services typedefs ---- */
 typedef EFI_STATUS (*EFI_ALLOCATE_PAGES_FN)(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType, UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory);
 typedef EFI_STATUS (*EFI_GET_MEMORY_MAP_FN)(UINTN *MemoryMapSize, EFI_MEMORY_DESCRIPTOR *MemoryMap, UINTN *MapKey, UINTN *DescriptorSize, UINT32 *DescriptorVersion);
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL_FN)(EFI_MEMORY_TYPE PoolType, UINTN Size, VOID **Buffer);
+typedef EFI_STATUS (*EFI_FREE_POOL_FN)(VOID *Buffer);
+typedef EFI_STATUS (*EFI_STALL_FN)(UINTN Microseconds);
 typedef EFI_STATUS (*EFI_EXIT_BOOT_SERVICES_FN)(EFI_HANDLE ImageHandle, UINTN MapKey);
 typedef EFI_STATUS (*EFI_LOCATE_PROTOCOL_FN)(EFI_GUID *Protocol, VOID *Registration, VOID **Interface);
 typedef EFI_STATUS (*EFI_OPEN_PROTOCOL_FN)(EFI_HANDLE Handle, EFI_GUID *Protocol, VOID **Interface, EFI_HANDLE AgentHandle, EFI_HANDLE ControllerHandle, UINT32 Attributes);
 typedef EFI_STATUS (*EFI_HANDLE_PROTOCOL_FN)(EFI_HANDLE Handle, EFI_GUID *Protocol, VOID **Interface);
 
+/* ---- Boot Services ----
+ *
+ * IMPORTANTE: el orden de los miembros coincide con el layout UEFI 2.x.
+ * Los offsets importan para la ABI con OVMF. Los VOID* son funciones que
+ * no usamos (o no tenemos tipo definido aún). Solo tipamos las que
+ * llamamos: AllocatePages, GetMemoryMap, AllocatePool, FreePool,
+ * ExitBootServices, LocateProtocol, OpenProtocol, HandleProtocol, Stall.
+ */
 typedef struct {
     EFI_TABLE_HEADER Hdr;
     VOID *RaiseTPL;
     VOID *RestoreTPL;
-    EFI_ALLOCATE_PAGES_FN   AllocatePages;
+    EFI_ALLOCATE_PAGES_FN    AllocatePages;
     VOID *FreePages;
-    EFI_GET_MEMORY_MAP_FN   GetMemoryMap;
-    EFI_ALLOCATE_POOL_FN    AllocatePool;
-    VOID *FreePool;
+    EFI_GET_MEMORY_MAP_FN    GetMemoryMap;
+    EFI_ALLOCATE_POOL_FN     AllocatePool;
+    EFI_FREE_POOL_FN         FreePool;      // [FIX] era VOID*
     VOID *CreateEvent;
     VOID *SetTimer;
     VOID *WaitForEvent;
@@ -237,7 +247,7 @@ typedef struct {
     VOID *InstallProtocolInterface;
     VOID *ReinstallProtocolInterface;
     VOID *UninstallProtocolInterface;
-    EFI_HANDLE_PROTOCOL_FN HandleProtocol;
+    EFI_HANDLE_PROTOCOL_FN   HandleProtocol;
     VOID *Reserved;
     VOID *RegisterProtocolNotify;
     VOID *LocateHandle;
@@ -248,17 +258,17 @@ typedef struct {
     VOID *Exit;
     VOID *UnloadImage;
     EFI_EXIT_BOOT_SERVICES_FN ExitBootServices;
-    VOID *GetNextMonotonicCount;
-    VOID *Stall;
+    VOID                    *GetNextMonotonicCount;
+    EFI_STALL_FN             Stall;         // [FIX] era VOID*
     VOID *SetWatchdogTimer;
     VOID *ConnectController;
     VOID *DisconnectController;
-    EFI_OPEN_PROTOCOL_FN OpenProtocol;
+    EFI_OPEN_PROTOCOL_FN     OpenProtocol;
     VOID *CloseProtocol;
     VOID *OpenProtocolInformation;
     VOID *ProtocolsPerHandle;
     VOID *LocateHandleBuffer;
-    EFI_LOCATE_PROTOCOL_FN LocateProtocol;
+    EFI_LOCATE_PROTOCOL_FN   LocateProtocol;
     VOID *InstallMultipleProtocolInterfaces;
     VOID *UninstallMultipleProtocolInterfaces;
     VOID *CalculateCrc32;

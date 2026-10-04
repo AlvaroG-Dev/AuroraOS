@@ -39,6 +39,7 @@ deps_scripts/kconfig/conf.o := \
   /usr/include/x86_64-linux-gnu/bits/struct_mutex.h \
   /usr/include/x86_64-linux-gnu/bits/struct_rwlock.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-bsearch.h \
+  /usr/include/x86_64-linux-gnu/bits/types/once_flag.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-float.h \
   /usr/include/stdio.h \
   /usr/lib/gcc/x86_64-linux-gnu/15/include/stdarg.h \

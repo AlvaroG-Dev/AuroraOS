@@ -11,9 +11,11 @@
 
 #include "vfs.h"
 #include "cpu.h"
+#include "block.h"   // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
+#include "sysfs.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
@@ -1526,6 +1528,194 @@ static const devfs_entry_t devfs_entries[] = {
     {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
 };
 
+// ===========================================================================
+// [FIX] Ops de un block device del block layer. Se aplican a cualquier
+// nodo devfs cuyo `priv` apunte a un `block_device_t`.
+//
+// Permite que fdisk, blkid, dd, mkdosfs abran /dev/<name> y lean/escriban
+// sectores directamente. El VFS solo pasa la operación; el block layer
+// hace el trabajo real (PIO, DMA, AHCI, ...).
+//
+// ioctls implementados: BLKGETSIZE, BLKGETSIZE64, BLKSSZGET. Los tres
+// que usa busybox fdisk/blkid/partprobe. Sin ellos, fdisk cree que el
+// disco tiene 0 sectores y rechaza operar.
+// ===========================================================================
+
+#define BLKGETSIZE    0x1260
+#define BLKSSZGET     0x1268
+#define BLKGETSIZE64  0x80081272
+
+// ===========================================================================
+// [FIX] Block devices: reads/writes con offset/size arbitrarios.
+//
+// El block layer solo entiende de sectores completos y alineados. Los
+// consumidores (blkid, fdisk, dd con bs distinto, hexdump) piden rangos
+// de bytes arbitrarios. Sin este bounce buffer, pedir 4 bytes en el
+// offset 82 (para leer la firma "FAT32   " de un BPB) fallaba con EINVAL,
+// que es por lo que `blkid` no detectaba nada.
+//
+// La lógica: alinear el rango a [sector_ini, sector_fin], leer/escribir
+// los sectores completos al bounce buffer, y copiar solo la parte que
+// pide el usuario. Sin allocs en el camino caliente: un solo bounce de
+// 4 KB en pila por llamada.
+// ===========================================================================
+
+static int64_t devfs_block_read(vfs_node_t *node, uint64_t offset,
+                                size_t size, void *buf) {
+  block_device_t *bdev = (block_device_t *)node->priv;
+  if (!bdev || !buf || size == 0)
+    return 0;
+
+  uint64_t total_bytes = bdev->num_sectors * (uint64_t)bdev->sector_size;
+  if (offset >= total_bytes)
+    return 0;
+  if (offset + size > total_bytes)
+    size = total_bytes - offset;
+  if (size == 0)
+    return 0;
+
+  const uint32_t ssz = bdev->sector_size;
+  const size_t MAX_SECTORS = 8;   /* 4 KB con ssz=512 */
+  uint8_t bounce[MAX_SECTORS * 512];
+
+  size_t done = 0;
+  uint8_t *out = (uint8_t *)buf;
+  while (done < size) {
+    uint64_t cur = offset + done;
+    uint64_t first_lba = cur / ssz;
+    uint32_t first_off = (uint32_t)(cur % ssz);
+
+    size_t want = size - done;
+    uint32_t nsec = (uint32_t)((first_off + want + ssz - 1) / ssz);
+    if (nsec > MAX_SECTORS)
+      nsec = MAX_SECTORS;
+
+    int rc = bdev_read(bdev, first_lba, nsec, bounce);
+    if (rc != 0)
+      return done > 0 ? (int64_t)done : rc;
+
+    size_t avail = (size_t)nsec * ssz - first_off;
+    size_t to_copy = (avail < want) ? avail : want;
+    if (first_off + to_copy > (size_t)nsec * ssz)
+      to_copy = (size_t)nsec * ssz - first_off;
+    if (to_copy == 0)
+      break;
+
+    memcpy(out + done, bounce + first_off, to_copy);
+    done += to_copy;
+  }
+  return (int64_t)done;
+}
+
+static int64_t devfs_block_write(vfs_node_t *node, uint64_t offset,
+                                 size_t size, const void *buf) {
+  block_device_t *bdev = (block_device_t *)node->priv;
+  if (!bdev || !buf)
+    return -EINVAL;
+  if (bdev->is_read_only)
+    return -EROFS;
+  if (size == 0)
+    return 0;
+
+  uint64_t total_bytes = bdev->num_sectors * (uint64_t)bdev->sector_size;
+  if (offset + size > total_bytes)
+    return -ERANGE;
+
+  const uint32_t ssz = bdev->sector_size;
+  const size_t MAX_SECTORS = 8;
+  uint8_t bounce[MAX_SECTORS * 512];
+
+  size_t done = 0;
+  const uint8_t *in = (const uint8_t *)buf;
+  while (done < size) {
+    uint64_t cur = offset + done;
+    uint64_t first_lba = cur / ssz;
+    uint32_t first_off = (uint32_t)(cur % ssz);
+
+    size_t want = size - done;
+    uint32_t nsec = (uint32_t)((first_off + want + ssz - 1) / ssz);
+    if (nsec > MAX_SECTORS)
+      nsec = MAX_SECTORS;
+
+    size_t span = (size_t)nsec * ssz;
+
+    // Si el rango cubre el sector completo Y está alineado, escribimos
+    // directo (sin leer primero). Si no, hay que hacer read-modify-write.
+    if (first_off == 0 && want >= span) {
+      int rc = bdev_write(bdev, first_lba, nsec, in + done);
+      if (rc != 0)
+        return done > 0 ? (int64_t)done : rc;
+      done += span;
+      continue;
+    }
+
+    int rc = bdev_read(bdev, first_lba, nsec, bounce);
+    if (rc != 0)
+      return done > 0 ? (int64_t)done : rc;
+
+    size_t avail = span - first_off;
+    size_t to_copy = (avail < want) ? avail : want;
+    memcpy(bounce + first_off, in + done, to_copy);
+
+    rc = bdev_write(bdev, first_lba, nsec, bounce);
+    if (rc != 0)
+      return done > 0 ? (int64_t)done : rc;
+
+    done += to_copy;
+  }
+  return (int64_t)done;
+}
+
+static int devfs_block_poll(vfs_node_t *node, short events) {
+  (void)node;
+  int rev = 0;
+  if (events & 1) /*POLLIN*/  rev |= 1;
+  if (events & 4) /*POLLOUT*/ rev |= 4;
+  return rev;
+}
+
+static int64_t devfs_block_ioctl(vfs_node_t *node, unsigned long req,
+                                 uint64_t arg) {
+  block_device_t *bdev = (block_device_t *)node->priv;
+  if (!bdev)
+    return -ENOTTY;
+
+  if (req == BLKGETSIZE) {
+    uint32_t sz = (bdev->num_sectors > 0xFFFFFFFFULL)
+                      ? 0xFFFFFFFFu
+                      : (uint32_t)bdev->num_sectors;
+    if (!access_ok((void *)arg, sizeof(sz)))
+      return -EFAULT;
+    if (copy_to_user((void *)arg, &sz, sizeof(sz)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  if (req == BLKGETSIZE64) {
+    uint64_t sz = bdev->num_sectors * (uint64_t)bdev->sector_size;
+    if (!access_ok((void *)arg, sizeof(sz)))
+      return -EFAULT;
+    if (copy_to_user((void *)arg, &sz, sizeof(sz)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  if (req == BLKSSZGET) {
+    int32_t ssz = (int32_t)bdev->sector_size;
+    if (!access_ok((void *)arg, sizeof(ssz)))
+      return -EFAULT;
+    if (copy_to_user((void *)arg, &ssz, sizeof(ssz)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  return -ENOTTY;
+}
+
+static vfs_ops_t devfs_block_ops = {
+    .read = devfs_block_read,
+    .write = devfs_block_write,
+    .poll = devfs_block_poll,
+    .ioctl = devfs_block_ioctl,
+};
+
 static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   if (!dir || !out)
     return -EINVAL;
@@ -1533,21 +1723,40 @@ static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     return -ENOTDIR;
 
   size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
-  if (index >= n_entries) {
-    out->name[0] = '\0';
-    out->type = 0;
+  if (index < n_entries) {
+    const char *name = devfs_entries[index].name;
+    size_t len = strlen(name);
+    if (len >= sizeof(out->name))
+      len = sizeof(out->name) - 1;
+    for (size_t i = 0; i < len; i++)
+      out->name[i] = name[i];
+    out->name[len] = '\0';
+    out->type = devfs_entries[index].type;
     out->size = 0;
     return 0;
   }
 
-  const char *name = devfs_entries[index].name;
-  size_t len = strlen(name);
-  if (len >= sizeof(out->name))
-    len = sizeof(out->name) - 1;
-  for (size_t i = 0; i < len; i++)
-    out->name[i] = name[i];
-  out->name[len] = '\0';
-  out->type = devfs_entries[index].type;
+  // [FIX] Tras los nodos estáticos, listar los block devices del block
+  // layer. Como las particiones también se registran como devices
+  // independientes (hda1, hda2, ...), aparecen aquí solas.
+  int blk_idx = (int)(index - n_entries);
+  int nblocks = blk_count();
+  if (blk_idx < nblocks) {
+    block_device_t *bdev = blk_get_by_index(blk_idx);
+    if (bdev) {
+      size_t len = strlen(bdev->name);
+      if (len >= sizeof(out->name))
+        len = sizeof(out->name) - 1;
+      memcpy(out->name, bdev->name, len);
+      out->name[len] = '\0';
+      out->type = VFS_FILE;
+      out->size = bdev->num_sectors * (uint64_t)bdev->sector_size;
+      return 0;
+    }
+  }
+
+  out->name[0] = '\0';
+  out->type = 0;
   out->size = 0;
   return 0;
 }
@@ -1607,16 +1816,45 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     n->mode = S_IFCHR | 0620;
     n->uid = 0;
     n->gid = 5;
-    // [4.4] PTY slaves usan major 136 en Linux.
     n->rdev = (136u << 8) | (uint32_t)idx;
     return n;
   }
 
+  // Rechazar subpaths no soportados.
   for (const char *p = name; *p; p++) {
     if (*p == '/')
       return NULL;
   }
 
+  // [FIX] ¿Es un block device del block layer?
+  block_device_t *bdev = blk_lookup(name);
+  if (bdev) {
+    vfs_node_t *n = kzalloc(sizeof(vfs_node_t));
+    if (!n)
+      return NULL;
+    size_t nlen = strlen(name);
+    if (nlen >= sizeof(n->name))
+      nlen = sizeof(n->name) - 1;
+    memcpy(n->name, name, nlen);
+    n->name[nlen] = '\0';
+    n->flags = VFS_FILE;  // VFS no tiene bit block device; el modo sí
+    n->ops = &devfs_block_ops;
+    n->priv = bdev;
+    n->size = bdev->num_sectors * (uint64_t)bdev->sector_size;
+    n->mode = S_IFBLK | (bdev->is_read_only ? 0444 : 0660);
+    n->uid = 0;
+    n->gid = 6;  // "disk"
+    // [FIX] rdev único por disco: major=8, minor=índice.
+    int idx = -1;
+    int nb = blk_count();
+    for (int i = 0; i < nb; i++) {
+      if (blk_get_by_index(i) == bdev) { idx = i; break; }
+    }
+    n->rdev = (8u << 8) | (uint32_t)(idx < 0 ? 0 : idx);
+    return n;
+  }
+
+  // Nodos estáticos.
   size_t n_entries = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
   for (size_t i = 0; i < n_entries; i++) {
     if (strcmp(name, devfs_entries[i].name) == 0) {
@@ -1637,7 +1875,7 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       }
       n->uid = 0;
       n->gid = 0;
-      n->rdev = devfs_entries[i].rdev; // [4.4]
+      n->rdev = devfs_entries[i].rdev;
       return n;
     }
   }
@@ -1722,6 +1960,15 @@ void vfs_init(void) {
   } else {
     LOG_INFO("[VFS] procfs montado en /proc");
   }
+  extern struct vfs_fs_ops *sysfs_get_vfs_ops(void);
+  extern void sysfs_init(void);
+  sysfs_init();
+  int rc4 = vfs_mount("/sys", sysfs_get_vfs_ops(), NULL);
+  if (rc4 != 0) {
+    LOG_ERR("[VFS] fallo al montar sysfs en /sys: %d", rc4);
+  } else {
+    LOG_INFO("[VFS] sysfs montado en /sys");
+  }
 }
 
 // ===========================================================================
@@ -1798,8 +2045,10 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   }
 
   vfs_node_t *node = vfs_lookup(path);
-  if (!node)
+  if (!node) {
+    LOG_INFO("[VFS-OPEN-FAIL] lookup('%s')=NULL", path);
     return -ENOENT;
+  }
 
   // [3.4.d] Comprobar permiso según los flags de apertura.
   int acc_mask = (flags & (O_WRONLY | O_RDWR)) ? VFS_W_OK : VFS_R_OK;

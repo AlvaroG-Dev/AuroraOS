@@ -128,6 +128,7 @@
 #define SIGINT 2
 #define SIGKILL 9
 #define SIGTERM 15
+#define SIGWINCH 28
 
 #define WNOHANG 1
 
@@ -196,6 +197,7 @@ typedef struct {
 #define WINSRV_EV_MOUSE 6
 #define WINSRV_EV_OUTPUT 7
 #define WINSRV_EV_TTY_INPUT 8
+#define WINSRV_EV_RESIZE 9
 
 typedef struct winsrv_event {
   uint32_t type;

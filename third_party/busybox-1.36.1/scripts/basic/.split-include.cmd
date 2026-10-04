@@ -74,6 +74,7 @@ deps_scripts/basic/split-include := \
   /usr/include/x86_64-linux-gnu/bits/waitstatus.h \
   /usr/include/alloca.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-bsearch.h \
+  /usr/include/x86_64-linux-gnu/bits/types/once_flag.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-float.h \
   /usr/include/string.h \
   /usr/include/strings.h \

@@ -57,6 +57,7 @@ deps_scripts/basic/docproc := \
   /usr/include/x86_64-linux-gnu/bits/struct_rwlock.h \
   /usr/include/alloca.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-bsearch.h \
+  /usr/include/x86_64-linux-gnu/bits/types/once_flag.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-float.h \
   /usr/include/string.h \
   /usr/include/x86_64-linux-gnu/bits/types/locale_t.h \

@@ -60,25 +60,28 @@
 
 <p>Currently available applets include:</p>
 
-<pre><code>[, [[, arch, ascii, ash, awk, base32, base64, basename, bc, bunzip2,
-busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown, chroot, cksum,
-clear, cmp, comm, cp, cpio, crc32, cttyhack, cut, date, dc, dd, df,
-diff, dirname, dmesg, dnsdomainname, dos2unix, dpkg, dpkg-deb, du,
-echo, ed, egrep, env, expand, expr, factor, false, fgrep, find,
-flock, fold, free, fsync, fuser, getopt, grep, groups, gunzip, gzip,
-hd, head, hexdump, hexedit, hostid, hostname, hush, id, install,
-kill, killall, killall5, less, link, ln, logname, ls, lzcat, lzma,
-lzop, md5sum, mdev, mesg, mkdir, mkfifo, mknod, mktemp, more, mount,
+<pre><code>[, [[, arch, ascii, ash, awk, base32, base64, basename, bc, blkid,
+bunzip2, busybox, bzcat, bzip2, cal, cat, chgrp, chmod, chown,
+chroot, cksum, clear, cmp, comm, cp, cpio, crc32, cttyhack, cut,
+date, dc, dd, df, diff, dirname, dmesg, dnsdomainname, dos2unix,
+dpkg, dpkg-deb, du, echo, ed, egrep, env, expand, expr, factor,
+false, fdisk, fgrep, find, flock, fold, free, fsck, fsck.minix,
+fsync, fuser, getopt, grep, groups, gunzip, gzip, halt, hd, head,
+hexdump, hexedit, hostid, hostname, hush, hwclock, id, install,
+kill, killall, killall5, klogd, less, link, ln, logger, logname, ls,
+lsof, lspci, lsusb, lzcat, lzma, lzop, md5sum, mdev, mesg, mkdir,
+mkdosfs, mkfifo, mkfs.minix, mknod, mkswap, mktemp, more, mount,
 mountpoint, mv, nice, nl, nohup, nproc, od, paste, patch, pgrep,
-pidof, pipe_progress, pivot_root, pkill, printenv, printf, ps,
-pstree, pwd, readlink, realpath, reset, resize, rev, rm, rmdir, rpm,
-rpm2cpio, run-parts, script, scriptreplay, sed, seq, setsid, sh,
-sha1sum, sha256sum, sha3sum, sha512sum, shred, shuf, sleep, sort,
-split, start-stop-daemon, stat, strings, stty, sum, sync, tac, tail,
-tar, tee, test, time, timeout, top, touch, tr, tree, true, truncate,
-ts, tsort, uname, unexpand, uniq, unix2dos, unlink, unlzma, unxz,
-unzip, uptime, usleep, uudecode, uuencode, vi, watch, wc, which,
-whoami, xargs, xxd, xz, xzcat, yes, zcat</code></pre>
+pidof, pipe_progress, pivot_root, pkill, pmap, poweroff, printenv,
+printf, ps, pstree, pwd, readlink, realpath, reboot, reset, resize,
+rev, rm, rmdir, rpm, rpm2cpio, run-parts, script, scriptreplay, sed,
+seq, setsid, sh, sha1sum, sha256sum, sha3sum, sha512sum, shred,
+shuf, sleep, sort, split, start-stop-daemon, stat, strings, stty,
+sum, swapoff, swapon, sync, tac, tail, tar, tee, test, time,
+timeout, top, touch, tr, tree, true, truncate, ts, tsort, uname,
+unexpand, uniq, unix2dos, unlink, unlzma, unxz, unzip, uptime,
+usleep, uudecode, uuencode, vi, watch, wc, which, whoami, xargs,
+xxd, xz, xzcat, yes, zcat</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
@@ -157,6 +160,14 @@ whoami, xargs, xxd, xz, xzcat, yes, zcat</code></pre>
 -w      Warn if extensions are used</code></pre>
 
 <p>$BC_LINE_LENGTH changes output width</p>
+
+</dd>
+<dt id="blkid"><b>blkid</b></dt>
+<dd>
+
+<p>blkid [BLOCKDEV]...</p>
+
+<p>Print UUIDs of all filesystems</p>
 
 </dd>
 <dt id="bunzip2"><b>bunzip2</b></dt>
@@ -667,6 +678,21 @@ quote TOKEN             Interpret TOKEN as a string, even if
 <p>Print prime factors</p>
 
 </dd>
+<dt id="fdisk"><b>fdisk</b></dt>
+<dd>
+
+<p>fdisk [-ul] [-C CYLINDERS] [-H HEADS] [-S SECTORS] [-b SSZ] DISK</p>
+
+<p>Change partition table</p>
+
+<pre><code>-u              Start and End are in sectors (instead of cylinders)
+-l              Show partition table for each DISK, then exit
+-b 2048         (for certain MO disks) use 2048-byte sectors
+-C CYLINDERS    Set number of cylinders/heads/sectors
+-H HEADS        Typically 255
+-S SECTORS      Typically 63</code></pre>
+
+</dd>
 <dt id="find"><b>find</b></dt>
 <dd>
 
@@ -758,6 +784,38 @@ If none of the following actions is specified, -print is assumed
 <p>free</p>
 
 <p>Display free and used memory</p>
+
+</dd>
+<dt id="fsck"><b>fsck</b></dt>
+<dd>
+
+<p>fsck [-ANPRTV] [-t FSTYPE] [FS_OPTS] [BLOCKDEV]...</p>
+
+<p>Check and repair filesystems</p>
+
+<pre><code>-A      Walk /etc/fstab and check all filesystems
+-N      Don&#39;t execute, just show what would be done
+-P      With -A, check filesystems in parallel
+-R      With -A, skip the root filesystem
+-T      Don&#39;t show title on startup
+-V      Verbose
+-t TYPE List of filesystem types to check</code></pre>
+
+</dd>
+<dt id="fsck.minix"><b>fsck.minix</b></dt>
+<dd>
+
+<p>fsck.minix [-larvsmf] BLOCKDEV</p>
+
+<p>Check MINIX filesystem</p>
+
+<pre><code>-l      List all filenames
+-r      Perform interactive repairs
+-a      Perform automatic repairs
+-v      Verbose
+-s      Output superblock information
+-m      Show &quot;mode not cleared&quot; warnings
+-f      Force file system check</code></pre>
 
 </dd>
 <dt id="fsync"><b>fsync</b></dt>
@@ -871,6 +929,18 @@ If none of the following actions is specified, -print is assumed
 -t      Test integrity</code></pre>
 
 </dd>
+<dt id="halt"><b>halt</b></dt>
+<dd>
+
+<p>halt [-d DELAY] [-nf]</p>
+
+<p>Halt the system</p>
+
+<pre><code>-d SEC  Delay interval
+-n      Do not sync
+-f      Force (don&#39;t go through init)</code></pre>
+
+</dd>
 <dt id="hd"><b>hd</b></dt>
 <dd>
 
@@ -952,6 +1022,23 @@ If none of the following actions is specified, -print is assumed
 <p>Unix shell interpreter</p>
 
 </dd>
+<dt id="hwclock"><b>hwclock</b></dt>
+<dd>
+
+<p>hwclock [-swul] [--systz] [-f DEV]</p>
+
+<p>Show or set hardware clock (RTC)</p>
+
+<pre><code>-s      Set system time from RTC
+-w      Set RTC from system time
+--systz Set in-kernel timezone, correct system time
+        if RTC is kept in local time
+-f DEV  Use specified device (e.g. /dev/rtc2)
+-u      Assume RTC is kept in UTC
+-l      Assume RTC is kept in local time
+        (if neither is given, read from /etc/adjtime)</code></pre>
+
+</dd>
 <dt id="id"><b>id</b></dt>
 <dd>
 
@@ -1016,6 +1103,17 @@ If none of the following actions is specified, -print is assumed
 -o PID  Don&#39;t signal this PID</code></pre>
 
 </dd>
+<dt id="klogd"><b>klogd</b></dt>
+<dd>
+
+<p>klogd [-c N] [-n]</p>
+
+<p>Log kernel messages to syslog</p>
+
+<pre><code>-c N    Print to console messages more urgent than prio N (1-8)
+-n      Run in foreground</code></pre>
+
+</dd>
 <dt id="less"><b>less</b></dt>
 <dd>
 
@@ -1056,6 +1154,18 @@ If none of the following actions is specified, -print is assumed
 -S SUF  Use suffix instead of ~ when making backup files
 -T      Treat LINK as a file, not DIR
 -v      Verbose</code></pre>
+
+</dd>
+<dt id="logger"><b>logger</b></dt>
+<dd>
+
+<p>logger [-s] [-t TAG] [-p PRIO] [MESSAGE]</p>
+
+<p>Write MESSAGE (or stdin) to syslog</p>
+
+<pre><code>-s      Log to stderr as well as the system log
+-t TAG  Log using the specified tag (defaults to user name)
+-p PRIO Priority (number or FACILITY.LEVEL pair)</code></pre>
 
 </dd>
 <dt id="logname"><b>logname</b></dt>
@@ -1101,6 +1211,25 @@ If none of the following actions is specified, -print is assumed
 -r      Reverse sort order
 -w N    Format N columns wide
 --color[={always,never,auto}]</code></pre>
+
+</dd>
+<dt id="lsof"><b>lsof</b></dt>
+<dd>
+
+<p>lsof</p>
+
+<p>Show all open files</p>
+
+</dd>
+<dt id="lspci"><b>lspci</b></dt>
+<dd>
+
+<p>lspci [-mk]</p>
+
+<p>List all PCI devices</p>
+
+<pre><code>-m      Parsable output
+-k      Show driver</code></pre>
 
 </dd>
 <dt id="lzcat"><b>lzcat</b></dt>
@@ -1187,6 +1316,17 @@ If none of the following actions is specified, -print is assumed
 -p      No error if exists; make parent directories as needed</code></pre>
 
 </dd>
+<dt id="mkdosfs"><b>mkdosfs</b></dt>
+<dd>
+
+<p>mkdosfs [-v] [-n LABEL] BLOCKDEV [KBYTES]</p>
+
+<p>Make a FAT32 filesystem</p>
+
+<pre><code>-v      Verbose
+-n LBL  Volume label</code></pre>
+
+</dd>
 <dt id="mkfifo"><b>mkfifo</b></dt>
 <dd>
 
@@ -1195,6 +1335,20 @@ If none of the following actions is specified, -print is assumed
 <p>Create named pipe</p>
 
 <pre><code>-m MODE Mode (default a=rw)</code></pre>
+
+</dd>
+<dt id="mkfs.minix"><b>mkfs.minix</b></dt>
+<dd>
+
+<p>mkfs.minix [-c | -l FILE] [-nXX] [-iXX] BLOCKDEV [KBYTES]</p>
+
+<p>Make a MINIX filesystem</p>
+
+<pre><code>-c              Check device for bad blocks
+-n [14|30]      Maximum length of filenames
+-i INODES       Number of inodes for the filesystem
+-l FILE         Read bad blocks list from FILE
+-v              Make version 2 filesystem</code></pre>
 
 </dd>
 <dt id="mknod"><b>mknod</b></dt>
@@ -1209,6 +1363,16 @@ TYPE:
         b       Block device
         c or u  Character device
         p       Named pipe (MAJOR MINOR must be omitted)</code></pre>
+
+</dd>
+<dt id="mkswap"><b>mkswap</b></dt>
+<dd>
+
+<p>mkswap [-L LBL] BLOCKDEV [KBYTES]</p>
+
+<p>Prepare BLOCKDEV to be used as swap partition</p>
+
+<pre><code>-L LBL  Label</code></pre>
 
 </dd>
 <dt id="mktemp"><b>mktemp</b></dt>
@@ -1424,6 +1588,29 @@ TYPE:
 -e      Display name and PID of the process being killed</code></pre>
 
 </dd>
+<dt id="pmap"><b>pmap</b></dt>
+<dd>
+
+<p>pmap [-xq] PID...</p>
+
+<p>Display process memory usage</p>
+
+<pre><code>-x      Show details
+-q      Quiet</code></pre>
+
+</dd>
+<dt id="poweroff"><b>poweroff</b></dt>
+<dd>
+
+<p>poweroff [-d DELAY] [-nf]</p>
+
+<p>Halt and shut off power</p>
+
+<pre><code>-d SEC  Delay interval
+-n      Do not sync
+-f      Force (don&#39;t go through init)</code></pre>
+
+</dd>
 <dt id="printenv"><b>printenv</b></dt>
 <dd>
 
@@ -1487,6 +1674,18 @@ l       Long output</code></pre>
 <p>realpath FILE...</p>
 
 <p>Print absolute pathnames of FILEs</p>
+
+</dd>
+<dt id="reboot"><b>reboot</b></dt>
+<dd>
+
+<p>reboot [-d DELAY] [-nf]</p>
+
+<p>Reboot the system</p>
+
+<pre><code>-d SEC  Delay interval
+-n      Do not sync
+-f      Force (don&#39;t go through init)</code></pre>
 
 </dd>
 <dt id="reset"><b>reset</b></dt>
@@ -1887,6 +2086,27 @@ Other:
 
 <pre><code>-r      Use BSD sum algorithm (1K blocks)
 -s      Use System V sum algorithm (512byte blocks)</code></pre>
+
+</dd>
+<dt id="swapoff"><b>swapoff</b></dt>
+<dd>
+
+<p>swapoff [-a] [DEVICE]</p>
+
+<p>Stop swapping on DEVICE</p>
+
+<pre><code>-a      Stop swapping on all swap devices</code></pre>
+
+</dd>
+<dt id="swapon"><b>swapon</b></dt>
+<dd>
+
+<p>swapon [-a] [-e] [DEVICE]</p>
+
+<p>Start swapping on DEVICE</p>
+
+<pre><code>-a      Start swapping on all swap devices
+-e      Silently skip devices that do not exist</code></pre>
 
 </dd>
 <dt id="sync"><b>sync</b></dt>

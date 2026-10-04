@@ -101,6 +101,7 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/bits/types/timer_t.h \
   /usr/include/x86_64-linux-gnu/bits/stdint-intn.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-bsearch.h \
+  /usr/include/x86_64-linux-gnu/bits/types/once_flag.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-float.h \
   /usr/include/string.h \
   /usr/include/strings.h \

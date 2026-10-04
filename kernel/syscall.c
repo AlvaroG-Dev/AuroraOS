@@ -369,9 +369,13 @@ static int64_t do_open_common(process_t *proc, const char *raw_path,
     }
   }
 
+  
   int fd = vfs_open_for_proc(proc, path, aflags);
-  if (fd < 0)
-    return fd; // [3.4.d] propaga el errno real (-EACCES, -ENOENT, ...)
+  if (fd < 0) {
+    LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", path, linux_flags, fd);
+    return fd;
+  }
+  LOG_TRACE("[OPEN-OK] path='%s'", path);
 
   if (!created_here && (linux_flags & LINUX_O_TRUNC)) {
     file_descriptor_t *f = proc->fds[fd];
@@ -1436,33 +1440,40 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
 
 // ---------- pipe / dup2 ----------
 static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
-  if (!fds_ptr)
+  if (!fds_ptr) {
+    LOG_ERR("[PIPE] return -EINVAL (fds_ptr=NULL)");
     return -EINVAL;
-  if (!access_ok((void *)fds_ptr, 2 * sizeof(int)))
+  }
+  if (!access_ok((void *)fds_ptr, 2 * sizeof(int))) {
+    LOG_ERR("[PIPE] return -EFAULT (access_ok falla, fds_ptr=%p)", (void *)fds_ptr);
     return -EFAULT;
+  }
 
   process_t *proc = process_current();
-  if (!proc)
+  if (!proc) {
+    LOG_ERR("[PIPE] return -EFAULT (no current process)");
     return -EFAULT;
+  }
 
   int rd = -1, wr = -1;
   for (int i = 0; i < MAX_PROCESS_FDS; i++) {
     if (!proc->fds[i]) {
-      if (rd < 0)
-        rd = i;
-      else {
-        wr = i;
-        break;
-      }
+      if (rd < 0) rd = i;
+      else { wr = i; break; }
     }
   }
-  if (rd < 0 || wr < 0)
+  if (rd < 0 || wr < 0) {
+    LOG_ERR("[PIPE] return -EMFILE (rd=%d wr=%d)", rd, wr);
     return -EMFILE;
+  }
 
   vfs_node_t *re = NULL, *we = NULL;
   int rc = vfs_pipe_create(&re, &we);
-  if (rc != 0)
+  if (rc != 0) {
+    LOG_ERR("[PIPE] return rc=%d (vfs_pipe_create falló)", rc);
     return rc;
+  }
+
 
   file_descriptor_t *rfd = (file_descriptor_t *)kzalloc(sizeof(*rfd));
   file_descriptor_t *wfd = (file_descriptor_t *)kzalloc(sizeof(*wfd));
@@ -1491,15 +1502,15 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
 
   int user_fds[2] = {rd, wr};
   if (copy_to_user((void *)fds_ptr, user_fds, sizeof(user_fds)) < 0) {
+    LOG_ERR("[PIPE] return -EFAULT (copy_to_user falló, fds_ptr=%p)", (void *)fds_ptr);
     vfs_close_for_proc(proc, rd);
     vfs_close_for_proc(proc, wr);
     return -EFAULT;
   }
 
-  if (out_rd)
-    *out_rd = rd;
-  if (out_wr)
-    *out_wr = wr;
+  LOG_INFO("[PIPE] OK rd=%d wr=%d", rd, wr);
+  if (out_rd) *out_rd = rd;
+  if (out_wr) *out_wr = wr;
   return 0;
 }
 
@@ -4494,6 +4505,20 @@ uint64_t syscall_handler_c(registers_t *regs) {
 
   if (cur)
     cur->syscall_regs = saved;
+
+    // [DIAG PIPE] Log temporal de pipe/pipe2 + cualquier retorno negativo.
+    // Quitar cuando se cierre el bug.
+    if ((num == SYS_PIPE || num == SYS_PIPE2) || ((int64_t)ret < 0 && (int64_t)ret > -4096)) {
+      if (num == SYS_PIPE || num == SYS_PIPE2) {
+        LOG_INFO("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
+                 (unsigned long)num, (void *)arg1,
+                 (unsigned long)arg2, (long)ret);
+      } else if (num < 100) {
+        // Otros syscalls "básicos" que devuelvan error: útiles para ver
+        // si open/read/write están fallando también.
+        LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
+      }
+    }
 
   // Devolvemos regs->rax (que pudo cambiar si k_rt_sigreturn restauró
   // un rax distinto). El asm lo escribirá en [frame+0x70].

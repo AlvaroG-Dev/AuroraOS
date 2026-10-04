@@ -96,10 +96,13 @@ void efi_print(const CHAR16 *fmt, ...) {
             break;
         }
         case L'l': {
-            if (*(fmt + 1) == L'x' || *(fmt + 1) == L'X') {
+            CHAR16 c = *(fmt + 1);
+            if (c == L'x' || c == L'X') {
                 fmt++;
-                UINT64 v = va_arg(ap, UINT64);
-                out = p_u64_hex(out, v);
+                out = p_u64_hex(out, va_arg(ap, UINT64));
+            } else if (c == L'u') {
+                fmt++;
+                out = p_u64_dec(out, va_arg(ap, UINT64));
             } else {
                 *out++ = L'?';
             }
@@ -217,19 +220,19 @@ static EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
 static EFI_STATUS get_memory_map(EFI_HANDLE image_handle) {
     (void)image_handle;
     EFI_STATUS status;
-
+  
     mem_map.map_size = 0;
     status = gBS->GetMemoryMap(&mem_map.map_size, NULL, &mem_map.map_key,
                                &mem_map.desc_size, &mem_map.desc_version);
     if (status != EFI_BUFFER_TOO_SMALL)
-        return status;
-
+      return status;
+  
     mem_map.map_size += 4 * mem_map.desc_size;
     status = gBS->AllocatePool(EfiLoaderData, mem_map.map_size,
                                (VOID **)&mem_map.map);
     if (EFI_ERROR(status))
-        return status;
-
+      return status;
+  
     status = gBS->GetMemoryMap(&mem_map.map_size, mem_map.map, &mem_map.map_key,
                                &mem_map.desc_size, &mem_map.desc_version);
     return status;
@@ -572,45 +575,134 @@ static void find_acpi_rsdp(EFI_SYSTEM_TABLE *st, uint8_t *out_rsdp) {
     efi_print(L"[BOOT] ACPI RSDP no encontrado\n");
 }
 
-/* ---- Salto al kernel ---- */
 static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
-                           struct kernel_boot_info *kinfo,
-                           EFI_PHYSICAL_ADDRESS pml4_addr) {
-    EFI_STATUS status;
+    struct kernel_boot_info *kinfo,
+    EFI_PHYSICAL_ADDRESS pml4_addr) {
+EFI_STATUS status;
 
-    EFI_PHYSICAL_ADDRESS safe_memmap_addr = 0xFFFFFFFF;
-    status = gBS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
-                                (mem_map.map_size + 0xFFF + 2048) / 0x1000,
-                                &safe_memmap_addr);
-    if (EFI_ERROR(status)) {
-        efi_print(L"[BOOT] Fallo alocando buffer seguro para memmap\n");
-        return;
-    }
+// ---------------------------------------------------------------------
+// 0. Todo lo que se usa DESPUÉS de cambiar CR3 debe estar < 4 GiB (único
+//    rango con identity map en las tablas del kernel). La imagen del
+//    bootloader, con >4 GiB de RAM, puede estar por encima.
+// ---------------------------------------------------------------------
+// 0a. Trampoline ejecutable: mov cr3,rcx ; mov rdi,rdx ; jmp r8
+EFI_PHYSICAL_ADDRESS tramp_addr = 0xFFFFFFFF;
+status = gBS->AllocatePages(AllocateMaxAddress, EfiLoaderCode, 1,
+       &tramp_addr);
+if (EFI_ERROR(status)) {
+efi_print(L"[BOOT] trampoline alloc FAIL %r\n", status);
+return;
+}
+static const UINT8 tramp_code[] = {
+0x0F, 0x22, 0xD9, // mov cr3, rcx
+0x48, 0x89, 0xD7, // mov rdi, rdx
+0x41, 0xFF, 0xE0  // jmp r8
+};
+copy_mem((VOID *)tramp_addr, tramp_code, sizeof(tramp_code));
 
-    efi_print(L"[BOOT] Salida de Boot Services...\n");
+// 0b. Copia de kinfo en una página baja (el original vive en la pila
+//     UEFI, que normalmente está <4 GiB pero no está garantizado).
+EFI_PHYSICAL_ADDRESS kinfo_addr = 0xFFFFFFFF;
+status = gBS->AllocatePages(AllocateMaxAddress, EfiLoaderData, 1,
+       &kinfo_addr);
+if (EFI_ERROR(status)) {
+efi_print(L"[BOOT] kinfo alloc FAIL %r\n", status);
+return;
+}
+copy_mem((VOID *)kinfo_addr, kinfo, sizeof(*kinfo));
+kinfo = (struct kernel_boot_info *)kinfo_addr;
 
-    get_memory_map(image_handle);
-    copy_mem((VOID *)safe_memmap_addr, mem_map.map, mem_map.map_size);
-    kinfo->memmap = safe_memmap_addr;
+// ---------------------------------------------------------------------
+// 1. Buffer "seguro" para el memory map final.
+// ---------------------------------------------------------------------
+EFI_PHYSICAL_ADDRESS safe_memmap_addr = 0;
+UINTN safe_pages = (mem_map.map_size + 0xFFF + 65536) / 0x1000;
+if (safe_pages < 16) safe_pages = 16;
+status = gBS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+       safe_pages, &safe_memmap_addr);
+if (EFI_ERROR(status)) {
+efi_print(L"[BOOT] safe_memmap alloc FAIL %r\n", status);
+return;
+}
+efi_print(L"[BOOT] safe_memmap @ %lx (%lu pages)\n",
+(UINT64)safe_memmap_addr, (UINT64)safe_pages);
 
-    __asm__ volatile("cli");
+// 2. IRQs off.
+__asm__ volatile("cli");
 
-    status = gBS->ExitBootServices(image_handle, mem_map.map_key);
-    if (EFI_ERROR(status)) {
-        get_memory_map(image_handle);
-        copy_mem((VOID *)safe_memmap_addr, mem_map.map, mem_map.map_size);
-        kinfo->memmap = safe_memmap_addr;
-        status = gBS->ExitBootServices(image_handle, mem_map.map_key);
-    }
+// 3. Bucle de ExitBootServices (sin cambios).
+EFI_MEMORY_DESCRIPTOR *map_buf = NULL;
+UINTN map_buf_size = 0;
+UINTN map_key = 0;
+UINTN desc_size = 0;
+UINT32 desc_ver = 0;
+status = EFI_INVALID_PARAMETER;
 
-    __asm__ volatile("movq %0, %%cr3" : : "r"(pml4_addr) : "memory");
+for (int attempt = 0; attempt < 32; attempt++) {
+if (attempt > 0)
+gBS->Stall(1000);
 
-    typedef void (*kernel_fn_t)(struct kernel_boot_info *)
-        __attribute__((sysv_abi));
-    kernel_fn_t kmain = (kernel_fn_t)kernel_entry;
-    kmain(kinfo);
+if (map_buf) {
+gBS->FreePool(map_buf);
+map_buf = NULL;
+map_buf_size = 0;
+}
 
-    while (1) __asm__ volatile("hlt");
+UINTN ms = 0;
+EFI_STATUS s = gBS->GetMemoryMap(&ms, NULL, &map_key, &desc_size,
+              &desc_ver);
+if (s != EFI_BUFFER_TOO_SMALL) {
+efi_print(L"[BOOT] t%d GM(size) FAIL %r\n", (INT64)attempt, s);
+continue;
+}
+ms += 8 * desc_size;
+
+s = gBS->AllocatePool(EfiLoaderData, ms, (VOID **)&map_buf);
+if (EFI_ERROR(s) || !map_buf) {
+efi_print(L"[BOOT] t%d AllocPool FAIL %r\n", (INT64)attempt, s);
+map_buf = NULL;
+continue;
+}
+map_buf_size = ms;
+
+s = gBS->GetMemoryMap(&map_buf_size, map_buf, &map_key, &desc_size,
+   &desc_ver);
+if (EFI_ERROR(s)) {
+efi_print(L"[BOOT] t%d GM(buf) FAIL %r\n", (INT64)attempt, s);
+continue;
+}
+
+copy_mem((VOID *)safe_memmap_addr, map_buf, map_buf_size);
+kinfo->memmap = safe_memmap_addr;
+kinfo->memmap_size = map_buf_size;
+kinfo->memmap_desc_size = desc_size;
+kinfo->memmap_desc_ver = desc_ver;
+
+status = gBS->ExitBootServices(image_handle, map_key);
+if (!EFI_ERROR(status))
+break;
+
+efi_print(L"[BOOT] t%d ExitBootServices key=%lx sz=%lx FAIL %r\n",
+(INT64)attempt, (UINT64)map_key, (UINT64)map_buf_size, status);
+}
+
+if (EFI_ERROR(status)) {
+efi_print(L"[BOOT] ExitBootServices fallo tras 32 intentos. Halt.\n");
+while (1)
+__asm__ volatile("hlt");
+}
+
+// ---------------------------------------------------------------------
+// 4. Cambiar CR3 y saltar al kernel DESDE el trampoline (identity-mapped).
+//    Convención del bootloader (MS ABI): rcx=pml4, rdx=kinfo, r8=entry.
+//    El trampoline deja kinfo en rdi (SysV) y salta a entry. No vuelve.
+// ---------------------------------------------------------------------
+typedef void (*__attribute__((ms_abi)) tramp_fn_t)(
+UINT64 pml4, struct kernel_boot_info *kinfo, VOID *entry);
+((tramp_fn_t)tramp_addr)((UINT64)pml4_addr, kinfo, kernel_entry);
+
+while (1)
+__asm__ volatile("hlt");
 }
 
 /* ---- Entry point ---- */

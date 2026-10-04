@@ -119,3 +119,8 @@ void window_start_close_animation(window_t *win);
 void window_advance_animation(window_t *win, int dt_ms);
 int window_is_animating(window_t *win);
 void window_start_minimize_animation(window_t *win);
+
+// [FIX #8] Resize de la ventana. Realloca content_buffer y surface.
+// No emite WINSRV_EV_RESIZE por sí sola — el compositor es quien
+// decide cuándo emitir el evento a la app.
+void window_resize(window_t *win, int new_w, int new_h);

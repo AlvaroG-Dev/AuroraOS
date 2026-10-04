@@ -20,9 +20,13 @@ typedef struct {
 } cell_t;
 
 typedef struct {
-  cell_t *cells;
-  int cols;
-  int rows;
+  cell_t *cells;       // buffer [alloc_rows * alloc_cols]
+  int cols;            // ancho lógico visible (<= alloc_cols)
+  int rows;            // alto lógico visible (<= alloc_rows)
+  int alloc_cols;      // ancho físico del buffer (solo crece)
+  int alloc_rows;      // alto físico del buffer (solo crece)
+  int y_top;           // fila física que mapea a la fila lógica 0
+                       // [0, alloc_rows - rows]
 } screen_t;
 
 enum {
@@ -46,6 +50,10 @@ typedef struct {
   int cursor_visible;
   int cursor_blink_on;
   int cursor_shape;
+
+  // [FIX #10b] Alpha del cursor (0=invisible, 255=opaco). Lo actualiza
+  // main.c cada frame con una onda triangular para el fade suave.
+  uint8_t cursor_alpha;
 
   int parser_state;
   int params[32];
@@ -98,11 +106,11 @@ typedef struct {
   int response_len;
 
   // --- Scrollback ---
-  cell_t *history;       // ring buffer [history_size * cols]
-  int history_size;      // capacidad en líneas (constante tras init)
-  int history_head;      // índice de la línea más vieja
-  int history_count;     // líneas válidas (0..history_size)
-  int scroll_offset;     // 0 = live, >0 = líneas hacia atrás
+  cell_t *history;
+  int history_size;
+  int history_head;
+  int history_count;
+  int scroll_offset;
 } terminal_t;
 
 // --- API ---
@@ -121,8 +129,17 @@ void terminal_clear_dirty(terminal_t *t);
 void terminal_blink_toggle(terminal_t *t);
 
 // --- Scrollback API ---
-// delta > 0 = hacia atrás, delta < 0 = hacia adelante. Clampea a
-// [0, history_count]. Cada llamada fuerza redraw completo del viewport.
 void terminal_scroll(terminal_t *t, int delta);
 int  terminal_is_scrolled(const terminal_t *t);
 void terminal_scroll_to_bottom(terminal_t *t);
+
+// --- [FIX #10b] Cursor animado ---
+void terminal_set_cursor_alpha(terminal_t *t, uint8_t alpha);
+
+// --- [FIX #6] Mouse tracking ---
+void terminal_mouse_event(terminal_t *t, int col, int row,
+                          int button, int pressed, int mods);
+
+// [FIX] Empuja todas las filas no vacías de la grid al scrollback.
+// Se usa antes de un resize para no perder el contenido visible.
+void terminal_push_to_history(terminal_t *t);

@@ -706,3 +706,80 @@ void window_start_minimize_animation(window_t *win) {
   win->anim_alpha = 255;
   win->anim_dy = 0;
 }
+
+// [FIX] Resize atómico: allocamos ambos buffers primero. Si la segunda
+// alloc falla, liberamos la primera y salimos sin tocar la ventana.
+// Esto evita el estado inconsistente (surface=NULL pero surface_w/h
+// viejos) que, junto con la corrupción del heap, terminaba de romper
+// el compositor.
+//
+// Nota sobre el lock: window_resize se llama desde el compositor (que
+// ya tiene su propio lock) y modifica la ventana. winsrv_blit (otro CPU)
+// lee win->content_buffer y win->content_w/h. Para que el swap sea seguro,
+// las asignaciones deben ocurrir en un orden que nunca deje la ventana
+// con puntero obsoleto: primero actualizamos el content_buffer, después
+// el surface, después las dims, y solo al final liberamos los viejos.
+// El mutex de winsrv_lock protege contra el resto.
+void window_resize(window_t *win, int new_w, int new_h) {
+  if (!win) return;
+  if (new_w < 200 || new_h < 100) return;
+  if (new_w > 2048 || new_h > 2048) return;
+  if (new_w == win->width && new_h == win->height) return;
+
+  int new_content_w, new_content_h;
+  if (!(win->flags & WIN_FLAGS_NODECORATION)) {
+    new_content_w = new_w;
+    new_content_h = new_h - WIN11_TITLEBAR_HEIGHT;
+  } else {
+    new_content_w = new_w;
+    new_content_h = new_h;
+  }
+  if (new_content_w <= 0 || new_content_h <= 0) return;
+
+  size_t new_buf_size = (size_t)new_content_w * new_content_h * sizeof(uint32_t);
+  int new_surf_w = new_w + WIN11_SHADOW_SIZE * 2;
+  int new_surf_h = new_h + WIN11_SHADOW_SIZE * 2;
+  size_t new_surf_bytes = (size_t)new_surf_w * new_surf_h * sizeof(uint32_t);
+
+  // --- Paso 1: allocar AMBOS buffers antes de tocar la ventana ---
+  uint32_t *new_content = (uint32_t *)kmalloc(new_buf_size);
+  if (!new_content) return;
+
+  uint32_t *new_surface = (uint32_t *)kmalloc(new_surf_bytes);
+  if (!new_surface) {
+    kfree(new_content);
+    return;
+  }
+
+  // --- Paso 2: copiar contenido (bounded) ---
+  int copy_w = (new_content_w < win->content_w) ? new_content_w : win->content_w;
+  int copy_h = (new_content_h < win->content_h) ? new_content_h : win->content_h;
+  for (int y = 0; y < new_content_h; y++) {
+    uint32_t *dst_row = &new_content[y * new_content_w];
+    for (int x = 0; x < new_content_w; x++) {
+      uint32_t c = WIN11_SURFACE_CARD;
+      if (y < copy_h && x < copy_w)
+        c = win->content_buffer[y * win->content_w + x];
+      dst_row[x] = c;
+    }
+  }
+
+  // --- Paso 3: guardar viejos, hacer el swap, liberar viejos ---
+  uint32_t *old_content = win->content_buffer;
+  uint32_t *old_surface = win->surface;
+
+  win->content_buffer = new_content;
+  win->content_w = new_content_w;
+  win->content_h = new_content_h;
+  win->surface = new_surface;
+  win->surface_w = new_surf_w;
+  win->surface_h = new_surf_h;
+  win->width = new_w;
+  win->height = new_h;
+
+  kfree(old_content);
+  kfree(old_surface);
+
+  win->dirty = 1;
+  window_redraw_surface(win);
+}

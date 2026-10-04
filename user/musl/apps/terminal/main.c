@@ -1,7 +1,6 @@
 // user/musl/apps/terminal/main.c
 //
 // Terminal 2D: matriz de celdas + parser ANSI completo + scrollback.
-// El shell corre en el PTY, este proceso solo pinta.
 
 #define syscall aurora_syscall
 #define puts    aurora_puts_userlib
@@ -44,21 +43,28 @@ static int g_child = -1;
 
 static terminal_t g_term;
 
-// Input buffering: agrupamos los bytes que llegan en el mismo drain
-// para poder detectar secuencias multi-byte (PgUp/PgDn) antes de
-// decidir si van al PTY o son comandos de scrollback.
+// Input buffering.
 static uint8_t g_in_buf[64];
 static int g_in_len = 0;
 
+// [FIX #10b] Fase del cursor animado (ms dentro de un ciclo de 2000 ms).
+static uint64_t g_cursor_phase = 0;
+
 // ---------------------------------------------------------------------------
-// Detección de las secuencias VT estándar de PgUp/PgDn.
-//   PgUp = ESC [ 5 ~
-//   PgDn = ESC [ 6 ~
-//
-// Devuelve 1 si es una de ellas, y rellena *out_delta con las líneas
-// de scroll (positivo = hacia atrás). Si el compositor envía otras
-// secuencias, ajustar aquí.
+// [FIX #6] Decode de eventos MOUSE.
+// Formato acordado con el compositor:
+//   bits 0-7   : button (0=left, 1=middle, 2=right, 64=wheel_up, 65=wheel_down)
+//   bit  8     : release (1 = soltar)
+//   bit  9     : motion  (1 = movimiento con botón pulsado)
+//   bits 16-18 : mods    (1=shift, 2=alt, 4=ctrl)
 // ---------------------------------------------------------------------------
+static inline int mouse_button(uint32_t d)  { return (int)(d & 0xFF); }
+static inline int mouse_pressed(uint32_t d) { return ((d >> 8) & 1) == 0; }
+static inline int mouse_motion(uint32_t d)  { return (int)((d >> 9) & 1); }
+static inline int mouse_mods(uint32_t d)    { return (int)((d >> 16) & 0x7); }
+
+// ---------------------------------------------------------------------------
+// Detección de PgUp/PgDn.
 static int match_scroll(const uint8_t *b, int n, int *out_delta, int rows) {
   if (n == 4 && b[0] == 0x1b && b[1] == '[' && b[3] == '~') {
     if (b[2] == '5') { *out_delta = +(rows - 2); return 1; }
@@ -91,32 +97,64 @@ static void flush_response(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Procesa el input acumulado: scrollback, Home/End en scrollback, o PTY.
+// [FIX #6] Convierte evento de ratón a celda del terminal y actúa.
+// ---------------------------------------------------------------------------
+static void handle_mouse_event(const winsrv_event_t *ev) {
+  int col = (ev->x - PAD_X) / g_cell_w;
+  int row = (ev->y - PAD_Y) / g_cell_h;
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS)
+    return;
+
+  int button  = mouse_button(ev->data);
+  int pressed = mouse_pressed(ev->data);
+  int motion  = mouse_motion(ev->data);
+  int mods    = mouse_mods(ev->data);
+
+  // Wheel: si el shell no pidió mouse tracking, scrollear scrollback local.
+  if ((button == 64 || button == 65) && !g_term.mode_mouse) {
+    int lines = 3;
+    terminal_scroll(&g_term, button == 64 ? +lines : -lines);
+    return;
+  }
+
+  if (!g_term.mode_mouse)
+    return;
+
+  // Wheel: pasar siempre al PTY (aunque sea release=1).
+  // Motion sin botón: ignorar (no implementamos any-event tracking).
+  if (motion && !pressed)
+    return;
+
+  terminal_mouse_event(&g_term, col, row, button, pressed, mods);
+  flush_response();
+}
+
+// ---------------------------------------------------------------------------
+// Procesa el input acumulado: scrollback, Home/End, o PTY.
 // ---------------------------------------------------------------------------
 static void process_input(const uint8_t *buf, int n) {
-  // PgUp / PgDn.
+  // [FIX] En alternate screen no interceptamos NADA. PgUp/PgDn/Home/End
+  // son para la app (top scrollea con ellos, vim los usa para moverse,
+  // less también). Pasamos todo al PTY sin tocar el scrollback local.
+  if (g_term.using_alternate) {
+    if (g_master >= 0)
+      write(g_master, buf, (size_t)n);
+    return;
+  }
+
   int delta = 0;
   if (match_scroll(buf, n, &delta, ROWS)) {
     terminal_scroll(&g_term, delta);
     return;
   }
 
-  // Home / End (ESC [ H  y  ESC [ F).
   if (n == 3 && buf[0] == 0x1b && buf[1] == '[') {
-    // Home: ir al top del history SIEMPRE que haya history.
-    // Si no hay history, se pasa al shell para que readline lo use
-    // como "inicio de línea" (Ctrl+A también sirve).
-    //
-    // Antes esto solo se activaba si ya estabas scrolleado, lo cual
-    // obligaba a pulsar PgUp primero. Ahora funciona directo.
     if (buf[2] == 'H') {
       if (g_term.history_count > 0) {
         terminal_scroll(&g_term, g_term.history_count);
         return;
       }
     }
-    // End: volver al live view SIEMPRE que estés scrolleado.
-    // Si no lo estás, se pasa al shell (readline End = fin de línea).
     if (buf[2] == 'F') {
       if (terminal_is_scrolled(&g_term)) {
         terminal_scroll_to_bottom(&g_term);
@@ -125,7 +163,8 @@ static void process_input(const uint8_t *buf, int n) {
     }
   }
 
-  // Cualquier otro input va al PTY y devuelve al live view.
+  g_cursor_phase = 0;
+
   if (g_master >= 0)
     write(g_master, buf, (size_t)n);
   terminal_scroll_to_bottom(&g_term);
@@ -148,19 +187,7 @@ static void enter_dead_mode(void) {
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// [FIX #3] Bracketed paste.
-//
-// El shell puede activar el modo ?2004h para que el terminal le avise
-// cuando el texto viene de un "paste" (no de teclado). Cuando está
-// activo, el texto se envuelve en ESC[200~ ... ESC[201~, lo que evita
-// que un paste accidental ejecute comandos línea a línea.
-//
-// Esta función NO se llama de momento: está lista para cuando
-// implementes Ctrl+Shift+V con clipboard. El llamante debe leer el
-// texto del clipboard y llamar aquí con el buffer.
-//
-// Marcada como `unused` para que GCC no se queje mientras no la uses.
+// [FIX #3] Bracketed paste (helper listo para Ctrl+Shift+V).
 static void __attribute__((unused))
 term_paste(const char *text, size_t len) {
   if (!text || len == 0 || g_master < 0)
@@ -174,21 +201,20 @@ term_paste(const char *text, size_t len) {
   }
 }
 
+// ---------------------------------------------------------------------------
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
 
-  // --- Métricas reales de la fuente ---
   const font_aa_t *font = font_system_mono();
   if (font) {
     g_font_h = font->height;
     g_cell_w = font->glyphs['M'].advance;
     if (g_cell_w <= 0)
       g_cell_w = 8;
-    g_cell_h = g_font_h + 4; // 4 px de leading
+    g_cell_h = g_font_h + 4;
   }
 
-  // --- Ventana dimensionada al contenido + padding + titlebar ---
   int win_w = COLS * g_cell_w + 2 * PAD_X;
   int win_h = ROWS * g_cell_h + 2 * PAD_Y;
 
@@ -207,6 +233,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Fondo inicial: solo lo usamos para el primer blit. El gradiente se
+  // aplica celda a celda en el render.
   const uint32_t k_bg = 0xFF000000u | 0x002B36u;
   for (int i = 0; i < g_cw * g_ch; i++)
     g_pixels[i] = k_bg;
@@ -220,7 +248,6 @@ int main(int argc, char **argv) {
   sys_win_blit(win, 0, 0, g_cw, g_ch, 0, 0, g_cw, g_pixels);
   terminal_clear_dirty(&g_term);
 
-  // --- ENV defaults ---
   if (!environ || !environ[0]) {
     setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin:/", 1);
     setenv("TERM", "xterm-256color", 1);
@@ -231,7 +258,6 @@ int main(int argc, char **argv) {
     setenv("PWD", "/", 1);
   }
 
-  // --- PTY ---
   int master = open("/dev/ptmx", O_RDWR);
   if (master < 0)
     enter_dead_mode();
@@ -253,7 +279,6 @@ int main(int argc, char **argv) {
   struct winsize ws = {ROWS, COLS, 0, 0};
   ioctl(master, TIOCSWINSZ, &ws);
 
-  // --- Spawn shell ---
   char *sh_argv[] = {"/bin/sh", NULL};
   spawn_fds_t fds = {slave, slave, slave};
   int child = spawn_args_fds("/bin/sh", sh_argv, 1, &fds);
@@ -265,9 +290,6 @@ int main(int argc, char **argv) {
   int child_pgid = child;
   ioctl(master, TIOCSPGRP, &child_pgid);
 
-  // --- Loop principal ---
-  int blink_count = 0;
-
   while (1) {
     // 1. Eventos de la ventana.
     winsrv_event_t ev;
@@ -278,10 +300,10 @@ int main(int argc, char **argv) {
           g_in_buf[g_in_len++] = (uint8_t)ev.x;
         break;
 
-      // [FIX #4] Focus events. Si el shell ha activado ?1004h, se
-      // envían ESC[I (focus in) / ESC[O (focus out) al PTY cuando la
-      // ventana gana o pierde el foco. Los usan vim, emacs y algunas
-      // TUIs para pausar timers o repaints.
+      case WINSRV_EV_MOUSE:
+        handle_mouse_event(&ev);
+        break;
+
       case WINSRV_EV_FOCUS:
         if (g_term.mode_focus_events && g_master >= 0) {
           const char seq[] = "\033[I";
@@ -294,6 +316,63 @@ int main(int argc, char **argv) {
           write(g_master, seq, 3);
         }
         break;
+
+      case WINSRV_EV_RESIZE: {
+        int new_cw = ev.x;
+        int new_ch = ev.y;
+        if (new_cw <= 2 * PAD_X || new_ch <= 2 * PAD_Y)
+          break;
+
+        int new_cols = (new_cw - 2 * PAD_X) / g_cell_w;
+        int new_rows = (new_ch - 2 * PAD_Y) / g_cell_h;
+        if (new_cols < 1) new_cols = 1;
+        if (new_rows < 1) new_rows = 1;
+
+        if (new_cols == g_term.primary.cols &&
+            new_rows == g_term.primary.rows &&
+            new_cw == g_cw && new_ch == g_ch)
+          break;
+
+        uint32_t *new_pixels = (uint32_t *)malloc(
+            (size_t)new_cw * new_ch * sizeof(uint32_t));
+        if (!new_pixels)
+          break;
+
+        const uint32_t k_bg = 0xFF000000u | 0x002B36u;
+        for (int i = 0; i < new_cw * new_ch; i++)
+          new_pixels[i] = k_bg;
+
+        free(g_pixels);
+        g_pixels = new_pixels;
+        g_cw = new_cw;
+        g_ch = new_ch;
+
+        // Resize de la grid. Preserva el contenido visible top-left.
+        terminal_resize(&g_term, new_cols, new_rows);
+
+        // Forzar render inmediato (sin esperar al loop, que puede tardar
+        // si el cursor está en fase hold y no marca dirty).
+        terminal_render(&g_term, g_pixels, g_cw,
+                        PAD_X, PAD_Y, g_cell_w, g_cell_h,
+                        font_system_mono());
+        terminal_clear_dirty(&g_term);
+
+        // Blit del buffer COMPLETO. Cubre:
+        //   1. Las celdas (con el contenido preservado).
+        //   2. El padding PAD_X/PAD_Y, que el kernel rellenó con
+        //      WIN11_SURFACE_CARD al hacer window_resize y que hay que
+        //      sobrescribir con el bg del terminal.
+        sys_win_blit(win, 0, 0, g_cw, g_ch, 0, 0, g_cw, g_pixels);
+
+        // Avisar al shell. ioctl(TIOCSWINSZ) ya envía SIGWINCH al
+        // foreground pgroup del PTY; no hace falta el kill explícito.
+        // Si lo dejábamos, el shell recibía SIGWINCH dos veces y podía
+        // imprimir el prompt dos veces.
+        struct winsize ws2 = {(unsigned short)new_rows,
+                              (unsigned short)new_cols, 0, 0};
+        ioctl(g_master, TIOCSWINSZ, &ws2);
+        break;
+      }
 
       case WINSRV_EV_CLOSE:
         if (g_child > 0) kill(g_child, SIGKILL);
@@ -308,13 +387,13 @@ int main(int argc, char **argv) {
       }
     }
 
-    // 2. Procesar input acumulado (scrollback, Home/End o PTY).
+    // 2. Input acumulado.
     if (g_in_len > 0) {
       process_input(g_in_buf, g_in_len);
       g_in_len = 0;
     }
 
-    // 3. Drenar el PTY master.
+    // 3. Drenar el PTY.
     for (;;) {
       struct pollfd pfd = {g_master, POLLIN, 0};
       int pr = poll(&pfd, 1, 0);
@@ -328,14 +407,33 @@ int main(int argc, char **argv) {
       flush_response();
     }
 
-    // 4. Blink cada ~500 ms (32 iteraciones × 16 ms).
-    blink_count++;
-    if (blink_count >= 32) {
-      blink_count = 0;
-      terminal_blink_toggle(&g_term);
-    }
+    // 4. [FIX #10b] Animación del cursor.
+    //
+    // Patrón "hold + fade corto", como kitty/xterm/GNOME Terminal:
+    //   - 450 ms opaco (alpha=255)
+    //   -  80 ms fade out (255 -> 0)
+    //   - 450 ms invisible (alpha=0)
+    //   -  80 ms fade in (0 -> 255)
+    // Ciclo total: 1060 ms. El cursor está visible ~53% del tiempo,
+    // pero las transiciones son rápidas (5 frames cada una) y no se
+    // percibe "flotando" como con una onda triangular lenta.
+    g_cursor_phase += 16;
+    if (g_cursor_phase >= 1060)
+      g_cursor_phase = 0;
 
-    // 5. Render + blit del bbox dirty.
+    uint8_t alpha;
+    if (g_cursor_phase < 450) {
+      alpha = 255;
+    } else if (g_cursor_phase < 530) {
+      alpha = (uint8_t)(255 - ((g_cursor_phase - 450) * 255) / 80);
+    } else if (g_cursor_phase < 980) {
+      alpha = 0;
+    } else {
+      alpha = (uint8_t)(((g_cursor_phase - 980) * 255) / 80);
+    }
+    terminal_set_cursor_alpha(&g_term, alpha);
+
+    // 5. Render.
     flush_to_window();
 
     // 6. Reap child.
@@ -345,7 +443,7 @@ int main(int argc, char **argv) {
         g_child = -1;
     }
 
-    // 7. Esperar 16 ms o hasta input del PTY.
+    // 7. Esperar 16 ms.
     struct pollfd pfd = {g_master, POLLIN, 0};
     poll(&pfd, 1, 16);
   }

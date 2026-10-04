@@ -151,6 +151,7 @@ deps_libbb/verror_msg.o := \
   include/grp_.h \
   include/shadow_.h \
   include/xatonum.h \
+  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/syslog.h \
 
 libbb/verror_msg.o: $(deps_libbb/verror_msg.o)
 

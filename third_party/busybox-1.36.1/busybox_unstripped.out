@@ -344,8 +344,10 @@ procps/lib.a
 (procps/lib.a)free.o
 (procps/lib.a)fuser.o
 (procps/lib.a)kill.o
+(procps/lib.a)lsof.o
 (procps/lib.a)pgrep.o
 (procps/lib.a)pidof.o
+(procps/lib.a)pmap.o
 (procps/lib.a)ps.o
 (procps/lib.a)pstree.o
 (procps/lib.a)top.o
@@ -367,16 +369,27 @@ shell/lib.a
 (shell/lib.a)shell_common.o
 attempt to open sysklogd/lib.a succeeded
 sysklogd/lib.a
+(sysklogd/lib.a)klogd.o
+(sysklogd/lib.a)syslogd_and_logger.o
 attempt to open util-linux/lib.a succeeded
 util-linux/lib.a
+(util-linux/lib.a)blkid.o
 (util-linux/lib.a)cal.o
 (util-linux/lib.a)dmesg.o
+(util-linux/lib.a)fdisk.o
 (util-linux/lib.a)flock.o
+(util-linux/lib.a)fsck_minix.o
 (util-linux/lib.a)getopt.o
 (util-linux/lib.a)hexdump.o
 (util-linux/lib.a)hexdump_xxd.o
+(util-linux/lib.a)hwclock.o
+(util-linux/lib.a)lspci.o
+(util-linux/lib.a)lsusb.o
 (util-linux/lib.a)mdev.o
 (util-linux/lib.a)mesg.o
+(util-linux/lib.a)mkfs_minix.o
+(util-linux/lib.a)mkfs_vfat.o
+(util-linux/lib.a)mkswap.o
 (util-linux/lib.a)more.o
 (util-linux/lib.a)mount.o
 (util-linux/lib.a)mountpoint.o
@@ -385,8 +398,12 @@ util-linux/lib.a
 (util-linux/lib.a)script.o
 (util-linux/lib.a)scriptreplay.o
 (util-linux/lib.a)setsid.o
+(util-linux/lib.a)swaponoff.o
 attempt to open util-linux/volume_id/lib.a succeeded
 util-linux/volume_id/lib.a
+(util-linux/volume_id/lib.a)get_devname.o
+(util-linux/volume_id/lib.a)volume_id.o
+(util-linux/volume_id/lib.a)util.o
 attempt to open archival/built-in.o succeeded
 archival/built-in.o
 attempt to open archival/libarchive/built-in.o succeeded
@@ -586,6 +603,7 @@ debianutils/lib.a
 (debianutils/lib.a)which.o
 klibc-utils/lib.a
 e2fsprogs/lib.a
+(e2fsprogs/lib.a)fsck.o
 editors/lib.a
 (editors/lib.a)awk.o
 (editors/lib.a)cmp.o
@@ -599,6 +617,7 @@ findutils/lib.a
 (findutils/lib.a)grep.o
 (findutils/lib.a)xargs.o
 init/lib.a
+(init/lib.a)halt.o
 libbb/lib.a
 (libbb/lib.a)ask_confirmation.o
 (libbb/lib.a)auto_string.o
@@ -624,6 +643,7 @@ libbb/lib.a
 (libbb/lib.a)find_root_device.o
 (libbb/lib.a)get_line_from_file.o
 (libbb/lib.a)get_shell_name.o
+(libbb/lib.a)get_volsize.o
 (libbb/lib.a)getopt_allopts.o
 (libbb/lib.a)getpty.o
 (libbb/lib.a)hash_md5_sha.o
@@ -653,6 +673,7 @@ libbb/lib.a
 (libbb/lib.a)recursive_action.o
 (libbb/lib.a)remove_file.o
 (libbb/lib.a)replace.o
+(libbb/lib.a)rtc.o
 (libbb/lib.a)safe_gethostname.o
 (libbb/lib.a)safe_poll.o
 (libbb/lib.a)simplify_path.o
