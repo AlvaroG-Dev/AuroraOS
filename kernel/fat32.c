@@ -1495,9 +1495,9 @@ static int64_t fat32_write_data(fat32_node_priv_t *np, uint64_t offset,
   }
   kfree(cbuf);
 
-  if (fat32_sync_locked(fs) != 0)
-    return -EIO;
-
+  // Update the directory entry before the final sync. Otherwise extending
+  // a file would persist its data/FAT first, then leave the new size or
+  // first-cluster metadata dirty in the buffer cache after returning.
   if (np->dirent_lba != 0) {
     if (starting_empty) {
       struct update_cluster_ctx cctx = {.new_cluster = new_first_cluster};
@@ -1519,6 +1519,9 @@ static int64_t fat32_write_data(fat32_node_priv_t *np, uint64_t offset,
 
   if (size_changed)
     np->size = new_size;
+
+  if (fat32_sync_locked(fs) != 0)
+    return -EIO;
 
   return (int64_t)size;
 }
