@@ -13,6 +13,7 @@
 #include "klog.h"
 #include "rtc.h"
 #include "spinlock.h"
+#include "wait.h"
 #include "string.h"
 #include "uaccess.h" // EINVAL, EIO, ENOMEM, ENOENT, EISDIR, ENAMETOOLONG,
 
@@ -93,9 +94,41 @@ _Static_assert(sizeof(struct fat32_dirent) == 32, "fat32_dirent != 32 bytes");
 // ===========================================================================
 // Estado en memoria
 // ===========================================================================
+typedef struct fat32_mutex {
+  wait_queue_t waiters;
+  volatile int locked;
+} fat32_mutex_t;
+
+static bool fat32_mutex_available(void *arg) {
+  fat32_mutex_t *m = (fat32_mutex_t *)arg;
+  return __atomic_load_n(&m->locked, __ATOMIC_ACQUIRE) == 0;
+}
+
+static void fat32_mutex_init(fat32_mutex_t *m) {
+  wait_queue_init(&m->waiters);
+  __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
+}
+
+static void fat32_mutex_lock(fat32_mutex_t *m) {
+  for (;;) {
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&m->locked, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+      return;
+    wait_event(&m->waiters, fat32_mutex_available, m);
+  }
+}
+
+static void fat32_mutex_unlock(fat32_mutex_t *m) {
+  unsigned long flags = spin_lock_irqsave(&m->waiters.lock);
+  __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
+  wake_up_one_locked(&m->waiters);
+  spin_unlock_irqrestore(&m->waiters.lock, flags);
+}
+
 typedef struct {
   block_device_t *bdev;
-  spinlock_t lock;
+  fat32_mutex_t lock;
 
   uint32_t bytes_per_sector;
   uint32_t sectors_per_cluster;
@@ -431,12 +464,13 @@ static fat32_bcache_t *fat32_bcache_alloc(void) {
   return c;
 }
 
-static void fat32_bcache_free(fat32_fs_t *fs) {
+static int fat32_bcache_free(fat32_fs_t *fs) {
   if (!fs || !fs->bcache)
-    return;
-  (void)fat32_bcache_flush(fs);
+    return 0;
+  int rc = fat32_bcache_flush(fs);
   kfree(fs->bcache);
   fs->bcache = NULL;
+  return rc;
 }
 
 // Lee el siguiente cluster de la FAT. Devuelve <0 en error.
@@ -847,22 +881,32 @@ static int fat32_update_fsinfo_locked(fat32_fs_t *fs) {
 static int fat32_sync_locked(fat32_fs_t *fs) {
   if (!fs)
     return -EINVAL;
-  if (!fs->fat_cache || !fs->fat_dirty)
+
+  int fat_dirty = (fs->fat_cache && fs->fat_dirty) ? 1 : 0;
+  int data_dirty = (fs->bcache && fs->bcache->dirty_slots > 0) ? 1 : 0;
+
+  // Los datos pueden estar dirty aunque la FAT esté limpia. Por tanto
+  // fat_dirty no puede decidir si hay que vaciar la buffer cache.
+  if (!fat_dirty && !data_dirty)
     return 0;
 
   // Volcar datos sucios antes que la FAT (recuperación tras crash).
-  if (fat32_bcache_flush(fs) != 0) {
+  if (data_dirty && fat32_bcache_flush(fs) != 0) {
     LOG_ERR("[FAT32] sync bcache flush falló");
     return -EIO;
   }
 
-  // [FIX] Escribir la FAT completa en UN bdev_write, no sector a sector.
-  // ata_dma_rw() se encarga de dividir en trozos de <= 64 KB.
-  //
-  // Límite: 16 MB de FAT por llamada. Si tu FS crece por encima (no es
-  // el caso hoy, son 504 KB), habrá que trocear a mano en bloques de
-  // 64 KB desde aquí y quitar el límite de 0x10000 en ata_dma_xfer.
-  const uint32_t MAX_SYNC_SECTORS = (64u * 1024u) / fs->bytes_per_sector;
+  // Si solo había datos dirty, no hay nada más que actualizar en FAT.
+  if (!fat_dirty) {
+    if (bdev_flush(fs->bdev) != 0) {
+      LOG_ERR("[FAT32] sync flush de datos falló");
+      return -EIO;
+    }
+    return 0;
+  }
+
+  const uint32_t MAX_SYNC_SECTORS =
+      (64u * 1024u) / fs->bytes_per_sector;
 
   uint64_t remaining = fs->fat_size_sectors;
   uint64_t lba = fs->fat_start_sector;
@@ -890,7 +934,10 @@ static int fat32_sync_locked(fat32_fs_t *fs) {
     remaining -= chunk;
   }
 
-  (void)fat32_update_fsinfo_locked(fs);
+  if (fat32_update_fsinfo_locked(fs) != 0) {
+    LOG_ERR("[FAT32] sync FSInfo falló");
+    return -EIO;
+  }
 
   if (bdev_flush(fs->bdev) != 0) {
     LOG_ERR("[FAT32] sync flush falló");
@@ -908,9 +955,9 @@ int fat32_sync(void *fs_priv) {
   if (!fs_priv)
     return -EINVAL;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
-  unsigned long flags = spin_lock_irqsave(&fs->lock);
+  fat32_mutex_lock(&fs->lock);
   int rc = fat32_sync_locked(fs);
-  spin_unlock_irqrestore(&fs->lock, flags);
+  fat32_mutex_unlock(&fs->lock);
   return rc;
 }
 
@@ -1546,11 +1593,11 @@ static int fat32_node_truncate(vfs_node_t *node, uint64_t new_size) {
   if (new_size > 0xFFFFFFFFULL)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   int rc = fat32_truncate_impl(np, (uint32_t)new_size);
   if (rc == 0)
     node->size = np->size;
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -1561,7 +1608,7 @@ static int fat32_statfs(void *fs_priv, struct vfs_statfs *out) {
   if (!fs_priv || !out)
     return -EINVAL;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
-  unsigned long flags = spin_lock_irqsave(&fs->lock);
+  fat32_mutex_lock(&fs->lock);
 
   memset(out, 0, sizeof(*out));
   out->f_type = 0x4d44; // MSDOS_SUPER_MAGIC
@@ -1582,7 +1629,7 @@ static int fat32_statfs(void *fs_priv, struct vfs_statfs *out) {
   out->f_ffree = 0;
   out->f_namelen = 255;
 
-  spin_unlock_irqrestore(&fs->lock, flags);
+  fat32_mutex_unlock(&fs->lock);
   return 0;
 }
 
@@ -1670,15 +1717,15 @@ static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
   if (np->dirent_lba == 0)
     return 0; // sin dirent (raíz): no-op
 
-  unsigned long flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
 
   uint8_t buf[512];
   if (np->fs->bytes_per_sector > sizeof(buf)) {
-    spin_unlock_irqrestore(&np->fs->lock, flags);
+    fat32_mutex_unlock(&np->fs->lock);
     return -EINVAL;
   }
   if (fat32_bread(np->fs, np->dirent_lba, 1, buf) != 0) {
-    spin_unlock_irqrestore(&np->fs->lock, flags);
+    fat32_mutex_unlock(&np->fs->lock);
     return -EIO;
   }
 
@@ -1696,7 +1743,7 @@ static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
     node->mtime_sec = mtime_sec;
   }
 
-  spin_unlock_irqrestore(&np->fs->lock, flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -2335,9 +2382,9 @@ static int64_t fat32_node_read(vfs_node_t *node, uint64_t offset, size_t size,
   if (!node || !node->priv)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   int64_t rc = fat32_read_data(np, offset, size, buf);
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -2346,11 +2393,11 @@ static int64_t fat32_node_write(vfs_node_t *node, uint64_t offset, size_t size,
   if (!node || !node->priv || !buf)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   int64_t rc = fat32_write_data(np, offset, size, buf);
   if (rc >= 0)
     node->size = np->size;
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -2379,11 +2426,11 @@ static int fat32_node_create(vfs_node_t *dir_node, const char *name,
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   // [3.4.c] FAT32 no persiste modo en disco, pero lo guardamos en RAM
   // para que `ls -l` lo muestre durante esta sesión.
   int rc = fat32_create_entry(np->fs, np->start_cluster, name, 0, mode);
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -2394,9 +2441,9 @@ static int fat32_node_mkdir(vfs_node_t *dir_node, const char *name,
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   int rc = fat32_create_entry(np->fs, np->start_cluster, name, 1, mode);
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -2406,9 +2453,9 @@ static int fat32_node_unlink(vfs_node_t *dir_node, const char *name) {
   fat32_node_priv_t *np = (fat32_node_priv_t *)dir_node->priv;
   if (!np->is_dir)
     return -ENOTDIR;
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   int rc = fat32_delete_entry(np->fs, np->start_cluster, name);
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   return rc;
 }
 
@@ -2470,9 +2517,9 @@ static int fat32_node_readdir(vfs_node_t *dir_node, uint64_t index,
       .out = out,
       .found = 0,
   };
-  unsigned long lock_flags = spin_lock_irqsave(&np->fs->lock);
+  fat32_mutex_lock(&np->fs->lock);
   int rc = fat32_iter_dir(np->fs, np->start_cluster, fat32_readdir_cb, &ctx);
-  spin_unlock_irqrestore(&np->fs->lock, lock_flags);
+  fat32_mutex_unlock(&np->fs->lock);
   if (rc < 0)
     return rc;
   return 0;
@@ -2842,10 +2889,10 @@ static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
     return -ENOTDIR;
   if (snp->fs != dnp->fs)
     return -EXDEV;
-  unsigned long lock_flags = spin_lock_irqsave(&snp->fs->lock);
+  fat32_mutex_lock(&snp->fs->lock);
   int rc = fat32_rename(snp->fs, snp->start_cluster, src_name,
                         dnp->start_cluster, dst_name);
-  spin_unlock_irqrestore(&snp->fs->lock, lock_flags);
+  fat32_mutex_unlock(&snp->fs->lock);
   return rc;
 }
 
@@ -2857,7 +2904,7 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
   if (!fs || !path || path[0] != '/')
     return NULL;
 
-  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
+  fat32_mutex_lock(&fs->lock);
   const char *orig = path;
   path++;
 
@@ -2870,14 +2917,14 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
 
   if (*path == '\0') {
     vfs_node_t *node = fat32_make_node(fs, cluster, 0, 1, orig, 0, 0, 0);
-    spin_unlock_irqrestore(&fs->lock, lock_flags);
+    fat32_mutex_unlock(&fs->lock);
     return node;
   }
 
   char comp[256];
   while (*path) {
     if (!is_dir) {
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return NULL;
     }
 
@@ -2886,7 +2933,7 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
       end++;
     size_t clen = (size_t)(end - path);
     if (clen == 0 || clen >= sizeof(comp)) {
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return NULL;
     }
     for (size_t i = 0; i < clen; i++)
@@ -2896,7 +2943,7 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
     fat32_lookup_ctx_t ctx = {.name = comp};
     int rc = fat32_iter_dir(fs, cluster, fat32_lookup_cb, &ctx);
     if (rc < 0 || !ctx.found) {
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return NULL;
     }
 
@@ -2914,7 +2961,7 @@ static vfs_node_t *fat32_lookup(void *fs_priv, const char *path) {
 
   vfs_node_t *node = fat32_make_node(fs, cluster, size, is_dir, orig, mtime_sec,
                                      dirent_lba, dirent_off);
-  spin_unlock_irqrestore(&fs->lock, lock_flags);
+  fat32_mutex_unlock(&fs->lock);
   return node;
 }
 
@@ -3040,7 +3087,7 @@ int fat32_check(void *fs_priv, struct fat32_check_result *out) {
   memset(out, 0, sizeof(*out));
   out->clusters_total = fs->fat_entries;
 
-  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
+  fat32_mutex_lock(&fs->lock);
 
   // Contar libres/usados.
   for (uint32_t c = 2; c < fs->fat_entries; c++) {
@@ -3054,7 +3101,7 @@ int fat32_check(void *fs_priv, struct fat32_check_result *out) {
   size_t bytes = (fs->fat_entries + 7) / 8;
   uint8_t *visited = (uint8_t *)kzalloc(bytes);
   if (!visited) {
-    spin_unlock_irqrestore(&fs->lock, lock_flags);
+    fat32_mutex_unlock(&fs->lock);
     return -ENOMEM;
   }
 
@@ -3083,7 +3130,7 @@ int fat32_check(void *fs_priv, struct fat32_check_result *out) {
   }
 
   kfree(visited);
-  spin_unlock_irqrestore(&fs->lock, lock_flags);
+  fat32_mutex_unlock(&fs->lock);
   return 0;
 }
 
@@ -3227,7 +3274,7 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
   fat32_fs_t *fs = (fat32_fs_t *)kzalloc(sizeof(*fs));
   if (!fs)
     return -ENOMEM;
-  spin_init(&fs->lock);
+  fat32_mutex_init(&fs->lock);
 
   fs->bcache = fat32_bcache_alloc();
   if (!fs->bcache)
@@ -3314,13 +3361,25 @@ void fat32_umount(void *fs_priv) {
   if (!fs_priv)
     return;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
-  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
-  if (fs->fat_cache && fs->fat_dirty)
-    (void)fat32_sync_locked(fs);
+  fat32_mutex_lock(&fs->lock);
+
+  // Persistir tanto la data cache como la FAT antes de destruirlas.
+  // VFS no permite propagar un error desde este callback void, así que
+  // cualquier fallo de persistencia queda registrado explícitamente.
+  int sync_rc = fat32_sync_locked(fs);
+  if (sync_rc != 0)
+    LOG_ERR("[FAT32] umount: no se pudieron persistir todos los datos (rc=%d)",
+            sync_rc);
+
   if (fs->fat_cache)
     kfree(fs->fat_cache);
-  fat32_bcache_free(fs);
-  spin_unlock_irqrestore(&fs->lock, lock_flags);
+
+  int cache_rc = fat32_bcache_free(fs);
+  if (cache_rc != 0)
+    LOG_ERR("[FAT32] umount: error adicional al liberar buffer cache (rc=%d)",
+            cache_rc);
+
+  fat32_mutex_unlock(&fs->lock);
   kfree(fs);
 }
 
@@ -3351,7 +3410,7 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
   if (!fs || !fs->fat_cache)
     return -1;
-  unsigned long lock_flags = spin_lock_irqsave(&fs->lock);
+  fat32_mutex_lock(&fs->lock);
 
   uint32_t clusters[5] = {0};
   for (int i = 0; i < 5; i++) {
@@ -3359,13 +3418,13 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
     if (clusters[i] == 0) {
       if (i > 0)
         fat32_free_chain(fs, clusters[0]);
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return -2;
     }
     for (int j = 0; j < i; j++) {
       if (clusters[j] == clusters[i]) {
         fat32_free_chain(fs, clusters[0]);
-        spin_unlock_irqrestore(&fs->lock, lock_flags);
+        fat32_mutex_unlock(&fs->lock);
         return -3;
       }
     }
@@ -3374,7 +3433,7 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   for (int i = 0; i < 4; i++) {
     if (fat32_fat_set(fs, clusters[i], clusters[i + 1]) != 0) {
       fat32_free_chain(fs, clusters[0]);
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return -4;
     }
   }
@@ -3384,27 +3443,27 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
   for (int i = 0; i < 5; i++) {
     if (!FAT_IS_VALID(cur)) {
       fat32_free_chain(fs, clusters[0]);
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return -5;
     }
     walked[i] = cur;
     int64_t next = fat32_fat_get(fs, cur);
     if (next < 0) {
       fat32_free_chain(fs, clusters[0]);
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return -6;
     }
     cur = (uint32_t)next;
   }
   if (cur < FAT_EOC_MIN) {
     fat32_free_chain(fs, clusters[0]);
-    spin_unlock_irqrestore(&fs->lock, lock_flags);
+    fat32_mutex_unlock(&fs->lock);
     return -7;
   }
   for (int i = 0; i < 5; i++) {
     if (walked[i] != clusters[i]) {
       fat32_free_chain(fs, clusters[0]);
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return -8;
     }
   }
@@ -3413,11 +3472,11 @@ int fat32_test_alloc_free_chain(void *fs_priv) {
 
   for (int i = 0; i < 5; i++) {
     if (fs->fat_cache[clusters[i]] != 0) {
-      spin_unlock_irqrestore(&fs->lock, lock_flags);
+      fat32_mutex_unlock(&fs->lock);
       return -9;
     }
   }
 
-  spin_unlock_irqrestore(&fs->lock, lock_flags);
+  fat32_mutex_unlock(&fs->lock);
   return 0;
 }
