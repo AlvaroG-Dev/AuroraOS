@@ -2277,6 +2277,11 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     fat32_ram_mode_set(fs, short_lba, short_off, mode & 07777);
   }
 
+  // Persist the newly written directory entries before reporting success.
+  // bdev_flush() cannot flush FAT32's in-memory buffer cache.
+  if (fat32_sync_locked(fs) != 0)
+    return -EIO;
+
   return 0;
 }
 // ===========================================================================
