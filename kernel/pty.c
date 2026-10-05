@@ -416,6 +416,15 @@ static vfs_ops_t pty_slave_ops = {
 
 // ---------------------------------------------------------------------------
 // Helper: construir (nodo, fd) y publicar en proc->fds[fd_num].
+//
+// [FIX] El nodo lleva el PATH COMPLETO en node->name ("/dev/ptmx" o
+// "/dev/pts/N"), no solo el nombre corto ("ptmx", "pts"). El VFS usa
+// node->name para:
+//   - El symlink /proc/<pid>/fd/N, que lsof lee como readlink.
+//   - Cualquier lookup posterior que reconstruya el path.
+//
+// Antes pasábamos "ptmx" / "pts" y el symlink quedaba como "ptmx" o
+// "pts" a secas, que lsof mostraba tal cual (parecía un path inválido).
 // ---------------------------------------------------------------------------
 static int pty_install_fd(struct process *proc, int fd_num, tty_pty_t *p,
                           vfs_ops_t *ops, const char *name) {
@@ -430,6 +439,9 @@ static int pty_install_fd(struct process *proc, int fd_num, tty_pty_t *p,
   n->flags = VFS_CHARDEVICE;
   n->ops = ops;
   n->priv = p;
+  n->mode = S_IFCHR | 0620;
+  // Major 136 = /dev/pts (Linux). Minor = índice del PTY.
+  n->rdev = (136u << 8) | (uint32_t)(p->index & 0xFF);
 
   file_descriptor_t *fd =
       (file_descriptor_t *)kzalloc(sizeof(file_descriptor_t));
@@ -470,7 +482,8 @@ int pty_open_master_fd(struct process *proc, int fd_num) {
   p->master_open = 1;
   spin_unlock_irqrestore(&g_pty_lock, flags);
 
-  int rc = pty_install_fd(proc, fd_num, p, &pty_master_ops, "ptmx");
+  // [FIX] path completo, no "ptmx".
+  int rc = pty_install_fd(proc, fd_num, p, &pty_master_ops, "/dev/ptmx");
   if (rc != 0) {
     pty_release_master(p);
     return rc;
@@ -511,7 +524,28 @@ int pty_open_slave_fd(struct process *proc, int fd_num, int index) {
   p->slave_ever_opened = 1; // [FIX EOF]
   spin_unlock_irqrestore(&g_pty_lock, flags);
 
-  int rc = pty_install_fd(proc, fd_num, p, &pty_slave_ops, "pts");
+  // [FIX] Construir "/dev/pts/N" en un buffer local.
+  char name[32];
+  int n = 0;
+  const char *pfx = "/dev/pts/";
+  while (*pfx && n < (int)sizeof(name) - 3)
+    name[n++] = *pfx++;
+  if (index == 0) {
+    name[n++] = '0';
+  } else {
+    char tmp[8];
+    int tn = 0;
+    int v = index;
+    while (v > 0) {
+      tmp[tn++] = (char)('0' + v % 10);
+      v /= 10;
+    }
+    while (tn > 0 && n < (int)sizeof(name) - 1)
+      name[n++] = tmp[--tn];
+  }
+  name[n] = '\0';
+
+  int rc = pty_install_fd(proc, fd_num, p, &pty_slave_ops, name);
   if (rc != 0) {
     pty_release_slave(p);
     return rc;

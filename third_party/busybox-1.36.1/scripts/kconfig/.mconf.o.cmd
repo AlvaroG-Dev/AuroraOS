@@ -13,17 +13,11 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/gnu/stubs.h \
   /usr/include/x86_64-linux-gnu/gnu/stubs-64.h \
   /usr/include/x86_64-linux-gnu/bits/ioctls.h \
-  /usr/lib/linux/uapi/x86/asm/ioctls.h \
+  /usr/include/x86_64-linux-gnu/asm/ioctls.h \
   /usr/include/asm-generic/ioctls.h \
   /usr/include/linux/ioctl.h \
-  /usr/lib/linux/uapi/x86/asm/ioctl.h \
+  /usr/include/x86_64-linux-gnu/asm/ioctl.h \
   /usr/include/asm-generic/ioctl.h \
-  /usr/include/linux/sockios.h \
-  /usr/lib/linux/uapi/x86/asm/bitsperlong.h \
-  /usr/include/asm-generic/bitsperlong.h \
-    $(wildcard include/config/64bit.h) \
-  /usr/lib/linux/uapi/x86/asm/sockios.h \
-  /usr/include/asm-generic/sockios.h \
   /usr/include/x86_64-linux-gnu/bits/ioctl-types.h \
   /usr/include/x86_64-linux-gnu/sys/ttydefaults.h \
   /usr/include/x86_64-linux-gnu/sys/wait.h \
@@ -47,7 +41,7 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/bits/types/sigevent_t.h \
   /usr/include/x86_64-linux-gnu/bits/sigevent-consts.h \
   /usr/include/x86_64-linux-gnu/bits/sigaction.h \
-  /usr/lib/gcc/x86_64-linux-gnu/15/include/stddef.h \
+  /usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h \
   /usr/include/x86_64-linux-gnu/bits/types/stack_t.h \
   /usr/include/x86_64-linux-gnu/sys/ucontext.h \
   /usr/include/x86_64-linux-gnu/bits/sigstack.h \
@@ -70,17 +64,17 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/errno.h \
   /usr/include/x86_64-linux-gnu/bits/errno.h \
   /usr/include/linux/errno.h \
-  /usr/lib/linux/uapi/x86/asm/errno.h \
+  /usr/include/x86_64-linux-gnu/asm/errno.h \
   /usr/include/asm-generic/errno.h \
   /usr/include/asm-generic/errno-base.h \
   /usr/include/fcntl.h \
   /usr/include/x86_64-linux-gnu/bits/fcntl.h \
   /usr/include/x86_64-linux-gnu/bits/fcntl-linux.h \
-  /usr/include/x86_64-linux-gnu/bits/cloexec.h \
   /usr/include/x86_64-linux-gnu/bits/stat.h \
   /usr/include/x86_64-linux-gnu/bits/struct_stat.h \
-  /usr/lib/gcc/x86_64-linux-gnu/15/include/limits.h \
-  /usr/lib/gcc/x86_64-linux-gnu/15/include/syslimits.h \
+  /usr/include/x86_64-linux-gnu/bits/fcntl2.h \
+  /usr/lib/gcc/x86_64-linux-gnu/13/include/limits.h \
+  /usr/lib/gcc/x86_64-linux-gnu/13/include/syslimits.h \
   /usr/include/limits.h \
   /usr/include/x86_64-linux-gnu/bits/libc-header-start.h \
   /usr/include/x86_64-linux-gnu/bits/posix1_lim.h \
@@ -91,7 +85,7 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/bits/posix2_lim.h \
   /usr/include/x86_64-linux-gnu/bits/xopen_lim.h \
   /usr/include/x86_64-linux-gnu/bits/uio_lim.h \
-  /usr/lib/gcc/x86_64-linux-gnu/15/include/stdarg.h \
+  /usr/lib/gcc/x86_64-linux-gnu/13/include/stdarg.h \
   /usr/include/stdlib.h \
   /usr/include/x86_64-linux-gnu/bits/floatn.h \
   /usr/include/x86_64-linux-gnu/bits/floatn-common.h \
@@ -101,9 +95,10 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/bits/types/timer_t.h \
   /usr/include/x86_64-linux-gnu/bits/stdint-intn.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-bsearch.h \
-  /usr/include/x86_64-linux-gnu/bits/types/once_flag.h \
   /usr/include/x86_64-linux-gnu/bits/stdlib-float.h \
+  /usr/include/x86_64-linux-gnu/bits/stdlib.h \
   /usr/include/string.h \
+  /usr/include/x86_64-linux-gnu/bits/string_fortified.h \
   /usr/include/strings.h \
   /usr/include/termios.h \
   /usr/include/x86_64-linux-gnu/bits/termios.h \
@@ -111,17 +106,19 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/bits/termios-c_cc.h \
   /usr/include/x86_64-linux-gnu/bits/termios-c_iflag.h \
   /usr/include/x86_64-linux-gnu/bits/termios-c_oflag.h \
+  /usr/include/x86_64-linux-gnu/bits/termios-baud.h \
   /usr/include/x86_64-linux-gnu/bits/termios-c_cflag.h \
   /usr/include/x86_64-linux-gnu/bits/termios-c_lflag.h \
   /usr/include/x86_64-linux-gnu/bits/termios-tcflow.h \
   /usr/include/x86_64-linux-gnu/bits/termios-misc.h \
-  /usr/include/x86_64-linux-gnu/bits/termios-baud.h \
   /usr/include/unistd.h \
   /usr/include/x86_64-linux-gnu/bits/posix_opt.h \
   /usr/include/x86_64-linux-gnu/bits/environments.h \
   /usr/include/x86_64-linux-gnu/bits/confname.h \
   /usr/include/x86_64-linux-gnu/bits/getopt_posix.h \
   /usr/include/x86_64-linux-gnu/bits/getopt_core.h \
+  /usr/include/x86_64-linux-gnu/bits/unistd.h \
+  /usr/include/x86_64-linux-gnu/bits/unistd-decl.h \
   /usr/include/x86_64-linux-gnu/bits/unistd_ext.h \
   /usr/include/locale.h \
   /usr/include/x86_64-linux-gnu/bits/locale.h \
@@ -135,8 +132,10 @@ deps_scripts/kconfig/mconf.o := \
   /usr/include/x86_64-linux-gnu/bits/types/FILE.h \
   /usr/include/x86_64-linux-gnu/bits/types/struct_FILE.h \
   /usr/include/x86_64-linux-gnu/bits/stdio_lim.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio2-decl.h \
   /usr/include/x86_64-linux-gnu/bits/stdio.h \
-  /usr/lib/gcc/x86_64-linux-gnu/15/include/stdbool.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio2.h \
+  /usr/lib/gcc/x86_64-linux-gnu/13/include/stdbool.h \
   /usr/include/libintl.h \
   scripts/kconfig/lkc_proto.h \
 

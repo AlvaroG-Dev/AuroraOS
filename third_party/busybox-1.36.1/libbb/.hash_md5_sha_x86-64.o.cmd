@@ -3,7 +3,7 @@ cmd_libbb/hash_md5_sha_x86-64.o := x86_64-linux-musl-gcc -Wp,-MD,libbb/.hash_md5
 deps_libbb/hash_md5_sha_x86-64.o := \
   libbb/hash_md5_sha_x86-64.S \
     $(wildcard include/config/sha1/small.h) \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
+  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
 
 libbb/hash_md5_sha_x86-64.o: $(deps_libbb/hash_md5_sha_x86-64.o)
 

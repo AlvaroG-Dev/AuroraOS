@@ -9,13 +9,16 @@
 // acceso" del VFS de Aurora.
 
 #include "procfs.h"
+#include "block.h"
 #include "heap.h"
 #include "klog.h"
+#include "pf.h" // vma_t, VMA_ELF, VMA_STACK, VMA_FILE, VMA_ANON
 #include "pmm.h"
 #include "process.h"
 #include "sched.h"
 #include "string.h"
-#include "sysfs.h"          // [FIX] sysfs_pci_count / sysfs_pci_get
+#include "swap.h"
+#include "sysfs.h" // [FIX] sysfs_pci_count / sysfs_pci_get
 #include "time.h"
 #include "uaccess.h"
 #include "vfs.h"
@@ -58,7 +61,8 @@ static int64_t procfs_write(vfs_node_t *node, uint64_t offset, size_t size,
 }
 
 static int procfs_open(vfs_node_t *node, int flags) {
-  LOG_INFO("[PROCFS-OPEN] path='%s' flags=0x%x", node ? node->name : "?", flags);
+  LOG_INFO("[PROCFS-OPEN] path='%s' flags=0x%x", node ? node->name : "?",
+           flags);
   if ((flags & O_WRONLY) || (flags & O_RDWR))
     return -EROFS;
   return 0;
@@ -106,8 +110,31 @@ static size_t kfmt_u64(char *out, size_t cap, uint64_t v) {
   return o;
 }
 
-static size_t __attribute__((unused))
-kfmt_i64(char *out, size_t cap, int64_t v) {
+// Formato hex con ancho mínimo (min_width dígitos, relleno con '0').
+// Linux usa "%08lx" para direcciones: mínimo 8, natural arriba de 8.
+static size_t kfmt_hex_min(char *out, size_t cap, uint64_t v, int min_width) {
+  static const char hex[] = "0123456789abcdef";
+  char tmp[16];
+  int n = 0;
+  if (v == 0) {
+    tmp[n++] = '0';
+  } else {
+    while (v && n < 16) {
+      tmp[n++] = hex[v & 0xF];
+      v >>= 4;
+    }
+  }
+  while (n < min_width && n < 16)
+    tmp[n++] = '0';
+  size_t o = 0;
+  while (n > 0 && o + 1 < cap)
+    out[o++] = tmp[--n];
+  out[o] = '\0';
+  return o;
+}
+
+static size_t __attribute__((unused)) kfmt_i64(char *out, size_t cap,
+                                               int64_t v) {
   if (v < 0) {
     if (cap < 2)
       return 0;
@@ -194,7 +221,7 @@ static char *gen_meminfo(size_t *out_len) {
   if (!buf)
     return NULL;
 
-  uint64_t total_pages = pmm_total_pages();
+  uint64_t total_pages = pmm_total_usable_pages(); // [FIX B]
   uint64_t free_pages = pmm_free_pages_count();
   uint64_t used_pages =
       (total_pages > free_pages) ? (total_pages - free_pages) : 0;
@@ -218,8 +245,8 @@ static char *gen_meminfo(size_t *out_len) {
   APPEND_KV("MemUsed:        ", used_kb);
   APPEND_KV("Buffers:        ", 0);
   APPEND_KV("Cached:         ", 0);
-  APPEND_KV("SwapTotal:      ", 0);
-  APPEND_KV("SwapFree:       ", 0);
+  APPEND_KV("SwapTotal:      ", swap_total_bytes() / 1024);
+  APPEND_KV("SwapFree:       ", swap_free_bytes() / 1024);
   APPEND_KV("Dirty:          ", 0);
   APPEND_KV("Writeback:      ", 0);
   APPEND_KV("Shmem:          ", 0);
@@ -488,7 +515,7 @@ static int gen_pid_statm_cb(process_t *p, void *arg) {
 }
 
 static char *gen_pid_file(uint32_t pid, size_t *out_len, process_iter_cb_t cb) {
-  const size_t CAP = 2048;
+  const size_t CAP = 4096;
   char *buf = (char *)kmalloc(CAP);
   if (!buf)
     return NULL;
@@ -525,8 +552,7 @@ static char *gen_proc_bus_pci_devices(size_t *out_len) {
     if (o + 64 > CAP)
       break;
 
-    uint32_t devfn = ((uint32_t)d->bus << 8) |
-                     ((uint32_t)d->slot << 3) |
+    uint32_t devfn = ((uint32_t)d->bus << 8) | ((uint32_t)d->slot << 3) |
                      (uint32_t)(d->func & 0x7);
 
     // devfn: 4 hex
@@ -560,6 +586,325 @@ static char *gen_proc_bus_pci_devices(size_t *out_len) {
   buf[o] = '\0';
   *out_len = o;
   return buf;
+}
+
+// ---------------------------------------------------------------------------
+// /proc/swaps
+// ---------------------------------------------------------------------------
+struct swaps_ctx {
+  char *buf;
+  size_t len;
+  size_t cap;
+};
+
+static void swaps_line_cb(const char *devname, uint64_t total_kb,
+                          uint64_t used_kb, uint64_t free_kb, void *arg) {
+  (void)free_kb;
+  struct swaps_ctx *c = (struct swaps_ctx *)arg;
+  char fname[64];
+  int fn = 0;
+  const char *pfx = "/dev/";
+  while (*pfx && fn < 60)
+    fname[fn++] = *pfx++;
+  const char *d = devname;
+  while (*d && fn < 60)
+    fname[fn++] = *d++;
+  fname[fn] = '\0';
+
+  c->len = kappend(c->buf, c->len, c->cap, fname);
+  while (c->len < 40)
+    c->buf[c->len++] = ' ';
+  c->len = kappend(c->buf, c->len, c->cap, "partition");
+  while (c->len < 56)
+    c->buf[c->len++] = ' ';
+  c->len += kfmt_u64(c->buf + c->len, c->cap - c->len, total_kb);
+  while (c->len < 64)
+    c->buf[c->len++] = ' ';
+  c->len += kfmt_u64(c->buf + c->len, c->cap - c->len, used_kb);
+  while (c->len < 72)
+    c->buf[c->len++] = ' ';
+  c->len = kappend(c->buf, c->len, c->cap, "-2\n");
+  c->buf[c->len] = '\0';
+}
+
+static char *gen_swaps(size_t *out_len) {
+  const size_t CAP = 1024;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+  buf[0] = '\0';
+  struct swaps_ctx c = {.buf = buf, .len = 0, .cap = CAP};
+  c.len = kappend(buf, c.len, CAP,
+                  "Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n");
+  swap_for_each(swaps_line_cb, &c);
+  *out_len = c.len;
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// [FIX] /proc/partitions — lista de block devices.
+// Formato Linux: "major minor  #blocks  name\n" con cabecera.
+//
+//   major minor  #blocks  name
+//
+//      8     0      65536 sda
+//      8     1      16384 sda1
+//      8     2      16384 sda2
+//      8     3      31727 sda3
+//
+// Lo usan blkid (scan mode), mount, df, fdisk, parted, ...
+// major=8 para todos los discos (SCSI/SATA en Linux). minor=índice.
+// ---------------------------------------------------------------------------
+static char *gen_partitions(size_t *out_len) {
+  const size_t CAP = 4096;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+
+  size_t o = 0;
+  o = kappend(buf, o, CAP, "major minor  #blocks  name\n\n");
+
+  int n = blk_count();
+  for (int i = 0; i < n; i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b)
+      continue;
+
+    uint64_t size_kb = (b->num_sectors * (uint64_t)b->sector_size) / 1024;
+
+    o = kappend(buf, o, CAP, "   8 ");
+    // minor en formato de 5 chars (como Linux, no alineado estrictamente)
+    if (i < 10) {
+      buf[o++] = ' ';
+      buf[o++] = (char)('0' + i);
+    } else if (i < 100) {
+      buf[o++] = (char)('0' + (i / 10));
+      buf[o++] = (char)('0' + (i % 10));
+    } else {
+      buf[o++] = (char)('0' + (i / 100));
+      buf[o++] = (char)('0' + ((i / 10) % 10));
+      buf[o++] = (char)('0' + (i % 10));
+    }
+    o = kappend(buf, o, CAP, "   ");
+    o += kfmt_u64(buf + o, CAP - o, size_kb);
+    o = kappend(buf, o, CAP, " ");
+    o = kappend(buf, o, CAP, b->name);
+    o = kappend(buf, o, CAP, "\n");
+
+    if (o + 64 > CAP)
+      break;
+  }
+  buf[o] = '\0';
+  *out_len = o;
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// [FIX D] /proc/<pid>/maps — formato Linux:
+//   00400000-00606000 r-xp 00000000 08:01 1234  /apps/init
+//   00007ffff0000000-00007ffff0004000 rw-p 00000000 00:00 0  [stack]
+//
+// pmap, gdb y otros parsean esto. Los campos van separados por espacios
+// (Linux usa uno o varios, da igual).
+//
+// Tipos de VMA (pf.h):
+//   VMA_ANON=0, VMA_STACK=1, VMA_ELF=2, VMA_FILE=3
+// ---------------------------------------------------------------------------
+static int gen_pid_maps_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid)
+    return 0;
+
+  char *buf = c->buf;
+  size_t cap = c->cap;
+  size_t o = 0;
+
+  for (vma_t *v = p->vma_list; v; v = v->next) {
+    // Reserva holgada por línea: ~150 bytes típicos.
+    if (o + 256 >= cap)
+      break;
+
+    // start-end
+    o += kfmt_hex_min(buf + o, cap - o, v->start, 8);
+    buf[o++] = '-';
+    o += kfmt_hex_min(buf + o, cap - o, v->end, 8);
+    buf[o++] = ' ';
+
+    // perms: r w x p  (siempre privado, always readable in x86)
+    buf[o++] = 'r';
+    buf[o++] = (v->flags & PTE_WRITABLE) ? 'w' : '-';
+    buf[o++] = (v->flags & PTE_NX) ? '-' : 'x';
+    buf[o++] = 'p';
+    buf[o++] = ' ';
+
+    // offset dentro del fichero (8 hex); 0 si no es VMA_FILE
+    uint64_t off = (v->type == VMA_FILE) ? v->file_offset : 0;
+    o += kfmt_hex_min(buf + o, cap - o, off, 8);
+    buf[o++] = ' ';
+
+    // dev + inode
+    uint64_t ino = 0;
+    if (v->type == VMA_FILE && v->file_fd && v->file_fd->node) {
+      o = kappend(buf, o, cap, "08:01");
+      ino = v->file_fd->node->inode;
+    } else {
+      o = kappend(buf, o, cap, "00:00");
+    }
+    buf[o++] = ' ';
+    o += kfmt_u64(buf + o, cap - o, ino);
+
+    // path
+    const char *path = NULL;
+    if (v->type == VMA_STACK) {
+      path = "[stack]";
+    } else if (v->type == VMA_ELF) {
+      // No guardamos el path completo; usamos el basename del proceso.
+      // Si en el futuro añades `char exe_path[VFS_PATH_MAX]` a
+      // process_t y lo rellenas en execve, cambia esto por:
+      //   path = p->exe_path[0] ? p->exe_path : p->name;
+      path = p->name;
+    } else if (v->type == VMA_FILE && v->file_fd && v->file_fd->node) {
+      path = v->file_fd->node->name;
+    } else if (v->type == VMA_ANON) {
+      path = "[anon]";
+    }
+
+    if (path && path[0]) {
+      buf[o++] = ' ';
+      o = kappend(buf, o, cap, path);
+    }
+
+    buf[o++] = '\n';
+  }
+
+  c->len = o;
+  c->found = 1;
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// [FIX D] /proc/<pid>/smaps.
+//
+// Igual que maps pero con campos extra por VMA. BusyBox pmap solo usa
+// Size/Rss/Private_Dirty, el resto puede ir a 0.
+//
+// Formato Linux: header de VMA igual que maps, luego "Key: %lu kB\n".
+// ---------------------------------------------------------------------------
+static int gen_pid_smaps_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid)
+    return 0;
+
+  char *buf = c->buf;
+  size_t cap = c->cap;
+  size_t o = 0;
+
+  uint64_t *pml4 = NULL;
+  if (p->pml4_phys)
+    pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+
+  for (vma_t *v = p->vma_list; v; v = v->next) {
+    if (o + 900 >= cap)
+      break;
+
+    // --- Header (idéntico a maps) ---
+    o += kfmt_hex_min(buf + o, cap - o, v->start, 8);
+    buf[o++] = '-';
+    o += kfmt_hex_min(buf + o, cap - o, v->end, 8);
+    buf[o++] = ' ';
+    buf[o++] = 'r';
+    buf[o++] = (v->flags & PTE_WRITABLE) ? 'w' : '-';
+    buf[o++] = (v->flags & PTE_NX) ? '-' : 'x';
+    buf[o++] = 'p';
+    buf[o++] = ' ';
+
+    uint64_t off = (v->type == VMA_FILE) ? v->file_offset : 0;
+    o += kfmt_hex_min(buf + o, cap - o, off, 8);
+    buf[o++] = ' ';
+
+    uint64_t ino = 0;
+    if (v->type == VMA_FILE && v->file_fd && v->file_fd->node) {
+      o = kappend(buf, o, cap, "08:01");
+      ino = v->file_fd->node->inode;
+    } else {
+      o = kappend(buf, o, cap, "00:00");
+    }
+    buf[o++] = ' ';
+    o += kfmt_u64(buf + o, cap - o, ino);
+
+    const char *path = NULL;
+    if (v->type == VMA_STACK)
+      path = "[stack]";
+    else if (v->type == VMA_ELF)
+      path = p->name;
+    else if (v->type == VMA_FILE && v->file_fd && v->file_fd->node)
+      path = v->file_fd->node->name;
+    else if (v->type == VMA_ANON)
+      path = "[anon]";
+
+    if (path && path[0]) {
+      buf[o++] = ' ';
+      o = kappend(buf, o, cap, path);
+    }
+    buf[o++] = '\n';
+
+    // --- Contar páginas presentes para Rss ---
+    uint64_t pages_present = 0;
+    if (pml4) {
+      for (uint64_t page = v->start; page < v->end; page += PAGE_SIZE) {
+        if (paging_get_phys_in(pml4, page))
+          pages_present++;
+      }
+    }
+    uint64_t size_kb = (v->end - v->start) / 1024;
+    uint64_t rss_kb = pages_present * 4; // 4 KB por página
+
+    // --- Campos smaps ---
+    // Reutilizamos un buffer temporal para cada línea "Key:  N kB".
+    char tmp[64];
+    int tn;
+
+#define SMAPS_LINE(key, val)                                                   \
+  do {                                                                         \
+    int _n = 0;                                                                \
+    const char *_k = (key);                                                    \
+    while (*_k && _n < (int)sizeof(tmp) - 32)                                  \
+      tmp[_n++] = *_k++;                                                       \
+    for (int _s = _n; _s < 22 && _n < (int)sizeof(tmp) - 16; _s++)             \
+      tmp[_n++] = ' ';                                                         \
+    _n += kfmt_u64(tmp + _n, sizeof(tmp) - _n, (val));                         \
+    tmp[_n++] = ' ';                                                           \
+    tmp[_n++] = 'k';                                                           \
+    tmp[_n++] = 'B';                                                           \
+    tmp[_n++] = '\n';                                                          \
+    tmp[_n] = '\0';                                                            \
+    o = kappend(buf, o, cap, tmp);                                             \
+  } while (0)
+
+    SMAPS_LINE("Size:", size_kb);
+    SMAPS_LINE("KernelPageSize:", 4);
+    SMAPS_LINE("MMUPageSize:", 4);
+    SMAPS_LINE("Rss:", rss_kb);
+    SMAPS_LINE("Pss:", rss_kb);
+    SMAPS_LINE("Shared_Clean:", 0);
+    SMAPS_LINE("Shared_Dirty:", 0);
+    SMAPS_LINE("Private_Clean:", 0);
+    SMAPS_LINE("Private_Dirty:", rss_kb);
+    SMAPS_LINE("Referenced:", rss_kb);
+    SMAPS_LINE("Anonymous:", rss_kb);
+    SMAPS_LINE("AnonHugePages:", 0);
+    SMAPS_LINE("Swap:", 0);
+    SMAPS_LINE("Locked:", 0);
+
+#undef SMAPS_LINE
+
+    o = kappend(buf, o, cap, "VmFlags: rd wr mr mw me\n");
+    (void)tn;
+  }
+
+  c->len = o;
+  c->found = 1;
+  return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -735,8 +1080,8 @@ static char *gen_mounts(size_t *out_len) {
 // readdir: /proc raíz, /proc/bus/*, /proc/<pid>/ y /proc/<pid>/fd/.
 // ===========================================================================
 static const char *procfs_root_entries[] = {
-    "uptime", "version", "meminfo", "stat", "self", "mounts", "loadavg",
-    "bus",
+    "uptime", "version", "meminfo", "stat",       "self",
+    "mounts", "loadavg", "bus",     "partitions", "swaps",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -777,6 +1122,7 @@ static int procfs_root_pid_cb(process_t *p, void *arg) {
 
 static const char *procfs_pid_entries[] = {
     "stat", "status", "cmdline", "comm", "statm", "fd",
+    "cwd",  "exe",    "root",    "maps", "smaps", // [FIX D] smaps
 };
 #define PROCFS_N_PID_ENTRIES                                                   \
   (sizeof(procfs_pid_entries) / sizeof(procfs_pid_entries[0]))
@@ -1149,6 +1495,32 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
       return n;
     }
 
+    if (strcmp(rest, "cwd") == 0 || strcmp(rest, "exe") == 0 ||
+        strcmp(rest, "root") == 0) {
+      process_t *p = process_find_by_pid(pid);
+      if (!p)
+        return NULL;
+      const char *target = "/";
+      if (strcmp(rest, "cwd") == 0 && p->cwd[0])
+        target = p->cwd;
+      else if (strcmp(rest, "exe") == 0 && p->name[0])
+        target = p->name;
+      vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+      if (!n)
+        return NULL;
+      n->is_symlink = 1;
+      size_t tl = strlen(target);
+      if (tl >= sizeof(n->link_target))
+        tl = sizeof(n->link_target) - 1;
+      memcpy(n->link_target, target, tl);
+      n->link_target[tl] = '\0';
+      n->flags = VFS_FILE;
+      n->mode = S_IFLNK | 0777;
+      n->uid = 0;
+      n->gid = 0;
+      return n;
+    }
+
     // <pid>/fd — directorio.
     if (strcmp(rest, "fd") == 0) {
       process_t *proc = process_find_by_pid(pid);
@@ -1184,6 +1556,14 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
       buf = gen_pid_file(pid, &len, gen_pid_statm_cb);
       return buf ? make_file_node("statm", buf, len) : NULL;
     }
+    if (strcmp(file, "maps") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_maps_cb);
+      return buf ? make_file_node("maps", buf, len) : NULL;
+    }
+    if (strcmp(file, "smaps") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_smaps_cb);
+      return buf ? make_file_node("smaps", buf, len) : NULL;
+    }
     return NULL;
   }
 
@@ -1217,6 +1597,16 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *b = gen_loadavg(&len);
     return make_file_node("loadavg", b, len);
+  }
+  if (strcmp(name, "partitions") == 0) {
+    size_t len = 0;
+    char *b = gen_partitions(&len);
+    return make_file_node("partitions", b, len);
+  }
+  if (strcmp(name, "swaps") == 0) {
+    size_t len = 0;
+    char *b = gen_swaps(&len);
+    return make_file_node("swaps", b, len);
   }
   if (strcmp(name, "self") == 0) {
     process_t *p = process_current();

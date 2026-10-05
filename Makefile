@@ -110,7 +110,7 @@ image: bootloader kernel user
 QEMU_FLAGS_COMMON = \
 	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 	-drive if=pflash,format=raw,file=OVMF_VARS.fd \
-	-m 5G \
+	-m 512M \
 	-no-reboot -no-shutdown
 
 QEMU_FLAGS_DEBUG = \

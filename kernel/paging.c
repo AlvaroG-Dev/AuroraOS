@@ -6,6 +6,7 @@
 #include "serial.h"
 #include "spinlock.h"
 #include "string.h"
+#include "swap.h"
 #include <stddef.h>
 
 #define IA32_PAT_MSR 0x277
@@ -709,10 +710,16 @@ void paging_free_user_space(uint64_t pml4_phys) {
 
         uint64_t *pt = (uint64_t *)phys_to_virt(pd[k] & PTE_FRAME);
         for (int l = 0; l < 512; l++) {
-          if (!(pt[l] & PTE_PRESENT))
-            continue;
-          pmm_free_page(pt[l] & PTE_FRAME);
-          pt[l] = 0;
+          uint64_t raw = pt[l];
+          if (raw & PTE_PRESENT) {
+            pmm_free_page(raw & PTE_FRAME);
+            pt[l] = 0;
+          } else if (pte_is_swap(raw)) {
+            // [FIX] Página en swap. Liberar el slot; si no, queda
+            // huérfano hasta el siguiente reboot.
+            swap_free_slot(pte_swap_type(raw), pte_swap_offset(raw));
+            pt[l] = 0;
+          }
         }
         pmm_free_page(pd[k] & PTE_FRAME);
         pd[k] = 0;
@@ -790,4 +797,67 @@ void mmio_unmap(uint64_t phys, uint64_t size) {
   for (uint64_t page = start; page < end; page += PAGE_SIZE) {
     paging_unmap_page(MMIO_MAP_BASE + page);
   }
+}
+
+// ---------------------------------------------------------------------------
+// [SWAP] Acceso crudo al PTE.
+// ---------------------------------------------------------------------------
+int paging_get_pte_in(uint64_t *pml4, uint64_t virt, uint64_t *pte_out) {
+  if (!pml4 || !pte_out || !paging_is_canonical(virt))
+    return 0;
+  *pte_out = 0;
+
+  uint64_t pml4_idx = PML4_INDEX(virt);
+  uint64_t pdpt_idx = PDPT_INDEX(virt);
+  uint64_t pd_idx = PD_INDEX(virt);
+  uint64_t pt_idx = PT_INDEX(virt);
+
+  if (!(pml4[pml4_idx] & PTE_PRESENT))
+    return 0;
+  uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & PTE_FRAME);
+  if (!(pdpt[pdpt_idx] & PTE_PRESENT))
+    return 0;
+  uint64_t *pd = (uint64_t *)phys_to_virt(pdpt[pdpt_idx] & PTE_FRAME);
+  if (!(pd[pd_idx] & PTE_PRESENT))
+    return 0;
+  if (pd[pd_idx] & PTE_HUGE)
+    return 0;
+  uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & PTE_FRAME);
+
+  *pte_out = pt[pt_idx];
+  return 1;
+}
+
+int paging_set_pte_in(uint64_t *pml4, uint64_t virt, uint64_t raw_pte) {
+  if (!pml4 || !paging_is_canonical(virt))
+    return -1;
+
+  uint64_t pml4_idx = PML4_INDEX(virt);
+  uint64_t pdpt_idx = PDPT_INDEX(virt);
+  uint64_t pd_idx = PD_INDEX(virt);
+  uint64_t pt_idx = PT_INDEX(virt);
+
+  unsigned long flags = spin_lock_irqsave(&paging_lock);
+  int ret = -1;
+
+  if (!(pml4[pml4_idx] & PTE_PRESENT))
+    goto out;
+  uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & PTE_FRAME);
+  if (!(pdpt[pdpt_idx] & PTE_PRESENT))
+    goto out;
+  uint64_t *pd = (uint64_t *)phys_to_virt(pdpt[pdpt_idx] & PTE_FRAME);
+  if (!(pd[pd_idx] & PTE_PRESENT))
+    goto out;
+  if (pd[pd_idx] & PTE_HUGE)
+    goto out;
+  uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & PTE_FRAME);
+
+  pt[pt_idx] = raw_pte;
+  ret = 0;
+
+out:
+  spin_unlock_irqrestore(&paging_lock, flags);
+  if (ret == 0)
+    paging_invalidate_tlb(virt);
+  return ret;
 }

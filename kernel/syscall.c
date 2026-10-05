@@ -12,6 +12,7 @@
 #include "gdt.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
+#include "io.h"
 #include "ipc.h"
 #include "klog.h"
 #include "paging.h"
@@ -24,6 +25,7 @@
 #include "signal.h"
 #include "spinlock.h"
 #include "string.h"
+#include "swap.h"
 #include "uaccess.h"
 #include "vfs.h"
 #include <stddef.h>
@@ -369,7 +371,6 @@ static int64_t do_open_common(process_t *proc, const char *raw_path,
     }
   }
 
-  
   int fd = vfs_open_for_proc(proc, path, aflags);
   if (fd < 0) {
     LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", path, linux_flags, fd);
@@ -838,8 +839,10 @@ static int64_t k_sysinfo(uint64_t info_ptr, uint64_t a2, uint64_t a3,
   memset(&si, 0, sizeof(si));
   si.uptime = (int64_t)(sched_get_ticks() / 1000);
   si.loads[0] = si.loads[1] = si.loads[2] = 0;
-  si.totalram = pmm_total_pages() * (uint64_t)PAGE_SIZE;
+  si.totalram = pmm_total_usable_pages() * (uint64_t)PAGE_SIZE; // [FIX B]
   si.freeram = pmm_free_pages_count() * (uint64_t)PAGE_SIZE;
+  si.totalswap = swap_total_bytes();
+  si.freeswap = swap_free_bytes();
   si.mem_unit = 1;
 
   struct count_ctx cc = {.n = 0};
@@ -1445,7 +1448,8 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
     return -EINVAL;
   }
   if (!access_ok((void *)fds_ptr, 2 * sizeof(int))) {
-    LOG_ERR("[PIPE] return -EFAULT (access_ok falla, fds_ptr=%p)", (void *)fds_ptr);
+    LOG_ERR("[PIPE] return -EFAULT (access_ok falla, fds_ptr=%p)",
+            (void *)fds_ptr);
     return -EFAULT;
   }
 
@@ -1458,8 +1462,12 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
   int rd = -1, wr = -1;
   for (int i = 0; i < MAX_PROCESS_FDS; i++) {
     if (!proc->fds[i]) {
-      if (rd < 0) rd = i;
-      else { wr = i; break; }
+      if (rd < 0)
+        rd = i;
+      else {
+        wr = i;
+        break;
+      }
     }
   }
   if (rd < 0 || wr < 0) {
@@ -1473,7 +1481,6 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
     LOG_ERR("[PIPE] return rc=%d (vfs_pipe_create falló)", rc);
     return rc;
   }
-
 
   file_descriptor_t *rfd = (file_descriptor_t *)kzalloc(sizeof(*rfd));
   file_descriptor_t *wfd = (file_descriptor_t *)kzalloc(sizeof(*wfd));
@@ -1502,15 +1509,18 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
 
   int user_fds[2] = {rd, wr};
   if (copy_to_user((void *)fds_ptr, user_fds, sizeof(user_fds)) < 0) {
-    LOG_ERR("[PIPE] return -EFAULT (copy_to_user falló, fds_ptr=%p)", (void *)fds_ptr);
+    LOG_ERR("[PIPE] return -EFAULT (copy_to_user falló, fds_ptr=%p)",
+            (void *)fds_ptr);
     vfs_close_for_proc(proc, rd);
     vfs_close_for_proc(proc, wr);
     return -EFAULT;
   }
 
   LOG_INFO("[PIPE] OK rd=%d wr=%d", rd, wr);
-  if (out_rd) *out_rd = rd;
-  if (out_wr) *out_wr = wr;
+  if (out_rd)
+    *out_rd = rd;
+  if (out_wr)
+    *out_wr = wr;
   return 0;
 }
 
@@ -2048,123 +2058,6 @@ static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
   return 0;
 }
 
-// ---------- set_robust_list ----------
-static int64_t k_set_robust_list(uint64_t a1, uint64_t a2, uint64_t a3,
-                                 uint64_t a4, uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
-}
-
-// ---------- getrandom ----------
-static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
-                           uint64_t a4, uint64_t a5) {
-  (void)flags;
-  (void)a4;
-  (void)a5;
-  if (buflen == 0)
-    return 0;
-  if (!access_ok((void *)buf, buflen))
-    return -EFAULT;
-
-  size_t written = 0;
-  uint8_t out[8];
-  while (written < buflen) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    uint64_t r = ((uint64_t)hi << 32) | lo;
-    r ^= (r << 13);
-    r ^= (r >> 7);
-    r ^= (r << 17);
-    size_t n = buflen - written;
-    if (n > 8)
-      n = 8;
-    memcpy(out, &r, n);
-    if (copy_to_user((uint8_t *)buf + written, out, n) < 0)
-      return -EFAULT;
-    written += n;
-  }
-  return (int64_t)buflen;
-}
-
-// ---------- rseq ----------
-static int64_t k_rseq(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                      uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return -ENOSYS;
-}
-
-// ---------- fcntl ----------
-//
-// musl lo usa en __stdio_init_file (F_GETFD, F_GETFL) y en las rutas de
-// dup2/O_APPEND/O_NONBLOCK. Sin él, printf() inicializa el FILE con
-// flags basura y revienta al primer flush.
-//
-// Comandos Linux x86_64:
-//   F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4,
-//   F_DUPFD_CLOEXEC=1030.
-static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
-                       uint64_t a5) {
-  (void)a4;
-  (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
-    return -EFAULT;
-  int kfd = (int)fd;
-  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
-    return -EBADF;
-
-  file_descriptor_t *f = proc->fds[kfd];
-
-  switch (cmd) {
-  case F_DUPFD:
-  case F_DUPFD_CLOEXEC: {
-    int minfd = (int)arg;
-    if (minfd < 0 || minfd >= MAX_PROCESS_FDS)
-      return -EINVAL;
-    int free_fd = -1;
-    for (int i = minfd; i < MAX_PROCESS_FDS; i++) {
-      if (!proc->fds[i]) {
-        free_fd = i;
-        break;
-      }
-    }
-    if (free_fd < 0)
-      return -EMFILE;
-    __atomic_fetch_add(&f->ref_count, 1, __ATOMIC_ACQ_REL);
-    proc->fds[free_fd] = f;
-    // [FD_CLOEXEC] POSIX: F_DUPFD limpia CLOEXEC en el nuevo fd.
-    // F_DUPFD_CLOEXEC lo pone.
-    if (cmd == F_DUPFD_CLOEXEC)
-      proc->fd_cloexec_mask |= (1u << free_fd);
-    else
-      proc->fd_cloexec_mask &= ~(1u << free_fd);
-    return (int64_t)free_fd;
-  }
-  case F_GETFD:
-    return (proc->fd_cloexec_mask & (1u << kfd)) ? FD_CLOEXEC : 0;
-  case F_SETFD:
-    if ((int)arg & FD_CLOEXEC)
-      proc->fd_cloexec_mask |= (1u << kfd);
-    else
-      proc->fd_cloexec_mask &= ~(1u << kfd);
-    return 0;
-  case F_GETFL:
-    return (int64_t)f->flags;
-  case F_SETFL:
-    return 0;
-  default:
-    return -EINVAL;
-  }
-}
-
 // ---------- poll / ppoll / select / pselect6 ----------
 
 struct k_pollfd {
@@ -2383,6 +2276,194 @@ static int64_t k_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t ts_ptr,
   if (big)
     kfree(big);
   return r;
+}
+
+// ---------- clock_settime / settimeofday / adjtimex ----------
+
+struct k_timeval {
+  int64_t tv_sec;
+  int64_t tv_usec;
+};
+
+extern int rtc_set_epoch(int64_t epoch);
+
+static int64_t k_clock_settime(uint64_t clockid, uint64_t tp, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Solo soportamos CLOCK_REALTIME (0). El resto son inmutables
+  // (MONOTONIC, BOOTTIME) o por-proceso (CPUTIME).
+  if (clockid != 0)
+    return -EINVAL;
+  if (!access_ok((void *)tp, 16))
+    return -EFAULT;
+  struct k_timespec ts;
+  if (copy_from_user(&ts, (void *)tp, sizeof(ts)) < 0)
+    return -EFAULT;
+  if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+    return -EINVAL;
+  if (!rtc_set_epoch(ts.tv_sec))
+    return -EIO;
+  return 0;
+}
+
+static int64_t k_settimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
+                              uint64_t a4, uint64_t a5) {
+  (void)tz_ptr;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (tv_ptr) {
+    if (!access_ok((void *)tv_ptr, sizeof(struct k_timeval)))
+      return -EFAULT;
+    struct k_timeval tv;
+    if (copy_from_user(&tv, (void *)tv_ptr, sizeof(tv)) < 0)
+      return -EFAULT;
+    if (tv.tv_sec < 0)
+      return -EINVAL;
+    if (!rtc_set_epoch(tv.tv_sec))
+      return -EIO;
+  }
+  return 0;
+}
+
+// adjtimex: hwclock -a lo usa. No soportamos ajuste de deriva; devolvemos
+// valores razonables (Linux: struct timex relleno). hwclock solo comprueba
+// el return, así que con 0 basta.
+static int64_t k_adjtimex(uint64_t tx_ptr, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (tx_ptr) {
+    // Rellenamos 128 bytes con ceros como hace Linux en modo
+    // "solo lectura". Es suficiente para que hwclock no se queje.
+    if (!access_ok((void *)tx_ptr, 128))
+      return -EFAULT;
+    uint8_t zeros[128] = {0};
+    if (copy_to_user((void *)tx_ptr, zeros, sizeof(zeros)) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+// ---------- set_robust_list ----------
+static int64_t k_set_robust_list(uint64_t a1, uint64_t a2, uint64_t a3,
+                                 uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+// ---------- getrandom ----------
+static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
+                           uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a4;
+  (void)a5;
+  if (buflen == 0)
+    return 0;
+  if (!access_ok((void *)buf, buflen))
+    return -EFAULT;
+
+  size_t written = 0;
+  uint8_t out[8];
+  while (written < buflen) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t r = ((uint64_t)hi << 32) | lo;
+    r ^= (r << 13);
+    r ^= (r >> 7);
+    r ^= (r << 17);
+    size_t n = buflen - written;
+    if (n > 8)
+      n = 8;
+    memcpy(out, &r, n);
+    if (copy_to_user((uint8_t *)buf + written, out, n) < 0)
+      return -EFAULT;
+    written += n;
+  }
+  return (int64_t)buflen;
+}
+
+// ---------- rseq ----------
+static int64_t k_rseq(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -ENOSYS;
+}
+
+// ---------- fcntl ----------
+//
+// musl lo usa en __stdio_init_file (F_GETFD, F_GETFL) y en las rutas de
+// dup2/O_APPEND/O_NONBLOCK. Sin él, printf() inicializa el FILE con
+// flags basura y revienta al primer flush.
+//
+// Comandos Linux x86_64:
+//   F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4,
+//   F_DUPFD_CLOEXEC=1030.
+static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                       uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int kfd = (int)fd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+    return -EBADF;
+
+  file_descriptor_t *f = proc->fds[kfd];
+
+  switch (cmd) {
+  case F_DUPFD:
+  case F_DUPFD_CLOEXEC: {
+    int minfd = (int)arg;
+    if (minfd < 0 || minfd >= MAX_PROCESS_FDS)
+      return -EINVAL;
+    int free_fd = -1;
+    for (int i = minfd; i < MAX_PROCESS_FDS; i++) {
+      if (!proc->fds[i]) {
+        free_fd = i;
+        break;
+      }
+    }
+    if (free_fd < 0)
+      return -EMFILE;
+    __atomic_fetch_add(&f->ref_count, 1, __ATOMIC_ACQ_REL);
+    proc->fds[free_fd] = f;
+    // [FD_CLOEXEC] POSIX: F_DUPFD limpia CLOEXEC en el nuevo fd.
+    // F_DUPFD_CLOEXEC lo pone.
+    if (cmd == F_DUPFD_CLOEXEC)
+      proc->fd_cloexec_mask |= (1u << free_fd);
+    else
+      proc->fd_cloexec_mask &= ~(1u << free_fd);
+    return (int64_t)free_fd;
+  }
+  case F_GETFD:
+    return (proc->fd_cloexec_mask & (1u << kfd)) ? FD_CLOEXEC : 0;
+  case F_SETFD:
+    if ((int)arg & FD_CLOEXEC)
+      proc->fd_cloexec_mask |= (1u << kfd);
+    else
+      proc->fd_cloexec_mask &= ~(1u << kfd);
+    return 0;
+  case F_GETFL:
+    return (int64_t)f->flags;
+  case F_SETFL:
+    return 0;
+  default:
+    return -EINVAL;
+  }
 }
 
 // select/pselect6: convertimos fd_set a un array de pollfd y reusamos
@@ -3788,6 +3869,79 @@ static int64_t k_futex(uint64_t uaddr, uint64_t op, uint64_t val,
   return sys_futex(uaddr, op, val, timeout, uaddr2, val3);
 }
 
+static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // No tenemos write-back cache: FAT32 sincroniza en cada write,
+  // tarfs es RO, procfs/sysfs/devfs no escriben a disco. No hay nada
+  // que volcar. Devolver 0 es correcto (Linux también lo hace en
+  // sistemas sin dirty pages).
+  return 0;
+}
+
+#define LINUX_REBOOT_MAGIC1 0xfee1dead
+#define LINUX_REBOOT_MAGIC2 672274793
+#define LINUX_REBOOT_CMD_RESTART 0x01234567
+#define LINUX_REBOOT_CMD_HALT 0xcdef0123
+#define LINUX_REBOOT_CMD_POWER_OFF 0x4321fedc
+
+static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
+                        uint64_t a5) {
+  (void)arg;
+  (void)a5;
+  if (m1 != LINUX_REBOOT_MAGIC1 || m2 != LINUX_REBOOT_MAGIC2)
+    return -EINVAL;
+  if (cmd == LINUX_REBOOT_CMD_RESTART) {
+    outb(0x64, 0xFE); // 8042 reset
+    return 0;
+  }
+  if (cmd == LINUX_REBOOT_CMD_HALT || cmd == LINUX_REBOOT_CMD_POWER_OFF) {
+    for (;;)
+      __asm__ volatile("cli; hlt");
+  }
+  return -EINVAL;
+}
+
+static int64_t k_swapon(uint64_t path_uptr, uint64_t flags, uint64_t a3,
+                        uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+
+  return swap_on(path);
+}
+
+static int64_t k_swapoff(uint64_t path_uptr, uint64_t a2, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+
+  return swap_off(path);
+}
+
 // ===========================================================================
 //  AURORA-ONLY HANDLERS  (rango 0x1000+)
 // ===========================================================================
@@ -4412,6 +4566,9 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETDENTS64] = {k_getdents64, "getdents64"},
     [SYS_SET_TID_ADDRESS] = {k_set_tid_address, "set_tid_address"},
     [SYS_CLOCK_GETTIME] = {k_clock_gettime, "clock_gettime"},
+    [SYS_CLOCK_SETTIME] = {k_clock_settime, "clock_settime"},
+    [SYS_SETTIMEOFDAY] = {k_settimeofday, "settimeofday"},
+    [SYS_ADJTIMEX] = {k_adjtimex, "adjtimex"},
     [SYS_EXIT] = {k_exit, "exit"},
     [SYS_EXIT_GROUP] = {k_exit_group, "exit_group"},
     [SYS_OPENAT] = {k_openat, "openat"},
@@ -4437,6 +4594,10 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SETDOMAINNAME] = {k_setdomainname, "setdomainname"},
     [SYS_WAITID] = {k_waitid, "waitid"},
     [SYS_FUTEX] = {k_futex, "futex"},
+    [SYS_SYNC] = {k_sync, "sync"},
+    [SYS_REBOOT] = {k_reboot, "reboot"},
+    [SYS_SWAPON] = {k_swapon, "swapon"},
+    [SYS_SWAPOFF] = {k_swapoff, "swapoff"},
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 
@@ -4506,19 +4667,20 @@ uint64_t syscall_handler_c(registers_t *regs) {
   if (cur)
     cur->syscall_regs = saved;
 
-    // [DIAG PIPE] Log temporal de pipe/pipe2 + cualquier retorno negativo.
-    // Quitar cuando se cierre el bug.
-    if ((num == SYS_PIPE || num == SYS_PIPE2) || ((int64_t)ret < 0 && (int64_t)ret > -4096)) {
-      if (num == SYS_PIPE || num == SYS_PIPE2) {
-        LOG_INFO("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
-                 (unsigned long)num, (void *)arg1,
-                 (unsigned long)arg2, (long)ret);
-      } else if (num < 100) {
-        // Otros syscalls "básicos" que devuelvan error: útiles para ver
-        // si open/read/write están fallando también.
-        LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
-      }
+  // [DIAG PIPE] Log temporal de pipe/pipe2 + cualquier retorno negativo.
+  // Quitar cuando se cierre el bug.
+  if ((num == SYS_PIPE || num == SYS_PIPE2) ||
+      ((int64_t)ret < 0 && (int64_t)ret > -4096)) {
+    if (num == SYS_PIPE || num == SYS_PIPE2) {
+      LOG_INFO("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
+               (unsigned long)num, (void *)arg1, (unsigned long)arg2,
+               (long)ret);
+    } else if (num < 100) {
+      // Otros syscalls "básicos" que devuelvan error: útiles para ver
+      // si open/read/write están fallando también.
+      LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
     }
+  }
 
   // Devolvemos regs->rax (que pudo cambiar si k_rt_sigreturn restauró
   // un rax distinto). El asm lo escribirá en [frame+0x70].

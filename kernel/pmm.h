@@ -26,4 +26,11 @@ void pmm_reserve_range(uint64_t start, uint64_t end);
 uint64_t pmm_total_pages(void);
 uint64_t pmm_free_pages_count(void);
 // Test helper: valida un rango EFI sin realizar ninguna reserva.
-int pmm_test_validate_efi_range(uint64_t phys, uint64_t pages, uint64_t *size_out);
+int pmm_test_validate_efi_range(uint64_t phys, uint64_t pages,
+                                uint64_t *size_out);
+
+// [FIX B] Total de páginas en regiones EFI_CONVENTIONAL_MEMORY. Es el
+// valor que debe usarse para "MemTotal" en /proc/meminfo y sysinfo(2).
+// pmm_total_pages() sigue devolviendo el tamaño del bitmap (que incluye
+// huecos MMIO/reservados) y solo lo usa el propio PMM internamente.
+uint64_t pmm_total_usable_pages(void);

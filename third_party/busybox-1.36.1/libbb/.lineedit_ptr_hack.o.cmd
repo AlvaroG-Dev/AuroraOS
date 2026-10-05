@@ -2,7 +2,7 @@ cmd_libbb/lineedit_ptr_hack.o := x86_64-linux-musl-gcc -Wp,-MD,libbb/.lineedit_p
 
 deps_libbb/lineedit_ptr_hack.o := \
   libbb/lineedit_ptr_hack.c \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
+  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
 
 libbb/lineedit_ptr_hack.o: $(deps_libbb/lineedit_ptr_hack.o)
 

@@ -11,6 +11,7 @@
 #include "serial.h"
 #include "signal.h"
 #include "string.h"
+#include "swap.h"
 #include "uaccess.h"
 #include <stddef.h>
 
@@ -92,8 +93,13 @@ vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
   v->flags = flags;
   v->type = type;
   v->pad = 0;
-  v->next = proc->vma_list;
-  proc->vma_list = v;
+
+  // Insertar ordenado por dirección ascendente.
+  vma_t **pp = &proc->vma_list;
+  while (*pp && (*pp)->start < v->start)
+    pp = &(*pp)->next;
+  v->next = *pp;
+  *pp = v;
   return v;
 }
 
@@ -131,8 +137,26 @@ void vma_destroy_all(struct process *proc) {
 // [Fase C.2] Helper para asignar una página de usuario y ponerla a cero.
 // Se usa en try_stack_growth, try_vma_demand, process_sbrk, process_spawn.
 // ---------------------------------------------------------------------------
+// [SWAP] Si el PMM no tiene páginas libres, intentar reclaimar una
+// página antes de rendirnos. Esto le da al page-fault handler una
+// oportunidad de sobrevivir a la presión de memoria.
+//
+// OJO: swap_reclaim_one() puede bloquear en I/O de disco (bms). El
+// llamante está en contexto de #PF, así que el disco debe estar vivo
+// y no reentrar aquí.
+extern int swap_reclaim_one(void);
+extern int swap_device_count(void);
+
 static uint64_t alloc_user_page_zeroed(void) {
   uint64_t phys = pmm_alloc_page();
+  if (!phys && swap_device_count() > 0) {
+    // Intentar liberar hasta 8 páginas para dar margen al llamante.
+    for (int i = 0; i < 8 && !phys; i++) {
+      if (!swap_reclaim_one())
+        break;
+      phys = pmm_alloc_page();
+    }
+  }
   if (!phys)
     return 0;
   memset(phys_to_virt(phys), 0, PAGE_SIZE);
@@ -267,8 +291,29 @@ static int handle_page_fault_inner(registers_t *regs) {
   // -------------------------------------------------------------------------
   if (user) {
     if (present) {
-      // [4.3] Violación de permisos (escribir a R, leer a PROT_NONE, ...).
-      // Si el proceso tiene handler, se entrega SIGSEGV. Si no, mata.
+      // [SWAP] ¿Violación de escritura sobre una página RW que kswapd
+      // marcó temporalmente RO para reclaimarla? Si el VMA es
+      // escribible, la marcamos RW otra vez y salimos sin señal.
+      if ((err & 0x02) != 0) {
+        struct process *proc = process_current();
+        if (proc) {
+          vma_t *vma = vma_find(proc, cr2);
+          if (vma && (vma->flags & PTE_WRITABLE)) {
+            uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+            uint64_t page_va = cr2 & ~0xFFFULL;
+            uint64_t pte;
+            if (paging_get_pte_in(pml4, page_va, &pte) && (pte & PTE_PRESENT) &&
+                !(pte & PTE_WRITABLE)) {
+              uint64_t new_pte = (pte & PTE_FRAME) | vma->flags | PTE_PRESENT;
+              paging_set_pte_in(pml4, page_va, new_pte);
+              pf_resolved++;
+              return 1;
+            }
+          }
+        }
+      }
+      // Fin del caso swap
+
       signal_deliver_from_exception(SIGSEGV, regs);
       pf_resolved++;
       return 1;
@@ -285,6 +330,56 @@ static int handle_page_fault_inner(registers_t *regs) {
       return 1;
     }
 
+    // -----------------------------------------------------------------------
+    // [SWAP] ¿La PTE es una swap entry? Si sí, hacer page-in.
+    //
+    // Se comprueba ANTES de try_stack_growth / try_vma_demand porque:
+    //   - La VMA sigue existiendo (solo el PTE fue reemplazado).
+    //   - try_vma_demand asignaría una página nueva cero y perdería los
+    //     datos que están en swap.
+    // -----------------------------------------------------------------------
+    {
+      uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+      uint64_t page_va = cr2 & ~0xFFFULL;
+      uint64_t raw_pte;
+
+      if (paging_get_pte_in(pml4, page_va, &raw_pte) && pte_is_swap(raw_pte)) {
+        uint32_t sw_type = pte_swap_type(raw_pte);
+        uint32_t sw_slot = pte_swap_offset(raw_pte);
+
+        uint64_t new_phys = pmm_alloc_page();
+        if (!new_phys) {
+          kill_current_process(regs, "swap-in: sin memoria física");
+          return 1;
+        }
+
+        if (swap_read_page(sw_type, sw_slot, new_phys) != 0) {
+          pmm_free_page(new_phys);
+          kill_current_process(regs, "swap-in: error de E/S");
+          return 1;
+        }
+
+        // Usar los flags de la VMA para preservar permisos.
+        // Si la VMA desapareció (raro), defaults razonables.
+        vma_t *vma = vma_find(proc, page_va);
+        uint64_t map_flags =
+            vma ? (vma->flags | PTE_PRESENT)
+                : (PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX);
+
+        if (paging_map_page_in(pml4, page_va, new_phys, map_flags) != 0) {
+          pmm_free_page(new_phys);
+          kill_current_process(regs, "swap-in: fallo al mapear");
+          return 1;
+        }
+
+        swap_free_slot(sw_type, sw_slot);
+        pf_resolved++;
+        LOG_DEBUG("[SWAP] Paged in pid=%u addr=%p type=%u slot=%u", proc->pid,
+                  (void *)page_va, sw_type, sw_slot);
+        return 1;
+      }
+    }
+
     if (try_stack_growth(proc, cr2, err)) {
       pf_resolved++;
       return 1;
@@ -296,7 +391,14 @@ static int handle_page_fault_inner(registers_t *regs) {
         pf_resolved++;
         return 1;
       }
-      kill_current_process(regs, "VMA permission violation");
+      // Distinguir OOM de permiso: si el PMM está a 0, es OOM.
+      if (pmm_free_pages_count() == 0) {
+        LOG_ERR("[PF] PID=%u addr=%p: OOM (sin páginas libres ni swap)",
+                proc->pid, (void *)cr2);
+        kill_current_process(regs, "out of memory");
+      } else {
+        kill_current_process(regs, "VMA permission violation");
+      }
       return 1;
     }
 
@@ -336,15 +438,6 @@ static int handle_page_fault_inner(registers_t *regs) {
     return 1;
   }
 
-  // Fallo de kernel sin fixup y con la página presente. Dos casos:
-  //   a) SMAP bloqueó un acceso a userland sin stac() (bug en un path
-  //      que NO es uaccess; p.ej. paging_map_page_in escribiendo la
-  //      VA del usuario en vez de phys_to_virt(phys)).
-  //   b) La instrucción está dentro de uaccess pero no en la tabla
-  //      de fixups (bug en uaccess_faults.asm: falta registrar esa IP).
-  //
-  // En cualquiera de los dos, es un bug del kernel que NO debe tirar
-  // todo el sistema. Matamos el proceso actual y seguimos.
   if ((err & 0x01) != 0 && proc) {
     LOG_ERR("[PF] kernel access to user page without fixup: "
             "pid=%u rip=%p cr2=%p err=%lx - matando proceso",
@@ -446,10 +539,19 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     uint64_t unmap_end = end < v->end ? end : v->end;
 
     for (uint64_t p = unmap_start; p < unmap_end; p += PAGE_SIZE) {
-      uint64_t phys =
-          paging_get_phys_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
+      uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+
+      // [FIX] Si la PTE es un swap entry, liberar el slot.
+      uint64_t raw;
+      if (paging_get_pte_in(pml4, p, &raw) && pte_is_swap(raw)) {
+        swap_free_slot(pte_swap_type(raw), pte_swap_offset(raw));
+        paging_set_pte_in(pml4, p, 0);
+        continue;
+      }
+
+      uint64_t phys = paging_get_phys_in(pml4, p);
       if (phys) {
-        paging_unmap_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), p);
+        paging_unmap_page_in(pml4, p);
         pmm_free_page(phys);
       }
     }

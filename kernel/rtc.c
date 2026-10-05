@@ -215,3 +215,111 @@ void rtc_init(void) {
   LOG_INFO("[RTC] CMOS RTC detectado: %02u:%02u %02u/%02u/%04u", now.hour,
            now.minute, now.day, now.month, now.year);
 }
+
+// ---------------------------------------------------------------------------
+// [FIX C] Escritura al RTC.
+// Necesario para RTC_SET_TIME (hwclock -w).
+// ---------------------------------------------------------------------------
+static uint8_t rtc_bin_to_bcd(uint8_t v) {
+  return (uint8_t)(((v / 10) << 4) | (v % 10));
+}
+
+static void cmos_write(uint8_t reg, uint8_t val) {
+  outb(CMOS_ADDR, cmos_nmi_mask | (reg & 0x7F));
+  outb(CMOS_DATA, val);
+}
+
+int rtc_set_datetime(const rtc_datetime_t *dt) {
+  if (!dt)
+    return 0;
+  if (!rtc_wait_stable())
+    return 0;
+
+  // [FIX AM/PM] Leer status_b ANTES de tocar SET para saber el modo actual.
+  uint8_t s = cmos_read(RTC_REG_STATUS_B);
+  int bcd = !(s & 0x04);        // bit 2: 0 = BCD, 1 = binario
+  int hour24 = (s & 0x02) != 0; // bit 1: 1 = 24h, 0 = 12h  ← corregido
+
+  // [FIX] Detener las actualizaciones mientras escribimos (bit 7 = SET).
+  cmos_write(RTC_REG_STATUS_B, (uint8_t)(s | 0x80));
+
+  uint8_t sec = bcd ? rtc_bin_to_bcd(dt->second) : dt->second;
+  uint8_t min = bcd ? rtc_bin_to_bcd(dt->minute) : dt->minute;
+
+  uint8_t hr = dt->hour;
+  if (!hour24) {
+    // Modo 12h: convertir 0-23 a 1-12 + bit PM (0x80).
+    uint8_t h12 = hr % 12;
+    if (h12 == 0)
+      h12 = 12;
+    hr = h12;
+    if (dt->hour >= 12)
+      hr |= 0x80;
+  }
+  if (bcd) {
+    hr = (uint8_t)(rtc_bin_to_bcd(hr & 0x7F) | (hr & 0x80));
+  }
+
+  uint8_t day = bcd ? rtc_bin_to_bcd(dt->day) : dt->day;
+  uint8_t mon = bcd ? rtc_bin_to_bcd(dt->month) : dt->month;
+  uint8_t year =
+      bcd ? rtc_bin_to_bcd(dt->year % 100) : (uint8_t)(dt->year % 100);
+  uint8_t cent =
+      bcd ? rtc_bin_to_bcd(dt->year / 100) : (uint8_t)(dt->year / 100);
+
+  cmos_write(RTC_REG_SECONDS, sec);
+  cmos_write(RTC_REG_MINUTES, min);
+  cmos_write(RTC_REG_HOURS, hr);
+  cmos_write(RTC_REG_DAY, day);
+  cmos_write(RTC_REG_MONTH, mon);
+  cmos_write(RTC_REG_YEAR, year);
+  cmos_write(RTC_REG_CENTURY, cent);
+
+  // Restaurar status_b (quita SET, vuelve a arrancar las actualizaciones).
+  cmos_write(RTC_REG_STATUS_B, s);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// [FIX] set_epoch: escribe un epoch UNIX al RTC CMOS.
+// Inverso de rtc_get_epoch.
+// ---------------------------------------------------------------------------
+int rtc_set_epoch(int64_t epoch) {
+  if (epoch < 0)
+    return 0;
+
+  int64_t days = epoch / 86400;
+  int64_t rem = epoch % 86400;
+
+  int year = 1970;
+  while (1) {
+    int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+    int dy = leap ? 366 : 365;
+    if (days < dy)
+      break;
+    days -= dy;
+    year++;
+  }
+
+  static const int md[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+  int month = 0;
+  while (month < 12) {
+    int dm = md[month] + ((month == 1 && leap) ? 1 : 0);
+    if (days < dm)
+      break;
+    days -= dm;
+    month++;
+  }
+
+  rtc_datetime_t dt = {
+      .second = (uint8_t)(rem % 60),
+      .minute = (uint8_t)((rem / 60) % 60),
+      .hour = (uint8_t)(rem / 3600),
+      .day = (uint8_t)(days + 1),
+      .month = (uint8_t)(month + 1),
+      .year = (uint16_t)year,
+      .century = (uint8_t)(year / 100),
+  };
+  return rtc_set_datetime(&dt);
+}

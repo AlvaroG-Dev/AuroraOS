@@ -2,10 +2,10 @@ cmd_libbb/ptr_to_globals.o := x86_64-linux-musl-gcc -Wp,-MD,libbb/.ptr_to_global
 
 deps_libbb/ptr_to_globals.o := \
   libbb/ptr_to_globals.c \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/errno.h \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/features.h \
-  /home/alvaro/Documentos/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/errno.h \
+  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/stdc-predef.h \
+  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/errno.h \
+  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/features.h \
+  /home/alvaro/aurora-os-copy/toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/include/bits/errno.h \
 
 libbb/ptr_to_globals.o: $(deps_libbb/ptr_to_globals.o)
 

@@ -10,18 +10,19 @@
 // resto.
 
 #include "vfs.h"
+#include "block.h" // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "cpu.h"
-#include "block.h"   // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
-#include "sysfs.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
+#include "rtc.h"
 #include "serial.h"
 #include "spinlock.h"
 #include "string.h"
+#include "sysfs.h"
 #include "tarfs.h" // solo por tarfs_get_vfs_ops()
 #include "tty.h"
 #include "uaccess.h"
@@ -1474,6 +1475,78 @@ static vfs_ops_t devfs_pts_dir_ops = {
     .readdir = devfs_pts_readdir,
 };
 
+// ---------------------------------------------------------------------------
+// [FIX C] /dev/rtc — acceso al RTC CMOS vía ioctl.
+// hwclock de BusyBox lo usa con RTC_RD_TIME (leer) y RTC_SET_TIME (escribir).
+// ---------------------------------------------------------------------------
+#define RTC_RD_TIME 0x80247009
+#define RTC_SET_TIME 0x4024700a
+
+struct rtc_time_user {
+  int32_t tm_sec;
+  int32_t tm_min;
+  int32_t tm_hour;
+  int32_t tm_mday;
+  int32_t tm_mon;  // 0-11
+  int32_t tm_year; // años desde 1900
+  int32_t tm_wday;
+  int32_t tm_yday;
+  int32_t tm_isdst;
+};
+
+extern int rtc_read_datetime(rtc_datetime_t *out);
+extern int rtc_set_datetime(const rtc_datetime_t *dt);
+
+static int64_t dev_rtc_ioctl(vfs_node_t *node, unsigned long req,
+                             uint64_t arg) {
+  (void)node;
+  if (req == RTC_RD_TIME) {
+    if (!access_ok((void *)arg, sizeof(struct rtc_time_user)))
+      return -EFAULT;
+    rtc_datetime_t dt;
+    if (!rtc_read_datetime(&dt))
+      return -EIO;
+    struct rtc_time_user rt = {
+        .tm_sec = dt.second,
+        .tm_min = dt.minute,
+        .tm_hour = dt.hour,
+        .tm_mday = dt.day,
+        .tm_mon = dt.month - 1,
+        .tm_year = dt.year - 1900,
+        .tm_wday = 0,
+        .tm_yday = 0,
+        .tm_isdst = 0,
+    };
+    if (copy_to_user((void *)arg, &rt, sizeof(rt)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  if (req == RTC_SET_TIME) {
+    if (!access_ok((void *)arg, sizeof(struct rtc_time_user)))
+      return -EFAULT;
+    struct rtc_time_user rt;
+    if (copy_from_user(&rt, (void *)arg, sizeof(rt)) < 0)
+      return -EFAULT;
+    rtc_datetime_t dt = {
+        .second = (uint8_t)rt.tm_sec,
+        .minute = (uint8_t)rt.tm_min,
+        .hour = (uint8_t)rt.tm_hour,
+        .day = (uint8_t)rt.tm_mday,
+        .month = (uint8_t)(rt.tm_mon + 1),
+        .year = (uint16_t)(rt.tm_year + 1900),
+        .century = (uint8_t)((rt.tm_year + 1900) / 100),
+    };
+    if (!rtc_set_datetime(&dt))
+      return -EIO;
+    return 0;
+  }
+  return -ENOTTY;
+}
+
+static vfs_ops_t dev_rtc_ops = {
+    .ioctl = dev_rtc_ioctl,
+};
+
 // /dev/tty: nodo mágico, resuelve al ctty del proceso en cada operación.
 static struct tty *dev_tty_resolve(void) {
   process_t *p = process_current();
@@ -1525,6 +1598,7 @@ static const devfs_entry_t devfs_entries[] = {
     {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
     {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
     {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
+    {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135}, // [FIX C]
     {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
 };
 
@@ -1541,9 +1615,9 @@ static const devfs_entry_t devfs_entries[] = {
 // disco tiene 0 sectores y rechaza operar.
 // ===========================================================================
 
-#define BLKGETSIZE    0x1260
-#define BLKSSZGET     0x1268
-#define BLKGETSIZE64  0x80081272
+#define BLKGETSIZE 0x1260
+#define BLKSSZGET 0x1268
+#define BLKGETSIZE64 0x80081272
 
 // ===========================================================================
 // [FIX] Block devices: reads/writes con offset/size arbitrarios.
@@ -1560,8 +1634,8 @@ static const devfs_entry_t devfs_entries[] = {
 // 4 KB en pila por llamada.
 // ===========================================================================
 
-static int64_t devfs_block_read(vfs_node_t *node, uint64_t offset,
-                                size_t size, void *buf) {
+static int64_t devfs_block_read(vfs_node_t *node, uint64_t offset, size_t size,
+                                void *buf) {
   block_device_t *bdev = (block_device_t *)node->priv;
   if (!bdev || !buf || size == 0)
     return 0;
@@ -1575,7 +1649,7 @@ static int64_t devfs_block_read(vfs_node_t *node, uint64_t offset,
     return 0;
 
   const uint32_t ssz = bdev->sector_size;
-  const size_t MAX_SECTORS = 8;   /* 4 KB con ssz=512 */
+  const size_t MAX_SECTORS = 8; /* 4 KB con ssz=512 */
   uint8_t bounce[MAX_SECTORS * 512];
 
   size_t done = 0;
@@ -1607,8 +1681,8 @@ static int64_t devfs_block_read(vfs_node_t *node, uint64_t offset,
   return (int64_t)done;
 }
 
-static int64_t devfs_block_write(vfs_node_t *node, uint64_t offset,
-                                 size_t size, const void *buf) {
+static int64_t devfs_block_write(vfs_node_t *node, uint64_t offset, size_t size,
+                                 const void *buf) {
   block_device_t *bdev = (block_device_t *)node->priv;
   if (!bdev || !buf)
     return -EINVAL;
@@ -1669,8 +1743,10 @@ static int64_t devfs_block_write(vfs_node_t *node, uint64_t offset,
 static int devfs_block_poll(vfs_node_t *node, short events) {
   (void)node;
   int rev = 0;
-  if (events & 1) /*POLLIN*/  rev |= 1;
-  if (events & 4) /*POLLOUT*/ rev |= 4;
+  if (events & 1) /*POLLIN*/
+    rev |= 1;
+  if (events & 4) /*POLLOUT*/
+    rev |= 4;
   return rev;
 }
 
@@ -1837,18 +1913,21 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       nlen = sizeof(n->name) - 1;
     memcpy(n->name, name, nlen);
     n->name[nlen] = '\0';
-    n->flags = VFS_FILE;  // VFS no tiene bit block device; el modo sí
+    n->flags = VFS_FILE; // VFS no tiene bit block device; el modo sí
     n->ops = &devfs_block_ops;
     n->priv = bdev;
     n->size = bdev->num_sectors * (uint64_t)bdev->sector_size;
     n->mode = S_IFBLK | (bdev->is_read_only ? 0444 : 0660);
     n->uid = 0;
-    n->gid = 6;  // "disk"
+    n->gid = 6; // "disk"
     // [FIX] rdev único por disco: major=8, minor=índice.
     int idx = -1;
     int nb = blk_count();
     for (int i = 0; i < nb; i++) {
-      if (blk_get_by_index(i) == bdev) { idx = i; break; }
+      if (blk_get_by_index(i) == bdev) {
+        idx = i;
+        break;
+      }
     }
     n->rdev = (8u << 8) | (uint32_t)(idx < 0 ? 0 : idx);
     return n;
@@ -1916,7 +1995,7 @@ void vfs_for_each_mount(vfs_mount_iter_cb_t cb, void *arg) {
 // ===========================================================================
 void vfs_init(void) {
   memset(&stdin_node, 0, sizeof(stdin_node));
-  strcpy(stdin_node.name, "stdin");
+  strcpy(stdin_node.name, "/dev/console");
   stdin_node.flags = VFS_CHARDEVICE;
   stdin_node.ops = &console_ops;
   stdin_node.mode = S_IFCHR | 0666;
@@ -1924,7 +2003,7 @@ void vfs_init(void) {
   stdin_node.gid = 0;
 
   memset(&stdout_node, 0, sizeof(stdout_node));
-  strcpy(stdout_node.name, "stdout");
+  strcpy(stdout_node.name, "/dev/console");
   stdout_node.flags = VFS_CHARDEVICE;
   stdout_node.ops = &console_ops;
   stdout_node.mode = S_IFCHR | 0666;
@@ -1932,7 +2011,7 @@ void vfs_init(void) {
   stdout_node.gid = 0;
 
   memset(&stderr_node, 0, sizeof(stderr_node));
-  strcpy(stderr_node.name, "stderr");
+  strcpy(stderr_node.name, "/dev/console");
   stderr_node.flags = VFS_CHARDEVICE;
   stderr_node.ops = &console_ops;
   stderr_node.mode = S_IFCHR | 0666;

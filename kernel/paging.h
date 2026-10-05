@@ -118,4 +118,18 @@ void mmio_unmap(uint64_t phys, uint64_t size);
 // del CR3 viejo. Si virt==0, se interpreta como "full flush".
 void paging_invalidate_tlb_global(uint64_t virt);
 
+// ---------------------------------------------------------------------------
+// [SWAP] Acceso crudo al PTE (sin forzar PTE_PRESENT).
+//
+// paging_get_pte_in: devuelve 1 si el path de tablas existe (y rellena
+//   *pte_out con el valor crudo del PTE, que puede ser 0), 0 si el path
+//   no existe (no hay tabla).
+//
+// paging_set_pte_in: escribe raw_pte en el PTE. El path debe existir.
+//   Devuelve 0 si OK, -1 si el path no existe o hay una huge page.
+//   Invalida el TLB de la página.
+// ---------------------------------------------------------------------------
+int paging_get_pte_in(uint64_t *pml4, uint64_t virt, uint64_t *pte_out);
+int paging_set_pte_in(uint64_t *pml4, uint64_t virt, uint64_t raw_pte);
+
 #endif

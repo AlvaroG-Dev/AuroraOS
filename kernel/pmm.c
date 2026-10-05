@@ -3,6 +3,7 @@
 #include "buddy.h"
 #include "klog.h"
 #include "paging.h"
+#include "sched.h" // sched_get_ticks
 #include "serial.h"
 #include "spinlock.h"
 #include "string.h"
@@ -16,6 +17,7 @@ static uint64_t max_blocks = 0;
 static uint64_t bitmap_size_bytes = 0;
 static uint64_t used_blocks = 0;
 static uint64_t last_alloc_bit = 0;
+static uint64_t total_usable_pages = 0;
 
 #define EFI_CONVENTIONAL_MEMORY 7
 
@@ -151,6 +153,7 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
         bitmap_clear_safe(bitmap, bit);
         if (used_blocks > 0)
           used_blocks--;
+        total_usable_pages++; // [FIX B] cuenta real de páginas usables
       }
     }
   }
@@ -220,7 +223,16 @@ uint64_t pmm_alloc_page(void) {
   }
 
   spin_unlock_irqrestore(&pmm_lock, flags);
-  LOG_ERR("[PMM] ERROR CRITICO: Memoria fisica agotada!");
+
+  // [FIX] Rate-limit: loguear como mucho una vez por segundo. Sin esto,
+  // un OOM masivo inunda el serial y ralentiza el sistema 100x.
+  static volatile uint64_t last_oom_log = 0;
+  uint64_t now = sched_get_ticks();
+  if (now - last_oom_log >= 1000) {
+    last_oom_log = now;
+    LOG_ERR("[PMM] Sin páginas libres (used=%lu/%lu)",
+            (unsigned long)used_blocks, (unsigned long)max_blocks);
+  }
   return 0;
 }
 
@@ -419,3 +431,5 @@ int pmm_test_validate_efi_range(uint64_t phys, uint64_t pages,
                                 uint64_t *size_out) {
   return pmm_validate_efi_range(phys, pages, size_out);
 }
+
+uint64_t pmm_total_usable_pages(void) { return total_usable_pages; }

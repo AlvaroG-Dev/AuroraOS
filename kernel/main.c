@@ -35,6 +35,7 @@
 #include "simd.h"
 #include "smp_boot.h"
 #include "string.h"
+#include "swap.h" // [SWAP]
 #include "syscall.h"
 #include "tarfs.h"
 #include "test.h"
@@ -430,6 +431,13 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("[INIT] Iniciando Heap (kmalloc)...");
   heap_init();
 
+  // [SWAP] Inicializar el subsistema de swap. Solo registra estado
+  // interno; no se activa ningún device hasta que userland llame a
+  // swapon(2).
+  LOG_INFO("[INIT] Swap subsystem...");
+  swap_init();
+  LOG_INFO("OK");
+
   pit_init();
 
   LOG_INFO("[INIT] Inicializando Initramfs (TarFS)...");
@@ -450,6 +458,19 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("[INIT] Process subsystem...");
   extern void process_init(void);
   process_init();
+
+  // [SWAP] Lanzar kswapd. Necesita sched_init() ya hecho (usa wait
+  // queues y sched_wake_expired), así que va justo aquí. La tarea
+  // arranca en el siguiente tick de cualquier CPU y se duerme hasta
+  // que haya presión de memoria.
+  LOG_INFO("[INIT] Lanzando kswapd...");
+  extern void kswapd_main(void);
+  task_t *kswapd_t = sched_create_task(kswapd_main);
+  if (kswapd_t) {
+    LOG_INFO("[INIT] kswapd lanzado (task ID=%u)", kswapd_t->id);
+  } else {
+    LOG_WARN("[INIT] kswapd no se pudo lanzar (sin memoria)");
+  }
 
   task_t *t = sched_create_task(kmain_task);
   if (!t) {
