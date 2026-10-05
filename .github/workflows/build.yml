@@ -19,8 +19,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential nasm xorriso mtools \
+            build-essential clang lld llvm nasm xorriso mtools \
+            qemu-system-x86 ovmf
             qemu-system-x86 ovmf gnu-efi
+
+      - name: Verificar herramientas EFI
+        run: |
+          clang --version
+          lld-link --version
 
       - name: Compilar bootloader
         run: make bootloader
