@@ -3,6 +3,7 @@
 #define PROCESS_H
 
 #include "sched.h"
+#include "mutex.h"
 #include "signal.h"
 #include "vfs.h"
 #include "wait.h"
@@ -123,6 +124,7 @@ typedef struct process {
   uint64_t next_mmap_addr;
 
   struct vma *vma_list;
+  mutex_t mm_lock;
   uint64_t stack_base;
   uint64_t stack_low;
   uint64_t stack_top;
