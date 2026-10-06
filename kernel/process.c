@@ -6,11 +6,13 @@
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
+#include "mutex.h"
 #include "paging.h"
 #include "pf.h"
 #include "pmm.h"
 #include "pty.h"
 #include "sched.h"
+#include "swap.h"
 #include "serial.h"
 #include "string.h"
 #include "tarfs.h"
@@ -695,6 +697,8 @@ static process_t *process_spawn_with_ppid(const char *name,
 
   proc->fd_cloexec_mask = 0;
 
+  mutex_init(&proc->mm_lock);
+  mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
 
   // Enlazar tarea ↔ proceso ANTES de publicar la tarea.
@@ -960,6 +964,8 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     proc->fds[2] = vfs_create_stdio_fd(2);
   }
 
+  mutex_init(&proc->mm_lock);
+  mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
   task->proc = proc;
 
@@ -1322,8 +1328,10 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         task_put(zombie_task);
         zombie_task = NULL;
       }
-      if (found_zombie->pml4_phys)
+      if (found_zombie->pml4_phys) {
+        futex_cleanup_pml4(found_zombie->pml4_phys);
         paging_free_user_space(found_zombie->pml4_phys);
+      }
       vma_destroy_all(found_zombie);
       if (found_zombie->task) {
         task_put(found_zombie->task);
@@ -1523,18 +1531,22 @@ void *process_sbrk(process_t *proc, int64_t increment) {
   if (!proc)
     return (void *)-1;
 
+  mutex_lock(&proc->mm_lock);
   uint64_t old_brk = proc->heap_end;
-  if (increment == 0)
+  if (increment == 0) {
+    mutex_unlock(&proc->mm_lock);
     return (void *)old_brk;
+  }
 
   if (increment > 0) {
     uint64_t new_brk = old_brk + (uint64_t)increment;
-    if (new_brk > proc->heap_max || new_brk < old_brk)
+    if (new_brk > proc->heap_max || new_brk < old_brk) {
+      mutex_unlock(&proc->mm_lock);
       return (void *)-1;
+    }
 
     uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
     uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
     for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
@@ -1542,6 +1554,7 @@ void *process_sbrk(process_t *proc, int64_t increment) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
           LOG_ERR("[PROC] sbrk: sin memoria física libre");
+          mutex_unlock(&proc->mm_lock);
           return (void *)-1;
         }
         if (paging_map_page_in(pml4, page, phys,
@@ -1549,6 +1562,7 @@ void *process_sbrk(process_t *proc, int64_t increment) {
                                    PTE_NX) != 0) {
           pmm_free_page(phys);
           LOG_ERR("[PROC] sbrk: error mapeando página");
+          mutex_unlock(&proc->mm_lock);
           return (void *)-1;
         }
         memset(phys_to_virt(phys), 0, PAGE_SIZE);
@@ -1556,27 +1570,29 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     }
 
     proc->heap_end = new_brk;
+    mutex_unlock(&proc->mm_lock);
     return (void *)old_brk;
   }
 
   uint64_t decr = (uint64_t)(-(increment + 1)) + 1;
-  if (decr > (old_brk - proc->heap_start))
+  if (decr > (old_brk - proc->heap_start)) {
+    mutex_unlock(&proc->mm_lock);
     return (void *)-1;
+  }
 
   uint64_t new_brk = old_brk - decr;
   uint64_t old_end_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
   uint64_t new_end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+
   for (uint64_t page = new_end_page; page < old_end_page; page += PAGE_SIZE) {
     uint64_t phys = paging_get_phys_in(pml4, page);
-    if (phys) {
-      if (paging_unmap_page_in(pml4, page) == 0)
-        pmm_free_page(phys);
-    }
+    if (phys && paging_unmap_page_in(pml4, page) == 0)
+      pmm_free_page(phys);
   }
 
   proc->heap_end = new_brk;
+  mutex_unlock(&proc->mm_lock);
   return (void *)old_brk;
 }
 
@@ -1621,6 +1637,25 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
 
         for (int l = 0; l < 512; l++) {
           uint64_t pte = pt_parent[l];
+          if (pte_is_swap(pte)) {
+            uint64_t new_phys = pmm_alloc_page();
+            if (!new_phys)
+              return -1;
+            if (swap_read_page(pte_swap_type(pte), pte_swap_offset(pte),
+                               new_phys) != 0) {
+              pmm_free_page(new_phys);
+              return -1;
+            }
+            uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                            ((uint64_t)k << 21) | ((uint64_t)l << 12);
+            if (paging_map_page_in(child_pml4, virt, new_phys,
+                                   PTE_USER | PTE_WRITABLE | PTE_PRESENT |
+                                       PTE_NX) != 0) {
+              pmm_free_page(new_phys);
+              return -1;
+            }
+            continue;
+          }
           if (!(pte & PTE_PRESENT))
             continue;
 
@@ -1702,10 +1737,15 @@ int64_t sys_fork(void) {
     return -EINVAL;
   }
 
-  // 1. Clonar PML4 (kernel half compartido).
+  // 1. Freeze the parent's address space while its page tables and VMA list
+  // are cloned. The lock is sleepable because swapped pages may need I/O.
+  mutex_lock(&parent->mm_lock);
+
+  // 2. Clonar PML4 (kernel half compartido).
   uint64_t child_pml4_phys = paging_clone_kernel_space();
   if (!child_pml4_phys) {
     LOG_ERR("[FORK] paging_clone_kernel_space falló");
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
   uint64_t *parent_pml4 = (uint64_t *)phys_to_virt(parent->pml4_phys);
@@ -1714,6 +1754,7 @@ int64_t sys_fork(void) {
   // 2. Copiar user space.
   if (clone_user_space(parent_pml4, child_pml4) != 0) {
     paging_free_user_space(child_pml4_phys);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1722,6 +1763,7 @@ int64_t sys_fork(void) {
   if (!child_task) {
     LOG_ERR("[FORK] sched_create_forked_user_task falló");
     paging_free_user_space(child_pml4_phys);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
   child_task->fs_base = parent->fs_base;
@@ -1734,6 +1776,7 @@ int64_t sys_fork(void) {
     if (child_task->stack)
       kfree(child_task->stack);
     kfree(child_task);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1798,6 +1841,7 @@ int64_t sys_fork(void) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1809,6 +1853,7 @@ int64_t sys_fork(void) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1822,8 +1867,11 @@ int64_t sys_fork(void) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
+
+  mutex_unlock(&parent->mm_lock);
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     child->fds[f] = parent->fds[f];
@@ -1832,6 +1880,8 @@ int64_t sys_fork(void) {
   }
   child->fd_cloexec_mask = parent->fd_cloexec_mask;
 
+  mutex_init(&child->mm_lock);
+  mutex_init(&child->fd_lock);
   wait_queue_init(&child->child_wq);
   child_task->proc = child;
 
@@ -1922,6 +1972,16 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     return -EINVAL;
   if (envc < 0 || envc > PROCESS_ENVP_MAX)
     return -EINVAL;
+
+  // execve replaces the entire address space. Aurora does not yet have the
+  // Linux-style mechanism that terminates/synchronizes sibling threads, so
+  // allowing execve() with team_size > 1 would leave sibling tasks running
+  // on a freed PML4. Reject it until that machinery exists.
+  unsigned long exec_flags = spin_lock_irqsave(&process_lock);
+  int has_siblings = (proc->team_size > 1);
+  spin_unlock_irqrestore(&process_lock, exec_flags);
+  if (has_siblings)
+    return -EAGAIN;
 
   uint32_t tpid = proc->pid;
 

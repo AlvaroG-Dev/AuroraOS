@@ -13,6 +13,7 @@
 #define FUTEX_CLOCK_REALTIME 256
 
 void futex_init(void);
+void futex_cleanup_pml4(uint64_t pml4);
 
 // [CLONE_CHILD_CLEARTID] Lo llama process.c al morir un hilo.
 void futex_wake_user(uint64_t uaddr, int nr_wake, uint64_t pml4);

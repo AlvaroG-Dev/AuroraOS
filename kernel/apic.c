@@ -24,6 +24,11 @@ static uint32_t g_bsp_apic_id = 0;
 // Un valor 0xFF indica que la IRQ NO es ruteable (colisión de GSI).
 static uint8_t g_irq_to_gsi[16];
 
+static uint32_t ioapic_redir_count(int idx) {
+  uint32_t ver = ioapic_read_reg(idx, 1);
+  return ((ver >> 16) & 0xFFu) + 1u;
+}
+
 // Flag para saber si el LAPIC está activo.
 static int g_apic_initialized = 0;
 
@@ -173,13 +178,13 @@ void apic_init(void) {
   // cascada al PIC slave y NUNCA se usa como IRQ normal en sistemas
   // con PIC dual. La marcamos como no ruteable.
   {
-    uint8_t gsi_owner[24];
-    for (int i = 0; i < 24; i++)
+    uint8_t gsi_owner[256];
+    for (int i = 0; i < 256; i++)
       gsi_owner[i] = 0xFF;
 
     for (int irq = 0; irq < 16; irq++) {
       uint8_t gsi = g_irq_to_gsi[irq];
-      if (gsi >= 24)
+      if (gsi >= 256)
         continue;
       if (gsi_owner[gsi] == 0xFF) {
         gsi_owner[gsi] = (uint8_t)irq;
@@ -241,7 +246,7 @@ void ioapic_redirect_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
   int ioapic_idx = -1;
   for (int i = 0; i < acpi->ioapic_count; i++) {
     const acpi_ioapic_t *cand = &acpi->ioapics[i];
-    if (gsi >= cand->gsi_base && gsi < cand->gsi_base + 24) {
+    if (gsi >= cand->gsi_base && gsi < cand->gsi_base + ioapic_redir_count(i)) {
       ioapic_idx = i;
       break;
     }

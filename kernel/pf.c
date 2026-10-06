@@ -4,6 +4,7 @@
 #include "gdt.h"
 #include "heap.h"
 #include "klog.h"
+#include "mutex.h"
 #include "paging.h"
 #include "pmm.h"
 #include "process.h"
@@ -339,8 +340,9 @@ static int handle_page_fault_inner(registers_t *regs) {
     //     datos que están en swap.
     // -----------------------------------------------------------------------
     {
-      uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
       uint64_t page_va = cr2 & ~0xFFFULL;
+      mutex_lock(&proc->mm_lock);
+      uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
       uint64_t raw_pte;
 
       if (paging_get_pte_in(pml4, page_va, &raw_pte) && pte_is_swap(raw_pte)) {
@@ -349,35 +351,42 @@ static int handle_page_fault_inner(registers_t *regs) {
 
         uint64_t new_phys = pmm_alloc_page();
         if (!new_phys) {
+          mutex_unlock(&proc->mm_lock);
           kill_current_process(regs, "swap-in: sin memoria física");
           return 1;
         }
 
         if (swap_read_page(sw_type, sw_slot, new_phys) != 0) {
           pmm_free_page(new_phys);
+          mutex_unlock(&proc->mm_lock);
           kill_current_process(regs, "swap-in: error de E/S");
           return 1;
         }
 
-        // Usar los flags de la VMA para preservar permisos.
-        // Si la VMA desapareció (raro), defaults razonables.
         vma_t *vma = vma_find(proc, page_va);
-        uint64_t map_flags =
-            vma ? (vma->flags | PTE_PRESENT)
-                : (PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX);
+        if (!vma) {
+          pmm_free_page(new_phys);
+          mutex_unlock(&proc->mm_lock);
+          kill_current_process(regs, "swap-in: VMA desaparecida");
+          return 1;
+        }
+        uint64_t map_flags = vma->flags | PTE_PRESENT;
 
         if (paging_map_page_in(pml4, page_va, new_phys, map_flags) != 0) {
           pmm_free_page(new_phys);
+          mutex_unlock(&proc->mm_lock);
           kill_current_process(regs, "swap-in: fallo al mapear");
           return 1;
         }
 
         swap_free_slot(sw_type, sw_slot);
+        mutex_unlock(&proc->mm_lock);
         pf_resolved++;
         LOG_DEBUG("[SWAP] Paged in pid=%u addr=%p type=%u slot=%u", proc->pid,
                   (void *)page_va, sw_type, sw_slot);
         return 1;
       }
+      mutex_unlock(&proc->mm_lock);
     }
 
     if (try_stack_growth(proc, cr2, err)) {

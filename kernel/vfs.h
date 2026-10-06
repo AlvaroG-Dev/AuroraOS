@@ -2,6 +2,7 @@
 #ifndef VFS_H
 #define VFS_H
 
+#include "mutex.h"
 #include "wait.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -218,6 +219,7 @@ struct vfs_fs_ops {
 };
 
 typedef struct file_descriptor {
+  mutex_t lock;
   vfs_node_t *node;
   uint64_t offset;
   int flags;

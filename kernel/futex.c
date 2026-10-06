@@ -212,3 +212,21 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
     return -ENOSYS;
   }
 }
+void futex_cleanup_pml4(uint64_t pml4) {
+  if (!pml4)
+    return;
+  unsigned long flags = spin_lock_irqsave(&futex_table_lock);
+  for (unsigned i = 0; i < FUTEX_HASH_SIZE; i++) {
+    futex_entry_t **pp = &futex_buckets[i];
+    while (*pp) {
+      futex_entry_t *e = *pp;
+      if (e->pml4 != pml4) {
+        pp = &e->next;
+        continue;
+      }
+      *pp = e->next;
+      kfree(e);
+    }
+  }
+  spin_unlock_irqrestore(&futex_table_lock, flags);
+}
