@@ -697,6 +697,7 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->fd_cloexec_mask = 0;
 
   mutex_init(&proc->mm_lock);
+  mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
 
   // Enlazar tarea ↔ proceso ANTES de publicar la tarea.
@@ -963,6 +964,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   }
 
   mutex_init(&proc->mm_lock);
+  mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
   task->proc = proc;
 
@@ -1836,6 +1838,7 @@ int64_t sys_fork(void) {
   child->fd_cloexec_mask = parent->fd_cloexec_mask;
 
   mutex_init(&child->mm_lock);
+  mutex_init(&child->fd_lock);
   wait_queue_init(&child->child_wq);
   child_task->proc = child;
 
