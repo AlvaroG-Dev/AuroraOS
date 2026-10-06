@@ -129,6 +129,7 @@ typedef struct process {
   uint64_t stack_low;
   uint64_t stack_top;
   uint64_t stack_guard;
+  mutex_t fd_lock;
   file_descriptor_t *fds[MAX_PROCESS_FDS];
   struct process *next;
   wait_queue_t child_wq;
