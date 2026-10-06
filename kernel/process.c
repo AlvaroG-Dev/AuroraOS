@@ -1328,8 +1328,10 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         task_put(zombie_task);
         zombie_task = NULL;
       }
-      if (found_zombie->pml4_phys)
+      if (found_zombie->pml4_phys) {
+        futex_cleanup_pml4(found_zombie->pml4_phys);
         paging_free_user_space(found_zombie->pml4_phys);
+      }
       vma_destroy_all(found_zombie);
       if (found_zombie->task) {
         task_put(found_zombie->task);
