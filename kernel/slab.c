@@ -131,13 +131,15 @@ static slab_header_t *slab_grow(slab_cache_t *c) {
     g_empty_slabs = hdr->next;
     spin_unlock_irqrestore(&slab_top_lock, tf);
   } else {
-    // No hay slabs vacíos: pedir VA+page nueva.
-    //
     // [H6] slab_top es un bump pointer que NUNCA se reutiliza, ni
     // siquiera en error. Si vmm_alloc_pages falla, la VA reservada se
-    // descarta: no es leak de memoria física (nunca se mapeó), solo
-    // de espacio virtual del rango SLAB, que es abundante.
+    // descarta: no es leak de memoria física, solo de espacio virtual.
     uint64_t vaddr = slab_top;
+    if (vaddr + PAGE_SIZE > SLAB_END) {
+      spin_unlock_irqrestore(&slab_top_lock, tf);
+      LOG_ERR("[SLAB] región SLAB agotada (SLAB_END=%p)", (void *)SLAB_END);
+      return NULL;
+    }
     slab_top += PAGE_SIZE;
     spin_unlock_irqrestore(&slab_top_lock, tf);
 

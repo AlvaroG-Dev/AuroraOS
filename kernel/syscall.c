@@ -3417,7 +3417,7 @@ static int64_t k_setrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a3,
 }
 
 // ---------- [4.6] sethostname / getrusage / times ----------
-static char g_hostname[64] = "aurora";
+char g_hostname[64] = "aurora";
 
 static int64_t k_sethostname(uint64_t name_uptr, uint64_t len, uint64_t a3,
                              uint64_t a4, uint64_t a5) {
@@ -3940,6 +3940,135 @@ static int64_t k_swapoff(uint64_t path_uptr, uint64_t a2, uint64_t a3,
     return rc;
 
   return swap_off(path);
+}
+
+// ---------- getcpu (309) ----------
+static int64_t k_getcpu(uint64_t cpu_ptr, uint64_t node_ptr, uint64_t a3,
+                        uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  int cpu = smp_processor_id();
+  if (cpu_ptr && access_ok((void *)cpu_ptr, sizeof(uint32_t))) {
+    if (copy_to_user((void *)cpu_ptr, &cpu, sizeof(uint32_t)) < 0)
+      return -EFAULT;
+  }
+  if (node_ptr) {
+    uint32_t node = 0;
+    if (access_ok((void *)node_ptr, sizeof(uint32_t)))
+      copy_to_user((void *)node_ptr, &node, sizeof(uint32_t));
+  }
+  return 0;
+}
+
+// ---------- membarrier (324) ----------
+// Solo soportamos QUERY (0) y PRIVATE_EXPEDITED (1). El resto EINVAL.
+static int64_t k_membarrier(uint64_t cmd, uint64_t flags, uint64_t a3,
+                            uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (flags != 0)
+    return -EINVAL;
+  switch (cmd) {
+  case 0:       // MEMBARRIER_CMD_QUERY
+    return 0x1; // soportamos PRIVATE_EXPEDITED
+  case 1:       // MEMBARRIER_CMD_PRIVATE_EXPEDITED
+    __asm__ volatile("mfence" ::: "memory");
+    return 0;
+  default:
+    return -EINVAL;
+  }
+}
+
+// ---------- sched_getaffinity (204) / setaffinity (203) ----------
+static int64_t k_sched_getaffinity(uint64_t pid, uint64_t cpusetsize,
+                                   uint64_t mask_ptr, uint64_t a4,
+                                   uint64_t a5) {
+  (void)pid;
+  (void)a4;
+  (void)a5;
+  if (cpusetsize < 8)
+    return -EINVAL;
+  if (!access_ok((void *)mask_ptr, 8))
+    return -EFAULT;
+  uint64_t mask = 0;
+  for (int i = 0; i < MAX_CPUS; i++)
+    mask |= (1ULL << i);
+  if (copy_to_user((void *)mask_ptr, &mask, 8) < 0)
+    return -EFAULT;
+  return 8;
+}
+
+static int64_t k_sched_setaffinity(uint64_t pid, uint64_t cpusetsize,
+                                   uint64_t mask_ptr, uint64_t a4,
+                                   uint64_t a5) {
+  (void)pid;
+  (void)cpusetsize;
+  (void)mask_ptr;
+  (void)a4;
+  (void)a5;
+  // No-op: aceptamos cualquier máscara. El scheduler ignora afinidad.
+  return 0;
+}
+
+// ---------- sched_getparam (143) / getscheduler (145) ----------
+struct k_sched_param {
+  int32_t sched_priority;
+};
+static int64_t k_sched_getparam(uint64_t pid, uint64_t param_ptr, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)pid;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct k_sched_param p = {0};
+  if (!access_ok((void *)param_ptr, sizeof(p)))
+    return -EFAULT;
+  if (copy_to_user((void *)param_ptr, &p, sizeof(p)) < 0)
+    return -EFAULT;
+  return 0;
+}
+static int64_t k_sched_getscheduler(uint64_t pid, uint64_t a2, uint64_t a3,
+                                    uint64_t a4, uint64_t a5) {
+  (void)pid;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0; // SCHED_OTHER
+}
+
+// ---------- getpriority (140) / setpriority (141) ----------
+static int64_t k_getpriority(uint64_t which, uint64_t who, uint64_t a3,
+                             uint64_t a4, uint64_t a5) {
+  (void)which;
+  (void)who;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 20; // nice(0) == priority 20 (Linux)
+}
+static int64_t k_setpriority(uint64_t which, uint64_t who, uint64_t prio,
+                             uint64_t a4, uint64_t a5) {
+  (void)which;
+  (void)who;
+  (void)prio;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
+// ---------- clock_nanosleep (230) ----------
+static int64_t k_clock_nanosleep(uint64_t clockid, uint64_t flags,
+                                 uint64_t req_ptr, uint64_t rem_ptr,
+                                 uint64_t a5) {
+  (void)a5;
+  if (clockid != 0 && clockid != 1)
+    return -EINVAL;
+  if (flags & ~1ULL) // TIMER_ABSTIME=1
+    return -EINVAL;
+  return k_nanosleep(req_ptr, rem_ptr, 0, 0, 0);
 }
 
 // ===========================================================================
@@ -4598,6 +4727,16 @@ static const syscall_entry_t linux_table[] = {
     [SYS_REBOOT] = {k_reboot, "reboot"},
     [SYS_SWAPON] = {k_swapon, "swapon"},
     [SYS_SWAPOFF] = {k_swapoff, "swapoff"},
+    [SYS_GETCPU] = {k_getcpu, "getcpu"},                                  // 309
+    [SYS_MEMBARRIER] = {k_membarrier, "membarrier"},                      // 324
+    [SYS_SCHED_GETAFFINITY] = {k_sched_getaffinity, "sched_getaffinity"}, // 204
+    [SYS_SCHED_SETAFFINITY] = {k_sched_setaffinity, "sched_setaffinity"}, // 203
+    [SYS_SCHED_GETPARAM] = {k_sched_getparam, "sched_getparam"},          // 143
+    [SYS_SCHED_GETSCHEDULER] = {k_sched_getscheduler,
+                                "sched_getscheduler"},              // 145
+    [SYS_GETPRIORITY] = {k_getpriority, "getpriority"},             // 140
+    [SYS_SETPRIORITY] = {k_setpriority, "setpriority"},             // 141
+    [SYS_CLOCK_NANOSLEEP] = {k_clock_nanosleep, "clock_nanosleep"}, // 230
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 
@@ -4646,7 +4785,15 @@ uint64_t syscall_handler_c(registers_t *regs) {
   }
 
   if (!fn) {
-    LOG_WARN("[SYSCALL] num desconocido: %lu", (unsigned long)num);
+    // [DEBUG] Loguear solo en el primer hit por syscall.
+    static uint8_t seen[512] = {0};
+    if (num < 512 && !seen[num]) {
+      seen[num] = 1;
+      LOG_ERR("[SYSCALL-GAP] num=%lu (0x%lx) pid=%u comm=%s",
+              (unsigned long)num, (unsigned long)num,
+              process_current() ? process_current()->pid : 0,
+              process_current() ? process_current()->name : "?");
+    }
     return err(ENOSYS);
   }
 
@@ -4672,9 +4819,9 @@ uint64_t syscall_handler_c(registers_t *regs) {
   if ((num == SYS_PIPE || num == SYS_PIPE2) ||
       ((int64_t)ret < 0 && (int64_t)ret > -4096)) {
     if (num == SYS_PIPE || num == SYS_PIPE2) {
-      LOG_INFO("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
-               (unsigned long)num, (void *)arg1, (unsigned long)arg2,
-               (long)ret);
+      LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
+                (unsigned long)num, (void *)arg1, (unsigned long)arg2,
+                (long)ret);
     } else if (num < 100) {
       // Otros syscalls "básicos" que devuelvan error: útiles para ver
       // si open/read/write están fallando también.

@@ -2,8 +2,8 @@
 #ifndef PROCESS_H
 #define PROCESS_H
 
-#include "sched.h"
 #include "mutex.h"
+#include "sched.h"
 #include "signal.h"
 #include "vfs.h"
 #include "wait.h"
@@ -324,4 +324,6 @@ process_t *process_spawn_child_args_fds_env(process_t *parent, const char *path,
                                             int argc, const char *const *argv,
                                             int envc, const char *const *envp,
                                             const spawn_fds_t *fds);
+
+process_t *process_find_by_pml4(uint64_t pml4_phys);
 #endif // PROCESS_H

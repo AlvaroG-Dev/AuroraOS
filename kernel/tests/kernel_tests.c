@@ -9,6 +9,8 @@
 //   }
 //   REGISTER_TEST("mi_cosa", test_mi_cosa);
 
+#include "memlayout.h"
+#include "memlayout.h"
 #include "../acpi.h"
 #include "../ahci.h"
 #include "../apic.h"

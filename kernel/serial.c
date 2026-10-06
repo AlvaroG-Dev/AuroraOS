@@ -1,7 +1,8 @@
 // kernel/serial.c
-// Driver serial COM1 — thread-safe y con lock compartido para klog
+// Driver serial COM1 — thread-safe, reentrante y con lock compartido para klog
 
 #include "serial.h"
+#include "cpu.h" // [FIX] smp_processor_id / this_cpu
 #include "io.h"
 #include "spinlock.h"
 #include <stdarg.h>
@@ -11,8 +12,17 @@
 // Es el mismo lock que klog usa para envolver mensajes completos.
 static spinlock_t serial_lock;
 
-// [FIX] Contador de caracteres descartados por timeout. Se expone
-// por si algún subsistema quiere diagnosticar problemas de serial.
+// [FIX] Quién tiene el lock. -1 = libre.
+//
+// Este campo es lo que permite detectar reentrada: si klog_printf()
+// se llama desde dentro de otro klog_printf() en el MISMO CPU (por
+// ejemplo, un LOG_ERR desde un handler de IRQ que se dispara mientras
+// el CPU está escribiendo el mensaje anterior), vemos que el lock ya
+// lo tenemos nosotros y devolvemos SERIAL_LOCK_REENTERED en vez de
+// spinnear contra nosotros mismos para siempre.
+static volatile int serial_lock_owner_cpu = -1;
+
+// [FIX] Contador de caracteres descartados por timeout o reentrada.
 static volatile uint64_t g_serial_dropped = 0;
 
 // ---------------------------------------------------------------------------
@@ -54,6 +64,7 @@ void serial_putc_locked(char c) {
 
 void serial_init(void) {
   spin_init(&serial_lock);
+  serial_lock_owner_cpu = -1;
   g_serial_dropped = 0;
 
   outb(SERIAL_PORT_COM1 + 1, 0x00);
@@ -65,20 +76,78 @@ void serial_init(void) {
   outb(SERIAL_PORT_COM1 + 4, 0x0B);
 }
 
+// ---------------------------------------------------------------------------
+// [FIX] Lock reentrante.
+//
+// Contrato:
+//   - Si el lock estaba libre: lo cogemos, *flags = RFLAGS previos.
+//     El llamante DEBE liberarlo con serial_lock_release(*flags).
+//
+//   - Si el lock lo tiene OTRO CPU: spinnamos hasta conseguirlo.
+//     Comportamiento clásico.
+//
+//   - Si el lock lo tiene ESTE CPU (reentrada): NO spinnamos, devolvemos
+//     SERIAL_LOCK_REENTERED en *flags, y NO modificamos el lock.
+//     El llamante DEBE comprobar este valor y descartar el mensaje.
+//     serial_lock_release(SERIAL_LOCK_REENTERED) es no-op.
+//
+// El motivo: sin esto, cualquier reentrada (LOG dentro de LOG, LOG desde
+// un IRQ handler disparado durante un LOG, etc.) produce un deadlock
+// irrecuperable en todo el sistema.
+// ---------------------------------------------------------------------------
 void serial_lock_acquire(unsigned long *flags) {
-  *flags = spin_lock_irqsave(&serial_lock);
+  // Deshabilitar IRQs lo antes posible. Guardamos RFLAGS en *flags.
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(*flags) : : "memory");
+
+  int cpu = smp_processor_id();
+
+  // [FIX] Reentrada: el lock ya es nuestro. No spinnar.
+  if (serial_lock_owner_cpu == cpu) {
+    // Restauramos RFLAGS porque la sección crítica que iba a empezar
+    // el llamante no va a ejecutarse (descartará el mensaje).
+    // Devolvemos el centinela para que el llamante lo sepa.
+    __asm__ volatile("push %0; popfq" : : "r"(*flags) : "memory");
+    *flags = SERIAL_LOCK_REENTERED;
+    return;
+  }
+
+  // Spin normal hasta adquirir el lock.
+  while (__sync_lock_test_and_set(&serial_lock.locked, 1)) {
+    __asm__ volatile("pause");
+  }
+
+  // Publicar qué CPU lo tiene.
+  serial_lock_owner_cpu = cpu;
 }
 
 void serial_lock_release(unsigned long flags) {
-  spin_unlock_irqrestore(&serial_lock, flags);
+  // [FIX] Si venimos de reentrada: NADA que hacer. RFLAGS ya se
+  // restauró en serial_lock_acquire(). Intentar popfq con 0xFFFF...
+  // dispara #GP por bits reservados en RFLAGS.
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
+  serial_lock_owner_cpu = -1;
+  __sync_lock_release(&serial_lock.locked);
+  __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 }
 
-// [FIX] Getter de diagnóstico.
 uint64_t serial_dropped_count(void) { return g_serial_dropped; }
 
+// ---------------------------------------------------------------------------
+// [FIX] Wrappers públicos. Todos usan el patrón:
+//   acquire → if (reentered) return → usar _locked → release
+// Si venimos de reentrada, no escribimos nada.
+// ---------------------------------------------------------------------------
+
+#define SERIAL_PUBLIC_BEGIN(flags)                                             \
+  unsigned long flags;                                                         \
+  serial_lock_acquire(&flags);                                                 \
+  if (flags == SERIAL_LOCK_REENTERED)                                          \
+  return
+
 void serial_putc(char c) {
-  unsigned long flags;
-  serial_lock_acquire(&flags);
+  SERIAL_PUBLIC_BEGIN(flags);
   serial_putc_locked(c);
   serial_lock_release(flags);
 }
@@ -88,20 +157,18 @@ void serial_puts(const char *str) {
     serial_puts("(null)");
     return;
   }
-  unsigned long flags;
-  serial_lock_acquire(&flags);
+  SERIAL_PUBLIC_BEGIN(flags);
   while (*str)
     serial_putc_locked(*str++);
   serial_lock_release(flags);
 }
 
 void serial_putn(uint64_t n, int base, int width) {
+  SERIAL_PUBLIC_BEGIN(flags);
+
   const char *digits = "0123456789ABCDEF";
   char buf[32];
   int i = 0;
-
-  unsigned long flags;
-  serial_lock_acquire(&flags);
 
   if (n == 0) {
     buf[i++] = '0';
@@ -130,6 +197,10 @@ void serial_printf(const char *fmt, ...) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED) {
+    va_end(args);
+    return;
+  }
 
   while (*fmt) {
     if (*fmt == '%' && *(fmt + 1)) {
@@ -293,12 +364,11 @@ void serial_printf(const char *fmt, ...) {
 }
 
 void serial_hex(uint64_t val) {
+  SERIAL_PUBLIC_BEGIN(flags);
+
   const char *hex = "0123456789abcdef";
   char tmp[16];
   int n = 0;
-
-  unsigned long flags;
-  serial_lock_acquire(&flags);
 
   serial_putc_locked('0');
   serial_putc_locked('x');
@@ -323,3 +393,5 @@ void serial_hex(uint64_t val) {
 
   serial_lock_release(flags);
 }
+
+#undef SERIAL_PUBLIC_BEGIN

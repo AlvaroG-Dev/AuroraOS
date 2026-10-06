@@ -1,12 +1,11 @@
 #ifndef PAGING_H
 #define PAGING_H
 
+#include "memlayout.h"
 #include <stdint.h>
 
 #define PAGE_SIZE 0x1000
 #define PAGE_ENTRIES 512
-#define KERNEL_VMA 0xFFFFFFFF80000000ULL
-#define HEAP_VMA 0xFFFFFFFF82000000ULL
 
 // ---------------------------------------------------------------------------
 // Ventanas de memoria física

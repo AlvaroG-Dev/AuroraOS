@@ -5,7 +5,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-
 struct block_device;
 
 // ---------------------------------------------------------------------------
@@ -98,5 +97,10 @@ void kswapd_main(void);
 typedef void (*swap_iter_cb_t)(const char *devname, uint64_t total_kb,
                                uint64_t used_kb, uint64_t free_kb, void *arg);
 void swap_for_each(swap_iter_cb_t cb, void *arg);
+
+uint32_t swap_get_low_pct(void);
+uint32_t swap_get_high_pct(void);
+void swap_set_low_pct(uint32_t pct);
+void swap_set_high_pct(uint32_t pct);
 
 #endif
