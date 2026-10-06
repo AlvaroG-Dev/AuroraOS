@@ -8,14 +8,14 @@
 #include "pmm.h"
 #include "process.h"
 #include "sched.h"
-#include "spinlock.h"
+#include "mutex.h"
 #include "string.h"
 #include "uaccess.h"
 #include "wait.h"
 #include <stddef.h>
 
 static swap_device_t *g_swap_devs[SWAP_MAX_DEVICES];
-static spinlock_t g_swap_lock;
+static mutex_t g_swap_lock;
 static int g_swap_ready = 0;
 
 // Watermarks en páginas. Con 512 MB RAM (131072 páginas), el kernel
@@ -24,7 +24,7 @@ static int g_swap_ready = 0;
 #define SWAP_HIGH_WATERMARK (110000ULL) // ≈ 430 MB libres
 
 void swap_init(void) {
-  spin_init(&g_swap_lock);
+  mutex_init(&g_swap_lock);
   for (int i = 0; i < SWAP_MAX_DEVICES; i++)
     g_swap_devs[i] = NULL;
   g_swap_ready = 1;
@@ -75,11 +75,11 @@ uint32_t swap_alloc_slot(uint32_t type) {
       slot_set(d, s);
       d->used_slots++;
       d->next_slot = (s + 1) % d->nr_slots;
-      spin_unlock_irqrestore(&g_swap_lock, flags);
+      mutex_unlock(&g_swap_lock);
       return s;
     }
   }
-  spin_unlock_irqrestore(&g_swap_lock, flags);
+  mutex_unlock(&g_swap_lock);
   LOG_WARN("[SWAP] type=%u sin slots (used=%u/%u)", type, d->used_slots,
            d->nr_slots);
   return 0xFFFFFFFFu;
@@ -98,7 +98,7 @@ void swap_free_slot(uint32_t type, uint32_t slot) {
     if (d->used_slots > 0)
       d->used_slots--;
   }
-  spin_unlock_irqrestore(&g_swap_lock, flags);
+  mutex_unlock(&g_swap_lock);
 }
 
 int swap_write_page(uint32_t type, uint32_t slot, uint64_t phys) {
@@ -251,7 +251,7 @@ int swap_on(const char *path) {
 
   unsigned long flags = spin_lock_irqsave(&g_swap_lock);
   g_swap_devs[slot_type] = d;
-  spin_unlock_irqrestore(&g_swap_lock, flags);
+  mutex_unlock(&g_swap_lock);
 
   LOG_INFO("[SWAP] Activado %s: type=%d slots=%u (%lu MB)", name, slot_type,
            last_page, (unsigned long)(d->total_bytes / (1024 * 1024)));
@@ -274,12 +274,12 @@ int swap_off(const char *path) {
     unsigned long flags = spin_lock_irqsave(&g_swap_lock);
     d->frozen = 1;
     uint32_t used = d->used_slots;
-    spin_unlock_irqrestore(&g_swap_lock, flags);
+    mutex_unlock(&g_swap_lock);
 
     if (used > 0) {
       flags = spin_lock_irqsave(&g_swap_lock);
       d->frozen = 0;
-      spin_unlock_irqrestore(&g_swap_lock, flags);
+      mutex_unlock(&g_swap_lock);
       LOG_WARN("[SWAP] '%s' tiene %u slots en uso, no se puede desactivar",
                name, used);
       return -EBUSY;
@@ -287,7 +287,7 @@ int swap_off(const char *path) {
 
     flags = spin_lock_irqsave(&g_swap_lock);
     g_swap_devs[i] = NULL;
-    spin_unlock_irqrestore(&g_swap_lock, flags);
+    mutex_unlock(&g_swap_lock);
 
     kfree(d->slot_bitmap);
     kfree(d);
