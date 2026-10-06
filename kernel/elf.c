@@ -86,17 +86,6 @@ static int map_page_in_pml4(uint64_t *pml4, uint64_t virt, uint64_t flags) {
     pmm_free_page(phys);
     return -1;
   }
-  uint64_t mapped_pte = 0;
-  int mapped_found = paging_get_pte_in(pml4, virt, &mapped_pte);
-  LOG_INFO("[ELF] map va=%p phys=%p pte_found=%d pte=%p",
-           (void *)virt, (void *)phys, mapped_found, (void *)mapped_pte);
-  if (!mapped_found || !(mapped_pte & PTE_PRESENT) ||
-      (mapped_pte & PTE_FRAME) != (phys & PTE_FRAME)) {
-    LOG_ERR("[ELF] Mapeo inconsistente: va=%p phys=%p pte=%p",
-            (void *)virt, (void *)phys, (void *)mapped_pte);
-    pmm_free_page(phys);
-    return -1;
-  }
   return 0;
 }
 
@@ -342,9 +331,6 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     if (!(ph->p_flags & PF_X))
       page_flags |= PTE_NX;
 
-    LOG_INFO("[ELF] Segmento: vaddr=%p memsz=%p flags=%p", (void *)vaddr,
-             (void *)memsz, (void *)(uint64_t)ph->p_flags);
-
     for (size_t j = 0; j < num_pages; j++) {
       uint64_t page_vaddr = start_page + j * PAGE_SIZE;
       uint64_t existing_pte = 0;
@@ -378,10 +364,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
 
       uint64_t phys = paging_get_phys_in(pml4, page_vaddr);
       if (!phys) {
-        uint64_t debug_pte = 0;
-        int debug_found = paging_get_pte_in(pml4, page_vaddr, &debug_pte);
-        LOG_ERR("[ELF] Física no encontrada: va=%p pte_found=%d pte=%p",
-                (void *)page_vaddr, debug_found, (void *)debug_pte);
+        LOG_ERR("[ELF] Física no encontrada: va=%p", (void *)page_vaddr);
         kfree(tmp);
         goto out;
       }
@@ -410,7 +393,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
 
         uint64_t phys = paging_get_phys_in(pml4, page_vaddr);
         if (!phys) {
-          LOG_ERR("[ELF] Física no encontrada (BSS)");
+          LOG_ERR("[ELF] Física no encontrada (BSS): va=%p", (void *)page_vaddr);
           kfree(tmp);
           goto out;
         }
