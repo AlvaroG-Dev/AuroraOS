@@ -40,10 +40,30 @@ typedef struct {
   char pad[12];
 } __attribute__((packed)) ustar_header_t;
 
-#define MAX_NODES 512
-
-static tar_node_t nodes[MAX_NODES];
+static tar_node_t *nodes = NULL;
 static size_t node_count = 0;
+static size_t node_capacity = 0;
+
+static int tarfs_grow_nodes(size_t required) {
+  if (required <= node_capacity)
+    return 0;
+
+  size_t new_capacity = node_capacity ? node_capacity : 64;
+  while (new_capacity < required) {
+    if (new_capacity > (SIZE_MAX / 2))
+      return -1;
+    new_capacity *= 2;
+  }
+
+  tar_node_t *new_nodes =
+      (tar_node_t *)krealloc(nodes, new_capacity * sizeof(*nodes));
+  if (!new_nodes)
+    return -1;
+
+  nodes = new_nodes;
+  node_capacity = new_capacity;
+  return 0;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers de paths. Estos operan sobre paths RELATIVOS al tar, no
@@ -128,11 +148,15 @@ static tar_node_t *find_by_name(const char *name) {
 // Init y utilidades públicas
 // ===========================================================================
 void tarfs_init(const void *tar_addr, size_t tar_size) {
+  if (nodes) {
+    kfree(nodes);
+    nodes = NULL;
+  }
   node_count = 0;
+  node_capacity = 0;
+
   uint8_t *ptr = (uint8_t *)tar_addr;
   uint8_t *end = ptr + tar_size;
-  int nodes_full = 0;
-
   LOG_INFO("[TARFS] Analizando Initramfs en %p (%lu bytes)...", tar_addr,
            (unsigned long)tar_size);
 
@@ -171,12 +195,13 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
     const char *clean_path = tarfs_normalize(full_path);
 
     if (clean_path[0] != '\0') {
-      if (node_count >= MAX_NODES) {
-        if (!nodes_full) {
-          LOG_WARN("[TARFS] MAX_NODES (%d) alcanzado.", MAX_NODES);
-          nodes_full = 1;
-        }
-      } else {
+      if (tarfs_grow_nodes(node_count + 1) != 0) {
+        LOG_PANIC("[TARFS] No se pudo ampliar el índice de nodos (%lu entradas)",
+                  (unsigned long)(node_count + 1));
+        return;
+      }
+
+      {
         tar_node_t *node = &nodes[node_count++];
         memset(node, 0, sizeof(*node));
 
