@@ -345,7 +345,7 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
         // Multiple PT_LOAD segments may share their boundary page. Preserve
         // the union of permissions instead of silently keeping the first
         // segment's W/NX bits.
-        uint64_t merged_flags = existing_pte & (PTE_USER | PTE_WRITABLE | PTE_NX);
+        uint64_t merged_flags = existing_pte & PTE_FRAME;
         merged_flags |= page_flags & (PTE_USER | PTE_WRITABLE | PTE_NX);
         merged_flags |= PTE_PRESENT;
         if (paging_set_pte_in(pml4, page_vaddr, merged_flags) != 0) {
