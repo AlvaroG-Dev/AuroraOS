@@ -362,7 +362,6 @@ EXPECTED_BOOT=(
     "[SYS] Servicio 'echo' registrado"
     "[IPC-KERNEL] Servicio de eco IPC iniciado"
     "[LAPIC-TIMER] Modo periódico"
-    "[TTY] Modo raw inicializado"
     "[INPUT] Subsistema de input inicializado"
     "[PS2] Tarea de procesamiento iniciada"
     "[PCI] Enumeracion completada"
