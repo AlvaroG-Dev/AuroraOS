@@ -1930,6 +1930,16 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   if (envc < 0 || envc > PROCESS_ENVP_MAX)
     return -EINVAL;
 
+  // execve replaces the entire address space. Aurora does not yet have the
+  // Linux-style mechanism that terminates/synchronizes sibling threads, so
+  // allowing execve() with team_size > 1 would leave sibling tasks running
+  // on a freed PML4. Reject it until that machinery exists.
+  unsigned long exec_flags = spin_lock_irqsave(&process_lock);
+  int has_siblings = (proc->team_size > 1);
+  spin_unlock_irqrestore(&process_lock, exec_flags);
+  if (has_siblings)
+    return -EAGAIN;
+
   uint32_t tpid = proc->pid;
 
   vfs_node_t *node = vfs_lookup(path);
