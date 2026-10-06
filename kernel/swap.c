@@ -130,6 +130,7 @@ int swap_write_page(uint32_t type, uint32_t slot, uint64_t phys) {
 int swap_read_page(uint32_t type, uint32_t slot, uint64_t phys) {
   if (type >= SWAP_MAX_DEVICES)
     return -EINVAL;
+  mutex_lock(&g_swap_lock);
   swap_device_t *d = g_swap_devs[type];
   if (!d || !d->in_use)
     return -EINVAL;
@@ -144,6 +145,7 @@ int swap_read_page(uint32_t type, uint32_t slot, uint64_t phys) {
   uint32_t nsec = PAGE_SIZE / ssz;
 
   int rc = bdev_read(d->bdev, lba, nsec, phys_to_virt(phys));
+  mutex_unlock(&g_swap_lock);
   if (rc != 0) {
     LOG_ERR("[SWAP] read type=%u slot=%u rc=%d", type, slot, rc);
     return -EIO;
