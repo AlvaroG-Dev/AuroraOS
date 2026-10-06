@@ -1533,19 +1533,20 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 
   mutex_lock(&proc->mm_lock);
   uint64_t old_brk = proc->heap_end;
-  if (increment == 0)
+  if (increment == 0) {
     mutex_unlock(&proc->mm_lock);
     return (void *)old_brk;
+  }
 
   if (increment > 0) {
     uint64_t new_brk = old_brk + (uint64_t)increment;
-    if (new_brk > proc->heap_max || new_brk < old_brk)
+    if (new_brk > proc->heap_max || new_brk < old_brk) {
       mutex_unlock(&proc->mm_lock);
       return (void *)-1;
+    }
 
     uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
     uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
     for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
@@ -1554,7 +1555,6 @@ void *process_sbrk(process_t *proc, int64_t increment) {
         if (!phys) {
           LOG_ERR("[PROC] sbrk: sin memoria física libre");
           mutex_unlock(&proc->mm_lock);
-          mutex_unlock(&proc->mm_lock);
           return (void *)-1;
         }
         if (paging_map_page_in(pml4, page, phys,
@@ -1562,6 +1562,7 @@ void *process_sbrk(process_t *proc, int64_t increment) {
                                    PTE_NX) != 0) {
           pmm_free_page(phys);
           LOG_ERR("[PROC] sbrk: error mapeando página");
+          mutex_unlock(&proc->mm_lock);
           return (void *)-1;
         }
         memset(phys_to_virt(phys), 0, PAGE_SIZE);
@@ -1569,25 +1570,25 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     }
 
     proc->heap_end = new_brk;
+    mutex_unlock(&proc->mm_lock);
     return (void *)old_brk;
   }
 
   uint64_t decr = (uint64_t)(-(increment + 1)) + 1;
-  if (decr > (old_brk - proc->heap_start))
+  if (decr > (old_brk - proc->heap_start)) {
     mutex_unlock(&proc->mm_lock);
     return (void *)-1;
+  }
 
   uint64_t new_brk = old_brk - decr;
   uint64_t old_end_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
   uint64_t new_end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+
   for (uint64_t page = new_end_page; page < old_end_page; page += PAGE_SIZE) {
     uint64_t phys = paging_get_phys_in(pml4, page);
-    if (phys) {
-      if (paging_unmap_page_in(pml4, page) == 0)
-        pmm_free_page(phys);
-    }
+    if (phys && paging_unmap_page_in(pml4, page) == 0)
+      pmm_free_page(phys);
   }
 
   proc->heap_end = new_brk;
