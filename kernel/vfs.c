@@ -15,6 +15,7 @@
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
+#include "mutex.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
@@ -2054,6 +2055,7 @@ void vfs_init(void) {
 // Helpers internos de FDs
 // ===========================================================================
 static void fd_init_wqs(file_descriptor_t *fd) {
+  mutex_init(&fd->lock);
   wait_queue_init(&fd->read_wq);
   wait_queue_init(&fd->write_wq);
   fd->flock_mode = 0; // [flock]
