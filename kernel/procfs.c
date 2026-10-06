@@ -18,6 +18,7 @@
 #include "sched.h"
 #include "string.h"
 #include "swap.h"
+#include "sysctl.h"
 #include "sysfs.h" // [FIX] sysfs_pci_count / sysfs_pci_get
 #include "time.h"
 #include "uaccess.h"
@@ -61,8 +62,8 @@ static int64_t procfs_write(vfs_node_t *node, uint64_t offset, size_t size,
 }
 
 static int procfs_open(vfs_node_t *node, int flags) {
-  LOG_INFO("[PROCFS-OPEN] path='%s' flags=0x%x", node ? node->name : "?",
-           flags);
+  LOG_TRACE("[PROCFS-OPEN] path='%s' flags=0x%x", node ? node->name : "?",
+            flags);
   if ((flags & O_WRONLY) || (flags & O_RDWR))
     return -EROFS;
   return 0;
@@ -80,6 +81,60 @@ static int procfs_close(vfs_node_t *node) {
   }
   return 0;
 }
+
+typedef struct {
+  char *buf;
+  size_t len;
+  const sysctl_entry_t *entry; // solo lo usa procfs_sysctl_write
+} procfs_sysctl_data_t;
+
+static int64_t procfs_sysctl_write(vfs_node_t *node, uint64_t offset,
+                                   size_t size, const void *buf) {
+  if (!node || !node->priv || !buf)
+    return -EINVAL;
+  procfs_sysctl_data_t *sd = (procfs_sysctl_data_t *)node->priv;
+  if (!sd->entry || !sd->entry->write)
+    return -EIO;
+
+  // Quitar '\n' final si lo hay (Linux sysctl no lo incluye)
+  size_t n = size;
+  if (n > 0 && ((const char *)buf)[n - 1] == '\n')
+    n--;
+
+  int rc = sd->entry->write((const char *)buf, n);
+  if (rc != 0)
+    return rc;
+  return (int64_t)size;
+}
+
+static int procfs_sysctl_close(vfs_node_t *node) {
+  if (!node)
+    return 0;
+  procfs_sysctl_data_t *sd = (procfs_sysctl_data_t *)node->priv;
+  if (sd) {
+    if (sd->buf)
+      kfree(sd->buf);
+    kfree(sd);
+    node->priv = NULL;
+  }
+  return 0;
+}
+
+// [FIX] procfs_open rechaza cualquier O_WRONLY (comportamiento correcto
+// para los ficheros read-only de procfs). Los nodos sysctl rw deben
+// usar este open permisivo, que deja pasar lectura y escritura.
+static int procfs_sysctl_open(vfs_node_t *node, int flags) {
+  (void)node;
+  (void)flags;
+  return 0;
+}
+
+static vfs_ops_t procfs_sysctl_rw_ops = {
+    .read = procfs_read,
+    .write = procfs_sysctl_write,
+    .open = procfs_sysctl_open, // ← antes procfs_open
+    .close = procfs_sysctl_close,
+};
 
 static vfs_ops_t procfs_file_ops = {
     .read = procfs_read,
@@ -1080,8 +1135,8 @@ static char *gen_mounts(size_t *out_len) {
 // readdir: /proc raíz, /proc/bus/*, /proc/<pid>/ y /proc/<pid>/fd/.
 // ===========================================================================
 static const char *procfs_root_entries[] = {
-    "uptime", "version", "meminfo", "stat",       "self",
-    "mounts", "loadavg", "bus",     "partitions", "swaps",
+    "uptime",  "version", "meminfo",    "stat",  "self", "mounts",
+    "loadavg", "bus",     "partitions", "swaps", "sys",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -1201,6 +1256,50 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     }
     out->name[0] = '\0';
     out->type = 0;
+    out->size = 0;
+    return 0;
+  }
+
+  // /proc/sys
+  if (strcmp(dir->name, "/proc/sys") == 0) {
+    static const char *l[] = {"kernel", "vm"};
+    if (index >= 2) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    const char *n = l[index];
+    size_t ln = strlen(n);
+    memcpy(out->name, n, ln);
+    out->name[ln] = '\0';
+    out->type = VFS_DIRECTORY;
+    out->size = 0;
+    return 0;
+  }
+  if (strcmp(dir->name, "/proc/sys/kernel") == 0) {
+    if (index >= 2) {
+      out->name[0] = '\0';
+      return 0;
+    }
+    const char *n = (index == 0) ? "hostname" : "printk";
+    size_t ln = strlen(n);
+    memcpy(out->name, n, ln);
+    out->name[ln] = '\0';
+    out->type = VFS_FILE;
+    out->size = 0;
+    return 0;
+  }
+  if (strcmp(dir->name, "/proc/sys/vm") == 0) {
+    if (index >= 2) {
+      out->name[0] = '\0';
+      return 0;
+    }
+    const char *n = (index == 0) ? "swap_low_pct" : "swap_high_pct";
+    size_t ln = strlen(n);
+    memcpy(out->name, n, ln);
+    out->name[ln] = '\0';
+    out->type = VFS_FILE;
     out->size = 0;
     return 0;
   }
@@ -1369,6 +1468,92 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *buf = gen_proc_bus_pci_devices(&len);
     return buf ? make_file_node("devices", buf, len) : NULL;
+  }
+
+  // ---- /proc/sys/... ----
+  if (strncmp(name, "sys", 3) == 0 && (name[3] == '\0' || name[3] == '/')) {
+    // Caso "/proc/sys": dir
+    if (name[3] == '\0')
+      return make_dir_node("sys");
+
+    const char *rest = name + 4; // "kernel" o "kernel/hostname"
+
+    // Subdirectorios hardcoded: kernel/, vm/
+    if (strcmp(rest, "kernel") == 0)
+      return make_dir_node("kernel");
+    if (strcmp(rest, "vm") == 0)
+      return make_dir_node("vm");
+
+    // Fichero concreto: buscar en sysctl
+    const sysctl_entry_t *e = sysctl_lookup(rest);
+    if (!e)
+      return NULL;
+
+    // Generar contenido
+    char buf[128];
+    size_t len = 0;
+    if (e->read)
+      e->read(buf, sizeof(buf), &len);
+
+    // Crear nodo. Si es rw, con ops->write; si es ro, con ops ro.
+    vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!n)
+      return NULL;
+    // El nombre debe ser el basename: extraerlo de `rest`
+    const char *base = rest;
+    for (const char *p = rest; *p; p++)
+      if (*p == '/')
+        base = p + 1;
+    size_t nl = strlen(base);
+    if (nl >= sizeof(n->name))
+      nl = sizeof(n->name) - 1;
+    memcpy(n->name, base, nl);
+    n->name[nl] = '\0';
+    n->flags = VFS_FILE;
+    n->ops = (e->mode & 0222) ? &procfs_sysctl_rw_ops : &procfs_file_ops;
+    n->mode = S_IFREG | (e->mode & 0777);
+    n->uid = 0;
+    n->gid = 0;
+
+    // Para el rw, guardamos el entry en priv para el write.
+    // Reutilizamos procfs_data_t pero con un campo extra.
+    if (e->mode & 0222) {
+      procfs_sysctl_data_t *sd = (procfs_sysctl_data_t *)kzalloc(sizeof(*sd));
+      if (!sd) {
+        kfree(n);
+        return NULL;
+      }
+      sd->entry = e;
+      sd->buf = (char *)kmalloc(len + 1);
+      if (!sd->buf) {
+        kfree(sd);
+        kfree(n);
+        return NULL;
+      }
+      memcpy(sd->buf, buf, len);
+      sd->buf[len] = '\0';
+      sd->len = len;
+      n->size = len;
+      n->priv = sd;
+    } else {
+      procfs_data_t *pd = (procfs_data_t *)kzalloc(sizeof(*pd));
+      if (!pd) {
+        kfree(n);
+        return NULL;
+      }
+      pd->buf = (char *)kmalloc(len + 1);
+      if (!pd->buf) {
+        kfree(pd);
+        kfree(n);
+        return NULL;
+      }
+      memcpy(pd->buf, buf, len);
+      pd->buf[len] = '\0';
+      pd->len = len;
+      n->size = len;
+      n->priv = pd;
+    }
+    return n;
   }
 
   // [FIX] /proc/bus/pci/<bus>  y  /proc/bus/pci/<bus>/<dev>.<func>
