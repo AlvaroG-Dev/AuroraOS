@@ -146,9 +146,9 @@ void dump_scheduler(void) {
   for (int i = 0; i < 32; i++) {
     // [FIX] Antes de dereferenciar, comprobar que el puntero está
     // en un rango razonable (kernel text + heap + slab):
-    //   0xffffffff80000000 .. 0xffffffff90000000
+    //   KERNEL_VMA .. HEAP_VMA
     uint64_t addr = (uint64_t)p;
-    if (addr < 0xffffffff80000000ULL || addr >= 0xffffffff90000000ULL) {
+    if (addr < KERNEL_VMA || addr >= HEAP_VMA) {
       serial_puts("\n    [");
       serial_putn((uint64_t)i, 10, 0);
       serial_puts("] puntero inválido: ");

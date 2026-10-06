@@ -3,12 +3,12 @@
 #include "block.h"
 #include "heap.h"
 #include "klog.h"
+#include "mutex.h"
 #include "paging.h"
 #include "pf.h"
 #include "pmm.h"
 #include "process.h"
 #include "sched.h"
-#include "mutex.h"
 #include "string.h"
 #include "uaccess.h"
 #include "wait.h"
@@ -18,17 +18,78 @@ static swap_device_t *g_swap_devs[SWAP_MAX_DEVICES];
 static mutex_t g_swap_lock;
 static int g_swap_ready = 0;
 
-// Watermarks en páginas. Con 512 MB RAM (131072 páginas), el kernel
-// usa ~25000 al arrancar. Libres ≈ 106000.
-#define SWAP_LOW_WATERMARK (100000ULL)  // ≈ 390 MB libres
-#define SWAP_HIGH_WATERMARK (110000ULL) // ≈ 430 MB libres
+// ===========================================================================
+// [SYSCTL] Watermarks ajustables en runtime.
+//
+// Antes eran #define. Ahora son variables para que /proc/sys/vm/
+// swap_{low,high}_pct puedan modificarlas sin recompilar.
+// ===========================================================================
+static uint32_t g_swap_low_pct = 15;
+static uint32_t g_swap_high_pct = 25;
 
+#define SWAP_LOW_MIN (8ULL * 1024 * 1024 / 4096)   // 8 MB
+#define SWAP_HIGH_MIN (16ULL * 1024 * 1024 / 4096) // 16 MB
+
+static uint64_t g_swap_low_wm = 0;
+static uint64_t g_swap_high_wm = 0;
+
+uint32_t swap_get_low_pct(void) { return g_swap_low_pct; }
+uint32_t swap_get_high_pct(void) { return g_swap_high_pct; }
+
+// Recalcula g_swap_{low,high}_wm a partir de los porcentajes actuales
+// y del total de RAM usable. Llamado desde swap_init y desde los
+// setters de sysctl.
+static void swap_recalc_watermarks(void) {
+  uint64_t total = pmm_total_usable_pages();
+  uint64_t low = (total * g_swap_low_pct) / 100;
+  uint64_t high = (total * g_swap_high_pct) / 100;
+  if (low < SWAP_LOW_MIN)
+    low = SWAP_LOW_MIN;
+  if (high < SWAP_HIGH_MIN)
+    high = SWAP_HIGH_MIN;
+  if (high <= low)
+    high = low + 1024;
+  g_swap_low_wm = low;
+  g_swap_high_wm = high;
+}
+
+void swap_set_low_pct(uint32_t pct) {
+  if (pct > 90)
+    pct = 90;
+  g_swap_low_pct = pct;
+  swap_recalc_watermarks();
+  LOG_INFO("[SWAP] vm.swap_low_pct = %u%% (low=%lu páginas)", pct,
+           (unsigned long)g_swap_low_wm);
+}
+
+void swap_set_high_pct(uint32_t pct) {
+  if (pct > 95)
+    pct = 95;
+  g_swap_high_pct = pct;
+  swap_recalc_watermarks();
+  LOG_INFO("[SWAP] vm.swap_high_pct = %u%% (high=%lu páginas)", pct,
+           (unsigned long)g_swap_high_wm);
+}
+
+// ===========================================================================
+// swap_init
+// ===========================================================================
 void swap_init(void) {
   mutex_init(&g_swap_lock);
   for (int i = 0; i < SWAP_MAX_DEVICES; i++)
     g_swap_devs[i] = NULL;
+
+  // Watermarks porcentuales en función de la RAM total. pmm_init()
+  // ya se ha ejecutado antes de swap_init() en kmain, así que
+  // pmm_total_usable_pages() devuelve un valor fiable.
+  swap_recalc_watermarks();
+
   g_swap_ready = 1;
-  LOG_INFO("[SWAP] Subsistema inicializado");
+  LOG_INFO("[SWAP] Subsistema inicializado (LOW=%lu HIGH=%lu páginas, "
+           "RAM total=%lu páginas, %u%%/%u%%)",
+           (unsigned long)g_swap_low_wm, (unsigned long)g_swap_high_wm,
+           (unsigned long)pmm_total_usable_pages(), g_swap_low_pct,
+           g_swap_high_pct);
 }
 
 int swap_device_count(void) {
@@ -80,8 +141,12 @@ uint32_t swap_alloc_slot(uint32_t type) {
     }
   }
   mutex_unlock(&g_swap_lock);
-  LOG_WARN("[SWAP] type=%u sin slots (used=%u/%u)", type, d->used_slots,
-           d->nr_slots);
+
+  // [FIX] Bajar de WARN a TRACE. El swap lleno es una condición normal
+  // bajo presión de memoria; kswapd lo detecta aparte y rate-limita su
+  // propio log. Este mensaje solo es útil en debugging fino.
+  LOG_TRACE("[SWAP] type=%u sin slots (used=%u/%u)", type, d->used_slots,
+            d->nr_slots);
   return 0xFFFFFFFFu;
 }
 
@@ -276,9 +341,122 @@ int swap_on(const char *path) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// swapoff: swap-in masivo.
+//
+// Congela el device, recorre todas las PTEs swapeadas que apunten a él
+// (vía process_for_each), y trae cada página a RAM. Cuando ya no queda
+// ninguna, desregistra el device.
+//
+// Fases por batch:
+//   1. Recolectar hasta SWAPOFF_BATCH entradas (pml4_phys, vaddr, slot).
+//   2. Fuera del process_lock, hacer swap-in de cada una.
+//   3. Repetir hasta que una pasada no recolecte nada.
+//
+// El device queda "frozen" durante todo el proceso: kswapd no crea
+// nuevas entradas, y swap_alloc_slot falla. Solo decrecen.
+// ---------------------------------------------------------------------------
+#define SWAPOFF_BATCH 256
+
+struct swapoff_entry {
+  uint64_t pml4_phys;
+  uint64_t vaddr;
+  uint32_t type;
+  uint32_t slot;
+};
+
+struct swapoff_ctx {
+  uint32_t target_type;
+  struct swapoff_entry *batch;
+  size_t capacity;
+  size_t count;
+};
+
+static int swapoff_collect_cb(process_t *p, void *arg) {
+  struct swapoff_ctx *ctx = (struct swapoff_ctx *)arg;
+  if (ctx->count >= ctx->capacity)
+    return 1;
+  if (!p || p->is_zombie || !p->pml4_phys)
+    return 0;
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+
+  for (vma_t *v = p->vma_list; v; v = v->next) {
+    for (uint64_t pg = v->start; pg < v->end; pg += PAGE_SIZE) {
+      uint64_t pte;
+      if (!paging_get_pte_in(pml4, pg, &pte))
+        continue;
+      if (!pte_is_swap(pte))
+        continue;
+      if (pte_swap_type(pte) != ctx->target_type)
+        continue;
+
+      ctx->batch[ctx->count].pml4_phys = p->pml4_phys;
+      ctx->batch[ctx->count].vaddr = pg;
+      ctx->batch[ctx->count].type = ctx->target_type;
+      ctx->batch[ctx->count].slot = pte_swap_offset(pte);
+      ctx->count++;
+      if (ctx->count >= ctx->capacity)
+        return 1;
+    }
+  }
+  return 0;
+}
+
+static int swapoff_do_one(struct swapoff_entry *e) {
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(e->pml4_phys);
+
+  // Re-verificar el PTE. Si cambió (por ejemplo, #PF concurrente ya la
+  // trajo), saltamos. Al device estar frozen, no debería pasar, pero
+  // es una salvaguarda barata.
+  uint64_t pte;
+  if (!paging_get_pte_in(pml4, e->vaddr, &pte))
+    return 0;
+  if (!pte_is_swap(pte))
+    return 0;
+  if (pte_swap_type(pte) != e->type)
+    return 0;
+  if (pte_swap_offset(pte) != e->slot)
+    return 0;
+
+  uint64_t new_phys = pmm_alloc_page();
+  if (!new_phys)
+    return -ENOMEM;
+
+  if (swap_read_page(e->type, e->slot, new_phys) != 0) {
+    pmm_free_page(new_phys);
+    return -EIO;
+  }
+
+  // Recuperar la VMA para aplicar los flags correctos. Si el proceso
+  // murió entre el collect y el do, saltamos: el slot ya se liberó al
+  // morir el proceso.
+  process_t *proc = process_find_by_pml4(e->pml4_phys);
+  if (!proc) {
+    pmm_free_page(new_phys);
+    return 0;
+  }
+
+  vma_t *vma = vma_find(proc, e->vaddr);
+  if (!vma) {
+    pmm_free_page(new_phys);
+    return 0;
+  }
+
+  uint64_t map_flags = vma->flags | PTE_PRESENT;
+  if (paging_map_page_in(pml4, e->vaddr, new_phys, map_flags) != 0) {
+    pmm_free_page(new_phys);
+    return -EIO;
+  }
+
+  swap_free_slot(e->type, e->slot);
+  return 1;
+}
+
 int swap_off(const char *path) {
   if (!g_swap_ready || !path)
     return -EINVAL;
+
   const char *name = basename_of(path);
   block_device_t *bdev = blk_lookup(name);
   if (!bdev)
@@ -294,13 +472,53 @@ int swap_off(const char *path) {
     uint32_t used = d->used_slots;
     mutex_unlock(&g_swap_lock);
 
+    int total_moved = 0;
+
     if (used > 0) {
-      mutex_lock(&g_swap_lock);
-      d->frozen = 0;
-      mutex_unlock(&g_swap_lock);
-      LOG_WARN("[SWAP] '%s' tiene %u slots en uso, no se puede desactivar",
-               name, used);
-      return -EBUSY;
+      LOG_INFO("[SWAP] swapoff '%s': swap-in masivo de %u slots", name, used);
+
+      struct swapoff_entry *batch =
+          (struct swapoff_entry *)kmalloc(SWAPOFF_BATCH * sizeof(*batch));
+      if (!batch) {
+        mutex_lock(&g_swap_lock);
+        d->frozen = 0;
+        mutex_unlock(&g_swap_lock);
+        return -ENOMEM;
+      }
+
+      int guard = 0;
+      while (used > 0 && guard++ < 100000) {
+        struct swapoff_ctx ctx = {
+            .target_type = d->type,
+            .batch = batch,
+            .capacity = SWAPOFF_BATCH,
+            .count = 0,
+        };
+        process_for_each(swapoff_collect_cb, &ctx);
+
+        if (ctx.count == 0)
+          break; // nada más que mover
+
+        for (size_t k = 0; k < ctx.count; k++) {
+          int r = swapoff_do_one(&batch[k]);
+          if (r > 0)
+            total_moved++;
+        }
+
+        mutex_lock(&g_swap_lock);
+        used = d->used_slots;
+        mutex_unlock(&g_swap_lock);
+      }
+
+      kfree(batch);
+
+      if (used > 0) {
+        LOG_WARN("[SWAP] swapoff '%s' incompleto: quedan %u slots", name, used);
+        mutex_lock(&g_swap_lock);
+        d->frozen = 0;
+        mutex_unlock(&g_swap_lock);
+        return -EBUSY;
+      }
     }
 
     mutex_lock(&g_swap_lock);
@@ -309,7 +527,8 @@ int swap_off(const char *path) {
 
     kfree(d->slot_bitmap);
     kfree(d);
-    LOG_INFO("[SWAP] Desactivado %s", name);
+
+    LOG_INFO("[SWAP] Desactivado %s (movidas %d páginas)", name, total_moved);
     return 0;
   }
   return -ENOENT;
@@ -481,6 +700,7 @@ int swap_reclaim_one(void) {
 
 // ---------------------------------------------------------------------------
 // kswapd: kernel thread
+// ---------------------------------------------------------------------------
 static bool kswapd_never(void *arg) {
   (void)arg;
   return false;
@@ -488,33 +708,60 @@ static bool kswapd_never(void *arg) {
 
 void kswapd_main(void) {
   LOG_INFO("[KSWAPD] Thread iniciado (low=%lu high=%lu páginas)",
-           (unsigned long)SWAP_LOW_WATERMARK,
-           (unsigned long)SWAP_HIGH_WATERMARK);
+           (unsigned long)g_swap_low_wm, (unsigned long)g_swap_high_wm);
 
   wait_queue_t wq;
   wait_queue_init(&wq);
 
+  // [FIX] Rate-limiting del log. Antes, si el swap estaba lleno y
+  // free seguía < LOW, kswapd spameaba 3 líneas cada 500 ms para
+  // siempre.
+  uint64_t last_log_tick = 0;
+
   while (1) {
-    // Dormir ~0,5 segundos (nunca despierta por condición, solo por timeout)
+    // Dormir ~0.5 segundos (nunca despierta por condición, solo por timeout)
     wait_event_interruptible_timeout(&wq, kswapd_never, NULL, 500);
 
     if (swap_device_count() == 0)
       continue;
 
     uint64_t free_pages = pmm_free_pages_count();
-    if (free_pages >= SWAP_LOW_WATERMARK)
+    if (free_pages >= g_swap_low_wm)
       continue;
 
-    LOG_INFO("[KSWAPD] free=%lu < low=%lu, iniciando reclaim",
-             (unsigned long)free_pages, (unsigned long)SWAP_LOW_WATERMARK);
+    // [FIX] Antes de intentar reclaimar, comprobar si queda algún
+    // slot libre. Si el swap está lleno, no tiene sentido iterar
+    // 8192 veces. Loguear solo cada 5 s para no spamear.
+    uint64_t total_bytes = swap_total_bytes();
+    uint64_t used_bytes = swap_used_bytes();
+    if (total_bytes > 0 && used_bytes >= total_bytes) {
+      uint64_t now = sched_get_ticks();
+      if (now - last_log_tick >= 5000) {
+        last_log_tick = now;
+        LOG_WARN("[KSWAPD] Swap lleno (%lu/%lu KB), free=%lu < low=%lu. "
+                 "No se puede reclaimar. Amplía swap o libera memoria.",
+                 (unsigned long)(used_bytes / 1024),
+                 (unsigned long)(total_bytes / 1024), (unsigned long)free_pages,
+                 (unsigned long)g_swap_low_wm);
+      }
+      continue;
+    }
 
     int n = 0;
-    while (pmm_free_pages_count() < SWAP_HIGH_WATERMARK && n < 8192) {
+    while (pmm_free_pages_count() < g_swap_high_wm && n < 8192) {
       if (!swap_reclaim_one())
         break;
       n++;
     }
-    LOG_INFO("[KSWAPD] Reclamadas %d páginas. free=%lu", n,
-             (unsigned long)pmm_free_pages_count());
+
+    // [FIX] Log rate-limited. Solo si reclamamos algo, o cada 5 s si
+    // el reclaim no consiguió avanzar (para no perderse en silencio).
+    uint64_t now = sched_get_ticks();
+    if (n > 0 || now - last_log_tick >= 5000) {
+      last_log_tick = now;
+      LOG_INFO("[KSWAPD] Reclamadas %d páginas. free=%lu (high=%lu)", n,
+               (unsigned long)pmm_free_pages_count(),
+               (unsigned long)g_swap_high_wm);
+    }
   }
 }

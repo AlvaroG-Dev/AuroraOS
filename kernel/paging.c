@@ -58,6 +58,17 @@ static uint64_t *alloc_page_table(void) {
   if (paging_test_fail_alloc_after > 0)
     paging_test_fail_alloc_after--;
 
+  // [FIX] Sin reclaim inline. Antes intentábamos swap_reclaim_one() para
+  // liberar 1 página cuando el PMM estaba lleno. Bajo presión sostenida
+  // (memhog pidiendo más que RAM+swap), eso livelockeaba: cada #PF
+  // liberaba 1 página con ~50 ms de I/O, la mapeaba, el proceso tocaba
+  // la siguiente y volvía a empezar. Efectivo a 80 KB/s en lugar de
+  // morir por OOM en segundos.
+  //
+  // kswapd (contexto propio, puede dormir) hace todo el reclaim en
+  // background. Si aún así no hay páginas, el PF handler falla rápido y
+  // mata al proceso por OOM — es lo correcto cuando la demanda excede
+  // la memoria disponible.
   uint64_t phys = pmm_alloc_page();
   if (!phys) {
     LOG_ERR("[PAGING] ERROR: PMM sin páginas libres");
@@ -579,8 +590,8 @@ int paging_map_page_in(uint64_t *pml4, uint64_t virt, uint64_t phys,
   uint64_t old_entry = pt[pt_idx];
   if ((old_entry & PTE_PRESENT) &&
       ((old_entry & PTE_FRAME) != (phys & PTE_FRAME))) {
-    LOG_WARN("[PAGING] remap: virt=%p old_phys=%p new_phys=%p", (void *)virt,
-             (void *)(old_entry & PTE_FRAME), (void *)(phys & PTE_FRAME));
+    LOG_TRACE("[PAGING] remap: virt=%p old_phys=%p new_phys=%p", (void *)virt,
+              (void *)(old_entry & PTE_FRAME), (void *)(phys & PTE_FRAME));
   }
 
   pt[pt_idx] = (phys & PTE_FRAME) | (flags & (0xFFF | PTE_NX)) | PTE_PRESENT;

@@ -105,7 +105,7 @@ int ata_dma_init_channel(int channel_idx, uint8_t pci_bus, uint8_t pci_slot,
   // Pagina fisica propia (PMM) accedida por la ventana fisica: la direccion
   // fisica es exacta, la tabla esta alineada a 4 KB (no cruza 64 KB) y es
   // contigua. NO usar kmalloc()+virt_to_phys(): el heap vive en
-  // 0xffffffff82xxxxxx (mapeado pagina a pagina) y virt_to_phys() solo vale
+  // la región HEAP_VMA (mapeado pagina a pagina) y virt_to_phys() solo vale
   // para la ventana fisica; el BMIDE leeria la PRDT de una direccion basura.
   uint64_t prdt_phys = pmm_alloc_page();
   if (prdt_phys == 0 || prdt_phys >= 0x100000000ULL) {

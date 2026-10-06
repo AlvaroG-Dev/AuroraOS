@@ -11,6 +11,7 @@
 #include "block.h"
 #include "cpu.h"
 #include "driver.h"
+#include "elf.h" // [FIX] Elf64_Ehdr, Elf64_Phdr, PT_LOAD
 #include "fat32.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
@@ -74,6 +75,17 @@ static uint8_t syscall_kernel_stack[8192] __attribute__((aligned(16)));
 extern struct driver ata_pio_driver;
 extern struct driver atapi_driver;
 extern struct driver ahci_driver;
+
+// [FIX] Símbolos del linker para el rango físico REAL del kernel.
+// NO usamos `_kernel_end - KERNEL_VMA`: esa es la LMA (load memory address)
+// que sugiere el linker script, no la dirección física donde el bootloader
+// cargó el kernel. Cuando el kernel crece (libc.a +9 MB), el bootloader
+// coloca los segmentos en direcciones físicas distintas a la LMA, y una
+// reserva basada en LMA deja páginas del kernel sin reservar. El PMM las
+// entrega al heap, el heap las pisa, y todo explota. Usamos paging_get_phys_in
+// para obtener la dirección física real via la tabla de páginas ya montada.
+extern uint8_t __text_start;
+extern uint8_t __bss_end;
 
 // ---------------------------------------------------------------------------
 // Framebuffer helpers
@@ -165,7 +177,6 @@ static void ipc_echo_service(void) {
 // ===========================================================================
 static void kmain_task(void) {
   LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
-  ;
 
   sched_create_task(ipc_echo_service);
 
@@ -200,19 +211,13 @@ static void kmain_task(void) {
   driver_register(&ahci_driver);
   drivers_init_all();
 
-  // [FIX] Fase C: el ATAPI ya está detectado, ahora se puede aplicar la
-  // compatibilidad de par master/slave y registrar los discos ATA.
   extern int ata_pio_finalize(void);
   ata_pio_finalize();
 
-  // [FASE 2] Escanear tablas de particiones en todos los discos.
   LOG_INFO("[INIT] Partition layer...");
   part_scan_all();
   LOG_INFO("OK");
 
-  // [PIVOT] La raíz / es tarfs (read-only, montado por vfs_init).
-  // FAT32 va a /data: el modelo LiveUSB clásico — sistema inmutable
-  // en la "imagen", datos persistentes en el disco.
   for (int i = 0; i < blk_count(); i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
@@ -254,17 +259,10 @@ static void kmain_task(void) {
     sched_create_task(compositor_thread);
   }
 
-  // ---------------------------------------------------------------------------
-  // [SMP 4.4] Arrancar APs. Al final del boot para no interferir con la
-  // carga de la shell. Los APs quedan en pause esperando smp_sched_active.
-  // ---------------------------------------------------------------------------
   LOG_DEBUG("[SMP] Inicializando trampoline y APs...");
   smp_boot_init();
   smp_boot_aps();
 
-  // Activar el scheduler en los APs ANTES de los tests. Algunos tests
-  // (IPI wakeup cross-CPU) requieren que los APs estén en idle_loop,
-  // procesando sched_tick() e IPIs.
   extern volatile int smp_sched_active;
   smp_sched_active = 1;
 
@@ -291,20 +289,6 @@ static void kmain_task(void) {
     process_load("/apps/terminal");
   }
 
-  // [FIX CRÍTICO] NO hacer `while (1) sched_yield();`.
-  //
-  // Ese bucle convierte a kmain_task en un busy-loop del BSP cuando
-  // no hay otra tarea READY en la runqueue. Con SMP, las tareas de
-  // usuario (shell, compositor) son absorbidas por los APs vía
-  // sched_kick_idle_cpu, que salta al BSP (me==0 → continue). El
-  // BSP nunca ve un READY en la lista, sched_tick retorna sin
-  // task_switch, y kmain_task gira a 100% CPU para siempre.
-  //
-  // La forma correcta: terminar la tarea. task_entry_wrapper
-  // (switch.asm) se encarga: marca TASK_DEAD, llama a sched_yield,
-  // y sched_tick saltará al idle del BSP, que hace `sti; hlt` y
-  // deja el CPU libre para las IRQs. A partir de ahí el BSP
-  // repartirá tareas normalmente como cualquier otro CPU.
   return;
 }
 
@@ -389,13 +373,8 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("[INIT] Iniciando PMM...");
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
 
-  // [SMP] Reservar las páginas bajas que usará el trampoline ANTES
-  // del auto-test, para que no las ocupe nadie.
-  //
-  // Rango reservado: 0x6000..0x9000.
-  //   0x6000..0x7000: stack temporal del trampoline (16 bits).
-  //   0x7000..0x8000: trampoline (código + header).
-  //   0x8000..0x9000: smp_boot_params.
+  // [SMP] Reservar las páginas bajas del trampoline ANTES del auto-test.
+  // Rango: 0x6000..0x9000 (stack 16-bit + código + smp_boot_params).
   extern void pmm_reserve_range(uint64_t start, uint64_t end);
   pmm_reserve_range(0x6000, 0x9000);
 
@@ -408,12 +387,66 @@ void kmain(struct kernel_boot_info *kinfo) {
   paging_init((uint64_t *)cr3, max_phys_addr);
   LOG_INFO("OK");
 
+  // ---------------------------------------------------------------------------
+  // [FIX] Reservar el rango físico REAL del kernel, página a página.
+  //
+  // El kernel tiene 2 PT_LOAD y el bootloader los coloca en zonas físicas
+  // disjuntas (no contiguas): .text/.rodata/.data/initrd en una zona alta,
+  // y .bss en otra zona baja. NO podemos usar un único rango
+  // [phys(__text_start), phys(__bss_end)) porque los extremos no están
+  // ordenados.
+  //
+  // Tampoco podemos leer el ELF header desde memoria: el bootloader solo
+  // carga los PT_LOAD, no el header del fichero. Cualquier intento de
+  // leer e_phoff desde 0xFFFFFFFF81000000 lee bytes de .text, no del header.
+  //
+  // Solución: recorrer cada página virtual de [__text_start, __bss_end)
+  // y reservar su dirección física individualmente. Las páginas no mapeadas
+  // (huecos entre segmentos) se saltan solas.
+  // ---------------------------------------------------------------------------
+  {
+    uint64_t *pml4 = paging_get_pml4();
+    uint64_t vstart = (uint64_t)&__text_start;
+    uint64_t vend = (uint64_t)&__bss_end;
+
+    // Optimización: agrupar páginas físicas contiguas en un solo
+    // pmm_reserve_range. Aunque los PT_LOAD están disjuntos en físico,
+    // dentro de cada segmento son contiguos, así que esto reduce las
+    // llamadas de ~35000 a 2.
+    uint64_t run_start = 0;
+    uint64_t run_end = 0;
+    int total_pages = 0;
+
+    for (uint64_t v = vstart; v < vend; v += PAGE_SIZE) {
+      uint64_t p = paging_get_phys_in(pml4, v);
+      if (!p) {
+        if (run_start) {
+          pmm_reserve_range(run_start, run_end);
+          run_start = 0;
+        }
+        continue;
+      }
+      if (run_start && p == run_end) {
+        run_end += PAGE_SIZE;
+      } else {
+        if (run_start)
+          pmm_reserve_range(run_start, run_end);
+        run_start = p;
+        run_end = p + PAGE_SIZE;
+      }
+      total_pages++;
+    }
+    if (run_start)
+      pmm_reserve_range(run_start, run_end);
+
+    LOG_INFO("[INIT] Kernel phys reservado: %d páginas (%lu KB)", total_pages,
+             (unsigned long)((uint64_t)total_pages * PAGE_SIZE / 1024));
+  }
+
   pmm_relocate_bitmap();
 
   // [FIX SMAP] Parchear stac/clac a NOP si la CPU no soporta SMAP.
-  // Debe ejecutarse ANTES de cualquier código que use uaccess (syscalls,
-  // copy_from_user, etc.) y ANTES de cargar ningún proceso de usuario.
-  // Tras paging_init ya está decidido cpu_smap_enabled.
+  // Debe ejecutarse ANTES de cualquier código que use uaccess.
   uaccess_init();
 
   LOG_INFO("[INIT] ACPI (MADT)...");
@@ -431,9 +464,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("[INIT] Iniciando Heap (kmalloc)...");
   heap_init();
 
-  // [SWAP] Inicializar el subsistema de swap. Solo registra estado
-  // interno; no se activa ningún device hasta que userland llame a
-  // swapon(2).
   LOG_INFO("[INIT] Swap subsystem...");
   swap_init();
   LOG_INFO("OK");
@@ -459,10 +489,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   extern void process_init(void);
   process_init();
 
-  // [SWAP] Lanzar kswapd. Necesita sched_init() ya hecho (usa wait
-  // queues y sched_wake_expired), así que va justo aquí. La tarea
-  // arranca en el siguiente tick de cualquier CPU y se duerme hasta
-  // que haya presión de memoria.
   LOG_INFO("[INIT] Lanzando kswapd...");
   extern void kswapd_main(void);
   task_t *kswapd_t = sched_create_task(kswapd_main);
@@ -476,7 +502,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   if (!t) {
     LOG_PANIC("[KERNEL] no se pudo crear kmain_task");
   }
-  t->cpu_affinity = 0; // ← FIX: task 8 solo corre en CPU 0
+  t->cpu_affinity = 0;
 
   LOG_DEBUG("[KERNEL] kmain: saltando a kmain_task");
   sched_start(t);

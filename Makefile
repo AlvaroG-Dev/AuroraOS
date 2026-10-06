@@ -59,12 +59,24 @@ elf_malformed: user
 			conv=notrunc status=none; \
 	fi
 
-# Añadir en el Makefile raíz, ANTES de initrd.tar
+# ---------------------------------------------------------------------------
+# initrd.tar: construye el tarfs desde sysroot/.
+#
+# Recopila en un único sitio:
+#   - BusyBox (binarios + applets) desde third_party/busybox-*/_install/
+#   - tcc (JIT compiler) desde tcc_stage/ si existe
+#   - ld-musl + headers de musl desde tcc_stage/lib/ y tcc_stage/usr/include/
+#   - tcc runtime (runmain.o, libtcc1.a, include/) desde tcc_stage/usr/lib/tcc/
+#   - libtcc.so desde tcc_stage/usr/lib/ (opcional, tcc static-pie no lo usa)
+#   - /root/hello.c de ejemplo para tcc -run
+# ---------------------------------------------------------------------------
 initrd.tar: sysroot user elf_malformed
-	@echo "[Makefile] Copiando busybox al tarfs..."
+	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
-	          sysroot/data sysroot/lib
+	          sysroot/usr/lib sysroot/usr/include \
+	          sysroot/data sysroot/lib sysroot/root
+	@echo "[Makefile] Copiando busybox al tarfs..."
 	@if [ -f third_party/busybox-1.36.1/_install/bin/busybox ]; then \
 		cp -a third_party/busybox-1.36.1/_install/bin/. sysroot/bin/; \
 		cp -a third_party/busybox-1.36.1/_install/usr/. sysroot/usr/; \
@@ -72,14 +84,74 @@ initrd.tar: sysroot user elf_malformed
 			cp -a third_party/busybox-1.36.1/_install/sbin/. sysroot/sbin/; \
 		fi; \
 	fi
-	@echo "[Makefile] Copiando dynamic linker de musl a sysroot/lib/..."
-	@MUSL_LIB=toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/lib; \
-	if [ -f $$MUSL_LIB/libc.so ]; then \
-		cp -f $$MUSL_LIB/libc.so sysroot/lib/ld-musl-x86_64.so.1; \
-		cp -f $$MUSL_LIB/libc.so sysroot/lib/libc.so; \
-		echo "[Makefile]   ld-musl-x86_64.so.1 + libc.so copiados"; \
+	@echo "[Makefile] Copiando tcc (JIT) desde tcc_stage/ si existe..."
+	@if [ -d tcc_stage ]; then \
+		if [ -f tcc_stage/usr/bin/tcc ]; then \
+			mkdir -p sysroot/usr/bin; \
+			cp -f tcc_stage/usr/bin/tcc sysroot/usr/bin/tcc; \
+			echo "[Makefile]   tcc -> sysroot/usr/bin/tcc"; \
+		fi; \
+		if [ -f tcc_stage/usr/lib/libtcc.so ]; then \
+			mkdir -p sysroot/usr/lib; \
+			cp -f tcc_stage/usr/lib/libtcc.so sysroot/usr/lib/libtcc.so; \
+			echo "[Makefile]   libtcc.so -> sysroot/usr/lib/libtcc.so"; \
+		fi; \
 	else \
-		echo "[Makefile] WARN: $$MUSL_LIB/libc.so no existe, los dinamicos fallaran"; \
+		echo "[Makefile]   (tcc_stage/ no existe, saltando tcc)"; \
+	fi
+	@echo "[Makefile] Copiando runtime de tcc (runmain.o, libtcc1.a, include)..."
+	@if [ -d tcc_stage/usr/lib/tcc ]; then \
+		mkdir -p sysroot/usr/lib/tcc; \
+		cp -r tcc_stage/usr/lib/tcc/. sysroot/usr/lib/tcc/; \
+		echo "[Makefile]   tcc runtime -> sysroot/usr/lib/tcc/"; \
+	fi
+	@echo "[Makefile] Copiando libc.a y stubs para tcc..."
+	@if [ -f tcc_stage/usr/lib/libc.a ]; then \
+		mkdir -p sysroot/usr/lib sysroot/lib; \
+		cp -f tcc_stage/usr/lib/libc.a sysroot/usr/lib/libc.a; \
+		cp -f tcc_stage/usr/lib/libc.a sysroot/lib/libc.a; \
+		echo "[Makefile]   libc.a -> sysroot/usr/lib/ y sysroot/lib/"; \
+		for stub in libm.a libpthread.a libdl.a librt.a libcrypt.a \
+		            libresolv.a libutil.a libxnet.a libssp_nonshared.a; do \
+			if [ -f tcc_stage/usr/lib/$$stub ]; then \
+				cp -f tcc_stage/usr/lib/$$stub sysroot/usr/lib/$$stub; \
+				cp -f tcc_stage/usr/lib/$$stub sysroot/lib/$$stub; \
+			fi; \
+		done; \
+	else \
+		echo "[Makefile]   (tcc_stage/usr/lib/libc.a no existe, tcc no podra linkar)"; \
+	fi
+	@echo "[Makefile] Copiando dynamic linker de musl a sysroot/lib/..."
+	@if [ -f tcc_stage/lib/ld-musl-x86_64.so.1 ]; then \
+		cp -f tcc_stage/lib/ld-musl-x86_64.so.1 sysroot/lib/ld-musl-x86_64.so.1; \
+		echo "[Makefile]   ld-musl desde tcc_stage/ (compilado en local)"; \
+		if [ -f tcc_stage/lib/libc.so ]; then \
+			cp -f tcc_stage/lib/libc.so sysroot/lib/libc.so; \
+		fi; \
+	else \
+		MUSL_LIB=toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/lib; \
+		if [ -f $$MUSL_LIB/libc.so ]; then \
+			cp -f $$MUSL_LIB/libc.so sysroot/lib/ld-musl-x86_64.so.1; \
+			cp -f $$MUSL_LIB/libc.so sysroot/lib/libc.so; \
+			echo "[Makefile]   ld-musl desde toolchain (fallback)"; \
+		else \
+			echo "[Makefile] WARN: no hay musl en tcc_stage/lib/ ni en el toolchain"; \
+		fi; \
+	fi
+	@echo "[Makefile] Copiando headers de musl para tcc..."
+	@if [ -d tcc_stage/usr/include ]; then \
+		mkdir -p sysroot/usr/include; \
+		cp -r tcc_stage/usr/include/. sysroot/usr/include/; \
+		echo "[Makefile]   headers -> sysroot/usr/include/"; \
+	else \
+		echo "[Makefile]   (tcc_stage/usr/include no existe, tcc no podra compilar)"; \
+	fi
+	@echo "[Makefile] Creando /root/hello.c para tcc -run (si no existe)..."
+	@if [ ! -f sysroot/root/hello.c ]; then \
+		printf '#include <stdio.h>\n\nint main(void) {\n    printf("hola desde codigo JIT\\n");\n    for (int i = 0; i < 5; i++)\n        printf("  iter %%d\\n", i);\n    return 0;\n}\n' > sysroot/root/hello.c; \
+		echo "[Makefile]   /root/hello.c creado"; \
+	else \
+		echo "[Makefile]   /root/hello.c ya existe, no se toca"; \
 	fi
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .

@@ -25,13 +25,7 @@ static inline uint64_t rdtsc(void) {
   return ((uint64_t)hi << 32) | lo;
 }
 
-// Frecuencia estimada del TSC. Valor por defecto típico de QEMU con
-// -cpu qemu64 (~3.6 GHz). Si tu entorno difiere, ajusta o calibra.
 static uint64_t tsc_freq_hz = 2600000000ULL;
-
-// Instante de klog_init. Los timestamps son relativos a este instante,
-// lo cual evita que un cambio de frecuencia (calibración) haga retroceder
-// los timestamps de mensajes posteriores.
 static uint64_t tsc_origin = 0;
 
 void klog_set_tsc_freq(uint64_t hz) {
@@ -67,17 +61,15 @@ static void out_char(char c) {
 // ---------------------------------------------------------------------------
 static void format_timestamp(char *buf, size_t buflen) {
   uint64_t now = rdtsc();
-  uint64_t delta = now - tsc_origin; // ciclos desde klog_init
+  uint64_t delta = now - tsc_origin;
 
   uint64_t secs = delta / tsc_freq_hz;
   uint64_t remainder = delta % tsc_freq_hz;
   uint64_t usec = (remainder * 1000000ULL) / tsc_freq_hz;
 
-  // Formato: "    S.UUUUUU" → 5 dígitos de segundos, 6 de microsegundos
   char tmp[24];
   int n = 0;
 
-  // Segundos con padding a 5
   char sbuf[20];
   int sn = 0;
   if (secs == 0) {
@@ -96,7 +88,6 @@ static void format_timestamp(char *buf, size_t buflen) {
 
   tmp[n++] = '.';
 
-  // Microsegundos con padding a 6
   char ubuf[8];
   int un = 0;
   if (usec == 0) {
@@ -153,7 +144,7 @@ static void emit_prefix(klog_level_t level) {
 }
 
 // ---------------------------------------------------------------------------
-// Números (usados por klog_hex / klog_dec)
+// Números
 // ---------------------------------------------------------------------------
 static void emit_num(uint64_t n, int base, int min_digits) {
   const char *digits = "0123456789abcdef";
@@ -285,12 +276,21 @@ static void klog_vprintf_locked(klog_level_t level, const char *fmt,
 void klog_init(void) {
   ring_head = ring_tail = ring_count = 0;
   min_level = KLOG_DEBUG;
-  tsc_origin = rdtsc(); // ← fija el origen de los timestamps
+  tsc_origin = rdtsc();
   klog_ready = 1;
 }
 
 void klog_set_level(klog_level_t lvl) { min_level = lvl; }
 klog_level_t klog_get_level(void) { return min_level; }
+
+// ---------------------------------------------------------------------------
+// [FIX] Todas las funciones públicas de klog usan el mismo patrón:
+//   acquire → if (reentered) return → escribir → release
+//
+// Si venimos de una reentrada (LOG desde dentro de otro LOG en el
+// mismo CPU), descartamos el mensaje. Es infinitamente mejor perder
+// un log a colgar el kernel en un deadlock irrecuperable.
+// ---------------------------------------------------------------------------
 
 void klog_vprintf(klog_level_t level, const char *fmt, va_list ap) {
   if (!klog_ready || level > min_level)
@@ -298,6 +298,9 @@ void klog_vprintf(klog_level_t level, const char *fmt, va_list ap) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
   klog_vprintf_locked(level, fmt, ap);
   serial_lock_release(flags);
 }
@@ -311,6 +314,16 @@ void klog_printf(klog_level_t level, const char *fmt, ...) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+
+  // [FIX] Reentrada: descartar el mensaje. No spinnear contra nosotros
+  // mismos. Esto es lo que evita el deadlock de 4 CPUs por LOG dentro
+  // de LOG (p.ej. kfree → LOG_ERR desde un handler de IRQ que dispara
+  // mientras otro CPU está logueando).
+  if (flags == SERIAL_LOCK_REENTERED) {
+    va_end(ap);
+    return;
+  }
+
   klog_vprintf_locked(level, fmt, ap);
   out_char('\n');
   serial_lock_release(flags);
@@ -324,6 +337,9 @@ void klog_puts(klog_level_t level, const char *s) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
   emit_prefix(level);
   while (*s)
     out_char(*s++);
@@ -337,6 +353,9 @@ void klog_putc(klog_level_t level, char c) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
   emit_prefix(level);
   out_char(c);
   out_char('\n');
@@ -349,6 +368,9 @@ void klog_hex(klog_level_t level, uint64_t val, int min_digits) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
   emit_prefix(level);
   out_char('0');
   out_char('x');
@@ -363,6 +385,9 @@ void klog_dec(klog_level_t level, uint64_t val) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
   emit_prefix(level);
   emit_num(val, 10, 0);
   out_char('\n');
@@ -372,10 +397,6 @@ void klog_dec(klog_level_t level, uint64_t val) {
 // ---------------------------------------------------------------------------
 // Calibración del TSC contra el PIT
 // ---------------------------------------------------------------------------
-// Nota: cambiar tsc_freq_hz a mitad del boot NO hace retroceder los
-// timestamps de mensajes posteriores, porque format_timestamp usa
-// delta = rdtsc() - tsc_origin. El único efecto es que los mensajes
-// previos a la calibración usaron la frecuencia por defecto (imprecisa).
 void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
   if (ticks_to_wait == 0 || pit_hz == 0)
     return;
@@ -399,16 +420,17 @@ void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
 }
 
 // ---------------------------------------------------------------------------
-// Acceso al ring
+// Acceso al ring (todas con el mismo patrón reentrante)
 // ---------------------------------------------------------------------------
 size_t klog_read(char *out, size_t max_len) {
   if (!out || max_len == 0)
     return 0;
-  // [libc] Lock: klog_read la llaman /dev/kmsg y potencialmente varias
-  // CPUs a la vez. Modifica ring_tail y ring_count sin protección en la
-  // versión anterior.
+
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return 0;
+
   size_t n = 0;
   while (n < max_len && ring_count > 0) {
     out[n++] = ring[ring_tail];
@@ -421,31 +443,36 @@ size_t klog_read(char *out, size_t max_len) {
 
 size_t klog_available(void) { return ring_count; }
 
-void klog_clear(void) { ring_head = ring_tail = ring_count = 0; }
+void klog_clear(void) {
+  // Nota: ring_head/tail/count son volatile size_t. Escribirlos sin lock
+  // desde aquí es benigno pero puede perder bytes concurrentes. Aceptable.
+  ring_head = ring_tail = ring_count = 0;
+}
 
-// ---------------------------------------------------------------------------
-// [libc] Escritura cruda (sin prefijo ni timestamp) al ring+serial.
-// Usado por /dev/kmsg::write. La longitud está acotada por el caller
-// (sys_write ya validó access_ok).
-// ---------------------------------------------------------------------------
 void klog_write_raw(const char *buf, size_t n) {
   if (!klog_ready || !buf || n == 0)
     return;
+
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
   for (size_t i = 0; i < n; i++)
     out_char(buf[i]);
+
   serial_lock_release(flags);
 }
 
-// ---------------------------------------------------------------------------
-// [klogctl] Peek no destructivo del ring.
-// ---------------------------------------------------------------------------
 size_t klog_peek(char *out, size_t max_len) {
   if (!out || max_len == 0)
     return 0;
+
   unsigned long flags;
   serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return 0;
+
   size_t n = 0;
   size_t tail = ring_tail;
   size_t count = ring_count;

@@ -138,26 +138,18 @@ void vma_destroy_all(struct process *proc) {
 // [Fase C.2] Helper para asignar una página de usuario y ponerla a cero.
 // Se usa en try_stack_growth, try_vma_demand, process_sbrk, process_spawn.
 // ---------------------------------------------------------------------------
-// [SWAP] Si el PMM no tiene páginas libres, intentar reclaimar una
-// página antes de rendirnos. Esto le da al page-fault handler una
-// oportunidad de sobrevivir a la presión de memoria.
+// [FIX] Sin reclaim inline. Antes, si el PMM estaba lleno, hacíamos
+// swap_reclaim_one() para liberar 1 página. Bajo presión sostenida
+// (memhog pidiendo más que RAM+swap), esto livelockeaba: cada PF
+// liberaba 1 página haciendo ~50 ms de I/O, la mapeaba, el proceso
+// tocaba la siguiente y volvía a empezar. Efectivo a 80 KB/s.
 //
-// OJO: swap_reclaim_one() puede bloquear en I/O de disco (bms). El
-// llamante está en contexto de #PF, así que el disco debe estar vivo
-// y no reentrar aquí.
-extern int swap_reclaim_one(void);
-extern int swap_device_count(void);
-
+// Ahora el PF falla rápido. kswapd (que corre en su propio contexto
+// y puede dormir) hace todo el reclaim en background. Si aún así no
+// hay páginas, el proceso muere por OOM — es lo correcto cuando la
+// demanda excede la memoria disponible.
 static uint64_t alloc_user_page_zeroed(void) {
   uint64_t phys = pmm_alloc_page();
-  if (!phys && swap_device_count() > 0) {
-    // Intentar liberar hasta 8 páginas para dar margen al llamante.
-    for (int i = 0; i < 8 && !phys; i++) {
-      if (!swap_reclaim_one())
-        break;
-      phys = pmm_alloc_page();
-    }
-  }
   if (!phys)
     return 0;
   memset(phys_to_virt(phys), 0, PAGE_SIZE);
@@ -291,10 +283,20 @@ static int handle_page_fault_inner(registers_t *regs) {
   // 1. Fallo en modo usuario: path clásico.
   // -------------------------------------------------------------------------
   if (user) {
+    // Log SIEMPRE para diagnóstico. Muestra present/write/fetch.
+    LOG_DEBUG("[PF-USER] pid=%u rip=%p cr2=%p err=0x%lx (P=%d W=%d F=%d)",
+              process_current() ? process_current()->pid : 0, (void *)regs->rip,
+              (void *)cr2, err, (int)(err & 1), (int)((err >> 1) & 1),
+              (int)((err >> 4) & 1));
+
     if (present) {
+      // Solo aquí importa el bit "fetch": página presente + fetch = NX
+      // violation.
+      LOG_DEBUG("[PF-USER] pid=%u rip=%p cr2=%p err=0x%lx",
+                process_current() ? process_current()->pid : 0,
+                (void *)regs->rip, (void *)cr2, err);
       // [SWAP] ¿Violación de escritura sobre una página RW que kswapd
-      // marcó temporalmente RO para reclaimarla? Si el VMA es
-      // escribible, la marcamos RW otra vez y salimos sin señal.
+      // marcó temporalmente RO para reclaimarla?
       if ((err & 0x02) != 0) {
         struct process *proc = process_current();
         if (proc) {
@@ -313,17 +315,19 @@ static int handle_page_fault_inner(registers_t *regs) {
           }
         }
       }
-      // Fin del caso swap
+      // Página presente + cualquier fallo = violación de permisos
+      // (incluye NX: instruction fetch sobre página sin PTE_USER_X).
+      signal_deliver_from_exception(SIGSEGV, regs);
+      pf_resolved++;
+      return 1;
+    }
 
-      signal_deliver_from_exception(SIGSEGV, regs);
-      pf_resolved++;
-      return 1;
-    }
-    if (fetch) {
-      signal_deliver_from_exception(SIGSEGV, regs);
-      pf_resolved++;
-      return 1;
-    }
+    // -----------------------------------------------------------------------
+    // Página NO presente. Tanto un fetch como un data fault aquí son
+    // demand-paging normal. El bit "fetch" SOLO importa si la página
+    // está presente (NX). Hasta ahora este path no se alcanzaba para
+    // fetches porque el `if (fetch)` de arriba enviaba SIGSEGV antes.
+    // -----------------------------------------------------------------------
 
     struct process *proc = process_current();
     if (!proc) {
@@ -382,8 +386,6 @@ static int handle_page_fault_inner(registers_t *regs) {
         swap_free_slot(sw_type, sw_slot);
         mutex_unlock(&proc->mm_lock);
         pf_resolved++;
-        LOG_DEBUG("[SWAP] Paged in pid=%u addr=%p type=%u slot=%u", proc->pid,
-                  (void *)page_va, sw_type, sw_slot);
         return 1;
       }
       mutex_unlock(&proc->mm_lock);
@@ -401,7 +403,7 @@ static int handle_page_fault_inner(registers_t *regs) {
         return 1;
       }
       // Distinguir OOM de permiso: si el PMM está a 0, es OOM.
-      if (pmm_free_pages_count() == 0) {
+      if (pmm_free_pages_count() < 64) {
         LOG_ERR("[PF] PID=%u addr=%p: OOM (sin páginas libres ni swap)",
                 proc->pid, (void *)cr2);
         kill_current_process(regs, "out of memory");

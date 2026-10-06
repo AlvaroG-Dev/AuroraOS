@@ -12,9 +12,9 @@
 #include "pmm.h"
 #include "pty.h"
 #include "sched.h"
-#include "swap.h"
 #include "serial.h"
 #include "string.h"
+#include "swap.h"
 #include "tarfs.h"
 #include "uaccess.h"
 #include "vfs.h"
@@ -2368,4 +2368,21 @@ void process_wake_parent(uint32_t parent_pid) {
     wait_queue_wake_task(parent_task);
     task_put(parent_task);
   }
+}
+// Añadir al final de process.c:
+process_t *process_find_by_pml4(uint64_t pml4_phys) {
+  if (!pml4_phys)
+    return NULL;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t *p = process_list;
+  process_t *found = NULL;
+  while (p) {
+    if (p->pml4_phys == pml4_phys && !p->is_zombie) {
+      found = p;
+      break;
+    }
+    p = p->next;
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+  return found;
 }

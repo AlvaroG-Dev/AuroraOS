@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "memlayout.h"
+#include "memlayout.h"
 
 // SLAB allocator para objetos pequeños. Caches por tamaño:
 // 16, 32, 64, 128, 256, 512, 1024, 2048 bytes.
@@ -16,12 +18,6 @@
 // slab_is_slab_ptr() sea trivial (comparación de rango) y no haya
 // falsos positivos con punteros del heap.
 
-// [FIX] De 16 MB a 48 MB de heap. Los 16 MB se agotaban al coexistir
-// backbuffer (~4 MB) + wallpaper_cache (~4 MB) + content_buffer y
-// surface del terminal (~4 MB) + heap del kernel. Con 48 MB hay margen
-// para 2-3 ventanas. HEAP_VMA (0xFFFFFFFF82000000) no cambia, solo se
-// estira el techo hasta 0xFFFFFFFF85000000.
-#define SLAB_VMA 0xFFFFFFFF85000000ULL
 #define SLAB_MAX_SIZE 2048
 #define SLAB_NUM_CACHES 8
 
