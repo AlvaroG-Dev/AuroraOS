@@ -10,7 +10,19 @@ MUSL_CFLAGS := -static -no-pie -Os -fno-stack-protector \
 # Auto-detecta apps/<name>/main.c
 MUSL_APPS := $(patsubst apps/%/main.c,%,$(wildcard apps/*/main.c))
 
-all: $(MUSL_APPS)
+# El paso de instalación es independiente de la compilación: aunque el
+# binario ya exista y make no tenga que recompilarlo, siempre debe copiarse
+# al sysroot que posteriormente se empaqueta en initrd.tar.
+all: $(MUSL_APPS) install
+
+install: $(MUSL_APPS)
+	@mkdir -p $(SYSDIR)
+	@for app in $(MUSL_APPS); do \
+		cp -f $$app $(SYSDIR)/$$app; \
+	done
+	@for app in $(MUSL_APPS); do \
+		file $(SYSDIR)/$$app | sed 's/^/  /'; \
+	done
 
 $(MUSL_APPS): %: apps/%/main.c
 	@if [ ! -x "$(MUSL_CC)" ]; then \
@@ -18,11 +30,9 @@ $(MUSL_APPS): %: apps/%/main.c
 	fi
 	@mkdir -p $(SYSDIR)
 	$(MUSL_CC) $(MUSL_CFLAGS) -o $@ $<
-	cp $@ $(SYSDIR)/
-	@file $(SYSDIR)/$@ | sed 's/^/  /'
 
 clean:
 	rm -f $(MUSL_APPS)
 	rm -f $(addprefix $(SYSDIR)/,$(MUSL_APPS))
 
-.PHONY: all clean
+.PHONY: all install clean
