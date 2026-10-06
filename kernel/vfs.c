@@ -15,6 +15,7 @@
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "klog.h"
+#include "mutex.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
@@ -2054,6 +2055,7 @@ void vfs_init(void) {
 // Helpers internos de FDs
 // ===========================================================================
 static void fd_init_wqs(file_descriptor_t *fd) {
+  mutex_init(&fd->lock);
   wait_queue_init(&fd->read_wq);
   wait_queue_init(&fd->write_wq);
   fd->flock_mode = 0; // [flock]
@@ -2162,38 +2164,68 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
   return free_fd;
 }
 
-int vfs_close_for_proc(void *proc_ptr, int fd) {
-  process_t *proc = (process_t *)proc_ptr;
-  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd])
-    return -1;
-
+static file_descriptor_t *fd_get_for_proc(process_t *proc, int fd) {
+  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS)
+    return NULL;
+  mutex_lock(&proc->fd_lock);
   file_descriptor_t *f = proc->fds[fd];
-  proc->fds[fd] = NULL;
+  if (f)
+    __atomic_fetch_add(&f->ref_count, 1, __ATOMIC_ACQUIRE);
+  mutex_unlock(&proc->fd_lock);
+  return f;
+}
 
+static void fd_put(file_descriptor_t *f) {
+  if (!f)
+    return;
   int new_rc = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
-
   if (new_rc == 0) {
     vfs_node_free(f->node);
     kfree(f);
   }
+}
+
+int vfs_close_for_proc(void *proc_ptr, int fd) {
+  process_t *proc = (process_t *)proc_ptr;
+  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS)
+    return -1;
+
+  mutex_lock(&proc->fd_lock);
+  file_descriptor_t *f = proc->fds[fd];
+  if (!f) {
+    mutex_unlock(&proc->fd_lock);
+    return -1;
+  }
+  proc->fds[fd] = NULL;
+  mutex_unlock(&proc->fd_lock);
+
+  fd_put(f);
   return 0;
 }
 
 int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
   process_t *proc = (process_t *)proc_ptr;
-  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || !buf)
-    return -1;
-
-  file_descriptor_t *f = proc->fds[fd];
-  if (!f->node || !f->node->ops || !f->node->ops->read)
+  if (!proc || !buf)
     return -1;
   if (count == 0)
     return 0;
 
+  file_descriptor_t *f = fd_get_for_proc(proc, fd);
+  if (!f)
+    return -1;
+  if (!f->node || !f->node->ops || !f->node->ops->read) {
+    fd_put(f);
+    return -1;
+  }
+
+  mutex_lock(&f->lock);
   const size_t chunk_size = 4096;
   uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
-  if (!kbuf)
+  if (!kbuf) {
+    mutex_unlock(&f->lock);
+    fd_put(f);
     return -ENOMEM;
+  }
 
   size_t total = 0;
   while (total < count) {
@@ -2203,24 +2235,18 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
 
     int64_t bytes = f->node->ops->read(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
-      if (total == 0) {
-        kfree(kbuf);
-        return bytes;
-      }
+      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return bytes; }
       break;
     }
     if (bytes == 0)
       break;
     if ((uint64_t)bytes > chunk) {
-      kfree(kbuf);
+      kfree(kbuf); mutex_unlock(&f->lock); fd_put(f);
       return total > 0 ? (int64_t)total : -EIO;
     }
 
     if (copy_to_user((uint8_t *)buf + total, kbuf, (size_t)bytes) < 0) {
-      if (total == 0) {
-        kfree(kbuf);
-        return -EFAULT;
-      }
+      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return -EFAULT; }
       break;
     }
 
@@ -2231,25 +2257,35 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
   }
 
   kfree(kbuf);
+  mutex_unlock(&f->lock);
+  fd_put(f);
   return (int64_t)total;
 }
 
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
                            size_t count) {
   process_t *proc = (process_t *)proc_ptr;
-  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || !buf)
-    return -1;
-
-  file_descriptor_t *f = proc->fds[fd];
-  if (!f->node || !f->node->ops || !f->node->ops->write)
+  if (!proc || !buf)
     return -1;
   if (count == 0)
     return 0;
 
+  file_descriptor_t *f = fd_get_for_proc(proc, fd);
+  if (!f)
+    return -1;
+  if (!f->node || !f->node->ops || !f->node->ops->write) {
+    fd_put(f);
+    return -1;
+  }
+
+  mutex_lock(&f->lock);
   const size_t chunk_size = 4096;
   uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
-  if (!kbuf)
+  if (!kbuf) {
+    mutex_unlock(&f->lock);
+    fd_put(f);
     return -ENOMEM;
+  }
 
   size_t total = 0;
   while (total < count) {
@@ -2258,23 +2294,17 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       chunk = chunk_size;
 
     if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
-      if (total == 0) {
-        kfree(kbuf);
-        return -EFAULT;
-      }
+      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return -EFAULT; }
       break;
     }
 
     int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
-      if (total == 0) {
-        kfree(kbuf);
-        return bytes;
-      }
+      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return bytes; }
       break;
     }
     if ((uint64_t)bytes > chunk) {
-      kfree(kbuf);
+      kfree(kbuf); mutex_unlock(&f->lock); fd_put(f);
       return total > 0 ? (int64_t)total : -EIO;
     }
 
@@ -2285,35 +2315,44 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
   }
 
   kfree(kbuf);
+  mutex_unlock(&f->lock);
+  fd_put(f);
   return (int64_t)total;
 }
 
 int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
   process_t *proc = (process_t *)proc_ptr;
-  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+  if (!proc)
     return -1;
 
-  file_descriptor_t *f = proc->fds[fd];
-  if (!f->node)
+  file_descriptor_t *f = fd_get_for_proc(proc, fd);
+  if (!f)
     return -1;
+  mutex_lock(&f->lock);
+  if (!f->node) {
+    mutex_unlock(&f->lock);
+    fd_put(f);
+    return -1;
+  }
 
   uint64_t new_off = f->offset;
   if (whence == SEEK_SET) {
-    if (offset < 0)
-      return -1;
+    if (offset < 0) { mutex_unlock(&f->lock); fd_put(f); return -1; }
     new_off = (uint64_t)offset;
   } else if (whence == SEEK_CUR) {
-    if (offset < 0 && (uint64_t)(-offset) > f->offset)
-      return -1;
+    if (offset < 0 && (uint64_t)(-offset) > f->offset) { mutex_unlock(&f->lock); fd_put(f); return -1; }
     new_off = f->offset + offset;
   } else if (whence == SEEK_END) {
-    if (offset < 0 && (uint64_t)(-offset) > f->node->size)
-      return -1;
+    if (offset < 0 && (uint64_t)(-offset) > f->node->size) { mutex_unlock(&f->lock); fd_put(f); return -1; }
     new_off = f->node->size + offset;
   } else {
+    mutex_unlock(&f->lock);
+    fd_put(f);
     return -1;
   }
   f->offset = new_off;
+  mutex_unlock(&f->lock);
+  fd_put(f);
   return (int64_t)new_off;
 }
 
