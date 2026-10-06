@@ -81,6 +81,19 @@ static int map_page_in_pml4(uint64_t *pml4, uint64_t virt, uint64_t flags) {
   if (!phys)
     return -1;
   if (paging_map_page_in(pml4, virt, phys, flags) != 0) {
+    LOG_ERR("[ELF] paging_map_page_in falló: va=%p phys=%p",
+            (void *)virt, (void *)phys);
+    pmm_free_page(phys);
+    return -1;
+  }
+  uint64_t mapped_pte = 0;
+  int mapped_found = paging_get_pte_in(pml4, virt, &mapped_pte);
+  LOG_INFO("[ELF] map va=%p phys=%p pte_found=%d pte=%p",
+           (void *)virt, (void *)phys, mapped_found, (void *)mapped_pte);
+  if (!mapped_found || !(mapped_pte & PTE_PRESENT) ||
+      (mapped_pte & PTE_FRAME) != (phys & PTE_FRAME)) {
+    LOG_ERR("[ELF] Mapeo inconsistente: va=%p phys=%p pte=%p",
+            (void *)virt, (void *)phys, (void *)mapped_pte);
     pmm_free_page(phys);
     return -1;
   }
