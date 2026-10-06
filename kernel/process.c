@@ -1753,6 +1753,7 @@ int64_t sys_fork(void) {
   if (!child_task) {
     LOG_ERR("[FORK] sched_create_forked_user_task falló");
     paging_free_user_space(child_pml4_phys);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
   child_task->fs_base = parent->fs_base;
@@ -1765,6 +1766,7 @@ int64_t sys_fork(void) {
     if (child_task->stack)
       kfree(child_task->stack);
     kfree(child_task);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1829,6 +1831,7 @@ int64_t sys_fork(void) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1840,6 +1843,7 @@ int64_t sys_fork(void) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
