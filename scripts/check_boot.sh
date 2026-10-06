@@ -372,12 +372,12 @@ EXPECTED_BOOT=(
     "[FB] Inicializado en memoria"
     "[COMP] Compositor thread started"
     "[WINSRV] Inicializado"
-    "[PROC] Proceso '/initrd/apps/shell' creado"
+    "[PROC] Proceso '/apps/init' creado"
 )
 
 EXPECTED_SHELL=(
-    "SHELL: main begin"
-    "SHELL: after win_create"
+    "[PROC] Proceso '/apps/terminal' creado"
+    "[PROC] Proceso '/bin/sh' creado"
 )
 
 EXPECTED_DISK=(
