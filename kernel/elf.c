@@ -334,9 +334,22 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
 
     for (size_t j = 0; j < num_pages; j++) {
       uint64_t page_vaddr = start_page + j * PAGE_SIZE;
-      if (!paging_get_phys_in(pml4, page_vaddr)) {
+      uint64_t existing_pte = 0;
+      if (!paging_get_pte_in(pml4, page_vaddr, &existing_pte)) {
         if (map_page_in_pml4(pml4, page_vaddr, page_flags) != 0) {
           LOG_ERR("[ELF] Error mapeando página");
+          kfree(tmp);
+          goto out;
+        }
+      } else {
+        // Multiple PT_LOAD segments may share their boundary page. Preserve
+        // the union of permissions instead of silently keeping the first
+        // segment's W/NX bits.
+        uint64_t merged_flags = existing_pte & (PTE_USER | PTE_WRITABLE | PTE_NX);
+        merged_flags |= page_flags & (PTE_USER | PTE_WRITABLE | PTE_NX);
+        merged_flags |= PTE_PRESENT;
+        if (paging_set_pte_in(pml4, page_vaddr, merged_flags) != 0) {
+          LOG_ERR("[ELF] Error actualizando permisos de página compartida");
           kfree(tmp);
           goto out;
         }
