@@ -104,17 +104,24 @@ void swap_free_slot(uint32_t type, uint32_t slot) {
 int swap_write_page(uint32_t type, uint32_t slot, uint64_t phys) {
   if (type >= SWAP_MAX_DEVICES)
     return -EINVAL;
+
   mutex_lock(&g_swap_lock);
   swap_device_t *d = g_swap_devs[type];
-  if (!d || !d->in_use)
+  if (!d || !d->in_use) {
+    mutex_unlock(&g_swap_lock);
     return -EINVAL;
-  if (slot >= d->nr_slots)
+  }
+  if (slot >= d->nr_slots) {
+    mutex_unlock(&g_swap_lock);
     return -EINVAL;
+  }
 
   uint64_t byte_off = ((uint64_t)slot + 1) * PAGE_SIZE;
   uint32_t ssz = d->bdev->sector_size;
-  if (byte_off % ssz != 0)
+  if (ssz == 0 || byte_off % ssz != 0 || PAGE_SIZE % ssz != 0) {
+    mutex_unlock(&g_swap_lock);
     return -EINVAL;
+  }
   uint64_t lba = byte_off / ssz;
   uint32_t nsec = PAGE_SIZE / ssz;
 
@@ -130,17 +137,24 @@ int swap_write_page(uint32_t type, uint32_t slot, uint64_t phys) {
 int swap_read_page(uint32_t type, uint32_t slot, uint64_t phys) {
   if (type >= SWAP_MAX_DEVICES)
     return -EINVAL;
+
   mutex_lock(&g_swap_lock);
   swap_device_t *d = g_swap_devs[type];
-  if (!d || !d->in_use)
+  if (!d || !d->in_use) {
+    mutex_unlock(&g_swap_lock);
     return -EINVAL;
-  if (slot >= d->nr_slots)
+  }
+  if (slot >= d->nr_slots) {
+    mutex_unlock(&g_swap_lock);
     return -EINVAL;
+  }
 
   uint64_t byte_off = ((uint64_t)slot + 1) * PAGE_SIZE;
   uint32_t ssz = d->bdev->sector_size;
-  if (byte_off % ssz != 0)
+  if (ssz == 0 || byte_off % ssz != 0 || PAGE_SIZE % ssz != 0) {
+    mutex_unlock(&g_swap_lock);
     return -EINVAL;
+  }
   uint64_t lba = byte_off / ssz;
   uint32_t nsec = PAGE_SIZE / ssz;
 
