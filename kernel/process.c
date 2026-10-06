@@ -12,6 +12,7 @@
 #include "pmm.h"
 #include "pty.h"
 #include "sched.h"
+#include "swap.h"
 #include "serial.h"
 #include "string.h"
 #include "tarfs.h"
@@ -1626,6 +1627,25 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
 
         for (int l = 0; l < 512; l++) {
           uint64_t pte = pt_parent[l];
+          if (pte_is_swap(pte)) {
+            uint64_t new_phys = pmm_alloc_page();
+            if (!new_phys)
+              return -1;
+            if (swap_read_page(pte_swap_type(pte), pte_swap_offset(pte),
+                               new_phys) != 0) {
+              pmm_free_page(new_phys);
+              return -1;
+            }
+            uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                            ((uint64_t)k << 21) | ((uint64_t)l << 12);
+            if (paging_map_page_in(child_pml4, virt, new_phys,
+                                   PTE_USER | PTE_WRITABLE | PTE_PRESENT |
+                                       PTE_NX) != 0) {
+              pmm_free_page(new_phys);
+              return -1;
+            }
+            continue;
+          }
           if (!(pte & PTE_PRESENT))
             continue;
 
@@ -1707,10 +1727,15 @@ int64_t sys_fork(void) {
     return -EINVAL;
   }
 
-  // 1. Clonar PML4 (kernel half compartido).
+  // 1. Freeze the parent's address space while its page tables and VMA list
+  // are cloned. The lock is sleepable because swapped pages may need I/O.
+  mutex_lock(&parent->mm_lock);
+
+  // 2. Clonar PML4 (kernel half compartido).
   uint64_t child_pml4_phys = paging_clone_kernel_space();
   if (!child_pml4_phys) {
     LOG_ERR("[FORK] paging_clone_kernel_space falló");
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
   uint64_t *parent_pml4 = (uint64_t *)phys_to_virt(parent->pml4_phys);
@@ -1719,6 +1744,7 @@ int64_t sys_fork(void) {
   // 2. Copiar user space.
   if (clone_user_space(parent_pml4, child_pml4) != 0) {
     paging_free_user_space(child_pml4_phys);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
@@ -1827,8 +1853,11 @@ int64_t sys_fork(void) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
+    mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
+
+  mutex_unlock(&parent->mm_lock);
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     child->fds[f] = parent->fds[f];
