@@ -389,11 +389,14 @@ int swap_reclaim_one(void) {
     return 0;
 
   int type = -1;
-  for (int i = 0; i < SWAP_MAX_DEVICES; i++)
+  mutex_lock(&g_swap_lock);
+  for (int i = 0; i < SWAP_MAX_DEVICES; i++) {
     if (g_swap_devs[i] && g_swap_devs[i]->in_use && !g_swap_devs[i]->frozen) {
       type = i;
       break;
     }
+  }
+  mutex_unlock(&g_swap_lock);
   if (type < 0)
     return 0;
 
@@ -402,101 +405,69 @@ int swap_reclaim_one(void) {
   if (c.pml4_phys == 0)
     return 0;
 
-  uint64_t *pml4 = (uint64_t *)phys_to_virt(c.pml4_phys);
+  struct {
+    uint64_t pml4_phys;
+    process_t *owner;
+  } find = {c.pml4_phys, NULL};
 
-  // Paso 1: leer PTE
-  uint64_t pte;
-  if (!paging_get_pte_in(pml4, c.vaddr, &pte))
+  int find_cb(process_t *p, void *arg) {
+    typeof(find) *f = arg;
+    if (p && !p->is_zombie && p->pml4_phys == f->pml4_phys) {
+      f->owner = p;
+      return 1;
+    }
     return 0;
-  if (!(pte & PTE_PRESENT) || !(pte & PTE_WRITABLE) || pte_is_swap(pte))
-    return 0;
-  uint64_t phys = pte & PTE_FRAME;
-
-  // Paso 2: [CRÍTICO] Quitar WRITABLE antes del I/O. Si el proceso
-  // escribe durante el I/O, el CPU dispara #PF(present+write) y el
-  // handler re-marca RW + abortamos el reclaim. Así no perdemos
-  // escrituras concurrentes.
-  uint64_t ro_pte = pte & ~(uint64_t)PTE_WRITABLE;
-  if (paging_set_pte_in(pml4, c.vaddr, ro_pte) != 0)
+  }
+  process_for_each(find_cb, &find);
+  process_t *owner = find.owner;
+  if (!owner)
     return 0;
 
-  // Paso 3: re-verificar que el PTE es el mismo RO (nadie lo tocó)
-  uint64_t check;
-  if (!paging_get_pte_in(pml4, c.vaddr, &check) ||
-      (check & PTE_FRAME) != phys) {
+  mutex_lock(&owner->mm_lock);
+  if (owner->pml4_phys != c.pml4_phys || owner->is_zombie) {
+    mutex_unlock(&owner->mm_lock);
     return 0;
   }
 
-  // Paso 4: alloc slot y escribir a swap
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(c.pml4_phys);
+  uint64_t pte;
+  if (!paging_get_pte_in(pml4, c.vaddr, &pte))
+    goto out_fail;
+  if (!(pte & PTE_PRESENT) || !(pte & PTE_WRITABLE) || pte_is_swap(pte))
+    goto out_fail;
+
+  uint64_t phys = pte & PTE_FRAME;
+  uint64_t ro_pte = pte & ~(uint64_t)PTE_WRITABLE;
+  if (paging_set_pte_in(pml4, c.vaddr, ro_pte) != 0)
+    goto out_fail;
+
   uint32_t slot = swap_alloc_slot((uint32_t)type);
   if (slot == 0xFFFFFFFFu) {
-    paging_set_pte_in(pml4, c.vaddr, pte); // restaurar RW
-    return 0;
+    paging_set_pte_in(pml4, c.vaddr, pte);
+    goto out_fail;
   }
 
   if (swap_write_page((uint32_t)type, slot, phys) != 0) {
     swap_free_slot((uint32_t)type, slot);
-    paging_set_pte_in(pml4, c.vaddr, pte); // restaurar RW
-    return 0;
+    paging_set_pte_in(pml4, c.vaddr, pte);
+    goto out_fail;
   }
 
-  // Paso 5: [CRÍTICO] Re-verificar. Si durante el I/O el proceso
-  // escribió, el PF handler ya marcó el PTE como RW. Abortamos el
-  // reclaim (el slot se libera, la página se queda donde estaba).
-  if (!paging_get_pte_in(pml4, c.vaddr, &check) ||
-      (check & PTE_FRAME) != phys || (check & PTE_WRITABLE)) {
+  // mm_lock prevents concurrent munmap/exec/fork/page-fault mutation of this
+  // address space while the swap I/O is in flight.
+  if (paging_set_pte_in(pml4, c.vaddr,
+                        pte_encode_swap((uint32_t)type, slot)) != 0) {
     swap_free_slot((uint32_t)type, slot);
-    return 0;
-  }
-
-  // Paso 6: promover a swap marker y liberar el frame
-  uint64_t spte = pte_encode_swap((uint32_t)type, slot);
-  if (paging_set_pte_in(pml4, c.vaddr, spte) != 0) {
-    swap_free_slot((uint32_t)type, slot);
-    paging_set_pte_in(pml4, c.vaddr, pte); // restaurar RW
-    return 0;
+    paging_set_pte_in(pml4, c.vaddr, pte);
+    goto out_fail;
   }
 
   pmm_free_page(phys);
+  mutex_unlock(&owner->mm_lock);
   return 1;
+
+out_fail:
+  mutex_unlock(&owner->mm_lock);
+  return 0;
 }
-
-// ---------------------------------------------------------------------------
-// kswapd: kernel thread
-static bool kswapd_never(void *arg) {
-  (void)arg;
-  return false;
-}
-
-void kswapd_main(void) {
-  LOG_INFO("[KSWAPD] Thread iniciado (low=%lu high=%lu páginas)",
-           (unsigned long)SWAP_LOW_WATERMARK,
-           (unsigned long)SWAP_HIGH_WATERMARK);
-
-  wait_queue_t wq;
-  wait_queue_init(&wq);
-
-  while (1) {
-    // Dormir ~0,5 segundos (nunca despierta por condición, solo por timeout)
-    wait_event_interruptible_timeout(&wq, kswapd_never, NULL, 500);
-
-    if (swap_device_count() == 0)
-      continue;
-
-    uint64_t free_pages = pmm_free_pages_count();
-    if (free_pages >= SWAP_LOW_WATERMARK)
-      continue;
-
-    LOG_INFO("[KSWAPD] free=%lu < low=%lu, iniciando reclaim",
-             (unsigned long)free_pages, (unsigned long)SWAP_LOW_WATERMARK);
-
-    int n = 0;
-    while (pmm_free_pages_count() < SWAP_HIGH_WATERMARK && n < 8192) {
-      if (!swap_reclaim_one())
-        break;
-      n++;
-    }
-    LOG_INFO("[KSWAPD] Reclamadas %d páginas. free=%lu", n,
-             (unsigned long)pmm_free_pages_count());
-  }
 }
