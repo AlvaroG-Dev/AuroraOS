@@ -365,7 +365,10 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
 
       uint64_t phys = paging_get_phys_in(pml4, page_vaddr);
       if (!phys) {
-        LOG_ERR("[ELF] Física no encontrada");
+        uint64_t debug_pte = 0;
+        int debug_found = paging_get_pte_in(pml4, page_vaddr, &debug_pte);
+        LOG_ERR("[ELF] Física no encontrada: va=%p pte_found=%d pte=%p",
+                (void *)page_vaddr, debug_found, (void *)debug_pte);
         kfree(tmp);
         goto out;
       }
