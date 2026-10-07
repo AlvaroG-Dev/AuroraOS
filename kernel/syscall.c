@@ -291,12 +291,7 @@ static int64_t k_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a4,
     return -EFAULT;
   if (!access_ok((void *)buf, (size_t)count))
     return -EFAULT;
-  int64_t rc = vfs_read_for_proc(proc, (int)fd, (void *)buf, (size_t)count);
-  if (strcmp(proc->name, "bash") == 0 && fd < MAX_PROCESS_FDS &&
-      proc->fds[fd] && proc->fds[fd]->node)
-    LOG_INFO("[BASH-READ-DIAG] path=%s count=%lu rc=%ld",
-             proc->fds[fd]->node->name, count, rc);
-  return rc;
+  return vfs_read_for_proc(proc, (int)fd, (void *)buf, (size_t)count);
 }
 
 static int64_t k_write(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a4,
@@ -1652,8 +1647,6 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
 
 static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
                         uint64_t a4, uint64_t a5) {
-  static char bash_stderr_diag[512];
-  static size_t bash_stderr_diag_len;
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
@@ -1683,27 +1676,6 @@ static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
         continue;
       if (!access_ok((void *)local[i].iov_base, (size_t)local[i].iov_len))
         return total > 0 ? total : -EFAULT;
-      if (strcmp(proc->name, "bash") == 0 && fd == 2) {
-        char text[256];
-        size_t text_len = local[i].iov_len;
-        if (text_len > sizeof(text))
-          text_len = sizeof(text);
-        if (copy_from_user(text, (const void *)local[i].iov_base, text_len) ==
-            0) {
-          for (size_t j = 0; j < text_len; j++) {
-            char c = text[j];
-            if (c != '\n' &&
-                bash_stderr_diag_len < sizeof(bash_stderr_diag) - 1)
-              bash_stderr_diag[bash_stderr_diag_len++] = c;
-            if (c == '\n' ||
-                bash_stderr_diag_len == sizeof(bash_stderr_diag) - 1) {
-              bash_stderr_diag[bash_stderr_diag_len] = '\0';
-              LOG_INFO("[BASH-STDERR] %s", bash_stderr_diag);
-              bash_stderr_diag_len = 0;
-            }
-          }
-        }
-      }
       int64_t r =
           vfs_write_for_proc(proc, (int)fd, (const void *)local[i].iov_base,
                              (size_t)local[i].iov_len);
@@ -2138,10 +2110,7 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
   // 0xffffffffXXXXXXXX. Truncamos a 32 bits, que es lo que hacen
   // Linux y cualquier kernel POSIX en el syscall ioctl.
   unsigned long kreq = (unsigned long)(uint32_t)req;
-  int64_t rc = vfs_node_ioctl(proc->fds[kfd]->node, kreq, arg);
-  if (strcmp(proc->name, "bash") == 0)
-    LOG_INFO("[IOCTL-DIAG] req=%lx arg=%p rc=%ld", kreq, (void *)arg, rc);
-  return rc;
+  return vfs_node_ioctl(proc->fds[kfd]->node, kreq, arg);
 }
 
 // ---------- clock_gettime ----------
@@ -2193,10 +2162,6 @@ static int64_t k_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  if (proc && strcmp(proc->name, "bash") == 0)
-    LOG_INFO("[GETTIMEOFDAY-DIAG] tv=%p tz=%p", (void *)tv_ptr,
-             (void *)tz_ptr);
 
   if (tv_ptr) {
     struct {
@@ -4995,17 +4960,6 @@ uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t arg5 = regs->r8;
 
   task_t *cur = sched_current();
-  // [DEBUG] Trace de TODAS las syscalls de procesos "sh" y "dash".
-  static uint32_t g_dbg_pid = 0;
-  if (cur && cur->proc && strcmp(cur->proc->name, "sh") == 0) {
-    if (g_dbg_pid != cur->proc->pid) {
-      g_dbg_pid = cur->proc->pid;
-      LOG_INFO("[DBG] trazar pid=%u", cur->proc->pid);
-    }
-    LOG_INFO("[DBG] num=%lu a1=%p a2=%p a3=%p a4=%p a5=%p", (unsigned long)num,
-             (void *)arg1, (void *)arg2, (void *)arg3, (void *)arg4,
-             (void *)arg5);
-  }
 
   syscall_fn_t fn = NULL;
   if (num < (uint64_t)LINUX_TABLE_N) {
@@ -5034,10 +4988,6 @@ uint64_t syscall_handler_c(registers_t *regs) {
     cur->syscall_regs = regs;
 
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
-  if (cur && cur->proc && strcmp(cur->proc->name, "bash") == 0)
-    LOG_INFO("[BASH-SYS] num=%lu a1=%p a2=%p a3=%p ret=%ld",
-             (unsigned long)num, (void *)arg1, (void *)arg2, (void *)arg3,
-             (long)ret);
 
   // Publicar el valor de retorno en el trap frame ANTES de la entrega
   // de señales, para que el ucontext que construyamos capture el rax

@@ -182,9 +182,6 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
     return 0;
   }
 
-  if (((proc->stack_base - page) & ((1ULL << 20) - 1)) < PAGE_SIZE)
-    LOG_INFO("[STACK-GROW-DIAG] PID=%u addr=%p distance=%llx", proc->pid,
-             (void *)page, (unsigned long long)(proc->stack_base - page));
   return 1;
 }
 
@@ -408,10 +405,6 @@ static int handle_page_fault_inner(registers_t *regs) {
     }
 
     if (cr2 >= proc->stack_guard && cr2 < proc->stack_guard + PAGE_SIZE) {
-      LOG_ERR("[STACK-DIAG] fault=%p rip=%p guard=%p low=%p top=%p base=%p",
-              (void *)cr2, (void *)regs->rip, (void *)proc->stack_guard,
-              (void *)proc->stack_low,
-              (void *)proc->stack_top, (void *)proc->stack_base);
       kill_current_process(regs, "stack overflow (guard page)");
       return 1;
     }

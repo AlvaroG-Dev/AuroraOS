@@ -389,15 +389,6 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     spin_unlock_irqrestore(&tty->lock, flags);
     if (!access_ok((void *)arg, sizeof(t)))
       return -EFAULT;
-    // Log una vez para saber qué se está enviando.
-    static int logged = 0;
-    if (!logged) {
-      logged = 1;
-      LOG_INFO("[TTY] TCGETS a=%p iflag=%x oflag=%x cflag=%x lflag=%x "
-               "cc[0..3]=%02x %02x %02x %02x",
-               (void *)arg, t.c_iflag, t.c_oflag, t.c_cflag, t.c_lflag,
-               t.c_cc[0], t.c_cc[1], t.c_cc[2], t.c_cc[3]);
-    }
     if (copy_to_user((void *)arg, &t, sizeof(t)) < 0)
       return -EFAULT;
     return 0;
