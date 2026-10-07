@@ -262,6 +262,17 @@ void isr_handler(registers_t *regs) {
     }
   }
 
+  // [glibc] Excepción en userspace: NO matar el kernel.
+  if ((regs->cs & 3) == 3) {
+    LOG_ERR("[ISR] excepción #%lu (%s) en userspace: rip=%p rsp=%p err=0x%lx",
+            (unsigned long)regs->int_num,
+            (regs->int_num < 32) ? exception_names[regs->int_num] : "?",
+            (void *)regs->rip, (void *)regs->rsp,
+            (unsigned long)regs->error_code);
+    process_exit_current(-1); // o signal_deliver_from_exception(SIGSEGV, regs);
+    return;
+  }
+
   // Comparar.
   LOG_ERR("[ISR] ahora: int_num=%lu rip=%p rsp=%p ss=0x%lx",
           (unsigned long)regs->int_num, (void *)regs->rip, (void *)regs->rsp,

@@ -4142,6 +4142,16 @@ static int64_t k_clock_nanosleep(uint64_t clockid, uint64_t flags,
   return k_nanosleep(req_ptr, rem_ptr, 0, 0, 0);
 }
 
+static int64_t k_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
+                           uint64_t advice, uint64_t a5) {
+  (void)fd;
+  (void)offset;
+  (void)len;
+  (void)advice;
+  (void)a5;
+  return 0; // no-op: somos un FS en RAM
+}
+
 // ===========================================================================
 //  AURORA-ONLY HANDLERS  (rango 0x1000+)
 // ===========================================================================
@@ -4810,6 +4820,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETPRIORITY] = {k_getpriority, "getpriority"},             // 140
     [SYS_SETPRIORITY] = {k_setpriority, "setpriority"},             // 141
     [SYS_CLOCK_NANOSLEEP] = {k_clock_nanosleep, "clock_nanosleep"}, // 230
+    [SYS_FADVISE64] = {k_fadvise64, "fadvise64"},                   // 291
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 

@@ -834,6 +834,8 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
 // MAP_SHARED file-backed requiere writeback; devolvemos -ENODEV hasta
 // que exista esa infraestructura. Solo MAP_PRIVATE por ahora.
 // ---------------------------------------------------------------------------
+#define MMAP_MAP_FIXED_NOREPLACE 0x100000ULL
+
 int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
                  uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
   if (!proc || length == 0)
@@ -843,13 +845,9 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   int is_file = !is_anon && fd >= 0;
 
   if (!is_anon && !is_file)
-    return -EINVAL; // ni anónimo ni file-backed
-
-  if (is_file && (flags & MMAP_MAP_SHARED)) {
-    // MAP_SHARED file-backed: requiere writeback, no soportado todavía.
+    return -EINVAL;
+  if (is_file && (flags & MMAP_MAP_SHARED))
     return -ENODEV;
-  }
-
   if (length > UINT64_MAX - 0xFFFULL)
     return -EINVAL;
   uint64_t len = (length + 0xFFFULL) & ~0xFFFULL;
@@ -862,23 +860,36 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   if (!(prot & MMAP_PROT_EXEC))
     pte_flags |= PTE_NX;
 
+  int is_fixed = (flags & MMAP_MAP_FIXED) != 0;
+  int is_noreplace = (flags & MMAP_MAP_FIXED_NOREPLACE) != 0;
   uint64_t base;
 
-  if (flags & MMAP_MAP_FIXED) {
-    // addr SÍ tiene que estar alineado (Linux), length NO.
-    // Linux redondea length hacia arriba internamente; solo rechaza
-    // length==0 (ya comprobado antes) y addr desalineado.
-    if ((addr & 0xFFFULL) != 0) {
-      LOG_ERR("[MMAP] EINVAL align: addr=%p len=%lu flags=0x%lx", (void *)addr,
-              (unsigned long)length, (unsigned long)flags);
+  if (flags & MMAP_MAP_ANONYMOUS) {
+    // Sanity: leer 4 bytes en offset 0 del rango.
+    uint64_t probe = base;
+    uint64_t v = *(volatile uint32_t *)phys_to_virt(paging_get_phys(probe));
+    LOG_TRACE("[MMAP-ANON] base=%p first4=0x%08lx", (void *)base,
+              (unsigned long)v);
+  }
+
+  if (is_fixed || is_noreplace) {
+    if ((addr & 0xFFFULL) != 0)
       return -EINVAL;
-    }
     if (addr >= USER_LIMIT || len > USER_LIMIT - addr)
       return -EINVAL;
+    if (is_noreplace) {
+      vma_t *v = proc->vma_list;
+      while (v) {
+        if (addr < v->end && addr + len > v->start)
+          return -EEXIST;
+        v = v->next;
+      }
+    } else {
+      int64_t ur = vma_unmap_range(proc, addr, addr + len);
+      if (ur < 0)
+        return ur;
+    }
     base = addr;
-    int64_t ur = vma_unmap_range(proc, base, base + len);
-    if (ur < 0)
-      return ur;
   } else {
     base = 0;
     if (addr != 0) {
@@ -921,17 +932,14 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     file_descriptor_t *f = proc->fds[fd];
     if (!f->node || !(f->node->flags & VFS_FILE))
       return -EINVAL;
-    if (!f->node->ops || !f->node->ops->read) {
+    if (!f->node->ops || !f->node->ops->read)
       return -EINVAL;
-    }
-    if (offset & 0xFFFULL) {
+    if (offset & 0xFFFULL)
       return -EINVAL;
-    }
     vma_t *v = vma_create_file(proc, base, base + len, pte_flags, f, offset);
     if (!v)
       return -ENOMEM;
   }
-
   return (int64_t)base;
 }
 
