@@ -24,7 +24,10 @@ install: $(MUSL_APPS)
 		file $(SYSDIR)/bin/$$app | sed 's/^/  /'; \
 	done
 
-$(MUSL_APPS): %: apps/%/main.c
+.PHONY: FORCE
+FORCE:
+
+$(MUSL_APPS): %: apps/%/main.c FORCE
 	@if [ ! -x "$(MUSL_CC)" ]; then \
 		echo "SKIP: falta toolchain musl en $(MUSL_CC)"; exit 1; \
 	fi
