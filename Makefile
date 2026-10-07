@@ -29,10 +29,10 @@ bootloader:
 # ---------------------------------------------------------------------------
 # Userland: nativo (user/) + musl (user/musl/).
 #
-# El orden importa: user/ primero (binarios nativos: shell, tests, apps
-# Aurora), user/musl/ después. Ambos usan el mismo staging centralizado y
-# colocan ejecutables en /bin; las librerías compartidas se resuelven una sola
-# vez desde el pool raíz lib/.
+# user/ contiene solo programas nativos específicos de Aurora y tests.
+# Las utilidades POSIX generales las proporciona BusyBox; los programas
+# POSIX adicionales propios se compilan con musl en user/musl/. Ambos usan
+# el mismo staging centralizado y colocan ejecutables en /bin.
 # ---------------------------------------------------------------------------
 user: user-native user-musl
 
@@ -190,12 +190,6 @@ image: bootloader kernel user
 	mcopy -i aurora.img -s esp/EFI ::
 	mcopy -i aurora.img -s esp/kernel.elf ::
 	mcopy -i aurora.img -s esp/etc ::
-	@if [ -f sysroot/bin/ls ]; then \
-		mcopy -i aurora.img sysroot/bin/ls ::/LS.ELF; \
-	fi
-	@if [ -f sysroot/bin/cat ]; then \
-		mcopy -i aurora.img sysroot/bin/cat ::/CAT.ELF; \
-	fi
 
 # ---------------------------------------------------------------------------
 # QEMU flags

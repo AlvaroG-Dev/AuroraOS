@@ -371,11 +371,11 @@ EXPECTED_BOOT=(
     "[FB] Inicializado en memoria"
     "[COMP] Compositor thread started"
     "[WINSRV] Inicializado"
-    "[PROC] Proceso '/apps/init' creado"
+    "[PROC] Proceso '/bin/init' creado"
 )
 
 EXPECTED_SHELL=(
-    "[PROC] Proceso '/apps/terminal' creado"
+    "[PROC] Proceso '/bin/terminal' creado"
     "[PROC] Proceso '/bin/sh' creado"
 )
 

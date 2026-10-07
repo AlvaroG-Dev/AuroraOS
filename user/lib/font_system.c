@@ -1,7 +1,6 @@
 // user/lib/font_system.c — GENERADO. No editar a mano.
 // Re-generar con: make -C user regen-font   (ver Makefile)
 #include "font_system.h"
-#pragma once
 
 
 static const uint8_t glyph_bmp_jetbrainsmono_regular_regular_14_0[] = { 0 };

@@ -3,7 +3,7 @@
 // init (PID 1) de Aurora OS.
 //
 // Responsabilidades:
-//   1. Lanzar el terminal gráfico (/apps/terminal) como primer hijo.
+//   1. Lanzar el terminal gráfico (/bin/terminal) como primer hijo.
 //   2. Reapear huérfanos reparentados a PID 1 por el kernel cuando su
 //      padre muere (Bloque D en kernel/process.c).
 //   3. Relanzar el terminal si muere por crash. Si el usuario lo cierra
@@ -25,7 +25,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define TERMINAL_PATH "/apps/terminal"
+#define TERMINAL_PATH "/bin/terminal"
 #define RESPAWN_DELAY_SEC 1
 
 static char *default_envp[] = {

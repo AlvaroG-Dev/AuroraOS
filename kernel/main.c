@@ -282,11 +282,11 @@ static void kmain_task(void) {
 
   __sched_canary_check();
 
-  LOG_INFO("[INIT] Cargando init '/apps/init'...");
-  process_t *init_proc = process_load("/apps/init");
+  LOG_INFO("[INIT] Cargando init '/bin/init'...");
+  process_t *init_proc = process_load("/bin/init");
   if (!init_proc) {
-    LOG_WARN("[INIT] /apps/init no encontrado, fallback a /apps/terminal");
-    process_load("/apps/terminal");
+    LOG_WARN("[INIT] /bin/init no encontrado, fallback a /bin/terminal");
+    process_load("/bin/terminal");
   }
 
   return;

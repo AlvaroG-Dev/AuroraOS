@@ -33,14 +33,10 @@ NATIVE_ALL = hello calc filetest ipctest pftest waitpid_stress \
              vma_isolation_worker munmap_partial \
              elf_validation elf_permtest \
              sbrk_shrink_test sbrk_shrink calloc_overflow \
-             shell ls cat echo touch wc head grep tee sort \
              segvtest segvtest_stack segvtest_nx segvtest_mmap_ro segvtest_kernel \
-             win_blit_fault \
-             mkdir rm cp pwd mv kill
+             win_blit_fault
 
 CORE_APPS := $(foreach a,$(NATIVE_ALL),$(if $(wildcard apps/$a/main.c),$a))
-CORE_APPS := $(filter-out shell,$(CORE_APPS))
-
 STANDALONE_APPS = syscall_linux_test
 SPECIAL_APPS = elf_rotest
 
@@ -50,9 +46,7 @@ LIB_OBJS = crt0.o syscall.o \
            lib/string.o lib/malloc.o lib/file.o lib/ipc.o lib/process.o \
            lib/env.o
 
-SHELL_LIBS = $(LIB_OBJS) lib/font_system.o
-
-all: $(APPS) shell
+all: $(APPS)
 
 crt0.o: crt0.asm
 	$(AS) -f elf64 $< -o $@
@@ -72,11 +66,6 @@ lib/env.o: lib/env.c lib/env.h lib/string.h lib/malloc.h
 $(CORE_APPS): %: apps/%/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $(LIB_OBJS) $@.o $(LDFLAGS)
-	@$(STAGE) $@ $(SYSDIR) /bin
-
-shell: apps/shell/main.c $(SHELL_LIBS)
-	$(CC) $(CFLAGS) -c $< -o $@.o
-	$(LD) -o $@ $(SHELL_LIBS) $@.o $(LDFLAGS)
 	@$(STAGE) $@ $(SYSDIR) /bin
 
 syscall_linux_test: apps/syscall_linux_test/main.c
@@ -107,7 +96,7 @@ regen-font:
 
 clean:
 	rm -f *.o lib/*.o
-	rm -f $(APPS) shell
-	rm -f $(addprefix $(SYSDIR)/bin/,$(APPS)) $(SYSDIR)/bin/shell
+	rm -f $(APPS)
+	rm -f $(addprefix $(SYSDIR)/bin/,$(APPS))
 
 .PHONY: all clean regen-font
