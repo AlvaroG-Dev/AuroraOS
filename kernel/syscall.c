@@ -306,6 +306,35 @@ static int64_t k_write(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a4,
   return vfs_write_for_proc(proc, (int)fd, (const void *)buf, (size_t)count);
 }
 
+// ---------- pread64 / pwrite64 ----------
+//
+// [glibc] pread/pwrite = read/write con offset explícito, sin mover
+// f->offset. glibc los usa para leer la cabecera ELF de un .so antes
+// de decidir cómo mmap'earlo.
+static int64_t k_pread64(uint64_t fd, uint64_t buf, uint64_t count,
+                         uint64_t offset, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!access_ok((void *)buf, (size_t)count))
+    return -EFAULT;
+  return vfs_pread_for_proc(proc, (int)fd, (void *)buf, (size_t)count,
+                            (uint64_t)offset);
+}
+
+static int64_t k_pwrite64(uint64_t fd, uint64_t buf, uint64_t count,
+                          uint64_t offset, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!access_ok((void *)buf, (size_t)count))
+    return -EFAULT;
+  return vfs_pwrite_for_proc(proc, (int)fd, (const void *)buf, (size_t)count,
+                             (uint64_t)offset);
+}
+
 // ---------- close ----------
 static int64_t k_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
@@ -320,13 +349,9 @@ static int64_t k_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
 }
 
 // ---------- open / openat ----------
-static int64_t do_open_common(process_t *proc, const char *raw_path,
-                              int linux_flags) {
-  char path[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, raw_path, path, sizeof(path));
-  if (rc != 0)
-    return rc;
-
+// [glibc] Núcleo reutilizable: toma un path ABSOLUTO ya resuelto.
+static int64_t do_open_resolved(process_t *proc, const char *kpath,
+                                int linux_flags) {
   int aflags;
   switch (linux_flags & LINUX_O_ACCMODE) {
   case LINUX_O_RDONLY:
@@ -343,40 +368,28 @@ static int64_t do_open_common(process_t *proc, const char *raw_path,
     break;
   }
 
-  // [FIX 3.4.a] O_CREAT: solo crear si el fichero NO existe.
-  //
-  // Antes llamábamos siempre a vfs_create, y devolvía -EROFS en FS sin
-  // op create (devfs, procfs, tarfs). Eso hacía que `2>/dev/null`
-  // fallara con "Read-only file system" aunque /dev/null ya existiera.
-  //
-  // Linux: O_CREAT sin O_EXCL sobre un fichero existente simplemente
-  // lo abre. Con O_EXCL sí devuelve EEXIST.
   int created_here = 0;
   if (linux_flags & LINUX_O_CREAT) {
-    vfs_node_t *probe = vfs_lookup(path);
+    vfs_node_t *probe = vfs_lookup(kpath);
     if (probe) {
-      // Ya existe. Solo es error si O_EXCL está puesto.
       vfs_node_free(probe);
       if (linux_flags & LINUX_O_EXCL)
         return -EEXIST;
     } else {
-      // [3.4.c] Aplicar umask al modo de creación.
       uint32_t create_mode = 0666 & ~proc->umask;
-      int crc = vfs_create(path, create_mode);
-      if (crc == 0) {
+      int crc = vfs_create(kpath, create_mode);
+      if (crc == 0)
         created_here = 1;
-      } else if (crc != -EEXIST) {
+      else if (crc != -EEXIST)
         return crc;
-      }
     }
   }
 
-  int fd = vfs_open_for_proc(proc, path, aflags);
+  int fd = vfs_open_for_proc(proc, kpath, aflags);
   if (fd < 0) {
-    LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", path, linux_flags, fd);
+    LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", kpath, linux_flags, fd);
     return fd;
   }
-  LOG_TRACE("[OPEN-OK] path='%s'", path);
 
   if (!created_here && (linux_flags & LINUX_O_TRUNC)) {
     file_descriptor_t *f = proc->fds[fd];
@@ -391,15 +404,14 @@ static int64_t do_open_common(process_t *proc, const char *raw_path,
   return fd;
 }
 
-static int64_t k_open(uint64_t path, uint64_t flags, uint64_t a3, uint64_t a4,
-                      uint64_t a5) {
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
-    return -EFAULT;
-  return do_open_common(proc, (const char *)path, (int)flags);
+// Ahora do_open_common es solo "resolver user-ptr → path absoluto → open".
+static int64_t do_open_common(process_t *proc, const char *raw_path,
+                              int linux_flags) {
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, raw_path, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return do_open_resolved(proc, path, linux_flags);
 }
 
 static int64_t k_openat(uint64_t dfd, uint64_t path, uint64_t flags,
@@ -409,8 +421,67 @@ static int64_t k_openat(uint64_t dfd, uint64_t path, uint64_t flags,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-  if ((int64_t)dfd != AT_FDCWD)
-    return -EINVAL;
+
+  // [glibc] El cast debe ser a (int), NO a (int64_t). glibc pasa
+  // AT_FDCWD cero-extendido (0x00000000FFFFFF9C), y el cast a int64_t
+  // daría 4294967196 en lugar de -100, entrando al branch por error.
+  if ((int)dfd != AT_FDCWD) {
+    int kfd = (int)dfd;
+    if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+      return -EBADF;
+    vfs_node_t *dir_node = proc->fds[kfd]->node;
+    if (!dir_node || !(dir_node->flags & VFS_DIRECTORY))
+      return -ENOTDIR;
+
+    char rel[VFS_PATH_MAX];
+    long n = strncpy_from_user(rel, (const char *)path, sizeof(rel));
+    if (n < 0)
+      return -EFAULT;
+    if (n == 0)
+      return -EINVAL;
+
+    char full[VFS_PATH_MAX];
+    if (rel[0] == '/') {
+      size_t rl = strlen(rel);
+      if (rl >= sizeof(full))
+        return -ENAMETOOLONG;
+      memcpy(full, rel, rl + 1);
+    } else {
+      const char *base = dir_node->name;
+      size_t bl = strlen(base);
+      size_t rl = strlen(rel);
+      int base_is_root = (bl == 1 && base[0] == '/');
+      size_t needed = base_is_root ? (1 + rl + 1) : (bl + 1 + rl + 1);
+      if (needed > sizeof(full))
+        return -ENAMETOOLONG;
+      if (base_is_root) {
+        full[0] = '/';
+        memcpy(full + 1, rel, rl + 1);
+      } else {
+        memcpy(full, base, bl);
+        full[bl] = '/';
+        memcpy(full + bl + 1, rel, rl + 1);
+      }
+    }
+
+    char norm[VFS_PATH_MAX];
+    int rc = vfs_resolve_path("/", full, norm, sizeof(norm));
+    if (rc != 0)
+      return rc;
+    return do_open_resolved(proc, norm, (int)flags);
+  }
+
+  return do_open_common(proc, (const char *)path, (int)flags);
+}
+
+static int64_t k_open(uint64_t path, uint64_t flags, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
   return do_open_common(proc, (const char *)path, (int)flags);
 }
 
@@ -511,7 +582,7 @@ static int64_t k_fstatat(uint64_t dfd, uint64_t path, uint64_t statbuf,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-  if ((int64_t)dfd != AT_FDCWD)
+  if ((int)dfd != AT_FDCWD)
     return -EINVAL;
   return do_stat_path(proc, (const char *)path, statbuf, flags);
 }
@@ -570,7 +641,7 @@ static int64_t k_mkdirat(uint64_t dfd, uint64_t path, uint64_t mode,
   (void)mode;
   (void)a4;
   (void)a5;
-  if ((int64_t)dfd != AT_FDCWD)
+  if ((int)dfd != AT_FDCWD)
     return -EINVAL;
   return k_mkdir(path, 0, 0, 0, 0);
 }
@@ -596,7 +667,7 @@ static int64_t k_unlinkat(uint64_t dfd, uint64_t path, uint64_t flags,
   (void)flags;
   (void)a4;
   (void)a5;
-  if ((int64_t)dfd != AT_FDCWD)
+  if ((int)dfd != AT_FDCWD)
     return -EINVAL;
   return k_unlink(path, 0, 0, 0, 0);
 }
@@ -622,7 +693,7 @@ static int64_t k_rename(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
 static int64_t k_renameat(uint64_t odfd, uint64_t oldp, uint64_t ndfd,
                           uint64_t newp, uint64_t a5) {
   (void)a5;
-  if ((int64_t)odfd != AT_FDCWD || (int64_t)ndfd != AT_FDCWD)
+  if ((int)odfd != AT_FDCWD || (int)ndfd != AT_FDCWD)
     return -EINVAL;
   return k_rename(oldp, newp, 0, 0, 0);
 }
@@ -1908,7 +1979,7 @@ static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
 static int64_t k_readlinkat(uint64_t dirfd, uint64_t path, uint64_t buf,
                             uint64_t bufsiz, uint64_t a5) {
   (void)a5;
-  if ((int64_t)dirfd != AT_FDCWD) {
+  if ((int)dirfd != AT_FDCWD) {
     // Path relativo a un dirfd abierto: no soportado todavía.
     // BusyBox rara vez lo usa (suele pasar AT_FDCWD).
     return -EINVAL;
@@ -1926,7 +1997,7 @@ static int64_t k_faccessat(uint64_t dirfd, uint64_t path, uint64_t mode,
                            uint64_t flags, uint64_t a5) {
   (void)flags;
   (void)a5;
-  if ((int64_t)dirfd != AT_FDCWD)
+  if ((int)dirfd != AT_FDCWD)
     return -EINVAL;
   return k_access(path, mode, 0, 0, 0);
 }
@@ -1989,7 +2060,7 @@ static int64_t k_link(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
 static int64_t k_linkat(uint64_t olddfd, uint64_t oldp, uint64_t newdfd,
                         uint64_t newp, uint64_t flags) {
   (void)flags;
-  if ((int64_t)olddfd != AT_FDCWD || (int64_t)newdfd != AT_FDCWD)
+  if ((int)olddfd != AT_FDCWD || (int)newdfd != AT_FDCWD)
     return -EINVAL;
   return k_link(oldp, newp, 0, 0, 0);
 }
@@ -3179,7 +3250,7 @@ static int64_t k_fchmodat(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
                           uint64_t flags, uint64_t a5) {
   (void)flags;
   (void)a5;
-  if ((int64_t)dfd != AT_FDCWD)
+  if ((int)dfd != AT_FDCWD)
     return -EINVAL;
   return k_chmod(path_ptr, mode, 0, 0, 0);
 }
@@ -3259,7 +3330,7 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   // [4.2] futimens(fd, times) → utimensat(fd, NULL, times, 0).
   // BusyBox touch abre el fichero con O_CREAT y luego aplica futimens.
   // Sin este path, dfd != AT_FDCWD → EINVAL → mtime se queda en 1980.
-  if ((int64_t)dfd != AT_FDCWD) {
+  if ((int)dfd != AT_FDCWD) {
     if (path_uptr != 0)
       return -EINVAL; // path relativo a dfd: no soportado todavía
     int kfd = (int)dfd;
@@ -4592,6 +4663,8 @@ static int64_t a_fs_check(uint64_t path_ptr, uint64_t result_ptr, uint64_t a3,
 static const syscall_entry_t linux_table[] = {
     [SYS_READ] = {k_read, "read"},
     [SYS_WRITE] = {k_write, "write"},
+    [SYS_PREAD64] = {k_pread64, "pread64"},
+    [SYS_PWRITE64] = {k_pwrite64, "pwrite64"},
     [SYS_OPEN] = {k_open, "open"},
     [SYS_CLOSE] = {k_close, "close"},
     [SYS_STAT] = {k_stat, "stat"},
@@ -4822,9 +4895,7 @@ uint64_t syscall_handler_c(registers_t *regs) {
       LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
                 (unsigned long)num, (void *)arg1, (unsigned long)arg2,
                 (long)ret);
-    } else if (num < 100) {
-      // Otros syscalls "básicos" que devuelvan error: útiles para ver
-      // si open/read/write están fallando también.
+    } else {
       LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
     }
   }

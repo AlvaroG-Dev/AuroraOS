@@ -283,18 +283,10 @@ static int handle_page_fault_inner(registers_t *regs) {
   // 1. Fallo en modo usuario: path clásico.
   // -------------------------------------------------------------------------
   if (user) {
-    // Log SIEMPRE para diagnóstico. Muestra present/write/fetch.
-    LOG_DEBUG("[PF-USER] pid=%u rip=%p cr2=%p err=0x%lx (P=%d W=%d F=%d)",
-              process_current() ? process_current()->pid : 0, (void *)regs->rip,
-              (void *)cr2, err, (int)(err & 1), (int)((err >> 1) & 1),
-              (int)((err >> 4) & 1));
 
     if (present) {
       // Solo aquí importa el bit "fetch": página presente + fetch = NX
       // violation.
-      LOG_DEBUG("[PF-USER] pid=%u rip=%p cr2=%p err=0x%lx",
-                process_current() ? process_current()->pid : 0,
-                (void *)regs->rip, (void *)cr2, err);
       // [SWAP] ¿Violación de escritura sobre una página RW que kswapd
       // marcó temporalmente RO para reclaimarla?
       if ((err & 0x02) != 0) {
@@ -873,8 +865,14 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   uint64_t base;
 
   if (flags & MMAP_MAP_FIXED) {
-    if ((addr & 0xFFFULL) != 0 || (length & 0xFFFULL) != 0)
+    // addr SÍ tiene que estar alineado (Linux), length NO.
+    // Linux redondea length hacia arriba internamente; solo rechaza
+    // length==0 (ya comprobado antes) y addr desalineado.
+    if ((addr & 0xFFFULL) != 0) {
+      LOG_ERR("[MMAP] EINVAL align: addr=%p len=%lu flags=0x%lx", (void *)addr,
+              (unsigned long)length, (unsigned long)flags);
       return -EINVAL;
+    }
     if (addr >= USER_LIMIT || len > USER_LIMIT - addr)
       return -EINVAL;
     base = addr;
