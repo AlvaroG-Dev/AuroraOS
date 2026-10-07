@@ -359,9 +359,7 @@ struct ktty_termios {
   uint32_t c_cflag;
   uint32_t c_lflag;
   uint8_t c_line;
-  uint8_t c_cc[32];
-  uint32_t c_ispeed;
-  uint32_t c_ospeed;
+  uint8_t c_cc[19];
 };
 
 struct ktty_winsize {
@@ -370,6 +368,9 @@ struct ktty_winsize {
   uint16_t ws_xpixel;
   uint16_t ws_ypixel;
 };
+
+_Static_assert(sizeof(struct ktty_termios) == 36,
+               "ktty_termios debe seguir el ABI Linux de 36 bytes");
 
 int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
   if (!tty)
@@ -384,10 +385,19 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     t.c_oflag = tty->oflag;
     t.c_cflag = tty->cflag;
     t.c_lflag = tty->lflag;
-    memcpy(t.c_cc, tty->cc, sizeof(tty->cc) < 32 ? sizeof(tty->cc) : 32);
+    memcpy(t.c_cc, tty->cc, sizeof(t.c_cc));
     spin_unlock_irqrestore(&tty->lock, flags);
     if (!access_ok((void *)arg, sizeof(t)))
       return -EFAULT;
+    // Log una vez para saber qué se está enviando.
+    static int logged = 0;
+    if (!logged) {
+      logged = 1;
+      LOG_INFO("[TTY] TCGETS a=%p iflag=%x oflag=%x cflag=%x lflag=%x "
+               "cc[0..3]=%02x %02x %02x %02x",
+               (void *)arg, t.c_iflag, t.c_oflag, t.c_cflag, t.c_lflag,
+               t.c_cc[0], t.c_cc[1], t.c_cc[2], t.c_cc[3]);
+    }
     if (copy_to_user((void *)arg, &t, sizeof(t)) < 0)
       return -EFAULT;
     return 0;
@@ -405,7 +415,7 @@ int64_t tty_ioctl(tty_t *tty, unsigned long req, uint64_t arg) {
     tty->oflag = t.c_oflag;
     tty->cflag = t.c_cflag;
     tty->lflag = t.c_lflag;
-    memcpy(tty->cc, t.c_cc, sizeof(tty->cc));
+    memcpy(tty->cc, t.c_cc, sizeof(t.c_cc));
     spin_unlock_irqrestore(&tty->lock, flags);
     return 0;
   }

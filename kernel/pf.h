@@ -15,7 +15,7 @@ struct process;
 struct file_descriptor;
 
 // Límites
-#define MAX_STACK_GROWTH (64 * 1024) // 64 KB de stack growth permitido
+#define MAX_STACK_GROWTH (8 * 1024 * 1024) // Límite RLIMIT_STACK predeterminado
 
 typedef struct vma {
   uint64_t start;

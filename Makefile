@@ -45,13 +45,14 @@ user-musl:
 
 # ---------------------------------------------------------------------------
 # ELF malformado para probar p_offset + p_filesz fuera del archivo.
+#
+# Parte de filetest (que user/Makefile ya deja en sysroot/usr/bin/).
 # ---------------------------------------------------------------------------
 elf_malformed: user
-	@mkdir -p sysroot/apps
-	@if [ -f sysroot/apps/filetest ]; then \
-		cp sysroot/apps/filetest sysroot/apps/elf_malformed; \
+	@if [ -f sysroot/usr/bin/filetest ]; then \
+		cp sysroot/usr/bin/filetest sysroot/usr/bin/elf_malformed; \
 		printf '\\377\\377\\377\\377\\377\\377\\377\\377' | \
-			dd of=sysroot/apps/elf_malformed bs=1 seek=96 count=8 \
+			dd of=sysroot/usr/bin/elf_malformed bs=1 seek=96 count=8 \
 			conv=notrunc status=none; \
 	fi
 
@@ -62,179 +63,113 @@ initrd.tar: sysroot user elf_malformed
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
-	          sysroot/usr/lib sysroot/usr/include \
+	          sysroot/lib sysroot/lib64 \
+	          sysroot/usr/lib sysroot/usr/lib64 \
+	          sysroot/lib/x86_64-linux-gnu \
+	          sysroot/usr/lib/x86_64-linux-gnu \
+	          sysroot/usr/include \
 	          sysroot/usr/share sysroot/usr/games \
-	          sysroot/data sysroot/lib sysroot/root
-	@echo "[Makefile] Copiando busybox al tarfs..."
-	@if [ -f third_party/busybox-1.36.1/_install/bin/busybox ]; then \
-		cp -a third_party/busybox-1.36.1/_install/bin/. sysroot/bin/; \
-		cp -a third_party/busybox-1.36.1/_install/usr/. sysroot/usr/; \
-		if [ -d third_party/busybox-1.36.1/_install/sbin ]; then \
-			cp -a third_party/busybox-1.36.1/_install/sbin/. sysroot/sbin/; \
-		fi; \
+	          sysroot/data sysroot/root
+
+# ---------------------------------------------------------------------------
+# 1. (Sin busybox — userspace es 100% glibc/Ubuntu)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 2. tcc + musl + ncurses + terminfo (source-build → build/tcc_stage/)
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando build/tcc_stage/ (tcc + musl + ncurses)..."
+	@if [ -d build/tcc_stage ]; then \
+		[ -f build/tcc_stage/usr/bin/tcc ] && cp -f build/tcc_stage/usr/bin/tcc sysroot/usr/bin/ || true; \
+		[ -f build/tcc_stage/usr/lib/libtcc.so ] && cp -f build/tcc_stage/usr/lib/libtcc.so sysroot/usr/lib/ || true; \
+		[ -d build/tcc_stage/usr/lib/tcc ] && cp -r build/tcc_stage/usr/lib/tcc/. sysroot/usr/lib/tcc/ || true; \
+		[ -d build/tcc_stage/usr/include ] && cp -r build/tcc_stage/usr/include/. sysroot/usr/include/ || true; \
+		[ -d build/tcc_stage/usr/share/terminfo ] && cp -r build/tcc_stage/usr/share/terminfo sysroot/usr/share/ || true; \
+		for lib in libncursesw.a libtinfow.a libformw.a libmenuw.a libpanelw.a; do \
+			[ -f build/tcc_stage/usr/lib/$$lib ] && cp -f build/tcc_stage/usr/lib/$$lib sysroot/usr/lib/ || true; \
+		done; \
 	fi
-	@echo "[Makefile] Copiando tcc (JIT) desde tcc_stage/ si existe..."
-	@if [ -d tcc_stage ]; then \
-		if [ -f tcc_stage/usr/bin/tcc ]; then \
-			mkdir -p sysroot/usr/bin; \
-			cp -f tcc_stage/usr/bin/tcc sysroot/usr/bin/tcc; \
-			echo "[Makefile]   tcc -> sysroot/usr/bin/tcc"; \
-		fi; \
-		if [ -f tcc_stage/usr/lib/libtcc.so ]; then \
-			mkdir -p sysroot/usr/lib; \
-			cp -f tcc_stage/usr/lib/libtcc.so sysroot/usr/lib/libtcc.so; \
-			echo "[Makefile]   libtcc.so -> sysroot/usr/lib/libtcc.so"; \
-		fi; \
-	else \
-		echo "[Makefile]   (tcc_stage/ no existe, saltando tcc)"; \
-	fi
-	@echo "[Makefile] Copiando runtime de tcc (runmain.o, libtcc1.a, include)..."
-	@if [ -d tcc_stage/usr/lib/tcc ]; then \
-		mkdir -p sysroot/usr/lib/tcc; \
-		cp -r tcc_stage/usr/lib/tcc/. sysroot/usr/lib/tcc/; \
-		echo "[Makefile]   tcc runtime -> sysroot/usr/lib/tcc/"; \
-	fi
-	@echo "[Makefile] Copiando libc.a y stubs para tcc..."
-	@if [ -f tcc_stage/usr/lib/libc.a ]; then \
-		mkdir -p sysroot/usr/lib sysroot/lib; \
-		cp -f tcc_stage/usr/lib/libc.a sysroot/usr/lib/libc.a; \
-		cp -f tcc_stage/usr/lib/libc.a sysroot/lib/libc.a; \
-		echo "[Makefile]   libc.a -> sysroot/usr/lib/ y sysroot/lib/"; \
+	@echo "[Makefile] Copiando libc.a + ld-musl para tcc..."
+	@if [ -f build/tcc_stage/usr/lib/libc.a ]; then \
+		cp -f build/tcc_stage/usr/lib/libc.a sysroot/usr/lib/; \
+		cp -f build/tcc_stage/usr/lib/libc.a sysroot/lib/; \
 		for stub in libm.a libpthread.a libdl.a librt.a libcrypt.a \
 		            libresolv.a libutil.a libxnet.a libssp_nonshared.a; do \
-			if [ -f tcc_stage/usr/lib/$$stub ]; then \
-				cp -f tcc_stage/usr/lib/$$stub sysroot/usr/lib/$$stub; \
-				cp -f tcc_stage/usr/lib/$$stub sysroot/lib/$$stub; \
-			fi; \
+			[ -f build/tcc_stage/usr/lib/$$stub ] && cp -f build/tcc_stage/usr/lib/$$stub sysroot/usr/lib/ || true; \
 		done; \
-	else \
-		echo "[Makefile]   (tcc_stage/usr/lib/libc.a no existe, tcc no podra linkar)"; \
 	fi
-	@echo "[Makefile] Copiando dynamic linker de musl a sysroot/lib/..."
-	@if [ -f tcc_stage/lib/ld-musl-x86_64.so.1 ]; then \
-		cp -f tcc_stage/lib/ld-musl-x86_64.so.1 sysroot/lib/ld-musl-x86_64.so.1; \
-		echo "[Makefile]   ld-musl desde tcc_stage/ (compilado en local)"; \
-		if [ -f tcc_stage/lib/libc.so ]; then \
-			cp -f tcc_stage/lib/libc.so sysroot/lib/libc.so; \
-		fi; \
-	else \
-		MUSL_LIB=toolchain/x86_64-linux-musl-cross/x86_64-linux-musl/lib; \
-		if [ -f $$MUSL_LIB/libc.so ]; then \
-			cp -f $$MUSL_LIB/libc.so sysroot/lib/ld-musl-x86_64.so.1; \
-			cp -f $$MUSL_LIB/libc.so sysroot/lib/libc.so; \
-			echo "[Makefile]   ld-musl desde toolchain (fallback)"; \
-		else \
-			echo "[Makefile] WARN: no hay musl en tcc_stage/lib/ ni en el toolchain"; \
-		fi; \
-	fi
-	@echo "[Makefile] Copiando headers de musl para tcc..."
-	@if [ -d tcc_stage/usr/include ]; then \
-		mkdir -p sysroot/usr/include; \
-		cp -r tcc_stage/usr/include/. sysroot/usr/include/; \
-		echo "[Makefile]   headers -> sysroot/usr/include/"; \
-	else \
-		echo "[Makefile]   (tcc_stage/usr/include no existe, tcc no podra compilar)"; \
+	@if [ -f build/tcc_stage/lib/ld-musl-x86_64.so.1 ]; then \
+		cp -f build/tcc_stage/lib/ld-musl-x86_64.so.1 sysroot/lib/; \
+		[ -f build/tcc_stage/lib/libc.so ] && cp -f build/tcc_stage/lib/libc.so sysroot/lib/ || true; \
 	fi
 
 # ---------------------------------------------------------------------------
-# [NUEVO] ncurses: librerías estáticas + headers (para compilar apps).
-# ---------------------------------------------------------------------------
-	@echo "[Makefile] Copiando librerías de ncurses..."
-	@for lib in libncursesw.a libncurses++w.a libtinfow.a \
-	            libformw.a libmenuw.a libpanelw.a; do \
-		if [ -f tcc_stage/usr/lib/$$lib ]; then \
-			cp -f tcc_stage/usr/lib/$$lib sysroot/usr/lib/$$lib; \
-			cp -f tcc_stage/usr/lib/$$lib sysroot/lib/$$lib; \
-		fi; \
-	done
-	@if [ -d tcc_stage/usr/include/ncursesw ]; then \
-		mkdir -p sysroot/usr/include; \
-		cp -r tcc_stage/usr/include/ncursesw sysroot/usr/include/; \
-		echo "[Makefile]   ncurses headers -> sysroot/usr/include/ncursesw/"; \
-	fi
-	@if [ -d tcc_stage/usr/include/ncurses ]; then \
-		cp -r tcc_stage/usr/include/ncurses sysroot/usr/include/; \
-	fi
-
-# ---------------------------------------------------------------------------
-# [NUEVO] terminfo: base de datos de capacidades de terminal.
-#
-# ncurses compilado con prefijo absoluto embebe ese path. En el guest
-# hay que exportar TERMINFO=/usr/share/terminfo (o TERMINFO_DIRS) para
-# que el binario lo encuentre, porque el path compilado apunta al host.
-# ---------------------------------------------------------------------------
-	@echo "[Makefile] Copiando terminfo..."
-	@if [ -d tcc_stage/usr/share/terminfo ]; then \
-		mkdir -p sysroot/usr/share; \
-		cp -r tcc_stage/usr/share/terminfo sysroot/usr/share/; \
-		echo "[Makefile]   terminfo -> sysroot/usr/share/terminfo"; \
-	fi
-	@if [ -L tcc_stage/usr/lib/terminfo ]; then \
-		:; \
-	elif [ -d tcc_stage/usr/lib/terminfo ]; then \
-		mkdir -p sysroot/usr/lib; \
-		cp -r tcc_stage/usr/lib/terminfo sysroot/usr/lib/; \
-	fi
-
-# ---------------------------------------------------------------------------
-# [NUEVO] frotz + Zork I.
+# 3. frotz + Zork I (source-build en third_party/)
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando frotz + Zork I..."
-	@if [ -f third_party/frotz/frotz ]; then \
-		mkdir -p sysroot/usr/bin; \
-		cp -f third_party/frotz/frotz sysroot/usr/bin/frotz; \
-		echo "[Makefile]   frotz -> sysroot/usr/bin/frotz"; \
+	@[ -f third_party/frotz/frotz ] && cp -f third_party/frotz/frotz sysroot/usr/bin/ || true
+	@[ -f third_party/zork1.z3 ] && cp -f third_party/zork1.z3 sysroot/usr/games/ || true
+
+# ---------------------------------------------------------------------------
+# 4. libs/ — runtime de otros OS (glibc del host, etc.)
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando libs/ a sysroot/..."
+	@if [ -d libs ]; then \
+		find libs -mindepth 1 -maxdepth 1 -type d \
+			! -name 'glibc' -exec cp -a {} sysroot/ \; ; \
+		if [ -d libs/glibc ]; then \
+			for d in lib lib64; do \
+				[ -d libs/glibc/$$d ] || continue; \
+				cp -a libs/glibc/$$d/. sysroot/$$d/; \
+				cp -a libs/glibc/$$d/. sysroot/usr/$$d/; \
+			done; \
+			echo "[Makefile]   libs glibc -> sysroot/{lib,lib64} y sysroot/usr/{lib,lib64}"; \
+		fi; \
 	else \
-		echo "[Makefile]   (third_party/frotz/frotz no existe, saltando)"; \
-	fi
-	@if [ -f third_party/zork1.z3 ]; then \
-		mkdir -p sysroot/usr/games; \
-		cp -f third_party/zork1.z3 sysroot/usr/games/zork1.z3; \
-		echo "[Makefile]   zork1.z3 -> sysroot/usr/games/zork1.z3"; \
-	else \
-		echo "[Makefile]   (third_party/zork1.z3 no existe, saltando)"; \
+		echo "[Makefile]   (libs/ no existe)"; \
 	fi
 
 # ---------------------------------------------------------------------------
-# /root/hello.c para tcc -run
+# 5. precompiled/ — binarios de otros OS
 # ---------------------------------------------------------------------------
-	@echo "[Makefile] Creando /root/hello.c para tcc -run (si no existe)..."
+	@echo "[Makefile] Copiando precompiled/ a sysroot/..."
+	@if [ -d precompiled ]; then \
+		cp -a precompiled/. sysroot/; \
+	else \
+		echo "[Makefile]   (precompiled/ no existe)"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# /bin/sh: los programas de Ubuntu hacen execve("/bin/sh") en muchos sitios.
+# Sin usrmerge, /bin es un directorio real. Ponemos dash ahí.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Instalando /bin/sh (dash)..."
+	@if [ -f sysroot/usr/bin/bash ]; then \
+		cp -f sysroot/usr/bin/bash sysroot/bin/bash; \
+		rm -f sysroot/bin/sh sysroot/usr/bin/sh; \
+		ln -sf bash sysroot/bin/sh; \
+		ln -sf bash sysroot/usr/bin/sh; \
+	fi
+
+# ---------------------------------------------------------------------------
+# [bash] Ficheros de config que bash espera. Sin ellos, bash sale con
+# exit(1) al no poder leer /etc/profile ni /root/.bashrc.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Creando config de bash..."
+	@mkdir -p sysroot/etc sysroot/root
+	@[ -f sysroot/etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\n' > sysroot/etc/passwd
+	@[ -f sysroot/etc/group ]  || printf 'root:x:0:\n' > sysroot/etc/group
+	@[ -f sysroot/etc/profile ] || printf '# /etc/profile (empty)\n' > sysroot/etc/profile
+	@[ -f sysroot/root/.bashrc ] || printf '# ~/.bashrc (empty)\n' > sysroot/root/.bashrc
+	@[ -f sysroot/root/.profile ] || printf '# ~/.profile (empty)\n' > sysroot/root/.profile
+	
+# ---------------------------------------------------------------------------
+# 6. /root/hello.c para tcc -run
+# ---------------------------------------------------------------------------
 	@if [ ! -f sysroot/root/hello.c ]; then \
 		printf '#include <stdio.h>\n\nint main(void) {\n    printf("hola desde codigo JIT\\n");\n    for (int i = 0; i < 5; i++)\n        printf("  iter %%d\\n", i);\n    return 0;\n}\n' > sysroot/root/hello.c; \
-		echo "[Makefile]   /root/hello.c creado"; \
-	else \
-		echo "[Makefile]   /root/hello.c ya existe, no se toca"; \
 	fi
-	# ---------------------------------------------------------------------------
-# [NUEVO] glibc dinámico: loader + libc + binarios de prueba Linux.
-#
-# Se copia desde el host (Ubuntu/Debian). En cada build porque `make clean`
-# borra sysroot/. Los binarios van sufijados con -glibc para no colisionar
-# con los busybox equivalentes que ya están en /usr/bin/.
-# ---------------------------------------------------------------------------
-	@echo "[Makefile] Copiando glibc del host..."
-	@mkdir -p sysroot/lib64 sysroot/lib/x86_64-linux-gnu
-	@if [ -e /lib64/ld-linux-x86-64.so.2 ]; then \
-		cp -L /lib64/ld-linux-x86-64.so.2 sysroot/lib64/ld-linux-x86-64.so.2; \
-		echo "[Makefile]   ld-linux-x86-64.so.2 -> sysroot/lib64/"; \
-	elif [ -e /lib/ld-linux-x86-64.so.2 ]; then \
-		mkdir -p sysroot/lib; \
-		cp -L /lib/ld-linux-x86-64.so.2 sysroot/lib/ld-linux-x86-64.so.2; \
-		cp -L /lib/ld-linux-x86-64.so.2 sysroot/lib64/ld-linux-x86-64.so.2; \
-		echo "[Makefile]   ld-linux-x86-64.so.2 -> sysroot/lib/ y lib64/"; \
-	fi
-	@for lib in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1; do \
-		if [ -e /lib/x86_64-linux-gnu/$$lib ]; then \
-			cp -L /lib/x86_64-linux-gnu/$$lib sysroot/lib/x86_64-linux-gnu/$$lib; \
-		fi; \
-	done
-	@echo "[Makefile]   libc/libm/libdl/libpthread/librt -> sysroot/lib/x86_64-linux-gnu/"
-	@for prog in true echo cat ls; do \
-		if [ -e /usr/bin/$$prog ]; then \
-			cp -L /usr/bin/$$prog sysroot/usr/bin/$$prog-glibc; \
-		fi; \
-	done
-	@echo "[Makefile]   binarios glibc de prueba (true/echo/cat/ls) sufijados -glibc"
+
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 
@@ -251,12 +186,6 @@ image: bootloader kernel user
 	mcopy -i aurora.img -s esp/EFI ::
 	mcopy -i aurora.img -s esp/kernel.elf ::
 	mcopy -i aurora.img -s esp/etc ::
-	@if [ -f sysroot/apps/ls ]; then \
-		mcopy -i aurora.img sysroot/apps/ls ::/LS.ELF; \
-	fi
-	@if [ -f sysroot/apps/cat ]; then \
-		mcopy -i aurora.img sysroot/apps/cat ::/CAT.ELF; \
-	fi
 
 # ---------------------------------------------------------------------------
 # QEMU flags

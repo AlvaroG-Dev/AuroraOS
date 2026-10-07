@@ -53,6 +53,8 @@ linker.ld: linker.ld.in memlayout.h
 %.o: %.asm
 	$(AS) -f elf64 $< -o $@
 
+initrd.o: initrd.asm initrd.tar
+
 # ---------------------------------------------------------------------------
 # Trampoline SMP: se ensambla a binario plano y se convierte a .o con
 # objcopy. Los símbolos se renombran a smp_trampoline_{start,end,size}.

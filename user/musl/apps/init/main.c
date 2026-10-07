@@ -25,11 +25,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define TERMINAL_PATH "/apps/terminal"
+#define TERMINAL_PATH "/usr/bin/terminal"
 #define RESPAWN_DELAY_SEC 1
 
 static char *default_envp[] = {
-    "PATH=/bin:/sbin:/usr/bin:/usr/sbin:/",
+    "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin",
     "TERM=linux",
     "HOME=/data",
     "USER=root",

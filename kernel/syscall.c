@@ -291,7 +291,12 @@ static int64_t k_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a4,
     return -EFAULT;
   if (!access_ok((void *)buf, (size_t)count))
     return -EFAULT;
-  return vfs_read_for_proc(proc, (int)fd, (void *)buf, (size_t)count);
+  int64_t rc = vfs_read_for_proc(proc, (int)fd, (void *)buf, (size_t)count);
+  if (strcmp(proc->name, "bash") == 0 && fd < MAX_PROCESS_FDS &&
+      proc->fds[fd] && proc->fds[fd]->node)
+    LOG_INFO("[BASH-READ-DIAG] path=%s count=%lu rc=%ld",
+             proc->fds[fd]->node->name, count, rc);
+  return rc;
 }
 
 static int64_t k_write(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a4,
@@ -390,7 +395,6 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
     LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", kpath, linux_flags, fd);
     return fd;
   }
-
   if (!created_here && (linux_flags & LINUX_O_TRUNC)) {
     file_descriptor_t *f = proc->fds[fd];
     if (f && f->node && f->node->ops && f->node->ops->truncate)
@@ -1382,6 +1386,11 @@ static int64_t k_getpgid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
   return (int64_t)target->pgid;
 }
 
+static int64_t k_getpgrp(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  return k_getpgid(0, a2, a3, a4, a5);
+}
+
 static int64_t k_setsid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a1;
@@ -1643,6 +1652,8 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
 
 static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
                         uint64_t a4, uint64_t a5) {
+  static char bash_stderr_diag[512];
+  static size_t bash_stderr_diag_len;
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
@@ -1672,6 +1683,27 @@ static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
         continue;
       if (!access_ok((void *)local[i].iov_base, (size_t)local[i].iov_len))
         return total > 0 ? total : -EFAULT;
+      if (strcmp(proc->name, "bash") == 0 && fd == 2) {
+        char text[256];
+        size_t text_len = local[i].iov_len;
+        if (text_len > sizeof(text))
+          text_len = sizeof(text);
+        if (copy_from_user(text, (const void *)local[i].iov_base, text_len) ==
+            0) {
+          for (size_t j = 0; j < text_len; j++) {
+            char c = text[j];
+            if (c != '\n' &&
+                bash_stderr_diag_len < sizeof(bash_stderr_diag) - 1)
+              bash_stderr_diag[bash_stderr_diag_len++] = c;
+            if (c == '\n' ||
+                bash_stderr_diag_len == sizeof(bash_stderr_diag) - 1) {
+              bash_stderr_diag[bash_stderr_diag_len] = '\0';
+              LOG_INFO("[BASH-STDERR] %s", bash_stderr_diag);
+              bash_stderr_diag_len = 0;
+            }
+          }
+        }
+      }
       int64_t r =
           vfs_write_for_proc(proc, (int)fd, (const void *)local[i].iov_base,
                              (size_t)local[i].iov_len);
@@ -1972,6 +2004,30 @@ static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
   return k_kill(tid, sig, 0, 0, 0);
 }
 
+// ---------- tgkill ----------
+//
+// tgkill(tgid, tid, sig). En Linux, envía una señal a un thread
+// específico. En Aurora no hay thread groups separados (cada thread es
+// un task_t y un process_t), así que tid == pid y tgid == pid.
+//
+// glibc lo usa en raise() y pthread_kill(). Sin esto, abort() no puede
+// matar el proceso y sigue ejecutando con estado corrupto → hlt.
+static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
+                        uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *self = process_current();
+  task_t *cur = sched_current();
+  if (!self || !cur)
+    return -EFAULT;
+  if ((uint32_t)tgid != self->pid)
+    return -EINVAL;
+  // Aceptar tanto el pid (thread principal) como el task->id crudo.
+  if ((uint32_t)tid != self->pid && (uint32_t)tid != cur->id)
+    return -EINVAL;
+  return k_kill(tid, sig, 0, 0, 0);
+}
+
 // ---------- readlinkat ----------
 //
 // readlinkat(dirfd, path, buf, bufsiz). AT_FDCWD o dirfd numérico.
@@ -2082,7 +2138,10 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
   // 0xffffffffXXXXXXXX. Truncamos a 32 bits, que es lo que hacen
   // Linux y cualquier kernel POSIX en el syscall ioctl.
   unsigned long kreq = (unsigned long)(uint32_t)req;
-  return vfs_node_ioctl(proc->fds[kfd]->node, kreq, arg);
+  int64_t rc = vfs_node_ioctl(proc->fds[kfd]->node, kreq, arg);
+  if (strcmp(proc->name, "bash") == 0)
+    LOG_INFO("[IOCTL-DIAG] req=%lx arg=%p rc=%ld", kreq, (void *)arg, rc);
+  return rc;
 }
 
 // ---------- clock_gettime ----------
@@ -2127,6 +2186,61 @@ static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
   if (copy_to_user((void *)tp, &ts, sizeof(ts)) < 0)
     return -EFAULT;
   return 0;
+}
+
+static int64_t k_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
+                              uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (proc && strcmp(proc->name, "bash") == 0)
+    LOG_INFO("[GETTIMEOFDAY-DIAG] tv=%p tz=%p", (void *)tv_ptr,
+             (void *)tz_ptr);
+
+  if (tv_ptr) {
+    struct {
+      int64_t sec;
+      int64_t usec;
+    } tv;
+    if (!access_ok((void *)tv_ptr, sizeof(tv)))
+      return -EFAULT;
+
+    int64_t epoch = rtc_get_epoch();
+    if (epoch == 0)
+      epoch = (int64_t)(sched_get_ticks() / 1000);
+    tv.sec = epoch;
+    tv.usec = 0;
+    if (copy_to_user((void *)tv_ptr, &tv, sizeof(tv)) < 0)
+      return -EFAULT;
+  }
+
+  if (tz_ptr) {
+    struct {
+      int32_t minutes_west;
+      int32_t dst_time;
+    } tz = {0};
+    if (!access_ok((void *)tz_ptr, sizeof(tz)))
+      return -EFAULT;
+    if (copy_to_user((void *)tz_ptr, &tz, sizeof(tz)) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+static int64_t k_time(uint64_t tloc, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  int64_t epoch = rtc_get_epoch();
+  if (epoch == 0)
+    epoch = (int64_t)(sched_get_ticks() / 1000);
+  if (tloc && copy_to_user((void *)tloc, &epoch, sizeof(epoch)) < 0)
+    return -EFAULT;
+  return epoch;
 }
 
 // ---------- poll / ppoll / select / pselect6 ----------
@@ -2535,6 +2649,15 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
   default:
     return -EINVAL;
   }
+}
+
+static int64_t k_dup(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                     uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_fcntl(fd, F_DUPFD, 0, 0, 0);
 }
 
 // select/pselect6: convertimos fd_set a un array de pollfd y reusamos
@@ -3150,7 +3273,14 @@ static int64_t k_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a4;
   (void)a5;
   task_t *t = sched_current();
-  return t ? (int64_t)t->id : -EFAULT;
+  if (!t)
+    return -EFAULT;
+  // [glibc] En un proceso sin threads, gettid() == getpid() (thread
+  // principal). Aurora tiene 1 task_t por proceso, así que el pid es
+  // el tid correcto. Devolver t->id rompía abort() de glibc:
+  // getpid()=3, gettid()=38, tgkill(3, 38, SIGABRT) → EINVAL.
+  process_t *p = t->proc;
+  return p ? (int64_t)p->pid : (int64_t)t->id;
 }
 
 static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
@@ -4736,6 +4866,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_PIPE] = {k_pipe, "pipe"},
     [SYS_SCHED_YIELD] = {k_sched_yield, "sched_yield"},
     [SYS_DUP2] = {k_dup2, "dup2"},
+    [SYS_DUP] = {k_dup, "dup"},
     [SYS_GETPID] = {k_getpid, "getpid"},
     [SYS_SENDFILE] = {k_sendfile, "sendfile"},
     [SYS_SYSINFO] = {k_sysinfo, "sysinfo"},
@@ -4746,6 +4877,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETPPID] = {k_getppid, "getppid"},
     [SYS_SETPGID] = {k_setpgid, "setpgid"},
     [SYS_GETPGID] = {k_getpgid, "getpgid"},
+    [SYS_GETPGRP] = {k_getpgrp, "getpgrp"},
     [SYS_GETSID] = {k_getsid, "getsid"},
     [SYS_SETSID] = {k_setsid, "setsid"},
     [SYS_UMASK] = {k_umask, "umask"},
@@ -4778,6 +4910,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETDENTS64] = {k_getdents64, "getdents64"},
     [SYS_SET_TID_ADDRESS] = {k_set_tid_address, "set_tid_address"},
     [SYS_CLOCK_GETTIME] = {k_clock_gettime, "clock_gettime"},
+    [SYS_GETTIMEOFDAY] = {k_gettimeofday, "gettimeofday"},
+    [SYS_TIME] = {k_time, "time"},
     [SYS_CLOCK_SETTIME] = {k_clock_settime, "clock_settime"},
     [SYS_SETTIMEOFDAY] = {k_settimeofday, "settimeofday"},
     [SYS_ADJTIMEX] = {k_adjtimex, "adjtimex"},
@@ -4821,6 +4955,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SETPRIORITY] = {k_setpriority, "setpriority"},             // 141
     [SYS_CLOCK_NANOSLEEP] = {k_clock_nanosleep, "clock_nanosleep"}, // 230
     [SYS_FADVISE64] = {k_fadvise64, "fadvise64"},                   // 291
+    [SYS_TGKILL] = {k_tgkill, "tgkill"},                            // 234
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 
@@ -4859,6 +4994,19 @@ uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t arg4 = regs->r10;
   uint64_t arg5 = regs->r8;
 
+  task_t *cur = sched_current();
+  // [DEBUG] Trace de TODAS las syscalls de procesos "sh" y "dash".
+  static uint32_t g_dbg_pid = 0;
+  if (cur && cur->proc && strcmp(cur->proc->name, "sh") == 0) {
+    if (g_dbg_pid != cur->proc->pid) {
+      g_dbg_pid = cur->proc->pid;
+      LOG_INFO("[DBG] trazar pid=%u", cur->proc->pid);
+    }
+    LOG_INFO("[DBG] num=%lu a1=%p a2=%p a3=%p a4=%p a5=%p", (unsigned long)num,
+             (void *)arg1, (void *)arg2, (void *)arg3, (void *)arg4,
+             (void *)arg5);
+  }
+
   syscall_fn_t fn = NULL;
   if (num < (uint64_t)LINUX_TABLE_N) {
     fn = linux_table[num].fn;
@@ -4881,12 +5029,15 @@ uint64_t syscall_handler_c(registers_t *regs) {
     return err(ENOSYS);
   }
 
-  task_t *cur = sched_current();
   registers_t *saved = cur ? cur->syscall_regs : NULL;
   if (cur)
     cur->syscall_regs = regs;
 
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
+  if (cur && cur->proc && strcmp(cur->proc->name, "bash") == 0)
+    LOG_INFO("[BASH-SYS] num=%lu a1=%p a2=%p a3=%p ret=%ld",
+             (unsigned long)num, (void *)arg1, (void *)arg2, (void *)arg3,
+             (long)ret);
 
   // Publicar el valor de retorno en el trap frame ANTES de la entrega
   // de señales, para que el ucontext que construyamos capture el rax

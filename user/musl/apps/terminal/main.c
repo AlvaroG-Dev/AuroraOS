@@ -3,8 +3,8 @@
 // Terminal 2D: matriz de celdas + parser ANSI completo + scrollback.
 
 #define syscall aurora_syscall
-#define puts    aurora_puts_userlib
-#define printf  aurora_printf_userlib
+#define puts aurora_puts_userlib
+#define printf aurora_printf_userlib
 
 #include "../../../lib/env.h"
 #include "../../../lib/file.h"
@@ -17,8 +17,8 @@
 #undef puts
 #undef printf
 
-#include "terminal.c"
 #include "../../../lib/font_system.c"
+#include "terminal.c"
 
 extern void _exit(int status) __attribute__((noreturn));
 
@@ -58,17 +58,23 @@ static uint64_t g_cursor_phase = 0;
 //   bit  9     : motion  (1 = movimiento con botón pulsado)
 //   bits 16-18 : mods    (1=shift, 2=alt, 4=ctrl)
 // ---------------------------------------------------------------------------
-static inline int mouse_button(uint32_t d)  { return (int)(d & 0xFF); }
+static inline int mouse_button(uint32_t d) { return (int)(d & 0xFF); }
 static inline int mouse_pressed(uint32_t d) { return ((d >> 8) & 1) == 0; }
-static inline int mouse_motion(uint32_t d)  { return (int)((d >> 9) & 1); }
-static inline int mouse_mods(uint32_t d)    { return (int)((d >> 16) & 0x7); }
+static inline int mouse_motion(uint32_t d) { return (int)((d >> 9) & 1); }
+static inline int mouse_mods(uint32_t d) { return (int)((d >> 16) & 0x7); }
 
 // ---------------------------------------------------------------------------
 // Detección de PgUp/PgDn.
 static int match_scroll(const uint8_t *b, int n, int *out_delta, int rows) {
   if (n == 4 && b[0] == 0x1b && b[1] == '[' && b[3] == '~') {
-    if (b[2] == '5') { *out_delta = +(rows - 2); return 1; }
-    if (b[2] == '6') { *out_delta = -(rows - 2); return 1; }
+    if (b[2] == '5') {
+      *out_delta = +(rows - 2);
+      return 1;
+    }
+    if (b[2] == '6') {
+      *out_delta = -(rows - 2);
+      return 1;
+    }
   }
   return 0;
 }
@@ -77,10 +83,8 @@ static int match_scroll(const uint8_t *b, int n, int *out_delta, int rows) {
 static void flush_to_window(void) {
   if (!g_term.any_dirty)
     return;
-  term_rect_t r = terminal_render(&g_term, g_pixels, g_cw,
-                                  PAD_X, PAD_Y,
-                                  g_cell_w, g_cell_h,
-                                  font_system_mono());
+  term_rect_t r = terminal_render(&g_term, g_pixels, g_cw, PAD_X, PAD_Y,
+                                  g_cell_w, g_cell_h, font_system_mono());
   if (r.w <= 0 || r.h <= 0) {
     terminal_clear_dirty(&g_term);
     return;
@@ -105,10 +109,10 @@ static void handle_mouse_event(const winsrv_event_t *ev) {
   if (col < 0 || col >= COLS || row < 0 || row >= ROWS)
     return;
 
-  int button  = mouse_button(ev->data);
+  int button = mouse_button(ev->data);
   int pressed = mouse_pressed(ev->data);
-  int motion  = mouse_motion(ev->data);
-  int mods    = mouse_mods(ev->data);
+  int motion = mouse_motion(ev->data);
+  int mods = mouse_mods(ev->data);
 
   // Wheel: si el shell no pidió mouse tracking, scrollear scrollback local.
   if ((button == 64 || button == 65) && !g_term.mode_mouse) {
@@ -188,8 +192,7 @@ static void enter_dead_mode(void) {
 
 // ---------------------------------------------------------------------------
 // [FIX #3] Bracketed paste (helper listo para Ctrl+Shift+V).
-static void __attribute__((unused))
-term_paste(const char *text, size_t len) {
+static void __attribute__((unused)) term_paste(const char *text, size_t len) {
   if (!text || len == 0 || g_master < 0)
     return;
   if (g_term.mode_bracketed_paste) {
@@ -249,12 +252,12 @@ int main(int argc, char **argv) {
   terminal_clear_dirty(&g_term);
 
   if (!environ || !environ[0]) {
-    setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin:/", 1);
+    setenv("PATH", "/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin", 1);
     setenv("TERM", "xterm-256color", 1);
     setenv("HOME", "/data", 1);
     setenv("USER", "root", 1);
     setenv("LOGNAME", "root", 1);
-    setenv("SHELL", "/bin/sh", 1);
+    setenv("SHELL", "/usr/bin/sh", 1);
     setenv("PWD", "/", 1);
   }
 
@@ -279,9 +282,9 @@ int main(int argc, char **argv) {
   struct winsize ws = {ROWS, COLS, 0, 0};
   ioctl(master, TIOCSWINSZ, &ws);
 
-  char *sh_argv[] = {"/bin/sh", NULL};
+  char *sh_argv[] = {"/usr/bin/sh", NULL};
   spawn_fds_t fds = {slave, slave, slave};
-  int child = spawn_args_fds("/bin/sh", sh_argv, 1, &fds);
+  int child = spawn_args_fds("/usr/bin/sh", sh_argv, 1, &fds);
   close(slave);
   if (child < 0)
     enter_dead_mode();
@@ -325,16 +328,17 @@ int main(int argc, char **argv) {
 
         int new_cols = (new_cw - 2 * PAD_X) / g_cell_w;
         int new_rows = (new_ch - 2 * PAD_Y) / g_cell_h;
-        if (new_cols < 1) new_cols = 1;
-        if (new_rows < 1) new_rows = 1;
+        if (new_cols < 1)
+          new_cols = 1;
+        if (new_rows < 1)
+          new_rows = 1;
 
         if (new_cols == g_term.primary.cols &&
-            new_rows == g_term.primary.rows &&
-            new_cw == g_cw && new_ch == g_ch)
+            new_rows == g_term.primary.rows && new_cw == g_cw && new_ch == g_ch)
           break;
 
-        uint32_t *new_pixels = (uint32_t *)malloc(
-            (size_t)new_cw * new_ch * sizeof(uint32_t));
+        uint32_t *new_pixels =
+            (uint32_t *)malloc((size_t)new_cw * new_ch * sizeof(uint32_t));
         if (!new_pixels)
           break;
 
@@ -352,9 +356,8 @@ int main(int argc, char **argv) {
 
         // Forzar render inmediato (sin esperar al loop, que puede tardar
         // si el cursor está en fase hold y no marca dirty).
-        terminal_render(&g_term, g_pixels, g_cw,
-                        PAD_X, PAD_Y, g_cell_w, g_cell_h,
-                        font_system_mono());
+        terminal_render(&g_term, g_pixels, g_cw, PAD_X, PAD_Y, g_cell_w,
+                        g_cell_h, font_system_mono());
         terminal_clear_dirty(&g_term);
 
         // Blit del buffer COMPLETO. Cubre:
@@ -375,8 +378,10 @@ int main(int argc, char **argv) {
       }
 
       case WINSRV_EV_CLOSE:
-        if (g_child > 0) kill(g_child, SIGKILL);
-        if (g_master >= 0) close(g_master);
+        if (g_child > 0)
+          kill(g_child, SIGKILL);
+        if (g_master >= 0)
+          close(g_master);
         terminal_shutdown(&g_term);
         free(g_pixels);
         sys_win_destroy(win);

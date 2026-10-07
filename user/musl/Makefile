@@ -1,7 +1,7 @@
 # user/musl/Makefile — Userland POSIX compilado con musl.
 
 MUSL_CC := ../../toolchain/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
-SYSDIR  := ../../sysroot/apps
+SYSDIR  := ../../sysroot/usr/bin
 
 MUSL_CFLAGS := -static -no-pie -Os -fno-stack-protector \
                -ffunction-sections -fdata-sections \
