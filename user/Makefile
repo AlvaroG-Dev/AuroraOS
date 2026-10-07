@@ -25,7 +25,8 @@ LD = $(CC)
 LDFLAGS = -nostdlib -T link.ld -no-pie -m64 \
           -Wl,-z,max-page-size=0x1000,-z,common-page-size=0x1000,--build-id=none
 
-SYSDIR := ../sysroot/apps
+SYSDIR := ../sysroot
+STAGE := python3 ../scripts/stage_elf.py
 
 NATIVE_ALL = hello calc filetest ipctest pftest waitpid_stress \
              mmap_race mmap_race_worker vma_overlap vma_isolation \
@@ -71,26 +72,22 @@ lib/env.o: lib/env.c lib/env.h lib/string.h lib/malloc.h
 $(CORE_APPS): %: apps/%/main.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $(LIB_OBJS) $@.o $(LDFLAGS)
-	@mkdir -p $(SYSDIR)
-	cp $@ $(SYSDIR)/
+	@$(STAGE) $@ $(SYSDIR) /bin
 
 shell: apps/shell/main.c $(SHELL_LIBS)
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $(SHELL_LIBS) $@.o $(LDFLAGS)
-	@mkdir -p $(SYSDIR)
-	cp $@ $(SYSDIR)/
+	@$(STAGE) $@ $(SYSDIR) /bin
 
 syscall_linux_test: apps/syscall_linux_test/main.c
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $@.o $(LDFLAGS)
-	@mkdir -p $(SYSDIR)
-	cp $@ $(SYSDIR)/
+	@$(STAGE) $@ $(SYSDIR) /bin
 
 elf_rotest: apps/elf_rotest/main.c apps/elf_rotest/link.ld $(LIB_OBJS)
 	$(CC) $(CFLAGS) -c apps/elf_rotest/main.c -o $@.o
 	$(LD) -o $@ $(LIB_OBJS) $@.o -T apps/elf_rotest/link.ld $(LDFLAGS)
-	@mkdir -p $(SYSDIR)
-	cp $@ $(SYSDIR)/
+	@$(STAGE) $@ $(SYSDIR) /bin
 
 .PHONY: regen-font
 regen-font:
@@ -111,6 +108,6 @@ regen-font:
 clean:
 	rm -f *.o lib/*.o
 	rm -f $(APPS) shell
-	rm -f $(addprefix $(SYSDIR)/,$(APPS)) $(SYSDIR)/shell
+	rm -f $(addprefix $(SYSDIR)/bin/,$(APPS)) $(SYSDIR)/bin/shell
 
 .PHONY: all clean regen-font

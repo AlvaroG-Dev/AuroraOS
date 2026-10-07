@@ -1,7 +1,8 @@
 # user/musl/Makefile — Userland POSIX compilado con musl.
 
 MUSL_CC := ../../toolchain/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
-SYSDIR  := ../../sysroot/apps
+SYSDIR  := ../../sysroot
+STAGE   := python3 ../../scripts/stage_elf.py
 
 MUSL_CFLAGS := -static -no-pie -Os -fno-stack-protector \
                -ffunction-sections -fdata-sections \
@@ -16,12 +17,11 @@ MUSL_APPS := $(patsubst apps/%/main.c,%,$(wildcard apps/*/main.c))
 all: $(MUSL_APPS) install
 
 install: $(MUSL_APPS)
-	@mkdir -p $(SYSDIR)
 	@for app in $(MUSL_APPS); do \
-		cp -f $$app $(SYSDIR)/$$app; \
+		$(STAGE) $$app $(SYSDIR) /bin; \
 	done
 	@for app in $(MUSL_APPS); do \
-		file $(SYSDIR)/$$app | sed 's/^/  /'; \
+		file $(SYSDIR)/bin/$$app | sed 's/^/  /'; \
 	done
 
 $(MUSL_APPS): %: apps/%/main.c
@@ -33,6 +33,6 @@ $(MUSL_APPS): %: apps/%/main.c
 
 clean:
 	rm -f $(MUSL_APPS)
-	rm -f $(addprefix $(SYSDIR)/,$(MUSL_APPS))
+	rm -f $(addprefix $(SYSDIR)/bin/,$(MUSL_APPS))
 
 .PHONY: all install clean

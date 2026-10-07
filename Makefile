@@ -1,6 +1,6 @@
 # Makefile global - Aurora OS
 
-.PHONY: all bootloader kernel user user-native user-musl image \
+.PHONY: all bootloader kernel user user-native user-musl stage-clean prebuilt image \
         run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso \
         run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci \
@@ -30,16 +30,16 @@ bootloader:
 # Userland: nativo (user/) + musl (user/musl/).
 #
 # El orden importa: user/ primero (binarios nativos: shell, tests, apps
-# Aurora), user/musl/ después (sobrescribe en sysroot/apps/ cualquier
-# nombre que colisione). Así el resultado final es "musl donde hay musl,
-# nativo donde no".
+# Aurora), user/musl/ después. Ambos usan el mismo staging centralizado y
+# colocan ejecutables en /bin; las librerías compartidas se resuelven una sola
+# vez desde el pool raíz lib/.
 # ---------------------------------------------------------------------------
 user: user-native user-musl
 
-user-native:
+user-native: stage-clean
 	$(MAKE) -C user all
 
-user-musl:
+user-musl: user-native
 	@if [ -f user/musl/Makefile ]; then \
 		echo "[Makefile] Build musl userland..."; \
 		$(MAKE) -C user/musl all; \
@@ -47,15 +47,35 @@ user-musl:
 		echo "[Makefile] user/musl/Makefile no existe, saltando"; \
 	fi
 
+stage-clean:
+	@rm -rf sysroot/bin sysroot/sbin sysroot/usr/bin sysroot/usr/sbin
+	@mkdir -p sysroot/bin sysroot/sbin sysroot/usr/bin sysroot/usr/sbin
+
+# ---------------------------------------------------------------------------
+# Prebuilt Linux userland.
+#
+# Executables placed under prebuilt/ubuntu/bin and prebuilt/ubuntu/usr/bin are
+# installed without recompilation. ELF dependencies are resolved through the
+# central lib/ pool by scripts/stage_elf.py.
+# ---------------------------------------------------------------------------
+prebuilt: user
+	@if [ -d prebuilt/ubuntu ]; then \
+		for dir in bin usr/bin; do \
+			if [ -d prebuilt/ubuntu/$$dir ]; then \
+				find prebuilt/ubuntu/$$dir -type f -perm -111 -exec \
+					python3 scripts/stage_elf.py {} sysroot /$$dir \; ; \
+			fi; \
+		done; \
+	fi
 # ---------------------------------------------------------------------------
 # ELF malformado para probar p_offset + p_filesz fuera del archivo.
 # ---------------------------------------------------------------------------
 elf_malformed: user
-	@mkdir -p sysroot/apps
-	@if [ -f sysroot/apps/filetest ]; then \
-		cp sysroot/apps/filetest sysroot/apps/elf_malformed; \
+	@mkdir -p sysroot/bin
+	@if [ -f sysroot/bin/filetest ]; then \
+		cp sysroot/bin/filetest sysroot/bin/elf_malformed; \
 		printf '\\377\\377\\377\\377\\377\\377\\377\\377' | \
-			dd of=sysroot/apps/elf_malformed bs=1 seek=96 count=8 \
+			dd of=sysroot/bin/elf_malformed bs=1 seek=96 count=8 \
 			conv=notrunc status=none; \
 	fi
 
@@ -69,19 +89,22 @@ elf_malformed: user
 #   - tcc runtime (runmain.o, libtcc1.a, include/) desde tcc_stage/usr/lib/tcc/
 #   - libtcc.so desde tcc_stage/usr/lib/ (opcional, tcc static-pie no lo usa)
 #   - /root/hello.c de ejemplo para tcc -run
+#
+# Userland executables are staged by user/Makefile and user/musl/Makefile
+# directly into sysroot/bin. This target only assembles runtime components.
 # ---------------------------------------------------------------------------
-initrd.tar: sysroot user elf_malformed
+initrd.tar: sysroot user prebuilt elf_malformed
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
 	          sysroot/usr/lib sysroot/usr/include \
-	          sysroot/data sysroot/lib sysroot/root
+	          sysroot/data sysroot/lib sysroot/lib64 sysroot/root
 	@echo "[Makefile] Copiando busybox al tarfs..."
 	@if [ -f third_party/busybox-1.36.1/_install/bin/busybox ]; then \
-		cp -a third_party/busybox-1.36.1/_install/bin/. sysroot/bin/; \
-		cp -a third_party/busybox-1.36.1/_install/usr/. sysroot/usr/; \
+		cp -a -n third_party/busybox-1.36.1/_install/bin/. sysroot/bin/; \
+		cp -a -n third_party/busybox-1.36.1/_install/usr/. sysroot/usr/; \
 		if [ -d third_party/busybox-1.36.1/_install/sbin ]; then \
-			cp -a third_party/busybox-1.36.1/_install/sbin/. sysroot/sbin/; \
+			cp -a -n third_party/busybox-1.36.1/_install/sbin/. sysroot/sbin/; \
 		fi; \
 	fi
 	@echo "[Makefile] Copiando tcc (JIT) desde tcc_stage/ si existe..."
@@ -107,15 +130,13 @@ initrd.tar: sysroot user elf_malformed
 	fi
 	@echo "[Makefile] Copiando libc.a y stubs para tcc..."
 	@if [ -f tcc_stage/usr/lib/libc.a ]; then \
-		mkdir -p sysroot/usr/lib sysroot/lib; \
+		mkdir -p sysroot/usr/lib; \
 		cp -f tcc_stage/usr/lib/libc.a sysroot/usr/lib/libc.a; \
-		cp -f tcc_stage/usr/lib/libc.a sysroot/lib/libc.a; \
-		echo "[Makefile]   libc.a -> sysroot/usr/lib/ y sysroot/lib/"; \
+		echo "[Makefile]   libc.a -> sysroot/usr/lib/"; \
 		for stub in libm.a libpthread.a libdl.a librt.a libcrypt.a \
 		            libresolv.a libutil.a libxnet.a libssp_nonshared.a; do \
-			if [ -f tcc_stage/usr/lib/$$stub ]; then \
-				cp -f tcc_stage/usr/lib/$$stub sysroot/usr/lib/$$stub; \
-				cp -f tcc_stage/usr/lib/$$stub sysroot/lib/$$stub; \
+			if [ -f tcc_stage/usr/lib/$stub ]; then \
+				cp -f tcc_stage/usr/lib/$stub sysroot/usr/lib/$stub; \
 			fi; \
 		done; \
 	else \
@@ -169,11 +190,11 @@ image: bootloader kernel user
 	mcopy -i aurora.img -s esp/EFI ::
 	mcopy -i aurora.img -s esp/kernel.elf ::
 	mcopy -i aurora.img -s esp/etc ::
-	@if [ -f sysroot/apps/ls ]; then \
-		mcopy -i aurora.img sysroot/apps/ls ::/LS.ELF; \
+	@if [ -f sysroot/bin/ls ]; then \
+		mcopy -i aurora.img sysroot/bin/ls ::/LS.ELF; \
 	fi
-	@if [ -f sysroot/apps/cat ]; then \
-		mcopy -i aurora.img sysroot/apps/cat ::/CAT.ELF; \
+	@if [ -f sysroot/bin/cat ]; then \
+		mcopy -i aurora.img sysroot/bin/cat ::/CAT.ELF; \
 	fi
 
 # ---------------------------------------------------------------------------
