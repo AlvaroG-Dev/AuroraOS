@@ -435,4 +435,9 @@ int vfs_check_access(vfs_node_t *node, int mask);
 // NULL si no hay ningún mount aplicable.
 struct vfs_fs_ops *vfs_get_mount_ops(const char *path);
 
+int64_t vfs_pread_for_proc(void *proc_ptr, int fd, void *buf, size_t count,
+                           uint64_t offset);
+int64_t vfs_pwrite_for_proc(void *proc_ptr, int fd, const void *buf,
+                            size_t count, uint64_t offset);
+
 #endif

@@ -11,6 +11,7 @@ all: image
 sysroot:
 	@mkdir -p sysroot/system/icons sysroot/system/wallpapers
 	@mkdir -p sysroot/etc
+	@mkdir -p sysroot/usr/share sysroot/usr/games
 	@if [ ! -f sysroot/system/config.txt ]; then \
 		echo "Aurora OS v0.1.0 Initramfs Config" > sysroot/system/config.txt; \
 	fi
@@ -28,11 +29,6 @@ bootloader:
 
 # ---------------------------------------------------------------------------
 # Userland: nativo (user/) + musl (user/musl/).
-#
-# El orden importa: user/ primero (binarios nativos: shell, tests, apps
-# Aurora), user/musl/ después (sobrescribe en sysroot/apps/ cualquier
-# nombre que colisione). Así el resultado final es "musl donde hay musl,
-# nativo donde no".
 # ---------------------------------------------------------------------------
 user: user-native user-musl
 
@@ -61,20 +57,13 @@ elf_malformed: user
 
 # ---------------------------------------------------------------------------
 # initrd.tar: construye el tarfs desde sysroot/.
-#
-# Recopila en un único sitio:
-#   - BusyBox (binarios + applets) desde third_party/busybox-*/_install/
-#   - tcc (JIT compiler) desde tcc_stage/ si existe
-#   - ld-musl + headers de musl desde tcc_stage/lib/ y tcc_stage/usr/include/
-#   - tcc runtime (runmain.o, libtcc1.a, include/) desde tcc_stage/usr/lib/tcc/
-#   - libtcc.so desde tcc_stage/usr/lib/ (opcional, tcc static-pie no lo usa)
-#   - /root/hello.c de ejemplo para tcc -run
 # ---------------------------------------------------------------------------
 initrd.tar: sysroot user elf_malformed
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
 	          sysroot/usr/lib sysroot/usr/include \
+	          sysroot/usr/share sysroot/usr/games \
 	          sysroot/data sysroot/lib sysroot/root
 	@echo "[Makefile] Copiando busybox al tarfs..."
 	@if [ -f third_party/busybox-1.36.1/_install/bin/busybox ]; then \
@@ -146,6 +135,69 @@ initrd.tar: sysroot user elf_malformed
 	else \
 		echo "[Makefile]   (tcc_stage/usr/include no existe, tcc no podra compilar)"; \
 	fi
+
+# ---------------------------------------------------------------------------
+# [NUEVO] ncurses: librerías estáticas + headers (para compilar apps).
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando librerías de ncurses..."
+	@for lib in libncursesw.a libncurses++w.a libtinfow.a \
+	            libformw.a libmenuw.a libpanelw.a; do \
+		if [ -f tcc_stage/usr/lib/$$lib ]; then \
+			cp -f tcc_stage/usr/lib/$$lib sysroot/usr/lib/$$lib; \
+			cp -f tcc_stage/usr/lib/$$lib sysroot/lib/$$lib; \
+		fi; \
+	done
+	@if [ -d tcc_stage/usr/include/ncursesw ]; then \
+		mkdir -p sysroot/usr/include; \
+		cp -r tcc_stage/usr/include/ncursesw sysroot/usr/include/; \
+		echo "[Makefile]   ncurses headers -> sysroot/usr/include/ncursesw/"; \
+	fi
+	@if [ -d tcc_stage/usr/include/ncurses ]; then \
+		cp -r tcc_stage/usr/include/ncurses sysroot/usr/include/; \
+	fi
+
+# ---------------------------------------------------------------------------
+# [NUEVO] terminfo: base de datos de capacidades de terminal.
+#
+# ncurses compilado con prefijo absoluto embebe ese path. En el guest
+# hay que exportar TERMINFO=/usr/share/terminfo (o TERMINFO_DIRS) para
+# que el binario lo encuentre, porque el path compilado apunta al host.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando terminfo..."
+	@if [ -d tcc_stage/usr/share/terminfo ]; then \
+		mkdir -p sysroot/usr/share; \
+		cp -r tcc_stage/usr/share/terminfo sysroot/usr/share/; \
+		echo "[Makefile]   terminfo -> sysroot/usr/share/terminfo"; \
+	fi
+	@if [ -L tcc_stage/usr/lib/terminfo ]; then \
+		:; \
+	elif [ -d tcc_stage/usr/lib/terminfo ]; then \
+		mkdir -p sysroot/usr/lib; \
+		cp -r tcc_stage/usr/lib/terminfo sysroot/usr/lib/; \
+	fi
+
+# ---------------------------------------------------------------------------
+# [NUEVO] frotz + Zork I.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando frotz + Zork I..."
+	@if [ -f third_party/frotz/frotz ]; then \
+		mkdir -p sysroot/usr/bin; \
+		cp -f third_party/frotz/frotz sysroot/usr/bin/frotz; \
+		echo "[Makefile]   frotz -> sysroot/usr/bin/frotz"; \
+	else \
+		echo "[Makefile]   (third_party/frotz/frotz no existe, saltando)"; \
+	fi
+	@if [ -f third_party/zork1.z3 ]; then \
+		mkdir -p sysroot/usr/games; \
+		cp -f third_party/zork1.z3 sysroot/usr/games/zork1.z3; \
+		echo "[Makefile]   zork1.z3 -> sysroot/usr/games/zork1.z3"; \
+	else \
+		echo "[Makefile]   (third_party/zork1.z3 no existe, saltando)"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# /root/hello.c para tcc -run
+# ---------------------------------------------------------------------------
 	@echo "[Makefile] Creando /root/hello.c para tcc -run (si no existe)..."
 	@if [ ! -f sysroot/root/hello.c ]; then \
 		printf '#include <stdio.h>\n\nint main(void) {\n    printf("hola desde codigo JIT\\n");\n    for (int i = 0; i < 5; i++)\n        printf("  iter %%d\\n", i);\n    return 0;\n}\n' > sysroot/root/hello.c; \
@@ -153,6 +205,36 @@ initrd.tar: sysroot user elf_malformed
 	else \
 		echo "[Makefile]   /root/hello.c ya existe, no se toca"; \
 	fi
+	# ---------------------------------------------------------------------------
+# [NUEVO] glibc dinámico: loader + libc + binarios de prueba Linux.
+#
+# Se copia desde el host (Ubuntu/Debian). En cada build porque `make clean`
+# borra sysroot/. Los binarios van sufijados con -glibc para no colisionar
+# con los busybox equivalentes que ya están en /usr/bin/.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando glibc del host..."
+	@mkdir -p sysroot/lib64 sysroot/lib/x86_64-linux-gnu
+	@if [ -e /lib64/ld-linux-x86-64.so.2 ]; then \
+		cp -L /lib64/ld-linux-x86-64.so.2 sysroot/lib64/ld-linux-x86-64.so.2; \
+		echo "[Makefile]   ld-linux-x86-64.so.2 -> sysroot/lib64/"; \
+	elif [ -e /lib/ld-linux-x86-64.so.2 ]; then \
+		mkdir -p sysroot/lib; \
+		cp -L /lib/ld-linux-x86-64.so.2 sysroot/lib/ld-linux-x86-64.so.2; \
+		cp -L /lib/ld-linux-x86-64.so.2 sysroot/lib64/ld-linux-x86-64.so.2; \
+		echo "[Makefile]   ld-linux-x86-64.so.2 -> sysroot/lib/ y lib64/"; \
+	fi
+	@for lib in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1; do \
+		if [ -e /lib/x86_64-linux-gnu/$$lib ]; then \
+			cp -L /lib/x86_64-linux-gnu/$$lib sysroot/lib/x86_64-linux-gnu/$$lib; \
+		fi; \
+	done
+	@echo "[Makefile]   libc/libm/libdl/libpthread/librt -> sysroot/lib/x86_64-linux-gnu/"
+	@for prog in true echo cat ls; do \
+		if [ -e /usr/bin/$$prog ]; then \
+			cp -L /usr/bin/$$prog sysroot/usr/bin/$$prog-glibc; \
+		fi; \
+	done
+	@echo "[Makefile]   binarios glibc de prueba (true/echo/cat/ls) sufijados -glibc"
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 

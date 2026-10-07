@@ -2235,18 +2235,30 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
 
     int64_t bytes = f->node->ops->read(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
-      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return bytes; }
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return bytes;
+      }
       break;
     }
     if (bytes == 0)
       break;
     if ((uint64_t)bytes > chunk) {
-      kfree(kbuf); mutex_unlock(&f->lock); fd_put(f);
+      kfree(kbuf);
+      mutex_unlock(&f->lock);
+      fd_put(f);
       return total > 0 ? (int64_t)total : -EIO;
     }
 
     if (copy_to_user((uint8_t *)buf + total, kbuf, (size_t)bytes) < 0) {
-      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return -EFAULT; }
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -EFAULT;
+      }
       break;
     }
 
@@ -2294,21 +2306,178 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       chunk = chunk_size;
 
     if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
-      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return -EFAULT; }
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -EFAULT;
+      }
       break;
     }
 
     int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
     if (bytes < 0) {
-      if (total == 0) { kfree(kbuf); mutex_unlock(&f->lock); fd_put(f); return bytes; }
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return bytes;
+      }
       break;
     }
     if ((uint64_t)bytes > chunk) {
-      kfree(kbuf); mutex_unlock(&f->lock); fd_put(f);
+      kfree(kbuf);
+      mutex_unlock(&f->lock);
+      fd_put(f);
       return total > 0 ? (int64_t)total : -EIO;
     }
 
     f->offset += (uint64_t)bytes;
+    total += (size_t)bytes;
+    if ((size_t)bytes < chunk)
+      break;
+  }
+
+  kfree(kbuf);
+  mutex_unlock(&f->lock);
+  fd_put(f);
+  return (int64_t)total;
+}
+
+// ---------------------------------------------------------------------------
+// [glibc] pread64 / pwrite64: como read/write pero con offset explícito,
+// sin tocar f->offset. glibc los usa para leer cabeceras ELF de .so
+// antes de mmap'earlas.
+// ---------------------------------------------------------------------------
+int64_t vfs_pread_for_proc(void *proc_ptr, int fd, void *buf, size_t count,
+                           uint64_t offset) {
+  process_t *proc = (process_t *)proc_ptr;
+  if (!proc || !buf)
+    return -1;
+  if (count == 0)
+    return 0;
+
+  file_descriptor_t *f = fd_get_for_proc(proc, fd);
+  if (!f)
+    return -1;
+  if (!f->node || !f->node->ops || !f->node->ops->read) {
+    fd_put(f);
+    return -1;
+  }
+
+  mutex_lock(&f->lock);
+  const size_t chunk_size = 4096;
+  uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
+  if (!kbuf) {
+    mutex_unlock(&f->lock);
+    fd_put(f);
+    return -ENOMEM;
+  }
+
+  size_t total = 0;
+  while (total < count) {
+    size_t chunk = count - total;
+    if (chunk > chunk_size)
+      chunk = chunk_size;
+
+    int64_t bytes = f->node->ops->read(f->node, offset + total, chunk, kbuf);
+    if (bytes < 0) {
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return bytes;
+      }
+      break;
+    }
+    if (bytes == 0)
+      break;
+    if ((uint64_t)bytes > chunk) {
+      kfree(kbuf);
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return total > 0 ? (int64_t)total : -EIO;
+    }
+
+    if (copy_to_user((uint8_t *)buf + total, kbuf, (size_t)bytes) < 0) {
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -EFAULT;
+      }
+      break;
+    }
+
+    total += (size_t)bytes;
+    if ((size_t)bytes < chunk)
+      break;
+  }
+
+  kfree(kbuf);
+  mutex_unlock(&f->lock);
+  fd_put(f);
+  return (int64_t)total;
+}
+
+int64_t vfs_pwrite_for_proc(void *proc_ptr, int fd, const void *buf,
+                            size_t count, uint64_t offset) {
+  process_t *proc = (process_t *)proc_ptr;
+  if (!proc || !buf)
+    return -1;
+  if (count == 0)
+    return 0;
+
+  file_descriptor_t *f = fd_get_for_proc(proc, fd);
+  if (!f)
+    return -1;
+  if (!f->node || !f->node->ops || !f->node->ops->write) {
+    fd_put(f);
+    return -1;
+  }
+
+  mutex_lock(&f->lock);
+  const size_t chunk_size = 4096;
+  uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);
+  if (!kbuf) {
+    mutex_unlock(&f->lock);
+    fd_put(f);
+    return -ENOMEM;
+  }
+
+  size_t total = 0;
+  while (total < count) {
+    size_t chunk = count - total;
+    if (chunk > chunk_size)
+      chunk = chunk_size;
+
+    if (copy_from_user(kbuf, (const uint8_t *)buf + total, chunk) < 0) {
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -EFAULT;
+      }
+      break;
+    }
+
+    int64_t bytes = f->node->ops->write(f->node, offset + total, chunk, kbuf);
+    if (bytes < 0) {
+      if (total == 0) {
+        kfree(kbuf);
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return bytes;
+      }
+      break;
+    }
+    if ((uint64_t)bytes > chunk) {
+      kfree(kbuf);
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return total > 0 ? (int64_t)total : -EIO;
+    }
+
     total += (size_t)bytes;
     if ((size_t)bytes < chunk)
       break;
@@ -2337,13 +2506,25 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
 
   uint64_t new_off = f->offset;
   if (whence == SEEK_SET) {
-    if (offset < 0) { mutex_unlock(&f->lock); fd_put(f); return -1; }
+    if (offset < 0) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -1;
+    }
     new_off = (uint64_t)offset;
   } else if (whence == SEEK_CUR) {
-    if (offset < 0 && (uint64_t)(-offset) > f->offset) { mutex_unlock(&f->lock); fd_put(f); return -1; }
+    if (offset < 0 && (uint64_t)(-offset) > f->offset) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -1;
+    }
     new_off = f->offset + offset;
   } else if (whence == SEEK_END) {
-    if (offset < 0 && (uint64_t)(-offset) > f->node->size) { mutex_unlock(&f->lock); fd_put(f); return -1; }
+    if (offset < 0 && (uint64_t)(-offset) > f->node->size) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -1;
+    }
     new_off = f->node->size + offset;
   } else {
     mutex_unlock(&f->lock);
