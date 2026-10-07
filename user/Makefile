@@ -1,8 +1,8 @@
 # user/Makefile — Userland nativo (Aurora ABI).
 #
-# Solo compila las apps que siguen en user/apps/. Las que se han movido
-# a user/musl/apps/ se detectan por ausencia de apps/<name>/main.c y se
-# saltan automáticamente.
+# Solo compila las apps nativas específicas de Aurora que siguen en user/apps/.
+# Las utilidades POSIX generales se proporcionan por BusyBox; las aplicaciones
+# POSIX propias se compilan con musl en user/musl/.
 
 AS = nasm
 

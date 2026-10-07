@@ -33,7 +33,7 @@ def interpreter(path: Path) -> str | None:
         raise RuntimeError(f"readelf failed for {path}: {exc.output}") from exc
     for line in out.splitlines():
         if "Requesting program interpreter:" in line:
-            return line.split("Requesting program interpreter:", 1)[1].strip()
+            return line.split("Requesting program interpreter:", 1)[1].strip().rstrip("]")
     return None
 
 
@@ -48,7 +48,11 @@ def find_library(name: str, pool: Path) -> Path | None:
 def destination_for(source: Path, pool: Path) -> Path:
     # lib/foo.so -> /lib/foo.so
     # lib/x86_64-linux-gnu/foo.so -> /lib/x86_64-linux-gnu/foo.so
-    return Path("/lib") / source.relative_to(pool)
+    # lib64/foo.so -> /lib64/foo.so
+    relative = source.relative_to(pool)
+    if relative.parts and relative.parts[0] == "lib64":
+        return Path("/lib64") / Path(*relative.parts[1:])
+    return Path("/lib") / relative
 
 
 def install_library(source: Path, sysroot: Path, pool: Path) -> Path:
