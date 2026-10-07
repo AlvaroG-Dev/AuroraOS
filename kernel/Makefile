@@ -57,6 +57,7 @@ linker.ld: linker.ld.in memlayout.h
 # reconstruirse siempre que cambie initrd.tar; la regla genérica de ASM no
 # conoce esa dependencia porque initrd.tar no aparece en el source .asm.
 initrd.o: initrd.asm initrd.tar
+	@rm -f $@
 	$(AS) -f elf64 $< -o $@
 
 # ---------------------------------------------------------------------------
