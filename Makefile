@@ -174,8 +174,28 @@ initrd.tar: sysroot user prebuilt elf_malformed
 	else \
 		echo "[Makefile]   /root/hello.c ya existe, no se toca"; \
 	fi
+	@echo "[Makefile] Verificando /bin/init antes de empaquetar..."
+	@if ! strings sysroot/bin/init 2>/dev/null | grep -q "/bin/terminal"; then \
+		echo "[Makefile] ERROR: sysroot/bin/init no contiene /bin/terminal"; \
+		exit 1; \
+	fi
+	@if strings sysroot/bin/init 2>/dev/null | grep -q "/apps/terminal"; then \
+		echo "[Makefile] ERROR: sysroot/bin/init sigue conteniendo /apps/terminal"; \
+		exit 1; \
+	fi
+	@echo "[Makefile] OK: /bin/init apunta a /bin/terminal"
 	@echo "[Makefile] Generando initrd.tar desde sysroot/"
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
+	@echo "[Makefile] Verificando /bin/init dentro de initrd.tar..."
+	@if ! tar -xOf kernel/initrd.tar ./bin/init 2>/dev/null | strings | grep -q "/bin/terminal"; then \
+		echo "[Makefile] ERROR: initrd.tar contiene un /bin/init incorrecto"; \
+		exit 1; \
+	fi
+	@if tar -xOf kernel/initrd.tar ./bin/init 2>/dev/null | strings | grep -q "/apps/terminal"; then \
+		echo "[Makefile] ERROR: initrd.tar contiene /apps/terminal en /bin/init"; \
+		exit 1; \
+	fi
+	@echo "[Makefile] OK: initrd.tar contiene el /bin/init correcto"
 
 kernel: initrd.tar
 	$(MAKE) -C kernel
