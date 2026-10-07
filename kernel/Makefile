@@ -53,6 +53,12 @@ linker.ld: linker.ld.in memlayout.h
 %.o: %.asm
 	$(AS) -f elf64 $< -o $@
 
+# initrd.asm usa INCBIN para incrustar el tarfs generado. Su objeto debe
+# reconstruirse siempre que cambie initrd.tar; la regla genérica de ASM no
+# conoce esa dependencia porque initrd.tar no aparece en el source .asm.
+initrd.o: initrd.asm initrd.tar
+	$(AS) -f elf64 $< -o $@
+
 # ---------------------------------------------------------------------------
 # Trampoline SMP: se ensambla a binario plano y se convierte a .o con
 # objcopy. Los símbolos se renombran a smp_trampoline_{start,end,size}.
