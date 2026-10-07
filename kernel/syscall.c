@@ -738,6 +738,30 @@ static int64_t k_chdir(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
   return 0;
 }
 
+static int64_t k_fchdir(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int kfd = (int)fd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+    return -EBADF;
+  vfs_node_t *node = proc->fds[kfd]->node;
+  if (!node || !(node->flags & VFS_DIRECTORY))
+    return -ENOTDIR;
+
+  // Copiamos node->name (path completo del directorio) a proc->cwd.
+  size_t len = strlen(node->name);
+  if (len >= sizeof(proc->cwd))
+    return -ENAMETOOLONG;
+  memcpy(proc->cwd, node->name, len + 1);
+  return 0;
+}
+
 static int64_t k_getcwd(uint64_t buf, uint64_t size, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a3;
@@ -1645,6 +1669,28 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
   return nfd;
 }
 
+static int64_t k_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags,
+                      uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  // dup3 es dup2 + flag opcional. Solo O_CLOEXEC (0x80000) es válido.
+  if (flags & ~0x80000ULL)
+    return -EINVAL;
+  // A diferencia de dup2, dup3(old, new) con old == new es EINVAL.
+  if ((int)oldfd == (int)newfd)
+    return -EINVAL;
+
+  int64_t r = k_dup2(oldfd, newfd, 0, 0, 0);
+  if (r < 0)
+    return r;
+  if (flags & 0x80000ULL) {
+    process_t *p = process_current();
+    if (p)
+      p->fd_cloexec_mask |= (1u << (int)newfd);
+  }
+  return r;
+}
+
 static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
                         uint64_t a4, uint64_t a5) {
   (void)a4;
@@ -1962,6 +2008,16 @@ static int64_t k_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
     return rc;
 
   return vfs_symlink(target, linkpath);
+}
+
+static int64_t k_symlinkat(uint64_t target_ptr, uint64_t newdfd,
+                           uint64_t linkpath_ptr, uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  // Aurora no soporta dirfd != AT_FDCWD todavía. Fallback a k_symlink.
+  if ((int)newdfd != AT_FDCWD)
+    return -EINVAL;
+  return k_symlink(target_ptr, linkpath_ptr, 0, 0, 0);
 }
 
 // ---------- tkill ----------
@@ -4247,6 +4303,21 @@ static int64_t k_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
   return 0; // no-op: somos un FS en RAM
 }
 
+// ---------- xattr family ----------
+// Linux's xattr API. Aurora no tiene xattrs en ningún FS. Devolvemos
+// -EOPNOTSUPP (95) para que glibc/coreutils lo interpreten como
+// "no soportado por el FS" y sigan sin quejarse. Si devolviéramos
+// -ENOSYS, ls -l imprimiría "Function not implemented".
+static int64_t k_xattr_notsup(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
+                              uint64_t e) {
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)d;
+  (void)e;
+  return -EOPNOTSUPP;
+}
+
 // ===========================================================================
 //  AURORA-ONLY HANDLERS  (rango 0x1000+)
 // ===========================================================================
@@ -4832,6 +4903,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SCHED_YIELD] = {k_sched_yield, "sched_yield"},
     [SYS_DUP2] = {k_dup2, "dup2"},
     [SYS_DUP] = {k_dup, "dup"},
+    [SYS_DUP3] = {k_dup3, "dup3"},
     [SYS_GETPID] = {k_getpid, "getpid"},
     [SYS_SENDFILE] = {k_sendfile, "sendfile"},
     [SYS_SYSINFO] = {k_sysinfo, "sysinfo"},
@@ -4863,9 +4935,11 @@ static const syscall_entry_t linux_table[] = {
     [SYS_UNAME] = {k_uname, "uname"},
     [SYS_GETCWD] = {k_getcwd, "getcwd"},
     [SYS_CHDIR] = {k_chdir, "chdir"},
+    [SYS_FCHDIR] = {k_fchdir, "fchdir"},
     [SYS_LINK] = {k_link, "link"},
     [SYS_LINKAT] = {k_linkat, "linkat"},
     [SYS_SYMLINK] = {k_symlink, "symlink"},
+    [SYS_SYMLINKAT] = {k_symlinkat, "symlinkat"},
     [SYS_READLINK] = {k_readlink, "readlink"},
     [SYS_TKILL] = {k_tkill, "tkill"},
     [SYS_READLINKAT] = {k_readlinkat, "readlinkat"},
@@ -4921,6 +4995,18 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CLOCK_NANOSLEEP] = {k_clock_nanosleep, "clock_nanosleep"}, // 230
     [SYS_FADVISE64] = {k_fadvise64, "fadvise64"},                   // 291
     [SYS_TGKILL] = {k_tgkill, "tgkill"},                            // 234
+    [SYS_SETXATTR] = {k_xattr_notsup, "setxattr"},
+    [SYS_LSETXATTR] = {k_xattr_notsup, "lsetxattr"},
+    [SYS_FSETXATTR] = {k_xattr_notsup, "fsetxattr"},
+    [SYS_GETXATTR] = {k_xattr_notsup, "getxattr"},
+    [SYS_LGETXATTR] = {k_xattr_notsup, "lgetxattr"},
+    [SYS_FGETXATTR] = {k_xattr_notsup, "fgetxattr"},
+    [SYS_LISTXATTR] = {k_xattr_notsup, "listxattr"},
+    [SYS_LLISTXATTR] = {k_xattr_notsup, "llistxattr"},
+    [SYS_FLISTXATTR] = {k_xattr_notsup, "flistxattr"},
+    [SYS_REMOVEXATTR] = {k_xattr_notsup, "removexattr"},
+    [SYS_LREMOVEXATTR] = {k_xattr_notsup, "lremovexattr"},
+    [SYS_FREMOVXATTR] = {k_xattr_notsup, "fremovexattr"},
 };
 #define LINUX_TABLE_N ((int)ARRAY_SIZE(linux_table))
 
