@@ -37,6 +37,24 @@
 #include "../time.h"
 #include "../vfs.h"
 
+static void test_tarfs_assigns_unique_file_inodes(void) {
+  vfs_node_t *libc = vfs_lookup("/lib/x86_64-linux-gnu/libc.so.6");
+  vfs_node_t *tinfo = vfs_lookup("/lib/x86_64-linux-gnu/libtinfo.so.6");
+
+  TEST_ASSERT(libc != NULL, "libc.so.6 no se encontró en TarFS");
+  TEST_ASSERT(tinfo != NULL, "libtinfo.so.6 no se encontró en TarFS");
+  if (libc && tinfo)
+    TEST_ASSERT(libc->inode != tinfo->inode,
+                "libc y libtinfo comparten el mismo inode (%u)", libc->inode);
+
+  if (libc)
+    vfs_node_free(libc);
+  if (tinfo)
+    vfs_node_free(tinfo);
+}
+REGISTER_TEST("tarfs: inodes únicos para bibliotecas",
+              test_tarfs_assigns_unique_file_inodes);
+
 // ---------------------------------------------------------------------------
 // BMP: alpha y reducción de iconos
 // ---------------------------------------------------------------------------

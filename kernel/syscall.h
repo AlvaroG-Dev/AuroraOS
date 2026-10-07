@@ -44,6 +44,7 @@
 #define SYS_SCHED_YIELD 24
 #define SYS_MREMAP 25
 #define SYS_MADVISE 28
+#define SYS_DUP 32
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
 #define SYS_GETPID 39
@@ -88,6 +89,7 @@
 #define SYS_FCHOWN 93
 #define SYS_LCHOWN 94
 #define SYS_UMASK 95
+#define SYS_GETTIMEOFDAY 96
 #define SYS_GETRLIMIT 97
 #define SYS_GETRUSAGE 98
 #define SYS_SYSINFO 99
@@ -101,6 +103,7 @@
 #define SYS_GETEGID 108
 #define SYS_SETPGID 109
 #define SYS_GETPPID 110
+#define SYS_GETPGRP 111
 #define SYS_SETSID 112
 #define SYS_SETREUID 113
 #define SYS_SETREGID 114
@@ -145,6 +148,7 @@
 #define SYS_CLOCK_GETTIME 228
 #define SYS_CLOCK_NANOSLEEP 230
 #define SYS_EXIT_GROUP 231
+#define SYS_TGKILL 234
 #define SYS_WAITID 247
 #define SYS_OPENAT 257
 #define SYS_MKDIRAT 258
@@ -166,6 +170,7 @@
 #define SYS_GETRANDOM 318
 #define SYS_MEMBARRIER 324
 #define SYS_RSEQ 334
+#define SYS_TIME 201
 
 #define FD_CLOEXEC 1
 #define F_DUPFD 0

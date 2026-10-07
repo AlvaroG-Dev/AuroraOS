@@ -25,7 +25,7 @@ LD = $(CC)
 LDFLAGS = -nostdlib -T link.ld -no-pie -m64 \
           -Wl,-z,max-page-size=0x1000,-z,common-page-size=0x1000,--build-id=none
 
-SYSDIR := ../sysroot/apps
+SYSDIR := ../sysroot/usr/bin
 
 NATIVE_ALL = hello calc filetest ipctest pftest waitpid_stress \
              mmap_race mmap_race_worker vma_overlap vma_isolation \

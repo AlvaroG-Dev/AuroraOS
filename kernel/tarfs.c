@@ -542,7 +542,7 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
 
   node->flags = tn->is_dir ? VFS_DIRECTORY : VFS_FILE;
   node->size = tn->size;
-  node->inode = 0;
+  node->inode = (uint32_t)(tn - nodes) + 1;
   node->ops = tn->is_dir ? &tar_dir_ops : &tar_file_ops;
   node->priv = tn;
 
