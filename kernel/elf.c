@@ -114,7 +114,8 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
                        uint64_t *vma_start_out, uint64_t *vma_end_out,
                        uint64_t *phdr_vaddr_out, uint16_t *phnum_out,
                        uint16_t *phent_out, char *interp_path,
-                       size_t interp_max, size_t *interp_len_out) {
+                       size_t interp_max, size_t *interp_len_out,
+                       elf_segment_t *segs_out, int *n_segs_out, int max_segs) {
   if (!read || !pml4 || !entry_out || !vma_start_out || !vma_end_out)
     return -1;
 
@@ -131,6 +132,8 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     interp_path[0] = '\0';
   if (interp_len_out)
     *interp_len_out = 0;
+  if (n_segs_out)
+    *n_segs_out = 0;
 
   /* --- 1. Leer Elf64_Ehdr --- */
   if (file_size < sizeof(Elf64_Ehdr)) {
@@ -331,6 +334,17 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
     if (end_page > vma_end)
       vma_end = end_page;
 
+    // [2.4] Publicar el segmento como VMA independiente. Un PT_LOAD
+    // (r--, r-x, rw-) → un VMA. Con esto /proc/<pid>/maps refleja los
+    // permisos reales por segmento, como Linux.
+    if (segs_out && n_segs_out && *n_segs_out < max_segs &&
+        end_page > start_page) {
+      segs_out[*n_segs_out].vaddr_start = start_page;
+      segs_out[*n_segs_out].vaddr_end = end_page;
+      segs_out[*n_segs_out].flags = ph->p_flags & (PF_R | PF_W | PF_X);
+      (*n_segs_out)++;
+    }
+
     uint64_t page_flags = PTE_USER | PTE_PRESENT;
     if (ph->p_flags & PF_W)
       page_flags |= PTE_WRITABLE;
@@ -419,6 +433,8 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
   if (phdr_vaddr_out)
     LOG_INFO("[ELF] AT_PHDR = %p, phnum=%u phent=%u", (void *)*phdr_vaddr_out,
              phnum_out ? *phnum_out : 0, phent_out ? *phent_out : 0);
+  if (n_segs_out)
+    LOG_INFO("[ELF] Segmentos PT_LOAD: %d", *n_segs_out);
   rc = 0;
 
 out:
@@ -434,5 +450,5 @@ int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
   uint64_t vma_s, vma_e;
   return elf_load_streaming(elf_buf_read, &ctx, size, pml4, load_base,
                             entry_out, &vma_s, &vma_e, NULL, NULL, NULL, NULL,
-                            0, NULL);
+                            0, NULL, NULL, NULL, 0);
 }

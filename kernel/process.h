@@ -198,6 +198,14 @@ typedef struct process {
   // tienen bitmaps independientes. Por eso vive en process_t, no en fd.
   uint32_t fd_cloexec_mask;
 
+  // En struct process_t:
+  char exe_path[VFS_PATH_MAX]; // path completo del binario en execve
+
+  // [2.4] Nodo VFS del binario en ejecución, con ref extra. Lo pone
+  // execve/spawn, lo suelta process_exit. Mantiene el inode vivo
+  // aunque el path se haga unlink.
+  vfs_node_t *exe_file;
+
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,
@@ -326,4 +334,6 @@ process_t *process_spawn_child_args_fds_env(process_t *parent, const char *path,
                                             const spawn_fds_t *fds);
 
 process_t *process_find_by_pml4(uint64_t pml4_phys);
+
+void process_set_exe_path(process_t *p, const char *path);
 #endif // PROCESS_H

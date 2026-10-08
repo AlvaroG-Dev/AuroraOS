@@ -568,15 +568,19 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
   if (ops->lookup)
     node = ops->lookup(fs_priv, rel);
 
-  // [3.3.c] El nodo debe llevar el path COMPLETO (visto por el usuario)
-  // en node->name, no el relativo al mount. k_getdents64 lo necesita
-  // para mergear mounts hijas sin volver a hacer lookup.
+  // [3.3.c] El nodo debe llevar el path COMPLETO...
   if (node) {
     size_t plen = strlen(norm);
     if (plen >= sizeof(node->name))
       plen = sizeof(node->name) - 1;
     memcpy(node->name, norm, plen);
     node->name[plen] = '\0';
+    // [df] Marcar el nodo con el fs_ops de su mount...
+    if (!node->fs)
+      node->fs = ops;
+    // [2.4] Ref primaria del llamante. Los FS hacen kzalloc, así que
+    // aquí es el único sitio donde ponemos ref_count=1 para todos.
+    node->ref_count = 1;
   }
 
   if (!node) {
@@ -1296,11 +1300,37 @@ int vfs_check_access(vfs_node_t *node, int mask) {
 // ===========================================================================
 // Free de nodo
 // ===========================================================================
+// ---------------------------------------------------------------------------
+// [2.4] Refcount de vfs_node_t.
+//
+// Convención: el nodo devuelto por vfs_lookup() llega con ref_count=0.
+// El llamante es dueño de ese "ref primario" y debe soltarlo con
+// vfs_node_free(). Cada consumidor adicional (exe_file, vma->file_node,
+// etc.) hace vfs_node_ref() — incrementa ref_count — y suelta con
+// vfs_node_free(). El nodo se libera cuando el último dueño llama a
+// vfs_node_free() con ref_count ya en 0.
+// ---------------------------------------------------------------------------
+void vfs_node_ref(vfs_node_t *node) {
+  if (!node)
+    return;
+  if (node == &stdin_node || node == &stdout_node || node == &stderr_node)
+    return;
+  __atomic_fetch_add(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+}
+
 void vfs_node_free(vfs_node_t *node) {
   if (!node)
     return;
   if (node == &stdin_node || node == &stdout_node || node == &stderr_node)
     return;
+
+  // Decrementa. Solo libera cuando el decremento deja el contador en
+  // -1, es decir: veníamos de ref_count=0 (el ref primario) y todos
+  // los refs extra ya se soltaron.
+  int new_rc = __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+  if (new_rc >= 0)
+    return;
+
   if (node->ops && node->ops->close)
     node->ops->close(node);
   kfree(node);

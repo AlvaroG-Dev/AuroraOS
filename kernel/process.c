@@ -248,6 +248,23 @@ static int64_t elf_read_vfs(void *ctx, uint64_t offset, size_t size,
 }
 
 // ---------------------------------------------------------------------------
+// [2.4] Traduce PF_* de un segmento ELF a flags de PTE.
+//   - Siempre PTE_USER (el kernel no necesita mapear estas páginas).
+//   - PF_W → PTE_WRITABLE.
+//   - PF_X ausente → PTE_NX.
+// x86 no tiene bit "no read": un segmento r--p y otro rw-p comparten
+// PTE_USER; la única diferencia es PTE_WRITABLE.
+// ---------------------------------------------------------------------------
+static uint64_t elf_seg_to_pte_flags(uint32_t pf) {
+  uint64_t fl = PTE_USER;
+  if (pf & PF_W)
+    fl |= PTE_WRITABLE;
+  if (!(pf & PF_X))
+    fl |= PTE_NX;
+  return fl;
+}
+
+// ---------------------------------------------------------------------------
 // [cwd] Inicializa proc->cwd a partir de `src`. Si `src` es NULL o vacío,
 // usa "/". Trunca si hace falta.
 // ---------------------------------------------------------------------------
@@ -668,8 +685,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   }
 
   if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
-      !vma_create(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
-                  VMA_ELF)) {
+      !vma_create_elf(proc, elf_vma_start, elf_vma_end, PTE_USER | PTE_NX,
+                      NULL)) {
     LOG_ERR("[PROC] No se pudo crear VMA ELF");
     task_put(task);
     task_put(task);
@@ -729,7 +746,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
     int argc, const char *const *argv, int envc, const char *const *envp,
     const char *inherited_cwd, const spawn_fds_t *fds, process_t *parent,
-    uint32_t ppid) {
+    vfs_node_t *exe_node, uint32_t ppid) {
   if (!read) {
     LOG_ERR("[PROC] reader ELF nulo");
     return NULL;
@@ -751,44 +768,49 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   uint16_t phnum = 0, phent = 0;
   char interp_path[VFS_PATH_MAX];
   size_t interp_len = 0;
+  elf_segment_t exe_segs[ELF_MAX_SEGMENTS];
+  int n_exe_segs = 0;
 
   if (elf_load_streaming(read, read_ctx, file_size, pml4, load_base, &entry,
                          &elf_vma_start, &elf_vma_end, &phdr_vaddr, &phnum,
-                         &phent, interp_path, sizeof(interp_path),
-                         &interp_len) != 0) {
+                         &phent, interp_path, sizeof(interp_path), &interp_len,
+                         exe_segs, &n_exe_segs, ELF_MAX_SEGMENTS) != 0) {
     LOG_ERR("[PROC] Fallo al cargar ELF (streaming)");
     paging_free_user_space(pml4_phys);
     return NULL;
   }
 
-  // --- Cargar intérprete si PT_INTERP ---
   uint64_t at_base = 0;
   uint64_t final_entry = entry;
   uint64_t interp_vma_start = 0, interp_vma_end = 0;
+  vfs_node_t *interp_inode = NULL;
+  elf_segment_t interp_segs[ELF_MAX_SEGMENTS];
+  int n_interp_segs = 0;
 
   if (interp_len > 0) {
     LOG_INFO("[PROC] Cargando intérprete '%s'", interp_path);
 
-    vfs_node_t *inode = vfs_lookup(interp_path);
-    if (!inode || !inode->ops || !inode->ops->read) {
-      if (inode)
-        vfs_node_free(inode);
+    interp_inode = vfs_lookup(interp_path);
+    if (!interp_inode || !interp_inode->ops || !interp_inode->ops->read) {
+      if (interp_inode)
+        vfs_node_free(interp_inode);
       LOG_ERR("[PROC] Intérprete no accesible");
       paging_free_user_space(pml4_phys);
       return NULL;
     }
 
-    struct elf_vfs_ctx ictx = {.node = inode};
+    struct elf_vfs_ctx ictx = {.node = interp_inode};
     uint64_t interp_load_base = 0x00007f0000000000ULL;
     uint64_t interp_entry = 0, interp_phdr = 0;
     uint16_t interp_phnum = 0, interp_phent = 0;
 
     int irc = elf_load_streaming(
-        elf_read_vfs, &ictx, inode->size, pml4, interp_load_base, &interp_entry,
-        &interp_vma_start, &interp_vma_end, &interp_phdr, &interp_phnum,
-        &interp_phent, NULL, 0, NULL);
-    vfs_node_free(inode);
+        elf_read_vfs, &ictx, interp_inode->size, pml4, interp_load_base,
+        &interp_entry, &interp_vma_start, &interp_vma_end, &interp_phdr,
+        &interp_phnum, &interp_phent, NULL, 0, NULL, interp_segs,
+        &n_interp_segs, ELF_MAX_SEGMENTS);
     if (irc != 0) {
+      vfs_node_free(interp_inode);
       LOG_ERR("[PROC] Fallo al cargar intérprete");
       paging_free_user_space(pml4_phys);
       return NULL;
@@ -800,12 +822,13 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
              (void *)final_entry);
   }
 
-  // --- Stack ---
   uint64_t stack_base = USER_STACK_BASE;
   uint64_t stack_top = stack_base + USER_STACK_SIZE;
   for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
+      if (interp_inode)
+        vfs_node_free(interp_inode);
       paging_free_user_space(pml4_phys);
       return NULL;
     }
@@ -814,12 +837,13 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
                            PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
         0) {
       pmm_free_page(phys);
+      if (interp_inode)
+        vfs_node_free(interp_inode);
       paging_free_user_space(pml4_phys);
       return NULL;
     }
   }
 
-  // --- auxv ---
   proc_auxv_info_t ai = {
       .phdr_vaddr = phdr_vaddr,
       .entry = entry,
@@ -829,14 +853,17 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   uint64_t user_rsp = setup_arg_block(pml4, stack_top, argc, argv, envc, envp,
                                       &ai, name, at_base);
   if (!user_rsp) {
+    if (interp_inode)
+      vfs_node_free(interp_inode);
     paging_free_user_space(pml4_phys);
     return NULL;
   }
 
-  // --- Tarea ---
   task_t *task = sched_create_user_task_stopped((void (*)(void))final_entry,
                                                 user_rsp, pml4_phys);
   if (!task) {
+    if (interp_inode)
+      vfs_node_free(interp_inode);
     paging_free_user_space(pml4_phys);
     return NULL;
   }
@@ -844,6 +871,8 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   process_t *proc = (process_t *)kzalloc(sizeof(process_t));
   if (!proc) {
     task_put(task);
+    if (interp_inode)
+      vfs_node_free(interp_inode);
     paging_free_user_space(pml4_phys);
     return NULL;
   }
@@ -854,6 +883,8 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->sid = proc->pid;
   proc->team_size = 1;
   proc->ctty = NULL;
+  proc->exe_file = NULL;
+  proc->exe_path[0] = '\0';
   set_proc_name_from_path(proc, name);
   proc->task = task;
   task_get(task);
@@ -882,35 +913,64 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     process_clear_argv(proc);
     task_put(task);
     task_put(task);
+    if (interp_inode)
+      vfs_node_free(interp_inode);
     paging_free_user_space(pml4_phys);
     kfree(proc);
     return NULL;
   }
 
-  if (elf_vma_start == ~0ULL || elf_vma_start >= elf_vma_end ||
-      !vma_create(proc, elf_vma_start, elf_vma_end,
-                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
-    LOG_ERR("[PROC] No se pudo crear VMA ELF");
+  // [2.4] Un VMA_ELF por cada PT_LOAD del binario.
+  if (n_exe_segs == 0) {
+    LOG_ERR("[PROC] ELF sin PT_LOAD");
     process_clear_envp(proc);
     process_clear_argv(proc);
     task_put(task);
     task_put(task);
+    if (interp_inode)
+      vfs_node_free(interp_inode);
     paging_free_user_space(pml4_phys);
     kfree(proc);
     return NULL;
+  }
+  for (int i = 0; i < n_exe_segs; i++) {
+    uint64_t fl = elf_seg_to_pte_flags(exe_segs[i].flags);
+    if (!vma_create_elf(proc, exe_segs[i].vaddr_start, exe_segs[i].vaddr_end,
+                        fl, exe_node)) {
+      LOG_ERR("[PROC] No se pudo crear VMA ELF seg %d", i);
+      vma_destroy_all(proc);
+      process_clear_envp(proc);
+      process_clear_argv(proc);
+      task_put(task);
+      task_put(task);
+      if (interp_inode)
+        vfs_node_free(interp_inode);
+      paging_free_user_space(pml4_phys);
+      kfree(proc);
+      return NULL;
+    }
   }
 
-  if (interp_len > 0 &&
-      !vma_create(proc, interp_vma_start, interp_vma_end,
-                  PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF)) {
-    LOG_ERR("[PROC] No se pudo crear VMA intérprete");
-    vma_destroy_all(proc);
-    task_put(task);
-    task_put(task);
-    paging_free_user_space(pml4_phys);
-    kfree(proc);
-    return NULL;
+  // [2.4] Un VMA_ELF por cada PT_LOAD del intérprete.
+  for (int i = 0; i < n_interp_segs; i++) {
+    uint64_t fl = elf_seg_to_pte_flags(interp_segs[i].flags);
+    if (!vma_create_elf(proc, interp_segs[i].vaddr_start,
+                        interp_segs[i].vaddr_end, fl, interp_inode)) {
+      LOG_ERR("[PROC] No se pudo crear VMA ELF interp seg %d", i);
+      vma_destroy_all(proc);
+      process_clear_envp(proc);
+      process_clear_argv(proc);
+      task_put(task);
+      task_put(task);
+      if (interp_inode)
+        vfs_node_free(interp_inode);
+      paging_free_user_space(pml4_phys);
+      kfree(proc);
+      return NULL;
+    }
   }
+  if (interp_inode)
+    vfs_node_free(interp_inode);
 
   if (!vma_create(proc, proc->stack_low, proc->stack_top,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK)) {
@@ -967,6 +1027,13 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   mutex_init(&proc->mm_lock);
   mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
+
+  if (exe_node) {
+    proc->exe_file = exe_node;
+    vfs_node_ref(exe_node);
+  }
+  process_set_exe_path(proc, name);
+
   task->proc = proc;
 
   unsigned long flags = spin_lock_irqsave(&process_lock);
@@ -979,15 +1046,6 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   LOG_INFO("[PROC] Proceso '%s' creado (PID=%u, at_base=%p)", name, proc->pid,
            (void *)at_base);
   return proc;
-}
-
-static process_t *process_spawn_streaming_with_ppid_args_cwd(
-    const char *name, elf_read_fn read, void *read_ctx, uint64_t file_size,
-    int argc, const char *const *argv, int envc, const char *const *envp,
-    const char *inherited_cwd, uint32_t ppid) {
-  return process_spawn_streaming_with_ppid_args_cwd_fds(
-      name, read, read_ctx, file_size, argc, argv, envc, envp, inherited_cwd,
-      NULL, NULL, ppid);
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,7 +1079,7 @@ static process_t *process_load_with_ppid_args_cwd_fds(
 
   process_t *p = process_spawn_streaming_with_ppid_args_cwd_fds(
       path, elf_read_vfs, &ctx, file_size, argc, argv, envc, envp,
-      inherited_cwd, fds, parent, ppid);
+      inherited_cwd, fds, parent, node, ppid);
 
   vfs_node_free(node);
   return p;
@@ -1397,6 +1455,14 @@ void process_exit(process_t *proc, int exit_code) {
       (unsigned long)__atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE),
       (unsigned long)proc->blocked_signals);
 
+  // [2.4] Soltar el nodo del binario. Si nadie más lo tenía
+  // referenciado (los VMAs ya lo han soltado o se soltarán aquí), el
+  // inode se libera. Un unlink previo no impide llegar aquí.
+  if (proc->exe_file) {
+    vfs_node_free(proc->exe_file);
+    proc->exe_file = NULL;
+  }
+
   process_clear_envp(proc);
   process_clear_argv(proc);
 
@@ -1703,12 +1769,8 @@ static int clone_vmas(process_t *parent, process_t *child) {
     nv->pad = 0;
     nv->next = NULL;
 
-    // [3.5] Compartir el file_descriptor_t con el padre: tomar ref.
-    if (v->type == VMA_FILE && v->file_fd) {
-      nv->file_fd = v->file_fd;
-      __atomic_fetch_add(&nv->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
-      nv->file_offset = v->file_offset;
-    }
+    // [2.4] Hereda file_fd + file_node con refs propias.
+    vma_inherit_backing(nv, v, 0);
 
     *tail = nv;
     tail = &nv->next;
@@ -1788,6 +1850,20 @@ int64_t sys_fork(void) {
   child->is_zombie = 0;
   child->team_size = 1; // ← AÑADIR
   child->ctty = parent->ctty;
+
+  // [2.4] Heredar el nodo del binario con ref propia.
+  child->exe_file = parent->exe_file;
+  if (child->exe_file)
+    vfs_node_ref(child->exe_file);
+  if (parent->exe_path[0]) {
+    size_t pl = strlen(parent->exe_path);
+    if (pl >= sizeof(child->exe_path))
+      pl = sizeof(child->exe_path) - 1;
+    memcpy(child->exe_path, parent->exe_path, pl);
+    child->exe_path[pl] = '\0';
+  } else {
+    child->exe_path[0] = '\0';
+  }
 
   // Nombre: prefijo con el del padre.
   {
@@ -1952,6 +2028,17 @@ task_t *process_clone_thread(process_t *parent, registers_t *regs,
   return child_task;
 }
 
+// Helper:
+void process_set_exe_path(process_t *p, const char *path) {
+  if (!p || !path)
+    return;
+  size_t n = strlen(path);
+  if (n >= sizeof(p->exe_path))
+    n = sizeof(p->exe_path) - 1;
+  memcpy(p->exe_path, path, n);
+  p->exe_path[n] = '\0';
+}
+
 // ---------------------------------------------------------------------------
 // [execve] Reemplazo in-place del espacio de usuario.
 //
@@ -1973,10 +2060,6 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   if (envc < 0 || envc > PROCESS_ENVP_MAX)
     return -EINVAL;
 
-  // execve replaces the entire address space. Aurora does not yet have the
-  // Linux-style mechanism that terminates/synchronizes sibling threads, so
-  // allowing execve() with team_size > 1 would leave sibling tasks running
-  // on a freed PML4. Reject it until that machinery exists.
   unsigned long exec_flags = spin_lock_irqsave(&process_lock);
   int has_siblings = (proc->team_size > 1);
   spin_unlock_irqrestore(&process_lock, exec_flags);
@@ -1985,50 +2068,52 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
 
   uint32_t tpid = proc->pid;
 
-  vfs_node_t *node = vfs_lookup(path);
-  if (!node)
+  vfs_node_t *exe_node = vfs_lookup(path);
+  if (!exe_node)
     return -ENOENT;
-  if (node->flags & VFS_DIRECTORY) {
-    vfs_node_free(node);
+  if (exe_node->flags & VFS_DIRECTORY) {
+    vfs_node_free(exe_node);
     return -EISDIR;
   }
-  if (!node->ops || !node->ops->read) {
-    vfs_node_free(node);
+  if (!exe_node->ops || !exe_node->ops->read) {
+    vfs_node_free(exe_node);
+    return -EACCES;
+  }
+  if ((exe_node->mode & 0111) == 0) {
+    vfs_node_free(exe_node);
     return -EACCES;
   }
 
-  if ((node->mode & 0111) == 0) {
-    vfs_node_free(node);
-    return -EACCES;
-  }
-
-  uint32_t new_mode = node->mode;
-  uint32_t new_uid = node->uid;
-  uint32_t new_gid = node->gid;
+  uint32_t new_mode = exe_node->mode;
+  uint32_t new_uid = exe_node->uid;
+  uint32_t new_gid = exe_node->gid;
 
   uint64_t new_pml4_phys = paging_clone_kernel_space();
   if (!new_pml4_phys) {
-    vfs_node_free(node);
+    vfs_node_free(exe_node);
     return -ENOMEM;
   }
   uint64_t *new_pml4 = (uint64_t *)phys_to_virt(new_pml4_phys);
 
   uint64_t load_base = 0x555555554000ULL;
 
-  struct elf_vfs_ctx ctx = {.node = node};
+  struct elf_vfs_ctx ctx = {.node = exe_node};
   uint64_t entry = 0, vma_start = ~0ULL, vma_end = 0;
   uint64_t phdr_vaddr = 0;
   uint16_t phnum = 0, phent = 0;
   char interp_path[VFS_PATH_MAX];
   size_t interp_len = 0;
+  elf_segment_t exe_segs[ELF_MAX_SEGMENTS];
+  int n_exe_segs = 0;
 
   int rc =
-      elf_load_streaming(elf_read_vfs, &ctx, node->size, new_pml4, load_base,
-                         &entry, &vma_start, &vma_end, &phdr_vaddr, &phnum,
-                         &phent, interp_path, sizeof(interp_path), &interp_len);
-  vfs_node_free(node);
+      elf_load_streaming(elf_read_vfs, &ctx, exe_node->size, new_pml4,
+                         load_base, &entry, &vma_start, &vma_end, &phdr_vaddr,
+                         &phnum, &phent, interp_path, sizeof(interp_path),
+                         &interp_len, exe_segs, &n_exe_segs, ELF_MAX_SEGMENTS);
   if (rc != 0) {
     LOG_WARN("[EXECVE-TRACE] pid=%u elf_load_streaming failed rc=%d", tpid, rc);
+    vfs_node_free(exe_node);
     paging_free_user_space(new_pml4_phys);
     return rc == -ENOMEM ? -ENOMEM : -ENOEXEC;
   }
@@ -2036,34 +2121,39 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   uint64_t at_base = 0;
   uint64_t final_entry = entry;
   uint64_t interp_vma_start = 0, interp_vma_end = 0;
+  vfs_node_t *interp_inode = NULL;
+  elf_segment_t interp_segs[ELF_MAX_SEGMENTS];
+  int n_interp_segs = 0;
 
   if (interp_len > 0) {
-
-    vfs_node_t *inode = vfs_lookup(interp_path);
-    if (!inode) {
+    interp_inode = vfs_lookup(interp_path);
+    if (!interp_inode) {
       LOG_ERR("[EXECVE] Intérprete no encontrado: %s", interp_path);
+      vfs_node_free(exe_node);
       paging_free_user_space(new_pml4_phys);
       return -ENOENT;
     }
-    if (!inode->ops || !inode->ops->read) {
-      vfs_node_free(inode);
+    if (!interp_inode->ops || !interp_inode->ops->read) {
+      vfs_node_free(interp_inode);
+      vfs_node_free(exe_node);
       paging_free_user_space(new_pml4_phys);
       return -EACCES;
     }
 
-    struct elf_vfs_ctx ictx = {.node = inode};
+    struct elf_vfs_ctx ictx = {.node = interp_inode};
     uint64_t interp_load_base = 0x00007f0000000000ULL;
     uint64_t interp_entry = 0;
     uint64_t interp_phdr = 0;
     uint16_t interp_phnum = 0, interp_phent = 0;
 
     int irc = elf_load_streaming(
-        elf_read_vfs, &ictx, inode->size, new_pml4, interp_load_base,
+        elf_read_vfs, &ictx, interp_inode->size, new_pml4, interp_load_base,
         &interp_entry, &interp_vma_start, &interp_vma_end, &interp_phdr,
-        &interp_phnum, &interp_phent, NULL, 0, NULL);
-    vfs_node_free(inode);
+        &interp_phnum, &interp_phent, NULL, 0, NULL, interp_segs,
+        &n_interp_segs, ELF_MAX_SEGMENTS);
     if (irc != 0) {
-      LOG_ERR("[EXECVE] Fallo al cargar intérprete");
+      vfs_node_free(interp_inode);
+      vfs_node_free(exe_node);
       paging_free_user_space(new_pml4_phys);
       return irc == -ENOMEM ? -ENOMEM : -ENOEXEC;
     }
@@ -2077,6 +2167,9 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   for (uint64_t off = 0; off < USER_STACK_SIZE; off += PAGE_SIZE) {
     uint64_t phys = pmm_alloc_page();
     if (!phys) {
+      if (interp_inode)
+        vfs_node_free(interp_inode);
+      vfs_node_free(exe_node);
       paging_free_user_space(new_pml4_phys);
       return -ENOMEM;
     }
@@ -2085,6 +2178,9 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
                            PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) !=
         0) {
       pmm_free_page(phys);
+      if (interp_inode)
+        vfs_node_free(interp_inode);
+      vfs_node_free(exe_node);
       paging_free_user_space(new_pml4_phys);
       return -ENOMEM;
     }
@@ -2100,6 +2196,9 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
                                       envp, &ai, path, at_base);
   if (!user_rsp) {
     LOG_WARN("[EXECVE-TRACE] pid=%u setup_arg_block failed", tpid);
+    if (interp_inode)
+      vfs_node_free(interp_inode);
+    vfs_node_free(exe_node);
     paging_free_user_space(new_pml4_phys);
     return -ENOMEM;
   }
@@ -2167,12 +2266,26 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     proc->name[n] = '\0';
   }
 
-  if (!vma_create(proc, vma_start, vma_end, PTE_USER | PTE_WRITABLE | PTE_NX,
-                  VMA_ELF))
-    LOG_ERR("[EXECVE] vma_create ELF falló");
-  if (interp_len > 0 && !vma_create(proc, interp_vma_start, interp_vma_end,
-                                    PTE_USER | PTE_WRITABLE | PTE_NX, VMA_ELF))
-    LOG_ERR("[EXECVE] vma_create intérprete falló");
+  // [2.4] Un VMA_ELF por PT_LOAD del binario y del intérprete.
+  if (n_exe_segs == 0) {
+    LOG_ERR("[EXECVE] ELF sin PT_LOAD");
+  } else {
+    for (int i = 0; i < n_exe_segs; i++) {
+      uint64_t fl = elf_seg_to_pte_flags(exe_segs[i].flags);
+      if (!vma_create_elf(proc, exe_segs[i].vaddr_start, exe_segs[i].vaddr_end,
+                          fl, exe_node))
+        LOG_ERR("[EXECVE] vma_create_elf exe seg %d falló", i);
+    }
+  }
+  for (int i = 0; i < n_interp_segs; i++) {
+    uint64_t fl = elf_seg_to_pte_flags(interp_segs[i].flags);
+    if (!vma_create_elf(proc, interp_segs[i].vaddr_start,
+                        interp_segs[i].vaddr_end, fl, interp_inode))
+      LOG_ERR("[EXECVE] vma_create_elf interp seg %d falló", i);
+  }
+  if (interp_inode)
+    vfs_node_free(interp_inode);
+
   if (!vma_create(proc, proc->stack_low, proc->stack_top,
                   PTE_USER | PTE_WRITABLE | PTE_NX, VMA_STACK))
     LOG_ERR("[EXECVE] vma_create stack falló");
@@ -2194,6 +2307,13 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
         vfs_close_for_proc(proc, f);
     }
   }
+
+  if (proc->exe_file && proc->exe_file != exe_node)
+    vfs_node_free(proc->exe_file);
+  proc->exe_file = exe_node;
+  vfs_node_ref(exe_node);
+  process_set_exe_path(proc, path);
+  vfs_node_free(exe_node);
 
   *new_entry = final_entry;
   *new_rsp = user_rsp;

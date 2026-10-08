@@ -13,9 +13,10 @@
 #include "klog.h"
 #include "rtc.h"
 #include "spinlock.h"
-#include "wait.h"
 #include "string.h"
 #include "uaccess.h" // EINVAL, EIO, ENOMEM, ENOENT, EISDIR, ENAMETOOLONG,
+#include "wait.h"
+
 
 // EEXIST, ENOTEMPTY, ENOSPC
 #include <stddef.h>
@@ -289,12 +290,12 @@ static inline uint64_t cluster_to_sector(const fat32_fs_t *fs, uint32_t c) {
 // 544 bytes (múltiplo de 16) para que todos los slots siguientes
 // mantengan la misma alineación.
 typedef struct __attribute__((aligned(16))) fat32_bcache_slot {
-  uint8_t  data[FAT32_BCACHE_SECTOR]; // offset 0   (512 bytes, alineado)
-  uint64_t lba;                       // offset 512
-  uint32_t last_used;                 // offset 520
-  uint8_t  dirty;                     // offset 524
+  uint8_t data[FAT32_BCACHE_SECTOR]; // offset 0   (512 bytes, alineado)
+  uint64_t lba;                      // offset 512
+  uint32_t last_used;                // offset 520
+  uint8_t dirty;                     // offset 524
   // El compilador añade 3 bytes de padding aquí para alinear `hnext` a 8.
-  struct fat32_bcache_slot *hnext;    // offset 528
+  struct fat32_bcache_slot *hnext; // offset 528
   // El compilador añade 8 bytes más de padding para que sizeof == 544,
   // múltiplo de la alineación 16. Así `data` de slots consecutivos
   // siempre cae en dirección múltiplo de 16.
@@ -905,17 +906,15 @@ static int fat32_sync_locked(fat32_fs_t *fs) {
     return 0;
   }
 
-  const uint32_t MAX_SYNC_SECTORS =
-      (64u * 1024u) / fs->bytes_per_sector;
+  const uint32_t MAX_SYNC_SECTORS = (64u * 1024u) / fs->bytes_per_sector;
 
   uint64_t remaining = fs->fat_size_sectors;
   uint64_t lba = fs->fat_start_sector;
   uint32_t *buf = fs->fat_cache;
 
   while (remaining > 0) {
-    uint32_t chunk = (remaining > MAX_SYNC_SECTORS)
-                       ? MAX_SYNC_SECTORS
-                       : (uint32_t)remaining;
+    uint32_t chunk =
+        (remaining > MAX_SYNC_SECTORS) ? MAX_SYNC_SECTORS : (uint32_t)remaining;
     if (bdev_write(fs->bdev, lba, chunk, buf) != 0) {
       LOG_ERR("[FAT32] sync FAT#1 falló (lba=%llu count=%u)",
               (unsigned long long)lba, chunk);
@@ -3327,9 +3326,8 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
       int read_ok = 1;
 
       while (remaining > 0) {
-        uint32_t chunk = (remaining > MAX_READ_SECTORS)
-                           ? MAX_READ_SECTORS
-                           : (uint32_t)remaining;
+        uint32_t chunk = (remaining > MAX_READ_SECTORS) ? MAX_READ_SECTORS
+                                                        : (uint32_t)remaining;
         if (bdev_read(fs->bdev, lba, chunk, buf) != 0) {
           read_ok = 0;
           break;

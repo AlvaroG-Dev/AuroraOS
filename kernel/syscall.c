@@ -245,11 +245,47 @@ static int resolve_user_path(process_t *proc, const char *uptr, char *out,
   return vfs_resolve_path(cwd, raw, out, outlen);
 }
 
+// ---------------------------------------------------------------------------
+// [df] Device id estable por filesystem montado.
+//
+// df, findmnt y mount deduplican y emparejan mounts por el número de
+// device (st_dev en stat, columna maj:min en /proc/self/mountinfo). Si
+// todos los FS comparten el mismo id, df colapsa /, /data, /proc, /sys
+// y /dev a uno solo, y luego filtra los que reportan 0 bloques → "no
+// file systems processed".
+//
+// Asignamos un id único por puntero a vfs_fs_ops. Todos los nodos de un
+// mismo FS comparten el mismo ops, así que todos comparten el device.
+// El primer slot es 32 (antes de 32 reservamos para el FS "desconocido").
+// ---------------------------------------------------------------------------
+#define FS_DEV_MAX 16
+static const void *g_fs_dev_tab[FS_DEV_MAX];
+
+uint64_t fs_dev_id(const void *fs) {
+  if (!fs)
+    return 31;
+  for (int i = 0; i < FS_DEV_MAX; i++) {
+    const void *cur = __atomic_load_n(&g_fs_dev_tab[i], __ATOMIC_ACQUIRE);
+    if (cur == fs)
+      return 32 + i;
+    if (cur == NULL) {
+      const void *expected = NULL;
+      if (__atomic_compare_exchange_n(&g_fs_dev_tab[i], &expected, fs, 0,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ||
+          expected == fs)
+        return 32 + i;
+    }
+  }
+  return 32 + FS_DEV_MAX;
+}
+
 // Traduce un vfs_stat_t de Aurora al struct stat de Linux.
-static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size,
+//
+// `dev` debe ser el device id del FS (fs_dev_id(node->fs)), no un valor
+// fijo, o df confunde todos los mounts con el mismo FS.
+static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size, uint64_t dev,
                               linux_stat_t *out) {
   memset(out, 0, sizeof(*out));
-  // [3.4.a] El FS decide el modo. Fallback por si algún FS no lo rellena.
   uint32_t mode = vs->mode;
   if (mode == 0) {
     if (vs->flags & VFS_DIRECTORY)
@@ -259,13 +295,13 @@ static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size,
     else
       mode = S_IFREG | 0644;
   }
-  out->st_dev = 1;
+  out->st_dev = (int64_t)dev;
   out->st_ino = vs->inode;
   out->st_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
   out->st_mode = mode;
   out->st_uid = vs->uid;
   out->st_gid = vs->gid;
-  out->st_rdev = (int64_t)vs->rdev; // [4.4]
+  out->st_rdev = (int64_t)vs->rdev;
   out->st_size = (int64_t)size;
   out->st_blksize = 512;
   out->st_blocks = (int64_t)((size + 511) / 512);
@@ -390,6 +426,7 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
     LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", kpath, linux_flags, fd);
     return fd;
   }
+
   if (!created_here && (linux_flags & LINUX_O_TRUNC)) {
     file_descriptor_t *f = proc->fds[fd];
     if (f && f->node && f->node->ops && f->node->ops->truncate)
@@ -496,6 +533,7 @@ static int64_t k_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
 }
 
 // ---------- fstat / stat / fstatat ----------
+// ---------- fstat / stat / fstatat ----------
 static int64_t k_fstat(uint64_t fd, uint64_t statbuf, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
   (void)a3;
@@ -512,8 +550,14 @@ static int64_t k_fstat(uint64_t fd, uint64_t statbuf, uint64_t a3, uint64_t a4,
   if (rc != 0)
     return rc;
 
+  // [df] Device del FS subyacente, no un 1 fijo.
+  uint64_t dev = 31;
+  if ((int)fd >= 0 && (int)fd < MAX_PROCESS_FDS && proc->fds[fd] &&
+      proc->fds[fd]->node)
+    dev = fs_dev_id(proc->fds[fd]->node->fs);
+
   linux_stat_t ls;
-  vfs_to_linux_stat(&vs, vs.size, &ls);
+  vfs_to_linux_stat(&vs, vs.size, dev, &ls);
   if (copy_to_user((void *)statbuf, &ls, sizeof(ls)) < 0)
     return -EFAULT;
   return 0;
@@ -542,12 +586,14 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .mode = node->mode,
       .uid = node->uid,
       .gid = node->gid,
-      .rdev = node->rdev, // [4.4]
+      .rdev = node->rdev,
   };
+  // [df] Capturar el device ANTES de liberar el nodo.
+  uint64_t dev = fs_dev_id(node->fs);
   vfs_node_free(node);
 
   linux_stat_t ls;
-  vfs_to_linux_stat(&vs, vs.size, &ls);
+  vfs_to_linux_stat(&vs, vs.size, dev, &ls);
   if (copy_to_user((void *)statbuf, &ls, sizeof(ls)) < 0)
     return -EFAULT;
   return 0;
@@ -581,9 +627,81 @@ static int64_t k_fstatat(uint64_t dfd, uint64_t path, uint64_t statbuf,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-  if ((int)dfd != AT_FDCWD)
+
+  if ((int)dfd == AT_FDCWD)
+    return do_stat_path(proc, (const char *)path, statbuf, flags);
+
+  // [FIX] dirfd real: combinar node->name + rel, como en k_openat.
+  int kfd = (int)dfd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
+    return -EBADF;
+  vfs_node_t *dir_node = proc->fds[kfd]->node;
+  if (!dir_node || !(dir_node->flags & VFS_DIRECTORY))
+    return -ENOTDIR;
+
+  char rel[VFS_PATH_MAX];
+  long n = strncpy_from_user(rel, (const char *)path, sizeof(rel));
+  if (n < 0)
+    return -EFAULT;
+  if (n == 0)
     return -EINVAL;
-  return do_stat_path(proc, (const char *)path, statbuf, flags);
+
+  char full[VFS_PATH_MAX];
+  if (rel[0] == '/') {
+    size_t rl = strlen(rel);
+    if (rl >= sizeof(full))
+      return -ENAMETOOLONG;
+    memcpy(full, rel, rl + 1);
+  } else {
+    const char *base = dir_node->name;
+    size_t bl = strlen(base);
+    size_t rl = strlen(rel);
+    int base_is_root = (bl == 1 && base[0] == '/');
+    size_t needed = base_is_root ? (1 + rl + 1) : (bl + 1 + rl + 1);
+    if (needed > sizeof(full))
+      return -ENAMETOOLONG;
+    if (base_is_root) {
+      full[0] = '/';
+      memcpy(full + 1, rel, rl + 1);
+    } else {
+      memcpy(full, base, bl);
+      full[bl] = '/';
+      memcpy(full + bl + 1, rel, rl + 1);
+    }
+  }
+
+  char norm[VFS_PATH_MAX];
+  int rc = vfs_resolve_path("/", full, norm, sizeof(norm));
+  if (rc != 0)
+    return rc;
+
+  if (!access_ok((void *)statbuf, sizeof(linux_stat_t)))
+    return -EFAULT;
+
+  int no_follow = (flags & AT_SYMLINK_NOFOLLOW) ? 1 : 0;
+  vfs_node_t *node = no_follow ? vfs_lookup_nofollow(norm) : vfs_lookup(norm);
+  if (!node)
+    return -ENOENT;
+
+  vfs_stat_t vs = {
+      .flags = node->flags,
+      .size = node->size,
+      .inode = node->inode,
+      .mtime_sec = node->mtime_sec,
+      .mode = node->mode,
+      .uid = node->uid,
+      .gid = node->gid,
+      .rdev = node->rdev,
+  };
+  // [df] Capturar el device ANTES de liberar el nodo.
+  uint64_t dev = fs_dev_id(node->fs);
+  vfs_node_free(node);
+
+  linux_stat_t ls;
+  vfs_to_linux_stat(&vs, vs.size, dev, &ls);
+  if (copy_to_user((void *)statbuf, &ls, sizeof(ls)) < 0)
+    return -EFAULT;
+  return 0;
 }
 
 // ---------- access ----------
@@ -1353,9 +1471,6 @@ static int64_t k_setpgid(uint64_t pid, uint64_t pgid, uint64_t a3, uint64_t a4,
   uint32_t target_pid = (pid == 0) ? self->pid : (uint32_t)pid;
   uint32_t target_pgid = (pgid == 0) ? target_pid : (uint32_t)pgid;
 
-  LOG_INFO("[SETPGID] self=%u target=%u pgid=%u", self->pid, target_pid,
-           target_pgid);
-
   if (target_pgid == 0)
     return -EINVAL;
 
@@ -1384,7 +1499,6 @@ static int64_t k_setpgid(uint64_t pid, uint64_t pgid, uint64_t a3, uint64_t a4,
   }
 
   target->pgid = target_pgid;
-  LOG_INFO("[SETPGID] -> OK pid=%u pgid=%u", target_pid, target_pgid);
   return 0;
 }
 
@@ -1504,10 +1618,6 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
 
   if (ksig < 1 || ksig >= SIG_MAX)
     return -EINVAL;
-
-  process_t *self = process_current();
-  LOG_INFO("[KILL] self=%u kpid=%d sig=%d", self ? self->pid : 0, (int)kpid,
-           ksig);
 
   if (kpid > 0) {
     int need_intr = 0;
@@ -3192,6 +3302,7 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
     ret = rc;
     goto out;
   }
+  process_set_exe_path(proc, path); // ← NUEVO
   LOG_INFO("[EXECVE] pid=%u path=%s", proc->pid, path);
 
   // Buffers en heap: 16*128 + 32*256 = 10 KB no caben cómodos en el
@@ -3756,24 +3867,19 @@ static int64_t k_klogctl(uint64_t type, uint64_t buf, uint64_t len, uint64_t a4,
   case SYSLOG_ACTION_READ_ALL:
   case SYSLOG_ACTION_READ_CLEAR: {
     if (len == 0) {
-      LOG_INFO("[KLOGCTL] len=0");
       return 0;
     }
     if (!buf) {
-      LOG_INFO("[KLOGCTL] buf=null");
       return -EINVAL;
     }
     if (!access_ok((void *)buf, (size_t)len)) {
-      LOG_INFO("[KLOGCTL] access_ok failed");
       return -EFAULT;
     }
-    LOG_INFO("[KLOGCTL] before kmalloc(%lu)", (unsigned long)len);
     size_t n = (size_t)len;
     if (n > 16384)
       n = 16384;
     char *tmp = (char *)kmalloc(n);
     if (!tmp) {
-      LOG_INFO("[KLOGCTL] kmalloc failed");
       return -ENOMEM;
     }
     size_t got;

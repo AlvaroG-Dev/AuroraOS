@@ -195,6 +195,12 @@ struct vfs_node {
   // majors grandes. Lo lee stat(2) para st_rdev. 0 para ficheros
   // regulares y directorios.
   uint32_t rdev;
+
+  // [2.4] Refcount. 0 = solo el "ref primario" del lookup. Cada
+  // consumidor que quiera mantener el nodo vivo hace vfs_node_ref(),
+  // y vfs_node_free() decrementa. El nodo se destruye cuando todos
+  // los dueños han soltado.
+  int ref_count;
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +354,8 @@ int vfs_link(const char *oldpath, const char *newpath);
 
 // Libera un nodo devuelto por vfs_lookup. Llamar a ops->close y kfree.
 void vfs_node_free(vfs_node_t *node);
+
+void vfs_node_ref(vfs_node_t *node);
 
 // Lee el archivo entero en un buffer kmalloc'd. El llamante hace kfree.
 // Devuelve 0 si OK, negativo en error (incluido -EISDIR).
