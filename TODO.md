@@ -196,6 +196,85 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 - [ ] `CLONE_VFORK` real.
 - [ ] `mknod` en devfs por major/minor (hoy solo guarda rdev).
 
+### Bloque 9 — Cierre del bloque interactivo + fixes estructurales ✅ CERRADO
+
+9.1 `/proc/vmstat` ✅
+   `gen_vmstat()` con ~100 claves a 0. `vmstat` funciona end-to-end.
+
+9.2 `/proc/<pid>/status` extendido ✅
+   Añadidos: Umask, FDSize, Groups, VmPeak/HWM/Size/RSS/Data/Stk/
+   Exe/Lib, RssAnon/File, Threads, SigQ/Pnd/Blk/Ign/Cgt,
+   Cpus_allowed(+list), Mems_allowed(+list).
+
+9.3 `/proc/<pid>/stat` con 52 campos ✅
+   Layout Linux x86_64 completo. Necesario para libproc2 (`ps aux`,
+   `top`). Requirió añadir 9 campos a `process_t`: start_tick,
+   start_code, end_code, start_data, end_data, arg_start, arg_end,
+   env_start, env_end. `calc_elf_code_data_ranges()` en process.c
+   los rellena a partir de los `elf_segment_t`.
+
+9.4 `exe_path` + `exe_file` + `vma->file_node` ✅
+   - `vfs_node_t` gana refcount real (`vfs_node_ref` + liberación
+     efectiva en `vfs_node_free`).
+   - `process_t.exe_path[VFS_PATH_MAX]` y `process_t.exe_file`
+     (ref extra, coherente con `mm->exe_file`). Heredado en fork,
+     liberado en `process_exit`.
+   - `vma_t.file_node` paralelo a `file_fd`. `vma_inherit_backing()`
+     centraliza la copia con refs correctos.
+   - VMA-per-PT_LOAD: un `vma_t` por segmento con sus permisos
+     reales. `maps`/`smaps` parseables por `pmap`, `gdb`, `lsof`.
+
+9.5 `/etc/ld.so.cache` ✅
+   Generado con `ldconfig -r sysroot` en build time. Corta a la
+   mitad los OPEN-FAIL por exec.
+
+9.6 `statx` (332) ✅
+   Estructura de 256 bytes, `vfs_to_statx()`, soporte de AT_FDCWD,
+   dirfd, AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH. Elimina el
+   `[SYSCALL-GAP] num=332` que coreutils 9.x dispara en cada `ls`.
+
+9.7 `/proc/<pid>/{cgroup,ctty}` ✅
+   - `cgroup`: `0::/\n`.
+   - `ctty`: symlink a `/dev/pts/N` o `/dev/console`. Fichero
+     vacío si no hay ctty. Implementado con `tty_get_path()` en
+     pty.c, declarado en tty.h.
+   - Añadidos a `procfs_pid_entries[]` para readdir.
+
+9.8 Fixes interactivos ✅
+   - `terminal.c` `case 'c'` (DA1): solo responde si no hay
+     params. Evita el bucle `6c6c6c...` con `nano`.
+   - `terminal.c` `case 'q'` (DECSCUSR): comprueba `inter[0]==' '`,
+     no `private_marker`. El SP es intermediate byte.
+   - `O_TMPFILE`: `-ENOENT` (no `-EISDIR` ni `-EOPNOTSUPP`).
+     glibc cae a `mkstemp` con ENOENT o EISDIR; ENOENT es la
+     constante universal.
+   - `TMPDIR=/data/tmp` en `default_envp[]` de init.
+   - Bind mount `/tmp` → `/data/tmp` en `kmain_task` (después
+     del mount de `/data`, no en `vfs_init`).
+
+9.9 Fixes estructurales descubiertos en el camino ✅
+   - **`vfs_node_free` nunca liberaba**: `if (new_rc >= 0) return;`
+     con `ref_count` inicial 1 → siempre salía por early-return.
+     Todos los nodos se filtraban. `fat32_test_cleanup()` liberaba
+     el `fat32_fs_t` y el SLAB reciclaba su dirección para otro
+     objeto, dejando la mount table con `fs_priv` apuntando a
+     memoria ajena. Hang silencioso en `fat32_mutex_unlock`.
+     Fix: `if (new_rc > 0) return;`.
+   - **`fat32_mutex_unlock` cogía `m->waiters.lock` a mano**:
+     violación de encapsulación de `wait_queue_t`. Delegado en
+     `wake_up_all`. Lock simplificado a `exchange`.
+   - **Tres sitios creaban `vfs_node_t` sin `ref_count=1`**:
+     `pty.c:pty_install_fd`, `pipe.c` (read/write end),
+     `vfs.c` (fallback root). Underflow exponía el bug anterior.
+   - **`k_sendfile`** con `uint8_t buf[4096]` en pila: frame de
+     4208 B, `-Wframe-larger-than=2048`. Movido a `kmalloc`.
+   - **`pty_m_has_space`** eliminado (dead code).
+
+**Deuda latente identificada pero no manifestada:**
+- [ ] Filtrar señales ignoradas en `signal_check_pending` y en
+      `wait_common` (Linux lo hace; evita bucles `read → EINTR` si
+      una señal con SIG_IGN queda pendiente).
+- [ ] Quitar el `[SIG-DBG]` temporal de `signal_check_pending`.
 ---
 
 # Estado global
@@ -212,22 +291,18 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 | 5.1 /etc/passwd | ✅ |
 | 5.2 init | ✅ |
 | 5.3 reaper | ✅ |
-| 5.4 getty | ⏳ |
+| 5.4 getty | ⏳ (opcional, cubierto por init) |
 | 6.1 scancodes | ✅ |
 | 6.2-6.4 | ⏳ |
 | 7 futex+clone | ✅ |
 | 8 SMP + syscalls Linux | ✅ |
+| 9 Interactivas + statx + /proc extendido + fixes FAT32 | ✅ |
 
-**Lo que queda del TODO**: 5.4 (getty — opcional, cubierto por init),
-6.2-6.4 (input/terminal avanzado), y el item opcional de mknod por
-major/minor. Todo lo demás está cerrado o equivalente.
+**Lo que queda del TODO**:
+- 5.4 (getty) — opcional, ya cubierto por init.
+- 6.2-6.4 (copy/paste, cursor parpadeante, serial como consola).
+- Deuda latente de señales ignoradas en wait/signal_check.
 
-Deudas conocidas del Bloque 7 (no bloquean nada hoy, todas acotadas):
-señales per-thread, `pthread_kill` dirigido, futex robusto,
-`CLONE_VFORK`. Ninguna impide que busybox o binarios musl básicos
-funcionen.
-
-**Siguiente bloque sugerido**: Terminal 2D (Fase 4.3 del ROADMAP), que
-desbloquea `vi`, `less` y `top` con render completo. Requiere ~8-10 h
-de trabajo: matriz de celdas, parser CSI completo, scroll region,
-alternate screen, render diferencial y SIGWINCH.
+**Siguiente bloque sugerido**: `epoll` + `eventfd` (Fase 3.9 del
+glibc_port, ~4 h). Desbloquea `tmux`, `screen`, `python3` asyncio,
+`libuv`, y hace que `pgrep` deje de emitir SYSCALL-GAP 213.

@@ -38,6 +38,15 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] Syscalls Linux: `futex`, `clone(CLONE_THREAD)`, `flock`, `klogctl`, `waitid`, `setdomainname`
 - [x] `pthread_create` / `pthread_join` funcional (stress 50 iteraciones, 60 clone events sin PF)
 - [x] Deadlock del TLB shootdown SMP resuelto (bitmask `tlb_pending` + polling en vez de IPI)
+- [x] **Port glibc maduro**: `/proc/vmstat`, `/proc/<pid>/stat` 52
+      campos, `/proc/<pid>/status` completo, `/proc/<pid>/{cgroup,ctty}`,
+      `statx`, `exe_path`+`exe_file`+`vma->file_node`, VMA-per-PT_LOAD,
+      `/etc/ld.so.cache`, bind mount `/tmp` → `/data/tmp`.
+- [x] **Interactivas**: `less`, `nano`, `ed` funcionan end-to-end
+      (incluido Ctrl+O en nano y heredoc en ed).
+- [x] **FAT32 estable bajo tests de truncate**: corregido el bug de
+      `vfs_node_free` que filtraba nodos y hacía que el SLAB reciclara
+      `fat32_fs_t` ya liberados (hang silencioso).
 
 La prioridad ahora es completar userland y filesystem, después networking/USB, y seguir validando Aurora OS sobre hardware real. En paralelo, el objetivo a más largo plazo del proyecto es que Aurora sea tan abierto y eficiente como Linux pero tan "todo hecho" como Windows: eso implica un BusyBox completo como base de userland (3.5), una capa de compatibilidad para ejecutar binarios Linux/ELF reales sin recompilar (3.6), y — de forma más experimental y acotada — un loader de ejecutables Windows/PE de consola (3.7). Ver el resumen de prioridad relativa al final de la Fase 3.
 
@@ -182,6 +191,17 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [x] Permisos y metadatos de archivos (mode/uid/gid por nodo, umask, chmod/chown, setuid/setgid en execve).
 - [x] Layout final: tarfs RO en `/`, FAT32 RW en `/data`, devfs en `/dev`, procfs en `/proc`.
 - [ ] `pivot_root`/`switch_root` genéricos: hoy el layout es fijo; sería útil soportar cambiar la raíz en runtime tras montar otro FS. (`vfs_pivot_root` está implementado pero no se usa porque el modelo LiveUSB no lo necesita.)
+- [x] /proc para observabilidad: `/proc/{uptime,version,meminfo,stat,
+      mounts,loadavg,vmstat,filesystems,partitions,swaps,self}` y
+      `/proc/<pid>/{stat,status,cmdline,comm,statm,maps,smaps,mountinfo,
+      cgroup,ctty}`.
+- [x] **`/proc/<pid>/stat` con 52 campos** al layout Linux x86_64
+      (necesario para libproc2 / top / htop).
+- [x] **`/proc/<pid>/status` extendido**: VmPeak/HWM/Size/RSS/Data/
+      Stk/Exe/Lib, SigQ/Pnd/Blk/Ign/Cgt, Cpus_allowed, Mems_allowed,
+      Groups, FDSize.
+- [x] **`/proc/<pid>/cgroup`** (`0::/`) y **`/proc/<pid>/ctty`**
+      (symlink al tty de control).
 
 ### 3.4 Shell
 - [x] Parser ANSI CSI en la consola gráfica: SGR (colores + bold), `K`/`J` con sus tres modos, `H`/`D`/`C`/`G`/`P`. Distingue `\033[J` local (post-backspace) de `\033[H\033[J` global (patrón de `clear` de busybox con `TERM=linux`).
@@ -191,6 +211,9 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [x] Pipes/redirecciones.
 - [x] Jobs/background.
 - [ ] Mejor manejo de errores.
+- [x] Bind mount `/tmp` → `/data/tmp` para que `tmpfile()`/`mkstemp()`
+      de glibc tenga un directorio RW real.
+- [x] `TMPDIR` exportado en el env de init.
 
 ### 3.5 BusyBox completo
 
@@ -236,6 +259,11 @@ Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bas
 - [x] `clone()` con flags de musl para pthread (CLONE_VM|CLONE_THREAD|CLONE_SETTLS|...).
 - [x] `pthread_create` / `pthread_join` / `pthread_mutex` / `pthread_cond` operativos.
 - [ ] Suite de smoke tests con binarios reales.
+- [x] `statx` (332) completo.
+- [x] `/etc/ld.so.cache` real, generado en build time.
+- [x] `O_TMPFILE` → `-ENOENT` para que glibc caiga a `mkstemp`.
+- [x] `exe_path` + `exe_file` + `vma->file_node` en `process_t`.
+- [x] VMA-per-PT_LOAD: `maps`/`smaps` con permisos reales por segmento.
 
 ### 3.7 Ejecutar ejecutables Windows (PE/COFF) — expectativas realistas
 *(sin cambios, sigue pendiente)*
@@ -325,7 +353,12 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 
 1. **Robustez del kernel + auditoría SMP** — ✅ completada.
 2. **Storage persistente + filesystem** — ✅ cerrado (FAT32 persistente con LFN, rename, buffer cache, tests de corrupción, fsck mínimo).
-3. **Userland/libc/shell** — ⏳ en progreso avanzado (ABI Linux, musl, TTY, pipes, PTYs, job control completo, permisos POSIX reales, `/etc/passwd`, BusyBox dinámico con ~200 applets, futex+clone, `flock`, `dmesg`; queda superficie libc/POSIX, señales per-thread y shell avanzado).
+3. **Userland/libc/shell** — ⏳ en progreso avanzado. Cerrado:
+   ABI Linux, glibc dinámico, TTY, pipes, PTYs, job control, permisos
+   POSIX, `/etc/passwd`, BusyBox dinámico (~200 applets), futex+clone,
+   `flock`, `dmesg`, `statx`, `/proc` extendido, VMA-per-PT_LOAD,
+   `/etc/ld.so.cache`, bind `/tmp`, interactivas (`less`/`nano`/`ed`).
+   Siguiente: `epoll`+`eventfd`, luego `perl`/`python3`.
 4. **Escritorio y window manager** — pendiente; el siguiente salto grande es el terminal 2D.
 5. **Networking**
 6. **USB**
