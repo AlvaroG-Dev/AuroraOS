@@ -16,6 +16,7 @@
 #include "pf.h" // vma_t, VMA_ELF, VMA_STACK, VMA_FILE, VMA_ANON
 #include "pmm.h"
 #include "process.h"
+#include "pty.h"
 #include "sched.h"
 #include "string.h"
 #include "swap.h"
@@ -26,6 +27,7 @@
 #include "vfs.h"
 #include <stddef.h>
 #include <stdint.h>
+
 
 // ===========================================================================
 // Nodo priv: buffer de contenido + longitud.
@@ -1034,6 +1036,21 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
   return 1;
 }
 
+// ---------------------------------------------------------------------------
+// [2.3] /proc/<pid>/cgroup — contenido mínimo v2. pgrep, ps, systemd-tmpfiles
+// y otros lo leen. En Linux v2 es "0::<path>\n". Aquí:
+//   0::/\n
+// ---------------------------------------------------------------------------
+static int gen_pid_cgroup_cb(process_t *p, void *arg) {
+  struct pid_ctx *c = (struct pid_ctx *)arg;
+  if (p->pid != c->target_pid)
+    return 0;
+  size_t o = kappend(c->buf, 0, c->cap, "0::/\n");
+  c->len = o;
+  c->found = 1;
+  return 1;
+}
+
 // [FIX] p->argv es un array, nunca es NULL. El check va sobre argv[0].
 static int gen_pid_cmdline_cb(process_t *p, void *arg) {
   struct pid_ctx *c = (struct pid_ctx *)arg;
@@ -1887,8 +1904,8 @@ static int procfs_root_pid_cb(process_t *p, void *arg) {
 }
 
 static const char *procfs_pid_entries[] = {
-    "stat", "status", "cmdline", "comm", "statm", "fd",
-    "cwd",  "exe",    "root",    "maps", "smaps", "mountinfo",
+    "stat", "status", "cmdline", "comm",      "statm",  "fd",   "cwd", "exe",
+    "root", "maps",   "smaps",   "mountinfo", "cgroup", "ctty", // ← AÑADIR
 };
 #define PROCFS_N_PID_ENTRIES                                                   \
   (sizeof(procfs_pid_entries) / sizeof(procfs_pid_entries[0]))
@@ -2430,6 +2447,41 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
       return n;
     }
 
+    // [2.3] /proc/<pid>/ctty — symlink al tty de control.
+    //   - Si el proceso tiene ctty: symlink a "/dev/pts/N" o "/dev/console".
+    //   - Si no: fichero regular vacío (comportamiento Linux).
+    if (strcmp(rest, "ctty") == 0) {
+      process_t *p = process_find_by_pid(pid);
+      if (!p)
+        return NULL;
+
+      if (p->ctty) {
+        char tpath[VFS_PATH_MAX];
+        if (tty_get_path(p->ctty, tpath, sizeof(tpath)) == 0) {
+          vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+          if (!n)
+            return NULL;
+          n->is_symlink = 1;
+          n->flags = VFS_FILE;
+          n->mode = S_IFLNK | 0777;
+          n->uid = 0;
+          n->gid = 0;
+          size_t tl = strlen(tpath);
+          if (tl >= sizeof(n->link_target))
+            tl = sizeof(n->link_target) - 1;
+          memcpy(n->link_target, tpath, tl);
+          n->link_target[tl] = '\0';
+          return n;
+        }
+      }
+      // Sin ctty: fichero regular vacío.
+      char *empty = (char *)kmalloc(1);
+      if (!empty)
+        return NULL;
+      empty[0] = '\0';
+      return make_file_node("ctty", empty, 0);
+    }
+
     // <pid>/fd — directorio.
     if (strcmp(rest, "fd") == 0) {
       process_t *proc = process_find_by_pid(pid);
@@ -2464,6 +2516,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     if (strcmp(file, "statm") == 0) {
       buf = gen_pid_file(pid, &len, gen_pid_statm_cb);
       return buf ? make_file_node("statm", buf, len) : NULL;
+    }
+    // [2.3] /proc/<pid>/cgroup — lo lee pgrep, ps, systemd.
+    if (strcmp(file, "cgroup") == 0) {
+      buf = gen_pid_file(pid, &len, gen_pid_cgroup_cb);
+      return buf ? make_file_node("cgroup", buf, len) : NULL;
     }
     if (strcmp(file, "maps") == 0) {
       buf = gen_pid_file(pid, &len, gen_pid_maps_cb);

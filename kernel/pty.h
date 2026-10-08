@@ -49,7 +49,7 @@ typedef struct tty_pty {
   size_t m_tail;
   size_t m_count;
   spinlock_t m_lock;
-  wait_queue_t m_read_wq;  // lectores esperando datos
+  wait_queue_t m_read_wq; // lectores esperando datos
 
 } tty_pty_t;
 
@@ -112,4 +112,7 @@ struct tty_pty *pty_slave_from_fd(struct file_descriptor *fd);
 // [JOB] Da el foreground del slave al pgid indicado.
 void pty_set_fg_pgid(struct tty_pty *pty, uint32_t pgid);
 
+// [2.3] Devuelve el path del nodo del tty (/dev/console o /dev/pts/N)
+// para /proc/<pid>/ctty. Devuelve 0 si OK, -1 si no cabe.
+int tty_get_path(struct tty *t, char *buf, size_t bufsz);
 #endif
