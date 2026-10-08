@@ -3113,6 +3113,221 @@ static int64_t k_fstatfs(uint64_t fd, uint64_t buf_uptr, uint64_t a3,
   return do_statfs_path(proc->fds[fd]->node->name, buf_uptr);
 }
 
+// ---------------------------------------------------------------------------
+// [statx] struct statx de Linux x86_64, 256 bytes.
+//
+// Layout exacto (include/uapi/linux/stat.h):
+//   0x00 stx_mask (u32)          0x04 stx_blksize (u32)
+//   0x08 stx_attributes (u64)    0x10 stx_nlink (u32)
+//   0x14 stx_uid (u32)           0x18 stx_gid (u32)
+//   0x1c stx_mode (u16)          0x1e __spare0 (u16)
+//   0x20 stx_ino (u64)           0x28 stx_size (u64)
+//   0x30 stx_blocks (u64)        0x38 stx_attributes_mask (u64)
+//   0x40 stx_atime (16B)         0x50 stx_btime (16B)
+//   0x60 stx_ctime (16B)         0x70 stx_mtime (16B)
+//   0x80 stx_rdev_major/minor    0x88 stx_dev_major/minor
+//   0x90 stx_mnt_id              0x98 stx_dio_mem_align
+//   0x9c stx_dio_offset_align    0xa0 __spare3[12] (96B)
+// ---------------------------------------------------------------------------
+struct k_statx_ts {
+  int64_t tv_sec;
+  uint32_t tv_nsec;
+  int32_t __reserved;
+};
+
+struct k_statx {
+  uint32_t stx_mask;
+  uint32_t stx_blksize;
+  uint64_t stx_attributes;
+  uint32_t stx_nlink;
+  uint32_t stx_uid;
+  uint32_t stx_gid;
+  uint16_t stx_mode;
+  uint16_t __spare0;
+  uint64_t stx_ino;
+  uint64_t stx_size;
+  uint64_t stx_blocks;
+  uint64_t stx_attributes_mask;
+  struct k_statx_ts stx_atime;
+  struct k_statx_ts stx_btime;
+  struct k_statx_ts stx_ctime;
+  struct k_statx_ts stx_mtime;
+  uint32_t stx_rdev_major;
+  uint32_t stx_rdev_minor;
+  uint32_t stx_dev_major;
+  uint32_t stx_dev_minor;
+  uint64_t stx_mnt_id;
+  uint32_t stx_dio_mem_align;
+  uint32_t stx_dio_offset_align;
+  uint64_t __spare3[12];
+};
+_Static_assert(sizeof(struct k_statx) == 256, "statx layout x86_64");
+
+#define STATX_BASIC_STATS 0x000007ffU
+
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
+// Traduce un vfs_stat_t al struct statx. Reutiliza el mismo esquema de
+// device que vfs_to_linux_stat (0:<minor>) para que coincida con el
+// resto del kernel (df/mountinfo/maps usan el mismo).
+static void vfs_to_statx(const vfs_stat_t *vs, uint64_t size, uint64_t dev,
+                         struct k_statx *out) {
+  memset(out, 0, sizeof(*out));
+
+  uint32_t mode = vs->mode;
+  if (mode == 0) {
+    if (vs->flags & VFS_DIRECTORY)
+      mode = S_IFDIR | 0755;
+    else if (vs->flags & VFS_CHARDEVICE)
+      mode = S_IFCHR | 0666;
+    else
+      mode = S_IFREG | 0644;
+  }
+
+  out->stx_mask = STATX_BASIC_STATS;
+  out->stx_blksize = 512;
+  out->stx_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
+  out->stx_uid = vs->uid;
+  out->stx_gid = vs->gid;
+  out->stx_mode = (uint16_t)(mode & 0xFFFF);
+  out->stx_ino = vs->inode;
+  out->stx_size = size;
+  out->stx_blocks = (size + 511) / 512;
+  out->stx_atime.tv_sec = vs->mtime_sec;
+  out->stx_mtime.tv_sec = vs->mtime_sec;
+  out->stx_ctime.tv_sec = vs->mtime_sec;
+
+  uint32_t ftype = mode & S_IFMT;
+  if (ftype == S_IFCHR || ftype == S_IFBLK) {
+    out->stx_rdev_major = (vs->rdev >> 8) & 0xFF;
+    out->stx_rdev_minor = vs->rdev & 0xFF;
+  }
+  out->stx_dev_major = 0;
+  out->stx_dev_minor = (uint32_t)dev;
+}
+
+// ---------------------------------------------------------------------------
+// statx(dirfd, path, flags, mask, statxbuf). Linux 332.
+//
+// Implementación mínima, suficiente para glibc y coreutils 9.x:
+//   - AT_FDCWD + path absoluto o relativo al cwd: camino normal.
+//   - dirfd real + path relativo: combina como fstatat.
+//   - AT_EMPTY_PATH con fd real: stat del nodo del fd.
+//   - AT_SYMLINK_NOFOLLOW: no sigue el symlink final.
+//
+// El `mask` del llamante se ignora: siempre rellenamos STATX_BASIC_STATS.
+// Es lo que hace Linux para la mayoría de FS: devuelve más de lo pedido
+// y el llamante filtra.
+// ---------------------------------------------------------------------------
+static int64_t k_statx(uint64_t dfd, uint64_t path_uptr, uint64_t flags,
+                       uint64_t mask, uint64_t statxbuf) {
+  (void)mask;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!access_ok((void *)statxbuf, sizeof(struct k_statx)))
+    return -EFAULT;
+
+  int32_t kdfd = (int32_t)dfd;
+  int no_follow = (flags & AT_SYMLINK_NOFOLLOW) ? 1 : 0;
+
+  // AT_EMPTY_PATH con fd real: stat del nodo del fd.
+  if ((flags & AT_EMPTY_PATH) && kdfd != AT_FDCWD) {
+    if (kdfd < 0 || kdfd >= MAX_PROCESS_FDS || !proc->fds[kdfd])
+      return -EBADF;
+    char chk[2];
+    long n = strncpy_from_user(chk, (const char *)path_uptr, sizeof(chk));
+    if (n < 0)
+      return -EFAULT;
+    if (n != 0)
+      return -EINVAL;
+
+    vfs_stat_t vs;
+    int rc = vfs_fstat_for_proc(proc, kdfd, &vs);
+    if (rc != 0)
+      return rc;
+    uint64_t dev = fs_dev_id(proc->fds[kdfd]->node->fs);
+    struct k_statx sx;
+    vfs_to_statx(&vs, vs.size, dev, &sx);
+    if (copy_to_user((void *)statxbuf, &sx, sizeof(sx)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+
+  char path[VFS_PATH_MAX];
+  if (kdfd == AT_FDCWD) {
+    int rc =
+        resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+    if (rc != 0)
+      return rc;
+  } else {
+    if (kdfd < 0 || kdfd >= MAX_PROCESS_FDS || !proc->fds[kdfd])
+      return -EBADF;
+    vfs_node_t *dir_node = proc->fds[kdfd]->node;
+    if (!dir_node || !(dir_node->flags & VFS_DIRECTORY))
+      return -ENOTDIR;
+
+    char rel[VFS_PATH_MAX];
+    long n = strncpy_from_user(rel, (const char *)path_uptr, sizeof(rel));
+    if (n < 0)
+      return -EFAULT;
+    if (n == 0)
+      return -EINVAL;
+
+    char full[VFS_PATH_MAX];
+    if (rel[0] == '/') {
+      size_t rl = strlen(rel);
+      if (rl >= sizeof(full))
+        return -ENAMETOOLONG;
+      memcpy(full, rel, rl + 1);
+    } else {
+      const char *base = dir_node->name;
+      size_t bl = strlen(base);
+      size_t rl = strlen(rel);
+      int base_is_root = (bl == 1 && base[0] == '/');
+      size_t needed = base_is_root ? (1 + rl + 1) : (bl + 1 + rl + 1);
+      if (needed > sizeof(full))
+        return -ENAMETOOLONG;
+      if (base_is_root) {
+        full[0] = '/';
+        memcpy(full + 1, rel, rl + 1);
+      } else {
+        memcpy(full, base, bl);
+        full[bl] = '/';
+        memcpy(full + bl + 1, rel, rl + 1);
+      }
+    }
+    int rc = vfs_resolve_path("/", full, path, sizeof(path));
+    if (rc != 0)
+      return rc;
+  }
+
+  vfs_node_t *node = no_follow ? vfs_lookup_nofollow(path) : vfs_lookup(path);
+  if (!node)
+    return -ENOENT;
+
+  vfs_stat_t vs = {
+      .flags = node->flags,
+      .size = node->size,
+      .inode = node->inode,
+      .mtime_sec = node->mtime_sec,
+      .mode = node->mode,
+      .uid = node->uid,
+      .gid = node->gid,
+      .rdev = node->rdev,
+  };
+  uint64_t dev = fs_dev_id(node->fs);
+  vfs_node_free(node);
+
+  struct k_statx sx;
+  vfs_to_statx(&vs, vs.size, dev, &sx);
+  if (copy_to_user((void *)statxbuf, &sx, sizeof(sx)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
 // ---------- fork / clone / wait4 ----------
 static int64_t k_fork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                       uint64_t a5) {
@@ -3489,19 +3704,28 @@ static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
 
   // Ignoramos offset_ptr por simplicidad: usamos el offset del fd de
   // entrada (que es lo que hace sendfile con offset==NULL).
-  uint8_t buf[4096];
+  // [fix] kmalloc en vez de buffer de pila: 4 KB en el stack del
+  // kernel dispara -Wframe-larger-than=2048 y en SMP reduce el margen
+  // antes del overflow de la pila de la tarea.
+  const size_t CHUNK = 4096;
+  uint8_t *buf = (uint8_t *)kmalloc(CHUNK);
+  if (!buf)
+    return -ENOMEM;
+
   size_t total = 0;
   while (total < count) {
     size_t chunk = count - total;
-    if (chunk > sizeof(buf))
-      chunk = sizeof(buf);
+    if (chunk > CHUNK)
+      chunk = CHUNK;
     int64_t r = in->node->ops->read(in->node, in->offset, chunk, buf);
     if (r <= 0)
       break;
     int64_t w = out->node->ops->write(out->node, out->offset, r, buf);
     if (w < 0) {
-      if (total == 0)
+      if (total == 0) {
+        kfree(buf);
         return w;
+      }
       break;
     }
     in->offset += r;
@@ -3510,6 +3734,8 @@ static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
     if (w < r)
       break;
   }
+
+  kfree(buf);
   return (int64_t)total;
 }
 
@@ -5119,6 +5345,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_OPENAT] = {k_openat, "openat"},
     [SYS_MKDIRAT] = {k_mkdirat, "mkdirat"},
     [SYS_FSTATAT] = {k_fstatat, "fstatat"},
+    [SYS_STATX] = {k_statx, "statx"}, // 332
     [SYS_UNLINKAT] = {k_unlinkat, "unlinkat"},
     [SYS_RENAMEAT] = {k_renameat, "renameat"},
     [SYS_SET_ROBUST_LIST] = {k_set_robust_list, "set_robust_list"},

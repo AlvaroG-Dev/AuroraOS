@@ -8,6 +8,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "process.h"
+#include "pty.h" // [2.3] tty_get_path para /proc/<pid>/ctty
 #include "string.h"
 #include "uaccess.h"
 #include "vfs.h"
@@ -124,30 +125,6 @@ int64_t pty_master_write(tty_pty_t *pty, const void *buf, size_t size) {
   for (size_t i = 0; i < size; i++)
     tty_slave_receive(&pty->slave, src[i]);
   return (int64_t)size;
-}
-
-// ---------------------------------------------------------------------------
-// Slave → Master
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Slave → Master (con back-pressure).
-//
-// Si el buffer slave→master está lleno (m_count == PTY_M_BUF_SIZE),
-// el escritor se bloquea en m_write_wq hasta que el lector drene.
-// Antes, al llenarse, los bytes sobrantes se DESCARTABAN, lo que
-// rompía volcados grandes (p. ej. `dmesg` que emite 16 KB con buffer
-// de 4 KB).
-//
-// El wake_up_all de m_read_wq va FUERA de m_lock para no invertir el
-// orden de locks (los que esperan en m_read_wq toman m_lock dentro
-// de su condición).
-// ---------------------------------------------------------------------------
-static bool pty_m_has_space(void *arg) {
-  tty_pty_t *pty = (tty_pty_t *)arg;
-  unsigned long flags = spin_lock_irqsave(&pty->m_lock);
-  bool ok = pty->m_count < PTY_M_BUF_SIZE;
-  spin_unlock_irqrestore(&pty->m_lock, flags);
-  return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,4 +555,48 @@ void pty_set_fg_pgid(struct tty_pty *pty_opaque, uint32_t pgid) {
   unsigned long flags = spin_lock_irqsave(&pty->slave.lock);
   pty->slave.fg_pgid = pgid;
   spin_unlock_irqrestore(&pty->slave.lock, flags);
+}
+
+// ---------------------------------------------------------------------------
+// [2.3] Path del nodo del tty. Lo usa /proc/<pid>/ctty.
+//   - Slave de un PTY: "/dev/pts/N".
+//   - Console tty:     "/dev/console".
+// ---------------------------------------------------------------------------
+int tty_get_path(struct tty *t, char *buf, size_t bufsz) {
+  if (!t || !buf || bufsz < 16)
+    return -1;
+
+  if (t->pty) {
+    tty_pty_t *p = (tty_pty_t *)t->pty;
+    char tmp[16];
+    int n = 0;
+    const char *pfx = "/dev/pts/";
+    while (*pfx && n < (int)sizeof(tmp) - 3)
+      tmp[n++] = *pfx++;
+    if (p->index == 0) {
+      tmp[n++] = '0';
+    } else {
+      char d[8];
+      int dn = 0;
+      uint32_t v = p->index;
+      while (v > 0) {
+        d[dn++] = (char)('0' + v % 10);
+        v /= 10;
+      }
+      while (dn > 0 && n < (int)sizeof(tmp) - 1)
+        tmp[n++] = d[--dn];
+    }
+    tmp[n] = '\0';
+    if ((size_t)(n + 1) > bufsz)
+      return -1;
+    memcpy(buf, tmp, (size_t)(n + 1));
+    return 0;
+  }
+
+  const char *c = "/dev/console";
+  size_t cl = strlen(c);
+  if (cl + 1 > bufsz)
+    return -1;
+  memcpy(buf, c, cl + 1);
+  return 0;
 }
