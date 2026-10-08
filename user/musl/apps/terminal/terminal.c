@@ -35,7 +35,7 @@ static const uint32_t PALETTE[16] = {
 #define TERM_GRADIENT 0
 
 #if TERM_GRADIENT
-#define DEF_BG_TOP_OPAQUE    0xFF002B36u
+#define DEF_BG_TOP_OPAQUE 0xFF002B36u
 #define DEF_BG_BOTTOM_OPAQUE 0xFF000A0Eu
 #endif
 
@@ -194,11 +194,13 @@ static void history_push_line(terminal_t *t, const cell_t *src) {
 // history — eso es lo que hacen todas las terminales reales.
 static void scroll_up(terminal_t *t, int n) {
   screen_t *s = cur_screen(t);
-  if (n <= 0) return;
+  if (n <= 0)
+    return;
   int top = t->scroll_top;
   int bot = t->scroll_bottom;
   int h = bot - top + 1;
-  if (n > h) n = h;
+  if (n > h)
+    n = h;
 
   int full_screen = (top == 0 && bot == s->rows - 1);
   int to_history = full_screen && !t->using_alternate;
@@ -214,7 +216,7 @@ static void scroll_up(terminal_t *t, int n) {
            &s->cells[(s->y_top + y + n) * s->alloc_cols],
            sizeof(cell_t) * s->alloc_cols);
   }
-  
+
   // Limpiar las n filas inferiores (solo columnas visibles).
   for (int y = bot - n + 1; y <= bot; y++) {
     for (int x = 0; x < s->cols; x++)
@@ -230,11 +232,13 @@ static void scroll_up(terminal_t *t, int n) {
 // Desplaza la región hacia abajo n filas.
 static void scroll_down(terminal_t *t, int n) {
   screen_t *s = cur_screen(t);
-  if (n <= 0) return;
+  if (n <= 0)
+    return;
   int top = t->scroll_top;
   int bot = t->scroll_bottom;
   int h = bot - top + 1;
-  if (n > h) n = h;
+  if (n > h)
+    n = h;
 
   for (int y = bot; y >= top + n; y--) {
     memcpy(&s->cells[(s->y_top + y) * s->alloc_cols],
@@ -393,7 +397,8 @@ int terminal_init(terminal_t *t, int cols, int rows) {
   t->primary.alloc_rows = rows;
   t->primary.y_top = 0;
   t->primary.cells = malloc(sizeof(cell_t) * cols * rows);
-  if (!t->primary.cells) return -1;
+  if (!t->primary.cells)
+    return -1;
 
   t->alternate.cols = cols;
   t->alternate.rows = rows;
@@ -443,8 +448,10 @@ void terminal_shutdown(terminal_t *t) {
 // esas celdas reaparecen. No hay reflow (el texto no se reorganiza),
 // pero tampoco se pierde.
 void terminal_resize(terminal_t *t, int new_cols, int new_rows) {
-  if (!t || new_cols <= 0 || new_rows <= 0) return;
-  if (new_cols == t->primary.cols && new_rows == t->primary.rows) return;
+  if (!t || new_cols <= 0 || new_rows <= 0)
+    return;
+  if (new_cols == t->primary.cols && new_rows == t->primary.rows)
+    return;
 
   int old_cols = t->primary.cols;
   int old_rows = t->primary.rows;
@@ -455,18 +462,22 @@ void terminal_resize(terminal_t *t, int new_cols, int new_rows) {
   screen_t *screens[2] = {&t->primary, &t->alternate};
   for (int k = 0; k < 2; k++) {
     screen_t *s = screens[k];
-    int need_realloc = (new_cols > s->alloc_cols) ||
-                       (new_rows > s->alloc_rows);
+    int need_realloc = (new_cols > s->alloc_cols) || (new_rows > s->alloc_rows);
     if (need_realloc) {
       int ac = s->alloc_cols;
       int ar = s->alloc_rows;
-      if (ac < new_cols) ac = new_cols * 2;
-      if (ar < new_rows) ar = new_rows * 2;
-      if (ac < new_cols) ac = new_cols;
-      if (ar < new_rows) ar = new_rows;
+      if (ac < new_cols)
+        ac = new_cols * 2;
+      if (ar < new_rows)
+        ar = new_rows * 2;
+      if (ac < new_cols)
+        ac = new_cols;
+      if (ar < new_rows)
+        ar = new_rows;
 
       cell_t *nc = malloc(sizeof(cell_t) * (size_t)ac * ar);
-      if (!nc) return;
+      if (!nc)
+        return;
 
       // Copia el buffer viejo, cambiando stride. Todas las filas
       // físicas se copian (no solo las visibles), para que el
@@ -691,14 +702,56 @@ static void csi_dispatch(terminal_t *t, int final) {
 
   switch (final) {
   // ---- Cursor movement ----
-  case 'A': { int n = param(t, 0, 1); t->cy -= n; cursor_clamp(t); break; }
-  case 'B': { int n = param(t, 0, 1); t->cy += n; cursor_clamp(t); break; }
-  case 'C': { int n = param(t, 0, 1); t->cx += n; cursor_clamp(t); break; }
-  case 'D': { int n = param(t, 0, 1); t->cx -= n; cursor_clamp(t); break; }
-  case 'E': { int n = param(t, 0, 1); t->cy += n; t->cx = 0; cursor_clamp(t); break; }
-  case 'F': { int n = param(t, 0, 1); t->cy -= n; t->cx = 0; cursor_clamp(t); break; }
-  case 'G': { int n = param(t, 0, 1); t->cx = n - 1; cursor_clamp(t); break; }
-  case 'd': { int n = param(t, 0, 1); t->cy = n - 1; cursor_clamp(t); break; }
+  case 'A': {
+    int n = param(t, 0, 1);
+    t->cy -= n;
+    cursor_clamp(t);
+    break;
+  }
+  case 'B': {
+    int n = param(t, 0, 1);
+    t->cy += n;
+    cursor_clamp(t);
+    break;
+  }
+  case 'C': {
+    int n = param(t, 0, 1);
+    t->cx += n;
+    cursor_clamp(t);
+    break;
+  }
+  case 'D': {
+    int n = param(t, 0, 1);
+    t->cx -= n;
+    cursor_clamp(t);
+    break;
+  }
+  case 'E': {
+    int n = param(t, 0, 1);
+    t->cy += n;
+    t->cx = 0;
+    cursor_clamp(t);
+    break;
+  }
+  case 'F': {
+    int n = param(t, 0, 1);
+    t->cy -= n;
+    t->cx = 0;
+    cursor_clamp(t);
+    break;
+  }
+  case 'G': {
+    int n = param(t, 0, 1);
+    t->cx = n - 1;
+    cursor_clamp(t);
+    break;
+  }
+  case 'd': {
+    int n = param(t, 0, 1);
+    t->cy = n - 1;
+    cursor_clamp(t);
+    break;
+  }
   case 'H':
   case 'f': {
     int row = param(t, 0, 1);
@@ -712,8 +765,18 @@ static void csi_dispatch(terminal_t *t, int final) {
     cursor_clamp(t);
     break;
   }
-  case '`': { int n = param(t, 0, 1); t->cx = n - 1; cursor_clamp(t); break; }
-  case 'a': { int n = param(t, 0, 1); t->cx += n; cursor_clamp(t); break; }
+  case '`': {
+    int n = param(t, 0, 1);
+    t->cx = n - 1;
+    cursor_clamp(t);
+    break;
+  }
+  case 'a': {
+    int n = param(t, 0, 1);
+    t->cx += n;
+    cursor_clamp(t);
+    break;
+  }
 
   // ---- Erase ----
   case 'J': {
@@ -797,7 +860,8 @@ static void csi_dispatch(terminal_t *t, int final) {
   // ---- Insert/delete ----
   case '@': {
     int n = param(t, 0, 1);
-    if (n > s->cols - t->cx) n = s->cols - t->cx;
+    if (n > s->cols - t->cx)
+      n = s->cols - t->cx;
     for (int x = s->cols - 1; x >= t->cx + n; x--) {
       s->cells[(s->y_top + t->cy) * s->alloc_cols + x] =
           s->cells[(s->y_top + t->cy) * s->alloc_cols + x - n];
@@ -811,7 +875,8 @@ static void csi_dispatch(terminal_t *t, int final) {
   }
   case 'P': {
     int n = param(t, 0, 1);
-    if (n > s->cols - t->cx) n = s->cols - t->cx;
+    if (n > s->cols - t->cx)
+      n = s->cols - t->cx;
     for (int x = t->cx; x < s->cols - n; x++) {
       s->cells[(s->y_top + t->cy) * s->alloc_cols + x] =
           s->cells[(s->y_top + t->cy) * s->alloc_cols + x + n];
@@ -847,8 +912,16 @@ static void csi_dispatch(terminal_t *t, int final) {
     t->scroll_bottom = save_bot;
     break;
   }
-  case 'S': { int n = param(t, 0, 1); scroll_up(t, n); break; }
-  case 'T': { int n = param(t, 0, 1); scroll_down(t, n); break; }
+  case 'S': {
+    int n = param(t, 0, 1);
+    scroll_up(t, n);
+    break;
+  }
+  case 'T': {
+    int n = param(t, 0, 1);
+    scroll_down(t, n);
+    break;
+  }
 
   // ---- SGR ----
   case 'm':
@@ -856,15 +929,21 @@ static void csi_dispatch(terminal_t *t, int final) {
     break;
 
   // ---- Save/restore cursor ----
-  case 's': decsc(t); break;
-  case 'u': decrc(t); break;
+  case 's':
+    decsc(t);
+    break;
+  case 'u':
+    decrc(t);
+    break;
 
   // ---- Scroll region ----
   case 'r': {
     int top = param(t, 0, 1);
     int bot = param(t, 1, s->rows);
-    if (top < 1) top = 1;
-    if (bot > s->rows) bot = s->rows;
+    if (top < 1)
+      top = 1;
+    if (bot > s->rows)
+      bot = s->rows;
     if (top < bot) {
       t->scroll_top = top - 1;
       t->scroll_bottom = bot - 1;
@@ -881,14 +960,22 @@ static void csi_dispatch(terminal_t *t, int final) {
       int p = t->params[i];
       if (t->private_marker == '?') {
         switch (p) {
-        case 1: t->mode_appcursor = set; break;
+        case 1:
+          t->mode_appcursor = set;
+          break;
         case 6:
           t->mode_origin = set;
-          if (set) cursor_set(t, 0, t->scroll_top);
-          else cursor_set(t, 0, 0);
+          if (set)
+            cursor_set(t, 0, t->scroll_top);
+          else
+            cursor_set(t, 0, 0);
           break;
-        case 7: t->mode_autowrap = set; break;
-        case 25: t->cursor_visible = set; break;
+        case 7:
+          t->mode_autowrap = set;
+          break;
+        case 25:
+          t->cursor_visible = set;
+          break;
         case 47:
         case 1047:
         case 1049: {
@@ -915,17 +1002,31 @@ static void csi_dispatch(terminal_t *t, int final) {
           }
           break;
         }
-        case 1000: t->mode_mouse = set; break;
-        case 1004: t->mode_focus_events = set; break;
-        case 1006: t->mode_mouse_sgr = set; break;
-        case 2004: t->mode_bracketed_paste = set; break;
-        default: break;
+        case 1000:
+          t->mode_mouse = set;
+          break;
+        case 1004:
+          t->mode_focus_events = set;
+          break;
+        case 1006:
+          t->mode_mouse_sgr = set;
+          break;
+        case 2004:
+          t->mode_bracketed_paste = set;
+          break;
+        default:
+          break;
         }
       } else {
         switch (p) {
-        case 4: t->mode_insert = set; break;
-        case 20: t->mode_lnm = set; break;
-        default: break;
+        case 4:
+          t->mode_insert = set;
+          break;
+        case 20:
+          t->mode_lnm = set;
+          break;
+        default:
+          break;
         }
       }
     }
@@ -934,11 +1035,16 @@ static void csi_dispatch(terminal_t *t, int final) {
 
   // ---- Cursor shape ----
   case 'q': {
-    if (t->private_marker == ' ') {
+    // DECSCUSR: CSI Ps SP q. El SP es un intermediate byte, no private
+    // marker. Comprobar t->inter[] (donde el parser acumula 0x20-0x2F).
+    if (t->n_inter > 0 && t->inter[0] == ' ') {
       int n = param(t, 0, 0);
-      if (n == 0 || n == 1) t->cursor_shape = CUR_BLOCK;
-      else if (n == 3 || n == 4) t->cursor_shape = CUR_UNDERLINE;
-      else if (n == 5 || n == 6) t->cursor_shape = CUR_BAR;
+      if (n == 0 || n == 1)
+        t->cursor_shape = CUR_BLOCK;
+      else if (n == 3 || n == 4)
+        t->cursor_shape = CUR_UNDERLINE;
+      else if (n == 5 || n == 6)
+        t->cursor_shape = CUR_BAR;
     }
     break;
   }
@@ -946,9 +1052,11 @@ static void csi_dispatch(terminal_t *t, int final) {
   // ---- Tabs ----
   case 'g': {
     int n = param(t, 0, 0);
-    if (n == 0) t->tabs[t->cx] = 0;
+    if (n == 0)
+      t->tabs[t->cx] = 0;
     else if (n == 3)
-      for (int i = 0; i < 256; i++) t->tabs[i] = 0;
+      for (int i = 0; i < 256; i++)
+        t->tabs[i] = 0;
     break;
   }
 
@@ -965,15 +1073,25 @@ static void csi_dispatch(terminal_t *t, int final) {
       char tmp[8];
       int tn = 0;
       int v = row;
-      if (v == 0) tmp[tn++] = '0';
-      while (v > 0) { tmp[tn++] = '0' + v % 10; v /= 10; }
-      while (tn > 0) buf[l++] = tmp[--tn];
+      if (v == 0)
+        tmp[tn++] = '0';
+      while (v > 0) {
+        tmp[tn++] = '0' + v % 10;
+        v /= 10;
+      }
+      while (tn > 0)
+        buf[l++] = tmp[--tn];
       buf[l++] = ';';
       tn = 0;
       v = col;
-      if (v == 0) tmp[tn++] = '0';
-      while (v > 0) { tmp[tn++] = '0' + v % 10; v /= 10; }
-      while (tn > 0) buf[l++] = tmp[--tn];
+      if (v == 0)
+        tmp[tn++] = '0';
+      while (v > 0) {
+        tmp[tn++] = '0' + v % 10;
+        v /= 10;
+      }
+      while (tn > 0)
+        buf[l++] = tmp[--tn];
       buf[l++] = 'R';
       if (t->response_len + l < (int)sizeof(t->response)) {
         memcpy(&t->response[t->response_len], buf, l);
@@ -985,16 +1103,28 @@ static void csi_dispatch(terminal_t *t, int final) {
 
   // ---- Device Attributes ----
   case 'c': {
+    // Query vs response: las queries reales (CSI c / CSI > c) NUNCA
+    // llevan parámetros. Las responses (CSI ? ... c / CSI > ... c)
+    // siempre. Si llegamos aquí con params, es una response que se
+    // coló por el eco del slave → ignorar. Sin este check, el terminal
+    // responde a su propia respuesta → bucle infinito (nano lo
+    // disparaba al inicializar ncurses).
+    if (t->nparams > 0) {
+      break;
+    }
     if (t->private_marker == '>') {
       const char *r = "\033[>0;10;1c";
-      int l = strlen(r);
+      int l = (int)strlen(r);
       if (t->response_len + l < (int)sizeof(t->response)) {
         memcpy(&t->response[t->response_len], r, l);
         t->response_len += l;
       }
+    } else if (t->private_marker == '?') {
+      // Primary DA response sin params (raro pero posible) → ignorar.
+      break;
     } else {
       const char *r = "\033[?6c";
-      int l = strlen(r);
+      int l = (int)strlen(r);
       if (t->response_len + l < (int)sizeof(t->response)) {
         memcpy(&t->response[t->response_len], r, l);
         t->response_len += l;
@@ -1030,14 +1160,18 @@ static void parser_push_param(terminal_t *t) {
 static void parser_execute_control(terminal_t *t, uint8_t c) {
   screen_t *s = cur_screen(t);
   switch (c) {
-  case 0x07: break;
+  case 0x07:
+    break;
   case 0x08:
-    if (t->cx > 0) t->cx--;
+    if (t->cx > 0)
+      t->cx--;
     break;
   case 0x09: {
     int x = t->cx + 1;
-    while (x < s->cols && !t->tabs[x]) x++;
-    if (x >= s->cols) x = s->cols - 1;
+    while (x < s->cols && !t->tabs[x])
+      x++;
+    if (x >= s->cols)
+      x = s->cols - 1;
     t->cx = x;
   } break;
   case 0x0A:
@@ -1049,30 +1183,60 @@ static void parser_execute_control(terminal_t *t, uint8_t c) {
   case 0x0D:
     t->cx = 0;
     break;
-  case 0x0E: t->active_charset = 1; break;
-  case 0x0F: t->active_charset = 0; break;
-  default: break;
+  case 0x0E:
+    t->active_charset = 1;
+    break;
+  case 0x0F:
+    t->active_charset = 0;
+    break;
+  default:
+    break;
   }
 }
 
 static void parser_feed_one(terminal_t *t, uint8_t c) {
   switch (t->parser_state) {
   case PS_GROUND:
-    if (c == 0x1B) { t->parser_state = PS_ESCAPE; return; }
-    if (c < 0x20) { parser_execute_control(t, c); return; }
-    if (c == 0x7F) return;
+    if (c == 0x1B) {
+      t->parser_state = PS_ESCAPE;
+      return;
+    }
+    if (c < 0x20) {
+      parser_execute_control(t, c);
+      return;
+    }
+    if (c == 0x7F)
+      return;
     put_cell(t, translate_charset(t, c));
     return;
 
   case PS_ESCAPE:
-    if (c == '[') { t->parser_state = PS_CSI_ENTRY; parser_reset_params(t); return; }
-    if (c == ']') { t->parser_state = PS_OSC_STRING; return; }
-    if (c == 'P') { t->parser_state = PS_DCS_STRING; return; }
-    if (c == '(' || c == ')') { t->private_marker = c; return; }
-    if (c == '#') { t->private_marker = '#'; return; }
+    if (c == '[') {
+      t->parser_state = PS_CSI_ENTRY;
+      parser_reset_params(t);
+      return;
+    }
+    if (c == ']') {
+      t->parser_state = PS_OSC_STRING;
+      return;
+    }
+    if (c == 'P') {
+      t->parser_state = PS_DCS_STRING;
+      return;
+    }
+    if (c == '(' || c == ')') {
+      t->private_marker = c;
+      return;
+    }
+    if (c == '#') {
+      t->private_marker = '#';
+      return;
+    }
     if (t->private_marker == '(' || t->private_marker == ')') {
-      if (t->private_marker == '(') t->g0_charset = c;
-      else t->g1_charset = c;
+      if (t->private_marker == '(')
+        t->g0_charset = c;
+      else
+        t->g1_charset = c;
       t->private_marker = 0;
       t->parser_state = PS_GROUND;
       return;
@@ -1095,16 +1259,36 @@ static void parser_feed_one(terminal_t *t, uint8_t c) {
       return;
     }
     switch (c) {
-    case '7': decsc(t); break;
-    case '8': decrc(t); break;
-    case 'D': do_linefeed(t); break;
-    case 'E': do_linefeed(t); t->cx = 0; break;
-    case 'H': t->tabs[t->cx] = 1; break;
-    case 'M': do_reverse_index(t); break;
-    case 'c': full_reset(t); break;
-    case '=': t->mode_appkeypad = 1; break;
-    case '>': t->mode_appkeypad = 0; break;
-    default: break;
+    case '7':
+      decsc(t);
+      break;
+    case '8':
+      decrc(t);
+      break;
+    case 'D':
+      do_linefeed(t);
+      break;
+    case 'E':
+      do_linefeed(t);
+      t->cx = 0;
+      break;
+    case 'H':
+      t->tabs[t->cx] = 1;
+      break;
+    case 'M':
+      do_reverse_index(t);
+      break;
+    case 'c':
+      full_reset(t);
+      break;
+    case '=':
+      t->mode_appkeypad = 1;
+      break;
+    case '>':
+      t->mode_appkeypad = 0;
+      break;
+    default:
+      break;
     }
     t->parser_state = PS_GROUND;
     return;
@@ -1116,14 +1300,19 @@ static void parser_feed_one(terminal_t *t, uint8_t c) {
       t->parser_state = PS_CSI_PARAM;
       return;
     }
-    if (c == ';') { parser_push_param(t); t->parser_state = PS_CSI_PARAM; return; }
+    if (c == ';') {
+      parser_push_param(t);
+      t->parser_state = PS_CSI_PARAM;
+      return;
+    }
     if (c == '<' || c == '=' || c == '>' || c == '?') {
       t->private_marker = c;
       t->parser_state = PS_CSI_PARAM;
       return;
     }
     if (c >= 0x20 && c <= 0x2F) {
-      if (t->n_inter < 4) t->inter[t->n_inter++] = c;
+      if (t->n_inter < 4)
+        t->inter[t->n_inter++] = c;
       t->parser_state = PS_CSI_INTERMEDIATE;
       return;
     }
@@ -1141,10 +1330,17 @@ static void parser_feed_one(terminal_t *t, uint8_t c) {
       t->has_cur_param = 1;
       return;
     }
-    if (c == ';') { parser_push_param(t); return; }
-    if (c == ':') { parser_push_param(t); return; }
+    if (c == ';') {
+      parser_push_param(t);
+      return;
+    }
+    if (c == ':') {
+      parser_push_param(t);
+      return;
+    }
     if (c >= 0x20 && c <= 0x2F) {
-      if (t->n_inter < 4) t->inter[t->n_inter++] = c;
+      if (t->n_inter < 4)
+        t->inter[t->n_inter++] = c;
       t->parser_state = PS_CSI_INTERMEDIATE;
       return;
     }
@@ -1159,7 +1355,8 @@ static void parser_feed_one(terminal_t *t, uint8_t c) {
 
   case PS_CSI_INTERMEDIATE:
     if (c >= 0x20 && c <= 0x2F) {
-      if (t->n_inter < 4) t->inter[t->n_inter++] = c;
+      if (t->n_inter < 4)
+        t->inter[t->n_inter++] = c;
       return;
     }
     if (c >= 0x40 && c <= 0x7E) {
@@ -1177,8 +1374,14 @@ static void parser_feed_one(terminal_t *t, uint8_t c) {
 
   case PS_OSC_STRING:
   case PS_DCS_STRING:
-    if (c == 0x07) { t->parser_state = PS_GROUND; return; }
-    if (c == 0x1B) { t->parser_state = PS_ESCAPE; return; }
+    if (c == 0x07) {
+      t->parser_state = PS_GROUND;
+      return;
+    }
+    if (c == 0x1B) {
+      t->parser_state = PS_ESCAPE;
+      return;
+    }
     return;
   }
 }
@@ -1209,9 +1412,7 @@ void terminal_feed(terminal_t *t, const uint8_t *buf, size_t n) {
 // Blink
 // ============================================================================
 // [FIX #10b] El blink binario ya no se usa: cursor_alpha lo reemplaza.
-void terminal_blink_toggle(terminal_t *t) {
-  (void)t;
-}
+void terminal_blink_toggle(terminal_t *t) { (void)t; }
 
 // ============================================================================
 // Render
@@ -1249,8 +1450,10 @@ static void draw_glyph(uint32_t *pixels, int stride, int px, int py, int cell_w,
     uint32_t bg_row;
     if (use_gradient && total_h_px > 0) {
       int gy = py + y;
-      if (gy < 0) gy = 0;
-      if (gy >= total_h_px) gy = total_h_px - 1;
+      if (gy < 0)
+        gy = 0;
+      if (gy >= total_h_px)
+        gy = total_h_px - 1;
       uint32_t a = DEF_BG_TOP_OPAQUE, b = DEF_BG_BOTTOM_OPAQUE;
       int ra = (a >> 16) & 0xFF, ga = (a >> 8) & 0xFF, ba = a & 0xFF;
       int rb = (b >> 16) & 0xFF, gb = (b >> 8) & 0xFF, bb = b & 0xFF;
@@ -1346,13 +1549,16 @@ void terminal_scroll(terminal_t *t, int delta) {
   // pantalla alterna y no esperan que el terminal guarde nada. Si el
   // usuario intenta scrollear, ignorarlo — PgUp/PgDn irán al PTY (ver
   // process_input en main.c).
-  if (t->using_alternate) return;
+  if (t->using_alternate)
+    return;
   if (!t->history || t->history_size <= 0)
     return;
   int max_off = t->history_count;
   int new_off = t->scroll_offset + delta;
-  if (new_off < 0) new_off = 0;
-  if (new_off > max_off) new_off = max_off;
+  if (new_off < 0)
+    new_off = 0;
+  if (new_off > max_off)
+    new_off = max_off;
   if (new_off == t->scroll_offset)
     return;
   t->scroll_offset = new_off;
@@ -1364,9 +1570,7 @@ void terminal_scroll(terminal_t *t, int delta) {
   t->dirty_max_y = t->primary.rows - 1;
 }
 
-int terminal_is_scrolled(const terminal_t *t) {
-  return t->scroll_offset > 0;
-}
+int terminal_is_scrolled(const terminal_t *t) { return t->scroll_offset > 0; }
 
 void terminal_scroll_to_bottom(terminal_t *t) {
   if (t->scroll_offset != 0)
@@ -1399,8 +1603,8 @@ static const cell_t *virtual_row(const terminal_t *t, int y,
 }
 
 term_rect_t terminal_render(terminal_t *t, uint32_t *pixels, int stride,
-                            int pad_x, int pad_y,
-                            int cell_w, int cell_h, const void *font_p) {
+                            int pad_x, int pad_y, int cell_w, int cell_h,
+                            const void *font_p) {
   term_rect_t r = {0, 0, 0, 0};
   if (!t->any_dirty)
     return r;
@@ -1415,16 +1619,23 @@ term_rect_t terminal_render(terminal_t *t, uint32_t *pixels, int stride,
   int x0, y0, x1, y1;
 
   if (scrolled) {
-    x0 = 0; y0 = 0;
+    x0 = 0;
+    y0 = 0;
     x1 = s->cols - 1;
     y1 = s->rows - 1;
   } else {
-    x0 = t->dirty_min_x; y0 = t->dirty_min_y;
-    x1 = t->dirty_max_x; y1 = t->dirty_max_y;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 >= s->cols) x1 = s->cols - 1;
-    if (y1 >= s->rows) y1 = s->rows - 1;
+    x0 = t->dirty_min_x;
+    y0 = t->dirty_min_y;
+    x1 = t->dirty_max_x;
+    y1 = t->dirty_max_y;
+    if (x0 < 0)
+      x0 = 0;
+    if (y0 < 0)
+      y0 = 0;
+    if (x1 >= s->cols)
+      x1 = s->cols - 1;
+    if (y1 >= s->rows)
+      y1 = s->rows - 1;
   }
 
   for (int y = y0; y <= y1; y++) {
@@ -1440,11 +1651,9 @@ term_rect_t terminal_render(terminal_t *t, uint32_t *pixels, int stride,
         c.bg = DEF_BG;
         c.attrs = 0;
       }
-      draw_glyph(pixels, stride,
-                 pad_x + x * cell_w, pad_y + y * cell_h,
-                 cell_w, cell_h,
-                 c.codepoint, c.fg, c.bg, c.attrs,
-                 font, font_h, total_h_px);
+      draw_glyph(pixels, stride, pad_x + x * cell_w, pad_y + y * cell_h, cell_w,
+                 cell_h, c.codepoint, c.fg, c.bg, c.attrs, font, font_h,
+                 total_h_px);
     }
   }
 
@@ -1454,15 +1663,17 @@ term_rect_t terminal_render(terminal_t *t, uint32_t *pixels, int stride,
         (t->cx >= x0 && t->cx <= x1 && t->cy >= y0 && t->cy <= y1);
     if (!cur_in_bbox) {
       cell_t *c = cell_at(s, t->cx, t->cy);
-      draw_glyph(pixels, stride,
-                 pad_x + t->cx * cell_w, pad_y + t->cy * cell_h,
-                 cell_w, cell_h,
-                 c->codepoint, c->fg, c->bg, c->attrs,
-                 font, font_h, total_h_px);
-      if (t->cx < x0) x0 = t->cx;
-      if (t->cy < y0) y0 = t->cy;
-      if (t->cx > x1) x1 = t->cx;
-      if (t->cy > y1) y1 = t->cy;
+      draw_glyph(pixels, stride, pad_x + t->cx * cell_w, pad_y + t->cy * cell_h,
+                 cell_w, cell_h, c->codepoint, c->fg, c->bg, c->attrs, font,
+                 font_h, total_h_px);
+      if (t->cx < x0)
+        x0 = t->cx;
+      if (t->cy < y0)
+        y0 = t->cy;
+      if (t->cx > x1)
+        x1 = t->cx;
+      if (t->cy > y1)
+        y1 = t->cy;
     }
 
     int px = pad_x + t->cx * cell_w;
@@ -1487,8 +1698,8 @@ term_rect_t terminal_render(terminal_t *t, uint32_t *pixels, int stride,
       }
       cell_t *c = cell_at(s, t->cx, t->cy);
       if (c->codepoint != ' ' && alpha > 128) {
-        draw_glyph(pixels, stride, px, py, cell_w, cell_h,
-                   c->codepoint, CUR_FG, CUR_BG, 0, font, font_h, total_h_px);
+        draw_glyph(pixels, stride, px, py, cell_w, cell_h, c->codepoint, CUR_FG,
+                   CUR_BG, 0, font, font_h, total_h_px);
       }
     } else if (t->cursor_shape == CUR_UNDERLINE) {
       int uy = py + cell_h - 2;
@@ -1527,10 +1738,13 @@ term_rect_t terminal_render(terminal_t *t, uint32_t *pixels, int stride,
     int track_w = 2;
     int total = t->history_count + s->rows;
     int thumb_h = (s->rows * track_h) / total;
-    if (thumb_h < 20) thumb_h = 20;
-    if (thumb_h > track_h) thumb_h = track_h;
+    if (thumb_h < 20)
+      thumb_h = 20;
+    if (thumb_h > track_h)
+      thumb_h = track_h;
     int pos_from_top = t->history_count - t->scroll_offset;
-    if (pos_from_top < 0) pos_from_top = 0;
+    if (pos_from_top < 0)
+      pos_from_top = 0;
     int thumb_y = track_y + (pos_from_top * track_h) / total;
     if (thumb_y + thumb_h > track_y + track_h)
       thumb_y = track_y + track_h - thumb_h;
@@ -1558,8 +1772,8 @@ void terminal_set_cursor_alpha(terminal_t *t, uint8_t alpha) {
 }
 
 // [FIX #6] Mouse tracking.
-void terminal_mouse_event(terminal_t *t, int col, int row,
-                          int button, int pressed, int mods) {
+void terminal_mouse_event(terminal_t *t, int col, int row, int button,
+                          int pressed, int mods) {
   if (!t || !t->mode_mouse)
     return;
   if (col < 0 || col >= t->primary.cols)
@@ -1568,16 +1782,19 @@ void terminal_mouse_event(terminal_t *t, int col, int row,
     return;
 
   int b = button;
-  if (mods & 1) b += 4;
-  if (mods & 2) b += 8;
-  if (mods & 4) b += 16;
+  if (mods & 1)
+    b += 4;
+  if (mods & 2)
+    b += 8;
+  if (mods & 4)
+    b += 16;
 
   char buf[32];
   int n;
 
   if (t->mode_mouse_sgr) {
-    n = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c",
-                 b, col + 1, row + 1, pressed ? 'M' : 'm');
+    n = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c", b, col + 1, row + 1,
+                 pressed ? 'M' : 'm');
   } else {
     int bb = b;
     if (!pressed && button < 64)

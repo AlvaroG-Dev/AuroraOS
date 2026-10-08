@@ -542,6 +542,34 @@ static void process_init_creds(process_t *proc) {
 }
 
 // ---------------------------------------------------------------------------
+// [2.3] Calcula start_code/end_code/start_data/end_data a partir de los
+// segmentos PT_LOAD de un ELF (ya relocados y alineados a página).
+//   start_code/end_code → rango de segmentos con PF_X (.text)
+//   start_data/end_data → rango de segmentos con PF_W (.data/.bss)
+// Si no hay ninguno, deja 0. Se usa para /proc/<pid>/stat campos 26/27
+// y 45/46.
+// ---------------------------------------------------------------------------
+static void calc_elf_code_data_ranges(const elf_segment_t *segs, int n,
+                                      uint64_t *sc, uint64_t *ec, uint64_t *sd,
+                                      uint64_t *ed) {
+  *sc = *ec = *sd = *ed = 0;
+  for (int i = 0; i < n; i++) {
+    if (segs[i].flags & PF_X) {
+      if (*sc == 0 || segs[i].vaddr_start < *sc)
+        *sc = segs[i].vaddr_start;
+      if (segs[i].vaddr_end > *ec)
+        *ec = segs[i].vaddr_end;
+    }
+    if (segs[i].flags & PF_W) {
+      if (*sd == 0 || segs[i].vaddr_start < *sd)
+        *sd = segs[i].vaddr_start;
+      if (segs[i].vaddr_end > *ed)
+        *ed = segs[i].vaddr_end;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Spawn desde un buffer ELF contiguo (path clásico, sin argv ni cwd
 // heredado). Se mantiene para tests y para futuros exec().
 // ---------------------------------------------------------------------------
@@ -637,6 +665,17 @@ static process_t *process_spawn_with_ppid(const char *name,
 
   proc->fs_base = 0;
 
+  // [2.3] Campos para /proc/<pid>/stat.
+  proc->start_tick = sched_get_ticks();
+  proc->start_code = 0;
+  proc->end_code = 0;
+  proc->start_data = 0;
+  proc->end_data = 0;
+  proc->arg_start = 0;
+  proc->arg_end = 0;
+  proc->env_start = 0;
+  proc->env_end = 0;
+
   // [cwd] Este path no hereda cwd. Arranca en "/".
   process_set_cwd(proc, "/");
   // [SIG] Estado de señales inicial.
@@ -677,6 +716,20 @@ static process_t *process_spawn_with_ppid(const char *name,
 
     if (seg_end <= seg_start)
       continue;
+
+    // [2.3] Rango de código y datos para /proc/<pid>/stat.
+    if (ph->p_flags & PF_X) {
+      if (proc->start_code == 0 || seg_start < proc->start_code)
+        proc->start_code = seg_start;
+      if (seg_end > proc->end_code)
+        proc->end_code = seg_end;
+    }
+    if (ph->p_flags & PF_W) {
+      if (proc->start_data == 0 || seg_start < proc->start_data)
+        proc->start_data = seg_start;
+      if (seg_end > proc->end_data)
+        proc->end_data = seg_end;
+    }
 
     if (seg_start < elf_vma_start)
       elf_vma_start = seg_start;
@@ -883,8 +936,17 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->sid = proc->pid;
   proc->team_size = 1;
   proc->ctty = NULL;
-  proc->exe_file = NULL;
+  proc->exe_file = NULL; // [2.4]
   proc->exe_path[0] = '\0';
+  proc->start_tick = sched_get_ticks();
+  proc->start_code = 0;
+  proc->end_code = 0;
+  proc->start_data = 0;
+  proc->end_data = 0;
+  proc->arg_start = 0;
+  proc->arg_end = 0;
+  proc->env_start = 0;
+  proc->env_end = 0;
   set_proc_name_from_path(proc, name);
   proc->task = task;
   task_get(task);
@@ -1033,6 +1095,21 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     vfs_node_ref(exe_node);
   }
   process_set_exe_path(proc, name);
+  // [2.3] Rangos de código/datos del exe para /proc/<pid>/stat.
+  calc_elf_code_data_ranges(exe_segs, n_exe_segs, &proc->start_code,
+                            &proc->end_code, &proc->start_data,
+                            &proc->end_data);
+
+  // [2.3] arg/env en el stack: layout de setup_arg_block.
+  //   +0                    argc
+  //   +8                    argv[0]
+  //   +8+8*argc             NULL (terminador argv)
+  //   +16+8*argc            envp[0]
+  //   +16+8*argc+8*envc     NULL (terminador envp)
+  proc->arg_start = user_rsp + 8;
+  proc->arg_end = user_rsp + 8 + 8ULL * (uint64_t)(argc + 1);
+  proc->env_start = proc->arg_end;
+  proc->env_end = proc->env_start + 8ULL * (uint64_t)(envc + 1);
 
   task->proc = proc;
 
@@ -1865,6 +1942,17 @@ int64_t sys_fork(void) {
     child->exe_path[0] = '\0';
   }
 
+  // [2.3] Heredar campos de /proc/<pid>/stat.
+  child->start_tick = parent->start_tick;
+  child->start_code = parent->start_code;
+  child->end_code = parent->end_code;
+  child->start_data = parent->start_data;
+  child->end_data = parent->end_data;
+  child->arg_start = parent->arg_start;
+  child->arg_end = parent->arg_end;
+  child->env_start = parent->env_start;
+  child->env_end = parent->env_end;
+
   // Nombre: prefijo con el del padre.
   {
     size_t i = 0;
@@ -2308,12 +2396,24 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     }
   }
 
+  // [2.4] exe_file: el proceso toma una ref propia. La primaria del
+  // vfs_lookup la soltamos aquí; la del VMA ya está cogida.
   if (proc->exe_file && proc->exe_file != exe_node)
     vfs_node_free(proc->exe_file);
   proc->exe_file = exe_node;
   vfs_node_ref(exe_node);
   process_set_exe_path(proc, path);
-  vfs_node_free(exe_node);
+  vfs_node_free(exe_node); // soltamos la primaria del lookup
+
+  // [2.3] Campos para /proc/<pid>/stat.
+  proc->start_tick = sched_get_ticks();
+  calc_elf_code_data_ranges(exe_segs, n_exe_segs, &proc->start_code,
+                            &proc->end_code, &proc->start_data,
+                            &proc->end_data);
+  proc->arg_start = user_rsp + 8;
+  proc->arg_end = user_rsp + 8 + 8ULL * (uint64_t)(argc + 1);
+  proc->env_start = proc->arg_end;
+  proc->env_end = proc->env_start + 8ULL * (uint64_t)(envc + 1);
 
   *new_entry = final_entry;
   *new_rsp = user_rsp;

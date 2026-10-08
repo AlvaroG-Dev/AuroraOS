@@ -264,6 +264,9 @@ int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end) {
   rn->fs = NULL;
   rn->priv = re;
 
+  rn->ref_count = 1; // ← AÑADIR
+  wn->ref_count = 1; // ← AÑADIR
+
   wn->name[0] = 'p';
   wn->name[1] = '\0';
   wn->flags = VFS_FILE;

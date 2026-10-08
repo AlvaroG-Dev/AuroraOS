@@ -228,6 +228,30 @@ static void kmain_task(void) {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // [fix] /tmp → /data/tmp (bind mount).
+  //
+  // Se hace AQUÍ y no en vfs_init(): /data no existe hasta que
+  // fat32_mount_bdev() de arriba monta la partición. Intentar el bind
+  // antes fallaba silenciosamente y /tmp quedaba huérfano.
+  //
+  // Flujo:
+  //   1. mkdir /data/tmp  → crea el directorio en FAT32 (idempotente).
+  //   2. bind /tmp → /data/tmp  → vfs_lookup("/tmp/foo") redirige a
+  //      /data/tmp/foo antes de tocar el FS.
+  // ---------------------------------------------------------------------------
+  {
+    int mkrc = vfs_mkdir("/data/tmp", 01777);
+    if (mkrc != 0 && mkrc != -EEXIST)
+      LOG_WARN("[INIT] mkdir /data/tmp: %d (tmp bind podría fallar)", mkrc);
+
+    int brc = vfs_mount_bind("/tmp", "/data/tmp");
+    if (brc != 0)
+      LOG_WARN("[INIT] bind /tmp -> /data/tmp falló: %d", brc);
+    else
+      LOG_INFO("[INIT] /tmp bind a /data/tmp");
+  }
+
   LOG_INFO("[INIT] DMA dump...");
   ata_dma_dump();
 

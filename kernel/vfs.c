@@ -591,6 +591,7 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
       root->name[0] = '/';
       root->name[1] = '\0';
       root->flags = VFS_DIRECTORY;
+      root->ref_count = 1; // ← AÑADIR
       return root;
     }
     return NULL;
@@ -1324,13 +1325,23 @@ void vfs_node_free(vfs_node_t *node) {
   if (node == &stdin_node || node == &stdout_node || node == &stderr_node)
     return;
 
-  // Decrementa. Solo libera cuando el decremento deja el contador en
-  // -1, es decir: veníamos de ref_count=0 (el ref primario) y todos
-  // los refs extra ya se soltaron.
+  // vfs_lookup() entrega el nodo con ref_count=1 (ref primaria). Cada
+  // consumidor extra (exe_file, vma->file_node, ...) hace vfs_node_ref()
+  // y suelta con vfs_node_free(). El nodo se destruye cuando el
+  // contador llega a 0.
+  //
+  // ANTES: `if (new_rc >= 0) return;` → como el contador empezaba en 1,
+  // siempre salía por aquí y nunca se hacía kfree. Todos los nodos se
+  // filtraban, y al reutilizar el SLAB la mount table quedaba con
+  // fs_priv apuntando a memoria ajena.
   int new_rc = __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
-  if (new_rc >= 0)
+  if (new_rc > 0)
     return;
-
+  if (new_rc < 0) {
+    LOG_ERR("[VFS] vfs_node_free: ref_count underflow en %p name='%s'",
+            (void *)node, node->name);
+    return;
+  }
   if (node->ops && node->ops->close)
     node->ops->close(node);
   kfree(node);
@@ -2014,7 +2025,38 @@ void vfs_for_each_mount(vfs_mount_iter_cb_t cb, void *arg) {
     return;
   unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
   for (struct vfs_mount *m = g_mounts; m; m = m->next) {
-    const char *name = (m->ops && m->ops->name) ? m->ops->name : "unknown";
+    const char *name = NULL;
+
+    if (m->ops && m->ops->name) {
+      name = m->ops->name;
+    } else if (m->is_bind) {
+      // Un bind mount no tiene ops propias. Buscamos el mount más
+      // específico que cubre m->bind_source y usamos su fs_name.
+      // Estamos bajo g_mounts_lock, así que hacemos el scan a mano.
+      size_t src_len = strlen(m->bind_source);
+      size_t best_len = 0;
+      for (struct vfs_mount *src = g_mounts; src; src = src->next) {
+        if (src == m)
+          continue;
+        size_t ml = strlen(src->path);
+        if (ml <= best_len || ml > src_len)
+          continue;
+        int match = 0;
+        if (ml == 1 && src->path[0] == '/')
+          match = 1;
+        else if (strncmp(m->bind_source, src->path, ml) == 0 &&
+                 (m->bind_source[ml] == '\0' || m->bind_source[ml] == '/'))
+          match = 1;
+        if (match) {
+          best_len = ml;
+          name = (src->ops && src->ops->name) ? src->ops->name : NULL;
+        }
+      }
+    }
+
+    if (!name)
+      name = "unknown";
+
     if (cb(m->path, name, m->is_bind, m->bind_source, arg) != 0)
       break;
   }

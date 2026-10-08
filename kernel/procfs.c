@@ -191,8 +191,7 @@ static size_t kfmt_hex_min(char *out, size_t cap, uint64_t v, int min_width) {
   return o;
 }
 
-static size_t __attribute__((unused)) kfmt_i64(char *out, size_t cap,
-                                               int64_t v) {
+static size_t kfmt_i64(char *out, size_t cap, int64_t v) {
   if (v < 0) {
     if (cap < 2)
       return 0;
@@ -408,9 +407,40 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
   size_t cap = c->cap;
   size_t o = 0;
 
+  // VmSize (bytes) y RSS (páginas) agregados por VMA.
+  uint64_t vm_size = 0, vm_rss_pages = 0;
+  uint64_t *pml4 = p->pml4_phys ? (uint64_t *)phys_to_virt(p->pml4_phys) : NULL;
+  for (vma_t *v = p->vma_list; v; v = v->next) {
+    vm_size += (v->end - v->start);
+    if (pml4) {
+      for (uint64_t pg = v->start; pg < v->end; pg += PAGE_SIZE) {
+        if (paging_get_phys_in(pml4, pg))
+          vm_rss_pages++;
+      }
+    }
+  }
+
+  // Máscaras de señales ignoradas / capturadas.
+  uint64_t sig_ign = 0, sig_catch = 0;
+  for (int i = 0; i < SIG_MAX; i++) {
+    if (p->sigactions[i].handler == SIG_IGN)
+      sig_ign |= (1ULL << i);
+    else if (p->sigactions[i].handler != SIG_DFL)
+      sig_catch |= (1ULL << i);
+  }
+
+  int n_threads = p->team_size > 0 ? p->team_size : 1;
+  uint64_t sig_pnd = __atomic_load_n(&p->pending_signals, __ATOMIC_ACQUIRE);
+
+  // tty_nr / tpgid: sin ctty, 0 y -1 (formato Linux).
+  uint64_t tty_nr = 0;
+  int64_t tpgid = -1;
+
+  // ---- 1. pid ----
   o += kfmt_u64(buf + o, cap - o, p->pid);
   o = kappend(buf, o, cap, " ");
 
+  // ---- 2. comm ----
   buf[o++] = '(';
   size_t nl = strlen(p->name);
   if (nl > 15)
@@ -420,27 +450,179 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
   buf[o++] = ')';
   o = kappend(buf, o, cap, " ");
 
+  // ---- 3. state ----
   char st = procfs_state_char(p, NULL);
   buf[o++] = st;
   o = kappend(buf, o, cap, " ");
 
+  // ---- 4. ppid ----
   o += kfmt_u64(buf + o, cap - o, p->ppid);
   o = kappend(buf, o, cap, " ");
+
+  // ---- 5. pgrp ----
   o += kfmt_u64(buf + o, cap - o, p->pgid);
   o = kappend(buf, o, cap, " ");
+
+  // ---- 6. session ----
   o += kfmt_u64(buf + o, cap - o, p->sid);
-  o = kappend(buf, o, cap, " 0 0 0 0 0 0 0 ");
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 7. tty_nr ----
+  o += kfmt_u64(buf + o, cap - o, tty_nr);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 8. tpgid (signed) ----
+  o += kfmt_i64(buf + o, cap - o, tpgid);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 9. flags ----
+  o += kfmt_u64(buf + o, cap - o, 0x400000ULL);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 10-13. minflt cminflt majflt cmajflt ----
+  o = kappend(buf, o, cap, "0 0 0 0 ");
+
+  // ---- 14. utime ----
   o += kfmt_u64(buf + o, cap - o, p->cpu_ticks_user);
   o = kappend(buf, o, cap, " ");
+
+  // ---- 15. stime ----
   o = kappend(buf, o, cap, "0 ");
-  o = kappend(buf, o, cap, "0 0 20 0 1 0 0 ");
+
+  // ---- 16. cutime ----
   o = kappend(buf, o, cap, "0 ");
+
+  // ---- 17. cstime ----
   o = kappend(buf, o, cap, "0 ");
-  for (int i = 0; i < 28; i++)
-    o = kappend(buf, o, cap, "0 ");
-  if (o > 0 && buf[o - 1] == ' ')
-    o--;
+
+  // ---- 18. priority ----
+  o = kappend(buf, o, cap, "20 ");
+
+  // ---- 19. nice ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 20. num_threads ----
+  o += kfmt_u64(buf + o, cap - o, (uint64_t)n_threads);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 21. itrealvalue ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 22. starttime ----
+  o += kfmt_u64(buf + o, cap - o, p->start_tick);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 23. vsize (bytes) ----
+  o += kfmt_u64(buf + o, cap - o, vm_size);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 24. rss (páginas) ----
+  o += kfmt_u64(buf + o, cap - o, vm_rss_pages);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 25. rsslim ----
+  o += kfmt_u64(buf + o, cap - o, p->rlimits[RLIMIT_RSS].rlim_cur);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 26. startcode ----
+  o += kfmt_u64(buf + o, cap - o, p->start_code);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 27. endcode ----
+  o += kfmt_u64(buf + o, cap - o, p->end_code);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 28. startstack ----
+  o += kfmt_u64(buf + o, cap - o, p->stack_top);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 29. kstkesp ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 30. kstkeip ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 31. signal (pending) ----
+  o += kfmt_u64(buf + o, cap - o, sig_pnd);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 32. blocked ----
+  o += kfmt_u64(buf + o, cap - o, p->blocked_signals);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 33. sigignore ----
+  o += kfmt_u64(buf + o, cap - o, sig_ign);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 34. sigcatch ----
+  o += kfmt_u64(buf + o, cap - o, sig_catch);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 35. wchan ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 36. nswap ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 37. cnswap ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 38. exit_signal (SIGCHLD = 17) ----
+  o = kappend(buf, o, cap, "17 ");
+
+  // ---- 39. processor ----
+  o += kfmt_u64(buf + o, cap - o, 0);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 40. rt_priority ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 41. policy (SCHED_OTHER) ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 42. delayacct_blkio_ticks ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 43. guest_time ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 44. cguest_time ----
+  o = kappend(buf, o, cap, "0 ");
+
+  // ---- 45. start_data ----
+  o += kfmt_u64(buf + o, cap - o, p->start_data);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 46. end_data ----
+  o += kfmt_u64(buf + o, cap - o, p->end_data);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 47. start_brk ----
+  o += kfmt_u64(buf + o, cap - o, p->heap_start);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 48. arg_start ----
+  o += kfmt_u64(buf + o, cap - o, p->arg_start);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 49. arg_end ----
+  o += kfmt_u64(buf + o, cap - o, p->arg_end);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 50. env_start ----
+  o += kfmt_u64(buf + o, cap - o, p->env_start);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 51. env_end ----
+  o += kfmt_u64(buf + o, cap - o, p->env_end);
+  o = kappend(buf, o, cap, " ");
+
+  // ---- 52. exit_code (low 8 bits si es zombie) ----
+  o += kfmt_u64(buf + o, cap - o,
+                (uint64_t)(p->is_zombie ? (p->exit_code & 0xff) : 0));
+
   buf[o++] = '\n';
+  buf[o] = '\0';
 
   c->len = o;
   c->found = 1;

@@ -36,6 +36,7 @@ static char *default_envp[] = {
     "LOGNAME=root",
     "SHELL=/bin/sh",
     "PWD=/",
+    "TMPDIR=/tmp",
     NULL,
 };
 

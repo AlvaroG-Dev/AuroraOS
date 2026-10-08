@@ -72,6 +72,15 @@ initrd.tar: sysroot user elf_malformed
 	          sysroot/data sysroot/root
 
 # ---------------------------------------------------------------------------
+# /tmp y /var/tmp: bind mount a /data/tmp (FAT32 RW).
+# El kernel lo monta en vfs_init() tras montar /data. Aquí solo dejamos
+# /var como directorio normal (por si alguien lee /var antes de que
+# el bind esté activo).
+# ---------------------------------------------------------------------------
+	@mkdir -p sysroot/var
+	@rm -rf sysroot/tmp sysroot/var/tmp sysroot/data/tmp
+
+# ---------------------------------------------------------------------------
 # 1. (Sin busybox — userspace es 100% glibc/Ubuntu)
 # ---------------------------------------------------------------------------
 
@@ -170,7 +179,35 @@ initrd.tar: sysroot user elf_malformed
 		printf '#include <stdio.h>\n\nint main(void) {\n    printf("hola desde codigo JIT\\n");\n    for (int i = 0; i < 5; i++)\n        printf("  iter %%d\\n", i);\n    return 0;\n}\n' > sysroot/root/hello.c; \
 	fi
 
-	@echo "[Makefile] Generando initrd.tar desde sysroot/"
+# ---------------------------------------------------------------------------
+# /etc/ld.so.cache: glibc's dynamic loader lo lee al arrancar y resuelve
+# cada .so con un solo open(), en vez de probar glibc-hwcaps/v3, /v2,
+# base, usr/lib, ... por cada lib. En el guest elimina ~50 opens
+# fallidos por exec (visible en el serial como OPEN-FAIL en cascada).
+#
+# `ldconfig -r sysroot` hace chroot lógico a sysroot y escribe
+# sysroot/etc/ld.so.cache con paths relativos a ese root (p. ej.
+# "/lib/x86_64-linux-gnu/libc.so.6"), que es justo lo que el guest
+# espera al abrirlo desde "/".
+#
+# Si ldconfig no está disponible en el host, se salta silenciosamente:
+# glibc hará probing como hasta ahora (más lento, mismos resultados).
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Generando /etc/ld.so.cache..."
+	@mkdir -p sysroot/etc/ld.so.conf.d
+	@printf '/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n/lib64\n/usr/lib64\n/lib\n/usr/lib\n' > sysroot/etc/ld.so.conf
+	@if command -v ldconfig >/dev/null 2>&1; then \
+		ldconfig -r "$(CURDIR)/sysroot" 2>/dev/null \
+			&& echo "[Makefile]   ld.so.cache OK" \
+			|| echo "[Makefile]   ldconfig falló (no crítico)"; \
+	elif [ -x /sbin/ldconfig ]; then \
+		/sbin/ldconfig -r "$(CURDIR)/sysroot" 2>/dev/null \
+			&& echo "[Makefile]   ld.so.cache OK" \
+			|| echo "[Makefile]   ldconfig falló (no crítico)"; \
+	else \
+		echo "[Makefile]   ldconfig no encontrado (glibc hará probing)"; \
+	fi
+
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 
 kernel: initrd.tar

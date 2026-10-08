@@ -388,6 +388,60 @@ static int64_t k_close(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
 // [glibc] Núcleo reutilizable: toma un path ABSOLUTO ya resuelto.
 static int64_t do_open_resolved(process_t *proc, const char *kpath,
                                 int linux_flags) {
+  // [fix] O_TMPFILE = __O_TMPFILE (0x400000) | O_DIRECTORY (0x10000).
+  // Hay que comprobar AMBOS bits: O_DIRECTORY solo (0x10000) es un
+  // flag válido que `ls .` y `ls /` pasan en cada invocación, y un
+  // check con disyunción (`flags & 0x410000`) los rechazaría por error.
+  //
+  // Devolvemos -EISDIR (NO -EOPNOTSUPP). glibc, en sysdeps/posix/
+  // tempname.c (el que usan mkstemp/tmpfile), solo cae a su fallback
+  // (open con nombre random + O_CREAT|O_EXCL) si el errno es EISDIR o
+  // ENOENT. Con EOPNOTSUPP aborta y no prueba el fallback, así que
+  // ed/nano/less morían con "?" o no guardaban.
+  //
+  // El path que llega aquí es un directorio (el usuario pidió "un
+  // fichero anónimo dentro de este directorio"), así que devolver
+  // EISDIR es además semánticamente correcto: coincide con lo que
+  // Linux devuelve cuando el FS no implementa O_TMPFILE.
+  if ((linux_flags & 0x410000) == 0x410000) {
+    // Devolvemos -ENOENT (NO -EISDIR ni -EOPNOTSUPP).
+    //
+    // glibc, en sysdeps/posix/tempname.c, acepta tanto EISDIR como
+    // ENOENT como señal de "O_TMPFILE no soportado por este FS, cae
+    // al fallback de generar nombre random + open(O_CREAT|O_EXCL)".
+    // ENOENT es la constante universal — la aceptan todas las
+    // versiones de glibc desde hace 20 años. EISDIR depende de la
+    // versión y algunos builds la rechazan.
+    //
+    // Devolver ENOENT para un path que existe es raro, pero glibc no
+    // valida la semántica: solo lo usa como señal interna para
+    // decidir el fallback. Es un uso de ENOENT como "feature not
+    // available", no como "file not found".
+    LOG_TRACE("[OPEN-TMPFILE] path='%s' flags=0x%x -> ENOENT", kpath,
+              linux_flags);
+    return -ENOENT;
+  }
+
+  // [fix] O_DIRECTORY (0x10000): falla con ENOTDIR si el path no es
+  // directorio. O_NOFOLLOW (0x20000): falla con ELOOP si el path final
+  // es un symlink. Ambos se comprueban con un lookup previo.
+  int want_dir = (linux_flags & 0x10000) != 0;
+  int no_follow = (linux_flags & 0x20000) != 0;
+  if (want_dir || no_follow) {
+    vfs_node_t *probe =
+        no_follow ? vfs_lookup_nofollow(kpath) : vfs_lookup(kpath);
+    if (!probe)
+      return -ENOENT;
+    int is_dir = (probe->flags & VFS_DIRECTORY) != 0;
+    int is_sym = probe->is_symlink;
+    vfs_node_free(probe);
+
+    if (no_follow && is_sym)
+      return -ELOOP;
+    if (want_dir && !is_dir)
+      return -ENOTDIR;
+  }
+
   int aflags;
   switch (linux_flags & LINUX_O_ACCMODE) {
   case LINUX_O_RDONLY:
