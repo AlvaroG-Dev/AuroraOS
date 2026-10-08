@@ -31,23 +31,42 @@ void pf_dump_stats(void) {
 }
 
 // ---------------------------------------------------------------------------
-// [3.5] vma_release_fd: libera la referencia al file_descriptor_t de un
-// VMA_FILE. Si ref_count llega a 0, libera el nodo y el fd (igual que
-// vfs_close_for_proc pero sin tocar la tabla del proceso).
+// [2.4] Copia el backing (file_fd + file_node) de src a dst, con los
+// refs correctos, ajustando el file_offset por off_delta. Se usa en
+// los splits de VMA (unmap, mprotect) y en clone_vmas.
 // ---------------------------------------------------------------------------
-static void vma_release_fd(vma_t *v) {
-  if (!v || !v->file_fd)
+void vma_inherit_backing(vma_t *dst, const vma_t *src, uint64_t off_delta) {
+  if (!dst || !src)
     return;
-  file_descriptor_t *f = v->file_fd;
-  v->file_fd = NULL;
+  if (src->file_fd) {
+    dst->file_fd = src->file_fd;
+    __atomic_fetch_add(&src->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
+    dst->file_offset = src->file_offset + off_delta;
+  }
+  if (src->file_node) {
+    dst->file_node = src->file_node;
+    vfs_node_ref(src->file_node);
+  }
+}
 
-  int left = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
-  if (left == 0) {
-    if (f->node)
-      vfs_node_free(f->node);
-    kfree(f);
-  } else if (left < 0) {
-    LOG_ERR("[PF] ref_count underflow fd=%p (%d)", (void *)f, left);
+static void vma_release_backing(vma_t *v) {
+  if (!v)
+    return;
+  if (v->file_fd) {
+    file_descriptor_t *f = v->file_fd;
+    v->file_fd = NULL;
+    int left = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
+    if (left == 0) {
+      if (f->node)
+        vfs_node_free(f->node);
+      kfree(f);
+    } else if (left < 0) {
+      LOG_ERR("[PF] ref_count underflow fd=%p (%d)", (void *)f, left);
+    }
+  }
+  if (v->file_node) {
+    vfs_node_free(v->file_node);
+    v->file_node = NULL;
   }
 }
 
@@ -116,8 +135,27 @@ vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
     return NULL;
   v->file_fd = fd;
   v->file_offset = file_offset;
-  if (fd)
+  if (fd) {
     __atomic_fetch_add(&fd->ref_count, 1, __ATOMIC_ACQ_REL);
+    // [2.4] Guardar también el nodo, con ref propia. Es redundante con
+    // file_fd->node pero unifica el camino de maps/smaps y sobrevive
+    // a un eventual cierre del file_descriptor_t.
+    v->file_node = fd->node;
+    if (fd->node)
+      vfs_node_ref(fd->node);
+  }
+  return v;
+}
+
+vma_t *vma_create_elf(struct process *proc, uint64_t start, uint64_t end,
+                      uint64_t flags, struct vfs_node *exe_node) {
+  vma_t *v = vma_create(proc, start, end, flags, VMA_ELF);
+  if (!v)
+    return NULL;
+  if (exe_node) {
+    v->file_node = exe_node;
+    vfs_node_ref(exe_node);
+  }
   return v;
 }
 
@@ -127,7 +165,7 @@ void vma_destroy_all(struct process *proc) {
   vma_t *v = proc->vma_list;
   while (v) {
     vma_t *next = v->next;
-    vma_release_fd(v);
+    vma_release_backing(v);
     kfree(v);
     v = next;
   }
@@ -500,12 +538,11 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     if (v->end <= start || v->start >= end)
       continue;
     if (start > v->start && end < v->end) {
-      // [3.5] kzalloc en vez de kmalloc para file_fd=NULL.
       vma_t *right = (vma_t *)kzalloc(sizeof(vma_t));
       if (!right) {
         while (new_vmas) {
           vma_t *next = new_vmas->next;
-          vma_release_fd(new_vmas);
+          vma_release_backing(new_vmas);
           kfree(new_vmas);
           new_vmas = next;
         }
@@ -517,12 +554,8 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       right->type = v->type;
       right->pad = 0;
       right->next = NULL;
-      // [3.5] Propagar file_fd si es VMA_FILE.
-      if (v->type == VMA_FILE && v->file_fd) {
-        right->file_fd = v->file_fd;
-        __atomic_fetch_add(&right->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
-        right->file_offset = v->file_offset + (end - v->start);
-      }
+      // [2.4] Hereda file_fd + file_node con refs propias.
+      vma_inherit_backing(right, v, end - v->start);
       *new_vmas_tail = right;
       new_vmas_tail = &right->next;
     }
@@ -543,7 +576,6 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     for (uint64_t p = unmap_start; p < unmap_end; p += PAGE_SIZE) {
       uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
-      // [FIX] Si la PTE es un swap entry, liberar el slot.
       uint64_t raw;
       if (paging_get_pte_in(pml4, p, &raw) && pte_is_swap(raw)) {
         swap_free_slot(pte_swap_type(raw), pte_swap_offset(raw));
@@ -559,17 +591,14 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     }
 
     if (start <= v->start && end >= v->end) {
-      // VMA completamente cubierto: eliminar.
       *pp = v->next;
-      vma_release_fd(v); // [3.5]
+      vma_release_backing(v);
       kfree(v);
       touched++;
       continue;
     }
     if (start <= v->start) {
-      // Recortar por la izquierda: queda [end, v->end).
-      // [3.5] Ajustar file_offset.
-      if (v->type == VMA_FILE && v->file_fd)
+      if (v->file_fd)
         v->file_offset += (end - v->start);
       v->start = end;
       touched++;
@@ -577,13 +606,11 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       continue;
     }
     if (end >= v->end) {
-      // Recortar por la derecha: queda [v->start, start).
       v->end = start;
       touched++;
       pp = &v->next;
       continue;
     }
-    // Split por el medio: queda [v->start, start) + [end, v->end).
     vma_t *right = new_vmas;
     new_vmas = new_vmas->next;
     right->next = v->next;
@@ -595,7 +622,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
 
   while (new_vmas) {
     vma_t *next = new_vmas->next;
-    vma_release_fd(new_vmas);
+    vma_release_backing(new_vmas);
     kfree(new_vmas);
     new_vmas = next;
   }
@@ -660,9 +687,6 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   if (end < addr || end > USER_LIMIT)
     return -ENOMEM;
 
-  // [4.3] En x86 no hay bit "no read": PROT_NONE se representa
-  // quitando PTE_USER. Userland accede → #PF(protection violation)
-  // → SIGSEGV.
   uint64_t new_flags = PTE_PRESENT;
   if (prot & (MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
     new_flags |= PTE_USER;
@@ -671,13 +695,11 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   if (!(prot & MMAP_PROT_EXEC))
     new_flags |= PTE_NX;
 
-  // Preasignar hasta 2 VMAs nuevos por cada VMA que solape.
+  // Contar cuántos VMAs nuevos necesitamos (máx 2 por VMA afectado).
   int need = 0;
   for (vma_t *v = proc->vma_list; v; v = v->next) {
     if (v->end <= addr || v->start >= end)
       continue;
-    // [FIX] El caso "cubre rango entero" necesita 2 VMAs nuevos
-    // (mid + right), no 1. Sin esto, pool se agota antes de tiempo.
     if (addr > v->start && end < v->end)
       need += 2;
     else if (addr > v->start || end < v->end)
@@ -711,7 +733,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
     int right_cov = (v->end <= end);
 
     if (left_cov && right_cov) {
-      // VMA completamente dentro: solo flags.
+      // Completamente dentro.
       v->flags = new_flags;
       pp = &v->next;
     } else if (left_cov) {
@@ -724,12 +746,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->type = v->type;
       right->pad = 0;
       right->next = v->next;
-      // [3.5] file_fd propagation
-      if (v->type == VMA_FILE && v->file_fd) {
-        right->file_fd = v->file_fd;
-        __atomic_fetch_add(&right->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
-        right->file_offset = v->file_offset + (end - v->start);
-      }
+      vma_inherit_backing(right, v, end - v->start);
 
       v->end = end;
       v->flags = new_flags;
@@ -745,12 +762,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->type = v->type;
       mid->pad = 0;
       mid->next = v->next;
-      // [3.5] file_fd propagation
-      if (v->type == VMA_FILE && v->file_fd) {
-        mid->file_fd = v->file_fd;
-        __atomic_fetch_add(&mid->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
-        mid->file_offset = v->file_offset + (addr - v->start);
-      }
+      vma_inherit_backing(mid, v, addr - v->start);
 
       v->end = addr;
       v->next = mid;
@@ -768,6 +780,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->type = v->type;
       mid->pad = 0;
       mid->next = right;
+      vma_inherit_backing(mid, v, addr - v->start);
 
       right->start = end;
       right->end = v->end;
@@ -775,16 +788,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->type = v->type;
       right->pad = 0;
       right->next = v->next;
-      // [3.5] file_fd propagation para ambos
-      if (v->type == VMA_FILE && v->file_fd) {
-        mid->file_fd = v->file_fd;
-        __atomic_fetch_add(&mid->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
-        mid->file_offset = v->file_offset + (addr - v->start);
-
-        right->file_fd = v->file_fd;
-        __atomic_fetch_add(&right->file_fd->ref_count, 1, __ATOMIC_ACQ_REL);
-        right->file_offset = v->file_offset + (end - v->start);
-      }
+      vma_inherit_backing(right, v, end - v->start);
 
       v->end = addr;
       v->next = mid;
@@ -792,14 +796,12 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
     }
   }
 
-  // Devolver pool sobrante.
   while (pool) {
     vma_t *n = pool->next;
     kfree(pool);
     pool = n;
   }
 
-  // Actualizar PTEs de las páginas presentes.
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
   int multi = (proc->team_size > 1);
   for (uint64_t p = addr; p < end; p += PAGE_SIZE) {

@@ -300,4 +300,9 @@ void syscall_init_ap(void);
 #define KERNEL_SERVICES_MAX 8
 void syscall_register_service(const char *name, uint32_t task_id);
 
+// [df] Device id estable por filesystem montado. Lo usan vfs_to_linux_stat
+// (st_dev) y procfs (columna maj:min de mountinfo). Deben coincidir para
+// que coreutils df no deduplique todos los mounts a uno solo.
+uint64_t fs_dev_id(const void *fs);
+
 #endif

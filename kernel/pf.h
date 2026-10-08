@@ -11,11 +11,12 @@
 #define VMA_ELF 2
 #define VMA_FILE 3 // [3.5] mmap file-backed
 
-struct process;
-struct file_descriptor;
-
 // Límites
 #define MAX_STACK_GROWTH (8 * 1024 * 1024) // Límite RLIMIT_STACK predeterminado
+
+struct process;
+struct file_descriptor;
+struct vfs_node;
 
 typedef struct vma {
   uint64_t start;
@@ -30,10 +31,30 @@ typedef struct vma {
   // el fichero sobreviva al close() del usuario.
   struct file_descriptor *file_fd;
 
-  // [3.5] Offset del byte 0 del VMA dentro del fichero. Alineado a
-  // página (Linux exige offset alineado en mmap).
+  // [3.5] Offset del byte 0 del VMA dentro del fichero.
   uint64_t file_offset;
+
+  // [2.4] Nodo VFS que respalda este VMA, con su propia ref.
+  //   VMA_ELF:  nodo del binario o del intérprete.
+  //   VMA_FILE: == file_fd->node (redundante por claridad).
+  //   VMA_ANON / VMA_STACK: NULL.
+  struct vfs_node *file_node;
 } vma_t;
+
+vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
+                       uint64_t flags, struct file_descriptor *fd,
+                       uint64_t file_offset);
+
+// [2.4] Como vma_create pero para VMA_ELF: toma ref extra al nodo del
+// binario. `exe_node` puede ser NULL (tests con buffer contiguo o
+// intérpretes sin nodo).
+vma_t *vma_create_elf(struct process *proc, uint64_t start, uint64_t end,
+                      uint64_t flags, struct vfs_node *exe_node);
+
+// [2.4] Copia el backing (file_fd + file_node) de src a dst, con los
+// refs correctos, ajustando file_offset por off_delta. Exportada para
+// que process.c (clone_vmas) la use sin duplicar lógica.
+void vma_inherit_backing(vma_t *dst, const vma_t *src, uint64_t off_delta);
 
 vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
                        uint64_t flags, struct file_descriptor *fd,

@@ -64,7 +64,21 @@ typedef struct {
   uint64_t p_align;
 } Elf64_Phdr;
 
-/* --- estructuras Elf64_Ehdr y Elf64_Phdr sin cambios --- */
+// [2.4] Un segmento PT_LOAD, ya relocado y alineado a página.
+// `vaddr_start` y `vaddr_end` están alineados a PAGE_SIZE y, si el ELF
+// es ET_DYN, ya llevan sumado el load_base. `flags` son los PF_* del
+// program header original.
+//
+// Se usa para crear un VMA por segmento, en vez de un único VMA
+// consolidado con permisos uniformes: así /proc/<pid>/maps muestra
+// r--p / r-xp / rw-p separados, como Linux.
+typedef struct {
+  uint64_t vaddr_start;
+  uint64_t vaddr_end;
+  uint32_t flags;
+} elf_segment_t;
+
+#define ELF_MAX_SEGMENTS 8
 
 int elf_validate(const void *data, size_t size);
 
@@ -76,7 +90,8 @@ int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
                        uint64_t *vma_start_out, uint64_t *vma_end_out,
                        uint64_t *phdr_vaddr_out, uint16_t *phnum_out,
                        uint16_t *phent_out, char *interp_path,
-                       size_t interp_max, size_t *interp_len_out);
+                       size_t interp_max, size_t *interp_len_out,
+                       elf_segment_t *segs_out, int *n_segs_out, int max_segs);
 
 int elf_load(const void *data, size_t size, uint64_t *pml4, uint64_t load_base,
              uint64_t *entry_out);
