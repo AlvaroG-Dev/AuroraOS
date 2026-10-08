@@ -77,7 +77,8 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
   if (!self)
     return -1;
 
-  if (!cond || cond(arg))
+  // Fast-path: si ya se cumple, no dormir.
+  if (cond && cond(arg))
     return (timeout_ticks == 0) ? 1 : (long)timeout_ticks;
 
   uint64_t deadline = 0;
@@ -85,8 +86,31 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     deadline = sched_get_ticks() + timeout_ticks;
 
   while (1) {
+    // -----------------------------------------------------------------
+    // 1. Evaluar la condición SIN wq->lock (modelo Linux:
+    //    prepare_to_wait + test + schedule + finish_wait).
+    //
+    // Antes se evaluaba con wq->lock y con IRQs off, y cond() podía
+    // coger otros locks (m_lock, g_pty_lock, ...). Eso formaba cadenas
+    // AB-BA con IF=0 en múltiples CPUs → deadlock global. En Linux la
+    // condición siempre se evalúa fuera del wq lock.
+    // -----------------------------------------------------------------
+    if (cond && cond(arg)) {
+      if (timeout_ticks == 0)
+        return 1;
+      uint64_t now = sched_get_ticks();
+      long remaining = (deadline > now) ? (long)(deadline - now) : 1;
+      return remaining;
+    }
+
+    // -----------------------------------------------------------------
+    // 2. Insertar en la cola y bloquear. wq->lock solo protege la
+    //    cola, no la condición.
+    // -----------------------------------------------------------------
     unsigned long flags = spin_lock_irqsave(&wq->lock);
 
+    // Re-chequear dentro del lock para no perder un wake que ocurrió
+    // entre el test de arriba y la inserción.
     if (cond && cond(arg)) {
       spin_unlock_irqrestore(&wq->lock, flags);
       if (timeout_ticks == 0)
@@ -99,18 +123,8 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     if (self->waiting_on == NULL) {
       self->wake_reason = 0;
       wait_queue_add_locked(wq, self);
-      // [C4] Publicación atómica de (state, wake_deadline) bajo
-      // sched_lock, para que sched_wake_expired (que lee ambos campos
-      // bajo el mismo lock) nunca vea una tarea BLOCKED con deadline
-      // aún sin escribir, ni al revés.
       sched_set_blocked_deadline(self, deadline);
 
-      // [FIX signal] Solo EINTR si la señal es realmente entregable
-      // (no bloqueada). Antes mirábamos pending_signals != 0, lo que
-      // incluía señales bloqueadas: cualquier proceso con SIGCHLD
-      // pendiente y bloqueado salía del wait con EINTR espurio. Ash
-      // bloquea SIGCHLD en secciones críticas, así que esto ocurría
-      // en la práctica constantemente.
       if (interruptible && self->proc) {
         uint64_t pend =
             __atomic_load_n(&self->proc->pending_signals, __ATOMIC_ACQUIRE);
@@ -127,10 +141,12 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
 
     sched_yield();
 
-    // [FIX timeout] Si despertamos por deadline, hay que limpiarlo
-    // (sched_wake_expired ya lo hace, pero por si acaso).
     __atomic_store_n(&self->wake_deadline, 0, __ATOMIC_RELEASE);
 
+    // -----------------------------------------------------------------
+    // 3. Despertamos. Distinguir por qué: condición cumplida, timeout,
+    //    o señal.
+    // -----------------------------------------------------------------
     if (cond && cond(arg)) {
       if (self->waiting_on == wq) {
         flags = spin_lock_irqsave(&wq->lock);
@@ -145,10 +161,6 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     }
 
     if (interruptible && self->wake_reason == -EINTR) {
-      // [FIX signal] Re-verificar que sigue habiendo una señal
-      // entregable. Si fue un wake_up_interruptible_all() por una señal
-      // que ya está bloqueada o ya consumida, reanudamos el wait en
-      // vez de devolver EINTR espurio.
       uint64_t pend = self->proc ? __atomic_load_n(&self->proc->pending_signals,
                                                    __ATOMIC_ACQUIRE)
                                  : 0;
@@ -157,49 +169,29 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
 
       if (deliverable == 0) {
         self->wake_reason = 0;
-        // volver al top del loop: re-add a la wq y seguir durmiendo
       } else if ((deliverable & ~SIG_STOP_CONT_MASK) == 0 && self->proc) {
-        // [FIX JOB] Solo señales de parada o SIGCONT pendientes.
-        //
-        // En Linux, nanosleep/pause/read NO devuelven EINTR por
-        // SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU ni por SIGCONT no-op. La
-        // parada se procesa DENTRO del wait (equivalente a
-        // do_signal_stop() en kernel/signal.c de Linux), y el wait
-        // se reanuda al llegar SIGCONT.
         uint64_t stops = deliverable & ~(1ULL << SIGCONT);
         uint64_t cont_only = deliverable & (1ULL << SIGCONT);
 
         if (stops != 0) {
-          // Hay al menos una señal de parada. Consumirla del pending
-          // y parar el proceso actual. ctzll devuelve el bit más bajo,
-          // que es lo que Linux reporta como stop_signal (una sola).
           __atomic_fetch_and(&self->proc->pending_signals, ~stops,
                              __ATOMIC_ACQ_REL);
           int stop_sig = __builtin_ctzll(stops);
-
-          // Sacar la tarea de la wq para que no aparezca "durmiendo"
-          // en la cola mientras está STOPPED. Al reanudar por SIGCONT
-          // volverá a añadirse en la siguiente iteración.
           if (self->waiting_on == wq) {
             flags = spin_lock_irqsave(&wq->lock);
             wait_queue_remove_locked(wq, self);
             spin_unlock_irqrestore(&wq->lock, flags);
           }
           self->wake_reason = 0;
-
-          process_stop_current(stop_sig); // retorna tras SIGCONT
+          process_stop_current(stop_sig);
           continue;
         }
 
-        // Solo SIGCONT pendiente: era un no-op (el proceso no estaba
-        // stopped). Consumirlo y reanudar el wait sin más.
         __atomic_fetch_and(&self->proc->pending_signals, ~cont_only,
                            __ATOMIC_ACQ_REL);
         self->wake_reason = 0;
         continue;
       } else {
-        // Hay una señal no-parada, no-SIGCONT pendiente: devolver
-        // EINTR como antes.
         if (self->waiting_on == wq) {
           flags = spin_lock_irqsave(&wq->lock);
           wait_queue_remove_locked(wq, self);

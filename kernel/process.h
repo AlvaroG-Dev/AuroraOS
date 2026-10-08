@@ -206,6 +206,18 @@ typedef struct process {
   // aunque el path se haga unlink.
   vfs_node_t *exe_file;
 
+  // [2.3] Campos para /proc/<pid>/stat (formato Linux, 52 campos).
+  // Se rellenan en spawn/execve; en fork se heredan.
+  uint64_t start_tick; // campo 22: starttime (ticks desde boot)
+  uint64_t start_code; // campo 26: inicio de .text
+  uint64_t end_code;   // campo 27: fin de .text
+  uint64_t start_data; // campo 45
+  uint64_t end_data;   // campo 46
+  uint64_t arg_start;  // campo 48: dirección de argv[0] en el stack
+  uint64_t arg_end;    // campo 49
+  uint64_t env_start;  // campo 50
+  uint64_t env_end;    // campo 51
+
 } process_t;
 
 process_t *process_spawn(const char *name, const void *elf_data,

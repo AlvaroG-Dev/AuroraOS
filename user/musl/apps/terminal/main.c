@@ -259,6 +259,7 @@ int main(int argc, char **argv) {
     setenv("LOGNAME", "root", 1);
     setenv("SHELL", "/usr/bin/sh", 1);
     setenv("PWD", "/", 1);
+    setenv("TMPDIR", "/tmp", 1); // ← AÑADIR
   }
 
   int master = open("/dev/ptmx", O_RDWR);

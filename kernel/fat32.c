@@ -17,7 +17,6 @@
 #include "uaccess.h" // EINVAL, EIO, ENOMEM, ENOENT, EISDIR, ENAMETOOLONG,
 #include "wait.h"
 
-
 // EEXIST, ENOTEMPTY, ENOSPC
 #include <stddef.h>
 
@@ -96,8 +95,10 @@ _Static_assert(sizeof(struct fat32_dirent) == 32, "fat32_dirent != 32 bytes");
 // Estado en memoria
 // ===========================================================================
 typedef struct fat32_mutex {
+  uint64_t canary_pre; // 0xFAT32CAFEBABE
   wait_queue_t waiters;
   volatile int locked;
+  uint64_t canary_post; // 0xFAT32DEADBEEF
 } fat32_mutex_t;
 
 static bool fat32_mutex_available(void *arg) {
@@ -105,9 +106,26 @@ static bool fat32_mutex_available(void *arg) {
   return __atomic_load_n(&m->locked, __ATOMIC_ACQUIRE) == 0;
 }
 
+#define FAT32_MUTEX_CANARY_PRE 0xFA732CAFEBABEULL
+#define FAT32_MUTEX_CANARY_POST 0xFA732DEADBEEFULL
+
 static void fat32_mutex_init(fat32_mutex_t *m) {
+  __atomic_store_n(&m->canary_pre, FAT32_MUTEX_CANARY_PRE, __ATOMIC_RELEASE);
   wait_queue_init(&m->waiters);
   __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&m->canary_post, FAT32_MUTEX_CANARY_POST, __ATOMIC_RELEASE);
+}
+
+static inline void fat32_mutex_check_canary(const fat32_mutex_t *m,
+                                            const char *site) {
+  if (__atomic_load_n(&m->canary_pre, __ATOMIC_ACQUIRE) !=
+          FAT32_MUTEX_CANARY_PRE ||
+      __atomic_load_n(&m->canary_post, __ATOMIC_ACQUIRE) !=
+          FAT32_MUTEX_CANARY_POST) {
+    LOG_PANIC("[FAT32] mutex canary roto en %s: pre=0x%llx post=0x%llx", site,
+              (unsigned long long)m->canary_pre,
+              (unsigned long long)m->canary_post);
+  }
 }
 
 static void fat32_mutex_lock(fat32_mutex_t *m) {
@@ -121,10 +139,17 @@ static void fat32_mutex_lock(fat32_mutex_t *m) {
 }
 
 static void fat32_mutex_unlock(fat32_mutex_t *m) {
-  unsigned long flags = spin_lock_irqsave(&m->waiters.lock);
+  // NO tocar m->waiters.lock directamente. wait_queue_t es un tipo
+  // abstracto: su spinlock interno se coge y suelta siempre por las
+  // funciones públicas (wait_queue_add_locked / wake_up_all / ...). El
+  // código anterior hacía spin_lock_irqsave(&m->waiters.lock) a mano y
+  // eso rompía en cuanto el wq quedaba corrupto: el hilo se quedaba
+  // girando para siempre sobre un spinlock que él mismo ya tenía.
+  //
+  // wake_up_all() ya hace su propio spin_lock_irqsave internamente y
+  // su propio unlock, así que aquí solo bajamos el mutex y despertamos.
   __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
-  wake_up_one_locked(&m->waiters);
-  spin_unlock_irqrestore(&m->waiters.lock, flags);
+  wake_up_all(&m->waiters);
 }
 
 typedef struct {

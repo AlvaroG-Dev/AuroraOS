@@ -240,6 +240,7 @@
 #define LINUX_O_TRUNC 0x0200
 #define LINUX_O_APPEND 0x0400
 #define LINUX_O_EXCL 0x0080
+#define LINUX_O_TMPFILE 0x410000
 
 // ---------------------------------------------------------------------------
 // struct stat de Linux x86_64, layout byte a byte.

@@ -234,10 +234,12 @@ int64_t pty_master_read(tty_pty_t *pty, void *buf, size_t size) {
     return 0;
 
   for (;;) {
-    int rc =
-        wait_event_interruptible(&pty->m_read_wq, pty_master_has_data, pty);
+    long rc = wait_event_interruptible_timeout(&pty->m_read_wq,
+                                               pty_master_has_data, pty, 100);
     if (rc < 0)
       return -EINTR;
+    // rc == 0: timeout → volver a iterar. Si nadie despertó por datos,
+    // reintentamos: nunca bloqueamos más de 100 ms.
 
     unsigned long flags = spin_lock_irqsave(&pty->m_lock);
     size_t n = pty->m_count < size ? pty->m_count : size;
@@ -442,6 +444,7 @@ static int pty_install_fd(struct process *proc, int fd_num, tty_pty_t *p,
   n->mode = S_IFCHR | 0620;
   // Major 136 = /dev/pts (Linux). Minor = índice del PTY.
   n->rdev = (136u << 8) | (uint32_t)(p->index & 0xFF);
+  n->ref_count = 1;
 
   file_descriptor_t *fd =
       (file_descriptor_t *)kzalloc(sizeof(file_descriptor_t));
