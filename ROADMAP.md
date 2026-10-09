@@ -202,7 +202,13 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
       Groups, FDSize.
 - [x] **`/proc/<pid>/cgroup`** (`0::/`) y **`/proc/<pid>/ctty`**
       (symlink al tty de control).
-
+- [x] **epoll**: `epoll_create1`/`epoll_ctl`/`epoll_wait` con wake
+      real vía `wait_queue_t::subs`. Sin polling.
+- [x] **eventfd**: `eventfd`/`eventfd2` con `EFD_SEMAPHORE`,
+      `EFD_NONBLOCK`, `EFD_CLOEXEC`.
+- [x] **signalfd**: `signalfd`/`signalfd4` con mask bloqueado al
+      crear y `signalfd_siginfo` de 128 bytes.
+      
 ### 3.4 Shell
 - [x] Parser ANSI CSI en la consola gráfica: SGR (colores + bold), `K`/`J` con sus tres modos, `H`/`D`/`C`/`G`/`P`. Distingue `\033[J` local (post-backspace) de `\033[H\033[J` global (patrón de `clear` de busybox con `TERM=linux`).
 - [x] Historial (busybox `FEATURE_EDITING_HISTORY`, `FEATURE_REVERSE_SEARCH`).
@@ -354,11 +360,12 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 1. **Robustez del kernel + auditoría SMP** — ✅ completada.
 2. **Storage persistente + filesystem** — ✅ cerrado (FAT32 persistente con LFN, rename, buffer cache, tests de corrupción, fsck mínimo).
 3. **Userland/libc/shell** — ⏳ en progreso avanzado. Cerrado:
-   ABI Linux, glibc dinámico, TTY, pipes, PTYs, job control, permisos
-   POSIX, `/etc/passwd`, BusyBox dinámico (~200 applets), futex+clone,
-   `flock`, `dmesg`, `statx`, `/proc` extendido, VMA-per-PT_LOAD,
-   `/etc/ld.so.cache`, bind `/tmp`, interactivas (`less`/`nano`/`ed`).
-   Siguiente: `epoll`+`eventfd`, luego `perl`/`python3`.
+   ABI Linux, glibc dinámico, TTY, pipes, PTYs, job control,
+   permisos POSIX, `/etc/passwd`, BusyBox dinámico (~200 applets),
+   futex+clone, `flock`, `dmesg`, `statx`, `/proc` extendido,
+   VMA-per-PT_LOAD, `/etc/ld.so.cache`, bind `/tmp`, interactivas
+   (`less`/`nano`/`ed`), `epoll`+`eventfd`+`signalfd`. Siguiente:
+   `perl`/`python3` (falta stdlib), `/proc/sys/` y `/proc/meminfo`.
 4. **Escritorio y window manager** — pendiente; el siguiente salto grande es el terminal 2D.
 5. **Networking**
 6. **USB**

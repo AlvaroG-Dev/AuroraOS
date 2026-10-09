@@ -4,8 +4,8 @@
 %define TASK_OFF_RSP        0x00
 %define TASK_OFF_FPU_STATE  0x18
 %define TASK_OFF_CR3        0x20
-%define TASK_OFF_ON_CPU     0x78C
-%define TASK_OFF_FS_BASE    0x7B8
+%define TASK_OFF_ON_CPU     0x794
+%define TASK_OFF_FS_BASE    0x7C0
 
 %define MSR_FS_BASE 0xC0000100
 

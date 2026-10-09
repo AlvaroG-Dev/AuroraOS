@@ -14,10 +14,20 @@ typedef struct wait_queue_entry {
   struct wait_queue_entry *next;
 } wait_queue_entry_t;
 
+struct wait_queue_sub {
+  struct wait_queue *target;
+  struct wait_queue_sub *next;
+};
+typedef struct wait_queue_sub wait_queue_sub_t;
+;
+
 typedef struct wait_queue {
   spinlock_t lock;
   wait_queue_entry_t *head;
   int nr_waiting;
+  // [epoll] Wqs suscritas a esta. Cuando esta wq se despierta, también
+  // se despiertan todas las suscritas. Un solo nivel (no recursivo).
+  struct wait_queue_sub *subs;
 } wait_queue_t;
 
 #define WAIT_QUEUE_INIT(name)                                                  \
@@ -58,5 +68,10 @@ void wait_queue_add_locked(wait_queue_t *wq, struct task *t);
 
 // [futex] Quita t de wq. wq->lock debe estar cogido.
 void wait_queue_remove_locked(wait_queue_t *wq, struct task *t);
+
+// [epoll] Suscribe `sub` a `target`: cuando `target` se despierte,
+// `sub` también. Devuelve 0 o negativo. `target != sub`.
+int wait_queue_subscribe(wait_queue_t *target, wait_queue_t *sub);
+void wait_queue_unsubscribe(wait_queue_t *target, wait_queue_t *sub);
 
 #endif

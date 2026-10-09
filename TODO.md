@@ -275,6 +275,55 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
       `wait_common` (Linux lo hace; evita bucles `read → EINTR` si
       una señal con SIG_IGN queda pendiente).
 - [ ] Quitar el `[SIG-DBG]` temporal de `signal_check_pending`.
+
+### Bloque 10 — epoll + eventfd + signalfd ✅ CERRADO
+
+10.1 `epoll_create` (213) / `epoll_create1` (291) ✅
+    `kernel/epoll.c` nuevo. Instance con `wait_queue_t` interna y
+    lista de entries.
+
+10.2 `epoll_ctl` (233) ✅
+    ADD/MOD/DEL. En ADD suscribe `ep->wq` a la `poll_wq` natural del
+    fd observado (o `fd->read_wq` como fallback). En DEL/close
+    desuscribe.
+
+10.3 `epoll_wait` (232) / `epoll_pwait` (281) / `epoll_pwait2` (441) ✅
+    Wake real vía cascada de `wait_queue_t::subs`: cuando el fd
+    observado se vuelve listo, su wq cascada a `ep->wq`, que
+    despierta al waiter. Sin polling. Latencia del test: 230 ms
+    con `usleep(200)` en el writer → wake inmediato.
+
+10.4 `eventfd` (284) / `eventfd2` (290) ✅
+    Contador 64-bit, EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC.
+    Expone `poll_wq` para que epoll se suscriba.
+
+10.5 `signalfd` (282) / `signalfd4` (289) ✅
+    Mask bloqueado en el proceso al crear. read() consume
+    pending_signals y devuelve `struct signalfd_siginfo` (128 B).
+    `signalfd_notify()` despierta los signalfds del proceso cuando
+    se encola una señal.
+
+10.6 Infraestructura: `wait_queue_t::subs` ✅
+    Nuevo campo (lista de suscriptores). `wake_up_all_locked` y
+    `wake_up_one_locked` cascadan a los suscriptores. Un solo nivel
+    (no recursivo), suficiente para epoll.
+
+10.7 Fix SMAP en ops de nodo ✅
+    `eventfd_read_op` / `eventfd_write_op` / `signalfd_read_op`
+    hacían `copy_to_user`/`copy_from_user` sobre el buffer que el
+    VFS ya había copiado a kernel. Con SMAP activo, `access_ok`
+    falla sobre direcciones del kernel y devuelve `-EFAULT`.
+    El log lo cazó como `SYSCALL-ERR num=1 ret=-14`. Fix: `memcpy`
+    puro, que es lo que hacen el resto de los nodos
+    (`pty_master_write_op`, `tty_*`).
+
+**Deuda conocida (no bloquea el cierre):**
+- [ ] `EPOLLET` (edge-triggered) — se acepta el flag, se ignora.
+- [ ] `EPOLLONESHOT` / `EPOLLEXCLUSIVE` — ignorados.
+- [ ] `EPOLLWAKEUP` — ignorado.
+- [ ] `epoll_pwait` no es atómico (Linux lo es). Ventana de race
+      microscópica entre cambio de máscara y entrada en wait.
+
 ---
 
 # Estado global
@@ -297,6 +346,7 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 | 7 futex+clone | ✅ |
 | 8 SMP + syscalls Linux | ✅ |
 | 9 Interactivas + statx + /proc extendido + fixes FAT32 | ✅ |
+| 10 epoll + eventfd + signalfd | ✅ |
 
 **Lo que queda del TODO**:
 - 5.4 (getty) — opcional, ya cubierto por init.

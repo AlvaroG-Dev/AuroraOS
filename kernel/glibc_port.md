@@ -32,7 +32,9 @@ que colgaban el sistema durante los tests de `truncate`.
   `/proc/<pid>/status` extendido).
 - **`pgrep` / `pkill` / `ps -l`** (con `/proc/<pid>/{cgroup,ctty}`).
 - **`lsof -p N`** (con `exe_path` real y `<pid>/exe` stat-eable).
-
+- **`pgrep` / `pkill` / `ps -l`** con wake real, sin caer a polling
+  interno.
+  
 ### Fixes de kernel acumulados
 
 De la sesión grande original:
@@ -179,26 +181,28 @@ durante el fix de FAT32: **filtrar señales ignoradas en
 `signal_check_pending` y en `wait_common`** (Linux lo hace; no
 manifestado en la práctica, pero correcto).
 
-### 3.9 `epoll` — **SIGUIENTE BLOQUE**
+### 3.9 `epoll` — ✅ CERRADO
 
-Sin `epoll_create1`/`epoll_ctl`/`epoll_wait`, `tmux`, `screen`,
-`python3` con asyncio, `libuv` no van. También es lo que hace que
-`pgrep` (syscall 213) emita un SYSCALL-GAP y caiga a polling.
+`epoll_create1`/`epoll_ctl`/`epoll_wait` + `epoll_pwait`/`epoll_pwait2`
+implementados en `kernel/epoll.c`. Wake real vía cascada de wait
+queues (`wait_queue_t::subs`): epoll subscribe su wq a la `poll_wq`
+natural de cada fd observado. Latencia de wakeup medida en 230 ms
+con `usleep(200)` en el writer → wake inmediato.
 
-Es un proyecto de ~4 h. Estructura:
-- `epoll_create1` (291): instancia con `wait_queue_t` interna.
-- `epoll_ctl` (233): ADD/MOD/DEL de fds observados.
-- `epoll_wait` (232): bloquea hasta que alguno esté listo.
-- Reutiliza `vfs_node_poll` / `poll_wq`.
+Sin soporte de `EPOLLET`, `EPOLLONESHOT`, `EPOLLEXCLUSIVE` (flags
+aceptados, ignorados).
 
-### 3.10 `eventfd` / `timerfd`
+### 3.10 `eventfd` — ✅ CERRADO
 
-Pendiente. `eventfd` son ~50 líneas. Lo pide `libuv`, `glib`,
-`systemd`.
+`eventfd` / `eventfd2` con `EFD_SEMAPHORE` / `EFD_NONBLOCK` /
+`EFD_CLOEXEC`. Expone `poll_wq` para epoll.
 
-### 3.11 `signalfd4`
+### 3.11 `signalfd` — ✅ CERRADO
 
-Pendiente. Media hora.
+`signalfd` / `signalfd4`. Mask bloqueado en el proceso al crear.
+`signalfd_notify()` se llama desde `process_signal_pid_ex`, `k_kill`
+y `process_signal_pgrp` cuando se encola una señal.
+`signalfd_cleanup()` desbloquea el mask al salir el proceso.
 
 ---
 
@@ -294,22 +298,20 @@ Sin cambios. Aceptable.
 
 | # | Item | Esfuerzo | Prioridad |
 |---|---|---|---|
-| 1 | `epoll` + `eventfd` | 4 h | **Alta** |
-| 2 | Probar `perl` | 30 min | Alta |
-| 3 | `signalfd` | 1 h | Media |
-| 4 | `/proc/sys/` más completo | 2 h | Media |
-| 5 | `/proc/meminfo` completo | 1 h | Media |
-| 6 | Filtrar señales ignoradas en wait/signal_check (deuda latente) | 1 h | Media |
-| 7 | Probar `python3` | 2-4 h | Alta |
-| 8 | `clone3` + `rseq` | 1 día | Media |
-| 9 | Red loopback | 2 días | Alta |
-| 10 | Driver de red (`e1000`) | 3 días | Alta |
-| 11 | TCP funcional | 1 semana | Alta |
-| 12 | Usuarios reales (`setuid` irreversible) | 1 día | Media |
-| 13 | Portar `git` | 1 semana | Media |
-| 14 | vDSO | 2 días | Baja |
-| 15 | `ptrace` (subset) | 3 días | Baja |
-| 16 | Portar `gcc` | 1 mes+ | Baja |
+| 1 | Probar `perl` | 30 min | **Alta** |
+| 2 | Probar `python3` (falta stdlib) | 2-4 h | Alta |
+| 3 | `/proc/sys/` más completo | 2 h | Media |
+| 4 | `/proc/meminfo` completo | 1 h | Media |
+| 5 | Filtrar señales ignoradas en wait/signal_check (deuda latente) | 1 h | Media |
+| 6 | `clone3` + `rseq` | 1 día | Media |
+| 7 | Red loopback | 2 días | Alta |
+| 8 | Driver de red (`e1000`) | 3 días | Alta |
+| 9 | TCP funcional | 1 semana | Alta |
+| 10 | Usuarios reales (`setuid` irreversible) | 1 día | Media |
+| 11 | Portar `git` | 1 semana | Media |
+| 12 | vDSO | 2 días | Baja |
+| 13 | `ptrace` (subset) | 3 días | Baja |
+| 14 | Portar `gcc` | 1 mes+ | Baja |
 
 ---
 
