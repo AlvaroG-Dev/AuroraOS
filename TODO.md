@@ -337,6 +337,39 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
     Sin `SYSCALL-ERR num=13` en el arranque tras rebuild completo.
     (El header no se recompilaba por falta de dependency tracking;
     ver Bloque 8.)
+
+### Bloque 12 — Python 3.12 + memfd + fixes de kernel ✅ CERRADO
+
+12.1 memfd_create (319) real ✅
+    Backed por kmalloc. Read/write posicionales, truncate, mmap
+    file-backed, F_ADD_SEALS/F_GET_SEALS. Necesario para bytecode
+    caches de Python.
+
+12.2 /proc/meminfo completo ✅
+    ~30 claves adicionales que glibc/procps/Python esperan.
+
+12.3 Fix sys_mmap (bug de debug) ✅
+    Sanity check mal ubicado leía `base` sin inicializar y disparaba
+    #PF en modo kernel con CR2 fuera de la ventana física. Bug
+    latente desde que se añadió; Python fue el primer programa en
+    ejercerlo por hacer muchos mmap anónimos sucesivos.
+
+12.4 Quitar [SIG-DBG] ✅
+
+12.5 scripts/fetch-python-stdlib.sh ✅
+
+12.6 Test test_memfd ✅
+
+**Deuda latente identificada (no bloquea):**
+- [ ] `sigaltstack` (131) → -ENOSYS. Python lo usa vía faulthandler.
+- [ ] `rt_sigaction` → -EINVAL en 3 llamadas consecutivas al arrancar
+      Python. Loguear `sig` y `sigsetsize` cuando devuelve EINVAL para
+      diagnosticar.
+- [ ] `ioctl(TCGETS)` sobre PTY → -ENOTTY. Revisar tty_ioctl.
+- [ ] Compilar stdlib a .pyc en build time.
+- [ ] Limpiar kernel_pml4[0] heredado del bootloader UEFI (excepto
+      trampoline SMP en 0x7000-0x9000). Fue un cómplice del bug 12.3.
+      
 ---
 
 # Estado global

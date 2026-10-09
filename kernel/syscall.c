@@ -2188,6 +2188,97 @@ static int64_t k_symlinkat(uint64_t target_ptr, uint64_t newdfd,
   return k_symlink(target_ptr, linkpath_ptr, 0, 0, 0);
 }
 
+// ---------- sigaltstack (131) ----------
+//
+// int sigaltstack(const stack_t *ss, stack_t *old_ss);
+//
+// struct stack_t Linux x86_64 (24 bytes):
+//   void  *ss_sp    (8)
+//   int    ss_flags (4)
+//   <4 bytes pad>
+//   size_t ss_size  (8)
+//
+// Flags:
+//   SS_ONSTACK    (1)      — solo lo pone el kernel. Rechazar del user.
+//   SS_DISABLE    (2)      — desactivar.
+//   SS_AUTODISARM (1<<31)  — desactivar automáticamente al entrar al handler.
+//
+// Aurora no usa la pila alternativa al entregar señales todavía;
+// solo persistimos el valor para que faulthandler y Python no se
+// quejen. Cuando se implemente SA_ONSTACK real, la lógica va en
+// signal.c:deliver() (construir el frame en proc->sigaltstack_sp+size
+// en vez de regs->rsp).
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+#define SS_AUTODISARM (1u << 31)
+#define MINSIGSTKSZ 2048
+
+struct k_stack_t {
+  uint64_t ss_sp;
+  int32_t ss_flags;
+  int32_t _pad;
+  uint64_t ss_size;
+};
+_Static_assert(sizeof(struct k_stack_t) == 24, "stack_t layout x86_64");
+
+static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
+                             uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+
+  // 1) Devolver estado actual (antes de tocar nada).
+  if (oss_uptr) {
+    if (!access_ok((void *)oss_uptr, sizeof(struct k_stack_t)))
+      return -EFAULT;
+    struct k_stack_t old = {
+        .ss_sp = proc->sigaltstack_sp,
+        .ss_flags = proc->sigaltstack_flags,
+        ._pad = 0,
+        .ss_size = proc->sigaltstack_size,
+    };
+    if (copy_to_user((void *)oss_uptr, &old, sizeof(old)) < 0)
+      return -EFAULT;
+  }
+
+  if (!ss_uptr)
+    return 0;
+
+  // 2) Aplicar nuevo valor.
+  if (!access_ok((void *)ss_uptr, sizeof(struct k_stack_t)))
+    return -EFAULT;
+  struct k_stack_t nss;
+  if (copy_from_user(&nss, (void *)ss_uptr, sizeof(nss)) < 0)
+    return -EFAULT;
+
+  // SS_ONSTACK no es user-settable.
+  if (nss.ss_flags & SS_ONSTACK)
+    return -EPERM;
+
+  // Solo SS_DISABLE y SS_AUTODISARM son válidos del user.
+  if (nss.ss_flags & ~(SS_DISABLE | (int32_t)SS_AUTODISARM))
+    return -EINVAL;
+
+  if (nss.ss_flags & SS_DISABLE) {
+    // Linux exige ss_size == 0 con SS_DISABLE.
+    if (nss.ss_size != 0 || nss.ss_sp != 0)
+      return -EINVAL;
+    proc->sigaltstack_sp = 0;
+    proc->sigaltstack_size = 0;
+    proc->sigaltstack_flags = SS_DISABLE;
+  } else {
+    if (nss.ss_size < MINSIGSTKSZ)
+      return -ENOMEM;
+    proc->sigaltstack_sp = nss.ss_sp;
+    proc->sigaltstack_size = nss.ss_size;
+    proc->sigaltstack_flags = nss.ss_flags & (int32_t)SS_AUTODISARM;
+  }
+  return 0;
+}
+
 // ---------- tkill ----------
 //
 // En Linux, tkill(tid, sig) envía a un thread concreto. Aurora es
@@ -5321,6 +5412,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETPGRP] = {k_getpgrp, "getpgrp"},
     [SYS_GETSID] = {k_getsid, "getsid"},
     [SYS_SETSID] = {k_setsid, "setsid"},
+    [SYS_SIGALTSTACK] = {k_sigaltstack, "sigaltstack"}, // 131
     [SYS_UMASK] = {k_umask, "umask"},
     [SYS_SETUID] = {k_setuid, "setuid"},
     [SYS_SETGID] = {k_setgid, "setgid"},

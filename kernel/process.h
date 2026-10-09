@@ -169,6 +169,21 @@ typedef struct process {
   uint64_t blocked_signals;
   k_sigaction_t sigactions[SIG_MAX];
 
+  // [SIGALTSTACK] Pila alternativa para handlers con SA_ONSTACK.
+  // Solo guardamos el valor; el kernel todavía no la usa al entregar
+  // señales (para eso hay que tocar deliver() en signal.c y dispatch
+  // el SP al construir el frame). faulthandler la consulta; con que
+  // devolvamos 0 y persistamos el valor es suficiente por ahora.
+  //
+  //   sigaltstack_sp     ss_sp del user
+  //   sigaltstack_size   ss_size
+  //   sigaltstack_flags  SS_DISABLE (2) | SS_AUTODISARM (1<<31)
+  //                      o 0 si está activa.
+  uint64_t sigaltstack_sp;
+  uint64_t sigaltstack_size;
+  int32_t sigaltstack_flags;
+  int32_t _sigaltstack_pad;
+
   // [musl] FS segment base (TLS). Se guarda también en task_t para que
   // switch.asm lo restaure al cambiar de tarea.
   uint64_t fs_base;

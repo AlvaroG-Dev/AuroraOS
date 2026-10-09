@@ -37,6 +37,9 @@ que colgaban el sistema durante los tests de `truncate`.
 - **perl 5.38** dinámico (glibc), con `Data::Dumper`, `Encode`,
   `POSIX`, `Unicode::*`, `Time::HiRes` y demás módulos XS cargando
   desde `/usr/lib/x86_64-linux-gnu/perl/5.38.2/`.
+- **python3 3.12.3** con imports del stdlib (`sys`, `json`, `re`,
+  `hashlib`, `os`, `time`) funcionando end-to-end. Carga de extensiones
+  C vía `lib-dynload/*.so` operativa.
 
 ### Fixes de kernel acumulados
 
@@ -244,12 +247,18 @@ Sin cambios.
 
 ## 5. Objetivos grandes (un mes+)
 
-### 5.1 Portar `python3`
+### 5.1 Portar `python3` ✅ (intérprete básico operativo)
 
-Es el siguiente salto grande. Depende de `epoll`, `eventfd`,
-`clone3`, `rseq`, `signalfd4`, `memfd_create`. **`perl` ya está
-operativo** (ver §1), así que el siguiente paso natural es
-`python3`.
+**3.12.3 funcional.** Ejecuta scripts, importa stdlib, compila bytecode
+al vuelo, carga extensiones C. Pendiente afinar:
+
+- `sigaltstack` (131) — usado por `faulthandler`.
+- `rt_sigaction` devuelve `-EINVAL` en 3 llamadas al arrancar (probable
+  bug en la comprobación de `sigsetsize` o en la entrega a userland).
+  No bloquea pero ensucia el log.
+- `ioctl(TCGETS)` sobre PTY devuelve `-ENOTTY` al cargar `encodings/utf_8`.
+  Tampoco bloquea pero convendría revisar `tty_ioctl`.
+- Compilar `.pyc` con `compileall` en build time para acelerar arranque.
 
 ### 5.2 Portar `git`
 

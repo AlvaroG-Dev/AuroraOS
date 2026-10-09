@@ -295,6 +295,11 @@ static void process_init_signals(process_t *proc) {
     proc->sigactions[i].restorer = NULL;
     proc->sigactions[i].mask = 0;
   }
+  // [SIGALTSTACK] Estado inicial: sin pila alternativa (SS_DISABLE=2).
+  proc->sigaltstack_sp = 0;
+  proc->sigaltstack_size = 0;
+  proc->sigaltstack_flags = 2;
+  proc->_sigaltstack_pad = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1989,6 +1994,12 @@ int64_t sys_fork(void) {
     child->sigactions[i] = parent->sigactions[i];
   child->blocked_signals = parent->blocked_signals;
   child->pending_signals = 0;
+  // [SIGALTSTACK] POSIX: el altstack se hereda a través de fork.
+  // execve NO lo resetea (solo resetea handlers). Por eso no hay
+  // nada que hacer en process_execve_prepare.
+  child->sigaltstack_sp = parent->sigaltstack_sp;
+  child->sigaltstack_size = parent->sigaltstack_size;
+  child->sigaltstack_flags = parent->sigaltstack_flags;
 
   child->uid = parent->uid;
   child->euid = parent->euid;

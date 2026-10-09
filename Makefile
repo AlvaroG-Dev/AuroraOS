@@ -4,7 +4,7 @@
         run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso \
         run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci \
-        run-smp-kvm-ahci-3disk
+        run-smp-kvm-ahci-3disk python-stdlib
 
 all: image
 
@@ -57,9 +57,34 @@ elf_malformed: user
 	fi
 
 # ---------------------------------------------------------------------------
+# Python stdlib: copia el stdlib del host a sysroot/usr/lib/python3.X/ y
+# precompila .py → .pyc.
+#
+# - rsync -a copia solo lo que falta.
+# - compileall sin -f salta los .pyc al día (si le pones -f recompila
+#   siempre y tarda 10-15 s por cada make image).
+#
+# Con el stdlib copiado, python3 arranca en ~200 ms en lugar de ~2 s:
+# no compila bytecode en runtime, y no intenta escribir __pycache__ en
+# el rootfs RO (que fallaba con EROFS y ensuciaba el serial con
+# VFS-OPEN-FAIL en cascada).
+#
+# Este target es "siempre corre" (no tiene output file). Si todo está
+# al día, tarda ~100 ms y el tar se regenera igualmente. Si no, copia
+# y compila lo que falte.
+# ---------------------------------------------------------------------------
+python-stdlib:
+	@if [ -x scripts/fetch-python-stdlib.sh ]; then \
+		echo "[Makefile] Fetch Python stdlib..."; \
+		scripts/fetch-python-stdlib.sh; \
+	else \
+		echo "[Makefile]   (scripts/fetch-python-stdlib.sh no existe, saltando)"; \
+	fi
+
+# ---------------------------------------------------------------------------
 # initrd.tar: construye el tarfs desde sysroot/.
 # ---------------------------------------------------------------------------
-initrd.tar: sysroot user elf_malformed
+initrd.tar: sysroot user elf_malformed python-stdlib
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \

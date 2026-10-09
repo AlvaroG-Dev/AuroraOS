@@ -6,7 +6,6 @@
 #include "syscall.h"
 #include "uaccess.h"
 
-
 extern registers_t *syscall_current_regs(void);
 
 sig_action_t signal_default_action(int sig) {
@@ -295,12 +294,21 @@ int signal_deliver_from_exception(int sig, registers_t *regs) {
 int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,
                        uint64_t sigsetsize, uint64_t _) {
   (void)_;
-  if (sig < 1 || sig >= SIG_MAX)
+  if (sig < 1 || sig >= SIG_MAX) {
+    LOG_TRACE("[RT_SIGACTION] EINVAL: sig=%lu fuera de [1,%d)",
+              (unsigned long)sig, SIG_MAX);
     return -EINVAL;
-  if (sig == SIGKILL || sig == SIGSTOP)
+  }
+  if (sig == SIGKILL || sig == SIGSTOP) {
+    LOG_TRACE("[RT_SIGACTION] EINVAL: sig=%lu no capturable",
+              (unsigned long)sig);
     return -EINVAL;
-  if (sigsetsize != 8)
+  }
+  if (sigsetsize != 8) {
+    LOG_TRACE("[RT_SIGACTION] EINVAL: sig=%lu sigsetsize=%lu != 8",
+              (unsigned long)sig, (unsigned long)sigsetsize);
     return -EINVAL;
+  }
 
   process_t *proc = process_current();
   if (!proc)
