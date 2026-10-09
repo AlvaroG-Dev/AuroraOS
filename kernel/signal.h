@@ -36,7 +36,7 @@
 #define SIGPWR 30
 #define SIGSYS 31
 
-#define SIG_MAX 32
+#define SIG_MAX 64
 
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
