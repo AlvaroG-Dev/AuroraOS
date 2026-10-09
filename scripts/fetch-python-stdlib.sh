@@ -69,6 +69,22 @@ rsync -a --delete \
   --exclude 'site-packages/' \
   "$SRC/" "$DST/"
 
+# Precompilar .py → .pyc. Reduce el arranque de Python ~5x y evita que
+# Python intente escribir __pycache__ en el rootfs RO.
+# Sin -f: compileall respeta mtimes y salta los .pyc ya actualizados,
+# así que repetir make image no recompila nada.
+echo
+echo "Precompilando stdlib a .pyc (unchecked-hash)..."
+"$HOST_PY" -m compileall \
+    --invalidation-mode unchecked-hash \
+    -q -j 0 \
+    "$DST" || {
+    echo "!! compileall falló" >&2
+    exit 1
+}
+PYC_COUNT="$(find "$DST" -name '*.pyc' | wc -l)"
+echo "  .pyc generados: $PYC_COUNT"
+
 # Resumen de tamaño.
 echo
 echo "Tamaño copiado:"

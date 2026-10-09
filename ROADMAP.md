@@ -272,7 +272,8 @@ Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bas
 - [x] VMA-per-PT_LOAD: `maps`/`smaps` con permisos reales por segmento.
 - [x] `perl 5.38` dinámico ejecutándose (con `Data::Dumper`,
       `Encode`, `POSIX`, `Unicode::*`).
-- [ ] `python3`.
+- [x] `python3 3.12.3` (intérprete básico + stdlib + imports C).
+- [ ] `git` (requiere clone3 más completo y sockets locales).
 
 ### 3.7 Ejecutar ejecutables Windows (PE/COFF) — expectativas realistas
 *(sin cambios, sigue pendiente)*
