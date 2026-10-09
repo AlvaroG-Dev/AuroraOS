@@ -450,7 +450,8 @@ static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
       size_t bytes = (size_t)run * FAT32_BCACHE_SECTOR;
       uint8_t *prefetch = (uint8_t *)kmalloc(bytes);
       if (prefetch) {
-        if (bdev_read(fs->bdev, current_lba, run, prefetch) == 0) {
+        int read_rc = bdev_read(fs->bdev, current_lba, run, prefetch);
+        if (read_rc == 0) {
           uint32_t cached = 0;
           for (; cached < run; cached++) {
             s = bcache_evict(fs);
@@ -481,11 +482,13 @@ static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
           continue;
         }
         kfree(prefetch);
+        // Una E/S fallida debe propagarse: reintentar con un solo sector
+        // podría convertir un error real en éxito y ocultarlo al llamante.
+        return read_rc;
       }
     }
 
-    // Fallback para lecturas aisladas, falta de memoria o drivers que no
-    // acepten una transferencia agrupada.
+    // Fallback solo cuando no se pudo reservar el buffer de prefetch.
     c->misses++;
     s = bcache_evict(fs);
     if (!s)
