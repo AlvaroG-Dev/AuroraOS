@@ -1,8 +1,10 @@
 // kernel/wait.c
 #include "wait.h"
+#include "heap.h" // kmalloc, kfree
 #include "klog.h"
 #include "process.h"
 #include "sched.h"
+#include "uaccess.h" // EINVAL, ENOMEM, etc.
 #include <stddef.h>
 
 #define EINTR 4
@@ -24,6 +26,7 @@ void wait_queue_init(wait_queue_t *wq) {
   spin_init(&wq->lock);
   wq->head = NULL;
   wq->nr_waiting = 0;
+  wq->subs = NULL;
 }
 
 // --- helpers, llamar con wq->lock cogido ---
@@ -234,11 +237,11 @@ void wait_event(wait_queue_t *wq, bool (*cond)(void *), void *arg) {
 // ---------------------------------------------------------------------------
 // wake_up_all_locked y amigos (sin cambios)
 // ---------------------------------------------------------------------------
-void wake_up_all_locked(wait_queue_t *wq) {
+// Despierta todos los waiters de `wq`. wq->lock debe estar cogido.
+static void wake_all_waiters_locked(wait_queue_t *wq) {
   wait_queue_entry_t *e = wq->head;
   wq->head = NULL;
   wq->nr_waiting = 0;
-
   while (e) {
     wait_queue_entry_t *next = e->next;
     task_t *t = e->task;
@@ -249,6 +252,19 @@ void wake_up_all_locked(wait_queue_t *wq) {
     e->next = NULL;
     task_put(t);
     e = next;
+  }
+}
+
+void wake_up_all_locked(wait_queue_t *wq) {
+  wake_all_waiters_locked(wq);
+  // [epoll] Cascada a los suscriptores. Un nivel: los subscribers
+  // (ep->wq) no tienen subs propios.
+  for (wait_queue_sub_t *s = wq->subs; s; s = s->next) {
+    if (s->target && s->target != wq) {
+      unsigned long f = spin_lock_irqsave(&s->target->lock);
+      wake_all_waiters_locked(s->target);
+      spin_unlock_irqrestore(&s->target->lock, f);
+    }
   }
 }
 
@@ -286,20 +302,28 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
 }
 
 void wake_up_one_locked(wait_queue_t *wq) {
-  if (!wq->head)
-    return;
-  wait_queue_entry_t *e = wq->head;
-  wq->head = e->next;
-  wq->nr_waiting--;
-
-  task_t *t = e->task;
-  t->waiting_on = NULL;
-  t->wake_reason = 0;
-  e->task = NULL;
-  e->next = NULL;
-  sched_make_ready(t);
-  task_put(t);
+  if (wq->head) {
+    wait_queue_entry_t *e = wq->head;
+    wq->head = e->next;
+    wq->nr_waiting--;
+    task_t *t = e->task;
+    t->waiting_on = NULL;
+    t->wake_reason = 0;
+    e->task = NULL;
+    e->next = NULL;
+    sched_make_ready(t);
+    task_put(t);
+  }
+  // [epoll] Cascada a suscriptores, incluso si no había waiter directo.
+  for (wait_queue_sub_t *s = wq->subs; s; s = s->next) {
+    if (s->target && s->target != wq) {
+      unsigned long f = spin_lock_irqsave(&s->target->lock);
+      wake_all_waiters_locked(s->target);
+      spin_unlock_irqrestore(&s->target->lock, f);
+    }
+  }
 }
+
 void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
                                   uint64_t wait_seq) {
   if (!wq || !task)
@@ -391,4 +415,35 @@ void wait_queue_interrupt_task(task_t *task) {
     }
   }
   spin_unlock_irqrestore(&wq->lock, flags);
+}
+
+int wait_queue_subscribe(wait_queue_t *target, wait_queue_t *sub) {
+  if (!target || !sub || target == sub)
+    return -EINVAL;
+  wait_queue_sub_t *s = (wait_queue_sub_t *)kmalloc(sizeof(*s));
+  if (!s)
+    return -ENOMEM;
+  s->target = sub;
+  unsigned long flags = spin_lock_irqsave(&target->lock);
+  s->next = target->subs;
+  target->subs = s;
+  spin_unlock_irqrestore(&target->lock, flags);
+  return 0;
+}
+
+void wait_queue_unsubscribe(wait_queue_t *target, wait_queue_t *sub) {
+  if (!target || !sub)
+    return;
+  unsigned long flags = spin_lock_irqsave(&target->lock);
+  wait_queue_sub_t **pp = &target->subs;
+  while (*pp) {
+    if ((*pp)->target == sub) {
+      wait_queue_sub_t *v = *pp;
+      *pp = v->next;
+      kfree(v);
+      break;
+    }
+    pp = &(*pp)->next;
+  }
+  spin_unlock_irqrestore(&target->lock, flags);
 }

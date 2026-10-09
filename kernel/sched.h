@@ -184,7 +184,7 @@ void __sched_canary_check(void);
 _Static_assert(offsetof(task_t, rsp) == 0x00, "switch.asm: rsp @ 0x00");
 _Static_assert(offsetof(task_t, fpu_state) == 0x18, "switch.asm");
 _Static_assert(offsetof(task_t, cr3) == 0x20, "switch.asm");
-_Static_assert(offsetof(task_t, on_cpu) == 0x78C, "switch.asm TASK_OFF_ON_CPU");
+_Static_assert(offsetof(task_t, on_cpu) == 0x794, "switch.asm TASK_OFF_ON_CPU");
 _Static_assert(offsetof(spinlock_t, locked) == 0 &&
                    sizeof(((spinlock_t *)0)->locked) == 4,
                "switch.asm libera el lock con mov dword [rdx], 0");
@@ -201,4 +201,4 @@ _Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) +
                        15 <=
                    sizeof(task_t),
                "fpu_raw demasiado cerca del final de task_t");
-_Static_assert(offsetof(task_t, fs_base) == 0x7B8, "switch.asm: fs_base");
+_Static_assert(offsetof(task_t, fs_base) == 0x7C0, "switch.asm: fs_base");

@@ -2,8 +2,10 @@
 #include "klog.h"
 #include "process.h"
 #include "sched.h"
+#include "signalfd.h"
 #include "syscall.h"
 #include "uaccess.h"
+
 
 extern registers_t *syscall_current_regs(void);
 

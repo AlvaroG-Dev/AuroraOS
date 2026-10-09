@@ -7,6 +7,7 @@
 
 #include "syscall.h"
 #include "cpu.h"
+#include "epoll.h"
 #include "fat32.h"
 #include "futex.h"
 #include "gdt.h"
@@ -23,6 +24,7 @@
 #include "sched.h"
 #include "serial.h"
 #include "signal.h"
+#include "signalfd.h"
 #include "spinlock.h"
 #include "string.h"
 #include "swap.h"
@@ -1692,6 +1694,7 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     uint64_t mask = signal_filter_ignored(target, 1ULL << ksig);
     if (mask) {
       __atomic_fetch_or(&target->pending_signals, mask, __ATOMIC_RELEASE);
+      signalfd_notify(target, mask);
       wait_queue_interrupt_task(t);
     }
     task_put(t);
@@ -5366,6 +5369,14 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SETDOMAINNAME] = {k_setdomainname, "setdomainname"},
     [SYS_WAITID] = {k_waitid, "waitid"},
     [SYS_FUTEX] = {k_futex, "futex"},
+    [SYS_EPOLL_WAIT] = {k_epoll_wait, "epoll_wait"},
+    [SYS_EPOLL_CTL] = {k_epoll_ctl, "epoll_ctl"},
+    [SYS_EPOLL_CREATE] = {k_epoll_create, "epoll_create"},
+    [SYS_EPOLL_CREATE1] = {k_epoll_create1, "epoll_create1"},
+    [SYS_EPOLL_PWAIT] = {k_epoll_pwait, "epoll_pwait"},
+    [SYS_EPOLL_PWAIT2] = {k_epoll_pwait2, "epoll_pwait2"},
+    [SYS_EVENTFD] = {k_eventfd, "eventfd"},
+    [SYS_EVENTFD2] = {k_eventfd2, "eventfd2"},
     [SYS_SYNC] = {k_sync, "sync"},
     [SYS_REBOOT] = {k_reboot, "reboot"},
     [SYS_SWAPON] = {k_swapon, "swapon"},
@@ -5382,6 +5393,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CLOCK_NANOSLEEP] = {k_clock_nanosleep, "clock_nanosleep"}, // 230
     [SYS_FADVISE64] = {k_fadvise64, "fadvise64"},                   // 291
     [SYS_TGKILL] = {k_tgkill, "tgkill"},                            // 234
+    [SYS_SIGNALFD] = {k_signalfd, "signalfd"},
+    [SYS_SIGNALFD4] = {k_signalfd4, "signalfd4"},
     [SYS_SETXATTR] = {k_xattr_notsup, "setxattr"},
     [SYS_LSETXATTR] = {k_xattr_notsup, "lsetxattr"},
     [SYS_FSETXATTR] = {k_xattr_notsup, "fsetxattr"},

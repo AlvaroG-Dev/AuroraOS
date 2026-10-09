@@ -13,6 +13,7 @@
 #include "pty.h"
 #include "sched.h"
 #include "serial.h"
+#include "signalfd.h"
 #include "string.h"
 #include "swap.h"
 #include "tarfs.h"
@@ -1283,8 +1284,10 @@ task_t *process_signal_pid_ex(uint32_t pid, uint64_t signal_mask,
         LOG_DEBUG("[SIG] pid=%u: descartadas señales ignoradas 0x%lx", p->pid,
                   (unsigned long)(before & ~signal_mask));
 
-      if (signal_mask)
+      if (signal_mask) {
         __atomic_fetch_or(&p->pending_signals, signal_mask, __ATOMIC_RELEASE);
+        signalfd_notify(p, signal_mask);
+      }
       spin_unlock_irqrestore(&process_lock, flags);
 
       if (need_interrupt)
@@ -1539,6 +1542,8 @@ void process_exit(process_t *proc, int exit_code) {
     vfs_node_free(proc->exe_file);
     proc->exe_file = NULL;
   }
+
+  signalfd_cleanup(proc);
 
   process_clear_envp(proc);
   process_clear_argv(proc);
@@ -2472,8 +2477,10 @@ int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
         LOG_DEBUG("[SIG] pgrp=%u pid=%u: descartadas señales ignoradas 0x%lx",
                   pgid_arg, p->pid, (unsigned long)(before & ~mask));
 
-      if (mask)
+      if (mask) {
         __atomic_fetch_or(&p->pending_signals, mask, __ATOMIC_RELEASE);
+        signalfd_notify(p, mask);
+      }
 
       tasks[n] = t;
       ppids[n] = p->ppid;
