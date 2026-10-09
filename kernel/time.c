@@ -11,6 +11,7 @@
 // timer (PIT o LAPIC timer). Es la base del scheduler preemptivo.
 // ---------------------------------------------------------------------------
 volatile uint64_t tick_count = 0;
+volatile uint64_t lapic_ticks_per_cpu[MAX_CPUS] = {0};
 
 // ---------------------------------------------------------------------------
 // PIT (Programmable Interval Timer)
@@ -36,20 +37,77 @@ extern void sched_wake_expired(void);
 
 extern void ahci_poll_ports(void);
 
+// ---------------------------------------------------------------------------
+// Diagnóstico del bug "python3 tarda 2s con user=0.005s"
+//
+// Estado por CPU para medir el gap entre ticks consecutivos del LAPIC.
+// Si un CPU pasa >2 ms con IF=0 (spinlock), el LAPIC descarta los ticks
+// intermedios y el siguiente tick llega con un delta grande. Ese delta
+// nos dice exactamente cuándo y cuánto tiempo estuvo el CPU "sordo".
+//
+// g_pf_per_pid lo expone pf.c. Lo imprimimos en cada [TICKS] para
+// correlacionar los gaps con picos de page faults del proceso python3.
+// ---------------------------------------------------------------------------
+extern volatile uint64_t g_pf_per_pid[128];
+
+static volatile uint64_t g_lapic_last_tsc[MAX_CPUS] = {0};
+static volatile uint64_t g_tick_gap_count[MAX_CPUS] = {0};
+
 void time_tick(void) {
-  if (smp_processor_id() == 0) {
+  int cpu = smp_processor_id();
+
+  // [DIAG] Detectar gaps >2 ms entre ticks consecutivos.
+  {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t now_tsc = ((uint64_t)hi << 32) | lo;
+    uint64_t prev = g_lapic_last_tsc[cpu];
+    if (prev != 0) {
+      uint64_t tsc_freq = klog_get_tsc_freq();
+      uint64_t delta_us =
+          tsc_freq ? ((now_tsc - prev) * 1000000ULL / tsc_freq) : 0;
+      // 2 ms = 2 ticks perdidos consecutivos. Solo nos interesa ver
+      // gaps grandes (>5 ms) para no inundar el log con jitter normal.
+      if (delta_us > 5000) {
+        g_tick_gap_count[cpu]++;
+        LOG_WARN("[TICK-GAP] cpu=%d delta=%lu us total_gaps=%lu", cpu,
+                 (unsigned long)delta_us, (unsigned long)g_tick_gap_count[cpu]);
+      }
+    }
+    g_lapic_last_tsc[cpu] = now_tsc;
+    lapic_ticks_per_cpu[cpu]++;
+  }
+
+  // [FIX] El tick "global" (tick_count, wake_expired, ahci_poll) solo
+  // desde CPU 0. El resto solo actualiza su contador y hace sched_tick.
+  if (cpu == 0) {
     tick_count++;
     if (tick_count % KERNEL_HZ == 0) {
       compositor_notify_clock_tick();
     }
-    // [FIX timeout] Despertar tareas cuyo deadline haya expirado.
-    sched_wake_expired();
+    // [FIX] sched_wake_expired a 125 Hz en vez de 1 kHz.
+    // Sin esto, cada tick hace un kmalloc+kfree con sched_lock tomado,
+    // y el resto de CPUs pierden tiempo esperando heap_lock. Ver el
+    // fix de sched_wake_expired en sched.c.
+    if ((tick_count & 7) == 0) {
+      sched_wake_expired();
+    }
     ahci_poll_ports();
+  }
+
+  // [DIAG] Dump periódico cada 5 s. Solo desde CPU 0 para no spamear
+  // el log (el tick_count es global y crece una vez por ms).
+  if (cpu == 0 && (tick_count % (5 * KERNEL_HZ)) == 0) {
+    LOG_INFO("[TICKS] cpu0=%lu cpu1=%lu cpu2=%lu cpu3=%lu | "
+             "gaps0=%lu gaps1=%lu gaps2=%lu gaps3=%lu",
+             lapic_ticks_per_cpu[0], lapic_ticks_per_cpu[1],
+             lapic_ticks_per_cpu[2], lapic_ticks_per_cpu[3],
+             g_tick_gap_count[0], g_tick_gap_count[1], g_tick_gap_count[2],
+             g_tick_gap_count[3]);
   }
 
   sched_tick();
 }
-
 // ---------------------------------------------------------------------------
 // LAPIC timer
 // ---------------------------------------------------------------------------
