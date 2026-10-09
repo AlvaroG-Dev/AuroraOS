@@ -274,106 +274,8 @@ static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
 static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
                              vfs_node_t *dst_dir, const char *dst_name);
 // [B] Buffer cache de sectores de datos.
-#define FAT32_BCACHE_READAHEAD_SECTORS 8
-
 static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
-                       void *buf) {
-  if (!fs || !buf || count == 0)
-    return -EINVAL;
-  if (!fs->bcache || fs->bytes_per_sector != FAT32_BCACHE_SECTOR)
-    return bdev_read(fs->bdev, lba, count, buf);
-
-  fat32_bcache_t *c = fs->bcache;
-  uint8_t *out = (uint8_t *)buf;
-  uint32_t i = 0;
-
-  while (i < count) {
-    uint64_t current_lba = lba + i;
-    if (current_lba >= fs->bdev->num_sectors)
-      return -ERANGE;
-
-    fat32_bcache_slot_t *s = bcache_lookup(c, current_lba);
-    if (s) {
-      c->hits++;
-      s->last_used = ++c->clock;
-      memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, s->data,
-             FAT32_BCACHE_SECTOR);
-      i++;
-      continue;
-    }
-
-    // Los fallos de caché secuenciales se agrupan en una sola lectura DMA.
-    // fat32_read_data suele pedir un clúster de 512 B cada vez; sin read-ahead
-    // una página de 4 KiB podía generar ocho comandos de disco. Prefetch de
-    // hasta ocho sectores, limitado por la siguiente entrada ya cacheada.
-    uint64_t available = fs->bdev->num_sectors - current_lba;
-    uint32_t run = FAT32_BCACHE_READAHEAD_SECTORS;
-    if (available < run)
-      run = (uint32_t)available;
-    for (uint32_t j = 1; j < run; j++) {
-      if (bcache_lookup(c, current_lba + j)) {
-        run = j;
-        break;
-      }
-    }
-
-    if (run > 1) {
-      size_t bytes = (size_t)run * FAT32_BCACHE_SECTOR;
-      uint8_t *prefetch = (uint8_t *)kmalloc(bytes);
-      if (prefetch) {
-        if (bdev_read(fs->bdev, current_lba, run, prefetch) == 0) {
-          uint32_t cached = 0;
-          for (; cached < run; cached++) {
-            s = bcache_evict(fs);
-            if (!s)
-              break;
-
-            c->misses++;
-            s->lba = current_lba + cached;
-            s->dirty = 0;
-            s->last_used = ++c->clock;
-            memcpy(s->data,
-                   prefetch + (size_t)cached * FAT32_BCACHE_SECTOR,
-                   FAT32_BCACHE_SECTOR);
-            bcache_link(c, s);
-          }
-
-          uint32_t copied = count - i;
-          if (copied > cached)
-            copied = cached;
-          if (copied > 0) {
-            memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, prefetch,
-                   (size_t)copied * FAT32_BCACHE_SECTOR);
-          }
-          kfree(prefetch);
-          if (cached != run)
-            return -EIO;
-          i += copied;
-          continue;
-        }
-        kfree(prefetch);
-      }
-    }
-
-    // Fallback para lecturas aisladas, falta de memoria o drivers que no
-    // acepten una transferencia agrupada.
-    c->misses++;
-    s = bcache_evict(fs);
-    if (!s)
-      return -EIO;
-    if (bdev_read(fs->bdev, current_lba, 1, s->data) != 0)
-      return -EIO;
-    s->lba = current_lba;
-    s->dirty = 0;
-    s->last_used = ++c->clock;
-    bcache_link(c, s);
-    memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, s->data,
-           FAT32_BCACHE_SECTOR);
-    i++;
-  }
-  return 0;
-}
-
+                       void *buf);
 static int fat32_bwrite(fat32_fs_t *fs, uint64_t lba, uint32_t count,
                         const void *buf);
 // ===========================================================================
@@ -402,6 +304,7 @@ static inline uint64_t cluster_to_sector(const fat32_fs_t *fs, uint32_t c) {
 #define FAT32_BCACHE_SLOTS 256
 #define FAT32_BCACHE_HASH_BUCKETS 512
 #define FAT32_BCACHE_SECTOR 512
+#define FAT32_BCACHE_READAHEAD_SECTORS 8
 
 // [FIX] `data` va PRIMERO y la struct está alineada a 16 bytes.
 //
@@ -511,26 +414,91 @@ static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
 
   fat32_bcache_t *c = fs->bcache;
   uint8_t *out = (uint8_t *)buf;
-  for (uint32_t i = 0; i < count; i++) {
-    uint64_t l = lba + i;
-    fat32_bcache_slot_t *s = bcache_lookup(c, l);
+  uint32_t i = 0;
+
+  while (i < count) {
+    uint64_t current_lba = lba + i;
+    if (current_lba >= fs->bdev->num_sectors)
+      return -ERANGE;
+
+    fat32_bcache_slot_t *s = bcache_lookup(c, current_lba);
     if (s) {
       c->hits++;
       s->last_used = ++c->clock;
-      memcpy(out + i * FAT32_BCACHE_SECTOR, s->data, FAT32_BCACHE_SECTOR);
+      memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, s->data,
+             FAT32_BCACHE_SECTOR);
+      i++;
       continue;
     }
+
+    // Los fallos de caché secuenciales se agrupan en una sola lectura DMA.
+    // fat32_read_data suele pedir un clúster de 512 B cada vez; sin read-ahead
+    // una página de 4 KiB podía generar ocho comandos de disco. Prefetch de
+    // hasta ocho sectores, limitado por la siguiente entrada ya cacheada.
+    uint64_t available = fs->bdev->num_sectors - current_lba;
+    uint32_t run = FAT32_BCACHE_READAHEAD_SECTORS;
+    if (available < run)
+      run = (uint32_t)available;
+    for (uint32_t j = 1; j < run; j++) {
+      if (bcache_lookup(c, current_lba + j)) {
+        run = j;
+        break;
+      }
+    }
+
+    if (run > 1) {
+      size_t bytes = (size_t)run * FAT32_BCACHE_SECTOR;
+      uint8_t *prefetch = (uint8_t *)kmalloc(bytes);
+      if (prefetch) {
+        if (bdev_read(fs->bdev, current_lba, run, prefetch) == 0) {
+          uint32_t cached = 0;
+          for (; cached < run; cached++) {
+            s = bcache_evict(fs);
+            if (!s)
+              break;
+
+            c->misses++;
+            s->lba = current_lba + cached;
+            s->dirty = 0;
+            s->last_used = ++c->clock;
+            memcpy(s->data,
+                   prefetch + (size_t)cached * FAT32_BCACHE_SECTOR,
+                   FAT32_BCACHE_SECTOR);
+            bcache_link(c, s);
+          }
+
+          uint32_t copied = count - i;
+          if (copied > cached)
+            copied = cached;
+          if (copied > 0) {
+            memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, prefetch,
+                   (size_t)copied * FAT32_BCACHE_SECTOR);
+          }
+          kfree(prefetch);
+          if (cached != run)
+            return -EIO;
+          i += copied;
+          continue;
+        }
+        kfree(prefetch);
+      }
+    }
+
+    // Fallback para lecturas aisladas, falta de memoria o drivers que no
+    // acepten una transferencia agrupada.
     c->misses++;
     s = bcache_evict(fs);
     if (!s)
       return -EIO;
-    if (bdev_read(fs->bdev, l, 1, s->data) != 0)
+    if (bdev_read(fs->bdev, current_lba, 1, s->data) != 0)
       return -EIO;
-    s->lba = l;
+    s->lba = current_lba;
     s->dirty = 0;
     s->last_used = ++c->clock;
     bcache_link(c, s);
-    memcpy(out + i * FAT32_BCACHE_SECTOR, s->data, FAT32_BCACHE_SECTOR);
+    memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, s->data,
+           FAT32_BCACHE_SECTOR);
+    i++;
   }
   return 0;
 }
