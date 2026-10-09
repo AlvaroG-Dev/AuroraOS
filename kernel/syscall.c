@@ -226,6 +226,13 @@ void syscall_init_ap(void) {
 // ---------------------------------------------------------------------------
 static inline uint64_t err(int e) { return (uint64_t)(-(int64_t)e); }
 
+// Reloj de alta resolución para localizar syscalls que bloquean el kernel.
+static inline uint64_t syscall_rdtsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+
 typedef int64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t,
                                 uint64_t);
 
@@ -5598,7 +5605,16 @@ uint64_t syscall_handler_c(registers_t *regs) {
   if (cur)
     cur->syscall_regs = regs;
 
+  uint64_t syscall_start_tsc = syscall_rdtsc();
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
+  uint64_t syscall_end_tsc = syscall_rdtsc();
+  uint64_t syscall_freq = klog_get_tsc_freq();
+  if (syscall_freq && syscall_end_tsc - syscall_start_tsc > syscall_freq / 100) {
+    uint64_t syscall_us =
+        (syscall_end_tsc - syscall_start_tsc) * 1000000ULL / syscall_freq;
+    LOG_WARN("[SYSCALL-SLOW] num=%lu dur=%lu us", (unsigned long)num,
+             (unsigned long)syscall_us);
+  }
 
   // Publicar el valor de retorno en el trap frame ANTES de la entrega
   // de señales, para que el ucontext que construyamos capture el rax
