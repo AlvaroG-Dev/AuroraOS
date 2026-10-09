@@ -340,6 +340,7 @@ void apic_dump(void) {
     LOG_INFO("[APIC] No inicializado");
     return;
   }
+
   LOG_INFO("[APIC] Estado:");
   LOG_INFO("  BSP APIC ID = %u", g_bsp_apic_id);
   LOG_INFO("  LAPIC ID (actual) = %u", lapic_get_id());

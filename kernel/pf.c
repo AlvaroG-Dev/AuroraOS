@@ -238,15 +238,17 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   if (!phys)
     return 0;
 
-  // [3.5] VMA_FILE: leer la página del fichero.
+  // [DIAG] Cronómetro para ver si el read del fichero backing es lento.
+  uint32_t _lo, _hi;
+  __asm__ volatile("rdtsc" : "=a"(_lo), "=d"(_hi));
+  uint64_t _t0 = ((uint64_t)_hi << 32) | _lo;
+
   if (vma->type == VMA_FILE && vma->file_fd) {
     file_descriptor_t *f = vma->file_fd;
     if (!f->node || !f->node->ops || !f->node->ops->read) {
       pmm_free_page(phys);
       return 0;
     }
-    // file_offset ya está alineado a página (sys_mmap lo valida).
-    // page >= vma->start, así que file_off >= file_offset.
     uint64_t file_off = vma->file_offset + (page - vma->start);
     int64_t r =
         f->node->ops->read(f->node, file_off, PAGE_SIZE, phys_to_virt(phys));
@@ -254,7 +256,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
       pmm_free_page(phys);
       return 0;
     }
-    // Si r < PAGE_SIZE, el resto queda a 0 (alloc_user_page_zeroed).
   }
 
   uint64_t map_flags = vma->flags | PTE_PRESENT;
@@ -264,8 +265,21 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     return 0;
   }
 
-  LOG_TRACE("[PF] Demand paging: PID=%u addr=%p type=%u", proc->pid,
-            (void *)page, vma->type);
+  // [DIAG] Reportar si el #PF completo tardó >2 ms.
+  {
+    uint32_t _lo2, _hi2;
+    __asm__ volatile("rdtsc" : "=a"(_lo2), "=d"(_hi2));
+    uint64_t _t1 = ((uint64_t)_hi2 << 32) | _lo2;
+    uint64_t _freq = klog_get_tsc_freq();
+    if (_freq) {
+      uint64_t _us = (_t1 - _t0) * 1000000ULL / _freq;
+      if (_us > 2000) {
+        LOG_WARN("[PF-SLOW] pid=%u cr2=%p type=%u %lu us", proc->pid,
+                 (void *)page, vma->type, (unsigned long)_us);
+      }
+    }
+  }
+
   return 1;
 }
 
@@ -306,8 +320,11 @@ void kill_current_process(registers_t *regs, const char *reason) {
 }
 
 // ---------------------------------------------------------------------------
-// Handler principal
+// Contador de #PF por PID. Lo lee time.c en el dump periódico. Solo
+// los primeros 128 PIDs (los relevantes son sh, python3, terminal).
 // ---------------------------------------------------------------------------
+volatile uint64_t g_pf_per_pid[128] = {0};
+
 static int handle_page_fault_inner(registers_t *regs) {
   uint64_t cr2 = read_cr2();
   uint64_t err = regs->error_code;
@@ -316,14 +333,21 @@ static int handle_page_fault_inner(registers_t *regs) {
   int user = err & 0x04;
   int fetch = err & 0x10;
 
+  // [DIAG] Contar #PF por PID. Solo cuando el fallo viene de userland;
+  // un #PF en kernel con cr2 en user no es lo que buscamos.
+  if (user) {
+    process_t *p = process_current();
+    if (p && p->pid < 128) {
+      g_pf_per_pid[p->pid]++;
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 1. Fallo en modo usuario: path clásico.
   // -------------------------------------------------------------------------
   if (user) {
 
     if (present) {
-      // Solo aquí importa el bit "fetch": página presente + fetch = NX
-      // violation.
       // [SWAP] ¿Violación de escritura sobre una página RW que kswapd
       // marcó temporalmente RO para reclaimarla?
       if ((err & 0x02) != 0) {
@@ -344,34 +368,20 @@ static int handle_page_fault_inner(registers_t *regs) {
           }
         }
       }
-      // Página presente + cualquier fallo = violación de permisos
-      // (incluye NX: instruction fetch sobre página sin PTE_USER_X).
+      // Página presente + cualquier fallo = violación de permisos.
       signal_deliver_from_exception(SIGSEGV, regs);
       pf_resolved++;
       return 1;
     }
 
-    // -----------------------------------------------------------------------
-    // Página NO presente. Tanto un fetch como un data fault aquí son
-    // demand-paging normal. El bit "fetch" SOLO importa si la página
-    // está presente (NX). Hasta ahora este path no se alcanzaba para
-    // fetches porque el `if (fetch)` de arriba enviaba SIGSEGV antes.
-    // -----------------------------------------------------------------------
-
+    // Página NO presente.
     struct process *proc = process_current();
     if (!proc) {
       kill_current_process(regs, "no process context");
       return 1;
     }
 
-    // -----------------------------------------------------------------------
-    // [SWAP] ¿La PTE es una swap entry? Si sí, hacer page-in.
-    //
-    // Se comprueba ANTES de try_stack_growth / try_vma_demand porque:
-    //   - La VMA sigue existiendo (solo el PTE fue reemplazado).
-    //   - try_vma_demand asignaría una página nueva cero y perdería los
-    //     datos que están en swap.
-    // -----------------------------------------------------------------------
+    // [SWAP] ¿La PTE es una swap entry?
     {
       uint64_t page_va = cr2 & ~0xFFFULL;
       mutex_lock(&proc->mm_lock);
@@ -431,7 +441,6 @@ static int handle_page_fault_inner(registers_t *regs) {
         pf_resolved++;
         return 1;
       }
-      // Distinguir OOM de permiso: si el PMM está a 0, es OOM.
       if (pmm_free_pages_count() < 64) {
         LOG_ERR("[PF] PID=%u addr=%p: OOM (sin páginas libres ni swap)",
                 proc->pid, (void *)cr2);
@@ -461,8 +470,6 @@ static int handle_page_fault_inner(registers_t *regs) {
 
   struct process *proc = process_current();
 
-  // Solo demand-page si la página NO está presente. Un fallo sobre una
-  // página presente-pero-RO (bit 0 = 1) NO se resuelve remapeando.
   if ((err & 0x01) == 0 && pf_try_demand_paging(proc, cr2, err)) {
     pf_resolved++;
     return 1;
@@ -530,6 +537,11 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     return -EINVAL;
   if (start >= USER_LIMIT || end > USER_LIMIT)
     return -EINVAL;
+
+  // [DIAG] Cronómetro.
+  uint32_t _lo, _hi;
+  __asm__ volatile("rdtsc" : "=a"(_lo), "=d"(_hi));
+  uint64_t _t0 = ((uint64_t)_hi << 32) | _lo;
 
   // Preasignar los VMAs "right" que puedan hacer falta para splits.
   vma_t *new_vmas = NULL;
@@ -626,6 +638,23 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     kfree(new_vmas);
     new_vmas = next;
   }
+  // [DIAG] Reportar si vma_unmap_range tardó >5 ms.
+  {
+    uint32_t _lo2, _hi2;
+    __asm__ volatile("rdtsc" : "=a"(_lo2), "=d"(_hi2));
+    uint64_t _t1 = ((uint64_t)_hi2 << 32) | _lo2;
+    uint64_t _freq = klog_get_tsc_freq();
+    if (_freq) {
+      uint64_t _us = (_t1 - _t0) * 1000000ULL / _freq;
+      if (_us > 5000) {
+        LOG_WARN("[UNMAP-SLOW] pid=%u [%p,%p) %lu paginas en %lu us", proc->pid,
+                 (void *)start, (void *)end,
+                 (unsigned long)((end - start) / PAGE_SIZE),
+                 (unsigned long)_us);
+      }
+    }
+  }
+
   return touched;
 }
 
@@ -687,6 +716,12 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   if (end < addr || end > USER_LIMIT)
     return -ENOMEM;
 
+  // [DIAG] Cronómetro TSC para ver si mprotect es el culpable del
+  // TICK-GAP de 1.4 s con IF=0.
+  uint32_t _lo, _hi;
+  __asm__ volatile("rdtsc" : "=a"(_lo), "=d"(_hi));
+  uint64_t _t0 = ((uint64_t)_hi << 32) | _lo;
+
   uint64_t new_flags = PTE_PRESENT;
   if (prot & (MMAP_PROT_READ | MMAP_PROT_WRITE | MMAP_PROT_EXEC))
     new_flags |= PTE_USER;
@@ -695,7 +730,6 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   if (!(prot & MMAP_PROT_EXEC))
     new_flags |= PTE_NX;
 
-  // Contar cuántos VMAs nuevos necesitamos (máx 2 por VMA afectado).
   int need = 0;
   for (vma_t *v = proc->vma_list; v; v = v->next) {
     if (v->end <= addr || v->start >= end)
@@ -733,11 +767,9 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
     int right_cov = (v->end <= end);
 
     if (left_cov && right_cov) {
-      // Completamente dentro.
       v->flags = new_flags;
       pp = &v->next;
     } else if (left_cov) {
-      // Split: [v->start, end) nuevos, [end, v->end) viejos.
       vma_t *right = pool;
       pool = pool->next;
       right->start = end;
@@ -753,7 +785,6 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       v->next = right;
       pp = &right->next;
     } else if (right_cov) {
-      // Split: [v->start, addr) viejos, [addr, v->end) nuevos.
       vma_t *mid = pool;
       pool = pool->next;
       mid->start = addr;
@@ -768,7 +799,6 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       v->next = mid;
       pp = &mid->next;
     } else {
-      // Cubre el rango entero: split en 3.
       vma_t *mid = pool;
       pool = pool->next;
       vma_t *right = pool;
@@ -815,8 +845,22 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
     }
   }
 
-  LOG_TRACE("[MPROTECT] PID=%u [%p, %p) prot=%lx", proc->pid, (void *)addr,
-            (void *)end, (unsigned long)prot);
+  // [DIAG] Reportar si mprotect tardó >5 ms.
+  {
+    uint32_t _lo2, _hi2;
+    __asm__ volatile("rdtsc" : "=a"(_lo2), "=d"(_hi2));
+    uint64_t _t1 = ((uint64_t)_hi2 << 32) | _lo2;
+    uint64_t _freq = klog_get_tsc_freq();
+    if (_freq) {
+      uint64_t _us = (_t1 - _t0) * 1000000ULL / _freq;
+      if (_us > 5000) {
+        LOG_WARN("[MPROTECT-SLOW] pid=%u [%p,%p) %lu paginas en %lu us",
+                 proc->pid, (void *)addr, (void *)end,
+                 (unsigned long)((end - addr) / PAGE_SIZE), (unsigned long)_us);
+      }
+    }
+  }
+
   return 0;
 }
 

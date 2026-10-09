@@ -239,48 +239,41 @@ void isr_handler(registers_t *regs) {
     __asm__ volatile("outb %0, $0xE9" : : "a"(_c));
   }
 
-  // Guardar el frame en un buffer estático (no en el stack).
-  static registers_t saved_regs;
-  saved_regs = *regs;
-
-  // [LOG] Solo loggear excepciones que NO son page faults, o page
-  // faults que el handler no va a resolver. Los #PF que el demand
-  // pager cubre (el 99%) se resuelven silenciosamente: son el
-  // comportamiento normal, no un evento raro, y saturan el log
-  // cuando corre busybox.
-  if (saved_regs.int_num != 14) {
+  // [FIX SMP] Usar `regs` directamente. La versión anterior copiaba
+  // a un `static registers_t saved_regs` compartido entre CPUs.
+  // Con dos #PF simultáneos en CPUs distintas, el segundo pisaba el
+  // frame del primero y el panic posterior leía basura. Ya se arregló
+  // para el path del panic hace tiempo; ahora también para el
+  // dispatch normal (que es el camino caliente del demand paging).
+  if (regs->int_num != 14) {
     LOG_DEBUG("[ISR] int_num=%lu error=0x%lx rip=%p rsp=%p cs=0x%lx ss=0x%lx",
-              (unsigned long)saved_regs.int_num,
-              (unsigned long)saved_regs.error_code, (void *)saved_regs.rip,
-              (void *)saved_regs.rsp, (unsigned long)saved_regs.cs,
-              (unsigned long)saved_regs.ss);
+              (unsigned long)regs->int_num, (unsigned long)regs->error_code,
+              (void *)regs->rip, (void *)regs->rsp, (unsigned long)regs->cs,
+              (unsigned long)regs->ss);
   }
 
-  if (saved_regs.int_num == 14) {
+  if (regs->int_num == 14) {
     if (handle_page_fault(regs)) {
       return;
     }
   }
 
-  // [glibc] Excepción en userspace: NO matar el kernel.
   if ((regs->cs & 3) == 3) {
     LOG_ERR("[ISR] excepción #%lu (%s) en userspace: rip=%p rsp=%p err=0x%lx",
             (unsigned long)regs->int_num,
             (regs->int_num < 32) ? exception_names[regs->int_num] : "?",
             (void *)regs->rip, (void *)regs->rsp,
             (unsigned long)regs->error_code);
-    process_exit_current(-1); // o signal_deliver_from_exception(SIGSEGV, regs);
+    process_exit_current(-1);
     return;
   }
 
-  // Comparar.
   LOG_ERR("[ISR] ahora: int_num=%lu rip=%p rsp=%p ss=0x%lx",
           (unsigned long)regs->int_num, (void *)regs->rip, (void *)regs->rsp,
           (unsigned long)regs->ss);
 
-  panic(&saved_regs, "unhandled exception #%lu (%s)",
-        (unsigned long)saved_regs.int_num,
-        (saved_regs.int_num < 32) ? exception_names[saved_regs.int_num] : "?");
+  panic(regs, "unhandled exception #%lu (%s)", (unsigned long)regs->int_num,
+        (regs->int_num < 32) ? exception_names[regs->int_num] : "?");
 }
 
 void irq_install_handler_ex(uint8_t irq, void (*ack)(void),
