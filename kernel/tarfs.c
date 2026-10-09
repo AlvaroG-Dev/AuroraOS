@@ -196,8 +196,9 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
 
     if (clean_path[0] != '\0') {
       if (tarfs_grow_nodes(node_count + 1) != 0) {
-        LOG_PANIC("[TARFS] No se pudo ampliar el índice de nodos (%lu entradas)",
-                  (unsigned long)(node_count + 1));
+        LOG_PANIC(
+            "[TARFS] No se pudo ampliar el índice de nodos (%lu entradas)",
+            (unsigned long)(node_count + 1));
         return;
       }
 
@@ -459,15 +460,6 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   return 0;
 }
 
-// Nodo sintético para la raíz de tarfs. tarfs no tiene entry para "".
-// Vive en .data y no se libera nunca.
-static tar_node_t g_tarfs_root = {
-    .name = "",
-    .data = NULL,
-    .size = 0,
-    .is_dir = 1,
-};
-
 static vfs_ops_t tar_file_ops = {
     .read = tar_vfs_read,
     .write = tar_vfs_write,
@@ -492,61 +484,40 @@ static vfs_ops_t tar_dir_ops = {
     .chown = NULL,
 };
 
-// ===========================================================================
-// fs lookup (vfs_fs_ops_t)
-//
-// Path RELATIVO al mount (empieza por '/'). NUNCA sigue symlinks:
-// devuelve el nodo del symlink con is_symlink=1 y link_target relleno.
-// vfs_lookup_rec() decide si seguirlo.
-// ===========================================================================
-static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
-  (void)fs_priv;
+// Nodo sintético para la raíz de tarfs. tarfs no tiene entry para "".
+// Vive en .data y no se libera nunca.
+static tar_node_t g_tarfs_root = {
+    .name = "",
+    .data = NULL,
+    .size = 0,
+    .is_dir = 1,
+};
 
-  // Caso raíz: directorio sintético sobre g_tarfs_root.
-  if (!path || path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
-    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!node)
-      return NULL;
-    node->name[0] = '/';
-    node->name[1] = '\0';
-    node->flags = VFS_DIRECTORY;
-    node->size = 0;
-    node->inode = 0;
-    node->ops = &tar_dir_ops;
-    node->fs = NULL;
-    node->priv = &g_tarfs_root;
-    // [3.4.a] Raíz tarfs: root:root 0755.
-    node->mode = S_IFDIR | 0755;
-    node->uid = 0;
-    node->gid = 0;
-    return node;
-  }
-
-  char collapsed[256];
-  const char *norm = tarfs_normalize(path);
-  collapse_path(norm, collapsed, sizeof(collapsed));
-
-  tar_node_t *tn = find_by_name(collapsed);
-  if (!tn)
-    return NULL;
-
+// Construye un vfs_node_t desde un tar_node_t. Reutilizado por el
+// lookup normal y por el caso raíz.
+static vfs_node_t *tarfs_make_vfs_node(tar_node_t *tn) {
   vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
   if (!node)
     return NULL;
 
-  size_t nlen = strlen(tn->name);
-  if (nlen >= sizeof(node->name))
-    nlen = sizeof(node->name) - 1;
-  memcpy(node->name, tn->name, nlen);
-  node->name[nlen] = '\0';
+  if (tn == &g_tarfs_root) {
+    node->name[0] = '/';
+    node->name[1] = '\0';
+    node->inode = 0;
+  } else {
+    size_t nlen = strlen(tn->name);
+    if (nlen >= sizeof(node->name))
+      nlen = sizeof(node->name) - 1;
+    memcpy(node->name, tn->name, nlen);
+    node->name[nlen] = '\0';
+    node->inode = (uint32_t)(tn - nodes) + 1;
+  }
 
   node->flags = tn->is_dir ? VFS_DIRECTORY : VFS_FILE;
   node->size = tn->size;
-  node->inode = (uint32_t)(tn - nodes) + 1;
   node->ops = tn->is_dir ? &tar_dir_ops : &tar_file_ops;
   node->priv = tn;
 
-  // [3.1] Exponer el symlink si lo es.
   if (tn->is_symlink) {
     node->is_symlink = 1;
     size_t tlen = strlen(tn->linkname);
@@ -554,11 +525,7 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
       tlen = sizeof(node->link_target) - 1;
     memcpy(node->link_target, tn->linkname, tlen);
     node->link_target[tlen] = '\0';
-  }
-
-  // [3.4.a] Propagar mode/uid/gid. Los S_IF* los añadimos aquí.
-  if (tn->is_symlink) {
-    node->mode = S_IFLNK | 0777;
+    node->mode = S_IFLNK | 07777;
   } else if (tn->is_dir) {
     node->mode = S_IFDIR | (tn->mode & 07777);
   } else {
@@ -566,8 +533,166 @@ static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
   }
   node->uid = tn->uid;
   node->gid = tn->gid;
-
   return node;
+}
+
+// ===========================================================================
+// fs lookup (vfs_fs_ops_t)
+//
+// Path RELATIVO al mount (empieza por '/'). Camina componente a
+// componente resolviendo symlinks MID-PATH internamente. Si el
+// symlink es el ÚLTIMO componente, lo devuelve con is_symlink=1 para
+// que el VFS decida según el flag no_follow.
+//
+// Sin esto, un path como ".../perl/5.38/Data/Dumper.pm" donde 5.38 es
+// un symlink a 5.38.2 fallaba: find_by_name() no encontraba el path
+// completo porque el árbol solo tiene entradas reales bajo 5.38.2.
+//
+// [FIX] Al reconstruir `work` tras resolver un symlink mid-path, el
+// resto del path (`p`) apunta DENTRO de `work`. Si copiáramos
+// `resolved` sobre `work` directamente, corromperíamos los bytes que
+// `rest` todavía no ha leído (solapamiento). Por eso copiamos el resto
+// a un buffer temporal antes de tocar `work`.
+// ===========================================================================
+static vfs_node_t *tarfs_fs_lookup(void *fs_priv, const char *path) {
+  (void)fs_priv;
+
+  if (!path)
+    return NULL;
+
+  // Raíz.
+  if (path[0] == '\0' || (path[0] == '/' && path[1] == '\0'))
+    return tarfs_make_vfs_node(&g_tarfs_root);
+
+  // Copia mutable del path sin '/' iniciales.
+  char work[512];
+  size_t wlen = 0;
+  while (*path == '/')
+    path++;
+  while (*path && wlen < sizeof(work) - 1)
+    work[wlen++] = *path++;
+  work[wlen] = '\0';
+
+  // Bucle de resolución: cada iteración intenta caminar `work`
+  // entero. Si encuentra un symlink mid-path, lo resuelve, reescribe
+  // `work` y vuelve a empezar. Si no, devuelve el nodo final.
+  for (int depth = 0; depth < 16; depth++) {
+    char current[256] = "";
+    size_t cur_len = 0;
+    int resolved_something = 0;
+    const char *p = work;
+
+    while (*p) {
+      const char *seg = p;
+      while (*p && *p != '/')
+        p++;
+      size_t seg_len = (size_t)(p - seg);
+      int is_last = (*p == '\0');
+      if (!is_last)
+        p++; // consumir '/'
+
+      if (seg_len == 0)
+        continue;
+
+      // candidate = current + "/" + seg
+      char candidate[256];
+      size_t clen = cur_len;
+      if (clen > 0) {
+        if (clen + 1 + seg_len >= sizeof(candidate))
+          return NULL;
+        memcpy(candidate, current, clen);
+        candidate[clen++] = '/';
+        memcpy(candidate + clen, seg, seg_len);
+        clen += seg_len;
+      } else {
+        if (seg_len >= sizeof(candidate))
+          return NULL;
+        memcpy(candidate, seg, seg_len);
+        clen = seg_len;
+      }
+      candidate[clen] = '\0';
+
+      tar_node_t *tn = find_by_name(candidate);
+      if (!tn)
+        return NULL;
+
+      if (tn->is_symlink) {
+        if (is_last) {
+          // Último componente: devolvemos el symlink tal cual para
+          // que el VFS decida según su flag no_follow.
+          return tarfs_make_vfs_node(tn);
+        }
+
+        // Mid-path: resolver internamente.
+        const char *target = tn->linkname;
+        char resolved[256];
+
+        if (target[0] == '/') {
+          collapse_path(target, resolved, sizeof(resolved));
+        } else {
+          char tmp[512];
+          size_t tlen = strlen(target);
+          if (cur_len > 0) {
+            if (cur_len + 1 + tlen >= sizeof(tmp))
+              return NULL;
+            memcpy(tmp, current, cur_len);
+            tmp[cur_len] = '/';
+            memcpy(tmp + cur_len + 1, target, tlen + 1);
+          } else {
+            if (tlen >= sizeof(tmp))
+              return NULL;
+            memcpy(tmp, target, tlen + 1);
+          }
+          collapse_path(tmp, resolved, sizeof(resolved));
+        }
+
+        // Reconstruir work: resolved + "/" + resto (p).
+        //
+        // IMPORTANTE: `p` apunta DENTRO de `work`. Copiamos el resto
+        // a un buffer temporal ANTES de sobreescribir `work` con
+        // `resolved`, porque los rangos [0, rlen) y
+        // [p_offset, p_offset+restlen) pueden solaparse (típicamente
+        // cuando el symlink está cerca del final del path). Sin esto,
+        // `memcpy(work, resolved, rlen)` corrompe los bytes que
+        // `rest` todavía no ha leído, y la segunda copia mete basura
+        // en `work`.
+        char rest_buf[512];
+        size_t restlen = strlen(p);
+        if (restlen >= sizeof(rest_buf))
+          return NULL;
+        memcpy(rest_buf, p, restlen + 1);
+
+        size_t rlen = strlen(resolved);
+        if (rlen + 1 + restlen >= sizeof(work))
+          return NULL;
+        memcpy(work, resolved, rlen);
+        if (restlen > 0) {
+          work[rlen] = '/';
+          memcpy(work + rlen + 1, rest_buf, restlen + 1);
+        } else {
+          work[rlen] = '\0';
+        }
+        resolved_something = 1;
+        break;
+      }
+
+      // Componente regular: avanzar `current`.
+      memcpy(current, candidate, clen + 1);
+      cur_len = clen;
+    }
+
+    if (resolved_something)
+      continue;
+
+    // No hubo symlinks mid-path: `current` es el path final.
+    tar_node_t *tn = find_by_name(current);
+    if (!tn)
+      return NULL;
+    return tarfs_make_vfs_node(tn);
+  }
+
+  LOG_WARN("[TARFS] Symlink loop en '%s'", path);
+  return NULL;
 }
 
 // [4.1] tarfs es in-memory. Reportamos bloques = 0 (nada contable) y
