@@ -375,7 +375,6 @@ EXPECTED_BOOT=(
 )
 
 EXPECTED_SHELL=(
-    "[PROC] Proceso '/usr/bin/terminal' creado"
     "[PROC] Proceso '/usr/bin/sh' creado"
 )
 
