@@ -88,7 +88,15 @@ syscall_entry:
     push r15
 
     mov rdi, rsp
+
+    ; El frame ya está completo y la pila del proceso es estable. Permitir
+    ; interrupciones durante el manejador C: SYSCALL entra con IF=0 por
+    ; SFMASK, y mantenerlo así durante toda la syscall bloquea el timer,
+    ; el scheduler y las IRQ de dispositivos durante cualquier operación
+    ; lenta (p. ej. VFS/mmap).
+    sti
     call syscall_handler_c
+    cli
 
     ; RAX = retorno de la syscall.
     mov [rsp + 0x70], rax
