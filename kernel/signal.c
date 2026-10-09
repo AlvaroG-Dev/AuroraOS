@@ -251,10 +251,6 @@ void signal_check_pending(void) {
   if (pending == 0)
     return;
 
-  // TEMPORAL: identificar el bucle.
-  LOG_INFO("[SIG-DBG] pid=%u pending=0x%lx blocked=0x%lx", proc->pid,
-           (unsigned long)pending, (unsigned long)proc->blocked_signals);
-
   if (pending & (1ULL << SIGKILL)) {
     __atomic_fetch_and(&proc->pending_signals, ~(1ULL << SIGKILL),
                        __ATOMIC_ACQ_REL);

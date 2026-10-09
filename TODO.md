@@ -324,6 +324,19 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 - [ ] `epoll_pwait` no es atómico (Linux lo es). Ventana de race
       microscópica entre cambio de máscara y entrada en wait.
 
+### Bloque 11 — Intérpretes dinámicos (perl) ✅ CERRADO
+
+11.1 Fix tarfs symlink mid-path ✅
+    `tarfs_fs_lookup` corrompía el buffer `work` al reconstruir el
+    path tras resolver un symlink intermedio: el resto del path
+    apuntaba dentro de `work` y el primer `memcpy` pisaba bytes que
+    el segundo aún no había leído. Fix: buffer temporal `rest_buf`.
+    Cierra `perl -MData::Dumper`.
+
+11.2 SIG_MAX = 64 confirmado ✅
+    Sin `SYSCALL-ERR num=13` en el arranque tras rebuild completo.
+    (El header no se recompilaba por falta de dependency tracking;
+    ver Bloque 8.)
 ---
 
 # Estado global
@@ -347,6 +360,7 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 | 8 SMP + syscalls Linux | ✅ |
 | 9 Interactivas + statx + /proc extendido + fixes FAT32 | ✅ |
 | 10 epoll + eventfd + signalfd | ✅ |
+| 11 Intérpretes dinámicos (perl) | ✅ |
 
 **Lo que queda del TODO**:
 - 5.4 (getty) — opcional, ya cubierto por init.

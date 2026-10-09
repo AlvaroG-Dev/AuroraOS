@@ -34,7 +34,10 @@ que colgaban el sistema durante los tests de `truncate`.
 - **`lsof -p N`** (con `exe_path` real y `<pid>/exe` stat-eable).
 - **`pgrep` / `pkill` / `ps -l`** con wake real, sin caer a polling
   interno.
-  
+- **perl 5.38** dinámico (glibc), con `Data::Dumper`, `Encode`,
+  `POSIX`, `Unicode::*`, `Time::HiRes` y demás módulos XS cargando
+  desde `/usr/lib/x86_64-linux-gnu/perl/5.38.2/`.
+
 ### Fixes de kernel acumulados
 
 De la sesión grande original:
@@ -54,6 +57,13 @@ De la sesión grande original:
 - **pf.c**: `MAP_FIXED_NOREPLACE`, `length` desalineado, excepciones
   ring 3 matan al proceso, no al kernel.
 - **panic handler**: excepciones de userspace no tiran el kernel.
+- **tarfs**: resolver symlinks mid-path cuando el symlink no es el
+  último componente (`5.38/Data/Dumper.pm` donde `5.38 -> 5.38.2`).
+  El bucle de resolución iterativa estaba implementado pero el
+  buffer `work` se corrompía al reescribirlo: el resto del path
+  apuntaba dentro del propio buffer y el primer `memcpy` pisaba los
+  bytes que el segundo todavía tenía que leer. Fix: copiar el resto
+  a un buffer temporal antes de sobrescribir `work`.
 
 De la sesión interactiva / statx:
 
@@ -135,7 +145,7 @@ Los items originales de esta sección quedaron cerrados:
 - 2.5 `less`/`nano`/`ed` interactivos ✅
 - 2.6 `tmux`/`screen` → bloqueado por `epoll`, ver §3.9
 - 2.7 `awk`/`gawk`/`mawk` ✅
-- 2.8 `perl`/`python3` → pendiente, ver §5.1
+- 2.8 `perl` ✅ / `python3` → pendiente, ver §5.1
 
 ---
 
@@ -237,8 +247,9 @@ Sin cambios.
 ### 5.1 Portar `python3`
 
 Es el siguiente salto grande. Depende de `epoll`, `eventfd`,
-`clone3`, `rseq`, `signalfd4`, `memfd_create`. **Primero `perl`**
-(más pequeño).
+`clone3`, `rseq`, `signalfd4`, `memfd_create`. **`perl` ya está
+operativo** (ver §1), así que el siguiente paso natural es
+`python3`.
 
 ### 5.2 Portar `git`
 
@@ -298,7 +309,7 @@ Sin cambios. Aceptable.
 
 | # | Item | Esfuerzo | Prioridad |
 |---|---|---|---|
-| 1 | Probar `perl` | 30 min | **Alta** |
+| 1 | ~~Probar `perl`~~ ✅ | — | **Hecho** |
 | 2 | Probar `python3` (falta stdlib) | 2-4 h | Alta |
 | 3 | `/proc/sys/` más completo | 2 h | Media |
 | 4 | `/proc/meminfo` completo | 1 h | Media |
