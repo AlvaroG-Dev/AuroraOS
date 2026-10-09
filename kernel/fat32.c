@@ -197,6 +197,9 @@ typedef struct {
   fat32_fs_t *fs;
   uint32_t start_cluster;
   uint32_t size;
+  // Cursor de lectura por nodo para acelerar lecturas secuenciales.
+  uint32_t read_cache_index;
+  uint32_t read_cache_cluster;
   int is_dir;
 
   // [PR 4.3] Ubicación del dirent en el directorio padre, capturada
@@ -1358,20 +1361,35 @@ static int64_t fat32_read_data(fat32_node_priv_t *np, uint64_t offset,
   uint32_t cl_idx = (uint32_t)(offset / fs->cluster_size);
   uint32_t within = (uint32_t)(offset % fs->cluster_size);
 
-  uint32_t cluster = np->start_cluster;
-  for (uint32_t i = 0; i < cl_idx; i++) {
+  // ELF/mmap suele avanzar por páginas. Reutilizar el último cluster evita
+  // recorrer desde el inicio toda la cadena FAT en cada lectura secuencial.
+  uint32_t cluster;
+  uint32_t cluster_idx;
+  if (FAT_IS_VALID(np->read_cache_cluster) &&
+      np->read_cache_index <= cl_idx) {
+    cluster = np->read_cache_cluster;
+    cluster_idx = np->read_cache_index;
+  } else {
+    cluster = np->start_cluster;
+    cluster_idx = 0;
+  }
+
+  while (cluster_idx < cl_idx) {
     if (!FAT_IS_VALID(cluster))
       return -EIO;
     int64_t next = fat32_fat_get(fs, cluster);
     if (next < 0)
       return next;
-    if ((uint32_t)next >= FAT_EOC_MIN)
+    if ((uint32_t)next >= FAT_EOC_MIN || (uint32_t)next == FAT_BAD)
       return -EIO;
     cluster = (uint32_t)next;
+    cluster_idx++;
   }
 
   if (!FAT_IS_VALID(cluster))
     return -EIO;
+  np->read_cache_index = cluster_idx;
+  np->read_cache_cluster = cluster;
 
   uint8_t *cbuf = (uint8_t *)kmalloc(fs->cluster_size);
   if (!cbuf)
@@ -1393,6 +1411,8 @@ static int64_t fat32_read_data(fat32_node_priv_t *np, uint64_t offset,
     remaining -= to_copy;
     within = 0;
 
+    np->read_cache_index = cluster_idx;
+    np->read_cache_cluster = cluster;
     if (remaining == 0)
       break;
 
@@ -1401,9 +1421,12 @@ static int64_t fat32_read_data(fat32_node_priv_t *np, uint64_t offset,
       kfree(cbuf);
       return next;
     }
-    if ((uint32_t)next >= FAT_EOC_MIN)
+    if ((uint32_t)next >= FAT_EOC_MIN || (uint32_t)next == FAT_BAD)
       break;
     cluster = (uint32_t)next;
+    cluster_idx++;
+    np->read_cache_index = cluster_idx;
+    np->read_cache_cluster = cluster;
   }
 
   kfree(cbuf);
@@ -1529,6 +1552,8 @@ static int64_t fat32_write_data(fat32_node_priv_t *np, uint64_t offset,
                               dirent_update_cluster, &cctx) != 0)
         return -EIO;
       np->start_cluster = new_first_cluster;
+      np->read_cache_index = 0;
+      np->read_cache_cluster = new_first_cluster;
     }
     if (size_changed) {
       struct update_size_ctx sctx = {.new_size = new_size};
@@ -1539,6 +1564,8 @@ static int64_t fat32_write_data(fat32_node_priv_t *np, uint64_t offset,
     }
   } else if (starting_empty) {
     np->start_cluster = new_first_cluster;
+    np->read_cache_index = 0;
+    np->read_cache_cluster = new_first_cluster;
   }
 
   if (size_changed)
@@ -1568,11 +1595,17 @@ static int fat32_truncate_impl(fat32_node_priv_t *np, uint32_t new_size) {
   if (new_size > np->size)
     return -EINVAL;
 
+  // Truncate puede liberar la parte final de la cadena: invalida el cursor.
+  np->read_cache_index = 0;
+  np->read_cache_cluster = np->start_cluster;
+
   if (new_size == 0 || !FAT_IS_VALID(np->start_cluster)) {
     if (FAT_IS_VALID(np->start_cluster)) {
       fat32_free_chain(fs, np->start_cluster);
     }
     np->start_cluster = 0;
+    np->read_cache_index = 0;
+    np->read_cache_cluster = 0;
     np->size = 0;
     if (np->dirent_lba) {
       struct update_cluster_ctx cctx = {.new_cluster = 0};
