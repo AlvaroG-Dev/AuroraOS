@@ -16,6 +16,7 @@
 #include "io.h"
 #include "ipc.h"
 #include "klog.h"
+#include "memfd.h"
 #include "paging.h"
 #include "pf.h"
 #include "pmm.h"
@@ -2834,6 +2835,20 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     return (int64_t)f->flags;
   case F_SETFL:
     return 0;
+  case 1033: /* F_ADD_SEALS */
+    if (!f->node || !memfd_is_node(f->node))
+      return -EINVAL;
+    return memfd_fcntl_add_seals(f->node, (uint32_t)arg);
+
+  case 1034: /* F_GET_SEALS */ {
+    if (!f->node || !memfd_is_node(f->node))
+      return -EINVAL;
+    uint32_t seals = 0;
+    int rc = memfd_fcntl_get_seals(f->node, &seals);
+    if (rc < 0)
+      return rc;
+    return (int64_t)seals;
+  }
   default:
     return -EINVAL;
   }
@@ -5356,6 +5371,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETRLIMIT] = {k_getrlimit, "getrlimit"},
     [SYS_SETRLIMIT] = {k_setrlimit, "setrlimit"},
     [SYS_GETRANDOM] = {k_getrandom, "getrandom"},
+    [SYS_MEMFD_CREATE] = {k_memfd_create, "memfd_create"}, // 319
     [SYS_RSEQ] = {k_rseq, "rseq"},
     [SYS_CLONE] = {k_clone, "clone"},
     [SYS_FORK] = {k_fork, "fork"},

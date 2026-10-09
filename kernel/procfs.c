@@ -28,7 +28,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
 // ===========================================================================
 // Nodo priv: buffer de contenido + longitud.
 // ===========================================================================
@@ -298,18 +297,76 @@ static char *gen_meminfo(size_t *out_len) {
     o = kappend(buf, o, CAP, " kB\n");                                         \
   } while (0)
 
+  // ---- Cabecera ----
   APPEND_KV("MemTotal:       ", total_kb);
   APPEND_KV("MemFree:        ", free_kb);
   APPEND_KV("MemAvailable:   ", free_kb);
   APPEND_KV("MemUsed:        ", used_kb);
   APPEND_KV("Buffers:        ", 0);
   APPEND_KV("Cached:         ", 0);
+
+  // ---- Swap ----
+  APPEND_KV("SwapCached:     ", 0);
   APPEND_KV("SwapTotal:      ", swap_total_bytes() / 1024);
   APPEND_KV("SwapFree:       ", swap_free_bytes() / 1024);
+
+  // ---- Active/Inactive (sin reclaim) ----
+  APPEND_KV("Active:         ", 0);
+  APPEND_KV("Inactive:       ", 0);
+  APPEND_KV("Active(anon):   ", 0);
+  APPEND_KV("Inactive(anon): ", 0);
+  APPEND_KV("Active(file):   ", 0);
+  APPEND_KV("Inactive(file): ", 0);
+  APPEND_KV("Unevictable:    ", 0);
+  APPEND_KV("Mlocked:        ", 0);
+
+  // ---- Anon / Mapped ----
+  APPEND_KV("Mapped:         ", 0);
+  APPEND_KV("AnonPages:      ", 0);
+  APPEND_KV("Shmem:          ", 0);
+  APPEND_KV("KReclaimable:   ", 0);
+  APPEND_KV("Slab:           ", 0);
+  APPEND_KV("SReclaimable:   ", 0);
+  APPEND_KV("SUnreclaim:     ", 0);
+
+  // ---- Commit ----
+  APPEND_KV("Committed_AS:   ", 0);
+  APPEND_KV("CommitLimit:    ", total_kb / 2);
+
+  // ---- Tablas del kernel ----
+  APPEND_KV("PageTables:     ", 0);
+  APPEND_KV("NFS_Unstable:   ", 0);
+  APPEND_KV("Bounce:         ", 0);
+  APPEND_KV("WritebackTmp:   ", 0);
+
+  // ---- Vmalloc (nuestro heap no es vmalloc) ----
+  APPEND_KV("VmallocTotal:   ", 0);
+  APPEND_KV("VmallocUsed:    ", 0);
+  APPEND_KV("VmallocChunk:   ", 0);
+  APPEND_KV("Percpu:         ", 0);
+
+  // ---- Huge pages (no soportadas pero las claves deben existir) ----
+  APPEND_KV("AnonHugePages:  ", 0);
+  APPEND_KV("ShmemHugePages: ", 0);
+  APPEND_KV("ShmemPmdMapped: ", 0);
+  APPEND_KV("FileHugePages:  ", 0);
+  APPEND_KV("FilePmdMapped:  ", 0);
+  APPEND_KV("HugePages_Total:", 0);
+  APPEND_KV("HugePages_Free: ", 0);
+  APPEND_KV("HugePages_Rsvd: ", 0);
+  APPEND_KV("HugePages_Surp: ", 0);
+  APPEND_KV("Hugepagesize:   ", 2048);
+  APPEND_KV("Hugetlb:        ", 0);
+
+  // ---- DirectMap ----
+  APPEND_KV("DirectMap4k:    ", total_kb);
+  APPEND_KV("DirectMap2M:    ", 0);
+  APPEND_KV("DirectMap1G:    ", 0);
+
+  // ---- Resto de campos que glibc/procps buscan ----
   APPEND_KV("Dirty:          ", 0);
   APPEND_KV("Writeback:      ", 0);
-  APPEND_KV("Shmem:          ", 0);
-  APPEND_KV("Slab:           ", 0);
+
 #undef APPEND_KV
 
   buf[o] = '\0';

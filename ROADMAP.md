@@ -270,6 +270,9 @@ Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bas
 - [x] `O_TMPFILE` → `-ENOENT` para que glibc caiga a `mkstemp`.
 - [x] `exe_path` + `exe_file` + `vma->file_node` en `process_t`.
 - [x] VMA-per-PT_LOAD: `maps`/`smaps` con permisos reales por segmento.
+- [x] `perl 5.38` dinámico ejecutándose (con `Data::Dumper`,
+      `Encode`, `POSIX`, `Unicode::*`).
+- [ ] `python3`.
 
 ### 3.7 Ejecutar ejecutables Windows (PE/COFF) — expectativas realistas
 *(sin cambios, sigue pendiente)*
@@ -364,8 +367,9 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
    permisos POSIX, `/etc/passwd`, BusyBox dinámico (~200 applets),
    futex+clone, `flock`, `dmesg`, `statx`, `/proc` extendido,
    VMA-per-PT_LOAD, `/etc/ld.so.cache`, bind `/tmp`, interactivas
-   (`less`/`nano`/`ed`), `epoll`+`eventfd`+`signalfd`. Siguiente:
-   `perl`/`python3` (falta stdlib), `/proc/sys/` y `/proc/meminfo`.
+   (`less`/`nano`/`ed`), `epoll`+`eventfd`+`signalfd`,
+   **`perl 5.38` dinámico con `Data::Dumper`**. Siguiente:
+   `python3` (falta stdlib), `/proc/sys/` y `/proc/meminfo`.
 4. **Escritorio y window manager** — pendiente; el siguiente salto grande es el terminal 2D.
 5. **Networking**
 6. **USB**

@@ -9,8 +9,6 @@
 //   }
 //   REGISTER_TEST("mi_cosa", test_mi_cosa);
 
-#include "memlayout.h"
-#include "memlayout.h"
 #include "../acpi.h"
 #include "../ahci.h"
 #include "../apic.h"
@@ -36,6 +34,7 @@
 #include "../test.h"
 #include "../time.h"
 #include "../vfs.h"
+#include "memlayout.h"
 
 static void test_tarfs_assigns_unique_file_inodes(void) {
   vfs_node_t *libc = vfs_lookup("/lib/x86_64-linux-gnu/libc.so.6");
@@ -5507,3 +5506,23 @@ static void test_fat32_orphan_repair(void) {
 }
 REGISTER_TEST("fat32-corrupt: reparación limpia huérfanos",
               test_fat32_orphan_repair);
+
+// [tarfs] symlink mid-path: 5.38 -> 5.38.2, Dumper.pm bajo 5.38.2/.
+// Antes del fix, find_by_name recibía un path con basura
+// ("5.38././ta/Dumper.pm") y devolvía NULL.
+static void test_tarfs_symlink_midpath(void) {
+  vfs_node_t *n =
+      vfs_lookup("/usr/lib/x86_64-linux-gnu/perl/5.38/Data/Dumper.pm");
+  TEST_ASSERT(n != NULL, "symlink mid-path debe resolver");
+  if (n) {
+    TEST_ASSERT(n->size > 0, "Dumper.pm no debe estar vacío");
+    vfs_node_free(n);
+  }
+
+  // Caso de control: el path directo (sin symlink) también debe ir.
+  vfs_node_t *n2 =
+      vfs_lookup("/usr/lib/x86_64-linux-gnu/perl/5.38.2/Data/Dumper.pm");
+  TEST_ASSERT(n2 != NULL, "path directo también debe resolver");
+  if (n2)
+    vfs_node_free(n2);
+}
