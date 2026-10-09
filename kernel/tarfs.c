@@ -44,6 +44,12 @@ static tar_node_t *nodes = NULL;
 static size_t node_count = 0;
 static size_t node_capacity = 0;
 
+// Índice hash estático por generación del initrd. Guarda índices (no
+// punteros) porque `nodes` puede realocarse mientras se analiza el tar.
+// 0 significa casilla vacía; cada entrada almacena index + 1.
+static size_t *node_hash_slots = NULL;
+static size_t node_hash_capacity = 0;
+
 static int tarfs_grow_nodes(size_t required) {
   if (required <= node_capacity)
     return 0;
@@ -136,7 +142,79 @@ static void collapse_path(const char *in, char *out, size_t outlen) {
   out[o] = '\0';
 }
 
+static uint64_t tarfs_name_hash(const char *name) {
+  // FNV-1a 64-bit. La tabla usa capacidad potencia de dos.
+  uint64_t hash = 14695981039346656037ULL;
+  for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+    hash ^= *p;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+static int tarfs_build_name_index(void) {
+  if (node_count == 0)
+    return 0;
+  if (node_count > SIZE_MAX / 2)
+    return -1;
+
+  size_t required = node_count * 2;
+  size_t capacity = 128;
+  while (capacity < required) {
+    if (capacity > SIZE_MAX / 2)
+      return -1;
+    capacity *= 2;
+  }
+  if (capacity > SIZE_MAX / sizeof(size_t))
+    return -1;
+
+  size_t *slots = (size_t *)kzalloc(capacity * sizeof(size_t));
+  if (!slots)
+    return -1;
+
+  const size_t mask = capacity - 1;
+  for (size_t i = 0; i < node_count; i++) {
+    size_t slot = (size_t)tarfs_name_hash(nodes[i].name) & mask;
+    while (slots[slot] != 0) {
+      size_t existing = slots[slot] - 1;
+      // Mantener la semántica anterior en caso de rutas duplicadas:
+      // find_by_name devolvía la primera entrada del archivo tar.
+      if (strcmp(nodes[existing].name, nodes[i].name) == 0)
+        break;
+      slot = (slot + 1) & mask;
+    }
+    if (slots[slot] == 0)
+      slots[slot] = i + 1;
+  }
+
+  if (node_hash_slots)
+    kfree(node_hash_slots);
+  node_hash_slots = slots;
+  node_hash_capacity = capacity;
+  return 0;
+}
+
 static tar_node_t *find_by_name(const char *name) {
+  if (!name)
+    return NULL;
+
+  if (node_hash_slots && node_hash_capacity != 0) {
+    const size_t mask = node_hash_capacity - 1;
+    size_t slot = (size_t)tarfs_name_hash(name) & mask;
+
+    for (size_t probes = 0; probes < node_hash_capacity; probes++) {
+      size_t encoded_index = node_hash_slots[slot];
+      if (encoded_index == 0)
+        return NULL;
+      tar_node_t *node = &nodes[encoded_index - 1];
+      if (strcmp(node->name, name) == 0)
+        return node;
+      slot = (slot + 1) & mask;
+    }
+    return NULL;
+  }
+
+  // Fallback correcto si no hay memoria para construir el índice.
   for (size_t i = 0; i < node_count; i++) {
     if (strcmp(nodes[i].name, name) == 0)
       return &nodes[i];
@@ -148,6 +226,11 @@ static tar_node_t *find_by_name(const char *name) {
 // Init y utilidades públicas
 // ===========================================================================
 void tarfs_init(const void *tar_addr, size_t tar_size) {
+  if (node_hash_slots) {
+    kfree(node_hash_slots);
+    node_hash_slots = NULL;
+  }
+  node_hash_capacity = 0;
   if (nodes) {
     kfree(nodes);
     nodes = NULL;
@@ -246,6 +329,14 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
 
     size_t data_blocks = (file_size + 511) / 512;
     ptr += 512 + (data_blocks * 512);
+  }
+
+  if (tarfs_build_name_index() != 0) {
+    LOG_WARN("[TARFS] Sin memoria para el índice hash; usando búsqueda lineal");
+  } else {
+    LOG_INFO("[TARFS] Índice hash creado: %lu nodos, %lu casillas",
+             (unsigned long)node_count,
+             (unsigned long)node_hash_capacity);
   }
 
   LOG_INFO("[TARFS] Carga completa. %lu nodos registrados.",
