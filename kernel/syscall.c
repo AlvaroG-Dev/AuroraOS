@@ -2437,6 +2437,34 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
 #define CLOCK_REALTIME_ 0
 #define CLOCK_MONOTONIC_ 1
 
+// gettimeofday()/CLOCK_REALTIME deben conservar fracciones de segundo.
+// El RTC CMOS solo ofrece segundos enteros; anclamos esa lectura una sola
+// vez al contador monotónico del kernel y avanzamos con los ticks de 1 ms.
+// Así las duraciones medidas por Bash (time) no quedan cuantizadas a 1 s.
+static volatile uint32_t g_realtime_offset_state = 0;
+static int64_t g_realtime_offset_ms = 0;
+
+static int64_t realtime_now_ms(void) {
+  uint32_t state =
+      __atomic_load_n(&g_realtime_offset_state, __ATOMIC_ACQUIRE);
+  if (state != 2) {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(&g_realtime_offset_state, &expected, 1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      uint64_t ticks = sched_get_ticks();
+      int64_t epoch = rtc_get_epoch();
+      g_realtime_offset_ms =
+          (epoch > 0) ? (epoch * 1000LL - (int64_t)ticks) : 0;
+      __atomic_store_n(&g_realtime_offset_state, 2, __ATOMIC_RELEASE);
+    } else {
+      while (__atomic_load_n(&g_realtime_offset_state, __ATOMIC_ACQUIRE) != 2)
+        __asm__ volatile("pause");
+    }
+  }
+
+  return g_realtime_offset_ms + (int64_t)sched_get_ticks();
+}
+
 static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
                                uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -2451,16 +2479,9 @@ static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
   } ts;
 
   if (clockid == CLOCK_REALTIME_) {
-    int64_t epoch = rtc_get_epoch();
-    if (epoch == 0) {
-      // RTC no disponible: cae a segundos desde boot. Mejor que 0.
-      uint64_t t = sched_get_ticks();
-      ts.sec = (int64_t)(t / 1000);
-      ts.nsec = (int64_t)((t % 1000) * 1000000);
-    } else {
-      ts.sec = epoch;
-      ts.nsec = 0;
-    }
+    int64_t now_ms = realtime_now_ms();
+    ts.sec = now_ms / 1000;
+    ts.nsec = (now_ms % 1000) * 1000000;
   } else {
     uint64_t t = sched_get_ticks();
     ts.sec = (int64_t)(t / 1000);
@@ -2486,11 +2507,9 @@ static int64_t k_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
     if (!access_ok((void *)tv_ptr, sizeof(tv)))
       return -EFAULT;
 
-    int64_t epoch = rtc_get_epoch();
-    if (epoch == 0)
-      epoch = (int64_t)(sched_get_ticks() / 1000);
-    tv.sec = epoch;
-    tv.usec = 0;
+    int64_t now_ms = realtime_now_ms();
+    tv.sec = now_ms / 1000;
+    tv.usec = (now_ms % 1000) * 1000;
     if (copy_to_user((void *)tv_ptr, &tv, sizeof(tv)) < 0)
       return -EFAULT;
   }
@@ -2515,9 +2534,7 @@ static int64_t k_time(uint64_t tloc, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a4;
   (void)a5;
 
-  int64_t epoch = rtc_get_epoch();
-  if (epoch == 0)
-    epoch = (int64_t)(sched_get_ticks() / 1000);
+  int64_t epoch = realtime_now_ms() / 1000;
   if (tloc && copy_to_user((void *)tloc, &epoch, sizeof(epoch)) < 0)
     return -EFAULT;
   return epoch;
