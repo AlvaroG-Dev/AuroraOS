@@ -865,14 +865,6 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
   int is_noreplace = (flags & MMAP_MAP_FIXED_NOREPLACE) != 0;
   uint64_t base;
 
-  if (flags & MMAP_MAP_ANONYMOUS) {
-    // Sanity: leer 4 bytes en offset 0 del rango.
-    uint64_t probe = base;
-    uint64_t v = *(volatile uint32_t *)phys_to_virt(paging_get_phys(probe));
-    LOG_TRACE("[MMAP-ANON] base=%p first4=0x%08lx", (void *)base,
-              (unsigned long)v);
-  }
-
   if (is_fixed || is_noreplace) {
     if ((addr & 0xFFFULL) != 0)
       return -EINVAL;
