@@ -50,6 +50,12 @@ static size_t node_capacity = 0;
 static size_t *node_hash_slots = NULL;
 static size_t node_hash_capacity = 0;
 
+// Índice por directorio: cada entrada apunta a un rango de hijos directos
+// en dir_child_indices. El índice node_count representa la raíz sintética.
+static size_t *dir_child_offsets = NULL;
+static size_t *dir_child_indices = NULL;
+static size_t dir_child_count = 0;
+
 static int tarfs_grow_nodes(size_t required) {
   if (required <= node_capacity)
     return 0;
@@ -152,6 +158,98 @@ static uint64_t tarfs_name_hash(const char *name) {
   return hash;
 }
 
+
+// Construye un índice compacto de hijos directos. Sin él, readdir(i) volvía
+// a recorrer los N nodos del initrd para localizar el hijo i; getdents64
+// sobre un directorio grande acababa costando O(N * hijos^2).
+static int tarfs_build_dir_index(void) {
+  if (node_count == 0 || !node_hash_slots)
+    return -1;
+  if (node_count > SIZE_MAX / sizeof(size_t) - 2)
+    return -1;
+
+  const size_t parent_count = node_count + 1; // nodos + raíz sintética
+  size_t *counts = (size_t *)kzalloc(parent_count * sizeof(size_t));
+  size_t *parents = (size_t *)kmalloc(node_count * sizeof(size_t));
+  size_t *offsets =
+      (size_t *)kzalloc((parent_count + 1) * sizeof(size_t));
+  size_t *cursor = (size_t *)kmalloc(parent_count * sizeof(size_t));
+  size_t *children = (size_t *)kmalloc(node_count * sizeof(size_t));
+  if (!counts || !parents || !offsets || !cursor || !children) {
+    if (counts) kfree(counts);
+    if (parents) kfree(parents);
+    if (offsets) kfree(offsets);
+    if (cursor) kfree(cursor);
+    if (children) kfree(children);
+    return -1;
+  }
+
+  // Resolver el padre de cada ruta después de que nodes y el índice hash
+  // estén completos. Exigimos directorios explícitos; si el tar no los
+  // contiene, mantenemos el readdir antiguo para no alterar su semántica.
+  for (size_t i = 0; i < node_count; i++) {
+    const char *name = nodes[i].name;
+    const char *last_slash = NULL;
+    for (const char *p = name; *p; p++) {
+      if (*p == '/')
+        last_slash = p;
+    }
+
+    size_t parent_index = node_count; // raíz sintética
+    if (last_slash) {
+      size_t parent_len = (size_t)(last_slash - name);
+      if (parent_len == 0 || parent_len >= sizeof(nodes[0].name))
+        goto fail;
+
+      char parent_name[sizeof(nodes[0].name)];
+      memcpy(parent_name, name, parent_len);
+      parent_name[parent_len] = '\0';
+      tar_node_t *parent = find_by_name(parent_name);
+      if (!parent || !parent->is_dir)
+        goto fail;
+      parent_index = (size_t)(parent - nodes);
+      if (parent_index >= node_count)
+        goto fail;
+    }
+
+    parents[i] = parent_index;
+    counts[parent_index]++;
+  }
+
+  offsets[0] = 0;
+  for (size_t p = 0; p < parent_count; p++) {
+    if (offsets[p] > SIZE_MAX - counts[p])
+      goto fail;
+    offsets[p + 1] = offsets[p] + counts[p];
+  }
+  memcpy(cursor, offsets, parent_count * sizeof(size_t));
+
+  // Recorrer en orden de archive conserva el orden previo de readdir.
+  for (size_t i = 0; i < node_count; i++)
+    children[cursor[parents[i]]++] = i;
+
+  if (dir_child_offsets)
+    kfree(dir_child_offsets);
+  if (dir_child_indices)
+    kfree(dir_child_indices);
+  dir_child_offsets = offsets;
+  dir_child_indices = children;
+  dir_child_count = offsets[parent_count];
+
+  kfree(counts);
+  kfree(parents);
+  kfree(cursor);
+  return 0;
+
+fail:
+  kfree(counts);
+  kfree(parents);
+  kfree(offsets);
+  kfree(cursor);
+  kfree(children);
+  return -1;
+}
+
 static int tarfs_build_name_index(void) {
   if (node_count == 0)
     return 0;
@@ -226,6 +324,15 @@ static tar_node_t *find_by_name(const char *name) {
 // Init y utilidades públicas
 // ===========================================================================
 void tarfs_init(const void *tar_addr, size_t tar_size) {
+  if (dir_child_offsets) {
+    kfree(dir_child_offsets);
+    dir_child_offsets = NULL;
+  }
+  if (dir_child_indices) {
+    kfree(dir_child_indices);
+    dir_child_indices = NULL;
+  }
+  dir_child_count = 0;
   if (node_hash_slots) {
     kfree(node_hash_slots);
     node_hash_slots = NULL;
@@ -337,6 +444,12 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
     LOG_INFO("[TARFS] Índice hash creado: %lu nodos, %lu casillas",
              (unsigned long)node_count,
              (unsigned long)node_hash_capacity);
+    if (tarfs_build_dir_index() == 0) {
+      LOG_INFO("[TARFS] Índice de directorios creado: %lu relaciones",
+               (unsigned long)dir_child_count);
+    } else {
+      LOG_WARN("[TARFS] Sin índice de directorios; readdir usa fallback lineal");
+    }
   }
 
   LOG_INFO("[TARFS] Carga completa. %lu nodos registrados.",
@@ -506,6 +619,45 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     prefix_len = plen + 1;
   }
 
+  if (dir_child_offsets && dir_child_indices) {
+    size_t dir_index =
+        (tn == &g_tarfs_root) ? node_count : (size_t)(tn - nodes);
+    if (dir_index <= node_count) {
+      size_t start = dir_child_offsets[dir_index];
+      size_t end = dir_child_offsets[dir_index + 1];
+      if (index >= (uint64_t)(end - start)) {
+        out->name[0] = '\\0';
+        out->type = 0;
+        out->size = 0;
+        return 0;
+      }
+
+      size_t child_index = dir_child_indices[start + (size_t)index];
+      if (child_index < node_count) {
+        tar_node_t *child = &nodes[child_index];
+        const char *name = child->name;
+        if (tn != &g_tarfs_root) {
+          if (strncmp(name, tn->name, plen) == 0 && name[plen] == '/') {
+            name += plen + 1;
+          } else {
+            // Índice inválido/inconsistente: usar abajo el recorrido fiable.
+            goto readdir_slow;
+          }
+        }
+
+        size_t rlen = strlen(name);
+        if (rlen >= sizeof(out->name))
+          rlen = sizeof(out->name) - 1;
+        memcpy(out->name, name, rlen);
+        out->name[rlen] = '\\0';
+        out->type = child->is_dir ? VFS_DIRECTORY : VFS_FILE;
+        out->size = child->is_dir ? 0 : child->size;
+        return 0;
+      }
+    }
+  }
+
+readdir_slow:
   size_t n = tarfs_get_node_count();
   uint64_t seen = 0;
   for (size_t i = 0; i < n; i++) {
