@@ -78,11 +78,43 @@ task_switch:
     mov cr3, rax
 .skip_cr3:
 
-    ; [fs_base] Escribir SIEMPRE, aunque el valor sea 0.
-    ; Si no lo hacemos, un kernel thread con fs_base=0 hereda el MSR
-    ; del thread anterior (TLS de usuario), lo que corrompe %fs en
-    ; tareas sin TLS. En SMP esto contamina CPUs.
+    ; ------------------------------------------------------------------
+    ; [fs_base] Escribir SIEMPRE, con validación de canonicidad.
+    ;
+    ; Si el valor de [rsi + TASK_OFF_FS_BASE] es no canónico (cae en
+    ; el hueco 0x00008000_00000000 .. 0xFFFF7FFF_FFFFFFFF),
+    ; wrmsr(MSR_FS_BASE) dispara #GP(0) y tumba el kernel. El valor
+    ; viene de arch_prctl(ARCH_SET_FS) de userspace: lo saneamos aquí
+    ; como red de seguridad.
+    ;
+    ; Canónico = (bits 63..48 == 0 y bit 47 == 0)
+    ;          | (bits 63..48 == 0xFFFF y bit 47 == 1)
+    ; ------------------------------------------------------------------
     mov rdx, [rsi + TASK_OFF_FS_BASE]
+    mov r8, rdx
+    shr r8, 47
+    test r8b, 1
+    jz .fs_ts_low             ; bit 47 == 0
+    ; bit 47 == 1 → exigir bits 63..48 == 0xFFFF
+    mov r8, rdx
+    shr r8, 48
+    cmp r8, 0xFFFF
+    je .fs_ts_ok
+    jmp .fs_ts_zero
+.fs_ts_low:
+    mov r8, rdx
+    shr r8, 48
+    test r8, r8
+    jz .fs_ts_ok
+.fs_ts_zero:
+    ; Valor no canónico: forzar 0 y limpiar el task_t. Log 'F' por COM1.
+    push rax
+    mov al, 'F'
+    out 0x3F8, al
+    pop rax
+    xor edx, edx
+    mov [rsi + TASK_OFF_FS_BASE], rdx
+.fs_ts_ok:
     mov rax, rdx
     shr rdx, 32
     mov ecx, MSR_FS_BASE
@@ -132,8 +164,33 @@ task_jump_to:
     mov cr3, rax
 .skip_cr3_jump:
 
-    ; [fs_base] Idem: escribir siempre.
+    ; ------------------------------------------------------------------
+    ; [fs_base] Idem, validación de canonicidad antes de wrmsr.
+    ; Registro base aquí es rdi (task_jump_to solo recibe new_task).
+    ; ------------------------------------------------------------------
     mov rdx, [rdi + TASK_OFF_FS_BASE]
+    mov r8, rdx
+    shr r8, 47
+    test r8b, 1
+    jz .fs_j_low
+    mov r8, rdx
+    shr r8, 48
+    cmp r8, 0xFFFF
+    je .fs_j_ok
+    jmp .fs_j_zero
+.fs_j_low:
+    mov r8, rdx
+    shr r8, 48
+    test r8, r8
+    jz .fs_j_ok
+.fs_j_zero:
+    push rax
+    mov al, 'J'
+    out 0x3F8, al
+    pop rax
+    xor edx, edx
+    mov [rdi + TASK_OFF_FS_BASE], rdx
+.fs_j_ok:
     mov rax, rdx
     shr rdx, 32
     mov ecx, MSR_FS_BASE

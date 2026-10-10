@@ -2063,11 +2063,32 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     return 0;
   }
   if (strcmp(dir->name, "/proc/sys/kernel") == 0) {
-    if (index >= 2) {
+    static const char *l[] = {"hostname",    "printk",    "pid_max",
+                              "threads-max", "osrelease", "random"};
+    const size_t N = sizeof(l) / sizeof(l[0]);
+    if (index >= N) {
       out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
       return 0;
     }
-    const char *n = (index == 0) ? "hostname" : "printk";
+    const char *n = l[index];
+    size_t ln = strlen(n);
+    memcpy(out->name, n, ln);
+    out->name[ln] = '\0';
+    out->type = (strcmp(n, "random") == 0) ? VFS_DIRECTORY : VFS_FILE;
+    out->size = 0;
+    return 0;
+  }
+  if (strcmp(dir->name, "/proc/sys/kernel/random") == 0) {
+    static const char *l[] = {"uuid", "boot_id"};
+    if (index >= 2) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    const char *n = l[index];
     size_t ln = strlen(n);
     memcpy(out->name, n, ln);
     out->name[ln] = '\0';
@@ -2076,11 +2097,16 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     return 0;
   }
   if (strcmp(dir->name, "/proc/sys/vm") == 0) {
-    if (index >= 2) {
+    static const char *l[] = {"overcommit_memory", "max_map_count",
+                              "swap_low_pct", "swap_high_pct"};
+    const size_t N = sizeof(l) / sizeof(l[0]);
+    if (index >= N) {
       out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
       return 0;
     }
-    const char *n = (index == 0) ? "swap_low_pct" : "swap_high_pct";
+    const char *n = l[index];
     size_t ln = strlen(n);
     memcpy(out->name, n, ln);
     out->name[ln] = '\0';
@@ -2278,6 +2304,8 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
       return make_dir_node("kernel");
     if (strcmp(rest, "vm") == 0)
       return make_dir_node("vm");
+    if (strcmp(rest, "kernel/random") == 0)
+      return make_dir_node("random");
 
     // Fichero concreto: buscar en sysctl
     const sysctl_entry_t *e = sysctl_lookup(rest);

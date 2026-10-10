@@ -817,14 +817,97 @@ static int64_t k_mkdir(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
   return vfs_mkdir(p, m);
 }
 
+// Resuelve `upath` (puntero de usuario) relativo a `dfd`. AT_FDCWD => cwd.
+static int resolve_at_path(process_t *proc, int dfd, const char *upath,
+                           char *out, size_t outlen) {
+  if (dfd == AT_FDCWD)
+    return resolve_user_path(proc, upath, out, outlen);
+  if (dfd < 0 || dfd >= MAX_PROCESS_FDS || !proc->fds[dfd])
+    return -EBADF;
+  vfs_node_t *dir_node = proc->fds[dfd]->node;
+  if (!dir_node || !(dir_node->flags & VFS_DIRECTORY))
+    return -ENOTDIR;
+
+  char rel[VFS_PATH_MAX];
+  long n = strncpy_from_user(rel, upath, sizeof(rel));
+  if (n < 0)
+    return -EFAULT;
+  if (n == 0)
+    return -EINVAL;
+  if (rel[0] == '/')
+    return vfs_resolve_path("/", rel, out, outlen);
+
+  char full[VFS_PATH_MAX];
+  const char *base = dir_node->name;
+  size_t bl = strlen(base), rl = strlen(rel);
+  int root = (bl == 1 && base[0] == '/');
+  if ((root ? 1 + rl + 1 : bl + 1 + rl + 1) > sizeof(full))
+    return -ENAMETOOLONG;
+  if (root) {
+    full[0] = '/';
+    memcpy(full + 1, rel, rl + 1);
+  } else {
+    memcpy(full, base, bl);
+    full[bl] = '/';
+    memcpy(full + bl + 1, rel, rl + 1);
+  }
+  return vfs_resolve_path("/", full, out, outlen);
+}
+
 static int64_t k_mkdirat(uint64_t dfd, uint64_t path, uint64_t mode,
                          uint64_t a4, uint64_t a5) {
-  (void)mode;
   (void)a4;
   (void)a5;
-  if ((int)dfd != AT_FDCWD)
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char p[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)dfd, (const char *)path, p, sizeof(p));
+  if (rc != 0)
+    return rc;
+  uint32_t m = (uint32_t)mode ? (uint32_t)mode : 0777;
+  return vfs_mkdir(p, m & ~proc->umask);
+}
+
+static int64_t k_unlinkat(uint64_t dfd, uint64_t path, uint64_t flags,
+                          uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (flags & ~(uint64_t)AT_REMOVEDIR)
     return -EINVAL;
-  return k_mkdir(path, 0, 0, 0, 0);
+  char p[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)dfd, (const char *)path, p, sizeof(p));
+  if (rc != 0)
+    return rc;
+  vfs_node_t *n = vfs_lookup_nofollow(p);
+  if (!n)
+    return -ENOENT;
+  int is_dir = (n->flags & VFS_DIRECTORY) != 0;
+  vfs_node_free(n);
+  if ((flags & AT_REMOVEDIR) && !is_dir)
+    return -ENOTDIR;
+  if (!(flags & AT_REMOVEDIR) && is_dir)
+    return -EISDIR;
+  return vfs_unlink(p);
+}
+
+static int64_t k_renameat(uint64_t odfd, uint64_t oldp, uint64_t ndfd,
+                          uint64_t newp, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char op[VFS_PATH_MAX], np[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)odfd, (const char *)oldp, op, sizeof(op));
+  if (rc != 0)
+    return rc;
+  rc = resolve_at_path(proc, (int)ndfd, (const char *)newp, np, sizeof(np));
+  if (rc != 0)
+    return rc;
+  return vfs_rename(op, np);
 }
 
 static int64_t k_unlink(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -843,16 +926,6 @@ static int64_t k_unlink(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
   return vfs_unlink(p);
 }
 
-static int64_t k_unlinkat(uint64_t dfd, uint64_t path, uint64_t flags,
-                          uint64_t a4, uint64_t a5) {
-  (void)flags;
-  (void)a4;
-  (void)a5;
-  if ((int)dfd != AT_FDCWD)
-    return -EINVAL;
-  return k_unlink(path, 0, 0, 0, 0);
-}
-
 static int64_t k_rename(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a3;
@@ -869,14 +942,6 @@ static int64_t k_rename(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
   if (rc != 0)
     return rc;
   return vfs_rename(op, np);
-}
-
-static int64_t k_renameat(uint64_t odfd, uint64_t oldp, uint64_t ndfd,
-                          uint64_t newp, uint64_t a5) {
-  (void)a5;
-  if ((int)odfd != AT_FDCWD || (int)ndfd != AT_FDCWD)
-    return -EINVAL;
-  return k_rename(oldp, newp, 0, 0, 0);
 }
 
 // ---------- chdir / getcwd ----------
@@ -1011,12 +1076,12 @@ static int64_t k_mremap(uint64_t old_addr, uint64_t old_size, uint64_t new_size,
 //   hacemos nada (el contenido sigue accesible — degradación benigna).
 static int64_t k_madvise(uint64_t addr, uint64_t len, uint64_t advice,
                          uint64_t a4, uint64_t a5) {
-  (void)addr;
-  (void)len;
-  (void)advice;
   (void)a4;
   (void)a5;
-  return 0;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return sys_madvise(proc, addr, len, advice);
 }
 
 static int64_t k_brk(uint64_t addr, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -1993,11 +2058,19 @@ static int64_t k_arch_prctl(uint64_t code, uint64_t addr, uint64_t a3,
 
   switch (code) {
   case ARCH_SET_FS:
+    // [FIX #GP] El FS base DEBE ser una dirección canónica de userspace.
+    // Si no lo es, wrmsr(MSR_FS_BASE) dispara #GP(0) y tumba el kernel.
+    // git y glibc pueden pasar valores corruptos si hay un bug en el
+    // loader o en la inicialización de TLS, y el kernel no debe morir
+    // por ello — debe rechazarlo con -EPERM.
+    if (!paging_is_canonical(addr)) {
+      LOG_WARN("[ARCH_PRCTL] ARCH_SET_FS con valor no canónico: %p",
+               (void *)addr);
+      return -EPERM;
+    }
     proc->fs_base = addr;
     if (proc->task)
       proc->task->fs_base = addr;
-    // Escribimos directamente el MSR. En SMP, switch.asm restaura el
-    // valor correcto al cambiar de tarea.
     wrmsr(0xC0000100, addr);
     return 0;
 
@@ -3615,6 +3688,87 @@ static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
   if (!child)
     return -ENOMEM;
   return (int64_t)child->id;
+}
+
+// ---------------------------------------------------------------------------
+// clone3(2) x86_64.
+//
+//   struct clone_args {
+//     __u64 flags;           // 0x00
+//     __u64 pidfd;           // 0x08
+//     __u64 child_tid;       // 0x10
+//     __u64 parent_tid;      // 0x18
+//     __u64 exit_signal;     // 0x20
+//     __u64 stack;           // 0x28
+//     __u64 stack_size;      // 0x30
+//     __u64 tls;             // 0x38
+//     __u64 set_tid;         // 0x40  (VER1)
+//     __u64 set_tid_size;    // 0x48  (VER1)
+//     __u64 cgroup;          // 0x50  (VER2)
+//   };
+//
+// Linux acepta structs de tamaño 64 (VER0), 72 (VER1), 80 (VER2) u 88
+// (VER3) y zero-rellena lo que no venga. La parte que nos interesa
+// (hasta tls) siempre está en VER0, así que con size >= 64 vamos sobrados.
+//
+// Estrategia:
+//   - CLONE_PIDFD y CLONE_INTO_CGROUP no soportados → -EINVAL.
+//     glibc cae a clone() si ve EINVAL (nptl/clone3.c).
+//   - set_tid / set_tid_size: los ignoramos. glibc 2.35+ lo pasa para
+//     "reservar" un tid, pero lee el tid real de CLONE_PARENT_SETTID o
+//     CLONE_CHILD_SETTID, así que no le importa que no respetemos su
+//     petición.
+//   - stack/stack_size: clone3 pasa base+tamaño; clone() clásico espera
+//     el TOP. Convertimos stack_top = stack + stack_size.
+// ---------------------------------------------------------------------------
+#define CLONE_ARGS_SIZE_VER0 64
+
+struct k_clone_args {
+  uint64_t flags;
+  uint64_t pidfd;
+  uint64_t child_tid;
+  uint64_t parent_tid;
+  uint64_t exit_signal;
+  uint64_t stack;
+  uint64_t stack_size;
+  uint64_t tls;
+  uint64_t set_tid;
+  uint64_t set_tid_size;
+  uint64_t cgroup;
+};
+
+static int64_t k_clone3(uint64_t uargs, uint64_t size, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (size < CLONE_ARGS_SIZE_VER0)
+    return -EINVAL;
+  if (size > sizeof(struct k_clone_args))
+    size = sizeof(struct k_clone_args);
+  if (!access_ok((void *)uargs, (size_t)size))
+    return -EFAULT;
+
+  struct k_clone_args args;
+  memset(&args, 0, sizeof(args));
+  if (copy_from_user(&args, (void *)uargs, (size_t)size) < 0)
+    return -EFAULT;
+
+  // Features que no tenemos. glibc cae a clone() con EINVAL.
+  if (args.flags & (CLONE_PIDFD | CLONE_INTO_CGROUP)) {
+    LOG_WARN("[CLONE3] flags no soportados: 0x%lx",
+             (unsigned long)(args.flags & (CLONE_PIDFD | CLONE_INTO_CGROUP)));
+    return -EINVAL;
+  }
+
+  // Reutilizamos el camino de clone(2) clásico.
+  uint64_t stack_top = args.stack + args.stack_size;
+  if (stack_top < args.stack)
+    return -EINVAL;
+
+  return k_clone(args.flags, stack_top, args.parent_tid, args.child_tid,
+                 args.tls);
 }
 
 static int64_t k_exit(uint64_t code, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -5495,6 +5649,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_MEMFD_CREATE] = {k_memfd_create, "memfd_create"}, // 319
     [SYS_RSEQ] = {k_rseq, "rseq"},
     [SYS_CLONE] = {k_clone, "clone"},
+    [SYS_CLONE3] = {k_clone3, "clone3"},
     [SYS_FORK] = {k_fork, "fork"},
     [SYS_VFORK] = {k_vfork, "vfork"},
     [SYS_PIVOT_ROOT] = {k_pivot_root, "pivot_root"},

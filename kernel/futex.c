@@ -85,7 +85,27 @@ void futex_init(void) {
   spin_init(&futex_table_lock);
 }
 
-static int64_t futex_do_wait(uint64_t uaddr, uint32_t val, int64_t timeout_ns) {
+// ---------------------------------------------------------------------------
+// [A.1.3] futex_do_wait_impl: núcleo compartido de FUTEX_WAIT y
+// FUTEX_WAIT_BITSET.
+//
+//   timeout_ns < 0  → esperar indefinidamente.
+//   timeout_ns == 0 → no bloquear, retornar -ETIMEDOUT.
+//   timeout_ns > 0  → dormir hasta el deadline.
+//
+//   absolute == 0 → timeout relativo (FUTEX_WAIT).
+//   absolute == 1 → timeout absoluto contra CLOCK_MONOTONIC
+//                   (FUTEX_WAIT_BITSET). Lo convertimos ns→ticks
+//                   (KERNEL_HZ = 1000) y comparamos con el reloj
+//                   monotónico del kernel.
+//
+// El bitset del waiter lo ignoramos. Todos los bitsets que usa glibc
+// son FUTEX_BITSET_MATCH_ANY, así que no hay wakeups cruzados en la
+// práctica. Si en el futuro aparece un caso real, hay que añadir
+// bitset al futex_entry_t y filtrar en futex_do_wake.
+// ---------------------------------------------------------------------------
+static int64_t futex_do_wait_impl(uint64_t uaddr, uint32_t val,
+                                  int64_t timeout_ns, int absolute) {
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -110,10 +130,20 @@ static int64_t futex_do_wait(uint64_t uaddr, uint32_t val, int64_t timeout_ns) {
 
   uint64_t deadline = 0;
   if (timeout_ns > 0) {
-    uint64_t ticks = (uint64_t)timeout_ns / 1000000ULL;
-    if (ticks == 0)
-      ticks = 1;
-    deadline = sched_get_ticks() + ticks;
+    uint64_t now = sched_get_ticks();
+    if (absolute) {
+      // timeout_ns es tiempo absoluto (ns) desde CLOCK_MONOTONIC.
+      // sched_get_ticks() está en ms, así que ns/1e6 = ticks.
+      uint64_t target_ticks = (uint64_t)timeout_ns / 1000000ULL;
+      if (target_ticks <= now)
+        return -ETIMEDOUT;
+      deadline = target_ticks;
+    } else {
+      uint64_t ticks = (uint64_t)timeout_ns / 1000000ULL;
+      if (ticks == 0)
+        ticks = 1;
+      deadline = now + ticks;
+    }
   }
 
   // Registro atómico: bajo wq->lock re-checkeamos el valor y nos
@@ -145,6 +175,11 @@ static int64_t futex_do_wait(uint64_t uaddr, uint32_t val, int64_t timeout_ns) {
   return 0;
 }
 
+// Wrapper para FUTEX_WAIT (timeout relativo).
+static int64_t futex_do_wait(uint64_t uaddr, uint32_t val, int64_t timeout_ns) {
+  return futex_do_wait_impl(uaddr, val, timeout_ns, /*absolute=*/0);
+}
+
 static int futex_do_wake(uint64_t uaddr, uint32_t nr_wake, uint64_t pml4) {
   futex_entry_t *entry = futex_lookup(uaddr, pml4);
   if (!entry)
@@ -168,7 +203,6 @@ void futex_wake_user(uint64_t uaddr, int nr_wake, uint64_t pml4) {
 int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
                   uint64_t timeout_uptr, uint64_t uaddr2, uint64_t val3) {
   (void)uaddr2;
-  (void)val3;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -179,32 +213,67 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
   // es lo que asumimos siempre.
   uint32_t cmd = (uint32_t)op & 0x7F;
 
-  switch (cmd) {
-  case FUTEX_WAIT: {
-    int64_t timeout_ns = -1;
-    if (timeout_uptr) {
-      struct {
-        int64_t sec;
-        int64_t nsec;
-      } ts;
-      if (!access_ok((void *)timeout_uptr, sizeof(ts)))
-        return -EFAULT;
-      if (copy_from_user(&ts, (void *)timeout_uptr, sizeof(ts)) < 0)
-        return -EFAULT;
-      if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1000000000LL)
-        return -EINVAL;
-      timeout_ns = ts.sec * 1000000000LL + ts.nsec;
-    }
-    return futex_do_wait(uaddr, (uint32_t)val, timeout_ns);
+  // [A.1.3] Helper local: parsea el struct timespec de un puntero de
+  // usuario y devuelve ns (o -1 si timeout_uptr == NULL, o error
+  // negativo). Reusado por WAIT y WAIT_BITSET.
+  int64_t timeout_ns = -1;
+  if (timeout_uptr) {
+    struct {
+      int64_t sec;
+      int64_t nsec;
+    } ts;
+    if (!access_ok((void *)timeout_uptr, sizeof(ts)))
+      return -EFAULT;
+    if (copy_from_user(&ts, (void *)timeout_uptr, sizeof(ts)) < 0)
+      return -EFAULT;
+    if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1000000000LL)
+      return -EINVAL;
+    timeout_ns = ts.sec * 1000000000LL + ts.nsec;
   }
+
+  switch (cmd) {
+  case FUTEX_WAIT:
+    return futex_do_wait(uaddr, (uint32_t)val, timeout_ns);
+
   case FUTEX_WAKE:
     return futex_do_wake(uaddr, (uint32_t)val, pml4);
+
+  // [A.1.3] FUTEX_WAIT_BITSET: FUTEX_WAIT con timeout ABSOLUTO contra
+  // CLOCK_MONOTONIC. val3 = bitset. Ignoramos el bitset de match
+  // (ver comentario en futex_do_wait_impl).
+  //
+  // NO rechazamos FUTEX_CLOCK_REALTIME (bit 8). glibc lo pasa con
+  // pthread_cond_* cuando el cond var se configuró con CLOCK_REALTIME,
+  // y también lo pasa incondicionalmente en algunas rutas internas del
+  // loader. Si devolvemos -ENOSYS, glibc NO cae a futex_wait: en
+  // __futex_abstimed_wait_common64 con abstime != NULL convierte el
+  // -ENOSYS en -ENOTSUP, y pthread_cond_wait hace __libc_fatal →
+  // abort() → SIGABRT. Eso es exactamente el "The futex facility
+  // returned an unexpected error code" que veíamos.
+  //
+  // Limitación: si el timeout es no-NULL y era CLOCK_REALTIME, lo
+  // interpretamos como si fuera CLOCK_MONOTONIC → expiraremos tarde
+  // (años, porque REALTIME ≈ 1.7e9 s vs MONOTONIC ≈ 100 s). Para
+  // abstime == NULL (el caso común en Python/C) el resultado es
+  // idéntico. Cuando aparezca un caller real que dependa de
+  // CLOCK_REALTIME con timeout, implementamos la conversión
+  // REALTIME→MONOTONIC usando rtc_get_epoch() + sched_get_ticks().
+  case FUTEX_WAIT_BITSET: {
+    if ((uint32_t)val3 == 0)
+      return -EINVAL;
+    return futex_do_wait_impl(uaddr, (uint32_t)val, timeout_ns,
+                              /*absolute=*/1);
+  }
+
+  case FUTEX_WAKE_BITSET: {
+    if ((uint32_t)val3 == 0)
+      return -EINVAL;
+    return futex_do_wake(uaddr, (uint32_t)val, pml4);
+  }
 
   case FUTEX_REQUEUE:
   case FUTEX_CMP_REQUEUE:
   case FUTEX_WAKE_OP:
-  case FUTEX_WAIT_BITSET:
-  case FUTEX_WAKE_BITSET:
     LOG_WARN("[FUTEX] op %u no soportada", cmd);
     return -ENOSYS;
 
@@ -212,6 +281,7 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
     return -ENOSYS;
   }
 }
+
 void futex_cleanup_pml4(uint64_t pml4) {
   if (!pml4)
     return;

@@ -243,11 +243,23 @@ image: bootloader kernel user
 	cp bootloader/BOOTX64.EFI esp/EFI/BOOT/
 	cp kernel/kernel.elf esp/
 	cp bootloader/aurora.conf esp/etc/aurora.conf
-	dd if=/dev/zero of=aurora.img bs=1M count=256
-	mkfs.fat -F 32 -s 4 -S 512 aurora.img
-	mcopy -i aurora.img -s esp/EFI ::
-	mcopy -i aurora.img -s esp/kernel.elf ::
-	mcopy -i aurora.img -s esp/etc ::
+
+# Solo creamos aurora.img si no existe. Si ya existe, la reutilizamos
+# tal cual: los ficheros del usuario en /data sobreviven a cada build.
+	@if [ ! -f aurora.img ]; then \
+		echo "[Makefile] Creando aurora.img (primera vez, 256 MB)..."; \
+		dd if=/dev/zero of=aurora.img bs=1M count=256 status=none; \
+		mkfs.fat -F 32 -s 4 -S 512 aurora.img >/dev/null; \
+	else \
+		echo "[Makefile] Reutilizando aurora.img existente (persistente)"; \
+	fi
+
+# -o = sobrescribe sin preguntar
+# -s = copia recursiva (necesario para EFI/ y etc/)
+# Solo actualiza estos paths. Todo lo demás en el FS queda intacto.
+	mcopy -i aurora.img -o -s esp/EFI ::
+	mcopy -i aurora.img -o esp/kernel.elf ::
+	mcopy -i aurora.img -o -s esp/etc ::
 
 # ---------------------------------------------------------------------------
 # QEMU flags

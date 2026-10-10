@@ -224,6 +224,11 @@ long wait_event_interruptible_timeout(wait_queue_t *wq, bool (*cond)(void *),
   return wait_common(wq, cond, arg, true, timeout_ticks);
 }
 
+long wait_event_timeout(wait_queue_t *wq, bool (*cond)(void *), void *arg,
+                        uint64_t timeout_ticks) {
+  return wait_common(wq, cond, arg, false, timeout_ticks);
+}
+
 int wait_event_interruptible(wait_queue_t *wq, bool (*cond)(void *),
                              void *arg) {
   long r = wait_common(wq, cond, arg, true, 0);
@@ -301,7 +306,7 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
   spin_unlock_irqrestore(&wq->lock, flags);
 }
 
-void wake_up_one_locked(wait_queue_t *wq) {
+void wake_up_one_direct_locked(wait_queue_t *wq) {
   if (wq->head) {
     wait_queue_entry_t *e = wq->head;
     wq->head = e->next;
@@ -314,6 +319,10 @@ void wake_up_one_locked(wait_queue_t *wq) {
     sched_make_ready(t);
     task_put(t);
   }
+}
+
+void wake_up_one_locked(wait_queue_t *wq) {
+  wake_up_one_direct_locked(wq);
   // [epoll] Cascada a suscriptores, incluso si no había waiter directo.
   for (wait_queue_sub_t *s = wq->subs; s; s = s->next) {
     if (s->target && s->target != wq) {

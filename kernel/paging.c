@@ -22,10 +22,6 @@ static spinlock_t paging_lock;
 /* Test-only allocation fault injection. -1 disables it; 0 fails now. */
 static int paging_test_fail_alloc_after = -1;
 
-static inline int paging_is_canonical(uint64_t virt) {
-  return virt <= 0x00007FFFFFFFFFFFULL || virt >= 0xFFFF800000000000ULL;
-}
-
 void paging_invalidate_tlb_global(uint64_t virt) {
   if (virt == 0) {
     // Full flush: recargar CR3 en todos los CPUs. Es lo más simple
