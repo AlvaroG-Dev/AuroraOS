@@ -97,13 +97,15 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	          sysroot/data sysroot/root
 
 # ---------------------------------------------------------------------------
-# /tmp y /var/tmp: bind mount a /data/tmp (FAT32 RW).
-# El kernel lo monta en vfs_init() tras montar /data. Aquí solo dejamos
-# /var como directorio normal (por si alguien lee /var antes de que
-# el bind esté activo).
+# /etc, /tmp, /var, /run son tmpfs en runtime (ver kernel/tmpfs.c).
+# El tarfs solo aporta /etc/ld.so.cache (immutable, generado por
+# ldconfig). tmpfs_init() lo lee de tarfs antes de shadow-ear /etc
+# con el tmpfs y lo reescribe dentro.
+#
+# No creamos /tmp, /var ni /run en el tar: los mounts viven en la
+# tabla de mounts y no necesitan entry previa en el FS subyacente.
 # ---------------------------------------------------------------------------
-	@mkdir -p sysroot/var
-	@rm -rf sysroot/tmp sysroot/var/tmp sysroot/data/tmp
+	@rm -rf sysroot/tmp sysroot/var sysroot/run sysroot/data/tmp
 
 # ---------------------------------------------------------------------------
 # 1. (Sin busybox — userspace es 100% glibc/Ubuntu)
@@ -186,14 +188,12 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# [bash] Ficheros de config que bash espera. Sin ellos, bash sale con
-# exit(1) al no poder leer /etc/profile ni /root/.bashrc.
+# [bash] /etc/passwd, /etc/group, /etc/profile ahora los crea
+# tmpfs_init() en runtime. Solo dejamos /root/.bashrc y
+# /root/.profile porque /root NO es tmpfs: vive en tarfs.
 # ---------------------------------------------------------------------------
-	@echo "[Makefile] Creando config de bash..."
-	@mkdir -p sysroot/etc sysroot/root
-	@[ -f sysroot/etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\n' > sysroot/etc/passwd
-	@[ -f sysroot/etc/group ]  || printf 'root:x:0:\n' > sysroot/etc/group
-	@[ -f sysroot/etc/profile ] || printf '# /etc/profile (empty)\n' > sysroot/etc/profile
+	@echo "[Makefile] Creando .bashrc/.profile de root..."
+	@mkdir -p sysroot/root
 	@[ -f sysroot/root/.bashrc ] || printf '# ~/.bashrc (empty)\n' > sysroot/root/.bashrc
 	@[ -f sysroot/root/.profile ] || printf '# ~/.profile (empty)\n' > sysroot/root/.profile
 	
@@ -209,6 +209,9 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 # cada .so con un solo open(), en vez de probar glibc-hwcaps/v3, /v2,
 # base, usr/lib, ... por cada lib. En el guest elimina ~50 opens
 # fallidos por exec (visible en el serial como OPEN-FAIL en cascada).
+# Nota: /etc es tmpfs en runtime, pero el ld.so.cache se genera AQUI en
+# build time y se mete en el tar. tmpfs_init() lo lee de tarfs y lo
+# reescribe dentro del tmpfs antes de ceder el control a userland.
 #
 # `ldconfig -r sysroot` hace chroot lógico a sysroot y escribe
 # sysroot/etc/ld.so.cache con paths relativos a ese root (p. ej.
