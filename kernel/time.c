@@ -5,6 +5,7 @@
 #include "klog.h"
 #include "panic.h"
 #include "sched.h"
+#include "vdso.h"
 
 // ---------------------------------------------------------------------------
 // tick_count: contador global de ticks. Lo incrementa el handler del
@@ -75,6 +76,7 @@ void time_tick(void) {
   // desde CPU 0. El resto solo actualiza su contador y hace sched_tick.
   if (cpu == 0) {
     tick_count++;
+    vdso_update_clock(); // ← NUEVO
     if (tick_count % KERNEL_HZ == 0) {
       compositor_notify_clock_tick();
     }

@@ -18,6 +18,7 @@
 #include "swap.h"
 #include "tarfs.h"
 #include "uaccess.h"
+#include "vdso.h"
 #include "vfs.h"
 #include "wait.h"
 #include <stddef.h>
@@ -307,10 +308,11 @@ static void process_init_signals(process_t *proc) {
 // process_spawn_streaming_* justo después de elf_load_streaming.
 // ---------------------------------------------------------------------------
 typedef struct {
-  uint64_t phdr_vaddr; // AT_PHDR
-  uint64_t entry;      // AT_ENTRY
-  uint16_t phnum;      // AT_PHNUM
-  uint16_t phent;      // AT_PHENT
+  uint64_t phdr_vaddr;
+  uint64_t entry;
+  uint16_t phnum;
+  uint16_t phent;
+  uint64_t vdso_base; // ← NUEVO
 } proc_auxv_info_t;
 
 // ---------------------------------------------------------------------------
@@ -374,7 +376,7 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
     execfn_len = 4096;
 
   // --- Tamaños de cada zona ---
-  const int N_AUXV_TOTAL = 18; // 17 entradas reales + AT_NULL
+  const int N_AUXV_TOTAL = 19; // 18 entradas reales + AT_NULL
 
   uint64_t argc_sz = 8;
   uint64_t argv_sz = ((uint64_t)argc + 1) * 8;
@@ -465,7 +467,8 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
   PUSH_AUXV(4, ai ? (uint64_t)ai->phent : 0); // AT_PHENT
   PUSH_AUXV(5, ai ? (uint64_t)ai->phnum : 0); // AT_PHNUM
   PUSH_AUXV(6, PAGE_SIZE);                    // AT_PAGESZ
-  PUSH_AUXV(7, at_base);                      // AT_BASE ← CAMBIO
+  PUSH_AUXV(7, at_base);                      // AT_BASE
+  PUSH_AUXV(33, ai ? ai->vdso_base : 0);      // AT_SYSINFO_EHDR ← NUEVO
   PUSH_AUXV(8, 0);                            // AT_FLAGS
   PUSH_AUXV(9, ai ? ai->entry : 0);           // AT_ENTRY
   PUSH_AUXV(11, 0);                           // AT_UID
@@ -903,11 +906,19 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     }
   }
 
+  // [C] vDSO. Mapeado en el nuevo pml4. Se hace DESPUES del ELF
+  // para que no colisione con ningun segmento (VDSO_VMA_BASE esta
+  // muy por encima del interp).
+  uint64_t vdso_base = vdso_map_in(pml4);
+  if (!vdso_base)
+    LOG_WARN("[PROC] vdso_map_in fallo, AT_SYSINFO_EHDR=0");
+
   proc_auxv_info_t ai = {
       .phdr_vaddr = phdr_vaddr,
       .entry = entry,
       .phnum = phnum,
       .phent = phent,
+      .vdso_base = vdso_base, // ← NUEVO
   };
   uint64_t user_rsp = setup_arg_block(pml4, stack_top, argc, argv, envc, envp,
                                       &ai, name, at_base);
@@ -2290,11 +2301,16 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     }
   }
 
+  uint64_t vdso_base = vdso_map_in(new_pml4);
+  if (!vdso_base)
+    LOG_WARN("[EXECVE] vdso_map_in fallo");
+
   proc_auxv_info_t ai = {
       .phdr_vaddr = phdr_vaddr,
       .entry = entry,
       .phnum = phnum,
       .phent = phent,
+      .vdso_base = vdso_base,
   };
   uint64_t user_rsp = setup_arg_block(new_pml4, stack_top, argc, argv, envc,
                                       envp, &ai, path, at_base);

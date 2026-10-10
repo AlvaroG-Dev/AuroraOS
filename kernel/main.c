@@ -42,6 +42,7 @@
 #include "test.h"
 #include "time.h"
 #include "tty.h"
+#include "vdso.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -503,6 +504,10 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] RTC CMOS... ");
   rtc_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] vDSO... ");
+  vdso_init();
   LOG_INFO("OK");
 
   LOG_INFO("[INIT] Iniciando Scheduler...");

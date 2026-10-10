@@ -719,7 +719,8 @@ void paging_free_user_space(uint64_t pml4_phys) {
         for (int l = 0; l < 512; l++) {
           uint64_t raw = pt[l];
           if (raw & PTE_PRESENT) {
-            pmm_free_page(raw & PTE_FRAME);
+            if (!(raw & PTE_SPECIAL))
+              pmm_free_page(raw & PTE_FRAME);
             pt[l] = 0;
           } else if (pte_is_swap(raw)) {
             // [FIX] Página en swap. Liberar el slot; si no, queda
