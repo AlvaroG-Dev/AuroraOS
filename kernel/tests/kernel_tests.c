@@ -4624,7 +4624,7 @@ static void test_fat32_rename_move_dir(void) {
 REGISTER_TEST("fat32: rename mover dentro de dir", test_fat32_rename_move_dir);
 
 // ===========================================================================
-// [RENAME] errores esperados.
+// [RENAME] errores y reemplazo POSIX.
 // ===========================================================================
 static void test_fat32_rename_errors(void) {
   block_device_t *b = fat32_find_test_disk();
@@ -4642,17 +4642,28 @@ static void test_fat32_rename_errors(void) {
   int rc = vfs_rename("/fat_test/no_existe.txt", "/fat_test/x.txt");
   TEST_ASSERT(rc == -ENOENT, "src inexistente devolvió %d", rc);
 
-  // dst existe → -EEXIST
+  // POSIX rename reemplaza un destino regular existente; Git lo necesita
+  // para publicar atómicamente el índice actualizado.
   TEST_ASSERT(vfs_create("/fat_test/re1.txt", O_CREAT) == 0, "create 1");
   TEST_ASSERT(vfs_create("/fat_test/re2.txt", O_CREAT) == 0, "create 2");
   rc = vfs_rename("/fat_test/re1.txt", "/fat_test/re2.txt");
-  TEST_ASSERT(rc == -EEXIST, "dst existente devolvió %d", rc);
+  TEST_ASSERT(rc == 0, "reemplazar dst existente devolvió %d", rc);
+
+  vfs_node_t *src = vfs_lookup("/fat_test/re1.txt");
+  TEST_ASSERT(src == NULL, "src sigue existiendo tras rename");
+  if (src)
+    vfs_node_free(src);
+  vfs_node_t *dst = vfs_lookup("/fat_test/re2.txt");
+  TEST_ASSERT(dst != NULL, "dst no existe tras rename");
+  if (dst)
+    vfs_node_free(dst);
 
   vfs_unlink("/fat_test/re1.txt");
   vfs_unlink("/fat_test/re2.txt");
   fat32_test_cleanup();
 }
-REGISTER_TEST("fat32: rename errores esperados", test_fat32_rename_errors);
+REGISTER_TEST("fat32: rename reemplaza destino existente",
+              test_fat32_rename_errors);
 
 static void test_vfs_resolve_path(void) {
   char out[VFS_PATH_MAX];

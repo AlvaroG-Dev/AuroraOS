@@ -93,6 +93,10 @@ static inline uint64_t *phys_to_ptr(uint64_t phys) {
   return (uint64_t *)phys_to_virt(phys);
 }
 
+static inline int paging_is_canonical(uint64_t virt) {
+  return virt <= 0x00007FFFFFFFFFFFULL || virt >= 0xFFFF800000000000ULL;
+}
+
 // ---------------------------------------------------------------------------
 // Huge pages (2 MB) para el mapeo de la ventana física
 // ---------------------------------------------------------------------------

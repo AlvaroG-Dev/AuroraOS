@@ -1073,3 +1073,88 @@ int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
   (void)sys_munmap(proc, old_addr, old_size);
   return dst;
 }
+
+// ---------------------------------------------------------------------------
+// [A.2] madvise(2).
+//
+// Los hints (NORMAL/RANDOM/SEQUENTIAL/WILLNEED) son no-ops: no cambian
+// el comportamiento visible para el usuario en un SO sin readahead ni
+// swap predictivo.
+//
+// MADV_DONTDUMP/MADV_DODUMP: no tenemos core dumps → no-op.
+//
+// MADV_DONTNEED y MADV_FREE: liberamos la página física y desmapeamos
+// el PTE. La próxima falta:
+//   - VMA_ANON/STACK → alloc_user_page_zeroed() en try_vma_demand.
+//   - VMA_FILE      → file->node->ops->read() en try_vma_demand.
+//
+// Con una salvedad: páginas que NO están dentro de ningún VMA (la
+// región brk que glibc gestiona con sbrk) NO se tocan. Si las
+// liberásemos, la siguiente escritura dispararía un #PF que el
+// handler no sabe resolver (no hay VMA) y mataría el proceso.
+//
+// MADV_FREE es semánticamente "libera cuando haga falta". Como no
+// tenemos presión de memoria diferida, lo tratamos igual que
+// DONTNEED. El observable (próximo acceso da 0 o re-lee) es idéntico.
+// ---------------------------------------------------------------------------
+int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len,
+                    uint64_t advice) {
+  if (!proc)
+    return -EINVAL;
+
+  if (len == 0)
+    return 0;
+
+  if (addr > UINT64_MAX - len)
+    return -EINVAL;
+  uint64_t start = addr & ~0xFFFULL;
+  uint64_t end = (addr + len + 0xFFFULL) & ~0xFFFULL;
+  if (end < start)
+    return -EINVAL;
+  if (start >= USER_LIMIT || end > USER_LIMIT)
+    return -EINVAL;
+
+  switch (advice) {
+  case MADV_NORMAL:
+  case MADV_RANDOM:
+  case MADV_SEQUENTIAL:
+  case MADV_WILLNEED:
+  case MADV_DONTDUMP:
+  case MADV_DODUMP:
+    return 0;
+
+  case MADV_DONTNEED:
+  case MADV_FREE: {
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+    uint64_t freed = 0, skipped = 0;
+    for (uint64_t p = start; p < end; p += PAGE_SIZE) {
+      // Páginas fuera de VMA (brk, principalmente): intocables.
+      if (!vma_find(proc, p)) {
+        skipped++;
+        continue;
+      }
+
+      uint64_t raw;
+      if (paging_get_pte_in(pml4, p, &raw) && pte_is_swap(raw)) {
+        swap_free_slot(pte_swap_type(raw), pte_swap_offset(raw));
+        paging_set_pte_in(pml4, p, 0);
+        freed++;
+        continue;
+      }
+      uint64_t phys = paging_get_phys_in(pml4, p);
+      if (phys) {
+        paging_unmap_page_in(pml4, p);
+        pmm_free_page(phys);
+        freed++;
+      }
+    }
+    LOG_TRACE("[MADV] pid=%u [%p,%p) advice=%lu free=%lu skip=%lu", proc->pid,
+              (void *)start, (void *)end, (unsigned long)advice,
+              (unsigned long)freed, (unsigned long)skipped);
+    return 0;
+  }
+
+  default:
+    return -EINVAL;
+  }
+}

@@ -1489,6 +1489,73 @@ static vfs_ops_t dev_kmsg_ops = {
     .write = dev_kmsg_write,
 };
 
+// ---------------------------------------------------------------------------
+// [GIT] /dev/urandom y /dev/random.
+//
+// Muchas herramientas (git, gpg, openssl, python's os.urandom) leen de
+// estos nodos para obtener entropía. Git, en particular, los usa para
+// generar nombres de tempfiles (mks_tempfile → "tmp_obj_XXXXXX").
+// Sin ellos, `git add` aborta con:
+//   error: unable to get random bytes for temporary file:
+//          No such file or directory
+//
+// Implementación: xorshift64 sembrado con RDTSC. NO es
+// criptográficamente fuerte — no lo pretende ser en este SO. Devuelve
+// bytes no repetitivos y rompe el ENOENT.
+// ---------------------------------------------------------------------------
+
+static uint64_t g_urandom_state;
+
+static uint64_t urandom_next(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t = ((uint64_t)hi << 32) | lo;
+
+  uint64_t s = __atomic_load_n(&g_urandom_state, __ATOMIC_ACQUIRE);
+  if (s == 0)
+    s = t | 1;
+
+  s ^= s << 13;
+  s ^= s >> 7;
+  s ^= s << 17;
+  s ^= t;
+
+  __atomic_store_n(&g_urandom_state, s, __ATOMIC_RELEASE);
+  return s;
+}
+
+static int64_t dev_urandom_read(vfs_node_t *node, uint64_t offset, size_t size,
+                                void *buf) {
+  (void)node;
+  (void)offset;
+  if (!buf)
+    return -EINVAL;
+  uint8_t *out = (uint8_t *)buf;
+  size_t done = 0;
+  while (done < size) {
+    uint64_t r = urandom_next();
+    size_t n = size - done;
+    if (n > 8)
+      n = 8;
+    memcpy(out + done, &r, n);
+    done += n;
+  }
+  return (int64_t)size;
+}
+
+static int64_t dev_urandom_write(vfs_node_t *node, uint64_t offset, size_t size,
+                                 const void *buf) {
+  (void)node;
+  (void)offset;
+  (void)buf;
+  return (int64_t)size;
+}
+
+static vfs_ops_t dev_urandom_ops = {
+    .read = dev_urandom_read,
+    .write = dev_urandom_write,
+};
+
 typedef struct {
   const char *name;
   vfs_ops_t *ops;
@@ -1660,8 +1727,10 @@ static const devfs_entry_t devfs_entries[] = {
     {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
     {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
     {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
-    {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135}, // [FIX C]
+    {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135},
     {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
+    {"urandom", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 9}, // ← NUEVO
+    {"random", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 8},  // ← NUEVO
 };
 
 // ===========================================================================

@@ -103,4 +103,24 @@ uint64_t pf_stats_resolved(void);
 uint64_t pf_stats_killed(void);
 void pf_dump_stats(void);
 
+// [A.2] madvise(2) — MADV_* de Linux x86_64.
+#define MADV_NORMAL 0
+#define MADV_RANDOM 1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED 3
+#define MADV_DONTNEED 4
+#define MADV_FREE 8
+#define MADV_DONTDUMP 16
+#define MADV_DODUMP 17
+
+// [A.2] Libera las páginas físicas del rango [addr, addr+len) que
+// estén dentro de un VMA. Las páginas sin VMA (p.ej. la región brk,
+// que glibc gestiona directo con sbrk) se dejan intactas, porque un
+// fault posterior no tendría VMA y mataría al proceso.
+//
+// Para VMA_FILE: la próxima falta relee del fichero.
+// Para VMA_ANON / VMA_STACK: la próxima falta cero-rellena.
+int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len,
+                    uint64_t advice);
+
 #endif

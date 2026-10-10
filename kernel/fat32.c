@@ -747,9 +747,13 @@ static int fat32_char_forbidden(uint8_t c) {
 // ¿Es "name" un 8.3 puro (todo mayúsculas, base<=8, ext<=3, sin raros)?
 // 1 = sí, 0 = no (necesita LFN), -EINVAL = inválido de cualquier forma.
 static int fat32_is_pure_83(const char *name) {
-  if (!name || !name[0] || name[0] == '.')
+  if (!name || !name[0])
     return -EINVAL;
-
+  // Los dotfiles (.git, .bashrc) NO pueden ser 8.3 puros: FAT
+  // reserva el primer byte del name11 para 0x00 (libre), 0xE5
+  // (borrada) o '.' (dir actual). Deben ir por LFN con alias ~N.
+  if (name[0] == '.')
+    return 0;
   const char *dot = NULL;
   int base_len = 0, ext_len = 0;
   for (const char *p = name; *p; p++) {
@@ -783,7 +787,13 @@ static int fat32_is_pure_83(const char *name) {
 
 // Valida un nombre largo (>8.3 o con lowercase). Devuelve 0 si OK.
 static int fat32_validate_long_name(const char *name) {
-  if (!name || !name[0] || name[0] == '.')
+  if (!name || !name[0])
+    return -EINVAL;
+  // Solo rechazar "." y ".." exactos. Un dotfile como ".git" o
+  // ".bashrc" es perfectamente válido como LFN.
+  if (name[0] == '.' && name[1] == '\0')
+    return -EINVAL;
+  if (name[0] == '.' && name[1] == '.' && name[2] == '\0')
     return -EINVAL;
   size_t n = strlen(name);
   if (n > FAT32_LFN_MAX_CHARS)
@@ -880,17 +890,25 @@ static int fat32_short_name_exists(fat32_fs_t *fs, uint32_t dir_cluster,
 static int fat32_gen_short_alias(fat32_fs_t *fs, uint32_t parent_cluster,
                                  const char *long_name, uint8_t *out11,
                                  uint8_t *out_nt) {
+  // Los dotfiles no pueden llevar el punto inicial en el alias 8.3.
+  // Saltamos todos los puntos iniciales para calcular el alias; el
+  // nombre real (con puntos) va en la LFN.
+  const char *alias_src = long_name;
+  while (*alias_src == '.')
+    alias_src++;
+  if (*alias_src == '\0')
+    return -EINVAL;
+
   uint8_t base[8];
   uint8_t ext[3];
   int blen, elen;
-  fat32_extract_parts(long_name, base, &blen, ext, &elen);
+  fat32_extract_parts(alias_src, base, &blen, ext, &elen);
   if (blen == 0)
     return -EINVAL;
 
-  // Contar la forma natural (sin truncar).
   const char *dot = NULL;
   int raw_blen = 0, raw_elen = 0;
-  for (const char *p = long_name; *p; p++) {
+  for (const char *p = alias_src; *p; p++) {
     if (*p == '.') {
       dot = p;
       break;
@@ -903,7 +921,11 @@ static int fat32_gen_short_alias(fat32_fs_t *fs, uint32_t parent_cluster,
   }
 
   // Intento 1: si cabe exacto (raw_blen<=8 && raw_elen<=3), usar eso.
-  if (raw_blen <= 8 && raw_elen <= 3) {
+  // EXCEPTO para dotfiles: nunca usar la forma natural, para evitar
+  // colisión con el homónimo sin punto. `.git` y `git` deben poder
+  // coexistir en el mismo directorio, así que `.git` va directo a
+  // BASEPART~N (Linux vfat hace lo mismo).
+  if (long_name[0] != '.' && raw_blen <= 8 && raw_elen <= 3) {
     memset(out11, ' ', 11);
     for (int i = 0; i < blen; i++)
       out11[i] = base[i];
@@ -911,7 +933,7 @@ static int fat32_gen_short_alias(fat32_fs_t *fs, uint32_t parent_cluster,
       out11[8 + i] = ext[i];
     int ex = fat32_short_name_exists(fs, parent_cluster, out11);
     if (ex < 0)
-      return ex; // [FIX] propaga error de E/S
+      return ex;
     if (ex == 0) {
       *out_nt = 0;
       return 0;
@@ -1352,9 +1374,12 @@ static int fat32_iter_dir(fat32_fs_t *fs, uint32_t start_cluster,
       const uint8_t *e = cbuf + off;
 
       if (e[0] == 0x00) {
-        // Fin de directorio.
-        stop = 1;
-        break;
+        // Slot libre. No cortamos el recorrido: versiones anteriores del
+        // driver dejaban entradas válidas en clusters posteriores.
+        lfn_len = 0;
+        lfn_valid = 0;
+        lfn_chain_count = 0;
+        continue;
       }
       if (e[0] == 0xE5) {
         // Entry borrada: cualquier cadena LFN pendiente queda huérfana.
@@ -1933,8 +1958,8 @@ static int64_t fat_ts_to_unix(uint16_t date, uint16_t time) {
 }
 
 static int fat32_node_utimes(vfs_node_t *node, int64_t mtime_sec) {
-  LOG_INFO("[FAT32-UTIMES] entry node=%p mtime=%lld", (void *)node,
-           (long long)mtime_sec);
+  LOG_TRACE("[FAT32-UTIMES] entry node=%p mtime=%lld", (void *)node,
+            (long long)mtime_sec);
   if (!node || !node->priv)
     return -EINVAL;
   fat32_node_priv_t *np = (fat32_node_priv_t *)node->priv;
@@ -2100,6 +2125,24 @@ static int fat32_find_free_dirents(fat32_fs_t *fs, uint32_t dir_cluster,
         }
       } else {
         run = 0;
+      }
+    }
+    // Este cluster no sirve: la cola de slots libres no alcanza para `count`.
+    // No puede quedar a 0x00 (iter_dir lo toma como fin de directorio y
+    // dejaría invisibles los clusters siguientes). La marcamos como borrada.
+    if (run > 0) {
+      int changed = 0;
+      for (uint32_t o = fs->cluster_size - (uint32_t)run * 32;
+           o + 32 <= fs->cluster_size; o += 32) {
+        if (cbuf[o] == 0x00) {
+          cbuf[o] = 0xE5;
+          changed = 1;
+        }
+      }
+      if (changed &&
+          fat32_bwrite(fs, cluster_lba, fs->sectors_per_cluster, cbuf) != 0) {
+        kfree(cbuf);
+        return -EIO;
       }
     }
     kfree(cbuf);
@@ -2773,16 +2816,42 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
       fat32_name_eq(src_name, dst_name))
     return 0;
 
-  // 3. Verificar que dst no existe.
+  // 3. Comprobar si dst existe. POSIX rename(2) SOBRESCRIBE el
+  // destino si es un fichero regular. Git depende de esto para su
+  // patrón "escribir a config.lock + rename(config.lock, config)".
+  // Linux vfat lo implementa así. Devolver -EEXIST aquí rompe git
+  // init, git config, y cualquier escritor atómico con tempfile.
   fat32_lookup_ctx_t dstl = {.name = dst_name};
   rc = fat32_iter_dir(fs, dst_parent_cluster, fat32_lookup_cb, &dstl);
   if (rc < 0)
     return rc;
-  if (dstl.found)
-    return -EEXIST;
+
+  int src_is_dir_pre = (src.attr & FAT_ATTR_DIRECTORY) ? 1 : 0;
+
+  if (dstl.found) {
+    int dst_is_dir = dstl.is_dir;
+
+    // POSIX. Casos no soportados: tipo cruzado y dir→dir.
+    if (src_is_dir_pre && !dst_is_dir)
+      return -ENOTDIR;
+    if (!src_is_dir_pre && dst_is_dir)
+      return -EISDIR;
+    if (dst_is_dir) {
+      // Linux exige que el dir dst esté vacío. No lo implementamos
+      // (git no lo necesita); devolvemos ENOTEMPTY siempre.
+      return -ENOTEMPTY;
+    }
+
+    // Fichero → fichero: borrar el destino y continuar con el rename.
+    // Lo hace en el mismo transaction group que el resto (el
+    // fat32_sync_locked() final lo persiste todo junto).
+    rc = fat32_delete_entry(fs, dst_parent_cluster, dst_name);
+    if (rc != 0)
+      return rc;
+  }
 
   // 4. Si es dir, rechazar mover a un descendiente de sí mismo.
-  int is_dir = (src.attr & FAT_ATTR_DIRECTORY) ? 1 : 0;
+  int is_dir = src_is_dir_pre;
   if (is_dir) {
     int ancestor =
         fat32_is_ancestor_of(fs, src.first_cluster, dst_parent_cluster);
@@ -2889,17 +2958,26 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
 
 // [3.4.c] FAT32 no persiste modo/owner. Linux con vfat sin dmask/fmask
 // devuelve -EPERM al intentar chmod. Vamos con eso.
+// [GIT/LINUX-COMPAT] FAT32 no guarda bits de modo. Linux vfat devuelve
+// 0 en chmod/chown (no-op silencioso): el modo real se fija por las
+// mount options (dmask/fmask), y las llamadas a chmod no cambian nada
+// pero SIEMPRE tienen éxito. Devolver -EPERM rompe git (chmod en
+// .git/config.lock → "could not set core.filemode"), coreutils install,
+// rsync -p, y cualquier cosa que haga un chmod "defensivo".
+//
+// Los bits de modo que ve `ls -l` siguen viniendo del mapa RAM
+// (fat32_ram_mode_get) y del default 0644/0755 según tipo.
 static int fat32_node_chmod(vfs_node_t *node, uint32_t mode) {
   (void)node;
   (void)mode;
-  return -EPERM;
+  return 0;
 }
 
 static int fat32_node_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   (void)node;
   (void)uid;
   (void)gid;
-  return -EPERM;
+  return 0;
 }
 
 static vfs_ops_t fat32_node_ops = {

@@ -61,4 +61,7 @@ bool completion_done(completion_t *c);
 // Solo se debe llamar cuando NO hay waiters.
 void completion_reinit(completion_t *c);
 
+// Añadir justo después de wait_for_completion:
+void wait_for_completion_uninterruptible(completion_t *c);
+
 #endif

@@ -198,6 +198,7 @@
 #define SYS_MEMBARRIER 324
 #define SYS_STATX 332
 #define SYS_RSEQ 334
+#define SYS_CLONE3 435
 #define SYS_EPOLL_PWAIT2 441
 
 #define FD_CLOEXEC 1
@@ -207,6 +208,9 @@
 #define F_GETFL 3
 #define F_SETFL 4
 #define F_DUPFD_CLOEXEC 1030
+
+#define CLONE_PIDFD 0x00001000ULL
+#define CLONE_INTO_CGROUP 0x200000000ULL
 
 // ---- Aurora-only ----
 #define ASYS_BASE 0x1000

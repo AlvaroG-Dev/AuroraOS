@@ -252,14 +252,22 @@ int main(int argc, char **argv) {
   terminal_clear_dirty(&g_term);
 
   if (!environ || !environ[0]) {
-    setenv("PATH", "/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin", 1);
-    setenv("TERM", "xterm-256color", 1);
-    setenv("HOME", "/data", 1);
-    setenv("USER", "root", 1);
-    setenv("LOGNAME", "root", 1);
-    setenv("SHELL", "/usr/bin/sh", 1);
-    setenv("PWD", "/", 1);
-    setenv("TMPDIR", "/tmp", 1); // ← AÑADIR
+    // Defaults de entorno. NO usamos `if (!environ)` porque terminal
+    // llega con el entorno de init ya puesto (envc=8): el guard hacía
+    // que estos setenv nunca corrieran. Con overwrite=0 solo se aplican
+    // si la variable NO existe, así init sigue pudiendo sobreescribir
+    // lo que quiera antes de que terminal arranque.
+    setenv("PATH", "/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin", 0);
+    setenv("TERM", "xterm-256color", 0);
+    setenv("HOME", "/data", 0);
+    setenv("USER", "root", 0);
+    setenv("LOGNAME", "root", 0);
+    setenv("SHELL", "/usr/bin/sh", 0);
+    setenv("PWD", "/", 0);
+    setenv("TMPDIR", "/tmp", 0);
+    setenv("GIT_PAGER", "cat", 0);
+    setenv("GIT_CONFIG_GLOBAL", "/dev/null", 0);
+    setenv("GIT_CONFIG_SYSTEM", "/dev/null", 0);
   }
 
   int master = open("/dev/ptmx", O_RDWR);
