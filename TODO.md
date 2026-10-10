@@ -370,6 +370,97 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 - [ ] Limpiar kernel_pml4[0] heredado del bootloader UEFI (excepto
       trampoline SMP en 0x7000-0x9000). Fue un cómplice del bug 12.3.
       
+### Bloque 13 — Portar git + fixes AHCI/completion/TLS/FAT32 ✅ CERRADO
+
+13.1 clone3 (435) ✅
+    Cae a clone(2) clásico. CLONE_PIDFD/CLONE_INTO_CGROUP
+    rechazados con EINVAL (glibc cae a clone sin más).
+    set_tid/set_tid_size ignorados.
+
+13.2 futex WAIT_BITSET/WAKE_BITSET ✅
+    Implementados sobre el mismo hash que WAIT/WAKE.
+    Ignoran el bitset de match (glibc usa MATCH_ANY). No
+    rechazan FUTEX_CLOCK_REALTIME (glibc lo pasa
+    incondicionalmente; sin él hacía abort() con -ENOSYS).
+
+13.3 /proc/sys completo ✅
+    kernel/{pid_max, threads-max, osrelease, random/{uuid,boot_id}}
+    vm/{overcommit_memory, max_map_count}. + los existentes.
+
+13.4 madvise(MADV_DONTNEED/MADV_FREE) real ✅
+    Libera frames de páginas dentro de VMA. Las páginas fuera
+    de VMA (brk) no se tocan para no matar al proceso.
+
+13.5 /dev/urandom, /dev/random ✅
+    xorshift64 sembrado con RDTSC. Git los usa para nombres de
+    tempfiles; sin ellos `git add` abortaba con "unable to get
+    random bytes".
+
+13.6 unlinkat/mkdirat/renameat con dirfd real ✅
+    Resuelven path relativo al cwd del fd. Sin esto `rm -rf`
+    fallaba con EINVAL en cada hijo y git no podía limpiar su
+    índice.
+
+13.7 FAT32 dotfiles ✅
+    `.git`, `.bashrc`, etc. van por LFN con alias ~N. Antes
+    fat32_is_pure_83 rechazaba cualquier nombre con punto
+    inicial → git init no podía crear .git/config.
+
+13.8 FAT32 chmod/chown no-op ✅
+    Devuelven 0 (como Linux vfat). Devolver -EPERM rompía git
+    (chmod sobre .git/config.lock) y rsync.
+
+13.9 FAT32 rename sobrescribe destino ✅
+    POSIX semantics. Sin esto git config fallaba con EEXIST al
+    renombrar config.lock → config.
+
+13.10 FAT32 find_free_dirents 0xE5 tail ✅
+    Al no caber la racha de slots en el cluster actual, marca
+    el tail como 0xE5 antes de saltar al siguiente. Sin esto
+    la cola a 0x00 hacía que iter_dir dejara de leer y las
+    entradas del siguiente cluster quedaran invisibles.
+
+13.11 FAT32 iter_dir tolerante a 0x00 ✅
+    Recupera dirs dañados por versiones anteriores.
+
+13.12 AHCI completion: separar wake directo vs epoll subs ✅
+    La wait_queue privada de una completion no debe propagar
+    a subs. Hacerlo disparaba #GP cuando el subs era basura de
+    memoria reciclada. complete() consume la completion al
+    despertar el waiter.
+
+13.13 wait_for_completion_uninterruptible() ✅
+    Usado por bdev_read/write/flush. Sin esto, una señal
+    (SIGCHLD) hacía que bdev_submit_sync retornara con el bio
+    aún en vuelo → #GP con RDX = "/dev/ura" en el panic.
+
+13.14 TLS canonicity en switch.asm + arch_prctl ✅
+    switch.asm valida fs_base antes de wrmsr(MSR_FS_BASE) en
+    task_switch y task_jump_to. arch_prctl(ARCH_SET_FS)
+    rechaza valores no canónicos con -EPERM.
+
+13.15 Terminal: setenv siempre ✅
+    Los defaults se aplican sin el `if (!environ)`. Añadidos
+    GIT_PAGER=cat, GIT_CONFIG_GLOBAL=/dev/null,
+    GIT_CONFIG_SYSTEM=/dev/null, TMPDIR.
+
+13.16 Build: aurora.img persistente ✅
+    `make image` ya no reformatea si aurora.img existe. Solo
+    actualiza ESP/EFI, kernel.elf, etc/. `/data` sobrevive a
+    los rebuilds. `make clean-data` para formatear.
+
+**Verificación:** git 2.43.0 `init` + `add .` (103 ficheros
+con LFN, subdirs anidados, binario 256 KB) + `commit` + `log`
++ `status` + `diff` funcionando end-to-end sin panic.
+
+**Deuda conocida (no bloquea el cierre):**
+- [ ] `libffi.so.8` falta → ctypes/cffi de Python.
+- [ ] `setitimer` (38) → -ENOSYS. Cosmético, ruido en log.
+- [ ] `[FAT32-UTIMES]` en LOG_INFO (debería ser TRACE).
+- [ ] `sigaltstack` (131) → -ENOSYS.
+- [ ] `rt_sigaction` (13) → -EINVAL en 3 llamadas al arrancar Python.
+- [ ] `ioctl(TCGETS)` sobre PTY → -ENOTTY.
+- [ ] Señales per-thread (blocked_signals compartido entre hilos).
 ---
 
 # Estado global
@@ -394,6 +485,8 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
 | 9 Interactivas + statx + /proc extendido + fixes FAT32 | ✅ |
 | 10 epoll + eventfd + signalfd | ✅ |
 | 11 Intérpretes dinámicos (perl) | ✅ |
+| 12 Python | ✅ |
+| 13 Portar git + AHCI/completion/TLS/FAT32 | ✅ |
 
 **Lo que queda del TODO**:
 - 5.4 (getty) — opcional, ya cubierto por init.

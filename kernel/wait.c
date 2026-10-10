@@ -4,6 +4,7 @@
 #include "klog.h"
 #include "process.h"
 #include "sched.h"
+#include "signal.h"
 #include "uaccess.h" // EINVAL, ENOMEM, etc.
 #include <stddef.h>
 
@@ -169,6 +170,14 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
                                  : 0;
       uint64_t blk = self->proc ? self->proc->blocked_signals : 0;
       uint64_t deliverable = pend & ~blk;
+
+      // [A.5] Filtrar señales que el proceso ignora. Si todas las
+      // pendientes son SIG_IGN (o SIG_DFL con acción IGN), no hay
+      // nada que entregar — seguimos durmiendo sin EINTR. Linux
+      // hace lo mismo en do_signal(). Sin esto, un `pthread_kill`
+      // con una señal ignorada despertaba read() con EINTR espurio.
+      if (self->proc)
+        deliverable = signal_filter_ignored(self->proc, deliverable);
 
       if (deliverable == 0) {
         self->wake_reason = 0;
