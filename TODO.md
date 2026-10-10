@@ -487,6 +487,7 @@ con LFN, subdirs anidados, binario 256 KB) + `commit` + `log`
 | 11 Intérpretes dinámicos (perl) | ✅ |
 | 12 Python | ✅ |
 | 13 Portar git + AHCI/completion/TLS/FAT32 | ✅ |
+| 14 vDSO (clock_gettime/gettimeofday/time) | ✅ |
 
 **Lo que queda del TODO**:
 - 5.4 (getty) — opcional, ya cubierto por init.
