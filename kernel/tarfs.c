@@ -44,6 +44,20 @@ static tar_node_t *nodes = NULL;
 static size_t node_count = 0;
 static size_t node_capacity = 0;
 
+// Forward declaration. tarfs_build_dir_index (más arriba en el fichero)
+// llama a find_by_name, pero la definición está más abajo.
+static tar_node_t *find_by_name(const char *name);
+
+// Nodo sintético para la raíz de tarfs. Lo usan tar_vfs_readdir y
+// tarfs_make_vfs_node. Definición completa, aquí arriba, para que
+// esté disponible antes de cualquier uso.
+static tar_node_t g_tarfs_root = {
+    .name = "",
+    .data = NULL,
+    .size = 0,
+    .is_dir = 1,
+};
+
 // Índice hash estático por generación del initrd. Guarda índices (no
 // punteros) porque `nodes` puede realocarse mientras se analiza el tar.
 // 0 significa casilla vacía; cada entrada almacena index + 1.
@@ -158,7 +172,6 @@ static uint64_t tarfs_name_hash(const char *name) {
   return hash;
 }
 
-
 // Construye un índice compacto de hijos directos. Sin él, readdir(i) volvía
 // a recorrer los N nodos del initrd para localizar el hijo i; getdents64
 // sobre un directorio grande acababa costando O(N * hijos^2).
@@ -171,16 +184,20 @@ static int tarfs_build_dir_index(void) {
   const size_t parent_count = node_count + 1; // nodos + raíz sintética
   size_t *counts = (size_t *)kzalloc(parent_count * sizeof(size_t));
   size_t *parents = (size_t *)kmalloc(node_count * sizeof(size_t));
-  size_t *offsets =
-      (size_t *)kzalloc((parent_count + 1) * sizeof(size_t));
+  size_t *offsets = (size_t *)kzalloc((parent_count + 1) * sizeof(size_t));
   size_t *cursor = (size_t *)kmalloc(parent_count * sizeof(size_t));
   size_t *children = (size_t *)kmalloc(node_count * sizeof(size_t));
   if (!counts || !parents || !offsets || !cursor || !children) {
-    if (counts) kfree(counts);
-    if (parents) kfree(parents);
-    if (offsets) kfree(offsets);
-    if (cursor) kfree(cursor);
-    if (children) kfree(children);
+    if (counts)
+      kfree(counts);
+    if (parents)
+      kfree(parents);
+    if (offsets)
+      kfree(offsets);
+    if (cursor)
+      kfree(cursor);
+    if (children)
+      kfree(children);
     return -1;
   }
 
@@ -442,13 +459,13 @@ void tarfs_init(const void *tar_addr, size_t tar_size) {
     LOG_WARN("[TARFS] Sin memoria para el índice hash; usando búsqueda lineal");
   } else {
     LOG_INFO("[TARFS] Índice hash creado: %lu nodos, %lu casillas",
-             (unsigned long)node_count,
-             (unsigned long)node_hash_capacity);
+             (unsigned long)node_count, (unsigned long)node_hash_capacity);
     if (tarfs_build_dir_index() == 0) {
       LOG_INFO("[TARFS] Índice de directorios creado: %lu relaciones",
                (unsigned long)dir_child_count);
     } else {
-      LOG_WARN("[TARFS] Sin índice de directorios; readdir usa fallback lineal");
+      LOG_WARN(
+          "[TARFS] Sin índice de directorios; readdir usa fallback lineal");
     }
   }
 
@@ -626,7 +643,7 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
       size_t start = dir_child_offsets[dir_index];
       size_t end = dir_child_offsets[dir_index + 1];
       if (index >= (uint64_t)(end - start)) {
-        out->name[0] = '\x5c0';
+        out->name[0] = '\0';
         out->type = 0;
         out->size = 0;
         return 0;
@@ -649,7 +666,7 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
         if (rlen >= sizeof(out->name))
           rlen = sizeof(out->name) - 1;
         memcpy(out->name, name, rlen);
-        out->name[rlen] = '\x5c0';
+        out->name[rlen] = '\0';
         out->type = child->is_dir ? VFS_DIRECTORY : VFS_FILE;
         out->size = child->is_dir ? 0 : child->size;
         return 0;
@@ -657,8 +674,7 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     }
   }
 
-readdir_slow:
-  ;
+readdir_slow:;
   size_t n = tarfs_get_node_count();
   uint64_t seen = 0;
   for (size_t i = 0; i < n; i++) {
@@ -726,15 +742,6 @@ static vfs_ops_t tar_dir_ops = {
     // [3.4.c] RO: chmod/chown devuelven -EROFS.
     .chmod = NULL,
     .chown = NULL,
-};
-
-// Nodo sintético para la raíz de tarfs. tarfs no tiene entry para "".
-// Vive en .data y no se libera nunca.
-static tar_node_t g_tarfs_root = {
-    .name = "",
-    .data = NULL,
-    .size = 0,
-    .is_dir = 1,
 };
 
 // Construye un vfs_node_t desde un tar_node_t. Reutilizado por el
