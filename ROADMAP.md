@@ -47,6 +47,15 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] **FAT32 estable bajo tests de truncate**: corregido el bug de
       `vfs_node_free` que filtraba nodos y hacía que el SLAB reciclara
       `fat32_fs_t` ya liberados (hang silencioso).
+- [x] **git 2.43.0 local**: init/add/commit/log/status/diff sobre
+      FAT32 RW sin red. Cierra el bloque B-local.
+- [x] **clone3 + futex WAIT_BITSET**: necesario para glibc
+      pthreads moderno.
+- [x] **/proc/sys completo**, `madvise(DONTNEED/FREE)` real,
+      `/dev/urandom`.
+- [x] **AHCI completion UAF resuelto**: separación wake directo /
+      epoll subs, `wait_for_completion_uninterruptible()`.
+- [x] **TLS canonicity check** en switch.asm y arch_prctl.
 
 La prioridad ahora es completar userland y filesystem, después networking/USB, y seguir validando Aurora OS sobre hardware real. En paralelo, el objetivo a más largo plazo del proyecto es que Aurora sea tan abierto y eficiente como Linux pero tan "todo hecho" como Windows: eso implica un BusyBox completo como base de userland (3.5), una capa de compatibilidad para ejecutar binarios Linux/ELF reales sin recompilar (3.6), y — de forma más experimental y acotada — un loader de ejecutables Windows/PE de consola (3.7). Ver el resumen de prioridad relativa al final de la Fase 3.
 
@@ -273,7 +282,8 @@ Objetivo: ejecutar binarios ELF reales de Linux (BusyBox oficial, coreutils, bas
 - [x] `perl 5.38` dinámico ejecutándose (con `Data::Dumper`,
       `Encode`, `POSIX`, `Unicode::*`).
 - [x] `python3 3.12.3` (intérprete básico + stdlib + imports C).
-- [ ] `git` (requiere clone3 más completo y sockets locales).
+- [x] `git 2.43.0` local (init/add/commit/log/status/diff).
+- [ ] `git` con red (push/pull) — depende de Fase 5.
 
 ### 3.7 Ejecutar ejecutables Windows (PE/COFF) — expectativas realistas
 *(sin cambios, sigue pendiente)*
@@ -363,14 +373,11 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 
 1. **Robustez del kernel + auditoría SMP** — ✅ completada.
 2. **Storage persistente + filesystem** — ✅ cerrado (FAT32 persistente con LFN, rename, buffer cache, tests de corrupción, fsck mínimo).
-3. **Userland/libc/shell** — ⏳ en progreso avanzado. Cerrado:
-   ABI Linux, glibc dinámico, TTY, pipes, PTYs, job control,
-   permisos POSIX, `/etc/passwd`, BusyBox dinámico (~200 applets),
-   futex+clone, `flock`, `dmesg`, `statx`, `/proc` extendido,
-   VMA-per-PT_LOAD, `/etc/ld.so.cache`, bind `/tmp`, interactivas
-   (`less`/`nano`/`ed`), `epoll`+`eventfd`+`signalfd`,
-   **`perl 5.38` dinámico con `Data::Dumper`**. Siguiente:
-   `python3` (falta stdlib), `/proc/sys/` y `/proc/meminfo`.
+3. **Userland/libc/shell** — ✅ **git cerrado**. Cerrado en este
+   bloque: clone3, futex BITSET, /proc/sys completo, madvise real,
+   /dev/urandom, dotfiles FAT32, rename overwrite, AHCI completion
+   UAF, TLS canonicity. Siguiente: **networking (loopback + e1000)**
+   o cierre de la **deuda de señales per-thread** (~4-6h).
 4. **Escritorio y window manager** — pendiente; el siguiente salto grande es el terminal 2D.
 5. **Networking**
 6. **USB**

@@ -37,9 +37,14 @@ que colgaban el sistema durante los tests de `truncate`.
 - **perl 5.38** dinámico (glibc), con `Data::Dumper`, `Encode`,
   `POSIX`, `Unicode::*`, `Time::HiRes` y demás módulos XS cargando
   desde `/usr/lib/x86_64-linux-gnu/perl/5.38.2/`.
-- **python3 3.12.3** con imports del stdlib (`sys`, `json`, `re`,
-  `hashlib`, `os`, `time`) funcionando end-to-end. Carga de extensiones
-  C vía `lib-dynload/*.so` operativa.
+- **git 2.43.0**: `init`, `add` (100+ ficheros), `commit`, `log`,
+  `status`, `diff` sobre FAT32 RW. Incluye dotfiles (`.git`),
+  rename atómico, flock sobre el índice, `link()` con EPERM
+  correcto, LFN en `.git/objects/`, y binarios de 256 KB.
+- **Python 3.12 threading**: 20 threads + join funcional (requiere
+  clone3 + futex WAIT_BITSET).
+- **madvise(MADV_DONTNEED)**: el allocator de Python libera frames.
+- **/dev/urandom**: git y cualquier cosa que use tempfiles aleatorios.
 
 ### Fixes de kernel acumulados
 
@@ -135,6 +140,28 @@ De la sesión interactiva / statx:
 - **`pty_m_has_space`** eliminado (dead code desde que el
   slave→master pasó de back-pressure a drop silencioso).
 
+De la sesión del port de git:
+
+- **clone3 (435)**: cae a clone(2). CLONE_PIDFD/CGROUP → EINVAL.
+- **futex WAIT_BITSET/WAKE_BITSET**: implementados; sin ellos glibc
+  hacía `__libc_fatal` → abort → SIGABRT.
+- **/proc/sys completo**: `kernel/{pid_max,threads-max,osrelease,
+  random/{uuid,boot_id}}`, `vm/{overcommit_memory,max_map_count}`.
+- **madvise(DONTNEED/FREE) real**: libera frames de páginas en VMA.
+- **/dev/urandom, /dev/random** (xorshift64).
+- **unlinkat/mkdirat/renameat con dirfd real** (`rm -rf` funciona).
+- **FAT32 dotfiles via LFN** (`.git`, `.bashrc`).
+- **FAT32 chmod/chown no-op** (Linux vfat semantics).
+- **FAT32 rename sobrescribe** (POSIX), necesario para `.lock`.
+- **FAT32 find_free_dirents**: marca tail como 0xE5 antes de
+  extender el chain.
+- **AHCI completion**: separa wake directo de propagación a epoll
+  subs. La wait_queue privada de una completion no debe propagar.
+- **wait_for_completion_uninterruptible()**: bdev_read/write/flush
+  no deben ser interrumpibles por señales — el bio en vuelo sigue
+  haciendo DMA.
+- **TLS canonicity**: switch.asm y arch_prctl(ARCH_SET_FS)
+  rechazan valores no canónicos.
 ---
 
 ## 2. Pendientes inmediatos
@@ -259,10 +286,15 @@ al vuelo, carga extensiones C. Pendiente afinar:
 - `ioctl(TCGETS)` sobre PTY devuelve `-ENOTTY` al cargar `encodings/utf_8`.
   Tampoco bloquea pero convendría revisar `tty_ioctl`.
 - Compilar `.pyc` con `compileall` en build time para acelerar arranque.
+- `libffi.so.8` falta → `ctypes`/`cffi` no cargan. Sólo importa
+  si algún binding lo pide.
 
-### 5.2 Portar `git`
+### 5.2 Portar `git` ✅ (git 2.43.0 operativo)
 
-Sin cambios.
+Verificado end-to-end: `git init` + `add .` (103 ficheros con LFN,
+subdirs anidados, binario 256 KB) + `commit` + `log` + `status`
++ `diff` sobre FAT32 RW, sin red. Bloquea el `git push/pull`
+hasta Fase 5 (networking).
 
 ### 5.3 Portar `gcc` nativo
 
@@ -319,16 +351,17 @@ Sin cambios. Aceptable.
 | # | Item | Esfuerzo | Prioridad |
 |---|---|---|---|
 | 1 | ~~Probar `perl`~~ ✅ | — | **Hecho** |
-| 2 | Probar `python3` (falta stdlib) | 2-4 h | Alta |
+| 2 | Probar `python3` (falta stdlib) | 2-4 h | ✅ Hecho |
 | 3 | `/proc/sys/` más completo | 2 h | Media |
 | 4 | `/proc/meminfo` completo | 1 h | Media |
-| 5 | Filtrar señales ignoradas en wait/signal_check (deuda latente) | 1 h | Media |
-| 6 | `clone3` + `rseq` | 1 día | Media |
+| 5 | Filtrar señales ignoradas en wait/signal_check | 1 h | Media |
+| 6 | `clone3` + `rseq` de verdad | 1 día | ✅ clone3 hecho, rseq pendiente |
 | 7 | Red loopback | 2 días | Alta |
 | 8 | Driver de red (`e1000`) | 3 días | Alta |
 | 9 | TCP funcional | 1 semana | Alta |
 | 10 | Usuarios reales (`setuid` irreversible) | 1 día | Media |
-| 11 | Portar `git` | 1 semana | Media |
+| 11 | Portar `git` | 1 semana | ✅ Hecho (local) |
+| 11b | Portar git con red (push/pull) | depende de 7-9 | Alta |
 | 12 | vDSO | 2 días | Baja |
 | 13 | `ptrace` (subset) | 3 días | Baja |
 | 14 | Portar `gcc` | 1 mes+ | Baja |

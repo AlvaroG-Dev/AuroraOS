@@ -4762,6 +4762,67 @@ static int64_t k_net_nosupport(uint64_t a1, uint64_t a2, uint64_t a3,
   return -EAFNOSUPPORT;
 }
 
+// ---------- getitimer (36) / setitimer (38) / alarm (37) ----------
+//
+// Aurora no tiene temporizadores por proceso. Git los usa para
+// timeouts internos, y no se cuelga porque el I/O es local.
+// No-op silencioso.
+struct k_timeval_it {
+  int64_t tv_sec;
+  int64_t tv_usec;
+};
+struct k_itimerval {
+  struct k_timeval_it it_interval;
+  struct k_timeval_it it_value;
+};
+_Static_assert(sizeof(struct k_itimerval) == 32, "itimerval x86_64");
+
+static int64_t k_setitimer(uint64_t which, uint64_t new_ptr, uint64_t old_ptr,
+                           uint64_t a4, uint64_t a5) {
+  (void)new_ptr;
+  (void)a4;
+  (void)a5;
+  if (which > 2)
+    return -EINVAL;
+  if (old_ptr) {
+    if (!access_ok((void *)old_ptr, sizeof(struct k_itimerval)))
+      return -EFAULT;
+    struct k_itimerval zero;
+    memset(&zero, 0, sizeof(zero));
+    if (copy_to_user((void *)old_ptr, &zero, sizeof(zero)) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+static int64_t k_getitimer(uint64_t which, uint64_t cur_ptr, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (which > 2)
+    return -EINVAL;
+  if (!cur_ptr)
+    return -EFAULT;
+  if (!access_ok((void *)cur_ptr, sizeof(struct k_itimerval)))
+    return -EFAULT;
+  struct k_itimerval zero;
+  memset(&zero, 0, sizeof(zero));
+  if (copy_to_user((void *)cur_ptr, &zero, sizeof(zero)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+static int64_t k_alarm(uint64_t sec, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)sec;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
 static int64_t k_futex(uint64_t uaddr, uint64_t op, uint64_t val,
                        uint64_t timeout, uint64_t uaddr2) {
   registers_t *regs = syscall_current_regs();
@@ -5629,6 +5690,9 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SET_TID_ADDRESS] = {k_set_tid_address, "set_tid_address"},
     [SYS_CLOCK_GETTIME] = {k_clock_gettime, "clock_gettime"},
     [SYS_GETTIMEOFDAY] = {k_gettimeofday, "gettimeofday"},
+    [SYS_GETITIMER] = {k_getitimer, "getitimer"},
+    [SYS_ALARM] = {k_alarm, "alarm"},
+    [SYS_SETITIMER] = {k_setitimer, "setitimer"},
     [SYS_TIME] = {k_time, "time"},
     [SYS_CLOCK_SETTIME] = {k_clock_settime, "clock_settime"},
     [SYS_SETTIMEOFDAY] = {k_settimeofday, "settimeofday"},

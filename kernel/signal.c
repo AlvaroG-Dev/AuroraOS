@@ -3,8 +3,10 @@
 #include "process.h"
 #include "sched.h"
 #include "signalfd.h"
+#include "string.h"
 #include "syscall.h"
 #include "uaccess.h"
+
 
 extern registers_t *syscall_current_regs(void);
 
@@ -203,7 +205,7 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
     }
     if (def == SIG_ACT_STOP) {
       LOG_INFO("[SIG] PID=%u SIG %d -> stop", proc->pid, sig);
-      process_stop_current(sig); // retorna cuando llega SIGCONT
+      process_stop_current(sig);
     }
     return 1;
   }
@@ -211,12 +213,26 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
     return 1;
   }
   if (!act->restorer) {
-    // Sin trampoline no podemos entregar. Consumir la señal.
     LOG_WARN("[SIG] PID=%u SIG %d sin restorer, ignorado", proc->pid, sig);
     return 1;
   }
 
-  uint64_t frame_va = (regs->rsp - SF_SIZE) & ~0xFULL;
+  // [A.4] Si SA_ONSTACK está activo y hay altstack configurada,
+  // construimos el frame en la altstack en lugar de en regs->rsp.
+  // La pila crece hacia abajo, así que el frame empieza en
+  // (sp + size) y baja SF_SIZE bytes.
+  //
+  // ss_flags == SS_DISABLE (2) significa "sin altstack".
+  uint64_t sp_base = regs->rsp;
+  int on_altstack = 0;
+  if ((act->flags & SA_ONSTACK) && proc->sigaltstack_sp != 0 &&
+      proc->sigaltstack_flags != 2 /* SS_DISABLE */ &&
+      proc->sigaltstack_size >= SF_SIZE) {
+    sp_base = proc->sigaltstack_sp + proc->sigaltstack_size;
+    on_altstack = 1;
+  }
+
+  uint64_t frame_va = (sp_base - SF_SIZE) & ~0xFULL;
   uint64_t old_mask = proc->blocked_signals;
 
   if (build_frame(frame_va, sig, act, regs, old_mask) < 0) {
@@ -226,13 +242,17 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
 
   proc->blocked_signals = old_mask | act->mask | (1ULL << sig);
 
-  // Redirigir el trap frame al handler.
   regs->rip = (uint64_t)act->handler;
   regs->rsp = frame_va;
   regs->rdi = (uint64_t)sig;
   regs->rsi = frame_va + SF_SIGINFO;
   regs->rdx = frame_va + SF_UCONTEXT;
-  // rax preservado (valor de retorno de la syscall).
+
+  if (on_altstack) {
+    LOG_TRACE("[SIG] PID=%u SIG %d entregada en altstack %p (size=%lu)",
+              proc->pid, sig, (void *)frame_va,
+              (unsigned long)proc->sigaltstack_size);
+  }
 
   return 1;
 }
@@ -294,25 +314,45 @@ int signal_deliver_from_exception(int sig, registers_t *regs) {
 int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,
                        uint64_t sigsetsize, uint64_t _) {
   (void)_;
-  if (sig < 1 || sig >= SIG_MAX) {
-    LOG_TRACE("[RT_SIGACTION] EINVAL: sig=%lu fuera de [1,%d)",
-              (unsigned long)sig, SIG_MAX);
+  if (sig < 1 || sig >= SIG_MAX)
     return -EINVAL;
-  }
-  if (sig == SIGKILL || sig == SIGSTOP) {
-    LOG_TRACE("[RT_SIGACTION] EINVAL: sig=%lu no capturable",
-              (unsigned long)sig);
+
+  // Linux acepta cualquier sigsetsize >= sizeof(kernel_sigset_t).
+  // glibc pasa 8; algunas libs pasan valores mayores por
+  // forward-compat. Rechazar solo < 8.
+  if (sigsetsize < 8)
     return -EINVAL;
-  }
-  if (sigsetsize != 8) {
-    LOG_TRACE("[RT_SIGACTION] EINVAL: sig=%lu sigsetsize=%lu != 8",
-              (unsigned long)sig, (unsigned long)sigsetsize);
-    return -EINVAL;
-  }
 
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+
+  // SIGKILL/SIGSTOP: Linux solo rechaza si se intenta instalar un
+  // handler distinto de SIG_DFL. La consulta (act == NULL) siempre
+  // funciona y devuelve la acción actual (SIG_DFL). Python consulta
+  // estos dos al arrancar, y con el check previo devolvíamos EINVAL
+  // por error.
+  if (sig == SIGKILL || sig == SIGSTOP) {
+    if (act) {
+      if (!access_ok((void *)act, sizeof(k_sigaction_t)))
+        return -EFAULT;
+      k_sigaction_t na;
+      if (copy_from_user(&na, (void *)act, sizeof(k_sigaction_t)) < 0)
+        return -EFAULT;
+      if (na.handler != SIG_DFL)
+        return -EINVAL;
+    }
+    if (oact) {
+      if (!access_ok((void *)oact, sizeof(k_sigaction_t)))
+        return -EFAULT;
+      k_sigaction_t cur;
+      memset(&cur, 0, sizeof(cur));
+      cur.handler = SIG_DFL;
+      if (copy_to_user((void *)oact, &cur, sizeof(cur)) < 0)
+        return -EFAULT;
+    }
+    return 0;
+  }
 
   if (oact) {
     if (!access_ok((void *)oact, sizeof(k_sigaction_t)))
