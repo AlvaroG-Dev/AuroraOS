@@ -37,7 +37,7 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
         uaccess.o uaccess_asm.o uaccess_faults.o signal.o procfs.o futex.o swap.o sysctl.o epoll.o signalfd.o \
         memfd.o \
         sysfs.o tests/pmm_stress.o tests/kernel_tests.o \
-        smp_trampoline.o smp_boot.o vdso.o vdso_blob.o
+        smp_trampoline.o smp_boot.o vdso.o vdso_blob.o tmpfs.o
 TARGET  = kernel.elf
 
 all: $(TARGET)

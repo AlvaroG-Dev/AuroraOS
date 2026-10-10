@@ -25,6 +25,7 @@
 #include "string.h"
 #include "sysfs.h"
 #include "tarfs.h" // solo por tarfs_get_vfs_ops()
+#include "tmpfs.h"
 #include "tty.h"
 #include "uaccess.h"
 #include <stddef.h>
@@ -2210,6 +2211,11 @@ void vfs_init(void) {
   } else {
     LOG_INFO("[VFS] sysfs montado en /sys");
   }
+  // ---------------------------------------------------------------------------
+  // [tmpfs] /etc, /tmp, /var, /run. Toda la logica (mount + prepoblado
+  // de /etc, lectura de ld.so.cache desde tarfs) vive en tmpfs_init().
+  // ---------------------------------------------------------------------------
+  tmpfs_init();
 }
 
 // ===========================================================================
