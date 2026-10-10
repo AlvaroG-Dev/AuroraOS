@@ -241,6 +241,51 @@ static void map_phys_window(uint64_t max_phys_addr) {
 
   LOG_INFO("[PAGING] Ventana fisica mapeada (%lu entradas de 2 MB)",
            (unsigned long)(size / 0x200000));
+
+  // ---------------------------------------------------------------------
+  // [PF-SLOW] Pre-touch de la ventana fisica.
+  //
+  // Bajo KVM con EPT, la primera escritura del guest a cada huge page
+  // fisica (2 MB) dispara un EPT fault que cuesta ~600 us en el host.
+  // Con 512 MB de RAM son 256 faults repartidos al azar durante el
+  // boot, visibles como [PF-SLOW] con memset=600 us. La medicion por
+  // fases mostro pmm=0 memset=600 read=0 map=0, que descarta el PMM y
+  // el driver de disco y confirma el EPT fault.
+  //
+  // Pre-tocando AQUI cada region de 2 MB (read + write-same-value,
+  // sin alterar el contenido de RAM) el coste queda concentrado en
+  // el boot y no aparece nunca en runtime.
+  //
+  // En metal real el EPT no existe y esto es esencialmente no-op.
+  //
+  // Nota: si el guest crece y se anade mas RAM, el bucle escala
+  // linealmente (256 iteraciones por cada 512 MB). Coste esperado:
+  // 100-200 ms en KVM, <5 ms en metal.
+  // ---------------------------------------------------------------------
+  {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t t0 = ((uint64_t)hi << 32) | lo;
+
+    volatile uint8_t *base = (volatile uint8_t *)PHYS_MAP_BASE;
+    for (uint64_t off = 0; off < size; off += 0x200000) {
+      uint8_t v = base[off];
+      base[off] = v; // write-same-value: dispara el EPT fault sin
+                     // modificar el contenido de RAM.
+    }
+
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t t1 = ((uint64_t)hi << 32) | lo;
+
+    // klog_get_tsc_freq() devuelve 2600000000 (default) hasta que
+    // klog_calibrate_tsc se ejecute en kmain_task. El valor es
+    // aproximado pero util como orden de magnitud.
+    uint64_t freq = klog_get_tsc_freq();
+    uint64_t us = freq ? (t1 - t0) * 1000000ULL / freq : 0;
+
+    LOG_INFO("[PAGING] Pre-touch ventana fisica: %lu MB en ~%lu us",
+             (unsigned long)(size / (1024 * 1024)), (unsigned long)us);
+  }
 }
 
 void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
