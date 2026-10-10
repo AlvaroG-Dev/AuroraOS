@@ -626,7 +626,7 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
       size_t start = dir_child_offsets[dir_index];
       size_t end = dir_child_offsets[dir_index + 1];
       if (index >= (uint64_t)(end - start)) {
-        out->name[0] = '\\0';
+        out->name[0] = '\x5c0';
         out->type = 0;
         out->size = 0;
         return 0;
@@ -649,7 +649,7 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
         if (rlen >= sizeof(out->name))
           rlen = sizeof(out->name) - 1;
         memcpy(out->name, name, rlen);
-        out->name[rlen] = '\\0';
+        out->name[rlen] = '\x5c0';
         out->type = child->is_dir ? VFS_DIRECTORY : VFS_FILE;
         out->size = child->is_dir ? 0 : child->size;
         return 0;
@@ -658,6 +658,7 @@ static int tar_vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   }
 
 readdir_slow:
+  ;
   size_t n = tarfs_get_node_count();
   uint64_t seen = 0;
   for (size_t i = 0; i < n; i++) {
