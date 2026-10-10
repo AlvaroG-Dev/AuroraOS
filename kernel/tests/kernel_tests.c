@@ -658,6 +658,43 @@ static void test_paging_map_rollback(void) {
 REGISTER_TEST("paging: rollback de tablas en fallo de alloc",
               test_paging_map_rollback);
 
+static void test_paging_special_mapping_lifetime(void) {
+  const uint64_t virt = 0x0000001000000000ULL;
+  uint64_t free_before = pmm_free_pages_count();
+  uint64_t shared_phys = pmm_alloc_page();
+  uint64_t pml4_phys = pmm_alloc_page();
+  TEST_ASSERT(shared_phys && pml4_phys, "fallo al reservar páginas de prueba");
+  if (!shared_phys || !pml4_phys) {
+    if (shared_phys)
+      pmm_free_page(shared_phys);
+    if (pml4_phys)
+      pmm_free_page(pml4_phys);
+    return;
+  }
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+  memset(pml4, 0, PAGE_SIZE);
+  int rc = paging_map_page_in(
+      pml4, virt, shared_phys, PTE_USER | PTE_PRESENT | PTE_SPECIAL);
+  TEST_ASSERT(rc == 0, "no se pudo mapear página shared: %d", rc);
+  if (rc != 0) {
+    paging_free_user_space(pml4_phys);
+    pmm_free_page(shared_phys);
+    return;
+  }
+
+  paging_free_user_space(pml4_phys);
+  uint64_t free_after = pmm_free_pages_count();
+  TEST_ASSERT(free_after + 1 == free_before,
+              "la liberación del address space liberó la página shared "
+              "(libres=%lu, esperado=%lu)",
+              (unsigned long)free_after, (unsigned long)(free_before - 1));
+  if (free_after + 1 == free_before)
+    pmm_free_page(shared_phys);
+}
+REGISTER_TEST("paging: conserva páginas especiales compartidas",
+              test_paging_special_mapping_lifetime);
+
 // ---------------------------------------------------------------------------
 // Paging: rechazo de rangos con overflow / direcciones no canónicas
 // ---------------------------------------------------------------------------

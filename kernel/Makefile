@@ -37,7 +37,7 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
         uaccess.o uaccess_asm.o uaccess_faults.o signal.o procfs.o futex.o swap.o sysctl.o epoll.o signalfd.o \
         memfd.o \
         sysfs.o tests/pmm_stress.o tests/kernel_tests.o \
-        smp_trampoline.o smp_boot.o
+        smp_trampoline.o smp_boot.o vdso.o vdso_blob.o
 TARGET  = kernel.elf
 
 all: $(TARGET)
@@ -71,7 +71,44 @@ smp_trampoline.o: smp_trampoline.bin
 	        --redefine-sym _binary_smp_trampoline_bin_size=smp_trampoline_size \
 	        $< $@
 
+# ---------------------------------------------------------------------------
+# vDSO: shared object embebido como blob.
+#
+# Se construye con el toolchain del host (gcc + ld + objcopy) y se
+# embebe como blob (mismo truco que smp_trampoline.o). En runtime el
+# kernel copia el blob a una pagina y la mapea en cada exec.
+#
+# El vDSO no tiene GOT/PLT/relocations: solo immediatos. Por eso puede
+# vivir a VMA fija sin que el kernel tenga que aplicar parches.
+# ---------------------------------------------------------------------------
+VDSO_OBJ      = vdso/vdso.o
+VDSO_SO       = vdso/vdso.so
+VDSO_BLOB_OBJ = vdso_blob.o
+
+$(VDSO_OBJ): vdso/vdso.S
+	$(CC) -c -fno-pic -fno-stack-protector -mno-red-zone \
+	      -ffreestanding -nostdlib -fno-asynchronous-unwind-tables \
+	      $< -o $@
+
+$(VDSO_SO): $(VDSO_OBJ) vdso/vdso.ld vdso/vdso.map
+	ld -shared -T vdso/vdso.ld \
+	   --version-script=vdso/vdso.map \
+	   --hash-style=sysv \
+	   --build-id=none -nostdlib \
+	   -o $@ $(VDSO_OBJ)
+
+# objcopy del .so ENTERO (no -O binary: queremos conservar el ELF
+# header, program headers y secciones dinamicas).
+$(VDSO_BLOB_OBJ): $(VDSO_SO)
+	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+	        --rename-section .data=.vdso_blob,alloc,load,readonly,data,contents \
+	        --redefine-sym _binary_vdso_vdso_so_start=vdso_blob_start \
+	        --redefine-sym _binary_vdso_vdso_so_end=vdso_blob_end \
+	        --redefine-sym _binary_vdso_vdso_so_size=vdso_blob_size \
+	        $(VDSO_SO) $@
+
 clean:
-	rm -f $(OBJS) $(TARGET) smp_trampoline.bin linker.ld
+	rm -f $(OBJS) $(TARGET) smp_trampoline.bin linker.ld \
+	      $(VDSO_OBJ) $(VDSO_SO) $(VDSO_BLOB_OBJ)
 
 .PHONY: all clean
