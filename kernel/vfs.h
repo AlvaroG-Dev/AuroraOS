@@ -240,6 +240,15 @@ typedef struct file_descriptor {
   wait_queue_t write_wq;
 } file_descriptor_t;
 
+typedef struct {
+  uint64_t inner; // próximo índice (tras mounts sintéticas) que se pedirá
+  uint64_t probe; // posición del readdir del FS que le corresponde
+  int valid;
+} vfs_rd_cursor_t;
+
+int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
+                       vfs_dirent_t *out);
+
 // --- Init y mount ---
 void vfs_init(void);
 

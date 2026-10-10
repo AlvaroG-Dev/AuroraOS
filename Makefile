@@ -244,7 +244,7 @@ image: bootloader kernel user
 	cp kernel/kernel.elf esp/
 	cp bootloader/aurora.conf esp/etc/aurora.conf
 	dd if=/dev/zero of=aurora.img bs=1M count=256
-	mkfs.fat -F 32 aurora.img
+	mkfs.fat -F 32 -s 4 -S 512 aurora.img
 	mcopy -i aurora.img -s esp/EFI ::
 	mcopy -i aurora.img -s esp/kernel.elf ::
 	mcopy -i aurora.img -s esp/etc ::

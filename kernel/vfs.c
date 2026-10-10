@@ -883,7 +883,8 @@ int vfs_statfs(const char *path, struct vfs_statfs *out) {
   return ops->statfs(fs_priv, out);
 }
 
-int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
+int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
+                       vfs_dirent_t *out) {
   if (!node || !out)
     return -EINVAL;
   if (!(node->flags & VFS_DIRECTORY))
@@ -893,7 +894,6 @@ int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
   size_t mount_count =
       collect_child_mounts(node->name, mount_names, MAX_SYNTH_MOUNTS);
 
-  // Primero servimos los nombres de mounts sintéticas.
   if (index < mount_count) {
     size_t bl = strlen(mount_names[index]);
     if (bl >= sizeof(out->name))
@@ -905,8 +905,6 @@ int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
     return 0;
   }
 
-  // Si el FS no tiene readdir (p. ej. un dir de mount sin backing) y
-  // ya pasamos los índices de mounts, EOF.
   if (!node->ops || !node->ops->readdir) {
     out->name[0] = '\0';
     out->type = 0;
@@ -926,6 +924,13 @@ int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
   uint64_t inner = index - mount_count;
   uint64_t seen = 0;
   uint64_t probe = 0;
+
+  // Si el llamante viene leyendo en secuencia, seguimos donde lo dejó
+  // en vez de re-recorrer el FS desde 0.
+  if (cur && cur->valid && cur->inner == inner) {
+    seen = inner;
+    probe = cur->probe;
+  }
 
   for (;;) {
     vfs_dirent_t e;
@@ -952,10 +957,19 @@ int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
 
     if (seen == inner) {
       *out = e;
+      if (cur) {
+        cur->valid = 1;
+        cur->inner = inner + 1;
+        cur->probe = probe;
+      }
       return 0;
     }
     seen++;
   }
+}
+
+int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
+  return vfs_readdir_node_c(node, index, NULL, out);
 }
 
 int vfs_readdir(const char *path, uint64_t index, vfs_dirent_t *out) {
