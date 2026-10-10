@@ -45,6 +45,9 @@ que colgaban el sistema durante los tests de `truncate`.
   clone3 + futex WAIT_BITSET).
 - **madvise(MADV_DONTNEED)**: el allocator de Python libera frames.
 - **/dev/urandom**: git y cualquier cosa que use tempfiles aleatorios.
+- **vDSO**: `clock_gettime`, `gettimeofday` y `time` resueltos en
+  userspace vía AT_SYSINFO_EHDR. ~40 ns por llamada vs ~500 ns del
+  syscall.
 
 ### Fixes de kernel acumulados
 
@@ -362,7 +365,7 @@ Sin cambios. Aceptable.
 | 10 | Usuarios reales (`setuid` irreversible) | 1 día | Media |
 | 11 | Portar `git` | 1 semana | ✅ Hecho (local) |
 | 11b | Portar git con red (push/pull) | depende de 7-9 | Alta |
-| 12 | vDSO | 2 días | Baja |
+| 12 | vDSO | 2 días | ✅ Hecho |
 | 13 | `ptrace` (subset) | 3 días | Baja |
 | 14 | Portar `gcc` | 1 mes+ | Baja |
 

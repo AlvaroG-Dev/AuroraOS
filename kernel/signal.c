@@ -7,7 +7,6 @@
 #include "syscall.h"
 #include "uaccess.h"
 
-
 extern registers_t *syscall_current_regs(void);
 
 sig_action_t signal_default_action(int sig) {
@@ -314,24 +313,39 @@ int signal_deliver_from_exception(int sig, registers_t *regs) {
 int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,
                        uint64_t sigsetsize, uint64_t _) {
   (void)_;
-  if (sig < 1 || sig >= SIG_MAX)
+  // [FIX] Linux SIGRTMAX es 64, y glibc lo consulta/instala al
+  // arrancar (nptl lo usa internamente). Nuestro SIG_MAX es 64 y el
+  // array sigactions[] tiene índices 0..63, así que la 64 no cabe.
+  // Aceptamos la 64 como no-op: devolvemos SIG_DFL si piden la
+  // acción antigua, descartamos cualquier instalación. Nadie en
+  // Aurora envía la 64, así que no perdemos nada.
+  if (sig < 1 || sig > 64) {
+    LOG_INFO("[RT_SIGACTION] EINVAL: sig=%lu fuera de [1,64]",
+             (unsigned long)sig);
     return -EINVAL;
-
-  // Linux acepta cualquier sigsetsize >= sizeof(kernel_sigset_t).
-  // glibc pasa 8; algunas libs pasan valores mayores por
-  // forward-compat. Rechazar solo < 8.
-  if (sigsetsize < 8)
+  }
+  if (sigsetsize < 8) {
+    LOG_INFO("[SIG-ACTION-EINVAL] sig=%lu sigsetsize=%lu", (unsigned long)sig,
+             (unsigned long)sigsetsize);
     return -EINVAL;
-
+  }
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
 
-  // SIGKILL/SIGSTOP: Linux solo rechaza si se intenta instalar un
-  // handler distinto de SIG_DFL. La consulta (act == NULL) siempre
-  // funciona y devuelve la acción actual (SIG_DFL). Python consulta
-  // estos dos al arrancar, y con el check previo devolvíamos EINVAL
-  // por error.
+  if (sig == 64) {
+    if (oact) {
+      if (!access_ok((void *)oact, sizeof(k_sigaction_t)))
+        return -EFAULT;
+      k_sigaction_t cur;
+      memset(&cur, 0, sizeof(cur));
+      cur.handler = SIG_DFL;
+      if (copy_to_user((void *)oact, &cur, sizeof(cur)) < 0)
+        return -EFAULT;
+    }
+    return 0;
+  }
+
   if (sig == SIGKILL || sig == SIGSTOP) {
     if (act) {
       if (!access_ok((void *)act, sizeof(k_sigaction_t)))
@@ -339,8 +353,11 @@ int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,
       k_sigaction_t na;
       if (copy_from_user(&na, (void *)act, sizeof(k_sigaction_t)) < 0)
         return -EFAULT;
-      if (na.handler != SIG_DFL)
+      if (na.handler != SIG_DFL) {
+        LOG_INFO("[SIG-ACTION-EINVAL] sig=%lu handler=%p (no SIG_DFL)",
+                 (unsigned long)sig, (void *)na.handler);
         return -EINVAL;
+      }
     }
     if (oact) {
       if (!access_ok((void *)oact, sizeof(k_sigaction_t)))
