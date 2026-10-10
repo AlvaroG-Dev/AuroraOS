@@ -174,6 +174,9 @@ typedef struct {
 
   // [PR 4] Estado de escritura.
   int fat_dirty;
+  uint8_t *fat_dirty_map; // 1 bit por sector de FAT (NULL => flush completo)
+  uint32_t alloc_hint;    // próximo cluster a probar en alloc
+  int fsinfo_dirty;       // FSInfo desactualizado (se escribe en sync/umount)
   int use_second_fat;
   uint32_t fs_info_sector;
 
@@ -274,8 +277,7 @@ static int fat32_update_dotdot(fat32_fs_t *fs, uint32_t dir_cluster,
 static int fat32_node_rename(vfs_node_t *src_dir, const char *src_name,
                              vfs_node_t *dst_dir, const char *dst_name);
 // [B] Buffer cache de sectores de datos.
-static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
-                       void *buf);
+static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count, void *buf);
 static int fat32_bwrite(fat32_fs_t *fs, uint64_t lba, uint32_t count,
                         const void *buf);
 // ===========================================================================
@@ -462,8 +464,7 @@ static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
             s->lba = current_lba + cached;
             s->dirty = 0;
             s->last_used = ++c->clock;
-            memcpy(s->data,
-                   prefetch + (size_t)cached * FAT32_BCACHE_SECTOR,
+            memcpy(s->data, prefetch + (size_t)cached * FAT32_BCACHE_SECTOR,
                    FAT32_BCACHE_SECTOR);
             bcache_link(c, s);
           }
@@ -499,8 +500,7 @@ static int fat32_bread(fat32_fs_t *fs, uint64_t lba, uint32_t count,
     s->dirty = 0;
     s->last_used = ++c->clock;
     bcache_link(c, s);
-    memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, s->data,
-           FAT32_BCACHE_SECTOR);
+    memcpy(out + (size_t)i * FAT32_BCACHE_SECTOR, s->data, FAT32_BCACHE_SECTOR);
     i++;
   }
   return 0;
@@ -540,16 +540,63 @@ static int fat32_bwrite(fat32_fs_t *fs, uint64_t lba, uint32_t count,
 
 static int fat32_bcache_flush(fat32_fs_t *fs) {
   fat32_bcache_t *c = fs->bcache;
-  if (!c)
+  if (!c || c->dirty_slots == 0)
     return 0;
-  for (int i = 0; i < FAT32_BCACHE_SLOTS; i++) {
+
+  const uint32_t MAX_RUN = 128; // 64 KB
+  uint8_t *stage = NULL;
+  int rc = 0;
+
+  for (int i = 0; i < FAT32_BCACHE_SLOTS && rc == 0; i++) {
     fat32_bcache_slot_t *s = &c->slots[i];
-    if (s->lba == UINT64_MAX || !s->dirty)
-      continue;
-    if (bdev_write(fs->bdev, s->lba, 1, s->data) != 0)
-      return -EIO;
-    s->dirty = 0;
+    while (rc == 0 && s->lba != UINT64_MAX && s->dirty) {
+      // Inicio de la racha contigua de sectores sucios que contiene a `s`.
+      uint64_t start = s->lba;
+      for (uint32_t k = 0; k < MAX_RUN && start > 0; k++) {
+        fat32_bcache_slot_t *p = bcache_lookup(c, start - 1);
+        if (!p || !p->dirty)
+          break;
+        start--;
+      }
+      uint32_t n = 0;
+      while (n < MAX_RUN) {
+        fat32_bcache_slot_t *p = bcache_lookup(c, start + n);
+        if (!p || !p->dirty)
+          break;
+        n++;
+      }
+      if (n == 0)
+        break; // no debería pasar
+
+      if (n > 1 && !stage)
+        stage = (uint8_t *)kmalloc(MAX_RUN * FAT32_BCACHE_SECTOR);
+
+      if (n > 1 && stage) {
+        for (uint32_t j = 0; j < n; j++)
+          memcpy(stage + (size_t)j * FAT32_BCACHE_SECTOR,
+                 bcache_lookup(c, start + j)->data, FAT32_BCACHE_SECTOR);
+        rc = bdev_write(fs->bdev, start, n, stage);
+      } else {
+        for (uint32_t j = 0; j < n && rc == 0; j++)
+          rc = bdev_write(fs->bdev, start + j, 1,
+                          bcache_lookup(c, start + j)->data);
+      }
+      if (rc != 0)
+        break;
+      for (uint32_t j = 0; j < n; j++) {
+        fat32_bcache_slot_t *p = bcache_lookup(c, start + j);
+        if (p && p->dirty) {
+          p->dirty = 0;
+          if (c->dirty_slots > 0)
+            c->dirty_slots--;
+        }
+      }
+    }
   }
+  if (stage)
+    kfree(stage);
+  if (rc != 0)
+    return -EIO;
   c->dirty_slots = 0;
   return 0;
 }
@@ -912,13 +959,30 @@ static int fat32_gen_short_alias(fat32_fs_t *fs, uint32_t parent_cluster,
 // Helpers de escritura de FAT
 // ===========================================================================
 
+// Marca el sector de FAT que contiene `cluster` como pendiente de escribir.
+static inline void fat32_fat_mark_dirty(fat32_fs_t *fs, uint32_t cluster) {
+  fs->fat_dirty = 1;
+  fs->fsinfo_dirty = 1;
+  if (!fs->fat_dirty_map)
+    return;
+  uint32_t sec = (uint32_t)(((uint64_t)cluster * 4u) / fs->bytes_per_sector);
+  if (sec < fs->fat_size_sectors)
+    fs->fat_dirty_map[sec >> 3] |= (uint8_t)(1u << (sec & 7));
+}
+
+// Sin mapa (fallo de memoria) todo cuenta como sucio => flush completo.
+static inline int fat32_fat_sector_dirty(const fat32_fs_t *fs, uint32_t sec) {
+  return !fs->fat_dirty_map ||
+         (fs->fat_dirty_map[sec >> 3] & (1u << (sec & 7)));
+}
+
 static int fat32_fat_set(fat32_fs_t *fs, uint32_t cluster, uint32_t value) {
   if (!fs->fat_cache)
     return -EIO;
   if (cluster >= fs->fat_entries)
     return -EINVAL;
   fs->fat_cache[cluster] = value & 0x0FFFFFFFu;
-  fs->fat_dirty = 1;
+  fat32_fat_mark_dirty(fs, cluster);
   return 0;
 }
 
@@ -967,85 +1031,106 @@ static int fat32_update_fsinfo_locked(fat32_fs_t *fs) {
   return 0;
 }
 
-// Vuelca la FAT cacheada a disco. Antes hacía un bdev_write por CADA
-// sector de FAT (1008 en tu FS). Cada bdev_write es una transacción
-// DMA completa; el bus master solo progresa entre transacciones, así
-// que en QEMU el coste es ~1008 × 4.8 ms = 4.8 s POR SYNC.
-//
-// El driver ATA-DMA (ata_dma_rw) ya divide internamente en trozos de
-// <= 64 KB para respetar el límite de la PRDT (una página de 4 KB = 512
-// entradas × 128 B con EOT). 64 KB / 512 B = 128 sectores por
-// transacción, así que pedir la FAT completa en un solo bdev_write
-// son ~8-16 transacciones en vez de 1008. Ganancia ~60×.
-static int fat32_sync_locked(fat32_fs_t *fs) {
+#define FAT32_FAT_MAX_RUN_BYTES (64u * 1024u)
+#define FAT32_FAT_GAP_MAX                                                      \
+  16 // sectores limpios que se rellenan para unir rachas
+
+static int fat32_write_fat_run(fat32_fs_t *fs, uint32_t first, uint32_t count) {
+  const uint8_t *buf =
+      (const uint8_t *)fs->fat_cache + (uint64_t)first * fs->bytes_per_sector;
+  uint64_t lba = (uint64_t)fs->fat_start_sector + first;
+  if (bdev_write(fs->bdev, lba, count, buf) != 0) {
+    LOG_ERR("[FAT32] sync FAT#1 falló (lba=%llu count=%u)",
+            (unsigned long long)lba, count);
+    return -EIO;
+  }
+  if (fs->use_second_fat) {
+    uint64_t lba2 = lba + fs->fat_size_sectors;
+    if (bdev_write(fs->bdev, lba2, count, buf) != 0) {
+      LOG_ERR("[FAT32] sync FAT#2 falló (lba=%llu count=%u)",
+              (unsigned long long)lba2, count);
+      return -EIO;
+    }
+  }
+  return 0;
+}
+
+// Escribe SOLO los sectores de FAT modificados, agrupando sectores
+// contiguos (y huecos cortos) en una sola transacción.
+static int fat32_flush_fat_dirty(fat32_fs_t *fs) {
+  const uint32_t max_run = FAT32_FAT_MAX_RUN_BYTES / fs->bytes_per_sector;
+  const uint32_t total = fs->fat_size_sectors;
+  uint32_t s = 0;
+
+  while (s < total) {
+    if (fs->fat_dirty_map && (s & 7) == 0 && fs->fat_dirty_map[s >> 3] == 0) {
+      s += 8;
+      continue;
+    }
+    if (!fat32_fat_sector_dirty(fs, s)) {
+      s++;
+      continue;
+    }
+    uint32_t end = s + 1; // exclusivo: último sucio + 1
+    uint32_t probe = s + 1;
+    while (probe < total && probe - s < max_run) {
+      if (fat32_fat_sector_dirty(fs, probe)) {
+        end = probe + 1;
+        probe++;
+      } else if (probe - end < FAT32_FAT_GAP_MAX) {
+        probe++;
+      } else {
+        break;
+      }
+    }
+    if (fat32_write_fat_run(fs, s, end - s) != 0)
+      return -EIO;
+    if (fs->fat_dirty_map)
+      for (uint32_t i = s; i < end; i++)
+        fs->fat_dirty_map[i >> 3] &= (uint8_t)~(1u << (i & 7));
+    s = end;
+  }
+  fs->fat_dirty = 0;
+  return 0;
+}
+
+// full=0: tras cada operación (datos + FAT sucia + flush).
+// full=1: sync explícito y umount (además FSInfo).
+static int fat32_sync_impl(fat32_fs_t *fs, int full) {
   if (!fs)
     return -EINVAL;
 
   int fat_dirty = (fs->fat_cache && fs->fat_dirty) ? 1 : 0;
   int data_dirty = (fs->bcache && fs->bcache->dirty_slots > 0) ? 1 : 0;
+  int fsinfo_due = (full && fs->fat_cache && fs->fsinfo_dirty) ? 1 : 0;
 
-  // Los datos pueden estar dirty aunque la FAT esté limpia. Por tanto
-  // fat_dirty no puede decidir si hay que vaciar la buffer cache.
-  if (!fat_dirty && !data_dirty)
+  if (!fat_dirty && !data_dirty && !fsinfo_due)
     return 0;
 
-  // Volcar datos sucios antes que la FAT (recuperación tras crash).
+  // Datos antes que la FAT (recuperación tras crash).
   if (data_dirty && fat32_bcache_flush(fs) != 0) {
     LOG_ERR("[FAT32] sync bcache flush falló");
     return -EIO;
   }
-
-  // Si solo había datos dirty, no hay nada más que actualizar en FAT.
-  if (!fat_dirty) {
-    if (bdev_flush(fs->bdev) != 0) {
-      LOG_ERR("[FAT32] sync flush de datos falló");
-      return -EIO;
-    }
-    return 0;
-  }
-
-  const uint32_t MAX_SYNC_SECTORS = (64u * 1024u) / fs->bytes_per_sector;
-
-  uint64_t remaining = fs->fat_size_sectors;
-  uint64_t lba = fs->fat_start_sector;
-  uint32_t *buf = fs->fat_cache;
-
-  while (remaining > 0) {
-    uint32_t chunk =
-        (remaining > MAX_SYNC_SECTORS) ? MAX_SYNC_SECTORS : (uint32_t)remaining;
-    if (bdev_write(fs->bdev, lba, chunk, buf) != 0) {
-      LOG_ERR("[FAT32] sync FAT#1 falló (lba=%llu count=%u)",
-              (unsigned long long)lba, chunk);
-      return -EIO;
-    }
-    if (fs->use_second_fat) {
-      uint64_t fat2_lba = lba + fs->fat_size_sectors;
-      if (bdev_write(fs->bdev, fat2_lba, chunk, buf) != 0) {
-        LOG_ERR("[FAT32] sync FAT#2 falló (lba=%llu count=%u)",
-                (unsigned long long)fat2_lba, chunk);
-        return -EIO;
-      }
-    }
-    lba += chunk;
-    buf += (uint64_t)chunk * fs->bytes_per_sector / sizeof(uint32_t);
-    remaining -= chunk;
-  }
-
-  if (fat32_update_fsinfo_locked(fs) != 0) {
-    LOG_ERR("[FAT32] sync FSInfo falló");
+  if (fat_dirty && fat32_flush_fat_dirty(fs) != 0)
     return -EIO;
+  if (fsinfo_due) {
+    if (fat32_update_fsinfo_locked(fs) != 0) {
+      LOG_ERR("[FAT32] sync FSInfo falló");
+      return -EIO;
+    }
+    fs->fsinfo_dirty = 0;
   }
-
   if (bdev_flush(fs->bdev) != 0) {
     LOG_ERR("[FAT32] sync flush falló");
     return -EIO;
   }
-
-  fs->fat_dirty = 0;
-  LOG_DEBUG("[FAT32] sync OK (%llu KB)",
-            (unsigned long long)((uint64_t)fs->fat_size_sectors *
-                                 fs->bytes_per_sector / 1024));
   return 0;
+}
+
+static int fat32_sync_locked(fat32_fs_t *fs) { return fat32_sync_impl(fs, 0); }
+static int fat32_sync_full_locked(fat32_fs_t *fs) {
+  return fat32_sync_impl(fs, 1);
 }
 
 int fat32_sync(void *fs_priv) {
@@ -1053,21 +1138,29 @@ int fat32_sync(void *fs_priv) {
     return -EINVAL;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
   fat32_mutex_lock(&fs->lock);
-  int rc = fat32_sync_locked(fs);
+  int rc = fat32_sync_full_locked(fs);
   fat32_mutex_unlock(&fs->lock);
   return rc;
 }
 
 static uint32_t fat32_alloc_cluster(fat32_fs_t *fs) {
-  if (!fs->fat_cache)
+  if (!fs->fat_cache || fs->fat_entries <= 2)
     return 0;
-  for (uint32_t c = 2; c < fs->fat_entries; c++) {
+  uint32_t n = fs->fat_entries;
+  uint32_t start = fs->alloc_hint;
+  if (start < 2 || start >= n)
+    start = 2;
+  uint32_t c = start;
+  do {
     if (fs->fat_cache[c] == 0) {
       fs->fat_cache[c] = 0x0FFFFFFFu; // EOC provisional
-      fs->fat_dirty = 1;
+      fat32_fat_mark_dirty(fs, c);
+      fs->alloc_hint = c + 1;
       return c;
     }
-  }
+    if (++c >= n)
+      c = 2;
+  } while (c != start);
   return 0;
 }
 
@@ -1083,7 +1176,9 @@ static void fat32_free_chain(fat32_fs_t *fs, uint32_t start) {
     if (next < 0)
       break;
     fs->fat_cache[cluster] = 0;
-    fs->fat_dirty = 1;
+    fat32_fat_mark_dirty(fs, cluster);
+    if (cluster < fs->alloc_hint)
+      fs->alloc_hint = cluster;
     if ((uint32_t)next >= FAT_EOC_MIN || (uint32_t)next == FAT_BAD)
       break;
     cluster = (uint32_t)next;
@@ -1435,8 +1530,7 @@ static int64_t fat32_read_data(fat32_node_priv_t *np, uint64_t offset,
   // recorrer desde el inicio toda la cadena FAT en cada lectura secuencial.
   uint32_t cluster;
   uint32_t cluster_idx;
-  if (FAT_IS_VALID(np->read_cache_cluster) &&
-      np->read_cache_index <= cl_idx) {
+  if (FAT_IS_VALID(np->read_cache_cluster) && np->read_cache_index <= cl_idx) {
     cluster = np->read_cache_cluster;
     cluster_idx = np->read_cache_index;
   } else {
@@ -3467,6 +3561,11 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
 
       if (read_ok) {
         fs->fat_entries = (uint32_t)(fat_bytes / 4);
+        fs->fat_dirty_map =
+            (uint8_t *)kzalloc(((size_t)fs->fat_size_sectors + 7) / 8);
+        if (!fs->fat_dirty_map)
+          LOG_WARN(
+              "[FAT32] sin memoria para el mapa dirty, flush completo de FAT");
         LOG_INFO("[FAT32] FAT cacheada: %u KB, %u entradas",
                  (unsigned)(fat_bytes / 1024), fs->fat_entries);
       } else {
@@ -3500,7 +3599,7 @@ void fat32_umount(void *fs_priv) {
   // Persistir tanto la data cache como la FAT antes de destruirlas.
   // VFS no permite propagar un error desde este callback void, así que
   // cualquier fallo de persistencia queda registrado explícitamente.
-  int sync_rc = fat32_sync_locked(fs);
+  int sync_rc = fat32_sync_full_locked(fs);
   if (sync_rc != 0)
     LOG_ERR("[FAT32] umount: no se pudieron persistir todos los datos (rc=%d)",
             sync_rc);
@@ -3508,6 +3607,8 @@ void fat32_umount(void *fs_priv) {
   if (fs->fat_cache)
     kfree(fs->fat_cache);
 
+  if (fs->fat_dirty_map)
+    kfree(fs->fat_dirty_map);
   int cache_rc = fat32_bcache_free(fs);
   if (cache_rc != 0)
     LOG_ERR("[FAT32] umount: error adicional al liberar buffer cache (rc=%d)",

@@ -66,13 +66,6 @@ void time_tick(void) {
       uint64_t tsc_freq = klog_get_tsc_freq();
       uint64_t delta_us =
           tsc_freq ? ((now_tsc - prev) * 1000000ULL / tsc_freq) : 0;
-      // 2 ms = 2 ticks perdidos consecutivos. Solo nos interesa ver
-      // gaps grandes (>5 ms) para no inundar el log con jitter normal.
-      if (delta_us > 5000) {
-        g_tick_gap_count[cpu]++;
-        LOG_WARN("[TICK-GAP] cpu=%d delta=%lu us total_gaps=%lu", cpu,
-                 (unsigned long)delta_us, (unsigned long)g_tick_gap_count[cpu]);
-      }
     }
     g_lapic_last_tsc[cpu] = now_tsc;
     lapic_ticks_per_cpu[cpu]++;

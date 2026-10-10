@@ -2048,12 +2048,13 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
   uint8_t kbuf[256];
   size_t pos = 0;
   uint64_t index = f->offset;
+  uint64_t start_index = index;
+  uint64_t t0 = sched_get_ticks();
+  vfs_rd_cursor_t cur = {0};
 
   while (pos + sizeof(linux_dirent64_t) + 8 <= count) {
     vfs_dirent_t ent;
-    // [3.3.c] vía vfs_readdir_node (no node->ops->readdir directo)
-    // para que las mounts hijas (/dev, /proc) aparezcan en `ls /`.
-    int rc = vfs_readdir_node(f->node, index, &ent);
+    int rc = vfs_readdir_node_c(f->node, index, &cur, &ent);
     if (rc != 0)
       break;
     if (ent.name[0] == '\0')
@@ -2089,6 +2090,11 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     pos += reclen;
     index++;
   }
+
+  uint64_t dt = sched_get_ticks() - t0;
+  if (dt > 20)
+    LOG_WARN("[GETDENTS] %s: %lu entradas en %lu ms", f->node->name,
+             (unsigned long)(index - start_index), (unsigned long)dt);
 
   f->offset = index;
   return (int64_t)pos;
@@ -2452,8 +2458,7 @@ static volatile uint32_t g_realtime_offset_state = 0;
 static int64_t g_realtime_offset_ms = 0;
 
 static int64_t realtime_now_ms(void) {
-  uint32_t state =
-      __atomic_load_n(&g_realtime_offset_state, __ATOMIC_ACQUIRE);
+  uint32_t state = __atomic_load_n(&g_realtime_offset_state, __ATOMIC_ACQUIRE);
   if (state != 2) {
     uint32_t expected = 0;
     if (__atomic_compare_exchange_n(&g_realtime_offset_state, &expected, 1, 0,
@@ -5605,16 +5610,7 @@ uint64_t syscall_handler_c(registers_t *regs) {
   if (cur)
     cur->syscall_regs = regs;
 
-  uint64_t syscall_start_tsc = syscall_rdtsc();
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
-  uint64_t syscall_end_tsc = syscall_rdtsc();
-  uint64_t syscall_freq = klog_get_tsc_freq();
-  if (syscall_freq && syscall_end_tsc - syscall_start_tsc > syscall_freq / 100) {
-    uint64_t syscall_us =
-        (syscall_end_tsc - syscall_start_tsc) * 1000000ULL / syscall_freq;
-    LOG_WARN("[SYSCALL-SLOW] num=%lu dur=%lu us", (unsigned long)num,
-             (unsigned long)syscall_us);
-  }
 
   // Publicar el valor de retorno en el trap frame ANTES de la entrega
   // de señales, para que el ucontext que construyamos capture el rax
