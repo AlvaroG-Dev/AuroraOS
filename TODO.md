@@ -496,6 +496,17 @@ con LFN, subdirs anidados, binario 256 KB) + `commit` + `log`
 **Verificado:** /tmp, /var, /etc, /run escribibles y persistentes
 mientras el sistema esta arriba. /etc/ld.so.cache sobrevive al mount
 tmpfs (leido de tarfs en boot).
+
+### Bloque 16 — pre-touch de ventana fisica ✅ CERRADO
+
+16.1 map_phys_window() pre-toca cada huge page fisica (read +
+     write-same-value) para absorber EPT faults de KVM en el boot.
+16.2 try_vma_demand mantiene instrumentacion con umbral 5 ms
+     (canario de regresion).
+
+**Medido:** 2 PF-SLOW de 600 us por arranque de Python antes; 0
+despues. Arranque de Python: 600 ms -> 250 ms.
+
 ---
 
 # Estado global

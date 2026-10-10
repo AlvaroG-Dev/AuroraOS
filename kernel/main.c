@@ -22,6 +22,15 @@
 #include "input.h"
 #include "ipi.h"
 #include "klog.h"
+#include "net/arp.h"
+#include "net/e1000e.h"
+#include "net/icmp.h"
+#include "net/ip.h"
+#include "net/loopback.h"
+#include "net/netif.h"
+#include "net/ping.h"
+#include "net/socket.h"
+#include "net/udp.h"
 #include "paging.h"
 #include "part.h"
 #include "pci.h"
@@ -283,6 +292,15 @@ static void kmain_task(void) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
 
+  // Arranca el kthread de RX del driver e1000e (si se inicializó).
+  if (e1000e_netif()) {
+    LOG_INFO("[INIT] Arrancando kthread RX de e1000e...");
+    e1000e_start();
+
+    LOG_INFO("[INIT] Arrancando kthread de ping (10.0.2.2)...");
+    ping_init();
+  }
+
   __sched_canary_check();
 
   LOG_INFO("[INIT] Cargando init '/usr/bin/init'...");
@@ -487,6 +505,41 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("[INIT] vDSO... ");
   vdso_init();
   LOG_INFO("OK");
+
+  LOG_INFO("[INIT] Networking (Fase 0)... ");
+  net_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] Loopback... ");
+  loopback_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] IPv4... ");
+  ip_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] ARP... ");
+  arp_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] ICMP... ");
+  icmp_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] UDP... ");
+  udp_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] Sockets... ");
+  socket_subsystem_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] e1000e... ");
+  if (e1000e_init() == 0) {
+    LOG_INFO("OK");
+  } else {
+    LOG_WARN("no disponible");
+  }
 
   LOG_INFO("[INIT] Iniciando Scheduler...");
   smp_init();

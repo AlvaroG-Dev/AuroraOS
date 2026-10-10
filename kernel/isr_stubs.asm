@@ -249,18 +249,42 @@ ipi_stub_tlb:
     
 
 ; ---------------------------------------------------------------------------
-; MSI stubs. Un solo vector (0x60) para el AHCI.
+; MSI stubs. Un stub por vector (0x60-0x6F).
 ;
-; Igual que irq_common, pero con int_num hardcodeado a 0x60.
-; Lo usamos en lugar de una macro porque solo necesitamos uno.
+; El CPU usa el vector MSI como índice en la IDT, y el stub es lo único
+; que puede decirle al handler C qué vector disparó. Por eso hay uno por
+; vector y no uno genérico: cuando el e1000e dispara el 0x61, el stub
+; empuja 0x61; cuando el AHCI dispara el 0x60, empuja 0x60.
+;
+; Si falta la IDT entry de un vector que está en uso (bug que teníamos),
+; el CPU lanza #GP con error_code = 0x30X, donde X = vector.
 ; ---------------------------------------------------------------------------
 extern msi_handler
 
-global msi_stub_0x60
-msi_stub_0x60:
+%macro MSI_STUB 1
+global msi_stub_%1
+msi_stub_%1:
     push 0          ; dummy error code
-    push 0x60       ; int_num = 0x60
+    push %1         ; int_num = vector
     jmp msi_common
+%endmacro
+
+MSI_STUB 0x60
+MSI_STUB 0x61
+MSI_STUB 0x62
+MSI_STUB 0x63
+MSI_STUB 0x64
+MSI_STUB 0x65
+MSI_STUB 0x66
+MSI_STUB 0x67
+MSI_STUB 0x68
+MSI_STUB 0x69
+MSI_STUB 0x6A
+MSI_STUB 0x6B
+MSI_STUB 0x6C
+MSI_STUB 0x6D
+MSI_STUB 0x6E
+MSI_STUB 0x6F
 
 ; ---------------------------------------------------------------------------
 ; msi_common: como irq_common, pero llama a msi_handler en vez de irq_handler.
