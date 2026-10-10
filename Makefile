@@ -144,6 +144,9 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 		mkdir -p sysroot/usr/share/locale; \
 		cp -f /usr/share/locale/locale.alias sysroot/usr/share/locale/locale.alias; \
 	fi
+	@if [ -f /usr/share/zoneinfo/UTC ]; then \
+		cp -f /usr/share/zoneinfo/UTC sysroot/etc/localtime; \
+	fi
 
 # ---------------------------------------------------------------------------
 # 1. (Sin busybox — userspace es 100% glibc/Ubuntu)

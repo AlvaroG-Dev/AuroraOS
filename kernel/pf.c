@@ -229,20 +229,40 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
 static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
                           uint64_t err_code) {
   int is_write = (err_code & 0x02) != 0;
-  if (is_write && !(vma->flags & PTE_WRITABLE)) {
+  if (is_write && !(vma->flags & PTE_WRITABLE))
     return 0;
-  }
 
   uint64_t page = fault_addr & ~0xFFFULL;
-  uint64_t phys = alloc_user_page_zeroed();
+  uint32_t lo, hi;
+  uint64_t freq = klog_get_tsc_freq();
+
+  // -------------------------------------------------------------------
+  // [PF-SLOW] Fase 1: pmm_alloc_page vs memset, medidos por separado.
+  //
+  // Sustituye a alloc_user_page_zeroed() para saber donde se va el
+  // tiempo. En el log previo salia alloc=609 us, read=1 us, map=0 us:
+  // todo el coste estaba dentro de alloc_user_page_zeroed(), pero esa
+  // funcion hace dos cosas (pmm_alloc_page + memset). Aqui las
+  // separamos con rdtsc entre medias.
+  // -------------------------------------------------------------------
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+
+  uint64_t phys = pmm_alloc_page();
   if (!phys)
     return 0;
 
-  // [DIAG] Cronómetro para ver si el read del fichero backing es lento.
-  uint32_t _lo, _hi;
-  __asm__ volatile("rdtsc" : "=a"(_lo), "=d"(_hi));
-  uint64_t _t0 = ((uint64_t)_hi << 32) | _lo;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t1 = ((uint64_t)hi << 32) | lo;
 
+  memset(phys_to_virt(phys), 0, PAGE_SIZE);
+
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t2 = ((uint64_t)hi << 32) | lo;
+
+  // -------------------------------------------------------------------
+  // [PF-SLOW] Fase 2: read del fichero (VMA_FILE).
+  // -------------------------------------------------------------------
   if (vma->type == VMA_FILE && vma->file_fd) {
     file_descriptor_t *f = vma->file_fd;
     if (!f->node || !f->node->ops || !f->node->ops->read) {
@@ -258,6 +278,12 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     }
   }
 
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t3 = ((uint64_t)hi << 32) | lo;
+
+  // -------------------------------------------------------------------
+  // [PF-SLOW] Fase 3: map.
+  // -------------------------------------------------------------------
   uint64_t map_flags = vma->flags | PTE_PRESENT;
   if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), page, phys,
                          map_flags) != 0) {
@@ -265,18 +291,28 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     return 0;
   }
 
-  // [DIAG] Reportar si el #PF completo tardó >2 ms.
-  {
-    uint32_t _lo2, _hi2;
-    __asm__ volatile("rdtsc" : "=a"(_lo2), "=d"(_hi2));
-    uint64_t _t1 = ((uint64_t)_hi2 << 32) | _lo2;
-    uint64_t _freq = klog_get_tsc_freq();
-    if (_freq) {
-      uint64_t _us = (_t1 - _t0) * 1000000ULL / _freq;
-      if (_us > 2000) {
-        LOG_WARN("[PF-SLOW] pid=%u cr2=%p type=%u %lu us", proc->pid,
-                 (void *)page, vma->type, (unsigned long)_us);
-      }
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t4 = ((uint64_t)hi << 32) | lo;
+
+  // -------------------------------------------------------------------
+  // [PF-SLOW] Reporte.
+  // -------------------------------------------------------------------
+  if (freq) {
+    uint64_t us_pmm = (t1 - t0) * 1000000ULL / freq;
+    uint64_t us_memset = (t2 - t1) * 1000000ULL / freq;
+    uint64_t us_read = (t3 - t2) * 1000000ULL / freq;
+    uint64_t us_map = (t4 - t3) * 1000000ULL / freq;
+    uint64_t us_total = us_pmm + us_memset + us_read + us_map;
+
+    // Umbral alto (5 ms): solo loguea si vuelve a aparecer un problema
+    // grave de latencia. Bajo KVM con EPT, los faults ya se absorben
+    // en el pre-touch de map_phys_window() al boot.
+    if (us_total > 5000) {
+      LOG_WARN("[PF-SLOW] pid=%u cr2=%p type=%u total=%lu us "
+               "(pmm=%lu memset=%lu read=%lu map=%lu)",
+               proc->pid, (void *)page, vma->type, (unsigned long)us_total,
+               (unsigned long)us_pmm, (unsigned long)us_memset,
+               (unsigned long)us_read, (unsigned long)us_map);
     }
   }
 
