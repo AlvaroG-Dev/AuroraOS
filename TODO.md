@@ -461,6 +461,41 @@ con LFN, subdirs anidados, binario 256 KB) + `commit` + `log`
 - [ ] `rt_sigaction` (13) → -EINVAL en 3 llamadas al arrancar Python.
 - [ ] `ioctl(TCGETS)` sobre PTY → -ENOTTY.
 - [ ] Señales per-thread (blocked_signals compartido entre hilos).
+
+### Bloque 14 — vDSO ✅ CERRADO
+
+14.1 blob ELF (vdso.S + vdso.ld + vdso.map) construido con toolchain del
+     host y embebido como vdso_blob.o.
+14.2 kernel/vdso.c: pagina vvar (seqlock) + mapeo del blob en el pml4.
+     PTE_SPECIAL para que paging_free_user_space no libere las paginas
+     compartidas al terminar un proceso.
+14.3 time.c: vdso_update_clock() en cada tick desde CPU0.
+14.4 process.c: mapea vdso en spawn y execve, AT_SYSINFO_EHDR (33) en
+     auxv. Reserva 19 entradas en lugar de 18.
+14.5 vdso.S: __vdso_gettimeofday dividia en vez de multiplicar para
+     tv_usec.
+
+**Verificado:** 100k time.monotonic() en 4.0 ms (~40 ns/llamada).
+**Efecto colateral positivo:** el doble-free de PMM al morir un proceso
+     era este bug (vvar/vdso liberados como privados).
+
+### Bloque 15 — tmpfs ✅ CERRADO
+
+15.1 kernel/tmpfs.{h,c}: nuevo FS en RAM. Nodos con buffer kmalloc'd,
+     directorio con lista enlazada. Cota global por instancia (ENOSPC).
+     Un mutex por FS. Refcounts nlink/vfs_refs (POSIX unlink semantics).
+     Symlinks.
+15.2 tmpfs_init(): monta /etc (4 MB), /tmp (64 MB), /var (16 MB),
+     /run (4 MB). Antes de shadow-ear /etc, lee /etc/ld.so.cache de
+     tarfs y lo reescribe dentro del tmpfs.
+15.3 vfs_init() llama a tmpfs_init() al final.
+15.4 main.c: elimina el bind mount /tmp -> /data/tmp (obsoleto).
+15.5 Makefile raiz: /tmp, /var, /run ya no se crean en tarfs. /etc
+     solo lleva ld.so.cache. passwd/group/profile en runtime.
+
+**Verificado:** /tmp, /var, /etc, /run escribibles y persistentes
+mientras el sistema esta arriba. /etc/ld.so.cache sobrevive al mount
+tmpfs (leido de tarfs en boot).
 ---
 
 # Estado global
@@ -488,6 +523,7 @@ con LFN, subdirs anidados, binario 256 KB) + `commit` + `log`
 | 12 Python | ✅ |
 | 13 Portar git + AHCI/completion/TLS/FAT32 | ✅ |
 | 14 vDSO (clock_gettime/gettimeofday/time) | ✅ |
+| 15 tmpfs (/etc, /tmp, /var, /run) | ✅ |
 
 **Lo que queda del TODO**:
 - 5.4 (getty) — opcional, ya cubierto por init.

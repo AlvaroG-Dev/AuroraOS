@@ -805,18 +805,26 @@ size_t tmpfs_bytes_used(void *priv) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers de pre-poblacion (solo usados por tmpfs_init)
+// Helpers de pre-poblacion
 // ---------------------------------------------------------------------------
-static char *tmpfs_read_kernel_file(const char *path, size_t *out_len) {
+
+// Lee un fichero completo de cualquier FS via VFS. Devuelve un buffer
+// kmalloc'd con NUL terminal, y escribe la longitud SIN el NUL en
+// *out_len. El llamante debe kfree() el buffer.
+static char *tmpfs_read_file(const char *path, size_t *out_len) {
   vfs_node_t *n = vfs_lookup(path);
   if (!n)
     return NULL;
+  if (n->flags & VFS_DIRECTORY) {
+    vfs_node_free(n);
+    return NULL;
+  }
   if (!n->ops || !n->ops->read) {
     vfs_node_free(n);
     return NULL;
   }
   size_t sz = n->size;
-  if (sz == 0 || sz > 16 * 1024 * 1024) {
+  if (sz > 4 * 1024 * 1024) {
     vfs_node_free(n);
     return NULL;
   }
@@ -825,9 +833,9 @@ static char *tmpfs_read_kernel_file(const char *path, size_t *out_len) {
     vfs_node_free(n);
     return NULL;
   }
-  int64_t r = n->ops->read(n, 0, sz, buf);
+  int64_t r = (sz == 0) ? 0 : n->ops->read(n, 0, sz, buf);
   vfs_node_free(n);
-  if (r != (int64_t)sz) {
+  if (r < 0 || (size_t)r != sz) {
     kfree(buf);
     return NULL;
   }
@@ -836,7 +844,10 @@ static char *tmpfs_read_kernel_file(const char *path, size_t *out_len) {
   return buf;
 }
 
-static int tmpfs_populate_file(const char *path, const void *data, size_t len) {
+// Escribe data (len bytes) en `path` dentro de un FS ya montado.
+// Crea el fichero si no existe. Sin proceso actual: bypassa
+// comprobaciones de permisos.
+static int tmpfs_put(const char *path, const void *data, size_t len) {
   int rc = vfs_create(path, 0644);
   if (rc != 0 && rc != -EEXIST)
     return rc;
@@ -852,28 +863,70 @@ static int tmpfs_populate_file(const char *path, const void *data, size_t len) {
   return (w < 0) ? (int)w : 0;
 }
 
-#define TMPFS_PUT(path, str) tmpfs_populate_file(path, str, strlen(str))
+static int tmpfs_put_str(const char *path, const char *s) {
+  return tmpfs_put(path, s, strlen(s));
+}
 
 // ---------------------------------------------------------------------------
-// tmpfs_init: monta /etc, /tmp, /var, /run y pre-popula /etc.
+// Lista declarativa de seeds para /etc.
+//
+// Los ficheros se leen de tarfs (o del FS que cubra /etc en ese
+// momento) ANTES de montar el tmpfs encima. Eso es critico: si
+// leyermos despues, vfs_lookup("/etc/X") ya iria al tmpfs vacio y no
+// encontraria nada.
+//
+// `fallback` se usa cuando el fichero no existe en tarfs (por ejemplo
+// porque el Makefile no lo copio del host).
+// ---------------------------------------------------------------------------
+typedef struct {
+  const char *path;     // path completo en el VFS (/etc/...)
+  const char *fallback; // si no esta en tarfs, se usa este texto
+  char *cached_data;    // llenado en la 1a pasada
+  size_t cached_len;
+} tmpfs_seed_t;
+
+static tmpfs_seed_t g_etc_seeds[] = {
+    {"/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n", NULL, 0},
+    {"/etc/group", "root:x:0:\n", NULL, 0},
+    {"/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n", NULL, 0},
+    {"/etc/resolv.conf", "", NULL, 0},
+    {"/etc/profile", "# /etc/profile\n", NULL, 0},
+    {"/etc/inputrc", NULL, NULL, 0},
+    {"/etc/nsswitch.conf",
+     "passwd:     files\ngroup:      files\nshadow:     files\nhosts:      "
+     "files dns\n",
+     NULL, 0},
+    {"/etc/bash.bashrc", NULL, NULL, 0},
+    {"/etc/ld.so.cache", NULL, NULL, 0},
+};
+#define N_ETC_SEEDS (sizeof(g_etc_seeds) / sizeof(g_etc_seeds[0]))
+
+// ---------------------------------------------------------------------------
+// tmpfs_init: monta /etc, /tmp, /var, /run, /dev/shm y pre-popula /etc.
 // ---------------------------------------------------------------------------
 void tmpfs_init(void) {
   // ---------------------------------------------------------------------
-  // [1] Leer de tarfs lo inmutable que debe sobrevivir al mount tmpfs.
-  //
-  // Hoy solo /etc/ld.so.cache (generado en build time por ldconfig).
-  // Sin esto, glibc no encuentra el cache y hace probing por cada lib
-  // (visible en el serial como OPEN-FAIL en cascada).
+  // [0] Pre-cache: leer TODOS los seeds desde el FS que cubra /etc
+  //     AHORA (tarfs). Despues de montar el tmpfs encima, /etc sera
+  //     otro FS y no podremos leerlos.
   // ---------------------------------------------------------------------
-  size_t cache_len = 0;
-  char *cache_buf = tmpfs_read_kernel_file("/etc/ld.so.cache", &cache_len);
-
-  // Alternativa por si el usuario deja un /etc/hosts custom en tarfs.
-  size_t hosts_len = 0;
-  char *hosts_buf = tmpfs_read_kernel_file("/etc/hosts", &hosts_len);
+  int cache_hits = 0;
+  for (size_t i = 0; i < N_ETC_SEEDS; i++) {
+    size_t len = 0;
+    char *buf = tmpfs_read_file(g_etc_seeds[i].path, &len);
+    if (buf) {
+      g_etc_seeds[i].cached_data = buf;
+      g_etc_seeds[i].cached_len = len;
+      cache_hits++;
+      LOG_TRACE("[TMPFS] precache %s (%lu B)", g_etc_seeds[i].path,
+                (unsigned long)len);
+    }
+  }
+  LOG_INFO("[TMPFS] /etc precache: %d/%lu ficheros leidos de tarfs", cache_hits,
+           (unsigned long)N_ETC_SEEDS);
 
   // ---------------------------------------------------------------------
-  // [2] /etc
+  // [1] /etc
   // ---------------------------------------------------------------------
   void *etc = tmpfs_new(4 * 1024 * 1024);
   if (!etc) {
@@ -884,27 +937,38 @@ void tmpfs_init(void) {
       LOG_ERR("[TMPFS] mount /etc: %d", rc);
       tmpfs_destroy(etc);
     } else {
-      TMPFS_PUT("/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n");
-      TMPFS_PUT("/etc/group", "root:x:0:\n");
-      if (hosts_buf && hosts_len > 0)
-        tmpfs_populate_file("/etc/hosts", hosts_buf, hosts_len);
-      else
-        TMPFS_PUT("/etc/hosts", "127.0.0.1\tlocalhost\n");
-      TMPFS_PUT("/etc/resolv.conf", "");
-      TMPFS_PUT("/etc/profile", "# /etc/profile\n");
-      if (cache_buf && cache_len > 0)
-        tmpfs_populate_file("/etc/ld.so.cache", cache_buf, cache_len);
-      LOG_INFO("[TMPFS] /etc montado (writable, ld.so.cache %lu B)",
-               (unsigned long)cache_len);
+      int seeded = 0, from_tar = 0;
+      for (size_t i = 0; i < N_ETC_SEEDS; i++) {
+        int put_rc = -1;
+        if (g_etc_seeds[i].cached_data) {
+          put_rc = tmpfs_put(g_etc_seeds[i].path, g_etc_seeds[i].cached_data,
+                             g_etc_seeds[i].cached_len);
+          if (put_rc == 0)
+            from_tar++;
+        } else if (g_etc_seeds[i].fallback) {
+          put_rc = tmpfs_put_str(g_etc_seeds[i].path, g_etc_seeds[i].fallback);
+        }
+        if (put_rc == 0)
+          seeded++;
+        else if (put_rc != -1)
+          LOG_WARN("[TMPFS] seed %s fallo rc=%d", g_etc_seeds[i].path, put_rc);
+      }
+      LOG_INFO("[TMPFS] /etc montado (%d seeds, %d de tarfs)", seeded,
+               from_tar);
     }
   }
-  if (cache_buf)
-    kfree(cache_buf);
-  if (hosts_buf)
-    kfree(hosts_buf);
+
+  // Liberar los buffers temporales.
+  for (size_t i = 0; i < N_ETC_SEEDS; i++) {
+    if (g_etc_seeds[i].cached_data) {
+      kfree(g_etc_seeds[i].cached_data);
+      g_etc_seeds[i].cached_data = NULL;
+      g_etc_seeds[i].cached_len = 0;
+    }
+  }
 
   // ---------------------------------------------------------------------
-  // [3] /tmp
+  // [2] /tmp
   // ---------------------------------------------------------------------
   void *tmp = tmpfs_new(64 * 1024 * 1024);
   if (!tmp) {
@@ -920,7 +984,7 @@ void tmpfs_init(void) {
   }
 
   // ---------------------------------------------------------------------
-  // [4] /var + subdirs estandar
+  // [3] /var + subdirs
   // ---------------------------------------------------------------------
   void *var = tmpfs_new(16 * 1024 * 1024);
   if (!var) {
@@ -939,7 +1003,7 @@ void tmpfs_init(void) {
   }
 
   // ---------------------------------------------------------------------
-  // [5] /run
+  // [4] /run
   // ---------------------------------------------------------------------
   void *run = tmpfs_new(4 * 1024 * 1024);
   if (!run) {
@@ -951,6 +1015,22 @@ void tmpfs_init(void) {
       tmpfs_destroy(run);
     } else {
       LOG_INFO("[TMPFS] /run montado (4 MB)");
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // [5] /dev/shm
+  // ---------------------------------------------------------------------
+  void *shm = tmpfs_new(16 * 1024 * 1024);
+  if (!shm) {
+    LOG_ERR("[TMPFS] sin memoria para /dev/shm");
+  } else {
+    int rc = vfs_mount("/dev/shm", tmpfs_get_vfs_ops(), shm);
+    if (rc != 0) {
+      LOG_ERR("[TMPFS] mount /dev/shm: %d", rc);
+      tmpfs_destroy(shm);
+    } else {
+      LOG_INFO("[TMPFS] /dev/shm montado (16 MB)");
     }
   }
 }

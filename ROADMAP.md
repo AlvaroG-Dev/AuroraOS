@@ -56,6 +56,8 @@ Aurora OS ya dispone de una base de kernel x86_64 bare-metal bastante completa:
 - [x] **AHCI completion UAF resuelto**: separación wake directo /
       epoll subs, `wait_for_completion_uninterruptible()`.
 - [x] **TLS canonicity check** en switch.asm y arch_prctl.
+- [x] **vDSO**: clock_gettime/gettimeofday/time en userspace.
+- [x] **tmpfs**: FS en RAM para /etc, /tmp, /var, /run.
 
 La prioridad ahora es completar userland y filesystem, después networking/USB, y seguir validando Aurora OS sobre hardware real. En paralelo, el objetivo a más largo plazo del proyecto es que Aurora sea tan abierto y eficiente como Linux pero tan "todo hecho" como Windows: eso implica un BusyBox completo como base de userland (3.5), una capa de compatibilidad para ejecutar binarios Linux/ELF reales sin recompilar (3.6), y — de forma más experimental y acotada — un loader de ejecutables Windows/PE de consola (3.7). Ver el resumen de prioridad relativa al final de la Fase 3.
 
@@ -138,6 +140,7 @@ Objetivo: pasar de un sistema que carga un initrd a un sistema operativo que pue
 - [x] LFN (nombres largos) en FAT32: crear, listar, borrar, preservar tras remount.
 - [x] Colisión de alias 8.3: crear `DOCUME~1` después de `Documentos` no pisa el alias autogenerado.
 - [x] fsck mínimo (`/apps/aurora-fsck`) + validación pasiva al montar + detección de huérfanos/ciclos/cadenas rotas + actualización de FSInfo en sync.
+- [x] tmpfs en RAM (sin persistencia) para /etc, /tmp, /var, /run.
 
 ### 2.3 Userland sobre disco
 - [ ] Acceso real a /dev desde userland.
@@ -171,6 +174,7 @@ Objetivo: convertir el kernel en una plataforma para aplicaciones.
 - [ ] Completar `errno`, tiempo, procesos, archivos y memoria.
 - [ ] Headers y ABI estable documentados.
 - [ ] Compatibilidad POSIX más amplia.
+- [x] vDSO con clock_gettime/gettimeofday/time.
 
 ### 3.2 Procesos, ejecución y shell
 

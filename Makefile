@@ -108,6 +108,44 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	@rm -rf sysroot/tmp sysroot/var sysroot/run sysroot/data/tmp
 
 # ---------------------------------------------------------------------------
+# Ficheros estaticos de /etc.
+#
+# Se copian del host en build time y se dejan en tarfs. tmpfs_init()
+# los lee de tarfs (via vfs_read_kernel_file, mismo patron que
+# ld.so.cache) y los reescribe dentro del tmpfs antes de ceder el
+# control a userland. Sin esto, quedarian invisibles porque /etc esta
+# shadowed por el tmpfs.
+#
+# Python (locale, ctypes), bash (inputrc, bash.bashrc) y glibc
+# (nsswitch.conf) los consultan al arrancar. Tenerlos reduce el ruido
+# de VFS-OPEN-FAIL en el serial.
+#
+# Si el host no los tiene (build muy minimal), se generan con
+# contenido minimo razonable.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando /etc estaticos..."
+	@mkdir -p sysroot/etc
+	@if [ -f /etc/inputrc ]; then \
+		cp -f /etc/inputrc sysroot/etc/inputrc; \
+	else \
+		printf '# /etc/inputrc (default)\nset bell-style none\nset meta-flag on\nset input-meta on\nset output-meta on\nset convert-meta off\n' > sysroot/etc/inputrc; \
+	fi
+	@if [ -f /etc/nsswitch.conf ]; then \
+		cp -f /etc/nsswitch.conf sysroot/etc/nsswitch.conf; \
+	else \
+		printf 'passwd:     files\ngroup:      files\nshadow:     files\nhosts:      files dns\nservices:   files\nnetworks:   files\n' > sysroot/etc/nsswitch.conf; \
+	fi
+	@if [ -f /etc/bash.bashrc ]; then \
+		cp -f /etc/bash.bashrc sysroot/etc/bash.bashrc; \
+	else \
+		printf '# /etc/bash.bashrc (default)\n' > sysroot/etc/bash.bashrc; \
+	fi
+	@if [ -f /usr/share/locale/locale.alias ]; then \
+		mkdir -p sysroot/usr/share/locale; \
+		cp -f /usr/share/locale/locale.alias sysroot/usr/share/locale/locale.alias; \
+	fi
+
+# ---------------------------------------------------------------------------
 # 1. (Sin busybox — userspace es 100% glibc/Ubuntu)
 # ---------------------------------------------------------------------------
 
