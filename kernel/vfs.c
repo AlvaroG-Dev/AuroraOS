@@ -914,6 +914,12 @@ int vfs_readdir_node(vfs_node_t *node, uint64_t index, vfs_dirent_t *out) {
     return 0;
   }
 
+  // Sin mounts hijas no hay que filtrar ni renumerar entradas. Delegar
+  // directamente evita recorrer 0..index por cada readdir(index), lo que
+  // convertía getdents64 en O(n²) incluso con un FS que indexa rápido.
+  if (mount_count == 0)
+    return node->ops->readdir(node, index, out);
+
   // Delegamos al FS saltando entries cuya basename coincida con una
   // mount (ya la servimos arriba). Búsqueda lineal — los directorios
   // tienen pocas entradas.
