@@ -1,10 +1,13 @@
 // kernel/sysctl.c
 #include "sysctl.h"
 #include "klog.h"
+#include "net/inet_socket.h"
+#include "net/socket.h"
 #include "string.h"
 #include "swap.h"
 #include "uaccess.h"
 #include <stddef.h>
+
 
 // ---------------------------------------------------------------------------
 // Handlers concretos

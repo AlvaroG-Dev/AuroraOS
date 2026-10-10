@@ -17,6 +17,9 @@
 #include "ipc.h"
 #include "klog.h"
 #include "memfd.h"
+#include "net/byteorder.h"
+#include "net/inet_socket.h"
+#include "net/socket.h"
 #include "paging.h"
 #include "pf.h"
 #include "pmm.h"
@@ -100,6 +103,20 @@ struct k_iovec {
   uint64_t iov_base;
   uint64_t iov_len;
 };
+
+// struct msghdr de Linux x86_64 = 56 bytes.
+struct k_msghdr {
+  uint64_t msg_name; // struct sockaddr*
+  uint32_t msg_namelen;
+  uint32_t _pad0;
+  uint64_t msg_iov; // struct iovec*
+  uint64_t msg_iovlen;
+  uint64_t msg_control; // ancillary data (ignorado)
+  uint64_t msg_controllen;
+  uint32_t msg_flags;
+  uint32_t _pad1;
+};
+_Static_assert(sizeof(struct k_msghdr) == 56, "msghdr x86_64");
 
 // ---------------------------------------------------------------------------
 // struct rusage de Linux x86_64. Layout exacto, 144 bytes.
@@ -4762,6 +4779,627 @@ static int64_t k_net_nosupport(uint64_t a1, uint64_t a2, uint64_t a3,
   return -EAFNOSUPPORT;
 }
 
+// ---------------------------------------------------------------------------
+// Familia de sockets (Fase 6b). Solo SOCK_DGRAM/UDP.
+// ---------------------------------------------------------------------------
+
+struct k_sockaddr_in {
+  uint16_t sin_family;
+  uint16_t sin_port; // big endian
+  uint32_t sin_addr; // big endian
+  uint8_t sin_zero[8];
+};
+_Static_assert(sizeof(struct k_sockaddr_in) == 16, "sockaddr_in x86_64");
+
+// Copia un sockaddr_in del userland a (ip, port) en host order.
+static int copy_sockaddr_in_from_user(uint64_t uptr, uint64_t ulen,
+                                      uint32_t *ip_out, uint16_t *port_out) {
+  if (!uptr)
+    return -EFAULT;
+  if (ulen < sizeof(struct k_sockaddr_in))
+    return -EINVAL;
+  if (!access_ok((void *)uptr, sizeof(struct k_sockaddr_in)))
+    return -EFAULT;
+  struct k_sockaddr_in sa;
+  if (copy_from_user(&sa, (void *)uptr, sizeof(sa)) < 0)
+    return -EFAULT;
+  if (sa.sin_family != AF_INET)
+    return -EAFNOSUPPORT;
+  *ip_out = ntohl(sa.sin_addr);
+  *port_out = ntohs(sa.sin_port);
+  return 0;
+}
+
+static int64_t k_socket(uint64_t domain, uint64_t type, uint64_t protocol,
+                        uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (domain != AF_INET)
+    return -EAFNOSUPPORT;
+  return inet_socket_create(proc, (int)type, (int)protocol);
+}
+
+static int64_t k_bind(uint64_t fd, uint64_t addr, uint64_t addrlen, uint64_t a4,
+                      uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  uint32_t ip;
+  uint16_t port;
+  int rc = copy_sockaddr_in_from_user(addr, addrlen, &ip, &port);
+  if (rc != 0)
+    return rc;
+  return socket_bind(s, ip, port);
+}
+
+static int64_t k_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
+                         uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  uint32_t ip;
+  uint16_t port;
+  int rc = copy_sockaddr_in_from_user(addr, addrlen, &ip, &port);
+  if (rc != 0)
+    return rc;
+  return socket_connect(s, ip, port);
+}
+
+static int64_t k_sendto(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags,
+                        uint64_t addr) {
+  // El dispatcher solo propaga 5 args (rdi..r8), pero sendto tiene 6.
+  // addrlen va en r9. Leemos del trap frame.
+  registers_t *regs = syscall_current_regs();
+  uint64_t addrlen = regs ? regs->r9 : 0;
+  (void)flags;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  if (!access_ok((void *)buf, (size_t)len))
+    return -EFAULT;
+  void *k = kmalloc(len);
+  if (!k)
+    return -ENOMEM;
+  if (copy_from_user(k, (void *)buf, len) < 0) {
+    kfree(k);
+    return -EFAULT;
+  }
+
+  uint32_t dip = 0;
+  uint16_t dport = 0;
+  if (addr) {
+    int rc = copy_sockaddr_in_from_user(addr, addrlen, &dip, &dport);
+    if (rc != 0) {
+      kfree(k);
+      return rc;
+    }
+  } else {
+    dip = socket_remote_ip(s);
+    dport = socket_remote_port(s);
+  }
+
+  int rc = socket_sendto(s, k, len, dip, dport);
+  kfree(k);
+  return rc < 0 ? rc : (int64_t)len;
+}
+
+static int64_t k_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
+                          uint64_t flags, uint64_t addr) {
+  registers_t *regs = syscall_current_regs();
+  uint64_t addrlen_ptr = regs ? regs->r9 : 0;
+  (void)flags;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  if (!access_ok((void *)buf, (size_t)len))
+    return -EFAULT;
+
+  void *k = kmalloc(len);
+  if (!k)
+    return -ENOMEM;
+
+  uint32_t sip = 0;
+  uint16_t sp = 0;
+  int wb = 0;
+  int n = socket_recvfrom(s, k, len, &sip, &sp, &wb);
+  if (n < 0) {
+    kfree(k);
+    return (wb && socket_is_nonblock(s)) ? -EAGAIN : n;
+  }
+
+  if (copy_to_user((void *)buf, k, n) < 0) {
+    kfree(k);
+    return -EFAULT;
+  }
+  kfree(k);
+
+  if (addr) {
+    struct k_sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(sp);
+    sa.sin_addr = htonl(sip);
+    if (access_ok((void *)addr, sizeof(sa)))
+      (void)copy_to_user((void *)addr, &sa, sizeof(sa));
+  }
+  if (addrlen_ptr) {
+    uint32_t alen = sizeof(struct k_sockaddr_in);
+    if (access_ok((void *)addrlen_ptr, sizeof(alen)))
+      (void)copy_to_user((void *)addrlen_ptr, &alen, sizeof(alen));
+  }
+  return n;
+}
+
+// struct timeval de Linux x86_64 = 16 bytes.
+struct k_timeval_sopt {
+  int64_t tv_sec;
+  int64_t tv_usec;
+};
+
+// SO_RCVTIMEO = 20, SO_SNDTIMEO = 21, SOL_SOCKET = 1.
+#define SOL_SOCKET_ 1
+#define SO_RCVTIMEO_ 20
+#define SO_SNDTIMEO_ 21
+
+static int64_t k_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
+                            uint64_t optval, uint64_t optlen) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+
+  if (level == SOL_SOCKET_ &&
+      (optname == SO_RCVTIMEO_ || optname == SO_SNDTIMEO_)) {
+    if (!optval || optlen < sizeof(struct k_timeval_sopt))
+      return -EINVAL;
+    struct k_timeval_sopt tv;
+    if (copy_from_user(&tv, (void *)optval, sizeof(tv)) < 0)
+      return -EFAULT;
+    if (tv.tv_sec < 0 || tv.tv_usec < 0)
+      return -EINVAL;
+    uint64_t ms =
+        (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+    if (optname == SO_RCVTIMEO_)
+      socket_set_rcvtimeo(s, ms);
+    // SO_SNDTIMEO: no aplica a UDP síncrono. Ignorar.
+    return 0;
+  }
+
+  // Otras opciones: aceptar como no-op (SO_REUSEADDR, SO_BROADCAST, ...).
+  return 0;
+}
+
+// Opciones de socket que iputils/dig/coreutils consultan. Devolvemos
+// valores "razonables" aunque no las implementemos, para que el caller
+// no se queje. Números de Linux:
+//   SOL_SOCKET=1: SO_REUSEADDR=2, SO_TYPE=3, SO_ERROR=4,
+//                 SO_SNDBUF=7, SO_RCVBUF=8
+//   IPPROTO_IP=0: IP_TTL=2
+#define SOL_SOCKET_ 1
+#define SO_REUSEADDR_ 2
+#define SO_TYPE_ 3
+#define SO_ERROR_ 4
+#define SO_SNDBUF_ 7
+#define SO_RCVBUF_ 8
+#define IPPROTO_IP_ 0
+#define IP_TTL_ 2
+
+static int64_t k_getsockopt(uint64_t fd, uint64_t level, uint64_t optname,
+                            uint64_t optval, uint64_t optlen) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!inet_socket_from_fd(proc, (int)fd))
+    return -ENOTSOCK;
+  if (!optval || !optlen)
+    return -EFAULT;
+
+  uint32_t val = 0;
+  if (level == SOL_SOCKET_) {
+    switch (optname) {
+    case SO_TYPE_:
+      val = 2;
+      break; // SOCK_DGRAM
+    case SO_ERROR_:
+      val = 0;
+      break;
+    case SO_SNDBUF_:
+    case SO_RCVBUF_:
+      val = 212992;
+      break; // default Linux
+    case SO_REUSEADDR_:
+      val = 1;
+      break;
+    default:
+      val = 0;
+      break;
+    }
+  } else if (level == IPPROTO_IP_ && optname == IP_TTL_) {
+    val = 64;
+  }
+
+  if (access_ok((void *)optval, 4)) {
+    if (copy_to_user((void *)optval, &val, 4) < 0)
+      return -EFAULT;
+  }
+  if (access_ok((void *)optlen, 4)) {
+    uint32_t l = 4;
+    if (copy_to_user((void *)optlen, &l, 4) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+static int64_t k_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
+                             uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  if (!addr)
+    return -EFAULT;
+  struct k_sockaddr_in sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons(socket_local_port(s));
+  sa.sin_addr = htonl(socket_local_ip(s));
+  if (!access_ok((void *)addr, sizeof(sa)))
+    return -EFAULT;
+  if (copy_to_user((void *)addr, &sa, sizeof(sa)) < 0)
+    return -EFAULT;
+  if (addrlen_ptr && access_ok((void *)addrlen_ptr, 4)) {
+    uint32_t l = sizeof(sa);
+    (void)copy_to_user((void *)addrlen_ptr, &l, 4);
+  }
+  return 0;
+}
+
+static int64_t k_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
+                             uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  if (!socket_is_connected(s))
+    return -ENOTCONN;
+  if (!addr)
+    return -EFAULT;
+  struct k_sockaddr_in sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons(socket_remote_port(s));
+  sa.sin_addr = htonl(socket_remote_ip(s));
+  if (!access_ok((void *)addr, sizeof(sa)))
+    return -EFAULT;
+  if (copy_to_user((void *)addr, &sa, sizeof(sa)) < 0)
+    return -EFAULT;
+  if (addrlen_ptr && access_ok((void *)addrlen_ptr, 4)) {
+    uint32_t l = sizeof(sa);
+    (void)copy_to_user((void *)addrlen_ptr, &l, 4);
+  }
+  return 0;
+}
+
+static int64_t k_listen(uint64_t fd, uint64_t backlog, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)fd;
+  (void)backlog;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -EOPNOTSUPP; // TCP, Fase 7
+}
+static int64_t k_accept(uint64_t fd, uint64_t addr, uint64_t addrlen,
+                        uint64_t a4, uint64_t a5) {
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  (void)a4;
+  (void)a5;
+  return -EOPNOTSUPP;
+}
+static int64_t k_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen,
+                         uint64_t flags, uint64_t a5) {
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  (void)flags;
+  (void)a5;
+  return -EOPNOTSUPP;
+}
+#define MSG_BUFFER_MAX 65536
+
+static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
+                         uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  if (!msg_uptr || !access_ok((void *)msg_uptr, sizeof(struct k_msghdr)))
+    return -EFAULT;
+
+  struct k_msghdr mh;
+  if (copy_from_user(&mh, (void *)msg_uptr, sizeof(mh)) < 0)
+    return -EFAULT;
+
+  uint64_t iovcnt = mh.msg_iovlen;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return -EMSGSIZE;
+
+  // Calcular total y copiar a un buffer del kernel.
+  struct k_iovec iovs[16];
+  size_t total = 0;
+  for (uint64_t done = 0; done < iovcnt;) {
+    uint64_t batch = iovcnt - done;
+    if (batch > 16)
+      batch = 16;
+    if (copy_from_user(iovs,
+                       (void *)(mh.msg_iov + done * sizeof(struct k_iovec)),
+                       batch * sizeof(struct k_iovec)) < 0)
+      return -EFAULT;
+    for (uint64_t i = 0; i < batch; i++) {
+      if (iovs[i].iov_len > MSG_BUFFER_MAX - total)
+        return -EMSGSIZE;
+      total += iovs[i].iov_len;
+    }
+    done += batch;
+  }
+  if (total == 0)
+    return 0;
+
+  void *kbuf = kmalloc(total);
+  if (!kbuf)
+    return -ENOMEM;
+
+  size_t off = 0;
+  for (uint64_t done = 0; done < iovcnt;) {
+    uint64_t batch = iovcnt - done;
+    if (batch > 16)
+      batch = 16;
+    if (copy_from_user(iovs,
+                       (void *)(mh.msg_iov + done * sizeof(struct k_iovec)),
+                       batch * sizeof(struct k_iovec)) < 0) {
+      kfree(kbuf);
+      return -EFAULT;
+    }
+    for (uint64_t i = 0; i < batch; i++) {
+      if (iovs[i].iov_len == 0)
+        continue;
+      if (!access_ok((void *)iovs[i].iov_base, iovs[i].iov_len)) {
+        kfree(kbuf);
+        return -EFAULT;
+      }
+      if (copy_from_user((char *)kbuf + off, (void *)iovs[i].iov_base,
+                         iovs[i].iov_len) < 0) {
+        kfree(kbuf);
+        return -EFAULT;
+      }
+      off += iovs[i].iov_len;
+    }
+    done += batch;
+  }
+
+  uint32_t dip = 0;
+  uint16_t dport = 0;
+  if (mh.msg_name) {
+    int rc =
+        copy_sockaddr_in_from_user(mh.msg_name, mh.msg_namelen, &dip, &dport);
+    if (rc != 0) {
+      kfree(kbuf);
+      return rc;
+    }
+  } else {
+    dip = socket_remote_ip(s);
+    dport = socket_remote_port(s);
+  }
+
+  int rc = socket_sendto(s, kbuf, total, dip, dport);
+  kfree(kbuf);
+  return rc < 0 ? rc : (int64_t)total;
+}
+
+static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
+                         uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  if (!msg_uptr || !access_ok((void *)msg_uptr, sizeof(struct k_msghdr)))
+    return -EFAULT;
+
+  struct k_msghdr mh;
+  if (copy_from_user(&mh, (void *)msg_uptr, sizeof(mh)) < 0)
+    return -EFAULT;
+
+  void *kbuf = kmalloc(MSG_BUFFER_MAX);
+  if (!kbuf)
+    return -ENOMEM;
+
+  uint32_t sip = 0;
+  uint16_t sp = 0;
+  int wb = 0;
+  int n = socket_recvfrom(s, kbuf, MSG_BUFFER_MAX, &sip, &sp, &wb);
+  if (n < 0) {
+    kfree(kbuf);
+    return (wb && socket_is_nonblock(s)) ? -EAGAIN : n;
+  }
+
+  // Repartir entre los iovecs.
+  size_t left = (size_t)n;
+  size_t off = 0;
+  struct k_iovec iovs[16];
+  uint64_t iovcnt = mh.msg_iovlen;
+  for (uint64_t done = 0; done < iovcnt && left > 0;) {
+    uint64_t batch = iovcnt - done;
+    if (batch > 16)
+      batch = 16;
+    if (copy_from_user(iovs,
+                       (void *)(mh.msg_iov + done * sizeof(struct k_iovec)),
+                       batch * sizeof(struct k_iovec)) < 0) {
+      kfree(kbuf);
+      return -EFAULT;
+    }
+    for (uint64_t i = 0; i < batch && left > 0; i++) {
+      size_t to_copy = iovs[i].iov_len;
+      if (to_copy > left)
+        to_copy = left;
+      if (to_copy == 0)
+        continue;
+      if (!access_ok((void *)iovs[i].iov_base, to_copy)) {
+        kfree(kbuf);
+        return -EFAULT;
+      }
+      if (copy_to_user((void *)iovs[i].iov_base, (char *)kbuf + off, to_copy) <
+          0) {
+        kfree(kbuf);
+        return -EFAULT;
+      }
+      off += to_copy;
+      left -= to_copy;
+    }
+    done += batch;
+  }
+  kfree(kbuf);
+
+  // Rellenar msg_name con el origen.
+  struct k_msghdr out = mh;
+  if (mh.msg_name) {
+    struct k_sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(sp);
+    sa.sin_addr = htonl(sip);
+    if (access_ok((void *)mh.msg_name, sizeof(sa)))
+      (void)copy_to_user((void *)mh.msg_name, &sa, sizeof(sa));
+    out.msg_namelen = sizeof(sa);
+  }
+  out.msg_controllen = 0;
+  out.msg_flags = 0;
+  (void)copy_to_user((void *)msg_uptr, &out, sizeof(out));
+
+  return n;
+}
+
+static int64_t k_shutdown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -EOPNOTSUPP;
+}
+static int64_t k_socketpair(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -EOPNOTSUPP;
+}
+
+// capget (125). iputils lo llama al arrancar. Devolvemos 0 con todo
+// a cero: el proceso no tiene capabilities efectivas. Eso basta para
+// que ping no aborte con "Function not implemented".
+struct k_cap_hdr {
+  uint32_t version;
+  int32_t pid;
+};
+struct k_cap_data {
+  uint32_t effective, permitted, inheritable;
+  uint32_t pad;
+};
+#define _LINUX_CAPABILITY_VERSION_3 0x20080522u
+static int64_t k_capget(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!hdr)
+    return -EFAULT;
+  if (!access_ok((void *)hdr, sizeof(struct k_cap_hdr)))
+    return -EFAULT;
+  struct k_cap_hdr h;
+  if (copy_from_user(&h, (void *)hdr, sizeof(h)) < 0)
+    return -EFAULT;
+  if (h.version != _LINUX_CAPABILITY_VERSION_3) {
+    // Devolvemos la versión soportada; Linux hace lo mismo y el caller
+    // reintenta.
+    h.version = _LINUX_CAPABILITY_VERSION_3;
+    if (copy_to_user((void *)hdr, &h, sizeof(h)) < 0)
+      return -EFAULT;
+    return -EINVAL;
+  }
+  if (data) {
+    if (access_ok((void *)data, 2 * sizeof(struct k_cap_data))) {
+      struct k_cap_data z[2];
+      memset(z, 0, sizeof(z));
+      (void)copy_to_user((void *)data, z, sizeof(z));
+    }
+  }
+  return 0;
+}
+
+static int64_t k_capset(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  (void)data;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!hdr)
+    return -EFAULT;
+  if (!access_ok((void *)hdr, sizeof(struct k_cap_hdr)))
+    return -EFAULT;
+  struct k_cap_hdr h;
+  if (copy_from_user(&h, (void *)hdr, sizeof(h)) < 0)
+    return -EFAULT;
+  if (h.version != _LINUX_CAPABILITY_VERSION_3)
+    return -EINVAL;
+  return 0;
+}
+
 // ---------- getitimer (36) / setitimer (38) / alarm (37) ----------
 //
 // Aurora no tiene temporizadores por proceso. Git los usa para
@@ -5604,22 +6242,24 @@ static const syscall_entry_t linux_table[] = {
     [SYS_MKNOD] = {k_mknod, "mknod"},
     [SYS_SETHOSTNAME] = {k_sethostname, "sethostname"},
     [SYS_UTIMENSAT] = {k_utimensat, "utimensat"},
-    [SYS_SOCKET] = {k_net_nosupport, "socket"},
-    [SYS_CONNECT] = {k_net_nosupport, "connect"},
-    [SYS_ACCEPT] = {k_net_nosupport, "accept"},
-    [SYS_SENDTO] = {k_net_nosupport, "sendto"},
-    [SYS_RECVFROM] = {k_net_nosupport, "recvfrom"},
-    [SYS_SENDMSG] = {k_net_nosupport, "sendmsg"},
-    [SYS_RECVMSG] = {k_net_nosupport, "recvmsg"},
-    [SYS_SHUTDOWN] = {k_net_nosupport, "shutdown"},
-    [SYS_BIND] = {k_net_nosupport, "bind"},
-    [SYS_LISTEN] = {k_net_nosupport, "listen"},
-    [SYS_GETSOCKNAME] = {k_net_nosupport, "getsockname"},
-    [SYS_GETPEERNAME] = {k_net_nosupport, "getpeername"},
-    [SYS_SOCKETPAIR] = {k_net_nosupport, "socketpair"},
-    [SYS_SETSOCKOPT] = {k_net_nosupport, "setsockopt"},
-    [SYS_GETSOCKOPT] = {k_net_nosupport, "getsockopt"},
-    [SYS_ACCEPT4] = {k_net_nosupport, "accept4"},
+    [SYS_SOCKET] = {k_socket, "socket"},
+    [SYS_BIND] = {k_bind, "bind"},
+    [SYS_CONNECT] = {k_connect, "connect"},
+    [SYS_LISTEN] = {k_listen, "listen"},
+    [SYS_ACCEPT] = {k_accept, "accept"},
+    [SYS_ACCEPT4] = {k_accept4, "accept4"},
+    [SYS_SENDTO] = {k_sendto, "sendto"},
+    [SYS_RECVFROM] = {k_recvfrom, "recvfrom"},
+    [SYS_SENDMSG] = {k_sendmsg, "sendmsg"},
+    [SYS_RECVMSG] = {k_recvmsg, "recvmsg"},
+    [SYS_SHUTDOWN] = {k_shutdown, "shutdown"},
+    [SYS_GETSOCKNAME] = {k_getsockname, "getsockname"},
+    [SYS_GETPEERNAME] = {k_getpeername, "getpeername"},
+    [SYS_SOCKETPAIR] = {k_socketpair, "socketpair"},
+    [SYS_SETSOCKOPT] = {k_setsockopt, "setsockopt"},
+    [SYS_GETSOCKOPT] = {k_getsockopt, "getsockopt"},
+    [SYS_CAPGET] = {k_capget, "capget"},
+    [SYS_CAPSET] = {k_capset, "capset"},
     [SYS_MUNMAP] = {k_munmap, "munmap"},
     [SYS_BRK] = {k_brk, "brk"},
     [SYS_RT_SIGACTION] = {k_rt_sigaction, "rt_sigaction"},

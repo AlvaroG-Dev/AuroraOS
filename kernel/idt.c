@@ -102,7 +102,30 @@ extern void ipi_stub_tlb(void);
 extern void ioapic_mask_irq(uint8_t irq, int masked);
 
 extern void msi_stub_0x60(void);
+extern void msi_stub_0x61(void);
+extern void msi_stub_0x62(void);
+extern void msi_stub_0x63(void);
+extern void msi_stub_0x64(void);
+extern void msi_stub_0x65(void);
+extern void msi_stub_0x66(void);
+extern void msi_stub_0x67(void);
+extern void msi_stub_0x68(void);
+extern void msi_stub_0x69(void);
+extern void msi_stub_0x6A(void);
+extern void msi_stub_0x6B(void);
+extern void msi_stub_0x6C(void);
+extern void msi_stub_0x6D(void);
+extern void msi_stub_0x6E(void);
+extern void msi_stub_0x6F(void);
 
+static const uint64_t msi_stub_table[MSI_VECTOR_COUNT] = {
+    (uint64_t)msi_stub_0x60, (uint64_t)msi_stub_0x61, (uint64_t)msi_stub_0x62,
+    (uint64_t)msi_stub_0x63, (uint64_t)msi_stub_0x64, (uint64_t)msi_stub_0x65,
+    (uint64_t)msi_stub_0x66, (uint64_t)msi_stub_0x67, (uint64_t)msi_stub_0x68,
+    (uint64_t)msi_stub_0x69, (uint64_t)msi_stub_0x6A, (uint64_t)msi_stub_0x6B,
+    (uint64_t)msi_stub_0x6C, (uint64_t)msi_stub_0x6D, (uint64_t)msi_stub_0x6E,
+    (uint64_t)msi_stub_0x6F,
+};
 // ---------------------------------------------------------------------------
 // Tabla de stubs en el mismo orden en que se colocan en la IDT:
 //   0..31  → isr0..isr31   (excepciones CPU)
@@ -221,8 +244,11 @@ void idt_init(void) {
   // Vector 0xFF: espurio del LAPIC.
   idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);
 
-  // Vector MSI para el AHCI (0x60).
-  idt_set_gate(0x60, (uint64_t)msi_stub_0x60, 0x08, 0x8E);
+  // Vectores MSI (0x60-0x6F). Cada uno tiene su propia IDT entry y su
+  // propio stub, porque el vector identifica quién disparó.
+  for (int i = 0; i < MSI_VECTOR_COUNT; i++) {
+    idt_set_gate(MSI_VECTOR_BASE + i, msi_stub_table[i], 0x08, 0x8E);
+  }
 
   pic_init();
   idt_load();
@@ -386,8 +412,15 @@ void msi_install_handler(uint8_t vector, void (*handler)(void)) {
 void msi_dispatch(uint8_t vector) {
   if (vector < MSI_VECTOR_BASE || vector > MSI_VECTOR_END)
     return;
-  if (msi_handlers[vector - MSI_VECTOR_BASE])
-    msi_handlers[vector - MSI_VECTOR_BASE]();
+  void (*h)(void) = msi_handlers[vector - MSI_VECTOR_BASE];
+  if (h) {
+    h();
+  } else {
+    // MSI disparado sin handler: o hemos instalado el stub en la IDT
+    // y olvidado msi_install_handler(), o hay un vector fantasma.
+    // No lo silenciamos: queremos verlo durante el bring-up.
+    LOG_WARN("[MSI] vector 0x%02x sin handler registrado", vector);
+  }
 }
 
 // ===========================================================================
