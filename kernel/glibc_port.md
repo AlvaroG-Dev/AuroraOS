@@ -46,8 +46,10 @@ que colgaban el sistema durante los tests de `truncate`.
 - **madvise(MADV_DONTNEED)**: el allocator de Python libera frames.
 - **/dev/urandom**: git y cualquier cosa que use tempfiles aleatorios.
 - **vDSO**: `clock_gettime`, `gettimeofday` y `time` resueltos en
-  userspace vía AT_SYSINFO_EHDR. ~40 ns por llamada vs ~500 ns del
-  syscall.
+  userspace vía AT_SYSINFO_EHDR (~40 ns por llamada vs ~500 ns del
+  syscall).
+- **tmpfs** en `/etc`, `/tmp`, `/var`, `/run`. Escribibles, con cota
+  por instancia. Reemplaza el bind mount a `/data/tmp`.
 
 ### Fixes de kernel acumulados
 
@@ -282,15 +284,11 @@ Sin cambios.
 **3.12.3 funcional.** Ejecuta scripts, importa stdlib, compila bytecode
 al vuelo, carga extensiones C. Pendiente afinar:
 
-- `sigaltstack` (131) — usado por `faulthandler`.
-- `rt_sigaction` devuelve `-EINVAL` en 3 llamadas al arrancar (probable
-  bug en la comprobación de `sigsetsize` o en la entrega a userland).
-  No bloquea pero ensucia el log.
 - `ioctl(TCGETS)` sobre PTY devuelve `-ENOTTY` al cargar `encodings/utf_8`.
   Tampoco bloquea pero convendría revisar `tty_ioctl`.
 - Compilar `.pyc` con `compileall` en build time para acelerar arranque.
-- `libffi.so.8` falta → `ctypes`/`cffi` no cargan. Sólo importa
-  si algún binding lo pide.
+- **libffi.so.8** ✅ (copiado). `ctypes` funcional.
+- **sqlite3, ssl, hashlib** ✅. `openssl version` y `python3 -c 'ssl'`.
 
 ### 5.2 Portar `git` ✅ (git 2.43.0 operativo)
 
