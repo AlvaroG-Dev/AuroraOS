@@ -43,6 +43,7 @@ skb_t *skb_alloc(void) {
   s->tail = s->head;
   s->end = SKB_BUF_SIZE;
   s->protocol = 0;
+  s->ttl = 0;
   s->flags = 0;
   s->netif = NULL;
   s->next = NULL;

@@ -50,20 +50,12 @@ static int sk_close_op(vfs_node_t *node) {
 }
 
 static int sk_poll_op(vfs_node_t *node, short events) {
-  (void)events;
-  // Para UDP, "readable" si hay datos encolados, "writable" siempre.
   socket_t *s = (socket_t *)node->priv;
   if (!s)
     return 0;
   int rev = 0;
-  if (events & 1) { // POLLIN
-    // Asumimos que el caller ya sabe. Siempre listo para escritura,
-    // para lectura solo si rx_count > 0. Necesitaríamos acceso al
-    // contador; como socket_has_data no es público, usamos una
-    // aproximación: devolvemos siempre listo. El recv no-bloqueante
-    // devolverá -EAGAIN si no hay datos.
+  if ((events & 1) && socket_is_readable(s))
     rev |= 1;
-  }
   if (events & 4) // POLLOUT
     rev |= 4;
   return rev;
@@ -85,30 +77,14 @@ static vfs_ops_t inet_socket_ops = {
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
-int64_t inet_socket_create(struct process *proc, int type, int protocol) {
-  if (!proc)
-    return -EFAULT;
-
-  int flags = type & ~0xF;
-  int base_type = type & 0xF;
-
-  if (base_type != SOCK_DGRAM)
-    return -EOPNOTSUPP;
-
-  socket_t *s = socket_create(base_type, protocol);
-  if (!s)
-    return -EOPNOTSUPP;
-
-  if (flags & SOCK_NONBLOCK)
-    socket_set_nonblock(s, 1);
-
+static int64_t wrap_socket(struct process *proc, socket_t *s, int flags) {
   vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(*node));
   if (!node) {
     socket_put(s);
     return -ENOMEM;
   }
-  // Nombre simbólico "socket:[udp]".
-  const char *nm = "socket:[udp]";
+  const char *nm =
+      (socket_type(s) == SOCK_STREAM) ? "socket:[tcp]" : "socket:[udp]";
   size_t nl = strlen(nm);
   if (nl >= sizeof(node->name))
     nl = sizeof(node->name) - 1;
@@ -150,10 +126,35 @@ int64_t inet_socket_create(struct process *proc, int type, int protocol) {
   proc->fds[free_fd] = fd;
   if (flags & SOCK_CLOEXEC)
     proc->fd_cloexec_mask |= (1u << free_fd);
-
-  LOG_DEBUG("[SOCK] fd=%d creado (type=%d proto=%d)", free_fd, base_type,
-            protocol);
   return free_fd;
+}
+
+int64_t inet_socket_create(struct process *proc, int type, int protocol) {
+  if (!proc)
+    return -EFAULT;
+
+  int flags = type & ~0xF;
+  int base_type = type & 0xF;
+  if (base_type != SOCK_DGRAM && base_type != SOCK_STREAM)
+    return -EOPNOTSUPP;
+
+  socket_t *s = socket_create(base_type, protocol);
+  if (!s)
+    return -EOPNOTSUPP;
+  if (flags & SOCK_NONBLOCK)
+    socket_set_nonblock(s, 1);
+
+  int64_t r = wrap_socket(proc, s, flags);
+  if (r >= 0)
+    LOG_DEBUG("[SOCK] fd=%d creado (type=%d proto=%d)", (int)r, base_type,
+              protocol);
+  return r;
+}
+
+int64_t inet_socket_wrap(struct process *proc, struct socket *s) {
+  if (!proc || !s)
+    return -EINVAL;
+  return wrap_socket(proc, s, 0);
 }
 
 // ---------------------------------------------------------------------------

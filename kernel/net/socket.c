@@ -10,6 +10,7 @@
 #include "icmp.h"
 #include "ip.h"
 #include "netif.h"
+#include "tcp.h"
 #include "udp.h"
 
 #ifndef EAGAIN
@@ -50,6 +51,11 @@ struct socket {
   uint16_t ping_ident;  // ident nuestro (índice en g_ping_socks)
   uint16_t user_ident;  // ident que el usuario puso en el header
   uint64_t rcvtimeo_ms; // 0 = sin timeout
+  uint8_t last_ttl;     // TTL del último paquete recibido
+
+  int is_tcp;
+  struct tcp_conn *tcp;
+  int backlog;
 };
 
 // Tabla global de sockets UDP, indexada por puerto local.
@@ -59,7 +65,6 @@ static spinlock_t g_socks_lock;
 
 #define PING_SOCK_MAX 32
 static socket_t *g_ping_socks[PING_SOCK_MAX];
-static uint16_t g_ping_ident_next = 0x8000;
 
 // Identificador del "puerto efímero" para asignaciones sin bind.
 static uint16_t g_ephemeral_next = 0xC000;
@@ -203,19 +208,18 @@ static socket_t *ping_lookup(uint16_t ident) {
 // ident corresponde a un ping socket nuestro, mutamos el header para
 // restaurar el ident del usuario y lo encolamos.
 static void ping_reply_cb(uint32_t src_ip, uint16_t ident, uint16_t seq,
-                          const uint8_t *data, size_t data_len) {
+                          const uint8_t *data, size_t data_len, uint8_t ttl) {
   (void)seq;
   socket_t *s = ping_lookup(ident);
   if (!s)
     return;
 
-  // Reconstruir el ICMP completo (8 B header + payload) con el ident
-  // del usuario.
   skb_t *sk = skb_alloc();
   if (!sk) {
     socket_put(s);
     return;
   }
+  sk->ttl = ttl; // ← guardar
   uint8_t *p = (uint8_t *)skb_put(sk, 8 + data_len);
   if (!p) {
     skb_free(sk);
@@ -258,10 +262,7 @@ static void ping_reply_cb(uint32_t src_ip, uint16_t ident, uint16_t seq,
 }
 
 socket_t *socket_create(int type, int protocol) {
-  if (type != SOCK_DGRAM)
-    return NULL;
-  if (protocol != SOCK_PROTO_AUTO && protocol != SOCK_IPPROTO_UDP &&
-      protocol != SOCK_IPPROTO_ICMP)
+  if (type != SOCK_DGRAM && type != SOCK_STREAM)
     return NULL;
 
   socket_t *s = (socket_t *)kzalloc(sizeof(*s));
@@ -272,6 +273,29 @@ socket_t *socket_create(int type, int protocol) {
   s->type = type;
   s->refcount = 1;
   s->local_ip = SOCK_ADDR_ANY;
+
+  if (type == SOCK_STREAM) {
+    if (protocol != SOCK_PROTO_AUTO && protocol != SOCK_IPPROTO_TCP) {
+      kfree(s);
+      return NULL;
+    }
+    tcp_conn_t *c = tcp_conn_alloc();
+    if (!c) {
+      kfree(s);
+      return NULL;
+    }
+    s->protocol = SOCK_IPPROTO_TCP;
+    s->is_tcp = 1;
+    s->tcp = c;
+    return s;
+  }
+
+  // SOCK_DGRAM: UDP o ICMP(ping).
+  if (protocol != SOCK_PROTO_AUTO && protocol != SOCK_IPPROTO_UDP &&
+      protocol != SOCK_IPPROTO_ICMP) {
+    kfree(s);
+    return NULL;
+  }
 
   if (protocol == SOCK_IPPROTO_ICMP) {
     s->protocol = SOCK_IPPROTO_ICMP;
@@ -300,6 +324,9 @@ void socket_put(socket_t *s) {
   if (s->is_ping) {
     icmp_remove_echo_reply_cb(ping_reply_cb);
     ping_table_remove(s);
+  } else if (s->is_tcp) {
+    if (s->tcp)
+      tcp_close(s->tcp);
   } else if (s->bound) {
     udp_table_remove(s);
   }
@@ -321,15 +348,38 @@ int socket_bind(socket_t *s, uint32_t ip, uint16_t port) {
   if (s->bound)
     return -EINVAL;
 
+  if (s->is_tcp) {
+    if (ip == SOCK_ADDR_ANY) {
+      netif_t *n = netif_lookup("eth0");
+      if (n && n->ip != 0)
+        ip = n->ip;
+      else {
+        for (n = netif_first(); n; n = n->next) {
+          if (n->ip != 0) {
+            ip = n->ip;
+            break;
+          }
+        }
+      }
+    }
+    if (port == 0) {
+      port = udp_alloc_ephemeral();
+      if (port == 0)
+        return -EADDRINUSE;
+    }
+    s->local_ip = ip;
+    s->local_port = port;
+    s->bound = 1;
+    return 0;
+  }
+
   if (ip == SOCK_ADDR_ANY) {
     // Preferimos eth0 (IP "real" en QEMU user-mode).
     netif_t *n = netif_lookup("eth0");
-    LOG_DEBUG("[SOCK] bind: netif_lookup(eth0)=%p", (void *)n);
     if (n && n->ip != 0) {
       ip = n->ip;
     } else {
       for (n = netif_first(); n; n = n->next) {
-        LOG_DEBUG("[SOCK] bind: candidato %s ip=%08x", n->name, n->ip);
         if (n->ip != 0) {
           ip = n->ip;
           break;
@@ -372,6 +422,24 @@ int socket_bind(socket_t *s, uint32_t ip, uint16_t port) {
 int socket_connect(socket_t *s, uint32_t ip, uint16_t port) {
   if (!s)
     return -EINVAL;
+
+  if (s->is_tcp) {
+    if (!s->bound) {
+      int rc = socket_bind(s, SOCK_ADDR_ANY, 0);
+      if (rc != 0)
+        return rc;
+    }
+    s->tcp->local_ip = s->local_ip;
+    s->tcp->local_port = s->local_port;
+    int rc = tcp_connect(s->tcp, ip, port, 10000); // 10 s
+    if (rc != 0)
+      return rc;
+    s->remote_ip = ip;
+    s->remote_port = port;
+    s->connected = 1;
+    return 0;
+  }
+
   if (!s->bound) {
     int rc = socket_bind(s, SOCK_ADDR_ANY, 0);
     if (rc != 0)
@@ -405,7 +473,10 @@ static int socket_sendto_udp(socket_t *s, const void *buf, size_t len,
   }
   memcpy(p, buf, len);
 
-  return udp_output(sk, s->local_ip, dst_ip, s->local_port, dst_port);
+  // Resolver el src ANTES de que udp_output calcule el checksum: si
+  // ip_output reescribiera el src después, el checksum quedaría mal.
+  uint32_t src = ip_pick_src(dst_ip, s->local_ip);
+  return udp_output(sk, src, dst_ip, s->local_port, dst_port);
 }
 
 int socket_sendto(socket_t *s, const void *buf, size_t len, uint32_t dst_ip,
@@ -453,7 +524,8 @@ int socket_sendto(socket_t *s, const void *buf, size_t len, uint32_t dst_ip,
     p[2] = (uint8_t)(csum >> 8);
     p[3] = (uint8_t)(csum & 0xFF);
 
-    return ip_output(sk, s->local_ip, dst_ip, SOCK_IPPROTO_ICMP);
+    uint32_t src = ip_pick_src(dst_ip, s->local_ip);
+    return ip_output(sk, src, dst_ip, SOCK_IPPROTO_ICMP);
   }
   if (s->protocol != SOCK_IPPROTO_UDP && !s->is_ping)
     return -EOPNOTSUPP;
@@ -463,6 +535,11 @@ int socket_sendto(socket_t *s, const void *buf, size_t len, uint32_t dst_ip,
 int socket_send(socket_t *s, const void *buf, size_t len) {
   if (!s || !buf)
     return -EINVAL;
+  if (s->is_tcp) {
+    if (!s->tcp || s->tcp->state != TCP_STATE_ESTABLISHED)
+      return -ENOTCONN;
+    return tcp_send(s->tcp, buf, len);
+  }
   if (!s->connected)
     return -ENOTCONN;
   return socket_sendto(s, buf, len, s->remote_ip, s->remote_port);
@@ -477,6 +554,15 @@ static bool socket_has_data(void *arg) {
   int has = (s->rx_count > 0);
   spin_unlock_irqrestore(&s->lock, flags);
   return has;
+}
+
+int socket_is_readable(socket_t *s) {
+  if (!s)
+    return 0;
+  if (s->is_tcp)
+    return s->tcp && (s->tcp->rx_count > 0 || s->tcp->peer_closed ||
+                      s->tcp->state == TCP_STATE_CLOSED);
+  return socket_has_data(s);
 }
 
 static int socket_recvfrom_udp(socket_t *s, void *buf, size_t len,
@@ -494,6 +580,8 @@ static int socket_recvfrom_udp(socket_t *s, void *buf, size_t len,
       // metadatos los tenemos del socket (peer).
       uint32_t sip = s->remote_ip;
       uint16_t sp = s->remote_port;
+      uint8_t ttl = sk->ttl; // ← nuevo
+      s->last_ttl = ttl;     // ← persistir para el syscall
       spin_unlock_irqrestore(&s->lock, flags);
 
       size_t n = skb_len(sk);
@@ -534,12 +622,43 @@ static int socket_recvfrom_udp(socket_t *s, void *buf, size_t len,
   }
 }
 
+static int socket_recv_tcp(socket_t *s, void *buf, size_t len,
+                           uint32_t *src_ip, uint16_t *src_port,
+                           int *would_block) {
+  if (!s->tcp)
+    return -ENOTCONN;
+  if (s->tcp->state != TCP_STATE_ESTABLISHED &&
+      s->tcp->state != TCP_STATE_CLOSE_WAIT) {
+    if (s->tcp->state == TCP_STATE_CLOSED)
+      return 0;
+    return -ENOTCONN;
+  }
+
+  int n;
+  if (s->nonblock) {
+    n = tcp_recv_nonblock(s->tcp, buf, len);
+    if (n == -EAGAIN && would_block)
+      *would_block = 1;
+  } else {
+    n = tcp_recv(s->tcp, buf, len, s->rcvtimeo_ms);
+  }
+  if (n >= 0) {
+    if (src_ip)
+      *src_ip = s->remote_ip;
+    if (src_port)
+      *src_port = s->remote_port;
+  }
+  return n;
+}
+
 int socket_recvfrom(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
                     uint16_t *src_port, int *would_block) {
   if (!s || !buf)
     return -EINVAL;
   if (would_block)
     *would_block = 0;
+  if (s->is_tcp)
+    return socket_recv_tcp(s, buf, len, src_ip, src_port, would_block);
   if (s->protocol != SOCK_IPPROTO_UDP && !s->is_ping)
     return -EOPNOTSUPP;
   return socket_recvfrom_udp(s, buf, len, src_ip, src_port, would_block);
@@ -548,6 +667,12 @@ int socket_recvfrom(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
 int socket_recv(socket_t *s, void *buf, size_t len, int *would_block) {
   if (!s || !buf)
     return -EINVAL;
+  if (would_block)
+    *would_block = 0;
+
+  if (s->is_tcp)
+    return socket_recv_tcp(s, buf, len, NULL, NULL, would_block);
+
   if (!s->connected)
     return -ENOTCONN;
   return socket_recvfrom(s, buf, len, NULL, NULL, would_block);
@@ -598,4 +723,52 @@ void socket_set_rcvtimeo(socket_t *s, uint64_t ms) {
 
 uint64_t socket_get_rcvtimeo(const socket_t *s) {
   return s ? s->rcvtimeo_ms : 0;
+}
+
+uint8_t socket_get_last_ttl(const socket_t *s) { return s ? s->last_ttl : 0; }
+
+int socket_type(const socket_t *s) { return s ? s->type : 0; }
+
+// ---------------------------------------------------------------------------
+// [Fase 7e] listen / accept para TCP
+// ---------------------------------------------------------------------------
+int socket_listen(socket_t *s, int backlog) {
+  (void)backlog; // ignoramos, usamos TCP_ACCEPT_MAX
+  if (!s || !s->is_tcp || !s->tcp)
+    return -EOPNOTSUPP;
+  if (!s->bound) {
+    int rc = socket_bind(s, SOCK_ADDR_ANY, 0);
+    if (rc != 0)
+      return rc;
+  }
+  return tcp_listen(s->tcp, s->local_ip, s->local_port);
+}
+
+socket_t *socket_accept(socket_t *listener, uint64_t timeout_ms) {
+  if (!listener || !listener->is_tcp || !listener->tcp)
+    return NULL;
+
+  tcp_conn_t *child = tcp_accept(listener->tcp, timeout_ms);
+  if (!child)
+    return NULL;
+
+  socket_t *s = (socket_t *)kzalloc(sizeof(*s));
+  if (!s) {
+    tcp_conn_free(child);
+    return NULL;
+  }
+  spin_init(&s->lock);
+  wait_queue_init(&s->rx_wq);
+  s->type = SOCK_STREAM;
+  s->protocol = SOCK_IPPROTO_TCP;
+  s->is_tcp = 1;
+  s->refcount = 1;
+  s->tcp = child;
+  s->local_ip = child->local_ip;
+  s->local_port = child->local_port;
+  s->remote_ip = child->remote_ip;
+  s->remote_port = child->remote_port;
+  s->bound = 1;
+  s->connected = 1;
+  return s;
 }

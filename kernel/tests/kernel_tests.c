@@ -24,6 +24,7 @@
 #include "../klog.h"
 #include "../paging.h"
 #include "../part.h"
+#include "../pipe.h"
 #include "../pmm.h"
 #include "../process.h"
 #include "../pty.h"
@@ -35,6 +36,45 @@
 #include "../time.h"
 #include "../vfs.h"
 #include "memlayout.h"
+
+static void test_pipe_poll_readiness(void) {
+  vfs_node_t *read_end = NULL;
+  vfs_node_t *write_end = NULL;
+  TEST_ASSERT(vfs_pipe_create(&read_end, &write_end) == 0,
+              "vfs_pipe_create falló");
+  if (!read_end || !write_end) {
+    if (read_end)
+      vfs_node_free(read_end);
+    if (write_end)
+      vfs_node_free(write_end);
+    return;
+  }
+
+  TEST_ASSERT(vfs_node_poll(read_end, 1) == 0,
+              "pipe vacío anunció POLLIN");
+  TEST_ASSERT((vfs_node_poll(write_end, 4) & 4) != 0,
+              "pipe con espacio no anunció POLLOUT");
+
+  const char byte = 'x';
+  TEST_ASSERT(write_end->ops->write(write_end, 0, 1, &byte) == 1,
+              "no se pudo escribir en el pipe");
+  TEST_ASSERT((vfs_node_poll(read_end, 1) & 1) != 0,
+              "pipe con datos no anunció POLLIN");
+
+  char received = 0;
+  TEST_ASSERT(read_end->ops->read(read_end, 0, 1, &received) == 1 &&
+                  received == byte,
+              "no se pudo leer el dato del pipe");
+  TEST_ASSERT(vfs_node_poll(read_end, 1) == 0,
+              "pipe vacío tras consumir datos anunció POLLIN");
+
+  vfs_node_free(write_end);
+  TEST_ASSERT((vfs_node_poll(read_end, 1) & 1) != 0,
+              "pipe con writer cerrado no anunció EOF legible");
+  vfs_node_free(read_end);
+}
+REGISTER_TEST("pipe: poll readiness refleja datos y EOF",
+              test_pipe_poll_readiness);
 
 static void test_tarfs_assigns_unique_file_inodes(void) {
   vfs_node_t *libc = vfs_lookup("/lib/x86_64-linux-gnu/libc.so.6");

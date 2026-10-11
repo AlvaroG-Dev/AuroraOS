@@ -81,6 +81,49 @@ static bool pipe_has_space(void *arg) {
   int readers = __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE);
   return count < PIPE_BUF_SIZE || readers == 0;
 }
+
+static bool pipe_readable(vfs_node_t *node) {
+  pipe_end_t *end = node ? (pipe_end_t *)node->priv : NULL;
+  if (!end || end->is_write)
+    return false;
+  return pipe_has_data(end->pipe);
+}
+
+static int pipe_read_poll(vfs_node_t *node, short events) {
+  pipe_end_t *end = node ? (pipe_end_t *)node->priv : NULL;
+  if (!end || end->is_write)
+    return 0;
+  int ready = 0;
+  if ((events & 1) && pipe_has_data(end->pipe))
+    ready |= 1;
+  return ready;
+}
+
+static int pipe_write_poll(vfs_node_t *node, short events) {
+  pipe_end_t *end = node ? (pipe_end_t *)node->priv : NULL;
+  if (!end || !end->is_write)
+    return 0;
+  pipe_t *p = end->pipe;
+  int ready = 0;
+  int readers = __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE);
+  size_t count = __atomic_load_n(&p->count, __ATOMIC_ACQUIRE);
+  if (readers == 0)
+    return 8 | 16; // POLLERR | POLLHUP
+  if ((events & 4) && count < PIPE_BUF_SIZE)
+    ready |= 4;
+  return ready;
+}
+
+static wait_queue_t *pipe_read_poll_wq(vfs_node_t *node) {
+  pipe_end_t *end = node ? (pipe_end_t *)node->priv : NULL;
+  return end ? &end->pipe->read_wq : NULL;
+}
+
+static wait_queue_t *pipe_write_poll_wq(vfs_node_t *node) {
+  pipe_end_t *end = node ? (pipe_end_t *)node->priv : NULL;
+  return end ? &end->pipe->write_wq : NULL;
+}
+
 // ---------------------------------------------------------------------------
 // Ops
 // ---------------------------------------------------------------------------
@@ -211,7 +254,9 @@ static vfs_ops_t pipe_read_ops = {
     .write = NULL,
     .open = pipe_open,
     .close = pipe_close,
-    .readable = NULL,
+    .readable = pipe_readable,
+    .poll = pipe_read_poll,
+    .poll_wq = pipe_read_poll_wq,
 };
 
 static vfs_ops_t pipe_write_ops = {
@@ -220,6 +265,8 @@ static vfs_ops_t pipe_write_ops = {
     .open = pipe_open,
     .close = pipe_close,
     .readable = NULL,
+    .poll = pipe_write_poll,
+    .poll_wq = pipe_write_poll_wq,
 };
 
 // ---------------------------------------------------------------------------

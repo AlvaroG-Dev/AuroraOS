@@ -19,4 +19,8 @@ int64_t inet_socket_create(struct process *proc, int type, int protocol);
 // Busca el socket_t asociado a un fd, o NULL si no es un socket.
 struct socket *inet_socket_from_fd(struct process *proc, int fd);
 
+// Envuelve un socket_t ya creado en un fd del proceso. Devuelve fd >= 0
+// o errno negativo. Usado por socket_accept para exponer la conn hija.
+int64_t inet_socket_wrap(struct process *proc, struct socket *s);
+
 #endif

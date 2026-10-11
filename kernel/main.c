@@ -30,6 +30,7 @@
 #include "net/netif.h"
 #include "net/ping.h"
 #include "net/socket.h"
+#include "net/tcp.h"
 #include "net/udp.h"
 #include "paging.h"
 #include "part.h"
@@ -532,6 +533,10 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   LOG_INFO("[INIT] Sockets... ");
   socket_subsystem_init();
+  LOG_INFO("OK");
+
+  LOG_INFO("[INIT] TCP... ");
+  tcp_init();
   LOG_INFO("OK");
 
   LOG_INFO("[INIT] e1000e... ");

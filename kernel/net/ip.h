@@ -51,4 +51,15 @@ int ip_input(skb_t *skb);
 // libera. Devuelve 0 si OK, <0 si error (p. ej. -ENETUNREACH).
 int ip_output(skb_t *skb, uint32_t src_ip, uint32_t dst_ip, uint8_t proto);
 
+// Devuelve la IP de origen que se usará para enviar a `dst_ip`.
+//   * requested_src == 0            → IP del netif de salida.
+//   * requested_src en la subred    → requested_src.
+//   * requested_src en otra subred  → IP del netif de salida (rewrite).
+// Si no hay ruta, devuelve requested_src tal cual (el llamante decide).
+//
+// La capa de transporte DEBE llamar a esto ANTES de calcular el
+// checksum, para que coincida con el src que finalmente irá en el
+// header IP.
+uint32_t ip_pick_src(uint32_t dst_ip, uint32_t requested_src);
+
 #endif

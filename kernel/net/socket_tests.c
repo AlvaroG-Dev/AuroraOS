@@ -129,10 +129,14 @@ static void test_socket_sendto_recvfrom(void) {
 
   TEST_ASSERT_EQ(socket_bind(srv, SOCK_ADDR_ANY, PORT_SERVER), 0);
   TEST_ASSERT_EQ(socket_bind(cli, SOCK_ADDR_ANY, PORT_CLIENT), 0);
+  TEST_ASSERT(!socket_is_readable(srv),
+              "socket UDP vacío no debe anunciar POLLIN");
 
   const char *msg = "hola-socket";
   int rc = socket_sendto(cli, msg, 11, IP_LOOP, PORT_SERVER);
   TEST_ASSERT_EQ(rc, 0);
+  TEST_ASSERT(socket_is_readable(srv),
+              "socket UDP con datagrama debe anunciar POLLIN");
 
   // El servidor debe tener el paquete encolado.
   char buf[64] = {0};

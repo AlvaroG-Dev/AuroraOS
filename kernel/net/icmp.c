@@ -64,7 +64,8 @@ static void icmp_input(skb_t *skb, uint32_t src_ip, uint32_t dst_ip,
     size_t data_len = len - ICMP_HDR_LEN;
     for (int i = 0; i < ICMP_CB_MAX; i++) {
       if (g_reply_cbs[i])
-        g_reply_cbs[i](src_ip, ident, seq, data, data_len);
+        g_reply_cbs[i](src_ip, ident, seq, data, data_len,
+                       skb->ttl); // ← ttl añadido
     }
     skb_free(skb);
     return;

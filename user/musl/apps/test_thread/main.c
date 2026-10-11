@@ -5,6 +5,7 @@
 // join debe completarse sin cuelgues.
 
 #include <pthread.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/syscall.h>
@@ -156,6 +157,27 @@ static int test_stress(void) {
   return 0;
 }
 
+static int test_futex_ignores_unused_timeout(void) {
+  volatile int word = 0;
+  long rc = syscall(SYS_futex, &word, 0x81, 1, (void *)0xca);
+  if (rc != 0) {
+    printf("    FAIL: FUTEX_WAKE con timeout no aplicable rc=%ld errno=%d\n",
+           rc, errno);
+    return 1;
+  }
+
+  errno = 0;
+  rc = syscall(SYS_futex, &word, 0x80, 0, (void *)0xca);
+  if (rc != -1 || errno != EFAULT) {
+    printf("    FAIL: FUTEX_WAIT debía validar timeout inválido rc=%ld errno=%d\n",
+           rc, errno);
+    return 1;
+  }
+
+  printf("    OK: FUTEX_WAKE ignora timeout; FUTEX_WAIT lo valida\n");
+  return 0;
+}
+
 int main(void) {
   printf("=== pthread_test ===\n");
   int fails = 0;
@@ -163,6 +185,7 @@ int main(void) {
   fails += test_many();
   fails += test_mutex_cond();
   fails += test_stress();
+  fails += test_futex_ignores_unused_timeout();
   printf("=== %s ===\n", fails ? "FALLOS" : "TODO OK");
   return fails;
 }

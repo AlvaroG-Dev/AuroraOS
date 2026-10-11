@@ -176,6 +176,11 @@ int ip_input(skb_t *skb) {
   if (len > total_len)
     skb_trim(skb, len - total_len);
 
+  // [Fase 6e] Guardar TTL para los protocolos que lo necesiten (ICMP
+  // para el cmsg IP_TTL). Se lee aquí porque después del pull el
+  // header IP ya no está accesible.
+  skb->ttl = hdr[8];
+
   skb_pull(skb, hdr_len);
 
   ip_rx_handler_t fn = g_proto_handlers[proto];
@@ -294,4 +299,16 @@ int ip_output(skb_t *skb, uint32_t src_ip, uint32_t dst_ip, uint8_t proto) {
 
   skb->protocol = ETH_P_IP;
   return netif_tx(route.netif, skb);
+}
+
+uint32_t ip_pick_src(uint32_t dst_ip, uint32_t requested_src) {
+  struct route_result route;
+  if (ip_route_lookup(dst_ip, &route) != 0)
+    return requested_src;
+  if (requested_src == 0)
+    return route.netif->ip;
+  if ((requested_src & route.netif->netmask) ==
+      (route.netif->ip & route.netif->netmask))
+    return requested_src;
+  return route.netif->ip;
 }

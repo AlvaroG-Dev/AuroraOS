@@ -191,7 +191,8 @@ static uint8_t g_cb_data[64];
 static size_t g_cb_data_len;
 
 static void on_reply(uint32_t src, uint16_t ident, uint16_t seq,
-                     const uint8_t *data, size_t data_len) {
+                     const uint8_t *data, size_t data_len, uint8_t ttl) {
+  (void)ttl;
   g_cb_hits++;
   g_cb_src = src;
   g_cb_ident = ident;

@@ -54,4 +54,9 @@ void arp_dump(void);
 // una interfaz (cambio de IP, down/up, etc.).
 void arp_flush(void);
 
+// Inserta/actualiza una entry en estado REACHABLE sin enviar ARP.
+// Pensado para tests y para configurar vecinos estáticos.
+// Devuelve 0 si OK, <0 si error.
+int arp_insert_static(netif_t *n, uint32_t ip, const uint8_t mac[6]);
+
 #endif

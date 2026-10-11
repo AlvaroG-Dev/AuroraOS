@@ -80,6 +80,9 @@ void socket_set_nonblock(socket_t *s, int nb);
 // Uso interno de inet_socket.c. No exportar.
 int socket_is_nonblock(const socket_t *s);
 
+// Indica si un recv inmediato puede entregar datos o EOF.
+int socket_is_readable(socket_t *s);
+
 // Devuelve la wait queue de RX del socket. Pensado para VFS/select/poll,
 // que necesitan dormir hasta que llegue un paquete sin conocer los
 // internals del struct.
@@ -89,5 +92,17 @@ struct wait_queue *socket_rx_wq(socket_t *s);
 // indefinido). Lo configura SO_RCVTIMEO.
 void socket_set_rcvtimeo(socket_t *s, uint64_t ms);
 uint64_t socket_get_rcvtimeo(const socket_t *s);
+
+uint8_t socket_get_last_ttl(const socket_t *s);
+
+// ---------------------------------------------------------------------------
+// [Fase 7e] Sockets TCP (SOCK_STREAM)
+// ---------------------------------------------------------------------------
+int socket_listen(socket_t *s, int backlog);
+socket_t *socket_accept(socket_t *listener, uint64_t timeout_ms);
+
+// Tipo del socket (SOCK_DGRAM o SOCK_STREAM). Para uso interno de
+// inet_socket.c.
+int socket_type(const socket_t *s);
 
 #endif

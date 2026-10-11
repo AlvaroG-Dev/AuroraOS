@@ -39,6 +39,10 @@
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
+#ifndef EISCONN
+#define EISCONN 106
+#endif
+
 #define SPAWN_ARGS_MAX PROCESS_ARGV_MAX
 #define SPAWN_ARG_STR_MAX 128
 
@@ -2567,6 +2571,25 @@ static int64_t realtime_now_ms(void) {
   return g_realtime_offset_ms + (int64_t)sched_get_ticks();
 }
 
+static int64_t k_clock_getres(uint64_t clockid, uint64_t res_ptr, uint64_t a3,
+                              uint64_t a4, uint64_t a5) {
+  (void)clockid;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!res_ptr)
+    return -EFAULT;
+  if (!access_ok((void *)res_ptr, 16))
+    return -EFAULT;
+  struct {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+  } ts = {0, 1000000}; // 1 ms
+  if (copy_to_user((void *)res_ptr, &ts, sizeof(ts)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
 static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
                                uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -2677,6 +2700,7 @@ static uint64_t ts_to_ticks(int64_t sec, int64_t nsec) {
 struct poll_ctx {
   struct k_pollfd *fds;
   uint32_t nfds;
+  process_t *proc;
   int any_ready;
 };
 
@@ -2684,8 +2708,16 @@ static bool poll_any_ready(void *arg) {
   struct poll_ctx *ctx = (struct poll_ctx *)arg;
   ctx->any_ready = 0;
   for (uint32_t i = 0; i < ctx->nfds; i++) {
-    if (ctx->fds[i].fd < 0)
+    int32_t fd = ctx->fds[i].fd;
+    ctx->fds[i].revents = 0;
+    if (fd < 0)
       continue;
+    if (fd >= MAX_PROCESS_FDS || !ctx->proc->fds[fd]) {
+      ctx->fds[i].revents = POLLNVAL;
+    } else {
+      ctx->fds[i].revents =
+          (int16_t)vfs_node_poll(ctx->proc->fds[fd]->node, ctx->fds[i].events);
+    }
     if (ctx->fds[i].revents) {
       ctx->any_ready = 1;
       break;
@@ -2754,7 +2786,8 @@ static int64_t do_poll_common(struct k_pollfd *kfds, uint32_t nfds,
     }
 
     if (wq) {
-      struct poll_ctx ctx = {.fds = kfds, .nfds = nfds, .any_ready = 0};
+      struct poll_ctx ctx = {
+          .fds = kfds, .nfds = nfds, .proc = proc, .any_ready = 0};
       long r = wait_event_interruptible_timeout(wq, poll_any_ready, &ctx,
                                                 wait_ticks);
       if (r < 0)
@@ -4759,26 +4792,6 @@ static int64_t k_flock(uint64_t fd, uint64_t operation, uint64_t a3,
   }
 }
 
-// ---------- Familia socket (Fase 5 pendiente) ----------
-//
-// Aurora no tiene stack de red todavía. Devolvemos -EAFNOSUPPORT
-// (el errno que da Linux cuando no hay familia de direcciones soportada)
-// en lugar de -ENOSYS: así dnsdomainname, hostname -d, getaddrinfo y
-// demás reciben un error informativo y tienen oportunidad de caer a un
-// fallback limpio, en vez de "syscall desconocida".
-//
-// Cuando Fase 5 (networking) llegue, se sustituye esto por la
-// implementación real; los números de syscall ya están reservados.
-static int64_t k_net_nosupport(uint64_t a1, uint64_t a2, uint64_t a3,
-                               uint64_t a4, uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return -EAFNOSUPPORT;
-}
-
 // ---------------------------------------------------------------------------
 // Familia de sockets (Fase 6b). Solo SOCK_DGRAM/UDP.
 // ---------------------------------------------------------------------------
@@ -4879,6 +4892,16 @@ static int64_t k_sendto(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags,
   if (copy_from_user(k, (void *)buf, len) < 0) {
     kfree(k);
     return -EFAULT;
+  }
+
+  if (socket_type(s) == SOCK_STREAM) {
+    if (addr) {
+      kfree(k);
+      return -EISCONN;
+    }
+    int rc = socket_send(s, k, len);
+    kfree(k);
+    return rc < 0 ? rc : (int64_t)rc;
   }
 
   uint32_t dip = 0;
@@ -5111,31 +5134,76 @@ static int64_t k_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
 
 static int64_t k_listen(uint64_t fd, uint64_t backlog, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
-  (void)fd;
-  (void)backlog;
   (void)a3;
   (void)a4;
   (void)a5;
-  return -EOPNOTSUPP; // TCP, Fase 7
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTSOCK;
+  return socket_listen(s, (int)backlog);
 }
+
+static int64_t do_accept(process_t *proc, int fd, uint64_t addr,
+                         uint64_t addrlen_ptr) {
+  socket_t *listener = inet_socket_from_fd(proc, fd);
+  if (!listener)
+    return -ENOTSOCK;
+
+  // accept bloqueante, sin timeout. En 7e no soportamos select sobre
+  // el listener; el proceso se queda dormido hasta que llega algo.
+  socket_t *child = socket_accept(listener, 0);
+  if (!child)
+    return -EAGAIN;
+
+  int64_t newfd = inet_socket_wrap(proc, child);
+  if (newfd < 0) {
+    socket_put(child);
+    return newfd;
+  }
+
+  if (addr) {
+    struct k_sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(socket_remote_port(child));
+    sa.sin_addr = htonl(socket_remote_ip(child));
+    if (access_ok((void *)addr, sizeof(sa)))
+      (void)copy_to_user((void *)addr, &sa, sizeof(sa));
+  }
+  if (addrlen_ptr && access_ok((void *)addrlen_ptr, 4)) {
+    uint32_t l = sizeof(struct k_sockaddr_in);
+    (void)copy_to_user((void *)addrlen_ptr, &l, 4);
+  }
+  return newfd;
+}
+
 static int64_t k_accept(uint64_t fd, uint64_t addr, uint64_t addrlen,
                         uint64_t a4, uint64_t a5) {
-  (void)fd;
-  (void)addr;
-  (void)addrlen;
   (void)a4;
   (void)a5;
-  return -EOPNOTSUPP;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return do_accept(proc, (int)fd, addr, addrlen);
 }
+
 static int64_t k_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen,
                          uint64_t flags, uint64_t a5) {
-  (void)fd;
-  (void)addr;
-  (void)addrlen;
-  (void)flags;
   (void)a5;
-  return -EOPNOTSUPP;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int64_t r = do_accept(proc, (int)fd, addr, addrlen);
+  if (r < 0)
+    return r;
+  if (flags & 0x80000ULL) // SOCK_CLOEXEC
+    proc->fd_cloexec_mask |= (1u << (int)r);
+  return r;
 }
+
 #define MSG_BUFFER_MAX 65536
 
 static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
@@ -5213,6 +5281,16 @@ static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
       off += iovs[i].iov_len;
     }
     done += batch;
+  }
+
+  if (socket_type(s) == SOCK_STREAM) {
+    if (mh.msg_name) {
+      kfree(kbuf);
+      return -EISCONN;
+    }
+    int rc = socket_send(s, kbuf, total);
+    kfree(kbuf);
+    return rc < 0 ? rc : (int64_t)rc;
   }
 
   uint32_t dip = 0;
@@ -5302,6 +5380,26 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   }
   kfree(kbuf);
 
+  // [Fase 6e] Emitir cmsg IP_TTL si el caller lo pidió.
+  // struct cmsghdr x86_64: 16 bytes (u64 cmsg_len + int cmsg_level + int
+  // cmsg_type). IPPROTO_IP = 0, IP_TTL = 2. CMSG_LEN(4) = 20; CMSG_SPACE(4) =
+  // 24 (alineado a 8).
+  int wrote_cmsg = 0;
+  if (mh.msg_control && mh.msg_controllen >= 24) {
+    uint8_t cmsg[24];
+    memset(cmsg, 0, sizeof(cmsg));
+    *(uint64_t *)(cmsg + 0) = 20; // cmsg_len
+    *(int32_t *)(cmsg + 8) = 0;   // cmsg_level = IPPROTO_IP
+    *(int32_t *)(cmsg + 12) = 2;  // cmsg_type = IP_TTL
+    int32_t ttl = (int32_t)socket_get_last_ttl(s);
+    *(int32_t *)(cmsg + 16) = ttl;
+    if (access_ok((void *)mh.msg_control, 24)) {
+      if (copy_to_user((void *)mh.msg_control, cmsg, 24) == 0) {
+        wrote_cmsg = 1;
+      }
+    }
+  }
+
   // Rellenar msg_name con el origen.
   struct k_msghdr out = mh;
   if (mh.msg_name) {
@@ -5314,7 +5412,7 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
       (void)copy_to_user((void *)mh.msg_name, &sa, sizeof(sa));
     out.msg_namelen = sizeof(sa);
   }
-  out.msg_controllen = 0;
+  out.msg_controllen = wrote_cmsg ? 24 : 0;
   out.msg_flags = 0;
   (void)copy_to_user((void *)msg_uptr, &out, sizeof(out));
 
@@ -6330,6 +6428,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SET_TID_ADDRESS] = {k_set_tid_address, "set_tid_address"},
     [SYS_CLOCK_GETTIME] = {k_clock_gettime, "clock_gettime"},
     [SYS_GETTIMEOFDAY] = {k_gettimeofday, "gettimeofday"},
+    [SYS_CLOCK_GETRES] = {k_clock_getres, "clock_getres"},
     [SYS_GETITIMER] = {k_getitimer, "getitimer"},
     [SYS_ALARM] = {k_alarm, "alarm"},
     [SYS_SETITIMER] = {k_setitimer, "setitimer"},

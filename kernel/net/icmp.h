@@ -20,7 +20,7 @@
 // Filtra por ident en el llamante.
 typedef void (*icmp_echo_reply_fn)(uint32_t src_ip, uint16_t ident,
                                    uint16_t seq, const uint8_t *data,
-                                   size_t data_len);
+                                   size_t data_len, uint8_t ttl);
 
 // Inicializa el módulo y registra el handler del protocolo IP 1.
 void icmp_init(void);

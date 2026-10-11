@@ -217,7 +217,9 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
   // usuario y devuelve ns (o -1 si timeout_uptr == NULL, o error
   // negativo). Reusado por WAIT y WAIT_BITSET.
   int64_t timeout_ns = -1;
-  if (timeout_uptr) {
+  // Los argumentos no usados por otras operaciones FUTEX pueden contener
+  // cualquier valor y no deben interpretarse como punteros.
+  if ((cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) && timeout_uptr) {
     struct {
       int64_t sec;
       int64_t nsec;

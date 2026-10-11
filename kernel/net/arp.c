@@ -13,7 +13,6 @@
 #include "ip.h"
 #include "netif.h"
 
-#define ETH_P_ARP 0x0806u
 #define ARP_HTYPE_ETHERNET 1u
 #define ARP_OP_REQUEST 1u
 #define ARP_OP_REPLY 2u
@@ -366,4 +365,22 @@ void arp_flush(void) {
     memset(e, 0, sizeof(*e));
   }
   spin_unlock_irqrestore(&g_arp_lock, flags);
+}
+
+int arp_insert_static(netif_t *n, uint32_t ip, const uint8_t mac[6]) {
+  if (!n || ip == 0 || !mac)
+    return -EINVAL;
+  unsigned long flags = spin_lock_irqsave(&g_arp_lock);
+  arp_entry_t *e = find_entry_locked(n, ip);
+  if (!e)
+    e = alloc_entry_locked(n, ip);
+  if (!e) {
+    spin_unlock_irqrestore(&g_arp_lock, flags);
+    return -ENOMEM;
+  }
+  memcpy(e->mac, mac, 6);
+  e->state = ARP_ENTRY_REACHABLE;
+  e->last_seen = tick_count;
+  spin_unlock_irqrestore(&g_arp_lock, flags);
+  return 0;
 }

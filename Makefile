@@ -6,6 +6,8 @@
         run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci \
         run-smp-kvm-ahci-3disk python-stdlib
 
+RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
+
 all: image
 
 sysroot:
@@ -148,6 +150,27 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 		cp -f /usr/share/zoneinfo/UTC sysroot/etc/localtime; \
 	fi
 
+	@echo "[Makefile] Generando /etc/resolv.conf..."
+	@printf '%b' "$(RESOLV_CONF)" > sysroot/etc/resolv.conf
+# ---------------------------------------------------------------------------
+# /etc/resolv.conf: servidores DNS que el guest usará.
+#
+# Por defecto: Cloudflare (1.1.1.1) y Google (8.8.8.8). Son DNS
+# públicos que cualquier red con salida a Internet enruta:
+#   - QEMU slirp (user-mode) → los reenvía al host.
+#   - VirtualBox NAT         → los reenvía al host.
+#   - TAP / bridge / físico  → los reenvía el router.
+#
+# NO usamos 10.0.2.3 (el "DNS virtual" de slirp/VBox) porque slirp NO
+# responde ARP para esa IP: el guest se queda con la query encolada
+# esperando una MAC que nunca llega. 10.0.2.3 solo funcionaría con un
+# hack de ARP en el kernel (que ya no tenemos).
+#
+# Para overrides locales:
+#   make RESOLV_CONF='nameserver 10.0.2.3\n' image
+# ---------------------------------------------------------------------------
+
+
 # ---------------------------------------------------------------------------
 # 1. (Sin busybox — userspace es 100% glibc/Ubuntu)
 # ---------------------------------------------------------------------------
@@ -206,6 +229,32 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 		echo "[Makefile]   (libs/ no existe)"; \
 	fi
 
+# ---------------------------------------------------------------------------
+# 4b. NSS modules de glibc.
+#
+# glibc carga estos .so con dlopen() en runtime — ldd NO los ve, así
+# que fetch-bin.sh no los arrastra. Sin ellos:
+#   - libnss_dns.so.2   → getaddrinfo() falla en silencio, curl/wget
+#                          se quedan colgados sin mandar la query UDP.
+#   - libnss_files.so.2 → getpwnam/getgrnam/... sobre /etc/passwd, /etc/hosts.
+#   - libnss_compat.so.2 → compat legacy (NIS).
+#
+# Los copiamos del host (misma versión de glibc que libc.so.6).
+# Si el host no los tiene, se salta silenciosamente.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando NSS modules de glibc..."
+	@mkdir -p sysroot/lib/x86_64-linux-gnu sysroot/usr/lib/x86_64-linux-gnu
+	@for lib in libnss_dns.so.2 libnss_files.so.2 libnss_compat.so.2; do \
+		for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do \
+			if [ -e "$$d/$$lib" ]; then \
+				cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
+				cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
+				echo "[Makefile]   nss: $$lib"; \
+				break; \
+			fi; \
+		done; \
+	done
+	
 # ---------------------------------------------------------------------------
 # 5. precompiled/ — binarios de otros OS
 # ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ typedef struct skb {
   uint8_t dst_mac[6]; // MAC destino (para netif_tx)
   uint8_t flags;
   uint8_t _pad;
+  uint8_t ttl; // [Fase 6e] TTL del último header IP que lo tocó
   struct netif *netif;
   struct skb *next; // para colas
 } skb_t;
@@ -132,6 +133,7 @@ static inline void skb_reset(skb_t *s) {
   s->flags = 0;
   s->netif = NULL;
   s->next = NULL;
+  s->ttl = 0;
 }
 
 // Estadísticas (para debug)

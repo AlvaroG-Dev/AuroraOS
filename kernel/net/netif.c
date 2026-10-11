@@ -186,6 +186,5 @@ void netif_rx(skb_t *skb) {
     skb_free(skb);
     return;
   }
-
   fn(skb->netif, skb);
 }

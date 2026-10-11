@@ -55,6 +55,7 @@
 #define ENETUNREACH 101
 #define ENOTCONN 107
 #define ETIMEDOUT 110
+#define ECONNREFUSED 111
 #define EINPROGRESS 115
 
 // Comprueba que [p, p+n) está dentro del espacio de usuario.

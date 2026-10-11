@@ -27,9 +27,11 @@ static bool ping_never(void *arg) {
 }
 
 static void ping_reply_cb(uint32_t src, uint16_t ident, uint16_t seq,
-                          const uint8_t *data, size_t data_len) {
+                          const uint8_t *data, size_t data_len, uint8_t ttl) {
+  (void)src;
   (void)data;
   (void)data_len;
+  (void)ttl;
   if (ident != PING_IDENT)
     return;
 
