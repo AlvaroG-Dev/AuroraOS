@@ -622,9 +622,8 @@ static int socket_recvfrom_udp(socket_t *s, void *buf, size_t len,
   }
 }
 
-static int socket_recv_tcp(socket_t *s, void *buf, size_t len,
-                           uint32_t *src_ip, uint16_t *src_port,
-                           int *would_block) {
+static int socket_recv_tcp(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
+                           uint16_t *src_port, int *would_block) {
   if (!s->tcp)
     return -ENOTCONN;
   if (s->tcp->state != TCP_STATE_ESTABLISHED &&
@@ -714,7 +713,17 @@ void socket_set_nonblock(socket_t *s, int nb) {
 
 int socket_is_nonblock(const socket_t *s) { return s ? s->nonblock : 0; }
 
-wait_queue_t *socket_rx_wq(socket_t *s) { return s ? &s->rx_wq : NULL; }
+wait_queue_t *socket_rx_wq(socket_t *s) {
+  if (!s)
+    return NULL;
+  // Para TCP los datos viven en el tcp_conn, no en el socket wrapper.
+  // El path de recepción (tcp_input) despierta &c->rx_wq, y tcp_recv
+  // duerme en &c->rx_wq. Si devolviéramos &s->rx_wq, el poll del
+  // syscall se suscribiría a una queue que nunca se despierta.
+  if (s->is_tcp && s->tcp)
+    return &s->tcp->rx_wq;
+  return &s->rx_wq;
+}
 
 void socket_set_rcvtimeo(socket_t *s, uint64_t ms) {
   if (s)

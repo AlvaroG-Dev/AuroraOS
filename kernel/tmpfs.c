@@ -899,6 +899,7 @@ static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/bash.bashrc", NULL, NULL, 0},
     {"/etc/ld.so.cache", NULL, NULL, 0},
     {"/etc/localtime", NULL},
+    {"/etc/ssl/certs/ca-certificates.crt", NULL, NULL, 0},
 };
 #define N_ETC_SEEDS (sizeof(g_etc_seeds) / sizeof(g_etc_seeds[0]))
 
@@ -938,6 +939,11 @@ void tmpfs_init(void) {
       LOG_ERR("[TMPFS] mount /etc: %d", rc);
       tmpfs_destroy(etc);
     } else {
+      // tmpfs_create no crea directorios padre. Los seeds anidados
+      // (hoy solo /etc/ssl/certs/ca-certificates.crt) necesitan que
+      // su cadena de padres exista antes del loop.
+      vfs_mkdir("/etc/ssl", 0755);
+      vfs_mkdir("/etc/ssl/certs", 0755);
       int seeded = 0, from_tar = 0;
       for (size_t i = 0; i < N_ETC_SEEDS; i++) {
         int put_rc = -1;

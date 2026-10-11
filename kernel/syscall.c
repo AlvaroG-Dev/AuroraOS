@@ -3076,8 +3076,19 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     return 0;
   case F_GETFL:
     return (int64_t)f->flags;
-  case F_SETFL:
+  case F_SETFL: {
+    int newflags = (int)arg;
+    if (newflags & LINUX_O_NONBLOCK)
+      f->flags |= LINUX_O_NONBLOCK;
+    else
+      f->flags &= ~LINUX_O_NONBLOCK;
+
+    // Si el fd es un socket, propagar el flag al socket_t.
+    socket_t *s = inet_socket_from_fd(proc, kfd);
+    if (s)
+      socket_set_nonblock(s, (newflags & LINUX_O_NONBLOCK) ? 1 : 0);
     return 0;
+  }
   case 1033: /* F_ADD_SEALS */
     if (!f->node || !memfd_is_node(f->node))
       return -EINVAL;

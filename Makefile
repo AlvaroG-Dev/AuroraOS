@@ -152,24 +152,41 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 
 	@echo "[Makefile] Generando /etc/resolv.conf..."
 	@printf '%b' "$(RESOLV_CONF)" > sysroot/etc/resolv.conf
-# ---------------------------------------------------------------------------
-# /etc/resolv.conf: servidores DNS que el guest usará.
-#
-# Por defecto: Cloudflare (1.1.1.1) y Google (8.8.8.8). Son DNS
-# públicos que cualquier red con salida a Internet enruta:
-#   - QEMU slirp (user-mode) → los reenvía al host.
-#   - VirtualBox NAT         → los reenvía al host.
-#   - TAP / bridge / físico  → los reenvía el router.
-#
-# NO usamos 10.0.2.3 (el "DNS virtual" de slirp/VBox) porque slirp NO
-# responde ARP para esa IP: el guest se queda con la query encolada
-# esperando una MAC que nunca llega. 10.0.2.3 solo funcionaría con un
-# hack de ARP en el kernel (que ya no tenemos).
-#
-# Para overrides locales:
-#   make RESOLV_CONF='nameserver 10.0.2.3\n' image
-# ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Bundle de CAs para TLS (openssl/curl/gnutls).
+#
+# curl https:// necesita /etc/ssl/certs/ca-certificates.crt. Sin él
+# aborta con "curl: (77) error setting certificate file" tras emitir
+# el Client Hello (el handshake TCP ya está hecho). Es puramente
+# userland, no es un bug del stack de red.
+#
+# Distintas distros lo dejan en sitios distintos:
+#   Debian/Ubuntu/Alpine/Arch: /etc/ssl/certs/ca-certificates.crt
+#   Fedora/RHEL:               /etc/pki/tls/certs/ca-bundle.crt
+#   openSUSE:                  /etc/ssl/ca-bundle.pem
+#
+# /etc es tmpfs en runtime: tmpfs_init() lee este fichero del tarfs y
+# lo reescribe dentro del tmpfs (ver kernel/tmpfs.c, seed de
+# /etc/ssl/certs/ca-certificates.crt).
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando bundle de CAs para TLS..."
+	@mkdir -p sysroot/etc/ssl/certs
+	@found_ca=0; \
+	for ca in /etc/ssl/certs/ca-certificates.crt \
+	          /etc/pki/tls/certs/ca-bundle.crt \
+	          /etc/ssl/ca-bundle.pem; do \
+		if [ -f "$$ca" ]; then \
+			cp -Lf "$$ca" sysroot/etc/ssl/certs/ca-certificates.crt; \
+			echo "[Makefile]   CA bundle: $$ca"; \
+			found_ca=1; \
+			break; \
+		fi; \
+	done; \
+	if [ "$$found_ca" = "0" ]; then \
+		echo "[Makefile]   (WARN) no se encontró CA bundle en el host."; \
+		echo "[Makefile]          curl https:// fallará con error 77."; \
+	fi
 
 # ---------------------------------------------------------------------------
 # 1. (Sin busybox — userspace es 100% glibc/Ubuntu)

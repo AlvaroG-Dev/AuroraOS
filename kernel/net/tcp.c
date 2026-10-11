@@ -754,15 +754,21 @@ int tcp_send(tcp_conn_t *c, const void *buf, size_t len) {
     return -ENOTCONN;
   if (len == 0)
     return 0;
-  if (len > 1400)
-    return -EMSGSIZE;
 
-  int rc =
-      tcp_send_segment(c, TCP_ACK | TCP_PSH, c->snd_nxt, c->rcv_nxt, buf, len);
-  if (rc != 0)
-    return rc;
-  c->snd_nxt += (uint32_t)len;
-  return (int)len;
+  const uint8_t *p = (const uint8_t *)buf;
+  size_t sent = 0;
+  while (sent < len) {
+    size_t chunk = len - sent;
+    if (chunk > 1400)
+      chunk = 1400;
+    int rc = tcp_send_segment(c, TCP_ACK | TCP_PSH, c->snd_nxt, c->rcv_nxt,
+                              p + sent, chunk);
+    if (rc != 0)
+      return sent > 0 ? (int)sent : rc;
+    c->snd_nxt += (uint32_t)chunk;
+    sent += chunk;
+  }
+  return (int)sent;
 }
 
 static bool tcp_rx_has_data(void *arg) {
@@ -781,19 +787,24 @@ int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms) {
   for (;;) {
     if (c->rx_head) {
       skb_t *sk = c->rx_head;
-      c->rx_head = sk->next;
-      if (!c->rx_head)
-        c->rx_tail = NULL;
-      c->rx_count--;
 
       size_t n = skb_len(sk);
-      if (n > len) {
-        LOG_WARN("[TCP] recv: pidiendo %lu de %lu, truncando",
-                 (unsigned long)len, (unsigned long)n);
+      if (n > len)
         n = len;
-      }
       memcpy(buf, skb_data(sk), n);
-      skb_free(sk);
+
+      // TCP es stream: si el caller pidió menos de lo que hay en el
+      // skb, conservamos el resto en la cola. Consumimos n bytes del
+      // frente con skb_pull. Si vaciamos el skb, lo liberamos.
+      if (n < skb_len(sk)) {
+        skb_pull(sk, n);
+      } else {
+        c->rx_head = sk->next;
+        if (!c->rx_head)
+          c->rx_tail = NULL;
+        c->rx_count--;
+        skb_free(sk);
+      }
       return (int)n;
     }
 
@@ -848,16 +859,21 @@ int tcp_recv_nonblock(tcp_conn_t *c, void *buf, size_t len) {
 
   if (c->rx_head) {
     skb_t *sk = c->rx_head;
-    c->rx_head = sk->next;
-    if (!c->rx_head)
-      c->rx_tail = NULL;
-    c->rx_count--;
 
     size_t n = skb_len(sk);
     if (n > len)
       n = len;
     memcpy(buf, skb_data(sk), n);
-    skb_free(sk);
+
+    if (n < skb_len(sk)) {
+      skb_pull(sk, n);
+    } else {
+      c->rx_head = sk->next;
+      if (!c->rx_head)
+        c->rx_tail = NULL;
+      c->rx_count--;
+      skb_free(sk);
+    }
     return (int)n;
   }
 
