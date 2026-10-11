@@ -259,11 +259,16 @@ static void wake_all_waiters_locked(wait_queue_t *wq) {
   while (e) {
     wait_queue_entry_t *next = e->next;
     task_t *t = e->task;
+    e->task = NULL;
+    e->next = NULL;
+    if (!t) {
+      LOG_ERR("[WAIT] entrada sin tarea en wake_up_all");
+      e = next;
+      continue;
+    }
     t->waiting_on = NULL;
     t->wake_reason = 0;
     sched_make_ready(t);
-    e->task = NULL;
-    e->next = NULL;
     task_put(t);
     e = next;
   }
@@ -303,11 +308,16 @@ void wake_up_interruptible_all(wait_queue_t *wq) {
   while (e) {
     wait_queue_entry_t *next = e->next;
     task_t *t = e->task;
+    e->task = NULL;
+    e->next = NULL;
+    if (!t) {
+      LOG_ERR("[WAIT] entrada sin tarea en wake_up_interruptible_all");
+      e = next;
+      continue;
+    }
     t->waiting_on = NULL;
     t->wake_reason = -EINTR;
     sched_make_ready(t);
-    e->task = NULL;
-    e->next = NULL;
     task_put(t);
     e = next;
   }

@@ -638,6 +638,9 @@ static void test_tcp_send_simple(void) {
   uint8_t flags = g_tx[0][14 + 20 + 13];
   TEST_ASSERT(flags & 0x08, "sin PSH");
   TEST_ASSERT(flags & 0x10, "sin ACK");
+  uint16_t tx_window = (uint16_t)((g_tx[0][14 + 20 + 14] << 8) |
+                                  g_tx[0][14 + 20 + 15]);
+  TEST_ASSERT_EQ(tx_window, 0xFFFF);
 
   tcp_conn_remove(c);
   tcp_conn_free(c);

@@ -508,7 +508,16 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
 
   int fd = vfs_open_for_proc(proc, kpath, aflags);
   if (fd < 0) {
-    LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", kpath, linux_flags, fd);
+    // git/coreutils sondean ENOENT constantemente (buscan un objeto
+    // loose antes de caer al packfile). Solo logueamos si NO es un
+    // ENOENT "aburrido" — es decir, si falló algo que el caller
+    // esperaba que existiera (create, write, exec...).
+    int boring =
+        (fd == -ENOENT &&
+         !(linux_flags & (LINUX_O_CREAT | LINUX_O_WRONLY | LINUX_O_RDWR)));
+    if (!boring)
+      LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", kpath, linux_flags,
+               fd);
     return fd;
   }
 
@@ -5430,6 +5439,97 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   return n;
 }
 
+// struct mmsghdr de Linux x86_64: msghdr (56 B) + msg_len (4 B) + padding.
+struct k_mmsghdr {
+  struct k_msghdr msg_hdr; // 56 B
+  uint32_t msg_len;        // escrito por el kernel
+  uint32_t _pad;
+};
+_Static_assert(sizeof(struct k_mmsghdr) == 64, "mmsghdr x86_64");
+
+// sendmmsg(fd, msgvec, vlen, flags): envía vlen mensajes de golpe.
+// Para DNS basta con iterar k_sendmsg; el coste del loop es despreciable
+// comparado con la latencia de red.
+static int64_t k_sendmmsg(uint64_t fd, uint64_t msgvec, uint64_t vlen,
+                          uint64_t flags, uint64_t a5) {
+  (void)a5;
+  if (vlen == 0)
+    return 0;
+  if (vlen > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)msgvec, vlen * sizeof(struct k_mmsghdr)))
+    return -EFAULT;
+
+  uint64_t sent = 0;
+  for (uint64_t i = 0; i < vlen; i++) {
+    uint64_t addr = msgvec + i * sizeof(struct k_mmsghdr);
+
+    // k_sendmsg lee el msghdr directamente del user pointer (que es
+    // el inicio del mmsghdr), así que podemos pasar addr tal cual.
+    int64_t r = k_sendmsg(fd, addr, flags, 0, 0);
+    if (r < 0) {
+      if (sent > 0)
+        return (int64_t)sent;
+      return r;
+    }
+    // Escribir solo el campo msg_len al userland.
+    uint32_t mlen = (uint32_t)r;
+    uint64_t off = addr + offsetof(struct k_mmsghdr, msg_len);
+    if (copy_to_user((void *)off, &mlen, sizeof(mlen)) < 0)
+      return sent > 0 ? (int64_t)sent : -EFAULT;
+    sent++;
+  }
+  return (int64_t)sent;
+}
+
+// recvmmsg(fd, msgvec, vlen, flags, timeout): recibe hasta vlen mensajes.
+// El timeout_ptr lo ignoramos: para DNS con vlen=1 el bloqueo normal
+// del recvmsg ya cubre el caso real.
+static int64_t k_recvmmsg(uint64_t fd, uint64_t msgvec, uint64_t vlen,
+                          uint64_t flags, uint64_t timeout_ptr) {
+  (void)timeout_ptr;
+  if (vlen == 0)
+    return 0;
+  if (vlen > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)msgvec, vlen * sizeof(struct k_mmsghdr)))
+    return -EFAULT;
+
+  uint64_t got = 0;
+  for (uint64_t i = 0; i < vlen; i++) {
+    uint64_t addr = msgvec + i * sizeof(struct k_mmsghdr);
+
+    int64_t r = k_recvmsg(fd, addr, flags, 0, 0);
+    if (r < 0) {
+      // EAGAIN tras haber recibido algo → devolvemos lo que llevamos.
+      if (got > 0)
+        return (int64_t)got;
+      return r;
+    }
+    uint32_t mlen = (uint32_t)r;
+    uint64_t off = addr + offsetof(struct k_mmsghdr, msg_len);
+    if (copy_to_user((void *)off, &mlen, sizeof(mlen)) < 0)
+      return got > 0 ? (int64_t)got : -EFAULT;
+    got++;
+    // Con sockets bloqueantes, si el primero devuelve 0 bytes no
+    // seguimos: evita colgar en el siguiente si el peer cerró.
+    if (r == 0)
+      break;
+  }
+  return (int64_t)got;
+}
+
+// rmdir(path): unlinkat(AT_FDCWD, path, AT_REMOVEDIR).
+// Trivial, ya tienes k_unlinkat.
+static int64_t k_rmdir(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return k_unlinkat((uint64_t)AT_FDCWD, path, AT_REMOVEDIR, 0, 0);
+}
+
 static int64_t k_shutdown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                           uint64_t a5) {
   (void)a1;
@@ -6361,6 +6461,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_RECVFROM] = {k_recvfrom, "recvfrom"},
     [SYS_SENDMSG] = {k_sendmsg, "sendmsg"},
     [SYS_RECVMSG] = {k_recvmsg, "recvmsg"},
+    [SYS_RECVMMSG] = {k_recvmmsg, "recvmmsg"},
+    [SYS_SENDMMSG] = {k_sendmmsg, "sendmmsg"},
     [SYS_SHUTDOWN] = {k_shutdown, "shutdown"},
     [SYS_GETSOCKNAME] = {k_getsockname, "getsockname"},
     [SYS_GETPEERNAME] = {k_getpeername, "getpeername"},
@@ -6382,6 +6484,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_PPOLL] = {k_ppoll, "ppoll"},
     [SYS_FCNTL] = {k_fcntl, "fcntl"},
     [SYS_RENAME] = {k_rename, "rename"},
+    [SYS_RMDIR] = {k_rmdir, "rmdir"},
     [SYS_MKDIR] = {k_mkdir, "mkdir"},
     [SYS_UNLINK] = {k_unlink, "unlink"},
     [SYS_READV] = {k_readv, "readv"},
@@ -6591,17 +6694,32 @@ uint64_t syscall_handler_c(registers_t *regs) {
   if (cur)
     cur->syscall_regs = saved;
 
-  // [DIAG PIPE] Log temporal de pipe/pipe2 + cualquier retorno negativo.
-  // Quitar cuando se cierre el bug.
-  if ((num == SYS_PIPE || num == SYS_PIPE2) ||
-      ((int64_t)ret < 0 && (int64_t)ret > -4096)) {
-    if (num == SYS_PIPE || num == SYS_PIPE2) {
-      LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld",
-                (unsigned long)num, (void *)arg1, (unsigned long)arg2,
-                (long)ret);
-    } else {
-      LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
+  // [DIAG] Retornos negativos: solo logueamos los "interesantes".
+  // openat/stat/readlink ENOENT son sondas normales de git/coreutils
+  // (buscan loose objects, dotfiles opcionales, ...). En un clone de
+  // git.git son >100k por segundo, y cada LOG_INFO coge el spinlock
+  // global de klog con IRQs off → la IRQ de la NIC se retrasa 1.5s
+  // → el peer retransmite por RTO → dup-ACK. No es TCP: es el log.
+  int boring_enoent = 0;
+  if ((int64_t)ret == -2 /* ENOENT */) {
+    switch ((int)num) {
+    case SYS_OPENAT:
+    case SYS_OPEN:
+    case SYS_FSTATAT:
+    case SYS_STATX:
+    case SYS_READLINK:
+    case SYS_READLINKAT:
+    case SYS_ACCESS:
+    case SYS_FACCESSAT:
+      boring_enoent = 1;
+      break;
     }
+  }
+  if (num == SYS_PIPE || num == SYS_PIPE2) {
+    LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld", (unsigned long)num,
+              (void *)arg1, (unsigned long)arg2, (long)ret);
+  } else if (!boring_enoent && (int64_t)ret < 0 && (int64_t)ret > -4096) {
+    LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
   }
 
   // Devolvemos regs->rax (que pudo cambiar si k_rt_sigreturn restauró

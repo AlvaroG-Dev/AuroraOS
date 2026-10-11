@@ -295,8 +295,8 @@ static int tcp_send_segment(tcp_conn_t *c, uint16_t flags, uint32_t seq,
   seg[13] = (uint8_t)(flags & 0xFF);
   if (flags & TCP_NS)
     seg[12] |= 0x01;
-  seg[14] = 0x10;
-  seg[15] = 0x00;
+  seg[14] = 0xFF;
+  seg[15] = 0xFF;
 
   if (payload_len)
     memcpy(seg + TCP_HDR_MIN_LEN, payload, payload_len);
@@ -550,8 +550,16 @@ static void tcp_input(skb_t *skb, uint32_t src_ip, uint32_t dst_ip,
         (void)tcp_send_segment(c, TCP_ACK, c->snd_nxt, c->rcv_nxt, NULL, 0);
         wake_up_all(&c->rx_wq);
       } else {
-        LOG_DEBUG("[TCP] seq inesperado: %u, esperado %u", hdr.seq, c->rcv_nxt);
-        // TODO(7g): reensamblado fuera de orden.
+        // [FIX] Segmento duplicado o fuera de orden. Re-ACKear con
+        // nuestro rcv_nxt actual para que el peer sepa dónde estamos.
+        // Sin esto, si un ACK se pierde, el peer retransmite el mismo
+        // seq en bucle (RTO backoff) hasta que alguien lo mata.
+        //
+        // Este es el "duplicate ACK" estándar de RFC 793 §3.9. También
+        // sirve de fast-retransmit si el peer tiene más datos.
+        (void)tcp_send_segment(c, TCP_ACK, c->snd_nxt, c->rcv_nxt, NULL, 0);
+        LOG_DEBUG("[TCP] seq inesperado: %u, esperado %u (dup-ACK)", hdr.seq,
+                  c->rcv_nxt);
       }
     }
 

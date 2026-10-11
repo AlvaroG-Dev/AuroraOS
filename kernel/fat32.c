@@ -3080,6 +3080,25 @@ static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
   n->size = size;
   n->ops = &fat32_node_ops;
   n->fs = &fat32_fs_ops;
+
+  // [FIX] inode único. FAT no tiene campo de inode, lo sintetizamos.
+  // Sin esto todos los nodos reportan st_ino=0 y `rm -rf` (fts) ve el
+  // mismo inodo en toda la cadena de ancestros y aborta con
+  // "Circular directory structure".
+  //
+  // - Ficheros con entry en disco: offset absoluto del dirent dentro
+  //   del FS (dirent_lba*512 + dirent_off) — único por entry.
+  // - Nodos sin entry (raíz, sintéticos): cluster con bit alto puesto
+  //   para no colisionar con offsets absolutos (< 2^63 en cualquier
+  //   FS razonable).
+  if (dirent_lba != 0) {
+    n->inode = dirent_lba * 512ULL + dirent_off;
+  } else if (cluster) {
+    n->inode = 0x8000000000000000ULL | cluster;
+  } else {
+    n->inode = 1;
+  }
+
   n->priv = np;
   n->mtime_sec = (int64_t)mtime_sec;
 

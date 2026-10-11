@@ -88,7 +88,7 @@
 // ---------------------------------------------------------------------------
 // Descriptores legacy
 // ---------------------------------------------------------------------------
-#define DESC_COUNT 32
+#define DESC_COUNT 256
 #define BUF_SIZE 2048
 
 typedef struct __attribute__((packed)) {
@@ -135,6 +135,7 @@ static e1000e_tx_desc_t *g_tx_ring;
 static uint32_t g_rx_tail; // próximo descriptor a procesar
 static uint32_t g_tx_head; // próximo descriptor a usar
 static spinlock_t g_lock;
+static volatile int g_rx_poll_active;
 static int g_initialized;
 static int g_started;
 static int g_use_msi;
@@ -326,6 +327,12 @@ void e1000e_poll(void) {
   if (!g_initialized)
     return;
 
+  // El hilo RX y el MSI pueden entrar mientras netif_rx procesa un paquete
+  // con g_lock liberado. Solo un consumidor puede avanzar el ring y despachar
+  // paquetes, para no duplicar descriptors ni entregar TCP fuera de orden.
+  if (__atomic_exchange_n(&g_rx_poll_active, 1, __ATOMIC_ACQUIRE))
+    return;
+
   unsigned long flags = spin_lock_irqsave(&g_lock);
   int budget = DESC_COUNT;
   while (budget-- > 0) {
@@ -371,6 +378,7 @@ void e1000e_poll(void) {
     e1000_flush();
   }
   spin_unlock_irqrestore(&g_lock, flags);
+  __atomic_store_n(&g_rx_poll_active, 0, __ATOMIC_RELEASE);
 }
 
 // ---------------------------------------------------------------------------
@@ -389,9 +397,9 @@ static void e1000e_rx_thread(void) {
   wait_queue_t dummy_wq;
   wait_queue_init(&dummy_wq);
 
-  // Si MSI está activo, el kthread solo es un "safety net" a 2 Hz.
-  // Si no, es el camino principal a 1 kHz (equivalente a polling a 1 ms).
-  uint64_t interval = g_use_msi ? 500 : 5;
+  // MSI es el camino rápido; este polling frecuente recupera paquetes si se
+  // pierde una notificación o coincide con un poll ya activo.
+  const uint64_t interval = 5;
 
   while (1) {
     e1000e_poll();
@@ -432,6 +440,7 @@ int e1000e_init(void) {
     return 0;
 
   spin_init(&g_lock);
+  __atomic_store_n(&g_rx_poll_active, 0, __ATOMIC_RELAXED);
 
   // 1) Localizar la NIC por vendor/device.
   int found = 0;

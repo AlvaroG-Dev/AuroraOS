@@ -2294,7 +2294,7 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
 
   vfs_node_t *node = vfs_lookup(path);
   if (!node) {
-    LOG_INFO("[VFS-OPEN-FAIL] lookup('%s')=NULL", path);
+    LOG_TRACE("[VFS-OPEN-FAIL] lookup('%s')=NULL", path);
     return -ENOENT;
   }
 

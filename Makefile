@@ -4,7 +4,8 @@
         run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso \
         run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci \
-        run-smp-kvm-ahci-3disk python-stdlib
+        run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap \
+        tap-setup tap-teardown python-stdlib
 
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
@@ -47,8 +48,6 @@ user-musl:
 
 # ---------------------------------------------------------------------------
 # ELF malformado para probar p_offset + p_filesz fuera del archivo.
-#
-# Parte de filetest (que user/Makefile ya deja en sysroot/usr/bin/).
 # ---------------------------------------------------------------------------
 elf_malformed: user
 	@if [ -f sysroot/usr/bin/filetest ]; then \
@@ -61,19 +60,6 @@ elf_malformed: user
 # ---------------------------------------------------------------------------
 # Python stdlib: copia el stdlib del host a sysroot/usr/lib/python3.X/ y
 # precompila .py → .pyc.
-#
-# - rsync -a copia solo lo que falta.
-# - compileall sin -f salta los .pyc al día (si le pones -f recompila
-#   siempre y tarda 10-15 s por cada make image).
-#
-# Con el stdlib copiado, python3 arranca en ~200 ms en lugar de ~2 s:
-# no compila bytecode en runtime, y no intenta escribir __pycache__ en
-# el rootfs RO (que fallaba con EROFS y ensuciaba el serial con
-# VFS-OPEN-FAIL en cascada).
-#
-# Este target es "siempre corre" (no tiene output file). Si todo está
-# al día, tarda ~100 ms y el tar se regenera igualmente. Si no, copia
-# y compila lo que falte.
 # ---------------------------------------------------------------------------
 python-stdlib:
 	@if [ -x scripts/fetch-python-stdlib.sh ]; then \
@@ -98,32 +84,10 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	          sysroot/usr/share sysroot/usr/games \
 	          sysroot/data sysroot/root
 
-# ---------------------------------------------------------------------------
-# /etc, /tmp, /var, /run son tmpfs en runtime (ver kernel/tmpfs.c).
-# El tarfs solo aporta /etc/ld.so.cache (immutable, generado por
-# ldconfig). tmpfs_init() lo lee de tarfs antes de shadow-ear /etc
-# con el tmpfs y lo reescribe dentro.
-#
-# No creamos /tmp, /var ni /run en el tar: los mounts viven en la
-# tabla de mounts y no necesitan entry previa en el FS subyacente.
-# ---------------------------------------------------------------------------
 	@rm -rf sysroot/tmp sysroot/var sysroot/run sysroot/data/tmp
 
 # ---------------------------------------------------------------------------
 # Ficheros estaticos de /etc.
-#
-# Se copian del host en build time y se dejan en tarfs. tmpfs_init()
-# los lee de tarfs (via vfs_read_kernel_file, mismo patron que
-# ld.so.cache) y los reescribe dentro del tmpfs antes de ceder el
-# control a userland. Sin esto, quedarian invisibles porque /etc esta
-# shadowed por el tmpfs.
-#
-# Python (locale, ctypes), bash (inputrc, bash.bashrc) y glibc
-# (nsswitch.conf) los consultan al arrancar. Tenerlos reduce el ruido
-# de VFS-OPEN-FAIL en el serial.
-#
-# Si el host no los tiene (build muy minimal), se generan con
-# contenido minimo razonable.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando /etc estaticos..."
 	@mkdir -p sysroot/etc
@@ -155,20 +119,6 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 
 # ---------------------------------------------------------------------------
 # Bundle de CAs para TLS (openssl/curl/gnutls).
-#
-# curl https:// necesita /etc/ssl/certs/ca-certificates.crt. Sin él
-# aborta con "curl: (77) error setting certificate file" tras emitir
-# el Client Hello (el handshake TCP ya está hecho). Es puramente
-# userland, no es un bug del stack de red.
-#
-# Distintas distros lo dejan en sitios distintos:
-#   Debian/Ubuntu/Alpine/Arch: /etc/ssl/certs/ca-certificates.crt
-#   Fedora/RHEL:               /etc/pki/tls/certs/ca-bundle.crt
-#   openSUSE:                  /etc/ssl/ca-bundle.pem
-#
-# /etc es tmpfs en runtime: tmpfs_init() lee este fichero del tarfs y
-# lo reescribe dentro del tmpfs (ver kernel/tmpfs.c, seed de
-# /etc/ssl/certs/ca-certificates.crt).
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando bundle de CAs para TLS..."
 	@mkdir -p sysroot/etc/ssl/certs
@@ -248,16 +198,6 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 
 # ---------------------------------------------------------------------------
 # 4b. NSS modules de glibc.
-#
-# glibc carga estos .so con dlopen() en runtime — ldd NO los ve, así
-# que fetch-bin.sh no los arrastra. Sin ellos:
-#   - libnss_dns.so.2   → getaddrinfo() falla en silencio, curl/wget
-#                          se quedan colgados sin mandar la query UDP.
-#   - libnss_files.so.2 → getpwnam/getgrnam/... sobre /etc/passwd, /etc/hosts.
-#   - libnss_compat.so.2 → compat legacy (NIS).
-#
-# Los copiamos del host (misma versión de glibc que libc.so.6).
-# Si el host no los tiene, se salta silenciosamente.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando NSS modules de glibc..."
 	@mkdir -p sysroot/lib/x86_64-linux-gnu sysroot/usr/lib/x86_64-linux-gnu
@@ -271,7 +211,28 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 			fi; \
 		done; \
 	done
-	
+
+# ---------------------------------------------------------------------------
+# 4c. libgcc_s.so.1: la necesita glibc para pthread_exit (unwinding de la
+# pila del thread). Sin ella, cualquier thread que llame a pthread_exit
+# aborta con "libgcc_s.so.1 must be installed for pthread_exit to work" y
+# el proceso muere con SIGABRT (code 134). git la usa: crea un thread
+# sideband-demuxer durante el clone y cuando sale llama a pthread_exit.
+#
+# Es la misma versión que libc.so.6 (mismo toolchain del host).
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Copiando libgcc_s.so.1..."
+	@for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do \
+		if [ -e "$$d/libgcc_s.so.1" ]; then \
+			cp -Lf "$$d/libgcc_s.so.1" sysroot/lib/x86_64-linux-gnu/; \
+			mkdir -p sysroot/lib64 sysroot/usr/lib/x86_64-linux-gnu; \
+			cp -Lf "$$d/libgcc_s.so.1" sysroot/lib64/ 2>/dev/null || true; \
+			cp -Lf "$$d/libgcc_s.so.1" sysroot/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
+			echo "[Makefile]   libgcc_s: $$d"; \
+			break; \
+		fi; \
+	done
+
 # ---------------------------------------------------------------------------
 # 5. precompiled/ — binarios de otros OS
 # ---------------------------------------------------------------------------
@@ -284,7 +245,6 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 
 # ---------------------------------------------------------------------------
 # /bin/sh: los programas de Ubuntu hacen execve("/bin/sh") en muchos sitios.
-# Sin usrmerge, /bin es un directorio real. Ponemos dash ahí.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando /bin/sh (dash)..."
 	@if [ -f sysroot/usr/bin/bash ]; then \
@@ -296,14 +256,13 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 
 # ---------------------------------------------------------------------------
 # [bash] /etc/passwd, /etc/group, /etc/profile ahora los crea
-# tmpfs_init() en runtime. Solo dejamos /root/.bashrc y
-# /root/.profile porque /root NO es tmpfs: vive en tarfs.
+# tmpfs_init() en runtime.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Creando .bashrc/.profile de root..."
 	@mkdir -p sysroot/root
 	@[ -f sysroot/root/.bashrc ] || printf '# ~/.bashrc (empty)\n' > sysroot/root/.bashrc
 	@[ -f sysroot/root/.profile ] || printf '# ~/.profile (empty)\n' > sysroot/root/.profile
-	
+
 # ---------------------------------------------------------------------------
 # 6. /root/hello.c para tcc -run
 # ---------------------------------------------------------------------------
@@ -312,21 +271,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# /etc/ld.so.cache: glibc's dynamic loader lo lee al arrancar y resuelve
-# cada .so con un solo open(), en vez de probar glibc-hwcaps/v3, /v2,
-# base, usr/lib, ... por cada lib. En el guest elimina ~50 opens
-# fallidos por exec (visible en el serial como OPEN-FAIL en cascada).
-# Nota: /etc es tmpfs en runtime, pero el ld.so.cache se genera AQUI en
-# build time y se mete en el tar. tmpfs_init() lo lee de tarfs y lo
-# reescribe dentro del tmpfs antes de ceder el control a userland.
-#
-# `ldconfig -r sysroot` hace chroot lógico a sysroot y escribe
-# sysroot/etc/ld.so.cache con paths relativos a ese root (p. ej.
-# "/lib/x86_64-linux-gnu/libc.so.6"), que es justo lo que el guest
-# espera al abrirlo desde "/".
-#
-# Si ldconfig no está disponible en el host, se salta silenciosamente:
-# glibc hará probing como hasta ahora (más lento, mismos resultados).
+# /etc/ld.so.cache
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Generando /etc/ld.so.cache..."
 	@mkdir -p sysroot/etc/ld.so.conf.d
@@ -354,8 +299,6 @@ image: bootloader kernel user
 	cp kernel/kernel.elf esp/
 	cp bootloader/aurora.conf esp/etc/aurora.conf
 
-# Solo creamos aurora.img si no existe. Si ya existe, la reutilizamos
-# tal cual: los ficheros del usuario en /data sobreviven a cada build.
 	@if [ ! -f aurora.img ]; then \
 		echo "[Makefile] Creando aurora.img (primera vez, 256 MB)..."; \
 		dd if=/dev/zero of=aurora.img bs=1M count=256 status=none; \
@@ -364,9 +307,6 @@ image: bootloader kernel user
 		echo "[Makefile] Reutilizando aurora.img existente (persistente)"; \
 	fi
 
-# -o = sobrescribe sin preguntar
-# -s = copia recursiva (necesario para EFI/ y etc/)
-# Solo actualiza estos paths. Todo lo demás en el FS queda intacto.
 	mcopy -i aurora.img -o -s esp/EFI ::
 	mcopy -i aurora.img -o esp/kernel.elf ::
 	mcopy -i aurora.img -o -s esp/etc ::
@@ -413,6 +353,26 @@ QEMU_FLAGS_Q35_AHCI = \
 	-device ide-hd,drive=disk0,bus=ahci.0
 
 # ---------------------------------------------------------------------------
+# Networking de QEMU.
+#
+# Por defecto usamos slirp (user-mode): no requiere privilegios, funciona
+# out-of-the-box, pero tiene un techo de ~300-500 KB/s por la granularidad
+# del timer interno de QEMU (4 ms por paquete).
+#
+# Con TAP hablamos TCP/IP directo con la red del host y vemos decenas de
+# MB/s. Requiere configurar la interfaz tap0 en el host (ver `make tap-setup`).
+#
+# El driver e1000e de Aurora tiene hardcodeado 10.0.2.15/24 gw=10.0.2.2
+# (los defaults de slirp), así que reutilizamos esa misma subred en tap0.
+# No colisiona mientras no corras otro QEMU con slirp a la vez en el host.
+# ---------------------------------------------------------------------------
+QEMU_NET_SLIRP = -nic user,model=e1000e
+QEMU_NET_TAP   = -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
+                 -device e1000e,netdev=net0
+
+HOST_IFACE ?= eth0
+
+# ---------------------------------------------------------------------------
 # TCG
 # ---------------------------------------------------------------------------
 run: iso
@@ -420,6 +380,7 @@ run: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_STORAGE_PC) \
+		$(QEMU_NET_SLIRP) \
 		-cpu max \
 		-serial stdio
 
@@ -428,6 +389,7 @@ run-debug: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_STORAGE_PC) \
+		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_DEBUG) \
 		-cpu max \
 		-serial file:serial.log
@@ -437,6 +399,7 @@ run-smp: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_STORAGE_PC) \
+		$(QEMU_NET_SLIRP) \
 		-cpu max \
 		-smp 4 \
 		-serial stdio
@@ -446,6 +409,7 @@ run-smp-debug: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_STORAGE_PC) \
+		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_DEBUG) \
 		-cpu max \
 		-smp 4 \
@@ -465,6 +429,7 @@ run-smp-kvm: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_STORAGE_PC) \
+		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_KVM) \
 		-smp 8 \
 		-serial stdio
@@ -474,6 +439,7 @@ run-smp-kvm-debug: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_STORAGE_PC) \
+		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
 		-smp 8 \
@@ -492,6 +458,7 @@ run-smp-kvm-ahci: iso tests/test_disk.img
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_STORAGE_Q35) \
+		$(QEMU_NET_SLIRP) \
 		-smp 4 \
 		-serial stdio
 
@@ -503,6 +470,7 @@ run-smp-kvm-ahci-debug: iso tests/test_disk.img
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
 		$(QEMU_STORAGE_Q35) \
+		$(QEMU_NET_SLIRP) \
 		-smp 4 \
 		-serial file:serial.log
 	@echo ""
@@ -519,6 +487,7 @@ run-kvm-ahci: iso tests/test_disk.img
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_STORAGE_Q35) \
+		$(QEMU_NET_SLIRP) \
 		-serial stdio
 
 run-smp-kvm-ahci-3disk: iso tests/test_disk.img tests/extra_disk.img
@@ -528,10 +497,63 @@ run-smp-kvm-ahci-3disk: iso tests/test_disk.img tests/extra_disk.img
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_STORAGE_Q35) \
+		$(QEMU_NET_SLIRP) \
 		-drive if=none,id=disk2,format=raw,file=tests/extra_disk.img \
 		-device ide-hd,drive=disk2,bus=ide.3 \
 		-smp 4 \
 		-serial stdio
+
+# ---------------------------------------------------------------------------
+# run-smp-kvm-ahci-tap: igual que run-smp-kvm-ahci pero con red TAP en vez
+# de slirp. Requiere `make tap-setup` ejecutado antes (una vez por sesión).
+# ---------------------------------------------------------------------------
+run-smp-kvm-ahci-tap: iso tests/test_disk.img
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_STORAGE_Q35) \
+		$(QEMU_NET_TAP) \
+		-smp 4 \
+		-serial stdio
+
+# ---------------------------------------------------------------------------
+# tap-setup / tap-teardown.
+#
+# Configura (o borra) la interfaz tap0 del host. Requiere sudo. Sobrevive
+# a reinicios de QEMU, hay que rehacerlo tras reboot del host.
+#
+# HOST_IFACE debe ser tu interfaz de red real (la que tiene el default
+# route). Descúbrela con: ip route | grep default
+#
+#   make tap-setup HOST_IFACE=wlan0
+#   make run-smp-kvm-ahci-tap
+#
+# Cuando termines:
+#   make tap-teardown HOST_IFACE=wlan0
+# ---------------------------------------------------------------------------
+tap-setup:
+	@echo "[tap] creando tap0..."
+	-sudo ip tuntap add dev tap0 mode tap user $$(id -u -n)
+	sudo ip link set tap0 up
+	sudo ip addr add 10.0.2.2/24 dev tap0 || true
+	sudo sysctl -w net.ipv4.ip_forward=1
+	sudo iptables -t nat -C POSTROUTING -s 10.0.2.0/24 -o $(HOST_IFACE) -j MASQUERADE 2>/dev/null || \
+		sudo iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -o $(HOST_IFACE) -j MASQUERADE
+	sudo iptables -C FORWARD -i tap0 -o $(HOST_IFACE) -j ACCEPT 2>/dev/null || \
+		sudo iptables -A FORWARD -i tap0 -o $(HOST_IFACE) -j ACCEPT
+	sudo iptables -C FORWARD -i $(HOST_IFACE) -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+		sudo iptables -A FORWARD -i $(HOST_IFACE) -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+	@echo "[tap] listo. Ahora: make run-smp-kvm-ahci-tap"
+
+tap-teardown:
+	-sudo iptables -t nat -D POSTROUTING -s 10.0.2.0/24 -o $(HOST_IFACE) -j MASQUERADE
+	-sudo iptables -D FORWARD -i tap0 -o $(HOST_IFACE) -j ACCEPT
+	-sudo iptables -D FORWARD -i $(HOST_IFACE) -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+	-sudo ip link set tap0 down
+	-sudo ip tuntap del dev tap0 mode tap
+	@echo "[tap] tap0 eliminado."
 
 # ---------------------------------------------------------------------------
 # ISO
@@ -555,6 +577,7 @@ run-iso: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
 		-smp 4 \
 		-cdrom aurora.iso \
 		-serial stdio

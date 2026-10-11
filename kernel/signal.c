@@ -229,9 +229,31 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
       proc->sigaltstack_size >= SF_SIZE) {
     sp_base = proc->sigaltstack_sp + proc->sigaltstack_size;
     on_altstack = 1;
+  } else {
+    // [FIX] Reservar 128 B de redzone. La ABI x86_64 permite al código
+    // interrumpido usar [rsp-128, rsp) como scratch sin ajustar RSP
+    // (funciones hoja). Si construimos el sigframe justo debajo de RSP,
+    // sobrescribimos ese scratch y al reanudar el código se encuentra
+    // datos basura → #GP o corrupción silenciosa.
+    //
+    // Linux hace lo mismo en get_sigframe(): sp -= 128 antes de alinear.
+    // Solo aplica al stack del usuario; la altstack la controlamos
+    // nosotros y no tiene redzone que preservar.
+    sp_base -= 128;
   }
 
-  uint64_t frame_va = (sp_base - SF_SIZE) & ~0xFULL;
+  // [FIX] Alineación de handler según SysV x86_64 ABI 3.2.2:
+  // la pila debe estar a rsp%16==8 al entrar a una función (porque un
+  // `call` normal empuja 8 bytes sobre una pila 16-alineada). El kernel
+  // emula ese call poniendo pretcode en [frame_va] y rip=handler.
+  // Si frame_va es 16-alineado, el handler entra con rsp%16==0 y el
+  // primer movaps [rsp+N] que emita el compilador dispara #GP(0).
+  //
+  // Restamos 8 al frame_va para que el handler vea rsp%16==8.
+  // k_rt_sigreturn lee mc = rsp + 0x28; al haber bajado el frame 8 bytes,
+  // rsp tras el `ret` del handler vale frame_va+8, y mc = frame_va+0x30
+  // = SF_UC_MCONTEXT, consistente con la nueva base.
+  uint64_t frame_va = ((sp_base - SF_SIZE) & ~0xFULL) - 8;
   uint64_t old_mask = proc->blocked_signals;
 
   if (build_frame(frame_va, sig, act, regs, old_mask) < 0) {

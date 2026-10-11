@@ -54,10 +54,13 @@ static int sk_poll_op(vfs_node_t *node, short events) {
   if (!s)
     return 0;
   int rev = 0;
-  if ((events & 1) && socket_is_readable(s))
+  int rd = socket_is_readable(s);
+  if ((events & 1) && rd)
     rev |= 1;
   if (events & 4) // POLLOUT
     rev |= 4;
+  LOG_INFO("[SK-POLL] events=0x%x rev=0x%x readable=%d type=%d",
+           (unsigned)events, (unsigned)rev, rd, socket_type(s));
   return rev;
 }
 

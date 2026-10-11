@@ -83,6 +83,7 @@
 #define SYS_FCHDIR 81
 #define SYS_RENAME 82
 #define SYS_MKDIR 83
+#define SYS_RMDIR 84
 #define SYS_LINK 86
 #define SYS_UNLINK 87
 #define SYS_SYMLINK 88
@@ -197,7 +198,9 @@
 #define SYS_EPOLL_CREATE1 291
 #define SYS_DUP3 292
 #define SYS_PIPE2 293
+#define SYS_RECVMMSG 299
 #define SYS_PRLIMIT64 302
+#define SYS_SENDMMSG 307
 #define SYS_GETCPU 309
 #define SYS_GETRANDOM 318
 #define SYS_MEMFD_CREATE 319
