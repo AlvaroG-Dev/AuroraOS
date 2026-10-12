@@ -1,8 +1,11 @@
 // kernel/net/netif.h
 //
-// Interfaz de red. Cada driver (loopback, e1000, ...) registra una
+// Interfaz de red. Cada driver (loopback, e1000e, ...) registra una
 // netif_t con un conjunto de ops. netif_tx() la usa para enviar;
 // netif_rx() procesa paquetes recibidos.
+//
+// El driver NO configura la IP. El userland lo hace vía ioctls
+// SIOCSIFADDR / SIOCSIFNETMASK que llegan a netif_set_addr().
 
 #ifndef KERNEL_NET_NETIF_H
 #define KERNEL_NET_NETIF_H
@@ -14,9 +17,6 @@
 typedef struct netif netif_t;
 
 typedef struct netif_ops {
-  // Transmitir un skb (con frame Ethernet completo). El driver
-  // consume el skb en éxito (llama a skb_free internamente o lo
-  // reutiliza). En error, el skb lo libera netif_tx.
   int (*transmit)(netif_t *netif, skb_t *skb);
   int (*open)(netif_t *netif);
   int (*close)(netif_t *netif);
@@ -37,10 +37,15 @@ struct netif {
   uint64_t rx_bytes, tx_bytes;
   uint64_t rx_errors, tx_errors, rx_dropped;
 
+  // [CONFIG] Estado de configuración. Lo consulta /proc/net/dev e
+  // ifconfig vía SIOCGIFFLAGS.
+  uint8_t is_up;       // IFF_UP
+  uint8_t is_loopback; // IFF_LOOPBACK
+  uint16_t _pad_flags;
+
   netif_t *next;
 };
 
-// Handler de recepción por protocolo (ethertype).
 typedef void (*netif_rx_handler_t)(netif_t *netif, skb_t *skb);
 
 void net_init(void);
@@ -51,6 +56,19 @@ void netif_unregister(netif_t *netif);
 netif_t *netif_lookup(const char *name);
 netif_t *netif_lookup_by_ip(uint32_t ip);
 netif_t *netif_first(void);
+
+// [CONFIG] Iteración por índice, para SIOCGIFCONF.
+int netif_count(void);
+netif_t *netif_get_by_index(int idx);
+
+// [CONFIG] Configura IP/netmask/gateway. Host order. Si netmask es 0,
+// se calcula a partir de la clase (fallback: /24).
+void netif_set_addr(netif_t *n, uint32_t ip, uint32_t netmask,
+                    uint32_t gateway);
+
+// [CONFIG] Arriba/abajo. Llama a ops->open/close.
+void netif_set_up(netif_t *n, int up);
+int netif_is_up(const netif_t *n);
 
 // Registra un handler para un ethertype. Máximo 8. Reemplaza si ya
 // existe uno para ese ethertype.
@@ -63,8 +81,6 @@ int netif_tx(netif_t *netif, skb_t *skb);
 
 // Punto de entrada de paquetes recibidos. Lo llama el driver (o
 // loopback) desde IRQ o desde el path de envío del loopback.
-// Despacha por ethertype al handler registrado. Si no hay handler,
-// libera el skb.
 void netif_rx(skb_t *skb);
 
 #endif

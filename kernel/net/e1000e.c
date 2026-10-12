@@ -583,10 +583,11 @@ int e1000e_init(void) {
   g_nic.name[3] = '0';
   g_nic.name[4] = '\0';
   memcpy(g_nic.mac, mac, 6);
-  // Defaults de QEMU user-mode networking.
-  g_nic.ip = 0x0A00020Fu;      // 10.0.2.15
-  g_nic.netmask = 0xFFFFFF00u; // 255.255.255.0
-  g_nic.gateway = 0x0A000202u; // 10.0.2.2
+  // [CONFIG] Sin IP hardcodeada. El userland configura la interfaz vía
+  // ifconfig. netif_register() pone is_up = 1 por defecto.
+  g_nic.ip = 0;
+  g_nic.netmask = 0;
+  g_nic.gateway = 0;
 
   memset(&g_ops, 0, sizeof(g_ops));
   g_ops.transmit = e1000e_transmit;

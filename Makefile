@@ -5,7 +5,7 @@
         run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso \
         run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci \
         run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap \
-        tap-setup tap-teardown python-stdlib
+        tap-setup tap-teardown tap-status python-stdlib
 
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
@@ -384,15 +384,42 @@ QEMU_FLAGS_Q35_AHCI = \
 # Con TAP hablamos TCP/IP directo con la red del host y vemos decenas de
 # MB/s. Requiere configurar la interfaz tap0 en el host (ver `make tap-setup`).
 #
-# El driver e1000e de Aurora tiene hardcodeado 10.0.2.15/24 gw=10.0.2.2
-# (los defaults de slirp), así que reutilizamos esa misma subred en tap0.
-# No colisiona mientras no corras otro QEMU con slirp a la vez en el host.
+# El cliente DHCP del kernel pide IP al dnsmasq que arranca `tap-setup`,
+# así que el guest no tiene IP hardcodeada.
 # ---------------------------------------------------------------------------
 QEMU_NET_SLIRP = -nic user,model=e1000e
 QEMU_NET_TAP   = -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
                  -device e1000e,netdev=net0
 
 HOST_IFACE ?= eth0
+
+# ---------------------------------------------------------------------------
+# Parámetros de la red privada host ↔ guest.
+#
+# tap0 vive en el host con TAP_HOST_IP/24. dnsmasq (unit systemd
+# aurora-dnsmasq) sirve DHCP en tap0 y reparte el rango TAP_DHCP_RANGE.
+# El guest pide IP por DHCP y recibe IP, GW y DNS.
+#
+# El tráfico del guest sale por TAP_HOST_IP → NAT con iptables → HOST_IFACE.
+# ---------------------------------------------------------------------------
+TAP_IFACE      ?= tap0
+TAP_HOST_IP    ?= 10.0.2.1
+TAP_CIDR       ?= 24
+TAP_DHCP_LOW   ?= 10.0.2.100
+TAP_DHCP_HIGH  ?= 10.0.2.200
+TAP_DHCP_LEASE ?= 12h
+TAP_DNS        ?= 1.1.1.1
+
+# Ficheros de configuración del dnsmasq de Aurora. El pidfile y el log
+# los crea root (dnsmasq corre como root). El conf lo lee root.
+TAP_DNSMASQ_CONF ?= /tmp/aurora-dnsmasq.conf
+TAP_DNSMASQ_PID  ?= /tmp/aurora-dnsmasq.pid
+TAP_DNSMASQ_LOG  ?= /tmp/aurora-dnsmasq.log
+TAP_DNSMASQ_LEASES ?= /tmp/aurora-dnsmasq.leases
+TAP_DNSMASQ_UNIT ?= aurora-dnsmasq
+
+# Subred de NAT (derivada de TAP_HOST_IP y TAP_CIDR).
+TAP_SUBNET = $(shell echo $(TAP_HOST_IP) | awk -F. '{print $$1"."$$2"."$$3".0"}')/$(TAP_CIDR)
 
 # ---------------------------------------------------------------------------
 # TCG
@@ -541,41 +568,167 @@ run-smp-kvm-ahci-tap: iso tests/test_disk.img
 		-serial stdio
 
 # ---------------------------------------------------------------------------
-# tap-setup / tap-teardown.
+# tap-setup / tap-teardown / tap-status.
 #
-# Configura (o borra) la interfaz tap0 del host. Requiere sudo. Sobrevive
-# a reinicios de QEMU, hay que rehacerlo tras reboot del host.
+# tap-setup hace:
+#   1. Crea tap0 y le asigna TAP_HOST_IP/24.
+#   2. Habilita IP forwarding.
+#   3. Añade reglas NAT para TAP_SUBNET → HOST_IFACE.
+#   4. Genera TAP_DNSMASQ_CONF y arranca dnsmasq como unit systemd
+#      transitorio (aurora-dnsmasq). Sobrevive a la salida del shell de
+#      make, a la sesión ssh, y a reinicios de QEMU.
 #
-# HOST_IFACE debe ser tu interfaz de red real (la que tiene el default
-# route). Descúbrela con: ip route | grep default
+# El dnsmasq es un proceso separado del dnsmasq del sistema (si lo hay).
+# Usa su propio conf-file, pid-file y lease-file, y solo se bindea a
+# tap0, así que no choca con nada.
 #
+# Requisitos:
+#   - sudo
+#   - systemd + systemd-run
+#   - dnsmasq instalado: sudo apt install dnsmasq
+#   - HOST_IFACE apunta a tu interfaz real: ip route | grep default
+#
+# Ejemplo:
 #   make tap-setup HOST_IFACE=wlan0
 #   make run-smp-kvm-ahci-tap
-#
-# Cuando termines:
-#   make tap-teardown HOST_IFACE=wlan0
+#   ...
+#   make tap-teardown
 # ---------------------------------------------------------------------------
+
 tap-setup:
-	@echo "[tap] creando tap0..."
-	-sudo ip tuntap add dev tap0 mode tap user $$(id -u -n)
-	sudo ip link set tap0 up
-	sudo ip addr add 10.0.2.2/24 dev tap0 || true
-	sudo sysctl -w net.ipv4.ip_forward=1
-	sudo iptables -t nat -C POSTROUTING -s 10.0.2.0/24 -o $(HOST_IFACE) -j MASQUERADE 2>/dev/null || \
-		sudo iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -o $(HOST_IFACE) -j MASQUERADE
-	sudo iptables -C FORWARD -i tap0 -o $(HOST_IFACE) -j ACCEPT 2>/dev/null || \
-		sudo iptables -A FORWARD -i tap0 -o $(HOST_IFACE) -j ACCEPT
-	sudo iptables -C FORWARD -i $(HOST_IFACE) -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-		sudo iptables -A FORWARD -i $(HOST_IFACE) -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-	@echo "[tap] listo. Ahora: make run-smp-kvm-ahci-tap"
+	@echo "[tap] === Configurando red privada $(TAP_SUBNET) en $(TAP_IFACE) ==="
+	@if ! command -v dnsmasq >/dev/null 2>&1; then \
+		echo "[tap] ERROR: dnsmasq no está instalado."; \
+		echo "[tap]        sudo apt install dnsmasq"; \
+		exit 1; \
+	fi
+	@if ! command -v systemd-run >/dev/null 2>&1; then \
+		echo "[tap] ERROR: systemd-run no está disponible."; \
+		echo "[tap]        Este Makefile asume systemd en el host."; \
+		exit 1; \
+	fi
+
+	@# 1) tap0 arriba con IP.
+	-@ip link show $(TAP_IFACE) >/dev/null 2>&1 || \
+		sudo ip tuntap add dev $(TAP_IFACE) mode tap user $$(id -u -n)
+	sudo ip link set $(TAP_IFACE) up
+	sudo ip addr flush dev $(TAP_IFACE) 2>/dev/null || true
+	sudo ip addr add $(TAP_HOST_IP)/$(TAP_CIDR) dev $(TAP_IFACE)
+	@echo "[tap] $(TAP_IFACE) arriba: $(TAP_HOST_IP)/$(TAP_CIDR)"
+
+	@# 2) IP forwarding.
+	sudo sysctl -qw net.ipv4.ip_forward=1
+
+	@# 3) NAT (idempotente).
+	sudo iptables -t nat -C POSTROUTING -s $(TAP_SUBNET) -o $(HOST_IFACE) -j MASQUERADE 2>/dev/null || \
+		sudo iptables -t nat -A POSTROUTING -s $(TAP_SUBNET) -o $(HOST_IFACE) -j MASQUERADE
+	sudo iptables -C FORWARD -i $(TAP_IFACE) -o $(HOST_IFACE) -j ACCEPT 2>/dev/null || \
+		sudo iptables -A FORWARD -i $(TAP_IFACE) -o $(HOST_IFACE) -j ACCEPT
+	sudo iptables -C FORWARD -i $(HOST_IFACE) -o $(TAP_IFACE) -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+		sudo iptables -A FORWARD -i $(HOST_IFACE) -o $(TAP_IFACE) -m state --state RELATED,ESTABLISHED -j ACCEPT
+	@echo "[tap] NAT: $(TAP_SUBNET) → $(HOST_IFACE) (MASQUERADE)"
+
+	@# 4) Generar conf de dnsmasq.
+	@echo "[tap] generando $(TAP_DNSMASQ_CONF)"
+	@printf '%s\n' \
+		"# Generado por make tap-setup. No editar a mano." \
+		"interface=$(TAP_IFACE)" \
+		"bind-interfaces" \
+		"except-interface=lo" \
+		"port=0" \
+		"no-resolv" \
+		"dhcp-range=$(TAP_DHCP_LOW),$(TAP_DHCP_HIGH),$(TAP_DHCP_LEASE)" \
+		"dhcp-option=3,$(TAP_HOST_IP)" \
+		"dhcp-option=6,$(TAP_DNS)" \
+		"dhcp-leasefile=$(TAP_DNSMASQ_LEASES)" \
+		"log-dhcp" \
+		> $(TAP_DNSMASQ_CONF)
+
+	@# 5) Parar instancia previa del unit, si existe.
+	-sudo systemctl stop $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
+	-sudo systemctl reset-failed $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
+	-sudo rm -f $(TAP_DNSMASQ_PID) $(TAP_DNSMASQ_LOG) $(TAP_DNSMASQ_LEASES) 2>/dev/null || true
+
+	@# 6) Arrancar dnsmasq como unit systemd transitorio. Con Type=forking
+	@#    y PIDFile, systemd espera a que dnsmasq escriba su PID. Esto
+	@#    resuelve los problemas de SIGHUP cuando sudo usa use_pty: el
+	@#    proceso queda gestionado por systemd, no por el shell.
+	@echo "[tap] arrancando dnsmasq (unit systemd: $(TAP_DNSMASQ_UNIT))"
+	sudo systemd-run --unit=$(TAP_DNSMASQ_UNIT) \
+		--description="Aurora DHCP/DNS on $(TAP_IFACE)" \
+		--property=Type=forking \
+		--property=PIDFile=$(TAP_DNSMASQ_PID) \
+		--property=Restart=on-failure \
+		/usr/sbin/dnsmasq \
+			--conf-file=$(TAP_DNSMASQ_CONF) \
+			--pid-file=$(TAP_DNSMASQ_PID) \
+			--log-facility=$(TAP_DNSMASQ_LOG)
+	@sleep 1.0
+
+	@# 7) Verificar que systemd lo considera activo.
+	@if ! systemctl is-active --quiet $(TAP_DNSMASQ_UNIT); then \
+		echo "[tap] ERROR: $(TAP_DNSMASQ_UNIT) no está activo"; \
+		sudo journalctl -u $(TAP_DNSMASQ_UNIT) -n 30 --no-pager; \
+		exit 1; \
+	fi
+	@PID=$$(systemctl show -p MainPID --value $(TAP_DNSMASQ_UNIT)); \
+	echo "[tap] dnsmasq arriba: unit=$(TAP_DNSMASQ_UNIT) pid=$$PID"
+
+	@echo "[tap] DHCP: $(TAP_DHCP_LOW) - $(TAP_DHCP_HIGH) (lease $(TAP_DHCP_LEASE))"
+	@echo "[tap] GW:   $(TAP_HOST_IP)"
+	@echo "[tap] DNS:  $(TAP_DNS) (reenviado por el host)"
+	@echo "[tap] listo. Siguiente: make run-smp-kvm-ahci-tap"
+	@echo "[tap] ver estado:  make tap-status"
+	@echo "[tap] parar:       make tap-teardown"
 
 tap-teardown:
-	-sudo iptables -t nat -D POSTROUTING -s 10.0.2.0/24 -o $(HOST_IFACE) -j MASQUERADE
-	-sudo iptables -D FORWARD -i tap0 -o $(HOST_IFACE) -j ACCEPT
-	-sudo iptables -D FORWARD -i $(HOST_IFACE) -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-	-sudo ip link set tap0 down
-	-sudo ip tuntap del dev tap0 mode tap
-	@echo "[tap] tap0 eliminado."
+	@echo "[tap] === Parando red privada ==="
+	@# 1) Parar el unit systemd.
+	@echo "[tap] parando $(TAP_DNSMASQ_UNIT)"
+	-sudo systemctl stop $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
+	-sudo systemctl reset-failed $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
+	-sudo rm -f $(TAP_DNSMASQ_PID) $(TAP_DNSMASQ_LOG) $(TAP_DNSMASQ_CONF) \
+	             $(TAP_DNSMASQ_LEASES) 2>/dev/null || true
+
+	@# 2) iptables.
+	-sudo iptables -t nat -D POSTROUTING -s $(TAP_SUBNET) -o $(HOST_IFACE) -j MASQUERADE 2>/dev/null || true
+	-sudo iptables -D FORWARD -i $(TAP_IFACE) -o $(HOST_IFACE) -j ACCEPT 2>/dev/null || true
+	-sudo iptables -D FORWARD -i $(HOST_IFACE) -o $(TAP_IFACE) -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+
+	@# 3) tap0.
+	-sudo ip link set $(TAP_IFACE) down 2>/dev/null || true
+	-sudo ip tuntap del dev $(TAP_IFACE) mode tap 2>/dev/null || true
+	@echo "[tap] $(TAP_IFACE) eliminado."
+
+# ---------------------------------------------------------------------------
+# tap-status: snapshot del estado de la red privada.
+# ---------------------------------------------------------------------------
+tap-status:
+	@echo "=== $(TAP_IFACE) ==="
+	@ip addr show $(TAP_IFACE) 2>/dev/null || echo "  (no existe. Ejecuta: make tap-setup)"
+	@echo ""
+	@echo "=== dnsmasq (unit systemd $(TAP_DNSMASQ_UNIT)) ==="
+	@if systemctl is-active --quiet $(TAP_DNSMASQ_UNIT) 2>/dev/null; then \
+		PID=$$(systemctl show -p MainPID --value $(TAP_DNSMASQ_UNIT)); \
+		echo "  activo: MainPID=$$PID"; \
+		systemctl status $(TAP_DNSMASQ_UNIT) --no-pager -n 3 2>/dev/null | sed 's/^/    /'; \
+	else \
+		echo "  inactivo"; \
+		echo "  últimas líneas del journal:"; \
+		sudo journalctl -u $(TAP_DNSMASQ_UNIT) -n 10 --no-pager 2>/dev/null | sed 's/^/    /' || true; \
+	fi
+	@echo ""
+	@echo "=== iptables NAT ==="
+	@sudo iptables -t nat -L POSTROUTING -n -v 2>/dev/null | grep -E "$(TAP_SUBNET)|Chain" || echo "  (sin reglas para $(TAP_SUBNET))"
+	@echo ""
+	@echo "=== iptables FORWARD ==="
+	@sudo iptables -L FORWARD -n -v 2>/dev/null | grep "$(TAP_IFACE)" || echo "  (sin reglas para $(TAP_IFACE))"
+	@echo ""
+	@echo "=== leases activos ==="
+	@sudo cat $(TAP_DNSMASQ_LEASES) 2>/dev/null || echo "  (ninguno)"
+	@echo ""
+	@echo "=== últimas líneas del log dnsmasq ==="
+	@sudo tail -20 $(TAP_DNSMASQ_LOG) 2>/dev/null || echo "  (sin log)"
 
 # ---------------------------------------------------------------------------
 # ISO

@@ -19,6 +19,7 @@
 #include "memfd.h"
 #include "net/byteorder.h"
 #include "net/inet_socket.h"
+#include "net/netif.h"
 #include "net/socket.h"
 #include "paging.h"
 #include "pf.h"
@@ -2526,6 +2527,263 @@ static int64_t k_linkat(uint64_t olddfd, uint64_t oldp, uint64_t newdfd,
   return k_link(oldp, newp, 0, 0, 0);
 }
 
+// ---------------------------------------------------------------------------
+// ioctls de interfaz de red. ifconfig los emite sobre un socket AF_INET:
+//   sd = socket(AF_INET, SOCK_DGRAM, 0);
+//   ioctl(sd, SIOCGIFCONF, &ifconf);
+//   ioctl(sd, SIOCGIFADDR, &ifreq);
+//   ioctl(sd, SIOCSIFADDR, &ifreq);
+// ...
+//
+// Interceptamos ANTES del dispatch al nodo VFS: el fd es un socket (no
+// un nodo normal), y sus ioctls no van a la implementación del nodo.
+// ---------------------------------------------------------------------------
+
+// Estructura ifreq (Linux x86_64): 40 bytes.
+//   char ifr_name[16];
+//   union { ... } ifr_ifru;   // 24 bytes
+struct k_ifreq {
+  char ifr_name[16];
+  union {
+    struct {
+      uint32_t addr;
+      char pad[20];
+    } ifr_addr;
+    struct {
+      uint32_t addr;
+      char pad[20];
+    } ifr_netmask;
+    struct {
+      uint32_t addr;
+      char pad[20];
+    } ifr_broadaddr;
+    struct {
+      uint32_t addr;
+      char pad[20];
+    } ifr_dstaddr;
+    struct {
+      uint16_t sa_family;
+      uint8_t hwaddr[14];
+    } ifr_hwaddr;
+    short ifr_flags;
+    int32_t ifr_mtu;
+    int32_t ifr_ifindex;
+    char ifr_data[24];
+  } ifr_ifru;
+};
+_Static_assert(sizeof(struct k_ifreq) == 40, "ifreq != 40 bytes");
+
+// struct ifconf (Linux x86_64): int len; void *buf; (padding)
+struct k_ifconf {
+  int32_t ifc_len;
+  int32_t _pad;
+  void *ifc_buf;
+  char _tail[16];
+};
+
+// Números Linux (linux/sockios.h)
+#define SIOCGIFCONF 0x8912
+#define SIOCGIFFLAGS 0x8913
+#define SIOCSIFFLAGS 0x8914
+#define SIOCGIFADDR 0x8915
+#define SIOCSIFADDR 0x8916
+#define SIOCGIFDSTADDR 0x8917
+#define SIOCGIFBRDADDR 0x8919
+#define SIOCGIFNETMASK 0x891B
+#define SIOCSIFNETMASK 0x891C
+#define SIOCGIFMTU 0x8921
+#define SIOCGIFHWADDR 0x8927
+
+// Flags de ifconfig (linux/if.h)
+#define IFF_UP 0x1
+#define IFF_BROADCAST 0x2
+#define IFF_LOOPBACK 0x8
+#define IFF_RUNNING 0x40
+#define IFF_MULTICAST 0x1000
+
+#define AF_INET_ 2
+
+// Rellena un sockaddr_in (16 bytes) con family=AF_INET y `ip` en
+// NETWORK byte order. sockaddr_in.sin_addr SIEMPRE es big-endian,
+// independientemente del endian del host.
+static void ifreq_fill_sockaddr(uint32_t ip, uint8_t out[16]) {
+  out[0] = AF_INET_; // sa_family (u16 LE en memoria)
+  out[1] = 0;
+  out[2] = 0; // sa_port (u16 BE)
+  out[3] = 0;
+  // sa_addr: BIG-ENDIAN en memoria. El byte más significativo va primero.
+  out[4] = (uint8_t)((ip >> 24) & 0xFF);
+  out[5] = (uint8_t)((ip >> 16) & 0xFF);
+  out[6] = (uint8_t)((ip >> 8) & 0xFF);
+  out[7] = (uint8_t)(ip & 0xFF);
+  for (int i = 8; i < 16; i++)
+    out[i] = 0;
+}
+
+// Lee un sockaddr_in (16 bytes) y devuelve la IP en HOST ORDER.
+// El campo sin_addr está en BIG-ENDIAN; hay que invertirlo al leer.
+static uint32_t sockaddr_to_ip(const uint8_t sa[16]) {
+  return ((uint32_t)sa[4] << 24) | ((uint32_t)sa[5] << 16) |
+         ((uint32_t)sa[6] << 8) | ((uint32_t)sa[7]);
+}
+
+// Extrae ifr_name del ifreq del usuario. Devuelve NULL si vacío.
+static int k_ifreq_read(uint64_t arg, struct k_ifreq *out) {
+  if (!arg || !access_ok((void *)arg, sizeof(*out)))
+    return -EFAULT;
+  if (copy_from_user(out, (void *)arg, sizeof(*out)) < 0)
+    return -EFAULT;
+  out->ifr_name[15] = '\0';
+  return 0;
+}
+
+static int k_ifreq_write(uint64_t arg, const struct k_ifreq *in) {
+  if (!access_ok((void *)arg, sizeof(*in)))
+    return -EFAULT;
+  if (copy_to_user((void *)arg, in, sizeof(*in)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -ENOTTY;
+  socket_t *s = inet_socket_from_fd(proc, (int)fd);
+  if (!s)
+    return -ENOTTY;
+
+  // ---------------------------------------------------------------------
+  // SIOCGIFCONF usa struct ifconf (24 bytes), NO ifreq (40 bytes).
+  // Lo tratamos aparte, ANTES de intentar leer un ifreq.
+  // ---------------------------------------------------------------------
+  if (req == SIOCGIFCONF) {
+    struct k_ifconf ifc;
+    if (!access_ok((void *)arg, sizeof(ifc)))
+      return -EFAULT;
+    if (copy_from_user(&ifc, (void *)arg, sizeof(ifc)) < 0)
+      return -EFAULT;
+    if (ifc.ifc_len < 0)
+      return -EINVAL;
+
+    int total = netif_count();
+
+    // Length probe: ifc_buf == NULL → devolver el tamaño necesario.
+    if (ifc.ifc_buf == NULL) {
+      int need = total * (int)sizeof(struct k_ifreq);
+      if (copy_to_user((void *)arg, &need, 4) < 0)
+        return -EFAULT;
+      return 0;
+    }
+
+    int max_entries = ifc.ifc_len / (int)sizeof(struct k_ifreq);
+    int written = 0;
+    for (int i = 0; i < total && written < max_entries; i++) {
+      netif_t *p = netif_get_by_index(i);
+      if (!p)
+        continue;
+      struct k_ifreq out;
+      memset(&out, 0, sizeof(out));
+      size_t nl = strlen(p->name);
+      if (nl > 15)
+        nl = 15;
+      memcpy(out.ifr_name, p->name, nl);
+      ifreq_fill_sockaddr(p->ip, (uint8_t *)&out.ifr_ifru.ifr_addr.addr);
+      uint64_t dst = (uint64_t)ifc.ifc_buf + (uint64_t)written * sizeof(out);
+      if (copy_to_user((void *)dst, &out, sizeof(out)) < 0)
+        return -EFAULT;
+      written++;
+    }
+    int used = written * (int)sizeof(struct k_ifreq);
+    if (copy_to_user((void *)arg, &used, 4) < 0)
+      return -EFAULT;
+    return 0;
+  }
+
+  // ---------------------------------------------------------------------
+  // Resto de ioctls: SÍ usan struct ifreq (40 bytes).
+  // ---------------------------------------------------------------------
+  struct k_ifreq r;
+  int rc = k_ifreq_read(arg, &r);
+  if (rc != 0)
+    return rc;
+
+  // Si el nombre está vacío, usar el primero. Linux devuelve el nombre
+  // en ifr_name para el caso "sin argumento".
+  netif_t *n = r.ifr_name[0] ? netif_lookup(r.ifr_name) : netif_get_by_index(0);
+  if (!n)
+    return -ENODEV;
+
+  switch (req) {
+  case SIOCGIFADDR:
+    ifreq_fill_sockaddr(n->ip, (uint8_t *)&r.ifr_ifru.ifr_addr.addr);
+    return k_ifreq_write(arg, &r);
+
+  case SIOCSIFADDR: {
+    uint8_t sa[16];
+    if (copy_from_user(sa, (void *)(arg + 16), 16) < 0)
+      return -EFAULT;
+    uint32_t ip = sockaddr_to_ip(sa);
+    netif_set_addr(n, ip, n->netmask, n->gateway);
+    return 0;
+  }
+
+  case SIOCGIFNETMASK:
+    ifreq_fill_sockaddr(n->netmask, (uint8_t *)&r.ifr_ifru.ifr_netmask.addr);
+    return k_ifreq_write(arg, &r);
+
+  case SIOCSIFNETMASK: {
+    uint8_t sa[16];
+    if (copy_from_user(sa, (void *)(arg + 16), 16) < 0)
+      return -EFAULT;
+    uint32_t mask = sockaddr_to_ip(sa);
+    netif_set_addr(n, n->ip, mask, n->gateway);
+    return 0;
+  }
+
+  case SIOCGIFBRDADDR:
+  case SIOCGIFDSTADDR: {
+    uint32_t bc = n->ip | ~n->netmask;
+    ifreq_fill_sockaddr(bc, (uint8_t *)&r.ifr_ifru.ifr_broadaddr.addr);
+    return k_ifreq_write(arg, &r);
+  }
+
+  case SIOCGIFFLAGS: {
+    short flags = 0;
+    if (n->is_up)
+      flags |= IFF_UP | IFF_RUNNING;
+    if (n->is_loopback)
+      flags |= IFF_LOOPBACK;
+    else
+      flags |= IFF_BROADCAST | IFF_MULTICAST;
+    r.ifr_ifru.ifr_flags = flags;
+    return k_ifreq_write(arg, &r);
+  }
+
+  case SIOCSIFFLAGS: {
+    short flags;
+    if (copy_from_user(&flags, (void *)(arg + 16), 2) < 0)
+      return -EFAULT;
+    netif_set_up(n, (flags & IFF_UP) ? 1 : 0);
+    return 0;
+  }
+
+  case SIOCGIFHWADDR: {
+    memset(&r.ifr_ifru, 0, sizeof(r.ifr_ifru));
+    r.ifr_ifru.ifr_hwaddr.sa_family = 1; // ARPHRD_ETHER
+    memcpy(r.ifr_ifru.ifr_hwaddr.hwaddr, n->mac, 6);
+    return k_ifreq_write(arg, &r);
+  }
+
+  case SIOCGIFMTU:
+    r.ifr_ifru.ifr_mtu = 1500;
+    return k_ifreq_write(arg, &r);
+
+  default:
+    return -ENOTTY;
+  }
+}
+
 // ---------- ioctl ----------
 static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
                        uint64_t a5) {
@@ -2537,12 +2795,15 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
   int kfd = (int)fd;
   if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
     return -EBADF;
-  // [ioctl] musl pasa `req` como int (sign-extended en x86_64). Los
-  // ioctls con bit 31 puesto (todos los _IOR/_IOW modernos, p. ej.
-  // TIOCGPTN, TIOCSPTLCK, DRM, V4L2, ...) llegan como
-  // 0xffffffffXXXXXXXX. Truncamos a 32 bits, que es lo que hacen
-  // Linux y cualquier kernel POSIX en el syscall ioctl.
+
   unsigned long kreq = (unsigned long)(uint32_t)req;
+
+  // [NET] Intentar ioctls de interfaz de red. Si no aplica, fallback
+  // al nodo VFS.
+  int64_t net_rc = k_ioctl_netif(fd, kreq, arg);
+  if (net_rc != -ENOTTY)
+    return net_rc;
+
   return vfs_node_ioctl(proc->fds[kfd]->node, kreq, arg);
 }
 

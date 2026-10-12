@@ -23,6 +23,7 @@
 #include "ipi.h"
 #include "klog.h"
 #include "net/arp.h"
+#include "net/dhcp.h"
 #include "net/e1000e.h"
 #include "net/icmp.h"
 #include "net/ip.h"
@@ -297,6 +298,9 @@ static void kmain_task(void) {
   if (e1000e_netif()) {
     LOG_INFO("[INIT] Arrancando kthread RX de e1000e...");
     e1000e_start();
+
+    LOG_INFO("[INIT] Arrancando kthread DHCP...");
+    dhcp_start(e1000e_netif());
 
     LOG_INFO("[INIT] Arrancando kthread de ping (10.0.2.2)...");
     ping_init();

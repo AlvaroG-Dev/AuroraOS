@@ -227,6 +227,19 @@ static int ip_route_lookup(uint32_t dst_ip, struct route_result *out) {
       }
     }
   }
+  // [DHCP] Si dst es broadcast limitado (255.255.255.255) y no hay ruta,
+  // usar cualquier netif que esté up aunque no tenga IP ni gateway.
+  // Necesario para DHCP DISCOVER antes de tener IP (src=0, dst=broadcast).
+  if (!best && dst_ip == IP_ADDR_BROADCAST) {
+    for (netif_t *n = netif_first(); n; n = n->next) {
+      if (n->is_up) {
+        best = n;
+        next_hop = dst_ip;
+        break;
+      }
+    }
+  }
+
   if (!best)
     return -ENETUNREACH;
 

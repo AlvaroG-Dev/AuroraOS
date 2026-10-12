@@ -638,8 +638,8 @@ static void test_tcp_send_simple(void) {
   uint8_t flags = g_tx[0][14 + 20 + 13];
   TEST_ASSERT(flags & 0x08, "sin PSH");
   TEST_ASSERT(flags & 0x10, "sin ACK");
-  uint16_t tx_window = (uint16_t)((g_tx[0][14 + 20 + 14] << 8) |
-                                  g_tx[0][14 + 20 + 15]);
+  uint16_t tx_window =
+      (uint16_t)((g_tx[0][14 + 20 + 14] << 8) | g_tx[0][14 + 20 + 15]);
   TEST_ASSERT_EQ(tx_window, 0xFFFF);
 
   tcp_conn_remove(c);
@@ -750,9 +750,8 @@ static void test_tcp_reassembles_out_of_order(void) {
   tcp_conn_insert(c);
 
   const uint32_t start = c->rcv_nxt;
-  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5,
-                                  c->snd_nxt, TCP_ACK | TCP_PSH, 0x1000,
-                                  "world", 5, 0);
+  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5, c->snd_nxt,
+                                  TCP_ACK | TCP_PSH, 0x1000, "world", 5, 0);
   TEST_ASSERT(later != NULL, "build later segment");
   if (later) {
     later->netif = &g_nif;
@@ -762,14 +761,16 @@ static void test_tcp_reassembles_out_of_order(void) {
   TEST_ASSERT_EQ(c->rx_count, 0);
   TEST_ASSERT_EQ(c->ooo_count, 1);
   TEST_ASSERT_EQ(c->rx_buffered_bytes, 5);
-  uint16_t window =
-      (uint16_t)((g_tx[g_tx_count - 1][14 + 20 + 14] << 8) |
-                 g_tx[g_tx_count - 1][14 + 20 + 15]);
-  TEST_ASSERT_EQ(window, 65530);
+  uint16_t window = (uint16_t)((g_tx[g_tx_count - 1][14 + 20 + 14] << 8) |
+                               g_tx[g_tx_count - 1][14 + 20 + 15]);
+  // [AUTOTUNE] Con buffer de 4 MB y sin WSCALE, la wire window está
+  // capada a 65535 (uint16_t). El test original esperaba 65530 porque
+  // asumía TCP_RX_BUFFER_BYTES = 65535. Lo que importa verificar aquí
+  // es que rcv_nxt NO avanzó (arriba) y que rx_buffered_bytes sí (5).
+  TEST_ASSERT_EQ(window, 65535);
 
-  skb_t *first =
-      build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
-                       TCP_ACK | TCP_PSH, 0x1000, "hello", 5, 0);
+  skb_t *first = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
+                                  TCP_ACK | TCP_PSH, 0x1000, "hello", 5, 0);
   TEST_ASSERT(first != NULL, "build first segment");
   if (first) {
     first->netif = &g_nif;
@@ -805,9 +806,8 @@ static void test_tcp_reassembles_overlapping_retransmission(void) {
   tcp_conn_insert(c);
 
   const uint32_t start = c->rcv_nxt;
-  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5,
-                                  c->snd_nxt, TCP_ACK | TCP_PSH, 0x1000,
-                                  "world", 5, 0);
+  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5, c->snd_nxt,
+                                  TCP_ACK | TCP_PSH, 0x1000, "world", 5, 0);
   TEST_ASSERT(later != NULL, "build later segment");
   if (later) {
     later->netif = &g_nif;
@@ -852,18 +852,16 @@ static void test_tcp_reassembles_partially_overlapping_segment(void) {
   tcp_conn_insert(c);
 
   const uint32_t start = c->rcv_nxt;
-  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5,
-                                  c->snd_nxt, TCP_ACK | TCP_PSH, 0x1000,
-                                  "world", 5, 0);
+  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5, c->snd_nxt,
+                                  TCP_ACK | TCP_PSH, 0x1000, "world", 5, 0);
   TEST_ASSERT(later != NULL, "build later segment");
   if (later) {
     later->netif = &g_nif;
     netif_rx(later);
   }
 
-  skb_t *first =
-      build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
-                       TCP_ACK | TCP_PSH, 0x1000, "hellowor", 8, 0);
+  skb_t *first = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
+                                  TCP_ACK | TCP_PSH, 0x1000, "hellowor", 8, 0);
   TEST_ASSERT(first != NULL, "build partially overlapping segment");
   if (first) {
     first->netif = &g_nif;

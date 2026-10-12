@@ -156,7 +156,18 @@ int udp_output(skb_t *skb, uint32_t src_ip, uint32_t dst_ip, uint16_t src_port,
                uint16_t dst_port) {
   if (!skb)
     return -EINVAL;
-  if (src_ip == 0 || src_port == 0) {
+  if (src_port == 0) {
+    skb_free(skb);
+    return -EINVAL;
+  }
+
+  // [DHCP] Antes de tener IP, el cliente DHCP envía con src=0.0.0.0.
+  // RFC 1542 §4.1.1: el checksum UDP MUST ser 0 en ese caso. Solo
+  // permitimos src_ip==0 para el flujo específico del cliente DHCP
+  // (src_port=68, dst_port=67, dst=broadcast).
+  int dhcp_style = (src_ip == 0 && src_port == 68 && dst_port == 67 &&
+                    dst_ip == 0xFFFFFFFFu);
+  if (src_ip == 0 && !dhcp_style) {
     skb_free(skb);
     return -EINVAL;
   }
@@ -177,15 +188,19 @@ int udp_output(skb_t *skb, uint32_t src_ip, uint32_t dst_ip, uint16_t src_port,
   wr16be(h + 0, src_port);
   wr16be(h + 2, dst_port);
   wr16be(h + 4, udp_len);
-  h[6] = 0;
-  h[7] = 0; // csum temporal
 
-  uint16_t csum = inet_csum_pseudo(src_ip, dst_ip, IP_PROTO_UDP, h, udp_len);
-  // RFC 768: si el checksum calculado es 0, transmitir 0xFFFF.
-  // El 0 en el wire significa "no computado" y no lo queremos.
-  if (csum == 0)
-    csum = 0xFFFF;
-  wr16be(h + 6, csum);
+  if (dhcp_style) {
+    // RFC 1542: sin checksum.
+    h[6] = 0;
+    h[7] = 0;
+  } else {
+    h[6] = 0;
+    h[7] = 0;
+    uint16_t csum = inet_csum_pseudo(src_ip, dst_ip, IP_PROTO_UDP, h, udp_len);
+    if (csum == 0)
+      csum = 0xFFFF;
+    wr16be(h + 6, csum);
+  }
 
   return ip_output(skb, src_ip, dst_ip, IP_PROTO_UDP);
 }

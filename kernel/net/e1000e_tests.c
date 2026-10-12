@@ -46,9 +46,12 @@ static void test_e1000e_registered(void) {
     return;
   }
   TEST_ASSERT(n == netif_lookup("eth0"), "netif_lookup('eth0') != e1000e");
-  TEST_ASSERT(n->ip == 0x0A00020Fu, "IP != 10.0.2.15 (0x%08x)", n->ip);
-  TEST_ASSERT(n->netmask == 0xFFFFFF00u, "netmask != /24");
-  TEST_ASSERT(n->gateway == 0x0A000202u, "gateway != 10.0.2.2");
+  // [CONFIG] El driver ya no asigna IP: la configura el userland vía
+  // ifconfig. Sin configurar, ip/netmask/gateway valen 0.
+  TEST_ASSERT(n->ip == 0, "IP esperada 0 (sin configurar), es 0x%08x", n->ip);
+  TEST_ASSERT(n->netmask == 0, "netmask esperada 0 (sin configurar)");
+  TEST_ASSERT(n->gateway == 0, "gateway esperado 0 (sin configurar)");
+  TEST_ASSERT(n->is_up == 1, "eth0 debe estar up por defecto");
 }
 REGISTER_TEST("net/e1000e: netif registrada", test_e1000e_registered);
 

@@ -79,6 +79,24 @@ static void ping_thread(void) {
     for (int i = 0; i < 16; i++)
       payload[i] = (uint8_t)(seq + i);
 
+    // [CONFIG] El driver ya no asigna IP. Si eth0 no está configurado,
+    // no podemos enrutar. Esperamos a que el userland lo haga sin
+    // spamear -ENETUNREACH.
+    netif_t *n = e1000e_netif();
+    if (!n || n->ip == 0 || n->gateway == 0) {
+      static int warned = 0;
+      if (!warned) {
+        warned = 1;
+        LOG_INFO("[PING] esperando IP en eth0. Configura con: "
+                 "ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up");
+      }
+      unsigned long f = spin_lock_irqsave(&g_lock);
+      g_inflight = 0;
+      spin_unlock_irqrestore(&g_lock, f);
+      ping_sleep_ms(500);
+      continue;
+    }
+
     int rc = icmp_echo_request(PING_TARGET, PING_IDENT, seq, payload,
                                sizeof(payload));
     if (rc != 0) {

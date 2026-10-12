@@ -13,6 +13,7 @@
 #include "cpu.h"
 #include "heap.h"
 #include "klog.h"
+#include "net/netif.h"
 #include "pf.h" // vma_t, VMA_ELF, VMA_STACK, VMA_FILE, VMA_ANON
 #include "pmm.h"
 #include "process.h"
@@ -1903,6 +1904,215 @@ static char *gen_filesystems(size_t *out_len) {
   return buf;
 }
 
+// ---------------------------------------------------------------------------
+// /proc/net/dev
+//
+// Formato Linux:
+//   Inter-|   Receive                                                | Transmit
+//    face |bytes    packets errs drop fifo frame compressed multicast|bytes
+//    packets errs drop fifo colls carrier compressed
+//      lo:       0       0    0    0    0     0          0         0        0
+//      0    0    0    0     0       0          0
+//    eth0:       0       0    0    0    0     0          0         0        0
+//    0    0    0    0     0       0          0
+//
+// ifconfig, ip, ss, sar, y cualquier contador de red lo leen.
+// ---------------------------------------------------------------------------
+static char *gen_net_dev(size_t *out_len) {
+  const size_t CAP = 4096;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+
+  size_t o = 0;
+  o = kappend(
+      buf, o, CAP,
+      "Inter-|   Receive                                                "
+      "|  Transmit\n"
+      " face |bytes    packets errs drop fifo frame compressed "
+      "multicast|bytes    packets errs drop fifo colls carrier "
+      "compressed\n");
+
+  int n = netif_count();
+  for (int i = 0; i < n && o + 256 < CAP; i++) {
+    netif_t *p = netif_get_by_index(i);
+    if (!p)
+      continue;
+
+    // nombre: %6s alineado a la izquierda con espacios
+    int nl = (int)strlen(p->name);
+    if (nl > 6)
+      nl = 6;
+    for (int k = 0; k < 6 - nl; k++)
+      buf[o++] = ' ';
+    for (int k = 0; k < nl; k++)
+      buf[o++] = p->name[k];
+    buf[o++] = ':';
+
+    // Fila de contadores: rx_bytes, rx_packets, rx_errors, rx_dropped,
+    // 0 (fifo), 0 (frame), 0 (compressed), 0 (multicast), tx_bytes,
+    // tx_packets, tx_errors, 0 (drop), 0 (fifo), 0 (colls), 0 (carrier),
+    // 0 (compressed). Todos con ancho mínimo.
+#define DEV_FIELD(w, v)                                                        \
+  do {                                                                         \
+    buf[o++] = ' ';                                                            \
+    char _tmp[24];                                                             \
+    size_t _n = kfmt_u64(_tmp, sizeof(_tmp), (uint64_t)(v));                   \
+    int _pad = (int)(w) - (int)_n;                                             \
+    for (int _i = 0; _i < _pad; _i++)                                          \
+      buf[o++] = ' ';                                                          \
+    for (size_t _i = 0; _i < _n; _i++)                                         \
+      buf[o++] = _tmp[_i];                                                     \
+  } while (0)
+
+    DEV_FIELD(8, p->rx_bytes);
+    DEV_FIELD(8, p->rx_packets);
+    DEV_FIELD(4, p->rx_errors);
+    DEV_FIELD(4, p->rx_dropped);
+    DEV_FIELD(4, 0);  // rx fifo
+    DEV_FIELD(5, 0);  // rx frame
+    DEV_FIELD(10, 0); // rx compressed
+    DEV_FIELD(9, 0);  // rx multicast
+    DEV_FIELD(8, p->tx_bytes);
+    DEV_FIELD(8, p->tx_packets);
+    DEV_FIELD(4, p->tx_errors);
+    DEV_FIELD(4, 0);  // tx drop
+    DEV_FIELD(4, 0);  // tx fifo
+    DEV_FIELD(5, 0);  // tx colls
+    DEV_FIELD(7, 0);  // tx carrier
+    DEV_FIELD(10, 0); // tx compressed
+#undef DEV_FIELD
+
+    buf[o++] = '\n';
+  }
+
+  buf[o] = '\0';
+  *out_len = o;
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// /proc/net/route
+//
+// Formato Linux (hex en little-endian del host, 8 chars):
+//   Iface  Destination  Gateway  Flags  RefCnt  Use  Metric  Mask  MTU  Window
+//   IRTT eth0   00000000     0202000A 0003   0       0    0       00000000 0 0
+//   0
+//
+//   Flags: RTF_UP=0x0001, RTF_GATEWAY=0x0002
+// ---------------------------------------------------------------------------
+#define RTF_UP 0x0001
+#define RTF_GATEWAY 0x0002
+
+static char *gen_net_route(size_t *out_len) {
+  const size_t CAP = 1024;
+  char *buf = (char *)kmalloc(CAP);
+  if (!buf)
+    return NULL;
+
+  size_t o = 0;
+  o = kappend(buf, o, CAP,
+              "Iface\tDestination\tGateway "
+              "\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+
+  int n = netif_count();
+  for (int i = 0; i < n; i++) {
+    netif_t *p = netif_get_by_index(i);
+    if (!p || p->ip == 0)
+      continue;
+
+    // Fila 1: ruta de red (destino = ip & netmask, sin gateway).
+    uint32_t net_addr = p->ip & p->netmask;
+    uint32_t be_dest = __builtin_bswap32(net_addr);
+    uint32_t be_mask = __builtin_bswap32(p->netmask);
+
+    char line[128];
+    int ln = 0;
+    const char *nm = p->name;
+    while (*nm && ln < 20)
+      line[ln++] = *nm++;
+    line[ln++] = '\t';
+    static const char hex[] = "0123456789ABCDEF";
+    for (int s = 28; s >= 0; s -= 4)
+      line[ln++] = hex[(be_dest >> s) & 0xF];
+    line[ln++] = '\t';
+    // Gateway en 0 si no hay.
+    for (int s = 0; s < 8; s++)
+      line[ln++] = '0';
+    line[ln++] = '\t';
+    // Flags UP.
+    line[ln++] = '0';
+    line[ln++] = '0';
+    line[ln++] = '0';
+    line[ln++] = '1';
+    line[ln++] = '\t';
+    line[ln++] = '0';
+    line[ln++] = '\t';
+    line[ln++] = '0';
+    line[ln++] = '\t';
+    line[ln++] = '0';
+    line[ln++] = '\t';
+    for (int s = 28; s >= 0; s -= 4)
+      line[ln++] = hex[(be_mask >> s) & 0xF];
+    line[ln++] = '\t';
+    line[ln++] = '0';
+    line[ln++] = '\t';
+    line[ln++] = '0';
+    line[ln++] = '\t';
+    line[ln++] = '0';
+    line[ln++] = '\n';
+    if (o + (size_t)ln + 1 < CAP) {
+      memcpy(buf + o, line, ln);
+      o += ln;
+    }
+
+    // Fila 2: default route si hay gateway.
+    if (p->gateway != 0) {
+      uint32_t be_gw = __builtin_bswap32(p->gateway);
+      ln = 0;
+      nm = p->name;
+      while (*nm && ln < 20)
+        line[ln++] = *nm++;
+      line[ln++] = '\t';
+      // Destination = 0.0.0.0
+      for (int s = 0; s < 8; s++)
+        line[ln++] = '0';
+      line[ln++] = '\t';
+      for (int s = 28; s >= 0; s -= 4)
+        line[ln++] = hex[(be_gw >> s) & 0xF];
+      line[ln++] = '\t';
+      // Flags UP | GATEWAY = 0x0003.
+      line[ln++] = '0';
+      line[ln++] = '0';
+      line[ln++] = '0';
+      line[ln++] = '3';
+      line[ln++] = '\t';
+      line[ln++] = '0';
+      line[ln++] = '\t';
+      line[ln++] = '0';
+      line[ln++] = '\t';
+      line[ln++] = '0';
+      line[ln++] = '\t';
+      for (int s = 0; s < 8; s++)
+        line[ln++] = '0';
+      line[ln++] = '\t';
+      line[ln++] = '0';
+      line[ln++] = '\t';
+      line[ln++] = '0';
+      line[ln++] = '\t';
+      line[ln++] = '0';
+      line[ln++] = '\n';
+      if (o + (size_t)ln + 1 < CAP) {
+        memcpy(buf + o, line, ln);
+        o += ln;
+      }
+    }
+  }
+  buf[o] = '\0';
+  *out_len = o;
+  return buf;
+}
+
 static char *gen_mounts(size_t *out_len) {
   const size_t CAP = 4096;
   char *buf = (char *)kmalloc(CAP);
@@ -1921,7 +2131,7 @@ static char *gen_mounts(size_t *out_len) {
 static const char *procfs_root_entries[] = {
     "uptime", "version", "meminfo",     "stat",       "self",
     "mounts", "loadavg", "bus",         "partitions", "swaps",
-    "sys",    "vmstat",  "filesystems",
+    "sys",    "vmstat",  "filesystems", "net", // ← AÑADIR
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -2041,6 +2251,24 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     }
     out->name[0] = '\0';
     out->type = 0;
+    out->size = 0;
+    return 0;
+  }
+
+  // /proc/net
+  if (strcmp(dir->name, "/proc/net") == 0) {
+    static const char *l[] = {"dev", "route", "tcp", "udp"};
+    if (index >= 4) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    const char *n = l[index];
+    size_t ln = strlen(n);
+    memcpy(out->name, n, ln);
+    out->name[ln] = '\0';
+    out->type = VFS_FILE;
     out->size = 0;
     return 0;
   }
@@ -2174,7 +2402,8 @@ static int procfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
       l = sizeof(out->name) - 1;
     memcpy(out->name, n, l);
     out->name[l] = '\0';
-    out->type = (strcmp(n, "bus") == 0) ? VFS_DIRECTORY : VFS_FILE;
+    out->type = (strcmp(n, "bus") == 0 || strcmp(n, "net") == 0) ? VFS_DIRECTORY
+                                                                 : VFS_FILE;
     out->size = 0;
     return 0;
   }
@@ -2279,6 +2508,34 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     return make_root_node();
 
   const char *name = path + 1;
+
+  // ---- /proc/net y subnodos ----
+  if (strcmp(name, "net") == 0)
+    return make_dir_node("net");
+  if (strcmp(name, "net/dev") == 0) {
+    size_t len = 0;
+    char *b = gen_net_dev(&len);
+    return b ? make_file_node("dev", b, len) : NULL;
+  }
+  if (strcmp(name, "net/route") == 0) {
+    size_t len = 0;
+    char *b = gen_net_route(&len);
+    return b ? make_file_node("route", b, len) : NULL;
+  }
+  // /proc/net/tcp y /proc/net/udp: contenido vacío por ahora (solo cabecera).
+  if (strcmp(name, "net/tcp") == 0 || strcmp(name, "net/udp") == 0) {
+    const char *hdr =
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when "
+        "retrnsmt   uid  timeout inode\n";
+    size_t hl = strlen(hdr);
+    char *b = (char *)kmalloc(hl + 1);
+    if (!b)
+      return NULL;
+    memcpy(b, hdr, hl);
+    b[hl] = '\0';
+    const char *fname = (name[4] == 't') ? "tcp" : "udp";
+    return make_file_node(fname, b, hl);
+  }
 
   // [FIX] /proc/bus/pci/devices — DESPUÉS de declarar `name`.
   if (strcmp(name, "bus") == 0)

@@ -50,8 +50,7 @@ static void test_pipe_poll_readiness(void) {
     return;
   }
 
-  TEST_ASSERT(vfs_node_poll(read_end, 1) == 0,
-              "pipe vacío anunció POLLIN");
+  TEST_ASSERT(vfs_node_poll(read_end, 1) == 0, "pipe vacío anunció POLLIN");
   TEST_ASSERT((vfs_node_poll(write_end, 4) & 4) != 0,
               "pipe con espacio no anunció POLLOUT");
 
@@ -714,8 +713,8 @@ static void test_paging_special_mapping_lifetime(void) {
 
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
   memset(pml4, 0, PAGE_SIZE);
-  int rc = paging_map_page_in(
-      pml4, virt, shared_phys, PTE_USER | PTE_PRESENT | PTE_SPECIAL);
+  int rc = paging_map_page_in(pml4, virt, shared_phys,
+                              PTE_USER | PTE_PRESENT | PTE_SPECIAL);
   TEST_ASSERT(rc == 0, "no se pudo mapear página shared: %d", rc);
   if (rc != 0) {
     paging_free_user_space(pml4_phys);
@@ -4423,7 +4422,17 @@ static void test_fat32_write_to_directory_fails(void) {
 REGISTER_TEST("fat32: write a directorio falla",
               test_fat32_write_to_directory_fails);
 
-static void test_fat32_truncate_grow_rejected(void) {
+// ---------------------------------------------------------------------------
+// [FIX] truncate-grow ahora SÍ está soportado: fat32_truncate_impl rellena
+// el rango extendido con ceros. Este test verifica:
+//   1. truncate(n, 100) con size=3 devuelve 0.
+//   2. node->size queda en 100.
+//   3. Los bytes [3, 100) son 0 (no basura de clústeres previos).
+//   4. Un write posterior en el offset 50 mantiene coherencia.
+//   5. truncate a mayor con size=0 también funciona (crea la cadena).
+//   6. truncate a mayor sobre un fichero sin cluster inicial funciona.
+// ---------------------------------------------------------------------------
+static void test_fat32_truncate_grow(void) {
   block_device_t *b = fat32_find_test_disk();
   if (!b) {
     test_skip("sin disco FAT32");
@@ -4432,31 +4441,120 @@ static void test_fat32_truncate_grow_rejected(void) {
   fat32_test_cleanup();
   TEST_ASSERT(fat32_mount_bdev(b->name, "/fat_test") == 0, "mount");
 
+  // Limpieza preventiva (por si un test previo dejó el fichero).
   vfs_node_t *pre = vfs_lookup("/fat_test/w7.txt");
   if (pre) {
     vfs_node_free(pre);
     vfs_unlink("/fat_test/w7.txt");
   }
 
+  // -----------------------------------------------------------------------
+  // Caso 1: fichero con 3 bytes → truncate a 100 → size=100, ceros en [3,100).
+  // -----------------------------------------------------------------------
   TEST_ASSERT(vfs_create("/fat_test/w7.txt", O_CREAT | O_RDWR) == 0, "create");
   vfs_node_t *n = vfs_lookup("/fat_test/w7.txt");
   TEST_ASSERT(n != NULL, "lookup");
   if (n) {
     const char *msg = "abc";
-    n->ops->write(n, 0, 3, msg);
+    int64_t wr = n->ops->write(n, 0, 3, msg);
+    TEST_ASSERT(wr == 3, "write devolvió %lld, esperado 3", (long long)wr);
 
-    // Truncar a 100 debe fallar (crecer no soportado).
+    // Truncar a 100 debe funcionar (extensión con ceros).
     int rc = n->ops->truncate(n, 100);
-    TEST_ASSERT(rc == -EINVAL, "truncate-grow devolvió %d, esperado -EINVAL",
-                rc);
-    TEST_ASSERT(n->size == 3, "size cambió: %lu", (unsigned long)n->size);
+    TEST_ASSERT(rc == 0, "truncate-grow devolvió %d, esperado 0", rc);
+    TEST_ASSERT(n->size == 100, "size esperado 100, es %lu",
+                (unsigned long)n->size);
+
+    // Verificar que los primeros 3 bytes siguen ahí.
+    char buf[100];
+    memset(buf, 0xAA, sizeof(buf));
+    int64_t rd = n->ops->read(n, 0, sizeof(buf), buf);
+    TEST_ASSERT(rd == 100, "read devolvió %lld, esperado 100", (long long)rd);
+    TEST_ASSERT(buf[0] == 'a' && buf[1] == 'b' && buf[2] == 'c',
+                "primeros 3 bytes corruptos: %02x %02x %02x",
+                (unsigned char)buf[0], (unsigned char)buf[1],
+                (unsigned char)buf[2]);
+
+    // Verificar que los bytes [3, 100) son cero.
+    int all_zero = 1;
+    int first_nonzero = -1;
+    for (int i = 3; i < 100; i++) {
+      if (buf[i] != 0) {
+        all_zero = 0;
+        first_nonzero = i;
+        break;
+      }
+    }
+    TEST_ASSERT(all_zero, "hueco de extensión no es cero (byte %d = 0x%02x)",
+                first_nonzero,
+                first_nonzero >= 0 ? (unsigned char)buf[first_nonzero] : 0);
+
+    // -------------------------------------------------------------------
+    // Caso 2: write en offset 50 sobre el hueco debe funcionar y persistir.
+    // -------------------------------------------------------------------
+    const char *mid = "MID";
+    wr = n->ops->write(n, 50, 3, mid);
+    TEST_ASSERT(wr == 3, "write mid devolvió %lld, esperado 3", (long long)wr);
+    TEST_ASSERT(n->size == 100, "size tras write mid: %lu (esperado 100)",
+                (unsigned long)n->size);
+
+    memset(buf, 0xAA, sizeof(buf));
+    rd = n->ops->read(n, 0, sizeof(buf), buf);
+    TEST_ASSERT(rd == 100, "read mid devolvió %lld", (long long)rd);
+    TEST_ASSERT(buf[50] == 'M' && buf[51] == 'I' && buf[52] == 'D',
+                "mid no persistió");
+    TEST_ASSERT(buf[49] == 0 && buf[53] == 0,
+                "bytes adyacentes al mid deben seguir a 0");
+    TEST_ASSERT(buf[3] == 0 && buf[99] == 0, "resto del hueco sigue a 0");
+
     vfs_node_free(n);
   }
   vfs_unlink("/fat_test/w7.txt");
+
+  // -----------------------------------------------------------------------
+  // Caso 3: fichero vacío (size 0, sin cluster inicial) → truncate a 5000.
+  // -----------------------------------------------------------------------
+  TEST_ASSERT(vfs_create("/fat_test/w8.txt", O_CREAT | O_RDWR) == 0,
+              "create vacío");
+  vfs_node_t *n2 = vfs_lookup("/fat_test/w8.txt");
+  TEST_ASSERT(n2 != NULL, "lookup vacío");
+  if (n2) {
+    TEST_ASSERT(n2->size == 0, "size inicial != 0");
+
+    int rc2 = n2->ops->truncate(n2, 5000);
+    TEST_ASSERT(rc2 == 0, "truncate-grow desde 0 devolvió %d", rc2);
+    TEST_ASSERT(n2->size == 5000, "size esperado 5000, es %lu",
+                (unsigned long)n2->size);
+
+    // Verificar que son 5000 bytes de ceros (en trozos para no allocar
+    // 5000 bytes de stack).
+    int ok = 1;
+    uint8_t chunk[512];
+    for (int off = 0; off < 5000 && ok; off += 512) {
+      int want = (5000 - off) < 512 ? (5000 - off) : 512;
+      memset(chunk, 0xAA, sizeof(chunk));
+      int64_t r = n2->ops->read(n2, off, want, chunk);
+      if (r != want) {
+        ok = 0;
+        break;
+      }
+      for (int i = 0; i < want; i++) {
+        if (chunk[i] != 0) {
+          ok = 0;
+          break;
+        }
+      }
+    }
+    TEST_ASSERT(ok, "fichero extendido desde 0 no es todo ceros");
+
+    vfs_node_free(n2);
+  }
+  vfs_unlink("/fat_test/w8.txt");
+
   fat32_test_cleanup();
 }
-REGISTER_TEST("fat32: truncate a mayor rechazado",
-              test_fat32_truncate_grow_rejected);
+REGISTER_TEST("fat32: truncate a mayor extiende con ceros",
+              test_fat32_truncate_grow);
 
 static void test_fat32_readdir(void) {
   block_device_t *b = fat32_find_test_disk();

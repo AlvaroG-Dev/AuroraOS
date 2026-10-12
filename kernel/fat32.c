@@ -1672,27 +1672,49 @@ static int64_t fat32_read_data(fat32_node_priv_t *np, uint64_t offset,
 // ===========================================================================
 // [PR 4.3] Escritura de datos.
 // ===========================================================================
-// Rellena con ceros el rango [from, to) del fichero. Se usa al
-// extender cuando hay un hueco (pwrite con offset > size).
-// Devuelve 0 si OK.
+// Rellena con ceros el rango [from, to) de un fichero.
+// Se usa al extender con pwrite a offset > size y al hacer truncate-grow.
+//
+// [FIX] Si el fichero aún no tiene cluster inicial (size 0, creado con
+// vfs_create), allocar uno antes de recorrer. Sin esto, cur=0 y
+// cluster_to_sector(0) desborda (uint32_t)(0-2) y la E/S va a un sector
+// basura → -EIO.
 static int fat32_zero_range(fat32_node_priv_t *np, uint64_t from, uint64_t to) {
   if (from >= to)
     return 0;
   fat32_fs_t *fs = np->fs;
-  uint8_t zeros[512] = {0};
+
+  // Paso 0: si no hay cadena, crear el primer cluster y persistirlo en
+  // el dirent AHORA (antes de tocar datos), para no dejar el dirent
+  // inconsistente si algo falla luego.
+  if (!FAT_IS_VALID(np->start_cluster)) {
+    uint32_t new_c = fat32_alloc_cluster(fs);
+    if (new_c == 0)
+      return -ENOSPC;
+    np->start_cluster = new_c;
+    np->read_cache_index = 0;
+    np->read_cache_cluster = new_c;
+    if (np->dirent_lba != 0) {
+      struct update_cluster_ctx cctx = {.new_cluster = new_c};
+      if (fat32_modify_dirent(fs, np->dirent_lba, np->dirent_off,
+                              dirent_update_cluster, &cctx) != 0)
+        return -EIO;
+    }
+  }
+
   uint64_t pos = from;
   while (pos < to) {
     uint32_t cl_idx = (uint32_t)(pos / fs->cluster_size);
     uint32_t within = (uint32_t)(pos % fs->cluster_size);
 
-    // Localizar el clúster cl_idx de la cadena.
+    // Localizar el clúster cl_idx de la cadena, extendiendo si hace
+    // falta.
     uint32_t cur = np->start_cluster;
     for (uint32_t i = 0; i < cl_idx; i++) {
       int64_t next = fat32_fat_get(fs, cur);
       if (next < 0)
         return (int)next;
       if ((uint32_t)next >= FAT_EOC_MIN) {
-        // Extender la cadena con un clúster nuevo.
         uint32_t new_c = fat32_alloc_cluster(fs);
         if (new_c == 0)
           return -ENOSPC;
@@ -1704,7 +1726,7 @@ static int fat32_zero_range(fat32_node_priv_t *np, uint64_t from, uint64_t to) {
       }
     }
 
-    // Escribir ceros al clúster actual hasta donde lleguemos.
+    // Escribir ceros hasta el final del clúster o hasta `to`.
     uint64_t end_in_cluster = (uint64_t)(cl_idx + 1) * fs->cluster_size;
     uint64_t write_end = (to < end_in_cluster) ? to : end_in_cluster;
     uint32_t to_write = (uint32_t)(write_end - pos);
@@ -1726,7 +1748,6 @@ static int fat32_zero_range(fat32_node_priv_t *np, uint64_t from, uint64_t to) {
     kfree(cbuf);
     pos = write_end;
   }
-  (void)zeros;
   return 0;
 }
 
