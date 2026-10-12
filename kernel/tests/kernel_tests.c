@@ -2070,50 +2070,6 @@ static void test_ata_multi_sector_read(void) {
 }
 REGISTER_TEST("ata: leer 4 sectores contiguos", test_ata_multi_sector_read);
 
-static void test_ata_write_read_back(void) {
-  block_device_t *hda = blk_lookup("hda");
-  if (!hda) {
-    test_skip("hda no existe");
-    return;
-  }
-
-  uint64_t lba = hda->num_sectors - 1;
-  uint8_t orig[512], pattern[512], readback[512];
-
-  int rc = bdev_read(hda, lba, 1, orig);
-  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
-  if (rc != 0)
-    return;
-
-  for (int i = 0; i < 512; i++)
-    pattern[i] = (uint8_t)(i ^ 0xA5);
-
-  rc = bdev_write(hda, lba, 1, pattern);
-  TEST_ASSERT(rc == 0, "write falló: %d", rc);
-  if (rc != 0)
-    return;
-
-  rc = bdev_flush(hda);
-  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
-
-  rc = bdev_read(hda, lba, 1, readback);
-  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
-  if (rc != 0)
-    return;
-
-  int ok = 1;
-  for (int i = 0; i < 512; i++) {
-    if (readback[i] != pattern[i]) {
-      ok = 0;
-      break;
-    }
-  }
-  TEST_ASSERT(ok, "el patrón leído no coincide");
-
-  bdev_write(hda, lba, 1, orig);
-  bdev_flush(hda);
-}
-REGISTER_TEST("ata: escribir y leer de vuelta", test_ata_write_read_back);
 
 static void test_ata_read_oob(void) {
   block_device_t *hda = blk_lookup("hda");
@@ -2127,17 +2083,6 @@ static void test_ata_read_oob(void) {
 }
 REGISTER_TEST("ata: leer fuera de rango falla", test_ata_read_oob);
 
-static void test_ata_write_oob(void) {
-  block_device_t *hda = blk_lookup("hda");
-  if (!hda) {
-    test_skip("hda no existe");
-    return;
-  }
-  uint8_t buf[512];
-  int rc = bdev_write(hda, hda->num_sectors, 1, buf);
-  TEST_ASSERT(rc < 0, "write fuera de rango debía fallar");
-}
-REGISTER_TEST("ata: escribir fuera de rango falla", test_ata_write_oob);
 
 // ---------------------------------------------------------------------------
 // ATAPI
@@ -2218,22 +2163,6 @@ static void test_atapi_read_pvd(void) {
 }
 REGISTER_TEST("atapi: leer PVD (firma CD001)", test_atapi_read_pvd);
 
-static void test_atapi_write_fails(void) {
-  block_device_t *sr0 = blk_lookup("sr0");
-  if (!sr0) {
-    test_skip("sr0 no existe");
-    return;
-  }
-  uint8_t *buf = (uint8_t *)kzalloc(sr0->sector_size ? sr0->sector_size : 2048);
-  if (!buf) {
-    TEST_ASSERT(0, "kzalloc falló");
-    return;
-  }
-  int rc = bdev_write(sr0, 0, 1, buf);
-  TEST_ASSERT(rc < 0, "write a sr0 debía fallar (read-only), rc=%d", rc);
-  kfree(buf);
-}
-REGISTER_TEST("atapi: escribir falla (read-only)", test_atapi_write_fails);
 
 static void test_atapi_read_oob(void) {
   block_device_t *sr0 = blk_lookup("sr0");
@@ -2321,66 +2250,6 @@ static void test_ata_dma_read_4k(void) {
 }
 REGISTER_TEST("ata_dma: leer 4KB", test_ata_dma_read_4k);
 
-static void test_ata_dma_write_read(void) {
-  block_device_t *hda = blk_lookup("hda");
-  if (!hda) {
-    test_skip("hda no existe");
-    return;
-  }
-
-  uint64_t lba = hda->num_sectors - 8;
-  uint8_t *orig = kmalloc(4096);
-  uint8_t *pattern = kmalloc(4096);
-  uint8_t *readback = kmalloc(4096);
-  if (!orig || !pattern || !readback) {
-    TEST_ASSERT(0, "kmalloc falló");
-    if (orig)
-      kfree(orig);
-    if (pattern)
-      kfree(pattern);
-    if (readback)
-      kfree(readback);
-    return;
-  }
-
-  int rc = bdev_read(hda, lba, 8, orig);
-  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  for (int i = 0; i < 4096; i++)
-    pattern[i] = (uint8_t)(i ^ 0x5A);
-
-  rc = bdev_write(hda, lba, 8, pattern);
-  TEST_ASSERT(rc == 0, "write 4K falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  rc = bdev_flush(hda);
-  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
-
-  rc = bdev_read(hda, lba, 8, readback);
-  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  int same = 1;
-  for (int i = 0; i < 4096; i++) {
-    if (readback[i] != pattern[i]) {
-      same = 0;
-      break;
-    }
-  }
-  TEST_ASSERT(same, "el patrón no coincide");
-
-out:
-  bdev_write(hda, lba, 8, orig);
-  bdev_flush(hda);
-  kfree(orig);
-  kfree(pattern);
-  kfree(readback);
-}
-REGISTER_TEST("ata_dma: escribir y leer 4KB", test_ata_dma_write_read);
 
 // ---------------------------------------------------------------------------
 // AHCI (Fase 3)
@@ -2477,72 +2346,6 @@ out:
 }
 REGISTER_TEST("ahci: leer 4KB", test_ahci_read_4k);
 
-static void test_ahci_write_read_back(void) {
-  block_device_t *sda = blk_lookup("sda");
-  if (!sda) {
-    LOG_INFO("  sda no existe, test omitido");
-    TEST_ASSERT(1, "sin sda: skip");
-    return;
-  }
-  if (sda->num_sectors < 16) {
-    LOG_INFO("  sda demasiado pequeño, test omitido");
-    TEST_ASSERT(1, "sda muy pequeño: skip");
-    return;
-  }
-
-  uint64_t lba = sda->num_sectors - 8;
-  uint8_t *orig = (uint8_t *)kmalloc(4096);
-  uint8_t *pattern = (uint8_t *)kmalloc(4096);
-  uint8_t *readback = (uint8_t *)kmalloc(4096);
-  if (!orig || !pattern || !readback) {
-    TEST_ASSERT(0, "kmalloc falló");
-    if (orig)
-      kfree(orig);
-    if (pattern)
-      kfree(pattern);
-    if (readback)
-      kfree(readback);
-    return;
-  }
-
-  int rc = bdev_read(sda, lba, 8, orig);
-  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  for (int i = 0; i < 4096; i++)
-    pattern[i] = (uint8_t)(i * 7 ^ 0x5A);
-
-  rc = bdev_write(sda, lba, 8, pattern);
-  TEST_ASSERT(rc == 0, "write 4K falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  rc = bdev_flush(sda);
-  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
-
-  rc = bdev_read(sda, lba, 8, readback);
-  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  int same = 1;
-  for (int i = 0; i < 4096; i++) {
-    if (readback[i] != pattern[i]) {
-      same = 0;
-      break;
-    }
-  }
-  TEST_ASSERT(same, "el patrón leído no coincide tras write+read");
-
-out:
-  bdev_write(sda, lba, 8, orig);
-  bdev_flush(sda);
-  kfree(orig);
-  kfree(pattern);
-  kfree(readback);
-}
-REGISTER_TEST("ahci: escribir y leer 4KB", test_ahci_write_read_back);
 
 static void test_ahci_read_oob(void) {
   block_device_t *sda = blk_lookup("sda");
@@ -2651,113 +2454,6 @@ REGISTER_TEST_FLAGS("ahci: latencia", test_ahci_latencia, TEST_FLAG_BLOCKING);
 //
 // Es BLOCKING porque bdev_read/bdev_write pueden dormir en wait_event.
 // ===========================================================================
-static void test_ahci_stress_1mb(void) {
-  block_device_t *sda = blk_lookup("sda");
-  if (!sda) {
-    test_skip("sin sda (no hay disco AHCI)");
-    return;
-  }
-
-  const uint32_t bytes = 1024 * 1024; // 1 MB
-  const uint32_t sectors = bytes / sda->sector_size;
-
-  if (sda->num_sectors < sectors + 4096) {
-    test_skip("sda demasiado pequeño (%lu sectores) para el test",
-              (unsigned long)sda->num_sectors);
-    return;
-  }
-
-  // Zona segura: 2 MB antes del final, dejando margen para los otros
-  // tests que escriben en num_sectors - 8.
-  uint64_t lba = sda->num_sectors - sectors - 4096;
-
-  uint8_t *orig = kmalloc(bytes);
-  uint8_t *pattern = kmalloc(bytes);
-  uint8_t *readback = kmalloc(bytes);
-  if (!orig || !pattern || !readback) {
-    TEST_ASSERT(0, "kmalloc(%u) falló (orig=%p pattern=%p readback=%p)", bytes,
-                (void *)orig, (void *)pattern, (void *)readback);
-    if (orig)
-      kfree(orig);
-    if (pattern)
-      kfree(pattern);
-    if (readback)
-      kfree(readback);
-    return;
-  }
-
-  int rc;
-
-  // 1. Leer el contenido original para poder restaurarlo.
-  rc = bdev_read(sda, lba, sectors, orig);
-  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  // 2. Generar un patrón determinista pero no trivial.
-  //    Usamos un LCG simple para que sea reproducible.
-  {
-    uint32_t state = 0x12345678u;
-    for (uint32_t i = 0; i < bytes; i++) {
-      state = state * 1103515245u + 12345u;
-      pattern[i] = (uint8_t)(state >> 16);
-    }
-  }
-
-  // 3. Escribir 1 MB.
-  LOG_INFO("  escribiendo %u bytes en lba=%lu", bytes, (unsigned long)lba);
-  rc = bdev_write(sda, lba, sectors, pattern);
-  TEST_ASSERT(rc == 0, "write 1MB falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  // 4. FLUSH (bdev_write ya llama a flush? No, lo hace port_xfer tras
-  //    cada bio de escritura. Pero llamamos a bdev_flush explícitamente
-  //    para asegurar que el disco persistió los datos.)
-  rc = bdev_flush(sda);
-  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  // 5. Leer de vuelta y comparar.
-  memset(readback, 0, bytes);
-  rc = bdev_read(sda, lba, sectors, readback);
-  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  {
-    uint32_t first_mismatch = UINT32_MAX;
-    for (uint32_t i = 0; i < bytes; i++) {
-      if (readback[i] != pattern[i]) {
-        first_mismatch = i;
-        break;
-      }
-    }
-    if (first_mismatch != UINT32_MAX) {
-      TEST_ASSERT(0, "mismatch en offset %u: esperado 0x%02x, leído 0x%02x",
-                  first_mismatch, pattern[first_mismatch],
-                  readback[first_mismatch]);
-    } else {
-      TEST_ASSERT(1, "1 MB escritos y leídos correctamente");
-    }
-  }
-
-out:
-  // Restaurar el contenido original, pase lo que pase.
-  if (orig) {
-    bdev_write(sda, lba, sectors, orig);
-    bdev_flush(sda);
-  }
-  if (orig)
-    kfree(orig);
-  if (pattern)
-    kfree(pattern);
-  if (readback)
-    kfree(readback);
-}
-REGISTER_TEST_FLAGS("ahci: stress 1MB write+read", test_ahci_stress_1mb,
-                    TEST_FLAG_BLOCKING);
 
 // ===========================================================================
 // ahci: stress multiples LBAs
@@ -2766,121 +2462,6 @@ REGISTER_TEST_FLAGS("ahci: stress 1MB write+read", test_ahci_stress_1mb,
 // y restaura. Valida que el driver funciona con LBAs no contiguos y
 // que el FLUSH persiste cada escritura.
 // ===========================================================================
-static void test_ahci_stress_multi_lba(void) {
-  block_device_t *sda = blk_lookup("sda");
-  if (!sda) {
-    test_skip("sin sda (no hay disco AHCI)");
-    return;
-  }
-
-  const uint32_t sectors_per_op = 8; // 4 KB por operación
-  const int N = 8;
-  const uint64_t margen_final = 8192;
-  const uint64_t margen_inicial = 4096;
-
-  if (sda->num_sectors < margen_inicial + margen_final + N * 4096) {
-    test_skip("sda demasiado pequeño para el test");
-    return;
-  }
-
-  uint32_t bytes = sectors_per_op * sda->sector_size;
-  uint8_t *orig[N];
-  uint8_t *pattern[N];
-  uint8_t *readback[N];
-  uint64_t lbas[N];
-
-  for (int i = 0; i < N; i++) {
-    orig[i] = NULL;
-    pattern[i] = NULL;
-    readback[i] = NULL;
-  }
-
-  // Elegir LBAs dispersos: espaciados ~4 MB, dentro de la zona segura.
-  uint64_t zona = sda->num_sectors - margen_final - margen_inicial;
-  for (int i = 0; i < N; i++) {
-    lbas[i] = margen_inicial + (zona / N) * i;
-    lbas[i] &= ~(uint64_t)7; // alinear a 8 sectores
-
-    orig[i] = kmalloc(bytes);
-    pattern[i] = kmalloc(bytes);
-    readback[i] = kmalloc(bytes);
-    if (!orig[i] || !pattern[i] || !readback[i]) {
-      TEST_ASSERT(0, "kmalloc falló en iteración %d", i);
-      goto cleanup;
-    }
-  }
-
-  // Leer originales.
-  for (int i = 0; i < N; i++) {
-    int rc = bdev_read(sda, lbas[i], sectors_per_op, orig[i]);
-    TEST_ASSERT(rc == 0, "read orig[%d] falló: %d", i, rc);
-    if (rc != 0)
-      goto cleanup;
-  }
-
-  // Generar patrones distintos y escribir.
-  for (int i = 0; i < N; i++) {
-    for (uint32_t j = 0; j < bytes; j++)
-      pattern[i][j] = (uint8_t)((i * 31 + j) ^ 0xA5);
-
-    int rc = bdev_write(sda, lbas[i], sectors_per_op, pattern[i]);
-    TEST_ASSERT(rc == 0, "write[%d] falló: %d", i, rc);
-    if (rc != 0)
-      goto cleanup;
-  }
-
-  int rc = bdev_flush(sda);
-  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
-  if (rc != 0)
-    goto cleanup;
-
-  // Leer de vuelta y comparar.
-  for (int i = 0; i < N; i++) {
-    memset(readback[i], 0, bytes);
-    rc = bdev_read(sda, lbas[i], sectors_per_op, readback[i]);
-    TEST_ASSERT(rc == 0, "read back[%d] falló: %d", i, rc);
-    if (rc != 0)
-      goto cleanup;
-
-    int ok = 1;
-    uint32_t first_bad = 0;
-    for (uint32_t j = 0; j < bytes; j++) {
-      if (readback[i][j] != pattern[i][j]) {
-        ok = 0;
-        first_bad = j;
-        break;
-      }
-    }
-    if (!ok) {
-      TEST_ASSERT(0,
-                  "LBA %d (lba=%lu) mismatch en offset %u: "
-                  "esperado 0x%02x, leído 0x%02x",
-                  i, (unsigned long)lbas[i], first_bad, pattern[i][first_bad],
-                  readback[i][first_bad]);
-    } else {
-      TEST_ASSERT(1, "LBA %d (lba=%lu) verificado OK", i,
-                  (unsigned long)lbas[i]);
-    }
-  }
-
-cleanup:
-  // Restaurar todo.
-  for (int i = 0; i < N; i++) {
-    if (orig[i])
-      bdev_write(sda, lbas[i], sectors_per_op, orig[i]);
-  }
-  bdev_flush(sda);
-  for (int i = 0; i < N; i++) {
-    if (orig[i])
-      kfree(orig[i]);
-    if (pattern[i])
-      kfree(pattern[i]);
-    if (readback[i])
-      kfree(readback[i]);
-  }
-}
-REGISTER_TEST_FLAGS("ahci: stress multiples LBAs", test_ahci_stress_multi_lba,
-                    TEST_FLAG_BLOCKING);
 
 // ===========================================================================
 // ahci: stress buffer no contiguo
@@ -2889,117 +2470,6 @@ REGISTER_TEST_FLAGS("ahci: stress multiples LBAs", test_ahci_stress_multi_lba,
 // distintas tiene, y hace write+read. Valida que el PRDT multi-entrada
 // maneja buffers que no son contiguos en físico.
 // ===========================================================================
-static void test_ahci_stress_no_contiguo(void) {
-  block_device_t *sda = blk_lookup("sda");
-  if (!sda) {
-    test_skip("sin sda (no hay disco AHCI)");
-    return;
-  }
-
-  const uint32_t bytes = 256 * 1024;
-  const uint32_t sectors = bytes / sda->sector_size;
-
-  if (sda->num_sectors < sectors + 8192) {
-    test_skip("sda demasiado pequeño para el test");
-    return;
-  }
-
-  uint64_t lba = sda->num_sectors - sectors - 8192;
-
-  uint8_t *orig = kmalloc(bytes);
-  uint8_t *pattern = kmalloc(bytes);
-  uint8_t *readback = kmalloc(bytes);
-  if (!orig || !pattern || !readback) {
-    TEST_ASSERT(0, "kmalloc falló");
-    if (orig)
-      kfree(orig);
-    if (pattern)
-      kfree(pattern);
-    if (readback)
-      kfree(readback);
-    return;
-  }
-
-  int rc;
-
-  rc = bdev_read(sda, lba, sectors, orig);
-  TEST_ASSERT(rc == 0, "read original falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  // Contar páginas físicas distintas en el buffer.
-  {
-    extern uint64_t paging_get_phys(uint64_t virt);
-    uint32_t paginas_distintas = 0;
-    uint64_t last_phys = 0;
-    int primera = 1;
-    for (uint32_t off = 0; off < bytes; off += PAGE_SIZE) {
-      uint64_t phys = paging_get_phys((uint64_t)(uintptr_t)(pattern + off));
-      if (primera || phys != last_phys + PAGE_SIZE) {
-        paginas_distintas++;
-      }
-      last_phys = phys;
-      primera = 0;
-    }
-    LOG_INFO("  buffer de %u bytes: %u tramos físicos contiguos", bytes,
-             paginas_distintas);
-    if (paginas_distintas == 1) {
-      LOG_WARN("  el buffer es físicamente contiguo; el test no ejercita "
-               "PRDT multi-entrada");
-    }
-  }
-
-  for (uint32_t i = 0; i < bytes; i++)
-    pattern[i] = (uint8_t)((i * 17) ^ 0x3C);
-
-  LOG_INFO("  escribiendo %u bytes en lba=%lu", bytes, (unsigned long)lba);
-  rc = bdev_write(sda, lba, sectors, pattern);
-  TEST_ASSERT(rc == 0, "write falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  rc = bdev_flush(sda);
-  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  memset(readback, 0, bytes);
-  rc = bdev_read(sda, lba, sectors, readback);
-  TEST_ASSERT(rc == 0, "read back falló: %d", rc);
-  if (rc != 0)
-    goto out;
-
-  {
-    uint32_t first_mismatch = UINT32_MAX;
-    for (uint32_t i = 0; i < bytes; i++) {
-      if (readback[i] != pattern[i]) {
-        first_mismatch = i;
-        break;
-      }
-    }
-    if (first_mismatch != UINT32_MAX) {
-      TEST_ASSERT(0, "mismatch en offset %u: esperado 0x%02x, leído 0x%02x",
-                  first_mismatch, pattern[first_mismatch],
-                  readback[first_mismatch]);
-    } else {
-      TEST_ASSERT(1, "buffer no contiguo escrito/leído OK");
-    }
-  }
-
-out:
-  if (orig) {
-    bdev_write(sda, lba, sectors, orig);
-    bdev_flush(sda);
-  }
-  if (orig)
-    kfree(orig);
-  if (pattern)
-    kfree(pattern);
-  if (readback)
-    kfree(readback);
-}
-REGISTER_TEST_FLAGS("ahci: stress buffer no contiguo",
-                    test_ahci_stress_no_contiguo, TEST_FLAG_BLOCKING);
 
 // ===========================================================================
 // [H3] TLB shootdown roundtrip
@@ -3205,29 +2675,6 @@ static void test_part_read_routed(void) {
 }
 REGISTER_TEST("part: lectura enrutada al padre", test_part_read_routed);
 
-static void test_part_write_routed(void) {
-  // Verifica que bdev_write a una partición enrutado al padre funciona
-  // (o falla consistentemente si el padre es RO). No escribe: solo
-  // confirma que la ruta llega al driver del padre sin error de tipo.
-  for (int i = 0; i < blk_count(); i++) {
-    block_device_t *b = blk_get_by_index(i);
-    if (!b || !b->is_partition || b->is_read_only)
-      continue;
-    if (b->num_sectors < 4)
-      continue;
-
-    // Leer el sector 0, escribir el mismo contenido, verificar que OK.
-    uint8_t buf[512];
-    int rc = bdev_read(b, 0, 1, buf);
-    TEST_ASSERT(rc == 0, "%s: read falló", b->name);
-    if (rc != 0)
-      continue;
-    rc = bdev_write(b, 0, 1, buf);
-    TEST_ASSERT(rc == 0, "%s: write falló rc=%d", b->name, rc);
-    // Al ser idempotente (mismo contenido), no corrompe nada.
-  }
-}
-REGISTER_TEST("part: escritura enrutada al padre", test_part_write_routed);
 
 // ===========================================================================
 // [Fase 2] VFS con mount points
@@ -3435,23 +2882,14 @@ static void test_vfs_tarfs_root_still_works(void) {
 // los tests se saltan.
 // ===========================================================================
 static block_device_t *fat32_find_test_disk(void) {
-  const char *names[] = {"sda", "hda", "sdb", "hdb", NULL};
-  for (int i = 0; names[i]; i++) {
-    block_device_t *b = blk_lookup(names[i]);
-    if (!b || b->is_partition || b->is_read_only)
-      continue;
-    if (b->sector_size < 512)
-      continue;
-    uint8_t buf[512];
-    if (bdev_read(b, 0, 1, buf) != 0)
-      continue;
-    // Verificar firma FAT32.
-    if (buf[510] != 0x55 || buf[511] != 0xAA)
-      continue;
-    if (memcmp(buf + 82, "FAT32   ", 8) != 0)
-      continue;
-    return b;
-  }
+  /*
+   * SAFETY: no ejecutar tests FAT32 de escritura sobre un disco detectado
+   * automáticamente. En equipos reales, hda/sda puede ser el disco de
+   * arranque del usuario. Reactivar solo cuando exista una imagen FAT32
+   * dedicada a tests y el driver pueda identificarla explícitamente.
+   *
+   * Mientras tanto, todos los tests que dependan de este helper se omiten.
+   */
   return NULL;
 }
 
