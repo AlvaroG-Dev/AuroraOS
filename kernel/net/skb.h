@@ -25,7 +25,7 @@
 
 struct netif;
 
-#define SKB_POOL_SIZE 256
+#define SKB_POOL_SIZE 2048 // 4 MB total (pool + buffers)
 #define SKB_BUF_SIZE 2048
 #define SKB_DEFAULT_HEADROOM 64
 
@@ -48,6 +48,7 @@ typedef struct skb {
   uint8_t ttl; // [Fase 6e] TTL del último header IP que lo tocó
   struct netif *netif;
   struct skb *next; // para colas
+  uint32_t tcp_seq; // sequence number cuando está en la cola TCP fuera de orden
 } skb_t;
 
 // Inicializa el pool. Llamar una vez en net_init().

@@ -1,21 +1,63 @@
 // kernel/net/tcp.h
 //
-// TCP (RFC 793). Fase 7a: parseo, checksum y tabla de conexiones.
-// El state machine se añade en Fase 7b.
+// TCP (RFC 793) + extensiones:
+//   - Window scaling (RFC 7323)
+//   - Congestion control (RFC 5681): slow start + congestion avoidance
+//   - RTO dinámico (RFC 6298): Jacobson/Karels
+//   - Fast retransmit + fast recovery (NewReno, RFC 6582)
+//   - Autotune de la ventana de recepción (basado en rate × RTT)
+//   - Cola de retransmisión con timers
 
 #ifndef KERNEL_NET_TCP_H
 #define KERNEL_NET_TCP_H
 
+#include "../spinlock.h"
 #include "../wait.h"
 #include "skb.h"
 #include <stddef.h>
 #include <stdint.h>
 
+// ---------------------------------------------------------------------------
+// Constantes del protocolo
+// ---------------------------------------------------------------------------
 #define TCP_HDR_MIN_LEN 20
 #define TCP_HDR_MAX_LEN 60
-#define TCP_ACCEPT_MAX 8 // [Fase 7d] cola de conexiones aceptadas por listener
+#define TCP_ACCEPT_MAX 8
 
-// Flags (9 bits bajos de offset 12-13).
+// MSS para TAP + MTU 1500. Con SLiRP usa 1300.
+#define TCP_RX_MSS 1460
+
+// Buffer máximo del kernel por conexión. Techo que autotune puede alcanzar.
+#define TCP_RX_BUFFER_BYTES (4u * 1024u * 1024u) // 4 MB
+#define TCP_RX_MAX_SKBS 4096                     // 4096 × 1460 = 5.8 MB
+
+// Autotune: ventana inicial pequeña para arrancar; crece en función del
+// rate medido × RTT. Nunca baja del mínimo. Nunca sube del techo.
+#define TCP_RX_WINDOW_INIT (64u * 1024u)    // 64 KB al arrancar
+#define TCP_RX_WINDOW_MIN (8u * TCP_RX_MSS) // 8 MSS ≈ 11.7 KB
+
+// Shift de window scaling. Con 4 MB >> 7 = 32768, cabe en uint16.
+#define TCP_WSCALE_SHIFT 7
+#define TCP_PEER_WINDOW_MAX (4u * 1024u * 1024u)
+
+// RTO bounds (RFC 6298). Floor bajo para que TAP reaccione rápido.
+#define TCP_RTO_MIN_MS 200ULL
+#define TCP_RTO_MAX_MS 60000ULL
+#define TCP_RTO_INITIAL_MS 1000ULL
+
+// Umbral de dup ACKs para fast retransmit (RFC 5681).
+#define TCP_DUP_ACK_THRESHOLD 3
+
+// Autotune: sampling cada N ms.
+#define TCP_AUTOTUNE_SAMPLE_MS 200ULL
+
+// Autotune: RTT mínimo usado en la fórmula. Con RTT real de 0.1 ms (local)
+// la fórmula daría un target minúsculo; forzamos 20 ms como floor.
+#define TCP_AUTOTUNE_RTT_FLOOR_MS 20
+
+// ---------------------------------------------------------------------------
+// Flags
+// ---------------------------------------------------------------------------
 #define TCP_FIN 0x001
 #define TCP_SYN 0x002
 #define TCP_RST 0x004
@@ -26,7 +68,6 @@
 #define TCP_CWR 0x080
 #define TCP_NS 0x100
 
-// Estados de la conexión. Fase 7b+ los usa; en 7a solo CLOSED/LISTEN.
 enum tcp_state {
   TCP_STATE_CLOSED = 0,
   TCP_STATE_LISTEN,
@@ -41,48 +82,35 @@ enum tcp_state {
   TCP_STATE_TIME_WAIT,
 };
 
-// Header parseado.
 typedef struct {
   uint16_t sport;
   uint16_t dport;
   uint32_t seq;
   uint32_t ack;
-  uint8_t data_offset; // en palabras de 4 bytes
-  uint16_t flags;      // bits TCP_*
+  uint8_t data_offset;
+  uint16_t flags;
   uint16_t window;
   uint16_t csum;
   uint16_t urgent;
-  size_t hdr_len; // data_offset * 4
+  size_t hdr_len;
 } tcp_hdr_t;
 
-// Parsea un segmento TCP (sin Ethernet, sin IP). Devuelve 0 si OK,
-// -EINVAL si mal formado (truncado, data_offset < 5, hdr_len > seg_len).
 int tcp_parse_header(const uint8_t *seg, size_t seg_len, tcp_hdr_t *out);
-
-// Verifica checksum con pseudo-header IPv4. 0 si OK, -1 si mal.
 int tcp_checksum_verify(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg,
                         size_t seg_len);
-
-// Calcula checksum. El llamante debe haber puesto seg[16..17] = 0.
 uint16_t tcp_checksum(uint32_t src_ip, uint32_t dst_ip, const uint8_t *seg,
                       size_t seg_len);
-
-// Inicializa el módulo y registra IPPROTO_TCP en ip.
 void tcp_init(void);
 
-// ---------------------------------------------------------------------------
-// Conexiones. Struct público para simplicidad en 7a; si en 7b+ hace falta
-// encapsular, se añaden accessors y se hace opaco.
-// ---------------------------------------------------------------------------
 typedef struct tcp_conn tcp_conn_t;
 
-// Handler llamado cuando llega un segmento para una conexión existente.
-// El skb tiene el header TCP NO quitado (el handler decide si lo quita).
-// El handler es responsable de consumir el skb (free o reuso).
 typedef void (*tcp_conn_handler_t)(tcp_conn_t *c, skb_t *skb,
                                    const tcp_hdr_t *hdr, uint32_t src_ip,
                                    uint32_t dst_ip);
 
+// ---------------------------------------------------------------------------
+// Estado por conexión
+// ---------------------------------------------------------------------------
 struct tcp_conn {
   enum tcp_state state;
   uint32_t local_ip;
@@ -92,115 +120,119 @@ struct tcp_conn {
   tcp_conn_handler_t handler;
   struct tcp_conn *next;
 
+  // Espacio de secuencia
   uint32_t snd_isn;
-  uint32_t snd_una;
-  uint32_t snd_nxt;
-  uint32_t rcv_nxt;
+  uint32_t snd_una; // primer byte sin ACK
+  uint32_t snd_nxt; // próximo byte a enviar
+  uint32_t rcv_nxt; // próximo byte esperado del peer
 
+  // Handshake
   wait_queue_t handshake_wq;
   int handshake_ok;
+  uint64_t syn_sent_tick; // para medir RTT inicial
 
-  // [Fase 7c] Cola RX de datos ya ACKeadeados. El consumidor (test o
-  // socket) hace tcp_recv() y saca de aquí.
+  // Cola de RX
   wait_queue_t rx_wq;
+  spinlock_t rx_lock;
   skb_t *rx_head;
   skb_t *rx_tail;
   int rx_count;
+  skb_t *ooo_head; // out-of-order
+  int ooo_count;
+  size_t rx_buffered_bytes;
+  uint16_t rcv_last_window; // último wire window anunciado
+  uint32_t pending_fin_seq;
+  int pending_fin;
 
-  // [Fase 7d] LISTEN y cola de aceptados.
-  int is_listener;              // 1 si state == LISTEN
-  wait_queue_t accept_wq;       // despierta a tcp_accept
-  struct tcp_conn *accept_head; // cola FIFO de hijos ESTABLISHED
+  // Listener
+  int is_listener;
+  wait_queue_t accept_wq;
+  struct tcp_conn *accept_head;
   struct tcp_conn *accept_tail;
-  struct tcp_conn *accept_next;     // enlace en la cola del listener
-  struct tcp_conn *parent_listener; // NULL si no vino de un listener
+  struct tcp_conn *accept_next;
+  struct tcp_conn *parent_listener;
   int accept_count;
 
-  int peer_closed; // [7f] 1 = el peer ya envió FIN
+  int peer_closed;
+
+  // MSS del peer (SYN o SYN-ACK)
+  uint16_t peer_mss;
+
+  // Ventana del peer (send window para nosotros) YA ESCALADA
+  uint32_t peer_window;
+  uint64_t peer_window_tick;
+
+  // Congestión
+  uint32_t cwnd;
+  uint32_t ssthresh;
+
+  // WSCALE negociado (RFC 7323)
+  uint8_t snd_wscale; // shift a aplicar a las ventanas del peer
+  uint8_t rcv_wscale; // shift que anunciamos
+  uint8_t wscale_negotiated;
+  uint8_t _pad_wscale;
+
+  // Cola de retransmisión
+  skb_t *rtx_head;
+  skb_t *rtx_tail;
+  int rtx_count;
+  int rtx_consec_retries;
+  int rtx_total_retries;
+  uint64_t last_ack_tick;
+
+  int pending_window_update;
+
+  // [AUTOTUNE] Ventana de recepción dinámica
+  uint32_t rcv_window_target; // lo que anunciamos ahora
+  uint32_t rcv_window_max;    // techo
+  uint32_t rcv_window_min;    // suelo
+  uint64_t rcv_sample_tick;   // último sample
+  uint64_t rcv_sample_bytes;  // bytes entregados desde el último sample
+
+  // [RTT] Estimación de RTT (Jacobson/Karels)
+  uint32_t srtt_ms;        // Smoothed RTT
+  uint32_t rttvar_ms;      // Variación
+  uint32_t rto_ms;         // RTO calculado
+  int rtt_measured;        // 1 si srtt ya tiene un sample
+  uint32_t rtt_probe_seq;  // último end_seq enviado con payload
+  uint64_t rtt_probe_tick; // tick en que se envió
+  int rtt_probe_outstanding;
+
+  // [FAST RETRANSMIT] Detección de dup ACKs
+  uint32_t dup_ack_count;
+  int in_fast_recovery;
+  uint32_t recover_seq; // seq hasta el que estamos en fast recovery
+
+  // Trazas (una vez por conexión)
+  int trace_tx_payload_logged;
+  int trace_rx_payload_logged;
+  int trace_rx_app_logged;
+  int trace_ack_error_logged;
+  int trace_rx_empty_wait_logged;
+  uint64_t rx_total_queued;
+  uint64_t rx_total_consumed;
+  uint64_t rate_ewma_kbps; // [AUTOTUNE] rate suavizado (KB/s)
 };
 
-// Crea una conexión en TCP_STATE_CLOSED con todos los campos a 0.
-// Devuelve NULL si la tabla está llena.
 tcp_conn_t *tcp_conn_alloc(void);
-
-// Devuelve la conexión a la tabla libre (no la quita del hash; usar
-// tcp_conn_remove antes si está insertada).
 void tcp_conn_free(tcp_conn_t *c);
-
-// Inserta en el hash. El llamante debe haber rellenado el 4-tuple.
-// Devuelve 0 si OK, -EEXIST si ya existe una idéntica, -EINVAL si
-// algún campo está a 0.
 int tcp_conn_insert(tcp_conn_t *c);
-
-// Quita del hash. Idempotente.
 void tcp_conn_remove(tcp_conn_t *c);
-
-// Busca por (local_ip, local_port, remote_ip, remote_port).
-// Devuelve NULL si no existe.
 tcp_conn_t *tcp_conn_lookup(uint32_t lip, uint16_t lp, uint32_t rip,
                             uint16_t rp);
-
-// Vacía la tabla (para tests y para reconfiguración).
 void tcp_flush(void);
 
-// ---------------------------------------------------------------------------
-// [Fase 7b] Handshake activo.
-// ---------------------------------------------------------------------------
-
-// Conecta a (remote_ip, remote_port). Bloquea hasta que la conexión
-// está ESTABLISHED, hasta `timeout_ms`, o hasta error.
-//   - El socket ya debe estar bound (local_ip/local_port rellenos).
-//   - Devuelve 0 si OK, -ETIMEDOUT/-EINVAL/-ENOMEM si falla.
-// La conexión queda insertada en la tabla hash y lista para send/recv
-// (que llegarán en 7c).
 int tcp_connect(tcp_conn_t *c, uint32_t remote_ip, uint16_t remote_port,
                 uint64_t timeout_ms);
-
-// ---------------------------------------------------------------------------
-// [Fase 7c] Envío y recepción
-// ---------------------------------------------------------------------------
-
-// Envía `len` bytes como uno o más segmentos TCP. Un solo segmento en
-// esta fase (no fragmentamos por MSS).
-//   - c debe estar ESTABLISHED.
-//   - Bloqueante hasta que se copia al skb y sale por la NIC.
-// Devuelve `len` si OK, <0 si error.
 int tcp_send(tcp_conn_t *c, const void *buf, size_t len);
-
-// Recibe hasta `len` bytes de la cola RX. Si no hay datos:
-//   - timeout_ms == 0    → bloquea indefinidamente.
-//   - timeout_ms >  0    → bloquea hasta timeout_ms.
-// Devuelve >0 bytes copiados, 0 si el peer cerró, -ETIMEDOUT/-EINTR.
 int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms);
-
-// ---------------------------------------------------------------------------
-// [Fase 7d] Servidor pasivo: listen / accept
-// ---------------------------------------------------------------------------
-
-// Pone la conexión en LISTEN sobre (local_ip, local_port).
-//   local_ip == 0 → se autoselecciona del primer netif con IP != 0.
-// La conexión queda insertada en la tabla hash y lista para aceptar SYN.
-// Devuelve 0 si OK, <0 si error.
 int tcp_listen(tcp_conn_t *c, uint32_t local_ip, uint16_t local_port);
-
-// Bloquea hasta que haya una conexión aceptada en la cola del listener.
-//   timeout_ms == 0 → devuelve NULL inmediatamente si no hay ninguna.
-//   timeout_ms >  0 → espera hasta timeout_ms.
-// Devuelve la conn hija en ESTABLISHED (el llamante la posee: debe
-// llamar a tcp_conn_remove + tcp_conn_free cuando termine), o NULL si
-// no hay / timeout.
 tcp_conn_t *tcp_accept(tcp_conn_t *listener, uint64_t timeout_ms);
-
-// [Fase 7e] Cierra una conexión TCP: envía FIN si está ESTABLISHED y
-// libera la conn. MVP sin esperar ACK del FIN (Fase 7f añadirá
-// TIME_WAIT y demás). Idempotente con NULL.
 void tcp_close(tcp_conn_t *c);
-
-// [Fase 7e] Igual que tcp_recv pero sin bloquear: si no hay datos,
-// devuelve -EAGAIN inmediatamente.
 int tcp_recv_nonblock(tcp_conn_t *c, void *buf, size_t len);
+int tcp_is_readable(tcp_conn_t *c);
+int tcp_peer_closed(tcp_conn_t *c);
 
-// [7f] ¿El peer ya cerró su lado? Tras esto, tcp_recv devolverá 0.
-int tcp_peer_closed(const tcp_conn_t *c);
+void tcp_timer_tick(void);
 
 #endif

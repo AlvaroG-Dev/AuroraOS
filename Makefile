@@ -244,6 +244,28 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
+# Git HTTP(S) transport helper. Git delegates URL transports to this binary.
+# ---------------------------------------------------------------------------
+	@echo "[Makefile] Instalando helper HTTP(S) de Git..."
+	@helper=/usr/lib/git-core/git-remote-http; \
+	if [ ! -x "$$helper" ]; then \
+		echo "[Makefile]   ERROR: no se encontró $$helper"; \
+		exit 1; \
+	fi; \
+	mkdir -p sysroot/usr/lib/git-core \
+	         sysroot/lib/x86_64-linux-gnu \
+	         sysroot/usr/lib/x86_64-linux-gnu; \
+	cp -Lf "$$helper" sysroot/usr/lib/git-core/git-remote-http; \
+	ln -sf git-remote-http sysroot/usr/lib/git-core/git-remote-https; \
+	ldd "$$helper" | awk '{ for (i = 1; i <= NF; i++) if ($$i ~ /^\//) { print $$i; break } }' | \
+	while IFS= read -r dep; do \
+		if [ -f "$$dep" ]; then \
+			cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
+			cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
+		fi; \
+	done
+
+# ---------------------------------------------------------------------------
 # /bin/sh: los programas de Ubuntu hacen execve("/bin/sh") en muchos sitios.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando /bin/sh (dash)..."
@@ -300,8 +322,8 @@ image: bootloader kernel user
 	cp bootloader/aurora.conf esp/etc/aurora.conf
 
 	@if [ ! -f aurora.img ]; then \
-		echo "[Makefile] Creando aurora.img (primera vez, 256 MB)..."; \
-		dd if=/dev/zero of=aurora.img bs=1M count=256 status=none; \
+		echo "[Makefile] Creando aurora.img (primera vez, 512 MB)..."; \
+		dd if=/dev/zero of=aurora.img bs=1M count=512 status=none; \
 		mkfs.fat -F 32 -s 4 -S 512 aurora.img >/dev/null; \
 	else \
 		echo "[Makefile] Reutilizando aurora.img existente (persistente)"; \

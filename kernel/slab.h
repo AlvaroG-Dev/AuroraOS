@@ -2,63 +2,49 @@
 #ifndef KERNEL_SLAB_H
 #define KERNEL_SLAB_H
 
+#include "memlayout.h"
 #include "spinlock.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "memlayout.h"
-#include "memlayout.h"
-
-// SLAB allocator para objetos pequeños. Caches por tamaño:
-// 16, 32, 64, 128, 256, 512, 1024, 2048 bytes.
-//
-// Los objetos de tamaño <= SLAB_MAX_SIZE se sirven desde aquí.
-// Los más grandes van al heap first-fit (heap.c).
-//
-// Región virtual: SLAB_VMA .. slab_top. Separada del heap para que
-// slab_is_slab_ptr() sea trivial (comparación de rango) y no haya
-// falsos positivos con punteros del heap.
 
 #define SLAB_MAX_SIZE 2048
 #define SLAB_NUM_CACHES 8
 
-// Tamaños de objeto soportados. Deben estar en orden ascendente.
 extern const size_t slab_sizes[SLAB_NUM_CACHES];
 
 typedef struct slab_header slab_header_t;
 
 typedef struct slab_cache {
-  spinlock_t lock;      // protege slabs, freelist, contadores
-  size_t obj_size;      // tamaño del objeto (redondeado a 8)
-  size_t objs_per_slab; // objetos por slab (>=1)
-  slab_header_t *slabs; // lista enlazada de slabs del cache
-  size_t slabs_count;   // número de slabs en la lista
-  size_t used_count;    // objetos actualmente en uso
-  size_t total_count;   // objetos asignados en slabs
-  const char *name;     // para debug
+  spinlock_t lock;
+  size_t obj_size;
+  size_t objs_per_slab;
+
+  slab_header_t *slabs;       // slabs con al menos 1 objeto en uso
+  slab_header_t *empty_slabs; // slabs vacíos, listos para reuso rápido
+
+  size_t slabs_count; // entradas en c->slabs
+  size_t empty_count; // entradas en c->empty_slabs
+  size_t used_count;  // objetos en uso
+  size_t total_count; // objetos en c->slabs (activos)
+
+  const char *name;
 } slab_cache_t;
 
-// Inicializa todas las caches. Debe llamarse DESPUÉS de heap_init.
 void slab_init(void);
-
-// Alloc/free para objetos pequeños. Llamados por kmalloc/kfree.
-// Devuelven NULL si size == 0 o size > SLAB_MAX_SIZE.
 void *slab_alloc(size_t size);
 void slab_free(void *ptr);
 
-// ¿Es 'ptr' un puntero servido por SLAB?
-// (usa comparación de rango, no mira magic ni cabeceras)
 int slab_is_slab_ptr(const void *ptr);
-
-// Tamaño usable del objeto (útil para krealloc). 0 si ptr no es SLAB.
 size_t slab_usable_size(const void *ptr);
 
-// [HARDENING] Límites del rango virtual del SLAB. Usados por sched.c
-// para validar que un puntero a task_t cae dentro del allocator antes
-// de escribir en él.
+// [HARDENING] Límites del rango virtual del SLAB.
 uint64_t slab_vma_start(void);
 uint64_t slab_vma_end(void);
 
-// Debug
+// [NUEVO] Devuelve páginas al PMM hasta liberar ~bytes.
+// Devuelve los bytes realmente liberados.
+size_t slab_reclaim_pages(size_t target_bytes);
+
 void slab_dump_stats(void);
 
 #endif

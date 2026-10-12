@@ -166,6 +166,10 @@ typedef struct vfs_ops {
   // soporte real (ext2, tmpfs) lo implementan. tarfs (RO) deja NULL
   // → EROFS. FAT32 no puede → EPERM.
   int (*link)(vfs_node_t *dir, const char *name, vfs_node_t *target);
+
+  // [FIX-PERF] Sincroniza los datos sucios de este nodo al medio.
+  // Solo FS con caché en RAM lo implementan. NULL → no-op.
+  int (*fsync)(vfs_node_t *node);
 } vfs_ops_t;
 
 struct vfs_node {

@@ -560,8 +560,7 @@ int socket_is_readable(socket_t *s) {
   if (!s)
     return 0;
   if (s->is_tcp)
-    return s->tcp && (s->tcp->rx_count > 0 || s->tcp->peer_closed ||
-                      s->tcp->state == TCP_STATE_CLOSED);
+    return tcp_is_readable(s->tcp);
   return socket_has_data(s);
 }
 
@@ -640,6 +639,23 @@ static int socket_recv_tcp(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
       *would_block = 1;
   } else {
     n = tcp_recv(s->tcp, buf, len, s->rcvtimeo_ms);
+  }
+  if (n > 0 &&
+      !__atomic_exchange_n(&s->tcp->trace_rx_app_logged, 1,
+                           __ATOMIC_RELAXED)) {
+    unsigned long flags = spin_lock_irqsave(&s->tcp->rx_lock);
+    uint64_t received = s->tcp->rx_total_consumed;
+    size_t buffered = s->tcp->rx_buffered_bytes;
+    int rx_count = s->tcp->rx_count;
+    int ooo_count = s->tcp->ooo_count;
+    uint32_t expected = s->tcp->rcv_nxt;
+    spin_unlock_irqrestore(&s->tcp->rx_lock, flags);
+    LOG_INFO("[TCP] primer payload entregado a app local=%u remote=%u "
+             "read=%d requested=%lu total=%lu buffered=%lu rx_skbs=%d "
+             "ooo=%d rcv_nxt=%u",
+             s->local_port, s->remote_port, n, (unsigned long)len,
+             (unsigned long)received, (unsigned long)buffered, rx_count,
+             ooo_count, expected);
   }
   if (n >= 0) {
     if (src_ip)

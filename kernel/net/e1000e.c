@@ -91,6 +91,15 @@
 #define DESC_COUNT 256
 #define BUF_SIZE 2048
 
+// Máx. de descriptors RX procesados por pasada y cada cuántos se
+// devuelve RDT al HW (evita escribir MMIO por cada paquete).
+#define RX_BUDGET 64
+#define RX_RDT_BATCH 16
+// Timeout de seguridad del kthread RX (ms). Con MSI solo es una red de
+// seguridad ante IRQs perdidas; sin MSI es el periodo de polling.
+#define RX_POLL_MS_MSI 10
+#define RX_POLL_MS_POLLING 1
+
 typedef struct __attribute__((packed)) {
   uint64_t addr;
   uint16_t length;
@@ -136,6 +145,8 @@ static uint32_t g_rx_tail; // próximo descriptor a procesar
 static uint32_t g_tx_head; // próximo descriptor a usar
 static spinlock_t g_lock;
 static volatile int g_rx_poll_active;
+static volatile int g_rx_pending;
+static wait_queue_t g_rx_wq;
 static int g_initialized;
 static int g_started;
 static int g_use_msi;
@@ -303,8 +314,11 @@ static int e1000e_transmit(netif_t *netif, skb_t *skb) {
   d->special = 0;
 
   g_tx_head = (g_tx_head + 1) % DESC_COUNT;
+  // El descriptor debe ser visible antes de avanzar TDT. La escritura MMIO
+  // es posted: no hace falta leer un registro para "flushear" (esa lectura
+  // costaba un exit/espera por cada paquete enviado).
+  __sync_synchronize();
   e1000_write(E1000_TDT, g_tx_head);
-  e1000_flush();
 
   spin_unlock_irqrestore(&g_lock, flags);
   skb_free(skb);
@@ -323,19 +337,25 @@ static int e1000e_close(netif_t *netif) {
 // ---------------------------------------------------------------------------
 // RX polling
 // ---------------------------------------------------------------------------
-void e1000e_poll(void) {
+// Estadísticas de diagnóstico (solo contadores, sin lock).
+static volatile uint32_t
+    g_stat_timeout_hits;                   // pasadas con paquetes tras timeout
+static volatile uint32_t g_stat_irq_wakes; // despertares por MSI
+
+// Procesa hasta RX_BUDGET descriptors. Devuelve cuántos ha consumido.
+static int e1000e_poll_batch(void) {
   if (!g_initialized)
-    return;
+    return 0;
 
   // El hilo RX y el MSI pueden entrar mientras netif_rx procesa un paquete
   // con g_lock liberado. Solo un consumidor puede avanzar el ring y despachar
   // paquetes, para no duplicar descriptors ni entregar TCP fuera de orden.
   if (__atomic_exchange_n(&g_rx_poll_active, 1, __ATOMIC_ACQUIRE))
-    return;
+    return 0;
 
+  int done = 0;
   unsigned long flags = spin_lock_irqsave(&g_lock);
-  int budget = DESC_COUNT;
-  while (budget-- > 0) {
+  while (done < RX_BUDGET) {
     e1000e_rx_desc_t *d = &g_rx_ring[g_rx_tail];
     if (!(d->status & RX_DD))
       break;
@@ -344,20 +364,22 @@ void e1000e_poll(void) {
     if (len > 0) {
       // El descriptor puede tener errores; los descartamos.
       if (d->errors == 0) {
-        skb_t *s = skb_alloc();
-        if (s) {
-          uint8_t *p = (uint8_t *)skb_put(s, len);
+        skb_t *sk = skb_alloc();
+        if (sk) {
+          uint8_t *p = (uint8_t *)skb_put(sk, len);
           if (p) {
             memcpy(p, (const uint8_t *)phys_to_virt(d->addr), len);
-            s->netif = &g_nic;
-            // Pasar por netif_rx SIN soltar g_lock: netif_rx es
-            // reentrante respecto a este lock porque no lo toca.
+            sk->netif = &g_nic;
+            // Pasar por netif_rx SIN g_lock: netif_rx no lo toca y el
+            // camino TCP puede transmitir (ACK) y necesita g_lock.
             spin_unlock_irqrestore(&g_lock, flags);
-            netif_rx(s);
+            netif_rx(sk);
             flags = spin_lock_irqsave(&g_lock);
           } else {
-            skb_free(s);
+            skb_free(sk);
           }
+        } else {
+          g_nic.rx_dropped++;
         }
       } else {
         g_nic.rx_errors++;
@@ -368,49 +390,68 @@ void e1000e_poll(void) {
     d->status = 0;
     d->errors = 0;
     d->length = 0;
-
     g_rx_tail = (g_rx_tail + 1) % DESC_COUNT;
-    // RDT apunta al ÚLTIMO descriptor que el HW puede escribir. Con
-    // tail como "próximo a procesar", el último disponible es
-    // (tail - 1 + COUNT) % COUNT.
-    uint32_t rdt = (g_rx_tail + DESC_COUNT - 1) % DESC_COUNT;
-    e1000_write(E1000_RDT, rdt);
-    e1000_flush();
+    done++;
+
+    // RDT apunta al ÚLTIMO descriptor que el HW puede escribir
+    // ((tail - 1) mod COUNT). Lo actualizamos por lotes, sin lectura de
+    // flush: antes eran 2 accesos MMIO por paquete.
+    if ((done & (RX_RDT_BATCH - 1)) == 0)
+      e1000_write(E1000_RDT, (g_rx_tail + DESC_COUNT - 1) % DESC_COUNT);
   }
+  if (done & (RX_RDT_BATCH - 1))
+    e1000_write(E1000_RDT, (g_rx_tail + DESC_COUNT - 1) % DESC_COUNT);
   spin_unlock_irqrestore(&g_lock, flags);
   __atomic_store_n(&g_rx_poll_active, 0, __ATOMIC_RELEASE);
+  return done;
 }
 
+void e1000e_poll(void) { (void)e1000e_poll_batch(); }
+
 // ---------------------------------------------------------------------------
-// Kthread de polling
+// Kthread de RX
 // ---------------------------------------------------------------------------
-// Condición que siempre devuelve false: usamos
-// wait_event_interruptible_timeout solo por su timeout.
-static bool e1000e_wait_never(void *arg) {
+static bool e1000e_rx_pending(void *arg) {
   (void)arg;
-  return false;
+  return __atomic_load_n(&g_rx_pending, __ATOMIC_ACQUIRE) != 0;
 }
 
 static void e1000e_rx_thread(void) {
   LOG_INFO("[E1000E] kthread RX arrancado (msi=%d)", g_use_msi);
 
-  wait_queue_t dummy_wq;
-  wait_queue_init(&dummy_wq);
-
-  // MSI es el camino rápido; este polling frecuente recupera paquetes si se
-  // pierde una notificación o coincide con un poll ya activo.
-  const uint64_t interval = 5;
-
+  int woke_by_timeout = 0;
   while (1) {
-    e1000e_poll();
-    (void)wait_event_interruptible_timeout(&dummy_wq, e1000e_wait_never, NULL,
-                                           interval);
+    __atomic_store_n(&g_rx_pending, 0, __ATOMIC_RELEASE);
+    int n = e1000e_poll_batch();
+
+    if (n > 0 && woke_by_timeout && g_use_msi) {
+      // Había paquetes esperando y el MSI no nos despertó: la IRQ no se
+      // está entregando (o llega tarde). Diagnóstico para dmesg.
+      uint32_t c = ++g_stat_timeout_hits;
+      if ((c & 0x3FF) == 1)
+        LOG_WARN("[E1000E] %u pasadas RX recogidas por timeout con MSI activo "
+                 "(irq_wakes=%u): el MSI no llega o llega tarde",
+                 c, g_stat_irq_wakes);
+    }
+    woke_by_timeout = 0;
+
+    if (n >= RX_BUDGET)
+      continue; // posible backlog: otra pasada sin dormir
+
+    if (!e1000e_rx_pending(NULL)) {
+      long r = wait_event_interruptible_timeout(
+          &g_rx_wq, e1000e_rx_pending, NULL,
+          g_use_msi ? RX_POLL_MS_MSI : RX_POLL_MS_POLLING);
+      if (r == 0)
+        woke_by_timeout = 1;
+      else if (r > 0)
+        g_stat_irq_wakes++;
+    }
   }
 }
 
-// Handler MSI del e1000e. Solo lee ICR (auto-clear) y delega el trabajo
-// al polling (que ya está preparado para ser llamado desde IRQ context:
-// toma spin_lock_irqsave y suelta el lock antes de netif_rx).
+// Handler MSI del e1000e. Solo lee ICR y despierta el consumidor RX; el
+// despacho IP/TCP se mantiene fuera del contexto de interrupción.
 static void e1000e_msi_handler(void) {
   if (!g_initialized)
     return;
@@ -429,7 +470,8 @@ static void e1000e_msi_handler(void) {
   // RX: procesar el ring. Cubre RXT0, RXDMT0, RXO y RXSEQ.
   if (icr &
       (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO | E1000_ICR_RXSEQ)) {
-    e1000e_poll();
+    __atomic_store_n(&g_rx_pending, 1, __ATOMIC_RELEASE);
+    wake_up_one(&g_rx_wq);
   }
 }
 // ---------------------------------------------------------------------------
@@ -441,6 +483,8 @@ int e1000e_init(void) {
 
   spin_init(&g_lock);
   __atomic_store_n(&g_rx_poll_active, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&g_rx_pending, 0, __ATOMIC_RELAXED);
+  wait_queue_init(&g_rx_wq);
 
   // 1) Localizar la NIC por vendor/device.
   int found = 0;

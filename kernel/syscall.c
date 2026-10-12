@@ -48,6 +48,8 @@
 
 extern void syscall_entry(void);
 
+#define MSG_BUFFER_MAX 65536
+
 // ---------------------------------------------------------------------------
 // Trap frame del syscall en curso. Almacenamiento per-task. Ver
 // sched.h:task_t.syscall_regs para el porqué del cambio desde global.
@@ -4111,9 +4113,14 @@ static int64_t k_fsync(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
-  if ((int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+  int kfd = (int)fd;
+  if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
     return -EBADF;
-  // FAT32 sincroniza en cada write. tarfs es RO. Nada que hacer.
+  vfs_node_t *node = proc->fds[kfd]->node;
+  if (!node)
+    return -EBADF;
+  if (node->ops && node->ops->fsync)
+    return node->ops->fsync(node);
   return 0;
 }
 
@@ -4956,7 +4963,11 @@ static int64_t k_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
   if (!access_ok((void *)buf, (size_t)len))
     return -EFAULT;
 
-  void *k = kmalloc(len);
+  // [FIX-PERF] Buffer en pila para reads pequeños (<= 512 B), kmalloc
+  // para el resto. Antes era una pila fija de 4 KB que rompía
+  // -Wframe-larger-than y no aportaba nada en reads grandes de TLS.
+  uint8_t stack_buf[512];
+  void *k = (len <= sizeof(stack_buf)) ? (void *)stack_buf : kmalloc(len);
   if (!k)
     return -ENOMEM;
 
@@ -4965,15 +4976,18 @@ static int64_t k_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
   int wb = 0;
   int n = socket_recvfrom(s, k, len, &sip, &sp, &wb);
   if (n < 0) {
-    kfree(k);
+    if (k != stack_buf)
+      kfree(k);
     return (wb && socket_is_nonblock(s)) ? -EAGAIN : n;
   }
 
   if (copy_to_user((void *)buf, k, n) < 0) {
-    kfree(k);
+    if (k != stack_buf)
+      kfree(k);
     return -EFAULT;
   }
-  kfree(k);
+  if (k != stack_buf)
+    kfree(k);
 
   if (addr) {
     struct k_sockaddr_in sa;
@@ -5224,8 +5238,6 @@ static int64_t k_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen,
   return r;
 }
 
-#define MSG_BUFFER_MAX 65536
-
 static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
                          uint64_t a4, uint64_t a5) {
   (void)flags;
@@ -5350,24 +5362,47 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   if (copy_from_user(&mh, (void *)msg_uptr, sizeof(mh)) < 0)
     return -EFAULT;
 
-  void *kbuf = kmalloc(MSG_BUFFER_MAX);
+  // [FIX] Calcular primero cuánto necesitamos realmente. Antes era
+  // kmalloc(65536) en cada llamada, lo cual fragmenta el heap y añade
+  // latencia en handshakes TLS (decenas de recvmsg seguidos).
+  size_t want = 0;
+  struct k_iovec iovs[16];
+  uint64_t iovcnt = mh.msg_iovlen;
+  for (uint64_t done = 0; done < iovcnt;) {
+    uint64_t batch = iovcnt - done;
+    if (batch > 16)
+      batch = 16;
+    if (copy_from_user(iovs,
+                       (void *)(mh.msg_iov + done * sizeof(struct k_iovec)),
+                       batch * sizeof(struct k_iovec)) < 0)
+      return -EFAULT;
+    for (uint64_t i = 0; i < batch; i++) {
+      if (iovs[i].iov_len > MSG_BUFFER_MAX - want)
+        return -EMSGSIZE;
+      want += iovs[i].iov_len;
+    }
+    done += batch;
+  }
+  if (want == 0)
+    want = 1;
+  if (want > MSG_BUFFER_MAX)
+    want = MSG_BUFFER_MAX;
+
+  void *kbuf = kmalloc(want);
   if (!kbuf)
     return -ENOMEM;
 
   uint32_t sip = 0;
   uint16_t sp = 0;
   int wb = 0;
-  int n = socket_recvfrom(s, kbuf, MSG_BUFFER_MAX, &sip, &sp, &wb);
+  int n = socket_recvfrom(s, kbuf, want, &sip, &sp, &wb);
   if (n < 0) {
     kfree(kbuf);
     return (wb && socket_is_nonblock(s)) ? -EAGAIN : n;
   }
 
-  // Repartir entre los iovecs.
   size_t left = (size_t)n;
   size_t off = 0;
-  struct k_iovec iovs[16];
-  uint64_t iovcnt = mh.msg_iovlen;
   for (uint64_t done = 0; done < iovcnt && left > 0;) {
     uint64_t batch = iovcnt - done;
     if (batch > 16)
@@ -5400,27 +5435,21 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   }
   kfree(kbuf);
 
-  // [Fase 6e] Emitir cmsg IP_TTL si el caller lo pidió.
-  // struct cmsghdr x86_64: 16 bytes (u64 cmsg_len + int cmsg_level + int
-  // cmsg_type). IPPROTO_IP = 0, IP_TTL = 2. CMSG_LEN(4) = 20; CMSG_SPACE(4) =
-  // 24 (alineado a 8).
   int wrote_cmsg = 0;
   if (mh.msg_control && mh.msg_controllen >= 24) {
     uint8_t cmsg[24];
     memset(cmsg, 0, sizeof(cmsg));
-    *(uint64_t *)(cmsg + 0) = 20; // cmsg_len
-    *(int32_t *)(cmsg + 8) = 0;   // cmsg_level = IPPROTO_IP
-    *(int32_t *)(cmsg + 12) = 2;  // cmsg_type = IP_TTL
+    *(uint64_t *)(cmsg + 0) = 20;
+    *(int32_t *)(cmsg + 8) = 0;
+    *(int32_t *)(cmsg + 12) = 2;
     int32_t ttl = (int32_t)socket_get_last_ttl(s);
     *(int32_t *)(cmsg + 16) = ttl;
     if (access_ok((void *)mh.msg_control, 24)) {
-      if (copy_to_user((void *)mh.msg_control, cmsg, 24) == 0) {
+      if (copy_to_user((void *)mh.msg_control, cmsg, 24) == 0)
         wrote_cmsg = 1;
-      }
     }
   }
 
-  // Rellenar msg_name con el origen.
   struct k_msghdr out = mh;
   if (mh.msg_name) {
     struct k_sockaddr_in sa;
@@ -6696,10 +6725,10 @@ uint64_t syscall_handler_c(registers_t *regs) {
 
   // [DIAG] Retornos negativos: solo logueamos los "interesantes".
   // openat/stat/readlink ENOENT son sondas normales de git/coreutils
-  // (buscan loose objects, dotfiles opcionales, ...). En un clone de
-  // git.git son >100k por segundo, y cada LOG_INFO coge el spinlock
-  // global de klog con IRQs off → la IRQ de la NIC se retrasa 1.5s
-  // → el peer retransmite por RTO → dup-ACK. No es TCP: es el log.
+  // (buscan loose objects, dotfiles opcionales, ...). Los EAGAIN de
+  // lecturas no bloqueantes también son resultados normales del polling.
+  // Evitamos ambos en el log caliente: LOG_INFO coge el spinlock global de
+  // klog con IRQs off y puede retrasar el procesamiento RX de la NIC.
   int boring_enoent = 0;
   if ((int64_t)ret == -2 /* ENOENT */) {
     switch ((int)num) {
@@ -6715,10 +6744,22 @@ uint64_t syscall_handler_c(registers_t *regs) {
       break;
     }
   }
+  int expected_would_block = 0;
+  if ((int64_t)ret == -11 /* EAGAIN */) {
+    switch ((int)num) {
+    case SYS_READ:
+    case SYS_READV:
+    case SYS_RECVFROM:
+    case SYS_RECVMSG:
+      expected_would_block = 1;
+      break;
+    }
+  }
   if (num == SYS_PIPE || num == SYS_PIPE2) {
     LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld", (unsigned long)num,
               (void *)arg1, (unsigned long)arg2, (long)ret);
-  } else if (!boring_enoent && (int64_t)ret < 0 && (int64_t)ret > -4096) {
+  } else if (!boring_enoent && !expected_would_block && (int64_t)ret < 0 &&
+             (int64_t)ret > -4096) {
     LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
   }
 

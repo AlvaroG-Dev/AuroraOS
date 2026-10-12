@@ -275,7 +275,7 @@ Cada fase es un commit coherente y cuenta con un entregable verificable.
 ### Fase 5 — TCP (1-2 semanas)
 * **Objetivo:** `curl` contra un servidor HTTP local funciona.
 * **Ficheros nuevos:** `tcp.c/.h`, `tcp_state.c`, `tcp_timer.c`.
-* **Tareas (sub-fases):** Handshake, transferencia con ventana deslizante, retransmisión con RTO (RFC 6298), cierre FIN, control de congestión (RFC 5681), Delayed ACK + Nagle.
+* **Tareas (sub-fases):** Handshake, transferencia con ventana deslizante, sincronización de colas RX entre el driver y los lectores, reensamblado de retransmisiones solapadas, lecturas agrupadas de segmentos, retransmisión con RTO (RFC 6298), cierre FIN, control de congestión (RFC 5681), Delayed ACK + Nagle.
 * **Entregable verificable:** `python3 -m http.server 8080` en Aurora, `curl http://127.0.0.1:8080/file` obtiene el fichero.
 
 ### Fase 6 — DNS (2 días)
@@ -310,19 +310,8 @@ Cada fase es un commit coherente y cuenta con un entregable verificable.
 * **Driver e1000 no funciona en el primer intento (Alta):** Verificar con QEMU + log detallado. Benchmarks de loopback interno.
 * **TCP se cuelga en el handshake (Alta):** Instrumentación desde el día 1. `tcpdump` en el guest desde fase 2.
 * **Checksums mal calculados (Alta):** Test vectors de la RFC 1071. Checksum offload deshabilitado al principio.
-* **Condiciones de carrera en colas de socket (Media):** Un lock por socket (`sk->lock`). Cero locks globales.
+* **Condiciones de carrera en colas de socket (Media):** Un lock por cola RX de conexión/socket, compartido por productor y consumidor. Cero locks globales para los datos.
 * **Consumo de memoria descontrolado (Media):** Pool de `skb`s con cota dura y comandos estilo `netstat`.
-
----
-
-## 7. Lo que NO vamos a hacer (Alcance inicial)
-
-* No implementaremos TCP SACK, timestamps ni window scaling en la v1.
-* No soportaremos IPv6 en v1.
-* No implementaremos IPsec, VPN o encapsulaciones avanzadas.
-* No haremos un firewall completo (`netfilter`).
-* No paralelizaremos el stack: un solo hilo de proceso de paquetes por interfaz.
-* No haremos *checksum offload* en la v1.
 
 ---
 

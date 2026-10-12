@@ -40,6 +40,7 @@ extern void ahci_poll_ports(void);
 
 // Al inicio del fichero, junto a los demás externs:
 extern void arp_timer_tick(void);
+extern void tcp_timer_tick(void);
 // ---------------------------------------------------------------------------
 // Diagnóstico del bug "python3 tarda 2s con user=0.005s"
 //
@@ -93,6 +94,7 @@ void time_tick(void) {
     if ((tick_count & 1023) == 0) {
       arp_timer_tick();
     }
+    tcp_timer_tick();
     ahci_poll_ports();
   }
 

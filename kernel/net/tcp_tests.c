@@ -739,6 +739,155 @@ static void test_tcp_auto_ack(void) {
 }
 REGISTER_TEST("net/tcp: ACK automático de datos", test_tcp_auto_ack);
 
+static void test_tcp_reassembles_out_of_order(void) {
+  mock_setup();
+  tcp_conn_t *c = make_established();
+  TEST_ASSERT(c != NULL, "make_established");
+  if (!c) {
+    mock_teardown();
+    return;
+  }
+  tcp_conn_insert(c);
+
+  const uint32_t start = c->rcv_nxt;
+  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5,
+                                  c->snd_nxt, TCP_ACK | TCP_PSH, 0x1000,
+                                  "world", 5, 0);
+  TEST_ASSERT(later != NULL, "build later segment");
+  if (later) {
+    later->netif = &g_nif;
+    netif_rx(later);
+  }
+  TEST_ASSERT_EQ(c->rcv_nxt, start);
+  TEST_ASSERT_EQ(c->rx_count, 0);
+  TEST_ASSERT_EQ(c->ooo_count, 1);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 5);
+  uint16_t window =
+      (uint16_t)((g_tx[g_tx_count - 1][14 + 20 + 14] << 8) |
+                 g_tx[g_tx_count - 1][14 + 20 + 15]);
+  TEST_ASSERT_EQ(window, 65530);
+
+  skb_t *first =
+      build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
+                       TCP_ACK | TCP_PSH, 0x1000, "hello", 5, 0);
+  TEST_ASSERT(first != NULL, "build first segment");
+  if (first) {
+    first->netif = &g_nif;
+    netif_rx(first);
+  }
+  TEST_ASSERT_EQ(c->rcv_nxt, start + 10);
+  TEST_ASSERT_EQ(c->ooo_count, 0);
+  TEST_ASSERT_EQ(c->rx_count, 2);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 10);
+
+  char buf[16] = {0};
+  int n = tcp_recv_nonblock(c, buf, sizeof(buf));
+  TEST_ASSERT_EQ(n, 10);
+  TEST_ASSERT(memcmp(buf, "helloworld", 10) == 0,
+              "lectura agrupada de segmentos reensamblados");
+  TEST_ASSERT_EQ(c->rx_count, 0);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 0);
+
+  tcp_conn_free(c);
+  mock_teardown();
+}
+REGISTER_TEST("net/tcp: reensambla segmentos fuera de orden",
+              test_tcp_reassembles_out_of_order);
+
+static void test_tcp_reassembles_overlapping_retransmission(void) {
+  mock_setup();
+  tcp_conn_t *c = make_established();
+  TEST_ASSERT(c != NULL, "make_established");
+  if (!c) {
+    mock_teardown();
+    return;
+  }
+  tcp_conn_insert(c);
+
+  const uint32_t start = c->rcv_nxt;
+  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5,
+                                  c->snd_nxt, TCP_ACK | TCP_PSH, 0x1000,
+                                  "world", 5, 0);
+  TEST_ASSERT(later != NULL, "build later segment");
+  if (later) {
+    later->netif = &g_nif;
+    netif_rx(later);
+  }
+
+  skb_t *retransmit =
+      build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
+                       TCP_ACK | TCP_PSH, 0x1000, "helloworld", 10, 0);
+  TEST_ASSERT(retransmit != NULL, "build overlapping retransmission");
+  if (retransmit) {
+    retransmit->netif = &g_nif;
+    netif_rx(retransmit);
+  }
+
+  TEST_ASSERT_EQ(c->rcv_nxt, start + 10);
+  TEST_ASSERT_EQ(c->rx_count, 1);
+  TEST_ASSERT_EQ(c->ooo_count, 0);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 10);
+
+  char buf[16] = {0};
+  int n = tcp_recv_nonblock(c, buf, sizeof(buf));
+  TEST_ASSERT_EQ(n, 10);
+  TEST_ASSERT(memcmp(buf, "helloworld", 10) == 0,
+              "el solapamiento no debe duplicar datos");
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 0);
+
+  tcp_conn_free(c);
+  mock_teardown();
+}
+REGISTER_TEST("net/tcp: retransmisión solapada no duplica datos",
+              test_tcp_reassembles_overlapping_retransmission);
+
+static void test_tcp_reassembles_partially_overlapping_segment(void) {
+  mock_setup();
+  tcp_conn_t *c = make_established();
+  TEST_ASSERT(c != NULL, "make_established");
+  if (!c) {
+    mock_teardown();
+    return;
+  }
+  tcp_conn_insert(c);
+
+  const uint32_t start = c->rcv_nxt;
+  skb_t *later = build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start + 5,
+                                  c->snd_nxt, TCP_ACK | TCP_PSH, 0x1000,
+                                  "world", 5, 0);
+  TEST_ASSERT(later != NULL, "build later segment");
+  if (later) {
+    later->netif = &g_nif;
+    netif_rx(later);
+  }
+
+  skb_t *first =
+      build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, start, c->snd_nxt,
+                       TCP_ACK | TCP_PSH, 0x1000, "hellowor", 8, 0);
+  TEST_ASSERT(first != NULL, "build partially overlapping segment");
+  if (first) {
+    first->netif = &g_nif;
+    netif_rx(first);
+  }
+
+  TEST_ASSERT_EQ(c->rcv_nxt, start + 10);
+  TEST_ASSERT_EQ(c->rx_count, 2);
+  TEST_ASSERT_EQ(c->ooo_count, 0);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 10);
+
+  char buf[16] = {0};
+  int n = tcp_recv_nonblock(c, buf, sizeof(buf));
+  TEST_ASSERT_EQ(n, 10);
+  TEST_ASSERT(memcmp(buf, "helloworld", 10) == 0,
+              "preserva solo la cola no solapada");
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 0);
+
+  tcp_conn_free(c);
+  mock_teardown();
+}
+REGISTER_TEST("net/tcp: solapamiento parcial conserva cola",
+              test_tcp_reassembles_partially_overlapping_segment);
+
 // 5. send fuera de ESTABLISHED → -ENOTCONN.
 static void test_tcp_send_not_connected(void) {
   mock_setup();
