@@ -188,7 +188,15 @@ static void tcp_autotune_sample(tcp_conn_t *c, size_t delivered) {
   if (elapsed < TCP_AUTOTUNE_SAMPLE_MS)
     return;
 
+  if (elapsed == 0)
+    elapsed = 1;
   uint64_t instant_rate = c->rcv_sample_bytes / elapsed;
+  // Guard: primer sample con pocos bytes (slow-start calentando), ignorar.
+  if (c->rate_ewma_kbps == 0 && c->rcv_sample_bytes < (uint64_t)(4u * 1460u)) {
+    c->rcv_sample_bytes = 0;
+    c->rcv_sample_tick = now;
+    return;
+  }
 
   // [EWMA] Suavizar el rate. 7/8 del anterior + 1/8 del nuevo. Ignora
   // los picos de "curl no está leyendo" que disparan el rate a 0.
@@ -225,6 +233,14 @@ static void tcp_autotune_sample(tcp_conn_t *c, size_t delivered) {
 
   unsigned long flags = spin_lock_irqsave(&c->rx_lock);
   uint32_t old = c->rcv_window_target;
+  // Limitar bajada brusca: max 25% menos por sample (sube libre, baja suave).
+  if (old > 0 && (uint32_t)target < old) {
+    uint32_t floor75 = old - old / 4;
+    if ((uint32_t)target < floor75)
+      target = floor75;
+    if (target < min_w)
+      target = min_w;
+  }
   c->rcv_window_target = (uint32_t)target;
   spin_unlock_irqrestore(&c->rx_lock, flags);
 
@@ -1270,6 +1286,10 @@ int tcp_connect(tcp_conn_t *c, uint32_t remote_ip, uint16_t remote_port,
   c->snd_wscale = 0;
   c->rcv_wscale = 0;
   c->syn_sent_tick = sched_get_ticks();
+  // Inicializar sample tick para que el primer elapsed sea controlado.
+  c->rcv_sample_tick = sched_get_ticks();
+  c->rcv_sample_bytes = 0;
+  c->rate_ewma_kbps = 0;
 
   int rc = tcp_conn_insert(c);
   if (rc != 0) {

@@ -33,7 +33,7 @@
 
 // Autotune: ventana inicial pequeña para arrancar; crece en función del
 // rate medido × RTT. Nunca baja del mínimo. Nunca sube del techo.
-#define TCP_RX_WINDOW_INIT (64u * 1024u)    // 64 KB al arrancar
+#define TCP_RX_WINDOW_INIT (256u * 1024u)   // 256 KB al arrancar (Bridge necesita más BDP)
 #define TCP_RX_WINDOW_MIN (8u * TCP_RX_MSS) // 8 MSS ≈ 11.7 KB
 
 // Shift de window scaling. Con 4 MB >> 7 = 32768, cabe en uint16.
@@ -41,7 +41,7 @@
 #define TCP_PEER_WINDOW_MAX (4u * 1024u * 1024u)
 
 // RTO bounds (RFC 6298). Floor bajo para que TAP reaccione rápido.
-#define TCP_RTO_MIN_MS 200ULL
+#define TCP_RTO_MIN_MS 500ULL   // 500 ms: redes físicas (Bridge) tienen latencia > 200 ms
 #define TCP_RTO_MAX_MS 60000ULL
 #define TCP_RTO_INITIAL_MS 1000ULL
 
@@ -49,11 +49,11 @@
 #define TCP_DUP_ACK_THRESHOLD 3
 
 // Autotune: sampling cada N ms.
-#define TCP_AUTOTUNE_SAMPLE_MS 200ULL
+#define TCP_AUTOTUNE_SAMPLE_MS 500ULL  // 500 ms: ventana de medición más estable
 
 // Autotune: RTT mínimo usado en la fórmula. Con RTT real de 0.1 ms (local)
 // la fórmula daría un target minúsculo; forzamos 20 ms como floor.
-#define TCP_AUTOTUNE_RTT_FLOOR_MS 20
+#define TCP_AUTOTUNE_RTT_FLOOR_MS 50  // 50 ms floor: previene ventana minúscula con RTT bajo
 
 // ---------------------------------------------------------------------------
 // Flags

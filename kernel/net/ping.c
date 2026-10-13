@@ -13,7 +13,7 @@
 #define PING_IDENT 0x4B4Bu      // "KK"
 #define PING_INTERVAL 2000      // ms entre pings
 #define PING_TIMEOUT 3000       // ms de espera por reply
-#define PING_TARGET 0x0A000202u // 10.0.2.2 (gateway QEMU)
+// PING_TARGET eliminado: se usa n->gateway dinamicamente.
 
 static spinlock_t g_lock;
 static uint16_t g_seq;
@@ -97,7 +97,8 @@ static void ping_thread(void) {
       continue;
     }
 
-    int rc = icmp_echo_request(PING_TARGET, PING_IDENT, seq, payload,
+    uint32_t ping_target = n->gateway;
+    int rc = icmp_echo_request(ping_target, PING_IDENT, seq, payload,
                                sizeof(payload));
     if (rc != 0) {
       LOG_WARN("[PING] icmp_echo_request rc=%d", rc);
