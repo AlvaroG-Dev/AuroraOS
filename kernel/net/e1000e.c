@@ -74,7 +74,9 @@
 #define E1000_TCTL_COLD_SHIFT 12
 
 #define E1000_VENDOR_INTEL 0x8086u
-#define E1000_DEV_82574L 0x10D3u
+#define E1000_DEV_82574L 0x10D3u  // QEMU default (e1000e)
+#define E1000_DEV_82540EM 0x100Eu // VirtualBox "Intel PRO/1000 MT Desktop"
+#define E1000_DEV_82545EM 0x100Fu // VirtualBox "Intel PRO/1000 MT Server"
 
 // ICR / IMS bits (e1000e datasheet 13.4.10-13.4.13).
 #define E1000_ICR_TXDW 0x00000001u   // TX descriptor written back
@@ -491,7 +493,9 @@ int e1000e_init(void) {
   uint8_t sb = 0, ss = 0, sf = 0;
   pci_device_t d;
   while (pci_find_next_device(0x02, 0x00, &sb, &ss, &sf, &d) == 0) {
-    if (d.vendor_id == E1000_VENDOR_INTEL && d.device_id == E1000_DEV_82574L) {
+    if (d.vendor_id == E1000_VENDOR_INTEL &&
+        (d.device_id == E1000_DEV_82574L || d.device_id == E1000_DEV_82540EM ||
+         d.device_id == E1000_DEV_82545EM)) {
       g_pci = d;
       found = 1;
       break;
