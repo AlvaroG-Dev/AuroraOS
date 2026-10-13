@@ -19,7 +19,8 @@ static void test_e1000e_nic_present(void) {
   uint8_t sb = 0, ss = 0, sf = 0;
   int found = 0;
   while (pci_find_next_device(0x02, 0x00, &sb, &ss, &sf, &d) == 0) {
-    if (d.vendor_id == 0x8086 && d.device_id == 0x10D3) {
+    if (d.vendor_id == 0x8086 &&
+        (d.device_id == 0x100E || d.device_id == 0x10D3)) {
       found = 1;
       break;
     }
@@ -32,10 +33,11 @@ static void test_e1000e_nic_present(void) {
     }
   }
   if (!found) {
-    test_skip("sin 82574L en este sistema");
+    test_skip("sin Intel 82540EM/82574L en este sistema");
     return;
   }
-  TEST_ASSERT(1, "82574L detectado en %02x:%02x.%u", d.bus, d.slot, d.func);
+  TEST_ASSERT(1, "Intel PRO/1000 detectada (device=%04x) en %02x:%02x.%u",
+              d.device_id, d.bus, d.slot, d.func);
 }
 REGISTER_TEST("net/e1000e: NIC detectada", test_e1000e_nic_present);
 
