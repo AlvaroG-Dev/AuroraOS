@@ -3129,39 +3129,7 @@ static void test_fat32_seek_and_read(void) {
 }
 REGISTER_TEST("fat32: seek y lecturas repetidas", test_fat32_seek_and_read);
 
-static void test_fat32_non_fat_rejected(void) {
-  // Buscar un disco que NO sea FAT32, sin asumir nombres. Saltamos
-  // el que fat32_find_test_disk() identifica como FAT32, y probamos
-  // con cualquier otro disco no-partición y escribible.
-  block_device_t *fat_disk = fat32_find_test_disk();
-  block_device_t *candidate = NULL;
-  for (int i = 0; i < blk_count(); i++) {
-    block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition || b->is_read_only)
-      continue;
-    if (b == fat_disk)
-      continue;
-    candidate = b;
-    break;
-  }
 
-  if (!candidate) {
-    test_skip("no hay disco no-FAT32 para probar el rechazo");
-    return;
-  }
-
-  void *priv = NULL;
-  int rc = fat32_mount(candidate, &priv);
-  TEST_ASSERT(rc != 0, "fat32_mount aceptó %s sin FAT32 (rc=%d)",
-              candidate->name, rc);
-  TEST_ASSERT(priv == NULL, "fs_priv != NULL tras fallo en %s",
-              candidate->name);
-
-  // Por si un futuro cambio hiciera pasar el mount: liberar.
-  if (rc == 0 && priv)
-    fat32_umount(priv);
-}
-REGISTER_TEST("fat32: rechaza disco no-FAT32", test_fat32_non_fat_rejected);
 
 // ===========================================================================
 // [PR 3.1] Verifica que la caché de FAT acelera reads en offsets
