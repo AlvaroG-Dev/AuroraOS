@@ -36,10 +36,12 @@ Estas capacidades deben conservarse mediante pruebas de regresión; no se deben 
 
 ### P2 — Interfaces de sistema y usuarios
 
-- [ ] Completar `/proc/meminfo` (`Active`, `Inactive`, `SwapCached`, `Mapped`, `Committed_AS`) y hacer coherentes `/proc/self/mounts` y `mountinfo`.
-- [ ] Completar `sysinfo(2)` (`loads[]`, `sharedram`) si lo requieren herramientas objetivo.
-- [ ] Implementar credenciales de usuario con semántica real: `setuid` irreversible y resolución NSS/`getpwnam`; los ficheros `passwd/group/shadow` por sí solos no cierran este bloque.
-- [ ] Decidir si `statfs` de tarfs con bloques reales es necesario; es opcional mientras no rompa las herramientas objetivo.
+- [x] `/proc/meminfo` extendido: el TODO registra que se completó en el bloque 12. No volver a tratarlo como pendiente sin una regresión concreta.
+- [x] Syscalls de identidad implementadas en `kernel/syscall.c`: `setuid/setgid`, `setreuid/setregid`, `setresuid/setresgid` y getters relacionados. La semántica debe mantenerse con tests de permisos/credenciales, pero no es una función ausente.
+- [ ] **Validar, no presuponer, la semántica de identidad en ejecución:** pruebas de transiciones root/no-root, `execve`, `setuid` irreversible y comprobaciones VFS de uid/gid. Abrir un bug solo si una prueba falla.
+- [ ] **NSS/glibc userspace:** `getpwnam/getpwuid/getgrnam` son interfaces de libc/NSS, no syscalls del kernel. Probarlas con los módulos/archivos disponibles en el sysroot; clasificarlas como problema de userspace si fallan.
+- [ ] Revisar coherencia de `/proc/self/mounts` y `mountinfo`, y `sysinfo(2)` solo si las aplicaciones objetivo muestran discrepancias reproducibles.
+- [ ] Revisar `statfs` por filesystem con pruebas de `df`/`stat -f`; no convertirlo en tarea genérica sin un caso fallido reproducible.
 
 ### P3 — Aplicaciones y funciones de mayor alcance
 
