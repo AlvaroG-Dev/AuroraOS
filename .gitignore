@@ -7,6 +7,11 @@
 *.EFI
 *.a
 
+# Imagen de disco del ESP (se genera con make)
+aurora/EFI.IMG
+aurora/*.IMG
+aurora/*.img
+
 # Initramfs generado
 kernel/initrd.tar
 sysroot/
