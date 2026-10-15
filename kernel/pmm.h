@@ -34,3 +34,15 @@ int pmm_test_validate_efi_range(uint64_t phys, uint64_t pages,
 // pmm_total_pages() sigue devolviendo el tamaño del bitmap (que incluye
 // huecos MMIO/reservados) y solo lo usa el propio PMM internamente.
 uint64_t pmm_total_usable_pages(void);
+
+// ---------------------------------------------------------------------------
+// Iterador sobre los rangos EFI_CONVENTIONAL_MEMORY detectados en
+// pmm_init(). Uso típico: pre-touch de la ventana física sin tocar
+// MMIO (framebuffer, IOAPIC, LAPIC, BARs PCI, etc.).
+//
+// El callback recibe [start, end) en direcciones FÍSICAS. Los rangos
+// están ordenados por dirección ascendente tal como aparecen en el
+// EFI memory map.
+// ---------------------------------------------------------------------------
+void pmm_for_each_usable(void (*cb)(uint64_t start, uint64_t end, void *ctx),
+                         void *ctx);

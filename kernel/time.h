@@ -33,4 +33,7 @@ void lapic_timer_init_ap(void);
 // vector 48.
 void lapic_timer_handler(void);
 
+// Llama al test LAPIC vs PIT. 'tag' es una etiqueta para el log.
+void time_diag_lapic_vs_pit(const char *tag);
+
 #endif

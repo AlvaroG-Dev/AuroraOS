@@ -205,6 +205,11 @@ struct vfs_node {
   // y vfs_node_free() decrementa. El nodo se destruye cuando todos
   // los dueños han soltado.
   int ref_count;
+
+  // [dmesg] 1 = el offset del fd es un ÍNDICE de registro, no un
+  // byte-count. vfs_read_for_proc avanzará f->offset en 1 tras cada
+  // read() en lugar de por bytes leídos. Lo usa /dev/kmsg.
+  int offset_is_index;
 };
 
 // ---------------------------------------------------------------------------

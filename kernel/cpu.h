@@ -15,33 +15,24 @@
 
 // EFER (Extended Feature Enable Register)
 #define MSR_EFER 0xC0000080
-#define EFER_SCE 1 // System Call Extensions
+#define EFER_SCE 1
 #define EFER_NXE (1ULL << 11)
 
-// ---------------------------------------------------------------------------
 // MSR_SFMASK (0xC0000084): máscara de RFLAGS aplicada al entrar en SYSCALL.
-// ---------------------------------------------------------------------------
-#define MSR_SFMASK_BITS 0x277CULL // + IF (0x200)
+#define MSR_SFMASK_BITS 0x277CULL
 
 // ---------------------------------------------------------------------------
 // SMP: soporte per-CPU.
 //
-// Fase 0 de SMP: MAX_CPUS = 8, pero solo hay 1 CPU corriendo.
-// Fase 3.1: smp_processor_id() lee %gs:cpu_id.
-// Fase 4: scheduler SMP completo.
+// MAX_CPUS debe cubrir los hilos lógicos reales. Un Alder Lake / Raptor
+// Lake tiene hasta 24 núcleos (8 P + 16 E) → 32 hilos con HT. 64 cubre
+// cualquier desktop/laptop actual y no consume un .bss exagerado
+// (cpu_local_t son 40 bytes → 2.5 KB con 64).
 // ---------------------------------------------------------------------------
+#define MAX_CPUS 64
 
-// Número máximo de CPUs soportadas.
-#define MAX_CPUS 8
-
-// Offset de cpu_id dentro de cpu_local_t.
-// cpu_local_t: kernel_stack (8) + user_rsp (8) + cpu_id (4) + ...
 #define CPU_LOCAL_CPU_ID_OFFSET 16
 
-// ID de la CPU actual. Lee %gs:cpu_id. El BSP tiene %gs apuntando a
-// cpu_local_data[0] (tras smp_init). Cada AP configura %gs a su propia
-// entrada en ap_entry. Requiere que %gs esté configurado; si no, lee
-// basura. En el boot temprano (antes de smp_init) no llames a esto.
 static inline int smp_processor_id(void) {
   int id;
   __asm__ volatile("movl %%gs:%c1, %0"
@@ -50,30 +41,21 @@ static inline int smp_processor_id(void) {
   return id;
 }
 
-// ---------------------------------------------------------------------------
-// Estructura per-CPU.
-// ---------------------------------------------------------------------------
 typedef struct {
-  uint64_t kernel_stack;        // stack de kernel para syscalls/interrupciones
-  uint64_t user_rsp;            // RSP del usuario guardado al entrar en syscall
-  int cpu_id;                   // índice 0..MAX_CPUS-1
-  int lapic_id;                 // APIC ID del LAPIC
-  void *current_task;           // task_t* actual (Fase 4, per-CPU)
-  uint64_t ticks_since_resched; // contador de ticks desde el último resched
+  uint64_t kernel_stack;
+  uint64_t user_rsp;
+  int cpu_id;
+  int lapic_id;
+  void *current_task;
+  uint64_t ticks_since_resched;
 } cpu_local_t;
 
-// Array de estructuras per-CPU.
 extern cpu_local_t cpu_local_data[MAX_CPUS];
 
-// cpu_local eliminada en Fase 4; todo migrado a cpu_local_data[].
-
-// Acceso a un campo del CPU actual. Ej: this_cpu(kernel_stack).
 #define this_cpu(field) (cpu_local_data[smp_processor_id()].field)
-
-// Acceso a un campo de un CPU concreto. Ej: per_cpu(kernel_stack, 2).
 #define per_cpu(field, cpu) (cpu_local_data[cpu].field)
 
-extern int cpu_smap_enabled; // 1 si SMAP está activo
+extern int cpu_smap_enabled;
 
 static inline void wrmsr(uint32_t msr, uint64_t val) {
   uint32_t low = (uint32_t)val;
@@ -87,10 +69,6 @@ static inline uint64_t rdmsr(uint32_t msr) {
   return ((uint64_t)high << 32) | low;
 }
 
-// ---------------------------------------------------------------------------
-// CPU feature detection (CPUID)
-// ---------------------------------------------------------------------------
-
 static inline void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax,
                          uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
   __asm__ volatile("cpuid"
@@ -103,22 +81,16 @@ static inline int cpu_has_nx(void) {
   cpuid(0x80000001, 0, &eax, &ebx, &ecx, &edx);
   return (edx >> 20) & 1;
 }
-
 static inline int cpu_has_smep(void) {
   uint32_t eax, ebx, ecx, edx;
   cpuid(7, 0, &eax, &ebx, &ecx, &edx);
   return (ebx >> 7) & 1;
 }
-
 static inline int cpu_has_smap(void) {
   uint32_t eax, ebx, ecx, edx;
   cpuid(7, 0, &eax, &ebx, &ecx, &edx);
   return (ebx >> 20) & 1;
 }
-
-// ---------------------------------------------------------------------------
-// Control registers
-// ---------------------------------------------------------------------------
 
 static inline uint64_t read_cr0(void) {
   uint64_t v;
@@ -147,19 +119,13 @@ static inline void write_cr4(uint64_t v) {
   __asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
 }
 
-// ---------------------------------------------------------------------------
-// SMAP: stac / clac
-// ---------------------------------------------------------------------------
 static inline void stac(void) {
-  if (cpu_smap_enabled) {
+  if (cpu_smap_enabled)
     __asm__ volatile("stac" ::: "memory");
-  }
 }
-
 static inline void clac(void) {
-  if (cpu_smap_enabled) {
+  if (cpu_smap_enabled)
     __asm__ volatile("clac" ::: "memory");
-  }
 }
 
 // ============================================================================
@@ -175,10 +141,27 @@ typedef struct {
   int avx512f, avx512bw, avx512vl, avx512dq;
   // OS state
   int osxsave;
-  int xsave_enabled;  // XCR0 configurado (AVX usable)
-  int avx512_enabled; // XCR0 bits 5..7 (ZMM usable)
-  // Nivel de dispatch elegido (0..4)
+  int xsave_enabled;
+  int avx512_enabled;
   int level;
+  // -----------------------------------------------------------------------
+  // [Power Management] Solo detección; la aplicación va aparte.
+  // -----------------------------------------------------------------------
+  int has_hwp;           // CPUID.6:EAX[7]
+  int has_hwp_feedback;  // CPUID.6:EAX[13]
+  int hwp_epp_supported; // CPUID.6:EAX[22]
+  int has_aperf_mperf;   // CPUID.6:ECX[0]  ← NUEVO
+  int has_eist;          // IA32_MISC_ENABLE[16], leído tras GDT/IDT
+  uint32_t pm_base_mhz;  // CPUID.16
+  uint32_t pm_max_mhz;
+  uint32_t pm_bus_mhz;
+  // Rellenados por cpu_apply_pm_policy():
+  int hwp_active;    // 1 si HWP quedó habilitado en este boot
+  int pstate_forced; // 1 si forzamos IA32_PERF_CTL
+  int hwp_lowest;
+  int hwp_guaranteed;
+  int hwp_highest;
+  int hwp_efficient;
 } cpu_features_t;
 
 extern cpu_features_t g_cpu_features;
@@ -191,6 +174,33 @@ extern cpu_features_t g_cpu_features;
 
 void cpu_simd_init(void);
 
+// ---------------------------------------------------------------------------
+// [Power Management] Split detección / aplicación:
+//
+//   cpu_detect_pm()       — solo CPUID + lectura de MSR sin efectos. Se llama
+//                           en kmain, antes de pmm_init/paging_init. Nunca
+//                           escribe nada, así que no puede fallar.
+//
+//   cpu_apply_pm_policy() — decide qué mecanismo usar (HWP / IA32_PERF_CTL
+//                           / ACPI _PSS / ninguno) y lo aplica. Se llama
+//                           en kmain después de ACPI y en kmain_task una
+//                           vez que el kernel está maduro. Puede escribir
+//                           MSRs y por tanto puede fallar; requiere que la
+//                           IDT esté ya cargada.
+//
+//   cpu_hwp_init_ap()     — versión reducida para APs. Solo activa HWP
+//                           o fuerza el ratio si la política ya fue
+//                           elegida por el BSP. Se llama desde ap_entry
+//                           DESPUÉS de idt_load().
+//
+//   cpu_dump_cpuid_diag() — dump completo de CPUID/MSR para diagnóstico.
+//                           Solo lectura. Se llama desde cpu_detect_pm().
+// ---------------------------------------------------------------------------
+void cpu_detect_pm(void);
+void cpu_apply_pm_policy(void);
+void cpu_hwp_init_ap(void);
+void cpu_dump_cpuid_diag(void);
+
 static inline int cpu_has_sse2(void) { return g_cpu_features.sse2; }
 static inline int cpu_has_sse41(void) { return g_cpu_features.sse41; }
 static inline int cpu_has_avx2(void) {
@@ -200,20 +210,6 @@ static inline int cpu_has_avx512(void) {
   return g_cpu_features.level >= CPU_SIMD_AVX512;
 }
 
-// ---------------------------------------------------------------------------
-// Asserts de offsets asm↔C.
-//
-// syscall_entry.asm usa:
-//   [gs:0]  → cpu_local_data[cpu].kernel_stack
-//   [gs:8]  → cpu_local_data[cpu].user_rsp
-//
-// switch.asm usa:
-//   task_t.rsp        (offset 0x00)
-//   task_t.fpu_state  (offset 0x18)
-//   task_t.cr3        (offset 0x20)
-//
-// Si cambias los structs, estos asserts te avisan en compilación.
-// ---------------------------------------------------------------------------
 _Static_assert(offsetof(cpu_local_t, kernel_stack) == 0,
                "syscall_entry.asm lee [gs:0] como kernel_stack");
 _Static_assert(offsetof(cpu_local_t, user_rsp) == 8,

@@ -19,6 +19,19 @@ static uint64_t used_blocks = 0;
 static uint64_t last_alloc_bit = 0;
 static uint64_t total_usable_pages = 0;
 
+// [PF-SLOW] Rangos EFI_CONVENTIONAL_MEMORY capturados en pmm_init().
+// Sirven para que el pre-touch de map_phys_window() no toque MMIO.
+// 64 entradas es holgado: un EFI memory map típico tiene <30.
+#define PMM_MAX_USABLE_RANGES 64
+
+typedef struct {
+  uint64_t start; // dirección física, inclusiva
+  uint64_t end;   // dirección física, exclusiva
+} pmm_usable_range_t;
+
+static pmm_usable_range_t usable_ranges[PMM_MAX_USABLE_RANGES];
+static int usable_ranges_count = 0;
+
 #define EFI_CONVENTIONAL_MEMORY 7
 
 static int pmm_validate_efi_range(uint64_t phys, uint64_t pages,
@@ -140,6 +153,17 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
     uint64_t size;
     if (!pmm_validate_efi_range(phys, pages, &size))
       continue;
+
+    // [PF-SLOW] Registrar el rango usable para el pre-touch de paging.
+    if (usable_ranges_count < PMM_MAX_USABLE_RANGES) {
+      usable_ranges[usable_ranges_count].start = phys;
+      usable_ranges[usable_ranges_count].end = phys + size;
+      usable_ranges_count++;
+    } else {
+      LOG_WARN("[PMM] demasiados rangos usables (>%d); pre-touch se "
+               "limitará a los primeros",
+               PMM_MAX_USABLE_RANGES);
+    }
 
     uint64_t start_bit = phys / PAGE_SIZE;
     uint64_t end_bit = start_bit + pages;
@@ -433,3 +457,12 @@ int pmm_test_validate_efi_range(uint64_t phys, uint64_t pages,
 }
 
 uint64_t pmm_total_usable_pages(void) { return total_usable_pages; }
+
+void pmm_for_each_usable(void (*cb)(uint64_t start, uint64_t end, void *ctx),
+                         void *ctx) {
+  if (!cb)
+    return;
+  for (int i = 0; i < usable_ranges_count; i++) {
+    cb(usable_ranges[i].start, usable_ranges[i].end, ctx);
+  }
+}

@@ -3,15 +3,18 @@
 // Punto de entrada del kernel Aurora OS
 
 #include "acpi.h"
+#include "acpi_aml.h"
+#include "acpi_pm.h"
 #include "ahci.h"
 #include "apic.h"
 #include "ata_common.h"
 #include "ata_dma.h"
 #include "atapi.h"
 #include "block.h"
+#include "boot_console.h"
 #include "cpu.h"
 #include "driver.h"
-#include "elf.h" // [FIX] Elf64_Ehdr, Elf64_Phdr, PT_LOAD
+#include "elf.h"
 #include "fat32.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
@@ -47,7 +50,7 @@
 #include "simd.h"
 #include "smp_boot.h"
 #include "string.h"
-#include "swap.h" // [SWAP]
+#include "swap.h"
 #include "syscall.h"
 #include "tarfs.h"
 #include "test.h"
@@ -88,14 +91,6 @@ extern struct driver ata_pio_driver;
 extern struct driver atapi_driver;
 extern struct driver ahci_driver;
 
-// [FIX] Símbolos del linker para el rango físico REAL del kernel.
-// NO usamos `_kernel_end - KERNEL_VMA`: esa es la LMA (load memory address)
-// que sugiere el linker script, no la dirección física donde el bootloader
-// cargó el kernel. Cuando el kernel crece (libc.a +9 MB), el bootloader
-// coloca los segmentos en direcciones físicas distintas a la LMA, y una
-// reserva basada en LMA deja páginas del kernel sin reservar. El PMM las
-// entrega al heap, el heap las pisa, y todo explota. Usamos paging_get_phys_in
-// para obtener la dirección física real via la tabla de páginas ya montada.
 extern uint8_t __text_start;
 extern uint8_t __bss_end;
 
@@ -116,6 +111,16 @@ static void fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch) {
   fb_pitch = pitch / 4;
   LOG_INFO("[FB] Inicializado en memoria: %p %u x %u pitch=%u", (void *)base, w,
            h, pitch);
+}
+
+static void fb_fill(uint32_t color) {
+  if (!fb_ptr)
+    return;
+  for (uint32_t y = 0; y < fb_height; y++) {
+    uint32_t *row = fb_ptr + (uint64_t)y * fb_pitch;
+    for (uint32_t x = 0; x < fb_width; x++)
+      row[x] = color;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,17 +207,17 @@ static void kmain_task(void) {
 
   lapic_timer_init();
 
-  LOG_INFO("[INIT] TTY...");
+  klog_boot_step("[INIT] TTY...");
   tty_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] PTY pool...");
+  klog_boot_step("[INIT] PTY pool...");
   pty_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Block layer...");
+  klog_boot_step("[INIT] Block layer...");
   blk_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
   input_init();
 
@@ -226,9 +231,9 @@ static void kmain_task(void) {
   extern int ata_pio_finalize(void);
   ata_pio_finalize();
 
-  LOG_INFO("[INIT] Partition layer...");
+  klog_boot_step("[INIT] Partition layer...");
   part_scan_all();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
   for (int i = 0; i < blk_count(); i++) {
     block_device_t *b = blk_get_by_index(i);
@@ -240,38 +245,18 @@ static void kmain_task(void) {
     }
   }
 
-  // /tmp ahora es tmpfs (montado en vfs_init). No hay bind a /data/tmp.
-
   LOG_INFO("[INIT] DMA dump...");
   ata_dma_dump();
 
-  int fb_ok = 0;
-  if (g_boot_info.fb_base != 0 && g_boot_info.fb_width > 0 &&
-      g_boot_info.fb_height > 0) {
-    LOG_INFO(
-        "[FB] Mapeando framebuffer via MMIO_MAP_BASE (Write-Combining)... ");
-    void *fb_virt = mmio_map(g_boot_info.fb_base, g_boot_info.fb_size,
-                             PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
-    if (fb_virt) {
-      LOG_INFO("OK");
-      fb_ok = 1;
-      fb_init((uint64_t)fb_virt, g_boot_info.fb_width, g_boot_info.fb_height,
-              g_boot_info.fb_pitch);
-    } else {
-      LOG_ERR("FALLIDO (mmio_map devolvió NULL)");
-    }
-  }
-  if (!fb_ok) {
-    LOG_ERR("[FB] No hay framebuffer disponible o fallo al mapear");
+  int fb_ok = (fb_ptr != NULL);
+  if (fb_ok) {
+    klog_boot_step("[FB] Framebuffer ya mapeado (WC)");
+    klog_boot_ok();
+  } else {
+    LOG_ERR("[FB] sin framebuffer disponible");
   }
 
   LOG_INFO("[INIT] Aurora OS listo. Multitarea activa.");
-  if (fb_ok) {
-    compositor_init();
-    LOG_INFO(
-        "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
-    sched_create_task(compositor_thread);
-  }
 
   LOG_DEBUG("[SMP] Inicializando trampoline y APs...");
   smp_boot_init();
@@ -286,6 +271,19 @@ static void kmain_task(void) {
 
   ipi_init();
 
+  if (fb_ok) {
+    // El compositor va a tomar el control. Desactivamos el hook normal
+    // (ya no escribimos todo el log a pantalla) pero activamos el overlay
+    // de las últimas líneas, para no perder visibilidad.
+    boot_console_hook_remove();
+    extern void boot_console_overlay_enable(int);
+    boot_console_overlay_enable(1);
+    compositor_init();
+    LOG_INFO(
+        "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
+    sched_create_task(compositor_thread);
+  }
+
   extern void __sched_canary_arm(void);
   __sched_canary_arm();
 
@@ -294,26 +292,30 @@ static void kmain_task(void) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
   }
 
-  // Arranca el kthread de RX del driver e1000e (si se inicializó).
   if (e1000e_netif()) {
-    LOG_INFO("[INIT] Arrancando kthread RX de e1000e...");
+    klog_boot_step("[INIT] Arrancando kthread RX de e1000e...");
     e1000e_start();
+    klog_boot_ok();
 
-    LOG_INFO("[INIT] Arrancando kthread DHCP...");
+    klog_boot_step("[INIT] Arrancando kthread DHCP...");
     dhcp_start(e1000e_netif());
+    klog_boot_ok();
 
-    LOG_INFO("[INIT] Arrancando kthread de ping (10.0.2.2)...");
+    klog_boot_step("[INIT] Arrancando kthread de ping (10.0.2.2)...");
     ping_init();
+    klog_boot_ok();
   }
 
   __sched_canary_check();
 
-  LOG_INFO("[INIT] Cargando init '/usr/bin/init'...");
+  klog_boot_step("[INIT] Cargando init '/usr/bin/init'...");
   process_t *init_proc = process_load("/usr/bin/init");
   if (!init_proc) {
-    LOG_WARN(
-        "[INIT] /usr/bin/init no encontrado, fallback a /usr/bin/terminal");
+    klog_boot_warn("[INIT] /usr/bin/init no encontrado, fallback a "
+                   "/usr/bin/terminal");
     process_load("/usr/bin/terminal");
+  } else {
+    klog_boot_ok();
   }
 
   return;
@@ -325,19 +327,32 @@ static void kmain_task(void) {
 void kmain(struct kernel_boot_info *kinfo) {
   serial_init();
   klog_init();
+
   LOG_INFO("========================================");
   LOG_INFO("   AURORA OS KERNEL x86_64");
   LOG_INFO("   Fase 1 - Kernel Base (REV 4)");
   LOG_INFO("========================================");
 
-  LOG_INFO("[INIT] SSE... ");
+  klog_boot_step("[INIT] SSE...");
   sse_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] SIMD... ");
+  klog_boot_step("[INIT] SIMD...");
   cpu_simd_init();
   simd_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
+
+  // ---------------------------------------------------------------------
+  // [PM] Detección temprana de capacidades de power management.
+  //
+  // Solo CPUID + lectura de MSR. No escribe nada, no puede fallar.
+  // La aplicación real (wrmsr a los MSRs HWP) va más tarde, después
+  // de ACPI, cuando el kernel ya tiene heap, IDT y drivers básicos.
+  // ---------------------------------------------------------------------
+  klog_boot_step("[INIT] PM: detección...");
+  cpu_dump_cpuid_diag();
+  cpu_detect_pm();
+  klog_boot_ok();
 
   memcpy(&boot, kinfo, sizeof(boot));
   g_boot_info = boot;
@@ -345,21 +360,21 @@ void kmain(struct kernel_boot_info *kinfo) {
   LOG_INFO("[BOOT] Framebuffer: %p %u x %u pitch=%u", (void *)boot.fb_base,
            boot.fb_width, boot.fb_height, boot.fb_pitch);
 
-  LOG_INFO("[INIT] GDT... ");
+  klog_boot_step("[INIT] GDT...");
   gdt_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] IDT... ");
+  klog_boot_step("[INIT] IDT...");
   idt_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
   cpu_local_data[0].kernel_stack =
       (uint64_t)(syscall_kernel_stack + sizeof(syscall_kernel_stack));
   cpu_local_data[0].user_rsp = 0;
 
-  LOG_INFO("[INIT] Syscalls... ");
+  klog_boot_step("[INIT] Syscalls...");
   syscall_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
   uint64_t max_phys_addr = 0;
   if (boot.memmap && boot.memmap_size > 0) {
@@ -389,7 +404,7 @@ void kmain(struct kernel_boot_info *kinfo) {
             (unsigned long)(max_phys_addr / (1024 * 1024)));
 
   if (boot.memmap == 0 || boot.memmap_size == 0 || boot.memmap_desc_size == 0) {
-    LOG_INFO("[MEM] Memmap inválido o ausente. Abortando parse.");
+    LOG_WARN("[MEM] Memmap inválido o ausente. Abortando parse.");
   } else if (boot.memmap_size > (1024 * 1024)) {
     LOG_WARN("[MEM] Memmap demasiado grande, posible corrupción (size>%u)",
              1024 * 1024);
@@ -397,49 +412,37 @@ void kmain(struct kernel_boot_info *kinfo) {
     parse_memmap();
   }
 
-  LOG_INFO("[INIT] Iniciando PMM...");
+  klog_boot_step("[INIT] PMM...");
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
+  klog_boot_ok();
 
   // [SMP] Reservar las páginas bajas del trampoline ANTES del auto-test.
-  // Rango: 0x6000..0x9000 (stack 16-bit + código + smp_boot_params).
   extern void pmm_reserve_range(uint64_t start, uint64_t end);
   pmm_reserve_range(0x6000, 0x9000);
 
   extern void pmm_self_test(void);
   pmm_self_test();
 
-  LOG_INFO("[INIT] Paging... ");
+  klog_boot_step("[INIT] Paging...");
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
   paging_init((uint64_t *)cr3, max_phys_addr);
-  LOG_INFO("OK");
+  klog_boot_ok();
 
   // ---------------------------------------------------------------------------
   // [FIX] Reservar el rango físico REAL del kernel, página a página.
   //
   // El kernel tiene 2 PT_LOAD y el bootloader los coloca en zonas físicas
-  // disjuntas (no contiguas): .text/.rodata/.data/initrd en una zona alta,
-  // y .bss en otra zona baja. NO podemos usar un único rango
+  // disjuntas (no contiguas). NO podemos usar un único rango
   // [phys(__text_start), phys(__bss_end)) porque los extremos no están
-  // ordenados.
-  //
-  // Tampoco podemos leer el ELF header desde memoria: el bootloader solo
-  // carga los PT_LOAD, no el header del fichero. Cualquier intento de
-  // leer e_phoff desde 0xFFFFFFFF81000000 lee bytes de .text, no del header.
-  //
-  // Solución: recorrer cada página virtual de [__text_start, __bss_end)
-  // y reservar su dirección física individualmente. Las páginas no mapeadas
-  // (huecos entre segmentos) se saltan solas.
+  // ordenados. Recorremos cada página virtual y reservamos su dirección
+  // física individualmente, agrupando runs contiguos.
   // ---------------------------------------------------------------------------
   {
     uint64_t *pml4 = paging_get_pml4();
     uint64_t vstart = (uint64_t)&__text_start;
     uint64_t vend = (uint64_t)&__bss_end;
 
-    // Optimización: agrupar páginas físicas contiguas en un solo
-    // pmm_reserve_range. Aunque los PT_LOAD están disjuntos en físico,
-    // dentro de cada segmento son contiguos, así que esto reduce las
-    // llamadas de ~35000 a 2.
     uint64_t run_start = 0;
     uint64_t run_end = 0;
     int total_pages = 0;
@@ -473,99 +476,158 @@ void kmain(struct kernel_boot_info *kinfo) {
   pmm_relocate_bitmap();
 
   // [FIX SMAP] Parchear stac/clac a NOP si la CPU no soporta SMAP.
-  // Debe ejecutarse ANTES de cualquier código que use uaccess.
   uaccess_init();
 
-  LOG_INFO("[INIT] ACPI (MADT)...");
-  acpi_init(boot.acpi_rsdp);
-  LOG_INFO("OK");
-
-  LOG_INFO("[INIT] APIC (LAPIC + IOAPIC)...");
-  apic_init();
-  LOG_INFO("OK");
-
-  LOG_INFO("[INIT] Demand paging (PF handler)...");
-  pf_init();
-  LOG_INFO("OK");
-
-  LOG_INFO("[INIT] Iniciando Heap (kmalloc)...");
+  klog_boot_step("[INIT] Heap (kmalloc)...");
   heap_init();
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Swap subsystem...");
+  // -------------------------------------------------------------------------
+  // [FB] Init temprano con mmio_map.
+  //
+  // El framebuffer de UEFI puede estar muy por encima de los 4 GiB
+  // (en este PC real: 0x4000000000 = 256 GiB). El identity map que deja
+  // el bootloader sólo cubre [0, 4 GiB), así que aquí mapeamos el FB en
+  // MMIO_MAP_BASE con Write-Combining. Es el mismo mapeo que antes
+  // hacíamos en kmain_task, sólo que adelantado: así tenemos pantalla
+  // desde el arranque en lugar de al final.
+  //
+  // Lo colocamos después de pmm_relocate_bitmap() porque mmio_map()
+  // necesita que el PMM esté operativo (alloc_page_table → pmm_alloc_page)
+  // y el bitmap relocalizado a la ventana física.
+  // -------------------------------------------------------------------------
+  if (boot.fb_base && boot.fb_width > 0 && boot.fb_height > 0 &&
+      boot.fb_pitch > 0 && boot.fb_size > 0) {
+    void *fb_virt = mmio_map(boot.fb_base, boot.fb_size,
+                             PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
+    if (fb_virt) {
+      fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height, boot.fb_pitch);
+      fb_fill(0x00101828); // fondo azul oscuro "toma de control"
+
+      boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
+      boot_console_clear();
+      boot_console_hook_install();
+      LOG_INFO("[FB] Boot console activa (%ux%u, phys=0x%lx)", fb_width,
+               fb_height, (unsigned long)boot.fb_base);
+    } else {
+      LOG_WARN("[FB] mmio_map del framebuffer falló");
+    }
+  } else if (boot.fb_base) {
+    LOG_WARN("[FB] parámetros inválidos: base=0x%lx w=%u h=%u pitch=%u",
+             (unsigned long)boot.fb_base, boot.fb_width, boot.fb_height,
+             boot.fb_pitch);
+  }
+
+  klog_boot_step("[INIT] ACPI (MADT)...");
+  acpi_init(boot.acpi_rsdp);
+  klog_boot_ok();
+
+  klog_boot_step("[INIT] ACPI AML (namespace)...");
+  aml_init();
+  klog_boot_ok();
+
+  klog_boot_step("[INIT] ACPI PM (P-states, S-states)...");
+  acpi_pm_init();
+  klog_boot_ok();
+
+  // ---------------------------------------------------------------------
+  // [PM] Aplicar política de rendimiento.
+  //
+  // Ahora el kernel ya tiene heap, IDT funcional y ACPI parseado. Si HWP
+  // está disponible, se activa. Si no, se intenta el MSR directo (si
+  // EIST está habilitado). Si nada funciona, se registra y no se toca.
+  // ---------------------------------------------------------------------
+  klog_boot_step("[INIT] PM: aplicar política...");
+  cpu_apply_pm_policy();
+  klog_boot_ok();
+
+  klog_boot_step("[INIT] APIC (LAPIC + IOAPIC)...");
+  apic_init();
+  klog_boot_ok();
+
+  klog_boot_step("[INIT] Demand paging (PF handler)...");
+  pf_init();
+  klog_boot_ok();
+
+  klog_boot_step("[INIT] Swap subsystem...");
   swap_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
   pit_init();
 
-  LOG_INFO("[INIT] Inicializando Initramfs (TarFS)...");
+  klog_boot_step("[INIT] Initramfs (TarFS)...");
   size_t initrd_size = (size_t)(initrd_end - initrd_start);
   tarfs_init(initrd_start, initrd_size);
   vfs_init();
   ipc_init();
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] RTC CMOS... ");
+  klog_boot_step("[INIT] RTC CMOS...");
   rtc_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] vDSO... ");
+  klog_boot_step("[INIT] vDSO...");
   vdso_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Networking (Fase 0)... ");
+  klog_boot_step("[INIT] Networking (Fase 0)...");
   net_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Loopback... ");
+  klog_boot_step("[INIT] Loopback...");
   loopback_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] IPv4... ");
+  klog_boot_step("[INIT] IPv4...");
   ip_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] ARP... ");
+  klog_boot_step("[INIT] ARP...");
   arp_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] ICMP... ");
+  klog_boot_step("[INIT] ICMP...");
   icmp_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] UDP... ");
+  klog_boot_step("[INIT] UDP...");
   udp_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Sockets... ");
+  klog_boot_step("[INIT] Sockets...");
   socket_subsystem_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] TCP... ");
+  klog_boot_step("[INIT] TCP...");
   tcp_init();
-  LOG_INFO("OK");
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] e1000e... ");
+  klog_boot_step("[INIT] e1000e...");
   if (e1000e_init() == 0) {
-    LOG_INFO("OK");
+    klog_boot_ok();
   } else {
-    LOG_WARN("no disponible");
+    klog_boot_warn("no disponible");
   }
 
-  LOG_INFO("[INIT] Iniciando Scheduler...");
+  klog_boot_step("[INIT] Scheduler...");
   smp_init();
   smp_set_bsp_lapic_id(lapic_get_bsp_id());
   sched_init();
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Process subsystem...");
+  klog_boot_step("[INIT] Process subsystem...");
   extern void process_init(void);
   process_init();
+  klog_boot_ok();
 
-  LOG_INFO("[INIT] Lanzando kswapd...");
+  klog_boot_step("[INIT] kswapd...");
   extern void kswapd_main(void);
   task_t *kswapd_t = sched_create_task(kswapd_main);
   if (kswapd_t) {
+    klog_boot_ok();
     LOG_INFO("[INIT] kswapd lanzado (task ID=%u)", kswapd_t->id);
   } else {
-    LOG_WARN("[INIT] kswapd no se pudo lanzar (sin memoria)");
+    klog_boot_warn("[INIT] kswapd no se pudo lanzar (sin memoria)");
   }
 
   task_t *t = sched_create_task(kmain_task);

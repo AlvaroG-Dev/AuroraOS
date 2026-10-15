@@ -69,6 +69,36 @@ typedef struct {
   acpi_wakeup_t wakeup;
 } acpi_info_t;
 
+// ---------------------------------------------------------------------------
+// ACPI PM: FADT, DSDT, SSDT.
+// ---------------------------------------------------------------------------
+typedef struct {
+  int valid;
+  uint32_t pm1a_cnt_blk;
+  uint32_t pm1b_cnt_blk;
+  uint32_t pm1a_evt_blk;
+  uint32_t pm1b_evt_blk;
+  uint32_t pm_tmr_blk;
+  uint32_t gpe0_blk;
+  uint32_t gpe1_blk;
+  uint8_t pm1_cnt_len;
+  uint8_t pm1_evt_len;
+  uint16_t sci_int;
+  uint32_t flags;
+  uint64_t reset_reg;
+  uint8_t reset_value;
+  uint8_t reset_reg_space; // 0=IO, 1=MMIO, 2=PCI
+  uint64_t dsdt_paddr;
+  uint64_t xsdt_paddr;
+  uint32_t ssdt_paddrs[8]; // máximo 8 SSDTs
+  int ssdt_count;
+} acpi_fadt_t;
+
+const acpi_fadt_t *acpi_get_fadt(void);
+const uint8_t *acpi_get_dsdt(void);
+int acpi_get_ssdt_count(void);
+const uint8_t *acpi_get_ssdt(int i);
+
 void acpi_init(const uint8_t rsdp_bytes[64]);
 const acpi_info_t *acpi_get_info(void);
 void acpi_dump(void);

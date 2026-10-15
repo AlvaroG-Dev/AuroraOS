@@ -63,3 +63,26 @@ size_t klog_peek(char *out, size_t max_len);
 // [klogctl] Capacidad total del ring (KLOG_RING_SIZE). Para
 // SYSLOG_ACTION_SIZE_BUFFER.
 size_t klog_size(void);
+
+typedef enum {
+  KLOG_FB_BODY = 0,
+  KLOG_FB_TS,
+  KLOG_FB_LEVEL,
+  KLOG_FB_OK,
+} klog_fb_style_t;
+
+extern void (*klog_fb_hook)(char c, klog_level_t level, klog_fb_style_t style);
+
+void klog_boot_step(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void klog_boot_ok(void);
+void klog_boot_warn(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void klog_boot_fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void klog_boot_info(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// ---------------------------------------------------------------------------
+// [dmesg] Helpers para /dev/kmsg.
+//   klog_line_count()  → número de líneas en el ring (no consume)
+//   klog_snapshot()    → copia NO destructiva del ring, NUL-terminated
+// ---------------------------------------------------------------------------
+uint64_t klog_line_count(void);
+size_t klog_snapshot(char *out, size_t max_len);

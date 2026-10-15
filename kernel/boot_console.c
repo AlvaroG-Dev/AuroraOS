@@ -1,0 +1,455 @@
+// kernel/boot_console.c
+#include "boot_console.h"
+#include "gfx/font_aa.h"
+#include "gfx/font_manager.h"
+#include "gfx/gfx.h"
+#include "heap.h"
+#include "klog.h"
+#include <stddef.h>
+
+#define COL_BG 0xFF101828u
+#define COL_TS 0xFF6C7A8Au
+#define COL_OK 0xFF50E880u
+#define COL_PANIC 0xFFFF4040u
+#define COL_ERR 0xFFFF7070u
+#define COL_WARN 0xFFFFC860u
+#define COL_INFO 0xFFC0C8D0u
+#define COL_DEBUG 0xFF9099A8u
+#define COL_TRACE 0xFF707888u
+
+// Tamaño máximo del área de consola. No hace falta que ocupe toda la
+// pantalla: 120 columnas × 60 filas son 1200×840 px = ~4 MB de sombra,
+// suficiente para cualquier log de boot.
+#define CONSOLE_MAX_COLS 120
+#define CONSOLE_MAX_ROWS 60
+
+static uint32_t *g_fb = NULL;
+static uint32_t g_fb_pitch = 0; // en dwords
+static uint32_t g_fb_w = 0, g_fb_h = 0;
+
+static uint32_t *g_shadow = NULL; // buffer en RAM cacheable
+static uint32_t g_shadow_w = 0;   // stride en px (= g_cols * cell_w)
+static uint32_t g_shadow_h = 0;   // alto en px (= g_rows * cell_h)
+
+static uint32_t g_cols = 0, g_rows = 0;
+static uint32_t g_cell_w = 9, g_cell_h = 20;
+static uint32_t g_col = 0, g_row = 0;
+static const font_aa_t *g_font = NULL;
+
+// ---------------------------------------------------------------------------
+// Sombra: todo el dibujado vive aquí, en RAM cacheable.
+// ---------------------------------------------------------------------------
+static void shadow_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                        uint32_t c) {
+  if (!g_shadow)
+    return;
+  if (x >= g_shadow_w || y >= g_shadow_h)
+    return;
+  if (x + w > g_shadow_w)
+    w = g_shadow_w - x;
+  if (y + h > g_shadow_h)
+    h = g_shadow_h - y;
+  for (uint32_t yy = 0; yy < h; yy++) {
+    uint32_t *row = g_shadow + (uint64_t)(y + yy) * g_shadow_w + x;
+    for (uint32_t xx = 0; xx < w; xx++)
+      row[xx] = c;
+  }
+}
+
+// Copia filas de la sombra al framebuffer. El FB es WC: las escrituras
+// son rápidas porque son secuenciales y NUNCA leemos del FB.
+static void blit_rows_to_fb(uint32_t src_y, uint32_t dst_y, uint32_t rows) {
+  if (!g_fb || !g_shadow)
+    return;
+  for (uint32_t yy = 0; yy < rows; yy++) {
+    uint32_t *dst = g_fb + (uint64_t)(dst_y + yy) * g_fb_pitch;
+    uint32_t *src = g_shadow + (uint64_t)(src_y + yy) * g_shadow_w;
+    for (uint32_t xx = 0; xx < g_shadow_w; xx++)
+      dst[xx] = src[xx];
+  }
+}
+
+static void blit_cell_to_fb(uint32_t col, uint32_t row) {
+  if (!g_fb || !g_shadow)
+    return;
+  uint32_t x = col * g_cell_w;
+  uint32_t y = row * g_cell_h;
+  for (uint32_t yy = 0; yy < g_cell_h; yy++) {
+    uint32_t *dst = g_fb + (uint64_t)(y + yy) * g_fb_pitch + x;
+    uint32_t *src = g_shadow + (uint64_t)(y + yy) * g_shadow_w + x;
+    for (uint32_t xx = 0; xx < g_cell_w; xx++)
+      dst[xx] = src[xx];
+  }
+}
+
+// Scroll en RAM (memmove cacheable) + un único blit del área completa
+// al FB. Coste: ~1 ms el memmove + ~5 ms el blit, en lugar de 2 s.
+static void scroll_one_row(void) {
+  if (!g_shadow)
+    return;
+  uint32_t move_rows = g_shadow_h - g_cell_h;
+  uint32_t *src = g_shadow + (uint64_t)g_cell_h * g_shadow_w;
+  __builtin_memmove(g_shadow, src,
+                    (size_t)move_rows * g_shadow_w * sizeof(uint32_t));
+  shadow_fill(0, g_shadow_h - g_cell_h, g_shadow_w, g_cell_h, COL_BG);
+  blit_rows_to_fb(0, 0, g_shadow_h);
+}
+
+static uint32_t color_for(klog_level_t level, klog_fb_style_t style) {
+  switch (style) {
+  case KLOG_FB_TS:
+    return COL_TS;
+  case KLOG_FB_OK:
+    return COL_OK;
+  default:
+    switch (level) {
+    case KLOG_PANIC:
+      return COL_PANIC;
+    case KLOG_ERR:
+      return COL_ERR;
+    case KLOG_WARN:
+      return COL_WARN;
+    case KLOG_INFO:
+      return COL_INFO;
+    case KLOG_DEBUG:
+      return COL_DEBUG;
+    case KLOG_TRACE:
+      return COL_TRACE;
+    default:
+      return COL_INFO;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
+void boot_console_init(uint32_t *fb, uint32_t width, uint32_t height,
+                       uint32_t pitch_px) {
+  g_fb = fb;
+  g_fb_w = width;
+  g_fb_h = height;
+  g_fb_pitch = pitch_px;
+  g_col = 0;
+  g_row = 0;
+
+  font_manager_init();
+  g_font = font_manager_get(FONT_ID_MONO);
+  if (!g_font)
+    g_font = font_manager_get(FONT_ID_MAIN_REGULAR);
+
+  if (g_font) {
+    const glyph_aa_t *M = &g_font->glyphs[(unsigned char)'M'];
+    g_cell_w = M->advance ? M->advance : 9;
+    g_cell_h = (uint32_t)g_font->height + 6;
+  } else {
+    g_cell_w = 9;
+    g_cell_h = 20;
+  }
+
+  // Cuántas celdas caben en pantalla, con techo por si la pantalla es
+  // enorme (no queremos reservar 8 MB de sombra cuando no hace falta).
+  g_cols = width / g_cell_w;
+  if (g_cols > CONSOLE_MAX_COLS)
+    g_cols = CONSOLE_MAX_COLS;
+  g_rows = height / g_cell_h;
+  if (g_rows > CONSOLE_MAX_ROWS)
+    g_rows = CONSOLE_MAX_ROWS;
+
+  g_shadow_w = g_cols * g_cell_w;
+  g_shadow_h = g_rows * g_cell_h;
+
+  g_shadow =
+      (uint32_t *)kmalloc((size_t)g_shadow_w * g_shadow_h * sizeof(uint32_t));
+  if (!g_shadow)
+    return;
+
+  shadow_fill(0, 0, g_shadow_w, g_shadow_h, COL_BG);
+  blit_rows_to_fb(0, 0, g_shadow_h);
+}
+
+void boot_console_clear(void) {
+  if (!g_shadow)
+    return;
+  shadow_fill(0, 0, g_shadow_w, g_shadow_h, COL_BG);
+  blit_rows_to_fb(0, 0, g_shadow_h);
+  g_col = 0;
+  g_row = 0;
+}
+
+void boot_console_putchar(char c, klog_level_t level, klog_fb_style_t style) {
+  if (!g_shadow)
+    return;
+
+  if (c == '\r') {
+    g_col = 0;
+    return;
+  }
+  if (c == '\n') {
+    g_col = 0;
+    g_row++;
+    if (g_row >= g_rows) {
+      scroll_one_row();
+      g_row = g_rows - 1;
+    }
+    return;
+  }
+  if (c == '\t') {
+    g_col = (g_col + 4) & ~3u;
+    if (g_col >= g_cols)
+      g_col = g_cols - 1;
+    return;
+  }
+  if ((unsigned char)c < 0x20)
+    return;
+
+  if (g_col >= g_cols) {
+    g_col = 0;
+    g_row++;
+    if (g_row >= g_rows) {
+      scroll_one_row();
+      g_row = g_rows - 1;
+    }
+  }
+
+  // Dibujar sólo en la sombra.
+  uint32_t px = g_col * g_cell_w;
+  uint32_t py = g_row * g_cell_h;
+  shadow_fill(px, py, g_cell_w, g_cell_h, COL_BG);
+
+  if (g_font) {
+    uint32_t fg = color_for(level, style);
+    char buf[2] = {c, 0};
+    rect_t clip = {0, 0, (int)g_shadow_w, (int)g_shadow_h};
+    gfx_draw_string_aa(g_shadow, (int)g_shadow_w, clip, (int)px, (int)py + 2,
+                       buf, fg, g_font);
+  }
+
+  // Sólo esta celda al FB (140 dwords = 560 bytes).
+  blit_cell_to_fb(g_col, g_row);
+  g_col++;
+}
+
+void boot_console_hook_install(void) { klog_fb_hook = boot_console_putchar; }
+
+void boot_console_hook_remove(void) {
+  klog_fb_hook = NULL;
+  // No liberamos g_shadow: liberarla aquí podría dar UAF si algún CPU
+  // aún está dentro del hook desde otro mensaje. Son ~4 MB y sólo se
+  // asignan una vez por boot. Aceptable.
+}
+
+// ===========================================================================
+// [OVERLAY] Franja de log grande y centrada, dibujada sobre el compositor.
+//
+// - Escala 2x del font normal → texto grande, legible desde lejos.
+// - Caja centrada horizontal y verticalmente.
+// - Fondo negro al 80% (mezcla con el wallpaper para legibilidad).
+// - Borde azulado sutil.
+// - Color por nivel: WARN amarillo, ERROR rojo, INFO gris claro.
+// - No redibuja si no hay nuevas líneas.
+// ===========================================================================
+#define OVERLAY_LINES 28
+#define OVERLAY_SCALE 1
+#define OVERLAY_MAX_COLS 100
+#define OVERLAY_PAD_X 16
+#define OVERLAY_PAD_Y 12
+
+static int g_overlay_enabled = 0;
+
+void boot_console_overlay_enable(int on) { g_overlay_enabled = on; }
+int boot_console_overlay_enabled(void) { return g_overlay_enabled; }
+
+// Dibuja un carácter escalado directamente sobre el framebuffer.
+// Usa blend_pixel_fast para conservar el antialiasing de la fuente.
+static void draw_char_scaled_fb(int x, int y, char c, uint32_t rgb,
+                                const font_aa_t *font, int scale) {
+  if (!font || (unsigned char)c >= 128)
+    return;
+  const glyph_aa_t *g = &font->glyphs[(unsigned char)c];
+  if (!g->bitmap || g->width == 0 || g->height == 0)
+    return;
+
+  int draw_x = x + g->bearing_x * scale;
+  int draw_y = y + (font->height - g->bearing_y) * scale;
+
+  for (int gy = 0; gy < g->height; gy++) {
+    for (int gx = 0; gx < g->width; gx++) {
+      uint8_t a = g->bitmap[gy * g->width + gx];
+      if (a == 0)
+        continue;
+      uint32_t fg = ((uint32_t)a << 24) | (rgb & 0x00FFFFFF);
+      int px = draw_x + gx * scale;
+      int py = draw_y + gy * scale;
+      for (int sy = 0; sy < scale; sy++) {
+        int fy = py + sy;
+        if (fy < 0 || fy >= (int)g_fb_h)
+          continue;
+        uint32_t *fbrow = g_fb + (uint64_t)fy * g_fb_pitch;
+        for (int sx = 0; sx < scale; sx++) {
+          int fx = px + sx;
+          if (fx < 0 || fx >= (int)g_fb_w)
+            continue;
+          fbrow[fx] = blend_pixel_fast(fg, fbrow[fx]);
+        }
+      }
+    }
+  }
+}
+
+// Detecta el nivel de log al principio de la línea y devuelve el color.
+static uint32_t overlay_level_color(const char *p, size_t pl) {
+  if (pl >= 5) {
+    if (p[0] == 'W' && p[1] == 'A' && p[2] == 'R' && p[3] == 'N')
+      return 0xFFFFC860u; // WARN → amarillo
+    if (p[0] == 'E' && p[1] == 'R' && p[2] == 'R' && p[3] == 'O' && p[4] == 'R')
+      return 0xFFFF7070u; // ERROR → rojo suave
+    if (p[0] == 'P' && p[1] == 'A' && p[2] == 'N' && p[3] == 'I' && p[4] == 'C')
+      return 0xFFFF4040u; // PANIC → rojo fuerte
+    if (p[0] == 'D' && p[1] == 'E' && p[2] == 'B' && p[3] == 'U')
+      return 0xFF9099A8u; // DEBUG → gris azulado
+  }
+  return 0xFFE0E0E0u; // INFO → gris claro
+}
+
+void boot_console_draw_overlay(void) {
+  if (!g_overlay_enabled)
+    return;
+  if (!g_fb || !g_font)
+    return;
+  if (g_cell_w == 0 || g_cell_h == 0)
+    return;
+
+  extern uint64_t klog_line_count(void);
+  static uint64_t last_line_count = 0;
+  uint64_t cur = klog_line_count();
+  if (cur == last_line_count)
+    return; // nada nuevo, no redibujar
+  last_line_count = cur;
+
+  extern size_t klog_snapshot(char *out, size_t max);
+  static char snap[16384];
+  size_t snap_len = klog_snapshot(snap, sizeof(snap));
+  if (snap_len == 0)
+    return;
+
+  const int scale = OVERLAY_SCALE;
+  const uint32_t cell_w = g_cell_w * scale;
+  const uint32_t cell_h = g_cell_h * scale;
+  const uint32_t pad_x = OVERLAY_PAD_X;
+  const uint32_t pad_y = OVERLAY_PAD_Y;
+
+  // Ancho de la caja: 100 columnas o pantalla-80, lo que sea menor.
+  uint32_t cols = OVERLAY_MAX_COLS;
+  uint32_t box_w = cols * cell_w + 2 * pad_x;
+  if (box_w > g_fb_w - 40) {
+    box_w = g_fb_w - 40;
+    cols = (box_w - 2 * pad_x) / cell_w;
+  }
+  uint32_t box_h = OVERLAY_LINES * cell_h + 2 * pad_y;
+
+  // Centrada.
+  int32_t box_x = ((int32_t)g_fb_w - (int32_t)box_w) / 2;
+  int32_t box_y = ((int32_t)g_fb_h - (int32_t)box_h) / 2;
+  if (box_x < 0)
+    box_x = 0;
+  if (box_y < 0)
+    box_y = 0;
+
+  // Fondo: negro al 80% mezclado con el pixel del framebuffer.
+  for (uint32_t yy = 0; yy < box_h; yy++) {
+    int32_t fy = box_y + yy;
+    if (fy < 0 || fy >= (int)g_fb_h)
+      continue;
+    uint32_t *row = g_fb + (uint64_t)fy * g_fb_pitch;
+    for (uint32_t xx = 0; xx < box_w; xx++) {
+      int32_t fx = box_x + xx;
+      if (fx < 0 || fx >= (int)g_fb_w)
+        continue;
+      uint32_t dst = row[fx];
+      uint32_t r = ((dst >> 16) & 0xFF) / 5;
+      uint32_t g = ((dst >> 8) & 0xFF) / 5;
+      uint32_t b = (dst & 0xFF) / 5;
+      row[fx] = 0xFF000000u | (r << 16) | (g << 8) | b;
+    }
+  }
+
+  // Borde sutil azulado.
+  const uint32_t border = 0xFF3A4A6Au;
+  for (uint32_t xx = 0; xx < box_w; xx++) {
+    int32_t fx = box_x + xx;
+    if (fx < 0 || fx >= (int)g_fb_w)
+      continue;
+    if (box_y >= 0)
+      g_fb[(uint64_t)box_y * g_fb_pitch + fx] = border;
+    if (box_y + (int)box_h - 1 < (int)g_fb_h)
+      g_fb[(uint64_t)(box_y + box_h - 1) * g_fb_pitch + fx] = border;
+  }
+  for (uint32_t yy = 0; yy < box_h; yy++) {
+    int32_t fy = box_y + yy;
+    if (fy < 0 || fy >= (int)g_fb_h)
+      continue;
+    if (box_x >= 0)
+      g_fb[(uint64_t)fy * g_fb_pitch + box_x] = border;
+    if (box_x + (int)box_w - 1 < (int)g_fb_w)
+      g_fb[(uint64_t)fy * g_fb_pitch + box_x + box_w - 1] = border;
+  }
+
+  // Contar líneas totales y saltar las antiguas.
+  int total = 0;
+  for (size_t k = 0; k < snap_len; k++)
+    if (snap[k] == '\n')
+      total++;
+  int skip = total > OVERLAY_LINES ? total - OVERLAY_LINES : 0;
+
+  size_t i = 0;
+  int line = 0;
+  while (i < snap_len && line < skip) {
+    while (i < snap_len && snap[i] != '\n')
+      i++;
+    if (i < snap_len)
+      i++;
+    line++;
+  }
+
+  // Dibujar las últimas OVERLAY_LINES líneas.
+  uint32_t row = 0;
+  while (i < snap_len && row < OVERLAY_LINES) {
+    size_t ls = i;
+    while (i < snap_len && snap[i] != '\n')
+      i++;
+    size_t ll = i - ls;
+    if (i < snap_len)
+      i++;
+
+    // Quitar el timestamp "[  0.123456] " para acortar.
+    const char *p = snap + ls;
+    size_t pl = ll;
+    if (pl > 2 && p[0] == '[') {
+      size_t k = 1;
+      while (k < pl && p[k] != ']')
+        k++;
+      if (k < pl) {
+        k++;
+        while (k < pl && p[k] == ' ')
+          k++;
+      }
+      p += k;
+      pl -= k;
+    }
+    if (pl > cols)
+      pl = cols;
+
+    int32_t tx = box_x + pad_x;
+    int32_t ty = box_y + pad_y + row * cell_h;
+    uint32_t color = overlay_level_color(p, pl);
+
+    for (size_t c = 0; c < pl; c++) {
+      int32_t px = tx + c * cell_w;
+      if (px + (int)cell_w > box_x + (int)box_w - (int)pad_x)
+        break;
+      draw_char_scaled_fb(px, ty, p[c], color, g_font, scale);
+    }
+    row++;
+  }
+}

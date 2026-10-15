@@ -105,6 +105,89 @@ static acpi_sdt_header_t *find_table(uint64_t *root_entries, int count,
   return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// [ACPI PM] FADT, DSDT, SSDTs.
+// ---------------------------------------------------------------------------
+static acpi_fadt_t g_fadt = {0};
+
+static void parse_fadt(const acpi_sdt_header_t *hdr) {
+  const uint8_t *p = (const uint8_t *)hdr;
+  uint32_t length = hdr->length;
+
+  // Campos base (siempre presentes en FADT, ACPI 1.0+).
+  g_fadt.pm1a_evt_blk = *(const uint32_t *)(p + 0x38);
+  g_fadt.pm1b_evt_blk = *(const uint32_t *)(p + 0x3C);
+  g_fadt.pm1a_cnt_blk = *(const uint32_t *)(p + 0x40);
+  g_fadt.pm1b_cnt_blk = *(const uint32_t *)(p + 0x44);
+  g_fadt.pm_tmr_blk = *(const uint32_t *)(p + 0x4C);
+  g_fadt.gpe0_blk = *(const uint32_t *)(p + 0x50);
+  g_fadt.gpe1_blk = *(const uint32_t *)(p + 0x54);
+  g_fadt.pm1_evt_len = *(const uint8_t *)(p + 0x58);
+  g_fadt.pm1_cnt_len = *(const uint8_t *)(p + 0x59);
+  g_fadt.sci_int = *(const uint16_t *)(p + 0x2E);
+  g_fadt.flags = *(const uint32_t *)(p + 0x70);
+  g_fadt.dsdt_paddr = *(const uint32_t *)(p + 0x28);
+
+  // FADT extendido (ACPI 2.0+). Solo si length >= 0xF4 (244).
+  if (length >= 0xF4) {
+    // RESET_REG: Generic Address Structure en 0x74 (12 bytes).
+    //   byte 0x74: Address Space ID (0=Memory, 1=IO, 2=PCI)
+    //   byte 0x75: Register Bit Width
+    //   byte 0x76: Register Bit Offset
+    //   byte 0x77: Access Size
+    //   bytes 0x78-0x7F: Address (u64 LE)
+    g_fadt.reset_reg_space = p[0x74] & 0x7F;
+    g_fadt.reset_reg = *(const uint64_t *)(p + 0x78);
+    g_fadt.reset_value = p[0x80];
+
+    // X_DSDT en 0x8C. Si está, tiene prioridad sobre el DSDT de 32 bits.
+    uint64_t x_dsdt = *(const uint64_t *)(p + 0x8C);
+    if (x_dsdt)
+      g_fadt.dsdt_paddr = x_dsdt;
+  }
+  g_fadt.valid = 1;
+
+  LOG_INFO("[ACPI PM] FADT: pm1a_cnt=0x%x pm1b_cnt=0x%x pm_tmr=0x%x "
+           "reset_reg=0x%lx space=%u reset_val=0x%x dsdt=0x%lx",
+           g_fadt.pm1a_cnt_blk, g_fadt.pm1b_cnt_blk, g_fadt.pm_tmr_blk,
+           (unsigned long)g_fadt.reset_reg, g_fadt.reset_reg_space,
+           g_fadt.reset_value, (unsigned long)g_fadt.dsdt_paddr);
+}
+
+static void collect_dsdt_ssdts(uint64_t *entries, int count, int is_64bit) {
+  for (int i = 0; i < count; i++) {
+    uint64_t addr = is_64bit ? entries[i] : ((uint32_t *)entries)[i];
+    if (!addr)
+      continue;
+    acpi_sdt_header_t *hdr = (acpi_sdt_header_t *)phys_to_virt(addr);
+    if (memcmp(hdr->signature, "DSDT", 4) == 0) {
+      if (g_fadt.dsdt_paddr == 0)
+        g_fadt.dsdt_paddr = addr;
+      LOG_INFO("[ACPI] DSDT en 0x%lx (length=%u)", (unsigned long)addr,
+               hdr->length);
+    } else if (memcmp(hdr->signature, "SSDT", 4) == 0) {
+      if (g_fadt.ssdt_count < 8) {
+        g_fadt.ssdt_paddrs[g_fadt.ssdt_count++] = (uint32_t)addr;
+        LOG_INFO("[ACPI] SSDT[%d] en 0x%lx (length=%u)", g_fadt.ssdt_count - 1,
+                 (unsigned long)addr, hdr->length);
+      }
+    }
+  }
+}
+
+const acpi_fadt_t *acpi_get_fadt(void) { return &g_fadt; }
+const uint8_t *acpi_get_dsdt(void) {
+  if (!g_fadt.dsdt_paddr)
+    return NULL;
+  return (const uint8_t *)phys_to_virt(g_fadt.dsdt_paddr);
+}
+int acpi_get_ssdt_count(void) { return g_fadt.ssdt_count; }
+const uint8_t *acpi_get_ssdt(int i) {
+  if (i < 0 || i >= g_fadt.ssdt_count)
+    return NULL;
+  return (const uint8_t *)phys_to_virt(g_fadt.ssdt_paddrs[i]);
+}
+
 static void parse_madt(const madt_t *madt) {
   g_acpi.lapic_address = madt->local_apic_address;
 
@@ -354,6 +437,15 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
   if (g_acpi.bsp_index < 0) {
     LOG_WARN("[ACPI] BSP no encontrado en la lista de CPUs");
   }
+
+  acpi_sdt_header_t *fadt_hdr =
+      find_table(entries, entries_count, is_64bit, "FACP");
+  if (fadt_hdr) {
+    parse_fadt(fadt_hdr);
+  } else {
+    LOG_WARN("[ACPI] FADT (FACP) no encontrado");
+  }
+  collect_dsdt_ssdts(entries, entries_count, is_64bit);
 
   g_acpi.valid = 1;
   LOG_INFO("[ACPI] Parseo completo: %d CPUs, %d IOAPICs, %d ISOs",

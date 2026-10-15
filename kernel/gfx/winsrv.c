@@ -140,6 +140,16 @@ int winsrv_create_window(task_t *owner, int x, int y, int w, int h,
   g_windows[slot].win = win;
   spin_unlock_irqrestore(&winsrv_lock, flags);
 
+  // [AUTO-FOCUS] La primera ventana que se cree se lleva el foco
+  // automáticamente. Sin esto, sin ratón no hay forma de teclear:
+  // compositor_handle_key() descarta teclas si no hay ventana focused.
+  //
+  // Se hace AQUÍ y no en compositor_create_window porque las funciones
+  // de winsrv_post_event() necesitan que el slot ya esté publicado
+  // (buscan por find_slot_by_win_locked). Si lo hiciéramos antes, los
+  // eventos FOCUS/BLUR se perderían.
+  compositor_focus_window(win);
+
   LOG_INFO("[WINSRV] ventana %d creada para task %u (%dx%d '%s')", slot,
            owner->id, w, h, ktitle);
   return slot;

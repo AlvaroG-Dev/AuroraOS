@@ -212,6 +212,29 @@ uint64_t paging_phys_window_size(uint64_t max_phys_addr) {
   return max_phys_addr;
 }
 
+// ---------------------------------------------------------------------------
+// [PF-SLOW] Callback del pre-touch. Se invoca una vez por cada rango
+// EFI_CONVENTIONAL_MEMORY. Lee (NUNCA escribe) el primer byte de cada
+// página de 2 MB completamente contenida en el rango.
+//
+// - La lectura ya dispara el EPT fault bajo KVM: no hace falta escribir.
+// - No escribimos porque cualquier byte podría caer en MMIO si el
+//   firmware reporta un rango mal alineado. Escribir en MMIO puede
+//   colgar el bus o disparar efectos laterales.
+// - Alineamos HACIA ARRIBA a 2 MB y comprobamos que la página completa
+//   cabe en [start, end), así ningún acceso sale del rango usable.
+// ---------------------------------------------------------------------------
+static void touch_ram_range(uint64_t start, uint64_t end, void *ctx) {
+  (void)ctx;
+  volatile uint8_t *base = (volatile uint8_t *)PHYS_MAP_BASE;
+
+  uint64_t pa = (start + 0x1FFFFFULL) & ~0x1FFFFFULL;
+  for (; pa + 0x200000ULL <= end; pa += 0x200000ULL) {
+    volatile uint8_t v = base[pa];
+    (void)v;
+  }
+}
+
 static void map_phys_window(uint64_t max_phys_addr) {
   uint64_t size = paging_phys_window_size(max_phys_addr);
   if (size == 0) {
@@ -243,36 +266,30 @@ static void map_phys_window(uint64_t max_phys_addr) {
            (unsigned long)(size / 0x200000));
 
   // ---------------------------------------------------------------------
-  // [PF-SLOW] Pre-touch de la ventana fisica.
+  // [PF-SLOW] Pre-touch de la RAM real.
   //
-  // Bajo KVM con EPT, la primera escritura del guest a cada huge page
-  // fisica (2 MB) dispara un EPT fault que cuesta ~600 us en el host.
-  // Con 512 MB de RAM son 256 faults repartidos al azar durante el
-  // boot, visibles como [PF-SLOW] con memset=600 us. La medicion por
-  // fases mostro pmm=0 memset=600 read=0 map=0, que descarta el PMM y
-  // el driver de disco y confirma el EPT fault.
+  // Bajo KVM con EPT, la primera lectura/escritura del guest a cada
+  // huge page fisica (2 MB) dispara un EPT fault que cuesta ~600 us
+  // en el host. Pre-tocar AQUI cada pagina de 2 MB de RAM concentra
+  // ese coste en el boot y evita los [PF-SLOW] de runtime.
   //
-  // Pre-tocando AQUI cada region de 2 MB (read + write-same-value,
-  // sin alterar el contenido de RAM) el coste queda concentrado en
-  // el boot y no aparece nunca en runtime.
+  // IMPORTANTE: solo tocamos rangos EFI_CONVENTIONAL_MEMORY. El bucle
+  // anterior recorria TODO el rango fisico hasta max_phys_addr, lo
+  // que incluye MMIO (framebuffer, IOAPIC, LAPIC, BARs PCI, HPET...).
+  // En segun que firmware, escribir a un registro MMIO concreto
+  // cuelga el bus o dispara un MCE; en VBox con EPT puede hacer que
+  // el hipervisor aborte la VM. Solo tocamos RAM, y solo lectura:
+  // la lectura ya dispara el EPT fault, escribir no aporta nada y
+  // si es MMIO sí puede tener efectos laterales.
   //
   // En metal real el EPT no existe y esto es esencialmente no-op.
-  //
-  // Nota: si el guest crece y se anade mas RAM, el bucle escala
-  // linealmente (256 iteraciones por cada 512 MB). Coste esperado:
-  // 100-200 ms en KVM, <5 ms en metal.
   // ---------------------------------------------------------------------
   {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t t0 = ((uint64_t)hi << 32) | lo;
 
-    volatile uint8_t *base = (volatile uint8_t *)PHYS_MAP_BASE;
-    for (uint64_t off = 0; off < size; off += 0x200000) {
-      uint8_t v = base[off];
-      base[off] = v; // write-same-value: dispara el EPT fault sin
-                     // modificar el contenido de RAM.
-    }
+    pmm_for_each_usable(touch_ram_range, NULL);
 
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t t1 = ((uint64_t)hi << 32) | lo;
@@ -283,7 +300,7 @@ static void map_phys_window(uint64_t max_phys_addr) {
     uint64_t freq = klog_get_tsc_freq();
     uint64_t us = freq ? (t1 - t0) * 1000000ULL / freq : 0;
 
-    LOG_INFO("[PAGING] Pre-touch ventana fisica: %lu MB en ~%lu us",
+    LOG_INFO("[PAGING] Pre-touch RAM usable (%lu MB de ventana) en ~%lu us",
              (unsigned long)(size / (1024 * 1024)), (unsigned long)us);
   }
 }

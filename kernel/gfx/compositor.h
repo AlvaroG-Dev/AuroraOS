@@ -13,3 +13,4 @@ void compositor_notify_event(void);
 void compositor_notify_clock_tick(void);
 void compositor_close_window(window_t *win);
 void compositor_minimize_window(window_t *win);
+void compositor_focus_window(window_t *win);

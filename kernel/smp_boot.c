@@ -228,27 +228,43 @@ void ap_entry(void) {
   DIAG('C');
 
   // GDT y IDT para este AP
+  // GDT per-AP (TSS propio, GDT limpia).
   gdt_ap_init(my_cpu);
   DIAG('F');
+
+  // ---------------------------------------------------------------------
+  // [FIX] Cargar la IDT ANTES de cualquier wrmsr.
+  //
+  // syscall_init_ap() escribe EFER, STAR, LSTAR, SFMASK. cpu_hwp_init_ap()
+  // escribe MSRs de HWP. Cualquiera de esos wrmsr puede generar #GP si
+  // el MSR no existe o el valor no es válido. Sin IDT cargada en este
+  // AP, el #GP escala a doble fault y mata el core.
+  //
+  // Cargar idt_load() justo después de GDT y antes de cualquier escritura
+  // de MSR garantiza que un fallo sea capturable.
+  // ---------------------------------------------------------------------
+  idt_load();
+  DIAG('G');
 
   extern void syscall_init_ap(void);
   syscall_init_ap();
   DIAG('S');
 
-  /* [SIMD] Habilitar OSXSAVE + XCR0 en ESTE core. Es per-core, no basta
-   * con lo que hace el BSP. Sin esto, el primer _mm256_* dará #UD. */
+  // SIMD per-core (OSXSAVE + XCR0).
   extern void cpu_simd_init(void);
   cpu_simd_init();
-  DIAG('s'); /* s minúscula para diferenciar del 'S' anterior */
+  DIAG('s');
+
+  // Power management per-core. Repite la política que eligió el BSP.
+  extern void cpu_hwp_init_ap(void);
+  cpu_hwp_init_ap();
+  DIAG('p');
 
   uint64_t star = rdmsr(MSR_STAR);
   LOG_DEBUG("[AP] CPU %d STAR=0x%lx (R3_CS=0x%lx)", my_cpu, (unsigned long)star,
             (unsigned long)((star >> 48) & 0xFFFF));
 
-  idt_load();
-  DIAG('G');
-
-  // Configurar %gs apuntando a cpu_local_data[my_cpu]
+  // Configurar %gs apuntando a cpu_local_data[my_cpu].
   uint64_t cpu_ptr = (uint64_t)&cpu_local_data[my_cpu];
   wrmsr(MSR_GS_BASE, cpu_ptr);
   wrmsr(MSR_KERNEL_GS_BASE, 0);
@@ -261,7 +277,6 @@ void ap_entry(void) {
   cpu_local_data[my_cpu].ticks_since_resched = 0;
   DIAG('I');
 
-  // Inicializar LAPIC local y su timer
   apic_init_ap();
   extern void lapic_timer_init_ap(void);
   lapic_timer_init_ap();

@@ -68,6 +68,16 @@ static CHAR16 *p_u64_hex(CHAR16 *out, UINT64 v) {
     return out;
 }
 
+// Emite un CHAR16 a 'out', traduciendo \n -> \r\n. Respeta el límite.
+static CHAR16 *emit_ch(CHAR16 *out, CHAR16 *end, CHAR16 c) {
+    if (c == L'\n') {
+        if (out + 2 < end) { *out++ = L'\r'; *out++ = L'\n'; }
+    } else {
+        if (out + 1 < end) { *out++ = c; }
+    }
+    return out;
+}
+
 void efi_print(const CHAR16 *fmt, ...) {
     static CHAR16 buf[1024];
     CHAR16 *out = buf;
@@ -77,7 +87,10 @@ void efi_print(const CHAR16 *fmt, ...) {
     va_start(ap, fmt);
 
     while (*fmt && out < end) {
-        if (*fmt != L'%') { *out++ = *fmt++; continue; }
+        if (*fmt != L'%') {
+            out = emit_ch(out, end, *fmt++);
+            continue;
+        }
         fmt++;
         if (out + 32 >= end) break;
 
@@ -85,46 +98,79 @@ void efi_print(const CHAR16 *fmt, ...) {
         case L's': {
             const CHAR16 *s = va_arg(ap, const CHAR16 *);
             if (!s) s = L"(null)";
-            while (*s && out < end) *out++ = *s++;
+            while (*s && out < end) out = emit_ch(out, end, *s++);
             break;
         }
         case L'd':
         case L'i': {
             INT64 v = va_arg(ap, INT64);
-            if (v < 0) { *out++ = L'-'; v = -v; }
-            out = p_u64_dec(out, (UINT64)v);
+            if (v < 0) { out = emit_ch(out, end, L'-'); v = -v; }
+            CHAR16 tmp[24]; int n = 0;
+            if (v == 0) tmp[n++] = L'0';
+            while (v) { tmp[n++] = (CHAR16)(L'0' + (v % 10)); v /= 10; }
+            while (n > 0) out = emit_ch(out, end, tmp[--n]);
             break;
         }
         case L'l': {
             CHAR16 c = *(fmt + 1);
             if (c == L'x' || c == L'X') {
                 fmt++;
-                out = p_u64_hex(out, va_arg(ap, UINT64));
+                UINT64 v = va_arg(ap, UINT64);
+                CHAR16 tmp[24]; int n = 0;
+                if (v == 0) tmp[n++] = L'0';
+                while (v) {
+                    int d = (int)(v & 0xF);
+                    tmp[n++] = (d < 10) ? (CHAR16)(L'0' + d)
+                                        : (CHAR16)(L'a' + d - 10);
+                    v >>= 4;
+                }
+                while (n > 0) out = emit_ch(out, end, tmp[--n]);
             } else if (c == L'u') {
                 fmt++;
-                out = p_u64_dec(out, va_arg(ap, UINT64));
+                UINT64 v = va_arg(ap, UINT64);
+                CHAR16 tmp[24]; int n = 0;
+                if (v == 0) tmp[n++] = L'0';
+                while (v) { tmp[n++] = (CHAR16)(L'0' + (v % 10)); v /= 10; }
+                while (n > 0) out = emit_ch(out, end, tmp[--n]);
             } else {
-                *out++ = L'?';
+                out = emit_ch(out, end, L'?');
             }
             break;
         }
         case L'x':
         case L'X': {
             UINT32 v = va_arg(ap, UINT32);
-            out = p_u64_hex(out, (UINT64)v);
+            CHAR16 tmp[16]; int n = 0;
+            if (v == 0) tmp[n++] = L'0';
+            while (v) {
+                int d = (int)(v & 0xF);
+                tmp[n++] = (d < 10) ? (CHAR16)(L'0' + d)
+                                    : (CHAR16)(L'a' + d - 10);
+                v >>= 4;
+            }
+            while (n > 0) out = emit_ch(out, end, tmp[--n]);
             break;
         }
         case L'r': {
             UINT64 v = va_arg(ap, UINT64);
-            *out++ = L'0'; *out++ = L'x';
-            out = p_u64_hex(out, v);
+            out = emit_ch(out, end, L'0');
+            out = emit_ch(out, end, L'x');
+            CHAR16 tmp[16]; int n = 0;
+            if (v == 0) tmp[n++] = L'0';
+            while (v) {
+                int d = (int)(v & 0xF);
+                tmp[n++] = (d < 10) ? (CHAR16)(L'0' + d)
+                                    : (CHAR16)(L'a' + d - 10);
+                v >>= 4;
+            }
+            while (n > 0) out = emit_ch(out, end, tmp[--n]);
             break;
         }
         case L'%':
-            *out++ = L'%';
+            out = emit_ch(out, end, L'%');
             break;
         default:
-            *out++ = L'?';
+            out = emit_ch(out, end, L'?');
             break;
         }
         fmt++;

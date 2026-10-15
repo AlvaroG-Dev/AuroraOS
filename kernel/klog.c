@@ -15,6 +15,23 @@ static char ring[KLOG_RING_SIZE];
 static volatile size_t ring_head = 0;
 static volatile size_t ring_tail = 0;
 static volatile size_t ring_count = 0;
+void (*klog_fb_hook)(char c, klog_level_t level, klog_fb_style_t style) = NULL;
+
+typedef struct {
+  char c;
+  uint8_t style;
+} klog_step_char_t;
+
+#define KLOG_STEP_BUF_SIZE 512
+static klog_step_char_t g_step_buf[KLOG_STEP_BUF_SIZE];
+static size_t g_step_len = 0;
+static int g_step_pending = 0;
+static int g_step_capturing = 0;
+static klog_level_t g_step_level = KLOG_INFO;
+
+// Nivel y estilo "actuales" para el hook de framebuffer.
+static klog_level_t g_fb_level = KLOG_INFO;
+static klog_fb_style_t g_fb_style = KLOG_FB_BODY;
 
 // ---------------------------------------------------------------------------
 // TSC (Time Stamp Counter)
@@ -40,20 +57,99 @@ uint64_t klog_get_tsc_freq(void) { return tsc_freq_hz; }
 // ---------------------------------------------------------------------------
 static void ring_push(char c) {
   if (ring_count == KLOG_RING_SIZE) {
-    ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
-    ring_count--;
+    // Ring lleno: hay que evictar desde el tail para hacer sitio.
+    //
+    // Si el tail está a mitad de una línea (porque el ring ya ha dado
+    // varias vueltas y el último evict dejó el cursor en cualquier
+    // sitio), avanzamos hasta el próximo '\n' ANTES de evictar nada.
+    // Así la primera línea del ring siempre empieza limpia.
+    //
+    // El coste de este while es cero cuando el ring ya está estabilizado
+    // en frontera de línea (el caso normal tras el arranque), porque el
+    // primer byte del tail YA es '\n' — bueno, ya es el carácter
+    // siguiente a un '\n'.
+    if (ring[ring_tail] != '\n' || ring_tail == ring_head) {
+      // Buscamos el próximo '\n' para dejarlo como primer byte
+      // "limpiable". En la práctica, retrocedemos hasta el '\n'
+      // anterior si lo hay, o avanzamos hasta el siguiente si no.
+      //
+      // Estrategia simple: mientras el byte del tail NO sea '\n',
+      // lo descartamos. Tras el bucle, descartamos también el '\n'.
+      while (ring_count > 0 && ring[ring_tail] != '\n') {
+        ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
+        ring_count--;
+      }
+      if (ring_count > 0 && ring[ring_tail] == '\n') {
+        ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
+        ring_count--;
+      }
+    } else {
+      // Caso rápido: el tail ya está en '\n' (línea anterior limpia).
+      // Avanzamos un byte para descartar el '\n' y dejamos hueco.
+      ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
+      ring_count--;
+    }
   }
+
   ring[ring_head] = c;
   ring_head = (ring_head + 1) % KLOG_RING_SIZE;
   ring_count++;
 }
-
 // ---------------------------------------------------------------------------
 // Salida: ring + serial (SIN coger el lock — el llamante ya lo tiene)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Captura de "boot steps".
+//
+// klog_boot_step() NO emite nada inmediatamente: formatea la línea completa
+// (con su prefijo) y la guarda en un buffer. Se emite cuando llega
+// klog_boot_ok() (con "  [  OK  ]" al final), klog_boot_warn() (con
+// "  [WARN] msg"), o cualquier otro LOG_* (que cierra el step con un
+// newline y sigue con lo suyo en la línea siguiente).
+//
+// La captura guarda (char, style) para reproducir el coloreado de la
+// consola de framebuffer al hacer el replay.
+// ---------------------------------------------------------------------------
+
 static void out_char(char c) {
+  if (g_step_capturing) {
+    if (g_step_len < KLOG_STEP_BUF_SIZE) {
+      g_step_buf[g_step_len].c = c;
+      g_step_buf[g_step_len].style = (uint8_t)g_fb_style;
+      g_step_len++;
+    }
+    return;
+  }
+
   ring_push(c);
+  if (klog_fb_hook)
+    klog_fb_hook(c, g_fb_level, g_fb_style);
+  if (c == '\n')
+    serial_putc_locked('\r');
   serial_putc_locked(c);
+}
+
+// Reproduce el contenido del step capturado, respetando el estilo por
+// carácter. NO añade newline al final.
+static void replay_step_locked(void) {
+  for (size_t i = 0; i < g_step_len; i++) {
+    char c = g_step_buf[i].c;
+    ring_push(c);
+    if (klog_fb_hook)
+      klog_fb_hook(c, g_step_level, (klog_fb_style_t)g_step_buf[i].style);
+    if (c == '\n')
+      serial_putc_locked('\r');
+    serial_putc_locked(c);
+  }
+}
+
+// Cierra un step pendiente con un newline, sin marcador.
+static void flush_step_locked(void) {
+  if (!g_step_pending)
+    return;
+  g_step_pending = 0;
+  replay_step_locked();
+  out_char('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -132,15 +228,23 @@ static const char *level_name(klog_level_t lvl) {
 static void emit_prefix(klog_level_t level) {
   char ts[32];
   format_timestamp(ts, sizeof(ts));
+
+  g_fb_level = level;
+
+  g_fb_style = KLOG_FB_TS;
   out_char('[');
   for (char *p = ts; *p; p++)
     out_char(*p);
   out_char(']');
   out_char(' ');
+
+  g_fb_style = KLOG_FB_LEVEL;
   const char *name = level_name(level);
   for (const char *p = name; *p; p++)
     out_char(*p);
   out_char(' ');
+
+  g_fb_style = KLOG_FB_BODY;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +405,8 @@ void klog_vprintf(klog_level_t level, const char *fmt, va_list ap) {
   if (flags == SERIAL_LOCK_REENTERED)
     return;
 
+  flush_step_locked();
+
   klog_vprintf_locked(level, fmt, ap);
   serial_lock_release(flags);
 }
@@ -314,15 +420,14 @@ void klog_printf(klog_level_t level, const char *fmt, ...) {
 
   unsigned long flags;
   serial_lock_acquire(&flags);
-
-  // [FIX] Reentrada: descartar el mensaje. No spinnear contra nosotros
-  // mismos. Esto es lo que evita el deadlock de 4 CPUs por LOG dentro
-  // de LOG (p.ej. kfree → LOG_ERR desde un handler de IRQ que dispara
-  // mientras otro CPU está logueando).
   if (flags == SERIAL_LOCK_REENTERED) {
     va_end(ap);
     return;
   }
+
+  // Un log cualquiera cierra el boot step que estuviera abierto: así los
+  // mensajes internos de un init no se pegan al "[INIT] XXX..." de arriba.
+  flush_step_locked();
 
   klog_vprintf_locked(level, fmt, ap);
   out_char('\n');
@@ -339,6 +444,8 @@ void klog_puts(klog_level_t level, const char *s) {
   serial_lock_acquire(&flags);
   if (flags == SERIAL_LOCK_REENTERED)
     return;
+
+  flush_step_locked();
 
   emit_prefix(level);
   while (*s)
@@ -397,7 +504,47 @@ void klog_dec(klog_level_t level, uint64_t val) {
 // ---------------------------------------------------------------------------
 // Calibración del TSC contra el PIT
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Lee la frecuencia del TSC vía CPUID. Es la fuente canónica, no depende
+// del PIT ni de interrupciones, y funciona incluso con el CPU a P-state
+// mínimo (el TSC es "invariant" en CPUs modernas).
+// Devuelve 0 si no se puede determinar.
+// ---------------------------------------------------------------------------
+static uint64_t tsc_freq_from_cpuid(void) {
+  uint32_t a, b, c, d;
+
+  // CPUID.0x15: TSC / Core Crystal Clock ratio.
+  //   EBX = numerator, EAX = denominator, ECX = crystal Hz (0 = 24 MHz)
+  __asm__ volatile("cpuid"
+                   : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                   : "a"(0x15), "c"(0));
+  if (a != 0 && b != 0) {
+    uint32_t crystal_hz = c ? c : 24000000;
+    return (uint64_t)crystal_hz * b / a;
+  }
+
+  // CPUID.0x16: Base/Max frequency en MHz. EAX = base.
+  __asm__ volatile("cpuid"
+                   : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                   : "a"(0x16), "c"(0));
+  if (a != 0) {
+    return (uint64_t)a * 1000000ULL;
+  }
+
+  return 0;
+}
+
 void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
+  // 1) Intentar CPUID primero. En un PC real esto siempre funciona.
+  uint64_t freq = tsc_freq_from_cpuid();
+  if (freq > 0) {
+    klog_set_tsc_freq(freq);
+    LOG_INFO("[TSC] Calibrado vía CPUID: %lu MHz",
+             (unsigned long)(freq / 1000000));
+    return;
+  }
+
+  // 2) Fallback: calibración con PIT (para CPUs antiguas sin CPUID.15/16).
   if (ticks_to_wait == 0 || pit_hz == 0)
     return;
 
@@ -415,8 +562,17 @@ void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
 
   uint64_t tsc_end = rdtsc();
   uint64_t elapsed_cycles = tsc_end - tsc_start;
-  uint64_t freq = (elapsed_cycles * pit_hz) / ticks_to_wait;
+  uint64_t real_ticks = tick_count - start_tick;
+
+  // Diagnóstico: cuántos ticks obtuvo realmente.
+  LOG_INFO("[TSC-CAL] pidió=%u obtuvo=%lu pit_hz=%u cycles=%lu", ticks_to_wait,
+           (unsigned long)real_ticks, pit_hz, (unsigned long)elapsed_cycles);
+
+  if (real_ticks == 0)
+    return;
+  freq = (elapsed_cycles * pit_hz) / real_ticks;
   klog_set_tsc_freq(freq);
+  LOG_INFO("[TSC] Calibrado vía PIT: %lu MHz", (unsigned long)(freq / 1000000));
 }
 
 // ---------------------------------------------------------------------------
@@ -486,3 +642,192 @@ size_t klog_peek(char *out, size_t max_len) {
 }
 
 size_t klog_size(void) { return KLOG_RING_SIZE; }
+
+// ---------------------------------------------------------------------------
+// Helpers de estado de arranque (estilo Linux)
+//
+// Todos comparten patrón: acquire → reentry check → emitir → release.
+// boot_vprintf_locked() reusa la lógica de formato de klog_vprintf_locked
+// pero NO emite newline al final; el llamante decide si cerrar la línea.
+// ---------------------------------------------------------------------------
+static void boot_vprintf_locked(klog_level_t level, const char *fmt,
+                                va_list ap) {
+  emit_prefix(level);
+  // Reusamos el formateador principal, pero sin el '\n' automático:
+  // klog_vprintf_locked() ya no añade '\n' por sí solo (lo hace
+  // klog_printf). Así que podemos llamarlo directamente.
+  klog_vprintf_locked(level, fmt, ap);
+}
+
+void klog_boot_step(const char *fmt, ...) {
+  if (!klog_ready || !fmt)
+    return;
+
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
+  // Si había un step abierto sin cerrar, lo volcamos primero.
+  flush_step_locked();
+
+  g_step_len = 0;
+  g_step_capturing = 1;
+  g_step_level = KLOG_INFO;
+
+  va_list ap;
+  va_start(ap, fmt);
+  klog_vprintf_locked(KLOG_INFO, fmt, ap);
+  va_end(ap);
+
+  g_step_capturing = 0;
+  g_step_pending = 1;
+
+  serial_lock_release(flags);
+}
+
+void klog_boot_ok(void) {
+  if (!klog_ready)
+    return;
+
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
+  if (g_step_pending) {
+    g_step_pending = 0;
+    replay_step_locked();
+    g_fb_level = KLOG_INFO;
+    g_fb_style = KLOG_FB_OK;
+    const char *s = "  [  OK  ]";
+    while (*s)
+      out_char(*s++);
+    g_fb_style = KLOG_FB_BODY;
+    out_char('\n');
+  }
+  // Sin step pendiente: no hacemos nada. Significa que este OK
+  // corresponde a un step cuyo init imprimió sus propios logs, y esos
+  // logs ya cerraron la línea. Emitir un [  OK  ] huérfano aquí sería
+  // ruido.
+
+  serial_lock_release(flags);
+}
+
+void klog_boot_warn(const char *fmt, ...) {
+  if (!klog_ready || !fmt)
+    return;
+
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+
+  if (g_step_pending) {
+    g_step_pending = 0;
+    replay_step_locked();
+    g_fb_level = KLOG_WARN;
+    g_fb_style = KLOG_FB_BODY;
+    const char *pre = "  [WARN] ";
+    while (*pre)
+      out_char(*pre++);
+    klog_vprintf_locked(KLOG_WARN, fmt, ap);
+    out_char('\n');
+  } else {
+    klog_vprintf_locked(KLOG_WARN, fmt, ap);
+    out_char('\n');
+  }
+
+  va_end(ap);
+  serial_lock_release(flags);
+}
+
+void klog_boot_fail(const char *fmt, ...) {
+  if (!klog_ready || !fmt)
+    return;
+
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+
+  if (g_step_pending) {
+    g_step_pending = 0;
+    replay_step_locked();
+    g_fb_level = KLOG_ERR;
+    g_fb_style = KLOG_FB_BODY;
+    const char *pre = "  [FAIL] ";
+    while (*pre)
+      out_char(*pre++);
+    klog_vprintf_locked(KLOG_ERR, fmt, ap);
+    out_char('\n');
+  } else {
+    klog_vprintf_locked(KLOG_ERR, fmt, ap);
+    out_char('\n');
+  }
+
+  va_end(ap);
+  serial_lock_release(flags);
+}
+
+void klog_boot_info(const char *fmt, ...) {
+  if (!klog_ready || !fmt)
+    return;
+
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return;
+
+  // Un boot_info es una línea independiente: cerramos cualquier step
+  // abierto antes de emitirlo.
+  flush_step_locked();
+
+  va_list ap;
+  va_start(ap, fmt);
+  klog_vprintf_locked(KLOG_INFO, fmt, ap);
+  va_end(ap);
+  out_char('\n');
+
+  serial_lock_release(flags);
+}
+
+// ---------------------------------------------------------------------------
+// [dmesg] Número de líneas en el ring. No consume.
+// ---------------------------------------------------------------------------
+uint64_t klog_line_count(void) {
+  unsigned long flags;
+  serial_lock_acquire(&flags);
+  if (flags == SERIAL_LOCK_REENTERED)
+    return 0;
+
+  uint64_t n = 0;
+  size_t tail = ring_tail;
+  size_t count = ring_count;
+  while (count > 0) {
+    if (ring[tail] == '\n')
+      n++;
+    tail = (tail + 1) % KLOG_RING_SIZE;
+    count--;
+  }
+  serial_lock_release(flags);
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// [dmesg] Snapshot NO destructivo del ring, terminado en NUL.
+// Devuelve los bytes escritos (sin contar el NUL).
+// ---------------------------------------------------------------------------
+size_t klog_snapshot(char *out, size_t max_len) {
+  if (!out || max_len < 2)
+    return 0;
+  size_t n = klog_peek(out, max_len - 1);
+  out[n] = '\0';
+  return n;
+}

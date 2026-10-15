@@ -448,6 +448,18 @@ static void e1000e_rx_thread(void) {
         woke_by_timeout = 1;
       else if (r > 0)
         g_stat_irq_wakes++;
+
+      // [AUTOMATIC FALLBACK] Detect MSI issues and switch to polling
+      // If we're getting timeouts but no IRQs when MSI is enabled,
+      // it suggests MSI isn't working properly in this environment
+      if (g_use_msi && woke_by_timeout && g_stat_timeout_hits > 5 && g_stat_irq_wakes == 0) {
+        LOG_WARN("[E1000E] MSI appears non-functional (timeout_hits=%u, irq_wakes=%u), "
+                 "switching to polling mode", g_stat_timeout_hits, g_stat_irq_wakes);
+        g_use_msi = 0;
+        // Reset counters to avoid repeated warnings
+        g_stat_timeout_hits = 0;
+        g_stat_irq_wakes = 0;
+      }
     }
   }
 }
@@ -573,6 +585,11 @@ int e1000e_init(void) {
   } else {
     LOG_INFO("[E1000E] sin capability MSI, usando polling");
   }
+
+  // [WORKAROUND] Force polling mode for VirtualBox bridged compatibility
+  // Some hypervisors have issues with MSI interrupt delivery in bridged mode
+  // Uncomment the next line to force polling mode if experiencing network issues
+  // g_use_msi = 0;
 
   // 6) Rings + enable.
   e1000e_setup_rings();

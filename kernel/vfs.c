@@ -1466,13 +1466,205 @@ static vfs_ops_t dev_zero_ops = {
     .write = dev_zero_write,
 };
 
+// ---------------------------------------------------------------------------
+// [dmesg] /dev/kmsg en formato Linux 3.5+:
+//
+//   <level>,<seq>,<timestamp_us>,<flags>;<message>\n
+//
+//   - Cada read() devuelve EXACTAMENTE un registro.
+//   - node->offset_is_index = 1 → f->offset es el número de registro
+//     (0 = primero). VFS lo incrementa en 1 tras cada read, no en bytes.
+//   - Non-destructive: usa klog_snapshot() (peek).
+// ---------------------------------------------------------------------------
+
+// Extrae level y ts_us del prefijo "[  X.YYYYYY] LEVEL " de una línea
+// del ring. Devuelve la longitud del prefijo consumido (bytes hasta el
+// inicio del mensaje real), o 0 si no se reconoce.
+static size_t kmsg_parse_prefix(const char *line, size_t line_len,
+                                int *out_level, uint64_t *out_ts_us) {
+  *out_level = 6;
+  *out_ts_us = 0;
+  if (line_len < 12 || line[0] != '[')
+    return 0;
+
+  size_t close = 1;
+  while (close < line_len && line[close] != ']')
+    close++;
+  if (close >= line_len)
+    return 0;
+
+  uint64_t sec = 0, us = 0;
+  int seen_dot = 0, us_digits = 0;
+  for (size_t i = 1; i < close; i++) {
+    char c = line[i];
+    if (c >= '0' && c <= '9') {
+      if (!seen_dot) {
+        sec = sec * 10 + (uint64_t)(c - '0');
+      } else if (us_digits < 6) {
+        us = us * 10 + (uint64_t)(c - '0');
+        us_digits++;
+      }
+    } else if (c == '.') {
+      seen_dot = 1;
+    }
+  }
+  while (us_digits < 6) {
+    us *= 10;
+    us_digits++;
+  }
+  *out_ts_us = sec * 1000000ULL + us;
+
+  size_t p = close + 1;
+  while (p < line_len && line[p] == ' ')
+    p++;
+
+  struct {
+    const char *s;
+    int lvl;
+  } map[] = {
+      {"PANIC", 0}, {"ERROR", 3}, {"ERR", 3},   {"WARN", 4},
+      {"INFO", 6},  {"DEBUG", 7}, {"TRACE", 7},
+  };
+  int matched = 0;
+  for (size_t k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
+    size_t L = 0;
+    while (map[k].s[L])
+      L++;
+    if (p + L > line_len)
+      continue;
+    int ok = 1;
+    for (size_t j = 0; j < L; j++) {
+      if (line[p + j] != map[k].s[j]) {
+        ok = 0;
+        break;
+      }
+    }
+    if (ok) {
+      *out_level = map[k].lvl;
+      p += L;
+      matched = 1;
+      break;
+    }
+  }
+  if (matched) {
+    while (p < line_len && line[p] == ' ')
+      p++;
+  }
+  return p;
+}
+
 static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
                              void *buf) {
+  LOG_DEBUG("[KMSG-READ] offset=%lu size=%zu", (unsigned long)offset, size);
   (void)node;
-  (void)offset;
-  if (!buf)
-    return -EINVAL;
-  return (int64_t)klog_read((char *)buf, size);
+  if (!buf || size == 0)
+    return 0;
+
+  // Snapshot del ring completo (no consume). klog_peek copia a un buffer
+  // del kernel sin tocar el ring.
+  const size_t SNAP_CAP = 64 * 1024; // > KLOG_RING_SIZE (16384)
+  char *snap = (char *)kmalloc(SNAP_CAP);
+  if (!snap)
+    return -ENOMEM;
+  size_t snap_len = klog_snapshot(snap, SNAP_CAP);
+  if (snap_len == 0) {
+    kfree(snap);
+    return 0;
+  }
+
+  // Avanzar a la línea número `offset`.
+  const char *p = snap;
+  const char *end = snap + snap_len;
+  uint64_t idx = 0;
+  while (idx < offset && p < end) {
+    while (p < end && *p != '\n')
+      p++;
+    if (p < end)
+      p++;
+    idx++;
+  }
+  if (p >= end) {
+    kfree(snap);
+    return 0;
+  }
+
+  const char *line_end = p;
+  while (line_end < end && *line_end != '\n')
+    line_end++;
+  size_t line_len = (size_t)(line_end - p);
+
+  int level = 6;
+  uint64_t ts_us = 0;
+  size_t body_off = kmsg_parse_prefix(p, line_len, &level, &ts_us);
+  const char *body = p + body_off;
+  size_t body_len = line_len - body_off;
+
+  // Construir "<level>,<seq>,<ts_us>,0;<body>\n".
+  size_t cap = 64 + body_len + 2;
+  char *rec = (char *)kmalloc(cap);
+  if (!rec) {
+    kfree(snap);
+    return -ENOMEM;
+  }
+
+  int h = 0;
+  rec[h++] = (char)('0' + (level & 7));
+  rec[h++] = ',';
+
+  uint64_t seq = offset + 1;
+  {
+    char t[24];
+    int n = 0;
+    if (seq == 0)
+      t[n++] = '0';
+    while (seq) {
+      t[n++] = (char)('0' + (seq % 10));
+      seq /= 10;
+    }
+    while (n > 0)
+      rec[h++] = t[--n];
+  }
+  rec[h++] = ',';
+
+  {
+    char t[24];
+    int n = 0;
+    if (ts_us == 0)
+      t[n++] = '0';
+    while (ts_us) {
+      t[n++] = (char)('0' + (ts_us % 10));
+      ts_us /= 10;
+    }
+    while (n > 0)
+      rec[h++] = t[--n];
+  }
+  rec[h++] = ',';
+  rec[h++] = '0';
+  rec[h++] = ';';
+
+  for (size_t i = 0; i < body_len; i++)
+    rec[h++] = body[i];
+  rec[h++] = '\n';
+
+  kfree(snap);
+
+  // =========================================================================
+  // [FIX] NO llamar a copy_to_user aquí.
+  //
+  // vfs_read_for_proc() nos pasa un buffer del KERNEL (kmalloc) y es
+  // quien copia a userland después. Si hiciéramos copy_to_user aquí,
+  // access_ok() fallaría al ver un puntero del kernel y devolveríamos
+  // -EFAULT → "cat /dev/kmsg: Bad address".
+  // =========================================================================
+  size_t copy = (size_t)h;
+  if (copy > size)
+    copy = size;
+
+  memcpy(buf, rec, copy);
+  kfree(rec);
+  LOG_DEBUG("[KMSG-READ] -> devolviendo %zu bytes, record=<%.32s...>", copy,
+            rec);
+  return (int64_t)copy;
 }
 
 static int64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset, size_t size,
@@ -2087,6 +2279,13 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       n->uid = 0;
       n->gid = 0;
       n->rdev = devfs_entries[i].rdev;
+
+      // [dmesg] /dev/kmsg usa offset como índice de registro, no como
+      // byte-count.
+      if (strcmp(name, "kmsg") == 0)
+        LOG_DEBUG("[KMSG-OPEN] alguien abrió /dev/kmsg");
+      n->offset_is_index = 1;
+
       return n;
     }
   }
@@ -2429,7 +2628,11 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
       break;
     }
 
-    f->offset += (uint64_t)bytes;
+    if (f->node->offset_is_index)
+      f->offset += 1; // el offset es índice de registro
+    else
+      f->offset += (uint64_t)bytes; // el offset es byte-count
+
     total += (size_t)bytes;
     if ((size_t)bytes < chunk)
       break;
@@ -2687,12 +2890,34 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
     }
     new_off = f->offset + offset;
   } else if (whence == SEEK_END) {
-    if (offset < 0 && (uint64_t)(-offset) > f->node->size) {
+    // [dmesg] Para /dev/kmsg (offset_is_index), END = fin del ring.
+    if (f->node->offset_is_index) {
+      extern uint64_t klog_line_count(void);
+      new_off = klog_line_count();
+      if (offset < 0 && (uint64_t)(-offset) > new_off) {
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -1;
+      }
+      new_off += offset;
+    } else {
+      if (offset < 0 && (uint64_t)(-offset) > f->node->size) {
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -1;
+      }
+      new_off = f->node->size + offset;
+    }
+  } else if (whence == 3 /* SEEK_DATA */) {
+    // [dmesg] Linux trata SEEK_DATA como SEEK_SET en /dev/kmsg:
+    // vuelve al principio del ring. dmesg lo usa para posicionarse
+    // antes de leer el log completo. NO saltar al final.
+    if (!f->node->offset_is_index) {
       mutex_unlock(&f->lock);
       fd_put(f);
       return -1;
     }
-    new_off = f->node->size + offset;
+    new_off = 0;
   } else {
     mutex_unlock(&f->lock);
     fd_put(f);
