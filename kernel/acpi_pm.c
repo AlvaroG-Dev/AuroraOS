@@ -471,6 +471,7 @@ static int scan_pct(void) {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+// Reemplaza la función acpi_pm_init completa en acpi_pm.c
 int acpi_pm_init(void) {
   // -------- 1) Intentar por parser AML --------
   aml_object_t *pss = aml_eval("\\_PR_.CPU0._PSS");
@@ -498,8 +499,24 @@ int acpi_pm_init(void) {
 
   if (g_ps.ctrl_reg == 0) {
     LOG_INFO("[ACPI PM] AML no encontró _PCT, probando byte-scan...");
-    if (scan_pct() != 0)
+    if (scan_pct() != 0) {
       LOG_WARN("[ACPI PM] Byte-scan de _PCT tampoco encontró nada");
+
+      // [NUEVO] Fallback para procesadores Intel
+      uint32_t eax, ebx, ecx, edx;
+      cpuid(0, 0, &eax, &ebx, &ecx, &edx);
+      // Verificar si es "GenuineIntel"
+      if (ebx == 0x756E6547 && edx == 0x49656E69 && ecx == 0x6C65746E) {
+        if (g_ps.state_count > 0) {
+          LOG_WARN("[ACPI PM] Fallback Intel activado: Usando IA32_PERF_CTL "
+                   "(MSR 0x199)");
+          g_ps.ctrl_reg = 0x199;
+          g_ps.space_ctrl = 0x7F; // 0x7F = Functional Fixed Hardware (MSR)
+          g_ps.status_reg = 0x198;
+          g_ps.space_status = 0x7F;
+        }
+      }
+    }
   }
 
   // -------- 3) Resumen --------

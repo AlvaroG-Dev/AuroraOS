@@ -1,51 +1,23 @@
 # bootloader/Makefile
-# Bootloader UEFI de Aurora OS — versión sin gnu-efi.
-# Compilado con clang + lld-link, target Windows MSVC (MS ABI nativa UEFI).
+# Orquesta el build del bootloader UEFI (efi/) y BIOS (bios/).
 
-TARGET  = BOOTX64.EFI
-SRC     = efi_main.c
+.PHONY: all efi bios install clean
 
-CC      = clang
-LD      = lld-link
+all: efi bios
 
-CLANG_TARGET = x86_64-pc-windows-msvc
+efi:
+	$(MAKE) -C efi
 
-# -ffreestanding:      sin libc
-# -fno-stack-protector: sin __stack_chk_*
-# -fshort-wchar:        wchar_t = 16 bits (CHAR16 UEFI)
-# -mno-red-zone:        sin red zone
-# -mno-stack-arg-probe: sin llamada a __chkstk
-CFLAGS = -target $(CLANG_TARGET) \
-         -ffreestanding -fno-stack-protector -fshort-wchar \
-         -mno-red-zone -mno-stack-arg-probe \
-         -Wall -Wextra \
-         -g0 -O2
+bios:
+	$(MAKE) -C bios
 
-# -subsystem:efi_application: Subsystem = 10 (EFI Application)
-# -entry:efi_main:            punto de entrada
-# -nodefaultlib:              sin CRT
-# -dll:                       formato PE/DLL (es lo que UEFI espera)
-# -filealign:512:             alineación de fichero que OVMF acepta
-LDFLAGS = -subsystem:efi_application \
-          -entry:efi_main \
-          -nodefaultlib \
-          -dll \
-          -filealign:512
-
-all: $(TARGET)
-
-$(TARGET): $(SRC) efi_min.h
-	@echo "  [clang]    target  = $(CLANG_TARGET)"
-	@echo "  [lld-link] subsys  = efi_application"
-	$(CC) $(CFLAGS) -c $(SRC) -o efi_main.o
-	$(LD) $(LDFLAGS) efi_main.o -out:$(TARGET)
-	rm -f efi_main.o
-
-install: $(TARGET)
-	mkdir -p ../esp/EFI/BOOT
-	cp $(TARGET) ../esp/EFI/BOOT/BOOTX64.EFI
+# install sólo es informativo. El Makefile global coge los binarios
+# directamente de efi/BOOTX64.EFI y bios/bios.img. No hay que copiar
+# nada aquí porque el # Makefile global se encarga del layout del ESP.
+install: efi bios
+	@echo "  [bootloader] efi/BOOTX64.EFI  listo"
+	@echo "  [bootloader] bios/bios.img    listo"
 
 clean:
-	rm -f $(TARGET) *.o
-
-.PHONY: all install clean
+	$(MAKE) -C efi clean
+	$(MAKE) -C bios clean

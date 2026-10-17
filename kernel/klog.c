@@ -46,8 +46,13 @@ static uint64_t tsc_freq_hz = 2600000000ULL;
 static uint64_t tsc_origin = 0;
 
 void klog_set_tsc_freq(uint64_t hz) {
-  if (hz > 0)
-    tsc_freq_hz = hz;
+  /* [SAFETY] Rechazar frecuencias implausibles. Un valor pequeño
+   * hace que format_timestamp() divida por un divisor casi cero y
+   * genere timestamps absurdos tipo [2477825.764648]. Es mejor
+   * mantener el default (2.6 GHz) que aceptar basura. */
+  if (hz < 100000000ULL) /* < 100 MHz */
+    return;
+  tsc_freq_hz = hz;
 }
 
 uint64_t klog_get_tsc_freq(void) { return tsc_freq_hz; }
@@ -513,66 +518,103 @@ void klog_dec(klog_level_t level, uint64_t val) {
 static uint64_t tsc_freq_from_cpuid(void) {
   uint32_t a, b, c, d;
 
-  // CPUID.0x15: TSC / Core Crystal Clock ratio.
-  //   EBX = numerator, EAX = denominator, ECX = crystal Hz (0 = 24 MHz)
+  /* CPUID.0x15: ratio TSC / crystal clock.
+   * Sólo lo aceptamos si la frecuencia resultante es plausible. */
   __asm__ volatile("cpuid"
                    : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                    : "a"(0x15), "c"(0));
   if (a != 0 && b != 0) {
     uint32_t crystal_hz = c ? c : 24000000;
-    return (uint64_t)crystal_hz * b / a;
+    uint64_t freq = (uint64_t)crystal_hz * b / a;
+
+    /* [FIX-TCG] QEMU TCG expone leaf 0x15 con basura. Requerimos
+     * al menos 100 MHz (ninguna CPU x86-64 real tiene TSC por debajo). */
+    if (freq >= 100000000ULL)
+      return freq;
   }
 
-  // CPUID.0x16: Base/Max frequency en MHz. EAX = base.
+  /* CPUID.0x16: frecuencia base en MHz. EAX = base. */
   __asm__ volatile("cpuid"
                    : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                    : "a"(0x16), "c"(0));
-  if (a != 0) {
+  /* [FIX-TCG] Mismo criterio: si devuelve < 100 MHz, es basura. */
+  if (a >= 100)
     return (uint64_t)a * 1000000ULL;
-  }
 
   return 0;
 }
 
 void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
-  // 1) Intentar CPUID primero. En un PC real esto siempre funciona.
-  uint64_t freq = tsc_freq_from_cpuid();
-  if (freq > 0) {
-    klog_set_tsc_freq(freq);
-    LOG_INFO("[TSC] Calibrado vía CPUID: %lu MHz",
-             (unsigned long)(freq / 1000000));
+  /* =====================================================================
+   * [FIX-TCG] PIT primero, CPUID después.
+   *
+   * En QEMU TCG, CPUID.15/16 devuelven valores que NO corresponden al
+   * TSC real (en un test reciente: 543 MHz cuando el TSC corre a ~3 GHz).
+   * Aceptarlo rompe TODA la cadena de tiempo: LAPIC mal calibrado,
+   * timestamps inflados, cursor acelerado.
+   *
+   * El PIT sí es fiable en TCG porque QEMU lo emula contra wall-clock.
+   * En KVM también es fiable (PIT real del host). Y sólo cuesta ~50 ms
+   * de boot.
+   * ===================================================================== */
+
+  uint64_t freq_pit = 0;
+  if (ticks_to_wait > 0 && pit_hz > 0) {
+    uint64_t start_tick = tick_count;
+    while (tick_count == start_tick) {
+      __asm__ volatile("hlt");
+    }
+
+    uint64_t tsc_start = rdtsc();
+    uint64_t target_tick = tick_count + ticks_to_wait;
+    while (tick_count < target_tick) {
+      __asm__ volatile("hlt");
+    }
+    uint64_t tsc_end = rdtsc();
+
+    uint64_t cycles = tsc_end - tsc_start;
+    uint64_t real_ticks = tick_count - start_tick;
+
+    LOG_INFO("[TSC-CAL] PIT: pidió=%u obtuvo=%lu pit_hz=%u cycles=%lu",
+             ticks_to_wait, (unsigned long)real_ticks, pit_hz,
+             (unsigned long)cycles);
+
+    if (real_ticks > 0)
+      freq_pit = (cycles * pit_hz) / real_ticks;
+  }
+
+  /* Como referencia, mira lo que diría CPUID. No lo usamos para
+   * configurar nada, sólo lo logueamos para que se vea el desajuste. */
+  uint64_t freq_cpuid = tsc_freq_from_cpuid();
+
+  if (freq_pit >= 100000000ULL) {
+    /* PIT creíble: usarlo. Si CPUID dice otra cosa, avisar. */
+    if (freq_cpuid >= 100000000ULL) {
+      uint64_t hi = freq_pit > freq_cpuid ? freq_pit : freq_cpuid;
+      uint64_t lo = freq_pit > freq_cpuid ? freq_cpuid : freq_pit;
+      if (hi - lo > hi / 5) {
+        LOG_WARN("[TSC] CPUID.15 dice %lu MHz, PIT dice %lu MHz; usando PIT",
+                 (unsigned long)(freq_cpuid / 1000000),
+                 (unsigned long)(freq_pit / 1000000));
+      }
+    }
+    klog_set_tsc_freq(freq_pit);
+    LOG_INFO("[TSC] Calibrado vía PIT: %lu MHz",
+             (unsigned long)(freq_pit / 1000000));
     return;
   }
 
-  // 2) Fallback: calibración con PIT (para CPUs antiguas sin CPUID.15/16).
-  if (ticks_to_wait == 0 || pit_hz == 0)
+  /* PIT no disponible o absurdo: aceptar CPUID con la validación de
+   * plausibilidad ya presente en klog_set_tsc_freq. */
+  if (freq_cpuid >= 100000000ULL) {
+    klog_set_tsc_freq(freq_cpuid);
+    LOG_INFO("[TSC] Calibrado vía CPUID (PIT falló): %lu MHz",
+             (unsigned long)(freq_cpuid / 1000000));
     return;
-
-  uint64_t start_tick = tick_count;
-  while (tick_count == start_tick) {
-    __asm__ volatile("hlt");
   }
 
-  uint64_t tsc_start = rdtsc();
-  uint64_t target_tick = tick_count + ticks_to_wait;
-
-  while (tick_count < target_tick) {
-    __asm__ volatile("hlt");
-  }
-
-  uint64_t tsc_end = rdtsc();
-  uint64_t elapsed_cycles = tsc_end - tsc_start;
-  uint64_t real_ticks = tick_count - start_tick;
-
-  // Diagnóstico: cuántos ticks obtuvo realmente.
-  LOG_INFO("[TSC-CAL] pidió=%u obtuvo=%lu pit_hz=%u cycles=%lu", ticks_to_wait,
-           (unsigned long)real_ticks, pit_hz, (unsigned long)elapsed_cycles);
-
-  if (real_ticks == 0)
-    return;
-  freq = (elapsed_cycles * pit_hz) / real_ticks;
-  klog_set_tsc_freq(freq);
-  LOG_INFO("[TSC] Calibrado vía PIT: %lu MHz", (unsigned long)(freq / 1000000));
+  LOG_WARN("[TSC] Calibración fallida; manteniendo default %lu MHz",
+           (unsigned long)(klog_get_tsc_freq() / 1000000));
 }
 
 // ---------------------------------------------------------------------------

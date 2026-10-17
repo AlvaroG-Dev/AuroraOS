@@ -7,6 +7,8 @@ extern uint32_t *fb_ptr;
 extern uint32_t fb_width;
 extern uint32_t fb_height;
 extern uint32_t fb_pitch;
+extern void fb_flush_rect(const uint32_t *src, uint32_t src_pitch, uint32_t x,
+                          uint32_t y, uint32_t w, uint32_t h);
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -98,6 +100,7 @@ int bmp_draw(tar_node_t *file, int dest_x, int dest_y) {
     }
   }
 
+  fb_flush_rect(fb_ptr, fb_pitch, 0, 0, fb_width, fb_height);
   return 0;
 }
 

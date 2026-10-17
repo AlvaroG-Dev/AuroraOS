@@ -171,6 +171,7 @@ void smp_set_bsp_lapic_id(uint32_t lapic_id);
 
 void __sched_canary_arm(void);
 void __sched_canary_check(void);
+
 // ---------------------------------------------------------------------------
 // Asserts de offsets asm↔C.
 //

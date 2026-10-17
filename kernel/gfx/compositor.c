@@ -25,6 +25,9 @@ extern uint32_t *fb_ptr;
 extern uint32_t fb_width;
 extern uint32_t fb_height;
 extern uint32_t fb_pitch;
+extern uint32_t fb_bpp;
+extern void fb_flush_rect(const uint32_t *src, uint32_t src_pitch, uint32_t x,
+                          uint32_t y, uint32_t w, uint32_t h);
 
 static uint32_t *backbuffer = NULL;
 static uint32_t *wallpaper_cache = NULL;
@@ -1057,14 +1060,21 @@ static void compositor_render(void) {
   /* 4. Blit a VRAM (non-temporal) + cursor */
   if (fb_ptr) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
-      simd_copy_to_vram(&fb_ptr[y * fb_pitch + clip.x],
-                        &backbuffer[y * fb_width + clip.x], clip.w);
+      if (fb_bpp == 24) {
+        simd_copy_normal(&fb_ptr[y * fb_pitch + clip.x],
+                         &backbuffer[y * fb_width + clip.x], clip.w);
+      } else {
+        simd_copy_to_vram(&fb_ptr[y * fb_pitch + clip.x],
+                          &backbuffer[y * fb_width + clip.x], clip.w);
+      }
     }
     rect_t cursor_rect = {cursor_x, cursor_y, CURSOR_W, CURSOR_H};
     rect_t c_clip = rect_clip(clip, cursor_rect);
     if (c_clip.w > 0 && c_clip.h > 0) {
       draw_cursor_overlay(fb_ptr, fb_pitch, c_clip);
     }
+    fb_flush_rect(fb_ptr, fb_pitch, (uint32_t)clip.x, (uint32_t)clip.y,
+                  (uint32_t)clip.w, (uint32_t)clip.h);
   }
   /* 5. Overlay de logs del kernel (encima de todo). */
   extern void boot_console_draw_overlay(void);

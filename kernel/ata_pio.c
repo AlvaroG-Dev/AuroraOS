@@ -1051,9 +1051,6 @@ ata_channel_t *ata_get_channel(int index) {
 int ata_pio_init(void) {
   LOG_INFO("[ATA] Iniciando detección de discos PATA...");
 
-  // Inicializar los canales SIEMPRE, aunque no haya controlador. Así
-  // ata_get_channel() devuelve punteros válidos y atapi_init() puede
-  // comprobar ata_ide_present() antes de tocar los puertos.
   ata_init_channel(&g_channels[0], ATA_PRIMARY_IO, ATA_PRIMARY_CTRL,
                    ATA_PRIMARY_IRQ, "primario");
   ata_init_channel(&g_channels[1], ATA_SECONDARY_IO, ATA_SECONDARY_CTRL,
@@ -1065,8 +1062,19 @@ int ata_pio_init(void) {
     g_ide_present = 0;
     return 0;
   }
-  g_ide_present = 1;
 
+  /* [FIX CRÍTICO] Asegurarnos de que NO es un controlador SATA AHCI camuflado.
+   * Si tiene subclase 0x06 o progif 0x01 (AHCI), lo ignoramos completamente. */
+  if (ide.subclass_id == PCI_SUBCLASS_STORAGE_SATA ||
+      (ide.prog_if & 0x7F) == PCI_PROGIF_SATA_AHCI) {
+    LOG_INFO("[ATA] Controlador en %02x:%02x.%x es SATA/AHCI. Ignorando para "
+             "no interferir con AHCI.",
+             ide.bus, ide.slot, ide.func);
+    g_ide_present = 0;
+    return 0;
+  }
+
+  g_ide_present = 1;
   LOG_INFO("[ATA] Controlador IDE en %02x:%02x.%x (vendor=0x%04x "
            "device=0x%04x, progif=0x%02x)",
            ide.bus, ide.slot, ide.func, ide.vendor_id, ide.device_id,
@@ -1093,7 +1101,6 @@ int ata_pio_init(void) {
     LOG_WARN("[ATA] DMA no disponible en canal secundario, usando PIO");
   }
 
-  // Soft reset de ambos canales ANTES de habilitar nIEN=0.
   ata_soft_reset(&g_channels[0]);
   ata_soft_reset(&g_channels[1]);
 
@@ -1101,7 +1108,6 @@ int ata_pio_init(void) {
   outb(g_channels[1].ctrl_base + ATA_CTRL_DEV_CTRL, 0);
   LOG_DEBUG("[ATA] IRQs del disco habilitadas (nIEN=0)");
 
-  // Fase A: solo detección.
   ata_probe_device_pending(&g_channels[0], 0, "primario");
   ata_probe_device_pending(&g_channels[0], 1, "primario");
   ata_probe_device_pending(&g_channels[1], 0, "secundario");

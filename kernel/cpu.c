@@ -227,6 +227,7 @@ void cpu_detect_pm(void) {
 //   2) Si no, forzar el ratio máximo con IA32_PERF_CTL (requiere EIST).
 //   3) Si tampoco, dejar constancia y no tocar nada.
 // ---------------------------------------------------------------------------
+// Reemplaza la función cpu_apply_pm_policy completa en cpu.c
 void cpu_apply_pm_policy(void) {
   if (g_cpu_features.has_hwp) {
     wrmsr(MSR_PM_ENABLE, 1);
@@ -238,37 +239,20 @@ void cpu_apply_pm_policy(void) {
       g_cpu_features.has_hwp = 0;
     } else {
       uint64_t caps = rdmsr(MSR_HWP_CAPABILITIES);
-
-      // Layout correcto (Intel SDM Vol 3 §14.4.4):
-      //   bits  7:0  → Highest Performance  (ratio MÁS ALTO)
-      //   bits 15:8  → Guaranteed Performance
-      //   bits 23:16 → Most Efficient Performance
-      //   bits 31:24 → Lowest Performance   (ratio MÁS BAJO)
       uint8_t highest = (caps >> 0) & 0xFF;
-      uint8_t guaranteed = (caps >> 8) & 0xFF;
-      uint8_t efficient = (caps >> 16) & 0xFF;
       uint8_t lowest = (caps >> 24) & 0xFF;
 
       g_cpu_features.hwp_highest = highest;
-      g_cpu_features.hwp_guaranteed = guaranteed;
-      g_cpu_features.hwp_efficient = efficient;
       g_cpu_features.hwp_lowest = lowest;
 
-      LOG_INFO("[PM] HWP caps: highest=%u guaranteed=%u efficient=%u lowest=%u",
-               highest, guaranteed, efficient, lowest);
+      LOG_INFO("[PM] HWP caps: highest=%u lowest=%u", highest, lowest);
 
-      // Request: min=lowest, max=highest, desired=highest, EPP=0.
       uint64_t req = ((uint64_t)lowest) | ((uint64_t)highest << 8) |
-                     ((uint64_t)highest << 16) | ((uint64_t)0 << 24);
+                     ((uint64_t)highest << 16);
       wrmsr(MSR_HWP_REQUEST, req);
 
-      uint64_t actual = rdmsr(MSR_HWP_REQUEST);
-      LOG_INFO("[PM] HWP_REQUEST=0x%lx (leído=0x%lx)", (unsigned long)req,
-               (unsigned long)actual);
-
       g_cpu_features.hwp_active = 1;
-      LOG_INFO("[PM] HWP activado (min=%u max=%u desired=%u)", lowest, highest,
-               highest);
+      LOG_INFO("[PM] HWP activado (min=%u max=%u)", lowest, highest);
       return;
     }
   }
@@ -288,32 +272,8 @@ void cpu_apply_pm_policy(void) {
   } else if (!g_cpu_features.has_eist) {
     LOG_WARN("[PM] EIST deshabilitado en la BIOS.");
   } else {
-    LOG_WARN("[PM] CPUID.16 sin frecuencias.");
-  }
-
-  // Diagnóstico APERF/MPERF (solo si soportado).
-  if (g_cpu_features.has_aperf_mperf) {
-    uint64_t aperf0 = rdmsr(0xE8);
-    uint64_t mperf0 = rdmsr(0xE7);
-    for (volatile int i = 0; i < 50000000; i++)
-      __asm__ volatile("pause");
-    uint64_t aperf1 = rdmsr(0xE8);
-    uint64_t mperf1 = rdmsr(0xE7);
-    uint64_t da = aperf1 - aperf0;
-    uint64_t dm = mperf1 - mperf0;
-    if (dm > 0 && g_cpu_features.pm_base_mhz > 0) {
-      uint64_t pct = (da * 100) / dm;
-      LOG_INFO("[PM] APERF/MPERF = %lu%% (~%lu MHz sobre base %u MHz)",
-               (unsigned long)pct,
-               (unsigned long)(pct * g_cpu_features.pm_base_mhz / 100),
-               g_cpu_features.pm_base_mhz);
-    }
-  } else {
-    LOG_INFO("[PM] APERF/MPERF no soportado (CPUID.6:ECX[0]=0)");
-  }
-
-  if (!g_cpu_features.hwp_active && !g_cpu_features.pstate_forced) {
-    LOG_WARN("[PM] Sin mecanismo de control de frecuencia disponible.");
+    // [FIX] No es un error, muchas laptops no exponen CPUID.16
+    LOG_INFO("[PM] CPUID.16 no soportado. Delegando control a ACPI.");
   }
 }
 

@@ -649,8 +649,11 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
         return n->value;
       return make_integer(0);
     }
-    // Desconocido: intentar no consumir y devolver 0. El caller (parser
-    // de término) se encargará de la sincronización.
+    // [FIX CRÍTICO] Opcode desconocido en un data object.
+    // Avanzamos 1 byte para evitar bucles infinitos o desincronización.
+    LOG_WARN("[AML] parse_data_object: opcode 0x%02x desconocido, saltando",
+             op);
+    c->pos++;
     return make_integer(0);
   }
 }
@@ -697,7 +700,8 @@ static void parse_field_list(parse_ctx_t *c, size_t end_pos) {
       decode_pkglength(c->data, c->len, &c->pos);
     }
   }
-  c->pos = end_pos;
+  if (c->pos > end_pos)
+    c->pos = end_pos;
 }
 
 // ===========================================================================
@@ -815,9 +819,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       resolve_name(c->scope, name, resolved, sizeof(resolved));
       aml_node_t *n = ensure_path(resolved);
 
-      // Parsear el valor. Si es Buffer/Package, el parser avanza c->pos
-      // de forma controlada. Si detectamos que nos hemos ido de rango,
-      // cortamos y avisamos.
       size_t before = c->pos;
       aml_object_t *v = parse_term_arg(c);
       size_t after = c->pos;
@@ -1004,7 +1005,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
         size_t pkg_start = c->pos;
         uint32_t pkglen = decode_pkglength(c->data, c->len, &c->pos);
         size_t obj_end = pkg_start + pkglen;
-        // NameString (region a la que se asocia)
         char rname[256];
         read_namestring(c->data, c->len, &c->pos, rname, sizeof(rname));
         if (c->pos < obj_end)
@@ -1022,7 +1022,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
         char rname[256];
         read_namestring(c->data, c->len, &c->pos, rname, sizeof(rname));
         read_namestring(c->data, c->len, &c->pos, rname, sizeof(rname));
-        // Para BankField hay un BankValue (TermArg) entre los dos names.
         if (ext == AML_EXT_BANK_FIELD) {
           parse_term_arg(c);
           read_namestring(c->data, c->len, &c->pos, rname, sizeof(rname));
@@ -1035,7 +1034,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       }
 
       case AML_EXT_MUTEX_OP: {
-        // NameString + SyncFlags (byte)
         char nm[256];
         read_namestring(c->data, c->len, &c->pos, nm, sizeof(nm));
         c->pos++;
@@ -1059,10 +1057,19 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       }
 
       default:
-        // Desconocido. No podemos saber la longitud, abortamos este
-        // scope para no desincronizarnos.
-        LOG_WARN("[AML] Opcode ext desconocido 0x5B 0x%02x en scope", ext);
-        return;
+        // [FIX] Opcode extendido desconocido.
+        // Antes hacíamos 'return' y abortábamos el SSDT entero.
+        // Ahora intentamos saltar el paquete asociado y seguir.
+        LOG_WARN(
+            "[AML] Opcode ext desconocido 0x5B 0x%02x, intentando saltar...",
+            ext);
+        if (c->pos < c->len) {
+          size_t before = c->pos;
+          decode_pkglength(c->data, c->len, &c->pos);
+          if (c->pos == before)
+            c->pos++; // Si no era un pkglen, saltamos 1 byte
+        }
+        break;
       }
       break;
     }
@@ -1087,10 +1094,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
 
     case AML_IF_OP:
     case AML_WHILE_OP: {
-      // If/While a nivel de scope. Parseamos el cuerpo como si la
-      // condición fuera siempre true: nos interesa que todos los
-      // Name/Method/Device declarados dentro entren al namespace.
-      // El Predicate lo saltamos con skip_predicate.
       c->pos++;
       size_t pkg_start = c->pos;
       uint32_t pkglen = decode_pkglength(c->data, c->len, &c->pos);
@@ -1099,7 +1102,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       size_t pred_start = c->pos;
       size_t pred_len = skip_predicate(c->data, c->len, pred_start);
       if (pred_len == 0) {
-        // No lo reconocemos — saltamos el bloque entero.
         c->pos = pkg_end;
       } else {
         c->pos = pred_start + pred_len;
@@ -1107,7 +1109,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
         c->pos = pkg_end;
       }
 
-      // Else opcional (solo aplica a If).
       if (op == AML_IF_OP && c->pos < end_pos &&
           c->data[c->pos] == AML_ELSE_OP) {
         c->pos++;
@@ -1124,10 +1125,23 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       c->pos++;
       break;
 
-    default:
-      LOG_WARN("[AML] Scope: opcode desconocido 0x%02x @ 0x%zx", op,
-               c->pos - 1);
-      return;
+    default: {
+      // [FIX CRÍTICO] En lugar de abortar el scope entero, usamos el
+      // parser de términos. Si es un Package (0x12), Buffer (0x11) o
+      // un NameString (A-Z, _, \, ^), lo consumirá correctamente.
+      size_t before = c->pos;
+      parse_term_arg(c);
+
+      // Si parse_term_arg no movió el puntero, significa que es un
+      // opcode totalmente desconocido. Saltamos 1 byte para evitar
+      // un bucle infinito y seguimos buscando.
+      if (c->pos == before) {
+        LOG_WARN("[AML] Scope: opcode desconocido 0x%02x @ 0x%zx, saltando...",
+                 op, c->pos - 1);
+        c->pos++;
+      }
+      break;
+    }
     }
   }
   c->pos = end_pos;

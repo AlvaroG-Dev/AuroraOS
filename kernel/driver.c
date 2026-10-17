@@ -27,7 +27,10 @@ int drivers_init_all(void) {
     if (drivers[i]->init) {
       int ret = drivers[i]->init();
       if (ret != 0) {
-        LOG_ERR("[DRIVER] '%s' falló con %d", drivers[i]->name, ret);
+        /* [FIX] No abortar el arranque si un driver falla (ej: ata_pio en
+         * SATA). Simplemente registrar el warning y continuar con los demás. */
+        LOG_WARN("[DRIVER] '%s' falló con %d, continuando...", drivers[i]->name,
+                 ret);
         failures++;
       }
     }

@@ -1,15 +1,40 @@
 # Makefile global - Aurora OS
 
-.PHONY: all bootloader kernel user user-native user-musl image \
-        run run-debug run-smp run-smp-debug \
-        run-smp-kvm run-smp-kvm-debug clean sysroot initrd.tar iso run-iso \
-        run-smp-kvm-ahci run-smp-kvm-ahci-debug run-kvm-ahci \
-        run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap \
-        tap-setup tap-teardown tap-status python-stdlib
+.PHONY: all bootloader bootloader-efi bootloader-bios \
+        kernel user user-native user-musl image iso iso_root \
+        normal run run-debug run-smp run-smp-debug \
+        run-smp-kvm run-smp-kvm-debug run-smp-kvm-ahci run-smp-kvm-ahci-debug \
+        run-kvm-ahci run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap run-smp-kvm-xhci run-smp-kvm-xhci-debug \
+        run-iso run-iso-tcg run-iso-as-usb \
+        run-bios run-bios-debug run-bios-usb \
+        tap-setup tap-teardown tap-status \
+        python-stdlib clean
 
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
-all: image
+# ---------------------------------------------------------------------------
+# Rutas del bootloader e ISO.
+# ---------------------------------------------------------------------------
+BOOTX64_EFI     ?= bootloader/efi/BOOTX64.EFI
+BIOS_IMG        ?= bootloader/bios/bios.img
+KERNEL_ELF      ?= kernel/kernel.elf
+AURORA_CONF     ?= bootloader/aurora.conf
+
+EFI_IMG         ?= build/efi.img
+ISO_ROOT        ?= build/iso_root
+ISO_OUT         ?= aurora.iso
+
+# ---------------------------------------------------------------------------
+# all: por defecto genera la ISO completa.
+# ---------------------------------------------------------------------------
+all: iso
+
+# Añade esto:
+normal: iso
+
+# ===========================================================================
+# SYSROOT / USERLAND
+# ===========================================================================
 
 sysroot:
 	@mkdir -p sysroot/system/icons sysroot/system/wallpapers
@@ -27,8 +52,21 @@ sysroot:
 		cp -f etc/passwd etc/group etc/shadow etc/hosts etc/resolv.conf sysroot/etc/ 2>/dev/null || true; \
 	fi
 
-bootloader:
-	$(MAKE) -C bootloader install
+bootloader: bootloader-efi bootloader-bios
+
+bootloader-efi:
+	$(MAKE) -C bootloader/efi
+
+bootloader-bios:
+	$(MAKE) -C bootloader/bios
+
+# [FIX] Reglas explícitas para que 'make' sepa cómo generar los archivos
+# si los pide como dependencia (ej: desde $(EFI_IMG) o iso_root)
+$(BOOTX64_EFI):
+	$(MAKE) -C bootloader/efi
+
+$(BIOS_IMG):
+	$(MAKE) -C bootloader/bios
 
 # ---------------------------------------------------------------------------
 # Userland: nativo (user/) + musl (user/musl/).
@@ -58,8 +96,7 @@ elf_malformed: user
 	fi
 
 # ---------------------------------------------------------------------------
-# Python stdlib: copia el stdlib del host a sysroot/usr/lib/python3.X/ y
-# precompila .py → .pyc.
+# Python stdlib.
 # ---------------------------------------------------------------------------
 python-stdlib:
 	@if [ -x scripts/fetch-python-stdlib.sh ]; then \
@@ -69,9 +106,10 @@ python-stdlib:
 		echo "[Makefile]   (scripts/fetch-python-stdlib.sh no existe, saltando)"; \
 	fi
 
-# ---------------------------------------------------------------------------
-# initrd.tar: construye el tarfs desde sysroot/.
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# INITRD
+# ===========================================================================
+
 initrd.tar: sysroot user elf_malformed python-stdlib
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
@@ -118,7 +156,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	@printf '%b' "$(RESOLV_CONF)" > sysroot/etc/resolv.conf
 
 # ---------------------------------------------------------------------------
-# Bundle de CAs para TLS (openssl/curl/gnutls).
+# Bundle de CAs para TLS.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando bundle de CAs para TLS..."
 	@mkdir -p sysroot/etc/ssl/certs
@@ -139,11 +177,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# 1. (Sin busybox — userspace es 100% glibc/Ubuntu)
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# 2. tcc + musl + ncurses + terminfo (source-build → build/tcc_stage/)
+# tcc + musl + ncurses + terminfo.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando build/tcc_stage/ (tcc + musl + ncurses)..."
 	@if [ -d build/tcc_stage ]; then \
@@ -171,14 +205,14 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# 3. frotz + Zork I (source-build en third_party/)
+# frotz + Zork I.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando frotz + Zork I..."
 	@[ -f third_party/frotz/frotz ] && cp -f third_party/frotz/frotz sysroot/usr/bin/ || true
 	@[ -f third_party/zork1.z3 ] && cp -f third_party/zork1.z3 sysroot/usr/games/ || true
 
 # ---------------------------------------------------------------------------
-# 4. libs/ — runtime de otros OS (glibc del host, etc.)
+# libs/ — runtime de otros OS.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando libs/ a sysroot/..."
 	@if [ -d libs ]; then \
@@ -197,7 +231,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# 4b. NSS modules de glibc.
+# NSS modules de glibc.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando NSS modules de glibc..."
 	@mkdir -p sysroot/lib/x86_64-linux-gnu sysroot/usr/lib/x86_64-linux-gnu
@@ -213,13 +247,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	done
 
 # ---------------------------------------------------------------------------
-# 4c. libgcc_s.so.1: la necesita glibc para pthread_exit (unwinding de la
-# pila del thread). Sin ella, cualquier thread que llame a pthread_exit
-# aborta con "libgcc_s.so.1 must be installed for pthread_exit to work" y
-# el proceso muere con SIGABRT (code 134). git la usa: crea un thread
-# sideband-demuxer durante el clone y cuando sale llama a pthread_exit.
-#
-# Es la misma versión que libc.so.6 (mismo toolchain del host).
+# libgcc_s.so.1.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando libgcc_s.so.1..."
 	@for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do \
@@ -234,7 +262,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	done
 
 # ---------------------------------------------------------------------------
-# 5. precompiled/ — binarios de otros OS
+# precompiled/.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando precompiled/ a sysroot/..."
 	@if [ -d precompiled ]; then \
@@ -244,7 +272,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# Git HTTP(S) transport helper. Git delegates URL transports to this binary.
+# Git HTTP(S) transport helper.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando helper HTTP(S) de Git..."
 	@helper=/usr/lib/git-core/git-remote-http; \
@@ -266,7 +294,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	done
 
 # ---------------------------------------------------------------------------
-# /bin/sh: los programas de Ubuntu hacen execve("/bin/sh") en muchos sitios.
+# /bin/sh.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando /bin/sh (dash)..."
 	@if [ -f sysroot/usr/bin/bash ]; then \
@@ -277,8 +305,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	fi
 
 # ---------------------------------------------------------------------------
-# [bash] /etc/passwd, /etc/group, /etc/profile ahora los crea
-# tmpfs_init() en runtime.
+# .bashrc / .profile.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Creando .bashrc/.profile de root..."
 	@mkdir -p sysroot/root
@@ -286,14 +313,14 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 	@[ -f sysroot/root/.profile ] || printf '# ~/.profile (empty)\n' > sysroot/root/.profile
 
 # ---------------------------------------------------------------------------
-# 6. /root/hello.c para tcc -run
+# /root/hello.c.
 # ---------------------------------------------------------------------------
 	@if [ ! -f sysroot/root/hello.c ]; then \
 		printf '#include <stdio.h>\n\nint main(void) {\n    printf("hola desde codigo JIT\\n");\n    for (int i = 0; i < 5; i++)\n        printf("  iter %%d\\n", i);\n    return 0;\n}\n' > sysroot/root/hello.c; \
 	fi
 
 # ---------------------------------------------------------------------------
-# /etc/ld.so.cache
+# /etc/ld.so.cache.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Generando /etc/ld.so.cache..."
 	@mkdir -p sysroot/etc/ld.so.conf.d
@@ -315,27 +342,103 @@ initrd.tar: sysroot user elf_malformed python-stdlib
 kernel: initrd.tar
 	$(MAKE) -C kernel
 
-image: bootloader kernel user
-	mkdir -p esp/EFI/BOOT esp/etc
-	cp bootloader/BOOTX64.EFI esp/EFI/BOOT/
-	cp kernel/kernel.elf esp/
-	cp bootloader/aurora.conf esp/etc/aurora.conf
+# ===========================================================================
+# ISO — estilo Windows/Linux:
+#   - efi.img contiene BOOTX64.EFI + kernel.elf + aurora.conf dentro.
+#   - La ISO9660 solo contiene efi.img. NO dependemos de que el firmware
+#     sepa leer ISO9660: solo FAT, que es lo único garantizado por UEFI.
+# ===========================================================================
 
-	@if [ ! -f aurora.img ]; then \
-		echo "[Makefile] Creando aurora.img (primera vez, 512 MB)..."; \
-		dd if=/dev/zero of=aurora.img bs=1M count=512 status=none; \
-		mkfs.fat -F 32 -s 4 -S 512 aurora.img >/dev/null; \
-	else \
-		echo "[Makefile] Reutilizando aurora.img existente (persistente)"; \
-	fi
+$(EFI_IMG): kernel initrd.tar $(BOOTX64_EFI) $(BIOS_IMG) $(AURORA_CONF)
+	@mkdir -p build
+	@bs=$$(stat -c%s $(KERNEL_ELF)); \
+	 is=$$(stat -c%s kernel/initrd.tar); \
+	 total=$$((bs + is)); \
+	 size_mb=$$(awk "BEGIN { print int($$total/1048576) + 32 }"); \
+	 if [ $$size_mb -lt 64 ]; then size_mb=64; fi; \
+	 echo "[ISO] Creando $(EFI_IMG) (FAT16, $${size_mb} MB)..."; \
+	 rm -f $(EFI_IMG); \
+	 dd if=/dev/zero of=$(EFI_IMG) bs=1M count=$$size_mb status=none; \
+	 mkfs.fat -F 16 -n EFIBOOT $(EFI_IMG) >/dev/null; \
+	 mmd -i $(EFI_IMG) ::/EFI; \
+	 mmd -i $(EFI_IMG) ::/EFI/BOOT; \
+	 mmd -i $(EFI_IMG) ::/aurora; \
+	 mcopy -i $(EFI_IMG) $(BOOTX64_EFI)      ::/EFI/BOOT/BOOTX64.EFI; \
+	 mcopy -i $(EFI_IMG) $(KERNEL_ELF)       ::/aurora/kernel.elf; \
+	 mcopy -i $(EFI_IMG) kernel/initrd.tar   ::/aurora/initrd.tar; \
+	 mcopy -i $(EFI_IMG) $(AURORA_CONF)      ::/aurora/aurora.conf; \
+	 echo "[ISO] $(EFI_IMG) listo:"; \
+	 ls -lh $(EFI_IMG)
 
-	mcopy -i aurora.img -o -s esp/EFI ::
-	mcopy -i aurora.img -o esp/kernel.elf ::
-	mcopy -i aurora.img -o -s esp/etc ::
+iso_root: $(EFI_IMG) $(BOOTX64_EFI) $(BIOS_IMG)
+	@rm -rf $(ISO_ROOT)
+	@mkdir -p $(ISO_ROOT)/EFI/BOOT $(ISO_ROOT)/boot
+	@cp $(EFI_IMG)     $(ISO_ROOT)/efi.img
+	@cp $(BOOTX64_EFI) $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI
+	@cp $(BIOS_IMG)    $(ISO_ROOT)/boot/bios.img
+	@echo "[ISO] $(ISO_ROOT) preparado:"
+	@ls -lh $(ISO_ROOT)/efi.img $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI $(ISO_ROOT)/boot/bios.img
 
 # ---------------------------------------------------------------------------
-# QEMU flags
+# aurora.iso: ISO híbrida (BIOS + UEFI) para CD y USB.
 # ---------------------------------------------------------------------------
+$(ISO_OUT): iso_root
+	@echo "[ISO] Generando $(ISO_OUT) con xorriso (BIOS + UEFI)..."
+	@xorriso -as mkisofs \
+		-V "AURORA_OS" \
+		-R -J -joliet-long \
+		-b boot/bios.img -no-emul-boot -boot-load-size 128 \
+		-eltorito-alt-boot \
+		-e efi.img -no-emul-boot \
+		-o $(ISO_OUT) \
+		$(ISO_ROOT)
+
+	@echo "[ISO] Convirtiendo en ISO híbrida (BIOS desde USB)..."
+	@mkdir -p build
+	@# 1. Obtener LBA del efi.img a partir del catálogo El Torito
+	@EFI_LBA_2048=$$(xorriso -indev $(ISO_OUT) -report_el_torito plain 2>/dev/null | awk '/UEFI/ {print $$NF}'); \
+	 EFI_LBA=$$((EFI_LBA_2048 * 4)); \
+	 EFI_SIZE=$$(stat -c%s build/efi.img); \
+	 EFI_SECTORS=$$((EFI_SIZE / 512)); \
+	 echo "  [ISO] efi.img en LBA $$EFI_LBA_2048 (2048B) -> LBA $$EFI_LBA (512B, $$EFI_SECTORS sectores)"; \
+	 \
+	 echo "  [ISO] Calculando CHS para LBA $$EFI_LBA (para contentar a Rufus)"; \
+	 S=$$(( (EFI_LBA % 63) + 1 )); \
+	 H=$$(( (EFI_LBA / 63) % 255 )); \
+	 C=$$(( EFI_LBA / 16065 )); \
+	 C_H=$$(( C >> 8 )); \
+	 C_L=$$(( C & 0xFF )); \
+	 S_H=$$(( S + (C_H << 6) )); \
+	 printf "  [ISO] CHS generado: C=$$C H=$$H S=$$S (bytes: %02x %02x %02x)\n" $$H $$S_H $$C_L; \
+	 \
+	 echo "  [ISO] Inyectando stage1_mbr.bin en LBA 0"; \
+	 dd if=bootloader/bios/stage1_mbr.bin of=$(ISO_OUT) bs=512 count=1 conv=notrunc status=none; \
+	 \
+	 echo "  [ISO] Generando y inyectando tabla de particiones MBR"; \
+	 printf "80 %02x %02x %02x 0c fe ff ff" $$H $$S_H $$C_L > build/mbr_part.hex; \
+	 printf "%02x%02x%02x%02x " \
+	     $$((EFI_LBA & 0xFF)) $$(((EFI_LBA >> 8) & 0xFF)) \
+	     $$(((EFI_LBA >> 16) & 0xFF)) $$(((EFI_LBA >> 24) & 0xFF)) >> build/mbr_part.hex; \
+	 printf "%02x%02x%02x%02x\n" \
+	     $$((EFI_SECTORS & 0xFF)) $$(((EFI_SECTORS >> 8) & 0xFF)) \
+	     $$(((EFI_SECTORS >> 16) & 0xFF)) $$(((EFI_SECTORS >> 24) & 0xFF)) >> build/mbr_part.hex; \
+	 xxd -r -p build/mbr_part.hex build/mbr_part.bin; \
+	 dd if=build/mbr_part.bin of=$(ISO_OUT) bs=1 seek=446 conv=notrunc status=none; \
+	 \
+	 echo "  [ISO] Inyectando stage2.bin en LBA 1"; \
+	 dd if=bootloader/bios/stage2.bin of=$(ISO_OUT) bs=512 seek=1 conv=notrunc status=none
+
+	@echo "[ISO] $(ISO_OUT) listo para CD/USB:"
+	@ls -lh $(ISO_OUT)
+
+# Alias.
+iso: $(ISO_OUT)
+image: $(ISO_OUT)
+
+# ===========================================================================
+# QEMU
+# ===========================================================================
+
 QEMU_FLAGS_COMMON = \
 	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 	-drive if=pflash,format=raw,file=OVMF_VARS.fd \
@@ -353,7 +456,7 @@ QEMU_FLAGS_KVM = \
 	-cpu host
 
 QEMU_STORAGE_PC = \
-	-drive if=none,id=disk0,format=raw,file=aurora.img \
+	-drive if=none,id=disk0,format=raw,file=aurora.iso \
 	-device ide-hd,drive=disk0,bus=ide.0,unit=0 \
 	-drive if=none,id=cdrom0,format=raw,file=aurora.iso \
 	-device ide-cd,drive=cdrom0,bus=ide.1,unit=0 \
@@ -361,7 +464,7 @@ QEMU_STORAGE_PC = \
 	-device ide-hd,drive=testdisk,bus=ide.1,unit=1
 
 QEMU_STORAGE_Q35 = \
-	-drive if=none,id=disk0,format=raw,file=aurora.img \
+	-drive if=none,id=disk0,format=raw,file=aurora.iso \
 	-device ide-hd,drive=disk0,bus=ide.0 \
 	-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
 	-device ide-hd,drive=testdisk,bus=ide.1 \
@@ -371,21 +474,11 @@ QEMU_STORAGE_Q35 = \
 QEMU_FLAGS_Q35_AHCI = \
 	-machine q35 \
 	-device ahci,id=ahci \
-	-drive if=none,id=disk0,format=raw,file=aurora.img \
+	-drive if=none,id=disk0,format=raw,file=aurora.iso \
 	-device ide-hd,drive=disk0,bus=ahci.0
 
 # ---------------------------------------------------------------------------
 # Networking de QEMU.
-#
-# Por defecto usamos slirp (user-mode): no requiere privilegios, funciona
-# out-of-the-box, pero tiene un techo de ~300-500 KB/s por la granularidad
-# del timer interno de QEMU (4 ms por paquete).
-#
-# Con TAP hablamos TCP/IP directo con la red del host y vemos decenas de
-# MB/s. Requiere configurar la interfaz tap0 en el host (ver `make tap-setup`).
-#
-# El cliente DHCP del kernel pide IP al dnsmasq que arranca `tap-setup`,
-# así que el guest no tiene IP hardcodeada.
 # ---------------------------------------------------------------------------
 QEMU_NET_SLIRP = -nic user,model=e1000e
 QEMU_NET_TAP   = -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
@@ -393,15 +486,6 @@ QEMU_NET_TAP   = -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
 
 HOST_IFACE ?= eth0
 
-# ---------------------------------------------------------------------------
-# Parámetros de la red privada host ↔ guest.
-#
-# tap0 vive en el host con TAP_HOST_IP/24. dnsmasq (unit systemd
-# aurora-dnsmasq) sirve DHCP en tap0 y reparte el rango TAP_DHCP_RANGE.
-# El guest pide IP por DHCP y recibe IP, GW y DNS.
-#
-# El tráfico del guest sale por TAP_HOST_IP → NAT con iptables → HOST_IFACE.
-# ---------------------------------------------------------------------------
 TAP_IFACE      ?= tap0
 TAP_HOST_IP    ?= 10.0.2.1
 TAP_CIDR       ?= 24
@@ -410,15 +494,12 @@ TAP_DHCP_HIGH  ?= 10.0.2.200
 TAP_DHCP_LEASE ?= 12h
 TAP_DNS        ?= 1.1.1.1
 
-# Ficheros de configuración del dnsmasq de Aurora. El pidfile y el log
-# los crea root (dnsmasq corre como root). El conf lo lee root.
-TAP_DNSMASQ_CONF ?= /tmp/aurora-dnsmasq.conf
-TAP_DNSMASQ_PID  ?= /tmp/aurora-dnsmasq.pid
-TAP_DNSMASQ_LOG  ?= /tmp/aurora-dnsmasq.log
+TAP_DNSMASQ_CONF   ?= /tmp/aurora-dnsmasq.conf
+TAP_DNSMASQ_PID    ?= /tmp/aurora-dnsmasq.pid
+TAP_DNSMASQ_LOG    ?= /tmp/aurora-dnsmasq.log
 TAP_DNSMASQ_LEASES ?= /tmp/aurora-dnsmasq.leases
-TAP_DNSMASQ_UNIT ?= aurora-dnsmasq
+TAP_DNSMASQ_UNIT   ?= aurora-dnsmasq
 
-# Subred de NAT (derivada de TAP_HOST_IP y TAP_CIDR).
 TAP_SUBNET = $(shell echo $(TAP_HOST_IP) | awk -F. '{print $$1"."$$2"."$$3".0"}')/$(TAP_CIDR)
 
 # ---------------------------------------------------------------------------
@@ -428,40 +509,42 @@ run: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_STORAGE_PC) \
 		$(QEMU_NET_SLIRP) \
 		-cpu max \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
 		-serial stdio
 
 run-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_STORAGE_PC) \
 		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_DEBUG) \
 		-cpu max \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
 		-serial file:serial.log
 
 run-smp: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_STORAGE_PC) \
 		$(QEMU_NET_SLIRP) \
 		-cpu max \
 		-smp 4 \
+		-cdrom $(ISO_OUT) \
 		-serial stdio
 
 run-smp-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_STORAGE_PC) \
 		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_DEBUG) \
 		-cpu max \
 		-smp 4 \
+		-cdrom $(ISO_OUT) \
 		-serial file:serial.log
 	@echo ""
 	@echo "=== Trampoline (debug.log) ==="
@@ -477,21 +560,21 @@ run-smp-kvm: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_STORAGE_PC) \
 		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_KVM) \
 		-smp 8 \
+		-cdrom $(ISO_OUT) \
 		-serial stdio
 
 run-smp-kvm-debug: iso
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_STORAGE_PC) \
 		$(QEMU_NET_SLIRP) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
 		-smp 8 \
+		-cdrom $(ISO_OUT) \
 		-serial file:serial.log
 	@echo ""
 	@echo "=== Trampoline (debug.log) ==="
@@ -506,9 +589,12 @@ run-smp-kvm-ahci: iso tests/test_disk.img
 		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		$(QEMU_STORAGE_Q35) \
 		$(QEMU_NET_SLIRP) \
 		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=testdisk,bus=ahci.0 \
 		-serial stdio
 
 run-smp-kvm-ahci-debug: iso tests/test_disk.img
@@ -518,9 +604,12 @@ run-smp-kvm-ahci-debug: iso tests/test_disk.img
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
 		$(QEMU_FLAGS_DEBUG) \
-		$(QEMU_STORAGE_Q35) \
 		$(QEMU_NET_SLIRP) \
 		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=testdisk,bus=ahci.0 \
 		-serial file:serial.log
 	@echo ""
 	@echo "=== Trampoline (debug.log) ==="
@@ -529,14 +618,74 @@ run-smp-kvm-ahci-debug: iso tests/test_disk.img
 	@echo "=== Últimas líneas de serial.log ==="
 	@tail -80 serial.log 2>/dev/null || echo "(vacío)"
 
+# ---------------------------------------------------------------------------
+# xHCI (USB 3.x) + teclado + ratón.
+#
+# qemu-xhci expone un controlador xHCI real en un slot PCI propio. Los dos
+# USB devices van a puertos fijos (1 y 2) para que el log sea determinista:
+#
+#   port 1 -> usb-kbd   (HID class 0x03, subclass 0x01, proto 0x01)
+#   port 2 -> usb-mouse (HID class 0x03, subclass 0x01, proto 0x02)
+#
+# Fase 1 (bring-up): busca en el log
+#   [xHCI] detectado en ...
+#   [xHCI] ver=0110 CAPLEN=0x40 slots=... ports=...
+#   [xHCI] inicializado
+#   [TEST] PASS xhci: no-op command
+#   [xHCI] port 1: PORTSC=0x... CCS=1 ...
+#   [xHCI] port 2: PORTSC=0x... CCS=1 ...
+#
+# Fase 2 (HID): los reports de teclado y ratón llegarán al compositor.
+#
+# Fase 3 (hubs): añade `-device usb-hub,...` (ver comentario más abajo).
+# Fase 4 (storage): añade `-device usb-storage,...` (idem).
+# ---------------------------------------------------------------------------
+run-smp-kvm-xhci: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0,port=1 \
+		-device usb-mouse,bus=xhci.0,port=2 \
+		-serial stdio
+
+run-smp-kvm-xhci-debug: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_FLAGS_DEBUG) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0,port=1 \
+		-device usb-mouse,bus=xhci.0,port=2 \
+		-serial file:serial.log
+	@echo ""
+	@echo "=== Trampoline (debug.log) ==="
+	@cat debug.log 2>/dev/null || echo "(vacío)"
+	@echo ""
+	@echo "=== Últimas líneas de serial.log (xHCI) ==="
+	@grep -E '\[xHCI|\[USB|usb:' serial.log 2>/dev/null | tail -80 || tail -80 serial.log 2>/dev/null || echo "(vacío)"
+	
 run-kvm-ahci: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		$(QEMU_STORAGE_Q35) \
 		$(QEMU_NET_SLIRP) \
+		-cdrom $(ISO_OUT) \
+		-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=testdisk,bus=ahci.0 \
 		-serial stdio
 
 run-smp-kvm-ahci-3disk: iso tests/test_disk.img tests/extra_disk.img
@@ -545,55 +694,99 @@ run-smp-kvm-ahci-3disk: iso tests/test_disk.img tests/extra_disk.img
 		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		$(QEMU_STORAGE_Q35) \
 		$(QEMU_NET_SLIRP) \
-		-drive if=none,id=disk2,format=raw,file=tests/extra_disk.img \
-		-device ide-hd,drive=disk2,bus=ide.3 \
 		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+		-drive if=none,id=extradisk,format=raw,file=tests/extra_disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=testdisk,bus=ahci.0 \
+		-device ide-hd,drive=extradisk,bus=ahci.1 \
 		-serial stdio
 
-# ---------------------------------------------------------------------------
-# run-smp-kvm-ahci-tap: igual que run-smp-kvm-ahci pero con red TAP en vez
-# de slirp. Requiere `make tap-setup` ejecutado antes (una vez por sesión).
-# ---------------------------------------------------------------------------
 run-smp-kvm-ahci-tap: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \
 		-machine q35 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_FLAGS_KVM) \
-		$(QEMU_STORAGE_Q35) \
 		$(QEMU_NET_TAP) \
 		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-drive if=none,id=testdisk,format=raw,file=tests/test_disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=testdisk,bus=ahci.0 \
 		-serial stdio
 
 # ---------------------------------------------------------------------------
-# tap-setup / tap-teardown / tap-status.
-#
-# tap-setup hace:
-#   1. Crea tap0 y le asigna TAP_HOST_IP/24.
-#   2. Habilita IP forwarding.
-#   3. Añade reglas NAT para TAP_SUBNET → HOST_IFACE.
-#   4. Genera TAP_DNSMASQ_CONF y arranca dnsmasq como unit systemd
-#      transitorio (aurora-dnsmasq). Sobrevive a la salida del shell de
-#      make, a la sesión ssh, y a reinicios de QEMU.
-#
-# El dnsmasq es un proceso separado del dnsmasq del sistema (si lo hay).
-# Usa su propio conf-file, pid-file y lease-file, y solo se bindea a
-# tap0, así que no choca con nada.
-#
-# Requisitos:
-#   - sudo
-#   - systemd + systemd-run
-#   - dnsmasq instalado: sudo apt install dnsmasq
-#   - HOST_IFACE apunta a tu interfaz real: ip route | grep default
-#
-# Ejemplo:
-#   make tap-setup HOST_IFACE=wlan0
-#   make run-smp-kvm-ahci-tap
-#   ...
-#   make tap-teardown
+# ISO como USB (isohybrid check).
 # ---------------------------------------------------------------------------
+run-iso-as-usb: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-device qemu-xhci,id=xhci \
+		-drive if=none,id=usbstick,format=raw,file=$(ISO_OUT) \
+		-device usb-storage,drive=usbstick,bus=xhci.0 \
+		-serial stdio
+
+run-iso-tcg: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_NET_SLIRP) \
+		-cpu max \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-serial stdio
+
+# Alias: run-iso == run-smp-kvm.
+run-iso: run-smp-kvm
+
+# ===========================================================================
+# BIOS (SeaBIOS por defecto, sin OVMF)
+# ===========================================================================
+QEMU_FLAGS_BIOS = -m 512M -no-reboot -no-shutdown
+
+run-bios: iso
+	qemu-system-x86_64 \
+		$(QEMU_FLAGS_BIOS) \
+		$(QEMU_NET_SLIRP) \
+		-cpu host \
+		-smp 2 \
+		-cdrom $(ISO_OUT) \
+		-serial stdio \
+		-enable-kvm
+
+run-bios-debug: iso
+	qemu-system-x86_64 \
+		$(QEMU_FLAGS_BIOS) \
+		$(QEMU_NET_SLIRP) \
+		-cpu host \
+		-smp 2 \
+		-cdrom $(ISO_OUT) \
+		-serial file:serial.log \
+		-s -S \
+		-enable-kvm
+
+# ---------------------------------------------------------------------------
+# Prueba del ISO como si fuera un USB conectado (para testear el MBR/BIOS)
+# ---------------------------------------------------------------------------
+run-bios-usb: iso
+	qemu-system-x86_64 -m 512M -no-reboot -no-shutdown \
+	    -nic user,model=e1000e -cpu max -smp 2 \
+	    -drive if=none,id=usbstick,format=raw,file=$(ISO_OUT) \
+	    -device qemu-xhci,id=xhci \
+	    -device usb-storage,drive=usbstick,bus=xhci.0 \
+	    -serial stdio \
+		-enable-kvm
+
+# ===========================================================================
+# TAP setup / teardown / status
+# ===========================================================================
 
 tap-setup:
 	@echo "[tap] === Configurando red privada $(TAP_SUBNET) en $(TAP_IFACE) ==="
@@ -604,11 +797,9 @@ tap-setup:
 	fi
 	@if ! command -v systemd-run >/dev/null 2>&1; then \
 		echo "[tap] ERROR: systemd-run no está disponible."; \
-		echo "[tap]        Este Makefile asume systemd en el host."; \
 		exit 1; \
 	fi
 
-	@# 1) tap0 arriba con IP.
 	-@ip link show $(TAP_IFACE) >/dev/null 2>&1 || \
 		sudo ip tuntap add dev $(TAP_IFACE) mode tap user $$(id -u -n)
 	sudo ip link set $(TAP_IFACE) up
@@ -616,10 +807,8 @@ tap-setup:
 	sudo ip addr add $(TAP_HOST_IP)/$(TAP_CIDR) dev $(TAP_IFACE)
 	@echo "[tap] $(TAP_IFACE) arriba: $(TAP_HOST_IP)/$(TAP_CIDR)"
 
-	@# 2) IP forwarding.
 	sudo sysctl -qw net.ipv4.ip_forward=1
 
-	@# 3) NAT (idempotente).
 	sudo iptables -t nat -C POSTROUTING -s $(TAP_SUBNET) -o $(HOST_IFACE) -j MASQUERADE 2>/dev/null || \
 		sudo iptables -t nat -A POSTROUTING -s $(TAP_SUBNET) -o $(HOST_IFACE) -j MASQUERADE
 	sudo iptables -C FORWARD -i $(TAP_IFACE) -o $(HOST_IFACE) -j ACCEPT 2>/dev/null || \
@@ -628,7 +817,6 @@ tap-setup:
 		sudo iptables -A FORWARD -i $(HOST_IFACE) -o $(TAP_IFACE) -m state --state RELATED,ESTABLISHED -j ACCEPT
 	@echo "[tap] NAT: $(TAP_SUBNET) → $(HOST_IFACE) (MASQUERADE)"
 
-	@# 4) Generar conf de dnsmasq.
 	@echo "[tap] generando $(TAP_DNSMASQ_CONF)"
 	@printf '%s\n' \
 		"# Generado por make tap-setup. No editar a mano." \
@@ -644,15 +832,10 @@ tap-setup:
 		"log-dhcp" \
 		> $(TAP_DNSMASQ_CONF)
 
-	@# 5) Parar instancia previa del unit, si existe.
 	-sudo systemctl stop $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
 	-sudo systemctl reset-failed $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
 	-sudo rm -f $(TAP_DNSMASQ_PID) $(TAP_DNSMASQ_LOG) $(TAP_DNSMASQ_LEASES) 2>/dev/null || true
 
-	@# 6) Arrancar dnsmasq como unit systemd transitorio. Con Type=forking
-	@#    y PIDFile, systemd espera a que dnsmasq escriba su PID. Esto
-	@#    resuelve los problemas de SIGHUP cuando sudo usa use_pty: el
-	@#    proceso queda gestionado por systemd, no por el shell.
 	@echo "[tap] arrancando dnsmasq (unit systemd: $(TAP_DNSMASQ_UNIT))"
 	sudo systemd-run --unit=$(TAP_DNSMASQ_UNIT) \
 		--description="Aurora DHCP/DNS on $(TAP_IFACE)" \
@@ -665,7 +848,6 @@ tap-setup:
 			--log-facility=$(TAP_DNSMASQ_LOG)
 	@sleep 1.0
 
-	@# 7) Verificar que systemd lo considera activo.
 	@if ! systemctl is-active --quiet $(TAP_DNSMASQ_UNIT); then \
 		echo "[tap] ERROR: $(TAP_DNSMASQ_UNIT) no está activo"; \
 		sudo journalctl -u $(TAP_DNSMASQ_UNIT) -n 30 --no-pager; \
@@ -676,33 +858,25 @@ tap-setup:
 
 	@echo "[tap] DHCP: $(TAP_DHCP_LOW) - $(TAP_DHCP_HIGH) (lease $(TAP_DHCP_LEASE))"
 	@echo "[tap] GW:   $(TAP_HOST_IP)"
-	@echo "[tap] DNS:  $(TAP_DNS) (reenviado por el host)"
+	@echo "[tap] DNS:  $(TAP_DNS)"
 	@echo "[tap] listo. Siguiente: make run-smp-kvm-ahci-tap"
-	@echo "[tap] ver estado:  make tap-status"
-	@echo "[tap] parar:       make tap-teardown"
 
 tap-teardown:
 	@echo "[tap] === Parando red privada ==="
-	@# 1) Parar el unit systemd.
 	@echo "[tap] parando $(TAP_DNSMASQ_UNIT)"
 	-sudo systemctl stop $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
 	-sudo systemctl reset-failed $(TAP_DNSMASQ_UNIT) 2>/dev/null || true
 	-sudo rm -f $(TAP_DNSMASQ_PID) $(TAP_DNSMASQ_LOG) $(TAP_DNSMASQ_CONF) \
 	             $(TAP_DNSMASQ_LEASES) 2>/dev/null || true
 
-	@# 2) iptables.
 	-sudo iptables -t nat -D POSTROUTING -s $(TAP_SUBNET) -o $(HOST_IFACE) -j MASQUERADE 2>/dev/null || true
 	-sudo iptables -D FORWARD -i $(TAP_IFACE) -o $(HOST_IFACE) -j ACCEPT 2>/dev/null || true
 	-sudo iptables -D FORWARD -i $(HOST_IFACE) -o $(TAP_IFACE) -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
-	@# 3) tap0.
 	-sudo ip link set $(TAP_IFACE) down 2>/dev/null || true
 	-sudo ip tuntap del dev $(TAP_IFACE) mode tap 2>/dev/null || true
 	@echo "[tap] $(TAP_IFACE) eliminado."
 
-# ---------------------------------------------------------------------------
-# tap-status: snapshot del estado de la red privada.
-# ---------------------------------------------------------------------------
 tap-status:
 	@echo "=== $(TAP_IFACE) ==="
 	@ip addr show $(TAP_IFACE) 2>/dev/null || echo "  (no existe. Ejecuta: make tap-setup)"
@@ -730,40 +904,16 @@ tap-status:
 	@echo "=== últimas líneas del log dnsmasq ==="
 	@sudo tail -20 $(TAP_DNSMASQ_LOG) 2>/dev/null || echo "  (sin log)"
 
-# ---------------------------------------------------------------------------
-# ISO
-# ---------------------------------------------------------------------------
-iso: image
-	@echo "[Makefile] Generando ISO UEFI/BIOS híbrida (aurora.iso)..."
-	@mkdir -p iso_root
-	@cp aurora.img iso_root/efi.img
-	@xorriso -as mkisofs \
-		-V "AURORA_OS" \
-		-e efi.img \
-		-no-emul-boot \
-		-isohybrid-gpt-basdat \
-		-isohybrid-apm-hfsplus \
-		-o aurora.iso iso_root
-	@rm -rf iso_root
-	@echo "[Makefile] ISO regenerada: aurora.iso"
-
-run-iso: iso
-	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
-	qemu-system-x86_64 \
-		$(QEMU_FLAGS_COMMON) \
-		$(QEMU_FLAGS_KVM) \
-		$(QEMU_NET_SLIRP) \
-		-smp 4 \
-		-cdrom aurora.iso \
-		-serial stdio
-
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Clean
-# ---------------------------------------------------------------------------
+# ===========================================================================
 clean:
-	$(MAKE) -C bootloader clean
+	$(MAKE) -C bootloader/efi clean
+	$(MAKE) -C bootloader/bios clean
 	$(MAKE) -C kernel clean
 	$(MAKE) -C user clean
 	@if [ -f user/musl/Makefile ]; then $(MAKE) -C user/musl clean; fi
-	rm -rf sysroot kernel/initrd.tar aurora.img aurora.iso esp
+	rm -rf sysroot kernel/initrd.tar esp
+	rm -rf build/efi.img build/iso_root build/mbr_part.bin
+	rm -f aurora.iso
 	rm -f serial.log debug.log qemu_debug.log

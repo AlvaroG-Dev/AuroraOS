@@ -105,6 +105,12 @@ void gdt_init(void) {
                    : "r"(&gdt_ptr)
                    : "rax", "memory");
 
+  // Cargar el selector GS puede sustituir la base per-CPU configurada
+  // en el punto de entrada. Restaurarla antes de que sched_current() lea
+  // cpu_id mediante %gs.
+  wrmsr(MSR_GS_BASE, (uint64_t)&cpu_local_data[0]);
+  wrmsr(MSR_KERNEL_GS_BASE, 0);
+
   uint16_t bsp_tss = TSS_SELECTOR(0);
   __asm__ volatile("ltr %%ax" : : "a"(bsp_tss));
 }

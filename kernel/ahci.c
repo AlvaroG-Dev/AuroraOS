@@ -1451,6 +1451,7 @@ static int ahci_register_disk(ahci_port_t *p) {
 // ===========================================================================
 // Detección de un puerto
 // ===========================================================================
+// Reemplaza la función ahci_probe_port completa en ahci.c
 static int ahci_probe_port(uint8_t port_num) {
   ahci_port_t *p = &g_hba.ports[port_num];
   p->port_num = port_num;
@@ -1468,12 +1469,19 @@ static int ahci_probe_port(uint8_t port_num) {
   p->ncq_enabled = 0;
   p->inflight_bio = NULL;
 
-  // 1. SSTS.DET == 3?
+  // 1. SSTS.DET == 3? (o DET == 1 que significa "presente pero enlace no
+  // listo")
   uint32_t ssts = port_read(p, PxSSTS);
-  if ((ssts & AHCI_SSTS_DET_MASK) != AHCI_SSTS_DET_READY) {
-    LOG_DEBUG("[AHCI] puerto %u: sin dispositivo (SSTS.DET=%u)", port_num,
-              ssts & AHCI_SSTS_DET_MASK);
+  uint32_t det = ssts & AHCI_SSTS_DET_MASK;
+
+  if (det == AHCI_SSTS_DET_NONE) { // 0 = Vacío
+    LOG_DEBUG("[AHCI] puerto %u: sin dispositivo (SSTS.DET=0)", port_num);
     return -1;
+  } else if (det !=
+             AHCI_SSTS_DET_READY) { // 1 = Presente, enlace no establecido
+    LOG_INFO("[AHCI] puerto %u: dispositivo presente pero enlace no listo "
+             "(SSTS.DET=%u), forzando COMRESET...",
+             port_num, det);
   }
 
   LOG_INFO("[AHCI] puerto %u: dispositivo presente (SSTS=0x%x, TFD=0x%x)",
@@ -1560,68 +1568,102 @@ static int ahci_init_impl(void) {
   memset(&g_hba, 0, sizeof(g_hba));
   g_hba.irq_count = 0;
 
-  // 1. Detectar el controlador AHCI en PCI.
+  LOG_INFO("[AHCI] Buscando controlador SATA/AHCI en el bus PCI...");
+
   pci_device_t dev;
-  if (pci_find_device(PCI_CLASS_STORAGE, PCI_SUBCLASS_STORAGE_SATA, &dev) !=
-      0) {
-    LOG_INFO("[AHCI] no hay controlador SATA en PCI");
+  int found_controller = 0;
+
+  // [FIX CRÍTICO] Enumeración manual del bus PCI.
+  // Nos saltamos pci_find_device() para evitar conflictos con otros drivers
+  // (como ata_pio) que puedan haber tocado el dispositivo previamente.
+  for (uint16_t bus = 0; bus < 256 && !found_controller; bus++) {
+    for (uint8_t slot = 0; slot < 32 && !found_controller; slot++) {
+      uint16_t vendor = pci_read_config_word((uint8_t)bus, slot, 0, 0);
+      if (vendor == 0xFFFF)
+        continue;
+
+      uint8_t header = pci_read_config_byte((uint8_t)bus, slot, 0, 0x0E);
+      int num_funcs = (header & 0x80) ? 8 : 1;
+
+      for (uint8_t func = 0; func < num_funcs; func++) {
+        pci_device_t tmp;
+        if (pci_get_device((uint8_t)bus, slot, func, &tmp) != 0)
+          continue;
+
+        // Comprobar si es un controlador SATA (class=0x01, sub=0x06)
+        if (tmp.class_id == PCI_CLASS_STORAGE &&
+            tmp.subclass_id == PCI_SUBCLASS_STORAGE_SATA) {
+          // Verificar que está en modo AHCI (prog_if=0x01)
+          if ((tmp.prog_if & 0x7F) == PCI_PROGIF_SATA_AHCI) {
+            dev = tmp;
+            found_controller = 1;
+            break; // Salir del bucle de funciones
+          } else {
+            LOG_INFO("[AHCI] Controlador SATA en %02x:%02x.%x ignorado: no "
+                     "está en modo AHCI (progif=0x%02x).",
+                     bus, slot, func, tmp.prog_if);
+          }
+        }
+      }
+    }
+  }
+
+  if (!found_controller) {
+    LOG_INFO(
+        "[AHCI] No se encontró ningún controlador SATA operando en modo AHCI.");
     return 0;
   }
-  uint8_t prog = dev.prog_if & 0x7F;
-  if (prog != PCI_PROGIF_SATA_AHCI) {
-    LOG_INFO("[AHCI] controlador SATA no está en modo AHCI (progif=0x%02x)",
-             dev.prog_if);
-    return 0;
-  }
+
   g_hba.pci = dev;
-  LOG_INFO("[AHCI] controlador en %02x:%02x.%x (vendor=0x%04x device=0x%04x)",
+  LOG_INFO("[AHCI] Controlador AHCI detectado en %02x:%02x.%x (vendor=0x%04x "
+           "device=0x%04x)",
            dev.bus, dev.slot, dev.func, dev.vendor_id, dev.device_id);
 
-  // [DEBUG] Leer PCI config: IRQ line (0x3C) y IRQ pin (0x3D).
+  // Leer PCI config: IRQ line (0x3C) y IRQ pin (0x3D).
   uint32_t irq_reg = pci_read_config_dword(dev.bus, dev.slot, dev.func, 0x3C);
   uint8_t irq_line = (uint8_t)(irq_reg & 0xFF);
   uint8_t irq_pin = (uint8_t)((irq_reg >> 8) & 0xFF);
   LOG_INFO("[AHCI-DEBUG] PCI 0x3C = 0x%08x (line=%u pin=%u)", irq_reg, irq_line,
            irq_pin);
+
   if (irq_pin == 0) {
     LOG_WARN("[AHCI-DEBUG] PCI_INTERRUPT_PIN=0: el BIOS NO ha ruteado IRQ");
   } else {
-    LOG_INFO("[AHCI-DEBUG] PCI_INTERRUPT_PIN=%u (INTA#=%u, INTB#=%u, "
-             "INTC#=%u, INTD#=%u)",
+    LOG_INFO("[AHCI-DEBUG] PCI_INTERRUPT_PIN=%u (INTA#=%u, INTB#=%u, INTC#=%u, "
+             "INTD#=%u)",
              irq_pin, irq_pin == 1, irq_pin == 2, irq_pin == 3, irq_pin == 4);
   }
 
-  // [DEBUG] Leer los registros PIRQ del LPC bridge (00:1f.0).
-  // En ICH9, el LPC bridge está en 00:1f.0 y los registros PIRQx_ROUT
-  // están en 0x60-0x63 (PIRQA-D) y 0x68-0x6B (PIRQE-H).
-  // El bit 7 (0x80) significa "IRQ deshabilitada".
+  // Leer los registros PIRQ del LPC bridge (00:1f.0).
   for (int i = 0; i < 8; i++) {
     uint32_t pirq_reg = pci_read_config_dword(0, 0x1f, 0, 0x60 + i);
     LOG_INFO("[AHCI-DEBUG] PIRQ%c_ROUT = 0x%02x (disabled=%d)", 'A' + i,
              pirq_reg & 0xFF, !!(pirq_reg & 0x80));
   }
 
-  // 2. Habilitar bus mastering e IO/MEM.
+  // Habilitar bus mastering e IO/MEM.
   pci_enable_bus_mastering(&dev);
   pci_enable_io_mem(&dev);
 
-  // 3. Mapear BAR5 (ABAR).
+  // Mapear BAR5 (ABAR).
   uint32_t abar_phys = pci_get_bar(&dev, 5);
   if (abar_phys == 0) {
-    LOG_ERR("[AHCI] BAR5 (ABAR) es 0");
+    LOG_ERR("[AHCI] BAR5 (ABAR) es 0. Fallo de hardware o BIOS.");
     return -1;
   }
+
   g_hba.abar_phys = abar_phys;
   g_hba.abar = (volatile uint8_t *)mmio_map(
       abar_phys, 0x1100, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
   if (!g_hba.abar) {
-    LOG_ERR("[AHCI] mmio_map(BAR5) falló");
+    LOG_ERR("[AHCI] mmio_map(BAR5) falló. No se puede acceder a los registros "
+            "del HBA.");
     return -1;
   }
   LOG_INFO("[AHCI] ABAR mapeado phys=0x%x -> virt=%p", abar_phys,
            (void *)g_hba.abar);
 
-  // 4. Leer capacidades.
+  // Leer capacidades.
   g_hba.cap = ahci_read32(g_hba.abar, HBA_CAP);
   g_hba.cap2 = ahci_read32(g_hba.abar, HBA_CAP2);
   g_hba.pi = ahci_read32(g_hba.abar, HBA_PI);
@@ -1634,20 +1676,13 @@ static int ahci_init_impl(void) {
            (g_hba.version >> 16) & 0xFFFF, (g_hba.version >> 8) & 0xFF,
            (g_hba.cap & 0x1F) + 1, ahci_popcount32(g_hba.pi));
 
-  // 5. Reset del HBA.
-  if (hba_reset() != 0)
+  // Reset del HBA.
+  if (hba_reset() != 0) {
+    LOG_ERR("[AHCI] Falló el reset del HBA.");
     return -1;
+  }
 
-  // 6. Configurar interrupciones.
-  //
-  // Estrategia universal:
-  //   1. Intentar MSI. Si funciona, sin storm posible.
-  //   2. Si no, IRQ legacy level-triggered con enmascaramiento.
-  //   3. El polling queda como red de seguridad.
-  //
-  // MSI no está disponible en todos los dispositivos (VirtualBox ICH9
-  // no lo expone para el SATA). En ese caso, la IRQ legacy con
-  // enmascaramiento funciona en cualquier hardware.
+  // Configurar interrupciones.
   uint8_t irq = pci_get_irq(&dev);
 
   // --- Intentar MSI primero ---
@@ -1665,16 +1700,16 @@ static int ahci_init_impl(void) {
         LOG_INFO("[AHCI] IRQ legacy %u enmascarada", irq);
       }
     } else {
-      LOG_WARN("[AHCI] MSI falló, usando IRQ legacy");
+      LOG_WARN("[AHCI] Falló la habilitación de MSI, usando IRQ legacy");
     }
   } else {
-    LOG_INFO("[AHCI] Sin capability MSI, usando IRQ legacy");
+    LOG_INFO("[AHCI] El controlador no soporta MSI, usando IRQ legacy");
   }
 
   // --- Fallback a IRQ legacy ---
   if (!g_hba.using_msi) {
     if (irq == 0xFF || irq > 15) {
-      LOG_WARN("[AHCI] IRQ inválida (%u), el driver usará polling", irq);
+      LOG_WARN("[AHCI] IRQ legacy inválida (%u), el driver usará polling", irq);
     } else {
       g_hba.irq = irq;
       g_hba.irq_masked = 0;
@@ -1682,20 +1717,19 @@ static int ahci_init_impl(void) {
 
       irq_install_handler_ex(irq, ahci_irq_ack, ahci_irq_process);
 
-      // level-triggered, active-low. El enmascaramiento en el ack
-      // evita el storm incluso si la IRQ se comparte.
+      // level-triggered, active-low.
       ioapic_redirect_irq_ex(irq, 32 + irq, lapic_get_bsp_id(),
                              0 /* unmasked */, 1 /* level */,
                              1 /* active-low */);
 
-      LOG_INFO("[AHCI] IRQ %u instalada como level/active-low", irq);
+      LOG_INFO("[AHCI] IRQ legacy %u instalada como level/active-low", irq);
     }
   }
 
-  // 7. Habilitar interrupciones globales del HBA.
+  // Habilitar interrupciones globales del HBA.
   ahci_write32(g_hba.abar, HBA_GHC, ahci_read32(g_hba.abar, HBA_GHC) | GHC_IE);
 
-  // 8. Probar cada puerto implementado.
+  // Probar cada puerto implementado.
   int found = 0;
   for (int i = 0; i < 32; i++) {
     if (!(g_hba.pi & (1u << i)))
@@ -1705,7 +1739,13 @@ static int ahci_init_impl(void) {
   }
   g_hba.num_ports_impl = (uint8_t)ahci_popcount32(g_hba.pi);
 
-  LOG_INFO("[AHCI] %d discos SATA registrados", found);
+  if (found == 0) {
+    LOG_WARN("[AHCI] El controlador se inicializó correctamente, pero no hay "
+             "discos conectados a los puertos SATA.");
+  } else {
+    LOG_INFO("[AHCI] %d discos SATA registrados correctamente.", found);
+  }
+
   g_hba.initialized = 1;
   return 0;
 }

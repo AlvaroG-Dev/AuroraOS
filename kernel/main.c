@@ -2,6 +2,7 @@
 // kernel/main.c
 // Punto de entrada del kernel Aurora OS
 
+#include "../bootloader/include/kernel_boot_info.h"
 #include "acpi.h"
 #include "acpi_aml.h"
 #include "acpi_pm.h"
@@ -21,7 +22,6 @@
 #include "gfx/theme.h"
 #include "heap.h"
 #include "idt.h"
-#include "initrd.h"
 #include "input.h"
 #include "ipi.h"
 #include "klog.h"
@@ -63,19 +63,6 @@
 // ---------------------------------------------------------------------------
 // Boot info (MISMO ORDEN Y TIPOS QUE EL BOOTLOADER)
 // ---------------------------------------------------------------------------
-struct __attribute__((packed)) kernel_boot_info {
-  uint64_t fb_base;
-  uint64_t fb_size;
-  uint32_t fb_width;
-  uint32_t fb_height;
-  uint32_t fb_pitch;
-  uint32_t fb_bpp;
-  uint64_t memmap;
-  uint64_t memmap_size;
-  uint64_t memmap_desc_size;
-  uint32_t memmap_desc_ver;
-  uint8_t acpi_rsdp[64];
-};
 
 static struct kernel_boot_info boot;
 static struct kernel_boot_info g_boot_info;
@@ -84,12 +71,16 @@ uint32_t *fb_ptr = NULL;
 uint32_t fb_width = 0;
 uint32_t fb_height = 0;
 uint32_t fb_pitch = 0;
+uint32_t fb_bpp = 0;
+static uint8_t *fb_hw_ptr = NULL;
+static uint32_t fb_hw_pitch = 0;
 
 static uint8_t syscall_kernel_stack[8192] __attribute__((aligned(16)));
 
 extern struct driver ata_pio_driver;
 extern struct driver atapi_driver;
 extern struct driver ahci_driver;
+extern struct driver xhci_driver;
 
 extern uint8_t __text_start;
 extern uint8_t __bss_end;
@@ -97,20 +88,70 @@ extern uint8_t __bss_end;
 // ---------------------------------------------------------------------------
 // Framebuffer helpers
 // ---------------------------------------------------------------------------
-static void fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch) {
-  if (base == 0 || w == 0 || h == 0 || pitch == 0) {
+static int fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch,
+                   uint32_t bpp, uint64_t size) {
+  if (base == 0 || w == 0 || h == 0 || pitch == 0 || (bpp != 24 && bpp != 32) ||
+      pitch < (uint64_t)w * (bpp / 8) || (uint64_t)pitch * h > size) {
     fb_ptr = NULL;
     fb_width = 0;
     fb_height = 0;
     fb_pitch = 0;
-    return;
+    fb_bpp = 0;
+    fb_hw_ptr = NULL;
+    fb_hw_pitch = 0;
+    LOG_WARN(
+        "[FB] parametros invalidos: base=%p %ux%u bpp=%u pitch=%u size=%lu",
+        (void *)base, w, h, bpp, pitch, (unsigned long)size);
+    return 0;
   }
-  fb_ptr = (uint32_t *)base;
+
+  fb_hw_ptr = (uint8_t *)base;
+  fb_hw_pitch = pitch;
   fb_width = w;
   fb_height = h;
-  fb_pitch = pitch / 4;
-  LOG_INFO("[FB] Inicializado en memoria: %p %u x %u pitch=%u", (void *)base, w,
-           h, pitch);
+  fb_bpp = bpp;
+  fb_pitch = bpp == 24 ? w : pitch / 4;
+  if (bpp == 24) {
+    uint64_t pixels = (uint64_t)w * h;
+    if (pixels > SIZE_MAX / sizeof(uint32_t)) {
+      fb_ptr = NULL;
+      fb_hw_ptr = NULL;
+      LOG_ERR("[FB] dimensiones demasiado grandes para buffer RGB888");
+      return 0;
+    }
+    fb_ptr = (uint32_t *)kmalloc((size_t)pixels * sizeof(uint32_t));
+    if (!fb_ptr) {
+      fb_hw_ptr = NULL;
+      LOG_ERR("[FB] no se pudo reservar buffer RGB888 de %ux%u", w, h);
+      return 0;
+    }
+  } else {
+    fb_ptr = (uint32_t *)base;
+  }
+  LOG_INFO("[FB] Inicializado en memoria: %p %u x %u bpp=%u pitch=%u",
+           (void *)base, w, h, bpp, pitch);
+  return 1;
+}
+
+void fb_flush_rect(const uint32_t *src, uint32_t src_pitch, uint32_t x,
+                   uint32_t y, uint32_t w, uint32_t h) {
+  if (fb_bpp != 24 || !fb_hw_ptr || !src || x >= fb_width || y >= fb_height)
+    return;
+  if (w > fb_width - x)
+    w = fb_width - x;
+  if (h > fb_height - y)
+    h = fb_height - y;
+  for (uint32_t row = 0; row < h; row++) {
+    uint8_t *dst =
+        fb_hw_ptr + (uint64_t)(y + row) * fb_hw_pitch + (uint64_t)x * 3;
+    const uint32_t *pixels = src + (uint64_t)(y + row) * src_pitch + x;
+    for (uint32_t col = 0; col < w; col++) {
+      uint32_t pixel = pixels[col];
+      dst[col * 3 + 0] = (uint8_t)pixel;
+      dst[col * 3 + 1] = (uint8_t)(pixel >> 8);
+      dst[col * 3 + 2] = (uint8_t)(pixel >> 16);
+    }
+  }
 }
 
 static void fb_fill(uint32_t color) {
@@ -121,6 +162,7 @@ static void fb_fill(uint32_t color) {
     for (uint32_t x = 0; x < fb_width; x++)
       row[x] = color;
   }
+  fb_flush_rect(fb_ptr, fb_pitch, 0, 0, fb_width, fb_height);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +268,7 @@ static void kmain_task(void) {
   driver_register(&ata_pio_driver);
   driver_register(&atapi_driver);
   driver_register(&ahci_driver);
+  driver_register(&xhci_driver);
   drivers_init_all();
 
   extern int ata_pio_finalize(void);
@@ -287,6 +330,14 @@ static void kmain_task(void) {
   extern void __sched_canary_arm(void);
   __sched_canary_arm();
 
+  {
+    extern cpu_local_t cpu_local_data[];
+    LOG_INFO("[DIAG-PRE-TEST] cpu_local_data[0].current_task=%p",
+             (void *)cpu_local_data[0].current_task);
+    LOG_INFO("[DIAG-PRE-TEST] cpu_local_data[0].cpu_id=%u",
+             cpu_local_data[0].cpu_id);
+  }
+
   int failed = run_all_tests();
   if (failed > 0) {
     LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
@@ -324,7 +375,29 @@ static void kmain_task(void) {
 // ===========================================================================
 // kmain
 // ===========================================================================
+// ===========================================================================
+// kmain
+// ===========================================================================
 void kmain(struct kernel_boot_info *kinfo) {
+  /* =====================================================================
+   * [FIX-DEFENSIVO] Reinicializar IA32_GS_BASE a &cpu_local_data[0] aquí,
+   * además de en boot.asm. Nunca está de más: si algo en el boot path
+   * (BIOS o UEFI) sobrescribe el MSR, esto lo restaura antes de que
+   * cualquier función lea %gs:0x10 (smp_processor_id / sched_current /
+   * process_current / vfs_check_access / ...).
+   *
+   * NO depender de smp_init() para esto: se llama mucho más abajo, y
+   * antes de llegar ahí ya hay varias rutas que consultan %gs.
+   * ===================================================================== */
+  {
+    extern cpu_local_t cpu_local_data[];
+    uint64_t gs_base = (uint64_t)&cpu_local_data[0];
+    uint32_t lo = (uint32_t)(gs_base & 0xFFFFFFFF);
+    uint32_t hi = (uint32_t)(gs_base >> 32);
+    __asm__ volatile("wrmsr" ::"a"(lo), "d"(hi), "c"(0xC0000101));
+    __asm__ volatile("wrmsr" ::"a"(0), "d"(0), "c"(0xC0000102));
+  }
+
   serial_init();
   klog_init();
 
@@ -342,13 +415,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   simd_init();
   klog_boot_ok();
 
-  // ---------------------------------------------------------------------
-  // [PM] Detección temprana de capacidades de power management.
-  //
-  // Solo CPUID + lectura de MSR. No escribe nada, no puede fallar.
-  // La aplicación real (wrmsr a los MSRs HWP) va más tarde, después
-  // de ACPI, cuando el kernel ya tiene heap, IDT y drivers básicos.
-  // ---------------------------------------------------------------------
+  /* [PM] Detección temprana de capacidades de power management. */
   klog_boot_step("[INIT] PM: detección...");
   cpu_dump_cpuid_diag();
   cpu_detect_pm();
@@ -357,8 +424,9 @@ void kmain(struct kernel_boot_info *kinfo) {
   memcpy(&boot, kinfo, sizeof(boot));
   g_boot_info = boot;
 
-  LOG_INFO("[BOOT] Framebuffer: %p %u x %u pitch=%u", (void *)boot.fb_base,
-           boot.fb_width, boot.fb_height, boot.fb_pitch);
+  LOG_INFO("[BOOT] Framebuffer: %p %u x %u bpp=%u pitch=%u",
+           (void *)boot.fb_base, boot.fb_width, boot.fb_height, boot.fb_bpp,
+           boot.fb_pitch);
 
   klog_boot_step("[INIT] GDT...");
   gdt_init();
@@ -416,7 +484,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
   klog_boot_ok();
 
-  // [SMP] Reservar las páginas bajas del trampoline ANTES del auto-test.
   extern void pmm_reserve_range(uint64_t start, uint64_t end);
   pmm_reserve_range(0x6000, 0x9000);
 
@@ -429,15 +496,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   paging_init((uint64_t *)cr3, max_phys_addr);
   klog_boot_ok();
 
-  // ---------------------------------------------------------------------------
-  // [FIX] Reservar el rango físico REAL del kernel, página a página.
-  //
-  // El kernel tiene 2 PT_LOAD y el bootloader los coloca en zonas físicas
-  // disjuntas (no contiguas). NO podemos usar un único rango
-  // [phys(__text_start), phys(__bss_end)) porque los extremos no están
-  // ordenados. Recorremos cada página virtual y reservamos su dirección
-  // física individualmente, agrupando runs contiguos.
-  // ---------------------------------------------------------------------------
+  /* [FIX] Reservar el rango físico REAL del kernel, página a página. */
   {
     uint64_t *pml4 = paging_get_pml4();
     uint64_t vstart = (uint64_t)&__text_start;
@@ -474,42 +533,26 @@ void kmain(struct kernel_boot_info *kinfo) {
   }
 
   pmm_relocate_bitmap();
-
-  // [FIX SMAP] Parchear stac/clac a NOP si la CPU no soporta SMAP.
   uaccess_init();
 
   klog_boot_step("[INIT] Heap (kmalloc)...");
   heap_init();
   klog_boot_ok();
 
-  // -------------------------------------------------------------------------
-  // [FB] Init temprano con mmio_map.
-  //
-  // El framebuffer de UEFI puede estar muy por encima de los 4 GiB
-  // (en este PC real: 0x4000000000 = 256 GiB). El identity map que deja
-  // el bootloader sólo cubre [0, 4 GiB), así que aquí mapeamos el FB en
-  // MMIO_MAP_BASE con Write-Combining. Es el mismo mapeo que antes
-  // hacíamos en kmain_task, sólo que adelantado: así tenemos pantalla
-  // desde el arranque en lugar de al final.
-  //
-  // Lo colocamos después de pmm_relocate_bitmap() porque mmio_map()
-  // necesita que el PMM esté operativo (alloc_page_table → pmm_alloc_page)
-  // y el bitmap relocalizado a la ventana física.
-  // -------------------------------------------------------------------------
+  /* [FB] Init temprano con mmio_map. */
   if (boot.fb_base && boot.fb_width > 0 && boot.fb_height > 0 &&
       boot.fb_pitch > 0 && boot.fb_size > 0) {
     void *fb_virt = mmio_map(boot.fb_base, boot.fb_size,
                              PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
-    if (fb_virt) {
-      fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height, boot.fb_pitch);
-      fb_fill(0x00101828); // fondo azul oscuro "toma de control"
-
+    if (fb_virt && fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height,
+                           boot.fb_pitch, boot.fb_bpp, boot.fb_size)) {
+      fb_fill(0x00101828);
       boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
       boot_console_clear();
       boot_console_hook_install();
       LOG_INFO("[FB] Boot console activa (%ux%u, phys=0x%lx)", fb_width,
                fb_height, (unsigned long)boot.fb_base);
-    } else {
+    } else if (!fb_virt) {
       LOG_WARN("[FB] mmio_map del framebuffer falló");
     }
   } else if (boot.fb_base) {
@@ -530,13 +573,6 @@ void kmain(struct kernel_boot_info *kinfo) {
   acpi_pm_init();
   klog_boot_ok();
 
-  // ---------------------------------------------------------------------
-  // [PM] Aplicar política de rendimiento.
-  //
-  // Ahora el kernel ya tiene heap, IDT funcional y ACPI parseado. Si HWP
-  // está disponible, se activa. Si no, se intenta el MSR directo (si
-  // EIST está habilitado). Si nada funciona, se registra y no se toca.
-  // ---------------------------------------------------------------------
   klog_boot_step("[INIT] PM: aplicar política...");
   cpu_apply_pm_policy();
   klog_boot_ok();
@@ -556,8 +592,16 @@ void kmain(struct kernel_boot_info *kinfo) {
   pit_init();
 
   klog_boot_step("[INIT] Initramfs (TarFS)...");
-  size_t initrd_size = (size_t)(initrd_end - initrd_start);
-  tarfs_init(initrd_start, initrd_size);
+  if (boot.initrd_base == 0 || boot.initrd_size == 0) {
+    klog_boot_warn("[INIT] initrd no cargado por el bootloader");
+  } else {
+    const void *initrd_virt = phys_to_virt(boot.initrd_base);
+    size_t initrd_size = (size_t)boot.initrd_size;
+    LOG_INFO("[INIT] initrd en phys=0x%lx (%lu KB) -> virt=%p",
+             (unsigned long)boot.initrd_base,
+             (unsigned long)(initrd_size / 1024), initrd_virt);
+    tarfs_init(initrd_virt, initrd_size);
+  }
   vfs_init();
   ipc_init();
   klog_boot_ok();

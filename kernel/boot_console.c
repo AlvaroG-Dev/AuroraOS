@@ -26,6 +26,8 @@
 static uint32_t *g_fb = NULL;
 static uint32_t g_fb_pitch = 0; // en dwords
 static uint32_t g_fb_w = 0, g_fb_h = 0;
+extern void fb_flush_rect(const uint32_t *src, uint32_t src_pitch, uint32_t x,
+                          uint32_t y, uint32_t w, uint32_t h);
 
 static uint32_t *g_shadow = NULL; // buffer en RAM cacheable
 static uint32_t g_shadow_w = 0;   // stride en px (= g_cols * cell_w)
@@ -67,6 +69,7 @@ static void blit_rows_to_fb(uint32_t src_y, uint32_t dst_y, uint32_t rows) {
     for (uint32_t xx = 0; xx < g_shadow_w; xx++)
       dst[xx] = src[xx];
   }
+  fb_flush_rect(g_fb, g_fb_pitch, 0, dst_y, g_shadow_w, rows);
 }
 
 static void blit_cell_to_fb(uint32_t col, uint32_t row) {
@@ -80,6 +83,7 @@ static void blit_cell_to_fb(uint32_t col, uint32_t row) {
     for (uint32_t xx = 0; xx < g_cell_w; xx++)
       dst[xx] = src[xx];
   }
+  fb_flush_rect(g_fb, g_fb_pitch, x, y, g_cell_w, g_cell_h);
 }
 
 // Scroll en RAM (memmove cacheable) + un único blit del área completa
@@ -452,4 +456,6 @@ void boot_console_draw_overlay(void) {
     }
     row++;
   }
+  fb_flush_rect(g_fb, g_fb_pitch, (uint32_t)box_x, (uint32_t)box_y, box_w,
+                box_h);
 }
