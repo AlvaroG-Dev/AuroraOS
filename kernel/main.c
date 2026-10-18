@@ -24,6 +24,7 @@
 #include "idt.h"
 #include "input.h"
 #include "ipi.h"
+#include "iso9660.h"
 #include "klog.h"
 #include "net/arp.h"
 #include "net/dhcp.h"
@@ -288,6 +289,18 @@ static void kmain_task(void) {
     }
   }
 
+  // Intentar montar CDs/DVDs (sector_size=2048, read-only) como ISO9660.
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || b->is_partition)
+      continue;
+    if (b->sector_size != 2048)
+      continue;
+    if (iso9660_mount_bdev(b->name, "/cdrom") == 0) {
+      LOG_INFO("[INIT] Montado %s en /cdrom (ISO9660)", b->name);
+      break;
+    }
+  }
   LOG_INFO("[INIT] DMA dump...");
   ata_dma_dump();
 

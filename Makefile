@@ -5,8 +5,8 @@
         normal run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug run-smp-kvm-ahci run-smp-kvm-ahci-debug \
         run-kvm-ahci run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap run-smp-kvm-xhci run-smp-kvm-xhci-debug \
-        run-iso run-iso-tcg run-iso-as-usb \
-        run-bios run-bios-debug run-bios-usb \
+        run-iso run-iso-tcg run-iso-as-usb run-smp-kvm-xhci-storage run-smp-kvm-xhci-storage-debug \
+        run-bios run-bios-debug run-bios-usb run-smp-kvm-xhci-hub run-smp-kvm-xhci-hub-debug \
         tap-setup tap-teardown tap-status \
         python-stdlib clean
 
@@ -674,6 +674,95 @@ run-smp-kvm-xhci-debug: iso
 	@echo ""
 	@echo "=== Últimas líneas de serial.log (xHCI) ==="
 	@grep -E '\[xHCI|\[USB|usb:' serial.log 2>/dev/null | tail -80 || tail -80 serial.log 2>/dev/null || echo "(vacío)"
+	
+run-smp-kvm-xhci-storage: iso tests/test_disk.img
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		-drive if=none,id=usbstick,format=raw,file=tests/test_disk.img \
+		-device usb-storage,drive=usbstick,bus=xhci.0 \
+		-serial stdio
+
+run-smp-kvm-xhci-storage-debug: iso tests/test_disk.img
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_FLAGS_DEBUG) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		-drive if=none,id=usbstick,format=raw,file=tests/test_disk.img \
+		-device usb-storage,drive=usbstick,bus=xhci.0 \
+		-serial file:serial.log
+	@echo ""
+	@echo "=== Últimas líneas de serial.log (USB) ==="
+	@grep -E '\[xHCI|\[USB|\[BLK|\[FAT32' serial.log 2>/dev/null | tail -100 || tail -100 serial.log 2>/dev/null || echo "(vacío)"
+
+run-smp-kvm-xhci-cd: iso
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		-drive if=none,id=usbcd,format=raw,media=cdrom,file=$(ISO_OUT),readonly=on \
+		-device usb-storage,drive=usbcd,bus=xhci.0 \
+		-serial stdio
+
+run-smp-kvm-xhci-hub: iso tests/test_disk.img
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-hub,bus=xhci.0,port=1 \
+		-device usb-kbd,bus=xhci.0,port=1.1 \
+		-device usb-mouse,bus=xhci.0,port=1.2 \
+		-drive if=none,id=usbstick,format=raw,file=tests/test_disk.img \
+		-device usb-storage,drive=usbstick,bus=xhci.0,port=2 \
+		-serial stdio
+
+run-smp-kvm-xhci-hub-debug: iso tests/test_disk.img
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_FLAGS_DEBUG) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-hub,bus=xhci.0,port=1 \
+		-device usb-kbd,bus=xhci.0,port=1.1 \
+		-device usb-mouse,bus=xhci.0,port=1.2 \
+		-drive if=none,id=usbstick,format=raw,file=tests/test_disk.img \
+		-device usb-storage,drive=usbstick,bus=xhci.0,port=2 \
+		-serial file:serial.log
+	@echo ""
+	@grep -E '\[xHCI|\[USB|\[HUB|\[BLK' serial.log | tail -80
 	
 run-kvm-ahci: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true

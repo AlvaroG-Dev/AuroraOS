@@ -493,6 +493,8 @@ static inline usb_speed_t xhci_speed_to_usb(uint32_t portsc) {
     return USB_SPEED_HIGH;
   case 4:
     return USB_SPEED_SUPER;
+  case 5:
+    return USB_SPEED_SUPER_PLUS; // <-- NUEVO
   default:
     return USB_SPEED_UNKNOWN;
   }
@@ -509,6 +511,8 @@ static inline uint16_t xhci_default_ep0_mps(usb_speed_t s) {
     return 64;
   case USB_SPEED_SUPER:
     return 512;
+  case USB_SPEED_SUPER_PLUS:
+    return 512; // <-- NUEVO
   default:
     return 8;
   }
@@ -551,7 +555,7 @@ typedef struct {
 
 typedef struct xhci_dev_priv {
   uint8_t slot_id;
-  uint8_t port;
+  uint8_t root_hub_port;
   usb_speed_t speed;
 
   xhci_ring_t ep0_ring;
@@ -588,6 +592,8 @@ static inline uint32_t usb_speed_to_xhci_slot_code(usb_speed_t s) {
     return 3;
   case USB_SPEED_SUPER:
     return 4;
+  case USB_SPEED_SUPER_PLUS:
+    return 5; // <-- NUEVO (xHCI spec 1.2: 5 = SS+)
   default:
     return 0;
   }
@@ -610,5 +616,11 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep);
 // `out_actual_len` recibe los bytes transferidos.
 int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
                             int len, int timeout_ms, int *out_actual_len);
+
+int xhci_hcd_bulk_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
+                       int len, int is_in, int timeout_ms);
+
+int xhci_hcd_new_device(usb_device_t *parent_hub, uint8_t port,
+                        usb_speed_t speed, usb_device_t **out_dev);
 
 #endif

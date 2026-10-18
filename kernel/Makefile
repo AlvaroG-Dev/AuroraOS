@@ -33,14 +33,14 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
         buddy.o spinlock.o heap.o slab.o sched.o ps2.o rtc.o tarfs.o vfs.o ipc.o bmp.o pci.o cpu.o simd.o boot_console.o\
         process.o elf.o klog.o pf.o panic.o driver.o input.o wait.o tty.o test.o acpi.o apic.o time.o block.o ata_pio.o \
         ata_common.o atapi.o ata_dma.o ahci.o completion.o part.o fat32.o pipe.o pty.o gfx/gfx.o gfx/window.o \
-        ipi.o gfx/compositor.o gfx/taskbar.o gfx/font_aa.o gfx/font_manager.o gfx/winsrv.o gfx/gfx_filter.o \
+        ipi.o gfx/compositor.o gfx/taskbar.o gfx/font_aa.o gfx/font_manager.o gfx/winsrv.o gfx/gfx_filter.o iso9660.o \
         uaccess.o uaccess_asm.o uaccess_faults.o signal.o procfs.o futex.o swap.o sysctl.o epoll.o signalfd.o \
         memfd.o sysfs.o tests/pmm_stress.o tests/kernel_tests.o smp_trampoline.o smp_boot.o vdso.o vdso_blob.o tmpfs.o \
 		net/skb.o net/netif.o net/checksum.o net/net_tests.o net/loopback.o net/loopback_tests.o net/ip.o net/ip_tests.o \
 		net/arp.o net/arp_tests.o net/icmp.o net/icmp_tests.o net/e1000e.o net/e1000e_tests.o net/ping.o net/udp.o net/udp_tests.o \
 		net/socket.o net/inet_socket.o net/socket_tests.o net/tcp.o net/tcp_tests.o net/dhcp.o acpi_aml.o acpi_pm.o \
 		usb/usb_dma.o usb/usb_core.o usb/usb_urb.o usb/xhci/xhci_ring.o usb/xhci/xhci.o usb/xhci/xhci_cmd.o usb/xhci/xhci_port.o \
-		usb/xhci/xhci_control.o usb/usb_hid.o
+		usb/xhci/xhci_control.o usb/usb_hid.o usb/usb_storage.o usb/usb_hub.o
 		
 TARGET  = kernel.elf
 

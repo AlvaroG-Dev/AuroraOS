@@ -37,6 +37,7 @@ typedef enum {
   USB_SPEED_FULL = 2,
   USB_SPEED_HIGH = 3,
   USB_SPEED_SUPER = 4,
+  USB_SPEED_SUPER_PLUS = 5, // <-- NUEVO (USB 3.1/3.2, tratado como SUPER)
 } usb_speed_t;
 
 // ===========================================================================
@@ -112,18 +113,20 @@ struct usb_hcd {
 
   int (*control_xfer)(usb_device_t *dev, const uint8_t setup[8], void *data,
                       int data_len, int is_in, int timeout_ms);
-
   int (*bulk_xfer)(usb_device_t *dev, usb_endpoint_t *ep, void *buf, int len,
                    int is_in, int timeout_ms);
-
-  // Interrupt/bulk IN/OUT síncrono. timeout_ms == 0 = infinito.
-  // out_actual_len recibe los bytes transferidos.
   int (*interrupt_xfer)(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
                         int len, int timeout_ms, int *out_actual_len);
-
-  // Configura un endpoint no-EP0 (interrupt/bulk). Tras esta llamada,
-  // ep->hc_ep apunta al estado del endpoint en el HCD.
   int (*configure_ep)(usb_device_t *dev, usb_endpoint_t *ep);
+
+  // Crea un nuevo usb_device_t detrás de un puerto (root o hub externo).
+  // - parent_hub == NULL → puerto del root hub.
+  // - parent_hub != NULL → puerto de ese hub.
+  // `speed` viene del PORTSC (root) o del GET_PORT_STATUS (hub).
+  // El HCD hace Enable Slot + Address Device con el route correcto.
+  // El llamante debe llamar luego a usb_enumerate(dev).
+  int (*new_device)(usb_device_t *parent_hub, uint8_t port, usb_speed_t speed,
+                    usb_device_t **out_dev);
 
   int (*alloc_device)(usb_device_t *dev);
   void (*free_device)(usb_device_t *dev);
@@ -177,5 +180,8 @@ int usb_enumerate(usb_device_t *dev);
 // Self-test de los parsers. Devuelve 0 si todo pasa, >0 = fallos.
 // Pensado para engancharse al run_all_tests().
 int usb_core_self_test(void);
+
+// Calcula el route string xHCI de un device (walk de parent_hub).
+uint32_t usb_device_route(const usb_device_t *dev);
 
 #endif

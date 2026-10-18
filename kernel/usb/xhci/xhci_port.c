@@ -151,130 +151,37 @@ static int xhci_attach_one(uint8_t port) {
     return -ENODEV;
 
   usb_speed_t speed = xhci_speed_to_usb(portsc);
-  LOG_INFO("[xHCI] attach: port=%u speed=%d", port, (int)speed);
+  LOG_INFO("[xHCI] attach: port=%u speed=%d PORTSC=0x%08x", port, (int)speed,
+           portsc);
 
-  int rc = xhci_port_reset(port);
+  uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+  int already_enabled = (portsc & XHCI_PORTSC_PED) && (pls == XHCI_PLS_U0);
+
+  if (!already_enabled) {
+    int rc = xhci_port_reset(port);
+    if (rc != 0)
+      return rc;
+    portsc = xhci_port_status(port);
+    speed = xhci_speed_to_usb(portsc);
+  } else {
+    LOG_INFO("[xHCI] port %u: ya habilitado en U0, skip reset", port);
+  }
+
+  usb_device_t *dev = NULL;
+  int rc = g_xhci_hcd.new_device(NULL, port, speed, &dev);
   if (rc != 0)
     return rc;
 
-  portsc = xhci_port_status(port);
-  speed = xhci_speed_to_usb(portsc);
-  uint16_t mps = xhci_default_ep0_mps(speed);
-
-  // ------------------------------------------------------------------
-  // 1. Enable Slot
-  // ------------------------------------------------------------------
-  uint8_t slot = 0;
-  rc = xhci_cmd_enable_slot(&slot);
-  if (rc != 0) {
-    LOG_ERR("[xHCI] port %u: enable_slot falló: %d", port, rc);
-    return rc;
-  }
-  LOG_INFO("[xHCI] port %u: slot_id=%u", port, slot);
-
-  // ------------------------------------------------------------------
-  // 2. Allocate usb_device_t + buffers DMA
-  // ------------------------------------------------------------------
-  usb_device_t *dev = usb_device_alloc();
-  if (!dev) {
-    xhci_cmd_disable_slot(slot);
-    return -ENOMEM;
-  }
-  dev->speed = speed;
-  dev->max_packet_size_ep0 = (mps > 0xFFu) ? 0xFFu : (uint8_t)mps;
-  dev->hcd = &g_xhci_hcd;
-  dev->addr = slot;
-
-  rc = xhci_hcd_alloc_device(dev);
-  if (rc != 0) {
-    LOG_ERR("[xHCI] port %u: alloc_device falló: %d", port, rc);
-    usb_device_free(dev);
-    xhci_cmd_disable_slot(slot);
-    return rc;
-  }
-  xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
-  p->slot_id = slot;
-  p->port = port;
-  p->speed = speed;
-
-  // ------------------------------------------------------------------
-  // 3. CRÍTICO: registrar el Output Device Context en la DCBAA.
-  //
-  // QEMU valida DCBAA[slot] != 0 al procesar Address Device y devuelve
-  // TRB Error (cc=5) si es cero. Linux hace lo mismo en xhci_alloc_dev
-  // (xhci_write_64 en &dcbaa->dev_context_ptrs[slot_id]).
-  // ------------------------------------------------------------------
-  if (p->out_ctx.phys == 0 || (p->out_ctx.phys & 0x3F) != 0) {
-    LOG_ERR("[xHCI] port %u: out_ctx.phys inválido (0x%llx)", port,
-            (unsigned long long)p->out_ctx.phys);
-    usb_device_free(dev);
-    xhci_cmd_disable_slot(slot);
-    return -EIO;
-  }
-  g_xhci.dcbaa[slot] = p->out_ctx.phys;
-  __asm__ volatile("mfence" ::: "memory");
-
-  LOG_INFO("[xHCI] port %u: DCBAA[%u] = 0x%llx", port, slot,
-           (unsigned long long)g_xhci.dcbaa[slot]);
-
-  // ------------------------------------------------------------------
-  // 4. Rellenar el input context (ICC + slot + EP0)
-  // ------------------------------------------------------------------
-  xhci_input_ctx_t *icc = (xhci_input_ctx_t *)p->input_ctx.virt;
-  memset(icc, 0, sizeof(*icc));
-
-  icc->icc.add = XHCI_ICC_ADD_SLOT | XHCI_ICC_ADD_EP0;
-
-  // Slot context. El USB Device Address (DW3) lo rellena el HC en Address
-  // Device; en el input context debe ir a 0.
-  icc->slot.dw0 = XHCI_SLOT_DW0_ROUTE(0) |
-                  XHCI_SLOT_DW0_SPEED(usb_speed_to_xhci_slot_code(speed)) |
-                  XHCI_SLOT_DW0_CTX_ENT(1);    // 1 endpoint context (EP0)
-  icc->slot.dw1 = XHCI_SLOT_DW1_RH_PORT(port); // Root Hub Port Number [23:16]
-  icc->slot.dw2 = 0;
-  icc->slot.dw3 = 0;
-
-  // EP0 context (índice 0 del array ep[] del input context).
-  xhci_ep_ctx_t *ep0 = xhci_ictx_ep0(icc);
-  ep0->dw0 = 0; // EP State = Disabled (lo pone el HC a Running)
-  ep0->dw1 = XHCI_EP_DW1_CERR(3) | XHCI_EP_DW1_EPTYPE(XHCI_EPTYPE_CONTROL) |
-             XHCI_EP_DW1_MAX_PKT(mps);
-  uint64_t deq = xhci_ring_trb_phys(&p->ep0_ring, 0) | XHCI_EP_DEQ_DCS;
-  ep0->dw2 = (uint32_t)(deq & 0xFFFFFFFF);
-  ep0->dw3 = (uint32_t)(deq >> 32);
-  ep0->reserved[0] = XHCI_EP_DW4_AVG_TRB_LEN(8); // DW4: avg TRB length
-
-  usb_dma_sync(&p->input_ctx, USB_DMA_TO_DEVICE);
-
-  // ------------------------------------------------------------------
-  // 5. Address Device
-  // ------------------------------------------------------------------
-  rc = xhci_cmd_address_device(slot, port, speed, mps, p->input_ctx.phys);
-  if (rc != 0) {
-    LOG_ERR("[xHCI] port %u: address_device falló: %d", port, rc);
-    g_xhci.dcbaa[slot] = 0;
-    __asm__ volatile("mfence" ::: "memory");
-    usb_device_free(dev);
-    xhci_cmd_disable_slot(slot);
-    return rc;
-  }
-
-  // ------------------------------------------------------------------
-  // 6. Enumeración genérica
-  // ------------------------------------------------------------------
   rc = usb_enumerate(dev);
   if (rc != 0) {
     LOG_ERR("[xHCI] port %u: enumerate falló: %d", port, rc);
-    g_xhci.dcbaa[slot] = 0;
-    __asm__ volatile("mfence" ::: "memory");
+    // cleanup: disable slot (libera DCBAA) y liberar dev.
+    xhci_cmd_disable_slot(dev->addr);
+    g_xhci.dcbaa[dev->addr] = 0;
     usb_device_free(dev);
-    xhci_cmd_disable_slot(slot);
     return rc;
   }
 
-  LOG_INFO("[xHCI] port %u: device %04x:%04x listo (slot=%u)", port,
-           dev->vendor_id, dev->product_id, slot);
-  // Nota: no liberamos `dev` para que Fase 2 pueda usarlo.
   return 0;
 }
 

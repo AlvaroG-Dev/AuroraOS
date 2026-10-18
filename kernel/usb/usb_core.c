@@ -220,6 +220,36 @@ void usb_device_free(usb_device_t *dev) {
   kfree(dev);
 }
 
+uint32_t usb_device_route(const usb_device_t *dev) {
+  if (!dev || !dev->parent_hub)
+    return 0;
+
+  // Construimos el route desde el root hacia el device:
+  //   nibble 0 = puerto del device en su hub padre
+  //   nibble 1 = puerto del hub padre en su hub padre
+  //   ...
+  //   último nibble = puerto del top-level hub en el root hub
+  //
+  // La spec xHCI 1.2 §6.2.2 dice que el tier-1 port NO va en el route
+  // (eso lo cumple Linux), pero QEMU valida el path completo e incluye
+  // el root port. Adoptamos esta variante, que es la que QEMU acepta,
+  // y sigue siendo funcional en hardware real (el HC ignora nibbles
+  // que corresponden a hubs inexistentes).
+  uint32_t route = 0;
+  int tier = 0;
+  const usb_device_t *d = dev;
+  while (d && tier < 5) {
+    if (d->parent_hub == NULL) {
+      // d es el root hub: no tiene puerto propio que meter.
+      break;
+    }
+    route |= ((uint32_t)(d->port_on_parent & 0xF)) << (tier * 4);
+    d = d->parent_hub;
+    tier++;
+  }
+  return route;
+}
+
 // ===========================================================================
 // Enumeración genérica.
 // ===========================================================================
@@ -304,11 +334,23 @@ int usb_enumerate(usb_device_t *dev) {
            dev->product[0] ? dev->product : "?",
            dev->serial[0] ? dev->serial : "?");
 
-  // Probe HID (boot protocol kbd/mouse). No es fatal si falla.
+  // Probe HID (boot protocol kbd/mouse).
   extern int usb_hid_probe(usb_device_t * dev);
   int hrc = usb_hid_probe(dev);
   if (hrc > 0)
     LOG_INFO("[USB] HID: %d interfaz(es) configurada(s)", hrc);
+
+  // Probe Mass Storage (BOT/SCSI).
+  extern int usb_storage_probe(usb_device_t * dev);
+  int src = usb_storage_probe(dev);
+  if (src > 0)
+    LOG_INFO("[USB] Storage: %d interfaz(es) configurada(s)", src);
+
+  // Probe Hub class (0x09).
+  extern int usb_hub_probe(usb_device_t * dev);
+  int hubrc = usb_hub_probe(dev);
+  if (hubrc > 0)
+    LOG_INFO("[USB] Hub: %d puerto(s) con device(s)", hubrc);
 
   return 0;
 }

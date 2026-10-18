@@ -38,6 +38,15 @@ static inline void rt_wr(uint32_t off, uint32_t v) {
   *(volatile uint32_t *)(g_xhci.rt + off) = v;
 }
 
+// fls: posición del bit más alto a 1 (1-indexed). 0 → 0.
+static inline int xhci_fls(uint32_t x) {
+  if (x == 0)
+    return 0;
+  uint32_t r;
+  __asm__ volatile("bsrl %1, %0" : "=r"(r) : "r"(x));
+  return (int)r + 1;
+}
+
 // ===========================================================================
 // Delay (TSC) — mismo patrón que ahci.c
 // ===========================================================================
@@ -438,7 +447,7 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
   in->slot.dw0 = XHCI_SLOT_DW0_ROUTE(0) |
                  XHCI_SLOT_DW0_SPEED(usb_speed_to_xhci_slot_code(p->speed)) |
                  XHCI_SLOT_DW0_CTX_ENT(dci);
-  in->slot.dw1 = XHCI_SLOT_DW1_RH_PORT(p->port);
+  in->slot.dw1 = XHCI_SLOT_DW1_RH_PORT(p->root_hub_port);
   in->slot.dw2 = XHCI_SLOT_DW2_USB_ADDR(p->slot_id);
   in->slot.dw3 = 0;
 
@@ -453,8 +462,31 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
   ec->dw3 = (uint32_t)(ep_deq >> 32);
 
   // Interval para interrupt endpoints (DW0 bits 23:16).
+  //
+  // El campo Interval del Endpoint Context vale 2^(Interval-1) microframes.
+  //   - HS / SS: bInterval ya está en microframes → usar tal cual.
+  //   - FS / LS: bInterval viene en ms (frames). Convertir a log2:
+  //       target_microframes = bInterval * 8
+  //       Interval = floor(log2(bInterval * 8)) + 1 = fls(bInterval) + 3
+  //     (redondea hacia abajo → polls ligeramente más rápido que lo pedido,
+  //      lo cual es seguro y correcto).
   if (ep->type == USB_EP_INTERRUPT) {
-    ec->dw0 |= ((uint32_t)ep->interval & 0xFF) << 16;
+    uint32_t interval_field;
+    if (p->speed == USB_SPEED_LOW || p->speed == USB_SPEED_FULL) {
+      int b = ep->interval;
+      if (b < 1)
+        b = 1;
+      if (b > 255)
+        b = 255;
+      interval_field = (uint32_t)(xhci_fls((uint32_t)b) + 3);
+    } else {
+      interval_field = (uint32_t)ep->interval;
+      if (interval_field < 1)
+        interval_field = 1;
+      if (interval_field > 255)
+        interval_field = 255;
+    }
+    ec->dw0 |= (interval_field & 0xFF) << 16;
   }
 
   // Average TRB Length (DW4 bits 15:0). Requerido para periodic EPs.
@@ -477,9 +509,119 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
 
   st->configured = 1;
   ep->hc_ep = st;
-  LOG_INFO("[xHCI] slot %u: EP%d %s configurado (mps=%u interval=%u)",
+  LOG_INFO("[xHCI] slot %u: EP%d %s configurado (mps=%u bInterval=%u -> "
+           "Interval_field=%u)",
            p->slot_id, ep_num, dir_in ? "IN" : "OUT", ep->max_packet,
-           ep->interval);
+           ep->interval, (ec->dw0 >> 16) & 0xFF);
+  return 0;
+}
+
+// ===========================================================================
+// Bulk transfer síncrono (Fase 4).
+//
+// Reutiliza el motor de interrupt_xfer: el TRB es un Normal TRB con
+// IOC y la mecánica es idéntica. La diferencia semántica (bulk no
+// tiene "short packet early termination") se cubre con ISP=1, que en
+// bulk simplemente acelera el reporte de transfers cortos.
+// ===========================================================================
+int xhci_hcd_bulk_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
+                       int len, int is_in, int timeout_ms) {
+  (void)is_in; // xhci_hcd_interrupt_xfer lo deriva de ep->addr
+  int actual = 0;
+  int rc = xhci_hcd_interrupt_xfer(dev, ep, buf, len, timeout_ms, &actual);
+  return rc == 0 ? actual : rc;
+}
+
+int xhci_hcd_new_device(usb_device_t *parent_hub, uint8_t port,
+                        usb_speed_t speed, usb_device_t **out_dev) {
+  if (!out_dev)
+    return -EINVAL;
+  *out_dev = NULL;
+
+  // 1. Enable Slot.
+  uint8_t slot = 0;
+  int rc = xhci_cmd_enable_slot(&slot);
+  if (rc != 0) {
+    LOG_ERR("[xHCI] new_device: enable_slot falló: %d", rc);
+    return rc;
+  }
+
+  // 2. Alloc usb_device_t.
+  usb_device_t *dev = usb_device_alloc();
+  if (!dev) {
+    xhci_cmd_disable_slot(slot);
+    return -ENOMEM;
+  }
+  dev->speed = speed;
+  dev->parent_hub = parent_hub;
+  dev->port_on_parent = port;
+  uint16_t mps = xhci_default_ep0_mps(speed);
+  dev->max_packet_size_ep0 = (mps > 0xFFu) ? 0xFFu : (uint8_t)mps;
+  dev->hcd = &g_xhci_hcd;
+  dev->addr = slot;
+
+  rc = xhci_hcd_alloc_device(dev);
+  if (rc != 0) {
+    usb_device_free(dev);
+    xhci_cmd_disable_slot(slot);
+    return rc;
+  }
+  xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
+  p->slot_id = slot;
+  p->root_hub_port = port;
+  if (parent_hub) {
+    const usb_device_t *top_hub = parent_hub;
+    while (top_hub->parent_hub)
+      top_hub = top_hub->parent_hub;
+    p->root_hub_port = top_hub->port_on_parent;
+  }
+  p->speed = speed;
+
+  // 3. DCBAA[slot] = out_ctx.
+  g_xhci.dcbaa[slot] = p->out_ctx.phys;
+  __asm__ volatile("mfence" ::: "memory");
+
+  // 4. Input context.
+  xhci_input_ctx_t *icc = (xhci_input_ctx_t *)p->input_ctx.virt;
+  memset(icc, 0, sizeof(*icc));
+  icc->icc.add = XHCI_ICC_ADD_SLOT | XHCI_ICC_ADD_EP0;
+
+  uint32_t route = usb_device_route(dev);
+  icc->slot.dw0 = XHCI_SLOT_DW0_ROUTE(route) |
+                  XHCI_SLOT_DW0_SPEED(usb_speed_to_xhci_slot_code(speed)) |
+                  XHCI_SLOT_DW0_CTX_ENT(1);
+
+  // Root Hub Port Number es obligatorio para TODOS los devices
+  // directos al root hub, sin importar speed. Para devices detrás de
+  // un hub, debe ir a 0 (la ruta va en el route string).
+  icc->slot.dw1 = XHCI_SLOT_DW1_RH_PORT(p->root_hub_port);
+  icc->slot.dw2 = 0;
+  icc->slot.dw3 = 0;
+
+  xhci_ep_ctx_t *ep0 = xhci_ictx_ep0(icc);
+  ep0->dw0 = 0;
+  ep0->dw1 = XHCI_EP_DW1_CERR(3) | XHCI_EP_DW1_EPTYPE(XHCI_EPTYPE_CONTROL) |
+             XHCI_EP_DW1_MAX_PKT(mps);
+  uint64_t deq = xhci_ring_trb_phys(&p->ep0_ring, 0) | XHCI_EP_DEQ_DCS;
+  ep0->dw2 = (uint32_t)(deq & 0xFFFFFFFF);
+  ep0->dw3 = (uint32_t)(deq >> 32);
+  ep0->reserved[0] = XHCI_EP_DW4_AVG_TRB_LEN(8);
+
+  usb_dma_sync(&p->input_ctx, USB_DMA_TO_DEVICE);
+
+  // 5. Address Device.
+  rc = xhci_cmd_address_device(slot, port, speed, mps, p->input_ctx.phys);
+  if (rc != 0) {
+    LOG_ERR("[xHCI] new_device: address_device falló: %d", rc);
+    g_xhci.dcbaa[slot] = 0;
+    usb_device_free(dev);
+    xhci_cmd_disable_slot(slot);
+    return rc;
+  }
+
+  LOG_INFO("[xHCI] new device slot=%u route=0x%05x speed=%d parent=%s port=%u",
+           slot, route, (int)speed, parent_hub ? "hub" : "root", port);
+  *out_dev = dev;
   return 0;
 }
 
@@ -488,9 +630,10 @@ usb_hcd_t g_xhci_hcd = {
     .name = "xhci",
     .priv = &g_xhci,
     .control_xfer = xhci_hcd_control_xfer,
-    .bulk_xfer = NULL,
+    .bulk_xfer = xhci_hcd_bulk_xfer,
     .interrupt_xfer = xhci_hcd_interrupt_xfer,
     .configure_ep = xhci_hcd_configure_ep,
+    .new_device = xhci_hcd_new_device,
     .alloc_device = xhci_hcd_alloc_device,
     .free_device = xhci_hcd_free_device,
 };

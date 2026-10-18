@@ -35,6 +35,7 @@
 #include "../test.h"
 #include "../time.h"
 #include "../usb/usb.h"
+#include "../usb/usb_storage.h"
 #include "../usb/xhci/xhci.h"
 #include "../usb/xhci/xhci_ring.h"
 #include "../vfs.h"
@@ -5304,3 +5305,39 @@ static void test_usb_hid_stubs(void) {
               "usb_hid_probe(NULL) debía ser -EINVAL");
 }
 REGISTER_TEST("usb: HID probe con NULL", test_usb_hid_stubs);
+
+static void test_usb_storage_stubs(void) {
+  extern int usb_storage_probe(usb_device_t * dev);
+  TEST_ASSERT(usb_storage_probe(NULL) == -EINVAL,
+              "usb_storage_probe(NULL) debía ser -EINVAL");
+}
+REGISTER_TEST("usb: storage probe con NULL", test_usb_storage_stubs);
+
+static void test_iso9660_stubs(void) {
+  extern int iso9660_mount_bdev(const char *bdev_name, const char *mountpoint);
+  TEST_ASSERT(iso9660_mount_bdev(NULL, NULL) == -EINVAL,
+              "iso9660_mount_bdev(NULL,NULL) debía ser -EINVAL");
+  TEST_ASSERT(iso9660_mount_bdev("noexiste", "/x") < 0,
+              "device inexistente no debe montar");
+}
+REGISTER_TEST("iso9660: mount stubs", test_iso9660_stubs);
+
+static void test_iso9660_ls_cdrom(void) {
+  vfs_node_t *d = vfs_lookup("/cdrom");
+  if (!d) {
+    test_skip("no hay /cdrom montado");
+    return;
+  }
+  TEST_ASSERT(d->flags == VFS_DIRECTORY, "/cdrom no es dir");
+  vfs_node_free(d);
+
+  // Intenta leer el primer fichero que aparezca.
+  vfs_dirent_t ent;
+  int rc = vfs_readdir("/cdrom", 0, &ent);
+  TEST_ASSERT(rc == 0 && ent.name[0] != '\0', "readdir /cdrom[0] falló (rc=%d)",
+              rc);
+  if (rc == 0 && ent.name[0])
+    LOG_INFO("  /cdrom[0] = '%s' (%s)", ent.name,
+             ent.type == VFS_DIRECTORY ? "dir" : "file");
+}
+REGISTER_TEST("iso9660: listado de /cdrom", test_iso9660_ls_cdrom);
