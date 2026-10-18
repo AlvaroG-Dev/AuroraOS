@@ -298,21 +298,27 @@ static int xhci_map_mmio(void) {
   if (lo & 0x01)
     return -ENODEV;
   uint64_t phys;
+  uint32_t hi = 0;
   if (((lo >> 1) & 0x03) == 0x02) {
-    uint32_t hi = pci_read_config_dword(g_xhci.pci.bus, g_xhci.pci.slot,
-                                        g_xhci.pci.func, 0x14);
+    hi = pci_read_config_dword(g_xhci.pci.bus, g_xhci.pci.slot,
+                               g_xhci.pci.func, 0x14);
     phys = (lo & ~0x0FULL) | ((uint64_t)hi << 32);
   } else {
     phys = lo & ~0x0FULL;
   }
+  LOG_INFO("[xHCI] BAR0 raw=0x%08x hi=0x%08x phys=0x%016lx",
+           lo, hi, (unsigned long)phys);
   if (phys == 0)
     return -ENODEV;
   g_xhci.mmio_phys = phys;
   g_xhci.mmio_size = 0x10000;
   g_xhci.mmio = (volatile uint8_t *)mmio_map(
       phys, g_xhci.mmio_size, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
-  if (!g_xhci.mmio)
+  if (!g_xhci.mmio) {
+    LOG_ERR("[xHCI] no se pudo mapear BAR0 phys=0x%016lx size=0x%lx",
+            (unsigned long)phys, (unsigned long)g_xhci.mmio_size);
     return -ENOMEM;
+  }
   return 0;
 }
 
