@@ -145,6 +145,12 @@ typedef struct {
 #define XHCI_SLOT_DW2_TT_PORT(p) (((p) & 0xFFu) << 8)
 #define XHCI_SLOT_DW2_TTT(t) (((t) & 0x3u) << 16)
 
+#define XHCI_EP_DW0_LSA 0x00008000u
+#define XHCI_EP_DW0_MAXPSTR(p) (((p) & 0x1Fu) * 1024u)
+#define XHCI_STREAM_CTX_SCT_PRIMARY 0x00000002u
+#define XHCI_UAS_STREAM_COUNT 16u
+#define XHCI_UAS_MAX_PSTREAMS 3u
+
 #define XHCI_EP_DW1_CERR(c) (((c) & 0x3u) << 1)
 #define XHCI_EP_DW1_EPTYPE(t) (((t) & 0x7u) << 3)
 #define XHCI_EPTYPE_BULK_OUT 2
@@ -315,7 +321,10 @@ typedef struct {
   uint8_t ep_num;
   uint8_t dir_in;
   uint8_t ep_type;
+  uint8_t has_streams;
+  uint8_t max_streams;
   xhci_ring_t ring;
+  usb_dma_buf_t stream_ctx;
 } xhci_ep_state_t;
 
 typedef struct xhci_dev_priv {
@@ -363,5 +372,27 @@ int xhci_hcd_bulk_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
 int xhci_hcd_new_device(usb_device_t *parent_hub, uint8_t port,
                         usb_speed_t speed, usb_device_t **out_dev);
 int xhci_hcd_set_hub_info(usb_device_t *dev, uint8_t num_ports);
+
+#define XHCI_MAX_ASYNC_URBS 64
+
+typedef struct xhci_pending_urb {
+  usb_bulk_urb_t *urb;
+  uint64_t trb_phys;
+  uint8_t slot_id;
+  uint8_t ep_id;
+} xhci_pending_urb_t;
+
+extern xhci_pending_urb_t g_async_urbs[XHCI_MAX_ASYNC_URBS];
+extern int g_async_urb_count;
+
+int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
+                         usb_bulk_urb_t *urb);
+
+int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
+                            uint64_t phys, void *virt, int len, int is_in,
+                            int timeout_ms);
+
+int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
+                       uint32_t timeout_ms, uint32_t *out_residual_len);
 
 #endif

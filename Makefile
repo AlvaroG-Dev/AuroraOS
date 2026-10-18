@@ -7,7 +7,7 @@
         run-kvm-ahci run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap run-smp-kvm-xhci run-smp-kvm-xhci-debug \
         run-iso run-iso-tcg run-iso-as-usb run-smp-kvm-xhci-storage run-smp-kvm-xhci-storage-debug \
         run-bios run-bios-debug run-bios-usb run-smp-kvm-xhci-hub run-smp-kvm-xhci-hub-debug \
-        tap-setup tap-teardown tap-status \
+        tap-setup tap-teardown tap-status run-smp-kvm-xhci-uas \
         python-stdlib clean
 
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
@@ -764,6 +764,23 @@ run-smp-kvm-xhci-hub-debug: iso tests/test_disk.img
 	@echo ""
 	@grep -E '\[xHCI|\[USB|\[HUB|\[BLK' serial.log | tail -80
 	
+run-smp-kvm-xhci-uas: iso tests/test_disk.img
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
+	qemu-system-x86_64 \
+		-machine q35 \
+		$(QEMU_FLAGS_COMMON) \
+		$(QEMU_FLAGS_KVM) \
+		$(QEMU_NET_SLIRP) \
+		-smp 4 \
+		-cdrom $(ISO_OUT) \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
+		-drive if=none,id=usbstick,format=raw,file=tests/test_disk.img \
+		-device usb-uas,id=uas,bus=xhci.0 \
+		-device scsi-hd,bus=uas.0,scsi-id=0,lun=0,drive=usbstick \
+		-serial stdio
+
 run-kvm-ahci: iso tests/test_disk.img
 	cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd 2>/dev/null || true
 	qemu-system-x86_64 \

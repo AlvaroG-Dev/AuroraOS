@@ -109,6 +109,7 @@ usb_config_t *usb_parse_config_descriptor(const uint8_t *raw, int raw_len) {
       ep->type = raw[off + 3] & 0x03;
       ep->max_packet = (uint16_t)((raw[off + 4] | (raw[off + 5] << 8)) & 0x7FF);
       ep->interval = raw[off + 6];
+      ep->stream_id = 0;
       ep->hc_ep = NULL;
       itf->num_endpoints++;
     }

@@ -18,6 +18,8 @@ xhci_trb_t g_pending_cmds[XHCI_MAX_PENDING_CMDS];
 int g_pending_cmd_count = 0;
 xhci_trb_t g_pending_xfers[XHCI_MAX_PENDING_XFERS];
 int g_pending_xfer_count = 0;
+xhci_pending_urb_t g_async_urbs[XHCI_MAX_ASYNC_URBS];
+int g_async_urb_count = 0;
 
 static volatile int g_event_pending = 0;
 static volatile int g_hotplug_pending = 0;
@@ -96,8 +98,6 @@ int xhci_take_pending_xfer(uint8_t slot, uint8_t ep_id, uint64_t trb_phys,
 
 static bool has_events(void *arg) { return g_event_pending > 0; }
 static bool has_hotplug(void *arg) { return g_hotplug_pending > 0; }
-static bool has_pending_cmd(void *arg) { return g_pending_cmd_count > 0; }
-static bool has_pending_xfer(void *arg) { return g_pending_xfer_count > 0; }
 
 static void xhci_irq_handler_msi(void) {
   uint32_t sts = op_rd(XHCI_OP_USBSTS);
@@ -149,6 +149,64 @@ void xhci_event_thread(void) {
         }
         spin_unlock_irqrestore(&g_xhci.lock, flags);
       } else if (type == XHCI_TRB_TRANSFER_EVT) {
+        // 1. Intentar casar con un URB asíncrono pendiente (bulk UAS).
+        usb_bulk_urb_t *async_urb = NULL;
+
+        flags = spin_lock_irqsave(&g_xhci.lock);
+        for (int i = 0; i < g_async_urb_count; i++) {
+          xhci_pending_urb_t *p = &g_async_urbs[i];
+          if (p->slot_id == XHCI_EVT_SLOT(evt) &&
+              p->ep_id == XHCI_EVT_EP(evt) && p->trb_phys == evt.param) {
+            async_urb = p->urb;
+            g_async_urbs[i] = g_async_urbs[--g_async_urb_count];
+            break;
+          }
+        }
+        spin_unlock_irqrestore(&g_xhci.lock, flags);
+
+        if (async_urb) {
+          LOG_DEBUG("[xHCI] async completion slot=%u ep=%u cc=%u",
+                    XHCI_EVT_SLOT(evt), XHCI_EVT_EP(evt), XHCI_EVT_CC(evt));
+          uint32_t cc = XHCI_EVT_CC(evt);
+          uint32_t residual = evt.status & 0xFFFFFF;
+          if (residual > (uint32_t)async_urb->len)
+            residual = (uint32_t)async_urb->len;
+          async_urb->actual_len = async_urb->len - (int)residual;
+          async_urb->status =
+              (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET) ? 0 : -EIO;
+
+          // Determinar el buffer DMA origen (para IN) y liberar el
+          // que haya allocado el HCD (si lo hay).
+          usb_dma_buf_t *src_dma = NULL;
+          if (async_urb->dma_buf) {
+            src_dma = (usb_dma_buf_t *)async_urb->dma_buf;
+          } else if (async_urb->hc_priv) {
+            src_dma = (usb_dma_buf_t *)async_urb->hc_priv;
+          }
+
+          // Copiar el resultado al buf del caller si es IN y el buffer
+          // del caller no coincide con el DMA.
+          if (async_urb->is_in && src_dma && src_dma->virt != async_urb->buf &&
+              async_urb->actual_len > 0 && async_urb->status == 0) {
+            memcpy(async_urb->buf, src_dma->virt,
+                   (size_t)async_urb->actual_len);
+          }
+
+          // Liberar el DMA si lo allocamos nosotros.
+          if (async_urb->hc_priv) {
+            usb_dma_buf_t *owned = (usb_dma_buf_t *)async_urb->hc_priv;
+            if (owned->virt)
+              usb_dma_free(owned);
+            kfree(owned);
+            async_urb->hc_priv = NULL;
+          }
+
+          if (async_urb->complete)
+            async_urb->complete(async_urb);
+          continue;
+        }
+
+        // 2. Sin match: evento para un waiter síncrono (HID, control).
         flags = spin_lock_irqsave(&g_xhci.lock);
         if (g_pending_xfer_count < XHCI_MAX_PENDING_XFERS) {
           g_pending_xfers[g_pending_xfer_count++] = evt;
@@ -386,6 +444,12 @@ void xhci_hcd_free_device(usb_device_t *dev) {
   if (!dev || !dev->hc_priv)
     return;
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
+  for (int i = 0; i < 15; i++) {
+    if (p->eps[i].stream_ctx.virt)
+      usb_dma_free(&p->eps[i].stream_ctx);
+    if (p->eps[i].configured)
+      xhci_ring_destroy(&p->eps[i].ring);
+  }
   if (p->input_ctx.virt)
     usb_dma_free(&p->input_ctx);
   if (p->out_ctx.virt)
@@ -444,6 +508,29 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
   uint64_t ep_deq = xhci_ring_trb_phys(&st->ring, 0) | XHCI_EP_DEQ_DCS;
   ec->dw2 = (uint32_t)(ep_deq & 0xFFFFFFFF);
   ec->dw3 = (uint32_t)(ep_deq >> 32);
+  if (ep->stream_id != 0 && ep->type == USB_EP_BULK) {
+    rc = usb_dma_alloc(XHCI_UAS_STREAM_COUNT * sizeof(xhci_trb_t),
+                       &st->stream_ctx);
+    if (rc != 0) {
+      xhci_ring_destroy(&st->ring);
+      memset(st, 0, sizeof(*st));
+      return rc;
+    }
+    xhci_trb_t *sc = (xhci_trb_t *)st->stream_ctx.virt;
+    memset(sc, 0, XHCI_UAS_STREAM_COUNT * sizeof(*sc));
+    uint64_t stream_deq = xhci_ring_trb_phys(&st->ring, 0);
+    for (uint32_t sid = 1; sid < XHCI_UAS_STREAM_COUNT; sid++) {
+      sc[sid].param = XHCI_EP_DEQ_DCS | XHCI_STREAM_CTX_SCT_PRIMARY;
+      sc[sid].status = (uint32_t)(stream_deq & 0xFFFFFFFFu);
+      sc[sid].control = (uint32_t)(stream_deq >> 32);
+    }
+    usb_dma_sync(&st->stream_ctx, USB_DMA_TO_DEVICE);
+    st->has_streams = 1;
+    st->max_streams = XHCI_UAS_STREAM_COUNT - 1;
+    ec->dw0 |= XHCI_EP_DW0_LSA | XHCI_EP_DW0_MAXPSTR(XHCI_UAS_MAX_PSTREAMS);
+    ec->dw2 = (uint32_t)(st->stream_ctx.phys & 0xFFFFFFFFu);
+    ec->dw3 = (uint32_t)(st->stream_ctx.phys >> 32);
+  }
 
   if (ep->type == USB_EP_INTERRUPT) {
     uint32_t interval_field;
@@ -624,6 +711,192 @@ int xhci_hcd_set_hub_info(usb_device_t *dev, uint8_t num_ports) {
   return 0;
 }
 
+int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
+                         usb_bulk_urb_t *urb) {
+  if (!dev || !dev->hc_priv || !ep || !urb || !urb->buf || urb->len <= 0)
+    return -EINVAL;
+
+  xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
+  xhci_ep_state_t *st = (xhci_ep_state_t *)ep->hc_ep;
+  if (!st || !st->configured)
+    return -ENODEV;
+
+  int dir_in = (ep->addr & 0x80) ? 1 : 0;
+  int ep_num = ep->addr & 0x0F;
+  uint32_t dci = dir_in ? (2 * ep_num + 1) : (2 * ep_num);
+  uint16_t stream_id = urb->stream_id;
+  if (st->has_streams) {
+    if (stream_id == 0 || stream_id > st->max_streams)
+      return -EINVAL;
+  } else if (stream_id != 0) {
+    return -EINVAL;
+  }
+
+  // Elegir buffer DMA: el del caller si lo aporta, o uno propio.
+  usb_dma_buf_t dma_local;
+  usb_dma_buf_t *dma = NULL;
+  int dma_allocated = 0;
+  memset(&dma_local, 0, sizeof(dma_local));
+
+  if (urb->dma_buf) {
+    dma = urb->dma_buf;
+    // Aseguramos que el write-back al físico esté hecho si es OUT.
+    if (!dir_in)
+      usb_dma_sync(dma, USB_DMA_TO_DEVICE);
+  } else {
+    if (usb_dma_alloc((size_t)urb->len, &dma_local) != 0)
+      return -ENOMEM;
+    dma = &dma_local;
+    dma_allocated = 1;
+    if (!dir_in) {
+      memcpy(dma->virt, urb->buf, (size_t)urb->len);
+      usb_dma_sync(dma, USB_DMA_TO_DEVICE);
+    }
+  }
+
+  // Reservar slot en la cola antes de tocar el ring.
+  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+  if (g_async_urb_count >= XHCI_MAX_ASYNC_URBS) {
+    spin_unlock_irqrestore(&g_xhci.lock, flags);
+    if (dma_allocated)
+      usb_dma_free(&dma_local);
+    return -ENOMEM;
+  }
+
+  uint32_t wrap_limit = st->ring.size - 1;
+  uint32_t trb_idx = st->ring.enqueue;
+  if (trb_idx == wrap_limit)
+    trb_idx = 0;
+  uint64_t trb_phys = xhci_ring_trb_phys(&st->ring, trb_idx);
+
+  xhci_trb_t trb = {0};
+  trb.param = dma->phys;
+  trb.status = (uint32_t)urb->len;
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP | XHCI_TRB_IOC |
+                (dir_in ? XHCI_TRB_DIR_IN : 0);
+
+  int rc = xhci_ring_enqueue(&st->ring, &trb);
+  if (rc != 0) {
+    spin_unlock_irqrestore(&g_xhci.lock, flags);
+    if (dma_allocated)
+      usb_dma_free(&dma_local);
+    return rc;
+  }
+
+  xhci_pending_urb_t *pu = &g_async_urbs[g_async_urb_count++];
+  pu->urb = urb;
+  pu->trb_phys = trb_phys;
+  pu->slot_id = p->slot_id;
+  pu->ep_id = (uint8_t)dci;
+
+  __asm__ volatile("mfence" ::: "memory");
+  *(volatile uint32_t *)(g_xhci.db + p->slot_id * 4) =
+      dci | ((uint32_t)stream_id * 65536u);
+  spin_unlock_irqrestore(&g_xhci.lock, flags);
+
+  // Guardar el buffer DMA allocado (solo si lo hemos allocado nosotros)
+  // para liberarlo en el completion. Si urb->dma_buf es del caller,
+  // dejamos hc_priv = NULL como marcador.
+  if (dma_allocated) {
+    usb_dma_buf_t *saved = kmalloc(sizeof(*saved));
+    if (saved)
+      memcpy(saved, &dma_local, sizeof(dma_local));
+    urb->hc_priv = saved;
+  } else {
+    urb->hc_priv = NULL;
+  }
+
+  return 0;
+}
+
+// ===========================================================================
+// Bulk transfer síncrono usando un buffer DMA ya preparado por el caller.
+//
+// `phys` es la dirección física del buffer (el caller la obtuvo con
+// usb_dma_alloc). `virt` es la misma memoria mapeada vía PHYS_MAP_BASE,
+// solo se usa para devolver el data en IN. NO se hace memcpy: el HC
+// lee/escribe directamente en `phys`.
+//
+// Esto evita el problema de coherencia caché<->DMA que se da con
+// usb-uas (QEMU lee el buffer con address_space_read sin pasar por
+// la caché del CPU guest, y el memcpy a un DMA nuevo deja los bytes
+// en caché sin write-back visible al emulador).
+// ===========================================================================
+int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
+                            uint64_t phys, void *virt, int len, int is_in,
+                            int timeout_ms) {
+  if (!dev || !dev->hc_priv || !ep || !phys || !virt || len <= 0)
+    return -EINVAL;
+
+  xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
+  xhci_ep_state_t *st = (xhci_ep_state_t *)ep->hc_ep;
+  if (!st || !st->configured)
+    return -ENODEV;
+  uint16_t stream_id = ep->stream_id;
+  if (st->has_streams) {
+    if (stream_id == 0 || stream_id > st->max_streams)
+      return -EINVAL;
+  } else if (stream_id != 0) {
+    return -EINVAL;
+  }
+
+  int dir_in = (ep->addr & 0x80) ? 1 : 0;
+  int ep_num = ep->addr & 0x0F;
+  uint32_t dci = dir_in ? (2 * ep_num + 1) : (2 * ep_num);
+
+  // Write-back del rango antes de DMA (no-op en x86 coherente, pero
+  // necesario para QEMU's usb-uas que lee del buffer físico sin pasar
+  // por la caché del guest).
+  if (!dir_in) {
+    uintptr_t start = (uintptr_t)virt & ~(uintptr_t)63;
+    uintptr_t end = ((uintptr_t)virt + (uintptr_t)len + 63) & ~(uintptr_t)63;
+    for (uintptr_t a = start; a < end; a += 64)
+      __asm__ volatile("clflush (%0)" : : "r"((const void *)a) : "memory");
+    __asm__ volatile("mfence" ::: "memory");
+  }
+
+  uint32_t wrap_limit = st->ring.size - 1;
+  uint32_t trb_idx = st->ring.enqueue;
+  if (trb_idx == wrap_limit)
+    trb_idx = 0;
+  uint64_t trb_phys = xhci_ring_trb_phys(&st->ring, trb_idx);
+
+  xhci_trb_t trb = {0};
+  trb.param = phys;
+  trb.status = (uint32_t)len;
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP | XHCI_TRB_IOC |
+                (dir_in ? XHCI_TRB_DIR_IN : 0);
+
+  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+  int rc = xhci_ring_enqueue(&st->ring, &trb);
+  __asm__ volatile("mfence" ::: "memory");
+  *(volatile uint32_t *)(g_xhci.db + p->slot_id * 4) =
+      dci | ((uint32_t)stream_id * 65536u);
+  spin_unlock_irqrestore(&g_xhci.lock, flags);
+
+  if (rc != 0)
+    return rc;
+
+  uint32_t residual = 0;
+  int werr = xhci_wait_transfer(p->slot_id, (uint8_t)dci, trb_phys,
+                                (uint32_t)timeout_ms, &residual);
+
+  if (werr == 0) {
+    if (dir_in) {
+      uintptr_t flush_base = (uintptr_t)virt & ~(uintptr_t)63;
+      uintptr_t flush_end =
+          ((uintptr_t)virt + (uintptr_t)len + 63) & ~(uintptr_t)63;
+      for (uintptr_t a = flush_base; a < flush_end; a += 64)
+        __asm__ volatile("clflush (%0)" : : "r"((const void *)a) : "memory");
+      __asm__ volatile("mfence" ::: "memory");
+    }
+    if (residual > (uint32_t)len)
+      residual = (uint32_t)len;
+    return len - (int)residual;
+  }
+  return werr;
+}
+
 usb_hcd_t g_xhci_hcd = {
     .name = "xhci",
     .priv = &g_xhci,
@@ -632,7 +905,9 @@ usb_hcd_t g_xhci_hcd = {
     .interrupt_xfer = xhci_hcd_interrupt_xfer,
     .configure_ep = xhci_hcd_configure_ep,
     .new_device = xhci_hcd_new_device,
-    .set_hub_info = xhci_hcd_set_hub_info, // <-- NUEVO
+    .set_hub_info = xhci_hcd_set_hub_info,
+    .bulk_submit = xhci_hcd_bulk_submit,
+    .bulk_xfer_phys = xhci_hcd_bulk_xfer_phys,
     .alloc_device = xhci_hcd_alloc_device,
     .free_device = xhci_hcd_free_device,
 };

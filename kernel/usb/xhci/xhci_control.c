@@ -26,15 +26,38 @@ int xhci_hcd_bulk_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
   return rc == 0 ? actual : rc;
 }
 
-static int xhci_wait_transfer(uint8_t slot, uint8_t ep_id,
-                              uint64_t last_trb_phys, uint32_t timeout_ms,
-                              uint32_t *out_residual_len) {
+int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
+                       uint32_t timeout_ms, uint32_t *out_residual_len) {
   if (!g_xhci.initialized)
     return -ENODEV;
 
-  uint64_t timeout_ticks = (timeout_ms == 0) ? 0 : timeout_ms;
-  xhci_trb_t evt;
+  extern uint64_t klog_get_tsc_freq(void);
+  extern void sched_yield(void);
+
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq == 0)
+    freq = 2000000000ULL;
+
+  // timeout_ms == 0 → espera infinita.
+  uint64_t max_cycles = (timeout_ms == 0) ? 0 : (freq / 1000) * timeout_ms;
+
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+
+  int iter = 0;
   while (1) {
+    // 1. Timeout real por TSC.
+    if (max_cycles != 0) {
+      __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+      if ((((uint64_t)hi << 32) | lo) - t0 >= max_cycles) {
+        LOG_ERR("[xHCI] transfer timeout (slot=%u ep=%u)", slot, ep_id);
+        return -ETIMEDOUT;
+      }
+    }
+
+    // 2. Intentar consumir MI evento específico.
+    xhci_trb_t evt;
     if (xhci_take_pending_xfer(slot, ep_id, last_trb_phys, &evt) == 0) {
       uint32_t cc = XHCI_EVT_CC(evt);
       if (out_residual_len)
@@ -44,20 +67,13 @@ static int xhci_wait_transfer(uint8_t slot, uint8_t ep_id,
       LOG_ERR("[xHCI] transfer cc=%u (slot=%u ep=%u)", cc, slot, ep_id);
       return -EIO;
     }
-    long ret = wait_event_interruptible_timeout(
-        &g_xhci.xfer_wq, has_pending_xfer, NULL, timeout_ticks);
-    if (ret == 0) {
-      if (xhci_take_pending_xfer(slot, ep_id, last_trb_phys, &evt) == 0) {
-        uint32_t cc = XHCI_EVT_CC(evt);
-        if (out_residual_len)
-          *out_residual_len = evt.status & 0xFFFFFF;
-        if (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET)
-          return 0;
-        return -EIO;
-      }
-      LOG_ERR("[xHCI] transfer timeout (slot=%u ep=%u)", slot, ep_id);
-      return -ETIMEDOUT;
-    }
+
+    // 3. No hay evento para mí (puede haber eventos para otros endpoints
+    //    en g_pending_xfers[]). Ceder CPU y reintentar.
+    if ((++iter & 0x3F) == 0)
+      sched_yield();
+    else
+      __asm__ volatile("pause");
   }
 }
 

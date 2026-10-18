@@ -1,16 +1,6 @@
 // kernel/usb/usb_storage.c
 //
-// Driver USB Mass Storage (Bulk-Only Transport + SCSI). El modelo de
-// ejecución es asíncrono:
-//
-//   caller → usb_storage_submit(bio)  → encola y retorna -EINPROGRESS
-//   worker → dequeue → ejecuta BOT → bio_endio(bio, rc)
-//   block layer → bdev_submit_sync espera con completion
-//
-// Un worker thread por dispositivo. Serializa las bios del mismo sdX
-// (necesario: los buffers CBW/CSW/DATA son compartidos) pero deja que
-// el hilo llamante duerma en kernel en lugar de bloquease dentro de
-// usb_storage_bot_xfer. Varios dispositivos corren en paralelo.
+// Mass Storage. Prueba UAS (protocol 0x62) primero; si no, BOT (0x50).
 
 #include "usb_storage.h"
 #include "../block.h"
@@ -22,9 +12,10 @@
 #include "../uaccess.h"
 #include "../wait.h"
 #include "usb_dma.h"
+#include "usb_uas.h"
 
 // ===========================================================================
-// Protocolo BOT
+// BOT
 // ===========================================================================
 typedef struct __attribute__((packed)) {
   uint32_t signature;
@@ -46,9 +37,6 @@ typedef struct __attribute__((packed)) {
 #define BOT_CBW_SIG 0x43425355u
 #define BOT_CSW_SIG 0x53425355u
 
-// ===========================================================================
-// Opcodes SCSI y tipos
-// ===========================================================================
 #define SCSI_TEST_UNIT_READY 0x00
 #define SCSI_REQUEST_SENSE 0x03
 #define SCSI_INQUIRY 0x12
@@ -64,9 +52,6 @@ typedef struct __attribute__((packed)) {
 #define USB_STORAGE_MAX_XFER (128 * 1024)
 #define USB_STORAGE_TIMEOUT_MS 5000
 
-// ===========================================================================
-// Estado por dispositivo
-// ===========================================================================
 typedef struct {
   usb_device_t *dev;
   usb_endpoint_t *bulk_in;
@@ -74,34 +59,24 @@ typedef struct {
   uint32_t next_tag;
   uint8_t lun;
   uint8_t dev_type;
-
   uint32_t num_sectors;
   uint32_t sector_size;
-
   char name[8];
   block_device_t *bdev;
-
   usb_dma_buf_t cbw_buf;
   usb_dma_buf_t csw_buf;
   usb_dma_buf_t data_buf;
-
   char inquiry_vendor[9];
   char inquiry_product[17];
   char inquiry_revision[5];
-
-  // --- Cola de bios asíncrona ---
   spinlock_t queue_lock;
   wait_queue_t queue_wq;
   bio_t *queue_head;
   bio_t *queue_tail;
 } usb_storage_t;
 
-// Spawner serializado (mismo patrón que usb_hid / usb_hub).
 static usb_storage_t *g_storage_spawn = NULL;
 
-// ===========================================================================
-// Naming
-// ===========================================================================
 static void usb_storage_assign_name(const char *prefix, char *out) {
   static const char letters[] = "abcdefghijklmnopqrstuvwxyz";
   char name[8];
@@ -118,10 +93,6 @@ static void usb_storage_assign_name(const char *prefix, char *out) {
   strcpy(out, prefix);
 }
 
-// ===========================================================================
-// BOT: una transacción CBW → data → CSW (síncrona, llamada solo desde el
-// worker o desde la fase de probe, nunca concurrentemente sobre el mismo s).
-// ===========================================================================
 static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
                                 void *data, uint32_t data_len, int dir_in,
                                 uint32_t timeout_ms) {
@@ -132,7 +103,6 @@ static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
 
   usb_bot_cbw_t *cbw = (usb_bot_cbw_t *)s->cbw_buf.virt;
   uint32_t tag = ++s->next_tag;
-
   memset(cbw, 0, sizeof(*cbw));
   cbw->signature = BOT_CBW_SIG;
   cbw->tag = tag;
@@ -147,10 +117,8 @@ static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
                                   sizeof(*cbw), 0, timeout_ms);
   if (rc < 0)
     return rc;
-  if (rc != (int)sizeof(*cbw)) {
-    LOG_ERR("[USB-STG] %s: CBW short (rc=%d)", s->name, rc);
+  if (rc != (int)sizeof(*cbw))
     return -EIO;
-  }
 
   if (data && data_len > 0) {
     if (dir_in) {
@@ -158,11 +126,8 @@ static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
                                   (int)data_len, 1, timeout_ms);
       if (rc < 0)
         return rc;
-      if (rc != (int)data_len) {
-        LOG_ERR("[USB-STG] %s: data-in short (rc=%d, want=%u)", s->name, rc,
-                data_len);
+      if (rc != (int)data_len)
         return -EIO;
-      }
       usb_dma_sync(&s->data_buf, USB_DMA_FROM_DEVICE);
       memcpy(data, s->data_buf.virt, data_len);
     } else {
@@ -172,11 +137,8 @@ static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
                                   (int)data_len, 0, timeout_ms);
       if (rc < 0)
         return rc;
-      if (rc != (int)data_len) {
-        LOG_ERR("[USB-STG] %s: data-out short (rc=%d, want=%u)", s->name, rc,
-                data_len);
+      if (rc != (int)data_len)
         return -EIO;
-      }
     }
   }
 
@@ -185,44 +147,29 @@ static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
                               sizeof(usb_bot_csw_t), 1, timeout_ms);
   if (rc < 0)
     return rc;
-  if (rc != (int)sizeof(usb_bot_csw_t)) {
-    LOG_ERR("[USB-STG] %s: CSW short (rc=%d)", s->name, rc);
+  if (rc != (int)sizeof(usb_bot_csw_t))
     return -EIO;
-  }
   usb_dma_sync(&s->csw_buf, USB_DMA_FROM_DEVICE);
 
   usb_bot_csw_t *csw = (usb_bot_csw_t *)s->csw_buf.virt;
-  if (csw->signature != BOT_CSW_SIG) {
-    LOG_ERR("[USB-STG] %s: CSW bad signature 0x%08x", s->name, csw->signature);
+  if (csw->signature != BOT_CSW_SIG)
     return -EIO;
-  }
-  if (csw->tag != tag) {
-    LOG_ERR("[USB-STG] %s: CSW tag mismatch (%u != %u)", s->name, csw->tag,
-            tag);
+  if (csw->tag != tag)
     return -EIO;
-  }
-  if (csw->status != 0) {
-    LOG_ERR("[USB-STG] %s: CSW status=%u residue=%u", s->name, csw->status,
-            csw->data_residue);
+  if (csw->status != 0)
     return -EIO;
-  }
   return 0;
 }
 
-// ===========================================================================
-// Comandos SCSI (solo llamados desde worker o desde probe con s exclusivo)
-// ===========================================================================
 static int scsi_test_unit_ready(usb_storage_t *s) {
   uint8_t cb[6] = {SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0};
   return usb_storage_bot_xfer(s, cb, 6, NULL, 0, 0, USB_STORAGE_TIMEOUT_MS);
 }
-
 static int scsi_request_sense(usb_storage_t *s, uint8_t *sense, uint32_t len) {
   uint8_t cb[6] = {
       SCSI_REQUEST_SENSE, 0, 0, 0, (uint8_t)(len > 0xFF ? 0xFF : len), 0};
   return usb_storage_bot_xfer(s, cb, 6, sense, len, 1, USB_STORAGE_TIMEOUT_MS);
 }
-
 static int scsi_inquiry(usb_storage_t *s) {
   uint8_t buf[36];
   memset(buf, 0, sizeof(buf));
@@ -231,7 +178,6 @@ static int scsi_inquiry(usb_storage_t *s) {
                                 USB_STORAGE_TIMEOUT_MS);
   if (rc != 0)
     return rc;
-
   s->dev_type = buf[0] & 0x1F;
   memcpy(s->inquiry_vendor, buf + 8, 8);
   s->inquiry_vendor[8] = '\0';
@@ -247,8 +193,7 @@ static int scsi_inquiry(usb_storage_t *s) {
     s->inquiry_revision[i] = '\0';
   return 0;
 }
-
-static int scsi_read_capacity_10(usb_storage_t *s, uint32_t *last_lba,
+static int scsi_read_capacity_10(usb_storage_t *s, uint32_t *last,
                                  uint32_t *bs) {
   uint8_t buf[8];
   memset(buf, 0, sizeof(buf));
@@ -257,13 +202,12 @@ static int scsi_read_capacity_10(usb_storage_t *s, uint32_t *last_lba,
                                 USB_STORAGE_TIMEOUT_MS);
   if (rc != 0)
     return rc;
-  *last_lba = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-              ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
+  *last = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+          ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
   *bs = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
         ((uint32_t)buf[6] << 8) | (uint32_t)buf[7];
   return 0;
 }
-
 static int scsi_read_10(usb_storage_t *s, uint64_t lba, uint32_t count,
                         void *buf) {
   if (count == 0 || count > 0xFFFF)
@@ -278,10 +222,9 @@ static int scsi_read_10(usb_storage_t *s, uint64_t lba, uint32_t count,
                     (count >> 8) & 0xFF,
                     count & 0xFF,
                     0};
-  uint32_t bytes = count * s->sector_size;
-  return usb_storage_bot_xfer(s, cb, 10, buf, bytes, 1, USB_STORAGE_TIMEOUT_MS);
+  return usb_storage_bot_xfer(s, cb, 10, buf, count * s->sector_size, 1,
+                              USB_STORAGE_TIMEOUT_MS);
 }
-
 static int scsi_write_10(usb_storage_t *s, uint64_t lba, uint32_t count,
                          const void *buf) {
   if (count == 0 || count > 0xFFFF)
@@ -296,19 +239,14 @@ static int scsi_write_10(usb_storage_t *s, uint64_t lba, uint32_t count,
                     (count >> 8) & 0xFF,
                     count & 0xFF,
                     0};
-  uint32_t bytes = count * s->sector_size;
-  return usb_storage_bot_xfer(s, cb, 10, (void *)buf, bytes, 0,
+  return usb_storage_bot_xfer(s, cb, 10, (void *)buf, count * s->sector_size, 0,
                               USB_STORAGE_TIMEOUT_MS);
 }
-
 static int scsi_sync_cache(usb_storage_t *s) {
   uint8_t cb[10] = {SCSI_SYNCHRONIZE_CACHE_10, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   return usb_storage_bot_xfer(s, cb, 10, NULL, 0, 0, USB_STORAGE_TIMEOUT_MS);
 }
 
-// ===========================================================================
-// Helpers con troceado (bio puede exceder el data_buf de 128 KB)
-// ===========================================================================
 static int usb_storage_do_read(usb_storage_t *s, uint64_t lba, uint32_t count,
                                void *buf) {
   uint8_t *p = (uint8_t *)buf;
@@ -316,7 +254,7 @@ static int usb_storage_do_read(usb_storage_t *s, uint64_t lba, uint32_t count,
   if (max_blocks == 0 || max_blocks > 0xFFFF)
     max_blocks = 0xFFFF;
   while (count > 0) {
-    uint32_t n = (count < max_blocks) ? count : max_blocks;
+    uint32_t n = count < max_blocks ? count : max_blocks;
     int rc = scsi_read_10(s, lba, n, p);
     if (rc != 0)
       return rc;
@@ -326,7 +264,6 @@ static int usb_storage_do_read(usb_storage_t *s, uint64_t lba, uint32_t count,
   }
   return 0;
 }
-
 static int usb_storage_do_write(usb_storage_t *s, uint64_t lba, uint32_t count,
                                 const void *buf) {
   const uint8_t *p = (const uint8_t *)buf;
@@ -334,7 +271,7 @@ static int usb_storage_do_write(usb_storage_t *s, uint64_t lba, uint32_t count,
   if (max_blocks == 0 || max_blocks > 0xFFFF)
     max_blocks = 0xFFFF;
   while (count > 0) {
-    uint32_t n = (count < max_blocks) ? count : max_blocks;
+    uint32_t n = count < max_blocks ? count : max_blocks;
     int rc = scsi_write_10(s, lba, n, p);
     if (rc != 0)
       return rc;
@@ -346,27 +283,18 @@ static int usb_storage_do_write(usb_storage_t *s, uint64_t lba, uint32_t count,
   return 0;
 }
 
-// ===========================================================================
-// Worker thread
-// ===========================================================================
 static bool storage_queue_not_empty(void *arg) {
-  usb_storage_t *s = (usb_storage_t *)arg;
-  return s->queue_head != NULL;
+  return ((usb_storage_t *)arg)->queue_head != NULL;
 }
 
 static void usb_storage_worker(void) {
   usb_storage_t *s = g_storage_spawn;
   g_storage_spawn = NULL;
-  if (!s) {
-    LOG_ERR("[USB-STG] worker arrancado sin device");
+  if (!s)
     return;
-  }
-
   LOG_INFO("[USB-STG] %s: worker iniciado", s->name);
-
   while (1) {
     wait_event(&s->queue_wq, storage_queue_not_empty, s);
-
     unsigned long flags = spin_lock_irqsave(&s->queue_lock);
     bio_t *bio = s->queue_head;
     if (bio) {
@@ -376,11 +304,9 @@ static void usb_storage_worker(void) {
       bio->next = NULL;
     }
     spin_unlock_irqrestore(&s->queue_lock, flags);
-
     if (!bio)
-      continue; // spurious wakeup
-
-    int rc = 0;
+      continue;
+    int rc;
     switch (bio->op) {
     case BIO_READ:
       rc = usb_storage_do_read(s, bio->lba, bio->count, bio->buf);
@@ -412,17 +338,12 @@ static int usb_storage_spawn_worker(usb_storage_t *s) {
   return 0;
 }
 
-// ===========================================================================
-// block_ops_t::submit — encola y retorna -EINPROGRESS
-// ===========================================================================
 static int usb_storage_submit(block_device_t *bdev, bio_t *bio) {
   usb_storage_t *s = (usb_storage_t *)bdev->private_data;
   if (!s)
     return -ENODEV;
-
   bio->error = 0;
   bio->next = NULL;
-
   unsigned long flags = spin_lock_irqsave(&s->queue_lock);
   if (!s->queue_head) {
     s->queue_head = bio;
@@ -432,13 +353,10 @@ static int usb_storage_submit(block_device_t *bdev, bio_t *bio) {
     s->queue_tail = bio;
   }
   spin_unlock_irqrestore(&s->queue_lock, flags);
-
   wake_up_one(&s->queue_wq);
   return -EINPROGRESS;
 }
-
 static void usb_storage_flush_marker(block_device_t *bdev) { (void)bdev; }
-
 static void usb_storage_dump(block_device_t *bdev) {
   usb_storage_t *s = (usb_storage_t *)bdev->private_data;
   if (!s)
@@ -447,7 +365,6 @@ static void usb_storage_dump(block_device_t *bdev) {
            s->inquiry_vendor, s->inquiry_product, s->sector_size,
            s->num_sectors, bdev->is_read_only ? " [RO]" : "");
 }
-
 static block_ops_t usb_storage_ops = {
     .submit = usb_storage_submit,
     .flush = usb_storage_flush_marker,
@@ -460,11 +377,66 @@ static block_ops_t usb_storage_ops = {
 int usb_storage_probe(usb_device_t *dev) {
   if (!dev || !dev->hcd || !dev->hcd->bulk_xfer || !dev->hcd->configure_ep)
     return -EINVAL;
-
   usb_config_t *cfg = dev->configs[0];
   if (!cfg)
     return -EINVAL;
 
+  // ------------------------------------------------------------------
+  // 1. Intenta UAS (class 0x08 / subclass 0x06 / protocol 0x62).
+  // ------------------------------------------------------------------
+  for (int i = 0; i < cfg->num_interface_structs; i++) {
+    usb_interface_t *itf = &cfg->interfaces[i];
+    if (itf->class != 0x08 || itf->subclass != 0x06)
+      continue;
+    if (itf->protocol != 0x62)
+      continue;
+
+    LOG_INFO("[USB-STG] iface %u UAS detectada (%d endpoints)", itf->number,
+             itf->num_endpoints);
+
+    usb_endpoint_t *ep_by_addr[0x10];
+    for (int k = 0; k < 0x10; k++)
+      ep_by_addr[k] = NULL;
+
+    for (int j = 0; j < itf->num_endpoints; j++) {
+      usb_endpoint_t *ep = &itf->endpoints[j];
+      LOG_DEBUG("[USB-STG]   ep[%d] addr=0x%02x type=%d mps=%u interval=%u", j,
+                ep->addr, ep->type, ep->max_packet, ep->interval);
+      ep_by_addr[ep->addr & 0x0F] = ep; // indexamos por dirección de endpoint
+    }
+
+    // QEMU's usb-uas (y la spec UAS 1.0 en su convención más común):
+    //   EP1 OUT  = Command IU
+    //   EP2 IN   = Status IU
+    //   EP3 IN   = Data-In
+    //   EP4 OUT  = Data-Out
+    //
+    // Buscamos por dirección exacta (0x01, 0x82, 0x83, 0x04) y no por
+    // "primer IN / primer OUT", que era la causa del bug: asignábamos
+    // 0x82 como Data-In (siendo Status) y 0x83 como Status (siendo Data-In).
+    usb_endpoint_t *cmd_ep = ep_by_addr[0x01];
+    usb_endpoint_t *status_ep = ep_by_addr[0x02];  // 0x82 & 0x0F
+    usb_endpoint_t *data_in_ep = ep_by_addr[0x03]; // 0x83 & 0x0F
+    usb_endpoint_t *data_out_ep = ep_by_addr[0x04];
+
+    if (!cmd_ep || !status_ep || !data_in_ep || !data_out_ep) {
+      LOG_WARN("[USB-STG] UAS: endpoints incompletos "
+               "(cmd=%p status=%p data_in=%p data_out=%p)",
+               (void *)cmd_ep, (void *)status_ep, (void *)data_in_ep,
+               (void *)data_out_ep);
+      continue;
+    }
+
+    int rc =
+        usb_uas_probe(dev, itf, cmd_ep, status_ep, data_in_ep, data_out_ep);
+    if (rc > 0)
+      return rc;
+    LOG_WARN("[USB-STG] UAS falló (%d), probando BOT si está disponible", rc);
+  }
+
+  // ------------------------------------------------------------------
+  // 2. BOT clásico (class 0x08 / subclass 0x06 / protocol 0x50).
+  // ------------------------------------------------------------------
   for (int i = 0; i < cfg->num_interface_structs; i++) {
     usb_interface_t *itf = &cfg->interfaces[i];
     if (itf->class != 0x08 || itf->subclass != 0x06 || itf->protocol != 0x50)
@@ -481,7 +453,7 @@ int usb_storage_probe(usb_device_t *dev) {
         bulk_out = ep;
     }
     if (!bulk_in || !bulk_out) {
-      LOG_ERR("[USB-STG] iface %u: falta bulk IN/OUT", itf->number);
+      LOG_ERR("[USB-STG] BOT iface %u: falta bulk IN/OUT", itf->number);
       return -ENODEV;
     }
 
@@ -521,7 +493,6 @@ int usb_storage_probe(usb_device_t *dev) {
       goto fail_free;
     }
 
-    // SCSI init (síncrono, antes de spawnear el worker)
     rc = scsi_test_unit_ready(s);
     for (int r = 0; r < 3 && rc != 0; r++) {
       uint8_t sense[18];
@@ -543,19 +514,18 @@ int usb_storage_probe(usb_device_t *dev) {
         (s->dev_type == SCSI_TYPE_CDROM || s->dev_type == SCSI_TYPE_OPTICAL);
     usb_storage_assign_name(is_cdrom ? "sr" : "sd", s->name);
 
-    uint32_t last_lba = 0, bs = 0;
-    rc = scsi_read_capacity_10(s, &last_lba, &bs);
+    uint32_t last = 0, bs = 0;
+    rc = scsi_read_capacity_10(s, &last, &bs);
     if (rc != 0) {
       LOG_ERR("[USB-STG] %s: READ_CAPACITY falló: %d", s->name, rc);
       goto fail_free;
     }
-    if (bs == 0 || last_lba == 0 || (bs & (bs - 1)) != 0 || bs < 512 ||
-        bs > 4096) {
-      LOG_ERR("[USB-STG] %s: geometría inválida (last=%u bs=%u)", s->name,
-              last_lba, bs);
+    if (bs == 0 || last == 0 || (bs & (bs - 1)) != 0 || bs < 512 || bs > 4096) {
+      LOG_ERR("[USB-STG] %s: geometría inválida (last=%u bs=%u)", s->name, last,
+              bs);
       goto fail_free;
     }
-    s->num_sectors = last_lba + 1;
+    s->num_sectors = last + 1;
     s->sector_size = bs;
 
     block_device_t *bdev = (block_device_t *)kzalloc(sizeof(*bdev));
@@ -578,7 +548,6 @@ int usb_storage_probe(usb_device_t *dev) {
       goto fail_free;
     }
 
-    // Spawn worker: cualquier bio que llegue después se encola aquí.
     rc = usb_storage_spawn_worker(s);
     if (rc != 0) {
       LOG_ERR("[USB-STG] %s: worker spawn falló: %d", s->name, rc);

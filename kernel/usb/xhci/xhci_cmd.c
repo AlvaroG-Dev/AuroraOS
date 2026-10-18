@@ -14,39 +14,56 @@ static int xhci_cmd_wait(xhci_trb_t *trb, uint32_t timeout_ms,
     return -EINVAL;
 
   unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+
   uint32_t write_idx = g_xhci.cmd.enqueue;
   if (write_idx == g_xhci.cmd.size - 1)
     write_idx = 0;
   uint64_t cmd_trb_phys = xhci_ring_trb_phys(&g_xhci.cmd, write_idx);
+
   int rc = xhci_ring_enqueue(&g_xhci.cmd, trb);
   if (rc != 0) {
     spin_unlock_irqrestore(&g_xhci.lock, flags);
     return rc;
   }
+
   __asm__ volatile("mfence" ::: "memory");
   *(volatile uint32_t *)g_xhci.db = 0;
   spin_unlock_irqrestore(&g_xhci.lock, flags);
 
-  uint64_t timeout_ticks = (timeout_ms == 0) ? 0 : timeout_ms;
-  xhci_trb_t evt;
+  // Espera por TSC con timeout absoluto (sin depender de has_pending_cmd).
+  extern uint64_t klog_get_tsc_freq(void);
+  extern void sched_yield(void);
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq == 0)
+    freq = 2000000000ULL;
+  uint64_t max_cycles = (timeout_ms == 0) ? 0 : (freq / 1000) * timeout_ms;
+
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+
+  int iter = 0;
   while (1) {
+    if (max_cycles != 0) {
+      __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+      if ((((uint64_t)hi << 32) | lo) - t0 >= max_cycles) {
+        LOG_ERR("[xHCI] cmd timeout (trb=0x%llx)",
+                (unsigned long long)cmd_trb_phys);
+        return -ETIMEDOUT;
+      }
+    }
+
+    xhci_trb_t evt;
     if (xhci_take_pending_cmd(cmd_trb_phys, &evt) == 0) {
       if (out_evt)
         *out_evt = evt;
       return 0;
     }
-    long ret = wait_event_interruptible_timeout(&g_xhci.cmd_wq, has_pending_cmd,
-                                                NULL, timeout_ticks);
-    if (ret == 0) {
-      if (xhci_take_pending_cmd(cmd_trb_phys, &evt) == 0) {
-        if (out_evt)
-          *out_evt = evt;
-        return 0;
-      }
-      LOG_ERR("[xHCI] cmd timeout (phys=0x%llx)",
-              (unsigned long long)cmd_trb_phys);
-      return -ETIMEDOUT;
-    }
+
+    if ((++iter & 0x3F) == 0)
+      sched_yield();
+    else
+      __asm__ volatile("pause");
   }
 }
 

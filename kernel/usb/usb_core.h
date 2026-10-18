@@ -45,12 +45,17 @@ typedef enum {
 // ===========================================================================
 typedef struct usb_device usb_device_t;
 typedef struct usb_hcd usb_hcd_t;
+// Forward declaration del URB asíncrono. La definición completa está
+// al final del fichero; aquí solo necesitamos el tag para poder
+// declarar el puntero de función en usb_hcd_t.
+typedef struct usb_bulk_urb usb_bulk_urb_t;
 
 typedef struct usb_endpoint {
   uint8_t addr;        // bit 7: dir (0=OUT, 1=IN), bits 3:0 número
   uint8_t type;        // USB_EP_*
   uint16_t max_packet; // wMaxPacketSize & 0x7FF
   uint8_t interval;    // bInterval
+  uint16_t stream_id;  // Stream ID xHCI actual (0 = sin streams)
   void *hc_ep;         // HCD-privado (contexto de endpoint xHCI)
 } usb_endpoint_t;
 
@@ -111,7 +116,6 @@ struct usb_hcd {
   const char *name;
   void *priv;
 
-  // Devuelve el número de bytes transferidos (>=0) o negativo en error.
   int (*control_xfer)(usb_device_t *dev, const uint8_t setup[8], void *data,
                       int data_len, int is_in, int timeout_ms);
   int (*bulk_xfer)(usb_device_t *dev, usb_endpoint_t *ep, void *buf, int len,
@@ -122,8 +126,19 @@ struct usb_hcd {
   int (*new_device)(usb_device_t *parent_hub, uint8_t port, usb_speed_t speed,
                     usb_device_t **out_dev);
   int (*set_hub_info)(usb_device_t *dev, uint8_t num_ports);
+
+  // Async bulk submit. Encola un único TRB con IOC y retorna
+  // inmediatamente. El callback se invoca desde el event thread del HCD
+  // cuando el Transfer Event llega, con `actual_len` ya relleno y
+  // `status` = 0 (OK) o -EIO.
+  int (*bulk_submit)(usb_device_t *dev, usb_endpoint_t *ep,
+                     struct usb_bulk_urb *urb);
+
   int (*alloc_device)(usb_device_t *dev);
   void (*free_device)(usb_device_t *dev);
+
+  int (*bulk_xfer_phys)(usb_device_t *dev, usb_endpoint_t *ep, uint64_t phys,
+                        void *virt, int len, int is_in, int timeout_ms);
 };
 
 // Devuelve el número de bytes transferidos en éxito, o negativo en error.
@@ -179,5 +194,25 @@ int usb_core_self_test(void);
 
 // Calcula el route string xHCI de un device (walk de parent_hub).
 uint32_t usb_device_route(const usb_device_t *dev);
+
+struct usb_bulk_urb {
+  usb_device_t *dev;
+  usb_endpoint_t *ep;
+  void *buf;
+  int len;
+  int is_in;
+  int status;
+  int actual_len;
+  uint16_t stream_id; // tag UAS cuando el endpoint usa streams
+  void (*complete)(struct usb_bulk_urb *urb);
+  void *context;
+  void *hc_priv;
+  // Opcional. Si != NULL, el HCD usa este buffer DMA directamente en vez
+  // de allocar uno propio y hacer memcpy. El caller (uas_execute) pasa
+  // aquí su u->status_buf para que el HC escriba los 12 bytes del
+  // Status IU en memoria ya alocada. Cuando el transfer completa, el
+  // HCD NO libera este buffer (el caller es dueño).
+  struct usb_dma_buf *dma_buf;
+};
 
 #endif
