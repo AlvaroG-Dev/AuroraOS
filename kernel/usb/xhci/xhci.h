@@ -131,7 +131,9 @@ typedef struct {
 #define XHCI_RT_IR0_ERSTBA (XHCI_RT_IR_OFFSET(0) + 0x10u)
 #define XHCI_RT_IR0_ERDP (XHCI_RT_IR_OFFSET(0) + 0x18u)
 
+#define XHCI_IMAN_IP (1u << 0)
 #define XHCI_IMAN_IE (1u << 1)
+#define XHCI_ERDP_EHB (1u << 3)
 
 #define XHCI_SLOT_DW0_ROUTE(s) ((s) & 0xFFFFFu)
 #define XHCI_SLOT_DW0_SPEED(s) (((s) & 0xFu) << 20)
