@@ -120,13 +120,13 @@ struct usb_hcd {
   int (*configure_ep)(usb_device_t *dev, usb_endpoint_t *ep);
 
   // Crea un nuevo usb_device_t detrás de un puerto (root o hub externo).
-  // - parent_hub == NULL → puerto del root hub.
-  // - parent_hub != NULL → puerto de ese hub.
-  // `speed` viene del PORTSC (root) o del GET_PORT_STATUS (hub).
-  // El HCD hace Enable Slot + Address Device con el route correcto.
-  // El llamante debe llamar luego a usb_enumerate(dev).
   int (*new_device)(usb_device_t *parent_hub, uint8_t port, usb_speed_t speed,
                     usb_device_t **out_dev);
+
+  // Marca un dispositivo ya direccionado como Hub y actualiza su
+  // Number of Ports. Requerido para que el xHCI asocie el Transaction
+  // Translator (TT) de sus hijos.
+  int (*set_hub_info)(usb_device_t *dev, uint8_t num_ports);
 
   int (*alloc_device)(usb_device_t *dev);
   void (*free_device)(usb_device_t *dev);

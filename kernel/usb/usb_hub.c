@@ -1,11 +1,4 @@
 // kernel/usb/usb_hub.c
-//
-// Driver USB Hub (class 0x09). Soporta hubs USB 2.0 y 3.0.
-//
-// Modelo: un kthread por hub, esperando en el interrupt endpoint.
-// Cuando llega un change-bit, hace GET_PORT_STATUS, resetea el puerto
-// si hace falta, y llama a hcd->new_device + usb_enumerate.
-
 #include "usb_hub.h"
 #include "../heap.h"
 #include "../klog.h"
@@ -14,11 +7,7 @@
 #include "../uaccess.h"
 #include "usb_core.h"
 
-// ===========================================================================
-// Class requests y constantes (USB 2.0 §11.24, USB 3.0 §10.16)
-// ===========================================================================
 #define USB_HUB_CLASS 0x09
-
 #define HUB_REQ_GET_STATUS 0x00
 #define HUB_REQ_CLEAR_FEATURE 0x01
 #define HUB_REQ_SET_FEATURE 0x03
@@ -27,7 +16,6 @@
 #define HUB_DESC_TYPE 0x29
 #define HUB_DESC_TYPE_SS 0x2A
 
-// Port features
 #define PORT_CONNECTION 0
 #define PORT_ENABLE 1
 #define PORT_SUSPEND 2
@@ -41,7 +29,6 @@
 #define C_PORT_OVER_CURRENT 19
 #define C_PORT_RESET 20
 
-// Port status bits (USB 2.0 §11.8.3 / USB 3.0 §10.16.2.6)
 #define PORT_STAT_CONNECTION 0x0001
 #define PORT_STAT_ENABLE 0x0002
 #define PORT_STAT_SUSPEND 0x0004
@@ -57,9 +44,6 @@
 #define PORT_CHANGE_OVERCURRENT 0x0008
 #define PORT_CHANGE_RESET 0x0010
 
-// ===========================================================================
-// Hub descriptor (USB 2.0 §11.23.2.1)
-// ===========================================================================
 typedef struct __attribute__((packed)) {
   uint8_t bDescLength;
   uint8_t bDescriptorType;
@@ -67,12 +51,9 @@ typedef struct __attribute__((packed)) {
   uint16_t wHubCharacteristics;
   uint8_t bPwrOn2PwrGood;
   uint8_t bHubContrCurrent;
-  uint8_t var[256]; // DeviceRemovable + PortPwrCtrlMask
+  uint8_t var[256];
 } usb_hub_desc_t;
 
-// ===========================================================================
-// Estado por hub
-// ===========================================================================
 typedef struct usb_hub_dev {
   usb_device_t *dev;
   usb_endpoint_t *int_ep;
@@ -88,9 +69,6 @@ static usb_hub_dev_t *g_hubs[MAX_HUBS];
 static int g_hub_count = 0;
 static usb_hub_dev_t *g_hub_pending = NULL;
 
-// ===========================================================================
-// Class requests (todas van a dev->hcd->control_xfer)
-// ===========================================================================
 static int hub_get_port_status(usb_device_t *dev, uint8_t port,
                                uint16_t *status, uint16_t *change) {
   uint8_t buf[4] = {0};
@@ -128,27 +106,20 @@ static int hub_get_descriptor(usb_device_t *dev, usb_hub_desc_t *desc) {
                                 0, desc, sizeof(*desc), 1000);
   if (rc < 0)
     return rc;
-  // Sanity: el descriptor tiene que ser del tipo pedido y tener al
-  // menos los 7 bytes fijos del hub descriptor.
   if (desc->bDescriptorType != dtype || desc->bDescLength < 7)
     return -EIO;
   return 0;
 }
 
-// ===========================================================================
-// Reset + attach de un puerto del hub
-// ===========================================================================
 static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
   usb_device_t *hdev = hub->dev;
 
-  // SET_PORT_FEATURE(PORT_RESET).
   int rc = hub_set_port_feature(hdev, port, PORT_RESET);
   if (rc != 0) {
     LOG_ERR("[HUB] %s port %u: PORT_RESET falló: %d", hub->name, port, rc);
     return rc;
   }
 
-  // Esperar C_PORT_RESET (o timeout).
   uint16_t status = 0, change = 0;
   int ok = 0;
   for (int i = 0; i < 500; i++) {
@@ -167,14 +138,13 @@ static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
   }
   hub_clear_port_feature(hdev, port, C_PORT_RESET);
 
-  // Determinar speed.
   usb_speed_t speed = USB_SPEED_FULL;
   if (hub->is_ss) {
     uint32_t sp = (status >> 10) & 0x0F;
     if (sp == 3)
       speed = USB_SPEED_SUPER;
     else if (sp == 4)
-      speed = USB_SPEED_SUPER; // SS+ → tratamos como SS
+      speed = USB_SPEED_SUPER_PLUS;
     else
       speed = USB_SPEED_UNKNOWN;
   } else {
@@ -189,7 +159,6 @@ static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
   LOG_INFO("[HUB] %s port %u: connected speed=%d status=0x%04x", hub->name,
            port, (int)speed, status);
 
-  // Crear el device.
   usb_device_t *dev = NULL;
   rc = hdev->hcd->new_device(hdev, port, speed, &dev);
   if (rc != 0) {
@@ -205,13 +174,13 @@ static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
   return 0;
 }
 
-// ===========================================================================
-// Handle a port change
-// ===========================================================================
 static void hub_port_change(usb_hub_dev_t *hub, uint8_t port) {
   uint16_t status = 0, change = 0;
   int rc = hub_get_port_status(hub->dev, port, &status, &change);
   if (rc != 0)
+    return;
+
+  if (change == 0)
     return;
 
   LOG_DEBUG("[HUB] %s port %u: status=0x%04x change=0x%04x", hub->name, port,
@@ -232,16 +201,11 @@ static void hub_port_change(usb_hub_dev_t *hub, uint8_t port) {
   if (change & PORT_CHANGE_OVERCURRENT)
     hub_clear_port_feature(hub->dev, port, C_PORT_OVER_CURRENT);
 
-  // Si hay device conectado y el puerto no está ya habilitado,
-  // resetear + attach.
   if ((status & PORT_STAT_CONNECTION) && !(status & PORT_STAT_ENABLE)) {
     hub_port_attach(hub, port);
   }
 }
 
-// ===========================================================================
-// Kthread por hub
-// ===========================================================================
 static void usb_hub_kthread(void) {
   usb_hub_dev_t *hub = g_hub_pending;
   g_hub_pending = NULL;
@@ -289,9 +253,6 @@ static int usb_hub_spawn_kthread(usb_hub_dev_t *hub) {
   return 0;
 }
 
-// ===========================================================================
-// Probe
-// ===========================================================================
 int usb_hub_probe(usb_device_t *dev) {
   if (!dev || !dev->hcd || !dev->hcd->configure_ep || !dev->hcd->new_device)
     return -EINVAL;
@@ -307,7 +268,6 @@ int usb_hub_probe(usb_device_t *dev) {
     if (itf->class != USB_HUB_CLASS)
       continue;
 
-    // Buscar el interrupt IN endpoint.
     usb_endpoint_t *int_ep = NULL;
     for (int j = 0; j < itf->num_endpoints; j++) {
       usb_endpoint_t *ep = &itf->endpoints[j];
@@ -321,7 +281,6 @@ int usb_hub_probe(usb_device_t *dev) {
       continue;
     }
 
-    // Leer descriptor del hub.
     usb_hub_desc_t hdesc;
     memset(&hdesc, 0, sizeof(hdesc));
     int rc = hub_get_descriptor(dev, &hdesc);
@@ -350,19 +309,22 @@ int usb_hub_probe(usb_device_t *dev) {
              hub->name, hub->n_ports, hub->characteristics,
              hub->pwr_on_2_pwr_good, hub->is_ss);
 
-    // Power-on de puertos (si bPwrOn2PwrGood > 0).
+    if (dev->hcd->set_hub_info) {
+      int hrc = dev->hcd->set_hub_info(dev, hub->n_ports);
+      if (hrc != 0) {
+        LOG_WARN("[HUB] %s: no se pudo marcar como hub: %d", hub->name, hrc);
+      }
+    }
+
     if (hub->pwr_on_2_pwr_good > 0) {
       for (uint8_t p = 1; p <= hub->n_ports; p++) {
         hub_set_port_feature(dev, p, PORT_POWER);
       }
-      extern uint64_t klog_get_tsc_freq(void);
-      // Delay 2 * pwr_good ms (aprox, via busy-wait corto).
       volatile uint64_t n = (uint64_t)hub->pwr_on_2_pwr_good * 2000;
       for (volatile uint64_t k = 0; k < n * 200; k++)
         __asm__ volatile("pause");
     }
 
-    // Configure Endpoint del interrupt.
     rc = dev->hcd->configure_ep(dev, int_ep);
     if (rc != 0) {
       LOG_ERR("[HUB] %s: configure_ep falló: %d", hub->name, rc);
@@ -384,7 +346,6 @@ int usb_hub_probe(usb_device_t *dev) {
       continue;
     }
 
-    // Probar cada puerto una vez (por si hay devices ya conectados).
     for (uint8_t p = 1; p <= hub->n_ports; p++) {
       uint16_t status = 0, change = 0;
       rc = hub_get_port_status(dev, p, &status, &change);
