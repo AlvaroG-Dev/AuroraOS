@@ -9,14 +9,17 @@
 #define USB_HID_PROTO_KBD 1
 #define USB_HID_PROTO_MOUSE 2
 
-#define USB_HID_REQ_SET_PROTOCOL 0x0B
+#define USB_HID_REQ_GET_REPORT 0x01
+#define USB_HID_REQ_GET_IDLE 0x02
+#define USB_HID_REQ_GET_PROTOCOL 0x03
+#define USB_HID_REQ_SET_REPORT 0x09
 #define USB_HID_REQ_SET_IDLE 0x0A
+#define USB_HID_REQ_SET_PROTOCOL 0x0B
 
-// Detecta interfaces HID, configura el endpoint de interrupt IN,
-// pone el device en boot protocol (SET_PROTOCOL(0)) y arranca un
-// kthread que lee reports y los entrega al input subsystem + TTY.
-//
-// Devuelve el número de interfaces HID configuradas, o negativo.
+// Prototipo para obtener el descriptor de report
+int usb_hid_get_report_descriptor(usb_device_t *dev, uint8_t intf_num,
+                                  void *buf, uint16_t len);
+
 int usb_hid_probe(usb_device_t *dev);
 
 #endif

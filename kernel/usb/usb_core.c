@@ -153,7 +153,9 @@ int usb_control_transfer(usb_device_t *dev, uint8_t request_type,
   setup[7] = (uint8_t)(len >> 8);
 
   int is_in = (request_type & 0x80) ? 1 : 0;
-  return dev->hcd->control_xfer(dev, setup, data, (int)len, is_in, timeout_ms);
+  int rc =
+      dev->hcd->control_xfer(dev, setup, data, (int)len, is_in, timeout_ms);
+  return rc;
 }
 
 int usb_get_descriptor(usb_device_t *dev, uint8_t type, uint8_t index,

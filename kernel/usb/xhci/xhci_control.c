@@ -132,17 +132,28 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   uint32_t actual = 0;
   int werr =
       xhci_wait_transfer(p->slot_id, 1, status_phys, timeout_ms, &actual);
-  if (werr == 0)
-    actual = has_data ? (uint32_t)data_len : 0;
 
-  if (werr == 0 && has_data && is_in) {
-    uint32_t to_copy =
-        actual < (uint32_t)data_len ? actual : (uint32_t)data_len;
-    memcpy(data, data_dma.virt, to_copy);
+  if (werr != 0) {
+    if (has_data)
+      usb_dma_free(&data_dma);
+    return werr;
   }
+
+  // El `actual` devuelto por el transfer event es el RESIDUO (bytes que
+  // faltan por transferir). Para calcular los bytes reales transferidos:
+  int transferred = 0;
+  if (has_data) {
+    if (actual > (uint32_t)data_len)
+      actual = (uint32_t)data_len;
+    transferred = data_len - (int)actual;
+    if (is_in) {
+      memcpy(data, data_dma.virt, transferred);
+    }
+  }
+
   if (has_data)
     usb_dma_free(&data_dma);
-  return werr;
+  return transferred;
 }
 
 int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,

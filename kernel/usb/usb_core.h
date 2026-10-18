@@ -111,6 +111,7 @@ struct usb_hcd {
   const char *name;
   void *priv;
 
+  // Devuelve el número de bytes transferidos (>=0) o negativo en error.
   int (*control_xfer)(usb_device_t *dev, const uint8_t setup[8], void *data,
                       int data_len, int is_in, int timeout_ms);
   int (*bulk_xfer)(usb_device_t *dev, usb_endpoint_t *ep, void *buf, int len,
@@ -118,19 +119,17 @@ struct usb_hcd {
   int (*interrupt_xfer)(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
                         int len, int timeout_ms, int *out_actual_len);
   int (*configure_ep)(usb_device_t *dev, usb_endpoint_t *ep);
-
-  // Crea un nuevo usb_device_t detrás de un puerto (root o hub externo).
   int (*new_device)(usb_device_t *parent_hub, uint8_t port, usb_speed_t speed,
                     usb_device_t **out_dev);
-
-  // Marca un dispositivo ya direccionado como Hub y actualiza su
-  // Number of Ports. Requerido para que el xHCI asocie el Transaction
-  // Translator (TT) de sus hijos.
   int (*set_hub_info)(usb_device_t *dev, uint8_t num_ports);
-
   int (*alloc_device)(usb_device_t *dev);
   void (*free_device)(usb_device_t *dev);
 };
+
+// Devuelve el número de bytes transferidos en éxito, o negativo en error.
+int usb_control_transfer(usb_device_t *dev, uint8_t request_type,
+                         uint8_t request, uint16_t value, uint16_t index,
+                         void *data, uint16_t len, int timeout_ms);
 
 // ===========================================================================
 // Parsers puros (sin I/O). El llamante pasa el buffer crudo leído por
@@ -151,9 +150,6 @@ void usb_config_free(usb_config_t *cfg);
 // ===========================================================================
 // Helpers de control transfer (usan dev->hcd->control_xfer).
 // ===========================================================================
-int usb_control_transfer(usb_device_t *dev, uint8_t request_type,
-                         uint8_t request, uint16_t value, uint16_t index,
-                         void *data, uint16_t len, int timeout_ms);
 
 int usb_get_descriptor(usb_device_t *dev, uint8_t type, uint8_t index,
                        uint16_t langid, void *buf, uint16_t len);
