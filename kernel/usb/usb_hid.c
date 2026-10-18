@@ -31,6 +31,11 @@ typedef struct usb_hid_dev {
   hid_report_t report;
   uint8_t prev_data[64];
 
+  // Modificadores (uno por bit; usage 0xE0..0xE7 de la page 0x07).
+  uint8_t mod_lctrl, mod_lshift, mod_lalt, mod_lgui;
+  uint8_t mod_rctrl, mod_rshift, mod_ralt, mod_rgui;
+
+  // Auto-repeat
   uint8_t repeat_key;
   uint32_t repeat_start_tick;
   uint32_t last_repeat_tick;
@@ -40,6 +45,9 @@ static usb_hid_dev_t *g_hid_devs[MAX_HID];
 static int g_hid_count = 0;
 static usb_hid_dev_t *g_hid_pending = NULL;
 
+// ===========================================================================
+// Tablas HID usage page 0x07 → ASCII (sin shift / con shift)
+// ===========================================================================
 static const char hid_kbd_ascii[128] = {
     [0x04] = 'a',  [0x05] = 'b',  [0x06] = 'c',  [0x07] = 'd',  [0x08] = 'e',
     [0x09] = 'f',  [0x0A] = 'g',  [0x0B] = 'h',  [0x0C] = 'i',  [0x0D] = 'j',
@@ -51,7 +59,8 @@ static const char hid_kbd_ascii[128] = {
     [0x27] = '0',  [0x28] = '\r', [0x29] = 0x1B, [0x2A] = 0x7F, [0x2B] = '\t',
     [0x2C] = ' ',  [0x2D] = '-',  [0x2E] = '=',  [0x2F] = '[',  [0x30] = ']',
     [0x31] = '\\', [0x32] = '#',  [0x33] = ';',  [0x34] = '\'', [0x35] = '`',
-    [0x36] = ',',  [0x37] = '.',  [0x38] = '/',
+    [0x36] = ',',  [0x37] = '.',  [0x38] = '/',  [0x54] = '/',  [0x55] = '*',
+    [0x56] = '-',  [0x57] = '+',  [0x58] = '\r', [0x62] = '0',  [0x63] = '.',
 };
 static const char hid_kbd_ascii_shift[128] = {
     [0x04] = 'A', [0x05] = 'B',  [0x06] = 'C',  [0x07] = 'D',  [0x08] = 'E',
@@ -64,9 +73,68 @@ static const char hid_kbd_ascii_shift[128] = {
     [0x27] = ')', [0x28] = '\r', [0x29] = 0x1B, [0x2A] = 0x7F, [0x2B] = '\t',
     [0x2C] = ' ', [0x2D] = '_',  [0x2E] = '+',  [0x2F] = '{',  [0x30] = '}',
     [0x31] = '|', [0x32] = '~',  [0x33] = ':',  [0x34] = '"',  [0x35] = '~',
-    [0x36] = '<', [0x37] = '>',  [0x38] = '?',
+    [0x36] = '<', [0x37] = '>',  [0x38] = '?',  [0x54] = '/',  [0x55] = '*',
+    [0x56] = '-', [0x57] = '+',  [0x58] = '\r', [0x62] = '0',  [0x63] = '.',
 };
 
+// ===========================================================================
+// Tabla HID usage page 0x07 → secuencias ANSI (igual patrón que ps2.c).
+// Estas teclas NO son ASCII; se entregan al TTY como escape sequences.
+// ===========================================================================
+static const char *hid_usage_ansi(uint32_t usage) {
+  switch (usage) {
+  case 0x49:
+    return "\x1b[2~"; // Insert
+  case 0x4A:
+    return "\x1b[H"; // Home
+  case 0x4B:
+    return "\x1b[5~"; // Page Up
+  case 0x4C:
+    return "\x1b[3~"; // Delete
+  case 0x4D:
+    return "\x1b[F"; // End
+  case 0x4E:
+    return "\x1b[6~"; // Page Down
+  case 0x4F:
+    return "\x1b[C"; // Right
+  case 0x50:
+    return "\x1b[D"; // Left
+  case 0x51:
+    return "\x1b[B"; // Down
+  case 0x52:
+    return "\x1b[A"; // Up
+  case 0x3A:
+    return "\x1bOP"; // F1
+  case 0x3B:
+    return "\x1bOQ"; // F2
+  case 0x3C:
+    return "\x1bOR"; // F3
+  case 0x3D:
+    return "\x1bOS"; // F4
+  case 0x3E:
+    return "\x1b[15~"; // F5
+  case 0x3F:
+    return "\x1b[17~"; // F6
+  case 0x40:
+    return "\x1b[18~"; // F7
+  case 0x41:
+    return "\x1b[19~"; // F8
+  case 0x42:
+    return "\x1b[20~"; // F9
+  case 0x43:
+    return "\x1b[21~"; // F10
+  case 0x44:
+    return "\x1b[23~"; // F11
+  case 0x45:
+    return "\x1b[24~"; // F12
+  default:
+    return NULL;
+  }
+}
+
+// ===========================================================================
+// Helpers
+// ===========================================================================
 static uint32_t hid_get_bits(const uint8_t *data, uint32_t bit_offset,
                              uint32_t size) {
   uint32_t val = 0;
@@ -89,34 +157,106 @@ static void usb_hid_emit(usb_hid_dev_t *h, uint8_t code, int value,
   input_push(&ev);
 }
 
-// ---------------------------------------------------------------------------
-// Report protocol: teclado
-// ---------------------------------------------------------------------------
+static inline int hid_mods_shift(const usb_hid_dev_t *h) {
+  return h->mod_lshift || h->mod_rshift;
+}
+static inline int hid_mods_ctrl(const usb_hid_dev_t *h) {
+  return h->mod_lctrl || h->mod_rctrl;
+}
+
+// Emite UNA pulsación al input subsystem y al TTY.
+//
+// Orden de decisión:
+//   1. Si la tecla tiene secuencia ANSI (flechas, F1-F12, etc.) → ANSI al TTY.
+//   2. Si no, traducción ASCII aplicando shift y luego ctrl.
+//   3. Si no hay traducción, solo el input_event (el compositor puede
+//      hacer algo con ella).
+static void usb_hid_kbd_emit_key(usb_hid_dev_t *h, uint32_t usage) {
+  if (usage == 0 || usage >= 128)
+    return;
+
+  // El input subsystem recibe siempre la tecla (usage HID).
+  usb_hid_emit(h, (uint8_t)usage, 1, 0);
+
+  // Teclas extendidas: secuencia ANSI al TTY.
+  const char *seq = hid_usage_ansi(usage);
+  if (seq) {
+    tty_t *tty = tty_console();
+    if (tty) {
+      for (const char *p = seq; *p; p++)
+        tty_receive_char(tty, *p);
+    }
+    return;
+  }
+
+  // Teclas ASCII con modificadores.
+  char c =
+      hid_mods_shift(h) ? hid_kbd_ascii_shift[usage] : hid_kbd_ascii[usage];
+  if (c == 0)
+    return;
+
+  if (hid_mods_ctrl(h)) {
+    char lower = c;
+    if (lower >= 'A' && lower <= 'Z')
+      lower += 32;
+    if (lower >= 'a' && lower <= 'z')
+      c = (char)(lower - 'a' + 1);
+  }
+
+  tty_t *tty = tty_console();
+  if (tty)
+    tty_receive_char(tty, c);
+}
+
+// ===========================================================================
+// Report Protocol: teclado
+// ===========================================================================
 static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
                                      int len) {
   uint32_t now = (uint32_t)tick_count;
 
-  // -------------------------------------------------------------------
-  // 1. Modificadores (usage 0xE0..0xE7, Input Variable).
-  //    Se emiten solo en la transición 0 -> 1.
-  // -------------------------------------------------------------------
+  // 1. Actualizar modificadores (usage 0xE0..0xE7, bits individuales).
   for (int i = 0; i < h->report.num_fields; i++) {
     hid_field_t *f = &h->report.fields[i];
     if (f->usage_page != 0x07)
       continue;
     if (f->usage < 0xE0 || f->usage > 0xE7)
       continue;
-    uint32_t val = hid_get_bits(data, f->bit_offset, f->report_size);
-    uint32_t was = hid_get_bits(h->prev_data, f->bit_offset, f->report_size);
-    if (val && !was)
+    uint32_t v = hid_get_bits(data, f->bit_offset, f->report_size) ? 1 : 0;
+    uint32_t was =
+        hid_get_bits(h->prev_data, f->bit_offset, f->report_size) ? 1 : 0;
+    switch (f->usage) {
+    case 0xE0:
+      h->mod_lctrl = (uint8_t)v;
+      break;
+    case 0xE1:
+      h->mod_lshift = (uint8_t)v;
+      break;
+    case 0xE2:
+      h->mod_lalt = (uint8_t)v;
+      break;
+    case 0xE3:
+      h->mod_lgui = (uint8_t)v;
+      break;
+    case 0xE4:
+      h->mod_rctrl = (uint8_t)v;
+      break;
+    case 0xE5:
+      h->mod_rshift = (uint8_t)v;
+      break;
+    case 0xE6:
+      h->mod_ralt = (uint8_t)v;
+      break;
+    case 0xE7:
+      h->mod_rgui = (uint8_t)v;
+      break;
+    }
+    // Emitir evento de modificador al input subsystem al pulsar.
+    if (v && !was)
       usb_hid_emit(h, (uint8_t)f->usage, 1, 0);
   }
 
-  // -------------------------------------------------------------------
   // 2. Teclas del array (Input Data, Array, Report Size = 8).
-  //    NO filtrar por f->usage: ese es el rango (0x00+c), no la tecla
-  //    pulsada. El código real está en `val`.
-  // -------------------------------------------------------------------
   for (int i = 0; i < h->report.num_fields; i++) {
     hid_field_t *f = &h->report.fields[i];
     if (f->usage_page != 0x07)
@@ -137,22 +277,18 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
           (now - h->repeat_start_tick) >= REPEAT_DELAY_MS &&
           (now - h->last_repeat_tick) >= REPEAT_INTERVAL_MS) {
         h->last_repeat_tick = now;
-        usb_hid_emit(h, (uint8_t)val, 1, 0);
-        char c = hid_kbd_ascii[val];
-        if (c)
-          tty_receive_char(tty_console(), c);
+        usb_hid_kbd_emit_key(h, val);
       }
       continue;
     }
 
-    // Tecla nueva. Comprobar que no esté ya en un slot anterior (roll-over).
+    // Tecla nueva. Comprobar roll-over (ya está en un slot anterior).
     int dup = 0;
     for (int j = 0; j < i; j++) {
       hid_field_t *g = &h->report.fields[j];
       if (g->usage_page != 0x07 || g->is_variable || g->report_size != 8)
         continue;
-      uint32_t other = hid_get_bits(data, g->bit_offset, 8);
-      if (other == val) {
+      if (hid_get_bits(data, g->bit_offset, 8) == val) {
         dup = 1;
         break;
       }
@@ -163,13 +299,10 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
     h->repeat_key = (uint8_t)val;
     h->repeat_start_tick = now;
     h->last_repeat_tick = now;
-    usb_hid_emit(h, (uint8_t)val, 1, 0);
-    char c = hid_kbd_ascii[val];
-    if (c)
-      tty_receive_char(tty_console(), c);
+    usb_hid_kbd_emit_key(h, val);
   }
 
-  // Si la repeat_key ya no aparece en ningún slot, dejar de repetir.
+  // 3. Si la repeat_key ya no aparece en ningún slot, dejar de repetir.
   if (h->repeat_key) {
     int held = 0;
     for (int i = 0; i < h->report.num_fields; i++) {
@@ -188,12 +321,11 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
   memcpy(h->prev_data, data, len < 64 ? len : 64);
 }
 
-// ---------------------------------------------------------------------------
-// Report protocol: ratón
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Report Protocol: ratón (sin cambios)
+// ===========================================================================
 static void usb_hid_process_mouse_full(usb_hid_dev_t *h, const uint8_t *data,
                                        int len) {
-  (void)len;
   int16_t dx = 0, dy = 0;
   uint8_t buttons = 0;
 
@@ -224,41 +356,75 @@ static void usb_hid_process_mouse_full(usb_hid_dev_t *h, const uint8_t *data,
   memcpy(h->prev_data, data, len < 64 ? len : 64);
 }
 
-// ---------------------------------------------------------------------------
-// Boot protocol fallback (sin cambios)
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Boot Protocol fallback: teclado.
+//
+// El report de boot USB trae los usages HID igual (no scancodes PS/2),
+// así que reutilizamos las mismas tablas y helpers.
+// ===========================================================================
 static void usb_hid_process_kbd_boot(usb_hid_dev_t *h, const uint8_t *data,
                                      int len) {
   if (len < 8)
     return;
   uint8_t mods = data[0];
-  int shift = !!(mods & 0x22);
-  int ctrl = !!(mods & 0x11);
+  h->mod_lctrl = !!(mods & 0x01);
+  h->mod_lshift = !!(mods & 0x02);
+  h->mod_lalt = !!(mods & 0x04);
+  h->mod_lgui = !!(mods & 0x08);
+  h->mod_rctrl = !!(mods & 0x10);
+  h->mod_rshift = !!(mods & 0x20);
+  h->mod_ralt = !!(mods & 0x40);
+  h->mod_rgui = !!(mods & 0x80);
+
+  uint32_t now = (uint32_t)tick_count;
+
   for (int i = 2; i < 8; i++) {
     uint8_t k = data[i];
     if (k == 0 || k >= 128)
       continue;
-    int was = 0;
+
+    uint8_t was = 0;
     for (int j = 2; j < 8; j++)
       if (h->prev_data[j] == k) {
         was = 1;
         break;
       }
-    if (was)
+    if (was) {
+      if (k == h->repeat_key &&
+          (now - h->repeat_start_tick) >= REPEAT_DELAY_MS &&
+          (now - h->last_repeat_tick) >= REPEAT_INTERVAL_MS) {
+        h->last_repeat_tick = now;
+        usb_hid_kbd_emit_key(h, k);
+      }
       continue;
-    usb_hid_emit(h, k, 1, 0);
-    char c = shift ? hid_kbd_ascii_shift[k] : hid_kbd_ascii[k];
-    if (!c)
-      continue;
-    if (ctrl) {
-      char lower = c;
-      if (lower >= 'A' && lower <= 'Z')
-        lower += 32;
-      if (lower >= 'a' && lower <= 'z')
-        c = (char)(lower - 'a' + 1);
     }
-    tty_receive_char(tty_console(), c);
+
+    int dup = 0;
+    for (int j = 2; j < i; j++)
+      if (data[j] == k) {
+        dup = 1;
+        break;
+      }
+    if (dup)
+      continue;
+
+    h->repeat_key = k;
+    h->repeat_start_tick = now;
+    h->last_repeat_tick = now;
+    usb_hid_kbd_emit_key(h, k);
   }
+
+  if (h->repeat_key) {
+    int held = 0;
+    for (int j = 2; j < 8; j++)
+      if (data[j] == h->repeat_key) {
+        held = 1;
+        break;
+      }
+    if (!held)
+      h->repeat_key = 0;
+  }
+
   memcpy(h->prev_data, data, 8);
 }
 
@@ -273,9 +439,9 @@ static void usb_hid_process_mouse_boot(usb_hid_dev_t *h, const uint8_t *data,
   memcpy(h->prev_data, data, len < 8 ? len : 8);
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Kthread
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static void usb_hid_device_kthread(void) {
   usb_hid_dev_t *d = g_hid_pending;
   g_hid_pending = NULL;
