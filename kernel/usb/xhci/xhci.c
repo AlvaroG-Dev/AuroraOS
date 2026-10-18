@@ -237,9 +237,6 @@ void xhci_event_thread(void) {
 
     unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
     uint64_t next = xhci_ring_trb_phys(&g_xhci.evt, g_xhci.evt.dequeue);
-    uint32_t *next_trb = (uint32_t *)&g_xhci.evt.trbs[g_xhci.evt.dequeue];
-    int more_events =
-        ((next_trb[3] & XHCI_TRB_CYCLE) == g_xhci.evt.cycle);
     spin_unlock_irqrestore(&g_xhci.lock, flags);
 
     rt_wr(XHCI_RT_IR0_ERDP + 4, (uint32_t)(next >> 32));
@@ -251,8 +248,9 @@ void xhci_event_thread(void) {
 
     /* Catch an event racing with the empty-ring check and acknowledgement. */
     flags = spin_lock_irqsave(&g_xhci.lock);
-    next_trb = (uint32_t *)&g_xhci.evt.trbs[g_xhci.evt.dequeue];
-    more_events =
+    volatile uint32_t *next_trb =
+        (volatile uint32_t *)&g_xhci.evt.trbs[g_xhci.evt.dequeue];
+    int more_events =
         ((next_trb[3] & XHCI_TRB_CYCLE) == g_xhci.evt.cycle);
     spin_unlock_irqrestore(&g_xhci.lock, flags);
     if (more_events)
