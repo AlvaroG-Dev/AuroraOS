@@ -775,7 +775,7 @@ REGISTER_TEST("paging: rechaza overflow en map_range",
 // MMIO: rechazo de rangos físicos que desbordan PTE_FRAME
 // ---------------------------------------------------------------------------
 static void test_mmio_map_overflow(void) {
-  const uint64_t mmio_window_size = (1ULL << 39);
+  const uint64_t mmio_window_size = (1ULL << 40);
   const uint64_t mmio_max_phys = mmio_window_size - 1;
 
   // El último byte de la ventana MMIO es válido.
