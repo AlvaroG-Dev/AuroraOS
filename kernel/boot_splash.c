@@ -2,6 +2,7 @@
 #include "boot_splash.h"
 #include "gfx/font_aa.h"
 #include "gfx/font_manager.h"
+#include "gfx/fonts/font_inter_bold48.h"
 #include "heap.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -16,7 +17,7 @@ uint32_t g_boot_splash_initial_ms = 0;
 
 #define TITLE_STR "AuroraOS"
 #define TITLE_LEN 8
-#define FONT_SCALE 4
+#define FONT_SCALE 1
 #define LETTER_FADE_MS 210
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
@@ -25,6 +26,7 @@ uint32_t g_boot_splash_initial_ms = 0;
 #define SPIN_DOT_R 3
 #define SPIN_DOTS 12
 #define SPIN_ROT_MS 1000
+#define FRAME_MS 16
 #define SPIN_PAD (SPIN_R + SPIN_DOT_R + 8)
 
 #define MIN_SPLASH_MS 2200
@@ -52,7 +54,7 @@ static uint32_t *g_title_bm = NULL;
 static int g_tb_w = 0, g_tb_h = 0;
 static int g_title_x = 0, g_title_y = 0;
 static int g_letter_x[TITLE_LEN];
-static int g_letter_pad = 24;
+static int g_letter_pad = 12;
 
 static int g_spin_cx = 0, g_spin_cy = 0;
 static uint64_t g_tsc_hz = TSC_HZ_DEFAULT;
@@ -68,8 +70,8 @@ static inline uint64_t rdtsc_now(void) {
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
-static inline uint32_t ms_to_ticks(uint64_t ms) {
-  return (uint32_t)(ms * (g_tsc_hz / 1000ULL));
+static inline uint64_t ms_to_ticks(uint64_t ms) {
+  return ms * (g_tsc_hz / 1000ULL);
 }
 static inline uint64_t elapsed_ms(uint64_t now, uint64_t then) {
   return (now - then) / (g_tsc_hz / 1000ULL);
@@ -223,9 +225,15 @@ static void prerender_glow(void) {
   g_glow_bm = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
   if (!g_glow_bm)
     return;
+  /* kmalloc may return dirty memory; clear transparent pixels explicitly. */
+  for (int i = 0; i < g_tb_w * g_tb_h; i++)
+    g_glow_bm[i] = 0;
   uint32_t *tmp = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
-  if (!tmp)
+  if (!tmp) {
+    kfree(g_glow_bm);
+    g_glow_bm = NULL;
     return;
+  }
   const int R = 6, N = 2 * R + 1;
   for (int y = 0; y < g_tb_h; y++) {
     uint32_t acc = 0;
@@ -257,61 +265,54 @@ static void prerender_glow(void) {
         acc += tmp[yb * g_tb_w + x];
     }
   }
+  kfree(tmp);
+
 }
 
 static void draw_title_frame(uint64_t ms) {
-  if (!g_shadow || !g_title_bm)
-    return;
+  if (!g_shadow || !g_title_bm || !g_font) return;
   sh_fill(g_title_x, g_title_y, g_tb_w, g_tb_h, COL_BG);
-  if (g_glow_bm) {
-    for (int y = 0; y < g_tb_h; y++) {
-      uint32_t *dst =
-          g_shadow + (uint64_t)(g_title_y + y) * g_pitch + g_title_x;
-      const uint32_t *src = g_glow_bm + y * g_tb_w;
-      for (int x = 0; x < g_tb_w; x++)
-        if (src[x] >> 24)
-          dst[x] = blend_px(src[x], dst[x]);
+  /* Clip in screen coordinates before constructing framebuffer pointers. */
+  int x0 = g_title_x < 0 ? -g_title_x : 0;
+  int y0 = g_title_y < 0 ? -g_title_y : 0;
+  int x1 = g_tb_w, y1 = g_tb_h;
+  if (g_title_x + x1 > (int)g_w) x1 = (int)g_w - g_title_x;
+  if (g_title_y + y1 > (int)g_h) y1 = (int)g_h - g_title_y;
+  if (x0 < x1 && y0 < y1 && g_glow_bm) {
+    for (int y = y0; y < y1; y++) {
+      uint32_t *dst = g_shadow + (uint64_t)(g_title_y + y) * g_pitch + g_title_x + x0;
+      const uint32_t *src = g_glow_bm + (uint64_t)y * g_tb_w + x0;
+      for (int x = x0; x < x1; x++, dst++, src++)
+        if (*src >> 24) *dst = blend_px(*src, *dst);
     }
   }
   for (int i = 0; i < TITLE_LEN; i++) {
     uint64_t start = (uint64_t)i * LETTER_STAGGER_MS;
-    uint8_t la = (ms < start)
-                     ? 0
-                     : ((ms - start >= LETTER_FADE_MS)
-                            ? 255
-                            : (uint8_t)(255 * (ms - start) / LETTER_FADE_MS));
-    if (!la)
-      continue;
+    uint8_t la = ms < start ? 0 : (ms - start >= LETTER_FADE_MS ? 255 :
+        (uint8_t)(255 * (ms - start) / LETTER_FADE_MS));
+    if (!la) continue;
     int rise = ((255 - la) * 12) / 255;
-    const glyph_aa_t *g = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
-    int gw = g->width * FONT_SCALE, gh = g->height * FONT_SCALE;
-    int bx = g_letter_x[i] + g->bearing_x * FONT_SCALE + g_letter_pad;
-    int by = (g_font->height - g->bearing_y) * FONT_SCALE + g_letter_pad + rise;
+    const glyph_aa_t *glyph = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
+    int gw = glyph->width * FONT_SCALE, gh = glyph->height * FONT_SCALE;
+    int bx = g_letter_x[i] + glyph->bearing_x * FONT_SCALE + g_letter_pad;
+    int by = (g_font->height - glyph->bearing_y) * FONT_SCALE + g_letter_pad + rise;
     for (int dy = 0; dy < gh; dy++) {
-      int py = by + dy;
-      if (py < 0 || py >= g_tb_h)
-        continue;
-      int fy = g_title_y + py;
-      if (fy < 0 || fy >= (int)g_h)
-        continue;
-      uint32_t *dst_row = g_shadow + (uint64_t)fy * g_pitch + g_title_x;
+      int py = by + dy, sy = g_title_y + py;
+      if (py < 0 || py >= g_tb_h || sy < 0 || sy >= (int)g_h) continue;
       for (int dx = 0; dx < gw; dx++) {
-        int px = bx + dx;
-        if (px < 0 || px >= g_tb_w)
-          continue;
-        uint32_t p = g_title_bm[py * g_tb_w + px], a = p >> 24;
-        if (!a)
-          continue;
+        int px = bx + dx, sx = g_title_x + px;
+        if (px < 0 || px >= g_tb_w || sx < 0 || sx >= (int)g_w) continue;
+        uint32_t p = g_title_bm[(uint64_t)py * g_tb_w + px], a = p >> 24;
+        if (!a) continue;
         uint32_t ea = (a * la) / 255;
-        if (!ea)
-          continue;
-        dst_row[px] = blend_px((ea << 24) | (p & 0xFFFFFFu), dst_row[px]);
+        if (!ea) continue;
+        uint32_t *dst = g_shadow + (uint64_t)sy * g_pitch + sx;
+        *dst = blend_px((ea << 24) | (p & 0xFFFFFFu), *dst);
       }
     }
   }
   sh_blit(g_title_x, g_title_y, g_tb_w, g_tb_h);
 }
-
 static void draw_spinner_dot(int cx, int cy, int r, uint32_t rgb,
                              uint8_t alpha) {
   for (int dy = -r - 1; dy <= r + 1; dy++) {
@@ -350,7 +351,7 @@ static void draw_spinner_frame(uint64_t ms) {
   if (ms < TITLE_TOTAL_MS)
     return;
   uint64_t sp_ms = ms - TITLE_TOTAL_MS;
-  int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
+  int head = (int)((sp_ms * SPIN_DOTS / SPIN_ROT_MS) % SPIN_DOTS);
   sh_fill(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
           2 * SPIN_PAD, COL_BG);
   for (int i = 0; i < SPIN_DOTS; i++) {
@@ -405,13 +406,19 @@ void boot_splash_begin_reveal(boot_splash_render_fn_t render_below) {
   }
   g_render_below = render_below;
   if (render_below) {
-    g_desktop_bm = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+    g_desktop_bm = (uint32_t *)kmalloc((size_t)g_pitch * g_h * sizeof(uint32_t));
     if (g_desktop_bm) {
       render_below(g_shadow, g_w, g_h, g_pitch);
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_desktop_bm[i] = g_shadow[i];
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_shadow[i] = COL_BG;
+      for (uint32_t y = 0; y < g_h; y++) {
+        uint64_t row = (uint64_t)y * g_pitch;
+        for (uint32_t x = 0; x < g_w; x++)
+          g_desktop_bm[row + x] = g_shadow[row + x];
+      }
+      for (uint32_t y = 0; y < g_h; y++) {
+        uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
+        for (uint32_t x = 0; x < g_w; x++)
+          row[x] = COL_BG;
+      }
     }
   }
   g_prev_offset = 0;
@@ -458,17 +465,21 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   g_w = width;
   g_h = height;
   g_pitch = pitch_px;
-  font_manager_init();
-  g_font = font_manager_get(FONT_ID_MAIN_REGULAR);
-  if (!g_font)
-    g_font = font_manager_get(FONT_ID_MONO);
+  /* Fuente de título rasterizada directamente a 48 px. */
+  g_font = &font_inter_bold_48;
   if (!g_font)
     return -1;
-  g_shadow = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+  /* pitch is in pixels and may exceed visible width. */
+  if (g_pitch < g_w || (uint64_t)g_pitch * g_h > SIZE_MAX / sizeof(uint32_t))
+    return -1;
+  g_shadow = (uint32_t *)kmalloc((size_t)g_pitch * g_h * sizeof(uint32_t));
   if (!g_shadow)
     return -1;
-  for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-    g_shadow[i] = COL_BG;
+  for (uint32_t y = 0; y < g_h; y++) {
+    uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
+    for (uint32_t x = 0; x < g_w; x++)
+      row[x] = COL_BG;
+  }
 
   /* Handoff desde bootloader */
   g_phase = g_boot_splash_initial_phase ? g_boot_splash_initial_phase : 1;
@@ -480,10 +491,14 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   prerender_title();
   if (!g_title_bm)
     return -1;
-  prerender_glow();
+  /* Sin glow: conserva los bordes de la fuente nítidos. */
   int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
   g_spin_cy = g_title_y + g_letter_pad + title_h + 70;
+  /* Keep the spinner visible even on small firmware video modes. */
+  if (g_spin_cy < SPIN_PAD + 2) g_spin_cy = SPIN_PAD + 2;
+  if (g_spin_cy > (int)g_h - SPIN_PAD - 2) g_spin_cy = (int)g_h - SPIN_PAD - 2;
+  if (g_spin_cy < 0) g_spin_cy = (int)g_h / 2;
   if (g_phase == 2) {
     g_last_tick = 0;
   } else {

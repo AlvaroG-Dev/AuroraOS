@@ -11,7 +11,7 @@ extern EFI_BOOT_SERVICES *gBS;
 
 #define TITLE_STR "AuroraOS"
 #define TITLE_LEN 8
-#define FONT_SCALE 4 /* Tamaño ajustado */
+#define FONT_SCALE 3 /* Tamaño ajustado */
 #define LETTER_FADE_MS 210
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
@@ -136,16 +136,16 @@ static void draw_spinner(UINT32 ms) {
   if (ms < TITLE_TOTAL_MS)
     return;
   UINT32 sp_ms = ms - TITLE_TOTAL_MS;
-  int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
+  int head = (int)((sp_ms * SPIN_DOTS / SPIN_ROT_MS) % SPIN_DOTS);
 
   fill_rect(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
             2 * SPIN_PAD, 0x000000);
 
   for (int i = 0; i < SPIN_DOTS; i++) {
     int d = (head - i + SPIN_DOTS) % SPIN_DOTS;
-    UINT32 bright = 255 - (UINT32)(d * 230 / SPIN_DOTS);
-    if (bright < 25)
-      bright = 25;
+    UINT32 bright = 255 - (UINT32)(d * 210 / (SPIN_DOTS - 1));
+    if (bright < 45)
+      bright = 45;
     UINT32 r = (0x5A * bright) / 255, g = (0xB0 * bright) / 255,
            b = (0xFF * bright) / 255;
     int px = g_spin_cx + k_spin_dx[i], py = g_spin_cy + k_spin_dy[i];
@@ -161,7 +161,10 @@ static void draw_spinner(UINT32 ms) {
 
 int efi_splash_init(EFI_PHYSICAL_ADDRESS lfb_phys, UINT32 w, UINT32 h,
                     UINT32 pitch, UINT32 bpp) {
-  if (!lfb_phys || !w || !h || !pitch || (bpp != 24 && bpp != 32))
+  if (!lfb_phys || !w || !h || (bpp != 24 && bpp != 32))
+    return -1;
+  /* GOP pitch is bytes; reject modes that cannot contain a visible row. */
+  if ((UINT64)pitch < (UINT64)w * (bpp / 8))
     return -1;
   g_fb = (uint8_t *)(UINTN)lfb_phys;
   g_w = w;
@@ -189,6 +192,7 @@ void efi_splash_tick(void) {
   if (now - g_last < 32000000ULL)
     return; // ~16ms asumiendo 2GHz
   g_last = now;
+  /* 16 ms cadence; keep animation position based on elapsed TSC time. */
   UINT32 ms = (UINT32)((now - g_start) / 2000000ULL);
 
   if (ms < TITLE_TOTAL_MS) {

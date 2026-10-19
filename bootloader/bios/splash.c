@@ -9,14 +9,14 @@ extern void bios_log(const char *fmt, ...);
 
 static uint8_t *g_fb = (uint8_t *)0;
 static uint32_t g_w, g_h, g_pitch, g_bpp;
-static uint32_t g_start_tsc = 0;
-static uint32_t g_last_draw = 0;
+static uint64_t g_last_draw = 0;
+static uint32_t g_elapsed_ms = 0;
 static int g_active = 0;
 
-static inline uint32_t rdtsc_lo(void) {
-  uint32_t lo;
-  __asm__ volatile("rdtsc" : "=a"(lo) : : "edx");
-  return lo;
+static inline uint64_t rdtsc_now(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
 }
 
 /* Escribe un pixel en la posición (x, y). Soporta 24 y 32 bpp. */
@@ -57,12 +57,12 @@ static void draw_frame(uint32_t ms) {
   /* caja de fondo */
   fill_rect(cx - R, cy - R, 2 * R, 2 * R, 0x000000);
 
-  int head = (int)((ms / (rot_ms / dots)) % dots);
+  int head = (int)(((uint64_t)ms * dots / rot_ms) % dots);
   for (int i = 0; i < dots; i++) {
     int d = (head - i + dots) % dots;
-    uint32_t bright = 255 - (uint32_t)(d * 230 / dots);
-    if (bright < 25)
-      bright = 25;
+    uint32_t bright = 255 - (uint32_t)(d * 210 / (dots - 1));
+    if (bright < 45)
+      bright = 45;
     /* color azulado modulado por brightness */
     uint32_t r = (uint32_t)(0x5A * bright / 255);
     uint32_t g = (uint32_t)(0xB0 * bright / 255);
@@ -80,34 +80,36 @@ static void draw_frame(uint32_t ms) {
 
 int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
                      uint32_t bpp) {
-  if (!lfb_phys || !w || !h || !pitch || (bpp != 24 && bpp != 32))
+  if (!lfb_phys || !w || !h || (bpp != 24 && bpp != 32) ||
+      (uint64_t)pitch < (uint64_t)w * (bpp / 8))
     return -1;
   g_fb = (uint8_t *)(uintptr_t)lfb_phys;
   g_w = w;
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
-  g_start_tsc = rdtsc_lo();
   g_last_draw = 0;
+  g_elapsed_ms = 0;
   g_active = 1;
 
   /* Fondo negro + primer frame */
   fill_rect(0, 0, (int)w, (int)h, 0x000000);
   draw_frame(0);
-  g_last_draw = g_start_tsc;
+  g_last_draw = rdtsc_now();
   return 0;
 }
 
 void bios_splash_tick(void) {
   if (!g_active)
     return;
-  uint32_t now = rdtsc_lo();
+  uint64_t now = rdtsc_now();
   /* ~2 GHz asumido: 16 ms ≈ 32 M ciclos. Aproximación sin TSC calibrado. */
-  if (now - g_last_draw < 32000000u)
+  if (now - g_last_draw < 32000000ULL)
     return;
   g_last_draw = now;
-  uint32_t ms = (now - g_start_tsc) / 2000000u;
-  draw_frame(ms);
+  /* Fixed animation step: avoid __udivdi3 in the BIOS stage 2. */
+  g_elapsed_ms += 16;
+  draw_frame(g_elapsed_ms);
 }
 
 void bios_splash_done(void) {
