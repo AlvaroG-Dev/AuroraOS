@@ -72,6 +72,15 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
               uint64_t memmap_desc_size) {
   if (!memmap || memmap_size == 0)
     return;
+  // EFI_MEMORY_DESCRIPTOR has a 40-byte minimum layout. Validate the
+  // stride before any loop; a zero/short stride could otherwise cause an
+  // infinite loop or out-of-bounds reads on a corrupt boot handoff.
+  if (memmap_desc_size < 40 || memmap_desc_size > memmap_size ||
+      memmap_size % memmap_desc_size != 0) {
+    LOG_ERR("[PMM] mapa EFI inválido: size=%lu desc_size=%lu",
+            (unsigned long)memmap_size, (unsigned long)memmap_desc_size);
+    return;
+  }
 
   spin_init(&pmm_lock);
 
