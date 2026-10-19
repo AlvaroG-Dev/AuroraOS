@@ -48,6 +48,7 @@ jobs:
           USE_KVM: no
           QEMU_SMP: ${{ matrix.smp }}
           REQUIRE_SMP: ${{ matrix.smp == 1 && 'no' || 'yes' }}
+          REQUIRE_DISK: no
           TIMEOUT: 30
           SHOW_SERIAL: yes
           SHOW_SERIAL_LINES: 500

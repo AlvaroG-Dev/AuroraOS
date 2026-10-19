@@ -243,7 +243,14 @@ void *kmalloc(size_t size) {
     return slab_alloc(size);
   }
 
-  // Camino slow: first-fit con alineación a 16 bytes.
+  // Camino slow: rechazar antes de alinear. La suma size + 15 puede
+  // desbordar size_t y convertir una petición enorme en una asignación
+  // pequeña, que después el llamante podría sobrescribir.
+  if (size > HEAP_MAX_SINGLE_ALLOC || size > SIZE_MAX - 15) {
+    LOG_ERR("[HEAP] kmalloc(%lu) excede el límite de %lu bytes",
+            (unsigned long)size, (unsigned long)HEAP_MAX_SINGLE_ALLOC);
+    return NULL;
+  }
   size = (size + 15) & ~(size_t)15;
 
   unsigned long flags = spin_lock_irqsave(&heap_lock);

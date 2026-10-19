@@ -104,14 +104,11 @@ static inline int paging_is_canonical(uint64_t virt) {
 int paging_map_huge_page(uint64_t virt, uint64_t phys, uint64_t flags);
 
 // ---------------------------------------------------------------------------
-// MMIO: mapear regiones de MMIO en MMIO_MAP_BASE
-// ---------------------------------------------------------------------------
-// La misma dirección física siempre se mapea en la misma dirección virtual
-// (MMIO_MAP_BASE + phys). Mapear dos veces la misma región con flags distintos
-// sobrescribe el primer mapeo.
-//
-// Devuelve un puntero virtual al inicio del mapeo (equivalente a
-// MMIO_MAP_BASE + phys), o NULL si falla.
+// MMIO: mapear regiones de MMIO en MMIO_MAP_BASE.
+// La ventana MMIO abarca dos entradas PML4 (1 TiB), para admitir BAR PCIe
+// de 64 bits colocados por firmware/QEMU por encima de 512 GiB.
+// El espacio virtual se calcula como MMIO_MAP_BASE + dirección física; por
+// tanto, solo son válidas direcciones físicas dentro de esa ventana.
 void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags);
 
 // Deshace un mapeo hecho con mmio_map.

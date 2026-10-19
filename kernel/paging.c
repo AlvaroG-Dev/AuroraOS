@@ -810,7 +810,7 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
     return NULL;
 
   const uint64_t pte_max_phys = PTE_FRAME + PAGE_SIZE - 1;
-  const uint64_t mmio_window_size = (1ULL << 39);
+  const uint64_t mmio_window_size = (1ULL << 40);
   const uint64_t mmio_max_phys = mmio_window_size - 1;
   const uint64_t max_phys =
       pte_max_phys < mmio_max_phys ? pte_max_phys : mmio_max_phys;
@@ -849,7 +849,7 @@ void mmio_unmap(uint64_t phys, uint64_t size) {
     return;
 
   const uint64_t pte_max_phys = PTE_FRAME + PAGE_SIZE - 1;
-  const uint64_t mmio_window_size = (1ULL << 39);
+  const uint64_t mmio_window_size = (1ULL << 40);
   const uint64_t mmio_max_phys = mmio_window_size - 1;
   const uint64_t max_phys =
       pte_max_phys < mmio_max_phys ? pte_max_phys : mmio_max_phys;

@@ -235,15 +235,11 @@ for f in "$OVMF_CODE" "$OVMF_VARS_SRC"; do
 done
 
 # ---------------------------------------------------------------------------
-# Generar aurora.img / aurora.iso si no existen.
-#
-# `make iso` depende de `image`, que a su vez depende de `kernel` y
-# `bootloader`. Al terminar, tenemos:
-#   - aurora.img (disco FAT32 con el bootloader y el kernel)
-#   - aurora.iso (ISO híbrida con aurora.img embebido como efi.img)
+# Generar la ISO si no existe. aurora.img es un disco de pruebas opcional:
+# la regla actual `make iso` genera aurora.iso y build/efi.img, no aurora.img.
 # ---------------------------------------------------------------------------
-if [ ! -f "$ROOT/aurora.img" ] || [ ! -f "$ROOT/aurora.iso" ]; then
-    log_info "aurora.img/aurora.iso no existen, generando con 'make iso'..."
+if [ ! -f "$ROOT/aurora.iso" ]; then
+    log_info "aurora.iso no existe, generando con 'make iso'..."
     if ! make iso; then
         log_error "'make iso' falló"
         dump_serial force
@@ -251,14 +247,14 @@ if [ ! -f "$ROOT/aurora.img" ] || [ ! -f "$ROOT/aurora.iso" ]; then
     fi
 fi
 
-# Sanity check: ambos deben existir después del build.
-if [ ! -f "$ROOT/aurora.img" ]; then
-    log_error "aurora.img no existe después de 'make iso'"
+if [ ! -f "$ROOT/aurora.iso" ]; then
+    log_error "aurora.iso no existe después de 'make iso'"
     dump_serial force
     exit 1
 fi
-if [ ! -f "$ROOT/aurora.iso" ]; then
-    log_error "aurora.iso no existe después de 'make iso'"
+if [ "$REQUIRE_DISK" = "yes" ] && [ ! -f "$ROOT/aurora.img" ]; then
+    log_error "REQUIRE_DISK=yes pero aurora.img no existe; make iso no lo genera"
+    log_info "Genera un disco de pruebas o ejecuta con REQUIRE_DISK=no"
     dump_serial force
     exit 1
 fi
@@ -284,15 +280,20 @@ log_info "  disco: $ROOT/aurora.img"
 log_info "  CD:    $ROOT/aurora.iso"
 
 set +e
+qemu_storage_args=()
+if [ "$REQUIRE_DISK" = "yes" ]; then
+    qemu_storage_args+=( -drive "format=raw,file=$ROOT/aurora.img" )
+fi
+
 timeout --foreground "$TIMEOUT" "$QEMU_BIN" \
-    -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-    -drive if=pflash,format=raw,file="$OVMF_VARS" \
-    -drive format=raw,file="$ROOT/aurora.img" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    "${qemu_storage_args[@]}" \
     -cdrom "$ROOT/aurora.iso" \
     "${kvm_args[@]}" \
     -smp "$QEMU_SMP" \
     -m "$QEMU_MEM" \
-    -serial file:"$SERIAL_LOG" \
+    -serial "file:$SERIAL_LOG" \
     -display none \
     -no-reboot -no-shutdown \
     > "$QEMU_LOG" 2>&1

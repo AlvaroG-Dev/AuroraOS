@@ -1,0 +1,57 @@
+name: xHCI smoke test
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  xhci-qemu:
+    name: xHCI USB enumeration (QEMU TCG)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build and emulation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang-18 lld-18 llvm-18 nasm xorriso mtools \
+            qemu-system-x86 ovmf
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain and OVMF
+        run: |
+          clang --version
+          lld-link --version
+          test -f /usr/share/OVMF/OVMF_CODE_4M.fd
+          test -f /usr/share/OVMF/OVMF_VARS_4M.fd
+
+      - name: Build ISO
+        run: make iso
+
+      - name: Run xHCI USB enumeration smoke test
+        env:
+          TIMEOUT_SECONDS: 45
+        run: |
+          chmod +x scripts/check_xhci.sh
+          ./scripts/check_xhci.sh
+
+      - name: Upload xHCI serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhci-serial-log
+          path: |
+            serial-xhci.log
+            qemu-xhci.log
+          if-no-files-found: warn
+          retention-days: 14

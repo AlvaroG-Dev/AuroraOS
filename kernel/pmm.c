@@ -72,6 +72,15 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
               uint64_t memmap_desc_size) {
   if (!memmap || memmap_size == 0)
     return;
+  // EFI_MEMORY_DESCRIPTOR has a 40-byte minimum layout. Validate the
+  // stride before any loop; a zero/short stride could otherwise cause an
+  // infinite loop or out-of-bounds reads on a corrupt boot handoff.
+  if (memmap_desc_size < 40 || memmap_desc_size > memmap_size ||
+      memmap_size % memmap_desc_size != 0) {
+    LOG_ERR("[PMM] mapa EFI inválido: size=%lu desc_size=%lu",
+            (unsigned long)memmap_size, (unsigned long)memmap_desc_size);
+    return;
+  }
 
   spin_init(&pmm_lock);
 
@@ -200,6 +209,26 @@ void pmm_init(uint64_t memmap, uint64_t memmap_size,
       used_blocks++;
     }
   }
+
+  /*
+   * Never hand legacy low memory to general-purpose clients or DMA. It may
+   * contain IVT/BDA, firmware data and startup trampolines even if a faulty
+   * EFI map marks some of those pages as conventional. Do this before the
+   * buddy allocator is initialized from the shared bitmap.
+   */
+  uint64_t low_mem_pages = 0x100000ULL / PAGE_SIZE;
+  if (low_mem_pages > max_blocks)
+    low_mem_pages = max_blocks;
+  uint64_t low_mem_new = 0;
+  for (uint64_t b = 0; b < low_mem_pages; b++) {
+    if (!bitmap_test_safe(bitmap, b)) {
+      bitmap_set_safe(bitmap, b);
+      used_blocks++;
+      low_mem_new++;
+    }
+  }
+  LOG_INFO("[PMM] Reservada memoria baja [0, 1 MiB): %lu páginas nuevas",
+           (unsigned long)low_mem_new);
 
   LOG_INFO(
       "[PMM] Bitmap inicializado en %p. Max RAM: %lu MB, Libres: %lu MB",

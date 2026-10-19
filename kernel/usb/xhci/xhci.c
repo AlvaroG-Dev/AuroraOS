@@ -96,17 +96,22 @@ int xhci_take_pending_xfer(uint8_t slot, uint8_t ep_id, uint64_t trb_phys,
   return -1;
 }
 
-static bool has_events(void *arg) { return g_event_pending > 0; }
-static bool has_hotplug(void *arg) { return g_hotplug_pending > 0; }
+static bool has_events(void *arg) {
+  (void)arg;
+  return __atomic_load_n(&g_event_pending, __ATOMIC_ACQUIRE) != 0;
+}
+static bool has_hotplug(void *arg) {
+  (void)arg;
+  return __atomic_load_n(&g_hotplug_pending, __ATOMIC_ACQUIRE) != 0;
+}
 
+/*
+ * Keep the hard IRQ short. USBSTS.EINT, ERDP.EHB and IMAN.IP must be
+ * acknowledged after the Event Ring consumer has advanced ERDP; clearing
+ * them here can lose a second event that arrives while the thread is running.
+ */
 static void xhci_irq_handler_msi(void) {
-  uint32_t sts = op_rd(XHCI_OP_USBSTS);
-  uint32_t rw1c = sts & (XHCI_USBSTS_EINT | XHCI_USBSTS_PCD | XHCI_USBSTS_HSE |
-                         XHCI_USBSTS_HCE);
-  if (rw1c)
-    op_wr(XHCI_OP_USBSTS, rw1c);
-
-  g_event_pending = 1;
+  __atomic_store_n(&g_event_pending, 1, __ATOMIC_RELEASE);
   wake_up_all(&g_xhci.irq_wq);
 }
 
@@ -120,19 +125,16 @@ void xhci_event_thread(void) {
       // Sin MSI: poll cada 1 tick (1 ms)
       wait_event_interruptible_timeout(&g_xhci.irq_wq, has_events, NULL, 1);
     }
-    g_event_pending = 0;
+    /*
+     * Clear the notification before draining. An interrupt arriving during
+     * the drain sets it again and cannot be overwritten by consumer bookkeeping.
+     */
+    (void)__atomic_exchange_n(&g_event_pending, 0, __ATOMIC_ACQ_REL);
 
     while (1) {
       xhci_trb_t evt;
       unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
       int rc = xhci_ring_dequeue(&g_xhci.evt, &evt);
-      if (rc == 0) {
-        uint64_t next = xhci_ring_trb_phys(&g_xhci.evt, g_xhci.evt.dequeue);
-        *(volatile uint32_t *)(g_xhci.rt + XHCI_RT_IR0_ERDP) =
-            (uint32_t)(next & 0xFFFFFFFF);
-        *(volatile uint32_t *)(g_xhci.rt + XHCI_RT_IR0_ERDP + 4) =
-            (uint32_t)(next >> 32);
-      }
       spin_unlock_irqrestore(&g_xhci.lock, flags);
 
       if (rc != 0)
@@ -216,10 +218,43 @@ void xhci_event_thread(void) {
         }
         spin_unlock_irqrestore(&g_xhci.lock, flags);
       } else if (type == XHCI_TRB_PORT_STATUS_CHG) {
-        g_hotplug_pending = 1;
+        __atomic_store_n(&g_hotplug_pending, 1, __ATOMIC_RELEASE);
         wake_up_all(&g_xhci.hub_wq);
       }
     }
+
+    /*
+     * xHCI interrupt acknowledgement order:
+     *   1. clear USBSTS status (including EINT),
+     *   2. advance ERDP and write EHB=1,
+     *   3. clear IMAN.IP while preserving IMAN.IE.
+     */
+    uint32_t sts = op_rd(XHCI_OP_USBSTS);
+    uint32_t rw1c = sts & (XHCI_USBSTS_EINT | XHCI_USBSTS_PCD |
+                           XHCI_USBSTS_HSE | XHCI_USBSTS_HCE);
+    if (rw1c)
+      op_wr(XHCI_OP_USBSTS, rw1c);
+
+    unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+    uint64_t next = xhci_ring_trb_phys(&g_xhci.evt, g_xhci.evt.dequeue);
+    spin_unlock_irqrestore(&g_xhci.lock, flags);
+
+    rt_wr(XHCI_RT_IR0_ERDP + 4, (uint32_t)(next >> 32));
+    rt_wr(XHCI_RT_IR0_ERDP, (uint32_t)(next & 0xFFFFFFF0u) | XHCI_ERDP_EHB);
+
+    uint32_t iman = *(volatile uint32_t *)(g_xhci.rt + XHCI_RT_IR0_IMAN);
+    if (iman & XHCI_IMAN_IP)
+      rt_wr(XHCI_RT_IR0_IMAN, (iman & XHCI_IMAN_IE) | XHCI_IMAN_IP);
+
+    /* Catch an event racing with the empty-ring check and acknowledgement. */
+    flags = spin_lock_irqsave(&g_xhci.lock);
+    volatile uint32_t *next_trb =
+        (volatile uint32_t *)&g_xhci.evt.trbs[g_xhci.evt.dequeue];
+    int more_events =
+        ((next_trb[3] & XHCI_TRB_CYCLE) == g_xhci.evt.cycle);
+    spin_unlock_irqrestore(&g_xhci.lock, flags);
+    if (more_events)
+      __atomic_store_n(&g_event_pending, 1, __ATOMIC_RELEASE);
   }
 }
 
@@ -227,7 +262,7 @@ void xhci_hotplug_thread(void) {
   LOG_INFO("[xHCI] Hotplug thread iniciado");
   while (1) {
     wait_event(&g_xhci.hub_wq, has_hotplug, NULL);
-    g_hotplug_pending = 0;
+    (void)__atomic_exchange_n(&g_hotplug_pending, 0, __ATOMIC_ACQ_REL);
     LOG_INFO("[xHCI] Hotplug event detectado, re-escaneando root hub");
     xhci_attach_all_devices();
   }
@@ -263,21 +298,27 @@ static int xhci_map_mmio(void) {
   if (lo & 0x01)
     return -ENODEV;
   uint64_t phys;
+  uint32_t hi = 0;
   if (((lo >> 1) & 0x03) == 0x02) {
-    uint32_t hi = pci_read_config_dword(g_xhci.pci.bus, g_xhci.pci.slot,
-                                        g_xhci.pci.func, 0x14);
+    hi = pci_read_config_dword(g_xhci.pci.bus, g_xhci.pci.slot,
+                               g_xhci.pci.func, 0x14);
     phys = (lo & ~0x0FULL) | ((uint64_t)hi << 32);
   } else {
     phys = lo & ~0x0FULL;
   }
+  LOG_INFO("[xHCI] BAR0 raw=0x%08x hi=0x%08x phys=0x%016lx",
+           lo, hi, (unsigned long)phys);
   if (phys == 0)
     return -ENODEV;
   g_xhci.mmio_phys = phys;
   g_xhci.mmio_size = 0x10000;
   g_xhci.mmio = (volatile uint8_t *)mmio_map(
       phys, g_xhci.mmio_size, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
-  if (!g_xhci.mmio)
+  if (!g_xhci.mmio) {
+    LOG_ERR("[xHCI] no se pudo mapear BAR0 phys=0x%016lx size=0x%lx",
+            (unsigned long)phys, (unsigned long)g_xhci.mmio_size);
     return -ENOMEM;
+  }
   return 0;
 }
 
@@ -302,13 +343,66 @@ static int xhci_read_caps(void) {
   return 0;
 }
 
+/*
+ * Transfer ownership from firmware before touching operational registers.
+ * xECP is a dword offset from the capability base; NEXT is measured in dwords.
+ */
+static int xhci_legacy_handoff(void) {
+  uint32_t xecp = (g_xhci.hccparams1 >> 16) & 0xFFFFu;
+  if (xecp == 0)
+    return 0;
+
+  uint32_t off = xecp * 4u;
+  for (uint32_t n = 0; n < 64 && off + 4 <= g_xhci.mmio_size; n++) {
+    uint32_t cap = mmio_rd(off);
+    uint8_t cap_id = (uint8_t)(cap & 0xFFu);
+    uint8_t next = (uint8_t)((cap >> 8) & 0xFFu);
+
+    if (cap_id == 1) { /* USB Legacy Support capability */
+      const uint32_t bios_owned = 1u << 16;
+      const uint32_t os_owned = 1u << 24;
+      *(volatile uint32_t *)(g_xhci.mmio + off) = cap | os_owned;
+      __asm__ volatile("mfence" ::: "memory");
+
+      if (cap & bios_owned) {
+        for (int i = 0; i < 1000; i++) {
+          if (!(mmio_rd(off) & bios_owned)) {
+            LOG_INFO("[xHCI] firmware relinquished USB ownership");
+            return 0;
+          }
+          xhci_delay_ms(1);
+        }
+        LOG_ERR("[xHCI] timeout esperando USB Legacy Handoff (BIOS-owned)");
+        return -ETIMEDOUT;
+      }
+      LOG_INFO("[xHCI] USB Legacy Support encontrado; OS-owned solicitado");
+      return 0;
+    }
+
+    if (next == 0)
+      break;
+    uint32_t advance = (uint32_t)next * 4u;
+    if (advance > g_xhci.mmio_size - off)
+      break;
+    off += advance;
+  }
+  return 0;
+}
+
 static int xhci_hc_reset(void) {
   if (op_rd(XHCI_OP_USBCMD) & XHCI_USBCMD_RS) {
     op_wr(XHCI_OP_USBCMD, op_rd(XHCI_OP_USBCMD) & ~XHCI_USBCMD_RS);
+    int halted = 0;
     for (int i = 0; i < 100; i++) {
-      if (op_rd(XHCI_OP_USBSTS) & XHCI_USBSTS_HCH)
+      if (op_rd(XHCI_OP_USBSTS) & XHCI_USBSTS_HCH) {
+        halted = 1;
         break;
+      }
       xhci_delay_ms(1);
+    }
+    if (!halted) {
+      LOG_ERR("[xHCI] el controlador no se detuvo antes del reset");
+      return -ETIMEDOUT;
     }
   }
   op_wr(XHCI_OP_USBCMD, op_rd(XHCI_OP_USBCMD) | XHCI_USBCMD_HCRST);
@@ -373,12 +467,14 @@ static int xhci_init_rings(void) {
   rt_wr(XHCI_RT_IR0_ERSTSZ, 1);
   rt_wr(XHCI_RT_IR0_ERSTBA, (uint32_t)(g_xhci.erst_phys & 0xFFFFFFFF));
   rt_wr(XHCI_RT_IR0_ERSTBA + 4, (uint32_t)(g_xhci.erst_phys >> 32));
-  rt_wr(XHCI_RT_IR0_ERDP, (uint32_t)(g_xhci.evt.phys & 0xFFFFFFFF) | 0x8);
   rt_wr(XHCI_RT_IR0_ERDP + 4, (uint32_t)(g_xhci.evt.phys >> 32));
+  rt_wr(XHCI_RT_IR0_ERDP,
+        (uint32_t)(g_xhci.evt.phys & 0xFFFFFFF0u) | XHCI_ERDP_EHB);
 
-  rt_wr(XHCI_RT_IR0_IMAN, XHCI_IMAN_IE);
+  /* Interrupts stay disabled until the handler and consumer threads exist. */
+  rt_wr(XHCI_RT_IR0_IMAN, 0);
 
-  op_wr(XHCI_OP_USBCMD, XHCI_USBCMD_RS | XHCI_USBCMD_INTE);
+  op_wr(XHCI_OP_USBCMD, XHCI_USBCMD_RS);
   for (int i = 0; i < 100; i++) {
     if (op_rd(XHCI_OP_USBCMD) & XHCI_USBCMD_RS)
       break;
@@ -444,7 +540,7 @@ void xhci_hcd_free_device(usb_device_t *dev) {
   if (!dev || !dev->hc_priv)
     return;
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
-  for (int i = 0; i < 15; i++) {
+  for (int i = 0; i < 30; i++) {
     if (p->eps[i].stream_ctx.virt)
       usb_dma_free(&p->eps[i].stream_ctx);
     if (p->eps[i].configured)
@@ -467,7 +563,9 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
   int dir_in = (ep->addr & 0x80) ? 1 : 0;
   if (ep_num == 0 || ep_num > 15)
     return -EINVAL;
-  xhci_ep_state_t *st = &p->eps[ep_num - 1];
+  // USB endpoint addresses include direction. Endpoint N IN and N OUT
+  // are distinct xHCI endpoints and must not share software state.
+  xhci_ep_state_t *st = &p->eps[2 * (ep_num - 1) + dir_in];
   if (st->configured) {
     ep->hc_ep = st;
     return 0;
@@ -520,9 +618,11 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
     memset(sc, 0, XHCI_UAS_STREAM_COUNT * sizeof(*sc));
     uint64_t stream_deq = xhci_ring_trb_phys(&st->ring, 0);
     for (uint32_t sid = 1; sid < XHCI_UAS_STREAM_COUNT; sid++) {
-      sc[sid].param = XHCI_EP_DEQ_DCS | XHCI_STREAM_CTX_SCT_PRIMARY;
-      sc[sid].status = (uint32_t)(stream_deq & 0xFFFFFFFFu);
-      sc[sid].control = (uint32_t)(stream_deq >> 32);
+      // Stream Context Entry layout: DWORDs 0-1 are the dequeue pointer
+      // (with DCS in bit 0), DWORD 2 is reserved, DWORD 3 contains SCT.
+      sc[sid].param = stream_deq | XHCI_EP_DEQ_DCS;
+      sc[sid].status = 0;
+      sc[sid].control = XHCI_STREAM_CTX_SCT_PRIMARY;
     }
     usb_dma_sync(&st->stream_ctx, USB_DMA_TO_DEVICE);
     st->has_streams = 1;
@@ -932,6 +1032,9 @@ int xhci_probe(void) {
   rc = xhci_read_caps();
   if (rc != 0)
     return rc;
+  rc = xhci_legacy_handoff();
+  if (rc != 0)
+    return rc;
   rc = xhci_hc_reset();
   if (rc != 0)
     return rc;
@@ -940,23 +1043,37 @@ int xhci_probe(void) {
     return rc;
   xhci_power_on_ports();
 
-  // MSI Setup
+  /*
+   * Register the vector before enabling MSI in PCI config space. The HC is
+   * running, but USBCMD.INTE and IMAN.IE remain disabled until this is ready.
+   */
   uint8_t msi_vec = 0x62;
+  msi_install_handler(msi_vec, xhci_irq_handler_msi);
   if (pci_enable_msi(g_xhci.pci.bus, g_xhci.pci.slot, g_xhci.pci.func, msi_vec,
-                     lapic_get_bsp_id()) == 0) {
-    msi_install_handler(msi_vec, xhci_irq_handler_msi);
+                     (uint8_t)lapic_get_bsp_id()) == 0) {
     g_xhci.using_msi = 1;
     g_xhci.msi_vector = msi_vec;
-    LOG_INFO("[xHCI] MSI habilitado en vector 0x%02x", msi_vec);
+    LOG_INFO("[xHCI] MSI preparado en vector 0x%02x", msi_vec);
   } else {
-    LOG_WARN("[xHCI] MSI falló, usando polling en event thread");
+    msi_install_handler(msi_vec, NULL);
+    LOG_WARN("[xHCI] MSI no disponible; usando polling del Event Ring");
   }
 
   g_xhci.initialized = 1;
 
-  // El event thread SIEMPRE se crea, use MSI o no
-  sched_create_task(xhci_event_thread);
-  sched_create_task(xhci_hotplug_thread);
+  /* Create the consumer before allowing the controller to generate MSI. */
+  if (!sched_create_task(xhci_event_thread)) {
+    LOG_ERR("[xHCI] no se pudo crear Event Thread; abortando");
+    g_xhci.initialized = 0;
+    return -ENOMEM;
+  }
+  if (!sched_create_task(xhci_hotplug_thread))
+    LOG_WARN("[xHCI] no se pudo crear Hotplug Thread");
+
+  if (g_xhci.using_msi) {
+    rt_wr(XHCI_RT_IR0_IMAN, XHCI_IMAN_IE);
+    op_wr(XHCI_OP_USBCMD, op_rd(XHCI_OP_USBCMD) | XHCI_USBCMD_INTE);
+  }
 
   xhci_attach_all_devices();
   LOG_INFO("[xHCI] inicializado");
