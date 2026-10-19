@@ -260,58 +260,49 @@ static void prerender_glow(void) {
 }
 
 static void draw_title_frame(uint64_t ms) {
-  if (!g_shadow || !g_title_bm)
-    return;
+  if (!g_shadow || !g_title_bm || !g_font) return;
   sh_fill(g_title_x, g_title_y, g_tb_w, g_tb_h, COL_BG);
-  if (g_glow_bm) {
-    for (int y = 0; y < g_tb_h; y++) {
-      uint32_t *dst =
-          g_shadow + (uint64_t)(g_title_y + y) * g_pitch + g_title_x;
-      const uint32_t *src = g_glow_bm + y * g_tb_w;
-      for (int x = 0; x < g_tb_w; x++)
-        if (src[x] >> 24)
-          dst[x] = blend_px(src[x], dst[x]);
+  /* Clip in screen coordinates before constructing framebuffer pointers. */
+  int x0 = g_title_x < 0 ? -g_title_x : 0;
+  int y0 = g_title_y < 0 ? -g_title_y : 0;
+  int x1 = g_tb_w, y1 = g_tb_h;
+  if (g_title_x + x1 > (int)g_w) x1 = (int)g_w - g_title_x;
+  if (g_title_y + y1 > (int)g_h) y1 = (int)g_h - g_title_y;
+  if (x0 < x1 && y0 < y1 && g_glow_bm) {
+    for (int y = y0; y < y1; y++) {
+      uint32_t *dst = g_shadow + (uint64_t)(g_title_y + y) * g_pitch + g_title_x + x0;
+      const uint32_t *src = g_glow_bm + (uint64_t)y * g_tb_w + x0;
+      for (int x = x0; x < x1; x++, dst++, src++)
+        if (*src >> 24) *dst = blend_px(*src, *dst);
     }
   }
   for (int i = 0; i < TITLE_LEN; i++) {
     uint64_t start = (uint64_t)i * LETTER_STAGGER_MS;
-    uint8_t la = (ms < start)
-                     ? 0
-                     : ((ms - start >= LETTER_FADE_MS)
-                            ? 255
-                            : (uint8_t)(255 * (ms - start) / LETTER_FADE_MS));
-    if (!la)
-      continue;
+    uint8_t la = ms < start ? 0 : (ms - start >= LETTER_FADE_MS ? 255 :
+        (uint8_t)(255 * (ms - start) / LETTER_FADE_MS));
+    if (!la) continue;
     int rise = ((255 - la) * 12) / 255;
-    const glyph_aa_t *g = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
-    int gw = g->width * FONT_SCALE, gh = g->height * FONT_SCALE;
-    int bx = g_letter_x[i] + g->bearing_x * FONT_SCALE + g_letter_pad;
-    int by = (g_font->height - g->bearing_y) * FONT_SCALE + g_letter_pad + rise;
+    const glyph_aa_t *glyph = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
+    int gw = glyph->width * FONT_SCALE, gh = glyph->height * FONT_SCALE;
+    int bx = g_letter_x[i] + glyph->bearing_x * FONT_SCALE + g_letter_pad;
+    int by = (g_font->height - glyph->bearing_y) * FONT_SCALE + g_letter_pad + rise;
     for (int dy = 0; dy < gh; dy++) {
-      int py = by + dy;
-      if (py < 0 || py >= g_tb_h)
-        continue;
-      int fy = g_title_y + py;
-      if (fy < 0 || fy >= (int)g_h)
-        continue;
-      uint32_t *dst_row = g_shadow + (uint64_t)fy * g_pitch + g_title_x;
+      int py = by + dy, sy = g_title_y + py;
+      if (py < 0 || py >= g_tb_h || sy < 0 || sy >= (int)g_h) continue;
       for (int dx = 0; dx < gw; dx++) {
-        int px = bx + dx;
-        if (px < 0 || px >= g_tb_w)
-          continue;
-        uint32_t p = g_title_bm[py * g_tb_w + px], a = p >> 24;
-        if (!a)
-          continue;
+        int px = bx + dx, sx = g_title_x + px;
+        if (px < 0 || px >= g_tb_w || sx < 0 || sx >= (int)g_w) continue;
+        uint32_t p = g_title_bm[(uint64_t)py * g_tb_w + px], a = p >> 24;
+        if (!a) continue;
         uint32_t ea = (a * la) / 255;
-        if (!ea)
-          continue;
-        dst_row[px] = blend_px((ea << 24) | (p & 0xFFFFFFu), dst_row[px]);
+        if (!ea) continue;
+        uint32_t *dst = g_shadow + (uint64_t)sy * g_pitch + sx;
+        *dst = blend_px((ea << 24) | (p & 0xFFFFFFu), *dst);
       }
     }
   }
   sh_blit(g_title_x, g_title_y, g_tb_w, g_tb_h);
 }
-
 static void draw_spinner_dot(int cx, int cy, int r, uint32_t rgb,
                              uint8_t alpha) {
   for (int dy = -r - 1; dy <= r + 1; dy++) {
