@@ -66,8 +66,8 @@ static inline uint64_t rdtsc_now(void) {
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
-static inline uint32_t ms_to_ticks(uint64_t ms) {
-  return (uint32_t)(ms * (g_tsc_hz / 1000ULL));
+static inline uint64_t ms_to_ticks(uint64_t ms) {
+  return ms * (g_tsc_hz / 1000ULL);
 }
 static inline uint64_t elapsed_ms(uint64_t now, uint64_t then) {
   return (now - then) / (g_tsc_hz / 1000ULL);
