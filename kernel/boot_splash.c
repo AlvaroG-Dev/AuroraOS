@@ -16,7 +16,7 @@ uint32_t g_boot_splash_initial_ms = 0;
 
 #define TITLE_STR "AuroraOS"
 #define TITLE_LEN 8
-#define FONT_SCALE 4
+#define FONT_SCALE 3
 #define LETTER_FADE_MS 210
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
@@ -25,6 +25,7 @@ uint32_t g_boot_splash_initial_ms = 0;
 #define SPIN_DOT_R 3
 #define SPIN_DOTS 12
 #define SPIN_ROT_MS 1000
+#define FRAME_MS 16
 #define SPIN_PAD (SPIN_R + SPIN_DOT_R + 8)
 
 #define MIN_SPLASH_MS 2200
@@ -68,8 +69,8 @@ static inline uint64_t rdtsc_now(void) {
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
-static inline uint32_t ms_to_ticks(uint64_t ms) {
-  return (uint32_t)(ms * (g_tsc_hz / 1000ULL));
+static inline uint64_t ms_to_ticks(uint64_t ms) {
+  return ms * (g_tsc_hz / 1000ULL);
 }
 static inline uint64_t elapsed_ms(uint64_t now, uint64_t then) {
   return (now - then) / (g_tsc_hz / 1000ULL);
@@ -349,7 +350,7 @@ static void draw_spinner_frame(uint64_t ms) {
   if (ms < TITLE_TOTAL_MS)
     return;
   uint64_t sp_ms = ms - TITLE_TOTAL_MS;
-  int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
+  int head = (int)((sp_ms * SPIN_DOTS / SPIN_ROT_MS) % SPIN_DOTS);
   sh_fill(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
           2 * SPIN_PAD, COL_BG);
   for (int i = 0; i < SPIN_DOTS; i++) {
@@ -407,10 +408,16 @@ void boot_splash_begin_reveal(boot_splash_render_fn_t render_below) {
     g_desktop_bm = (uint32_t *)kmalloc((size_t)g_pitch * g_h * sizeof(uint32_t));
     if (g_desktop_bm) {
       render_below(g_shadow, g_w, g_h, g_pitch);
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_desktop_bm[i] = g_shadow[i];
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_shadow[i] = COL_BG;
+      for (uint32_t y = 0; y < g_h; y++) {
+        uint64_t row = (uint64_t)y * g_pitch;
+        for (uint32_t x = 0; x < g_w; x++)
+          g_desktop_bm[row + x] = g_shadow[row + x];
+      }
+      for (uint32_t y = 0; y < g_h; y++) {
+        uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
+        for (uint32_t x = 0; x < g_w; x++)
+          row[x] = COL_BG;
+      }
     }
   }
   g_prev_offset = 0;
@@ -469,8 +476,11 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   g_shadow = (uint32_t *)kmalloc((size_t)g_pitch * g_h * sizeof(uint32_t));
   if (!g_shadow)
     return -1;
-  for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-    g_shadow[i] = COL_BG;
+  for (uint32_t y = 0; y < g_h; y++) {
+    uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
+    for (uint32_t x = 0; x < g_w; x++)
+      row[x] = COL_BG;
+  }
 
   /* Handoff desde bootloader */
   g_phase = g_boot_splash_initial_phase ? g_boot_splash_initial_phase : 1;
