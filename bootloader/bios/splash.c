@@ -9,14 +9,14 @@ extern void bios_log(const char *fmt, ...);
 
 static uint8_t *g_fb = (uint8_t *)0;
 static uint32_t g_w, g_h, g_pitch, g_bpp;
-static uint32_t g_start_tsc = 0;
-static uint32_t g_last_draw = 0;
+static uint64_t g_start_tsc = 0;
+static uint64_t g_last_draw = 0;
 static int g_active = 0;
 
-static inline uint32_t rdtsc_lo(void) {
-  uint32_t lo;
-  __asm__ volatile("rdtsc" : "=a"(lo) : : "edx");
-  return lo;
+static inline uint64_t rdtsc_now(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
 }
 
 /* Escribe un pixel en la posición (x, y). Soporta 24 y 32 bpp. */
@@ -80,7 +80,8 @@ static void draw_frame(uint32_t ms) {
 
 int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
                      uint32_t bpp) {
-  if (!lfb_phys || !w || !h || !pitch || (bpp != 24 && bpp != 32))
+  if (!lfb_phys || !w || !h || (bpp != 24 && bpp != 32) ||
+      (uint64_t)pitch < (uint64_t)w * (bpp / 8))
     return -1;
   g_fb = (uint8_t *)(uintptr_t)lfb_phys;
   g_w = w;
