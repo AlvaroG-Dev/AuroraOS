@@ -161,7 +161,10 @@ static void draw_spinner(UINT32 ms) {
 
 int efi_splash_init(EFI_PHYSICAL_ADDRESS lfb_phys, UINT32 w, UINT32 h,
                     UINT32 pitch, UINT32 bpp) {
-  if (!lfb_phys || !w || !h || !pitch || (bpp != 24 && bpp != 32))
+  if (!lfb_phys || !w || !h || (bpp != 24 && bpp != 32))
+    return -1;
+  /* GOP pitch is bytes; reject modes that cannot contain a visible row. */
+  if ((UINT64)pitch < (UINT64)w * (bpp / 8))
     return -1;
   g_fb = (uint8_t *)(UINTN)lfb_phys;
   g_w = w;
