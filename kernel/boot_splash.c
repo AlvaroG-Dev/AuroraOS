@@ -227,8 +227,11 @@ static void prerender_glow(void) {
   for (int i = 0; i < g_tb_w * g_tb_h; i++)
     g_glow_bm[i] = 0;
   uint32_t *tmp = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
-  if (!tmp)
+  if (!tmp) {
+    kfree(g_glow_bm);
+    g_glow_bm = NULL;
     return;
+  }
   const int R = 6, N = 2 * R + 1;
   for (int y = 0; y < g_tb_h; y++) {
     uint32_t acc = 0;
@@ -260,6 +263,8 @@ static void prerender_glow(void) {
         acc += tmp[yb * g_tb_w + x];
     }
   }
+  kfree(tmp);
+
 }
 
 static void draw_title_frame(uint64_t ms) {
