@@ -1,10 +1,9 @@
 /* bootloader/efi/splash.c */
 #include "splash.h"
 #include "font_aa.h"
-#include "font_inter_regular14.h"
+#include "font_inter_bold14.h"
 
-/* El compilador nos ha chivado el nombre exacto de la variable */
-#define FONT_MAIN (font_inter_regular_14)
+#define FONT_MAIN (font_inter_bold_14)
 
 extern EFI_SYSTEM_TABLE *gST;
 extern EFI_BOOT_SERVICES *gBS;
@@ -14,15 +13,14 @@ extern EFI_BOOT_SERVICES *gBS;
 #define FONT_SCALE g_font_scale
 static int g_font_scale = 4;
 static int g_title_y = 0;
-#define LETTER_FADE_MS 210
-#define LETTER_STAGGER_MS 105
-#define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
+#define TITLE_FADE_MS 420
+#define TITLE_TOTAL_MS TITLE_FADE_MS
 
-#define SPIN_R 18 /* Spinner ajustado */
+#define SPIN_R 20
 #define SPIN_DOT_R 3
 #define SPIN_DOTS 12
-#define SPIN_ROT_MS 1000
-#define SPIN_PAD (SPIN_R + SPIN_DOT_R + 8)
+#define SPIN_ROT_MS 900
+#define SPIN_PAD (SPIN_R + SPIN_DOT_R + 5)
 
 static uint8_t *g_fb = NULL;
 static UINT32 g_w, g_h, g_pitch, g_bpp;
@@ -125,14 +123,12 @@ static void draw_title(UINT32 ms) {
   int y = g_title_y;
   fill_rect(x - 4, y - 4, total_w + 8, FONT_MAIN.height * FONT_SCALE + 12, 0x000000);
 
+  UINT32 la = (ms >= TITLE_FADE_MS)
+                   ? 255
+                   : (UINT32)(255 * ms / TITLE_FADE_MS);
+  int rise = (int)((255 - la) * 8 / 255);
   for (int i = 0; i < TITLE_LEN; i++) {
     const glyph_aa_t *g = &FONT_MAIN.glyphs[(unsigned char)TITLE_STR[i]];
-    UINT64 st = (UINT64)i * LETTER_STAGGER_MS;
-    UINT32 la = (ms < st) ? 0
-                          : ((ms - st >= LETTER_FADE_MS)
-                                 ? 255
-                                 : (UINT32)(255 * (ms - st) / LETTER_FADE_MS));
-    int rise = (int)((255 - la) * 12 / 255);
     int gw = g->width * FONT_SCALE, gh = g->height * FONT_SCALE;
     int bx = x + g->bearing_x * FONT_SCALE;
     int by = y + (FONT_MAIN.height - g->bearing_y) * FONT_SCALE + rise;
@@ -160,24 +156,35 @@ static void draw_spinner(UINT32 ms) {
   if (ms < TITLE_TOTAL_MS)
     return;
   UINT32 sp_ms = ms - TITLE_TOTAL_MS;
-  int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
+  UINT32 phase = (UINT32)(((UINT64)(sp_ms % SPIN_ROT_MS) * SPIN_DOTS * 256ULL) /
+                          SPIN_ROT_MS);
+  int head = (int)(phase >> 8);
+  UINT32 fraction = phase & 255u;
 
   fill_rect(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
             2 * SPIN_PAD, 0x000000);
 
   for (int i = 0; i < SPIN_DOTS; i++) {
     int d = (head - i + SPIN_DOTS) % SPIN_DOTS;
-    UINT32 bright = 255 - (UINT32)(d * 230 / SPIN_DOTS);
-    if (bright < 25)
-      bright = 25;
-    UINT32 r = (0x5A * bright) / 255, g = (0xB0 * bright) / 255,
-           b = (0xFF * bright) / 255;
+    UINT32 distance = (UINT32)d * 256u + fraction;
+    UINT32 bright = 255u - (distance * 230u) / (SPIN_DOTS * 256u);
+    if (bright < 25u)
+      bright = 25u;
     int px = g_spin_cx + k_spin_dx[i], py = g_spin_cy + k_spin_dy[i];
 
+    /* Antialiased circular dots: solid core, soft one-pixel edge. */
     for (int yy = -SPIN_DOT_R; yy <= SPIN_DOT_R; yy++) {
       for (int xx = -SPIN_DOT_R; xx <= SPIN_DOT_R; xx++) {
-        if (xx * xx + yy * yy <= SPIN_DOT_R * SPIN_DOT_R)
-          put_px(px + xx, py + yy, (r << 16) | (g << 8) | b);
+        int d2 = xx * xx + yy * yy;
+        if (d2 > SPIN_DOT_R * SPIN_DOT_R)
+          continue;
+        UINT32 coverage = (d2 <= (SPIN_DOT_R - 1) * (SPIN_DOT_R - 1))
+                              ? 255u : 160u;
+        UINT32 intensity = (bright * coverage) / 255u;
+        UINT32 r = (0x5A * intensity) / 255u;
+        UINT32 g = (0xB0 * intensity) / 255u;
+        UINT32 b = (0xFF * intensity) / 255u;
+        put_px(px + xx, py + yy, (r << 16) | (g << 8) | b);
       }
     }
   }
