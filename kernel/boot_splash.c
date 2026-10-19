@@ -486,6 +486,10 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
   g_spin_cy = g_title_y + g_letter_pad + title_h + 70;
+  /* Keep the spinner visible even on small firmware video modes. */
+  if (g_spin_cy < SPIN_PAD + 2) g_spin_cy = SPIN_PAD + 2;
+  if (g_spin_cy > (int)g_h - SPIN_PAD - 2) g_spin_cy = (int)g_h - SPIN_PAD - 2;
+  if (g_spin_cy < 0) g_spin_cy = (int)g_h / 2;
   if (g_phase == 2) {
     g_last_tick = 0;
   } else {
