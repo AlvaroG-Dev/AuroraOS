@@ -405,7 +405,7 @@ void boot_splash_begin_reveal(boot_splash_render_fn_t render_below) {
   }
   g_render_below = render_below;
   if (render_below) {
-    g_desktop_bm = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+    g_desktop_bm = (uint32_t *)kmalloc((size_t)g_pitch * g_h * sizeof(uint32_t));
     if (g_desktop_bm) {
       render_below(g_shadow, g_w, g_h, g_pitch);
       for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
@@ -464,7 +464,10 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
     g_font = font_manager_get(FONT_ID_MONO);
   if (!g_font)
     return -1;
-  g_shadow = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+  /* pitch is in pixels and may exceed visible width. */
+  if (g_pitch < g_w || (uint64_t)g_pitch * g_h > SIZE_MAX / sizeof(uint32_t))
+    return -1;
+  g_shadow = (uint32_t *)kmalloc((size_t)g_pitch * g_h * sizeof(uint32_t));
   if (!g_shadow)
     return -1;
   for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
