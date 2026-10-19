@@ -2,6 +2,7 @@
 #include "boot_splash.h"
 #include "gfx/font_aa.h"
 #include "gfx/font_manager.h"
+#include "gfx/fonts/font_inter_bold48.h"
 #include "heap.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -16,7 +17,7 @@ uint32_t g_boot_splash_initial_ms = 0;
 
 #define TITLE_STR "AuroraOS"
 #define TITLE_LEN 8
-#define FONT_SCALE 3
+#define FONT_SCALE 1
 #define LETTER_FADE_MS 210
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
@@ -53,7 +54,7 @@ static uint32_t *g_title_bm = NULL;
 static int g_tb_w = 0, g_tb_h = 0;
 static int g_title_x = 0, g_title_y = 0;
 static int g_letter_x[TITLE_LEN];
-static int g_letter_pad = 24;
+static int g_letter_pad = 12;
 
 static int g_spin_cx = 0, g_spin_cy = 0;
 static uint64_t g_tsc_hz = TSC_HZ_DEFAULT;
@@ -464,10 +465,8 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   g_w = width;
   g_h = height;
   g_pitch = pitch_px;
-  font_manager_init();
-  g_font = font_manager_get(FONT_ID_MAIN_REGULAR);
-  if (!g_font)
-    g_font = font_manager_get(FONT_ID_MONO);
+  /* Fuente de título rasterizada directamente a 48 px. */
+  g_font = &font_inter_bold_48;
   if (!g_font)
     return -1;
   /* pitch is in pixels and may exceed visible width. */
@@ -492,7 +491,7 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   prerender_title();
   if (!g_title_bm)
     return -1;
-  prerender_glow();
+  /* Sin glow: conserva los bordes de la fuente nítidos. */
   int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
   g_spin_cy = g_title_y + g_letter_pad + title_h + 70;
