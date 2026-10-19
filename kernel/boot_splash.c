@@ -16,7 +16,8 @@ uint32_t g_boot_splash_initial_ms = 0;
 
 #define TITLE_STR "AuroraOS"
 #define TITLE_LEN 8
-#define FONT_SCALE 4
+#define FONT_SCALE g_font_scale
+static int g_font_scale = 4;
 #define LETTER_FADE_MS 210
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
@@ -68,8 +69,8 @@ static inline uint64_t rdtsc_now(void) {
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
-static inline uint32_t ms_to_ticks(uint64_t ms) {
-  return (uint32_t)(ms * (g_tsc_hz / 1000ULL));
+static inline uint64_t ms_to_ticks(uint64_t ms) {
+  return ms * (g_tsc_hz / 1000ULL);
 }
 static inline uint64_t elapsed_ms(uint64_t now, uint64_t then) {
   return (now - then) / (g_tsc_hz / 1000ULL);
@@ -89,7 +90,7 @@ static inline uint32_t blend_px(uint32_t src, uint32_t dst) {
 }
 
 static void sh_fill(int x, int y, int w, int h, uint32_t c) {
-  if (!g_shadow)
+  if (!g_shadow || w <= 0 || h <= 0)
     return;
   if (x < 0) {
     w += x;
@@ -101,8 +102,12 @@ static void sh_fill(int x, int y, int w, int h, uint32_t c) {
   }
   if (x + w > (int)g_w)
     w = g_w - x;
+  if (x >= (int)g_w || y >= (int)g_h || w <= 0 || h <= 0)
+    return;
   if (y + h > (int)g_h)
     h = g_h - y;
+  if (w <= 0 || h <= 0)
+    return;
   for (int yy = 0; yy < h; yy++) {
     uint32_t *row = g_shadow + (uint64_t)(y + yy) * g_pitch + x;
     for (int xx = 0; xx < w; xx++)
@@ -175,6 +180,16 @@ static uint32_t *g_glow_bm = NULL;
 static void prerender_title(void) {
   if (!g_font)
     return;
+  int natural_w = 0;
+  for (int i = 0; i < TITLE_LEN; i++)
+    natural_w += g_font->glyphs[(unsigned char)TITLE_STR[i]].advance;
+  g_font_scale = 4;
+  while (g_font_scale > 1 &&
+         ((uint64_t)natural_w * g_font_scale + 12 * g_font_scale >
+              (uint64_t)g_w * 9 / 10 ||
+          (uint64_t)g_font->height * g_font_scale + 120 > g_h))
+    g_font_scale--;
+  g_letter_pad = 6 * g_font_scale;
   int total_w = 0, max_h = 0;
   for (int i = 0; i < TITLE_LEN; i++) {
     const glyph_aa_t *g = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
@@ -214,10 +229,14 @@ static void prerender_title(void) {
     }
   }
   g_title_x = ((int)g_w - total_w) / 2 - g_letter_pad;
-  g_title_y = (int)g_h / 2 - max_h - 40 - g_letter_pad;
+  int layout_h = g_tb_h + 18 + 2 * SPIN_PAD;
+  g_title_y = ((int)g_h - layout_h) / 2;
 }
 
 static void prerender_glow(void) {
+  /* Minimalist splash: omit the blur/glow pass to save memory and CPU. */
+  g_glow_bm = NULL;
+  return;
   if (!g_title_bm)
     return;
   g_glow_bm = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
@@ -260,52 +279,44 @@ static void prerender_glow(void) {
 }
 
 static void draw_title_frame(uint64_t ms) {
-  if (!g_shadow || !g_title_bm)
+  if (!g_shadow || !g_title_bm || !g_font)
     return;
   sh_fill(g_title_x, g_title_y, g_tb_w, g_tb_h, COL_BG);
-  if (g_glow_bm) {
-    for (int y = 0; y < g_tb_h; y++) {
-      uint32_t *dst =
-          g_shadow + (uint64_t)(g_title_y + y) * g_pitch + g_title_x;
-      const uint32_t *src = g_glow_bm + y * g_tb_w;
-      for (int x = 0; x < g_tb_w; x++)
-        if (src[x] >> 24)
-          dst[x] = blend_px(src[x], dst[x]);
-    }
-  }
   for (int i = 0; i < TITLE_LEN; i++) {
-    uint64_t start = (uint64_t)i * LETTER_STAGGER_MS;
-    uint8_t la = (ms < start)
+    uint64_t start_ms = (uint64_t)i * LETTER_STAGGER_MS;
+    uint8_t la = (ms < start_ms)
                      ? 0
-                     : ((ms - start >= LETTER_FADE_MS)
+                     : ((ms - start_ms >= LETTER_FADE_MS)
                             ? 255
-                            : (uint8_t)(255 * (ms - start) / LETTER_FADE_MS));
+                            : (uint8_t)(255 * (ms - start_ms) / LETTER_FADE_MS));
     if (!la)
       continue;
-    int rise = ((255 - la) * 12) / 255;
+    int rise = ((255 - la) * 5) / 255;
     const glyph_aa_t *g = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
     int gw = g->width * FONT_SCALE, gh = g->height * FONT_SCALE;
     int bx = g_letter_x[i] + g->bearing_x * FONT_SCALE + g_letter_pad;
-    int by = (g_font->height - g->bearing_y) * FONT_SCALE + g_letter_pad + rise;
+    int by = (g_font->height - g->bearing_y) * FONT_SCALE +
+             g_letter_pad + rise;
     for (int dy = 0; dy < gh; dy++) {
       int py = by + dy;
-      if (py < 0 || py >= g_tb_h)
+      int sy = g_title_y + py;
+      if (py < 0 || py >= g_tb_h || sy < 0 || sy >= (int)g_h)
         continue;
-      int fy = g_title_y + py;
-      if (fy < 0 || fy >= (int)g_h)
-        continue;
-      uint32_t *dst_row = g_shadow + (uint64_t)fy * g_pitch + g_title_x;
+      uint32_t *dst_row = g_shadow + (uint64_t)sy * g_pitch;
       for (int dx = 0; dx < gw; dx++) {
         int px = bx + dx;
         if (px < 0 || px >= g_tb_w)
           continue;
-        uint32_t p = g_title_bm[py * g_tb_w + px], a = p >> 24;
+        int sx = g_title_x + px;
+        if (sx < 0 || sx >= (int)g_w)
+          continue;
+        uint32_t p = g_title_bm[py * g_tb_w + px];
+        uint32_t a = p >> 24;
         if (!a)
           continue;
         uint32_t ea = (a * la) / 255;
-        if (!ea)
-          continue;
-        dst_row[px] = blend_px((ea << 24) | (p & 0xFFFFFFu), dst_row[px]);
+        if (ea)
+          dst_row[sx] = blend_px((ea << 24) | (p & 0xFFFFFFu), dst_row[sx]);
       }
     }
   }
@@ -405,13 +416,18 @@ void boot_splash_begin_reveal(boot_splash_render_fn_t render_below) {
   }
   g_render_below = render_below;
   if (render_below) {
-    g_desktop_bm = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+    size_t fb_bytes = (size_t)g_pitch * g_h * sizeof(uint32_t);
+    g_desktop_bm = (uint32_t *)kmalloc(fb_bytes);
     if (g_desktop_bm) {
       render_below(g_shadow, g_w, g_h, g_pitch);
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_desktop_bm[i] = g_shadow[i];
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_shadow[i] = COL_BG;
+      for (uint32_t y = 0; y < g_h; y++) {
+        uint32_t *src = g_shadow + (uint64_t)y * g_pitch;
+        uint32_t *dst = g_desktop_bm + (uint64_t)y * g_pitch;
+        for (uint32_t x = 0; x < g_pitch; x++) {
+          dst[x] = src[x];
+          src[x] = COL_BG;
+        }
+      }
     }
   }
   g_prev_offset = 0;
@@ -452,7 +468,8 @@ int boot_splash_tick_reveal(void) {
 
 int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
                      uint32_t pitch_px) {
-  if (!fb || !width || !height || !pitch_px)
+  if (!fb || !width || !height || pitch_px < width ||
+      (size_t)pitch_px > (size_t)-1 / height / sizeof(uint32_t))
     return -1;
   g_fb = fb;
   g_w = width;
@@ -464,11 +481,15 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
     g_font = font_manager_get(FONT_ID_MONO);
   if (!g_font)
     return -1;
-  g_shadow = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+  size_t shadow_bytes = (size_t)g_pitch * g_h * sizeof(uint32_t);
+  g_shadow = (uint32_t *)kmalloc(shadow_bytes);
   if (!g_shadow)
     return -1;
-  for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-    g_shadow[i] = COL_BG;
+  for (uint32_t y = 0; y < g_h; y++) {
+    uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
+    for (uint32_t x = 0; x < g_pitch; x++)
+      row[x] = COL_BG;
+  }
 
   /* Handoff desde bootloader */
   g_phase = g_boot_splash_initial_phase ? g_boot_splash_initial_phase : 1;
@@ -483,7 +504,7 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   prerender_glow();
   int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
-  g_spin_cy = g_title_y + g_letter_pad + title_h + 70;
+  g_spin_cy = g_title_y + g_tb_h + 18 + SPIN_PAD;
   if (g_phase == 2) {
     g_last_tick = 0;
   } else {
