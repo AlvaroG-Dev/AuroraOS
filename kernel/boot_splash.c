@@ -34,7 +34,6 @@ static int g_font_scale = 4;
 
 #define COL_BG 0xFF000000u
 #define COL_TITLE 0xFFE8F0FFu
-#define COL_GLOW 0xFF3E70C0u
 #define COL_SPINNER 0xFF5AB0FFu
 #define COL_DESKTOP 0xFF101828u
 
@@ -175,8 +174,6 @@ static inline uint8_t bilinear(const glyph_aa_t *g, int dx, int dy, int scale) {
   return (uint8_t)((a0 * (65536 - fy) + a1 * fy) >> 16);
 }
 
-static uint32_t *g_glow_bm = NULL;
-
 static void prerender_title(void) {
   if (!g_font)
     return;
@@ -231,51 +228,6 @@ static void prerender_title(void) {
   g_title_x = ((int)g_w - total_w) / 2 - g_letter_pad;
   int layout_h = g_tb_h + 18 + 2 * SPIN_PAD;
   g_title_y = ((int)g_h - layout_h) / 2;
-}
-
-static void prerender_glow(void) {
-  /* Minimalist splash: omit the blur/glow pass to save memory and CPU. */
-  g_glow_bm = NULL;
-  return;
-  if (!g_title_bm)
-    return;
-  g_glow_bm = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
-  if (!g_glow_bm)
-    return;
-  uint32_t *tmp = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
-  if (!tmp)
-    return;
-  const int R = 6, N = 2 * R + 1;
-  for (int y = 0; y < g_tb_h; y++) {
-    uint32_t acc = 0;
-    for (int x = -R; x <= R; x++)
-      if (x >= 0 && x < g_tb_w)
-        acc += g_title_bm[y * g_tb_w + x] >> 24;
-    for (int x = 0; x < g_tb_w; x++) {
-      tmp[y * g_tb_w + x] = acc / N;
-      int xa = x - R, xb = x + R + 1;
-      if (xa >= 0 && xa < g_tb_w)
-        acc -= g_title_bm[y * g_tb_w + xa] >> 24;
-      if (xb >= 0 && xb < g_tb_w)
-        acc += g_title_bm[y * g_tb_w + xb] >> 24;
-    }
-  }
-  for (int x = 0; x < g_tb_w; x++) {
-    uint32_t acc = 0;
-    for (int y = -R; y <= R; y++)
-      if (y >= 0 && y < g_tb_h)
-        acc += tmp[y * g_tb_w + x];
-    for (int y = 0; y < g_tb_h; y++) {
-      uint32_t a = acc / N;
-      if (a)
-        g_glow_bm[y * g_tb_w + x] = (a << 24) | (COL_GLOW & 0xFFFFFFu);
-      int ya = y - R, yb = y + R + 1;
-      if (ya >= 0 && ya < g_tb_h)
-        acc -= tmp[ya * g_tb_w + x];
-      if (yb >= 0 && yb < g_tb_h)
-        acc += tmp[yb * g_tb_w + x];
-    }
-  }
 }
 
 static void draw_title_frame(uint64_t ms) {
@@ -501,8 +453,6 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   prerender_title();
   if (!g_title_bm)
     return -1;
-  prerender_glow();
-  int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
   g_spin_cy = g_title_y + g_tb_h + 18 + SPIN_PAD;
   if (g_phase == 2) {
