@@ -9,14 +9,14 @@ extern void bios_log(const char *fmt, ...);
 
 static uint8_t *g_fb = (uint8_t *)0;
 static uint32_t g_w, g_h, g_pitch, g_bpp;
-static uint32_t g_start_tsc = 0;
-static uint32_t g_last_draw = 0;
+static uint64_t g_start_tsc = 0;
+static uint64_t g_last_draw = 0;
 static int g_active = 0;
 
-static inline uint32_t rdtsc_lo(void) {
-  uint32_t lo;
-  __asm__ volatile("rdtsc" : "=a"(lo) : : "edx");
-  return lo;
+static inline uint64_t rdtsc_now(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
 }
 
 /* Escribe un pixel en la posición (x, y). Soporta 24 y 32 bpp. */
@@ -35,22 +35,40 @@ static void put_px(int x, int y, uint32_t rgb) {
 }
 
 static void fill_rect(int x, int y, int w, int h, uint32_t rgb) {
-  for (int yy = 0; yy < h; yy++)
-    for (int xx = 0; xx < w; xx++)
-      put_px(x + xx, y + yy, rgb);
+  if (!g_fb || w <= 0 || h <= 0)
+    return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x >= (int)g_w || y >= (int)g_h || w <= 0 || h <= 0)
+    return;
+  if (w > (int)g_w - x) w = (int)g_w - x;
+  if (h > (int)g_h - y) h = (int)g_h - y;
+  if (g_bpp == 32) {
+    for (int yy = 0; yy < h; yy++) {
+      uint32_t *row = (uint32_t *)(g_fb + (uint64_t)(y + yy) * g_pitch) + x;
+      for (int xx = 0; xx < w; xx++) row[xx] = rgb;
+    }
+  } else if (g_bpp == 24) {
+    for (int yy = 0; yy < h; yy++) {
+      uint8_t *row = g_fb + (uint64_t)(y + yy) * g_pitch + (uint64_t)x * 3;
+      for (int xx = 0; xx < w; xx++) {
+        row[xx * 3 + 0] = rgb & 0xFF;
+        row[xx * 3 + 1] = (rgb >> 8) & 0xFF;
+        row[xx * 3 + 2] = (rgb >> 16) & 0xFF;
+      }
+    }
+  }
 }
 
-/* 12 puntos precalculados, R = 26 */
-static const int16_t k_dx[12] = {26,  22,  13,  0, -13, -22,
-                                 -26, -22, -13, 0, 13,  22};
-static const int16_t k_dy[12] = {0, 13,  22,  26,  22,  13,
-                                 0, -13, -22, -26, -22, -13};
+/* Minimal 12-dot spinner, radius 18. */
+static const int16_t k_dx[12] = {18, 16, 9, 0, -9, -16, -18, -16, -9, 0, 9, 16};
+static const int16_t k_dy[12] = {0, 9, 16, 18, 16, 9, 0, -9, -16, -18, -16, -9};
 
 static void draw_frame(uint32_t ms) {
   int cx = (int)g_w / 2;
   int cy = (int)g_h / 2;
-  int R = 26 + 5 + 4; /* pad */
-  const int dot_r = 4;
+  const int dot_r = 2;
+  int R = 18 + dot_r + 4; /* clipped dirty rectangle */
   const int dots = 12;
   const uint32_t rot_ms = 1100;
 
@@ -87,7 +105,7 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
-  g_start_tsc = rdtsc_lo();
+  g_start_tsc = rdtsc_now();
   g_last_draw = 0;
   g_active = 1;
 
@@ -101,12 +119,12 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
 void bios_splash_tick(void) {
   if (!g_active)
     return;
-  uint32_t now = rdtsc_lo();
-  /* ~2 GHz asumido: 16 ms ≈ 32 M ciclos. Aproximación sin TSC calibrado. */
-  if (now - g_last_draw < 32000000u)
+  uint64_t now = rdtsc_now();
+  /* 60 Hz throttle; 64-bit TSC avoids the ~2.1 s 32-bit wraparound. */
+  if (now - g_last_draw < 32000000ULL)
     return;
   g_last_draw = now;
-  uint32_t ms = (now - g_start_tsc) / 2000000u;
+  uint32_t ms = (uint32_t)((now - g_start_tsc) / 2000000ULL);
   draw_frame(ms);
 }
 
