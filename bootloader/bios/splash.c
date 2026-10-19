@@ -35,9 +35,61 @@ static void put_px(int x, int y, uint32_t rgb) {
 }
 
 static void fill_rect(int x, int y, int w, int h, uint32_t rgb) {
-  for (int yy = 0; yy < h; yy++)
-    for (int xx = 0; xx < w; xx++)
-      put_px(x + xx, y + yy, rgb);
+  if (w <= 0 || h <= 0) return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)g_w) w = (int)g_w - x;
+  if (y + h > (int)g_h) h = (int)g_h - y;
+  if (w <= 0 || h <= 0) return;
+  for (int yy = y; yy < y + h; yy++) {
+    if (g_bpp == 32) {
+      uint32_t *row = (uint32_t *)(g_fb + (uint64_t)yy * g_pitch + (uint64_t)x * 4);
+      for (int xx = 0; xx < w; xx++) row[xx] = rgb;
+    } else {
+      uint8_t *row = g_fb + (uint64_t)yy * g_pitch + (uint64_t)x * 3;
+      uint8_t b = (uint8_t)rgb, g = (uint8_t)(rgb >> 8), r = (uint8_t)(rgb >> 16);
+      for (int xx = 0; xx < w; xx++) { row[xx*3] = b; row[xx*3+1] = g; row[xx*3+2] = r; }
+    }
+  }
+}
+static uint32_t bg_color(uint32_t y) {
+  uint32_t t = (g_h > 1) ? (y * 255u) / (g_h - 1u) : 0;
+  uint32_t r = 6u + (5u * t) / 255u;
+  uint32_t g = 10u + (10u * t) / 255u;
+  uint32_t b = 19u + (19u * t) / 255u;
+  return (r << 16) | (g << 8) | b;
+}
+static void fill_bg_rect(int x, int y, int w, int h) {
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)g_w) w = (int)g_w - x;
+  if (y + h > (int)g_h) h = (int)g_h - y;
+  if (w <= 0 || h <= 0) return;
+  for (int yy = y; yy < y + h; yy++) fill_rect(x, yy, w, 1, bg_color((uint32_t)yy));
+}
+static void draw_background(void) {
+  for (uint32_t y = 0; y < g_h; y++) fill_rect(0, (int)y, (int)g_w, 1, bg_color(y));
+}
+static void draw_segment(int x0, int y0, int x1, int y1, uint32_t color) {
+  int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x0 < x1 ? 1 : -1;
+  int dy = y0 > y1 ? y1 - y0 : y0 - y1, sy = y0 < y1 ? 1 : -1;
+  dy = -dy;
+  int err = dx + dy;
+  for (;;) {
+    fill_rect(x0 - 1, y0 - 1, 3, 3, color);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+static void draw_logo(void) {
+  int cx = (int)g_w / 2, cy = (int)g_h / 2 - 55;
+  if (cy < 36) cy = 36;
+  draw_segment(cx - 24, cy + 14, cx - 8, cy - 16, 0x3B82F6u);
+  draw_segment(cx - 8, cy - 16, cx + 8, cy + 14, 0x60D5FFu);
+  draw_segment(cx + 2, cy + 14, cx + 18, cy - 16, 0x8B9DFFu);
+  draw_segment(cx + 18, cy - 16, cx + 28, cy + 4, 0x3B82F6u);
 }
 
 /* 12 puntos precalculados, R = 26 */
@@ -48,14 +100,14 @@ static const int16_t k_dy[12] = {0, 13,  22,  26,  22,  13,
 
 static void draw_frame(uint32_t ms) {
   int cx = (int)g_w / 2;
-  int cy = (int)g_h / 2;
+  int cy = (int)g_h / 2 + 60;
   int R = 26 + 5 + 4; /* pad */
   const int dot_r = 4;
   const int dots = 12;
   const uint32_t rot_ms = 1100;
 
   /* caja de fondo */
-  fill_rect(cx - R, cy - R, 2 * R, 2 * R, 0x000000);
+  fill_bg_rect(cx - R, cy - R, 2 * R, 2 * R);
 
   int head = (int)((ms / (rot_ms / dots)) % dots);
   for (int i = 0; i < dots; i++) {
@@ -91,8 +143,9 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
   g_last_draw = 0;
   g_active = 1;
 
-  /* Fondo negro + primer frame */
-  fill_rect(0, 0, (int)w, (int)h, 0x000000);
+  /* Fondo degradado y marca vectorial; solo se renderiza una vez. */
+  draw_background();
+  draw_logo();
   draw_frame(0);
   g_last_draw = g_start_tsc;
   return 0;
