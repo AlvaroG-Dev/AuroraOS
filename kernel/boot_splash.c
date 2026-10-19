@@ -223,6 +223,9 @@ static void prerender_glow(void) {
   g_glow_bm = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
   if (!g_glow_bm)
     return;
+  /* kmalloc may return dirty memory; clear transparent pixels explicitly. */
+  for (int i = 0; i < g_tb_w * g_tb_h; i++)
+    g_glow_bm[i] = 0;
   uint32_t *tmp = (uint32_t *)kmalloc((size_t)g_tb_w * g_tb_h * 4);
   if (!tmp)
     return;
