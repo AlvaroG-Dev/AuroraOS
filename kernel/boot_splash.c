@@ -282,7 +282,7 @@ static void draw_caption(void) {
         int px = bx + gx;
         if (px < 0 || px >= (int)g_w) continue;
         uint32_t a = g->bitmap[gy * g->width + gx] / 2;
-        if (a) row[px] = blend_px((a << 24) | 0xFFB5C6DFu, row[px]);
+        if (a) row[px] = blend_px((a << 24) | 0x00B5C6DFu, row[px]);
       }
     }
     x += g->advance;
