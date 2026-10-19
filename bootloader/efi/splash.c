@@ -30,10 +30,10 @@ static int g_active = 0;
 static int g_spin_cx, g_spin_cy;
 
 /* 12 puntos precalculados, R=18 */
-static const int16_t k_spin_dx[12] = {18,  16,  9,  0, -9, -16,
-                                      -18, -16, -9, 0, 9,  16};
-static const int16_t k_spin_dy[12] = {0, 9,  16,  18,  16,  9,
-                                      0, -9, -16, -18, -16, -9};
+static const int16_t k_spin_dx[12] = {20, 17, 10, 0, -10, -17,
+                                      -20, -17, -10, 0, 10, 17};
+static const int16_t k_spin_dy[12] = {0, 10, 17, 20, 17, 10,
+                                      0, -10, -17, -20, -17, -10};
 
 static UINT64 rdtsc_now(void) {
   UINT32 lo, hi;
