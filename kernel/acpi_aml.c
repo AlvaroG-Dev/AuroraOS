@@ -801,6 +801,159 @@ static size_t skip_predicate(const uint8_t *code, size_t len, size_t pos) {
   return 0;
 }
 
+
+// Consume AML executable terms without evaluating them. This is needed when
+// parsing module-level If/While blocks: treating Store/Add/etc. as a data
+// object advances one byte and makes operand bytes look like opcodes.
+static int aml_skip_term(parse_ctx_t *c, size_t limit, unsigned depth);
+
+static int aml_skip_supername(parse_ctx_t *c, size_t limit, unsigned depth) {
+  if (c->pos >= limit || c->pos >= c->len || depth > 32) return 0;
+  uint8_t op = c->data[c->pos];
+  if ((op >= AML_LOCAL0_OP && op <= AML_LOCAL7_OP) ||
+      (op >= AML_ARG0_OP && op <= AML_ARG6_OP) || op == 0x00) {
+    c->pos++;
+    return 1;
+  }
+  if (op == AML_EXT_OP_PREFIX && c->pos + 1 < limit &&
+      c->data[c->pos + 1] == AML_EXT_DEBUG) {
+    c->pos += 2;
+    return 1;
+  }
+  if ((op >= 'A' && op <= 'Z') || op == '_' || op == '\\' || op == '^') {
+    char nm[256];
+    return read_namestring(c->data, limit, &c->pos, nm, sizeof(nm)) >= 0;
+  }
+  return aml_skip_term(c, limit, depth + 1);
+}
+
+static int aml_skip_term(parse_ctx_t *c, size_t limit, unsigned depth) {
+  if (c->pos >= limit || c->pos >= c->len || depth > 32) return 0;
+  size_t start = c->pos;
+  uint8_t op = c->data[c->pos];
+
+  if (op == AML_ZERO_OP || op == AML_ONE_OP || op == AML_ONES_OP) {
+    c->pos++; return 1;
+  }
+  if (op == AML_BYTE_PREFIX || op == AML_WORD_PREFIX ||
+      op == AML_DWORD_PREFIX || op == AML_QWORD_PREFIX) {
+    size_t n = op == AML_BYTE_PREFIX ? 2 : op == AML_WORD_PREFIX ? 3 :
+               op == AML_DWORD_PREFIX ? 5 : 9;
+    if (start + n > limit || start + n > c->len) return 0;
+    c->pos += n; return 1;
+  }
+  if (op == AML_STRING_PREFIX) {
+    c->pos++;
+    while (c->pos < limit && c->pos < c->len && c->data[c->pos]) c->pos++;
+    if (c->pos < limit && c->pos < c->len) c->pos++;
+    return 1;
+  }
+  if (op == AML_BUFFER_OP || op == AML_PACKAGE_OP || op == AML_VAR_PACKAGE_OP) {
+    c->pos++;
+    size_t pkg_start = c->pos;
+    uint32_t pkglen = decode_pkglength(c->data, limit, &c->pos);
+    if (!pkglen || pkg_start > limit || pkglen > limit - pkg_start) return 0;
+    c->pos = pkg_start + pkglen; return 1;
+  }
+
+  if ((op >= 'A' && op <= 'Z') || op == '_' || op == '\\' || op == '^') {
+    char nm[256];
+    if (read_namestring(c->data, limit, &c->pos, nm, sizeof(nm)) < 0) return 0;
+    char resolved[512];
+    resolve_name(c->scope, nm, resolved, sizeof(resolved));
+    aml_node_t *n = lookup_path_abs(resolved);
+    if (n && n->value && n->value->type == AML_METHOD) {
+      for (int i = 0; i < n->value->method.arg_count; ++i)
+        if (!aml_skip_term(c, limit, depth + 1)) return 0;
+    }
+    return c->pos > start;
+  }
+
+  switch (op) {
+  case AML_STORE_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_REF_OF_OP: case AML_INCREMENT_OP: case AML_DECREMENT_OP:
+  case AML_SIZE_OF_OP:
+    c->pos++; return aml_skip_supername(c, limit, depth + 1);
+  case AML_ADD_OP: case AML_CONCAT_OP: case AML_SUBTRACT_OP:
+  case AML_MULTIPLY_OP: case AML_SHIFT_LEFT_OP: case AML_SHIFT_RIGHT_OP:
+  case AML_AND_OP: case AML_NAND_OP: case AML_OR_OP: case AML_NOR_OP:
+  case AML_XOR_OP: case AML_MOD_OP: case AML_CONCAT_RES_OP: case AML_INDEX_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_DIVIDE_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_NOT_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_LNOT_OP:
+    c->pos++; return aml_skip_term(c, limit, depth + 1);
+  case AML_LAND_OP: case AML_LOR_OP: case AML_LEQUAL_OP:
+  case AML_LGREATER_OP: case AML_LLESS_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1);
+  case AML_FIND_SET_LEFT: case AML_FIND_SET_RIGHT:
+  case AML_TO_BUFFER_OP: case AML_TO_DECSTRING_OP: case AML_TO_HEXSTRING_OP:
+  case AML_TO_INTEGER_OP: case AML_COPY_OBJECT_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_TO_STRING_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_MID_OP:
+    c->pos++;
+    return aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1) &&
+           aml_skip_supername(c, limit, depth + 1);
+  case AML_RETURN_OP:
+    c->pos++; return aml_skip_term(c, limit, depth + 1);
+  case AML_NOTIFY_OP:
+    c->pos++;
+    return aml_skip_supername(c, limit, depth + 1) &&
+           aml_skip_term(c, limit, depth + 1);
+  case AML_CONTINUE_OP: case AML_BREAK_OP: case AML_NOOP_OP:
+  case AML_BREAKPOINT_OP:
+    c->pos++; return 1;
+  case AML_EXT_OP_PREFIX: {
+    c->pos++;
+    if (c->pos >= limit) return 0;
+    uint8_t ext = c->data[c->pos++];
+    switch (ext) {
+    case AML_EXT_STALL: case AML_EXT_SLEEP:
+      return aml_skip_term(c, limit, depth + 1);
+    case AML_EXT_SIGNAL: case AML_EXT_RESET: case AML_EXT_RELEASE:
+      return aml_skip_supername(c, limit, depth + 1);
+    case AML_EXT_WAIT:
+      return aml_skip_supername(c, limit, depth + 1) &&
+             aml_skip_term(c, limit, depth + 1);
+    case AML_EXT_ACQUIRE:
+      if (!aml_skip_supername(c, limit, depth + 1) || c->pos + 2 > limit)
+        return 0;
+      c->pos += 2; return 1;
+    case AML_EXT_REVISION: case AML_EXT_DEBUG: case AML_EXT_TIMER:
+      return 1;
+    default: return 0;
+    }
+  }
+  default:
+    return 0;
+  }
+}
+
 static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
   int guard = 0;
   while (c->pos < end_pos && c->pos < c->len) {
@@ -1126,19 +1279,15 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       break;
 
     default: {
-      // [FIX CRÍTICO] En lugar de abortar el scope entero, usamos el
-      // parser de términos. Si es un Package (0x12), Buffer (0x11) o
-      // un NameString (A-Z, _, \, ^), lo consumirá correctamente.
+      // Los bloques If/While pueden contener TermOps ejecutables. No
+      // pasarlos por parse_data_object: no son DataRefObjects.
       size_t before = c->pos;
-      parse_term_arg(c);
-
-      // Si parse_term_arg no movió el puntero, significa que es un
-      // opcode totalmente desconocido. Saltamos 1 byte para evitar
-      // un bucle infinito y seguimos buscando.
-      if (c->pos == before) {
-        LOG_WARN("[AML] Scope: opcode desconocido 0x%02x @ 0x%zx, saltando...",
-                 op, c->pos - 1);
-        c->pos++;
+      if (!aml_skip_term(c, end_pos, 0) || c->pos <= before ||
+          c->pos > end_pos) {
+        LOG_WARN("[AML] Scope: término AML no soportado 0x%02x @ 0x%zx; "
+                 "se omite el resto del paquete",
+                 op, before);
+        c->pos = end_pos;
       }
       break;
     }
