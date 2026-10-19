@@ -9,8 +9,8 @@ extern void bios_log(const char *fmt, ...);
 
 static uint8_t *g_fb = (uint8_t *)0;
 static uint32_t g_w, g_h, g_pitch, g_bpp;
-static uint64_t g_start_tsc = 0;
 static uint64_t g_last_draw = 0;
+static uint32_t g_elapsed_ms = 0;
 static int g_active = 0;
 
 static inline uint64_t rdtsc_now(void) {
@@ -88,14 +88,14 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
-  g_start_tsc = rdtsc_now();
   g_last_draw = 0;
+  g_elapsed_ms = 0;
   g_active = 1;
 
   /* Fondo negro + primer frame */
   fill_rect(0, 0, (int)w, (int)h, 0x000000);
   draw_frame(0);
-  g_last_draw = g_start_tsc;
+  g_last_draw = rdtsc_now();
   return 0;
 }
 
@@ -107,8 +107,9 @@ void bios_splash_tick(void) {
   if (now - g_last_draw < 32000000ULL)
     return;
   g_last_draw = now;
-  uint32_t ms = (uint32_t)((now - g_start_tsc) / 2000000ULL);
-  draw_frame(ms);
+  /* Fixed animation step: avoid __udivdi3 in the BIOS stage 2. */
+  g_elapsed_ms += 16;
+  draw_frame(g_elapsed_ms);
 }
 
 void bios_splash_done(void) {
