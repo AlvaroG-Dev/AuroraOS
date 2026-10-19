@@ -109,16 +109,11 @@ static void sh_fill(int x, int y, int w, int h, uint32_t c) {
 }
 
 static uint32_t background_color(int x, int y) {
-  int cx = (int)g_w / 2, cy = (int)g_h / 2;
-  int dx = (x > cx) ? x - cx : cx - x, dy = (y > cy) ? y - cy : cy - y;
-  int nx = (dx * 255) / (cx ? cx : 1), ny = (dy * 255) / (cy ? cy : 1);
-  if (nx > 255) nx = 255;
-  if (ny > 255) ny = 255;
-  int glow = ((255 - nx) * (255 - ny)) / 255;
+  (void)x;
   int t = (g_h > 1) ? (y * 255) / (g_h - 1) : 0;
-  uint32_t r = 5 + (t * 3) / 255 + (glow * 2) / 255;
-  uint32_t g = 9 + (t * 7) / 255 + (glow * 7) / 255;
-  uint32_t b = 20 + (t * 16) / 255 + (glow * 18) / 255;
+  uint32_t r = 6 + (t * 3) / 255;
+  uint32_t g = 10 + (t * 6) / 255;
+  uint32_t b = 19 + (t * 15) / 255;
   return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 static void sh_restore_bg(int x, int y, int w, int h) {
@@ -130,13 +125,15 @@ static void sh_restore_bg(int x, int y, int w, int h) {
   if (w <= 0 || h <= 0) return;
   for (int yy = y; yy < y + h; yy++) {
     uint32_t *row = g_shadow + (uint64_t)yy * g_pitch + x;
-    for (int xx = 0; xx < w; xx++) row[xx] = background_color(x + xx, yy);
+    uint32_t color = background_color(x, yy);
+    for (int xx = 0; xx < w; xx++) row[xx] = color;
   }
 }
 static void draw_background(void) {
   for (uint32_t y = 0; y < g_h; y++) {
     uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
-    for (uint32_t x = 0; x < g_w; x++) row[x] = background_color((int)x, (int)y);
+    uint32_t color = background_color(0, (int)y);
+    for (uint32_t x = 0; x < g_w; x++) row[x] = color;
     for (uint32_t x = g_w; x < g_pitch; x++) row[x] = COL_BG;
   }
 }
