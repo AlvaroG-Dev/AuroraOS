@@ -9,14 +9,14 @@ extern void bios_log(const char *fmt, ...);
 
 static uint8_t *g_fb = (uint8_t *)0;
 static uint32_t g_w, g_h, g_pitch, g_bpp;
-static uint32_t g_start_tsc = 0;
-static uint32_t g_last_draw = 0;
+static uint64_t g_start_tsc = 0;
+static uint64_t g_last_draw = 0;
 static int g_active = 0;
 
-static inline uint32_t rdtsc_lo(void) {
-  uint32_t lo;
-  __asm__ volatile("rdtsc" : "=a"(lo) : : "edx");
-  return lo;
+static inline uint64_t rdtsc_now(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
 }
 
 /* Escribe un pixel en la posición (x, y). Soporta 24 y 32 bpp. */
@@ -139,7 +139,7 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
-  g_start_tsc = rdtsc_lo();
+  g_start_tsc = rdtsc_now();
   g_last_draw = 0;
   g_active = 1;
 
@@ -154,12 +154,12 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
 void bios_splash_tick(void) {
   if (!g_active)
     return;
-  uint32_t now = rdtsc_lo();
-  /* ~2 GHz asumido: 16 ms ≈ 32 M ciclos. Aproximación sin TSC calibrado. */
-  if (now - g_last_draw < 32000000u)
+  uint64_t now = rdtsc_now();
+  /* ~2 GHz asumido: 16 ms ≈ 32 M ciclos. RDTSC de 64 bits evita wrap cada 2 s. */
+  if (now - g_last_draw < 32000000ULL)
     return;
   g_last_draw = now;
-  uint32_t ms = (now - g_start_tsc) / 2000000u;
+  uint32_t ms = (uint32_t)((now - g_start_tsc) / 2000000ULL);
   draw_frame(ms);
 }
 
