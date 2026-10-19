@@ -536,6 +536,11 @@ static void parse_field_list(parse_ctx_t *c, size_t end_pos);
 // ===========================================================================
 // Parseo de elementos sueltos (data objects)
 // ===========================================================================
+// Forward declaration: method invocations inside data-object expressions must
+// consume their encoded arguments so argument bytes are not reinterpreted as
+// independent AML opcodes by the surrounding TermList parser.
+static int aml_skip_term(parse_ctx_t *c, size_t limit, unsigned depth);
+
 static aml_object_t *parse_data_object(parse_ctx_t *c) {
   if (c->pos >= c->len)
     return make_integer(0);
@@ -704,6 +709,21 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
       char resolved[512];
       resolve_name(c->scope, name, resolved, sizeof(resolved));
       aml_node_t *n = lookup_path_abs(resolved);
+      if (n && n->value && n->value->type == AML_METHOD) {
+        // A method invocation is NameString followed by ArgCount TermArgs.
+        // Leaving those arguments unconsumed was the source of many bogus
+        // "unknown opcode" warnings (e.g. ASCII bytes from string arguments).
+        for (int i = 0; i < n->value->method.arg_count; ++i) {
+          size_t before = c->pos;
+          if (!aml_skip_term(c, c->len, 0) || c->pos <= before) {
+            LOG_WARN("[AML] no se pudieron consumir argumentos del método %s",
+                     name);
+            c->pos = c->len;
+            break;
+          }
+        }
+        return n->value;
+      }
       if (n && n->value)
         return n->value;
       return make_integer(0);
