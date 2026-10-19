@@ -100,7 +100,7 @@ static void draw_background(void) {
 static void draw_segment(int x0, int y0, int x1, int y1, UINT32 color) {
   int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x0 < x1 ? 1 : -1;
   int dy = y0 > y1 ? y1 - y0 : y0 - y1, sy = y0 < y1 ? 1 : -1;
-  dy = -dy;
+
   int err = dx + dy;
   for (;;) {
     fill_rect(x0 - 1, y0 - 1, 3, 3, color);
