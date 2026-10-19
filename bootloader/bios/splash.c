@@ -9,14 +9,16 @@ extern void bios_log(const char *fmt, ...);
 
 static uint8_t *g_fb = (uint8_t *)0;
 static uint32_t g_w, g_h, g_pitch, g_bpp;
-static uint64_t g_start_tsc = 0;
-static uint64_t g_last_draw = 0;
+static uint32_t g_last_tsc_lo = 0;
+static uint32_t g_tick_remainder = 0;
+static uint32_t g_elapsed_ms = 0;
 static int g_active = 0;
 
-static inline uint64_t rdtsc_now(void) {
-  uint32_t lo, hi;
-  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-  return ((uint64_t)hi << 32) | lo;
+/* BIOS stage2 links without libgcc: keep timing arithmetic 32-bit. */
+static inline uint32_t rdtsc_lo(void) {
+  uint32_t lo;
+  __asm__ volatile("rdtsc" : "=a"(lo) : : "edx");
+  return lo;
 }
 
 /* Escribe un pixel en la posición (x, y). Soporta 24 y 32 bpp. */
@@ -105,27 +107,33 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
-  g_start_tsc = rdtsc_now();
-  g_last_draw = 0;
+  g_last_tsc_lo = rdtsc_lo();
+  g_tick_remainder = 0;
+  g_elapsed_ms = 0;
   g_active = 1;
 
   /* Fondo negro + primer frame */
   fill_rect(0, 0, (int)w, (int)h, 0x000000);
   draw_frame(0);
-  g_last_draw = g_start_tsc;
+  g_last_tsc_lo = rdtsc_lo();
   return 0;
 }
 
 void bios_splash_tick(void) {
   if (!g_active)
     return;
-  uint64_t now = rdtsc_now();
-  /* 60 Hz throttle; 64-bit TSC avoids the ~2.1 s 32-bit wraparound. */
-  if (now - g_last_draw < 32000000ULL)
+  uint32_t now = rdtsc_lo();
+  /* Unsigned subtraction handles TSC low-word wrap between adjacent ticks. */
+  uint32_t delta = now - g_last_tsc_lo;
+  if (delta < 32000000u)
     return;
-  g_last_draw = now;
-  uint32_t ms = (uint32_t)((now - g_start_tsc) / 2000000ULL);
-  draw_frame(ms);
+  g_last_tsc_lo = now;
+
+  /* Carry fractional milliseconds without 64-bit division/libgcc helpers. */
+  uint32_t accumulated = g_tick_remainder + delta;
+  g_elapsed_ms += accumulated / 2000000u;
+  g_tick_remainder = accumulated % 2000000u;
+  draw_frame(g_elapsed_ms);
 }
 
 void bios_splash_done(void) {
