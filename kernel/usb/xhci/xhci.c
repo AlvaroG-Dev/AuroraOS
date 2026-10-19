@@ -540,7 +540,7 @@ void xhci_hcd_free_device(usb_device_t *dev) {
   if (!dev || !dev->hc_priv)
     return;
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
-  for (int i = 0; i < 15; i++) {
+  for (int i = 0; i < 30; i++) {
     if (p->eps[i].stream_ctx.virt)
       usb_dma_free(&p->eps[i].stream_ctx);
     if (p->eps[i].configured)
@@ -563,7 +563,9 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
   int dir_in = (ep->addr & 0x80) ? 1 : 0;
   if (ep_num == 0 || ep_num > 15)
     return -EINVAL;
-  xhci_ep_state_t *st = &p->eps[ep_num - 1];
+  // USB endpoint addresses include direction. Endpoint N IN and N OUT
+  // are distinct xHCI endpoints and must not share software state.
+  xhci_ep_state_t *st = &p->eps[2 * (ep_num - 1) + dir_in];
   if (st->configured) {
     ep->hc_ep = st;
     return 0;
@@ -616,9 +618,11 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
     memset(sc, 0, XHCI_UAS_STREAM_COUNT * sizeof(*sc));
     uint64_t stream_deq = xhci_ring_trb_phys(&st->ring, 0);
     for (uint32_t sid = 1; sid < XHCI_UAS_STREAM_COUNT; sid++) {
-      sc[sid].param = XHCI_EP_DEQ_DCS | XHCI_STREAM_CTX_SCT_PRIMARY;
-      sc[sid].status = (uint32_t)(stream_deq & 0xFFFFFFFFu);
-      sc[sid].control = (uint32_t)(stream_deq >> 32);
+      // Stream Context Entry layout: DWORDs 0-1 are the dequeue pointer
+      // (with DCS in bit 0), DWORD 2 is reserved, DWORD 3 contains SCT.
+      sc[sid].param = stream_deq | XHCI_EP_DEQ_DCS;
+      sc[sid].status = 0;
+      sc[sid].control = XHCI_STREAM_CTX_SCT_PRIMARY;
     }
     usb_dma_sync(&st->stream_ctx, USB_DMA_TO_DEVICE);
     st->has_streams = 1;
