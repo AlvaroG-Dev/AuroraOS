@@ -18,6 +18,18 @@ static inline uint64_t rdtsc_now(void) {
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
+/* División u64/u32 sin __udivdi3: el stage2 BIOS se enlaza sin libgcc. */
+static uint32_t ticks_to_ms(uint64_t ticks) {
+  uint32_t quotient = 0, remainder = 0;
+  for (int bit = 63; bit >= 0; --bit) {
+    remainder = (remainder << 1) | (uint32_t)((ticks >> bit) & 1u);
+    if (remainder >= 2000000u) {
+      remainder -= 2000000u;
+      if (bit < 32) quotient |= (uint32_t)1u << bit;
+    }
+  }
+  return quotient;
+}
 
 /* Escribe un pixel en la posición (x, y). Soporta 24 y 32 bpp. */
 static void put_px(int x, int y, uint32_t rgb) {
@@ -159,7 +171,7 @@ void bios_splash_tick(void) {
   if (now - g_last_draw < 32000000ULL)
     return;
   g_last_draw = now;
-  uint32_t ms = (uint32_t)((now - g_start_tsc) / 2000000ULL);
+  uint32_t ms = ticks_to_ms(now - g_start_tsc);
   draw_frame(ms);
 }
 
