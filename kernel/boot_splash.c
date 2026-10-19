@@ -36,10 +36,10 @@ static int g_font_scale = 4;
 #define COL_SPINNER 0xFF5AB0FFu
 #define COL_DESKTOP 0xFF101828u
 
-static const int16_t k_spin_dx[12] = {18,  16,  9,  0, -9, -16,
-                                      -18, -16, -9, 0, 9,  16};
-static const int16_t k_spin_dy[12] = {0, 9,  16,  18,  16,  9,
-                                      0, -9, -16, -18, -16, -9};
+static const int16_t k_spin_dx[12] = {20, 17, 10, 0, -10, -17,
+                                      -20, -17, -10, 0, 10, 17};
+static const int16_t k_spin_dy[12] = {0, 10, 17, 20, 17, 10,
+                                      0, -10, -17, -20, -17, -10};
 
 static uint32_t *g_fb = NULL;
 static uint32_t g_w = 0, g_h = 0, g_pitch = 0;
