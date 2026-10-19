@@ -553,7 +553,7 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   prerender_glow();
   int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
-  g_spin_cy = g_title_y + g_letter_pad + title_h + 70;
+  g_spin_cy = g_title_y + g_letter_pad + title_h + 100;
   sh_blit(0, 0, (int)g_w, (int)g_h);
   draw_title_frame(g_boot_splash_initial_ms);
   if (g_phase >= 2) draw_spinner_frame(g_boot_splash_initial_ms);
