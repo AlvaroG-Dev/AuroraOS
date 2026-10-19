@@ -11,7 +11,9 @@ extern EFI_BOOT_SERVICES *gBS;
 
 #define TITLE_STR "AuroraOS"
 #define TITLE_LEN 8
-#define FONT_SCALE 4 /* Tamaño ajustado */
+#define FONT_SCALE g_font_scale
+static int g_font_scale = 4;
+static int g_title_y = 0;
 #define LETTER_FADE_MS 210
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
@@ -25,6 +27,7 @@ extern EFI_BOOT_SERVICES *gBS;
 static uint8_t *g_fb = NULL;
 static UINT32 g_w, g_h, g_pitch, g_bpp;
 static UINT64 g_start = 0, g_last = 0;
+static UINT64 g_tsc_hz = 2000000000ULL;
 static int g_active = 0;
 static int g_spin_cx, g_spin_cy;
 
@@ -55,9 +58,29 @@ static void put_px(int x, int y, UINT32 rgb) {
 }
 
 static void fill_rect(int x, int y, int w, int h, UINT32 rgb) {
-  for (int yy = 0; yy < h; yy++)
-    for (int xx = 0; xx < w; xx++)
-      put_px(x + xx, y + yy, rgb);
+  if (!g_fb || w <= 0 || h <= 0)
+    return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x >= (int)g_w || y >= (int)g_h || w <= 0 || h <= 0)
+    return;
+  if (w > (int)g_w - x) w = (int)g_w - x;
+  if (h > (int)g_h - y) h = (int)g_h - y;
+  if (g_bpp == 32) {
+    for (int yy = 0; yy < h; yy++) {
+      UINT32 *row = (UINT32 *)(g_fb + (UINT64)(y + yy) * g_pitch) + x;
+      for (int xx = 0; xx < w; xx++) row[xx] = rgb;
+    }
+  } else if (g_bpp == 24) {
+    for (int yy = 0; yy < h; yy++) {
+      UINT8 *row = g_fb + (UINT64)(y + yy) * g_pitch + (UINT64)x * 3;
+      for (int xx = 0; xx < w; xx++) {
+        row[xx * 3 + 0] = rgb & 0xFF;
+        row[xx * 3 + 1] = (rgb >> 8) & 0xFF;
+        row[xx * 3 + 2] = (rgb >> 16) & 0xFF;
+      }
+    }
+  }
 }
 
 static inline uint8_t gsample(const glyph_aa_t *g, int x, int y) {
@@ -99,7 +122,8 @@ static void draw_title(UINT32 ms) {
     total_w +=
         FONT_MAIN.glyphs[(unsigned char)TITLE_STR[i]].advance * FONT_SCALE;
   int x = ((int)g_w - total_w) / 2;
-  int y = (int)g_h / 2 - FONT_MAIN.height * FONT_SCALE - 40;
+  int y = g_title_y;
+  fill_rect(x - 4, y - 4, total_w + 8, FONT_MAIN.height * FONT_SCALE + 12, 0x000000);
 
   for (int i = 0; i < TITLE_LEN; i++) {
     const glyph_aa_t *g = &FONT_MAIN.glyphs[(unsigned char)TITLE_STR[i]];
@@ -168,13 +192,30 @@ int efi_splash_init(EFI_PHYSICAL_ADDRESS lfb_phys, UINT32 w, UINT32 h,
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
+  /* Calibrate TSC against the UEFI timer instead of assuming a 2 GHz CPU. */
+  UINT64 cal_start = rdtsc_now();
+  gBS->Stall(10000);
+  UINT64 cal_delta = rdtsc_now() - cal_start;
+  if (cal_delta >= 1000)
+    g_tsc_hz = cal_delta * 100ULL;
   g_start = rdtsc_now();
   g_last = 0;
   g_active = 1;
 
+  g_font_scale = 4;
+  int natural_w = 0;
+  for (int i = 0; i < TITLE_LEN; i++)
+    natural_w += FONT_MAIN.glyphs[(unsigned char)TITLE_STR[i]].advance;
+  while (g_font_scale > 1 &&
+         ((UINT64)natural_w * g_font_scale > (UINT64)g_w * 9 / 10 ||
+          (UINT64)FONT_MAIN.height * g_font_scale + 100 > g_h))
+    g_font_scale--;
   int title_h = FONT_MAIN.height * FONT_SCALE;
+  int spin_pad = SPIN_PAD;
+  int layout_h = title_h + 20 + 2 * spin_pad;
+  g_title_y = ((int)g_h - layout_h) / 2;
   g_spin_cx = (int)g_w / 2;
-  g_spin_cy = (int)g_h / 2 - title_h - 40 + title_h + 70;
+  g_spin_cy = g_title_y + title_h + 20 + spin_pad;
 
   fill_rect(0, 0, (int)w, (int)h, 0x000000);
   draw_title(0);
@@ -186,10 +227,10 @@ void efi_splash_tick(void) {
   if (!g_active)
     return;
   UINT64 now = rdtsc_now();
-  if (now - g_last < 32000000ULL)
-    return; // ~16ms asumiendo 2GHz
+  if (now - g_last < g_tsc_hz / 60ULL)
+    return;
   g_last = now;
-  UINT32 ms = (UINT32)((now - g_start) / 2000000ULL);
+  UINT32 ms = (UINT32)((now - g_start) / (g_tsc_hz / 1000ULL));
 
   if (ms < TITLE_TOTAL_MS) {
     draw_title(ms);
@@ -199,7 +240,9 @@ void efi_splash_tick(void) {
 }
 
 void efi_splash_get_state(UINT32 *phase, UINT32 *elapsed_ms) {
-  UINT32 ms = (UINT32)((rdtsc_now() - g_start) / 2000000ULL);
+  if (!phase || !elapsed_ms)
+    return;
+  UINT32 ms = (UINT32)((rdtsc_now() - g_start) / (g_tsc_hz / 1000ULL));
   *elapsed_ms = ms;
   *phase = (ms >= TITLE_TOTAL_MS) ? 2 : 1;
 }
