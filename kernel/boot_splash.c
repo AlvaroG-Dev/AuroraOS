@@ -18,15 +18,14 @@ uint32_t g_boot_splash_initial_ms = 0;
 #define TITLE_LEN 8
 #define FONT_SCALE g_font_scale
 static int g_font_scale = 4;
-#define LETTER_FADE_MS 210
-#define LETTER_STAGGER_MS 105
-#define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
+#define TITLE_FADE_MS 420
+#define TITLE_TOTAL_MS TITLE_FADE_MS
 
-#define SPIN_R 18
+#define SPIN_R 20
 #define SPIN_DOT_R 3
 #define SPIN_DOTS 12
-#define SPIN_ROT_MS 1000
-#define SPIN_PAD (SPIN_R + SPIN_DOT_R + 8)
+#define SPIN_ROT_MS 900
+#define SPIN_PAD (SPIN_R + SPIN_DOT_R + 5)
 
 #define MIN_SPLASH_MS 2200
 #define REVEAL_MS 560
@@ -235,15 +234,12 @@ static void draw_title_frame(uint64_t ms) {
     return;
   sh_fill(g_title_x, g_title_y, g_tb_w, g_tb_h, COL_BG);
   for (int i = 0; i < TITLE_LEN; i++) {
-    uint64_t start_ms = (uint64_t)i * LETTER_STAGGER_MS;
-    uint8_t la = (ms < start_ms)
-                     ? 0
-                     : ((ms - start_ms >= LETTER_FADE_MS)
-                            ? 255
-                            : (uint8_t)(255 * (ms - start_ms) / LETTER_FADE_MS));
+    uint8_t la = (ms >= TITLE_FADE_MS)
+                     ? 255
+                     : (uint8_t)((ms * 255) / TITLE_FADE_MS);
     if (!la)
       continue;
-    int rise = ((255 - la) * 5) / 255;
+    int rise = ((255 - la) * 8) / 255;
     const glyph_aa_t *g = &g_font->glyphs[(unsigned char)TITLE_STR[i]];
     int gw = g->width * FONT_SCALE, gh = g->height * FONT_SCALE;
     int bx = g_letter_x[i] + g->bearing_x * FONT_SCALE + g_letter_pad;
@@ -313,14 +309,18 @@ static void draw_spinner_frame(uint64_t ms) {
   if (ms < TITLE_TOTAL_MS)
     return;
   uint64_t sp_ms = ms - TITLE_TOTAL_MS;
-  int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
+  uint32_t phase = (uint32_t)(((sp_ms % SPIN_ROT_MS) * SPIN_DOTS * 256ULL) /
+                              SPIN_ROT_MS);
+  int head = (int)(phase >> 8);
+  uint32_t fraction = phase & 255u;
   sh_fill(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
           2 * SPIN_PAD, COL_BG);
   for (int i = 0; i < SPIN_DOTS; i++) {
     int d = (head - i + SPIN_DOTS) % SPIN_DOTS;
-    uint32_t bright = 255 - (uint32_t)(d * 230 / SPIN_DOTS);
-    if (bright < 25)
-      bright = 25;
+    uint32_t distance = (uint32_t)d * 256u + fraction;
+    uint32_t bright = 255u - (distance * 230u) / (SPIN_DOTS * 256u);
+    if (bright < 25u)
+      bright = 25u;
     draw_spinner_dot(g_spin_cx + k_spin_dx[i], g_spin_cy + k_spin_dy[i],
                      SPIN_DOT_R, COL_SPINNER, (uint8_t)bright);
   }
@@ -428,7 +428,7 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
   g_h = height;
   g_pitch = pitch_px;
   font_manager_init();
-  g_font = font_manager_get(FONT_ID_MAIN_REGULAR);
+  g_font = font_manager_get(FONT_ID_MAIN_BOLD);
   if (!g_font)
     g_font = font_manager_get(FONT_ID_MONO);
   if (!g_font)
