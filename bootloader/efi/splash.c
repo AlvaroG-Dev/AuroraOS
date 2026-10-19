@@ -192,6 +192,9 @@ static void draw_title(UINT32 ms) {
         FONT_MAIN.glyphs[(unsigned char)TITLE_STR[i]].advance * FONT_SCALE;
   int x = ((int)g_w - total_w) / 2;
   int y = (int)g_h / 2 - FONT_MAIN.height * FONT_SCALE - 40;
+  g_title_x = x - 10; g_title_y = y - 8; g_title_w = total_w + 20;
+  g_title_h = FONT_MAIN.height * FONT_SCALE + 16;
+  fill_bg_rect(g_title_x, g_title_y, g_title_w, g_title_h);
 
   for (int i = 0; i < TITLE_LEN; i++) {
     const glyph_aa_t *g = &FONT_MAIN.glyphs[(unsigned char)TITLE_STR[i]];
@@ -228,8 +231,8 @@ static void draw_spinner(UINT32 ms) {
   UINT32 sp_ms = ms - TITLE_TOTAL_MS;
   int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
 
-  fill_rect(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
-            2 * SPIN_PAD, 0x000000);
+  fill_bg_rect(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
+               2 * SPIN_PAD);
 
   for (int i = 0; i < SPIN_DOTS; i++) {
     int d = (head - i + SPIN_DOTS) % SPIN_DOTS;
@@ -262,12 +265,13 @@ int efi_splash_init(EFI_PHYSICAL_ADDRESS lfb_phys, UINT32 w, UINT32 h,
   g_last = 0;
   g_active = 1;
 
-  int title_h = FONT_MAIN.height * FONT_SCALE;
   g_spin_cx = (int)g_w / 2;
-  g_spin_cy = (int)g_h / 2 - title_h - 40 + title_h + 70;
+  g_spin_cy = (int)g_h / 2 + 60;
 
-  fill_rect(0, 0, (int)w, (int)h, 0x000000);
+  draw_background();
+  draw_logo();
   draw_title(0);
+  draw_caption();
   g_last = g_start;
   return 0;
 }
