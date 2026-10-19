@@ -87,7 +87,7 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
   g_h = h;
   g_pitch = pitch;
   g_bpp = bpp;
-  g_start_tsc = rdtsc_lo();
+  g_start_tsc = rdtsc_now();
   g_last_draw = 0;
   g_active = 1;
 
@@ -101,12 +101,12 @@ int bios_splash_init(uint32_t lfb_phys, uint32_t w, uint32_t h, uint32_t pitch,
 void bios_splash_tick(void) {
   if (!g_active)
     return;
-  uint32_t now = rdtsc_lo();
+  uint64_t now = rdtsc_now();
   /* ~2 GHz asumido: 16 ms ≈ 32 M ciclos. Aproximación sin TSC calibrado. */
-  if (now - g_last_draw < 32000000u)
+  if (now - g_last_draw < 32000000ULL)
     return;
   g_last_draw = now;
-  uint32_t ms = (now - g_start_tsc) / 2000000u;
+  uint32_t ms = (uint32_t)((now - g_start_tsc) / 2000000ULL);
   draw_frame(ms);
 }
 
