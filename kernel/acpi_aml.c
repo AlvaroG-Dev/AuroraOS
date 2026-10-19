@@ -552,16 +552,32 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
     c->pos++;
     return make_integer(0xFFFFFFFFFFFFFFFFULL);
 
-  case AML_BYTE_PREFIX:
+  case AML_BYTE_PREFIX: {
+    if (c->len - c->pos < 2) {
+      c->pos = c->len;
+      LOG_WARN("[AML] ByteConst truncado");
+      return make_integer(0);
+    }
     c->pos++;
     return make_integer(c->data[c->pos++]);
+  }
   case AML_WORD_PREFIX: {
+    if (c->len - c->pos < 3) {
+      c->pos = c->len;
+      LOG_WARN("[AML] WordConst truncado");
+      return make_integer(0);
+    }
     c->pos++;
     uint64_t v = c->data[c->pos] | ((uint64_t)c->data[c->pos + 1] << 8);
     c->pos += 2;
     return make_integer(v);
   }
   case AML_DWORD_PREFIX: {
+    if (c->len - c->pos < 5) {
+      c->pos = c->len;
+      LOG_WARN("[AML] DWordConst truncado");
+      return make_integer(0);
+    }
     c->pos++;
     uint64_t v = c->data[c->pos] | ((uint64_t)c->data[c->pos + 1] << 8) |
                  ((uint64_t)c->data[c->pos + 2] << 16) |
@@ -570,6 +586,11 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
     return make_integer(v);
   }
   case AML_QWORD_PREFIX: {
+    if (c->len - c->pos < 9) {
+      c->pos = c->len;
+      LOG_WARN("[AML] QWordConst truncado");
+      return make_integer(0);
+    }
     c->pos++;
     uint64_t v = 0;
     for (int i = 0; i < 8; i++)
@@ -591,17 +612,30 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
   case AML_BUFFER_OP: {
     c->pos++;
     size_t pkg_start = c->pos;
-    uint32_t pkglen = decode_pkglength(c->data, c->len, &c->pos);
+    size_t outer_len = c->len;
+    uint32_t pkglen = decode_pkglength(c->data, outer_len, &c->pos);
+    if (!pkglen || pkg_start > outer_len || pkglen > outer_len - pkg_start) {
+      LOG_WARN("[AML] Buffer con PkgLength inválido");
+      c->pos = outer_len;
+      return make_integer(0);
+    }
     size_t pkg_end = pkg_start + pkglen;
-    // BufferSize (TermArg)
+    if (c->pos > pkg_end) {
+      LOG_WARN("[AML] Buffer con PkgLength demasiado corto");
+      c->pos = pkg_end;
+      return make_integer(0);
+    }
+    // Limitar el parseo de BufferSize al propio paquete: nunca debe leer
+    // bytes pertenecientes al siguiente TermObj si el paquete está truncado.
+    c->len = pkg_end;
     aml_object_t *sz = parse_term_arg(c);
     uint64_t n = sz ? aml_to_integer(sz) : 0;
-    // ByteList: bytes hasta pkg_end
-    size_t avail = (c->pos < pkg_end) ? pkg_end - c->pos : 0;
+    size_t avail = c->pos < pkg_end ? pkg_end - c->pos : 0;
     if (n > avail)
       n = avail;
     aml_object_t *b = make_buffer(c->data + c->pos, (uint32_t)n);
     c->pos = pkg_end;
+    c->len = outer_len;
     return b;
   }
 
@@ -609,11 +643,29 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
   case AML_VAR_PACKAGE_OP: {
     c->pos++;
     size_t pkg_start = c->pos;
-    uint32_t pkglen = decode_pkglength(c->data, c->len, &c->pos);
+    size_t outer_len = c->len;
+    uint32_t pkglen = decode_pkglength(c->data, outer_len, &c->pos);
+    if (!pkglen || pkg_start > outer_len || pkglen > outer_len - pkg_start) {
+      LOG_WARN("[AML] Package con PkgLength inválido");
+      c->pos = outer_len;
+      return make_integer(0);
+    }
     size_t pkg_end = pkg_start + pkglen;
+    if (c->pos > pkg_end) {
+      LOG_WARN("[AML] Package con PkgLength demasiado corto");
+      c->pos = pkg_end;
+      return make_integer(0);
+    }
+    c->len = pkg_end;
 
     uint32_t nelem;
     if (op == AML_PACKAGE_OP) {
+      if (c->pos >= pkg_end) {
+        c->len = outer_len;
+        c->pos = pkg_end;
+        LOG_WARN("[AML] Package sin NumElements");
+        return make_integer(0);
+      }
       nelem = c->data[c->pos++];
     } else {
       aml_object_t *nv = parse_term_arg(c);
@@ -623,15 +675,22 @@ static aml_object_t *parse_data_object(parse_ctx_t *c) {
     aml_object_t *pkg = make_package(nelem);
     if (!pkg) {
       c->pos = pkg_end;
+      c->len = outer_len;
       return make_integer(0);
     }
 
     for (uint32_t i = 0; i < nelem && c->pos < pkg_end; i++) {
+      size_t before = c->pos;
       pkg->package.elems[i] = parse_term_arg(c);
       if (!pkg->package.elems[i])
         pkg->package.elems[i] = make_integer(0);
+      if (c->pos <= before) {
+        LOG_WARN("[AML] Package: TermArg no avanzó; abortando paquete");
+        break;
+      }
     }
     c->pos = pkg_end;
+    c->len = outer_len;
     return pkg;
   }
 
