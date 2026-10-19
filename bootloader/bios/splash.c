@@ -57,12 +57,12 @@ static void draw_frame(uint32_t ms) {
   /* caja de fondo */
   fill_rect(cx - R, cy - R, 2 * R, 2 * R, 0x000000);
 
-  int head = (int)((ms / (rot_ms / dots)) % dots);
+  int head = (int)(((uint64_t)ms * dots / rot_ms) % dots);
   for (int i = 0; i < dots; i++) {
     int d = (head - i + dots) % dots;
-    uint32_t bright = 255 - (uint32_t)(d * 230 / dots);
-    if (bright < 25)
-      bright = 25;
+    uint32_t bright = 255 - (uint32_t)(d * 210 / (dots - 1));
+    if (bright < 45)
+      bright = 45;
     /* color azulado modulado por brightness */
     uint32_t r = (uint32_t)(0x5A * bright / 255);
     uint32_t g = (uint32_t)(0xB0 * bright / 255);
