@@ -334,7 +334,8 @@ typedef struct xhci_dev_priv {
   uint8_t root_hub_port;
   usb_speed_t speed;
   xhci_ring_t ep0_ring;
-  xhci_ep_state_t eps[15];
+  // One state per non-control DCI: 15 endpoint numbers x IN/OUT.
+  xhci_ep_state_t eps[30];
   usb_dma_buf_t input_ctx;
   usb_dma_buf_t out_ctx;
 } xhci_dev_priv_t;
