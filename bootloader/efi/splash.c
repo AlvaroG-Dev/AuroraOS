@@ -214,9 +214,7 @@ static void draw_title(UINT32 ms) {
           if (!ea)
             continue;
           /* Fondo negro, así que hacemos alpha blending directo */
-          UINT32 r = (0xE8 * ea) / 255, g_c = (0xF0 * ea) / 255,
-                 b = (0xFF * ea) / 255;
-          put_px(bx + dx, by + dy, (r << 16) | (g_c << 8) | b);
+          put_px(bx + dx, by + dy, blend_rgb(COL_TITLE, read_px(bx + dx, by + dy), ea));
         }
       }
     }
