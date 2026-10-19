@@ -21,26 +21,24 @@ uint32_t g_boot_splash_initial_ms = 0;
 #define LETTER_STAGGER_MS 105
 #define TITLE_TOTAL_MS (LETTER_STAGGER_MS * (TITLE_LEN - 1) + LETTER_FADE_MS)
 
-#define SPIN_R 18
-#define SPIN_DOT_R 3
+#define SPIN_R 26
+#define SPIN_DOT_R 4
 #define SPIN_DOTS 12
-#define SPIN_ROT_MS 1000
+#define SPIN_ROT_MS 900
 #define SPIN_PAD (SPIN_R + SPIN_DOT_R + 8)
 
 #define MIN_SPLASH_MS 2200
 #define REVEAL_MS 560
 #define TSC_HZ_DEFAULT 3000000000ULL
 
-#define COL_BG 0xFF000000u
-#define COL_TITLE 0xFFE8F0FFu
-#define COL_GLOW 0xFF3E70C0u
-#define COL_SPINNER 0xFF5AB0FFu
-#define COL_DESKTOP 0xFF101828u
+#define COL_BG 0xFF070B14u
+#define COL_TITLE 0xFFF1F5FFu
+#define COL_GLOW 0xFF3478D4u
+#define COL_SPINNER 0xFF64C7FFu
+#define COL_DESKTOP 0xFF0B1426u
 
-static const int16_t k_spin_dx[12] = {18,  16,  9,  0, -9, -16,
-                                      -18, -16, -9, 0, 9,  16};
-static const int16_t k_spin_dy[12] = {0, 9,  16,  18,  16,  9,
-                                      0, -9, -16, -18, -16, -9};
+static const int16_t k_spin_dx[12] = {26, 22, 13, 0, -13, -22, -26, -22, -13, 0, 13, 22};
+static const int16_t k_spin_dy[12] = {0, 13, 22, 26, 22, 13, 0, -13, -22, -26, -22, -13};
 
 static uint32_t *g_fb = NULL;
 static uint32_t g_w = 0, g_h = 0, g_pitch = 0;
@@ -110,6 +108,59 @@ static void sh_fill(int x, int y, int w, int h, uint32_t c) {
   }
 }
 
+static uint32_t background_color(int x, int y) {
+  int cx = (int)g_w / 2, cy = (int)g_h / 2;
+  int dx = (x > cx) ? x - cx : cx - x, dy = (y > cy) ? y - cy : cy - y;
+  int nx = (dx * 255) / (cx ? cx : 1), ny = (dy * 255) / (cy ? cy : 1);
+  if (nx > 255) nx = 255;
+  if (ny > 255) ny = 255;
+  int glow = ((255 - nx) * (255 - ny)) / 255;
+  int t = (g_h > 1) ? (y * 255) / (g_h - 1) : 0;
+  uint32_t r = 5 + (t * 3) / 255 + (glow * 2) / 255;
+  uint32_t g = 9 + (t * 7) / 255 + (glow * 7) / 255;
+  uint32_t b = 20 + (t * 16) / 255 + (glow * 18) / 255;
+  return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+static void sh_restore_bg(int x, int y, int w, int h) {
+  if (!g_shadow || w <= 0 || h <= 0) return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)g_w) w = (int)g_w - x;
+  if (y + h > (int)g_h) h = (int)g_h - y;
+  if (w <= 0 || h <= 0) return;
+  for (int yy = y; yy < y + h; yy++) {
+    uint32_t *row = g_shadow + (uint64_t)yy * g_pitch + x;
+    for (int xx = 0; xx < w; xx++) row[xx] = background_color(x + xx, yy);
+  }
+}
+static void draw_background(void) {
+  for (uint32_t y = 0; y < g_h; y++) {
+    uint32_t *row = g_shadow + (uint64_t)y * g_pitch;
+    for (uint32_t x = 0; x < g_w; x++) row[x] = background_color((int)x, (int)y);
+    for (uint32_t x = g_w; x < g_pitch; x++) row[x] = COL_BG;
+  }
+}
+static void draw_segment(int x0, int y0, int x1, int y1, uint32_t color) {
+  int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x0 < x1 ? 1 : -1;
+  int dy = y0 > y1 ? y1 - y0 : y0 - y1, sy = y0 < y1 ? 1 : -1;
+  dy = -dy;
+  int err = dx + dy;
+  for (;;) {
+    sh_fill(x0 - 1, y0 - 1, 3, 3, color);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+static void draw_logo(void) {
+  int cx = (int)g_w / 2, cy = g_title_y - 38;
+  if (cy < 42) cy = 42;
+  draw_segment(cx - 24, cy + 14, cx - 8, cy - 16, 0xFF3B82F6u);
+  draw_segment(cx - 8, cy - 16, cx + 8, cy + 14, 0xFF60D5FFu);
+  draw_segment(cx + 2, cy + 14, cx + 18, cy - 16, 0xFF8B9DFFu);
+  draw_segment(cx + 18, cy - 16, cx + 28, cy + 4, 0xFF3B82F6u);
+}
 static void sh_blit(int x, int y, int w, int h) {
   if (!g_fb || !g_shadow)
     return;
@@ -217,6 +268,29 @@ static void prerender_title(void) {
   g_title_y = (int)g_h / 2 - max_h - 40 - g_letter_pad;
 }
 
+static void draw_caption(void) {
+  static const char caption[] = "INITIALIZING YOUR WORKSPACE";
+  if (!g_font || !g_shadow) return;
+  int width = 0;
+  for (int i = 0; caption[i]; i++) width += g_font->glyphs[(unsigned char)caption[i]].advance;
+  int x = ((int)g_w - width) / 2, y = g_title_y + g_tb_h + 2;
+  for (int i = 0; caption[i]; i++) {
+    const glyph_aa_t *g = &g_font->glyphs[(unsigned char)caption[i]];
+    int bx = x + g->bearing_x, by = y + (g_font->height - g->bearing_y);
+    for (int gy = 0; gy < g->height; gy++) {
+      int py = by + gy;
+      if (py < 0 || py >= (int)g_h) continue;
+      uint32_t *row = g_shadow + (uint64_t)py * g_pitch;
+      for (int gx = 0; gx < g->width; gx++) {
+        int px = bx + gx;
+        if (px < 0 || px >= (int)g_w) continue;
+        uint32_t a = g->bitmap[gy * g->width + gx] / 2;
+        if (a) row[px] = blend_px((a << 24) | 0xFFB5C6DFu, row[px]);
+      }
+    }
+    x += g->advance;
+  }
+}
 static void prerender_glow(void) {
   if (!g_title_bm)
     return;
@@ -262,7 +336,7 @@ static void prerender_glow(void) {
 static void draw_title_frame(uint64_t ms) {
   if (!g_shadow || !g_title_bm)
     return;
-  sh_fill(g_title_x, g_title_y, g_tb_w, g_tb_h, COL_BG);
+  sh_restore_bg(g_title_x, g_title_y, g_tb_w, g_tb_h);
   if (g_glow_bm) {
     for (int y = 0; y < g_tb_h; y++) {
       uint32_t *dst =
@@ -351,8 +425,7 @@ static void draw_spinner_frame(uint64_t ms) {
     return;
   uint64_t sp_ms = ms - TITLE_TOTAL_MS;
   int head = (int)((sp_ms / (SPIN_ROT_MS / SPIN_DOTS)) % SPIN_DOTS);
-  sh_fill(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD,
-          2 * SPIN_PAD, COL_BG);
+  sh_restore_bg(g_spin_cx - SPIN_PAD, g_spin_cy - SPIN_PAD, 2 * SPIN_PAD, 2 * SPIN_PAD);
   for (int i = 0; i < SPIN_DOTS; i++) {
     int d = (head - i + SPIN_DOTS) % SPIN_DOTS;
     uint32_t bright = 255 - (uint32_t)(d * 230 / SPIN_DOTS);
@@ -405,13 +478,14 @@ void boot_splash_begin_reveal(boot_splash_render_fn_t render_below) {
   }
   g_render_below = render_below;
   if (render_below) {
-    g_desktop_bm = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
+    uint64_t fb_pixels = (uint64_t)g_pitch * g_h;
+    if (fb_pixels <= (uint64_t)SIZE_MAX / sizeof(uint32_t))
+      g_desktop_bm = (uint32_t *)kmalloc((size_t)fb_pixels * sizeof(uint32_t));
     if (g_desktop_bm) {
       render_below(g_shadow, g_w, g_h, g_pitch);
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_desktop_bm[i] = g_shadow[i];
-      for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-        g_shadow[i] = COL_BG;
+      uint64_t fb_pixels = (uint64_t)g_pitch * g_h;
+      for (uint64_t i = 0; i < fb_pixels; i++) g_desktop_bm[i] = g_shadow[i];
+      for (uint64_t i = 0; i < fb_pixels; i++) g_shadow[i] = COL_BG;
     }
   }
   g_prev_offset = 0;
@@ -452,8 +526,7 @@ int boot_splash_tick_reveal(void) {
 
 int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
                      uint32_t pitch_px) {
-  if (!fb || !width || !height || !pitch_px)
-    return -1;
+  if (!fb || !width || !height || pitch_px < width) return -1;
   g_fb = fb;
   g_w = width;
   g_h = height;
@@ -464,31 +537,27 @@ int boot_splash_init(uint32_t *fb, uint32_t width, uint32_t height,
     g_font = font_manager_get(FONT_ID_MONO);
   if (!g_font)
     return -1;
-  g_shadow = (uint32_t *)kmalloc((size_t)g_w * g_h * 4);
-  if (!g_shadow)
-    return -1;
-  for (uint64_t i = 0; i < (uint64_t)g_w * g_h; i++)
-    g_shadow[i] = COL_BG;
+  uint64_t fb_pixels = (uint64_t)g_pitch * g_h;
+  if (fb_pixels > (uint64_t)SIZE_MAX / sizeof(uint32_t)) return -1;
+  g_shadow = (uint32_t *)kmalloc((size_t)fb_pixels * sizeof(uint32_t));
+  if (!g_shadow) return -1;
+  draw_background();
 
-  /* Handoff desde bootloader */
+  /* Handoff desde bootloader: conservar el tiempo de animación recibido. */
   g_phase = g_boot_splash_initial_phase ? g_boot_splash_initial_phase : 1;
   g_start = rdtsc_now() - ms_to_ticks(g_boot_splash_initial_ms);
-
-  if (g_phase == 1)
-    sh_blit(0, 0, (int)g_w, (int)g_h);
-
   prerender_title();
-  if (!g_title_bm)
-    return -1;
+  if (!g_title_bm) return -1;
+  draw_logo();
+  draw_caption();
   prerender_glow();
   int title_h = g_tb_h - 2 * g_letter_pad;
   g_spin_cx = (int)g_w / 2;
   g_spin_cy = g_title_y + g_letter_pad + title_h + 70;
-  if (g_phase == 2) {
-    g_last_tick = 0;
-  } else {
-    g_start = rdtsc_now();
-  }
+  sh_blit(0, 0, (int)g_w, (int)g_h);
+  draw_title_frame(g_boot_splash_initial_ms);
+  if (g_phase >= 2) draw_spinner_frame(g_boot_splash_initial_ms);
+  g_last_tick = 0;
   g_active = 1;
   return 0;
 }
