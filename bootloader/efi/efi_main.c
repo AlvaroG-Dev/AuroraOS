@@ -12,6 +12,7 @@
 
 #include "../include/kernel_boot_info.h"
 #include "efi_min.h"
+#include "splash.h"
 #include <stdarg.h>
 
 /* ---- Globals ---- */
@@ -705,6 +706,7 @@ static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
     file->Close(file);
     return EFI_LOAD_ERROR;
   }
+
   EFI_FILE_INFO *info = (EFI_FILE_INFO *)info_buf;
   UINTN fsize = (UINTN)info->FileSize;
   if (fsize == 0) {
@@ -716,21 +718,33 @@ static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
   EFI_PHYSICAL_ADDRESS addr = 0xFFFFFFFF;
   st = gBS->AllocatePages(AllocateMaxAddress, EfiLoaderData, npages, &addr);
   if (EFI_ERROR(st)) {
-    efi_print(L"[BOOT] initrd alloc FAIL (%lu pages) %r\n", (UINT64)npages, st);
     file->Close(file);
     return st;
   }
 
-  UINTN read_size = fsize;
-  st = file->Read(file, &read_size, (VOID *)addr);
-  file->Close(file);
-  if (EFI_ERROR(st) || read_size != fsize) {
-    efi_print(L"[BOOT] initrd read FAIL (want=%lu got=%lu) %r\n", (UINT64)fsize,
-              (UINT64)read_size, st);
-    gBS->FreePages(addr, npages);
-    return EFI_LOAD_ERROR;
+  /* --- LECTURA TROCEADA PARA QUE LA ANIMACION NO SE CONGELE --- */
+  UINTN chunk_size = 4 * 1024 * 1024; // 4 MB por chunk
+  UINTN total_read = 0;
+
+  while (total_read < fsize) {
+    UINTN to_read = fsize - total_read;
+    if (to_read > chunk_size)
+      to_read = chunk_size;
+    UINTN read_size = to_read;
+
+    st = file->Read(file, &read_size, (VOID *)(addr + total_read));
+    if (EFI_ERROR(st) || read_size == 0) {
+      file->Close(file);
+      gBS->FreePages(addr, npages);
+      return EFI_LOAD_ERROR;
+    }
+    total_read += read_size;
+
+    // Animar mientras carga
+    efi_splash_tick();
   }
 
+  file->Close(file);
   efi_print(L"[BOOT] initrd: %lu bytes @ phys=0x%lx\n", (UINT64)fsize,
             (UINT64)addr);
   *out_addr = addr;
@@ -1169,6 +1183,20 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
    * --------------------------------------------------------------------- */
   setup_framebuffer();
 
+  /* Splash simple mientras se carga el initrd (que es lo lento). */
+  int splash_on = 0;
+  if (gop && gop->Mode && gop->Mode->Info) {
+    EFI_PHYSICAL_ADDRESS lfb = gop->Mode->FrameBufferBase;
+    UINT32 pitch = gop->Mode->Info->PixelsPerScanLine * 4;
+    splash_on =
+        (efi_splash_init(lfb, gop->Mode->Info->HorizontalResolution,
+                         gop->Mode->Info->VerticalResolution, pitch, 32) == 0);
+    if (splash_on)
+      efi_print(L"[SPLASH] activa %ux%u\n",
+                gop->Mode->Info->HorizontalResolution,
+                gop->Mode->Info->VerticalResolution);
+  }
+
   EFI_PHYSICAL_ADDRESS pml4_addr = 0;
   status = build_page_tables(&pml4_addr);
   if (EFI_ERROR(status)) {
@@ -1230,6 +1258,15 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     } else {
       efi_print(L"[BOOT] WARN: initrd.tar no encontrado en el volumen\n");
     }
+  }
+
+  /* Si la splash está activa, darla un mínimo de vida visual. */
+  if (splash_on) {
+    for (int k = 0; k < 30; k++) {
+      efi_splash_tick();
+      gBS->Stall(16000);
+    }
+    efi_splash_done();
   }
 
   /* ---------------------------------------------------------------------

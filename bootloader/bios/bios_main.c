@@ -1,6 +1,7 @@
 /* bootloader/bios/bios_main.c */
 #include "bios.h"
 #include "fat16.h"
+#include "splash.h"
 
 /* ===========================================================================
  * Salida SOLO por pantalla VGA (0xB8000).
@@ -242,6 +243,22 @@ void stage2_main(uint32_t drive, uint32_t e820_addr, uint32_t e820_count,
   }
   bios_log("[FAT] mount OK\n");
 
+  /* Fijar VBE temprano: sin esto, el LFB no está disponible hasta
+   * el final del boot. rm_vbe_set_mode preserva el estado y se puede
+   * llamar varias veces sin problema. */
+  vbe_desc_t vbe_early;
+  vbe_get(&vbe_early);
+  int splash_on = 0;
+  if (vbe_early.ok && vbe_early.lfb_phys) {
+    rm_vbe_set_mode(vbe_early.mode);
+    splash_on =
+        (bios_splash_init(vbe_early.lfb_phys, vbe_early.width, vbe_early.height,
+                          vbe_early.pitch, vbe_early.bpp) == 0);
+    if (splash_on)
+      bios_log("[SPLASH] activa %ux%u bpp=%u\n", vbe_early.width,
+               vbe_early.height, vbe_early.bpp);
+  }
+
   bios_config_t cfg;
   bios_config_load(drive, NULL, &cfg);
 
@@ -338,6 +355,7 @@ void stage2_main(uint32_t drive, uint32_t e820_addr, uint32_t e820_count,
           dst += nbytes;
           lba += nsec;
           remaining -= nbytes;
+          bios_splash_tick();
           if (++it % 100 == 0) {
             bios_log("[READ] %u / %u KB\n", (dst - phys) / 1024,
                      initrd_file.size / 1024);
@@ -372,6 +390,7 @@ void stage2_main(uint32_t drive, uint32_t e820_addr, uint32_t e820_count,
           dst += nbytes;
           lba += nsec;
           remaining -= nbytes;
+          bios_splash_tick();
           if (++it % 200 == 0) {
             bios_log("[READ] %u / %u KB\n", (dst - phys) / 1024,
                      initrd_file.size / 1024);
@@ -451,7 +470,12 @@ void stage2_main(uint32_t drive, uint32_t e820_addr, uint32_t e820_count,
 
   bios_log("[BOOT] saltando al kernel en 0x%lx\n", (unsigned long)entry);
 
-  if (vbe.ok)
+  if (splash_on)
+    bios_splash_done();
+
+  /* Si no se fijó el modo antes (vbe.ok era 0 en su momento), fijarlo
+   * ahora por si acaso. Doble llamada es segura. */
+  if (vbe.ok && !splash_on)
     rm_vbe_set_mode(vbe.mode);
 
   bios_jump_to_kernel(pml4_phys, (uint32_t)(uintptr_t)kinfo_final, entry);

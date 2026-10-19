@@ -19,7 +19,7 @@ LDFLAGS_32 = -m elf_i386 -T stage2_ld.ld --build-id=none \
 
 OBJS = stage2.o int13_asm.o \
        bios_main.o string.o int13.o e820.o vbe.o vbe_asm.o \
-       iso9660.o fat16.o elf_min.o paging.o bump.o config.o trampoline.o
+       iso9660.o fat16.o elf_min.o paging.o bump.o config.o trampoline.o splash.o
 
 TARGET      = bios.img
 STAGE1      = stage1.bin

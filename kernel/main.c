@@ -13,6 +13,7 @@
 #include "atapi.h"
 #include "block.h"
 #include "boot_console.h"
+#include "boot_splash.h"
 #include "cpu.h"
 #include "driver.h"
 #include "elf.h"
@@ -176,8 +177,7 @@ static void parse_memmap(void) {
     LOG_PANIC("[MEM] No hay mapa de memoria disponible");
     return;
   }
-  if (boot.memmap_desc_size < 40 ||
-      boot.memmap_desc_size > boot.memmap_size ||
+  if (boot.memmap_desc_size < 40 || boot.memmap_desc_size > boot.memmap_size ||
       boot.memmap_size % boot.memmap_desc_size != 0) {
     LOG_PANIC("[MEM] Descriptor EFI inválido: size=%lu desc_size=%lu",
               (unsigned long)boot.memmap_size,
@@ -255,6 +255,7 @@ static void kmain_task(void) {
 
   klog_calibrate_tsc(50, KERNEL_HZ);
   LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
+  boot_splash_set_tsc_hz(klog_get_tsc_freq());
 
   lapic_timer_init();
 
@@ -336,16 +337,33 @@ static void kmain_task(void) {
   ipi_init();
 
   if (fb_ok) {
-    // El compositor va a tomar el control. Desactivamos el hook normal
-    // (ya no escribimos todo el log a pantalla) pero activamos el overlay
-    // de las últimas líneas, para no perder visibilidad.
-    boot_console_hook_remove();
-    extern void boot_console_overlay_enable(int);
-    boot_console_overlay_enable(1);
-    compositor_init();
-    LOG_INFO(
-        "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
-    sched_create_task(compositor_thread);
+    if (g_boot_splash_enabled && boot_splash_active()) {
+      /* Compositor listo, pero aún oculto tras la splash.
+       * Si tu compositor expone algo como
+       *     compositor_render_first_frame(fb, w, h, pitch)
+       * pásalo como callback para que el reveal muestre el escritorio
+       * real en vez de un color liso. */
+      compositor_init();
+
+      boot_splash_begin_reveal(NULL);
+
+      while (boot_splash_tick_reveal())
+        __asm__ volatile("pause");
+
+      boot_splash_finish();
+
+      LOG_INFO(
+          "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
+      sched_create_task(compositor_thread);
+    } else {
+      boot_console_hook_remove();
+      extern void boot_console_overlay_enable(int);
+      boot_console_overlay_enable(1);
+      compositor_init();
+      LOG_INFO(
+          "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
+      sched_create_task(compositor_thread);
+    }
   }
 
   extern void __sched_canary_arm(void);
@@ -560,26 +578,32 @@ void kmain(struct kernel_boot_info *kinfo) {
   heap_init();
   klog_boot_ok();
 
-  /* [FB] Init temprano con mmio_map. */
   if (boot.fb_base && boot.fb_width > 0 && boot.fb_height > 0 &&
       boot.fb_pitch > 0 && boot.fb_size > 0) {
     void *fb_virt = mmio_map(boot.fb_base, boot.fb_size,
                              PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
     if (fb_virt && fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height,
                            boot.fb_pitch, boot.fb_bpp, boot.fb_size)) {
-      fb_fill(0x00101828);
-      boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
-      boot_console_clear();
-      boot_console_hook_install();
-      LOG_INFO("[FB] Boot console activa (%ux%u, phys=0x%lx)", fb_width,
-               fb_height, (unsigned long)boot.fb_base);
-    } else if (!fb_virt) {
-      LOG_WARN("[FB] mmio_map del framebuffer falló");
+      if (g_boot_splash_enabled) {
+        /* HANDOFF desde el bootloader */
+        extern uint32_t g_boot_splash_initial_phase;
+        extern uint32_t g_boot_splash_initial_ms;
+        g_boot_splash_initial_phase = boot.splash_phase;
+        g_boot_splash_initial_ms = boot.splash_elapsed_ms;
+
+        if (boot_splash_init(fb_ptr, fb_width, fb_height, fb_pitch) == 0) {
+          LOG_INFO("[FB] Boot splash activa (%ux%u)", fb_width, fb_height);
+        } else {
+          boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
+          boot_console_clear();
+          boot_console_hook_install();
+        }
+      } else {
+        boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
+        boot_console_clear();
+        boot_console_hook_install();
+      }
     }
-  } else if (boot.fb_base) {
-    LOG_WARN("[FB] parámetros inválidos: base=0x%lx w=%u h=%u pitch=%u",
-             (unsigned long)boot.fb_base, boot.fb_width, boot.fb_height,
-             boot.fb_pitch);
   }
 
   klog_boot_step("[INIT] ACPI (MADT)...");
@@ -693,6 +717,16 @@ void kmain(struct kernel_boot_info *kinfo) {
     LOG_INFO("[INIT] kswapd lanzado (task ID=%u)", kswapd_t->id);
   } else {
     klog_boot_warn("[INIT] kswapd no se pudo lanzar (sin memoria)");
+  }
+
+  /* Splash task: si la splash está activa, creamos el thread que la anima
+   * a 60 fps independientemente del bring-up. */
+  if (g_boot_splash_enabled && boot_splash_active()) {
+    task_t *splash_t = sched_create_task(boot_splash_task_loop);
+    if (splash_t)
+      splash_t->cpu_affinity = 0;
+    else
+      LOG_WARN("[SPLASH] no se pudo crear splash task");
   }
 
   task_t *t = sched_create_task(kmain_task);

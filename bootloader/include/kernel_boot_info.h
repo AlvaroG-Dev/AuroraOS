@@ -1,9 +1,4 @@
-/* bootloader/include/kernel_boot_info.h
- *
- * Estructura compartida entre el bootloader (EFI y BIOS) y el kernel.
- * CUALQUIER cambio aquí DEBE replicarse en kernel/main.c.
- * El _Static_assert detecta desalineaciones en build time.
- */
+/* bootloader/include/kernel_boot_info.h */
 #ifndef AURORA_KERNEL_BOOT_INFO_H
 #define AURORA_KERNEL_BOOT_INFO_H
 
@@ -21,12 +16,14 @@ struct __attribute__((packed)) kernel_boot_info {
   uint64_t memmap_desc_size;
   uint32_t memmap_desc_ver;
   uint8_t acpi_rsdp[64];
-  uint64_t initrd_base; /* direccion FISICA del initrd */
+  uint64_t initrd_base;
   uint64_t initrd_size;
+  uint32_t splash_phase;      /* 0=off, 1=titulo, 2=spinner */
+  uint32_t splash_elapsed_ms; /* Tiempo que lleva corriendo la splash */
 };
 
 _Static_assert(
-    sizeof(struct kernel_boot_info) == 140,
+    sizeof(struct kernel_boot_info) == 148,
     "kernel_boot_info cambio de tamano: sincroniza con kernel/main.c");
 
 #endif

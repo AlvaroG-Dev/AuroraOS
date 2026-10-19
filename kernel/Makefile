@@ -40,7 +40,7 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
 		net/arp.o net/arp_tests.o net/icmp.o net/icmp_tests.o net/e1000e.o net/e1000e_tests.o net/ping.o net/udp.o net/udp_tests.o \
 		net/socket.o net/inet_socket.o net/socket_tests.o net/tcp.o net/tcp_tests.o net/dhcp.o acpi_aml.o acpi_pm.o \
 		usb/usb_dma.o usb/usb_core.o usb/usb_urb.o usb/xhci/xhci_ring.o usb/xhci/xhci.o usb/xhci/xhci_cmd.o usb/xhci/xhci_port.o \
-		usb/xhci/xhci_control.o usb/usb_hid.o usb/usb_storage.o usb/usb_hub.o usb/hid_parser.o usb/usb_uas.o
+		usb/xhci/xhci_control.o usb/usb_hid.o usb/usb_storage.o usb/usb_hub.o usb/hid_parser.o usb/usb_uas.o boot_splash.o
 		 
 TARGET  = kernel.elf
 
