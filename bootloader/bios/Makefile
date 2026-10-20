@@ -26,7 +26,7 @@ STAGE1      = stage1.bin
 STAGE1_MBR  = stage1_mbr.bin
 STAGE2      = stage2.bin
 STAGE2_ELF  = stage2.elf
-STAGE2_SECTORS ?= 64
+STAGE2_SECTORS ?= 128
 
 .PHONY: all clean
 

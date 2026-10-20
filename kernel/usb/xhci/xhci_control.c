@@ -77,6 +77,8 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
   }
 }
 
+// kernel/usb/xhci/xhci_control.c
+
 int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
                           int data_len, int is_in, int timeout_ms) {
   if (!dev || !dev->hc_priv || !setup)
@@ -103,6 +105,11 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   if (has_data) {
     if (usb_dma_alloc((size_t)data_len, &data_dma) != 0)
       return -ENOMEM;
+    if (!is_in) {
+      memcpy(data_dma.virt, data, (size_t)data_len);
+    }
+    // [FIX] Asegurar write-back antes de DMA (útil en QEMU TCG)
+    usb_dma_sync(&data_dma, is_in ? USB_DMA_FROM_DEVICE : USB_DMA_TO_DEVICE);
   }
 
   xhci_trb_t data_trb = {0};
@@ -120,6 +127,14 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
     status_trb.control |= XHCI_TRB_DIR_IN;
 
   uint32_t n_trbs = has_data ? 3 : 2;
+  uint64_t status_phys = 0;
+  int rc;
+
+  // [FIX] Todo el cálculo y enqueue debe ocurrir DENTRO del lock para evitar
+  // races
+  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+
+  // Calcular dirección física del status TRB de forma segura
   uint32_t status_idx = p->ep0_ring.enqueue;
   for (uint32_t i = 0; i < n_trbs; i++) {
     if (status_idx == p->ep0_ring.size - 1)
@@ -127,16 +142,18 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
     if (i + 1 < n_trbs)
       status_idx++;
   }
-  uint64_t status_phys = xhci_ring_trb_phys(&p->ep0_ring, status_idx);
+  status_phys = xhci_ring_trb_phys(&p->ep0_ring, status_idx);
 
-  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
-  int rc = xhci_ring_enqueue(&p->ep0_ring, &setup_trb);
+  rc = xhci_ring_enqueue(&p->ep0_ring, &setup_trb);
   if (rc == 0 && has_data)
     rc = xhci_ring_enqueue(&p->ep0_ring, &data_trb);
   if (rc == 0)
     rc = xhci_ring_enqueue(&p->ep0_ring, &status_trb);
-  __asm__ volatile("mfence" ::: "memory");
-  *(volatile uint32_t *)(g_xhci.db + p->slot_id * 4) = 1;
+
+  if (rc == 0) {
+    __asm__ volatile("mfence" ::: "memory");
+    *(volatile uint32_t *)(g_xhci.db + p->slot_id * 4) = 1;
+  }
   spin_unlock_irqrestore(&g_xhci.lock, flags);
 
   if (rc != 0) {
@@ -155,20 +172,19 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
     return werr;
   }
 
-  // El `actual` devuelto por el transfer event es el RESIDUO (bytes que
-  // faltan por transferir). Para calcular los bytes reales transferidos:
   int transferred = 0;
   if (has_data) {
     if (actual > (uint32_t)data_len)
       actual = (uint32_t)data_len;
     transferred = data_len - (int)actual;
     if (is_in) {
+      // Invalidar caché tras DMA IN
+      usb_dma_sync(&data_dma, USB_DMA_FROM_DEVICE);
       memcpy(data, data_dma.virt, transferred);
     }
+    usb_dma_free(&data_dma);
   }
 
-  if (has_data)
-    usb_dma_free(&data_dma);
   return transferred;
 }
 

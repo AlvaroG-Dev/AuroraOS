@@ -119,16 +119,11 @@ static void xhci_irq_handler_msi(void) {
 void xhci_event_thread(void) {
   LOG_INFO("[xHCI] Event thread iniciado (MSI=%d)", g_xhci.using_msi);
   while (1) {
-    if (g_xhci.using_msi) {
-      wait_event(&g_xhci.irq_wq, has_events, NULL);
-    } else {
-      // Sin MSI: poll cada 1 tick (1 ms)
-      wait_event_interruptible_timeout(&g_xhci.irq_wq, has_events, NULL, 1);
-    }
-    /*
-     * Clear the notification before draining. An interrupt arriving during
-     * the drain sets it again and cannot be overwritten by consumer bookkeeping.
-     */
+    // [FIX] Usar SIEMPRE timeout, incluso con MSI.
+    // Si el MSI falla, el polling cada 10 ticks evita que el sistema se
+    // cuelgue.
+    wait_event_interruptible_timeout(&g_xhci.irq_wq, has_events, NULL, 10);
+
     (void)__atomic_exchange_n(&g_event_pending, 0, __ATOMIC_ACQ_REL);
 
     while (1) {
@@ -250,8 +245,7 @@ void xhci_event_thread(void) {
     flags = spin_lock_irqsave(&g_xhci.lock);
     volatile uint32_t *next_trb =
         (volatile uint32_t *)&g_xhci.evt.trbs[g_xhci.evt.dequeue];
-    int more_events =
-        ((next_trb[3] & XHCI_TRB_CYCLE) == g_xhci.evt.cycle);
+    int more_events = ((next_trb[3] & XHCI_TRB_CYCLE) == g_xhci.evt.cycle);
     spin_unlock_irqrestore(&g_xhci.lock, flags);
     if (more_events)
       __atomic_store_n(&g_event_pending, 1, __ATOMIC_RELEASE);
@@ -300,14 +294,14 @@ static int xhci_map_mmio(void) {
   uint64_t phys;
   uint32_t hi = 0;
   if (((lo >> 1) & 0x03) == 0x02) {
-    hi = pci_read_config_dword(g_xhci.pci.bus, g_xhci.pci.slot,
-                               g_xhci.pci.func, 0x14);
+    hi = pci_read_config_dword(g_xhci.pci.bus, g_xhci.pci.slot, g_xhci.pci.func,
+                               0x14);
     phys = (lo & ~0x0FULL) | ((uint64_t)hi << 32);
   } else {
     phys = lo & ~0x0FULL;
   }
-  LOG_INFO("[xHCI] BAR0 raw=0x%08x hi=0x%08x phys=0x%016lx",
-           lo, hi, (unsigned long)phys);
+  LOG_INFO("[xHCI] BAR0 raw=0x%08x hi=0x%08x phys=0x%016lx", lo, hi,
+           (unsigned long)phys);
   if (phys == 0)
     return -ENODEV;
   g_xhci.mmio_phys = phys;
@@ -767,6 +761,11 @@ int xhci_hcd_new_device(usb_device_t *parent_hub, uint8_t port,
     xhci_cmd_disable_slot(slot);
     return rc;
   }
+
+  // [FIX HARDWARE REAL] El dispositivo necesita tiempo para procesar el
+  // SET_ADDRESS internamente. 20ms es un estándar seguro.
+  extern void xhci_delay_ms(uint32_t ms);
+  xhci_delay_ms(20);
 
   LOG_INFO("[xHCI] new device slot=%u route=0x%05x speed=%d parent=%s port=%u",
            slot, route, (int)speed, parent_hub ? "hub" : "root", port);

@@ -67,7 +67,8 @@ int xhci_port_reset(uint8_t port) {
     if ((((uint64_t)hi << 32) | lo) - t0 >= max_cycles)
       break;
     uint32_t s = xhci_port_status(port);
-    if (s & XHCI_PORTSC_PRC) {
+    // [FIX] Aceptar PRC (USB 2.0) o WRC (USB 3.0)
+    if (s & (XHCI_PORTSC_PRC | XHCI_PORTSC_WRC)) {
       ok = 1;
       break;
     }
@@ -77,7 +78,9 @@ int xhci_port_reset(uint8_t port) {
     return -ETIMEDOUT;
 
   uint32_t s = xhci_port_status(port);
-  portsc_write(port, (s & ~XHCI_PORTSC_CHANGE_BITS) | XHCI_PORTSC_PRC);
+  // [FIX] Limpiar ambos bits de cambio
+  portsc_write(port, (s & ~XHCI_PORTSC_CHANGE_BITS) | XHCI_PORTSC_PRC |
+                         XHCI_PORTSC_WRC);
   s = xhci_port_status(port);
   if (!(s & XHCI_PORTSC_PED))
     return -EIO;
@@ -89,9 +92,22 @@ void xhci_port_poll_changes(void) {
     return;
   for (uint8_t p = 1; p <= g_xhci.max_ports; p++) {
     uint32_t s = xhci_port_status(p);
+    // Si hay algún bit de cambio pendiente...
     if (s & XHCI_PORTSC_CHANGE_BITS) {
-      portsc_write(p, (s & ~XHCI_PORTSC_CHANGE_BITS) |
-                          (s & XHCI_PORTSC_CHANGE_BITS));
+      // Escribir 1 para limpiar CADA bit de cambio por separado.
+      // Esto confirma (ACK) el cambio al hardware y evita el bucle.
+      if (s & XHCI_PORTSC_CSC)
+        portsc_write(p, s | XHCI_PORTSC_CSC);
+      if (s & XHCI_PORTSC_PEC)
+        portsc_write(p, s | XHCI_PORTSC_PEC);
+      if (s & XHCI_PORTSC_WRC)
+        portsc_write(p, s | XHCI_PORTSC_WRC); // USB 3.0
+      if (s & XHCI_PORTSC_PRC)
+        portsc_write(p, s | XHCI_PORTSC_PRC);
+      if (s & XHCI_PORTSC_PLC)
+        portsc_write(p, s | XHCI_PORTSC_PLC);
+      if (s & XHCI_PORTSC_CEC)
+        portsc_write(p, s | XHCI_PORTSC_CEC);
     }
   }
 }

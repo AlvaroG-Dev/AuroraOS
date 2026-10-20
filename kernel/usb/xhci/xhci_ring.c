@@ -90,10 +90,15 @@ int xhci_ring_enqueue(xhci_ring_t *ring, const xhci_trb_t *trb) {
     ring->cycle ^= 1;
   }
 
+  // kernel/usb/xhci/xhci_ring.c
+
   xhci_trb_t *dst = &ring->trbs[ring->enqueue];
   *dst = *trb;
-  // OR-ea el cycle bit actual.
   dst->control = (dst->control & ~XHCI_TRB_CYCLE) | ring->cycle;
+
+  // [FIX] Asegurar que la escritura del TRB sea visible para el hardware
+  __asm__ volatile("mfence" ::: "memory");
+
   ring->enqueue++;
   return 0;
 }

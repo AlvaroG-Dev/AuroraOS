@@ -723,7 +723,8 @@ static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
   }
 
   /* --- LECTURA TROCEADA PARA QUE LA ANIMACION NO SE CONGELE --- */
-  UINTN chunk_size = 4 * 1024 * 1024; // 4 MB por chunk
+  // Reducido de 4MB a 256KB para asegurar 60FPS en la animación
+  UINTN chunk_size = 1024 * 1024; // 256 KB por chunk
   UINTN total_read = 0;
 
   while (total_read < fsize) {
