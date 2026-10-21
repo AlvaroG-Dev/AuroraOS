@@ -258,6 +258,7 @@ int xhci_cmd_noop(void);
 int xhci_cmd_enable_slot(uint8_t *slot_id);
 int xhci_cmd_disable_slot(uint8_t slot_id);
 uint32_t xhci_port_status(uint8_t port);
+int xhci_port_is_attached(uint8_t port);
 void xhci_port_dump_all(void);
 int xhci_port_reset(uint8_t port);
 int xhci_attach_all_devices(void);
