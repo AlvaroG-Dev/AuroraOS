@@ -411,7 +411,8 @@ int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
                             int timeout_ms);
 
 int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
-                       uint32_t timeout_ms, uint32_t *out_residual_len);
+                       uint32_t timeout_ms, uint32_t *out_residual_len,
+                       xhci_trb_t *out_event);
 
 int xhci_cmd_reset_endpoint(uint8_t slot, uint32_t dci);
 int xhci_cmd_set_tr_dequeue(uint8_t slot, uint32_t dci, uint64_t deq_ptr,
