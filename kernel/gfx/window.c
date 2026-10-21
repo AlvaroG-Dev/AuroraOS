@@ -470,6 +470,23 @@ void window_render_frame(window_t *win, uint32_t *dst, int dst_stride,
   if (win->anim_alpha >= 255) {
     gfx_bit_blat(dst, dst_stride, win->surface, win->surface_w, clip, surf_x,
                  surf_y, win->surface_w, win->surface_h);
+
+    /*
+     * Keep the decorated surface (shadow/frame/titlebar) cached. Client apps
+     * such as the terminal can update a small rectangle many times per second;
+     * copying the current content buffer over the damaged part avoids rebuilding
+     * the entire shadow and window frame for each userland blit.
+     */
+    if (win->flags & WIN_FLAGS_NODECORATION) {
+      gfx_bit_blat(dst, dst_stride, win->content_buffer, win->content_w, clip,
+                   win->x, win->y, win->content_w, win->content_h);
+    } else {
+      gfx_bit_blat_rounded(
+          dst, dst_stride, win->content_buffer, win->content_w,
+          win->content_h, clip, win->x,
+          win->y + WIN11_TITLEBAR_HEIGHT, win->x, win->y, win->width,
+          win->height, WIN11_CORNER_RADIUS);
+    }
   } else if (win->anim_alpha > 0) {
     gfx_blit_with_alpha(dst, dst_stride, win->surface, win->surface_w, clip,
                         surf_x, surf_y, win->surface_w, win->surface_h,
