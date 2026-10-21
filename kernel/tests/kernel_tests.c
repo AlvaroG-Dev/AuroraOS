@@ -692,6 +692,7 @@ static void test_paging_map_rollback(void) {
     return;
   }
 
+  uint64_t baseline = pmm_free_pages_count();
   for (int fail_after = 0; fail_after < 3; fail_after++) {
     memset(pml4, 0, PAGE_SIZE);
     paging_test_set_alloc_fail_after(fail_after);
@@ -833,7 +834,6 @@ static void test_paging_noncanonical_addresses(void) {
 
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
   memset(pml4, 0, PAGE_SIZE);
-  uint64_t baseline = pmm_free_pages_count();
 
   TEST_ASSERT(paging_map_page_in(pml4, noncanonical_low, 0x1000,
                                  PTE_WRITABLE | PTE_NX) != 0,
