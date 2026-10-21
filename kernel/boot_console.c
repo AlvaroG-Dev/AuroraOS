@@ -441,7 +441,7 @@ static int overlay_rebuild_cache(void) {
 
   g_overlay_last_line_count = cur;
   g_overlay_cache_valid = 1;
-  return 0;
+  return 1;
 }
 
 /*
@@ -453,8 +453,17 @@ void boot_console_draw_overlay(uint32_t *dst, uint32_t dst_pitch, int clip_x,
                                int clip_y, int clip_w, int clip_h) {
   if (!g_overlay_enabled || !dst || !g_fb || clip_w <= 0 || clip_h <= 0)
     return;
-  if (overlay_rebuild_cache() != 0 || !g_overlay_layer)
+  int rebuild = overlay_rebuild_cache();
+  if (rebuild < 0 || !g_overlay_layer)
     return;
+
+  /* A new snapshot changes the overlay even if the current damage rectangle
+   * only intersects part of it. Schedule one full-card repaint next frame. */
+  if (rebuild > 0) {
+    extern void compositor_invalidate_rect(rect_t damage);
+    compositor_invalidate_rect((rect_t){(int)g_overlay_x, (int)g_overlay_y,
+                                        (int)g_overlay_w, (int)g_overlay_h});
+  }
 
   int x0 = clip_x > (int)g_overlay_x ? clip_x : (int)g_overlay_x;
   int y0 = clip_y > (int)g_overlay_y ? clip_y : (int)g_overlay_y;
