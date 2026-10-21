@@ -299,7 +299,14 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
       copied += chunk;
     }
   }
-  win->dirty = 1;
+  /*
+   * In the steady state, window_render_frame() composites content_buffer
+   * directly for the damaged rectangle. Mark the cached full surface dirty
+   * only during alpha animations, when the content must be baked into the
+   * surface that gets blended. Preserve any pre-existing dirty frame state.
+   */
+  if (win->anim_alpha < 255)
+    win->dirty = 1;
 
   int inv_x = win->x + dst_x;
   int inv_y = win->y + WIN11_TITLEBAR_HEIGHT + dst_y;
