@@ -263,16 +263,28 @@ int usb_enumerate(usb_device_t *dev) {
   // 1. Device descriptor completo (18 bytes).
   //    El HCD ya ha hecho SET_ADDRESS y conoce el speed, así que EP0
   //    tiene max_packet_size correcto. Podemos leer los 18 de una.
-  uint8_t dev_desc[18];
+  uint8_t dev_desc[18] = {0};
   int rc =
       usb_get_descriptor(dev, USB_DT_DEVICE, 0, 0, dev_desc, sizeof(dev_desc));
   if (rc < 0) {
     LOG_ERR("[USB] GET_DESCRIPTOR(DEVICE) falló: %d", rc);
     return rc;
   }
+  // Un descriptor DEVICE estándar contiene 18 bytes. Nunca parsear un buffer
+  // parcial: sus bytes restantes no vienen del dispositivo y pueden ser
+  // datos indeterminados de la pila.
+  if (rc != (int)sizeof(dev_desc)) {
+    LOG_ERR("[USB] GET_DESCRIPTOR(DEVICE) incompleto: %d/%u bytes",
+            rc, (unsigned)sizeof(dev_desc));
+    LOG_ERR("[USB] cabecera recibida: %02x %02x %02x %02x (speed=%u)",
+            dev_desc[0], dev_desc[1], dev_desc[2], dev_desc[3],
+            (unsigned)dev->speed);
+    return -EIO;
+  }
   rc = usb_parse_device_descriptor(dev_desc, dev);
   if (rc != 0) {
-    LOG_ERR("[USB] device descriptor malformado");
+    LOG_ERR("[USB] device descriptor malformado: len=%u type=%u speed=%u",
+            dev_desc[0], dev_desc[1], (unsigned)dev->speed);
     return rc;
   }
 
