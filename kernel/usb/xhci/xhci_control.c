@@ -149,7 +149,10 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   xhci_trb_t setup_trb = {0};
   setup_trb.param = setup_val;
   setup_trb.status = 8;
-  setup_trb.control = XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | XHCI_TRB_CH | trt;
+  // Setup Stage TRB bits 4:1 are reserved. CH is not valid on this
+  // stage: Setup, optional Data, and Status are separate control-stage TDs.
+  setup_trb.control =
+      XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | trt;
 
   usb_dma_buf_t data_dma = {0};
   if (has_data) {
@@ -164,12 +167,11 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   if (has_data) {
     data_trb.param = data_dma.phys;
     data_trb.status = (uint32_t)data_len;
-    // IN data stages can terminate with a Short Packet (e.g. an 18-byte
-    // descriptor on a SuperSpeed EP0 with MPS=512). Request the intermediate
-    // Transfer Event so its residual length, not the zero-length Status Stage
-    // event, determines how many bytes were actually received.
+    // This Data Stage TD contains exactly one TRB, so CH must be clear.
+    // On a short IN packet, ISP reports the Data Stage residual; the following
+    // Status Stage TRB then reports completion of the control request.
     data_trb.control =
-        XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) | XHCI_TRB_CH |
+        XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) |
         (is_in ? (XHCI_TRB_DIR_IN | XHCI_TRB_ISP) : 0);
   }
 
