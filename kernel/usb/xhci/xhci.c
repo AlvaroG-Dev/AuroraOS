@@ -924,7 +924,7 @@ int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
 
   uint32_t residual = 0;
   int werr = xhci_wait_transfer(p->slot_id, (uint8_t)dci, trb_phys,
-                                (uint32_t)timeout_ms, &residual);
+                                (uint32_t)timeout_ms, &residual, NULL);
 
   if (werr == 0) {
     if (dir_in) {
