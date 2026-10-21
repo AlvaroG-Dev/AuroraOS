@@ -163,6 +163,8 @@ static int hid_field_matches_report(const usb_hid_dev_t *h,
 
 static uint32_t hid_field_bits(const usb_hid_dev_t *h, const uint8_t *data,
                                const hid_field_t *f) {
+  if (!hid_field_matches_report(h, data, f))
+    return 0;
   uint32_t bit_offset =
       f->bit_offset + (h->report.has_report_id ? 8u : 0u);
   return hid_get_bits(data, bit_offset, f->report_size);
