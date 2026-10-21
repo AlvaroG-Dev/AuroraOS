@@ -28,6 +28,17 @@ static void xhci_port_mark_detached(uint16_t port) {
   __atomic_fetch_and(&g_attached_ports_mask[(port - 1u) >> 5], ~bit,
                      __ATOMIC_ACQ_REL);
 }
+
+// Consulta sin modificar el bitmap; se usa también para verificar
+// que los puertos conectados sobreviven a un segundo escaneo del root hub.
+int xhci_port_is_attached(uint8_t port) {
+  if (port == 0 || port > g_xhci.max_ports)
+    return 0;
+  uint32_t bit = 1u << ((port - 1u) & 31u);
+  uint32_t word = __atomic_load_n(
+      &g_attached_ports_mask[(port - 1u) >> 5], __ATOMIC_ACQUIRE);
+  return (word & bit) != 0;
+}
 static volatile int g_attach_busy = 0;
 
 uint32_t xhci_port_status(uint8_t port) {
