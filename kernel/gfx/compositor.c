@@ -101,7 +101,7 @@ extern uint64_t klog_get_tsc_freq(void);
  * saber si el cuello de botella está en el render, en el blend, o en el
  * blit final a VRAM.
  * ==========================================================================*/
-#define COMP_FRAME_LOG_INTERVAL 120 /* cada ~2 segundos a 60fps */
+#define COMP_FRAME_LOG_INTERVAL 30 /* informe temprano durante diagnósticos */
 
 static uint64_t g_frame_cycles_sum = 0;
 static uint32_t g_frame_count = 0;
