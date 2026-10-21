@@ -146,7 +146,7 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   xhci_trb_t setup_trb = {0};
   setup_trb.param = setup_val;
   setup_trb.status = 8;
-  setup_trb.control = XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | trt;
+  setup_trb.control = XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | XHCI_TRB_CH | trt;
 
   usb_dma_buf_t data_dma = {0};
   if (has_data) {
@@ -162,7 +162,8 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
     data_trb.param = data_dma.phys;
     data_trb.status = (uint32_t)data_len;
     data_trb.control =
-        XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) | (is_in ? XHCI_TRB_DIR_IN : 0);
+        XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) | XHCI_TRB_CH |
+        (is_in ? XHCI_TRB_DIR_IN : 0);
   }
 
   int status_dir_in = !has_data ? 1 : (is_in ? 0 : 1);
