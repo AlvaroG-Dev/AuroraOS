@@ -8,7 +8,26 @@
 #include "xhci_ring.h"
 
 #define PORT_RESET_TIMEOUT_MS 500
-static uint8_t g_attached_ports_mask = 0;
+// xHCI admite hasta 255 puertos raíz. Una máscara uint8_t perdía los
+// puertos 9+; ocho palabras cubren todo el rango sin shifts >= 32.
+static uint32_t g_attached_ports_mask[8] = {0};
+
+static int xhci_port_mark_attached(uint16_t port) {
+  if (port == 0 || port > 255)
+    return 0;
+  uint32_t bit = 1u << ((port - 1u) & 31u);
+  uint32_t old = __atomic_fetch_or(&g_attached_ports_mask[(port - 1u) >> 5],
+                                   bit, __ATOMIC_ACQ_REL);
+  return (old & bit) != 0;
+}
+
+static void xhci_port_mark_detached(uint16_t port) {
+  if (port == 0 || port > 255)
+    return;
+  uint32_t bit = 1u << ((port - 1u) & 31u);
+  __atomic_fetch_and(&g_attached_ports_mask[(port - 1u) >> 5], ~bit,
+                     __ATOMIC_ACQ_REL);
+}
 static volatile int g_attach_busy = 0;
 
 uint32_t xhci_port_status(uint8_t port) {
@@ -91,13 +110,13 @@ int xhci_port_reset(uint8_t port) {
 void xhci_port_poll_changes(void) {
   if (!g_xhci.initialized)
     return;
-  for (uint8_t p = 1; p <= g_xhci.max_ports; p++) {
-    uint32_t s = xhci_port_status(p);
+  for (uint16_t p = 1; p <= (uint16_t)g_xhci.max_ports; p++) {
+    uint32_t s = xhci_port_status((uint8_t)p);
     // Si hay algún bit de cambio pendiente...
     if (s & XHCI_PORTSC_CHANGE_BITS) {
       // ACK de todos los change bits en UNA escritura (RW1C) y sin tocar
       // PED/PR: antes se escribía `s` entero, lo que deshabilitaba el puerto.
-      portsc_write(p, xhci_portsc_neutral(s) | (s & XHCI_PORTSC_CHANGE_BITS));
+      portsc_write((uint8_t)p, xhci_portsc_neutral(s) | (s & XHCI_PORTSC_CHANGE_BITS));
     }
   }
 }
@@ -149,31 +168,28 @@ int xhci_attach_all_devices(void) {
   xhci_port_poll_changes();
   int attached = 0;
 
-  for (uint8_t p = 1; p <= g_xhci.max_ports; p++) {
-    uint32_t s = xhci_port_status(p);
+  for (uint16_t p = 1; p <= (uint16_t)g_xhci.max_ports; p++) {
+    uint32_t s = xhci_port_status((uint8_t)p);
     if (!(s & XHCI_PORTSC_CCS)) {
-      g_attached_ports_mask &= ~(1u << (p - 1));
+      xhci_port_mark_detached(p);
       continue;
     }
-    // Reservar antes de attachar: si hotplug entra mientras tanto,
-    // ve el bit ya puesto y no intenta duplicar.
-    uint8_t old = __atomic_fetch_or(&g_attached_ports_mask, 1u << (p - 1),
-                                    __ATOMIC_ACQ_REL);
-    if (old & (1u << (p - 1)))
+    // Reservar antes de attachar. El escaneo se serializa mediante
+    // g_attach_busy; el bitmap atómico evita perder los puertos 9+.
+    if (xhci_port_mark_attached(p))
       continue;
 
-    if (xhci_attach_one(p) == 0) {
+    if (xhci_attach_one((uint8_t)p) == 0) {
       attached++;
     } else {
-      // Rollback si falló
-      __atomic_fetch_and(&g_attached_ports_mask, ~(1u << (p - 1)),
-                         __ATOMIC_ACQ_REL);
+      // Rollback si falló: permitir reintentos tras un hotplug.
+      xhci_port_mark_detached(p);
     }
   }
 
   if (attached > 0)
     LOG_INFO("[xHCI] %d device(s) attachados", attached);
 
-  g_attach_busy = 0;
+  __atomic_store_n(&g_attach_busy, 0, __ATOMIC_RELEASE);
   return attached;
 }
