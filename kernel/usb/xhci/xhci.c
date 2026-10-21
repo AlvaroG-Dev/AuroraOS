@@ -1,7 +1,6 @@
 // kernel/usb/xhci/xhci.c
 #include "xhci.h"
 #include "../../apic.h"
-#include "../../driver.h"
 #include "../../heap.h"
 #include "../../klog.h"
 #include "../../paging.h"
@@ -11,6 +10,7 @@
 #include "../../uaccess.h"
 #include "../usb_dma.h"
 #include "xhci_ring.h"
+#include "xhci_scratch.h"
 
 xhci_controller_t g_xhci;
 
@@ -37,7 +37,7 @@ static inline void rt_wr(uint32_t off, uint32_t v) {
   *(volatile uint32_t *)(g_xhci.rt + off) = v;
 }
 
-static void xhci_delay_ms(uint32_t ms) {
+void xhci_delay_ms(uint32_t ms) {
   extern uint64_t klog_get_tsc_freq(void);
   uint64_t freq = klog_get_tsc_freq();
   if (freq == 0) {
@@ -85,7 +85,7 @@ int xhci_take_pending_xfer(uint8_t slot, uint8_t ep_id, uint64_t trb_phys,
   for (int i = 0; i < g_pending_xfer_count; i++) {
     if (XHCI_EVT_SLOT(g_pending_xfers[i]) == slot &&
         XHCI_EVT_EP(g_pending_xfers[i]) == ep_id &&
-        g_pending_xfers[i].param == trb_phys) {
+        (trb_phys == 0 || g_pending_xfers[i].param == trb_phys)) {
       *out = g_pending_xfers[i];
       g_pending_xfers[i] = g_pending_xfers[--g_pending_xfer_count];
       spin_unlock_irqrestore(&g_xhci.lock, flags);
@@ -105,25 +105,15 @@ static bool has_hotplug(void *arg) {
   return __atomic_load_n(&g_hotplug_pending, __ATOMIC_ACQUIRE) != 0;
 }
 
-/*
- * Keep the hard IRQ short. USBSTS.EINT, ERDP.EHB and IMAN.IP must be
- * acknowledged after the Event Ring consumer has advanced ERDP; clearing
- * them here can lose a second event that arrives while the thread is running.
- */
 static void xhci_irq_handler_msi(void) {
   __atomic_store_n(&g_event_pending, 1, __ATOMIC_RELEASE);
   wake_up_all(&g_xhci.irq_wq);
 }
 
-// Event thread: único consumidor del anillo.
 void xhci_event_thread(void) {
   LOG_INFO("[xHCI] Event thread iniciado (MSI=%d)", g_xhci.using_msi);
   while (1) {
-    // [FIX] Usar SIEMPRE timeout, incluso con MSI.
-    // Si el MSI falla, el polling cada 10 ticks evita que el sistema se
-    // cuelgue.
     wait_event_interruptible_timeout(&g_xhci.irq_wq, has_events, NULL, 10);
-
     (void)__atomic_exchange_n(&g_event_pending, 0, __ATOMIC_ACQ_REL);
 
     while (1) {
@@ -146,7 +136,6 @@ void xhci_event_thread(void) {
         }
         spin_unlock_irqrestore(&g_xhci.lock, flags);
       } else if (type == XHCI_TRB_TRANSFER_EVT) {
-        // 1. Intentar casar con un URB asíncrono pendiente (bulk UAS).
         usb_bulk_urb_t *async_urb = NULL;
 
         flags = spin_lock_irqsave(&g_xhci.lock);
@@ -172,8 +161,6 @@ void xhci_event_thread(void) {
           async_urb->status =
               (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET) ? 0 : -EIO;
 
-          // Determinar el buffer DMA origen (para IN) y liberar el
-          // que haya allocado el HCD (si lo hay).
           usb_dma_buf_t *src_dma = NULL;
           if (async_urb->dma_buf) {
             src_dma = (usb_dma_buf_t *)async_urb->dma_buf;
@@ -181,15 +168,12 @@ void xhci_event_thread(void) {
             src_dma = (usb_dma_buf_t *)async_urb->hc_priv;
           }
 
-          // Copiar el resultado al buf del caller si es IN y el buffer
-          // del caller no coincide con el DMA.
           if (async_urb->is_in && src_dma && src_dma->virt != async_urb->buf &&
               async_urb->actual_len > 0 && async_urb->status == 0) {
             memcpy(async_urb->buf, src_dma->virt,
                    (size_t)async_urb->actual_len);
           }
 
-          // Liberar el DMA si lo allocamos nosotros.
           if (async_urb->hc_priv) {
             usb_dma_buf_t *owned = (usb_dma_buf_t *)async_urb->hc_priv;
             if (owned->virt)
@@ -203,7 +187,6 @@ void xhci_event_thread(void) {
           continue;
         }
 
-        // 2. Sin match: evento para un waiter síncrono (HID, control).
         flags = spin_lock_irqsave(&g_xhci.lock);
         if (g_pending_xfer_count < XHCI_MAX_PENDING_XFERS) {
           g_pending_xfers[g_pending_xfer_count++] = evt;
@@ -218,12 +201,6 @@ void xhci_event_thread(void) {
       }
     }
 
-    /*
-     * xHCI interrupt acknowledgement order:
-     *   1. clear USBSTS status (including EINT),
-     *   2. advance ERDP and write EHB=1,
-     *   3. clear IMAN.IP while preserving IMAN.IE.
-     */
     uint32_t sts = op_rd(XHCI_OP_USBSTS);
     uint32_t rw1c = sts & (XHCI_USBSTS_EINT | XHCI_USBSTS_PCD |
                            XHCI_USBSTS_HSE | XHCI_USBSTS_HCE);
@@ -241,7 +218,6 @@ void xhci_event_thread(void) {
     if (iman & XHCI_IMAN_IP)
       rt_wr(XHCI_RT_IR0_IMAN, (iman & XHCI_IMAN_IE) | XHCI_IMAN_IP);
 
-    /* Catch an event racing with the empty-ring check and acknowledgement. */
     flags = spin_lock_irqsave(&g_xhci.lock);
     volatile uint32_t *next_trb =
         (volatile uint32_t *)&g_xhci.evt.trbs[g_xhci.evt.dequeue];
@@ -260,30 +236,6 @@ void xhci_hotplug_thread(void) {
     LOG_INFO("[xHCI] Hotplug event detectado, re-escaneando root hub");
     xhci_attach_all_devices();
   }
-}
-
-static int xhci_find_controller(pci_device_t *out) {
-  for (uint16_t bus = 0; bus < 256; bus++) {
-    for (uint8_t slot = 0; slot < 32; slot++) {
-      uint16_t vendor = pci_read_config_word((uint8_t)bus, slot, 0, 0);
-      if (vendor == 0xFFFF)
-        continue;
-      uint8_t hdr = pci_read_config_byte((uint8_t)bus, slot, 0, 0x0E);
-      int nfuncs = (hdr & 0x80) ? 8 : 1;
-      for (uint8_t func = 0; func < nfuncs; func++) {
-        pci_device_t d;
-        if (pci_get_device((uint8_t)bus, slot, func, &d) != 0)
-          continue;
-        if (d.class_id != 0x0C || d.subclass_id != 0x03)
-          continue;
-        if (d.prog_if != 0x30)
-          continue;
-        *out = d;
-        return 0;
-      }
-    }
-  }
-  return -ENODEV;
 }
 
 static int xhci_map_mmio(void) {
@@ -337,10 +289,6 @@ static int xhci_read_caps(void) {
   return 0;
 }
 
-/*
- * Transfer ownership from firmware before touching operational registers.
- * xECP is a dword offset from the capability base; NEXT is measured in dwords.
- */
 static int xhci_legacy_handoff(void) {
   uint32_t xecp = (g_xhci.hccparams1 >> 16) & 0xFFFFu;
   if (xecp == 0)
@@ -352,7 +300,7 @@ static int xhci_legacy_handoff(void) {
     uint8_t cap_id = (uint8_t)(cap & 0xFFu);
     uint8_t next = (uint8_t)((cap >> 8) & 0xFFu);
 
-    if (cap_id == 1) { /* USB Legacy Support capability */
+    if (cap_id == 1) {
       const uint32_t bios_owned = 1u << 16;
       const uint32_t os_owned = 1u << 24;
       *(volatile uint32_t *)(g_xhci.mmio + off) = cap | os_owned;
@@ -372,7 +320,6 @@ static int xhci_legacy_handoff(void) {
       LOG_INFO("[xHCI] USB Legacy Support encontrado; OS-owned solicitado");
       return 0;
     }
-
     if (next == 0)
       break;
     uint32_t advance = (uint32_t)next * 4u;
@@ -394,10 +341,8 @@ static int xhci_hc_reset(void) {
       }
       xhci_delay_ms(1);
     }
-    if (!halted) {
-      LOG_ERR("[xHCI] el controlador no se detuvo antes del reset");
+    if (!halted)
       return -ETIMEDOUT;
-    }
   }
   op_wr(XHCI_OP_USBCMD, op_rd(XHCI_OP_USBCMD) | XHCI_USBCMD_HCRST);
   for (int i = 0; i < 1000; i++) {
@@ -415,6 +360,39 @@ static int xhci_hc_reset(void) {
   if (op_rd(XHCI_OP_USBSTS) & XHCI_USBSTS_CNR)
     return -ETIMEDOUT;
   op_wr(XHCI_OP_CONFIG, g_xhci.max_slots);
+  return 0;
+}
+
+static usb_dma_buf_t g_sp_array_raw, g_sp_pages_raw;
+
+static int xhci_setup_scratchpad(void) {
+  uint32_t n = xhci_scratch_count(g_xhci.hcsparams2);
+  if (n == 0) {
+    LOG_INFO("[xHCI] scratchpad: no requerido");
+    return 0;
+  }
+  size_t pg = xhci_page_size(op_rd(0x08 /* PAGESIZE */));
+
+  if (usb_dma_alloc((size_t)n * 8 + 64, &g_sp_array_raw) != 0)
+    return -ENOMEM;
+  if (usb_dma_alloc((size_t)n * pg + pg, &g_sp_pages_raw) != 0) {
+    usb_dma_free(&g_sp_array_raw);
+    return -ENOMEM;
+  }
+  memset(g_sp_array_raw.virt, 0, (size_t)n * 8 + 64);
+  memset(g_sp_pages_raw.virt, 0, (size_t)n * pg + pg);
+
+  size_t aoff = xhci_align_off(g_sp_array_raw.phys, 64);
+  size_t poff = xhci_align_off(g_sp_pages_raw.phys, pg);
+  uint64_t *arr = (uint64_t *)((uint8_t *)g_sp_array_raw.virt + aoff);
+  uint64_t arr_phys = g_sp_array_raw.phys + aoff;
+  uint64_t pages_phys = g_sp_pages_raw.phys + poff;
+  for (uint32_t i = 0; i < n; i++)
+    arr[i] = pages_phys + (uint64_t)i * pg;
+
+  g_xhci.dcbaa[0] = arr_phys;
+  __asm__ volatile("mfence" ::: "memory");
+  LOG_INFO("[xHCI] scratchpad: %u buffers x %u B", n, (unsigned)pg);
   return 0;
 }
 
@@ -452,6 +430,17 @@ static int xhci_init_rings(void) {
   }
   g_xhci.dcbaa = (uint64_t *)dcbaa_buf.virt;
   g_xhci.dcbaa_phys = dcbaa_buf.phys;
+  memset(g_xhci.dcbaa, 0, dcbaa_bytes);
+
+  rc = xhci_setup_scratchpad();
+  if (rc != 0) {
+    LOG_ERR("[xHCI] scratchpad falló: %d", rc);
+    usb_dma_free(&dcbaa_buf);
+    usb_dma_free(&erst_buf);
+    xhci_ring_destroy(&g_xhci.evt);
+    xhci_ring_destroy(&g_xhci.cmd);
+    return rc;
+  }
 
   op_wr(XHCI_OP_DCBAAP, (uint32_t)(g_xhci.dcbaa_phys & 0xFFFFFFFF));
   op_wr(XHCI_OP_DCBAAP + 4, (uint32_t)(g_xhci.dcbaa_phys >> 32));
@@ -465,7 +454,6 @@ static int xhci_init_rings(void) {
   rt_wr(XHCI_RT_IR0_ERDP,
         (uint32_t)(g_xhci.evt.phys & 0xFFFFFFF0u) | XHCI_ERDP_EHB);
 
-  /* Interrupts stay disabled until the handler and consumer threads exist. */
   rt_wr(XHCI_RT_IR0_IMAN, 0);
 
   op_wr(XHCI_OP_USBCMD, XHCI_USBCMD_RS);
@@ -487,8 +475,7 @@ static int xhci_power_on_ports(void) {
     uint32_t portsc = op_rd(XHCI_OP_PORTSC(p));
     if (portsc & XHCI_PORTSC_PP)
       continue;
-    uint32_t val = portsc & ~XHCI_PORTSC_CHANGE_BITS;
-    val |= XHCI_PORTSC_PP;
+    uint32_t val = xhci_portsc_neutral(portsc) | XHCI_PORTSC_PP;
     op_wr(XHCI_OP_PORTSC(p), val);
     for (int i = 0; i < 100; i++) {
       if (op_rd(XHCI_OP_PORTSC(p)) & XHCI_PORTSC_PP)
@@ -526,6 +513,7 @@ int xhci_hcd_alloc_device(usb_device_t *dev) {
     kfree(p);
     return rc;
   }
+  memset(p->out_ctx.virt, 0, out_ctx_size);
   dev->hc_priv = p;
   return 0;
 }
@@ -557,8 +545,6 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
   int dir_in = (ep->addr & 0x80) ? 1 : 0;
   if (ep_num == 0 || ep_num > 15)
     return -EINVAL;
-  // USB endpoint addresses include direction. Endpoint N IN and N OUT
-  // are distinct xHCI endpoints and must not share software state.
   xhci_ep_state_t *st = &p->eps[2 * (ep_num - 1) + dir_in];
   if (st->configured) {
     ep->hc_ep = st;
@@ -612,8 +598,6 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
     memset(sc, 0, XHCI_UAS_STREAM_COUNT * sizeof(*sc));
     uint64_t stream_deq = xhci_ring_trb_phys(&st->ring, 0);
     for (uint32_t sid = 1; sid < XHCI_UAS_STREAM_COUNT; sid++) {
-      // Stream Context Entry layout: DWORDs 0-1 are the dequeue pointer
-      // (with DCS in bit 0), DWORD 2 is reserved, DWORD 3 contains SCT.
       sc[sid].param = stream_deq | XHCI_EP_DEQ_DCS;
       sc[sid].status = 0;
       sc[sid].control = XHCI_STREAM_CTX_SCT_PRIMARY;
@@ -711,26 +695,17 @@ int xhci_hcd_new_device(usb_device_t *parent_hub, uint8_t port,
   icc->icc.add = XHCI_ICC_ADD_SLOT | XHCI_ICC_ADD_EP0;
 
   uint32_t route = usb_device_route(dev);
-
-  // ------------------------------------------------------------------
-  // Transaction Translator (TT) para dispositivos FS/LS detrás de un hub HS/SS.
-  // Si el padre es un hub de alta velocidad y el hijo es de baja/full speed,
-  // el xHCI necesita saber qué TT usar (el del hub padre).
-  // ------------------------------------------------------------------
   uint32_t dw2 = 0;
   if (parent_hub != NULL) {
     if ((parent_hub->speed == USB_SPEED_HIGH ||
          parent_hub->speed == USB_SPEED_SUPER ||
          parent_hub->speed == USB_SPEED_SUPER_PLUS) &&
         (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW)) {
-
-      uint8_t tt_hub_slot = parent_hub->addr; // Slot ID del hub
-      uint8_t tt_port = port;                 // Puerto en el hub
-      uint8_t ttt = 1;                        // Think Time (1 = 8 FS bit times)
-
+      uint8_t tt_hub_slot = parent_hub->addr;
+      uint8_t tt_port = port;
+      uint8_t ttt = 1;
       dw2 = XHCI_SLOT_DW2_TT_HUB_SLOT(tt_hub_slot) |
             XHCI_SLOT_DW2_TT_PORT(tt_port) | XHCI_SLOT_DW2_TTT(ttt);
-
       LOG_INFO("[xHCI] slot %u: TT configurado (hub_slot=%u port=%u ttt=%u)",
                slot, tt_hub_slot, tt_port, ttt);
     }
@@ -762,10 +737,7 @@ int xhci_hcd_new_device(usb_device_t *parent_hub, uint8_t port,
     return rc;
   }
 
-  // [FIX HARDWARE REAL] El dispositivo necesita tiempo para procesar el
-  // SET_ADDRESS internamente. 20ms es un estándar seguro.
-  extern void xhci_delay_ms(uint32_t ms);
-  xhci_delay_ms(20);
+  xhci_delay_ms(20); // SET_ADDRESS settle time
 
   LOG_INFO("[xHCI] new device slot=%u route=0x%05x speed=%d parent=%s port=%u",
            slot, route, (int)speed, parent_hub ? "hub" : "root", port);
@@ -777,34 +749,23 @@ int xhci_hcd_set_hub_info(usb_device_t *dev, uint8_t num_ports) {
   if (!dev || !dev->hc_priv)
     return -EINVAL;
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
-
   xhci_input_ctx_t *icc = (xhci_input_ctx_t *)p->input_ctx.virt;
   memset(icc, 0, sizeof(*icc));
-
   icc->icc.add = XHCI_ICC_ADD_SLOT;
-
   uint32_t route = usb_device_route(dev);
-
-  // DW0: Route, Speed, Hub=1, Context Entries
   icc->slot.dw0 = XHCI_SLOT_DW0_ROUTE(route) |
                   XHCI_SLOT_DW0_SPEED(usb_speed_to_xhci_slot_code(p->speed)) |
                   XHCI_SLOT_DW0_CTX_ENT(1) | XHCI_SLOT_DW0_HUB;
-
-  // DW1: Root Hub Port, Number of Ports
   icc->slot.dw1 = XHCI_SLOT_DW1_RH_PORT(p->root_hub_port) |
                   XHCI_SLOT_DW1_NUM_PORTS(num_ports);
-
   icc->slot.dw2 = 0;
   icc->slot.dw3 = 0;
-
   usb_dma_sync(&p->input_ctx, USB_DMA_TO_DEVICE);
-
   int rc = xhci_cmd_evaluate_context(p->slot_id, p->input_ctx.phys);
   if (rc != 0) {
     LOG_ERR("[xHCI] set_hub_info(slot=%u) falló: %d", p->slot_id, rc);
     return rc;
   }
-
   LOG_INFO("[xHCI] slot %u: marcado como hub (%u puertos)", p->slot_id,
            num_ports);
   return 0;
@@ -814,7 +775,6 @@ int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
                          usb_bulk_urb_t *urb) {
   if (!dev || !dev->hc_priv || !ep || !urb || !urb->buf || urb->len <= 0)
     return -EINVAL;
-
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
   xhci_ep_state_t *st = (xhci_ep_state_t *)ep->hc_ep;
   if (!st || !st->configured)
@@ -831,7 +791,6 @@ int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
     return -EINVAL;
   }
 
-  // Elegir buffer DMA: el del caller si lo aporta, o uno propio.
   usb_dma_buf_t dma_local;
   usb_dma_buf_t *dma = NULL;
   int dma_allocated = 0;
@@ -839,7 +798,6 @@ int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
 
   if (urb->dma_buf) {
     dma = urb->dma_buf;
-    // Aseguramos que el write-back al físico esté hecho si es OUT.
     if (!dir_in)
       usb_dma_sync(dma, USB_DMA_TO_DEVICE);
   } else {
@@ -853,7 +811,6 @@ int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
     }
   }
 
-  // Reservar slot en la cola antes de tocar el ring.
   unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
   if (g_async_urb_count >= XHCI_MAX_ASYNC_URBS) {
     spin_unlock_irqrestore(&g_xhci.lock, flags);
@@ -893,9 +850,6 @@ int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
       dci | ((uint32_t)stream_id * 65536u);
   spin_unlock_irqrestore(&g_xhci.lock, flags);
 
-  // Guardar el buffer DMA allocado (solo si lo hemos allocado nosotros)
-  // para liberarlo en el completion. Si urb->dma_buf es del caller,
-  // dejamos hc_priv = NULL como marcador.
   if (dma_allocated) {
     usb_dma_buf_t *saved = kmalloc(sizeof(*saved));
     if (saved)
@@ -904,29 +858,14 @@ int xhci_hcd_bulk_submit(usb_device_t *dev, usb_endpoint_t *ep,
   } else {
     urb->hc_priv = NULL;
   }
-
   return 0;
 }
 
-// ===========================================================================
-// Bulk transfer síncrono usando un buffer DMA ya preparado por el caller.
-//
-// `phys` es la dirección física del buffer (el caller la obtuvo con
-// usb_dma_alloc). `virt` es la misma memoria mapeada vía PHYS_MAP_BASE,
-// solo se usa para devolver el data en IN. NO se hace memcpy: el HC
-// lee/escribe directamente en `phys`.
-//
-// Esto evita el problema de coherencia caché<->DMA que se da con
-// usb-uas (QEMU lee el buffer con address_space_read sin pasar por
-// la caché del CPU guest, y el memcpy a un DMA nuevo deja los bytes
-// en caché sin write-back visible al emulador).
-// ===========================================================================
 int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
                             uint64_t phys, void *virt, int len, int is_in,
                             int timeout_ms) {
   if (!dev || !dev->hc_priv || !ep || !phys || !virt || len <= 0)
     return -EINVAL;
-
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
   xhci_ep_state_t *st = (xhci_ep_state_t *)ep->hc_ep;
   if (!st || !st->configured)
@@ -943,9 +882,6 @@ int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
   int ep_num = ep->addr & 0x0F;
   uint32_t dci = dir_in ? (2 * ep_num + 1) : (2 * ep_num);
 
-  // Write-back del rango antes de DMA (no-op en x86 coherente, pero
-  // necesario para QEMU's usb-uas que lee del buffer físico sin pasar
-  // por la caché del guest).
   if (!dir_in) {
     uintptr_t start = (uintptr_t)virt & ~(uintptr_t)63;
     uintptr_t end = ((uintptr_t)virt + (uintptr_t)len + 63) & ~(uintptr_t)63;
@@ -1011,7 +947,23 @@ usb_hcd_t g_xhci_hcd = {
     .free_device = xhci_hcd_free_device,
 };
 
-int xhci_probe(void) {
+static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
+  (void)id;
+  if (!pci_dev)
+    return -EINVAL;
+  if (pci_dev->prog_if != 0x30) {
+    LOG_INFO("[xHCI] %02x:%02x.%x: progif=0x%02x != 0x30, no es xHCI",
+             pci_dev->bus, pci_dev->slot, pci_dev->func, pci_dev->prog_if);
+    return -ENODEV;
+  }
+  if (g_xhci.initialized) {
+    LOG_INFO("[xHCI] %02x:%02x.%x: ya hay xHCI activo en %02x:%02x.%x, "
+             "ignorando este controlador",
+             pci_dev->bus, pci_dev->slot, pci_dev->func, g_xhci.pci.bus,
+             g_xhci.pci.slot, g_xhci.pci.func);
+    return -EBUSY;
+  }
+
   memset(&g_xhci, 0, sizeof(g_xhci));
   spin_init(&g_xhci.lock);
   wait_queue_init(&g_xhci.irq_wq);
@@ -1019,13 +971,11 @@ int xhci_probe(void) {
   wait_queue_init(&g_xhci.xfer_wq);
   wait_queue_init(&g_xhci.hub_wq);
 
-  int rc = xhci_find_controller(&g_xhci.pci);
-  if (rc != 0)
-    return rc;
-
+  g_xhci.pci = *pci_dev;
   pci_enable_bus_mastering(&g_xhci.pci);
   pci_enable_io_mem(&g_xhci.pci);
-  rc = xhci_map_mmio();
+
+  int rc = xhci_map_mmio();
   if (rc != 0)
     return rc;
   rc = xhci_read_caps();
@@ -1042,10 +992,6 @@ int xhci_probe(void) {
     return rc;
   xhci_power_on_ports();
 
-  /*
-   * Register the vector before enabling MSI in PCI config space. The HC is
-   * running, but USBCMD.INTE and IMAN.IE remain disabled until this is ready.
-   */
   uint8_t msi_vec = 0x62;
   msi_install_handler(msi_vec, xhci_irq_handler_msi);
   if (pci_enable_msi(g_xhci.pci.bus, g_xhci.pci.slot, g_xhci.pci.func, msi_vec,
@@ -1060,7 +1006,6 @@ int xhci_probe(void) {
 
   g_xhci.initialized = 1;
 
-  /* Create the consumer before allowing the controller to generate MSI. */
   if (!sched_create_task(xhci_event_thread)) {
     LOG_ERR("[xHCI] no se pudo crear Event Thread; abortando");
     g_xhci.initialized = 0;
@@ -1074,10 +1019,32 @@ int xhci_probe(void) {
     op_wr(XHCI_OP_USBCMD, op_rd(XHCI_OP_USBCMD) | XHCI_USBCMD_INTE);
   }
 
-  xhci_attach_all_devices();
+  // [FIX] No enumerar sincrónicamente aquí para no bloquear pci_bus_probe_all.
+  // Encolamos el escaneo en el hotplug thread.
+  __atomic_store_n(&g_hotplug_pending, 1, __ATOMIC_RELEASE);
+  wake_up_all(&g_xhci.hub_wq);
+
   LOG_INFO("[xHCI] inicializado");
   return 0;
 }
+
+static const pci_device_id_t xhci_id_table[] = {{
+                                                    .vendor_id = PCI_ANY_ID,
+                                                    .device_id = PCI_ANY_ID,
+                                                    .subvendor = PCI_ANY_ID,
+                                                    .subdevice = PCI_ANY_ID,
+                                                    .class_id = 0x0C,
+                                                    .subclass_id = 0x03,
+                                                    .class_mask = 0xFF,
+                                                },
+                                                {0}};
+
+pci_driver_t xhci_pci_driver = {
+    .name = "xhci",
+    .id_table = xhci_id_table,
+    .probe = xhci_probe_inner,
+    .remove = NULL,
+};
 
 void xhci_dump(void) {
   if (!g_xhci.initialized)
@@ -1103,7 +1070,3 @@ void xhci_port_dump_all(void) {
         !!(portsc & XHCI_PORTSC_PP), (portsc >> 5) & 0xF, (portsc >> 10) & 0xF);
   }
 }
-
-static int xhci_init_impl(void) { return xhci_probe(); }
-struct driver xhci_driver = {
-    .name = "xhci", .init = xhci_init_impl, .shutdown = NULL};

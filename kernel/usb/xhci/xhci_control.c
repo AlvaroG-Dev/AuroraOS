@@ -10,22 +10,6 @@
 
 static bool has_pending_xfer(void *arg) { return g_pending_xfer_count > 0; }
 
-// ===========================================================================
-// Bulk transfer síncrono (Fase 4).
-//
-// Reutiliza el motor de interrupt_xfer: el TRB es un Normal TRB con
-// IOC y la mecánica es idéntica. La diferencia semántica (bulk no
-// tiene "short packet early termination") se cubre con ISP=1, que en
-// bulk simplemente acelera el reporte de transfers cortos.
-// ===========================================================================
-int xhci_hcd_bulk_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
-                       int len, int is_in, int timeout_ms) {
-  (void)is_in; // xhci_hcd_interrupt_xfer lo deriva de ep->addr
-  int actual = 0;
-  int rc = xhci_hcd_interrupt_xfer(dev, ep, buf, len, timeout_ms, &actual);
-  return rc == 0 ? actual : rc;
-}
-
 int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
                        uint32_t timeout_ms, uint32_t *out_residual_len) {
   if (!g_xhci.initialized)
@@ -38,7 +22,6 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
   if (freq == 0)
     freq = 2000000000ULL;
 
-  // timeout_ms == 0 → espera infinita.
   uint64_t max_cycles = (timeout_ms == 0) ? 0 : (freq / 1000) * timeout_ms;
 
   uint32_t lo, hi;
@@ -47,7 +30,6 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
 
   int iter = 0;
   while (1) {
-    // 1. Timeout real por TSC.
     if (max_cycles != 0) {
       __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
       if ((((uint64_t)hi << 32) | lo) - t0 >= max_cycles) {
@@ -56,7 +38,6 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
       }
     }
 
-    // 2. Intentar consumir MI evento específico.
     xhci_trb_t evt;
     if (xhci_take_pending_xfer(slot, ep_id, last_trb_phys, &evt) == 0) {
       uint32_t cc = XHCI_EVT_CC(evt);
@@ -68,8 +49,6 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
       return -EIO;
     }
 
-    // 3. No hay evento para mí (puede haber eventos para otros endpoints
-    //    en g_pending_xfers[]). Ceder CPU y reintentar.
     if ((++iter & 0x3F) == 0)
       sched_yield();
     else
@@ -77,7 +56,76 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
   }
 }
 
-// kernel/usb/xhci/xhci_control.c
+static void xhci_diag_timeout(xhci_dev_priv_t *p) {
+  uint32_t sts = *(volatile uint32_t *)(g_xhci.op + XHCI_OP_USBSTS);
+  uint32_t psc = xhci_port_status(p->root_hub_port);
+  uint32_t ep0_dw0 = 0;
+  if (p->out_ctx.virt)
+    ep0_dw0 =
+        *(volatile uint32_t *)((uint8_t *)p->out_ctx.virt + g_xhci.ctx_size);
+  LOG_ERR(
+      "[xHCI] diag slot=%u: USBSTS=0x%08x%s%s PORTSC[%u]=0x%08x "
+      "(CCS=%d PED=%d PLS=%u) EP0.state=%u (0=off 1=run 2=halt 3=stop 4=err)",
+      p->slot_id, sts, (sts & XHCI_USBSTS_HSE) ? " HSE!" : "",
+      (sts & XHCI_USBSTS_HCH) ? " HALTED!" : "", p->root_hub_port, psc,
+      !!(psc & XHCI_PORTSC_CCS), !!(psc & XHCI_PORTSC_PED),
+      (psc >> XHCI_PORTSC_PLS_SHIFT) & 0xF, ep0_dw0 & 7u);
+}
+
+int xhci_cmd_reset_endpoint(uint8_t slot, uint32_t dci) {
+  xhci_trb_t trb = {0};
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_RESET_EP) | ((uint32_t)slot << 24) |
+                ((uint32_t)dci << 16);
+
+  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+  uint32_t idx = g_xhci.cmd.enqueue;
+  if (idx == g_xhci.cmd.size - 1)
+    idx = 0;
+  uint64_t phys = xhci_ring_trb_phys(&g_xhci.cmd, idx);
+  int rc = xhci_ring_enqueue(&g_xhci.cmd, &trb);
+  if (rc == 0) {
+    __asm__ volatile("mfence" ::: "memory");
+    *(volatile uint32_t *)(g_xhci.db + 0) = 0;
+  }
+  spin_unlock_irqrestore(&g_xhci.lock, flags);
+  return rc;
+}
+
+int xhci_cmd_set_tr_dequeue(uint8_t slot, uint32_t dci, uint64_t deq_ptr,
+                            int dcs) {
+  xhci_trb_t trb = {0};
+  trb.param = deq_ptr;
+  trb.status = 0;
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_SET_TR_DEQUEUE) |
+                ((uint32_t)slot << 24) | ((uint32_t)dci << 16);
+  if (dcs)
+    trb.param |= 1;
+
+  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+  uint32_t idx = g_xhci.cmd.enqueue;
+  if (idx == g_xhci.cmd.size - 1)
+    idx = 0;
+  uint64_t phys = xhci_ring_trb_phys(&g_xhci.cmd, idx);
+  int rc = xhci_ring_enqueue(&g_xhci.cmd, &trb);
+  if (rc == 0) {
+    __asm__ volatile("mfence" ::: "memory");
+    *(volatile uint32_t *)(g_xhci.db + 0) = 0;
+  }
+  spin_unlock_irqrestore(&g_xhci.lock, flags);
+  return rc;
+}
+
+void xhci_recover_ep0(xhci_dev_priv_t *p) {
+  LOG_INFO("[xHCI] slot %u: recuperando EP0 tras error", p->slot_id);
+  xhci_cmd_reset_endpoint(p->slot_id, 1);
+  xhci_delay_ms(10);
+  p->ep0_ring.enqueue = 0;
+  p->ep0_ring.dequeue = 0;
+  p->ep0_ring.cycle = 1;
+  uint64_t deq = xhci_ring_trb_phys(&p->ep0_ring, 0) | XHCI_EP_DEQ_DCS;
+  xhci_cmd_set_tr_dequeue(p->slot_id, 1, deq, 1);
+  xhci_delay_ms(10);
+}
 
 int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
                           int data_len, int is_in, int timeout_ms) {
@@ -98,17 +146,14 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   xhci_trb_t setup_trb = {0};
   setup_trb.param = setup_val;
   setup_trb.status = 8;
-  setup_trb.control =
-      XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | XHCI_TRB_CH | trt;
+  setup_trb.control = XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | trt;
 
   usb_dma_buf_t data_dma = {0};
   if (has_data) {
     if (usb_dma_alloc((size_t)data_len, &data_dma) != 0)
       return -ENOMEM;
-    if (!is_in) {
+    if (!is_in)
       memcpy(data_dma.virt, data, (size_t)data_len);
-    }
-    // [FIX] Asegurar write-back antes de DMA (útil en QEMU TCG)
     usb_dma_sync(&data_dma, is_in ? USB_DMA_FROM_DEVICE : USB_DMA_TO_DEVICE);
   }
 
@@ -116,8 +161,8 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   if (has_data) {
     data_trb.param = data_dma.phys;
     data_trb.status = (uint32_t)data_len;
-    data_trb.control = XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) | XHCI_TRB_CH |
-                       (is_in ? XHCI_TRB_DIR_IN : 0);
+    data_trb.control =
+        XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) | (is_in ? XHCI_TRB_DIR_IN : 0);
   }
 
   int status_dir_in = !has_data ? 1 : (is_in ? 0 : 1);
@@ -130,11 +175,7 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   uint64_t status_phys = 0;
   int rc;
 
-  // [FIX] Todo el cálculo y enqueue debe ocurrir DENTRO del lock para evitar
-  // races
   unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
-
-  // Calcular dirección física del status TRB de forma segura
   uint32_t status_idx = p->ep0_ring.enqueue;
   for (uint32_t i = 0; i < n_trbs; i++) {
     if (status_idx == p->ep0_ring.size - 1)
@@ -164,9 +205,11 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
 
   uint32_t actual = 0;
   int werr =
-      xhci_wait_transfer(p->slot_id, 1, status_phys, timeout_ms, &actual);
+      xhci_wait_transfer(p->slot_id, 1, 0 /* WILDCARD */, timeout_ms, &actual);
 
   if (werr != 0) {
+    xhci_diag_timeout(p);
+    xhci_recover_ep0(p);
     if (has_data)
       usb_dma_free(&data_dma);
     return werr;
@@ -178,13 +221,11 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
       actual = (uint32_t)data_len;
     transferred = data_len - (int)actual;
     if (is_in) {
-      // Invalidar caché tras DMA IN
       usb_dma_sync(&data_dma, USB_DMA_FROM_DEVICE);
       memcpy(data, data_dma.virt, transferred);
     }
     usb_dma_free(&data_dma);
   }
-
   return transferred;
 }
 
@@ -234,9 +275,8 @@ int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
   uint32_t residual = 0;
   int werr = xhci_wait_transfer(p->slot_id, (uint8_t)dci, trb_phys,
                                 (uint32_t)timeout_ms, &residual);
-  if (werr == 0 && residual > (uint32_t)len) {
+  if (werr == 0 && residual > (uint32_t)len)
     werr = -EIO;
-  }
   if (werr == 0) {
     uint32_t actual = (uint32_t)len - residual;
     if (dir_in)
@@ -246,4 +286,12 @@ int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
   }
   usb_dma_free(&dma);
   return werr;
+}
+
+int xhci_hcd_bulk_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
+                       int len, int is_in, int timeout_ms) {
+  (void)is_in;
+  int actual = 0;
+  int rc = xhci_hcd_interrupt_xfer(dev, ep, buf, len, timeout_ms, &actual);
+  return rc == 0 ? actual : rc;
 }

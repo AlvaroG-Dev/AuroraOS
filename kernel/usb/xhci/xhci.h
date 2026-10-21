@@ -67,6 +67,17 @@
 
 #define XHCI_PLS_U0 0
 
+#define XHCI_PORTSC_OCA (1u << 3)
+#define XHCI_PORTSC_SPEED_MASK (0xFu << 10)
+#define XHCI_PORTSC_WAKE_BITS (7u << 25)
+#define XHCI_PORTSC_DR (1u << 30)
+#define XHCI_PORTSC_PRESERVE                                                   \
+  (XHCI_PORTSC_CCS | XHCI_PORTSC_OCA | XHCI_PORTSC_PLS_MASK | XHCI_PORTSC_PP | \
+   XHCI_PORTSC_SPEED_MASK | XHCI_PORTSC_WAKE_BITS | XHCI_PORTSC_DR)
+static inline uint32_t xhci_portsc_neutral(uint32_t v) {
+  return v & XHCI_PORTSC_PRESERVE;
+}
+
 typedef struct {
   uint64_t param;
   uint32_t status;
@@ -83,6 +94,8 @@ typedef struct {
 #define XHCI_TRB_ADDRESS_DEVICE 11
 #define XHCI_TRB_CONFIGURE_EP 12
 #define XHCI_TRB_EVAL_CTX 13
+#define XHCI_TRB_RESET_EP 14
+#define XHCI_TRB_SET_TR_DEQUEUE 16
 #define XHCI_TRB_NO_OP_CMD 23
 #define XHCI_TRB_TRANSFER_EVT 32
 #define XHCI_TRB_CMD_COMPLETION 33
@@ -237,6 +250,8 @@ int xhci_take_pending_xfer(uint8_t slot, uint8_t ep_id, uint64_t trb_phys,
 void xhci_event_thread(void);
 void xhci_hotplug_thread(void);
 
+void xhci_delay_ms(uint32_t ms);
+
 int xhci_probe(void);
 void xhci_dump(void);
 int xhci_cmd_noop(void);
@@ -334,7 +349,6 @@ typedef struct xhci_dev_priv {
   uint8_t root_hub_port;
   usb_speed_t speed;
   xhci_ring_t ep0_ring;
-  // One state per non-control DCI: 15 endpoint numbers x IN/OUT.
   xhci_ep_state_t eps[30];
   usb_dma_buf_t input_ctx;
   usb_dma_buf_t out_ctx;
@@ -397,5 +411,12 @@ int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
 
 int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
                        uint32_t timeout_ms, uint32_t *out_residual_len);
+
+int xhci_cmd_reset_endpoint(uint8_t slot, uint32_t dci);
+int xhci_cmd_set_tr_dequeue(uint8_t slot, uint32_t dci, uint64_t deq_ptr,
+                            int dcs);
+void xhci_recover_ep0(xhci_dev_priv_t *p);
+
+extern pci_driver_t xhci_pci_driver;
 
 #endif

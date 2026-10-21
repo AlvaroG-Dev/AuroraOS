@@ -235,6 +235,8 @@ typedef struct process {
 
 } process_t;
 
+void process_init(void);
+
 process_t *process_spawn(const char *name, const void *elf_data,
                          size_t elf_size);
 process_t *process_load(const char *path);

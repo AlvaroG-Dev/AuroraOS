@@ -1,6 +1,5 @@
-#include "ipc.h"
 // kernel/main.c
-// Punto de entrada del kernel Aurora OS
+// Punto de entrada del kernel Aurora OS.
 
 #include "../bootloader/include/kernel_boot_info.h"
 #include "acpi.h"
@@ -14,6 +13,7 @@
 #include "block.h"
 #include "boot_console.h"
 #include "boot_splash.h"
+#include "completion.h"
 #include "cpu.h"
 #include "driver.h"
 #include "elf.h"
@@ -24,9 +24,12 @@
 #include "heap.h"
 #include "idt.h"
 #include "input.h"
+#include "ipc.h"
 #include "ipi.h"
+#include "irq_threaded.h"
 #include "iso9660.h"
 #include "klog.h"
+#include "kthread.h"
 #include "net/arp.h"
 #include "net/dhcp.h"
 #include "net/e1000e.h"
@@ -59,13 +62,13 @@
 #include "time.h"
 #include "tty.h"
 #include "vdso.h"
+#include "workqueue.h"
 #include <stddef.h>
 #include <stdint.h>
 
-// ---------------------------------------------------------------------------
-// Boot info (MISMO ORDEN Y TIPOS QUE EL BOOTLOADER)
-// ---------------------------------------------------------------------------
-
+// ===========================================================================
+// Estado global (accesible desde tareas de init)
+// ===========================================================================
 static struct kernel_boot_info boot;
 static struct kernel_boot_info g_boot_info;
 
@@ -87,26 +90,34 @@ extern struct driver xhci_driver;
 extern uint8_t __text_start;
 extern uint8_t __bss_end;
 
-// ---------------------------------------------------------------------------
+// Completions globales. Reglas de consumidor:
+//   - g_acpi_done:   0 waiters (informativo)
+//   - g_fb_done:     1 waiter  → complete()
+//   - g_vfs_done:    3 waiters → complete_all()   [ver fix #1]
+//   - g_drivers_done: 1 waiter → complete()
+//   - g_smp_done:    1 waiter  → complete()
+//   - g_timer_done:  0 waiters (informativo)
+static completion_t g_acpi_done;
+static completion_t g_fb_done;
+static completion_t g_vfs_done;
+static completion_t g_drivers_done;
+static completion_t g_smp_done;
+static completion_t g_timer_done;
+
+// ===========================================================================
 // Framebuffer helpers
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static int fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch,
                    uint32_t bpp, uint64_t size) {
   if (base == 0 || w == 0 || h == 0 || pitch == 0 || (bpp != 24 && bpp != 32) ||
       pitch < (uint64_t)w * (bpp / 8) || (uint64_t)pitch * h > size) {
     fb_ptr = NULL;
-    fb_width = 0;
-    fb_height = 0;
-    fb_pitch = 0;
-    fb_bpp = 0;
     fb_hw_ptr = NULL;
+    fb_width = fb_height = fb_pitch = fb_bpp = 0;
     fb_hw_pitch = 0;
-    LOG_WARN(
-        "[FB] parametros invalidos: base=%p %ux%u bpp=%u pitch=%u size=%lu",
-        (void *)base, w, h, bpp, pitch, (unsigned long)size);
+    LOG_WARN("[FB] parametros invalidos");
     return 0;
   }
-
   fb_hw_ptr = (uint8_t *)base;
   fb_hw_pitch = pitch;
   fb_width = w;
@@ -118,20 +129,17 @@ static int fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch,
     if (pixels > SIZE_MAX / sizeof(uint32_t)) {
       fb_ptr = NULL;
       fb_hw_ptr = NULL;
-      LOG_ERR("[FB] dimensiones demasiado grandes para buffer RGB888");
       return 0;
     }
     fb_ptr = (uint32_t *)kmalloc((size_t)pixels * sizeof(uint32_t));
     if (!fb_ptr) {
       fb_hw_ptr = NULL;
-      LOG_ERR("[FB] no se pudo reservar buffer RGB888 de %ux%u", w, h);
       return 0;
     }
   } else {
     fb_ptr = (uint32_t *)base;
   }
-  LOG_INFO("[FB] Inicializado en memoria: %p %u x %u bpp=%u pitch=%u",
-           (void *)base, w, h, bpp, pitch);
+  LOG_INFO("[FB] Inicializado: %p %ux%u bpp=%u", (void *)base, w, h, bpp);
   return 1;
 }
 
@@ -156,57 +164,31 @@ void fb_flush_rect(const uint32_t *src, uint32_t src_pitch, uint32_t x,
   }
 }
 
-static void fb_fill(uint32_t color) {
-  if (!fb_ptr)
-    return;
-  for (uint32_t y = 0; y < fb_height; y++) {
-    uint32_t *row = fb_ptr + (uint64_t)y * fb_pitch;
-    for (uint32_t x = 0; x < fb_width; x++)
-      row[x] = color;
-  }
-  fb_flush_rect(fb_ptr, fb_pitch, 0, 0, fb_width, fb_height);
-}
-
-// ---------------------------------------------------------------------------
-// Memmap parse
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Memmap helpers
+// ===========================================================================
 #define EFI_CONVENTIONAL_MEMORY 7
 
 static void parse_memmap(void) {
-  if (!boot.memmap || boot.memmap_size == 0) {
-    LOG_PANIC("[MEM] No hay mapa de memoria disponible");
+  if (!boot.memmap || boot.memmap_size == 0 || boot.memmap_desc_size < 40 ||
+      boot.memmap_size % boot.memmap_desc_size != 0)
     return;
-  }
-  if (boot.memmap_desc_size < 40 || boot.memmap_desc_size > boot.memmap_size ||
-      boot.memmap_size % boot.memmap_desc_size != 0) {
-    LOG_PANIC("[MEM] Descriptor EFI inválido: size=%lu desc_size=%lu",
-              (unsigned long)boot.memmap_size,
-              (unsigned long)boot.memmap_desc_size);
-    return;
-  }
-  LOG_INFO("[MEM] Mapa de memoria EFI:");
   uint8_t *ptr = (uint8_t *)boot.memmap;
-  uint64_t total_usable = 0;
-
+  uint64_t total = 0;
   for (uint64_t i = 0; i < boot.memmap_size; i += boot.memmap_desc_size) {
     uint32_t type = *(uint32_t *)(ptr + i + 0);
-    uint64_t phys = *(uint64_t *)(ptr + i + 8);
     uint64_t pages = *(uint64_t *)(ptr + i + 24);
     uint64_t len = pages * 4096;
-
-    if (type == EFI_CONVENTIONAL_MEMORY) {
-      total_usable += len;
-      LOG_INFO("  [USABLE] %p - %p (%lu MB)", (void *)phys,
-               (void *)(phys + len), (unsigned long)(len / (1024 * 1024)));
-    }
+    if (type == EFI_CONVENTIONAL_MEMORY)
+      total += len;
   }
   LOG_INFO("[MEM] Total usable: %lu MB",
-           (unsigned long)(total_usable / (1024 * 1024)));
+           (unsigned long)(total / (1024 * 1024)));
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // SSE
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static void sse_init(void) {
   uint64_t cr4;
   __asm__ volatile("movq %%cr4, %0" : "=r"(cr4));
@@ -216,24 +198,20 @@ static void sse_init(void) {
   LOG_INFO("[SSE] OSFXSR + OSXMMEXCPT habilitados");
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Servicio IPC de eco
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static uint32_t ipc_echo_task_id = 0;
 
 static void ipc_echo_service(void) {
   task_t *self = sched_current();
   ipc_echo_task_id = self->id;
   syscall_register_service("echo", self->id);
-  LOG_INFO("[IPC-KERNEL] Servicio de eco IPC iniciado (Task ID=%u)",
+  LOG_INFO("[IPC-KERNEL] Servicio de eco iniciado (Task ID=%u)",
            ipc_echo_task_id);
-
   while (1) {
     ipc_msg_t msg;
     if (ipc_recv(&msg, 0) == 0) {
-      LOG_INFO("[IPC-KERNEL] Mensaje recibido de Tarea ID=%u (tipo=%u, "
-               "payload='%s')",
-               msg.sender, msg.type, (const char *)msg.data);
       const char *reply = "PONG: Hola desde el Kernel (Ring 0)";
       ipc_send(msg.sender, IPC_TYPE_RESPONSE, reply, 36);
     }
@@ -241,50 +219,370 @@ static void ipc_echo_service(void) {
 }
 
 // ===========================================================================
-// kmain_task
+// INIT WORKERS
+//
+// Reglas comunes:
+//   - Usan SOLO LOG_INFO/LOG_WARN/LOG_ERR (thread-safe). NO klog_boot_step
+//     ni klog_boot_ok: esos pares mantienen estado global y con varios
+//     workers concurrentes se pisan entre sí (fix #5).
+//   - Reciben la completion como void* arg y la completan al terminar.
+//   - Si esperan a otra completion, usan wait_for_completion_timeout para
+//     no colgarse si la otra falla.
 // ===========================================================================
-static void kmain_task(void) {
-  LOG_INFO("[KERNEL] kmain_task: inicio (id=%u)", sched_current()->id);
 
-  sched_create_task(ipc_echo_service);
-
-  extern void time_tick(void);
-  irq_install_handler(0, time_tick);
-
-  __asm__ volatile("sti");
+// ---------------------------------------------------------------------------
+// Timer: TSC + LAPIC. Síncrono (no kthread), lo hace system_init_task.
+// ---------------------------------------------------------------------------
+static int timer_init_task(void *arg) {
+  completion_t *done = (completion_t *)arg;
+  LOG_INFO("[INIT] TSC + LAPIC timer...");
 
   klog_calibrate_tsc(50, KERNEL_HZ);
-  LOG_INFO("[TSC] Calibrado a %lu MHz", klog_get_tsc_freq() / 1000000);
   boot_splash_set_tsc_hz(klog_get_tsc_freq());
-
   lapic_timer_init();
 
-  klog_boot_step("[INIT] TTY...");
+  LOG_INFO("[INIT] Timer listo (%lu MHz)", klog_get_tsc_freq() / 1000000);
+  if (done)
+    complete(done);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ACPI AML + PM. Single-consumer completion.
+// ---------------------------------------------------------------------------
+static int acpi_init_task(void *arg) {
+  completion_t *done = (completion_t *)arg;
+
+  LOG_INFO("[INIT] ACPI AML (namespace)...");
+  aml_init();
+
+  LOG_INFO("[INIT] ACPI PM (P-states, S-states)...");
+  acpi_pm_init();
+
+  LOG_INFO("[INIT] PM: aplicar política...");
+  cpu_apply_pm_policy();
+
+  if (done)
+    complete(done);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Framebuffer + splash. Single-consumer completion.
+// ---------------------------------------------------------------------------
+static int fb_init_task(void *arg) {
+  completion_t *done = (completion_t *)arg;
+
+  LOG_INFO("[INIT] Framebuffer...");
+
+  if (boot.fb_base && boot.fb_width > 0 && boot.fb_height > 0 &&
+      boot.fb_pitch > 0 && boot.fb_size > 0) {
+    void *fb_virt = mmio_map(boot.fb_base, boot.fb_size,
+                             PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
+    if (fb_virt && fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height,
+                           boot.fb_pitch, boot.fb_bpp, boot.fb_size)) {
+      if (g_boot_splash_enabled) {
+        extern uint32_t g_boot_splash_initial_phase;
+        extern uint32_t g_boot_splash_initial_ms;
+        g_boot_splash_initial_phase = boot.splash_phase;
+        g_boot_splash_initial_ms = boot.splash_elapsed_ms;
+        if (boot_splash_init(fb_ptr, fb_width, fb_height, fb_pitch) == 0)
+          LOG_INFO("[FB] Boot splash activa (%ux%u)", fb_width, fb_height);
+        else {
+          boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
+          boot_console_clear();
+          boot_console_hook_install();
+        }
+      } else {
+        boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
+        boot_console_clear();
+        boot_console_hook_install();
+      }
+    }
+  } else {
+    LOG_WARN("[FB] sin framebuffer disponible");
+  }
+
+  // Tarea de animación del splash.
+  if (g_boot_splash_enabled && boot_splash_active()) {
+    task_t *splash_t = sched_create_task(boot_splash_task_loop);
+    if (splash_t)
+      splash_t->cpu_affinity = 0;
+    else
+      LOG_WARN("[SPLASH] no se pudo crear splash task");
+  }
+
+  if (done)
+    complete(done);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// VFS + servicios de usuario.
+//
+// [FIX #1] complete_all(): 3 waiters concurrentes (system_init_task,
+// drivers_init_task, net_init_task) esperan en esta completion. Usar
+// complete() despertaría a UNO y dejaría a los otros dos bloqueados
+// hasta su timeout (bug del boot anterior: 8.5 s perdidos).
+// ---------------------------------------------------------------------------
+static int vfs_init_task(void *arg) {
+  completion_t *done = (completion_t *)arg;
+
+  LOG_INFO("[INIT] Initramfs (TarFS)...");
+  if (boot.initrd_base == 0 || boot.initrd_size == 0) {
+    LOG_WARN("[INIT] initrd no cargado");
+  } else {
+    const void *initrd_virt = phys_to_virt(boot.initrd_base);
+    LOG_INFO("[INIT] initrd en phys=0x%lx (%lu KB)",
+             (unsigned long)boot.initrd_base,
+             (unsigned long)(boot.initrd_size / 1024));
+    tarfs_init(initrd_virt, (size_t)boot.initrd_size);
+  }
+
+  LOG_INFO("[INIT] VFS...");
+  vfs_init();
+
+  LOG_INFO("[INIT] IPC...");
+  ipc_init();
+
+  LOG_INFO("[INIT] RTC CMOS...");
+  rtc_init();
+
+  LOG_INFO("[INIT] vDSO...");
+  vdso_init();
+
+  LOG_INFO("[INIT] TTY...");
   tty_init();
-  klog_boot_ok();
 
-  klog_boot_step("[INIT] PTY pool...");
+  LOG_INFO("[INIT] PTY pool...");
   pty_init();
-  klog_boot_ok();
 
-  klog_boot_step("[INIT] Block layer...");
+  // kswapd (necesita swap_init de kmain + sched).
+  extern void kswapd_main(void);
+  task_t *kt = sched_create_task(kswapd_main);
+  if (kt)
+    LOG_INFO("[INIT] kswapd lanzado (task ID=%u)", kt->id);
+  else
+    LOG_WARN("[INIT] kswapd no se pudo lanzar");
+
+  // [FIX #1] complete_all, NO complete.
+  if (done)
+    complete_all(done);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Drivers: block layer + input + bus.
+//
+// Espera a VFS (con timeout por si falla), pero ahora VFS señaliza con
+// complete_all() y drivers despierta en milisegundos, no tras timeout.
+// ---------------------------------------------------------------------------
+static int drivers_init_task(void *arg) {
+  completion_t *done = (completion_t *)arg;
+
+  if (wait_for_completion_timeout(&g_vfs_done, 5000) == 0)
+    LOG_WARN("[INIT] VFS timeout, drivers pueden fallar");
+
+  LOG_INFO("[INIT] Block layer...");
   blk_init();
-  klog_boot_ok();
 
+  LOG_INFO("[INIT] Input...");
   input_init();
+
+  LOG_INFO("[INIT] Drivers...");
+
+  // [FASE 2.1b] Los drivers PCI de bus se registran ANTES de que
+  // pci_init_impl() corra (dentro de drivers_init_all_parallel).
+  // pci_init_impl dispara pci_bus_probe_all() al terminar su scan,
+  // que llamará a ahci_probe() y xhci_probe_inner() con los
+  // pci_device_t ya encontrados.
+  pci_bus_register_driver(&ahci_pci_driver);
+  pci_bus_register_driver(&xhci_pci_driver);
 
   driver_register(&ps2_driver);
   driver_register(&pci_driver);
   driver_register(&ata_pio_driver);
   driver_register(&atapi_driver);
-  driver_register(&ahci_driver);
-  driver_register(&xhci_driver);
-  drivers_init_all();
+  drivers_init_all_parallel();
+  klog_boot_ok();
 
   extern int ata_pio_finalize(void);
   ata_pio_finalize();
 
-  klog_boot_step("[INIT] Partition layer...");
+  if (done)
+    complete(done);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Red: stack IP + NIC.
+//
+// [FIX #3] Solo inicializa el stack y registra la NIC. NO arranca DHCP
+// ni ping: eso se hace en system_init_task DESPUÉS de run_all_tests()
+// para que los tests de e1000e vean netif->ip == 0.
+//
+// e1000e_start() tampoco se llama aquí: sin DHCP no hay paquetes que
+// procesar, y arrancar el RX kthread antes de tests podría procesar
+// ARPs espontáneos si QEMU emite alguno (no debería, pero mejor
+// prevenir).
+// ---------------------------------------------------------------------------
+static int net_init_task(void *arg) {
+  (void)arg;
+  if (wait_for_completion_timeout(&g_vfs_done, 5000) == 0)
+    LOG_WARN("[INIT] VFS timeout, red puede fallar");
+
+  LOG_INFO("[INIT] Networking...");
+  net_init();
+  loopback_init();
+  ip_init();
+  arp_init();
+  icmp_init();
+  udp_init();
+  socket_subsystem_init();
+  tcp_init();
+
+  LOG_INFO("[INIT] e1000e...");
+  if (e1000e_init() == 0) {
+    LOG_INFO("[INIT] e1000e inicializada (dhcp/ping diferidos)");
+  } else {
+    LOG_WARN("[INIT] e1000e no disponible");
+  }
+
+  // No completion: system_init_task no espera a net-init directamente.
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// SMP: arranque de APs.
+//
+// [FIX #6] smp_dump() y apic_dump() emiten ~3 s de log. Compilamos
+// condicionalmente con -D SMP_VERBOSE_DUMP.
+// ---------------------------------------------------------------------------
+static int smp_boot_task(void *arg) {
+  completion_t *done = (completion_t *)arg;
+
+  preempt_disable();
+  smp_boot_init();
+  smp_boot_aps();
+  __atomic_store_n(&smp_sched_active, 1, __ATOMIC_RELEASE);
+  preempt_enable();
+
+#ifdef SMP_VERBOSE_DUMP
+  smp_dump();
+  apic_dump();
+#endif
+
+  if (done)
+    complete(done);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [REFACTOR] Tests en kthread separado.
+//
+// Antes: system_init_task llamaba run_all_tests() inline. Bloqueaba ~1.6 s
+// antes de cargar /usr/bin/init.
+//
+// Ahora: kthread propio. /usr/bin/init arranca inmediatamente en paralelo.
+//
+// IMPORTANTE (red de usuario): DHCP/ping modifican netif->ip. Los tests
+// de e1000e asumen netif->ip == 0. Por eso DHCP/ping arrancan al FINAL
+// de este kthread, no en system_init_task.
+// ---------------------------------------------------------------------------
+static void tests_thread(void) {
+  LOG_INFO("[TEST] kthread tests iniciado (id=%u)", sched_current()->id);
+
+  extern void __sched_canary_arm(void);
+  extern void __sched_canary_check(void);
+  __sched_canary_arm();
+
+  int failed = run_all_tests();
+  if (failed > 0)
+    LOG_ERR("[TEST] %d tests fallaron", failed);
+
+  __sched_canary_check();
+
+  LOG_INFO("[TEST] kthread tests terminado (id=%u, failed=%d)",
+           sched_current()->id, failed);
+
+  // Red de usuario SOLO tras tests (e1000e asume netif->ip == 0).
+  // No usamos klog_boot_step/ok aquí: esos pares son secuenciales y
+  // se pisan si system_init_task está haciendo boot_step en paralelo.
+  if (e1000e_netif()) {
+    LOG_INFO("[TEST] Arrancando red de usuario (post-tests)...");
+    e1000e_start();
+    dhcp_start(e1000e_netif());
+    ping_init();
+  }
+}
+
+// ===========================================================================
+// system_init_task
+//
+// PID 0 real: arranca como primer task de kernel, coordina los workers y
+// termina lanzando /usr/bin/init. Solo aquí usamos klog_boot_step/ok
+// (secuencial, sin race con workers).
+// ===========================================================================
+static void system_init_task(void) {
+  LOG_INFO("[KERNEL] system_init_task: inicio (id=%u)", sched_current()->id);
+
+  // 1. Inicializar completions (una sola vez, antes de nada).
+  completion_init(&g_acpi_done);
+  completion_init(&g_fb_done);
+  completion_init(&g_vfs_done);
+  completion_init(&g_drivers_done);
+  completion_init(&g_smp_done);
+  completion_init(&g_timer_done);
+
+  // 2. Timer IRQ (PIT) + abrir IRQs.
+  extern void time_tick(void);
+  irq_install_handler(0, time_tick);
+  __asm__ volatile("sti");
+
+  // 3. Timer definitivo (TSC + LAPIC). Inline, ~70 ms.
+  timer_init_task(&g_timer_done);
+
+  // 4. Workqueues + IRQ threaded. Necesitan scheduler + timer.
+  klog_boot_step("[INIT] Workqueues globales...");
+  if (workqueue_init() != 0)
+    LOG_WARN("[INIT] workqueue_init() falló");
+  else
+    klog_boot_ok();
+
+  klog_boot_step("[INIT] IRQ threaded...");
+  if (irq_threaded_init() != 0)
+    LOG_WARN("[INIT] irq_threaded_init() falló");
+  else
+    klog_boot_ok();
+
+  // 5. Servicios permanentes del kernel.
+  sched_create_task(ipc_echo_service);
+
+  // 6. Spawn workers en paralelo.
+  klog_boot_step("[INIT] Arrancando subsistemas en paralelo...");
+  kthread_run(acpi_init_task, &g_acpi_done, "acpi-init");
+  kthread_run(fb_init_task, &g_fb_done, "fb-init");
+  kthread_run(vfs_init_task, &g_vfs_done, "vfs-init");
+  kthread_run(drivers_init_task, &g_drivers_done, "drivers-init");
+  kthread_run(net_init_task, NULL, "net-init");
+  kthread_run(smp_boot_task, &g_smp_done, "smp-boot");
+  klog_boot_ok();
+
+  // 7. FB cuanto antes (para el splash).
+  wait_for_completion_timeout(&g_fb_done, 3000);
+
+  // 8. Subsistemas críticos.
+  if (wait_for_completion_timeout(&g_vfs_done, 10000) == 0)
+    LOG_WARN("[INIT] VFS timeout");
+  if (wait_for_completion_timeout(&g_drivers_done, 15000) == 0)
+    LOG_WARN("[INIT] Drivers timeout");
+  if (wait_for_completion_timeout(&g_smp_done, 5000) == 0)
+    LOG_WARN("[INIT] SMP timeout");
+  else
+    LOG_INFO("[INIT] SMP listo (%d CPUs online)", smp_online_cpus());
+
+  // 9. Particiones + mounts (necesitan drivers).
+  klog_boot_step("[INIT] Particiones...");
   part_scan_all();
   klog_boot_ok();
 
@@ -297,137 +595,67 @@ static void kmain_task(void) {
       break;
     }
   }
-
-  // Intentar montar CDs/DVDs (sector_size=2048, read-only) como ISO9660.
   for (int i = 0; i < blk_count(); i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition)
-      continue;
-    if (b->sector_size != 2048)
+    if (!b || b->is_partition || b->sector_size != 2048)
       continue;
     if (iso9660_mount_bdev(b->name, "/cdrom") == 0) {
-      LOG_INFO("[INIT] Montado %s en /cdrom (ISO9660)", b->name);
+      LOG_INFO("[INIT] Montado %s en /cdrom", b->name);
       break;
     }
   }
-  LOG_INFO("[INIT] DMA dump...");
-  ata_dma_dump();
 
-  int fb_ok = (fb_ptr != NULL);
-  if (fb_ok) {
-    klog_boot_step("[FB] Framebuffer ya mapeado (WC)");
-    klog_boot_ok();
-  } else {
-    LOG_ERR("[FB] sin framebuffer disponible");
-  }
-
-  LOG_INFO("[INIT] Aurora OS listo. Multitarea activa.");
-
-  LOG_DEBUG("[SMP] Inicializando trampoline y APs...");
-  smp_boot_init();
-  smp_boot_aps();
-
-  extern volatile int smp_sched_active;
-  smp_sched_active = 1;
-
-  smp_dump();
-  acpi_dump();
-  apic_dump();
-
-  ipi_init();
-
-  if (fb_ok) {
+  // 10. Reveal de splash + compositor.
+  if (fb_ptr) {
     if (g_boot_splash_enabled && boot_splash_active()) {
-      /* Compositor listo, pero aún oculto tras la splash.
-       * Si tu compositor expone algo como
-       *     compositor_render_first_frame(fb, w, h, pitch)
-       * pásalo como callback para que el reveal muestre el escritorio
-       * real en vez de un color liso. */
       compositor_init();
-
       boot_splash_begin_reveal(NULL);
-
       while (boot_splash_tick_reveal())
         __asm__ volatile("pause");
-
       boot_splash_finish();
-
-      LOG_INFO(
-          "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
-      sched_create_task(compositor_thread);
     } else {
-      boot_console_hook_remove();
       extern void boot_console_overlay_enable(int);
+      boot_console_hook_remove();
       boot_console_overlay_enable(1);
       compositor_init();
-      LOG_INFO(
-          "[KERNEL] Compositor inicializado. Cediendo control al scheduler...");
-      sched_create_task(compositor_thread);
     }
+    sched_create_task(compositor_thread);
+    LOG_INFO("[KERNEL] Compositor inicializado");
   }
 
-  extern void __sched_canary_arm(void);
-  __sched_canary_arm();
+  // 11. Tests en kthread paralelo. No bloquea: /usr/bin/init arranca
+  // inmediatamente y los tests se ejecutan en background. El kthread
+  // de tests arranca DHCP/ping al final (e1000e asume netif->ip == 0
+  // durante los tests).
+  task_t *test_task = sched_create_task(tests_thread);
+  if (!test_task)
+    LOG_WARN("[TEST] no se pudo crear tests_thread; tests NO ejecutados");
 
-  {
-    extern cpu_local_t cpu_local_data[];
-    LOG_INFO("[DIAG-PRE-TEST] cpu_local_data[0].current_task=%p",
-             (void *)cpu_local_data[0].current_task);
-    LOG_INFO("[DIAG-PRE-TEST] cpu_local_data[0].cpu_id=%u",
-             cpu_local_data[0].cpu_id);
-  }
-
-  int failed = run_all_tests();
-  if (failed > 0) {
-    LOG_ERR("[TEST] %d tests fallaron. Revisar arriba.", failed);
-  }
-
-  if (e1000e_netif()) {
-    klog_boot_step("[INIT] Arrancando kthread RX de e1000e...");
-    e1000e_start();
-    klog_boot_ok();
-
-    klog_boot_step("[INIT] Arrancando kthread DHCP...");
-    dhcp_start(e1000e_netif());
-    klog_boot_ok();
-
-    klog_boot_step("[INIT] Arrancando kthread de ping (10.0.2.2)...");
-    ping_init();
-    klog_boot_ok();
-  }
-
-  __sched_canary_check();
-
-  klog_boot_step("[INIT] Cargando init '/usr/bin/init'...");
+  // 12. Espacio de usuario (sin esperar a tests).
+  klog_boot_step("[INIT] Cargando /usr/bin/init...");
   process_t *init_proc = process_load("/usr/bin/init");
   if (!init_proc) {
-    klog_boot_warn("[INIT] /usr/bin/init no encontrado, fallback a "
-                   "/usr/bin/terminal");
+    klog_boot_warn("[INIT] /usr/bin/init no encontrado, fallback terminal");
     process_load("/usr/bin/terminal");
   } else {
     klog_boot_ok();
   }
 
-  return;
+  // 13. Salir.
+  LOG_INFO("[KERNEL] system_init_task completado");
+  task_t *cur = sched_current();
+  if (cur)
+    cur->state = TASK_DEAD;
+  sched_yield();
+  while (1)
+    __asm__ volatile("sti; hlt");
 }
 
 // ===========================================================================
-// kmain
-// ===========================================================================
-// ===========================================================================
-// kmain
+// kmain (sin cambios respecto al refactor anterior)
 // ===========================================================================
 void kmain(struct kernel_boot_info *kinfo) {
-  /* =====================================================================
-   * [FIX-DEFENSIVO] Reinicializar IA32_GS_BASE a &cpu_local_data[0] aquí,
-   * además de en boot.asm. Nunca está de más: si algo en el boot path
-   * (BIOS o UEFI) sobrescribe el MSR, esto lo restaura antes de que
-   * cualquier función lea %gs:0x10 (smp_processor_id / sched_current /
-   * process_current / vfs_check_access / ...).
-   *
-   * NO depender de smp_init() para esto: se llama mucho más abajo, y
-   * antes de llegar ahí ya hay varias rutas que consultan %gs.
-   * ===================================================================== */
+  // 1. IA32_GS_BASE defensivo.
   {
     extern cpu_local_t cpu_local_data[];
     uint64_t gs_base = (uint64_t)&cpu_local_data[0];
@@ -437,52 +665,36 @@ void kmain(struct kernel_boot_info *kinfo) {
     __asm__ volatile("wrmsr" ::"a"(0), "d"(0), "c"(0xC0000102));
   }
 
+  // 2. Consola mínima.
   serial_init();
   klog_init();
-
   LOG_INFO("========================================");
   LOG_INFO("   AURORA OS KERNEL x86_64");
-  LOG_INFO("   Fase 1 - Kernel Base (REV 4)");
   LOG_INFO("========================================");
 
-  klog_boot_step("[INIT] SSE...");
+  // 3. SIMD + FPU.
+  klog_boot_step("[BOOT] SSE/SIMD...");
   sse_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] SIMD...");
   cpu_simd_init();
   simd_init();
   klog_boot_ok();
 
-  /* [PM] Detección temprana de capacidades de power management. */
-  klog_boot_step("[INIT] PM: detección...");
-  cpu_dump_cpuid_diag();
-  cpu_detect_pm();
-  klog_boot_ok();
-
+  // 4. Boot info.
   memcpy(&boot, kinfo, sizeof(boot));
   g_boot_info = boot;
 
-  LOG_INFO("[BOOT] Framebuffer: %p %u x %u bpp=%u pitch=%u",
-           (void *)boot.fb_base, boot.fb_width, boot.fb_height, boot.fb_bpp,
-           boot.fb_pitch);
-
-  klog_boot_step("[INIT] GDT...");
+  // 5. Tablas de sistema.
+  klog_boot_step("[BOOT] GDT/IDT/SYSCALL...");
   gdt_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] IDT...");
   idt_init();
-  klog_boot_ok();
-
+  syscall_init();
   cpu_local_data[0].kernel_stack =
       (uint64_t)(syscall_kernel_stack + sizeof(syscall_kernel_stack));
   cpu_local_data[0].user_rsp = 0;
-
-  klog_boot_step("[INIT] Syscalls...");
-  syscall_init();
   klog_boot_ok();
 
+  // 6. Memoria.
+  klog_boot_step("[BOOT] Memoria...");
   uint64_t max_phys_addr = 0;
   if (boot.memmap && boot.memmap_size > 0) {
     uint8_t *ptr = (uint8_t *)boot.memmap;
@@ -492,251 +704,95 @@ void kmain(struct kernel_boot_info *kinfo) {
         continue;
       uint64_t phys = *(uint64_t *)(ptr + i + 8);
       uint64_t pages = *(uint64_t *)(ptr + i + 24);
-      if (pages > UINT64_MAX / PAGE_SIZE) {
-        LOG_WARN(
-            "[MEM] Descriptor EFI con tamaño de páginas inválido, ignorado");
+      if (pages > UINT64_MAX / PAGE_SIZE)
         continue;
-      }
-      uint64_t size = pages * PAGE_SIZE;
-      if (phys > UINT64_MAX - size) {
-        LOG_WARN("[MEM] Descriptor EFI con rango físico desbordado, ignorado");
+      uint64_t end = phys + pages * PAGE_SIZE;
+      if (end < phys)
         continue;
-      }
-      uint64_t end = phys + size;
       if (end > max_phys_addr)
         max_phys_addr = end;
     }
   }
-  LOG_DEBUG("[INIT] max_phys_addr = %p (%lu MB)", (void *)max_phys_addr,
-            (unsigned long)(max_phys_addr / (1024 * 1024)));
+  parse_memmap();
 
-  if (boot.memmap == 0 || boot.memmap_size == 0 || boot.memmap_desc_size == 0) {
-    LOG_WARN("[MEM] Memmap inválido o ausente. Abortando parse.");
-  } else if (boot.memmap_size > (1024 * 1024)) {
-    LOG_WARN("[MEM] Memmap demasiado grande, posible corrupción (size>%u)",
-             1024 * 1024);
-  } else {
-    parse_memmap();
-  }
-
-  klog_boot_step("[INIT] PMM...");
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
-  klog_boot_ok();
-
-  extern void pmm_reserve_range(uint64_t start, uint64_t end);
+  extern void pmm_reserve_range(uint64_t, uint64_t);
   pmm_reserve_range(0x6000, 0x9000);
 
   extern void pmm_self_test(void);
   pmm_self_test();
 
-  klog_boot_step("[INIT] Paging...");
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
   paging_init((uint64_t *)cr3, max_phys_addr);
-  klog_boot_ok();
 
-  /* [FIX] Reservar el rango físico REAL del kernel, página a página. */
   {
     uint64_t *pml4 = paging_get_pml4();
     uint64_t vstart = (uint64_t)&__text_start;
     uint64_t vend = (uint64_t)&__bss_end;
-
-    uint64_t run_start = 0;
-    uint64_t run_end = 0;
-    int total_pages = 0;
-
+    uint64_t run_start = 0, run_end = 0;
     for (uint64_t v = vstart; v < vend; v += PAGE_SIZE) {
       uint64_t p = paging_get_phys_in(pml4, v);
       if (!p) {
-        if (run_start) {
+        if (run_start)
           pmm_reserve_range(run_start, run_end);
-          run_start = 0;
-        }
+        run_start = 0;
         continue;
       }
-      if (run_start && p == run_end) {
+      if (run_start && p == run_end)
         run_end += PAGE_SIZE;
-      } else {
+      else {
         if (run_start)
           pmm_reserve_range(run_start, run_end);
         run_start = p;
         run_end = p + PAGE_SIZE;
       }
-      total_pages++;
     }
     if (run_start)
       pmm_reserve_range(run_start, run_end);
-
-    LOG_INFO("[INIT] Kernel phys reservado: %d páginas (%lu KB)", total_pages,
-             (unsigned long)((uint64_t)total_pages * PAGE_SIZE / 1024));
   }
 
   pmm_relocate_bitmap();
   uaccess_init();
-
-  klog_boot_step("[INIT] Heap (kmalloc)...");
   heap_init();
   klog_boot_ok();
 
-  if (boot.fb_base && boot.fb_width > 0 && boot.fb_height > 0 &&
-      boot.fb_pitch > 0 && boot.fb_size > 0) {
-    void *fb_virt = mmio_map(boot.fb_base, boot.fb_size,
-                             PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
-    if (fb_virt && fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height,
-                           boot.fb_pitch, boot.fb_bpp, boot.fb_size)) {
-      if (g_boot_splash_enabled) {
-        /* HANDOFF desde el bootloader */
-        extern uint32_t g_boot_splash_initial_phase;
-        extern uint32_t g_boot_splash_initial_ms;
-        g_boot_splash_initial_phase = boot.splash_phase;
-        g_boot_splash_initial_ms = boot.splash_elapsed_ms;
-
-        if (boot_splash_init(fb_ptr, fb_width, fb_height, fb_pitch) == 0) {
-          LOG_INFO("[FB] Boot splash activa (%ux%u)", fb_width, fb_height);
-        } else {
-          boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
-          boot_console_clear();
-          boot_console_hook_install();
-        }
-      } else {
-        boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
-        boot_console_clear();
-        boot_console_hook_install();
-      }
-    }
-  }
-
-  klog_boot_step("[INIT] ACPI (MADT)...");
+  // 7. ACPI MADT.
+  klog_boot_step("[BOOT] ACPI MADT...");
   acpi_init(boot.acpi_rsdp);
   klog_boot_ok();
 
-  klog_boot_step("[INIT] ACPI AML (namespace)...");
-  aml_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] ACPI PM (P-states, S-states)...");
-  acpi_pm_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] PM: aplicar política...");
-  cpu_apply_pm_policy();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] APIC (LAPIC + IOAPIC)...");
+  // 8. APIC + PIT.
+  klog_boot_step("[BOOT] LAPIC + IOAPIC + PIT...");
   apic_init();
+  pit_init();
   klog_boot_ok();
 
-  klog_boot_step("[INIT] Demand paging (PF handler)...");
+  // 9. PF + swap.
+  klog_boot_step("[BOOT] PF + swap...");
   pf_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] Swap subsystem...");
   swap_init();
   klog_boot_ok();
 
-  pit_init();
-
-  klog_boot_step("[INIT] Initramfs (TarFS)...");
-  if (boot.initrd_base == 0 || boot.initrd_size == 0) {
-    klog_boot_warn("[INIT] initrd no cargado por el bootloader");
-  } else {
-    const void *initrd_virt = phys_to_virt(boot.initrd_base);
-    size_t initrd_size = (size_t)boot.initrd_size;
-    LOG_INFO("[INIT] initrd en phys=0x%lx (%lu KB) -> virt=%p",
-             (unsigned long)boot.initrd_base,
-             (unsigned long)(initrd_size / 1024), initrd_virt);
-    tarfs_init(initrd_virt, initrd_size);
-  }
-  vfs_init();
-  ipc_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] RTC CMOS...");
-  rtc_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] vDSO...");
-  vdso_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] Networking (Fase 0)...");
-  net_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] Loopback...");
-  loopback_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] IPv4...");
-  ip_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] ARP...");
-  arp_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] ICMP...");
-  icmp_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] UDP...");
-  udp_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] Sockets...");
-  socket_subsystem_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] TCP...");
-  tcp_init();
-  klog_boot_ok();
-
-  klog_boot_step("[INIT] e1000e...");
-  if (e1000e_init() == 0) {
-    klog_boot_ok();
-  } else {
-    klog_boot_warn("no disponible");
-  }
-
-  klog_boot_step("[INIT] Scheduler...");
+  // 10. Per-CPU + IPI.
+  klog_boot_step("[BOOT] SMP init + IPI...");
   smp_init();
   smp_set_bsp_lapic_id(lapic_get_bsp_id());
-  sched_init();
+  ipi_init();
   klog_boot_ok();
 
-  klog_boot_step("[INIT] Process subsystem...");
-  extern void process_init(void);
+  // 11. Scheduler + process.
+  klog_boot_step("[BOOT] Scheduler + procesador...");
+  sched_init();
   process_init();
   klog_boot_ok();
 
-  klog_boot_step("[INIT] kswapd...");
-  extern void kswapd_main(void);
-  task_t *kswapd_t = sched_create_task(kswapd_main);
-  if (kswapd_t) {
-    klog_boot_ok();
-    LOG_INFO("[INIT] kswapd lanzado (task ID=%u)", kswapd_t->id);
-  } else {
-    klog_boot_warn("[INIT] kswapd no se pudo lanzar (sin memoria)");
-  }
-
-  /* Splash task: si la splash está activa, creamos el thread que la anima
-   * a 60 fps independientemente del bring-up. */
-  if (g_boot_splash_enabled && boot_splash_active()) {
-    task_t *splash_t = sched_create_task(boot_splash_task_loop);
-    if (splash_t)
-      splash_t->cpu_affinity = 0;
-    else
-      LOG_WARN("[SPLASH] no se pudo crear splash task");
-  }
-
-  task_t *t = sched_create_task(kmain_task);
-  if (!t) {
-    LOG_PANIC("[KERNEL] no se pudo crear kmain_task");
-  }
+  // 12. GO.
+  klog_boot_step("[BOOT] Saltando a multitarea...");
+  task_t *t = sched_create_task(system_init_task);
+  if (!t)
+    LOG_PANIC("[KERNEL] no se pudo crear system_init_task");
   t->cpu_affinity = 0;
-
-  LOG_DEBUG("[KERNEL] kmain: saltando a kmain_task");
   sched_start(t);
-
   __builtin_unreachable();
 }

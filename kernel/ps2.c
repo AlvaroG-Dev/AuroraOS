@@ -424,6 +424,7 @@ static int ps2_init_impl(void) {
 
 struct driver ps2_driver = {
     .name = "ps2",
+    .depends = NULL, // sin deps
     .init = ps2_init_impl,
     .shutdown = NULL,
 };

@@ -1,9 +1,4 @@
 // kernel/ata_dma.c
-//
-// Soporte de DMA para ATA (Bus Master IDE).
-//
-// Referencia: Intel PIIX3 datasheet, ATA/ATAPI-7.
-
 #include "ata_dma.h"
 #include "ata_common.h"
 #include "ata_device.h"
@@ -23,13 +18,7 @@
 
 extern uint64_t paging_get_phys(uint64_t virt);
 
-// ---------------------------------------------------------------------------
-// Logs de diagnóstico.
-// Descomenta la línea de abajo para ver logs detallados de DMA (uno por
-// transferencia; desactivado por defecto).
-// ---------------------------------------------------------------------------
 // #define ATA_DMA_DEBUG
-
 #ifdef ATA_DMA_DEBUG
 #define DMA_LOG(...) LOG_INFO(__VA_ARGS__)
 #else
@@ -43,37 +32,22 @@ extern uint64_t paging_get_phys(uint64_t virt);
 // ===========================================================================
 static ata_dma_state_t g_dma[2];
 
-// ===========================================================================
-// Bounce buffer por canal.
-//
-// El BMIDE exige que el campo `base` del PRD esté alineado a 2 bytes. Si
-// el buffer del llamante no lo está (por ejemplo, un campo dentro de una
-// struct cuya alineación no controlamos), copiamos a este buffer
-// alineado antes de lanzar el DMA. En lecturas, copiamos del bounce al
-// buffer original después de que el DMA complete.
-//
-// 64 KB por canal = tamaño máximo de transferencia (ver
-// ata_dma_xfer). Vive en .bss, sin coste en runtime.
-// ===========================================================================
+// Bounce buffers (path sync). Ver ata_dma_xfer para contexto.
 static uint8_t g_bounce[2][0x10000] __attribute__((aligned(4096)));
 
-// Registros del BMIDE (offsets desde bmide_base).
 #define BM_CMD 0x00
 #define BM_STATUS 0x02
 #define BM_PRDT 0x04
 
-// Entradas maximas de la PRDT (una pagina de 4 KB, 8 bytes por entrada).
 #define ATA_DMA_MAX_PRD (PAGE_SIZE / sizeof(ata_dma_prd_t))
 
-// Delay tras programar el BMIDE.
 static void ata_dma_delay(void) {
-  for (volatile int i = 0; i < 100; i++) {
+  for (volatile int i = 0; i < 100; i++)
     __asm__ volatile("pause");
-  }
 }
 
 // ===========================================================================
-// Inicialización
+// Init
 // ===========================================================================
 int ata_dma_init_channel(int channel_idx, uint8_t pci_bus, uint8_t pci_slot,
                          uint8_t pci_func) {
@@ -83,7 +57,6 @@ int ata_dma_init_channel(int channel_idx, uint8_t pci_bus, uint8_t pci_slot,
   ata_dma_state_t *dma = &g_dma[channel_idx];
   memset(dma, 0, sizeof(*dma));
 
-  // 1. Leer BAR4 del PCI IDE.
   extern uint32_t pci_read_bar(uint8_t bus, uint8_t slot, uint8_t func,
                                int bar_num);
   uint32_t bar4 = pci_read_bar(pci_bus, pci_slot, pci_func, 4);
@@ -100,13 +73,6 @@ int ata_dma_init_channel(int channel_idx, uint8_t pci_bus, uint8_t pci_slot,
            channel_idx == 0 ? "primario" : "secundario", dma->bmide_base,
            dma->irq);
 
-  // 2. Asignar PRDT.
-  //
-  // Pagina fisica propia (PMM) accedida por la ventana fisica: la direccion
-  // fisica es exacta, la tabla esta alineada a 4 KB (no cruza 64 KB) y es
-  // contigua. NO usar kmalloc()+virt_to_phys(): el heap vive en
-  // la región HEAP_VMA (mapeado pagina a pagina) y virt_to_phys() solo vale
-  // para la ventana fisica; el BMIDE leeria la PRDT de una direccion basura.
   uint64_t prdt_phys = pmm_alloc_page();
   if (prdt_phys == 0 || prdt_phys >= 0x100000000ULL) {
     LOG_ERR("[ATA-DMA] no hay pagina fisica < 4GB para la PRDT");
@@ -118,7 +84,6 @@ int ata_dma_init_channel(int channel_idx, uint8_t pci_bus, uint8_t pci_slot,
   dma->prdt_phys = prdt_phys;
   memset(dma->prdt, 0, PAGE_SIZE);
 
-  // 3. Inicializar lock y wait queue.
   spin_init(&dma->lock);
   wait_queue_init(&dma->irq_wq);
   dma->irq_pending = 0;
@@ -127,10 +92,11 @@ int ata_dma_init_channel(int channel_idx, uint8_t pci_bus, uint8_t pci_slot,
   dma->timeout_count = 0;
   dma->error_count = 0;
 
-  // 4. Parar el BMIDE.
-  outb(dma->bmide_base + BM_CMD, 0);
+  // [FASE 1.4] Estado async limpio.
+  dma->inflight_bio = NULL;
+  dma->xfer_state = XFS_IDLE;
 
-  // 5. Limpiar el status.
+  outb(dma->bmide_base + BM_CMD, 0);
   outb(dma->bmide_base + BM_STATUS, BM_STATUS_IRQ | BM_STATUS_ERROR);
 
   dma->initialized = 1;
@@ -144,77 +110,8 @@ int ata_dma_is_ready(int channel_idx) {
 }
 
 // ===========================================================================
-// Handler de IRQ
+// PRDT build
 // ===========================================================================
-void ata_dma_irq_handler(int channel_idx) {
-  if (channel_idx < 0 || channel_idx > 1)
-    return;
-
-  ata_dma_state_t *dma = &g_dma[channel_idx];
-  if (!dma->initialized)
-    return;
-
-  // [FIX] Leer BM_STATUS PRIMERO. Es la fuente de verdad de "esta IRQ es
-  // mía". Si el BMIDE no tiene IRQ ni error pendiente, la IRQ es
-  // compartida o espuria, y no tocamos nada.
-  uint8_t bm = inb(dma->bmide_base + BM_STATUS);
-  if (!(bm & (BM_STATUS_IRQ | BM_STATUS_ERROR))) {
-    // IRQ no es del BMIDE. Puede ser de otro dispositivo que comparte
-    // la línea (SMBus, etc). Salir sin tocar nada.
-    return;
-  }
-
-  // Limpiar los bits del BMIDE (esto desaserta la línea del IOAPIC).
-  outb(dma->bmide_base + BM_STATUS, bm | BM_STATUS_IRQ | BM_STATUS_ERROR);
-
-  // [FIX] NO descartar por disk_status == 0x00. En VirtualBox PIIX3, el
-  // disco baja DRDY/DRQ inmediatamente tras completar un WRITE_DMA, y
-  // leer 0x00 NO significa IRQ espuria: significa que el disco terminó.
-  // El código anterior descartaba la IRQ y dejaba al waiter colgado
-  // hasta el timeout de 5 s.
-  //
-  // Solo descartamos si el bus está claramente flotante (0xFF), que
-  // indica que el controlador no responde.
-  uint16_t io = (channel_idx == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
-  uint8_t disk_status = inb(io + ATA_REG_STATUS);
-  if (disk_status == 0xFF) {
-    // Bus flotante: no hay dispositivo. La IRQ es espuria, ya limpiamos
-    // el BMIDE arriba, salimos sin despertar a nadie.
-    return;
-  }
-
-  // ---------------------------------------------------------------------
-  // Actualizar el estado de completación bajo el mismo lock que usa
-  // wait_common para comprobar la condición y encolarse. Cierra la
-  // ventana en la que el IRQ llegaba justo después de que el waiter
-  // hubiese comprobado cond()==false pero antes de encolarse.
-  // ---------------------------------------------------------------------
-  unsigned long flags = spin_lock_irqsave(&dma->irq_wq.lock);
-
-  dma->irq_pending = 1;
-  dma->irq_error = (bm & BM_STATUS_ERROR) ? 1 : 0;
-  dma->irq_count++;
-
-  wake_up_all_locked(&dma->irq_wq);
-
-  spin_unlock_irqrestore(&dma->irq_wq.lock, flags);
-}
-
-// ===========================================================================
-// Condición para esperar la IRQ.
-// ===========================================================================
-static bool ata_dma_irq_cond(void *arg) {
-  ata_dma_state_t *dma = (ata_dma_state_t *)arg;
-  return dma->irq_pending != 0;
-}
-
-// ===========================================================================
-// Construcción de la PRDT
-// ===========================================================================
-//
-// El buffer es contiguo en virtual pero NO necesariamente en fisico, asi que
-// se recorre pagina a pagina y se emite una entrada por tramo. Ademas cada
-// entrada no puede cruzar un limite de 64 KB fisico ni superar 4 GB.
 static int ata_dma_build_prdt(ata_dma_state_t *dma, const void *buf,
                               uint32_t byte_count) {
   uint64_t virt = (uint64_t)(uintptr_t)buf;
@@ -239,7 +136,7 @@ static int ata_dma_build_prdt(ata_dma_state_t *dma, const void *buf,
       return -1;
 
     dma->prdt[n].base = (uint32_t)phys;
-    dma->prdt[n].count = (uint16_t)chunk; // chunk <= 4096: nunca 0 ni 64 KB
+    dma->prdt[n].count = (uint16_t)chunk;
     dma->prdt[n].flags = 0;
     n++;
     virt += chunk;
@@ -251,22 +148,13 @@ static int ata_dma_build_prdt(ata_dma_state_t *dma, const void *buf,
 }
 
 // ===========================================================================
-// Preparar el BMIDE
+// BMIDE setup / start / cleanup
 // ===========================================================================
 static void ata_dma_setup_bmide(ata_dma_state_t *dma, int is_read) {
-  // 1. Parar el BMIDE.
   outb(dma->bmide_base + BM_CMD, 0);
-
-  // 2. Limpiar el status.
   outb(dma->bmide_base + BM_STATUS, BM_STATUS_IRQ | BM_STATUS_ERROR);
-
-  // 3. Escribir la dirección física de la PRDT.
   outl(dma->bmide_base + BM_PRDT, (uint32_t)dma->prdt_phys);
-
-  // 4. BM Command: solo la direccion (READ = el disco escribe en memoria).
-  //    START se activa DESPUES de emitir el comando ATA (ata_dma_start_bmide).
   outb(dma->bmide_base + BM_CMD, is_read ? BM_CMD_READ : 0);
-
   ata_dma_delay();
 }
 
@@ -277,16 +165,13 @@ static void ata_dma_start_bmide(ata_dma_state_t *dma, int is_read) {
   outb(dma->bmide_base + BM_CMD, cmd);
 }
 
-// ===========================================================================
-// Limpiar el BMIDE
-// ===========================================================================
 static void ata_dma_cleanup_bmide(ata_dma_state_t *dma) {
   outb(dma->bmide_base + BM_CMD, 0);
   outb(dma->bmide_base + BM_STATUS, BM_STATUS_IRQ | BM_STATUS_ERROR);
 }
 
 // ===========================================================================
-// Enviar un comando DMA al disco (LBA48 o LBA28).
+// Issue ATA command (shared by sync + async)
 // ===========================================================================
 static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
                              uint32_t count, uint8_t cmd) {
@@ -300,11 +185,9 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
     return rc;
 
   if (dev->use_lba48) {
-    // LBA48.
     uint8_t drive_head = ATA_DRIVE_LBA | (dev->drive << 4);
     outb(io + ATA_REG_DRIVE, drive_head);
     ata_io_delay(ctrl);
-
     rc = ata_wait_not_busy(io, timeout);
     if (rc != ATA_OK)
       return rc;
@@ -314,7 +197,6 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
     outb(io + ATA_REG_LBA1, (uint8_t)((lba >> 32) & 0xFF));
     outb(io + ATA_REG_LBA2, (uint8_t)((lba >> 40) & 0xFF));
     ata_io_delay(ctrl);
-
     rc = ata_wait_not_busy(io, timeout);
     if (rc != ATA_OK)
       return rc;
@@ -324,16 +206,13 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
     outb(io + ATA_REG_LBA1, (uint8_t)((lba >> 8) & 0xFF));
     outb(io + ATA_REG_LBA2, (uint8_t)((lba >> 16) & 0xFF));
     ata_io_delay(ctrl);
-
     rc = ata_wait_not_busy(io, timeout);
     if (rc != ATA_OK)
       return rc;
   } else {
-    // LBA28.
     uint8_t drive_head = 0xE0 | (dev->drive << 4) | ((lba >> 24) & 0x0F);
     outb(io + ATA_REG_DRIVE, drive_head);
     ata_io_delay(ctrl);
-
     rc = ata_wait_not_busy(io, timeout);
     if (rc != ATA_OK)
       return rc;
@@ -348,7 +227,6 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
     ata_io_delay(ctrl);
     outb(io + ATA_REG_LBA2, (uint8_t)((lba >> 16) & 0xFF));
     ata_io_delay(ctrl);
-
     rc = ata_wait_not_busy(io, timeout);
     if (rc != ATA_OK)
       return rc;
@@ -359,23 +237,13 @@ static int ata_dma_issue_cmd(struct ata_device *dev, uint64_t lba,
 }
 
 // ===========================================================================
-// Operación DMA común.
-//
-// [FIX SMP + TIMEOUT REAL + ESCRITURA + BOUNCE]
-//
-//   - Bounce buffer: si el buffer del llamante no está alineado a 2 bytes,
-//     usamos g_bounce[ch_idx] para el DMA y copiamos en la dirección
-//     adecuada antes/después. El BMIDE exige base par en el PRD; sin esto,
-//     el transfer se queda mudo y salta el timeout de 5 s.
-//
-//   - Espera la IRQ del BMIDE con wait_event_interruptible_timeout (o
-//     polling si estamos en contexto atómico con preempt_count > 0).
-//
-//   - Tras la IRQ, en ESCRITURAS, espera a que el disco termine de
-//     escribir los datos al medio (BSY=0). La IRQ del BMIDE se genera
-//     cuando el bus master termina de transferir los datos a su buffer
-//     interno, NO cuando el disco ha completado la escritura al medio.
+// SYNC path (unchanged, only used for odd buffers and PIO fallback)
 // ===========================================================================
+static bool ata_dma_irq_cond(void *arg) {
+  ata_dma_state_t *dma = (ata_dma_state_t *)arg;
+  return dma->irq_pending != 0;
+}
+
 static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
                         void *buf, int is_read) {
   int ch_idx = (dev->channel->io_base == ATA_PRIMARY_IO) ? 0 : 1;
@@ -385,22 +253,12 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
 
   uint32_t byte_count = count * dev->sector_size;
   if (byte_count == 0 || byte_count > 0x10000) {
-    LOG_ERR("[ATA-DMA] transferencia de %u bytes no soportada (max 64 KB)",
-            byte_count);
+    LOG_ERR("[ATA-DMA] transferencia de %u bytes no soportada", byte_count);
     return ATA_ERR_UNKNOWN;
   }
 
-  // -------------------------------------------------------------------------
-  // Bounce buffer si el buffer no está alineado a 2 bytes.
-  //
-  // El BMIDE requiere base del PRD par. La mayoría de buffers del kernel
-  // lo están (kmalloc devuelve 16-aligned), pero el bcache de FAT32 tenía
-  // `data` en offset impar. Con el reordenamiento de fat32_bcache_slot_t
-  // ya no ocurre, pero el bounce es la red de seguridad.
-  // -------------------------------------------------------------------------
   uint8_t *bounce = NULL;
   void *dma_buf = buf;
-
   if (((uintptr_t)buf & 1) != 0) {
     if (byte_count > sizeof(g_bounce[0])) {
       LOG_ERR("[ATA-DMA] buffer impar demasiado grande para bounce: %u",
@@ -411,30 +269,16 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
     dma_buf = bounce;
   }
 
-  // =========================================================================
-  // Fase 1: preparar PRDT + BMIDE + comando ATA bajo dma->lock.
-  //
-  // Orden de locks (siempre en este orden): dma->lock → dma->irq_wq.lock.
-  // Nunca al revés.
-  // =========================================================================
   unsigned long flags = spin_lock_irqsave(&dma->lock);
 
-  // Si usamos bounce y es escritura, copiamos el contenido ANTES del DMA,
-  // bajo lock (protege g_bounce[ch_idx] contra otras escrituras al mismo
-  // canal).
   if (bounce && !is_read) {
     memcpy(bounce, buf, byte_count);
   }
 
   if (ata_dma_build_prdt(dma, dma_buf, byte_count) != 0) {
-    LOG_ERR("[ATA-DMA] no se pudo construir la PRDT para %p (%u bytes)",
-            dma_buf, byte_count);
     spin_unlock_irqrestore(&dma->lock, flags);
     return ATA_ERR_UNKNOWN;
   }
-
-  DMA_LOG("[ATA-DMA] xfer: lba=%lu count=%u buf=%p read=%d", (unsigned long)lba,
-          count, dma_buf, is_read);
 
   ata_dma_setup_bmide(dma, is_read);
 
@@ -447,7 +291,6 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
 
   int rc = ata_dma_issue_cmd(dev, lba, count, cmd);
   if (rc != ATA_OK) {
-    LOG_ERR("[ATA-DMA] issue_cmd falló: %d", rc);
     ata_dma_cleanup_bmide(dma);
     spin_unlock_irqrestore(&dma->lock, flags);
     return rc;
@@ -460,14 +303,9 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
   spin_unlock_irqrestore(&dma->irq_wq.lock, wf);
 
   ata_dma_start_bmide(dma, is_read);
-
   spin_unlock_irqrestore(&dma->lock, flags);
 
-  // =========================================================================
-  // Fase 2: dormir hasta que la IRQ marque irq_pending, con timeout real.
-  // =========================================================================
   uint64_t timeout_ticks = (uint64_t)ATA_DMA_TIMEOUT_SECONDS * 1000ULL;
-
   long w;
   if (preempt_count() > 0) {
     uint64_t deadline = sched_get_ticks() + timeout_ticks;
@@ -484,9 +322,6 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
                                          timeout_ticks);
   }
 
-  // =========================================================================
-  // Fase 3: evaluar el resultado.
-  // =========================================================================
   flags = spin_lock_irqsave(&dma->lock);
 
   wf = spin_lock_irqsave(&dma->irq_wq.lock);
@@ -495,8 +330,7 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
   spin_unlock_irqrestore(&dma->irq_wq.lock, wf);
 
   if (w == 0 && irq_count_after == irq_count_before) {
-    LOG_ERR("[ATA-DMA] timeout esperando IRQ (canal %d, %u timeouts totales)",
-            ch_idx, dma->timeout_count);
+    LOG_ERR("[ATA-DMA] timeout esperando IRQ (canal %d)", ch_idx);
     dma->timeout_count++;
     ata_dma_cleanup_bmide(dma);
     spin_unlock_irqrestore(&dma->lock, flags);
@@ -529,14 +363,8 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
     return rc;
   }
 
-  // -------------------------------------------------------------------------
-  // [FIX VirtualBox] Tras una ESCRITURA DMA, forzar un FLUSH CACHE para
-  // asegurar que los datos han llegado al medio antes de dar la operación
-  // por completada.
-  // -------------------------------------------------------------------------
   if (!is_read) {
     ata_select_drive(dev->channel, dev->drive);
-
     rc = ata_wait_not_busy(io, ata_timeout_iters());
     if (rc != ATA_OK) {
       LOG_WARN("[ATA-DMA] disco no responde antes de FLUSH: %d", rc);
@@ -544,34 +372,25 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
       spin_unlock_irqrestore(&dma->lock, flags);
       return rc;
     }
-
     uint8_t flush_cmd =
         dev->use_lba48 ? ATA_CMD_FLUSH_CACHE_EXT : ATA_CMD_FLUSH_CACHE;
     outb(io + ATA_REG_COMMAND, flush_cmd);
-
     rc = ata_wait_not_busy(io, ata_timeout_iters());
     if (rc != ATA_OK) {
-      LOG_WARN("[ATA-DMA] FLUSH CACHE falló tras escritura: %d", rc);
+      LOG_WARN("[ATA-DMA] FLUSH CACHE falló: %d", rc);
       ata_dma_cleanup_bmide(dma);
       spin_unlock_irqrestore(&dma->lock, flags);
       return rc;
     }
-
-    uint8_t flush_status = inb(io + ATA_REG_STATUS);
-    if (flush_status & ATA_SR_ERR) {
+    uint8_t fs = inb(io + ATA_REG_STATUS);
+    if (fs & ATA_SR_ERR) {
       rc = ata_decode_error(io);
-      LOG_WARN("[ATA-DMA] error en FLUSH CACHE: %d", rc);
       ata_dma_cleanup_bmide(dma);
       spin_unlock_irqrestore(&dma->lock, flags);
       return rc;
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Bounce de lectura: copiar del bounce al buffer original del llamante.
-  // Solo si el DMA completó OK y era una lectura (en escritura ya copiamos
-  // al bounce ANTES del DMA, en la Fase 1).
-  // -------------------------------------------------------------------------
   if (bounce && is_read) {
     memcpy(buf, bounce, byte_count);
   }
@@ -581,12 +400,10 @@ static int ata_dma_xfer(struct ata_device *dev, uint64_t lba, uint32_t count,
   return ATA_OK;
 }
 
-// Divide en trozos de <= 64 KB (limite de ata_dma_xfer).
 static int ata_dma_rw(struct ata_device *dev, uint64_t lba, uint32_t count,
                       void *buf, int is_read) {
   uint32_t max = 0x10000 / dev->sector_size;
   uint8_t *p = (uint8_t *)buf;
-
   while (count > 0) {
     uint32_t n = (count > max) ? max : count;
     int rc = ata_dma_xfer(dev, lba, n, p, is_read);
@@ -603,14 +420,369 @@ int ata_dma_read(struct ata_device *dev, uint64_t lba, uint32_t count,
                  void *buf) {
   return ata_dma_rw(dev, lba, count, buf, 1);
 }
-
 int ata_dma_write(struct ata_device *dev, uint64_t lba, uint32_t count,
                   const void *buf) {
   return ata_dma_rw(dev, lba, count, (void *)buf, 0);
 }
 
 // ===========================================================================
-// Handlers específicos de IRQ (para idt.c).
+// [FASE 1.4] ASYNC path
+// ===========================================================================
+
+// Arranca el siguiente chunk del bio en vuelo. Asume dma->lock cogido.
+// Retorna 0 si el chunk se lanzó (IRQ disparará), <0 si error.
+static int ata_dma_start_chunk_locked(ata_dma_state_t *dma,
+                                      struct ata_device *dev) {
+  if (dma->xfer_left == 0)
+    return -EINVAL;
+
+  uint32_t n = dma->xfer_left;
+  uint32_t max = 0x10000 / dev->sector_size;
+  if (n > max)
+    n = max;
+
+  uint32_t bytes = n * dev->sector_size;
+  if (ata_dma_build_prdt(dma, dma->xfer_buf, bytes) != 0) {
+    return -EIO;
+  }
+
+  ata_dma_setup_bmide(dma, dma->xfer_is_read);
+
+  uint8_t cmd;
+  if (dev->use_lba48) {
+    cmd = dma->xfer_is_read ? ATA_CMD_READ_DMA_EXT : ATA_CMD_WRITE_DMA_EXT;
+  } else {
+    cmd = dma->xfer_is_read ? ATA_CMD_READ_DMA : ATA_CMD_WRITE_DMA;
+  }
+
+  int rc = ata_dma_issue_cmd(dev, dma->xfer_lba, n, cmd);
+  if (rc != ATA_OK) {
+    ata_dma_cleanup_bmide(dma);
+    return rc;
+  }
+
+  // Limpiar IRQ state ANTES de arrancar BMIDE. Lock order:
+  // dma->lock -> dma->irq_wq.lock (consistente con el IRQ handler).
+  unsigned long wf = spin_lock_irqsave(&dma->irq_wq.lock);
+  dma->irq_pending = 0;
+  dma->irq_error = 0;
+  spin_unlock_irqrestore(&dma->irq_wq.lock, wf);
+
+  ata_dma_start_bmide(dma, dma->xfer_is_read);
+
+  dma->xfer_chunk_sectors = n;
+  dma->last_cmd_tick = sched_get_ticks();
+  return 0;
+}
+
+// Envía FLUSH CACHE EXT/FLUSH CACHE. Asume dma->lock NO cogido
+// (bloquea en ata_wait_not_busy).
+static int ata_dma_send_flush(struct ata_device *dev) {
+  uint16_t io = dev->channel->io_base;
+  uint64_t timeout = ata_timeout_iters();
+
+  int rc = ata_wait_not_busy(io, timeout);
+  if (rc != ATA_OK)
+    return rc;
+
+  ata_select_drive(dev->channel, dev->drive);
+
+  rc = ata_wait_not_busy(io, timeout);
+  if (rc != ATA_OK)
+    return rc;
+
+  uint8_t cmd = dev->use_lba48 ? ATA_CMD_FLUSH_CACHE_EXT : ATA_CMD_FLUSH_CACHE;
+  outb(io + ATA_REG_COMMAND, cmd);
+  return 0;
+}
+
+// Submit asíncrono. Devuelve 0 si arrancó con error (bio NO en vuelo),
+// -EINPROGRESS si arrancó OK, <0 si error (no arrancó).
+int ata_dma_submit_async(struct ata_device *dev, struct bio *bio) {
+  int ch_idx = (dev->channel->io_base == ATA_PRIMARY_IO) ? 0 : 1;
+  ata_dma_state_t *dma = &g_dma[ch_idx];
+  if (!dma->initialized)
+    return -ENODEV;
+
+  // Caso especial: BIO_FLUSH no tiene datos.
+  if (bio->op == BIO_FLUSH) {
+    ata_chan_acquire(dev->channel);
+
+    unsigned long flags = spin_lock_irqsave(&dma->lock);
+    if (dma->inflight_bio != NULL) {
+      spin_unlock_irqrestore(&dma->lock, flags);
+      ata_chan_release(dev->channel);
+      return -EBUSY;
+    }
+    dma->inflight_bio = bio;
+    dma->xfer_state = XFS_FLUSHING;
+    dma->last_cmd_tick = sched_get_ticks();
+    spin_unlock_irqrestore(&dma->lock, flags);
+
+    if (ata_dma_send_flush(dev) != 0) {
+      flags = spin_lock_irqsave(&dma->lock);
+      dma->inflight_bio = NULL;
+      dma->xfer_state = XFS_IDLE;
+      spin_unlock_irqrestore(&dma->lock, flags);
+      ata_chan_release(dev->channel);
+      return -EIO;
+    }
+
+    bio->error = 0;
+    return -EINPROGRESS;
+  }
+
+  // Data transfer (READ o WRITE).
+  ata_chan_acquire(dev->channel);
+
+  unsigned long flags = spin_lock_irqsave(&dma->lock);
+  if (dma->inflight_bio != NULL) {
+    spin_unlock_irqrestore(&dma->lock, flags);
+    ata_chan_release(dev->channel);
+    return -EBUSY;
+  }
+  dma->inflight_bio = bio;
+  dma->xfer_lba = bio->lba;
+  dma->xfer_buf = (uint8_t *)bio->buf;
+  dma->xfer_left = bio->count;
+  dma->xfer_is_read = (bio->op == BIO_READ) ? 1 : 0;
+  dma->xfer_need_flush = (bio->op == BIO_WRITE) ? 1 : 0;
+  dma->xfer_error = 0;
+  dma->xfer_state = XFS_RUNNING;
+  dma->xfer_chunk_sectors = 0;
+
+  int rc = ata_dma_start_chunk_locked(dma, dev);
+  if (rc != 0) {
+    dma->inflight_bio = NULL;
+    dma->xfer_state = XFS_IDLE;
+    spin_unlock_irqrestore(&dma->lock, flags);
+    ata_chan_release(dev->channel);
+    return rc;
+  }
+
+  spin_unlock_irqrestore(&dma->lock, flags);
+  bio->error = 0;
+  return -EINPROGRESS;
+}
+
+// Procesa el IRQ (o el polling rescue) del path async.
+static void ata_dma_handle_async_irq(ata_dma_state_t *dma, int ch_idx) {
+  struct bio *bio = NULL;
+  struct ata_device *dev = NULL;
+  int error = 0;
+  int need_next_chunk = 0;
+  int need_flush_now = 0;
+  int need_release = 0;
+
+  unsigned long flags = spin_lock_irqsave(&dma->lock);
+
+  bio = dma->inflight_bio;
+  if (!bio) {
+    spin_unlock_irqrestore(&dma->lock, flags);
+    return;
+  }
+  dev = (struct ata_device *)bio->bdev->private_data;
+
+  int state = dma->xfer_state;
+
+  if (state == XFS_RUNNING) {
+    uint8_t bm = inb(dma->bmide_base + BM_STATUS);
+    uint16_t io = (ch_idx == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
+    uint8_t disk_status = inb(io + ATA_REG_STATUS);
+
+    int is_err =
+        (bm & BM_STATUS_ERROR) || (disk_status & ATA_SR_ERR) || dma->irq_error;
+
+    if (is_err) {
+      error = -EIO;
+      need_release = 1;
+      dma->inflight_bio = NULL;
+      dma->xfer_state = XFS_IDLE;
+      ata_dma_cleanup_bmide(dma);
+    } else {
+      uint32_t consumed = dma->xfer_chunk_sectors;
+      dma->xfer_lba += consumed;
+      dma->xfer_left -= consumed;
+      dma->xfer_buf += (uint64_t)consumed * bio->bdev->sector_size;
+
+      if (dma->xfer_left > 0) {
+        need_next_chunk = 1;
+      } else if (dma->xfer_need_flush) {
+        dma->xfer_need_flush = 0;
+        dma->xfer_state = XFS_FLUSHING;
+        dma->last_cmd_tick = sched_get_ticks();
+        need_flush_now = 1;
+      } else {
+        error = 0;
+        need_release = 1;
+        dma->inflight_bio = NULL;
+        dma->xfer_state = XFS_IDLE;
+      }
+    }
+  } else if (state == XFS_FLUSHING) {
+    uint16_t io = (ch_idx == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
+    uint8_t disk_status = inb(io + ATA_REG_STATUS);
+    error = (disk_status & ATA_SR_ERR) ? -EIO : 0;
+    need_release = 1;
+    dma->inflight_bio = NULL;
+    dma->xfer_state = XFS_IDLE;
+  } else {
+    spin_unlock_irqrestore(&dma->lock, flags);
+    return;
+  }
+
+  spin_unlock_irqrestore(&dma->lock, flags);
+
+  if (need_next_chunk) {
+    unsigned long f2 = spin_lock_irqsave(&dma->lock);
+    int rc = ata_dma_start_chunk_locked(dma, dev);
+    spin_unlock_irqrestore(&dma->lock, f2);
+    if (rc != 0) {
+      f2 = spin_lock_irqsave(&dma->lock);
+      dma->inflight_bio = NULL;
+      dma->xfer_state = XFS_IDLE;
+      spin_unlock_irqrestore(&dma->lock, f2);
+      ata_chan_release(dev->channel);
+      bio_endio(bio, -EIO);
+    }
+    return;
+  }
+
+  if (need_flush_now) {
+    if (ata_dma_send_flush(dev) != 0) {
+      unsigned long f3 = spin_lock_irqsave(&dma->lock);
+      dma->inflight_bio = NULL;
+      dma->xfer_state = XFS_IDLE;
+      spin_unlock_irqrestore(&dma->lock, f3);
+      ata_chan_release(dev->channel);
+      bio_endio(bio, -EIO);
+    }
+    return;
+  }
+
+  if (need_release && bio) {
+    ata_chan_release(dev->channel);
+    bio_endio(bio, error);
+  }
+}
+
+// ===========================================================================
+// IRQ handler (sync + async)
+// ===========================================================================
+void ata_dma_irq_handler(int channel_idx) {
+  if (channel_idx < 0 || channel_idx > 1)
+    return;
+  ata_dma_state_t *dma = &g_dma[channel_idx];
+  if (!dma->initialized)
+    return;
+
+  // Leer BM_STATUS ANTES de cualquier otra cosa. El BMIDE es el dueño
+  // del bit IRQ en su registro. Si está limpio, la IRQ es de otro
+  // dispositivo (SMBus compartiendo línea).
+  uint8_t bm = inb(dma->bmide_base + BM_STATUS);
+  int is_bmide = (bm & (BM_STATUS_IRQ | BM_STATUS_ERROR)) != 0;
+
+  if (is_bmide) {
+    outb(dma->bmide_base + BM_STATUS, bm | BM_STATUS_IRQ | BM_STATUS_ERROR);
+  }
+
+  // Ver el estado antes de hacer nada: si es FLUSHING, la IRQ es del
+  // FLUSH CACHE (BMIDE no interviene), no del BMIDE.
+  unsigned long flags = spin_lock_irqsave(&dma->lock);
+  int state = dma->xfer_state;
+  spin_unlock_irqrestore(&dma->lock, flags);
+
+  if (state == XFS_FLUSHING) {
+    // FLUSH: no toca BMIDE, solo despertar/async-complete.
+    flags = spin_lock_irqsave(&dma->irq_wq.lock);
+    dma->irq_pending = 1;
+    dma->irq_error = 0;
+    dma->irq_count++;
+    wake_up_all_locked(&dma->irq_wq);
+    spin_unlock_irqrestore(&dma->irq_wq.lock, flags);
+
+    ata_dma_handle_async_irq(dma, channel_idx);
+    return;
+  }
+
+  if (!is_bmide) {
+    // Sin BMIDE IRQ y sin FLUSHING: IRQ ajena, salir.
+    return;
+  }
+
+  // Data IRQ.
+  uint16_t io = (channel_idx == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
+  uint8_t disk_status = inb(io + ATA_REG_STATUS);
+  if (disk_status == 0xFF) {
+    // Bus flotante.
+    return;
+  }
+
+  flags = spin_lock_irqsave(&dma->irq_wq.lock);
+  dma->irq_pending = 1;
+  dma->irq_error = (bm & BM_STATUS_ERROR) ? 1 : 0;
+  dma->irq_count++;
+  wake_up_all_locked(&dma->irq_wq);
+  spin_unlock_irqrestore(&dma->irq_wq.lock, flags);
+
+  ata_dma_handle_async_irq(dma, channel_idx);
+}
+
+// ===========================================================================
+// [FASE 1.4] Polling rescue
+// ===========================================================================
+void ata_dma_poll_ports(void) {
+  uint64_t now = sched_get_ticks();
+
+  for (int ch = 0; ch < 2; ch++) {
+    ata_dma_state_t *dma = &g_dma[ch];
+    if (!dma->initialized)
+      continue;
+
+    unsigned long flags = spin_lock_irqsave(&dma->lock);
+    struct bio *bio = dma->inflight_bio;
+    int state = dma->xfer_state;
+    uint64_t last = dma->last_cmd_tick;
+    spin_unlock_irqrestore(&dma->lock, flags);
+
+    if (!bio || state == XFS_IDLE)
+      continue;
+    if (now - last < ATA_DMA_POLL_DELAY_TICKS)
+      continue;
+
+    // ¿El hardware terminó sin avisar por IRQ?
+    if (state == XFS_RUNNING) {
+      uint8_t bm = inb(dma->bmide_base + BM_STATUS);
+      if (bm & BM_STATUS_ACTIVE)
+        continue; // sigue transfiriendo
+      // BMIDE sin active: forzar irq_pending (idempotente con IRQ real).
+      flags = spin_lock_irqsave(&dma->irq_wq.lock);
+      if (!dma->irq_pending) {
+        dma->irq_pending = 1;
+        dma->irq_error = (bm & BM_STATUS_ERROR) ? 1 : 0;
+        dma->irq_count++;
+      }
+      spin_unlock_irqrestore(&dma->irq_wq.lock, flags);
+      ata_dma_handle_async_irq(dma, ch);
+    } else if (state == XFS_FLUSHING) {
+      uint16_t io = (ch == 0) ? ATA_PRIMARY_IO : ATA_SECONDARY_IO;
+      uint8_t disk_status = inb(io + ATA_REG_STATUS);
+      if (disk_status & ATA_SR_BSY)
+        continue; // aún ocupado
+      flags = spin_lock_irqsave(&dma->irq_wq.lock);
+      if (!dma->irq_pending) {
+        dma->irq_pending = 1;
+        dma->irq_error = 0;
+        dma->irq_count++;
+      }
+      spin_unlock_irqrestore(&dma->irq_wq.lock, flags);
+      ata_dma_handle_async_irq(dma, ch);
+    }
+  }
+}
+
+// ===========================================================================
+// IRQ stubs
 // ===========================================================================
 void ata_dma_irq14(void) { ata_dma_irq_handler(0); }
 void ata_dma_irq15(void) { ata_dma_irq_handler(1); }

@@ -769,7 +769,6 @@ static void xfer_fail_and_complete(ahci_port_t *p, int error) {
 }
 
 static void ahci_start_next_cmd(ahci_port_t *p) {
-  // Leer estado bajo lock (sin modificarlo, solo para decidir).
   unsigned long flags = spin_lock_irqsave(&p->irq_wq.lock);
   bio_t *bio = p->inflight_bio;
   uint64_t lba = p->xfer_lba;
@@ -780,17 +779,22 @@ static void ahci_start_next_cmd(ahci_port_t *p) {
   int err = p->xfer_error;
   spin_unlock_irqrestore(&p->irq_wq.lock, flags);
 
-  if (!bio) {
+  if (!bio)
+    return;
+
+  // [FIX 2.1b] Puerta defensiva: nunca dividir por sector_size=0.
+  if (p->sector_size == 0) {
+    LOG_ERR("[AHCI] puerto %u: sector_size=0, abortando bio",
+            p->port_num);
+    xfer_fail_and_complete(p, -EIO);
     return;
   }
 
   if (err != 0) {
-    // Hubo un error antes: completar y salir.
     xfer_fail_and_complete(p, err);
     return;
   }
 
-  // 1. ¿Quedan datos por transferir?
   if (left > 0) {
     uint32_t max_sectors = AHCI_MAX_XFER_BYTES / p->sector_size;
     if (max_sectors == 0)
@@ -1564,63 +1568,42 @@ static int ahci_probe_port(uint8_t port_num) {
 // ===========================================================================
 // Inicialización
 // ===========================================================================
-static int ahci_init_impl(void) {
+static int ahci_probe(pci_device_t *pci_dev, const pci_device_id_t *id) {
+  (void)id;
+
+  if (!pci_dev)
+    return -EINVAL;
+
+  if ((pci_dev->prog_if & 0x7F) != PCI_PROGIF_SATA_AHCI) {
+    LOG_INFO("[AHCI] %02x:%02x.%x: no está en modo AHCI (progif=0x%02x)",
+             pci_dev->bus, pci_dev->slot, pci_dev->func, pci_dev->prog_if);
+    return -ENODEV;
+  }
+
+  // [FIX 2.1b] Solo UN controlador AHCI por ahora: g_hba es global.
+  // Si ya hay uno inicializado, NO memsets (romperías sda y cualquier
+  // bio en vuelo sobre ese controlador). Devolver -EBUSY deja el device
+  // sin reclamar y no toca nada.
+  if (g_hba.initialized) {
+    LOG_INFO("[AHCI] %02x:%02x.%x: ya hay AHCI activo en %02x:%02x.%x, "
+             "ignorando este controlador",
+             pci_dev->bus, pci_dev->slot, pci_dev->func, g_hba.pci.bus,
+             g_hba.pci.slot, g_hba.pci.func);
+    return -EBUSY;
+  }
+
   memset(&g_hba, 0, sizeof(g_hba));
   g_hba.irq_count = 0;
+  g_hba.pci = *pci_dev;
 
-  LOG_INFO("[AHCI] Buscando controlador SATA/AHCI en el bus PCI...");
-
-  pci_device_t dev;
-  int found_controller = 0;
-
-  // [FIX CRÍTICO] Enumeración manual del bus PCI.
-  // Nos saltamos pci_find_device() para evitar conflictos con otros drivers
-  // (como ata_pio) que puedan haber tocado el dispositivo previamente.
-  for (uint16_t bus = 0; bus < 256 && !found_controller; bus++) {
-    for (uint8_t slot = 0; slot < 32 && !found_controller; slot++) {
-      uint16_t vendor = pci_read_config_word((uint8_t)bus, slot, 0, 0);
-      if (vendor == 0xFFFF)
-        continue;
-
-      uint8_t header = pci_read_config_byte((uint8_t)bus, slot, 0, 0x0E);
-      int num_funcs = (header & 0x80) ? 8 : 1;
-
-      for (uint8_t func = 0; func < num_funcs; func++) {
-        pci_device_t tmp;
-        if (pci_get_device((uint8_t)bus, slot, func, &tmp) != 0)
-          continue;
-
-        // Comprobar si es un controlador SATA (class=0x01, sub=0x06)
-        if (tmp.class_id == PCI_CLASS_STORAGE &&
-            tmp.subclass_id == PCI_SUBCLASS_STORAGE_SATA) {
-          // Verificar que está en modo AHCI (prog_if=0x01)
-          if ((tmp.prog_if & 0x7F) == PCI_PROGIF_SATA_AHCI) {
-            dev = tmp;
-            found_controller = 1;
-            break; // Salir del bucle de funciones
-          } else {
-            LOG_INFO("[AHCI] Controlador SATA en %02x:%02x.%x ignorado: no "
-                     "está en modo AHCI (progif=0x%02x).",
-                     bus, slot, func, tmp.prog_if);
-          }
-        }
-      }
-    }
-  }
-
-  if (!found_controller) {
-    LOG_INFO(
-        "[AHCI] No se encontró ningún controlador SATA operando en modo AHCI.");
-    return 0;
-  }
-
-  g_hba.pci = dev;
-  LOG_INFO("[AHCI] Controlador AHCI detectado en %02x:%02x.%x (vendor=0x%04x "
-           "device=0x%04x)",
-           dev.bus, dev.slot, dev.func, dev.vendor_id, dev.device_id);
+  LOG_INFO("[AHCI] Controlador AHCI detectado en %02x:%02x.%x "
+           "(vendor=0x%04x device=0x%04x)",
+           pci_dev->bus, pci_dev->slot, pci_dev->func, pci_dev->vendor_id,
+           pci_dev->device_id);
 
   // Leer PCI config: IRQ line (0x3C) y IRQ pin (0x3D).
-  uint32_t irq_reg = pci_read_config_dword(dev.bus, dev.slot, dev.func, 0x3C);
+  uint32_t irq_reg =
+      pci_read_config_dword(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x3C);
   uint8_t irq_line = (uint8_t)(irq_reg & 0xFF);
   uint8_t irq_pin = (uint8_t)((irq_reg >> 8) & 0xFF);
   LOG_INFO("[AHCI-DEBUG] PCI 0x3C = 0x%08x (line=%u pin=%u)", irq_reg, irq_line,
@@ -1629,8 +1612,8 @@ static int ahci_init_impl(void) {
   if (irq_pin == 0) {
     LOG_WARN("[AHCI-DEBUG] PCI_INTERRUPT_PIN=0: el BIOS NO ha ruteado IRQ");
   } else {
-    LOG_INFO("[AHCI-DEBUG] PCI_INTERRUPT_PIN=%u (INTA#=%u, INTB#=%u, INTC#=%u, "
-             "INTD#=%u)",
+    LOG_INFO("[AHCI-DEBUG] PCI_INTERRUPT_PIN=%u (INTA#=%u, INTB#=%u, "
+             "INTC#=%u, INTD#=%u)",
              irq_pin, irq_pin == 1, irq_pin == 2, irq_pin == 3, irq_pin == 4);
   }
 
@@ -1642,23 +1625,23 @@ static int ahci_init_impl(void) {
   }
 
   // Habilitar bus mastering e IO/MEM.
-  pci_enable_bus_mastering(&dev);
-  pci_enable_io_mem(&dev);
+  pci_enable_bus_mastering(pci_dev);
+  pci_enable_io_mem(pci_dev);
 
   // Mapear BAR5 (ABAR).
-  uint32_t abar_phys = pci_get_bar(&dev, 5);
+  uint32_t abar_phys = pci_get_bar(pci_dev, 5);
   if (abar_phys == 0) {
     LOG_ERR("[AHCI] BAR5 (ABAR) es 0. Fallo de hardware o BIOS.");
-    return -1;
+    return -ENODEV;
   }
 
   g_hba.abar_phys = abar_phys;
   g_hba.abar = (volatile uint8_t *)mmio_map(
       abar_phys, 0x1100, PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
   if (!g_hba.abar) {
-    LOG_ERR("[AHCI] mmio_map(BAR5) falló. No se puede acceder a los registros "
-            "del HBA.");
-    return -1;
+    LOG_ERR("[AHCI] mmio_map(BAR5) falló. No se puede acceder a los "
+            "registros del HBA.");
+    return -ENOMEM;
   }
   LOG_INFO("[AHCI] ABAR mapeado phys=0x%x -> virt=%p", abar_phys,
            (void *)g_hba.abar);
@@ -1679,22 +1662,24 @@ static int ahci_init_impl(void) {
   // Reset del HBA.
   if (hba_reset() != 0) {
     LOG_ERR("[AHCI] Falló el reset del HBA.");
-    return -1;
+    mmio_unmap(abar_phys, 0x1100);
+    g_hba.abar = NULL;
+    return -EIO;
   }
 
   // Configurar interrupciones.
-  uint8_t irq = pci_get_irq(&dev);
+  uint8_t irq = pci_get_irq(pci_dev);
 
   // --- Intentar MSI primero ---
-  if (pci_find_capability(dev.bus, dev.slot, dev.func, 0x05) != 0) {
-    if (pci_enable_msi(dev.bus, dev.slot, dev.func, MSI_VECTOR_BASE,
-                       lapic_get_bsp_id()) == 0) {
+  if (pci_find_capability(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x05) !=
+      0) {
+    if (pci_enable_msi(pci_dev->bus, pci_dev->slot, pci_dev->func,
+                       MSI_VECTOR_BASE, lapic_get_bsp_id()) == 0) {
       g_hba.using_msi = 1;
       g_hba.msi_vector = MSI_VECTOR_BASE;
       msi_install_handler(MSI_VECTOR_BASE, ahci_irq_handler_msi);
       LOG_INFO("[AHCI] MSI habilitado en vector 0x%02x", MSI_VECTOR_BASE);
 
-      // Enmascarar la IRQ legacy por si acaso.
       if (irq != 0xFF && irq <= 15) {
         ioapic_mask_irq(irq, 1);
         LOG_INFO("[AHCI] IRQ legacy %u enmascarada", irq);
@@ -1717,7 +1702,6 @@ static int ahci_init_impl(void) {
 
       irq_install_handler_ex(irq, ahci_irq_ack, ahci_irq_process);
 
-      // level-triggered, active-low.
       ioapic_redirect_irq_ex(irq, 32 + irq, lapic_get_bsp_id(),
                              0 /* unmasked */, 1 /* level */,
                              1 /* active-low */);
@@ -1740,12 +1724,21 @@ static int ahci_init_impl(void) {
   g_hba.num_ports_impl = (uint8_t)ahci_popcount32(g_hba.pi);
 
   if (found == 0) {
-    LOG_WARN("[AHCI] El controlador se inicializó correctamente, pero no hay "
-             "discos conectados a los puertos SATA.");
-  } else {
-    LOG_INFO("[AHCI] %d discos SATA registrados correctamente.", found);
+    LOG_WARN("[AHCI] El controlador en %02x:%02x.%x no tiene discos SATA "
+             "conectados; liberando para permitir probar otro",
+             pci_dev->bus, pci_dev->slot, pci_dev->func);
+    // Nada útil que devolver: liberar el mmio. Los puertos ya se han
+    // liberado en ahci_probe_port() (port_free_memory). El HBA sigue
+    // con AE=1 pero no hay bdev. No hay daño: si el siguiente probe
+    // llega, entrará aquí con g_hba.initialized==0 (no seteamos).
+    if (g_hba.abar) {
+      mmio_unmap(g_hba.abar_phys, 0x1100);
+      g_hba.abar = NULL;
+    }
+    return -ENODEV;
   }
 
+  LOG_INFO("[AHCI] %d discos SATA registrados correctamente.", found);
   g_hba.initialized = 1;
   return 0;
 }
@@ -2013,8 +2006,22 @@ static void ahci_irq_handler_msi(void) {
 // ===========================================================================
 // Driver
 // ===========================================================================
-struct driver ahci_driver = {
+
+static const pci_device_id_t ahci_id_table[] = {
+    {
+        .vendor_id = PCI_ANY_ID,
+        .device_id = PCI_ANY_ID,
+        .subvendor = PCI_ANY_ID,
+        .subdevice = PCI_ANY_ID,
+        .class_id = PCI_CLASS_STORAGE,
+        .subclass_id = PCI_SUBCLASS_STORAGE_SATA,
+        .class_mask = 0xFF,
+    },
+    {0}};
+
+pci_driver_t ahci_pci_driver = {
     .name = "ahci",
-    .init = ahci_init_impl,
-    .shutdown = NULL,
+    .id_table = ahci_id_table,
+    .probe = ahci_probe,
+    .remove = NULL,
 };

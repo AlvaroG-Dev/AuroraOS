@@ -850,6 +850,29 @@ static int ata_submit(block_device_t *bdev, bio_t *bio) {
   if (!dev)
     return -ENODEV;
 
+  // [FASE 1.4] Intentar path async DMA si aplica:
+  //   - el disco tiene DMA activo
+  //   - el buffer del bio está alineado a 2 bytes (el BMIDE exige base par)
+  //   - el canal DMA está inicializado
+  //
+  // Los bios que no cumplen (buffers impares, PIO-only, FLUSH) caen al
+  // path síncrono existente más abajo. La ruta síncrona es la misma de
+  // antes; solo añadimos la oportunidad de async.
+  if (dev->use_dma && ((uintptr_t)bio->buf & 1) == 0) {
+    int ch_idx = (dev->channel->io_base == ATA_PRIMARY_IO) ? 0 : 1;
+    if (ata_dma_is_ready(ch_idx)) {
+      int arc = ata_dma_submit_async(dev, bio);
+      if (arc == -EINPROGRESS) {
+        // En vuelo: IRQ / polling llamarán a bio_endio.
+        return -EINPROGRESS;
+      }
+      // arc != -EINPROGRESS: no arrancó. Caer al path síncrono para
+      // que el bio se complete con el resultado real (probablemente
+      // el mismo error, pero al menos tenemos un código coherente).
+    }
+  }
+
+  // --- Path síncrono (sin cambios) ---
   ata_channel_t *ch = dev->channel;
   ata_chan_acquire(ch);
   int rc;
@@ -862,8 +885,6 @@ static int ata_submit(block_device_t *bdev, bio_t *bio) {
         dev->dma_fail_streak = 0;
       } else {
         ata_dma_note_failure(dev, rc);
-        // [FIX] Soft reset antes de reintentar con PIO. El DMA a medias
-        // puede dejar el disco en un estado inconsistente.
         ata_soft_reset(dev->channel);
         ata_select_drive(dev->channel, dev->drive);
         rc =
@@ -880,7 +901,6 @@ static int ata_submit(block_device_t *bdev, bio_t *bio) {
         dev->dma_fail_streak = 0;
       } else {
         ata_dma_note_failure(dev, rc);
-        // [FIX] Soft reset antes de reintentar con PIO.
         ata_soft_reset(dev->channel);
         ata_select_drive(dev->channel, dev->drive);
         rc = ata_retry_op(dev, (void *)ata_write, bio->lba, bio->count,
@@ -1273,8 +1293,11 @@ void ata_dump(void) {
 // ===========================================================================
 // Registro del driver
 // ===========================================================================
+static const char *const ata_pio_depends[] = {"pci", NULL};
+
 struct driver ata_pio_driver = {
     .name = "ata_pio",
+    .depends = ata_pio_depends,
     .init = ata_pio_init,
     .shutdown = NULL,
 };

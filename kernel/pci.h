@@ -220,8 +220,64 @@ int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
 void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func);
 
 // ===========================================================================
+// PCI Bus Driver Framework (Fase 2.1b)
+//
+// Permite registrar drivers PCI con una tabla de IDs y un callback probe().
+// pci_init_impl() llama a pci_bus_probe_all() al final de la enumeracion:
+// itera los dispositivos encontrados y llama a probe() en el primer driver
+// cuya id_table haga match.
+//
+// Ventajas sobre init() global:
+//   - El driver recibe el pci_device_t ya encontrado; no necesita su
+//     propio loop de busqueda por el bus.
+//   - Multiples instancias del mismo device_id se sondean automaticamente.
+//   - El PCI bus controla el orden: primero enumera, luego sondea.
+// ===========================================================================
+
+// Sentinel: cualquier valor en los campos de id_table.
+#define PCI_ANY_ID 0xFFFFu
+
+// Entrada de tabla de IDs PCI.
+// vendor_id==0 actua como terminador.
+typedef struct {
+  uint16_t vendor_id;
+  uint16_t device_id;
+  uint16_t subvendor;  // PCI_ANY_ID para ignorar
+  uint16_t subdevice;  // PCI_ANY_ID para ignorar
+  uint8_t class_id;    // ignorado si class_mask == 0
+  uint8_t subclass_id; // ignorado si class_mask == 0
+  uint8_t class_mask;  // 0xFF match exacto de clase; 0x00 ignorar
+  uint8_t _pad;
+} pci_device_id_t;
+
+// Descriptor de driver PCI de bus.
+typedef struct pci_driver {
+  const char *name;
+  const pci_device_id_t *id_table; // array terminado con { vendor_id==0 }
+  // probe: llamado con el dispositivo ya encontrado.
+  // Devuelve 0 si reclamado (claimed), -errno si no puede manejarlo.
+  int (*probe)(pci_device_t *dev, const pci_device_id_t *id);
+  // remove: llamado al apagar/desconectar. Puede ser NULL.
+  void (*remove)(pci_device_t *dev);
+} pci_driver_t;
+
+// Registra un driver PCI de bus. Debe llamarse ANTES de pci_init_impl().
+void pci_bus_register_driver(pci_driver_t *drv);
+
+// Sondea todos los dispositivos enumerados contra todos los drivers
+// registrados. Llamado automaticamente por pci_init_impl() al final.
+void pci_bus_probe_all(void);
+
+// Devuelve el array de dispositivos enumerados y su conteo.
+const pci_device_t *pci_get_devices(int *count);
+
+// ===========================================================================
 // Driver.
 // ===========================================================================
 extern struct driver pci_driver;
+
+// [FASE 2.1b] Drivers PCI de bus. Se registran ANTES de pci_init_impl().
+extern pci_driver_t ahci_pci_driver;
+extern pci_driver_t xhci_pci_driver;
 
 #endif

@@ -247,7 +247,7 @@ typedef struct ahci_hba {
   uint8_t msi_vector;
 } ahci_hba_t;
 
-extern struct driver ahci_driver;
+extern pci_driver_t ahci_pci_driver;
 void ahci_dump(void);
 int ahci_disk_count(void);
 void ahci_poll_ports(void);

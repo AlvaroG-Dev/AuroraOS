@@ -45,12 +45,11 @@ int xhci_port_reset(uint8_t port) {
   if (!(portsc & XHCI_PORTSC_CCS))
     return -ENODEV;
 
-  uint32_t v = portsc & ~XHCI_PORTSC_CHANGE_BITS;
-  v |= XHCI_PORTSC_PP;
-  portsc_write(port, v);
-
-  v = xhci_port_status(port) & ~XHCI_PORTSC_CHANGE_BITS;
-  portsc_write(port, v | XHCI_PORTSC_PR);
+  /* [FIX HW REAL] Solo bits neutros: antes se reescribía PED=1 (desactiva el
+   * puerto) y los change bits pendientes. */
+  portsc_write(port, xhci_portsc_neutral(portsc) | XHCI_PORTSC_PP);
+  portsc_write(port,
+               xhci_portsc_neutral(xhci_port_status(port)) | XHCI_PORTSC_PR);
 
   uint32_t lo, hi;
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -79,8 +78,10 @@ int xhci_port_reset(uint8_t port) {
 
   uint32_t s = xhci_port_status(port);
   // [FIX] Limpiar ambos bits de cambio
-  portsc_write(port, (s & ~XHCI_PORTSC_CHANGE_BITS) | XHCI_PORTSC_PRC |
-                         XHCI_PORTSC_WRC);
+  /* [FIX HW REAL] Aquí s tenía PED=1: escribirlo desactivaba el puerto recién
+   * reseteado y la función devolvía -EIO (puertos USB2 que "no aparecen"). */
+  portsc_write(port,
+               xhci_portsc_neutral(s) | XHCI_PORTSC_PRC | XHCI_PORTSC_WRC);
   s = xhci_port_status(port);
   if (!(s & XHCI_PORTSC_PED))
     return -EIO;
@@ -94,20 +95,9 @@ void xhci_port_poll_changes(void) {
     uint32_t s = xhci_port_status(p);
     // Si hay algún bit de cambio pendiente...
     if (s & XHCI_PORTSC_CHANGE_BITS) {
-      // Escribir 1 para limpiar CADA bit de cambio por separado.
-      // Esto confirma (ACK) el cambio al hardware y evita el bucle.
-      if (s & XHCI_PORTSC_CSC)
-        portsc_write(p, s | XHCI_PORTSC_CSC);
-      if (s & XHCI_PORTSC_PEC)
-        portsc_write(p, s | XHCI_PORTSC_PEC);
-      if (s & XHCI_PORTSC_WRC)
-        portsc_write(p, s | XHCI_PORTSC_WRC); // USB 3.0
-      if (s & XHCI_PORTSC_PRC)
-        portsc_write(p, s | XHCI_PORTSC_PRC);
-      if (s & XHCI_PORTSC_PLC)
-        portsc_write(p, s | XHCI_PORTSC_PLC);
-      if (s & XHCI_PORTSC_CEC)
-        portsc_write(p, s | XHCI_PORTSC_CEC);
+      // ACK de todos los change bits en UNA escritura (RW1C) y sin tocar
+      // PED/PR: antes se escribía `s` entero, lo que deshabilitaba el puerto.
+      portsc_write(p, xhci_portsc_neutral(s) | (s & XHCI_PORTSC_CHANGE_BITS));
     }
   }
 }
