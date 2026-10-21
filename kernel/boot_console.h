@@ -13,6 +13,7 @@ void boot_console_hook_remove(void);
 
 void boot_console_overlay_enable(int on);
 int boot_console_overlay_enabled(void);
-void boot_console_draw_overlay(void);
+void boot_console_draw_overlay(uint32_t *dst, uint32_t dst_pitch, int clip_x,
+                               int clip_y, int clip_w, int clip_h);
 
 #endif
