@@ -107,27 +107,72 @@ static uint64_t g_frame_cycles_sum = 0;
 static uint32_t g_frame_count = 0;
 static uint64_t g_frame_cycles_max = 0;
 
-static void compositor_report_frame_stats(uint64_t elapsed_cycles) {
+static uint64_t g_frame_wallpaper_sum = 0;
+static uint64_t g_frame_windows_sum = 0;
+static uint64_t g_frame_ui_sum = 0;
+static uint64_t g_frame_blit_sum = 0;
+static uint64_t g_frame_overlay_sum = 0;
+static uint64_t g_frame_damage_pixels_sum = 0;
+
+static void compositor_report_frame_stats(uint64_t elapsed_cycles,
+                                          uint64_t wallpaper_cycles,
+                                          uint64_t windows_cycles,
+                                          uint64_t ui_cycles,
+                                          uint64_t blit_cycles,
+                                          uint64_t overlay_cycles,
+                                          uint64_t damage_pixels) {
   g_frame_cycles_sum += elapsed_cycles;
   if (elapsed_cycles > g_frame_cycles_max)
     g_frame_cycles_max = elapsed_cycles;
+  g_frame_wallpaper_sum += wallpaper_cycles;
+  g_frame_windows_sum += windows_cycles;
+  g_frame_ui_sum += ui_cycles;
+  g_frame_blit_sum += blit_cycles;
+  g_frame_overlay_sum += overlay_cycles;
+  g_frame_damage_pixels_sum += damage_pixels;
   g_frame_count++;
 
   if (g_frame_count >= COMP_FRAME_LOG_INTERVAL) {
     uint64_t freq = klog_get_tsc_freq();
     if (freq > 0) {
-      /* Calcular en microsegundos, enteros. 1 ms = 1000 us. */
+      /* Medias del tiempo transcurrido por fase; incluye preempciones. */
       uint64_t avg_us =
           (g_frame_cycles_sum / g_frame_count) * 1000000ULL / freq;
       uint64_t max_us = g_frame_cycles_max * 1000000ULL / freq;
+      uint64_t wall_us =
+          (g_frame_wallpaper_sum / g_frame_count) * 1000000ULL / freq;
+      uint64_t windows_us =
+          (g_frame_windows_sum / g_frame_count) * 1000000ULL / freq;
+      uint64_t ui_us =
+          (g_frame_ui_sum / g_frame_count) * 1000000ULL / freq;
+      uint64_t blit_us =
+          (g_frame_blit_sum / g_frame_count) * 1000000ULL / freq;
+      uint64_t overlay_us =
+          (g_frame_overlay_sum / g_frame_count) * 1000000ULL / freq;
+      uint64_t damage_pixels = g_frame_damage_pixels_sum / g_frame_count;
+
       LOG_DEBUG(
-          "[COMP-PERF] render: avg=%u.%03u ms, max=%u.%03u ms (%u frames)",
+          "[COMP-PERF] avg=%u.%03u max=%u.%03u ms, damage=%u px | "
+          "wall=%u.%03u windows=%u.%03u ui=%u.%03u blit=%u.%03u "
+          "overlay=%u.%03u ms (%u frames)",
           (unsigned)(avg_us / 1000), (unsigned)(avg_us % 1000),
           (unsigned)(max_us / 1000), (unsigned)(max_us % 1000),
+          (unsigned)damage_pixels,
+          (unsigned)(wall_us / 1000), (unsigned)(wall_us % 1000),
+          (unsigned)(windows_us / 1000), (unsigned)(windows_us % 1000),
+          (unsigned)(ui_us / 1000), (unsigned)(ui_us % 1000),
+          (unsigned)(blit_us / 1000), (unsigned)(blit_us % 1000),
+          (unsigned)(overlay_us / 1000), (unsigned)(overlay_us % 1000),
           (unsigned)g_frame_count);
     }
     g_frame_cycles_sum = 0;
     g_frame_cycles_max = 0;
+    g_frame_wallpaper_sum = 0;
+    g_frame_windows_sum = 0;
+    g_frame_ui_sum = 0;
+    g_frame_blit_sum = 0;
+    g_frame_overlay_sum = 0;
+    g_frame_damage_pixels_sum = 0;
     g_frame_count = 0;
   }
 }
@@ -1013,6 +1058,15 @@ static void compositor_render(void) {
   if (clip.w <= 0 || clip.h <= 0)
     return;
 
+  /* Medir únicamente los frames que realmente renderizan una región válida. */
+  uint64_t t_render_start = comp_rdtsc();
+  uint64_t t_stage_start = t_render_start;
+  uint64_t wallpaper_cycles = 0;
+  uint64_t windows_cycles = 0;
+  uint64_t ui_cycles = 0;
+  uint64_t blit_cycles = 0;
+  uint64_t overlay_cycles = 0;
+
   /* 1. Wallpaper (backbuffer ← wallpaper_cache, memoria normal) */
   if (wallpaper_cache) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
@@ -1024,6 +1078,9 @@ static void compositor_render(void) {
       simd_fill_row(&backbuffer[y * fb_width + clip.x], 0xFF1E1E2E, clip.w);
     }
   }
+  uint64_t t_stage_end = comp_rdtsc();
+  wallpaper_cycles = t_stage_end - t_stage_start;
+  t_stage_start = t_stage_end;
 
   /* 2. Ventanas, de atrás hacia adelante */
   window_t *curr = window_stack;
@@ -1043,6 +1100,9 @@ static void compositor_render(void) {
     }
     curr = curr->prev;
   }
+  t_stage_end = comp_rdtsc();
+  windows_cycles = t_stage_end - t_stage_start;
+  t_stage_start = t_stage_end;
 
   /* 3. Taskbar */
   rect_t taskbar_rect = taskbar_get_bounds(fb_width, fb_height);
@@ -1056,6 +1116,9 @@ static void compositor_render(void) {
   if (resize_window) {
     draw_resize_outline(backbuffer, fb_width, clip);
   }
+  t_stage_end = comp_rdtsc();
+  ui_cycles = t_stage_end - t_stage_start;
+  t_stage_start = t_stage_end;
 
   /* 4. Blit a VRAM (non-temporal) + cursor */
   if (fb_ptr) {
@@ -1076,9 +1139,19 @@ static void compositor_render(void) {
     fb_flush_rect(fb_ptr, fb_pitch, (uint32_t)clip.x, (uint32_t)clip.y,
                   (uint32_t)clip.w, (uint32_t)clip.h);
   }
+  t_stage_end = comp_rdtsc();
+  blit_cycles = t_stage_end - t_stage_start;
+  t_stage_start = t_stage_end;
+
   /* 5. Overlay de logs del kernel (encima de todo). */
   extern void boot_console_draw_overlay(void);
   boot_console_draw_overlay();
+  t_stage_end = comp_rdtsc();
+  overlay_cycles = t_stage_end - t_stage_start;
+
+  compositor_report_frame_stats(
+      t_stage_end - t_render_start, wallpaper_cycles, windows_cycles, ui_cycles,
+      blit_cycles, overlay_cycles, (uint64_t)clip.w * (uint64_t)clip.h);
 }
 
 static int compositor_has_active_animations(void) {
@@ -1210,11 +1283,7 @@ void compositor_thread(void) {
       }
     }
 
-    /* [NUEVO] Diagnóstico: mide el tiempo real de compositor_render(). */
-    uint64_t t_render_start = comp_rdtsc();
     compositor_render();
-    uint64_t t_render_end = comp_rdtsc();
-    compositor_report_frame_stats(t_render_end - t_render_start);
 
     if (still_animating) {
       compositor_frame_delay();
