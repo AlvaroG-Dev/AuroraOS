@@ -315,8 +315,10 @@ int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
   xhci_trb_t trb = {0};
   trb.param = dma.phys;
   trb.status = (uint32_t)len;
-  trb.control = XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP | XHCI_TRB_IOC |
-                (dir_in ? XHCI_TRB_DIR_IN : 0);
+  /* Normal TRB direction comes from the endpoint context. DIR (bit 16)
+   * is reserved for this TRB type; only Data Stage TRBs use XHCI_TRB_DIR_IN. */
+  trb.control =
+      XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP | XHCI_TRB_IOC;
 
   unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
   int rc = xhci_ring_enqueue(&st->ring, &trb);
