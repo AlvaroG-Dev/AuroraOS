@@ -5295,16 +5295,32 @@ static void test_xhci_attach_devices(void) {
     test_skip("xHCI no inicializado");
     return;
   }
-  // Los devices ya se attacharon en xhci_probe(). Solo validamos
-  // que al menos uno se enumeró.
-  int n = 0;
-  // Recorremos con xhci_attach_all_devices de nuevo (idempotente: los
-  // que ya están PED=1 los salta).
+
+  int connected = 0;
+  for (uint16_t p = 1; p <= (uint16_t)g_xhci.max_ports; p++) {
+    if (xhci_port_status((uint8_t)p) & XHCI_PORTSC_CCS)
+      connected++;
+  }
+  if (connected == 0) {
+    test_skip("sin dispositivos USB conectados a puertos raíz");
+    return;
+  }
+
+  // Repetir el scan debe ser idempotente. Cada puerto conectado debe
+  // conservar la marca de enumeración; una transferencia fallida no puede
+  // quedar ocultada por un TEST_ASSERT(1) incondicional.
   (void)xhci_attach_all_devices();
-  // No tenemos API para contar devices; el test pasa si el log muestra
-  // al menos un `[USB] device` arriba. Marcamos como passed.
-  TEST_ASSERT(1, "attach ejecutado, ver log de [USB] device");
-  (void)n;
+
+  int attached = 0;
+  for (uint16_t p = 1; p <= (uint16_t)g_xhci.max_ports; p++) {
+    if (!(xhci_port_status((uint8_t)p) & XHCI_PORTSC_CCS))
+      continue;
+    int ok = xhci_port_is_attached((uint8_t)p);
+    if (ok)
+      attached++;
+    TEST_ASSERT(ok, "puerto xHCI %u conectado pero no enumerado", p);
+  }
+  TEST_ASSERT(attached > 0, "no se enumeró ningún dispositivo USB conectado");
 }
 REGISTER_TEST("xhci: attach devices", test_xhci_attach_devices);
 
