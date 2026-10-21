@@ -205,8 +205,11 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   }
 
   uint32_t actual = 0;
+  // El TD de control termina en Status Stage. No aceptar como fin de la
+  // petición un Transfer Event intermedio del Data Stage (p. ej. SHORT_PACKET)
+  // ni el evento de otra petición simultánea del mismo slot/EP0.
   int werr =
-      xhci_wait_transfer(p->slot_id, 1, 0 /* WILDCARD */, timeout_ms, &actual);
+      xhci_wait_transfer(p->slot_id, 1, status_phys, timeout_ms, &actual);
 
   if (werr != 0) {
     xhci_diag_timeout(p);
