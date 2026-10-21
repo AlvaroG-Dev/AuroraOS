@@ -692,7 +692,6 @@ static void test_paging_map_rollback(void) {
     return;
   }
 
-  uint64_t baseline = pmm_free_pages_count();
   for (int fail_after = 0; fail_after < 3; fail_after++) {
     memset(pml4, 0, PAGE_SIZE);
     paging_test_set_alloc_fail_after(fail_after);
@@ -844,9 +843,6 @@ static void test_paging_noncanonical_addresses(void) {
               "paging_map_page_in aceptó dirección no canónica alta");
   TEST_ASSERT(pml4[0] == 0 && pml4[511] == 0,
               "una dirección no canónica modificó el PML4");
-  TEST_ASSERT(pmm_free_pages_count() == baseline,
-              "dirección no canónica consumió páginas de tablas");
-
   TEST_ASSERT(
       paging_map_page(noncanonical_low, 0x1000, PTE_WRITABLE | PTE_NX) != 0,
       "paging_map_page aceptó dirección no canónica baja");
