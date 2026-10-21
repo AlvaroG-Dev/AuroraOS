@@ -56,5 +56,18 @@ if grep -Eiq '\[xHCI\].*cmd timeout|\[xHCI\].*timeout esperando USB Legacy Hando
 fi
 grep -Eq '\[xHCI\] new device slot=' "$SERIAL_LOG" || fail "no USB device reached the xHCI slot-creation path"
 
-echo "[check_xhci] PASS: xHCI initialized and at least one USB device reached slot creation"
+# A slot alone is not proof of successful enumeration. Require real device
+# descriptors and successful HID report descriptor parsing for both devices
+# this test attaches to QEMU's xHCI controller.
+grep -Eq '\[USB\] device [[:xdigit:]]{4}:[[:xdigit:]]{4}' "$SERIAL_LOG" ||
+  fail "no USB device descriptor was parsed"
+if grep -Eiq '\[USB\].*(descriptor malformado|descriptor incompleto|GET_DESCRIPTOR\(DEVICE\) falló)' "$SERIAL_LOG"; then
+  fail "USB device descriptor transfer or parsing failed"
+fi
+grep -Eq '\[HID\] usbhid-kbd-[0-9]+: Report Descriptor OK' "$SERIAL_LOG" ||
+  fail "USB keyboard HID report descriptor was not parsed"
+grep -Eq '\[HID\] usbhid-mouse-[0-9]+: Report Descriptor OK' "$SERIAL_LOG" ||
+  fail "USB mouse HID report descriptor was not parsed"
+
+echo "[check_xhci] PASS: USB descriptors and keyboard/mouse HID report descriptors parsed"
 echo "[check_xhci] Serial log: $SERIAL_LOG"
