@@ -255,7 +255,7 @@ void boot_console_hook_remove(void) {
 #define OVERLAY_MAX_COLS 100
 #define OVERLAY_PAD_X 16
 #define OVERLAY_PAD_Y 12
-#define OVERLAY_BG 0xF9101828u
+#define OVERLAY_BG 0xFF101828u
 
 static int g_overlay_enabled = 0;
 static uint32_t *g_overlay_layer = NULL;
