@@ -11,6 +11,8 @@
 #include "usb_core.h"
 
 extern volatile uint64_t tick_count;
+extern uint32_t fb_width;
+extern uint32_t fb_height;
 
 #define HID_KIND_KEYBOARD 1
 #define HID_KIND_MOUSE 2
@@ -30,6 +32,11 @@ typedef struct usb_hid_dev {
   int use_report_protocol;
   hid_report_t report;
   uint8_t prev_data[64];
+
+  // Última posición escalada de informes HID con coordenadas absolutas.
+  int32_t mouse_abs_x;
+  int32_t mouse_abs_y;
+  uint8_t mouse_abs_valid; // bit 0 = X, bit 1 = Y
 
   // Modificadores (uno por bit; usage 0xE0..0xE7 de la page 0x07).
   uint8_t mod_lctrl, mod_lshift, mod_lalt, mod_lgui;
@@ -146,6 +153,73 @@ static uint32_t hid_get_bits(const uint8_t *data, uint32_t bit_offset,
   return val;
 }
 
+/* Los offsets del parser son relativos al payload y no incluyen el byte
+ * Report ID. Solo deben procesarse los campos del ID que llegó por USB. */
+static int hid_field_matches_report(const usb_hid_dev_t *h,
+                                    const uint8_t *data,
+                                    const hid_field_t *f) {
+  return !h->report.has_report_id || data[0] == f->report_id;
+}
+
+static uint32_t hid_field_bits(const usb_hid_dev_t *h, const uint8_t *data,
+                               const hid_field_t *f) {
+  uint32_t bit_offset =
+      f->bit_offset + (h->report.has_report_id ? 8u : 0u);
+  return hid_get_bits(data, bit_offset, f->report_size);
+}
+
+static int32_t hid_field_signed_value(const hid_field_t *f, uint32_t value) {
+  if (f->report_size > 0 && f->report_size < 32 &&
+      (f->is_relative || f->logical_min < 0) &&
+      (value & (1u << (f->report_size - 1)))) {
+    value |= ~((1u << f->report_size) - 1u);
+  }
+  return (int32_t)value;
+}
+
+static int32_t hid_absolute_to_screen(const hid_field_t *f, uint32_t value,
+                                      int vertical) {
+  int64_t v = hid_field_signed_value(f, value);
+  int64_t minv = f->logical_min;
+  int64_t maxv = f->logical_max;
+  uint32_t extent = vertical ? fb_height : fb_width;
+
+  if (extent <= 1 || maxv <= minv)
+    return 0;
+  if (v < minv)
+    v = minv;
+  if (v > maxv)
+    v = maxv;
+
+  return (int32_t)(((v - minv) * (int64_t)(extent - 1)) / (maxv - minv));
+}
+
+/* Los HID no Boot (p. ej. VirtualBox USB Tablet) se clasifican por las
+ * usages de entrada del Report Descriptor, no por bInterfaceProtocol. */
+static int hid_infer_kind(const hid_report_t *report) {
+  int keyboard = 0;
+  int has_x = 0;
+  int has_y = 0;
+
+  for (int i = 0; i < report->num_fields; i++) {
+    const hid_field_t *f = &report->fields[i];
+    if (f->is_constant)
+      continue;
+    if (f->usage_page == 0x07 && f->usage >= 0x04 && f->usage <= 0xE7)
+      keyboard = 1;
+    if (f->usage_page == 0x01 && f->usage == 0x30)
+      has_x = 1;
+    if (f->usage_page == 0x01 && f->usage == 0x31)
+      has_y = 1;
+  }
+
+  if (keyboard)
+    return HID_KIND_KEYBOARD;
+  if (has_x && has_y)
+    return HID_KIND_MOUSE;
+  return 0;
+}
+
 static void usb_hid_emit(usb_hid_dev_t *h, uint8_t code, int value,
                          int value2) {
   input_event_t ev;
@@ -218,13 +292,15 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
   // 1. Actualizar modificadores (usage 0xE0..0xE7, bits individuales).
   for (int i = 0; i < h->report.num_fields; i++) {
     hid_field_t *f = &h->report.fields[i];
+    if (!hid_field_matches_report(h, data, f))
+      continue;
     if (f->usage_page != 0x07)
       continue;
     if (f->usage < 0xE0 || f->usage > 0xE7)
       continue;
-    uint32_t v = hid_get_bits(data, f->bit_offset, f->report_size) ? 1 : 0;
+    uint32_t v = hid_field_bits(h, data, f) ? 1 : 0;
     uint32_t was =
-        hid_get_bits(h->prev_data, f->bit_offset, f->report_size) ? 1 : 0;
+        hid_field_bits(h, h->prev_data, f) ? 1 : 0;
     switch (f->usage) {
     case 0xE0:
       h->mod_lctrl = (uint8_t)v;
@@ -259,6 +335,8 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
   // 2. Teclas del array (Input Data, Array, Report Size = 8).
   for (int i = 0; i < h->report.num_fields; i++) {
     hid_field_t *f = &h->report.fields[i];
+    if (!hid_field_matches_report(h, data, f))
+      continue;
     if (f->usage_page != 0x07)
       continue;
     if (f->is_variable)
@@ -266,11 +344,11 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
     if (f->report_size != 8)
       continue;
 
-    uint32_t val = hid_get_bits(data, f->bit_offset, 8);
+    uint32_t val = hid_field_bits(h, data, f);
     if (val == 0 || val >= 128)
       continue;
 
-    uint32_t was = hid_get_bits(h->prev_data, f->bit_offset, 8);
+    uint32_t was = hid_field_bits(h, h->prev_data, f);
     if (was == val) {
       // Sigue pulsada en el mismo slot → auto-repeat.
       if (val == h->repeat_key &&
@@ -309,7 +387,7 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
       hid_field_t *f = &h->report.fields[i];
       if (f->usage_page != 0x07 || f->is_variable || f->report_size != 8)
         continue;
-      if (hid_get_bits(data, f->bit_offset, 8) == h->repeat_key) {
+      if (hid_field_bits(h, data, f) == h->repeat_key) {
         held = 1;
         break;
       }
@@ -326,33 +404,67 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
 // ===========================================================================
 static void usb_hid_process_mouse_full(usb_hid_dev_t *h, const uint8_t *data,
                                        int len) {
-  int16_t dx = 0, dy = 0;
+  int32_t dx = 0, dy = 0;
+  int32_t abs_x = 0, abs_y = 0;
+  int has_abs_x = 0, has_abs_y = 0;
   uint8_t buttons = 0;
 
   for (int i = 0; i < h->report.num_fields; i++) {
     hid_field_t *f = &h->report.fields[i];
-    if (f->is_constant)
+    if (f->is_constant || !hid_field_matches_report(h, data, f))
       continue;
-    uint32_t val = hid_get_bits(data, f->bit_offset, f->report_size);
-    if (f->is_relative && f->report_size > 1 && f->report_size < 32) {
-      if (val & (1U << (f->report_size - 1)))
-        val |= ~((1U << f->report_size) - 1);
-    }
+
+    uint32_t raw = hid_field_bits(h, data, f);
+    int32_t val = hid_field_signed_value(f, raw);
     if (f->is_button) {
-      if (val)
+      if (val && f->usage >= 1 && f->usage <= 8)
         buttons |= (uint8_t)(1u << (f->usage - 1));
     } else if (f->usage_page == 0x01) {
       switch (f->usage) {
-      case 0x30:
-        dx = (int16_t)val;
+      case 0x30: // X
+        if (f->is_relative) {
+          dx = val;
+        } else {
+          abs_x = hid_absolute_to_screen(f, raw, 0);
+          has_abs_x = 1;
+        }
         break;
-      case 0x31:
-        dy = (int16_t)val;
+      case 0x31: // Y
+        if (f->is_relative) {
+          dy = val;
+        } else {
+          abs_y = hid_absolute_to_screen(f, raw, 1);
+          has_abs_y = 1;
+        }
         break;
       }
     }
   }
-  usb_hid_emit(h, buttons, dx, dy);
+
+  // Tabletas HID envían coordenadas absolutas. El compositor actual consume
+  // deltas, así que se escala a pantalla y se resta la última posición.
+  if (has_abs_x) {
+    dx = (h->mouse_abs_valid & 0x01) ? abs_x - h->mouse_abs_x : 0;
+    h->mouse_abs_x = abs_x;
+    h->mouse_abs_valid |= 0x01;
+  }
+  if (has_abs_y) {
+    dy = (h->mouse_abs_valid & 0x02) ? abs_y - h->mouse_abs_y : 0;
+    h->mouse_abs_y = abs_y;
+    h->mouse_abs_valid |= 0x02;
+  }
+
+  // INPUT_EV_MOUSE transporta deltas firmados de 16 bits.
+  if (dx > 32767)
+    dx = 32767;
+  if (dx < -32768)
+    dx = -32768;
+  if (dy > 32767)
+    dy = 32767;
+  if (dy < -32768)
+    dy = -32768;
+
+  usb_hid_emit(h, buttons, (int16_t)dx, (int16_t)dy);
   memcpy(h->prev_data, data, len < 64 ? len : 64);
 }
 
@@ -570,17 +682,39 @@ int usb_hid_probe(usb_device_t *dev) {
       kfree(raw_desc);
     }
 
-    if (h->use_report_protocol) {
-      usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_PROTOCOL, 1, itf->number,
-                           NULL, 0, 5000);
-    } else {
-      LOG_INFO("[HID] %s: Fallback a Boot Protocol", h->name);
-      h->report_len = (kind == HID_KIND_KEYBOARD) ? 8 : 4;
-      usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_PROTOCOL, 0, itf->number,
-                           NULL, 0, 5000);
+    if (kind == 0 && h->use_report_protocol)
+      kind = hid_infer_kind(&h->report);
+    h->kind = kind;
+    snprintf(h->name, sizeof(h->name), "usbhid-%s-%u",
+             kind == HID_KIND_KEYBOARD ? "kbd" : "mouse", itf->number);
+
+    /* Un dispositivo HID que no es Boot ya usa Report Protocol de forma
+     * predeterminada. No enviarle SET_PROTOCOL/SET_IDLE: tablets genéricas
+     * de VirtualBox pueden responder STALL y forzar recuperación de EP0. */
+    if (itf->subclass == USB_HID_SUBCLASS_BOOT) {
+      if (h->use_report_protocol) {
+        (void)usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_PROTOCOL, 1,
+                                   itf->number, NULL, 0, 1000);
+      } else {
+        if (kind == 0) {
+          LOG_INFO("[HID] iface %u omitida: Boot Protocol no reconocido",
+                   itf->number);
+          kfree(h);
+          continue;
+        }
+        LOG_INFO("[HID] %s: Fallback a Boot Protocol", h->name);
+        h->report_len = (kind == HID_KIND_KEYBOARD) ? 8 : 4;
+        (void)usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_PROTOCOL, 0,
+                                   itf->number, NULL, 0, 1000);
+      }
+      (void)usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_IDLE, 4,
+                                 itf->number, NULL, 0, 1000);
+    } else if (!h->use_report_protocol || kind == 0) {
+      LOG_INFO("[HID] iface %u omitida: Report Descriptor no compatible",
+               itf->number);
+      kfree(h);
+      continue;
     }
-    usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_IDLE, 4, itf->number, NULL,
-                         0, 5000);
 
     int rc = dev->hcd->configure_ep(dev, in_ep);
     if (rc < 0) {
