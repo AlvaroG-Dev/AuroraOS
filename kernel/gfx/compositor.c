@@ -1120,7 +1120,19 @@ static void compositor_render(void) {
   ui_cycles = t_stage_end - t_stage_start;
   t_stage_start = t_stage_end;
 
-  /* 4. Blit a VRAM (non-temporal) + cursor */
+  /* 4. Overlay de logs de diagnóstico sobre el backbuffer cacheable.
+   * Nunca se mezcla leyendo la VRAM WC, que puede causar stalls de decenas
+   * de milisegundos en emuladores y hardware real. */
+  extern void boot_console_draw_overlay(uint32_t *dst, uint32_t dst_pitch,
+                                        int clip_x, int clip_y, int clip_w,
+                                        int clip_h);
+  boot_console_draw_overlay(backbuffer, fb_width, clip.x, clip.y, clip.w,
+                            clip.h);
+  t_stage_end = comp_rdtsc();
+  overlay_cycles = t_stage_end - t_stage_start;
+  t_stage_start = t_stage_end;
+
+  /* 5. Blit a VRAM (non-temporal) + cursor */
   if (fb_ptr) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
       if (fb_bpp == 24) {
@@ -1141,13 +1153,6 @@ static void compositor_render(void) {
   }
   t_stage_end = comp_rdtsc();
   blit_cycles = t_stage_end - t_stage_start;
-  t_stage_start = t_stage_end;
-
-  /* 5. Overlay de logs del kernel (encima de todo). */
-  extern void boot_console_draw_overlay(void);
-  boot_console_draw_overlay();
-  t_stage_end = comp_rdtsc();
-  overlay_cycles = t_stage_end - t_stage_start;
 
   compositor_report_frame_stats(
       t_stage_end - t_render_start, wallpaper_cycles, windows_cycles, ui_cycles,
