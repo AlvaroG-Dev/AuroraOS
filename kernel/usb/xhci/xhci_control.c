@@ -11,7 +11,8 @@
 static bool has_pending_xfer(void *arg) { return g_pending_xfer_count > 0; }
 
 int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
-                       uint32_t timeout_ms, uint32_t *out_residual_len) {
+                       uint32_t timeout_ms, uint32_t *out_residual_len,
+                       xhci_trb_t *out_event) {
   if (!g_xhci.initialized)
     return -ENODEV;
 
@@ -43,6 +44,8 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
       uint32_t cc = XHCI_EVT_CC(evt);
       if (out_residual_len)
         *out_residual_len = evt.status & 0xFFFFFF;
+      if (out_event)
+        *out_event = evt;
       if (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET)
         return 0;
       LOG_ERR("[xHCI] transfer cc=%u (slot=%u ep=%u)", cc, slot, ep_id);
@@ -161,9 +164,13 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   if (has_data) {
     data_trb.param = data_dma.phys;
     data_trb.status = (uint32_t)data_len;
+    // IN data stages can terminate with a Short Packet (e.g. an 18-byte
+    // descriptor on a SuperSpeed EP0 with MPS=512). Request the intermediate
+    // Transfer Event so its residual length, not the zero-length Status Stage
+    // event, determines how many bytes were actually received.
     data_trb.control =
         XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) | XHCI_TRB_CH |
-        (is_in ? XHCI_TRB_DIR_IN : 0);
+        (is_in ? (XHCI_TRB_DIR_IN | XHCI_TRB_ISP) : 0);
   }
 
   int status_dir_in = !has_data ? 1 : (is_in ? 0 : 1);
@@ -172,19 +179,26 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   if (status_dir_in)
     status_trb.control |= XHCI_TRB_DIR_IN;
 
-  uint32_t n_trbs = has_data ? 3 : 2;
+  uint64_t data_phys = 0;
   uint64_t status_phys = 0;
   int rc;
 
   unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
-  uint32_t status_idx = p->ep0_ring.enqueue;
-  for (uint32_t i = 0; i < n_trbs; i++) {
-    if (status_idx == p->ep0_ring.size - 1)
-      status_idx = 0;
-    if (i + 1 < n_trbs)
-      status_idx++;
+  // Predict the physical TRB addresses using the same Link-TRB skip rule as
+  // xhci_ring_enqueue(). The ring's enqueue index can currently point at Link.
+  uint32_t setup_idx = p->ep0_ring.enqueue;
+  if (setup_idx >= p->ep0_ring.size - 1)
+    setup_idx = 0;
+  uint32_t next_idx = setup_idx + 1;
+  if (next_idx >= p->ep0_ring.size - 1)
+    next_idx = 0;
+  if (has_data) {
+    data_phys = xhci_ring_trb_phys(&p->ep0_ring, next_idx);
+    next_idx++;
+    if (next_idx >= p->ep0_ring.size - 1)
+      next_idx = 0;
   }
-  status_phys = xhci_ring_trb_phys(&p->ep0_ring, status_idx);
+  status_phys = xhci_ring_trb_phys(&p->ep0_ring, next_idx);
 
   rc = xhci_ring_enqueue(&p->ep0_ring, &setup_trb);
   if (rc == 0 && has_data)
@@ -205,11 +219,43 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   }
 
   uint32_t actual = 0;
-  // El TD de control termina en Status Stage. No aceptar como fin de la
-  // petición un Transfer Event intermedio del Data Stage (p. ej. SHORT_PACKET)
-  // ni el evento de otra petición simultánea del mismo slot/EP0.
-  int werr =
-      xhci_wait_transfer(p->slot_id, 1, status_phys, timeout_ms, &actual);
+  xhci_trb_t first_evt = {0};
+  // En una lectura IN corta puede llegar primero el evento SHORT_PACKET del
+  // Data Stage; después debe completarse el Status Stage.
+  int werr = xhci_wait_transfer(p->slot_id, 1, 0, timeout_ms, &actual,
+                                &first_evt);
+
+  if (werr == 0) {
+    if (has_data && first_evt.param == data_phys) {
+      if (XHCI_EVT_CC(first_evt) != XHCI_CC_SHORT_PACKET) {
+        LOG_ERR("[xHCI] evento inesperado en Data Stage: cc=%u param=0x%lx",
+                XHCI_EVT_CC(first_evt), (unsigned long)first_evt.param);
+        werr = -EIO;
+      } else {
+        // Este residuo corresponde al búfer del Data Stage.
+        xhci_trb_t status_evt = {0};
+        uint32_t status_residual = 0;
+        werr = xhci_wait_transfer(p->slot_id, 1, status_phys, timeout_ms,
+                                  &status_residual, &status_evt);
+        if (werr == 0 && XHCI_EVT_CC(status_evt) != XHCI_CC_SUCCESS) {
+          LOG_ERR("[xHCI] Status Stage terminó con cc=%u",
+                  XHCI_EVT_CC(status_evt));
+          werr = -EIO;
+        }
+      }
+    } else if (first_evt.param != status_phys ||
+               XHCI_EVT_CC(first_evt) != XHCI_CC_SUCCESS) {
+      LOG_ERR("[xHCI] evento inesperado en Control TD: cc=%u param=0x%lx "
+              "(data=0x%lx status=0x%lx)",
+              XHCI_EVT_CC(first_evt), (unsigned long)first_evt.param,
+              (unsigned long)data_phys, (unsigned long)status_phys);
+      werr = -EIO;
+    } else {
+      // Si Status es el primer evento, no hubo un evento intermedio de
+      // paquete corto: el Data Stage completó la longitud solicitada.
+      actual = 0;
+    }
+  }
 
   if (werr != 0) {
     xhci_diag_timeout(p);
@@ -221,12 +267,17 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
 
   int transferred = 0;
   if (has_data) {
-    if (actual > (uint32_t)data_len)
-      actual = (uint32_t)data_len;
-    transferred = data_len - (int)actual;
+    if (first_evt.param == data_phys) {
+      if (actual > (uint32_t)data_len)
+        actual = (uint32_t)data_len;
+      transferred = data_len - (int)actual;
+    } else {
+      // El contador del Status Stage es de su etapa, no del búfer IN.
+      transferred = data_len;
+    }
     if (is_in) {
       usb_dma_sync(&data_dma, USB_DMA_FROM_DEVICE);
-      memcpy(data, data_dma.virt, transferred);
+      memcpy(data, data_dma.virt, (size_t)transferred);
     }
     usb_dma_free(&data_dma);
   }
