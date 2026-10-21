@@ -610,6 +610,10 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
     ec->dw3 = (uint32_t)(st->stream_ctx.phys >> 32);
   }
 
+  // Para endpoints periódicos (interrupt), xHCI exige Max ESIT Payload.
+  // Si queda a cero, el controlador puede aceptar Configure Endpoint pero no
+  // programar correctamente las transferencias del teclado/ratón HID.
+  uint32_t max_esit_payload = 0;
   if (ep->type == USB_EP_INTERRUPT) {
     uint32_t interval_field;
     if (p->speed == USB_SPEED_LOW || p->speed == USB_SPEED_FULL) {
@@ -626,12 +630,18 @@ int xhci_hcd_configure_ep(usb_device_t *dev, usb_endpoint_t *ep) {
       if (interval_field > 255)
         interval_field = 255;
     }
-    ec->dw0 |= (interval_field & 0xFF) << 16;
+    ec->dw0 |= (interval_field & 0xFFu) << 16;
+
+    // Para los endpoints HID usados aquí, el máximo por ESIT es un paquete
+    // (wMaxPacketSize). El campo es de 24 bits: 8 en DW0[31:24] y 16 en DW4[31:16].
+    max_esit_payload = ep->max_packet;
+    ec->dw0 |= ((max_esit_payload >> 16) & 0xFFu) << 24;
   }
   uint32_t avg = (ep->max_packet > 0) ? ep->max_packet : 8;
   if (avg > 1024)
     avg = 1024;
-  ec->reserved[0] = avg & 0xFFFF;
+  ec->reserved[0] = (avg & 0xFFFFu) |
+                    ((max_esit_payload & 0xFFFFu) << 16);
   usb_dma_sync(&p->input_ctx, USB_DMA_TO_DEVICE);
   rc = xhci_cmd_configure_endpoint(p->slot_id, p->input_ctx.phys);
   if (rc != 0) {
