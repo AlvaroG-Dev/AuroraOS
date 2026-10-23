@@ -42,10 +42,13 @@
 //   normal (cat /sys/.../vendor sigue funcionando).
 
 #include "sysfs.h"
+#include "aur.h"       // [FASE 4.3] AUR_CAP_MMIO
 #include "block.h"
 #include "heap.h"
 #include "io.h"        // inl / outl
 #include "klog.h"
+#include "paging.h"    // [FASE 4.3] paging_map_page_in, PTE_*
+#include "process.h"   // [FASE 4.3] struct process (aur.caps)
 #include "string.h"
 #include "vfs.h"
 #include <stddef.h>
@@ -78,6 +81,15 @@ static uint8_t pci_read_byte(uint8_t bus, uint8_t slot, uint8_t func,
   return (uint8_t)((v >> ((off & 3u) * 8u)) & 0xFFu);
 }
 
+static void pci_write_dword(uint8_t bus, uint8_t slot, uint8_t func,
+                            uint8_t off, uint32_t val) {
+  uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) |
+                  ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
+                  (uint32_t)(off & 0xFCu);
+  outl(PCI_CONFIG_ADDR, addr);
+  outl(PCI_CONFIG_DATA, val);
+}
+
 // ===========================================================================
 // Tabla de dispositivos PCI cacheada.
 // ===========================================================================
@@ -89,11 +101,110 @@ typedef struct {
   uint8_t revision;
   uint8_t prog_if, subclass, class;
   uint16_t subsys_vendor, subsys_device;
+
+  // [FASE 4.3] BARs. Indexados como pci_device_t::bar[] de pci.h.
+  // bar_size[i] == 0 → el BAR no existe (o está enmascarado).
+  uint8_t header_type;
+  uint32_t bar[6];
+  uint32_t bar_size[6];
+  uint8_t bar_is_io[6];
 } pci_dev_t;
 
 static pci_dev_t g_pci[SYSFS_PCI_MAX];
 static int g_pci_count = 0;
 static int g_sysfs_ready = 0;
+
+// [FASE 4.3] BAR sizing: escribir 0xFF... para leer la máscara
+// (bits forzados a 0 = alineación), y restaurar el valor original.
+// Solo para header_type == 0 (DEVICE), que es donde BARs son estándar.
+//
+// Llamaos desde sysfs_init sin concurrencia: net_init_task y
+// drivers_init_task esperan g_vfs_done, que se completa después.
+static void sysfs_size_bars(pci_dev_t *d) {
+  if (d->header_type != 0)
+    return;
+
+  for (int b = 0; b < 6; b++) {
+    uint8_t off = (uint8_t)(0x10 + b * 4);
+    uint32_t orig = pci_read_dword(d->bus, d->slot, d->func, off);
+    if (orig == 0 || orig == 0xFFFFFFFF) {
+      d->bar[b] = 0;
+      d->bar_size[b] = 0;
+      d->bar_is_io[b] = 0;
+      continue;
+    }
+    d->bar_is_io[b] = (orig & 1) ? 1 : 0;
+
+    // --- I/O BAR ---
+    if (d->bar_is_io[b]) {
+      pci_write_dword(d->bus, d->slot, d->func, off, 0xFFFFFFFF);
+      uint32_t mask = pci_read_dword(d->bus, d->slot, d->func, off);
+      pci_write_dword(d->bus, d->slot, d->func, off, orig);
+      uint32_t size = (uint32_t)(-(int32_t)(mask & ~0x3u));
+      if (size == 0 || size > 0x10000u) {
+        d->bar[b] = 0;
+        d->bar_size[b] = 0;
+        continue;
+      }
+      d->bar[b] = orig & ~0x3u;
+      d->bar_size[b] = size;
+      continue;
+    }
+
+    // --- MMIO BAR ---
+    uint32_t type = (orig >> 1) & 0x3;
+    if (type == 0x2) {
+      // BAR 64-bit: b y b+1 son un solo BAR.
+      uint8_t off_hi = (uint8_t)(0x10 + (b + 1) * 4);
+      uint32_t orig_hi = pci_read_dword(d->bus, d->slot, d->func, off_hi);
+
+      pci_write_dword(d->bus, d->slot, d->func, off, 0xFFFFFFFF);
+      pci_write_dword(d->bus, d->slot, d->func, off_hi, 0xFFFFFFFF);
+      uint32_t mask_lo = pci_read_dword(d->bus, d->slot, d->func, off);
+      uint32_t mask_hi = pci_read_dword(d->bus, d->slot, d->func, off_hi);
+      pci_write_dword(d->bus, d->slot, d->func, off, orig);
+      pci_write_dword(d->bus, d->slot, d->func, off_hi, orig_hi);
+
+      uint32_t size_lo = (uint32_t)(-(int32_t)(mask_lo & ~0xFu));
+      uint64_t bar_addr = (uint64_t)(orig & ~0xFu) |
+                          ((uint64_t)orig_hi << 32);
+      uint64_t bar_size;
+      if (size_lo != 0) {
+        bar_size = size_lo;
+      } else {
+        uint32_t size_hi = ~mask_hi;  // puede ser 0 si el BAR es gigante
+        bar_size = (uint64_t)size_hi << 32;
+        if (bar_size == 0)
+          bar_size = 4ULL << 30;  // fallback: 4GB
+      }
+      d->bar[b] = (uint32_t)bar_addr;       // truncado (perdemos hi)
+      d->bar_size[b] = (uint32_t)bar_size;  // truncado
+      d->bar_is_io[b] = 0;
+      // Reservar b+1 como "consumido".
+      if (b + 1 < 6) {
+        d->bar[b + 1] = 0;
+        d->bar_size[b + 1] = 0;
+        d->bar_is_io[b + 1] = 0;
+      }
+      b++;  // skip next slot
+      continue;
+    }
+
+    // --- MMIO BAR 32-bit ---
+    pci_write_dword(d->bus, d->slot, d->func, off, 0xFFFFFFFF);
+    uint32_t mask = pci_read_dword(d->bus, d->slot, d->func, off);
+    pci_write_dword(d->bus, d->slot, d->func, off, orig);
+
+    uint32_t size = (uint32_t)(-(int32_t)(mask & ~0xFu));
+    if (size == 0) {
+      d->bar[b] = 0;
+      d->bar_size[b] = 0;
+      continue;
+    }
+    d->bar[b] = orig & ~0xFu;
+    d->bar_size[b] = size;
+  }
+}
 
 void sysfs_init(void) {
   if (g_sysfs_ready)
@@ -128,6 +239,8 @@ void sysfs_init(void) {
       d->class = pci_read_byte(0, slot, func, 0x0B);
       d->subsys_vendor = pci_read_word(0, slot, func, 0x2C);
       d->subsys_device = pci_read_word(0, slot, func, 0x2E);
+      d->header_type = pci_read_byte(0, slot, func, 0x0E) & 0x7F;
+      sysfs_size_bars(d);
     }
   }
 done:
@@ -402,24 +515,121 @@ static vfs_node_t *make_symlink(const char *name, const char *target) {
 }
 
 // ===========================================================================
+// [FASE 4.3] resourceN de un dispositivo PCI (MMIO mmap).
+// ===========================================================================
+typedef struct {
+  uint8_t bus, slot, func;
+  int bar_index;
+  uint64_t phys;
+  uint64_t size;
+} sysfs_resource_t;
+
+static int sysfs_resource_open(vfs_node_t *node, int flags) {
+  (void)node;
+  (void)flags;
+  return 0;   // mmap controla PTE perms; el open no restringe
+}
+
+static int sysfs_resource_close(vfs_node_t *node) {
+  if (!node) return 0;
+  if (node->priv) {
+    kfree(node->priv);
+    node->priv = NULL;
+  }
+  return 0;
+}
+
+static int sysfs_resource_mmap(vfs_node_t *node, struct process *proc,
+                               uint64_t vaddr, uint64_t length,
+                               uint64_t prot, uint64_t flags,
+                               uint64_t offset) {
+  (void)flags;
+  if (!node || !node->priv || !proc)
+    return -EINVAL;
+
+  if (!(proc->aur.caps & AUR_CAP_MMIO))
+    return -EPERM;
+
+  sysfs_resource_t *r = (sysfs_resource_t *)node->priv;
+  if (offset >= r->size || length > r->size - offset)
+    return -EINVAL;
+  if ((offset & 0xFFFULL) != 0)
+    return -EINVAL;
+
+  uint64_t pte_flags = PTE_USER | PTE_NOCACHE | PTE_SPECIAL;
+  if (prot & 0x02)
+    pte_flags |= PTE_WRITABLE;
+  if (!(prot & 0x04))
+    pte_flags |= PTE_NX;
+
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  for (uint64_t off = 0; off < length; off += PAGE_SIZE) {
+    int rc = paging_map_page_in(pml4, vaddr + off,
+                                 r->phys + offset + off, pte_flags);
+    if (rc != 0) {
+      for (uint64_t back = 0; back < off; back += PAGE_SIZE)
+        paging_unmap_page_in(pml4, vaddr + back);
+      return -ENOMEM;
+    }
+  }
+
+  LOG_INFO("[SYSFS] pid=%u mmap resource%d %02x:%02x.%x: "
+           "phys=0x%lx len=0x%lx -> vaddr=0x%lx",
+           proc->pid, r->bar_index, r->bus, r->slot, r->func,
+           (unsigned long)(r->phys + offset),
+           (unsigned long)length, (unsigned long)vaddr);
+  return 0;
+}
+
+static vfs_ops_t sysfs_resource_ops = {
+    .read = NULL,
+    .open = sysfs_resource_open,
+    .close = sysfs_resource_close,
+    .mmap = sysfs_resource_mmap,
+};
+
+static vfs_node_t *make_resource_node(const pci_dev_t *d, int bar) {
+  vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+  if (!n)
+    return NULL;
+
+  char name[16];
+  snprintf(name, sizeof(name), "resource%d", bar);
+  size_t nl = strlen(name);
+  if (nl >= sizeof(n->name))
+    nl = sizeof(n->name) - 1;
+  memcpy(n->name, name, nl);
+  n->name[nl] = '\0';
+
+  n->flags = VFS_FILE;
+  n->size = d->bar_size[bar];
+  n->ops = &sysfs_resource_ops;
+  n->mode = S_IFREG | 0444;
+  n->uid = 0;
+  n->gid = 0;
+
+  sysfs_resource_t *r = (sysfs_resource_t *)kzalloc(sizeof(*r));
+  if (!r) {
+    kfree(n);
+    return NULL;
+  }
+  r->bus = d->bus;
+  r->slot = d->slot;
+  r->func = d->func;
+  r->bar_index = bar;
+  r->phys = (uint64_t)d->bar[bar];
+  r->size = (uint64_t)d->bar_size[bar];
+  n->priv = r;
+
+  return n;
+}
+
+// ===========================================================================
 // Listas estáticas para readdir
 // ===========================================================================
 static const char *sysfs_root_entries[] = {"bus", "class", "dev"};
 #define SYSFS_N_ROOT \
   (sizeof(sysfs_root_entries) / sizeof(sysfs_root_entries[0]))
-
-// [FIX] BusyBox lspci hace recursive_action("/sys/bus/pci/devices") y
-// para cada entry X de <BDF> abre "<BDF>/X/uevent" y lo parsea como un
-// uevent (KEY=VALUE). Solo X="uevent" da contenido válido. Si listamos
-// todos los attrs, lspci abre vendor/uevent, recibe "0x8086\n" (1 token)
-// y falla con "bad line 1: 1 tokens found, 2 needed".
-//
-// Los demás attrs siguen accesibles por lookup normal (cat sigue
-// funcionando), simplemente no los exponemos en readdir para que lspci
-// no los itere.
-static const char *pci_dev_attrs[] = {"uevent"};
-#define SYSFS_N_PCI_ATTRS \
-  (sizeof(pci_dev_attrs) / sizeof(pci_dev_attrs[0]))
 
 static const char *block_dev_attrs[] = {"dev", "size", "ro", "removable"};
 #define SYSFS_N_BLK_ATTRS \
@@ -749,6 +959,17 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
       memcpy(buf, tmp, (size_t)o + 1);
       len = (size_t)o;
       content = buf;
+    } else if (attr[0] == 'r' && attr[1] == 'e' && attr[2] == 's' &&
+               attr[3] == 'o' && attr[4] == 'u' && attr[5] == 'r' &&
+               attr[6] == 'c' && attr[7] == 'e' && attr[8] >= '0' &&
+               attr[8] <= '5' && attr[9] == '\0') {
+      // [FASE 4.3] resourceN.
+      int bar = attr[8] - '0';
+      if (d->bar_size[bar] == 0)
+        return NULL;
+      if (d->bar_is_io[bar])
+        return NULL;   // I/O ports no son mmap-ables
+      return make_resource_node(d, bar);
     } else {
       return NULL;
     }
@@ -898,6 +1119,45 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
 // ===========================================================================
 // readdir dispatcher
 // ===========================================================================
+
+// [FASE 4.3] readdir de <BDF>: "uevent" + "resourceN" para cada BAR
+// MMIO válido.
+static int sysfs_bdf_readdir(const pci_dev_t *d, uint64_t index,
+                              vfs_dirent_t *out) {
+  if (index == 0) {
+    strcpy(out->name, "uevent");
+    out->type = VFS_FILE;
+    out->size = 0;
+    return 0;
+  }
+
+  int bars[6];
+  int nbars = 0;
+  for (int b = 0; b < 6; b++) {
+    if (d->bar_size[b] == 0)
+      continue;
+    if (d->bar_is_io[b])
+      continue;
+    bars[nbars++] = b;
+  }
+
+  uint64_t ridx = index - 1;
+  if (ridx >= (uint64_t)nbars) {
+    out->name[0] = '\0';
+    out->type = 0;
+    out->size = 0;
+    return 0;
+  }
+
+  int bar = bars[ridx];
+  char buf[16];
+  snprintf(buf, sizeof(buf), "resource%d", bar);
+  strcpy(out->name, buf);
+  out->type = VFS_FILE;
+  out->size = d->bar_size[bar];
+  return 0;
+}
+
 static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
   if (!dir || !out)
     return -EINVAL;
@@ -945,8 +1205,30 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     for (const char *p = rest; *p; p++)
       if (*p == '/')
         return 0;
-    return readdir_list_typed(pci_dev_attrs, SYSFS_N_PCI_ATTRS,
-                              VFS_FILE, index, out);
+
+    // [FASE 4.3] Listar uevent + resourceN dinámicamente.
+    uint8_t bus, slot, func;
+    if (parse_pci_bdf(rest, &bus, &slot, &func) != 0) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    const pci_dev_t *d = NULL;
+    for (int i = 0; i < g_pci_count; i++) {
+      if (g_pci[i].bus == bus && g_pci[i].slot == slot &&
+          g_pci[i].func == func) {
+        d = &g_pci[i];
+        break;
+      }
+    }
+    if (!d) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    return sysfs_bdf_readdir(d, index, out);
   }
 
   if (strcmp(n, "/class") == 0) {

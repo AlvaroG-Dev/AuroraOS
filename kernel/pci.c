@@ -1,40 +1,50 @@
 // kernel/pci.c
 //
-// Enumeración de dispositivos PCI + bus driver framework.
+// Enumeración de dispositivos PCI + bus_type PCI.
 //
-// [FASE 2.1b] Añade:
-//   - spinlock global para config space (fix de corrupción paralela).
-//   - Tabla de drivers PCI (pci_bus_register_driver / pci_bus_probe_all).
-//   - Caché de dispositivos enumerados (pci_get_devices).
+// [FASE 2.1b] Cambios respecto a la entrega anterior:
+//   - pci_driver_t y pci_bus_register_driver/pci_bus_probe_all ELIMINADOS.
+//   - pci_bus es ahora un struct bus_type genérico (bus.h).
+//   - Cada dispositivo enumerado crea un struct device con:
+//       name  = "0000:BB:SS.F"
+//       priv  = &g_pci_devices[idx]  (pci_device_t*)
+//       id    = &g_pci_devices[idx]
+//     y se registra con device_register() para que el bus haga el probe.
+//   - pci_id_match() pasa a ser pública (la necesita pci_bus_match).
+//   - pci_init_impl() llama a bus_register(&pci_bus) (idempotente) y
+//     drivers_probe_all() al final (red de seguridad).
+//
+// No se modifica la enumeración en sí ni el acceso a config space.
 
 #include "pci.h"
+#include "bus.h"
 #include "io.h"
 #include "klog.h"
 #include "spinlock.h"
 #include "string.h"
+#include "uaccess.h"
 
 // ---------------------------------------------------------------------------
-// [FIX 2.1b] Lock global para config space. NO coger nunca mientras se
-// mantiene otro lock, excepto sched_lock (nunca se coge desde aquí).
+// Lock global para config space.
 // ---------------------------------------------------------------------------
 static spinlock_t pci_config_lock;
 
 // ---------------------------------------------------------------------------
-// [FASE 2.1b] Cache de dispositivos + tabla de drivers PCI.
+// Cache de dispositivos enumerados.
 // ---------------------------------------------------------------------------
 #define PCI_MAX_DEVICES 64
-#define PCI_MAX_DRIVERS 16
 
 static pci_device_t g_pci_devices[PCI_MAX_DEVICES];
 static int g_pci_device_count = 0;
 
-static pci_driver_t *g_pci_drivers[PCI_MAX_DRIVERS];
-static int g_pci_driver_count = 0;
+// struct device paralelo: g_pci_dev_nodes[i] <-> g_pci_devices[i].
+// Almacenamiento estático (no kmalloc) para que el ciclo de vida sea
+// trivial: la lista del bus apunta a estos nodos y nunca se liberan.
+static struct device g_pci_dev_nodes[PCI_MAX_DEVICES];
 
 // ---------------------------------------------------------------------------
-// Acceso config space. `__pci_*` son las versiones SIN lock (llamante
-// debe tener pci_config_lock). Los públicos son wrappers que toman el
-// lock por operación atómica.
+// Acceso config space. `__pci_*` son las versiones SIN lock; los públicos
+// son wrappers que toman el lock por operación atómica.
 // ---------------------------------------------------------------------------
 static inline uint32_t __pci_read_dword(uint8_t bus, uint8_t slot, uint8_t func,
                                         uint8_t offset) {
@@ -119,7 +129,7 @@ void pci_write_config_byte(uint8_t bus, uint8_t slot, uint8_t func,
 }
 
 // ---------------------------------------------------------------------------
-// Nombres legibles de clases (sin cambios).
+// Nombres legibles de clases.
 // ---------------------------------------------------------------------------
 static const char *pci_class_name(uint8_t class_id) {
   switch (class_id) {
@@ -248,8 +258,7 @@ static void pci_read_bars_locked(pci_device_t *dev) {
 }
 
 // ---------------------------------------------------------------------------
-// pci_get_device: toma el lock para toda la lectura del dispositivo.
-// Esto garantiza consistencia entre vendor, device, class, BARs, etc.
+// pci_get_device: atómico por dispositivo.
 // ---------------------------------------------------------------------------
 int pci_get_device(uint8_t bus, uint8_t slot, uint8_t func, pci_device_t *dev) {
   if (!dev)
@@ -365,7 +374,7 @@ int pci_find_next_device(uint8_t class_id, uint8_t subclass_id,
 }
 
 // ---------------------------------------------------------------------------
-// Utilidades (usan los wrappers públicos, ya atómicos).
+// Utilidades.
 // ---------------------------------------------------------------------------
 uint32_t pci_get_bar(const pci_device_t *dev, int bar_num) {
   if (!dev || bar_num < 0 || bar_num > 5)
@@ -402,7 +411,7 @@ uint8_t pci_get_irq(const pci_device_t *dev) {
 }
 
 // ---------------------------------------------------------------------------
-// Dump (sin cambios).
+// Dump.
 // ---------------------------------------------------------------------------
 static void pci_dump_device(const pci_device_t *dev) {
   const char *class_name = pci_class_name(dev->class_id);
@@ -431,11 +440,19 @@ static void pci_dump_device(const pci_device_t *dev) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// [FASE 2.1b] Matching y dispatch de drivers PCI.
-// ---------------------------------------------------------------------------
-static int pci_id_match(const pci_device_t *dev, const pci_device_id_t *id) {
-  if (!id || id->vendor_id == 0)
+// ===========================================================================
+// [FASE 2.1b] Bus PCI genérico.
+//
+// pci_bus es un struct bus_type que conecta los drivers PCI con la capa
+// genérica de bus.c. Match: compara dev->priv (pci_device_t) contra cada
+// entrada del id_table del driver. Probe: delega en dev->driver->probe.
+// ===========================================================================
+
+// Matching público. vendor_id==0 es el terminador de la id_table:
+// el llamador (pci_bus_match) NO lo pasa, pero mantenemos la guarda
+// por si un .kur la llama directamente con una entrada terminador.
+int pci_id_match(const pci_device_t *dev, const pci_device_id_t *id) {
+  if (!dev || !id || id->vendor_id == 0)
     return 0;
   if (id->vendor_id != PCI_ANY_ID && id->vendor_id != dev->vendor_id)
     return 0;
@@ -455,87 +472,131 @@ static int pci_id_match(const pci_device_t *dev, const pci_device_id_t *id) {
   return 1;
 }
 
-void pci_bus_register_driver(pci_driver_t *drv) {
-  if (!drv || !drv->id_table || !drv->probe)
-    return;
-  if (g_pci_driver_count >= PCI_MAX_DRIVERS) {
-    LOG_ERR("[PCI] pci_bus_register_driver: tabla de drivers llena");
-    return;
-  }
-  g_pci_drivers[g_pci_driver_count++] = drv;
-  LOG_INFO("[PCI] driver PCI registrado: '%s'", drv->name);
-}
+static int pci_bus_match(struct device *dev, struct driver *drv,
+                         const void **id_out) {
+  if (!drv->id_table)
+    return 0;
+  const pci_device_id_t *ids = (const pci_device_id_t *)drv->id_table;
+  const pci_device_t *pdev = (const pci_device_t *)dev->priv;
+  if (!pdev)
+    return 0;
 
-void pci_bus_probe_all(void) {
-  if (g_pci_driver_count == 0 || g_pci_device_count == 0) {
-    LOG_INFO("[PCI] probe: %d drivers, %d devices; nada que hacer",
-             g_pci_driver_count, g_pci_device_count);
-    return;
-  }
-  LOG_INFO("[PCI] probing %d driver(s) sobre %d device(s)", g_pci_driver_count,
-           g_pci_device_count);
-
-  for (int i = 0; i < g_pci_device_count; i++) {
-    pci_device_t *dev = &g_pci_devices[i];
-    int claimed = 0;
-    for (int j = 0; j < g_pci_driver_count && !claimed; j++) {
-      pci_driver_t *drv = g_pci_drivers[j];
-      for (int k = 0; !claimed; k++) {
-        const pci_device_id_t *id = &drv->id_table[k];
-        if (id->vendor_id == 0)
-          break; // terminator
-        if (!pci_id_match(dev, id))
-          continue;
-        int rc = drv->probe(dev, id);
-        if (rc == 0) {
-          LOG_INFO("[PCI] %02x:%02x.%x claimed by '%s'", dev->bus, dev->slot,
-                   dev->func, drv->name);
-          claimed = 1;
-        }
-      }
+  for (int i = 0; ids[i].vendor_id != 0; i++) {
+    if (pci_id_match(pdev, &ids[i])) {
+      if (id_out)
+        *id_out = &ids[i];
+      return 1;
     }
   }
+  return 0;
 }
 
-const pci_device_t *pci_get_devices(int *count) {
-  if (count)
-    *count = g_pci_device_count;
-  return g_pci_devices;
+static int pci_bus_probe(struct device *dev) {
+  if (!dev->driver || !dev->driver->probe)
+    return -EINVAL;
+  return dev->driver->probe(dev);
+}
+
+struct bus_type pci_bus = {
+    .name = "pci",
+    .match = pci_bus_match,
+    .probe = pci_bus_probe,
+};
+
+// ---------------------------------------------------------------------------
+// Nombre de device: "0000:BB:SS.F". Estático, no formatea (evita snprintf
+// que no tenemos en el kernel).
+// ---------------------------------------------------------------------------
+static void pci_format_name(struct device *d, const pci_device_t *p) {
+  static const char hex[] = "0123456789abcdef";
+  d->name[0] = '0';
+  d->name[1] = '0';
+  d->name[2] = '0';
+  d->name[3] = '0';
+  d->name[4] = ':';
+  d->name[5] = hex[(p->bus >> 4) & 0xF];
+  d->name[6] = hex[p->bus & 0xF];
+  d->name[7] = ':';
+  d->name[8] = hex[(p->slot >> 4) & 0xF];
+  d->name[9] = hex[p->slot & 0xF];
+  d->name[10] = '.';
+  d->name[11] = hex[p->func & 0xF];
+  d->name[12] = '\0';
 }
 
 // ---------------------------------------------------------------------------
-// pci_init_impl: scan principal. Guarda copia de cada dispositivo en
-// g_pci_devices y, al final, dispara pci_bus_probe_all().
+// pci_init_impl: scan principal. Crea un struct device por dispositivo
+// y lo registra en pci_bus. device_register dispara bus_try_probe, que
+// matchea contra los drivers ya registrados (ahci, xhci) y llama a su
+// probe.
+//
+// Nota: device_register se llama sin tener pci_config_lock. Los probes
+// (ahci_probe, xhci_probe_inner) pueden dormir/bloquear y a su vez
+// llaman a pci_read_config_* que cogen el lock por operación. Sin
+// anidamiento, sin deadlock.
 // ---------------------------------------------------------------------------
 static int pci_init_impl(void) {
   LOG_INFO("[PCI] Iniciando enumeracion de dispositivos...");
   spin_init(&pci_config_lock);
   g_pci_device_count = 0;
 
+  // Registrar el bus PCI. Idempotente: drivers_init_task lo hace antes
+  // para asegurarse de que existe antes de registrar drivers PCI.
+  bus_register(&pci_bus);
+
   int count = 0;
-  for (uint16_t bus = 0; bus < 256; bus++) {
+  for (uint16_t b = 0; b < 256; b++) {
     for (uint8_t slot = 0; slot < 32; slot++) {
-      uint16_t vendor = pci_read_config_word((uint8_t)bus, slot, 0, 0);
+      uint16_t vendor = pci_read_config_word((uint8_t)b, slot, 0, 0);
       if (vendor == 0xFFFF)
         continue;
-      uint8_t header = pci_read_config_byte((uint8_t)bus, slot, 0, 0x0E);
+      uint8_t header = pci_read_config_byte((uint8_t)b, slot, 0, 0x0E);
       int num_funcs = (header & 0x80) ? 8 : 1;
       for (uint8_t func = 0; func < num_funcs; func++) {
         pci_device_t dev;
-        if (pci_get_device((uint8_t)bus, slot, func, &dev) != 0)
+        if (pci_get_device((uint8_t)b, slot, func, &dev) != 0)
           continue;
         pci_dump_device(&dev);
         count++;
-        if (g_pci_device_count < PCI_MAX_DEVICES)
-          g_pci_devices[g_pci_device_count++] = dev;
+
+        if (g_pci_device_count >= PCI_MAX_DEVICES) {
+          LOG_WARN("[PCI] cache de devices llena (%d), ignorando %02x:%02x.%x",
+                   PCI_MAX_DEVICES, b, slot, func);
+          continue;
+        }
+
+        int idx = g_pci_device_count;
+        g_pci_devices[idx] = dev;
+
+        struct device *node = &g_pci_dev_nodes[idx];
+        memset(node, 0, sizeof(*node));
+        pci_format_name(node, &dev);
+        node->bus = &pci_bus;
+        node->priv = &g_pci_devices[idx];
+        node->id = &g_pci_devices[idx];
+        node->driver = NULL;
+
+        g_pci_device_count++;
+
+        // Registro en el bus. Dispara bus_try_probe -> probe(dev) si
+        // algún driver ya registrado matchea.
+        device_register(node);
       }
     }
   }
 
-  LOG_INFO("[PCI] Enumeracion completada (%d dispositivos)", count);
+  LOG_INFO("[PCI] Enumeracion completada (%d dispositivos, %d registrados)",
+           count, g_pci_device_count);
 
-  // [FASE 2.1b] Disparar el probe de drivers registrados.
-  pci_bus_probe_all();
+  // Red de seguridad: probar todo lo que quede suelto. Cubre el caso
+  // (improbable) de un driver que se registró DESPUÉS de un device en
+  // otra CPU, o de un id_table que necesitó reintento.
+  //
+  // NOTA: drivers_probe_all() itera bus->devices sin lock. Seguro hoy
+  // porque solo corre desde el kthread de pci_init_impl (single writer
+  // durante el boot).
+  drivers_probe_all();
+
   return 0;
 }
 
@@ -593,7 +654,17 @@ void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func) {
 }
 
 // ---------------------------------------------------------------------------
-// Driver (struct driver, no pci_driver_t): sólo hace el scan principal.
+// Accessor público del cache de devices.
+// ---------------------------------------------------------------------------
+const pci_device_t *pci_get_devices(int *count) {
+  if (count)
+    *count = g_pci_device_count;
+  return g_pci_devices;
+}
+
+// ---------------------------------------------------------------------------
+// Driver legacy: solo hace el scan principal. Los drivers PCI (ahci,
+// xhci) viven en pci_bus.drivers como bus-managed, no aquí.
 // ---------------------------------------------------------------------------
 struct driver pci_driver = {
     .name = "pci",

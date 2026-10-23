@@ -1,5 +1,6 @@
 // kernel/process.c
 #include "process.h"
+#include "aur_loader.h"   // [FASE 4.2] struct aur_module_info + parse
 #include "cpu.h"
 #include "elf.h"
 #include "futex.h"
@@ -579,6 +580,18 @@ static void calc_elf_code_data_ranges(const elf_segment_t *segs, int n,
 }
 
 // ---------------------------------------------------------------------------
+// [FASE 4.2] Log de diagnóstico de .aur. No-op si el proceso no es .aur.
+// ---------------------------------------------------------------------------
+void process_aur_dump(const process_t *proc) {
+  if (!proc || !proc->aur.name[0])
+    return;
+  LOG_INFO("[AUR] pid=%u '%s' caps=0x%x ring=%u bus=%d devfd=%d ipc=%d",
+           proc->pid, proc->aur.name, proc->aur.caps, proc->aur.ring_per_cpu,
+           proc->aur.bus_match_count, proc->aur.devfd_count,
+           proc->aur.ipc_count);
+}
+
+// ---------------------------------------------------------------------------
 // Spawn desde un buffer ELF contiguo (path clásico, sin argv ni cwd
 // heredado). Se mantiene para tests y para futuros exec().
 // ---------------------------------------------------------------------------
@@ -840,6 +853,19 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
     LOG_ERR("[PROC] Fallo al cargar ELF (streaming)");
     paging_free_user_space(pml4_phys);
     return NULL;
+  }
+
+  // [FASE 4.2] Parse .aur (best effort). Si el binario no tiene
+  // sección .aur, aur_info queda zeroed y el proceso corre como ELF
+  // normal. Si la sección existe pero está malformada, logueamos y
+  // seguimos igual: 4.2 no rechaza, solo parsea.
+  struct aur_module_info aur_info;
+  memset(&aur_info, 0, sizeof(aur_info));
+  int aur_rc =
+      aur_loader_parse_streaming(read, read_ctx, file_size, &aur_info);
+  if (aur_rc != 0 && aur_rc != -ENOENT) {
+    LOG_WARN("[AUR] parse .aur falló (%d) en '%s'", aur_rc, name);
+    memset(&aur_info, 0, sizeof(aur_info));
   }
 
   uint64_t at_base = 0;
@@ -1127,6 +1153,11 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->arg_end = user_rsp + 8 + 8ULL * (uint64_t)(argc + 1);
   proc->env_start = proc->arg_end;
   proc->env_end = proc->env_start + 8ULL * (uint64_t)(envc + 1);
+
+  // [FASE 4.2] Publicar el .aur (si lo hay).
+  proc->aur = aur_info;
+  if (proc->aur.name[0])
+    process_aur_dump(proc);
 
   task->proc = proc;
 
@@ -1823,6 +1854,26 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           if (!(pte & PTE_PRESENT))
             continue;
 
+          uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                          ((uint64_t)k << 21) | ((uint64_t)l << 12);
+
+          // [FASE 4.3] PTE_NOCACHE marca los mapeos de MMIO (resourceN).
+          // NO copiar: el hijo debe apuntar al MISMO físico (el BAR),
+          // no a una copia que perdería el enlace al hardware. Además,
+          // phys_to_virt(BAR) (p.ej. 0x810a0000 del e1000e) cae FUERA
+          // de la ventana física de 512MB → #PF en el memcpy.
+          if (pte & PTE_NOCACHE) {
+            uint64_t mmio_phys = pte & PTE_FRAME;
+            uint64_t mmio_flags = pte & (0xFFF | PTE_NX);
+            if (paging_map_page_in(child_pml4, virt, mmio_phys,
+                                   mmio_flags) != 0) {
+              LOG_ERR("[FORK] paging_map_page_in (MMIO) falló en %p",
+                      (void *)virt);
+              return -1;
+            }
+            continue;
+          }
+
           uint64_t old_phys = pte & PTE_FRAME;
           uint64_t new_phys = pmm_alloc_page();
           if (!new_phys) {
@@ -1831,8 +1882,6 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           }
           memcpy(phys_to_virt(new_phys), phys_to_virt(old_phys), PAGE_SIZE);
 
-          uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
-                          ((uint64_t)k << 21) | ((uint64_t)l << 12);
           // paging_map_page_in enmascara flags con (0xFFF | PTE_NX). Le
           // pasamos el pte entero (con el frame) y ya lo filtra.
           if (paging_map_page_in(child_pml4, virt, new_phys, pte) != 0) {
@@ -1998,6 +2047,9 @@ int64_t sys_fork(void) {
   child->stack_guard = parent->stack_guard;
 
   child->fs_base = parent->fs_base;
+
+  // [FASE 4.2] Heredar el .aur: mismo binario, mismas capabilities.
+  child->aur = parent->aur;
 
   process_set_cwd(child, parent->cwd);
   process_init_signals(child);
@@ -2233,6 +2285,16 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     return rc == -ENOMEM ? -ENOMEM : -ENOEXEC;
   }
 
+  // [FASE 4.2] Parse .aur (best effort) del binario que se va a ejecutar.
+  struct aur_module_info aur_info;
+  memset(&aur_info, 0, sizeof(aur_info));
+  int aur_rc = aur_loader_parse_streaming(elf_read_vfs, &ctx, exe_node->size,
+                                          &aur_info);
+  if (aur_rc != 0 && aur_rc != -ENOENT) {
+    LOG_WARN("[AUR] parse .aur falló (%d) en execve '%s'", aur_rc, path);
+    memset(&aur_info, 0, sizeof(aur_info));
+  }
+
   uint64_t at_base = 0;
   uint64_t final_entry = entry;
   uint64_t interp_vma_start = 0, interp_vma_end = 0;
@@ -2414,6 +2476,13 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     LOG_WARN("[EXECVE] process_set_envp falló, entorno conservado");
   if (process_set_argv(proc, argc, argv) != 0)
     LOG_WARN("[EXECVE] process_set_argv falló, argv conservado");
+
+  // [FASE 4.2] Reset del .aur anterior; instalar el nuevo si existe.
+  memset(&proc->aur, 0, sizeof(proc->aur));
+  if (aur_info.name[0]) {
+    proc->aur = aur_info;
+    process_aur_dump(proc);
+  }
 
   write_cr3(new_pml4_phys);
 
@@ -2623,6 +2692,7 @@ void process_wake_parent(uint32_t parent_pid) {
     task_put(parent_task);
   }
 }
+
 // Añadir al final de process.c:
 process_t *process_find_by_pml4(uint64_t pml4_phys) {
   if (!pml4_phys)

@@ -2007,6 +2007,8 @@ static void ahci_irq_handler_msi(void) {
 // Driver
 // ===========================================================================
 
+// kernel/ahci.c — bottom (reemplaza el bloque pci_driver_t)
+
 static const pci_device_id_t ahci_id_table[] = {
     {
         .vendor_id = PCI_ANY_ID,
@@ -2019,9 +2021,17 @@ static const pci_device_id_t ahci_id_table[] = {
     },
     {0}};
 
-pci_driver_t ahci_pci_driver = {
+// Shim bus->driver->probe(dev) -> ahci_probe(pci_device_t*, id).
+// dev->matched_id lo pone bus_try_probe() antes de invocar el probe.
+static int ahci_probe_generic(struct device *dev) {
+  return ahci_probe((pci_device_t *)dev->priv,
+                    (const pci_device_id_t *)dev->matched_id);
+}
+
+struct driver ahci_driver = {
     .name = "ahci",
+    .bus = &pci_bus,
     .id_table = ahci_id_table,
-    .probe = ahci_probe,
+    .probe = ahci_probe_generic,
     .remove = NULL,
 };

@@ -14,6 +14,7 @@
 #include "cpu.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
+#include "dma_user.h"
 #include "klog.h"
 #include "mutex.h"
 #include "process.h"
@@ -1916,14 +1917,15 @@ static vfs_ops_t dev_tty_ops = {
 };
 
 static const devfs_entry_t devfs_entries[] = {
-    {"null", &dev_null_ops, VFS_CHARDEVICE, (1u << 8) | 3},
-    {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
-    {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
-    {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
-    {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135},
-    {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
-    {"urandom", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 9}, // ← NUEVO
-    {"random", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 8},  // ← NUEVO
+  {"null", &dev_null_ops, VFS_CHARDEVICE, (1u << 8) | 3},
+  {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
+  {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
+  {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
+  {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135},
+  {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
+  {"urandom", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 9},
+  {"random", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 8},
+  {"dma", &dma_dev_ops, VFS_CHARDEVICE, (10u << 8) | 60}, // <-- [FASE 4.4]
 };
 
 // ===========================================================================

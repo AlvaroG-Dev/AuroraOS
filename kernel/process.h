@@ -7,6 +7,7 @@
 #include "signal.h"
 #include "vfs.h"
 #include "wait.h"
+#include "aur_loader.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -228,10 +229,15 @@ typedef struct process {
   uint64_t end_code;   // campo 27: fin de .text
   uint64_t start_data; // campo 45
   uint64_t end_data;   // campo 46
-  uint64_t arg_start;  // campo 48: dirección de argv[0] en el stack
-  uint64_t arg_end;    // campo 49
-  uint64_t env_start;  // campo 50
-  uint64_t env_end;    // campo 51
+  uint64_t arg_start;
+  uint64_t arg_end;
+  uint64_t env_start;
+  uint64_t env_end;
+
+  // [FASE 4.2] Metadatos AUR. Si `aur.name[0] == '\0'`, el binario
+  // no tiene sección .aur (no es un driver userland). Los chequeos
+  // de capabilities viven en 4.3+; aquí solo parseamos y guardamos.
+  struct aur_module_info aur;
 
 } process_t;
 
@@ -365,4 +371,9 @@ process_t *process_spawn_child_args_fds_env(process_t *parent, const char *path,
 process_t *process_find_by_pml4(uint64_t pml4_phys);
 
 void process_set_exe_path(process_t *p, const char *path);
+
+// [FASE 4.2] Log de diagnóstico: imprime nombre + caps + counts.
+// No-op si el proceso no es un .aur.
+void process_aur_dump(const process_t *proc);
+
 #endif // PROCESS_H

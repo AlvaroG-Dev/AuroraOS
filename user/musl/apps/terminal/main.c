@@ -249,8 +249,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Fondo inicial: solo lo usamos para el primer blit. El gradiente se
-  // aplica celda a celda en el render.
+  // Fondo inicial para el padding; el render dibuja también la celda y el
+  // cursor antes del primer blit.
   const uint32_t k_bg = 0xFF000000u | 0x002B36u;
   for (int i = 0; i < g_cw * g_ch; i++)
     g_pixels[i] = k_bg;
@@ -261,6 +261,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  terminal_render(&g_term, g_pixels, g_cw, PAD_X, PAD_Y, g_cell_w, g_cell_h,
+                  font_system_mono());
   sys_win_blit(win, 0, 0, g_cw, g_ch, 0, 0, g_cw, g_pixels);
   terminal_clear_dirty(&g_term);
 

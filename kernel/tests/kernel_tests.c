@@ -5266,6 +5266,27 @@ static void test_xhci_link_trb_type(void) {
 }
 REGISTER_TEST("xhci: Link TRB es type 6", test_xhci_link_trb_type);
 
+static void test_xhci_input_context_stride(void) {
+  static uint8_t input_ctx[33 * 64];
+  const uint8_t *base = input_ctx;
+
+  TEST_ASSERT((uint8_t *)xhci_ictx_slot(input_ctx, 32) == base + 32,
+              "Slot Context con stride de 32 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 32, 0, 0) == base + 64,
+              "EP0 Context con stride de 32 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 32, 1, 1) == base + 128,
+              "EP1 IN Context con stride de 32 B");
+
+  TEST_ASSERT((uint8_t *)xhci_ictx_slot(input_ctx, 64) == base + 64,
+              "Slot Context con stride de 64 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 64, 0, 0) == base + 128,
+              "EP0 Context con stride de 64 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 64, 1, 1) == base + 256,
+              "EP1 IN Context con stride de 64 B");
+}
+REGISTER_TEST("xhci: input context respeta stride 32/64 B",
+              test_xhci_input_context_stride);
+
 static void test_xhci_noop(void) {
   if (!g_xhci.initialized) {
     test_skip("xHCI no inicializado");

@@ -10,6 +10,10 @@
 #define VMA_STACK 1
 #define VMA_ELF 2
 #define VMA_FILE 3 // [3.5] mmap file-backed
+// [FASE 4.3] mmap de MMIO (resourceN de sysfs, /dev/mem, DMA).
+// Las páginas se mapean eagerly con ops->mmap, no por demand paging.
+// vma_unmap_range NO las devuelve al PMM (son MMIO, no RAM).
+#define VMA_MMIO 4
 
 // Límites
 #define MAX_STACK_GROWTH (8 * 1024 * 1024) // Límite RLIMIT_STACK predeterminado

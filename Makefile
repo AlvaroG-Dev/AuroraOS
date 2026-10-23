@@ -110,7 +110,7 @@ python-stdlib:
 # INITRD
 # ===========================================================================
 
-initrd.tar: sysroot user elf_malformed python-stdlib
+initrd.tar: sysroot user elf_malformed python-stdlib hello_kur hello2_kur
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
@@ -1010,6 +1010,50 @@ tap-status:
 	@echo "=== últimas líneas del log dnsmasq ==="
 	@sudo tail -20 $(TAP_DNSMASQ_LOG) 2>/dev/null || echo "  (sin log)"
 
+
+HOST_CC    ?= gcc
+KUR_CC     ?= x86_64-elf-gcc
+KUR_CFLAGS  = -ffreestanding -O2 -mcmodel=kernel -mno-red-zone \
+              -fno-stack-protector -fno-pic -fno-pie -fno-common \
+              -fno-asynchronous-unwind-tables -I.
+
+# kurbuild: host gcc, incluye sha256.c como TU aparte.
+tools/kurbuild: tools/kurbuild.c kernel/sha256.c kernel/sha256.h
+	$(HOST_CC) -O2 -Wall -Wextra -iquote kernel -o $@ tools/kurbuild.c kernel/sha256.c
+
+# hello.kur (con hash y exports).
+tools/hello_kur.o: tools/hello_kur.c kernel/kur.h
+	$(KUR_CC) $(KUR_CFLAGS) -c $< -o $@
+
+tools/hello_kur.kur: tools/hello_kur.o tools/kurbuild
+	./tools/kurbuild -H $< $@
+
+# hello2.kur (importa hello_add).
+tools/hello2_kur.o: tools/hello2_kur.c kernel/kur.h
+	$(KUR_CC) $(KUR_CFLAGS) -c $< -o $@
+
+tools/hello2_kur.kur: tools/hello2_kur.o tools/kurbuild
+	./tools/kurbuild -H $< $@
+
+hello_kur: tools/hello_kur.kur
+	@mkdir -p sysroot/lib/modules
+	@cp -f tools/hello_kur.kur sysroot/lib/modules/hello.kur
+
+hello2_kur: tools/hello2_kur.kur
+	@mkdir -p sysroot/lib/modules
+	@cp -f tools/hello2_kur.kur sysroot/lib/modules/hello2.kur
+
+# ===========================================================================
+# [FASE 4.1] aurbuild: empaqueta un ELF userland como .aur
+# ===========================================================================
+tools/aurbuild: tools/aurbuild.c
+	$(HOST_CC) -O2 -Wall -Wextra -o $@ $<
+
+.PHONY: aurbuild
+aurbuild: tools/aurbuild
+
+.PHONY: hello_kur hello2_kur
+
 # ===========================================================================
 # Clean
 # ===========================================================================
@@ -1022,4 +1066,5 @@ clean:
 	rm -rf sysroot kernel/initrd.tar esp
 	rm -rf build/efi.img build/iso_root build/mbr_part.bin
 	rm -f aurora.iso
-	rm -f serial.log debug.log qemu_debug.log
+	rm -f serial.log debug.log qemu_debug.log 
+	rm -f tools/aurbuild

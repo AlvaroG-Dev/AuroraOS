@@ -6212,6 +6212,62 @@ static int64_t a_print(uint64_t arg1, uint64_t a2, uint64_t a3, uint64_t a4,
   return 0;
 }
 
+// [FASE 4.2] Introspección de capabilities .aur.
+//   aur_info(pid, buf) → 0
+//   pid=0 → el proceso actual. pid>0 → target (solo root).
+//   `buf` recibe struct aur_info_user.
+struct aur_info_user {
+  uint32_t magic;              // "AURI"
+  uint32_t pid;
+  char     name[AUR_MAX_NAME];
+  uint32_t caps;
+  uint32_t ring_per_cpu;
+  int32_t  devfd_count;
+  int32_t  ipc_count;
+  int32_t  bus_match_count;
+};
+
+static int64_t a_aur_info(uint64_t pid, uint64_t buf, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *self = process_current();
+  if (!self)
+    return -EFAULT;
+  if (!buf)
+    return -EINVAL;
+
+  process_t *target = self;
+  if (pid != 0 && (uint32_t)pid != self->pid) {
+    if (self->euid != 0)
+      return -EPERM;
+    target = process_find_by_pid((uint32_t)pid);
+    if (!target)
+      return -ESRCH;
+  }
+
+  struct aur_info_user info;
+  memset(&info, 0, sizeof(info));
+  info.magic = 0x41555249u; // "AURI"
+  info.pid = target->pid;
+  size_t nlen = strlen(target->aur.name);
+  if (nlen >= sizeof(info.name))
+    nlen = sizeof(info.name) - 1;
+  memcpy(info.name, target->aur.name, nlen);
+  info.caps = target->aur.caps;
+  info.ring_per_cpu = target->aur.ring_per_cpu;
+  info.devfd_count = target->aur.devfd_count;
+  info.ipc_count = target->aur.ipc_count;
+  info.bus_match_count = target->aur.bus_match_count;
+
+  if (!access_ok((void *)buf, sizeof(info)))
+    return -EFAULT;
+  if (copy_to_user((void *)buf, &info, sizeof(info)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
 static int64_t a_get_task_id(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                              uint64_t a5) {
   (void)a1;
@@ -6933,6 +6989,7 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_VM_DEBUG_INFO - ASYS_BASE] = {a_vm_debug_info, "asys_vm_debug_info"},
     [ASYS_FS_CHECK - ASYS_BASE] = {a_fs_check, "asys_fs_check"},
     [ASYS_PRINT - ASYS_BASE] = {a_print, "asys_print"},
+    [ASYS_AUR_INFO - ASYS_BASE] = {a_aur_info, "asys_aur_info"},
 };
 #define AURORA_TABLE_N ((int)ARRAY_SIZE(aurora_table))
 

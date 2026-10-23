@@ -8,7 +8,7 @@
 #include "xhci.h"
 #include "xhci_ring.h"
 
-static bool has_pending_xfer(void *arg) { return g_pending_xfer_count > 0; }
+extern void sched_yield(void);
 
 int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
                        uint32_t timeout_ms, uint32_t *out_residual_len,
@@ -59,6 +59,172 @@ int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
   }
 }
 
+// ===========================================================================
+// TD de bulk/interrupt (Normal TRBs encadenados)
+// ===========================================================================
+int xhci_td_enqueue(xhci_ep_state_t *st, uint16_t mps, uint64_t phys,
+                    uint32_t len, int isp_all, xhci_td_t *td) {
+  if (!st || !td || len == 0 || !st->ring.is_producer)
+    return -EINVAL;
+  if (mps == 0)
+    mps = 8;
+  uint32_t segs = (uint32_t)(((phys & 0xFFFFu) + len + 0xFFFFu) >> 16);
+  if (segs > XHCI_TD_MAX_TRBS || segs + 2 > st->ring.size)
+    return -EINVAL;
+
+  uint32_t total_pk = (len + mps - 1) / mps;
+  uint32_t done = 0;
+  int n = 0;
+  while (done < len) {
+    uint64_t addr = phys + done;
+    uint32_t chunk = len - done;
+    uint32_t to_boundary = 0x10000u - (uint32_t)(addr & 0xFFFFu);
+    if (chunk > to_boundary)
+      chunk = to_boundary;
+    int last = (done + chunk == len);
+
+    uint32_t td_size = 0;
+    if (!last) {
+      uint32_t rem;
+      if (g_xhci.hciversion < 0x100)
+        rem = (len - (done + chunk)) >> 10;
+      else
+        rem = total_pk - (done + chunk) / mps;
+      td_size = rem > 31 ? 31 : rem;
+    }
+
+    xhci_trb_t trb = {0};
+    trb.param = addr;
+    trb.status = chunk | (td_size << 17);
+    trb.control = XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP |
+                  (last ? XHCI_TRB_IOC : XHCI_TRB_CH);
+    if (!last && !isp_all)
+      trb.control &= ~XHCI_TRB_ISP;
+    int rc = xhci_ring_enqueue(&st->ring, &trb);
+    if (rc != 0)
+      return rc;
+    td->phys[n] = xhci_ring_trb_phys(&st->ring, st->ring.enqueue - 1);
+    td->len[n] = chunk;
+    n++;
+    done += chunk;
+  }
+  td->n = n;
+  td->total = len;
+  return 0;
+}
+
+// Espera el final de un TD. Un paquete corto en un TRB intermedio genera un
+// evento Short Packet para ESE TRB y luego otro (IOC) para el último.
+static int xhci_wait_td(uint8_t slot, uint8_t dci, const xhci_td_t *td,
+                        uint32_t timeout_ms, uint32_t *out_actual) {
+  if (!g_xhci.initialized)
+    return -ENODEV;
+  extern uint64_t klog_get_tsc_freq(void);
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq == 0)
+    freq = 2000000000ULL;
+  uint64_t max_cycles = (timeout_ms == 0) ? 0 : (freq / 1000) * timeout_ms;
+  uint64_t short_grace = (freq / 1000) * 50;
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+  uint64_t t_short = 0;
+
+  uint32_t actual = td->total;
+  int short_seen = 0;
+  int iter = 0;
+  while (1) {
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t now = ((uint64_t)hi << 32) | lo;
+    if (short_seen && now - t_short >= short_grace) {
+      *out_actual = actual;
+      return 0;
+    }
+    if (max_cycles != 0 && now - t0 >= max_cycles) {
+      if (short_seen) {
+        *out_actual = actual;
+        return 0;
+      }
+      LOG_ERR("[xHCI] transfer timeout (slot=%u ep=%u)", slot, dci);
+      return -ETIMEDOUT;
+    }
+
+    xhci_trb_t evt;
+    if (xhci_take_pending_xfer(slot, dci, 0, &evt) == 0) {
+      int idx = -1;
+      for (int i = 0; i < td->n; i++) {
+        if (td->phys[i] == evt.param) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx < 0)
+        continue; // evento viejo de otro TD
+      uint32_t cc = XHCI_EVT_CC(evt);
+      uint32_t res = evt.status & 0xFFFFFF;
+      if (cc == XHCI_CC_SUCCESS) {
+        if (idx == td->n - 1) {
+          *out_actual = short_seen ? actual : td->total;
+          return 0;
+        }
+        continue;
+      }
+      if (cc == XHCI_CC_SHORT_PACKET) {
+        uint32_t before = 0;
+        for (int i = 0; i < idx; i++)
+          before += td->len[i];
+        if (res > td->len[idx])
+          res = td->len[idx];
+        if (!short_seen)
+          actual = before + td->len[idx] - res;
+        if (idx == td->n - 1) {
+          *out_actual = actual;
+          return 0;
+        }
+        short_seen = 1;
+        t_short = now;
+        continue;
+      }
+      LOG_ERR("[xHCI] transfer cc=%u (slot=%u ep=%u)", cc, slot, dci);
+      return -EIO;
+    }
+    if ((++iter & 0x3F) == 0)
+      sched_yield();
+    else
+      __asm__ volatile("pause");
+  }
+}
+
+int xhci_td_xfer(xhci_dev_priv_t *p, xhci_ep_state_t *st, uint32_t dci,
+                 uint16_t mps, uint16_t stream_id, uint64_t phys, uint32_t len,
+                 int timeout_ms, uint32_t *out_actual) {
+  xhci_td_t td;
+  uint32_t actual = 0;
+  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
+  int rc = xhci_td_enqueue(st, mps, phys, len, 1, &td);
+  if (rc == 0) {
+    __asm__ volatile("mfence" ::: "memory");
+    *(volatile uint32_t *)(g_xhci.db + p->slot_id * 4) =
+        dci | ((uint32_t)stream_id << 16);
+  }
+  spin_unlock_irqrestore(&g_xhci.lock, flags);
+  if (rc != 0)
+    return rc;
+
+  int werr = xhci_wait_td(p->slot_id, (uint8_t)dci, &td,
+                          (uint32_t)(timeout_ms < 0 ? 0 : timeout_ms), &actual);
+  if (werr != 0) {
+    if (st->has_streams)
+      xhci_cmd_reset_endpoint(p->slot_id, dci); // anillos por stream: ver notas
+    else
+      xhci_recover_endpoint(p, dci, &st->ring);
+    return werr;
+  }
+  if (out_actual)
+    *out_actual = actual;
+  return 0;
+}
+
 static void xhci_diag_timeout(xhci_dev_priv_t *p) {
   uint32_t sts = *(volatile uint32_t *)(g_xhci.op + XHCI_OP_USBSTS);
   uint32_t psc = xhci_port_status(p->root_hub_port);
@@ -75,63 +241,46 @@ static void xhci_diag_timeout(xhci_dev_priv_t *p) {
       (psc >> XHCI_PORTSC_PLS_SHIFT) & 0xF, ep0_dw0 & 7u);
 }
 
-int xhci_cmd_reset_endpoint(uint8_t slot, uint32_t dci) {
-  xhci_trb_t trb = {0};
-  trb.control = XHCI_TRB_TYPE(XHCI_TRB_RESET_EP) | ((uint32_t)slot << 24) |
-                ((uint32_t)dci << 16);
-
-  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
-  uint32_t idx = g_xhci.cmd.enqueue;
-  if (idx == g_xhci.cmd.size - 1)
-    idx = 0;
-  uint64_t phys = xhci_ring_trb_phys(&g_xhci.cmd, idx);
-  int rc = xhci_ring_enqueue(&g_xhci.cmd, &trb);
-  if (rc == 0) {
-    __asm__ volatile("mfence" ::: "memory");
-    *(volatile uint32_t *)(g_xhci.db + 0) = 0;
-  }
-  spin_unlock_irqrestore(&g_xhci.lock, flags);
-  return rc;
+static uint32_t xhci_ep_state(xhci_dev_priv_t *p, uint32_t dci) {
+  if (!p->out_ctx.virt)
+    return XHCI_EP_STATE_DISABLED;
+  __asm__ volatile("mfence" ::: "memory");
+  volatile uint32_t *ep = (volatile uint32_t *)((uint8_t *)p->out_ctx.virt +
+                                                (size_t)dci * g_xhci.ctx_size);
+  return ep[0] & 7u;
 }
 
-int xhci_cmd_set_tr_dequeue(uint8_t slot, uint32_t dci, uint64_t deq_ptr,
-                            int dcs) {
-  xhci_trb_t trb = {0};
-  trb.param = deq_ptr;
-  trb.status = 0;
-  trb.control = XHCI_TRB_TYPE(XHCI_TRB_SET_TR_DEQUEUE) |
-                ((uint32_t)slot << 24) | ((uint32_t)dci << 16);
-  if (dcs)
-    trb.param |= 1;
+// Recuperación completa de un endpoint tras error/timeout:
+//   Running -> Stop Endpoint; Halted/Error -> Reset Endpoint;
+//   después se vacía el ring y se reprograma el dequeue pointer.
+// Todos los comandos esperan su evento (antes eran fire-and-forget y sus
+// completions llenaban la cola de comandos pendientes).
+void xhci_recover_endpoint(xhci_dev_priv_t *p, uint32_t dci,
+                           xhci_ring_t *ring) {
+  uint32_t st = xhci_ep_state(p, dci);
+  LOG_INFO("[xHCI] slot %u dci %u: recuperando endpoint (state=%u)", p->slot_id,
+           dci, st);
+  if (st == XHCI_EP_STATE_RUNNING)
+    xhci_cmd_stop_endpoint(p->slot_id, dci);
+  else if (st == XHCI_EP_STATE_HALTED || st == XHCI_EP_STATE_ERROR)
+    xhci_cmd_reset_endpoint(p->slot_id, dci);
 
-  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
-  uint32_t idx = g_xhci.cmd.enqueue;
-  if (idx == g_xhci.cmd.size - 1)
-    idx = 0;
-  uint64_t phys = xhci_ring_trb_phys(&g_xhci.cmd, idx);
-  int rc = xhci_ring_enqueue(&g_xhci.cmd, &trb);
-  if (rc == 0) {
-    __asm__ volatile("mfence" ::: "memory");
-    *(volatile uint32_t *)(g_xhci.db + 0) = 0;
-  }
-  spin_unlock_irqrestore(&g_xhci.lock, flags);
-  return rc;
+  xhci_ring_reset(ring);
+  uint64_t deq = xhci_ring_trb_phys(ring, 0);
+  int rc = xhci_cmd_set_tr_dequeue(p->slot_id, dci, deq, 1);
+  if (rc != 0)
+    LOG_WARN("[xHCI] slot %u dci %u: set_tr_dequeue falló: %d", p->slot_id, dci,
+             rc);
+  xhci_flush_pending_xfers(p->slot_id, (uint8_t)dci);
 }
 
 void xhci_recover_ep0(xhci_dev_priv_t *p) {
-  LOG_INFO("[xHCI] slot %u: recuperando EP0 tras error", p->slot_id);
-  xhci_cmd_reset_endpoint(p->slot_id, 1);
-  xhci_delay_ms(10);
-  p->ep0_ring.enqueue = 0;
-  p->ep0_ring.dequeue = 0;
-  p->ep0_ring.cycle = 1;
-  uint64_t deq = xhci_ring_trb_phys(&p->ep0_ring, 0) | XHCI_EP_DEQ_DCS;
-  xhci_cmd_set_tr_dequeue(p->slot_id, 1, deq, 1);
-  xhci_delay_ms(10);
+  xhci_recover_endpoint(p, 1, &p->ep0_ring);
 }
 
-int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
-                          int data_len, int is_in, int timeout_ms) {
+static int xhci_control_xfer_locked(usb_device_t *dev, const uint8_t setup[8],
+                                    void *data, int data_len, int is_in,
+                                    int timeout_ms) {
   if (!dev || !dev->hc_priv || !setup)
     return -EINVAL;
   xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
@@ -151,8 +300,7 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   setup_trb.status = 8;
   // Setup Stage TRB bits 4:1 are reserved. CH is not valid on this
   // stage: Setup, optional Data, and Status are separate control-stage TDs.
-  setup_trb.control =
-      XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | trt;
+  setup_trb.control = XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) | XHCI_TRB_IDT | trt;
 
   usb_dma_buf_t data_dma = {0};
   if (has_data) {
@@ -170,9 +318,8 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
     // This Data Stage TD contains exactly one TRB, so CH must be clear.
     // On a short IN packet, ISP reports the Data Stage residual; the following
     // Status Stage TRB then reports completion of the control request.
-    data_trb.control =
-        XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) |
-        (is_in ? (XHCI_TRB_DIR_IN | XHCI_TRB_ISP) : 0);
+    data_trb.control = XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) |
+                       (is_in ? (XHCI_TRB_DIR_IN | XHCI_TRB_ISP) : 0);
   }
 
   int status_dir_in = !has_data ? 1 : (is_in ? 0 : 1);
@@ -184,6 +331,9 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   uint64_t data_phys = 0;
   uint64_t status_phys = 0;
   int rc;
+
+  // Descartar eventos viejos de un TD anterior fallido/timeout de este EP0.
+  xhci_flush_pending_xfers(p->slot_id, 1);
 
   unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
   // Predict the physical TRB addresses using the same Link-TRB skip rule as
@@ -224,8 +374,8 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   xhci_trb_t first_evt = {0};
   // En una lectura IN corta puede llegar primero el evento SHORT_PACKET del
   // Data Stage; después debe completarse el Status Stage.
-  int werr = xhci_wait_transfer(p->slot_id, 1, 0, timeout_ms, &actual,
-                                &first_evt);
+  int werr =
+      xhci_wait_transfer(p->slot_id, 1, 0, timeout_ms, &actual, &first_evt);
 
   if (werr == 0) {
     if (has_data && first_evt.param == data_phys) {
@@ -286,6 +436,21 @@ int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
   return transferred;
 }
 
+int xhci_hcd_control_xfer(usb_device_t *dev, const uint8_t setup[8], void *data,
+                          int data_len, int is_in, int timeout_ms) {
+  if (!dev || !dev->hc_priv || !setup)
+    return -EINVAL;
+  xhci_dev_priv_t *p = (xhci_dev_priv_t *)dev->hc_priv;
+  // EP0 solo admite un control transfer a la vez: hub kthread, enumeración y
+  // HID pueden coincidir sobre el mismo device.
+  while (__atomic_exchange_n(&p->ctrl_busy, 1, __ATOMIC_ACQUIRE))
+    sched_yield();
+  int rc =
+      xhci_control_xfer_locked(dev, setup, data, data_len, is_in, timeout_ms);
+  __atomic_store_n(&p->ctrl_busy, 0, __ATOMIC_RELEASE);
+  return rc;
+}
+
 int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
                             int len, int timeout_ms, int *out_actual_len) {
   if (!dev || !dev->hc_priv || !ep || !buf || len <= 0)
@@ -298,48 +463,57 @@ int xhci_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep, void *buf,
   int ep_num = ep->addr & 0x0F;
   uint32_t dci = dir_in ? (2 * ep_num + 1) : (2 * ep_num);
 
+  // Transferencias grandes de bulk: trozos de 1 MiB (múltiplo de cualquier
+  // MPS).
+  if (ep->type != USB_EP_INTERRUPT && (uint32_t)len > XHCI_TD_CHUNK) {
+    int total = 0;
+    while (total < len) {
+      int n = len - total;
+      if (n > (int)XHCI_TD_CHUNK)
+        n = (int)XHCI_TD_CHUNK;
+      int act = 0;
+      int rc = xhci_hcd_interrupt_xfer(dev, ep, (uint8_t *)buf + total, n,
+                                       timeout_ms, &act);
+      if (rc != 0)
+        return rc;
+      total += act;
+      if (act < n)
+        break;
+    }
+    if (out_actual_len)
+      *out_actual_len = total;
+    return 0;
+  }
+
+  // Un interrupt IN debe pedir SIEMPRE un múltiplo de wMaxPacketSize: si el
+  // dispositivo envía un informe más largo que el TRB (p.ej. ratón con varios
+  // report IDs) el xHC devuelve Babble Detected (cc=3) y HALTEA el endpoint.
+  uint32_t trb_len = (uint32_t)len;
+  if (dir_in && ep->type == USB_EP_INTERRUPT && ep->max_packet > 0) {
+    uint32_t mps = ep->max_packet;
+    if (trb_len < mps)
+      trb_len = mps;
+    trb_len = ((trb_len + mps - 1) / mps) * mps;
+  }
+
   usb_dma_buf_t dma = {0};
-  if (usb_dma_alloc((size_t)len, &dma) != 0)
+  if (usb_dma_alloc((size_t)trb_len, &dma) != 0)
     return -ENOMEM;
-  if (!dir_in && ep->type != USB_EP_INTERRUPT) {
+  if (!dir_in) {
     memcpy(dma.virt, buf, (size_t)len);
     usb_dma_sync(&dma, USB_DMA_TO_DEVICE);
   }
 
-  uint32_t wrap_limit = st->ring.size - 1;
-  uint32_t trb_idx = st->ring.enqueue;
-  if (trb_idx == wrap_limit)
-    trb_idx = 0;
-  uint64_t trb_phys = xhci_ring_trb_phys(&st->ring, trb_idx);
-
-  xhci_trb_t trb = {0};
-  trb.param = dma.phys;
-  trb.status = (uint32_t)len;
-  /* Normal TRB direction comes from the endpoint context. DIR (bit 16)
-   * is reserved for this TRB type; only Data Stage TRBs use XHCI_TRB_DIR_IN. */
-  trb.control =
-      XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP | XHCI_TRB_IOC;
-
-  unsigned long flags = spin_lock_irqsave(&g_xhci.lock);
-  int rc = xhci_ring_enqueue(&st->ring, &trb);
-  __asm__ volatile("mfence" ::: "memory");
-  *(volatile uint32_t *)(g_xhci.db + p->slot_id * 4) = dci;
-  spin_unlock_irqrestore(&g_xhci.lock, flags);
-
-  if (rc != 0) {
-    usb_dma_free(&dma);
-    return rc;
-  }
-
-  uint32_t residual = 0;
-  int werr = xhci_wait_transfer(p->slot_id, (uint8_t)dci, trb_phys,
-                                (uint32_t)timeout_ms, &residual, NULL);
-  if (werr == 0 && residual > (uint32_t)len)
-    werr = -EIO;
+  uint32_t actual = 0;
+  int werr = xhci_td_xfer(p, st, dci, ep->max_packet, 0, dma.phys, trb_len,
+                          timeout_ms, &actual);
   if (werr == 0) {
-    uint32_t actual = (uint32_t)len - residual;
-    if (dir_in)
+    if (actual > (uint32_t)len)
+      actual = (uint32_t)len;
+    if (dir_in) {
+      usb_dma_sync(&dma, USB_DMA_FROM_DEVICE);
       memcpy(buf, dma.virt, actual);
+    }
     if (out_actual_len)
       *out_actual_len = (int)actual;
   }

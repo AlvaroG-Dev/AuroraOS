@@ -1,4 +1,5 @@
 // kernel/driver.c
+#include "bus.h"        // NEW
 #include "driver.h"
 #include "completion.h"
 #include "klog.h"
@@ -8,10 +9,6 @@
 #include <stddef.h>
 
 #define MAX_DRIVERS 32
-
-// Timeout global (ticks a 1 kHz) para drivers_init_all_parallel.
-// Debe ser mayor que el timeout por dep para que un dep colgado no
-// haga expirar el global sin que el resto haya intentado nada.
 #define DRIVER_GLOBAL_TIMEOUT_MS 30000
 #define DRIVER_DEP_TIMEOUT_MS 30000
 
@@ -21,6 +18,11 @@ static int driver_count = 0;
 void driver_register(struct driver *d) {
   if (!d) {
     LOG_ERR("[DRIVER] driver nulo");
+    return;
+  }
+  // v3: bus-managed -> va al bus, no a la lista legacy.
+  if (d->bus) {
+    bus_add_driver(d);
     return;
   }
   if (driver_count >= MAX_DRIVERS) {

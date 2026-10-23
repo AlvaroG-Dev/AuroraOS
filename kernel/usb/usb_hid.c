@@ -155,8 +155,7 @@ static uint32_t hid_get_bits(const uint8_t *data, uint32_t bit_offset,
 
 /* Los offsets del parser son relativos al payload y no incluyen el byte
  * Report ID. Solo deben procesarse los campos del ID que llegó por USB. */
-static int hid_field_matches_report(const usb_hid_dev_t *h,
-                                    const uint8_t *data,
+static int hid_field_matches_report(const usb_hid_dev_t *h, const uint8_t *data,
                                     const hid_field_t *f) {
   return !h->report.has_report_id || data[0] == f->report_id;
 }
@@ -165,8 +164,7 @@ static uint32_t hid_field_bits(const usb_hid_dev_t *h, const uint8_t *data,
                                const hid_field_t *f) {
   if (!hid_field_matches_report(h, data, f))
     return 0;
-  uint32_t bit_offset =
-      f->bit_offset + (h->report.has_report_id ? 8u : 0u);
+  uint32_t bit_offset = f->bit_offset + (h->report.has_report_id ? 8u : 0u);
   return hid_get_bits(data, bit_offset, f->report_size);
 }
 
@@ -301,8 +299,7 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
     if (f->usage < 0xE0 || f->usage > 0xE7)
       continue;
     uint32_t v = hid_field_bits(h, data, f) ? 1 : 0;
-    uint32_t was =
-        hid_field_bits(h, h->prev_data, f) ? 1 : 0;
+    uint32_t was = hid_field_bits(h, h->prev_data, f) ? 1 : 0;
     switch (f->usage) {
     case 0xE0:
       h->mod_lctrl = (uint8_t)v;
@@ -574,6 +571,12 @@ static void usb_hid_device_kthread(void) {
     int len = d->report_len;
     if (len <= 0 || len > (int)sizeof(buf))
       len = 8;
+    // Pedir al menos wMaxPacketSize: informes más largos que el buffer
+    // provocan Babble y halt del endpoint en el xHC.
+    if (d->in_ep && len < (int)d->in_ep->max_packet)
+      len = (int)d->in_ep->max_packet;
+    if (len > (int)sizeof(buf))
+      len = (int)sizeof(buf);
 
     int rc =
         d->dev->hcd->interrupt_xfer(d->dev, d->in_ep, buf, len, 0, &actual);
@@ -628,7 +631,7 @@ int usb_hid_probe(usb_device_t *dev) {
   int probed = 0;
   for (int i = 0; i < cfg->num_interface_structs; i++) {
     usb_interface_t *itf = &cfg->interfaces[i];
-    if (itf->class != USB_HID_CLASS)
+    if (itf->class != USB_HID_CLASS || itf->alt_setting != 0)
       continue;
 
     int kind = 0;
@@ -712,8 +715,8 @@ int usb_hid_probe(usb_device_t *dev) {
       (void)usb_control_transfer(dev, 0x21, USB_HID_REQ_SET_IDLE, 4,
                                  itf->number, NULL, 0, 1000);
     } else if (!h->use_report_protocol || kind == 0) {
-      LOG_INFO("[HID] iface %u omitida: Report Descriptor no compatible",
-               itf->number);
+      LOG_DEBUG("[HID] iface %u omitida: no utilizable como teclado/ratón",
+                itf->number);
       kfree(h);
       continue;
     }
@@ -743,3 +746,30 @@ int usb_hid_probe(usb_device_t *dev) {
   }
   return probed;
 }
+
+// ===========================================================================
+// [FASE 2.1c] Driver bus-managed.
+// ===========================================================================
+static const usb_device_id_t usb_hid_id_table[] = {
+    {.match_flags = USB_DEVICE_ID_MATCH_INT_CLASS,
+     .b_interface_class = USB_HID_CLASS},   // 0x03
+    {0}};
+
+static int hid_probe_generic(struct device *dev) {
+  int rc = usb_hid_probe((usb_device_t *)dev->priv);
+  // usb_hid_probe devuelve >0 si configuró alguna interface. El bus
+  // considera "claimed" solo si devolvemos 0. Si no configuró ninguna
+  // (device HID no utilizable como kbd/mouse), devolvemos -ENODEV para
+  // que el bus pruebe con otro driver.
+  if (rc > 0)
+    return 0;
+  return rc < 0 ? rc : -ENODEV;
+}
+
+struct driver usb_hid_driver = {
+    .name = "usbhid",
+    .bus = &usb_bus,
+    .id_table = usb_hid_id_table,
+    .probe = hid_probe_generic,
+    .remove = NULL,
+};

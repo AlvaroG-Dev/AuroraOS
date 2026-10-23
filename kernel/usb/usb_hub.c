@@ -12,6 +12,9 @@
 #define HUB_REQ_CLEAR_FEATURE 0x01
 #define HUB_REQ_SET_FEATURE 0x03
 #define HUB_REQ_GET_DESCRIPTOR 0x06
+#define HUB_REQ_SET_HUB_DEPTH 0x0C
+#define C_HUB_LOCAL_POWER 0
+#define C_HUB_OVER_CURRENT 1
 
 #define HUB_DESC_TYPE 0x29
 #define HUB_DESC_TYPE_SS 0x2A
@@ -62,7 +65,36 @@ typedef struct usb_hub_dev {
   uint8_t pwr_on_2_pwr_good;
   int is_ss;
   char name[32];
+  uint32_t busy[8]; // puertos en enumeración (evita doble attach)
 } usb_hub_dev_t;
+
+static void hub_delay_ms(uint32_t ms) {
+  extern uint64_t klog_get_tsc_freq(void);
+  uint64_t freq = klog_get_tsc_freq();
+  if (freq == 0)
+    freq = 2000000000ULL;
+  uint64_t target = (freq / 1000) * ms;
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+  for (;;) {
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    if ((((uint64_t)hi << 32) | lo) - t0 >= target)
+      break;
+    __asm__ volatile("pause");
+  }
+}
+
+static int hub_port_try_lock(usb_hub_dev_t *hub, uint8_t port) {
+  uint32_t bit = 1u << (port & 31);
+  uint32_t old =
+      __atomic_fetch_or(&hub->busy[port >> 5], bit, __ATOMIC_ACQ_REL);
+  return (old & bit) == 0;
+}
+static void hub_port_unlock(usb_hub_dev_t *hub, uint8_t port) {
+  __atomic_fetch_and(&hub->busy[port >> 5], ~(1u << (port & 31)),
+                     __ATOMIC_ACQ_REL);
+}
 
 #define MAX_HUBS 8
 static usb_hub_dev_t *g_hubs[MAX_HUBS];
@@ -137,16 +169,18 @@ static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
     return -ETIMEDOUT;
   }
   hub_clear_port_feature(hdev, port, C_PORT_RESET);
+  if (!(status & PORT_STAT_ENABLE)) {
+    LOG_ERR("[HUB] %s port %u: puerto no habilitado tras el reset", hub->name,
+            port);
+    return -EIO;
+  }
+  hub_delay_ms(20); // TRSTRCY
 
   usb_speed_t speed = USB_SPEED_FULL;
   if (hub->is_ss) {
-    uint32_t sp = (status >> 10) & 0x0F;
-    if (sp == 3)
-      speed = USB_SPEED_SUPER;
-    else if (sp == 4)
-      speed = USB_SPEED_SUPER_PLUS;
-    else
-      speed = USB_SPEED_UNKNOWN;
+    // wPortStatus de un hub SS no lleva bits de velocidad: los dispositivos
+    // de sus puertos van a la velocidad del propio hub (SS / SS+).
+    speed = hdev->speed;
   } else {
     if (status & PORT_STAT_HIGH_SPEED)
       speed = USB_SPEED_HIGH;
@@ -169,6 +203,7 @@ static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
   rc = usb_enumerate(dev);
   if (rc != 0) {
     LOG_ERR("[HUB] %s port %u: enumerate falló: %d", hub->name, port, rc);
+    usb_device_free(dev);
     return rc;
   }
   return 0;
@@ -202,7 +237,10 @@ static void hub_port_change(usb_hub_dev_t *hub, uint8_t port) {
     hub_clear_port_feature(hub->dev, port, C_PORT_OVER_CURRENT);
 
   if ((status & PORT_STAT_CONNECTION) && !(status & PORT_STAT_ENABLE)) {
-    hub_port_attach(hub, port);
+    if (hub_port_try_lock(hub, port)) {
+      hub_port_attach(hub, port);
+      hub_port_unlock(hub, port);
+    }
   }
 }
 
@@ -216,7 +254,7 @@ static void usb_hub_kthread(void) {
   LOG_INFO("[HUB] %s: kthread iniciado (%u puertos)", hub->name, hub->n_ports);
 
   uint8_t buf[32];
-  int report_len = (hub->n_ports + 7) / 8;
+  int report_len = (hub->n_ports + 1 + 7) / 8; // bit 0 = hub, bit N = puerto N
   if (report_len <= 0 || report_len > (int)sizeof(buf))
     report_len = 1;
 
@@ -227,9 +265,17 @@ static void usb_hub_kthread(void) {
                                            report_len, 0, &actual);
     if (rc == 0 && actual > 0) {
       err = 0;
-      for (int p = 0; p < hub->n_ports; p++) {
+      if (buf[0] & 1) {
+        // Cambio de estado del propio hub: hay que limpiarlo o el endpoint
+        // interrupt devuelve el mismo bit sin parar.
+        (void)usb_control_transfer(hub->dev, 0x20, HUB_REQ_CLEAR_FEATURE,
+                                   C_HUB_LOCAL_POWER, 0, NULL, 0, 1000);
+        (void)usb_control_transfer(hub->dev, 0x20, HUB_REQ_CLEAR_FEATURE,
+                                   C_HUB_OVER_CURRENT, 0, NULL, 0, 1000);
+      }
+      for (int p = 1; p <= hub->n_ports; p++) {
         if (buf[p / 8] & (1 << (p % 8)))
-          hub_port_change(hub, (uint8_t)(p + 1));
+          hub_port_change(hub, (uint8_t)p);
       }
     } else if (rc < 0) {
       if (++err == 1 || (err & 0x3F) == 0)
@@ -262,10 +308,11 @@ int usb_hub_probe(usb_device_t *dev) {
     return -EINVAL;
 
   int ports_with_device = 0;
+  int configured = 0;
 
   for (int i = 0; i < cfg->num_interface_structs; i++) {
     usb_interface_t *itf = &cfg->interfaces[i];
-    if (itf->class != USB_HUB_CLASS)
+    if (itf->class != USB_HUB_CLASS || itf->alt_setting != 0)
       continue;
 
     usb_endpoint_t *int_ep = NULL;
@@ -279,6 +326,16 @@ int usb_hub_probe(usb_device_t *dev) {
     if (!int_ep) {
       LOG_WARN("[HUB] iface %u: sin interrupt IN", itf->number);
       continue;
+    }
+
+    if (dev->speed == USB_SPEED_SUPER || dev->speed == USB_SPEED_SUPER_PLUS) {
+      // Los hubs SS necesitan SET_HUB_DEPTH (nº de hubs por encima) antes de
+      // usarse; sin él no encaminan bien el tráfico.
+      uint16_t depth = 0;
+      for (const usb_device_t *u = dev->parent_hub; u; u = u->parent_hub)
+        depth++;
+      (void)usb_control_transfer(dev, 0x20, HUB_REQ_SET_HUB_DEPTH, depth, 0,
+                                 NULL, 0, 1000);
     }
 
     usb_hub_desc_t hdesc;
@@ -320,9 +377,10 @@ int usb_hub_probe(usb_device_t *dev) {
       for (uint8_t p = 1; p <= hub->n_ports; p++) {
         hub_set_port_feature(dev, p, PORT_POWER);
       }
-      volatile uint64_t n = (uint64_t)hub->pwr_on_2_pwr_good * 2000;
-      for (volatile uint64_t k = 0; k < n * 200; k++)
-        __asm__ volatile("pause");
+      // bPwrOn2PwrGood está en unidades de 2 ms; mínimo prudente 100 ms para
+      // que los dispositivos hagan debounce de conexión.
+      uint32_t ms = (uint32_t)hub->pwr_on_2_pwr_good * 2;
+      hub_delay_ms(ms < 100 ? 100 : ms);
     }
 
     rc = dev->hcd->configure_ep(dev, int_ep);
@@ -356,7 +414,36 @@ int usb_hub_probe(usb_device_t *dev) {
         ports_with_device++;
       }
     }
+    configured++;    // [FASE 2.1c] hub funcional (kthread arriba)
   }
 
-  return ports_with_device;
+  // [FASE 2.1c] Retornar 0 si al menos una interface de hub se configuró
+  // correctamente. `ports_with_device` es informativo (log dentro), no
+  // el resultado del probe: un hub vacío sigue siendo un hub reclamado.
+  if (configured > 0) {
+    LOG_INFO("[HUB] %d interfaz(es) de hub configurada(s) (%d puerto(s) con device ahora)",
+             configured, ports_with_device);
+    return 0;
+  }
+  return -ENODEV;
 }
+
+// ===========================================================================
+// [FASE 2.1c] Driver bus-managed.
+// ===========================================================================
+static const usb_device_id_t usb_hub_id_table[] = {
+    {.match_flags = USB_DEVICE_ID_MATCH_INT_CLASS,
+     .b_interface_class = USB_HUB_CLASS},   // 0x09
+    {0}};
+
+static int hub_probe_generic(struct device *dev) {
+  return usb_hub_probe((usb_device_t *)dev->priv);
+}
+
+struct driver usb_hub_driver = {
+    .name = "usb-hub",
+    .bus = &usb_bus,
+    .id_table = usb_hub_id_table,
+    .probe = hub_probe_generic,
+    .remove = NULL,
+};

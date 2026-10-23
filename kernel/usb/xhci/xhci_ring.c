@@ -53,6 +53,23 @@ int xhci_ring_init(xhci_ring_t *ring, uint32_t trb_count, int is_producer) {
   return 0;
 }
 
+// Vuelve a dejar un producer ring vacío y consistente con DCS=1. Solo es
+// seguro con el endpoint Stopped/Halted (el HC no está leyendo el ring).
+// Borrar los TRB es imprescindible: si quedan TRB viejos con cycle=1, el HC
+// los volvería a ejecutar tras Set TR Dequeue Pointer.
+void xhci_ring_reset(xhci_ring_t *ring) {
+  if (!ring || !ring->trbs || !ring->is_producer)
+    return;
+  memset(ring->trbs, 0, (size_t)ring->size * sizeof(xhci_trb_t));
+  xhci_trb_t *link = &ring->trbs[ring->size - 1];
+  link->param = ring->phys;
+  link->control = XHCI_TRB_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC | XHCI_TRB_CYCLE;
+  ring->enqueue = 0;
+  ring->dequeue = 0;
+  ring->cycle = 1;
+  __asm__ volatile("mfence" ::: "memory");
+}
+
 void xhci_ring_destroy(xhci_ring_t *ring) {
   if (!ring || !ring->trbs)
     return;
@@ -108,8 +125,11 @@ int xhci_ring_dequeue(xhci_ring_t *ring, xhci_trb_t *out) {
     return -EINVAL;
 
   xhci_trb_t *src = &ring->trbs[ring->dequeue];
-  if ((src->control & XHCI_TRB_CYCLE) != ring->cycle)
+  uint32_t ctl = *(volatile uint32_t *)&src->control;
+  if ((ctl & XHCI_TRB_CYCLE) != ring->cycle)
     return -EAGAIN; // ring vacío
+  __atomic_thread_fence(
+      __ATOMIC_ACQUIRE); // leer el resto del TRB tras el cycle
 
   *out = *src;
   ring->dequeue++;

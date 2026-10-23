@@ -16,6 +16,8 @@
 #include "completion.h"
 #include "cpu.h"
 #include "driver.h"
+#include "kur_loader.h"
+#include "ksymtab.h"
 #include "elf.h"
 #include "fat32.h"
 #include "gdt.h"
@@ -65,6 +67,7 @@
 #include "workqueue.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "bus.h"
 
 // ===========================================================================
 // Estado global (accesible desde tareas de init)
@@ -365,6 +368,19 @@ static int vfs_init_task(void *arg) {
   else
     LOG_WARN("[INIT] kswapd no se pudo lanzar");
 
+  // [FASE 3.3] Cargar módulos .kur desde /lib/modules (dentro del
+  // initrd, montado como tarfs). Así el mismo binario .kur sirve para
+  // tests y producción, y se puede inspeccionar con `ls`/`hexdump`
+  // desde userland. NO se usan blobs embebidos.
+  LOG_INFO("[INIT] Cargando módulos .kur desde /lib/modules...");
+  extern int kur_load_all(const char *dir);
+  int kur_loaded = kur_load_all("/lib/modules");
+  if (kur_loaded < 0) {
+    LOG_WARN("[INIT] kur_load_all('/lib/modules') falló: %d", kur_loaded);
+  } else {
+    LOG_INFO("[INIT] %d módulo(s) .kur cargado(s)", kur_loaded);
+  }
+
   // [FIX #1] complete_all, NO complete.
   if (done)
     complete_all(done);
@@ -389,21 +405,20 @@ static int drivers_init_task(void *arg) {
   LOG_INFO("[INIT] Input...");
   input_init();
 
-  LOG_INFO("[INIT] Drivers...");
+  LOG_INFO("[INIT] Buses...");
+  bus_register(&pci_bus);          // NEW: idempotente, explícito
 
-  // [FASE 2.1b] Los drivers PCI de bus se registran ANTES de que
-  // pci_init_impl() corra (dentro de drivers_init_all_parallel).
-  // pci_init_impl dispara pci_bus_probe_all() al terminar su scan,
-  // que llamará a ahci_probe() y xhci_probe_inner() con los
-  // pci_device_t ya encontrados.
-  pci_bus_register_driver(&ahci_pci_driver);
-  pci_bus_register_driver(&xhci_pci_driver);
+  LOG_INFO("[INIT] Drivers bus-managed...");
+  driver_register(&ahci_driver);    // NEW: va por bus_add_driver
+  driver_register(&xhci_driver);    // NEW
 
+  LOG_INFO("[INIT] Drivers legacy...");
   driver_register(&ps2_driver);
-  driver_register(&pci_driver);
+  driver_register(&pci_driver);     // scanner, legacy (tiene .init)
   driver_register(&ata_pio_driver);
   driver_register(&atapi_driver);
-  drivers_init_all_parallel();
+
+  drivers_init_all_parallel();      // solo legacy (bus-managed ya está)
   klog_boot_ok();
 
   extern int ata_pio_finalize(void);
@@ -504,6 +519,36 @@ static void tests_thread(void) {
 
   LOG_INFO("[TEST] kthread tests terminado (id=%u, failed=%d)",
            sched_current()->id, failed);
+
+  // [FASE 3.3] Los .kur se cargaron desde VFS en vfs_init_task. Este
+  // test verifica que están presentes, que hello2 importa de hello
+  // (n_dependents) y que el ciclo unload funciona. NO carga desde
+  // blobs.
+  {
+    struct kur_module *m1 = kur_loader_find_by_name("hello");
+    struct kur_module *m2 = kur_loader_find_by_name("hello2");
+
+    LOG_INFO("[TEST-KUR2] hello loaded=%d hello2 loaded=%d (esperado 1 1)",
+             m1 != NULL, m2 != NULL);
+    if (m1)
+      LOG_INFO("[TEST-KUR2] hello.n_dependents=%u (esperado 1)",
+               m1->n_dependents);
+    if (m2)
+      LOG_INFO("[TEST-KUR2] hello2.n_dependents=%u (esperado 0)",
+               m2->n_dependents);
+
+    if (m1 && m2) {
+      int urc1 = kur_loader_unload(m1);
+      LOG_INFO("[TEST-KUR2] unload(hello) con hello2 vivo = %d "
+               "(esperado -16)", urc1);
+      int urc2 = kur_loader_unload(m2);
+      LOG_INFO("[TEST-KUR2] unload(hello2) = %d (esperado 0)", urc2);
+      int urc3 = kur_loader_unload(m1);
+      LOG_INFO("[TEST-KUR2] unload(hello) = %d (esperado 0)", urc3);
+    }
+    LOG_INFO("[TEST-KUR2] modulos tras test: %d (esperado 0)",
+             kur_loader_count());
+  }
 
   // Red de usuario SOLO tras tests (e1000e asume netif->ip == 0).
   // No usamos klog_boot_step/ok aquí: esos pares son secuenciales y
@@ -693,6 +738,22 @@ void kmain(struct kernel_boot_info *kinfo) {
   cpu_local_data[0].user_rsp = 0;
   klog_boot_ok();
 
+  // [FASE 3.3] Registrar el bus PCI antes de cualquier init paralelo.
+  extern struct bus_type pci_bus;
+  bus_register(&pci_bus);
+
+  // [FASE 2.1c] Registrar el bus USB + drivers usbhid/storage/hub.
+  // Debe ir antes de driver_register(&xhci_driver) para que cuando el
+  // hotplug thread de xhci enumere el primer device USB, el bus ya
+  // exista y tenga drivers que lo reclamen.
+  extern int usb_bus_init(void);
+  int usb_rc = usb_bus_init();
+  if (usb_rc != 0)
+    LOG_WARN("[BOOT] usb_bus_init falló: %d", usb_rc);
+
+  // [FASE 3.1] Tabla de símbolos del kernel para .kur.
+  ksymtab_init();
+
   // 6. Memoria.
   klog_boot_step("[BOOT] Memoria...");
   uint64_t max_phys_addr = 0;
@@ -756,6 +817,9 @@ void kmain(struct kernel_boot_info *kinfo) {
   uaccess_init();
   heap_init();
   klog_boot_ok();
+
+  // [FASE 3.1] Loader de .kur (necesita heap + vmm_alloc_pages).
+  kur_loader_init();
 
   // 7. ACPI MADT.
   klog_boot_step("[BOOT] ACPI MADT...");

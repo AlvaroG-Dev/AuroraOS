@@ -35,8 +35,8 @@ int xhci_port_is_attached(uint8_t port) {
   if (port == 0 || port > g_xhci.max_ports)
     return 0;
   uint32_t bit = 1u << ((port - 1u) & 31u);
-  uint32_t word = __atomic_load_n(
-      &g_attached_ports_mask[(port - 1u) >> 5], __ATOMIC_ACQUIRE);
+  uint32_t word = __atomic_load_n(&g_attached_ports_mask[(port - 1u) >> 5],
+                                  __ATOMIC_ACQUIRE);
   return (word & bit) != 0;
 }
 static volatile int g_attach_busy = 0;
@@ -78,8 +78,14 @@ int xhci_port_reset(uint8_t port) {
   /* [FIX HW REAL] Solo bits neutros: antes se reescribía PED=1 (desactiva el
    * puerto) y los change bits pendientes. */
   portsc_write(port, xhci_portsc_neutral(portsc) | XHCI_PORTSC_PP);
-  portsc_write(port,
-               xhci_portsc_neutral(xhci_port_status(port)) | XHCI_PORTSC_PR);
+  // USB3 en Inactive/Compliance solo sale con Warm Reset (WPR, bit 31).
+  uint32_t cur = xhci_port_status(port);
+  uint32_t cur_pls = (cur & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+  int ss_port = (((cur >> 10) & 0xF) >= 4);
+  uint32_t rst_bit = (ss_port && (cur_pls == 6 || cur_pls == 10))
+                         ? (1u << 31)
+                         : XHCI_PORTSC_PR;
+  portsc_write(port, xhci_portsc_neutral(cur) | rst_bit);
 
   uint32_t lo, hi;
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -127,7 +133,8 @@ void xhci_port_poll_changes(void) {
     if (s & XHCI_PORTSC_CHANGE_BITS) {
       // ACK de todos los change bits en UNA escritura (RW1C) y sin tocar
       // PED/PR: antes se escribía `s` entero, lo que deshabilitaba el puerto.
-      portsc_write((uint8_t)p, xhci_portsc_neutral(s) | (s & XHCI_PORTSC_CHANGE_BITS));
+      portsc_write((uint8_t)p,
+                   xhci_portsc_neutral(s) | (s & XHCI_PORTSC_CHANGE_BITS));
     }
   }
 }
@@ -142,7 +149,26 @@ static int xhci_attach_one(uint8_t port) {
            portsc);
 
   uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
-  int already_enabled = (portsc & XHCI_PORTSC_PED) && (pls == XHCI_PLS_U0);
+  // Solo SuperSpeed se habilita solo por link training. Un puerto USB2 con
+  // PED=1 puede tener un device que YA tiene dirección (BIOS o intento previo
+  // fallido): sin reset, Address Device falla con cc=4 (Transaction Error).
+  int is_ss = (speed == USB_SPEED_SUPER || speed == USB_SPEED_SUPER_PLUS);
+  int already_enabled =
+      is_ss && (portsc & XHCI_PORTSC_PED) && (pls == XHCI_PLS_U0);
+  if (is_ss && !already_enabled) {
+    // El link SuperSpeed entrena solo: dar hasta ~300 ms antes de resetear.
+    for (int i = 0; i < 30 && !already_enabled; i++) {
+      xhci_delay_ms_local(10);
+      portsc = xhci_port_status(port);
+      pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+      already_enabled = (portsc & XHCI_PORTSC_CCS) &&
+                        (portsc & XHCI_PORTSC_PED) && (pls == XHCI_PLS_U0);
+    }
+    if (!(portsc & XHCI_PORTSC_CCS))
+      return -ENODEV;
+    if (already_enabled)
+      speed = xhci_speed_to_usb(portsc);
+  }
 
   if (!already_enabled) {
     int rc = xhci_port_reset(port);
@@ -150,6 +176,7 @@ static int xhci_attach_one(uint8_t port) {
       return rc;
     portsc = xhci_port_status(port);
     speed = xhci_speed_to_usb(portsc);
+    xhci_delay_ms_local(20); // TRSTRCY: recuperación tras reset antes de hablar
   }
 
   usb_device_t *dev = NULL;
@@ -159,9 +186,7 @@ static int xhci_attach_one(uint8_t port) {
 
   rc = usb_enumerate(dev);
   if (rc != 0) {
-    xhci_cmd_disable_slot(dev->addr);
-    g_xhci.dcbaa[dev->addr] = 0;
-    usb_device_free(dev);
+    usb_device_free(dev); // free_device hace Disable Slot + limpia el DCBAA
     return rc;
   }
   return 0;
@@ -190,12 +215,30 @@ int xhci_attach_all_devices(void) {
     if (xhci_port_mark_attached(p))
       continue;
 
-    if (xhci_attach_one((uint8_t)p) == 0) {
-      attached++;
-    } else {
-      // Rollback si falló: permitir reintentos tras un hotplug.
-      xhci_port_mark_detached(p);
+    // Reintentos en línea. Si siguen fallando el puerto queda marcado hasta
+    // que se desconecte: antes se hacía rollback y cada fallo generaba otro
+    // evento de hotplug -> bucle infinito que gastaba un slot por intento.
+    int ok = 0, gone = 0;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      int rc = xhci_attach_one((uint8_t)p);
+      if (rc == 0) {
+        ok = 1;
+        break;
+      }
+      if (rc == -ENODEV) {
+        gone = 1;
+        break;
+      }
+      LOG_WARN("[xHCI] port %u: attach falló (%d), intento %d/3", p, rc,
+               attempt);
+      xhci_delay_ms_local(100);
     }
+    if (ok)
+      attached++;
+    else if (gone)
+      xhci_port_mark_detached(p);
+    else
+      LOG_ERR("[xHCI] port %u: se rinde hasta reconectar el dispositivo", p);
   }
 
   if (attached > 0)
