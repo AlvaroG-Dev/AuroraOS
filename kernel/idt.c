@@ -3,6 +3,7 @@
 
 #include "idt.h"
 #include "ipi.h"
+#include "irq_threaded.h"
 #include "klog.h"
 #include "paging.h"
 #include "panic.h"
@@ -33,6 +34,10 @@ static struct idt_ptr idt_ptr;
 static void (*irq_ack_handlers[16])(void) = {NULL};
 static void (*irq_process_handlers[16])(void) = {NULL};
 static void (*irq_handlers[16])(void) = {NULL}; // legacy
+
+// Forward-decl: dispatch unificado. Vive en irq_threaded.c para poder
+// compartirse entre el path IOAPIC y el path MSI.
+extern irqreturn_t irq_threaded_dispatch(int irq);
 
 // ---------------------------------------------------------------------------
 // Stubs de ISR/IRQ (definidos en isr_stubs.asm).
@@ -353,48 +358,51 @@ static void irq_try_deliver_signals(registers_t *regs) {
 }
 
 void irq_handler(registers_t *regs) {
-  // [FIX] LAPIC timer (vector 48): EOI ANTES del handler.
-  // (comentario original sin cambios)
+  // LAPIC timer (vector 48): igual que antes.
   if (regs->int_num == 48) {
     extern void lapic_timer_handler(void);
     extern void lapic_eoi(void);
-    lapic_eoi();           // PRIMERO
-    lapic_timer_handler(); // luego el handler (que puede cambiar de tarea)
-
-    // [SIG] El timer acaba de darnos la oportunidad de entregar
-    // señales pendientes al proceso interrumpido. Si lapic_timer_handler
-    // cambió de tarea, regs sigue apuntando al frame de la tarea que
-    // fue interrumpida (está en SU pila de kernel), así que es el
-    // frame correcto.
+    lapic_eoi();
+    lapic_timer_handler();
     irq_try_deliver_signals(regs);
     return;
   }
 
-  // IRQs del IOAPIC (32..47). Aquí el patrón ack → EOI → process es
-  // correcto para IRQs level-triggered: el ack silencia la fuente
-  // antes de enviar el EOI, así el IOAPIC no re-dispara.
   uint8_t irq = (uint8_t)(regs->int_num - 32);
 
   if (irq < 16) {
-    if (irq_ack_handlers[irq]) {
-      irq_ack_handlers[irq]();
-    } else if (irq_handlers[irq]) {
-      irq_handlers[irq]();
+    // [IRQ-THREADED] Primero la tabla nueva. Si devuelve IRQ_NONE es
+    // que nadie ha registrado este irq en la capa threaded; caemos al
+    // path legacy (que sigue soportando irq_install_handler y
+    // irq_install_handler_ex).
+    irqreturn_t tr = irq_threaded_dispatch(irq);
+
+    if (tr == IRQ_NONE) {
+      // Path legacy sin cambios.
+      if (irq_ack_handlers[irq]) {
+        irq_ack_handlers[irq]();
+      } else if (irq_handlers[irq]) {
+        irq_handlers[irq]();
+      }
+      extern void lapic_eoi(void);
+      lapic_eoi();
+      if (irq_process_handlers[irq]) {
+        irq_process_handlers[irq]();
+      }
+    } else {
+      // Path threaded: ack ya atendió la fuente; el thread_fn correrá
+      // en su kthread. Mandamos EOI aquí para que IOAPIC no retenga
+      // la línea mientras el thread_fn procesa.
+      extern void lapic_eoi(void);
+      lapic_eoi();
+      // El wake del kthread ya lo hizo irq_threaded_dispatch.
     }
+  } else {
+    // Fuera de 32..47, no es una IRQ IOAPIC.
+    extern void lapic_eoi(void);
+    lapic_eoi();
   }
 
-  extern void lapic_eoi(void);
-  lapic_eoi();
-
-  if (irq < 16 && irq_process_handlers[irq]) {
-    irq_process_handlers[irq]();
-  }
-
-  // [SIG] Misma lógica que en el camino del timer: cualquier IRQ que
-  // devuelva el control a userland es una oportunidad para entregar
-  // señales. Sin esto, un busy-loop que solo es interrumpido por
-  // IRQs de dispositivo (p. ej. teclado) vería la señal con latencia
-  // de segundos.
   irq_try_deliver_signals(regs);
 }
 
@@ -434,7 +442,16 @@ void msi_dispatch(uint8_t vector) {
 // ===========================================================================
 void msi_handler(registers_t *regs) {
   uint8_t vector = (uint8_t)(regs->int_num & 0xFF);
-  msi_dispatch(vector);
+
+  // [IRQ-THREADED] Mismo dispatch unificado. Si nadie ha registrado
+  // este vector en la capa threaded, caemos al msi_dispatch legacy.
+  irqreturn_t tr = irq_threaded_dispatch((int)vector);
+
+  if (tr == IRQ_NONE) {
+    msi_dispatch(vector);
+  }
+  // else: ack ya atendió la fuente; el thread_fn correrá en su kthread.
+
   extern void lapic_eoi(void);
   lapic_eoi();
 }

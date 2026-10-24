@@ -4,6 +4,7 @@
 #include "../simd.h"
 #include "font_aa.h"
 #include "font_manager.h"
+#include "theme.h"
 #include <emmintrin.h>
 #include <immintrin.h>
 
@@ -88,11 +89,14 @@ static inline uint32_t smooth_ring_alpha(int diff_fp, uint32_t base_alpha) {
 // dibuja (alpha=0 en la LUT). El cuerpo de la ventana cubre esa zona por
 // su cuenta.
 // ---------------------------------------------------------------------------
-#define AURORA_SHADOW_BLUR 10
-#define AURORA_SHADOW_ALPHA_MAX 60
-#define AURORA_SHADOW_OFFSET_Y 0
-#define AURORA_SHADOW_RADIUS 8 /* corner radius de las ventanas */
-#define AURORA_SHADOW_D2_MAX (AURORA_SHADOW_BLUR * AURORA_SHADOW_BLUR * 2 + 4)
+/* BLUR y OFFSET_Y vienen de theme.h. D2_MAX debe cubrir (R + BLUR)^2: antes
+ * valía 2*BLUR^2+4 y cortaba la sombra a mitad de camino (borde duro). */
+#define AURORA_SHADOW_ALPHA_MAX 90
+#define AURORA_SHADOW_RADIUS AURORA_CORNER_RADIUS
+#define AURORA_SHADOW_D2_MAX                                                   \
+  ((AURORA_SHADOW_RADIUS + AURORA_SHADOW_BLUR) *                               \
+       (AURORA_SHADOW_RADIUS + AURORA_SHADOW_BLUR) +                           \
+   1)
 
 static uint8_t g_shadow_lut[AURORA_SHADOW_D2_MAX];
 static int g_shadow_lut_ready = 0;
@@ -110,24 +114,33 @@ static void shadow_lut_init(void) {
       d++;
     int sdf = d - R;
     if (sdf < 0) {
-      g_shadow_lut[d2] = 0;
+      /* Dentro de la forma de la sombra: alpha máximo. Con OFFSET_Y > 0 la
+       * forma desplazada asoma por debajo de la ventana; si aquí fuera 0
+       * quedaba una franja sin sombra pegada al borde inferior. El cuerpo
+       * de la ventana tapa el resto. */
+      g_shadow_lut[d2] = (uint8_t)AMAX;
       continue;
-    } /* dentro */
+    }
     if (sdf >= BLUR) {
       g_shadow_lut[d2] = 0;
       continue;
     } /* muy lejos */
-    /* Falloff cuadrático: al borde (sdf=0) alpha=AMAX, cae a 0 en sdf=BLUR. */
-    int t = BLUR - sdf;
-    g_shadow_lut[d2] = (uint8_t)((AMAX * t * t) / (BLUR * BLUR));
+    /* Falloff smoothstep: al borde (sdf=0) alpha=AMAX, cae suave a 0 en
+     * sdf=BLUR (cola larga, sin escalón). x en 0..1024. */
+    int x = ((BLUR - sdf) * 1024) / BLUR;
+    int s = (3 * x * x - (2 * x * x * x) / 1024) / 1024; /* 0..1024 */
+    g_shadow_lut[d2] = (uint8_t)((AMAX * s) / 1024);
   }
   g_shadow_lut_ready = 1;
 }
 
-void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
-                            rect_t win_rect, int corner_radius) {
-  if (!dst)
+void gfx_draw_shadow_aurora_ex(uint32_t *dst, int dst_stride, rect_t clip,
+                               rect_t win_rect, int corner_radius,
+                               int strength256) {
+  if (!dst || strength256 <= 0)
     return;
+  if (strength256 > 256)
+    strength256 = 256;
   shadow_lut_init();
 
   int wx = win_rect.x, wy = win_rect.y;
@@ -166,7 +179,19 @@ void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
     if (dy2 >= AURORA_SHADOW_D2_MAX)
       continue;
 
+    /* El núcleo de la ventana (rect encogido R px) siempre queda cubierto por
+     * el cuerpo: no gastar tiempo sombreándolo. */
+    int skip0 = 0, skip1 = 0;
+    if (py >= wy + R && py < wy + wh - R) {
+      skip0 = wx + R;
+      skip1 = wx + ww - R;
+    }
+
     for (int px = bx0; px < bx1; px++) {
+      if (px >= skip0 && px < skip1) {
+        px = skip1 - 1;
+        continue;
+      }
       int dx = 0;
       if (px < sx0)
         dx = sx0 - px;
@@ -177,7 +202,7 @@ void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
       if (d2 >= AURORA_SHADOW_D2_MAX)
         continue;
 
-      uint32_t a = g_shadow_lut[d2];
+      uint32_t a = ((uint32_t)g_shadow_lut[d2] * (uint32_t)strength256) >> 8;
       if (a == 0)
         continue;
 
@@ -187,6 +212,12 @@ void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
 }
 
 // Función auxiliar de mezcla ponderada para la sombra
+void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
+                            rect_t win_rect, int corner_radius) {
+  gfx_draw_shadow_aurora_ex(dst, dst_stride, clip, win_rect, corner_radius,
+                            256);
+}
+
 static inline void gfx_blend_shadow_pixel(uint32_t *dst, int x, int y,
                                           int stride, uint32_t base_color,
                                           uint8_t alpha_factor) {
@@ -840,6 +871,106 @@ void gfx_fill_rounded_rect_gradient_v(uint32_t *dst, int dst_stride,
       } else {
         row[px] = c;
       }
+    }
+  }
+}
+
+// ============================================================================
+// Métricas de texto
+// ============================================================================
+int gfx_text_width(const char *str, font_id_t font) {
+  return font_aa_text_width(font_manager_get(font), str);
+}
+
+int gfx_font_ascent(font_id_t font) {
+  const font_aa_t *f = font_manager_get(font);
+  return f ? f->height : 0;
+}
+
+int gfx_text_center_y(font_id_t font, int top, int height) {
+  const font_aa_t *f = font_manager_get(font);
+  if (!f)
+    return top;
+  int cap = font_aa_cap_height(f);
+  /* baseline = y + f->height; queremos baseline = centro + cap/2 */
+  return top + (height + cap) / 2 - f->height;
+}
+
+// ============================================================================
+// Desenfoque de fondo localizado (Dock, barra de menús, menús)
+// ============================================================================
+static inline int blur_in_shape(int x, int y, int w, int h, int cr) {
+  if (cr <= 0)
+    return 1;
+  int dx = (x < cr) ? (cr - 1 - x) : (x >= w - cr ? x - (w - cr) : -1);
+  int dy = (y < cr) ? (cr - 1 - y) : (y >= h - cr ? y - (h - cr) : -1);
+  if (dx < 0 || dy < 0)
+    return 1;
+  return 4 * (dx * dx + dx + dy * dy + dy) + 2 <= 4 * cr * cr;
+}
+
+static inline int blur_clampi(int v, int lo, int hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+void gfx_backdrop_blur_rounded(uint32_t *dst, int dst_stride, rect_t clip,
+                               rect_t r, int corner_radius, int blur_radius,
+                               uint32_t *tmp, size_t tmp_px) {
+  if (!dst || !tmp || blur_radius < 1 || r.w <= 0 || r.h <= 0)
+    return;
+  if ((size_t)r.w * (size_t)r.h > tmp_px)
+    return;
+
+  const int w = r.w, h = r.h, br = blur_radius;
+  const uint32_t mul = 65536u / (uint32_t)(2 * br + 1);
+
+  /* Pasada horizontal: dst -> tmp */
+  for (int y = 0; y < h; y++) {
+    const uint32_t *row = &dst[(r.y + y) * dst_stride + r.x];
+    uint32_t *out = &tmp[y * w];
+    int sr = 0, sg = 0, sb = 0;
+    for (int i = -br; i <= br; i++) {
+      uint32_t p = row[blur_clampi(i, 0, w - 1)];
+      sr += (p >> 16) & 0xFF;
+      sg += (p >> 8) & 0xFF;
+      sb += p & 0xFF;
+    }
+    for (int x = 0; x < w; x++) {
+      out[x] = 0xFF000000 | ((((uint32_t)sr * mul) >> 16) << 16) |
+               ((((uint32_t)sg * mul) >> 16) << 8) |
+               (((uint32_t)sb * mul) >> 16);
+      uint32_t pa = row[blur_clampi(x + br + 1, 0, w - 1)];
+      uint32_t ps = row[blur_clampi(x - br, 0, w - 1)];
+      sr += (int)((pa >> 16) & 0xFF) - (int)((ps >> 16) & 0xFF);
+      sg += (int)((pa >> 8) & 0xFF) - (int)((ps >> 8) & 0xFF);
+      sb += (int)(pa & 0xFF) - (int)(ps & 0xFF);
+    }
+  }
+
+  /* Pasada vertical: tmp -> dst (solo dentro de la forma y del clip) */
+  for (int x = 0; x < w; x++) {
+    int px = r.x + x;
+    int x_ok = (px >= clip.x && px < clip.x + clip.w);
+    int sr = 0, sg = 0, sb = 0;
+    for (int i = -br; i <= br; i++) {
+      uint32_t p = tmp[blur_clampi(i, 0, h - 1) * w + x];
+      sr += (p >> 16) & 0xFF;
+      sg += (p >> 8) & 0xFF;
+      sb += p & 0xFF;
+    }
+    for (int y = 0; y < h; y++) {
+      int py = r.y + y;
+      if (x_ok && py >= clip.y && py < clip.y + clip.h &&
+          blur_in_shape(x, y, w, h, corner_radius)) {
+        dst[py * dst_stride + px] =
+            0xFF000000 | ((((uint32_t)sr * mul) >> 16) << 16) |
+            ((((uint32_t)sg * mul) >> 16) << 8) | (((uint32_t)sb * mul) >> 16);
+      }
+      uint32_t pa = tmp[blur_clampi(y + br + 1, 0, h - 1) * w + x];
+      uint32_t ps = tmp[blur_clampi(y - br, 0, h - 1) * w + x];
+      sr += (int)((pa >> 16) & 0xFF) - (int)((ps >> 16) & 0xFF);
+      sg += (int)((pa >> 8) & 0xFF) - (int)((ps >> 8) & 0xFF);
+      sb += (int)(pa & 0xFF) - (int)(ps & 0xFF);
     }
   }
 }

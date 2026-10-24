@@ -7,13 +7,13 @@
 
 struct wait_queue;
 struct process;
+struct kthread; // [KTHREAD] forward-decl para el back-pointer de task_t
 
 typedef enum {
   TASK_READY = 0,
   TASK_RUNNING = 1,
   TASK_BLOCKED = 2,
-  TASK_STOPPED = 3, // [JOB] Detenido por SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU.
-                    // Solo SIGCONT lo saca de este estado.
+  TASK_STOPPED = 3,
   TASK_DEAD = 4,
 } task_state_t;
 
@@ -36,7 +36,6 @@ typedef struct ipc_mailbox {
   struct wait_queue wq;
 } ipc_mailbox_t;
 
-// Process Control Block
 typedef struct task {
   uint64_t rsp;
   uint64_t *stack;
@@ -49,9 +48,6 @@ typedef struct task {
   int is_idle;
   struct task *next;
 
-  // [Fase A] Enlace directo a la estructura de proceso (NULL para
-  // tareas de kernel e idle). Evita recorrer process_list en cada
-  // syscall y elimina el use-after-free que había.
   struct process *proc;
 
   struct wait_queue *waiting_on;
@@ -65,44 +61,29 @@ typedef struct task {
   volatile int on_cpu;
   wait_queue_entry_t wait_entry;
   volatile uint64_t wait_seq;
-  // [FIX timeout] Tick absoluto en el que la tarea debe despertar aunque
-  // nadie la despierte explícitamente. 0 = sin timeout (espera indefinida).
-  // Lo usa wait_event_interruptible_timeout para que el scheduler la
-  // despierte al expirar, en vez de quedarse dormida para siempre.
   uint64_t wake_deadline;
-
-  // [FIX sched_yield] Marca que la tarea pidió ceder explícitamente
-  // (vía sched_yield) y que, aunque siga RUNNING, sched_tick debe
-  // saltar al idle si no hay otra tarea READY. Sin esto, sched_yield
-  // no cede en absoluto cuando todas las demás tareas han migrado a
-  // otros CPUs, y la tarea actual se queda en un busy-loop.
   volatile int yield_requested;
 
-  uint64_t fs_base; // [musl] FS segment base (TLS). 0 si no lo usa.
-                    // [FIX-SMP] Trap frame del syscall en curso para ESTA
-                    // tarea. Antes
-  // era un global compartido: con SMP, k_execve escribía regs->rip
-  // en el frame de OTRA tarea concurrente (la que estaba en waitpid),
-  // y ni una ni otra volvían a un rip válido → PF en ambas.
-  // Per-task sobrevive incluso si la tarea migra de CPU durante la
-  // syscall.
+  uint64_t fs_base;
   registers_t *syscall_regs;
 
-  // [clone] Puntero al tid del usuario. CLONE_CHILD_CLEARTID:
-  // cuando esta tarea muere, escribimos 0 en *clear_child_tid y
-  // futex_wake() sobre esa dirección. Lo pone set_tid_address().
-  // NULL si nunca se llamó.
   uint32_t *clear_child_tid;
 
+  // [KTHREAD] Back-pointer al handle cuando esta task fue creada vía
+  // kthread_create/run. NULL para tareas nativas del kernel y para
+  // procesos de usuario. kthread_stop lo pone a NULL antes de liberar
+  // el handle, así que un task_t reapeado nunca deja un puntero vivo.
+  struct kthread *kthread;
 } task_t;
 
 void sched_init(void);
 task_t *sched_create_task(void (*fn)(void));
 
-// [Fase A] Crea una tarea de usuario pero NO la inserta en la runqueue.
-// El llamante debe inicializar task->proc y llamar a sched_make_ready(task)
-// cuando esté todo listo. Esto evita que un AP ejecute la tarea antes de
-// que process_spawn haya terminado de montarla.
+// [KTHREAD] Igual que sched_create_task pero NO inserta la tarea en la
+// runqueue. El llamante debe llamar a sched_publish_task(t) cuando el
+// resto de la inicialización (incluido t->kthread) haya terminado.
+task_t *sched_create_kernel_task_stopped(void (*fn)(void));
+
 task_t *sched_create_user_task_stopped(void (*fn)(void),
                                        uint64_t user_stack_top, uint64_t cr3);
 
@@ -111,38 +92,19 @@ void sched_yield(void);
 task_t *sched_current(void);
 task_t *sched_find_task(uint32_t task_id);
 
-// [FIX] Contador monótono de ticks desde el arranque. Lo incrementa el
-// handler del LAPIC timer a 1000 Hz. Usado por wait_event_*_timeout.
 uint64_t sched_get_ticks(void);
 
 void sched_make_ready(task_t *t);
 void sched_mark_need_resched(void);
 void sched_publish_task(task_t *t);
 
-// [JOB CONTROL] Transiciona una tarea viva a TASK_STOPPED. La tarea
-// permanece en la runqueue pero el selector la ignora. Solo
-// sched_cont_task la reactiva.
 void sched_stop_task(task_t *t);
-
-// [JOB CONTROL] Contraparte de sched_stop_task: STOPPED -> READY.
-// No hace nada si la tarea no estaba STOPPED.
 void sched_cont_task(task_t *t);
 
-// [fork] Crea la tarea del hijo. El frame de kernel se construye a partir
-// de `parent_regs` (el registers_t del padre en el momento del syscall),
-// de forma que al saltar a userland el hijo vea los mismos registros que
-// el padre excepto rax = 0.
 task_t *sched_create_forked_user_task(registers_t *parent_regs, uint64_t cr3);
 
-// [C4] Publica atómicamente la transición a TASK_BLOCKED junto con el
-// wake_deadline, bajo sched_lock. Debe llamarse después de insertar
-// la tarea en la wait queue (t->waiting_on != NULL). El consumidor
-// (sched_wake_expired) lee ambos campos bajo el mismo lock.
 void sched_set_blocked_deadline(task_t *t, uint64_t deadline);
 
-// [clone] Como sched_create_forked_user_task, pero permite sobrescribir
-// el RSP del usuario (stack argument de clone). rsp_override == 0
-// significa "usa regs->rsp" (comportamiento fork).
 task_t *sched_create_forked_user_task_ex(registers_t *regs, uint64_t cr3,
                                          uint64_t rsp_override);
 
@@ -158,8 +120,6 @@ extern void task_switch(task_t *old_task, task_t *new_task, void *lock);
 void task_entry_wrapper(void (*fn)(void));
 void task_die_hlt(void);
 
-// [FIX timeout] Despierta tareas BLOCKED cuyo wake_deadline haya expirado.
-// Lo llama time_tick a 1000 Hz en el BSP.
 void sched_wake_expired(void);
 
 __attribute__((noreturn)) void sched_start(task_t *task);
@@ -172,16 +132,6 @@ void smp_set_bsp_lapic_id(uint32_t lapic_id);
 void __sched_canary_arm(void);
 void __sched_canary_check(void);
 
-// ---------------------------------------------------------------------------
-// Asserts de offsets asm↔C.
-//
-// switch.asm usa:
-//   0x00 → rsp
-//   0x18 → fpu_state
-//   0x20 → cr3
-//
-// Si cambias el struct task_t, estos asserts te avisan.
-// ---------------------------------------------------------------------------
 _Static_assert(offsetof(task_t, rsp) == 0x00, "switch.asm: rsp @ 0x00");
 _Static_assert(offsetof(task_t, fpu_state) == 0x18, "switch.asm");
 _Static_assert(offsetof(task_t, cr3) == 0x20, "switch.asm");
@@ -190,14 +140,6 @@ _Static_assert(offsetof(spinlock_t, locked) == 0 &&
                    sizeof(((spinlock_t *)0)->locked) == 4,
                "switch.asm libera el lock con mov dword [rdx], 0");
 
-// FXSAVE64/FXRSTOR64 requieren que la dirección del buffer esté
-// alineada a 16 bytes. task->fpu_state se calcula como
-//   (uint64_t)task->fpu_raw redondeado hacia arriba a 16.
-// Para que esto funcione, fpu_raw debe estar a una distancia tal que
-// el redondeo no desborde el buffer.
-//
-// Verificamos que fpu_raw + 15 (el peor caso del redondeo) siga
-// cabiendo dentro de task_t.
 _Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) +
                        15 <=
                    sizeof(task_t),

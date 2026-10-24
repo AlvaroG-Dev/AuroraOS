@@ -48,4 +48,9 @@ void ap_entry(void);
 int smp_aps_ready(void);
 extern volatile int smp_sched_active;
 
+// Total de CPUs online en este momento (BSP + APs que arrancaron
+// correctamente). Antes de smp_boot_aps(), devuelve 1. Después, es
+// estable hasta el final del boot. Clampeado a [1, MAX_CPUS].
+int smp_online_cpus(void);
+
 #endif

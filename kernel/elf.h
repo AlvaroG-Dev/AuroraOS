@@ -64,6 +64,49 @@ typedef struct {
   uint64_t p_align;
 } Elf64_Phdr;
 
+// ---------------------------------------------------------------------------
+// [FASE 3.1] Tipos de sección, símbolo y relocación.
+// Solo los usa el loader de .kur (ET_REL). elf_load_streaming() no los
+// necesita (trabaja con program headers), así que añadirlos aquí no
+// afecta a nada existente.
+// ---------------------------------------------------------------------------
+
+// Section header (System V gABI). 64 bytes.
+typedef struct {
+  uint32_t sh_name;
+  uint32_t sh_type;
+  uint64_t sh_flags;
+  uint64_t sh_addr;
+  uint64_t sh_offset;
+  uint64_t sh_size;
+  uint32_t sh_link;
+  uint32_t sh_info;
+  uint64_t sh_addralign;
+  uint64_t sh_entsize;
+} Elf64_Shdr;
+
+// Symbol table entry. 24 bytes.
+typedef struct {
+  uint32_t st_name;
+  uint8_t  st_info;
+  uint8_t  st_other;
+  uint16_t st_shndx;
+  uint64_t st_value;
+  uint64_t st_size;
+} Elf64_Sym;
+
+// Rela relocation (con addend explícito). 24 bytes.
+typedef struct {
+  uint64_t r_offset;
+  uint64_t r_info;
+  int64_t  r_addend;
+} Elf64_Rela;
+
+// ELF magic como string de 4 bytes: 0x7F 'E' 'L' 'F'.
+// Es lo que usa memcmp(x, ELFMAG, SELFMAG).
+#define ELFMAG  "\177ELF"
+#define SELFMAG 4
+
 // [2.4] Un segmento PT_LOAD, ya relocado y alineado a página.
 // `vaddr_start` y `vaddr_end` están alineados a PAGE_SIZE y, si el ELF
 // es ET_DYN, ya llevan sumado el load_base. `flags` son los PF_* del

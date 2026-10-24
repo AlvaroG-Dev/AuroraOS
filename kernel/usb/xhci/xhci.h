@@ -67,6 +67,17 @@
 
 #define XHCI_PLS_U0 0
 
+#define XHCI_PORTSC_OCA (1u << 3)
+#define XHCI_PORTSC_SPEED_MASK (0xFu << 10)
+#define XHCI_PORTSC_WAKE_BITS (7u << 25)
+#define XHCI_PORTSC_DR (1u << 30)
+#define XHCI_PORTSC_PRESERVE                                                   \
+  (XHCI_PORTSC_CCS | XHCI_PORTSC_OCA | XHCI_PORTSC_PLS_MASK | XHCI_PORTSC_PP | \
+   XHCI_PORTSC_SPEED_MASK | XHCI_PORTSC_WAKE_BITS | XHCI_PORTSC_DR)
+static inline uint32_t xhci_portsc_neutral(uint32_t v) {
+  return v & XHCI_PORTSC_PRESERVE;
+}
+
 typedef struct {
   uint64_t param;
   uint32_t status;
@@ -83,6 +94,9 @@ typedef struct {
 #define XHCI_TRB_ADDRESS_DEVICE 11
 #define XHCI_TRB_CONFIGURE_EP 12
 #define XHCI_TRB_EVAL_CTX 13
+#define XHCI_TRB_STOP_EP 15
+#define XHCI_TRB_RESET_EP 14
+#define XHCI_TRB_SET_TR_DEQUEUE 16
 #define XHCI_TRB_NO_OP_CMD 23
 #define XHCI_TRB_TRANSFER_EVT 32
 #define XHCI_TRB_CMD_COMPLETION 33
@@ -105,6 +119,13 @@ typedef struct {
 
 #define XHCI_CC_SUCCESS 1
 #define XHCI_CC_SHORT_PACKET 13
+#define XHCI_CC_CTX_STATE_ERR 19
+
+#define XHCI_EP_STATE_DISABLED 0
+#define XHCI_EP_STATE_RUNNING 1
+#define XHCI_EP_STATE_HALTED 2
+#define XHCI_EP_STATE_STOPPED 3
+#define XHCI_EP_STATE_ERROR 4
 
 #define XHCI_EVT_CC(t) (((t).status >> 24) & 0xFFu)
 #define XHCI_EVT_SLOT(t) (((t).control >> 24) & 0xFFu)
@@ -175,6 +196,8 @@ typedef struct xhci_ring {
   uint8_t pad[2];
 } xhci_ring_t;
 
+void xhci_ring_reset(xhci_ring_t *ring);
+
 #define XHCI_MAX_PENDING_CMDS 32
 #define XHCI_MAX_PENDING_XFERS 64
 
@@ -237,12 +260,15 @@ int xhci_take_pending_xfer(uint8_t slot, uint8_t ep_id, uint64_t trb_phys,
 void xhci_event_thread(void);
 void xhci_hotplug_thread(void);
 
+void xhci_delay_ms(uint32_t ms);
+
 int xhci_probe(void);
 void xhci_dump(void);
 int xhci_cmd_noop(void);
 int xhci_cmd_enable_slot(uint8_t *slot_id);
 int xhci_cmd_disable_slot(uint8_t slot_id);
 uint32_t xhci_port_status(uint8_t port);
+int xhci_port_is_attached(uint8_t port);
 void xhci_port_dump_all(void);
 int xhci_port_reset(uint8_t port);
 int xhci_attach_all_devices(void);
@@ -263,25 +289,23 @@ typedef struct {
   uint32_t reserved[4];
 } __attribute__((packed)) xhci_ep_ctx_t;
 
-typedef struct {
-  xhci_icc_t icc;
-  xhci_slot_ctx_t slot;
-  xhci_ep_ctx_t ep[31];
-} __attribute__((packed)) xhci_input_ctx_t;
-
 static inline int xhci_ep_ctx_index(int ep_num, int dir_in) {
   if (ep_num == 0)
     return 2;
   return 2 * ep_num + 1 + (dir_in ? 1 : 0);
 }
 
-static inline xhci_ep_ctx_t *xhci_ictx_ep(xhci_input_ctx_t *p, int ep_num,
-                                          int dir_in) {
-  return &p->ep[xhci_ep_ctx_index(ep_num, dir_in) - 2];
+static inline xhci_icc_t *xhci_ictx_control(void *p) { return (xhci_icc_t *)p; }
+
+static inline xhci_slot_ctx_t *xhci_ictx_slot(void *p, uint8_t ctx_size) {
+  return (xhci_slot_ctx_t *)((uint8_t *)p + ctx_size);
 }
 
-static inline xhci_ep_ctx_t *xhci_ictx_ep0(xhci_input_ctx_t *p) {
-  return &p->ep[0];
+static inline xhci_ep_ctx_t *xhci_ictx_ep(void *p, uint8_t ctx_size, int ep_num,
+                                          int dir_in) {
+  return (xhci_ep_ctx_t *)((uint8_t *)p +
+                           (size_t)xhci_ep_ctx_index(ep_num, dir_in) *
+                               ctx_size);
 }
 
 static inline usb_speed_t xhci_speed_to_usb(uint32_t portsc) {
@@ -334,10 +358,10 @@ typedef struct xhci_dev_priv {
   uint8_t root_hub_port;
   usb_speed_t speed;
   xhci_ring_t ep0_ring;
-  // One state per non-control DCI: 15 endpoint numbers x IN/OUT.
   xhci_ep_state_t eps[30];
   usb_dma_buf_t input_ctx;
   usb_dma_buf_t out_ctx;
+  volatile int ctrl_busy; /* serializa transferencias de control por device */
 } xhci_dev_priv_t;
 
 static inline uint32_t usb_speed_to_xhci_slot_code(usb_speed_t s) {
@@ -396,6 +420,35 @@ int xhci_hcd_bulk_xfer_phys(usb_device_t *dev, usb_endpoint_t *ep,
                             int timeout_ms);
 
 int xhci_wait_transfer(uint8_t slot, uint8_t ep_id, uint64_t last_trb_phys,
-                       uint32_t timeout_ms, uint32_t *out_residual_len);
+                       uint32_t timeout_ms, uint32_t *out_residual_len,
+                       xhci_trb_t *out_event);
+
+int xhci_cmd_reset_endpoint(uint8_t slot, uint32_t dci);
+int xhci_cmd_stop_endpoint(uint8_t slot, uint32_t dci);
+int xhci_cmd_set_tr_dequeue(uint8_t slot, uint32_t dci, uint64_t deq_ptr,
+                            int dcs);
+
+/* TD de bulk/interrupt: cadena de Normal TRB partida en límites de 64 KiB
+ * (un buffer de TRB no puede cruzar 64 KiB; Intel/AMD lo exigen). */
+#define XHCI_TD_MAX_TRBS 32
+#define XHCI_TD_CHUNK (1u << 20)
+typedef struct {
+  uint64_t phys[XHCI_TD_MAX_TRBS];
+  uint32_t len[XHCI_TD_MAX_TRBS];
+  int n;
+  uint32_t total;
+} xhci_td_t;
+
+int xhci_td_enqueue(xhci_ep_state_t *st, uint16_t mps, uint64_t phys,
+                    uint32_t len, int isp_all, xhci_td_t *td);
+int xhci_td_xfer(xhci_dev_priv_t *p, xhci_ep_state_t *st, uint32_t dci,
+                 uint16_t mps, uint16_t stream_id, uint64_t phys, uint32_t len,
+                 int timeout_ms, uint32_t *out_actual);
+void xhci_recover_ep0(xhci_dev_priv_t *p);
+void xhci_recover_endpoint(xhci_dev_priv_t *p, uint32_t dci, xhci_ring_t *ring);
+void xhci_flush_pending_xfers(uint8_t slot, uint8_t ep_id);
+
+// [FASE 2.1b] Bus-managed driver.
+extern struct driver xhci_driver;
 
 #endif

@@ -413,3 +413,19 @@ void smp_boot_aps(void) {
              smp_boot_params->aps_started);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Total de CPUs online (BSP + APs que respondieron).
+//
+// No usamos acpi->cpu_count porque cuenta CPUs *enumeradas*, incluidas
+// las que están disabled en el MADT. aps_ready solo cuenta las que
+// efectivamente llegaron a ap_entry() y se publicaron en el scheduler.
+// ---------------------------------------------------------------------------
+int smp_online_cpus(void) {
+  int n = smp_aps_ready() + 1; // +1 por el BSP
+  if (n < 1)
+    n = 1;
+  if (n > MAX_CPUS)
+    n = MAX_CPUS;
+  return n;
+}

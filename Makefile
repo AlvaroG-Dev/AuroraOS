@@ -110,7 +110,7 @@ python-stdlib:
 # INITRD
 # ===========================================================================
 
-initrd.tar: sysroot user elf_malformed python-stdlib
+initrd.tar: sysroot user elf_malformed python-stdlib hello_kur hello2_kur selftest_kur aur_selftest e1000e_aur
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
@@ -1010,6 +1010,99 @@ tap-status:
 	@echo "=== últimas líneas del log dnsmasq ==="
 	@sudo tail -20 $(TAP_DNSMASQ_LOG) 2>/dev/null || echo "  (sin log)"
 
+
+HOST_CC    ?= gcc
+KUR_CC     ?= x86_64-elf-gcc
+KUR_CFLAGS  = -ffreestanding -O2 -mcmodel=kernel -mno-red-zone \
+              -fno-stack-protector -fno-pic -fno-pie -fno-common \
+              -fno-asynchronous-unwind-tables -I.
+
+# kurbuild: host gcc, incluye sha256.c como TU aparte.
+tools/kurbuild: tools/kurbuild.c kernel/sha256.c kernel/sha256.h
+	$(HOST_CC) -O2 -Wall -Wextra -iquote kernel -o $@ tools/kurbuild.c kernel/sha256.c
+
+# hello.kur (con hash y exports).
+tools/hello_kur.o: tools/hello_kur.c kernel/kur.h
+	$(KUR_CC) $(KUR_CFLAGS) -c $< -o $@
+
+tools/hello_kur.kur: tools/hello_kur.o tools/kurbuild
+	./tools/kurbuild -H $< $@
+
+# hello2.kur (importa hello_add).
+tools/hello2_kur.o: tools/hello2_kur.c kernel/kur.h
+	$(KUR_CC) $(KUR_CFLAGS) -c $< -o $@
+
+tools/hello2_kur.kur: tools/hello2_kur.o tools/kurbuild
+	./tools/kurbuild -H $< $@
+
+hello_kur: tools/hello_kur.kur
+	@mkdir -p sysroot/lib/modules
+	@cp -f tools/hello_kur.kur sysroot/lib/modules/hello.kur
+
+hello2_kur: tools/hello2_kur.kur
+	@mkdir -p sysroot/lib/modules
+	@cp -f tools/hello2_kur.kur sysroot/lib/modules/hello2.kur
+
+# ===========================================================================
+# [TEST] selftest.kur + aur_selftest.aur
+# ===========================================================================
+
+# --- .kur ----------------------------------------------------------------
+tools/selftest_kur.o: tools/selftest_kur.c kernel/kur.h
+	$(KUR_CC) $(KUR_CFLAGS) -c $< -o $@
+
+tools/selftest.kur: tools/selftest_kur.o tools/kurbuild
+	./tools/kurbuild -H $< $@
+
+selftest_kur: tools/selftest.kur
+	@mkdir -p sysroot/lib/modules
+	@cp -f tools/selftest.kur sysroot/lib/modules/selftest.kur
+	@echo "[selftest_kur] instalado en sysroot/lib/modules/selftest.kur"
+
+# --- .aur ----------------------------------------------------------------
+# gcc del host. Sin -static: el kernel resuelve el INTERP (ld-linux.so.2)
+# vía vfs_lookup en process.c y el loader lo mapea en AT_BASE. Un PIE
+# dinámico es, además, un test real del Linux-compat layer (relocaciones
+# + interp + TLS), que es lo que va a usar cualquier driver real (.aur).
+AUR_CC ?= gcc
+
+tools/aur_selftest.elf: tools/aur_selftest.c
+	$(AUR_CC) -O2 -fno-stack-protector -o $@ $<
+
+tools/aur_selftest.aur: tools/aur_selftest.elf tools/aurbuild
+	./tools/aurbuild --name=aur_selftest --caps=0x7 $< $@
+
+aur_selftest: tools/aur_selftest.aur
+	@mkdir -p sysroot/usr/bin
+	@cp -f tools/aur_selftest.aur sysroot/usr/bin/aur_selftest
+	@chmod +x sysroot/usr/bin/aur_selftest
+	@echo "[aur_selftest] instalado en sysroot/usr/bin/aur_selftest"
+
+tools/e1000e_aur.elf: tools/e1000e_aur.c
+	$(AUR_CC) -O2 -fno-stack-protector -o $@ $<
+
+tools/e1000e_aur.aur: tools/e1000e_aur.elf tools/aurbuild
+	./tools/aurbuild --name=e1000e --caps=0x7 --pci-device=8086:10d3 $< $@
+
+e1000e_aur: tools/e1000e_aur.aur
+	@mkdir -p sysroot/usr/lib/aur
+	@cp -f tools/e1000e_aur.aur sysroot/usr/lib/aur/e1000e.aur
+	@chmod +x sysroot/usr/lib/aur/e1000e.aur   # <-- ESTO FALTABA
+	@echo "[e1000e_aur] instalado en sysroot/usr/lib/aur/e1000e.aur"
+
+.PHONY: selftest_kur aur_selftest e1000e_aur
+
+# ===========================================================================
+# [FASE 4.1] aurbuild: empaqueta un ELF userland como .aur
+# ===========================================================================
+tools/aurbuild: tools/aurbuild.c
+	$(HOST_CC) -O2 -Wall -Wextra -o $@ $<
+
+.PHONY: aurbuild
+aurbuild: tools/aurbuild
+
+.PHONY: hello_kur hello2_kur
+
 # ===========================================================================
 # Clean
 # ===========================================================================
@@ -1022,4 +1115,5 @@ clean:
 	rm -rf sysroot kernel/initrd.tar esp
 	rm -rf build/efi.img build/iso_root build/mbr_part.bin
 	rm -f aurora.iso
-	rm -f serial.log debug.log qemu_debug.log
+	rm -f serial.log debug.log qemu_debug.log 
+	rm -f tools/aurbuild

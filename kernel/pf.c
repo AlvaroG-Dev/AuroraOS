@@ -228,6 +228,11 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
 // ---------------------------------------------------------------------------
 static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
                           uint64_t err_code) {
+  // [FASE 4.3] VMA_MMIO: las páginas ya están mapeadas por ops->mmap.
+  // Un #PF aquí significa acceso fuera del rango o munmap del usuario.
+  if (vma->type == VMA_MMIO)
+    return 0;
+
   int is_write = (err_code & 0x02) != 0;
   if (is_write && !(vma->flags & PTE_WRITABLE))
     return 0;
@@ -236,15 +241,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   uint32_t lo, hi;
   uint64_t freq = klog_get_tsc_freq();
 
-  // -------------------------------------------------------------------
-  // [PF-SLOW] Fase 1: pmm_alloc_page vs memset, medidos por separado.
-  //
-  // Sustituye a alloc_user_page_zeroed() para saber donde se va el
-  // tiempo. En el log previo salia alloc=609 us, read=1 us, map=0 us:
-  // todo el coste estaba dentro de alloc_user_page_zeroed(), pero esa
-  // funcion hace dos cosas (pmm_alloc_page + memset). Aqui las
-  // separamos con rdtsc entre medias.
-  // -------------------------------------------------------------------
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   uint64_t t0 = ((uint64_t)hi << 32) | lo;
 
@@ -260,9 +256,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   uint64_t t2 = ((uint64_t)hi << 32) | lo;
 
-  // -------------------------------------------------------------------
-  // [PF-SLOW] Fase 2: read del fichero (VMA_FILE).
-  // -------------------------------------------------------------------
   if (vma->type == VMA_FILE && vma->file_fd) {
     file_descriptor_t *f = vma->file_fd;
     if (!f->node || !f->node->ops || !f->node->ops->read) {
@@ -281,9 +274,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   uint64_t t3 = ((uint64_t)hi << 32) | lo;
 
-  // -------------------------------------------------------------------
-  // [PF-SLOW] Fase 3: map.
-  // -------------------------------------------------------------------
   uint64_t map_flags = vma->flags | PTE_PRESENT;
   if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), page, phys,
                          map_flags) != 0) {
@@ -294,9 +284,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   uint64_t t4 = ((uint64_t)hi << 32) | lo;
 
-  // -------------------------------------------------------------------
-  // [PF-SLOW] Reporte.
-  // -------------------------------------------------------------------
   if (freq) {
     uint64_t us_pmm = (t1 - t0) * 1000000ULL / freq;
     uint64_t us_memset = (t2 - t1) * 1000000ULL / freq;
@@ -304,9 +291,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     uint64_t us_map = (t4 - t3) * 1000000ULL / freq;
     uint64_t us_total = us_pmm + us_memset + us_read + us_map;
 
-    // Umbral alto (5 ms): solo loguea si vuelve a aparecer un problema
-    // grave de latencia. Bajo KVM con EPT, los faults ya se absorben
-    // en el pre-touch de map_phys_window() al boot.
     if (us_total > 5000) {
       LOG_WARN("[PF-SLOW] pid=%u cr2=%p type=%u total=%lu us "
                "(pmm=%lu memset=%lu read=%lu map=%lu)",
@@ -315,7 +299,6 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
                (unsigned long)us_read, (unsigned long)us_map);
     }
   }
-
   return 1;
 }
 
@@ -574,12 +557,6 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
   if (start >= USER_LIMIT || end > USER_LIMIT)
     return -EINVAL;
 
-  // [DIAG] Cronómetro.
-  uint32_t _lo, _hi;
-  __asm__ volatile("rdtsc" : "=a"(_lo), "=d"(_hi));
-  uint64_t _t0 = ((uint64_t)_hi << 32) | _lo;
-
-  // Preasignar los VMAs "right" que puedan hacer falta para splits.
   vma_t *new_vmas = NULL;
   vma_t **new_vmas_tail = &new_vmas;
   for (vma_t *v = proc->vma_list; v; v = v->next) {
@@ -602,7 +579,6 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       right->type = v->type;
       right->pad = 0;
       right->next = NULL;
-      // [2.4] Hereda file_fd + file_node con refs propias.
       vma_inherit_backing(right, v, end - v->start);
       *new_vmas_tail = right;
       new_vmas_tail = &right->next;
@@ -634,7 +610,9 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       uint64_t phys = paging_get_phys_in(pml4, p);
       if (phys) {
         paging_unmap_page_in(pml4, p);
-        pmm_free_page(phys);
+        // [FASE 4.3] No liberar física de VMA_MMIO (BAR PCI)
+        if (v->type != VMA_MMIO)
+          pmm_free_page(phys);
       }
     }
 
@@ -674,23 +652,6 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     kfree(new_vmas);
     new_vmas = next;
   }
-  // [DIAG] Reportar si vma_unmap_range tardó >5 ms.
-  {
-    uint32_t _lo2, _hi2;
-    __asm__ volatile("rdtsc" : "=a"(_lo2), "=d"(_hi2));
-    uint64_t _t1 = ((uint64_t)_hi2 << 32) | _lo2;
-    uint64_t _freq = klog_get_tsc_freq();
-    if (_freq) {
-      uint64_t _us = (_t1 - _t0) * 1000000ULL / _freq;
-      if (_us > 5000) {
-        LOG_WARN("[UNMAP-SLOW] pid=%u [%p,%p) %lu paginas en %lu us", proc->pid,
-                 (void *)start, (void *)end,
-                 (unsigned long)((end - start) / PAGE_SIZE),
-                 (unsigned long)_us);
-      }
-    }
-  }
-
   return touched;
 }
 
@@ -927,8 +888,6 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
 
   if (!is_anon && !is_file)
     return -EINVAL;
-  if (is_file && (flags & MMAP_MAP_SHARED))
-    return -ENODEV;
   if (length > UINT64_MAX - 0xFFFULL)
     return -EINVAL;
   uint64_t len = (length + 0xFFFULL) & ~0xFFFULL;
@@ -1005,6 +964,23 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     file_descriptor_t *f = proc->fds[fd];
     if (!f->node || !(f->node->flags & VFS_FILE))
       return -EINVAL;
+
+    if (f->node->ops && f->node->ops->mmap) {
+      vma_t *v = vma_create(proc, base, base + len, pte_flags, VMA_MMIO);
+      if (!v)
+        return -ENOMEM;
+
+      int rc = f->node->ops->mmap(f->node, proc, base, len,
+                                   prot, flags, offset);
+      if (rc != 0) {
+        vma_unmap_range(proc, base, base + len);
+        return rc;
+      }
+      return (int64_t)base;
+    }
+
+    if (flags & MMAP_MAP_SHARED)
+      return -ENODEV;
     if (!f->node->ops || !f->node->ops->read)
       return -EINVAL;
     if (offset & 0xFFFULL)

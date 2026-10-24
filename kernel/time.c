@@ -33,6 +33,7 @@ void pit_init(void) { pit_init_impl(); }
 // Tick común. Lo llama el handler de IRQ (PIT o LAPIC timer).
 // ---------------------------------------------------------------------------
 extern void compositor_notify_clock_tick(void);
+extern void compositor_frame_tick(void);
 extern void sched_wake_expired(void);
 extern void ahci_poll_ports(void);
 extern void arp_timer_tick(void);
@@ -74,6 +75,7 @@ void time_tick(void) {
   if (cpu == 0) {
     tick_count++;
     vdso_update_clock();
+    compositor_frame_tick(); // ~62 fps mientras haya animaciones
     if (tick_count % KERNEL_HZ == 0) {
       compositor_notify_clock_tick();
     }

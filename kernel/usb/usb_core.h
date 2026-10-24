@@ -2,6 +2,7 @@
 #ifndef KERNEL_USB_CORE_H
 #define KERNEL_USB_CORE_H
 
+#include "../bus.h"      // [FASE 2.1c] struct bus_type, struct device
 #include <stddef.h>
 #include <stdint.h>
 
@@ -37,7 +38,7 @@ typedef enum {
   USB_SPEED_FULL = 2,
   USB_SPEED_HIGH = 3,
   USB_SPEED_SUPER = 4,
-  USB_SPEED_SUPER_PLUS = 5, // <-- NUEVO (USB 3.1/3.2, tratado como SUPER)
+  USB_SPEED_SUPER_PLUS = 5,
 } usb_speed_t;
 
 // ===========================================================================
@@ -45,41 +46,38 @@ typedef enum {
 // ===========================================================================
 typedef struct usb_device usb_device_t;
 typedef struct usb_hcd usb_hcd_t;
-// Forward declaration del URB asíncrono. La definición completa está
-// al final del fichero; aquí solo necesitamos el tag para poder
-// declarar el puntero de función en usb_hcd_t.
 typedef struct usb_bulk_urb usb_bulk_urb_t;
 
 typedef struct usb_endpoint {
-  uint8_t addr;        // bit 7: dir (0=OUT, 1=IN), bits 3:0 número
-  uint8_t type;        // USB_EP_*
-  uint16_t max_packet; // wMaxPacketSize & 0x7FF
-  uint8_t interval;    // bInterval
-  uint16_t stream_id;  // Stream ID xHCI actual (0 = sin streams)
-  void *hc_ep;         // HCD-privado (contexto de endpoint xHCI)
+  uint8_t addr;
+  uint8_t type;
+  uint16_t max_packet;
+  uint8_t interval;
+  uint16_t stream_id;
+  void *hc_ep;
 } usb_endpoint_t;
 
 typedef struct usb_interface {
-  uint8_t number;      // bInterfaceNumber
-  uint8_t alt_setting; // bAlternateSetting
-  uint8_t class;       // bInterfaceClass
-  uint8_t subclass;    // bInterfaceSubClass
-  uint8_t protocol;    // bInterfaceProtocol
+  uint8_t number;
+  uint8_t alt_setting;
+  uint8_t class;
+  uint8_t subclass;
+  uint8_t protocol;
   usb_endpoint_t *endpoints;
   int num_endpoints;
 } usb_interface_t;
 
 typedef struct usb_config {
-  uint8_t value;          // bConfigurationValue
-  uint8_t num_interfaces; // bNumInterfaces
-  uint8_t attributes;     // bmAttributes
-  uint8_t max_power;      // bMaxPower (unidades de 2 mA)
+  uint8_t value;
+  uint8_t num_interfaces;
+  uint8_t attributes;
+  uint8_t max_power;
   usb_interface_t *interfaces;
-  int num_interface_structs; // incluye alt settings
+  int num_interface_structs;
 } usb_config_t;
 
 struct usb_device {
-  uint8_t addr; // 1..127
+  uint8_t addr;
   usb_speed_t speed;
   uint16_t vendor_id;
   uint16_t product_id;
@@ -89,10 +87,8 @@ struct usb_device {
   uint8_t max_packet_size_ep0;
   uint8_t num_configurations;
 
-  // Índices de string (0 = sin string).
   uint8_t i_manufacturer, i_product, i_serial;
 
-  // Strings ya decodificadas.
   char manufacturer[64];
   char product[64];
   char serial[64];
@@ -101,16 +97,18 @@ struct usb_device {
   uint8_t port_on_parent;
 
   usb_config_t *configs[8];
-  uint8_t active_config; // bConfigurationValue activa, 0 = sin configurar
+  uint8_t active_config;
 
-  usb_hcd_t *hcd; // back-pointer al controlador que lo gestiona
-  void *hc_priv;  // datos privados del HCD (slot_id de xHCI, etc.)
+  usb_hcd_t *hcd;
+  void *hc_priv;
+
+  // [FASE 2.1c] Nodo del bus USB asociado (NULL si no se registró en bus).
+  // Lo pone usb_device_register() y lo limpia usb_device_unregister().
+  struct device *dev_node;
 };
 
 // ===========================================================================
 // Interfaz HCD (Host Controller Driver).
-//
-// La implementa xHCI (y en el futuro EHCI/OHCI/UHCI).
 // ===========================================================================
 struct usb_hcd {
   const char *name;
@@ -127,10 +125,6 @@ struct usb_hcd {
                     usb_device_t **out_dev);
   int (*set_hub_info)(usb_device_t *dev, uint8_t num_ports);
 
-  // Async bulk submit. Encola un único TRB con IOC y retorna
-  // inmediatamente. El callback se invoca desde el event thread del HCD
-  // cuando el Transfer Event llega, con `actual_len` ya relleno y
-  // `status` = 0 (OK) o -EIO.
   int (*bulk_submit)(usb_device_t *dev, usb_endpoint_t *ep,
                      struct usb_bulk_urb *urb);
 
@@ -147,33 +141,18 @@ int usb_control_transfer(usb_device_t *dev, uint8_t request_type,
                          void *data, uint16_t len, int timeout_ms);
 
 // ===========================================================================
-// Parsers puros (sin I/O). El llamante pasa el buffer crudo leído por
-// control transfer.
+// Parsers puros (sin I/O).
 // ===========================================================================
-
-// Rellena `dev_out` con los campos del device descriptor.
-// Devuelve 0 si OK, -EINVAL si el descriptor está malformado.
 int usb_parse_device_descriptor(const uint8_t *raw, usb_device_t *dev_out);
-
-// Parsea un blob de configuration (config + interface(s) + endpoint(s)).
-// Devuelve un usb_config_t* heap-allocated (liberar con usb_config_free),
-// o NULL si el blob está malformado / sin memoria.
 usb_config_t *usb_parse_config_descriptor(const uint8_t *raw, int raw_len);
-
 void usb_config_free(usb_config_t *cfg);
 
 // ===========================================================================
-// Helpers de control transfer (usan dev->hcd->control_xfer).
+// Helpers de control transfer.
 // ===========================================================================
-
 int usb_get_descriptor(usb_device_t *dev, uint8_t type, uint8_t index,
                        uint16_t langid, void *buf, uint16_t len);
-
 int usb_set_configuration(usb_device_t *dev, uint8_t config_value);
-
-// Lee un string descriptor y lo decodifica a ASCII (reemplaza no-ASCII
-// por '?'). `langid` típico es 0x0409 (inglés US). Devuelve la longitud
-// copiada (sin NUL) o negativo.
 int usb_get_string_descriptor(usb_device_t *dev, uint8_t index, uint16_t langid,
                               char *out, size_t outlen);
 
@@ -183,16 +162,8 @@ int usb_get_string_descriptor(usb_device_t *dev, uint8_t index, uint16_t langid,
 usb_device_t *usb_device_alloc(void);
 void usb_device_free(usb_device_t *dev);
 
-// Lee device + config descriptor, setea configuración y strings.
-// El HCD debe haber rellenado dev->speed, dev->hcd, dev->hc_priv y
-// dev->max_packet_size_ep0 antes de llamar.
 int usb_enumerate(usb_device_t *dev);
-
-// Self-test de los parsers. Devuelve 0 si todo pasa, >0 = fallos.
-// Pensado para engancharse al run_all_tests().
 int usb_core_self_test(void);
-
-// Calcula el route string xHCI de un device (walk de parent_hub).
 uint32_t usb_device_route(const usb_device_t *dev);
 
 struct usb_bulk_urb {
@@ -203,16 +174,70 @@ struct usb_bulk_urb {
   int is_in;
   int status;
   int actual_len;
-  uint16_t stream_id; // tag UAS cuando el endpoint usa streams
+  uint16_t stream_id;
   void (*complete)(struct usb_bulk_urb *urb);
   void *context;
   void *hc_priv;
-  // Opcional. Si != NULL, el HCD usa este buffer DMA directamente en vez
-  // de allocar uno propio y hacer memcpy. El caller (uas_execute) pasa
-  // aquí su u->status_buf para que el HC escriba los 12 bytes del
-  // Status IU en memoria ya alocada. Cuando el transfer completa, el
-  // HCD NO libera este buffer (el caller es dueño).
   struct usb_dma_buf *dma_buf;
 };
 
+// ===========================================================================
+// [FASE 2.1c] Bus USB genérico.
+//
+// usb_bus ata los drivers USB al framework genérico de bus.c, igual que
+// pci_bus. La única diferencia con PCI: los IDs se comparan contra el
+// device descriptor (vendor/product/clase) Y, si match_flags incluye
+// los bits INT_*, contra alguna interface del device (class/subclass/
+// protocol por interface).
+//
+// Uso:
+//   static const usb_device_id_t usb_hid_id_table[] = {
+//     { .match_flags = USB_DEVICE_ID_MATCH_INT_CLASS,
+//       .b_interface_class = 0x03 },
+//     {0}
+//   };
+//   struct driver usb_hid_driver = {
+//     .name     = "usbhid",
+//     .bus      = &usb_bus,
+//     .id_table = usb_hid_id_table,
+//     .probe    = hid_probe_generic,
+//   };
+//   driver_register(&usb_hid_driver);
+// ===========================================================================
+
+#define USB_DEVICE_ID_MATCH_VENDOR       0x0001
+#define USB_DEVICE_ID_MATCH_PRODUCT      0x0002
+#define USB_DEVICE_ID_MATCH_DEV_CLASS    0x0004
+#define USB_DEVICE_ID_MATCH_DEV_SUBCLASS 0x0008
+#define USB_DEVICE_ID_MATCH_DEV_PROTOCOL 0x0010
+#define USB_DEVICE_ID_MATCH_INT_CLASS    0x0020
+#define USB_DEVICE_ID_MATCH_INT_SUBCLASS 0x0040
+#define USB_DEVICE_ID_MATCH_INT_PROTOCOL 0x0080
+
+typedef struct {
+  uint16_t match_flags;  // combinación de USB_DEVICE_ID_MATCH_*
+  uint16_t id_vendor;
+  uint16_t id_product;
+  uint8_t  b_device_class;
+  uint8_t  b_device_subclass;
+  uint8_t  b_device_protocol;
+  uint8_t  b_interface_class;
+  uint8_t  b_interface_subclass;
+  uint8_t  b_interface_protocol;
+} usb_device_id_t;
+
+extern struct bus_type usb_bus;
+
+// Registra el device en el bus USB. Si algún driver ya registrado matchea,
+// llama a su probe. Devuelve 0 si OK, -errno si no hay slot libre.
+int usb_device_register(usb_device_t *udev);
+void usb_device_unregister(usb_device_t *udev);
+
+// [FASE 2.1c] Inicializa el bus USB (bus_register + driver_register de
+// usb_hid / usb_storage / usb_hub). Idempotente.
+//
+// NO confundir con usb_init() de usb.h, que inicializa el subsistema
+// USB core (DMA pool, URB self-tests). Aquí solo registramos el bus y
+// sus drivers en bus.c.
+int usb_bus_init(void);
 #endif

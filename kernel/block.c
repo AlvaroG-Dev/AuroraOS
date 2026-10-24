@@ -1,12 +1,9 @@
 // kernel/block.c
-//
-// Implementación del block layer. Ver block.h para el contrato.
-
 #include "block.h"
 #include "completion.h"
 #include "klog.h"
 #include "string.h"
-#include "uaccess.h" // EINVAL, ERANGE, EIO, EROFS, ENOENT
+#include "uaccess.h"
 
 // ---------------------------------------------------------------------------
 // Estado global
@@ -14,45 +11,14 @@
 static block_device_t *g_devices = NULL;
 static int g_device_count = 0;
 
-// Callback que se ejecuta cuando el driver termina el bio.
-// Marca la completion asociada.
 static void bdev_completion_cb(bio_t *bio) {
   completion_t *comp = (completion_t *)bio->end_io_data;
   if (comp)
     complete(comp);
 }
 
-// Helper común para bdev_read/bdev_write.
-// Devuelve 0 si OK, <0 si error. Asume validate_io ya hecho.
-// Helper común para bdev_read/bdev_write.
-// Devuelve 0 si OK, <0 si error. Asume validate_io ya hecho.
-static int bdev_submit_sync(bio_t *bio) {
-  completion_t comp;
-  completion_init(&comp);
-
-  bio->end_io = bdev_completion_cb;
-  bio->end_io_data = &comp;
-  bio->error = 0;
-
-  int rc = blk_submit(bio);
-
-  // Si el driver es síncrono, rc == 0 o <0 (nunca -EINPROGRESS) y
-  // bio_endio ya se llamó (o no hacía falta).
-  if (rc == -EINPROGRESS) {
-    wait_for_completion_uninterruptible(&comp);
-    bio->end_io = NULL;
-    bio->end_io_data = NULL;
-    return bio->error;
-  }
-
-  // Síncrono: el driver ya rellenó bio->error.
-  bio->end_io = NULL;
-  bio->end_io_data = NULL;
-  return (rc < 0) ? rc : bio->error;
-}
-
 // ---------------------------------------------------------------------------
-// Init
+// Init / registro / búsqueda
 // ---------------------------------------------------------------------------
 void blk_init(void) {
   g_devices = NULL;
@@ -60,9 +26,6 @@ void blk_init(void) {
   LOG_INFO("[BLK] Block layer inicializado");
 }
 
-// ---------------------------------------------------------------------------
-// Registro
-// ---------------------------------------------------------------------------
 static int validate_device(block_device_t *bdev) {
   if (!bdev)
     return -EINVAL;
@@ -73,8 +36,6 @@ static int validate_device(block_device_t *bdev) {
   if (bdev->num_sectors == 0)
     return -EINVAL;
   if (!bdev->ops || !bdev->ops->submit)
-    return -EINVAL;
-  if (!bdev->is_read_only && !bdev->ops->submit) // redundante, pero explícito
     return -EINVAL;
   return 0;
 }
@@ -102,8 +63,6 @@ int blk_register(block_device_t *bdev) {
     return -ENOMEM;
   }
 
-  // Insertar AL FINAL: blk_get_by_index(0) es el primer dispositivo
-  // registrado (orden de deteccion), y blk_dump lista en ese mismo orden.
   bdev->next = NULL;
   if (!g_devices) {
     g_devices = bdev;
@@ -120,14 +79,12 @@ int blk_register(block_device_t *bdev) {
            bdev->name, (unsigned long)bdev->num_sectors, bdev->sector_size,
            (unsigned long)size_mb, bdev->is_read_only ? " [RO]" : "",
            bdev->is_partition ? " [partición]" : "");
-
   return 0;
 }
 
 int blk_unregister(block_device_t *bdev) {
   if (!bdev)
     return -EINVAL;
-
   block_device_t **pp = &g_devices;
   while (*pp) {
     if (*pp == bdev) {
@@ -142,9 +99,6 @@ int blk_unregister(block_device_t *bdev) {
   return -ENOENT;
 }
 
-// ---------------------------------------------------------------------------
-// Búsqueda
-// ---------------------------------------------------------------------------
 block_device_t *blk_lookup(const char *name) {
   if (!name)
     return NULL;
@@ -195,19 +149,46 @@ void bio_endio(bio_t *bio, int error) {
 }
 
 // ---------------------------------------------------------------------------
-// Wrappers síncronos (bdev_*)
-//
-// En Fase 1, todos los drivers son síncronos: ops->submit devuelve cuando
-// el bio ha terminado. Así que no hace falta completion.
-//
-// En Fase 3 (DMA), estos wrappers cambiarán a usar completion:
-//   - inicializan una completion,
-//   - ponen bio->end_io = completion_callback,
-//   - llaman a blk_submit,
-//   - esperan con wait_for_completion.
-// La estructura del bio ya lo permite.
+// [FASE 1.4] Helpers async
 // ---------------------------------------------------------------------------
+int blk_submit_async(bio_t *bio, bio_end_io_fn cb, void *ctx) {
+  if (!bio)
+    return -EINVAL;
+  bio->end_io = cb;
+  bio->end_io_data = ctx;
+  bio->error = 0;
+  return blk_submit(bio);
+}
 
+int blk_submit_wait(bio_t *bio) {
+  if (!bio)
+    return -EINVAL;
+
+  completion_t comp;
+  completion_init(&comp);
+
+  bio->end_io = bdev_completion_cb;
+  bio->end_io_data = &comp;
+  bio->error = 0;
+
+  int rc = blk_submit(bio);
+
+  if (rc == -EINPROGRESS) {
+    wait_for_completion_uninterruptible(&comp);
+    bio->end_io = NULL;
+    bio->end_io_data = NULL;
+    return bio->error;
+  }
+
+  // Síncrono: el driver ya puso bio->error.
+  bio->end_io = NULL;
+  bio->end_io_data = NULL;
+  return (rc < 0) ? rc : bio->error;
+}
+
+// ---------------------------------------------------------------------------
+// Wrappers síncronos
+// ---------------------------------------------------------------------------
 static int validate_io(block_device_t *bdev, uint64_t lba, uint32_t count) {
   if (count == 0)
     return -EINVAL;
@@ -221,7 +202,6 @@ static int validate_io(block_device_t *bdev, uint64_t lba, uint32_t count) {
 int bdev_read(block_device_t *bdev, uint64_t lba, uint32_t count, void *buf) {
   if (!bdev || !buf)
     return -EINVAL;
-
   int rc = validate_io(bdev, lba, count);
   if (rc < 0)
     return rc;
@@ -237,9 +217,7 @@ int bdev_read(block_device_t *bdev, uint64_t lba, uint32_t count, void *buf) {
       .end_io_data = NULL,
       .next = NULL,
   };
-
-  rc = bdev_submit_sync(&bio);
-  return rc;
+  return blk_submit_wait(&bio);
 }
 
 int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
@@ -248,7 +226,6 @@ int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
     return -EINVAL;
   if (bdev->is_read_only)
     return -EROFS;
-
   int rc = validate_io(bdev, lba, count);
   if (rc < 0)
     return rc;
@@ -264,9 +241,7 @@ int bdev_write(block_device_t *bdev, uint64_t lba, uint32_t count,
       .end_io_data = NULL,
       .next = NULL,
   };
-
-  rc = bdev_submit_sync(&bio);
-  return rc;
+  return blk_submit_wait(&bio);
 }
 
 int bdev_flush(block_device_t *bdev) {
@@ -288,8 +263,7 @@ int bdev_flush(block_device_t *bdev) {
       .end_io_data = NULL,
       .next = NULL,
   };
-
-  return bdev_submit_sync(&bio);
+  return blk_submit_wait(&bio);
 }
 
 // ---------------------------------------------------------------------------
@@ -302,8 +276,7 @@ void blk_dump(void) {
              (unsigned long)p->num_sectors, p->sector_size,
              (unsigned long)bdev_size_mb(p), p->is_read_only ? " [RO]" : "",
              p->is_partition ? " [partición]" : "");
-    if (p->ops && p->ops->dump) {
+    if (p->ops && p->ops->dump)
       p->ops->dump(p);
-    }
   }
 }

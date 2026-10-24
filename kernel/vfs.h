@@ -60,6 +60,7 @@
 
 typedef struct vfs_node vfs_node_t;
 typedef struct vfs_fs_ops vfs_fs_ops_t;
+struct process;   // [FASE 4.3] forward-decl para vfs_ops.mmap
 
 // ---------------------------------------------------------------------------
 // [4.1] statfs: información del FS montado en un path.
@@ -170,6 +171,26 @@ typedef struct vfs_ops {
   // [FIX-PERF] Sincroniza los datos sucios de este nodo al medio.
   // Solo FS con caché en RAM lo implementan. NULL → no-op.
   int (*fsync)(vfs_node_t *node);
+
+  // [FASE 4.3] mmap de un nodo especial (resourceN de sysfs,
+  // /dev/mem, DMA buffers, etc.).
+  //
+  // sys_mmap() llama a este callback si el fd corresponde a un nodo
+  // con ops->mmap != NULL, ANTES de mapear. El VFS ya creó el VMA
+  // del proceso (tipo VMA_MMIO); este callback debe:
+  //   1. Chequear las capabilities del proceso (`proc->aur.caps`).
+  //      Para MMIO: `AUR_CAP_MMIO`. El callback decide qué cap pedir.
+  //   2. Chequear rangos (offset + length <= tamaño del recurso).
+  //   3. Mapear las PTEs con paging_map_page_in, marcándolas con
+  //      PTE_NOCACHE (MMIO no debe cachearse) y PTE_SPECIAL (para
+  //      que paging_free_user_space no las devuelva al PMM).
+  //   4. Devolver 0 si OK, -errno en error (sys_mmap hará rollback
+  //      del VMA con vma_unmap_range).
+  //
+  // Los nodos con ops->mmap NO necesitan ops->read.
+  int (*mmap)(vfs_node_t *node, struct process *proc, uint64_t vaddr,
+              uint64_t length, uint64_t prot, uint64_t flags,
+              uint64_t offset);
 } vfs_ops_t;
 
 struct vfs_node {

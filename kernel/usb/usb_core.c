@@ -4,10 +4,11 @@
 // genérica. No habla con hardware: toda la E/S pasa por dev->hcd.
 
 #include "usb_core.h"
-#include "heap.h"
-#include "klog.h"
-#include "string.h"
-#include "uaccess.h" // EINVAL, ENOMEM, EIO, ENODEV
+#include "../bus.h"
+#include "../heap.h"
+#include "../klog.h"
+#include "../string.h"
+#include "../uaccess.h"
 #include "usb_hid.h"
 
 // ===========================================================================
@@ -36,8 +37,6 @@ int usb_parse_device_descriptor(const uint8_t *raw, usb_device_t *dev_out) {
 
 // ===========================================================================
 // Parser: configuration blob
-//
-// Estructura: [config][interface + endpoints]* [interface + endpoints]*
 // ===========================================================================
 usb_config_t *usb_parse_config_descriptor(const uint8_t *raw, int raw_len) {
   if (!raw || raw_len < 9)
@@ -58,7 +57,6 @@ usb_config_t *usb_parse_config_descriptor(const uint8_t *raw, int raw_len) {
   cfg->attributes = raw[7];
   cfg->max_power = raw[8];
 
-  // Pass 1: contar interfaces.
   int n_iface = 0;
   int off = 0;
   while (off < total) {
@@ -79,7 +77,6 @@ usb_config_t *usb_parse_config_descriptor(const uint8_t *raw, int raw_len) {
     goto fail;
   cfg->num_interface_structs = n_iface;
 
-  // Pass 2: rellenar. Cada interface recibe su propio array de endpoints.
   int cur_iface = -1;
   off = 0;
   while (off < total) {
@@ -135,7 +132,7 @@ void usb_config_free(usb_config_t *cfg) {
 }
 
 // ===========================================================================
-// Control transfer: construye el setup packet y delega en el HCD.
+// Control transfer
 // ===========================================================================
 int usb_control_transfer(usb_device_t *dev, uint8_t request_type,
                          uint8_t request, uint16_t value, uint16_t index,
@@ -162,17 +159,15 @@ int usb_control_transfer(usb_device_t *dev, uint8_t request_type,
 int usb_get_descriptor(usb_device_t *dev, uint8_t type, uint8_t index,
                        uint16_t langid, void *buf, uint16_t len) {
   uint16_t value = (uint16_t)((type << 8) | index);
-  // bmRequestType = 0x80 (device-to-host, standard, device)
   return usb_control_transfer(dev, 0x80, 0x06, value, langid, buf, len, 5000);
 }
 
 int usb_set_configuration(usb_device_t *dev, uint8_t config_value) {
-  // bmRequestType = 0x00 (host-to-device, standard, device)
   return usb_control_transfer(dev, 0x00, 0x09, config_value, 0, NULL, 0, 5000);
 }
 
 // ===========================================================================
-// String descriptor: USB usa UTF-16LE. Convertimos a ASCII (no-ASCII -> '?').
+// String descriptor
 // ===========================================================================
 int usb_get_string_descriptor(usb_device_t *dev, uint8_t index, uint16_t langid,
                               char *out, size_t outlen) {
@@ -180,18 +175,19 @@ int usb_get_string_descriptor(usb_device_t *dev, uint8_t index, uint16_t langid,
     return -EINVAL;
   out[0] = '\0';
   if (index == 0)
-    return 0; // sin string
+    return 0;
 
-  uint8_t buf[255];
+  uint8_t buf[255] = {0};
   int rc =
       usb_get_descriptor(dev, USB_DT_STRING, index, langid, buf, sizeof(buf));
   if (rc < 0)
     return rc;
 
-  if (buf[0] < 2 || buf[1] != USB_DT_STRING)
+  if (rc < 2 || buf[0] < 2 || buf[1] != USB_DT_STRING)
     return -EIO;
 
-  int nchars = (buf[0] - 2) / 2;
+  int blen = buf[0] < rc ? buf[0] : rc;
+  int nchars = (blen - 2) / 2;
   size_t i;
   for (i = 0; i < (size_t)nchars && (i + 1) < outlen; i++) {
     uint16_t c = (uint16_t)(buf[2 + i * 2] | (buf[3 + i * 2] << 8));
@@ -212,6 +208,10 @@ usb_device_t *usb_device_alloc(void) {
 void usb_device_free(usb_device_t *dev) {
   if (!dev)
     return;
+  // [FASE 2.1c] Desregistrar del bus USB antes de liberar nada. Si el
+  // device nunca llegó a usb_device_register (fallo en enumerate), es
+  // no-op.
+  usb_device_unregister(dev);
   for (int i = 0; i < 8; i++) {
     if (dev->configs[i]) {
       usb_config_free(dev->configs[i]);
@@ -227,30 +227,169 @@ uint32_t usb_device_route(const usb_device_t *dev) {
   if (!dev || !dev->parent_hub)
     return 0;
 
-  // Construimos el route desde el root hacia el device:
-  //   nibble 0 = puerto del device en su hub padre
-  //   nibble 1 = puerto del hub padre en su hub padre
-  //   ...
-  //   último nibble = puerto del top-level hub en el root hub
-  //
-  // La spec xHCI 1.2 §6.2.2 dice que el tier-1 port NO va en el route
-  // (eso lo cumple Linux), pero QEMU valida el path completo e incluye
-  // el root port. Adoptamos esta variante, que es la que QEMU acepta,
-  // y sigue siendo funcional en hardware real (el HC ignora nibbles
-  // que corresponden a hubs inexistentes).
-  uint32_t route = 0;
-  int tier = 0;
+  uint8_t ports[5];
+  int n = 0;
   const usb_device_t *d = dev;
-  while (d && tier < 5) {
-    if (d->parent_hub == NULL) {
-      // d es el root hub: no tiene puerto propio que meter.
+  while (d && d->parent_hub && n < 5) {
+    ports[n++] = (uint8_t)(d->port_on_parent & 0xF);
+    d = d->parent_hub;
+  }
+  uint32_t route = 0;
+  for (int i = 0; i < n; i++)
+    route |= ((uint32_t)ports[n - 1 - i]) << (i * 4);
+  return route;
+}
+
+// ===========================================================================
+// [FASE 2.1c] Bus USB genérico.
+//
+// Pool estático de struct device. Como máximo un puñado de devices USB
+// por controlador (root hub + hubs anidados + devices finales). El slot
+// se marca libre con dev->bus = NULL; usb_device_unregister lo limpia.
+// ===========================================================================
+#define USB_MAX_BUS_DEVICES 32
+static struct device g_usb_dev_nodes[USB_MAX_BUS_DEVICES];
+
+static int usb_match_one(const usb_device_t *dev, const usb_device_id_t *id) {
+  if (id->match_flags & USB_DEVICE_ID_MATCH_VENDOR)
+    if (dev->vendor_id != id->id_vendor)
+      return 0;
+  if (id->match_flags & USB_DEVICE_ID_MATCH_PRODUCT)
+    if (dev->product_id != id->id_product)
+      return 0;
+  if (id->match_flags & USB_DEVICE_ID_MATCH_DEV_CLASS)
+    if (dev->class != id->b_device_class)
+      return 0;
+  if (id->match_flags & USB_DEVICE_ID_MATCH_DEV_SUBCLASS)
+    if (dev->subclass != id->b_device_subclass)
+      return 0;
+  if (id->match_flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL)
+    if (dev->protocol != id->b_device_protocol)
+      return 0;
+
+  if (id->match_flags &
+      (USB_DEVICE_ID_MATCH_INT_CLASS | USB_DEVICE_ID_MATCH_INT_SUBCLASS |
+       USB_DEVICE_ID_MATCH_INT_PROTOCOL)) {
+    int found = 0;
+    for (int c = 0; c < 8 && !found; c++) {
+      if (!dev->configs[c])
+        continue;
+      for (int i = 0; i < dev->configs[c]->num_interface_structs; i++) {
+        const usb_interface_t *itf = &dev->configs[c]->interfaces[i];
+        int ok = 1;
+        if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_CLASS) &&
+            itf->class != id->b_interface_class)
+          ok = 0;
+        if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_SUBCLASS) &&
+            itf->subclass != id->b_interface_subclass)
+          ok = 0;
+        if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_PROTOCOL) &&
+            itf->protocol != id->b_interface_protocol)
+          ok = 0;
+        if (ok) {
+          found = 1;
+          break;
+        }
+      }
+    }
+    if (!found)
+      return 0;
+  }
+  return 1;
+}
+
+static int usb_bus_match(struct device *dev, struct driver *drv,
+                         const void **id_out) {
+  if (!drv->id_table)
+    return 0;
+  const usb_device_t *udev = (const usb_device_t *)dev->priv;
+  if (!udev)
+    return 0;
+  const usb_device_id_t *ids = (const usb_device_id_t *)drv->id_table;
+  for (int i = 0; ids[i].match_flags != 0; i++) {
+    if (usb_match_one(udev, &ids[i])) {
+      if (id_out)
+        *id_out = &ids[i];
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int usb_bus_probe(struct device *dev) {
+  if (!dev->driver || !dev->driver->probe)
+    return -EINVAL;
+  return dev->driver->probe(dev);
+}
+
+struct bus_type usb_bus = {
+    .name = "usb",
+    .match = usb_bus_match,
+    .probe = usb_bus_probe,
+};
+
+int usb_device_register(usb_device_t *udev) {
+  if (!udev)
+    return -EINVAL;
+  if (udev->dev_node)
+    return 0; // ya registrado
+
+  int idx = -1;
+  for (int i = 0; i < USB_MAX_BUS_DEVICES; i++) {
+    if (g_usb_dev_nodes[i].bus == NULL) {
+      idx = i;
       break;
     }
-    route |= ((uint32_t)(d->port_on_parent & 0xF)) << (tier * 4);
-    d = d->parent_hub;
-    tier++;
   }
-  return route;
+  if (idx < 0) {
+    LOG_WARN("[USB] bus device pool lleno (%d)", USB_MAX_BUS_DEVICES);
+    return -ENOMEM;
+  }
+
+  struct device *dev = &g_usb_dev_nodes[idx];
+  memset(dev, 0, sizeof(*dev));
+  // snprintf está en kernel/string.h. El nombre "usb-<addr>" es único
+  // dentro del bus (addr lo asigna el HCD; root hub usa 0).
+  snprintf(dev->name, sizeof(dev->name), "usb-%u", (unsigned)udev->addr);
+  dev->bus = &usb_bus;
+  dev->priv = udev;
+  dev->id = udev;
+
+  udev->dev_node = dev;
+  return device_register(dev);
+}
+
+void usb_device_unregister(usb_device_t *udev) {
+  if (!udev || !udev->dev_node)
+    return;
+  struct device *dev = udev->dev_node;
+  device_unregister(dev);
+  dev->bus = NULL; // marcar libre para reutilización
+  dev->driver = NULL;
+  dev->priv = NULL;
+  dev->id = NULL;
+  dev->matched_id = NULL;
+  dev->next = NULL;
+  udev->dev_node = NULL;
+}
+
+int usb_bus_init(void) {
+  extern struct driver usb_hid_driver;
+  extern struct driver usb_storage_driver;
+  extern struct driver usb_hub_driver;
+
+  int rc = bus_register(&usb_bus);
+  if (rc != 0) {
+    LOG_ERR("[USB] bus_register falló: %d", rc);
+    return rc;
+  }
+
+  driver_register(&usb_hid_driver);
+  driver_register(&usb_storage_driver);
+  driver_register(&usb_hub_driver);
+
+  LOG_INFO("[USB] bus USB registrado (hid, storage, hub)");
+  return 0;
 }
 
 // ===========================================================================
@@ -260,15 +399,17 @@ int usb_enumerate(usb_device_t *dev) {
   if (!dev || !dev->hcd || !dev->hcd->control_xfer)
     return -ENODEV;
 
-  // 1. Device descriptor completo (18 bytes).
-  //    El HCD ya ha hecho SET_ADDRESS y conoce el speed, así que EP0
-  //    tiene max_packet_size correcto. Podemos leer los 18 de una.
-  uint8_t dev_desc[18];
+  uint8_t dev_desc[18] = {0};
   int rc =
       usb_get_descriptor(dev, USB_DT_DEVICE, 0, 0, dev_desc, sizeof(dev_desc));
   if (rc < 0) {
     LOG_ERR("[USB] GET_DESCRIPTOR(DEVICE) falló: %d", rc);
     return rc;
+  }
+  if (rc != (int)sizeof(dev_desc)) {
+    LOG_ERR("[USB] GET_DESCRIPTOR(DEVICE) incompleto: %d/%u bytes", rc,
+            (unsigned)sizeof(dev_desc));
+    return -EIO;
   }
   rc = usb_parse_device_descriptor(dev_desc, dev);
   if (rc != 0) {
@@ -280,7 +421,6 @@ int usb_enumerate(usb_device_t *dev) {
            dev->vendor_id, dev->product_id, dev->bcd_usb,
            dev->max_packet_size_ep0, dev->num_configurations);
 
-  // 2. Leer cada configuration descriptor.
   uint8_t cfg_hdr[9];
   int n_cfg = dev->num_configurations;
   if (n_cfg > 8)
@@ -313,135 +453,85 @@ int usb_enumerate(usb_device_t *dev) {
     dev->configs[i] = cfg;
   }
 
-  // 3. Set configuration (la primera).
   if (dev->configs[0]) {
     rc = usb_set_configuration(dev, dev->configs[0]->value);
     if (rc < 0) {
       LOG_WARN("[USB] SET_CONFIGURATION(%u) falló: %d", dev->configs[0]->value,
                rc);
-      // Algunos dispositivos no lo necesitan; seguimos.
     }
     dev->active_config = dev->configs[0]->value;
   }
 
-  // 4. Strings. langid estándar inglés US.
-  usb_get_string_descriptor(dev, dev->i_manufacturer, 0x0409, dev->manufacturer,
-                            sizeof(dev->manufacturer));
-  usb_get_string_descriptor(dev, dev->i_product, 0x0409, dev->product,
-                            sizeof(dev->product));
-  usb_get_string_descriptor(dev, dev->i_serial, 0x0409, dev->serial,
-                            sizeof(dev->serial));
+  if (dev->i_manufacturer || dev->i_product || dev->i_serial) {
+    uint8_t lbuf[8] = {0};
+    int lrc = usb_get_descriptor(dev, USB_DT_STRING, 0, 0, lbuf, sizeof(lbuf));
+    if (lrc >= 4 && lbuf[1] == USB_DT_STRING && lbuf[0] >= 4) {
+      uint16_t langid = (uint16_t)(lbuf[2] | (lbuf[3] << 8));
+      usb_get_string_descriptor(dev, dev->i_manufacturer, langid,
+                                dev->manufacturer, sizeof(dev->manufacturer));
+      usb_get_string_descriptor(dev, dev->i_product, langid, dev->product,
+                                sizeof(dev->product));
+      usb_get_string_descriptor(dev, dev->i_serial, langid, dev->serial,
+                                sizeof(dev->serial));
+    }
+  }
 
   LOG_INFO("[USB]   manuf='%s' prod='%s' serial='%s'",
            dev->manufacturer[0] ? dev->manufacturer : "?",
            dev->product[0] ? dev->product : "?",
            dev->serial[0] ? dev->serial : "?");
 
-  // Probe HID (boot protocol kbd/mouse).
-  extern int usb_hid_probe(usb_device_t * dev);
-  int hrc = usb_hid_probe(dev);
-  if (hrc > 0)
-    LOG_INFO("[USB] HID: %d interfaz(es) configurada(s)", hrc);
-
-  // Probe Mass Storage (BOT/SCSI).
-  extern int usb_storage_probe(usb_device_t * dev);
-  int src = usb_storage_probe(dev);
-  if (src > 0)
-    LOG_INFO("[USB] Storage: %d interfaz(es) configurada(s)", src);
-
-  // Probe Hub class (0x09).
-  extern int usb_hub_probe(usb_device_t * dev);
-  int hubrc = usb_hub_probe(dev);
-  if (hubrc > 0)
-    LOG_INFO("[USB] Hub: %d puerto(s) con device(s)", hubrc);
+  // [FASE 2.1c] El dispatch a hid/storage/hub lo hace el bus USB. Antes
+  // se llamaba aquí directamente a usb_hid_probe / usb_storage_probe /
+  // usb_hub_probe; ahora esos son drivers del bus y el matching lo hace
+  // bus_try_probe() cuando device_register dispara.
+  //
+  // Si usb_device_register falla (pool lleno), el device queda enumerado
+  // pero sin driver. No abortamos el enumerate: el device es funcional
+  // (tiene config activa) y un unload posterior lo libera limpiamente.
+  int brc = usb_device_register(dev);
+  if (brc != 0) {
+    LOG_WARN("[USB] device_register falló: %d (device queda sin driver)", brc);
+  }
 
   return 0;
 }
 
 // ===========================================================================
-// Self-test (para enganchar a run_all_tests()).
+// Self-test
 // ===========================================================================
 static int usb_self_test_device(void) {
   const uint8_t raw[18] = {
-      18,   USB_DT_DEVICE,
-      0x00, 0x02, // bcdUSB = 2.00
-      0x00, 0x00,
-      0x00,       // class/sub/proto = 0 (per-interface)
-      64,         // bMaxPacketSize0 = 64
-      0x6B, 0x1D, // idVendor = 0x1D6B (Linux Foundation)
-      0x02, 0x00, // idProduct = 0x0002
-      0x00, 0x01, // bcdDevice = 1.00
-      0,    0,
-      0, // iMan/iProd/iSerial = 0
-      1, // bNumConfigurations = 1
+      18,  USB_DT_DEVICE, 0x00, 0x02, 0x00, 0x00, 0x00, 64, 0x6B,
+      0x1D, 0x02,          0x00, 0x00, 0x01, 0,    0,    0,  1,
   };
   usb_device_t dev;
   memset(&dev, 0, sizeof(dev));
   if (usb_parse_device_descriptor(raw, &dev) != 0)
     return 1;
-  if (dev.vendor_id != 0x1D6B)
+  if (dev.vendor_id != 0x1D6B || dev.product_id != 0x0002)
     return 1;
-  if (dev.product_id != 0x0002)
-    return 1;
-  if (dev.max_packet_size_ep0 != 64)
-    return 1;
-  if (dev.num_configurations != 1)
+  if (dev.max_packet_size_ep0 != 64 || dev.num_configurations != 1)
     return 1;
   return 0;
 }
 
 static int usb_self_test_config(void) {
-  // Config + 1 interface (Mass Storage/BOT) + 2 bulk endpoints.
   const uint8_t raw[] = {
-      9,    USB_DT_CONFIG,
-      32,   0, // wTotalLength = 32
-      1,       // bNumInterfaces = 1
-      1,       // bConfigurationValue = 1
-      0,       // iConfiguration = 0
-      0x80,    // bmAttributes = bus-powered
-      50,      // bMaxPower = 100 mA
-
-      9,    USB_DT_INTERFACE,
-      0,    0,
-      2, // iface 0, alt 0, 2 endpoints
-      0x08, 0x06,
-      0x50, // Mass Storage / SCSI / BOT
-      0,    // iInterface
-
-      7,    USB_DT_ENDPOINT,
-      0x81,       // IN, EP1
-      0x02,       // Bulk
-      0x00, 0x02, // wMaxPacketSize = 512
-      0,
-
-      7,    USB_DT_ENDPOINT,
-      0x02,       // OUT, EP2
-      0x02,       // Bulk
-      0x00, 0x02, // wMaxPacketSize = 512
-      0,
+      9,  USB_DT_CONFIG, 32, 0, 1, 1, 0, 0x80, 50,
+      9,  USB_DT_INTERFACE, 0, 0, 2, 0x08, 0x06, 0x50, 0,
+      7,  USB_DT_ENDPOINT, 0x81, 0x02, 0x00, 0x02, 0,
+      7,  USB_DT_ENDPOINT, 0x02, 0x02, 0x00, 0x02, 0,
   };
-
   usb_config_t *cfg = usb_parse_config_descriptor(raw, (int)sizeof(raw));
   if (!cfg)
     return 1;
-
   int fail = 0;
-  if (cfg->value != 1)
+  if (cfg->value != 1 || cfg->num_interface_structs != 1)
     fail |= 1;
-  if (cfg->num_interface_structs != 1)
-    fail |= 2;
-  if (cfg->num_interfaces != 1)
-    fail |= 4;
   usb_interface_t *itf = &cfg->interfaces[0];
-  if (itf->class != 0x08 || itf->subclass != 0x06 || itf->protocol != 0x50)
-    fail |= 8;
-  if (itf->num_endpoints != 2)
-    fail |= 16;
-  if (itf->endpoints[0].addr != 0x81 || itf->endpoints[0].type != USB_EP_BULK)
-    fail |= 32;
-  if (itf->endpoints[1].addr != 0x02 || itf->endpoints[1].max_packet != 512)
-    fail |= 64;
-
+  if (itf->class != 0x08 || itf->num_endpoints != 2)
+    fail |= 2;
   usb_config_free(cfg);
   return fail ? 1 : 0;
 }

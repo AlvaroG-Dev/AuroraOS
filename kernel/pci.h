@@ -2,6 +2,7 @@
 #ifndef PCI_H
 #define PCI_H
 
+#include "bus.h"
 #include "driver.h"
 #include <stdint.h>
 
@@ -78,19 +79,16 @@
 #define PCI_SUBCLASS_NETWORK_OTHER 0x80
 
 // ===========================================================================
-// Prog IF (offset 0x09) para IDE.
+// Prog IF (offset 0x09) para IDE / SATA.
 // ===========================================================================
-// ProgIF para subclase IDE (0x01)
-#define PCI_PROGIF_IDE_COMPAT 0x00     // Compatibility mode (PIC)
-#define PCI_PROGIF_IDE_NATIVE 0x05     // Native mode (BARs)
-#define PCI_PROGIF_IDE_BUS_MASTER 0x80 // Bit 7: capaz de bus master
+#define PCI_PROGIF_IDE_COMPAT 0x00
+#define PCI_PROGIF_IDE_NATIVE 0x05
+#define PCI_PROGIF_IDE_BUS_MASTER 0x80
 
-// ProgIF para subclase SATA (0x06)
-#define PCI_PROGIF_SATA_AHCI 0x01 // <-- el que usa el ICH9 de Q35
+#define PCI_PROGIF_SATA_AHCI 0x01
 #define PCI_PROGIF_SATA_RAID 0x00
 #define PCI_PROGIF_SATA_NVME 0x01
 
-// Alias por compatibilidad con código antiguo (no usar en código nuevo)
 #define PCI_PROGIF_AHCI PCI_PROGIF_SATA_AHCI
 
 // ===========================================================================
@@ -144,20 +142,34 @@ typedef struct {
   uint8_t prog_if;
   uint8_t revision_id;
 
-  uint8_t header_type; // bits 0-6
+  uint8_t header_type;
   uint8_t multifunction;
   uint8_t irq_line;
   uint8_t irq_pin;
 
-  // BARs.
   uint32_t bar[6];
-  uint8_t bar_is_io[6]; // 1 si el BAR es I/O, 0 si es MMIO
-  uint8_t bar_is_64[6]; // 1 si es un BAR de 64 bits (ocupa 2 slots)
+  uint8_t bar_is_io[6];
+  uint8_t bar_is_64[6];
 
-  // Para bridges.
   uint8_t secondary_bus;
   uint8_t subordinate_bus;
 } pci_device_t;
+
+// ===========================================================================
+// Entrada de tabla de IDs PCI. vendor_id==0 actúa como terminador.
+// ===========================================================================
+#define PCI_ANY_ID 0xFFFFu
+
+typedef struct {
+  uint16_t vendor_id;
+  uint16_t device_id;
+  uint16_t subvendor;
+  uint16_t subdevice;
+  uint8_t class_id;
+  uint8_t subclass_id;
+  uint8_t class_mask;
+  uint8_t _pad;
+} pci_device_id_t;
 
 // ===========================================================================
 // API de configuración de bajo nivel.
@@ -179,40 +191,22 @@ void pci_write_config_byte(uint8_t bus, uint8_t slot, uint8_t func,
 // ===========================================================================
 // API de alto nivel.
 // ===========================================================================
-
-// Rellena `dev` con la info del dispositivo (bus, slot, func).
-// Devuelve 0 si OK, -1 si no existe.
 int pci_get_device(uint8_t bus, uint8_t slot, uint8_t func, pci_device_t *dev);
 
-// Busca el primer dispositivo que coincida con class_id y subclass_id.
-// Si subclass_id es 0xFF, cualquier subclase vale.
-// Devuelve 0 si lo encuentra, -1 si no.
 int pci_find_device(uint8_t class_id, uint8_t subclass_id, pci_device_t *dev);
 
-// Busca el siguiente dispositivo (para iterar).
-// `start_bus`, `start_slot`, `start_func` marcan el punto de inicio.
-// `found_bus`, `found_slot`, `found_func` devuelven el encontrado.
-// Devuelve 0 si OK, -1 si no hay más.
 int pci_find_next_device(uint8_t class_id, uint8_t subclass_id,
                          uint8_t *start_bus, uint8_t *start_slot,
                          uint8_t *start_func, pci_device_t *dev);
 
-// Devuelve el BAR `bar_num` del dispositivo. 0 si no existe.
 uint32_t pci_get_bar(const pci_device_t *dev, int bar_num);
-
-// Lee el BAR `bar_num` del dispositivo.
 uint32_t pci_read_bar(uint8_t bus, uint8_t slot, uint8_t func, int bar_num);
 
-// Habilita bus mastering (necesario para DMA).
 void pci_enable_bus_mastering(const pci_device_t *dev);
-
-// Habilita el espacio de I/O y memoria del dispositivo.
 void pci_enable_io_mem(const pci_device_t *dev);
 
-// Devuelve el IRQ line del dispositivo (0xFF si no tiene).
 uint8_t pci_get_irq(const pci_device_t *dev);
 
-// Capability list y MSI.
 uint8_t pci_find_capability(uint8_t bus, uint8_t slot, uint8_t func,
                             uint8_t cap_id);
 int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
@@ -220,8 +214,40 @@ int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
 void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func);
 
 // ===========================================================================
-// Driver.
+// Bus PCI genérico (Fase 2.1b).
+//
+// pci_bus es el struct bus_type que ata los drivers PCI al framework
+// genérico de bus.c. Se registra con bus_register() (idempotente) desde
+// pci_init_impl() y también desde drivers_init_task() antes de registrar
+// los drivers.
+//
+// Uso:
+//   static const pci_device_id_t ahci_id_table[] = { ... , {0}};
+//   struct driver ahci_driver = {
+//       .name      = "ahci",
+//       .bus       = &pci_bus,
+//       .id_table  = ahci_id_table,
+//       .probe     = ahci_probe_generic, // shim -> ahci_probe(pdev, id)
+//   };
+//   driver_register(&ahci_driver);   // -> bus_add_driver(&pci_bus)
+//
+// Migración: pci_bus_register_driver() y pci_bus_probe_all() eliminados.
+// Reemplazarlos por bus_add_driver / drivers_probe_all (declarados en bus.h).
 // ===========================================================================
-extern struct driver pci_driver;
+extern struct bus_type pci_bus;
+
+// Matching de un id contra un device. Exportada porque pci_find_* y
+// futuros .kur pueden necesitarla (ksymtab_exports la publica).
+int pci_id_match(const pci_device_t *dev, const pci_device_id_t *id);
+
+// Devuelve el array de dispositivos enumerados y su conteo.
+const pci_device_t *pci_get_devices(int *count);
+
+// ===========================================================================
+// Drivers.
+// ===========================================================================
+extern struct driver pci_driver;   // scanner (legacy, .init)
+extern struct driver ahci_driver;  // Fase 2.1b (bus-managed)
+extern struct driver xhci_driver;  // Fase 2.1b (bus-managed)
 
 #endif

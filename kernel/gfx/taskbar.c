@@ -63,6 +63,9 @@ void taskbar_refresh_clock(void) {
   rtc_format_date(&now, clock_date_buffer, sizeof(clock_date_buffer));
 }
 
+const char *taskbar_clock_time_str(void) { return clock_time_buffer; }
+const char *taskbar_clock_date_str(void) { return clock_date_buffer; }
+
 taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
                                      const char *label, tar_node_t *bmp_file,
                                      void (*on_click)(taskbar_item_t *)) {
@@ -414,8 +417,7 @@ rect_t taskbar_get_bounds(int screen_w, int screen_h) {
 
 void taskbar_init(void) {
   taskbar_items = NULL;
-  // Botón de Inicio con ancho automático por defecto (width = 0)
-  taskbar_add_item(TASKBAR_ITEM_START_BTN, "Start", "win", 0xFF60CDFF, NULL);
+  // Sin botón Start: el escritorio es estilo macOS (Dock + barra de menús).
   // Inicializar buffers de reloj
   clock_time_buffer[0] = '\0';
   clock_date_buffer[0] = '\0';
@@ -443,6 +445,8 @@ taskbar_item_t *taskbar_add_item_custom_width(
   item->next = NULL;
   item->hover_t = 0;
   item->is_hovered = 0;
+  item->dock_icon = NULL;
+  item->dock_icon_state = 0;
 
   int i = 0;
   while (label && label[i] && i < 31) {
@@ -487,6 +491,8 @@ void taskbar_remove_item(uint32_t id) {
       else
         taskbar_items = curr->next;
       // Free the item
+      if (curr->dock_icon)
+        kfree(curr->dock_icon);
       kfree(curr);
       return;
     }
@@ -672,6 +678,8 @@ void taskbar_remove_item_ptr(taskbar_item_t *item) {
         prev->next = curr->next;
       else
         taskbar_items = curr->next;
+      if (curr->dock_icon)
+        kfree(curr->dock_icon);
       kfree(curr);
       return;
     }

@@ -242,6 +242,7 @@
 #define ASYS_VM_DEBUG_INFO (ASYS_BASE + 0x30)
 #define ASYS_PRINT (ASYS_BASE + 0x40)
 #define ASYS_FS_CHECK (ASYS_BASE + 0x50)
+#define ASYS_AUR_INFO (ASYS_BASE + 0x60)
 #define ASYS_MAX (ASYS_BASE + 0x100)
 
 // ---------------------------------------------------------------------------

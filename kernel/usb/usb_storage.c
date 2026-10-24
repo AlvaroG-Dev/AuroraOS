@@ -575,3 +575,26 @@ int usb_storage_probe(usb_device_t *dev) {
 
   return 0;
 }
+
+// ===========================================================================
+// [FASE 2.1c] Driver bus-managed.
+// ===========================================================================
+static const usb_device_id_t usb_storage_id_table[] = {
+    {.match_flags = USB_DEVICE_ID_MATCH_INT_CLASS,
+     .b_interface_class = 0x08}, // Mass Storage
+    {0}};
+
+static int storage_probe_generic(struct device *dev) {
+  int rc = usb_storage_probe((usb_device_t *)dev->priv);
+  if (rc > 0)
+    return 0;
+  return rc < 0 ? rc : -ENODEV;
+}
+
+struct driver usb_storage_driver = {
+    .name = "usb-storage",
+    .bus = &usb_bus,
+    .id_table = usb_storage_id_table,
+    .probe = storage_probe_generic,
+    .remove = NULL,
+};

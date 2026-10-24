@@ -247,7 +247,10 @@ typedef struct ahci_hba {
   uint8_t msi_vector;
 } ahci_hba_t;
 
+// [FASE 2.1b] Bus-managed driver. Se registra con driver_register() y
+// su probe se llama desde pci_bus cuando matchea el id_table.
 extern struct driver ahci_driver;
+
 void ahci_dump(void);
 int ahci_disk_count(void);
 void ahci_poll_ports(void);

@@ -795,8 +795,11 @@ void atapi_dump(void) {
 // ===========================================================================
 // Registro del driver
 // ===========================================================================
+static const char *const atapi_depends[] = {"pci", "ata_pio", NULL};
+
 struct driver atapi_driver = {
     .name = "atapi",
+    .depends = atapi_depends,
     .init = atapi_init,
     .shutdown = NULL,
 };

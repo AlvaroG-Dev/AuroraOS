@@ -164,17 +164,13 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->on_cpu = 0;
   task->syscall_regs = NULL;
 
-  // [musl] FS_BASE por defecto 0. Hasta que un proceso llame a
-  // arch_prctl(ARCH_SET_FS), no debe tener TLS. Si no lo ponemos
-  // explícitamente, tomamos el valor que dejara el SLAB, y switch.asm
-  // lo escribirá en el MSR → #GP si es no canónico.
   task->fs_base = 0;
   task->clear_child_tid = NULL;
 
-  // [FIX timeout] Sin timeout por defecto.
-  task->wake_deadline = 0;
+  // [KTHREAD] tareas nativas no son kthreads
+  task->kthread = NULL;
 
-  // [FIX sched_yield] Sin petición de yield pendiente.
+  task->wake_deadline = 0;
   task->yield_requested = 0;
 
   task->wait_entry.task = NULL;
@@ -256,7 +252,12 @@ void sched_init(void) {
 // ---------------------------------------------------------------------------
 // Creación de tareas
 // ---------------------------------------------------------------------------
-task_t *sched_create_task(void (*fn)(void)) {
+// ---------------------------------------------------------------------------
+// [KTHREAD] Crea una tarea de kernel SIN publicarla. El llamante debe
+// llamar a sched_publish_task(t) cuando haya terminado de configurarla
+// (por ejemplo, tras fijar t->kthread en kthread_create).
+// ---------------------------------------------------------------------------
+task_t *sched_create_kernel_task_stopped(void (*fn)(void)) {
   task_t *task = (task_t *)kmalloc(sizeof(task_t));
   if (!task)
     return NULL;
@@ -278,8 +279,13 @@ task_t *sched_create_task(void (*fn)(void)) {
 
   task_init_common(task, sp, kernel_cr3);
   task->stack = (uint64_t *)stack;
-  task_list_insert(task);
+  return task;
+}
 
+task_t *sched_create_task(void (*fn)(void)) {
+  task_t *task = sched_create_kernel_task_stopped(fn);
+  if (task)
+    task_list_insert(task);
   return task;
 }
 
@@ -385,20 +391,27 @@ void sched_tick(void) {
   if (!curr)
     return;
 
-  // [RUSAGE] Contabilizar este tick al proceso de la tarea actual.
   process_account_tick(curr);
 
   this_cpu(ticks_since_resched)++;
 
-  // [C3] Antes: read + write separados. Un sched_kick_idle_cpu() en otra
-  // CPU podía escribir need_resched=1 en la ventana entre el read y el
-  // write, y la petición se perdía. xchg es atómico y captura el valor
-  // anterior.
+  // [BLOCK-ASYNC POLL] Cada ~10 ms (100 Hz) en el BSP, revisar si algún
+  // bio async se ha quedado colgado por IRQ perdida. Ahci y ATA DMA
+  // necesitan este rescate: si el IRQ handler no se ejecuta (por storm,
+  // enmascaramiento, hardware sin IRQ), el bio quedaría colgado.
   //
-  // need_resched es 'volatile int' en task_t; casteamos para usar el
-  // builtin atómico (el volatile no aporta nada aquí, todas las
-  // escrituras ya pasan por xchg o por escrituras locales de la propia
-  // CPU).
+  // El coste del poll es mínimo (unas pocas lecturas MMIO por canal)
+  // y solo actúa sobre canales con bio en vuelo.
+  //
+  // Se hace SOLO en el BSP porque el IRQ del AHCI está ruteado al BSP
+  // y el polling del ATA DMA sigue la misma política.
+  if (smp_processor_id() == 0 && (sched_get_ticks() % 10) == 0) {
+    extern void ahci_poll_ports(void);
+    extern void ata_dma_poll_ports(void);
+    ahci_poll_ports();
+    ata_dma_poll_ports();
+  }
+
   int force =
       __atomic_exchange_n((int *)&curr->need_resched, 0, __ATOMIC_ACQ_REL);
 
@@ -436,8 +449,6 @@ void sched_tick(void) {
 
   if (!next) {
     if (curr->is_idle) {
-      // El idle no tiene a quién ceder. Limpiar yield_requested por si
-      // acaso y volver a hlt.
       curr->yield_requested = 0;
       sched_unlock_irqrestore(flags);
       return;
@@ -446,22 +457,15 @@ void sched_tick(void) {
         curr->state == TASK_DEAD) {
       next = idle_tasks[cpu];
     } else if (curr->yield_requested) {
-      // [FIX sched_yield] La tarea actual pidió ceder explícitamente.
-      // Aunque siga RUNNING y ejecutable, saltamos al idle para dar
-      // oportunidad a otras CPUs/tareas y evitar el busy-loop.
       curr->yield_requested = 0;
       next = idle_tasks[cpu];
     } else {
-      // curr sigue siendo ejecutable. Si state == READY es que nos
-      // despertaron en la ventana entre "BLOCKED" y este punto.
       if (curr->state == TASK_READY)
         curr->state = TASK_RUNNING;
       sched_unlock_irqrestore(flags);
       return;
     }
   } else {
-    // [FIX sched_yield] Se encontró otra tarea. Limpiar la petición
-    // de yield de la actual: ya se va a ceder de todos modos.
     curr->yield_requested = 0;
   }
 
@@ -484,9 +488,6 @@ void sched_tick(void) {
   __atomic_store_n((task_t *volatile *)&this_cpu(current_task), next,
                    __ATOMIC_RELEASE);
 
-  // on_cpu lo actualiza task_switch (asm) justo después de cargar el stack
-  // de la nueva tarea (old->on_cpu = 0, new->on_cpu = 1). No tocarlo aquí.
-
   if (next->stack) {
     uint64_t kstack = (uint64_t)((uint8_t *)next->stack + TASK_STACK_SIZE);
     tss_set_rsp0(kstack);
@@ -495,15 +496,6 @@ void sched_tick(void) {
 
   task_switch(old, next, &sched_lock);
 
-  // Restaurar los flags de la tarea que retoma el control.
-  //
-  // task_switch libera sched_lock por su cuenta (en asm, mov dword [rdx], 0),
-  // pero NO toca RFLAGS. Cada tarea guardó sus flags en su stack cuando
-  // llamó a sched_lock_irqsave, y los restaura aquí al volver de task_switch.
-  //
-  // SIN ESTO, IF queda en 0 tras el primer context switch y el sistema
-  // deja de recibir interrupciones (timer, teclado, mouse). El sistema
-  // parece funcionar 1-5 segundos y luego se cuelga.
   __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");
 }
 

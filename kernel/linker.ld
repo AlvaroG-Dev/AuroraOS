@@ -40,6 +40,12 @@ SECTIONS
         *(.data.*)
         __data_end = .;
     }
+    .ksymtab : {
+      . = ALIGN(8);
+      __ksymtab_start = .;
+      KEEP(*(.ksymtab))
+      __ksymtab_end = .;
+    }
     . = ALIGN(4096);
     .bss : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
     {

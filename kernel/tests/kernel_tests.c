@@ -16,12 +16,15 @@
 #include "../atapi.h"
 #include "../block.h"
 #include "../bmp.h"
+#include "../completion.h"
 #include "../cpu.h"
 #include "../elf.h"
 #include "../fat32.h"
 #include "../heap.h"
 #include "../ipi.h"
+#include "../irq_threaded.h"
 #include "../klog.h"
+#include "../kthread.h"
 #include "../paging.h"
 #include "../part.h"
 #include "../pipe.h"
@@ -39,6 +42,7 @@
 #include "../usb/xhci/xhci.h"
 #include "../usb/xhci/xhci_ring.h"
 #include "../vfs.h"
+#include "../workqueue.h"
 #include "memlayout.h"
 
 static void test_pipe_poll_readiness(void) {
@@ -639,7 +643,6 @@ static void test_elf_relocation_overflow(void) {
 
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
   memset(pml4, 0, PAGE_SIZE);
-  uint64_t baseline = pmm_free_pages_count();
 
   /*
    * 0x1000 + (UINT64_MAX - 0xFFF) = 2^64: el código antiguo hacía wrap
@@ -652,8 +655,17 @@ static void test_elf_relocation_overflow(void) {
   TEST_ASSERT(rc != 0, "elf_load aceptó overflow en p_vaddr + load_base");
   TEST_ASSERT(pml4[PML4_INDEX(0x1000)] == 0,
               "ELF inválido modificó el PML4 antes de ser rechazado");
-  TEST_ASSERT(pmm_free_pages_count() == baseline,
-              "ELF inválido consumió páginas antes de ser rechazado");
+
+  // [FIX tests-parallel] Se ha ELIMINADO el check de
+  // pmm_free_pages_count() == baseline: ahora los tests corren en un
+  // kthread paralelo con init/terminal/sh, que alocan y liberan
+  // páginas concurrentemente. El delta del PMM global no distingue
+  // "elf_load leak" de "otra thread alocó en el medio".
+  //
+  // Los dos checks restantes cubren lo esencial: elf_load rechaza el
+  // ELF (rc != 0) y la preflight aborta ANTES de tocar la PML4
+  // (pml4[...] == 0). Que no leak en una sola llamada ya lo garantiza
+  // la preflight: valida todos los PT_LOAD antes de map_page_in_pml4.
 
   pmm_free_page(pml4_phys);
 }
@@ -822,7 +834,6 @@ static void test_paging_noncanonical_addresses(void) {
 
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
   memset(pml4, 0, PAGE_SIZE);
-  uint64_t baseline = pmm_free_pages_count();
 
   TEST_ASSERT(paging_map_page_in(pml4, noncanonical_low, 0x1000,
                                  PTE_WRITABLE | PTE_NX) != 0,
@@ -832,9 +843,6 @@ static void test_paging_noncanonical_addresses(void) {
               "paging_map_page_in aceptó dirección no canónica alta");
   TEST_ASSERT(pml4[0] == 0 && pml4[511] == 0,
               "una dirección no canónica modificó el PML4");
-  TEST_ASSERT(pmm_free_pages_count() == baseline,
-              "dirección no canónica consumió páginas de tablas");
-
   TEST_ASSERT(
       paging_map_page(noncanonical_low, 0x1000, PTE_WRITABLE | PTE_NX) != 0,
       "paging_map_page aceptó dirección no canónica baja");
@@ -899,8 +907,12 @@ static void test_paging_noncanonical_addresses(void) {
     pml4[PML4_INDEX(valid_high)] = 0;
   }
 
-  TEST_ASSERT(pmm_free_pages_count() == baseline,
-              "el test dejó tablas de páginas sin liberar");
+  /*
+   * No comparar aquí el contador global de páginas libres: este test corre
+   * mientras las demás CPUs siguen ejecutando tareas y sus asignaciones
+   * pueden cambiar ese contador de forma legítima. Las tablas creadas por
+   * este PML4 aislado se liberan explícitamente justo arriba.
+   */
   pmm_free_page(pml4_phys);
 }
 REGISTER_TEST("paging: rechaza direcciones no canónicas",
@@ -4602,7 +4614,7 @@ REGISTER_TEST("pty: /dev/ptmx siempre crea par nuevo",
               test_pty_double_master_rejected);
 
 static void test_pty_pts_listable(void) {
-  // Sin PTYs activos, /dev/pts debe existir como DIR pero readdir vacío.
+  // /dev/pts debe existir como DIR (tenga o no entries).
   vfs_node_t *d = vfs_lookup("/dev/pts");
   TEST_ASSERT(d != NULL, "/dev/pts no existe");
   if (d) {
@@ -4610,7 +4622,9 @@ static void test_pty_pts_listable(void) {
     vfs_node_free(d);
   }
 
-  // Abrir master, luego /dev/pts debe listar el nuevo PTY.
+  // Abrir master → obtiene un slot del pool (puede ser cualquier idx,
+  // no necesariamente 0: el terminal u otro proceso puede tener otros
+  // PTYs en uso).
   static process_t fake;
   memset(&fake, 0, sizeof(fake));
   int m = vfs_open_for_proc(&fake, "/dev/ptmx", O_RDWR);
@@ -4619,30 +4633,39 @@ static void test_pty_pts_listable(void) {
     return;
   int idx = ((tty_pty_t *)fake.fds[m]->node->priv)->index;
 
-  vfs_dirent_t e;
-  int rc = vfs_readdir("/dev/pts", 0, &e);
-  TEST_ASSERT(rc == 0, "readdir /dev/pts falló");
-  TEST_ASSERT(e.name[0] != '\0', "readdir devolvió vacío con 1 PTY activo");
-
-  // El nombre debe ser el índice.
+  // Convertir idx a string decimal.
   char expected[8];
   int t = 0;
   int v = idx;
   if (v == 0)
     expected[t++] = '0';
   while (v > 0) {
-    expected[t++] = '0' + v % 10;
+    expected[t++] = (char)('0' + v % 10);
     v /= 10;
   }
   expected[t] = '\0';
-  // invertir
   for (int i = 0; i < t / 2; i++) {
     char tmp = expected[i];
     expected[i] = expected[t - 1 - i];
     expected[t - 1 - i] = tmp;
   }
-  TEST_ASSERT(strcmp(e.name, expected) == 0, "readdir pts: '%s' != '%s'",
-              e.name, expected);
+
+  // [FIX tests-parallel] El terminal (userland) puede tener /dev/pts/0
+  // en uso. Buscamos NUESTRO índice entre todas las entries de
+  // readdir, en lugar de asumir que somos la primera.
+  int found = 0;
+  for (int i = 0; i < 32; i++) {
+    vfs_dirent_t e;
+    int rc = vfs_readdir("/dev/pts", (uint64_t)i, &e);
+    if (rc != 0 || e.name[0] == '\0')
+      break;
+    if (strcmp(e.name, expected) == 0) {
+      found = 1;
+      break;
+    }
+  }
+  TEST_ASSERT(found, "readdir /dev/pts no contiene '%s' (idx=%d)", expected,
+              idx);
 
   vfs_close_for_proc(&fake, m);
   memset(&fake, 0, sizeof(fake));
@@ -5243,6 +5266,27 @@ static void test_xhci_link_trb_type(void) {
 }
 REGISTER_TEST("xhci: Link TRB es type 6", test_xhci_link_trb_type);
 
+static void test_xhci_input_context_stride(void) {
+  static uint8_t input_ctx[33 * 64];
+  const uint8_t *base = input_ctx;
+
+  TEST_ASSERT((uint8_t *)xhci_ictx_slot(input_ctx, 32) == base + 32,
+              "Slot Context con stride de 32 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 32, 0, 0) == base + 64,
+              "EP0 Context con stride de 32 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 32, 1, 1) == base + 128,
+              "EP1 IN Context con stride de 32 B");
+
+  TEST_ASSERT((uint8_t *)xhci_ictx_slot(input_ctx, 64) == base + 64,
+              "Slot Context con stride de 64 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 64, 0, 0) == base + 128,
+              "EP0 Context con stride de 64 B");
+  TEST_ASSERT((uint8_t *)xhci_ictx_ep(input_ctx, 64, 1, 1) == base + 256,
+              "EP1 IN Context con stride de 64 B");
+}
+REGISTER_TEST("xhci: input context respeta stride 32/64 B",
+              test_xhci_input_context_stride);
+
 static void test_xhci_noop(void) {
   if (!g_xhci.initialized) {
     test_skip("xHCI no inicializado");
@@ -5272,16 +5316,32 @@ static void test_xhci_attach_devices(void) {
     test_skip("xHCI no inicializado");
     return;
   }
-  // Los devices ya se attacharon en xhci_probe(). Solo validamos
-  // que al menos uno se enumeró.
-  int n = 0;
-  // Recorremos con xhci_attach_all_devices de nuevo (idempotente: los
-  // que ya están PED=1 los salta).
+
+  int connected = 0;
+  for (uint16_t p = 1; p <= (uint16_t)g_xhci.max_ports; p++) {
+    if (xhci_port_status((uint8_t)p) & XHCI_PORTSC_CCS)
+      connected++;
+  }
+  if (connected == 0) {
+    test_skip("sin dispositivos USB conectados a puertos raíz");
+    return;
+  }
+
+  // Repetir el scan debe ser idempotente. Cada puerto conectado debe
+  // conservar la marca de enumeración; una transferencia fallida no puede
+  // quedar ocultada por un TEST_ASSERT(1) incondicional.
   (void)xhci_attach_all_devices();
-  // No tenemos API para contar devices; el test pasa si el log muestra
-  // al menos un `[USB] device` arriba. Marcamos como passed.
-  TEST_ASSERT(1, "attach ejecutado, ver log de [USB] device");
-  (void)n;
+
+  int attached = 0;
+  for (uint16_t p = 1; p <= (uint16_t)g_xhci.max_ports; p++) {
+    if (!(xhci_port_status((uint8_t)p) & XHCI_PORTSC_CCS))
+      continue;
+    int ok = xhci_port_is_attached((uint8_t)p);
+    if (ok)
+      attached++;
+    TEST_ASSERT(ok, "puerto xHCI %u conectado pero no enumerado", p);
+  }
+  TEST_ASSERT(attached > 0, "no se enumeró ningún dispositivo USB conectado");
 }
 REGISTER_TEST("xhci: attach devices", test_xhci_attach_devices);
 
@@ -5341,3 +5401,400 @@ static void test_iso9660_ls_cdrom(void) {
              ent.type == VFS_DIRECTORY ? "dir" : "file");
 }
 REGISTER_TEST("iso9660: listado de /cdrom", test_iso9660_ls_cdrom);
+
+// ===========================================================================
+// [Fase 1.1 + 1.2] kthread + workqueue
+//
+// Estos tests validan la infraestructura de tareas diferidas. Si alguno
+// cuelga, es señal de bug en kthread_stop o en flush_workqueue, no en el
+// test. Comentarlo con el patrón habitual (DISABLED: unsafe for automatic
+// boot testing) si aparece un hang y depurar aparte.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// [Fase 1.2] kthread: creación, ejecución y stop
+//
+// El kthread corre en un bucle hasta que kthread_should_stop() devuelve 1.
+// El test verifica que (a) el kthread realmente corre en paralelo con
+// kmain_task, y (b) kthread_stop devuelve el exit code con el que el
+// worker retornó.
+// ---------------------------------------------------------------------------
+static volatile int g_kt_counter = 0;
+
+static int kt_counter_fn(void *arg) {
+  (void)arg;
+  while (!kthread_should_stop())
+    __sync_fetch_and_add(&g_kt_counter, 1);
+  return 42;
+}
+
+static void test_kthread_basic(void) {
+  g_kt_counter = 0;
+
+  struct kthread *kt = kthread_run(kt_counter_fn, NULL, "kt-test");
+  TEST_ASSERT(kt != NULL, "kthread_run devolvió NULL");
+  if (!kt)
+    return;
+
+  // El worker va a 100% CPU entre preempciones; en 500 ticks (0.5 s)
+  // el contador debería superar 1000 de largo. Usamos un umbral bajo
+  // por si el test cae justo cuando el BSP está saturado.
+  uint64_t deadline = sched_get_ticks() + 500;
+  while (g_kt_counter < 100 && sched_get_ticks() < deadline)
+    sched_yield();
+
+  int advanced = (g_kt_counter >= 100);
+  int code = kthread_stop(kt);
+
+  TEST_ASSERT(advanced, "kthread no avanzó (counter=%d, deadline expirado)",
+              g_kt_counter);
+  TEST_ASSERT(code == 42, "kthread_stop devolvió %d (esperado 42)", code);
+}
+REGISTER_TEST("kthread: creación, ejecución y stop", test_kthread_basic);
+
+// ---------------------------------------------------------------------------
+// [Fase 1.1] workqueue: 64 works inmediatos + 1 delayed
+//
+// Encola 64 trabajos triviales (incrementar un contador) y llama a
+// flush_workqueue. Todos deben haberse ejecutado exactamente una vez.
+//
+// Después encola un delayed a 50 ticks y verifica con flush_work +
+// medición de tick que se ejecutó en el rango esperado.
+// ---------------------------------------------------------------------------
+#define WQ_TEST_N 64
+static volatile int g_wq_count = 0;
+static struct work_struct g_wq_works[WQ_TEST_N];
+
+static void wq_test_fn(struct work_struct *w) {
+  (void)w;
+  __sync_fetch_and_add(&g_wq_count, 1);
+}
+
+static volatile uint64_t g_wq_delayed_fire = 0;
+static struct work_struct g_wq_delayed;
+
+static void wq_delayed_fn(struct work_struct *w) {
+  (void)w;
+  g_wq_delayed_fire = sched_get_ticks();
+}
+
+static void test_workqueue_basic(void) {
+  TEST_ASSERT(system_wq != NULL,
+              "system_wq no inicializada (¿workqueue_init falló?)");
+  if (!system_wq)
+    return;
+
+  // --- Caso 1: 64 works inmediatos ---
+  g_wq_count = 0;
+  for (int i = 0; i < WQ_TEST_N; i++)
+    INIT_WORK(&g_wq_works[i], wq_test_fn);
+
+  for (int i = 0; i < WQ_TEST_N; i++) {
+    if (!queue_work(system_wq, &g_wq_works[i])) {
+      TEST_ASSERT(0, "queue_work[%d] devolvió false (¿ya encolado?)", i);
+      return;
+    }
+  }
+  flush_workqueue(system_wq);
+
+  TEST_ASSERT(g_wq_count == WQ_TEST_N, "workqueue: contador=%d (esperado %d)",
+              g_wq_count, WQ_TEST_N);
+
+  // --- Caso 2: delayed a 50 ticks ---
+  INIT_WORK(&g_wq_delayed, wq_delayed_fn);
+  g_wq_delayed_fire = 0;
+  uint64_t start = sched_get_ticks();
+
+  if (!queue_delayed_work(system_wq, &g_wq_delayed, 50)) {
+    TEST_ASSERT(0, "queue_delayed_work devolvió false");
+    return;
+  }
+  flush_work(&g_wq_delayed);
+
+  uint64_t delta =
+      (g_wq_delayed_fire > start) ? (g_wq_delayed_fire - start) : 0;
+
+  // Tolerancia amplia: el worker puede tardar hasta 100 ms en despertar
+  // por el WORKER_MAX_SLEEP_TICKS si el tick del timer no coincide.
+  TEST_ASSERT(delta >= 45 && delta <= 500,
+              "delayed disparó a %lu ticks (esperado ~50, rango [45,500])",
+              (unsigned long)delta);
+}
+REGISTER_TEST("workqueue: 64 works + 1 delayed", test_workqueue_basic);
+// ===========================================================================
+// [Fase 1.3] IRQ threaded: ciclo ack → wake → thread_fn
+//
+// Registra un handler threaded en un IRQ que no usa nadie durante el
+// boot (IRQ 15, que el IOAPIC no tiene conectado en QEMU), dispara el
+// dispatch manualmente (la función irq_threaded_simulate_for_test, que
+// es pública para tests), y verifica:
+//   - El ack corre en el contexto del llamante (hard-IRQ simulado).
+//   - El thread_fn corre en un kthread (contador atómico sube).
+//   - irq_free limpia sin colgarse.
+//   - Doble irq_request_threaded sobre el mismo irq devuelve -EBUSY.
+// ===========================================================================
+static volatile int g_irqtest_ack_count = 0;
+static volatile int g_irqtest_thread_count = 0;
+
+static irqreturn_t irqtest_ack(int irq, void *dev_id) {
+  (void)irq;
+  (void)dev_id;
+  __sync_fetch_and_add(&g_irqtest_ack_count, 1);
+  return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t irqtest_thread(int irq, void *dev_id) {
+  (void)irq;
+  (void)dev_id;
+  __sync_fetch_and_add(&g_irqtest_thread_count, 1);
+  return IRQ_HANDLED;
+}
+
+static void test_irq_threaded_basic(void) {
+  const unsigned int TEST_IRQ = 15;
+  g_irqtest_ack_count = 0;
+  g_irqtest_thread_count = 0;
+
+  int rc = irq_request_threaded(TEST_IRQ, irqtest_ack, irqtest_thread,
+                                "irqtest", NULL);
+  TEST_ASSERT(rc == 0, "irq_request_threaded falló: %d", rc);
+  if (rc != 0)
+    return;
+
+  int rc2 = irq_request_threaded(TEST_IRQ, irqtest_ack, irqtest_thread,
+                                 "irqtest2", NULL);
+  TEST_ASSERT(rc2 == -EBUSY, "doble registro devolvió %d (esperado -EBUSY)",
+              rc2);
+
+  irq_threaded_simulate_for_test(TEST_IRQ);
+  irq_threaded_simulate_for_test(TEST_IRQ);
+  irq_threaded_simulate_for_test(TEST_IRQ);
+
+  TEST_ASSERT(g_irqtest_ack_count == 3, "ack corrió %d veces (esperado 3)",
+              g_irqtest_ack_count);
+
+  // Con pending como boolean, solo se garantiza UNA invocación del thread_fn
+  // por ráfaga de IRQs antes de que el kthread procese. Esperamos a 1, no a 3.
+  uint64_t deadline = sched_get_ticks() + 100; // 100 ms, generoso
+  while (g_irqtest_thread_count < 1 && sched_get_ticks() < deadline)
+    sched_yield();
+
+  int tcount = g_irqtest_thread_count;
+  irq_free(TEST_IRQ);
+
+  TEST_ASSERT(tcount >= 1, "thread_fn corrió %d veces (esperado >=1)", tcount);
+
+  g_irqtest_ack_count = 0;
+  irq_threaded_simulate_for_test(TEST_IRQ);
+  TEST_ASSERT(g_irqtest_ack_count == 0, "ack corrió tras irq_free (%d)",
+              g_irqtest_ack_count);
+}
+
+// ---------------------------------------------------------------------------
+// [Fase 1.3] IRQ threaded: thread_fn == NULL → solo ack, sin kthread.
+//
+// Valida el modo "migración suave": el driver registra su ack, no crea
+// kthread, y el ack sigue corriendo en hard-IRQ como hoy. Sirve para
+// drivers que no necesitan dormir (por ejemplo, xhci con polling).
+// ---------------------------------------------------------------------------
+static void test_irq_threaded_ack_only(void) {
+  const unsigned int TEST_IRQ = 14;
+
+  g_irqtest_ack_count = 0;
+  g_irqtest_thread_count = 0;
+
+  int rc =
+      irq_request_threaded(TEST_IRQ, irqtest_ack, NULL, "irqackonly", NULL);
+  TEST_ASSERT(rc == 0, "irq_request_threaded(sin thread) falló: %d", rc);
+  if (rc != 0)
+    return;
+
+  irq_threaded_simulate_for_test(TEST_IRQ);
+  irq_threaded_simulate_for_test(TEST_IRQ);
+
+  TEST_ASSERT(g_irqtest_ack_count == 2, "ack-only corrió %d veces (esperado 2)",
+              g_irqtest_ack_count);
+  TEST_ASSERT(g_irqtest_thread_count == 0, "thread corrió sin thread_fn (%d)",
+              g_irqtest_thread_count);
+
+  irq_free(TEST_IRQ);
+}
+REGISTER_TEST("irq: threaded ack-only sin kthread", test_irq_threaded_ack_only);
+
+// ===========================================================================
+// [FASE 1.4] Async block I/O
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// [FASE 1.4] Async submit sobre un disco AHCI (o cualquier disco async).
+//
+// Verifica que blk_submit_async devuelve -EINPROGRESS y que el callback
+// se ejecuta. Se ejecuta sobre el primer disco que exponga el block
+// layer; si es síncrono (ata_pio), el test puede detectarlo y saltar.
+// ---------------------------------------------------------------------------
+typedef struct {
+  completion_t done;
+  int fired;
+  int error;
+  uint8_t *buf;
+} async_test_ctx_t;
+
+static void async_test_cb(bio_t *bio) {
+  async_test_ctx_t *ctx = (async_test_ctx_t *)bio->end_io_data;
+  if (!ctx)
+    return;
+  ctx->error = bio->error;
+  ctx->fired = 1;
+  complete(&ctx->done);
+}
+
+static void test_blk_async_submit(void) {
+  // Buscar un disco utilizable.
+  block_device_t *bdev = NULL;
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (b && !b->is_partition && !b->is_read_only && b->num_sectors > 0) {
+      bdev = b;
+      break;
+    }
+  }
+  if (!bdev) {
+    test_skip("sin discos para probar async");
+    return;
+  }
+
+  async_test_ctx_t ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  completion_init(&ctx.done);
+  ctx.buf = kmalloc(bdev->sector_size);
+  TEST_ASSERT(ctx.buf != NULL, "kmalloc(sector_size) falló");
+
+  bio_t bio;
+  memset(&bio, 0, sizeof(bio));
+  bio.bdev = bdev;
+  bio.lba = 0;
+  bio.count = 1;
+  bio.buf = ctx.buf;
+  bio.op = BIO_READ;
+  bio.error = 0;
+
+  int rc = blk_submit_async(&bio, async_test_cb, &ctx);
+
+  if (rc == -EINPROGRESS) {
+    // Async: esperar la completion.
+    wait_for_completion_uninterruptible(&ctx.done);
+    TEST_ASSERT(ctx.fired == 1, "callback async no se invocó");
+    TEST_ASSERT(ctx.error == 0, "async read devolvió error %d", ctx.error);
+  } else if (rc == 0) {
+    // Driver síncrono: no hay callback, el bio ya terminó.
+    TEST_ASSERT(bio.error == 0 || bio.error < 0, "bio.error incoherente: %d",
+                bio.error);
+    LOG_INFO("  [async-test] driver síncrono, bio.error=%d", bio.error);
+  } else {
+    TEST_ASSERT(0, "blk_submit_async devolvió %d", rc);
+  }
+
+  kfree(ctx.buf);
+}
+REGISTER_TEST("blk: async submit (callback ejecutado)", test_blk_async_submit);
+
+// ---------------------------------------------------------------------------
+// [FASE 1.4] 4 hilos hacen bdev_read concurrente sobre el mismo disco.
+//
+// Verifica que la serialización del driver (canal / puerto) no cuelga
+// ni corrompe. Cada hilo lee el sector 0 en un buffer privado y lo
+// compara consigo mismo (bytes iguales a sí mismos).
+//
+// Es intencionalmente "síncrono desde fuera": cada hilo llama bdev_read
+// y espera. Lo que probamos es que 4 submits concurrentes no deadlockean.
+// ---------------------------------------------------------------------------
+typedef struct {
+  block_device_t *bdev;
+  volatile int done;
+  volatile int failed;
+  volatile int attempts;
+} concurrent_read_ctx_t;
+
+static int concurrent_read_thread(void *arg) {
+  concurrent_read_ctx_t *ctx = (concurrent_read_ctx_t *)arg;
+  uint8_t *buf = kmalloc(ctx->bdev->sector_size);
+  if (!buf) {
+    ctx->failed = 1;
+    ctx->done = 1;
+    return 1;
+  }
+
+  int rc = bdev_read(ctx->bdev, 0, 1, buf);
+  if (rc == 0) {
+    // Verificar que podemos releer el mismo sector en otro buffer.
+    // IMPORTANTE: el segundo buffer DEBE tener sector_size bytes,
+    // no 16. El test anterior desbordaba el stack del kthread aquí.
+    uint8_t *tmp = kmalloc(ctx->bdev->sector_size);
+    if (tmp) {
+      rc = bdev_read(ctx->bdev, 0, 1, tmp);
+      kfree(tmp);
+    }
+  }
+  kfree(buf);
+  if (rc != 0)
+    ctx->failed = 1;
+  ctx->attempts++;
+  ctx->done = 1;
+  return 0;
+}
+
+static void test_blk_parallel_sync(void) {
+  block_device_t *bdev = NULL;
+  for (int i = 0; i < blk_count(); i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (b && !b->is_partition && !b->is_read_only && b->num_sectors > 0) {
+      bdev = b;
+      break;
+    }
+  }
+  if (!bdev) {
+    test_skip("sin discos para probar concurrencia");
+    return;
+  }
+
+  concurrent_read_ctx_t ctxs[4];
+  struct kthread *kts[4];
+  memset(ctxs, 0, sizeof(ctxs));
+
+  for (int i = 0; i < 4; i++) {
+    ctxs[i].bdev = bdev;
+    kts[i] = kthread_run(concurrent_read_thread, &ctxs[i], "blk-conc");
+    TEST_ASSERT(kts[i] != NULL, "kthread_run[%d] falló", i);
+  }
+
+  // Esperar a que los 4 terminen (timeout 10 s).
+  uint64_t deadline = sched_get_ticks() + 10000;
+  int all_done = 0;
+  while (sched_get_ticks() < deadline) {
+    all_done = 1;
+    for (int i = 0; i < 4; i++) {
+      if (!ctxs[i].done) {
+        all_done = 0;
+        break;
+      }
+    }
+    if (all_done)
+      break;
+    sched_yield();
+  }
+
+  TEST_ASSERT(all_done, "timeout esperando 4 reads concurrentes");
+
+  int failures = 0;
+  for (int i = 0; i < 4; i++)
+    if (ctxs[i].failed)
+      failures++;
+
+  for (int i = 0; i < 4; i++)
+    if (kts[i])
+      kthread_stop(kts[i]);
+
+  TEST_ASSERT(failures == 0, "%d/4 reads concurrentes fallaron", failures);
+}
+REGISTER_TEST("blk: 4 reads concurrentes al mismo disco",
+              test_blk_parallel_sync);

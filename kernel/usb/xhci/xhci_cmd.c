@@ -159,3 +159,60 @@ int xhci_cmd_evaluate_context(uint8_t slot, uint64_t input_ctx_phys) {
     return -EIO;
   return 0;
 }
+int xhci_cmd_stop_endpoint(uint8_t slot, uint32_t dci) {
+  if (slot == 0 || slot > g_xhci.max_slots)
+    return -EINVAL;
+  xhci_trb_t trb = {0};
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_STOP_EP) | ((uint32_t)slot << 24) |
+                ((uint32_t)dci << 16);
+  xhci_trb_t evt;
+  int rc = xhci_cmd_wait(&trb, 2000, &evt);
+  if (rc != 0)
+    return rc;
+  uint32_t cc = XHCI_EVT_CC(evt);
+  if (cc != XHCI_CC_SUCCESS && cc != XHCI_CC_CTX_STATE_ERR) {
+    LOG_ERR("[xHCI] stop_endpoint(slot=%u dci=%u) cc=%u", slot, dci, cc);
+    return -EIO;
+  }
+  return 0;
+}
+
+// Reset Endpoint: Halted -> Stopped. Ahora ESPERA la finalización (antes no se
+// consumía el evento y llenaba g_pending_cmds -> "pending cmd queue full").
+int xhci_cmd_reset_endpoint(uint8_t slot, uint32_t dci) {
+  if (slot == 0 || slot > g_xhci.max_slots)
+    return -EINVAL;
+  xhci_trb_t trb = {0};
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_RESET_EP) | ((uint32_t)slot << 24) |
+                ((uint32_t)dci << 16);
+  xhci_trb_t evt;
+  int rc = xhci_cmd_wait(&trb, 2000, &evt);
+  if (rc != 0)
+    return rc;
+  uint32_t cc = XHCI_EVT_CC(evt);
+  if (cc != XHCI_CC_SUCCESS && cc != XHCI_CC_CTX_STATE_ERR) {
+    LOG_ERR("[xHCI] reset_endpoint(slot=%u dci=%u) cc=%u", slot, dci, cc);
+    return -EIO;
+  }
+  return 0;
+}
+
+int xhci_cmd_set_tr_dequeue(uint8_t slot, uint32_t dci, uint64_t deq_ptr,
+                            int dcs) {
+  if (slot == 0 || slot > g_xhci.max_slots)
+    return -EINVAL;
+  xhci_trb_t trb = {0};
+  trb.param = (deq_ptr & ~0xFULL) | (dcs ? 1u : 0u);
+  trb.control = XHCI_TRB_TYPE(XHCI_TRB_SET_TR_DEQUEUE) |
+                ((uint32_t)slot << 24) | ((uint32_t)dci << 16);
+  xhci_trb_t evt;
+  int rc = xhci_cmd_wait(&trb, 2000, &evt);
+  if (rc != 0)
+    return rc;
+  if (XHCI_EVT_CC(evt) != XHCI_CC_SUCCESS) {
+    LOG_ERR("[xHCI] set_tr_dequeue(slot=%u dci=%u) cc=%u", slot, dci,
+            XHCI_EVT_CC(evt));
+    return -EIO;
+  }
+  return 0;
+}

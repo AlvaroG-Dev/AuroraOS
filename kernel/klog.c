@@ -546,18 +546,23 @@ static uint64_t tsc_freq_from_cpuid(void) {
 
 void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
   /* =====================================================================
-   * [FIX-TCG] PIT primero, CPUID después.
-   *
-   * En QEMU TCG, CPUID.15/16 devuelven valores que NO corresponden al
-   * TSC real (en un test reciente: 543 MHz cuando el TSC corre a ~3 GHz).
-   * Aceptarlo rompe TODA la cadena de tiempo: LAPIC mal calibrado,
-   * timestamps inflados, cursor acelerado.
-   *
-   * El PIT sí es fiable en TCG porque QEMU lo emula contra wall-clock.
-   * En KVM también es fiable (PIT real del host). Y sólo cuesta ~50 ms
-   * de boot.
+   * Nueva estrategia de calibración:
+   * 1. CPUID.15/16 (Arquitectura x86): Altamente fiable, inmune a P-states.
+   * 2. PIT (Fallback): Útil en hardware antiguo o VMs con TCG, pero
+   *    propenso a jitter y pérdida de ticks.
    * ===================================================================== */
 
+  uint64_t freq_cpuid = tsc_freq_from_cpuid();
+
+  // 1. Intentar CPUID primero (rango plausible: 100 MHz a 15 GHz)
+  if (freq_cpuid >= 100000000ULL && freq_cpuid <= 15000000000ULL) {
+    klog_set_tsc_freq(freq_cpuid);
+    LOG_INFO("[TSC] Calibrado vía CPUID: %lu MHz",
+             (unsigned long)(freq_cpuid / 1000000));
+    return;
+  }
+
+  // 2. Fallback: PIT (solo si CPUID falló o devolvió basura)
   uint64_t freq_pit = 0;
   if (ticks_to_wait > 0 && pit_hz > 0) {
     uint64_t start_tick = tick_count;
@@ -579,41 +584,20 @@ void klog_calibrate_tsc(uint32_t ticks_to_wait, uint32_t pit_hz) {
              ticks_to_wait, (unsigned long)real_ticks, pit_hz,
              (unsigned long)cycles);
 
-    if (real_ticks > 0)
+    if (real_ticks > 0) {
       freq_pit = (cycles * pit_hz) / real_ticks;
+    }
   }
 
-  /* Como referencia, mira lo que diría CPUID. No lo usamos para
-   * configurar nada, sólo lo logueamos para que se vea el desajuste. */
-  uint64_t freq_cpuid = tsc_freq_from_cpuid();
-
-  if (freq_pit >= 100000000ULL) {
-    /* PIT creíble: usarlo. Si CPUID dice otra cosa, avisar. */
-    if (freq_cpuid >= 100000000ULL) {
-      uint64_t hi = freq_pit > freq_cpuid ? freq_pit : freq_cpuid;
-      uint64_t lo = freq_pit > freq_cpuid ? freq_cpuid : freq_pit;
-      if (hi - lo > hi / 5) {
-        LOG_WARN("[TSC] CPUID.15 dice %lu MHz, PIT dice %lu MHz; usando PIT",
-                 (unsigned long)(freq_cpuid / 1000000),
-                 (unsigned long)(freq_pit / 1000000));
-      }
-    }
+  if (freq_pit >= 100000000ULL && freq_pit <= 15000000000ULL) {
     klog_set_tsc_freq(freq_pit);
-    LOG_INFO("[TSC] Calibrado vía PIT: %lu MHz",
+    LOG_INFO("[TSC] Calibrado vía PIT (fallback): %lu MHz",
              (unsigned long)(freq_pit / 1000000));
     return;
   }
 
-  /* PIT no disponible o absurdo: aceptar CPUID con la validación de
-   * plausibilidad ya presente en klog_set_tsc_freq. */
-  if (freq_cpuid >= 100000000ULL) {
-    klog_set_tsc_freq(freq_cpuid);
-    LOG_INFO("[TSC] Calibrado vía CPUID (PIT falló): %lu MHz",
-             (unsigned long)(freq_cpuid / 1000000));
-    return;
-  }
-
-  LOG_WARN("[TSC] Calibración fallida; manteniendo default %lu MHz",
+  LOG_WARN("[TSC] Calibración fallida (CPUID y PIT inválidos); manteniendo "
+           "default %lu MHz",
            (unsigned long)(klog_get_tsc_freq() / 1000000));
 }
 

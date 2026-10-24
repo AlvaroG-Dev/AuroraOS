@@ -106,6 +106,26 @@ void gfx_fill_rounded_rect_gradient_v(uint32_t *dst, int dst_stride,
                                       uint32_t top_color,
                                       uint32_t bottom_color);
 
-/* Sombra en dos capas (cercana + lejana), tinte azulado sutil. */
+/* Sombra de ventana (LUT precalculada). corner_radius debe coincidir con
+ * AURORA_CORNER_RADIUS (la LUT se genera para ese radio). */
 void gfx_draw_shadow_aurora(uint32_t *dst, int dst_stride, rect_t clip,
                             rect_t win_rect, int corner_radius);
+/* Igual, con intensidad 0..256 (256 = normal). Ventanas inactivas: ~140. */
+void gfx_draw_shadow_aurora_ex(uint32_t *dst, int dst_stride, rect_t clip,
+                               rect_t win_rect, int corner_radius,
+                               int strength256);
+
+/* Desenfoque de fondo (box blur separable, 2 pasadas) sobre el rectángulo r
+ * de dst, escribiendo solo dentro de la forma redondeada y del clip. Usa
+ * `tmp` (>= r.w*r.h píxeles) como buffer intermedio. r debe estar
+ * completamente dentro del buffer. */
+void gfx_backdrop_blur_rounded(uint32_t *dst, int dst_stride, rect_t clip,
+                               rect_t r, int corner_radius, int blur_radius,
+                               uint32_t *tmp, size_t tmp_px);
+
+/* Métricas de texto (UTF-8). */
+int gfx_text_width(const char *str, font_id_t font);
+int gfx_font_ascent(font_id_t font);
+/* Devuelve la y donde dibujar para que la altura de mayúsculas quede
+ * centrada verticalmente en [top, top+height). */
+int gfx_text_center_y(font_id_t font, int top, int height);

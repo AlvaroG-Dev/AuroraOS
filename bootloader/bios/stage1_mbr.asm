@@ -3,7 +3,7 @@ BITS 16
 ORG 0x7C00
 
 %ifndef STAGE2_SECTORS
-%define STAGE2_SECTORS 62
+%define STAGE2_SECTORS 80
 %endif
 
 STAGE2_LBA      equ 1

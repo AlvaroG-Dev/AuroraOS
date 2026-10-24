@@ -13,6 +13,7 @@
 #include "../../../lib/process.h"
 #include "../../../lib/string.h"
 #include "../../../syscall.h"
+#include <time.h>
 
 #undef puts
 #undef printf
@@ -49,6 +50,17 @@ static int g_in_len = 0;
 
 // [FIX #10b] Fase del cursor animado (ms dentro de un ciclo de 2000 ms).
 static uint64_t g_cursor_phase = 0;
+static uint64_t g_cursor_last_ms = 0;
+
+// Medir el parpadeo con tiempo monotónico real: poll() puede retornar
+// inmediatamente cuando el PTY produce salida continuamente.
+static uint64_t monotonic_ms(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+  // Fallback si vDSO/syscall de reloj no está disponible.
+  return g_cursor_last_ms + 16;
+}
 
 // ---------------------------------------------------------------------------
 // [FIX #6] Decode de eventos MOUSE.
@@ -168,6 +180,7 @@ static void process_input(const uint8_t *buf, int n) {
   }
 
   g_cursor_phase = 0;
+  g_cursor_last_ms = monotonic_ms();
 
   if (g_master >= 0)
     write(g_master, buf, (size_t)n);
@@ -236,8 +249,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Fondo inicial: solo lo usamos para el primer blit. El gradiente se
-  // aplica celda a celda en el render.
+  // Fondo inicial para el padding; el render dibuja también la celda y el
+  // cursor antes del primer blit.
   const uint32_t k_bg = 0xFF000000u | 0x002B36u;
   for (int i = 0; i < g_cw * g_ch; i++)
     g_pixels[i] = k_bg;
@@ -248,6 +261,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  terminal_render(&g_term, g_pixels, g_cw, PAD_X, PAD_Y, g_cell_w, g_cell_h,
+                  font_system_mono());
   sys_win_blit(win, 0, 0, g_cw, g_ch, 0, 0, g_cw, g_pixels);
   terminal_clear_dirty(&g_term);
 
@@ -301,11 +316,14 @@ int main(int argc, char **argv) {
 
   int child_pgid = child;
   ioctl(master, TIOCSPGRP, &child_pgid);
+  g_cursor_last_ms = monotonic_ms();
 
   while (1) {
     // 1. Eventos de la ventana.
     winsrv_event_t ev;
-    while (sys_win_poll_event(win, &ev, 0) > 0) {
+    int events_processed = 0;
+    while (events_processed < 64 && sys_win_poll_event(win, &ev, 0) > 0) {
+      events_processed++;
       switch (ev.type) {
       case WINSRV_EV_TTY_INPUT:
         if (g_in_len < (int)sizeof(g_in_buf))
@@ -408,7 +426,7 @@ int main(int argc, char **argv) {
     }
 
     // 3. Drenar el PTY.
-    for (;;) {
+    for (int pty_reads = 0; pty_reads < 32; pty_reads++) {
       struct pollfd pfd = {g_master, POLLIN, 0};
       int pr = poll(&pfd, 1, 0);
       if (pr <= 0 || !(pfd.revents & POLLIN))
@@ -431,9 +449,11 @@ int main(int argc, char **argv) {
     // Ciclo total: 1060 ms. El cursor está visible ~53% del tiempo,
     // pero las transiciones son rápidas (5 frames cada una) y no se
     // percibe "flotando" como con una onda triangular lenta.
-    g_cursor_phase += 16;
-    if (g_cursor_phase >= 1060)
-      g_cursor_phase = 0;
+    uint64_t cursor_now = monotonic_ms();
+    uint64_t elapsed_ms =
+        (cursor_now >= g_cursor_last_ms) ? cursor_now - g_cursor_last_ms : 0;
+    g_cursor_last_ms = cursor_now;
+    g_cursor_phase = (g_cursor_phase + (elapsed_ms % 1060)) % 1060;
 
     uint8_t alpha;
     if (g_cursor_phase < 450) {
