@@ -53,6 +53,12 @@ typedef struct taskbar_item {
 
   int hover_t;    // 0..256 (0 = sin hover, 256 = hover completo)
   int is_hovered; // 1 si el ratón está encima
+
+  // Icono del Dock (DOCK_ICON_SRC x DOCK_ICON_SRC, ARGB). Lo crea el Dock
+  // bajo demanda desde icon_bmp_node o, si no hay BMP, como baldosa con el
+  // símbolo. 0 = sin generar, 1 = listo. Se libera al quitar el item.
+  uint32_t *dock_icon;
+  int dock_icon_state;
 } taskbar_item_t;
 
 // API de abstracción de la Taskbar
@@ -86,3 +92,7 @@ rect_t taskbar_item_get_bounds(taskbar_item_t *item, int screen_w,
 taskbar_item_t *taskbar_get_item_at(int sx, int sy, int sw, int sh);
 taskbar_item_t *taskbar_items_head(void);
 int taskbar_has_active_hover(void);
+// Cadenas del reloj ("HH:MM" y "DD/MM/YYYY"), refrescadas con
+// taskbar_refresh_clock(). Las usa la barra de menús.
+const char *taskbar_clock_time_str(void);
+const char *taskbar_clock_date_str(void);

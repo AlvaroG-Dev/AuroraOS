@@ -10,14 +10,14 @@
 #include "ata_common.h"
 #include "ata_dma.h"
 #include "atapi.h"
+#include "aur_bus.h"
 #include "block.h"
 #include "boot_console.h"
 #include "boot_splash.h"
+#include "bus.h"
 #include "completion.h"
 #include "cpu.h"
 #include "driver.h"
-#include "kur_loader.h"
-#include "ksymtab.h"
 #include "elf.h"
 #include "fat32.h"
 #include "gdt.h"
@@ -31,13 +31,16 @@
 #include "irq_threaded.h"
 #include "iso9660.h"
 #include "klog.h"
+#include "ksymtab.h"
 #include "kthread.h"
+#include "kur_loader.h"
 #include "net/arp.h"
 #include "net/dhcp.h"
 #include "net/e1000e.h"
 #include "net/icmp.h"
 #include "net/ip.h"
 #include "net/loopback.h"
+#include "net/net_proxy.h"
 #include "net/netif.h"
 #include "net/ping.h"
 #include "net/socket.h"
@@ -67,7 +70,6 @@
 #include "workqueue.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "bus.h"
 
 // ===========================================================================
 // Estado global (accesible desde tareas de init)
@@ -406,19 +408,26 @@ static int drivers_init_task(void *arg) {
   input_init();
 
   LOG_INFO("[INIT] Buses...");
-  bus_register(&pci_bus);          // NEW: idempotente, explícito
+  bus_register(&pci_bus); // NEW: idempotente, explícito
 
   LOG_INFO("[INIT] Drivers bus-managed...");
-  driver_register(&ahci_driver);    // NEW: va por bus_add_driver
-  driver_register(&xhci_driver);    // NEW
+
+  // [FASE 4.7] Registrar el bus de módulos de usuario PRIMERO.
+  // Al usar una lista LIFO en bus.c, esto asegura que se pruebe
+  // AL FINAL, dejando que los drivers del kernel (ahci, xhci)
+  // tengan prioridad.
+  driver_register(&aur_bus_driver); // <-- AÑADIR ESTA LÍNEA
+
+  driver_register(&ahci_driver); // NEW: va por bus_add_driver
+  driver_register(&xhci_driver); // NEW
 
   LOG_INFO("[INIT] Drivers legacy...");
   driver_register(&ps2_driver);
-  driver_register(&pci_driver);     // scanner, legacy (tiene .init)
+  driver_register(&pci_driver); // scanner, legacy (tiene .init)
   driver_register(&ata_pio_driver);
   driver_register(&atapi_driver);
 
-  drivers_init_all_parallel();      // solo legacy (bus-managed ya está)
+  drivers_init_all_parallel(); // solo legacy (bus-managed ya está)
   klog_boot_ok();
 
   extern int ata_pio_finalize(void);
@@ -456,12 +465,8 @@ static int net_init_task(void *arg) {
   socket_subsystem_init();
   tcp_init();
 
-  LOG_INFO("[INIT] e1000e...");
-  if (e1000e_init() == 0) {
-    LOG_INFO("[INIT] e1000e inicializada (dhcp/ping diferidos)");
-  } else {
-    LOG_WARN("[INIT] e1000e no disponible");
-  }
+  LOG_INFO("[INIT] Virtual Net Proxy (TUN/TAP)...");
+  net_proxy_init();
 
   // No completion: system_init_task no espera a net-init directamente.
   return 0;
@@ -540,7 +545,8 @@ static void tests_thread(void) {
     if (m1 && m2) {
       int urc1 = kur_loader_unload(m1);
       LOG_INFO("[TEST-KUR2] unload(hello) con hello2 vivo = %d "
-               "(esperado -16)", urc1);
+               "(esperado -16)",
+               urc1);
       int urc2 = kur_loader_unload(m2);
       LOG_INFO("[TEST-KUR2] unload(hello2) = %d (esperado 0)", urc2);
       int urc3 = kur_loader_unload(m1);
@@ -548,16 +554,6 @@ static void tests_thread(void) {
     }
     LOG_INFO("[TEST-KUR2] modulos tras test: %d (esperado 0)",
              kur_loader_count());
-  }
-
-  // Red de usuario SOLO tras tests (e1000e asume netif->ip == 0).
-  // No usamos klog_boot_step/ok aquí: esos pares son secuenciales y
-  // se pisan si system_init_task está haciendo boot_step en paralelo.
-  if (e1000e_netif()) {
-    LOG_INFO("[TEST] Arrancando red de usuario (post-tests)...");
-    e1000e_start();
-    dhcp_start(e1000e_netif());
-    ping_init();
   }
 }
 

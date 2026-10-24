@@ -12,11 +12,13 @@
 #include "vfs.h"
 #include "block.h" // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "cpu.h"
+#include "dma_user.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
-#include "dma_user.h"
+#include "irq_user.h"
 #include "klog.h"
 #include "mutex.h"
+#include "net/net_proxy.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
@@ -1917,15 +1919,17 @@ static vfs_ops_t dev_tty_ops = {
 };
 
 static const devfs_entry_t devfs_entries[] = {
-  {"null", &dev_null_ops, VFS_CHARDEVICE, (1u << 8) | 3},
-  {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
-  {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
-  {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
-  {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135},
-  {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
-  {"urandom", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 9},
-  {"random", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 8},
-  {"dma", &dma_dev_ops, VFS_CHARDEVICE, (10u << 8) | 60}, // <-- [FASE 4.4]
+    {"null", &dev_null_ops, VFS_CHARDEVICE, (1u << 8) | 3},
+    {"zero", &dev_zero_ops, VFS_CHARDEVICE, (1u << 8) | 5},
+    {"kmsg", &dev_kmsg_ops, VFS_CHARDEVICE, (1u << 8) | 11},
+    {"tty", &dev_tty_ops, VFS_CHARDEVICE, (5u << 8) | 0},
+    {"rtc", &dev_rtc_ops, VFS_CHARDEVICE, (10u << 8) | 135},
+    {"pts", &devfs_pts_dir_ops, VFS_DIRECTORY, 0},
+    {"irq", &aur_irq_dir_ops, VFS_DIRECTORY, 0}, // <-- NUEVO
+    {"urandom", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 9},
+    {"random", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 8},
+    {"dma", &dma_dev_ops, VFS_CHARDEVICE, (10u << 8) | 60},
+    {"net0", &net_proxy_ops, VFS_CHARDEVICE, (10u << 8) | 200},
 };
 
 // ===========================================================================
@@ -2222,6 +2226,43 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     return n;
   }
 
+  // /irq/N — solo decimal (legacy + MSI). El .aur pide "0x62" como "98".
+  if (strncmp(name, "irq/", 4) == 0) {
+    const char *num = name + 4;
+    if (*num == '\0')
+      return NULL;
+    uint32_t irq = 0;
+    while (*num >= '0' && *num <= '9') {
+      irq = irq * 10 + (uint32_t)(*num - '0');
+      if (irq >= IRQ_USER_MAX)
+        return NULL;
+      num++;
+    }
+    if (*num != '\0')
+      return NULL;
+
+    struct aur_irq_ctx *ctx = aur_irq_get_ctx_pub(irq);
+    if (!ctx)
+      return NULL;
+
+    vfs_node_t *n = kzalloc(sizeof(vfs_node_t));
+    if (!n)
+      return NULL;
+    size_t nl = strlen(name);
+    if (nl >= sizeof(n->name))
+      nl = sizeof(n->name) - 1;
+    memcpy(n->name, name, nl);
+    n->name[nl] = '\0';
+    n->flags = VFS_CHARDEVICE;
+    n->ops = &aur_irq_node_ops;
+    n->priv = ctx;
+    n->mode = S_IFCHR | 0660;
+    n->uid = 0;
+    n->gid = 0;
+    n->rdev = (10u << 8) | 200;
+    return n;
+  }
+
   // Rechazar subpaths no soportados.
   for (const char *p = name; *p; p++) {
     if (*p == '/')
@@ -2397,6 +2438,7 @@ void vfs_init(void) {
   } else {
     LOG_INFO("[VFS] devfs montado en /dev");
   }
+  aur_irq_init(); // <-- NUEVO
   int rc3 = vfs_mount("/proc", procfs_get_vfs_ops(), NULL);
   if (rc3 != 0) {
     LOG_ERR("[VFS] fallo al montar procfs en /proc: %d", rc3);

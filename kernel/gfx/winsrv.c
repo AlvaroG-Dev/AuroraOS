@@ -224,6 +224,10 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
     return -1;
   }
 
+  // content_lock protege el intercambio de content_buffer en window_resize
+  // (hilo del compositor, otra CPU). Orden: winsrv_lock -> content_lock.
+  unsigned long cfl = spin_lock_irqsave(&win->content_lock);
+
   // Ajustar src_x/src_y si el rectángulo destino se sale de la ventana
   // por la izquierda/arriba.
   int local_src_x = src_x;
@@ -246,11 +250,13 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
   if (dst_y + copy_h > win->content_h)
     copy_h = win->content_h - dst_y;
   if (copy_w <= 0 || copy_h <= 0) {
+    spin_unlock_irqrestore(&win->content_lock, cfl);
     spin_unlock_irqrestore(&winsrv_lock, flags);
     return 0;
   }
   // Comprobar que el rectángulo fuente no se sale del buffer.
   if (local_src_x + copy_w > src_stride) {
+    spin_unlock_irqrestore(&win->content_lock, cfl);
     spin_unlock_irqrestore(&winsrv_lock, flags);
     return -1;
   }
@@ -287,7 +293,8 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
       size_t chunk_bytes = (size_t)chunk * sizeof(uint32_t);
 
       if (copy_from_user(row_buf, src, chunk_bytes) < 0) {
-        spin_unlock_irqrestore(&winsrv_lock, flags);
+        spin_unlock_irqrestore(&win->content_lock, cfl);
+    spin_unlock_irqrestore(&winsrv_lock, flags);
         return -EFAULT;
       }
 
@@ -299,21 +306,15 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
       copied += chunk;
     }
   }
-  /*
-   * In the steady state, window_render_frame() composites content_buffer
-   * directly for the damaged rectangle. Mark the cached full surface dirty
-   * only during alpha animations, when the content must be baked into the
-   * surface that gets blended. Preserve any pre-existing dirty frame state.
-   */
-  if (win->anim_alpha < 255)
-    win->dirty = 1;
+  win->content_dirty = 1;
 
   int inv_x = win->x + dst_x;
-  int inv_y = win->y + WIN11_TITLEBAR_HEIGHT + dst_y;
+  int inv_y = win->y + window_titlebar_h(win) + dst_y;
   int inv_w = copy_w;
   int inv_h = copy_h;
 
-  spin_unlock_irqrestore(&winsrv_lock, flags);
+  spin_unlock_irqrestore(&win->content_lock, cfl);
+    spin_unlock_irqrestore(&winsrv_lock, flags);
 
   compositor_invalidate_rect((rect_t){inv_x, inv_y, inv_w, inv_h});
 
@@ -574,30 +575,14 @@ int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
   window_t *win = e->win;
   spin_unlock_irqrestore(&winsrv_lock, flags);
 
-  LOG_DEBUG("[WINSRV] set_icon: '%s' (%llu bytes, first=%02x %02x)", path,
-            (unsigned long long)size, size > 0 ? node->data[0] : 0,
-            size > 1 ? node->data[1] : 0);
+  LOG_DEBUG("[WINSRV] set_icon: '%s' (%llu bytes)", path,
+            (unsigned long long)size);
 
-  win_set_icon_bmp(win, node);
-
-  if (!win->has_icon_cache) {
-    LOG_ERR("[WINSRV] set_icon: '%s' no pudo decodificarse como BMP", path);
-    // node y buf quedan huérfanos: leak bounded, ver nota arriba.
-    return -EINVAL;
-  }
-
-  uint32_t center = win->icon_cache[9 * 18 + 9];
-  uint32_t corner = win->icon_cache[0];
-  LOG_DEBUG(
-      "[WINSRV] set_icon: cache ventana OK has=%d center=%08x corner=%08x",
-      win->has_icon_cache, center, corner);
-  if (win->taskbar_item) {
-    uint32_t tb_center = win->taskbar_item->icon_cache[10 * 20 + 10];
-    uint32_t tb_corner = win->taskbar_item->icon_cache[0];
-    LOG_DEBUG("[WINSRV] set_icon: cache taskbar has=%d center=%08x corner=%08x",
-              win->taskbar_item->has_icon_cache, tb_center, tb_corner);
-  }
-
+  // El hilo del compositor es el único que toca la ventana y su item de la
+  // taskbar/Dock: se le encola el nodo. Si el BMP no es decodificable, el
+  // Dock cae a una baldosa con el símbolo (no hay error síncrono). node y buf
+  // permanecen vivos (leak acotado por WINSRV_MAX_WINDOWS, ver nota arriba).
+  compositor_set_icon_bmp(win, node);
   return 0;
 }
 
