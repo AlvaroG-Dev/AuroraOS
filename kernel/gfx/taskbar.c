@@ -300,23 +300,6 @@ static void taskbar_draw_text_centered(uint32_t *dst, int stride, rect_t clip,
   gfx_draw_string(dst, stride, clip, tx, ty, text, color, font_id);
 }
 
-static void taskbar_draw_start_icon(uint32_t *dst, int stride, rect_t clip,
-                                    int left, int center_y, uint32_t color) {
-  int top = center_y - TASKBAR_START_ICON_SIZE / 2;
-  int sq = TASKBAR_START_ICON_SQ;
-  int gap = TASKBAR_START_ICON_GAP;
-
-  gfx_fill_rounded_rect(dst, stride, clip, (rect_t){left, top, sq, sq}, 2,
-                        color);
-  gfx_fill_rounded_rect(dst, stride, clip,
-                        (rect_t){left + sq + gap, top, sq, sq}, 2, color);
-  gfx_fill_rounded_rect(dst, stride, clip,
-                        (rect_t){left, top + sq + gap, sq, sq}, 2, color);
-  gfx_fill_rounded_rect(dst, stride, clip,
-                        (rect_t){left + sq + gap, top + sq + gap, sq, sq}, 2,
-                        color);
-}
-
 static taskbar_item_layout_t taskbar_measure_item(taskbar_item_t *item,
                                                   taskbar_fonts_t fonts) {
   taskbar_item_layout_t layout;

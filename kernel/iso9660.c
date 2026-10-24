@@ -344,49 +344,6 @@ static int iso9660_find_in_dir(iso9660_fs_t *fs, uint32_t dir_lba,
   return -ENOENT;
 }
 
-static vfs_node_t *iso9660_lookup(void *fs_priv, const char *path) {
-  iso9660_fs_t *fs = (iso9660_fs_t *)fs_priv;
-  if (!fs)
-    return NULL;
-
-  while (*path == '/')
-    path++;
-  if (*path == '\0')
-    return iso9660_make_node(fs, fs->root_lba, fs->root_size, 1, "/");
-
-  uint32_t cur_lba = fs->root_lba;
-  uint32_t cur_size = fs->root_size;
-
-  char comp[VFS_PATH_MAX];
-  while (*path) {
-    size_t clen = 0;
-    while (*path && *path != '/' && clen + 1 < sizeof(comp))
-      comp[clen++] = *path++;
-    comp[clen] = '\0';
-    while (*path == '/')
-      path++;
-
-    uint32_t next_lba = 0, next_size = 0;
-    uint8_t flags = 0;
-    int rc = iso9660_find_in_dir(fs, cur_lba, cur_size, comp, &next_lba,
-                                 &next_size, &flags);
-    if (rc != 0)
-      return NULL;
-
-    cur_lba = next_lba;
-    cur_size = next_size;
-
-    if (*path == '\0') {
-      int is_dir = !!(flags & ISO_FLAG_DIR);
-      vfs_node_t *node = iso9660_make_node(fs, cur_lba, cur_size, is_dir, comp);
-      return node;
-    }
-    if (!(flags & ISO_FLAG_DIR))
-      return NULL;
-  }
-  return NULL;
-}
-
 static int iso9660_close(vfs_node_t *node) {
   if (node && node->priv) {
     kfree(node->priv);

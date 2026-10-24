@@ -538,9 +538,6 @@ void sched_set_blocked_deadline(task_t *t, uint64_t deadline) {
   t->wake_deadline = deadline;
   spin_unlock_irqrestore(&sched_lock, flags);
 
-  if (deadline == 0) {
-    process_t *p = process_current();
-  }
 }
 
 // ===========================================================================
@@ -595,7 +592,6 @@ static int sched_task_ptr_valid(const task_t *t) {
 static void sched_kick_idle_cpu(task_t *t) {
   int me = smp_processor_id();
 
-  int target_cpu = -1;
   uint32_t dest_lapic = 0;
   int send_ipi = 0;
 
@@ -609,14 +605,13 @@ static void sched_kick_idle_cpu(task_t *t) {
       task_t *cur = sched_read_current(me);
       if (cur && cur->is_idle && sched_task_ptr_valid(cur))
         __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
-    } else if (cpu >= 0 && cpu < MAX_CPUS) {
+    } else if (cpu >= 0 && cpu < (int)MAX_CPUS) {
       task_t *cur = sched_read_current(cpu);
       if (cur && cur->is_idle && sched_task_ptr_valid(cur)) {
         __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
-        target_cpu = cpu;
         dest_lapic = per_cpu(lapic_id, cpu);
 
-        if (dest_lapic != per_cpu(lapic_id, me))
+        if (dest_lapic != (uint32_t)per_cpu(lapic_id, me))
           send_ipi = 1;
       } else if (cur && !sched_task_ptr_valid(cur)) {
         LOG_WARN("[SCHED] kick_idle: current_task[%d]=%p fuera de SLAB", cpu,
@@ -636,7 +631,7 @@ static void sched_kick_idle_cpu(task_t *t) {
   static volatile int next_cpu = 0;
   int start = __sync_fetch_and_add(&next_cpu, 1) % MAX_CPUS;
 
-  for (int i = 0; i < MAX_CPUS; i++) {
+  for (int i = 0; i < (int)MAX_CPUS; i++) {
     int cpu = (start + i) % MAX_CPUS;
     if (cpu == me)
       continue;
@@ -652,10 +647,9 @@ static void sched_kick_idle_cpu(task_t *t) {
     }
 
     __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
-    target_cpu = cpu;
     dest_lapic = per_cpu(lapic_id, cpu);
 
-    if (dest_lapic != per_cpu(lapic_id, me))
+    if (dest_lapic != (uint32_t)per_cpu(lapic_id, me))
       send_ipi = 1;
     break;
   }

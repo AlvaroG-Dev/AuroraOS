@@ -107,7 +107,7 @@ static int64_t elf_buf_read(void *ctx, uint64_t offset, size_t size,
 }
 
 // ---- núcleo: elf_load_streaming ------------------------------------------
-#define ELF_PHDR_STACK 32
+#define ELF_PHDR_STACK 16
 
 int elf_load_streaming(elf_read_fn read, void *ctx, uint64_t file_size,
                        uint64_t *pml4, uint64_t load_base, uint64_t *entry_out,

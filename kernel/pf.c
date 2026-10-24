@@ -350,8 +350,6 @@ static int handle_page_fault_inner(registers_t *regs) {
 
   int present = err & 0x01;
   int user = err & 0x04;
-  int fetch = err & 0x10;
-
   // [DIAG] Contar #PF por PID. Solo cuando el fallo viene de userland;
   // un #PF en kernel con cr2 en user no es lo que buscamos.
   if (user) {

@@ -223,7 +223,9 @@ static void make_fallback_tile(taskbar_item_t *it) {
                           16, 0x30FFFFFF);
 
   /* Símbolo: se dibuja a 24x24 y se amplía con bilineal para que quede liso. */
-  uint32_t tmp[24 * 24];
+  uint32_t *tmp = (uint32_t *)kmalloc(24 * 24 * sizeof(uint32_t));
+  if (!tmp)
+    return;
   for (int i = 0; i < 24 * 24; i++)
     tmp[i] = 0;
   char sym[8];
@@ -244,6 +246,7 @@ static void make_fallback_tile(taskbar_item_t *it) {
                   FONT_ID_MAIN_BOLD);
   gfx_blit_scaled(it->dock_icon, S, clip, (S - 48) / 2, (S - 48) / 2, 48, 48,
                   tmp, 24, 24, GFX_FILTER_BILINEAR);
+  kfree(tmp);
 }
 
 static int ensure_icon(taskbar_item_t *it) {

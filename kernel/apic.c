@@ -184,7 +184,7 @@ void apic_init(void) {
 
     for (int irq = 0; irq < 16; irq++) {
       uint8_t gsi = g_irq_to_gsi[irq];
-      if (gsi >= 256)
+      if (gsi == 0xFF)
         continue;
       if (gsi_owner[gsi] == 0xFF) {
         gsi_owner[gsi] = (uint8_t)irq;

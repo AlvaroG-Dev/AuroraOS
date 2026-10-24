@@ -133,3 +133,5 @@ syscall_entry:
     or  qword [rsp + 0x10], 0x200
 
     iretq
+
+section .note.GNU-stack noalloc noexec nowrite progbits

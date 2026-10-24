@@ -2539,28 +2539,22 @@ static int64_t k_linkat(uint64_t olddfd, uint64_t oldp, uint64_t newdfd,
 // un nodo normal), y sus ioctls no van a la implementación del nodo.
 // ---------------------------------------------------------------------------
 
+struct k_sockaddr {
+  uint16_t sa_family;
+  uint8_t sa_data[14];
+};
+_Static_assert(sizeof(struct k_sockaddr) == 16, "sockaddr != 16 bytes");
+
 // Estructura ifreq (Linux x86_64): 40 bytes.
 //   char ifr_name[16];
 //   union { ... } ifr_ifru;   // 24 bytes
 struct k_ifreq {
   char ifr_name[16];
   union {
-    struct {
-      uint32_t addr;
-      char pad[20];
-    } ifr_addr;
-    struct {
-      uint32_t addr;
-      char pad[20];
-    } ifr_netmask;
-    struct {
-      uint32_t addr;
-      char pad[20];
-    } ifr_broadaddr;
-    struct {
-      uint32_t addr;
-      char pad[20];
-    } ifr_dstaddr;
+    struct k_sockaddr ifr_addr;
+    struct k_sockaddr ifr_netmask;
+    struct k_sockaddr ifr_broadaddr;
+    struct k_sockaddr ifr_dstaddr;
     struct {
       uint16_t sa_family;
       uint8_t hwaddr[14];
@@ -2606,18 +2600,19 @@ struct k_ifconf {
 // Rellena un sockaddr_in (16 bytes) con family=AF_INET y `ip` en
 // NETWORK byte order. sockaddr_in.sin_addr SIEMPRE es big-endian,
 // independientemente del endian del host.
-static void ifreq_fill_sockaddr(uint32_t ip, uint8_t out[16]) {
-  out[0] = AF_INET_; // sa_family (u16 LE en memoria)
-  out[1] = 0;
-  out[2] = 0; // sa_port (u16 BE)
-  out[3] = 0;
+static void ifreq_fill_sockaddr(uint32_t ip, struct k_sockaddr *out) {
+  uint8_t *bytes = (uint8_t *)out;
+  bytes[0] = AF_INET_; // sa_family (u16 LE en memoria)
+  bytes[1] = 0;
+  bytes[2] = 0; // sa_port (u16 BE)
+  bytes[3] = 0;
   // sa_addr: BIG-ENDIAN en memoria. El byte más significativo va primero.
-  out[4] = (uint8_t)((ip >> 24) & 0xFF);
-  out[5] = (uint8_t)((ip >> 16) & 0xFF);
-  out[6] = (uint8_t)((ip >> 8) & 0xFF);
-  out[7] = (uint8_t)(ip & 0xFF);
+  bytes[4] = (uint8_t)((ip >> 24) & 0xFF);
+  bytes[5] = (uint8_t)((ip >> 16) & 0xFF);
+  bytes[6] = (uint8_t)((ip >> 8) & 0xFF);
+  bytes[7] = (uint8_t)(ip & 0xFF);
   for (int i = 8; i < 16; i++)
-    out[i] = 0;
+    bytes[i] = 0;
 }
 
 // Lee un sockaddr_in (16 bytes) y devuelve la IP en HOST ORDER.
@@ -2688,7 +2683,7 @@ static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
       if (nl > 15)
         nl = 15;
       memcpy(out.ifr_name, p->name, nl);
-      ifreq_fill_sockaddr(p->ip, (uint8_t *)&out.ifr_ifru.ifr_addr.addr);
+      ifreq_fill_sockaddr(p->ip, &out.ifr_ifru.ifr_addr);
       uint64_t dst = (uint64_t)ifc.ifc_buf + (uint64_t)written * sizeof(out);
       if (copy_to_user((void *)dst, &out, sizeof(out)) < 0)
         return -EFAULT;
@@ -2716,7 +2711,7 @@ static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
 
   switch (req) {
   case SIOCGIFADDR:
-    ifreq_fill_sockaddr(n->ip, (uint8_t *)&r.ifr_ifru.ifr_addr.addr);
+    ifreq_fill_sockaddr(n->ip, &r.ifr_ifru.ifr_addr);
     return k_ifreq_write(arg, &r);
 
   case SIOCSIFADDR: {
@@ -2729,7 +2724,7 @@ static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
   }
 
   case SIOCGIFNETMASK:
-    ifreq_fill_sockaddr(n->netmask, (uint8_t *)&r.ifr_ifru.ifr_netmask.addr);
+    ifreq_fill_sockaddr(n->netmask, &r.ifr_ifru.ifr_netmask);
     return k_ifreq_write(arg, &r);
 
   case SIOCSIFNETMASK: {
@@ -2744,7 +2739,7 @@ static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
   case SIOCGIFBRDADDR:
   case SIOCGIFDSTADDR: {
     uint32_t bc = n->ip | ~n->netmask;
-    ifreq_fill_sockaddr(bc, (uint8_t *)&r.ifr_ifru.ifr_broadaddr.addr);
+    ifreq_fill_sockaddr(bc, &r.ifr_ifru.ifr_broadaddr);
     return k_ifreq_write(arg, &r);
   }
 

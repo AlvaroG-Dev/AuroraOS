@@ -141,7 +141,6 @@ static void ata_parse_identify(ata_device_t *dev, const uint16_t *id) {
 // ===========================================================================
 static int ata_identify(ata_device_t *dev) {
   uint16_t io = dev->channel->io_base;
-  uint16_t ctrl = dev->channel->ctrl_base;
   uint64_t timeout = ata_timeout_iters();
   int rc;
 
@@ -366,7 +365,7 @@ static int ata_apply_pair_compat(ata_device_t *dev) {
       // ---------------------------------------------------------------------
       // Caso 0: canal con un solo dispositivo. El PIIX3 soporta DMA en
       // canales incompletos, así que dejamos los modos candidatos
-      // intactos: ata_select_mode elegirá el más rápido disponible.
+      // intactos para la configuración posterior.
       // ---------------------------------------------------------------------
       LOG_INFO("[ATA] %s: canal sin peer, DMA permitido", dev->model);
     }
@@ -467,95 +466,6 @@ static int ata_apply_pair_compat(ata_device_t *dev) {
 // ===========================================================================
 // Selección de modo
 // ===========================================================================
-static int ata_select_mode(ata_device_t *dev) {
-  // LBA48 o LBA28.
-  if (dev->supports_lba48 && dev->lba48_sectors > 0) {
-    dev->use_lba48 = 1;
-    dev->num_sectors = dev->lba48_sectors;
-  } else if (dev->supports_lba && dev->lba28_sectors > 0) {
-    dev->use_lba48 = 0;
-    dev->num_sectors = dev->lba28_sectors;
-  } else {
-    return ATA_ERR_UNKNOWN;
-  }
-
-  // PIO mode más alto.
-  dev->pio_mode = 0;
-  if (dev->pio_modes & (1 << 4))
-    dev->pio_mode = 4;
-  else if (dev->pio_modes & (1 << 3))
-    dev->pio_mode = 3;
-  else if (dev->pio_modes & (1 << 2))
-    dev->pio_mode = 2;
-  else if (dev->pio_modes & (1 << 1))
-    dev->pio_mode = 1;
-
-  uint8_t pio_val = dev->pio_mode;
-  if (dev->pio_mode >= 3)
-    pio_val = dev->pio_mode - 3 + 0x08;
-
-  ata_set_features(dev->channel, dev->drive, ATA_FEATURE_TRANSFER_MODE,
-                   pio_val);
-
-  // [FIX] Aplicar compatibilidad de par ANTES de decidir UDMA/MWDMA.
-  ata_apply_pair_compat(dev);
-
-  // DMA: preferir UDMA > MWDMA > PIO.
-  dev->use_dma = 0;
-  dev->dma_mode = 0;
-
-  int ch_idx = (dev->channel->io_base == ATA_PRIMARY_IO) ? 0 : 1;
-  if (dev->supports_dma && ata_dma_is_ready(ch_idx)) {
-    if (dev->udma_modes != 0) {
-      for (int m = 6; m >= 0; m--) {
-        if (dev->udma_modes & (1 << m)) {
-          dev->dma_mode = (uint8_t)m;
-          break;
-        }
-      }
-      int rc =
-          ata_set_features(dev->channel, dev->drive, ATA_FEATURE_TRANSFER_MODE,
-                           0x40 | dev->dma_mode);
-      if (rc == ATA_OK) {
-        dev->use_dma = 1;
-        LOG_INFO("[ATA] %s: usando UDMA mode %u", dev->model, dev->dma_mode);
-      } else {
-        LOG_WARN("[ATA] %s: SET FEATURES UDMA falló (%d), probando MWDMA",
-                 dev->model, rc);
-      }
-    }
-
-    if (!dev->use_dma && dev->dma_modes != 0) {
-      for (int m = 2; m >= 0; m--) {
-        if (dev->dma_modes & (1 << m)) {
-          dev->dma_mode = (uint8_t)m;
-          break;
-        }
-      }
-      int rc =
-          ata_set_features(dev->channel, dev->drive, ATA_FEATURE_TRANSFER_MODE,
-                           0x20 | dev->dma_mode);
-      if (rc == ATA_OK) {
-        dev->use_dma = 1;
-        LOG_INFO("[ATA] %s: usando MWDMA mode %u", dev->model, dev->dma_mode);
-      } else {
-        LOG_WARN("[ATA] %s: SET FEATURES MWDMA falló (%d)", dev->model, rc);
-      }
-    }
-  }
-
-  if (!dev->use_dma) {
-    LOG_INFO("[ATA] %s: usando PIO mode %u", dev->model, dev->pio_mode);
-  }
-
-  LOG_INFO("[ATA] select_mode: %s use_dma=%d dma_mode=%d udma_modes=0x%x "
-           "dma_modes=0x%x",
-           dev->model, dev->use_dma, dev->dma_mode, dev->udma_modes,
-           dev->dma_modes);
-
-  return ATA_OK;
-}
-
 // ===========================================================================
 // Emisión de comandos PIO
 // ===========================================================================

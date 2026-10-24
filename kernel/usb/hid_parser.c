@@ -44,8 +44,11 @@ static void hid_add_fields(hid_report_t *r, uint32_t *bits,
     f->is_constant = (flags & 0x01) ? 1 : 0;
     f->bit_offset = *bits;
 
-    if (l_num_usages > 0)
-      f->usage = l_usages[c < (uint32_t)l_num_usages ? c : (l_num_usages - 1)];
+    if (l_num_usages > 0) {
+      uint32_t usage_count = (uint32_t)l_num_usages;
+      uint32_t usage_index = c < usage_count ? c : usage_count - 1;
+      f->usage = l_usages[usage_index];
+    }
     else if (l_usage_min && l_usage_max)
       f->usage = l_usage_min + c;
 

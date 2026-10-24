@@ -1,0 +1,1 @@
+KUR_NAME := hello

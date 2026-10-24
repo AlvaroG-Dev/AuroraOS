@@ -110,7 +110,8 @@ task_switch:
     ; Valor no canónico: forzar 0 y limpiar el task_t. Log 'F' por COM1.
     push rax
     mov al, 'F'
-    out 0x3F8, al
+    mov dx, 0x3F8
+    out dx, al
     pop rax
     xor edx, edx
     mov [rsi + TASK_OFF_FS_BASE], rdx
@@ -131,8 +132,11 @@ task_switch:
     je .fs_ok
     ; mismatch: log por serial
     push rax
+    push rdx
     mov al, '!'
-    out 0x3F8, al
+    mov dx, 0x3F8
+    out dx, al
+    pop rdx
     pop rax
 .fs_ok:
 
@@ -186,7 +190,8 @@ task_jump_to:
 .fs_j_zero:
     push rax
     mov al, 'J'
-    out 0x3F8, al
+    mov dx, 0x3F8
+    out dx, al
     pop rax
     xor edx, edx
     mov [rdi + TASK_OFF_FS_BASE], rdx
@@ -261,3 +266,5 @@ user_trampoline:
     xor r15, r15
 
     iretq
+
+section .note.GNU-stack noalloc noexec nowrite progbits

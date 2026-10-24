@@ -1038,7 +1038,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
   while (c->pos < end_pos && c->pos < c->len) {
     if (++guard > 100000)
       return;
-    size_t start = c->pos;
     uint8_t op = c->data[c->pos];
 
     switch (op) {

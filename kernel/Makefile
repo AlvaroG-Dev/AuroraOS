@@ -73,6 +73,7 @@ smp_trampoline.o: smp_trampoline.bin
 	        --redefine-sym _binary_smp_trampoline_bin_start=smp_trampoline_start \
 	        --redefine-sym _binary_smp_trampoline_bin_end=smp_trampoline_end \
 	        --redefine-sym _binary_smp_trampoline_bin_size=smp_trampoline_size \
+	        --add-section .note.GNU-stack=/dev/null \
 	        $< $@
 
 # ---------------------------------------------------------------------------
@@ -109,6 +110,7 @@ $(VDSO_BLOB_OBJ): $(VDSO_SO)
 	        --redefine-sym _binary_vdso_vdso_so_start=vdso_blob_start \
 	        --redefine-sym _binary_vdso_vdso_so_end=vdso_blob_end \
 	        --redefine-sym _binary_vdso_vdso_so_size=vdso_blob_size \
+	        --add-section .note.GNU-stack=/dev/null \
 	        $(VDSO_SO) $@
 
 

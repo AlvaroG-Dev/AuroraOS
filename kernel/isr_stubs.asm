@@ -338,3 +338,5 @@ msi_common:
 global isr_spurious
 isr_spurious:
     iretq
+
+section .note.GNU-stack noalloc noexec nowrite progbits

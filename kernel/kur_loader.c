@@ -760,8 +760,12 @@ int kur_load_all(const char *dir) {
     return -ENOTDIR;
   }
 
-  // Recopilar basenames .kur (32 * 64 = 2 KB en stack del kthread).
-  char names[KUR_MAX_SCAN][KUR_NAME_MAX];
+  char (*names)[KUR_NAME_MAX] =
+      (char (*)[KUR_NAME_MAX])kmalloc(KUR_MAX_SCAN * KUR_NAME_MAX);
+  if (!names) {
+    vfs_node_free(d);
+    return -ENOMEM;
+  }
   int n = 0;
 
   vfs_dirent_t ent;
@@ -828,6 +832,7 @@ int kur_load_all(const char *dir) {
 
   LOG_INFO("[KUR] kur_load_all('%s'): %d cargados, %d fallidos", dir,
            loaded, failed);
+  kfree(names);
   return loaded;
 }
 

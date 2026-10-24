@@ -82,7 +82,7 @@ shell: apps/shell/main.c $(SHELL_LIBS)
 
 syscall_linux_test: apps/syscall_linux_test/main.c
 	$(CC) $(CFLAGS) -c $< -o $@.o
-	$(LD) -o $@ $@.o $(LDFLAGS)
+	$(LD) -o $@ $@.o $(LDFLAGS) -static
 	@mkdir -p $(SYSDIR)
 	cp $@ $(SYSDIR)/
 
@@ -100,6 +100,7 @@ regen-font:
 	  echo '// Regenerar con: make -C user regen-font'; \
 	  echo '#include "font_system.h"'; \
 	  sed -e 's|#include "../font_aa.h"||' \
+	      -e '/#pragma once/d' \
 	      ../kernel/gfx/fonts/font_jetbrains_regular14.h; \
 	  echo ''; \
 	  echo 'const font_aa_t *font_system_mono(void) {'; \

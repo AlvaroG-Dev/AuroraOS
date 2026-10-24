@@ -62,7 +62,7 @@ static void fill_scalar(uint32_t *dst, uint32_t color, size_t n) {
 // ============================================================================
 // SSE2 blend (4 px por iteración)
 // ============================================================================
-__attribute__((target("sse2"))) static void
+__attribute__((target("sse2"), optimize("O2"))) static void
 blend_sse2(uint32_t *dst, const uint32_t *src, int n) {
   const __m128i zero = _mm_setzero_si128();
   const __m128i c255 = _mm_set1_epi32(255);
@@ -125,7 +125,10 @@ blend_sse41(uint32_t *dst, const uint32_t *src, int n) {
 // ============================================================================
 // AVX2 blend (8 px por iteración)
 // ============================================================================
-__attribute__((target("avx2"))) static void
+#pragma GCC push_options
+#pragma GCC target("avx2")
+#pragma GCC optimize("O2")
+static void
 blend_avx2(uint32_t *dst, const uint32_t *src, int n) {
   const __m256i zero = _mm256_setzero_si256();
   const __m256i c255 = _mm256_set1_epi32(255);
@@ -197,6 +200,7 @@ blend_avx2(uint32_t *dst, const uint32_t *src, int n) {
   for (; i < n; i++)
     dst[i] = blend_pixel_fast(src[i], dst[i]);
 }
+#pragma GCC pop_options
 
 // ============================================================================
 // SSE2/AVX2/AVX-512 copies

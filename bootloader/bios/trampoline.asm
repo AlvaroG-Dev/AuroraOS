@@ -107,7 +107,8 @@ gdt64:
     db 0x00, 0x92, 0xCF, 0x00
 gdt64_desc:
     dw gdt64_desc - gdt64 - 1
-    dq gdt64
+    dd gdt64
+    dd 0
 
 section .data
 align 8

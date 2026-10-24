@@ -4,10 +4,13 @@
 
 static volatile int depth_counter = 0;
 
+static int infinite_recurse(void);
+static int (*volatile recurse_fn)(void) = infinite_recurse;
+
 static int infinite_recurse(void) {
   volatile char buf[1024];
   buf[0] = (char)depth_counter++;
-  int r = infinite_recurse();
+  int r = recurse_fn();
   return r + buf[0];
 }
 

@@ -802,11 +802,8 @@ void gfx_fill_rounded_rect_gradient_v(uint32_t *dst, int dst_stride,
 
   int denom = rect.h > 1 ? rect.h - 1 : 1;
   int r = radius;
-  int x_left_corner_end = rect.x + r;
-  int x_right_corner_beg = rect.x + rect.w - r;
   int y_top_corner_end = rect.y + r;
   int y_bot_corner_beg = rect.y + rect.h - r;
-  int r_fp = r << 8;
 
   for (int py = sy; py < ey; py++) {
     int t = ((py - rect.y) * 256) / denom;

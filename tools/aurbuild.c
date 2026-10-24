@@ -460,7 +460,13 @@ int main(int argc, char **argv) {
     return 2;
   }
   if (args.name[0] == '\0') {
-    snprintf(args.name, sizeof(args.name), "%s", basename_dup(out));
+    const char *default_name = basename_dup(out);
+    size_t name_len = strlen(default_name);
+    if (name_len >= sizeof(args.name)) {
+      fprintf(stderr, "name demasiado largo: %s\n", default_name);
+      return 2;
+    }
+    memcpy(args.name, default_name, name_len + 1);
   }
 
   // Leer el ELF

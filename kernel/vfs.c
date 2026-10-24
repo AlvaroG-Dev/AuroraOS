@@ -894,7 +894,10 @@ int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
   if (!(node->flags & VFS_DIRECTORY))
     return -ENOTDIR;
 
-  char mount_names[MAX_SYNTH_MOUNTS][VFS_PATH_MAX];
+  char (*mount_names)[VFS_PATH_MAX] =
+      (char (*)[VFS_PATH_MAX])kmalloc(MAX_SYNTH_MOUNTS * VFS_PATH_MAX);
+  if (!mount_names)
+    return -ENOMEM;
   size_t mount_count =
       collect_child_mounts(node->name, mount_names, MAX_SYNTH_MOUNTS);
 
@@ -906,6 +909,7 @@ int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
     out->name[bl] = '\0';
     out->type = VFS_DIRECTORY;
     out->size = 0;
+    kfree(mount_names);
     return 0;
   }
 
@@ -913,14 +917,18 @@ int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
     out->name[0] = '\0';
     out->type = 0;
     out->size = 0;
+    kfree(mount_names);
     return 0;
   }
 
   // Sin mounts hijas no hay que filtrar ni renumerar entradas. Delegar
   // directamente evita recorrer 0..index por cada readdir(index), lo que
   // convertía getdents64 en O(n²) incluso con un FS que indexa rápido.
-  if (mount_count == 0)
-    return node->ops->readdir(node, index, out);
+  if (mount_count == 0) {
+    int rc = node->ops->readdir(node, index, out);
+    kfree(mount_names);
+    return rc;
+  }
 
   // Delegamos al FS saltando entries cuya basename coincida con una
   // mount (ya la servimos arriba). Búsqueda lineal — los directorios
@@ -939,12 +947,15 @@ int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
   for (;;) {
     vfs_dirent_t e;
     int rc = node->ops->readdir(node, probe, &e);
-    if (rc != 0)
+    if (rc != 0) {
+      kfree(mount_names);
       return rc;
+    }
     if (e.name[0] == '\0') {
       out->name[0] = '\0';
       out->type = 0;
       out->size = 0;
+      kfree(mount_names);
       return 0;
     }
     probe++;
@@ -966,6 +977,7 @@ int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
         cur->inner = inner + 1;
         cur->probe = probe;
       }
+      kfree(mount_names);
       return 0;
     }
     seen++;

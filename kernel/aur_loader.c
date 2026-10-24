@@ -1,6 +1,7 @@
 // kernel/aur_loader.c
 #include "aur_loader.h"
 #include "elf.h"
+#include "heap.h"
 #include "klog.h"
 #include "string.h"
 #include "uaccess.h"
@@ -121,9 +122,13 @@ int aur_loader_parse_streaming(elf_read_fn read, void *ctx,
   if (ehdr.e_shoff + sh_bytes > file_size)
     return -ENOEXEC;
 
-  Elf64_Shdr shdrs[256];
-  if (read(ctx, ehdr.e_shoff, (size_t)sh_bytes, shdrs) != (int64_t)sh_bytes)
+  Elf64_Shdr *shdrs = (Elf64_Shdr *)kmalloc((size_t)sh_bytes);
+  if (!shdrs)
+    return -ENOMEM;
+  if (read(ctx, ehdr.e_shoff, (size_t)sh_bytes, shdrs) != (int64_t)sh_bytes) {
+    kfree(shdrs);
     return -EIO;
+  }
 
   for (int i = 0; i < ehdr.e_shnum; i++) {
     if (shdrs[i].sh_type != SHT_PROGBITS)
@@ -143,12 +148,23 @@ int aur_loader_parse_streaming(elf_read_fn read, void *ctx,
       continue;
 
     // It's a .aur section. Read the whole blob and parse it.
-    uint8_t blob[AUR_MAX_BLOB_SIZE];
+    uint8_t *blob = (uint8_t *)kmalloc((size_t)shdrs[i].sh_size);
+    if (!blob) {
+      kfree(shdrs);
+      return -ENOMEM;
+    }
     if (read(ctx, shdrs[i].sh_offset, shdrs[i].sh_size, blob) !=
-        (int64_t)shdrs[i].sh_size)
+        (int64_t)shdrs[i].sh_size) {
+      kfree(blob);
+      kfree(shdrs);
       return -EIO;
-    return aur_parse_blob(blob, shdrs[i].sh_size, out);
+    }
+    int rc = aur_parse_blob(blob, shdrs[i].sh_size, out);
+    kfree(blob);
+    kfree(shdrs);
+    return rc;
   }
 
+  kfree(shdrs);
   return -ENOENT;
 }

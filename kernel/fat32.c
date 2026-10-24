@@ -309,7 +309,7 @@ static inline uint64_t cluster_to_sector(const fat32_fs_t *fs, uint32_t c) {
 // cacheada entera; FSInfo/superbloque siguen directos a bdev_*.
 //
 // Coherencia: las escrituras marcan el slot dirty. Se vuelcan a disco en
-// fat32_sync_locked (datos → FAT → FSInfo → flush) y en fat32_umount.
+// fat32_sync_full_locked (datos → FAT → FSInfo → flush) y en fat32_umount.
 // Todos los accesos al cache están ya bajo fs->lock.
 // ===========================================================================
 
@@ -373,19 +373,6 @@ static fat32_bcache_slot_t *bcache_lookup(fat32_bcache_t *c, uint64_t lba) {
       return s;
   }
   return NULL;
-}
-
-static void bcache_unlink(fat32_bcache_t *c, fat32_bcache_slot_t *s) {
-  uint32_t h = bcache_hash(s->lba);
-  fat32_bcache_slot_t **pp = &c->hash[h];
-  while (*pp) {
-    if (*pp == s) {
-      *pp = s->hnext;
-      s->hnext = NULL;
-      return;
-    }
-    pp = &(*pp)->hnext;
-  }
 }
 
 static void bcache_link(fat32_bcache_t *c, fat32_bcache_slot_t *s) {
@@ -655,7 +642,7 @@ static int fat32_bcache_free(fat32_fs_t *fs) {
 }
 
 // Lee el siguiente cluster de la FAT. Devuelve <0 en error.
-static int64_t fat32_fat_get(const fat32_fs_t *fs, uint32_t cluster) {
+static int64_t fat32_fat_get(fat32_fs_t *fs, uint32_t cluster) {
   // [PR 3.1] Fast path con caché.
   if (fs->fat_cache) {
     if (cluster >= fs->fat_entries)
@@ -1197,7 +1184,6 @@ static int fat32_sync_impl(fat32_fs_t *fs, int full) {
   return 0;
 }
 
-static int fat32_sync_locked(fat32_fs_t *fs) { return fat32_sync_impl(fs, 0); }
 static int fat32_sync_full_locked(fat32_fs_t *fs) {
   return fat32_sync_impl(fs, 1);
 }
@@ -1278,7 +1264,7 @@ static int fat32_modify_dirent(fat32_fs_t *fs, uint64_t lba, uint32_t off,
   int rc = (fat32_bwrite(fs, lba, 1, buf) == 0) ? 0 : -EIO;
   kfree(buf);
   // [FIX] No flush aquí. Todas las rutas de escritura llaman a
-  // fat32_sync_locked() al final, que ya hace el flush. Con FAT
+  // fat32_sync_full_locked() al final, que ya hace el flush. Con FAT
   // llena esto son varios flush por operación que se anulan.
   return rc;
 }
@@ -3035,7 +3021,7 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
 
     // Fichero → fichero: borrar el destino y continuar con el rename.
     // Lo hace en el mismo transaction group que el resto (el
-    // fat32_sync_locked() final lo persiste todo junto).
+    // fat32_sync_full_locked() final lo persiste todo junto).
     rc = fat32_delete_entry(fs, dst_parent_cluster, dst_name);
     if (rc != 0)
       return rc;

@@ -269,3 +269,5 @@ gdt:
 gdt_desc:
     dw gdt_desc - gdt - 1
     dd gdt
+
+section .note.GNU-stack noalloc noexec nowrite progbits

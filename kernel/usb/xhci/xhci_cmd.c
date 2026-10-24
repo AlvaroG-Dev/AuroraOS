@@ -6,8 +6,6 @@
 #include "xhci.h"
 #include "xhci_ring.h"
 
-static bool has_pending_cmd(void *arg) { return g_pending_cmd_count > 0; }
-
 static int xhci_cmd_wait(xhci_trb_t *trb, uint32_t timeout_ms,
                          xhci_trb_t *out_evt) {
   if (!g_xhci.initialized || !trb)

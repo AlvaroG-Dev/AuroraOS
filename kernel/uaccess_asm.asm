@@ -128,3 +128,5 @@ raw_strncpy_from_user_fixup:
     pop rsi
     pop rdi
     ret
+
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -19,3 +19,5 @@ extern raw_strncpy_from_user_fixup
     dq raw_strncpy_from_user_fixup
     dq 0
     dq 0
+
+section .note.GNU-stack noalloc noexec nowrite progbits

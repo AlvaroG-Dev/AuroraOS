@@ -673,18 +673,7 @@ size_t klog_size(void) { return KLOG_RING_SIZE; }
 // Helpers de estado de arranque (estilo Linux)
 //
 // Todos comparten patrón: acquire → reentry check → emitir → release.
-// boot_vprintf_locked() reusa la lógica de formato de klog_vprintf_locked
-// pero NO emite newline al final; el llamante decide si cerrar la línea.
 // ---------------------------------------------------------------------------
-static void boot_vprintf_locked(klog_level_t level, const char *fmt,
-                                va_list ap) {
-  emit_prefix(level);
-  // Reusamos el formateador principal, pero sin el '\n' automático:
-  // klog_vprintf_locked() ya no añade '\n' por sí solo (lo hace
-  // klog_printf). Así que podemos llamarlo directamente.
-  klog_vprintf_locked(level, fmt, ap);
-}
-
 void klog_boot_step(const char *fmt, ...) {
   if (!klog_ready || !fmt)
     return;

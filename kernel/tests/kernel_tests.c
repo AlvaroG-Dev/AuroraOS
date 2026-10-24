@@ -653,7 +653,7 @@ static void test_elf_relocation_overflow(void) {
   int rc = elf_load(image, sizeof(image), pml4, load_base, &entry);
 
   TEST_ASSERT(rc != 0, "elf_load aceptó overflow en p_vaddr + load_base");
-  TEST_ASSERT(pml4[PML4_INDEX(0x1000)] == 0,
+  TEST_ASSERT(pml4[PML4_INDEX(0x1000ULL)] == 0,
               "ELF inválido modificó el PML4 antes de ser rechazado");
 
   // [FIX tests-parallel] Se ha ELIMINADO el check de
@@ -1607,8 +1607,8 @@ static void test_smp_task_migration_canary(void) {
   // wait queue. Esto evita despertar demasiado pronto, entre el flag local
   // del test y wq_add_locked().
   uint64_t deadline = sched_get_ticks() + 3000;
-  while (__atomic_load_n((task_t *volatile *)&waiter->waiting_on,
-                         __ATOMIC_ACQUIRE) != &g_smp_mig_wq) {
+  while (__atomic_load_n(&waiter->waiting_on, __ATOMIC_ACQUIRE) !=
+         &g_smp_mig_wq) {
     TEST_ASSERT(sched_get_ticks() < deadline,
                 "timeout esperando waiter en la wait queue");
     if (sched_get_ticks() >= deadline)
@@ -3211,7 +3211,7 @@ static void test_fat32_cache_speedup(void) {
     freq = 2000000000ULL;
 
   uint64_t mid = n->size / 2;
-  uint8_t buf[4096];
+  static uint8_t buf[4096];
 
   uint32_t lo, hi;
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -3647,7 +3647,7 @@ static void test_fat32_write_extend(void) {
   TEST_ASSERT(n != NULL, "lookup");
   if (n) {
     // Escribir 3 KB (varios clusters, cluster_size=512).
-    uint8_t pattern[3072];
+    static uint8_t pattern[3072];
     for (size_t i = 0; i < sizeof(pattern); i++)
       pattern[i] = (uint8_t)(i * 7);
 
@@ -3737,7 +3737,7 @@ static void test_fat32_truncate_shrink(void) {
   vfs_node_t *n = vfs_lookup("/fat_test/w4.txt");
   TEST_ASSERT(n != NULL, "lookup");
   if (n) {
-    uint8_t buf[2048];
+    static uint8_t buf[2048];
     memset(buf, 0xAA, sizeof(buf));
     TEST_ASSERT(n->ops->write(n, 0, sizeof(buf), buf) == (int64_t)sizeof(buf),
                 "write");
@@ -4436,7 +4436,6 @@ static void test_pty_echo(void) {
   TEST_ASSERT(buf[0] == 'a', "eco incorrecto: '%c'", buf[0]);
 
   // El slave en canon NO debe haber expuesto 'a' hasta el \n.
-  char slave_buf[8] = {0};
   // Lectura no bloqueante: usamos pty_slave_readable para comprobar
   // que no hay nada, y solo entonces hacemos el read.
   TEST_ASSERT(!pty_slave_readable(p),
@@ -5589,6 +5588,8 @@ static void test_irq_threaded_basic(void) {
   TEST_ASSERT(g_irqtest_ack_count == 0, "ack corrió tras irq_free (%d)",
               g_irqtest_ack_count);
 }
+REGISTER_TEST_FLAGS("irq: threaded ack → thread_fn",
+                    test_irq_threaded_basic, TEST_FLAG_BLOCKING);
 
 // ---------------------------------------------------------------------------
 // [Fase 1.3] IRQ threaded: thread_fn == NULL → solo ack, sin kthread.
@@ -5620,6 +5621,83 @@ static void test_irq_threaded_ack_only(void) {
   irq_free(TEST_IRQ);
 }
 REGISTER_TEST("irq: threaded ack-only sin kthread", test_irq_threaded_ack_only);
+
+// Tests excluded from automatic boot execution remain available for explicit
+// invocation without placing them in the runner's .tests section.
+const test_fn_t kernel_manual_test_functions[] = {
+    test_tarfs_symlink_midpath,
+    test_fat32_orphan_repair,
+    test_fat32_io_error_propagated,
+    test_fat32_orphan_detect,
+    test_fat32_cluster_out_of_range,
+    test_fat32_fat_cycle_detect,
+    test_fat32_bpb_fuzz,
+    test_fat32_rename_errors,
+    test_fat32_rename_move_dir,
+    test_fat32_rename_lfn,
+    test_fat32_rename_file_same_dir,
+    test_fat32_mkdir_readdir_unlink,
+    test_fat32_truncate_grow,
+    test_fat32_write_to_directory_fails,
+    test_fat32_write_persist,
+    test_fat32_truncate_to_zero,
+    test_fat32_truncate_shrink,
+    test_fat32_write_partial_overwrite,
+    test_fat32_write_extend,
+    test_fat32_write_small,
+    test_fat32_lfn_alias_collision,
+    test_fat32_persistence_after_remount,
+    test_fat32_lfn_create_and_readdir,
+    test_fat32_mkdir_not_empty,
+    test_fat32_create_file_empty,
+    test_fat32_mkdir_unlink,
+    test_fat32_alloc_free_chain,
+    test_vfs_tarfs_root_still_works,
+    test_vfs_read_all_tarfs,
+    test_vfs_path_normalization,
+    test_sched_set_blocked_deadline,
+    test_paging_invalidate_tlb_global_smoke,
+    test_ipi_tlb_shootdown_roundtrip,
+    test_ahci_latencia,
+    test_ahci_read_oob,
+    test_ahci_read_4k,
+    test_ahci_read_sector0,
+    test_ahci_sda_detected,
+    test_ahci_controller_detected,
+    test_ata_dma_read_4k,
+    test_ata_dma_bmide_ready,
+    test_atapi_read_oob,
+    test_atapi_read_pvd,
+    test_atapi_sr0_media,
+    test_atapi_sr0_sector_size,
+    test_atapi_sr0_read_only,
+    test_atapi_sr0_detected,
+    test_ata_read_oob,
+    test_ata_multi_sector_read,
+    test_ata_read_sector0,
+    test_ata_hda_capacity,
+    test_ata_hda_detected,
+    test_sched_need_resched_atomic,
+    test_sched_stale_timeout_requeue,
+    test_sched_timeout_more_than_16_queues,
+    test_smp_task_migration_canary,
+    test_smp_ipi_wakeup,
+    test_smp_aps_status,
+    test_lapic_timer_tick,
+    test_lapic_timer_running,
+    test_apic_bsp_id,
+    test_paging_remap_updates_phys,
+    test_paging_split_huge_preserves_nx,
+    test_paging_unmap_rejects_huge_page,
+    test_paging_special_mapping_lifetime,
+    test_paging_map_rollback,
+    test_pmm_double_free_range_buddy,
+    test_pmm_double_free_page,
+    test_slab_late_free_after_release,
+};
+const size_t kernel_manual_test_function_count =
+    sizeof(kernel_manual_test_functions) /
+    sizeof(kernel_manual_test_functions[0]);
 
 // ===========================================================================
 // [FASE 1.4] Async block I/O

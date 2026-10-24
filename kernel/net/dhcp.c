@@ -345,8 +345,6 @@ static void dhcp_write_resolv_conf(uint32_t dns) {
 // ---------------------------------------------------------------------------
 // Kthread principal.
 // ---------------------------------------------------------------------------
-static void dhcp_never(void *arg) { (void)arg; }
-
 static void dhcp_sleep_ms(uint64_t ms) {
   wait_queue_t wq;
   wait_queue_init(&wq);
