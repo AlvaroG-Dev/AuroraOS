@@ -38,12 +38,40 @@
 #include "../test.h"
 #include "../time.h"
 #include "../usb/usb.h"
+#include "../usb/usb_proxy.h"
 #include "../usb/usb_storage.h"
 #include "../usb/xhci/xhci.h"
 #include "../usb/xhci/xhci_ring.h"
 #include "../vfs.h"
+#include "../wait.h"
 #include "../workqueue.h"
 #include "memlayout.h"
+
+// epoll EPOLLET: cada suscripción lleva su contador de despertares y la baja
+// es por (sub, seq), sin tocar la otra suscripción sobre la misma wq.
+static void test_wait_subscribe_seq(void) {
+  wait_queue_t target, sub;
+  wait_queue_init(&target);
+  wait_queue_init(&sub);
+  uint32_t seq_a = 0, seq_b = 0;
+
+  TEST_ASSERT(wait_queue_subscribe_seq(&target, &sub, &seq_a) == 0, "sub a");
+  TEST_ASSERT(wait_queue_subscribe_seq(&target, &sub, &seq_b) == 0, "sub b");
+
+  wake_up_all(&target);
+  TEST_ASSERT(seq_a == 1 && seq_b == 1, "ambos contadores suben");
+
+  wait_queue_unsubscribe_seq(&target, &sub, &seq_a);
+  wake_up_all(&target);
+  TEST_ASSERT(seq_a == 1, "a dado de baja no cambia");
+  TEST_ASSERT(seq_b == 2, "b sigue suscrito");
+
+  wait_queue_unsubscribe_seq(&target, &sub, &seq_b);
+  wake_up_all(&target);
+  TEST_ASSERT(seq_b == 2, "b dado de baja no cambia");
+  TEST_ASSERT(target.subs == NULL, "sin suscripciones residuales");
+}
+REGISTER_TEST("wait: subscribe_seq por entrada", test_wait_subscribe_seq);
 
 static void test_pipe_poll_readiness(void) {
   vfs_node_t *read_end = NULL;
@@ -2032,6 +2060,93 @@ static void test_blk_lookup_missing(void) {
   TEST_ASSERT(d == NULL, "blk_lookup('nonexistent') != NULL");
 }
 REGISTER_TEST("blk: lookup de disco inexistente", test_blk_lookup_missing);
+
+// [FASE 5.2] Round-trip de datos por /dev/blkproxy (ahci.aur). Solo corre
+// con AHCI en Ring 3. 1100 sectores > 2 * max_sectors(512): ejercita el
+// troceado de bios del kernel. Restaura el contenido original al acabar.
+static void blk_roundtrip_sda(void) {
+  block_device_t *sda = blk_lookup("sda");
+  if (!sda || sda->sector_size != 512) {
+    test_skip("sda no existe o no es de 512 B");
+    return;
+  }
+
+  const uint32_t n = 1100;
+  if (sda->num_sectors < n + 8) {
+    test_skip("sda demasiado pequeño");
+    return;
+  }
+  const uint64_t base = sda->num_sectors - n;
+  const size_t bytes = (size_t)n * 512;
+
+  uint8_t *orig = (uint8_t *)kmalloc(bytes);
+  uint8_t *pat = (uint8_t *)kmalloc(bytes);
+  uint8_t *rb = (uint8_t *)kmalloc(bytes);
+  TEST_ASSERT(orig && pat && rb, "kmalloc falló");
+  if (!orig || !pat || !rb)
+    goto out;
+
+  int rc = bdev_read(sda, base, n, orig);
+  TEST_ASSERT(rc == 0, "lectura inicial falló: %d", rc);
+  if (rc != 0)
+    goto out;
+
+  for (size_t i = 0; i < bytes; i++)
+    pat[i] = (uint8_t)(i * 7 + (i >> 9) + 13);
+
+  rc = bdev_write(sda, base, n, pat);
+  TEST_ASSERT(rc == 0, "escritura de %u sectores falló: %d", n, rc);
+  rc = bdev_flush(sda);
+  TEST_ASSERT(rc == 0, "flush falló: %d", rc);
+
+  memset(rb, 0, bytes);
+  rc = bdev_read(sda, base, n, rb);
+  TEST_ASSERT(rc == 0, "relectura falló: %d", rc);
+  TEST_ASSERT(rc == 0 && memcmp(rb, pat, bytes) == 0,
+              "los datos leídos difieren de los escritos");
+
+  // Restaurar y verificar.
+  rc = bdev_write(sda, base, n, orig);
+  TEST_ASSERT(rc == 0, "restauración falló: %d", rc);
+  bdev_flush(sda);
+  rc = bdev_read(sda, base, n, rb);
+  TEST_ASSERT(rc == 0 && memcmp(rb, orig, bytes) == 0,
+              "el contenido original no se restauró");
+
+  // Fuera de rango: debe fallar sin llegar al driver.
+  rc = bdev_read(sda, sda->num_sectors, 1, rb);
+  TEST_ASSERT(rc < 0, "lectura fuera de rango debía fallar");
+
+out:
+  if (orig)
+    kfree(orig);
+  if (pat)
+    kfree(pat);
+  if (rb)
+    kfree(rb);
+}
+
+static void test_blkproxy_roundtrip(void) {
+  if (!ahci_user_mode()) {
+    test_skip("AHCI en modo kernel (make AHCI_USER=1 para activarlo)");
+    return;
+  }
+  blk_roundtrip_sda();
+}
+REGISTER_TEST_FLAGS("blkproxy: round-trip multi-chunk por ahci.aur",
+                    test_blkproxy_roundtrip, TEST_FLAG_BLOCKING);
+
+// [FASE 5.4] Mismo round-trip sobre un disco USB-storage servido por
+// xhci.aur (bulk IN/OUT, troceado de 64 KiB en usb_proxy).
+static void test_xhci_user_roundtrip(void) {
+  if (!xhci_user_mode()) {
+    test_skip("xHCI en modo kernel (make XHCI_USER=1 para activarlo)");
+    return;
+  }
+  blk_roundtrip_sda();
+}
+REGISTER_TEST_FLAGS("xhci.aur: round-trip bulk multi-chunk (usb-storage)",
+                    test_xhci_user_roundtrip, TEST_FLAG_BLOCKING);
 
 // ---------------------------------------------------------------------------
 // ATA (driver completo)

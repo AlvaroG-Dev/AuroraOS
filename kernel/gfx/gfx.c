@@ -89,49 +89,68 @@ static inline uint32_t smooth_ring_alpha(int diff_fp, uint32_t base_alpha) {
 // dibuja (alpha=0 en la LUT). El cuerpo de la ventana cubre esa zona por
 // su cuenta.
 // ---------------------------------------------------------------------------
-/* BLUR y OFFSET_Y vienen de theme.h. D2_MAX debe cubrir (R + BLUR)^2: antes
- * valía 2*BLUR^2+4 y cortaba la sombra a mitad de camino (borde duro). */
-#define AURORA_SHADOW_ALPHA_MAX 90
+/* Dos capas (theme.h): contacto (corta, casi sin desplazar) y ambiental
+ * (ancha, desplazada hacia abajo). Cada una tiene su LUT indexada por d² hasta
+ * (R + alcance)², así el bucle no hace raíces. Dentro de la forma de cada capa
+ * el alpha es máximo: con desplazamiento > 0 la forma asoma por debajo de la
+ * ventana y si fuera 0 quedaría una franja sin sombra pegada al borde. El
+ * cuerpo de la ventana tapa el resto. */
 #define AURORA_SHADOW_RADIUS AURORA_CORNER_RADIUS
-#define AURORA_SHADOW_D2_MAX                                                   \
+#define SHADOW_AMB_D2_MAX                                                      \
   ((AURORA_SHADOW_RADIUS + AURORA_SHADOW_BLUR) *                               \
        (AURORA_SHADOW_RADIUS + AURORA_SHADOW_BLUR) +                           \
    1)
+#define SHADOW_KEY_D2_MAX                                                      \
+  ((AURORA_SHADOW_RADIUS + AURORA_SHADOW_KEY_BLUR) *                           \
+       (AURORA_SHADOW_RADIUS + AURORA_SHADOW_KEY_BLUR) +                       \
+   1)
 
-static uint8_t g_shadow_lut[AURORA_SHADOW_D2_MAX];
+static uint8_t g_shadow_amb[SHADOW_AMB_D2_MAX];
+static uint8_t g_shadow_key[SHADOW_KEY_D2_MAX];
 static int g_shadow_lut_ready = 0;
 
-static void shadow_lut_init(void) {
-  if (g_shadow_lut_ready)
-    return;
-  const int BLUR = AURORA_SHADOW_BLUR;
-  const int AMAX = AURORA_SHADOW_ALPHA_MAX;
+/* Caída suave de amax (sdf = 0) a 0 (sdf = reach): smoothstep al cuadrado,
+ * que deja una cola larga y difusa como la de macOS. */
+static void shadow_fill_lut(uint8_t *lut, int d2_max, int reach, int amax) {
   const int R = AURORA_SHADOW_RADIUS;
-  for (int d2 = 0; d2 < AURORA_SHADOW_D2_MAX; d2++) {
-    /* sqrt entero por búsqueda lineal (d2 < 400 → máximo 20 iteraciones) */
+  for (int d2 = 0; d2 < d2_max; d2++) {
     int d = 0;
     while ((d + 1) * (d + 1) <= d2)
       d++;
     int sdf = d - R;
     if (sdf < 0) {
-      /* Dentro de la forma de la sombra: alpha máximo. Con OFFSET_Y > 0 la
-       * forma desplazada asoma por debajo de la ventana; si aquí fuera 0
-       * quedaba una franja sin sombra pegada al borde inferior. El cuerpo
-       * de la ventana tapa el resto. */
-      g_shadow_lut[d2] = (uint8_t)AMAX;
+      lut[d2] = (uint8_t)amax;
       continue;
     }
-    if (sdf >= BLUR) {
-      g_shadow_lut[d2] = 0;
+    if (sdf >= reach) {
+      lut[d2] = 0;
       continue;
-    } /* muy lejos */
-    /* Falloff smoothstep: al borde (sdf=0) alpha=AMAX, cae suave a 0 en
-     * sdf=BLUR (cola larga, sin escalón). x en 0..1024. */
-    int x = ((BLUR - sdf) * 1024) / BLUR;
-    int s = (3 * x * x - (2 * x * x * x) / 1024) / 1024; /* 0..1024 */
-    g_shadow_lut[d2] = (uint8_t)((AMAX * s) / 1024);
+    }
+    int x = ((reach - sdf) * 1024) / reach;              /* 1024 -> 0 */
+    int s = (3 * x * x - (2 * x * x * x) / 1024) / 1024; /* smoothstep */
+    s = (s * s) / 1024;
+    lut[d2] = (uint8_t)((amax * s) / 1024);
   }
+}
+
+static void shadow_lut_init(void) {
+  if (g_shadow_lut_ready)
+    return;
+  shadow_fill_lut(g_shadow_amb, SHADOW_AMB_D2_MAX, AURORA_SHADOW_BLUR,
+                  AURORA_SHADOW_AMB_ALPHA);
+  shadow_fill_lut(g_shadow_key, SHADOW_KEY_D2_MAX, AURORA_SHADOW_KEY_BLUR,
+                  AURORA_SHADOW_KEY_ALPHA);
   g_shadow_lut_ready = 1;
+}
+
+/* d² de (px, py) al rectángulo redondeado [x0, x1] x [y0, y1] (ya encogido R)
+ * desplazado oy hacia abajo. */
+static inline int shadow_d2(int px, int py, int x0, int y0, int x1, int y1,
+                            int oy) {
+  int sy = py - oy;
+  int dy = sy < y0 ? y0 - sy : (sy > y1 ? sy - y1 : 0);
+  int dx = px < x0 ? x0 - px : (px > x1 ? px - x1 : 0);
+  return dx * dx + dy * dy;
 }
 
 void gfx_draw_shadow_aurora_ex(uint32_t *dst, int dst_stride, rect_t clip,
@@ -145,39 +164,24 @@ void gfx_draw_shadow_aurora_ex(uint32_t *dst, int dst_stride, rect_t clip,
 
   int wx = win_rect.x, wy = win_rect.y;
   int ww = win_rect.w, wh = win_rect.h;
-  const int BLUR = AURORA_SHADOW_BLUR;
   const int R = corner_radius;
+  const int OA = AURORA_SHADOW_OFFSET_Y, OK = AURORA_SHADOW_KEY_OFFSET_Y;
 
   int sx0 = wx + R, sy0 = wy + R;
   int sx1 = wx + ww - R, sy1 = wy + wh - R;
 
-  int bx0 = wx - BLUR;
-  int by0 = wy - BLUR + AURORA_SHADOW_OFFSET_Y;
-  int bx1 = wx + ww + BLUR;
-  int by1 = wy + wh + BLUR + AURORA_SHADOW_OFFSET_Y;
-
-  if (bx0 < clip.x)
-    bx0 = clip.x;
-  if (by0 < clip.y)
-    by0 = clip.y;
-  if (bx1 > clip.x + clip.w)
-    bx1 = clip.x + clip.w;
-  if (by1 > clip.y + clip.h)
-    by1 = clip.y + clip.h;
+  /* La capa ambiental es la más grande: su caja contiene a la de contacto. */
+  int bx0 = MAX(wx - AURORA_SHADOW_BLUR, clip.x);
+  int by0 = MAX(MIN(wy - AURORA_SHADOW_BLUR + OA,
+                    wy - AURORA_SHADOW_KEY_BLUR + OK),
+                clip.y);
+  int bx1 = MIN(wx + ww + AURORA_SHADOW_BLUR, clip.x + clip.w);
+  int by1 = MIN(wy + wh + AURORA_SHADOW_BLUR + OA, clip.y + clip.h);
   if (bx0 >= bx1 || by0 >= by1)
     return;
 
   for (int py = by0; py < by1; py++) {
     uint32_t *row = &dst[py * dst_stride];
-    int sy = py - AURORA_SHADOW_OFFSET_Y;
-    int dy = 0;
-    if (sy < sy0)
-      dy = sy0 - sy;
-    else if (sy > sy1)
-      dy = sy - sy1;
-    int dy2 = dy * dy;
-    if (dy2 >= AURORA_SHADOW_D2_MAX)
-      continue;
 
     /* El núcleo de la ventana (rect encogido R px) siempre queda cubierto por
      * el cuerpo: no gastar tiempo sombreándolo. */
@@ -192,20 +196,18 @@ void gfx_draw_shadow_aurora_ex(uint32_t *dst, int dst_stride, rect_t clip,
         px = skip1 - 1;
         continue;
       }
-      int dx = 0;
-      if (px < sx0)
-        dx = sx0 - px;
-      else if (px > sx1)
-        dx = px - sx1;
-
-      int d2 = dx * dx + dy2;
-      if (d2 >= AURORA_SHADOW_D2_MAX)
-        continue;
-
-      uint32_t a = ((uint32_t)g_shadow_lut[d2] * (uint32_t)strength256) >> 8;
+      int da = shadow_d2(px, py, sx0, sy0, sx1, sy1, OA);
+      int dk = shadow_d2(px, py, sx0, sy0, sx1, sy1, OK);
+      uint32_t a = 0;
+      if (da < SHADOW_AMB_D2_MAX)
+        a += g_shadow_amb[da];
+      if (dk < SHADOW_KEY_D2_MAX)
+        a += g_shadow_key[dk];
+      a = (a * (uint32_t)strength256) >> 8;
       if (a == 0)
         continue;
-
+      if (a > 255)
+        a = 255;
       row[px] = blend_pixel_fast((a << 24), row[px]);
     }
   }
@@ -303,136 +305,93 @@ void gfx_blend_rect(uint32_t *dst, int dst_stride, rect_t clip, rect_t rect,
   }
 }
 
-void gfx_fill_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
-                           rect_t rect, int radius, uint32_t color) {
+// ---------------------------------------------------------------------------
+// Rectángulos redondeados por tramos. La geometría (y por tanto cada píxel) es
+// la misma que la de la versión por píxel original: misma distancia al centro
+// del arco y misma precedencia entre esquinas cuando el radio supera la mitad
+// del lado. La diferencia es que solo las columnas de las esquinas se evalúan
+// una a una; el resto de cada fila es un tramo de color constante. Antes el
+// borde recorría el área entera del rectángulo píxel a píxel, y eso es lo que
+// costaba cada vez que el terminal actualizaba su contenido.
+// ---------------------------------------------------------------------------
+
+/* Tramo [x0, x1) de una fila con color constante. */
+static inline void span_fill(uint32_t *row, int x0, int x1, uint32_t color) {
+  if (x0 >= x1)
+    return;
+  if ((color >> 24) == 0xFF) {
+    simd_fill_row(&row[x0], color, (size_t)(x1 - x0));
+    return;
+  }
+  for (int px = x0; px < x1; px++)
+    row[px] = blend_pixel_fast(color, row[px]);
+}
+
+static inline void corner_fill_px(uint32_t *p, int cx, int cy, int r_fp,
+                                  uint32_t base_alpha, uint32_t rgb) {
+  int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
+  uint32_t a = smooth_edge_alpha(dist_fp, r_fp, base_alpha);
+  if (a)
+    *p = blend_pixel_fast((a << 24) | rgb, *p);
+}
+
+static inline void corner_ring_px(uint32_t *p, int cx, int cy, int r_fp,
+                                  uint32_t base_alpha, uint32_t rgb) {
+  int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
+  uint32_t a = smooth_ring_alpha(dist_fp - r_fp, base_alpha);
+  if (a)
+    *p = blend_pixel_fast((a << 24) | rgb, *p);
+}
+
+/* Fila de la banda de esquinas (superior o inferior) del relleno: cy es la
+ * distancia vertical al centro del arco, [sx, ex) el tramo visible. */
+static void rounded_fill_row(uint32_t *row, rect_t rect, int r, int sx, int ex,
+                             int cy, uint32_t color) {
+  uint32_t base_alpha = color >> 24, rgb = color & 0x00FFFFFF;
+  int r_fp = r << 8;
+  int lend = MIN(rect.x + MIN(r, rect.w), ex);
+  int rbeg = MAX(rect.x + MAX(r, rect.w - r), sx);
+  for (int px = sx; px < lend; px++)
+    corner_fill_px(&row[px], r - (px - rect.x), cy, r_fp, base_alpha, rgb);
+  span_fill(row, MAX(sx, rect.x + r), MIN(ex, rect.x + rect.w - r), color);
+  for (int px = rbeg; px < ex; px++)
+    corner_fill_px(&row[px], (px - rect.x) - (rect.w - r - 1), cy, r_fp,
+                   base_alpha, rgb);
+}
+
+static void rounded_fill(uint32_t *dst, int dst_stride, rect_t clip,
+                         rect_t rect, int r, uint32_t color, int bottom) {
   if (!dst || rect.w <= 0 || rect.h <= 0)
     return;
-
-  int start_x = MAX(rect.x, clip.x);
-  int start_y = MAX(rect.y, clip.y);
-  int end_x = MIN(rect.x + rect.w, clip.x + clip.w);
-  int end_y = MIN(rect.y + rect.h, clip.y + clip.h);
-  if (start_x >= end_x || start_y >= end_y)
+  int sx = MAX(rect.x, clip.x);
+  int sy = MAX(rect.y, clip.y);
+  int ex = MIN(rect.x + rect.w, clip.x + clip.w);
+  int ey = MIN(rect.y + rect.h, clip.y + clip.h);
+  if (sx >= ex || sy >= ey)
     return;
+  if (r < 0)
+    r = 0;
 
-  uint32_t base_alpha = (color >> 24) & 0xFF;
-  uint32_t rgb = color & 0x00FFFFFF;
-  int r = radius;
-  int x_left_corner_end = rect.x + r;
-  int x_right_corner_beg = rect.x + rect.w - r;
-  int y_top_corner_end = rect.y + r;
-  int y_bot_corner_beg = rect.y + rect.h - r;
-  int r_fp = r << 8;
-
-  for (int py = start_y; py < end_y; py++) {
+  for (int py = sy; py < ey; py++) {
     uint32_t *row = &dst[py * dst_stride];
-    int row_in_corner = (py < y_top_corner_end) || (py >= y_bot_corner_beg);
-
-    if (!row_in_corner) {
-      /* Fila sin esquinas: relleno SIMD desde x_left_corner_end a
-       * x_right_corner_beg */
-      int rx0 = MAX(start_x, x_left_corner_end);
-      int rx1 = MIN(end_x, x_right_corner_beg);
-      if (rx0 < rx1) {
-        if (base_alpha == 255) {
-          simd_fill_row(&row[rx0], color, rx1 - rx0);
-        } else {
-          for (int px = rx0; px < rx1; px++)
-            row[px] = blend_pixel_fast(color, row[px]);
-        }
-      }
-      /* Extremos izquierdo y derecho (también sin esquina, pero por si clip) */
-      for (int px = start_x; px < MIN(end_x, x_left_corner_end); px++)
-        row[px] = blend_pixel_fast(color, row[px]);
-      for (int px = MAX(start_x, x_right_corner_beg); px < end_x; px++)
-        row[px] = blend_pixel_fast(color, row[px]);
-      continue;
-    }
-
-    /* Fila con esquinas: cálculo por píxel */
-    for (int px = start_x; px < end_x; px++) {
-      int rx = px - rect.x;
-      int ry = py - rect.y;
-
-      int in_corner = 0, cx = 0, cy = 0;
-      if (rx < r && ry < r) {
-        cx = r - rx;
-        cy = r - ry;
-        in_corner = 1;
-      } else if (rx >= rect.w - r && ry < r) {
-        cx = rx - (rect.w - r - 1);
-        cy = r - ry;
-        in_corner = 1;
-      } else if (rx < r && ry >= rect.h - r) {
-        cx = r - rx;
-        cy = ry - (rect.h - r - 1);
-        in_corner = 1;
-      } else if (rx >= rect.w - r && ry >= rect.h - r) {
-        cx = rx - (rect.w - r - 1);
-        cy = ry - (rect.h - r - 1);
-        in_corner = 1;
-      }
-
-      if (in_corner) {
-        int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
-        uint32_t alpha = smooth_edge_alpha(dist_fp, r_fp, base_alpha);
-        if (alpha == 0)
-          continue;
-        row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
-      } else {
-        row[px] = blend_pixel_fast(color, row[px]);
-      }
-    }
+    int ry = py - rect.y;
+    if (ry < r)
+      rounded_fill_row(row, rect, r, sx, ex, r - ry, color);
+    else if (bottom && ry >= rect.h - r)
+      rounded_fill_row(row, rect, r, sx, ex, ry - (rect.h - r - 1), color);
+    else
+      span_fill(row, sx, ex, color);
   }
+}
+
+void gfx_fill_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
+                           rect_t rect, int radius, uint32_t color) {
+  rounded_fill(dst, dst_stride, clip, rect, radius, color, 1);
 }
 
 void gfx_fill_top_rounded_rect(uint32_t *dst, int dst_stride, rect_t clip,
                                rect_t rect, int radius, uint32_t color) {
-  if (!dst || rect.w <= 0 || rect.h <= 0)
-    return;
-
-  int start_x = MAX(rect.x, clip.x);
-  int start_y = MAX(rect.y, clip.y);
-  int end_x = MIN(rect.x + rect.w, clip.x + clip.w);
-  int end_y = MIN(rect.y + rect.h, clip.y + clip.h);
-
-  if (start_x >= end_x || start_y >= end_y)
-    return;
-
-  uint32_t base_alpha = (color >> 24) & 0xFF;
-  uint32_t rgb = color & 0x00FFFFFF;
-  int r_fp = radius << 8;
-
-  for (int py = start_y; py < end_y; py++) {
-    uint32_t *row = &dst[py * dst_stride];
-    for (int px = start_x; px < end_x; px++) {
-      int rx = px - rect.x;
-      int ry = py - rect.y;
-
-      int in_corner = 0;
-      int cx = 0, cy = 0;
-
-      if (rx < radius && ry < radius) {
-        cx = radius - rx;
-        cy = radius - ry;
-        in_corner = 1;
-      } else if (rx >= rect.w - radius && ry < radius) {
-        cx = rx - (rect.w - radius - 1);
-        cy = radius - ry;
-        in_corner = 1;
-      }
-
-      if (in_corner) {
-        int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
-        uint32_t alpha = smooth_edge_alpha(dist_fp, r_fp, base_alpha);
-        if (alpha == 0)
-          continue;
-        row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
-      } else {
-        row[px] = blend_pixel_fast(color, row[px]);
-      }
-    }
-  }
+  rounded_fill(dst, dst_stride, clip, rect, radius, color, 0);
 }
 
 void gfx_draw_rect_outline(uint32_t *dst, int dst_stride, rect_t clip,
@@ -447,63 +406,59 @@ void gfx_draw_rect_outline(uint32_t *dst, int dst_stride, rect_t clip,
                  (rect_t){rect.x + rect.w - 1, rect.y, 1, rect.h}, color);
 }
 
+/* Borde (anillo de ~1 px) de un rect redondeado. Coste proporcional al
+ * perímetro: en las filas centrales solo se tocan los dos píxeles laterales. */
 void gfx_draw_rounded_border(uint32_t *dst, int dst_stride, rect_t clip,
                              rect_t rect, int radius, uint32_t color) {
   if (!dst || rect.w <= 0 || rect.h <= 0)
     return;
 
-  int start_x = MAX(rect.x, clip.x);
-  int start_y = MAX(rect.y, clip.y);
-  int end_x = MIN(rect.x + rect.w, clip.x + clip.w);
-  int end_y = MIN(rect.y + rect.h, clip.y + clip.h);
-
-  if (start_x >= end_x || start_y >= end_y)
+  int sx = MAX(rect.x, clip.x);
+  int sy = MAX(rect.y, clip.y);
+  int ex = MIN(rect.x + rect.w, clip.x + clip.w);
+  int ey = MIN(rect.y + rect.h, clip.y + clip.h);
+  if (sx >= ex || sy >= ey)
     return;
 
   uint32_t base_alpha = (color >> 24) & 0xFF;
   uint32_t rgb = color & 0x00FFFFFF;
-  int r_fp = radius << 8;
+  int r = radius < 0 ? 0 : radius;
+  int r_fp = r << 8;
+  int lx = rect.x, rx = rect.x + rect.w - 1;
 
-  for (int py = start_y; py < end_y; py++) {
+  for (int py = sy; py < ey; py++) {
     uint32_t *row = &dst[py * dst_stride];
-    for (int px = start_x; px < end_x; px++) {
-      int rx = px - rect.x;
-      int ry = py - rect.y;
+    int ry = py - rect.y;
+    int edge_row = (ry == 0 || ry == rect.h - 1);
+    int cy;
+    if (ry < r)
+      cy = r - ry;
+    else if (ry >= rect.h - r)
+      cy = ry - (rect.h - r - 1);
+    else
+      cy = -1;
 
-      int in_corner = 0;
-      int cx = 0, cy = 0;
-
-      if (rx < radius && ry < radius) {
-        cx = radius - rx;
-        cy = radius - ry;
-        in_corner = 1;
-      } else if (rx >= rect.w - radius && ry < radius) {
-        cx = rx - (rect.w - radius - 1);
-        cy = radius - ry;
-        in_corner = 1;
-      } else if (rx < radius && ry >= rect.h - radius) {
-        cx = radius - rx;
-        cy = ry - (rect.h - radius - 1);
-        in_corner = 1;
-      } else if (rx >= rect.w - radius && ry >= rect.h - radius) {
-        cx = rx - (rect.w - radius - 1);
-        cy = ry - (rect.h - radius - 1);
-        in_corner = 1;
-      }
-
-      if (in_corner) {
-        int dist_fp = int_sqrt((cx * cx + cy * cy) << 16);
-        int diff = dist_fp - r_fp;
-        uint32_t alpha = smooth_ring_alpha(diff, base_alpha);
-        if (alpha == 0)
-          continue;
-        row[px] = blend_pixel_fast((alpha << 24) | rgb, row[px]);
+    if (cy < 0) { /* fila central: solo los laterales */
+      if (edge_row) {
+        span_fill(row, sx, ex, color);
       } else {
-        if (rx == 0 || rx == rect.w - 1 || ry == 0 || ry == rect.h - 1) {
-          row[px] = blend_pixel_fast(color, row[px]);
-        }
+        if (lx >= sx && lx < ex)
+          row[lx] = blend_pixel_fast(color, row[lx]);
+        if (rx != lx && rx >= sx && rx < ex)
+          row[rx] = blend_pixel_fast(color, row[rx]);
       }
+      continue;
     }
+
+    int lend = MIN(rect.x + MIN(r, rect.w), ex);
+    int rbeg = MAX(rect.x + MAX(r, rect.w - r), sx);
+    for (int px = sx; px < lend; px++)
+      corner_ring_px(&row[px], r - (px - rect.x), cy, r_fp, base_alpha, rgb);
+    if (edge_row)
+      span_fill(row, MAX(sx, rect.x + r), MIN(ex, rect.x + rect.w - r), color);
+    for (int px = rbeg; px < ex; px++)
+      corner_ring_px(&row[px], (px - rect.x) - (rect.w - r - 1), cy, r_fp,
+                     base_alpha, rgb);
   }
 }
 
@@ -802,8 +757,11 @@ void gfx_fill_rounded_rect_gradient_v(uint32_t *dst, int dst_stride,
 
   int denom = rect.h > 1 ? rect.h - 1 : 1;
   int r = radius;
+  int x_left_corner_end = rect.x + r;
+  int x_right_corner_beg = rect.x + rect.w - r;
   int y_top_corner_end = rect.y + r;
   int y_bot_corner_beg = rect.y + rect.h - r;
+  int r_fp = r << 8;
 
   for (int py = sy; py < ey; py++) {
     int t = ((py - rect.y) * 256) / denom;
@@ -910,64 +868,311 @@ static inline int blur_clampi(int v, int lo, int hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
-void gfx_backdrop_blur_rounded(uint32_t *dst, int dst_stride, rect_t clip,
-                               rect_t r, int corner_radius, int blur_radius,
-                               uint32_t *tmp, size_t tmp_px) {
+static inline uint32_t blur_pack(uint32_t r, uint32_t g, uint32_t b,
+                                 int sat256) {
+  if (sat256 != 256) {
+    int lum = (int)((77 * r + 150 * g + 29 * b) >> 8);
+    int rr = lum + (((int)r - lum) * sat256) / 256;
+    int gg = lum + (((int)g - lum) * sat256) / 256;
+    int bb = lum + (((int)b - lum) * sat256) / 256;
+    r = (uint32_t)(rr < 0 ? 0 : (rr > 255 ? 255 : rr));
+    g = (uint32_t)(gg < 0 ? 0 : (gg > 255 ? 255 : gg));
+    b = (uint32_t)(bb < 0 ? 0 : (bb > 255 ? 255 : bb));
+  }
+  return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+/* Sumas por columna de la pasada vertical. Solo las usa el hilo del
+ * compositor (Dock, menús y tooltips se pintan desde él). */
+#define BLUR_MAX_W 4096
+static uint32_t g_blur_sr[BLUR_MAX_W], g_blur_sg[BLUR_MAX_W],
+    g_blur_sb[BLUR_MAX_W];
+
+/* Box blur separable de radio blur_radius sobre el rectángulo r, con los
+ * bordes de r replicados. Solo calcula la parte visible o = clip ∩ r: la
+ * pasada horizontal recorre las filas de o ampliadas blur_radius (lo único que
+ * la vertical necesita) y la vertical va fila a fila con sumas por columna, en
+ * vez de por columnas (que salta de fila en fila y no aprovecha la caché). El
+ * resultado dentro de o es idéntico al de desenfocar r entero; el que llama
+ * debe tener compuesto el fondo de o ampliado blur_radius (ver
+ * compositor.c). tmp necesita o.w * (o.h + 2 * blur_radius) píxeles. */
+static void blur_core(uint32_t *dst, int dst_stride, rect_t clip, rect_t r,
+                      int corner_radius, int blur_radius, int sat256,
+                      uint32_t *tmp, size_t tmp_px) {
   if (!dst || !tmp || blur_radius < 1 || r.w <= 0 || r.h <= 0)
     return;
-  if ((size_t)r.w * (size_t)r.h > tmp_px)
+  rect_t o = rect_clip(clip, r);
+  if (o.w <= 0 || o.h <= 0 || o.w > BLUR_MAX_W)
     return;
 
-  const int w = r.w, h = r.h, br = blur_radius;
+  const int br = blur_radius;
+  const int xl = r.x, xr = r.x + r.w - 1;
+  const int sy0 = MAX(r.y, o.y - br);
+  const int sy1 = MIN(r.y + r.h, o.y + o.h + br); /* exclusivo */
+  const int ow = o.w;
+  if ((size_t)ow * (size_t)(sy1 - sy0) > tmp_px)
+    return;
   const uint32_t mul = 65536u / (uint32_t)(2 * br + 1);
 
-  /* Pasada horizontal: dst -> tmp */
-  for (int y = 0; y < h; y++) {
-    const uint32_t *row = &dst[(r.y + y) * dst_stride + r.x];
-    uint32_t *out = &tmp[y * w];
-    int sr = 0, sg = 0, sb = 0;
+  /* Pasada horizontal: filas [sy0, sy1) de dst -> tmp (solo columnas de o) */
+  for (int y = sy0; y < sy1; y++) {
+    const uint32_t *row = &dst[y * dst_stride];
+    uint32_t *out = &tmp[(y - sy0) * ow];
+    uint32_t sr = 0, sg = 0, sb = 0;
     for (int i = -br; i <= br; i++) {
-      uint32_t p = row[blur_clampi(i, 0, w - 1)];
+      uint32_t p = row[blur_clampi(o.x + i, xl, xr)];
       sr += (p >> 16) & 0xFF;
       sg += (p >> 8) & 0xFF;
       sb += p & 0xFF;
     }
-    for (int x = 0; x < w; x++) {
-      out[x] = 0xFF000000 | ((((uint32_t)sr * mul) >> 16) << 16) |
-               ((((uint32_t)sg * mul) >> 16) << 8) |
-               (((uint32_t)sb * mul) >> 16);
-      uint32_t pa = row[blur_clampi(x + br + 1, 0, w - 1)];
-      uint32_t ps = row[blur_clampi(x - br, 0, w - 1)];
-      sr += (int)((pa >> 16) & 0xFF) - (int)((ps >> 16) & 0xFF);
-      sg += (int)((pa >> 8) & 0xFF) - (int)((ps >> 8) & 0xFF);
-      sb += (int)(pa & 0xFF) - (int)(ps & 0xFF);
+    for (int x = 0; x < ow; x++) {
+      out[x] = 0xFF000000 | (((sr * mul) >> 16) << 16) |
+               (((sg * mul) >> 16) << 8) | ((sb * mul) >> 16);
+      uint32_t pa = row[blur_clampi(o.x + x + br + 1, xl, xr)];
+      uint32_t ps = row[blur_clampi(o.x + x - br, xl, xr)];
+      sr += ((pa >> 16) & 0xFF) - ((ps >> 16) & 0xFF);
+      sg += ((pa >> 8) & 0xFF) - ((ps >> 8) & 0xFF);
+      sb += (pa & 0xFF) - (ps & 0xFF);
     }
   }
 
-  /* Pasada vertical: tmp -> dst (solo dentro de la forma y del clip) */
-  for (int x = 0; x < w; x++) {
-    int px = r.x + x;
-    int x_ok = (px >= clip.x && px < clip.x + clip.w);
-    int sr = 0, sg = 0, sb = 0;
-    for (int i = -br; i <= br; i++) {
-      uint32_t p = tmp[blur_clampi(i, 0, h - 1) * w + x];
-      sr += (p >> 16) & 0xFF;
-      sg += (p >> 8) & 0xFF;
-      sb += p & 0xFF;
+  /* Pasada vertical: tmp -> dst, fila a fila. Las filas fuera de r se
+   * replican desde su borde, que siempre está dentro de [sy0, sy1). */
+#define TMP_ROW(yy) (&tmp[(blur_clampi((yy), sy0, sy1 - 1) - sy0) * ow])
+  for (int x = 0; x < ow; x++)
+    g_blur_sr[x] = g_blur_sg[x] = g_blur_sb[x] = 0;
+  for (int i = -br; i <= br; i++) {
+    const uint32_t *t = TMP_ROW(o.y + i);
+    for (int x = 0; x < ow; x++) {
+      g_blur_sr[x] += (t[x] >> 16) & 0xFF;
+      g_blur_sg[x] += (t[x] >> 8) & 0xFF;
+      g_blur_sb[x] += t[x] & 0xFF;
     }
-    for (int y = 0; y < h; y++) {
-      int py = r.y + y;
-      if (x_ok && py >= clip.y && py < clip.y + clip.h &&
-          blur_in_shape(x, y, w, h, corner_radius)) {
-        dst[py * dst_stride + px] =
-            0xFF000000 | ((((uint32_t)sr * mul) >> 16) << 16) |
-            ((((uint32_t)sg * mul) >> 16) << 8) | (((uint32_t)sb * mul) >> 16);
+  }
+  for (int y = o.y; y < o.y + o.h; y++) {
+    uint32_t *drow = &dst[y * dst_stride + o.x];
+    int ly = y - r.y;
+    /* Fuera de las bandas de esquina toda la fila está dentro de la forma. */
+    int corner_band = corner_radius > 0 &&
+                      (ly < corner_radius || ly >= r.h - corner_radius);
+    for (int x = 0; x < ow; x++) {
+      if (corner_band &&
+          !blur_in_shape(o.x + x - r.x, ly, r.w, r.h, corner_radius))
+        continue;
+      drow[x] = blur_pack((g_blur_sr[x] * mul) >> 16,
+                          (g_blur_sg[x] * mul) >> 16,
+                          (g_blur_sb[x] * mul) >> 16, sat256);
+    }
+    const uint32_t *ta = TMP_ROW(y + br + 1);
+    const uint32_t *ts = TMP_ROW(y - br);
+    for (int x = 0; x < ow; x++) {
+      g_blur_sr[x] += ((ta[x] >> 16) & 0xFF) - ((ts[x] >> 16) & 0xFF);
+      g_blur_sg[x] += ((ta[x] >> 8) & 0xFF) - ((ts[x] >> 8) & 0xFF);
+      g_blur_sb[x] += (ta[x] & 0xFF) - (ts[x] & 0xFF);
+    }
+  }
+#undef TMP_ROW
+}
+
+/* Región de fondo que hay que tener compuesta para poder desenfocar la parte
+ * visible (clip ∩ r) de un panel de cristal de radio blur. */
+rect_t gfx_glass_source_rect(rect_t clip, rect_t r, int blur) {
+  rect_t o = rect_clip(clip, r);
+  if (o.w <= 0 || o.h <= 0)
+    return (rect_t){0, 0, 0, 0};
+  return rect_clip(rect_grow(o, blur), r);
+}
+
+void gfx_backdrop_blur_rounded(uint32_t *dst, int dst_stride, rect_t clip,
+                               rect_t r, int corner_radius, int blur_radius,
+                               uint32_t *tmp, size_t tmp_px) {
+  blur_core(dst, dst_stride, clip, r, corner_radius, blur_radius, 256, tmp,
+            tmp_px);
+}
+
+// ============================================================================
+// Cristal líquido (estilo Tahoe)
+//   1. fondo desenfocado y más saturado (solo dentro de la forma redondeada)
+//   2. tinte
+//   3. brillo suave en la mitad superior
+//   4. borde especular: 1 px, intenso arriba, tenue en los lados, algo de luz
+//      abajo; más un segundo filete interior muy sutil
+// ============================================================================
+static inline int lerp_i(int a, int b, int t256) {
+  return a + (((b - a) * t256) >> 8);
+}
+
+void gfx_glass_panel(uint32_t *dst, int dst_stride, rect_t clip, rect_t r,
+                     int radius, uint32_t tint, int blur_radius, int sat256,
+                     uint32_t *tmp, size_t tmp_px) {
+  if (r.w <= 0 || r.h <= 0)
+    return;
+  int cr = radius;
+  if (cr > r.h / 2)
+    cr = r.h / 2;
+  if (cr > r.w / 2)
+    cr = r.w / 2;
+
+  if (tmp && blur_radius > 0)
+    blur_core(dst, dst_stride, clip, r, cr, blur_radius, sat256, tmp, tmp_px);
+
+  gfx_fill_rounded_rect(dst, dst_stride, clip, r, cr, tint);
+
+  /* Brillo superior: filas de blanco que se desvanece hacia el centro,
+   * recortadas por el contorno redondeado. (gfx_fill_rounded_rect_gradient_v
+   * ignora el alfa, por eso no se usa aquí.) */
+  int gh = (r.h / 2 > 6) ? r.h / 2 : r.h;
+  for (int dy = 0; dy < gh; dy++) {
+    int a = 0x24 * (gh - dy) / gh;
+    if (a == 0)
+      break;
+    int inset = 0;
+    if (dy < cr) {
+      int d = cr - dy, v = cr * cr - d * d, s = 0;
+      while ((s + 1) * (s + 1) <= v)
+        s++;
+      inset = cr - s;
+    }
+    gfx_blend_rect(dst, dst_stride, clip,
+                   (rect_t){r.x + inset, r.y + dy, r.w - 2 * inset, 1},
+                   ((uint32_t)a << 24) | 0x00FFFFFF);
+  }
+
+  /* Borde especular por bandas verticales (el gradiente va en el clip). */
+  const int bands = r.h < 48 ? 4 : 8;
+  for (int i = 0; i < bands; i++) {
+    int y0 = r.y + (r.h * i) / bands;
+    int y1 = r.y + (r.h * (i + 1)) / bands;
+    int t = ((i * 2 + 1) * 256) / (bands * 2); /* 0..256 al centro de la banda */
+    int a = (t < 128) ? lerp_i(0x88, 0x30, t * 2)
+                      : lerp_i(0x30, 0x50, (t - 128) * 2);
+    rect_t bc = rect_clip(clip, (rect_t){r.x - 1, y0, r.w + 2, y1 - y0});
+    if (bc.w > 0 && bc.h > 0)
+      gfx_draw_rounded_border(dst, dst_stride, bc, r, cr,
+                              ((uint32_t)a << 24) | 0x00FFFFFF);
+  }
+  /* Filete interior, apenas visible, que da grosor al cristal. */
+  if (r.w > 8 && r.h > 8)
+    gfx_draw_rounded_border(dst, dst_stride, clip,
+                            (rect_t){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                            cr > 1 ? cr - 1 : 0, 0x12FFFFFF);
+}
+
+// ============================================================================
+// Formas vectoriales con antialiasing (semáforos, glifos, marcas, cursor).
+// Cobertura = distancia con signo al borde, en píxeles, recortada a [0, 1]:
+// un borde de 1 px de transición, igual que el resto de primitivas.
+// ============================================================================
+static inline float cov01(float v) {
+  return v <= 0.0f ? 0.0f : (v >= 1.0f ? 1.0f : v);
+}
+
+static inline void blend_cov(uint32_t *p, uint32_t color, float cov) {
+  uint32_t a = (uint32_t)((float)(color >> 24) * cov + 0.5f);
+  if (a)
+    *p = blend_pixel_fast((a << 24) | (color & 0x00FFFFFF), *p);
+}
+
+/* Caja [x0, x1) x [y0, y1) que contiene la forma, recortada al clip. */
+static inline int shape_box(rect_t clip, float fx0, float fy0, float fx1,
+                            float fy1, int *x0, int *y0, int *x1, int *y1) {
+  *x0 = MAX((int)fx0 - 1, clip.x);
+  *y0 = MAX((int)fy0 - 1, clip.y);
+  *x1 = MIN((int)fx1 + 2, clip.x + clip.w);
+  *y1 = MIN((int)fy1 + 2, clip.y + clip.h);
+  return *x0 < *x1 && *y0 < *y1;
+}
+
+void gfx_fill_circle(uint32_t *dst, int dst_stride, rect_t clip, float cx,
+                     float cy, float r, uint32_t color) {
+  int x0, y0, x1, y1;
+  if (!dst || r <= 0.0f ||
+      !shape_box(clip, cx - r, cy - r, cx + r, cy + r, &x0, &y0, &x1, &y1))
+    return;
+  float inner = r > 1.0f ? (r - 1.0f) * (r - 1.0f) : 0.0f;
+  for (int py = y0; py < y1; py++) {
+    uint32_t *row = &dst[py * dst_stride];
+    float dy = (float)py + 0.5f - cy;
+    for (int px = x0; px < x1; px++) {
+      float dx = (float)px + 0.5f - cx;
+      float d2 = dx * dx + dy * dy;
+      if (d2 <= inner) { /* interior: sin raíz */
+        blend_cov(&row[px], color, 1.0f);
+        continue;
       }
-      uint32_t pa = tmp[blur_clampi(y + br + 1, 0, h - 1) * w + x];
-      uint32_t ps = tmp[blur_clampi(y - br, 0, h - 1) * w + x];
-      sr += (int)((pa >> 16) & 0xFF) - (int)((ps >> 16) & 0xFF);
-      sg += (int)((pa >> 8) & 0xFF) - (int)((ps >> 8) & 0xFF);
-      sb += (int)(pa & 0xFF) - (int)(ps & 0xFF);
+      float c = cov01(r + 0.5f - kernel_sqrtf(d2));
+      if (c > 0.0f)
+        blend_cov(&row[px], color, c);
+    }
+  }
+}
+
+void gfx_draw_capsule(uint32_t *dst, int dst_stride, rect_t clip, float x0,
+                      float y0, float x1, float y1, float hw, uint32_t color) {
+  int bx0, by0, bx1, by1;
+  if (!dst || hw <= 0.0f ||
+      !shape_box(clip, MIN(x0, x1) - hw, MIN(y0, y1) - hw, MAX(x0, x1) + hw,
+                 MAX(y0, y1) + hw, &bx0, &by0, &bx1, &by1))
+    return;
+  float vx = x1 - x0, vy = y1 - y0;
+  float len2 = vx * vx + vy * vy;
+  for (int py = by0; py < by1; py++) {
+    uint32_t *row = &dst[py * dst_stride];
+    for (int px = bx0; px < bx1; px++) {
+      float wx = (float)px + 0.5f - x0, wy = (float)py + 0.5f - y0;
+      float t = len2 > 0.0f ? (wx * vx + wy * vy) / len2 : 0.0f;
+      t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+      float dx = wx - vx * t, dy = wy - vy * t;
+      float c = cov01(hw + 0.5f - kernel_sqrtf(dx * dx + dy * dy));
+      if (c > 0.0f)
+        blend_cov(&row[px], color, c);
+    }
+  }
+}
+
+void gfx_fill_triangle(uint32_t *dst, int dst_stride, rect_t clip, float x0,
+                       float y0, float x1, float y1, float x2, float y2,
+                       uint32_t color) {
+  int bx0, by0, bx1, by1;
+  if (!dst || !shape_box(clip, MIN(x0, MIN(x1, x2)), MIN(y0, MIN(y1, y2)),
+                         MAX(x0, MAX(x1, x2)), MAX(y0, MAX(y1, y2)), &bx0,
+                         &by0, &bx1, &by1))
+    return;
+  /* Orientación antihoraria para que la distancia sea positiva dentro. */
+  float area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+  if (area == 0.0f)
+    return;
+  if (area < 0.0f) {
+    float tx = x1, ty = y1;
+    x1 = x2;
+    y1 = y2;
+    x2 = tx;
+    y2 = ty;
+  }
+  float ex[3] = {x0, x1, x2}, ey[3] = {y0, y1, y2};
+  float nx[3], ny[3], nc[3];
+  for (int i = 0; i < 3; i++) {
+    int j = (i + 1) % 3;
+    float dx = ex[j] - ex[i], dy = ey[j] - ey[i];
+    float inv = 1.0f / kernel_sqrtf(dx * dx + dy * dy);
+    nx[i] = -dy * inv;
+    ny[i] = dx * inv;
+    nc[i] = -(nx[i] * ex[i] + ny[i] * ey[i]);
+  }
+  for (int py = by0; py < by1; py++) {
+    uint32_t *row = &dst[py * dst_stride];
+    float fy = (float)py + 0.5f;
+    for (int px = bx0; px < bx1; px++) {
+      float fx = (float)px + 0.5f;
+      float d = nx[0] * fx + ny[0] * fy + nc[0];
+      for (int i = 1; i < 3; i++) {
+        float di = nx[i] * fx + ny[i] * fy + nc[i];
+        if (di < d)
+          d = di;
+      }
+      float c = cov01(d + 0.5f);
+      if (c > 0.0f)
+        blend_cov(&row[px], color, c);
     }
   }
 }

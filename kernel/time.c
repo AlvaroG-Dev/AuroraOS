@@ -38,6 +38,7 @@ extern void sched_wake_expired(void);
 extern void ahci_poll_ports(void);
 extern void arp_timer_tick(void);
 extern void tcp_timer_tick(void);
+extern void ip_frag_timer_tick(void);
 extern volatile uint64_t g_pf_per_pid[128];
 
 // ---------------------------------------------------------------------------
@@ -88,6 +89,7 @@ void time_tick(void) {
       arp_timer_tick();
     }
     tcp_timer_tick();
+    ip_frag_timer_tick();
     ahci_poll_ports();
 
     // [DIAG] Dump periódico cada 5 s.

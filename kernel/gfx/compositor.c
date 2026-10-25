@@ -8,8 +8,17 @@
 // compositor los ejecuta al inicio de cada iteración. Lo único compartido con
 // otras CPUs son: la cola de comandos, la lista de damage (dmg_lock) y los
 // flags de despertar.
+//
+// Frame
+// -----
+// Para cada rectángulo dañado: se compone el fondo y las ventanas en el
+// backbuffer (empezando por la ventana opaca más alta que lo tapa entero, si
+// la hay), se pintan Dock y barra de menús encima y se vuelca a VRAM con el
+// cursor mezclado. El volcado se hace con la preempción desactivada para que
+// una ventana en movimiento nunca se quede a medio copiar en pantalla.
 #include "compositor.h"
 #include "../bmp.h"
+#include "../boot_console.h"
 #include "../heap.h"
 #include "../input.h"
 #include "../klog.h"
@@ -20,6 +29,8 @@
 #include "../tarfs.h"
 #include "../time.h"
 #include "../wait.h"
+#include "about.h"
+#include "cursor.h"
 #include "dock.h"
 #include "font_manager.h"
 #include "gfx.h"
@@ -50,6 +61,8 @@ static task_t *compositor_task_ref = NULL;
 static tar_node_t *bg_wallpaper_node = NULL;
 
 static int cursor_x = 400, cursor_y = 300;
+static cursor_shape_t cursor_shape = CURSOR_ARROW;
+static rect_t cursor_drawn = {0, 0, 0, 0}; /* donde está pintado el cursor */
 
 static wait_queue_t compositor_wq = WAIT_QUEUE_INIT(compositor_wq);
 static volatile int compositor_has_input = 0;
@@ -66,19 +79,33 @@ static window_t *pressed_win = NULL;
 static window_btn_state_t pressed_btn = WIN_BTN_NONE;
 static int last_mouse_buttons = 0;
 
-// Estado del resize en curso (se aplica una sola vez al soltar).
+/* Icono del Dock pulsado: como en macOS, la acción ocurre al soltar sobre él. */
+static taskbar_item_t *dock_pressed_item = NULL;
+
+/* Ventana "Acerca de AuroraOS" (una sola instancia). */
+static window_t *about_win = NULL;
+
+/* Doble clic en la barra de título = Zoom (como macOS). */
+static window_t *title_click_win = NULL;
+static uint64_t title_click_tsc = 0;
+
+// Estado del resize en curso (se aplica una sola vez al soltar; mientras
+// tanto se dibuja un marco fantasma).
 static window_t *resize_window = NULL;
 static int resize_edge = 0;
 static int resize_origin_x = 0;
 static int resize_origin_y = 0;
-static int resize_win_w = 0;
-static int resize_win_h = 0;
-static int resize_new_w = 0;
-static int resize_new_h = 0;
+static rect_t resize_from = {0, 0, 0, 0}; /* geometría al empezar */
+static rect_t resize_to = {0, 0, 0, 0};   /* geometría propuesta */
 
 #define RESIZE_EDGE_NONE 0
 #define RESIZE_EDGE_RIGHT (1 << 0)
 #define RESIZE_EDGE_BOTTOM (1 << 1)
+#define RESIZE_EDGE_LEFT (1 << 2)
+#define RESIZE_EDGE_TOP (1 << 3)
+#define RESIZE_MIN_W 200
+#define RESIZE_MIN_H 150
+#define RESIZE_MAX 2048
 
 static inline int imin(int a, int b) { return a < b ? a : b; }
 static inline int imax(int a, int b) { return a > b ? a : b; }
@@ -158,6 +185,14 @@ static int damage_take(rect_t *out) {
 void compositor_invalidate_dock(void) {
   compositor_dock_dirty = 1;
   wake_up_all(&compositor_wq);
+}
+
+/* Invalida lo que la ventana ocupaba en el último frame y lo que ocupa
+ * ahora (animación, movimiento o cambio de aspecto). Hilo del compositor. */
+static void invalidate_window(window_t *w) {
+  rect_t now = window_visual_rect(w);
+  compositor_invalidate_rect(rect_bounding_box(w->last_vis, now));
+  w->last_vis = now;
 }
 
 /* =========================================================================
@@ -255,13 +290,19 @@ static void compositor_report_frame_stats(uint64_t total_cycles) {
   g_frame_count = 0;
 }
 
-/* Outline del resize en curso (línea de acento de 1 px). */
+/* Marco fantasma del resize en curso: tinte de acento y borde. */
+static rect_t resize_outline_rect(void) {
+  return rect_grow(resize_to, 2);
+}
+
 static void draw_resize_outline(uint32_t *dst, int stride, rect_t clip) {
-  if (!resize_window || resize_new_w <= 0 || resize_new_h <= 0)
+  if (!resize_window || resize_to.w <= 0 || resize_to.h <= 0)
     return;
-  rect_t r = {resize_window->x, resize_window->y, resize_new_w, resize_new_h};
+  rect_t r = resize_to;
+  gfx_fill_rounded_rect(dst, stride, clip, r, AURORA_CORNER_RADIUS,
+                        0x160A84FF);
   gfx_draw_rounded_border(dst, stride, clip, r, AURORA_CORNER_RADIUS,
-                          0xE0FFFFFF);
+                          0xD8FFFFFF);
   gfx_draw_rounded_border(dst, stride, clip,
                           (rect_t){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
                           AURORA_CORNER_RADIUS - 1, AURORA_ACCENT);
@@ -300,21 +341,19 @@ static void update_menubar_title(void) {
 static void do_focus_window(window_t *win);
 static void do_minimize_window(window_t *win);
 static void do_close_begin(window_t *win);
+static void do_toggle_maximize(window_t *win);
+static void open_about_window(void);
 
+/* Clic en un icono del Dock, como en macOS: activa la app (trae su ventana
+ * al frente) o la restaura si estaba minimizada. Nunca minimiza. */
 static void taskbar_item_on_click(taskbar_item_t *item) {
   if (!item)
     return;
   for (window_t *win = window_stack; win; win = win->next) {
-    if (win->taskbar_item != item)
-      continue;
-    if (window_is_visible(win) && (win->flags & WIN_FLAGS_FOCUSED)) {
-      do_minimize_window(win);
-      taskbar_set_active_item(NULL);
-      dock_invalidate_layout();
-    } else {
+    if (win->taskbar_item == item) {
       do_focus_window(win);
+      break;
     }
-    break;
   }
 }
 
@@ -332,17 +371,71 @@ static window_t *focused_window(void) {
   return NULL;
 }
 
+/* Ventana visible más alta que puede recibir el foco (ni cerrándose ni
+ * minimizada), distinta de `except`. */
+static window_t *next_focus_candidate(const window_t *except) {
+  for (window_t *c = window_stack; c; c = c->next) {
+    if (c == except || (c->flags & WIN_FLAGS_HIDDEN) || c->minimized ||
+        c->anim_state == WIN_ANIM_CLOSING || c->pending_destroy)
+      continue;
+    return c;
+  }
+  return NULL;
+}
+
+/* ---- Datos de las ventanas para la barra de menús (orden de creación) ---- */
+static window_t *win_by_index(int idx) {
+  int i = 0;
+  for (taskbar_item_t *it = taskbar_items_head(); it; it = it->next) {
+    if (it->type != TASKBAR_ITEM_APP_ICON)
+      continue;
+    if (i++ != idx)
+      continue;
+    for (window_t *w = window_stack; w; w = w->next)
+      if (w->taskbar_item == it)
+        return w;
+    return NULL;
+  }
+  return NULL;
+}
+static int prov_count(void) {
+  int n = 0;
+  for (taskbar_item_t *it = taskbar_items_head(); it; it = it->next)
+    if (it->type == TASKBAR_ITEM_APP_ICON)
+      n++;
+  return n;
+}
+static const char *prov_title(int i) {
+  window_t *w = win_by_index(i);
+  return w ? w->title : "";
+}
+static int prov_focused(int i) {
+  window_t *w = win_by_index(i);
+  return w && (w->flags & WIN_FLAGS_FOCUSED);
+}
+static int prov_has_focused(void) { return focused_window() != NULL; }
+static const menubar_provider_t k_menu_provider = {
+    prov_count, prov_title, prov_focused, prov_has_focused};
+
 static void run_menu_action(menu_action_t act) {
   window_t *w = focused_window();
+  if ((int)act >= MENU_ACT_FOCUS_BASE) {
+    window_t *t = win_by_index((int)act - MENU_ACT_FOCUS_BASE);
+    if (t)
+      do_focus_window(t);
+    return;
+  }
   switch (act) {
+  case MENU_ACT_ZOOM:
+    if (w)
+      do_toggle_maximize(w);
+    break;
   case MENU_ACT_ABOUT:
-    LOG_INFO("[COMPOSITOR] Acerca de AuroraOS");
+    open_about_window();
     break;
   case MENU_ACT_MINIMIZE:
-    if (w) {
+    if (w)
       do_minimize_window(w);
-      taskbar_set_active_item(NULL);
-    }
     break;
   case MENU_ACT_CLOSE:
     if (w)
@@ -351,6 +444,23 @@ static void run_menu_action(menu_action_t act) {
   default:
     break;
   }
+}
+
+/* Olvida cualquier interacción en curso con `win` (drag, resize, botón). */
+static void drop_interaction(window_t *win) {
+  if (drag_window == win)
+    drag_window = NULL;
+  if (pressed_win == win) {
+    pressed_win = NULL;
+    pressed_btn = WIN_BTN_NONE;
+  }
+  if (resize_window == win) {
+    compositor_invalidate_rect(resize_outline_rect());
+    resize_window = NULL;
+    resize_to = (rect_t){0, 0, 0, 0};
+  }
+  if (title_click_win == win)
+    title_click_win = NULL;
 }
 
 static void do_attach(window_t *win) {
@@ -372,8 +482,30 @@ static void do_attach(window_t *win) {
   if (win->taskbar_item && win->icon_bmp_node)
     win->taskbar_item->icon_bmp_node = win->icon_bmp_node;
 
-  compositor_invalidate_rect(win_damage_rect(win));
+  invalidate_window(win);
   dock_invalidate_layout();
+  dock_bounce(win->taskbar_item); /* la app "se abre" en el Dock */
+}
+
+/* "Acerca de AuroraOS": ventana del propio compositor, centrada en la zona
+ * útil. Si ya está abierta, se trae al frente. */
+static void open_about_window(void) {
+  if (about_win && stack_contains(about_win) && !about_win->pending_destroy) {
+    do_focus_window(about_win);
+    return;
+  }
+  rect_t wa = compositor_work_area();
+  int x = wa.x + (wa.w - ABOUT_W) / 2;
+  int y = wa.y + imax(0, (wa.h - ABOUT_H) / 3);
+  window_t *w = window_create(x, y, ABOUT_W, ABOUT_H, "Acerca de AuroraOS",
+                              WIN_FLAGS_FIXED_SIZE);
+  if (!w)
+    return;
+  win_set_icon_text(w, "A", AURORA_ACCENT);
+  about_paint(w);
+  about_win = w;
+  do_attach(w);
+  do_focus_window(w);
 }
 
 static void do_close_begin(window_t *win) {
@@ -381,64 +513,56 @@ static void do_close_begin(window_t *win) {
     return;
   window_start_close_animation(win);
   win->pending_destroy = 1;
+  drop_interaction(win);
+  invalidate_window(win);
+}
 
-  if (drag_window == win)
-    drag_window = NULL;
-  if (pressed_win == win) {
-    pressed_win = NULL;
-    pressed_btn = WIN_BTN_NONE;
-  }
-  if (resize_window == win)
-    resize_window = NULL;
-
-  compositor_invalidate_rect(
-      (rect_t){win->x - SH, win->y - SH + win->anim_dy, win->width + SH * 2,
-               win->height + SH * 2});
+/* Icono del Dock de la ventana: destino del genie. */
+static rect_t dock_target(const window_t *win) {
+  rect_t r = {0, 0, 0, 0};
+  if (win->taskbar_item && !dock_item_rect(win->taskbar_item, &r))
+    r = (rect_t){0, 0, 0, 0};
+  return r;
 }
 
 static void do_minimize_window(window_t *win) {
-  if (!win)
+  if (!win || win->anim_state == WIN_ANIM_CLOSING || win->pending_destroy)
     return;
-  window_start_minimize_animation(win);
-  win->pending_destroy = 0;
+  window_start_minimize_animation(win, dock_target(win));
+  drop_interaction(win);
 
-  if (win->flags & WIN_FLAGS_FOCUSED) {
+  int was_focused = (win->flags & WIN_FLAGS_FOCUSED) != 0;
+  if (was_focused) {
     win->flags &= ~WIN_FLAGS_FOCUSED;
     win->flags |= WIN_FLAGS_INACTIVE;
     win->dirty = 1;
     winsrv_post_event(win, WINSRV_EV_BLUR, 0, 0, 0);
-    dock_invalidate_layout();
+    taskbar_set_active_item(NULL);
   }
+  invalidate_window(win);
+  dock_invalidate_layout();
 
-  if (drag_window == win)
-    drag_window = NULL;
-  if (pressed_win == win) {
-    pressed_win = NULL;
-    pressed_btn = WIN_BTN_NONE;
+  /* Como macOS: el foco pasa a la siguiente ventana visible. */
+  if (was_focused) {
+    window_t *next = next_focus_candidate(win);
+    if (next)
+      do_focus_window(next);
   }
   update_menubar_title();
-  compositor_invalidate_rect(
-      (rect_t){win->x - SH, win->y - SH + win->anim_dy, win->width + SH * 2,
-               win->height + SH * 2});
 }
 
 static void do_focus_window(window_t *win) {
   if (!win)
     return;
-  if (win->anim_state == WIN_ANIM_CLOSING)
+  if (win->anim_state == WIN_ANIM_CLOSING || win->pending_destroy)
     return;
 
-  int need_restore = (win->flags & WIN_FLAGS_HIDDEN) ||
-                     (win->anim_state == WIN_ANIM_MINIMIZING);
-  if (need_restore) {
-    win->flags &= ~WIN_FLAGS_HIDDEN;
-    win->flags &= ~WIN_FLAGS_INACTIVE;
-    if (win->anim_state == WIN_ANIM_MINIMIZING)
-      win->anim_state = WIN_ANIM_NONE;
-    if (win->anim_state != WIN_ANIM_OPENING)
-      window_start_open_animation(win);
+  if (win->minimized || (win->flags & WIN_FLAGS_HIDDEN)) {
+    /* Vuelve del Dock con el genie inverso. */
+    win->flags &= ~(WIN_FLAGS_HIDDEN | WIN_FLAGS_INACTIVE);
+    window_start_restore_animation(win, dock_target(win));
     win->dirty = 1;
-    compositor_invalidate_rect(win_damage_rect(win));
+    invalidate_window(win);
   }
 
   if (window_stack == win && (win->flags & WIN_FLAGS_FOCUSED))
@@ -473,10 +597,9 @@ static void do_focus_window(window_t *win) {
   if (win->taskbar_item)
     taskbar_set_active_item(win->taskbar_item);
 
-  rect_t damage = win_damage_rect(win);
+  invalidate_window(win);
   if (old_focus)
-    damage = rect_bounding_box(damage, win_damage_rect(old_focus));
-  compositor_invalidate_rect(damage);
+    invalidate_window(old_focus);
 
   if (old_focus)
     winsrv_post_event(old_focus, WINSRV_EV_BLUR, 0, 0, 0);
@@ -493,7 +616,7 @@ static void do_unfocus_all(void) {
       c->flags &= ~WIN_FLAGS_FOCUSED;
       c->flags |= WIN_FLAGS_INACTIVE;
       c->dirty = 1;
-      compositor_invalidate_rect(win_damage_rect(c));
+      invalidate_window(c);
       winsrv_post_event(c, WINSRV_EV_BLUR, 0, 0, 0);
       changed = 1;
     }
@@ -510,17 +633,7 @@ static void do_destroy(window_t *win) {
   if (!win)
     return;
   int was_focused = (win->flags & WIN_FLAGS_FOCUSED) != 0;
-
-  if (drag_window == win)
-    drag_window = NULL;
-  if (pressed_win == win) {
-    pressed_win = NULL;
-    pressed_btn = WIN_BTN_NONE;
-  }
-  if (resize_window == win) {
-    resize_window = NULL;
-    resize_new_w = resize_new_h = 0;
-  }
+  drop_interaction(win);
 
   if (win->prev)
     win->prev->next = win->next;
@@ -529,30 +642,33 @@ static void do_destroy(window_t *win) {
   if (win->next)
     win->next->prev = win->prev;
 
-  compositor_invalidate_rect(win_damage_rect(win));
+  compositor_invalidate_rect(
+      rect_bounding_box(win->last_vis, win_damage_rect(win)));
+  if (win == about_win)
+    about_win = NULL;
+  if (win->taskbar_item) {
+    dock_forget(win->taskbar_item);
+    if (dock_pressed_item == win->taskbar_item)
+      dock_pressed_item = NULL;
+  }
   window_destroy(win); /* también quita el item de la taskbar */
   dock_invalidate_layout();
 
   /* Como en macOS: al cerrar la ventana activa, pasa el foco a la siguiente
    * visible que no se esté cerrando. */
   if (was_focused) {
-    for (window_t *c = window_stack; c; c = c->next) {
-      if (!(c->flags & WIN_FLAGS_HIDDEN) && c->anim_state != WIN_ANIM_CLOSING &&
-          c->anim_state != WIN_ANIM_MINIMIZING) {
-        do_focus_window(c);
-        break;
-      }
-    }
+    window_t *next = next_focus_candidate(NULL);
+    if (next)
+      do_focus_window(next);
   }
   update_menubar_title();
 }
 
 static void do_toggle_maximize(window_t *win) {
   if (!win || win->anim_state != WIN_ANIM_NONE ||
-      (win->flags & WIN_FLAGS_NODECORATION))
+      (win->flags & (WIN_FLAGS_NODECORATION | WIN_FLAGS_FIXED_SIZE)))
     return;
 
-  rect_t old_r = win_damage_rect(win);
   rect_t wa = compositor_work_area();
   int nx, ny, nw, nh;
   if (win->maximized) {
@@ -565,10 +681,12 @@ static void do_toggle_maximize(window_t *win) {
     win->restore_y = win->y;
     win->restore_w = win->width;
     win->restore_h = win->height;
-    nx = wa.x;
-    ny = wa.y;
-    nw = imin(wa.w, 2048);
-    nh = imin(wa.h, 2048);
+    /* Como el Zoom de macOS: la zona útil con un pequeño margen, para que la
+     * sombra y las esquinas sigan viéndose. */
+    nx = wa.x + 6;
+    ny = wa.y + 4;
+    nw = imin(wa.w - 12, RESIZE_MAX);
+    nh = imin(wa.h - 8, RESIZE_MAX);
   }
 
   window_resize(win, nw, nh);
@@ -579,7 +697,7 @@ static void do_toggle_maximize(window_t *win) {
   win->y = ny;
   win->maximized = !win->maximized;
   win->dirty = 1;
-  compositor_invalidate_rect(rect_bounding_box(old_r, win_damage_rect(win)));
+  invalidate_window(win);
   winsrv_post_event(win, WINSRV_EV_RESIZE, win->content_w, win->content_h, 0);
   winsrv_post_event(win, WINSRV_EV_MOVE, nx, ny, 0);
 }
@@ -636,41 +754,114 @@ void compositor_set_icon_bmp(window_t *win, tar_node_t *node) {
 }
 
 /* =========================================================================
- * Cursor estilo macOS: flecha negra con borde blanco.
+ * Cursor (imágenes de cursor.c, mezcladas sobre el backbuffer al volcar)
  * =======================================================================*/
-#define CURSOR_W 12
-#define CURSOR_H 19
+static rect_t cursor_rect(void) {
+  const cursor_img_t *c = cursor_get(cursor_shape);
+  return (rect_t){cursor_x - c->hot_x, cursor_y - c->hot_y, c->w, c->h};
+}
 
-static const uint8_t g_cursor_arrow[19][12] = {
-    {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0},
-    {2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0}, {2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0},
-    {2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0}, {2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0},
-    {2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0}, {2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0},
-    {2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 0, 0}, {2, 1, 1, 2, 1, 1, 1, 2, 0, 0, 0, 0},
-    {2, 1, 2, 0, 2, 1, 1, 1, 2, 0, 0, 0}, {2, 2, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0},
-    {0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0}, {0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0},
-    {0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0}, {0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0},
-};
+/* El cursor cambió de sitio o de forma: repintar donde estaba y donde está. */
+static void cursor_moved(void) {
+  rect_t now = cursor_rect();
+  if (now.x == cursor_drawn.x && now.y == cursor_drawn.y &&
+      now.w == cursor_drawn.w)
+    return;
+  compositor_invalidate_rect(cursor_drawn);
+  compositor_invalidate_rect(now);
+  cursor_drawn = now;
+}
 
-static void draw_cursor_overlay(uint32_t *dst, int stride, rect_t clip) {
-  for (int y = 0; y < CURSOR_H; y++) {
-    int py = cursor_y + y;
-    if (py < clip.y || py >= clip.y + clip.h)
-      continue;
-    for (int x = 0; x < CURSOR_W; x++) {
-      uint8_t v = g_cursor_arrow[y][x];
-      if (v == 0)
-        continue;
-      int px = cursor_x + x;
-      if (px < clip.x || px >= clip.x + clip.w)
-        continue;
-      /* Relleno negro, borde blanco (al revés que el cursor estilo Windows).
-       * Se escribe directo en VRAM sin leerla. */
-      dst[py * stride + px] = (v == 1) ? 0xFF111111 : 0xFFFFFFFF;
+static void set_cursor_shape(cursor_shape_t s) {
+  if (s == cursor_shape)
+    return;
+  cursor_shape = s;
+  compositor_invalidate_rect(cursor_drawn);
+  cursor_drawn = (rect_t){0, 0, 0, 0};
+  cursor_moved();
+}
+
+/* Se escribe en VRAM sin leerla: el fondo sale del backbuffer. */
+static void draw_cursor_overlay(rect_t clip) {
+  const cursor_img_t *c = cursor_get(cursor_shape);
+  rect_t cr = cursor_rect();
+  rect_t r = rect_clip(clip, cr);
+  for (int y = r.y; y < r.y + r.h; y++) {
+    const uint32_t *src = &c->px[(y - cr.y) * c->w + (r.x - cr.x)];
+    const uint32_t *bg = &backbuffer[y * fb_width + r.x];
+    uint32_t *out = &fb_ptr[y * fb_pitch + r.x];
+    for (int x = 0; x < r.w; x++) {
+      if (src[x] >> 24)
+        out[x] = blend_pixel_fast(src[x], bg[x]);
     }
   }
+}
+
+static int edges_for_hit(win_hit_t h) {
+  switch (h) {
+  case WIN_HIT_RESIZE_R:
+    return RESIZE_EDGE_RIGHT;
+  case WIN_HIT_RESIZE_B:
+    return RESIZE_EDGE_BOTTOM;
+  case WIN_HIT_RESIZE_BR:
+    return RESIZE_EDGE_RIGHT | RESIZE_EDGE_BOTTOM;
+  case WIN_HIT_RESIZE_L:
+    return RESIZE_EDGE_LEFT;
+  case WIN_HIT_RESIZE_T:
+    return RESIZE_EDGE_TOP;
+  case WIN_HIT_RESIZE_TL:
+    return RESIZE_EDGE_TOP | RESIZE_EDGE_LEFT;
+  case WIN_HIT_RESIZE_TR:
+    return RESIZE_EDGE_TOP | RESIZE_EDGE_RIGHT;
+  case WIN_HIT_RESIZE_BL:
+    return RESIZE_EDGE_BOTTOM | RESIZE_EDGE_LEFT;
+  default:
+    return RESIZE_EDGE_NONE;
+  }
+}
+
+static cursor_shape_t shape_for_edges(int e) {
+  int h = e & (RESIZE_EDGE_LEFT | RESIZE_EDGE_RIGHT);
+  int v = e & (RESIZE_EDGE_TOP | RESIZE_EDGE_BOTTOM);
+  if (h && v) {
+    int nwse = (e & RESIZE_EDGE_LEFT) ? (e & RESIZE_EDGE_TOP) != 0
+                                      : (e & RESIZE_EDGE_BOTTOM) != 0;
+    return nwse ? CURSOR_RESIZE_NWSE : CURSOR_RESIZE_NESW;
+  }
+  if (h)
+    return CURSOR_RESIZE_EW;
+  if (v)
+    return CURSOR_RESIZE_NS;
+  return CURSOR_ARROW;
+}
+
+/* Ventana interactiva más alta bajo el cursor y la zona tocada. */
+static window_t *window_at_cursor(win_hit_t *hit) {
+  for (window_t *w = window_stack; w; w = w->next) {
+    if ((w->flags & WIN_FLAGS_HIDDEN) || w->anim_state != WIN_ANIM_NONE)
+      continue;
+    win_hit_t h = window_hit_test(w, cursor_x, cursor_y);
+    if (h != WIN_HIT_NONE) {
+      *hit = h;
+      return w;
+    }
+  }
+  *hit = WIN_HIT_NONE;
+  return NULL;
+}
+
+static void update_cursor_shape(void) {
+  cursor_shape_t s = CURSOR_ARROW;
+  if (resize_window) {
+    s = shape_for_edges(resize_edge);
+  } else if (!drag_window && !pressed_win && !menubar_is_open() &&
+             cursor_y >= AURORA_MENUBAR_H &&
+             !dock_hit_test(cursor_x, cursor_y)) {
+    win_hit_t h;
+    if (window_at_cursor(&h))
+      s = shape_for_edges(edges_for_hit(h));
+  }
+  set_cursor_shape(s);
 }
 
 /* =========================================================================
@@ -681,6 +872,11 @@ static void compositor_handle_key(uint8_t scancode, int pressed) {
     return;
   if (menubar_is_open() && scancode == 0x01) { /* Esc cierra el menú */
     menubar_close();
+    return;
+  }
+  if (scancode == 0x58) { /* F12: overlay de logs del kernel */
+    boot_console_overlay_enable(!boot_console_overlay_enabled());
+    compositor_invalidate_rect(screen_rect());
     return;
   }
   window_t *w = focused_window();
@@ -702,9 +898,74 @@ static void post_client_mouse(window_t *win, uint32_t data) {
                     cursor_y - win->y - tb, data);
 }
 
-static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
-  int old_x = cursor_x, old_y = cursor_y;
+/* Id de semáforo (1 min, 2 max, 3 cerrar) para hover/pressed. */
+static int light_id(win_hit_t h) {
+  return (h == WIN_HIT_MINIMIZE)   ? 1
+         : (h == WIN_HIT_MAXIMIZE) ? 2
+         : (h == WIN_HIT_CLOSE)    ? 3
+                                   : 0;
+}
 
+static void set_pressed_light(window_t *w, int id) {
+  if (!w || w->pressed_btn == id)
+    return;
+  w->pressed_btn = id;
+  compositor_invalidate_rect(window_invalidate_controls(w));
+}
+
+/* Geometría propuesta del resize según el cursor (sin tocar la ventana). */
+static rect_t resize_proposal(void) {
+  rect_t f = resize_from;
+  int dx = cursor_x - resize_origin_x, dy = cursor_y - resize_origin_y;
+  int w = f.w, h = f.h;
+  if (resize_edge & RESIZE_EDGE_RIGHT)
+    w = f.w + dx;
+  if (resize_edge & RESIZE_EDGE_LEFT)
+    w = f.w - dx;
+  if (resize_edge & RESIZE_EDGE_BOTTOM)
+    h = f.h + dy;
+  if (resize_edge & RESIZE_EDGE_TOP)
+    h = f.h - dy;
+  w = imax(RESIZE_MIN_W, imin(w, RESIZE_MAX));
+  h = imax(RESIZE_MIN_H, imin(h, RESIZE_MAX));
+  int x = (resize_edge & RESIZE_EDGE_LEFT) ? f.x + f.w - w : f.x;
+  int y = f.y;
+  if (resize_edge & RESIZE_EDGE_TOP) {
+    y = f.y + f.h - h;
+    if (y < AURORA_MENUBAR_H) { /* el borde superior no pasa la barra */
+      y = AURORA_MENUBAR_H;
+      h = f.y + f.h - y;
+    }
+  }
+  return (rect_t){x, y, w, h};
+}
+
+static void finish_resize(void) {
+  window_t *w = resize_window;
+  rect_t to = resize_to;
+  compositor_invalidate_rect(resize_outline_rect());
+  resize_window = NULL;
+  resize_edge = 0;
+  resize_to = (rect_t){0, 0, 0, 0};
+  if (!w || to.w <= 0 || to.h <= 0)
+    return;
+  if (to.w == w->width && to.h == w->height && to.x == w->x && to.y == w->y)
+    return;
+
+  if (to.w != w->width || to.h != w->height) {
+    window_resize(w, to.w, to.h);
+    if (w->width != to.w || w->height != to.h)
+      return; /* sin memoria: se queda como estaba */
+    winsrv_post_event(w, WINSRV_EV_RESIZE, w->content_w, w->content_h, 0);
+  }
+  w->x = to.x;
+  w->y = to.y;
+  w->maximized = 0;
+  invalidate_window(w);
+  winsrv_post_event(w, WINSRV_EV_MOVE, w->x, w->y, 0);
+}
+
+static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
   cursor_x += dx;
   cursor_y += dy;
   if (cursor_x < 0)
@@ -732,20 +993,14 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
     w->hover_btn = 0;
     w->hover_controls = 0;
     if (!(w->flags & WIN_FLAGS_HIDDEN) && w->anim_state == WIN_ANIM_NONE &&
-        !menubar_is_open()) {
+        !menubar_is_open() && !drag_window && !resize_window) {
       if (window_in_controls(w, cursor_x, cursor_y)) {
         w->hover_controls = 1;
-        win_hit_t h = window_hit_test(w, cursor_x, cursor_y);
-        w->hover_btn = (h == WIN_HIT_MINIMIZE)   ? 1
-                       : (h == WIN_HIT_MAXIMIZE) ? 2
-                       : (h == WIN_HIT_CLOSE)    ? 3
-                                                 : 0;
+        w->hover_btn = light_id(window_hit_test(w, cursor_x, cursor_y));
       }
     }
-    if (w->hover_btn != old_btn || w->hover_controls != old_ctrl) {
-      w->dirty = 1;
-      compositor_invalidate_rect(win_damage_rect(w));
-    }
+    if (w->hover_btn != old_btn || w->hover_controls != old_ctrl)
+      compositor_invalidate_rect(window_invalidate_controls(w));
   }
 
   /* ---------- 1. Press izquierdo ---------- */
@@ -757,51 +1012,49 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
     } else {
       taskbar_item_t *item = dock_hit_test(cursor_x, cursor_y);
       if (item) {
-        if (item->on_click)
-          item->on_click(item);
+        dock_pressed_item = item;
+        dock_set_pressed(item);
       } else {
-        int hit_any = 0;
-        for (window_t *win = window_stack; win; win = win->next) {
-          if ((win->flags & WIN_FLAGS_HIDDEN) || win->anim_state != WIN_ANIM_NONE)
-            continue;
-          win_hit_t h = window_hit_test(win, cursor_x, cursor_y);
-          if (h == WIN_HIT_NONE)
-            continue;
-          hit_any = 1;
-
+        win_hit_t h;
+        window_t *win = window_at_cursor(&h);
+        if (!win)
+          do_unfocus_all();
+        else if (win_hit_is_resize(h)) {
+          resize_window = win;
+          resize_edge = edges_for_hit(h);
+          resize_origin_x = cursor_x;
+          resize_origin_y = cursor_y;
+          resize_from = (rect_t){win->x, win->y, win->width, win->height};
+          resize_to = resize_from;
+          do_focus_window(win);
+        } else {
           switch (h) {
-          case WIN_HIT_RESIZE_R:
-          case WIN_HIT_RESIZE_B:
-          case WIN_HIT_RESIZE_BR:
-            resize_window = win;
-            resize_edge = (h == WIN_HIT_RESIZE_R)   ? RESIZE_EDGE_RIGHT
-                          : (h == WIN_HIT_RESIZE_B) ? RESIZE_EDGE_BOTTOM
-                                                    : (RESIZE_EDGE_RIGHT |
-                                                       RESIZE_EDGE_BOTTOM);
-            resize_origin_x = cursor_x;
-            resize_origin_y = cursor_y;
-            resize_win_w = win->width;
-            resize_win_h = win->height;
-            do_focus_window(win);
-            break;
           case WIN_HIT_CLOSE:
-            pressed_win = win;
-            pressed_btn = WIN_BTN_CLOSE_PRESSED;
-            break;
           case WIN_HIT_MINIMIZE:
-            pressed_win = win;
-            pressed_btn = WIN_BTN_MINIMIZE_PRESSED;
-            break;
           case WIN_HIT_MAXIMIZE:
             pressed_win = win;
-            pressed_btn = WIN_BTN_MAXIMIZE_PRESSED;
+            pressed_btn = (h == WIN_HIT_CLOSE)      ? WIN_BTN_CLOSE_PRESSED
+                          : (h == WIN_HIT_MINIMIZE) ? WIN_BTN_MINIMIZE_PRESSED
+                                                    : WIN_BTN_MAXIMIZE_PRESSED;
+            set_pressed_light(win, light_id(h));
             break;
-          case WIN_HIT_TITLEBAR:
+          case WIN_HIT_TITLEBAR: {
+            uint64_t now = comp_rdtsc();
+            uint64_t freq = klog_get_tsc_freq();
+            uint64_t dbl = freq ? freq * WIN_DOUBLE_CLICK_MS / 1000 : 0;
             do_focus_window(win);
-            drag_window = win;
-            drag_offset_x = cursor_x - win->x;
-            drag_offset_y = cursor_y - win->y;
+            if (title_click_win == win && now - title_click_tsc < dbl) {
+              title_click_win = NULL;
+              do_toggle_maximize(win);
+            } else {
+              title_click_win = win;
+              title_click_tsc = now;
+              drag_window = win;
+              drag_offset_x = cursor_x - win->x;
+              drag_offset_y = cursor_y - win->y;
+            }
             break;
+          }
           case WIN_HIT_CLIENT:
             do_focus_window(win);
             post_client_mouse(win, MOUSE_BUTTON_LEFT);
@@ -809,57 +1062,39 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
           default:
             break;
           }
-          break;
         }
-        if (!hit_any)
-          do_unfocus_all();
       }
     }
   }
 
   /* ---------- 2. Release ---------- */
   if (released) {
-    /* Resize: se aplica una sola vez al soltar. */
-    if (resize_window) {
-      int final_w = resize_new_w, final_h = resize_new_h;
-      if (final_w > 0 && final_h > 0 &&
-          (final_w != resize_window->width || final_h != resize_window->height)) {
-        rect_t old_r = win_damage_rect(resize_window);
-        window_resize(resize_window, final_w, final_h);
-        if (resize_window->width == final_w &&
-            resize_window->height == final_h) {
-          resize_window->maximized = 0;
-          compositor_invalidate_rect(
-              rect_bounding_box(old_r, win_damage_rect(resize_window)));
-          winsrv_post_event(resize_window, WINSRV_EV_RESIZE,
-                            resize_window->content_w, resize_window->content_h,
-                            0);
-        } else {
-          compositor_invalidate_rect(old_r);
-        }
-      } else {
-        compositor_invalidate_rect(
-            (rect_t){resize_window->x - 2, resize_window->y - 2,
-                     resize_new_w + 4, resize_new_h + 4});
-      }
-      resize_window = NULL;
-      resize_edge = 0;
-      resize_new_w = resize_new_h = 0;
+    /* Dock: la acción ocurre al soltar, si se suelta sobre el mismo icono. */
+    if (dock_pressed_item) {
+      taskbar_item_t *it = dock_pressed_item;
+      dock_pressed_item = NULL;
+      dock_set_pressed(NULL);
+      if (dock_hit_test(cursor_x, cursor_y) == it && it->on_click)
+        it->on_click(it);
     }
+
+    /* Resize: se aplica una sola vez al soltar. */
+    if (resize_window)
+      finish_resize();
 
     /* Semáforos: la acción solo se ejecuta si se suelta sobre el mismo. */
     if (pressed_win && pressed_btn != WIN_BTN_NONE) {
-      win_hit_t h = window_hit_test(pressed_win, cursor_x, cursor_y);
+      window_t *pw = pressed_win;
+      win_hit_t h = window_hit_test(pw, cursor_x, cursor_y);
+      set_pressed_light(pw, 0);
       if (pressed_btn == WIN_BTN_CLOSE_PRESSED && h == WIN_HIT_CLOSE) {
-        request_close(pressed_win);
+        request_close(pw);
       } else if (pressed_btn == WIN_BTN_MINIMIZE_PRESSED &&
                  h == WIN_HIT_MINIMIZE) {
-        do_minimize_window(pressed_win);
-        taskbar_set_active_item(NULL);
-        dock_invalidate_layout();
+        do_minimize_window(pw);
       } else if (pressed_btn == WIN_BTN_MAXIMIZE_PRESSED &&
                  h == WIN_HIT_MAXIMIZE) {
-        do_toggle_maximize(pressed_win);
+        do_toggle_maximize(pw);
       }
     }
 
@@ -878,24 +1113,34 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
     pressed_btn = WIN_BTN_NONE;
   }
 
-  /* ---------- 3. Resize en curso: solo outline hasta soltar ---------- */
-  if (pressed && resize_window) {
-    int new_w = resize_win_w, new_h = resize_win_h;
-    if (resize_edge & RESIZE_EDGE_RIGHT)
-      new_w += cursor_x - resize_origin_x;
-    if (resize_edge & RESIZE_EDGE_BOTTOM)
-      new_h += cursor_y - resize_origin_y;
-    new_w = imax(200, imin(new_w, 2048));
-    new_h = imax(150, imin(new_h, 2048));
+  /* Icono del Dock pulsado: oscurecido solo mientras el cursor siga encima. */
+  if (pressed && dock_pressed_item && mouse_moved)
+    dock_set_pressed(dock_hit_test(cursor_x, cursor_y) == dock_pressed_item
+                         ? dock_pressed_item
+                         : NULL);
 
-    if (new_w != resize_new_w || new_h != resize_new_h) {
-      int ow = imax(resize_new_w, resize_window->width);
-      int oh = imax(resize_new_h, resize_window->height);
-      compositor_invalidate_rect(
-          (rect_t){resize_window->x - 2, resize_window->y - 2,
-                   imax(ow, new_w) + 4, imax(oh, new_h) + 4});
-      resize_new_w = new_w;
-      resize_new_h = new_h;
+  /* ---------- 2.5 Semáforo pulsado: oscurecido solo mientras el cursor
+   * siga encima, como en macOS ---------- */
+  if (pressed && pressed_win && mouse_moved) {
+    win_hit_t h = window_hit_test(pressed_win, cursor_x, cursor_y);
+    int want = (pressed_btn == WIN_BTN_CLOSE_PRESSED && h == WIN_HIT_CLOSE) ||
+                       (pressed_btn == WIN_BTN_MINIMIZE_PRESSED &&
+                        h == WIN_HIT_MINIMIZE) ||
+                       (pressed_btn == WIN_BTN_MAXIMIZE_PRESSED &&
+                        h == WIN_HIT_MAXIMIZE)
+                   ? light_id(h)
+                   : 0;
+    set_pressed_light(pressed_win, want);
+  }
+
+  /* ---------- 3. Resize en curso: solo el marco fantasma hasta soltar ---- */
+  if (pressed && resize_window) {
+    rect_t to = resize_proposal();
+    if (to.x != resize_to.x || to.y != resize_to.y || to.w != resize_to.w ||
+        to.h != resize_to.h) {
+      rect_t old = resize_outline_rect();
+      resize_to = to;
+      compositor_invalidate_rect(rect_bounding_box(old, resize_outline_rect()));
     }
   }
 
@@ -903,21 +1148,21 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
   if (pressed && drag_window) {
     int new_x = cursor_x - drag_offset_x;
     int new_y = cursor_y - drag_offset_y;
-    new_y = imax(new_y, AURORA_MENUBAR_H);            /* no bajo la barra */
-    new_y = imin(new_y, (int)fb_height - 40);         /* siempre agarrable */
+    new_y = imax(new_y, AURORA_MENUBAR_H);    /* no bajo la barra */
+    new_y = imin(new_y, (int)fb_height - 40); /* siempre agarrable */
     if (new_x != drag_window->x || new_y != drag_window->y) {
-      rect_t old_r = win_damage_rect(drag_window);
       drag_window->x = new_x;
       drag_window->y = new_y;
       drag_window->maximized = 0;
-      compositor_invalidate_rect(
-          rect_bounding_box(old_r, win_damage_rect(drag_window)));
+      title_click_win = NULL; /* arrastrar no cuenta como clic */
+      invalidate_window(drag_window);
       winsrv_post_event(drag_window, WINSRV_EV_MOVE, new_x, new_y, 0);
     }
   }
 
   /* ---------- 5. Motion sobre cliente con botón pulsado ---------- */
-  if (pressed && mouse_moved && !drag_window && !resize_window) {
+  if (pressed && mouse_moved && !drag_window && !resize_window &&
+      !pressed_win) {
     for (window_t *win = window_stack; win; win = win->next) {
       if (win->flags & WIN_FLAGS_HIDDEN)
         continue;
@@ -930,19 +1175,19 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
 
   last_mouse_buttons = buttons;
 
-  /* ---------- 6. Refresco del cursor ---------- */
-  if (mouse_moved && (old_x != cursor_x || old_y != cursor_y)) {
-    compositor_invalidate_rect(
-        (rect_t){old_x - 2, old_y - 2, CURSOR_W + 4, CURSOR_H + 4});
-    compositor_invalidate_rect(
-        (rect_t){cursor_x, cursor_y, CURSOR_W, CURSOR_H});
-  }
+  /* ---------- 6. Cursor: forma y posición ---------- */
+  update_cursor_shape();
+  cursor_moved();
 }
 
 /* Procesa hasta EVENT_BUDGET eventos por iteración y funde el movimiento
  * consecutivo del ratón (misma pulsación) en uno solo. Un cambio de botones
- * nunca se funde: se procesa por separado y en orden. */
-#define EVENT_BUDGET 64
+ * nunca se funde: se procesa por separado y en orden. Con un ratón USB a
+ * 1000 Hz el presupuesto alcanza para varios frames de eventos acumulados. */
+#define EVENT_BUDGET 256
+
+/* Duración mínima de un frame con volcado (ms). */
+#define COMP_FRAME_MS 16
 
 static void compositor_process_events(void) {
   input_event_t ev;
@@ -981,71 +1226,98 @@ static void compositor_process_events(void) {
 /* =========================================================================
  * Render
  * =======================================================================*/
+
+/* Fondo + ventanas de atrás hacia delante en `e`. Si una ventana opaca tapa
+ * `e` entero, se empieza por ella: ni el fondo ni lo que hay debajo se ven
+ * (p. ej. el cursor del terminal parpadeando solo recompone el terminal). */
+static void compose_scene(rect_t e) {
+  window_t *cover = NULL;
+  for (window_t *w = window_stack; w; w = w->next) {
+    if (window_covers(w, e)) {
+      cover = w;
+      break;
+    }
+  }
+
+  window_t *curr = cover;
+  if (!curr) {
+    if (wallpaper_cache) {
+      for (int y = e.y; y < e.y + e.h; y++)
+        simd_copy_normal(&backbuffer[y * fb_width + e.x],
+                         &wallpaper_cache[y * fb_width + e.x], e.w);
+    } else {
+      for (int y = e.y; y < e.y + e.h; y++)
+        simd_fill_row(&backbuffer[y * fb_width + e.x], 0xFF1E1E2E, e.w);
+    }
+    curr = window_stack;
+    while (curr && curr->next)
+      curr = curr->next;
+  }
+  for (; curr; curr = curr->prev) {
+    if (!(curr->flags & WIN_FLAGS_HIDDEN) &&
+        rect_intersects(e, window_visual_rect(curr)))
+      window_render_frame(curr, backbuffer, fb_width, e);
+  }
+}
+
+/* Backbuffer -> VRAM del rectángulo `clip`, con el cursor encima. Sin
+ * preempción: así nunca queda en pantalla media ventana en la posición
+ * nueva y media en la vieja durante un quantum entero de otra tarea. */
+static void present_rect(rect_t clip) {
+  if (!fb_ptr)
+    return;
+  preempt_disable();
+  for (int y = clip.y; y < clip.y + clip.h; y++) {
+    if (fb_bpp == 24) /* fb_ptr es un buffer en RAM; fb_flush_rect empaqueta */
+      simd_copy_normal(&fb_ptr[y * fb_pitch + clip.x],
+                       &backbuffer[y * fb_width + clip.x], clip.w);
+    else
+      simd_copy_to_vram(&fb_ptr[y * fb_pitch + clip.x],
+                        &backbuffer[y * fb_width + clip.x], clip.w);
+  }
+  draw_cursor_overlay(clip);
+  fb_flush_rect(fb_ptr, fb_pitch, (uint32_t)clip.x, (uint32_t)clip.y,
+                (uint32_t)clip.w, (uint32_t)clip.h);
+  preempt_enable();
+}
+
 static void render_rect(rect_t clip) {
   uint64_t t0 = comp_rdtsc();
 
-  /* El Dock y la barra de menús desenfocan lo que hay debajo: si el daño los
-   * toca, se repinta entera su zona para que el desenfoque lea un fondo
-   * recién compuesto (y no restos del frame anterior). */
-  rect_t dd = dock_get_damage_rect();
-  if (dd.w > 0 && rect_intersects(clip, dd))
-    clip = rect_clip(rect_bounding_box(clip, dd), screen_rect());
-  rect_t md = menubar_get_damage_rect();
-  if (rect_intersects(clip, md))
-    clip = rect_clip(rect_bounding_box(clip, md), screen_rect());
-  if (clip.w <= 0 || clip.h <= 0)
-    return;
-
-  /* 1. Fondo */
-  if (wallpaper_cache) {
-    for (int y = clip.y; y < clip.y + clip.h; y++)
-      simd_copy_normal(&backbuffer[y * fb_width + clip.x],
-                       &wallpaper_cache[y * fb_width + clip.x], clip.w);
-  } else {
-    for (int y = clip.y; y < clip.y + clip.h; y++)
-      simd_fill_row(&backbuffer[y * fb_width + clip.x], 0xFF1E1E2E, clip.w);
+  /* Los paneles de cristal (Dock, tooltip, menús) desenfocan lo que tienen
+   * debajo: para la parte de cada uno que cae en el clip, el fondo debe estar
+   * recién compuesto también en un margen del radio de desenfoque. Solo se
+   * compone ese margen extra; el cristal y la UI se pintan y vuelcan solo
+   * dentro del clip. */
+  glass_rect_t glass[4];
+  int ng = dock_glass_rects(glass, 4);
+  ng += menubar_glass_rects(glass + ng, 4 - ng);
+  rect_t e = clip;
+  for (int i = 0; i < ng; i++) {
+    rect_t s = gfx_glass_source_rect(clip, glass[i].r, glass[i].blur);
+    if (s.w > 0 && s.h > 0)
+      e = rect_bounding_box(e, s);
   }
+  e = rect_clip(e, screen_rect());
+
+  /* 1-2. Fondo y ventanas */
   uint64_t t1 = comp_rdtsc();
-
-  /* 2. Ventanas, de atrás hacia delante */
-  window_t *curr = window_stack;
-  while (curr && curr->next)
-    curr = curr->next;
-  while (curr) {
-    if (!(curr->flags & WIN_FLAGS_HIDDEN)) {
-      rect_t wb = {curr->x - SH, curr->y - SH + curr->anim_dy,
-                   curr->width + SH * 2, curr->height + SH * 2};
-      if (rect_intersects(clip, wb))
-        window_render_frame(curr, backbuffer, fb_width, clip);
-    }
-    curr = curr->prev;
-  }
+  compose_scene(e);
   uint64_t t2 = comp_rdtsc();
 
-  /* 3. Dock, barra de menús y outline de resize */
+  /* 3. Dock, barra de menús y marco de resize */
   dock_render(backbuffer, fb_width, clip);
   menubar_render(backbuffer, fb_width, clip);
   if (resize_window)
     draw_resize_outline(backbuffer, fb_width, clip);
+  /* Overlay de logs del kernel, sobre todo lo demás (solo si está
+   * activado: arranque sin splash). */
+  boot_console_draw_overlay(backbuffer, fb_width, clip.x, clip.y, clip.w,
+                            clip.h);
   uint64_t t3 = comp_rdtsc();
 
-  /* 4. Blit a VRAM (non-temporal) + cursor + flush */
-  if (fb_ptr) {
-    for (int y = clip.y; y < clip.y + clip.h; y++) {
-      if (fb_bpp == 24) /* fb_ptr es un buffer en RAM; fb_flush_rect empaqueta */
-        simd_copy_normal(&fb_ptr[y * fb_pitch + clip.x],
-                         &backbuffer[y * fb_width + clip.x], clip.w);
-      else
-        simd_copy_to_vram(&fb_ptr[y * fb_pitch + clip.x],
-                          &backbuffer[y * fb_width + clip.x], clip.w);
-    }
-    rect_t c_clip =
-        rect_clip(clip, (rect_t){cursor_x, cursor_y, CURSOR_W, CURSOR_H});
-    if (c_clip.w > 0 && c_clip.h > 0)
-      draw_cursor_overlay(fb_ptr, fb_pitch, c_clip);
-    fb_flush_rect(fb_ptr, fb_pitch, (uint32_t)clip.x, (uint32_t)clip.y,
-                  (uint32_t)clip.w, (uint32_t)clip.h);
-  }
+  /* 4. Volcado a VRAM + cursor */
+  present_rect(clip);
   uint64_t t4 = comp_rdtsc();
 
   g_ph_cur[PH_BG] += t1 - t0;
@@ -1054,11 +1326,12 @@ static void render_rect(rect_t clip) {
   g_ph_cur[PH_BLIT] += t4 - t3;
 }
 
-static void compositor_render(void) {
+/* Devuelve 1 si se pintó algo. */
+static int compositor_render(void) {
   rect_t list[DAMAGE_MAX];
   int n = damage_take(list);
   if (n == 0)
-    return;
+    return 0;
 
   uint64_t t0 = comp_rdtsc();
   for (int i = 0; i < n; i++) {
@@ -1067,10 +1340,7 @@ static void compositor_render(void) {
       render_rect(r);
   }
   compositor_report_frame_stats(comp_rdtsc() - t0);
-
-  /* Overlay de logs del kernel (solo dibuja si está activado). */
-  extern void boot_console_draw_overlay(void);
-  boot_console_draw_overlay();
+  return 1;
 }
 
 /* =========================================================================
@@ -1088,23 +1358,31 @@ static int compositor_tick_animations(int dt_ms) {
   while (w) {
     window_t *next = w->next;
     if (w->anim_state != WIN_ANIM_NONE) {
+      /* El destino del genie sigue al icono (el Dock puede estar animando la
+       * magnificación). */
+      if (w->anim_state == WIN_ANIM_MINIMIZING ||
+          w->anim_state == WIN_ANIM_RESTORING) {
+        rect_t t = dock_target(w);
+        if (t.w > 0)
+          w->genie_to = t;
+      }
       window_advance_animation(w, dt_ms);
-
-      rect_t d1 = {w->x - SH, w->y - SH + w->anim_dy, w->width + SH * 2,
-                   w->height + SH * 2};
-      compositor_invalidate_rect(rect_bounding_box(d1, win_damage_rect(w)));
 
       if (w->anim_state == WIN_ANIM_NONE) {
         if (w->pending_destroy) {
           w->pending_destroy = 0;
           do_destroy(w);
-        } else if (w->anim_alpha == 0 && !(w->flags & WIN_FLAGS_HIDDEN)) {
-          w->flags |= WIN_FLAGS_HIDDEN;
+          w = next;
+          continue;
+        }
+        if (w->anim_alpha == 0 && !(w->flags & WIN_FLAGS_HIDDEN)) {
+          w->flags |= WIN_FLAGS_HIDDEN; /* fin del minimizado */
           w->flags &= ~WIN_FLAGS_FOCUSED;
           w->flags |= WIN_FLAGS_INACTIVE;
           w->dirty = 1;
         }
       }
+      invalidate_window(w);
     }
     w = next;
   }
@@ -1114,6 +1392,11 @@ static int compositor_tick_animations(int dt_ms) {
 /* =========================================================================
  * Despertar y bucle principal
  * =======================================================================*/
+static bool cond_never(void *arg) {
+  (void)arg;
+  return false;
+}
+
 static bool cond_work(void *arg) {
   (void)arg;
   return compositor_has_input || compositor_needs_clock ||
@@ -1151,6 +1434,7 @@ void compositor_init(void) {
   spin_init(&dmg_lock);
   spin_init(&cmd_lock);
   font_manager_init();
+  cursor_init();
 
   compositor_has_input = 0;
   compositor_needs_clock = 0;
@@ -1167,9 +1451,10 @@ void compositor_init(void) {
   winsrv_init();
   dock_init((int)fb_width, (int)fb_height);
   menubar_init((int)fb_width, (int)fb_height);
+  menubar_set_provider(&k_menu_provider);
   taskbar_refresh_clock();
 
-  bg_wallpaper_node = tar_find_file("system/wallpapers/wallpaper-main.bmp");
+  bg_wallpaper_node = tar_find_file("system/wallpapers/wallpaper-aurora-blue.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
   if (wallpaper_cache) {
@@ -1243,6 +1528,7 @@ void compositor_init(void) {
     }
   }
 
+  cursor_drawn = cursor_rect();
   compositor_invalidate_rect(screen_rect());
 }
 
@@ -1263,6 +1549,7 @@ void compositor_thread(void) {
       wait_event_timeout(&compositor_wq, cond_urgent_or_frame, NULL, 20);
     }
     compositor_frame_due = 0;
+    uint64_t frame_tsc = comp_rdtsc();
 
     /* 1. Comandos de otras CPUs (crear/cerrar/enfocar/icono) */
     comp_cmd_t cmd;
@@ -1292,7 +1579,10 @@ void compositor_thread(void) {
     last_tsc = now_tsc;
     dt = imax(1, imin(dt, 33));
 
-    /* 5. Animaciones, Dock y barra de menús */
+    /* 5. Animaciones, Dock y barra de menús. El Dock va después: si una
+     * ventana se destruye aquí, su item desaparece y dock_update rehace los
+     * slots antes de pintar (el genie usa los del frame anterior, que solo
+     * compara por puntero). */
     int win_anim = compositor_tick_animations(dt);
     int dock_anim = dock_update(dt);
 
@@ -1303,8 +1593,20 @@ void compositor_thread(void) {
       compositor_invalidate_rect(r);
 
     /* 6. Render */
-    compositor_render();
+    int rendered = compositor_render();
 
     compositor_animating = (win_anim || dock_anim) ? 1 : 0;
+
+    /* Ritmo de frames (~62 fps). Sin esto, con un ratón a 1000 Hz cada
+     * evento provoca un volcado a VRAM y, si el frame tarda, el compositor
+     * escribe VRAM sin pausa: el escaneo de pantalla siempre pilla una
+     * ventana a medias (cortes al arrastrar). Durante la pausa los eventos se
+     * acumulan en la cola y se funden en un solo movimiento. */
+    if (rendered && tsc_freq > 0) {
+      uint64_t spent_ms = (comp_rdtsc() - frame_tsc) * 1000 / tsc_freq;
+      if (spent_ms < COMP_FRAME_MS)
+        wait_event_timeout(&compositor_wq, cond_never, NULL,
+                           COMP_FRAME_MS - spent_ms);
+    }
   }
 }

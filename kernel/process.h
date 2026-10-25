@@ -251,6 +251,15 @@ process_t *process_spawn_child(process_t *parent, const char *path);
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
                     proc_rusage_t *rusage_out, int options);
 
+// [Fase 6.2] Envía `sig` al proceso `pid` desde el kernel (como kill(2) sin
+// comprobación de permisos). -ESRCH si no existe.
+int process_kill(uint32_t pid, int sig);
+
+// [Fase 6.3] Recoge un proceso huérfano (ppid 0, p.ej. un .aur lanzado por el
+// kernel) si ya es zombi. 0 = recogido (exit_code_out relleno), -EBUSY = sigue
+// vivo, -ESRCH = no existe o tiene padre (lo recoge su waitpid).
+int process_reap_orphan(uint32_t pid, int *exit_code_out);
+
 // [Fase A] Marca el proceso como zombie, cierra fds y ventanas, y
 // despierta al padre. NO mata la tarea. Es la parte "lógica".
 void process_exit(process_t *proc, int exit_code);

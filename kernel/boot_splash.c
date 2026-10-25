@@ -65,6 +65,13 @@ void boot_splash_tick(void) {
     return;
   if (__sync_lock_test_and_set(&g_lock, 1))
     return;
+  /* Re-comprobar con el lock: si el reveal empezó entre la comprobación de
+   * arriba y aquí, pintar este fotograma dejaría restos del spinner sobre el
+   * escritorio ya compuesto. */
+  if (!g_active || g_phase != 1) {
+    __sync_lock_release(&g_lock);
+    return;
+  }
   g_last = now;
   asp_frame(&S, (uint32_t)elapsed_ms(now, g_start), put_row, 0, g_line);
   __sync_lock_release(&g_lock);

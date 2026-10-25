@@ -47,6 +47,7 @@
 #include "heap.h"
 #include "io.h"        // inl / outl
 #include "klog.h"
+#include "kmod_sys.h"
 #include "paging.h"    // [FASE 4.3] paging_map_page_in, PTE_*
 #include "process.h"   // [FASE 4.3] struct process (aur.caps)
 #include "string.h"
@@ -107,6 +108,7 @@ typedef struct {
   uint8_t header_type;
   uint32_t bar[6];
   uint32_t bar_size[6];
+  uint64_t bar_phys[6]; // dirección física COMPLETA (BAR de 64 bits)
   uint8_t bar_is_io[6];
 } pci_dev_t;
 
@@ -177,7 +179,8 @@ static void sysfs_size_bars(pci_dev_t *d) {
         if (bar_size == 0)
           bar_size = 4ULL << 30;  // fallback: 4GB
       }
-      d->bar[b] = (uint32_t)bar_addr;       // truncado (perdemos hi)
+      d->bar[b] = (uint32_t)bar_addr;       // truncado (ver bar_phys)
+      d->bar_phys[b] = bar_addr;
       d->bar_size[b] = (uint32_t)bar_size;  // truncado
       d->bar_is_io[b] = 0;
       // Reservar b+1 como "consumido".
@@ -202,6 +205,7 @@ static void sysfs_size_bars(pci_dev_t *d) {
       continue;
     }
     d->bar[b] = orig & ~0xFu;
+    d->bar_phys[b] = d->bar[b];
     d->bar_size[b] = size;
   }
 }
@@ -617,7 +621,7 @@ static vfs_node_t *make_resource_node(const pci_dev_t *d, int bar) {
   r->slot = d->slot;
   r->func = d->func;
   r->bar_index = bar;
-  r->phys = (uint64_t)d->bar[bar];
+  r->phys = d->bar_phys[bar] ? d->bar_phys[bar] : (uint64_t)d->bar[bar];
   r->size = (uint64_t)d->bar_size[bar];
   n->priv = r;
 
@@ -627,7 +631,7 @@ static vfs_node_t *make_resource_node(const pci_dev_t *d, int bar) {
 // ===========================================================================
 // Listas estáticas para readdir
 // ===========================================================================
-static const char *sysfs_root_entries[] = {"bus", "class", "dev"};
+static const char *sysfs_root_entries[] = {"bus", "class", "dev", "module"};
 #define SYSFS_N_ROOT \
   (sizeof(sysfs_root_entries) / sizeof(sysfs_root_entries[0]))
 
@@ -1059,6 +1063,44 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
     return make_file(attr, content, len);
   }
 
+  // ---- /sys/module[/<m>[/attr | /holders[/<h>]]] (kmod: initstate, refcnt) ----
+  if (strcmp(name, "module") == 0)
+    return make_dir("module");
+  if (strncmp(name, "module/", 7) == 0) {
+    char mod[KMOD_NAME_MAX];
+    const char *rest = name + 7;
+    size_t ml = 0;
+    while (rest[ml] && rest[ml] != '/')
+      ml++;
+    if (ml == 0 || ml >= sizeof(mod))
+      return NULL;
+    memcpy(mod, rest, ml);
+    mod[ml] = '\0';
+    if (!kmod_is_loaded(mod))
+      return NULL;
+    const char *attr = rest[ml] == '/' ? rest + ml + 1 : NULL;
+    if (!attr)
+      return make_dir(mod);
+    if (strcmp(attr, "holders") == 0)
+      return make_dir("holders");
+    if (strncmp(attr, "holders/", 8) == 0) {
+      const char *h = attr + 8;
+      for (uint64_t i = 0;; i++) {
+        const char *hn = kmod_holder_name(mod, i);
+        if (!hn)
+          return NULL;
+        if (strcmp(hn, h) == 0) {
+          char target[KMOD_NAME_MAX + 16];
+          snprintf(target, sizeof(target), "/sys/module/%s", hn);
+          return make_symlink(hn, target);
+        }
+      }
+    }
+    size_t len = 0;
+    char *c = kmod_gen_sysfs_attr(mod, attr, &len);
+    return c ? make_file(attr, c, len) : NULL;
+  }
+
   // ---- /sys/dev ----
   if (strcmp(name, "dev") == 0)
     return make_dir("dev");
@@ -1250,6 +1292,52 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
         return 0;
     return readdir_list_typed(block_dev_attrs, SYSFS_N_BLK_ATTRS,
                               VFS_FILE, index, out);
+  }
+
+  if (strcmp(n, "/module") == 0) {
+    const char *m = kmod_loaded_name(index);
+    if (!m) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    strncpy(out->name, m, sizeof(out->name) - 1);
+    out->name[sizeof(out->name) - 1] = '\0';
+    out->type = VFS_DIRECTORY;
+    out->size = 0;
+    return 0;
+  }
+  if (strncmp(n, "/module/", 8) == 0) {
+    char mod[KMOD_NAME_MAX];
+    const char *rest = n + 8;
+    size_t ml = 0;
+    while (rest[ml] && rest[ml] != '/')
+      ml++;
+    if (ml > 0 && ml < sizeof(mod)) {
+      memcpy(mod, rest, ml);
+      mod[ml] = '\0';
+      if (rest[ml] == '\0') {
+        static const char *l[] = {"initstate", "refcnt", "taint", "holders"};
+        if (index < 3)
+          return readdir_list_typed(l, 4, VFS_FILE, index, out);
+        return readdir_list_typed(l, 4, VFS_DIRECTORY, index, out);
+      }
+      if (strcmp(rest + ml, "/holders") == 0) {
+        const char *h = kmod_holder_name(mod, index);
+        if (h) {
+          strncpy(out->name, h, sizeof(out->name) - 1);
+          out->name[sizeof(out->name) - 1] = '\0';
+          out->type = VFS_FILE;
+          out->size = 0;
+          return 0;
+        }
+      }
+    }
+    out->name[0] = '\0';
+    out->type = 0;
+    out->size = 0;
+    return 0;
   }
 
   if (strcmp(n, "/dev") == 0) {

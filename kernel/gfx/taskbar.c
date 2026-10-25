@@ -11,6 +11,7 @@ static taskbar_item_t *taskbar_items = NULL;
 static uint32_t next_item_id = 1;
 static char clock_time_buffer[6];  // HH:MM + nullo
 static char clock_date_buffer[11]; // DD/MM/YYYY + nullo
+static char clock_menubar_buffer[24]; // "vie 24 oct" (UTF-8)
 
 typedef struct {
   int advance_w;
@@ -61,10 +62,42 @@ void taskbar_refresh_clock(void) {
   }
   rtc_format_time(&now, clock_time_buffer, sizeof(clock_time_buffer));
   rtc_format_date(&now, clock_date_buffer, sizeof(clock_date_buffer));
+
+  /* Formato de la barra de menús de macOS en español: "vie 24 oct". */
+  static const char *const k_wday[] = {"dom", "lun", "mar", "mié",
+                                       "jue", "vie", "sáb"};
+  static const char *const k_mon[] = {"ene", "feb", "mar", "abr",
+                                      "may", "jun", "jul", "ago",
+                                      "sept", "oct", "nov", "dic"};
+  clock_menubar_buffer[0] = '\0';
+  if (now.month < 1 || now.month > 12 || now.day < 1 || now.day > 31)
+    return;
+  /* Día de la semana (Sakamoto). */
+  static const int k_t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  int y = now.year - (now.month < 3);
+  int wd = (y + y / 4 - y / 100 + y / 400 + k_t[now.month - 1] + now.day) % 7;
+  char *o = clock_menubar_buffer;
+  size_t n = 0, cap = sizeof(clock_menubar_buffer);
+  for (const char *s = k_wday[wd]; *s && n < cap - 1; s++)
+    o[n++] = *s;
+  if (n < cap - 1)
+    o[n++] = ' ';
+  if (now.day >= 10 && n < cap - 1)
+    o[n++] = (char)('0' + now.day / 10);
+  if (n < cap - 1)
+    o[n++] = (char)('0' + now.day % 10);
+  if (n < cap - 1)
+    o[n++] = ' ';
+  for (const char *s = k_mon[now.month - 1]; *s && n < cap - 1; s++)
+    o[n++] = *s;
+  o[n] = '\0';
 }
 
 const char *taskbar_clock_time_str(void) { return clock_time_buffer; }
 const char *taskbar_clock_date_str(void) { return clock_date_buffer; }
+const char *taskbar_clock_menubar_date_str(void) {
+  return clock_menubar_buffer;
+}
 
 taskbar_item_t *taskbar_add_item_bmp(taskbar_item_type_t type,
                                      const char *label, tar_node_t *bmp_file,
@@ -298,6 +331,23 @@ static void taskbar_draw_text_centered(uint32_t *dst, int stride, rect_t clip,
   // Sombra de 1px para que iconos/textos finos no se pierdan sobre el Mica.
   gfx_draw_string(dst, stride, clip, tx, ty + 1, text, 0x78000000, font_id);
   gfx_draw_string(dst, stride, clip, tx, ty, text, color, font_id);
+}
+
+static void taskbar_draw_start_icon(uint32_t *dst, int stride, rect_t clip,
+                                    int left, int center_y, uint32_t color) {
+  int top = center_y - TASKBAR_START_ICON_SIZE / 2;
+  int sq = TASKBAR_START_ICON_SQ;
+  int gap = TASKBAR_START_ICON_GAP;
+
+  gfx_fill_rounded_rect(dst, stride, clip, (rect_t){left, top, sq, sq}, 2,
+                        color);
+  gfx_fill_rounded_rect(dst, stride, clip,
+                        (rect_t){left + sq + gap, top, sq, sq}, 2, color);
+  gfx_fill_rounded_rect(dst, stride, clip,
+                        (rect_t){left, top + sq + gap, sq, sq}, 2, color);
+  gfx_fill_rounded_rect(dst, stride, clip,
+                        (rect_t){left + sq + gap, top + sq + gap, sq, sq}, 2,
+                        color);
 }
 
 static taskbar_item_layout_t taskbar_measure_item(taskbar_item_t *item,

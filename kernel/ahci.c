@@ -26,6 +26,7 @@
 #include "sched.h"
 #include "string.h"
 #include "uaccess.h"
+#include "vfs.h"
 
 // ===========================================================================
 // Helpers MMIO
@@ -1568,11 +1569,31 @@ static int ahci_probe_port(uint8_t port_num) {
 // ===========================================================================
 // Inicialización
 // ===========================================================================
+// [FASE 5.2] Modo "AHCI en Ring 3". Si existe /usr/lib/aur/ahci.user (initrd,
+// ver `make AHCI_USER=1`), este driver de kernel NO reclama el controlador
+// y lo deja para ahci.aur vía aur_bus + /dev/blkproxy. Se evalúa una vez.
+int ahci_user_mode(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    vfs_node_t *n = vfs_lookup("/usr/lib/aur/ahci.user");
+    cached = n ? 1 : 0;
+    if (n)
+      vfs_node_free(n);
+  }
+  return cached;
+}
+
 static int ahci_probe(pci_device_t *pci_dev, const pci_device_id_t *id) {
   (void)id;
 
   if (!pci_dev)
     return -EINVAL;
+
+  if (ahci_user_mode()) {
+    LOG_INFO("[AHCI] %02x:%02x.%x: modo usuario activo, cediendo a ahci.aur",
+             pci_dev->bus, pci_dev->slot, pci_dev->func);
+    return -ENODEV;
+  }
 
   if ((pci_dev->prog_if & 0x7F) != PCI_PROGIF_SATA_AHCI) {
     LOG_INFO("[AHCI] %02x:%02x.%x: no está en modo AHCI (progif=0x%02x)",

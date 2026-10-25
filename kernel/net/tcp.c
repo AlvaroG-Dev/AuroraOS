@@ -1528,10 +1528,11 @@ static bool tcp_rx_has_data(void *arg) {
   return has_data;
 }
 
-static size_t tcp_rx_read_locked(tcp_conn_t *c, void *buf, size_t len) {
+static size_t tcp_rx_read_locked(tcp_conn_t *c, void *buf, size_t len,
+                                 int peek) {
   size_t copied = 0;
-  while (c->rx_head && copied < len) {
-    skb_t *skb = c->rx_head;
+  skb_t *skb = c->rx_head;
+  while (skb && copied < len) {
     size_t available = skb_len(skb);
     size_t amount = len - copied;
     if (amount > available)
@@ -1539,23 +1540,29 @@ static size_t tcp_rx_read_locked(tcp_conn_t *c, void *buf, size_t len) {
 
     memcpy((uint8_t *)buf + copied, skb_data(skb), amount);
     copied += amount;
-    c->rx_buffered_bytes -= amount;
-    c->rx_total_consumed += amount;
 
-    if (amount == available) {
-      c->rx_head = skb->next;
-      if (!c->rx_head)
-        c->rx_tail = NULL;
-      c->rx_count--;
-      skb_free(skb);
+    if (peek) {
+      skb = skb->next;
     } else {
-      skb_pull(skb, amount);
+      c->rx_buffered_bytes -= amount;
+      c->rx_total_consumed += amount;
+      if (amount == available) {
+        c->rx_head = skb->next;
+        if (!c->rx_head)
+          c->rx_tail = NULL;
+        c->rx_count--;
+        skb_free(skb);
+        skb = c->rx_head;
+      } else {
+        skb_pull(skb, amount);
+      }
     }
   }
   return copied;
 }
 
-int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms) {
+int tcp_recv_flags(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms,
+                   int peek) {
   if (!c || !buf)
     return -EINVAL;
   if (len == 0)
@@ -1565,13 +1572,15 @@ int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms) {
 
   for (;;) {
     unsigned long flags = spin_lock_irqsave(&c->rx_lock);
-    size_t n = tcp_rx_read_locked(c, buf, len);
+    size_t n = tcp_rx_read_locked(c, buf, len, peek);
     int closed = c->peer_closed || c->state == TCP_STATE_CLOSED;
     spin_unlock_irqrestore(&c->rx_lock, flags);
 
     if (n > 0) {
-      tcp_autotune_sample(c, n);
-      tcp_send_window_update(c);
+      if (!peek) {
+        tcp_autotune_sample(c, n);
+        tcp_send_window_update(c);
+      }
       return (int)n;
     }
     if (closed)
@@ -1593,23 +1602,33 @@ int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms) {
   }
 }
 
-int tcp_recv_nonblock(tcp_conn_t *c, void *buf, size_t len) {
+int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms) {
+  return tcp_recv_flags(c, buf, len, timeout_ms, 0);
+}
+
+int tcp_recv_nonblock_flags(tcp_conn_t *c, void *buf, size_t len, int peek) {
   if (!c || !buf)
     return -EINVAL;
   if (len == 0)
     return 0;
   unsigned long flags = spin_lock_irqsave(&c->rx_lock);
-  size_t n = tcp_rx_read_locked(c, buf, len);
+  size_t n = tcp_rx_read_locked(c, buf, len, peek);
   int closed = c->peer_closed || c->state == TCP_STATE_CLOSED;
   spin_unlock_irqrestore(&c->rx_lock, flags);
   if (n > 0) {
-    tcp_autotune_sample(c, n);
-    tcp_send_window_update(c);
+    if (!peek) {
+      tcp_autotune_sample(c, n);
+      tcp_send_window_update(c);
+    }
     return (int)n;
   }
   if (closed)
     return 0;
   return -EAGAIN;
+}
+
+int tcp_recv_nonblock(tcp_conn_t *c, void *buf, size_t len) {
+  return tcp_recv_nonblock_flags(c, buf, len, 0);
 }
 
 int tcp_is_readable(tcp_conn_t *c) {

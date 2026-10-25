@@ -3714,7 +3714,10 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
   struct fat32_bpb *bpb = (struct fat32_bpb *)buf;
 
   if (bpb->signature != 0xAA55) {
-    LOG_ERR("[FAT32] boot signature 0x%04x != 0xAA55", bpb->signature);
+    // Un disco en blanco o con otro FS no es un error: el arranque prueba a
+    // montar cada disco como FAT32 (igual que "no es FAT32" justo debajo).
+    LOG_DEBUG("[FAT32] sin firma de arranque (0x%04x != 0xAA55)",
+              bpb->signature);
     return -EINVAL;
   }
   if (memcmp(bpb->fs_type, "FAT32   ", 8) != 0) {

@@ -27,6 +27,8 @@
 #define SOCK_NONBLOCK 0x800
 #define SOCK_CLOEXEC 0x80000
 
+#define SOCKET_MSG_PEEK 0x02
+
 // Protocolo especial: 0 → autoseleccionar según type.
 #define SOCK_PROTO_AUTO 0
 
@@ -63,6 +65,9 @@ int socket_sendto(socket_t *s, const void *buf, size_t len, uint32_t dst_ip,
                   uint16_t dst_port);
 int socket_recvfrom(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
                     uint16_t *src_port, int *would_block);
+int socket_recvfrom_flags(socket_t *s, void *buf, size_t len, uint64_t flags,
+                          uint32_t *src_ip, uint16_t *src_port,
+                          int *would_block);
 
 // Devuelve el fd local del socket (asignado en bind) o 0.
 uint16_t socket_local_port(const socket_t *s);

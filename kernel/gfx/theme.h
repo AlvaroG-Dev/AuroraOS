@@ -5,16 +5,19 @@
 // Colors format: 0xAARRGGBB
 
 // ============================================================================
-// AURORA OS — identidad visual (escritorio estilo macOS, modo oscuro)
+// AURORA OS — identidad visual (escritorio estilo macOS Tahoe, modo oscuro)
 // ----------------------------------------------------------------------------
-// Base de grises neutros + UN acento (índigo). Los únicos colores "vivos" de
-// la interfaz son los semáforos de las ventanas y el acento de selección.
+// Base de grises neutros + UN acento (azul de sistema). Los únicos colores
+// "vivos" son los semáforos de las ventanas y el acento de selección. Los
+// paneles flotantes (Dock, menús, tooltips) usan "cristal": fondo desenfocado
+// y saturado + tinte + borde especular (ver gfx_glass_panel).
+// Para volver al índigo de Aurora basta con cambiar AURORA_ACCENT*.
 // ============================================================================
 
 // --- Acento único ---
-#define AURORA_ACCENT 0xFF6366F1
-#define AURORA_ACCENT_HOVER 0xFF818CF8
-#define AURORA_ACCENT_DIM 0x556366F1
+#define AURORA_ACCENT 0xFF0A84FF
+#define AURORA_ACCENT_HOVER 0xFF409CFF
+#define AURORA_ACCENT_DIM 0x550A84FF
 
 // --- Escala de grises ---
 #define AURORA_BLACK 0xFF0A0A0A
@@ -38,19 +41,26 @@
 #define AURORA_WIN_BG 0xFF1E1E1E /* cuerpo de la ventana, opaco */
 
 // --- Ventanas ---
-#define AURORA_TITLEBAR_ACTIVE 0xFF2C2C2E
-#define AURORA_TITLEBAR_INACTIVE 0xFF252527
-#define AURORA_BORDER_ACTIVE 0x33FFFFFF
+#define AURORA_TITLEBAR_ACTIVE 0xFF262628
+#define AURORA_TITLEBAR_INACTIVE 0xFF212123
+#define AURORA_BORDER_ACTIVE 0x2EFFFFFF
 #define AURORA_BORDER_INACTIVE 0x1AFFFFFF
-#define AURORA_TITLEBAR_SEP 0x38000000
+#define AURORA_TITLEBAR_SEP 0x00000000 /* Tahoe: sin separador */
+
+#define AURORA_TITLEBAR_HAIRLINE 0x66000000 /* separación barra/contenido */
 
 // --- Semáforos (izquierda de la barra de título) ---
 #define AURORA_TL_CLOSE 0xFFFF5F57
 #define AURORA_TL_MINIMIZE 0xFFFEBC2E
 #define AURORA_TL_MAXIMIZE 0xFF28C840
-#define AURORA_TL_INACTIVE 0xFF4D4D50
-#define AURORA_TL_RIM 0x40000000   /* borde fino oscuro */
-#define AURORA_TL_GLYPH 0xB0000000 /* ×, −, + al pasar el ratón */
+#define AURORA_TL_INACTIVE 0xFF4A4A4D
+#define AURORA_TL_RIM 0x33000000   /* borde fino oscuro */
+/* Glifos (×, −, flechas de zoom) al pasar el ratón: tono oscuro de cada
+ * botón, como en macOS, en vez de un negro genérico. */
+#define AURORA_TL_GLYPH_CLOSE 0xE0640806
+#define AURORA_TL_GLYPH_MINIMIZE 0xE0804C00
+#define AURORA_TL_GLYPH_MAXIMIZE 0xE0065012
+#define AURORA_TL_PRESSED 0x40000000 /* oscurecido mientras se pulsa */
 
 // --- Texto ---
 #define AURORA_TEXT_PRIMARY AURORA_WHITE
@@ -63,14 +73,20 @@
 #define AURORA_ICON_INACTIVE 0xFF808090
 #define AURORA_ICON_MUTED 0xFF5A5A68
 
-// --- Barra de menús y Dock (translucidez sobre fondo desenfocado) ---
+// --- Barra de menús: transparente (Tahoe). Solo un velo muy tenue arriba para
+// que el texto blanco se lea sobre fondos claros. ---
 #define AURORA_MENUBAR_H 28
-#define AURORA_MENUBAR_TINT 0x7A141418
-#define AURORA_MENUBAR_LINE 0x22FFFFFF
+#define AURORA_MENUBAR_SCRIM 0x40000000   /* alpha arriba, se desvanece a 0 */
+#define AURORA_MENUBAR_TEXT_SHADOW 0x70000000
+#define AURORA_MENUBAR_PILL 0x38FFFFFF    /* título resaltado (menú abierto) */
+
+// --- Cristal líquido ---
+#define AURORA_GLASS_BLUR 12              /* radio del box-blur (2 pasadas) */
+#define AURORA_GLASS_SAT 300              /* saturación del fondo, 256 = igual */
 #define AURORA_DOCK_TINT 0x3CFFFFFF
-#define AURORA_DOCK_BORDER 0x40FFFFFF
-#define AURORA_DOCK_TOPLIGHT 0x30FFFFFF
-#define AURORA_MENU_BG 0xB0202024
+#define AURORA_MENU_TINT 0x9A1E1E22
+#define AURORA_TOOLTIP_TINT 0xB0202024
+#define AURORA_MENU_BG AURORA_MENU_TINT
 #define AURORA_MENU_HILITE AURORA_ACCENT
 
 // --- Taskbar (legado: ya no se dibuja; se mantiene el modelo de items) ---
@@ -81,21 +97,31 @@
 #define AURORA_TASKBAR_INDICATOR AURORA_ACCENT
 
 // --- Geometría ---
-#define AURORA_CORNER_RADIUS 10
-#define AURORA_CORNER_RADIUS_SM 6
-#define AURORA_CORNER_RADIUS_LG 14
-#define AURORA_TITLEBAR_HEIGHT 32
+#define AURORA_CORNER_RADIUS 20
+#define AURORA_CORNER_RADIUS_SM 8
+#define AURORA_CORNER_RADIUS_LG 26
+#define AURORA_TITLEBAR_HEIGHT 38
 
-// Sombra: la superficie de la ventana reserva BLUR + OFFSET_Y px por lado.
-#define AURORA_SHADOW_BLUR 18
-#define AURORA_SHADOW_OFFSET_Y 6
+// Sombra en dos capas, como macOS: una de contacto, corta y algo más oscura,
+// y otra ambiental, ancha y desplazada hacia abajo. La superficie de la
+// ventana reserva BLUR + OFFSET_Y px por lado.
+#define AURORA_SHADOW_BLUR 30          /* alcance de la capa ambiental */
+#define AURORA_SHADOW_OFFSET_Y 10      /* desplazamiento de la ambiental */
+#define AURORA_SHADOW_KEY_BLUR 9       /* alcance de la capa de contacto */
+#define AURORA_SHADOW_KEY_OFFSET_Y 2
+#define AURORA_SHADOW_AMB_ALPHA 66
+#define AURORA_SHADOW_KEY_ALPHA 72
+#define AURORA_SHADOW_INACTIVE 150     /* intensidad 0..256 sin foco */
 #define AURORA_SHADOW_SIZE (AURORA_SHADOW_BLUR + AURORA_SHADOW_OFFSET_Y)
 
 // --- Animaciones ---
-#define WIN_ANIM_OPEN_MS 220
-#define WIN_ANIM_CLOSE_MS 160
-#define WIN_ANIM_OPEN_DY (-12)
-#define WIN_ANIM_CLOSE_DY (-6)
+#define WIN_ANIM_OPEN_MS 240
+#define WIN_ANIM_CLOSE_MS 170
+#define WIN_ANIM_MINIMIZE_MS 460 /* efecto "genie" hacia el Dock */
+#define WIN_ANIM_RESTORE_MS 380
+#define WIN_ANIM_OPEN_SCALE 240  /* escala inicial (de 256) al abrir */
+#define WIN_ANIM_CLOSE_SCALE 238 /* escala final (de 256) al cerrar */
+#define WIN_DOUBLE_CLICK_MS 420
 
 // ============================================================================
 // Aliases legacy (código que aún usa WIN11_*; migrar y borrar)

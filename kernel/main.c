@@ -12,6 +12,7 @@
 #include "atapi.h"
 #include "aur_bus.h"
 #include "block.h"
+#include "block_proxy.h"
 #include "boot_console.h"
 #include "boot_splash.h"
 #include "bus.h"
@@ -530,6 +531,8 @@ static void tests_thread(void) {
   // (n_dependents) y que el ciclo unload funciona. NO carga desde
   // blobs.
   {
+    int modules_before = kur_loader_count();
+    int expected_after = modules_before;
     struct kur_module *m1 = kur_loader_find_by_name("hello");
     struct kur_module *m2 = kur_loader_find_by_name("hello2");
 
@@ -549,11 +552,15 @@ static void tests_thread(void) {
                urc1);
       int urc2 = kur_loader_unload(m2);
       LOG_INFO("[TEST-KUR2] unload(hello2) = %d (esperado 0)", urc2);
+      if (urc2 == 0)
+        expected_after--;
       int urc3 = kur_loader_unload(m1);
       LOG_INFO("[TEST-KUR2] unload(hello) = %d (esperado 0)", urc3);
+      if (urc3 == 0)
+        expected_after--;
     }
-    LOG_INFO("[TEST-KUR2] modulos tras test: %d (esperado 0)",
-             kur_loader_count());
+    LOG_INFO("[TEST-KUR2] modulos tras test: %d (esperado %d)",
+             kur_loader_count(), expected_after);
   }
 }
 
@@ -623,8 +630,19 @@ static void system_init_task(void) {
     LOG_INFO("[INIT] SMP listo (%d CPUs online)", smp_online_cpus());
 
   // 9. Particiones + mounts (necesitan drivers).
+  // [FASE 5.2] Con AHCI en Ring 3 los discos aparecen cuando ahci.aur
+  // arranca y los registra; esperarlos antes de escanear particiones.
+  if (ahci_user_mode()) {
+    klog_boot_step("[INIT] Esperando ahci.aur...");
+    if (blkp_wait_ready(5000))
+      klog_boot_ok();
+    else
+      klog_boot_warn("[INIT] ahci.aur no registró discos (timeout)");
+  }
+
   klog_boot_step("[INIT] Particiones...");
   part_scan_all();
+  blkp_boot_scanned();
   klog_boot_ok();
 
   for (int i = 0; i < blk_count(); i++) {
@@ -657,7 +675,8 @@ static void system_init_task(void) {
     } else {
       extern void boot_console_overlay_enable(int);
       boot_console_hook_remove();
-      boot_console_overlay_enable(1);
+      /* El overlay de logs del kernel arranca oculto; F12 lo muestra. */
+      boot_console_overlay_enable(0);
       compositor_init();
     }
     sched_create_task(compositor_thread);

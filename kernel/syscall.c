@@ -8,6 +8,7 @@
 #include "syscall.h"
 #include "cpu.h"
 #include "epoll.h"
+#include "kmod_sys.h"
 #include "fat32.h"
 #include "futex.h"
 #include "gdt.h"
@@ -5160,7 +5161,6 @@ static int64_t k_sendto(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags,
   // addrlen va en r9. Leemos del trap frame.
   registers_t *regs = syscall_current_regs();
   uint64_t addrlen = regs ? regs->r9 : 0;
-  (void)flags;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -5209,7 +5209,6 @@ static int64_t k_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
                           uint64_t flags, uint64_t addr) {
   registers_t *regs = syscall_current_regs();
   uint64_t addrlen_ptr = regs ? regs->r9 : 0;
-  (void)flags;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -5230,7 +5229,7 @@ static int64_t k_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
   uint32_t sip = 0;
   uint16_t sp = 0;
   int wb = 0;
-  int n = socket_recvfrom(s, k, len, &sip, &sp, &wb);
+  int n = socket_recvfrom_flags(s, k, len, flags, &sip, &sp, &wb);
   if (n < 0) {
     if (k != stack_buf)
       kfree(k);
@@ -5496,7 +5495,6 @@ static int64_t k_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen,
 
 static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
                          uint64_t a4, uint64_t a5) {
-  (void)flags;
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
@@ -5602,7 +5600,6 @@ static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
 
 static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
                          uint64_t a4, uint64_t a5) {
-  (void)flags;
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
@@ -5651,7 +5648,7 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   uint32_t sip = 0;
   uint16_t sp = 0;
   int wb = 0;
-  int n = socket_recvfrom(s, kbuf, want, &sip, &sp, &wb);
+  int n = socket_recvfrom_flags(s, kbuf, want, flags, &sip, &sp, &wb);
   if (n < 0) {
     kfree(kbuf);
     return (wb && socket_is_nonblock(s)) ? -EAGAIN : n;
@@ -6904,6 +6901,9 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETRLIMIT] = {k_getrlimit, "getrlimit"},
     [SYS_SETRLIMIT] = {k_setrlimit, "setrlimit"},
     [SYS_GETRANDOM] = {k_getrandom, "getrandom"},
+    [SYS_INIT_MODULE] = {k_init_module, "init_module"},
+    [SYS_DELETE_MODULE] = {k_delete_module, "delete_module"},
+    [SYS_FINIT_MODULE] = {k_finit_module, "finit_module"},
     [SYS_MEMFD_CREATE] = {k_memfd_create, "memfd_create"}, // 319
     [SYS_RSEQ] = {k_rseq, "rseq"},
     [SYS_CLONE] = {k_clone, "clone"},

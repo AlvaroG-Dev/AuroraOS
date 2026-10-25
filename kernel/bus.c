@@ -65,8 +65,14 @@ static void bus_try_probe(struct device *dev) {
       return;
     }
 
-    LOG_WARN("[BUS] %s: '%s' probe '%s' -> %d", bus->name, dev->name,
-             d->name, rc);
+    // -ENODEV = "este driver no es para este dispositivo": caso normal (p.ej.
+    // aur_bus prueba todos los dispositivos PCI), no merece un WARN.
+    if (rc == -ENODEV)
+      LOG_DEBUG("[BUS] %s: '%s' rechazado por '%s'", bus->name, dev->name,
+                d->name);
+    else
+      LOG_WARN("[BUS] %s: '%s' probe '%s' -> %d", bus->name, dev->name,
+               d->name, rc);
     dev->driver = NULL;
   }
 }

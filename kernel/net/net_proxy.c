@@ -13,6 +13,7 @@
 
 extern void dhcp_start(netif_t *n);
 #define DHCP_RESTART 0x200
+#define NETP_SET_MAC 0x201 // arg: puntero a uint8_t[6]
 
 typedef struct {
   skb_t *head;
@@ -134,7 +135,18 @@ static wait_queue_t *net_proxy_poll_wq(vfs_node_t *node) {
 static int64_t net_proxy_ioctl(vfs_node_t *node, unsigned long req,
                                uint64_t arg) {
   (void)node;
-  (void)arg;
+  if (req == NETP_SET_MAC) {
+    // El driver de usuario informa de la MAC real del NIC (arg = 6 bytes).
+    uint8_t mac[6];
+    if (copy_from_user(mac, (void *)arg, sizeof(mac)) < 0)
+      return -EFAULT;
+    if ((mac[0] & 1) || !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]))
+      return -EINVAL; // multicast o todo ceros
+    memcpy(g_proxy_netif.mac, mac, 6);
+    LOG_INFO("[NET-PROXY] MAC del driver: %02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return 0;
+  }
   if (req == DHCP_RESTART) {
     LOG_INFO("[NET-PROXY] Driver userland listo. Relanzando DHCP...");
     dhcp_start(&g_proxy_netif);
@@ -167,8 +179,7 @@ void net_proxy_init(void) {
   memset(&g_proxy_netif, 0, sizeof(g_proxy_netif));
   strcpy(g_proxy_netif.name, "eth0");
 
-  // MAC por defecto (el .aur no puede cambiarla sin un ioctl, así que
-  // le damos la de QEMU por defecto).
+  // MAC provisional; el driver la sustituye con NETP_SET_MAC al arrancar.
   const uint8_t mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
   memcpy(g_proxy_netif.mac, mac, 6);
   g_proxy_netif.ops = &g_proxy_ops;

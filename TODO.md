@@ -318,8 +318,8 @@ Bloque 8 — Cierre de SMP estable + syscalls Linux ✅ CERRADO
     (`pty_master_write_op`, `tty_*`).
 
 **Deuda conocida (no bloquea el cierre):**
-- [ ] `EPOLLET` (edge-triggered) — se acepta el flag, se ignora.
-- [ ] `EPOLLONESHOT` / `EPOLLEXCLUSIVE` — ignorados.
+- [x] `EPOLLET` (edge-triggered) — implementado por entrada con contador de despertares (`wait_queue_subscribe_seq`); falta test de userspace.
+- [x] `EPOLLONESHOT` (MOD rearma) y `EPOLLEXCLUSIVE` (validado: solo ADD, bits permitidos; despierta a todos) — falta test de userspace.
 - [ ] `EPOLLWAKEUP` — ignorado.
 - [ ] `epoll_pwait` no es atómico (Linux lo es). Ventana de race
       microscópica entre cambio de máscara y entrada en wait.

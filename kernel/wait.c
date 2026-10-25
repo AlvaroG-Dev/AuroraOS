@@ -274,17 +274,23 @@ static void wake_all_waiters_locked(wait_queue_t *wq) {
   }
 }
 
-void wake_up_all_locked(wait_queue_t *wq) {
-  wake_all_waiters_locked(wq);
-  // [epoll] Cascada a los suscriptores. Un nivel: los subscribers
-  // (ep->wq) no tienen subs propios.
+// [epoll] Cascada a los suscriptores. Un nivel: los subscribers (ep->wq) no
+// tienen subs propios. Incrementa además el contador por suscripción (EPOLLET).
+static void wake_subscribers_locked(wait_queue_t *wq) {
   for (wait_queue_sub_t *s = wq->subs; s; s = s->next) {
+    if (s->seq)
+      __atomic_add_fetch(s->seq, 1, __ATOMIC_RELEASE);
     if (s->target && s->target != wq) {
       unsigned long f = spin_lock_irqsave(&s->target->lock);
       wake_all_waiters_locked(s->target);
       spin_unlock_irqrestore(&s->target->lock, f);
     }
   }
+}
+
+void wake_up_all_locked(wait_queue_t *wq) {
+  wake_all_waiters_locked(wq);
+  wake_subscribers_locked(wq);
 }
 
 void wake_up_all(wait_queue_t *wq) {
@@ -343,13 +349,7 @@ void wake_up_one_direct_locked(wait_queue_t *wq) {
 void wake_up_one_locked(wait_queue_t *wq) {
   wake_up_one_direct_locked(wq);
   // [epoll] Cascada a suscriptores, incluso si no había waiter directo.
-  for (wait_queue_sub_t *s = wq->subs; s; s = s->next) {
-    if (s->target && s->target != wq) {
-      unsigned long f = spin_lock_irqsave(&s->target->lock);
-      wake_all_waiters_locked(s->target);
-      spin_unlock_irqrestore(&s->target->lock, f);
-    }
-  }
+  wake_subscribers_locked(wq);
 }
 
 void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
@@ -446,12 +446,22 @@ void wait_queue_interrupt_task(task_t *task) {
 }
 
 int wait_queue_subscribe(wait_queue_t *target, wait_queue_t *sub) {
+  return wait_queue_subscribe_seq(target, sub, NULL);
+}
+
+void wait_queue_unsubscribe(wait_queue_t *target, wait_queue_t *sub) {
+  wait_queue_unsubscribe_seq(target, sub, NULL);
+}
+
+int wait_queue_subscribe_seq(wait_queue_t *target, wait_queue_t *sub,
+                             uint32_t *seq) {
   if (!target || !sub || target == sub)
     return -EINVAL;
   wait_queue_sub_t *s = (wait_queue_sub_t *)kmalloc(sizeof(*s));
   if (!s)
     return -ENOMEM;
   s->target = sub;
+  s->seq = seq;
   unsigned long flags = spin_lock_irqsave(&target->lock);
   s->next = target->subs;
   target->subs = s;
@@ -459,13 +469,16 @@ int wait_queue_subscribe(wait_queue_t *target, wait_queue_t *sub) {
   return 0;
 }
 
-void wait_queue_unsubscribe(wait_queue_t *target, wait_queue_t *sub) {
+// Tras volver, ningún despertar volverá a tocar `seq` (la cascada corre bajo
+// target->lock), así que el llamante puede liberar su memoria.
+void wait_queue_unsubscribe_seq(wait_queue_t *target, wait_queue_t *sub,
+                                uint32_t *seq) {
   if (!target || !sub)
     return;
   unsigned long flags = spin_lock_irqsave(&target->lock);
   wait_queue_sub_t **pp = &target->subs;
   while (*pp) {
-    if ((*pp)->target == sub) {
+    if ((*pp)->target == sub && (*pp)->seq == seq) {
       wait_queue_sub_t *v = *pp;
       *pp = v->next;
       kfree(v);

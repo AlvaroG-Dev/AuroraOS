@@ -96,3 +96,6 @@ int taskbar_has_active_hover(void);
 // taskbar_refresh_clock(). Las usa la barra de menús.
 const char *taskbar_clock_time_str(void);
 const char *taskbar_clock_date_str(void);
+// Fecha corta de la barra de menús, estilo macOS ("vie 24 oct"). Vacía si el
+// RTC no dio una fecha válida.
+const char *taskbar_clock_menubar_date_str(void);

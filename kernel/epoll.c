@@ -8,8 +8,12 @@
 // cascada en wake_up_all_locked despierta ep->wq, y epoll_wait
 // re-evalúa el estado de todos los fds.
 //
-// Semántica: level-triggered siempre (no EPOLLET). Wakeup inmediato,
-// sin polling periódico.
+// Semántica: level-triggered por defecto. EPOLLET se implementa por entrada
+// con un contador de despertares de la wq observada (wake_seq): una entrada
+// ET solo se reporta si hay estado listo Y la wq se despertó desde el último
+// reporte. EPOLLONESHOT desarma la entrada tras reportarla (EPOLL_CTL_MOD la
+// rearma). EPOLLEXCLUSIVE se valida pero despierta a todos los waiters
+// (thundering herd inocuo). Wakeup inmediato, sin polling periódico.
 
 #include "epoll.h"
 #include "heap.h"
@@ -23,6 +27,7 @@
 #include "uaccess.h"
 #include "vfs.h"
 #include "wait.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -33,6 +38,16 @@
 #define EPOLLERR 0x008u
 #define EPOLLHUP 0x010u
 #define EPOLLNVAL 0x020u
+#define EPOLLRDHUP 0x2000u
+#define EPOLLEXCLUSIVE (1u << 28)
+#define EPOLLWAKEUP (1u << 29)
+#define EPOLLONESHOT (1u << 30)
+#define EPOLLET (1u << 31)
+
+// Bits permitidos junto a EPOLLEXCLUSIVE (como en Linux).
+#define EPOLL_EXCL_ALLOWED                                                     \
+  (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLWAKEUP | EPOLLET |          \
+   EPOLLEXCLUSIVE)
 
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
@@ -55,6 +70,9 @@ typedef struct epoll_entry {
   uint64_t data;
   file_descriptor_t *target;   // ref extra
   wait_queue_t *subscribed_wq; // wq a la que estamos suscritos
+  uint32_t wake_seq;           // despertares de subscribed_wq (atómico)
+  uint32_t seen_seq;           // wake_seq en el último reporte ET
+  bool disabled;               // EPOLLONESHOT ya disparado
   struct epoll_entry *next;
 } epoll_entry_t;
 
@@ -103,7 +121,7 @@ static int epoll_node_close(vfs_node_t *node) {
   while (e) {
     epoll_entry_t *next = e->next;
     if (e->subscribed_wq)
-      wait_queue_unsubscribe(e->subscribed_wq, &ep->wq);
+      wait_queue_unsubscribe_seq(e->subscribed_wq, &ep->wq, &e->wake_seq);
     fd_put_ref(e->target);
     kfree(e);
     e = next;
@@ -199,6 +217,54 @@ int64_t k_epoll_create1(uint64_t flags, uint64_t a2, uint64_t a3, uint64_t a4,
 }
 
 // ============ epoll_ctl ============
+// Rearma una entrada: la próxima evaluación reporta si hay estado listo.
+static void epoll_entry_arm(epoll_entry_t *e) {
+  e->seen_seq = __atomic_load_n(&e->wake_seq, __ATOMIC_ACQUIRE) - 1;
+  e->disabled = false;
+}
+
+// Evalúa una entrada y devuelve los eventos a reportar (0 = nada). Con
+// consume=true aplica los efectos de haber reportado (ET / ONESHOT).
+// Llamar con ep->lock cogido.
+static uint32_t epoll_entry_eval(epoll_entry_t *e, bool consume) {
+  if (e->disabled || !e->target || !e->target->node)
+    return 0;
+  uint32_t seq = __atomic_load_n(&e->wake_seq, __ATOMIC_ACQUIRE);
+  if ((e->events & EPOLLET) && seq == e->seen_seq)
+    return 0;
+  short req = 0;
+  if (e->events & EPOLLIN)
+    req |= 1;
+  if (e->events & EPOLLOUT)
+    req |= 4;
+  if (e->events & EPOLLPRI)
+    req |= 2;
+  int rev = vfs_node_poll(e->target->node, req);
+  if (rev == 0)
+    return 0;
+  uint32_t reported = 0;
+  if ((rev & 1) && (e->events & EPOLLIN))
+    reported |= EPOLLIN;
+  if ((rev & 4) && (e->events & EPOLLOUT))
+    reported |= EPOLLOUT;
+  if ((rev & 2) && (e->events & EPOLLPRI))
+    reported |= EPOLLPRI;
+  // ERR y HUP se reportan siempre, aunque no se hayan pedido.
+  if (rev & 8)
+    reported |= EPOLLERR;
+  if (rev & 16)
+    reported |= EPOLLHUP;
+  if (reported == 0)
+    return 0;
+  if (consume) {
+    if (e->events & EPOLLET)
+      e->seen_seq = seq;
+    if (e->events & EPOLLONESHOT)
+      e->disabled = true;
+  }
+  return reported;
+}
+
 static epoll_entry_t *epoll_find(epoll_t *ep, int fd) {
   for (epoll_entry_t *e = ep->entries; e; e = e->next) {
     if (e->fd == fd)
@@ -214,7 +280,8 @@ static void epoll_remove_locked(epoll_t *ep, epoll_entry_t *prev,
   else
     ep->entries = victim->next;
   if (victim->subscribed_wq)
-    wait_queue_unsubscribe(victim->subscribed_wq, &ep->wq);
+    wait_queue_unsubscribe_seq(victim->subscribed_wq, &ep->wq,
+                               &victim->wake_seq);
   fd_put_ref(victim->target);
   kfree(victim);
 }
@@ -256,6 +323,8 @@ int64_t k_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
   if (op32 == EPOLL_CTL_ADD) {
     if (!has_ev)
       return -EFAULT;
+    if ((uev.events & EPOLLEXCLUSIVE) && (uev.events & ~EPOLL_EXCL_ALLOWED))
+      return -EINVAL;
     file_descriptor_t *target;
     int rc = fd_get_ref(proc, target_fd_num, &target);
     if (rc != 0)
@@ -277,6 +346,7 @@ int64_t k_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
     e->events = uev.events;
     e->data = uev.data;
     e->target = target;
+    epoll_entry_arm(e);
 
     // Suscribir ep->wq a la wq natural del fd. Preferimos poll_wq
     // (contrato explícito); si el nodo no la implementa, caemos al
@@ -288,7 +358,7 @@ int64_t k_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
       wq = &target->read_wq;
     e->subscribed_wq = wq;
     if (wq)
-      wait_queue_subscribe(wq, &ep->wq);
+      wait_queue_subscribe_seq(wq, &ep->wq, &e->wake_seq);
 
     e->next = ep->entries;
     ep->entries = e;
@@ -320,14 +390,21 @@ int64_t k_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
   if (op32 == EPOLL_CTL_MOD) {
     if (!has_ev)
       return -EFAULT;
+    if (uev.events & EPOLLEXCLUSIVE)
+      return -EINVAL; // solo válido en EPOLL_CTL_ADD
     unsigned long flags = spin_lock_irqsave(&ep->lock);
     epoll_entry_t *e = epoll_find(ep, target_fd_num);
     if (!e) {
       spin_unlock_irqrestore(&ep->lock, flags);
       return -ENOENT;
     }
+    if (e->events & EPOLLEXCLUSIVE) {
+      spin_unlock_irqrestore(&ep->lock, flags);
+      return -EINVAL;
+    }
     e->events = uev.events;
     e->data = uev.data;
+    epoll_entry_arm(e);
     spin_unlock_irqrestore(&ep->lock, flags);
     wake_up_all(&ep->wq);
     return 0;
@@ -347,17 +424,7 @@ static bool epoll_any_ready(void *arg) {
   unsigned long flags = spin_lock_irqsave(&ep->lock);
   bool ready = false;
   for (epoll_entry_t *e = ep->entries; e; e = e->next) {
-    if (!e->target || !e->target->node)
-      continue;
-    short req = 0;
-    if (e->events & EPOLLIN)
-      req |= 1;
-    if (e->events & EPOLLOUT)
-      req |= 4;
-    if (e->events & EPOLLPRI)
-      req |= 2;
-    int rev = vfs_node_poll(e->target->node, req);
-    if (rev != 0) {
+    if (epoll_entry_eval(e, false) != 0) {
       ready = true;
       break;
     }
@@ -406,29 +473,7 @@ int64_t k_epoll_wait(uint64_t epfd, uint64_t events_uptr, uint64_t maxevents,
     int ready = 0;
     unsigned long flags = spin_lock_irqsave(&ep->lock);
     for (epoll_entry_t *e = ep->entries; e && ready < maxev; e = e->next) {
-      if (!e->target || !e->target->node)
-        continue;
-      short req = 0;
-      if (e->events & EPOLLIN)
-        req |= 1;
-      if (e->events & EPOLLOUT)
-        req |= 4;
-      if (e->events & EPOLLPRI)
-        req |= 2;
-      int rev = vfs_node_poll(e->target->node, req);
-      if (rev == 0)
-        continue;
-      uint32_t reported = 0;
-      if ((rev & 1) && (e->events & EPOLLIN))
-        reported |= EPOLLIN;
-      if ((rev & 4) && (e->events & EPOLLOUT))
-        reported |= EPOLLOUT;
-      if ((rev & 2) && (e->events & EPOLLPRI))
-        reported |= EPOLLPRI;
-      if (rev & 8)
-        reported |= EPOLLERR;
-      if (rev & 16)
-        reported |= EPOLLHUP;
+      uint32_t reported = epoll_entry_eval(e, true);
       if (reported == 0)
         continue;
       kout[ready].events = reported;

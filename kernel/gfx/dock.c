@@ -12,18 +12,30 @@ typedef struct {
   rect_t r; /* rectángulo del icono (con la magnificación aplicada) */
 } dock_slot_t;
 
+#define DOCK_MAX_BOUNCE 4
+#define BOUNCE_MS 420    /* duración de cada salto */
+#define BOUNCE_COUNT 2   /* saltos por lanzamiento */
+#define BOUNCE_HEIGHT 18 /* altura del primer salto, px */
+#define MAG_RADIUS_ICONS 26 /* alcance de la lupa: 2,6 iconos por lado (x10) */
+
 static struct {
   int sw, sh;
   int cur_x, cur_y;
   int mag;        /* 0..256: cuánto está activa la magnificación */
   int mag_target; /* 0 o 256 */
   int n;
-  int base;  /* tamaño de reposo actual (se reduce si hay muchas apps) */
-  int hover; /* índice del slot bajo el cursor, o -1 */
+  int base;       /* tamaño de reposo actual (se reduce si hay muchas apps) */
+  int hover;      /* índice del slot bajo el cursor, o -1 */
   rect_t panel;
+  rect_t tip; /* tooltip del icono bajo el cursor; w = 0 si no hay */
   rect_t damage, prev_damage;
   uint64_t sig, prev_sig;
   int force;
+  taskbar_item_t *pressed;
+  struct {
+    taskbar_item_t *item;
+    int t_ms; /* tiempo transcurrido del rebote */
+  } bounce[DOCK_MAX_BOUNCE];
   dock_slot_t slots[DOCK_MAX_ITEMS];
   uint32_t *scratch;
   size_t scratch_px;
@@ -58,16 +70,112 @@ int dock_reserved_height(void) { return DOCK_HEIGHT + DOCK_MARGIN_BOTTOM * 2; }
 rect_t dock_get_panel_rect(void) { return D.panel; }
 rect_t dock_get_damage_rect(void) { return D.damage; }
 
+#define TIP_BLUR 6
+#define TIP_H 26
+
+int dock_glass_rects(glass_rect_t *out, int max) {
+  int n = 0;
+  if (D.n > 0 && n < max)
+    out[n++] = (glass_rect_t){D.panel, AURORA_GLASS_BLUR};
+  if (D.tip.w > 0 && n < max)
+    out[n++] = (glass_rect_t){D.tip, TIP_BLUR};
+  return n;
+}
+
+void dock_set_pressed(taskbar_item_t *item) {
+  if (D.pressed != item) {
+    D.pressed = item;
+    D.force = 1;
+  }
+}
+
+void dock_bounce(taskbar_item_t *item) {
+  if (!item)
+    return;
+  int slot = 0;
+  for (int i = 0; i < DOCK_MAX_BOUNCE; i++) {
+    if (D.bounce[i].item == item || !D.bounce[i].item) {
+      slot = i;
+      break;
+    }
+    if (D.bounce[i].t_ms > D.bounce[slot].t_ms)
+      slot = i; /* sin hueco: reemplaza el más avanzado */
+  }
+  D.bounce[slot].item = item;
+  D.bounce[slot].t_ms = 0;
+  D.force = 1;
+}
+
+void dock_forget(taskbar_item_t *item) {
+  if (D.pressed == item)
+    D.pressed = NULL;
+  for (int i = 0; i < DOCK_MAX_BOUNCE; i++)
+    if (D.bounce[i].item == item)
+      D.bounce[i].item = NULL;
+  for (int i = 0; i < D.n; i++)
+    if (D.slots[i].item == item)
+      D.force = 1;
+}
+
+/* Altura del rebote de `item` ahora (0 si no rebota). Cada salto es una
+ * parábola; el segundo, más bajo, como en macOS. */
+static int bounce_offset(const taskbar_item_t *item) {
+  for (int i = 0; i < DOCK_MAX_BOUNCE; i++) {
+    if (D.bounce[i].item != item)
+      continue;
+    int t = D.bounce[i].t_ms;
+    int k = t / BOUNCE_MS;
+    if (k >= BOUNCE_COUNT)
+      return 0;
+    int u = ((t % BOUNCE_MS) * 256) / BOUNCE_MS; /* 0..256 */
+    int h = BOUNCE_HEIGHT * (k == 0 ? 256 : 150) / 256;
+    return h * 4 * u * (256 - u) / (256 * 256);
+  }
+  return 0;
+}
+
+static int advance_bounces(int dt_ms) {
+  int active = 0;
+  for (int i = 0; i < DOCK_MAX_BOUNCE; i++) {
+    if (!D.bounce[i].item)
+      continue;
+    D.bounce[i].t_ms += dt_ms;
+    if (D.bounce[i].t_ms >= BOUNCE_MS * BOUNCE_COUNT)
+      D.bounce[i].item = NULL;
+    else
+      active = 1;
+  }
+  return active;
+}
+
+int dock_item_rect(const taskbar_item_t *item, rect_t *out) {
+  for (int i = 0; i < D.n; i++) {
+    if (D.slots[i].item == item) {
+      *out = D.slots[i].r;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
-// Magnificación: parábola^2 sobre la distancia al centro "de reposo" del
-// icono (no al centro ampliado), así no hay realimentación ni temblor.
+// Magnificación: campana suave (smoothstep) sobre la distancia al centro "de
+// reposo" del icono (no al centro ampliado), así no hay realimentación ni
+// temblor. Más ancha y de cima más plana que la parábola anterior: los
+// vecinos crecen un poco y el icono bajo el cursor no destaca tanto.
 // ---------------------------------------------------------------------------
+static int smooth256(int t) { /* t 0..256 -> smoothstep 0..256 */
+  if (t <= 0)
+    return 0;
+  if (t >= 256)
+    return 256;
+  return (t * t * (3 * 256 - 2 * t)) >> 16;
+}
+
 static int bump256(int dist, int radius) {
   if (dist >= radius)
     return 0;
-  int u = (dist * 256) / radius;    /* 0..256 */
-  int t = (256 * 256 - u * u) >> 8; /* 256 -> 0 */
-  return (t * t) >> 8;              /* afila la campana */
+  return smooth256(256 - (dist * 256) / radius);
 }
 
 static uint64_t fnv(uint64_t h, uint32_t v) {
@@ -102,20 +210,22 @@ int dock_update(int dt_ms) {
                 D.cur_y >= rest_panel_y - 12 && D.cur_y < D.sh;
   D.mag_target = in_zone ? 256 : 0;
 
-  int step = imax(8, dt_ms * 2); /* ~140 ms de 0 a 256 */
+  int step = imax(6, dt_ms * 256 / 180); /* ~180 ms de 0 a 256 */
   if (D.mag < D.mag_target)
     D.mag = imin(D.mag + step, D.mag_target);
   else if (D.mag > D.mag_target)
     D.mag = imax(D.mag - step, D.mag_target);
+  int mag = smooth256(D.mag); /* entrada y salida suaves de la lupa */
+  int bouncing = advance_bounces(dt_ms);
 
   /* Tamaños. */
   int sizes[DOCK_MAX_ITEMS];
   int total = 0;
-  int radius = (base + DOCK_GAP) * 22 / 10; /* ~2.2 iconos a cada lado */
+  int radius = (base + DOCK_GAP) * MAG_RADIUS_ICONS / 10;
   for (int i = 0; i < n; i++) {
     int cx0 = rest_x0 + i * (base + DOCK_GAP) + base / 2;
     int b = bump256(iabs(D.cur_x - cx0), radius);
-    sizes[i] = base + ((maxs - base) * b >> 8) * D.mag / 256;
+    sizes[i] = base + ((maxs - base) * b >> 8) * mag / 256;
     total += sizes[i];
   }
   if (n > 1)
@@ -133,22 +243,37 @@ int dock_update(int dt_ms) {
   D.hover = -1;
   for (int i = 0; i < n; i++) {
     D.slots[i].item = items[i];
-    D.slots[i].r = (rect_t){x, icon_bottom - sizes[i], sizes[i], sizes[i]};
+    D.slots[i].r = (rect_t){x, icon_bottom - sizes[i] - bounce_offset(items[i]),
+                            sizes[i], sizes[i]};
     if (D.cur_x >= x - DOCK_GAP / 2 && D.cur_x < x + sizes[i] + DOCK_GAP / 2 &&
         D.cur_y >= D.slots[i].r.y && in_zone)
       D.hover = i;
     x += sizes[i] + DOCK_GAP;
   }
 
-  /* Rectángulo de daño máximo. */
+  /* Tooltip sobre el icono bajo el cursor. */
+  D.tip = (rect_t){0, 0, 0, 0};
+  if (D.hover >= 0 && D.mag > 128) {
+    rect_t ir = D.slots[D.hover].r;
+    int w = gfx_text_width(D.slots[D.hover].item->label, FONT_ID_MAIN_REGULAR) +
+            22;
+    int tx = imax(8, imin(ir.x + ir.w / 2 - w / 2, D.sw - w - 8));
+    D.tip = (rect_t){tx, ir.y - 10 - TIP_H, w, TIP_H};
+  }
+
+  /* Rectángulo de daño: lo que el Dock ocupa de verdad ahora (panel, iconos
+   * ampliados o rebotando y tooltip). Antes era una caja fija enorme alrededor
+   * del Dock, y cada movimiento del ratón sobre él repintaba y desenfocaba
+   * toda esa zona. */
   if (n == 0) {
     D.damage = (rect_t){0, 0, 0, 0};
   } else {
-    int pad = 64; /* margen lateral para tooltips largos */
-    int dx = imax(0, D.panel.x - pad);
-    int dr = imin(D.sw, D.panel.x + D.panel.w + pad);
-    int dy = imax(0, D.panel.y - DOCK_HEADROOM);
-    D.damage = (rect_t){dx, dy, dr - dx, D.sh - dy};
+    rect_t u = D.panel;
+    for (int i = 0; i < n; i++)
+      u = rect_bounding_box(u, rect_grow(D.slots[i].r, 2));
+    if (D.tip.w > 0)
+      u = rect_bounding_box(u, rect_grow(D.tip, 2));
+    D.damage = rect_clip(u, (rect_t){0, 0, D.sw, D.sh});
   }
 
   /* Firma para detectar cambios. */
@@ -164,9 +289,10 @@ int dock_update(int dt_ms) {
     h = fnv(h, (uint32_t)D.slots[i].r.w);
     h = fnv(h, (uint32_t)D.slots[i].item->is_active);
   }
+  h = fnv(h, (uint32_t)(uintptr_t)D.pressed);
   D.sig = h;
 
-  return D.mag != D.mag_target;
+  return D.mag != D.mag_target || bouncing;
 }
 
 int dock_take_damage(rect_t *out) {
@@ -177,7 +303,7 @@ int dock_take_damage(rect_t *out) {
   rect_t r = D.damage;
   if (D.prev_damage.w > 0 && D.prev_damage.h > 0)
     r = (r.w > 0 && r.h > 0) ? rect_bounding_box(r, D.prev_damage)
-                             : D.prev_damage;
+                              : D.prev_damage;
   D.prev_damage = D.damage;
   if (r.w <= 0 || r.h <= 0)
     return 0;
@@ -211,21 +337,45 @@ static uint32_t lighten(uint32_t c, int amt) {
 static void make_fallback_tile(taskbar_item_t *it) {
   const int S = DOCK_ICON_SRC;
   rect_t clip = {0, 0, S, S};
-  uint32_t base =
-      it->icon_color ? (it->icon_color | 0xFF000000) : AURORA_ACCENT;
+  uint32_t base = it->icon_color ? (it->icon_color | 0xFF000000) : AURORA_ACCENT;
   if (base == 0xFF0078D4 || base == 0xFF60CDFF)
     base = AURORA_ACCENT; /* colores heredados de Windows -> acento Aurora */
 
-  gfx_fill_rounded_rect_gradient_v(it->dock_icon, S, clip,
-                                   (rect_t){2, 2, S - 4, S - 4}, 16,
-                                   lighten(base, 40), base);
-  gfx_draw_rounded_border(it->dock_icon, S, clip, (rect_t){2, 2, S - 4, S - 4},
-                          16, 0x30FFFFFF);
+  rect_t tile = {2, 2, S - 4, S - 4};
+  gfx_fill_rounded_rect(it->dock_icon, S, clip, tile, 16, base);
+  /* Brillo superior y sombra inferior: filas con alfa (el degradado de gfx
+   * ignora el alfa y tiene esquinas sin suavizar). El relleno AA de arriba
+   * define el contorno; estas capas solo viven dentro de él. */
+  for (int dy = 4; dy < S - 6; dy++) {
+    int t = (dy * 256) / S; /* 0..256 */
+    uint32_t col;
+    if (t < 128)
+      col = ((uint32_t)(0x46 * (128 - t) / 128) << 24) | 0x00FFFFFF;
+    else
+      col = ((uint32_t)(0x38 * (t - 128) / 128) << 24);
+    int inset = 0;
+    if (dy < 18) {
+      int dd = 18 - dy, v = 16 * 16 - dd * dd, s = 0;
+      if (v > 0)
+        while ((s + 1) * (s + 1) <= v)
+          s++;
+      inset = 16 - s + 2;
+    } else if (dy > S - 20) {
+      int dd = dy - (S - 20), v = 16 * 16 - dd * dd, s = 0;
+      if (v > 0)
+        while ((s + 1) * (s + 1) <= v)
+          s++;
+      inset = 16 - s + 2;
+    }
+    inset += 1;
+    gfx_blend_rect(it->dock_icon, S, clip,
+                   (rect_t){2 + inset, dy, S - 4 - 2 * inset, 1}, col);
+  }
+  gfx_draw_rounded_border(it->dock_icon, S, clip, tile, 16, 0x30FFFFFF);
 
   /* Símbolo: se dibuja a 24x24 y se amplía con bilineal para que quede liso. */
-  uint32_t *tmp = (uint32_t *)kmalloc(24 * 24 * sizeof(uint32_t));
-  if (!tmp)
-    return;
+  static uint32_t tmp[24 * 24]; /* solo hilo del compositor; 2,3 KB fuera de
+                                   la pila del kernel */
   for (int i = 0; i < 24 * 24; i++)
     tmp[i] = 0;
   char sym[8];
@@ -246,7 +396,45 @@ static void make_fallback_tile(taskbar_item_t *it) {
                   FONT_ID_MAIN_BOLD);
   gfx_blit_scaled(it->dock_icon, S, clip, (S - 48) / 2, (S - 48) / 2, 48, 48,
                   tmp, 24, 24, GFX_FILTER_BILINEAR);
-  kfree(tmp);
+}
+
+/* Convierte el icono (alfa recto) en el que se dibuja: con una sombra suave
+ * debajo, ya incorporada, y con el alfa PREMULTIPLICADO. Se hace una sola vez
+ * al crear el icono; así cada redibujado del Dock es un único blit sin
+ * divisiones por icono. La sombra es la silueta desplazada 2 px hacia abajo y
+ * difuminada. */
+static void bake_shadow_and_premultiply(uint32_t *icon) {
+  const int S = DOCK_ICON_SRC;
+  static uint8_t sh[DOCK_ICON_SRC * DOCK_ICON_SRC];
+  static uint8_t tmp[DOCK_ICON_SRC * DOCK_ICON_SRC];
+
+  for (int y = 0; y < S; y++)
+    for (int x = 0; x < S; x++)
+      sh[y * S + x] = y >= 2 ? (uint8_t)((icon[(y - 2) * S + x] >> 24) * 0x46 / 255)
+                             : 0;
+  for (int pass = 0; pass < 2; pass++) { /* box 3x3 separable, dos veces */
+    for (int y = 0; y < S; y++)
+      for (int x = 0; x < S; x++) {
+        int s = sh[y * S + x] + (x > 0 ? sh[y * S + x - 1] : 0) +
+                (x < S - 1 ? sh[y * S + x + 1] : 0);
+        tmp[y * S + x] = (uint8_t)(s / 3);
+      }
+    for (int y = 0; y < S; y++)
+      for (int x = 0; x < S; x++) {
+        int s = tmp[y * S + x] + (y > 0 ? tmp[(y - 1) * S + x] : 0) +
+                (y < S - 1 ? tmp[(y + 1) * S + x] : 0);
+        sh[y * S + x] = (uint8_t)(s / 3);
+      }
+  }
+
+  for (int i = 0; i < S * S; i++) {
+    uint32_t c = blend_pixel_fast(icon[i], (uint32_t)sh[i] << 24);
+    uint32_t a = c >> 24;
+    uint32_t r = (((c >> 16) & 0xFF) * a + 127) / 255;
+    uint32_t g = (((c >> 8) & 0xFF) * a + 127) / 255;
+    uint32_t b = ((c & 0xFF) * a + 127) / 255;
+    icon[i] = (a << 24) | (r << 16) | (g << 8) | b;
+  }
 }
 
 static int ensure_icon(taskbar_item_t *it) {
@@ -268,8 +456,19 @@ static int ensure_icon(taskbar_item_t *it) {
       it->dock_icon[i] = 0;
     make_fallback_tile(it);
   }
+  bake_shadow_and_premultiply(it->dock_icon);
   it->dock_icon_state = 1;
   return 1;
+}
+
+/* Negro premultiplicado con el alfa del icono por a/255 (oscurecido al
+ * pulsar). Solo se usa para el icono pulsado, uno a la vez. Solo hilo del
+ * compositor. */
+static const uint32_t *silhouette(const taskbar_item_t *it, uint32_t a) {
+  static uint32_t sil[DOCK_ICON_SRC * DOCK_ICON_SRC];
+  for (int i = 0; i < DOCK_ICON_SRC * DOCK_ICON_SRC; i++)
+    sil[i] = (((it->dock_icon[i] >> 24) * a / 255) << 24);
+  return sil;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,46 +480,41 @@ void dock_render(uint32_t *dst, int stride, rect_t clip) {
 
   rect_t p = D.panel;
 
-  /* Cristal esmerilado: desenfoque del fondo ya compuesto + tinte + borde. */
-  if (D.scratch)
-    gfx_backdrop_blur_rounded(dst, stride, clip, p, DOCK_RADIUS, 8, D.scratch,
-                              D.scratch_px);
-  gfx_fill_rounded_rect(dst, stride, clip, p, DOCK_RADIUS, AURORA_DOCK_TINT);
-  gfx_draw_rounded_border(dst, stride, clip, p, DOCK_RADIUS,
-                          AURORA_DOCK_BORDER);
-  gfx_blend_rect(dst, stride, clip,
-                 (rect_t){p.x + DOCK_RADIUS, p.y, p.w - 2 * DOCK_RADIUS, 1},
-                 AURORA_DOCK_TOPLIGHT);
+  /* Cristal líquido: fondo desenfocado y saturado + tinte + borde especular. */
+  gfx_glass_panel(dst, stride, clip, p, DOCK_RADIUS, AURORA_DOCK_TINT,
+                  AURORA_GLASS_BLUR, AURORA_GLASS_SAT, D.scratch,
+                  D.scratch_px);
 
+  const int S = DOCK_ICON_SRC;
   for (int i = 0; i < D.n; i++) {
     taskbar_item_t *it = D.slots[i].item;
     rect_t r = D.slots[i].r;
-    if (ensure_icon(it))
-      gfx_blit_scaled(dst, stride, clip, r.x, r.y, r.w, r.h, it->dock_icon,
-                      DOCK_ICON_SRC, DOCK_ICON_SRC, GFX_FILTER_BILINEAR);
+    if (!ensure_icon(it))
+      continue;
+
+    /* Un único blit: el icono ya lleva su sombra y el alfa premultiplicado. */
+    gfx_blit_scaled_premul(dst, stride, clip, r.x, r.y, r.w, r.h,
+                           it->dock_icon, S, S);
+
+    /* Pulsado: se oscurece mientras el botón está abajo. */
+    if (it == D.pressed)
+      gfx_blit_scaled_premul(dst, stride, clip, r.x, r.y, r.w, r.h,
+                             silhouette(it, 0x60), S, S);
 
     /* Indicador de app abierta (más brillante si es la activa). */
-    int dot_y = p.y + p.h - 9;
-    gfx_fill_rounded_rect(dst, stride, clip,
-                          (rect_t){r.x + r.w / 2 - 2, dot_y, 4, 4}, 2,
-                          it->is_active ? 0xFFFFFFFF : 0x99FFFFFF);
+    gfx_fill_circle(dst, stride, clip, (float)r.x + r.w / 2.0f,
+                    (float)(p.y + p.h) - 5.0f, 1.75f,
+                    it->is_active ? 0xF2FFFFFF : 0x80FFFFFF);
   }
 
-  /* Tooltip sobre el icono bajo el cursor. */
-  if (D.hover >= 0 && D.mag > 128) {
-    taskbar_item_t *it = D.slots[D.hover].item;
-    rect_t ir = D.slots[D.hover].r;
-    const char *label = it->label;
-    int tw = gfx_text_width(label, FONT_ID_MAIN_REGULAR);
-    int w = tw + 22, h = 26;
-    int x = ir.x + ir.w / 2 - w / 2;
-    x = imax(8, imin(x, D.sw - w - 8));
-    int y = ir.y - 10 - h;
-    rect_t tr = {x, y, w, h};
-    gfx_fill_rounded_rect(dst, stride, clip, tr, 8, 0xE6262628);
-    gfx_draw_rounded_border(dst, stride, clip, tr, 8, 0x30FFFFFF);
-    gfx_draw_string(dst, stride, clip, x + 11,
-                    gfx_text_center_y(FONT_ID_MAIN_REGULAR, y, h), label,
-                    AURORA_TEXT_PRIMARY, FONT_ID_MAIN_REGULAR);
+  /* Tooltip sobre el icono bajo el cursor (geometría de dock_update). */
+  if (D.tip.w > 0 && D.hover >= 0) {
+    rect_t tr = D.tip;
+    gfx_glass_panel(dst, stride, clip, tr, tr.h / 2, AURORA_TOOLTIP_TINT,
+                    TIP_BLUR, 280, D.scratch, D.scratch_px);
+    gfx_draw_string(dst, stride, clip, tr.x + 11,
+                    gfx_text_center_y(FONT_ID_MAIN_REGULAR, tr.y, tr.h),
+                    D.slots[D.hover].item->label, AURORA_TEXT_PRIMARY,
+                    FONT_ID_MAIN_REGULAR);
   }
 }

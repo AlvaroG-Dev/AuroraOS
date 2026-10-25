@@ -9,6 +9,7 @@
 #include "../../string.h"
 #include "../../uaccess.h"
 #include "../usb_dma.h"
+#include "../usb_proxy.h"
 #include "xhci_ring.h"
 #include "xhci_scratch.h"
 
@@ -1030,6 +1031,11 @@ static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
   if (pci_dev->prog_if != 0x30) {
     LOG_INFO("[xHCI] %02x:%02x.%x: progif=0x%02x != 0x30, no es xHCI",
              pci_dev->bus, pci_dev->slot, pci_dev->func, pci_dev->prog_if);
+    return -ENODEV;
+  }
+  if (xhci_user_mode()) {
+    LOG_INFO("[xHCI] %02x:%02x.%x: modo usuario activo, cediendo a xhci.aur",
+             pci_dev->bus, pci_dev->slot, pci_dev->func);
     return -ENODEV;
   }
   if (g_xhci.initialized) {

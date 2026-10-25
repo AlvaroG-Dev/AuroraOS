@@ -9,13 +9,16 @@
 #include <stdint.h>
 
 #define DOCK_ICON_BASE 48   /* tamaño de reposo del icono */
-#define DOCK_ICON_MAX 72    /* tamaño máximo con magnificación */
+#define DOCK_ICON_MAX 60    /* tamaño máximo con magnificación (+25 %) */
 #define DOCK_ICON_SRC 72    /* lado de la caché de icono (ARGB) */
-#define DOCK_PAD_X 12
-#define DOCK_PAD_TOP 8
-#define DOCK_PAD_BOTTOM 14  /* sitio para el indicador de app abierta */
-#define DOCK_GAP 6
-#define DOCK_MARGIN_BOTTOM 8
+/* Proporciones: el icono lleva ~2/72 de margen transparente propio, así que
+ * el hueco visible entre iconos es DOCK_GAP + ~3 px. El relleno lateral es
+ * parecido al superior y el inferior deja sitio al indicador de app abierta. */
+#define DOCK_PAD_X 10
+#define DOCK_PAD_TOP 7
+#define DOCK_PAD_BOTTOM 11
+#define DOCK_GAP 4
+#define DOCK_MARGIN_BOTTOM 7
 #define DOCK_RADIUS 20
 #define DOCK_HEIGHT (DOCK_PAD_TOP + DOCK_ICON_BASE + DOCK_PAD_BOTTOM)
 #define DOCK_HEADROOM 84    /* espacio sobre el panel: iconos ampliados + tooltip */
@@ -43,6 +46,21 @@ int dock_take_damage(rect_t *out);
 rect_t dock_get_damage_rect(void);
 
 rect_t dock_get_panel_rect(void);
+
+// Paneles de cristal visibles ahora (panel y tooltip). Devuelve cuántos.
+int dock_glass_rects(glass_rect_t *out, int max);
+
+// Rectángulo del icono de `item` (para el efecto genie). 0 si no está.
+int dock_item_rect(const taskbar_item_t *item, rect_t *out);
+
+// Icono pulsado (se oscurece mientras el botón está abajo). NULL = ninguno.
+void dock_set_pressed(taskbar_item_t *item);
+
+// Rebote de "app abriéndose", como macOS al lanzar una aplicación.
+void dock_bounce(taskbar_item_t *item);
+
+// Un item va a desaparecer: olvidar cualquier referencia a él.
+void dock_forget(taskbar_item_t *item);
 void dock_render(uint32_t *dst, int dst_stride, rect_t clip);
 
 // Item bajo (x, y) o NULL. Solo cuenta lo que se ve: el panel y los iconos.

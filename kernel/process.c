@@ -1428,6 +1428,72 @@ static bool has_matching_event(void *arg) {
 //    0  WNOHANG sin eventos listos.
 //   -1  no hay hijos que cumplan el filtro.
 // ---------------------------------------------------------------------------
+// Libera un zombi ya desenlazado de process_list. `zombie_task` es la
+// referencia tomada bajo process_lock (puede ser NULL).
+static void free_reaped_zombie(process_t *z, task_t *zombie_task) {
+  if (zombie_task) {
+    // [CONCURRENCIA] Esperar a que la tarea no esté en ningún CPU.
+    // on_cpu se limpia en task_switch, así que esto es la barrera
+    // mínima antes de soltar la referencia.
+    while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
+      __asm__ volatile("pause");
+
+    zombie_task->proc = NULL;
+    task_put(zombie_task);
+  }
+  if (z->pml4_phys) {
+    futex_cleanup_pml4(z->pml4_phys);
+    paging_free_user_space(z->pml4_phys);
+  }
+  vma_destroy_all(z);
+  if (z->task) {
+    task_put(z->task);
+    z->task = NULL;
+  }
+  kfree(z);
+}
+
+int process_kill(uint32_t pid, int sig) {
+  if (sig <= 0 || sig > 63)
+    return -EINVAL;
+  int need_intr = 0;
+  // La máscara de señales del kernel indexa por número de señal (bit sig).
+  task_t *t = process_signal_pid_ex(pid, 1ULL << sig, &need_intr);
+  if (!t)
+    return -ESRCH;
+  if (need_intr)
+    wait_queue_interrupt_task(t);
+  task_put(t);
+  return 0;
+}
+
+int process_reap_orphan(uint32_t pid, int *exit_code_out) {
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  process_t **pp = &process_list;
+  while (*pp && (*pp)->pid != pid)
+    pp = &(*pp)->next;
+  process_t *z = *pp;
+  if (!z || z->ppid != 0) {
+    spin_unlock_irqrestore(&process_lock, flags);
+    return -ESRCH;
+  }
+  if (!z->is_zombie) {
+    spin_unlock_irqrestore(&process_lock, flags);
+    return -EBUSY;
+  }
+  *pp = z->next;
+  task_t *zt = z->task;
+  if (zt)
+    task_get(zt);
+  int code = z->exit_code;
+  spin_unlock_irqrestore(&process_lock, flags);
+
+  if (exit_code_out)
+    *exit_code_out = code;
+  free_reaped_zombie(z, zt);
+  return 0;
+}
+
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,
                     proc_rusage_t *rusage_out, int options) {
   if (!parent)
@@ -1502,27 +1568,7 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
         rusage_out->maxrss_kb = 0;
       }
 
-      if (zombie_task) {
-        // [CONCURRENCIA] Esperar a que la tarea no esté en ningún CPU.
-        // on_cpu se limpia en task_switch, así que esto es la barrera
-        // mínima antes de soltar la referencia.
-        while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
-          __asm__ volatile("pause");
-
-        zombie_task->proc = NULL;
-        task_put(zombie_task);
-        zombie_task = NULL;
-      }
-      if (found_zombie->pml4_phys) {
-        futex_cleanup_pml4(found_zombie->pml4_phys);
-        paging_free_user_space(found_zombie->pml4_phys);
-      }
-      vma_destroy_all(found_zombie);
-      if (found_zombie->task) {
-        task_put(found_zombie->task);
-        found_zombie->task = NULL;
-      }
-      kfree(found_zombie);
+      free_reaped_zombie(found_zombie, zombie_task);
       return (int)zpid;
     }
 

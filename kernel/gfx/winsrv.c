@@ -306,7 +306,8 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
       copied += chunk;
     }
   }
-  win->content_dirty = 1;
+  // Solo esta zona de la superficie se recompone en el siguiente frame.
+  window_mark_content_locked(win, (rect_t){dst_x, dst_y, copy_w, copy_h});
 
   int inv_x = win->x + dst_x;
   int inv_y = win->y + window_titlebar_h(win) + dst_y;

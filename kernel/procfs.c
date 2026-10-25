@@ -12,6 +12,7 @@
 #include "block.h"
 #include "cpu.h"
 #include "heap.h"
+#include "kmod_sys.h"
 #include "klog.h"
 #include "net/netif.h"
 #include "pf.h" // vma_t, VMA_ELF, VMA_STACK, VMA_FILE, VMA_ANON
@@ -2132,6 +2133,7 @@ static const char *procfs_root_entries[] = {
     "uptime", "version", "meminfo",     "stat",       "self",
     "mounts", "loadavg", "bus",         "partitions", "swaps",
     "sys",    "vmstat",  "filesystems", "net", // ← AÑADIR
+    "modules",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -2895,6 +2897,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *b = gen_meminfo(&len);
     return make_file_node("meminfo", b, len);
+  }
+  if (strcmp(name, "modules") == 0) {
+    size_t len = 0;
+    char *b = kmod_gen_proc_modules(&len);
+    return make_file_node("modules", b, len);
   }
   if (strcmp(name, "stat") == 0) {
     size_t len = 0;

@@ -31,7 +31,7 @@ Estas capacidades deben conservarse mediante pruebas de regresión; no se deben 
 
 - [ ] **Señales:** comprobar el filtrado de señales ignoradas en `signal_check_pending` y `wait_common`; revisar `sigaltstack` + `SA_ONSTACK` y `pidfd_send_signal` si las aplicaciones objetivo lo requieren. Retirar `[SIG-DBG]` solo tras cerrar y probar esa deuda.
 - [ ] **Futex/threads:** stress tests concurrentes de WAIT/WAKE, WAIT_BITSET, WAKE_BITSET, salida de threads, señales y cancelación. `clone3` no es aún semánticamente completo: el fallback rechaza flags no soportados (por ejemplo PIDFD/CGROUP) con `EINVAL`; `rseq` sigue pendiente según el estado documentado.
-- [ ] **epoll:** implementar y probar `EPOLLET`, `EPOLLONESHOT` y `EPOLLEXCLUSIVE`, o rechazar explícitamente los flags no soportados. Actualmente el plan registra que se aceptan pero se ignoran, lo cual puede producir comportamientos silenciosamente incorrectos.
+- [~] **epoll:** `EPOLLET`, `EPOLLONESHOT` y `EPOLLEXCLUSIVE` implementados en `kernel/epoll.c` (2026-10-24; ET por contador de despertares por entrada, EXCLUSIVE validado como en Linux pero sin despertar selectivo; ERR/HUP se reportan siempre). Test de kernel `wait: subscribe_seq por entrada`. Pendiente: test de userspace (ET/ONESHOT con pipe/eventfd) y `EPOLLRDHUP` real.
 - [ ] **PTY/TTY:** investigar `ioctl(TCGETS)` sobre PTY, que Python registra como `ENOTTY` al cargar `encodings/utf_8`; crear pruebas de ioctl, termios, foreground process group y cierre de PTY.
 
 ### P2 — Interfaces de sistema y usuarios

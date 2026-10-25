@@ -16,6 +16,8 @@
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "irq_user.h"
+#include "block_proxy.h"
+#include "usb/usb_proxy.h"
 #include "klog.h"
 #include "mutex.h"
 #include "net/net_proxy.h"
@@ -1942,6 +1944,8 @@ static const devfs_entry_t devfs_entries[] = {
     {"random", &dev_urandom_ops, VFS_CHARDEVICE, (1u << 8) | 8},
     {"dma", &dma_dev_ops, VFS_CHARDEVICE, (10u << 8) | 60},
     {"net0", &net_proxy_ops, VFS_CHARDEVICE, (10u << 8) | 200},
+    {"blkproxy", &blkp_dev_ops, VFS_CHARDEVICE, (10u << 8) | 201},
+    {"usbproxy", &uproxy_dev_ops, VFS_CHARDEVICE, (10u << 8) | 202},
 };
 
 // ===========================================================================
@@ -2451,6 +2455,8 @@ void vfs_init(void) {
     LOG_INFO("[VFS] devfs montado en /dev");
   }
   aur_irq_init(); // <-- NUEVO
+  blkp_init();
+  uproxy_init();
   int rc3 = vfs_mount("/proc", procfs_get_vfs_ops(), NULL);
   if (rc3 != 0) {
     LOG_ERR("[VFS] fallo al montar procfs en /proc: %d", rc3);

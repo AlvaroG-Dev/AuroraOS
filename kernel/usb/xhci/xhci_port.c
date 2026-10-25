@@ -139,7 +139,10 @@ void xhci_port_poll_changes(void) {
   }
 }
 
-static int xhci_attach_one(uint8_t port) {
+// force_reset: en los reintentos se resetea SIEMPRE el puerto. Un puerto
+// SuperSpeed ya en U0/PED=1 se daba por habilitado y los reintentos repetian
+// exactamente lo mismo (Address Device ok, primer control con cc=4).
+static int xhci_attach_one(uint8_t port, int force_reset) {
   uint32_t portsc = xhci_port_status(port);
   if (!(portsc & XHCI_PORTSC_CCS))
     return -ENODEV;
@@ -153,7 +156,9 @@ static int xhci_attach_one(uint8_t port) {
   // PED=1 puede tener un device que YA tiene dirección (BIOS o intento previo
   // fallido): sin reset, Address Device falla con cc=4 (Transaction Error).
   int is_ss = (speed == USB_SPEED_SUPER || speed == USB_SPEED_SUPER_PLUS);
-  int already_enabled =
+  if (force_reset)
+    is_ss = 0; // saltar la espera de link training y resetear
+  int already_enabled = !force_reset &&
       is_ss && (portsc & XHCI_PORTSC_PED) && (pls == XHCI_PLS_U0);
   if (is_ss && !already_enabled) {
     // El link SuperSpeed entrena solo: dar hasta ~300 ms antes de resetear.
@@ -170,7 +175,11 @@ static int xhci_attach_one(uint8_t port) {
       speed = xhci_speed_to_usb(portsc);
   }
 
-  if (!already_enabled) {
+  // Reset SIEMPRE, también con el link SuperSpeed ya en U0/PED=1 (como Linux,
+  // que resetea todo puerto al enumerar). Sin él, VirtualBox acepta Address
+  // Device pero el primer control transfer termina con cc=4 y hace falta un
+  // reintento. `already_enabled` solo evita esperar el link training.
+  {
     int rc = xhci_port_reset(port);
     if (rc != 0)
       return rc;
@@ -220,7 +229,7 @@ int xhci_attach_all_devices(void) {
     // evento de hotplug -> bucle infinito que gastaba un slot por intento.
     int ok = 0, gone = 0;
     for (int attempt = 1; attempt <= 3; attempt++) {
-      int rc = xhci_attach_one((uint8_t)p);
+      int rc = xhci_attach_one((uint8_t)p, attempt > 1);
       if (rc == 0) {
         ok = 1;
         break;

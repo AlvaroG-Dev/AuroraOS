@@ -228,10 +228,13 @@ int tcp_connect(tcp_conn_t *c, uint32_t remote_ip, uint16_t remote_port,
                 uint64_t timeout_ms);
 int tcp_send(tcp_conn_t *c, const void *buf, size_t len);
 int tcp_recv(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms);
+int tcp_recv_flags(tcp_conn_t *c, void *buf, size_t len, uint64_t timeout_ms,
+                   int peek);
 int tcp_listen(tcp_conn_t *c, uint32_t local_ip, uint16_t local_port);
 tcp_conn_t *tcp_accept(tcp_conn_t *listener, uint64_t timeout_ms);
 void tcp_close(tcp_conn_t *c);
 int tcp_recv_nonblock(tcp_conn_t *c, void *buf, size_t len);
+int tcp_recv_nonblock_flags(tcp_conn_t *c, void *buf, size_t len, int peek);
 int tcp_is_readable(tcp_conn_t *c);
 int tcp_peer_closed(tcp_conn_t *c);
 

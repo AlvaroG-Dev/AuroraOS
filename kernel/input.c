@@ -6,6 +6,8 @@
 #include "string.h"
 #include "wait.h"
 
+extern void compositor_notify_event(void);
+
 static input_event_t buf[INPUT_BUF_SIZE];
 static volatile uint16_t head = 0;
 static volatile uint16_t tail = 0;
@@ -26,6 +28,24 @@ void input_push(const input_event_t *ev) {
 
   unsigned long flags = spin_lock_irqsave(&input_lock);
 
+  // Ratón: fundir con el evento anterior si es movimiento con los mismos
+  // botones. Un ratón USB a 1000 Hz llenaría la cola mientras el compositor
+  // renderiza un frame lento, y el descarte del más viejo se llevaría por
+  // delante pulsaciones/liberaciones de botón (clics perdidos).
+  if (ev->type == INPUT_EV_MOUSE && count > 0) {
+    input_event_t *last = &buf[(head + INPUT_BUF_SIZE - 1) % INPUT_BUF_SIZE];
+    if (last->type == INPUT_EV_MOUSE && last->code == ev->code) {
+      int32_t sx = (int32_t)last->value + ev->value;
+      int32_t sy = (int32_t)last->value2 + ev->value2;
+      last->value = (int16_t)(sx > 32767 ? 32767 : sx < -32768 ? -32768 : sx);
+      last->value2 = (int16_t)(sy > 32767 ? 32767 : sy < -32768 ? -32768 : sy);
+      last->timestamp = ev->timestamp;
+      spin_unlock_irqrestore(&input_lock, flags);
+      compositor_notify_event();
+      return;
+    }
+  }
+
   if (count >= INPUT_BUF_SIZE) {
     // Buffer lleno: descartar el más viejo
     tail = (tail + 1) % INPUT_BUF_SIZE;
@@ -45,7 +65,6 @@ void input_push(const input_event_t *ev) {
   // (compositor_wq) porque también espera por daño y clock tick.
   // Sin esto, un evento de input se quedaría en cola hasta el
   // próximo redibujado espontáneo.
-  extern void compositor_notify_event(void);
   compositor_notify_event();
 }
 

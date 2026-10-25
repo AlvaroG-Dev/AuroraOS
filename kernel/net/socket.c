@@ -566,28 +566,31 @@ int socket_is_readable(socket_t *s) {
 
 static int socket_recvfrom_udp(socket_t *s, void *buf, size_t len,
                                uint32_t *src_ip, uint16_t *src_port,
-                               int *would_block) {
+                               int *would_block, int peek) {
   for (;;) {
     unsigned long flags = spin_lock_irqsave(&s->lock);
     skb_t *sk = s->rx_head;
     if (sk) {
-      s->rx_head = sk->next;
-      if (!s->rx_head)
-        s->rx_tail = NULL;
-      s->rx_count--;
+      if (!peek) {
+        s->rx_head = sk->next;
+        if (!s->rx_head)
+          s->rx_tail = NULL;
+        s->rx_count--;
+      }
       // El skb que recibimos ya viene con el payload limpio; los
       // metadatos los tenemos del socket (peer).
       uint32_t sip = s->remote_ip;
       uint16_t sp = s->remote_port;
       uint8_t ttl = sk->ttl; // ← nuevo
       s->last_ttl = ttl;     // ← persistir para el syscall
-      spin_unlock_irqrestore(&s->lock, flags);
 
       size_t n = skb_len(sk);
       if (n > len)
         n = len;
       memcpy(buf, skb_data(sk), n);
-      skb_free(sk);
+      spin_unlock_irqrestore(&s->lock, flags);
+      if (!peek)
+        skb_free(sk);
 
       if (src_ip)
         *src_ip = sip;
@@ -622,7 +625,7 @@ static int socket_recvfrom_udp(socket_t *s, void *buf, size_t len,
 }
 
 static int socket_recv_tcp(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
-                           uint16_t *src_port, int *would_block) {
+                           uint16_t *src_port, int *would_block, int peek) {
   if (!s->tcp)
     return -ENOTCONN;
   if (s->tcp->state != TCP_STATE_ESTABLISHED &&
@@ -634,15 +637,13 @@ static int socket_recv_tcp(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
 
   int n;
   if (s->nonblock) {
-    n = tcp_recv_nonblock(s->tcp, buf, len);
+    n = tcp_recv_nonblock_flags(s->tcp, buf, len, peek);
     if (n == -EAGAIN && would_block)
       *would_block = 1;
   } else {
-    n = tcp_recv(s->tcp, buf, len, s->rcvtimeo_ms);
+    n = tcp_recv_flags(s->tcp, buf, len, s->rcvtimeo_ms, peek);
   }
-  if (n > 0 &&
-      !__atomic_exchange_n(&s->tcp->trace_rx_app_logged, 1,
-                           __ATOMIC_RELAXED)) {
+  if (n > 0 && !peek) {
     unsigned long flags = spin_lock_irqsave(&s->tcp->rx_lock);
     uint64_t received = s->tcp->rx_total_consumed;
     size_t buffered = s->tcp->rx_buffered_bytes;
@@ -650,12 +651,14 @@ static int socket_recv_tcp(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
     int ooo_count = s->tcp->ooo_count;
     uint32_t expected = s->tcp->rcv_nxt;
     spin_unlock_irqrestore(&s->tcp->rx_lock, flags);
-    LOG_INFO("[TCP] primer payload entregado a app local=%u remote=%u "
-             "read=%d requested=%lu total=%lu buffered=%lu rx_skbs=%d "
-             "ooo=%d rcv_nxt=%u",
-             s->local_port, s->remote_port, n, (unsigned long)len,
-             (unsigned long)received, (unsigned long)buffered, rx_count,
-             ooo_count, expected);
+    if (!__atomic_exchange_n(&s->tcp->trace_rx_app_logged, 1,
+                             __ATOMIC_RELAXED))
+      LOG_INFO("[TCP] primer payload entregado a app local=%u remote=%u "
+               "read=%d requested=%lu total=%lu buffered=%lu rx_skbs=%d "
+               "ooo=%d rcv_nxt=%u",
+               s->local_port, s->remote_port, n, (unsigned long)len,
+               (unsigned long)received, (unsigned long)buffered, rx_count,
+               ooo_count, expected);
   }
   if (n >= 0) {
     if (src_ip)
@@ -668,15 +671,22 @@ static int socket_recv_tcp(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
 
 int socket_recvfrom(socket_t *s, void *buf, size_t len, uint32_t *src_ip,
                     uint16_t *src_port, int *would_block) {
+  return socket_recvfrom_flags(s, buf, len, 0, src_ip, src_port, would_block);
+}
+
+int socket_recvfrom_flags(socket_t *s, void *buf, size_t len, uint64_t flags,
+                          uint32_t *src_ip, uint16_t *src_port,
+                          int *would_block) {
   if (!s || !buf)
     return -EINVAL;
   if (would_block)
     *would_block = 0;
+  int peek = (flags & SOCKET_MSG_PEEK) != 0;
   if (s->is_tcp)
-    return socket_recv_tcp(s, buf, len, src_ip, src_port, would_block);
+    return socket_recv_tcp(s, buf, len, src_ip, src_port, would_block, peek);
   if (s->protocol != SOCK_IPPROTO_UDP && !s->is_ping)
     return -EOPNOTSUPP;
-  return socket_recvfrom_udp(s, buf, len, src_ip, src_port, would_block);
+  return socket_recvfrom_udp(s, buf, len, src_ip, src_port, would_block, peek);
 }
 
 int socket_recv(socket_t *s, void *buf, size_t len, int *would_block) {
@@ -686,7 +696,7 @@ int socket_recv(socket_t *s, void *buf, size_t len, int *would_block) {
     *would_block = 0;
 
   if (s->is_tcp)
-    return socket_recv_tcp(s, buf, len, NULL, NULL, would_block);
+    return socket_recv_tcp(s, buf, len, NULL, NULL, would_block, 0);
 
   if (!s->connected)
     return -ENOTCONN;

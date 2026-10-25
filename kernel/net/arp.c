@@ -13,6 +13,9 @@
 #include "ip.h"
 #include "netif.h"
 
+volatile uint64_t g_arp_time_skew = 0;
+static inline uint64_t arp_now(void) { return tick_count + g_arp_time_skew; }
+
 #define ARP_HTYPE_ETHERNET 1u
 #define ARP_OP_REQUEST 1u
 #define ARP_OP_REPLY 2u
@@ -185,7 +188,7 @@ static void arp_rx_ethernet(netif_t *netif, skb_t *skb) {
     if (e) {
       memcpy(e->mac, smac, 6);
       e->state = ARP_ENTRY_REACHABLE;
-      e->last_seen = tick_count;
+      e->last_seen = arp_now();
 
       // Desencolar bajo lock (la cola entera). Luego enviamos fuera
       // del lock para no meter netif_tx dentro de la sección crítica.
@@ -284,7 +287,7 @@ int arp_resolve(netif_t *n, uint32_t ip, uint8_t mac_out[6]) {
     }
   }
   e->state = ARP_ENTRY_INCOMPLETE;
-  e->last_seen = tick_count;
+  e->last_seen = arp_now();
   spin_unlock_irqrestore(&g_arp_lock, flags);
 
   send_request(n, ip);
@@ -317,7 +320,7 @@ int arp_queue_pending(netif_t *n, uint32_t ip, skb_t *skb) {
 }
 
 void arp_timer_tick(void) {
-  uint64_t now = tick_count;
+  uint64_t now = arp_now();
 
   unsigned long flags = spin_lock_irqsave(&g_arp_lock);
   for (int i = 0; i < ARP_TABLE_SIZE; i++) {
@@ -380,7 +383,7 @@ int arp_insert_static(netif_t *n, uint32_t ip, const uint8_t mac[6]) {
   }
   memcpy(e->mac, mac, 6);
   e->state = ARP_ENTRY_REACHABLE;
-  e->last_seen = tick_count;
+  e->last_seen = arp_now();
   spin_unlock_irqrestore(&g_arp_lock, flags);
   return 0;
 }

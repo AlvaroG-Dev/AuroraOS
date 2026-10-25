@@ -49,6 +49,15 @@ static inline uint32_t blend_pixel_fast(uint32_t src, uint32_t dst) {
     r = (sr * sa + dr * da * inv_sa / 255) / out_a;
     g = (sg * sa + dg * da * inv_sa / 255) / out_a;
     b = (sb * sa + db * da * inv_sa / 255) / out_a;
+    /* out_a se trunca, así que con destino semitransparente el cociente puede
+     * pasar de 255; sin recortar, el sobrante se cuela en el canal vecino al
+     * empaquetar (franjas verdosas en los bordes de iconos y esquinas). */
+    if (r > 255)
+      r = 255;
+    if (g > 255)
+      g = 255;
+    if (b > 255)
+      b = 255;
   }
 
   return (out_a << 24) | (r << 16) | (g << 8) | b;
@@ -122,6 +131,45 @@ void gfx_draw_shadow_aurora_ex(uint32_t *dst, int dst_stride, rect_t clip,
 void gfx_backdrop_blur_rounded(uint32_t *dst, int dst_stride, rect_t clip,
                                rect_t r, int corner_radius, int blur_radius,
                                uint32_t *tmp, size_t tmp_px);
+
+/* Panel de "cristal líquido" (Dock, menús, tooltips): desenfoque + saturación
+ * del fondo ya compuesto, tinte, brillo superior y borde especular. `tmp` es
+ * el buffer de desenfoque (NULL = solo tinte). El rectángulo debe estar
+ * dentro del buffer y el fondo debajo recién compuesto. */
+void gfx_glass_panel(uint32_t *dst, int dst_stride, rect_t clip, rect_t r,
+                     int radius, uint32_t tint, int blur_radius, int sat256,
+                     uint32_t *tmp, size_t tmp_px);
+
+/* Rectángulo con desenfoque de fondo (panel de cristal). El compositor lo usa
+ * para saber qué fondo extra debe componer antes de pintar el cristal. */
+typedef struct {
+  rect_t r;
+  int blur;
+} glass_rect_t;
+
+/* Fondo que debe estar compuesto para desenfocar clip ∩ r con radio blur. */
+rect_t gfx_glass_source_rect(rect_t clip, rect_t r, int blur);
+
+/* Formas vectoriales con antialiasing (coordenadas en píxeles, el centro del
+ * píxel (x, y) es (x + 0.5, y + 0.5)). */
+void gfx_fill_circle(uint32_t *dst, int dst_stride, rect_t clip, float cx,
+                     float cy, float r, uint32_t color);
+/* Segmento con extremos redondeados de semiancho hw. */
+void gfx_draw_capsule(uint32_t *dst, int dst_stride, rect_t clip, float x0,
+                      float y0, float x1, float y1, float hw, uint32_t color);
+void gfx_fill_triangle(uint32_t *dst, int dst_stride, rect_t clip, float x0,
+                       float y0, float x1, float y1, float x2, float y2,
+                       uint32_t color);
+
+static inline rect_t rect_grow(rect_t r, int d) {
+  return (rect_t){r.x - d, r.y - d, r.w + 2 * d, r.h + 2 * d};
+}
+
+static inline int rect_contains(rect_t outer, rect_t inner) {
+  return inner.x >= outer.x && inner.y >= outer.y &&
+         inner.x + inner.w <= outer.x + outer.w &&
+         inner.y + inner.h <= outer.y + outer.h;
+}
 
 /* Métricas de texto (UTF-8). */
 int gfx_text_width(const char *str, font_id_t font);

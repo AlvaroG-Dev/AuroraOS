@@ -686,6 +686,63 @@ static void test_tcp_recv_basic(void) {
 }
 REGISTER_TEST("net/tcp: recv saca payload inyectado", test_tcp_recv_basic);
 
+static void test_tcp_recv_peek_preserves_data(void) {
+  mock_setup();
+  tcp_conn_t *c = make_established();
+  TEST_ASSERT(c != NULL, "make_established");
+  if (!c) {
+    mock_teardown();
+    return;
+  }
+  tcp_conn_insert(c);
+
+  const char *payload = "HTTP/1.1 200 OK\r\n";
+  skb_t *s =
+      build_eth_ip_tcp(IP_B, IP_A, P_B, P_A, c->rcv_nxt, c->snd_nxt,
+                       TCP_ACK | TCP_PSH, 0x1000, payload, strlen(payload), 0);
+  TEST_ASSERT(s != NULL, "build");
+  if (!s) {
+    tcp_conn_remove(c);
+    tcp_conn_free(c);
+    mock_teardown();
+    return;
+  }
+  s->netif = &g_nif;
+  netif_rx(s);
+
+  char peek_buf[64] = {0};
+  int n = tcp_recv_flags(c, peek_buf, sizeof(peek_buf), 500, 1);
+  TEST_ASSERT_EQ(n, (int)strlen(payload));
+  TEST_ASSERT(memcmp(peek_buf, payload, strlen(payload)) == 0,
+              "peek payload mal");
+  TEST_ASSERT_EQ(c->rx_count, 1);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, strlen(payload));
+  TEST_ASSERT_EQ(c->rx_total_consumed, 0);
+
+  memset(peek_buf, 0, sizeof(peek_buf));
+  n = tcp_recv_nonblock_flags(c, peek_buf, sizeof(peek_buf), 1);
+  TEST_ASSERT_EQ(n, (int)strlen(payload));
+  TEST_ASSERT(memcmp(peek_buf, payload, strlen(payload)) == 0,
+              "peek non-blocking payload mal");
+  TEST_ASSERT_EQ(c->rx_count, 1);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, strlen(payload));
+  TEST_ASSERT_EQ(c->rx_total_consumed, 0);
+
+  char buf[64] = {0};
+  n = tcp_recv(c, buf, sizeof(buf), 500);
+  TEST_ASSERT_EQ(n, (int)strlen(payload));
+  TEST_ASSERT(memcmp(buf, payload, strlen(payload)) == 0,
+              "recv posterior al peek mal");
+  TEST_ASSERT_EQ(c->rx_count, 0);
+  TEST_ASSERT_EQ(c->rx_buffered_bytes, 0);
+
+  tcp_conn_remove(c);
+  tcp_conn_free(c);
+  mock_teardown();
+}
+REGISTER_TEST("net/tcp: MSG_PEEK preserva datos",
+              test_tcp_recv_peek_preserves_data);
+
 // 3. recv sin datos: timeout.
 static void test_tcp_recv_timeout(void) {
   mock_setup();

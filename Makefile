@@ -131,6 +131,19 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando /etc estaticos..."
 	@mkdir -p sysroot/etc
+	@mkdir -p sysroot/usr/lib/aur
+	@if [ "$(AHCI_USER)" = "1" ]; then \
+		echo "[Makefile] AHCI en Ring 3 (ahci.aur): /usr/lib/aur/ahci.user"; \
+		echo 1 > sysroot/usr/lib/aur/ahci.user; \
+	else \
+		rm -f sysroot/usr/lib/aur/ahci.user; \
+	fi
+	@if [ "$(XHCI_USER)" = "1" ]; then \
+		echo "[Makefile] xHCI en Ring 3 (xhci.aur): /usr/lib/aur/xhci.user"; \
+		echo 1 > sysroot/usr/lib/aur/xhci.user; \
+	else \
+		rm -f sysroot/usr/lib/aur/xhci.user; \
+	fi
 	@if [ -f /etc/inputrc ]; then \
 		cp -f /etc/inputrc sysroot/etc/inputrc; \
 	else \
@@ -176,6 +189,10 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers
 	if [ "$$found_ca" = "0" ]; then \
 		echo "[Makefile]   (WARN) no se encontró CA bundle en el host."; \
 		echo "[Makefile]          curl https:// fallará con error 77."; \
+	else \
+		mkdir -p sysroot/usr/lib/ssl; \
+		ln -sfn /etc/ssl/certs/ca-certificates.crt sysroot/usr/lib/ssl/cert.pem; \
+		ln -sfn /etc/ssl/certs sysroot/usr/lib/ssl/certs; \
 	fi
 
 # ---------------------------------------------------------------------------
@@ -1081,8 +1098,16 @@ tools/kurbuild: tools/kurbuild.c kernel/sha256.c kernel/sha256.h
 tools/aurbuild: tools/aurbuild.c
 	@$(HOST_CC) -O2 -Wall -Wextra -o $@ $<
 
+# Árbol /lib/modules/<release>/ para kmod (modprobe/rmmod/lsmod), con los
+# .kur como <modulo>.ko y los índices generados por depmod.
+KERNEL_RELEASE ?= 0.1.0
+
+.PHONY: kmod-tree
+kmod-tree: $(KUR_TARGETS)
+	@bash scripts/mk-kmod-tree.sh sysroot $(KERNEL_RELEASE) drivers/kur
+
 .PHONY: drivers
-drivers: tools/kurbuild tools/aurbuild $(KUR_TARGETS) $(AUR_TARGETS)
+drivers: tools/kurbuild tools/aurbuild $(KUR_TARGETS) $(AUR_TARGETS) kmod-tree
 
 # ===========================================================================
 # Clean

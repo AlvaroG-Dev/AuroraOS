@@ -20,6 +20,13 @@
 #define ARP_STALE_TTL_MS 120000ULL
 #define ARP_INCOMPLETE_TTL_MS 3000ULL
 
+// Desplazamiento del reloj SOLO para el aging de ARP. Lo usan los tests para
+// simular el paso del tiempo sin tocar tick_count: tick_count es el reloj de
+// todo el sistema (deadlines de poll/wait, TCP...) y los tests corren en
+// paralelo con el userland. Retroceder tick_count tras un salto dejaba a
+// tareas con deadlines ~3 min en el futuro (terminal y sh "colgadas").
+extern volatile uint64_t g_arp_time_skew;
+
 enum {
   ARP_ENTRY_FREE = 0,
   ARP_ENTRY_INCOMPLETE,

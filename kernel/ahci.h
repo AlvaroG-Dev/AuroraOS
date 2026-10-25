@@ -253,6 +253,9 @@ extern struct driver ahci_driver;
 
 void ahci_dump(void);
 int ahci_disk_count(void);
+
+// 1 si /usr/lib/aur/ahci.user existe: el AHCI lo gestiona ahci.aur (Fase 5.2).
+int ahci_user_mode(void);
 void ahci_poll_ports(void);
 
 #endif

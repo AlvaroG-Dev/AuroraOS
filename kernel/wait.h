@@ -16,6 +16,9 @@ typedef struct wait_queue_entry {
 
 struct wait_queue_sub {
   struct wait_queue *target;
+  // Opcional: contador que se incrementa (atómico) en cada despertar de la wq
+  // observada. Permite a epoll implementar EPOLLET por entrada.
+  uint32_t *seq;
   struct wait_queue_sub *next;
 };
 typedef struct wait_queue_sub wait_queue_sub_t;
@@ -76,5 +79,11 @@ void wait_queue_remove_locked(wait_queue_t *wq, struct task *t);
 // `sub` también. Devuelve 0 o negativo. `target != sub`.
 int wait_queue_subscribe(wait_queue_t *target, wait_queue_t *sub);
 void wait_queue_unsubscribe(wait_queue_t *target, wait_queue_t *sub);
+// Variantes con contador de despertares por suscripción. La baja se hace por
+// (sub, seq), de modo que varias entradas epoll sobre la misma wq no se pisan.
+int wait_queue_subscribe_seq(wait_queue_t *target, wait_queue_t *sub,
+                             uint32_t *seq);
+void wait_queue_unsubscribe_seq(wait_queue_t *target, wait_queue_t *sub,
+                                uint32_t *seq);
 
 #endif

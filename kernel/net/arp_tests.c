@@ -243,8 +243,9 @@ static void test_arp_aging(void) {
   TEST_ASSERT_EQ(arp_resolve(&g_nif, IP_PEER, mac), 0);
 
   // Avanzamos el reloj del kernel artificialmente.
-  uint64_t saved = tick_count;
-  tick_count = saved + ARP_REACHABLE_TTL_MS + 1;
+  // Avanza solo el reloj de ARP (g_arp_time_skew): NO tocar tick_count, que es
+  // el reloj global y los tests corren en paralelo con el userland.
+  g_arp_time_skew = ARP_REACHABLE_TTL_MS + 1;
   arp_timer_tick();
 
   // Sigue siendo válida la MAC (STALE también es usable).
@@ -253,7 +254,7 @@ static void test_arp_aging(void) {
   TEST_ASSERT(memcmp(mac, peer_mac, 6) == 0, "STALE perdió la MAC");
 
   // Avanzamos más: debe expirar.
-  tick_count = saved + ARP_REACHABLE_TTL_MS + ARP_STALE_TTL_MS + 1;
+  g_arp_time_skew = ARP_REACHABLE_TTL_MS + ARP_STALE_TTL_MS + 1;
   arp_timer_tick();
 
   // Ahora resolve debe volver a armar INCOMPLETE (nueva request).
@@ -261,7 +262,7 @@ static void test_arp_aging(void) {
   TEST_ASSERT_EQ(arp_resolve(&g_nif, IP_PEER, mac), -EAGAIN);
   TEST_ASSERT_EQ(g_tx_count, 1);
 
-  tick_count = saved;
+  g_arp_time_skew = 0;
 
   mock_teardown();
 }

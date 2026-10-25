@@ -40,6 +40,7 @@
 #define AUR_CAP_BUS_MATCH    (1u << 4)
 #define AUR_CAP_BLOCK_DEVICE (1u << 5)
 #define AUR_CAP_NETIF        (1u << 6)
+#define AUR_CAP_USB_HCD      (1u << 7)
 
 #define AUR_BUS_NONE 0
 #define AUR_BUS_PCI  1
@@ -340,6 +341,7 @@ static int cmd_info(const char *path) {
     CAP(AUR_CAP_BUS_MATCH, "BUS");
     CAP(AUR_CAP_BLOCK_DEVICE, "BLK");
     CAP(AUR_CAP_NETIF, "NET");
+    CAP(AUR_CAP_USB_HCD, "USB");
 #undef CAP
     printf(")");
   }
