@@ -73,7 +73,9 @@ rect_t dock_get_panel_rect(void) { return D.panel; }
 rect_t dock_get_damage_rect(void) { return D.damage; }
 
 #define TIP_BLUR 6
-#define TIP_H 26
+#define TIP_H 28
+#define DOCK_GLASS_SAT 215 /* menos saturado que el cristal de los menus: el Dock
+                              se parece mas a un panel esmerilado neutro */
 
 int dock_glass_rects(glass_rect_t *out, int max) {
   int n = 0;
@@ -305,9 +307,6 @@ int dock_update(int dt_ms) {
     rect_t u = D.panel;
     for (int i = 0; i < n; i++)
       u = rect_bounding_box(u, rect_grow(D.slots[i].r, 2));
-    /* El resplandor de aurora cae bajo el panel hasta el borde de pantalla. */
-    u = rect_bounding_box(u, (rect_t){D.panel.x, D.panel.y, D.panel.w,
-                                      D.panel.h + DOCK_MARGIN_BOTTOM});
     if (D.tip.w > 0)
       u = rect_bounding_box(u, rect_grow(D.tip, 2));
     D.damage = rect_clip(u, (rect_t){0, 0, D.sw, D.sh});
@@ -373,90 +372,37 @@ static uint32_t lighten(uint32_t c, int amt) {
   return 0xFF000000 | (uint32_t)(r << 16) | (uint32_t)(g << 8) | (uint32_t)b;
 }
 
-/* Degradado de tres paradas de la aurora: verde azulado -> azul -> violeta.
- * t en 0..256. Devuelve RGB sin alfa. */
-static uint32_t aurora_grad(int t) {
-  const uint32_t A = 0x3DF2C0, B = 0x4DA3FF, C = 0xB07CFF;
-  uint32_t from = t < 128 ? A : B, to = t < 128 ? B : C;
-  int u = (t < 128 ? t : t - 128) * 2; /* 0..256 */
-  if (u > 256)
-    u = 256;
-  uint32_t r = (((from >> 16) & 0xFF) * (256 - u) + ((to >> 16) & 0xFF) * u) >> 8;
-  uint32_t g = (((from >> 8) & 0xFF) * (256 - u) + ((to >> 8) & 0xFF) * u) >> 8;
-  uint32_t b = ((from & 0xFF) * (256 - u) + (to & 0xFF) * u) >> 8;
-  return (r << 16) | (g << 8) | b;
-}
-
-/* "Cinta" de aurora: una franja de luz difusa en diagonal que cruza la
- * baldosa de abajo-izquierda a arriba-derecha y cambia de verde a violeta. Es
- * lo que distingue los iconos de Aurora de cualquier otro sistema. Solo toca
- * píxeles ya cubiertos por la baldosa (respeta bordes suavizados). */
-static void aurora_ribbon(uint32_t *icon, int S) {
-  for (int y = 0; y < S; y++) {
-    for (int x = 0; x < S; x++) {
-      uint32_t px = icon[y * S + x];
-      uint32_t a = px >> 24;
-      if (!a)
-        continue;
-      /* distancia a la recta x + 0.85 y = c (en 1/8 px aprox) */
-      int d = x + (y * 218 >> 8) - (S * 3 / 4);
-      if (d < 0)
-        d = -d;
-      if (d >= 22)
-        continue;
-      int ba = 0x78 * (22 - d) / 22;
-      ba = ba * ba / 0x78; /* perfil suave */
-      int t = (x * 256) / S;
-      uint32_t nb = blend_pixel_fast(((uint32_t)ba << 24) | aurora_grad(t),
-                                     px | 0xFF000000);
-      icon[y * S + x] = (nb & 0x00FFFFFF) | (a << 24);
-    }
-  }
-}
-
+/* Baldosa por defecto (apps sin icono propio): cuadrado redondeado de color
+ * liso con un degradado vertical muy suave (más claro arriba, más oscuro
+ * abajo) y la inicial o el símbolo en blanco. */
 static void make_fallback_tile(taskbar_item_t *it) {
   const int S = DOCK_ICON_SRC;
   rect_t clip = {0, 0, S, S};
   uint32_t base = it->icon_color ? (it->icon_color | 0xFF000000) : AURORA_ACCENT;
   if (base == 0xFF0078D4 || base == 0xFF60CDFF)
-    base = AURORA_ACCENT; /* colores heredados de Windows -> acento Aurora */
+    base = AURORA_ACCENT; /* colores heredados de Windows -> acento de sistema */
 
-  rect_t tile = {2, 2, S - 4, S - 4};
-  gfx_fill_rounded_rect(it->dock_icon, S, clip, tile, 16, base);
-  /* Brillo superior y sombra inferior: filas con alfa (el degradado de gfx
-   * ignora el alfa y tiene esquinas sin suavizar). El relleno AA de arriba
-   * define el contorno; estas capas solo viven dentro de él. */
-  for (int dy = 4; dy < S - 6; dy++) {
-    int t = (dy * 256) / S; /* 0..256 */
-    uint32_t col;
-    if (t < 128)
-      col = ((uint32_t)(0x46 * (128 - t) / 128) << 24) | 0x00FFFFFF;
-    else /* sombra inferior teñida de índigo, no negra: firma de Aurora */
-      col = ((uint32_t)(0x50 * (t - 128) / 128) << 24) | 0x0020104A;
-    int inset = 0;
-    if (dy < 18) {
-      int dd = 18 - dy, v = 16 * 16 - dd * dd, s = 0;
-      if (v > 0)
-        while ((s + 1) * (s + 1) <= v)
-          s++;
-      inset = 16 - s + 2;
-    } else if (dy > S - 20) {
-      int dd = dy - (S - 20), v = 16 * 16 - dd * dd, s = 0;
-      if (v > 0)
-        while ((s + 1) * (s + 1) <= v)
-          s++;
-      inset = 16 - s + 2;
+  const int inset = S / 24, radius = S * 9 / 40;
+  rect_t tile = {inset, inset, S - 2 * inset, S - 2 * inset};
+  gfx_fill_rounded_rect(it->dock_icon, S, clip, tile, radius, base);
+  /* Degradado vertical sobre los píxeles de la baldosa (respeta el borde AA). */
+  for (int y = 0; y < S; y++) {
+    int t = y * 256 / S; /* 0 arriba .. 256 abajo */
+    uint32_t over = t < 128 ? (((uint32_t)(0x2C * (128 - t) / 128) << 24) | 0x00FFFFFF)
+                            : ((uint32_t)(0x2C * (t - 128) / 128) << 24);
+    for (int x = 0; x < S; x++) {
+      uint32_t px = it->dock_icon[y * S + x];
+      uint32_t a = px >> 24;
+      if (!a)
+        continue;
+      uint32_t nb = blend_pixel_fast(over, px | 0xFF000000);
+      it->dock_icon[y * S + x] = (nb & 0x00FFFFFF) | (a << 24);
     }
-    inset += 1;
-    gfx_blend_rect(it->dock_icon, S, clip,
-                   (rect_t){2 + inset, dy, S - 4 - 2 * inset, 1}, col);
   }
-  gfx_draw_rounded_border(it->dock_icon, S, clip, tile, 16, 0x30FFFFFF);
-  aurora_ribbon(it->dock_icon, S);
+  gfx_draw_rounded_border(it->dock_icon, S, clip, tile, radius, 0x24FFFFFF);
 
   /* Símbolo: se dibuja a 24x24 y se amplía con bilineal para que quede liso. */
-  static uint32_t tmp[24 * 24]; /* solo hilo del compositor; 2,3 KB fuera de
-                                   la pila del kernel */
+  static uint32_t tmp[24 * 24]; /* solo hilo del compositor */
   for (int i = 0; i < 24 * 24; i++)
     tmp[i] = 0;
   char sym[8];
@@ -475,8 +421,9 @@ static void make_fallback_tile(taskbar_item_t *it) {
   gfx_draw_string(tmp, 24, tclip, (24 - tw) / 2,
                   gfx_text_center_y(FONT_ID_MAIN_BOLD, 0, 24), sym, 0xFFFFFFFF,
                   FONT_ID_MAIN_BOLD);
-  gfx_blit_scaled(it->dock_icon, S, clip, (S - 48) / 2, (S - 48) / 2, 48, 48,
-                  tmp, 24, 24, GFX_FILTER_BILINEAR);
+  int g = S * 2 / 3;
+  gfx_blit_scaled(it->dock_icon, S, clip, (S - g) / 2, (S - g) / 2, g, g, tmp,
+                  24, 24, GFX_FILTER_BILINEAR);
 }
 
 /* Convierte el icono (alfa recto) en el que se dibuja: con una sombra suave
@@ -561,38 +508,9 @@ void dock_render(uint32_t *dst, int stride, rect_t clip) {
 
   rect_t p = D.panel;
 
-  /* Resplandor de aurora bajo el Dock: luz verde azulada -> violeta que
-   * "cae" sobre el escritorio, más intensa hacia el centro. Distingue el Dock
-   * de Aurora de cualquier otro. */
-  {
-    int gx0 = p.x + 10, gx1 = p.x + p.w - 10;
-    for (int y = 0; y < DOCK_MARGIN_BOTTOM + 3; y++) {
-      int fall = 0x34 - (y * 0x34) / (DOCK_MARGIN_BOTTOM + 3);
-      for (int x = gx0; x < gx1; x++) {
-        int t = (x - gx0) * 256 / (gx1 - gx0);
-        int e = t < 128 ? t : 256 - t;       /* 0..128 */
-        int a = fall * (64 + e) / 192;
-        gfx_blend_rect(dst, stride, clip, (rect_t){x, p.y + p.h - 3 + y, 1, 1},
-                       ((uint32_t)a << 24) | aurora_grad(t));
-      }
-    }
-  }
-
   /* Cristal líquido: fondo desenfocado y saturado + tinte + borde especular. */
   gfx_glass_panel(dst, stride, clip, p, DOCK_RADIUS, AURORA_DOCK_TINT,
-                  AURORA_GLASS_BLUR, AURORA_GLASS_SAT, D.scratch,
-                  D.scratch_px);
-
-  /* Filo de luz de aurora en el borde superior del cristal. */
-  {
-    int x0 = p.x + DOCK_RADIUS, x1 = p.x + p.w - DOCK_RADIUS;
-    for (int x = x0; x < x1; x++) {
-      int t = (x1 > x0) ? (x - x0) * 256 / (x1 - x0) : 0;
-      int edge = t < 40 ? t : (t > 216 ? 256 - t : 40); /* se apaga en los extremos */
-      gfx_blend_rect(dst, stride, clip, (rect_t){x, p.y + 1, 1, 1},
-                     ((uint32_t)(0x5A * edge / 40) << 24) | aurora_grad(t));
-    }
-  }
+                  AURORA_GLASS_BLUR, DOCK_GLASS_SAT, D.scratch, D.scratch_px);
 
   /* Separador entre lanzadores fijados y ventanas sueltas. */
   if (D.sep_x >= 0) {
@@ -601,7 +519,7 @@ void dock_render(uint32_t *dst, int stride, rect_t clip) {
       int t = (y - y0) * 256 / (y1 - y0);
       int e = t < 128 ? t : 256 - t;
       gfx_blend_rect(dst, stride, clip, (rect_t){D.sep_x, y, 1, 1},
-                     ((uint32_t)(0x46 * e / 128) << 24) | aurora_grad(128));
+                     ((uint32_t)(0x4A * e / 128) << 24) | 0x00FFFFFF);
     }
   }
 
@@ -621,30 +539,22 @@ void dock_render(uint32_t *dst, int stride, rect_t clip) {
       gfx_blit_scaled_premul(dst, stride, clip, r.x, r.y, r.w, r.h,
                              silhouette(it, 0x60), S, S);
 
-    /* Indicador de app abierta: cápsula con el degradado de la aurora (más
-     * larga y con halo si es la activa). Un lanzador sin ventanas no lleva. */
+    /* Indicador de app abierta: punto blanco bajo el icono (más brillante si
+     * es la activa; tenue mientras un lanzador se está abriendo). Un lanzador
+     * sin ventanas no lleva punto. */
     if (!it->pinned || it->win_count > 0 || it->launching > 0) {
-      int w = it->is_active ? 20 : 10;
+      uint32_t col = it->is_active ? 0xF2FFFFFF : 0x80FFFFFF;
       if (it->pinned && it->win_count == 0)
-        w = 6; /* abriéndose */
-      uint32_t alpha = it->is_active ? 0xFF : (it->win_count == 0 && it->pinned ? 0x78 : 0xB0);
-      int cx = r.x + r.w / 2, py = p.y + p.h - 7;
-      if (it->is_active)
-        gfx_blend_rect(dst, stride, clip, (rect_t){cx - w / 2 - 4, py + 3, w + 8, 2},
-                       0x22000000 | aurora_grad(128));
-      for (int c = 0; c < w; c++) {
-        int h = (c == 0 || c == w - 1) ? 1 : 3;
-        gfx_blend_rect(dst, stride, clip,
-                       (rect_t){cx - w / 2 + c, py + (3 - h) / 2, 1, h},
-                       (alpha << 24) | aurora_grad(c * 256 / (w > 1 ? w - 1 : 1)));
-      }
+        col = 0x50FFFFFF;
+      gfx_fill_circle(dst, stride, clip, (float)r.x + r.w / 2.0f,
+                      (float)(p.y + p.h) - 5.0f, 2.0f, col);
     }
   }
 
   /* Tooltip sobre el icono bajo el cursor (geometría de dock_update). */
   if (D.tip.w > 0 && D.hover >= 0) {
     rect_t tr = D.tip;
-    gfx_glass_panel(dst, stride, clip, tr, tr.h / 2, AURORA_TOOLTIP_TINT,
+    gfx_glass_panel(dst, stride, clip, tr, 9, AURORA_TOOLTIP_TINT,
                     TIP_BLUR, 280, D.scratch, D.scratch_px);
     gfx_draw_string(dst, stride, clip, tr.x + 11,
                     gfx_text_center_y(FONT_ID_MAIN_REGULAR, tr.y, tr.h),

@@ -770,6 +770,10 @@ static void do_dock_pin(const comp_cmd_t *c) {
     strncpy(it->app_id, c->app_id, sizeof(it->app_id) - 1);
   }
   it->launch_id = (uint32_t)c->value;
+  if (c->node) {
+    it->icon_bmp_node = c->node;
+    it->dock_icon_state = 0; /* regenerar con el icono real */
+  }
   dock_invalidate_layout();
 }
 
@@ -888,9 +892,10 @@ void compositor_set_maximized(window_t *win, int maximized) {
   cmd_post(&c);
 }
 void compositor_dock_pin(const char *name, const char *app_id,
-                         const char *symbol, uint32_t color,
-                         uint32_t launch_id) {
-  comp_cmd_t c = {.type = CMD_DOCK_PIN, .color = color, .value = (int)launch_id};
+                         const char *symbol, uint32_t color, uint32_t launch_id,
+                         tar_node_t *icon) {
+  comp_cmd_t c = {.type = CMD_DOCK_PIN, .node = icon, .color = color,
+                  .value = (int)launch_id};
   strncpy(c.title, name, sizeof(c.title) - 1);
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
   strncpy(c.symbol, symbol, sizeof(c.symbol) - 1);

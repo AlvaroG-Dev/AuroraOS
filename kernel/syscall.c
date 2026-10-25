@@ -6934,13 +6934,13 @@ static int64_t a_win_set_state(uint64_t win_id, uint64_t state, uint64_t a3,
 }
 
 // Fija un lanzador en el Dock. a1 -> { uint32_t launch_id, color; char name[32],
-// symbol[8], app_id[48]; }
+// symbol[8], app_id[48], icon[64]; }
 static int64_t a_dock_pin(uint64_t req, uint64_t a2, uint64_t a3, uint64_t a4,
                           uint64_t a5) {
   (void)a2; (void)a3; (void)a4; (void)a5;
   struct {
     uint32_t launch_id, color;
-    char name[32], symbol[8], app_id[48];
+    char name[32], symbol[8], app_id[48], icon[64];
   } r;
   if (!process_current())
     return -EFAULT;
@@ -6949,9 +6949,13 @@ static int64_t a_dock_pin(uint64_t req, uint64_t a2, uint64_t a3, uint64_t a4,
   r.name[sizeof(r.name) - 1] = 0;
   r.symbol[sizeof(r.symbol) - 1] = 0;
   r.app_id[sizeof(r.app_id) - 1] = 0;
+  r.icon[sizeof(r.icon) - 1] = 0;
   if (!r.app_id[0] || !r.launch_id)
     return -EINVAL;
-  compositor_dock_pin(r.name, r.app_id, r.symbol, r.color, r.launch_id);
+  // Icono real (BMP del VFS, p. ej. /system/icons/app-foot.bmp); si no existe
+  // el Dock usa una baldosa con el simbolo.
+  tar_node_t *icon = r.icon[0] ? winsrv_load_icon_node(r.icon) : NULL;
+  compositor_dock_pin(r.name, r.app_id, r.symbol, r.color, r.launch_id, icon);
   return 0;
 }
 

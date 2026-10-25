@@ -553,6 +553,28 @@ void winsrv_cleanup_task(task_t *owner) {
   }
 }
 
+// Lee un BMP del VFS y lo deja en un nodo que no se libera (los iconos del
+// Dock viven toda la sesion). NULL si no existe o no se puede leer.
+tar_node_t *winsrv_load_icon_node(const char *path) {
+  void *buf = NULL;
+  size_t size = 0;
+  if (!path || !path[0] || vfs_read_all(path, &buf, &size) != 0)
+    return NULL;
+  tar_node_t *node = (tar_node_t *)kzalloc(sizeof(tar_node_t));
+  if (!node) {
+    kfree(buf);
+    return NULL;
+  }
+  node->data = (uint8_t *)buf;
+  node->size = size;
+  size_t plen = strlen(path);
+  if (plen >= sizeof(node->name))
+    plen = sizeof(node->name) - 1;
+  memcpy(node->name, path, plen);
+  node->name[plen] = '\0';
+  return node;
+}
+
 int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
   if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || !path)
     return -1;

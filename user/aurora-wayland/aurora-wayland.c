@@ -1795,7 +1795,7 @@ static int keymap_init(void) {
 
 // ---------------------------------------------------------------------------
 // Lanzadores del Dock: /usr/share/aurora/dock.conf
-//   Nombre | app_id | simbolo | color RRGGBB | orden de arranque (ruta args...)
+//   Nombre | app_id | simbolo | color RRGGBB | icono BMP | orden (ruta args...)
 // aurora-wayland los fija en el Dock; cuando el usuario pulsa uno sin ventanas
 // abiertas, el compositor encola una peticion y aqui se lanza el proceso (con
 // WAYLAND_DISPLAY/XDG_RUNTIME_DIR ya preparados) y se recoge al terminar.
@@ -1803,7 +1803,7 @@ static int keymap_init(void) {
 #define DOCK_CONF_PATH "/usr/share/aurora/dock.conf"
 #define MAX_LAUNCHERS 16
 static struct {
-  char name[32], app_id[48], symbol[8], cmd[192];
+  char name[32], app_id[48], symbol[8], icon[64], cmd[192];
   uint32_t color;
 } g_launchers[MAX_LAUNCHERS];
 static int g_nlaunchers;
@@ -1827,24 +1827,25 @@ static void launchers_load(void) {
     char *h = strchr(line, '#');
     if (h)
       *h = 0;
-    char *fld[5];
+    char *fld[6];
     int n = 0;
-    for (char *p = line; n < 5;) {
+    for (char *p = line; n < 6;) {
       fld[n++] = p;
-      char *bar = n < 5 ? strchr(p, '|') : NULL;
+      char *bar = n < 6 ? strchr(p, '|') : NULL;
       if (!bar)
         break;
       *bar = 0;
       p = bar + 1;
     }
-    if (n < 5)
+    if (n < 6)
       continue;
     int i = g_nlaunchers;
     snprintf(g_launchers[i].name, sizeof(g_launchers[i].name), "%s", trim(fld[0]));
     snprintf(g_launchers[i].app_id, sizeof(g_launchers[i].app_id), "%s", trim(fld[1]));
     snprintf(g_launchers[i].symbol, sizeof(g_launchers[i].symbol), "%s", trim(fld[2]));
     g_launchers[i].color = (uint32_t)strtoul(trim(fld[3]), NULL, 16) | 0xFF000000u;
-    snprintf(g_launchers[i].cmd, sizeof(g_launchers[i].cmd), "%s", trim(fld[4]));
+    snprintf(g_launchers[i].icon, sizeof(g_launchers[i].icon), "%s", trim(fld[4]));
+    snprintf(g_launchers[i].cmd, sizeof(g_launchers[i].cmd), "%s", trim(fld[5]));
     if (g_launchers[i].app_id[0] && g_launchers[i].cmd[0])
       g_nlaunchers++;
   }
@@ -1855,7 +1856,7 @@ static void launchers_pin(void) {
   for (int i = 0; i < g_nlaunchers; i++) {
     struct {
       uint32_t launch_id, color;
-      char name[32], symbol[8], app_id[48];
+      char name[32], symbol[8], app_id[48], icon[64];
     } r;
     memset(&r, 0, sizeof(r));
     r.launch_id = (uint32_t)i + 1;
@@ -1863,6 +1864,7 @@ static void launchers_pin(void) {
     snprintf(r.name, sizeof(r.name), "%s", g_launchers[i].name);
     snprintf(r.symbol, sizeof(r.symbol), "%s", g_launchers[i].symbol);
     snprintf(r.app_id, sizeof(r.app_id), "%s", g_launchers[i].app_id);
+    snprintf(r.icon, sizeof(r.icon), "%s", g_launchers[i].icon);
     syscall(ASYS_DOCK_PIN, &r);
   }
   fprintf(stderr, "[aurora-wayland] %d lanzador(es) fijados en el Dock\n", g_nlaunchers);

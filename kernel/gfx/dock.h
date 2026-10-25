@@ -8,20 +8,20 @@
 #include "taskbar.h"
 #include <stdint.h>
 
-#define DOCK_ICON_BASE 48   /* tamaño de reposo del icono */
-#define DOCK_ICON_MAX 60    /* tamaño máximo con magnificación (+25 %) */
-#define DOCK_ICON_SRC 72    /* lado de la caché de icono (ARGB) */
+#define DOCK_ICON_BASE 56   /* tamaño de reposo del icono */
+#define DOCK_ICON_MAX 84    /* tamaño máximo con magnificación (+50 %) */
+#define DOCK_ICON_SRC 96    /* lado de la caché de icono (ARGB) */
 /* Proporciones: el icono lleva ~2/72 de margen transparente propio, así que
  * el hueco visible entre iconos es DOCK_GAP + ~3 px. El relleno lateral es
  * parecido al superior y el inferior deja sitio al indicador de app abierta. */
-#define DOCK_PAD_X 10
-#define DOCK_PAD_TOP 7
-#define DOCK_PAD_BOTTOM 11
-#define DOCK_GAP 4
-#define DOCK_MARGIN_BOTTOM 7
-#define DOCK_RADIUS 20
+#define DOCK_PAD_X 12
+#define DOCK_PAD_TOP 8
+#define DOCK_PAD_BOTTOM 14
+#define DOCK_GAP 6
+#define DOCK_MARGIN_BOTTOM 8
+#define DOCK_RADIUS 24
 #define DOCK_HEIGHT (DOCK_PAD_TOP + DOCK_ICON_BASE + DOCK_PAD_BOTTOM)
-#define DOCK_HEADROOM 84    /* espacio sobre el panel: iconos ampliados + tooltip */
+#define DOCK_HEADROOM 110    /* espacio sobre el panel: iconos ampliados + tooltip */
 #define DOCK_MAX_ITEMS 32
 #define DOCK_SEP_GAP 14     /* hueco extra entre lanzadores fijados y ventanas sueltas */
 
