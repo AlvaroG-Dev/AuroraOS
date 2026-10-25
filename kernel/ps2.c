@@ -129,6 +129,7 @@ static void ps2_mouse_irq(void) { ps2_irq_common(1); }
 // ===========================================================================
 static int mouse_cycle = 0;
 static uint8_t mouse_packet[3];
+static int mouse_has_wheel; // IntelliMouse (ID 3): paquetes de 4 bytes
 
 // ===========================================================================
 // Traducción scancode → ASCII
@@ -332,6 +333,11 @@ static void process_keyboard_byte(uint8_t sc) {
   tty_receive_char(tty, c);
 }
 
+void ps2_set_mouse_wheel(int on) {
+  mouse_has_wheel = on;
+  mouse_cycle = 0;
+}
+
 static void process_mouse_byte(uint8_t data) {
   switch (mouse_cycle) {
   case 0:
@@ -344,8 +350,21 @@ static void process_mouse_byte(uint8_t data) {
     mouse_packet[1] = data;
     mouse_cycle = 2;
     break;
-  case 2: {
+  case 2:
     mouse_packet[2] = data;
+    if (mouse_has_wheel) {
+      mouse_cycle = 3; // falta el byte Z
+      break;
+    }
+    /* fallthrough */
+  case 3: {
+    int wheel = 0;
+    if (mouse_cycle == 3) {
+      int z = data & 0x0F; // desplazamiento en los 4 bits bajos, con signo
+      if (z & 0x08)
+        z -= 16;
+      wheel = -z; // PS/2: + = hacia el usuario; evdev: + = hacia arriba
+    }
     mouse_cycle = 0;
 
     if (mouse_packet[0] & 0xC0)
@@ -368,6 +387,8 @@ static void process_mouse_byte(uint8_t data) {
     ev.timestamp = (uint32_t)tick_count;
     input_push(&ev);
     evdev_mouse_report(raw_x, raw_y, btn);
+    if (wheel)
+      evdev_mouse_wheel(wheel, 0);
     break;
   }
   }
@@ -429,6 +450,40 @@ static int ps2_init_impl(void) {
     outb(0x64, 0x60);
     wait_input_buffer_empty();
     outb(0x60, cmd);
+  }
+
+  // Secuencia magica del IntelliMouse (sample rate 200, 100, 80) y lectura del
+  // ID: 3 = el raton tiene rueda y envia paquetes de 4 bytes.
+  {
+    static const uint8_t magic[] = {0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2};
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(magic) && ok; i++) {
+      wait_input_buffer_empty();
+      outb(0x64, 0xD4);
+      wait_input_buffer_empty();
+      outb(0x60, magic[i]);
+      ok = 0;
+      for (int t = 0; t < 10000; t++) {
+        uint8_t s = inb(0x64);
+        if ((s & 0x01) && (s & 0x20)) {
+          ok = inb(0x60) == 0xFA;
+          break;
+        }
+        io_wait();
+      }
+    }
+    if (ok) {
+      for (int t = 0; t < 10000; t++) {
+        uint8_t s = inb(0x64);
+        if ((s & 0x01) && (s & 0x20)) {
+          mouse_has_wheel = inb(0x60) == 3;
+          break;
+        }
+        io_wait();
+      }
+    }
+    if (mouse_has_wheel)
+      LOG_INFO("[PS2] IntelliMouse detectado (rueda)");
   }
 
   int retries = 3, ack_ok = 0;

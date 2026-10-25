@@ -285,6 +285,7 @@ _Static_assert(sizeof(struct aur_usb_done) == 40,
 //   INPUTP_PORT_IN  (struct aur_input_port*)  inb(port) -> .value
 //   INPUTP_PORT_OUT (struct aur_input_port*)  outb(port, value)
 //   INPUTP_FEED     (struct aur_input_feed*)  entrega bytes crudos
+//   INPUTP_MOUSE_WHEEL (arg = 0/1)  el raton es un IntelliMouse (paquetes de 4)
 //
 // Si el proceso cierra el fd (o muere) el kernel se queda sin driver de
 // entrada hasta que el supervisor relance el .aur.
@@ -292,6 +293,7 @@ _Static_assert(sizeof(struct aur_usb_done) == 40,
 #define INPUTP_PORT_IN 0x600
 #define INPUTP_PORT_OUT 0x601
 #define INPUTP_FEED 0x602
+#define INPUTP_MOUSE_WHEEL 0x603
 
 #define AUR_INPUT_KBD 0   // aur_input_feed.kind: bytes de teclado (Set 1)
 #define AUR_INPUT_MOUSE 1 // bytes del ratón (paquetes de 3)

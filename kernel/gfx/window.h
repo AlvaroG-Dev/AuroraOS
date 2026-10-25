@@ -12,6 +12,10 @@
 #define WIN_FLAGS_MOVABLE (1 << 3)
 #define WIN_FLAGS_HIDDEN (1 << 4)
 #define WIN_FLAGS_FIXED_SIZE (1 << 5) /* sin redimensionar ni Zoom */
+#define WIN_FLAGS_RAW_INPUT (1 << 6)  /* el cliente quiere WINSRV_EV_PTR */
+/* Menu/popup de un cliente: sin Dock, sin tomar el foco ni al crearse ni al
+ * hacer clic (el cliente sigue recibiendo el puntero). */
+#define WIN_FLAGS_POPUP (1 << 7)
 
 #define ALIGN_LEFT (1 << 0)
 #define ALIGN_RIGHT (1 << 1)
@@ -129,6 +133,7 @@ typedef struct window {
 
   /* Maximizado / restauración */
   int maximized;
+  int pending_max; // 0 = ninguna, 1 = maximizar, 2 = restaurar al acabar la anim
   int restore_x, restore_y, restore_w, restore_h;
 } window_t;
 

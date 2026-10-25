@@ -23,3 +23,4 @@ for s in "$ROOT"/tests/wayland/guest/*.sh; do
 done
 gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/drm_test" "$ROOT/tests/wayland/drm_test.c"
 echo "OK: precompiled/usr/bin/drm_test"
+bash "$ROOT/scripts/build-aurora-wayland.sh"

@@ -6,6 +6,7 @@
 // distinguir de un vistazo a qué ABI pertenecen.
 
 #include "syscall.h"
+#include "smp_boot.h"
 #include "cpu.h"
 #include "epoll.h"
 #include "kmod_sys.h"
@@ -6310,9 +6311,14 @@ static int64_t k_sched_getaffinity(uint64_t pid, uint64_t cpusetsize,
     return -EINVAL;
   if (!access_ok((void *)mask_ptr, 8))
     return -EFAULT;
-  uint64_t mask = 0;
-  for (int i = 0; i < MAX_CPUS; i++)
-    mask |= (1ULL << i);
+  // Solo las CPUs en linea: las apps dimensionan sus pools de hilos con esto
+  // (p. ej. foot crea un hilo de render por CPU).
+  int ncpu = smp_online_cpus();
+  if (ncpu < 1)
+    ncpu = 1;
+  if (ncpu > 64)
+    ncpu = 64;
+  uint64_t mask = (ncpu >= 64) ? ~0ULL : ((1ULL << ncpu) - 1);
   if (copy_to_user((void *)mask_ptr, &mask, 8) < 0)
     return -EFAULT;
   return 8;
@@ -6873,6 +6879,63 @@ static int64_t a_win_set_icon(uint64_t win_id, uint64_t path, uint64_t a3,
   return winsrv_set_icon(proc->task, (int)win_id, p);
 }
 
+static int64_t a_win_set_raw_input(uint64_t win_id, uint64_t enable,
+                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  return winsrv_set_raw_input(proc->task, (int)win_id, (int)enable);
+}
+
+static int64_t a_win_set_title(uint64_t win_id, uint64_t title, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  char t[64];
+  long n = strncpy_from_user(t, (const char *)title, sizeof(t));
+  if (n < 0)
+    return -EFAULT;
+  t[sizeof(t) - 1] = 0;
+  return winsrv_set_title(proc->task, (int)win_id, t);
+}
+
+static int64_t a_win_set_state(uint64_t win_id, uint64_t state, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  return winsrv_set_state(proc->task, (int)win_id, (int)state);
+}
+
+// a5 -> { uint32_t flags; char title[64]; }
+static int64_t a_win_create_ex(uint64_t a1, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  struct {
+    uint32_t flags;
+    char title[64];
+  } req;
+  if (copy_from_user(&req, (const void *)a5, sizeof(req)) < 0)
+    return -EFAULT;
+  req.title[sizeof(req.title) - 1] = 0;
+  // winsrv copia el titulo con strncpy_from_user: se le pasa un puntero de
+  // usuario valido (el mismo del cliente, a 4 bytes del inicio).
+  return winsrv_create_window_ex(proc->task, (int)a1, (int)a2, (int)a3,
+                                 (int)a4, (const char *)(a5 + 4), req.flags);
+}
+
 // ---------- IPC ----------
 static int64_t a_ipc_send(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                           uint64_t a5) {
@@ -7220,6 +7283,11 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_WIN_REGISTER_CONSOLE -
         ASYS_BASE] = {a_win_register_console, "asys_win_register_console"},
     [ASYS_WIN_SET_ICON - ASYS_BASE] = {a_win_set_icon, "asys_win_set_icon"},
+    [ASYS_WIN_SET_RAW_INPUT -
+        ASYS_BASE] = {a_win_set_raw_input, "asys_win_set_raw_input"},
+    [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},
+    [ASYS_WIN_SET_TITLE - ASYS_BASE] = {a_win_set_title, "asys_win_set_title"},
+    [ASYS_WIN_SET_STATE - ASYS_BASE] = {a_win_set_state, "asys_win_set_state"},
     [ASYS_IPC_SEND - ASYS_BASE] = {a_ipc_send, "asys_ipc_send"},
     [ASYS_IPC_RECV - ASYS_BASE] = {a_ipc_recv, "asys_ipc_recv"},
     [ASYS_GET_SERVICE_ID -

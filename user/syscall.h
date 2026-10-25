@@ -104,6 +104,13 @@
 #define ASYS_WIN_POLL_EVENT (ASYS_BASE + 0x13)
 #define ASYS_WIN_REGISTER_CONSOLE (ASYS_BASE + 0x14)
 #define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
+#define ASYS_WIN_SET_RAW_INPUT (ASYS_BASE + 0x16)
+#define ASYS_WIN_CREATE_EX (ASYS_BASE + 0x17)
+#define ASYS_WIN_SET_TITLE (ASYS_BASE + 0x18)
+#define ASYS_WIN_SET_STATE (ASYS_BASE + 0x19)
+#define WINSRV_STATE_MINIMIZE 1
+#define WINSRV_STATE_MAXIMIZE 2
+#define WINSRV_STATE_RESTORE 3
 #define ASYS_IPC_SEND (ASYS_BASE + 0x20)
 #define ASYS_IPC_RECV (ASYS_BASE + 0x21)
 #define ASYS_GET_SERVICE_ID (ASYS_BASE + 0x22)
@@ -376,6 +383,18 @@ static inline int sys_win_register_console(int win_id) {
 static inline int sys_win_set_icon(int win_id, const char *path) {
   return (int)syscall(ASYS_WIN_SET_ICON, (uint64_t)win_id, (uint64_t)path, 0, 0,
                       0);
+}
+static inline int sys_win_set_raw_input(int win_id, int enable) {
+  return (int)syscall(ASYS_WIN_SET_RAW_INPUT, (uint64_t)win_id,
+                      (uint64_t)enable, 0, 0, 0);
+}
+static inline int sys_win_set_title(int win_id, const char *title) {
+  return (int)syscall(ASYS_WIN_SET_TITLE, (uint64_t)win_id, (uint64_t)title, 0,
+                      0, 0);
+}
+static inline int sys_win_set_state(int win_id, int state) {
+  return (int)syscall(ASYS_WIN_SET_STATE, (uint64_t)win_id, (uint64_t)state, 0,
+                      0, 0);
 }
 static inline int sys_get_service_id(const char *name) {
   return (int)syscall(ASYS_GET_SERVICE_ID, (uint64_t)name, 0, 0, 0, 0);

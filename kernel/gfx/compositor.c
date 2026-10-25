@@ -203,13 +203,17 @@ typedef enum {
   CMD_CLOSE,
   CMD_MINIMIZE,
   CMD_FOCUS,
-  CMD_ICON_BMP
+  CMD_ICON_BMP,
+  CMD_TITLE,
+  CMD_MAXIMIZE /* value: 1 = maximizar, 0 = restaurar */
 } cmd_type_t;
 
 typedef struct {
   uint8_t type;
   window_t *win;
   tar_node_t *node;
+  char title[64]; /* CMD_TITLE */
+  int value;      /* CMD_MAXIMIZE */
 } comp_cmd_t;
 
 #define CMDQ_SIZE 128
@@ -476,9 +480,10 @@ static void do_attach(window_t *win) {
     window_stack->prev = win;
   window_stack = win;
 
-  win->taskbar_item =
-      taskbar_add_item(TASKBAR_ITEM_APP_ICON, win->title, win->icon_symbol,
-                       win->icon_bg_color, taskbar_item_on_click);
+  if (!(win->flags & WIN_FLAGS_POPUP))
+    win->taskbar_item =
+        taskbar_add_item(TASKBAR_ITEM_APP_ICON, win->title, win->icon_symbol,
+                         win->icon_bg_color, taskbar_item_on_click);
   if (win->taskbar_item && win->icon_bmp_node)
     win->taskbar_item->icon_bmp_node = win->icon_bmp_node;
 
@@ -723,6 +728,30 @@ static void exec_cmd(const comp_cmd_t *c) {
     if (stack_contains(c->win))
       win_set_icon_bmp(c->win, c->node);
     break;
+  case CMD_TITLE:
+    if (stack_contains(c->win)) {
+      memcpy(c->win->title, c->title, sizeof(c->win->title));
+      c->win->title[sizeof(c->win->title) - 1] = 0;
+      if (c->win->taskbar_item) {
+        strncpy(c->win->taskbar_item->label, c->win->title,
+                sizeof(c->win->taskbar_item->label) - 1);
+        dock_invalidate_layout();
+      }
+      c->win->dirty = 1; /* redibuja la barra de titulo */
+      invalidate_window(c->win);
+      update_menubar_title();
+    }
+    break;
+  case CMD_MAXIMIZE:
+    /* do_toggle_maximize alterna y no hace nada durante una animacion (p. ej.
+     * la de apertura): se deja pendiente y se aplica al terminar. */
+    if (stack_contains(c->win)) {
+      if (c->win->anim_state != WIN_ANIM_NONE)
+        c->win->pending_max = c->value ? 1 : 2;
+      else if (!!c->win->maximized != !!c->value)
+        do_toggle_maximize(c->win);
+    }
+    break;
   }
 }
 
@@ -746,6 +775,16 @@ void compositor_minimize_window(window_t *win) {
 }
 void compositor_focus_window(window_t *win) {
   comp_cmd_t c = {.type = CMD_FOCUS, .win = win, .node = NULL};
+  cmd_post(&c);
+}
+void compositor_set_title(window_t *win, const char *title) {
+  comp_cmd_t c = {.type = CMD_TITLE, .win = win, .node = NULL};
+  strncpy(c.title, title, sizeof(c.title) - 1);
+  cmd_post(&c);
+}
+void compositor_set_maximized(window_t *win, int maximized) {
+  comp_cmd_t c = {.type = CMD_MAXIMIZE, .win = win, .node = NULL,
+                  .value = maximized};
   cmd_post(&c);
 }
 void compositor_set_icon_bmp(window_t *win, tar_node_t *node) {
@@ -965,6 +1004,39 @@ static void finish_resize(void) {
   winsrv_post_event(w, WINSRV_EV_MOVE, w->x, w->y, 0);
 }
 
+/* Puntero "crudo" para clientes con WIN_FLAGS_RAW_INPUT (p. ej. el servidor
+ * Wayland): movimiento y botones sin filtrar sobre el area de cliente. Con un
+ * boton pulsado el cliente que lo recibio conserva el puntero (grab). */
+static window_t *raw_ptr_win;
+
+static void route_raw_pointer(int mouse_moved, uint8_t buttons) {
+  window_t *target = NULL;
+  int grab = buttons && raw_ptr_win && stack_contains(raw_ptr_win);
+  if (grab) {
+    target = raw_ptr_win;
+  } else if (!buttons && !drag_window && !resize_window && !pressed_win &&
+             !menubar_is_open()) {
+    win_hit_t h;
+    window_t *w = window_at_cursor(&h);
+    if (w && h == WIN_HIT_CLIENT && (w->flags & WIN_FLAGS_RAW_INPUT))
+      target = w;
+  }
+
+  if (raw_ptr_win && target != raw_ptr_win) {
+    winsrv_post_event(raw_ptr_win, WINSRV_EV_PTR_LEAVE, 0, 0, 0);
+    raw_ptr_win = NULL;
+  }
+  if (!target)
+    return;
+  int entered = (raw_ptr_win != target);
+  if (entered || mouse_moved || buttons != (uint8_t)last_mouse_buttons) {
+    raw_ptr_win = target;
+    winsrv_post_event(target, WINSRV_EV_PTR, cursor_x - target->x,
+                      cursor_y - target->y - window_titlebar_h(target),
+                      buttons & 7u);
+  }
+}
+
 static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
   cursor_x += dx;
   cursor_y += dy;
@@ -1056,7 +1128,8 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
             break;
           }
           case WIN_HIT_CLIENT:
-            do_focus_window(win);
+            if (!(win->flags & WIN_FLAGS_POPUP))
+              do_focus_window(win);
             post_client_mouse(win, MOUSE_BUTTON_LEFT);
             break;
           default:
@@ -1172,6 +1245,8 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
       }
     }
   }
+
+  route_raw_pointer(mouse_moved, buttons);
 
   last_mouse_buttons = buttons;
 
@@ -1430,6 +1505,12 @@ static int compositor_tick_animations(int dt_ms) {
           w->flags &= ~WIN_FLAGS_FOCUSED;
           w->flags |= WIN_FLAGS_INACTIVE;
           w->dirty = 1;
+        }
+        if (w->pending_max) {
+          int want = w->pending_max == 1;
+          w->pending_max = 0;
+          if (!(w->flags & WIN_FLAGS_HIDDEN) && !!w->maximized != want)
+            do_toggle_maximize(w);
         }
       }
       invalidate_window(w);

@@ -31,6 +31,7 @@
 #define INPUTP_PORT_IN 0x600
 #define INPUTP_PORT_OUT 0x601
 #define INPUTP_FEED 0x602
+#define INPUTP_MOUSE_WHEEL 0x603
 
 #define AUR_INPUT_KBD 0
 #define AUR_INPUT_MOUSE 1
@@ -117,6 +118,17 @@ static int ctl_data(uint8_t val) {
   return wait_ibf_clear() ? port_out(PS2_DATA, val) : -1;
 }
 
+// Lee un byte del ratón (-1 si no llega).
+static int mouse_read_byte(void) {
+  for (int i = 0; i < 2000; i++) {
+    int s = port_in(PS2_STATUS);
+    if (s >= 0 && (s & ST_OBF) && (s & ST_AUX))
+      return port_in(PS2_DATA);
+    usleep(20);
+  }
+  return -1;
+}
+
 // Misma secuencia que el driver de kernel: habilita el puerto auxiliar,
 // activa IRQ de teclado y ratón, y manda "enable data reporting" (0xF4) al
 // ratón.
@@ -133,6 +145,20 @@ static void i8042_init(void) {
       ctl_cmd(0x60);
       ctl_data((uint8_t)cfg);
     }
+  }
+
+  // Secuencia magica del IntelliMouse (sample rate 200, 100, 80) y lectura del
+  // ID: 3 = tiene rueda y los paquetes pasan a ser de 4 bytes.
+  static const uint8_t magic[] = {0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2};
+  int ok = 1;
+  for (unsigned i = 0; i < sizeof(magic) && ok; i++) {
+    ctl_cmd(0xD4);
+    ctl_data(magic[i]);
+    ok = mouse_read_byte() == 0xFA;
+  }
+  if (ok && mouse_read_byte() == 3) {
+    ioctl(g_io, INPUTP_MOUSE_WHEEL, 1);
+    fprintf(stderr, "ps2.aur: IntelliMouse detectado (rueda)\n");
   }
 
   int ack = 0;

@@ -92,11 +92,23 @@ void winsrv_init(void) {
 // ---------------------------------------------------------------------------
 // Crear / destruir
 // ---------------------------------------------------------------------------
+#define WINSRV_USER_FLAGS                                                      \
+  (WIN_FLAGS_NODECORATION | WIN_FLAGS_FIXED_SIZE | WIN_FLAGS_POPUP |           \
+   WIN_FLAGS_RAW_INPUT)
+
 int winsrv_create_window(task_t *owner, int x, int y, int w, int h,
                          const char *title) {
+  return winsrv_create_window_ex(owner, x, y, w, h, title, 0);
+}
+
+int winsrv_create_window_ex(task_t *owner, int x, int y, int w, int h,
+                            const char *title, uint32_t wflags) {
   if (!g_ready || !owner)
     return -1;
-  if (w < 64 || h < 64 || w > 2048 || h > 2048)
+  wflags &= WINSRV_USER_FLAGS;
+  // Un popup puede ser mas pequeno que una ventana normal (menus, tooltips).
+  int min = (wflags & WIN_FLAGS_POPUP) ? 8 : 64;
+  if (w < min || h < min || w > 2048 || h > 2048)
     return -1;
 
   char ktitle[64];
@@ -124,7 +136,7 @@ int winsrv_create_window(task_t *owner, int x, int y, int w, int h,
 
   // Crear la ventana en el compositor. Fuera del lock (toca window_stack
   // y taskbar, con su propio lock).
-  window_t *win = compositor_create_window(x, y, w, h, ktitle, 0);
+  window_t *win = compositor_create_window(x, y, w, h, ktitle, wflags);
   if (!win) {
     // Liberar el slot reservado.
     flags = spin_lock_irqsave(&winsrv_lock);
@@ -148,7 +160,8 @@ int winsrv_create_window(task_t *owner, int x, int y, int w, int h,
   // de winsrv_post_event() necesitan que el slot ya esté publicado
   // (buscan por find_slot_by_win_locked). Si lo hiciéramos antes, los
   // eventos FOCUS/BLUR se perderían.
-  compositor_focus_window(win);
+  if (!(wflags & WIN_FLAGS_POPUP))
+    compositor_focus_window(win);
 
   LOG_INFO("[WINSRV] ventana %d creada para task %u (%dx%d '%s')", slot,
            owner->id, w, h, ktitle);
@@ -422,6 +435,23 @@ int winsrv_register_console(task_t *owner, int win_id) {
   return 0;
 }
 
+int winsrv_set_raw_input(task_t *owner, int win_id, int enable) {
+  if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS)
+    return -1;
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  winsrv_entry_t *e = &g_windows[win_id];
+  if (!e->in_use || e->owner != owner || !e->win) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+  if (enable)
+    e->win->flags |= WIN_FLAGS_RAW_INPUT;
+  else
+    e->win->flags &= ~WIN_FLAGS_RAW_INPUT;
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // API interna para el compositor y el VFS
 // ---------------------------------------------------------------------------
@@ -584,6 +614,48 @@ int winsrv_set_icon(task_t *owner, int win_id, const char *path) {
   // Dock cae a una baldosa con el símbolo (no hay error síncrono). node y buf
   // permanecen vivos (leak acotado por WINSRV_MAX_WINDOWS, ver nota arriba).
   compositor_set_icon_bmp(win, node);
+  return 0;
+}
+
+int winsrv_set_title(task_t *owner, int win_id, const char *title) {
+  if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || !title)
+    return -1;
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  winsrv_entry_t *e = &g_windows[win_id];
+  if (!e->in_use || e->owner != owner || !e->win) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+  window_t *win = e->win;
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+  compositor_set_title(win, title);
+  return 0;
+}
+
+int winsrv_set_state(task_t *owner, int win_id, int state) {
+  if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS)
+    return -1;
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  winsrv_entry_t *e = &g_windows[win_id];
+  if (!e->in_use || e->owner != owner || !e->win) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+  window_t *win = e->win;
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+  switch (state) {
+  case WINSRV_STATE_MINIMIZE:
+    compositor_minimize_window(win);
+    break;
+  case WINSRV_STATE_MAXIMIZE:
+    compositor_set_maximized(win, 1);
+    break;
+  case WINSRV_STATE_RESTORE:
+    compositor_set_maximized(win, 0);
+    break;
+  default:
+    return -1;
+  }
   return 0;
 }
 

@@ -105,6 +105,9 @@ static int64_t inputp_ioctl(vfs_node_t *node, unsigned long req,
     ps2_feed(f.kind == AUR_INPUT_MOUSE, f.data, f.len);
     return 0;
   }
+  case INPUTP_MOUSE_WHEEL:
+    ps2_set_mouse_wheel(arg != 0);
+    return 0;
   default:
     return -ENOTTY;
   }

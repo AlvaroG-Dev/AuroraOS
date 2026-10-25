@@ -302,8 +302,27 @@ int64_t tty_write(tty_t *tty, uint64_t offset, size_t size, const void *buf) {
 
   if (tty->pty) {
     // El slave escribe: emitir al buffer del master. El terminal app
-    // (que tiene el master fd) lo leerá y lo pintará.
-    pty_slave_emit(tty->pty, buf, size);
+    // (que tiene el master fd) lo leerá y lo pintará. Post-proceso de salida
+    // como Linux (OPOST|ONLCR: "\n" -> "\r\n"); los emuladores de terminal
+    // estandar (foot...) no lo hacen por su cuenta.
+    if (!((tty->oflag & TTY_OFLAG_OPOST) && (tty->oflag & TTY_OFLAG_ONLCR))) {
+      pty_slave_emit(tty->pty, buf, size);
+      return (int64_t)size;
+    }
+    const char *in = (const char *)buf;
+    char out[256];
+    size_t o = 0;
+    for (size_t i = 0; i < size; i++) {
+      if (o + 2 > sizeof(out)) {
+        pty_slave_emit(tty->pty, out, o);
+        o = 0;
+      }
+      if (in[i] == '\n')
+        out[o++] = '\r';
+      out[o++] = in[i];
+    }
+    if (o)
+      pty_slave_emit(tty->pty, out, o);
     return (int64_t)size;
   }
 

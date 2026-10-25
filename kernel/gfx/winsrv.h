@@ -21,6 +21,14 @@
 #define WINSRV_EV_OUTPUT 7
 #define WINSRV_EV_TTY_INPUT 8
 #define WINSRV_EV_RESIZE 9
+// Puntero "crudo" (solo ventanas con WIN_FLAGS_RAW_INPUT, ver
+// winsrv_set_raw_input): x,y = posicion en el contenido de la ventana,
+// data = botones pulsados (bit0 izq, bit1 der, bit2 medio). Se emite con
+// cada movimiento o cambio de botones sobre el area de cliente (y mientras
+// haya un boton pulsado, aunque el cursor salga). PTR_LEAVE: el cursor dejo
+// la ventana.
+#define WINSRV_EV_PTR 10
+#define WINSRV_EV_PTR_LEAVE 11
 
 #define WINSRV_USER_LIMIT 0x0000800000000000ULL
 
@@ -53,6 +61,10 @@ void winsrv_init(void);
 
 int winsrv_create_window(task_t *owner, int x, int y, int w, int h,
                          const char *title);
+// Variante con flags (WIN_FLAGS_NODECORATION/FIXED_SIZE/POPUP/RAW_INPUT). Con
+// NODECORATION, w x h es el tamano del contenido (sin barra de titulo).
+int winsrv_create_window_ex(task_t *owner, int x, int y, int w, int h,
+                            const char *title, uint32_t flags);
 int winsrv_destroy_window(task_t *owner, int win_id);
 int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
                 int src_x, int src_y, int src_stride,
@@ -60,6 +72,8 @@ int winsrv_blit(task_t *owner, int win_id, int x, int y, int w, int h,
 int winsrv_poll_event(task_t *owner, int win_id, winsrv_event_t *out_user_ev,
                       int blocking);
 int winsrv_register_console(task_t *owner, int win_id);
+// Pide recibir WINSRV_EV_PTR (movimiento/botones sin filtrar) en esta ventana.
+int winsrv_set_raw_input(task_t *owner, int win_id, int enable);
 
 void winsrv_post_event(window_t *win, uint32_t type, int32_t x, int32_t y,
                        uint32_t data);
@@ -70,6 +84,13 @@ int winsrv_has_window(window_t *win);
 void winsrv_cleanup_task(task_t *owner);
 
 int winsrv_set_icon(task_t *owner, int win_id, const char *path);
+// `title` es un puntero de KERNEL (el syscall ya lo copio).
+int winsrv_set_title(task_t *owner, int win_id, const char *title);
+// Estado pedido por el dueno de la ventana (ASYS_WIN_SET_STATE).
+#define WINSRV_STATE_MINIMIZE 1
+#define WINSRV_STATE_MAXIMIZE 2
+#define WINSRV_STATE_RESTORE 3
+int winsrv_set_state(task_t *owner, int win_id, int state);
 
 // Postea un evento a la ventana que tiene el foco. Si no hay ninguna
 // enfocada, no hace nada. Se usa para input de teclado: el TTY recibe

@@ -180,6 +180,7 @@ window_t *window_create(int x, int y, int w, int h, const char *title,
   win->pressed_btn = 0;
 
   win->maximized = 0;
+  win->pending_max = 0;
   win->restore_x = win->restore_y = win->restore_w = win->restore_h = 0;
   spin_init(&win->content_lock);
   win->content_dmg = (rect_t){0, 0, 0, 0};

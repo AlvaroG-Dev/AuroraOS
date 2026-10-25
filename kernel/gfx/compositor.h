@@ -20,7 +20,11 @@ window_t *compositor_create_window(int x, int y, int w, int h,
 void compositor_close_window(window_t *win);
 void compositor_minimize_window(window_t *win);
 void compositor_focus_window(window_t *win);
+// Maximiza (1) o restaura (0) la ventana; no-op si ya esta en ese estado.
+void compositor_set_maximized(window_t *win, int maximized);
 void compositor_set_icon_bmp(window_t *win, tar_node_t *bmp_file);
+// Cambia el titulo de la ventana (barra de titulo, Dock y menubar). Asincrono.
+void compositor_set_title(window_t *win, const char *title);
 
 void compositor_thread(void);
 void compositor_notify_event(void);

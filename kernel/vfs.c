@@ -2872,6 +2872,18 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
     return -1;
   }
 
+  // O_NONBLOCK (fcntl F_SETFL): la mayoria de ops->read bloquean. Si el nodo
+  // sabe decir si hay datos (poll), un fd no bloqueante sin datos da EAGAIN en
+  // vez de dormir (pty master de foot, tty, pipes...). POLLERR/POLLHUP si dejan
+  // pasar: el read devuelve el error o EOF.
+  if ((f->flags & 0x800 /* O_NONBLOCK */) && f->node->ops->poll) {
+    int rev = f->node->ops->poll(f->node, 1 /* POLLIN */);
+    if (!(rev & (1 | 0x8 | 0x10))) {
+      fd_put(f);
+      return -EAGAIN;
+    }
+  }
+
   mutex_lock(&f->lock);
   const size_t chunk_size = 4096;
   uint8_t *kbuf = (uint8_t *)kmalloc(chunk_size);

@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #define TERMINAL_PATH "/usr/bin/terminal"
+#define WAYLAND_PATH "/usr/bin/aurora-wayland"
 #define RESPAWN_DELAY_SEC 1
 
 static char *default_envp[] = {
@@ -39,6 +40,12 @@ static char *default_envp[] = {
     "SHELL=/bin/sh",
     "PWD=/",
     "TMPDIR=/tmp",
+    // Apps Wayland: las ventanas las gestiona aurora-wayland (ver abajo).
+    "XDG_RUNTIME_DIR=/run/user/0",
+    "WAYLAND_DISPLAY=wayland-0",
+    "LANG=C.UTF-8",
+    "FONTCONFIG_FILE=/usr/share/fontconfig/fonts.conf",
+    "XDG_DATA_DIRS=/usr/share",
     NULL,
 };
 
@@ -52,6 +59,31 @@ static pid_t spawn_terminal(void) {
     char *argv[] = {(char *)TERMINAL_PATH, NULL};
     execve(TERMINAL_PATH, argv, default_envp);
     perror("init: execve " TERMINAL_PATH);
+    _exit(127);
+  }
+  return pid;
+}
+
+// Servidor Wayland nativo: cada ventana Wayland es una ventana de Aurora.
+static pid_t spawn_wayland(void) {
+  pid_t pid = fork();
+  if (pid < 0) {
+    perror("init: fork");
+    return -1;
+  }
+  if (pid == 0) {
+    if (access(WAYLAND_PATH, X_OK) != 0)
+      _exit(127);
+    // Su salida es solo diagnostico: a /dev/kmsg (serie), no a una tty.
+    int fd = open("/dev/kmsg", O_WRONLY);
+    if (fd >= 0) {
+      dup2(fd, 1);
+      dup2(fd, 2);
+      if (fd > 2)
+        close(fd);
+    }
+    char *argv[] = {(char *)WAYLAND_PATH, NULL};
+    execve(WAYLAND_PATH, argv, default_envp);
     _exit(127);
   }
   return pid;
@@ -85,8 +117,12 @@ static void run_boot_tests(void) {
 }
 
 int main(void) {
+  // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
+  int testing = access("/system/boot-tests", F_OK) == 0;
   run_boot_tests();
   pid_t term = spawn_terminal();
+  pid_t wl = testing ? -1 : spawn_wayland();
+  int wl_restarts = 0;
 
   for (;;) {
     int status = 0;
@@ -104,7 +140,15 @@ int main(void) {
       continue;
     }
 
-    if (pid == term) {
+    if (pid == wl) {
+      // El servidor Wayland nunca debe morir; si cae, se relanza (con tope).
+      fprintf(stderr, "init: aurora-wayland termino (status=0x%x)\n", status);
+      wl = -1;
+      if (wl_restarts++ < 5) {
+        sleep(RESPAWN_DELAY_SEC);
+        wl = spawn_wayland();
+      }
+    } else if (pid == term) {
       // Decidir si respawnear:
       //
       //   Salida limpia (exit 0): el usuario cerró la ventana.

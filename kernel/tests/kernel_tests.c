@@ -4665,8 +4665,9 @@ static void test_pty_open_master_slave_vfs(void) {
 
   memset(buf, 0, sizeof(buf));
   int64_t r2 = fdm->node->ops->read(fdm->node, 0, sizeof(buf), buf);
-  TEST_ASSERT(r2 == 6, "read del master devolvió %lld", (long long)r2);
-  TEST_ASSERT(memcmp(buf, "mundo\n", 6) == 0, "contenido master incorrecto");
+  // Post-proceso de salida del slave (OPOST|ONLCR): "\n" llega como "\r\n".
+  TEST_ASSERT(r2 == 7, "read del master devolvió %lld", (long long)r2);
+  TEST_ASSERT(memcmp(buf, "mundo\r\n", 7) == 0, "contenido master incorrecto");
 
   vfs_close_for_proc(self, slave_fd);
   vfs_close_for_proc(self, master_fd);
