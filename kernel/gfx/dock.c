@@ -28,6 +28,7 @@ static struct {
   int hover;      /* índice del slot bajo el cursor, o -1 */
   rect_t panel;
   rect_t tip; /* tooltip del icono bajo el cursor; w = 0 si no hay */
+  int sep_x;  /* x del separador fijados | abiertas, o -1 */
   rect_t damage, prev_damage;
   uint64_t sig, prev_sig;
   int force;
@@ -51,6 +52,7 @@ void dock_init(int screen_w, int screen_h) {
   D.sh = screen_h;
   D.cur_x = D.cur_y = -1;
   D.hover = -1;
+  D.sep_x = -1;
   D.force = 1;
   D.scratch_px = (size_t)screen_w * DOCK_HEIGHT;
   D.scratch = (uint32_t *)kmalloc(D.scratch_px * sizeof(uint32_t));
@@ -115,6 +117,13 @@ void dock_forget(taskbar_item_t *item) {
   for (int i = 0; i < D.n; i++)
     if (D.slots[i].item == item)
       D.force = 1;
+}
+
+static int is_bouncing(const taskbar_item_t *item) {
+  for (int i = 0; i < DOCK_MAX_BOUNCE; i++)
+    if (D.bounce[i].item == item)
+      return 1;
+  return 0;
 }
 
 /* Altura del rebote de `item` ahora (0 si no rebota). Cada salto es una
@@ -186,11 +195,31 @@ static uint64_t fnv(uint64_t h, uint32_t v) {
 int dock_update(int dt_ms) {
   /* Items de aplicación, en orden de creación. */
   taskbar_item_t *items[DOCK_MAX_ITEMS];
-  int n = 0;
-  for (taskbar_item_t *it = taskbar_items_head(); it && n < DOCK_MAX_ITEMS;
-       it = it->next)
-    if (it->type == TASKBAR_ITEM_APP_ICON)
-      items[n++] = it;
+  int n = 0, npin = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    /* Primero los lanzadores fijados, luego las ventanas sueltas. */
+    for (taskbar_item_t *it = taskbar_items_head(); it && n < DOCK_MAX_ITEMS;
+         it = it->next)
+      if (it->type == TASKBAR_ITEM_APP_ICON && !!it->pinned == (pass == 0))
+        items[n++] = it;
+    if (pass == 0)
+      npin = n;
+  }
+  int sep = (npin > 0 && n > npin) ? DOCK_SEP_GAP : 0;
+  int launching = 0;
+  for (int i = 0; i < n; i++) {
+    taskbar_item_t *it = items[i];
+    if (it->launching > 0) {
+      it->launching -= dt_ms > 0 ? dt_ms : 1;
+      if (it->launching < 0)
+        it->launching = 0;
+      else {
+        launching = 1;
+        if (!is_bouncing(it))
+          dock_bounce(it); /* sigue saltando hasta que aparezca la ventana */
+      }
+    }
+  }
 
   int avail = D.sw - 2 * DOCK_PAD_X - 48;
   int base = DOCK_ICON_BASE;
@@ -199,7 +228,7 @@ int dock_update(int dt_ms) {
   int maxs = base + (DOCK_ICON_MAX - DOCK_ICON_BASE) * base / DOCK_ICON_BASE;
 
   /* Geometría de reposo (sin magnificación). */
-  int rest_w = n > 0 ? n * base + (n - 1) * DOCK_GAP : 0;
+  int rest_w = n > 0 ? n * base + (n - 1) * DOCK_GAP + sep : 0;
   int rest_x0 = (D.sw - rest_w) / 2;
   int rest_panel_y = D.sh - DOCK_MARGIN_BOTTOM - DOCK_HEIGHT;
 
@@ -223,13 +252,13 @@ int dock_update(int dt_ms) {
   int total = 0;
   int radius = (base + DOCK_GAP) * MAG_RADIUS_ICONS / 10;
   for (int i = 0; i < n; i++) {
-    int cx0 = rest_x0 + i * (base + DOCK_GAP) + base / 2;
+    int cx0 = rest_x0 + i * (base + DOCK_GAP) + base / 2 + (i >= npin ? sep : 0);
     int b = bump256(iabs(D.cur_x - cx0), radius);
     sizes[i] = base + ((maxs - base) * b >> 8) * mag / 256;
     total += sizes[i];
   }
   if (n > 1)
-    total += (n - 1) * DOCK_GAP;
+    total += (n - 1) * DOCK_GAP + sep;
 
   /* Distribución centrada; los iconos crecen hacia arriba. */
   D.n = n;
@@ -249,7 +278,12 @@ int dock_update(int dt_ms) {
         D.cur_y >= D.slots[i].r.y && in_zone)
       D.hover = i;
     x += sizes[i] + DOCK_GAP;
+    if (sep && i == npin - 1)
+      x += sep;
   }
+  D.sep_x = -1;
+  if (sep)
+    D.sep_x = D.slots[npin - 1].r.x + D.slots[npin - 1].r.w + (DOCK_GAP + sep) / 2;
 
   /* Tooltip sobre el icono bajo el cursor. */
   D.tip = (rect_t){0, 0, 0, 0};
@@ -271,6 +305,9 @@ int dock_update(int dt_ms) {
     rect_t u = D.panel;
     for (int i = 0; i < n; i++)
       u = rect_bounding_box(u, rect_grow(D.slots[i].r, 2));
+    /* El resplandor de aurora cae bajo el panel hasta el borde de pantalla. */
+    u = rect_bounding_box(u, (rect_t){D.panel.x, D.panel.y, D.panel.w,
+                                      D.panel.h + DOCK_MARGIN_BOTTOM});
     if (D.tip.w > 0)
       u = rect_bounding_box(u, rect_grow(D.tip, 2));
     D.damage = rect_clip(u, (rect_t){0, 0, D.sw, D.sh});
@@ -288,11 +325,13 @@ int dock_update(int dt_ms) {
     h = fnv(h, (uint32_t)D.slots[i].r.y);
     h = fnv(h, (uint32_t)D.slots[i].r.w);
     h = fnv(h, (uint32_t)D.slots[i].item->is_active);
+    h = fnv(h, (uint32_t)D.slots[i].item->win_count);
+    h = fnv(h, (uint32_t)(D.slots[i].item->launching > 0));
   }
   h = fnv(h, (uint32_t)(uintptr_t)D.pressed);
   D.sig = h;
 
-  return D.mag != D.mag_target || bouncing;
+  return D.mag != D.mag_target || bouncing || launching;
 }
 
 int dock_take_damage(rect_t *out) {
@@ -334,6 +373,47 @@ static uint32_t lighten(uint32_t c, int amt) {
   return 0xFF000000 | (uint32_t)(r << 16) | (uint32_t)(g << 8) | (uint32_t)b;
 }
 
+/* Degradado de tres paradas de la aurora: verde azulado -> azul -> violeta.
+ * t en 0..256. Devuelve RGB sin alfa. */
+static uint32_t aurora_grad(int t) {
+  const uint32_t A = 0x3DF2C0, B = 0x4DA3FF, C = 0xB07CFF;
+  uint32_t from = t < 128 ? A : B, to = t < 128 ? B : C;
+  int u = (t < 128 ? t : t - 128) * 2; /* 0..256 */
+  if (u > 256)
+    u = 256;
+  uint32_t r = (((from >> 16) & 0xFF) * (256 - u) + ((to >> 16) & 0xFF) * u) >> 8;
+  uint32_t g = (((from >> 8) & 0xFF) * (256 - u) + ((to >> 8) & 0xFF) * u) >> 8;
+  uint32_t b = ((from & 0xFF) * (256 - u) + (to & 0xFF) * u) >> 8;
+  return (r << 16) | (g << 8) | b;
+}
+
+/* "Cinta" de aurora: una franja de luz difusa en diagonal que cruza la
+ * baldosa de abajo-izquierda a arriba-derecha y cambia de verde a violeta. Es
+ * lo que distingue los iconos de Aurora de cualquier otro sistema. Solo toca
+ * píxeles ya cubiertos por la baldosa (respeta bordes suavizados). */
+static void aurora_ribbon(uint32_t *icon, int S) {
+  for (int y = 0; y < S; y++) {
+    for (int x = 0; x < S; x++) {
+      uint32_t px = icon[y * S + x];
+      uint32_t a = px >> 24;
+      if (!a)
+        continue;
+      /* distancia a la recta x + 0.85 y = c (en 1/8 px aprox) */
+      int d = x + (y * 218 >> 8) - (S * 3 / 4);
+      if (d < 0)
+        d = -d;
+      if (d >= 22)
+        continue;
+      int ba = 0x78 * (22 - d) / 22;
+      ba = ba * ba / 0x78; /* perfil suave */
+      int t = (x * 256) / S;
+      uint32_t nb = blend_pixel_fast(((uint32_t)ba << 24) | aurora_grad(t),
+                                     px | 0xFF000000);
+      icon[y * S + x] = (nb & 0x00FFFFFF) | (a << 24);
+    }
+  }
+}
+
 static void make_fallback_tile(taskbar_item_t *it) {
   const int S = DOCK_ICON_SRC;
   rect_t clip = {0, 0, S, S};
@@ -351,8 +431,8 @@ static void make_fallback_tile(taskbar_item_t *it) {
     uint32_t col;
     if (t < 128)
       col = ((uint32_t)(0x46 * (128 - t) / 128) << 24) | 0x00FFFFFF;
-    else
-      col = ((uint32_t)(0x38 * (t - 128) / 128) << 24);
+    else /* sombra inferior teñida de índigo, no negra: firma de Aurora */
+      col = ((uint32_t)(0x50 * (t - 128) / 128) << 24) | 0x0020104A;
     int inset = 0;
     if (dy < 18) {
       int dd = 18 - dy, v = 16 * 16 - dd * dd, s = 0;
@@ -372,6 +452,7 @@ static void make_fallback_tile(taskbar_item_t *it) {
                    (rect_t){2 + inset, dy, S - 4 - 2 * inset, 1}, col);
   }
   gfx_draw_rounded_border(it->dock_icon, S, clip, tile, 16, 0x30FFFFFF);
+  aurora_ribbon(it->dock_icon, S);
 
   /* Símbolo: se dibuja a 24x24 y se amplía con bilineal para que quede liso. */
   static uint32_t tmp[24 * 24]; /* solo hilo del compositor; 2,3 KB fuera de
@@ -480,10 +561,49 @@ void dock_render(uint32_t *dst, int stride, rect_t clip) {
 
   rect_t p = D.panel;
 
+  /* Resplandor de aurora bajo el Dock: luz verde azulada -> violeta que
+   * "cae" sobre el escritorio, más intensa hacia el centro. Distingue el Dock
+   * de Aurora de cualquier otro. */
+  {
+    int gx0 = p.x + 10, gx1 = p.x + p.w - 10;
+    for (int y = 0; y < DOCK_MARGIN_BOTTOM + 3; y++) {
+      int fall = 0x34 - (y * 0x34) / (DOCK_MARGIN_BOTTOM + 3);
+      for (int x = gx0; x < gx1; x++) {
+        int t = (x - gx0) * 256 / (gx1 - gx0);
+        int e = t < 128 ? t : 256 - t;       /* 0..128 */
+        int a = fall * (64 + e) / 192;
+        gfx_blend_rect(dst, stride, clip, (rect_t){x, p.y + p.h - 3 + y, 1, 1},
+                       ((uint32_t)a << 24) | aurora_grad(t));
+      }
+    }
+  }
+
   /* Cristal líquido: fondo desenfocado y saturado + tinte + borde especular. */
   gfx_glass_panel(dst, stride, clip, p, DOCK_RADIUS, AURORA_DOCK_TINT,
                   AURORA_GLASS_BLUR, AURORA_GLASS_SAT, D.scratch,
                   D.scratch_px);
+
+  /* Filo de luz de aurora en el borde superior del cristal. */
+  {
+    int x0 = p.x + DOCK_RADIUS, x1 = p.x + p.w - DOCK_RADIUS;
+    for (int x = x0; x < x1; x++) {
+      int t = (x1 > x0) ? (x - x0) * 256 / (x1 - x0) : 0;
+      int edge = t < 40 ? t : (t > 216 ? 256 - t : 40); /* se apaga en los extremos */
+      gfx_blend_rect(dst, stride, clip, (rect_t){x, p.y + 1, 1, 1},
+                     ((uint32_t)(0x5A * edge / 40) << 24) | aurora_grad(t));
+    }
+  }
+
+  /* Separador entre lanzadores fijados y ventanas sueltas. */
+  if (D.sep_x >= 0) {
+    int y0 = p.y + 12, y1 = p.y + p.h - 14;
+    for (int y = y0; y < y1; y++) {
+      int t = (y - y0) * 256 / (y1 - y0);
+      int e = t < 128 ? t : 256 - t;
+      gfx_blend_rect(dst, stride, clip, (rect_t){D.sep_x, y, 1, 1},
+                     ((uint32_t)(0x46 * e / 128) << 24) | aurora_grad(128));
+    }
+  }
 
   const int S = DOCK_ICON_SRC;
   for (int i = 0; i < D.n; i++) {
@@ -501,10 +621,24 @@ void dock_render(uint32_t *dst, int stride, rect_t clip) {
       gfx_blit_scaled_premul(dst, stride, clip, r.x, r.y, r.w, r.h,
                              silhouette(it, 0x60), S, S);
 
-    /* Indicador de app abierta (más brillante si es la activa). */
-    gfx_fill_circle(dst, stride, clip, (float)r.x + r.w / 2.0f,
-                    (float)(p.y + p.h) - 5.0f, 1.75f,
-                    it->is_active ? 0xF2FFFFFF : 0x80FFFFFF);
+    /* Indicador de app abierta: cápsula con el degradado de la aurora (más
+     * larga y con halo si es la activa). Un lanzador sin ventanas no lleva. */
+    if (!it->pinned || it->win_count > 0 || it->launching > 0) {
+      int w = it->is_active ? 20 : 10;
+      if (it->pinned && it->win_count == 0)
+        w = 6; /* abriéndose */
+      uint32_t alpha = it->is_active ? 0xFF : (it->win_count == 0 && it->pinned ? 0x78 : 0xB0);
+      int cx = r.x + r.w / 2, py = p.y + p.h - 7;
+      if (it->is_active)
+        gfx_blend_rect(dst, stride, clip, (rect_t){cx - w / 2 - 4, py + 3, w + 8, 2},
+                       0x22000000 | aurora_grad(128));
+      for (int c = 0; c < w; c++) {
+        int h = (c == 0 || c == w - 1) ? 1 : 3;
+        gfx_blend_rect(dst, stride, clip,
+                       (rect_t){cx - w / 2 + c, py + (3 - h) / 2, 1, h},
+                       (alpha << 24) | aurora_grad(c * 256 / (w > 1 ? w - 1 : 1)));
+      }
+    }
   }
 
   /* Tooltip sobre el icono bajo el cursor (geometría de dock_update). */

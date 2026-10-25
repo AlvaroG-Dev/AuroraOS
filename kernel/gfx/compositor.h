@@ -26,6 +26,16 @@ void compositor_set_icon_bmp(window_t *win, tar_node_t *bmp_file);
 // Cambia el titulo de la ventana (barra de titulo, Dock y menubar). Asincrono.
 void compositor_set_title(window_t *win, const char *title);
 
+// Dock: fija un lanzador (app Linux). Al hacer clic sin ventanas abiertas se
+// encola `launch_id` (ver compositor_pop_launch). Asincrono.
+void compositor_dock_pin(const char *name, const char *app_id,
+                         const char *symbol, uint32_t color,
+                         uint32_t launch_id);
+// La ventana pertenece a `app_id`: cuelga del lanzador fijado de esa app.
+void compositor_set_app_id(window_t *win, const char *app_id);
+// Siguiente peticion de lanzamiento pendiente, o 0 si no hay.
+uint32_t compositor_pop_launch(void);
+
 void compositor_thread(void);
 void compositor_notify_event(void);
 void compositor_notify_clock_tick(void);

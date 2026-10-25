@@ -23,6 +23,7 @@
 #define DOCK_HEIGHT (DOCK_PAD_TOP + DOCK_ICON_BASE + DOCK_PAD_BOTTOM)
 #define DOCK_HEADROOM 84    /* espacio sobre el panel: iconos ampliados + tooltip */
 #define DOCK_MAX_ITEMS 32
+#define DOCK_SEP_GAP 14     /* hueco extra entre lanzadores fijados y ventanas sueltas */
 
 void dock_init(int screen_w, int screen_h);
 

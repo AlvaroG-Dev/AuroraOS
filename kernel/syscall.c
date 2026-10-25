@@ -13,6 +13,7 @@
 #include "fat32.h"
 #include "futex.h"
 #include "gdt.h"
+#include "gfx/compositor.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "io.h"
@@ -6932,6 +6933,49 @@ static int64_t a_win_set_state(uint64_t win_id, uint64_t state, uint64_t a3,
   return winsrv_set_state(proc->task, (int)win_id, (int)state);
 }
 
+// Fija un lanzador en el Dock. a1 -> { uint32_t launch_id, color; char name[32],
+// symbol[8], app_id[48]; }
+static int64_t a_dock_pin(uint64_t req, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  struct {
+    uint32_t launch_id, color;
+    char name[32], symbol[8], app_id[48];
+  } r;
+  if (!process_current())
+    return -EFAULT;
+  if (copy_from_user(&r, (const void *)req, sizeof(r)) < 0)
+    return -EFAULT;
+  r.name[sizeof(r.name) - 1] = 0;
+  r.symbol[sizeof(r.symbol) - 1] = 0;
+  r.app_id[sizeof(r.app_id) - 1] = 0;
+  if (!r.app_id[0] || !r.launch_id)
+    return -EINVAL;
+  compositor_dock_pin(r.name, r.app_id, r.symbol, r.color, r.launch_id);
+  return 0;
+}
+
+// Siguiente peticion de lanzamiento del Dock (0 = ninguna).
+static int64_t a_dock_poll_launch(uint64_t a1, uint64_t a2, uint64_t a3,
+                                  uint64_t a4, uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  return (int64_t)compositor_pop_launch();
+}
+
+static int64_t a_win_set_app_id(uint64_t win_id, uint64_t app_id, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  char t[48];
+  long n = strncpy_from_user(t, (const char *)app_id, sizeof(t));
+  if (n < 0)
+    return -EFAULT;
+  t[sizeof(t) - 1] = 0;
+  return winsrv_set_app_id(proc->task, (int)win_id, t);
+}
+
 // a5 -> { uint32_t flags; char title[64]; }
 static int64_t a_win_create_ex(uint64_t a1, uint64_t a2, uint64_t a3,
                                uint64_t a4, uint64_t a5) {
@@ -7304,6 +7348,11 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},
     [ASYS_WIN_SET_TITLE - ASYS_BASE] = {a_win_set_title, "asys_win_set_title"},
     [ASYS_WIN_SET_STATE - ASYS_BASE] = {a_win_set_state, "asys_win_set_state"},
+    [ASYS_DOCK_PIN - ASYS_BASE] = {a_dock_pin, "asys_dock_pin"},
+    [ASYS_DOCK_POLL_LAUNCH - ASYS_BASE] = {a_dock_poll_launch,
+                                           "asys_dock_poll_launch"},
+    [ASYS_WIN_SET_APP_ID - ASYS_BASE] = {a_win_set_app_id,
+                                         "asys_win_set_app_id"},
     [ASYS_IPC_SEND - ASYS_BASE] = {a_ipc_send, "asys_ipc_send"},
     [ASYS_IPC_RECV - ASYS_BASE] = {a_ipc_recv, "asys_ipc_recv"},
     [ASYS_GET_SERVICE_ID -

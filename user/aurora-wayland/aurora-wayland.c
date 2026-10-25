@@ -23,6 +23,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server.h>
@@ -89,6 +90,12 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
 #define WINSRV_STATE_MINIMIZE 1
 #define WINSRV_STATE_MAXIMIZE 2
 #define WINSRV_STATE_RESTORE 3
+#define ASYS_DOCK_PIN (ASYS_BASE + 0x1A)
+#define ASYS_DOCK_POLL_LAUNCH (ASYS_BASE + 0x1B)
+#define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C)
+static int win_set_app_id(int id, const char *app_id) {
+  return (int)syscall(ASYS_WIN_SET_APP_ID, (long)id, app_id);
+}
 static int win_set_title(int id, const char *title) {
   return (int)syscall(ASYS_WIN_SET_TITLE, (long)id, title);
 }
@@ -656,9 +663,11 @@ static void xs_map(struct xsurf *xs, int w, int h) {
       fprintf(stderr, "[aurora-wayland] ventana demasiado grande (%dx%d)\n", w, h);
       return;
     }
-    int n = g_win_count % 8;
-    xs->wx = 100 + 40 * n;
-    xs->wy = 70 + 30 * n + TITLEBAR_H;
+    // Cascada ancha: las barras de titulo de las ventanas que se van abriendo
+    // quedan a la vista (y se distingue cada app).
+    int n = g_win_count % 5;
+    xs->wx = 80 + 260 * n;
+    xs->wy = 60 + 50 * n + TITLEBAR_H;
     const char *title = xs->tl && xs->tl->title[0] ? xs->tl->title : "Wayland";
     struct toplevel *t = xs->tl;
     // min == max: el cliente no admite redimensionar (dialogos, calculadoras).
@@ -673,6 +682,8 @@ static void xs_map(struct xsurf *xs, int w, int h) {
     return;
   }
   xs->win_id = id;
+  if (xs->tl && xs->tl->app_id[0])
+    win_set_app_id(id, xs->tl->app_id); /* agrupa la ventana en el Dock */
   xs->cw = w;
   xs->ch = h;
   wl_list_insert(&g_wins, &xs->wlink);
@@ -1177,6 +1188,8 @@ static void tl_set_app_id(struct wl_client *c, struct wl_resource *r, const char
   (void)c;
   struct toplevel *tl = wl_resource_get_user_data(r);
   snprintf(tl->app_id, sizeof(tl->app_id), "%s", t);
+  if (tl->xs && tl->xs->win_id >= 0)
+    win_set_app_id(tl->xs->win_id, tl->app_id);
 }
 static void tl_set_parent(struct wl_client *c, struct wl_resource *r, struct wl_resource *p) {
   (void)c; (void)r; (void)p;
@@ -1780,6 +1793,130 @@ static int keymap_init(void) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Lanzadores del Dock: /usr/share/aurora/dock.conf
+//   Nombre | app_id | simbolo | color RRGGBB | orden de arranque (ruta args...)
+// aurora-wayland los fija en el Dock; cuando el usuario pulsa uno sin ventanas
+// abiertas, el compositor encola una peticion y aqui se lanza el proceso (con
+// WAYLAND_DISPLAY/XDG_RUNTIME_DIR ya preparados) y se recoge al terminar.
+// ---------------------------------------------------------------------------
+#define DOCK_CONF_PATH "/usr/share/aurora/dock.conf"
+#define MAX_LAUNCHERS 16
+static struct {
+  char name[32], app_id[48], symbol[8], cmd[192];
+  uint32_t color;
+} g_launchers[MAX_LAUNCHERS];
+static int g_nlaunchers;
+static struct wl_event_source *g_launch_timer;
+
+static char *trim(char *s) {
+  while (*s == ' ' || *s == '\t')
+    s++;
+  char *e = s + strlen(s);
+  while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))
+    *--e = 0;
+  return s;
+}
+
+static void launchers_load(void) {
+  FILE *f = fopen(DOCK_CONF_PATH, "r");
+  if (!f)
+    return;
+  char line[512];
+  while (g_nlaunchers < MAX_LAUNCHERS && fgets(line, sizeof(line), f)) {
+    char *h = strchr(line, '#');
+    if (h)
+      *h = 0;
+    char *fld[5];
+    int n = 0;
+    for (char *p = line; n < 5;) {
+      fld[n++] = p;
+      char *bar = n < 5 ? strchr(p, '|') : NULL;
+      if (!bar)
+        break;
+      *bar = 0;
+      p = bar + 1;
+    }
+    if (n < 5)
+      continue;
+    int i = g_nlaunchers;
+    snprintf(g_launchers[i].name, sizeof(g_launchers[i].name), "%s", trim(fld[0]));
+    snprintf(g_launchers[i].app_id, sizeof(g_launchers[i].app_id), "%s", trim(fld[1]));
+    snprintf(g_launchers[i].symbol, sizeof(g_launchers[i].symbol), "%s", trim(fld[2]));
+    g_launchers[i].color = (uint32_t)strtoul(trim(fld[3]), NULL, 16) | 0xFF000000u;
+    snprintf(g_launchers[i].cmd, sizeof(g_launchers[i].cmd), "%s", trim(fld[4]));
+    if (g_launchers[i].app_id[0] && g_launchers[i].cmd[0])
+      g_nlaunchers++;
+  }
+  fclose(f);
+}
+
+static void launchers_pin(void) {
+  for (int i = 0; i < g_nlaunchers; i++) {
+    struct {
+      uint32_t launch_id, color;
+      char name[32], symbol[8], app_id[48];
+    } r;
+    memset(&r, 0, sizeof(r));
+    r.launch_id = (uint32_t)i + 1;
+    r.color = g_launchers[i].color;
+    snprintf(r.name, sizeof(r.name), "%s", g_launchers[i].name);
+    snprintf(r.symbol, sizeof(r.symbol), "%s", g_launchers[i].symbol);
+    snprintf(r.app_id, sizeof(r.app_id), "%s", g_launchers[i].app_id);
+    syscall(ASYS_DOCK_PIN, &r);
+  }
+  fprintf(stderr, "[aurora-wayland] %d lanzador(es) fijados en el Dock\n", g_nlaunchers);
+}
+
+static void launch_app(int idx) {
+  const char *cmd = g_launchers[idx].cmd;
+  fprintf(stderr, "[aurora-wayland] lanzando '%s': %s\n", g_launchers[idx].name, cmd);
+  pid_t pid = fork();
+  if (pid != 0) {
+    if (pid < 0)
+      fprintf(stderr, "[aurora-wayland] fork fallo: %s\n", strerror(errno));
+    return;
+  }
+  // Hijo: argv por espacios (sin comillas; las apps con ruta + args simples).
+  char buf[192];
+  snprintf(buf, sizeof(buf), "%s", cmd);
+  char *argv[16];
+  int ac = 0;
+  for (char *tok = strtok(buf, " "); tok && ac < 15; tok = strtok(NULL, " "))
+    argv[ac++] = tok;
+  argv[ac] = NULL;
+  int fd = open("/dev/null", O_RDWR);
+  if (fd >= 0) {
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if (fd > 2)
+      close(fd);
+  }
+  signal(SIGPIPE, SIG_DFL);
+  setenv("XDG_RUNTIME_DIR", "/run/user/0", 0);
+  setenv("WAYLAND_DISPLAY", "wayland-0", 0);
+  execv(argv[0], argv);
+  _exit(127);
+}
+
+static int launch_poll(void *data) {
+  (void)data;
+  long id;
+  while ((id = syscall(ASYS_DOCK_POLL_LAUNCH)) > 0)
+    if (id <= g_nlaunchers)
+      launch_app((int)id - 1);
+  wl_event_source_timer_update(g_launch_timer, 100);
+  return 0;
+}
+
+static int on_chld(int sig, void *data) {
+  (void)sig; (void)data;
+  while (waitpid(-1, NULL, WNOHANG) > 0)
+    ;
+  return 0;
+}
+
 static int on_term(int sig, void *data) {
   (void)sig; (void)data;
   wl_display_terminate(g_display);
@@ -1821,6 +1958,7 @@ int main(int argc, char **argv) {
                    NULL, kde_mgr_bind);
 
   g_pump_timer = wl_event_loop_add_timer(g_loop, pump_events, NULL);
+  wl_event_loop_add_signal(g_loop, SIGCHLD, on_chld, NULL);
   wl_event_loop_add_signal(g_loop, SIGTERM, on_term, NULL);
   wl_event_loop_add_signal(g_loop, SIGINT, on_term, NULL);
 
@@ -1841,6 +1979,10 @@ int main(int argc, char **argv) {
             sock, getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(null)");
     return 1;
   }
+  launchers_load();
+  launchers_pin();
+  g_launch_timer = wl_event_loop_add_timer(g_loop, launch_poll, NULL);
+  wl_event_source_timer_update(g_launch_timer, 100);
   fprintf(stderr, "[aurora-wayland] READY socket=%s\n", sock);
   wl_display_run(g_display);
 

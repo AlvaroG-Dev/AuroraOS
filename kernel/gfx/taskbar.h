@@ -59,6 +59,15 @@ typedef struct taskbar_item {
   // símbolo. 0 = sin generar, 1 = listo. Se libera al quitar el item.
   uint32_t *dock_icon;
   int dock_icon_state;
+
+  // Lanzador fijado en el Dock (apps Linux/Wayland): sobrevive a sus ventanas,
+  // las ventanas con su app_id cuelgan de él y un clic sin ventanas pide a
+  // userspace que lance la app (ver compositor_pop_launch).
+  int pinned;
+  uint32_t launch_id; /* id que se devuelve a userspace al lanzar */
+  char app_id[48];
+  int win_count;      /* ventanas que cuelgan de este item */
+  int launching;      /* ms restantes de "abriendose" (rebote), 0 = no */
 } taskbar_item_t;
 
 // API de abstracción de la Taskbar

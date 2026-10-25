@@ -205,7 +205,9 @@ typedef enum {
   CMD_FOCUS,
   CMD_ICON_BMP,
   CMD_TITLE,
-  CMD_MAXIMIZE /* value: 1 = maximizar, 0 = restaurar */
+  CMD_MAXIMIZE, /* value: 1 = maximizar, 0 = restaurar */
+  CMD_DOCK_PIN, /* title = nombre, app_id, symbol, color, value = launch_id */
+  CMD_WIN_APP   /* win + app_id: la ventana pasa al lanzador de esa app */
 } cmd_type_t;
 
 typedef struct {
@@ -213,7 +215,10 @@ typedef struct {
   window_t *win;
   tar_node_t *node;
   char title[64]; /* CMD_TITLE */
-  int value;      /* CMD_MAXIMIZE */
+  int value;      /* CMD_MAXIMIZE / CMD_DOCK_PIN */
+  char app_id[48];
+  char symbol[8];
+  uint32_t color;
 } comp_cmd_t;
 
 #define CMDQ_SIZE 128
@@ -350,14 +355,48 @@ static void open_about_window(void);
 
 /* Clic en un icono del Dock, como en macOS: activa la app (trae su ventana
  * al frente) o la restaura si estaba minimizada. Nunca minimiza. */
+/* Peticiones de lanzamiento (clic en un lanzador sin ventanas) para el
+ * proceso de userspace que gestiona las apps Linux (aurora-wayland). */
+#define LAUNCHQ_SIZE 8
+static uint32_t launchq[LAUNCHQ_SIZE];
+static int lq_head, lq_count;
+static spinlock_t launch_lock;
+
+static void launch_request(uint32_t id) {
+  unsigned long fl = spin_lock_irqsave(&launch_lock);
+  if (lq_count < LAUNCHQ_SIZE) {
+    launchq[(lq_head + lq_count) % LAUNCHQ_SIZE] = id;
+    lq_count++;
+  }
+  spin_unlock_irqrestore(&launch_lock, fl);
+}
+
+uint32_t compositor_pop_launch(void) {
+  uint32_t id = 0;
+  unsigned long fl = spin_lock_irqsave(&launch_lock);
+  if (lq_count > 0) {
+    id = launchq[lq_head];
+    lq_head = (lq_head + 1) % LAUNCHQ_SIZE;
+    lq_count--;
+  }
+  spin_unlock_irqrestore(&launch_lock, fl);
+  return id;
+}
+
 static void taskbar_item_on_click(taskbar_item_t *item) {
   if (!item)
     return;
   for (window_t *win = window_stack; win; win = win->next) {
     if (win->taskbar_item == item) {
       do_focus_window(win);
-      break;
+      return;
     }
+  }
+  /* Lanzador fijado sin ventanas: abrir la app. */
+  if (item->pinned && item->launch_id && !item->launching) {
+    item->launching = 8000; /* hasta que aparezca su ventana (o 8 s) */
+    launch_request(item->launch_id);
+    dock_bounce(item);
   }
 }
 
@@ -393,19 +432,17 @@ static window_t *win_by_index(int idx) {
   for (taskbar_item_t *it = taskbar_items_head(); it; it = it->next) {
     if (it->type != TASKBAR_ITEM_APP_ICON)
       continue;
-    if (i++ != idx)
-      continue;
+    /* Un lanzador fijado puede tener varias ventanas (o ninguna). */
     for (window_t *w = window_stack; w; w = w->next)
-      if (w->taskbar_item == it)
+      if (w->taskbar_item == it && i++ == idx)
         return w;
-    return NULL;
   }
   return NULL;
 }
 static int prov_count(void) {
   int n = 0;
-  for (taskbar_item_t *it = taskbar_items_head(); it; it = it->next)
-    if (it->type == TASKBAR_ITEM_APP_ICON)
+  for (window_t *w = window_stack; w; w = w->next)
+    if (w->taskbar_item && w->taskbar_item->type == TASKBAR_ITEM_APP_ICON)
       n++;
   return n;
 }
@@ -651,6 +688,15 @@ static void do_destroy(window_t *win) {
       rect_bounding_box(win->last_vis, win_damage_rect(win)));
   if (win == about_win)
     about_win = NULL;
+  if (win->taskbar_item && win->taskbar_item->pinned) {
+    /* El lanzador fijado se queda; solo se desengancha la ventana. */
+    taskbar_item_t *pin = win->taskbar_item;
+    if (pin->win_count > 0)
+      pin->win_count--;
+    if (pin->win_count == 0)
+      pin->is_active = 0;
+    win->taskbar_item = NULL;
+  }
   if (win->taskbar_item) {
     dock_forget(win->taskbar_item);
     if (dock_pressed_item == win->taskbar_item)
@@ -707,6 +753,53 @@ static void do_toggle_maximize(window_t *win) {
   winsrv_post_event(win, WINSRV_EV_MOVE, nx, ny, 0);
 }
 
+/* Fija (o actualiza) un lanzador en el Dock. */
+static void do_dock_pin(const comp_cmd_t *c) {
+  taskbar_item_t *it = NULL;
+  for (taskbar_item_t *i = taskbar_items_head(); i; i = i->next)
+    if (i->pinned && !strcmp(i->app_id, c->app_id)) {
+      it = i;
+      break;
+    }
+  if (!it) {
+    it = taskbar_add_item(TASKBAR_ITEM_APP_ICON, c->title, c->symbol, c->color,
+                          taskbar_item_on_click);
+    if (!it)
+      return;
+    it->pinned = 1;
+    strncpy(it->app_id, c->app_id, sizeof(it->app_id) - 1);
+  }
+  it->launch_id = (uint32_t)c->value;
+  dock_invalidate_layout();
+}
+
+/* La ventana `win` pertenece a la app `app_id`: si hay un lanzador fijado
+ * para ella, pasa a colgar de él (un solo icono por app). */
+static void do_win_app(window_t *win, const char *app_id) {
+  taskbar_item_t *pin = NULL;
+  for (taskbar_item_t *i = taskbar_items_head(); i; i = i->next)
+    if (i->pinned && !strcmp(i->app_id, app_id)) {
+      pin = i;
+      break;
+    }
+  if (!pin || win->taskbar_item == pin)
+    return;
+  taskbar_item_t *old = win->taskbar_item;
+  win->taskbar_item = pin;
+  if (old) {
+    dock_forget(old);
+    if (dock_pressed_item == old)
+      dock_pressed_item = NULL;
+    taskbar_remove_item_ptr(old);
+  }
+  pin->win_count++;
+  pin->launching = 0;
+  if (win->flags & WIN_FLAGS_FOCUSED)
+    taskbar_set_active_item(pin);
+  dock_invalidate_layout();
+  dock_bounce(pin);
+}
+
 static void exec_cmd(const comp_cmd_t *c) {
   switch (c->type) {
   case CMD_ATTACH:
@@ -732,7 +825,7 @@ static void exec_cmd(const comp_cmd_t *c) {
     if (stack_contains(c->win)) {
       memcpy(c->win->title, c->title, sizeof(c->win->title));
       c->win->title[sizeof(c->win->title) - 1] = 0;
-      if (c->win->taskbar_item) {
+      if (c->win->taskbar_item && !c->win->taskbar_item->pinned) {
         strncpy(c->win->taskbar_item->label, c->win->title,
                 sizeof(c->win->taskbar_item->label) - 1);
         dock_invalidate_layout();
@@ -751,6 +844,13 @@ static void exec_cmd(const comp_cmd_t *c) {
       else if (!!c->win->maximized != !!c->value)
         do_toggle_maximize(c->win);
     }
+    break;
+  case CMD_DOCK_PIN:
+    do_dock_pin(c);
+    break;
+  case CMD_WIN_APP:
+    if (stack_contains(c->win))
+      do_win_app(c->win, c->app_id);
     break;
   }
 }
@@ -785,6 +885,20 @@ void compositor_set_title(window_t *win, const char *title) {
 void compositor_set_maximized(window_t *win, int maximized) {
   comp_cmd_t c = {.type = CMD_MAXIMIZE, .win = win, .node = NULL,
                   .value = maximized};
+  cmd_post(&c);
+}
+void compositor_dock_pin(const char *name, const char *app_id,
+                         const char *symbol, uint32_t color,
+                         uint32_t launch_id) {
+  comp_cmd_t c = {.type = CMD_DOCK_PIN, .color = color, .value = (int)launch_id};
+  strncpy(c.title, name, sizeof(c.title) - 1);
+  strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
+  strncpy(c.symbol, symbol, sizeof(c.symbol) - 1);
+  cmd_post(&c);
+}
+void compositor_set_app_id(window_t *win, const char *app_id) {
+  comp_cmd_t c = {.type = CMD_WIN_APP, .win = win};
+  strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
   cmd_post(&c);
 }
 void compositor_set_icon_bmp(window_t *win, tar_node_t *node) {
