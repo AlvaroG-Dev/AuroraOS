@@ -16,9 +16,11 @@ gen() { # xml nombre
 }
 gen "$PROTO/stable/xdg-shell/xdg-shell.xml" xdg-shell
 gen "$PROTO/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml" xdg-decoration-unstable-v1
+gen "$ROOT/user/aurora-wayland/org-kde-kwin-server-decoration.xml" org-kde-kwin-server-decoration
 gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora-wayland" \
     "$ROOT/user/aurora-wayland/aurora-wayland.c" "$GEN/xdg-shell-protocol.c" \
     "$GEN/xdg-decoration-unstable-v1-protocol.c" \
+    "$GEN/org-kde-kwin-server-decoration-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" \
     -lwayland-server -l:libxkbcommon.so.0 -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aurora-wayland"

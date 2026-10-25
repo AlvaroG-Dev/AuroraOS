@@ -46,6 +46,16 @@ static char *default_envp[] = {
     "LANG=C.UTF-8",
     "FONTCONFIG_FILE=/usr/share/fontconfig/fonts.conf",
     "XDG_DATA_DIRS=/usr/share",
+    // Que ningun toolkit dibuje su propia barra de titulo: la unica es la de
+    // Aurora (los que no lo respetan se recortan en aurora-wayland, ver
+    // /usr/share/aurora/csd-rules.conf).
+    "GTK_CSD=0",
+    "QT_QPA_PLATFORM=wayland",
+    "QT_WAYLAND_DISABLE_WINDOWDECORATION=1",
+    "SDL_VIDEODRIVER=wayland",
+    "SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0",
+    "MOZ_ENABLE_WAYLAND=1",
+    "ELECTRON_OZONE_PLATFORM_HINT=wayland",
     NULL,
 };
 

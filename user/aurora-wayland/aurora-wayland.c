@@ -12,6 +12,7 @@
 // No es Weston ni un escritorio aparte: no hay scanout propio (no toca DRM).
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fnmatch.h>
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
@@ -27,6 +28,7 @@
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "org-kde-kwin-server-decoration-server-protocol.h"
 #include "xdg-decoration-unstable-v1-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
 
@@ -65,10 +67,6 @@ typedef struct {
   uint32_t *pixels;
 } winsrv_blit_args_t;
 
-static int win_create(int x, int y, int w, int h, const char *title) {
-  return (int)syscall(ASYS_WIN_CREATE, (long)x, (long)y, (long)w, (long)h,
-                      title);
-}
 #define WIN_FLAGS_NODECORATION (1 << 2)
 #define WIN_FLAGS_FIXED_SIZE (1 << 5)
 #define WIN_FLAGS_RAW_INPUT (1 << 6)
@@ -100,9 +98,6 @@ static int win_set_state(int id, int state) {
 static int win_destroy(int id) { return (int)syscall(ASYS_WIN_DESTROY, (long)id); }
 static int win_poll(int id, winsrv_event_t *ev) {
   return (int)syscall(ASYS_WIN_POLL_EVENT, (long)id, ev, 0L);
-}
-static int win_raw_input(int id) {
-  return (int)syscall(ASYS_WIN_SET_RAW_INPUT, (long)id, 1L);
 }
 // Copia el rectangulo (sx, sy, w, h) del buffer `pixels` (ancho `stride`) a
 // (dx, dy) del contenido de la ventana.
@@ -172,6 +167,7 @@ struct surface {
   uint32_t *scratch;              /* copia ARGB opaca del buffer */
   size_t scratch_px;
   int buf_w, buf_h;               /* tamaño del ultimo buffer volcado */
+  int kde_ssd;                    /* org_kde_kwin_server_decoration creado */
 };
 
 struct xsurf {
@@ -207,6 +203,13 @@ struct toplevel {
   int maximized;   /* estado anunciado en configure */
   int pending_max; /* set_maximized antes de existir la ventana de Aurora */
   int pending_min; /* idem para set_minimized */
+  char app_id[64];
+  int min_w, min_h, max_w, max_h; /* set_min_size / set_max_size (0 = sin limite) */
+  // Politica de decoraciones: la unica barra de titulo debe ser la de Aurora.
+  int ssd;          /* el cliente negocio xdg-decoration / KDE server-decoration */
+  int inset_state;  /* 0 sin decidir, 1 recorte CSD activo, 2 sin recorte */
+  int in_l, in_t, in_r, in_b; /* recorte aplicado en el ultimo commit */
+  const struct csd_rule *rule;
 };
 
 struct data_source {
@@ -214,9 +217,123 @@ struct data_source {
   struct wl_array mimes; /* cadenas contiguas separadas por NUL */
 };
 
+// ---------------------------------------------------------------------------
+// Politica de decoraciones (CSD)
+//
+// Aurora siempre dibuja la barra de titulo, semaforos y sombras. Para los
+// clientes que negocian xdg-decoration (o el protocolo de KDE) basta con
+// contestar "server-side". Los que NO lo negocian (weston-terminal, GTK/Qt
+// antiguos, SDL+libdecor, Electron...) dibujan su propio marco; contra eso hay
+// tres capas, de menos a mas agresiva:
+//   1. configure con estados TILED_*: los toolkits quitan sombras y esquinas
+//      redondeadas y no pintan bordes de redimension.
+//   2. set_window_geometry: lo que queda fuera (sombra) no se vuelca.
+//   3. recorte ("inset") de la barra/bordes propios segun reglas por app_id o
+//      nombre de proceso (csd-rules.conf), solo si el cliente muestra margenes
+//      de CSD (geometria menor que el buffer).
+// ---------------------------------------------------------------------------
+#define CSD_RULES_PATH "/usr/share/aurora/csd-rules.conf"
+struct csd_rule {
+  struct wl_list link;
+  char pat[64];
+  int l, t, r, b;
+};
+static struct wl_list g_csd_rules; /* struct csd_rule.link */
+
+static void csd_rule_add(const char *pat, int l, int t, int r, int b) {
+  struct csd_rule *cr = calloc(1, sizeof(*cr));
+  if (!cr)
+    return;
+  snprintf(cr->pat, sizeof(cr->pat), "%s", pat);
+  cr->l = l; cr->t = t; cr->r = r; cr->b = b;
+  wl_list_insert(g_csd_rules.prev, &cr->link);
+}
+
+// Formato: "patron [left=N] [top=N] [right=N] [bottom=N] [border=N]" (glob sobre
+// app_id o nombre de proceso; '#' comenta). "none" desactiva el recorte.
+static void csd_rules_load(void) {
+  // Valores por defecto: toolkit de Weston (marco de 6 px y barra de 27 px).
+  csd_rule_add("org.freedesktop.weston.*", 6, 27, 6, 6);
+  csd_rule_add("weston-*", 6, 27, 6, 6);
+  FILE *f = fopen(CSD_RULES_PATH, "r");
+  if (!f)
+    return;
+  char line[256];
+  while (fgets(line, sizeof(line), f)) {
+    char *h = strchr(line, '#');
+    if (h)
+      *h = 0;
+    char pat[64];
+    int off = 0;
+    if (sscanf(line, "%63s%n", pat, &off) < 1)
+      continue;
+    int l = 0, t = 0, r = 0, b = 0;
+    for (char *tok = strtok(line + off, " \t\r\n"); tok;
+         tok = strtok(NULL, " \t\r\n")) {
+      int v;
+      if (sscanf(tok, "left=%d", &v) == 1) l = v;
+      else if (sscanf(tok, "top=%d", &v) == 1) t = v;
+      else if (sscanf(tok, "right=%d", &v) == 1) r = v;
+      else if (sscanf(tok, "bottom=%d", &v) == 1) b = v;
+      else if (sscanf(tok, "border=%d", &v) == 1) l = r = b = v;
+    }
+    // Una regla del fichero va delante de las predeterminadas.
+    struct csd_rule *cr = calloc(1, sizeof(*cr));
+    if (!cr)
+      continue;
+    snprintf(cr->pat, sizeof(cr->pat), "%s", pat);
+    cr->l = l; cr->t = t; cr->r = r; cr->b = b;
+    wl_list_insert(&g_csd_rules, &cr->link);
+  }
+  fclose(f);
+}
+
+static const struct csd_rule *csd_rule_find(struct toplevel *tl) {
+  char comm[32] = "";
+  pid_t pid = 0;
+  wl_client_get_credentials(wl_resource_get_client(tl->res), &pid, NULL, NULL);
+  if (pid > 0) {
+    char path[48];
+    snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (f) {
+      if (fgets(comm, sizeof(comm), f))
+        comm[strcspn(comm, "\n")] = 0;
+      fclose(f);
+    }
+  }
+  struct csd_rule *cr;
+  wl_list_for_each(cr, &g_csd_rules, link) {
+    if ((tl->app_id[0] && !fnmatch(cr->pat, tl->app_id, 0)) ||
+        (comm[0] && !fnmatch(cr->pat, comm, 0)))
+      return cr;
+  }
+  return NULL;
+}
+
+static int tl_is_ssd(const struct toplevel *tl) {
+  return tl->ssd || (tl->xs && tl->xs->surface && tl->xs->surface->kde_ssd);
+}
+
 static void toplevel_send_configure(struct toplevel *tl, int w, int h) {
+  // El cliente cuenta su propia decoracion dentro de la geometria: si se
+  // recorta, hay que pedirle esa parte de mas.
+  if (w > 0 && h > 0 && tl->inset_state == 1) {
+    w += tl->in_l + tl->in_r;
+    h += tl->in_t + tl->in_b;
+  }
   struct wl_array states;
   wl_array_init(&states);
+  if (!tl_is_ssd(tl) && wl_resource_get_version(tl->res) >= 2) {
+    static const uint32_t edges[4] = {
+        XDG_TOPLEVEL_STATE_TILED_LEFT, XDG_TOPLEVEL_STATE_TILED_RIGHT,
+        XDG_TOPLEVEL_STATE_TILED_TOP, XDG_TOPLEVEL_STATE_TILED_BOTTOM};
+    for (int i = 0; i < 4; i++) {
+      uint32_t *e = wl_array_add(&states, sizeof(uint32_t));
+      if (e)
+        *e = edges[i];
+    }
+  }
   if (tl->activated) {
     uint32_t *s = wl_array_add(&states, sizeof(uint32_t));
     *s = XDG_TOPLEVEL_STATE_ACTIVATED;
@@ -542,10 +659,13 @@ static void xs_map(struct xsurf *xs, int w, int h) {
     int n = g_win_count % 8;
     xs->wx = 100 + 40 * n;
     xs->wy = 70 + 30 * n + TITLEBAR_H;
-    id = win_create(xs->wx, xs->wy - TITLEBAR_H, w, h + TITLEBAR_H,
-                    xs->tl && xs->tl->title[0] ? xs->tl->title : "Wayland");
-    if (id >= 0)
-      win_raw_input(id);
+    const char *title = xs->tl && xs->tl->title[0] ? xs->tl->title : "Wayland";
+    struct toplevel *t = xs->tl;
+    // min == max: el cliente no admite redimensionar (dialogos, calculadoras).
+    int fixed = t && t->min_w > 0 && t->min_w == t->max_w && t->min_h > 0 &&
+                t->min_h == t->max_h;
+    id = win_create_ex(xs->wx, xs->wy - TITLEBAR_H, w, h + TITLEBAR_H, title,
+                       WIN_FLAGS_RAW_INPUT | (fixed ? WIN_FLAGS_FIXED_SIZE : 0));
     g_win_count++;
   }
   if (id < 0) {
@@ -610,6 +730,26 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
           if (gx + gw > w) gw = w - gx;
           if (gy + gh > h) gh = h - gy;
           if (gw <= 0 || gh <= 0) { gx = gy = 0; gw = w; gh = h; }
+        }
+        if (tl && !tl_is_ssd(tl)) {
+          // Cliente que dibuja su propio marco: recortar barra/bordes.
+          if (tl->inset_state == 0 && xs->has_geom) {
+            int margins = gx > 0 || gy > 0 || gw < w || gh < h;
+            tl->rule = csd_rule_find(tl);
+            tl->inset_state = (tl->rule && margins) ? 1 : 2;
+            fprintf(stderr, "[aurora-wayland] '%s' (app_id '%s') sin xdg-decoration: %s\n",
+                    tl->title, tl->app_id,
+                    tl->inset_state == 1 ? "recorte de su marco" : "se deja tal cual");
+          }
+          if (tl->inset_state == 1) {
+            // Maximizada, el toolkit quita bordes laterales/inferior pero deja la barra.
+            int l = tl->maximized ? 0 : tl->rule->l, r = tl->maximized ? 0 : tl->rule->r;
+            int b = tl->maximized ? 0 : tl->rule->b, t = tl->rule->t;
+            if (gw - l - r >= WIN_MIN && gh - t - b >= WIN_MIN - TITLEBAR_H) {
+              gx += l; gy += t; gw -= l + r; gh -= t + b;
+              tl->in_l = l; tl->in_t = t; tl->in_r = r; tl->in_b = b;
+            }
+          }
         }
         xs->vx = gx;
         xs->vy = gy;
@@ -1034,7 +1174,9 @@ static void tl_set_title(struct wl_client *c, struct wl_resource *r, const char 
     win_set_title(tl->xs->win_id, tl->title);
 }
 static void tl_set_app_id(struct wl_client *c, struct wl_resource *r, const char *t) {
-  (void)c; (void)r; (void)t;
+  (void)c;
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  snprintf(tl->app_id, sizeof(tl->app_id), "%s", t);
 }
 static void tl_set_parent(struct wl_client *c, struct wl_resource *r, struct wl_resource *p) {
   (void)c; (void)r; (void)p;
@@ -1048,8 +1190,15 @@ static void tl_move(struct wl_client *c, struct wl_resource *r, struct wl_resour
 static void tl_resize(struct wl_client *c, struct wl_resource *r, struct wl_resource *seat, uint32_t serial, uint32_t edges) {
   (void)c; (void)r; (void)seat; (void)serial; (void)edges;
 }
-static void tl_set_size(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {
-  (void)c; (void)r; (void)w; (void)h;
+static void tl_set_min_size(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {
+  (void)c;
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  tl->min_w = w; tl->min_h = h;
+}
+static void tl_set_max_size(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {
+  (void)c;
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  tl->max_w = w; tl->max_h = h;
 }
 static void tl_nop(struct wl_client *c, struct wl_resource *r) { (void)c; (void)r; }
 static void tl_set_maximized(struct wl_client *c, struct wl_resource *r) {
@@ -1095,8 +1244,8 @@ static const struct xdg_toplevel_interface toplevel_impl = {
     .show_window_menu = tl_show_menu,
     .move = tl_move,
     .resize = tl_resize,
-    .set_max_size = tl_set_size,
-    .set_min_size = tl_set_size,
+    .set_max_size = tl_set_max_size,
+    .set_min_size = tl_set_min_size,
     .set_maximized = tl_set_maximized,
     .unset_maximized = tl_unset_maximized,
     .set_fullscreen = tl_set_fullscreen,
@@ -1285,8 +1434,10 @@ static const struct zxdg_toplevel_decoration_v1_interface deco_impl = {
     .unset_mode = deco_unset_mode,
 };
 static void dm2_get_toplevel_decoration(struct wl_client *c, struct wl_resource *r,
-                                        uint32_t id, struct wl_resource *tl) {
-  (void)tl;
+                                        uint32_t id, struct wl_resource *tlr) {
+  struct toplevel *tl = wl_resource_get_user_data(tlr);
+  if (tl)
+    tl->ssd = 1;
   struct wl_resource *d = wl_resource_create(
       c, &zxdg_toplevel_decoration_v1_interface, wl_resource_get_version(r), id);
   if (!d) {
@@ -1310,6 +1461,52 @@ static void deco_mgr_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id)
     return;
   }
   wl_resource_set_implementation(r, &deco_mgr_impl, NULL, NULL);
+}
+
+// org_kde_kwin_server_decoration: mismo efecto para toolkits que solo conocen
+// el protocolo de KDE.
+static void kde_release(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static void kde_request_mode(struct wl_client *c, struct wl_resource *r, uint32_t m) {
+  (void)c; (void)m;
+  org_kde_kwin_server_decoration_send_mode(
+      r, ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER);
+}
+static const struct org_kde_kwin_server_decoration_interface kde_deco_impl = {
+    .release = kde_release,
+    .request_mode = kde_request_mode,
+};
+static void kde_mgr_create(struct wl_client *c, struct wl_resource *r,
+                           uint32_t id, struct wl_resource *surf) {
+  struct wl_resource *d = wl_resource_create(
+      c, &org_kde_kwin_server_decoration_interface, wl_resource_get_version(r), id);
+  if (!d) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(d, &kde_deco_impl, NULL, NULL);
+  struct surface *s = wl_resource_get_user_data(surf);
+  if (s)
+    s->kde_ssd = 1;
+  org_kde_kwin_server_decoration_send_mode(
+      d, ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER);
+}
+static const struct org_kde_kwin_server_decoration_manager_interface kde_mgr_impl = {
+    .create = kde_mgr_create,
+};
+static void kde_mgr_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(
+      c, &org_kde_kwin_server_decoration_manager_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &kde_mgr_impl, NULL, NULL);
+  org_kde_kwin_server_decoration_manager_send_default_mode(
+      r, ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER);
 }
 
 // ---------------------------------------------------------------------------
@@ -1601,6 +1798,8 @@ int main(int argc, char **argv) {
   }
   g_loop = wl_display_get_event_loop(g_display);
   wl_list_init(&g_toplevels);
+  wl_list_init(&g_csd_rules);
+  csd_rules_load();
   wl_list_init(&g_wins);
   wl_list_init(&g_pointers);
   wl_list_init(&g_keyboards);
@@ -1618,6 +1817,8 @@ int main(int argc, char **argv) {
   wl_global_create(g_display, &xdg_wm_base_interface, 3, NULL, wm_bind);
   wl_global_create(g_display, &zxdg_decoration_manager_v1_interface, 1, NULL,
                    deco_mgr_bind);
+  wl_global_create(g_display, &org_kde_kwin_server_decoration_manager_interface, 1,
+                   NULL, kde_mgr_bind);
 
   g_pump_timer = wl_event_loop_add_timer(g_loop, pump_events, NULL);
   wl_event_loop_add_signal(g_loop, SIGTERM, on_term, NULL);
