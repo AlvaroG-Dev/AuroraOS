@@ -1,5 +1,6 @@
 // kernel/usb/usb_hid.c
 #include "usb_hid.h"
+#include "../evdev.h"
 #include "../heap.h"
 #include "../input.h"
 #include "../klog.h"
@@ -32,6 +33,7 @@ typedef struct usb_hid_dev {
   int use_report_protocol;
   hid_report_t report;
   uint8_t prev_data[64];
+  uint8_t evd_prev[32]; // teclas HID pulsadas (evdev)
 
   // Última posición escalada de informes HID con coordenadas absolutas.
   int32_t mouse_abs_x;
@@ -229,6 +231,8 @@ static void usb_hid_emit(usb_hid_dev_t *h, uint8_t code, int value,
   ev.value2 = value2;
   ev.timestamp = (uint32_t)tick_count;
   input_push(&ev);
+  if (h->kind != HID_KIND_KEYBOARD)
+    evdev_mouse_report(value, value2, code);
 }
 
 static inline int hid_mods_shift(const usb_hid_dev_t *h) {
@@ -288,6 +292,26 @@ static void usb_hid_kbd_emit_key(usb_hid_dev_t *h, uint32_t usage) {
 static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
                                      int len) {
   uint32_t now = (uint32_t)tick_count;
+
+  // evdev: estado completo de teclas del informe.
+  {
+    uint8_t cur[32];
+    memset(cur, 0, sizeof(cur));
+    for (int i = 0; i < h->report.num_fields; i++) {
+      hid_field_t *f = &h->report.fields[i];
+      if (!hid_field_matches_report(h, data, f) || f->usage_page != 0x07)
+        continue;
+      if (f->usage >= 0xE0 && f->usage <= 0xE7) {
+        if (hid_field_bits(h, data, f))
+          cur[f->usage >> 3] |= (uint8_t)(1u << (f->usage & 7));
+      } else if (!f->is_variable && f->report_size == 8) {
+        uint32_t v = hid_field_bits(h, data, f);
+        if (v >= 4 && v < 256)
+          cur[v >> 3] |= (uint8_t)(1u << (v & 7));
+      }
+    }
+    evdev_hid_keys_sync(h->evd_prev, cur);
+  }
 
   // 1. Actualizar modificadores (usage 0xE0..0xE7, bits individuales).
   for (int i = 0; i < h->report.num_fields; i++) {
@@ -486,6 +510,18 @@ static void usb_hid_process_kbd_boot(usb_hid_dev_t *h, const uint8_t *data,
   h->mod_rshift = !!(mods & 0x20);
   h->mod_ralt = !!(mods & 0x40);
   h->mod_rgui = !!(mods & 0x80);
+
+  {
+    uint8_t cur[32];
+    memset(cur, 0, sizeof(cur));
+    for (int b = 0; b < 8; b++)
+      if (mods & (1u << b))
+        cur[(0xE0 + b) >> 3] |= (uint8_t)(1u << ((0xE0 + b) & 7));
+    for (int i = 2; i < 8; i++)
+      if (data[i] >= 4)
+        cur[data[i] >> 3] |= (uint8_t)(1u << (data[i] & 7));
+    evdev_hid_keys_sync(h->evd_prev, cur);
+  }
 
   uint32_t now = (uint32_t)tick_count;
 

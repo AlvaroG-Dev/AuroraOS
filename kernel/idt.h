@@ -43,14 +43,20 @@ void msi_handler(registers_t *regs);
 void irq_install_handler_ex(uint8_t irq, void (*ack)(void),
                             void (*process)(void));
 
-// Rango de vectores MSI (0x60-0x6F). 16 vectores disponibles.
+// Rango de vectores MSI (0x60-0x7F). 32 vectores disponibles.
 #define MSI_VECTOR_BASE 0x60
-#define MSI_VECTOR_COUNT 16
+#define MSI_VECTOR_COUNT 32
 #define MSI_VECTOR_END (MSI_VECTOR_BASE + MSI_VECTOR_COUNT - 1)
 
 // Instala un handler para un vector MSI.
 // El handler recibe el vector y lo usa para indexar.
 void msi_install_handler(uint8_t vector, void (*handler)(void));
+
+// Reserva/libera un vector MSI libre para un driver de kernel (0x63..0x67 y
+// 0x70..0x7F). msi_vector_alloc() devuelve el vector o -1 si no queda ninguno;
+// msi_vector_free() además desinstala el handler.
+int msi_vector_alloc(void);
+void msi_vector_free(uint8_t vector);
 
 // Wrapper que llama al handler MSI correspondiente.
 // Lo usa el dispatcher de IRQ cuando el int_num está en el rango MSI.

@@ -35,9 +35,24 @@ struct dma_sync_req {
 // ============================================================================
 #define E1000_CTRL 0x0000
 #define E1000_STATUS 0x0008
+#define E1000_CTRL_EXT 0x0018
 #define E1000_ICR 0x00C0
 #define E1000_IMS 0x00D0
 #define E1000_IMC 0x00D8
+#define E1000_EIAC_82574 0x00DC
+#define E1000_IAM 0x00E0
+#define E1000_IVAR 0x00E4
+
+// MSI-X del 82574: IVAR enruta causas -> entradas de la tabla MSI-X.
+#define E1000_CTRL_EXT_EIAME (1u << 24)
+#define E1000_CTRL_EXT_PBA_CLR (1u << 31)
+#define E1000_IVAR_VALID 0x8u // bit "valid" de cada campo de 4 bits
+#define E1000_ICR_LSC (1u << 2)
+#define E1000_ICR_RXQ0 (1u << 20)
+#define E1000_ICR_OTHER (1u << 24)
+#define E1000_EIAC_MASK_82574 0x01F00000u
+#define MSIX_ENTRY_RX 0
+#define MSIX_ENTRY_OTHER 1
 #define E1000_RCTL 0x0100
 #define E1000_TCTL 0x0400
 #define E1000_RDBAL 0x2800
@@ -106,6 +121,20 @@ static uint8_t *rx_bufs, *tx_bufs;
 
 static int fd_net0;
 static int fd_irq;
+static int fd_irq_other = -1; // solo con MSI-X: vector de enlace/errores
+static uint32_t ims_mask = 0xFFFFFFFF; // causas habilitadas en IMS
+static int use_msix;
+
+// ============================================================================
+// MSI / MSI-X (/dev/msi + /dev/irq/<vector>)
+// ============================================================================
+#define AURMSI_ALLOC_N 0x701
+#define AUR_MSI_MAX_VECS 4
+struct aur_msi_alloc_n {
+  uint8_t bus, slot, func, count;
+  uint32_t vectors[AUR_MSI_MAX_VECS];
+};
+_Static_assert(sizeof(struct aur_msi_alloc_n) == 20, "ABI aur_msi_alloc_n");
 
 static inline void mmio_wr(uint32_t reg, uint32_t val) { mmio[reg / 4] = val; }
 static inline uint32_t mmio_rd(uint32_t reg) { return mmio[reg / 4]; }
@@ -158,8 +187,76 @@ static void setup_rings(int fd_dma) {
   mmio_wr(E1000_TCTL,
           E1000_TCTL_EN | E1000_TCTL_PSP | (0x10 << 4) | (0x40 << 12));
 
-  // 6. Habilitar todas las interrupciones (MSI/Legacy)
-  mmio_wr(E1000_IMS, 0xFFFFFFFF);
+  // 6. Habilitar las interrupciones (todas con MSI/legacy; solo las causas
+  // enrutadas con MSI-X).
+  mmio_wr(E1000_IMS, ims_mask);
+}
+
+// "0000:00:02.0" -> bus/slot/func.
+static int parse_bdf(const char *bdf, uint8_t *bus, uint8_t *slot,
+                     uint8_t *func) {
+  if (strlen(bdf) < 12 || bdf[4] != ':' || bdf[7] != ':' || bdf[10] != '.')
+    return -1;
+  *bus = (uint8_t)strtoul(bdf + 5, NULL, 16);
+  *slot = (uint8_t)strtoul(bdf + 8, NULL, 16);
+  *func = (uint8_t)(bdf[11] - '0');
+  return 0;
+}
+
+static int open_vector(uint32_t vec) {
+  char path[32];
+  snprintf(path, sizeof(path), "/dev/irq/%u", vec);
+  return open(path, O_RDONLY);
+}
+
+// Intenta MSI-X con dos vectores (RX y enlace/errores) o, si el dispositivo
+// solo ofrece MSI, un vector. Deja fd_irq (y fd_irq_other) abiertos y ims_mask
+// listo. -1 = sin MSI: se sigue con la IRQ legacy. Debe llamarse tras el reset
+// y antes de habilitar IMS.
+static int msi_setup(const char *bdf) {
+  struct aur_msi_alloc_n a;
+  memset(&a, 0, sizeof(a));
+  if (parse_bdf(bdf, &a.bus, &a.slot, &a.func) != 0)
+    return -1;
+  a.count = 2;
+  int fd_msi = open("/dev/msi", O_RDWR);
+  if (fd_msi < 0 || ioctl(fd_msi, AURMSI_ALLOC_N, &a) != 0) {
+    printf("[e1000e.aur] %s: sin MSI (%s), IRQ legacy\n", bdf, strerror(errno));
+    return -1;
+  }
+  // fd_msi se queda abierto: cerrarlo libera los vectores.
+  fd_irq = open_vector(a.vectors[MSIX_ENTRY_RX]);
+  if (fd_irq < 0) {
+    perror("[e1000e.aur] open irq msi");
+    return -1;
+  }
+  if (a.count < 2) {
+    // MSI de un solo vector: mismo comportamiento que la IRQ legacy.
+    printf("[e1000e.aur] %s: MSI en vector 0x%02x\n", bdf,
+           a.vectors[MSIX_ENTRY_RX]);
+    return 0;
+  }
+  fd_irq_other = open_vector(a.vectors[MSIX_ENTRY_OTHER]);
+  if (fd_irq_other < 0) {
+    perror("[e1000e.aur] open irq msi-x otros");
+    return -1;
+  }
+
+  // Causas -> entradas de la tabla, con autolimpieza de las causas MSI-X
+  // (como el driver de Linux: el handler de RX no tiene que leer ICR).
+  uint32_t ivar =
+      ((MSIX_ENTRY_RX | E1000_IVAR_VALID) << 0) |
+      ((MSIX_ENTRY_OTHER | E1000_IVAR_VALID) << 16);
+  mmio_wr(E1000_IVAR, ivar);
+  mmio_wr(E1000_EIAC_82574, E1000_ICR_RXQ0 | E1000_ICR_OTHER);
+  mmio_wr(E1000_IAM, ~E1000_EIAC_MASK_82574 | E1000_ICR_OTHER);
+  mmio_wr(E1000_CTRL_EXT, mmio_rd(E1000_CTRL_EXT) | E1000_CTRL_EXT_PBA_CLR |
+                              E1000_CTRL_EXT_EIAME);
+  ims_mask = E1000_ICR_RXQ0 | E1000_ICR_OTHER | E1000_ICR_LSC;
+  use_msix = 1;
+  printf("[e1000e.aur] %s: MSI-X rx=0x%02x otros=0x%02x\n", bdf,
+         a.vectors[MSIX_ENTRY_RX], a.vectors[MSIX_ENTRY_OTHER]);
+  return 0;
 }
 
 // ============================================================================
@@ -250,12 +347,16 @@ static void rx_drain(void) {
 // ============================================================================
 // Main
 // ============================================================================
-int main(void) {
+int main(int argc, char **argv) {
   printf("[e1000e.aur] Iniciando driver en Ring 3...\n");
 
   // 1. Localizar el NIC y leer su IRQ del config space (offset 0x3C).
+  // aur_bus pasa el BDF del dispositivo en argv[1]; sin él (lanzado a mano)
+  // se busca el primer 8086:10d3 en sysfs.
   char bdf[64];
-  if (find_device(bdf, sizeof(bdf)) != 0) {
+  if (argc > 1 && strlen(argv[1]) < sizeof(bdf)) {
+    strcpy(bdf, argv[1]);
+  } else if (find_device(bdf, sizeof(bdf)) != 0) {
     fprintf(stderr, "[e1000e.aur] no hay 8086:10d3 en sysfs\n");
     return 1;
   }
@@ -309,14 +410,18 @@ int main(void) {
     printf("[e1000e.aur] MAC %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1],
            mac[2], mac[3], mac[4], mac[5]);
 
-  // 7. Configurar los Rings DMA
+  // 7. MSI-X/MSI (antes de setup_rings, que habilita IMS) y rings DMA
+  int have_msi = msi_setup(bdf) == 0;
   setup_rings(fd_dma);
   printf("[e1000e.aur] Rings DMA configurados\n");
 
-  // 8. IRQ: /dev/irq solo cubre las legacy 1..15. Si no hay IRQ usable,
-  // caemos a polling (epoll con timeout) en vez de fallar.
-  fd_irq = -1;
-  if (irq >= 1 && irq <= 15) {
+  // 8. IRQ legacy (solo sin MSI): /dev/irq cubre las legacy 1..15. Si no hay
+  // IRQ usable, caemos a polling (epoll con timeout) en vez de fallar.
+  if (!have_msi) {
+    fd_irq = -1;
+    fd_irq_other = -1;
+  }
+  if (!have_msi && irq >= 1 && irq <= 15) {
     snprintf(path, sizeof(path), "/dev/irq/%d", irq);
     fd_irq = open(path, O_RDONLY);
     if (fd_irq < 0)
@@ -338,6 +443,11 @@ int main(void) {
     ev.data.fd = fd_irq;
     epoll_ctl(epfd, EPOLL_CTL_ADD, fd_irq, &ev);
   }
+  if (fd_irq_other >= 0) {
+    ev.events = EPOLLIN;
+    ev.data.fd = fd_irq_other;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd_irq_other, &ev);
+  }
 
   printf("[e1000e.aur] Bucle principal iniciado. Notificando al kernel...\n");
 
@@ -351,7 +461,7 @@ int main(void) {
   while (1) {
     // Desenmascarar la IRQ en cada iteración: otros drivers (AHCI) la
     // enmascaran durante su init.
-    if (fd_irq >= 0)
+    if (fd_irq >= 0 && !have_msi)
       ioctl(fd_irq, AUR_IRQ_UNMASK, 0);
 
     // Con IRQ dormimos indefinidamente; en polling, 2 ms.
@@ -371,11 +481,13 @@ int main(void) {
         }
       }
       // IRQ: ack en el kernel
-      else if (events[i].data.fd == fd_irq) {
+      else if (events[i].data.fd == fd_irq ||
+               (fd_irq_other >= 0 && events[i].data.fd == fd_irq_other)) {
+        int fd_ev = events[i].data.fd;
         uint32_t irq_event[2];
         int64_t irq_bytes;
         do {
-          irq_bytes = read(fd_irq, irq_event, sizeof(irq_event));
+          irq_bytes = read(fd_ev, irq_event, sizeof(irq_event));
         } while (irq_bytes < 0 && errno == EINTR);
         if (irq_bytes != (int64_t)sizeof(irq_event)) {
           if (irq_bytes < 0)
@@ -388,6 +500,8 @@ int main(void) {
     // RX: tras cualquier despertar (IRQ, TX o timeout de polling) limpiamos
     // la causa y vaciamos el anillo. Leer ICR la limpia.
     (void)mmio_rd(E1000_ICR);
+    if (use_msix) // IAM enmascara OTHER/LSC al leer ICR: rearmar
+      mmio_wr(E1000_IMS, ims_mask);
     rx_drain();
   }
   return 0;

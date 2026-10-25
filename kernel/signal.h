@@ -90,4 +90,11 @@ int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
 // [4.3] Entrega una señal al proceso actual usando los regs del fault.
 int signal_deliver_from_exception(int sig, registers_t *regs);
 
+// Las mascaras internas (blocked_signals, pending_signals, sa_mask...) usan
+// el bit `sig`; el sigset_t de Linux usa el bit `sig - 1`. Toda mascara que
+// cruce la frontera con userland (sigprocmask, sigaction, signalfd,
+// epoll_pwait, ucontext, /proc) pasa por estas dos funciones.
+static inline uint64_t sigset_from_user(uint64_t u) { return u << 1; }
+static inline uint64_t sigset_to_user(uint64_t k) { return k >> 1; }
+
 #endif

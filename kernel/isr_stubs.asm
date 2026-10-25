@@ -249,7 +249,7 @@ ipi_stub_tlb:
     
 
 ; ---------------------------------------------------------------------------
-; MSI stubs. Un stub por vector (0x60-0x6F).
+; MSI stubs. Un stub por vector (0x60-0x7F).
 ;
 ; El CPU usa el vector MSI como índice en la IDT, y el stub es lo único
 ; que puede decirle al handler C qué vector disparó. Por eso hay uno por
@@ -285,6 +285,22 @@ MSI_STUB 0x6C
 MSI_STUB 0x6D
 MSI_STUB 0x6E
 MSI_STUB 0x6F
+MSI_STUB 0x70
+MSI_STUB 0x71
+MSI_STUB 0x72
+MSI_STUB 0x73
+MSI_STUB 0x74
+MSI_STUB 0x75
+MSI_STUB 0x76
+MSI_STUB 0x77
+MSI_STUB 0x78
+MSI_STUB 0x79
+MSI_STUB 0x7A
+MSI_STUB 0x7B
+MSI_STUB 0x7C
+MSI_STUB 0x7D
+MSI_STUB 0x7E
+MSI_STUB 0x7F
 
 ; ---------------------------------------------------------------------------
 ; msi_common: como irq_common, pero llama a msi_handler en vez de irq_handler.

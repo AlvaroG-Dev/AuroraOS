@@ -20,6 +20,7 @@
 #include "bus.h"
 #include "io.h"
 #include "klog.h"
+#include "paging.h"
 #include "spinlock.h"
 #include "string.h"
 #include "uaccess.h"
@@ -497,10 +498,13 @@ static int pci_bus_probe(struct device *dev) {
   return dev->driver->probe(dev);
 }
 
+static void pci_bus_remove(struct device *dev);
+
 struct bus_type pci_bus = {
     .name = "pci",
     .match = pci_bus_match,
     .probe = pci_bus_probe,
+    .remove = pci_bus_remove,
 };
 
 // ---------------------------------------------------------------------------
@@ -523,6 +527,389 @@ static void pci_format_name(struct device *d, const pci_device_t *p) {
   d->name[11] = hex[p->func & 0xF];
   d->name[12] = '\0';
 }
+// ===========================================================================
+// [FASE 6.4] Hot-plug PCI.
+//
+// Un kthread (pci-hotplug) reexplora los buses cada PCI_HOTPLUG_PERIOD_MS y
+// compara con la cache:
+//   - dispositivo nuevo: se le asignan los BARs que el firmware dejó a 0 (un
+//     dispositivo enchufado en caliente llega con los BARs reseteados) desde
+//     la ventana de su puente, se refresca sysfs y se registra en el bus, lo
+//     que dispara el probe (driver de kernel o aur_bus -> .aur).
+//   - dispositivo desaparecido: device_unregister() avisa al driver
+//     (aur_bus mata el .aur) y se libera su hueco.
+// Es sondeo, no el evento de slot de PCIe (pciehp): vale en cualquier
+// plataforma y no depende de ACPI, a costa de ~1 s de latencia.
+// ===========================================================================
+#include "kthread.h"
+#include "wait.h"
+
+#define PCI_HOTPLUG_PERIOD_MS 1000u
+
+extern void sysfs_pci_refresh(int max_bus);
+
+static uint8_t g_pci_present[PCI_MAX_DEVICES]; // 1 = el dispositivo está en el bus
+static int g_pci_max_bus;                      // último bus a explorar
+static int g_rescanning;                       // un solo rescan a la vez
+
+int pci_max_bus(void) { return g_pci_max_bus; }
+
+static int pci_cache_find(uint8_t bus, uint8_t slot, uint8_t func) {
+  for (int i = 0; i < g_pci_device_count; i++) {
+    const pci_device_t *d = &g_pci_devices[i];
+    if (g_pci_present[i] && d->bus == bus && d->slot == slot && d->func == func)
+      return i;
+  }
+  return -1;
+}
+
+// Recalcula el último bus a explorar: el mayor `subordinate` de los puentes
+// presentes (o 0 si no hay).
+static void pci_update_max_bus(void) {
+  int mb = 0;
+  for (int i = 0; i < g_pci_device_count; i++) {
+    const pci_device_t *d = &g_pci_devices[i];
+    if (g_pci_present[i] && d->header_type == PCI_HEADER_TYPE_BRIDGE &&
+        d->subordinate_bus > mb)
+      mb = d->subordinate_bus;
+  }
+  g_pci_max_bus = mb;
+}
+
+// ---------------------------------------------------------------------------
+// Ventanas de puente y asignación de BARs
+// ---------------------------------------------------------------------------
+// Ventana MMIO del puente cuyo bus secundario es `bus`. prefetch=1: la
+// prefetchable (hasta 64 bits). Devuelve 0 y [*base,*limit] (inclusive), o -1
+// si no hay puente o la ventana está cerrada (base > limit).
+static int pci_bridge_window(uint8_t bus, int prefetch, uint64_t *base,
+                             uint64_t *limit) {
+  for (int i = 0; i < g_pci_device_count; i++) {
+    const pci_device_t *br = &g_pci_devices[i];
+    if (!g_pci_present[i] || br->header_type != PCI_HEADER_TYPE_BRIDGE ||
+        br->secondary_bus != bus)
+      continue;
+    uint8_t b = br->bus, s = br->slot, f = br->func;
+    uint64_t lo, hi;
+    uint16_t rb = pci_read_config_word(b, s, f, prefetch ? 0x24 : 0x20);
+    uint16_t rl = pci_read_config_word(b, s, f, prefetch ? 0x26 : 0x22);
+    lo = (uint64_t)(rb & 0xFFF0) << 16;
+    hi = ((uint64_t)(rl & 0xFFF0) << 16) | 0xFFFFF;
+    if (prefetch && (rb & 0xF) == 1) { // ventana de 64 bits
+      lo |= (uint64_t)pci_read_config_dword(b, s, f, 0x28) << 32;
+      hi |= (uint64_t)pci_read_config_dword(b, s, f, 0x2C) << 32;
+    }
+    if (lo > hi)
+      return -1;
+    *base = lo;
+    *limit = hi;
+    return 0;
+  }
+  return -1;
+}
+
+struct pci_bar_info {
+  uint64_t addr, size;
+  int is_io, is_64, prefetch;
+};
+
+// Mide un BAR escribiendo 1s y restaurándolo. Devuelve cuántos registros
+// ocupa (1 o 2); size=0 si el BAR no existe. El llamante decide si
+// deshabilitar la decodificación antes.
+static int pci_bar_probe(const pci_device_t *d, int i, struct pci_bar_info *o) {
+  uint8_t b = d->bus, s = d->slot, f = d->func, off = (uint8_t)(0x10 + i * 4);
+  memset(o, 0, sizeof(*o));
+  uint32_t orig = pci_read_config_dword(b, s, f, off);
+  if (orig & 1) {
+    o->is_io = 1;
+    pci_write_config_dword(b, s, f, off, 0xFFFFFFFF);
+    uint32_t m = pci_read_config_dword(b, s, f, off);
+    pci_write_config_dword(b, s, f, off, orig);
+    o->addr = orig & ~0x3u;
+    o->size = (uint32_t)(-(int32_t)(m & ~0x3u)) & 0xFFFF;
+    return 1;
+  }
+  o->is_64 = ((orig >> 1) & 3) == 2;
+  o->prefetch = (orig >> 3) & 1;
+  pci_write_config_dword(b, s, f, off, 0xFFFFFFFF);
+  uint32_t m = pci_read_config_dword(b, s, f, off);
+  pci_write_config_dword(b, s, f, off, orig);
+  o->addr = orig & ~0xFu;
+  uint32_t lo = (uint32_t)(-(int32_t)(m & ~0xFu));
+  if (!o->is_64) {
+    o->size = lo;
+    return 1;
+  }
+  uint32_t orig_hi = pci_read_config_dword(b, s, f, off + 4);
+  pci_write_config_dword(b, s, f, off + 4, 0xFFFFFFFF);
+  uint32_t mh = pci_read_config_dword(b, s, f, off + 4);
+  pci_write_config_dword(b, s, f, off + 4, orig_hi);
+  o->addr |= (uint64_t)orig_hi << 32;
+  if (lo)
+    o->size = lo;
+  else if (mh)
+    o->size = ((uint64_t)(uint32_t)(~mh) + 1) << 32;
+  else
+    o->size = 0;
+  return 2;
+}
+
+// Primera dirección libre de la ventana: justo después del BAR más alto que
+// ya haya dentro de ella entre los dispositivos presentes de ese bus.
+static uint64_t pci_window_cursor(uint8_t bus, int prefetch, uint64_t base,
+                                  uint64_t limit, const pci_device_t *skip) {
+  uint64_t cur = base;
+  for (int i = 0; i < g_pci_device_count; i++) {
+    const pci_device_t *d = &g_pci_devices[i];
+    if (!g_pci_present[i] || d == skip || d->bus != bus ||
+        d->header_type != PCI_HEADER_TYPE_DEVICE)
+      continue;
+    for (int b = 0; b < 6;) {
+      struct pci_bar_info bi;
+      int n = pci_bar_probe(d, b, &bi);
+      if (!bi.is_io && bi.size && bi.addr >= base && bi.addr <= limit &&
+          bi.prefetch == prefetch && bi.addr + bi.size > cur)
+        cur = bi.addr + bi.size;
+      b += n;
+    }
+  }
+  return cur;
+}
+
+// Asigna los BARs MMIO a 0 de un dispositivo nuevo desde la ventana de su
+// puente. Los BARs de E/S no se asignan. Deja la decodificación como estaba:
+// la enciende el driver (pci_enable_io_mem).
+static void pci_assign_bars(pci_device_t *d) {
+  if (d->header_type != PCI_HEADER_TYPE_DEVICE || d->bus == 0)
+    return; // en el bus 0 no hay puente del que repartir
+  uint16_t cmd = pci_read_config_word(d->bus, d->slot, d->func, 0x04);
+  pci_write_config_word(d->bus, d->slot, d->func, 0x04,
+                        cmd & ~(PCI_CMD_IO_SPACE | PCI_CMD_MEM_SPACE));
+
+  uint64_t placed_end[2] = {0, 0}; // fin de lo ya colocado a este dispositivo
+  for (int i = 0; i < 6;) {
+    struct pci_bar_info bi;
+    int n = pci_bar_probe(d, i, &bi);
+    int cur_i = i;
+    i += n;
+    if (bi.is_io || bi.size == 0 || bi.addr != 0)
+      continue;
+    uint64_t base, limit;
+    if (pci_bridge_window(d->bus, bi.prefetch, &base, &limit) != 0) {
+      LOG_WARN("[PCI-HP] %02x:%02x.%x BAR%d (%lu B): ventana %s del puente "
+               "cerrada (¿falta mem-reserve?)",
+               d->bus, d->slot, d->func, cur_i, (unsigned long)bi.size,
+               bi.prefetch ? "prefetchable" : "MMIO");
+      continue;
+    }
+    uint64_t cursor = pci_window_cursor(d->bus, bi.prefetch, base, limit, d);
+    if (placed_end[bi.prefetch] > cursor)
+      cursor = placed_end[bi.prefetch];
+    uint64_t addr = (cursor + bi.size - 1) & ~(bi.size - 1);
+    if (addr + bi.size - 1 > limit) {
+      LOG_WARN("[PCI-HP] %02x:%02x.%x BAR%d: sin hueco en la ventana "
+               "[0x%lx,0x%lx]",
+               d->bus, d->slot, d->func, cur_i, (unsigned long)base,
+               (unsigned long)limit);
+      continue;
+    }
+    uint8_t off = (uint8_t)(0x10 + cur_i * 4);
+    uint32_t flags = pci_read_config_dword(d->bus, d->slot, d->func, off) & 0xF;
+    pci_write_config_dword(d->bus, d->slot, d->func, off,
+                           (uint32_t)addr | flags);
+    if (bi.is_64)
+      pci_write_config_dword(d->bus, d->slot, d->func, (uint8_t)(off + 4),
+                             (uint32_t)(addr >> 32));
+    placed_end[bi.prefetch] = addr + bi.size;
+    LOG_INFO("[PCI-HP] %02x:%02x.%x BAR%d -> 0x%lx (%lu B%s)", d->bus, d->slot,
+             d->func, cur_i, (unsigned long)addr, (unsigned long)bi.size,
+             bi.prefetch ? ", pref" : "");
+  }
+
+  // Releer los BARs en la ficha.
+  pci_device_t fresh;
+  if (pci_get_device(d->bus, d->slot, d->func, &fresh) == 0) {
+    memcpy(d->bar, fresh.bar, sizeof(d->bar));
+    memcpy(d->bar_is_io, fresh.bar_is_io, sizeof(d->bar_is_io));
+    memcpy(d->bar_is_64, fresh.bar_is_64, sizeof(d->bar_is_64));
+  }
+  pci_write_config_word(d->bus, d->slot, d->func, 0x04, cmd);
+}
+
+// ---------------------------------------------------------------------------
+// Rescan
+// ---------------------------------------------------------------------------
+static void pci_bus_remove(struct device *dev) {
+  if (dev->driver && dev->driver->remove)
+    dev->driver->remove(dev);
+}
+
+// ---------------------------------------------------------------------------
+// Eventos de slot de PCIe (pciehp mínimo)
+//
+// En PCIe un dispositivo no desaparece solo: pedir su retirada (botón de
+// atención / device_del) solo avisa, y es el SO quien debe apagar el slot.
+// Y un dispositivo recién enchufado puede tener el slot sin alimentar. Se
+// atiende desde el sondeo, sin interrupciones de slot.
+// ---------------------------------------------------------------------------
+#define PCIE_CAP_ID 0x10
+#define PCIE_SLOT_IMPLEMENTED (1u << 8) // PCIe Capabilities
+#define PCIE_SLTCTL 0x18
+#define PCIE_SLTSTA 0x1A
+#define PCIE_SLTSTA_ABP (1u << 0) // Attention Button Pressed
+#define PCIE_SLTSTA_PDC (1u << 3) // Presence Detect Changed
+#define PCIE_SLTSTA_PDS (1u << 6) // Presence Detect State
+#define PCIE_SLTCTL_PCC (1u << 10) // Power Controller Control: 1 = apagado
+#define PCIE_SLTCTL_PIC_MASK (3u << 8)
+#define PCIE_SLTCTL_PIC_ON (1u << 8)
+#define PCIE_SLTCTL_PIC_OFF (3u << 8)
+#define PCIE_SLTCTL_AIC_OFF (3u << 6)
+
+static void pci_slot_events(void) {
+  for (int i = 0; i < g_pci_device_count; i++) {
+    const pci_device_t *br = &g_pci_devices[i];
+    if (!g_pci_present[i] || br->header_type != PCI_HEADER_TYPE_BRIDGE)
+      continue;
+    uint8_t b = br->bus, s = br->slot, f = br->func;
+    uint8_t cap = pci_find_capability(b, s, f, PCIE_CAP_ID);
+    if (!cap || !(pci_read_config_word(b, s, f, cap + 2) & PCIE_SLOT_IMPLEMENTED))
+      continue;
+
+    uint16_t sta = pci_read_config_word(b, s, f, cap + PCIE_SLTSTA);
+    uint16_t ctl = pci_read_config_word(b, s, f, cap + PCIE_SLTCTL);
+    if (sta & PCIE_SLTSTA_PDC) {
+      // Inserción (o retirada ya consumada). Al enchufar, QEMU/el chasis puede
+      // levantar también el botón de atención: no es una petición de retirada.
+      pci_write_config_word(b, s, f, cap + PCIE_SLTSTA,
+                            PCIE_SLTSTA_PDC | PCIE_SLTSTA_ABP);
+      if ((sta & PCIE_SLTSTA_PDS) && (ctl & PCIE_SLTCTL_PCC)) {
+        ctl = (uint16_t)((ctl & ~(PCIE_SLTCTL_PIC_MASK | PCIE_SLTCTL_PCC)) |
+                         PCIE_SLTCTL_PIC_ON);
+        pci_write_config_word(b, s, f, cap + PCIE_SLTCTL, ctl);
+        LOG_INFO("[PCI-HP] %02x:%02x.%x: dispositivo presente; slot alimentado",
+                 b, s, f);
+      }
+    } else if (sta & PCIE_SLTSTA_ABP) {
+      // Petición de retirada: apagar el slot. El dispositivo desaparece del
+      // bus y el siguiente barrido lo da de baja.
+      pci_write_config_word(b, s, f, cap + PCIE_SLTSTA, PCIE_SLTSTA_ABP);
+      ctl = (uint16_t)((ctl & ~PCIE_SLTCTL_PIC_MASK) | PCIE_SLTCTL_PCC |
+                       PCIE_SLTCTL_PIC_OFF | PCIE_SLTCTL_AIC_OFF);
+      pci_write_config_word(b, s, f, cap + PCIE_SLTCTL, ctl);
+      LOG_INFO("[PCI-HP] %02x:%02x.%x: retirada pedida; slot apagado", b, s, f);
+    }
+  }
+}
+
+// Reexplora el bus. Devuelve el nº de cambios (altas + bajas).
+int pci_rescan(void) {
+  if (__atomic_exchange_n(&g_rescanning, 1, __ATOMIC_ACQ_REL))
+    return 0;
+
+  pci_slot_events();
+
+  uint8_t seen[PCI_MAX_DEVICES];
+  memset(seen, 0, sizeof(seen));
+  int added_idx[PCI_MAX_DEVICES], n_added = 0, changes = 0;
+
+  for (int b = 0; b <= g_pci_max_bus; b++) {
+    for (int slot = 0; slot < 32; slot++) {
+      if (pci_read_config_word((uint8_t)b, (uint8_t)slot, 0, 0) == 0xFFFF)
+        continue;
+      uint8_t header =
+          pci_read_config_byte((uint8_t)b, (uint8_t)slot, 0, 0x0E);
+      int nf = (header & 0x80) ? 8 : 1;
+      for (int func = 0; func < nf; func++) {
+        pci_device_t dev;
+        if (pci_get_device((uint8_t)b, (uint8_t)slot, (uint8_t)func, &dev) !=
+            0)
+          continue;
+        int idx = pci_cache_find((uint8_t)b, (uint8_t)slot, (uint8_t)func);
+        if (idx >= 0) {
+          seen[idx] = 1;
+          continue;
+        }
+        // Nuevo: hueco libre (reutiliza bajas) o al final.
+        int slot_idx = -1;
+        for (int i = 0; i < g_pci_device_count; i++)
+          if (!g_pci_present[i]) {
+            slot_idx = i;
+            break;
+          }
+        if (slot_idx < 0) {
+          if (g_pci_device_count >= PCI_MAX_DEVICES) {
+            LOG_WARN("[PCI-HP] cache llena, ignorando %02x:%02x.%x", b, slot,
+                     func);
+            continue;
+          }
+          slot_idx = g_pci_device_count;
+        }
+        pci_assign_bars(&dev);
+        g_pci_devices[slot_idx] = dev;
+        struct device *node = &g_pci_dev_nodes[slot_idx];
+        memset(node, 0, sizeof(*node));
+        pci_format_name(node, &dev);
+        node->bus = &pci_bus;
+        node->priv = &g_pci_devices[slot_idx];
+        node->id = &g_pci_devices[slot_idx];
+        if (slot_idx == g_pci_device_count)
+          g_pci_device_count++;
+        g_pci_present[slot_idx] = 1;
+        seen[slot_idx] = 1;
+        added_idx[n_added++] = slot_idx;
+        LOG_INFO("[PCI-HP] alta %s vendor=0x%04x device=0x%04x", node->name,
+                 dev.vendor_id, dev.device_id);
+        changes++;
+      }
+    }
+  }
+
+  // Bajas: presentes en la cache y no vistos.
+  for (int i = 0; i < g_pci_device_count; i++) {
+    if (!g_pci_present[i] || seen[i])
+      continue;
+    struct device *node = &g_pci_dev_nodes[i];
+    LOG_INFO("[PCI-HP] baja %s", node->name);
+    device_unregister(node);
+    g_pci_present[i] = 0;
+    changes++;
+  }
+
+  if (changes) {
+    pci_update_max_bus();
+    sysfs_pci_refresh(g_pci_max_bus);
+    for (int k = 0; k < n_added; k++)
+      device_register(&g_pci_dev_nodes[added_idx[k]]);
+  }
+  __atomic_store_n(&g_rescanning, 0, __ATOMIC_RELEASE);
+  return changes;
+}
+
+static bool pci_hotplug_never(void *arg) {
+  (void)arg;
+  return false;
+}
+
+static wait_queue_t g_hp_wq;
+
+static int pci_hotplug_thread(void *arg) {
+  (void)arg;
+  while (!kthread_should_stop()) {
+    wait_event_timeout(&g_hp_wq, pci_hotplug_never, NULL,
+                       PCI_HOTPLUG_PERIOD_MS);
+    pci_rescan();
+  }
+  return 0;
+}
+
+static void pci_hotplug_start(void) {
+  wait_queue_init(&g_hp_wq);
+  pci_update_max_bus();
+  sysfs_pci_refresh(g_pci_max_bus);
+  if (!kthread_run(pci_hotplug_thread, NULL, "pci-hotplug"))
+    LOG_WARN("[PCI-HP] no se pudo crear el kthread de hot-plug");
+}
+
 
 // ---------------------------------------------------------------------------
 // pci_init_impl: scan principal. Crea un struct device por dispositivo
@@ -577,6 +964,7 @@ static int pci_init_impl(void) {
         node->driver = NULL;
 
         g_pci_device_count++;
+        g_pci_present[idx] = 1;
 
         // Registro en el bus. Dispara bus_try_probe -> probe(dev) si
         // algún driver ya registrado matchea.
@@ -596,6 +984,9 @@ static int pci_init_impl(void) {
   // porque solo corre desde el kthread de pci_init_impl (single writer
   // durante el boot).
   drivers_probe_all();
+
+  // [FASE 6.4] A partir de aquí se vigilan altas/bajas.
+  pci_hotplug_start();
 
   return 0;
 }
@@ -645,12 +1036,243 @@ int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
 }
 
 void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func) {
-  uint8_t cap = pci_find_capability(bus, slot, func, 0x05);
+  // Libera también MSI-X si el dispositivo lo tenía activo (no-op si no).
+  pci_disable_msix(bus, slot, func);
+  uint8_t cap = pci_find_capability(bus, slot, func, PCI_CAP_ID_MSI);
   if (!cap)
     return;
   uint16_t msg_ctrl = pci_read_config_word(bus, slot, func, cap + 2);
   msg_ctrl &= ~0x0001;
   pci_write_config_word(bus, slot, func, cap + 2, msg_ctrl);
+}
+
+// ---------------------------------------------------------------------------
+// MSI-X.
+//
+// Capability (cap = offset en config space):
+//   +2  Message Control: [10:0] tamaño-1, [14] function mask, [15] enable
+//   +4  Table Offset / BIR: [2:0] BAR de la tabla, [31:3] offset en el BAR
+//   +8  PBA Offset / BIR (no se usa: no hacemos polling de pendientes)
+//
+// Entrada de la tabla (16 bytes, MMIO):
+//   +0 addr_lo  +4 addr_hi  +8 data  +12 vector control (bit0 = masked)
+// ---------------------------------------------------------------------------
+#define MSIX_CTRL_ENABLE (1u << 15)
+#define MSIX_CTRL_FMASK (1u << 14)
+#define MSIX_CTRL_TSIZE 0x07FFu
+#define MSIX_ENTRY_SIZE 16u
+#define MSIX_ENTRY_VCTRL 12u
+#define MSIX_VCTRL_MASKED 1u
+#define PCI_MSIX_MAX_DEVS 8
+
+struct msix_state {
+  uint8_t used;
+  uint8_t bus, slot, func;
+  uint8_t intx_was_enabled; // INTx lo apagamos al activar MSI-X; se restaura
+  int count;
+  volatile uint32_t *table;
+};
+
+static struct msix_state g_msix[PCI_MSIX_MAX_DEVS];
+static spinlock_t g_msix_lock;
+
+static struct msix_state *msix_find_locked(uint8_t bus, uint8_t slot,
+                                           uint8_t func) {
+  for (int i = 0; i < PCI_MSIX_MAX_DEVS; i++)
+    if (g_msix[i].used && g_msix[i].bus == bus && g_msix[i].slot == slot &&
+        g_msix[i].func == func)
+      return &g_msix[i];
+  return NULL;
+}
+
+static inline void msix_entry_write(volatile uint32_t *table, int entry,
+                                    uint32_t addr_lo, uint32_t addr_hi,
+                                    uint32_t data, uint32_t vctrl) {
+  volatile uint32_t *e = table + (size_t)entry * (MSIX_ENTRY_SIZE / 4);
+  e[0] = addr_lo;
+  e[1] = addr_hi;
+  e[2] = data;
+  e[3] = vctrl;
+}
+
+int pci_msix_table_size(uint8_t bus, uint8_t slot, uint8_t func) {
+  uint8_t cap = pci_find_capability(bus, slot, func, PCI_CAP_ID_MSIX);
+  if (!cap)
+    return 0;
+  return (pci_read_config_word(bus, slot, func, cap + 2) & MSIX_CTRL_TSIZE) + 1;
+}
+
+// Dirección física de la tabla MSI-X. 0 si el BAR no sirve. Se lee del config
+// space porque pci_device_t.bar es de 32 bits y un BAR de 64 perdería la
+// parte alta.
+static uint64_t msix_table_phys(uint8_t bus, uint8_t slot, uint8_t func,
+                                uint8_t cap) {
+  uint32_t tbl = pci_read_config_dword(bus, slot, func, cap + 4);
+  uint8_t bir = tbl & 0x7;
+  uint32_t off = tbl & ~0x7u;
+  if (bir > 5)
+    return 0;
+  uint32_t bar = pci_read_config_dword(bus, slot, func, 0x10 + bir * 4);
+  if (bar & 1) // BAR de I/O: no puede alojar la tabla
+    return 0;
+  uint64_t base = bar & ~0xFULL;
+  if (((bar >> 1) & 0x3) == 0x2) {
+    if (bir == 5)
+      return 0;
+    base |= (uint64_t)pci_read_config_dword(bus, slot, func,
+                                            0x10 + (bir + 1) * 4)
+            << 32;
+  }
+  if (base == 0)
+    return 0;
+  return base + off;
+}
+
+int pci_enable_msix(uint8_t bus, uint8_t slot, uint8_t func,
+                    const uint8_t *vectors, int count, uint8_t lapic_id) {
+  if (!vectors || count <= 0)
+    return -1;
+  uint8_t cap = pci_find_capability(bus, slot, func, PCI_CAP_ID_MSIX);
+  if (!cap)
+    return -1;
+
+  uint16_t ctrl = pci_read_config_word(bus, slot, func, cap + 2);
+  int tsize = (ctrl & MSIX_CTRL_TSIZE) + 1;
+  if (count > tsize) {
+    LOG_WARN("[PCI] %02x:%02x.%x: MSI-X pide %d vectores, tabla de %d", bus,
+             slot, func, count, tsize);
+    return -1;
+  }
+
+  unsigned long fl = spin_lock_irqsave(&g_msix_lock);
+  struct msix_state *st = msix_find_locked(bus, slot, func);
+  if (!st) {
+    for (int i = 0; i < PCI_MSIX_MAX_DEVS; i++) {
+      if (!g_msix[i].used) {
+        st = &g_msix[i];
+        st->used = 1; // reservado; se libera abajo si algo falla
+        st->bus = bus;
+        st->slot = slot;
+        st->func = func;
+        st->table = NULL;
+        st->count = 0;
+        break;
+      }
+    }
+  }
+  spin_unlock_irqrestore(&g_msix_lock, fl);
+  if (!st) {
+    LOG_WARN("[PCI] tabla de MSI-X llena");
+    return -1;
+  }
+
+  uint64_t phys = msix_table_phys(bus, slot, func, cap);
+  void *mapped = NULL;
+  if (phys)
+    mapped = mmio_map(phys, (uint64_t)tsize * MSIX_ENTRY_SIZE,
+                      PTE_WRITABLE | PTE_NOCACHE | PTE_NX);
+  if (!mapped) {
+    LOG_WARN("[PCI] %02x:%02x.%x: no se pudo mapear la tabla MSI-X (phys=%p)",
+             bus, slot, func, (void *)phys);
+    st->used = 0;
+    return -1;
+  }
+  volatile uint32_t *table = (volatile uint32_t *)mapped;
+
+  // MSI y MSI-X son excluyentes.
+  uint8_t msi_cap = pci_find_capability(bus, slot, func, PCI_CAP_ID_MSI);
+  if (msi_cap) {
+    uint16_t mc = pci_read_config_word(bus, slot, func, msi_cap + 2);
+    pci_write_config_word(bus, slot, func, msi_cap + 2, mc & ~0x0001);
+  }
+
+  // La tabla se escribe con MSI-X habilitado pero enmascarado a nivel
+  // función, para que ninguna entrada a medio programar dispare.
+  ctrl |= MSIX_CTRL_ENABLE | MSIX_CTRL_FMASK;
+  pci_write_config_word(bus, slot, func, cap + 2, ctrl);
+
+  // El acceso MMIO a la tabla exige Memory Space activo.
+  uint16_t cmd = pci_read_config_word(bus, slot, func, 0x04);
+  st->intx_was_enabled = !(cmd & PCI_CMD_INT_DISABLE);
+  cmd |= PCI_CMD_MEM_SPACE | PCI_CMD_INT_DISABLE;
+  pci_write_config_word(bus, slot, func, 0x04, cmd);
+
+  uint32_t addr_lo = 0xFEE00000U | ((uint32_t)lapic_id << 12);
+  for (int i = 0; i < count; i++)
+    msix_entry_write(table, i, addr_lo, 0, vectors[i], MSIX_VCTRL_MASKED);
+  for (int i = 0; i < count; i++)
+    table[(size_t)i * (MSIX_ENTRY_SIZE / 4) + MSIX_ENTRY_VCTRL / 4] = 0;
+  (void)table[MSIX_ENTRY_VCTRL / 4]; // flush de escrituras posteadas
+
+  ctrl &= ~MSIX_CTRL_FMASK;
+  pci_write_config_word(bus, slot, func, cap + 2, ctrl);
+
+  fl = spin_lock_irqsave(&g_msix_lock);
+  st->table = table;
+  st->count = count;
+  spin_unlock_irqrestore(&g_msix_lock, fl);
+
+  LOG_INFO("[PCI] %02x:%02x.%x: MSI-X habilitado (cap=0x%02x, %d/%d vectores, "
+           "primero=0x%02x, tabla=%p)",
+           bus, slot, func, cap, count, tsize, vectors[0], (void *)phys);
+  return 0;
+}
+
+void pci_msix_mask_vector(uint8_t bus, uint8_t slot, uint8_t func, int entry,
+                          int masked) {
+  unsigned long fl = spin_lock_irqsave(&g_msix_lock);
+  struct msix_state *st = msix_find_locked(bus, slot, func);
+  if (st && st->table && entry >= 0 && entry < st->count) {
+    volatile uint32_t *vc =
+        st->table + (size_t)entry * (MSIX_ENTRY_SIZE / 4) +
+        MSIX_ENTRY_VCTRL / 4;
+    *vc = masked ? MSIX_VCTRL_MASKED : 0;
+    (void)*vc;
+  }
+  spin_unlock_irqrestore(&g_msix_lock, fl);
+}
+
+void pci_disable_msix(uint8_t bus, uint8_t slot, uint8_t func) {
+  unsigned long fl = spin_lock_irqsave(&g_msix_lock);
+  struct msix_state *st = msix_find_locked(bus, slot, func);
+  if (!st) {
+    spin_unlock_irqrestore(&g_msix_lock, fl);
+    return;
+  }
+  struct msix_state s = *st;
+  st->used = 0;
+  st->table = NULL;
+  st->count = 0;
+  spin_unlock_irqrestore(&g_msix_lock, fl);
+
+  if (s.table)
+    for (int i = 0; i < s.count; i++)
+      s.table[(size_t)i * (MSIX_ENTRY_SIZE / 4) + MSIX_ENTRY_VCTRL / 4] =
+          MSIX_VCTRL_MASKED;
+
+  uint8_t cap = pci_find_capability(bus, slot, func, PCI_CAP_ID_MSIX);
+  if (cap) {
+    uint16_t ctrl = pci_read_config_word(bus, slot, func, cap + 2);
+    ctrl &= ~MSIX_CTRL_ENABLE;
+    pci_write_config_word(bus, slot, func, cap + 2, ctrl);
+  }
+  if (s.intx_was_enabled) {
+    uint16_t cmd = pci_read_config_word(bus, slot, func, 0x04);
+    pci_write_config_word(bus, slot, func, 0x04, cmd & ~PCI_CMD_INT_DISABLE);
+  }
+}
+
+int pci_has_msi_any(uint8_t bus, uint8_t slot, uint8_t func) {
+  return pci_find_capability(bus, slot, func, PCI_CAP_ID_MSI) ||
+         pci_find_capability(bus, slot, func, PCI_CAP_ID_MSIX);
+}
+
+// MSI de un solo vector; si el dispositivo solo tiene MSI-X, usa su entrada 0.
+int pci_enable_msi_any(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
+                       uint8_t lapic_id) {
+  if (pci_find_capability(bus, slot, func, PCI_CAP_ID_MSI))
+    return pci_enable_msi(bus, slot, func, vector, lapic_id);
+  return pci_enable_msix(bus, slot, func, &vector, 1, lapic_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -672,3 +1294,37 @@ struct driver pci_driver = {
     .init = pci_init_impl,
     .shutdown = NULL,
 };
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#include "test.h"
+
+// Sin cambios en el bus, un rescan no da altas ni bajas (y no toca la cache).
+static void test_pci_rescan_idempotent(void) {
+  int before = g_pci_device_count;
+  TEST_ASSERT_EQ(pci_rescan(), 0);
+  TEST_ASSERT_EQ(pci_rescan(), 0);
+  TEST_ASSERT_EQ(g_pci_device_count, before);
+  int present = 0;
+  for (int i = 0; i < g_pci_device_count; i++)
+    present += g_pci_present[i];
+  TEST_ASSERT_EQ(present, before);
+}
+REGISTER_TEST("pci: rescan sin cambios es idempotente", test_pci_rescan_idempotent);
+
+// El tamaño de tabla MSI-X reportado es coherente (1..2048) o 0 si no hay cap,
+// y deshabilitar MSI-X en un dispositivo que no lo activó es inocuo.
+static void test_pci_msix_table_size(void) {
+  for (int i = 0; i < g_pci_device_count; i++) {
+    const pci_device_t *d = &g_pci_devices[i];
+    int n = pci_msix_table_size(d->bus, d->slot, d->func);
+    int has = pci_find_capability(d->bus, d->slot, d->func, PCI_CAP_ID_MSIX) != 0;
+    TEST_ASSERT(has ? (n >= 1 && n <= 2048) : n == 0, "tamaño tabla MSI-X");
+    pci_disable_msix(d->bus, d->slot, d->func);
+  }
+  uint8_t v = 0x63;
+  TEST_ASSERT(pci_enable_msix(0xFF, 0x1F, 7, &v, 1, 0) != 0,
+              "MSI-X en dispositivo inexistente falla");
+}
+REGISTER_TEST("pci: tabla MSI-X coherente", test_pci_msix_table_size);

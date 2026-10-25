@@ -16,9 +16,9 @@
 // (NEW_DEVICE, CONFIGURE_EP, ...) se ejecutan síncronas, pero mientras esperan
 // su comando siguen drenando el Event Ring.
 //
-// Sin interrupciones: IMAN.IE=0 / USBCMD.INTE=0; se hace polling del Event
-// Ring (el controlador escribe los eventos igualmente). Un .aur no puede
-// habilitar MSI y /dev/irq solo cubre IRQs legacy 0..15.
+// Con MSI (/dev/msi + /dev/irq/<vector>) el bucle principal duerme hasta el
+// evento del controlador; sin capability MSI se hace polling del Event Ring
+// (el controlador escribe los eventos igualmente).
 //
 // Restricciones de recursos de un .aur: 32 fds por proceso y cerrar un fd DMA
 // libera sus páginas, por eso se piden pocas regiones grandes y nunca se
@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -142,6 +143,7 @@ _Static_assert(sizeof(struct aur_usb_done) == 40, "ABI aur_usb_done");
 
 #define USBCMD_RS (1u << 0)
 #define USBCMD_HCRST (1u << 1)
+#define USBCMD_INTE (1u << 2)
 #define USBSTS_HCH (1u << 0)
 #define USBSTS_HSE (1u << 2)
 #define USBSTS_EINT (1u << 3)
@@ -337,6 +339,8 @@ static uint32_t hcs1, hcs2, hcc1;
 static uint16_t hciversion;
 static uint8_t max_slots, max_ports, ctx_size;
 static int fd_dma = -1, fd_up = -1;
+static int ep_irq = -1;  // epoll sobre el vector MSI; -1 = polling
+static int ep_both = -1; // lo mismo + /dev/usbproxy (peticiones nuevas)
 
 static struct ring cmd_ring, evt_ring;
 static uint64_t *dcbaa;
@@ -1834,7 +1838,82 @@ static void handle_new(int qi) {
   req_finish(qi, rc, 0, out0, out1);
 }
 
-int main(void) {
+// ============================================================================
+// MSI (/dev/msi + /dev/irq/<vector>)
+// ============================================================================
+#define AURMSI_ALLOC 0x700
+struct aur_msi_alloc {
+  uint8_t bus, slot, func, _pad;
+  uint32_t vector;
+};
+_Static_assert(sizeof(struct aur_msi_alloc) == 8, "ABI aur_msi_alloc");
+
+struct aur_irq_event {
+  uint32_t irq;
+  uint32_t count;
+};
+
+static int g_irq_fd = -1;
+
+// "0000:00:03.0" -> bus/slot/func.
+static int parse_bdf(const char *bdf, uint8_t *bus, uint8_t *slot,
+                     uint8_t *func) {
+  if (strlen(bdf) < 12 || bdf[4] != ':' || bdf[7] != ':' || bdf[10] != '.')
+    return -1;
+  *bus = (uint8_t)strtoul(bdf + 5, NULL, 16);
+  *slot = (uint8_t)strtoul(bdf + 8, NULL, 16);
+  *func = (uint8_t)(bdf[11] - '0');
+  return 0;
+}
+
+// Pide MSI para el controlador y prepara ep_irq / ep_both. 0 = MSI activo;
+// -1 = sin MSI (sin capability, sin permiso...): se sigue en polling.
+static int msi_setup(const char *bdf) {
+  struct aur_msi_alloc a;
+  memset(&a, 0, sizeof(a));
+  if (parse_bdf(bdf, &a.bus, &a.slot, &a.func) != 0)
+    return -1;
+  int fd_msi = open("/dev/msi", O_RDWR);
+  if (fd_msi < 0 || ioctl(fd_msi, AURMSI_ALLOC, &a) != 0) {
+    fprintf(stderr, "[xhci.aur] %s: sin MSI (%s), usando polling\n", bdf,
+            strerror(errno));
+    return -1;
+  }
+  // fd_msi se queda abierto: cerrarlo libera el vector.
+  char path[32];
+  snprintf(path, sizeof(path), "/dev/irq/%u", a.vector);
+  g_irq_fd = open(path, O_RDONLY);
+  ep_irq = epoll_create1(0);
+  ep_both = epoll_create1(0);
+  struct epoll_event ev = {.events = EPOLLIN, .data.fd = g_irq_fd};
+  int ok = g_irq_fd >= 0 && ep_irq >= 0 && ep_both >= 0 &&
+           epoll_ctl(ep_irq, EPOLL_CTL_ADD, g_irq_fd, &ev) == 0 &&
+           epoll_ctl(ep_both, EPOLL_CTL_ADD, g_irq_fd, &ev) == 0;
+  ev.data.fd = fd_up;
+  ok = ok && epoll_ctl(ep_both, EPOLL_CTL_ADD, fd_up, &ev) == 0;
+  if (!ok) {
+    perror("[xhci.aur] /dev/irq");
+    ep_irq = ep_both = -1;
+    return -1;
+  }
+  printf("[xhci.aur] %s: MSI en vector 0x%02x\n", bdf, a.vector);
+  return 0;
+}
+
+// Duerme hasta una IRQ (o petición nueva si `with_proxy`) o `ms`.
+static void wait_event_ms(int with_proxy, int ms) {
+  struct epoll_event ev[2];
+  int n = epoll_wait(with_proxy ? ep_both : ep_irq, ev, 2, ms);
+  for (int i = 0; i < n; i++) {
+    if (ev[i].data.fd != g_irq_fd)
+      continue;
+    struct aur_irq_event e;
+    if (read(g_irq_fd, &e, sizeof(e)) < 0 && errno != EINTR)
+      perror("[xhci.aur] read irq");
+  }
+}
+
+int main(int argc, char **argv) {
   if (access(MARKER_PATH, F_OK) != 0)
     return 0; // el driver de kernel es el dueño del xHCI
 
@@ -1847,8 +1926,12 @@ int main(void) {
     return errno == EBUSY ? 0 : 1;
   }
 
+  // aur_bus pasa el BDF del controlador en argv[1]; sin él se toma el primer
+  // xHCI de sysfs.
   char bdf[64];
-  if (find_controller(bdf, sizeof(bdf)) != 0) {
+  if (argc > 1 && strlen(argv[1]) < sizeof(bdf)) {
+    strcpy(bdf, argv[1]);
+  } else if (find_controller(bdf, sizeof(bdf)) != 0) {
     // Controlador USB1/2 (UHCI/OHCI/EHCI) u otro: no es cosa nuestra.
     return 0;
   }
@@ -1864,6 +1947,13 @@ int main(void) {
     reqs[i].bidx = -1;
   if (init_controller(bdf) != 0)
     return 1;
+
+  // MSI: IMAN.IE + USBCMD.INTE. pump_events ya limpia IMAN.IP / USBSTS.EINT
+  // y reescribe ERDP.EHB, que es lo que rearma la interrupción.
+  if (msi_setup(bdf) == 0) {
+    wr32(rtb, RT_IMAN, IMAN_IE | IMAN_IP);
+    wr32(opb, OP_USBCMD, rd32(opb, OP_USBCMD) | USBCMD_INTE);
+  }
 
   struct aur_usb_hello hello = {.max_ports = max_ports, .max_slots = max_slots};
   if (ioctl(fd_up, UPROXY_HELLO, &hello) != 0) {
@@ -1929,10 +2019,17 @@ int main(void) {
       for (int i = 0; i < MAX_REQS; i++)
         if (reqs[i].state == RQ_ACTIVE && reqs[i].r.ep_type != EP_INTERRUPT)
           busy = 1;
-      if (busy)
+      if (ep_irq >= 0) {
+        // Con MSI se duerme hasta el evento del controlador (o, si hay hueco
+        // para más, hasta una petición nueva). El timeout cubre los plazos de
+        // check_timeouts() y una IRQ perdida.
+        wait_event_ms(find_free_req() >= 0 && find_free_buf() >= 0,
+                      busy ? 2 : 10);
+      } else if (busy) {
         sched_yield();
-      else
+      } else {
         usleep(500);
+      }
     }
   }
   return 0;

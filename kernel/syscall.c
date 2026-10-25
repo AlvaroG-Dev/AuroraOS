@@ -20,6 +20,8 @@
 #include "memfd.h"
 #include "net/byteorder.h"
 #include "net/inet_socket.h"
+#include "unix_socket.h"
+#include "nl_uevent.h"
 #include "net/netif.h"
 #include "net/socket.h"
 #include "paging.h"
@@ -31,6 +33,8 @@
 #include "serial.h"
 #include "signal.h"
 #include "signalfd.h"
+#include "timerfd.h"
+#include "pidfd_inotify.h"
 #include "spinlock.h"
 #include "string.h"
 #include "swap.h"
@@ -471,8 +475,12 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
     int is_sym = probe->is_symlink;
     vfs_node_free(probe);
 
-    if (no_follow && is_sym)
+    if (no_follow && is_sym) {
+      // O_PATH|O_NOFOLLOW: el fd apunta al propio symlink (systemd/libudev).
+      if (linux_flags & 0x200000)
+        return vfs_open_nofollow_for_proc(proc, kpath, O_RDONLY);
       return -ELOOP;
+    }
     if (want_dir && !is_dir)
       return -ENOTDIR;
   }
@@ -510,6 +518,8 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
     }
   }
 
+  // O_NONBLOCK viaja hasta ops->open y queda en fd->flags (F_GETFL).
+  aflags |= (linux_flags & LINUX_O_NONBLOCK);
   int fd = vfs_open_for_proc(proc, kpath, aflags);
   if (fd < 0) {
     // git/coreutils sondean ENOENT constantemente (buscan un objeto
@@ -1933,7 +1943,7 @@ static int64_t k_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a3, uint64_t a4,
   }
 
   proc->fds[nfd] = f;
-  proc->fd_cloexec_mask &= ~(1u << nfd);
+  fd_cloexec_clr(proc, nfd);
   // [FIX] ELIMINADA esta línea: el ref ya se incrementó arriba con
   // __atomic_fetch_add. Antes estaba duplicada y cada dup2 dejaba el
   // file_descriptor_t con un ref huérfano, así que el write end de un
@@ -1960,7 +1970,7 @@ static int64_t k_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags,
   if (flags & 0x80000ULL) {
     process_t *p = process_current();
     if (p)
-      p->fd_cloexec_mask |= (1u << (int)newfd);
+      fd_cloexec_set(p, (int)newfd);
   }
   return r;
 }
@@ -2184,6 +2194,8 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
       d->d_type = DT_DIR;
     else if (ent.type == VFS_CHARDEVICE)
       d->d_type = DT_CHR;
+    else if (ent.type == VFS_SYMLINK_ENT)
+      d->d_type = 10; // DT_LNK
     else
       d->d_type = DT_REG;
     memcpy(d->d_name, ent.name, namelen);
@@ -2442,12 +2454,51 @@ static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
 static int64_t k_readlinkat(uint64_t dirfd, uint64_t path, uint64_t buf,
                             uint64_t bufsiz, uint64_t a5) {
   (void)a5;
-  if ((int)dirfd != AT_FDCWD) {
-    // Path relativo a un dirfd abierto: no soportado todavía.
-    // BusyBox rara vez lo usa (suele pasar AT_FDCWD).
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (!buf || bufsiz == 0)
     return -EINVAL;
+  if (!access_ok((void *)buf, bufsiz))
+    return -EFAULT;
+
+  // Ruta vacia: readlink del propio fd (O_PATH sobre un symlink).
+  char first = 1;
+  if (path && copy_from_user(&first, (void *)path, 1) < 0)
+    return -EFAULT;
+  if (first == 0) {
+    int fdn = (int)dirfd;
+    if (fdn < 0 || fdn >= MAX_PROCESS_FDS || !proc->fds[fdn] ||
+        !proc->fds[fdn]->node)
+      return -EBADF;
+    vfs_node_t *nd = proc->fds[fdn]->node;
+    if (!nd->is_symlink)
+      return -EINVAL;
+    size_t n = strlen(nd->link_target);
+    if (n > bufsiz)
+      n = bufsiz;
+    if (copy_to_user((void *)buf, nd->link_target, n) < 0)
+      return -EFAULT;
+    return (int64_t)n;
   }
-  return k_readlink(path, buf, bufsiz, 0, 0);
+
+  if ((int)dirfd == AT_FDCWD)
+    return k_readlink(path, buf, bufsiz, 0, 0);
+
+  char p[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)dirfd, (const char *)path, p, sizeof(p));
+  if (rc != 0)
+    return rc;
+  char target[VFS_PATH_MAX];
+  rc = vfs_readlink(p, target, sizeof(target));
+  if (rc < 0)
+    return rc;
+  size_t n = (size_t)rc;
+  if (n > bufsiz)
+    n = bufsiz;
+  if (copy_to_user((void *)buf, target, n) < 0)
+    return -EFAULT;
+  return (int64_t)n;
 }
 
 // ---------- faccessat ----------
@@ -2458,11 +2509,22 @@ static int64_t k_readlinkat(uint64_t dirfd, uint64_t path, uint64_t buf,
 // reales, todo es accesible si existe).
 static int64_t k_faccessat(uint64_t dirfd, uint64_t path, uint64_t mode,
                            uint64_t flags, uint64_t a5) {
-  (void)flags;
   (void)a5;
-  if ((int)dirfd != AT_FDCWD)
-    return -EINVAL;
-  return k_access(path, mode, 0, 0, 0);
+  if ((int)dirfd == AT_FDCWD)
+    return k_access(path, mode, 0, 0, 0);
+  // Ruta relativa a un dirfd (libudev/systemd comprueban "uevent" asi).
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char p[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)dirfd, (const char *)path, p, sizeof(p));
+  if (rc != 0)
+    return rc;
+  vfs_node_t *nd = (flags & 0x100) ? vfs_lookup_nofollow(p) : vfs_lookup(p);
+  if (!nd)
+    return -ENOENT;
+  vfs_node_free(nd);
+  return 0;
 }
 
 // ---------- pipe2 ----------
@@ -2494,7 +2556,8 @@ static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
     return rc;
 
   if (flags & LINUX_O_CLOEXEC)
-    proc->fd_cloexec_mask |= (1u << rd) | (1u << wr);
+    fd_cloexec_set(proc, rd);
+    fd_cloexec_set(proc, wr);
 
   return 0;
 }
@@ -2818,6 +2881,9 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
 // Así las duraciones medidas por Bash (time) no quedan cuantizadas a 1 s.
 static volatile uint32_t g_realtime_offset_state = 0;
 static int64_t g_realtime_offset_ms = 0;
+
+static int64_t realtime_now_ms(void);
+int64_t kernel_realtime_ms(void) { return realtime_now_ms(); }
 
 static int64_t realtime_now_ms(void) {
   uint32_t state = __atomic_load_n(&g_realtime_offset_state, __ATOMIC_ACQUIRE);
@@ -3329,18 +3395,18 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     // [FD_CLOEXEC] POSIX: F_DUPFD limpia CLOEXEC en el nuevo fd.
     // F_DUPFD_CLOEXEC lo pone.
     if (cmd == F_DUPFD_CLOEXEC)
-      proc->fd_cloexec_mask |= (1u << free_fd);
+      fd_cloexec_set(proc, free_fd);
     else
-      proc->fd_cloexec_mask &= ~(1u << free_fd);
+      fd_cloexec_clr(proc, free_fd);
     return (int64_t)free_fd;
   }
   case F_GETFD:
-    return (proc->fd_cloexec_mask & (1u << kfd)) ? FD_CLOEXEC : 0;
+    return fd_cloexec_test(proc, kfd) ? FD_CLOEXEC : 0;
   case F_SETFD:
     if ((int)arg & FD_CLOEXEC)
-      proc->fd_cloexec_mask |= (1u << kfd);
+      fd_cloexec_set(proc, kfd);
     else
-      proc->fd_cloexec_mask &= ~(1u << kfd);
+      fd_cloexec_clr(proc, kfd);
     return 0;
   case F_GETFL:
     return (int64_t)f->flags;
@@ -3355,6 +3421,8 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     socket_t *s = inet_socket_from_fd(proc, kfd);
     if (s)
       socket_set_nonblock(s, (newflags & LINUX_O_NONBLOCK) ? 1 : 0);
+    if (unix_fd_is_socket(proc, kfd))
+      unix_set_nonblock(proc, kfd, (newflags & LINUX_O_NONBLOCK) != 0);
     return 0;
   }
   case 1033: /* F_ADD_SEALS */
@@ -4535,29 +4603,141 @@ static int64_t k_mprotect(uint64_t addr, uint64_t length, uint64_t prot,
 }
 
 // ---------- [4.4] mknod ----------
-static int64_t k_mknod(uint64_t path_uptr, uint64_t mode, uint64_t dev,
-                       uint64_t a4, uint64_t a5) {
-  (void)dev;
+// name_to_handle_at(2): ningun FS soporta file handles. systemd/libudev lo
+// tratan como "sin soporte" y usan fdinfo/statx para el mount id.
+static int64_t k_name_to_handle_at(uint64_t a1, uint64_t a2, uint64_t a3,
+                                   uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return -EOPNOTSUPP;
+}
+
+// truncate(2) / ftruncate(2). ftruncate opera sobre el nodo del fd (memfd,
+// tmpfs, fat32...) y exige que este abierto para escritura.
+static int64_t k_ftruncate(uint64_t fd, uint64_t length, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a3;
   (void)a4;
   (void)a5;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if ((int64_t)length < 0)
+    return -EINVAL;
+  file_descriptor_t *f = vfs_fd_get_ref(proc, (int)fd);
+  if (!f)
+    return -EBADF;
+  int64_t rc;
+  if ((f->flags & 3) == O_RDONLY)
+    rc = -EINVAL;
+  else if (!f->node || (f->node->flags & VFS_DIRECTORY))
+    rc = -EISDIR;
+  else if (!f->node->ops || !f->node->ops->truncate)
+    rc = -EINVAL;
+  else
+    rc = f->node->ops->truncate(f->node, length);
+  vfs_fd_put_ref(f);
+  return rc;
+}
 
-  int type = (int)(mode & S_IFMT);
-  if (type == 0 || type == S_IFREG) {
-    char path[VFS_PATH_MAX];
-    int rc =
-        resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
-    if (rc != 0)
-      return rc;
-    // [3.4.c] mknod(PATH, mode) usa `mode & 0777` filtrado por umask.
-    uint32_t m = ((uint32_t)mode & 0777) & ~proc->umask;
-    if (m == 0)
-      m = 0666 & ~proc->umask;
-    return vfs_create(path, m);
+// fallocate(2): solo mode 0 (reservar = crecer el fichero si hace falta) y
+// FALLOC_FL_KEEP_SIZE (no-op). Lo usan memfd/tmpfs de Wayland (os_create_
+// anonymous_file) y glibc en posix_fallocate. El resto -> EOPNOTSUPP.
+static int64_t k_fallocate(uint64_t fd, uint64_t mode, uint64_t offset,
+                           uint64_t len, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int64_t)offset < 0 || (int64_t)len <= 0)
+    return -EINVAL;
+  if (mode & ~1ULL)
+    return -EOPNOTSUPP;
+  file_descriptor_t *f = vfs_fd_get_ref(proc, (int)fd);
+  if (!f)
+    return -EBADF;
+  int64_t rc = 0;
+  if ((f->flags & 3) == O_RDONLY)
+    rc = -EBADF;
+  else if (!f->node || (f->node->flags & VFS_DIRECTORY))
+    rc = -ENODEV;
+  else if (!(mode & 1) && offset + len > f->node->size) {
+    if (!f->node->ops || !f->node->ops->truncate)
+      rc = -EOPNOTSUPP;
+    else
+      rc = f->node->ops->truncate(f->node, offset + len);
   }
-  return -EPERM;
+  vfs_fd_put_ref(f);
+  return rc;
+}
+
+static int64_t k_truncate(uint64_t path_uptr, uint64_t length, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int64_t)length < 0)
+    return -EINVAL;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return vfs_truncate(path, length);
+}
+
+// mknod / mknodat: ficheros regulares (como antes) y char devices bajo /dev
+// (root). `dev` usa la codificacion de glibc (new_encode_dev); el kernel
+// guarda (major << 8) | minor con ambos < 256.
+static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
+                        uint64_t mode, uint64_t dev) {
+  int type = (int)(mode & S_IFMT);
+  if (type != 0 && type != S_IFREG && type != S_IFCHR)
+    return -EPERM;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, dfd, (const char *)path_uptr, path,
+                           sizeof(path));
+  if (rc != 0)
+    return rc;
+  uint32_t perm = ((uint32_t)mode & 0777) & ~proc->umask;
+
+  if (type == S_IFCHR) {
+    if (proc->euid != 0)
+      return -EPERM;
+    uint64_t maj = ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfffULL);
+    uint64_t min = (dev & 0xff) | ((dev >> 12) & ~0xffULL);
+    if (maj > 255 || min > 255)
+      return -EINVAL;
+    return vfs_mknod(path, perm, (uint32_t)((maj << 8) | min));
+  }
+  // [3.4.c] mknod(PATH, mode) usa `mode & 0777` filtrado por umask.
+  if (perm == 0)
+    perm = 0666 & ~proc->umask;
+  return vfs_create(path, perm);
+}
+
+static int64_t k_mknod(uint64_t path_uptr, uint64_t mode, uint64_t dev,
+                       uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return do_mknod(proc, AT_FDCWD, path_uptr, mode, dev);
+}
+
+static int64_t k_mknodat(uint64_t dfd, uint64_t path_uptr, uint64_t mode,
+                         uint64_t dev, uint64_t a5) {
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return do_mknod(proc, (int)dfd, path_uptr, mode, dev);
 }
 
 // ---------- [4.5] prlimit64 ----------
@@ -5114,6 +5294,10 @@ static int64_t k_socket(uint64_t domain, uint64_t type, uint64_t protocol,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (domain == AF_UNIX_FAMILY)
+    return unix_sys_socket(proc, type, protocol);
+  if (domain == AF_NETLINK_FAMILY)
+    return nl_sys_socket(proc, type, protocol);
   if (domain != AF_INET)
     return -EAFNOSUPPORT;
   return inet_socket_create(proc, (int)type, (int)protocol);
@@ -5126,6 +5310,10 @@ static int64_t k_bind(uint64_t fd, uint64_t addr, uint64_t addrlen, uint64_t a4,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_bind(proc, (int)fd, addr, addrlen);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_bind(proc, (int)fd, addr, addrlen);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5144,6 +5332,8 @@ static int64_t k_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_connect(proc, (int)fd, addr, addrlen);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5164,6 +5354,10 @@ static int64_t k_sendto(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_sendto(proc, (int)fd, buf, len, flags, addr, addrlen);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_sendto(proc, (int)fd, len);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5212,6 +5406,10 @@ static int64_t k_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_recvfrom(proc, (int)fd, buf, len, flags, addr, addrlen_ptr);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_recvfrom(proc, (int)fd, buf, len, flags);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5277,6 +5475,10 @@ static int64_t k_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_setsockopt(proc, (int)fd, level, optname, optval, optlen);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_setsockopt(proc, (int)fd, level, optname, optval, optlen);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5322,6 +5524,10 @@ static int64_t k_getsockopt(uint64_t fd, uint64_t level, uint64_t optname,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_getsockopt(proc, (int)fd, level, optname, optval, optlen);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_getsockopt(proc, (int)fd, level, optname, optval, optlen);
   if (!inet_socket_from_fd(proc, (int)fd))
     return -ENOTSOCK;
   if (!optval || !optlen)
@@ -5370,6 +5576,10 @@ static int64_t k_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_getsockname(proc, (int)fd, addr, addrlen_ptr, false);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_getsockname(proc, (int)fd, addr, addrlen_ptr);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5398,6 +5608,8 @@ static int64_t k_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_getsockname(proc, (int)fd, addr, addrlen_ptr, true);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5429,6 +5641,8 @@ static int64_t k_listen(uint64_t fd, uint64_t backlog, uint64_t a3, uint64_t a4,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_listen(proc, (int)fd, (int)backlog);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5437,6 +5651,8 @@ static int64_t k_listen(uint64_t fd, uint64_t backlog, uint64_t a3, uint64_t a4,
 
 static int64_t do_accept(process_t *proc, int fd, uint64_t addr,
                          uint64_t addrlen_ptr) {
+  if (unix_fd_is_socket(proc, fd))
+    return unix_sys_accept(proc, fd, addr, addrlen_ptr, 0);
   socket_t *listener = inet_socket_from_fd(proc, fd);
   if (!listener)
     return -ENOTSOCK;
@@ -5485,11 +5701,13 @@ static int64_t k_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_accept(proc, (int)fd, addr, addrlen, flags);
   int64_t r = do_accept(proc, (int)fd, addr, addrlen);
   if (r < 0)
     return r;
   if (flags & 0x80000ULL) // SOCK_CLOEXEC
-    proc->fd_cloexec_mask |= (1u << (int)r);
+    fd_cloexec_set(proc, (int)r);
   return r;
 }
 
@@ -5500,6 +5718,10 @@ static int64_t k_sendmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_sendmsg(proc, (int)fd, msg_uptr, flags);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_sendmsg(proc, (int)fd, msg_uptr, flags);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5605,6 +5827,10 @@ static int64_t k_recvmsg(uint64_t fd, uint64_t msg_uptr, uint64_t flags,
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
+  if (unix_fd_is_socket(proc, (int)fd))
+    return unix_sys_recvmsg(proc, (int)fd, msg_uptr, flags);
+  if (nl_fd_is_socket(proc, (int)fd))
+    return nl_sys_recvmsg(proc, (int)fd, msg_uptr, flags);
   socket_t *s = inet_socket_from_fd(proc, (int)fd);
   if (!s)
     return -ENOTSOCK;
@@ -5814,21 +6040,23 @@ static int64_t k_rmdir(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
 
 static int64_t k_shutdown(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                           uint64_t a5) {
-  (void)a1;
-  (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
+  process_t *proc = process_current();
+  if (proc && unix_fd_is_socket(proc, (int)a1))
+    return unix_sys_shutdown(proc, (int)a1, (int)a2);
   return -EOPNOTSUPP;
 }
 static int64_t k_socketpair(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                             uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
   (void)a5;
-  return -EOPNOTSUPP;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (a1 != AF_UNIX_FAMILY)
+    return -EAFNOSUPPORT;
+  return unix_sys_socketpair(proc, a2, a3, a4);
 }
 
 // capget (125). iputils lo llama al arrancar. Devolvemos 0 con todo
@@ -6787,6 +7015,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETRUSAGE] = {k_getrusage, "getrusage"},
     [SYS_TIMES] = {k_times, "times"},
     [SYS_MKNOD] = {k_mknod, "mknod"},
+    [SYS_MKNODAT] = {k_mknodat, "mknodat"},
     [SYS_SETHOSTNAME] = {k_sethostname, "sethostname"},
     [SYS_UTIMENSAT] = {k_utimensat, "utimensat"},
     [SYS_SOCKET] = {k_socket, "socket"},
@@ -6945,6 +7174,20 @@ static const syscall_entry_t linux_table[] = {
     [SYS_TGKILL] = {k_tgkill, "tgkill"},                            // 234
     [SYS_SIGNALFD] = {k_signalfd, "signalfd"},
     [SYS_SIGNALFD4] = {k_signalfd4, "signalfd4"},
+    [303] = {k_name_to_handle_at, "name_to_handle_at"},
+    [439] = {k_faccessat, "faccessat2"},
+    [439] = {k_faccessat, "faccessat2"},
+    [SYS_TRUNCATE] = {k_truncate, "truncate"},
+    [SYS_FTRUNCATE] = {k_ftruncate, "ftruncate"},
+    [SYS_FALLOCATE] = {k_fallocate, "fallocate"},
+    [SYS_INOTIFY_INIT] = {k_inotify_init, "inotify_init"},
+    [SYS_INOTIFY_ADD_WATCH] = {k_inotify_add_watch, "inotify_add_watch"},
+    [SYS_INOTIFY_RM_WATCH] = {k_inotify_rm_watch, "inotify_rm_watch"},
+    [SYS_INOTIFY_INIT1] = {k_inotify_init1, "inotify_init1"},
+    [SYS_PIDFD_OPEN] = {k_pidfd_open, "pidfd_open"},
+    [SYS_TIMERFD_CREATE] = {k_timerfd_create, "timerfd_create"},
+    [SYS_TIMERFD_SETTIME] = {k_timerfd_settime, "timerfd_settime"},
+    [SYS_TIMERFD_GETTIME] = {k_timerfd_gettime, "timerfd_gettime"},
     [SYS_SETXATTR] = {k_xattr_notsup, "setxattr"},
     [SYS_LSETXATTR] = {k_xattr_notsup, "lsetxattr"},
     [SYS_FSETXATTR] = {k_xattr_notsup, "fsetxattr"},
@@ -6988,6 +7231,30 @@ static const syscall_entry_t aurora_table[] = {
 };
 #define AURORA_TABLE_N ((int)ARRAY_SIZE(aurora_table))
 
+// Traza de syscalls por nombre de proceso (depuracion). Se activa escribiendo
+// "strace=NOMBRE" en /dev/kmsg y se desactiva con "strace=".
+char g_strace_comm[32];
+
+static void strace_path(uint64_t num, uint64_t a1, uint64_t a2, char *out,
+                        size_t n) {
+  out[0] = 0;
+  uint64_t p = 0;
+  switch (num) {
+  case 2: case 4: case 6: case 21: case 89: case 80: case 82: case 83:
+  case 84: case 87: case 76:
+    p = a1;
+    break;
+  case 257: case 262: case 267: case 269: case 332: case 258: case 259:
+    p = a2;
+    break;
+  default:
+    return;
+  }
+  if (p && p < USER_LIMIT)
+    (void)strncpy_from_user(out, (const char *)p, n);
+  out[n - 1] = 0;
+}
+
 uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t num = regs->rax;
   uint64_t arg1 = regs->rdi;
@@ -7024,7 +7291,18 @@ uint64_t syscall_handler_c(registers_t *regs) {
   if (cur)
     cur->syscall_regs = regs;
 
+  char tr_path[96];
+  int tracing = 0;
+  if (g_strace_comm[0] && process_current() &&
+      strcmp(process_current()->name, g_strace_comm) == 0) {
+    tracing = 1;
+    strace_path(num, arg1, arg2, tr_path, sizeof(tr_path));
+  }
+
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
+
+  if (tracing)
+    LOG_INFO("[STRACE] %s(%lu) a=%lx,%lx,%lx '%s' -> %ld", linux_table[num < (uint64_t)LINUX_TABLE_N ? num : 0].name ? linux_table[num < (uint64_t)LINUX_TABLE_N ? num : 0].name : "?", (unsigned long)num, (unsigned long)arg1, (unsigned long)arg2, (unsigned long)arg3, tr_path, (long)ret);
 
   // Publicar el valor de retorno en el trap frame ANTES de la entrega
   // de señales, para que el ucontext que construyamos capture el rax

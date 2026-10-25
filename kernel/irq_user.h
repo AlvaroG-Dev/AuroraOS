@@ -5,8 +5,8 @@
 #include "vfs.h"
 #include <stdint.h>
 
-// Índice directo por número de IRQ. 0..15 legacy, 0x60..0x6F MSI.
-#define IRQ_USER_MAX 0x70
+// Índice directo por número de IRQ. 0..15 legacy, 0x60..0x7F MSI.
+#define IRQ_USER_MAX 0x80
 
 // VFS ops del nodo /dev/irq/<N> (char device).
 extern struct vfs_ops aur_irq_node_ops;

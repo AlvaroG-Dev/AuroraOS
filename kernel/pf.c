@@ -237,6 +237,23 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   if (is_write && !(vma->flags & PTE_WRITABLE))
     return 0;
 
+  if (vma->type == VMA_SHARED) {
+    file_descriptor_t *sf = vma->file_fd;
+    if (!sf || !sf->node || !sf->node->ops || !sf->node->ops->get_page)
+      return 0;
+    uint64_t spage = fault_addr & ~0xFFFULL;
+    uint64_t pgoff = (vma->file_offset + (spage - vma->start)) / PAGE_SIZE;
+    uint64_t sphys = 0;
+    if (sf->node->ops->get_page(sf->node, pgoff, &sphys) != 0 || !sphys)
+      return 0;
+    if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), spage,
+                           sphys,
+                           vma->flags | PTE_PRESENT | PTE_SPECIAL |
+                               PTE_SHARED_OBJ) != 0)
+      return 0;
+    return 1;
+  }
+
   uint64_t page = fault_addr & ~0xFFFULL;
   uint32_t lo, hi;
   uint64_t freq = klog_get_tsc_freq();
@@ -609,7 +626,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       if (phys) {
         paging_unmap_page_in(pml4, p);
         // [FASE 4.3] No liberar física de VMA_MMIO (BAR PCI)
-        if (v->type != VMA_MMIO)
+        if (v->type != VMA_MMIO && v->type != VMA_SHARED)
           pmm_free_page(phys);
       }
     }
@@ -944,6 +961,20 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
       if (next < 0x0000000040000000ULL)
         next = 0x0000000060000000ULL;
       uint64_t candidate = (next + 0xFFFULL) & ~0xFFFULL;
+      // Saltar los VMAs que ya ocupen el hueco (mapeos con hint, MAP_FIXED,
+      // mremap...): la lista esta ordenada por direccion creciente.
+      for (int retry = 0; retry < 4096; retry++) {
+        vma_t *hit = NULL;
+        for (vma_t *v = proc->vma_list; v; v = v->next) {
+          if (candidate < v->end && candidate + len > v->start) {
+            hit = v;
+            break;
+          }
+        }
+        if (!hit)
+          break;
+        candidate = (hit->end + 0xFFFULL) & ~0xFFFULL;
+      }
       uint64_t end = candidate + len;
       if (end < candidate || end > 0x00007F0000000000ULL)
         return -ENOMEM;
@@ -960,7 +991,11 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     if (fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd])
       return -EBADF;
     file_descriptor_t *f = proc->fds[fd];
-    if (!f->node || !(f->node->flags & VFS_FILE))
+    // Un char device solo se mapea si lo soporta de verdad (DRM: dumb
+    // buffers por get_page); el resto de char devices siguen siendo -EINVAL.
+    bool chr_mappable = f->node && (f->node->flags & VFS_CHARDEVICE) &&
+                        f->node->ops && f->node->ops->get_page;
+    if (!f->node || (!(f->node->flags & VFS_FILE) && !chr_mappable))
       return -EINVAL;
 
     if (f->node->ops && f->node->ops->mmap) {
@@ -977,7 +1012,19 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
       return (int64_t)base;
     }
 
-    if (flags & MMAP_MAP_SHARED)
+    if ((flags & MMAP_MAP_SHARED) && f->node->ops && f->node->ops->get_page) {
+      if (offset & 0xFFFULL)
+        return -EINVAL;
+      vma_t *v = vma_create_file(proc, base, base + len, pte_flags, f, offset);
+      if (!v)
+        return -ENOMEM;
+      v->type = VMA_SHARED;
+      return (int64_t)base;
+    }
+    // MAP_SHARED escribible sobre un FS sin get_page no se puede honrar. De
+    // solo lectura es indistinguible de MAP_PRIVATE (xkbcommon lo usa para
+    // leer sus reglas), asi que se trata como tal.
+    if ((flags & MMAP_MAP_SHARED) && (prot & MMAP_PROT_WRITE))
       return -ENODEV;
     if (!f->node->ops || !f->node->ops->read)
       return -EINVAL;

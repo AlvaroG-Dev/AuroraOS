@@ -12,6 +12,7 @@
 #include "pf.h"
 #include "pmm.h"
 #include "pty.h"
+#include "pidfd_inotify.h"
 #include "sched.h"
 #include "serial.h"
 #include "signalfd.h"
@@ -787,7 +788,7 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->fds[1] = vfs_create_stdio_fd(1);
   proc->fds[2] = vfs_create_stdio_fd(2);
 
-  proc->fd_cloexec_mask = 0;
+  fd_cloexec_clear_all(proc);
 
   mutex_init(&proc->mm_lock);
   mutex_init(&proc->fd_lock);
@@ -1091,7 +1092,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   for (int f = 0; f < MAX_PROCESS_FDS; f++)
     proc->fds[f] = NULL;
 
-  proc->fd_cloexec_mask = 0;
+  fd_cloexec_clear_all(proc);
 
   if (fds && parent) {
     if (fds->fd_in != -1) {
@@ -1701,6 +1702,8 @@ void process_exit(process_t *proc, int exit_code) {
 
   spin_unlock_irqrestore(&process_lock, flags);
 
+  pidfd_notify_exit();
+
   if (parent_task) {
     if (parent_proc) {
       __atomic_fetch_or(&parent_proc->pending_signals, 1ULL << SIGCHLD,
@@ -1908,6 +1911,14 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           // no a una copia que perdería el enlace al hardware. Además,
           // phys_to_virt(BAR) (p.ej. 0x810a0000 del e1000e) cae FUERA
           // de la ventana física de 512MB → #PF en el memcpy.
+          // Paginas de objetos compartidos (memfd MAP_SHARED): mismo fisico.
+          if (pte & PTE_SHARED_OBJ) {
+            if (paging_map_page_in(child_pml4, virt, pte & PTE_FRAME,
+                                   pte & (0xFFF | PTE_NX)) != 0)
+              return -1;
+            continue;
+          }
+
           if (pte & PTE_NOCACHE) {
             uint64_t mmio_phys = pte & PTE_FRAME;
             uint64_t mmio_flags = pte & (0xFFF | PTE_NX);
@@ -2536,8 +2547,8 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   paging_free_user_space(old_pml4_phys);
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
-    if (proc->fd_cloexec_mask & (1u << f)) {
-      proc->fd_cloexec_mask &= ~(1u << f);
+    if fd_cloexec_test(proc, f) {
+      fd_cloexec_clr(proc, f);
       if (proc->fds[f])
         vfs_close_for_proc(proc, f);
     }
@@ -2755,4 +2766,10 @@ process_t *process_find_by_pml4(uint64_t pml4_phys) {
   }
   spin_unlock_irqrestore(&process_lock, flags);
   return found;
+}
+// [FASE 4.7] Lanza un proceso huérfano (ppid 0) con argv; lo usa aur_bus para
+// pasar el BDF al .aur.
+process_t *process_load_args(const char *path, int argc,
+                             const char *const *argv) {
+  return process_load_with_ppid_args(path, argc, argv, 0, NULL, 0);
 }

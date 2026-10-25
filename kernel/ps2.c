@@ -7,11 +7,14 @@
 
 #include "ps2.h"
 #include "idt.h"
+#include "evdev.h"
 #include "input.h"
+#include "aur_bus.h"
 #include "klog.h"
 #include "sched.h"
 #include "serial.h"
 #include "tty.h" // [TTY]
+#include "vfs.h"
 #include "wait.h"
 #include <stdint.h>
 
@@ -76,14 +79,7 @@ static bool ps2_has_byte(void *arg) {
 // ===========================================================================
 // IRQ handlers
 // ===========================================================================
-static void ps2_irq_common(int is_mouse) {
-  uint8_t status = inb(0x64);
-  if (!(status & 0x01))
-    return;
-  if ((status & 0x20) != (is_mouse ? 0x20 : 0))
-    return;
-
-  uint8_t data = inb(0x60);
+static void ps2_enqueue(uint8_t data, int is_mouse) {
   uint16_t next = (byte_head + 1) % PS2_BYTE_QUEUE_SIZE;
   if (next != byte_tail) {
     byte_queue[byte_head] = data;
@@ -91,6 +87,38 @@ static void ps2_irq_common(int is_mouse) {
     byte_head = next;
     wake_up_all(&ps2_wq);
   }
+}
+
+static void ps2_irq_common(int is_mouse) {
+  uint8_t status = inb(0x64);
+  if (!(status & 0x01))
+    return;
+  if ((status & 0x20) != (is_mouse ? 0x20 : 0))
+    return;
+
+  ps2_enqueue(inb(0x60), is_mouse);
+}
+
+// [FASE 5.5] Bytes crudos que entrega ps2.aur por /dev/inputproxy. En modo
+// usuario no se instalan los handlers de IRQ, así que el único productor de
+// la cola es el proceso driver (un único propietario, ver input_proxy.c).
+void ps2_feed(int is_mouse, const uint8_t *data, size_t len) {
+  for (size_t i = 0; i < len; i++)
+    ps2_enqueue(data[i], is_mouse);
+}
+
+// [FASE 5.5] Modo "PS/2 en Ring 3". Si existe /usr/lib/aur/ps2.user (initrd,
+// ver `make PS2_USER=1`), el kernel no toca el i8042: lo hace ps2.aur. El
+// kernel conserva la traducción scancode -> TTY/input. Se evalúa una vez.
+int ps2_user_mode(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    vfs_node_t *n = vfs_lookup("/usr/lib/aur/ps2.user");
+    cached = n ? 1 : 0;
+    if (n)
+      vfs_node_free(n);
+  }
+  return cached;
 }
 
 static void ps2_keyboard_irq(void) { ps2_irq_common(0); }
@@ -223,6 +251,10 @@ static void process_keyboard_byte(uint8_t sc) {
     return;
   }
 
+  // evdev: pulsaciones y liberaciones con prefijo extendido (0xE1 ignorado).
+  if (sc != 0xE1)
+    evdev_ps2_key(code, extended_pending, pressed);
+
   // [6.1] Publicar evento en input subsystem solo en press. Es lo que
   // consume el compositor (aunque hoy solo mira el ratón; el teclado
   // va por tty). En release no hay evento.
@@ -335,6 +367,7 @@ static void process_mouse_byte(uint8_t data) {
     ev.value2 = raw_y;
     ev.timestamp = (uint32_t)tick_count;
     input_push(&ev);
+    evdev_mouse_report(raw_x, raw_y, btn);
     break;
   }
   }
@@ -369,6 +402,18 @@ static int ps2_init_impl(void) {
   LOG_INFO("[PS2] Inicializando controlador PS/2...");
 
   wait_queue_init(&ps2_wq);
+
+  if (ps2_user_mode()) {
+    if (aur_bus_launch("/usr/lib/aur/ps2.aur") == 0) {
+      LOG_INFO("[PS2] modo usuario activo, cediendo el i8042 a ps2.aur");
+      if (!sched_create_task(ps2_thread)) {
+        LOG_ERR("[PS2] No se pudo crear la tarea de procesamiento");
+        return -1;
+      }
+      return 0;
+    }
+    LOG_WARN("[PS2] no se pudo lanzar ps2.aur; usando el driver de kernel");
+  }
 
   wait_input_buffer_empty();
   outb(0x64, 0xA8);

@@ -38,22 +38,9 @@ static int aur_bus_match_manifest(struct device *dev,
       if (!pdev)
         continue;
 
-      // Si el manifiesto especifica vendor/device y no coinciden, saltar
-      if (m->vendor != 0 && m->vendor != pdev->vendor_id)
-        continue;
-      if (m->device != 0 && m->device != pdev->device_id)
-        continue;
-
-      // Si se especifica class_mask, comprobar clase y subclase
-      if (m->class_mask != 0) {
-        if ((pdev->class_id & m->class_mask) != (m->class_id & m->class_mask))
-          continue;
-        if ((pdev->subclass_id & m->class_mask) !=
-            (m->subclass_id & m->class_mask))
-          continue;
-      }
-
-      return 1; // ¡Match!
+      if (aur_match_pci(m, pdev->vendor_id, pdev->device_id, pdev->class_id,
+                        pdev->subclass_id))
+        return 1; // ¡Match!
     }
   }
   return 0;
@@ -151,11 +138,14 @@ static int aur_bus_scan_once(void) {
 #define AUR_SUP_BACKOFF_MS 500u  // se duplica con cada reinicio seguido
 #define AUR_SUP_STABLE_MS 30000u // vivo tanto tiempo => se resetea el contador
 
-enum { SUP_FREE = 0, SUP_RUNNING, SUP_BACKOFF, SUP_GIVEN_UP };
+// SUP_STOPPING: el dispositivo se quitó; ya se mató al driver y solo falta
+// recogerlo (sin reiniciarlo).
+enum { SUP_FREE = 0, SUP_RUNNING, SUP_BACKOFF, SUP_GIVEN_UP, SUP_STOPPING };
 
 struct aur_sup {
   int state;
   char path[VFS_PATH_MAX];
+  char arg[32]; // argv[1] (BDF del dispositivo); "" = sin argumento
   uint32_t pid;
   int restarts;
   uint64_t started;  // tick del último lanzamiento
@@ -209,6 +199,8 @@ static enum sup_action aur_sup_step(struct aur_sup *s, uint64_t now, int reap,
   return SUP_NONE;
 }
 
+static process_t *aur_spawn(const char *path, const char *arg);
+
 static bool aur_sup_never(void *arg) {
   (void)arg;
   return false;
@@ -225,6 +217,18 @@ static int aur_sup_thread(void *arg) {
       int state = s->state;
       uint32_t pid = s->pid;
       spin_unlock_irqrestore(&g_sup_lock, fl);
+      if (state == SUP_STOPPING) {
+        // Dispositivo retirado: recoger al driver muerto y liberar la entrada
+        // (sea cual sea su código de salida, no se reinicia).
+        int c = 0;
+        if (process_reap_orphan(pid, &c) != -EBUSY) {
+          fl = spin_lock_irqsave(&g_sup_lock);
+          if (s->state == SUP_STOPPING && s->pid == pid)
+            s->state = SUP_FREE;
+          spin_unlock_irqrestore(&g_sup_lock, fl);
+        }
+        continue;
+      }
       if (state != SUP_RUNNING && state != SUP_BACKOFF)
         continue;
 
@@ -236,13 +240,16 @@ static int aur_sup_thread(void *arg) {
       fl = spin_lock_irqsave(&g_sup_lock);
       enum sup_action act = aur_sup_step(s, now, reap, code);
       char path[VFS_PATH_MAX];
-      if (act == SUP_RESTART_NOW)
+      char arg[sizeof(s->arg)];
+      if (act == SUP_RESTART_NOW) {
         memcpy(path, s->path, sizeof(path));
+        memcpy(arg, s->arg, sizeof(arg));
+      }
       spin_unlock_irqrestore(&g_sup_lock, fl);
 
       if (act != SUP_RESTART_NOW)
         continue;
-      process_t *p = process_load(path);
+      process_t *p = aur_spawn(path, arg);
       fl = spin_lock_irqsave(&g_sup_lock);
       s->restarts++;
       s->started = sched_get_ticks();
@@ -264,7 +271,15 @@ static int aur_sup_thread(void *arg) {
   return 0;
 }
 
-static void aur_sup_register(const char *path, uint32_t pid) {
+// Lanza un .aur con argv = {path[, arg]}. Mismo camino para el primer
+// arranque y para los reinicios del supervisor.
+static process_t *aur_spawn(const char *path, const char *arg) {
+  const char *argv[2] = {path, arg};
+  return process_load_args(path, arg[0] ? 2 : 1, argv);
+}
+
+static void aur_sup_register(const char *path, const char *arg,
+                             uint32_t pid) {
   unsigned long fl = spin_lock_irqsave(&g_sup_lock);
   struct aur_sup *s = NULL;
   for (int i = 0; i < AUR_SUP_MAX; i++) {
@@ -277,6 +292,7 @@ static void aur_sup_register(const char *path, uint32_t pid) {
   if (s) {
     memset(s, 0, sizeof(*s));
     strncpy(s->path, path, sizeof(s->path) - 1);
+    strncpy(s->arg, arg, sizeof(s->arg) - 1);
     s->pid = pid;
     s->started = sched_get_ticks();
     s->state = SUP_RUNNING;
@@ -299,6 +315,17 @@ static void aur_sup_register(const char *path, uint32_t pid) {
   }
 }
 
+int aur_bus_launch(const char *path) {
+  process_t *p = aur_spawn(path, "");
+  if (!p) {
+    LOG_ERR("[AUR-BUS] Fallo al lanzar %s", path);
+    return -ENOENT;
+  }
+  LOG_INFO("[AUR-BUS] lanzado %s (pid %u)", path, p->pid);
+  aur_sup_register(path, "", p->pid);
+  return 0;
+}
+
 // Función probe: se llama cuando el bus decide probar este driver contra un
 // dispositivo. Solo loguea (INFO) cuando algún .aur coincide; "ningún .aur"
 // es el caso normal de casi todos los dispositivos PCI.
@@ -318,9 +345,9 @@ static int aur_bus_probe(struct device *dev) {
       pci_enable_bus_mastering(pdev);
       pci_enable_io_mem(pdev);
     }
-    process_t *p = process_load(g_aur_mods[i].path);
+    process_t *p = aur_spawn(g_aur_mods[i].path, dev->name);
     if (p) {
-      aur_sup_register(g_aur_mods[i].path, p->pid);
+      aur_sup_register(g_aur_mods[i].path, dev->name, p->pid);
       return 0;
     }
     LOG_ERR("[AUR-BUS] Fallo al lanzar %s", g_aur_mods[i].path);
@@ -341,11 +368,41 @@ static const pci_device_id_t aur_pci_id_table[] = {
     },
     {0}};
 
+// [FASE 6.4] El dispositivo se retiró del bus (hot-plug): matar a su .aur y
+// dejar de supervisarlo. Los proxies ya toleran la muerte del driver (al
+// cerrarse el fd abortan lo pendiente y dan de baja lo que registró).
+static void aur_bus_remove(struct device *dev) {
+  uint32_t kill_pids[AUR_SUP_MAX];
+  int n = 0;
+
+  unsigned long fl = spin_lock_irqsave(&g_sup_lock);
+  for (int i = 0; i < AUR_SUP_MAX; i++) {
+    struct aur_sup *s = &g_sup[i];
+    if (s->state == SUP_FREE || s->state == SUP_STOPPING ||
+        strcmp(s->arg, dev->name) != 0)
+      continue;
+    if (s->state == SUP_RUNNING) {
+      s->state = SUP_STOPPING;
+      kill_pids[n++] = s->pid;
+    } else {
+      s->state = SUP_FREE; // en backoff o abandonado: nada vivo que matar
+    }
+  }
+  spin_unlock_irqrestore(&g_sup_lock, fl);
+
+  for (int i = 0; i < n; i++) {
+    LOG_INFO("[AUR-BUS] %s retirado: matando al driver (pid %u)", dev->name,
+             kill_pids[i]);
+    process_kill(kill_pids[i], 9);
+  }
+}
+
 struct driver aur_bus_driver = {
     .name = "aur_bus",
     .bus = &pci_bus,
     .id_table = aur_pci_id_table,
     .probe = aur_bus_probe,
+    .remove = aur_bus_remove,
 };
 
 // ---------------------------------------------------------------------------
@@ -399,3 +456,28 @@ static void test_aur_sup_step(void) {
   TEST_ASSERT(s.state == SUP_FREE, "código 0 libera la entrada");
 }
 REGISTER_TEST("aur-sup: máquina de estados de reinicio", test_aur_sup_step);
+
+static void test_aur_info_allows_pci(void) {
+  struct aur_module_info info;
+  memset(&info, 0, sizeof(info));
+
+  // Sin entradas de bus: sin restricción (aur_selftest).
+  TEST_ASSERT(aur_info_allows_pci(&info, 0x8086, 0x10d3, 2, 0), "sin match");
+
+  // e1000e: vendor/device exactos.
+  info.bus_match_count = 1;
+  info.bus_match[0] = (aur_bus_match_t){
+      .bus = AUR_BUS_PCI, .vendor = 0x8086, .device = 0x10d3};
+  TEST_ASSERT(aur_info_allows_pci(&info, 0x8086, 0x10d3, 2, 0), "propio NIC");
+  TEST_ASSERT(!aur_info_allows_pci(&info, 0x8086, 0x2922, 1, 6), "otro device");
+  TEST_ASSERT(!aur_info_allows_pci(&info, 0x1234, 0x10d3, 2, 0), "otro vendor");
+
+  // ahci: por clase 01:06.
+  info.bus_match[0] = (aur_bus_match_t){
+      .bus = AUR_BUS_PCI, .class_id = 1, .subclass_id = 6, .class_mask = 0xff};
+  TEST_ASSERT(aur_info_allows_pci(&info, 0x8086, 0x2922, 1, 6), "HBA AHCI");
+  TEST_ASSERT(aur_info_allows_pci(&info, 0x1b36, 0x0001, 1, 6), "otro HBA");
+  TEST_ASSERT(!aur_info_allows_pci(&info, 0x8086, 0x10d3, 2, 0), "NIC no");
+  TEST_ASSERT(!aur_info_allows_pci(&info, 0x8086, 0x1, 1, 1), "subclase");
+}
+REGISTER_TEST("aur: manifiesto limita BARs mapeables", test_aur_info_allows_pci);

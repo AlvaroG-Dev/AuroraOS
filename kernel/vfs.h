@@ -15,6 +15,7 @@
 #define VFS_FILE 0x01
 #define VFS_DIRECTORY 0x02
 #define VFS_CHARDEVICE 0x04
+#define VFS_SYMLINK_ENT 0x08 // solo en vfs_dirent_t.type (getdents -> DT_LNK)
 
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
@@ -53,7 +54,7 @@
 #define VFS_W_OK 2
 #define VFS_R_OK 4
 
-#define MAX_PROCESS_FDS 32
+#define MAX_PROCESS_FDS 256
 
 // Longitud máxima de un path normalizado (coincide con name[] de vfs_node).
 #define VFS_PATH_MAX 128
@@ -118,6 +119,10 @@ typedef struct vfs_ops {
   int (*create)(vfs_node_t *dir, const char *name, uint32_t mode);
   int (*mkdir)(vfs_node_t *dir, const char *name, uint32_t mode);
   int (*unlink)(vfs_node_t *dir, const char *name);
+  // mknod(2) de un char device: crea `name` en `dir` con permisos `mode` y
+  // numero de dispositivo `rdev` ((major<<8)|minor). NULL => -EPERM.
+  int (*mknod)(vfs_node_t *dir, const char *name, uint32_t mode,
+               uint32_t rdev);
 
   int (*truncate)(vfs_node_t *node, uint64_t new_size);
 
@@ -191,6 +196,10 @@ typedef struct vfs_ops {
   int (*mmap)(vfs_node_t *node, struct process *proc, uint64_t vaddr,
               uint64_t length, uint64_t prot, uint64_t flags,
               uint64_t offset);
+  // mmap(MAP_SHARED) por demand paging: devuelve la pagina fisica `pgoff` del
+  // objeto (estable mientras el nodo viva; el VMA mantiene una ref al nodo).
+  // -errno si esta fuera de rango (el proceso muere, como un SIGBUS).
+  int (*get_page)(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -362,6 +371,7 @@ int vfs_symlink(const char *target, const char *linkpath);
 //   -ENAMETOOLONG nombre no cabe (p.ej. >8.3 en FAT32 sin LFN)
 //   -EINVAL      path inválido (raíz, "..", etc.)
 int vfs_create(const char *path, uint32_t mode);
+int vfs_mknod(const char *path, uint32_t mode, uint32_t rdev);
 int vfs_mkdir(const char *path, uint32_t mode);
 int vfs_unlink(const char *path);
 
@@ -408,6 +418,12 @@ int vfs_resolve_path(const char *cwd, const char *in, char *out, size_t outlen);
 // --- FDs por proceso ---
 int vfs_open_for_proc(void *proc_ptr, const char *path, int flags);
 int vfs_close_for_proc(void *proc_ptr, int fd);
+int vfs_open_nofollow_for_proc(void *proc_ptr, const char *path, int flags);
+// Referencias a file_descriptor_t (SCM_RIGHTS): get toma una ref sobre el fd
+// del proceso, put la suelta, install consume la ref en el primer fd libre.
+file_descriptor_t *vfs_fd_get_ref(void *proc_ptr, int fd);
+void vfs_fd_put_ref(file_descriptor_t *f);
+int vfs_fd_install_ref(void *proc_ptr, file_descriptor_t *f, int cloexec);
 int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count);
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
                            size_t count);

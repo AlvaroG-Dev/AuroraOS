@@ -68,6 +68,33 @@ typedef struct {
   int64_t maxrss_kb;    // RSS máximo en KB (0)
 } proc_rusage_t;
 
+// Bitmap de close-on-exec por fd (un bit por entrada de fds[]).
+typedef struct {
+  uint64_t w[(MAX_PROCESS_FDS + 63) / 64];
+} fdmask_t;
+
+#define FDMASK_OK(fd) ((fd) >= 0 && (fd) < MAX_PROCESS_FDS)
+#define fd_cloexec_set(p, fd)                                                  \
+  do {                                                                         \
+    int _fd = (int)(fd);                                                       \
+    if (FDMASK_OK(_fd))                                                        \
+      (p)->fd_cloexec_mask.w[_fd >> 6] |= 1ULL << (_fd & 63);                  \
+  } while (0)
+#define fd_cloexec_clr(p, fd)                                                  \
+  do {                                                                         \
+    int _fd = (int)(fd);                                                       \
+    if (FDMASK_OK(_fd))                                                        \
+      (p)->fd_cloexec_mask.w[_fd >> 6] &= ~(1ULL << (_fd & 63));               \
+  } while (0)
+#define fd_cloexec_test(p, fd)                                                 \
+  (FDMASK_OK((int)(fd)) &&                                                     \
+   ((p)->fd_cloexec_mask.w[((int)(fd)) >> 6] >> (((int)(fd)) & 63)) & 1ULL)
+#define fd_cloexec_clear_all(p)                                                \
+  do {                                                                         \
+    for (unsigned _i = 0; _i < sizeof((p)->fd_cloexec_mask.w) / 8; _i++)       \
+      (p)->fd_cloexec_mask.w[_i] = 0;                                          \
+  } while (0)
+
 typedef struct process {
   uint32_t pid;
   uint32_t ppid;
@@ -212,7 +239,7 @@ typedef struct process {
   // POSIX: el flag es POR FD, no por file_descriptor_t compartido.
   // Dos procesos que comparten el mismo file_descriptor_t (vía fork)
   // tienen bitmaps independientes. Por eso vive en process_t, no en fd.
-  uint32_t fd_cloexec_mask;
+  fdmask_t fd_cloexec_mask;
 
   // En struct process_t:
   char exe_path[VFS_PATH_MAX]; // path completo del binario en execve
@@ -246,6 +273,8 @@ void process_init(void);
 process_t *process_spawn(const char *name, const void *elf_data,
                          size_t elf_size);
 process_t *process_load(const char *path);
+process_t *process_load_args(const char *path, int argc,
+                             const char *const *argv);
 process_t *process_spawn_child(process_t *parent, const char *path);
 
 int process_waitpid(process_t *parent, int32_t pid, int *status_out,

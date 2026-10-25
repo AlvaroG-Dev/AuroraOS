@@ -61,7 +61,6 @@ las desviaciones y los siguientes pasos.
 *   [x] **3.3 Integración con VFS**: Implementado. `kur_load_all("/lib/modules")` escanea
     el initrd y carga los módulos al arrancar (Fase 3.3 cerrada).
 *   [x] **3.4 Recarga en caliente (modprobe/rmmod)**: Implementado con la capa Linux (`kernel/kmod_sys.c`): syscalls `init_module`/`finit_module`/`delete_module` (solo euid 0; `-EBUSY` si otro módulo usa sus exports; parámetros y `rmmod -f` ignorados), `/proc/modules` y `/sys/module/<m>/{initstate,refcnt,taint,holders/}`. Se usan los `modprobe`/`rmmod`/`insmod`/`lsmod` reales de kmod 31 (copiados con `scripts/fetch-bin.sh`). `scripts/mk-kmod-tree.sh` (regla `kmod-tree`, parte de `make drivers`) genera `/lib/modules/0.1.0/` con los `.kur` como `kernel/<m>.ko` e índices de `depmod` calculados sobre módulos stub que replican exports/imports. *Validado en QEMU:* `modprobe hello2` carga `hello` primero; `rmmod hello` falla con "in use by: hello2"; `modprobe -r hello2` descarga ambos; `lsmod` y módulo inexistente correctos. *Limitaciones:* añadir un módulo exige reconstruir el árbol (no hay depmod en el guest); sin `modinfo`/`depmod` en el guest; el `.kur` no tiene parámetros ni `modalias`, así que no hay autocarga por hardware; la release está fijada a `0.1.0` (`uname -r`).
-    falta la herramienta de userspace para invocarlo y la integración con `bus_add_driver`.
 
 ---
 
@@ -78,16 +77,29 @@ las desviaciones y los siguientes pasos.
     `ioctl(DMA_ALLOC)` devuelve un buffer de páginas físicamente contiguas.
     *Validado escribiendo un patrón, sincronizando con clflush y leyéndolo de vuelta.*
 *   [x] **4.5 Primitivas IRQ**: Implementado (`irq_user.c`). `/dev/irq/<N>` con `epoll`
-    y `AUR_CAP_IRQ`. Solo cubre IRQs legacy 0..15 y vectores MSI 0x60..0x6F; un `.aur`
-    no puede habilitar MSI por sí mismo ni usar INTx >15 (ahci.aur usa polling por esto).
+    y `AUR_CAP_IRQ`. Cubre IRQs legacy 0..15 (las ISA 1/3/4/8/12 como edge/active-high, el
+    resto como INTx de PCI) y los vectores MSI. Un `.aur` con `AUR_CAP_MSI` pide MSI para
+    SU dispositivo (el del manifiesto) con `/dev/msi` (`AURMSI_ALLOC`, `msi_user.c`): el
+    kernel reserva un vector del pool 0x68..0x6F, programa la capability y lo devuelve; el
+    `.aur` lo atiende con `/dev/irq/<vector>` + `epoll` (solo puede abrirlo quien lo reservó;
+    0x60..0x67 son de drivers de kernel). Al cerrar el fd se desactiva MSI y se libera.
+    *Validado en QEMU:* `ahci.aur` (q35) y `xhci.aur` (`nec-usb-xhci,msi=on,msix=off`) con
+    MSI, bulk round-trip y teclado USB; test `msi_user: pool de vectores`; suite 174/174.
+    *Limitaciones:* solo MSI de un vector (no MSI-X: `qemu-xhci` por defecto solo ofrece
+    MSI-X, y ahí `xhci.aur` cae a polling igual que el driver de kernel), siempre al BSP,
+    sin INTx >15 para `.aur` genéricos (el e1000e.aur usa su INTx legacy).
 *   [~] **4.6 Control Channel (VFS node)**: Resuelto por subsistema en lugar de
     `/dev/aur/<driver>/` genérico: `/dev/net0` (`net_proxy.c`) y `/dev/blkproxy`
     (`block_proxy.c`, Fase 5.1). Falta un canal genérico para drivers de otras clases.
 *   [x] **4.7 Bus matching user**: Implementado (`aur_bus.c`). Driver fallback del bus PCI
     que escanea `/usr/lib/aur/*.aur`, compara el manifiesto y lanza el `.aur`; habilita
-    bus mastering y MEM/IO antes de lanzarlo. Limitación: una instancia por dispositivo
-    declinado y el `.aur` no recibe qué BDF le tocó (e1000e.aur lo lleva hardcodeado;
-    ahci.aur escanea sysfs y gestiona todos los controladores).
+    bus mastering y MEM/IO antes de lanzarlo. Lanza una instancia por dispositivo declinado
+    y le pasa el BDF en `argv[1]` (`process_load_args()`); el supervisor (6.3) lo guarda y
+    lo reutiliza al relanzar. `e1000e.aur` y `xhci.aur` usan ese BDF (sin él, si se lanzan
+    a mano, escanean sysfs). `ahci.aur` ignora el argumento a propósito: una sola instancia
+    abre `/dev/blkproxy` y gestiona todos los HBA (las demás salen con código 0).
+    *Validado en QEMU q35:* `argc=2` en e1000e/xhci/ahci, DHCP con lease, xHCI con teclado
+    y ratón; suite 172/172.
 
 ---
 
@@ -100,15 +112,15 @@ las desviaciones y los siguientes pasos.
     El submit es asíncrono (`-EINPROGRESS` + `bio_endio`); los bios grandes se trocean en
     el kernel a `max_sectors`. Si el driver muere, los bios pendientes fallan con `-EIO`
     y los discos se dan de baja (la memoria del `block_device_t` no se libera, a propósito).
-*   [x] **5.2 ahci.aur**: Implementado, **opt-in** (`make AHCI_USER=1`, que instala el
+*   [x] **5.2 ahci.aur**: Implementado, **por defecto** (`AHCI_USER=1`; `make AHCI_USER=0` usa el driver de kernel). Instala el
     marcador `/usr/lib/aur/ahci.user`; con él `ahci.c` del kernel cede el controlador y
-    el arranque espera a `BLKP_READY` antes de escanear particiones). Sin el marcador el
+    el arranque espera a `BLKP_READY` antes de escanear particiones. Sin el marcador el
     driver de kernel sigue siendo el dueño. `ahci.aur` gestiona todos los HBA AHCI,
     IDENTIFY, READ/WRITE DMA EXT y FLUSH EXT.
     *Validado en QEMU q35:* `sda` aparece vía `ahci.aur`, FAT32 se monta en `/data` y el
     test `blkproxy: round-trip multi-chunk` (1100 sectores, write+flush+read+restore)
     pasa; suite completa 165/165.
-    *Limitaciones v1:* un comando a la vez (slot 0, sin NCQ), polling (sin IRQ/MSI), solo
+    *Limitaciones v1:* un comando a la vez (slot 0, sin NCQ), MSI con respaldo a polling (sin MSI-X), solo
     LBA48 y discos ATA (no ATAPI/CD), sin hot-plug ni reset de HBA, bounce buffer de 256 KiB
     (dos copias por transferencia). Si `ahci.aur` muere, los discos desaparecen y no hay
     reinicio automático del driver (Fase 6.3).
@@ -117,7 +129,7 @@ las desviaciones y los siguientes pasos.
     fijo: localiza el NIC por vendor/device en sysfs, lee la IRQ del config space (cae a
     polling con `epoll` + timeout si no está en 1..15; *ese camino no está probado*) y
     comunica la MAC real al kernel con `NETP_SET_MAC` (validado con una MAC distinta).
-*   [x] **5.4 USB split (xhci.aur)**: Implementado, **opt-in** (`make XHCI_USER=1`, marcador
+*   [x] **5.4 USB split (xhci.aur)**: Implementado, **por defecto** (`XHCI_USER=1`; `=0` usa el de kernel, marcador
     `/usr/lib/aur/xhci.user`; sin él `xhci.c` del kernel sigue siendo el dueño). El kernel
     conserva `usb_core`, hubs y los drivers de clase; `xhci.aur` implementa lo que hay bajo
     `usb_hcd_t` (anillos, contextos, comandos, eventos, reset de puertos) y `usb_proxy.c`
@@ -131,13 +143,30 @@ las desviaciones y los siguientes pasos.
     `xhci.aur: round-trip bulk` (1100 sectores por bulk IN/OUT); suite 166/166. También con
     `e1000e.aur` + `ahci.aur` + `xhci.aur` a la vez.
     *Limitaciones v1:* sin streams/UAS (`bulk_submit`/`bulk_xfer_phys` quedan a NULL, así
-    que `usb_uas.c` no se activa), sin isócronos, sin interrupciones (polling del Event Ring
-    cada ~0,5 ms), sin MSI, hasta 30 slots, un solo controlador, sin detach (igual que el
+    que `usb_uas.c` no se activa), sin isócronos, interrupciones solo por MSI (sin él, polling del Event Ring
+    cada ~0,5 ms; sin MSI-X), hasta 30 slots, un solo controlador, sin detach (igual que el
     driver de kernel), `scratchpad` implementado pero sin probar (QEMU no lo pide) y nada
     verificado en hardware real. Hay 2 copias por transferencia (kernel↔bounce 64 KiB).
     *Arreglo colateral:* `sysfs` truncaba los BARs de 64 bits (`resourceN` apuntaba a la
     dirección baja); ahora guarda la física completa (`bar_phys`).
-*   [ ] **5.5 Input user**: Pendiente.
+*   [x] **5.5 Input user (ps2.aur)**: Implementado, **por defecto** (`PS2_USER=1`; `=0` usa el de kernel, marcador
+    `/usr/lib/aur/ps2.user`; sin él `ps2.c` del kernel sigue siendo el dueño). `ps2.aur`
+    (`drivers/aur/ps2`, caps `IRQ|INPUT_DEVICE`) inicializa el i8042, atiende IRQ 1 y 12 con
+    `epoll` sobre `/dev/irq/N` y entrega los bytes crudos al kernel por `/dev/inputproxy`
+    (`input_proxy.c`, ABI en `aur.h`: `INPUTP_PORT_IN/OUT/FEED`). Un .aur no tiene E/S de
+    puertos, así que el kernel los presta con lista blanca (solo 0x60 y 0x64). La traducción
+    scancode → TTY/`input_push` y el parseo de paquetes de ratón se quedan en el kernel
+    (`ps2_feed()` alimenta la misma cola/tarea que los IRQ handlers), igual que 5.4 conserva
+    las clases USB. `ps2_init` lanza el `.aur` con el nuevo `aur_bus_launch()` (supervisado,
+    6.3); si no puede lanzarlo vuelve al driver de kernel.
+    *Arreglo colateral:* `irq_user.c` enrutaba toda IRQ 0..15 como level/active-low (PCI);
+    las ISA (1, 3, 4, 8, 12) usan ahora la redirección por defecto (edge/active-high).
+    *Validado en QEMU q35:* teclado (`sendkey`) escribe en la terminal y el ratón
+    (`mouse_move`) mueve el cursor; test `inputproxy: validación de puertos y feed`; suite
+    172/172. *Limitaciones v1:* solo PS/2 (el `usbhid` sigue en el kernel sobre `usb_core`),
+    sin LEDs/autorepeat/reconfiguración, ~3 syscalls por byte, si el driver muere el
+    teclado/ratón quedan sin servicio hasta que `aur-sup` lo relance (el controlador no se
+    reinicializa de forma distinta), sin probar en hardware real ni con KVM desactivado.
 *   [ ] **5.6 GFX / winsrv.aur**: Pendiente (aunque `winsrv` ya corre como tarea de kernel/init).
 
 ---
@@ -146,7 +175,29 @@ las desviaciones y los siguientes pasos.
 *   [x] **6.1 Timeouts por op**: Hecho para los proxies con peticiones bloqueantes. `blkproxy` (`block_proxy.c`): plazo fijo de 30 s por petición. `usbproxy` (`usb_proxy.c`): plazo = `timeout_ms` de la petición + 5 s de gracia (control y bulk/interrupt), 15 s para el resto de operaciones (NEW_DEVICE, CONFIGURE_EP, PORT_*...), y **sin plazo** si `timeout_ms == 0` (el interrupt-IN de un HID espera indefinidamente a propósito). En ambos un watchdog (`blkp-wd` / `uproxy-wd`, vivo mientras el driver está conectado) falla con `-ETIMEDOUT` las vencidas, pendientes o en vuelo; el plazo se renueva al entregar la petición al driver y un COMPLETE tardío recibe `-ENOENT`. `net_proxy` no necesita nada: sus colas no tienen llamantes bloqueados esperando respuesta. Tests: `blkproxy: watchdog expira peticiones`, `usbproxy: plazos por operación`, `usbproxy: watchdog expira peticiones` (los de reap se saltan si el proxy está en uso). *Validado en QEMU* con `XHCI_USER=1` (storage + teclado + ratón, 75 s): round-trip bulk OK y ningún timeout espurio. *Limitaciones:* un watchdog no mata ni reinicia al driver colgado (6.2); si el .aur completa una petición justo cuando vence, el llamante ya puede haber vuelto (ventana de ~1 s, igual que en `close`).
 *   [x] **6.2 Watchdog por driver**: Implementado sobre 6.1 y 6.3. Cuando el watchdog de `blkproxy`/`usbproxy` ve vencer una petición, el driver se da por colgado: se le envía SIGKILL (`process_kill()`, nuevo; una vez por conexión) y `aur-sup` lo relanza. *Validado en QEMU* con `AHCI_USER=1`: `kill -STOP` a `ahci.aur` + `dd if=/dev/sda` → `dd` falla con `ETIMEDOUT` a los 30 s, el driver muere (código 137), se relanza (0,5 s) y `sda` se vuelve a registrar. *Limitaciones:* un plazo vencido por un disco lento (>30 s) mata un driver sano; no hay watchdog para `net0` (sin peticiones con plazo) ni para drivers lanzados fuera de `aur_bus` (no se relanzan); tras el reinicio los montajes anteriores de `sda` siguen apuntando al disco viejo. *Arreglo colateral:* la prueba de 6.3 había enviado SIGFPE en vez de SIGKILL (la máscara de señales del kernel indexa por número de señal, no por número-1).
 *   [x] **6.3 Driver restart**: Implementado (`aur_bus.c`, hilo `aur-sup`). Los `.aur` lanzados por el bus PCI se supervisan: si terminan con código != 0 (fallo o señal) se recogen con `process_reap_orphan()` (nuevo; antes los huérfanos con ppid 0 quedaban como zombi para siempre) y se relanzan con backoff exponencial 0,5 s·2^n; tras 5 fallos seguidos (el contador se resetea si el driver aguanta 30 s) se abandona. Salida con código 0 = voluntaria, no se reinicia. Máquina de estados cubierta por el test `aur-sup: máquina de estados de reinicio`. *Validado en QEMU:* dos señales fatales (SIGFPE, código 136) a `e1000e.aur` y recuperación completa cada vez (NIC, MAC, DHCP con lease). *Limitaciones:* solo supervisa drivers lanzados por `aur_bus` (no los de `init`); no probado con `xhci.aur` ni con `ahci.aur` caído (los discos se re-registran con el mismo nombre, pero los montajes previos quedan obsoletos); sin watchdog de cuelgue (6.2), solo detecta muerte.
-*   [ ] **6.4 Hot-plug PCI**: Pendiente (USB hot-plug ya funciona en xhci).
+*   [x] **6.4 Hot-plug PCI**: Implementado (`pci.c`, `bus.c`, `sysfs.c`, `aur_bus.c`). Un kthread
+    `pci-hotplug` reexplora los buses cada 1 s (hasta el mayor `subordinate` de los puentes) y
+    compara con la cache (`pci_rescan()`, también invocable).
+    *Alta:* se asignan los BARs MMIO que el dispositivo trae a 0 desde la ventana (MMIO o
+    prefetchable) de su puente, se refresca sysfs (`sysfs_pci_refresh()`, que ahora cubre buses
+    >0 y marca `gone` lo retirado) y se registra en el bus: probe de kernel o `aur_bus` →
+    `.aur` con su BDF. *Baja:* `device_unregister()` llama ahora a `bus->remove` (solo PCI lo
+    define) y `aur_bus_remove` mata al `.aur` (SIGKILL) y lo deja de supervisar
+    (`SUP_STOPPING`, sin reinicio); los proxies ya limpian al morir el driver.
+    *PCIe:* un mínimo de pciehp por sondeo: con el botón de atención (`device_del`) se apaga
+    el slot (PCC/indicadores) para que el dispositivo desaparezca, y con un cambio de presencia
+    se alimenta. *Validado en QEMU q35* (`-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support
+    =off`, `pcie-root-port mem-reserve=4M`): dos ciclos `device_add e1000e` / `device_del` →
+    BARs repartidos, `e1000e.aur` con DHCP (de paso, ejercita su modo polling sin IRQ), y al
+    retirarlo muere el driver; arranque normal sin altas/bajas falsas; test `pci: rescan sin
+    cambios es idempotente`; suite 175/175.
+    *Limitaciones:* sondeo (~1 s), no las interrupciones de slot; con el hot-plug ACPI de q35
+    (por defecto, `_EJ0` en AML) la retirada no la atiende nadie; la ventana del puente debe
+    estar reservada por el firmware (`mem-reserve`), sin ventana cerrada → los BARs se quedan
+    sin asignar (aviso en el log); los BARs de E/S no se asignan; no se asignan buses a puentes
+    nuevos ni se enumeran hot-plugs de puentes; el espacio se reparte tras el BAR más alto
+    presente (sin compactar huecos); si cae `ahci.aur` por quitar un HBA, los demás
+    HBA pierden servicio (una sola instancia gestiona todos); solo se probó con e1000e.
 
 ---
 
@@ -167,9 +218,14 @@ las desviaciones y los siguientes pasos.
     se puede reintroducir un anillo asíncrono para ese driver concreto.
 2.  **`kur_load_all`**: En lugar de tener un `/boot/modules.list`, el loader escanea
     directamente `/lib/modules` en el initrd.
-3.  **Capabilities**: En lugar de un bitmap complejo con verificación por dispositivo,
-    las caps son globales al proceso (ej: `AUR_CAP_MMIO` permite mapear *cualquier* BAR PCI).
-    Para un sistema de producción, se debería añadir una lista de BDFs permitidos en el manifiesto.
+3.  **Capabilities**: las caps son globales al proceso, pero `AUR_CAP_MMIO` ya no permite
+    mapear *cualquier* BAR: `sysfs_resource_mmap` comprueba que el dispositivo coincida con
+    alguna entrada `bus_match` del manifiesto del `.aur` (vendor/device o clase, la misma
+    regla que usa `aur_bus`; `aur_info_allows_pci`). En vez de una lista de BDFs literales,
+    que cambian con la topología, se restringe por identidad del dispositivo. Un manifiesto
+    sin entradas de bus (p. ej. `aur_selftest`, lanzado a mano) sigue sin restricción. No
+    cubre DMA: `AUR_CAP_DMA` sigue permitiendo reservar memoria física a cualquier `.aur`
+    (IOMMU, 8.0).
 
 
 Diferencia Teórica (.kur vs .aur)

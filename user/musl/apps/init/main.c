@@ -18,9 +18,11 @@
 //     launcher (taskbar, Ctrl+Alt+T, ...). Pendiente Fase 4.
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -55,7 +57,35 @@ static pid_t spawn_terminal(void) {
   return pid;
 }
 
+// Si existe /system/boot-tests, ejecuta cada linea con sh y manda su salida a
+// /dev/kmsg (serie). Sirve para tests automaticos en QEMU sin teclado.
+static void run_boot_tests(void) {
+  FILE *f = fopen("/system/boot-tests", "r");
+  if (!f)
+    return;
+  char line[256];
+  while (fgets(line, sizeof(line), f)) {
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+      line[--n] = 0;
+    if (!n || line[0] == '#')
+      continue;
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "{ %s; } > /dev/kmsg 2>&1", line);
+    pid_t pid = fork();
+    if (pid == 0) {
+      char *argv[] = {"bash", "-c", cmd, NULL};
+      execve("/bin/bash", argv, default_envp);
+      _exit(127);
+    }
+    if (pid > 0)
+      waitpid(pid, NULL, 0);
+  }
+  fclose(f);
+}
+
 int main(void) {
+  run_boot_tests();
   pid_t term = spawn_terminal();
 
   for (;;) {

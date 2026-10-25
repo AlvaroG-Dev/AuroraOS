@@ -42,4 +42,10 @@ int aur_loader_parse_streaming(elf_read_fn read, void *ctx,
                                uint64_t file_size,
                                struct aur_module_info *out);
 
+int aur_match_pci(const aur_bus_match_t *m, uint16_t vendor, uint16_t device,
+                  uint8_t class_id, uint8_t subclass_id);
+int aur_info_allows_pci(const struct aur_module_info *info, uint16_t vendor,
+                        uint16_t device, uint8_t class_id,
+                        uint8_t subclass_id);
+
 #endif  // KERNEL_AUR_LOADER_H

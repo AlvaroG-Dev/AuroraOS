@@ -12,7 +12,7 @@
 #include <stddef.h>
 
 // ---------------------------------------------------------------------------
-// Tamaño de la tabla: 0x60 + 16 = 0x70 = 112 entradas.
+// Tamaño de la tabla: 0x60 + 32 = 0x80 = 128 entradas.
 // ---------------------------------------------------------------------------
 #define IRQ_THREADED_MAX (MSI_VECTOR_END + 1)
 
@@ -32,7 +32,7 @@ static spinlock_t g_lock;
 static int g_initialized = 0;
 
 // ---------------------------------------------------------------------------
-// Rango de irq válido: 0..15 (IOAPIC) o 0x60..0x6F (MSI).
+// Rango de irq válido: 0..15 (IOAPIC) o 0x60..0x7F (MSI).
 // ---------------------------------------------------------------------------
 static int irq_is_valid(unsigned int irq) {
   if (irq <= 15)
@@ -88,7 +88,7 @@ static int irq_thread_fn_main(void *arg) {
 // ---------------------------------------------------------------------------
 // Dispatch unificado. Lo llaman:
 //   - irq_handler() (vector 32..47) tras traducir irq = int_num - 32
-//   - msi_handler() (vector 0x60..0x6F) con irq = int_num
+//   - msi_handler() (vector 0x60..0x7F) con irq = int_num
 //
 // Devuelve:
 //   IRQ_NONE      → no hay handler threaded registrado (el caller debe

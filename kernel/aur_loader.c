@@ -168,3 +168,37 @@ int aur_loader_parse_streaming(elf_read_fn read, void *ctx,
   kfree(shdrs);
   return -ENOENT;
 }
+
+// [FASE 4.7] ¿Coincide un dispositivo PCI con una entrada del manifiesto?
+// Misma regla que usa aur_bus para decidir a quién lanzar.
+int aur_match_pci(const aur_bus_match_t *m, uint16_t vendor, uint16_t device,
+                  uint8_t class_id, uint8_t subclass_id) {
+  if (m->bus != AUR_BUS_PCI)
+    return 0;
+  if (m->vendor != 0 && m->vendor != vendor)
+    return 0;
+  if (m->device != 0 && m->device != device)
+    return 0;
+  if (m->class_mask != 0) {
+    if ((class_id & m->class_mask) != (m->class_id & m->class_mask))
+      return 0;
+    if ((subclass_id & m->class_mask) != (m->subclass_id & m->class_mask))
+      return 0;
+  }
+  return 1;
+}
+
+// ¿Puede este .aur mapear los BARs de ese dispositivo? Con manifiesto sin
+// entradas de bus (p. ej. aur_selftest, lanzado a mano) no hay restricción;
+// si declara dispositivos, solo esos.
+int aur_info_allows_pci(const struct aur_module_info *info, uint16_t vendor,
+                        uint16_t device, uint8_t class_id,
+                        uint8_t subclass_id) {
+  if (info->bus_match_count <= 0)
+    return 1;
+  for (int i = 0; i < info->bus_match_count; i++)
+    if (aur_match_pci(&info->bus_match[i], vendor, device, class_id,
+                      subclass_id))
+      return 1;
+  return 0;
+}

@@ -1021,6 +1021,9 @@ void tmpfs_init(void) {
       LOG_ERR("[TMPFS] mount /run: %d", rc);
       tmpfs_destroy(run);
     } else {
+      // XDG_RUNTIME_DIR=/run/user/<uid> (Wayland: socket y locks).
+      vfs_mkdir("/run/user", 0755);
+      vfs_mkdir("/run/user/0", 0700);
       LOG_INFO("[TMPFS] /run montado (4 MB)");
     }
   }

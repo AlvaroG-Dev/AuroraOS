@@ -40,6 +40,9 @@
 #define AUR_CAP_BUS_MATCH (1u << 4)
 #define AUR_CAP_BLOCK_DEVICE (1u << 5)
 #define AUR_CAP_NETIF (1u << 6)
+// (1u << 7) = AUR_CAP_USB_HCD, definido más abajo junto a /dev/usbproxy.
+#define AUR_CAP_INPUT_DEVICE (1u << 8)
+#define AUR_CAP_MSI (1u << 9)
 
 // Tipo de bus para matching.
 #define AUR_BUS_NONE 0
@@ -268,6 +271,98 @@ _Static_assert(sizeof(struct aur_usb_fetch) == 88,
 _Static_assert(sizeof(struct aur_usb_done) == 40,
                "aur_usb_done debe ser 40 bytes");
 
+// ---------------------------------------------------------------------------
+// [FASE 5.5] /dev/inputproxy — driver de entrada (PS/2) en Ring 3.
+//
+// Requiere AUR_CAP_INPUT_DEVICE; un único propietario. ps2.aur es dueño del
+// controlador i8042 (puertos 0x60/0x64 + IRQ 1/12 vía /dev/irq/N). Como un
+// .aur no tiene acceso a puertos de E/S, el kernel los presta con una lista
+// blanca mínima (solo 0x60 y 0x64). Lo que el .aur lee del controlador lo
+// devuelve al kernel como bytes crudos: la traducción scancode -> tecla/TTY
+// y el parseo de paquetes de ratón siguen en el kernel (ps2.c / input.c),
+// igual que 5.4 conserva las clases USB en el kernel.
+//
+//   INPUTP_PORT_IN  (struct aur_input_port*)  inb(port) -> .value
+//   INPUTP_PORT_OUT (struct aur_input_port*)  outb(port, value)
+//   INPUTP_FEED     (struct aur_input_feed*)  entrega bytes crudos
+//
+// Si el proceso cierra el fd (o muere) el kernel se queda sin driver de
+// entrada hasta que el supervisor relance el .aur.
+// ---------------------------------------------------------------------------
+#define INPUTP_PORT_IN 0x600
+#define INPUTP_PORT_OUT 0x601
+#define INPUTP_FEED 0x602
+
+#define AUR_INPUT_KBD 0   // aur_input_feed.kind: bytes de teclado (Set 1)
+#define AUR_INPUT_MOUSE 1 // bytes del ratón (paquetes de 3)
+#define AUR_INPUT_MAX_FEED 64
+
+struct aur_input_port {
+  uint16_t port;
+  uint8_t value; // out de PORT_IN, in de PORT_OUT
+  uint8_t _pad;
+};
+
+struct aur_input_feed {
+  uint32_t kind; // AUR_INPUT_*
+  uint32_t len;  // 1..AUR_INPUT_MAX_FEED
+  uint8_t data[AUR_INPUT_MAX_FEED];
+};
+
+_Static_assert(sizeof(struct aur_input_port) == 4,
+               "aur_input_port debe ser 4 bytes");
+_Static_assert(sizeof(struct aur_input_feed) == 72,
+               "aur_input_feed debe ser 72 bytes");
+
+
+// ---------------------------------------------------------------------------
+// [FASE 4.5b] /dev/msi — MSI para drivers de usuario.
+//
+// Requiere AUR_CAP_MSI. Un .aur no puede escribir el config space, así que
+// pide al kernel que programe la capability MSI de SU dispositivo (el que
+// declara en el manifiesto, igual que para mapear los BARs):
+//
+//   AURMSI_ALLOC (struct aur_msi_alloc*)
+//       in: bus/slot/func. Reserva un vector del pool de usuario
+//       (AUR_MSI_VEC_FIRST..AUR_MSI_VEC_LAST), habilita MSI en el
+//       dispositivo apuntando a ese vector y lo devuelve en .vector. A
+//       partir de ahí el .aur lo atiende con open("/dev/irq/<vector>") +
+//       epoll, como cualquier IRQ. -ENODEV si no hay capability MSI (el
+//       driver debe caer a polling), -ENOSPC si no quedan vectores.
+//
+// Al cerrar el fd (o morir el proceso) se deshabilita MSI en los
+// dispositivos y se liberan sus vectores. Un vector del pool solo lo puede
+// abrir en /dev/irq el proceso al que se asignó.
+// ---------------------------------------------------------------------------
+//
+//   AURMSI_ALLOC_N (struct aur_msi_alloc_n*)
+//       Como AURMSI_ALLOC pero pidiendo hasta .count (1..AUR_MSI_MAX_VECS)
+//       vectores a la vez. Si el dispositivo tiene MSI-X, la entrada i de
+//       su tabla queda apuntando a .vectors[i] (el driver enruta las causas
+//       a esas entradas, p. ej. con IVAR). Sin MSI-X se concede un único
+//       vector por MSI. Al volver, .count es lo concedido (puede ser menos
+//       que lo pedido). -ENODEV sin MSI ni MSI-X; -ENOSPC si no queda ni uno.
+#define AURMSI_ALLOC 0x700
+#define AURMSI_ALLOC_N 0x701
+#define AUR_MSI_VEC_FIRST 0x68 // 0x60..0x67 los usan los drivers de kernel
+#define AUR_MSI_VEC_LAST 0x6F
+#define AUR_MSI_MAX_VECS 4
+
+struct aur_msi_alloc {
+  uint8_t bus, slot, func, _pad;
+  uint32_t vector; // out
+};
+
+struct aur_msi_alloc_n {
+  uint8_t bus, slot, func;
+  uint8_t count;                      // in: pedidos; out: concedidos
+  uint32_t vectors[AUR_MSI_MAX_VECS]; // out: vectors[i] -> entrada i
+};
+
+_Static_assert(sizeof(struct aur_msi_alloc) == 8,
+               "aur_msi_alloc debe ser 8 bytes");
+_Static_assert(sizeof(struct aur_msi_alloc_n) == 20,
+               "aur_msi_alloc_n debe ser 20 bytes");
 _Static_assert(sizeof(struct aur_manifest) == 64,
                "aur_manifest debe ser 64 bytes");
 _Static_assert(sizeof(aur_bus_match_t) == 10,

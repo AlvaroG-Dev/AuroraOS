@@ -32,7 +32,7 @@
 //
 // Semántica de `irq`:
 //   - 0..15                 → IRQs legacy del IOAPIC (INTx)
-//   - MSI_VECTOR_BASE..END  → vectores MSI (0x60..0x6F)
+//   - MSI_VECTOR_BASE..END  → vectores MSI (0x60..0x7F)
 //
 // Este rango unificado simplifica el dispatch: tanto `irq_handler` como
 // `msi_handler` indexan la misma tabla `g_actions[]`.

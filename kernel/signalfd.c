@@ -216,6 +216,7 @@ static int64_t signalfd_common(uint64_t fd_arg, uint64_t mask_uptr,
     return -EFAULT;
   if (copy_from_user(&mask, (void *)mask_uptr, 8) < 0)
     return -EFAULT;
+  mask = sigset_from_user(mask);
 
   // SIGKILL y SIGSTOP no son bloqueables.
   mask &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
@@ -271,7 +272,7 @@ static int64_t signalfd_common(uint64_t fd_arg, uint64_t mask_uptr,
 
   proc->blocked_signals |= mask;
   if (flags & SFD_CLOEXEC)
-    proc->fd_cloexec_mask |= (1u << free_fd);
+    fd_cloexec_set(proc, free_fd);
   return (int64_t)free_fd;
 }
 

@@ -190,7 +190,7 @@ static int64_t epoll_create_internal(int flags) {
 
   proc->fds[free_fd] = fd;
   if (flags & EPOLL_CLOEXEC)
-    proc->fd_cloexec_mask |= (1u << free_fd);
+    fd_cloexec_set(proc, free_fd);
   return (int64_t)free_fd;
 }
 
@@ -537,7 +537,7 @@ int64_t k_epoll_pwait(uint64_t epfd, uint64_t events_uptr, uint64_t maxevents,
     uint64_t m = 0;
     if (copy_from_user(&m, (void *)sigmask_uptr, 8) < 0)
       return -EFAULT;
-    m &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    m = sigset_from_user(m) & ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
     proc->blocked_signals = m;
     changed = 1;
   }
@@ -744,7 +744,7 @@ static int64_t eventfd_create_internal(uint64_t initval, int flags) {
 
   proc->fds[free_fd] = fd;
   if (flags & EFD_CLOEXEC)
-    proc->fd_cloexec_mask |= (1u << free_fd);
+    fd_cloexec_set(proc, free_fd);
   return (int64_t)free_fd;
 }
 

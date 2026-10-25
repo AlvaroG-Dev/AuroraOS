@@ -1691,11 +1691,10 @@ static int ahci_probe(pci_device_t *pci_dev, const pci_device_id_t *id) {
   // Configurar interrupciones.
   uint8_t irq = pci_get_irq(pci_dev);
 
-  // --- Intentar MSI primero ---
-  if (pci_find_capability(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x05) !=
-      0) {
-    if (pci_enable_msi(pci_dev->bus, pci_dev->slot, pci_dev->func,
-                       MSI_VECTOR_BASE, lapic_get_bsp_id()) == 0) {
+  // --- Intentar MSI (o MSI-X de un vector) primero ---
+  if (pci_has_msi_any(pci_dev->bus, pci_dev->slot, pci_dev->func)) {
+    if (pci_enable_msi_any(pci_dev->bus, pci_dev->slot, pci_dev->func,
+                           MSI_VECTOR_BASE, lapic_get_bsp_id()) == 0) {
       g_hba.using_msi = 1;
       g_hba.msi_vector = MSI_VECTOR_BASE;
       msi_install_handler(MSI_VECTOR_BASE, ahci_irq_handler_msi);

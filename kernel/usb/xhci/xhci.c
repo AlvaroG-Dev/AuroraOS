@@ -1076,8 +1076,8 @@ static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
 
   uint8_t msi_vec = 0x62;
   msi_install_handler(msi_vec, xhci_irq_handler_msi);
-  if (pci_enable_msi(g_xhci.pci.bus, g_xhci.pci.slot, g_xhci.pci.func, msi_vec,
-                     (uint8_t)lapic_get_bsp_id()) == 0) {
+  if (pci_enable_msi_any(g_xhci.pci.bus, g_xhci.pci.slot, g_xhci.pci.func,
+                         msi_vec, (uint8_t)lapic_get_bsp_id()) == 0) {
     g_xhci.using_msi = 1;
     g_xhci.msi_vector = msi_vec;
     LOG_INFO("[xHCI] MSI preparado en vector 0x%02x", msi_vec);

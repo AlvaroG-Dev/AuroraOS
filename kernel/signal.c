@@ -170,13 +170,13 @@ static int build_frame(uint64_t frame_va, int sig, const k_sigaction_t *act,
     return -1;
   if (w_u64(mc + G_TRAPNO, (uint64_t)sig) < 0)
     return -1;
-  if (w_u64(mc + G_OLDMASK, old_mask) < 0)
+  if (w_u64(mc + G_OLDMASK, sigset_to_user(old_mask)) < 0)
     return -1;
   if (w_u64(mc + G_CR2, 0) < 0)
     return -1;
 
   // uc_sigmask
-  if (w_u64(frame_va + SF_UC_SIGMASK, old_mask) < 0)
+  if (w_u64(frame_va + SF_UC_SIGMASK, sigset_to_user(old_mask)) < 0)
     return -1;
 
   // siginfo (128 bytes). Solo los 3 primeros campos importan.
@@ -396,8 +396,9 @@ int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,
   if (oact) {
     if (!access_ok((void *)oact, sizeof(k_sigaction_t)))
       return -EFAULT;
-    if (copy_to_user((void *)oact, &proc->sigactions[sig],
-                     sizeof(k_sigaction_t)) < 0)
+    k_sigaction_t cur = proc->sigactions[sig];
+    cur.mask = sigset_to_user(cur.mask);
+    if (copy_to_user((void *)oact, &cur, sizeof(k_sigaction_t)) < 0)
       return -EFAULT;
   }
   if (act) {
@@ -406,6 +407,8 @@ int64_t k_rt_sigaction(uint64_t sig, uint64_t act, uint64_t oact,
     k_sigaction_t na;
     if (copy_from_user(&na, (void *)act, sizeof(k_sigaction_t)) < 0)
       return -EFAULT;
+    na.mask = sigset_from_user(na.mask) &
+              ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
     proc->sigactions[sig] = na;
   }
   return 0;
@@ -459,7 +462,8 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   uint64_t mask = 0;
   if (copy_from_user(&mask, (void *)(rsp + 0x128), 8) < 0)
     return -EFAULT;
-  proc->blocked_signals = mask;
+  proc->blocked_signals =
+      sigset_from_user(mask) & ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
 
   return (int64_t)regs->rax;
 }
@@ -478,7 +482,7 @@ int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
   if (oldset) {
     if (!access_ok((void *)oldset, 8))
       return -EFAULT;
-    uint64_t old = proc->blocked_signals;
+    uint64_t old = sigset_to_user(proc->blocked_signals);
     if (copy_to_user((void *)oldset, &old, 8) < 0)
       return -EFAULT;
   }
@@ -488,6 +492,7 @@ int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
     uint64_t s = 0;
     if (copy_from_user(&s, (void *)set, 8) < 0)
       return -EFAULT;
+    s = sigset_from_user(s);
 
     if (how == 0)
       proc->blocked_signals |= s;

@@ -213,6 +213,25 @@ int pci_enable_msi(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
                    uint8_t lapic_id);
 void pci_disable_msi(uint8_t bus, uint8_t slot, uint8_t func);
 
+// IDs de capability.
+#define PCI_CAP_ID_MSI 0x05
+#define PCI_CAP_ID_MSIX 0x11
+
+// MSI-X. vectors[i] se programa en la entrada i de la tabla (count <= tamaño
+// de la tabla). Deja las entradas desenmascaradas, MSI e INTx apagados.
+// Devuelve 0 o -1. pci_disable_msi() también libera MSI-X.
+int pci_msix_table_size(uint8_t bus, uint8_t slot, uint8_t func); // 0 = no hay
+int pci_enable_msix(uint8_t bus, uint8_t slot, uint8_t func,
+                    const uint8_t *vectors, int count, uint8_t lapic_id);
+void pci_disable_msix(uint8_t bus, uint8_t slot, uint8_t func);
+void pci_msix_mask_vector(uint8_t bus, uint8_t slot, uint8_t func, int entry,
+                          int masked);
+
+// Un solo vector: MSI si existe, si no MSI-X (entrada 0).
+int pci_has_msi_any(uint8_t bus, uint8_t slot, uint8_t func);
+int pci_enable_msi_any(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector,
+                       uint8_t lapic_id);
+
 // ===========================================================================
 // Bus PCI genérico (Fase 2.1b).
 //
@@ -242,6 +261,12 @@ int pci_id_match(const pci_device_t *dev, const pci_device_id_t *id);
 
 // Devuelve el array de dispositivos enumerados y su conteo.
 const pci_device_t *pci_get_devices(int *count);
+
+// [FASE 6.4] Hot-plug: reexplora el bus (altas/bajas); devuelve los cambios.
+// El kthread pci-hotplug lo llama cada segundo.
+int pci_rescan(void);
+// Último bus que se explora (mayor `subordinate` de los puentes presentes).
+int pci_max_bus(void);
 
 // ===========================================================================
 // Drivers.

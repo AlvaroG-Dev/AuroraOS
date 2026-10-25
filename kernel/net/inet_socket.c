@@ -126,7 +126,7 @@ static int64_t wrap_socket(struct process *proc, socket_t *s, int flags) {
   }
   proc->fds[free_fd] = fd;
   if (flags & SOCK_CLOEXEC)
-    proc->fd_cloexec_mask |= (1u << free_fd);
+    fd_cloexec_set(proc, free_fd);
   return free_fd;
 }
 

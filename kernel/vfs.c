@@ -12,10 +12,15 @@
 #include "vfs.h"
 #include "block.h" // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "cpu.h"
+#include "devtmpfs.h"
+#include "evdev.h"
+#include "drm/drm.h"
 #include "dma_user.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
+#include "input_proxy.h"
 #include "irq_user.h"
+#include "msi_user.h"
 #include "block_proxy.h"
 #include "usb/usb_proxy.h"
 #include "klog.h"
@@ -498,6 +503,42 @@ static int resolve_symlink_target(const char *symlink_path, const char *target,
 
 // Recorre la mount table buscando el mount más específico, delega el
 // path relativo al FS, y sigue symlinks si no estamos en no_follow.
+static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow);
+
+// Symlinks en componentes INTERMEDIOS (sysfs: /sys/class/input/event0/dev, con
+// event0 -> ../../devices/...). Solo se intenta cuando el lookup directo falla,
+// asi el coste no recae en las rutas normales. Si algun prefijo es un symlink,
+// escribe en `out` la ruta con ese prefijo sustituido por su destino.
+static int expand_mid_symlink(const char *norm, char *out, size_t outlen) {
+  size_t len = strlen(norm);
+  char prefix[VFS_PATH_MAX];
+  for (size_t i = 1; i < len; i++) {
+    if (norm[i] != '/')
+      continue;
+    memcpy(prefix, norm, i);
+    prefix[i] = 0;
+    vfs_node_t *n = vfs_lookup_rec(prefix, 1, 1);
+    if (!n)
+      return 0;
+    if (n->is_symlink) {
+      char target[VFS_PATH_MAX];
+      int rc = resolve_symlink_target(prefix, n->link_target, target,
+                                      sizeof(target));
+      vfs_node_free(n);
+      if (rc != 0)
+        return 0;
+      size_t tl = strlen(target), rl = len - i;
+      if (tl + rl + 1 > outlen)
+        return 0;
+      memcpy(out, target, tl);
+      memcpy(out + tl, norm + i, rl + 1);
+      return 1;
+    }
+    vfs_node_free(n);
+  }
+  return 0;
+}
+
 static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
   if (depth > 8)
     return NULL;
@@ -587,6 +628,12 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
     // [2.4] Ref primaria del llamante. Los FS hacen kzalloc, así que
     // aquí es el único sitio donde ponemos ref_count=1 para todos.
     node->ref_count = 1;
+  }
+
+  if (!node && ops->name && strcmp(ops->name, "sysfs") == 0) {
+    char expanded[VFS_PATH_MAX];
+    if (expand_mid_symlink(norm, expanded, sizeof(expanded)))
+      return vfs_lookup_rec(expanded, depth + 1, no_follow);
   }
 
   if (!node) {
@@ -724,6 +771,30 @@ int vfs_create(const char *path, uint32_t mode) {
     return -EROFS;
   }
   rc = parent->ops->create(parent, base, mode & 07777);
+  vfs_node_free(parent);
+  return rc;
+}
+
+int vfs_mknod(const char *path, uint32_t mode, uint32_t rdev) {
+  if (!path)
+    return -EINVAL;
+
+  char base[VFS_PATH_MAX];
+  int rc;
+  vfs_node_t *parent = resolve_parent(path, base, sizeof(base), &rc);
+  if (!parent)
+    return rc;
+
+  int acc = vfs_check_access(parent, VFS_W_OK | VFS_X_OK);
+  if (acc != 0) {
+    vfs_node_free(parent);
+    return acc;
+  }
+  if (!parent->ops || !parent->ops->mknod) {
+    vfs_node_free(parent);
+    return -EPERM;
+  }
+  rc = parent->ops->mknod(parent, base, mode & 07777, rdev);
   vfs_node_free(parent);
   return rc;
 }
@@ -1690,6 +1761,17 @@ static int64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset, size_t size,
   (void)offset;
   if (!buf || size == 0)
     return 0;
+  extern char g_strace_comm[32];
+  if (size > 7 && memcmp(buf, "strace=", 7) == 0) {
+    size_t n = size - 7;
+    if (n > 31)
+      n = 31;
+    memcpy(g_strace_comm, (const char *)buf + 7, n);
+    while (n && (g_strace_comm[n - 1] == 10 || g_strace_comm[n - 1] == 13))
+      n--;
+    g_strace_comm[n] = 0;
+    return (int64_t)size;
+  }
   klog_write_raw((const char *)buf, size);
   return (int64_t)size;
 }
@@ -1946,6 +2028,8 @@ static const devfs_entry_t devfs_entries[] = {
     {"net0", &net_proxy_ops, VFS_CHARDEVICE, (10u << 8) | 200},
     {"blkproxy", &blkp_dev_ops, VFS_CHARDEVICE, (10u << 8) | 201},
     {"usbproxy", &uproxy_dev_ops, VFS_CHARDEVICE, (10u << 8) | 202},
+    {"inputproxy", &inputp_dev_ops, VFS_CHARDEVICE, (10u << 8) | 203},
+    {"msi", &msi_dev_ops, VFS_CHARDEVICE, (10u << 8) | 204},
 };
 
 // ===========================================================================
@@ -2177,14 +2261,108 @@ static int devfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     }
   }
 
-  out->name[0] = '\0';
-  out->type = 0;
-  out->size = 0;
+  // Nodos dinamicos (devtmpfs): dri/, input/, mknod...
+  return devtmpfs_readdir("", (uint64_t)(blk_idx - nblocks), out);
+}
+
+// vfs_lookup() reescribe node->name con el path completo ("/dev/dri"); el
+// registro dinamico trabaja con rutas relativas a /dev ("dri", "" = raiz).
+static const char *devfs_dir_rel(const vfs_node_t *dir) {
+  const char *p = dir->name;
+  if (strncmp(p, "/dev", 4) == 0 && (p[4] == 0 || p[4] == '/'))
+    p += 4;
+  while (*p == '/')
+    p++;
+  return p;
+}
+
+// Subdirectorios dinamicos de /dev (dri/, input/, ...).
+static int devfs_sub_readdir(vfs_node_t *dir, uint64_t index,
+                             vfs_dirent_t *out) {
+  if (!dir || !out)
+    return -EINVAL;
+  return devtmpfs_readdir(devfs_dir_rel(dir), index, out);
+}
+
+// Busca el ops de un char device conocido por (major<<8|minor): tabla
+// estatica de devfs y despues el registro dinamico.
+static bool devfs_find_rdev(uint32_t rdev, vfs_ops_t **ops, void **priv) {
+  size_t n = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
+  for (size_t i = 0; i < n; i++) {
+    if (devfs_entries[i].rdev == rdev &&
+        (devfs_entries[i].type & VFS_CHARDEVICE)) {
+      *ops = devfs_entries[i].ops;
+      *priv = NULL;
+      return true;
+    }
+  }
+  return devtmpfs_find_by_rdev(rdev, ops, priv);
+}
+
+static bool devfs_name_taken(const char *rel) {
+  size_t n = sizeof(devfs_entries) / sizeof(devfs_entries[0]);
+  for (size_t i = 0; i < n; i++)
+    if (strcmp(rel, devfs_entries[i].name) == 0)
+      return true;
+  if (blk_lookup(rel))
+    return true;
+  return devtmpfs_exists(rel);
+}
+
+// rel = ruta dentro de /dev del hijo `name` de `dir`.
+static int devfs_child_path(vfs_node_t *dir, const char *name, char *rel,
+                            size_t rel_sz) {
+  size_t nl = strlen(name);
+  const char *base = devfs_dir_rel(dir);
+  size_t bl = strlen(base);
+  if (nl == 0 || bl + nl + 2 > rel_sz)
+    return -ENAMETOOLONG;
+  if (bl) {
+    memcpy(rel, base, bl);
+    rel[bl] = '/';
+    memcpy(rel + bl + 1, name, nl + 1);
+  } else {
+    memcpy(rel, name, nl + 1);
+  }
   return 0;
+}
+
+static int devfs_mknod(vfs_node_t *dir, const char *name, uint32_t mode,
+                       uint32_t rdev) {
+  char rel[64];
+  int rc = devfs_child_path(dir, name, rel, sizeof(rel));
+  if (rc < 0)
+    return rc;
+  if (devfs_name_taken(rel))
+    return -EEXIST;
+  vfs_ops_t *ops = NULL;
+  void *priv = NULL;
+  if (!devfs_find_rdev(rdev, &ops, &priv))
+    return -ENODEV; // ningun driver registrado con ese major:minor
+  return devtmpfs_register(rel, rdev, mode, 0, 0, ops, priv);
+}
+
+static int devfs_unlink(vfs_node_t *dir, const char *name) {
+  char rel[64];
+  int rc = devfs_child_path(dir, name, rel, sizeof(rel));
+  if (rc < 0)
+    return rc;
+  rc = devtmpfs_unregister(rel);
+  if (rc == -ENOENT && devfs_name_taken(rel))
+    return -EPERM; // nodo estatico o block device
+  return rc;
 }
 
 static vfs_ops_t devfs_dir_ops = {
     .readdir = devfs_readdir,
+    .mknod = devfs_mknod,
+    .unlink = devfs_unlink,
+};
+
+static vfs_ops_t devfs_sub_dir_ops = {
+    .readdir = devfs_sub_readdir,
+    .mknod = devfs_mknod,
+    .unlink = devfs_unlink,
 };
 
 static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
@@ -2277,6 +2455,14 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
     n->gid = 0;
     n->rdev = (10u << 8) | 200;
     return n;
+  }
+
+  // Nodos registrados dinamicamente (dri/card0, input/event0, mknod...),
+  // incluidos los directorios implicitos.
+  {
+    vfs_node_t *dn = devtmpfs_lookup(name, &devfs_sub_dir_ops);
+    if (dn)
+      return dn;
   }
 
   // Rechazar subpaths no soportados.
@@ -2477,6 +2663,8 @@ void vfs_init(void) {
   // de /etc, lectura de ld.so.cache desde tarfs) vive en tmpfs_init().
   // ---------------------------------------------------------------------------
   tmpfs_init();
+  evdev_publish_udev();
+  drm_udev_publish();
 }
 
 // ===========================================================================
@@ -2514,7 +2702,8 @@ file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
 // ===========================================================================
 // FDs por proceso
 // ===========================================================================
-int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
+static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
+                         int nofollow) {
   process_t *proc = (process_t *)proc_ptr;
   if (!proc || !path)
     return -EINVAL;
@@ -2553,7 +2742,7 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
     return rc == 0 ? free_fd : rc;
   }
 
-  vfs_node_t *node = vfs_lookup(path);
+  vfs_node_t *node = nofollow ? vfs_lookup_nofollow(path) : vfs_lookup(path);
   if (!node) {
     LOG_TRACE("[VFS-OPEN-FAIL] lookup('%s')=NULL", path);
     return -ENOENT;
@@ -2590,6 +2779,15 @@ int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
 
   proc->fds[free_fd] = fd_entry;
   return free_fd;
+}
+
+int vfs_open_for_proc(void *proc_ptr, const char *path, int flags) {
+  return vfs_open_impl(proc_ptr, path, flags, 0);
+}
+
+// open(O_PATH|O_NOFOLLOW) sobre un symlink: el fd referencia el propio enlace.
+int vfs_open_nofollow_for_proc(void *proc_ptr, const char *path, int flags) {
+  return vfs_open_impl(proc_ptr, path, flags, 1);
 }
 
 static file_descriptor_t *fd_get_for_proc(process_t *proc, int fd) {
@@ -2629,6 +2827,34 @@ int vfs_close_for_proc(void *proc_ptr, int fd) {
 
   fd_put(f);
   return 0;
+}
+
+// Helpers para pasar file_descriptor_t entre procesos (SCM_RIGHTS).
+file_descriptor_t *vfs_fd_get_ref(void *proc_ptr, int fd) {
+  return fd_get_for_proc((process_t *)proc_ptr, fd);
+}
+
+void vfs_fd_put_ref(file_descriptor_t *f) { fd_put(f); }
+
+// Instala `f` (consumiendo la referencia del llamante) en el primer fd libre.
+int vfs_fd_install_ref(void *proc_ptr, file_descriptor_t *f, int cloexec) {
+  process_t *proc = (process_t *)proc_ptr;
+  if (!proc || !f)
+    return -EBADF;
+  mutex_lock(&proc->fd_lock);
+  for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+    if (!proc->fds[i]) {
+      proc->fds[i] = f;
+      if (cloexec)
+        fd_cloexec_set(proc, i);
+      else
+        fd_cloexec_clr(proc, i);
+      mutex_unlock(&proc->fd_lock);
+      return i;
+    }
+  }
+  mutex_unlock(&proc->fd_lock);
+  return -EMFILE;
 }
 
 int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {

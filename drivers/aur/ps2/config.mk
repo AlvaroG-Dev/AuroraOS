@@ -1,0 +1,3 @@
+AUR_NAME  := ps2
+AUR_CAPS := 0x104
+AUR_ARGS :=

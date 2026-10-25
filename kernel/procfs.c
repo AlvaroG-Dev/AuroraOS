@@ -485,9 +485,9 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
   uint64_t sig_ign = 0, sig_catch = 0;
   for (int i = 0; i < SIG_MAX; i++) {
     if (p->sigactions[i].handler == SIG_IGN)
-      sig_ign |= (1ULL << i);
+      sig_ign |= (1ULL << i) >> 1; // sigset_t: bit sig-1
     else if (p->sigactions[i].handler != SIG_DFL)
-      sig_catch |= (1ULL << i);
+      sig_catch |= (1ULL << i) >> 1;
   }
 
   int n_threads = p->team_size > 0 ? p->team_size : 1;
@@ -604,11 +604,11 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
   o = kappend(buf, o, cap, "0 ");
 
   // ---- 31. signal (pending) ----
-  o += kfmt_u64(buf + o, cap - o, sig_pnd);
+  o += kfmt_u64(buf + o, cap - o, sig_pnd >> 1);
   o = kappend(buf, o, cap, " ");
 
   // ---- 32. blocked ----
-  o += kfmt_u64(buf + o, cap - o, p->blocked_signals);
+  o += kfmt_u64(buf + o, cap - o, p->blocked_signals >> 1);
   o = kappend(buf, o, cap, " ");
 
   // ---- 33. sigignore ----
@@ -1058,9 +1058,10 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
     buf[o++] = '\n';                                                           \
   } while (0)
 
-  MASK_LINE("SigPnd:\t", sig_pnd);
+  // Formato sigset_t de Linux (bit sig-1); internamente es bit sig.
+  MASK_LINE("SigPnd:\t", sig_pnd >> 1);
   MASK_LINE("ShdPnd:\t", 0);
-  MASK_LINE("SigBlk:\t", sig_blk);
+  MASK_LINE("SigBlk:\t", sig_blk >> 1);
   MASK_LINE("SigIgn:\t", 0);
   MASK_LINE("SigCgt:\t", 0);
 #undef MASK_LINE

@@ -22,6 +22,7 @@
 #include "aur.h"
 #include "idt.h"
 #include "irq_threaded.h"
+#include "msi_user.h"
 #include "klog.h"
 #include "process.h"
 #include "spinlock.h"
@@ -45,6 +46,11 @@ struct aur_irq_ctx {
 static struct aur_irq_ctx g_irq_ctxs[IRQ_USER_MAX];
 static int g_aur_irq_init_done = 0;
 static spinlock_t g_aur_irq_init_lock = {.locked = 0};
+
+// IRQs que en un PC solo cablean dispositivos ISA (nunca INTx de PCI).
+static int aur_irq_is_isa(uint32_t irq) {
+  return irq == 1 || irq == 3 || irq == 4 || irq == 8 || irq == 12;
+}
 
 static struct aur_irq_ctx *aur_irq_get_ctx(uint32_t irq) {
   if (irq >= IRQ_USER_MAX)
@@ -92,6 +98,17 @@ static int aur_irq_open(vfs_node_t *node, int flags) {
   if (!ctx)
     return -EINVAL;
 
+  // Los vectores MSI del pool de usuario solo los abre quien los reservó
+  // con /dev/msi; 0x60..0x67 son de drivers de kernel.
+  if (ctx->irq >= MSI_VECTOR_BASE) {
+    if (!aur_msi_is_user_vector(ctx->irq) ||
+        aur_msi_vector_pid(ctx->irq) != proc->pid) {
+      LOG_WARN("[IRQ-USER] pid=%u: vector 0x%02x no le pertenece", proc->pid,
+               ctx->irq);
+      return -EPERM;
+    }
+  }
+
   unsigned long lf = spin_lock_irqsave(&ctx->lock);
   if (!ctx->registered) {
     // Primer open: registrar en irq_threaded.
@@ -124,9 +141,15 @@ static int aur_irq_open(vfs_node_t *node, int flags) {
 
     // [FIX] Enrutar en el IOAPIC si es una IRQ legacy (0..15).
     // Las funciones ya están declaradas en apic.h.
+    // Las IRQs ISA (teclado, ratón PS/2...) son edge/active-high: usan la
+    // redirección por defecto (con ISOs de la MADT). Forzarlas a
+    // level/active-low como las INTx de PCI las dejaría siempre disparadas.
     if (ctx->irq <= 15) {
-      ioapic_redirect_irq_ex(ctx->irq, 32 + ctx->irq, lapic_get_bsp_id(), 0, 1,
-                             1);
+      if (aur_irq_is_isa(ctx->irq))
+        ioapic_redirect_irq(ctx->irq, 32 + ctx->irq, lapic_get_bsp_id(), 0);
+      else
+        ioapic_redirect_irq_ex(ctx->irq, 32 + ctx->irq, lapic_get_bsp_id(), 0,
+                               1, 1);
     }
 
     ctx->registered = 1;

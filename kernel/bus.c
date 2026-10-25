@@ -99,6 +99,14 @@ void device_unregister(struct device *dev) {
   if (!dev || !dev->bus)
     return;
   struct bus_type *bus = dev->bus;
+
+  // [FASE 6.4] Baja con driver: avisarle (sin bus lock: puede dormir). Solo
+  // los buses que definen .remove (PCI) lo usan; el resto sigue como antes.
+  if (dev->driver && bus->remove) {
+    bus->remove(dev);
+    dev->driver = NULL;
+  }
+
   unsigned long flags = spin_lock_irqsave(&bus->lock);
   struct device **pp = &bus->devices;
   while (*pp) {

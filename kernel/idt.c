@@ -11,6 +11,7 @@
 #include "sched.h"
 #include "serial.h"
 #include "signal.h"
+#include "spinlock.h"
 #include "string.h"
 #include <stdint.h>
 
@@ -122,6 +123,22 @@ extern void msi_stub_0x6C(void);
 extern void msi_stub_0x6D(void);
 extern void msi_stub_0x6E(void);
 extern void msi_stub_0x6F(void);
+extern void msi_stub_0x70(void);
+extern void msi_stub_0x71(void);
+extern void msi_stub_0x72(void);
+extern void msi_stub_0x73(void);
+extern void msi_stub_0x74(void);
+extern void msi_stub_0x75(void);
+extern void msi_stub_0x76(void);
+extern void msi_stub_0x77(void);
+extern void msi_stub_0x78(void);
+extern void msi_stub_0x79(void);
+extern void msi_stub_0x7A(void);
+extern void msi_stub_0x7B(void);
+extern void msi_stub_0x7C(void);
+extern void msi_stub_0x7D(void);
+extern void msi_stub_0x7E(void);
+extern void msi_stub_0x7F(void);
 
 static const uint64_t msi_stub_table[MSI_VECTOR_COUNT] = {
     (uint64_t)msi_stub_0x60, (uint64_t)msi_stub_0x61, (uint64_t)msi_stub_0x62,
@@ -130,6 +147,22 @@ static const uint64_t msi_stub_table[MSI_VECTOR_COUNT] = {
     (uint64_t)msi_stub_0x69, (uint64_t)msi_stub_0x6A, (uint64_t)msi_stub_0x6B,
     (uint64_t)msi_stub_0x6C, (uint64_t)msi_stub_0x6D, (uint64_t)msi_stub_0x6E,
     (uint64_t)msi_stub_0x6F,
+    (uint64_t)msi_stub_0x70,
+    (uint64_t)msi_stub_0x71,
+    (uint64_t)msi_stub_0x72,
+    (uint64_t)msi_stub_0x73,
+    (uint64_t)msi_stub_0x74,
+    (uint64_t)msi_stub_0x75,
+    (uint64_t)msi_stub_0x76,
+    (uint64_t)msi_stub_0x77,
+    (uint64_t)msi_stub_0x78,
+    (uint64_t)msi_stub_0x79,
+    (uint64_t)msi_stub_0x7A,
+    (uint64_t)msi_stub_0x7B,
+    (uint64_t)msi_stub_0x7C,
+    (uint64_t)msi_stub_0x7D,
+    (uint64_t)msi_stub_0x7E,
+    (uint64_t)msi_stub_0x7F,
 };
 // ---------------------------------------------------------------------------
 // Tabla de stubs en el mismo orden en que se colocan en la IDT:
@@ -249,7 +282,7 @@ void idt_init(void) {
   // Vector 0xFF: espurio del LAPIC.
   idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);
 
-  // Vectores MSI (0x60-0x6F). Cada uno tiene su propia IDT entry y su
+  // Vectores MSI (0x60-0x7F). Cada uno tiene su propia IDT entry y su
   // propio stub, porque el vector identifica quién disparó.
   for (int i = 0; i < MSI_VECTOR_COUNT; i++) {
     idt_set_gate(MSI_VECTOR_BASE + i, msi_stub_table[i], 0x08, 0x8E);
@@ -417,6 +450,41 @@ void msi_install_handler(uint8_t vector, void (*handler)(void)) {
   msi_handlers[vector - MSI_VECTOR_BASE] = handler;
 }
 
+// Asignador de vectores MSI/MSI-X para drivers de kernel. Fuera quedan los que
+// ya están fijos en los drivers (0x60 AHCI, 0x61 e1000e, 0x62 xHCI) y el pool
+// de drivers de usuario (0x68..0x6F, ver msi_user.c).
+static spinlock_t g_msi_alloc_lock;
+static uint32_t g_msi_used;
+
+static int msi_vector_reserved(uint8_t vector) {
+  return vector <= 0x62 || (vector >= 0x68 && vector <= 0x6F);
+}
+
+int msi_vector_alloc(void) {
+  unsigned long fl = spin_lock_irqsave(&g_msi_alloc_lock);
+  int found = -1;
+  for (int i = 0; i < MSI_VECTOR_COUNT; i++) {
+    uint8_t v = (uint8_t)(MSI_VECTOR_BASE + i);
+    if (msi_vector_reserved(v) || (g_msi_used & (1u << i)))
+      continue;
+    g_msi_used |= 1u << i;
+    found = v;
+    break;
+  }
+  spin_unlock_irqrestore(&g_msi_alloc_lock, fl);
+  return found;
+}
+
+void msi_vector_free(uint8_t vector) {
+  if (vector < MSI_VECTOR_BASE || vector > MSI_VECTOR_END ||
+      msi_vector_reserved(vector))
+    return;
+  msi_install_handler(vector, NULL);
+  unsigned long fl = spin_lock_irqsave(&g_msi_alloc_lock);
+  g_msi_used &= ~(1u << (vector - MSI_VECTOR_BASE));
+  spin_unlock_irqrestore(&g_msi_alloc_lock, fl);
+}
+
 void msi_dispatch(uint8_t vector) {
   if (vector < MSI_VECTOR_BASE || vector > MSI_VECTOR_END)
     return;
@@ -455,3 +523,27 @@ void msi_handler(registers_t *regs) {
   extern void lapic_eoi(void);
   lapic_eoi();
 }
+#include "test.h"
+
+// El asignador nunca entrega vectores fijos ni del pool de usuario, no repite
+// vectores y se agota limpiamente.
+static void test_msi_vector_alloc(void) {
+  int got[MSI_VECTOR_COUNT];
+  int n = 0;
+  int v;
+  while (n < MSI_VECTOR_COUNT && (v = msi_vector_alloc()) >= 0) {
+    TEST_ASSERT(v >= MSI_VECTOR_BASE && v <= MSI_VECTOR_END, "dentro de rango");
+    TEST_ASSERT(v > 0x62 && !(v >= 0x68 && v <= 0x6F), "no es reservado");
+    for (int i = 0; i < n; i++)
+      TEST_ASSERT(got[i] != v, "sin repetidos");
+    got[n++] = v;
+  }
+  TEST_ASSERT(n > 0, "al menos un vector libre");
+  TEST_ASSERT_EQ(msi_vector_alloc(), -1); // agotado
+  for (int i = 0; i < n; i++)
+    msi_vector_free((uint8_t)got[i]);
+  v = msi_vector_alloc();
+  TEST_ASSERT(v >= 0, "reutilizable tras liberar");
+  msi_vector_free((uint8_t)v);
+}
+REGISTER_TEST("idt: asignador de vectores MSI", test_msi_vector_alloc);

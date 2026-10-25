@@ -1,0 +1,303 @@
+// tests/wayland/drm_test.c
+//
+// Prueba de /dev/dri/card0 con las cabeceras uapi reales de Linux (sin
+// libdrm): version, caps, recursos KMS, dumb buffer + mmap, ADDFB2, SETCRTC,
+// PAGE_FLIP con evento, propiedades y commit atomico, y limpieza.
+
+#include <drm/drm.h>
+#include <drm/drm_fourcc.h>
+#include <drm/drm_mode.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+static int g_fail;
+#define CHECK(cond, ...)                                                       \
+  do {                                                                         \
+    if (cond) {                                                                \
+      printf("[drm_test] PASS " __VA_ARGS__);                                  \
+      printf("\n");                                                            \
+    } else {                                                                   \
+      printf("[drm_test] FAIL " __VA_ARGS__);                                  \
+      printf(" (errno=%d)\n", errno);                                          \
+      g_fail++;                                                                \
+    }                                                                          \
+  } while (0)
+
+static uint32_t find_prop(int fd, uint32_t obj, uint32_t type, const char *name) {
+  struct drm_mode_obj_get_properties g = {.obj_id = obj, .obj_type = type};
+  if (ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &g) < 0)
+    return 0;
+  uint32_t ids[32];
+  uint64_t vals[32];
+  if (g.count_props > 32)
+    return 0;
+  g.props_ptr = (uintptr_t)ids;
+  g.prop_values_ptr = (uintptr_t)vals;
+  if (ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &g) < 0)
+    return 0;
+  for (uint32_t i = 0; i < g.count_props; i++) {
+    struct drm_mode_get_property p = {.prop_id = ids[i]};
+    if (ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, &p) < 0)
+      continue;
+    if (!strcmp(p.name, name))
+      return ids[i];
+  }
+  return 0;
+}
+
+static int wait_event(int fd, uint32_t type, uint64_t user_data) {
+  struct pollfd pfd = {.fd = fd, .events = POLLIN};
+  if (poll(&pfd, 1, 2000) <= 0)
+    return 0;
+  char buf[128];
+  ssize_t n = read(fd, buf, sizeof(buf));
+  if (n < (ssize_t)sizeof(struct drm_event_vblank))
+    return 0;
+  struct drm_event_vblank *e = (struct drm_event_vblank *)buf;
+  return e->base.type == type && e->user_data == user_data;
+}
+
+int main(int argc, char **argv) {
+  (void)argv;
+  setvbuf(stdout, NULL, _IONBF, 0);
+  int fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+  CHECK(fd >= 0, "open /dev/dri/card0");
+  if (fd < 0)
+    return 1;
+
+  // VERSION (dos pasadas, como libdrm)
+  struct drm_version v;
+  memset(&v, 0, sizeof(v));
+  CHECK(ioctl(fd, DRM_IOCTL_VERSION, &v) == 0 && v.name_len > 0, "VERSION len");
+  char name[32] = {0};
+  v.name = name;
+  v.name_len = sizeof(name) - 1;
+  v.date = NULL; v.date_len = 0; v.desc = NULL; v.desc_len = 0;
+  CHECK(ioctl(fd, DRM_IOCTL_VERSION, &v) == 0 && !strcmp(name, "aurora"),
+        "VERSION name=%s", name);
+
+  struct drm_get_cap cap = {.capability = DRM_CAP_DUMB_BUFFER};
+  CHECK(ioctl(fd, DRM_IOCTL_GET_CAP, &cap) == 0 && cap.value == 1, "CAP_DUMB_BUFFER");
+  struct drm_set_client_cap cc = {.capability = DRM_CLIENT_CAP_UNIVERSAL_PLANES, .value = 1};
+  CHECK(ioctl(fd, DRM_IOCTL_SET_CLIENT_CAP, &cc) == 0, "CLIENT_CAP universal planes");
+  cc.capability = DRM_CLIENT_CAP_ATOMIC;
+  CHECK(ioctl(fd, DRM_IOCTL_SET_CLIENT_CAP, &cc) == 0, "CLIENT_CAP atomic");
+
+  // Recursos
+  struct drm_mode_card_res res;
+  memset(&res, 0, sizeof(res));
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0 &&
+            res.count_crtcs == 1 && res.count_connectors == 1 &&
+            res.count_encoders == 1,
+        "GETRESOURCES crtcs=%u conns=%u encs=%u", res.count_crtcs,
+        res.count_connectors, res.count_encoders);
+  uint32_t crtc = 0, conn = 0, enc = 0;
+  res.crtc_id_ptr = (uintptr_t)&crtc;
+  res.connector_id_ptr = (uintptr_t)&conn;
+  res.encoder_id_ptr = (uintptr_t)&enc;
+  res.fb_id_ptr = 0;
+  res.count_fbs = 0;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0 && crtc && conn && enc,
+        "GETRESOURCES ids crtc=%u conn=%u enc=%u", crtc, conn, enc);
+
+  // Conector: dos pasadas
+  struct drm_mode_get_connector gc;
+  memset(&gc, 0, sizeof(gc));
+  gc.connector_id = conn;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &gc) == 0 && gc.count_modes >= 1 &&
+            gc.connection == 1,
+        "GETCONNECTOR modes=%u props=%u", gc.count_modes, gc.count_props);
+  struct drm_mode_modeinfo modes[16];
+  uint32_t cprops[8];
+  uint64_t cvals[8];
+  uint32_t cenc[2];
+  if (gc.count_modes > 16 || gc.count_props > 8 || gc.count_encoders > 2)
+    return 1;
+  gc.modes_ptr = (uintptr_t)modes;
+  gc.props_ptr = (uintptr_t)cprops;
+  gc.prop_values_ptr = (uintptr_t)cvals;
+  gc.encoders_ptr = (uintptr_t)cenc;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &gc) == 0, "GETCONNECTOR fill");
+  struct drm_mode_modeinfo mode = modes[0];
+  CHECK(mode.hdisplay >= 64 && (mode.type & DRM_MODE_TYPE_PREFERRED),
+        "preferred mode %s (%ux%u)", mode.name, mode.hdisplay, mode.vdisplay);
+
+  struct drm_mode_get_encoder ge = {.encoder_id = enc};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &ge) == 0 && ge.possible_crtcs == 1,
+        "GETENCODER");
+
+  // Planos
+  struct drm_mode_get_plane_res pr;
+  memset(&pr, 0, sizeof(pr));
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr) == 0 && pr.count_planes == 1,
+        "GETPLANERESOURCES n=%u", pr.count_planes);
+  uint32_t plane = 0;
+  pr.plane_id_ptr = (uintptr_t)&plane;
+  ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr);
+  CHECK(plane != 0, "plane id=%u", plane);
+
+  // Dumb buffer
+  struct drm_mode_create_dumb cd = {.width = mode.hdisplay, .height = mode.vdisplay, .bpp = 32};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd) == 0 && cd.handle && cd.pitch >= cd.width * 4,
+        "CREATE_DUMB %ux%u pitch=%u size=%llu", cd.width, cd.height, cd.pitch,
+        (unsigned long long)cd.size);
+  struct drm_mode_map_dumb md = {.handle = cd.handle};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &md) == 0, "MAP_DUMB offset=%llx",
+        (unsigned long long)md.offset);
+  uint32_t *px = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, md.offset);
+  CHECK(px != MAP_FAILED, "mmap dumb");
+  if (px == MAP_FAILED)
+    return 1;
+  for (uint32_t y = 0; y < cd.height; y++)
+    for (uint32_t x = 0; x < cd.width; x++)
+      px[y * (cd.pitch / 4) + x] = ((x / 64 + y / 64) & 1) ? 0x2060C0 : 0xE0A030;
+  CHECK(px[0] == 0xE0A030 && px[64] == 0x2060C0, "escritura/lectura del mapeo");
+
+  // ADDFB2
+  struct drm_mode_fb_cmd2 fb2;
+  memset(&fb2, 0, sizeof(fb2));
+  fb2.width = cd.width;
+  fb2.height = cd.height;
+  fb2.pixel_format = DRM_FORMAT_XRGB8888;
+  fb2.handles[0] = cd.handle;
+  fb2.pitches[0] = cd.pitch;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fb2) == 0 && fb2.fb_id, "ADDFB2 fb=%u", fb2.fb_id);
+
+  // SETCRTC (legacy)
+  struct drm_mode_crtc sc;
+  memset(&sc, 0, sizeof(sc));
+  sc.crtc_id = crtc;
+  sc.fb_id = fb2.fb_id;
+  sc.set_connectors_ptr = (uintptr_t)&conn;
+  sc.count_connectors = 1;
+  sc.mode_valid = 1;
+  sc.mode = mode;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &sc) == 0, "SETCRTC");
+  struct drm_mode_crtc gcr = {.crtc_id = crtc};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &gcr) == 0 && gcr.fb_id == fb2.fb_id &&
+            gcr.mode_valid && gcr.mode.hdisplay == mode.hdisplay,
+        "GETCRTC devuelve el modo activo");
+
+  // Segundo buffer + PAGE_FLIP con evento
+  struct drm_mode_create_dumb cd2 = cd;
+  cd2.handle = 0;
+  cd2.pitch = 0;
+  cd2.size = 0;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd2) == 0, "CREATE_DUMB #2");
+  struct drm_mode_fb_cmd2 fbb = fb2;
+  fbb.fb_id = 0;
+  fbb.handles[0] = cd2.handle;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fbb) == 0, "ADDFB2 #2");
+  struct drm_mode_crtc_page_flip pf = {.crtc_id = crtc, .fb_id = fbb.fb_id,
+                                       .flags = DRM_MODE_PAGE_FLIP_EVENT,
+                                       .user_data = 0xABCD};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) == 0, "PAGE_FLIP");
+  CHECK(wait_event(fd, DRM_EVENT_FLIP_COMPLETE, 0xABCD), "evento FLIP_COMPLETE");
+  pf.fb_id = fb2.fb_id;
+  pf.user_data = 0x1234;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) == 0, "PAGE_FLIP de vuelta");
+  CHECK(wait_event(fd, DRM_EVENT_FLIP_COMPLETE, 0x1234), "evento FLIP_COMPLETE #2");
+
+  // Atomic
+  uint32_t p_fb = find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "FB_ID");
+  uint32_t p_pcrtc = find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "CRTC_ID");
+  uint32_t p_active = find_prop(fd, crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE");
+  uint32_t p_mode = find_prop(fd, crtc, DRM_MODE_OBJECT_CRTC, "MODE_ID");
+  uint32_t p_ccrtc = find_prop(fd, conn, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID");
+  uint32_t p_sw = find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "SRC_W");
+  uint32_t p_sh = find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "SRC_H");
+  uint32_t p_cw = find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "CRTC_W");
+  uint32_t p_ch = find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "CRTC_H");
+  CHECK(p_fb && p_pcrtc && p_active && p_mode && p_ccrtc && p_sw && p_sh && p_cw && p_ch,
+        "propiedades atomic encontradas");
+
+  struct drm_mode_create_blob cb = {.data = (uintptr_t)&mode, .length = sizeof(mode)};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_CREATEPROPBLOB, &cb) == 0 && cb.blob_id, "CREATEPROPBLOB");
+  struct drm_mode_get_blob gb = {.blob_id = cb.blob_id};
+  struct drm_mode_modeinfo back;
+  gb.length = sizeof(back);
+  gb.data = (uintptr_t)&back;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETPROPBLOB, &gb) == 0 && !memcmp(&back, &mode, sizeof(mode)),
+        "GETPROPBLOB coincide");
+
+  uint32_t objs[3] = {plane, crtc, conn};
+  uint32_t counts[3] = {7, 2, 1};
+  uint32_t props[10] = {p_fb, p_pcrtc, p_sw, p_sh, p_cw, p_ch, find_prop(fd, plane, DRM_MODE_OBJECT_PLANE, "SRC_X"),
+                        p_active, p_mode, p_ccrtc};
+  uint64_t vals[10] = {fb2.fb_id, crtc, (uint64_t)mode.hdisplay << 16, (uint64_t)mode.vdisplay << 16,
+                       mode.hdisplay, mode.vdisplay, 0, 1, cb.blob_id, crtc};
+  struct drm_mode_atomic at;
+  memset(&at, 0, sizeof(at));
+  at.flags = DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT;
+  at.count_objs = 3;
+  at.objs_ptr = (uintptr_t)objs;
+  at.count_props_ptr = (uintptr_t)counts;
+  at.props_ptr = (uintptr_t)props;
+  at.prop_values_ptr = (uintptr_t)vals;
+  at.user_data = 0x77;
+  at.flags |= DRM_MODE_ATOMIC_TEST_ONLY;
+  at.flags &= ~DRM_MODE_PAGE_FLIP_EVENT;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_ATOMIC, &at) == 0, "ATOMIC test-only");
+  at.flags = DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_ATOMIC, &at) == 0, "ATOMIC commit");
+  CHECK(wait_event(fd, DRM_EVENT_FLIP_COMPLETE, 0x77), "evento atomic");
+  if (argc > 1) { // "hold": deja el patron en pantalla para una captura
+    printf("[drm_test] HOLD\n");
+    sleep(8);
+  }
+
+  // Commit invalido: fb inexistente
+  vals[0] = 9999;
+  at.flags = DRM_MODE_ATOMIC_TEST_ONLY;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_ATOMIC, &at) < 0, "ATOMIC con fb invalido falla");
+
+  // Apagar: ACTIVE=0, sin plano ni conector
+  uint32_t off_objs[3] = {plane, crtc, conn};
+  uint32_t off_counts[3] = {2, 2, 1};
+  uint32_t off_props[5] = {p_fb, p_pcrtc, p_active, p_mode, p_ccrtc};
+  uint64_t off_vals[5] = {0, 0, 0, 0, 0};
+  memset(&at, 0, sizeof(at));
+  at.flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
+  at.count_objs = 3;
+  at.objs_ptr = (uintptr_t)off_objs;
+  at.count_props_ptr = (uintptr_t)off_counts;
+  at.props_ptr = (uintptr_t)off_props;
+  at.prop_values_ptr = (uintptr_t)off_vals;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_ATOMIC, &at) == 0, "ATOMIC apagar");
+  gcr.mode_valid = 0;
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &gcr) == 0 && gcr.fb_id == 0, "CRTC apagado");
+
+  // Un segundo fd no es master
+  int fd2 = open("/dev/dri/card0", O_RDWR);
+  struct drm_mode_crtc bad = sc;
+  CHECK(fd2 >= 0 && ioctl(fd2, DRM_IOCTL_MODE_SETCRTC, &bad) < 0 && errno == EACCES,
+        "segundo fd no puede hacer modeset");
+  close(fd2);
+
+  // Render node: sin KMS
+  int rfd = open("/dev/dri/renderD128", O_RDWR);
+  struct drm_mode_card_res rr;
+  memset(&rr, 0, sizeof(rr));
+  CHECK(rfd >= 0 && ioctl(rfd, DRM_IOCTL_MODE_GETRESOURCES, &rr) < 0, "renderD128 rechaza KMS");
+  close(rfd);
+
+  // Limpieza
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_RMFB, &fbb.fb_id) == 0, "RMFB");
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb2.fb_id) == 0, "RMFB #2");
+  struct drm_mode_destroy_dumb dd = {.handle = cd.handle};
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd) == 0, "DESTROY_DUMB");
+  CHECK(px[0] == 0xE0A030, "el mapeo sigue valido tras destroy (paginas diferidas)");
+  munmap(px, cd.size);
+  close(fd);
+
+  printf("[drm_test] %s\n", g_fail ? "FAILED" : "ALL PASS");
+  return g_fail ? 1 : 0;
+}

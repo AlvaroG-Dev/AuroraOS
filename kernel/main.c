@@ -26,6 +26,8 @@
 #include "gfx/theme.h"
 #include "heap.h"
 #include "idt.h"
+#include "evdev.h"
+#include "drm/drm.h"
 #include "input.h"
 #include "ipc.h"
 #include "ipi.h"
@@ -407,6 +409,8 @@ static int drivers_init_task(void *arg) {
 
   LOG_INFO("[INIT] Input...");
   input_init();
+  evdev_init();
+  drm_init();
 
   LOG_INFO("[INIT] Buses...");
   bus_register(&pci_bus); // NEW: idempotente, explícito
@@ -632,7 +636,9 @@ static void system_init_task(void) {
   // 9. Particiones + mounts (necesitan drivers).
   // [FASE 5.2] Con AHCI en Ring 3 los discos aparecen cuando ahci.aur
   // arranca y los registra; esperarlos antes de escanear particiones.
-  if (ahci_user_mode()) {
+  // Solo si hay un HBA AHCI: sin él ahci.aur no se lanza y esperaría en vano.
+  pci_device_t ahci_probe_dev;
+  if (ahci_user_mode() && pci_find_device(0x01, 0x06, &ahci_probe_dev) == 0) {
     klog_boot_step("[INIT] Esperando ahci.aur...");
     if (blkp_wait_ready(5000))
       klog_boot_ok();

@@ -9,4 +9,8 @@
 // con el manifiesto y lo lanza en espacio de usuario.
 extern struct driver aur_bus_driver;
 
+// [FASE 5.5] Lanza un .aur que no se asocia a un dispositivo PCI (p. ej.
+// ps2.aur) y lo pone bajo el supervisor (reinicio automático). 0 = lanzado.
+int aur_bus_launch(const char *path);
+
 #endif

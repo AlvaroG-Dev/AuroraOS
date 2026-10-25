@@ -14,6 +14,10 @@
 // Las páginas se mapean eagerly con ops->mmap, no por demand paging.
 // vma_unmap_range NO las devuelve al PMM (son MMIO, no RAM).
 #define VMA_MMIO 4
+// mmap MAP_SHARED de un objeto con ops->get_page (memfd). Demand paging con
+// paginas compartidas (PTE_SPECIAL|PTE_SHARED_OBJ): ni se liberan al
+// desmapear ni se copian en fork.
+#define VMA_SHARED 5
 
 // Límites
 #define MAX_STACK_GROWTH (8 * 1024 * 1024) // Límite RLIMIT_STACK predeterminado

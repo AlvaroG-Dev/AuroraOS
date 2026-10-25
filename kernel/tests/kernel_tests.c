@@ -18,6 +18,8 @@
 #include "../bmp.h"
 #include "../completion.h"
 #include "../cpu.h"
+#include "../devtmpfs.h"
+#include "../evdev.h"
 #include "../elf.h"
 #include "../fat32.h"
 #include "../heap.h"
@@ -5991,3 +5993,123 @@ static void test_blk_parallel_sync(void) {
 }
 REGISTER_TEST("blk: 4 reads concurrentes al mismo disco",
               test_blk_parallel_sync);
+// --- devtmpfs: registro dinamico en /dev ---------------------------------
+static void test_devtmpfs_register_lookup_readdir(void) {
+  TEST_ASSERT(devtmpfs_register("dt_test/n0", DEVT_MKDEV(240, 7), 0660, 0, 5,
+                                NULL, NULL) == 0,
+              "register dt_test/n0");
+  TEST_ASSERT(devtmpfs_register("dt_test/n0", DEVT_MKDEV(240, 7), 0660, 0, 0,
+                                NULL, NULL) == -EEXIST,
+              "register duplicado debe dar -EEXIST");
+
+  vfs_node_t *n = vfs_lookup("/dev/dt_test/n0");
+  TEST_ASSERT(n != NULL, "lookup /dev/dt_test/n0");
+  if (n) {
+    TEST_ASSERT((n->flags & VFS_CHARDEVICE) != 0, "n0 no es chardev");
+    TEST_ASSERT(n->rdev == DEVT_MKDEV(240, 7), "rdev de n0 = %u", n->rdev);
+    TEST_ASSERT((n->mode & S_IFMT) == S_IFCHR && (n->mode & 0777) == 0660,
+                "modo de n0 = %o", n->mode);
+    vfs_node_free(n);
+  }
+
+  vfs_node_t *d = vfs_lookup("/dev/dt_test");
+  TEST_ASSERT(d != NULL && (d->flags & VFS_DIRECTORY), "dt_test es dir");
+  if (d) {
+    vfs_dirent_t *de = (vfs_dirent_t *)kzalloc(sizeof(*de));
+    TEST_ASSERT(de && d->ops && d->ops->readdir, "readdir de dt_test");
+    if (de && d->ops && d->ops->readdir) {
+      TEST_ASSERT(d->ops->readdir(d, 0, de) == 0 &&
+                      strcmp(de->name, "n0") == 0,
+                  "primer entry = n0 (%s)", de->name);
+      TEST_ASSERT(d->ops->readdir(d, 1, de) == 0 && de->name[0] == '\0',
+                  "fin del listado");
+    }
+    if (de)
+      kfree(de);
+    vfs_node_free(d);
+  }
+
+  // Aparece en el listado de la raiz de /dev como directorio.
+  vfs_node_t *root = vfs_lookup("/dev");
+  bool seen = false;
+  if (root && root->ops && root->ops->readdir) {
+    vfs_dirent_t *de = (vfs_dirent_t *)kzalloc(sizeof(*de));
+    for (uint64_t i = 0; de && i < 256; i++) {
+      if (root->ops->readdir(root, i, de) != 0 || de->name[0] == '\0')
+        break;
+      if (strcmp(de->name, "dt_test") == 0 && (de->type & VFS_DIRECTORY))
+        seen = true;
+    }
+    if (de)
+      kfree(de);
+  }
+  TEST_ASSERT(seen, "dt_test aparece en readdir(/dev)");
+  if (root)
+    vfs_node_free(root);
+
+  TEST_ASSERT(devtmpfs_unregister("dt_test/n0") == 0, "unregister");
+  vfs_node_t *gone = vfs_lookup("/dev/dt_test/n0");
+  TEST_ASSERT(gone == NULL, "n0 sigue existiendo tras unregister");
+  if (gone)
+    vfs_node_free(gone);
+  vfs_node_t *gdir = vfs_lookup("/dev/dt_test");
+  TEST_ASSERT(gdir == NULL, "dt_test sigue existiendo sin hijos");
+  if (gdir)
+    vfs_node_free(gdir);
+}
+REGISTER_TEST("devtmpfs: registro, lookup y readdir",
+              test_devtmpfs_register_lookup_readdir);
+
+// --- evdev: /dev/input/event0 ---------------------------------------------
+struct t_input_event {
+  int64_t sec, usec;
+  uint16_t type, code;
+  int32_t value;
+};
+
+static void test_evdev_keyboard_events(void) {
+  vfs_node_t *n = vfs_lookup("/dev/input/event0");
+  TEST_ASSERT(n != NULL, "lookup /dev/input/event0");
+  if (!n)
+    return;
+  TEST_ASSERT(n->ops && n->ops->open && n->ops->read && n->ops->ioctl,
+              "ops de evdev incompletas");
+  if (!n->ops || !n->ops->open || n->ops->open(n, 0x800) != 0) {
+    vfs_node_free(n);
+    TEST_ASSERT(0, "open evdev");
+    return;
+  }
+
+  struct t_input_event ev[8];
+  TEST_ASSERT(n->ops->read(n, 0, sizeof(ev), ev) == -EAGAIN,
+              "read vacio no bloqueante -> EAGAIN");
+
+  evdev_ps2_key(0x1E, 0, 1); // 'a' pulsada  (KEY_A = 30)
+  evdev_ps2_key(0x1E, 0, 0); // soltada
+  evdev_ps2_key(0x48, 1, 1); // flecha arriba extendida (KEY_UP = 103)
+  evdev_ps2_key(0x48, 1, 0);
+  int64_t r = n->ops->read(n, 0, sizeof(ev), ev);
+  TEST_ASSERT(r == 8 * (int64_t)sizeof(struct t_input_event),
+              "read devolvio %ld bytes", (long)r);
+  if (r == 8 * (int64_t)sizeof(struct t_input_event)) {
+    TEST_ASSERT(ev[0].type == 1 && ev[0].code == 30 && ev[0].value == 1,
+                "KEY_A down");
+    TEST_ASSERT(ev[1].type == 0 && ev[1].code == 0, "SYN tras KEY_A down");
+    TEST_ASSERT(ev[2].type == 1 && ev[2].code == 30 && ev[2].value == 0,
+                "KEY_A up");
+    TEST_ASSERT(ev[4].type == 1 && ev[4].code == 103 && ev[4].value == 1,
+                "KEY_UP (extendida) down");
+  }
+
+  // Autorepeat: segunda pulsacion sin soltar -> value 2.
+  evdev_kbd_key(30, 1);
+  evdev_kbd_key(30, 1);
+  evdev_kbd_key(30, 0);
+  r = n->ops->read(n, 0, sizeof(ev), ev);
+  TEST_ASSERT(r >= 4 * (int64_t)sizeof(struct t_input_event) && ev[2].value == 2,
+              "autorepeat value=2");
+
+  vfs_node_free(n);
+}
+REGISTER_TEST("evdev: teclado, SYN, autorepeat, ioctl",
+              test_evdev_keyboard_events);

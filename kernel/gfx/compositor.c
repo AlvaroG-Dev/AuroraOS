@@ -781,19 +781,19 @@ static void set_cursor_shape(cursor_shape_t s) {
   cursor_moved();
 }
 
-/* Se escribe en VRAM sin leerla: el fondo sale del backbuffer. */
-static void draw_cursor_overlay(rect_t clip) {
+/* Mezcla el cursor sobre `row` (píxeles x0..x0+n de la fila y, ya copiados del
+ * backbuffer). Nunca se lee VRAM. */
+static void draw_cursor_row(uint32_t *row, int x0, int n, int y) {
   const cursor_img_t *c = cursor_get(cursor_shape);
   rect_t cr = cursor_rect();
-  rect_t r = rect_clip(clip, cr);
-  for (int y = r.y; y < r.y + r.h; y++) {
-    const uint32_t *src = &c->px[(y - cr.y) * c->w + (r.x - cr.x)];
-    const uint32_t *bg = &backbuffer[y * fb_width + r.x];
-    uint32_t *out = &fb_ptr[y * fb_pitch + r.x];
-    for (int x = 0; x < r.w; x++) {
-      if (src[x] >> 24)
-        out[x] = blend_pixel_fast(src[x], bg[x]);
-    }
+  rect_t r = rect_clip((rect_t){x0, y, n, 1}, cr);
+  if (r.w <= 0)
+    return;
+  const uint32_t *src = &c->px[(y - cr.y) * c->w + (r.x - cr.x)];
+  uint32_t *out = &row[r.x - x0];
+  for (int x = 0; x < r.w; x++) {
+    if (src[x] >> 24)
+      out[x] = blend_pixel_fast(src[x], out[x]);
   }
 }
 
@@ -1263,21 +1263,71 @@ static void compose_scene(rect_t e) {
 /* Backbuffer -> VRAM del rectángulo `clip`, con el cursor encima. Sin
  * preempción: así nunca queda en pantalla media ventana en la posición
  * nueva y media en la vieja durante un quantum entero de otra tarea. */
+/* Copia de lo que hay en VRAM (cursor incluido) y fila temporal. Sin vsync, el
+ * escaneo de la pantalla (o el refresco de QEMU/KVM) puede caer a mitad del
+ * volcado y mostrar media ventana en la posición vieja y media en la nueva
+ * (tearing). Solo se escriben en VRAM los píxeles que cambian de verdad: al
+ * mover una ventana la mayor parte del rect dañado es idéntica y el volcado
+ * es mucho más corto. */
+static uint32_t *front_shadow = NULL;
+static uint32_t *present_line = NULL;
+#define FRONT_UNKNOWN 0x01234567u /* alpha != 0xFF: nunca sale del compositor */
+#define PRESENT_GAP 16 /* píxeles iguales que se escriben igual para no partir */
+
+static void present_row_delta(int y, int x0, int n) {
+  const uint32_t *src = &backbuffer[y * fb_width + x0];
+  uint32_t *line = present_line;
+  uint32_t *front = &front_shadow[y * fb_width + x0];
+  uint32_t *vram = &fb_ptr[y * fb_pitch + x0];
+
+  rect_t cr = cursor_rect();
+  if (y >= cr.y && y < cr.y + cr.h && cr.x < x0 + n && cr.x + cr.w > x0) {
+    simd_copy_normal(line, src, (size_t)n);
+    draw_cursor_row(line, x0, n, y);
+    src = line;
+  }
+
+  int i = 0;
+  while (i < n) {
+    while (i < n && src[i] == front[i])
+      i++;
+    if (i >= n)
+      break;
+    int start = i, last = i, same = 0;
+    for (; i < n; i++) {
+      if (src[i] != front[i]) {
+        last = i;
+        same = 0;
+      } else if (++same >= PRESENT_GAP) {
+        break;
+      }
+    }
+    int len = last - start + 1;
+    simd_copy_to_vram(&vram[start], &src[start], (size_t)len);
+    simd_copy_normal(&front[start], &src[start], (size_t)len);
+  }
+}
+
 static void present_rect(rect_t clip) {
   if (!fb_ptr)
     return;
   preempt_disable();
-  for (int y = clip.y; y < clip.y + clip.h; y++) {
-    if (fb_bpp == 24) /* fb_ptr es un buffer en RAM; fb_flush_rect empaqueta */
-      simd_copy_normal(&fb_ptr[y * fb_pitch + clip.x],
-                       &backbuffer[y * fb_width + clip.x], clip.w);
-    else
-      simd_copy_to_vram(&fb_ptr[y * fb_pitch + clip.x],
-                        &backbuffer[y * fb_width + clip.x], clip.w);
+  if (fb_bpp == 24 || !front_shadow || !present_line) {
+    for (int y = clip.y; y < clip.y + clip.h; y++) {
+      uint32_t *dst = &fb_ptr[y * fb_pitch + clip.x];
+      const uint32_t *src = &backbuffer[y * fb_width + clip.x];
+      if (fb_bpp == 24) /* fb_ptr es un buffer en RAM; fb_flush_rect empaqueta */
+        simd_copy_normal(dst, src, clip.w);
+      else
+        simd_copy_to_vram(dst, src, clip.w);
+      draw_cursor_row(dst, clip.x, clip.w, y);
+    }
+    fb_flush_rect(fb_ptr, fb_pitch, (uint32_t)clip.x, (uint32_t)clip.y,
+                  (uint32_t)clip.w, (uint32_t)clip.h);
+  } else {
+    for (int y = clip.y; y < clip.y + clip.h; y++)
+      present_row_delta(y, clip.x, clip.w);
   }
-  draw_cursor_overlay(clip);
-  fb_flush_rect(fb_ptr, fb_pitch, (uint32_t)clip.x, (uint32_t)clip.y,
-                (uint32_t)clip.w, (uint32_t)clip.h);
   preempt_enable();
 }
 
@@ -1444,6 +1494,16 @@ void compositor_init(void) {
   if (!backbuffer) {
     LOG_ERR("[COMPOSITOR] ERROR CRITICO: No se pudo alojar el Backbuffer");
     return;
+  }
+
+  if (fb_bpp == 32) {
+    front_shadow = (uint32_t *)kmalloc(size);
+    present_line = (uint32_t *)kmalloc((size_t)fb_width * sizeof(uint32_t));
+    if (!present_line)
+      front_shadow = NULL;
+    if (front_shadow)
+      for (size_t i = 0; i < (size_t)fb_width * fb_height; i++)
+        front_shadow[i] = FRONT_UNKNOWN;
   }
 
   LOG_INFO("[COMPOSITOR] Motor grafico con aceleracion SIMD SSE2 inicializado.");

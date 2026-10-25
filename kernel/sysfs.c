@@ -42,13 +42,16 @@
 //   normal (cat /sys/.../vendor sigue funcionando).
 
 #include "sysfs.h"
+#include "sysfs_dyn.h"
 #include "aur.h"       // [FASE 4.3] AUR_CAP_MMIO
+#include "aur_loader.h"
 #include "block.h"
 #include "heap.h"
 #include "io.h"        // inl / outl
 #include "klog.h"
 #include "kmod_sys.h"
 #include "paging.h"    // [FASE 4.3] paging_map_page_in, PTE_*
+#include "pci.h"       // pci_{read,write}_config_dword (con pci_config_lock)
 #include "process.h"   // [FASE 4.3] struct process (aur.caps)
 #include "string.h"
 #include "vfs.h"
@@ -58,16 +61,12 @@
 // ===========================================================================
 // PCI config space access (puerto 0xCF8 / 0xCFC)
 // ===========================================================================
-#define PCI_CONFIG_ADDR 0xCF8
-#define PCI_CONFIG_DATA 0xCFC
-
+// Estos accesos pasan por la API de pci.c: 0xCF8/0xCFC es un par
+// dirección/dato compartido y sin el pci_config_lock otro CPU pisa la
+// dirección entre el outl y el inl (lecturas de dispositivos fantasma).
 static uint32_t pci_read_dword(uint8_t bus, uint8_t slot, uint8_t func,
                                uint8_t off) {
-  uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) |
-                  ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
-                  (uint32_t)(off & 0xFCu);
-  outl(PCI_CONFIG_ADDR, addr);
-  return inl(PCI_CONFIG_DATA);
+  return pci_read_config_dword(bus, slot, func, off);
 }
 
 static uint16_t pci_read_word(uint8_t bus, uint8_t slot, uint8_t func,
@@ -84,11 +83,7 @@ static uint8_t pci_read_byte(uint8_t bus, uint8_t slot, uint8_t func,
 
 static void pci_write_dword(uint8_t bus, uint8_t slot, uint8_t func,
                             uint8_t off, uint32_t val) {
-  uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) |
-                  ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
-                  (uint32_t)(off & 0xFCu);
-  outl(PCI_CONFIG_ADDR, addr);
-  outl(PCI_CONFIG_DATA, val);
+  pci_write_config_dword(bus, slot, func, off, val);
 }
 
 // ===========================================================================
@@ -110,6 +105,7 @@ typedef struct {
   uint32_t bar_size[6];
   uint64_t bar_phys[6]; // dirección física COMPLETA (BAR de 64 bits)
   uint8_t bar_is_io[6];
+  uint8_t gone; // [FASE 6.4] el dispositivo se quitó del bus
 } pci_dev_t;
 
 static pci_dev_t g_pci[SYSFS_PCI_MAX];
@@ -210,44 +206,89 @@ static void sysfs_size_bars(pci_dev_t *d) {
   }
 }
 
+static void sysfs_fill_dev(pci_dev_t *d, uint8_t bus, uint8_t slot,
+                           uint8_t func, uint16_t vendor) {
+  d->bus = bus;
+  d->slot = slot;
+  d->func = func;
+  d->vendor = vendor;
+  d->device = pci_read_word(bus, slot, func, 0x02);
+  d->revision = pci_read_byte(bus, slot, func, 0x08);
+  d->prog_if = pci_read_byte(bus, slot, func, 0x09);
+  d->subclass = pci_read_byte(bus, slot, func, 0x0A);
+  d->class = pci_read_byte(bus, slot, func, 0x0B);
+  d->subsys_vendor = pci_read_word(bus, slot, func, 0x2C);
+  d->subsys_device = pci_read_word(bus, slot, func, 0x2E);
+  d->header_type = pci_read_byte(bus, slot, func, 0x0E) & 0x7F;
+  sysfs_size_bars(d);
+}
+
+static int g_sysfs_refreshing;
+
+// [FASE 6.4] Sincroniza la tabla con el bus: añade lo nuevo y marca `gone`
+// lo que ya no responde. Explora los buses 0..max_bus (el escaneo completo
+// de los 256 buses es lento). Se llama al arrancar y en cada alta/baja.
+void sysfs_pci_refresh(int max_bus) {
+  while (__atomic_exchange_n(&g_sysfs_refreshing, 1, __ATOMIC_ACQ_REL))
+    ;
+  uint8_t seen[SYSFS_PCI_MAX];
+  memset(seen, 0, sizeof(seen));
+  if (max_bus > 255)
+    max_bus = 255;
+
+  for (int bus = 0; bus <= max_bus; bus++) {
+    for (int slot = 0; slot < 32; slot++) {
+      if (pci_read_word((uint8_t)bus, (uint8_t)slot, 0, 0x00) == 0xFFFF)
+        continue;
+      uint8_t header = pci_read_byte((uint8_t)bus, (uint8_t)slot, 0, 0x0E);
+      int nfuncs = (header & 0x80) ? 8 : 1;
+      for (int func = 0; func < nfuncs; func++) {
+        uint16_t vendor =
+            pci_read_word((uint8_t)bus, (uint8_t)slot, (uint8_t)func, 0x00);
+        if (vendor == 0xFFFF)
+          continue;
+        int idx = -1;
+        for (int i = 0; i < g_pci_count; i++)
+          if (g_pci[i].bus == bus && g_pci[i].slot == slot &&
+              g_pci[i].func == func) {
+            idx = i;
+            break;
+          }
+        if (idx >= 0 && !g_pci[idx].gone) {
+          seen[idx] = 1;
+          continue;
+        }
+        if (idx < 0) {
+          if (g_pci_count >= SYSFS_PCI_MAX)
+            goto done;
+          idx = g_pci_count;
+        }
+        // Se rellena completa antes de publicarla (count / gone=0).
+        pci_dev_t *d = &g_pci[idx];
+        d->gone = 1;
+        sysfs_fill_dev(d, (uint8_t)bus, (uint8_t)slot, (uint8_t)func, vendor);
+        seen[idx] = 1;
+        __atomic_store_n(&d->gone, 0, __ATOMIC_RELEASE);
+        if (idx == g_pci_count)
+          __atomic_store_n(&g_pci_count, g_pci_count + 1, __ATOMIC_RELEASE);
+      }
+    }
+  }
+done:
+  for (int i = 0; i < g_pci_count; i++)
+    if (!seen[i] && !g_pci[i].gone)
+      g_pci[i].gone = 1;
+  __atomic_store_n(&g_sysfs_refreshing, 0, __ATOMIC_RELEASE);
+}
+
 void sysfs_init(void) {
   if (g_sysfs_ready)
     return;
   g_sysfs_ready = 1;
   g_pci_count = 0;
-
-  // Solo bus 0: QEMU/PIIX no pone nada en buses >0, y el escaneo
-  // completo (256*32*8 = 65536 reads de config space) es lento y
-  // completamente innecesario.
-  for (int slot = 0; slot < 32; slot++) {
-    uint16_t v0 = pci_read_word(0, slot, 0, 0x00);
-    if (v0 == 0xFFFF)
-      continue;
-    uint8_t header = pci_read_byte(0, slot, 0, 0x0E);
-    int nfuncs = (header & 0x80) ? 8 : 1;
-    for (int func = 0; func < nfuncs; func++) {
-      uint16_t vendor = pci_read_word(0, slot, func, 0x00);
-      if (vendor == 0xFFFF)
-        continue;
-      if (g_pci_count >= SYSFS_PCI_MAX)
-        goto done;
-      pci_dev_t *d = &g_pci[g_pci_count++];
-      d->bus = 0;
-      d->slot = (uint8_t)slot;
-      d->func = (uint8_t)func;
-      d->vendor = vendor;
-      d->device = pci_read_word(0, slot, func, 0x02);
-      d->revision = pci_read_byte(0, slot, func, 0x08);
-      d->prog_if = pci_read_byte(0, slot, func, 0x09);
-      d->subclass = pci_read_byte(0, slot, func, 0x0A);
-      d->class = pci_read_byte(0, slot, func, 0x0B);
-      d->subsys_vendor = pci_read_word(0, slot, func, 0x2C);
-      d->subsys_device = pci_read_word(0, slot, func, 0x2E);
-      d->header_type = pci_read_byte(0, slot, func, 0x0E) & 0x7F;
-      sysfs_size_bars(d);
-    }
-  }
-done:
+  // Al arrancar solo el bus 0: el hilo de hot-plug de pci.c amplía a los
+  // buses de los puentes en cuanto termina su enumeración.
+  sysfs_pci_refresh(0);
   LOG_INFO("[SYSFS] %d dispositivos PCI enumerados", g_pci_count);
 }
 
@@ -524,6 +565,8 @@ static vfs_node_t *make_symlink(const char *name, const char *target) {
 typedef struct {
   uint8_t bus, slot, func;
   int bar_index;
+  uint16_t vendor, device; // para comprobar el manifiesto del .aur
+  uint8_t class_id, subclass_id;
   uint64_t phys;
   uint64_t size;
 } sysfs_resource_t;
@@ -555,6 +598,16 @@ static int sysfs_resource_mmap(vfs_node_t *node, struct process *proc,
     return -EPERM;
 
   sysfs_resource_t *r = (sysfs_resource_t *)node->priv;
+  // [FASE 4.7] Un .aur solo mapea los BARs de los dispositivos que declara
+  // en su manifiesto (vendor/device o clase), no cualquiera del bus.
+  if (!aur_info_allows_pci(&proc->aur, r->vendor, r->device, r->class_id,
+                           r->subclass_id)) {
+    LOG_WARN("[SYSFS] pid=%u '%s': %02x:%02x.%x (%04x:%04x) no está en su "
+             "manifiesto",
+             proc->pid, proc->aur.name, r->bus, r->slot, r->func, r->vendor,
+             r->device);
+    return -EPERM;
+  }
   if (offset >= r->size || length > r->size - offset)
     return -EINVAL;
   if ((offset & 0xFFFULL) != 0)
@@ -621,6 +674,10 @@ static vfs_node_t *make_resource_node(const pci_dev_t *d, int bar) {
   r->slot = d->slot;
   r->func = d->func;
   r->bar_index = bar;
+  r->vendor = d->vendor;
+  r->device = d->device;
+  r->class_id = d->class;
+  r->subclass_id = d->subclass;
   r->phys = d->bar_phys[bar] ? d->bar_phys[bar] : (uint64_t)d->bar[bar];
   r->size = (uint64_t)d->bar_size[bar];
   n->priv = r;
@@ -631,7 +688,8 @@ static vfs_node_t *make_resource_node(const pci_dev_t *d, int bar) {
 // ===========================================================================
 // Listas estáticas para readdir
 // ===========================================================================
-static const char *sysfs_root_entries[] = {"bus", "class", "dev", "module"};
+static const char *sysfs_root_entries[] = {"bus", "class", "dev", "module",
+                                           "devices"};
 #define SYSFS_N_ROOT \
   (sizeof(sysfs_root_entries) / sizeof(sysfs_root_entries[0]))
 
@@ -660,11 +718,21 @@ static int readdir_list_typed(const char **list, size_t n, uint32_t type,
 }
 
 static int readdir_bdf_list(uint64_t idx, vfs_dirent_t *out) {
-  if (idx >= (uint64_t)g_pci_count) {
+  // idx cuenta solo los dispositivos presentes (los dados de baja se saltan).
+  int found = -1;
+  for (int i = 0, n = 0; i < g_pci_count; i++) {
+    if (g_pci[i].gone)
+      continue;
+    if ((uint64_t)n++ == idx) {
+      found = i;
+      break;
+    }
+  }
+  if (found < 0) {
     out->name[0] = '\0';
     return 1;
   }
-  pci_bdf_str(&g_pci[idx], out->name, sizeof(out->name));
+  pci_bdf_str(&g_pci[found], out->name, sizeof(out->name));
   out->type = VFS_DIRECTORY;
   out->size = 0;
   return 0;
@@ -765,7 +833,7 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
     const pci_dev_t *d = NULL;
     for (int i = 0; i < g_pci_count; i++) {
       if (g_pci[i].bus == bus && g_pci[i].slot == slot &&
-          g_pci[i].func == func) {
+          g_pci[i].func == func && !g_pci[i].gone) {
         d = &g_pci[i];
         break;
       }
@@ -1155,6 +1223,26 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
     return make_symlink(link_name, target);
   }
 
+  // ---- registro dinamico (input, drm...) ----
+  {
+    char *data = NULL;
+    size_t dlen = 0;
+    int kind = sysfs_dyn_get(name, &data, &dlen);
+    const char *base = name;
+    for (const char *p = name; *p; p++)
+      if (*p == '/')
+        base = p + 1;
+    if (kind == SYSFS_DYN_FILE)
+      return make_file(base, data, dlen);
+    if (kind == SYSFS_DYN_LINK) {
+      vfs_node_t *ln = make_symlink(base, data);
+      kfree(data);
+      return ln;
+    }
+    if (kind == SYSFS_DYN_DIR)
+      return make_dir(base);
+  }
+
   return NULL;
 }
 
@@ -1259,7 +1347,7 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     const pci_dev_t *d = NULL;
     for (int i = 0; i < g_pci_count; i++) {
       if (g_pci[i].bus == bus && g_pci[i].slot == slot &&
-          g_pci[i].func == func) {
+          g_pci[i].func == func && !g_pci[i].gone) {
         d = &g_pci[i];
         break;
       }
@@ -1275,7 +1363,9 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
 
   if (strcmp(n, "/class") == 0) {
     static const char *l[] = {"block"};
-    return readdir_list_typed(l, 1, VFS_DIRECTORY, index, out);
+    if (index == 0)
+      return readdir_list_typed(l, 1, VFS_DIRECTORY, index, out);
+    return sysfs_dyn_readdir("class", index - 1, out);
   }
   if (strcmp(n, "/class/block") == 0) {
     if (readdir_block_names(index, out) == 1) {
@@ -1342,7 +1432,9 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
 
   if (strcmp(n, "/dev") == 0) {
     static const char *l[] = {"block"};
-    return readdir_list_typed(l, 1, VFS_DIRECTORY, index, out);
+    if (index == 0)
+      return readdir_list_typed(l, 1, VFS_DIRECTORY, index, out);
+    return sysfs_dyn_readdir("dev", index - 1, out);
   }
   if (strcmp(n, "/dev/block") == 0) {
     if (readdir_devblock(index, out) == 1) {
@@ -1352,6 +1444,10 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
     }
     return 0;
   }
+
+  // Directorios del registro dinamico (devices/..., class/input/..., dev/char).
+  if (sysfs_dyn_readdir(n + 1, index, out) == 0)
+    return 0;
 
   out->name[0] = '\0';
   out->type = 0;
@@ -1405,7 +1501,7 @@ int sysfs_pci_read_config(uint8_t bus, uint8_t slot, uint8_t func,
   const pci_dev_t *d = NULL;
   for (int i = 0; i < g_pci_count; i++) {
     if (g_pci[i].bus == bus && g_pci[i].slot == slot &&
-        g_pci[i].func == func) {
+        g_pci[i].func == func && !g_pci[i].gone) {
       d = &g_pci[i];
       break;
     }

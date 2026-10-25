@@ -14,6 +14,12 @@
 
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
+# Drivers en Ring 3 (.aur) por defecto. Con =0 se usa el driver del kernel.
+# Cada uno instala/borra el marcador /usr/lib/aur/<drv>.user en el initrd.
+AHCI_USER ?= 1
+XHCI_USER ?= 1
+PS2_USER  ?= 1
+
 # ---------------------------------------------------------------------------
 # Rutas del bootloader e ISO.
 # ---------------------------------------------------------------------------
@@ -143,6 +149,12 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers
 		echo 1 > sysroot/usr/lib/aur/xhci.user; \
 	else \
 		rm -f sysroot/usr/lib/aur/xhci.user; \
+	fi
+	@if [ "$(PS2_USER)" = "1" ]; then \
+		echo "[Makefile] PS/2 en Ring 3 (ps2.aur): /usr/lib/aur/ps2.user"; \
+		echo 1 > sysroot/usr/lib/aur/ps2.user; \
+	else \
+		rm -f sysroot/usr/lib/aur/ps2.user; \
 	fi
 	@if [ -f /etc/inputrc ]; then \
 		cp -f /etc/inputrc sysroot/etc/inputrc; \

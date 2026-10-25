@@ -11,10 +11,10 @@
 //
 // Diseño v1 (deliberadamente simple):
 //   - Un comando a la vez, slot 0, sin NCQ.
-//   - Sin interrupciones: GHC.IE=0 y PxIE=0; se hace polling de PxCI. Así
-//     no dependemos de /dev/irq (que solo cubre IRQs legacy 0..15, y los
-//     AHCI de q35 usan INTx > 15 o MSI).
-//   - Un único controlador AHCI (el primero que aparezca en sysfs).
+//   - Interrupciones por MSI (/dev/msi + /dev/irq/<vector>): el comando se
+//     espera dormido; sigue comprobando PxCI/PxIS con un timeout corto, así
+//     que sin MSI (sin capability, sin permiso) cae a polling.
+//   - Todos los controladores AHCI de sysfs, cada uno con su vector MSI.
 //
 // Solo actúa si existe /usr/lib/aur/ahci.user (ver `make AHCI_USER=1`); sin
 // él, el driver de kernel ahci.c sigue siendo el dueño del controlador.
@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -136,6 +137,7 @@ _Static_assert(sizeof(struct aur_blk_done) == 32, "ABI aur_blk_done");
 #define IS_FATAL                                                               \
   ((1u << 30) | (1u << 29) | (1u << 28) | (1u << 27) | (1u << 24))
 #define IS_TFES (1u << 30)
+#define PXIE_DONE 0xFu // DHRS | PSS | DSS | SDBS
 
 #define SIG_ATA 0x00000101u
 
@@ -170,6 +172,7 @@ struct port {
   uint64_t phys;
   uint32_t ss; // tamaño de sector lógico
   uint64_t sectors;
+  int ep; // epoll sobre el vector MSI del HBA; -1 = polling
 };
 
 // Estado del HBA que se está inicializando (solo se usa durante el init;
@@ -177,6 +180,7 @@ struct port {
 static volatile uint8_t *abar;
 static size_t abar_len;
 static uint32_t hba_cap;
+static int hba_ep = -1; // epoll del HBA en init (ver hba_msi_setup)
 
 static struct port ports[MAX_HBAS * PORTS_PER_HBA];
 static int nports;
@@ -241,6 +245,71 @@ static int phys_ok(uint32_t cap, uint64_t phys, size_t len) {
   if (cap & (1u << 31))
     return 1;
   return phys + len <= 0x100000000ULL;
+}
+
+// ============================================================================
+// MSI (/dev/msi + /dev/irq/<vector>)
+// ============================================================================
+#define AURMSI_ALLOC 0x700
+struct aur_msi_alloc {
+  uint8_t bus, slot, func, _pad;
+  uint32_t vector;
+};
+_Static_assert(sizeof(struct aur_msi_alloc) == 8, "ABI aur_msi_alloc");
+
+struct aur_irq_event {
+  uint32_t irq;
+  uint32_t count;
+};
+
+static int fd_msi = -1;
+
+// "0000:00:1f.2" -> bus/slot/func.
+static int parse_bdf(const char *bdf, uint8_t *bus, uint8_t *slot,
+                     uint8_t *func) {
+  if (strlen(bdf) < 12 || bdf[4] != ':' || bdf[7] != ':' || bdf[10] != '.')
+    return -1;
+  *bus = (uint8_t)strtoul(bdf + 5, NULL, 16);
+  *slot = (uint8_t)strtoul(bdf + 8, NULL, 16);
+  *func = (uint8_t)(bdf[11] - '0');
+  return 0;
+}
+
+// Pide MSI para el HBA y devuelve un epoll sobre su vector, o -1 (el driver
+// sigue en polling: sin cap MSI, sin permiso o sin vectores).
+static int hba_msi_setup(const char *bdf) {
+  struct aur_msi_alloc a;
+  memset(&a, 0, sizeof(a));
+  if (parse_bdf(bdf, &a.bus, &a.slot, &a.func) != 0)
+    return -1;
+  if (fd_msi < 0)
+    fd_msi = open("/dev/msi", O_RDWR);
+  if (fd_msi < 0 || ioctl(fd_msi, AURMSI_ALLOC, &a) != 0) {
+    fprintf(stderr, "[ahci.aur] %s: sin MSI (%s), usando polling\n", bdf,
+            strerror(errno));
+    return -1;
+  }
+  char path[32];
+  snprintf(path, sizeof(path), "/dev/irq/%u", a.vector);
+  int irq_fd = open(path, O_RDONLY);
+  int ep = epoll_create1(0);
+  struct epoll_event ev = {.events = EPOLLIN, .data.fd = irq_fd};
+  if (irq_fd < 0 || ep < 0 || epoll_ctl(ep, EPOLL_CTL_ADD, irq_fd, &ev) != 0) {
+    perror("[ahci.aur] /dev/irq");
+    return -1;
+  }
+  printf("[ahci.aur] %s: MSI en vector 0x%02x\n", bdf, a.vector);
+  return ep;
+}
+
+// Duerme hasta una IRQ o `ms`; consume el contador para poder volver a dormir.
+static void wait_irq(int ep, int ms) {
+  struct epoll_event ev;
+  if (epoll_wait(ep, &ev, 1, ms) > 0) {
+    struct aur_irq_event e;
+    if (read(ev.data.fd, &e, sizeof(e)) < 0 && errno != EINTR)
+      perror("[ahci.aur] read irq");
+  }
 }
 
 // ============================================================================
@@ -316,6 +385,8 @@ static int port_cmd(struct port *p, uint8_t cmd, uint64_t lba, uint32_t count,
 
   pwr(p, PxIS, 0xFFFFFFFF);
   __sync_synchronize();
+  // Para un MSI (edge) hay que limpiar también el bit del puerto en IS.
+  *(volatile uint32_t *)(p->abar + HBA_IS) = 1u << p->n;
   pwr(p, PxCI, 1);
 
   uint64_t t0 = now_ms();
@@ -329,7 +400,9 @@ static int port_cmd(struct port *p, uint8_t cmd, uint64_t lba, uint32_t count,
               cmd);
       goto fail;
     }
-    if (spin > 2000)
+    if (p->ep >= 0 && spin > 20)
+      wait_irq(p->ep, 10); // el MSI despierta; el timeout cubre una pérdida
+    else if (spin > 2000)
       usleep(100);
   }
   __sync_synchronize();
@@ -391,7 +464,8 @@ static int port_init(struct port *p) {
   pwr(p, PxFBU, (uint32_t)((p->phys + OFF_FIS) >> 32));
   pwr(p, PxSERR, 0xFFFFFFFF);
   pwr(p, PxIS, 0xFFFFFFFF);
-  pwr(p, PxIE, 0); // polling: ninguna fuente de interrupción
+  // Con MSI: fin de comando (DHRS/PSS/DSS/SDBS) y errores fatales.
+  pwr(p, PxIE, p->ep >= 0 ? (PXIE_DONE | IS_FATAL) : 0);
   if (port_start(p) != 0) {
     fprintf(stderr, "[ahci.aur] puerto %d: no arranca\n", p->n);
     return -EIO;
@@ -542,6 +616,9 @@ static int init_hba(const char *bdf) {
   if (map_abar(bdf) != 0)
     return 0;
   hba_init();
+  hba_ep = hba_msi_setup(bdf);
+  if (hba_ep >= 0) // cada puerto arma su PxIE en port_init
+    hba_wr(HBA_GHC, hba_rd(HBA_GHC) | GHC_IE);
 
   uint32_t pi = hba_rd(HBA_PI);
   printf("[ahci.aur] %s CAP=0x%08x PI=0x%08x\n", bdf, hba_cap, pi);
@@ -563,6 +640,7 @@ static int init_hba(const char *bdf) {
     memset(p, 0, sizeof(*p));
     p->n = i;
     p->abar = abar;
+    p->ep = hba_ep;
     p->cap = hba_cap;
     p->bdf = bdf;
     if (port_init(p) == 0 && register_disk(p) == 0) {

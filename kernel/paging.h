@@ -39,6 +39,7 @@
 #define PTE_HUGE 0x080
 #define PTE_GLOBAL 0x100
 #define PTE_SPECIAL 0x200 // Shared page; not freed during process teardown.
+#define PTE_SHARED_OBJ 0x400 // Pagina de objeto compartido (memfd): fork la comparte.
 #define PTE_FRAME 0x000FFFFFFFFFF000ULL
 #define PTE_NX (1ULL << 63)
 #define PTE_WRITECOMB (PTE_WRITETHRU | PTE_NOCACHE)
