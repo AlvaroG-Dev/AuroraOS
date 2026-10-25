@@ -630,6 +630,21 @@ static int64_t k_open(uint64_t path, uint64_t flags, uint64_t a3, uint64_t a4,
   return do_open_common(proc, (const char *)path, (int)flags);
 }
 
+// creat(path, mode) == open(path, O_CREAT|O_WRONLY|O_TRUNC, mode). glibc la usa
+// en wl-copy (fichero temporal del portapapeles).
+static int64_t k_creat(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)mode;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  return do_open_common(proc, (const char *)path,
+                        LINUX_O_CREAT | LINUX_O_TRUNC | LINUX_O_WRONLY);
+}
+
 // ---------- lseek ----------
 static int64_t k_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
                        uint64_t a4, uint64_t a5) {
@@ -7057,6 +7072,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_PREAD64] = {k_pread64, "pread64"},
     [SYS_PWRITE64] = {k_pwrite64, "pwrite64"},
     [SYS_OPEN] = {k_open, "open"},
+    [SYS_CREAT] = {k_creat, "creat"},
     [SYS_CLOSE] = {k_close, "close"},
     [SYS_STAT] = {k_stat, "stat"},
     [SYS_FSTAT] = {k_fstat, "fstat"},
