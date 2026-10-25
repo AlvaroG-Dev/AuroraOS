@@ -93,6 +93,8 @@ int winsrv_set_title(task_t *owner, int win_id, const char *title);
 int winsrv_set_state(task_t *owner, int win_id, int state);
 // app_id de la ventana (ASYS_WIN_SET_APP_ID): la agrupa en el Dock.
 int winsrv_set_app_id(task_t *owner, int win_id, const char *app_id);
+// Forma de cursor sobre el contenido (ASYS_WIN_SET_CURSOR; cursor_shape_t).
+int winsrv_set_cursor(task_t *owner, int win_id, int shape);
 // Carga un BMP del VFS como nodo permanente (icono del Dock); NULL si falla.
 tar_node_t *winsrv_load_icon_node(const char *path);
 

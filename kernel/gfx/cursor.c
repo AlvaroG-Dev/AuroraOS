@@ -164,6 +164,60 @@ void cursor_init(void) {
   build_double_arrow(&g_cursors[CURSOR_RESIZE_NS], 0.0f, 1.0f, 0.78f);
   build_double_arrow(&g_cursors[CURSOR_RESIZE_NWSE], d, d, 0.72f);
   build_double_arrow(&g_cursors[CURSOR_RESIZE_NESW], d, -d, 0.72f);
+
+  /* I de texto (punto activo en el centro). */
+  static const pt_t ibeam[] = {
+      {-3.5f, -8.0f}, {3.5f, -8.0f}, {3.5f, -6.5f}, {0.9f, -6.5f},
+      {0.9f, 6.5f},   {3.5f, 6.5f},  {3.5f, 8.0f},  {-3.5f, 8.0f},
+      {-3.5f, 6.5f},  {-0.9f, 6.5f}, {-0.9f, -6.5f}, {-3.5f, -6.5f}};
+  {
+    const int m = (int)(sizeof(ibeam) / sizeof(ibeam[0]));
+    pt_t q[sizeof(ibeam) / sizeof(ibeam[0])];
+    for (int i = 0; i < m; i++) {
+      q[i].x = CURSOR_IMG / 2.0f + ibeam[i].x;
+      q[i].y = CURSOR_IMG / 2.0f + ibeam[i].y;
+    }
+    build(&g_cursors[CURSOR_TEXT], q, m, CURSOR_IMG / 2, CURSOR_IMG / 2);
+  }
+
+  /* Cruz de precisión. */
+  static const pt_t cross[] = {
+      {-1.0f, -8.0f}, {1.0f, -8.0f}, {1.0f, -1.0f}, {8.0f, -1.0f},
+      {8.0f, 1.0f},   {1.0f, 1.0f},  {1.0f, 8.0f},  {-1.0f, 8.0f},
+      {-1.0f, 1.0f},  {-8.0f, 1.0f}, {-8.0f, -1.0f}, {-1.0f, -1.0f}};
+  {
+    const int m = (int)(sizeof(cross) / sizeof(cross[0]));
+    pt_t q[sizeof(cross) / sizeof(cross[0])];
+    for (int i = 0; i < m; i++) {
+      q[i].x = CURSOR_IMG / 2.0f + cross[i].x;
+      q[i].y = CURSOR_IMG / 2.0f + cross[i].y;
+    }
+    build(&g_cursors[CURSOR_CROSS], q, m, CURSOR_IMG / 2, CURSOR_IMG / 2);
+  }
+
+  /* Mano con el índice levantado (punto activo en la yema del índice). */
+  static const pt_t hand[] = {
+      {-1.5f, 0.0f}, {1.5f, 0.0f},  {1.5f, 6.0f},  {4.2f, 6.0f},
+      {4.2f, 7.5f},  {6.8f, 7.5f},  {6.8f, 9.0f},  {8.8f, 9.0f},
+      {8.8f, 14.0f}, {7.0f, 17.0f}, {7.0f, 19.0f}, {-3.0f, 19.0f},
+      {-3.0f, 16.0f}, {-6.5f, 11.5f}, {-6.5f, 9.5f}, {-4.5f, 9.5f},
+      {-1.5f, 12.0f}};
+  {
+    const int m = (int)(sizeof(hand) / sizeof(hand[0]));
+    pt_t q[sizeof(hand) / sizeof(hand[0])];
+    for (int i = 0; i < m; i++) {
+      q[i].x = 10.0f + hand[i].x;
+      q[i].y = 4.0f + hand[i].y;
+    }
+    build(&g_cursors[CURSOR_HAND], q, m, 10, 4);
+  }
+
+  /* Invisible: una imagen de 1x1 transparente. */
+  g_cursors[CURSOR_NONE].w = 1;
+  g_cursors[CURSOR_NONE].h = 1;
+  g_cursors[CURSOR_NONE].hot_x = 0;
+  g_cursors[CURSOR_NONE].hot_y = 0;
+  g_cursors[CURSOR_NONE].px[0] = 0;
   g_ready = 1;
 }
 

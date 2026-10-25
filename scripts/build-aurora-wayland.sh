@@ -17,10 +17,18 @@ gen() { # xml nombre
 gen "$PROTO/stable/xdg-shell/xdg-shell.xml" xdg-shell
 gen "$PROTO/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml" xdg-decoration-unstable-v1
 gen "$ROOT/user/aurora-wayland/org-kde-kwin-server-decoration.xml" org-kde-kwin-server-decoration
+gen "$PROTO/stable/viewporter/viewporter.xml" viewporter
+gen "$PROTO/staging/fractional-scale/fractional-scale-v1.xml" fractional-scale-v1
+gen "$PROTO/unstable/primary-selection/primary-selection-unstable-v1.xml" primary-selection-unstable-v1
+gen "$PROTO/staging/cursor-shape/cursor-shape-v1.xml" cursor-shape-v1
+gen "$PROTO/stable/tablet/tablet-v2.xml" tablet-v2
 gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora-wayland" \
     "$ROOT/user/aurora-wayland/aurora-wayland.c" "$GEN/xdg-shell-protocol.c" \
     "$GEN/xdg-decoration-unstable-v1-protocol.c" \
     "$GEN/org-kde-kwin-server-decoration-protocol.c" \
+    "$GEN/viewporter-protocol.c" "$GEN/fractional-scale-v1-protocol.c" \
+    "$GEN/primary-selection-unstable-v1-protocol.c" \
+    "$GEN/cursor-shape-v1-protocol.c" "$GEN/tablet-v2-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" \
     -lwayland-server -l:libxkbcommon.so.0 -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aurora-wayland"

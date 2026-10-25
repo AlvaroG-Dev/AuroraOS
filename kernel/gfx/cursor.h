@@ -14,6 +14,10 @@ typedef enum {
   CURSOR_RESIZE_NS,   /* ↕ bordes superior/inferior */
   CURSOR_RESIZE_NWSE, /* ⤡ esquinas sup-izq / inf-der */
   CURSOR_RESIZE_NESW, /* ⤢ esquinas sup-der / inf-izq */
+  CURSOR_TEXT,        /* I de edición de texto */
+  CURSOR_HAND,        /* mano de enlace/botón */
+  CURSOR_CROSS,       /* cruz de precisión */
+  CURSOR_NONE,        /* sin cursor (el cliente lo oculta) */
   CURSOR_COUNT
 } cursor_shape_t;
 

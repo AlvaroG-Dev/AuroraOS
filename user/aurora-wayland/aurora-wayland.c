@@ -29,7 +29,11 @@
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "cursor-shape-v1-server-protocol.h"
+#include "fractional-scale-v1-server-protocol.h"
 #include "org-kde-kwin-server-decoration-server-protocol.h"
+#include "primary-selection-unstable-v1-server-protocol.h"
+#include "viewporter-server-protocol.h"
 #include "xdg-decoration-unstable-v1-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
 
@@ -93,6 +97,16 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
 #define ASYS_DOCK_PIN (ASYS_BASE + 0x1A)
 #define ASYS_DOCK_POLL_LAUNCH (ASYS_BASE + 0x1B)
 #define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C)
+#define ASYS_WIN_SET_CURSOR (ASYS_BASE + 0x1D)
+// Formas de cursor de Aurora (cursor_shape_t en kernel/gfx/cursor.h).
+enum {
+  AUR_CURSOR_ARROW = 0, AUR_CURSOR_RESIZE_EW, AUR_CURSOR_RESIZE_NS,
+  AUR_CURSOR_RESIZE_NWSE, AUR_CURSOR_RESIZE_NESW, AUR_CURSOR_TEXT,
+  AUR_CURSOR_HAND, AUR_CURSOR_CROSS, AUR_CURSOR_NONE
+};
+static int win_set_cursor(int id, int shape) {
+  return (int)syscall(ASYS_WIN_SET_CURSOR, (long)id, (long)shape);
+}
 static int win_set_app_id(int id, const char *app_id) {
   return (int)syscall(ASYS_WIN_SET_APP_ID, (long)id, app_id);
 }
@@ -131,6 +145,45 @@ static int win_blit(int id, int dx, int dy, int sx, int sy, int w, int h,
 struct surface;
 struct toplevel;
 
+// Rectangulo [x0,x1)x[y0,y1); vacio si x1<=x0.
+typedef struct { int x0, y0, x1, y1; } rc_t;
+static inline int rc_empty(rc_t r) { return r.x1 <= r.x0 || r.y1 <= r.y0; }
+static inline void rc_union(rc_t *a, rc_t b) {
+  if (rc_empty(b))
+    return;
+  if (rc_empty(*a)) {
+    *a = b;
+    return;
+  }
+  if (b.x0 < a->x0) a->x0 = b.x0;
+  if (b.y0 < a->y0) a->y0 = b.y0;
+  if (b.x1 > a->x1) a->x1 = b.x1;
+  if (b.y1 > a->y1) a->y1 = b.y1;
+}
+static inline rc_t rc_move(rc_t r, int dx, int dy) {
+  return (rc_t){r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy};
+}
+static inline rc_t rc_clip(rc_t r, rc_t c) {
+  if (r.x0 < c.x0) r.x0 = c.x0;
+  if (r.y0 < c.y0) r.y0 = c.y0;
+  if (r.x1 > c.x1) r.x1 = c.x1;
+  if (r.y1 > c.y1) r.y1 = c.y1;
+  return r;
+}
+
+// Nodo de la pila de subsuperficies de un padre (de abajo a arriba). El padre
+// se representa a si mismo con el nodo `self` (res == NULL).
+struct subsurf {
+  struct wl_resource *res;
+  struct surface *surface;
+  struct surface *parent;
+  struct wl_list link; /* en parent->stack */
+  int x, y;            /* posicion aplicada, respecto al padre */
+  int px, py, pos_pending;
+  int sync;
+  rc_t pdmg; /* dano diferido (modo sync), en coordenadas de la subsuperficie */
+};
+
 static struct wl_display *g_display;
 static struct wl_event_loop *g_loop;
 static struct wl_event_source *g_pump_timer;
@@ -140,6 +193,7 @@ static struct wl_list g_keyboards;  /* struct seat_res.link */
 static struct wl_list g_datadevs;   /* struct seat_res.link */
 static struct toplevel *g_kbd_focus;
 static struct xsurf *g_ptr_focus;
+static struct surface *g_ptr_surf; /* superficie (raiz o subsuperficie) con el foco de puntero */
 static struct wl_list g_wins; /* struct xsurf.wlink: ventanas mapeadas */
 static int g_win_count;
 static int g_debug; /* AW_DEBUG=1: traza de eventos */
@@ -151,6 +205,10 @@ static int g_keymap_fd = -1;
 static size_t g_keymap_size;
 
 static struct data_source *g_selection;
+static struct data_source *g_primary; /* seleccion primaria (boton central) */
+static struct wl_list g_psdevs;       /* struct seat_res.link: primary_selection_device */
+static void xs_set_cursor(struct xsurf *xs, int shape);
+static void primary_send_to(struct wl_client *client);
 
 static uint32_t now_ms(void) {
   struct timespec ts;
@@ -165,6 +223,28 @@ struct seat_res {
 
 struct surface {
   struct wl_resource *res;
+  // Subsuperficies
+  struct wl_list stack;   /* struct subsurf.link; incluye `self` */
+  struct subsurf self;
+  struct subsurf *sub;    /* rol wl_subsurface (NULL si no lo tiene) */
+  int stack_dirty;        /* place_above/below desde el ultimo commit */
+  // Contenido: `scratch` guarda el ultimo buffer (alfa respetado solo en
+  // subsuperficies; la raiz se fuerza opaca).
+  int has_content;
+  int store_alpha;        /* scratch puede tener alfa */
+  int scale, pend_scale;  /* wl_surface.set_buffer_scale */
+  // wp_viewport (pendiente / aplicado); src en px de superficie
+  struct wl_resource *vp;
+  int vp_src_set, vp_sx, vp_sy, vp_sw, vp_sh;
+  int vp_dst_w, vp_dst_h; /* -1 = sin destino */
+  int pvp_src_set, pvp_sx, pvp_sy, pvp_sw, pvp_sh;
+  int pvp_dst_w, pvp_dst_h;
+  int dw, dh;             /* tamano de la superficie (coords de superficie) */
+  // Composicion (solo raices con subsuperficies/escalado)
+  uint32_t *canvas;
+  size_t canvas_px;
+  int canvas_valid;       /* el canvas tiene el ultimo compuesto */
+  int pres_w, pres_h;     /* tamano de lo ultimo presentado a la ventana */
   struct wl_resource *buffer;     /* buffer pendiente (attach) */
   int has_attach;                 /* hubo attach desde el ultimo commit */
   int dmg_x0, dmg_y0, dmg_x1, dmg_y1; /* bbox de daño pendiente; x1<=x0 = ninguno */
@@ -183,6 +263,7 @@ struct xsurf {
   struct toplevel *tl;
   int is_popup;
   int configured_sent;
+  int cursor;             /* forma de cursor enviada al kernel */
   uint32_t last_serial;
   int acked;
   int has_geom, gx, gy, gw, gh; /* set_window_geometry */
@@ -208,6 +289,7 @@ struct toplevel {
   char title[64];
   int activated;
   int maximized;   /* estado anunciado en configure */
+  int fullscreen;  /* set_fullscreen: se trata como maximizada */
   int pending_max; /* set_maximized antes de existir la ventana de Aurora */
   int pending_min; /* idem para set_minimized */
   char app_id[64];
@@ -348,6 +430,10 @@ static void toplevel_send_configure(struct toplevel *tl, int w, int h) {
   if (tl->maximized) {
     uint32_t *s = wl_array_add(&states, sizeof(uint32_t));
     *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
+  }
+  if (tl->fullscreen) {
+    uint32_t *s = wl_array_add(&states, sizeof(uint32_t));
+    *s = XDG_TOPLEVEL_STATE_FULLSCREEN;
   }
   xdg_toplevel_send_configure(tl->res, w, h, &states);
   wl_array_release(&states);
@@ -620,7 +706,9 @@ static void surface_set_transform(struct wl_client *c, struct wl_resource *r,
 }
 static void surface_set_scale(struct wl_client *c, struct wl_resource *r,
                               int32_t sc) {
-  (void)c; (void)r; (void)sc;
+  (void)c;
+  struct surface *s = wl_resource_get_user_data(r);
+  s->pend_scale = sc > 0 ? sc : 1;
 }
 static void surface_offset(struct wl_client *c, struct wl_resource *r,
                            int32_t x, int32_t y) {
@@ -630,8 +718,10 @@ static void surface_offset(struct wl_client *c, struct wl_resource *r,
 static void xs_unmap(struct xsurf *xs) {
   if (xs->win_id < 0)
     return;
-  if (g_ptr_focus == xs)
+  if (g_ptr_focus == xs) {
     g_ptr_focus = NULL;
+    g_ptr_surf = NULL;
+  }
   win_destroy(xs->win_id);
   xs->win_id = -1;
   wl_list_remove(&xs->wlink);
@@ -706,6 +796,287 @@ static void xs_map(struct xsurf *xs, int w, int h) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Arbol de superficies, composicion y presentacion en la ventana de Aurora
+//
+// Una superficie "plana" (sin subsuperficies, sin viewport ni escala) se vuelca
+// tal cual a la ventana. Si la raiz tiene subsuperficies mapeadas (o escala /
+// viewport) se compone en un canvas del tamano de la superficie raiz, en el
+// orden de la pila de subsuperficies, y ese canvas es lo que se vuelca.
+// ---------------------------------------------------------------------------
+static void surface_calc_size(struct surface *s) {
+  int sc = s->scale > 0 ? s->scale : 1;
+  if (!s->has_content) {
+    s->dw = s->dh = 0;
+  } else if (s->vp_dst_w > 0 && s->vp_dst_h > 0) {
+    s->dw = s->vp_dst_w;
+    s->dh = s->vp_dst_h;
+  } else if (s->vp_src_set) {
+    s->dw = s->vp_sw;
+    s->dh = s->vp_sh;
+  } else {
+    s->dw = s->buf_w / sc;
+    s->dh = s->buf_h / sc;
+  }
+  if (s->has_content && (s->dw < 1 || s->dh < 1))
+    s->dw = s->dh = 1;
+}
+
+// Rectangulo del buffer (px) que muestra la superficie.
+static void surface_src_rect(const struct surface *s, int *sx, int *sy, int *sw,
+                             int *sh) {
+  int sc = s->scale > 0 ? s->scale : 1;
+  *sx = 0; *sy = 0; *sw = s->buf_w; *sh = s->buf_h;
+  if (s->vp_src_set) {
+    *sx = s->vp_sx * sc; *sy = s->vp_sy * sc;
+    *sw = s->vp_sw * sc; *sh = s->vp_sh * sc;
+  }
+  if (*sx < 0) *sx = 0;
+  if (*sy < 0) *sy = 0;
+  if (*sx >= s->buf_w) *sx = s->buf_w - 1;
+  if (*sy >= s->buf_h) *sy = s->buf_h - 1;
+  if (*sw < 1 || *sx + *sw > s->buf_w) *sw = s->buf_w - *sx;
+  if (*sh < 1 || *sy + *sh > s->buf_h) *sh = s->buf_h - *sy;
+}
+
+static int surface_is_plain(const struct surface *s) {
+  return s->dw == s->buf_w && s->dh == s->buf_h && !s->vp_src_set;
+}
+
+static struct surface *tree_root(struct surface *s) {
+  while (s->sub && s->sub->parent)
+    s = s->sub->parent;
+  return s;
+}
+
+static void surface_origin(const struct surface *s, int *ox, int *oy) {
+  int x = 0, y = 0;
+  while (s->sub && s->sub->parent) {
+    x += s->sub->x;
+    y += s->sub->y;
+    s = s->sub->parent;
+  }
+  *ox = x;
+  *oy = y;
+}
+
+static int tree_has_subs(const struct surface *s) {
+  const struct subsurf *n;
+  wl_list_for_each(n, &s->stack, link)
+    if (n != &s->self && n->surface && n->surface->has_content)
+      return 1;
+  return 0;
+}
+
+static void sub_unlink(struct subsurf *sb) {
+  if (!sb->parent)
+    return;
+  wl_list_remove(&sb->link);
+  wl_list_init(&sb->link);
+  sb->parent = NULL;
+}
+
+// Mezcla `s` (ARGB premultiplicado) sobre `d`.
+static inline uint32_t blend_premul(uint32_t s, uint32_t d) {
+  uint32_t ia = 255 - (s >> 24), out = 0;
+  for (int sh = 0; sh < 32; sh += 8) {
+    uint32_t v = ((s >> sh) & 255) + ((((d >> sh) & 255) * ia + 127) / 255);
+    if (v > 255)
+      v = 255;
+    out |= v << sh;
+  }
+  return out;
+}
+
+// Pinta la superficie `s` (origen (ox,oy) en el canvas de la raiz) en `clip`.
+static void draw_surface(struct surface *root, struct surface *s, int ox, int oy,
+                         rc_t clip) {
+  if (!s->has_content || !s->scratch || s->dw <= 0 || s->dh <= 0)
+    return;
+  rc_t r = rc_clip((rc_t){ox, oy, ox + s->dw, oy + s->dh}, clip);
+  if (rc_empty(r))
+    return;
+  int sx, sy, sw, sh;
+  surface_src_rect(s, &sx, &sy, &sw, &sh);
+  int plain = (sw == s->dw && sh == s->dh);
+  int cw = root->dw;
+  for (int y = r.y0; y < r.y1; y++) {
+    uint32_t *dst = root->canvas + (size_t)y * cw;
+    int ly = y - oy;
+    int srow = sy + (plain ? ly : (int)((long)ly * sh / s->dh));
+    const uint32_t *src = s->scratch + (size_t)srow * s->buf_w;
+    if (plain && !s->store_alpha) {
+      memcpy(dst + r.x0, src + sx + (r.x0 - ox), (size_t)(r.x1 - r.x0) * 4);
+      continue;
+    }
+    for (int x = r.x0; x < r.x1; x++) {
+      int lx = x - ox;
+      uint32_t p = src[sx + (plain ? lx : (int)((long)lx * sw / s->dw))];
+      if (!s->store_alpha || (p >> 24) == 255)
+        dst[x] = p | (s->store_alpha ? 0 : 0xFF000000u);
+      else if (p >> 24)
+        dst[x] = blend_premul(p, dst[x]);
+    }
+  }
+}
+
+static void compose_node(struct surface *root, struct surface *s, int ox, int oy,
+                         rc_t clip) {
+  struct subsurf *n;
+  wl_list_for_each(n, &s->stack, link) {
+    if (n == &s->self)
+      draw_surface(root, s, ox, oy, clip);
+    else if (n->surface && n->surface->has_content)
+      compose_node(root, n->surface, ox + n->x, oy + n->y, clip);
+  }
+}
+
+// Vuelca `d` de `px` (ancho `w`, alto `h`) a la ventana de Aurora de la raiz,
+// con la politica de geometria/recorte de decoraciones CSD.
+static void present(struct surface *s, const uint32_t *px, int w, int h, rc_t d) {
+  struct xsurf *xs = s->xs;
+  struct toplevel *tl = xs->tl;
+  // Area visible: la geometria de ventana (sin sombras CSD) o el buffer.
+  int gx = 0, gy = 0, gw = w, gh = h;
+  if (xs->has_geom) {
+    gx = xs->gx; gy = xs->gy; gw = xs->gw; gh = xs->gh;
+    if (gx < 0) { gw += gx; gx = 0; }
+    if (gy < 0) { gh += gy; gy = 0; }
+    if (gx + gw > w) gw = w - gx;
+    if (gy + gh > h) gh = h - gy;
+    if (gw <= 0 || gh <= 0) { gx = gy = 0; gw = w; gh = h; }
+  }
+  if (tl && !tl_is_ssd(tl)) {
+    // Cliente que dibuja su propio marco: recortar barra/bordes.
+    if (tl->inset_state == 0 && xs->has_geom) {
+      int margins = gx > 0 || gy > 0 || gw < w || gh < h;
+      tl->rule = csd_rule_find(tl);
+      tl->inset_state = (tl->rule && margins) ? 1 : 2;
+      fprintf(stderr, "[aurora-wayland] '%s' (app_id '%s') sin xdg-decoration: %s\n",
+              tl->title, tl->app_id,
+              tl->inset_state == 1 ? "recorte de su marco" : "se deja tal cual");
+    }
+    if (tl->inset_state == 1) {
+      // Maximizada, el toolkit quita bordes laterales/inferior pero deja la barra.
+      int l = tl->maximized ? 0 : tl->rule->l, r = tl->maximized ? 0 : tl->rule->r;
+      int b = tl->maximized ? 0 : tl->rule->b, t = tl->rule->t;
+      if (gw - l - r >= WIN_MIN && gh - t - b >= WIN_MIN - TITLEBAR_H) {
+        gx += l; gy += t; gw -= l + r; gh -= t + b;
+        tl->in_l = l; tl->in_t = t; tl->in_r = r; tl->in_b = b;
+      }
+    }
+  }
+  xs->vx = gx;
+  xs->vy = gy;
+  int fresh = 0;
+  if (xs->win_id < 0) {
+    xs_map(xs, gw, gh);
+    fresh = 1;
+  }
+  if (xs->win_id < 0)
+    return;
+  rc_t r = fresh ? (rc_t){0, 0, w, h} : d;
+  r = rc_clip(r, (rc_t){gx, gy, gx + gw, gy + gh});
+  if (!rc_empty(r))
+    win_blit(xs->win_id, r.x0 - gx, r.y0 - gy, r.x0, r.y0, r.x1 - r.x0,
+             r.y1 - r.y0, w, (uint32_t *)px);
+}
+
+// `d` (coordenadas de la superficie raiz) ha cambiado: componer y presentar.
+static void root_update(struct surface *root, rc_t d) {
+  struct xsurf *xs = root->xs;
+  if (!xs || !(xs->tl || xs->is_popup) || !root->has_content)
+    return;
+  rc_t all = {0, 0, root->dw, root->dh};
+  if (root->pres_w != root->dw || root->pres_h != root->dh)
+    d = all;
+  d = rc_clip(d, all);
+  if (rc_empty(d))
+    return;
+  if (surface_is_plain(root) && !tree_has_subs(root)) {
+    root->canvas_valid = 0;
+    present(root, root->scratch, root->dw, root->dh, d);
+  } else {
+    size_t need = (size_t)root->dw * root->dh;
+    if (root->canvas_px < need) {
+      free(root->canvas);
+      root->canvas = malloc(need * 4);
+      root->canvas_px = root->canvas ? need : 0;
+      root->canvas_valid = 0;
+    }
+    if (!root->canvas)
+      return;
+    if (!root->canvas_valid)
+      d = all;
+    for (int y = d.y0; y < d.y1; y++) {
+      uint32_t *row = root->canvas + (size_t)y * root->dw;
+      for (int x = d.x0; x < d.x1; x++)
+        row[x] = 0xFF000000u;
+    }
+    compose_node(root, root, 0, 0, d);
+    root->canvas_valid = 1;
+    present(root, root->canvas, root->dw, root->dh, d);
+  }
+  root->pres_w = root->dw;
+  root->pres_h = root->dh;
+}
+
+// El dano `d` (coords de `s`) sube por el arbol hasta la raiz. Una
+// subsuperficie en modo sync retiene el dano hasta el commit de su padre.
+static void surface_damage_up(struct surface *s, rc_t d) {
+  while (s->sub && s->sub->parent) {
+    struct subsurf *sb = s->sub;
+    if (sb->sync) {
+      rc_union(&sb->pdmg, d);
+      return;
+    }
+    d = rc_move(d, sb->x, sb->y);
+    s = sb->parent;
+  }
+  root_update(s, d);
+}
+
+// Copia el buffer shm al almacen de la superficie; devuelve el dano en px de
+// buffer. En subsuperficies se conserva el alfa; la raiz se fuerza opaca.
+static rc_t surface_ingest(struct surface *s, struct wl_shm_buffer *shm) {
+  int w = wl_shm_buffer_get_width(shm);
+  int h = wl_shm_buffer_get_height(shm);
+  int stride = wl_shm_buffer_get_stride(shm);
+  int keep_alpha = s->sub != NULL &&
+                   wl_shm_buffer_get_format(shm) == WL_SHM_FORMAT_ARGB8888;
+  rc_t all = {0, 0, w, h};
+  rc_t d = all;
+  if (w == s->buf_w && h == s->buf_h && s->has_content &&
+      s->store_alpha == keep_alpha && s->dmg_x1 > s->dmg_x0)
+    d = rc_clip((rc_t){s->dmg_x0, s->dmg_y0, s->dmg_x1, s->dmg_y1}, all);
+  size_t need = (size_t)w * h;
+  if (s->scratch_px < need) {
+    free(s->scratch);
+    s->scratch = malloc(need * 4);
+    s->scratch_px = s->scratch ? need : 0;
+    d = all;
+  }
+  if (!s->scratch) {
+    s->has_content = 0;
+    return (rc_t){0, 0, 0, 0};
+  }
+  uint32_t force = keep_alpha ? 0 : 0xFF000000u;
+  wl_shm_buffer_begin_access(shm);
+  const uint8_t *src = wl_shm_buffer_get_data(shm);
+  for (int y = d.y0; y < d.y1; y++) {
+    const uint32_t *row = (const uint32_t *)(src + (size_t)y * stride);
+    uint32_t *dst = s->scratch + (size_t)y * w;
+    for (int x = d.x0; x < d.x1; x++)
+      dst[x] = row[x] | force;
+  }
+  wl_shm_buffer_end_access(shm);
+  s->store_alpha = keep_alpha;
+  s->buf_w = w;
+  s->buf_h = h;
+  s->has_content = 1;
+  return d;
+}
+
 static void surface_commit(struct wl_client *c, struct wl_resource *r) {
   (void)c;
   struct surface *s = wl_resource_get_user_data(r);
@@ -721,89 +1092,80 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
   }
 
   if (g_debug)
-    fprintf(stderr, "[aurora-wayland] commit xs=%p attach=%d buf=%p dmg=(%d,%d)-(%d,%d)\n",
-            (void *)xs, s->has_attach, (void *)s->buffer, s->dmg_x0, s->dmg_y0,
-            s->dmg_x1, s->dmg_y1);
+    fprintf(stderr, "[aurora-wayland] commit s=%p xs=%p sub=%p attach=%d buf=%p dmg=(%d,%d)-(%d,%d)\n",
+            (void *)s, (void *)xs, (void *)s->sub, s->has_attach, (void *)s->buffer,
+            s->dmg_x0, s->dmg_y0, s->dmg_x1, s->dmg_y1);
+
+  // Estado pendiente: escala y viewport.
+  int need_all = 0;
+  if (s->scale != s->pend_scale) {
+    s->scale = s->pend_scale;
+    need_all = 1;
+  }
+  if (s->vp_src_set != s->pvp_src_set || s->vp_sx != s->pvp_sx ||
+      s->vp_sy != s->pvp_sy || s->vp_sw != s->pvp_sw || s->vp_sh != s->pvp_sh ||
+      s->vp_dst_w != s->pvp_dst_w || s->vp_dst_h != s->pvp_dst_h) {
+    s->vp_src_set = s->pvp_src_set;
+    s->vp_sx = s->pvp_sx; s->vp_sy = s->pvp_sy;
+    s->vp_sw = s->pvp_sw; s->vp_sh = s->pvp_sh;
+    s->vp_dst_w = s->pvp_dst_w; s->vp_dst_h = s->pvp_dst_h;
+    need_all = 1;
+  }
+
+  int old_dw = s->dw, old_dh = s->dh;
+  int tree_member = s->sub || (xs && (tl || xs->is_popup));
+  int ingested = 0;
+  rc_t ingest_dmg = {0, 0, 0, 0};
   if (s->has_attach) {
     s->has_attach = 0;
     if (s->buffer) {
       struct wl_shm_buffer *shm = wl_shm_buffer_get(s->buffer);
-      if (shm && xs && (tl || xs->is_popup)) {
-        int w = wl_shm_buffer_get_width(shm);
-        int h = wl_shm_buffer_get_height(shm);
-        int stride = wl_shm_buffer_get_stride(shm);
-        // Area visible: la geometria de ventana (sin sombras CSD) o el buffer.
-        int gx = 0, gy = 0, gw = w, gh = h;
-        if (xs->has_geom) {
-          gx = xs->gx; gy = xs->gy; gw = xs->gw; gh = xs->gh;
-          if (gx < 0) { gw += gx; gx = 0; }
-          if (gy < 0) { gh += gy; gy = 0; }
-          if (gx + gw > w) gw = w - gx;
-          if (gy + gh > h) gh = h - gy;
-          if (gw <= 0 || gh <= 0) { gx = gy = 0; gw = w; gh = h; }
-        }
-        if (tl && !tl_is_ssd(tl)) {
-          // Cliente que dibuja su propio marco: recortar barra/bordes.
-          if (tl->inset_state == 0 && xs->has_geom) {
-            int margins = gx > 0 || gy > 0 || gw < w || gh < h;
-            tl->rule = csd_rule_find(tl);
-            tl->inset_state = (tl->rule && margins) ? 1 : 2;
-            fprintf(stderr, "[aurora-wayland] '%s' (app_id '%s') sin xdg-decoration: %s\n",
-                    tl->title, tl->app_id,
-                    tl->inset_state == 1 ? "recorte de su marco" : "se deja tal cual");
-          }
-          if (tl->inset_state == 1) {
-            // Maximizada, el toolkit quita bordes laterales/inferior pero deja la barra.
-            int l = tl->maximized ? 0 : tl->rule->l, r = tl->maximized ? 0 : tl->rule->r;
-            int b = tl->maximized ? 0 : tl->rule->b, t = tl->rule->t;
-            if (gw - l - r >= WIN_MIN && gh - t - b >= WIN_MIN - TITLEBAR_H) {
-              gx += l; gy += t; gw -= l + r; gh -= t + b;
-              tl->in_l = l; tl->in_t = t; tl->in_r = r; tl->in_b = b;
-            }
-          }
-        }
-        xs->vx = gx;
-        xs->vy = gy;
-        if (xs->win_id < 0)
-          xs_map(xs, gw, gh);
-        if (xs->win_id >= 0) {
-          int full = (w != s->buf_w || h != s->buf_h || s->dmg_x1 <= s->dmg_x0);
-          int x0 = full ? 0 : s->dmg_x0, y0 = full ? 0 : s->dmg_y0;
-          int x1 = full ? w : s->dmg_x1, y1 = full ? h : s->dmg_y1;
-          if (x0 < gx) x0 = gx;
-          if (y0 < gy) y0 = gy;
-          if (x1 > gx + gw) x1 = gx + gw;
-          if (y1 > gy + gh) y1 = gy + gh;
-          if (x1 > x0 && y1 > y0) {
-            size_t need = (size_t)w * h;
-            if (s->scratch_px < need) {
-              free(s->scratch);
-              s->scratch = malloc(need * 4);
-              s->scratch_px = s->scratch ? need : 0;
-              x0 = 0; y0 = 0; x1 = w; y1 = h; /* scratch nuevo: todo */
-            }
-            if (s->scratch) {
-              wl_shm_buffer_begin_access(shm);
-              const uint8_t *src = wl_shm_buffer_get_data(shm);
-              for (int y = y0; y < y1; y++) {
-                const uint32_t *row = (const uint32_t *)(src + (size_t)y * stride);
-                uint32_t *dst = s->scratch + (size_t)y * w;
-                for (int x = x0; x < x1; x++)
-                  dst[x] = row[x] | 0xFF000000u;
-              }
-              wl_shm_buffer_end_access(shm);
-              win_blit(xs->win_id, x0 - gx, y0 - gy, x0, y0, x1 - x0, y1 - y0, w,
-                       s->scratch);
-            }
-          }
-          s->buf_w = w;
-          s->buf_h = h;
-        }
+      if (shm && tree_member) {
+        ingest_dmg = surface_ingest(s, shm);
+        ingested = 1;
       }
       // Ya copiamos el contenido: el cliente puede reutilizar el buffer.
       wl_buffer_send_release(s->buffer);
+    } else if (s->has_content) {
+      s->has_content = 0; /* attach(NULL): la superficie se desmapea */
+      need_all = 1;
     }
   }
+  surface_calc_size(s);
+  if (s->dw != old_dw || s->dh != old_dh)
+    need_all = 1;
+
+  rc_t area = {0, 0, old_dw > s->dw ? old_dw : s->dw,
+               old_dh > s->dh ? old_dh : s->dh};
+  rc_t dmg = {0, 0, 0, 0};
+  if (need_all || s->stack_dirty)
+    dmg = area;
+  else if (ingested)
+    dmg = surface_is_plain(s) ? ingest_dmg : area;
+  s->stack_dirty = 0;
+
+  // Posiciones pendientes y dano diferido de las subsuperficies (modo sync).
+  struct subsurf *n;
+  wl_list_for_each(n, &s->stack, link) {
+    if (n == &s->self)
+      continue;
+    struct surface *cs = n->surface;
+    if (n->pos_pending) {
+      n->pos_pending = 0;
+      if (cs && cs->has_content)
+        rc_union(&dmg, rc_move((rc_t){0, 0, cs->dw, cs->dh}, n->x, n->y));
+      n->x = n->px;
+      n->y = n->py;
+      if (cs && cs->has_content)
+        rc_union(&dmg, rc_move((rc_t){0, 0, cs->dw, cs->dh}, n->x, n->y));
+    }
+    if (!rc_empty(n->pdmg)) {
+      rc_union(&dmg, rc_move(n->pdmg, n->x, n->y));
+      n->pdmg = (rc_t){0, 0, 0, 0};
+    }
+  }
+  if (!rc_empty(dmg))
+    surface_damage_up(s, dmg);
   s->dmg_x0 = s->dmg_y0 = s->dmg_x1 = s->dmg_y1 = 0;
 
   // Frame callbacks: todo lo pedido hasta aqui se considera presentado.
@@ -831,12 +1193,36 @@ static const struct wl_surface_interface surface_impl = {
 
 static void surface_resource_destroy(struct wl_resource *r) {
   struct surface *s = wl_resource_get_user_data(r);
+  if (g_ptr_surf == s)
+    g_ptr_surf = NULL;
+  // Si era una subsuperficie, desaparece de su padre.
+  if (s->sub) {
+    struct surface *p = s->sub->parent;
+    rc_t d = rc_move((rc_t){0, 0, s->dw, s->dh}, s->sub->x, s->sub->y);
+    s->sub->surface = NULL;
+    sub_unlink(s->sub);
+    s->sub = NULL;
+    if (p && !rc_empty(d))
+      surface_damage_up(p, d);
+  }
+  // Sus hijas quedan huerfanas (los objetos wl_subsurface siguen existiendo).
+  struct subsurf *n, *tmpn;
+  wl_list_for_each_safe(n, tmpn, &s->stack, link) {
+    if (n == &s->self)
+      continue;
+    wl_list_remove(&n->link);
+    wl_list_init(&n->link);
+    n->parent = NULL;
+  }
+  if (s->vp)
+    wl_resource_set_user_data(s->vp, NULL);
   surface_clear_buffer(s);
   struct wl_resource *cb, *tmp;
   wl_resource_for_each_safe(cb, tmp, &s->frames) wl_resource_destroy(cb);
   if (s->xs)
     s->xs->surface = NULL;
   free(s->scratch);
+  free(s->canvas);
   free(s);
 }
 
@@ -856,6 +1242,11 @@ static void comp_create_surface(struct wl_client *c, struct wl_resource *r,
   }
   wl_list_init(&s->frames);
   wl_list_init(&s->buffer_destroy.link);
+  wl_list_init(&s->stack);
+  s->self.surface = s;
+  wl_list_insert(&s->stack, &s->self.link);
+  s->scale = s->pend_scale = 1;
+  s->vp_dst_w = s->vp_dst_h = s->pvp_dst_w = s->pvp_dst_h = -1;
   wl_resource_set_implementation(s->res, &surface_impl, s,
                                  surface_resource_destroy);
 }
@@ -884,38 +1275,128 @@ static void comp_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
 }
 
 // ---------------------------------------------------------------------------
-// wl_subcompositor: aceptado; las subsuperficies aun no se componen.
+// wl_subcompositor: las subsuperficies se componen dentro de la ventana de su
+// superficie raiz (ver "Arbol de superficies"). Posicion y orden se aplican en
+// el commit del padre; en modo sync el contenido tambien.
 // ---------------------------------------------------------------------------
 static void sub_set_position(struct wl_client *c, struct wl_resource *r,
                              int32_t x, int32_t y) {
-  (void)c; (void)r; (void)x; (void)y;
+  (void)c;
+  struct subsurf *sb = wl_resource_get_user_data(r);
+  sb->px = x;
+  sb->py = y;
+  sb->pos_pending = 1;
 }
-static void sub_place(struct wl_client *c, struct wl_resource *r,
-                      struct wl_resource *sib) {
-  (void)c; (void)r; (void)sib;
+// Nodo de la pila de `sb->parent` que corresponde a la superficie `sibres`.
+static struct subsurf *sub_sibling(struct subsurf *sb, struct wl_resource *sibres) {
+  struct surface *sib = wl_resource_get_user_data(sibres);
+  if (!sb->parent || !sib)
+    return NULL;
+  if (sib == sb->parent)
+    return &sib->self;
+  if (sib->sub && sib->sub->parent == sb->parent && sib->sub != sb)
+    return sib->sub;
+  return NULL;
 }
-static void sub_mode(struct wl_client *c, struct wl_resource *r) {
-  (void)c; (void)r;
+static void sub_place_above(struct wl_client *c, struct wl_resource *r,
+                            struct wl_resource *sibres) {
+  (void)c;
+  struct subsurf *sb = wl_resource_get_user_data(r);
+  struct subsurf *sib = sub_sibling(sb, sibres);
+  if (!sib) {
+    wl_resource_post_error(r, WL_SUBSURFACE_ERROR_BAD_SURFACE,
+                           "place_above: no es hermana ni padre");
+    return;
+  }
+  wl_list_remove(&sb->link);
+  wl_list_insert(&sib->link, &sb->link);
+  sb->parent->stack_dirty = 1;
+}
+static void sub_place_below(struct wl_client *c, struct wl_resource *r,
+                            struct wl_resource *sibres) {
+  (void)c;
+  struct subsurf *sb = wl_resource_get_user_data(r);
+  struct subsurf *sib = sub_sibling(sb, sibres);
+  if (!sib) {
+    wl_resource_post_error(r, WL_SUBSURFACE_ERROR_BAD_SURFACE,
+                           "place_below: no es hermana ni padre");
+    return;
+  }
+  wl_list_remove(&sb->link);
+  wl_list_insert(sib->link.prev, &sb->link);
+  sb->parent->stack_dirty = 1;
+}
+static void sub_set_sync(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  ((struct subsurf *)wl_resource_get_user_data(r))->sync = 1;
+}
+static void sub_set_desync(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  struct subsurf *sb = wl_resource_get_user_data(r);
+  sb->sync = 0;
+  // El estado retenido pasa a ser efectivo.
+  if (sb->surface && sb->parent && !rc_empty(sb->pdmg)) {
+    rc_t d = sb->pdmg;
+    sb->pdmg = (rc_t){0, 0, 0, 0};
+    surface_damage_up(sb->surface, d);
+  }
 }
 static const struct wl_subsurface_interface subsurface_impl = {
     .destroy = noop_destroy,
     .set_position = sub_set_position,
-    .place_above = sub_place,
-    .place_below = sub_place,
-    .set_sync = sub_mode,
-    .set_desync = sub_mode,
+    .place_above = sub_place_above,
+    .place_below = sub_place_below,
+    .set_sync = sub_set_sync,
+    .set_desync = sub_set_desync,
 };
+static void subsurface_resource_destroy(struct wl_resource *r) {
+  struct subsurf *sb = wl_resource_get_user_data(r);
+  struct surface *cs = sb->surface, *p = sb->parent;
+  rc_t d = {0, 0, 0, 0};
+  if (cs && p && cs->has_content)
+    d = rc_move((rc_t){0, 0, cs->dw, cs->dh}, sb->x, sb->y);
+  sub_unlink(sb);
+  if (cs)
+    cs->sub = NULL;
+  if (p && !rc_empty(d))
+    surface_damage_up(p, d);
+  free(sb);
+}
 static void subc_get_subsurface(struct wl_client *c, struct wl_resource *r,
                                 uint32_t id, struct wl_resource *surf,
                                 struct wl_resource *parent) {
-  (void)surf; (void)parent;
-  struct wl_resource *ss = wl_resource_create(c, &wl_subsurface_interface,
-                                              wl_resource_get_version(r), id);
-  if (!ss) {
+  struct surface *cs = wl_resource_get_user_data(surf);
+  struct surface *ps = wl_resource_get_user_data(parent);
+  if (cs == ps || cs->sub || cs->xs) {
+    wl_resource_post_error(r, WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
+                           "la superficie ya tiene rol o es su propio padre");
+    return;
+  }
+  for (struct surface *a = ps; a; a = a->sub ? a->sub->parent : NULL)
+    if (a == cs) {
+      wl_resource_post_error(r, WL_SUBCOMPOSITOR_ERROR_BAD_PARENT,
+                             "ciclo de subsuperficies");
+      return;
+    }
+  struct subsurf *sb = calloc(1, sizeof(*sb));
+  if (!sb) {
     wl_client_post_no_memory(c);
     return;
   }
-  wl_resource_set_implementation(ss, &subsurface_impl, NULL, NULL);
+  sb->res = wl_resource_create(c, &wl_subsurface_interface,
+                               wl_resource_get_version(r), id);
+  if (!sb->res) {
+    free(sb);
+    wl_client_post_no_memory(c);
+    return;
+  }
+  sb->surface = cs;
+  sb->parent = ps;
+  sb->sync = 1; /* por defecto una subsuperficie nace en modo sync */
+  wl_list_insert(ps->stack.prev, &sb->link); /* encima de las demas */
+  cs->sub = sb;
+  wl_resource_set_implementation(sb->res, &subsurface_impl, sb,
+                                 subsurface_resource_destroy);
 }
 static const struct wl_subcompositor_interface subc_impl = {
     .destroy = noop_destroy,
@@ -1013,12 +1494,21 @@ static void kbd_focus_set(struct toplevel *tl) {
     send_modifiers_to(nc);
   }
   selection_send_to(nc);
+  primary_send_to(nc);
 }
 
+// El cliente cambia el cursor: solo vale si es el dueno del foco de puntero.
+// Aurora dibuja sus propias formas; una superficie de cursor arbitraria (mapa
+// de bits del cliente) no se usa y se deja la flecha.
+static int client_owns_pointer(struct wl_client *c) {
+  return g_ptr_focus && g_ptr_surf && wl_resource_get_client(g_ptr_surf->res) == c;
+}
 static void ptr_set_cursor(struct wl_client *c, struct wl_resource *r,
                            uint32_t serial, struct wl_resource *surf,
                            int32_t hx, int32_t hy) {
-  (void)c; (void)r; (void)serial; (void)surf; (void)hx; (void)hy;
+  (void)r; (void)serial; (void)hx; (void)hy;
+  if (client_owns_pointer(c))
+    xs_set_cursor(g_ptr_focus, surf ? AUR_CURSOR_ARROW : AUR_CURSOR_NONE);
 }
 static const struct wl_pointer_interface pointer_impl = {
     .set_cursor = ptr_set_cursor,
@@ -1213,7 +1703,6 @@ static void tl_set_max_size(struct wl_client *c, struct wl_resource *r, int32_t 
   struct toplevel *tl = wl_resource_get_user_data(r);
   tl->max_w = w; tl->max_h = h;
 }
-static void tl_nop(struct wl_client *c, struct wl_resource *r) { (void)c; (void)r; }
 static void tl_set_maximized(struct wl_client *c, struct wl_resource *r) {
   (void)c;
   struct toplevel *tl = wl_resource_get_user_data(r);
@@ -1246,8 +1735,20 @@ static void tl_set_minimized(struct wl_client *c, struct wl_resource *r) {
   else
     tl->pending_min = 1;
 }
+// Pantalla completa = maximizada (Aurora conserva menubar y Dock); el estado
+// `fullscreen` se anuncia para que el cliente adapte su interfaz.
 static void tl_set_fullscreen(struct wl_client *c, struct wl_resource *r, struct wl_resource *o) {
-  (void)c; (void)r; (void)o;
+  (void)o;
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  tl->fullscreen = 1;
+  tl_set_maximized(c, r);
+}
+static void tl_unset_fullscreen(struct wl_client *c, struct wl_resource *r) {
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  if (!tl->fullscreen)
+    return;
+  tl->fullscreen = 0;
+  tl_unset_maximized(c, r);
 }
 static const struct xdg_toplevel_interface toplevel_impl = {
     .destroy = noop_destroy,
@@ -1262,7 +1763,7 @@ static const struct xdg_toplevel_interface toplevel_impl = {
     .set_maximized = tl_set_maximized,
     .unset_maximized = tl_unset_maximized,
     .set_fullscreen = tl_set_fullscreen,
-    .unset_fullscreen = tl_nop,
+    .unset_fullscreen = tl_unset_fullscreen,
     .set_minimized = tl_set_minimized,
 };
 static void toplevel_resource_destroy(struct wl_resource *r) {
@@ -1523,27 +2024,349 @@ static void kde_mgr_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) 
 }
 
 // ---------------------------------------------------------------------------
+// Seleccion primaria (zwp_primary_selection_device_manager_v1): el texto
+// seleccionado se pega con el boton central. Misma mecanica que el portapapeles.
+// ---------------------------------------------------------------------------
+static void psoffer_receive(struct wl_client *c, struct wl_resource *r,
+                            const char *mime, int32_t fd) {
+  (void)c;
+  struct data_source *src = wl_resource_get_user_data(r);
+  if (src && src == g_primary)
+    zwp_primary_selection_source_v1_send_send(src->res, mime, fd);
+  close(fd);
+}
+static const struct zwp_primary_selection_offer_v1_interface psoffer_impl = {
+    .receive = psoffer_receive,
+    .destroy = noop_destroy,
+};
+static void primary_send_to(struct wl_client *client) {
+  struct seat_res *d;
+  wl_list_for_each(d, &g_psdevs, link) {
+    if (wl_resource_get_client(d->res) != client)
+      continue;
+    if (!g_primary) {
+      zwp_primary_selection_device_v1_send_selection(d->res, NULL);
+      continue;
+    }
+    struct wl_resource *offer = wl_resource_create(
+        client, &zwp_primary_selection_offer_v1_interface,
+        wl_resource_get_version(d->res), 0);
+    if (!offer)
+      continue;
+    wl_resource_set_implementation(offer, &psoffer_impl, g_primary, NULL);
+    zwp_primary_selection_device_v1_send_data_offer(d->res, offer);
+    const char *p = g_primary->mimes.data;
+    size_t left = g_primary->mimes.size;
+    while (left > 0) {
+      size_t n = strnlen(p, left);
+      zwp_primary_selection_offer_v1_send_offer(offer, p);
+      p += n + 1;
+      left -= (n + 1 > left) ? left : n + 1;
+    }
+    zwp_primary_selection_device_v1_send_selection(d->res, offer);
+  }
+}
+static void primary_send_to_focus(void) {
+  if (g_kbd_focus)
+    primary_send_to(wl_resource_get_client(g_kbd_focus->res));
+}
+static void pssrc_offer(struct wl_client *c, struct wl_resource *r, const char *mime) {
+  ds_offer(c, r, mime);
+}
+static const struct zwp_primary_selection_source_v1_interface pssrc_impl = {
+    .offer = pssrc_offer,
+    .destroy = noop_destroy,
+};
+static void pssrc_resource_destroy(struct wl_resource *r) {
+  struct data_source *s = wl_resource_get_user_data(r);
+  if (g_primary == s) {
+    g_primary = NULL;
+    primary_send_to_focus();
+  }
+  wl_array_release(&s->mimes);
+  free(s);
+}
+static void psm_create_source(struct wl_client *c, struct wl_resource *r, uint32_t id) {
+  struct data_source *s = calloc(1, sizeof(*s));
+  if (!s) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_array_init(&s->mimes);
+  s->res = wl_resource_create(c, &zwp_primary_selection_source_v1_interface,
+                              wl_resource_get_version(r), id);
+  if (!s->res) {
+    free(s);
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(s->res, &pssrc_impl, s, pssrc_resource_destroy);
+}
+static void psdev_set_selection(struct wl_client *c, struct wl_resource *r,
+                                struct wl_resource *src, uint32_t serial) {
+  (void)c; (void)r; (void)serial;
+  g_primary = src ? wl_resource_get_user_data(src) : NULL;
+  primary_send_to_focus();
+}
+static const struct zwp_primary_selection_device_v1_interface psdev_impl = {
+    .set_selection = psdev_set_selection,
+    .destroy = noop_destroy,
+};
+static void psm_get_device(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                           struct wl_resource *seat) {
+  (void)seat;
+  struct wl_resource *dd = wl_resource_create(
+      c, &zwp_primary_selection_device_v1_interface, wl_resource_get_version(r), id);
+  if (!dd) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  struct seat_res *sr = seat_res_add(&g_psdevs, dd);
+  wl_resource_set_implementation(dd, &psdev_impl, sr, seat_res_destroy);
+  if (g_kbd_focus && wl_resource_get_client(g_kbd_focus->res) == c)
+    primary_send_to(c);
+}
+static const struct zwp_primary_selection_device_manager_v1_interface psm_impl = {
+    .create_source = psm_create_source,
+    .get_device = psm_get_device,
+    .destroy = noop_destroy,
+};
+static void psm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(
+      c, &zwp_primary_selection_device_manager_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &psm_impl, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// wp_viewporter: recorte (set_source) y escalado (set_destination) del buffer.
+// El estado es pendiente hasta el commit de la superficie.
+// ---------------------------------------------------------------------------
+static void vp_set_source(struct wl_client *c, struct wl_resource *r,
+                          wl_fixed_t x, wl_fixed_t y, wl_fixed_t w, wl_fixed_t h) {
+  (void)c;
+  struct surface *s = wl_resource_get_user_data(r);
+  if (!s) {
+    wl_resource_post_error(r, WP_VIEWPORT_ERROR_NO_SURFACE, "superficie destruida");
+    return;
+  }
+  if (x == wl_fixed_from_int(-1) && y == wl_fixed_from_int(-1) &&
+      w == wl_fixed_from_int(-1) && h == wl_fixed_from_int(-1)) {
+    s->pvp_src_set = 0;
+    return;
+  }
+  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+    wl_resource_post_error(r, WP_VIEWPORT_ERROR_BAD_VALUE, "origen/tamano invalidos");
+    return;
+  }
+  s->pvp_src_set = 1;
+  s->pvp_sx = wl_fixed_to_int(x);
+  s->pvp_sy = wl_fixed_to_int(y);
+  s->pvp_sw = (wl_fixed_to_int(w) < 1) ? 1 : wl_fixed_to_int(w);
+  s->pvp_sh = (wl_fixed_to_int(h) < 1) ? 1 : wl_fixed_to_int(h);
+}
+static void vp_set_destination(struct wl_client *c, struct wl_resource *r,
+                               int32_t w, int32_t h) {
+  (void)c;
+  struct surface *s = wl_resource_get_user_data(r);
+  if (!s) {
+    wl_resource_post_error(r, WP_VIEWPORT_ERROR_NO_SURFACE, "superficie destruida");
+    return;
+  }
+  if (w == -1 && h == -1) {
+    s->pvp_dst_w = s->pvp_dst_h = -1;
+    return;
+  }
+  if (w <= 0 || h <= 0) {
+    wl_resource_post_error(r, WP_VIEWPORT_ERROR_BAD_VALUE, "destino invalido");
+    return;
+  }
+  s->pvp_dst_w = w;
+  s->pvp_dst_h = h;
+}
+static const struct wp_viewport_interface viewport_impl = {
+    .destroy = noop_destroy,
+    .set_source = vp_set_source,
+    .set_destination = vp_set_destination,
+};
+static void viewport_resource_destroy(struct wl_resource *r) {
+  struct surface *s = wl_resource_get_user_data(r);
+  if (!s)
+    return;
+  s->vp = NULL;
+  s->pvp_src_set = 0; /* sin viewport: el siguiente commit lo deshace */
+  s->pvp_dst_w = s->pvp_dst_h = -1;
+}
+static void vpm_get_viewport(struct wl_client *c, struct wl_resource *r,
+                             uint32_t id, struct wl_resource *surf) {
+  struct surface *s = wl_resource_get_user_data(surf);
+  if (s->vp) {
+    wl_resource_post_error(r, WP_VIEWPORTER_ERROR_VIEWPORT_EXISTS,
+                           "la superficie ya tiene un viewport");
+    return;
+  }
+  struct wl_resource *vp = wl_resource_create(c, &wp_viewport_interface,
+                                              wl_resource_get_version(r), id);
+  if (!vp) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  s->vp = vp;
+  wl_resource_set_implementation(vp, &viewport_impl, s, viewport_resource_destroy);
+}
+static const struct wp_viewporter_interface viewporter_impl = {
+    .destroy = noop_destroy,
+    .get_viewport = vpm_get_viewport,
+};
+static void viewporter_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(c, &wp_viewporter_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &viewporter_impl, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// wp_fractional_scale: la salida es 1.0x (120/120).
+// ---------------------------------------------------------------------------
+static const struct wp_fractional_scale_v1_interface fscale_impl = {
+    .destroy = noop_destroy,
+};
+static void fsm_get_fractional_scale(struct wl_client *c, struct wl_resource *r,
+                                     uint32_t id, struct wl_resource *surf) {
+  (void)surf;
+  struct wl_resource *f = wl_resource_create(c, &wp_fractional_scale_v1_interface,
+                                             wl_resource_get_version(r), id);
+  if (!f) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(f, &fscale_impl, NULL, NULL);
+  wp_fractional_scale_v1_send_preferred_scale(f, 120);
+}
+static const struct wp_fractional_scale_manager_v1_interface fsm_impl = {
+    .destroy = noop_destroy,
+    .get_fractional_scale = fsm_get_fractional_scale,
+};
+static void fsm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r =
+      wl_resource_create(c, &wp_fractional_scale_manager_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &fsm_impl, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// wp_cursor_shape_v1: el cliente pide una forma con nombre; Aurora la dibuja.
+// ---------------------------------------------------------------------------
+static int cursor_shape_to_aurora(uint32_t shape) {
+  switch (shape) {
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS:
+    return AUR_CURSOR_HAND;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT:
+    return AUR_CURSOR_TEXT;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CELL:
+    return AUR_CURSOR_CROSS;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE:
+    return AUR_CURSOR_RESIZE_EW;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE:
+    return AUR_CURSOR_RESIZE_NS;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE:
+    return AUR_CURSOR_RESIZE_NESW;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE:
+    return AUR_CURSOR_RESIZE_NWSE;
+  default:
+    return AUR_CURSOR_ARROW;
+  }
+}
+static void csdev_set_shape(struct wl_client *c, struct wl_resource *r,
+                            uint32_t serial, uint32_t shape) {
+  (void)r; (void)serial;
+  if (client_owns_pointer(c))
+    xs_set_cursor(g_ptr_focus, cursor_shape_to_aurora(shape));
+}
+static const struct wp_cursor_shape_device_v1_interface csdev_impl = {
+    .destroy = noop_destroy,
+    .set_shape = csdev_set_shape,
+};
+static void csm_new_device(struct wl_client *c, struct wl_resource *r, uint32_t id) {
+  struct wl_resource *d = wl_resource_create(c, &wp_cursor_shape_device_v1_interface,
+                                             wl_resource_get_version(r), id);
+  if (!d) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(d, &csdev_impl, NULL, NULL);
+}
+static void csm_get_pointer(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                            struct wl_resource *pointer) {
+  (void)pointer;
+  csm_new_device(c, r, id);
+}
+static void csm_get_tablet_tool(struct wl_client *c, struct wl_resource *r,
+                                uint32_t id, struct wl_resource *tool) {
+  (void)tool;
+  csm_new_device(c, r, id);
+}
+static const struct wp_cursor_shape_manager_v1_interface csm_impl = {
+    .destroy = noop_destroy,
+    .get_pointer = csm_get_pointer,
+    .get_tablet_tool_v2 = csm_get_tablet_tool,
+};
+static void csm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r =
+      wl_resource_create(c, &wp_cursor_shape_manager_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &csm_impl, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
 // Eventos de Aurora -> Wayland
 // ---------------------------------------------------------------------------
-static void ptr_send_to(struct xsurf *xs, void (*fn)(struct wl_resource *, void *), void *arg) {
-  struct wl_client *c = wl_resource_get_client(xs->res);
+static void ptr_send_to(struct wl_client *c, void (*fn)(struct wl_resource *, void *), void *arg) {
   struct seat_res *p;
   wl_list_for_each(p, &g_pointers, link)
     if (wl_resource_get_client(p->res) == c)
       fn(p->res, arg);
 }
 
-struct ptr_ev { struct xsurf *xs; int x, y; uint32_t serial; uint32_t time; uint32_t button; uint32_t state; };
+struct ptr_ev { struct surface *surf; int x, y; uint32_t serial; uint32_t time; uint32_t button; uint32_t state; };
 static void do_enter(struct wl_resource *p, void *a) {
   struct ptr_ev *e = a;
-  if (e->xs->surface)
-    wl_pointer_send_enter(p, e->serial, e->xs->surface->res,
-                          wl_fixed_from_int(e->x), wl_fixed_from_int(e->y));
+  wl_pointer_send_enter(p, e->serial, e->surf->res, wl_fixed_from_int(e->x),
+                        wl_fixed_from_int(e->y));
 }
 static void do_leave(struct wl_resource *p, void *a) {
   struct ptr_ev *e = a;
-  if (e->xs->surface)
-    wl_pointer_send_leave(p, e->serial, e->xs->surface->res);
+  wl_pointer_send_leave(p, e->serial, e->surf->res);
 }
 static void do_motion(struct wl_resource *p, void *a) {
   struct ptr_ev *e = a;
@@ -1559,14 +2382,48 @@ static void do_frame(struct wl_resource *p, void *a) {
     wl_pointer_send_frame(p);
 }
 
+// Cursor sobre el contenido de la ventana `xs` (forma de Aurora).
+static void xs_set_cursor(struct xsurf *xs, int shape) {
+  if (xs->cursor == shape || xs->win_id < 0)
+    return;
+  xs->cursor = shape;
+  win_set_cursor(xs->win_id, shape);
+}
+
+// El puntero sale de la superficie con foco (sin tocar g_ptr_focus).
+static void pointer_surf_leave(void) {
+  if (!g_ptr_surf)
+    return;
+  struct ptr_ev e = {.surf = g_ptr_surf, .serial = wl_display_next_serial(g_display)};
+  struct wl_client *c = wl_resource_get_client(g_ptr_surf->res);
+  ptr_send_to(c, do_leave, &e);
+  ptr_send_to(c, do_frame, &e);
+  g_ptr_surf = NULL;
+}
+
 static void pointer_leave(struct xsurf *xs) {
   if (g_ptr_focus != xs)
     return;
-  struct ptr_ev e = {.xs = xs, .serial = wl_display_next_serial(g_display)};
-  ptr_send_to(xs, do_leave, &e);
-  ptr_send_to(xs, do_frame, &e);
+  pointer_surf_leave();
   g_ptr_focus = NULL;
   xs->last_buttons = 0;
+}
+
+// Superficie (raiz o subsuperficie) mas alta bajo (px,py), coordenadas de la
+// superficie raiz. Las regiones de entrada no se tienen en cuenta.
+static struct surface *surface_at(struct surface *s, int ox, int oy, int px, int py) {
+  struct subsurf *n;
+  wl_list_for_each_reverse(n, &s->stack, link) {
+    if (n == &s->self) {
+      if (s->has_content && px >= ox && py >= oy && px < ox + s->dw && py < oy + s->dh)
+        return s;
+    } else if (n->surface && n->surface->has_content) {
+      struct surface *r = surface_at(n->surface, ox + n->x, oy + n->y, px, py);
+      if (r)
+        return r;
+    }
+  }
+  return NULL;
 }
 
 // Raiz (toplevel) de la cadena de padres de un popup.
@@ -1587,20 +2444,41 @@ static void popups_dismiss(struct xsurf *root, struct xsurf *except) {
 
 static void pointer_event(struct xsurf *xs, int x, int y, uint32_t buttons) {
   // Aurora da coordenadas de la ventana (= geometria); Wayland, de la superficie.
-  struct ptr_ev e = {.xs = xs, .x = x + xs->vx, .y = y + xs->vy,
-                     .time = now_ms()};
+  int rx = x + xs->vx, ry = y + xs->vy;
+  struct ptr_ev e = {.time = now_ms()};
   if (g_debug)
     fprintf(stderr, "[aurora-wayland] ptr win=%d (%d,%d) btn=%u\n", xs->win_id,
             x, y, buttons);
+  if (!xs->surface)
+    return;
   if (g_ptr_focus != xs) {
     if (g_ptr_focus)
       pointer_leave(g_ptr_focus);
+    pointer_surf_leave();
     g_ptr_focus = xs;
     xs->last_buttons = 0;
-    e.serial = wl_display_next_serial(g_display);
-    ptr_send_to(xs, do_enter, &e);
   }
-  ptr_send_to(xs, do_motion, &e);
+  // Con un boton pulsado el puntero queda "agarrado" a su superficie.
+  struct surface *target = NULL;
+  if (xs->last_buttons && g_ptr_surf && tree_root(g_ptr_surf) == xs->surface)
+    target = g_ptr_surf;
+  if (!target)
+    target = surface_at(xs->surface, 0, 0, rx, ry);
+  if (!target)
+    target = xs->surface;
+  int ox, oy;
+  surface_origin(target, &ox, &oy);
+  e.surf = target;
+  e.x = rx - ox;
+  e.y = ry - oy;
+  struct wl_client *cl = wl_resource_get_client(target->res);
+  if (g_ptr_surf != target) {
+    pointer_surf_leave();
+    g_ptr_surf = target;
+    e.serial = wl_display_next_serial(g_display);
+    ptr_send_to(cl, do_enter, &e);
+  }
+  ptr_send_to(cl, do_motion, &e);
   static const uint32_t codes[3] = {BTN_LEFT, BTN_RIGHT, BTN_MIDDLE};
   for (int b = 0; b < 3; b++) {
     int was = (xs->last_buttons >> b) & 1, is = (buttons >> b) & 1;
@@ -1608,7 +2486,7 @@ static void pointer_event(struct xsurf *xs, int x, int y, uint32_t buttons) {
       e.serial = wl_display_next_serial(g_display);
       e.button = codes[b];
       e.state = is ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED;
-      ptr_send_to(xs, do_button, &e);
+      ptr_send_to(cl, do_button, &e);
       // Pulsar sobre la ventana de la que cuelga un popup (no sobre el propio
       // popup) lo cierra, como en cualquier compositor con grab de popups.
       if (is && !xs->is_popup)
@@ -1616,7 +2494,7 @@ static void pointer_event(struct xsurf *xs, int x, int y, uint32_t buttons) {
     }
   }
   xs->last_buttons = (int)buttons;
-  ptr_send_to(xs, do_frame, &e);
+  ptr_send_to(cl, do_frame, &e);
 }
 
 static void handle_win_event(struct xsurf *xs, const winsrv_event_t *ev) {
@@ -1744,7 +2622,7 @@ static int wheel_input(int fd, uint32_t mask, void *data) {
       if (g_debug)
         fprintf(stderr, "[aurora-wayland] wheel code=%u value=%d focus=%d\n",
                 ev[i].code, ev[i].value, g_ptr_focus ? g_ptr_focus->win_id : -1);
-      if (!g_ptr_focus)
+      if (!g_ptr_focus || !g_ptr_surf)
         continue;
       struct axis_ev e = {
           .time = now_ms(),
@@ -1752,8 +2630,9 @@ static int wheel_input(int fd, uint32_t mask, void *data) {
                                           : WL_POINTER_AXIS_HORIZONTAL_SCROLL,
           // evdev: + = arriba/izquierda; Wayland: + = abajo/derecha
           .notches = ev[i].code == REL_WHEEL ? -ev[i].value : ev[i].value};
-      ptr_send_to(g_ptr_focus, do_axis, &e);
-      ptr_send_to(g_ptr_focus, do_frame, &e);
+      struct wl_client *pc = wl_resource_get_client(g_ptr_surf->res);
+      ptr_send_to(pc, do_axis, &e);
+      ptr_send_to(pc, do_frame, &e);
     }
   }
   wl_display_flush_clients(g_display);
@@ -1943,6 +2822,7 @@ int main(int argc, char **argv) {
   wl_list_init(&g_pointers);
   wl_list_init(&g_keyboards);
   wl_list_init(&g_datadevs);
+  wl_list_init(&g_psdevs);
 
   if (keymap_init() < 0)
     fprintf(stderr, "[aurora-wayland] aviso: sin teclado xkb\n");
@@ -1954,6 +2834,13 @@ int main(int argc, char **argv) {
   wl_global_create(g_display, &wl_seat_interface, 5, NULL, seat_bind);
   wl_global_create(g_display, &wl_data_device_manager_interface, 3, NULL, dm_bind);
   wl_global_create(g_display, &xdg_wm_base_interface, 3, NULL, wm_bind);
+  wl_global_create(g_display, &zwp_primary_selection_device_manager_v1_interface, 1,
+                   NULL, psm_bind);
+  wl_global_create(g_display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
+  wl_global_create(g_display, &wp_fractional_scale_manager_v1_interface, 1, NULL,
+                   fsm_bind);
+  wl_global_create(g_display, &wp_cursor_shape_manager_v1_interface, 1, NULL,
+                   csm_bind);
   wl_global_create(g_display, &zxdg_decoration_manager_v1_interface, 1, NULL,
                    deco_mgr_bind);
   wl_global_create(g_display, &org_kde_kwin_server_decoration_manager_interface, 1,

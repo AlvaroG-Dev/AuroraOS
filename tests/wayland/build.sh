@@ -16,6 +16,22 @@ gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/udev_test" "$ROOT/tests/wayland/udev
         -I"$ST/include" -l:libudev.so.1
 }
 echo "OK: precompiled/usr/bin/udev_test"
+# Cliente de prueba de subsuperficies/viewporter/cursor-shape de aurora-wayland.
+GEN="$ROOT/build/aurora_wl_client"
+SCAN="$ST/bin/wayland-scanner"
+PROTO="$ST/share/wayland-protocols"
+mkdir -p "$GEN"
+cgen() { "$SCAN" client-header "$1" "$GEN/$2-client-protocol.h"; "$SCAN" private-code "$1" "$GEN/$2-protocol.c"; }
+cgen "$PROTO/stable/xdg-shell/xdg-shell.xml" xdg-shell
+cgen "$PROTO/stable/viewporter/viewporter.xml" viewporter
+cgen "$PROTO/staging/cursor-shape/cursor-shape-v1.xml" cursor-shape-v1
+cgen "$PROTO/stable/tablet/tablet-v2.xml" tablet-v2
+gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/aw_sub_test" "$ROOT/tests/wayland/aw_sub_test.c" \
+    "$GEN/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" \
+    "$GEN/cursor-shape-v1-protocol.c" "$GEN/tablet-v2-protocol.c" \
+    -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" -lwayland-client \
+    -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
+echo "OK: precompiled/usr/bin/aw_sub_test"
 # Scripts que se ejecutan dentro del guest.
 for s in "$ROOT"/tests/wayland/guest/*.sh; do
     cp -f "$s" "$ROOT/precompiled/usr/bin/$(basename "$s")"

@@ -10,7 +10,7 @@ bash tests/wayland/build.sh >/dev/null || exit 1
 CLIENTS="${*:-/usr/bin/weston-simple-shm /usr/bin/weston-flower /usr/bin/weston-terminal}"
 rm -f /tmp/aw_shot.ppm
 QMON="${AW_QMON:-screendump /tmp/aw_shot.ppm}" QMON_WAIT="READY-FOR-SHOT" \
-  bash scripts/qemu-boot-test.sh -t 120 "AW_HOLD=${AW_HOLD:-6} ${AW_DEBUG:+AW_DEBUG=1} ${STRACE:+STRACE=$STRACE} /usr/bin/aurora-wayland.sh 12 $CLIENTS"
+  bash scripts/qemu-boot-test.sh -t "${AW_TIMEOUT:-120}" "AW_HOLD=${AW_HOLD:-6} ${AW_DEBUG:+AW_DEBUG=1} ${STRACE:+STRACE=$STRACE} /usr/bin/aurora-wayland.sh 12 $CLIENTS"
 L=/tmp/boot-test.log
 
 rc=0

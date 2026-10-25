@@ -6980,6 +6980,16 @@ static int64_t a_win_set_app_id(uint64_t win_id, uint64_t app_id, uint64_t a3,
   return winsrv_set_app_id(proc->task, (int)win_id, t);
 }
 
+// Forma de cursor de una ventana (cursor_shape_t) sobre su contenido.
+static int64_t a_win_set_cursor(uint64_t win_id, uint64_t shape, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  return winsrv_set_cursor(proc->task, (int)win_id, (int)shape);
+}
+
 // a5 -> { uint32_t flags; char title[64]; }
 static int64_t a_win_create_ex(uint64_t a1, uint64_t a2, uint64_t a3,
                                uint64_t a4, uint64_t a5) {
@@ -7357,6 +7367,8 @@ static const syscall_entry_t aurora_table[] = {
                                            "asys_dock_poll_launch"},
     [ASYS_WIN_SET_APP_ID - ASYS_BASE] = {a_win_set_app_id,
                                          "asys_win_set_app_id"},
+    [ASYS_WIN_SET_CURSOR - ASYS_BASE] = {a_win_set_cursor,
+                                         "asys_win_set_cursor"},
     [ASYS_IPC_SEND - ASYS_BASE] = {a_ipc_send, "asys_ipc_send"},
     [ASYS_IPC_RECV - ASYS_BASE] = {a_ipc_recv, "asys_ipc_recv"},
     [ASYS_GET_SERVICE_ID -

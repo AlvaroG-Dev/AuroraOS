@@ -195,6 +195,8 @@ static void invalidate_window(window_t *w) {
   w->last_vis = now;
 }
 
+static void update_cursor_shape(void);
+
 /* =========================================================================
  * Cola de comandos (cualquier CPU -> hilo del compositor)
  * =======================================================================*/
@@ -207,7 +209,8 @@ typedef enum {
   CMD_TITLE,
   CMD_MAXIMIZE, /* value: 1 = maximizar, 0 = restaurar */
   CMD_DOCK_PIN, /* title = nombre, app_id, symbol, color, value = launch_id */
-  CMD_WIN_APP   /* win + app_id: la ventana pasa al lanzador de esa app */
+  CMD_WIN_APP,  /* win + app_id: la ventana pasa al lanzador de esa app */
+  CMD_WIN_CURSOR /* win + value (cursor_shape_t) */
 } cmd_type_t;
 
 typedef struct {
@@ -856,6 +859,12 @@ static void exec_cmd(const comp_cmd_t *c) {
     if (stack_contains(c->win))
       do_win_app(c->win, c->app_id);
     break;
+  case CMD_WIN_CURSOR:
+    if (stack_contains(c->win)) {
+      c->win->client_cursor = c->value;
+      update_cursor_shape();
+    }
+    break;
   }
 }
 
@@ -904,6 +913,10 @@ void compositor_dock_pin(const char *name, const char *app_id,
 void compositor_set_app_id(window_t *win, const char *app_id) {
   comp_cmd_t c = {.type = CMD_WIN_APP, .win = win};
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
+  cmd_post(&c);
+}
+void compositor_set_cursor(window_t *win, int shape) {
+  comp_cmd_t c = {.type = CMD_WIN_CURSOR, .win = win, .value = shape};
   cmd_post(&c);
 }
 void compositor_set_icon_bmp(window_t *win, tar_node_t *node) {
@@ -1016,7 +1029,11 @@ static void update_cursor_shape(void) {
              cursor_y >= AURORA_MENUBAR_H &&
              !dock_hit_test(cursor_x, cursor_y)) {
     win_hit_t h;
-    if (window_at_cursor(&h))
+    window_t *w = window_at_cursor(&h);
+    if (w && h == WIN_HIT_CLIENT && w->client_cursor > 0 &&
+        w->client_cursor < CURSOR_COUNT)
+      s = (cursor_shape_t)w->client_cursor;
+    else if (w)
       s = shape_for_edges(edges_for_hit(h));
   }
   set_cursor_shape(s);
