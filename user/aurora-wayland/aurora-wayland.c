@@ -36,6 +36,7 @@
 #include "primary-selection-unstable-v1-server-protocol.h"
 #include "viewporter-server-protocol.h"
 #include "idle-inhibit-unstable-v1-server-protocol.h"
+#include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
 #include "xdg-activation-v1-server-protocol.h"
 #include "xdg-output-unstable-v1-server-protocol.h"
@@ -1173,14 +1174,220 @@ static void surface_damage_up(struct surface *s, rc_t d) {
   root_update(s, d);
 }
 
+// ---------------------------------------------------------------------------
+// zwp_linux_dmabuf_v1: buffers dma-buf lineales XRGB8888/ARGB8888 de un plano
+// (los que crean Mesa/GBM, Xwayland o los clientes con PRIME). El fd se mapea
+// una vez (las paginas son las del GEM exportado: sin copia) y cada commit lo
+// vuelca al almacen de la superficie igual que un wl_shm.
+// ---------------------------------------------------------------------------
+#define DRM_FMT_XRGB8888 0x34325258u
+#define DRM_FMT_ARGB8888 0x34325241u
+
+struct dmabuf_buf {
+  int fd;
+  int w, h, stride, offset;
+  uint32_t format;
+  uint8_t *map;
+  size_t map_len;
+};
+
+struct dmabuf_params {
+  int fd; /* -1 = plano 0 sin anadir */
+  uint32_t offset, stride;
+  int used;
+};
+
+static void dmabuf_buf_destroy_res(struct wl_resource *r);
+static void dmabuf_buffer_destroy(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static const struct wl_buffer_interface dmabuf_buffer_impl = {
+    .destroy = dmabuf_buffer_destroy,
+};
+static struct dmabuf_buf *dmabuf_buf_from(struct wl_resource *buf) {
+  if (!buf || !wl_resource_instance_of(buf, &wl_buffer_interface,
+                                       &dmabuf_buffer_impl))
+    return NULL;
+  return wl_resource_get_user_data(buf);
+}
+static int dmabuf_buf_map(struct dmabuf_buf *b) {
+  if (b->map)
+    return 1;
+  off_t len = lseek(b->fd, 0, SEEK_END);
+  size_t need = (size_t)b->offset + (size_t)b->stride * b->h;
+  if (len < 0 || (size_t)len < need)
+    return 0;
+  void *m = mmap(NULL, (size_t)len, PROT_READ, MAP_SHARED, b->fd, 0);
+  if (m == MAP_FAILED)
+    return 0;
+  b->map = m;
+  b->map_len = (size_t)len;
+  return 1;
+}
+static void dmabuf_buf_destroy_res(struct wl_resource *r) {
+  struct dmabuf_buf *b = wl_resource_get_user_data(r);
+  if (!b)
+    return;
+  if (b->map)
+    munmap(b->map, b->map_len);
+  close(b->fd);
+  free(b);
+}
+
+static struct wl_resource *dmabuf_make_buffer(struct wl_client *c,
+                                              struct wl_resource *pr, uint32_t id,
+                                              int w, int h, uint32_t format,
+                                              uint32_t flags, int immed) {
+  struct dmabuf_params *p = wl_resource_get_user_data(pr);
+  if (p->used) {
+    wl_resource_post_error(pr, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED,
+                           "params ya usado");
+    return NULL;
+  }
+  p->used = 1;
+  int ok = p->fd >= 0 && w > 0 && h > 0 && w <= 8192 && h <= 8192 &&
+           flags == 0 && (format == DRM_FMT_XRGB8888 || format == DRM_FMT_ARGB8888) &&
+           p->stride >= (uint32_t)w * 4;
+  if (p->fd < 0) {
+    wl_resource_post_error(pr, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INCOMPLETE,
+                           "falta el plano 0");
+    return NULL;
+  }
+  struct dmabuf_buf *b = ok ? calloc(1, sizeof(*b)) : NULL;
+  if (b) {
+    b->fd = p->fd;
+    p->fd = -1;
+    b->w = w;
+    b->h = h;
+    b->stride = (int)p->stride;
+    b->offset = (int)p->offset;
+    b->format = format;
+    if (!dmabuf_buf_map(b)) {
+      close(b->fd);
+      free(b);
+      b = NULL;
+    }
+  }
+  if (!b) {
+    if (immed)
+      wl_resource_post_error(pr, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT,
+                             "dmabuf no soportado");
+    else
+      zwp_linux_buffer_params_v1_send_failed(pr);
+    return NULL;
+  }
+  struct wl_resource *buf = wl_resource_create(c, &wl_buffer_interface, 1, id);
+  if (!buf) {
+    munmap(b->map, b->map_len);
+    close(b->fd);
+    free(b);
+    wl_client_post_no_memory(c);
+    return NULL;
+  }
+  wl_resource_set_implementation(buf, &dmabuf_buffer_impl, b, dmabuf_buf_destroy_res);
+  if (!immed)
+    zwp_linux_buffer_params_v1_send_created(pr, buf);
+  return buf;
+}
+
+static void dparams_destroy(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static void dparams_add(struct wl_client *c, struct wl_resource *r, int32_t fd,
+                        uint32_t plane, uint32_t offset, uint32_t stride,
+                        uint32_t mod_hi, uint32_t mod_lo) {
+  (void)c;
+  struct dmabuf_params *p = wl_resource_get_user_data(r);
+  if (p->used) {
+    close(fd);
+    wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED,
+                           "params ya usado");
+    return;
+  }
+  if (plane != 0) {
+    close(fd);
+    wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_IDX,
+                           "solo hay un plano");
+    return;
+  }
+  if (p->fd >= 0) {
+    close(fd);
+    wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_SET,
+                           "plano 0 ya anadido");
+    return;
+  }
+  if (mod_hi != 0 || mod_lo != 0) { /* solo DRM_FORMAT_MOD_LINEAR */
+    close(fd);
+    return; /* el create posterior fallara por plano ausente */
+  }
+  p->fd = fd;
+  p->offset = offset;
+  p->stride = stride;
+}
+static void dparams_create(struct wl_client *c, struct wl_resource *r, int32_t w,
+                           int32_t h, uint32_t format, uint32_t flags) {
+  dmabuf_make_buffer(c, r, 0, w, h, format, flags, 0);
+}
+static void dparams_create_immed(struct wl_client *c, struct wl_resource *r,
+                                 uint32_t id, int32_t w, int32_t h,
+                                 uint32_t format, uint32_t flags) {
+  dmabuf_make_buffer(c, r, id, w, h, format, flags, 1);
+}
+static const struct zwp_linux_buffer_params_v1_interface dparams_impl = {
+    .destroy = dparams_destroy,
+    .add = dparams_add,
+    .create = dparams_create,
+    .create_immed = dparams_create_immed,
+};
+static void dparams_free(struct wl_resource *r) {
+  struct dmabuf_params *p = wl_resource_get_user_data(r);
+  if (p && p->fd >= 0)
+    close(p->fd);
+  free(p);
+}
+static void dmabuf_create_params(struct wl_client *c, struct wl_resource *r,
+                                 uint32_t id) {
+  struct dmabuf_params *p = calloc(1, sizeof(*p));
+  struct wl_resource *pr =
+      p ? wl_resource_create(c, &zwp_linux_buffer_params_v1_interface,
+                             wl_resource_get_version(r), id)
+        : NULL;
+  if (!pr) {
+    free(p);
+    wl_client_post_no_memory(c);
+    return;
+  }
+  p->fd = -1;
+  wl_resource_set_implementation(pr, &dparams_impl, p, dparams_free);
+}
+static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
+    .destroy = noop_destroy,
+    .create_params = dmabuf_create_params,
+};
+static void dmabuf_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &dmabuf_impl, NULL, NULL);
+  static const uint32_t fmts[] = {DRM_FMT_XRGB8888, DRM_FMT_ARGB8888};
+  for (unsigned i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+    if (v >= 3)
+      zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], 0, 0); /* LINEAR */
+    else
+      zwp_linux_dmabuf_v1_send_format(r, fmts[i]);
+  }
+}
+
 // Copia el buffer shm al almacen de la superficie; devuelve el dano en px de
 // buffer. En subsuperficies se conserva el alfa; la raiz se fuerza opaca.
-static rc_t surface_ingest(struct surface *s, struct wl_shm_buffer *shm) {
-  int w = wl_shm_buffer_get_width(shm);
-  int h = wl_shm_buffer_get_height(shm);
-  int stride = wl_shm_buffer_get_stride(shm);
-  int keep_alpha = s->sub != NULL &&
-                   wl_shm_buffer_get_format(shm) == WL_SHM_FORMAT_ARGB8888;
+static rc_t surface_ingest(struct surface *s, const uint8_t *src, int w, int h,
+                           int stride, int argb) {
+  int keep_alpha = s->sub != NULL && argb;
   rc_t all = {0, 0, w, h};
   rc_t d = all;
   if (w == s->buf_w && h == s->buf_h && s->has_content &&
@@ -1198,15 +1405,12 @@ static rc_t surface_ingest(struct surface *s, struct wl_shm_buffer *shm) {
     return (rc_t){0, 0, 0, 0};
   }
   uint32_t force = keep_alpha ? 0 : 0xFF000000u;
-  wl_shm_buffer_begin_access(shm);
-  const uint8_t *src = wl_shm_buffer_get_data(shm);
   for (int y = d.y0; y < d.y1; y++) {
     const uint32_t *row = (const uint32_t *)(src + (size_t)y * stride);
     uint32_t *dst = s->scratch + (size_t)y * w;
     for (int x = d.x0; x < d.x1; x++)
       dst[x] = row[x] | force;
   }
-  wl_shm_buffer_end_access(shm);
   s->store_alpha = keep_alpha;
   s->buf_w = w;
   s->buf_h = h;
@@ -1257,8 +1461,20 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     s->has_attach = 0;
     if (s->buffer) {
       struct wl_shm_buffer *shm = wl_shm_buffer_get(s->buffer);
+      struct dmabuf_buf *db = dmabuf_buf_from(s->buffer);
       if (shm && tree_member) {
-        ingest_dmg = surface_ingest(s, shm);
+        wl_shm_buffer_begin_access(shm);
+        ingest_dmg = surface_ingest(s, wl_shm_buffer_get_data(shm),
+                                    wl_shm_buffer_get_width(shm),
+                                    wl_shm_buffer_get_height(shm),
+                                    wl_shm_buffer_get_stride(shm),
+                                    wl_shm_buffer_get_format(shm) ==
+                                        WL_SHM_FORMAT_ARGB8888);
+        wl_shm_buffer_end_access(shm);
+        ingested = 1;
+      } else if (db && tree_member && dmabuf_buf_map(db)) {
+        ingest_dmg = surface_ingest(s, db->map + db->offset, db->w, db->h,
+                                    db->stride, db->format == DRM_FMT_ARGB8888);
         ingested = 1;
       }
       // Ya copiamos el contenido: el cliente puede reutilizar el buffer.
@@ -3353,6 +3569,7 @@ int main(int argc, char **argv) {
   wl_global_create(g_display, &xdg_wm_base_interface, 3, NULL, wm_bind);
   wl_global_create(g_display, &zwp_primary_selection_device_manager_v1_interface, 1,
                    NULL, psm_bind);
+  wl_global_create(g_display, &zwp_linux_dmabuf_v1_interface, 3, NULL, dmabuf_bind);
   wl_global_create(g_display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
   wl_global_create(g_display, &wp_fractional_scale_manager_v1_interface, 1, NULL,
                    fsm_bind);

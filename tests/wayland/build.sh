@@ -26,12 +26,18 @@ cgen "$PROTO/stable/xdg-shell/xdg-shell.xml" xdg-shell
 cgen "$PROTO/stable/viewporter/viewporter.xml" viewporter
 cgen "$PROTO/staging/cursor-shape/cursor-shape-v1.xml" cursor-shape-v1
 cgen "$PROTO/stable/tablet/tablet-v2.xml" tablet-v2
+cgen "$PROTO/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml" linux-dmabuf-unstable-v1
 gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/aw_sub_test" "$ROOT/tests/wayland/aw_sub_test.c" \
     "$GEN/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" \
     "$GEN/cursor-shape-v1-protocol.c" "$GEN/tablet-v2-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" -lwayland-client \
     -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aw_sub_test"
+gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/aw_dmabuf_test" "$ROOT/tests/wayland/aw_dmabuf_test.c" \
+    "$GEN/xdg-shell-protocol.c" "$GEN/linux-dmabuf-unstable-v1-protocol.c" \
+    -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" -lwayland-client \
+    -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
+echo "OK: precompiled/usr/bin/aw_dmabuf_test"
 # App GTK3 minima (necesita libgtk-3-dev en el host de build; se omite si falta).
 if pkg-config --exists gtk+-3.0 2>/dev/null; then
     gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/hello-gtk" "$ROOT/tests/wayland/hello-gtk.c" \
