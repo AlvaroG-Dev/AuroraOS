@@ -99,12 +99,12 @@ Hecho y validado antes y durante esta sesión: `wl_compositor/subcompositor/shm/
 |---|---|---|
 | D1 | Multi-CRTC / hot-plug / multi-monitor | **Decidido: SÍ, hay que hacerlo, pero cuando se pueda** (aplazado: depende de un driver de pantalla real, D5/D6) |
 | D2 | Cambio de resolución en caliente | **Decidido: SÍ, hay que hacerlo, pero cuando se pueda** (aplazado: depende de un driver de pantalla real, D5/D6) |
-| D3 | Portapapeles X11: alcance | **Aceptado `PRIMARY`; pendiente de implementar** |
+| D3 | Portapapeles X11: alcance | **Hecho `PRIMARY`** (27-oct-2026); `INCR`/imágenes siguen fuera |
 | D4 | `virtio-gpu` 3D (virgl/venus) | **Decidido: SÍ, no crítico; pendiente** |
 | D5 | Intel/AMD/NVIDIA reales | **ABIERTA** (hardware identificado; falta modelo del portátil y licencia GPL) |
 | D6 | Driver de pantalla nativo | **ABIERTA** (depende de D5) |
 | D7 | EDID por DDC/VBE (BIOS) y CEA | **ABIERTA** |
-| D8 | Iconos | **Decidido: simbólicos de respaldo; pendiente de implementar** |
+| D8 | Iconos | **Hecho: simbólicos de respaldo** (27-oct-2026) |
 | D9 | Intermitencia del guest y rendimiento con KVM | **ABIERTA** |
 
 Detalle de cada una:
@@ -130,7 +130,7 @@ Detalle de cada una:
 - **Hecho**: texto, `CLIPBOARD`. **Falta**: `INCR` (más de ~256 KB por la conexión X), imágenes (`image/png`), `PRIMARY`↔selección primaria de Wayland, `text/uri-list`.
 - **Opciones**: (a) quedarse en texto; (b) añadir `PRIMARY` (barato); (c) `INCR` + imágenes (medio).
 - **Recomendación**: (b) ya; (c) cuando haya una app que lo necesite.
-- **Decisión (26-oct-2026): ACEPTADA, pendiente de implementar** — opción (b): añadir `PRIMARY` ↔ selección primaria de Wayland al puente del `xwm`. Imágenes e `INCR` quedan fuera hasta que una app los necesite. **Estado: anotado, sin implementar.**
+- **Decisión (26-oct-2026): ACEPTADA, pendiente de implementar** — opción (b): añadir `PRIMARY` ↔ selección primaria de Wayland al puente del `xwm`. Imágenes e `INCR` quedan fuera hasta que una app los necesite. **Estado: HECHO.** `aurora-wayland` puentea ahora dos canales (`CLIPBOARD` y `PRIMARY`) con el mismo código (`struct xchan`); `PRIMARY` ↔ `zwp_primary_selection_v1`. Probado en ambas direcciones y sin mezclarse con `CLIPBOARD` (`tests/wayland/guest/primary-icons.sh`).
 
 ### D4 — Aceleración 3D: `virtio-gpu` virgl/venus
 - **Contexto**: es la única aceleración que se puede probar en QEMU, pero **este entorno no trae `virtio-gpu-gl`**, así que no se podría validar aquí. Implica ampliar `virtio_gpu.aur` (contextos, `SUBMIT_3D`, fences, blobs) y ioctls `DRM_IOCTL_VIRTGPU_*`.
@@ -168,7 +168,7 @@ Detalle de cada una:
 ### D8 — Iconos: arte definitivo y apps solo-simbólicas
 - **Contexto**: los iconos de `xclock`, `xeyes`, `hello-gtk`, `gtk3-icon-browser`, `qt5-*` son placeholders propios; las apps que solo traen iconos `-symbolic` no muestran icono (usan la baldosa con iniciales).
 - **Opciones**: (a) sustituir por arte definitivo con los mismos nombres; (b) usar el icono simbólico recoloreado como respaldo.
-- **Decisión (26-oct-2026): por ahora que se usen los iconos simbólicos** como respaldo para las apps que no traen icono normal (opción b); los placeholders propios actuales se mantienen donde existen. **Estado: pendiente de implementar** (`icons.c` ignora hoy los `-symbolic`; hay que buscarlos y recolorearlos a un color legible sobre el Dock).
+- **Decisión (26-oct-2026): por ahora que se usen los iconos simbólicos** como respaldo para las apps que no traen icono normal (opción b); los placeholders propios actuales se mantienen donde existen. **Estado: HECHO.** `icons.c` busca `NOMBRE-symbolic` (`<tema>/symbolic/apps`, `scalable/apps` y los `.symbolic.png` de GTK) solo cuando no hay icono normal, lo recolorea a blanco azulado conservando el alfa y lo pone sobre una baldosa redondeada oscura. Para probarlo, `AW_APPS_DIR` permite apuntar a otro directorio de `.desktop` (el real es de solo lectura en el guest).
 
 ### D9 — Intermitencia del guest y rendimiento con KVM
 - **Contexto**: el bloqueo ocasional del shell en TCG sigue sin causa; no se ha medido rendimiento con KVM (en TCG `gtk3-widget-factory` tarda 2–3 min en pintar).
@@ -179,8 +179,7 @@ Detalle de cada una:
 
 0. D1 y D2 (multi-monitor/hot-plug y cambio de resolución en caliente): hay que hacerlos, aplazados hasta que exista el driver de pantalla (D5/D6).
 1. Confirmar el modelo del portátil Intel y obtener un log serie de arranque / `lspci -nn` (desbloquea D5 y D6 y valida §4.1 y §4.5). El sobremesa (i7-12700KF **sin iGPU** + RTX 4060) solo sirve para probar GOP.
-2. D3(b): `PRIMARY` del portapapeles X11 (aceptado, barato).
-3. D8: iconos simbólicos como respaldo (aceptado).
+2. ~~D3(b): `PRIMARY`~~ hecho. 3. ~~D8: iconos simbólicos~~ hecho.
 4. D9: medir con KVM.
 5. D4: `virtio-gpu` 3D (decidido que sí, no crítico; necesita QEMU con GL).
 

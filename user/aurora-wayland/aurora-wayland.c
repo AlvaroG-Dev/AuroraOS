@@ -294,8 +294,9 @@ static int g_keymap_fd = -1;
 static size_t g_keymap_size;
 
 static struct data_source *g_selection;
-static void xsel_wayland_changed(void); /* puente del portapapeles X11 */
-static void xsel_request(const char *mime, int fd);
+enum { XSEL_CLIPBOARD, XSEL_PRIMARY, XSEL_NCHAN };
+static void xsel_wayland_changed(int chan); /* puente del portapapeles X11 */
+static void xsel_request(int chan, const char *mime, int fd);
 static struct data_source *g_primary; /* seleccion primaria (boton central) */
 static struct wl_list g_psdevs;       /* struct seat_res.link: primary_selection_device */
 static void primary_send_to(struct wl_client *client);
@@ -568,7 +569,7 @@ static void offer_receive(struct wl_client *c, struct wl_resource *r,
   (void)c;
   struct data_source *src = wl_resource_get_user_data(r);
   if (src && src == g_selection && src->x_origin) {
-    xsel_request(mime, fd); /* pide el dato al cliente X11; se encarga de cerrar fd */
+    xsel_request(XSEL_CLIPBOARD, mime, fd); /* pide el dato al cliente X11; se encarga de cerrar fd */
     return;
   }
   if (src && src == g_selection) /* solo se compara: la fuente puede haber muerto */
@@ -656,7 +657,7 @@ static void ds_resource_destroy(struct wl_resource *r) {
   if (g_selection == s) {
     g_selection = NULL;
     selection_send_to_focus();
-    xsel_wayland_changed();
+    xsel_wayland_changed(XSEL_CLIPBOARD);
   }
   wl_array_release(&s->mimes);
   free(s);
@@ -692,7 +693,7 @@ static void dd_set_selection(struct wl_client *c, struct wl_resource *r,
     fprintf(stderr, "[aurora-wayland] set_selection de cliente %p (fuente %p, foco kbd %p)\n",
             (void *)c, (void *)s, g_kbd_focus ? (void *)g_kbd_focus->client : NULL);
   selection_send_to_focus();
-  xsel_wayland_changed();
+  xsel_wayland_changed(XSEL_CLIPBOARD);
 }
 static const struct wl_data_device_interface dd_impl = {
     .start_drag = dd_start_drag,
@@ -2526,6 +2527,10 @@ static void psoffer_receive(struct wl_client *c, struct wl_resource *r,
                             const char *mime, int32_t fd) {
   (void)c;
   struct data_source *src = wl_resource_get_user_data(r);
+  if (src && src == g_primary && src->x_origin) {
+    xsel_request(XSEL_PRIMARY, mime, fd);
+    return;
+  }
   if (src && src == g_primary)
     zwp_primary_selection_source_v1_send_send(src->res, mime, fd);
   close(fd);
@@ -2577,6 +2582,7 @@ static void pssrc_resource_destroy(struct wl_resource *r) {
   if (g_primary == s) {
     g_primary = NULL;
     primary_send_to_focus();
+    xsel_wayland_changed(XSEL_PRIMARY);
   }
   wl_array_release(&s->mimes);
   free(s);
@@ -2602,6 +2608,7 @@ static void psdev_set_selection(struct wl_client *c, struct wl_resource *r,
   (void)c; (void)r; (void)serial;
   g_primary = src ? wl_resource_get_user_data(src) : NULL;
   primary_send_to_focus();
+  xsel_wayland_changed(XSEL_PRIMARY);
 }
 static const struct zwp_primary_selection_device_v1_interface psdev_impl = {
     .set_selection = psdev_set_selection,
@@ -3464,25 +3471,47 @@ static void xwm_close(struct toplevel *tl) {
 
 
 // ---------------------------------------------------------------------------
-// Portapapeles X11 <-> Wayland (CLIPBOARD, solo texto)
+// Portapapeles X11 <-> Wayland (CLIPBOARD y PRIMARY, solo texto)
 //
 // Con Xwayland en modo -wm el puente de selecciones lo hace el gestor de
 // ventanas (como el xwm de Weston): una ventana propia (g_selwin) hace de
-// propietario/solicitante X11.
+// propietario/solicitante X11. Hay dos canales con la misma mecanica:
+//   CLIPBOARD <-> wl_data_device (g_selection)
+//   PRIMARY   <-> zwp_primary_selection_v1 (g_primary)
 //   X11 -> Wayland: XFixes avisa de un nuevo propietario; se pide TARGETS y se
 //     ofrece a los clientes Wayland una fuente "x_origin" con los mimes
 //     equivalentes; al pedir un mime (offer.receive) se hace ConvertSelection y
 //     el contenido de la propiedad se vuelca al fd del cliente.
 //   Wayland -> X11: al fijar un cliente Wayland su seleccion, g_selwin pasa a ser
-//     propietaria de CLIPBOARD; a cada SelectionRequest se pide el dato a la
+//     propietaria de la seleccion; a cada SelectionRequest se pide el dato a la
 //     fuente por un pipe y se devuelve como propiedad.
 // ---------------------------------------------------------------------------
 static xcb_window_t g_selwin;
-static xcb_atom_t A_CLIPBOARD, A_TARGETS, A_TEXT_ATOM, A_AW_PROP, A_TIMESTAMP;
+static xcb_atom_t A_TARGETS, A_TEXT_ATOM, A_TIMESTAMP;
 static uint8_t g_xfixes_base;
-static int g_we_own_clip;
-static struct data_source *g_xsrc;
 #define XSEL_MAX (1u << 20)
+
+struct xchan {
+  xcb_atom_t atom;                /* CLIPBOARD o PRIMARY */
+  xcb_atom_t prop;                /* propiedad de g_selwin donde se recibe el dato */
+  struct data_source **sel;       /* seleccion Wayland equivalente */
+  void (*to_focus)(void);         /* reenvia la seleccion Wayland al cliente enfocado */
+  struct data_source *xsrc;       /* fuente "x_origin" vigente */
+  int we_own;                     /* g_selwin es propietaria en X11 */
+  int pending_targets;
+  struct { int active; int fd; xcb_atom_t target; } xfer; /* un volcado a la vez */
+};
+static struct xchan g_xch[XSEL_NCHAN] = {
+    [XSEL_CLIPBOARD] = {.sel = &g_selection, .to_focus = selection_send_to_focus},
+    [XSEL_PRIMARY] = {.sel = &g_primary, .to_focus = primary_send_to_focus},
+};
+
+static struct xchan *xch_by_atom(xcb_atom_t a) {
+  for (int i = 0; i < XSEL_NCHAN; i++)
+    if (g_xch[i].atom && g_xch[i].atom == a)
+      return &g_xch[i];
+  return NULL;
+}
 
 static xcb_atom_t xsel_atom_for_mime(const char *mime) {
   if (!strcmp(mime, "text/plain;charset=utf-8") || !strcmp(mime, "UTF8_STRING"))
@@ -3506,29 +3535,27 @@ static int src_has_mime(const struct data_source *s, const char *m) {
 }
 
 // --- X11 -> Wayland ---------------------------------------------------------
-static struct { int active; int fd; xcb_atom_t target; } g_xfer; /* un volcado a la vez */
-static int g_pending_targets;
-
-static void xsrc_clear(void) {
-  if (g_xsrc) {
-    if (g_selection == g_xsrc)
-      g_selection = NULL;
-    wl_array_release(&g_xsrc->mimes);
-    free(g_xsrc);
-    g_xsrc = NULL;
+static void xsrc_clear(struct xchan *ch) {
+  if (ch->xsrc) {
+    if (*ch->sel == ch->xsrc)
+      *ch->sel = NULL;
+    wl_array_release(&ch->xsrc->mimes);
+    free(ch->xsrc);
+    ch->xsrc = NULL;
   }
 }
 
-static void xsel_request(const char *mime, int fd) {
+static void xsel_request(int chi, const char *mime, int fd) {
+  struct xchan *ch = &g_xch[chi];
   xcb_atom_t t = xsel_atom_for_mime(mime);
-  if (!g_xc || t == XCB_ATOM_NONE || g_xfer.active) {
+  if (!g_xc || !g_selwin || t == XCB_ATOM_NONE || ch->xfer.active) {
     close(fd);
     return;
   }
-  g_xfer.active = 1;
-  g_xfer.fd = fd;
-  g_xfer.target = t;
-  xcb_convert_selection(g_xc, g_selwin, A_CLIPBOARD, t, A_AW_PROP, XCB_CURRENT_TIME);
+  ch->xfer.active = 1;
+  ch->xfer.fd = fd;
+  ch->xfer.target = t;
+  xcb_convert_selection(g_xc, g_selwin, ch->atom, t, ch->prop, XCB_CURRENT_TIME);
   xcb_flush(g_xc);
 }
 
@@ -3549,11 +3576,14 @@ static void xsel_write_all(int fd, const uint8_t *d, size_t n) {
 }
 
 static void xsel_notify_x11(xcb_selection_notify_event_t *ev) {
-  if (ev->target == A_TARGETS && g_pending_targets) {
-    g_pending_targets = 0;
+  struct xchan *ch = xch_by_atom(ev->selection);
+  if (!ch)
+    return;
+  if (ev->target == A_TARGETS && ch->pending_targets) {
+    ch->pending_targets = 0;
     if (ev->property == XCB_ATOM_NONE)
       return;
-    xcb_get_property_cookie_t c = xcb_get_property(g_xc, 1, g_selwin, A_AW_PROP,
+    xcb_get_property_cookie_t c = xcb_get_property(g_xc, 1, g_selwin, ch->prop,
                                                    XCB_ATOM_ATOM, 0, 256);
     xcb_get_property_reply_t *r = xcb_get_property_reply(g_xc, c, NULL);
     if (!r)
@@ -3568,36 +3598,37 @@ static void xsel_notify_x11(xcb_selection_notify_event_t *ev) {
     free(r);
     if (!has_utf8 && !has_str)
       return; /* sin texto: no se ofrece (imagenes etc. no se puentean) */
-    xsrc_clear();
-    g_xsrc = calloc(1, sizeof(*g_xsrc));
-    if (!g_xsrc)
+    xsrc_clear(ch);
+    ch->xsrc = calloc(1, sizeof(*ch->xsrc));
+    if (!ch->xsrc)
       return;
-    g_xsrc->x_origin = 1;
-    wl_array_init(&g_xsrc->mimes);
+    ch->xsrc->x_origin = 1;
+    wl_array_init(&ch->xsrc->mimes);
     const char *list[2];
     int nl = 0;
     if (has_utf8) list[nl++] = "text/plain;charset=utf-8";
     if (has_str || has_utf8) list[nl++] = "text/plain";
     for (int i = 0; i < nl; i++) {
       size_t n = strlen(list[i]) + 1;
-      char *p = wl_array_add(&g_xsrc->mimes, n);
+      char *p = wl_array_add(&ch->xsrc->mimes, n);
       if (p) memcpy(p, list[i], n);
     }
-    g_selection = g_xsrc;
+    *ch->sel = ch->xsrc;
     if (g_debug)
-      fprintf(stderr, "[aurora-wayland] seleccion X11 -> Wayland (%d mimes)\n", nl);
-    selection_send_to_focus();
+      fprintf(stderr, "[aurora-wayland] seleccion X11 %s -> Wayland (%d mimes)\n",
+              ch == &g_xch[XSEL_PRIMARY] ? "PRIMARY" : "CLIPBOARD", nl);
+    ch->to_focus();
     return;
   }
-  if (!g_xfer.active || ev->target != g_xfer.target)
+  if (!ch->xfer.active || ev->target != ch->xfer.target)
     return;
-  int fd = g_xfer.fd;
-  g_xfer.active = 0;
+  int fd = ch->xfer.fd;
+  ch->xfer.active = 0;
   if (ev->property == XCB_ATOM_NONE) {
     close(fd);
     return;
   }
-  xcb_get_property_cookie_t c = xcb_get_property(g_xc, 1, g_selwin, A_AW_PROP,
+  xcb_get_property_cookie_t c = xcb_get_property(g_xc, 1, g_selwin, ch->prop,
                                                  XCB_GET_PROPERTY_TYPE_ANY, 0, XSEL_MAX / 4);
   xcb_get_property_reply_t *r = xcb_get_property_reply(g_xc, c, NULL);
   if (r && xcb_get_property_value_length(r) > 0)
@@ -3607,18 +3638,19 @@ static void xsel_notify_x11(xcb_selection_notify_event_t *ev) {
 }
 
 static void xsel_owner_changed(xcb_xfixes_selection_notify_event_t *ev) {
-  if (ev->selection != A_CLIPBOARD || ev->owner == g_selwin)
+  struct xchan *ch = xch_by_atom(ev->selection);
+  if (!ch || ev->owner == g_selwin)
     return;
-  if (ev->owner == XCB_NONE) { /* el cliente X solto el portapapeles */
-    if (g_xsrc && g_selection == g_xsrc) {
-      xsrc_clear();
-      selection_send_to_focus();
+  if (ev->owner == XCB_NONE) { /* el cliente X solto la seleccion */
+    if (ch->xsrc && *ch->sel == ch->xsrc) {
+      xsrc_clear(ch);
+      ch->to_focus();
     }
     return;
   }
-  g_we_own_clip = 0;
-  g_pending_targets = 1;
-  xcb_convert_selection(g_xc, g_selwin, A_CLIPBOARD, A_TARGETS, A_AW_PROP, XCB_CURRENT_TIME);
+  ch->we_own = 0;
+  ch->pending_targets = 1;
+  xcb_convert_selection(g_xc, g_selwin, ch->atom, A_TARGETS, ch->prop, XCB_CURRENT_TIME);
   xcb_flush(g_xc);
 }
 
@@ -3703,8 +3735,9 @@ static int xreq_timeout(void *data) {
 static void xsel_selection_request(xcb_selection_request_event_t *e) {
   struct xreq base = {.requestor = e->requestor, .selection = e->selection, .target = e->target,
                       .property = e->property ? e->property : e->target, .time = e->time, .fd = -1};
-  struct data_source *s = g_selection;
-  if (e->selection != A_CLIPBOARD || !s || s->x_origin || !s->res) {
+  struct xchan *ch = xch_by_atom(e->selection);
+  struct data_source *s = ch ? *ch->sel : NULL;
+  if (!ch || !s || s->x_origin || !s->res) {
     xsel_send_notify(&base, XCB_ATOM_NONE);
     return;
   }
@@ -3743,7 +3776,10 @@ static void xsel_selection_request(xcb_selection_request_event_t *e) {
   *q = base;
   q->fd = pfd[0];
   fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL) | O_NONBLOCK);
-  wl_data_source_send_send(s->res, mime, pfd[1]);
+  if (ch == &g_xch[XSEL_PRIMARY])
+    zwp_primary_selection_source_v1_send_send(s->res, mime, pfd[1]);
+  else
+    wl_data_source_send_send(s->res, mime, pfd[1]);
   wl_client_flush(wl_resource_get_client(s->res));
   close(pfd[1]);
   q->src = wl_event_loop_add_fd(g_loop, q->fd, WL_EVENT_READABLE, xreq_read, q);
@@ -3751,26 +3787,30 @@ static void xsel_selection_request(xcb_selection_request_event_t *e) {
   wl_event_source_timer_update(q->timer, 3000);
 }
 
-// g_selection cambio por una accion de un cliente Wayland (o se vacio).
-static void xsel_wayland_changed(void) {
+// La seleccion Wayland del canal cambio por una accion de un cliente Wayland
+// (o se vacio).
+static void xsel_wayland_changed(int chi) {
+  struct xchan *ch = &g_xch[chi];
   if (!g_xc || !g_selwin)
     return;
-  if (g_selection && !g_selection->x_origin) {
-    xcb_set_selection_owner(g_xc, g_selwin, A_CLIPBOARD, XCB_CURRENT_TIME);
-    g_we_own_clip = 1;
+  if (*ch->sel && !(*ch->sel)->x_origin) {
+    xcb_set_selection_owner(g_xc, g_selwin, ch->atom, XCB_CURRENT_TIME);
+    ch->we_own = 1;
     xcb_flush(g_xc);
-  } else if (!g_selection && g_we_own_clip) {
-    xcb_set_selection_owner(g_xc, XCB_NONE, A_CLIPBOARD, XCB_CURRENT_TIME);
-    g_we_own_clip = 0;
+  } else if (!*ch->sel && ch->we_own) {
+    xcb_set_selection_owner(g_xc, XCB_NONE, ch->atom, XCB_CURRENT_TIME);
+    ch->we_own = 0;
     xcb_flush(g_xc);
   }
 }
 
 static void xsel_init(void) {
-  A_CLIPBOARD = xatom("CLIPBOARD");
+  g_xch[XSEL_CLIPBOARD].atom = xatom("CLIPBOARD");
+  g_xch[XSEL_CLIPBOARD].prop = xatom("_AURORA_SELECTION");
+  g_xch[XSEL_PRIMARY].atom = XCB_ATOM_PRIMARY;
+  g_xch[XSEL_PRIMARY].prop = xatom("_AURORA_PRIMARY");
   A_TARGETS = xatom("TARGETS");
   A_TEXT_ATOM = xatom("TEXT");
-  A_AW_PROP = xatom("_AURORA_SELECTION");
   A_TIMESTAMP = xatom("TIMESTAMP");
   g_selwin = xcb_generate_id(g_xc);
   uint32_t em = XCB_EVENT_MASK_PROPERTY_CHANGE;
@@ -3781,10 +3821,11 @@ static void xsel_init(void) {
   const xcb_query_extension_reply_t *ext = xcb_get_extension_data(g_xc, &xcb_xfixes_id);
   if (qv && ext && ext->present) {
     g_xfixes_base = ext->first_event;
-    xcb_xfixes_select_selection_input(g_xc, g_selwin, A_CLIPBOARD,
-                                      XCB_XFIXES_SELECTION_EVENT_MASK_SET_SELECTION_OWNER |
-                                          XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_WINDOW_DESTROY |
-                                          XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_CLIENT_CLOSE);
+    for (int i = 0; i < XSEL_NCHAN; i++)
+      xcb_xfixes_select_selection_input(g_xc, g_selwin, g_xch[i].atom,
+                                        XCB_XFIXES_SELECTION_EVENT_MASK_SET_SELECTION_OWNER |
+                                            XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_WINDOW_DESTROY |
+                                            XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_CLIENT_CLOSE);
   } else {
     fprintf(stderr, "[aurora-wayland] xwm: sin XFixes, portapapeles X11 desactivado\n");
     g_selwin = 0;
@@ -3792,11 +3833,15 @@ static void xsel_init(void) {
   free(qv);
 }
 
+
 static void xwm_stop(void) {
   g_selwin = 0;
-  g_we_own_clip = 0;
-  g_xfer.active = 0;
-  xsrc_clear();
+  for (int i = 0; i < XSEL_NCHAN; i++) {
+    g_xch[i].we_own = 0;
+    g_xch[i].pending_targets = 0;
+    g_xch[i].xfer.active = 0;
+    xsrc_clear(&g_xch[i]);
+  }
   if (g_xwm_src) {
     wl_event_source_remove(g_xwm_src);
     g_xwm_src = NULL;
@@ -4378,7 +4423,10 @@ static void desktop_exec_clean(char *dst, size_t n, const char *exec) {
 }
 
 static void desktop_launchers_load(void) {
-  DIR *d = opendir(APPS_DIR);
+  const char *apps_dir = getenv("AW_APPS_DIR"); /* para pruebas */
+  if (!apps_dir || !apps_dir[0])
+    apps_dir = APPS_DIR;
+  DIR *d = opendir(apps_dir);
   if (!d)
     return;
   struct dirent *e;
@@ -4387,7 +4435,7 @@ static void desktop_launchers_load(void) {
     if (nl < 9 || strcmp(e->d_name + nl - 8, ".desktop") != 0)
       continue;
     char path[320];
-    snprintf(path, sizeof(path), APPS_DIR "/%s", e->d_name);
+    snprintf(path, sizeof(path), "%s/%s", apps_dir, e->d_name);
     FILE *f = fopen(path, "r");
     if (!f)
       continue;

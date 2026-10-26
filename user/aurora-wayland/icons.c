@@ -206,6 +206,75 @@ static int find_icon(const char *name, char *out, size_t n) {
   return 0;
 }
 
+// Iconos simbolicos (respaldo): apps que solo traen NOMBRE-symbolic. Se buscan
+// en <tema>/symbolic/apps, <tema>/scalable/apps y los .symbolic.png de GTK.
+static int find_symbolic(const char *name, char *out, size_t n) {
+  if (!name || !name[0] || name[0] == '/' || ends_with(name, ".png") || ends_with(name, ".svg") ||
+      ends_with(name, "-symbolic"))
+    return 0;
+  static const char *const themes[] = {"Aurora", "hicolor", "Adwaita"};
+  static const char *const sizes[] = {"64x64", "48x48", "32x32", "24x24", "22x22"};
+  char p[320];
+  for (unsigned t = 0; t < 3; t++) {
+    snprintf(p, sizeof(p), "/usr/share/icons/%s/symbolic/apps/%s-symbolic.svg", themes[t], name);
+    if (file_exists(p)) { snprintf(out, n, "%s", p); return 1; }
+    snprintf(p, sizeof(p), "/usr/share/icons/%s/scalable/apps/%s-symbolic.svg", themes[t], name);
+    if (file_exists(p)) { snprintf(out, n, "%s", p); return 1; }
+  }
+  for (unsigned t = 0; t < 3; t++)
+    for (unsigned s = 0; s < 5; s++) {
+      snprintf(p, sizeof(p), "/usr/share/icons/%s/%s/apps/%s-symbolic.symbolic.png", themes[t],
+               sizes[s], name);
+      if (file_exists(p)) { snprintf(out, n, "%s", p); return 1; }
+    }
+  return 0;
+}
+
+// Un simbolico es una silueta monocroma (gris oscuro, pensada para fondos claros)
+// y casi invisible sobre el Dock. Se recolorea a un blanco azulado conservando el
+// alfa y se coloca sobre una baldosa redondeada oscura. `px` es BGRA recto w x h.
+#define TILE 128
+static uint8_t *symbolic_tile(const uint8_t *px, int w, int h) {
+  uint8_t *out = calloc(1, (size_t)TILE * TILE * 4);
+  if (!out)
+    return NULL;
+  const int R = 28;                         // radio de las esquinas
+  const int GLYPH = 76, OFF = (TILE - GLYPH) / 2;
+  for (int y = 0; y < TILE; y++)
+    for (int x = 0; x < TILE; x++) {
+      // cobertura de la baldosa (esquinas redondeadas, borde sin antialias fino)
+      int cx = x < R ? R - x : (x >= TILE - R ? x - (TILE - R - 1) : 0);
+      int cy = y < R ? R - y : (y >= TILE - R ? y - (TILE - R - 1) : 0);
+      if (cx * cx + cy * cy > R * R)
+        continue;
+      uint8_t *o = out + ((size_t)y * TILE + x) * 4;
+      // fondo: degradado vertical suave
+      int g = 0x4C - (y * 0x14) / TILE;
+      float br = (float)(g - 4), bg = (float)g, bb = (float)(g + 8);
+      // silueta: muestreo por caja del glifo reducido
+      int gx = x - OFF, gy = y - OFF;
+      float a = 0;
+      if (gx >= 0 && gy >= 0 && gx < GLYPH && gy < GLYPH) {
+        int x0 = gx * w / GLYPH, x1 = (gx + 1) * w / GLYPH, y0 = gy * h / GLYPH, y1 = (gy + 1) * h / GLYPH;
+        if (x1 <= x0) x1 = x0 + 1;
+        if (y1 <= y0) y1 = y0 + 1;
+        int cnt = 0;
+        long sum = 0;
+        for (int yy = y0; yy < y1 && yy < h; yy++)
+          for (int xx = x0; xx < x1 && xx < w; xx++) {
+            sum += px[((size_t)yy * w + xx) * 4 + 3];
+            cnt++;
+          }
+        a = cnt ? (float)sum / (cnt * 255.0f) : 0;
+      }
+      o[0] = (uint8_t)(bb + (0xF4 - bb) * a);
+      o[1] = (uint8_t)(bg + (0xEE - bg) * a);
+      o[2] = (uint8_t)(br + (0xE8 - br) * a);
+      o[3] = 255;
+    }
+  return out;
+}
+
 static void cache_path(const char *key, char *out, size_t n) {
   char k[64];
   size_t i = 0;
@@ -233,6 +302,24 @@ int aw_icon_for(const char *key, const char *const *names, int nnames, char *out
       continue;
     int rc = write_bmp(out, px, w, h);
     free(px);
+    if (rc == 0)
+      return 1;
+  }
+  // Respaldo (D8): sin icono normal, el simbolico recoloreado sobre una baldosa.
+  for (int i = 0; i < nnames; i++) {
+    char src[320];
+    if (!find_symbolic(names[i], src, sizeof(src)))
+      continue;
+    int w = 0, h = 0;
+    uint8_t *px = ends_with(src, ".svg") ? load_svg(src, &w, &h) : load_png(src, &w, &h);
+    if (!px)
+      continue;
+    uint8_t *tile = symbolic_tile(px, w, h);
+    free(px);
+    if (!tile)
+      continue;
+    int rc = write_bmp(out, tile, TILE, TILE);
+    free(tile);
     if (rc == 0)
       return 1;
   }
