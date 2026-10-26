@@ -157,6 +157,20 @@ void bus_del_driver(struct driver *drv) {
     pp = &(*pp)->next_on_bus;
   }
   spin_unlock_irqrestore(&bus->lock, flags);
+
+  // Desvincular los devices que reclamó: si no, quedarían apuntando a un
+  // driver que puede estar a punto de descargarse (un .kur). Sin bus lock,
+  // como device_unregister: remove puede dormir.
+  for (struct device *dev = bus->devices; dev; dev = dev->next) {
+    if (dev->driver != drv)
+      continue;
+    if (bus->remove)
+      bus->remove(dev);
+    dev->driver = NULL;
+    dev->matched_id = NULL;
+    LOG_INFO("[BUS] %s: '%s' liberado por '%s'", bus->name, dev->name,
+             drv->name);
+  }
 }
 
 void drivers_probe_all(void) {

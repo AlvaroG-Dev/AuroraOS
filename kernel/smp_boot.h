@@ -52,5 +52,8 @@ extern volatile int smp_sched_active;
 // correctamente). Antes de smp_boot_aps(), devuelve 1. Después, es
 // estable hasta el final del boot. Clampeado a [1, MAX_CPUS].
 int smp_online_cpus(void);
+// ID de LAPIC de la CPU lógica `cpu` (0..smp_online_cpus()-1); -1 si no
+// existe. Para dirigir MSI/MSI-X o el IOAPIC a una CPU concreta.
+int smp_cpu_lapic_id(int cpu);
 
 #endif

@@ -25,6 +25,7 @@ struct irq_action {
       *thread;     // creado por irq_request_threaded, NULL si no hay thread_fn
   wait_queue_t wq; // el kthread duerme aquí
   volatile int pending; // 1 = hay trabajo pendiente
+  volatile int active;  // dispatchers dentro del ack ahora mismo (irq_free)
 };
 
 static struct irq_action g_actions[IRQ_THREADED_MAX];
@@ -105,11 +106,16 @@ irqreturn_t irq_threaded_dispatch(int irq) {
     return IRQ_NONE;
 
   struct irq_action *a = &g_actions[irq];
-  irq_handler_fn ack = __atomic_load_n(&a->ack, __ATOMIC_ACQUIRE);
-  irq_handler_fn tfn = __atomic_load_n(&a->thread_fn, __ATOMIC_ACQUIRE);
+  // `active` se publica ANTES de leer los punteros (seq_cst en los dos
+  // lados): o irq_free ve active > 0 y espera, o aquí se ve ack == NULL.
+  __atomic_fetch_add(&a->active, 1, __ATOMIC_SEQ_CST);
+  irq_handler_fn ack = __atomic_load_n(&a->ack, __ATOMIC_SEQ_CST);
+  irq_handler_fn tfn = __atomic_load_n(&a->thread_fn, __ATOMIC_SEQ_CST);
 
-  if (!ack && !tfn)
+  if (!ack && !tfn) {
+    __atomic_fetch_sub(&a->active, 1, __ATOMIC_RELEASE);
     return IRQ_NONE;
+  }
 
   irqreturn_t ret = IRQ_HANDLED;
 
@@ -125,6 +131,7 @@ irqreturn_t irq_threaded_dispatch(int irq) {
     wake_up_one(&a->wq);
   }
 
+  __atomic_fetch_sub(&a->active, 1, __ATOMIC_RELEASE);
   return ret;
 }
 
@@ -239,14 +246,21 @@ void irq_free(unsigned int irq) {
   // mientras esperamos al kthread, dispatch ve ack=NULL y retorna
   // IRQ_NONE, no entra en el handler del driver que puede estar en
   // proceso de desmontaje.
-  __atomic_store_n(&a->ack, (irq_handler_fn)NULL, __ATOMIC_RELEASE);
-  __atomic_store_n(&a->thread_fn, (irq_handler_fn)NULL, __ATOMIC_RELEASE);
-  __atomic_store_n(&a->dev_id, (void *)NULL, __ATOMIC_RELEASE);
+  __atomic_store_n(&a->ack, (irq_handler_fn)NULL, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&a->thread_fn, (irq_handler_fn)NULL, __ATOMIC_SEQ_CST);
   a->thread = NULL;
   a->name = NULL;
   __atomic_store_n(&a->pending, 0, __ATOMIC_RELEASE);
 
   spin_unlock_irqrestore(&g_lock, flags);
+
+  // Esperar a que salga un ack que ya estuviera corriendo en otra CPU: al
+  // volver, el llamante puede liberar dev_id o descargar el .kur del handler.
+  // (Llamarla desde el propio handler se interbloquea, como free_irq en
+  // Linux.)
+  while (__atomic_load_n(&a->active, __ATOMIC_ACQUIRE) != 0)
+    __asm__ volatile("pause");
+  __atomic_store_n(&a->dev_id, (void *)NULL, __ATOMIC_RELEASE);
 
   if (kt) {
     kthread_stop(kt);
@@ -274,6 +288,7 @@ int irq_threaded_init(void) {
     g_actions[i].name = NULL;
     g_actions[i].thread = NULL;
     g_actions[i].pending = 0;
+    g_actions[i].active = 0;
     wait_queue_init(&g_actions[i].wq);
   }
 
@@ -290,4 +305,4 @@ void irq_threaded_simulate_for_test(unsigned int irq) {
   if (!irq_is_valid(irq))
     return;
   (void)irq_threaded_dispatch(irq);
-}
+}

@@ -421,6 +421,12 @@ void smp_boot_aps(void) {
 // las que están disabled en el MADT. aps_ready solo cuenta las que
 // efectivamente llegaron a ap_entry() y se publicaron en el scheduler.
 // ---------------------------------------------------------------------------
+int smp_cpu_lapic_id(int cpu) {
+  if (cpu < 0 || cpu >= smp_online_cpus())
+    return -1;
+  return cpu_local_data[cpu].lapic_id;
+}
+
 int smp_online_cpus(void) {
   int n = smp_aps_ready() + 1; // +1 por el BSP
   if (n < 1)

@@ -351,6 +351,33 @@ uint64_t pmm_alloc_pages(uint64_t count) {
   return 0;
 }
 
+uint64_t pmm_alloc_pages_below(uint64_t count, uint64_t limit) {
+  if (count == 0 || !bitmap || max_blocks == 0)
+    return 0;
+  uint64_t align = 1;
+  while (align < count)
+    align <<= 1;
+  uint64_t end = limit / PAGE_SIZE;
+  if (end > max_blocks)
+    end = max_blocks;
+
+  unsigned long flags = spin_lock_irqsave(&pmm_lock);
+  for (uint64_t first = align; first + count <= end; first += align) {
+    uint64_t b = 0;
+    while (b < count && !bitmap_test_safe(bitmap, first + b))
+      b++;
+    if (b < count)
+      continue;
+    for (b = 0; b < count; b++)
+      bitmap_set_safe(bitmap, first + b);
+    used_blocks += count;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return first * PAGE_SIZE;
+  }
+  spin_unlock_irqrestore(&pmm_lock, flags);
+  return 0;
+}
+
 void pmm_free_page(uint64_t phys_addr) {
   if (phys_addr == 0 || !bitmap)
     return;

@@ -17,6 +17,13 @@ void pmm_free_page(uint64_t phys_addr);
 uint64_t pmm_alloc_pages(uint64_t count);
 void pmm_free_pages(uint64_t phys_addr, uint64_t count);
 
+// Como pmm_alloc_pages, pero todo el bloque queda por debajo de `limit`
+// (exclusivo): para DMA con máscara de direcciones (dispositivos de 32 bits o
+// menos). Busca desde la dirección más baja, alineado a la potencia de dos
+// que cubre `count` (igual que el buddy). Se libera con pmm_free_pages.
+// 0 si no hay hueco.
+uint64_t pmm_alloc_pages_below(uint64_t count, uint64_t limit);
+
 // Reservar un rango físico [start, end) como USADO. Ignora páginas ya
 // reservadas. `end` es exclusivo. Requiere que el bitmap esté ya
 // relocalizado (tras pmm_relocate_bitmap).

@@ -66,10 +66,12 @@ void device_unregister(struct device *dev);
 
 // Añade un driver al bus y prueba contra los devices ya registrados.
 int bus_add_driver(struct driver *drv);
+// Quita el driver del bus y desvincula (llamando a bus->remove) los devices
+// que tuviera reclamados.
 void bus_del_driver(struct driver *drv);
 
 // Barrido global: todos los buses, devices no reclamados contra todos
 // los drivers. Idempotente. Útil tras cargar .kur en Fase 3.3.
 void drivers_probe_all(void);
 
-#endif
+#endif
