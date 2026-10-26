@@ -1,0 +1,142 @@
+/* GTK4 / libadwaita en Aurora: paleta, radios y acento de kernel/gfx/theme.h
+ * (macOS Tahoe oscuro). Lo usan el tema "Aurora" (apps GTK4 puras) y el
+ * gtk.css de usuario (apps libadwaita, que ignoran GTK_THEME). La barra de
+ * titulo y los semaforos los dibuja Aurora. */
+
+/* ---- Colores con nombre de libadwaita ---- */
+@define-color accent_color #409CFF;
+@define-color accent_bg_color #0A84FF;
+@define-color accent_fg_color #FFFFFF;
+@define-color destructive_color #FF7A73;
+@define-color destructive_bg_color #FF5F57;
+@define-color destructive_fg_color #FFFFFF;
+@define-color success_color #28C840;
+@define-color success_bg_color #28C840;
+@define-color success_fg_color #0A0A0A;
+@define-color warning_color #FEBC2E;
+@define-color warning_bg_color #FEBC2E;
+@define-color warning_fg_color #0A0A0A;
+@define-color error_color #FF7A73;
+@define-color error_bg_color #FF5F57;
+@define-color error_fg_color #FFFFFF;
+@define-color window_bg_color #1E1E1E;
+@define-color window_fg_color #FFFFFF;
+@define-color view_bg_color #1A1A1A;
+@define-color view_fg_color #FFFFFF;
+@define-color headerbar_bg_color #262628;
+@define-color headerbar_fg_color #FFFFFF;
+@define-color headerbar_border_color rgba(0, 0, 0, 0.40);
+@define-color headerbar_backdrop_color #212123;
+@define-color headerbar_shade_color rgba(0, 0, 0, 0.40);
+@define-color card_bg_color rgba(255, 255, 255, 0.06);
+@define-color card_fg_color #FFFFFF;
+@define-color card_shade_color rgba(0, 0, 0, 0.36);
+@define-color dialog_bg_color #1E1E1E;
+@define-color dialog_fg_color #FFFFFF;
+@define-color popover_bg_color #2A2A2C;
+@define-color popover_fg_color #FFFFFF;
+@define-color popover_shade_color rgba(0, 0, 0, 0.25);
+@define-color sidebar_bg_color #242424;
+@define-color sidebar_fg_color #FFFFFF;
+@define-color sidebar_backdrop_color #202020;
+@define-color sidebar_shade_color rgba(0, 0, 0, 0.36);
+@define-color secondary_sidebar_bg_color #202020;
+@define-color secondary_sidebar_fg_color #FFFFFF;
+@define-color thumbnail_bg_color #2E2E2E;
+@define-color thumbnail_fg_color #FFFFFF;
+@define-color shade_color rgba(0, 0, 0, 0.36);
+@define-color scrollbar_outline_color rgba(0, 0, 0, 0.5);
+
+* { font-family: "Inter", "DejaVu Sans", sans-serif; }
+
+/* ---- Sin botones de ventana ni decoracion CSD ---- */
+windowcontrols { min-width: 0; min-height: 0; margin: 0; padding: 0; opacity: 0; }
+window.csd, window.csd decoration { box-shadow: none; margin: 0; border-radius: 0; }
+headerbar { border-radius: 0; box-shadow: none; background-image: none; }
+
+/* ---- Botones ---- */
+button {
+  background-image: linear-gradient(to bottom, #48484A, #3A3A3C);
+  color: #FFFFFF;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  padding: 3px 12px;
+  min-height: 22px;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.14);
+}
+button:hover { background-image: linear-gradient(to bottom, #545456, #444446); }
+button:active, button:checked {
+  background-image: linear-gradient(to bottom, #303032, #3A3A3C);
+  box-shadow: none;
+}
+button:disabled { background-image: none; background-color: #262628; color: rgba(255, 255, 255, 0.35); box-shadow: none; }
+button.flat, headerbar button, toolbar button {
+  background-image: none; background-color: transparent;
+  border-color: transparent; box-shadow: none;
+}
+button.flat:hover, headerbar button:hover, toolbar button:hover { background-color: rgba(255, 255, 255, 0.10); }
+button.flat:active, button.flat:checked, headerbar button:active, headerbar button:checked { background-color: rgba(255, 255, 255, 0.18); }
+button.suggested-action {
+  background-image: linear-gradient(to bottom, #409CFF, #0A84FF);
+  border-color: rgba(0, 0, 0, 0.25); color: #FFFFFF;
+}
+button.suggested-action:active { background-image: linear-gradient(to bottom, #0A6FDB, #0A5CB8); }
+button.destructive-action {
+  background-image: linear-gradient(to bottom, #FF7A73, #FF5F57);
+  border-color: rgba(0, 0, 0, 0.25); color: #FFFFFF;
+}
+button.circular { border-radius: 9999px; padding: 3px; }
+
+/* ---- Campos ---- */
+entry, spinbutton, textview > text {
+  background-color: #1A1A1A; color: #FFFFFF;
+  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 6px;
+  box-shadow: none; min-height: 22px; caret-color: #0A84FF;
+}
+entry:focus-within, spinbutton:focus-within {
+  border-color: #0A84FF; box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.40);
+}
+text selection, label selection { background-color: rgba(10, 132, 255, 0.55); color: #FFFFFF; }
+
+/* ---- Casillas, radios, interruptores ---- */
+checkbutton check, radiobutton radio {
+  background-image: none; background-color: #3A3A3C;
+  border: 1px solid rgba(255, 255, 255, 0.25); box-shadow: none;
+  min-width: 16px; min-height: 16px; color: #FFFFFF;
+}
+checkbutton check { border-radius: 4px; }
+radiobutton radio { border-radius: 9999px; }
+checkbutton check:checked, checkbutton check:indeterminate,
+radiobutton radio:checked, radiobutton radio:indeterminate {
+  background-color: #0A84FF; border-color: rgba(0, 0, 0, 0.25);
+}
+switch {
+  background-color: #3A3A3C; border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 9999px; min-height: 22px; color: transparent; box-shadow: none;
+}
+switch:checked { background-color: #0A84FF; }
+switch slider {
+  background-image: none; background-color: #FFFFFF; border: none;
+  border-radius: 9999px; min-width: 18px; min-height: 18px; margin: 1px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* ---- Scroll, escalas, progreso ---- */
+scrollbar slider { background-color: rgba(255, 255, 255, 0.35); border-radius: 9999px; min-width: 6px; min-height: 6px; }
+scrollbar slider:hover { background-color: rgba(255, 255, 255, 0.55); }
+scale trough, progressbar trough { background-color: #3A3A3C; border: none; border-radius: 9999px; min-height: 4px; min-width: 4px; }
+scale highlight, progressbar progress { background-image: none; background-color: #0A84FF; border: none; border-radius: 9999px; }
+scale slider { background-image: none; background-color: #FFFFFF; border: 1px solid rgba(0, 0, 0, 0.30); border-radius: 9999px; min-width: 16px; min-height: 16px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+
+/* ---- Pestanas, listas, menus ---- */
+notebook > header { background-color: #262628; border-color: rgba(0, 0, 0, 0.40); }
+notebook > header > tabs > tab { background: transparent; border: none; border-radius: 6px; margin: 3px 2px; padding: 3px 12px; color: rgba(255, 255, 255, 0.80); }
+notebook > header > tabs > tab:checked { background-color: rgba(255, 255, 255, 0.16); color: #FFFFFF; }
+row:selected, listview > row:selected, list > row:selected { background-color: #0A84FF; color: #FFFFFF; }
+popover > contents, popover.menu > contents {
+  background-color: #2A2A2C; border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+modelbutton { border-radius: 5px; margin: 0 4px; padding: 4px 10px; }
+modelbutton:hover { background-color: #0A84FF; color: #FFFFFF; }
+tooltip, tooltip.background { background-color: #2E2E2E; color: #FFFFFF; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.14); }

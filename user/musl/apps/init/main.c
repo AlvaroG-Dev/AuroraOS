@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -145,7 +146,20 @@ static void run_boot_tests(void) {
   fclose(f);
 }
 
+// libadwaita ignora GTK_THEME y solo lee $XDG_CONFIG_HOME/gtk-4.0/gtk.css (que
+// vive en tmpfs): se enlaza el gtk.css de Aurora para que las apps GTK4 se vean
+// con su paleta.
+static void setup_gtk4_config(void) {
+  mkdir("/tmp/.config", 0755);
+  mkdir("/tmp/.config/gtk-4.0", 0755);
+  if (symlink("/usr/share/aurora/xdg/gtk-4.0/gtk.css",
+              "/tmp/.config/gtk-4.0/gtk.css") < 0 &&
+      errno != EEXIST)
+    perror("init: gtk-4.0/gtk.css");
+}
+
 int main(void) {
+  setup_gtk4_config();
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
   int testing = access("/system/boot-tests", F_OK) == 0;
   run_boot_tests();

@@ -44,7 +44,7 @@
 
 /* ---- Tipografia ---- */
 * {
-  font-family: "DejaVu Sans", sans-serif;
+  font-family: "Inter", "DejaVu Sans", sans-serif;
   -gtk-icon-style: symbolic;
 }
 window, .background {
@@ -94,28 +94,30 @@ separator { background-color: @aurora_line; min-width: 1px; min-height: 1px; }
 
 /* ---- Botones ---- */
 button {
-  background-image: none;
+  background-image: linear-gradient(to bottom, #48484A, #3A3A3C);
   background-color: @aurora_raised;
   color: @aurora_text;
-  border: 1px solid rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(0, 0, 0, 0.35);
   border-radius: 6px;
   padding: 3px 12px;
   min-height: 22px;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.14);
   text-shadow: none;
   transition: background-color 120ms ease;
 }
-button:hover { background-color: @aurora_raised_hover; }
+button:hover { background-image: linear-gradient(to bottom, #545456, #444446); }
 button:active, button:checked {
-  background-color: #454545;
+  background-image: linear-gradient(to bottom, #303032, #3A3A3C);
   box-shadow: none;
 }
 button:disabled {
+  background-image: none;
   background-color: #242424;
   color: @insensitive_fg_color;
   box-shadow: none;
 }
 button.flat, toolbar button, headerbar button {
+  background-image: none;
   background-color: transparent;
   border-color: transparent;
   box-shadow: none;
@@ -129,14 +131,15 @@ headerbar button:active, headerbar button:checked {
   background-color: rgba(255, 255, 255, 0.18);
 }
 button.suggested-action, button.default {
+  background-image: linear-gradient(to bottom, #409CFF, #0A84FF);
   background-color: @aurora_accent;
   border-color: rgba(0, 0, 0, 0.25);
   color: #FFFFFF;
 }
 button.suggested-action:hover, button.default:hover {
-  background-color: @aurora_accent_hover;
+  background-image: linear-gradient(to bottom, #5AAAFF, #1A8FFF);
 }
-button.suggested-action:active { background-color: #0A6FDB; }
+button.suggested-action:active { background-image: linear-gradient(to bottom, #0A6FDB, #0A5CB8); }
 button.destructive-action {
   background-color: #FF5F57;
   border-color: rgba(0, 0, 0, 0.25);
