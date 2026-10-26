@@ -131,7 +131,7 @@ Detalle de cada una:
 - **Hecho**: texto, `CLIPBOARD`. **Falta**: `INCR` (más de ~256 KB por la conexión X), imágenes (`image/png`), `PRIMARY`↔selección primaria de Wayland, `text/uri-list`.
 - **Opciones**: (a) quedarse en texto; (b) añadir `PRIMARY` (barato); (c) `INCR` + imágenes (medio).
 - **Recomendación**: (b) ya; (c) cuando haya una app que lo necesite.
-- **Decisión (26-oct-2026): ACEPTADA, pendiente de implementar** — opción (b): añadir `PRIMARY` ↔ selección primaria de Wayland al puente del `xwm`. Imágenes e `INCR` quedan fuera hasta que una app los necesite. **Estado: HECHO.** `aurora-wayland` puentea ahora dos canales (`CLIPBOARD` y `PRIMARY`) con el mismo código (`struct xchan`); `PRIMARY` ↔ `zwp_primary_selection_v1`. Probado en ambas direcciones y sin mezclarse con `CLIPBOARD` (`tests/wayland/guest/primary-icons.sh`).
+- **Decisión (26-oct-2026): ACEPTADA, pendiente de implementar** — opción (b): añadir `PRIMARY` ↔ selección primaria de Wayland al puente del `xwm`. Imágenes e `INCR` quedan fuera hasta que una app los necesite. **Estado: HECHO.** `aurora-wayland` puentea ahora dos canales (`CLIPBOARD` y `PRIMARY`) con el mismo código (`struct xchan`); `PRIMARY` ↔ `zwp_primary_selection_v1`. Probado en ambas direcciones y sin mezclarse con `CLIPBOARD` (`tests/wayland/guest/primary-icons.sh`, 7/7 ejecuciones); `clipboard-x11.sh` sigue pasando tras el refactor.
 
 ### D4 — Aceleración 3D: `virtio-gpu` virgl/venus
 - **Contexto**: es la única aceleración que se puede probar en QEMU, pero **este entorno no trae `virtio-gpu-gl`**, así que no se podría validar aquí. Implica ampliar `virtio_gpu.aur` (contextos, `SUBMIT_3D`, fences, blobs) y ioctls `DRM_IOCTL_VIRTGPU_*`.
@@ -188,6 +188,7 @@ Detalle de cada una:
 - **Contexto**: el bloqueo ocasional del shell en TCG sigue sin causa; no se ha medido rendimiento con KVM (en TCG `gtk3-widget-factory` tarda 2–3 min en pintar).
 - **Recomendación**: medir con KVM en una máquina con virtualización antes de optimizar; investigar la intermitencia con un trazado del scheduler cuando se reproduzca.
 - **Decisión**: ABIERTA.
+- **Dato nuevo (26-oct-2026):** 6 ejecuciones seguidas de `primary-icons.sh` en TCG, una a una, sin ningún cuelgue. El único cuelgue de esa sesión coincidió con **dos QEMU a la vez** (comparten `/tmp/boot-test.log` y `OVMF_VARS.fd`), así que probablemente fue un artefacto de pruebas solapadas; ejecutar siempre una sola instancia. No descarta la intermitencia antigua (~5/45).
 
 ## 7. Resumen de prioridades sugeridas
 
