@@ -3604,10 +3604,10 @@ static void xwm_spawn(void) {
     unsetenv("DISPLAY");
     if (getenv("AW_XSTRACE")) /* depuracion: traza de syscalls de Xwayland */
       execl("/usr/bin/strace", "strace", "-D", "-f", "-o", getenv("AW_XSTRACE"),
-            "/usr/bin/Xwayland", disp, "-rootless", "-shm", "-noreset",
+            "/usr/bin/Xwayland", disp, "-rootless", "-shm", "-noreset", "-nolock",
             "-wm", wmfd, (char *)NULL);
     execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
-          "-wm", wmfd, (char *)NULL);
+          "-nolock", "-wm", wmfd, (char *)NULL);
     _exit(127);
   }
   close(sv[1]);
