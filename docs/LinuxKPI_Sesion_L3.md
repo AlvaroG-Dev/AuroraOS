@@ -95,12 +95,12 @@ Todo en QEMU 8.2.2 TCG, `-m 6G`, un solo QEMU cada vez, con `edu` y `virtio-rng-
 | Prueba | Al empezar (sin cambios) | Al terminar |
 |---|---|---|
 | Suite del kernel (`-smp 2`) | 192/192 (16 omitidas) | **198/198** (16 omitidas; +3 de Aurora, +K4, +K5, +K5 SMP) |
-| Suite del kernel (`-smp 4`) | 192/192 | **198/198** (en curso: 2 de 2 hasta ahora) |
-| `drm_test`, `sig_test`, `rseq_test` | ALL PASS | en curso |
-| `clipboard-x11.sh` | pasa | en curso |
-| `primary-icons.sh` | pasa | en curso |
+| Suite del kernel (`-smp 4`) | 192/192 | **198/198** en 3 de 3 arranques |
+| `drm_test`, `sig_test`, `rseq_test` | ALL PASS | ALL PASS |
+| `clipboard-x11.sh` | pasa | pasa (el `bash` termina; no se reprodujo el cuelgue) |
+| `primary-icons.sh` | pasa | pasa (1 de 1; no se reprodujo el cuelgue de `wl-copy`) |
 
-Estrés con 4 CPU (una ejecución): ver la salida de `kt_edu estres` (en curso).
+Estrés con 4 CPU (una ejecución): 68 738 disparos de MSI desde 8 hilos, 4 320 atendidas (los disparos se acumulan en el registro de estado de edu), en las 4 CPU, 0 handlers dentro de una ventana deshabilitada; la MSI-X de virtio-rng llegó a la CPU pedida en 12 de 12 rondas.
 
 Historia: el primer arranque con la capa nueva ya hizo probe de `edu` y `virtio-rng`, y pasaron INTx, MSI, MSI-X, DMA y el estrés SMP; solo fallaban K4/K5 por §3.1 y §3.2 (9 fallos, todos de lectura de atributos). Con eso corregido, 198/198.
 
