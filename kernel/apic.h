@@ -107,4 +107,9 @@ void ioapic_mask_only_irq(uint8_t irq);
 void ioapic_redirect_irq_ex(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
                             int masked, int level_triggered, int active_low);
 
+// INTx de PCI: con los flags del ISO de la MADT si la línea lo tiene (el
+// firmware sabe la polaridad real); si no, nivel y activa a nivel bajo.
+void ioapic_route_pci_intx(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
+                           int masked);
+
 #endif

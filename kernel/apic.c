@@ -386,6 +386,21 @@ void ioapic_unmask_irq(uint8_t irq) { ioapic_mask_irq(irq, 0); }
 
 void ioapic_mask_only_irq(uint8_t irq) { ioapic_mask_irq(irq, 1); }
 
+// Enruta la INTx de un dispositivo PCI. Si la MADT trae un ISO para la línea
+// se respeta (QEMU pc declara 5/9/10/11 nivel y activas a nivel ALTO); si no,
+// nivel y activa a nivel bajo, como dice la especificación PCI.
+void ioapic_route_pci_intx(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
+                           int masked) {
+  const acpi_info_t *acpi = acpi_get_info();
+  for (int i = 0; i < acpi->iso_count; i++) {
+    if (acpi->isos[i].irq == irq) {
+      ioapic_redirect_irq(irq, vector, dest_apic_id, masked);
+      return;
+    }
+  }
+  ioapic_redirect_irq_ex(irq, vector, dest_apic_id, masked, 1, 1);
+}
+
 void ioapic_redirect_irq_ex(uint8_t irq, uint8_t vector, uint32_t dest_apic_id,
                             int masked, int level_triggered, int active_low) {
   if (irq >= 16) {

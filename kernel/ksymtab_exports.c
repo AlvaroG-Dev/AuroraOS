@@ -116,7 +116,7 @@ KEXPORT_SYMBOL(msi_vector_alloc);
 KEXPORT_SYMBOL(msi_vector_free);
 KEXPORT_SYMBOL(irq_request_threaded);
 KEXPORT_SYMBOL(irq_free);
-KEXPORT_SYMBOL(ioapic_redirect_irq_ex);
+KEXPORT_SYMBOL(ioapic_route_pci_intx);
 KEXPORT_SYMBOL(ioapic_mask_irq);
 KEXPORT_SYMBOL(smp_cpu_lapic_id);
 KEXPORT_SYMBOL(pmm_alloc_pages_below);
@@ -125,6 +125,9 @@ KEXPORT_SYMBOL(sysfs_dyn_add_symlink);
 KEXPORT_SYMBOL(sysfs_dyn_add_attr);
 KEXPORT_SYMBOL(sysfs_dyn_remove);
 KEXPORT_SYMBOL(sysfs_dyn_remove_tree);
+KEXPORT_SYMBOL(sysfs_dyn_get);   // pruebas de la capa: leer /sys como el VFS
+KEXPORT_SYMBOL(sysfs_dyn_store);
+KEXPORT_SYMBOL(test_skip);
 _Static_assert(sizeof(struct device) == 64 && offsetof(struct device, bus) == 16 &&
                    offsetof(struct device, priv) == 24 &&
                    offsetof(struct device, driver) == 48,
