@@ -4,6 +4,12 @@ Registro de la fase L2 de la capa de compatibilidad con drivers de Linux: sincro
 
 Estado: **L2 terminada**. **L3 (modelo de dispositivos, PCI, IRQ) no empezada**: espera confirmación del autor.
 
+Resumen de la sesión completa:
+1. **L2** (§1–§8): K2 escrito en la capa (locks, `ww_mutex`, RCU/SRCU, esperas, completions, timers, hrtimers, tasklets, `irq_work`, workqueues, kthreads, percpu, tiempo con TSC), el gancho de RCU en `sched_tick()` y dos pruebas `.kur` (funcional y estrés SMP).
+2. **Después de L2** (§9, con confirmación del autor): versiones fijadas (Linux 6.18.59, `linux-firmware` 20261019, NVIDIA open 615.78.08) y L0.3 repetida; `sched_current()` atómico en Aurora; plazos de espera a 1 ms con expulsión acotada; aproximaciones de la capa retiradas.
+3. Repositorio: binarios regenerados en un commit aparte y `build/mbr_part.hex` fuera del control de versiones (`.gitignore`).
+4. Rama `claude/beautiful-newton-1neyw4`, **sin merge a `main`** (a petición del autor).
+
 ---
 
 ## 1. Decisiones tomadas (con el autor, antes de escribir código)
@@ -115,6 +121,20 @@ Intermitencia ajena a la capa: en 1 de 6 arranques `iso9660: listado de /cdrom` 
 - **`sched_current()` atómico** en Aurora (`this_cpu_current_task()`, un `movq %gs:24`), usado también en `sched_tick()`. La capa ya no necesita llamar con las IRQ desactivadas.
 - **Plazos a 1 ms**: `sched_wake_expired()` también en el tick del plazo más cercano y, si el despertado no encuentra CPU ociosa, `need_resched` en la CPU cuya tarea lleva más tiempo seguida. Prueba del kernel que mide el instante del despertar (con el código anterior, 1 de 12 a tiempo).
 - **Capa**: `disable_work`/`enable_work` reales, SRCU por CPU, percpu estático por alias (valen `this_cpu_ptr(&v)` y `per_cpu_ptr(&v, cpu)`), `LKPI_USLEEP_SPIN_US` 1 ms.
+
+### Commits después de L2
+
+| Commit | Contenido |
+|---|---|
+| `1b449979` | Hash del último commit de L2 en este registro |
+| `b8f2d4a9` | Binarios regenerados por `make iso` (sin cambios de fuente) |
+| `36260b42` | `build/mbr_part.hex` fuera del control de versiones |
+| `1b71ca87` | Aurora: `sched_current()` con una sola instrucción; se retiran las mitigaciones de `42b32f62`/`2656d44b` |
+| `b63c893c` | Aurora: plazos de espera a 1 ms, expulsión acotada y prueba del kernel |
+| `c10ae6ed` | Capa: `disable_work` real, SRCU por CPU, percpu estático con `this_cpu_ptr(&v)` |
+| `818b3f4d` | Linux 6.18.59 y `linux-firmware` 20261019; L0.3 repetida |
+| `54e2feb4` | Plan §11 y resultados de §9 |
+| `28bbba27` | NVIDIA open 615.78.08 por `git` (`fetch-linux-drivers.sh`) y L0.3 repetida con ella |
 
 **Regresión tras estos cambios**: suite del kernel 192/192 con `-smp 2` y 5 de 5 con `-smp 4` (plazos 1 ms: 12 de 12 en todas); `drm_test`, `sig_test`, `rseq_test` ALL PASS; `clipboard-x11.sh` pasa. `primary-icons.sh` se colgó una vez (bash esperando a `wl-copy`, que no terminaba tras lanzar `cat` y `xdg-mime`); repetido 4 veces, pasó las 4. Coincide con la intermitencia ya conocida (~5 de 45 antes de estos cambios), así que no lo atribuyo a ellos, pero sigue abierto.
 
