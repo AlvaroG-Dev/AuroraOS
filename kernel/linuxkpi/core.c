@@ -146,9 +146,21 @@ EXPORT_SYMBOL(lkpi_dump_stack);
 
 /* ------------------------------------------------------- planificador */
 
+/*
+ * sched_current() de Aurora lee this_cpu(current_task) en dos pasos (numero
+ * de CPU y luego cpu_local_data[cpu]). Si el tick expulsa a la tarea entre
+ * ambos y migra, obtiene la tarea actual de su CPU anterior: preempt_disable()
+ * incrementaria el contador de *otra* tarea, que se quedaria sin poder ser
+ * expulsada. Con las IRQ desactivadas no hay expulsion entre las dos lecturas.
+ * (preempt_enable() no lo necesita: con el contador > 0 la tarea no migra.)
+ */
 void lkpi_preempt_disable(void)
 {
+	unsigned long flags;
+
+	local_irq_save(flags);
 	aurora_preempt_disable();
+	local_irq_restore(flags);
 }
 EXPORT_SYMBOL(lkpi_preempt_disable);
 

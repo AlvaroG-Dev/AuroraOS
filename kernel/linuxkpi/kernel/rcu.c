@@ -35,8 +35,7 @@ static u64 lkpi_gp_snap[NR_CPUS];	/* bajo el mutex */
 static void lkpi_rcu_run_gp(void)
 {
 	struct cpumask pending;
-	unsigned long start = jiffies;
-	bool warned = false;
+	unsigned long start = jiffies, next_warn = start + LKPI_RCU_STALL_JIFFIES;
 	unsigned int cpu;
 
 	smp_mb();	/* lo que el llamante retiro es visible antes de la foto */
@@ -49,10 +48,12 @@ static void lkpi_rcu_run_gp(void)
 				cpumask_clear_cpu(cpu, &pending);
 		if (cpumask_empty(&pending))
 			break;
-		if (!warned && time_after(jiffies, start + LKPI_RCU_STALL_JIFFIES)) {
-			pr_warn("linuxkpi: periodo de gracia de RCU atascado (CPU %u sin estado quiescente)\n",
-				cpumask_first(&pending));
-			warned = true;
+		if (time_after(jiffies, next_warn)) {
+			cpu = cpumask_first(&pending);
+			pr_warn("linuxkpi: periodo de gracia de RCU atascado %u s (CPU %u sin estado quiescente, contador %llu)\n",
+				jiffies_to_msecs(jiffies - start) / 1000, cpu,
+				aurora_sched_rcu_qs_count(cpu));
+			next_warn = jiffies + LKPI_RCU_STALL_JIFFIES;
 		}
 		schedule_timeout_uninterruptible(1);
 	}

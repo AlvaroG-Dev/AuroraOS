@@ -121,9 +121,21 @@ static struct task_struct *lkpi_task_get_or_create(struct aurora_task *at, const
 	return p;
 }
 
+/* Ver lkpi_preempt_disable() en core.c: sched_current() no es atomico. */
+static struct aurora_task *lkpi_aurora_current(void)
+{
+	struct aurora_task *at;
+	unsigned long flags;
+
+	local_irq_save(flags);
+	at = aurora_sched_current();
+	local_irq_restore(flags);
+	return at;
+}
+
 struct task_struct *lkpi_get_current(void)
 {
-	struct aurora_task *at = aurora_sched_current();
+	struct aurora_task *at = lkpi_aurora_current();
 	struct task_struct *p = lkpi_task_lookup(at);
 
 	return p ? p : lkpi_task_get_or_create(at, "aurora", TASK_RUNNING, 0, false);
@@ -142,13 +154,19 @@ EXPORT_SYMBOL(lkpi_put_task_struct);
 
 int lkpi_preempt_count(void)
 {
-	return aurora_preempt_count();
+	unsigned long flags;
+	int n;
+
+	local_irq_save(flags);
+	n = aurora_preempt_count();
+	local_irq_restore(flags);
+	return n;
 }
 EXPORT_SYMBOL(lkpi_preempt_count);
 
 bool lkpi_in_serving_softirq(void)
 {
-	struct task_struct *p = lkpi_task_lookup(aurora_sched_current());
+	struct task_struct *p = lkpi_task_lookup(lkpi_aurora_current());
 	return p && p->__lkpi_softirq;
 }
 EXPORT_SYMBOL(lkpi_in_serving_softirq);
@@ -191,7 +209,7 @@ long lkpi_schedule_timeout(long timeout)
 		WARN_ONCE(1, "schedule_timeout: plazo negativo %ld\n", timeout);
 		timeout = 0;
 	}
-	if (aurora_preempt_count() > 0) {
+	if (lkpi_preempt_count() > 0) {
 		/* Dormir aqui colgaria la CPU: Aurora no cambia de tarea. */
 		WARN_ONCE(1, "linuxkpi: schedule() con la expulsion desactivada\n");
 		__set_current_state(TASK_RUNNING);
