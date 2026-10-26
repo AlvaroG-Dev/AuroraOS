@@ -16,7 +16,7 @@ cat > /tmp/apps/ayuda-simbolica.desktop <<'EOT'
 [Desktop Entry]
 Type=Application
 Name=Ayuda
-Exec=/usr/bin/xclock
+Exec=/usr/bin/ayuda-demo
 Icon=help-contents
 StartupWMClass=ayuda
 EOT
