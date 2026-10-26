@@ -97,8 +97,8 @@ Hecho y validado antes y durante esta sesión: `wl_compositor/subcompositor/shm/
 
 | | Tema | Estado (26-oct-2026) |
 |---|---|---|
-| D1 | Multi-CRTC / hot-plug / multi-monitor | **Decidido: NO** |
-| D2 | Cambio de resolución en caliente | **Decidido: NO** |
+| D1 | Multi-CRTC / hot-plug / multi-monitor | **Decidido: SÍ, hay que hacerlo, pero cuando se pueda** (aplazado: depende de un driver de pantalla real, D5/D6) |
+| D2 | Cambio de resolución en caliente | **Decidido: SÍ, hay que hacerlo, pero cuando se pueda** (aplazado: depende de un driver de pantalla real, D5/D6) |
 | D3 | Portapapeles X11: alcance | **Aceptado `PRIMARY`; pendiente de implementar** |
 | D4 | `virtio-gpu` 3D (virgl/venus) | **Decidido: SÍ, no crítico; pendiente** |
 | D5 | Intel/AMD/NVIDIA reales | **ABIERTA** (hardware identificado; falta modelo del portátil y licencia GPL) |
@@ -118,13 +118,13 @@ Detalle de cada una:
   - (b) *Capa virtual*: segundo conector/CRTC virtual (otra ventana) + evento uevent de hot-plug, solo para probar el API. **No valida nada real** y complica `drm_core.c` (asume un CRTC en todo).
   - (c) *Multi-monitor en el compositor* (varios framebuffers/GOP): trabajo grande de arquitectura (`fb_width/height` global).
 - **Recomendación**: (a). Retomar con (c) cuando exista un driver que entregue más de una salida.
-- **Decisión (26-oct-2026): NO.** No se implementa multi-CRTC, hot-plug ni multi-monitor por ahora. Se reabre solo si aparece un driver de pantalla real que entregue más de una salida.
+- **Decisión (26-oct-2026): SÍ, hay que hacerlo, pero cuando se pueda.** No se hace **ahora** (sin driver de pantalla real no hay nada que validar), pero **queda como trabajo pendiente obligatorio**, no descartado: se retoma en cuanto exista un driver (D5/D6) que entregue más de una salida. Mientras tanto no se escribe la capa virtual (opción b) porque no valida nada real.
 
 ### D2 — Cambio de resolución en caliente
 - **Contexto**: `fb_width/fb_height` están cableados en todo el compositor (backbuffer, sombras, caché del fondo, límites de ventana). En PC real el modo lo fija el firmware (GOP); solo se podría cambiar con un driver (`bochs.aur`/virtio-gpu en VM, o uno nativo).
 - **Opciones**: (a) no hacerlo; (b) refactor del compositor para reasignar buffers y re-maquetar, probado en QEMU con `bochs.aur`; (c) elegir resolución solo al arrancar (ya hecho con el EDID).
 - **Recomendación**: (c) ya cubierto; (b) solo si se quiere resolución configurable en VM.
-- **Decisión (26-oct-2026): NO.** No se hace cambio de resolución en caliente ni selector de resolución en Ajustes. La resolución se elige al arrancar (modo nativo del EDID cuando el firmware lo da).
+- **Decisión (26-oct-2026): SÍ, hay que hacerlo, pero cuando se pueda.** Queda como trabajo pendiente, no descartado: se hará cuando haya un driver de pantalla real que pueda cambiar de modo (D5/D6), con el refactor del compositor necesario y su selector en Ajustes. Mientras tanto la resolución se elige solo al arrancar (modo nativo del EDID cuando el firmware lo da).
 
 ### D3 — Portapapeles X11: alcance
 - **Hecho**: texto, `CLIPBOARD`. **Falta**: `INCR` (más de ~256 KB por la conexión X), imágenes (`image/png`), `PRIMARY`↔selección primaria de Wayland, `text/uri-list`.
@@ -158,7 +158,7 @@ Detalle de cada una:
 ### D6 — Driver de pantalla nativo (modeset) y cambio de modo real
 - **Contexto**: depende de D5(c). Sin él: sin cambio de resolución real (D2), sin hot-plug (D1), sin cursor por hardware, sin DPMS real.
 - **Recomendación**: empezar por Intel tomando el estado que deja el firmware y cambiando de modo solo después, con GOP como respaldo automático. La generación objetivo depende del portátil (ver D5: probablemente Gen7.5/Haswell, no Gen9+).
-- **Decisión**: ABIERTA (hardware ya identificado; pendiente confirmar el modelo y obtener el log de arranque). Por D1 y D2 (NO), este driver no tiene que dar hot-plug, multi-monitor ni cambio de resolución en caliente en su primera versión.
+- **Decisión**: ABIERTA (hardware ya identificado; pendiente confirmar el modelo y obtener el log de arranque). D1 y D2 (hot-plug, multi-monitor y cambio de resolución en caliente) **siguen siendo trabajo obligatorio** sobre este driver, pero se pueden dejar para después de una primera versión que solo muestre imagen con GOP como respaldo.
 
 ### D7 — EDID por DDC/VBE en el arranque BIOS y extensión CEA
 - **Contexto**: el EDID solo llega por UEFI. En BIOS no hay EDID; el bloque CEA (modos de TV, audio) no se analiza.
@@ -177,6 +177,7 @@ Detalle de cada una:
 
 ## 7. Resumen de prioridades sugeridas
 
+0. D1 y D2 (multi-monitor/hot-plug y cambio de resolución en caliente): hay que hacerlos, aplazados hasta que exista el driver de pantalla (D5/D6).
 1. Confirmar el modelo del portátil Intel y obtener un log serie de arranque / `lspci -nn` (desbloquea D5 y D6 y valida §4.1 y §4.5). El sobremesa (i7-12700KF **sin iGPU** + RTX 4060) solo sirve para probar GOP.
 2. D3(b): `PRIMARY` del portapapeles X11 (aceptado, barato).
 3. D8: iconos simbólicos como respaldo (aceptado).
