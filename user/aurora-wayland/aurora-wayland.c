@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -3521,16 +3522,33 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
   return 0;
 }
 
+static void xwm_ready(void);
 static int g_xwm_fd = -1; /* extremo nuestro del socket -wm */
-static int g_xwaiting;    /* Xwayland lanzado, a la espera de su SIGUSR1 */
+static int g_xready_pipe[2] = {-1, -1};
+static xcb_connection_t *g_xthread_conn;
 
-// Xwayland avisa con SIGUSR1 cuando termina de arrancar (lo hace si el padre lo
-// tenia ignorado al hacer exec): ya se puede hablar X11 por el socket -wm sin
-// interbloqueo (durante el arranque Xwayland hace roundtrips contra este mismo
-// proceso y xcb bloquearia el bucle de eventos).
+// El apreton de manos X11 por el socket -wm (xcb_connect_to_fd) solo termina
+// cuando Xwayland acaba de arrancar, y Xwayland hace antes roundtrips contra
+// este mismo proceso: bloquear aqui el bucle de eventos seria un interbloqueo.
+// Un hilo espera la conexion y avisa por una tuberia cuando esta lista.
+static void *xwm_connect_thread(void *arg) {
+  (void)arg;
+  g_xthread_conn = xcb_connect_to_fd(g_xwm_fd, NULL);
+  char c = 1;
+  if (write(g_xready_pipe[1], &c, 1) < 0) {}
+  return NULL;
+}
+
+static int xwm_ready_cb(int fd, uint32_t mask, void *data) {
+  (void)mask; (void)data;
+  char c;
+  if (read(fd, &c, 1) < 0) {}
+  xwm_ready();
+  return 0;
+}
+
 static void xwm_ready(void) {
-  g_xwaiting = 0;
-  g_xc = xcb_connect_to_fd(g_xwm_fd, NULL);
+  g_xc = g_xthread_conn;
   if (xcb_connection_has_error(g_xc)) {
     fprintf(stderr, "[aurora-wayland] xcb_connect_to_fd fallo\n");
     xcb_disconnect(g_xc);
@@ -3622,7 +3640,13 @@ static void xwm_spawn(void) {
   }
   close(sv[1]);
   g_xpid = pid;
-  g_xwaiting = 1;
+  g_xwm_fd = sv[0];
+  if (pipe2(g_xready_pipe, O_CLOEXEC) == 0) {
+    wl_event_loop_add_fd(g_loop, g_xready_pipe[0], WL_EVENT_READABLE, xwm_ready_cb, NULL);
+    pthread_t th;
+    if (pthread_create(&th, NULL, xwm_connect_thread, NULL) == 0)
+      pthread_detach(th);
+  }
   g_xwm_fd = sv[0];
 }
 
@@ -4087,9 +4111,7 @@ static int mock_dump(int sig, void *data) {
 }
 
 static int on_usr1(int sig, void *data) {
-  if (g_xwaiting)
-    xwm_ready();
-  else if (g_mock)
+  if (g_mock)
     mock_dump(sig, data);
   return 0;
 }

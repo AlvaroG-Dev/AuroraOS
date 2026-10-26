@@ -38,5 +38,5 @@ gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora
     "$GEN/idle-inhibit-unstable-v1-protocol.c" "$GEN/xdg-activation-v1-protocol.c" \
     "$GEN/linux-dmabuf-unstable-v1-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" \
-    -lwayland-server -l:libxkbcommon.so.0 -lxcb -lxcb-composite -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
+    -lwayland-server -l:libxkbcommon.so.0 -lxcb -lxcb-composite -lpthread -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aurora-wayland"
