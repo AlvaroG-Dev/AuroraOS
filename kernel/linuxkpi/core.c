@@ -201,9 +201,14 @@ int kur_init(void)
 	rc = lkpi_platform_bus_init();
 	if (rc)
 		goto err_core;
+	rc = lkpi_pci_init();
+	if (rc)
+		goto err_platform;
 	pr_info("linuxkpi: capa de compatibilidad con drivers de Linux lista\n");
 	return 0;
 
+err_platform:
+	lkpi_platform_bus_exit();
 err_core:
 	lkpi_device_core_exit();
 err_wq:
@@ -224,6 +229,7 @@ err_mm:
 void kur_exit(void)
 {
 	/* El modelo de dispositivos antes que las workqueues y RCU que usa. */
+	lkpi_pci_exit();
 	lkpi_platform_bus_exit();
 	lkpi_device_core_exit();
 	/* Primero lo que encola trabajo o callbacks; RCU vacia su cola al salir. */

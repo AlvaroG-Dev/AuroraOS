@@ -147,7 +147,8 @@ EXPORT_SYMBOL(lkpi_put_task_struct);
 
 int lkpi_preempt_count(void)
 {
-	return aurora_preempt_count();
+	/* Como Linux: dentro de un handler de request_irq() suma HARDIRQ_OFFSET. */
+	return aurora_preempt_count() + lkpi_hardirq_count() * HARDIRQ_OFFSET;
 }
 EXPORT_SYMBOL(lkpi_preempt_count);
 
