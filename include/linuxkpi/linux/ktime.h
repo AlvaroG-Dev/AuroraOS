@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * ktime_t en nanosegundos. ktime_get() usa el reloj monotono de Aurora
- * (resolucion del tick, 1 ms, de momento).
+ * ktime_t en nanosegundos. ktime_get() cuenta con el TSC (frecuencia que
+ * calibra Aurora) desde un ancla tomada al cargar la capa: resolucion de
+ * ns y monotono entre CPU. Sin TSC calibrado, la del tick (1 ms).
  */
 #ifndef _LKPI_LINUX_KTIME_H
 #define _LKPI_LINUX_KTIME_H

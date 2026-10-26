@@ -115,6 +115,9 @@ struct callback_head {
 } __attribute__((aligned(sizeof(void *))));
 #define rcu_head callback_head
 
+typedef unsigned int __poll_t;
+typedef int clockid_t;
+
 #define DECLARE_BITMAP(name, bits) \
 	unsigned long name[((bits) + 64 - 1) / 64]
 
