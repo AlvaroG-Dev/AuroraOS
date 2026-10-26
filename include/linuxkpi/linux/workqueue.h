@@ -83,6 +83,7 @@ static inline void __lkpi_init_work(struct work_struct *w, work_func_t f)
 	w->__lkpi_wq = NULL;
 	w->__lkpi_seq = 0;
 	w->__lkpi_flags = 0;
+	atomic_set(&w->__lkpi_disable, 0);
 }
 #define INIT_WORK(w, f) __lkpi_init_work((w), (f))
 #define INIT_WORK_ONSTACK(w, f) __lkpi_init_work((w), (f))
@@ -140,6 +141,8 @@ bool lkpi_cancel_work(struct work_struct *work);
 bool lkpi_cancel_work_sync(struct work_struct *work);
 bool lkpi_cancel_delayed_work(struct delayed_work *dw);
 bool lkpi_cancel_delayed_work_sync(struct delayed_work *dw);
+bool lkpi_disable_work(struct work_struct *work, bool is_dwork, bool sync);
+bool lkpi_enable_work(struct work_struct *work);
 bool lkpi_workqueue_congested(int cpu, struct workqueue_struct *wq);
 struct work_struct *lkpi_current_work(void);
 void lkpi_workqueue_set_max_active(struct workqueue_struct *wq, int max_active);
@@ -180,7 +183,12 @@ void lkpi_workqueue_set_max_active(struct workqueue_struct *wq, int max_active);
 #define cancel_work_sync(w) lkpi_cancel_work_sync(w)
 #define cancel_delayed_work(dw) lkpi_cancel_delayed_work(dw)
 #define cancel_delayed_work_sync(dw) lkpi_cancel_delayed_work_sync(dw)
-#define disable_work_sync(w) lkpi_cancel_work_sync(w)
-#define disable_delayed_work_sync(dw) lkpi_cancel_delayed_work_sync(dw)
+/* Como cancel_*, y ademas queue_work() falla hasta el enable_* que lo compense. */
+#define disable_work(w) lkpi_disable_work(w, false, false)
+#define disable_work_sync(w) lkpi_disable_work(w, false, true)
+#define enable_work(w) lkpi_enable_work(w)
+#define disable_delayed_work(dw) lkpi_disable_work(&(dw)->work, true, false)
+#define disable_delayed_work_sync(dw) lkpi_disable_work(&(dw)->work, true, true)
+#define enable_delayed_work(dw) lkpi_enable_work(&(dw)->work)
 
 #endif

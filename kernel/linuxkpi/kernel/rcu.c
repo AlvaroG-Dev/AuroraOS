@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * RCU (no expulsable) y SRCU basico.
+ * RCU (no expulsable) y SRCU (contadores por CPU).
  *
  * Periodo de gracia: foto de sched_rcu_qs_count() de cada CPU en linea (el
  * kernel lo incrementa en cada tick que llega con la expulsion activa, es
@@ -207,9 +207,23 @@ EXPORT_SYMBOL(lkpi_rcu_barrier);
 
 /* ---------------------------------------------------------------- SRCU */
 
+/* ¿Ningun lector con el indice `idx`? Ver linux/srcu.h. */
+static bool lkpi_srcu_idx_idle(struct srcu_struct *ssp, unsigned int idx)
+{
+	unsigned long locks = 0, unlocks = 0;
+	unsigned int cpu;
+
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		unlocks += READ_ONCE(ssp->sda[cpu].unlock[idx]);
+	smp_mb();	/* salidas antes que entradas: un lector visto salir se ve entrar */
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		locks += READ_ONCE(ssp->sda[cpu].lock[idx]);
+	return locks == unlocks;
+}
+
 static void lkpi_srcu_wait_idx(struct srcu_struct *ssp, unsigned int idx)
 {
-	while (atomic_long_read(&ssp->c[idx]))
+	while (!lkpi_srcu_idx_idle(ssp, idx))
 		schedule_timeout_uninterruptible(1);
 }
 
@@ -281,7 +295,7 @@ EXPORT_SYMBOL(lkpi_srcu_barrier);
 void lkpi_cleanup_srcu_struct(struct srcu_struct *ssp)
 {
 	lkpi_srcu_barrier(ssp);
-	WARN_ON(atomic_long_read(&ssp->c[0]) || atomic_long_read(&ssp->c[1]));
+	WARN_ON(!lkpi_srcu_idx_idle(ssp, 0) || !lkpi_srcu_idx_idle(ssp, 1));
 }
 EXPORT_SYMBOL(lkpi_cleanup_srcu_struct);
 

@@ -115,6 +115,23 @@ static inline void lkpi_work_clear_pending(struct work_struct *w)
 	clear_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(w));
 }
 
+/*
+ * Toma PENDING para encolar. Falla si ya estaba pendiente o si el trabajo
+ * esta desactivado (disable_work). Pareja de lkpi_disable_work(): uno sube
+ * la cuenta y luego toma PENDING, el otro toma PENDING y luego mira la
+ * cuenta (ambos con barrera completa), asi que alguno ve al otro.
+ */
+static bool lkpi_work_claim(struct work_struct *w)
+{
+	if (lkpi_work_test_and_set_pending(w))
+		return false;
+	if (unlikely(atomic_read(&w->__lkpi_disable))) {
+		lkpi_work_clear_pending(w);
+		return false;
+	}
+	return true;
+}
+
 /* ------------------------------------------------- listas (con lock) */
 
 /* Mueve `w` y los que van enlazados detras al final de `dst`. */
@@ -198,7 +215,7 @@ static void __lkpi_queue_work(struct workqueue_struct *wq, struct work_struct *w
 
 bool lkpi_queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
-	if (lkpi_work_test_and_set_pending(work))
+	if (!lkpi_work_claim(work))
 		return false;
 	__lkpi_queue_work(wq, work);
 	return true;
@@ -518,7 +535,7 @@ static void __lkpi_queue_delayed_work(struct workqueue_struct *wq, struct delaye
 bool lkpi_queue_delayed_work(struct workqueue_struct *wq, struct delayed_work *dw,
 			     unsigned long delay)
 {
-	if (lkpi_work_test_and_set_pending(&dw->work))
+	if (!lkpi_work_claim(&dw->work))
 		return false;
 	__lkpi_queue_delayed_work(wq, dw, delay);
 	return true;
@@ -571,6 +588,10 @@ bool lkpi_mod_delayed_work(struct workqueue_struct *wq, struct delayed_work *dw,
 {
 	int ret = lkpi_grab_pending(&dw->work, true);
 
+	if (unlikely(atomic_read(&dw->work.__lkpi_disable))) {
+		lkpi_work_clear_pending(&dw->work);	/* desactivado: queda cancelado */
+		return false;
+	}
 	__lkpi_queue_delayed_work(wq, dw, delay);
 	return ret == 1;
 }
@@ -611,6 +632,27 @@ bool lkpi_cancel_delayed_work_sync(struct delayed_work *dw)
 }
 EXPORT_SYMBOL(lkpi_cancel_delayed_work_sync);
 
+bool lkpi_disable_work(struct work_struct *work, bool is_dwork, bool sync)
+{
+	atomic_inc(&work->__lkpi_disable);
+	smp_mb__after_atomic();
+	return __lkpi_cancel(work, is_dwork, sync);
+}
+EXPORT_SYMBOL(lkpi_disable_work);
+
+/* true si la cuenta llega a 0 (vuelve a poder encolarse). */
+bool lkpi_enable_work(struct work_struct *work)
+{
+	int left = atomic_dec_return(&work->__lkpi_disable);
+
+	if (WARN_ON_ONCE(left < 0)) {
+		atomic_set(&work->__lkpi_disable, 0);
+		return true;
+	}
+	return left == 0;
+}
+EXPORT_SYMBOL(lkpi_enable_work);
+
 bool lkpi_flush_delayed_work(struct delayed_work *dw)
 {
 	if (timer_delete_sync(&dw->timer))
@@ -627,7 +669,7 @@ static void lkpi_rcu_work_rcufn(struct rcu_head *rcu)
 
 bool lkpi_queue_rcu_work(struct workqueue_struct *wq, struct rcu_work *rw)
 {
-	if (lkpi_work_test_and_set_pending(&rw->work))
+	if (!lkpi_work_claim(&rw->work))
 		return false;
 	rw->wq = wq;
 	call_rcu(&rw->rcu, lkpi_rcu_work_rcufn);

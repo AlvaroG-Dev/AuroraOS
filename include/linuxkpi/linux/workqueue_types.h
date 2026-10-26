@@ -13,7 +13,8 @@ struct workqueue_struct;
 /*
  * data: bit 0 = PENDING (encolado o con su timer armado). El resto de campos
  * son de la capa: lista donde espera, cola en la que se encolo, numero de
- * secuencia (para flush_workqueue) y marcas internas.
+ * secuencia (para flush_workqueue), marcas internas y la cuenta de
+ * disable_work().
  */
 struct work_struct {
 	atomic_long_t data;
@@ -22,6 +23,7 @@ struct work_struct {
 	struct workqueue_struct *__lkpi_wq;
 	unsigned long __lkpi_seq;
 	unsigned int __lkpi_flags;
+	atomic_t __lkpi_disable;	/* > 0: disable_work(), no se encola */
 };
 
 #define WORK_STRUCT_PENDING_BIT 0

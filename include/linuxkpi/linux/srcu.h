@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * SRCU basico: lectores que pueden dormir. Dos contadores de lectores
- * (indice 0/1); synchronize_srcu() cambia el indice y espera a que se vacie
- * el antiguo, dos veces, para cubrir a un lector que leyo el indice justo
- * antes del cambio. Los contadores son globales por srcu_struct (no por
- * CPU): suficiente para el uso que hacen los drivers de GPU.
+ * SRCU: lectores que pueden dormir. Cada CPU cuenta entradas (lock) y
+ * salidas (unlock) en dos indices; el lector usa el indice vigente. Para
+ * esperar a los lectores de un indice, synchronize_srcu() suma primero las
+ * salidas y luego las entradas de todas las CPU (con barrera entre medias):
+ * si coinciden, no queda ninguno. Un lector que migra entre lock y unlock
+ * suma en CPU distintas, por eso solo cuentan los totales. Cambia el indice
+ * y espera al antiguo (y antes, a rezagados del otro).
  */
 #ifndef _LKPI_LINUX_SRCU_H
 #define _LKPI_LINUX_SRCU_H
@@ -12,23 +14,28 @@
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
 #include <linux/list.h>
+#include <linux/smp.h>
+#include <linux/string.h>
+
+struct lkpi_srcu_data {
+	unsigned long lock[2];
+	unsigned long unlock[2];
+};
 
 struct srcu_struct {
-	atomic_long_t c[2];
 	unsigned int idx;
 	struct mutex gp_mutex;
+	struct lkpi_srcu_data sda[NR_CPUS];
 };
 
 #define __SRCU_STRUCT_INIT(name) \
-	{ .c = { ATOMIC_LONG_INIT(0), ATOMIC_LONG_INIT(0) }, .idx = 0, \
-	  .gp_mutex = __MUTEX_INITIALIZER(name.gp_mutex) }
+	{ .idx = 0, .gp_mutex = __MUTEX_INITIALIZER(name.gp_mutex) }
 #define DEFINE_SRCU(name) struct srcu_struct name = __SRCU_STRUCT_INIT(name)
 #define DEFINE_STATIC_SRCU(name) static struct srcu_struct name = __SRCU_STRUCT_INIT(name)
 
 static inline int init_srcu_struct(struct srcu_struct *ssp)
 {
-	atomic_long_set(&ssp->c[0], 0);
-	atomic_long_set(&ssp->c[1], 0);
+	memset(ssp->sda, 0, sizeof(ssp->sda));
 	ssp->idx = 0;
 	mutex_init(&ssp->gp_mutex);
 	return 0;
@@ -39,14 +46,17 @@ void lkpi_cleanup_srcu_struct(struct srcu_struct *ssp);
 static inline int srcu_read_lock(struct srcu_struct *ssp)
 {
 	int idx = READ_ONCE(ssp->idx) & 1;
-	atomic_long_inc(&ssp->c[idx]);
-	smp_mb();	/* el contador se ve antes que las lecturas protegidas */
+
+	/* Atomico: si migramos tras leer la CPU, otra puede sumar en la misma ranura. */
+	__atomic_fetch_add(&ssp->sda[raw_smp_processor_id()].lock[idx], 1, __ATOMIC_RELAXED);
+	smp_mb();	/* la entrada se ve antes que las lecturas protegidas */
 	return idx;
 }
 static inline void srcu_read_unlock(struct srcu_struct *ssp, int idx)
 {
-	smp_mb();	/* las lecturas protegidas terminan antes de soltar */
-	atomic_long_dec(&ssp->c[idx & 1]);
+	smp_mb();	/* las lecturas protegidas terminan antes de la salida */
+	__atomic_fetch_add(&ssp->sda[raw_smp_processor_id()].unlock[idx & 1], 1,
+			   __ATOMIC_RELAXED);
 }
 #define srcu_read_lock_nmisafe(ssp) srcu_read_lock(ssp)
 #define srcu_read_unlock_nmisafe(ssp, idx) srcu_read_unlock(ssp, idx)

@@ -903,6 +903,30 @@ static void test_workqueues(void)
 	flush_rcu_work(&kt_rwork);
 	KT_EQ(atomic_read(&kt_work_runs), 1);
 
+	/* disable_work: no se encola hasta el enable que lo compense. */
+	atomic_set(&kt_work_runs, 0);
+	INIT_WORK(&kt_work2, kt_count_fn);
+	KT_EQ(disable_work(&kt_work2), false);
+	KT_EQ(disable_work(&kt_work2), false);	/* anidado: cuenta 2 */
+	KT_EQ(queue_work(wq, &kt_work2), false);
+	KT_EQ(enable_work(&kt_work2), false);
+	KT_EQ(schedule_work(&kt_work2), false);
+	KT_EQ(enable_work(&kt_work2), true);
+	KT_EQ(queue_work(wq, &kt_work2), true);
+	flush_work(&kt_work2);
+	KT_EQ(atomic_read(&kt_work_runs), 1);
+	atomic_set(&kt_work_runs, 0);
+	KT_EQ(queue_delayed_work(wq, &kt_dwork, 1000), true);
+	KT_EQ(disable_delayed_work_sync(&kt_dwork), true);	/* cancela el pendiente */
+	KT_EQ(mod_delayed_work(wq, &kt_dwork, 1), false);
+	KT_EQ(queue_delayed_work(wq, &kt_dwork, 1), false);
+	msleep(20);
+	KT_EQ(atomic_read(&kt_work_runs), 0);
+	KT_EQ(enable_delayed_work(&kt_dwork), true);
+	KT_EQ(queue_delayed_work(wq, &kt_dwork, 1), true);
+	flush_delayed_work(&kt_dwork);
+	KT_EQ(atomic_read(&kt_work_runs), 1);
+
 	destroy_workqueue(owq);
 	destroy_workqueue(wq);
 }
@@ -959,6 +983,9 @@ static void test_tasklets(void)
 /* --------------------------------------------- CPUs, percpu, notifier */
 
 static DEFINE_PER_CPU(int, kt_pcpu_counter);
+DECLARE_PER_CPU(int, kt_pcpu_counter);	/* como lo haria otro fichero */
+struct kt_pcpu_stat { long a, b; };
+static DEFINE_PER_CPU(struct kt_pcpu_stat, kt_pcpu_stat);
 static int kt_nb_calls;
 
 static int kt_nb_fn(struct notifier_block *nb, unsigned long action, void *data)
@@ -982,7 +1009,22 @@ static void test_cpus(void)
 	KT_ASSERT(cpu_online(cpu), "smp_processor_id %d en linea", cpu);
 	this_cpu_inc(kt_pcpu_counter);
 	KT_EQ(per_cpu(kt_pcpu_counter, cpu), 1);
+	KT_ASSERT(this_cpu_ptr(&kt_pcpu_counter) == &per_cpu(kt_pcpu_counter, cpu),
+		  "this_cpu_ptr(&v) == &per_cpu(v, cpu)");
+	KT_ASSERT(per_cpu_ptr(&kt_pcpu_counter, cpu) == &per_cpu(kt_pcpu_counter, cpu),
+		  "per_cpu_ptr(&v, cpu)");
+	this_cpu_ptr(&kt_pcpu_stat)->b += 7;
+	KT_EQ(per_cpu(kt_pcpu_stat, cpu).b, 7);
 	put_cpu();
+	{
+		int c, n2 = 0;
+
+		for_each_online_cpu(c)
+			*per_cpu_ptr(&kt_pcpu_counter, c) = 100 + c;
+		for_each_online_cpu(c)
+			n2 += per_cpu(kt_pcpu_counter, c) == 100 + c;
+		KT_EQ(n2, num_online_cpus());
+	}
 	KT_ASSERT(pc != NULL, "alloc_percpu");
 	if (pc) {
 		for_each_online_cpu(cpu) {
