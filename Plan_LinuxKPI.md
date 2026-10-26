@@ -61,6 +61,35 @@ Los números son orientativos (líneas de la capa, no del driver).
 
 Total orientativo de la capa (sin DRM de Linux): **~40–45 kLOC de C** propios, con ~25 % tomable o adaptable de FreeBSD `linuxkpi` (ya licenciado BSD).
 
+### 3.1 Datos medidos (L0.3, 26-oct-2026) — **provisionales**
+
+`scripts/linuxkpi-scan.py` → `docs/linuxkpi_api.md` (resumen) y `docs/linuxkpi_api.tsv` (tabla completa). **Medido sobre Linux 6.8 de Ubuntu y NVIDIA open 615.71.09**, no sobre la 6.18 fijada (kernel.org y GitHub bloqueados en el entorno de desarrollo); hay que repetirlo con la 6.18 en cuanto se pueda descargar. El orden de magnitud no debería cambiar entre 6.8 y 6.18, pero los nombres sí (p. ej. `simpledrm` se movió a `drm/sysfb/`, `drm_aperture` a `aperture`). Es un análisis léxico: cuenta macros, *inlines* y tipos (que la capa también debe dar), incluye todas las ramas `#if` y tiene algo de ruido.
+
+| Nivel | Símbolos (todos los drivers) | de ellos funciones | QEMU (`bochs`+`simpledrm`+`virtio-gpu`) | Estimación anterior | **Estimación corregida** |
+|---|---:|---:|---:|---|---|
+| K0 Base C | 404 | 35 | 45 | ~4 kLOC | **2–3,5 kLOC** (casi todo macros) |
+| K1 Memoria (sin DMA) | 430 | 96 | 61 | ~6 kLOC (con DMA) | **3–5 kLOC** |
+| K1-dma DMA, `dma_buf`, IOMMU | 97 | 39 | 24 | (en K1) | **1–2 kLOC** (+ IOMMU real en L9) |
+| K2 Sincronización/tiempo | 454 | 100 | 31 | ~5 kLOC | **3–6 kLOC** (RCU y `ww_mutex` son lo delicado) |
+| K3 Estructuras | 349 | 89 | 28 | ~4 kLOC | **2,5–5 kLOC** |
+| K4 Dispositivos | 210 | 80 | 42 | ~4 kLOC | **2–3,5 kLOC** |
+| K5 PCI/IRQ/energía (+ bus `virtio`) | 386 | 140 | 46 | ~5 kLOC | **3–6 kLOC** |
+| K6 Firmware/I²C/ACPI/… | 458 | 135 | 20 | ~4 kLOC | **3–6 kLOC** (mucho *stub*) |
+| K7 Fences | 96 | 37 | 33 | ~3 kLOC | **1–2 kLOC** (o compilar `drivers/dma-buf/` de Linux) |
+| K8 Usuario/VFS | 116 | 46 | 3 | ~5 kLOC | **1–2 kLOC** |
+| K9 *stubs* (trace, kasan, hmm, cgroup…) | 181 | 59 | 25 | grande | **1–3 kLOC** |
+| **K9-drm** (DRM core y helpers) | **2292** | 578 | 273 | (venía de Linux con B) | **≥15–30 kLOC** con la opción A: el *shim* sobre `kernel/drm/` (la cifra mínima; los *atomic helpers* tienen mucha semántica) |
+| K9-ttm (TTM, `drm_buddy`, `drm_exec`, gpuvm) | 174 | 83 | 0 | — | **≥2 kLOC** si se compilan los de Linux sobre el *shim*; mucho más si se reescriben |
+| K9-sched (`gpu_scheduler`) | 45 | 27 | 0 | — | igual que TTM |
+| Sin clasificar (ruido sobre todo) | 25 | 2 | 3 | — | — |
+
+Fórmula de la estimación: líneas por definición (función 15, inline 6, tipo 8, macro 2…) × 1–2 (la cota baja es lo que da el escáner; la alta, margen por semántica). **Total corregido de la capa sin DRM: ~22–45 kLOC** (coincide con la cota alta de la estimación anterior). **El *shim* DRM de la opción A es la pieza mayor**: `i915` solo consume 1669 símbolos de `include/drm/`, `amdgpu` 917, `virtio-gpu` 208 y `bochs` 70.
+
+Para llegar al primer hito en QEMU (`bochs` + `simpledrm` + `virtio-gpu`) bastan **634 símbolos** (≈5–10 kLOC, de ellos 273 de DRM). Unión acumulada en el orden de trabajo: `bochs` 135 → `simpledrm` 277 → `virtio-gpu` 634 → `i915` 3877 → `xe` 4198 → `amdgpu` 5031 → `nvidia` 5717.
+
+**NVIDIA (`kernel-open/nvidia`, `nvidia-modeset`, `nvidia-drm`, `common`; sin `uvm`):** 1672 símbolos, de los que **953 (57 %) ya los necesitan Intel/AMD**. Los 719 restantes son sobre todo memoria (NUMA, `get_user_pages`, `pin_user_pages`…: K1 116), K6 (132), K5 (75) y K4 (68); 340 son DRM (`nvidia-drm`). Es el dato para la decisión abierta 4.
+
+
 ## 4. Fases e hitos
 
 Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) en verde. La capa vive en `kernel/linuxkpi/` (código) y `include/linuxkpi/` (cabeceras), con su propio `Makefile` y un `.kur` por driver.

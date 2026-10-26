@@ -16,6 +16,8 @@ Fuente: `github.com/NVIDIA/open-gpu-kernel-modules` (README, comprobado el 26-oc
 
 > **Nota (26-oct-2026, D5):** el autor decidió hacer una capa de compatibilidad con drivers de Linux (LinuxKPI) para todas las GPU. Eso abre una alternativa a la «capa de SO propia» de este plan: alojar `kernel-open/` de NVIDIA (la capa Linux) sobre esa LinuxKPI en lugar de reescribirla. Ventaja: una sola capa y menos código nuevo; coste: LinuxKPI debe estar bastante completa antes de N1. Decidir al terminar T0.2 (cuando se conozca la lista exacta de APIs que usa `kernel-open/`). Las fases N0–N6 no cambian.
 
+> **Datos (26-oct-2026, LinuxKPI L0.3, provisionales sobre NVIDIA open 615.71.09 de Ubuntu):** `kernel-open/{nvidia,nvidia-modeset,nvidia-drm,common}` (90 k líneas) consume **1672 símbolos** de la API de Linux; **953 (57 %)** los necesitan también `i915`/`xe`/`amdgpu`, así que la capa ya los tendrá. Lo exclusivo de NVIDIA son 719 (memoria/NUMA y `get/pin_user_pages` 116, K6 132, K5 75, K4 68, DRM 44…). La alternativa «capa de SO propia» supone reescribir el equivalente a esos 90 k líneas de `kernel-open/`. Detalle: `docs/linuxkpi_api.md` y `Plan_LinuxKPI.md` §3.1. Decisión pendiente del autor.
+
 ## 1. Qué reutiliza Aurora (ya existe)
 
 | Necesidad | Existe | Dónde |
