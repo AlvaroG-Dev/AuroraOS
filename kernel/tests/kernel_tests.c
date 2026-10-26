@@ -6178,6 +6178,121 @@ static void test_sched_deadline_1ms(void) {
 REGISTER_TEST_FLAGS("sched: plazos de espera con resolución de 1 ms",
                     test_sched_deadline_1ms, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
+// ---------------------------------------------------------------------------
+// [LinuxKPI L3] Servicios de Aurora que usa la capa: memoria por debajo de un
+// límite (DMA con máscara), bus_del_driver que desvincula y atributos de
+// sysfs con callbacks.
+// ---------------------------------------------------------------------------
+#include "../bus.h"
+#include "../sysfs_dyn.h"
+#include "../vfs.h"
+
+static void test_pmm_alloc_below(void) {
+  const uint64_t limit = 256ULL << 20; // máscara de 28 bits (edu de QEMU)
+  uint64_t a = pmm_alloc_pages_below(1, limit);
+  uint64_t b = pmm_alloc_pages_below(3, limit); // se alinea a 4 páginas
+  uint64_t c = pmm_alloc_pages_below(16, limit);
+  TEST_ASSERT(a && a + 4096 <= limit, "1 página bajo 256 MiB: %lx", (unsigned long)a);
+  TEST_ASSERT(b && b + 3 * 4096 <= limit && (b & (4 * 4096 - 1)) == 0,
+              "3 páginas alineadas a 4: %lx", (unsigned long)b);
+  TEST_ASSERT(c && c + 16 * 4096 <= limit && (c & (16 * 4096 - 1)) == 0,
+              "16 páginas alineadas: %lx", (unsigned long)c);
+  TEST_ASSERT(a != b && a != c && b != c, "bloques distintos");
+  TEST_ASSERT_EQ(pmm_alloc_pages_below(1, 4096), 0); // nada por debajo de 4 KiB
+  pmm_free_pages(a, 1);
+  pmm_free_pages(b, 3);
+  pmm_free_pages(c, 16);
+  // Lo liberado se puede volver a pedir (otra CPU puede haber cogido `a`: el
+  // buddy también asigna desde abajo, así que no se compara la dirección).
+  a = pmm_alloc_pages_below(1, limit);
+  TEST_ASSERT(a && a + 4096 <= limit, "reutilizable: %lx", (unsigned long)a);
+  pmm_free_pages(a, 1);
+}
+REGISTER_TEST("pmm: páginas por debajo de un límite (DMA con máscara)",
+              test_pmm_alloc_below);
+
+static int g_tb_removed;
+static int tb_match(struct device *dev, struct driver *drv, const void **id) {
+  *id = NULL;
+  return 1;
+}
+static int tb_probe(struct device *dev) { return 0; }
+static void tb_remove(struct device *dev) { g_tb_removed++; }
+static void test_bus_del_driver_unbinds(void) {
+  static struct bus_type tb = {.name = "l3test", .match = tb_match,
+                               .probe = tb_probe, .remove = tb_remove};
+  static struct device d1 = {.name = "d1", .bus = &tb};
+  static struct device d2 = {.name = "d2", .bus = &tb};
+  static struct driver drv = {.name = "l3drv", .bus = &tb};
+  g_tb_removed = 0;
+  TEST_ASSERT_EQ(bus_register(&tb), 0);
+  device_register(&d1);
+  device_register(&d2);
+  TEST_ASSERT_EQ(bus_add_driver(&drv), 0);
+  TEST_ASSERT(d1.driver == &drv && d2.driver == &drv, "probe de los dos");
+  bus_del_driver(&drv);
+  TEST_ASSERT_EQ(g_tb_removed, 2);
+  TEST_ASSERT(!d1.driver && !d2.driver, "desvinculados");
+  device_unregister(&d1);
+  device_unregister(&d2);
+  TEST_ASSERT_EQ(g_tb_removed, 2); // sin driver: no hay remove
+  bus_unregister(&tb);
+}
+REGISTER_TEST("bus: bus_del_driver desvincula sus dispositivos",
+              test_bus_del_driver_unbinds);
+
+static char g_sd_val[32] = "inicial";
+static long sd_show(void *ctx, char *buf, size_t size) {
+  return snprintf(buf, size, "%s:%s\n", (const char *)ctx, g_sd_val);
+}
+static long sd_store(void *ctx, const char *buf, size_t len) {
+  size_t n = len < sizeof(g_sd_val) - 1 ? len : sizeof(g_sd_val) - 1;
+  memcpy(g_sd_val, buf, n);
+  g_sd_val[n] = '\0';
+  return (long)len;
+}
+static const sysfs_dyn_attr_ops_t g_sd_ops = {.show = sd_show, .store = sd_store};
+static void test_sysfs_dyn_attr(void) {
+  TEST_ASSERT_EQ(sysfs_dyn_add_attr("devices/l3test/valor", &g_sd_ops, "ctx", 0644), 0);
+  TEST_ASSERT_EQ(sysfs_dyn_add_attr("devices/l3test/valor", &g_sd_ops, "ctx", 0644),
+                 -EEXIST);
+  char *data = NULL;
+  size_t len = 0;
+  TEST_ASSERT_EQ(sysfs_dyn_get("devices/l3test/valor", &data, &len), SYSFS_DYN_ATTR);
+  TEST_ASSERT(data && strcmp(data, "ctx:inicial\n") == 0, "show: '%s'", data ? data : "");
+  kfree(data);
+  TEST_ASSERT_EQ(sysfs_dyn_get("devices/l3test", &data, &len), SYSFS_DYN_DIR);
+
+  // Por el VFS, como lo vería el userland.
+  vfs_node_t *n = vfs_lookup("/sys/devices/l3test/valor");
+  TEST_ASSERT(n != NULL, "lookup en /sys");
+  if (n) {
+    char buf[32] = {0};
+    TEST_ASSERT((n->mode & 0777) == 0644, "modo 0%o", n->mode & 0777);
+    TEST_ASSERT(n->ops && n->ops->open && n->ops->open(n, O_WRONLY) == 0, "abrir para escribir");
+    TEST_ASSERT_EQ(n->ops->write(n, 0, 5, "nuevo"), 5);
+    int64_t r = n->ops->read(n, 0, sizeof(buf) - 1, buf);
+    TEST_ASSERT(r > 0 && strcmp(buf, "ctx:inicial\n") == 0, "contenido al abrir: '%s'", buf);
+    vfs_node_free(n);
+  }
+  n = vfs_lookup("/sys/devices/l3test/valor");
+  if (n) {
+    char buf[32] = {0};
+    n->ops->read(n, 0, sizeof(buf) - 1, buf);
+    TEST_ASSERT(strcmp(buf, "ctx:nuevo\n") == 0, "tras store: '%s'", buf);
+    vfs_node_free(n);
+  }
+  vfs_dirent_t de;
+  TEST_ASSERT(sysfs_dyn_readdir("devices/l3test", 0, &de) == 0 &&
+                  strcmp(de.name, "valor") == 0,
+              "readdir");
+  TEST_ASSERT_EQ(sysfs_dyn_remove("devices/l3test/valor"), 0);
+  TEST_ASSERT_EQ(sysfs_dyn_get("devices/l3test/valor", &data, &len), SYSFS_DYN_NONE);
+  TEST_ASSERT_EQ(sysfs_dyn_store("devices/l3test/valor", "x", 1), -ENOENT);
+}
+REGISTER_TEST_FLAGS("sysfs: atributos dinámicos con show/store", test_sysfs_dyn_attr,
+                    TEST_FLAG_BLOCKING);
+
 // --- LinuxKPI (Plan_LinuxKPI.md, L0.5) -------------------------------------
 // La capa (linuxkpi.kur) y sus pruebas son .kur en /lib/modules/linuxkpi/.
 // Cada .kur de prueba hace sus comprobaciones en module_init y las cuenta

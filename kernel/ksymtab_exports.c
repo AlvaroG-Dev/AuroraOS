@@ -95,6 +95,51 @@ KEXPORT_SYMBOL(smp_online_cpus);
 // kernel/linuxkpi/aurora.h replica wait_queue_t como struct aurora_wait_queue.
 _Static_assert(sizeof(wait_queue_t) == 32 && offsetof(wait_queue_t, lock) == 0,
                "wait_queue_t cambio: actualizar struct aurora_wait_queue");
+// [LinuxKPI L3] Modelo de dispositivos, PCI e interrupciones. La capa replica
+// struct device/driver y pci_device_t (kernel/linuxkpi/aurora.h): estos
+// asserts avisan si cambian.
+#include "apic.h"
+#include "idt.h"
+#include "irq_threaded.h"
+#include "sysfs_dyn.h"
+KEXPORT_SYMBOL(bus_del_driver);
+KEXPORT_SYMBOL(device_unregister);
+KEXPORT_SYMBOL(pci_bus);
+KEXPORT_SYMBOL(pci_get_devices);
+KEXPORT_SYMBOL(pci_read_config_byte);
+KEXPORT_SYMBOL(pci_read_config_word);
+KEXPORT_SYMBOL(pci_read_config_dword);
+KEXPORT_SYMBOL(pci_write_config_byte);
+KEXPORT_SYMBOL(pci_write_config_word);
+KEXPORT_SYMBOL(pci_write_config_dword);
+KEXPORT_SYMBOL(msi_vector_alloc);
+KEXPORT_SYMBOL(msi_vector_free);
+KEXPORT_SYMBOL(irq_request_threaded);
+KEXPORT_SYMBOL(irq_free);
+KEXPORT_SYMBOL(ioapic_redirect_irq_ex);
+KEXPORT_SYMBOL(ioapic_mask_irq);
+KEXPORT_SYMBOL(smp_cpu_lapic_id);
+KEXPORT_SYMBOL(pmm_alloc_pages_below);
+KEXPORT_SYMBOL(sysfs_dyn_set_file);
+KEXPORT_SYMBOL(sysfs_dyn_add_symlink);
+KEXPORT_SYMBOL(sysfs_dyn_add_attr);
+KEXPORT_SYMBOL(sysfs_dyn_remove);
+KEXPORT_SYMBOL(sysfs_dyn_remove_tree);
+_Static_assert(sizeof(struct device) == 64 && offsetof(struct device, bus) == 16 &&
+                   offsetof(struct device, priv) == 24 &&
+                   offsetof(struct device, driver) == 48,
+               "struct device cambio: actualizar struct aurora_device");
+_Static_assert(sizeof(struct driver) == 72 && offsetof(struct driver, probe) == 24 &&
+                   offsetof(struct driver, remove) == 32,
+               "struct driver cambio: actualizar struct aurora_driver");
+_Static_assert(sizeof(pci_device_t) == 60 && offsetof(pci_device_t, vendor_id) == 4 &&
+                   offsetof(pci_device_t, class_id) == 12 &&
+                   offsetof(pci_device_t, irq_line) == 18 &&
+                   offsetof(pci_device_t, bar) == 20 &&
+                   offsetof(pci_device_t, bar_is_64) == 50,
+               "pci_device_t cambio: actualizar struct aurora_pci_device");
+_Static_assert(sizeof(sysfs_dyn_attr_ops_t) == 16,
+               "sysfs_dyn_attr_ops_t cambio: actualizar struct aurora_sysfs_attr_ops");
 // Pruebas en .kur (tests/linuxkpi): informan con TEST_ASSERT del kernel.
 KEXPORT_SYMBOL(test_pass);
 KEXPORT_SYMBOL(test_fail);

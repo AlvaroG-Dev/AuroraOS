@@ -43,7 +43,11 @@ q = subprocess.Popen([
     '-drive', 'if=pflash,format=raw,file=OVMF_VARS.fd',
     '-m', a.m, '-no-reboot', '-smp', '2', '-cdrom', 'aurora.iso',
     '-display', 'none', '-monitor', 'unix:/tmp/qmon.sock,server,nowait',
-    '-serial', 'file:' + a.log] + a.extra)
+    '-serial', 'file:' + a.log,
+    # Dispositivos PCI para las pruebas de LinuxKPI (L3): `edu` (MMIO, INTx,
+    # MSI, DMA con mascara de 28 bits) y `virtio-rng-pci` (MSI-X, virtqueue).
+    # Ningun driver de Aurora los reclama.
+    '-device', 'edu', '-device', 'virtio-rng-pci'] + a.extra)
 
 for _ in range(60):
     if os.path.exists('/tmp/qmon.sock'):
