@@ -1,6 +1,6 @@
 # Plan de implementación: capa de compatibilidad con drivers de Linux (LinuxKPI) para Aurora
 
-Estado: **PLANIFICADO, nada implementado** (26-oct-2026). Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
+Estado: **L0 y L1 hechas** (26-oct-2026; L0.2/L0.3 con fuentes provisionales, ver §11). L2 pendiente de confirmación. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
 
 ## 0. Principios
 
@@ -155,7 +155,7 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 
 | Cambio en el kernel de Aurora | Fase |
 |---|---|
-| Cargador `.kur`: reubicaciones adicionales, secciones de `modinfo/param`, `__ksymtab_gpl`, módulos grandes (> 50 MB), versiones/`vermagic` opcional | L0 |
+| Cargador `.kur`: reubicaciones adicionales, secciones de `modinfo/param`, `__ksymtab_gpl`, módulos grandes (> 50 MB), versiones/`vermagic` opcional — **hecho en L0.4** salvo módulos > 64 MiB (lectura por trozos, L8) y `vermagic` (no hace falta: `EXPORT_SYMBOL*` va a `.kur_ksymtab`) | L0 |
 | `ksymtab`: exportar los símbolos de la capa con nombres de Linux; `EXPORT_SYMBOL_GPL` como alias | L0–L1 |
 | `kernel/drm/`: opción de compilación «propio» / «Linux sobre LinuxKPI» | L5 |
 | VFS: `cdev` genérico + `file_operations` completo (`fault`, `llseek`, `poll`, `fasync`) | L4 |
@@ -203,6 +203,8 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 3. ~~**Licencia de la capa**~~ → **decidido: GPL-2.0-only** (sección 11).
 4. **NVIDIA**: `kernel-open/` sobre LinuxKPI **o** capa de SO propia (decidir tras L0.3 con los datos reales).
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
+6. **Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**: fijarlos cuando el entorno pueda acceder a `kernel.org` (hoy bloqueado); repetir entonces L0.3 sobre la 6.18.
+7. **RCU antes de usar `xarray`/`idr` con lectores concurrentes** (L2).
 
 ## 11. Decisiones (registro)
 
@@ -214,3 +216,18 @@ Cada entrada lleva fecha. Cambiar una decisión requiere discutirlo y añadir un
 - **Licencia de la capa: GPL-2.0-only.** Igual que los drivers que aloja. Vive en `kernel/linuxkpi/` e `include/linuxkpi/`, se enlaza en su propio `.kur` (`linuxkpi.kur`) y no la incluye el resto del kernel. Cada fichero lleva `SPDX-License-Identifier: GPL-2.0-only`; si se toma código de FreeBSD `linuxkpi` se conserva su aviso BSD-2-Clause (compatible).
 - **NVIDIA (`kernel-open` sobre LinuxKPI o capa propia):** sigue abierta; se decide con los datos de L0.3 (`docs/linuxkpi_api.md`).
 - **Fuentes externas:** `scripts/fetch-linux-drivers.sh` → `build/linuxkpi_src/` (ignorado por git). `linux-firmware` sin fijar todavía (no hace falta hasta L4).
+
+### 26-oct-2026 — L0.4, L0.5 y L1 (diseño)
+- **Cargador `.kur`** (`kernel/kur_loader.c`): sin tope de secciones (`sec_off[]` por índice, índices extendidos), carga de toda sección `SHF_ALLOC`, `.preinit_array`/`.init_array`/`.fini_array`, relocaciones `PC64` y `GOTPCREL*` (GOT propia), `__start_SEC`/`__stop_SEC`, `_GLOBAL_OFFSET_TABLE_`, débiles a 0, error explícito si se usa un símbolo de una sección no cargada (antes se resolvía en silencio). Exports en tabla hash sin límite (antes 256 y nombres de 63 caracteres) y prohibido tapar un símbolo del kernel. `KUR_MAX_SIZE` 16 → **64 MiB**: es el tope de `kmalloc` (`heap.c`) y `kur_loader_load_file()` lee el fichero entero. **Pendiente para NVIDIA (L8)**: leer módulos mayores por trozos.
+- **Nombres**: todo lo que exporta `linuxkpi.kur` lleva el prefijo **`lkpi_`**; las cabeceras ofrecen el nombre de Linux como `static inline` o macro. Así un driver no puede enlazar por accidente con un símbolo homónimo de Aurora (`kmalloc`, `device_register`, `request_firmware`… existen en el ksymtab con otra semántica). Excepción: `memcpy/memset/memmove/memcmp`, que el compilador puede emitir solo y vienen del kernel.
+- **Puente con Aurora**: la capa no incluye cabeceras de Aurora. `kernel/linuxkpi/aurora.h` declara cada servicio con nombre `aurora_*` y etiqueta asm del símbolo real; `kernel/ksymtab_exports.c` los exporta. Si cambia una firma de Aurora hay que cambiarla allí.
+- **Compilación** (`kernel/linuxkpi/flags.mk`): como un módulo de Linux x86-64 (`-nostdinc`, sin SSE/x87, `-mcmodel=kernel`, `-include linux/kconfig.h -include linux/compiler_types.h`, `-ffunction-sections`). `CONFIG_*` fijos en `include/linuxkpi/lkpi/config.h` (solo lo que la capa implementa). `make linuxkpi-drv DRV=<n>` usa un descriptor `kernel/linuxkpi/drivers/<n>.mk` (o `tests/linuxkpi/<n>/drv.mk`); `linuxkpi.kur` y las pruebas se instalan en `/lib/modules/linuxkpi/` (no se cargan solos al arrancar).
+- **`struct page`** propio: `alloc_pages()` da un array contiguo de descriptores (`page + i` vale dentro de la asignación) y un registro hash pfn → página resuelve `pfn_to_page`/`virt_to_page`; para marcos ajenos se crea un descriptor suelto (vive hasta descargar la capa). No hay `mem_map` global: si un driver necesita `page + i` sobre memoria que no salió de `alloc_pages`, habrá que revisarlo (FreeBSD tiene el mismo problema).
+- **`kmalloc`** propio sobre páginas del PMM: físicamente contiguo, alineación natural en potencias de dos y `virt_to_page` válido, como en Linux (el `kmalloc` de Aurora no garantiza nada de eso: cabecera de 64 bytes por página en el slab y heap virtual). `kmem_cache` con constructor, `SLAB_HWCACHE_ALIGN` y alineación.
+- **`vmalloc`** sobre el heap de Aurora (virtualmente contiguo, alineado a página; ≤ 64 MiB por bloque). `vmap()` de páginas arbitrarias queda para L4.
+- **`ioremap`**: la ventana MMIO de Aurora asigna la virtual por la física, así que una página ya mapeada por Aurora (LAPIC, framebuffer…) se reutiliza y nunca se desmapea; las de la capa se cuentan y se desmapean cuando ningún `ioremap` vivo las cubre. `memremap(WB)` de RAM es la ventana directa.
+- **`xarray`** propio (radix de 64 ranuras con bitmaps de presencia/lleno/marcas); `idr`/`ida` encima. Lecturas sin bloqueo, como en Linux; **liberar nodos con lectores concurrentes necesita RCU (L2)**: hoy `xa_node_free` libera al momento.
+- **Spinlock mínimo en L1** (lo necesita `xarray`): desactiva la expulsión de Aurora; `_irq/_irqsave` también las interrupciones. K2 completo (mutex, rwsem, ww_mutex, RCU, workqueue, timers) es L2.
+- **Tiempo**: `HZ = 1000` (el tick de Aurora); `ktime_get()` tiene la resolución del tick (1 ms) hasta usar el TSC.
+- **Pruebas** (`tests/linuxkpi/`): cada `.kur` de prueba comprueba en `module_init` y cuenta en la suite con `test_pass`/`test_fail` del kernel; `kernel/tests/kernel_tests.c` tiene 6 pruebas `linuxkpi: …` (cargador, capa, K0, K1, K3, descarga). **Suite del kernel: 189/189** en QEMU (183 previas + 6).
+- **Fuentes de Linux**: `kernel.org` y GitHub están bloqueados en el entorno de desarrollo. `scripts/fetch-linux-drivers.sh` descarga la 6.18 y NVIDIA cuando haya red; `--ubuntu` toma Linux 6.8 y NVIDIA 615.71.09 del archivo de Ubuntu solo para desarrollar el escáner (`docs/linuxkpi_api.md` es provisional por eso).

@@ -161,6 +161,7 @@ Detalle de cada una:
   - Sigue valiendo: GOP como respaldo en cada hito y pruebas solo en hardware real (o VFIO + KVM).
   - Plan detallado de la capa (fases L0–L9, API por niveles, pruebas, riesgos): [`Plan_LinuxKPI.md`](../Plan_LinuxKPI.md).
 - **Decisiones de L0.1 (26-oct-2026)**, detalle en `Plan_LinuxKPI.md` §11: Linux **6.18 LTS**; capa bajo **GPL-2.0-only** en `kernel/linuxkpi/` + `include/linuxkpi/` con su propio `.kur`; **DRM opción A** (se mantiene `kernel/drm/` propio y la capa aporta un *shim* `drm_*`). Consecuencia para **D1/D2**: multi-CRTC, hot-plug y cambio de modo no vendrán del DRM de Linux; hay que generalizar `kernel/drm/drm_core.c` (un solo CRTC virtual hoy) cuando haya un driver real que lo use.
+- **Estado LinuxKPI (26-oct-2026)**: L0 y L1 hechas (cargador `.kur` ampliado, `make linuxkpi-drv`, pruebas en la suite del kernel, cabeceras e implementación de K0/K3/K1 sin DMA; suite del kernel 189/189). Ningún driver de GPU real todavía; L2 (sincronización) espera confirmación. Detalle en `Plan_LinuxKPI.md` §11.
 
 ### D10 — NVIDIA: obligatorio, con el código abierto de NVIDIA (`open-gpu-kernel-modules`)
 - **Decisión (26-oct-2026): SÍ, NVIDIA se implementa sí o sí.** Sustituye al «último y opcional» del Bloque 8.4. Hardware de prueba: RTX 4060 (Ada, AD107) del sobremesa.
