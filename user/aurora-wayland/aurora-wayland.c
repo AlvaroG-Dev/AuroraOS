@@ -34,6 +34,10 @@
 #include "org-kde-kwin-server-decoration-server-protocol.h"
 #include "primary-selection-unstable-v1-server-protocol.h"
 #include "viewporter-server-protocol.h"
+#include "idle-inhibit-unstable-v1-server-protocol.h"
+#include "presentation-time-server-protocol.h"
+#include "xdg-activation-v1-server-protocol.h"
+#include "xdg-output-unstable-v1-server-protocol.h"
 #include "xdg-decoration-unstable-v1-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
 
@@ -54,6 +58,14 @@
 #define WINSRV_EV_RESIZE 9
 #define WINSRV_EV_PTR 10
 #define WINSRV_EV_PTR_LEAVE 11
+
+// AW_MOCK=1: sin winsrv (host de desarrollo). Las ventanas viven en memoria y
+// SIGUSR1 las vuelca a /tmp/aw-mock-<id>.ppm; sirve para depurar clientes
+// Wayland reales (GTK, Qt...) en el PC de desarrollo con WAYLAND_DEBUG=1.
+static int g_mock;
+#define MOCK_MAX_WIN 32
+static struct { int used, w, h; uint32_t *px; char title[64]; } g_mw[MOCK_MAX_WIN];
+static int mock_dump(int sig, void *data);
 
 #define TITLEBAR_H 32 /* alto de la barra de titulo de Aurora */
 #define WIN_MIN 64
@@ -86,6 +98,18 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
   memset(&req, 0, sizeof(req));
   req.flags = flags;
   snprintf(req.title, sizeof(req.title), "%s", title);
+  if (g_mock) {
+    for (int i = 0; i < MOCK_MAX_WIN; i++)
+      if (!g_mw[i].used) {
+        g_mw[i].used = 1;
+        g_mw[i].w = w;
+        g_mw[i].h = h;
+        g_mw[i].px = calloc((size_t)w * h, 4);
+        snprintf(g_mw[i].title, sizeof(g_mw[i].title), "%s", title);
+        return i;
+      }
+    return -1;
+  }
   return (int)syscall(ASYS_WIN_CREATE_EX, (long)x, (long)y, (long)w, (long)h,
                       &req);
 }
@@ -97,27 +121,43 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
 #define ASYS_DOCK_PIN (ASYS_BASE + 0x1A)
 #define ASYS_DOCK_POLL_LAUNCH (ASYS_BASE + 0x1B)
 #define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C)
-#define ASYS_WIN_SET_CURSOR (ASYS_BASE + 0x1D)
-// Formas de cursor de Aurora (cursor_shape_t en kernel/gfx/cursor.h).
-enum {
-  AUR_CURSOR_ARROW = 0, AUR_CURSOR_RESIZE_EW, AUR_CURSOR_RESIZE_NS,
-  AUR_CURSOR_RESIZE_NWSE, AUR_CURSOR_RESIZE_NESW, AUR_CURSOR_TEXT,
-  AUR_CURSOR_HAND, AUR_CURSOR_CROSS, AUR_CURSOR_NONE
-};
-static int win_set_cursor(int id, int shape) {
-  return (int)syscall(ASYS_WIN_SET_CURSOR, (long)id, (long)shape);
+#define ASYS_WIN_BEGIN_GRAB (ASYS_BASE + 0x1D)
+#define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
+#define WINSRV_EV_STATE 12 /* x = 1: la ventana quedo maximizada */
+// Bordes para ASYS_WIN_BEGIN_GRAB (RESIZE_EDGE_* del compositor); 0 = mover.
+static int win_begin_grab(int id, int edges) {
+  if (g_mock)
+    return 0;
+  return (int)syscall(ASYS_WIN_BEGIN_GRAB, (long)id, (long)edges);
 }
 static int win_set_app_id(int id, const char *app_id) {
+  if (g_mock)
+    return 0;
   return (int)syscall(ASYS_WIN_SET_APP_ID, (long)id, app_id);
 }
 static int win_set_title(int id, const char *title) {
+  if (g_mock)
+    return 0;
   return (int)syscall(ASYS_WIN_SET_TITLE, (long)id, title);
 }
 static int win_set_state(int id, int state) {
+  if (g_mock)
+    return 0;
   return (int)syscall(ASYS_WIN_SET_STATE, (long)id, (long)state);
 }
-static int win_destroy(int id) { return (int)syscall(ASYS_WIN_DESTROY, (long)id); }
+static int win_destroy(int id) {
+  if (g_mock) {
+    if (id >= 0 && id < MOCK_MAX_WIN) {
+      free(g_mw[id].px);
+      memset(&g_mw[id], 0, sizeof(g_mw[id]));
+    }
+    return 0;
+  }
+  return (int)syscall(ASYS_WIN_DESTROY, (long)id);
+}
 static int win_poll(int id, winsrv_event_t *ev) {
+  if (g_mock)
+    return 0;
   return (int)syscall(ASYS_WIN_POLL_EVENT, (long)id, ev, 0L);
 }
 // Copia el rectangulo (sx, sy, w, h) del buffer `pixels` (ancho `stride`) a
@@ -133,6 +173,16 @@ static int win_blit(int id, int dx, int dy, int sx, int sy, int w, int h,
                           .src_y = sy,
                           .src_stride = stride,
                           .pixels = pixels};
+  if (g_mock) {
+    if (id < 0 || id >= MOCK_MAX_WIN || !g_mw[id].used)
+      return -1;
+    for (int j = 0; j < h; j++)
+      for (int i = 0; i < w; i++)
+        if (dx + i >= 0 && dx + i < g_mw[id].w && dy + j >= 0 && dy + j < g_mw[id].h)
+          g_mw[id].px[(size_t)(dy + j) * g_mw[id].w + dx + i] =
+              pixels[(size_t)(sy + j) * stride + sx + i];
+    return 0;
+  }
   return (int)syscall(ASYS_WIN_BLIT, &a);
 }
 
@@ -207,8 +257,11 @@ static size_t g_keymap_size;
 static struct data_source *g_selection;
 static struct data_source *g_primary; /* seleccion primaria (boton central) */
 static struct wl_list g_psdevs;       /* struct seat_res.link: primary_selection_device */
-static void xs_set_cursor(struct xsurf *xs, int shape);
 static void primary_send_to(struct wl_client *client);
+static void surface_send_presented(struct surface *s);
+static struct wl_list g_frame_q;           /* superficies con frame callbacks pendientes */
+static struct wl_event_source *g_frame_timer;
+#define FRAME_MS 16                        /* ~60 Hz */
 
 static uint32_t now_ms(void) {
   struct timespec ts;
@@ -221,8 +274,13 @@ struct seat_res {
   struct wl_list link;
 };
 
+struct region;
 struct surface {
   struct wl_resource *res;
+  struct region *in_reg;  /* region de entrada (NULL = toda la superficie) */
+  struct wl_list pfb;     /* wp_presentation_feedback pendientes (del siguiente commit) */
+  struct wl_list flink;   /* en g_frame_q mientras espera su "vsync" */
+  int fq;                 /* 1 = en g_frame_q */
   // Subsuperficies
   struct wl_list stack;   /* struct subsurf.link; incluye `self` */
   struct subsurf self;
@@ -263,7 +321,6 @@ struct xsurf {
   struct toplevel *tl;
   int is_popup;
   int configured_sent;
-  int cursor;             /* forma de cursor enviada al kernel */
   uint32_t last_serial;
   int acked;
   int has_geom, gx, gy, gw, gh; /* set_window_geometry */
@@ -615,17 +672,51 @@ static void dm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
 }
 
 // ---------------------------------------------------------------------------
-// wl_region (no se usa: aceptamos y olvidamos)
+// wl_region: lista de operaciones add/subtract evaluadas en orden. Solo se usa
+// la region de entrada (hit-test del puntero); la opaca se ignora.
 // ---------------------------------------------------------------------------
-static void region_rect(struct wl_client *c, struct wl_resource *r, int32_t x,
-                        int32_t y, int32_t w, int32_t h) {
-  (void)c; (void)r; (void)x; (void)y; (void)w; (void)h;
+#define REGION_MAX_OPS 64
+struct region {
+  int n;
+  struct { int x, y, w, h, add; } op[REGION_MAX_OPS];
+};
+static void region_op(struct wl_resource *r, int add, int x, int y, int w, int h) {
+  struct region *rg = wl_resource_get_user_data(r);
+  if (rg->n >= REGION_MAX_OPS)
+    return;
+  rg->op[rg->n].x = x; rg->op[rg->n].y = y;
+  rg->op[rg->n].w = w; rg->op[rg->n].h = h;
+  rg->op[rg->n].add = add;
+  rg->n++;
+}
+static void region_add(struct wl_client *c, struct wl_resource *r, int32_t x,
+                       int32_t y, int32_t w, int32_t h) {
+  (void)c;
+  region_op(r, 1, x, y, w, h);
+}
+static void region_sub(struct wl_client *c, struct wl_resource *r, int32_t x,
+                       int32_t y, int32_t w, int32_t h) {
+  (void)c;
+  region_op(r, 0, x, y, w, h);
+}
+static int region_contains(const struct region *rg, int x, int y) {
+  if (!rg)
+    return 1;
+  int in = 0;
+  for (int i = 0; i < rg->n; i++)
+    if (x >= rg->op[i].x && y >= rg->op[i].y && x < rg->op[i].x + rg->op[i].w &&
+        y < rg->op[i].y + rg->op[i].h)
+      in = rg->op[i].add;
+  return in;
 }
 static const struct wl_region_interface region_impl = {
     .destroy = noop_destroy,
-    .add = region_rect,
-    .subtract = region_rect,
+    .add = region_add,
+    .subtract = region_sub,
 };
+static void region_resource_destroy(struct wl_resource *r) {
+  free(wl_resource_get_user_data(r));
+}
 
 // ---------------------------------------------------------------------------
 // wl_surface
@@ -700,6 +791,19 @@ static void surface_noop_region(struct wl_client *c, struct wl_resource *r,
                                 struct wl_resource *region) {
   (void)c; (void)r; (void)region;
 }
+static void surface_set_input_region(struct wl_client *c, struct wl_resource *r,
+                                     struct wl_resource *region) {
+  (void)c;
+  struct surface *s = wl_resource_get_user_data(r);
+  free(s->in_reg);
+  s->in_reg = NULL;
+  if (region) {
+    struct region *src = wl_resource_get_user_data(region);
+    s->in_reg = malloc(sizeof(*src));
+    if (s->in_reg)
+      memcpy(s->in_reg, src, sizeof(*src));
+  }
+}
 static void surface_set_transform(struct wl_client *c, struct wl_resource *r,
                                   int32_t t) {
   (void)c; (void)r; (void)t;
@@ -714,6 +818,8 @@ static void surface_offset(struct wl_client *c, struct wl_resource *r,
                            int32_t x, int32_t y) {
   (void)c; (void)r; (void)x; (void)y;
 }
+
+static int has_launcher(const char *app_id);
 
 static void xs_unmap(struct xsurf *xs) {
   if (xs->win_id < 0)
@@ -774,6 +880,8 @@ static void xs_map(struct xsurf *xs, int w, int h) {
   xs->win_id = id;
   if (xs->tl && xs->tl->app_id[0])
     win_set_app_id(id, xs->tl->app_id); /* agrupa la ventana en el Dock */
+  if (xs->tl && !g_mock && !has_launcher(xs->tl->app_id))
+    syscall(ASYS_WIN_SET_ICON, (long)id, "/system/icons/app-generic.bmp");
   xs->cw = w;
   xs->ch = h;
   wl_list_insert(&g_wins, &xs->wlink);
@@ -1168,13 +1276,33 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     surface_damage_up(s, dmg);
   s->dmg_x0 = s->dmg_y0 = s->dmg_x1 = s->dmg_y1 = 0;
 
-  // Frame callbacks: todo lo pedido hasta aqui se considera presentado.
-  uint32_t t = now_ms();
-  struct wl_resource *cb, *tmp;
-  wl_resource_for_each_safe(cb, tmp, &s->frames) {
-    wl_callback_send_done(cb, t);
-    wl_resource_destroy(cb);
+  // Frame callbacks y feedback de presentacion: como en un vsync a 60 Hz, no al
+  // instante (un cliente que anima y repinta al recibir el frame saturaria la
+  // CPU en un bucle commit -> frame -> commit sin fin).
+  if (!s->fq && (!wl_list_empty(&s->frames) || !wl_list_empty(&s->pfb))) {
+    s->fq = 1;
+    wl_list_insert(g_frame_q.prev, &s->flink);
+    if (g_frame_timer)
+      wl_event_source_timer_update(g_frame_timer, FRAME_MS);
   }
+}
+
+static int frame_tick(void *data) {
+  (void)data;
+  struct surface *s, *tmp;
+  wl_list_for_each_safe(s, tmp, &g_frame_q, flink) {
+    wl_list_remove(&s->flink);
+    s->fq = 0;
+    surface_send_presented(s);
+    uint32_t t = now_ms();
+    struct wl_resource *cb, *ctmp;
+    wl_resource_for_each_safe(cb, ctmp, &s->frames) {
+      wl_callback_send_done(cb, t);
+      wl_resource_destroy(cb);
+    }
+  }
+  wl_display_flush_clients(g_display);
+  return 0;
 }
 
 static const struct wl_surface_interface surface_impl = {
@@ -1183,7 +1311,7 @@ static const struct wl_surface_interface surface_impl = {
     .damage = surface_damage,
     .frame = surface_frame,
     .set_opaque_region = surface_noop_region,
-    .set_input_region = surface_noop_region,
+    .set_input_region = surface_set_input_region,
     .commit = surface_commit,
     .set_buffer_transform = surface_set_transform,
     .set_buffer_scale = surface_set_scale,
@@ -1193,6 +1321,10 @@ static const struct wl_surface_interface surface_impl = {
 
 static void surface_resource_destroy(struct wl_resource *r) {
   struct surface *s = wl_resource_get_user_data(r);
+  if (s->fq) {
+    wl_list_remove(&s->flink);
+    s->fq = 0;
+  }
   if (g_ptr_surf == s)
     g_ptr_surf = NULL;
   // Si era una subsuperficie, desaparece de su padre.
@@ -1216,6 +1348,13 @@ static void surface_resource_destroy(struct wl_resource *r) {
   }
   if (s->vp)
     wl_resource_set_user_data(s->vp, NULL);
+  {
+    struct wl_resource *fb, *ftmp;
+    wl_resource_for_each_safe(fb, ftmp, &s->pfb) {
+      wp_presentation_feedback_send_discarded(fb);
+      wl_resource_destroy(fb);
+    }
+  }
   surface_clear_buffer(s);
   struct wl_resource *cb, *tmp;
   wl_resource_for_each_safe(cb, tmp, &s->frames) wl_resource_destroy(cb);
@@ -1223,6 +1362,7 @@ static void surface_resource_destroy(struct wl_resource *r) {
     s->xs->surface = NULL;
   free(s->scratch);
   free(s->canvas);
+  free(s->in_reg);
   free(s);
 }
 
@@ -1241,6 +1381,7 @@ static void comp_create_surface(struct wl_client *c, struct wl_resource *r,
     return;
   }
   wl_list_init(&s->frames);
+  wl_list_init(&s->pfb);
   wl_list_init(&s->buffer_destroy.link);
   wl_list_init(&s->stack);
   s->self.surface = s;
@@ -1258,7 +1399,13 @@ static void comp_create_region(struct wl_client *c, struct wl_resource *r,
     wl_client_post_no_memory(c);
     return;
   }
-  wl_resource_set_implementation(reg, &region_impl, NULL, NULL);
+  struct region *rg = calloc(1, sizeof(*rg));
+  if (!rg) {
+    wl_resource_destroy(reg);
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(reg, &region_impl, rg, region_resource_destroy);
 }
 static const struct wl_compositor_interface comp_impl = {
     .create_surface = comp_create_surface,
@@ -1497,18 +1644,14 @@ static void kbd_focus_set(struct toplevel *tl) {
   primary_send_to(nc);
 }
 
-// El cliente cambia el cursor: solo vale si es el dueno del foco de puntero.
-// Aurora dibuja sus propias formas; una superficie de cursor arbitraria (mapa
-// de bits del cliente) no se usa y se deja la flecha.
-static int client_owns_pointer(struct wl_client *c) {
-  return g_ptr_focus && g_ptr_surf && wl_resource_get_client(g_ptr_surf->res) == c;
-}
+// El cursor es siempre el de Aurora (flecha y formas de redimension del
+// propio compositor): la forma que pida el cliente (wl_pointer.set_cursor,
+// wp_cursor_shape_v1) se acepta y se ignora, para que la apariencia no dependa
+// de la ventana bajo el puntero.
 static void ptr_set_cursor(struct wl_client *c, struct wl_resource *r,
                            uint32_t serial, struct wl_resource *surf,
                            int32_t hx, int32_t hy) {
-  (void)r; (void)serial; (void)hx; (void)hy;
-  if (client_owns_pointer(c))
-    xs_set_cursor(g_ptr_focus, surf ? AUR_CURSOR_ARROW : AUR_CURSOR_NONE);
+  (void)c; (void)r; (void)serial; (void)surf; (void)hx; (void)hy;
 }
 static const struct wl_pointer_interface pointer_impl = {
     .set_cursor = ptr_set_cursor,
@@ -1687,11 +1830,25 @@ static void tl_set_parent(struct wl_client *c, struct wl_resource *r, struct wl_
 static void tl_show_menu(struct wl_client *c, struct wl_resource *r, struct wl_resource *seat, uint32_t serial, int32_t x, int32_t y) {
   (void)c; (void)r; (void)seat; (void)serial; (void)x; (void)y;
 }
+// El cliente pide mover/redimensionar su ventana (arrastre de su propia barra o
+// borde). Aurora lo hace con su arrastre nativo, solo si el boton sigue pulsado.
 static void tl_move(struct wl_client *c, struct wl_resource *r, struct wl_resource *seat, uint32_t serial) {
-  (void)c; (void)r; (void)seat; (void)serial;
+  (void)c; (void)seat; (void)serial;
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  if (tl->xs && tl->xs->win_id >= 0)
+    win_begin_grab(tl->xs->win_id, 0);
 }
 static void tl_resize(struct wl_client *c, struct wl_resource *r, struct wl_resource *seat, uint32_t serial, uint32_t edges) {
-  (void)c; (void)r; (void)seat; (void)serial; (void)edges;
+  (void)c; (void)seat; (void)serial;
+  struct toplevel *tl = wl_resource_get_user_data(r);
+  // xdg: top=1 bottom=2 left=4 right=8; compositor: right=1 bottom=2 left=4 top=8
+  int e = 0;
+  if (edges & XDG_TOPLEVEL_RESIZE_EDGE_TOP) e |= 8;
+  if (edges & XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM) e |= 2;
+  if (edges & XDG_TOPLEVEL_RESIZE_EDGE_LEFT) e |= 4;
+  if (edges & XDG_TOPLEVEL_RESIZE_EDGE_RIGHT) e |= 1;
+  if (e && tl->xs && tl->xs->win_id >= 0)
+    win_begin_grab(tl->xs->win_id, e);
 }
 static void tl_set_min_size(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {
   (void)c;
@@ -1932,15 +2089,15 @@ static void wm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
 }
 
 // xdg-decoration: siempre del lado del servidor (la decoracion es la de Aurora)
+// El modo es siempre server-side. Se anuncia una sola vez por objeto: repetir
+// el evento en cada peticion hace que algunos toolkits (GTK3) vuelvan a pedir
+// el modo cliente en un bucle sin fin.
 static void deco_set_mode(struct wl_client *c, struct wl_resource *r, uint32_t m) {
   (void)c; (void)m;
-  zxdg_toplevel_decoration_v1_send_configure(
-      r, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+  (void)r; /* ya se anuncio al crear el objeto */
 }
 static void deco_unset_mode(struct wl_client *c, struct wl_resource *r) {
-  (void)c;
-  zxdg_toplevel_decoration_v1_send_configure(
-      r, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+  (void)c; (void)r;
 }
 static const struct zxdg_toplevel_decoration_v1_interface deco_impl = {
     .destroy = noop_destroy,
@@ -1984,9 +2141,8 @@ static void kde_release(struct wl_client *c, struct wl_resource *r) {
   wl_resource_destroy(r);
 }
 static void kde_request_mode(struct wl_client *c, struct wl_resource *r, uint32_t m) {
-  (void)c; (void)m;
-  org_kde_kwin_server_decoration_send_mode(
-      r, ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER);
+  (void)c; (void)r; (void)m;
+  /* Siempre server; el modo ya se anuncio al crear (ver deco_set_mode). */
 }
 static const struct org_kde_kwin_server_decoration_interface kde_deco_impl = {
     .release = kde_release,
@@ -2266,48 +2422,12 @@ static void fsm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
 }
 
 // ---------------------------------------------------------------------------
-// wp_cursor_shape_v1: el cliente pide una forma con nombre; Aurora la dibuja.
+// wp_cursor_shape_v1: se acepta (los clientes no cargan temas de cursores) pero
+// el cursor visible es siempre el de Aurora.
 // ---------------------------------------------------------------------------
-static int cursor_shape_to_aurora(uint32_t shape) {
-  switch (shape) {
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS:
-    return AUR_CURSOR_HAND;
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT:
-    return AUR_CURSOR_TEXT;
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CELL:
-    return AUR_CURSOR_CROSS;
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE:
-    return AUR_CURSOR_RESIZE_EW;
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE:
-    return AUR_CURSOR_RESIZE_NS;
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE:
-    return AUR_CURSOR_RESIZE_NESW;
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE:
-  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE:
-    return AUR_CURSOR_RESIZE_NWSE;
-  default:
-    return AUR_CURSOR_ARROW;
-  }
-}
 static void csdev_set_shape(struct wl_client *c, struct wl_resource *r,
                             uint32_t serial, uint32_t shape) {
-  (void)r; (void)serial;
-  if (client_owns_pointer(c))
-    xs_set_cursor(g_ptr_focus, cursor_shape_to_aurora(shape));
+  (void)c; (void)r; (void)serial; (void)shape; /* cursor unico de Aurora */
 }
 static const struct wp_cursor_shape_device_v1_interface csdev_impl = {
     .destroy = noop_destroy,
@@ -2349,6 +2469,169 @@ static void csm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
 }
 
 // ---------------------------------------------------------------------------
+// zxdg_output_manager_v1: tamano logico de la salida.
+// ---------------------------------------------------------------------------
+static const struct zxdg_output_v1_interface xdgout_impl = {.destroy = noop_destroy};
+static void xom_get_xdg_output(struct wl_client *c, struct wl_resource *r,
+                               uint32_t id, struct wl_resource *output) {
+  (void)output;
+  struct wl_resource *o = wl_resource_create(c, &zxdg_output_v1_interface,
+                                             wl_resource_get_version(r), id);
+  if (!o) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(o, &xdgout_impl, NULL, NULL);
+  zxdg_output_v1_send_logical_position(o, 0, 0);
+  zxdg_output_v1_send_logical_size(o, OUT_W, OUT_H);
+  if (wl_resource_get_version(o) >= 2) {
+    zxdg_output_v1_send_name(o, "Aurora-1");
+    zxdg_output_v1_send_description(o, "Pantalla de Aurora");
+  }
+  zxdg_output_v1_send_done(o);
+}
+static const struct zxdg_output_manager_v1_interface xom_impl = {
+    .destroy = noop_destroy,
+    .get_xdg_output = xom_get_xdg_output,
+};
+static void xom_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(c, &zxdg_output_manager_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &xom_impl, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// wp_presentation: la "presentacion" ocurre en el commit (se vuelca a la
+// ventana de forma sincrona), a 60 Hz nominales.
+// ---------------------------------------------------------------------------
+static void pfb_destroy(struct wl_resource *r) {
+  wl_list_remove(wl_resource_get_link(r));
+}
+static void pres_feedback(struct wl_client *c, struct wl_resource *r,
+                          struct wl_resource *surf, uint32_t id) {
+  struct surface *s = wl_resource_get_user_data(surf);
+  struct wl_resource *fb = wl_resource_create(c, &wp_presentation_feedback_interface,
+                                              wl_resource_get_version(r), id);
+  if (!fb) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(fb, NULL, NULL, pfb_destroy);
+  wl_list_insert(s->pfb.prev, wl_resource_get_link(fb));
+}
+static const struct wp_presentation_interface pres_impl = {
+    .destroy = noop_destroy,
+    .feedback = pres_feedback,
+};
+static void pres_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(c, &wp_presentation_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &pres_impl, NULL, NULL);
+  wp_presentation_send_clock_id(r, CLOCK_MONOTONIC);
+}
+static void surface_send_presented(struct surface *s) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  static uint64_t seq;
+  seq++;
+  struct wl_resource *fb, *tmp;
+  wl_resource_for_each_safe(fb, tmp, &s->pfb) {
+    wp_presentation_feedback_send_presented(
+        fb, (uint32_t)((uint64_t)ts.tv_sec >> 32), (uint32_t)ts.tv_sec,
+        (uint32_t)ts.tv_nsec, 16666667, (uint32_t)(seq >> 32), (uint32_t)seq, 0);
+    wl_resource_destroy(fb);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// zwp_idle_inhibit_manager_v1 y xdg_activation_v1: se aceptan (no hay
+// salvapantallas; la activacion de ventanas ajenas no se concede).
+// ---------------------------------------------------------------------------
+static const struct zwp_idle_inhibitor_v1_interface inhibitor_impl = {.destroy = noop_destroy};
+static void iim_create(struct wl_client *c, struct wl_resource *r, uint32_t id,
+                       struct wl_resource *surf) {
+  (void)surf;
+  struct wl_resource *i = wl_resource_create(c, &zwp_idle_inhibitor_v1_interface,
+                                             wl_resource_get_version(r), id);
+  if (!i) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(i, &inhibitor_impl, NULL, NULL);
+}
+static const struct zwp_idle_inhibit_manager_v1_interface iim_impl = {
+    .destroy = noop_destroy,
+    .create_inhibitor = iim_create,
+};
+static void iim_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(c, &zwp_idle_inhibit_manager_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &iim_impl, NULL, NULL);
+}
+
+static void act_tok_set_serial(struct wl_client *c, struct wl_resource *r, uint32_t s, struct wl_resource *seat) {
+  (void)c; (void)r; (void)s; (void)seat;
+}
+static void act_tok_set_app_id(struct wl_client *c, struct wl_resource *r, const char *a) {
+  (void)c; (void)r; (void)a;
+}
+static void act_tok_set_surface(struct wl_client *c, struct wl_resource *r, struct wl_resource *s) {
+  (void)c; (void)r; (void)s;
+}
+static void act_tok_commit(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  static unsigned n;
+  char tok[32];
+  snprintf(tok, sizeof(tok), "aurora-%u", ++n);
+  xdg_activation_token_v1_send_done(r, tok);
+}
+static const struct xdg_activation_token_v1_interface act_tok_impl = {
+    .set_serial = act_tok_set_serial,
+    .set_app_id = act_tok_set_app_id,
+    .set_surface = act_tok_set_surface,
+    .commit = act_tok_commit,
+    .destroy = noop_destroy,
+};
+static void act_get_token(struct wl_client *c, struct wl_resource *r, uint32_t id) {
+  struct wl_resource *t = wl_resource_create(c, &xdg_activation_token_v1_interface,
+                                             wl_resource_get_version(r), id);
+  if (!t) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(t, &act_tok_impl, NULL, NULL);
+}
+static void act_activate(struct wl_client *c, struct wl_resource *r, const char *tok, struct wl_resource *surf) {
+  (void)c; (void)r; (void)tok; (void)surf;
+}
+static const struct xdg_activation_v1_interface act_impl = {
+    .destroy = noop_destroy,
+    .get_activation_token = act_get_token,
+    .activate = act_activate,
+};
+static void act_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
+  (void)d;
+  struct wl_resource *r = wl_resource_create(c, &xdg_activation_v1_interface, v, id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &act_impl, NULL, NULL);
+}
+
+// ---------------------------------------------------------------------------
 // Eventos de Aurora -> Wayland
 // ---------------------------------------------------------------------------
 static void ptr_send_to(struct wl_client *c, void (*fn)(struct wl_resource *, void *), void *arg) {
@@ -2382,14 +2665,6 @@ static void do_frame(struct wl_resource *p, void *a) {
     wl_pointer_send_frame(p);
 }
 
-// Cursor sobre el contenido de la ventana `xs` (forma de Aurora).
-static void xs_set_cursor(struct xsurf *xs, int shape) {
-  if (xs->cursor == shape || xs->win_id < 0)
-    return;
-  xs->cursor = shape;
-  win_set_cursor(xs->win_id, shape);
-}
-
 // El puntero sale de la superficie con foco (sin tocar g_ptr_focus).
 static void pointer_surf_leave(void) {
   if (!g_ptr_surf)
@@ -2415,7 +2690,8 @@ static struct surface *surface_at(struct surface *s, int ox, int oy, int px, int
   struct subsurf *n;
   wl_list_for_each_reverse(n, &s->stack, link) {
     if (n == &s->self) {
-      if (s->has_content && px >= ox && py >= oy && px < ox + s->dw && py < oy + s->dh)
+      if (s->has_content && px >= ox && py >= oy && px < ox + s->dw &&
+          py < oy + s->dh && region_contains(s->in_reg, px - ox, py - oy))
         return s;
     } else if (n->surface && n->surface->has_content) {
       struct surface *r = surface_at(n->surface, ox + n->x, oy + n->y, px, py);
@@ -2528,6 +2804,15 @@ static void handle_win_event(struct xsurf *xs, const winsrv_event_t *ev) {
     if (tl) {
       xs->wx = ev->x;
       xs->wy = ev->y + TITLEBAR_H;
+    }
+    break;
+  case WINSRV_EV_STATE:
+    // Aurora maximizo/restauro la ventana (semaforo, doble clic, arrastre).
+    if (tl && tl->maximized != (ev->x != 0)) {
+      tl->maximized = ev->x != 0;
+      if (!tl->maximized)
+        tl->fullscreen = 0;
+      toplevel_send_configure(tl, xs->cw, xs->ch);
     }
     break;
   case WINSRV_EV_PTR:
@@ -2731,6 +3016,13 @@ static void launchers_load(void) {
   fclose(f);
 }
 
+static int has_launcher(const char *app_id) {
+  for (int i = 0; i < g_nlaunchers; i++)
+    if (app_id[0] && !strcmp(g_launchers[i].app_id, app_id))
+      return 1;
+  return 0;
+}
+
 static void launchers_pin(void) {
   for (int i = 0; i < g_nlaunchers; i++) {
     struct {
@@ -2798,6 +3090,30 @@ static int on_chld(int sig, void *data) {
   return 0;
 }
 
+static int mock_dump(int sig, void *data) {
+  (void)sig; (void)data;
+  for (int i = 0; i < MOCK_MAX_WIN; i++) {
+    if (!g_mw[i].used)
+      continue;
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/aw-mock-%d.ppm", i);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+      continue;
+    fprintf(f, "P6\n%d %d\n255\n", g_mw[i].w, g_mw[i].h);
+    for (size_t k = 0; k < (size_t)g_mw[i].w * g_mw[i].h; k++) {
+      uint32_t p = g_mw[i].px[k];
+      fputc((p >> 16) & 255, f);
+      fputc((p >> 8) & 255, f);
+      fputc(p & 255, f);
+    }
+    fclose(f);
+    fprintf(stderr, "[aurora-wayland] mock: ventana %d '%s' %dx%d -> %s\n", i,
+            g_mw[i].title, g_mw[i].w, g_mw[i].h, path);
+  }
+  return 0;
+}
+
 static int on_term(int sig, void *data) {
   (void)sig; (void)data;
   wl_display_terminate(g_display);
@@ -2808,6 +3124,7 @@ int main(int argc, char **argv) {
   const char *sock = argc > 1 ? argv[1] : "wayland-0";
   signal(SIGPIPE, SIG_IGN);
   g_debug = getenv("AW_DEBUG") != NULL;
+  g_mock = getenv("AW_MOCK") != NULL;
 
   g_display = wl_display_create();
   if (!g_display) {
@@ -2841,15 +3158,24 @@ int main(int argc, char **argv) {
                    fsm_bind);
   wl_global_create(g_display, &wp_cursor_shape_manager_v1_interface, 1, NULL,
                    csm_bind);
+  wl_global_create(g_display, &zxdg_output_manager_v1_interface, 2, NULL, xom_bind);
+  wl_global_create(g_display, &wp_presentation_interface, 1, NULL, pres_bind);
+  wl_global_create(g_display, &zwp_idle_inhibit_manager_v1_interface, 1, NULL,
+                   iim_bind);
+  wl_global_create(g_display, &xdg_activation_v1_interface, 1, NULL, act_bind);
   wl_global_create(g_display, &zxdg_decoration_manager_v1_interface, 1, NULL,
                    deco_mgr_bind);
   wl_global_create(g_display, &org_kde_kwin_server_decoration_manager_interface, 1,
                    NULL, kde_mgr_bind);
 
+  wl_list_init(&g_frame_q);
+  g_frame_timer = wl_event_loop_add_timer(g_loop, frame_tick, NULL);
   g_pump_timer = wl_event_loop_add_timer(g_loop, pump_events, NULL);
   wl_event_loop_add_signal(g_loop, SIGCHLD, on_chld, NULL);
   wl_event_loop_add_signal(g_loop, SIGTERM, on_term, NULL);
   wl_event_loop_add_signal(g_loop, SIGINT, on_term, NULL);
+  if (g_mock)
+    wl_event_loop_add_signal(g_loop, SIGUSR1, mock_dump, NULL);
 
   int kfd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
   if (kfd >= 0)
@@ -2868,8 +3194,10 @@ int main(int argc, char **argv) {
             sock, getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(null)");
     return 1;
   }
-  launchers_load();
-  launchers_pin();
+  if (!g_mock) {
+    launchers_load();
+    launchers_pin();
+  }
   g_launch_timer = wl_event_loop_add_timer(g_loop, launch_poll, NULL);
   wl_event_source_timer_update(g_launch_timer, 100);
   fprintf(stderr, "[aurora-wayland] READY socket=%s\n", sock);

@@ -17,6 +17,7 @@ ap.add_argument('--log', default='/tmp/boot-test.log')
 ap.add_argument('--boot-test', action='append', default=[])
 ap.add_argument('--step', action='append', default=[])
 ap.add_argument('--done', default='DRIVE-DONE')
+ap.add_argument('--extra', action='append', default=[], help='argumento extra para QEMU (repetible), p. ej. --extra=-vga --extra=none')
 a = ap.parse_args()
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(root)
@@ -41,7 +42,7 @@ q = subprocess.Popen([
     '-drive', 'if=pflash,format=raw,file=OVMF_VARS.fd',
     '-m', a.m, '-no-reboot', '-smp', '2', '-cdrom', 'aurora.iso',
     '-display', 'none', '-monitor', 'unix:/tmp/qmon.sock,server,nowait',
-    '-serial', 'file:' + a.log])
+    '-serial', 'file:' + a.log] + a.extra)
 
 for _ in range(60):
     if os.path.exists('/tmp/qmon.sock'):

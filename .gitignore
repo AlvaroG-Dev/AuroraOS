@@ -48,3 +48,9 @@ kernel.bak.string/
 kernel.bak
 debug.log
 qemu_debug.log
+
+# Mesa/LLVM de Ubuntu: demasiado grande para git; se baja con scripts/fetch-mesa.sh
+libs/glibc/lib/x86_64-linux-gnu/libLLVM*
+libs/glibc/lib/x86_64-linux-gnu/libgallium*
+precompiled/usr/lib/x86_64-linux-gnu/dri/
+build/mesa_stage/

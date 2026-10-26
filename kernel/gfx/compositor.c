@@ -36,6 +36,7 @@
 #include "gfx.h"
 #include "gfx_filter.h"
 #include "menubar.h"
+#include "../gpu_proxy.h"
 #include "taskbar.h"
 #include "theme.h"
 #include "window.h"
@@ -195,8 +196,6 @@ static void invalidate_window(window_t *w) {
   w->last_vis = now;
 }
 
-static void update_cursor_shape(void);
-
 /* =========================================================================
  * Cola de comandos (cualquier CPU -> hilo del compositor)
  * =======================================================================*/
@@ -210,7 +209,7 @@ typedef enum {
   CMD_MAXIMIZE, /* value: 1 = maximizar, 0 = restaurar */
   CMD_DOCK_PIN, /* title = nombre, app_id, symbol, color, value = launch_id */
   CMD_WIN_APP,  /* win + app_id: la ventana pasa al lanzador de esa app */
-  CMD_WIN_CURSOR /* win + value (cursor_shape_t) */
+  CMD_WIN_GRAB  /* win + value: 0 = mover, otro = RESIZE_EDGE_* (peticion del cliente) */
 } cmd_type_t;
 
 typedef struct {
@@ -754,6 +753,7 @@ static void do_toggle_maximize(window_t *win) {
   invalidate_window(win);
   winsrv_post_event(win, WINSRV_EV_RESIZE, win->content_w, win->content_h, 0);
   winsrv_post_event(win, WINSRV_EV_MOVE, nx, ny, 0);
+  winsrv_post_event(win, WINSRV_EV_STATE, win->maximized, 0, 0);
 }
 
 /* Fija (o actualiza) un lanzador en el Dock. */
@@ -859,10 +859,25 @@ static void exec_cmd(const comp_cmd_t *c) {
     if (stack_contains(c->win))
       do_win_app(c->win, c->app_id);
     break;
-  case CMD_WIN_CURSOR:
-    if (stack_contains(c->win)) {
-      c->win->client_cursor = c->value;
-      update_cursor_shape();
+  case CMD_WIN_GRAB:
+    /* xdg_toplevel.move/resize: solo mientras siga pulsado el boton izquierdo
+     * (el cliente lo pide con el serial de ese clic). */
+    if (stack_contains(c->win) && (last_mouse_buttons & 0x01) && !drag_window &&
+        !resize_window && c->win->anim_state == WIN_ANIM_NONE &&
+        !(c->win->flags & (WIN_FLAGS_NODECORATION | WIN_FLAGS_POPUP))) {
+      window_t *win = c->win;
+      if (c->value == 0) {
+        drag_window = win;
+        drag_offset_x = cursor_x - win->x;
+        drag_offset_y = cursor_y - win->y;
+      } else if (!(win->flags & WIN_FLAGS_FIXED_SIZE)) {
+        resize_window = win;
+        resize_edge = c->value;
+        resize_origin_x = cursor_x;
+        resize_origin_y = cursor_y;
+        resize_from = (rect_t){win->x, win->y, win->width, win->height};
+        resize_to = resize_from;
+      }
     }
     break;
   }
@@ -915,8 +930,8 @@ void compositor_set_app_id(window_t *win, const char *app_id) {
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
   cmd_post(&c);
 }
-void compositor_set_cursor(window_t *win, int shape) {
-  comp_cmd_t c = {.type = CMD_WIN_CURSOR, .win = win, .value = shape};
+void compositor_begin_grab(window_t *win, int edges) {
+  comp_cmd_t c = {.type = CMD_WIN_GRAB, .win = win, .value = edges};
   cmd_post(&c);
 }
 void compositor_set_icon_bmp(window_t *win, tar_node_t *node) {
@@ -1029,11 +1044,7 @@ static void update_cursor_shape(void) {
              cursor_y >= AURORA_MENUBAR_H &&
              !dock_hit_test(cursor_x, cursor_y)) {
     win_hit_t h;
-    window_t *w = window_at_cursor(&h);
-    if (w && h == WIN_HIT_CLIENT && w->client_cursor > 0 &&
-        w->client_cursor < CURSOR_COUNT)
-      s = (cursor_shape_t)w->client_cursor;
-    else if (w)
+    if (window_at_cursor(&h))
       s = shape_for_edges(edges_for_hit(h));
   }
   set_cursor_shape(s);
@@ -1135,9 +1146,12 @@ static void finish_resize(void) {
   }
   w->x = to.x;
   w->y = to.y;
+  int was_max = w->maximized;
   w->maximized = 0;
   invalidate_window(w);
   winsrv_post_event(w, WINSRV_EV_MOVE, w->x, w->y, 0);
+  if (was_max)
+    winsrv_post_event(w, WINSRV_EV_STATE, 0, 0, 0);
 }
 
 /* Puntero "crudo" para clientes con WIN_FLAGS_RAW_INPUT (p. ej. el servidor
@@ -1362,6 +1376,8 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
     if (new_x != drag_window->x || new_y != drag_window->y) {
       drag_window->x = new_x;
       drag_window->y = new_y;
+      if (drag_window->maximized)
+        winsrv_post_event(drag_window, WINSRV_EV_STATE, 0, 0, 0);
       drag_window->maximized = 0;
       title_click_win = NULL; /* arrastrar no cuenta como clic */
       invalidate_window(drag_window);
@@ -1579,6 +1595,7 @@ static void render_rect(rect_t clip) {
 
   /* 4. Volcado a VRAM + cursor */
   present_rect(clip);
+  gpup_notify_dirty(clip.x, clip.y, clip.w, clip.h);
   uint64_t t4 = comp_rdtsc();
 
   g_ph_cur[PH_BG] += t1 - t0;

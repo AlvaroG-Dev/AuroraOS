@@ -29,6 +29,8 @@
 // la ventana.
 #define WINSRV_EV_PTR 10
 #define WINSRV_EV_PTR_LEAVE 11
+// Cambio de estado de la ventana hecho por Aurora: x = 1 maximizada, 0 no.
+#define WINSRV_EV_STATE 12
 
 #define WINSRV_USER_LIMIT 0x0000800000000000ULL
 
@@ -93,8 +95,9 @@ int winsrv_set_title(task_t *owner, int win_id, const char *title);
 int winsrv_set_state(task_t *owner, int win_id, int state);
 // app_id de la ventana (ASYS_WIN_SET_APP_ID): la agrupa en el Dock.
 int winsrv_set_app_id(task_t *owner, int win_id, const char *app_id);
-// Forma de cursor sobre el contenido (ASYS_WIN_SET_CURSOR; cursor_shape_t).
-int winsrv_set_cursor(task_t *owner, int win_id, int shape);
+// Inicia un arrastre (edges=0) o redimension (bits RESIZE_EDGE_*: 1 der, 2 inf,
+// 4 izq, 8 sup) interactivo; solo vale con el boton izquierdo pulsado.
+int winsrv_begin_grab(task_t *owner, int win_id, int edges);
 // Carga un BMP del VFS como nodo permanente (icono del Dock); NULL si falla.
 tar_node_t *winsrv_load_icon_node(const char *path);
 

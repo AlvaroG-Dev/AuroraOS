@@ -13,6 +13,7 @@
 #include "aur_bus.h"
 #include "block.h"
 #include "block_proxy.h"
+#include "gpu_proxy.h"
 #include "boot_console.h"
 #include "boot_splash.h"
 #include "bus.h"
@@ -149,6 +150,20 @@ static int fb_init(uint64_t base, uint32_t w, uint32_t h, uint32_t pitch,
   }
   LOG_INFO("[FB] Inicializado: %p %ux%u bpp=%u", (void *)base, w, h, bpp);
   return 1;
+}
+
+// Pantalla "tardia" (ver gpu_proxy.c): framebuffer en RAM de un driver GPU.
+int fb_adopt_ram(uint64_t phys, uint64_t size, uint32_t w, uint32_t h,
+                 uint32_t pitch) {
+  if (fb_ptr)
+    return -EBUSY;
+  if (!fb_init((uint64_t)phys_to_virt(phys), w, h, pitch, 32, size))
+    return -EINVAL;
+  gpup_set_framebuffer(phys, size, w, h, pitch, 32);
+  boot_console_init(fb_ptr, fb_width, fb_height, fb_pitch);
+  boot_console_clear();
+  boot_console_hook_install();
+  return 0;
 }
 
 void fb_flush_rect(const uint32_t *src, uint32_t src_pitch, uint32_t x,
@@ -289,6 +304,8 @@ static int fb_init_task(void *arg) {
                              PTE_WRITABLE | PTE_WRITECOMB | PTE_NX);
     if (fb_virt && fb_init((uint64_t)fb_virt, boot.fb_width, boot.fb_height,
                            boot.fb_pitch, boot.fb_bpp, boot.fb_size)) {
+      gpup_set_framebuffer(boot.fb_base, boot.fb_size, boot.fb_width,
+                           boot.fb_height, boot.fb_pitch, boot.fb_bpp);
       if (g_boot_splash_enabled) {
         extern uint32_t g_boot_splash_initial_phase;
         extern uint32_t g_boot_splash_initial_ms;
@@ -671,6 +688,15 @@ static void system_init_task(void) {
   }
 
   // 10. Reveal de splash + compositor.
+  // Sin framebuffer del firmware (GOP solo-Blt: virtio-gpu sin VGA...) se
+  // espera a que el driver GPU .aur pida uno (GPUP_ALLOC_FB).
+  if (!fb_ptr && gpup_display_expected()) {
+    klog_boot_step("[INIT] Esperando driver de pantalla...");
+    if (gpup_wait_display(10000))
+      klog_boot_ok();
+    else
+      klog_boot_warn("[INIT] sin framebuffer ni driver de pantalla");
+  }
   if (fb_ptr) {
     if (g_boot_splash_enabled && boot_splash_active()) {
       compositor_init();

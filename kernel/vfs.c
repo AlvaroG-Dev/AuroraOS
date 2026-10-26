@@ -19,6 +19,7 @@
 #include "gfx/winsrv.h"
 #include "heap.h"
 #include "input_proxy.h"
+#include "gpu_proxy.h"
 #include "irq_user.h"
 #include "msi_user.h"
 #include "block_proxy.h"
@@ -2030,6 +2031,7 @@ static const devfs_entry_t devfs_entries[] = {
     {"usbproxy", &uproxy_dev_ops, VFS_CHARDEVICE, (10u << 8) | 202},
     {"inputproxy", &inputp_dev_ops, VFS_CHARDEVICE, (10u << 8) | 203},
     {"msi", &msi_dev_ops, VFS_CHARDEVICE, (10u << 8) | 204},
+    {"gpuproxy", &gpup_dev_ops, VFS_CHARDEVICE, (10u << 8) | 205},
 };
 
 // ===========================================================================
@@ -2642,6 +2644,7 @@ void vfs_init(void) {
   }
   aur_irq_init(); // <-- NUEVO
   blkp_init();
+  gpup_init();
   uproxy_init();
   int rc3 = vfs_mount("/proc", procfs_get_vfs_ops(), NULL);
   if (rc3 != 0) {

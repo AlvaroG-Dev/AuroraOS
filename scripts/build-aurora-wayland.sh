@@ -22,6 +22,10 @@ gen "$PROTO/staging/fractional-scale/fractional-scale-v1.xml" fractional-scale-v
 gen "$PROTO/unstable/primary-selection/primary-selection-unstable-v1.xml" primary-selection-unstable-v1
 gen "$PROTO/staging/cursor-shape/cursor-shape-v1.xml" cursor-shape-v1
 gen "$PROTO/stable/tablet/tablet-v2.xml" tablet-v2
+gen "$PROTO/unstable/xdg-output/xdg-output-unstable-v1.xml" xdg-output-unstable-v1
+gen "$PROTO/stable/presentation-time/presentation-time.xml" presentation-time
+gen "$PROTO/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml" idle-inhibit-unstable-v1
+gen "$PROTO/staging/xdg-activation/xdg-activation-v1.xml" xdg-activation-v1
 gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora-wayland" \
     "$ROOT/user/aurora-wayland/aurora-wayland.c" "$GEN/xdg-shell-protocol.c" \
     "$GEN/xdg-decoration-unstable-v1-protocol.c" \
@@ -29,6 +33,8 @@ gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora
     "$GEN/viewporter-protocol.c" "$GEN/fractional-scale-v1-protocol.c" \
     "$GEN/primary-selection-unstable-v1-protocol.c" \
     "$GEN/cursor-shape-v1-protocol.c" "$GEN/tablet-v2-protocol.c" \
+    "$GEN/xdg-output-unstable-v1-protocol.c" "$GEN/presentation-time-protocol.c" \
+    "$GEN/idle-inhibit-unstable-v1-protocol.c" "$GEN/xdg-activation-v1-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" \
     -lwayland-server -l:libxkbcommon.so.0 -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aurora-wayland"

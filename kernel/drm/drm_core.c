@@ -8,6 +8,7 @@
 #include "../devtmpfs.h"
 #include "../gfx/compositor.h"
 #include "../gfx/window.h"
+#include "../gpu_proxy.h"
 #include "../heap.h"
 #include "../klog.h"
 #include "../kthread.h"
@@ -226,6 +227,7 @@ enum {
   P_CRTC_MODE_ID,
   P_CONN_DPMS,
   P_CONN_CRTC_ID,
+  P_CONN_EDID,
   P_LAST
 };
 
@@ -255,6 +257,7 @@ static const prop_def_t g_props[] = {
     {P_CRTC_MODE_ID, "MODE_ID", PROP_BLOB | PROP_ATOMIC, 0, 0, 0},
     {P_CONN_DPMS, "DPMS", PROP_ENUM, 0, 3, 0},
     {P_CONN_CRTC_ID, "CRTC_ID", PROP_OBJECT | PROP_ATOMIC, 0, 0, OBJ_CRTC},
+    {P_CONN_EDID, "EDID", PROP_BLOB | PROP_IMMUTABLE, 0, 0, 0},
 };
 #define NPROPS ((int)(sizeof(g_props) / sizeof(g_props[0])))
 
@@ -263,7 +266,8 @@ static const uint32_t g_plane_props[] = {
     P_PLANE_CRTC_Y, P_PLANE_CRTC_W, P_PLANE_CRTC_H,  P_PLANE_SRC_X,
     P_PLANE_SRC_Y,  P_PLANE_SRC_W,  P_PLANE_SRC_H};
 static const uint32_t g_crtc_props[] = {P_CRTC_ACTIVE, P_CRTC_MODE_ID};
-static const uint32_t g_conn_props[] = {P_CONN_DPMS, P_CONN_CRTC_ID};
+static const uint32_t g_conn_props[] = {P_CONN_DPMS, P_CONN_CRTC_ID,
+                                        P_CONN_EDID};
 
 static const struct {
   uint64_t v;
@@ -617,7 +621,24 @@ static void mark_flip(void) {
 // ---------------------------------------------------------------------------
 // Blobs
 // ---------------------------------------------------------------------------
+// EDID del adaptador (si el driver GPU .aur registro uno): blob fijo y de solo
+// lectura, id reservado por debajo de DRM_BLOB_ID_BASE.
+#define DRM_EDID_BLOB_ID (DRM_BLOB_ID_BASE - 1)
+static drm_blob_t g_edid_blob;
+static drm_blob_t *edid_blob(void) {
+  const struct aur_gpu_reg *a = gpup_adapter();
+  if (!a || a->edid_len != 128)
+    return NULL;
+  g_edid_blob.id = DRM_EDID_BLOB_ID;
+  g_edid_blob.data = (uint8_t *)a->edid;
+  g_edid_blob.len = a->edid_len;
+  g_edid_blob.owner = NULL;
+  return &g_edid_blob;
+}
+
 static drm_blob_t *blob_find(uint32_t id) {
+  if (id == DRM_EDID_BLOB_ID)
+    return edid_blob();
   for (int i = 0; i < MAX_BLOBS; i++)
     if (g_blobs[i].data && g_blobs[i].id == id)
       return &g_blobs[i];
@@ -665,6 +686,8 @@ static int ioctl_destroy_blob(uint64_t arg) {
   int rc = drm_get_user(arg, &id, sizeof(id));
   if (rc)
     return rc;
+  if (id == DRM_EDID_BLOB_ID)
+    return -EPERM;
   drm_blob_t *b = blob_find(id);
   if (!b)
     return -ENOENT;
@@ -715,7 +738,9 @@ static int ioctl_version(uint64_t arg) {
   v.patch = 0;
   if ((rc = put_string(v.name, &v.name_len, "aurora")) ||
       (rc = put_string(v.date, &v.date_len, "20260101")) ||
-      (rc = put_string(v.desc, &v.desc_len, "AuroraOS DRM/KMS")))
+      (rc = put_string(v.desc, &v.desc_len,
+                       gpup_adapter() ? gpup_adapter()->name
+                                      : "AuroraOS DRM/KMS")))
     return rc;
   return drm_put_user(arg, &v, sizeof(v));
 }
@@ -889,6 +914,7 @@ static uint64_t prop_value(uint32_t pid) {
   case P_CRTC_MODE_ID: return act ? g_crtc.mode_blob : 0;
   case P_CONN_DPMS: return act ? 0 : 3;
   case P_CONN_CRTC_ID: return act ? DRM_CRTC_ID : 0;
+  case P_CONN_EDID: return edid_blob() ? DRM_EDID_BLOB_ID : 0;
   }
   return 0;
 }

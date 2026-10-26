@@ -32,11 +32,19 @@ gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/aw_sub_test" "$ROOT/tests/wayland/aw
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" -lwayland-client \
     -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aw_sub_test"
+# App GTK3 minima (necesita libgtk-3-dev en el host de build; se omite si falta).
+if pkg-config --exists gtk+-3.0 2>/dev/null; then
+    gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/hello-gtk" "$ROOT/tests/wayland/hello-gtk.c" \
+        $(pkg-config --cflags --libs gtk+-3.0)
+    echo "OK: precompiled/usr/bin/hello-gtk"
+fi
 # Scripts que se ejecutan dentro del guest.
 for s in "$ROOT"/tests/wayland/guest/*.sh; do
     cp -f "$s" "$ROOT/precompiled/usr/bin/$(basename "$s")"
     chmod +x "$ROOT/precompiled/usr/bin/$(basename "$s")"
 done
+gcc -O1 -Wall -Wno-unused-result -o "$ROOT/precompiled/usr/bin/fuzz_test" "$ROOT/tests/wayland/fuzz_test.c"
+echo "OK: precompiled/usr/bin/fuzz_test"
 gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/drm_test" "$ROOT/tests/wayland/drm_test.c"
 echo "OK: precompiled/usr/bin/drm_test"
 bash "$ROOT/scripts/build-aurora-wayland.sh"

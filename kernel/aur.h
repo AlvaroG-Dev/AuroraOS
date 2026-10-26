@@ -43,6 +43,7 @@
 // (1u << 7) = AUR_CAP_USB_HCD, definido más abajo junto a /dev/usbproxy.
 #define AUR_CAP_INPUT_DEVICE (1u << 8)
 #define AUR_CAP_MSI (1u << 9)
+#define AUR_CAP_GPU (1u << 10)
 
 // Tipo de bus para matching.
 #define AUR_BUS_NONE 0
@@ -316,6 +317,79 @@ _Static_assert(sizeof(struct aur_input_port) == 4,
 _Static_assert(sizeof(struct aur_input_feed) == 72,
                "aur_input_feed debe ser 72 bytes");
 
+
+// ---------------------------------------------------------------------------
+// [FASE 6.1] /dev/gpuproxy — driver de pantalla (GPU/adaptador) en Ring 3.
+//
+// Requiere AUR_CAP_GPU; un unico propietario. El kernel conserva el
+// compositor y la memoria del framebuffer que dejo el firmware (GOP); el .aur
+// es el dueno del hardware de presentacion. Dos casos:
+//   - bochs/VGA lineal: el framebuffer ya es visible; el driver solo describe
+//     el adaptador (nombre, modos, EDID) para DRM.
+//   - virtio-gpu 2D: el framebuffer es RAM que el host no escanea por si
+//     solo; el driver crea un recurso 2D cuyo backing es ese mismo
+//     framebuffer y, por cada rectangulo sucio que reporta el kernel, hace
+//     TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
+//
+//   GPUP_INFO (struct aur_gpu_info*)     out: dónde está el framebuffer.
+//   GPUP_ALLOC_FB (struct aur_gpu_info*)  solo si el firmware no dejo
+//       framebuffer (GOP "BltOnly", p. ej. virtio-gpu sin VGA): in = width,
+//       height deseados; el kernel reserva un framebuffer en RAM, arranca la
+//       pantalla con él y devuelve la info completa. Es el propio driver
+//       quien lo presenta con TRANSFER+FLUSH.
+//   GPUP_REGISTER (struct aur_gpu_reg*)  describe el adaptador; si lleva
+//       AUR_GPU_NEEDS_PRESENT el kernel empieza a acumular rectángulos sucios.
+//   GPUP_WAIT_PRESENT (struct aur_gpu_present*)  bloquea (salvo
+//       AUR_GPU_NOWAIT -> -EAGAIN) hasta que haya algo que presentar y
+//       devuelve el rectángulo sucio acumulado (varios se fusionan).
+//
+// Si el proceso cierra el fd o muere, el kernel deja de notificar y el
+// framebuffer sigue siendo el de GOP (sin presentación).
+// ---------------------------------------------------------------------------
+#define GPUP_INFO 0x800
+#define GPUP_REGISTER 0x801
+#define GPUP_WAIT_PRESENT 0x802
+#define GPUP_ALLOC_FB 0x803
+
+#define AUR_GPU_NEEDS_PRESENT (1u << 0) // aur_gpu_reg.flags
+#define AUR_GPU_NOWAIT (1u << 0)        // aur_gpu_present.flags
+#define AUR_GPU_MAX_MODES 16
+
+struct aur_gpu_info {
+  uint64_t fb_phys; // dirección física del framebuffer
+  uint64_t fb_size; // bytes
+  uint32_t width, height;
+  uint32_t pitch; // bytes por línea
+  uint32_t bpp;   // 24 o 32
+};
+
+struct aur_gpu_mode {
+  uint16_t width, height;
+  uint16_t refresh; // Hz
+  uint16_t flags;   // bit 0: preferido
+};
+
+struct aur_gpu_reg {
+  char name[32];
+  uint32_t flags; // AUR_GPU_*
+  uint32_t n_modes;
+  struct aur_gpu_mode modes[AUR_GPU_MAX_MODES];
+  uint32_t edid_len; // 0 o 128
+  uint32_t _pad;
+  uint8_t edid[128];
+};
+
+struct aur_gpu_present {
+  uint32_t x, y, w, h; // out: rectángulo sucio
+  uint32_t flags;      // in: AUR_GPU_NOWAIT
+  uint32_t seq;        // out: nº de presentación
+};
+
+_Static_assert(sizeof(struct aur_gpu_info) == 32, "aur_gpu_info debe ser 32 bytes");
+_Static_assert(sizeof(struct aur_gpu_mode) == 8, "aur_gpu_mode debe ser 8 bytes");
+_Static_assert(sizeof(struct aur_gpu_reg) == 32 + 8 + 128 + 8 + 128,
+               "aur_gpu_reg debe ser 304 bytes");
+_Static_assert(sizeof(struct aur_gpu_present) == 24, "aur_gpu_present debe ser 24 bytes");
 
 // ---------------------------------------------------------------------------
 // [FASE 4.5b] /dev/msi — MSI para drivers de usuario.

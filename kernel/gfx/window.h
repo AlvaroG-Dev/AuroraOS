@@ -135,10 +135,6 @@ typedef struct window {
   int maximized;
   int pending_max; // 0 = ninguna, 1 = maximizar, 2 = restaurar al acabar la anim
   int restore_x, restore_y, restore_w, restore_h;
-
-  /* Forma de cursor que pide el cliente sobre su area de contenido
-   * (cursor_shape_t; 0 = la flecha de Aurora). */
-  int client_cursor;
 } window_t;
 
 window_t *window_create(int x, int y, int w, int h, const char *title,
