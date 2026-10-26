@@ -236,8 +236,9 @@ static int64_t tmpfs_write_op(vfs_node_t *vn, uint64_t off, size_t sz,
 }
 
 static int tmpfs_open_op(vfs_node_t *vn, int flags) {
-  (void)vn;
-  (void)flags;
+  // Un fichero socket (bind de AF_UNIX) no se puede abrir (ENXIO), salvo O_PATH.
+  if ((vn->mode & S_IFMT) == S_IFSOCK && !(flags & 010000000))
+    return -ENXIO;
   return 0;
 }
 
@@ -349,6 +350,25 @@ static int tmpfs_create_op(vfs_node_t *dir_vn, const char *name,
   dir->mtime = n->mtime;
 
   mutex_unlock(&fs->lock);
+  return 0;
+}
+
+// mknod de sockets/FIFOs (nodos sin datos): `mode` lleva el tipo.
+static int tmpfs_mknod_op(vfs_node_t *dir_vn, const char *name, uint32_t mode,
+                          uint32_t rdev) {
+  (void)rdev;
+  uint32_t type = mode & S_IFMT;
+  if (type != S_IFSOCK && type != S_IFIFO)
+    return -EPERM;
+  int rc = tmpfs_create_op(dir_vn, name, mode & 07777);
+  if (rc)
+    return rc;
+  tmpfs_node_t *dir = (tmpfs_node_t *)dir_vn->priv;
+  mutex_lock(&dir->fs->lock);
+  tmpfs_node_t *n = lookup_child_locked(dir, name);
+  if (n)
+    n->mode = type | (mode & 07777);
+  mutex_unlock(&dir->fs->lock);
   return 0;
 }
 
@@ -651,6 +671,7 @@ static vfs_ops_t tmpfs_dir_ops = {
     .open = tmpfs_open_op,
     .close = tmpfs_close_op,
     .create = tmpfs_create_op,
+    .mknod = tmpfs_mknod_op,
     .mkdir = tmpfs_mkdir_op,
     .unlink = tmpfs_unlink_op,
     .rename = tmpfs_rename_op,

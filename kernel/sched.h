@@ -69,6 +69,13 @@ typedef struct task {
 
   uint32_t *clear_child_tid;
 
+  // rseq(2): area registrada por este hilo (0 = ninguna) y contador de
+  // conmutaciones (el kernel actualiza cpu_id y aborta la seccion critica
+  // en el primer retorno a userland tras una).
+  uint64_t rseq_ptr;
+  uint32_t rseq_len, rseq_sig;
+  uint32_t rseq_sw, rseq_seen;
+
   // [KTHREAD] Back-pointer al handle cuando esta task fue creada vía
   // kthread_create/run. NULL para tareas nativas del kernel y para
   // procesos de usuario. kthread_stop lo pone a NULL antes de liberar

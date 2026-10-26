@@ -6,6 +6,7 @@
 // distinguir de un vistazo a qué ABI pertenecen.
 
 #include "syscall.h"
+#include "rseq.h"
 #include "smp_boot.h"
 #include "cpu.h"
 #include "epoll.h"
@@ -3357,17 +3358,6 @@ static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
     written += n;
   }
   return (int64_t)buflen;
-}
-
-// ---------- rseq ----------
-static int64_t k_rseq(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
-                      uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return -ENOSYS;
 }
 
 // ---------- fcntl ----------
@@ -7490,6 +7480,8 @@ uint64_t syscall_handler_c(registers_t *regs) {
   // correcto (valor de retorno de la syscall).
   regs->rax = ret;
 
+  if (cur)
+    rseq_exit_to_user(cur, regs);
   signal_check_pending();
 
   if (cur)

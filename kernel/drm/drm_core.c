@@ -210,6 +210,9 @@ struct wait_vblank_u {
 #define MODE_TYPE_DRIVER (1u << 6)
 #define MODE_FLAG_PHSYNC 1u
 #define MODE_FLAG_PVSYNC 4u
+#define MODE_FLAG_NHSYNC 2u
+#define MODE_FLAG_NVSYNC 8u
+#define MODE_FLAG_INTERLACE 16u
 
 // Propiedades.
 enum {
@@ -362,15 +365,70 @@ static void work_size(int *w, int *h) {
   *h = hh;
 }
 
-#define MAX_MODES 6
+#define MAX_MODES 24
+static drm_blob_t *edid_blob(void);
+
+static void mode_from_edid(struct modeinfo *m, const struct edid_mode *e, uint32_t type) {
+  memset(m, 0, sizeof(*m));
+  m->clock = e->clock_khz;
+  m->hdisplay = e->hdisplay;
+  m->hsync_start = e->hsync_start;
+  m->hsync_end = e->hsync_end;
+  m->htotal = e->htotal;
+  m->vdisplay = e->vdisplay;
+  m->vsync_start = e->vsync_start;
+  m->vsync_end = e->vsync_end;
+  m->vtotal = e->vtotal;
+  m->vrefresh = e->refresh_hz;
+  m->flags = ((e->flags & EDID_MODE_PHSYNC) ? MODE_FLAG_PHSYNC : MODE_FLAG_NHSYNC) |
+             ((e->flags & EDID_MODE_PVSYNC) ? MODE_FLAG_PVSYNC : MODE_FLAG_NVSYNC) |
+             ((e->flags & EDID_MODE_INTERLACED) ? MODE_FLAG_INTERLACE : 0);
+  m->type = type | (e->detailed ? MODE_TYPE_DRIVER : 0);
+  snprintf(m->name, sizeof(m->name), "%dx%d", e->hdisplay, e->vdisplay);
+}
+
+static bool mode_listed(const struct modeinfo *out, int n, int w, int h, int hz) {
+  for (int i = 0; i < n; i++)
+    if (out[i].hdisplay == w && out[i].vdisplay == h && (!hz || out[i].vrefresh == hz))
+      return true;
+  return false;
+}
+
+// Modos del conector: el del area de trabajo (preferido: es lo que se muestra),
+// los del EDID del monitor (temporizaciones reales) que quepan en ella y los
+// estandar de siempre. El scanout es una ventana, asi que un modo mas grande
+// que el area de trabajo no se ofrece.
 static int build_modes(struct modeinfo *out) {
   int w, h, n = 0;
   work_size(&w, &h);
-  fill_mode(&out[n++], w, h, MODE_TYPE_PREFERRED | MODE_TYPE_DRIVER);
+  struct edid_mode em[16];
+  int ne = 0;
+  drm_blob_t *eb = edid_blob();
+  if (eb)
+    ne = edid_modes(eb->data, eb->len, em, 16);
+  // Si el EDID trae la temporizacion exacta del modo del area de trabajo, se usa.
+  int pref = -1;
+  for (int i = 0; i < ne; i++)
+    if (em[i].hdisplay == w && em[i].vdisplay == h && em[i].detailed) {
+      pref = i;
+      break;
+    }
+  if (pref >= 0)
+    mode_from_edid(&out[n++], &em[pref], MODE_TYPE_PREFERRED);
+  else
+    fill_mode(&out[n++], w, h, MODE_TYPE_PREFERRED | MODE_TYPE_DRIVER);
+  for (int i = 0; i < ne && n < MAX_MODES; i++) {
+    if (i == pref || em[i].hdisplay > w || em[i].vdisplay > h ||
+        (em[i].flags & EDID_MODE_INTERLACED))
+      continue;
+    if (mode_listed(out, n, em[i].hdisplay, em[i].vdisplay, em[i].refresh_hz))
+      continue;
+    mode_from_edid(&out[n++], &em[i], 0);
+  }
   static const int std[][2] = {
       {1920, 1080}, {1280, 720}, {1024, 768}, {800, 600}, {640, 480}};
   for (unsigned i = 0; i < sizeof(std) / sizeof(std[0]) && n < MAX_MODES; i++) {
-    if (std[i][0] <= w && std[i][1] <= h && !(std[i][0] == w && std[i][1] == h))
+    if (std[i][0] <= w && std[i][1] <= h && !mode_listed(out, n, std[i][0], std[i][1], 0))
       fill_mode(&out[n++], std[i][0], std[i][1], MODE_TYPE_DRIVER);
   }
   return n;

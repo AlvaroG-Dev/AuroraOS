@@ -166,6 +166,9 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
 
   task->fs_base = 0;
   task->clear_child_tid = NULL;
+  task->rseq_ptr = 0;
+  task->rseq_len = task->rseq_sig = 0;
+  task->rseq_sw = task->rseq_seen = 0;
 
   // [KTHREAD] tareas nativas no son kthreads
   task->kthread = NULL;
@@ -494,6 +497,7 @@ void sched_tick(void) {
     this_cpu(kernel_stack) = kstack;
   }
 
+  old->rseq_sw++; // rseq: la tarea sale de la CPU (preemption/migracion)
   task_switch(old, next, &sched_lock);
 
   __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");

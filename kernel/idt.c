@@ -2,6 +2,7 @@
 // IDT, ISR handlers y PIC
 
 #include "idt.h"
+#include "rseq.h"
 #include "ipi.h"
 #include "irq_threaded.h"
 #include "klog.h"
@@ -379,6 +380,8 @@ static void irq_try_deliver_signals(registers_t *regs) {
   task_t *cur = sched_current();
   if (!cur || !cur->proc)
     return;
+
+  rseq_exit_to_user(cur, regs); // rseq: cpu_id y abort de la seccion critica
 
   // Fast path: sin señales pendientes, ni tocamos syscall_regs.
   if (__atomic_load_n(&cur->proc->pending_signals, __ATOMIC_ACQUIRE) == 0)

@@ -776,7 +776,7 @@ int vfs_create(const char *path, uint32_t mode) {
   return rc;
 }
 
-int vfs_mknod(const char *path, uint32_t mode, uint32_t rdev) {
+static int vfs_mknod_impl(const char *path, uint32_t mode, uint32_t rdev, int keep_type) {
   if (!path)
     return -EINVAL;
 
@@ -795,9 +795,16 @@ int vfs_mknod(const char *path, uint32_t mode, uint32_t rdev) {
     vfs_node_free(parent);
     return -EPERM;
   }
-  rc = parent->ops->mknod(parent, base, mode & 07777, rdev);
+  rc = parent->ops->mknod(parent, base, keep_type ? mode : (mode & 07777), rdev);
   vfs_node_free(parent);
   return rc;
+}
+
+int vfs_mknod(const char *path, uint32_t mode, uint32_t rdev) {
+  return vfs_mknod_impl(path, mode, rdev, 0);
+}
+int vfs_mknod_raw(const char *path, uint32_t mode, uint32_t rdev) {
+  return vfs_mknod_impl(path, mode, rdev, 1);
 }
 
 int vfs_mkdir(const char *path, uint32_t mode) {

@@ -7,6 +7,7 @@
 #include "syscall.h"
 #include "uaccess.h"
 #include "wait.h"
+#include "rseq.h"
 #include <stdbool.h>
 
 extern registers_t *syscall_current_regs(void);
@@ -206,6 +207,7 @@ static int build_frame(uint64_t frame_va, int sig, const k_sigaction_t *act,
 // Entrega `sig` al proceso actual, si tiene handler. Devuelve 1 si
 // entregada, 0 si ignorada, y no retorna si es fatal.
 static int deliver(process_t *proc, int sig, registers_t *regs) {
+  rseq_signal(sched_current(), regs); // rseq: una senal aborta la seccion critica
   k_sigaction_t *act = &proc->sigactions[sig];
 
   if (act->handler == SIG_DFL) {

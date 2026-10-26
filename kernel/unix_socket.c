@@ -259,6 +259,23 @@ static void unregister_name(usock_t *u) {
   u->bnext = NULL;
 }
 
+// El nombre de ruta de un socket vive en el VFS como un inodo S_IFSOCK (como
+// en Linux: persiste al cerrar el socket y se quita con unlink). Un socket cuyo
+// fichero ya no existe sigue vivo pero es inalcanzable.
+static bool path_inode_is_sock(const char *key, int klen) {
+  char path[UNIX_NAME_MAX + 1];
+  if (klen <= 0 || klen > UNIX_NAME_MAX)
+    return false;
+  memcpy(path, key, (size_t)klen);
+  path[klen] = '\0'; // las claves no llevan NUL final
+  vfs_node_t *n = vfs_lookup(path);
+  if (!n)
+    return false;
+  bool ok = (n->mode & S_IFMT) == S_IFSOCK;
+  vfs_node_free(n);
+  return ok;
+}
+
 static void cred_of(process_t *proc, ucred_t *c) {
   c->pid = (int32_t)proc->pid;
   c->uid = proc->euid;
@@ -1018,9 +1035,27 @@ int64_t unix_sys_bind(process_t *proc, int fd, uint64_t addr,
     g_bound = u;
     u->registered = true;
     rc = 0;
+  } else if (key[0] == '/' && find_bound(key, klen) &&
+             !path_inode_is_sock(key, klen)) {
+    // Nombre retenido por un socket cuyo fichero fue borrado: se libera.
+    unregister_name(find_bound(key, klen));
+    goto bind_new;
   } else if (find_bound(key, klen)) {
     rc = -EADDRINUSE;
   } else {
+bind_new:
+    if (key[0] == '/') {
+      // Inodo S_IFSOCK en el VFS. Si el FS no admite mknod (initrd de solo
+      // lectura...) el nombre solo existe en la tabla interna.
+      char kpath[UNIX_NAME_MAX + 1];
+      memcpy(kpath, key, (size_t)klen);
+      kpath[klen] = '\0';
+      int mrc = vfs_mknod_raw(kpath, S_IFSOCK | 0777, 0);
+      if (mrc == -EEXIST) {
+        rc = -EADDRINUSE;
+        goto bind_done;
+      }
+    }
     memcpy(u->name, key, (size_t)klen);
     u->name_len = klen;
     u->bnext = g_bound;
@@ -1028,6 +1063,7 @@ int64_t unix_sys_bind(process_t *proc, int fd, uint64_t addr,
     u->registered = true;
     rc = 0;
   }
+bind_done:
   UNLOCK();
   vfs_fd_put_ref(f);
   return rc;
@@ -1079,6 +1115,8 @@ int64_t unix_sys_connect(process_t *proc, int fd, uint64_t addr,
   LOCK();
   for (;;) {
     usock_t *l = find_bound(key, klen);
+    if (l && key[0] == '/' && !path_inode_is_sock(key, klen))
+      l = NULL; // fichero borrado: el socket ya no es alcanzable
     if (u->type == SOCK_DGRAM_T) {
       if (!l || l->type != SOCK_DGRAM_T) {
         rc = (key[0] == '/') ? -ENOENT : -ECONNREFUSED;

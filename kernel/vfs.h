@@ -372,6 +372,8 @@ int vfs_symlink(const char *target, const char *linkpath);
 //   -EINVAL      path inválido (raíz, "..", etc.)
 int vfs_create(const char *path, uint32_t mode);
 int vfs_mknod(const char *path, uint32_t mode, uint32_t rdev);
+// Igual, pero `mode` conserva el tipo (S_IFSOCK/S_IFIFO): la usa bind() de AF_UNIX.
+int vfs_mknod_raw(const char *path, uint32_t mode, uint32_t rdev);
 int vfs_mkdir(const char *path, uint32_t mode);
 int vfs_unlink(const char *path);
 

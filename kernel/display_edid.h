@@ -32,4 +32,22 @@ void display_edid_init(const uint8_t *edid, uint32_t len);
 const uint8_t *display_edid_data(uint32_t *len);
 const struct edid_info *display_edid_info(void);
 
+// Un modo de video descrito por el EDID.
+struct edid_mode {
+  uint16_t hdisplay, hsync_start, hsync_end, htotal;
+  uint16_t vdisplay, vsync_start, vsync_end, vtotal;
+  uint32_t clock_khz;     // 0 = sin temporizacion exacta (modo estandar/establecido)
+  uint32_t refresh_hz;    // redondeado
+  uint32_t flags;         // bit0 interlaced, bit1 hsync+, bit2 vsync+
+  bool detailed;          // viene de un descriptor de temporizacion detallada
+};
+#define EDID_MODE_INTERLACED 1u
+#define EDID_MODE_PHSYNC 2u
+#define EDID_MODE_PVSYNC 4u
+
+// Extrae los modos del EDID (descriptores detallados, temporizaciones
+// establecidas y estandar del bloque base). Sin duplicados (w, h, refresh).
+// Devuelve cuantos escribio en `out` (max `max`).
+int edid_modes(const uint8_t *edid, uint32_t len, struct edid_mode *out, int max);
+
 #endif
