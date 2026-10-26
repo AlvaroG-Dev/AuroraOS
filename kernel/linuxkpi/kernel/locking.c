@@ -66,10 +66,18 @@ static int __lkpi_mutex_lock_slow(struct mutex *m, unsigned int state, struct ww
 
 	raw_spin_lock_irqsave(&m->wait_lock, flags);
 	for (;;) {
-		long o = atomic_long_read(&m->owner);
+		long o;
 
+		/*
+		 * El estado va antes de mirar las condiciones: wound-wait marca
+		 * `wounded` y despierta desde el wait_lock de *otro* cerrojo, asi
+		 * que o lo vemos aqui o su wake_up_process() nos encuentra ya
+		 * fuera de TASK_RUNNING.
+		 */
+		set_current_state(state);
 		if (READ_ONCE(w.granted))
 			break;
+		o = atomic_long_read(&m->owner);
 		if (o == 0) {
 			if (atomic_long_try_cmpxchg(&m->owner, &o, (long)me)) {
 				if (queued)
@@ -97,7 +105,6 @@ static int __lkpi_mutex_lock_slow(struct mutex *m, unsigned int state, struct ww
 			continue;
 		if (ww && ctx && !ctx->is_wait_die)
 			__lkpi_ww_wound(ww, ctx);
-		set_current_state(state);
 		raw_spin_unlock_irqrestore(&m->wait_lock, flags);
 		schedule();
 		raw_spin_lock_irqsave(&m->wait_lock, flags);

@@ -114,7 +114,9 @@ static void stress_mutex(void)
 #define KT_WW_ITERS 400
 static DEFINE_WW_CLASS(kt_ww_class);
 static DEFINE_WD_CLASS(kt_wd_class);
-static struct ww_mutex kt_ww[KT_WW_LOCKS];
+/* Un juego de cerrojos por clase: un fallo de una fase no contamina la otra. */
+static struct ww_mutex kt_ww_sets[2][KT_WW_LOCKS];
+static struct ww_mutex *kt_ww;
 static unsigned long kt_ww_count[KT_WW_LOCKS];
 static int kt_ww_owner[KT_WW_LOCKS];
 static atomic_t kt_ww_deadlk, kt_ww_rounds;
@@ -197,12 +199,13 @@ static int kt_ww_fn(void *data)
 	return 0;
 }
 
-static void stress_ww(struct ww_class *cls, const char *name)
+static void stress_ww(struct ww_class *cls, int set, const char *name)
 {
 	unsigned long total = 0;
 	int i;
 
 	kt_ww_cur_class = cls;
+	kt_ww = kt_ww_sets[set];
 	for (i = 0; i < KT_WW_LOCKS; i++) {
 		ww_mutex_init(&kt_ww[i], cls);
 		kt_ww_count[i] = 0;
@@ -515,8 +518,8 @@ static int __init test_k2_smp_init(void)
 	KT_ASSERT(num_online_cpus() >= 2, "prueba SMP con %u CPUs", num_online_cpus());
 	pr_info("lkpi_test_k2_smp: %u CPUs, %d hilos por fase\n", num_online_cpus(), kt_nthreads);
 	stress_mutex();
-	stress_ww(&kt_ww_class, "ww_mutex wound-wait");
-	stress_ww(&kt_wd_class, "ww_mutex wait-die");
+	stress_ww(&kt_ww_class, 0, "ww_mutex wound-wait");
+	stress_ww(&kt_wd_class, 1, "ww_mutex wait-die");
 	stress_work_timers();
 	stress_rcu();
 	stress_pingpong();
