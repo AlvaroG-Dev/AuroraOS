@@ -19,7 +19,7 @@ make iso >/tmp/boot-test-build.log 2>&1 || { tail -30 /tmp/boot-test-build.log; 
 rm -f sysroot/system/boot-tests
 trap - EXIT
 cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd
-rm -f "$LOG" /tmp/qmon.sock
+rm -f "$LOG" ${QMON_SOCK:-/tmp/qmon.sock}
 
 if [ -n "${QMON:-}" ]; then
   (
@@ -38,7 +38,7 @@ import socket, sys, time
 s = socket.socket(socket.AF_UNIX)
 for _ in range(20):
     try:
-        s.connect('/tmp/qmon.sock')
+        s.connect(__import__('os').environ.get('QMON_SOCK', '/tmp/qmon.sock'))
         break
     except Exception:
         time.sleep(0.5)
@@ -54,5 +54,5 @@ timeout "$T" qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=OVMF_VARS.fd \
   -m "${QEMU_MEM:-512M}" -no-reboot -smp "${QEMU_SMP:-2}" -cdrom aurora.iso -display none \
-  -monitor unix:/tmp/qmon.sock,server,nowait \
+  -monitor unix:${QMON_SOCK:-/tmp/qmon.sock},server,nowait \
   -serial file:"$LOG" || true
