@@ -18,6 +18,7 @@
 //   - Cuando ambos contadores llegan a 0, se libera pipe_t.
 
 #include "pipe.h"
+#include "signal.h"
 #include "heap.h"
 #include "klog.h"
 #include "process.h"
@@ -188,6 +189,7 @@ static int64_t pipe_write(vfs_node_t *node, uint64_t offset, size_t size,
     unsigned long flags = spin_lock_irqsave(&p->lock);
     if (p->readers == 0) {
       spin_unlock_irqrestore(&p->lock, flags);
+      signal_raise_sigpipe(); // write() en pipe sin lectores: SIGPIPE + EPIPE
       return -EPIPE;
     }
     size_t avail = PIPE_BUF_SIZE - p->count;

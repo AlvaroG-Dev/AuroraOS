@@ -7,7 +7,7 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 sleep 5
-/usr/bin/xterm -geometry 60x12 -e 'echo X11-sobre-Aurora; sleep 600' &
+/usr/bin/xterm -geometry 60x12 -e /bin/sh -c 'echo X11-sobre-Aurora; sleep 600' &
 /usr/bin/xeyes &
 /usr/bin/xclock &
 wait

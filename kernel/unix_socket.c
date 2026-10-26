@@ -21,6 +21,7 @@
 //     en el VFS todavía): connect() busca por ruta absoluta normalizada.
 
 #include "unix_socket.h"
+#include "signal.h"
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
@@ -372,7 +373,10 @@ static int64_t uv_write(vfs_node_t *node, uint64_t off, size_t size,
   if (!u)
     return -EBADF;
   process_t *proc = process_current();
-  return core_send(u, u->nonblock, buf, size, NULL, 0, NULL, 0, proc);
+  int64_t wr = core_send(u, u->nonblock, buf, size, NULL, 0, NULL, 0, proc);
+  if (wr == -EPIPE)
+    signal_raise_sigpipe(); // write() en un socket sin par: como Linux
+  return wr;
 }
 
 static int uv_close(vfs_node_t *node) {
@@ -1278,6 +1282,8 @@ int64_t unix_sys_sendmsg(process_t *proc, int fd, uint64_t msg_uptr,
 
   int64_t r = core_send(u, is_nonblock(u, f, flags), kbuf, total,
                         dklen ? dkey : NULL, dklen, fds, nfds, proc);
+  if (r == -EPIPE && !(flags & 0x4000)) // MSG_NOSIGNAL
+    signal_raise_sigpipe();
   if (r < 0 && nfds)
     release_fds(fds, nfds);
   if (kbuf)
@@ -1477,6 +1483,8 @@ int64_t unix_sys_sendto(process_t *proc, int fd, uint64_t buf, uint64_t len,
   }
   int64_t r = core_send(u, is_nonblock(u, f, flags), kbuf, n,
                         dklen ? dkey : NULL, dklen, NULL, 0, proc);
+  if (r == -EPIPE && !(flags & 0x4000)) // MSG_NOSIGNAL
+    signal_raise_sigpipe();
   if (kbuf)
     kfree(kbuf);
   vfs_fd_put_ref(f);

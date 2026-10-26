@@ -5,7 +5,7 @@ set -u
 cd "$(dirname "$0")/../.."
 bash tests/wayland/build.sh || exit 1
 
-TESTS=(unix_test dev_test timerfd_test shm_test wl_test udev_test evdev_test drm_test)
+TESTS=(sig_test unix_test dev_test timerfd_test shm_test wl_test udev_test evdev_test drm_test)
 CMDS=()
 for t in "${TESTS[@]}"; do
   case "$t" in

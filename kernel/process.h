@@ -120,6 +120,7 @@ typedef struct process {
   struct tty *ctty;
 
   int exit_code;
+  int term_signal; // != 0: murio por esa senal (wait4 la informa como WIFSIGNALED)
   int is_zombie;
 
   // [clone] Número de tareas vivas en este team (hilos). 1 para
@@ -198,6 +199,10 @@ typedef struct process {
 
   uint64_t pending_signals;
   uint64_t blocked_signals;
+  // rt_sigsuspend/pause: mascara original, que el handler (o el retorno a
+  // userland) debe restaurar en lugar de la temporal de la espera.
+  uint64_t suspend_saved_mask;
+  int suspend_active;
   k_sigaction_t sigactions[SIG_MAX];
 
   // [SIGALTSTACK] Pila alternativa para handlers con SA_ONSTACK.

@@ -200,9 +200,9 @@ SCM_RIGHTS (refcounts de `file*`), Weston exige atomic KMS + libseat, Mesa/LLVM 
 ## Pendiente (consolidado, no hecho)
 - ~~dma-buf/PRIME~~ **[HECHO]** (ver notas); virgl/Venus pasa a **8.1**; vmsvga (6.5) sigue fuera de alcance. GPU real Intel/AMD/NVIDIA: **Bloque 8**.
 - `xdg_toplevel.move/resize` pedidos por el cliente y cursor con mapa de bits propio (`wl_pointer.set_cursor` con superficie).
-- Xwayland: arranca y el gestor X11 interno carga, pero en la última prueba (QEMU, 6 GB) Xwayland salió con código 1 y `xterm -e 'a; b'` no ejecuta bien su argumento; sin captura válida.
+- Xwayland: **funciona** — `xclock` se abre como ventana de Aurora (captura `build/capturas/x11_xwayland.png`, `tests/wayland/guest/x11-demo.sh`). El fallo de las pruebas anteriores era que SIGUSR1 (con la que Xwayland avisa de que está listo) se ignoraba por defecto en el kernel. Pendiente: verificar `xterm`/`xeyes` en pantalla a la vez (en la captura solo había salido xclock; xterm avisa de `chown /dev/pts/0: sistema de ficheros de solo lectura`), teclado/ratón X11 y portapapeles X11↔Wayland.
 - Subsuperficies `sync` (hoy todas se tratan como `desync` según la otra implementación; revisar) y comprobación visual GTK4/libadwaita (no hay app GTK4 en el sysroot).
-- 3.3 `libseat` real, `rseq`, `rt_sigsuspend/pending/timedwait`, SIGPIPE y inodo `S_IFSOCK` en bind (Bloques 2–3).
+- 3.3 `libseat` real, `rseq` e inodo `S_IFSOCK` en bind (Bloques 2–3). **[HECHO]** `rt_sigpending`, `rt_sigtimedwait`, `rt_sigsuspend`, `pause` (restauran la máscara al volver del handler) y SIGPIPE en pipes y sockets AF_UNIX (respeta `MSG_NOSIGNAL`); `user/musl/apps/sig_test` (11 comprobaciones, ALL PASS en QEMU). Dos fallos del kernel corregidos por el camino: SIGUSR1/SIGUSR2/SIGVTALRM/SIGPROF/SIGIO/SIGPWR/SIGSTKFLT (y SIGSYS/SIGXCPU/SIGXFSZ) se **ignoraban** por defecto en vez de terminar el proceso, y una muerte por señal se informaba como `exit(128+sig)`; ahora `wait4` devuelve `WIFSIGNALED/WTERMSIG` (`process_t.term_signal`).
 - Xwayland (depende de dmabuf estable), multi-monitor/hot-plug, multi-CRTC, touch.
 - IOMMU/VT-d (7.2): un `.aur` GPU con `AUR_CAP_DMA` sigue siendo riesgo.
 - Cambio de resolución en caliente (el compositor trabaja a la resolución de arranque).

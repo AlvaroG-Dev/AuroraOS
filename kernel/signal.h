@@ -87,6 +87,17 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
                          uint64_t sigsetsize, uint64_t a5);
 
+int64_t k_rt_sigpending(uint64_t set, uint64_t sigsetsize, uint64_t a3,
+                        uint64_t a4, uint64_t a5);
+int64_t k_rt_sigtimedwait(uint64_t set, uint64_t info, uint64_t timeout,
+                          uint64_t sigsetsize, uint64_t a5);
+int64_t k_rt_sigsuspend(uint64_t set, uint64_t sigsetsize, uint64_t a3,
+                        uint64_t a4, uint64_t a5);
+int64_t k_pause(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
+
+// Marca SIGPIPE como pendiente en el proceso actual (write sin lector).
+void signal_raise_sigpipe(void);
+
 // [4.3] Entrega una señal al proceso actual usando los regs del fault.
 int signal_deliver_from_exception(int sig, registers_t *regs);
 

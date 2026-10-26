@@ -1555,7 +1555,8 @@ int process_waitpid(process_t *parent, int32_t pid, int *status_out,
 
       if (status_out) {
         stac();
-        *status_out = (exit_code & 0xff) << 8; // WIFEXITED
+        *status_out = found_zombie->term_signal ? (found_zombie->term_signal & 0x7f)
+                                                : ((exit_code & 0xff) << 8); // WIFSIGNALED / WIFEXITED
         clac();
       }
 
