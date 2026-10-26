@@ -36,6 +36,17 @@ const EFI_GUID gEfiGraphicsOutputProtocolGuid = {
     0x23DC,
     0x4A38,
     {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
+/* EFI_EDID_ACTIVE_PROTOCOL / EFI_EDID_DISCOVERED_PROTOCOL */
+static const EFI_GUID gEfiEdidActiveGuid = {
+    0xBD8C1056, 0x9F36, 0x44EC, {0x92, 0xA8, 0xA6, 0x33, 0x7F, 0x81, 0x79, 0x86}};
+static const EFI_GUID gEfiEdidDiscoveredGuid = {
+    0x1C0C34F6, 0xD380, 0x41FA, {0xA0, 0x49, 0x8A, 0xD0, 0x6C, 0x1A, 0x66, 0xAA}};
+typedef struct {
+  UINT32 SizeOfEdid;
+  UINT8 *Edid;
+} EFI_EDID_PROTOCOL_MIN;
+static UINT8 g_edid[256];
+static UINT32 g_edid_len;
 const EFI_GUID gEfiFileInfoGuid = {
     0x09576e92,
     0x6d3f,
@@ -823,7 +834,54 @@ static void dump_all_volumes(EFI_HANDLE image_handle) {
  * Framebuffer
  * ===========================================================================
  */
+/* Lee el EDID del monitor (activo; si no, el descubierto). Solo copia un EDID
+ * con cabecera valida y checksum correcto en cada bloque de 128 bytes. */
+static void read_edid(void) {
+  const EFI_GUID *guids[2] = {&gEfiEdidActiveGuid, &gEfiEdidDiscoveredGuid};
+  g_edid_len = 0;
+  for (int g = 0; g < 2 && !g_edid_len; g++) {
+    EFI_EDID_PROTOCOL_MIN *p = NULL;
+    if (EFI_ERROR(gBS->LocateProtocol((EFI_GUID *)guids[g], NULL, (VOID **)&p)) ||
+        !p || !p->Edid || p->SizeOfEdid < 128)
+      continue;
+    UINT32 n = p->SizeOfEdid > 256 ? 256 : p->SizeOfEdid;
+    n &= ~127u;
+    static const UINT8 hdr[8] = {0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0};
+    if (compare_mem(p->Edid, hdr, 8) != 0)
+      continue;
+    int ok = 1;
+    for (UINT32 b = 0; b < n; b += 128) {
+      UINT8 sum = 0;
+      for (UINT32 i = 0; i < 128; i++)
+        sum += p->Edid[b + i];
+      if (sum != 0)
+        ok = 0;
+    }
+    if (!ok)
+      continue;
+    copy_mem(g_edid, p->Edid, n);
+    g_edid_len = n;
+  }
+  if (g_edid_len)
+    efi_print(L"[BOOT] EDID: %u bytes\n", g_edid_len);
+  else
+    efi_print(L"[BOOT] EDID no disponible\n");
+}
+
+/* Resolucion nativa (primer descriptor de 18 bytes = modo preferido). */
+static int edid_preferred(UINT32 *w, UINT32 *h) {
+  if (!g_edid_len)
+    return 0;
+  const UINT8 *d = &g_edid[54];
+  if (d[0] == 0 && d[1] == 0)
+    return 0; /* no es un descriptor de temporizacion */
+  *w = d[2] | ((UINT32)(d[4] & 0xF0) << 4);
+  *h = d[5] | ((UINT32)(d[7] & 0xF0) << 4);
+  return *w && *h;
+}
+
 static EFI_STATUS setup_framebuffer(void) {
+  read_edid();
   EFI_STATUS status = gBS->LocateProtocol(
       (EFI_GUID *)&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&gop);
   if (EFI_ERROR(status) || !gop) {
@@ -852,8 +910,27 @@ static EFI_STATUS setup_framebuffer(void) {
       best_area = 0; // Forzar búsqueda si el actual es muy grande
     }
 
+    // Modo nativo del monitor (EDID) si la GOP lo ofrece y no pasa de
+    // 1920x1200 (el compositor trabaja por software).
+    UINT32 nat_w = 0, nat_h = 0, nat_mode = 0xFFFFFFFFu;
+    if (edid_preferred(&nat_w, &nat_h) && nat_w <= 1920 && nat_h <= 1200) {
+      for (UINT32 i = 0; i < gop->Mode->MaxMode; i++) {
+        UINTN size;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        if (query_mode(gop, i, &size, &info) == EFI_SUCCESS && info &&
+            info->HorizontalResolution == nat_w &&
+            info->VerticalResolution == nat_h && info->PixelFormat != 3) {
+          nat_mode = i;
+          break;
+        }
+      }
+      if (nat_mode != 0xFFFFFFFFu)
+        efi_print(L"[BOOT] Modo nativo del monitor: %ux%u (modo %u)\n", nat_w,
+                  nat_h, nat_mode);
+    }
+
     // Iterar por todos los modos disponibles
-    for (UINT32 i = 0; i < gop->Mode->MaxMode; i++) {
+    for (UINT32 i = 0; nat_mode == 0xFFFFFFFFu && i < gop->Mode->MaxMode; i++) {
       UINTN size;
       EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
       if (query_mode(gop, i, &size, &info) == EFI_SUCCESS && info) {
@@ -871,6 +948,10 @@ static EFI_STATUS setup_framebuffer(void) {
       }
     }
 
+    if (nat_mode != 0xFFFFFFFFu) {
+      best_mode = nat_mode;
+      best_area = nat_w * nat_h;
+    }
     // Si encontramos un modo mejor que el actual, lo aplicamos
     if (best_area > 0 && best_mode != gop->Mode->Mode) {
       efi_print(L"[BOOT] Cambiando a modo %u (%ux%u)\n", best_mode,
@@ -1282,7 +1363,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
   /* ---------------------------------------------------------------------
    * 8. Rellenar kernel_boot_info.
    * --------------------------------------------------------------------- */
-  struct kernel_boot_info kinfo = {0};
+  struct kernel_boot_info kinfo;
+  zero_mem(&kinfo, sizeof(kinfo));
   if (gop) {
     kinfo.fb_base = gop->Mode->FrameBufferBase;
     kinfo.fb_size = gop->Mode->FrameBufferSize;
@@ -1291,6 +1373,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     kinfo.fb_pitch = gop->Mode->Info->PixelsPerScanLine * 4;
     kinfo.fb_bpp = 32;
   }
+  kinfo.edid_len = g_edid_len;
+  copy_mem(kinfo.edid, g_edid, sizeof(g_edid));
   kinfo.memmap_size = mem_map.map_size;
   kinfo.memmap_desc_size = mem_map.desc_size;
   kinfo.memmap_desc_ver = mem_map.desc_version;

@@ -2,6 +2,7 @@
 // Punto de entrada del kernel Aurora OS.
 
 #include "../bootloader/include/kernel_boot_info.h"
+#include "display_edid.h"
 #include "acpi.h"
 #include "acpi_aml.h"
 #include "acpi_pm.h"
@@ -774,6 +775,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   // 4. Boot info.
   memcpy(&boot, kinfo, sizeof(boot));
   g_boot_info = boot;
+  display_edid_init(boot.edid, boot.edid_len);
 
   // 5. Tablas de sistema.
   klog_boot_step("[BOOT] GDT/IDT/SYSCALL...");

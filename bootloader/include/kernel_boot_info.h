@@ -20,10 +20,12 @@ struct __attribute__((packed)) kernel_boot_info {
   uint64_t initrd_size;
   uint32_t splash_phase;      /* 0=off, 1=titulo, 2=spinner */
   uint32_t splash_elapsed_ms; /* Tiempo que lleva corriendo la splash */
+  uint32_t edid_len;          /* 0 = sin EDID; 128 o 256 */
+  uint8_t edid[256];          /* EDID del monitor (EFI_EDID_ACTIVE/DISCOVERED) */
 };
 
 _Static_assert(
-    sizeof(struct kernel_boot_info) == 148,
+    sizeof(struct kernel_boot_info) == 408,
     "kernel_boot_info cambio de tamano: sincroniza con kernel/main.c");
 
 #endif

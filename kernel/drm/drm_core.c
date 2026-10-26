@@ -5,6 +5,7 @@
 // 60 Hz) y scanout hacia una ventana del compositor (modo A del plan).
 
 #include "drm.h"
+#include "../display_edid.h"
 #include "../devtmpfs.h"
 #include "../gfx/compositor.h"
 #include "../gfx/window.h"
@@ -627,12 +628,20 @@ static void mark_flip(void) {
 static drm_blob_t g_edid_blob;
 static drm_blob_t *edid_blob(void) {
   const struct aur_gpu_reg *a = gpup_adapter();
-  if (!a || a->edid_len != 128)
-    return NULL;
   g_edid_blob.id = DRM_EDID_BLOB_ID;
-  g_edid_blob.data = (uint8_t *)a->edid;
-  g_edid_blob.len = a->edid_len;
   g_edid_blob.owner = NULL;
+  if (a && a->edid_len == 128) {
+    g_edid_blob.data = (uint8_t *)a->edid;
+    g_edid_blob.len = a->edid_len;
+    return &g_edid_blob;
+  }
+  // Sin driver .aur: el EDID del monitor que dio el firmware (UEFI).
+  uint32_t n = 0;
+  const uint8_t *e = display_edid_data(&n);
+  if (!e)
+    return NULL;
+  g_edid_blob.data = (uint8_t *)e;
+  g_edid_blob.len = n;
   return &g_edid_blob;
 }
 
@@ -965,8 +974,13 @@ static int ioctl_get_connector(uint64_t arg) {
   c.connection = 1; // connected
   int w, h;
   work_size(&w, &h);
-  c.mm_width = (uint32_t)w * 254 / 960;
+  c.mm_width = (uint32_t)w * 254 / 960; // 96 dpi por defecto
   c.mm_height = (uint32_t)h * 254 / 960;
+  const struct edid_info *ei = display_edid_info();
+  if (ei && ei->width_mm && ei->height_mm) { // tamano fisico real del monitor
+    c.mm_width = ei->width_mm;
+    c.mm_height = ei->height_mm;
+  }
   c.subpixel = 1; // unknown
   c.pad = 0;
   return drm_put_user(arg, &c, sizeof(c));
