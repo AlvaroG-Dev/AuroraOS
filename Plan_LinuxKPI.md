@@ -151,13 +151,14 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 - **Hito:** un driver de memoria de dispositivo simulado (un `.kur` de prueba que usa `ttm` con un «VRAM» en RAM) crea, mapea y evicta buffers; las pruebas de estrés de GEM/`ttm` pasan.
 
 ### L7 — Intel (primer hardware real)
-- **Cuál:** el portátil, un Toshiba Portégé R30-A con Core i5-4210M e Intel HD Graphics 4600 (Haswell, `i915` Gen7.5, confirmado por el autor el 26-oct-2026); si hubiese uno con Gen9–12, igual con `i915` y luego `xe` (Gen12+). Haswell no usa GuC/HuC.
+- **Alcance: todas las generaciones de Intel que traiga `i915`/`xe` de la versión de Linux fijada**, no una GPU concreta. `i915` cubre desde Gen2 hasta Gen12 (según la serie de Linux) y `xe` Gen12+ en adelante; el objetivo es compilar y alojar esos dos drivers completos, con las opciones de cada generación (GuC/HuC solo donde existan, power wells, display engine DDI, etc.).
+- **Bancos de prueba reales (no limitan el alcance):** el portátil del autor, Toshiba Portégé R30-A con Core i5-4210M e Intel HD Graphics 4600 (Haswell, Gen7.5, confirmado el 26-oct-2026), es la primera máquina; cualquier otra generación disponible se añade a la matriz de pruebas (§6) y se valida igual.
 - Aquí por primera vez se necesitan: `vga_client`, `acpi` (opregion, `_DSM`, `acpi_video`), `intel_gtt`/GGTT, `i2c` GMBUS, `power wells`, `rc6` desactivado, `GuC/HuC` (firmware) según generación, `drm_display_helper` (DP/HDMI), reset de GPU, DMAR/IOMMU (K5 + L9).
-- **Hitos:** (1) `i915` hace probe y muestra la identidad por serie; (2) pantalla nativa con GOP de respaldo; (3) 3D con Mesa `crocus` (Haswell; `iris` es para Gen8+, a comprobar contra la versión de Mesa fijada) + `aurora-wayland` con `linux-dmabuf`.
+- **Hitos:** (1) `i915` hace probe y muestra la identidad por serie; (2) pantalla nativa con GOP de respaldo; (3) 3D con el driver de Mesa que corresponda a cada generación (de memoria: `crocus` para las antiguas hasta Gen7.5, `iris` desde Gen8, `anv` para Vulkan; confirmar el reparto exacto contra la versión de Mesa fijada) + `aurora-wayland` con `linux-dmabuf`. Estos tres hitos se repiten por generación disponible.
 - Pruebas: **PC real** con log serie; o **VFIO + KVM** (passthrough de la iGPU) desde Linux en ese PC.
 
 ### L8 — AMD (`amdgpu`) y NVIDIA (`kernel-open/`)
-- `amdgpu`: tamaño enorme (~5 M de líneas); **solo** las partes que usa la GPU concreta del autor (si la hay) y nada de SVM/KFD/compute. Requiere `ttm`, `gpu-sched`, `drm_buddy`, `ioremap` de BARs grandes (ReBAR), `acpi` y firmware.
+- `amdgpu`: tamaño enorme (~5 M de líneas); el objetivo es el driver completo para las GPU de la serie de Linux fijada; lo que se **desactiva** es lo que no sea gráfico o necesite piezas que Aurora no tiene (SVM/HMM, KFD/compute), como decisión de configuración y no por limitarse a una GPU concreta. Requiere `ttm`, `gpu-sched`, `drm_buddy`, `ioremap` de BARs grandes (ReBAR), `acpi` y firmware.
 - NVIDIA: alojar `kernel-open/` (`nvidia.ko`, `nvidia-modeset.ko`, `nvidia-drm.ko`) sobre esta capa, con el núcleo abierto `src/nvidia`/`src/nvidia-modeset` como objetos binarios del paquete de NVIDIA. Fases N1–N5 de `Plan_NVIDIA.md`. **Alternativa**: capa de SO propia (ver nota de ese plan).
 - Pruebas: RTX 4060 por serie o VFIO.
 
