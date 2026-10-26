@@ -268,6 +268,8 @@ struct subsurf {
   rc_t pdmg; /* dano diferido (modo sync), en coordenadas de la subsuperficie */
 };
 
+static void xwin_bind_pending(struct wl_client *created_by);
+
 static struct wl_display *g_display;
 static struct wl_event_loop *g_loop;
 static const char *g_sockname = "wayland-0";
@@ -1665,6 +1667,9 @@ static void comp_create_surface(struct wl_client *c, struct wl_resource *r,
   s->vp_dst_w = s->vp_dst_h = s->pvp_dst_w = s->pvp_dst_h = -1;
   wl_resource_set_implementation(s->res, &surface_impl, s,
                                  surface_resource_destroy);
+  // Xwayland avisa del WL_SURFACE_ID por el socket X11, que puede llegar antes
+  // que la creacion de la superficie por el socket Wayland: reintentar.
+  xwin_bind_pending(c);
 }
 static void comp_create_region(struct wl_client *c, struct wl_resource *r,
                                uint32_t id) {
@@ -3291,6 +3296,17 @@ static void xwin_bind(struct xwin *xw) {
   xwin_read_props(xw);
   if (s->has_content)
     root_update(s, (rc_t){0, 0, s->dw, s->dh});
+}
+
+// Reintenta enlazar las ventanas X11 cuyo WL_SURFACE_ID llego antes de que
+// existiera su superficie Wayland (carrera entre los dos sockets de Xwayland).
+static void xwin_bind_pending(struct wl_client *created_by) {
+  if (!g_xc || created_by != xwayland_client())
+    return;
+  struct xwin *w;
+  wl_list_for_each(w, &g_xwins, link)
+    if (w->surf_id && !w->xs)
+      xwin_bind(w);
 }
 
 static void xwin_unmap(struct xwin *xw) {
