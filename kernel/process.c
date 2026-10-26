@@ -172,7 +172,7 @@ int process_set_argv(process_t *proc, int argc, const char *const *argv) {
     // `grep "" fichero`, `awk '...' ""`, etc. Solo rechazamos si
     // excede el límite o es NULL (ya filtrado arriba).
     size_t n = strlen(argv[i]);
-    if (n >= PROCESS_ENV_STR_MAX) {
+    if (n >= PROCESS_ARG_STR_MAX) {
       process_clear_argv(proc);
       return -E2BIG;
     }

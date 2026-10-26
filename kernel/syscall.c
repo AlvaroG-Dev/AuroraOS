@@ -52,7 +52,7 @@
 #endif
 
 #define SPAWN_ARGS_MAX PROCESS_ARGV_MAX
-#define SPAWN_ARG_STR_MAX 128
+#define SPAWN_ARG_STR_MAX PROCESS_ARG_STR_MAX
 
 extern void syscall_entry(void);
 
@@ -4312,6 +4312,11 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
+        goto out;
+      }
+      if (m >= SPAWN_ARG_STR_MAX) { // antes se truncaba en silencio (128 B)
+        kfree(buf);
+        ret = -E2BIG;
         goto out;
       }
       kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];

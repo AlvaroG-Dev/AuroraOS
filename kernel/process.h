@@ -16,6 +16,9 @@
 #define WCONTINUED 8
 
 #define PROCESS_ARGV_MAX 16
+// Longitud maxima de cada argumento de execve/spawn (p. ej. el "sh -c <orden>"
+// que usa Xwayland para lanzar xkbcomp tiene ~250 bytes).
+#define PROCESS_ARG_STR_MAX 1024
 
 #define PROCESS_ENVP_MAX 32
 #define PROCESS_ENV_STR_MAX 256
