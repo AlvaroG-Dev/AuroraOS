@@ -3614,7 +3614,7 @@ static void xwm_spawn(void) {
             "-wm", wmfd, (char *)NULL);
     if (getenv("AW_XVERBOSE")) /* depuracion: mas trazas de Xwayland */
       execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
-            "-nolock", "-verbose", "10", "-logverbose", "10", "-wm", wmfd,
+            "-nolock", "-verbose", "10", "-wm", wmfd,
             (char *)NULL);
     execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
           "-nolock", "-wm", wmfd, (char *)NULL);
