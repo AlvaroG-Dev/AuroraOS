@@ -102,6 +102,7 @@ Hecho y validado antes y durante esta sesión: `wl_compositor/subcompositor/shm/
 | D3 | Portapapeles X11: alcance | **Hecho `PRIMARY`** (27-oct-2026); `INCR`/imágenes siguen fuera |
 | D4 | `virtio-gpu` 3D (virgl/venus) | **Decidido: SÍ, no crítico; pendiente** |
 | D5 | Intel/AMD/NVIDIA reales | **ABIERTA** (hardware identificado; falta modelo del portátil y licencia GPL) |
+| D10 | NVIDIA con el código abierto de NVIDIA | **Decidido: SÍ, obligatorio** (plan por hitos, necesita hardware real) |
 | D6 | Driver de pantalla nativo | **ABIERTA** (depende de D5) |
 | D7 | EDID por DDC/VBE (BIOS) y CEA | **ABIERTA** |
 | D8 | Iconos | **Hecho: simbólicos de respaldo** (27-oct-2026) |
@@ -154,6 +155,19 @@ Detalle de cada una:
   - Para empezar hace falta un **log serie de arranque** del portátil (o su `lspci -nn`/ID PCI) con el ISO actual.
 - **Pregunta pendiente**: ¿es aceptable la licencia GPL en los drivers de GPU si se elige la capa de compatibilidad con Linux (opción a)? (Sin respuesta todavía.)
 - **Decisión**: **ABIERTA** (hardware identificado; falta confirmar el modelo del portátil y la política de licencia).
+
+### D10 — NVIDIA: obligatorio, con el código abierto de NVIDIA (`open-gpu-kernel-modules`)
+- **Decisión (26-oct-2026): SÍ, NVIDIA se implementa sí o sí.** Sustituye al «último y opcional» del Bloque 8.4. Hardware de prueba: RTX 4060 (Ada, AD107) del sobremesa.
+- **Por qué es viable ahora**: desde Turing el driver oficial es el de módulos abiertos (MIT/GPL), cuyo núcleo (el *Resource Manager*, `src/nvidia`, y `src/nvidia-modeset`) es independiente del SO. Habla con la GPU a través del **firmware GSP** (binario redistribuible de NVIDIA, necesario). Es el camino por el que FreeBSD ya porta el driver.
+- **Enfoque propuesto**: escribir una **capa de SO propia de Aurora** (equivalente al `os-interface.h`/`nv-linux` de NVIDIA: memoria, bloqueos, temporizadores, config PCI, MMIO, DMA, IRQ/MSI-X, carga de firmware) en vez de emular todo Linux. Como `.kur` (Ring 0), porque el RM necesita IRQs y control fino; el `.aur` queda para piezas aisladas.
+- **Hitos** (cada uno validable solo en el PC real, con log serie):
+  1. Sondeo PCI + mapa de BARs + lectura de identidad (`NV_PMC_BOOT_0`), sin tocar la pantalla.
+  2. Carga del firmware GSP y arranque del GSP-RM.
+  3. Modeset nativo (nvidia-modeset) con GOP como respaldo automático. Aquí se desbloquean D1/D2 en NVIDIA.
+  4. Memoria y *channels* de la GPU, y la ABI de `/dev/nvidiactl` + `/dev/nvidia0`.
+  5. 3D: dos vías, a elegir al llegar aquí. (a) Userspace propietario de NVIDIA bajo la capa Linux de Aurora (necesita sus ioctls y `nvidia-drm`). (b) `nouveau` + NVK de Mesa (abierto, GPL, necesita la capa tipo LinuxKPI de D5(a)).
+- **Riesgos**: no se puede probar en este entorno (sin GPU ni passthrough); sin IOMMU (8.0) el DMA de la GPU es un riesgo de seguridad; el firmware GSP hay que obtenerlo de NVIDIA/`linux-firmware` y su licencia debe revisarse; programar sin hardware conectado puede dejar la pantalla en negro, por eso cada hito conserva GOP como respaldo.
+- **Pendiente del autor**: confirmar que la RTX 4060 es el equipo de pruebas y poder enviar un log serie o `lspci -nnk`. Hasta entonces solo se puede escribir la capa de SO y los hitos 1–2 «a medias», sin validarlos.
 
 ### D6 — Driver de pantalla nativo (modeset) y cambio de modo real
 - **Contexto**: depende de D5(c). Sin él: sin cambio de resolución real (D2), sin hot-plug (D1), sin cursor por hardware, sin DPMS real.
