@@ -1,6 +1,6 @@
 # Plan de implementación: capa de compatibilidad con drivers de Linux (LinuxKPI) para Aurora
 
-Estado: **L0, L1 y L2 hechas** (26-oct-2026; L0.2/L0.3 con fuentes provisionales, ver §11). L3 pendiente de confirmación. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md` y `docs/LinuxKPI_Sesion_L2.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
+Estado: **L0, L1 y L2 hechas** (26-oct-2026; L0.3 repetida sobre Linux 6.18.59, NVIDIA aún con la fuente provisional de Ubuntu, ver §3.1 y §11). L3 pendiente de confirmación. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md` y `docs/LinuxKPI_Sesion_L2.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
 
 ## 0. Principios
 
@@ -61,7 +61,33 @@ Los números son orientativos (líneas de la capa, no del driver).
 
 Total orientativo de la capa (sin DRM de Linux): **~40–45 kLOC de C** propios, con ~25 % tomable o adaptable de FreeBSD `linuxkpi` (ya licenciado BSD).
 
-### 3.1 Datos medidos (L0.3, 26-oct-2026) — **provisionales**
+### 3.1 Datos medidos (L0.3, 26-oct-2026)
+
+**Sobre Linux 6.18.59** (versión fijada; repetida el mismo día en cuanto kernel.org fue accesible). NVIDIA sigue siendo open 615.71.09 de Ubuntu porque GitHub está bloqueado en el entorno (la fijada es 615.78.08). Es lo que hay ahora en `docs/linuxkpi_api.md`/`.tsv`.
+
+| Nivel | Símbolos (todos los drivers) | de ellos funciones | QEMU (`bochs`+`simpledrm`+`virtio-gpu`) |
+|---|---:|---:|---:|
+| K0 Base C | 453 | 35 | 50 |
+| K1 Memoria (sin DMA) | 458 | 93 | 60 |
+| K1-dma DMA, `dma_buf`, IOMMU | 104 | 35 | 35 |
+| K2 Sincronización/tiempo | 452 | 96 | 32 |
+| K3 Estructuras | 405 | 101 | 32 |
+| K4 Dispositivos | 235 | 90 | 47 |
+| K5 PCI/IRQ/energía | 425 | 153 | 53 |
+| K6 Firmware/I²C/ACPI/… | 501 | 137 | 22 |
+| K7 Fences | 103 | 44 | 36 |
+| K8 Usuario/VFS | 137 | 52 | 3 |
+| K9 *stubs* | 193 | 66 | 26 |
+| **K9-drm** | **2325** | 646 | 295 |
+| K9-ttm | 190 | 95 | 0 |
+| K9-sched | 46 | 27 | 0 |
+| Sin clasificar | 77 | 15 | 3 |
+
+Unión acumulada en el orden de trabajo: `bochs` 180 → `simpledrm` 304 → `virtio-gpu` **694** → `i915` 3881 → `xe` 4559 → `amdgpu` 5450 → `nvidia` 6104 (con la 6.8: 135 → 277 → 634 → 3877 → 4198 → 5031 → 5717). El mayor cambio es `xe`, que pasa de 1139 a 1783 símbolos (el driver ha crecido mucho entre 6.8 y 6.18). Estimación heurística total: ≈ 40 kLOC (5 kLOC para el primer hito en QEMU), en la misma horquilla que la corregida abajo. NVIDIA: 1675 símbolos, **990 (59 %) compartidos con Intel/AMD**; lo exclusivo es sobre todo K6 (130), K1 (107), K3 (70), K4 (67) y K5 (61).
+
+Huecos de K2 tras L2 (símbolos de la 6.18 que la capa aún no define, sin contar los generados por macros): `nop`/`clflush`/`halt` (`asm/special_insns`), `cpufeature`/`boot_cpu_data`, `irq_handler_t`/`IRQF_SHARED` (K5), `on_each_cpu`, `stop_machine`, `percpu_counter`, `synchronize_hardirq`. Todos de uso bajo y casi todos de otros niveles.
+
+#### Medida anterior (provisional, Linux 6.8 de Ubuntu)
 
 `scripts/linuxkpi-scan.py` → `docs/linuxkpi_api.md` (resumen) y `docs/linuxkpi_api.tsv` (tabla completa). **Medido sobre Linux 6.8 de Ubuntu y NVIDIA open 615.71.09**, no sobre la 6.18 fijada (kernel.org y GitHub bloqueados en el entorno de desarrollo); hay que repetirlo con la 6.18 en cuanto se pueda descargar. El orden de magnitud no debería cambiar entre 6.8 y 6.18, pero los nombres sí (p. ej. `simpledrm` se movió a `drm/sysfb/`, `drm_aperture` a `aperture`). Es un análisis léxico: cuenta macros, *inlines* y tipos (que la capa también debe dar), incluye todas las ramas `#if` y tiene algo de ruido.
 
@@ -203,7 +229,7 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 3. ~~**Licencia de la capa**~~ → **decidido: GPL-2.0-only** (sección 11).
 4. **NVIDIA**: `kernel-open/` sobre LinuxKPI **o** capa de SO propia (decidir tras L0.3 con los datos reales).
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
-6. **Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**: fijarlos cuando el entorno pueda acceder a `kernel.org` (hoy bloqueado); repetir entonces L0.3 sobre la 6.18.
+6. ~~**Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**~~ → **6.18.59** y **20261019** (sección 11); L0.3 repetida. Pendiente: NVIDIA 615.78.08 desde GitHub (bloqueado).
 7. ~~**RCU antes de usar `xarray`/`idr` con lectores concurrentes**~~ → hecho en L2 (`kfree_rcu` en `xa_node_free`).
 8. **Cambios en Aurora que L2 no ha hecho** (rechazados o pendientes de decisión, ver §11 L2): plazos de espera a 1 ms (hoy ~8 ms), `task_t->lkpi_task` para `current`, exportar `signal_pending`, y el arreglo de `sched_current()` (lectura atómica de `current_task`).
 
@@ -252,4 +278,12 @@ Decisiones tomadas con el autor antes de escribir código:
 - **Hallazgos del estrés con 4 CPU** (corregidos en la capa):
   - *Despertar perdido en wound-wait*: la víctima comprobaba `wounded` antes de `set_current_state()`, y quien la hiere escribe y despierta desde el `wait_lock` de otro cerrojo. Ahora el estado se fija al principio de cada vuelta, antes de mirar las condiciones (como en Linux).
   - *`sched_current()` de Aurora no es atómico*: lee `this_cpu(current_task)` en dos pasos (`%gs:16` y luego `cpu_local_data[cpu]`). Si la tarea se expulsa y migra entre ambos, devuelve la tarea de su CPU anterior. Con eso, `preempt_disable()` incrementaba el contador de **otra** tarea, que quedaba no expulsable y, al terminar, ocupando su CPU para siempre en `kthread_do_exit` (y el periodo de gracia de RCU no avanzaba en esa CPU). La capa lee `current` y `preempt_count`, y llama a `preempt_disable()`, `sched_yield()` y `kthread_stop()` de Aurora (que leen la tarea actual por dentro) con las IRQ desactivadas. Un interbloqueo de wait-die visto una vez antes de esta mitigación no se ha reproducido (6/6 en verde después); no se capturó su estado. **Pendiente en Aurora** (no se ha tocado, a decidir por el autor): leer `current_task` con una sola instrucción relativa a `%gs`. El fallo afecta también a los usos internos de Aurora (`sched_yield`, `wait.c`, `kthread_should_stop`, `preempt_disable` del compositor y del *shootdown* de TLB).
+
+### 26-oct-2026 — Versión fijada, `sched_current()`, plazos a 1 ms (tras L2)
+Con confirmación del autor:
+- **Linux 6.18.59** (el último `6.18.y` en `kernel.org/releases.json` ese día) y **`linux-firmware` 20261019** (`kernel/linuxkpi/linux-version.mk`). L0.3 repetida sobre la 6.18.59 (§3.1). GitHub sigue bloqueado (403 del proxy), así que NVIDIA open 615.78.08 no se ha descargado: el escaneo usa la 615.71.09 de Ubuntu para NVIDIA.
+- **`sched_current()` atómico** en Aurora: `this_cpu_current_task()` (`kernel/cpu.h`) lee `%gs:current_task` con una instrucción; lo usan `sched_current()` y `sched_tick()`. Se retiran las mitigaciones de la capa (llamadas con las IRQ desactivadas).
+- **Plazos de espera a 1 ms**: `sched_lock` guarda el plazo más cercano; `time_tick()` llama a `sched_wake_expired()` en el tick en que vence (además de cada 8 ticks). **Y una expulsión acotada**: si lo que despierta un plazo no encuentra CPU ociosa, se marca `need_resched` en la CPU cuya tarea lleva más tiempo seguida (sin eso esperaría la rodaja de 10 ticks). Solo para despertares por plazo; el resto de despertares no cambia (Aurora sigue sin *wakeup preemption* general). Prueba nueva del kernel (`sched: plazos de espera con resolución de 1 ms`) que mide el instante del despertar: 12 de 12 a tiempo; con el código anterior, 1 de 12.
+- **Aproximaciones de la capa retiradas**: `disable_work`/`enable_work` reales (cuenta de desactivación), SRCU con contadores por CPU, y percpu estático por alias de la copia 0 (valen `this_cpu_ptr(&v)` y `per_cpu_ptr(&v, cpu)`; sigue sin valer `this_cpu_inc(p->campo)`).
+- Siguen rechazados `current` estable en `task_t` y `signal_pending` (K8, L4).
 
