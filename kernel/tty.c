@@ -201,6 +201,9 @@ void tty_slave_receive(tty_t *tty, uint8_t byte) {
   wake_up_all(&tty->read_wq);
 
   if (echo && tty->pty) {
+    // ICRNL: la tecla Enter llega como '\r' pero la linea (y el eco) usan '\n'.
+    if ((tty->iflag & TTY_IFLAG_ICRNL) && byte == '\r')
+      byte = '\n';
     if (byte == '\n') {
       pty_slave_emit(tty->pty, "\r\n", 2);
     } else if (byte == '\b' || byte == 0x7F) {

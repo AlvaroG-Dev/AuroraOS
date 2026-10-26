@@ -2749,6 +2749,8 @@ static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
     if (*p != '\0')
       return -ENOENT;
     int rc = pty_open_slave_fd(proc, free_fd, idx);
+    if (rc == 0 && !(flags & 0400)) // sin O_NOCTTY: puede pasar a ser su terminal de control
+      pty_acquire_ctty(proc, idx);
     return rc == 0 ? free_fd : rc;
   }
 

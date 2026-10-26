@@ -100,6 +100,9 @@ bool pty_slave_readable(tty_pty_t *pty);
 // Devuelven 0 en éxito, negativo en error (fd_num queda sin usar).
 int pty_open_master_fd(struct process *proc, int fd_num);
 int pty_open_slave_fd(struct process *proc, int fd_num, int index);
+// Abrir un tty sin O_NOCTTY siendo lider de sesion sin terminal de control lo
+// convierte en su terminal de control y fija su pgrp en primer plano (Linux).
+void pty_acquire_ctty(struct process *proc, int index);
 
 // [PTY] Comprueba si el slot `idx` está en uso. 1 si sí.
 int pty_is_in_use(int idx);

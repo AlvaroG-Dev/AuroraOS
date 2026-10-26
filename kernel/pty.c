@@ -475,6 +475,17 @@ int pty_open_master_fd(struct process *proc, int fd_num) {
 // ---------------------------------------------------------------------------
 // Open del slave: /dev/pts/N
 // ---------------------------------------------------------------------------
+void pty_acquire_ctty(struct process *proc, int index) {
+  if (!proc || index < 0 || index >= PTY_MAX)
+    return;
+  tty_pty_t *p = &g_ptys[index];
+  if (proc->sid != proc->pid || proc->ctty || p->slave.session_leader_pid != 0)
+    return;
+  p->slave.session_leader_pid = proc->pid;
+  p->slave.fg_pgid = proc->pgid;
+  proc->ctty = &p->slave;
+}
+
 int pty_open_slave_fd(struct process *proc, int fd_num, int index) {
   if (!proc || fd_num < 0 || fd_num >= MAX_PROCESS_FDS)
     return -EINVAL;
