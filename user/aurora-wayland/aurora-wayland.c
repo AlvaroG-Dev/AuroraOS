@@ -3599,8 +3599,14 @@ static void xwm_spawn(void) {
     sigemptyset(&none);
     sigprocmask(SIG_SETMASK, &none, NULL); /* wl_event_loop bloqueo SIGTERM... */
     signal(SIGUSR1, SIG_IGN); /* Xwayland avisara con SIGUSR1 al estar listo */
-    setenv("XDG_RUNTIME_DIR", "/run/user/0", 0);
-    setenv("WAYLAND_DISPLAY", g_sockname, 1);
+    /* xkbcomp escribe el keymap en $XDG_RUNTIME_DIR: en Aurora /run/user/0 no
+     * admite unlink/crear ahi, asi que Xwayland usa /tmp y llega al socket
+     * Wayland por ruta absoluta. */
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    char wsock[160];
+    snprintf(wsock, sizeof(wsock), "%s/%s", rt && *rt ? rt : "/run/user/0", g_sockname);
+    setenv("WAYLAND_DISPLAY", wsock, 1);
+    setenv("XDG_RUNTIME_DIR", "/tmp", 1);
     unsetenv("DISPLAY");
     if (getenv("AW_XSTRACE")) /* depuracion: traza de syscalls de Xwayland */
       execl("/usr/bin/strace", "strace", "-D", "-f", "-o", getenv("AW_XSTRACE"),
