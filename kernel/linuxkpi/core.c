@@ -166,17 +166,7 @@ unsigned long lkpi_jiffies(void)
 }
 EXPORT_SYMBOL(lkpi_jiffies);
 
-u64 lkpi_ktime_get_ns(void)
-{
-	return aurora_sched_get_ticks() * NSEC_PER_MSEC;
-}
-EXPORT_SYMBOL(lkpi_ktime_get_ns);
-
-u64 lkpi_ktime_get_real_ns(void)
-{
-	return (u64)aurora_kernel_realtime_ms() * NSEC_PER_MSEC;
-}
-EXPORT_SYMBOL(lkpi_ktime_get_real_ns);
+/* ktime: kernel/time.c (TSC). */
 
 /* ------------------------------------------------------- init / exit */
 
@@ -189,16 +179,45 @@ int kur_init(void)
 	if (rc)
 		return rc;
 	rc = lkpi_slab_init();
-	if (rc) {
-		lkpi_mm_exit();
-		return rc;
-	}
+	if (rc)
+		goto err_mm;
+	rc = lkpi_sched_init();
+	if (rc)
+		goto err_slab;
+	lkpi_time_init();
+	lkpi_wait_init();
+	rc = lkpi_softirq_init();
+	if (rc)
+		goto err_sched;
+	rc = lkpi_rcu_init();
+	if (rc)
+		goto err_softirq;
+	rc = lkpi_wq_init();
+	if (rc)
+		goto err_rcu;
 	pr_info("linuxkpi: capa de compatibilidad con drivers de Linux lista\n");
 	return 0;
+
+err_rcu:
+	lkpi_rcu_exit();
+err_softirq:
+	lkpi_softirq_exit();
+err_sched:
+	lkpi_sched_exit();
+err_slab:
+	lkpi_slab_exit();
+err_mm:
+	lkpi_mm_exit();
+	return rc;
 }
 
 void kur_exit(void)
 {
+	/* Primero lo que encola trabajo o callbacks; RCU vacia su cola al salir. */
+	lkpi_wq_exit();
+	lkpi_rcu_exit();
+	lkpi_softirq_exit();
+	lkpi_sched_exit();
 	lkpi_ioremap_exit();
 	lkpi_vmalloc_exit();
 	lkpi_slab_exit();

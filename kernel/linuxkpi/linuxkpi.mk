@@ -4,7 +4,8 @@ include kernel/linuxkpi/flags.mk
 include kernel/linuxkpi/linux-version.mk
 
 LKPI_BUILD   := build/linuxkpi
-LKPI_SRCS    := $(wildcard kernel/linuxkpi/*.c kernel/linuxkpi/lib/*.c kernel/linuxkpi/mm/*.c)
+LKPI_SRCS    := $(wildcard kernel/linuxkpi/*.c kernel/linuxkpi/kernel/*.c kernel/linuxkpi/lib/*.c \
+                           kernel/linuxkpi/mm/*.c)
 LKPI_SRCS    := $(filter-out kernel/linuxkpi/kur_manifest.c,$(LKPI_SRCS))
 LKPI_OBJS    := $(patsubst kernel/linuxkpi/%.c,$(LKPI_BUILD)/obj/%.o,$(LKPI_SRCS))
 LKPI_HDRS    := $(shell find include/linuxkpi kernel/linuxkpi -name '*.h' 2>/dev/null)

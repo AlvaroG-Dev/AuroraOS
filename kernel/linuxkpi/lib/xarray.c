@@ -5,10 +5,11 @@
  *   full     hoja: ranura ocupada; interior: subarbol del hijo sin huecos
  *   marks[]  hoja: entrada marcada; interior: el hijo tiene alguna marcada
  * Escrituras con xa_lock (las __xa_* esperan que el llamante lo tenga).
- * Lecturas sin bloqueo como en Linux; liberar nodos con lectores
- * concurrentes necesita RCU, que llega en L2 (xa_node_free).
+ * Lecturas sin bloqueo como en Linux, bajo rcu_read_lock(): los nodos se
+ * liberan con kfree_rcu() (xa_node_free).
  */
 #include <linux/kernel.h>
+#include <linux/rcupdate.h>
 #include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
@@ -27,6 +28,7 @@ struct xa_node {
 	unsigned long full;
 	unsigned long marks[XA_MARKS];
 	void *slots[XA_CHUNK_SIZE];
+	struct rcu_head rcu;		/* liberacion diferida (kfree_rcu) */
 };
 
 static inline struct xa_node *xa_head_node(const struct xarray *xa)
@@ -59,7 +61,8 @@ static struct xa_node *xa_node_alloc(unsigned int shift, gfp_t gfp)
 
 static void xa_node_free(struct xa_node *node)
 {
-	kfree(node);	/* L2: kfree_rcu */
+	/* Puede haber lectores sin cerrojo recorriendo el nodo. */
+	kfree_rcu(node, rcu);
 }
 
 /* Recalcula en los antecesores los bits que dependen del hijo. */
@@ -194,7 +197,12 @@ void *lkpi_xa_load_raw(const struct xarray *xa, unsigned long index)
 
 void *lkpi_xa_load(struct xarray *xa, unsigned long index)
 {
-	return xa_zero_to_null(lkpi_xa_load_raw(xa, index));
+	void *e;
+
+	rcu_read_lock();
+	e = xa_zero_to_null(lkpi_xa_load_raw(xa, index));
+	rcu_read_unlock();
+	return e;
 }
 EXPORT_SYMBOL(lkpi_xa_load);
 
@@ -479,7 +487,9 @@ void *lkpi_xa_find(struct xarray *xa, unsigned long *index, unsigned long max, x
 		return NULL;
 	if (*index > max || !xa_covers(xa, *index))
 		return NULL;
+	rcu_read_lock();
 	e = xa_find_in_node(xa_head_node(xa), 0, *index, max, filter, &idx);
+	rcu_read_unlock();
 	if (e)
 		*index = idx;
 	return e;
