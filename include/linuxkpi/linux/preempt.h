@@ -11,6 +11,7 @@
 
 #include <linux/types.h>
 #include <linux/compiler.h>
+#include <linux/irqflags.h>
 
 void lkpi_preempt_disable(void);
 void lkpi_preempt_enable(void);

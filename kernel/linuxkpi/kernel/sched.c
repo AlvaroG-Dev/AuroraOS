@@ -427,13 +427,14 @@ EXPORT_SYMBOL(__lkpi_cpumask_of);
 void __percpu *lkpi_alloc_percpu(size_t size, size_t align, gfp_t gfp)
 {
 	(void)align;	/* sizeof(tipo) ya es multiplo de su alineacion */
-	return kzalloc(size * NR_CPUS, gfp);
+	/* NR_CPUS copias: puede ser grande, no hace falta que sea contigua. */
+	return kvzalloc(size * NR_CPUS, gfp);
 }
 EXPORT_SYMBOL(lkpi_alloc_percpu);
 
 void lkpi_free_percpu(void __percpu *p)
 {
-	kfree(p);
+	kvfree(p);
 }
 EXPORT_SYMBOL(lkpi_free_percpu);
 
