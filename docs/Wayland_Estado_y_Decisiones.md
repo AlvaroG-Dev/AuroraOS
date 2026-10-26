@@ -159,7 +159,7 @@ Detalle de cada una:
   - **Se hace primero IOMMU/VT-d (8.0)** y el DMA con máscaras: esos módulos corren en Ring 0 y manejan memoria de la GPU.
   - **NVIDIA**: `Plan_NVIDIA.md` proponía una capa de SO propia para el núcleo abierto. Con esta decisión también se puede alojar `kernel-open/` de NVIDIA (la capa Linux) sobre la misma LinuxKPI; hay que elegir al empezar (ver nota en `Plan_NVIDIA.md`).
   - Sigue valiendo: GOP como respaldo en cada hito y pruebas solo en hardware real (o VFIO + KVM).
-  - Pendiente: plan detallado de la capa (`Plan_LinuxKPI.md`), aún sin escribir.
+  - Plan detallado de la capa (fases L0–L9, API por niveles, pruebas, riesgos): [`Plan_LinuxKPI.md`](../Plan_LinuxKPI.md).
 
 ### D10 — NVIDIA: obligatorio, con el código abierto de NVIDIA (`open-gpu-kernel-modules`)
 - **Decisión (26-oct-2026): SÍ, NVIDIA se implementa sí o sí.** Sustituye al «último y opcional» del Bloque 8.4. Hardware de prueba: RTX 4060 (Ada, AD107) del sobremesa.
