@@ -59,6 +59,9 @@ build/mesa_stage/
 build/linuxkpi_src/
 build/linuxkpi/
 
+# Tabla de particiones MBR que make iso recalcula en cada build (Makefile, ISO).
+build/mbr_part.hex
+
 # El firmware de prueba de request_firmware si se versiona (no es un artefacto).
 !precompiled/lib/firmware/aurora/selftest.bin
 scripts/__pycache__/
