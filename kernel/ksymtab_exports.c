@@ -46,3 +46,32 @@ KEXPORT_SYMBOL(release_firmware);
 KEXPORT_SYMBOL(usb_device_register);
 KEXPORT_SYMBOL(usb_device_unregister);
 KEXPORT_SYMBOL(usb_bus_init);
+// [LinuxKPI] Servicios que importa linuxkpi.kur (kernel/linuxkpi/aurora.h).
+// mem* tambien los puede emitir el compilador en cualquier .kur.
+#include "string.h"
+#include "uaccess.h"
+#include "pmm.h"
+#include "panic.h"
+#include "timerfd.h"
+#include "test.h"
+KEXPORT_SYMBOL(memcpy);
+KEXPORT_SYMBOL(memset);
+KEXPORT_SYMBOL(memmove);
+KEXPORT_SYMBOL(memcmp);
+KEXPORT_SYMBOL(klog_vprintf);
+KEXPORT_SYMBOL(pmm_alloc_pages);
+KEXPORT_SYMBOL(pmm_free_pages);
+KEXPORT_SYMBOL(pmm_total_pages);
+KEXPORT_SYMBOL(paging_get_phys);
+KEXPORT_SYMBOL(mmio_map);
+KEXPORT_SYMBOL(mmio_unmap);
+KEXPORT_SYMBOL(kernel_realtime_ms);
+KEXPORT_SYMBOL(preempt_disable);
+KEXPORT_SYMBOL(preempt_enable);
+KEXPORT_SYMBOL(copy_to_user);
+KEXPORT_SYMBOL(copy_from_user);
+KEXPORT_SYMBOL(strncpy_from_user);
+KEXPORT_SYMBOL(panic_noctx);
+// Pruebas en .kur (tests/linuxkpi): informan con TEST_ASSERT del kernel.
+KEXPORT_SYMBOL(test_pass);
+KEXPORT_SYMBOL(test_fail);
