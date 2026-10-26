@@ -169,8 +169,19 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 
 ## 10. Decisiones abiertas
 
-1. **DRM A o B** (propio con *shim* vs DRM de Linux compilado): recomendado **B**. Decidir antes de L5.
-2. **Versión de Linux** (a fijar en L0.1).
-3. **Licencia de la capa** (propuesta: GPL-2.0 compatible, separada del resto).
+1. ~~**DRM A o B**~~ → **decidido: A** (ver sección 11, 26-oct-2026).
+2. ~~**Versión de Linux**~~ → **decidido: 6.18 LTS** (sección 11).
+3. ~~**Licencia de la capa**~~ → **decidido: GPL-2.0-only** (sección 11).
 4. **NVIDIA**: `kernel-open/` sobre LinuxKPI **o** capa de SO propia (decidir tras L0.3 con los datos reales).
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
+
+## 11. Decisiones (registro)
+
+Cada entrada lleva fecha. Cambiar una decisión requiere discutirlo y añadir una entrada nueva (no editar la anterior).
+
+### 26-oct-2026 — L0.1
+- **Versión de Linux: serie 6.18 LTS.** Es la LTS más reciente (diciembre 2025, soporte hasta al menos finales de 2027). Trae `i915` para Haswell (Gen7.5, el portátil) y Alder Lake, y `xe` para Gen12+ (Alder Lake solo con `force_probe`); las ramas recientes de `open-gpu-kernel-modules` compilan contra ella. La versión exacta está en `kernel/linuxkpi/linux-version.mk` (una sola fuente, la leen make y bash). **Provisional: `LINUX_VERSION=6.18` (base)**, porque desde el entorno de desarrollo `kernel.org` está bloqueado y no se pudo consultar el último `6.18.y`; pasar a ese punto estable se hará en una entrada nueva.
+- **DRM: opción A** (decisión del autor, contra la recomendación B de la sección 2). Se mantiene `kernel/drm/` propio y la capa aportará un *shim* con las funciones `drm_*` que usen los drivers. Consecuencias: (1) la superficie `include/drm/*` (K9-DRM) la escribe Aurora; `docs/linuxkpi_api.md` la mide aparte para dimensionar el *shim*; (2) multi-CRTC, hot-plug (D1) y cambio de modo (D2) no vienen «gratis» del DRM de Linux: hay que generalizar `kernel/drm/drm_core.c` (hoy un solo CRTC virtual); (3) L5 cambia de «compilar `drm.ko`» a «*shim* + `bochs`/`simpledrm`/`virtio-gpu` contra él». L0–L4 no cambian.
+- **Licencia de la capa: GPL-2.0-only.** Igual que los drivers que aloja. Vive en `kernel/linuxkpi/` e `include/linuxkpi/`, se enlaza en su propio `.kur` (`linuxkpi.kur`) y no la incluye el resto del kernel. Cada fichero lleva `SPDX-License-Identifier: GPL-2.0-only`; si se toma código de FreeBSD `linuxkpi` se conserva su aviso BSD-2-Clause (compatible).
+- **NVIDIA (`kernel-open` sobre LinuxKPI o capa propia):** sigue abierta; se decide con los datos de L0.3 (`docs/linuxkpi_api.md`).
+- **Fuentes externas:** `scripts/fetch-linux-drivers.sh` → `build/linuxkpi_src/` (ignorado por git). `linux-firmware` sin fijar todavía (no hace falta hasta L4).

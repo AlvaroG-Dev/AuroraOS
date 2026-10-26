@@ -160,6 +160,7 @@ Detalle de cada una:
   - **NVIDIA**: `Plan_NVIDIA.md` proponía una capa de SO propia para el núcleo abierto. Con esta decisión también se puede alojar `kernel-open/` de NVIDIA (la capa Linux) sobre la misma LinuxKPI; hay que elegir al empezar (ver nota en `Plan_NVIDIA.md`).
   - Sigue valiendo: GOP como respaldo en cada hito y pruebas solo en hardware real (o VFIO + KVM).
   - Plan detallado de la capa (fases L0–L9, API por niveles, pruebas, riesgos): [`Plan_LinuxKPI.md`](../Plan_LinuxKPI.md).
+- **Decisiones de L0.1 (26-oct-2026)**, detalle en `Plan_LinuxKPI.md` §11: Linux **6.18 LTS**; capa bajo **GPL-2.0-only** en `kernel/linuxkpi/` + `include/linuxkpi/` con su propio `.kur`; **DRM opción A** (se mantiene `kernel/drm/` propio y la capa aporta un *shim* `drm_*`). Consecuencia para **D1/D2**: multi-CRTC, hot-plug y cambio de modo no vendrán del DRM de Linux; hay que generalizar `kernel/drm/drm_core.c` (un solo CRTC virtual hoy) cuando haya un driver real que lo use.
 
 ### D10 — NVIDIA: obligatorio, con el código abierto de NVIDIA (`open-gpu-kernel-modules`)
 - **Decisión (26-oct-2026): SÍ, NVIDIA se implementa sí o sí.** Sustituye al «último y opcional» del Bloque 8.4. Hardware de prueba: RTX 4060 (Ada, AD107) del sobremesa.
