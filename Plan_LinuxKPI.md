@@ -1,6 +1,6 @@
 # Plan de implementación: capa de compatibilidad con drivers de Linux (LinuxKPI) para Aurora
 
-Estado: **L0 y L1 hechas** (26-oct-2026; L0.2/L0.3 con fuentes provisionales, ver §11). L2 pendiente de confirmación. Resumen de la sesión: `docs/LinuxKPI_Sesion_L0_L1.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
+Estado: **L0, L1 y L2 hechas** (26-oct-2026; L0.2/L0.3 con fuentes provisionales, ver §11). L3 pendiente de confirmación. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md` y `docs/LinuxKPI_Sesion_L2.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
 
 ## 0. Principios
 
@@ -106,7 +106,7 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 - **Hito:** un `.kur` de prueba usa `kzalloc`, `list_head`, `rb_tree`, `idr`, `printk`, `snprintf` y los resultados coinciden con los esperados (pruebas unitarias).
 
 ### L2 — Sincronización, tiempo y trabajo diferido (K2)
-- `mutex`, `spinlock`, `rwsem`, `ww_mutex`, `completion`, `wait_queue`, `rcu` (aproximado: un *grace period* que espera a que todas las CPU pasen por un punto seguro), `workqueue`/`delayed_work` sobre `workqueue.c`, `timer_list`, `hrtimer`.
+- `mutex`, `spinlock`, `rwsem`, `ww_mutex`, `completion`, `wait_queue`, `rcu` (aproximado: un *grace period* que espera a que todas las CPU pasen por un punto seguro), `workqueue`/`delayed_work` sobre `workqueue.c`, `timer_list`, `hrtimer`. *(Hecho el 26-oct-2026; las workqueues se escribieron en la capa y no sobre `workqueue.c`, ver §11 L2.)*
 - **Hito:** pruebas de estrés con 4 CPU (contención de mutex/ww_mutex, work + timers) sin interbloqueos; una prueba de `ww_mutex` con `-EDEADLK` y reintento.
 
 ### L3 — Modelo de dispositivos, PCI e interrupciones (K4, K5)
@@ -169,7 +169,7 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 
 1. **Unitarias de la capa** (`tests/linuxkpi/`): cada nivel con un `.kur` de prueba, dentro de la suite del kernel.
 2. **Drivers de Linux reales que funcionan en QEMU** (no necesitan GPU): `bochs`, `simpledrm`, `virtio-gpu` (+ `edu` de QEMU para DMA/IRQ, `e1000e` para PCI/IRQ y `snd-hda`/`virtio-*` para variedad). Son el banco de pruebas principal.
-3. **Regresión**: suite del kernel (183), `drm_test`, `sig_test`, `rseq_test`, Weston, `aurora-wayland` (X11 y Wayland), `clipboard-x11.sh`, `primary-icons.sh`. **Ninguna fase se da por terminada si empeora.**
+3. **Regresión**: suite del kernel (183 al empezar L0; 191 tras L2), `drm_test`, `sig_test`, `rseq_test`, Weston, `aurora-wayland` (X11 y Wayland), `clipboard-x11.sh`, `primary-icons.sh`. **Ninguna fase se da por terminada si empeora.**
 4. **Estrés en SMP**: ejecución con `-smp 4` y TCG; con KVM cuando haya (medirá el rendimiento de verdad, D9).
 5. **Hardware real** (L7–L8): PC con **log serie** siempre; passthrough VFIO + KVM desde Linux para iterar sin reiniciar; `screendump` por cámara si no hay captura.
 6. **Análisis estático**: `linuxkpi-scan.py` en CI para detectar símbolos faltantes cuando se actualice la versión de Linux.
@@ -204,7 +204,8 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 4. **NVIDIA**: `kernel-open/` sobre LinuxKPI **o** capa de SO propia (decidir tras L0.3 con los datos reales).
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
 6. **Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**: fijarlos cuando el entorno pueda acceder a `kernel.org` (hoy bloqueado); repetir entonces L0.3 sobre la 6.18.
-7. **RCU antes de usar `xarray`/`idr` con lectores concurrentes** (L2).
+7. ~~**RCU antes de usar `xarray`/`idr` con lectores concurrentes**~~ → hecho en L2 (`kfree_rcu` en `xa_node_free`).
+8. **Cambios en Aurora que L2 no ha hecho** (rechazados o pendientes de decisión, ver §11 L2): plazos de espera a 1 ms (hoy ~8 ms), `task_t->lkpi_task` para `current`, exportar `signal_pending`, y el arreglo de `sched_current()` (lectura atómica de `current_task`).
 
 ## 11. Decisiones (registro)
 
@@ -231,3 +232,24 @@ Cada entrada lleva fecha. Cambiar una decisión requiere discutirlo y añadir un
 - **Tiempo**: `HZ = 1000` (el tick de Aurora); `ktime_get()` tiene la resolución del tick (1 ms) hasta usar el TSC.
 - **Pruebas** (`tests/linuxkpi/`): cada `.kur` de prueba comprueba en `module_init` y cuenta en la suite con `test_pass`/`test_fail` del kernel; `kernel/tests/kernel_tests.c` tiene 6 pruebas `linuxkpi: …` (cargador, capa, K0, K1, K3, descarga). **Suite del kernel: 189/189** en QEMU (183 previas + 6).
 - **Fuentes de Linux**: `kernel.org` y GitHub están bloqueados en el entorno de desarrollo. `scripts/fetch-linux-drivers.sh` descarga la 6.18 y NVIDIA cuando haya red; `--ubuntu` toma Linux 6.8 y NVIDIA 615.71.09 del archivo de Ubuntu solo para desarrollar el escáner (`docs/linuxkpi_api.md` es provisional por eso).
+
+### 26-oct-2026 — L2 (K2: sincronización, tiempo y trabajo diferido)
+Decisiones tomadas con el autor antes de escribir código:
+- **RCU: contador de estados quiescentes por CPU en el tick** (opción A). Único cambio en el planificador de Aurora: `sched_tick()` incrementa `g_rcu_qs_count[cpu]` si la tarea actual tiene `preempt_count == 0`, y lo exporta como `sched_rcu_qs_count(cpu)`. `rcu_read_lock()` es `preempt_disable()` (RCU no expulsable), así que un tick con la expulsión activa cae fuera de cualquier lectura. `synchronize_rcu()` toma una foto de los contadores de las CPU en línea y espera a que avancen todas (≈ 8–16 ms en la práctica, por la resolución de los plazos; ver abajo). Descartadas: un kthread fijado a cada CPU (periodo de ~10 ms + IPI) y un contador global de lectores (contención e inanición).
+- **K2 se escribe en la capa** sobre un único servicio de Aurora: aparcar y despertar una tarea. Cada `task_struct` lleva una `wait_queue_t` de Aurora propia; `schedule()` se aparca solo si `__state != TASK_RUNNING` y `wake_up_process()` pone `TASK_RUNNING` y desaparca, ambos bajo el cerrojo de esa cola (como `futex.c`). Encima, con la semántica de Linux: `wait_queue_head` (funciones de despertar, exclusivas, `wait_woken`), `completion`, `mutex` (propietario, traspaso FIFO), `ww_mutex`, `rwsem`, `semaphore`, `schedule_timeout`, `workqueue`, `timer_list`, `hrtimer`, tasklets e `irq_work`. No se envuelven `wait.c`/`completion.c`/`workqueue.c`/`mutex.h` de Aurora: no tienen la semántica de Linux y cambiarla afectaría al resto del kernel (ver «Contradicciones» en `docs/LinuxKPI_Sesion_L2.md`).
+- **Cambios en Aurora aceptados: solo el gancho de RCU.** Rechazados por ahora: (b) plazos de espera a 1 ms, (c) puntero `lkpi_task` en `task_t` y (d) exportar `signal_pending`. Consecuencias:
+  - Los plazos (`schedule_timeout`, `msleep`, `timer_list`, `hrtimer`, `delayed_work`) tienen la resolución de `sched_wake_expired()` (cada 8 ticks): pueden llegar **hasta ~8 ms tarde**, nunca antes. `usleep_range()` con mínimo < 2 ms hace espera activa con el TSC.
+  - `current` se busca en una tabla hash `task_t* → task_struct` sin cerrojo para leer. Las entradas no se liberan hasta descargar la capa; las de kthreads terminados se reutilizan. Si Aurora reutiliza la dirección de un `task_t` muerto de una tarea ajena, la nueva hereda su descriptor (pid/comm informativos en K2).
+  - `signal_pending()` devuelve 0: las variantes `_interruptible`/`_killable` no se interrumpen (K8, L4).
+- **Timers, hrtimers, tasklets e `irq_work` corren en un hilo** (`lkpi_softirqd`), con la expulsión desactivada durante cada función, no en la IRQ del tick. Así `spin_lock_bh()` puede ser un `spin_lock()` normal (el hilo no expulsa a quien tiene el cerrojo en su CPU) y `in_softirq()` es cierto dentro de esas funciones. `in_hardirq()` es 0 hasta L3.
+- **Workqueues**: grupo de hilos compartido (`lkpi_wq/N`, mínimo `max(2, CPUs)`, máximo 64) con un gestor (`lkpi_wq_mgr`) que crea hilos cuando hay trabajo, ninguno libre y menos hilos *ejecutándose* (no dormidos) que CPUs; los inactivos 10 s terminan. Semántica de Linux: reencolar en curso vuelve a ejecutar, no reentrada, `max_active` por cola (ordenadas FIFO), `flush_work` con barrera (espera solo a esa instancia), `cancel_*_sync`, `mod_delayed_work`, `rcu_work`. `disable_work_sync()` es de momento `cancel_work_sync()` (no impide encolar después).
+- **`ktime_get()` con el TSC** (frecuencia calibrada por Aurora, exportada `klog_get_tsc_freq`): ancla en un flanco de tick al cargar la capa, `ns = ancla + ciclos·mult >> 32` y un máximo global para que sea monótono entre CPU. `udelay`/`ndelay`/`mdelay`: espera activa sobre el TSC. `jiffies` sigue siendo el tick (1 ms).
+- **SRCU básico**: dos contadores globales por `srcu_struct` (no por CPU) y cambio de índice. `call_srcu()` va por `system_unbound_wq`.
+- **percpu básico**: `DEFINE_PER_CPU` es un array de `NR_CPUS` con nombre interno; se usa por nombre (`per_cpu(v, cpu)`, `this_cpu_inc(v)`), no con `this_cpu_ptr(&v)`. `alloc_percpu(tipo)` da `NR_CPUS` copias seguidas y `per_cpu_ptr(p, cpu)` avanza `sizeof(*p)`.
+- **CPU en línea** = CPU con ticks quiescentes al cargar la capa (sin hotplug). `smp_processor_id()` lee `%gs:16` como Aurora.
+- **`xa_node_free()` → `kfree_rcu()`** y las lecturas sin cerrojo de `xarray` (`xa_load`, `xa_find`) van bajo `rcu_read_lock()`: pendiente de L1 resuelto.
+- **Pruebas**: `lkpi_test_k2` (funcional, `TEST_FLAG_BLOCKING`) y `lkpi_test_k2_smp` (estrés, `TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP`). Se separan para que la funcional cuente aunque no haya SMP.
+- **Hallazgos del estrés con 4 CPU** (corregidos en la capa):
+  - *Despertar perdido en wound-wait*: la víctima comprobaba `wounded` antes de `set_current_state()`, y quien la hiere escribe y despierta desde el `wait_lock` de otro cerrojo. Ahora el estado se fija al principio de cada vuelta, antes de mirar las condiciones (como en Linux).
+  - *`sched_current()` de Aurora no es atómico*: lee `this_cpu(current_task)` en dos pasos (`%gs:16` y luego `cpu_local_data[cpu]`). Si la tarea se expulsa y migra entre ambos, devuelve la tarea de su CPU anterior. Con eso, `preempt_disable()` incrementaba el contador de **otra** tarea, que quedaba no expulsable y, al terminar, ocupando su CPU para siempre en `kthread_do_exit` (y el periodo de gracia de RCU no avanzaba en esa CPU). La capa lee `current` y `preempt_count`, y llama a `preempt_disable()`, `sched_yield()` y `kthread_stop()` de Aurora (que leen la tarea actual por dentro) con las IRQ desactivadas. Un interbloqueo de wait-die visto una vez antes de esta mitigación no se ha reproducido (6/6 en verde después); no se capturó su estado. **Pendiente en Aurora** (no se ha tocado, a decidir por el autor): leer `current_task` con una sola instrucción relativa a `%gs`. El fallo afecta también a los usos internos de Aurora (`sched_yield`, `wait.c`, `kthread_should_stop`, `preempt_disable` del compositor y del *shootdown* de TLB).
+

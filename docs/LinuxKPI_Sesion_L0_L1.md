@@ -2,7 +2,7 @@
 
 Registro de lo hecho en la primera sesión de la capa de compatibilidad con drivers de Linux. El plan es `Plan_LinuxKPI.md`; las decisiones con fecha están en su §11 y los datos medidos en su §3.1. Este documento es el resumen para retomar el trabajo.
 
-Estado: **L0 y L1 terminadas**. **L2 (sincronización, tiempo, trabajo diferido) no empezada**: espera confirmación del autor.
+Estado: **L0 y L1 terminadas**. L2 (sincronización, tiempo, trabajo diferido) se hizo después: ver `docs/LinuxKPI_Sesion_L2.md`.
 
 ---
 
