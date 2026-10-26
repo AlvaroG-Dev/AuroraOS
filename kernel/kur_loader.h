@@ -12,6 +12,8 @@ struct kur_module {
   uint64_t base_size;
   void    *init_fn;
   void    *exit_fn;
+  uint64_t fini_array;   // .fini_array del módulo (0 si no tiene)
+  uint64_t fini_count;
   int      index;
   int      in_use;
 
@@ -37,6 +39,8 @@ struct kur_module *kur_loader_find_by_name(const char *name);
 
 // Introspección de la tabla dinámica de símbolos (para /proc y tests).
 int kur_dynsym_count(void);
+// Dirección de un símbolo exportado por un módulo cargado (0 si no existe).
+uint64_t kur_loader_lookup_symbol(const char *name);
 
 // ---------------------------------------------------------------------------
 // [FASE 3.3] Carga desde VFS.

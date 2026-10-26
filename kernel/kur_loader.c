@@ -6,6 +6,22 @@
 //   - Resolución de imports: ksymtab estático -> dynsym dinámico.
 //   - Refcounts entre módulos (n_dependents, n_imports_from).
 //   - kur_loader_unload(): llama kur_exit, elimina exports, libera VA.
+//
+// [LinuxKPI L0.4] Límites ampliados para módulos grandes (drivers de Linux):
+//   - Sin tope de secciones (antes 64 en total): tabla sec_off[] por índice,
+//     con índices extendidos (e_shnum/e_shstrndx en shdr[0]).
+//   - Se carga toda sección SHF_ALLOC (PROGBITS, NOBITS, INIT/FINI_ARRAY,
+//     NOTE, unwind...). Se ejecuta .preinit_array/.init_array antes de
+//     kur_init y .fini_array tras kur_exit.
+//   - Relocaciones: + NONE, PC64, GOTPCREL, GOTPCRELX, REX_GOTPCRELX (con una
+//     GOT propia al final de la imagen). Un símbolo de una sección no cargada
+//     es error (antes se resolvía en silencio a la base del módulo).
+//   - Símbolos `__start_SEC`/`__stop_SEC` de secciones con nombre de
+//     identificador C, como hace ld en un enlace final, y
+//     `_GLOBAL_OFFSET_TABLE_` (la GOT del módulo).
+//   - Undefined débil (STB_WEAK) sin definición -> 0.
+//   - Tabla dinámica de exports con hash, sin límite de entradas ni de
+//     longitud de nombre. Un export no puede tapar un símbolo del kernel.
 
 #include "kur_loader.h"
 #include "elf.h"
@@ -22,36 +38,42 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SHT_PROGBITS 1
-#define SHT_SYMTAB   2
-#define SHT_STRTAB   3
-#define SHT_RELA     4
-#define SHT_NOBITS   8
+#define SHT_PROGBITS      1
+#define SHT_SYMTAB        2
+#define SHT_STRTAB        3
+#define SHT_RELA          4
+#define SHT_NOBITS        8
+#define SHT_INIT_ARRAY    14
+#define SHT_FINI_ARRAY    15
+#define SHT_PREINIT_ARRAY 16
 #define SHF_ALLOC    0x2u
 #define SHN_UNDEF    0
+#define SHN_LORESERVE 0xFF00
 #define SHN_ABS      0xFFF1
 #define SHN_COMMON   0xFFF2
+#define SHN_XINDEX   0xFFFF
+#define STB_WEAK     2
 
-#define R_X86_64_64    1
-#define R_X86_64_PC32  2
-#define R_X86_64_PLT32 4
-#define R_X86_64_32    10
-#define R_X86_64_32S   11
+#define R_X86_64_NONE          0
+#define R_X86_64_64            1
+#define R_X86_64_PC32          2
+#define R_X86_64_PLT32         4
+#define R_X86_64_GOTPCREL      9
+#define R_X86_64_32            10
+#define R_X86_64_32S           11
+#define R_X86_64_PC64          24
+#define R_X86_64_GOTPCRELX     41
+#define R_X86_64_REX_GOTPCRELX 42
 
-#define MAX_LOADED_SECS 64
-
-struct loaded_section {
-  uint32_t shndx;
-  uint32_t sh_type;
-  uint64_t sh_size;
-  uint64_t load_offset;
-};
+#define KUR_NOT_LOADED  UINT64_MAX   // sec_off[] / sym_addrs[]: sin dirección
+#define KUR_MAX_ALIGN   0x200000ULL  // la base de cada módulo va a 2 MiB
+#define DYNSYM_BUCKETS  1024
 
 struct kur_dynsym {
-  char     name[64];
+  const char *name;   // apunta a la imagen del módulo (vive lo que él)
   uint64_t addr;
-  uint8_t  owner;    // slot de g_modules[] que lo exporta
-  uint8_t  in_use;
+  uint8_t  owner;     // slot de g_modules[] que lo exporta
+  struct kur_dynsym *next;
 };
 
 static spinlock_t g_kur_lock = {.locked = 0};
@@ -60,7 +82,8 @@ static volatile int g_loader_ready = 0;
 static volatile int g_load_in_progress = 0;
 static uint64_t g_module_cursor = 0;
 static struct kur_module g_modules[KUR_MAX_MODULES];
-static struct kur_dynsym g_dynsym[KUR_MAX_DYNSYMS];
+static struct kur_dynsym *g_dynsym[DYNSYM_BUCKETS];
+static int g_dynsym_count = 0;
 
 static inline uint64_t align_up(uint64_t v, uint64_t a) {
   return (v + a - 1) & ~(a - 1);
@@ -70,6 +93,15 @@ static size_t bounded_strlen(const char *s, size_t max) {
   size_t n = 0;
   while (n < max && s[n]) n++;
   return n;
+}
+
+static uint32_t dynsym_hash(const char *s) {
+  uint32_t h = 2166136261u;  // FNV-1a
+  while (*s) {
+    h ^= (uint8_t)*s++;
+    h *= 16777619u;
+  }
+  return h & (DYNSYM_BUCKETS - 1);
 }
 
 static uint64_t next_module_base(size_t size) {
@@ -106,15 +138,35 @@ static int validate_manifest(const struct kur_manifest *m) {
   return 0;
 }
 
-static const Elf64_Sym *sym_find(const uint8_t *base, const Elf64_Shdr *shdrs,
-                                 int n_shdrs, const char *name) {
-  for (int i = 0; i < n_shdrs; i++) {
-    if (shdrs[i].sh_type != SHT_SYMTAB) continue;
-    if (shdrs[i].sh_link >= (uint32_t)n_shdrs) continue;
-    const Elf64_Sym *syms = (const Elf64_Sym *)(base + shdrs[i].sh_offset);
-    size_t n = shdrs[i].sh_size / sizeof(Elf64_Sym);
-    const Elf64_Shdr *strhdr = &shdrs[shdrs[i].sh_link];
-    const char *strs = (const char *)(base + strhdr->sh_offset);
+// Vista validada de las tablas del ELF que usa el loader.
+struct kur_elf {
+  const uint8_t *data;
+  size_t size;
+  const Elf64_Shdr *shdrs;
+  uint32_t shnum;
+  uint32_t shstrndx;
+};
+
+// Nombre de la sección i (o "" si no es válido).
+static const char *sec_name(const struct kur_elf *e, uint32_t i) {
+  if (e->shstrndx == 0 || e->shstrndx >= e->shnum || i >= e->shnum)
+    return "";
+  const Elf64_Shdr *strh = &e->shdrs[e->shstrndx];
+  if (strh->sh_type != SHT_STRTAB || e->shdrs[i].sh_name >= strh->sh_size)
+    return "";
+  const char *s = (const char *)e->data + strh->sh_offset + e->shdrs[i].sh_name;
+  size_t rem = strh->sh_size - e->shdrs[i].sh_name;
+  return bounded_strlen(s, rem) < rem ? s : "";
+}
+
+static const Elf64_Sym *sym_find(const struct kur_elf *e, const char *name) {
+  for (uint32_t i = 0; i < e->shnum; i++) {
+    if (e->shdrs[i].sh_type != SHT_SYMTAB) continue;
+    if (e->shdrs[i].sh_link >= e->shnum) continue;
+    const Elf64_Sym *syms = (const Elf64_Sym *)(e->data + e->shdrs[i].sh_offset);
+    size_t n = e->shdrs[i].sh_size / sizeof(Elf64_Sym);
+    const Elf64_Shdr *strhdr = &e->shdrs[e->shdrs[i].sh_link];
+    const char *strs = (const char *)(e->data + strhdr->sh_offset);
     for (size_t j = 0; j < n; j++) {
       if (syms[j].st_name >= strhdr->sh_size) continue;
       if (strcmp(strs + syms[j].st_name, name) == 0)
@@ -122,6 +174,19 @@ static const Elf64_Sym *sym_find(const uint8_t *base, const Elf64_Shdr *shdrs,
     }
   }
   return NULL;
+}
+
+// Comprueba que todas las secciones con contenido caen dentro del fichero.
+static int check_sections_in_file(const struct kur_elf *e) {
+  for (uint32_t i = 1; i < e->shnum; i++) {
+    const Elf64_Shdr *s = &e->shdrs[i];
+    if (s->sh_type == SHT_NOBITS || s->sh_size == 0) continue;
+    if (s->sh_offset > e->size || s->sh_size > e->size - s->sh_offset) {
+      LOG_ERR("[KUR] sección %u fuera del fichero", i);
+      return -ENOEXEC;
+    }
+  }
+  return 0;
 }
 
 static int verify_manifest_hash(const void *data, size_t size,
@@ -155,11 +220,10 @@ static uint64_t kur_dynsym_lookup(const char *name, int *owner_out) {
   uint64_t addr = 0;
   int owner = -1;
   unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
-  for (int i = 0; i < KUR_MAX_DYNSYMS; i++) {
-    if (!g_dynsym[i].in_use) continue;
-    if (strcmp(g_dynsym[i].name, name) == 0) {
-      addr = g_dynsym[i].addr;
-      owner = g_dynsym[i].owner;
+  for (struct kur_dynsym *d = g_dynsym[dynsym_hash(name)]; d; d = d->next) {
+    if (strcmp(d->name, name) == 0) {
+      addr = d->addr;
+      owner = d->owner;
       break;
     }
   }
@@ -168,98 +232,127 @@ static uint64_t kur_dynsym_lookup(const char *name, int *owner_out) {
   return addr;
 }
 
-static int find_section_by_name(const char *name, const Elf64_Shdr *shdrs,
-                                int n_shdrs, int shstrndx, const void *data,
-                                size_t size, uint32_t *out_idx) {
-  if (shstrndx <= 0 || shstrndx >= n_shdrs) return -1;
-  const Elf64_Shdr *strh = &shdrs[shstrndx];
-  if (strh->sh_type != SHT_STRTAB) return -1;
-  if (strh->sh_offset + strh->sh_size > size) return -1;
-  const char *strs = (const char *)((const uint8_t *)data + strh->sh_offset);
-  for (int i = 0; i < n_shdrs; i++) {
-    if (shdrs[i].sh_name >= strh->sh_size) continue;
-    const char *sname = strs + shdrs[i].sh_name;
-    size_t remaining = strh->sh_size - shdrs[i].sh_name;
-    size_t nlen = bounded_strlen(sname, remaining);
-    if (nlen < remaining && strcmp(sname, name) == 0) {
-      *out_idx = (uint32_t)i;
-      return 0;
+// Quita de la tabla dinámica los exports del slot `owner`.
+static int dynsym_remove_owner(int owner) {
+  int removed = 0;
+  unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
+  for (int b = 0; b < DYNSYM_BUCKETS; b++) {
+    struct kur_dynsym **pp = &g_dynsym[b];
+    while (*pp) {
+      struct kur_dynsym *d = *pp;
+      if (d->owner == (uint8_t)owner) {
+        *pp = d->next;
+        kfree(d);
+        removed++;
+      } else {
+        pp = &d->next;
+      }
     }
   }
-  return -1;
+  g_dynsym_count -= removed;
+  spin_unlock_irqrestore(&g_dynsym_lock, flags);
+  return removed;
+}
+
+// Primera sección cuyo nombre es `name`, o 0.
+static uint32_t find_section_by_name(const struct kur_elf *e, const char *name) {
+  for (uint32_t i = 1; i < e->shnum; i++) {
+    if (strcmp(sec_name(e, i), name) == 0)
+      return i;
+  }
+  return 0;
 }
 
 // Registra los exports del módulo en la tabla dinámica.
 // Se llama DESPUÉS de aplicar relocaciones y de kur_init OK.
-static int register_module_exports(struct kur_module *mod, const void *data,
-                                   size_t size, const Elf64_Shdr *shdrs,
-                                   int n_shdrs, int shstrndx,
-                                   const struct loaded_section *secs,
-                                   int n_secs, uint64_t base) {
-  uint32_t exp_idx;
-  if (find_section_by_name(KUR_EXPORT_SECTION, shdrs, n_shdrs, shstrndx,
-                           data, size, &exp_idx) != 0)
+static int register_module_exports(struct kur_module *mod,
+                                   const struct kur_elf *e,
+                                   const uint64_t *sec_off, uint64_t base) {
+  uint32_t exp_idx = find_section_by_name(e, KUR_EXPORT_SECTION);
+  if (exp_idx == 0)
     return 0;  // módulo sin exports: OK
-
-  const Elf64_Shdr *exp_sh = &shdrs[exp_idx];
-  uint64_t exp_off = 0;
-  int found = 0;
-  for (int i = 0; i < n_secs; i++) {
-    if (secs[i].shndx == exp_idx) {
-      exp_off = secs[i].load_offset;
-      found = 1;
-      break;
-    }
-  }
-  if (!found) {
+  if (sec_off[exp_idx] == KUR_NOT_LOADED) {
     LOG_ERR("[KUR] %s presente pero no allocable", KUR_EXPORT_SECTION);
     return -ENOEXEC;
   }
-  size_t n_entries = exp_sh->sh_size / sizeof(struct kur_export_entry);
+  size_t n_entries = e->shdrs[exp_idx].sh_size / sizeof(struct kur_export_entry);
   const struct kur_export_entry *entries =
-      (const struct kur_export_entry *)((const uint8_t *)base + exp_off);
+      (const struct kur_export_entry *)(base + sec_off[exp_idx]);
 
   for (size_t i = 0; i < n_entries; i++) {
     const char *name = entries[i].name;
     uint64_t addr = entries[i].addr;
-    if (!name || !name[0]) {
-      LOG_ERR("[KUR] export[%zu]: sin nombre", i);
+    if (!name || bounded_strlen(name, 4096) == 0 ||
+        bounded_strlen(name, 4096) == 4096) {
+      LOG_ERR("[KUR] export[%zu]: nombre vacío o inválido", i);
       return -ENOEXEC;
     }
-    size_t nlen = bounded_strlen(name, 63);
-    if (nlen == 0) {
-      LOG_ERR("[KUR] export[%zu]: nombre vacío", i);
-      return -ENOEXEC;
-    }
-    unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
-    int slot = -1;
-    int dup = 0;
-    for (int j = 0; j < KUR_MAX_DYNSYMS; j++) {
-      if (g_dynsym[j].in_use && strcmp(g_dynsym[j].name, name) == 0) {
-        dup = 1;
-        break;
-      }
-      if (!g_dynsym[j].in_use && slot < 0) slot = j;
-    }
-    if (dup) {
-      spin_unlock_irqrestore(&g_dynsym_lock, flags);
-      LOG_ERR("[KUR] export duplicado: '%s'", name);
+    if (ksymtab_lookup(name) != 0) {
+      LOG_ERR("[KUR] export '%s' tapa un símbolo del kernel", name);
       return -EEXIST;
     }
-    if (slot < 0) {
-      spin_unlock_irqrestore(&g_dynsym_lock, flags);
-      LOG_ERR("[KUR] tabla dynsym llena (max=%d)", KUR_MAX_DYNSYMS);
-      return -ENOMEM;
+    struct kur_dynsym *d = (struct kur_dynsym *)kmalloc(sizeof(*d));
+    if (!d) return -ENOMEM;
+    d->name = name;
+    d->addr = addr;
+    d->owner = (uint8_t)mod->index;
+    uint32_t h = dynsym_hash(name);
+    unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
+    for (struct kur_dynsym *o = g_dynsym[h]; o; o = o->next) {
+      if (strcmp(o->name, name) == 0) {
+        spin_unlock_irqrestore(&g_dynsym_lock, flags);
+        kfree(d);
+        LOG_ERR("[KUR] export duplicado: '%s'", name);
+        return -EEXIST;
+      }
     }
-    memcpy(g_dynsym[slot].name, name, nlen);
-    g_dynsym[slot].name[nlen] = '\0';
-    g_dynsym[slot].addr = addr;
-    g_dynsym[slot].owner = (uint8_t)mod->index;
-    g_dynsym[slot].in_use = 1;
+    d->next = g_dynsym[h];
+    g_dynsym[h] = d;
+    g_dynsym_count++;
     spin_unlock_irqrestore(&g_dynsym_lock, flags);
-    LOG_INFO("[KUR] export '%s' @ %p", name, (void *)addr);
+    LOG_DEBUG("[KUR] export '%s' @ %p", name, (void *)addr);
   }
+  if (n_entries)
+    LOG_INFO("[KUR] '%s': %zu exports registrados", mod->name, n_entries);
   return 0;
+}
+
+static int is_got_reloc(uint32_t type) {
+  return type == R_X86_64_GOTPCREL || type == R_X86_64_GOTPCRELX ||
+         type == R_X86_64_REX_GOTPCRELX;
+}
+
+// Llama a las funciones de las secciones del tipo dado, en orden.
+static void run_array_sections(const struct kur_elf *e, const uint64_t *sec_off,
+                               uint64_t base, uint32_t type) {
+  for (uint32_t i = 1; i < e->shnum; i++) {
+    if (e->shdrs[i].sh_type != type || sec_off[i] == KUR_NOT_LOADED) continue;
+    const uint64_t *fns = (const uint64_t *)(base + sec_off[i]);
+    size_t n = e->shdrs[i].sh_size / sizeof(uint64_t);
+    for (size_t k = 0; k < n; k++) {
+      if (fns[k] && fns[k] != UINT64_MAX)
+        ((void (*)(void))fns[k])();
+    }
+  }
+}
+
+// Resuelve `__start_SEC` / `__stop_SEC` contra las secciones cargadas.
+static uint64_t start_stop_symbol(const struct kur_elf *e,
+                                  const uint64_t *sec_off, uint64_t base,
+                                  const char *nm) {
+  int stop = 0;
+  const char *sec;
+  if (strncmp(nm, "__start_", 8) == 0) {
+    sec = nm + 8;
+  } else if (strncmp(nm, "__stop_", 7) == 0) {
+    sec = nm + 7;
+    stop = 1;
+  } else {
+    return 0;
+  }
+  uint32_t i = find_section_by_name(e, sec);
+  if (i == 0 || sec_off[i] == KUR_NOT_LOADED) return 0;
+  return base + sec_off[i] + (stop ? e->shdrs[i].sh_size : 0);
 }
 
 static int kur_load_internal(const void *data, size_t size, int slot,
@@ -286,27 +379,37 @@ static int kur_load_internal(const void *data, size_t size, int slot,
     LOG_ERR("[KUR] e_type=%u, esperado ET_REL(1)", ehdr->e_type);
     return -ENOEXEC;
   }
-  if (ehdr->e_shoff > size || ehdr->e_shentsize != sizeof(Elf64_Shdr) ||
-      ehdr->e_shnum == 0 || ehdr->e_shnum > MAX_LOADED_SECS) {
+  if (ehdr->e_shoff == 0 || ehdr->e_shoff > size ||
+      ehdr->e_shentsize != sizeof(Elf64_Shdr) ||
+      size - ehdr->e_shoff < sizeof(Elf64_Shdr)) {
     LOG_ERR("[KUR] section header table inválida");
     return -ENOEXEC;
   }
-  if (ehdr->e_shoff + (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr) > size) {
+
+  struct kur_elf e;
+  e.data = (const uint8_t *)data;
+  e.size = size;
+  e.shdrs = (const Elf64_Shdr *)(e.data + ehdr->e_shoff);
+  // Índices extendidos: con >= SHN_LORESERVE secciones, e_shnum = 0 y el
+  // número real va en shdr[0].sh_size (y e_shstrndx en shdr[0].sh_link).
+  e.shnum = ehdr->e_shnum ? ehdr->e_shnum : (uint32_t)e.shdrs[0].sh_size;
+  e.shstrndx = ehdr->e_shstrndx == SHN_XINDEX ? e.shdrs[0].sh_link
+                                              : ehdr->e_shstrndx;
+  if (e.shnum == 0 ||
+      (uint64_t)e.shnum > (size - ehdr->e_shoff) / sizeof(Elf64_Shdr)) {
     LOG_ERR("[KUR] section headers fuera del fichero");
     return -ENOEXEC;
   }
-
-  const Elf64_Shdr *shdrs =
-      (const Elf64_Shdr *)((const uint8_t *)data + ehdr->e_shoff);
+  int rc = check_sections_in_file(&e);
+  if (rc < 0) return rc;
 
   // -- 1. Manifest ---------------------------------------------------------
-  const Elf64_Sym *mfs =
-      sym_find(data, shdrs, ehdr->e_shnum, KUR_SYM_MANIFEST);
-  if (!mfs || mfs->st_shndx == SHN_UNDEF || mfs->st_shndx >= ehdr->e_shnum) {
+  const Elf64_Sym *mfs = sym_find(&e, KUR_SYM_MANIFEST);
+  if (!mfs || mfs->st_shndx == SHN_UNDEF || mfs->st_shndx >= e.shnum) {
     LOG_ERR("[KUR] falta '%s' definido", KUR_SYM_MANIFEST);
     return -ENOEXEC;
   }
-  const Elf64_Shdr *mfsh = &shdrs[mfs->st_shndx];
+  const Elf64_Shdr *mfsh = &e.shdrs[mfs->st_shndx];
   if (mfsh->sh_offset > size ||
       mfsh->sh_size < sizeof(struct kur_manifest)) {
     LOG_ERR("[KUR] sección del manifest demasiado pequeña");
@@ -320,7 +423,7 @@ static int kur_load_internal(const void *data, size_t size, int slot,
   const struct kur_manifest *mf =
       (const struct kur_manifest *)((const uint8_t *)data + manifest_off);
 
-  int rc = validate_manifest(mf);
+  rc = validate_manifest(mf);
   if (rc < 0) return rc;
   LOG_INFO("[KUR] manifest OK: name='%s' abi=%u flags=0x%x",
            mf->name, mf->abi_version, mf->flags);
@@ -330,99 +433,127 @@ static int kur_load_internal(const void *data, size_t size, int slot,
   rc = verify_manifest_hash(data, size, hash_file_off, mf);
   if (rc < 0) return rc;
 
-  // -- 2. init/exit --------------------------------------------------------
-  const Elf64_Sym *init_sym = sym_find(data, shdrs, ehdr->e_shnum, KUR_SYM_INIT);
-  if (!init_sym || init_sym->st_shndx == SHN_UNDEF) {
+  // -- 2. init/exit y tabla de símbolos -------------------------------------
+  const Elf64_Sym *init_sym = sym_find(&e, KUR_SYM_INIT);
+  if (!init_sym || init_sym->st_shndx == SHN_UNDEF ||
+      init_sym->st_shndx >= e.shnum) {
     LOG_ERR("[KUR] falta '%s'", KUR_SYM_INIT);
     return -ENOEXEC;
   }
-  const Elf64_Sym *exit_sym = sym_find(data, shdrs, ehdr->e_shnum, KUR_SYM_EXIT);
+  const Elf64_Sym *exit_sym = sym_find(&e, KUR_SYM_EXIT);
 
-  // -- 3. Layout ----------------------------------------------------------
-  struct loaded_section secs[MAX_LOADED_SECS];
-  int n_secs = 0;
+  const Elf64_Shdr *symtab_hdr = NULL;
+  for (uint32_t i = 0; i < e.shnum; i++) {
+    if (e.shdrs[i].sh_type == SHT_SYMTAB) { symtab_hdr = &e.shdrs[i]; break; }
+  }
+  if (!symtab_hdr || symtab_hdr->sh_link >= e.shnum) {
+    LOG_ERR("[KUR] sin .symtab");
+    return -ENOEXEC;
+  }
+  size_t n_syms = symtab_hdr->sh_size / sizeof(Elf64_Sym);
+  const Elf64_Sym *syms = (const Elf64_Sym *)(e.data + symtab_hdr->sh_offset);
+  const Elf64_Shdr *strtab_hdr = &e.shdrs[symtab_hdr->sh_link];
+  const char *strs = (const char *)(e.data + strtab_hdr->sh_offset);
+
+  uint64_t *sec_off = (uint64_t *)kmalloc(e.shnum * sizeof(uint64_t));
+  uint64_t *sym_addrs = (uint64_t *)kmalloc((n_syms + 1) * sizeof(uint64_t));
+  uint32_t *got_slot = (uint32_t *)kcalloc(n_syms + 1, sizeof(uint32_t));
+  if (!sec_off || !sym_addrs || !got_slot) {
+    kfree(sec_off); kfree(sym_addrs); kfree(got_slot);
+    return -ENOMEM;
+  }
+  uint64_t base = 0, npages = 0;
+  rc = -ENOEXEC;
+
+  // -- 3. Layout: toda sección SHF_ALLOC, y la GOT al final ----------------
   uint64_t total = 0;
-  for (int i = 0; i < ehdr->e_shnum; i++) {
-    const Elf64_Shdr *s = &shdrs[i];
-    if (!(s->sh_flags & SHF_ALLOC) || s->sh_size == 0) continue;
-    if (s->sh_type != SHT_PROGBITS && s->sh_type != SHT_NOBITS) continue;
-    if (n_secs >= MAX_LOADED_SECS) return -ENOEXEC;
-    uint64_t align = s->sh_addralign ? s->sh_addralign : 16;
-    if (align > 4096) align = 4096;
-    uint64_t off = align_up(total, align);
-    secs[n_secs].shndx = (uint32_t)i;
-    secs[n_secs].sh_type = s->sh_type;
-    secs[n_secs].sh_size = s->sh_size;
-    secs[n_secs].load_offset = off;
-    n_secs++;
-    total = off + s->sh_size;
+  for (uint32_t i = 0; i < e.shnum; i++) {
+    const Elf64_Shdr *s = &e.shdrs[i];
+    sec_off[i] = KUR_NOT_LOADED;
+    if (i == 0 || !(s->sh_flags & SHF_ALLOC) || s->sh_size == 0) continue;
+    uint64_t align = s->sh_addralign ? s->sh_addralign : 1;
+    if (align & (align - 1)) align = 16;
+    if (align > KUR_MAX_ALIGN) {
+      LOG_ERR("[KUR] sección %u: alineación %lu > 2 MiB", i,
+              (unsigned long)align);
+      goto out_free;
+    }
+    sec_off[i] = align_up(total, align);
+    total = sec_off[i] + s->sh_size;
   }
   if (total == 0) {
     LOG_ERR("[KUR] sin secciones allocables");
-    return -ENOEXEC;
+    goto out_free;
   }
+  uint32_t n_got = 0;
+  for (uint32_t i = 0; i < e.shnum; i++) {
+    const Elf64_Shdr *rh = &e.shdrs[i];
+    if (rh->sh_type != SHT_RELA || rh->sh_info >= e.shnum ||
+        sec_off[rh->sh_info] == KUR_NOT_LOADED)
+      continue;
+    const Elf64_Rela *relas = (const Elf64_Rela *)(e.data + rh->sh_offset);
+    size_t n = rh->sh_size / sizeof(Elf64_Rela);
+    for (size_t j = 0; j < n; j++) {
+      uint32_t si = (uint32_t)(relas[j].r_info >> 32);
+      if (is_got_reloc((uint32_t)relas[j].r_info) && si < n_syms &&
+          got_slot[si] == 0)
+        got_slot[si] = ++n_got;
+    }
+  }
+  uint64_t got_off = align_up(total, 8);
+  if (n_got) total = got_off + (uint64_t)n_got * 8;
 
   // -- 4. Alloc VA --------------------------------------------------------
-  uint64_t base = next_module_base(total);
-  uint64_t npages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+  base = next_module_base(total);
+  npages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
   if (vmm_alloc_pages(base, npages, PTE_WRITABLE | PTE_GLOBAL) != 0) {
     LOG_ERR("[KUR] vmm_alloc_pages(%lu págs) falló en %p",
             (unsigned long)npages, (void *)base);
-    return -ENOMEM;
+    npages = 0;
+    rc = -ENOMEM;
+    goto out_free;
   }
   memset((void *)base, 0, total);
-  LOG_INFO("[KUR] cargado en %p size=%lu", (void *)base,
-           (unsigned long)total);
+  LOG_INFO("[KUR] cargado en %p size=%lu (%u secciones, %u entradas GOT)",
+           (void *)base, (unsigned long)total, e.shnum, n_got);
 
-  // -- 5. Copiar PROGBITS -------------------------------------------------
-  for (int i = 0; i < n_secs; i++) {
-    if (secs[i].sh_type == SHT_NOBITS) continue;
-    const Elf64_Shdr *s = &shdrs[secs[i].shndx];
-    if (s->sh_offset + s->sh_size > size) {
-      LOG_ERR("[KUR] sección %u fuera del fichero", secs[i].shndx);
-      goto fail;
-    }
-    memcpy((uint8_t *)base + secs[i].load_offset,
-           (const uint8_t *)data + s->sh_offset, s->sh_size);
+  // -- 5. Copiar contenido ------------------------------------------------
+  for (uint32_t i = 1; i < e.shnum; i++) {
+    if (sec_off[i] == KUR_NOT_LOADED || e.shdrs[i].sh_type == SHT_NOBITS)
+      continue;
+    memcpy((uint8_t *)base + sec_off[i], e.data + e.shdrs[i].sh_offset,
+           e.shdrs[i].sh_size);
   }
 
   // -- 6. Pre-resolver símbolos ------------------------------------------
-  const Elf64_Shdr *symtab_hdr = NULL;
-  for (int i = 0; i < ehdr->e_shnum; i++) {
-    if (shdrs[i].sh_type == SHT_SYMTAB) { symtab_hdr = &shdrs[i]; break; }
-  }
-  if (!symtab_hdr) {
-    LOG_ERR("[KUR] sin .symtab");
-    goto fail;
-  }
-  size_t n_syms = symtab_hdr->sh_size / sizeof(Elf64_Sym);
-  const Elf64_Sym *syms =
-      (const Elf64_Sym *)((const uint8_t *)data + symtab_hdr->sh_offset);
-  const char *strs =
-      (const char *)((const uint8_t *)data +
-                     shdrs[symtab_hdr->sh_link].sh_offset);
-
-  uint64_t *sym_addrs = (uint64_t *)kmalloc(n_syms * sizeof(uint64_t));
-  if (!sym_addrs) { rc = -ENOMEM; goto fail; }
-  for (size_t i = 0; i < n_syms; i++) {
+  sym_addrs[0] = 0;
+  for (size_t i = 1; i < n_syms; i++) {
     const Elf64_Sym *s = &syms[i];
-    if (i == 0) { sym_addrs[i] = 0; continue; }
-
+    if (s->st_name >= strtab_hdr->sh_size) {
+      LOG_ERR("[KUR] sym[%zu]: nombre fuera de .strtab", i);
+      goto fail;
+    }
+    const char *nm = strs + s->st_name;
     if (s->st_shndx == SHN_UNDEF) {
       if (s->st_name == 0) {
         LOG_ERR("[KUR] sym[%zu]: undefined sin nombre", i);
-        kfree(sym_addrs); goto fail;
+        goto fail;
       }
-      const char *nm = strs + s->st_name;
+      // 0) __start_SEC / __stop_SEC del propio módulo, y la GOT propia
+      // (_GLOBAL_OFFSET_TABLE_ lo referencia el ensamblador con GOTPCREL).
+      uint64_t a = start_stop_symbol(&e, sec_off, base, nm);
+      if (a == 0 && strcmp(nm, "_GLOBAL_OFFSET_TABLE_") == 0)
+        a = base + got_off;
       // 1) ksymtab estático (kernel).
-      uint64_t a = ksymtab_lookup(nm);
+      if (a == 0)
+        a = ksymtab_lookup(nm);
       int owner = -1;
       // 2) dynsym dinámico (otros módulos).
       if (a == 0)
         a = kur_dynsym_lookup(nm, &owner);
-      if (a == 0) {
+      if (a == 0 && (s->st_info >> 4) != STB_WEAK) {
         LOG_ERR("[KUR] símbolo sin resolver: '%s'", nm);
-        kfree(sym_addrs); goto fail;
+        goto fail;
       }
       sym_addrs[i] = a;
       if (owner >= 0 && owner != slot) {
@@ -430,9 +561,7 @@ static int kur_load_internal(const void *data, size_t size, int slot,
         // rechace con -EBUSY mientras este módulo viva. Se deshace en
         // el fail: y en kur_loader_unload().
         if (owner >= KUR_MAX_MODULES || !g_modules[owner].in_use) {
-          LOG_ERR("[KUR] dynsym apunta a slot %d inválido (in_use=%d)",
-                  owner, g_modules[owner].in_use);
-          kfree(sym_addrs);
+          LOG_ERR("[KUR] dynsym apunta a slot %d inválido", owner);
           goto fail;
         }
         out->n_imports_from[owner]++;
@@ -442,61 +571,77 @@ static int kur_load_internal(const void *data, size_t size, int slot,
       sym_addrs[i] = s->st_value;
     } else if (s->st_shndx == SHN_COMMON) {
       LOG_ERR("[KUR] SHN_COMMON no soportado (usa -fno-common)");
-      kfree(sym_addrs); goto fail;
+      goto fail;
+    } else if (s->st_shndx >= SHN_LORESERVE) {
+      LOG_ERR("[KUR] sym '%s': st_shndx 0x%x no soportado", nm, s->st_shndx);
+      goto fail;
+    } else if (s->st_shndx >= e.shnum ||
+               sec_off[s->st_shndx] == KUR_NOT_LOADED) {
+      sym_addrs[i] = KUR_NOT_LOADED;  // p. ej. símbolo de sección de debug
     } else {
-      uint64_t sec_off = 0;
-      for (int k = 0; k < n_secs; k++) {
-        if (secs[k].shndx == s->st_shndx) {
-          sec_off = secs[k].load_offset;
-          break;
-        }
-      }
-      sym_addrs[i] = base + sec_off + s->st_value;
+      sym_addrs[i] = base + sec_off[s->st_shndx] + s->st_value;
     }
   }
 
   // -- 7. Aplicar relocaciones SHT_RELA ----------------------------------
-  for (int i = 0; i < ehdr->e_shnum; i++) {
-    const Elf64_Shdr *rh = &shdrs[i];
+  for (uint32_t i = 0; i < e.shnum; i++) {
+    const Elf64_Shdr *rh = &e.shdrs[i];
     if (rh->sh_type != SHT_RELA) continue;
-    uint64_t target_off = 0;
-    int found = 0;
-    for (int k = 0; k < n_secs; k++) {
-      if (secs[k].shndx == rh->sh_info) {
-        target_off = secs[k].load_offset;
-        found = 1;
-        break;
-      }
+    if (rh->sh_info >= e.shnum) {
+      LOG_ERR("[KUR] rela sección %u: destino inválido", i);
+      goto fail;
     }
-    if (!found) continue;
-    if (rh->sh_offset + rh->sh_size > size) {
-      LOG_ERR("[KUR] rela sección %d fuera del fichero", i);
-      kfree(sym_addrs); goto fail;
-    }
-    const Elf64_Rela *relas =
-        (const Elf64_Rela *)((const uint8_t *)data + rh->sh_offset);
+    // Relocaciones de secciones no cargadas (debug): se ignoran.
+    if (sec_off[rh->sh_info] == KUR_NOT_LOADED) continue;
+    uint64_t target_off = sec_off[rh->sh_info];
+    uint64_t target_size = e.shdrs[rh->sh_info].sh_size;
+    const Elf64_Rela *relas = (const Elf64_Rela *)(e.data + rh->sh_offset);
     size_t n_relas = rh->sh_size / sizeof(Elf64_Rela);
     for (size_t j = 0; j < n_relas; j++) {
       const Elf64_Rela *r = &relas[j];
       uint32_t sym_idx = (uint32_t)(r->r_info >> 32);
       uint32_t type = (uint32_t)(r->r_info & 0xFFFFFFFFu);
+      if (type == R_X86_64_NONE) continue;
       if (sym_idx >= n_syms) {
         LOG_ERR("[KUR] rela %zu: sym_idx fuera de rango", j);
-        kfree(sym_addrs); goto fail;
+        goto fail;
+      }
+      if (r->r_offset > target_size || target_size - r->r_offset < 4 ||
+          ((type == R_X86_64_64 || type == R_X86_64_PC64) &&
+           target_size - r->r_offset < 8)) {
+        LOG_ERR("[KUR] rela %zu: offset 0x%lx fuera de la sección", j,
+                (unsigned long)r->r_offset);
+        goto fail;
       }
       uint64_t S = sym_addrs[sym_idx];
+      if (S == KUR_NOT_LOADED) {
+        LOG_ERR("[KUR] rela %zu: símbolo '%s' en sección no cargada", j,
+                strs + syms[sym_idx].st_name);
+        goto fail;
+      }
       int64_t A = r->r_addend;
       uint64_t P = base + target_off + r->r_offset;
       switch (type) {
       case R_X86_64_64:
         *(uint64_t *)P = S + A;
         break;
+      case R_X86_64_PC64:
+        *(int64_t *)P = (int64_t)S + A - (int64_t)P;
+        break;
+      case R_X86_64_GOTPCREL:
+      case R_X86_64_GOTPCRELX:
+      case R_X86_64_REX_GOTPCRELX: {
+        uint64_t G = base + got_off + (uint64_t)(got_slot[sym_idx] - 1) * 8;
+        *(uint64_t *)G = S;
+        S = G;
+      }
+        __attribute__((fallthrough)); // PC32 contra la entrada de la GOT
       case R_X86_64_PC32:
       case R_X86_64_PLT32: {
         int64_t v = (int64_t)S + A - (int64_t)P;
         if (v > INT32_MAX || v < INT32_MIN) {
           LOG_ERR("[KUR] PC32 fuera de rango: %lld", (long long)v);
-          kfree(sym_addrs); goto fail;
+          goto fail;
         }
         *(int32_t *)P = (int32_t)v;
         break;
@@ -505,7 +650,7 @@ static int kur_load_internal(const void *data, size_t size, int slot,
         uint64_t v = S + A;
         if (v > 0xFFFFFFFFULL) {
           LOG_ERR("[KUR] R_X86_64_32 overflow: 0x%lx", (unsigned long)v);
-          kfree(sym_addrs); goto fail;
+          goto fail;
         }
         *(uint32_t *)P = (uint32_t)v;
         break;
@@ -514,28 +659,27 @@ static int kur_load_internal(const void *data, size_t size, int slot,
         int64_t v = (int64_t)S + A;
         if (v > INT32_MAX || v < INT32_MIN) {
           LOG_ERR("[KUR] R_X86_64_32S overflow: %lld", (long long)v);
-          kfree(sym_addrs); goto fail;
+          goto fail;
         }
         *(int32_t *)P = (int32_t)v;
         break;
       }
       default:
         LOG_ERR("[KUR] reloc tipo %u no soportado (rela %zu)", type, j);
-        kfree(sym_addrs); goto fail;
+        goto fail;
       }
     }
   }
-  kfree(sym_addrs);
 
-  // -- 8. kur_init -------------------------------------------------------
-  uint64_t init_off = 0;
-  for (int k = 0; k < n_secs; k++) {
-    if (secs[k].shndx == init_sym->st_shndx) {
-      init_off = secs[k].load_offset;
-      break;
-    }
+  // -- 8. Constructores y kur_init ----------------------------------------
+  run_array_sections(&e, sec_off, base, SHT_PREINIT_ARRAY);
+  run_array_sections(&e, sec_off, base, SHT_INIT_ARRAY);
+  if (sec_off[init_sym->st_shndx] == KUR_NOT_LOADED) {
+    LOG_ERR("[KUR] %s en sección no cargada", KUR_SYM_INIT);
+    goto fail;
   }
-  void *init_addr = (void *)(base + init_off + init_sym->st_value);
+  void *init_addr =
+      (void *)(base + sec_off[init_sym->st_shndx] + init_sym->st_value);
   LOG_INFO("[KUR] llamando %s en %p", KUR_SYM_INIT, init_addr);
   int (*init_fn)(void) = (int (*)(void))init_addr;
   int irc = init_fn();
@@ -552,25 +696,29 @@ static int kur_load_internal(const void *data, size_t size, int slot,
   out->base_va = base;
   out->base_size = total;
   out->init_fn = init_addr;
-  if (exit_sym && exit_sym->st_shndx != SHN_UNDEF) {
-    uint64_t eoff = 0;
-    for (int k = 0; k < n_secs; k++) {
-      if (secs[k].shndx == exit_sym->st_shndx) {
-        eoff = secs[k].load_offset;
-        break;
-      }
+  if (exit_sym && exit_sym->st_shndx != SHN_UNDEF &&
+      exit_sym->st_shndx < e.shnum &&
+      sec_off[exit_sym->st_shndx] != KUR_NOT_LOADED)
+    out->exit_fn =
+        (void *)(base + sec_off[exit_sym->st_shndx] + exit_sym->st_value);
+  for (uint32_t i = 1; i < e.shnum; i++) {
+    if (e.shdrs[i].sh_type == SHT_FINI_ARRAY && sec_off[i] != KUR_NOT_LOADED) {
+      out->fini_array = base + sec_off[i];
+      out->fini_count = e.shdrs[i].sh_size / sizeof(uint64_t);
+      break;
     }
-    out->exit_fn = (void *)(base + eoff + exit_sym->st_value);
   }
 
   // -- 10. Registrar exports (ya con módulo cargado y kur_init OK) -------
-  rc = register_module_exports(out, data, size, shdrs, ehdr->e_shnum,
-                               ehdr->e_shstrndx, secs, n_secs, base);
+  rc = register_module_exports(out, &e, sec_off, base);
   if (rc < 0) {
     // Rollback: descargar y fallar.
     goto fail;
   }
 
+  kfree(sec_off);
+  kfree(sym_addrs);
+  kfree(got_slot);
   return 0;
 
 fail:
@@ -585,15 +733,13 @@ fail:
     }
   }
   // Rollback de exports (por si register_module_exports falló a medias).
-  {
-    unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
-    for (int i = 0; i < KUR_MAX_DYNSYMS; i++) {
-      if (g_dynsym[i].in_use && g_dynsym[i].owner == (uint8_t)out->index)
-        g_dynsym[i].in_use = 0;
-    }
-    spin_unlock_irqrestore(&g_dynsym_lock, flags);
-  }
-  vmm_free_pages(base, npages);
+  dynsym_remove_owner(out->index);
+out_free:
+  if (npages)
+    vmm_free_pages(base, npages);
+  kfree(sec_off);
+  kfree(sym_addrs);
+  kfree(got_slot);
   return rc ? rc : -ENOEXEC;
 }
 
@@ -607,8 +753,8 @@ void kur_loader_init(void) {
     LOG_ERR("[KUR] KUR_MODULE_BASE=0x%lx colisiona con __bss_end=0x%lx",
             (unsigned long)KUR_MODULE_BASE, (unsigned long)&__bss_end);
   }
-  LOG_INFO("[KUR] loader listo (ABI v%u, max %d módulos, max %d dynsyms)",
-           KUR_ABI_VERSION, KUR_MAX_MODULES, KUR_MAX_DYNSYMS);
+  LOG_INFO("[KUR] loader listo (ABI v%u, max %d módulos, max %u MiB)",
+           KUR_ABI_VERSION, KUR_MAX_MODULES, KUR_MAX_SIZE >> 20);
   g_loader_ready = 1;
 }
 
@@ -675,18 +821,17 @@ int kur_loader_unload(struct kur_module *mod) {
     exit_fn();
   }
 
-  // Eliminar dynsym entries de este módulo.
-  int removed = 0;
-  {
-    unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
-    for (int i = 0; i < KUR_MAX_DYNSYMS; i++) {
-      if (g_dynsym[i].in_use && g_dynsym[i].owner == (uint8_t)mod->index) {
-        g_dynsym[i].in_use = 0;
-        removed++;
-      }
+  // Destructores (.fini_array, en orden inverso).
+  if (mod->fini_array) {
+    const uint64_t *fns = (const uint64_t *)mod->fini_array;
+    for (size_t k = mod->fini_count; k > 0; k--) {
+      if (fns[k - 1] && fns[k - 1] != UINT64_MAX)
+        ((void (*)(void))fns[k - 1])();
     }
-    spin_unlock_irqrestore(&g_dynsym_lock, flags);
   }
+
+  // Eliminar dynsym entries de este módulo.
+  int removed = dynsym_remove_owner(mod->index);
 
   // Decrementar refcounts en módulos que nos importaban.
   for (int b = 0; b < KUR_MAX_MODULES; b++) {
@@ -858,10 +1003,12 @@ struct kur_module *kur_loader_find_by_name(const char *name) {
 }
 
 int kur_dynsym_count(void) {
-  int n = 0;
   unsigned long flags = spin_lock_irqsave(&g_dynsym_lock);
-  for (int i = 0; i < KUR_MAX_DYNSYMS; i++)
-    if (g_dynsym[i].in_use) n++;
+  int n = g_dynsym_count;
   spin_unlock_irqrestore(&g_dynsym_lock, flags);
   return n;
+}
+
+uint64_t kur_loader_lookup_symbol(const char *name) {
+  return name ? kur_dynsym_lookup(name, NULL) : 0;
 }

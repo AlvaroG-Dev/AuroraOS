@@ -10,10 +10,12 @@
 
 #define KUR_MODULE_BASE 0xFFFFFFFFB0000000ULL
 
-#define KUR_MAX_SIZE     (16u * 1024 * 1024)
+// Tamaño máximo del fichero .kur. kur_loader_load_file() lo lee entero con
+// kmalloc, cuyo tope por asignación es 64 MiB (heap.c). Módulos mayores
+// (p. ej. nvidia.ko con el núcleo binario) necesitarán leerse por trozos.
+#define KUR_MAX_SIZE     (64u * 1024 * 1024)
 #define KUR_MAX_MODULES  32
 #define KUR_MAX_NAME     64
-#define KUR_MAX_DYNSYMS  256
 
 #define KUR_SYM_INIT     "kur_init"
 #define KUR_SYM_EXIT     "kur_exit"

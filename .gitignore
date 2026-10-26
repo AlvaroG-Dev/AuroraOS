@@ -55,8 +55,10 @@ libs/glibc/lib/x86_64-linux-gnu/libgallium*
 precompiled/usr/lib/x86_64-linux-gnu/dri/
 build/mesa_stage/
 
-# Fuentes externas de LinuxKPI (scripts/fetch-linux-drivers.sh)
+# LinuxKPI: fuentes externas (scripts/fetch-linux-drivers.sh) y objetos
 build/linuxkpi_src/
+build/linuxkpi/
 
 # El firmware de prueba de request_firmware si se versiona (no es un artefacto).
 !precompiled/lib/firmware/aurora/selftest.bin
+scripts/__pycache__/
