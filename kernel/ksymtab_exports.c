@@ -17,6 +17,7 @@
 #include "pci.h"     // pci_id_match (Fase 2.1b: API para .kur)
 #include "sched.h"   // sched_get_ticks, sched_current
 #include "aur_loader.h"
+#include "firmware.h"
 
 KEXPORT_SYMBOL(klog_printf);
 KEXPORT_SYMBOL(klog_puts);
@@ -38,6 +39,8 @@ KEXPORT_SYMBOL(drivers_probe_all);
 KEXPORT_SYMBOL(pci_id_match);
 
 KEXPORT_SYMBOL(aur_loader_parse_streaming);
+KEXPORT_SYMBOL(request_firmware);
+KEXPORT_SYMBOL(release_firmware);
 
 #include "usb/usb_core.h"
 KEXPORT_SYMBOL(usb_device_register);

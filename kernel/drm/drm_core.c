@@ -1524,6 +1524,8 @@ static int64_t drm_ioctl_locked(drm_file_t *f, unsigned long req, uint64_t arg) 
     return -EACCES;
 
   switch (nr) {
+  case 0x0a: return drm_ioctl_gem_flink(f, arg);
+  case 0x0b: return drm_ioctl_gem_open(f, arg);
   case 0x1e: // SET_MASTER
     if (g_master == f)
       return 0;

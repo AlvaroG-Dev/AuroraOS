@@ -212,6 +212,49 @@ static int so_make_fd(struct drm_syncobj *o, uint64_t pt, const char *name,
   return 0;
 }
 
+// Fence implicito de un dma-buf --------------------------------------------------
+// Un syncobj interno por dma-buf. Nace senalado; IMPORT_SYNC_FILE lo sustituye
+// por un alias del fence del sync_file; EXPORT_SYNC_FILE devuelve un sync_file
+// que se senala cuando el fence actual lo hace.
+struct drm_syncobj *drm_resv_new(void) {
+  so_init_once();
+  struct drm_syncobj *o = so_new();
+  if (o)
+    o->value = 1;
+  return o;
+}
+void drm_resv_put(struct drm_syncobj *o) {
+  if (o)
+    so_put(o);
+}
+bool drm_resv_signaled(struct drm_syncobj *o) { return !o || so_signaled(o, 1); }
+wait_queue_t *drm_syncobj_wq(void) {
+  so_init_once();
+  return &g_so_wq;
+}
+int drm_resv_export_sync_file(struct drm_syncobj *o, int *fd_out) {
+  return so_make_fd(o, 1, "sync_file", DRM_CLOEXEC, fd_out);
+}
+int drm_resv_import_sync_file(struct drm_syncobj **po, int fd) {
+  process_t *proc = process_current();
+  so_fd_t *s = proc ? so_fd_of(proc, fd) : NULL;
+  if (!s)
+    return -EINVAL;
+  struct drm_syncobj *n = so_new();
+  if (!n)
+    return -ENOMEM;
+  so_get(s->o);
+  n->alias = s->o;
+  n->alias_pt = s->pt;
+  if (so_signaled(s->o, s->pt))
+    n->value = 1;
+  struct drm_syncobj *old = *po;
+  *po = n;
+  if (old)
+    so_put(old);
+  return 0;
+}
+
 // Estructuras uapi --------------------------------------------------------------
 struct sync_create { uint32_t handle, flags; };
 struct sync_destroy { uint32_t handle, pad; };

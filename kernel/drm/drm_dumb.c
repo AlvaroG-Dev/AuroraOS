@@ -19,6 +19,11 @@
 static spinlock_t g_gem_lock = {.locked = 0};
 static uint32_t g_gem_next_id = 1;
 
+// Nombres globales (GEM_FLINK): tabla debil; se limpia al liberar el GEM.
+#define FLINK_MAX 64
+static drm_gem_t *g_flink[FLINK_MAX];
+static uint32_t g_flink_next = 1;
+
 int drm_put_user(uint64_t arg, const void *src, size_t n) {
   if (!arg || !access_ok((void *)arg, n) || copy_to_user((void *)arg, src, n) < 0)
     return -EFAULT;
@@ -83,6 +88,11 @@ void drm_gem_put(drm_gem_t *g) {
   if (--g->refcnt > 0) {
     spin_unlock_irqrestore(&g_gem_lock, fl);
     return;
+  }
+  if (g->flink_name) {
+    for (int i = 0; i < FLINK_MAX; i++)
+      if (g_flink[i] == g)
+        g_flink[i] = NULL;
   }
   if (g->owner) {
     drm_gem_t **pp = &g->owner->gems;
@@ -280,4 +290,78 @@ int drm_ioctl_destroy_dumb(drm_file_t *f, uint64_t arg) {
   if (rc)
     return rc;
   return drm_handle_close(f, a.handle);
+}
+
+// DRM_IOCTL_GEM_FLINK: nombre global de un GEM (entero que otro fichero DRM
+// puede abrir con GEM_OPEN). Sin referencia propia: el nombre desaparece
+// cuando el objeto se libera.
+struct drm_gem_flink_arg { uint32_t handle, name; };
+struct drm_gem_open_arg { uint32_t name, handle; uint64_t size; };
+
+int drm_ioctl_gem_flink(drm_file_t *f, uint64_t arg) {
+  struct drm_gem_flink_arg a;
+  int rc = drm_get_user(arg, &a, sizeof(a));
+  if (rc)
+    return rc;
+  drm_gem_t *g = drm_handle_lookup(f, a.handle);
+  if (!g)
+    return -ENOENT;
+  unsigned long fl = spin_lock_irqsave(&g_gem_lock);
+  if (!g->flink_name) {
+    int slot = -1;
+    for (int i = 0; i < FLINK_MAX; i++)
+      if (!g_flink[i]) {
+        slot = i;
+        break;
+      }
+    if (slot < 0) {
+      spin_unlock_irqrestore(&g_gem_lock, fl);
+      return -ENOSPC;
+    }
+    g->flink_name = g_flink_next++;
+    g_flink[slot] = g;
+  }
+  a.name = g->flink_name;
+  spin_unlock_irqrestore(&g_gem_lock, fl);
+  return drm_put_user(arg, &a, sizeof(a));
+}
+
+int drm_ioctl_gem_open(drm_file_t *f, uint64_t arg) {
+  struct drm_gem_open_arg a;
+  int rc = drm_get_user(arg, &a, sizeof(a));
+  if (rc)
+    return rc;
+  drm_gem_t *g = NULL;
+  unsigned long fl = spin_lock_irqsave(&g_gem_lock);
+  for (int i = 0; i < FLINK_MAX; i++)
+    if (g_flink[i] && g_flink[i]->flink_name == a.name && g_flink[i]->refcnt > 0) {
+      g = g_flink[i];
+      g->refcnt++; // la referencia del handle que se abre
+      break;
+    }
+  spin_unlock_irqrestore(&g_gem_lock, fl);
+  if (!g)
+    return -ENOENT;
+  // Mismo GEM ya presente en este fichero: se devuelve su handle.
+  for (int i = 0; i < DRM_MAX_HANDLES; i++)
+    if (f->handles[i] == g) {
+      drm_gem_put(g);
+      a.handle = (uint32_t)i + 1;
+      a.size = g->size;
+      return drm_put_user(arg, &a, sizeof(a));
+    }
+  uint32_t h;
+  rc = drm_handle_alloc(f, g, &h);
+  if (rc) {
+    drm_gem_put(g);
+    return rc;
+  }
+  f->imported[h - 1] = 1; // el handle posee la referencia tomada arriba
+  g->mapped = true;
+  a.handle = h;
+  a.size = g->size;
+  rc = drm_put_user(arg, &a, sizeof(a));
+  if (rc)
+    drm_handle_close(f, h);
+  return rc;
 }

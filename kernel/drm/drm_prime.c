@@ -26,6 +26,7 @@ struct drm_prime_handle {
 
 typedef struct dmabuf {
   drm_gem_t *gem;
+  struct drm_syncobj *resv; // fence implicito (senalado = sin trabajo pendiente)
 } dmabuf_t;
 
 static int dmabuf_get_page(vfs_node_t *node, uint64_t pgoff, uint64_t *phys) {
@@ -41,27 +42,64 @@ static int dmabuf_close(vfs_node_t *node) {
   if (!d)
     return 0;
   drm_gem_put(d->gem);
+  drm_resv_put(d->resv);
   kfree(d);
   node->priv = NULL;
   return 0;
 }
 
+// Listo para leer/escribir cuando el fence implicito esta senalado.
 static int dmabuf_poll(vfs_node_t *node, short events) {
+  dmabuf_t *d = (dmabuf_t *)node->priv;
+  if (d && !drm_resv_signaled(d->resv))
+    return 0;
+  return events & (1 | 4);
+}
+
+static wait_queue_t *dmabuf_poll_wq(vfs_node_t *node) {
   (void)node;
-  return events & (1 | 4); // siempre listo (sin fences)
+  return drm_syncobj_wq();
 }
 
 // DMA_BUF_IOCTL_SYNC / SET_NAME: el acceso a la memoria es coherente.
+struct dmabuf_sync_file { uint32_t flags; int32_t fd; };
+#define DMA_BUF_SYNC_READ (1u << 0)
+#define DMA_BUF_SYNC_WRITE (2u << 0)
+
 static int64_t dmabuf_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
-  (void)node;
-  (void)arg;
+  dmabuf_t *d = (dmabuf_t *)node->priv;
   if (((req >> 8) & 0xFF) != 'b')
     return -ENOTTY;
   switch (req & 0xFF) {
-  case 0: // SYNC
-  case 1: // SET_NAME_A
-  case 2: // SET_NAME_B
+  case 0: // DMA_BUF_IOCTL_SYNC: el acceso a la memoria es coherente
+  case 1: // SET_NAME_A / SET_NAME_B
     return 0;
+  case 2: { // EXPORT_SYNC_FILE: sync_file del fence implicito
+    struct dmabuf_sync_file a;
+    int rc = drm_get_user(arg, &a, sizeof(a));
+    if (rc)
+      return rc;
+    if (!d || !a.flags || (a.flags & ~(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)))
+      return -EINVAL;
+    int fdn;
+    rc = drm_resv_export_sync_file(d->resv, &fdn);
+    if (rc)
+      return rc;
+    a.fd = fdn;
+    return drm_put_user(arg, &a, sizeof(a));
+  }
+  case 3: { // IMPORT_SYNC_FILE: el fence del sync_file pasa a ser el implicito
+    struct dmabuf_sync_file a;
+    int rc = drm_get_user(arg, &a, sizeof(a));
+    if (rc)
+      return rc;
+    if (!d || !a.flags || (a.flags & ~(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)))
+      return -EINVAL;
+    rc = drm_resv_import_sync_file(&d->resv, a.fd);
+    if (rc == 0)
+      wake_up_all(drm_syncobj_wq());
+    return rc;
+  }
   }
   return -ENOTTY;
 }
@@ -70,6 +108,7 @@ static vfs_ops_t dmabuf_ops = {
     .get_page = dmabuf_get_page,
     .close = dmabuf_close,
     .poll = dmabuf_poll,
+    .poll_wq = dmabuf_poll_wq,
     .ioctl = dmabuf_ioctl,
 };
 
@@ -106,6 +145,13 @@ int drm_ioctl_prime_handle_to_fd(drm_file_t *f, uint64_t arg) {
   vfs_node_t *vn = (vfs_node_t *)kzalloc(sizeof(*vn));
   file_descriptor_t *fd = (file_descriptor_t *)kzalloc(sizeof(*fd));
   if (!d || !vn || !fd) {
+    kfree(d);
+    kfree(vn);
+    kfree(fd);
+    return -ENOMEM;
+  }
+  d->resv = drm_resv_new();
+  if (!d->resv) {
     kfree(d);
     kfree(vn);
     kfree(fd);

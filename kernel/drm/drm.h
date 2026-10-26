@@ -50,6 +50,7 @@ typedef struct drm_gem {
   uint64_t *pages;   // direcciones fisicas de cada pagina
   bool mapped;      // MAP_DUMB pedido: las paginas no se liberan hasta cerrar
   bool creator_ref; // aun cuenta la referencia del creador
+  uint32_t flink_name; // 0 = sin nombre global (DRM_IOCTL_GEM_FLINK)
   struct drm_file *owner;
   struct drm_gem *next; // lista del fichero propietario
 } drm_gem_t;
@@ -99,6 +100,8 @@ void drm_file_release_gems(drm_file_t *f);
 void drm_gem_read(const drm_gem_t *g, size_t off, void *dst, size_t len);
 int drm_gem_get_page(drm_file_t *f, uint64_t byte_off, uint64_t *phys);
 
+int drm_ioctl_gem_flink(drm_file_t *f, uint64_t arg);
+int drm_ioctl_gem_open(drm_file_t *f, uint64_t arg);
 int drm_ioctl_create_dumb(drm_file_t *f, uint64_t arg);
 int drm_ioctl_map_dumb(drm_file_t *f, uint64_t arg);
 int drm_ioctl_destroy_dumb(drm_file_t *f, uint64_t arg);
@@ -111,6 +114,13 @@ int drm_ioctl_prime_fd_to_handle(drm_file_t *f, uint64_t arg);
 // ioctls 0xBF..0xCD (SYNCOBJ_*); bloquean, asi que se llaman sin g_drm_lock.
 int drm_syncobj_ioctl(drm_file_t *f, unsigned long req, uint64_t arg);
 void drm_file_release_syncobjs(drm_file_t *f);
+// Fence implicito de un dma-buf (DMA_BUF_IOCTL_EXPORT/IMPORT_SYNC_FILE).
+struct drm_syncobj *drm_resv_new(void); // nace senalado
+void drm_resv_put(struct drm_syncobj *o);
+bool drm_resv_signaled(struct drm_syncobj *o);
+int drm_resv_export_sync_file(struct drm_syncobj *o, int *fd_out); // fd nuevo
+int drm_resv_import_sync_file(struct drm_syncobj **o, int fd);      // reemplaza el fence
+wait_queue_t *drm_syncobj_wq(void);
 // Para drivers de GPU: busca un syncobj por handle y senala un punto
 // (point 0 = binario). Despierta a los que esperan.
 struct drm_syncobj *drm_syncobj_find(drm_file_t *f, uint32_t handle);

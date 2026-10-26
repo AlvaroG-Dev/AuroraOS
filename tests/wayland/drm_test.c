@@ -5,6 +5,7 @@
 // PAGE_FLIP con evento, propiedades y commit atomico, y limpieza.
 
 #include <drm/drm.h>
+#include <linux/dma-buf.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_mode.h>
 #include <errno.h>
@@ -332,6 +333,70 @@ int main(int argc, char **argv) {
   CHECK(ioctl(rfd2, DRM_IOCTL_GEM_CLOSE, &gcl) == 0, "GEM_CLOSE del importado");
   close(rfd2);
   close(dbuf);
+
+  // GEM_FLINK / GEM_OPEN y fences implicitos del dma-buf (sync_file).
+  {
+    struct drm_gem_flink fl = {.handle = cd.handle};
+    CHECK(ioctl(fd, DRM_IOCTL_GEM_FLINK, &fl) == 0 && fl.name,
+          "GEM_FLINK da un nombre global (%u)", fl.name);
+    struct drm_gem_flink fl2 = {.handle = cd.handle};
+    CHECK(ioctl(fd, DRM_IOCTL_GEM_FLINK, &fl2) == 0 && fl2.name == fl.name,
+          "GEM_FLINK repetido devuelve el mismo nombre");
+    int card2 = open("/dev/dri/card0", O_RDWR);
+    struct drm_gem_open op = {.name = fl.name};
+    CHECK(card2 >= 0 && ioctl(card2, DRM_IOCTL_GEM_OPEN, &op) == 0 && op.handle && op.size >= cd.size,
+          "GEM_OPEN en otro fichero (handle=%u size=%llu)", op.handle, (unsigned long long)op.size);
+    struct drm_mode_map_dumb omd = {.handle = op.handle};
+    uint32_t *opx = MAP_FAILED;
+    if (ioctl(card2, DRM_IOCTL_MODE_MAP_DUMB, &omd) == 0)
+      opx = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, card2, omd.offset);
+    CHECK(opx != MAP_FAILED && opx[0] == 0xE0A030, "mmap del GEM abierto por nombre ve el contenido");
+    if (opx != MAP_FAILED)
+      munmap(opx, cd.size);
+    struct drm_gem_open bad = {.name = 0xFFFFFF};
+    CHECK(ioctl(card2, DRM_IOCTL_GEM_OPEN, &bad) < 0, "GEM_OPEN con nombre inexistente falla");
+    int rnode = open("/dev/dri/renderD128", O_RDWR);
+    struct drm_gem_flink rf = {.handle = 1};
+    CHECK(rnode >= 0 && ioctl(rnode, DRM_IOCTL_GEM_FLINK, &rf) < 0,
+          "GEM_FLINK no esta permitido en renderD128");
+    close(rnode);
+    struct drm_gem_close gc2 = {.handle = op.handle};
+    CHECK(ioctl(card2, DRM_IOCTL_GEM_CLOSE, &gc2) == 0, "GEM_CLOSE del abierto");
+    close(card2);
+
+    // dma-buf: fence implicito
+    struct drm_prime_handle dph = {.handle = cd.handle, .flags = DRM_CLOEXEC | DRM_RDWR};
+    CHECK(ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph) == 0, "PRIME para fences implicitos");
+    struct dma_buf_export_sync_file ex = {.flags = DMA_BUF_SYNC_RW, .fd = -1};
+    CHECK(ioctl(dph.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0 && ex.fd >= 0,
+          "EXPORT_SYNC_FILE fd=%d", ex.fd);
+    struct pollfd dpf = {.fd = ex.fd, .events = POLLIN};
+    CHECK(poll(&dpf, 1, 0) == 1, "el fence inicial del dma-buf esta senalado");
+    close(ex.fd);
+
+    // Un syncobj sin senalar importado como fence implicito bloquea el dma-buf.
+    int sfd = open("/dev/dri/renderD128", O_RDWR);
+    struct drm_syncobj_create nc = {0};
+    ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &nc);
+    struct drm_syncobj_handle nh = {.handle = nc.handle,
+                                    .flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE};
+    ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &nh);
+    struct dma_buf_import_sync_file im = {.flags = DMA_BUF_SYNC_WRITE, .fd = nh.fd};
+    CHECK(ioctl(dph.fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &im) == 0, "IMPORT_SYNC_FILE");
+    struct pollfd bpf = {.fd = dph.fd, .events = POLLIN};
+    CHECK(poll(&bpf, 1, 0) == 0, "dma-buf con fence pendiente: poll no esta listo");
+    struct drm_syncobj_array sg = {.handles = (uintptr_t)&nc.handle, .count_handles = 1};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_SIGNAL, &sg) == 0, "senalar el fence del productor");
+    CHECK(poll(&bpf, 1, 1000) == 1 && (bpf.revents & POLLIN), "dma-buf listo tras senalar");
+    struct dma_buf_export_sync_file ex2 = {.flags = DMA_BUF_SYNC_READ, .fd = -1};
+    CHECK(ioctl(dph.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex2) == 0 && ex2.fd >= 0, "EXPORT tras importar");
+    if (ex2.fd >= 0) close(ex2.fd);
+    struct dma_buf_export_sync_file bad0 = {.flags = 0, .fd = -1};
+    CHECK(ioctl(dph.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &bad0) < 0, "EXPORT sin flags falla");
+    close(nh.fd);
+    close(sfd);
+    close(dph.fd);
+  }
 
   // drm_syncobj / sync_file: caps, binario, linea temporal, fd y despertar
   // entre procesos.
