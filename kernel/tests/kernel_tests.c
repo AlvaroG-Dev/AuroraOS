@@ -6114,3 +6114,99 @@ static void test_evdev_keyboard_events(void) {
 }
 REGISTER_TEST("evdev: teclado, SYN, autorepeat, ioctl",
               test_evdev_keyboard_events);
+
+// --- LinuxKPI (Plan_LinuxKPI.md, L0.5) -------------------------------------
+// La capa (linuxkpi.kur) y sus pruebas son .kur en /lib/modules/linuxkpi/.
+// Cada .kur de prueba hace sus comprobaciones en module_init y las cuenta
+// aquí con test_pass/test_fail (exportados en ksymtab_exports.c), dentro del
+// REGISTER_TEST que lo carga. Tras cargarlo, se descarga.
+#include "../kur_loader.h"
+#include "../ksymtab.h"
+
+#define LKPI_DIR "/lib/modules/linuxkpi"
+
+// .fini_array de lkpi_test_loader lo incrementa al descargarse.
+volatile int kur_test_fini_counter;
+KEXPORT_SYMBOL(kur_test_fini_counter);
+
+static struct kur_module *lkpi_layer(void) {
+  struct kur_module *m = kur_loader_find_by_name("linuxkpi");
+  if (!m && kur_loader_load_file(LKPI_DIR "/linuxkpi.kur", &m) != 0)
+    m = NULL;
+  return m;
+}
+
+// Carga tests/<name>.kur (sus aserciones corren en su init) y lo descarga.
+static struct kur_module *lkpi_load_test(const char *name) {
+  char path[128];
+  struct kur_module *m = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  snprintf(path, sizeof(path), LKPI_DIR "/tests/%s.kur", name);
+  int rc = kur_loader_load_file(path, &m);
+  TEST_ASSERT(rc == 0 && m, "%s no carga (rc=%d)", name, rc);
+  return rc == 0 ? m : NULL;
+}
+
+static void lkpi_unload_test(struct kur_module *m) {
+  if (m)
+    TEST_ASSERT(kur_loader_unload(m) == 0, "%s no se descarga", m->name);
+}
+
+static void test_lkpi_loader(void) {
+  int dyn_before = kur_dynsym_count();
+  int fini_before = kur_test_fini_counter;
+  struct kur_module *m = lkpi_load_test("lkpi_test_loader");
+  if (!m)
+    return;
+  TEST_ASSERT(m->base_size > (16u << 20), "imagen de %lu bytes (esperado > 16 MiB)",
+              (unsigned long)m->base_size);
+  uint64_t f = kur_loader_lookup_symbol(
+      "lkpi_test_loader_exported_function_with_a_name_longer_than_sixty_four_chars");
+  TEST_ASSERT(f != 0, "export de nombre largo no registrado");
+  if (f)
+    TEST_ASSERT(((int (*)(void))f)() == 0x4C4B5049, "export de nombre largo");
+  TEST_ASSERT(kur_dynsym_count() > dyn_before, "dynsym no crece");
+  lkpi_unload_test(m);
+  TEST_ASSERT(kur_test_fini_counter == fini_before + 1, ".fini_array no se ejecutó");
+  TEST_ASSERT(kur_loader_lookup_symbol(
+                  "lkpi_test_loader_exported_function_with_a_name_longer_than_sixty_four_chars") == 0,
+              "export sigue tras descargar");
+}
+REGISTER_TEST_FLAGS("linuxkpi: cargador .kur para módulos grandes (L0.4)",
+                    test_lkpi_loader, TEST_FLAG_BLOCKING);
+
+static void test_lkpi_layer_exports(void) {
+  struct kur_module *m = lkpi_layer();
+  TEST_ASSERT(m != NULL, "linuxkpi.kur no carga");
+  if (!m)
+    return;
+  TEST_ASSERT(kur_loader_lookup_symbol("lkpi_kmalloc") != 0, "lkpi_kmalloc no exportado");
+  TEST_ASSERT(kur_loader_lookup_symbol("lkpi_vsnprintf") != 0, "lkpi_vsnprintf no exportado");
+  // Ningún export de la capa puede tapar un símbolo del kernel.
+  TEST_ASSERT(kur_loader_lookup_symbol("kmalloc") == 0, "la capa exporta 'kmalloc'");
+}
+REGISTER_TEST_FLAGS("linuxkpi: carga de la capa y sus exports", test_lkpi_layer_exports,
+                    TEST_FLAG_BLOCKING);
+
+static void test_lkpi_k0(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k0")); }
+REGISTER_TEST_FLAGS("linuxkpi: K0 base (printk, formatos, bits, atómicos)", test_lkpi_k0,
+                    TEST_FLAG_BLOCKING);
+
+static void test_lkpi_k1(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k1")); }
+REGISTER_TEST_FLAGS("linuxkpi: K1 memoria (kmalloc, páginas, vmalloc, ioremap)",
+                    test_lkpi_k1, TEST_FLAG_BLOCKING);
+
+static void test_lkpi_k3(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k3")); }
+REGISTER_TEST_FLAGS("linuxkpi: K3 estructuras (list, rbtree, xarray, idr)", test_lkpi_k3,
+                    TEST_FLAG_BLOCKING);
+
+static void test_lkpi_unload(void) {
+  struct kur_module *m = kur_loader_find_by_name("linuxkpi");
+  TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");
+  if (!m)
+    return;
+  TEST_ASSERT(m->n_dependents == 0, "linuxkpi con %u dependientes", m->n_dependents);
+  TEST_ASSERT(kur_loader_unload(m) == 0, "linuxkpi no se descarga");
+  TEST_ASSERT(kur_loader_find_by_name("linuxkpi") == NULL, "linuxkpi sigue cargada");
+}
+REGISTER_TEST_FLAGS("linuxkpi: descarga de la capa", test_lkpi_unload, TEST_FLAG_BLOCKING);

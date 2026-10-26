@@ -1119,7 +1119,11 @@ kmod-tree: $(KUR_TARGETS)
 	@bash scripts/mk-kmod-tree.sh sysroot $(KERNEL_RELEASE) drivers/kur
 
 .PHONY: drivers
-drivers: tools/kurbuild tools/aurbuild $(KUR_TARGETS) $(AUR_TARGETS) kmod-tree
+# LinuxKPI: capa de compatibilidad con drivers de Linux y sus .kur de prueba
+# (/lib/modules/linuxkpi/). Ver Plan_LinuxKPI.md.
+include kernel/linuxkpi/linuxkpi.mk
+
+drivers: tools/kurbuild tools/aurbuild $(KUR_TARGETS) $(AUR_TARGETS) kmod-tree linuxkpi
 
 # ===========================================================================
 # Clean
