@@ -129,6 +129,10 @@ void task_die_hlt(void);
 
 void sched_wake_expired(void);
 
+// [LinuxKPI RCU] Ticks de la CPU `cpu` que llegaron con preempt_count == 0
+// (estados quiescentes). 0 si la CPU nunca ha tenido un tick.
+uint64_t sched_rcu_qs_count(int cpu);
+
 __attribute__((noreturn)) void sched_start(task_t *task);
 
 void smp_init(void);

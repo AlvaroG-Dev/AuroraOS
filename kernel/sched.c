@@ -389,10 +389,29 @@ static void sched_check_invariants(task_t *t) {
 //     Sin esto, sched_yield no cede cuando todas las demás tareas están
 //     en otros CPUs, y la tarea actual se queda en un busy-loop.
 // ---------------------------------------------------------------------------
+// [LinuxKPI RCU] Estados quiescentes por CPU. Un tick (o un sched_yield)
+// que llega con la expulsion activa en la tarea actual no puede estar dentro
+// de una seccion rcu_read_lock() de la capa (que es preempt_disable): el
+// contador de esa CPU avanza y synchronize_rcu() espera a verlo avanzar en
+// todas. Solo lo escribe su propia CPU.
+static volatile uint64_t g_rcu_qs_count[MAX_CPUS];
+
+uint64_t sched_rcu_qs_count(int cpu) {
+  if (cpu < 0 || cpu >= MAX_CPUS)
+    return 0;
+  return __atomic_load_n(&g_rcu_qs_count[cpu], __ATOMIC_ACQUIRE);
+}
+
 void sched_tick(void) {
   task_t *curr = (task_t *)this_cpu(current_task);
   if (!curr)
     return;
+
+  if (curr->preempt_count == 0) {
+    int qcpu = smp_processor_id();
+    __atomic_store_n(&g_rcu_qs_count[qcpu], g_rcu_qs_count[qcpu] + 1,
+                     __ATOMIC_RELEASE);
+  }
 
   process_account_tick(curr);
 

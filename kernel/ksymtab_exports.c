@@ -72,6 +72,29 @@ KEXPORT_SYMBOL(copy_to_user);
 KEXPORT_SYMBOL(copy_from_user);
 KEXPORT_SYMBOL(strncpy_from_user);
 KEXPORT_SYMBOL(panic_noctx);
+// [LinuxKPI L2] Aparcar/despertar tareas, kthreads, tiempo y RCU.
+#include "kthread.h"
+#include "smp_boot.h"
+#include "wait.h"
+KEXPORT_SYMBOL(sched_yield);
+KEXPORT_SYMBOL(sched_set_blocked_deadline);
+KEXPORT_SYMBOL(sched_rcu_qs_count);
+KEXPORT_SYMBOL(preempt_count);
+KEXPORT_SYMBOL(wait_queue_init);
+KEXPORT_SYMBOL(wait_queue_add_locked);
+KEXPORT_SYMBOL(wait_queue_remove_locked);
+KEXPORT_SYMBOL(wake_up_all_locked);
+KEXPORT_SYMBOL(spin_lock_irqsave);
+KEXPORT_SYMBOL(spin_unlock_irqrestore);
+KEXPORT_SYMBOL(kthread_create);
+KEXPORT_SYMBOL(kthread_start);
+KEXPORT_SYMBOL(kthread_stop);
+KEXPORT_SYMBOL(kthread_task);
+KEXPORT_SYMBOL(klog_get_tsc_freq);
+KEXPORT_SYMBOL(smp_online_cpus);
+// kernel/linuxkpi/aurora.h replica wait_queue_t como struct aurora_wait_queue.
+_Static_assert(sizeof(wait_queue_t) == 32 && offsetof(wait_queue_t, lock) == 0,
+               "wait_queue_t cambio: actualizar struct aurora_wait_queue");
 // Pruebas en .kur (tests/linuxkpi): informan con TEST_ASSERT del kernel.
 KEXPORT_SYMBOL(test_pass);
 KEXPORT_SYMBOL(test_fail);
