@@ -88,11 +88,21 @@ echo "OK: Linux $LINUX_VERSION en $OUT/linux"
 # --- NVIDIA open-gpu-kernel-modules -----------------------------------------
 if [ "$NV" = 1 ]; then
     NTB="open-gpu-kernel-modules-$NVIDIA_OPEN_VERSION.tar.gz"
-    fetch "https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/$NVIDIA_OPEN_VERSION.tar.gz" "$DL/$NTB"
+    NGIT="https://github.com/NVIDIA/open-gpu-kernel-modules"
     if [ ! -f "$OUT/nvidia-open/.aurora-version" ] ||
        [ "$(cat "$OUT/nvidia-open/.aurora-version")" != "$NVIDIA_OPEN_VERSION" ]; then
-        rm -rf "$OUT/nvidia-open"; mkdir -p "$OUT/nvidia-open"
-        tar -xzf "$DL/$NTB" -C "$OUT/nvidia-open" --strip-components=1
+        rm -rf "$OUT/nvidia-open"
+        # El tarball de GitHub puede estar bloqueado donde git si funciona:
+        # en ese caso, clon superficial de la misma etiqueta.
+        if fetch "$NGIT/archive/refs/tags/$NVIDIA_OPEN_VERSION.tar.gz" "$DL/$NTB"; then
+            mkdir -p "$OUT/nvidia-open"
+            tar -xzf "$DL/$NTB" -C "$OUT/nvidia-open" --strip-components=1
+        else
+            rm -f "$DL/$NTB.part"
+            echo "  tarball no disponible; clon git de la etiqueta $NVIDIA_OPEN_VERSION"
+            git -c advice.detachedHead=false clone -q --depth 1 --branch "$NVIDIA_OPEN_VERSION" "$NGIT" "$OUT/nvidia-open"
+            rm -rf "$OUT/nvidia-open/.git"
+        fi
         echo "$NVIDIA_OPEN_VERSION" > "$OUT/nvidia-open/.aurora-version"
     fi
     echo "OK: NVIDIA open $NVIDIA_OPEN_VERSION en $OUT/nvidia-open"

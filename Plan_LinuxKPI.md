@@ -63,7 +63,7 @@ Total orientativo de la capa (sin DRM de Linux): **~40–45 kLOC de C** propios,
 
 ### 3.1 Datos medidos (L0.3, 26-oct-2026)
 
-**Sobre Linux 6.18.59** (versión fijada; repetida el mismo día en cuanto kernel.org fue accesible). NVIDIA sigue siendo open 615.71.09 de Ubuntu porque GitHub está bloqueado en el entorno (la fijada es 615.78.08). Es lo que hay ahora en `docs/linuxkpi_api.md`/`.tsv`.
+**Sobre Linux 6.18.59** (versión fijada; repetida el mismo día en cuanto kernel.org fue accesible). NVIDIA open **615.78.08** (la fijada; desde GitHub con `git`, ya que el tarball sigue dando 403). Es lo que hay ahora en `docs/linuxkpi_api.md`/`.tsv`.
 
 | Nivel | Símbolos (todos los drivers) | de ellos funciones | QEMU (`bochs`+`simpledrm`+`virtio-gpu`) |
 |---|---:|---:|---:|
@@ -83,7 +83,7 @@ Total orientativo de la capa (sin DRM de Linux): **~40–45 kLOC de C** propios,
 | K9-sched | 46 | 27 | 0 |
 | Sin clasificar | 77 | 15 | 3 |
 
-Unión acumulada en el orden de trabajo: `bochs` 180 → `simpledrm` 304 → `virtio-gpu` **694** → `i915` 3881 → `xe` 4559 → `amdgpu` 5450 → `nvidia` 6104 (con la 6.8: 135 → 277 → 634 → 3877 → 4198 → 5031 → 5717). El mayor cambio es `xe`, que pasa de 1139 a 1783 símbolos (el driver ha crecido mucho entre 6.8 y 6.18). Estimación heurística total: ≈ 40 kLOC (5 kLOC para el primer hito en QEMU), en la misma horquilla que la corregida abajo. NVIDIA: 1675 símbolos, **990 (59 %) compartidos con Intel/AMD**; lo exclusivo es sobre todo K6 (130), K1 (107), K3 (70), K4 (67) y K5 (61).
+Unión acumulada en el orden de trabajo: `bochs` 180 → `simpledrm` 304 → `virtio-gpu` **694** → `i915` 3881 → `xe` 4559 → `amdgpu` 5450 → `nvidia` 6106 (con la 6.8: 135 → 277 → 634 → 3877 → 4198 → 5031 → 5717). El mayor cambio es `xe`, que pasa de 1139 a 1783 símbolos (el driver ha crecido mucho entre 6.8 y 6.18). Estimación heurística total: ≈ 40 kLOC (5 kLOC para el primer hito en QEMU), en la misma horquilla que la corregida abajo. NVIDIA (615.78.08): 1679 símbolos, **992 (59 %) compartidos con Intel/AMD** (con la 615.71.09 de Ubuntu: 1675 y 990); lo exclusivo es sobre todo K6 (130), K1 (108), K3 (70), K4 (67) y K5 (61).
 
 Huecos de K2 tras L2 (símbolos de la 6.18 que la capa aún no define, sin contar los generados por macros): `nop`/`clflush`/`halt` (`asm/special_insns`), `cpufeature`/`boot_cpu_data`, `irq_handler_t`/`IRQF_SHARED` (K5), `on_each_cpu`, `stop_machine`, `percpu_counter`, `synchronize_hardirq`. Todos de uso bajo y casi todos de otros niveles.
 
@@ -229,7 +229,7 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 3. ~~**Licencia de la capa**~~ → **decidido: GPL-2.0-only** (sección 11).
 4. **NVIDIA**: `kernel-open/` sobre LinuxKPI **o** capa de SO propia (decidir tras L0.3 con los datos reales).
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
-6. ~~**Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**~~ → **6.18.59** y **20261019** (sección 11); L0.3 repetida. Pendiente: NVIDIA 615.78.08 desde GitHub (bloqueado).
+6. ~~**Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**~~ → **6.18.59** y **20261019** (sección 11); L0.3 repetida, también con NVIDIA 615.78.08.
 7. ~~**RCU antes de usar `xarray`/`idr` con lectores concurrentes**~~ → hecho en L2 (`kfree_rcu` en `xa_node_free`).
 8. **Cambios en Aurora que L2 no ha hecho** (rechazados o pendientes de decisión, ver §11 L2): plazos de espera a 1 ms (hoy ~8 ms), `task_t->lkpi_task` para `current`, exportar `signal_pending`, y el arreglo de `sched_current()` (lectura atómica de `current_task`).
 
@@ -281,9 +281,10 @@ Decisiones tomadas con el autor antes de escribir código:
 
 ### 26-oct-2026 — Versión fijada, `sched_current()`, plazos a 1 ms (tras L2)
 Con confirmación del autor:
-- **Linux 6.18.59** (el último `6.18.y` en `kernel.org/releases.json` ese día) y **`linux-firmware` 20261019** (`kernel/linuxkpi/linux-version.mk`). L0.3 repetida sobre la 6.18.59 (§3.1). GitHub sigue bloqueado (403 del proxy), así que NVIDIA open 615.78.08 no se ha descargado: el escaneo usa la 615.71.09 de Ubuntu para NVIDIA.
+- **Linux 6.18.59** (el último `6.18.y` en `kernel.org/releases.json` ese día) y **`linux-firmware` 20261019** (`kernel/linuxkpi/linux-version.mk`). L0.3 repetida sobre la 6.18.59 (§3.1). GitHub sigue bloqueado (403 del proxy), así que NVIDIA open 615.78.08 no se ha descargado: el escaneo usa la 615.71.09 de Ubuntu para NVIDIA (resuelto el mismo día: ver abajo).
 - **`sched_current()` atómico** en Aurora: `this_cpu_current_task()` (`kernel/cpu.h`) lee `%gs:current_task` con una instrucción; lo usan `sched_current()` y `sched_tick()`. Se retiran las mitigaciones de la capa (llamadas con las IRQ desactivadas).
 - **Plazos de espera a 1 ms**: `sched_lock` guarda el plazo más cercano; `time_tick()` llama a `sched_wake_expired()` en el tick en que vence (además de cada 8 ticks). **Y una expulsión acotada**: si lo que despierta un plazo no encuentra CPU ociosa, se marca `need_resched` en la CPU cuya tarea lleva más tiempo seguida (sin eso esperaría la rodaja de 10 ticks). Solo para despertares por plazo; el resto de despertares no cambia (Aurora sigue sin *wakeup preemption* general). Prueba nueva del kernel (`sched: plazos de espera con resolución de 1 ms`) que mide el instante del despertar: 12 de 12 a tiempo; con el código anterior, 1 de 12.
 - **Aproximaciones de la capa retiradas**: `disable_work`/`enable_work` reales (cuenta de desactivación), SRCU con contadores por CPU, y percpu estático por alias de la copia 0 (valen `this_cpu_ptr(&v)` y `per_cpu_ptr(&v, cpu)`; sigue sin valer `this_cpu_inc(p->campo)`).
 - Siguen rechazados `current` estable en `task_t` y `signal_pending` (K8, L4).
+- **NVIDIA open 615.78.08** descargada (mismo día): el tarball de GitHub sigue dando 403 en el proxy, pero `git` sí llega, así que `scripts/fetch-linux-drivers.sh` clona la etiqueta (`--depth 1`) si falla el tarball. L0.3 repetida: NVIDIA 1679 símbolos (antes 1675), 992 compartidos con Intel/AMD (antes 990); total 6106.
 

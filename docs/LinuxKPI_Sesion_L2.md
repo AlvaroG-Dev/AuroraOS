@@ -72,11 +72,10 @@ Intermitencia ajena a la capa: en 1 de 6 arranques `iso9660: listado de /cdrom` 
 
 ## 5. Qué no se ha podido comprobar
 
-- Ningún driver de Linux real usa todavía K2 (llegan en L3–L5); la API se ha medido con `docs/linuxkpi_api.md` (Linux 6.18.59 desde §9; NVIDIA aún 615.71.09 de Ubuntu).
+- Ningún driver de Linux real usa todavía K2 (llegan en L3–L5); la API se ha medido con `docs/linuxkpi_api.md` (Linux 6.18.59 y NVIDIA 615.78.08 desde §9).
 - `signal_pending()` es siempre 0 (decisión: K8, L4): las esperas `_interruptible`/`_killable` no se han probado con señales reales.
 - Resolución de los plazos: 1 ms desde §9, pero con todas las CPU ocupadas el despertado puede esperar a otra tarea `READY` (planificador round-robin sin prioridades).
 - KVM y hardware real: todo en QEMU TCG. La deriva entre el TSC y el tick en ejecuciones largas no se ha medido.
-- GitHub sigue bloqueado en el entorno (403 del proxy): NVIDIA open 615.78.08 no se ha descargado.
 
 ## 6. Contradicciones encontradas (planes frente al código)
 
@@ -93,7 +92,7 @@ Intermitencia ajena a la capa: en 1 de 6 arranques `iso9660: listado de /cdrom` 
 2. ~~Plazos a 1 ms~~ → hecho, con expulsión acotada a los despertares por plazo (§9).
 3. **`current` estable** (`task_t->lkpi_task` + gancho al liberar) y **`signal_pending`**: siguen rechazados; necesarios en K8 (L4).
 4. ~~`disable_work_sync`, percpu estático, SRCU global~~ → hecho (§9). Queda `this_cpu_inc(p->campo)` sobre structs por CPU y `on_each_cpu()` (IPI de función, L3/L7).
-5. De L0–L1: NVIDIA 615.78.08 (GitHub bloqueado) y la decisión NVIDIA; módulos > 64 MiB (L8).
+5. De L0–L1: la decisión NVIDIA (615.78.08 ya descargada, §9); módulos > 64 MiB (L8).
 6. **L3**: espera confirmación.
 
 ## 8. Commits de la sesión
@@ -112,7 +111,7 @@ Intermitencia ajena a la capa: en 1 de 6 arranques `iso9660: listado de /cdrom` 
 
 ## 9. Después de L2 (mismo día, con confirmación del autor)
 
-- **Versión fijada**: Linux **6.18.59** y `linux-firmware` **20261019** (`kernel/linuxkpi/linux-version.mk`); `scripts/fetch-linux-drivers.sh --no-nvidia` la descarga de kernel.org. **L0.3 repetida** sobre la 6.18.59 (`docs/linuxkpi_api.md`/`.tsv`, resumen en `Plan_LinuxKPI.md` §3.1): primer hito en QEMU 694 símbolos (antes 634), total 6104 (antes 5717), K2 452; NVIDIA 59 % compartido con Intel/AMD. NVIDIA sigue siendo la 615.71.09 de Ubuntu (GitHub, 403).
+- **Versión fijada**: Linux **6.18.59** y `linux-firmware` **20261019** (`kernel/linuxkpi/linux-version.mk`); `scripts/fetch-linux-drivers.sh --no-nvidia` la descarga de kernel.org. **L0.3 repetida** sobre la 6.18.59 (`docs/linuxkpi_api.md`/`.tsv`, resumen en `Plan_LinuxKPI.md` §3.1): primer hito en QEMU 694 símbolos (antes 634), total 6106 (antes 5717), K2 452; NVIDIA 59 % compartido con Intel/AMD. **NVIDIA open 615.78.08**: el tarball de GitHub da 403, pero `git` llega; `fetch-linux-drivers.sh` clona la etiqueta si falla el tarball (1679 símbolos, 992 compartidos).
 - **`sched_current()` atómico** en Aurora (`this_cpu_current_task()`, un `movq %gs:24`), usado también en `sched_tick()`. La capa ya no necesita llamar con las IRQ desactivadas.
 - **Plazos a 1 ms**: `sched_wake_expired()` también en el tick del plazo más cercano y, si el despertado no encuentra CPU ociosa, `need_resched` en la CPU cuya tarea lleva más tiempo seguida. Prueba del kernel que mide el instante del despertar (con el código anterior, 1 de 12 a tiempo).
 - **Capa**: `disable_work`/`enable_work` reales, SRCU por CPU, percpu estático por alias (valen `this_cpu_ptr(&v)` y `per_cpu_ptr(&v, cpu)`), `LKPI_USLEEP_SPIN_US` 1 ms.

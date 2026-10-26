@@ -1,12 +1,12 @@
-# linuxkpi-scan.py Linux 6.18.59 (kernel.org, version fijada) y NVIDIA open 615.71.09 de Ubuntu (`nvidia-kernel-source-615-open`; GitHub bloqueado en el entorno: **NVIDIA no es la version fijada 615.78.08**)
+# linuxkpi-scan.py Linux 6.18.59 (kernel.org, version fijada) y NVIDIA open 615.78.08 (GitHub, version fijada)
 simbolo	nivel	tipo	cabecera	usos	n_drivers	bochs	simpledrm	virtio-gpu	i915	xe	amdgpu	nvidia
 size_t	K0	type	linux/types	1452	7	2	16	7	270	295	311	551
-ENOMEM	K0	macro	asm-generic/errno-base	1062	7	2	7	37	219	162	493	142
+ENOMEM	K0	macro	asm-generic/errno-base	1065	7	2	7	37	219	162	493	145
 container_of	K0	macro	linux/container_of	886	7	1	2	12	273	185	366	47
 IS_ERR	K0	inline	linux/err	866	7	1	9	15	489	207	63	82
 PTR_ERR	K0	inline	linux/err	614	7	1	4	10	337	164	54	44
 ENODEV	K0	macro	asm-generic/errno-base	507	7	4	1	7	269	67	98	61
-ERR_PTR	K0	inline	linux/err	647	6	0	27	11	297	253	18	41
+ERR_PTR	K0	inline	linux/err	650	6	0	27	11	297	253	18	44
 WARN_ON	K0	macro	asm-generic/bug	444	6	2	0	10	103	23	174	132
 IS_ENABLED	K0	macro	linux/kconfig	378	6	2	0	1	200	129	26	20
 uint32_t	K0	type	linux/types	313	6	1	1	171	1	7	0	132
@@ -590,7 +590,6 @@ IORESOURCE_IRQ	K1	macro	linux/ioport	5	2	0	0	0	1	0	4	0
 devm_kzalloc	K1	inline	linux/device/devres	5	2	0	0	0	0	2	0	3
 memunmap	K1	func	linux/io	5	2	0	0	0	4	0	1	0
 mmput	K1	func	linux/sched/mm	5	2	0	0	0	0	3	2	0
-shmem_file_setup	K1	func	linux/shmem_fs	5	2	0	0	0	3	0	0	2
 vzalloc	K1	macro	linux/vmalloc	5	2	0	0	0	1	0	4	0
 IORES_DESC_NONE	K1	enumconst	linux/ioport	4	2	0	0	0	1	3	0	0
 PHYS_PFN	K1	macro	linux/pfn	4	2	0	0	0	0	3	0	1
@@ -603,6 +602,7 @@ memalloc_noreclaim_save	K1	inline	linux/sched/mm	4	2	0	0	0	1	0	3	0
 might_alloc	K1	inline	linux/sched/mm	4	2	0	0	0	3	1	0	0
 page_to_phys	K1	macro	asm-generic/memory_model	4	2	0	0	0	2	0	0	2
 pfn_valid	K1	inline	linux/mmzone	4	2	0	0	0	0	0	2	2
+shmem_file_setup	K1	func	linux/shmem_fs	4	2	0	0	0	3	0	0	1
 vmf_insert_pfn_prot	K1	func	linux/mm	4	2	0	0	0	0	3	0	1
 FOLL_WRITE	K1	enumconst	linux/mm_types	3	2	0	0	0	1	0	0	2
 IORESOURCE_ROM_SHADOW	K1	macro	linux/ioport	3	2	0	0	0	0	0	1	2
@@ -887,6 +887,7 @@ set_pages_array_wb	K1	func	asm/set_memory	1	1	0	0	0	0	0	0	1
 set_pages_uc	K1	func	asm/set_memory	1	1	0	0	0	0	0	0	1
 set_pages_wb	K1	func	asm/set_memory	1	1	0	0	0	0	0	0	1
 shmem_file_setup_with_mnt	K1	func	linux/shmem_fs	1	1	0	0	0	1	0	0	0
+shmem_kernel_file_setup	K1	func	linux/shmem_fs	1	1	0	0	0	0	0	0	1
 shmem_read_folio_gfp	K1	func	linux/shmem_fs	1	1	0	0	0	1	0	0	0
 shmem_writeout	K1	func	linux/shmem_fs	1	1	0	0	0	1	0	0	0
 strncpy_from_user	K1	func	asm/uaccess	1	1	0	0	1	0	0	0	0
@@ -3373,6 +3374,7 @@ debug_object_init	K9	func	linux/debugobjects	2	1	0	0	0	2	0	0	0
 devfreq_resume_device	K9	func	linux/devfreq	2	1	0	0	0	0	0	0	2
 devfreq_suspend_device	K9	func	linux/devfreq	2	1	0	0	0	0	0	0	2
 devm_devfreq_remove_device	K9	func	linux/devfreq	2	1	0	0	0	0	0	0	2
+dmem_cgroup_register_region	K9	func	linux/cgroup_dmem	2	1	0	0	0	0	0	0	2
 dmem_cgroup_try_charge	K9	func	linux/cgroup_dmem	2	1	0	0	0	0	0	0	2
 dmem_cgroup_uncharge	K9	func	linux/cgroup_dmem	2	1	0	0	0	0	0	0	2
 dmem_cgroup_unregister_region	K9	func	linux/cgroup_dmem	2	1	0	0	0	0	0	0	2
@@ -3423,7 +3425,6 @@ debug_object_init_on_stack	K9	func	linux/debugobjects	1	1	0	0	0	1	0	0	0
 devm_devfreq_add_device	K9	func	linux/devfreq	1	1	0	0	0	0	0	0	1
 devm_pinctrl_get_select	K9	inline	linux/pinctrl/consumer	1	1	0	0	0	1	0	0	0
 dmem_cgroup_pool_state_put	K9	func	linux/cgroup_dmem	1	1	0	0	0	0	0	0	1
-dmem_cgroup_register_region	K9	func	linux/cgroup_dmem	1	1	0	0	0	0	0	0	1
 dmem_cgroup_state_evict_valuable	K9	func	linux/cgroup_dmem	1	1	0	0	0	0	0	0	1
 ftrace_dump	K9	func	linux/trace_printk	1	1	0	0	0	1	0	0	0
 hmm_range_fault	K9	func	linux/hmm	1	1	0	0	0	0	0	1	0
@@ -3472,7 +3473,7 @@ drm_dev_unplug	K9-drm	func	drm/drm_drv	10	7	1	1	2	1	1	3	1
 DRIVER_GEM	K9-drm	enumconst	drm/drm_drv	9	7	1	1	1	1	1	3	1
 drm_dev_register	K9-drm	func	drm/drm_drv	8	7	1	1	1	1	1	2	1
 drm_mode_config_reset	K9-drm	func	drm/drm_mode_config	8	7	1	1	1	1	2	1	1
-struct drm_plane_state	K9-drm	type	drm/drm_plane	112	6	3	4	10	13	0	57	25
+struct drm_plane_state	K9-drm	type	drm/drm_plane	113	6	3	4	10	13	0	57	26
 struct drm_framebuffer	K9-drm	type	drm/drm_framebuffer	63	6	1	2	4	0	8	39	9
 drm_dev_exit	K9-drm	func	drm/drm_drv	56	6	3	2	2	1	7	41	0
 DRM_FORMAT_XRGB8888	K9-drm	macro	drm/drm_fourcc	54	6	3	2	1	38	0	9	1
@@ -3502,13 +3503,13 @@ drm_crtc_init_with_planes	K9-drm	func	drm/drm_crtc	7	6	1	1	1	1	0	2	1
 drm_err	K9-drm	macro	drm/drm_print	775	5	1	11	0	478	90	195	0
 drm_dbg	K9-drm	macro	drm/drm_print	519	5	1	7	0	336	122	53	0
 DRM_DEBUG	K9-drm	macro	drm/drm_print	422	5	1	0	10	20	0	390	1
-struct drm_connector	K9-drm	type	drm/drm_connector	299	5	4	4	6	0	0	247	38
+struct drm_connector	K9-drm	type	drm/drm_connector	300	5	4	4	6	0	0	247	39
 struct drm_encoder	K9-drm	type	drm/drm_encoder	212	5	2	2	5	0	0	183	20
 DRM_INFO	K9-drm	macro	drm/drm_print	148	5	2	0	8	5	0	132	1
-struct drm_plane	K9-drm	type	drm/drm_plane	133	5	5	10	16	0	0	56	46
+struct drm_plane	K9-drm	type	drm/drm_plane	134	5	5	10	16	0	0	56	47
 DRM_IOCTL_DEF_DRV	K9-drm	macro	drm/drm_ioctl	130	5	0	0	11	59	14	20	26
 DRM_RENDER_ALLOW	K9-drm	enumconst	drm/drm_ioctl	100	5	0	0	11	33	14	19	23
-struct drm_crtc_state	K9-drm	type	drm/drm_crtc	93	5	3	10	2	0	0	53	25
+struct drm_crtc_state	K9-drm	type	drm/drm_crtc	94	5	3	10	2	0	0	53	26
 struct drm_atomic_state	K9-drm	type	drm/drm_atomic	84	5	5	8	7	0	0	63	1
 drm_gem_object_put	K9-drm	inline	drm/drm_gem	64	5	0	0	12	3	6	41	2
 MODE_OK	K9-drm	enumconst	drm/drm_modes	63	5	1	0	3	50	0	8	1
@@ -3551,7 +3552,7 @@ struct drm_display_mode	K9-drm	type	drm/drm_modes	162	4	2	6	4	0	0	150	0
 DRM_DEBUG_DRIVER	K9-drm	macro	drm/drm_print	154	4	4	0	0	14	0	134	2
 drm_warn	K9-drm	macro	drm/drm_print	92	4	0	7	0	29	33	23	0
 connector_status_connected	K9-drm	enumconst	drm/drm_connector	90	4	0	0	1	46	0	42	1
-struct drm_crtc	K9-drm	type	drm/drm_crtc	63	4	7	13	7	0	0	0	36
+struct drm_crtc	K9-drm	type	drm/drm_crtc	64	4	7	13	7	0	0	0	37
 connector_status_disconnected	K9-drm	enumconst	drm/drm_connector	59	4	0	0	1	34	0	22	2
 drm_mm_node_allocated	K9-drm	inline	drm/drm_mm	55	4	0	0	2	47	4	2	0
 DRM_FORMAT_XBGR8888	K9-drm	macro	drm/drm_fourcc	43	4	0	1	0	33	0	8	1
@@ -3795,7 +3796,7 @@ drm_rect_width	K9-drm	inline	drm/drm_rect	86	2	0	1	0	85	0	0	0
 drm_rect_height	K9-drm	inline	drm/drm_rect	67	2	0	1	0	66	0	0	0
 fixed20_12	K9-drm	type	drm/drm_fixed	65	2	0	0	0	1	0	64	0
 struct drm_property	K9-drm	type	drm/drm_property	64	2	0	0	0	0	0	33	31
-struct drm_connector_state	K9-drm	type	drm/drm_connector	56	2	0	0	0	0	0	39	17
+struct drm_connector_state	K9-drm	type	drm/drm_connector	57	2	0	0	0	0	0	39	18
 drm_modeset_unlock	K9-drm	func	drm/drm_modeset_lock	50	2	0	0	0	29	0	21	0
 drm_dp_dpcd_read	K9-drm	func	drm/display/drm_dp_helper	49	2	0	0	0	34	0	15	0
 DP_DPCD_REV	K9-drm	macro	drm/display/drm_dp	46	2	0	0	0	14	0	32	0
@@ -4138,7 +4139,9 @@ HDCP_2_2_HDMI_RXSTATUS_MSG_SZ_HI	K9-drm	macro	drm/display/drm_hdcp	2	2	0	0	0	1	0
 HDCP_2_2_HDMI_RXSTATUS_REAUTH_REQ	K9-drm	macro	drm/display/drm_hdcp	2	2	0	0	0	1	0	1	0
 HDCP_2_2_HDMI_SUPPORT_MASK	K9-drm	macro	drm/display/drm_hdcp	2	2	0	0	0	1	0	1	0
 HDMI_EOTF_SMPTE_ST2084	K9-drm	enumconst	linux/hdmi	2	2	0	0	0	1	0	0	1
+__drm_atomic_helper_crtc_state_reset	K9-drm	func	drm/drm_atomic_state_helper	2	2	0	0	0	1	0	0	1
 __drm_atomic_helper_plane_destroy_state	K9-drm	func	drm/drm_atomic_state_helper	2	2	0	0	0	1	0	0	1
+__drm_atomic_helper_plane_state_reset	K9-drm	func	drm/drm_atomic_state_helper	2	2	0	0	0	1	0	0	1
 drm_any_plane_has_format	K9-drm	func	drm/drm_plane	2	2	0	0	0	1	0	1	0
 drm_atomic_for_each_plane_damage	K9-drm	macro	drm/drm_damage_helper	2	2	1	1	0	0	0	0	0
 drm_atomic_helper_check_crtc_primary_plane	K9-drm	func	drm/drm_atomic_helper	2	2	1	1	0	0	0	0	0
@@ -5459,9 +5462,8 @@ __I915_PMU_ENGINE	K9-drm	macro	drm/i915_drm	1	1	0	0	0	1	0	0	0
 __I915_PMU_OTHER	K9-drm	macro	drm/i915_drm	1	1	0	0	0	1	0	0	0
 __devm_drm_panel_alloc	K9-drm	func	drm/drm_panel	1	1	0	0	0	1	0	0	0
 __drm_atomic_get_current_plane_state	K9-drm	inline	drm/drm_atomic	1	1	0	0	0	1	0	0	0
-__drm_atomic_helper_crtc_state_reset	K9-drm	func	drm/drm_atomic_state_helper	1	1	0	0	0	1	0	0	0
+__drm_atomic_helper_connector_state_reset	K9-drm	func	drm/drm_atomic_state_helper	1	1	0	0	0	0	0	0	1
 __drm_atomic_helper_plane_reset	K9-drm	func	drm/drm_atomic_state_helper	1	1	0	0	0	0	0	1	0
-__drm_atomic_helper_plane_state_reset	K9-drm	func	drm/drm_atomic_state_helper	1	1	0	0	0	1	0	0	0
 __drm_atomic_helper_private_obj_duplicate_state	K9-drm	func	drm/drm_atomic_state_helper	1	1	0	0	0	0	0	1	0
 __drm_gem_object_put	K9-drm	inline	drm/drm_gem	1	1	0	0	0	1	0	0	0
 __drmm_workqueue_release	K9-drm	func	drm/drm_managed	1	1	0	0	0	0	1	0	0

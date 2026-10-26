@@ -2,7 +2,7 @@
 
 Generado por `scripts/linuxkpi-scan.py` (no editar a mano; la tabla completa esta en `linuxkpi_api.tsv`).
 
-**Fuentes analizadas:** Linux 6.18.59 (kernel.org, version fijada) y NVIDIA open 615.71.09 de Ubuntu (`nvidia-kernel-source-615-open`; GitHub bloqueado en el entorno: **NVIDIA no es la version fijada 615.78.08**)
+**Fuentes analizadas:** Linux 6.18.59 (kernel.org, version fijada) y NVIDIA open 615.78.08 (GitHub, version fijada)
 
 Indice: 6931 cabeceras de Linux, 393977 nombres definidos. Un simbolo cuenta si un fichero del driver lo usa, lo define una cabecera de Linux y no lo define el propio driver. **Analisis lexico**: incluye todas las ramas `#if`, macros e *inlines* (que la capa tambien tiene que dar) y algo de ruido; no ve nombres creados por macros generadoras.
 
@@ -16,14 +16,14 @@ Indice: 6931 cabeceras de Linux, 393977 nombres definidos. Un simbolo cuenta si 
 | `i915` | 726 | 341919 | 3772 |
 | `xe` | 468 | 113746 | 1783 |
 | `amdgpu` | 1985 | 1196265 | 2941 |
-| `nvidia` | 215 | 90146 | 1675 |
+| `nvidia` | 215 | 90262 | 1679 |
 
 ## Simbolos distintos por nivel y driver
 
 | Nivel | `bochs` | `simpledrm` | `virtio-gpu` | `i915` | `xe` | `amdgpu` | `nvidia` | Union | de ellos funciones (no inline) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | K0 Base C | 14 | 15 | 43 | 304 | 253 | 242 | 150 | **453** | 35 |
-| K1 Memoria (sin DMA) | 14 | 18 | 38 | 254 | 154 | 120 | 216 | **458** | 93 |
+| K1 Memoria (sin DMA) | 14 | 18 | 38 | 254 | 154 | 120 | 217 | **459** | 94 |
 | K1-dma Memoria: DMA, dma-buf, IOMMU | 0 | 1 | 35 | 44 | 37 | 50 | 71 | **104** | 35 |
 | K2 Sincronizacion, tiempo, trabajo diferido | 0 | 0 | 32 | 311 | 185 | 173 | 161 | **452** | 96 |
 | K3 Estructuras y utilidades | 3 | 9 | 27 | 255 | 157 | 179 | 118 | **405** | 101 |
@@ -33,11 +33,11 @@ Indice: 6931 cabeceras de Linux, 393977 nombres definidos. Un simbolo cuenta si 
 | K7 Fences/sync | 0 | 0 | 36 | 81 | 62 | 65 | 33 | **103** | 44 |
 | K8 Entorno de usuario / VFS | 0 | 0 | 3 | 71 | 42 | 42 | 69 | **137** | 52 |
 | K9 Miscelaneo (stubs: trace, kasan, hmm...) | 7 | 3 | 21 | 101 | 66 | 68 | 76 | **193** | 66 |
-| K9-drm DRM core y helpers (shim propio con la opcion A) | 114 | 138 | 214 | 1616 | 288 | 960 | 339 | **2325** | 646 |
+| K9-drm DRM core y helpers (shim propio con la opcion A) | 114 | 138 | 214 | 1616 | 288 | 960 | 342 | **2326** | 647 |
 | K9-ttm TTM, drm_buddy, drm_exec, gpuvm | 0 | 0 | 0 | 70 | 157 | 106 | 0 | **190** | 95 |
 | K9-sched drm/gpu_scheduler | 0 | 0 | 0 | 0 | 24 | 42 | 0 | **46** | 27 |
 | K? Sin clasificar | 0 | 1 | 2 | 14 | 41 | 32 | 18 | **77** | 15 |
-| **Total** | 180 | 233 | 511 | 3564 | 1743 | 2622 | 1675 | **6104** | 1685 |
+| **Total** | 180 | 233 | 511 | 3564 | 1743 | 2622 | 1679 | **6106** | 1687 |
 
 Union acumulada siguiendo el orden de trabajo (cuanto anade cada driver a lo que ya necesitan los anteriores):
 
@@ -49,14 +49,14 @@ Union acumulada siguiendo el orden de trabajo (cuanto anade cada driver a lo que
 | `i915` | 3187 | 3881 | 1486 |
 | `xe` | 678 | 4559 | 175 |
 | `amdgpu` | 891 | 5450 | 330 |
-| `nvidia` | 654 | 6104 | 39 |
+| `nvidia` | 656 | 6106 | 40 |
 
 ## Por tipo de definicion
 
 | Nivel | func | inline | macro | type | enumconst | var |
 |---|---:|---:|---:|---:|---:|---:|
 | K0 | 35 | 75 | 299 | 39 | 3 | 2 |
-| K1 | 93 | 109 | 206 | 23 | 24 | 3 |
+| K1 | 94 | 109 | 206 | 23 | 24 | 3 |
 | K1-dma | 35 | 32 | 23 | 11 | 3 | 0 |
 | K2 | 96 | 121 | 180 | 36 | 12 | 7 |
 | K3 | 101 | 113 | 171 | 19 | 1 | 0 |
@@ -66,7 +66,7 @@ Union acumulada siguiendo el orden de trabajo (cuanto anade cada driver a lo que
 | K7 | 44 | 31 | 7 | 12 | 8 | 1 |
 | K8 | 52 | 21 | 33 | 25 | 5 | 1 |
 | K9 | 66 | 19 | 64 | 31 | 12 | 1 |
-| K9-drm | 646 | 147 | 1203 | 165 | 163 | 1 |
+| K9-drm | 647 | 147 | 1203 | 165 | 163 | 1 |
 | K9-ttm | 95 | 20 | 30 | 30 | 14 | 1 |
 | K9-sched | 27 | 1 | 2 | 8 | 8 | 0 |
 | K? | 15 | 9 | 32 | 18 | 3 | 0 |
@@ -78,7 +78,7 @@ Formula (orientativa, no medida): funcion 15 lineas, inline 6, tipo 8, macro 2, 
 | Nivel | QEMU (bochs, simpledrm, virtio-gpu) | Todos | kLOC QEMU | kLOC todos |
 |---|---:|---:|---:|---:|
 | K0 | 50 | 453 | 0.2 | 1.9 |
-| K1 | 60 | 458 | 0.4 | 2.7 |
+| K1 | 60 | 459 | 0.4 | 2.7 |
 | K1-dma | 35 | 104 | 0.3 | 0.9 |
 | K2 | 32 | 452 | 0.2 | 2.8 |
 | K3 | 32 | 405 | 0.1 | 2.7 |
@@ -88,7 +88,7 @@ Formula (orientativa, no medida): funcion 15 lineas, inline 6, tipo 8, macro 2, 
 | K7 | 36 | 103 | 0.3 | 1.0 |
 | K8 | 3 | 137 | 0.0 | 1.2 |
 | K9 | 26 | 193 | 0.1 | 1.5 |
-| K9-drm | 295 | 2325 | 2.4 | 14.5 |
+| K9-drm | 295 | 2326 | 2.4 | 14.5 |
 | K9-ttm | 0 | 190 | 0.0 | 1.9 |
 | K9-sched | 0 | 46 | 0.0 | 0.5 |
 | K? | 3 | 77 | 0.0 | 0.5 |
@@ -103,12 +103,12 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
 | `size_t` | type | `linux/types` | 2 | 16 | 7 | 270 | 295 | 311 | 551 |
-| `ENOMEM` | macro | `asm-generic/errno-base` | 2 | 7 | 37 | 219 | 162 | 493 | 142 |
+| `ENOMEM` | macro | `asm-generic/errno-base` | 2 | 7 | 37 | 219 | 162 | 493 | 145 |
 | `container_of` | macro | `linux/container_of` | 1 | 2 | 12 | 273 | 185 | 366 | 47 |
 | `IS_ERR` | inline | `linux/err` | 1 | 9 | 15 | 489 | 207 | 63 | 82 |
 | `PTR_ERR` | inline | `linux/err` | 1 | 4 | 10 | 337 | 164 | 54 | 44 |
 | `ENODEV` | macro | `asm-generic/errno-base` | 4 | 1 | 7 | 269 | 67 | 98 | 61 |
-| `ERR_PTR` | inline | `linux/err` | - | 27 | 11 | 297 | 253 | 18 | 41 |
+| `ERR_PTR` | inline | `linux/err` | - | 27 | 11 | 297 | 253 | 18 | 44 |
 | `WARN_ON` | macro | `asm-generic/bug` | 2 | - | 10 | 103 | 23 | 174 | 132 |
 | `IS_ENABLED` | macro | `linux/kconfig` | 2 | - | 1 | 200 | 129 | 26 | 20 |
 | `uint32_t` | type | `linux/types` | 1 | 1 | 171 | 1 | 7 | - | 132 |
@@ -143,7 +143,7 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `GENMASK` | macro | `linux/bits` | - | - | - | 54 | 115 | 29 | 6 |
 | `BUILD_BUG_ON` | macro | `linux/build_bug` | - | - | - | 152 | 44 | 2 | 5 |
 
-### K1 — Memoria (sin DMA) (458 simbolos)
+### K1 — Memoria (sin DMA) (459 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -593,7 +593,7 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `PERF_EF_START` | macro | `linux/perf_event` | - | - | - | 1 | 1 | 1 | - |
 | `mmu_interval_notifier_remove` | func | `linux/mmu_notifier` | - | - | - | 1 | 1 | 1 | - |
 
-### K9-drm — DRM core y helpers (shim propio con la opcion A) (2325 simbolos)
+### K9-drm — DRM core y helpers (shim propio con la opcion A) (2326 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -603,7 +603,7 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `DRIVER_GEM` | enumconst | `drm/drm_drv` | 1 | 1 | 1 | 1 | 1 | 3 | 1 |
 | `drm_dev_register` | func | `drm/drm_drv` | 1 | 1 | 1 | 1 | 1 | 2 | 1 |
 | `drm_mode_config_reset` | func | `drm/drm_mode_config` | 1 | 1 | 1 | 1 | 2 | 1 | 1 |
-| `struct drm_plane_state` | type | `drm/drm_plane` | 3 | 4 | 10 | 13 | - | 57 | 25 |
+| `struct drm_plane_state` | type | `drm/drm_plane` | 3 | 4 | 10 | 13 | - | 57 | 26 |
 | `struct drm_framebuffer` | type | `drm/drm_framebuffer` | 1 | 2 | 4 | - | 8 | 39 | 9 |
 | `drm_dev_exit` | func | `drm/drm_drv` | 3 | 2 | 2 | 1 | 7 | 41 | - |
 | `DRM_FORMAT_XRGB8888` | macro | `drm/drm_fourcc` | 3 | 2 | 1 | 38 | - | 9 | 1 |
@@ -633,10 +633,10 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `drm_err` | macro | `drm/drm_print` | 1 | 11 | - | 478 | 90 | 195 | - |
 | `drm_dbg` | macro | `drm/drm_print` | 1 | 7 | - | 336 | 122 | 53 | - |
 | `DRM_DEBUG` | macro | `drm/drm_print` | 1 | - | 10 | 20 | - | 390 | 1 |
-| `struct drm_connector` | type | `drm/drm_connector` | 4 | 4 | 6 | - | - | 247 | 38 |
+| `struct drm_connector` | type | `drm/drm_connector` | 4 | 4 | 6 | - | - | 247 | 39 |
 | `struct drm_encoder` | type | `drm/drm_encoder` | 2 | 2 | 5 | - | - | 183 | 20 |
 | `DRM_INFO` | macro | `drm/drm_print` | 2 | - | 8 | 5 | - | 132 | 1 |
-| `struct drm_plane` | type | `drm/drm_plane` | 5 | 10 | 16 | - | - | 56 | 46 |
+| `struct drm_plane` | type | `drm/drm_plane` | 5 | 10 | 16 | - | - | 56 | 47 |
 
 ### K9-ttm — TTM, drm_buddy, drm_exec, gpuvm (190 simbolos)
 
