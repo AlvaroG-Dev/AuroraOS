@@ -28,7 +28,7 @@ gen "$PROTO/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml" idle-inhibit-uns
 gen "$PROTO/staging/xdg-activation/xdg-activation-v1.xml" xdg-activation-v1
 gen "$PROTO/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml" linux-dmabuf-unstable-v1
 gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora-wayland" \
-    "$ROOT/user/aurora-wayland/aurora-wayland.c" "$GEN/xdg-shell-protocol.c" \
+    "$ROOT/user/aurora-wayland/aurora-wayland.c" "$ROOT/user/aurora-wayland/icons.c" "$GEN/xdg-shell-protocol.c" \
     "$GEN/xdg-decoration-unstable-v1-protocol.c" \
     "$GEN/org-kde-kwin-server-decoration-protocol.c" \
     "$GEN/viewporter-protocol.c" "$GEN/fractional-scale-v1-protocol.c" \
@@ -38,5 +38,5 @@ gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora
     "$GEN/idle-inhibit-unstable-v1-protocol.c" "$GEN/xdg-activation-v1-protocol.c" \
     "$GEN/linux-dmabuf-unstable-v1-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" \
-    -lwayland-server -l:libxkbcommon.so.0 -lxcb -lxcb-composite -lpthread -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
+    -lwayland-server -l:libxkbcommon.so.0 -lxcb -lxcb-composite -lpthread -lpng16 -ldl -lm -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aurora-wayland"

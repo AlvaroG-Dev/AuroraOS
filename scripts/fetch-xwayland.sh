@@ -3,7 +3,7 @@
 # xeyes, xclock) de Ubuntu, sin tocar, para correr aplicaciones X11 como ventanas
 # de Aurora (aurora-wayland hace de gestor de ventanas, ver "Xwayland" en
 # Plan_Wayland_Unificado.md). Requiere en el host de build (Ubuntu 24.04):
-#   apt-get install xwayland x11-apps xterm x11-xkb-utils xkb-data
+#   apt-get install xwayland x11-apps xterm x11-xkb-utils xkb-data xclip xsel
 #                   libxcb1-dev libxcb-composite0-dev
 # Copia binarios, datos de xkb y el cierre de librerias que falte en libs/glibc.
 set -euo pipefail
@@ -13,7 +13,7 @@ PRE="$ROOT/precompiled"
 G=/usr/lib/x86_64-linux-gnu
 mkdir -p "$PRE/usr/bin" "$PRE/usr/share/X11" "$PRE/usr/share/applications" "$LIBDIR"
 
-BINS="Xwayland xkbcomp xterm xeyes xclock"
+BINS="Xwayland xkbcomp xterm xeyes xclock xclip xsel"
 for b in $BINS; do
     cp -Lf "/usr/bin/$b" "$PRE/usr/bin/$b" && echo "  bin: $b"
 done

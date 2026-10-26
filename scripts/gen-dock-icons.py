@@ -88,6 +88,40 @@ def glyph_dot(img, N):
 def glyph_app(img, N):
     text_center(img, N, 'A', 70, (255, 255, 255, 255), 8)
 
+def glyph_clock(img, N):
+    d = ImageDraw.Draw(img)
+    cx = cy = N / 2
+    r = 40 * SS
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 255, 255, 245))
+    for k in range(12):
+        a = k * math.pi / 6
+        r1, r2 = (33 if k % 3 else 29) * SS, 37 * SS
+        d.line([cx + math.sin(a) * r1, cy - math.cos(a) * r1, cx + math.sin(a) * r2, cy - math.cos(a) * r2],
+               fill=(60, 60, 70, 255), width=(2 if k % 3 else 3) * SS)
+    d.line([cx, cy, cx + 14 * SS, cy - 4 * SS], fill=(30, 30, 40, 255), width=4 * SS)
+    d.line([cx, cy, cx - 3 * SS, cy - 26 * SS], fill=(30, 30, 40, 255), width=3 * SS)
+    d.ellipse([cx - 4 * SS, cy - 4 * SS, cx + 4 * SS, cy + 4 * SS], fill=(255, 69, 58, 255))
+
+def glyph_eyes(img, N):
+    d = ImageDraw.Draw(img)
+    for ox in (-19, 19):
+        cx, cy = N / 2 + ox * SS, N / 2
+        d.ellipse([cx - 17 * SS, cy - 24 * SS, cx + 17 * SS, cy + 24 * SS], fill=(255, 255, 255, 255))
+        d.ellipse([cx - 7 * SS + 3 * SS, cy - 8 * SS, cx + 7 * SS + 3 * SS, cy + 10 * SS], fill=(20, 20, 24, 255))
+
+def glyph_hi(img, N):
+    text_center(img, N, 'Hi', 58, (255, 255, 255, 255), 6)
+
+def glyph_grid(img, N):
+    d = ImageDraw.Draw(img)
+    for i in range(3):
+        for j in range(3):
+            x, y = (30 + i * 26) * SS, (30 + j * 26) * SS
+            d.rounded_rectangle([x, y, x + 20 * SS, y + 20 * SS], radius=5 * SS, fill=(255, 255, 255, 235 if (i + j) % 2 == 0 else 150))
+
+def glyph_qt(img, N):
+    text_center(img, N, 'Qt', 60, (255, 255, 255, 255), 6)
+
 def save_bmp(im, path):
     w, h = im.size
     px = im.tobytes('raw', 'BGRA')
@@ -105,6 +139,23 @@ ICONS = {
     'app-clickdot': ((72, 214, 112), (26, 150, 66), glyph_dot),
     'app-generic': ((120, 170, 255), (40, 100, 230), glyph_app),
 }
+# Iconos de tema (hicolor 128x128, PNG) de las apps de demostracion que no
+# traen icono propio: el Dock y las ventanas los encuentran por nombre (Icon= del
+# .desktop o el app_id).
+THEME = os.path.join(os.path.dirname(OUT), '..', '..', 'precompiled', 'usr', 'share', 'icons',
+                     'hicolor', '128x128', 'apps')
+THEME_ICONS = {
+    'xclock': ((92, 140, 255), (36, 60, 160), glyph_clock),
+    'xeyes': ((120, 120, 128), (52, 52, 58), glyph_eyes),
+    'hello-gtk': ((64, 200, 190), (20, 120, 130), glyph_hi),
+    'gtk3-icon-browser': ((255, 170, 70), (214, 100, 20), glyph_grid),
+    'qt5-application': ((90, 220, 120), (30, 150, 70), glyph_qt),
+    'qt5-gallery': ((60, 210, 160), (20, 130, 110), glyph_grid),
+}
+os.makedirs(THEME, exist_ok=True)
+for name, (top, bot, g) in THEME_ICONS.items():
+    tile(top, bot, g).save(os.path.join(THEME, name + '.png'))
+    print('OK tema', name)
 os.makedirs(OUT, exist_ok=True)
 for name, (top, bot, g) in ICONS.items():
     im = tile(top, bot, g)

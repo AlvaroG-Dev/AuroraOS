@@ -36,6 +36,7 @@
 #include <xcb/xcb.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "icons.h"
 #include "cursor-shape-v1-server-protocol.h"
 #include "fractional-scale-v1-server-protocol.h"
 #include "org-kde-kwin-server-decoration-server-protocol.h"
@@ -391,6 +392,7 @@ struct toplevel {
   int pending_max; /* set_maximized antes de existir la ventana de Aurora */
   int pending_min; /* idem para set_minimized */
   char app_id[64];
+  char icon[64]; /* BMP del icono propio (p. ej. _NET_WM_ICON de una ventana X11) */
   int min_w, min_h, max_w, max_h; /* set_min_size / set_max_size (0 = sin limite) */
   // Politica de decoraciones: la unica barra de titulo debe ser la de Aurora.
   int ssd;          /* el cliente negocio xdg-decoration / KDE server-decoration */
@@ -591,6 +593,9 @@ static const struct wl_data_offer_interface offer_impl = {
 // Envia la seleccion actual a los data_device del cliente `client`.
 static void selection_send_to(struct wl_client *client) {
   struct seat_res *d;
+  if (g_debug)
+    fprintf(stderr, "[aurora-wayland] seleccion -> cliente %p (%s)\n", (void *)client,
+            g_selection ? "con fuente" : "vacia");
   wl_list_for_each(d, &g_datadevs, link) {
     if (wl_resource_get_client(d->res) != client)
       continue;
@@ -674,7 +679,9 @@ static void dd_set_selection(struct wl_client *c, struct wl_resource *r,
   (void)r; (void)serial;
   struct data_source *s = src ? wl_resource_get_user_data(src) : NULL;
   g_selection = s;
-  (void)c;
+  if (g_debug)
+    fprintf(stderr, "[aurora-wayland] set_selection de cliente %p (fuente %p, foco kbd %p)\n",
+            (void *)c, (void *)s, g_kbd_focus ? (void *)g_kbd_focus->client : NULL);
   selection_send_to_focus();
 }
 static const struct wl_data_device_interface dd_impl = {
@@ -940,8 +947,26 @@ static void xs_map(struct xsurf *xs, int w, int h) {
   xs->win_id = id;
   if (xs->tl && xs->tl->app_id[0])
     win_set_app_id(id, xs->tl->app_id); /* agrupa la ventana en el Dock */
-  if (xs->tl && !g_mock && !has_launcher(xs->tl->app_id))
-    syscall(ASYS_WIN_SET_ICON, (long)id, "/system/icons/app-generic.bmp");
+  if (xs->tl && !g_mock && !has_launcher(xs->tl->app_id)) {
+    // Icono propio de la app: el que trae la ventana (_NET_WM_ICON) o el que
+    // dice su app_id en los temas instalados; si no hay, el generico de Aurora.
+    char ip[64];
+    const char *icon = "/system/icons/app-generic.bmp";
+    if (xs->tl->icon[0]) {
+      icon = xs->tl->icon;
+    } else if (xs->tl->app_id[0]) {
+      const char *names[2] = {xs->tl->app_id, NULL};
+      const char *dot = strrchr(xs->tl->app_id, '.');
+      int nn = 1;
+      if (dot && dot[1])
+        names[nn++] = dot + 1; /* org.gnome.Foo -> Foo */
+      char key[80];
+      snprintf(key, sizeof(key), "app-%s", xs->tl->app_id);
+      if (aw_icon_for(key, names, nn, ip, sizeof(ip)))
+        icon = ip;
+    }
+    syscall(ASYS_WIN_SET_ICON, (long)id, icon);
+  }
   xs->cw = w;
   xs->ch = h;
   wl_list_insert(&g_wins, &xs->wlink);
@@ -3154,7 +3179,7 @@ static pid_t g_xpid;
 static struct wl_event_source *g_xwm_src;
 static const char *g_xdisplay_num = "0";
 static xcb_atom_t A_SURF_ID, A_WM_PROTOCOLS, A_DELETE, A_NET_WM_NAME, A_UTF8,
-    A_WM_CLASS, A_ALLOW_COMMITS;
+    A_WM_CLASS, A_ALLOW_COMMITS, A_NET_WM_ICON;
 
 static xcb_atom_t xatom(const char *name) {
   xcb_intern_atom_cookie_t c = xcb_intern_atom(g_xc, 0, (uint16_t)strlen(name), name);
@@ -3222,13 +3247,50 @@ static void xwin_read_props(struct xwin *xw) {
   char *cls = xprop_str(xw->id, A_WM_CLASS, XCB_ATOM_STRING, &n);
   if (cls) {
     const char *klass = cls + strlen(cls) + 1; /* "instancia\0clase\0" */
-    if (klass < cls + n && *klass)
-      snprintf(tl->app_id, sizeof(tl->app_id), "%s", klass);
-    else
-      snprintf(tl->app_id, sizeof(tl->app_id), "%s", cls);
+    int has_klass = klass < cls + n && *klass;
+    // El lanzador del Dock suele llevar la instancia en minusculas ("xclock",
+    // StartupWMClass); la clase es "XClock". Se usa la que tenga lanzador para
+    // que la ventana cuelgue de su icono; si ninguna, la clase.
+    const char *pick = has_launcher(cls) ? cls
+                       : (has_klass && has_launcher(klass)) ? klass
+                       : has_klass ? klass : cls;
+    snprintf(tl->app_id, sizeof(tl->app_id), "%s", pick);
     free(cls);
     if (xw->xs->win_id >= 0 && tl->app_id[0])
       win_set_app_id(xw->xs->win_id, tl->app_id);
+  }
+  // _NET_WM_ICON: lista de (ancho, alto, pixeles ARGB); se usa el mayor <= 256.
+  if (!tl->icon[0] && A_NET_WM_ICON != XCB_ATOM_NONE && !has_launcher(tl->app_id)) {
+    xcb_get_property_cookie_t ic = xcb_get_property(g_xc, 0, xw->id, A_NET_WM_ICON,
+                                                    XCB_ATOM_CARDINAL, 0, 1 << 18);
+    xcb_get_property_reply_t *ir = xcb_get_property_reply(g_xc, ic, NULL);
+    if (ir && xcb_get_property_value_length(ir) >= 12) {
+      const uint32_t *d = xcb_get_property_value(ir);
+      size_t nw = (size_t)xcb_get_property_value_length(ir) / 4;
+      size_t pos = 0, best = (size_t)-1;
+      uint32_t bw = 0, bh = 0;
+      while (pos + 2 <= nw) {
+        uint32_t w = d[pos], h = d[pos + 1];
+        if (w == 0 || h == 0 || w > 1024 || h > 1024 || pos + 2 + (size_t)w * h > nw)
+          break;
+        if (w <= 256 && h <= 256 && w * h > bw * bh) {
+          best = pos;
+          bw = w;
+          bh = h;
+        }
+        pos += 2 + (size_t)w * h;
+      }
+      if (best != (size_t)-1) {
+        char key[32], path[64];
+        snprintf(key, sizeof(key), "x11-%x", xw->id);
+        if (aw_icon_from_argb(key, d + best + 2, (int)bw, (int)bh, path, sizeof(path))) {
+          snprintf(tl->icon, sizeof(tl->icon), "%s", path);
+          if (xw->xs->win_id >= 0)
+            syscall(ASYS_WIN_SET_ICON, (long)xw->xs->win_id, tl->icon);
+        }
+      }
+    }
+    free(ir);
   }
   xcb_get_property_cookie_t pc =
       xcb_get_property(g_xc, 0, xw->id, A_WM_PROTOCOLS, XCB_ATOM_ATOM, 0, 32);
@@ -3598,6 +3660,7 @@ static void xwm_ready(void) {
   A_WM_PROTOCOLS = xatom("WM_PROTOCOLS");
   A_DELETE = xatom("WM_DELETE_WINDOW");
   A_NET_WM_NAME = xatom("_NET_WM_NAME");
+  A_NET_WM_ICON = xatom("_NET_WM_ICON");
   A_UTF8 = xatom("UTF8_STRING");
   A_WM_CLASS = xatom("WM_CLASS");
   A_ALLOW_COMMITS = xatom("_XWAYLAND_ALLOW_COMMITS");
@@ -3969,7 +4032,7 @@ static void desktop_launchers_load(void) {
     FILE *f = fopen(path, "r");
     if (!f)
       continue;
-    char name[32] = "", exec[192] = "", wmclass[48] = "", line[512];
+    char name[32] = "", exec[192] = "", wmclass[48] = "", iconname[96] = "", line[512];
     int in_entry = 0, hidden = 0, is_app = 0;
     while (fgets(line, sizeof(line), f)) {
       char *t = trim(line);
@@ -3983,6 +4046,8 @@ static void desktop_launchers_load(void) {
         snprintf(name, sizeof(name), "%s", t + 5);
       else if (!strncmp(t, "Exec=", 5))
         desktop_exec_clean(exec, sizeof(exec), t + 5);
+      else if (!strncmp(t, "Icon=", 5))
+        snprintf(iconname, sizeof(iconname), "%s", t + 5);
       else if (!strncmp(t, "StartupWMClass=", 15))
         snprintf(wmclass, sizeof(wmclass), "%s", t + 15);
       else if (!strcmp(t, "NoDisplay=true") || !strcmp(t, "Hidden=true") ||
@@ -4028,6 +4093,29 @@ static void desktop_launchers_load(void) {
     g_launchers[i].color = 0xFF000000u | (0x30 + (h & 0x5F)) << 16 |
                            (0x30 + ((h >> 8) & 0x5F)) << 8 | (0x40 + ((h >> 16) & 0x7F));
     g_launchers[i].icon[0] = 0; /* sin icono: baldosa con simbolo y color */
+    {
+      // Icono de la app: Icon= del .desktop, o el nombre del app_id / ejecutable.
+      const char *names[3];
+      int nn = 0;
+      if (iconname[0])
+        names[nn++] = iconname;
+      names[nn++] = app_id;
+      char base[64] = "";
+      char tmp2[192];
+      snprintf(tmp2, sizeof(tmp2), "%s", exec);
+      char *sp2 = strchr(tmp2, ' ');
+      if (sp2)
+        *sp2 = 0;
+      const char *b2 = strrchr(tmp2, '/');
+      snprintf(base, sizeof(base), "%s", b2 ? b2 + 1 : tmp2);
+      if (base[0] && strcmp(base, app_id))
+        names[nn++] = base;
+      char key[80];
+      snprintf(key, sizeof(key), "app-%s", app_id);
+      char ip[64];
+      if (aw_icon_for(key, names, nn, ip, sizeof(ip)))
+        snprintf(g_launchers[i].icon, sizeof(g_launchers[i].icon), "%s", ip);
+    }
     snprintf(g_launchers[i].cmd, sizeof(g_launchers[i].cmd), "%s", exec);
     g_nlaunchers++;
   }
