@@ -6387,6 +6387,20 @@ static void test_lkpi_k2_smp(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_
 REGISTER_TEST_FLAGS("linuxkpi: K2 estrés SMP (mutex, ww_mutex, work+timers, RCU)",
                     test_lkpi_k2_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
+static void test_lkpi_k4(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k4")); }
+REGISTER_TEST_FLAGS("linuxkpi: K4 modelo de dispositivos (kobject, sysfs, bus, devres) (L3)",
+                    test_lkpi_k4, TEST_FLAG_BLOCKING);
+
+// Hito de L3: drivers PCI de Linux de juguete sobre edu y virtio-rng-pci de
+// QEMU (scripts/qemu-drive.py los añade; si no están, se omite).
+static void test_lkpi_k5(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k5")); }
+REGISTER_TEST_FLAGS("linuxkpi: K5 PCI, IRQ y DMA con edu y virtio-rng (L3)", test_lkpi_k5,
+                    TEST_FLAG_BLOCKING);
+
+static void test_lkpi_k5_smp(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k5_smp")); }
+REGISTER_TEST_FLAGS("linuxkpi: K5 SMP (MSI-X repartida, afinidad, estrés de MSI)",
+                    test_lkpi_k5_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
 static void test_lkpi_unload(void) {
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
   TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");
