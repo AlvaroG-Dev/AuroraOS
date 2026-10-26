@@ -1,6 +1,6 @@
 # Plan de implementación: capa de compatibilidad con drivers de Linux (LinuxKPI) para Aurora
 
-Estado: **L0 y L1 hechas** (26-oct-2026; L0.2/L0.3 con fuentes provisionales, ver §11). L2 pendiente de confirmación. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
+Estado: **L0 y L1 hechas** (26-oct-2026; L0.2/L0.3 con fuentes provisionales, ver §11). L2 pendiente de confirmación. Resumen de la sesión: `docs/LinuxKPI_Sesion_L0_L1.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
 
 ## 0. Principios
 
