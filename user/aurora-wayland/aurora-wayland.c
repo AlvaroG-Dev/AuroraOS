@@ -3612,6 +3612,10 @@ static void xwm_spawn(void) {
       execl("/usr/bin/strace", "strace", "-D", "-f", "-o", getenv("AW_XSTRACE"),
             "/usr/bin/Xwayland", disp, "-rootless", "-shm", "-noreset", "-nolock",
             "-wm", wmfd, (char *)NULL);
+    if (getenv("AW_XVERBOSE")) /* depuracion: mas trazas de Xwayland */
+      execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
+            "-nolock", "-verbose", "10", "-logverbose", "10", "-wm", wmfd,
+            (char *)NULL);
     execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
           "-nolock", "-wm", wmfd, (char *)NULL);
     _exit(127);
