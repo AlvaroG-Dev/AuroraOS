@@ -15,3 +15,8 @@ sh -c '"/usr/bin/xkbcomp" -w 1 "-R/usr/share/X11/xkb" -xkm "-" -em1 "m1" -emp ">
 echo "[xkb-test] xkbcomp rc=$?"
 ls -la /tmp/server-t.xkm 2>&1
 echo "[xkb-test] fin"
+echo "[xkb-test] /bin/sh -> $(readlink -f /bin/sh)"
+sh -c '"/usr/bin/printf" "[%s]\n" -w 1 "-R/usr/share/X11/xkb" -xkm "-" -em1 "The XKEYBOARD keymap compiler (xkbcomp) reports:" -emp "> " -eml "Errors from xkbcomp are not fatal to the X server" "/tmp/server-0.xkm"'
+echo "[xkb-test] printf rc=$?"
+/usr/bin/printf "[%s]\n" -w 1 "-R/usr/share/X11/xkb" -xkm "-" -em1 "The XKEYBOARD keymap compiler (xkbcomp) reports:" -emp "> " -eml "Errors from xkbcomp are not fatal to the X server" "/tmp/server-0.xkm"
+echo "[xkb-test] printf directo rc=$?"
