@@ -152,6 +152,7 @@ window_t *window_create(int x, int y, int w, int h, const char *title,
   win->height = h;
   win->flags = (flags | WIN_FLAGS_MOVABLE) & ~WIN_FLAGS_HIDDEN;
   win->z_order = 0;
+  win->cursor = 0; /* CURSOR_ARROW */
   win->next = NULL;
   win->prev = NULL;
 

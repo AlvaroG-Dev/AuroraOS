@@ -210,7 +210,8 @@ typedef enum {
   CMD_DOCK_PIN, /* title = nombre, app_id, symbol, color, value = launch_id */
   CMD_WIN_APP,  /* win + app_id: la ventana pasa al lanzador de esa app */
   CMD_WIN_GRAB, /* win + value: 0 = mover, otro = RESIZE_EDGE_* (peticion del cliente) */
-  CMD_WIN_RESIZE /* win + value = (ancho << 16) | alto exteriores (peticion del cliente) */
+  CMD_WIN_RESIZE, /* win + value = (ancho << 16) | alto exteriores (peticion del cliente) */
+  CMD_WIN_CURSOR /* win + value = cursor_shape_t sobre el area de cliente */
 } cmd_type_t;
 
 typedef struct {
@@ -246,6 +247,7 @@ static int cmd_try_post(const comp_cmd_t *c) {
 
 /* Bloqueante: solo para tareas normales (nunca desde el hilo del compositor
  * ni desde IRQ). */
+static void update_cursor_shape(void);
 static void cmd_post(const comp_cmd_t *c) {
   while (cmd_try_post(c) < 0)
     sched_yield();
@@ -860,6 +862,12 @@ static void exec_cmd(const comp_cmd_t *c) {
     if (stack_contains(c->win))
       do_win_app(c->win, c->app_id);
     break;
+  case CMD_WIN_CURSOR:
+    if (stack_contains(c->win) && c->value >= 0 && c->value < CURSOR_COUNT) {
+      c->win->cursor = (uint8_t)c->value;
+      update_cursor_shape();
+    }
+    break;
   case CMD_WIN_RESIZE:
     /* El cliente necesita mas espacio (p. ej. xdg_toplevel.set_min_size). */
     if (stack_contains(c->win) && c->win->anim_state == WIN_ANIM_NONE &&
@@ -943,6 +951,10 @@ void compositor_dock_pin(const char *name, const char *app_id,
 void compositor_set_app_id(window_t *win, const char *app_id) {
   comp_cmd_t c = {.type = CMD_WIN_APP, .win = win};
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
+  cmd_post(&c);
+}
+void compositor_set_cursor(window_t *win, int shape) {
+  comp_cmd_t c = {.type = CMD_WIN_CURSOR, .win = win, .value = shape};
   cmd_post(&c);
 }
 void compositor_request_resize(window_t *win, int w, int h) {
@@ -1063,8 +1075,13 @@ static void update_cursor_shape(void) {
              cursor_y >= AURORA_MENUBAR_H &&
              !dock_hit_test(cursor_x, cursor_y)) {
     win_hit_t h;
-    if (window_at_cursor(&h))
-      s = shape_for_edges(edges_for_hit(h));
+    window_t *w = window_at_cursor(&h);
+    if (w) {
+      /* Bordes de redimension: siempre su cursor. Area de cliente: el que
+       * pidio la app. Barra de titulo y botones: la flecha. */
+      s = h == WIN_HIT_CLIENT ? (cursor_shape_t)w->cursor
+                              : shape_for_edges(edges_for_hit(h));
+    }
   }
   set_cursor_shape(s);
 }

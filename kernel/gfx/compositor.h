@@ -33,6 +33,8 @@ void compositor_dock_pin(const char *name, const char *app_id,
                          tar_node_t *icon);
 // La ventana pertenece a `app_id`: cuelga del lanzador fijado de esa app.
 void compositor_set_app_id(window_t *win, const char *app_id);
+// Cursor (cursor_shape_t) que se muestra sobre el area de cliente de `win`.
+void compositor_set_cursor(window_t *win, int shape);
 /* El cliente pide mover (edges=0) o redimensionar (RESIZE_EDGE_*) su ventana. */
 void compositor_begin_grab(window_t *win, int edges);
 /* El cliente pide un tamano exterior (con barra de titulo) distinto. */

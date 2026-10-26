@@ -9,6 +9,7 @@
 #include "../uaccess.h"
 #include "../vfs.h"
 #include "compositor.h"
+#include "cursor.h"
 #include "theme.h"
 
 // ---------------------------------------------------------------------------
@@ -666,6 +667,22 @@ int winsrv_set_app_id(task_t *owner, int win_id, const char *app_id) {
   window_t *win = e->win;
   spin_unlock_irqrestore(&winsrv_lock, flags);
   compositor_set_app_id(win, app_id);
+  return 0;
+}
+
+int winsrv_set_cursor(task_t *owner, int win_id, int shape) {
+  if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || shape < 0 ||
+      shape >= CURSOR_COUNT)
+    return -1;
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  winsrv_entry_t *e = &g_windows[win_id];
+  if (!e->in_use || e->owner != owner || !e->win) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+  window_t *win = e->win;
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+  compositor_set_cursor(win, shape);
   return 0;
 }
 

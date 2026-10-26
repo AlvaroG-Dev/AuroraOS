@@ -1,4 +1,4 @@
-// kernel/gfx/cursor.h — Cursores estilo macOS (flecha y redimensionado).
+// kernel/gfx/cursor.h — Cursores estilo macOS (flecha, redimensionado, mano, texto...).
 //
 // Se generan una vez en cursor_init() a partir de polígonos, con
 // antialiasing (supermuestreo 4x4), borde blanco y sombra difusa, como
@@ -14,6 +14,11 @@ typedef enum {
   CURSOR_RESIZE_NS,   /* ↕ bordes superior/inferior */
   CURSOR_RESIZE_NWSE, /* ⤡ esquinas sup-izq / inf-der */
   CURSOR_RESIZE_NESW, /* ⤢ esquinas sup-der / inf-izq */
+  CURSOR_POINTER,     /* mano con el índice (enlaces, botones) */
+  CURSOR_NOT_ALLOWED, /* círculo tachado */
+  CURSOR_TEXT,        /* I-beam */
+  CURSOR_GRABBING,    /* mano cerrada (arrastre) */
+  CURSOR_WAIT,        /* reloj de arena */
   CURSOR_COUNT
 } cursor_shape_t;
 

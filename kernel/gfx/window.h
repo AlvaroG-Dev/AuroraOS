@@ -84,6 +84,7 @@ typedef struct window {
   int content_dirty; // 1 = solo cambió el contenido (camino barato)
 
   uint32_t flags;
+  uint8_t cursor; /* cursor_shape_t sobre el area de cliente (por defecto flecha) */
   int z_order;
 
   char title[64];

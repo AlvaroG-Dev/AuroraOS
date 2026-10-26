@@ -95,6 +95,9 @@ int winsrv_set_title(task_t *owner, int win_id, const char *title);
 int winsrv_set_state(task_t *owner, int win_id, int state);
 // app_id de la ventana (ASYS_WIN_SET_APP_ID): la agrupa en el Dock.
 int winsrv_set_app_id(task_t *owner, int win_id, const char *app_id);
+// Forma del cursor (cursor_shape_t) sobre el area de cliente de la ventana
+// (ASYS_WIN_SET_CURSOR). Formas desconocidas -> -1.
+int winsrv_set_cursor(task_t *owner, int win_id, int shape);
 // Inicia un arrastre (edges=0) o redimension (bits RESIZE_EDGE_*: 1 der, 2 inf,
 // 4 izq, 8 sup) interactivo; solo vale con el boton izquierdo pulsado.
 int winsrv_begin_grab(task_t *owner, int win_id, int edges);

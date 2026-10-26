@@ -124,6 +124,7 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
 #define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C)
 #define ASYS_WIN_BEGIN_GRAB (ASYS_BASE + 0x1D)
 #define ASYS_WIN_RESIZE (ASYS_BASE + 0x1E)
+#define ASYS_WIN_SET_CURSOR (ASYS_BASE + 0x1F)
 #define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
 #define WINSRV_EV_STATE 12 /* x = 1: la ventana quedo maximizada */
 // Bordes para ASYS_WIN_BEGIN_GRAB (RESIZE_EDGE_* del compositor); 0 = mover.
@@ -142,6 +143,24 @@ static int win_set_app_id(int id, const char *app_id) {
   if (g_mock)
     return 0;
   return (int)syscall(ASYS_WIN_SET_APP_ID, (long)id, app_id);
+}
+// Formas de cursor de Aurora (cursor_shape_t de kernel/gfx/cursor.h).
+enum {
+  AUR_CURSOR_ARROW = 0,
+  AUR_CURSOR_RESIZE_EW,
+  AUR_CURSOR_RESIZE_NS,
+  AUR_CURSOR_RESIZE_NWSE,
+  AUR_CURSOR_RESIZE_NESW,
+  AUR_CURSOR_POINTER,
+  AUR_CURSOR_NOT_ALLOWED,
+  AUR_CURSOR_TEXT,
+  AUR_CURSOR_GRABBING,
+  AUR_CURSOR_WAIT,
+};
+static int win_set_cursor(int id, int shape) {
+  if (g_mock)
+    return 0;
+  return (int)syscall(ASYS_WIN_SET_CURSOR, (long)id, (long)shape);
 }
 static int win_set_title(int id, const char *title) {
   if (g_mock)
@@ -1654,14 +1673,22 @@ static void kbd_focus_set(struct toplevel *tl) {
   primary_send_to(nc);
 }
 
-// El cursor es siempre el de Aurora (flecha y formas de redimension del
-// propio compositor): la forma que pida el cliente (wl_pointer.set_cursor,
-// wp_cursor_shape_v1) se acepta y se ignora, para que la apariencia no dependa
-// de la ventana bajo el puntero.
+// El cursor visible es siempre uno de Aurora (cursor_shape_t del compositor).
+// Las imagenes que mande el cliente (wl_pointer.set_cursor con superficie, o
+// sin ella para ocultarlo) nunca se muestran: se descartan y queda la flecha.
+// La forma solo puede pedirse con wp_cursor_shape_v1 (cursor_shape_apply).
+// Se fija en la ventana bajo el puntero de ese cliente; el compositor la usa
+// solo sobre el area de cliente (bordes y barra de titulo siguen siendo suyos).
+static void cursor_shape_apply(struct wl_client *c, int shape) {
+  if (g_ptr_focus && g_ptr_focus->win_id >= 0 &&
+      wl_resource_get_client(g_ptr_focus->res) == c)
+    win_set_cursor(g_ptr_focus->win_id, shape);
+}
 static void ptr_set_cursor(struct wl_client *c, struct wl_resource *r,
                            uint32_t serial, struct wl_resource *surf,
                            int32_t hx, int32_t hy) {
-  (void)c; (void)r; (void)serial; (void)surf; (void)hx; (void)hy;
+  (void)r; (void)serial; (void)surf; (void)hx; (void)hy;
+  cursor_shape_apply(c, AUR_CURSOR_ARROW);
 }
 static const struct wl_pointer_interface pointer_impl = {
     .set_cursor = ptr_set_cursor,
@@ -2447,12 +2474,60 @@ static void fsm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
 }
 
 // ---------------------------------------------------------------------------
-// wp_cursor_shape_v1: se acepta (los clientes no cargan temas de cursores) pero
-// el cursor visible es siempre el de Aurora.
+// wp_cursor_shape_v1: cada forma estandar se traduce a la forma de Aurora mas
+// parecida (cursor.c); lo que no tiene equivalente queda como flecha.
 // ---------------------------------------------------------------------------
+static int aur_cursor_for_shape(uint32_t shape) {
+  switch (shape) {
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB:
+    return AUR_CURSOR_POINTER;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL:
+    return AUR_CURSOR_GRABBING;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT:
+    return AUR_CURSOR_TEXT;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_PROGRESS:
+    return AUR_CURSOR_WAIT;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NO_DROP:
+    return AUR_CURSOR_NOT_ALLOWED;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE:
+    return AUR_CURSOR_RESIZE_EW;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE:
+    return AUR_CURSOR_RESIZE_NS;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE:
+    return AUR_CURSOR_RESIZE_NESW;
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE:
+  case WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE:
+    return AUR_CURSOR_RESIZE_NWSE;
+  default:
+    return AUR_CURSOR_ARROW;
+  }
+}
 static void csdev_set_shape(struct wl_client *c, struct wl_resource *r,
                             uint32_t serial, uint32_t shape) {
-  (void)c; (void)r; (void)serial; (void)shape; /* cursor unico de Aurora */
+  (void)serial;
+  if (shape < WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT ||
+      shape > WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT) {
+    wl_resource_post_error(r, WP_CURSOR_SHAPE_DEVICE_V1_ERROR_INVALID_SHAPE,
+                           "forma de cursor %u invalida", shape);
+    return;
+  }
+  cursor_shape_apply(c, aur_cursor_for_shape(shape));
 }
 static const struct wp_cursor_shape_device_v1_interface csdev_impl = {
     .destroy = noop_destroy,
