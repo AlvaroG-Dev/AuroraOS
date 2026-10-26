@@ -34,6 +34,7 @@
 #include <wayland-server.h>
 #include <xcb/composite.h>
 #include <xcb/xcb.h>
+#include <xcb/xfixes.h>
 #include <xkbcommon/xkbcommon.h>
 
 #include "icons.h"
@@ -293,6 +294,8 @@ static int g_keymap_fd = -1;
 static size_t g_keymap_size;
 
 static struct data_source *g_selection;
+static void xsel_wayland_changed(void); /* puente del portapapeles X11 */
+static void xsel_request(const char *mime, int fd);
 static struct data_source *g_primary; /* seleccion primaria (boton central) */
 static struct wl_list g_psdevs;       /* struct seat_res.link: primary_selection_device */
 static void primary_send_to(struct wl_client *client);
@@ -402,6 +405,7 @@ struct toplevel {
 };
 
 struct data_source {
+  int x_origin; /* seleccion de un cliente X11 (puente en el xwm): res == NULL */
   struct wl_resource *res;
   struct wl_array mimes; /* cadenas contiguas separadas por NUL */
 };
@@ -563,6 +567,10 @@ static void offer_receive(struct wl_client *c, struct wl_resource *r,
                           const char *mime, int32_t fd) {
   (void)c;
   struct data_source *src = wl_resource_get_user_data(r);
+  if (src && src == g_selection && src->x_origin) {
+    xsel_request(mime, fd); /* pide el dato al cliente X11; se encarga de cerrar fd */
+    return;
+  }
   if (src && src == g_selection) /* solo se compara: la fuente puede haber muerto */
     wl_data_source_send_send(src->res, mime, fd);
   close(fd);
@@ -648,6 +656,7 @@ static void ds_resource_destroy(struct wl_resource *r) {
   if (g_selection == s) {
     g_selection = NULL;
     selection_send_to_focus();
+    xsel_wayland_changed();
   }
   wl_array_release(&s->mimes);
   free(s);
@@ -683,6 +692,7 @@ static void dd_set_selection(struct wl_client *c, struct wl_resource *r,
     fprintf(stderr, "[aurora-wayland] set_selection de cliente %p (fuente %p, foco kbd %p)\n",
             (void *)c, (void *)s, g_kbd_focus ? (void *)g_kbd_focus->client : NULL);
   selection_send_to_focus();
+  xsel_wayland_changed();
 }
 static const struct wl_data_device_interface dd_impl = {
     .start_drag = dd_start_drag,
@@ -3452,7 +3462,341 @@ static void xwm_close(struct toplevel *tl) {
   xcb_flush(g_xc);
 }
 
+
+// ---------------------------------------------------------------------------
+// Portapapeles X11 <-> Wayland (CLIPBOARD, solo texto)
+//
+// Con Xwayland en modo -wm el puente de selecciones lo hace el gestor de
+// ventanas (como el xwm de Weston): una ventana propia (g_selwin) hace de
+// propietario/solicitante X11.
+//   X11 -> Wayland: XFixes avisa de un nuevo propietario; se pide TARGETS y se
+//     ofrece a los clientes Wayland una fuente "x_origin" con los mimes
+//     equivalentes; al pedir un mime (offer.receive) se hace ConvertSelection y
+//     el contenido de la propiedad se vuelca al fd del cliente.
+//   Wayland -> X11: al fijar un cliente Wayland su seleccion, g_selwin pasa a ser
+//     propietaria de CLIPBOARD; a cada SelectionRequest se pide el dato a la
+//     fuente por un pipe y se devuelve como propiedad.
+// ---------------------------------------------------------------------------
+static xcb_window_t g_selwin;
+static xcb_atom_t A_CLIPBOARD, A_TARGETS, A_TEXT_ATOM, A_AW_PROP, A_TIMESTAMP;
+static uint8_t g_xfixes_base;
+static int g_we_own_clip;
+static struct data_source *g_xsrc;
+#define XSEL_MAX (1u << 20)
+
+static xcb_atom_t xsel_atom_for_mime(const char *mime) {
+  if (!strcmp(mime, "text/plain;charset=utf-8") || !strcmp(mime, "UTF8_STRING"))
+    return A_UTF8;
+  if (!strcmp(mime, "text/plain") || !strcmp(mime, "STRING") || !strcmp(mime, "TEXT"))
+    return XCB_ATOM_STRING;
+  return XCB_ATOM_NONE;
+}
+
+static int src_has_mime(const struct data_source *s, const char *m) {
+  const char *p = s->mimes.data;
+  size_t left = s->mimes.size;
+  while (left > 0) {
+    size_t n = strnlen(p, left);
+    if (!strcmp(p, m))
+      return 1;
+    p += n + 1;
+    left -= (n + 1 > left) ? left : n + 1;
+  }
+  return 0;
+}
+
+// --- X11 -> Wayland ---------------------------------------------------------
+static struct { int active; int fd; xcb_atom_t target; } g_xfer; /* un volcado a la vez */
+static int g_pending_targets;
+
+static void xsrc_clear(void) {
+  if (g_xsrc) {
+    if (g_selection == g_xsrc)
+      g_selection = NULL;
+    wl_array_release(&g_xsrc->mimes);
+    free(g_xsrc);
+    g_xsrc = NULL;
+  }
+}
+
+static void xsel_request(const char *mime, int fd) {
+  xcb_atom_t t = xsel_atom_for_mime(mime);
+  if (!g_xc || t == XCB_ATOM_NONE || g_xfer.active) {
+    close(fd);
+    return;
+  }
+  g_xfer.active = 1;
+  g_xfer.fd = fd;
+  g_xfer.target = t;
+  xcb_convert_selection(g_xc, g_selwin, A_CLIPBOARD, t, A_AW_PROP, XCB_CURRENT_TIME);
+  xcb_flush(g_xc);
+}
+
+static void xsel_write_all(int fd, const uint8_t *d, size_t n) {
+  int fl = fcntl(fd, F_GETFL);
+  if (fl >= 0)
+    fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+  size_t off = 0;
+  while (off < n) {
+    ssize_t w = write(fd, d + off, n - off);
+    if (w <= 0) {
+      if (w < 0 && errno == EINTR)
+        continue;
+      break;
+    }
+    off += (size_t)w;
+  }
+}
+
+static void xsel_notify_x11(xcb_selection_notify_event_t *ev) {
+  if (ev->target == A_TARGETS && g_pending_targets) {
+    g_pending_targets = 0;
+    if (ev->property == XCB_ATOM_NONE)
+      return;
+    xcb_get_property_cookie_t c = xcb_get_property(g_xc, 1, g_selwin, A_AW_PROP,
+                                                   XCB_ATOM_ATOM, 0, 256);
+    xcb_get_property_reply_t *r = xcb_get_property_reply(g_xc, c, NULL);
+    if (!r)
+      return;
+    xcb_atom_t *at = xcb_get_property_value(r);
+    int na = xcb_get_property_value_length(r) / (int)sizeof(xcb_atom_t);
+    int has_utf8 = 0, has_str = 0;
+    for (int i = 0; i < na; i++) {
+      if (at[i] == A_UTF8) has_utf8 = 1;
+      if (at[i] == XCB_ATOM_STRING || at[i] == A_TEXT_ATOM) has_str = 1;
+    }
+    free(r);
+    if (!has_utf8 && !has_str)
+      return; /* sin texto: no se ofrece (imagenes etc. no se puentean) */
+    xsrc_clear();
+    g_xsrc = calloc(1, sizeof(*g_xsrc));
+    if (!g_xsrc)
+      return;
+    g_xsrc->x_origin = 1;
+    wl_array_init(&g_xsrc->mimes);
+    const char *list[2];
+    int nl = 0;
+    if (has_utf8) list[nl++] = "text/plain;charset=utf-8";
+    if (has_str || has_utf8) list[nl++] = "text/plain";
+    for (int i = 0; i < nl; i++) {
+      size_t n = strlen(list[i]) + 1;
+      char *p = wl_array_add(&g_xsrc->mimes, n);
+      if (p) memcpy(p, list[i], n);
+    }
+    g_selection = g_xsrc;
+    if (g_debug)
+      fprintf(stderr, "[aurora-wayland] seleccion X11 -> Wayland (%d mimes)\n", nl);
+    selection_send_to_focus();
+    return;
+  }
+  if (!g_xfer.active || ev->target != g_xfer.target)
+    return;
+  int fd = g_xfer.fd;
+  g_xfer.active = 0;
+  if (ev->property == XCB_ATOM_NONE) {
+    close(fd);
+    return;
+  }
+  xcb_get_property_cookie_t c = xcb_get_property(g_xc, 1, g_selwin, A_AW_PROP,
+                                                 XCB_GET_PROPERTY_TYPE_ANY, 0, XSEL_MAX / 4);
+  xcb_get_property_reply_t *r = xcb_get_property_reply(g_xc, c, NULL);
+  if (r && xcb_get_property_value_length(r) > 0)
+    xsel_write_all(fd, xcb_get_property_value(r), (size_t)xcb_get_property_value_length(r));
+  free(r);
+  close(fd);
+}
+
+static void xsel_owner_changed(xcb_xfixes_selection_notify_event_t *ev) {
+  if (ev->selection != A_CLIPBOARD || ev->owner == g_selwin)
+    return;
+  if (ev->owner == XCB_NONE) { /* el cliente X solto el portapapeles */
+    if (g_xsrc && g_selection == g_xsrc) {
+      xsrc_clear();
+      selection_send_to_focus();
+    }
+    return;
+  }
+  g_we_own_clip = 0;
+  g_pending_targets = 1;
+  xcb_convert_selection(g_xc, g_selwin, A_CLIPBOARD, A_TARGETS, A_AW_PROP, XCB_CURRENT_TIME);
+  xcb_flush(g_xc);
+}
+
+// --- Wayland -> X11 ---------------------------------------------------------
+struct xreq {
+  xcb_window_t requestor;
+  xcb_atom_t selection, target, property;
+  xcb_timestamp_t time;
+  int fd;
+  uint8_t *buf;
+  size_t len;
+  struct wl_event_source *src, *timer;
+};
+
+static void xsel_send_notify(const struct xreq *q, xcb_atom_t prop) {
+  xcb_selection_notify_event_t ev;
+  memset(&ev, 0, sizeof(ev));
+  ev.response_type = XCB_SELECTION_NOTIFY;
+  ev.time = q->time;
+  ev.requestor = q->requestor;
+  ev.selection = q->selection;
+  ev.target = q->target;
+  ev.property = prop;
+  xcb_send_event(g_xc, 0, q->requestor, XCB_EVENT_MASK_NO_EVENT, (const char *)&ev);
+  xcb_flush(g_xc);
+}
+
+static void xreq_finish(struct xreq *q, int ok) {
+  if (g_xc) {
+    if (ok) {
+      xcb_atom_t type = q->target == A_UTF8 ? A_UTF8 : XCB_ATOM_STRING;
+      xcb_change_property(g_xc, XCB_PROP_MODE_REPLACE, q->requestor, q->property, type, 8,
+                          (uint32_t)q->len, q->buf ? q->buf : (const uint8_t *)"");
+      xsel_send_notify(q, q->property);
+    } else {
+      xsel_send_notify(q, XCB_ATOM_NONE);
+    }
+  }
+  if (q->src) wl_event_source_remove(q->src);
+  if (q->timer) wl_event_source_remove(q->timer);
+  if (q->fd >= 0) close(q->fd);
+  free(q->buf);
+  free(q);
+}
+
+static int xreq_read(int fd, uint32_t mask, void *data) {
+  struct xreq *q = data;
+  uint8_t tmp[4096];
+  for (;;) {
+    ssize_t n = read(fd, tmp, sizeof(tmp));
+    if (n > 0) {
+      if (q->len + (size_t)n > XSEL_MAX) {
+        xreq_finish(q, 0);
+        return 0;
+      }
+      uint8_t *nb = realloc(q->buf, q->len + (size_t)n);
+      if (!nb) {
+        xreq_finish(q, 0);
+        return 0;
+      }
+      q->buf = nb;
+      memcpy(q->buf + q->len, tmp, (size_t)n);
+      q->len += (size_t)n;
+      continue;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+      if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+        break;
+      return 0;
+    }
+    break; /* EOF o error */
+  }
+  xreq_finish(q, 1);
+  return 0;
+}
+
+static int xreq_timeout(void *data) {
+  xreq_finish(data, 0);
+  return 0;
+}
+
+static void xsel_selection_request(xcb_selection_request_event_t *e) {
+  struct xreq base = {.requestor = e->requestor, .selection = e->selection, .target = e->target,
+                      .property = e->property ? e->property : e->target, .time = e->time, .fd = -1};
+  struct data_source *s = g_selection;
+  if (e->selection != A_CLIPBOARD || !s || s->x_origin || !s->res) {
+    xsel_send_notify(&base, XCB_ATOM_NONE);
+    return;
+  }
+  if (e->target == A_TARGETS) {
+    xcb_atom_t at[5];
+    int n = 0;
+    at[n++] = A_TARGETS;
+    if (src_has_mime(s, "text/plain;charset=utf-8")) at[n++] = A_UTF8;
+    if (src_has_mime(s, "text/plain") || src_has_mime(s, "text/plain;charset=utf-8")) {
+      at[n++] = XCB_ATOM_STRING;
+      at[n++] = A_TEXT_ATOM;
+    }
+    xcb_change_property(g_xc, XCB_PROP_MODE_REPLACE, e->requestor, base.property, XCB_ATOM_ATOM,
+                        32, (uint32_t)n, at);
+    xsel_send_notify(&base, base.property);
+    return;
+  }
+  const char *mime = NULL;
+  if (e->target == A_UTF8) {
+    mime = src_has_mime(s, "text/plain;charset=utf-8") ? "text/plain;charset=utf-8" : NULL;
+  } else if (e->target == XCB_ATOM_STRING || e->target == A_TEXT_ATOM) {
+    mime = src_has_mime(s, "text/plain") ? "text/plain"
+           : src_has_mime(s, "text/plain;charset=utf-8") ? "text/plain;charset=utf-8" : NULL;
+  }
+  int pfd[2];
+  if (!mime || pipe(pfd) < 0) {
+    xsel_send_notify(&base, XCB_ATOM_NONE);
+    return;
+  }
+  struct xreq *q = calloc(1, sizeof(*q));
+  if (!q) {
+    close(pfd[0]); close(pfd[1]);
+    xsel_send_notify(&base, XCB_ATOM_NONE);
+    return;
+  }
+  *q = base;
+  q->fd = pfd[0];
+  fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL) | O_NONBLOCK);
+  wl_data_source_send_send(s->res, mime, pfd[1]);
+  wl_client_flush(wl_resource_get_client(s->res));
+  close(pfd[1]);
+  q->src = wl_event_loop_add_fd(g_loop, q->fd, WL_EVENT_READABLE, xreq_read, q);
+  q->timer = wl_event_loop_add_timer(g_loop, xreq_timeout, q);
+  wl_event_source_timer_update(q->timer, 3000);
+}
+
+// g_selection cambio por una accion de un cliente Wayland (o se vacio).
+static void xsel_wayland_changed(void) {
+  if (!g_xc || !g_selwin)
+    return;
+  if (g_selection && !g_selection->x_origin) {
+    xcb_set_selection_owner(g_xc, g_selwin, A_CLIPBOARD, XCB_CURRENT_TIME);
+    g_we_own_clip = 1;
+    xcb_flush(g_xc);
+  } else if (!g_selection && g_we_own_clip) {
+    xcb_set_selection_owner(g_xc, XCB_NONE, A_CLIPBOARD, XCB_CURRENT_TIME);
+    g_we_own_clip = 0;
+    xcb_flush(g_xc);
+  }
+}
+
+static void xsel_init(void) {
+  A_CLIPBOARD = xatom("CLIPBOARD");
+  A_TARGETS = xatom("TARGETS");
+  A_TEXT_ATOM = xatom("TEXT");
+  A_AW_PROP = xatom("_AURORA_SELECTION");
+  A_TIMESTAMP = xatom("TIMESTAMP");
+  g_selwin = xcb_generate_id(g_xc);
+  uint32_t em = XCB_EVENT_MASK_PROPERTY_CHANGE;
+  xcb_create_window(g_xc, XCB_COPY_FROM_PARENT, g_selwin, g_xroot, -10, -10, 1, 1, 0,
+                    XCB_WINDOW_CLASS_INPUT_ONLY, XCB_COPY_FROM_PARENT, XCB_CW_EVENT_MASK, &em);
+  xcb_xfixes_query_version_reply_t *qv =
+      xcb_xfixes_query_version_reply(g_xc, xcb_xfixes_query_version(g_xc, 5, 0), NULL);
+  const xcb_query_extension_reply_t *ext = xcb_get_extension_data(g_xc, &xcb_xfixes_id);
+  if (qv && ext && ext->present) {
+    g_xfixes_base = ext->first_event;
+    xcb_xfixes_select_selection_input(g_xc, g_selwin, A_CLIPBOARD,
+                                      XCB_XFIXES_SELECTION_EVENT_MASK_SET_SELECTION_OWNER |
+                                          XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_WINDOW_DESTROY |
+                                          XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_CLIENT_CLOSE);
+  } else {
+    fprintf(stderr, "[aurora-wayland] xwm: sin XFixes, portapapeles X11 desactivado\n");
+    g_selwin = 0;
+  }
+  free(qv);
+}
+
 static void xwm_stop(void) {
+  g_selwin = 0;
+  g_we_own_clip = 0;
+  g_xfer.active = 0;
+  xsrc_clear();
   if (g_xwm_src) {
     wl_event_source_remove(g_xwm_src);
     g_xwm_src = NULL;
@@ -3484,6 +3828,12 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
   while ((ev = xcb_poll_for_event(g_xc))) {
     if (g_debug)
       fprintf(stderr, "[aurora-wayland] xwm evento %d\n", ev->response_type & 0x7f);
+    if (g_selwin && g_xfixes_base &&
+        (ev->response_type & 0x7f) == g_xfixes_base + XCB_XFIXES_SELECTION_NOTIFY) {
+      xsel_owner_changed((xcb_xfixes_selection_notify_event_t *)ev);
+      free(ev);
+      continue;
+    }
     switch (ev->response_type & 0x7f) {
     case XCB_CREATE_NOTIFY: {
       xcb_create_notify_event_t *e = (void *)ev;
@@ -3581,6 +3931,14 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
       }
       break;
     }
+    case XCB_SELECTION_NOTIFY:
+      if (g_selwin && ((xcb_selection_notify_event_t *)ev)->requestor == g_selwin)
+        xsel_notify_x11((xcb_selection_notify_event_t *)ev);
+      break;
+    case XCB_SELECTION_REQUEST:
+      if (g_selwin)
+        xsel_selection_request((xcb_selection_request_event_t *)ev);
+      break;
     case XCB_PROPERTY_NOTIFY: {
       xcb_property_notify_event_t *e = (void *)ev;
       struct xwin *xw = xwin_find(e->window);
@@ -3664,6 +4022,7 @@ static void xwm_ready(void) {
   A_UTF8 = xatom("UTF8_STRING");
   A_WM_CLASS = xatom("WM_CLASS");
   A_ALLOW_COMMITS = xatom("_XWAYLAND_ALLOW_COMMITS");
+  xsel_init();
   xcb_flush(g_xc);
   g_xwm_src = wl_event_loop_add_fd(g_loop, g_xwm_fd, WL_EVENT_READABLE, xwm_event, NULL);
   fprintf(stderr, "[aurora-wayland] Xwayland pid %d, DISPLAY=:%s, WM listo\n", (int)g_xpid,
