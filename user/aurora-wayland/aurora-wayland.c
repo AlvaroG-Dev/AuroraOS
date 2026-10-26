@@ -123,9 +123,16 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
 #define ASYS_DOCK_POLL_LAUNCH (ASYS_BASE + 0x1B)
 #define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C)
 #define ASYS_WIN_BEGIN_GRAB (ASYS_BASE + 0x1D)
+#define ASYS_WIN_RESIZE (ASYS_BASE + 0x1E)
 #define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
 #define WINSRV_EV_STATE 12 /* x = 1: la ventana quedo maximizada */
 // Bordes para ASYS_WIN_BEGIN_GRAB (RESIZE_EDGE_* del compositor); 0 = mover.
+// Tamano exterior pedido por el cliente (con la barra de titulo de Aurora).
+static int win_request_resize(int id, int w, int h) {
+  if (g_mock)
+    return 0;
+  return (int)syscall(ASYS_WIN_RESIZE, (long)id, (long)w, (long)h);
+}
 static int win_begin_grab(int id, int edges) {
   if (g_mock)
     return 0;
@@ -854,6 +861,8 @@ static void xs_map(struct xsurf *xs, int w, int h) {
                        WIN_FLAGS_NODECORATION | WIN_FLAGS_FIXED_SIZE |
                            WIN_FLAGS_POPUP | WIN_FLAGS_RAW_INPUT);
   } else {
+    if (xs->tl && xs->tl->min_w > w) w = xs->tl->min_w; /* respeta set_min_size */
+    if (xs->tl && xs->tl->min_h > h) h = xs->tl->min_h;
     if (w < WIN_MIN) w = WIN_MIN;
     if (h < WIN_MIN - TITLEBAR_H) h = WIN_MIN - TITLEBAR_H;
     if (w > WIN_MAX || h + TITLEBAR_H > WIN_MAX) {
@@ -1855,6 +1864,21 @@ static void tl_set_min_size(struct wl_client *c, struct wl_resource *r, int32_t 
   (void)c;
   struct toplevel *tl = wl_resource_get_user_data(r);
   tl->min_w = w; tl->min_h = h;
+  // Si la ventana ya existe y es mas pequena que el minimo del cliente, se
+  // agranda (la geometria de ventana excluye las sombras CSD; el recorte de
+  // marcos se suma tambien).
+  struct xsurf *xs = tl->xs;
+  if (xs && xs->win_id >= 0 && !xs->is_popup && w > 0 && h > 0) {
+    int mw = w, mh = h;
+    if (tl->inset_state == 1) {
+      mw -= tl->in_l + tl->in_r;
+      mh -= tl->in_t + tl->in_b;
+    }
+    if (mw > xs->cw || mh > xs->ch) {
+      int nw = mw > xs->cw ? mw : xs->cw, nh = mh > xs->ch ? mh : xs->ch;
+      win_request_resize(xs->win_id, nw, nh + TITLEBAR_H);
+    }
+  }
 }
 static void tl_set_max_size(struct wl_client *c, struct wl_resource *r, int32_t w, int32_t h) {
   (void)c;

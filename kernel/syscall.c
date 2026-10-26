@@ -6980,6 +6980,16 @@ static int64_t a_win_set_app_id(uint64_t win_id, uint64_t app_id, uint64_t a3,
   return winsrv_set_app_id(proc->task, (int)win_id, t);
 }
 
+// Pide un tamano exterior (con barra de titulo) para la ventana propia.
+static int64_t a_win_resize(uint64_t win_id, uint64_t w, uint64_t h,
+                            uint64_t a4, uint64_t a5) {
+  (void)a4; (void)a5;
+  process_t *proc = process_current();
+  if (!proc || !proc->task)
+    return -EFAULT;
+  return winsrv_request_resize(proc->task, (int)win_id, (int)w, (int)h);
+}
+
 // xdg_toplevel.move / resize: a2 = 0 mover, o bits RESIZE_EDGE_*.
 static int64_t a_win_begin_grab(uint64_t win_id, uint64_t edges, uint64_t a3,
                                 uint64_t a4, uint64_t a5) {
@@ -7369,6 +7379,7 @@ static const syscall_entry_t aurora_table[] = {
                                          "asys_win_set_app_id"},
     [ASYS_WIN_BEGIN_GRAB - ASYS_BASE] = {a_win_begin_grab,
                                          "asys_win_begin_grab"},
+    [ASYS_WIN_RESIZE - ASYS_BASE] = {a_win_resize, "asys_win_resize"},
     [ASYS_IPC_SEND - ASYS_BASE] = {a_ipc_send, "asys_ipc_send"},
     [ASYS_IPC_RECV - ASYS_BASE] = {a_ipc_recv, "asys_ipc_recv"},
     [ASYS_GET_SERVICE_ID -

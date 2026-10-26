@@ -669,6 +669,22 @@ int winsrv_set_app_id(task_t *owner, int win_id, const char *app_id) {
   return 0;
 }
 
+int winsrv_request_resize(task_t *owner, int win_id, int w, int h) {
+  if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || w < 200 ||
+      h < 100 || w > 2048 || h > 2048)
+    return -1;
+  unsigned long flags = spin_lock_irqsave(&winsrv_lock);
+  winsrv_entry_t *e = &g_windows[win_id];
+  if (!e->in_use || e->owner != owner || !e->win) {
+    spin_unlock_irqrestore(&winsrv_lock, flags);
+    return -1;
+  }
+  window_t *win = e->win;
+  spin_unlock_irqrestore(&winsrv_lock, flags);
+  compositor_request_resize(win, w, h);
+  return 0;
+}
+
 int winsrv_begin_grab(task_t *owner, int win_id, int edges) {
   if (!g_ready || win_id < 0 || win_id >= WINSRV_MAX_WINDOWS || edges < 0 ||
       edges > 15)

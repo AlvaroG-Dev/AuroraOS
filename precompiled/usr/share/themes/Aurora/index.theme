@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=Aurora
+Comment=Adwaita integrado con las ventanas de Aurora
+[X-GNOME-Metatheme]
+GtkTheme=Aurora

@@ -98,6 +98,8 @@ int winsrv_set_app_id(task_t *owner, int win_id, const char *app_id);
 // Inicia un arrastre (edges=0) o redimension (bits RESIZE_EDGE_*: 1 der, 2 inf,
 // 4 izq, 8 sup) interactivo; solo vale con el boton izquierdo pulsado.
 int winsrv_begin_grab(task_t *owner, int win_id, int edges);
+// Pide un tamano exterior w x h (ASYS_WIN_RESIZE); el cliente recibe WINSRV_EV_RESIZE.
+int winsrv_request_resize(task_t *owner, int win_id, int w, int h);
 // Carga un BMP del VFS como nodo permanente (icono del Dock); NULL si falla.
 tar_node_t *winsrv_load_icon_node(const char *path);
 

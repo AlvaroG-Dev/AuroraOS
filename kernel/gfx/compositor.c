@@ -209,7 +209,8 @@ typedef enum {
   CMD_MAXIMIZE, /* value: 1 = maximizar, 0 = restaurar */
   CMD_DOCK_PIN, /* title = nombre, app_id, symbol, color, value = launch_id */
   CMD_WIN_APP,  /* win + app_id: la ventana pasa al lanzador de esa app */
-  CMD_WIN_GRAB  /* win + value: 0 = mover, otro = RESIZE_EDGE_* (peticion del cliente) */
+  CMD_WIN_GRAB, /* win + value: 0 = mover, otro = RESIZE_EDGE_* (peticion del cliente) */
+  CMD_WIN_RESIZE /* win + value = (ancho << 16) | alto exteriores (peticion del cliente) */
 } cmd_type_t;
 
 typedef struct {
@@ -859,6 +860,20 @@ static void exec_cmd(const comp_cmd_t *c) {
     if (stack_contains(c->win))
       do_win_app(c->win, c->app_id);
     break;
+  case CMD_WIN_RESIZE:
+    /* El cliente necesita mas espacio (p. ej. xdg_toplevel.set_min_size). */
+    if (stack_contains(c->win) && c->win->anim_state == WIN_ANIM_NONE &&
+        !c->win->maximized && !(c->win->flags & WIN_FLAGS_FIXED_SIZE)) {
+      window_t *win = c->win;
+      int nw = (c->value >> 16) & 0xFFFF, nh = c->value & 0xFFFF;
+      window_resize(win, nw, nh);
+      if (win->width == nw && win->height == nh) {
+        invalidate_window(win);
+        winsrv_post_event(win, WINSRV_EV_RESIZE, win->content_w, win->content_h,
+                          0);
+      }
+    }
+    break;
   case CMD_WIN_GRAB:
     /* xdg_toplevel.move/resize: solo mientras siga pulsado el boton izquierdo
      * (el cliente lo pide con el serial de ese clic). */
@@ -928,6 +943,10 @@ void compositor_dock_pin(const char *name, const char *app_id,
 void compositor_set_app_id(window_t *win, const char *app_id) {
   comp_cmd_t c = {.type = CMD_WIN_APP, .win = win};
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
+  cmd_post(&c);
+}
+void compositor_request_resize(window_t *win, int w, int h) {
+  comp_cmd_t c = {.type = CMD_WIN_RESIZE, .win = win, .value = (w << 16) | h};
   cmd_post(&c);
 }
 void compositor_begin_grab(window_t *win, int edges) {

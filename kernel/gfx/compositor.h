@@ -35,6 +35,8 @@ void compositor_dock_pin(const char *name, const char *app_id,
 void compositor_set_app_id(window_t *win, const char *app_id);
 /* El cliente pide mover (edges=0) o redimensionar (RESIZE_EDGE_*) su ventana. */
 void compositor_begin_grab(window_t *win, int edges);
+/* El cliente pide un tamano exterior (con barra de titulo) distinto. */
+void compositor_request_resize(window_t *win, int w, int h);
 // Siguiente peticion de lanzamiento pendiente, o 0 si no hay.
 uint32_t compositor_pop_launch(void);
 

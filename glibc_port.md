@@ -104,5 +104,7 @@ make run-smp-kvm-ahci
   sysfs dinámico (`/sys/class/{input,drm}`), udev data mínima y `AF_NETLINK` uevent.
 - `rseq` sigue en `-ENOSYS` (glibc lo tolera). Pendiente: `rt_sigsuspend`, `rt_sigpending`,
   `rt_sigtimedwait`, SIGPIPE real en sockets, inodos `S_IFSOCK` en el VFS.
+- `FUTEX_WAKE_OP`, `FUTEX_CMP_REQUEUE` y `FUTEX_REQUEUE` implementados (Qt/libstdc++/GLib se quedaban dormidos con
+  `-ENOSYS`); `poll()` sobre un fd de epoll ya no es siempre «listo» (GLib giraba al 100 % de CPU).
 - Rendimiento: en QEMU sin KVM (TCG) los fallos de página que reservan bloques grandes hacen lentas las apps con
-  mucha memoria (GTK widget-factory no llega a pintar en 7 minutos); no se ha medido con KVM.
+  mucha memoria; GTK widget-factory pinta a los ~2-3 minutos de arrancar. No se ha medido con KVM.

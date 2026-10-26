@@ -376,10 +376,22 @@ void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
       pp = &(*pp)->next;
     }
   }
+  int match_wq = (task->waiting_on == wq);
+  int st = (int)task->state;
+  uint64_t seq_now = __atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE);
   spin_unlock_irqrestore(&wq->lock, flags);
   if (removed) {
     sched_make_ready(task);
     task_put(task);
+  } else {
+    // [DIAG] Plazo vencido que no desperto a nadie: normal si otro evento se
+    // adelanto; si una tarea se queda dormida para siempre, aqui queda el rastro.
+    static volatile int g_nomatch_logs;
+    if (__atomic_fetch_add(&g_nomatch_logs, 1, __ATOMIC_RELAXED) < 40)
+      LOG_WARN("[WAIT] timeout sin efecto: pid=%u state=%d en_cola=%d "
+               "seq=%lu/%lu",
+               task->proc ? task->proc->pid : 0, st, match_wq,
+               (unsigned long)wait_seq, (unsigned long)seq_now);
   }
 }
 

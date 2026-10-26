@@ -555,8 +555,9 @@ G.2 Servidor Wayland nativo `aurora-wayland`: toplevels/popups/subsuperficies co
     completa, regiones de entrada ✅
 G.3 Cursor único de Aurora (no cambia según la ventana) ✅
 G.4 Mesa llvmpipe + EGL: weston-simple-egl y weston-subsurfaces ✅ (scripts/fetch-mesa.sh)
-G.5 GTK3 y Qt5 reales (hello-gtk validado; widget-factory/gallery cargan pero en TCG
-    tardan minutos) ✅/⚠️ (scripts/fetch-toolkits.sh)
+G.5 GTK3 y Qt5 reales: hello-gtk, gtk3-widget-factory y el ejemplo "Application" de Qt5 se
+    abren como ventanas de Aurora ✅ (scripts/fetch-toolkits.sh; necesitaron FUTEX_WAKE_OP/REQUEUE
+    y poll sobre epoll en el kernel); apps instaladas (.desktop) fijadas en el Dock ✅
 G.6 Drivers de pantalla .aur: virtio_gpu, bochs; framebuffer tardío ✅
 G.7 Pendiente: dma-buf/PRIME, virgl, hot-plug de monitores, multi-CRTC, touch, Xwayland,
     cursor con mapa de bits del cliente (decisión: se descarta, cursor único), IOMMU.

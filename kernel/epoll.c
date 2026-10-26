@@ -112,6 +112,8 @@ static void fd_put_ref(file_descriptor_t *f) {
   }
 }
 
+static uint32_t epoll_entry_eval(struct epoll_entry *e, bool consume);
+
 // ============ epoll node ops ============
 static int epoll_node_close(vfs_node_t *node) {
   epoll_t *ep = (epoll_t *)node->priv;
@@ -131,8 +133,35 @@ static int epoll_node_close(vfs_node_t *node) {
   return 0;
 }
 
+// Un fd de epoll es "legible" cuando alguna de sus entradas tiene eventos
+// pendientes (poll/select/epoll anidado sobre un epoll). Sin esto el VFS lo
+// daba por siempre listo y GLib (que vigila /proc/self/mountinfo con un epoll
+// dentro de su bucle principal) giraba al 100 % de CPU sin dormir nunca.
+static int epoll_node_poll(vfs_node_t *node, short events) {
+  epoll_t *ep = (epoll_t *)node->priv;
+  if (!ep || !(events & 1))
+    return 0;
+  int rev = 0;
+  unsigned long flags = spin_lock_irqsave(&ep->lock);
+  for (epoll_entry_t *e = ep->entries; e; e = e->next) {
+    if (epoll_entry_eval(e, false)) {
+      rev = 1;
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&ep->lock, flags);
+  return rev;
+}
+
+static wait_queue_t *epoll_node_poll_wq(vfs_node_t *node) {
+  epoll_t *ep = (epoll_t *)node->priv;
+  return ep ? &ep->wq : NULL;
+}
+
 static vfs_ops_t epoll_node_ops = {
     .close = epoll_node_close,
+    .poll = epoll_node_poll,
+    .poll_wq = epoll_node_poll_wq,
 };
 
 // ============ epoll_create / epoll_create1 ============

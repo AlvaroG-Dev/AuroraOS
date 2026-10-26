@@ -54,6 +54,8 @@ copy_dir /usr/share/icons/Adwaita "$PRE/usr/share/icons/Adwaita"
 # el cursor lo dibuja Aurora: los temas de cursores sobran
 rm -rf "$PRE/usr/share/icons/Adwaita/cursors"
 copy_dir /usr/share/themes/Default "$PRE/usr/share/themes/Default"
+# (el tema "Aurora" -Adwaita sin botones de ventana de las headerbars- vive en
+#  precompiled/usr/share/themes/Aurora y no se toca aqui)
 copy_dir /usr/share/gtk-3.0 "$PRE/usr/share/gtk-3.0"
 copy_dir /usr/share/glvnd "$PRE/usr/share/glvnd"
 # lanzadores (.desktop) propios (los de GTK vienen con NoDisplay=true): aurora-wayland

@@ -38,11 +38,19 @@ if pkg-config --exists gtk+-3.0 2>/dev/null; then
         $(pkg-config --cflags --libs gtk+-3.0)
     echo "OK: precompiled/usr/bin/hello-gtk"
 fi
+# Comportamiento del bucle principal de GLib en el guest (GTK/Qt dependen de el).
+if pkg-config --exists glib-2.0 2>/dev/null; then
+    gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/glib_test" "$ROOT/tests/wayland/glib_test.c" \
+        $(pkg-config --cflags --libs glib-2.0 gthread-2.0)
+    echo "OK: precompiled/usr/bin/glib_test"
+fi
 # Scripts que se ejecutan dentro del guest.
 for s in "$ROOT"/tests/wayland/guest/*.sh; do
     cp -f "$s" "$ROOT/precompiled/usr/bin/$(basename "$s")"
     chmod +x "$ROOT/precompiled/usr/bin/$(basename "$s")"
 done
+gcc -O1 -Wall -Wno-unused-result -o "$ROOT/precompiled/usr/bin/epoll_poll_test" "$ROOT/tests/wayland/epoll_poll_test.c"
+echo "OK: precompiled/usr/bin/epoll_poll_test"
 gcc -O1 -Wall -pthread -o "$ROOT/precompiled/usr/bin/futex_test" "$ROOT/tests/wayland/futex_test.c"
 echo "OK: precompiled/usr/bin/futex_test"
 gcc -O1 -Wall -Wno-unused-result -o "$ROOT/precompiled/usr/bin/fuzz_test" "$ROOT/tests/wayland/fuzz_test.c"

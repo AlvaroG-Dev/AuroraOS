@@ -63,7 +63,7 @@ static char *default_envp[] = {
     // GTK3 / Qt5: sin dconf ni bus de accesibilidad, datos en /usr/share y
     // configuracion de GTK en /usr/share/aurora/xdg (ver settings.ini).
     "GDK_BACKEND=wayland",
-    "GTK_THEME=Adwaita",
+    "GTK_THEME=Aurora",
     "GSETTINGS_BACKEND=memory",
     "GSETTINGS_SCHEMA_DIR=/usr/share/glib-2.0/schemas",
     "GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
