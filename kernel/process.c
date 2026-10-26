@@ -349,7 +349,7 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
     return 0;
   if (argc > 0 && !argv)
     return 0;
-  if (envc < 0 || envc > 32)
+  if (envc < 0 || envc > PROCESS_ENVP_MAX)
     return 0;
   if (envc > 0 && !envp)
     return 0;

@@ -26,7 +26,7 @@
 #   QEMU_BIN       (default: qemu-system-x86_64)
 #   QEMU_CPU       (default: max)
 #   QEMU_SMP       (default: 1)      CPUs a emular. Normalmente 1, 2 o 4.
-#   QEMU_MEM       (default: 512M)
+#   QEMU_MEM       (default: 2G)
 #   USE_KVM        (default: auto)   auto|yes|no
 #   KEEP_LOGS      (default: no)     yes para no borrar serial.log/qemu.log
 #   REQUIRE_SMP    (default: auto)   auto: exige APs si QEMU_SMP>1 Y KVM.
@@ -59,7 +59,7 @@ OVMF_VARS="$ROOT/OVMF_VARS.fd"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_CPU="${QEMU_CPU:-max}"
 QEMU_SMP="${QEMU_SMP:-1}"
-QEMU_MEM="${QEMU_MEM:-512M}"
+QEMU_MEM="${QEMU_MEM:-2G}"
 USE_KVM="${USE_KVM:-auto}"
 KEEP_LOGS="${KEEP_LOGS:-no}"
 REQUIRE_SMP="${REQUIRE_SMP:-auto}"

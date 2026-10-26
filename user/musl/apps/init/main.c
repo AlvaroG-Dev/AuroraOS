@@ -65,6 +65,8 @@ static char *default_envp[] = {
     // configuracion de GTK en /usr/share/aurora/xdg (ver settings.ini).
     // Apps X11: Xwayland (lo arranca aurora-wayland) escucha en :0.
     "DISPLAY=:0",
+    // Recursos de las apps Xt (xterm...): fuente del sistema y colores.
+    "XENVIRONMENT=/usr/share/aurora/xdg/Xresources",
     "GDK_BACKEND=wayland",
     "GTK_THEME=Aurora",
     "GSETTINGS_BACKEND=memory",

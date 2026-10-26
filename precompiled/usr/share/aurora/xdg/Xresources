@@ -1,0 +1,16 @@
+! Recursos X11 globales de Aurora. Las apps Xt (xterm, xclock, xeyes...) los leen
+! porque init exporta XENVIRONMENT=/usr/share/aurora/xdg/Xresources y Xwayland
+! no tiene RESOURCE_MANAGER (no hay xrdb).
+!
+! Fuente del sistema: "monospace" resuelve por fontconfig a JetBrains Mono
+! (ver /usr/share/fontconfig/fonts.conf), la misma que usan foot y el Terminal.
+XTerm*faceName: monospace
+XTerm*faceSize: 11
+XTerm*renderFont: true
+XTerm*scrollBar: false
+XTerm*saveLines: 4000
+XTerm*background: #002b36
+XTerm*foreground: #d3dcdc
+XTerm*cursorColor: #d3dcdc
+XTerm*internalBorder: 8
+XTerm*borderWidth: 0

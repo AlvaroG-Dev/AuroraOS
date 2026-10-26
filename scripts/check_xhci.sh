@@ -33,7 +33,7 @@ timeout --signal=TERM --kill-after=5s "${TIMEOUT_SECONDS}s" \
   -machine q35 \
   -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
   -drive "if=pflash,format=raw,file=$ROOT/OVMF_VARS-xhci.fd" \
-  -m 512M -smp 4 -cpu max \
+  -m 2G -smp 4 -cpu max \
   -cdrom "$ROOT/aurora.iso" \
   -device qemu-xhci,id=xhci \
   -device usb-kbd,bus=xhci.0,port=1 \

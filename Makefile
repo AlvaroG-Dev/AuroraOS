@@ -10,7 +10,18 @@
         run-iso run-iso-tcg run-iso-as-usb run-smp-kvm-xhci-storage run-smp-kvm-xhci-storage-debug \
         run-bios run-bios-debug run-bios-usb run-smp-kvm-xhci-hub run-smp-kvm-xhci-hub-debug \
         tap-setup tap-teardown tap-status run-smp-kvm-xhci-uas \
-        python-stdlib clean
+        python-stdlib env clean
+
+# ---------------------------------------------------------------------------
+# Preparacion del entorno (paquetes del host, toolchain musl, pila Wayland,
+# iconos, discos de prueba...). scripts/setup-env.sh solo actua si falta algo,
+# asi que en un build normal cuesta una comprobacion rapida.
+#   make env              preparar a mano
+#   SKIP_ENV=1 make ...   saltarse la comprobacion
+#   WITH_MESA=1 make ...  ademas, bajar Mesa/LLVM (initrd +500 MB)
+# ---------------------------------------------------------------------------
+env:
+	@bash scripts/setup-env.sh
 
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
@@ -62,29 +73,32 @@ sysroot:
 
 bootloader: bootloader-efi bootloader-bios
 
-bootloader-efi:
+bootloader-efi: | env
 	$(MAKE) -C bootloader/efi
 
-bootloader-bios:
+bootloader-bios: | env
 	$(MAKE) -C bootloader/bios
 
 # [FIX] Reglas explícitas para que 'make' sepa cómo generar los archivos
 # si los pide como dependencia (ej: desde $(EFI_IMG) o iso_root)
-$(BOOTX64_EFI):
+$(BOOTX64_EFI): | env
 	$(MAKE) -C bootloader/efi
 
-$(BIOS_IMG):
+$(BIOS_IMG): | env
 	$(MAKE) -C bootloader/bios
+
+# Imagenes de disco de prueba: las crea scripts/setup-env.sh.
+tests/test_disk.img tests/extra_disk.img: | env
 
 # ---------------------------------------------------------------------------
 # Userland: nativo (user/) + musl (user/musl/).
 # ---------------------------------------------------------------------------
 user: user-native user-musl
 
-user-native:
+user-native: | env
 	$(MAKE) -C user all
 
-user-musl:
+user-musl: | env
 	@if [ -f user/musl/Makefile ]; then \
 		echo "[Makefile] Build musl userland..."; \
 		$(MAKE) -C user/musl all; \
@@ -118,7 +132,7 @@ python-stdlib:
 # INITRD
 # ===========================================================================
 
-initrd.tar: sysroot user elf_malformed python-stdlib drivers
+initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
@@ -470,10 +484,20 @@ image: $(ISO_OUT)
 # QEMU
 # ===========================================================================
 
+# RAM del guest: el initrd (~500 MB) se carga entero en memoria; con 512M el
+# firmware devuelve EFI_OUT_OF_RESOURCES ("initrd no cargado"), no hay init y
+# no arranca ni el dock ni las apps. Con Mesa (WITH_MESA=1) subir a 3G.
+QEMU_MEM ?= 2G
+
+# Aceleracion para 'run' / 'run-smp': KVM si /dev/kvm es accesible (el
+# compositor va fluido), y TCG puro si no (muy lento: el raton se atasca).
+# Forzar uno u otro:  make run QEMU_ACCEL="-cpu max"
+QEMU_ACCEL ?= $(shell [ -w /dev/kvm ] && echo "-enable-kvm -cpu host" || echo "-cpu max")
+
 QEMU_FLAGS_COMMON = \
 	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 	-drive if=pflash,format=raw,file=OVMF_VARS.fd \
-	-m 512M \
+	-m $(QEMU_MEM) \
 	-no-reboot -no-shutdown
 
 QEMU_FLAGS_DEBUG = \
@@ -541,7 +565,7 @@ run: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_NET_SLIRP) \
-		-cpu max \
+		$(QEMU_ACCEL) \
 		-smp 4 \
 		-cdrom $(ISO_OUT) \
 		-serial stdio
@@ -562,7 +586,7 @@ run-smp: iso
 	qemu-system-x86_64 \
 		$(QEMU_FLAGS_COMMON) \
 		$(QEMU_NET_SLIRP) \
-		-cpu max \
+		$(QEMU_ACCEL) \
 		-smp 4 \
 		-cdrom $(ISO_OUT) \
 		-serial stdio
@@ -886,7 +910,7 @@ run-iso: run-smp-kvm
 # ===========================================================================
 # BIOS (SeaBIOS por defecto, sin OVMF)
 # ===========================================================================
-QEMU_FLAGS_BIOS = -m 512M -no-reboot -no-shutdown
+QEMU_FLAGS_BIOS = -m $(QEMU_MEM) -no-reboot -no-shutdown
 
 run-bios: iso
 	qemu-system-x86_64 \
@@ -913,7 +937,7 @@ run-bios-debug: iso
 # Prueba del ISO como si fuera un USB conectado (para testear el MBR/BIOS)
 # ---------------------------------------------------------------------------
 run-bios-usb: iso
-	qemu-system-x86_64 -m 512M -no-reboot -no-shutdown \
+	qemu-system-x86_64 -m $(QEMU_MEM) -no-reboot -no-shutdown \
 	    -nic user,model=e1000e -cpu max -smp 2 \
 	    -drive if=none,id=usbstick,format=raw,file=$(ISO_OUT) \
 	    -device qemu-xhci,id=xhci \
@@ -1047,10 +1071,15 @@ tap-status:
 # ===========================================================================
 
 HOST_CC    ?= gcc
-KUR_CC     ?= x86_64-elf-gcc
+# Sin cross-compiler x86_64-elf-gcc se usa el gcc del host (x86_64 ELF): vale
+# para codigo freestanding; solo hay que desactivar CET.
+KUR_CC     ?= $(shell command -v x86_64-elf-gcc >/dev/null 2>&1 && echo x86_64-elf-gcc || echo gcc)
 AUR_CC     ?= gcc
+ifeq ($(KUR_CC),gcc)
+KUR_HOSTFLAGS = -fcf-protection=none
+endif
 
-KUR_CFLAGS  = -ffreestanding -O2 -mcmodel=kernel -mno-red-zone \
+KUR_CFLAGS  = $(KUR_HOSTFLAGS) -ffreestanding -O2 -mcmodel=kernel -mno-red-zone \
               -fno-stack-protector -fno-pic -fno-pie -fno-common \
               -fno-asynchronous-unwind-tables -I. -Ikernel
 
@@ -1123,6 +1152,7 @@ kmod-tree: $(KUR_TARGETS)
 # (/lib/modules/linuxkpi/). Ver Plan_LinuxKPI.md.
 include kernel/linuxkpi/linuxkpi.mk
 
+drivers: | env
 drivers: tools/kurbuild tools/aurbuild $(KUR_TARGETS) $(AUR_TARGETS) kmod-tree linuxkpi
 
 # ===========================================================================

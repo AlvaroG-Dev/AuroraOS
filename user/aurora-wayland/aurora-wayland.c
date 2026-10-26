@@ -4573,6 +4573,12 @@ static void launch_app(int idx) {
       close(fd);
   }
   signal(SIGPIPE, SIG_DFL);
+  /* wl_event_loop_add_signal bloquea SIGCHLD/SIGTERM/SIGINT/SIGUSR1 en este
+   * proceso y la mascara se hereda por exec: sin esto la app (y su shell) no
+   * recibe SIGHUP/SIGTERM y, p. ej., xterm no llega a cerrarse. */
+  sigset_t none;
+  sigemptyset(&none);
+  sigprocmask(SIG_SETMASK, &none, NULL);
   setenv("XDG_RUNTIME_DIR", "/run/user/0", 0);
   setenv("WAYLAND_DISPLAY", "wayland-0", 0);
   setenv("DISPLAY", ":0", 0);

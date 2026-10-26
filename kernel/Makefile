@@ -54,8 +54,13 @@ $(TARGET): $(OBJS) linker.ld
 linker.ld: linker.ld.in memlayout.h
 	cpp -P -undef -D__LINKER__ -I. -x c $< -o $@
 
+# Dependencias de cabeceras (-MMD genera un .d junto a cada .o): sin esto,
+# tocar un .h dejaba objetos viejos con otro layout de struct y el kernel
+# arrancaba roto (dock sin pintar, tests fallando...).
+DEPFLAGS = -MMD -MP
+
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # El compositor y las primitivas gráficas son casi todo bucles por píxel: a
 # -O0 van varias veces más lentos, y era lo que hacía que la ventana fuera a
@@ -67,10 +72,10 @@ GFX_DEPS = gfx/gfx.h gfx/theme.h gfx/window.h gfx/compositor.h gfx/dock.h \
            simd.h
 
 gfx/%.o: gfx/%.c $(GFX_DEPS)
-	$(CC) $(GFX_CFLAGS) -c $< -o $@
+	$(CC) $(GFX_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 simd.o: simd.c simd.h
-	$(CC) $(GFX_CFLAGS) -c $< -o $@
+	$(CC) $(GFX_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 %.o: %.asm
 	$(AS) -f elf64 $< -o $@
@@ -129,8 +134,10 @@ $(VDSO_BLOB_OBJ): $(VDSO_SO)
 	        $(VDSO_SO) $@
 
 
+-include $(OBJS:.o=.d)
+
 clean:
-	rm -f $(OBJS) $(TARGET) smp_trampoline.bin linker.ld \
+	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET) smp_trampoline.bin linker.ld \
 	      $(VDSO_OBJ) $(VDSO_SO) $(VDSO_BLOB_OBJ)
 
 .PHONY: all clean

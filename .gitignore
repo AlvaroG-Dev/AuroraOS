@@ -62,3 +62,7 @@ build/linuxkpi/
 # El firmware de prueba de request_firmware si se versiona (no es un artefacto).
 !precompiled/lib/firmware/aurora/selftest.bin
 scripts/__pycache__/
+
+# Dependencias de cabeceras del kernel (-MMD)
+*.d
+kernel/.deps-stamp
