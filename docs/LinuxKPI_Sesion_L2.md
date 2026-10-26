@@ -108,4 +108,4 @@ Intermitencia ajena a la capa: en 1 de 6 arranques `iso9660: listado de /cdrom` 
 | `42b32f62` | `current`/`preempt_count`/`preempt_disable` de Aurora sin expulsión |
 | `2656d44b` | `sched_yield`/`kthread_stop` de Aurora con las IRQ desactivadas; arreglo de la prueba |
 | `6a40683d` | `preempt.h` incluye `irqflags.h`; `alloc_percpu` con `kvzalloc` |
-| (este) | Plan §11 y este registro |
+| `7174c65f` | Plan §11 y este registro |
