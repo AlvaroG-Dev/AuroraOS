@@ -176,10 +176,16 @@ SCM_RIGHTS (refcounts de `file*`), Weston exige atomic KMS + libseat, Mesa/LLVM 
 - **Decoración:** se mantiene la barra de título de Aurora (`xdg-decoration` server-side anunciado una vez; `QT_WAYLAND_DISABLE_WINDOWDECORATION=1`).
 
 ## Pendiente (consolidado, no hecho)
-- dma-buf/PRIME (`DRM_CAP_PRIME=0`), virgl (6.4) y vmsvga (6.5).
+- ~~dma-buf/PRIME~~ **[HECHO]** (ver notas); virgl (6.4) y vmsvga (6.5).
 - Xwayland (depende de dmabuf estable), multi-monitor/hot-plug, multi-CRTC, touch.
 - IOMMU/VT-d (7.2): un `.aur` GPU con `AUR_CAP_DMA` sigue siendo riesgo.
 - Cambio de resolución en caliente (el compositor trabaja a la resolución de arranque).
 - Rendimiento medido con KVM (en TCG, `gtk3-widget-factory` tarda 2-3 min en pintar).
 - Intermitencia del guest (~5/45 ejecuciones TCG: el shell deja de avanzar tras `sleep`/`echo` a `/dev/kmsg`; kernel vivo). Sospecha: cola de espera en pila en `sched_wake_expired`; sin causa confirmada.
 - Mesa/LLVM no versionados: ejecutar `scripts/fetch-mesa.sh`.
+
+## dma-buf / PRIME — [HECHO]
+- `kernel/drm/drm_prime.c`: `DRM_IOCTL_PRIME_HANDLE_TO_FD` / `PRIME_FD_TO_HANDLE` (disponibles también en `renderD128`) y `DRM_CAP_PRIME = 3` (import|export). Un GEM exportado es un fichero anónimo que mantiene una referencia al GEM: `mmap` por `get_page`, `lseek(SEEK_END)` = tamaño, `DMA_BUF_IOCTL_SYNC`/`SET_NAME` aceptados, paso por `SCM_RIGHTS`. Importar el mismo GEM en el mismo fichero devuelve el handle original; en otro fichero crea un handle con referencia propia (`drm_file_t.imported[]`). Sin fences ni modificadores (solo lineal).
+- `aurora-wayland`: `zwp_linux_dmabuf_v1` v3 (XRGB8888/ARGB8888 lineales, un plano; `create` y `create_immed`); el fd se mapea una vez y cada commit se vuelca al almacén de la superficie como un `wl_shm`.
+- Pruebas: `drm_test` (8 comprobaciones PRIME, ALL PASS en QEMU) y `aw_dmabuf_test` (dumb en `renderD128` -> PRIME -> linux-dmabuf -> toplevel); captura en `build/capturas/dmabuf-prime.png`.
+- **Para ejecutar en QEMU** hace falta `QEMU_MEM=6G` (el cargador EFI coloca el initrd de ~500 MB por debajo de 4 GB y con 3 GB falla con `OUT_OF_RESOURCES`); `scripts/qemu-boot-test.sh` admite `QEMU_MEM`/`QEMU_SMP`, y `run-aurora-wayland.sh` `AW_WAIT`.
