@@ -430,6 +430,7 @@ static char *make_hex_content(uint32_t v, int width, size_t *out_len) {
 typedef struct {
   char *buf;
   size_t len;
+  char *dyn_path; // atributo dinamico con store: ruta para sysfs_dyn_store
 } sysfs_data_t;
 
 static int64_t sysfs_read(vfs_node_t *node, uint64_t offset, size_t size,
@@ -453,10 +454,20 @@ static int64_t sysfs_read(vfs_node_t *node, uint64_t offset, size_t size,
 }
 
 static int sysfs_open(vfs_node_t *node, int flags) {
-  (void)node;
+  sysfs_data_t *sd = node ? (sysfs_data_t *)node->priv : NULL;
   if ((flags & O_WRONLY) || (flags & O_RDWR))
-    return -EROFS;
+    return (sd && sd->dyn_path) ? 0 : -EROFS;
   return 0;
+}
+
+// Solo los atributos dinamicos con store (sysfs_dyn_add_attr) se escriben.
+static int64_t sysfs_write(vfs_node_t *node, uint64_t offset, size_t size,
+                           const void *src) {
+  (void)offset;
+  sysfs_data_t *sd = node ? (sysfs_data_t *)node->priv : NULL;
+  if (!sd || !sd->dyn_path)
+    return -EROFS;
+  return sysfs_dyn_store(sd->dyn_path, (const char *)src, size);
 }
 
 static int sysfs_close(vfs_node_t *node) {
@@ -466,6 +477,8 @@ static int sysfs_close(vfs_node_t *node) {
   if (sd) {
     if (sd->buf)
       kfree(sd->buf);
+    if (sd->dyn_path)
+      kfree(sd->dyn_path);
     kfree(sd);
     node->priv = NULL;
   }
@@ -474,6 +487,7 @@ static int sysfs_close(vfs_node_t *node) {
 
 static vfs_ops_t sysfs_file_ops = {
     .read = sysfs_read,
+    .write = sysfs_write,
     .open = sysfs_open,
     .close = sysfs_close,
 };
@@ -715,6 +729,30 @@ static int readdir_list_typed(const char **list, size_t n, uint32_t type,
   out->type = type;
   out->size = 0;
   return 0;
+}
+
+// Entradas estaticas (directorios) y despues las del registro dinamico `dyn`
+// que no esten ya en la lista (p. ej. "pci" en /sys/bus, que la capa LinuxKPI
+// tambien usa para bus/pci/drivers).
+static int readdir_static_dyn(const char **list, size_t n, const char *dyn,
+                              uint64_t idx, vfs_dirent_t *out) {
+  if (idx < n)
+    return readdir_list_typed(list, n, VFS_DIRECTORY, idx, out);
+  uint64_t want = idx - n;
+  for (uint64_t i = 0;; i++) {
+    if (sysfs_dyn_readdir(dyn, i, out) != 0 || !out->name[0]) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    int dup = 0;
+    for (size_t k = 0; k < n; k++)
+      if (strcmp(out->name, list[k]) == 0)
+        dup = 1;
+    if (!dup && want-- == 0)
+      return 0;
+  }
 }
 
 static int readdir_bdf_list(uint64_t idx, vfs_dirent_t *out) {
@@ -1043,7 +1081,7 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
         return NULL;   // I/O ports no son mmap-ables
       return make_resource_node(d, bar);
     } else {
-      return NULL;
+      goto dyn; // p. ej. el enlace "driver" de la capa LinuxKPI
     }
     return make_file(attr, content, len);
   }
@@ -1223,8 +1261,8 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
     return make_symlink(link_name, target);
   }
 
-  // ---- registro dinamico (input, drm...) ----
-  {
+  // ---- registro dinamico (input, drm, LinuxKPI...) ----
+dyn: {
     char *data = NULL;
     size_t dlen = 0;
     int kind = sysfs_dyn_get(name, &data, &dlen);
@@ -1234,6 +1272,22 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
         base = p + 1;
     if (kind == SYSFS_DYN_FILE)
       return make_file(base, data, dlen);
+    if (kind == SYSFS_DYN_ATTR) {
+      vfs_node_t *fn = make_file(base, data, dlen);
+      if (!fn)
+        return NULL;
+      uint32_t m = sysfs_dyn_mode(name);
+      fn->mode = S_IFREG | (m & 0777);
+      if (m & 0222) {
+        size_t pl = strlen(name);
+        char *dp = (char *)kmalloc(pl + 1);
+        if (dp) {
+          memcpy(dp, name, pl + 1);
+          ((sysfs_data_t *)fn->priv)->dyn_path = dp;
+        }
+      }
+      return fn;
+    }
     if (kind == SYSFS_DYN_LINK) {
       vfs_node_t *ln = make_symlink(base, data);
       kfree(data);
@@ -1252,8 +1306,8 @@ static vfs_node_t *sysfs_lookup(void *fs_priv, const char *path) {
 
 // [FASE 4.3] readdir de <BDF>: "uevent" + "resourceN" para cada BAR
 // MMIO válido.
-static int sysfs_bdf_readdir(const pci_dev_t *d, uint64_t index,
-                              vfs_dirent_t *out) {
+static int sysfs_bdf_readdir(const pci_dev_t *d, const char *bdf,
+                              uint64_t index, vfs_dirent_t *out) {
   if (index == 0) {
     strcpy(out->name, "uevent");
     out->type = VFS_FILE;
@@ -1273,9 +1327,14 @@ static int sysfs_bdf_readdir(const pci_dev_t *d, uint64_t index,
 
   uint64_t ridx = index - 1;
   if (ridx >= (uint64_t)nbars) {
-    out->name[0] = '\0';
-    out->type = 0;
-    out->size = 0;
+    // Despues, lo que haya en el registro dinamico (enlace "driver"...).
+    char dyn[64];
+    snprintf(dyn, sizeof(dyn), "bus/pci/devices/%s", bdf);
+    if (sysfs_dyn_readdir(dyn, ridx - (uint64_t)nbars, out) != 0) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+    }
     return 0;
   }
 
@@ -1316,11 +1375,11 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
 
   if (strcmp(n, "/bus") == 0) {
     static const char *l[] = {"pci"};
-    return readdir_list_typed(l, 1, VFS_DIRECTORY, index, out);
+    return readdir_static_dyn(l, 1, "bus", index, out);
   }
   if (strcmp(n, "/bus/pci") == 0) {
     static const char *l[] = {"devices"};
-    return readdir_list_typed(l, 1, VFS_DIRECTORY, index, out);
+    return readdir_static_dyn(l, 1, "bus/pci", index, out);
   }
   if (strcmp(n, "/bus/pci/devices") == 0) {
     if (readdir_bdf_list(index, out) == 1) {
@@ -1358,7 +1417,7 @@ static int sysfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *out) {
       out->size = 0;
       return 0;
     }
-    return sysfs_bdf_readdir(d, index, out);
+    return sysfs_bdf_readdir(d, rest, index, out);
   }
 
   if (strcmp(n, "/class") == 0) {
