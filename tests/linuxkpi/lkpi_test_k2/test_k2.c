@@ -238,10 +238,10 @@ static void test_kthreads(void)
 		KT_EQ(kthread_stop(t), -EINTR);
 	KT_EQ(atomic_read(&kt_thread_flag), 0);
 
+	reinit_completion(&kt_thread_ran);	/* antes: el hilo puede completar ya */
 	t = kthread_run(kt_thread_fn, (void *)5L, "kt_k2_run");
 	KT_ASSERT(!IS_ERR(t), "kthread_run");
 	if (!IS_ERR(t)) {
-		reinit_completion(&kt_thread_ran);
 		KT_ASSERT(wait_for_completion_timeout(&kt_thread_ran, KT_TIMEOUT), "kthread_run arranca");
 		KT_EQ(kthread_stop(t), 5);
 	}

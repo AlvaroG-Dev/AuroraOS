@@ -121,7 +121,15 @@ static struct task_struct *lkpi_task_get_or_create(struct aurora_task *at, const
 	return p;
 }
 
-/* Ver lkpi_preempt_disable() en core.c: sched_current() no es atomico. */
+/*
+ * Ver lkpi_preempt_disable() en core.c: sched_current() no es atomico. Lo
+ * mismo vale para lo que Aurora hace por dentro con la tarea actual:
+ * sched_yield() (sched_tick lee this_cpu(current_task)) y kthread_stop()
+ * (wait_common usa sched_current() y, si lee la tarea equivocada, la deja
+ * BLOCKED en su cola). Se llaman con las IRQ desactivadas: cada tarea
+ * guarda sus propios flags al cambiar, asi que al volver aqui se restauran
+ * los nuestros.
+ */
 static struct aurora_task *lkpi_aurora_current(void)
 {
 	struct aurora_task *at;
@@ -131,6 +139,26 @@ static struct aurora_task *lkpi_aurora_current(void)
 	at = aurora_sched_current();
 	local_irq_restore(flags);
 	return at;
+}
+
+static void lkpi_aurora_yield(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	aurora_sched_yield();
+	local_irq_restore(flags);
+}
+
+static int lkpi_aurora_kthread_stop(struct aurora_kthread *akt)
+{
+	unsigned long flags;
+	int ret;
+
+	local_irq_save(flags);
+	ret = aurora_kthread_stop(akt);
+	local_irq_restore(flags);
+	return ret;
 }
 
 struct task_struct *lkpi_get_current(void)
@@ -191,7 +219,7 @@ static void lkpi_park_current(struct task_struct *p, u64 deadline)
 	aurora_sched_set_blocked_deadline(at, deadline);
 	aurora_spin_unlock_irqrestore(&park->lock, flags);
 
-	aurora_sched_yield();
+	lkpi_aurora_yield();
 
 	/* Si vencio el plazo, Aurora ya nos saco de la cola; si no, no estamos. */
 	flags = aurora_spin_lock_irqsave(&park->lock);
@@ -264,7 +292,7 @@ EXPORT_SYMBOL(lkpi_wake_up_process);
 
 void lkpi_yield(void)
 {
-	aurora_sched_yield();
+	lkpi_aurora_yield();
 }
 EXPORT_SYMBOL(lkpi_yield);
 
@@ -359,7 +387,7 @@ int lkpi_kthread_stop(struct task_struct *p)
 	WRITE_ONCE(kt->should_stop, true);
 	smp_mb();
 	wake_up_process(p);
-	aurora_kthread_stop(kt->akt);	/* espera a que el hilo termine */
+	lkpi_aurora_kthread_stop(kt->akt);	/* espera a que el hilo termine */
 	ret = kt->result;
 	p->__lkpi_kthread = NULL;
 	kfree(kt);

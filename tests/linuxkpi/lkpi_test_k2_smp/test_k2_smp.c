@@ -31,6 +31,8 @@ static struct task_struct *kt_threads[KT_MAX_THREADS];
 static struct completion kt_done;
 static atomic_t kt_cpus_seen;		/* bit por CPU en la que corrio algun hilo */
 static atomic_t kt_errors;
+static atomic_t kt_progress[KT_MAX_THREADS];	/* vueltas de cada hilo */
+static void (*kt_dump_hook)(void);		/* estado extra si hay atasco */
 
 static void kt_note_cpu(void)
 {
@@ -45,12 +47,23 @@ static bool kt_run_threads(int (*fn)(void *), int n, const char *name)
 
 	init_completion(&kt_done);
 	for (i = 0; i < n; i++)
+		atomic_set(&kt_progress[i], 0);
+	for (i = 0; i < n; i++)
 		kt_threads[i] = kthread_run(fn, (void *)(long)i, "%s%d", name, i);
 	for (i = 0; i < n; i++) {
 		if (IS_ERR(kt_threads[i]))
 			continue;
 		if (!wait_for_completion_timeout(&kt_done, KT_PHASE_TIMEOUT)) {
+			int k;
+
 			KT_ASSERT(0, "%s: hilos sin terminar (posible interbloqueo)", name);
+			for (k = 0; k < n; k++)
+				if (!IS_ERR(kt_threads[k]))
+					pr_err("lkpi_test_k2_smp: %s: vueltas %d estado %u\n",
+					       kt_threads[k]->comm, atomic_read(&kt_progress[k]),
+					       READ_ONCE(kt_threads[k]->__state));
+			if (kt_dump_hook)
+				kt_dump_hook();
 			return false;
 		}
 	}
@@ -85,6 +98,7 @@ static int kt_mutex_fn(void *data)
 			atomic_inc(&kt_errors);	/* otro hilo dentro a la vez */
 		WRITE_ONCE(kt_mutex_inside, 1);
 		kt_mutex_counter++;
+		atomic_inc(&kt_progress[id]);
 		if (!(i % 97))
 			udelay(20);
 		if (!(i % 499))
@@ -193,10 +207,25 @@ static int kt_ww_fn(void *data)
 		}
 		ww_acquire_fini(&ctx);
 		atomic_inc(&kt_ww_rounds);
+		atomic_inc(&kt_progress[id]);
 	}
 	kt_note_cpu();
 	complete(&kt_done);
 	return 0;
+}
+
+static void kt_ww_dump(void)
+{
+	int i;
+
+	for (i = 0; i < KT_WW_LOCKS; i++) {
+		struct ww_acquire_ctx *c = READ_ONCE(kt_ww[i].ctx);
+		struct task_struct *o = (struct task_struct *)mutex_get_owner(&kt_ww[i].base);
+
+		pr_err("lkpi_test_k2_smp: cerrojo %d: dueno %s ctx %lu (acq %u, herido %u) esperas %d\n",
+		       i, o ? o->comm : "-", c ? c->stamp : 0, c ? c->acquired : 0,
+		       c ? c->wounded : 0, !list_empty(&kt_ww[i].base.wait_list));
+	}
 }
 
 static void stress_ww(struct ww_class *cls, int set, const char *name)
@@ -214,8 +243,10 @@ static void stress_ww(struct ww_class *cls, int set, const char *name)
 	atomic_set(&kt_errors, 0);
 	atomic_set(&kt_ww_deadlk, 0);
 	atomic_set(&kt_ww_rounds, 0);
+	kt_dump_hook = kt_ww_dump;
 	if (!kt_run_threads(kt_ww_fn, kt_nthreads, name))
 		return;
+	kt_dump_hook = NULL;
 	for (i = 0; i < KT_WW_LOCKS; i++) {
 		total += kt_ww_count[i];
 		KT_ASSERT(!ww_mutex_is_locked(&kt_ww[i]), "%s: cerrojo %d libre al final", name, i);
