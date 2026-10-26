@@ -1,6 +1,6 @@
 # Plan de implementación: capa de compatibilidad con drivers de Linux (LinuxKPI) para Aurora
 
-Estado: **L0, L1 y L2 hechas** (26-oct-2026; L0.3 repetida sobre Linux 6.18.59 y NVIDIA open 615.78.08, las versiones fijadas, ver §3.1 y §11). L3 pendiente de confirmación. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md` y `docs/LinuxKPI_Sesion_L2.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
+Estado: **L0, L1, L2 y L3 hechas** (26-oct-2026; L0.3 repetida sobre Linux 6.18.59 y NVIDIA open 615.78.08, las versiones fijadas, ver §3.1 y §11). L4 pendiente de confirmación. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md`, `docs/LinuxKPI_Sesion_L2.md` y `docs/LinuxKPI_Sesion_L3.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
 
 ## 0. Principios
 
@@ -185,7 +185,7 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 | `ksymtab`: exportar los símbolos de la capa con nombres de Linux; `EXPORT_SYMBOL_GPL` como alias | L0–L1 |
 | `kernel/drm/`: opción de compilación «propio» / «Linux sobre LinuxKPI» | L5 |
 | VFS: `cdev` genérico + `file_operations` completo (`fault`, `llseek`, `poll`, `fasync`) | L4 |
-| `sysfs`: crear atributos desde `kobject`/`device` (`drm/cardN`, `class/drm`, `bus/pci/drivers`) | L3 |
+| `sysfs`: crear atributos desde `kobject`/`device` (`drm/cardN`, `class/drm`, `bus/pci/drivers`) — **hecho en L3** (atributos con `show`/`store` en `sysfs_dyn`; faltan los binarios) | L3 |
 | `udev`/`uevent`: eventos `change` (hot-plug de conector) hacia `libudev` | L5 |
 | Memoria: `shmem` para objetos GEM, páginas con atributos WC/UC, `vmap`, límites por proceso | L1/L4/L6 |
 | IOMMU/VT-d y `dma_map` real | L9 |
@@ -232,6 +232,7 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 6. ~~**Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**~~ → **6.18.59** y **20261019** (sección 11); L0.3 repetida, también con NVIDIA 615.78.08.
 7. ~~**RCU antes de usar `xarray`/`idr` con lectores concurrentes**~~ → hecho en L2 (`kfree_rcu` en `xa_node_free`).
 8. **Cambios en Aurora tras L2**: ~~plazos de espera a 1 ms~~ y ~~`sched_current()` atómico~~ → hechos (§11, «Versión fijada, `sched_current()`, plazos a 1 ms»). Siguen rechazados `task_t->lkpi_task` para `current` y exportar `signal_pending` (necesarios en K8, L4).
+9. **Abiertas tras L3** (§11, «L3»): (a) opción de arranque para que `aur_bus` no reclame los ID que deba llevar un driver de Linux (bochs, virtio-gpu; antes de L5); (b) `on_each_cpu()`/IPI de función (`IPI_VECTOR_CALL` sin handler; L7, `i915`); (c) ECAM para el espacio de configuración extendido (L7/L8); (d) ampliar los 21 vectores MSI de kernel o darles espacio por CPU (L7/L8); (e) `irq_user.c` fuerza INTx activas a nivel bajo en líneas que la MADT de QEMU declara activas a nivel alto (5/9/10/11): posible fallo para `.aur` con INTx, sin tocar; (f) uevents hacia el userland (L5).
 
 ## 11. Decisiones (registro)
 
@@ -288,3 +289,17 @@ Con confirmación del autor:
 - Siguen rechazados `current` estable en `task_t` y `signal_pending` (K8, L4).
 - **NVIDIA open 615.78.08** descargada (mismo día): el tarball de GitHub sigue dando 403 en el proxy, pero `git` sí llega, así que `scripts/fetch-linux-drivers.sh` clona la etiqueta (`--depth 1`) si falla el tarball. L0.3 repetida: NVIDIA 1679 símbolos (antes 1675), 992 compartidos con Intel/AMD (antes 990); total 6106.
 
+
+### 26-oct-2026 — L3 (K4/K5: modelo de dispositivos, PCI e interrupciones)
+Preguntas de diseño hechas en una sola ronda; el autor delegó la elección («lo más profesional y acorde con el objetivo y entorno actual»). Se tomaron las recomendaciones:
+- **Convivencia con los `.aur`/`.kur`**: cada `pci_driver` de Linux es un driver «sombra» en el `pci_bus` de Aurora (`bus_add_driver`, id comodín). Aurora decide: el primero que reclama un dispositivo se lo queda, también en hot-plug; la sombra crea el `pci_dev`, comprueba la `id_table` de Linux (`-ENODEV` si no casa: Aurora sigue con el siguiente driver) y vincula el driver en el modelo de la capa. En el bus `pci` de la capa no hay match propio. Un dispositivo que ya reclama un `.aur` (hoy `bochs` 1234:1111, `virtio_gpu` 1af4:1050, `e1000e` 8086:10d3) **no** se ofrece a Linux. Para L5 (bochs/virtio-gpu de Linux) hará falta una opción de arranque para que `aur_bus` no reclame ciertos ID (pendiente, no hecha).
+- **Contexto de IRQ: la IRQ real.** `request_irq()` corre el handler dentro de la IRQ de Aurora (IF=0, antes del EOI): `in_hardirq()` es cierto (contador por CPU de la capa) y `preempt_count()` suma `HARDIRQ_OFFSET`. La parte con hilo va en un kthread de la capa por acción; `IRQF_ONESHOT` enmascara las INTx (nivel) hasta que acaba el hilo; las MSI (flanco) que llegan deshabilitadas se reproducen en `enable_irq()`. `IRQF_SHARED` vale entre drivers de la capa; una línea que ya tiene Aurora da `-EBUSY`.
+- **`sysfs` en el `/sys` real**: los kobject de la capa se publican en el registro dinámico de Aurora (`sysfs_dyn`), con atributos que llaman a `show`/`store`. `/sys/devices/...`, `/sys/bus/<bus>/{devices,drivers}`, `/sys/class/<clase>`; para PCI, `/sys/devices/pci0000:00/<BDF>` es de la capa y `/sys/bus/pci/devices/<BDF>` sigue siendo el de Aurora (la capa le añade el enlace `driver`). Los atributos binarios y los uevents no salen todavía (L4/L5).
+- **Dispositivos del hito: `edu` y `virtio-rng-pci`** (comprobado en QEMU 8.2.2: `edu` solo tiene INTx y MSI de un vector, sin MSI-X; `e1000e` lo reclama un `.aur`). `edu` para MMIO/INTx/MSI/DMA y virtio-rng moderno para MSI-X con virtqueue. `scripts/qemu-drive.py` los añade siempre; las pruebas se omiten si faltan.
+- **`on_each_cpu()`: aplazado a L7** (no lo usan `bochs`, `simpledrm` ni el núcleo virtio; sí `i915`). `IPI_VECTOR_CALL` existe en `ipi.h` pero no tiene handler.
+- **FLR**: implementado (`pcie_flr`, `pci_reset_function` con guardar/restaurar la cabecera y MSI/MSI-X) pero **sin probar**: la máquina `pc` de QEMU no tiene dispositivos PCIe con FLR; solo se prueba el camino `-ENOTTY`. Sin reset de bus ni por PM.
+- **`platform_bus` básico ya en L3** (lo necesita `simpledrm` en L5).
+- **Cambios en Aurora (aceptados)**: `bus_del_driver()` desvincula (llama a `remove`); `irq_free()` espera al `ack` que esté corriendo en otra CPU; `pmm_alloc_pages_below()`; `smp_cpu_lapic_id()`; atributos con `show`/`store` en `sysfs_dyn` (sin tope de 512 entradas, ficheros escribibles, mezcla con `/sys/bus` y `/sys/bus/pci/devices/<BDF>`); `ioapic_route_pci_intx()` (polaridad del ISO de la MADT si existe, si no nivel/activa baja); exports para la capa y las pruebas. Cada cambio con prueba del kernel donde tiene sentido (3 nuevas).
+- **No se cambió en Aurora**: MSI/MSI-X los programa la capa (espacio de configuración + su propio `ioremap` de la tabla), no `pci_enable_msi/msix` de Aurora, para tener destino por vector, máscara por entrada y afinidad, y no compartir el mapeo de la tabla. Los vectores siguen siendo globales (21 de kernel, una IDT para todas las CPU): lo que se reparte entre CPU es el destino (LAPIC) de cada vector, por turnos o con `PCI_IRQ_AFFINITY` uno por CPU.
+- **DMA provisional**: `dma_alloc_coherent()` con páginas del PMM, alineadas al orden del tamaño y por debajo de `coherent_dma_mask` (edu: 28 bits); dirección de bus = física (sin IOMMU). `dma_map_*`/`sg_table`/bounce son L4.
+- **Espacio de configuración**: solo 256 bytes (Aurora usa 0xCF8/0xCFC, sin ECAM): `pci_find_ext_capability()` devuelve 0, sin SR-IOV/AER/BAR redimensionable. Hará falta ECAM para `amdgpu`/NVIDIA (L7/L8). Los BARs los mide la capa al vincular (con la decodificación apagada): `pci_device_t.bar` de Aurora es de 32 bits.
