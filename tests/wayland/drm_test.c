@@ -289,6 +289,48 @@ int main(int argc, char **argv) {
   CHECK(rfd >= 0 && ioctl(rfd, DRM_IOCTL_MODE_GETRESOURCES, &rr) < 0, "renderD128 rechaza KMS");
   close(rfd);
 
+  // PRIME / dma-buf: exportar el dumb, mapear el fd, reimportar en otro fichero
+  // DRM (render node) y compartir las mismas paginas sin copia.
+  struct drm_get_cap pcap = {.capability = DRM_CAP_PRIME};
+  CHECK(ioctl(fd, DRM_IOCTL_GET_CAP, &pcap) == 0 &&
+            (pcap.value & (DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT)) ==
+                (DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT),
+        "CAP_PRIME import|export (=%llu)", (unsigned long long)pcap.value);
+  struct drm_prime_handle ph = {.handle = cd.handle, .flags = DRM_CLOEXEC | DRM_RDWR};
+  CHECK(ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ph) == 0 && ph.fd >= 0,
+        "PRIME_HANDLE_TO_FD fd=%d", ph.fd);
+  int dbuf = ph.fd;
+  CHECK(lseek(dbuf, 0, SEEK_END) == (off_t)cd.size, "lseek(dmabuf, SEEK_END) = size");
+  uint32_t *dpx = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, dbuf, 0);
+  CHECK(dpx != MAP_FAILED && dpx[0] == 0xE0A030 && dpx[64] == 0x2060C0,
+        "mmap del dmabuf ve el contenido del dumb");
+  if (dpx != MAP_FAILED) {
+    dpx[1] = 0xCAFE01;
+    CHECK(px[1] == 0xCAFE01, "dmabuf y dumb comparten paginas");
+    munmap(dpx, cd.size);
+  }
+  struct drm_prime_handle same = {.fd = dbuf};
+  CHECK(ioctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &same) == 0 && same.handle == cd.handle,
+        "FD_TO_HANDLE en el mismo fichero devuelve el handle original");
+  int rfd2 = open("/dev/dri/renderD128", O_RDWR);
+  struct drm_prime_handle imp = {.fd = dbuf};
+  CHECK(rfd2 >= 0 && ioctl(rfd2, DRM_IOCTL_PRIME_FD_TO_HANDLE, &imp) == 0 && imp.handle,
+        "FD_TO_HANDLE en renderD128 handle=%u", imp.handle);
+  struct drm_mode_map_dumb imd = {.handle = imp.handle};
+  uint32_t *ipx = MAP_FAILED;
+  if (ioctl(rfd2, DRM_IOCTL_MODE_MAP_DUMB, &imd) == 0)
+    ipx = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, rfd2, imd.offset);
+  CHECK(ipx != MAP_FAILED && ipx[0] == 0xE0A030 && ipx[1] == 0xCAFE01,
+        "mmap del GEM importado ve el mismo contenido");
+  if (ipx != MAP_FAILED)
+    munmap(ipx, cd.size);
+  struct drm_prime_handle bad_fd = {.fd = 0};
+  CHECK(ioctl(rfd2, DRM_IOCTL_PRIME_FD_TO_HANDLE, &bad_fd) < 0, "FD_TO_HANDLE con fd que no es dmabuf falla");
+  struct drm_gem_close gcl = {.handle = imp.handle};
+  CHECK(ioctl(rfd2, DRM_IOCTL_GEM_CLOSE, &gcl) == 0, "GEM_CLOSE del importado");
+  close(rfd2);
+  close(dbuf);
+
   // Limpieza
   CHECK(ioctl(fd, DRM_IOCTL_MODE_RMFB, &fbb.fb_id) == 0, "RMFB");
   CHECK(ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb2.fb_id) == 0, "RMFB #2");

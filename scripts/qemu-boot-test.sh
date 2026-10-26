@@ -53,6 +53,6 @@ fi
 timeout "$T" qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-  -m 512M -no-reboot -smp 2 -cdrom aurora.iso -display none \
+  -m "${QEMU_MEM:-512M}" -no-reboot -smp "${QEMU_SMP:-2}" -cdrom aurora.iso -display none \
   -monitor unix:/tmp/qmon.sock,server,nowait \
   -serial file:"$LOG" || true

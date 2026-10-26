@@ -755,7 +755,7 @@ static int ioctl_get_cap(uint64_t arg) {
   case 0x2: c.value = 1; break;   // VBLANK_HIGH_CRTC
   case 0x3: c.value = 24; break;  // DUMB_PREFERRED_DEPTH
   case 0x4: c.value = 0; break;   // DUMB_PREFER_SHADOW
-  case 0x5: c.value = 0; break;   // PRIME (pendiente)
+  case 0x5: c.value = 3; break;   // PRIME: import | export
   case 0x6: c.value = 1; break;   // TIMESTAMP_MONOTONIC
   case 0x7: c.value = 0; break;   // ASYNC_PAGE_FLIP
   case 0x8: c.value = 64; break;  // CURSOR_WIDTH
@@ -1498,6 +1498,8 @@ static int64_t drm_ioctl_locked(drm_file_t *f, unsigned long req, uint64_t arg) 
   case 0x0c: return ioctl_get_cap(arg);
   case 0x0d: return ioctl_set_client_cap(f, arg);
   case 0x11: return 0; // AUTH_MAGIC: sin autenticacion
+  case 0x2d: return drm_ioctl_prime_handle_to_fd(f, arg);
+  case 0x2e: return drm_ioctl_prime_fd_to_handle(f, arg);
   case 0xB2: return drm_ioctl_create_dumb(f, arg);
   case 0xB3: return drm_ioctl_map_dumb(f, arg);
   case 0xB4: return drm_ioctl_destroy_dumb(f, arg);

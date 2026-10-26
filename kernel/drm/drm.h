@@ -75,6 +75,7 @@ typedef struct drm_file {
   bool atomic;
   bool nonblock;
   drm_gem_t *handles[DRM_MAX_HANDLES]; // handle = indice + 1
+  uint8_t imported[DRM_MAX_HANDLES];   // 1 = el handle posee su propia ref (PRIME)
   drm_gem_t *gems;                     // todos los GEM creados por el fichero
   drm_event_rec_t ring[DRM_EVENT_RING];
   uint32_t head, tail;
@@ -84,6 +85,7 @@ typedef struct drm_file {
 
 // drm_dumb.c ----------------------------------------------------------------
 int drm_gem_create(drm_file_t *f, size_t size, drm_gem_t **out);
+void drm_gem_get(drm_gem_t *g); // toma una referencia
 void drm_gem_put(drm_gem_t *g); // suelta una referencia
 int drm_handle_alloc(drm_file_t *f, drm_gem_t *g, uint32_t *handle);
 drm_gem_t *drm_handle_lookup(drm_file_t *f, uint32_t handle);
@@ -96,6 +98,10 @@ int drm_gem_get_page(drm_file_t *f, uint64_t byte_off, uint64_t *phys);
 int drm_ioctl_create_dumb(drm_file_t *f, uint64_t arg);
 int drm_ioctl_map_dumb(drm_file_t *f, uint64_t arg);
 int drm_ioctl_destroy_dumb(drm_file_t *f, uint64_t arg);
+
+// drm_prime.c ---------------------------------------------------------------
+int drm_ioctl_prime_handle_to_fd(drm_file_t *f, uint64_t arg);
+int drm_ioctl_prime_fd_to_handle(drm_file_t *f, uint64_t arg);
 
 // drm_sysfs.c ---------------------------------------------------------------
 void drm_sysfs_publish(void);

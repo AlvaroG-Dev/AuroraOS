@@ -70,6 +70,12 @@ int drm_gem_create(drm_file_t *f, size_t size, drm_gem_t **out) {
   return 0;
 }
 
+void drm_gem_get(drm_gem_t *g) {
+  unsigned long fl = spin_lock_irqsave(&g_gem_lock);
+  g->refcnt++;
+  spin_unlock_irqrestore(&g_gem_lock, fl);
+}
+
 void drm_gem_put(drm_gem_t *g) {
   if (!g)
     return;
@@ -124,6 +130,11 @@ int drm_handle_close(drm_file_t *f, uint32_t handle) {
   if (!g)
     return -EINVAL;
   f->handles[handle - 1] = NULL;
+  if (f->imported[handle - 1]) { // importado por PRIME: tiene ref propia
+    f->imported[handle - 1] = 0;
+    drm_gem_put(g);
+    return 0;
+  }
   // Si alguien pudo mapearlo, las paginas siguen vivas hasta cerrar el fichero
   // (un munmap no avisa al driver; liberarlas dejaria mapeos colgando).
   if (!g->mapped)
@@ -132,8 +143,13 @@ int drm_handle_close(drm_file_t *f, uint32_t handle) {
 }
 
 void drm_file_release_gems(drm_file_t *f) {
-  for (int i = 0; i < DRM_MAX_HANDLES; i++)
+  for (int i = 0; i < DRM_MAX_HANDLES; i++) {
+    drm_gem_t *g = f->handles[i];
     f->handles[i] = NULL;
+    if (g && f->imported[i])
+      drm_gem_put(g);
+    f->imported[i] = 0;
+  }
   for (;;) {
     unsigned long fl = spin_lock_irqsave(&g_gem_lock);
     drm_gem_t *g = f->gems;
@@ -180,6 +196,16 @@ int drm_gem_get_page(drm_file_t *f, uint64_t byte_off, uint64_t *phys) {
       break;
     }
   }
+  if (rc) // GEM importado por PRIME: no esta en f->gems, solo en los handles
+    for (int i = 0; i < DRM_MAX_HANDLES; i++) {
+      drm_gem_t *g = f->handles[i];
+      if (g && f->imported[i] && g->id == id && g->mapped &&
+          local / PAGE_SIZE < g->npages) {
+        *phys = g->pages[local / PAGE_SIZE];
+        rc = 0;
+        break;
+      }
+    }
   spin_unlock_irqrestore(&g_gem_lock, fl);
   return rc;
 }

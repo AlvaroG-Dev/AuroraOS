@@ -1,0 +1,170 @@
+// kernel/drm/drm_prime.c
+//
+// PRIME / dma-buf (DRM_CAP_PRIME = import | export): un objeto GEM se exporta
+// como un fichero anonimo ("dmabuf") que mantiene viva una referencia al GEM.
+// El fd se puede pasar por SCM_RIGHTS (Wayland linux-dmabuf, Mesa/GBM), mapear
+// con mmap (vfs_ops.get_page) y volver a importar en otro fichero DRM con
+// PRIME_FD_TO_HANDLE: ambos manejan las mismas paginas fisicas (sin copia).
+
+#include "../heap.h"
+#include "../klog.h"
+#include "../pmm.h"
+#include "../process.h"
+#include "../string.h"
+#include "../uaccess.h"
+#include "../vfs.h"
+#include "drm.h"
+
+#define DRM_CLOEXEC 0x80000 // O_CLOEXEC
+#define DRM_RDWR 0x2        // O_RDWR
+
+struct drm_prime_handle {
+  uint32_t handle;
+  uint32_t flags;
+  int32_t fd;
+};
+
+typedef struct dmabuf {
+  drm_gem_t *gem;
+} dmabuf_t;
+
+static int dmabuf_get_page(vfs_node_t *node, uint64_t pgoff, uint64_t *phys) {
+  dmabuf_t *d = (dmabuf_t *)node->priv;
+  if (!d || !phys || pgoff >= d->gem->npages)
+    return -EFAULT;
+  *phys = d->gem->pages[pgoff];
+  return 0;
+}
+
+static int dmabuf_close(vfs_node_t *node) {
+  dmabuf_t *d = (dmabuf_t *)node->priv;
+  if (!d)
+    return 0;
+  drm_gem_put(d->gem);
+  kfree(d);
+  node->priv = NULL;
+  return 0;
+}
+
+static int dmabuf_poll(vfs_node_t *node, short events) {
+  (void)node;
+  return events & (1 | 4); // siempre listo (sin fences)
+}
+
+// DMA_BUF_IOCTL_SYNC / SET_NAME: el acceso a la memoria es coherente.
+static int64_t dmabuf_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
+  (void)node;
+  (void)arg;
+  if (((req >> 8) & 0xFF) != 'b')
+    return -ENOTTY;
+  switch (req & 0xFF) {
+  case 0: // SYNC
+  case 1: // SET_NAME_A
+  case 2: // SET_NAME_B
+    return 0;
+  }
+  return -ENOTTY;
+}
+
+static vfs_ops_t dmabuf_ops = {
+    .get_page = dmabuf_get_page,
+    .close = dmabuf_close,
+    .poll = dmabuf_poll,
+    .ioctl = dmabuf_ioctl,
+};
+
+static dmabuf_t *dmabuf_of_fd(process_t *proc, int fd) {
+  if (fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || !proc->fds[fd]->node)
+    return NULL;
+  vfs_node_t *n = proc->fds[fd]->node;
+  return n->ops == &dmabuf_ops ? (dmabuf_t *)n->priv : NULL;
+}
+
+int drm_ioctl_prime_handle_to_fd(drm_file_t *f, uint64_t arg) {
+  struct drm_prime_handle a;
+  int rc = drm_get_user(arg, &a, sizeof(a));
+  if (rc)
+    return rc;
+  if (a.flags & ~(uint32_t)(DRM_CLOEXEC | DRM_RDWR))
+    return -EINVAL;
+  drm_gem_t *g = drm_handle_lookup(f, a.handle);
+  if (!g)
+    return -ENOENT;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  int fdn = -1;
+  for (int i = 0; i < MAX_PROCESS_FDS; i++)
+    if (!proc->fds[i]) {
+      fdn = i;
+      break;
+    }
+  if (fdn < 0)
+    return -EMFILE;
+
+  dmabuf_t *d = (dmabuf_t *)kzalloc(sizeof(*d));
+  vfs_node_t *vn = (vfs_node_t *)kzalloc(sizeof(*vn));
+  file_descriptor_t *fd = (file_descriptor_t *)kzalloc(sizeof(*fd));
+  if (!d || !vn || !fd) {
+    kfree(d);
+    kfree(vn);
+    kfree(fd);
+    return -ENOMEM;
+  }
+  drm_gem_get(g);
+  g->mapped = true; // las paginas no se liberan hasta soltar todas las refs
+  d->gem = g;
+  strncpy(vn->name, "dmabuf", sizeof(vn->name) - 1);
+  vn->flags = VFS_FILE;
+  vn->ops = &dmabuf_ops;
+  vn->priv = d;
+  vn->size = g->size;
+  vn->mode = S_IFREG | 0600;
+  vn->ref_count = 1;
+  fd->node = vn;
+  fd->flags = O_RDWR;
+  fd->ref_count = 1;
+  mutex_init(&fd->lock);
+  wait_queue_init(&fd->read_wq);
+  wait_queue_init(&fd->write_wq);
+  proc->fds[fdn] = fd;
+  if (a.flags & DRM_CLOEXEC)
+    fd_cloexec_set(proc, fdn);
+  a.fd = fdn;
+  rc = drm_put_user(arg, &a, sizeof(a));
+  if (rc) { // el usuario no vera el fd: se cierra con el proceso
+    return rc;
+  }
+  return 0;
+}
+
+int drm_ioctl_prime_fd_to_handle(drm_file_t *f, uint64_t arg) {
+  struct drm_prime_handle a;
+  int rc = drm_get_user(arg, &a, sizeof(a));
+  if (rc)
+    return rc;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  dmabuf_t *d = dmabuf_of_fd(proc, a.fd);
+  if (!d)
+    return -EINVAL;
+  drm_gem_t *g = d->gem;
+  // Mismo GEM ya presente en este fichero: se devuelve su handle.
+  for (int i = 0; i < DRM_MAX_HANDLES; i++)
+    if (f->handles[i] == g) {
+      a.handle = (uint32_t)i + 1;
+      return drm_put_user(arg, &a, sizeof(a));
+    }
+  uint32_t h;
+  rc = drm_handle_alloc(f, g, &h);
+  if (rc)
+    return rc;
+  drm_gem_get(g);
+  f->imported[h - 1] = 1;
+  a.handle = h;
+  rc = drm_put_user(arg, &a, sizeof(a));
+  if (rc)
+    drm_handle_close(f, h);
+  return rc;
+}
