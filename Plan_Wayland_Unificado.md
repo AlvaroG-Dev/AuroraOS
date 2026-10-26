@@ -163,6 +163,8 @@ SCM_RIGHTS (refcounts de `file*`), Weston exige atomic KMS + libseat, Mesa/LLVM 
 - **GTK3:** hoy solo el tema `Aurora` (Adwaita sin botones de ventana). Falta un tema completo en `gtk.css` (colores, radios, botones, pestañas, listas, barras de desplazamiento, campos) con la paleta y la tipografía de Aurora; GTK4/libadwaita (`GTK_THEME` no basta: requiere CSS propio o `adwaita` con `ADW_DEBUG_COLOR_SCHEME`) como segundo paso.
 - **Qt5:** un estilo propio (plugin `QStyle` en `QT_PLUGIN_PATH/styles`, `QT_STYLE_OVERRIDE=Aurora`) o, más barato, Fusion + `QPalette` + hoja QSS global (`qApp->setStyleSheet`) cargada desde un plugin de plataforma-tema (`QT_QPA_PLATFORMTHEME=aurora`) que defina paleta, fuentes e iconos.
 - **Fuentes e iconos:** una fuente del sistema única (fontconfig a `/usr/share`) y un tema de iconos Aurora (`gtk-icon-theme-name` / `QIcon::setThemeName`).
+- **Orden recomendado:** (1) ampliar `gtk.css` del tema `Aurora` (barato; se prueba en segundos en el host con `AW_MOCK=1` + volcados `.ppm`); (2) plugin de tema de plataforma de Qt con Fusion + paleta + QSS; (3) fuentes e iconos comunes; (4) solo después, `QStyle` propio de Qt que dibuje los controles como el compositor, y GTK4/libadwaita.
+- **Criterio de hecho:** `gtk3-widget-factory` y `qt5-application` muestran controles con la misma paleta, radios y tipografía que el Dock, la barra de menús y las ventanas nativas; captura comparativa en `build/capturas/`.
 - **Decoración:** se mantiene la barra de título de Aurora (`xdg-decoration` server-side anunciado una vez; `QT_WAYLAND_DISABLE_WINDOWDECORATION=1`).
 
 ## Pendiente (consolidado, no hecho)
