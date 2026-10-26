@@ -67,8 +67,28 @@ Decisiones por defecto (cambiar si no valen): integración **A** (cada toplevel 
 - 7.3 `wp_presentation` **[HECHO]**; dmabuf, hotplug de monitores, multi-CRTC y touch **[PENDIENTES, fuera del producto actual]**.
 - 7.4 **[HECHO]** `TODO.md`, `ROADMAP.md`, `glibc_port.md`, `drv_impl_plan.md` actualizados.
 
-## Fuera de alcance
-Intel/AMD reales, Xwayland (hasta que 2.1 y dmabuf estén estables).
+## Bloque 8 — GPU real (Intel, AMD, NVIDIA) y aceleración 3D — [PLANIFICADO, nada implementado]
+
+**Aclaración clave sobre reutilizar Mesa (corrección a la idea inicial):** Mesa solo aporta la mitad *de usuario* del driver (`iris`/`crocus` para Intel, `radeonsi`/`r600` y `radv` para AMD, `nouveau`/`nvk` para NVIDIA, `virgl`/`venus` para virtio-gpu). Esos drivers hablan con el hardware a través de **ioctls DRM específicos de cada GPU** sobre `/dev/dri/renderD128` (`DRM_IOCTL_I915_*`/`XE_*`, `AMDGPU_*`, `NOUVEAU_*`), y esos ioctls los atiende el **driver de kernel de Linux** (`i915`/`xe`, `amdgpu`, `nouveau`), que Mesa no incluye. Hoy Aurora solo implementa el DRM genérico (KMS + dumb + PRIME) y Mesa corre con llvmpipe sobre `wl_shm`. Por tanto, para usar Mesa acelerada hace falta, además de Mesa, **una implementación del lado del kernel** de esos ioctls más: gestión de memoria de GPU (GEM con VRAM/GTT, page tables de GPU), colas de comandos y planificación, fences/`drm_syncobj`, carga de **firmware** (`/lib/firmware`, imprescindible en AMD y NVIDIA) y gestión de energía/relojes.
+
+**Opciones, de menos a más coste (se recomienda ir en este orden):**
+1. **8.1 virtio-gpu 3D (virgl y, mejor, Venus/Vulkan)** — *camino realista a aceleración en QEMU/VMs.* El host hace el trabajo; el guest solo envía streams de comandos por virtqueue. Mesa ya trae `virgl` y `venus`. Requisitos en Aurora: ampliar `virtio_gpu.aur` a 3D (contextos, `RESOURCE_CREATE_3D`, `SUBMIT_3D`, fences, blobs de memoria compartida), exponer en `renderD128` los ioctls `DRM_IOCTL_VIRTGPU_*`, `drm_syncobj` y fences implícitas/explícitas, y `zwp_linux_dmabuf` con fds reales de GPU en `aurora-wayland`. Sustituye al antiguo 6.4 (virgl).
+2. **8.2 KMS nativo sin aceleración (modeset-only) para hardware real** — drivers `.aur` pequeños que solo configuran pantalla (modos, EDID, scanout, cursor hardware) y dejan el 3D en llvmpipe (software). Intel Gen9+ (display engine documentado públicamente), AMD (DCN es enorme; usar GOP/framebuffer UEFI como alternativa) y NVIDIA (sin documentación de display: solo GOP/framebuffer). Es lo único viable a corto plazo para «que arranque con GPU real»; reutiliza `gpu_proxy` y el patrón de `bochs.aur`.
+3. **8.3 Capa de compatibilidad de drivers de Linux (estilo LinuxKPI / FreeBSD `drm-kmod`)** — portar los drivers de Linux `i915`/`xe` y `amdgpu` como `.aur`/`.kur` con una capa que emule las APIs internas del kernel que usan (`struct device`, `dma_fence`, `ttm`, workqueues, `kref`, `i2c`, `firmware`, `pci`, `ioremap`, mutex/wait/RCU...). Es la única forma de reutilizar *a la vez* el kernel y Mesa sin reescribir, pero es un proyecto de **meses** (amdgpu ≈ 5 millones de líneas con cabeceras; depende de TTM, DRM scheduler, `drm_buddy`, GPU VM) y obliga a anteponer: IOMMU/VT-d (7.2), MSI-X (1.4), cargador de firmware, y a cumplir GPL (los drivers de Linux son GPL-2.0: el `.aur` resultante queda bajo GPL; revisar compatibilidad de licencia con el resto de Aurora).
+4. **8.4 NVIDIA** — último y opcional. Los `nouveau`/`nvk` de Mesa necesitan el kernel `nouveau` (que a partir de Turing exige el firmware GSP firmado de NVIDIA) o el módulo `nvidia-open` (MIT/GPL, también con GSP y una gran capa de abstracción propia). Sin documentación de display, sin reclocking libre en generaciones antiguas. En máquinas virtuales no aplica; en hardware real, mantener GOP/framebuffer (8.2) + llvmpipe.
+
+**Tareas de base comunes (antes de 8.1/8.3):**
+- 8.0.1 Ioctls DRM de render: `drm_syncobj`, `DRM_IOCTL_GEM_OPEN/FLINK`, `PRIME` con sincronización (fences en dma-buf: `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`), `sync_file`, `mmap` con cache attributes (WC/UC) y mapeos de VRAM.
+- 8.0.2 Cargador de firmware (`request_firmware` → `/lib/firmware`, ya hay VFS) y empaquetado de blobs (licencia redistribuible: `linux-firmware`).
+- 8.0.3 IOMMU/VT-d (ya en 7.2) y `AUR_CAP_DMA` con ventanas acotadas; MSI-X real (1.4); hot-plug PCI (4.6/6.4 de `drv_impl_plan`).
+- 8.0.4 Mesa con el driver elegido en el sysroot (`scripts/fetch-mesa.sh` ya trae llvmpipe) y plataforma EGL «wayland» con `wl_drm`/dmabuf sobre `renderD128` en lugar de `wl_shm`.
+- 8.0.5 Multi-CRTC / hot-plug de monitores / cambio de resolución en caliente en el KMS de Aurora (hoy un conector virtual fijo): necesarios en cuanto haya GPU real.
+- **Hito 8.1:** `glxgears`/`weston-simple-egl`/`vkcube` a 60 fps sobre virtio-gpu+virgl/venus en QEMU con `-device virtio-gpu-gl`, como ventana de Aurora.
+- **Hito 8.2:** Aurora arranca con GPU Intel/AMD real, modo nativo, sin aceleración.
+- **Riesgos:** DMA mal acotado por un driver de GPU (riesgo de seguridad: sin IOMMU un `.aur` con `AUR_CAP_DMA` puede escribir toda la RAM); volumen de código de 8.3; firmware con licencias propietarias; sin hardware real en este entorno de pruebas (solo QEMU/TCG), por lo que 8.2–8.4 no se pueden validar aquí.
+
+## Fuera de alcance (actualizado)
+Soporte 3D acelerado en hardware real hasta completar 8.0.x y 8.1. Xwayland está en curso (ver notas) pero **no validado** aún.
 
 ## Riesgos clave
 SCM_RIGHTS (refcounts de `file*`), Weston exige atomic KMS + libseat, Mesa/LLVM pesada (empezar con softpipe/pixman).
@@ -176,7 +196,11 @@ SCM_RIGHTS (refcounts de `file*`), Weston exige atomic KMS + libseat, Mesa/LLVM 
 - **Decoración:** se mantiene la barra de título de Aurora (`xdg-decoration` server-side anunciado una vez; `QT_WAYLAND_DISABLE_WINDOWDECORATION=1`).
 
 ## Pendiente (consolidado, no hecho)
-- ~~dma-buf/PRIME~~ **[HECHO]** (ver notas); virgl (6.4) y vmsvga (6.5).
+- ~~dma-buf/PRIME~~ **[HECHO]** (ver notas); virgl/Venus pasa a **8.1**; vmsvga (6.5) sigue fuera de alcance. GPU real Intel/AMD/NVIDIA: **Bloque 8**.
+- `xdg_toplevel.move/resize` pedidos por el cliente y cursor con mapa de bits propio (`wl_pointer.set_cursor` con superficie).
+- Xwayland: arranca y el gestor X11 interno carga, pero en la última prueba (QEMU, 6 GB) Xwayland salió con código 1 y `xterm -e 'a; b'` no ejecuta bien su argumento; sin captura válida.
+- Subsuperficies `sync` (hoy todas se tratan como `desync` según la otra implementación; revisar) y comprobación visual GTK4/libadwaita (no hay app GTK4 en el sysroot).
+- 3.3 `libseat` real, `rseq`, `rt_sigsuspend/pending/timedwait`, SIGPIPE y inodo `S_IFSOCK` en bind (Bloques 2–3).
 - Xwayland (depende de dmabuf estable), multi-monitor/hot-plug, multi-CRTC, touch.
 - IOMMU/VT-d (7.2): un `.aur` GPU con `AUR_CAP_DMA` sigue siendo riesgo.
 - Cambio de resolución en caliente (el compositor trabaja a la resolución de arranque).
