@@ -763,7 +763,8 @@ static int ioctl_get_cap(uint64_t arg) {
   case 0x10: c.value = 0; break;  // ADDFB2_MODIFIERS
   case 0x11: c.value = 0; break;  // PAGE_FLIP_TARGET
   case 0x12: c.value = 1; break;  // CRTC_IN_VBLANK_EVENT
-  case 0x13: c.value = 0; break;  // SYNCOBJ
+  case 0x13: c.value = 1; break;  // SYNCOBJ
+  case 0x14: c.value = 1; break;  // SYNCOBJ_TIMELINE
   default: return -EINVAL;
   }
   return drm_put_user(arg, &c, sizeof(c));
@@ -1577,6 +1578,8 @@ static int64_t drm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     return -ENODEV;
   if (!f->render && (req & 0xFF) == 0x3a && ((req >> 8) & 0xFF) == 'd')
     return ioctl_wait_vblank(f, arg); // bloquea: no retiene g_drm_lock
+  if (((req >> 8) & 0xFF) == 'd' && (req & 0xFF) >= 0xBF && (req & 0xFF) <= 0xCD)
+    return drm_syncobj_ioctl(f, req, arg); // SYNCOBJ_*: bloquea, sin g_drm_lock
   mutex_lock(&g_drm_lock);
   int64_t rc = drm_ioctl_locked(f, req, arg);
   mutex_unlock(&g_drm_lock);
@@ -1649,6 +1652,7 @@ static int drm_close(vfs_node_t *node) {
   if (g_master == f)
     g_master = NULL;
   drm_file_release_gems(f);
+  drm_file_release_syncobjs(f);
   mutex_unlock(&g_drm_lock);
   node->priv = NULL;
   f->magic = 0;

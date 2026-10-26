@@ -26,6 +26,7 @@
 
 #define DRM_FILE_MAGIC 0xD2F11E01u
 #define DRM_MAX_HANDLES 128
+#define DRM_MAX_SYNCOBJS 64
 #define DRM_EVENT_RING 32
 
 // Ids de objetos KMS (fijos: solo hay uno de cada).
@@ -38,6 +39,8 @@
 
 #define DRM_FORMAT_XRGB8888 0x34325258u // 'XR24'
 #define DRM_FORMAT_ARGB8888 0x34325241u // 'AR24'
+
+struct drm_syncobj;
 
 typedef struct drm_gem {
   uint32_t id;       // unico en el sistema; mmap offset = id << 32
@@ -77,6 +80,7 @@ typedef struct drm_file {
   drm_gem_t *handles[DRM_MAX_HANDLES]; // handle = indice + 1
   uint8_t imported[DRM_MAX_HANDLES];   // 1 = el handle posee su propia ref (PRIME)
   drm_gem_t *gems;                     // todos los GEM creados por el fichero
+  struct drm_syncobj *syncobjs[DRM_MAX_SYNCOBJS]; // handle = indice + 1
   drm_event_rec_t ring[DRM_EVENT_RING];
   uint32_t head, tail;
   wait_queue_t wq;
@@ -102,6 +106,15 @@ int drm_ioctl_destroy_dumb(drm_file_t *f, uint64_t arg);
 // drm_prime.c ---------------------------------------------------------------
 int drm_ioctl_prime_handle_to_fd(drm_file_t *f, uint64_t arg);
 int drm_ioctl_prime_fd_to_handle(drm_file_t *f, uint64_t arg);
+
+// drm_syncobj.c -------------------------------------------------------------
+// ioctls 0xBF..0xCD (SYNCOBJ_*); bloquean, asi que se llaman sin g_drm_lock.
+int drm_syncobj_ioctl(drm_file_t *f, unsigned long req, uint64_t arg);
+void drm_file_release_syncobjs(drm_file_t *f);
+// Para drivers de GPU: busca un syncobj por handle y senala un punto
+// (point 0 = binario). Despierta a los que esperan.
+struct drm_syncobj *drm_syncobj_find(drm_file_t *f, uint32_t handle);
+void drm_syncobj_signal_point(struct drm_syncobj *o, uint64_t point);
 
 // drm_sysfs.c ---------------------------------------------------------------
 void drm_sysfs_publish(void);

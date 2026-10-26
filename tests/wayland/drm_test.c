@@ -16,6 +16,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int g_fail;
@@ -330,6 +332,112 @@ int main(int argc, char **argv) {
   CHECK(ioctl(rfd2, DRM_IOCTL_GEM_CLOSE, &gcl) == 0, "GEM_CLOSE del importado");
   close(rfd2);
   close(dbuf);
+
+  // drm_syncobj / sync_file: caps, binario, linea temporal, fd y despertar
+  // entre procesos.
+  {
+    struct drm_get_cap sc = {.capability = DRM_CAP_SYNCOBJ};
+    struct drm_get_cap tc = {.capability = DRM_CAP_SYNCOBJ_TIMELINE};
+    CHECK(ioctl(fd, DRM_IOCTL_GET_CAP, &sc) == 0 && sc.value == 1 &&
+              ioctl(fd, DRM_IOCTL_GET_CAP, &tc) == 0 && tc.value == 1,
+          "CAP_SYNCOBJ y CAP_SYNCOBJ_TIMELINE");
+    int sfd = open("/dev/dri/renderD128", O_RDWR); // tambien en el nodo render
+    struct drm_syncobj_create c0 = {0}, c1 = {.flags = DRM_SYNCOBJ_CREATE_SIGNALED};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &c0) == 0 && c0.handle &&
+              ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &c1) == 0 && c1.handle,
+          "SYNCOBJ_CREATE (sin senalar y senalado) %u,%u", c0.handle, c1.handle);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    uint32_t h0 = c0.handle, h1 = c1.handle;
+    struct drm_syncobj_wait w = {.handles = (uintptr_t)&h1, .count_handles = 1,
+                                 .timeout_nsec = now};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &w) == 0, "WAIT de un syncobj ya senalado");
+    w.handles = (uintptr_t)&h0;
+    w.timeout_nsec = now + 50000000LL;
+    errno = 0;
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &w) < 0 && errno == ETIME,
+          "WAIT sin senalar vence con ETIME (errno=%d)", errno);
+    struct drm_syncobj_array arr = {.handles = (uintptr_t)&h0, .count_handles = 1};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_SIGNAL, &arr) == 0, "SYNCOBJ_SIGNAL");
+    w.timeout_nsec = now;
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &w) == 0, "WAIT tras SIGNAL");
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_RESET, &arr) == 0, "SYNCOBJ_RESET");
+    w.timeout_nsec = now;
+    errno = 0;
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &w) < 0 && errno == ETIME, "WAIT tras RESET vence");
+
+    // Linea temporal
+    uint64_t pt5 = 5, q = 0;
+    struct drm_syncobj_timeline_array tl = {.handles = (uintptr_t)&h0, .points = (uintptr_t)&pt5,
+                                            .count_handles = 1};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, &tl) == 0, "TIMELINE_SIGNAL punto 5");
+    struct drm_syncobj_timeline_array qa = {.handles = (uintptr_t)&h0, .points = (uintptr_t)&q,
+                                            .count_handles = 1};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_QUERY, &qa) == 0 && q == 5, "SYNCOBJ_QUERY = %llu",
+          (unsigned long long)q);
+    uint64_t p3 = 3, p7 = 7;
+    struct drm_syncobj_timeline_wait tw = {.handles = (uintptr_t)&h0, .points = (uintptr_t)&p3,
+                                           .count_handles = 1, .timeout_nsec = now};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &tw) == 0, "TIMELINE_WAIT punto 3 (<=5)");
+    tw.points = (uintptr_t)&p7;
+    tw.timeout_nsec = now + 30000000LL;
+    errno = 0;
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &tw) < 0 && errno == ETIME,
+          "TIMELINE_WAIT punto 7 vence");
+
+    // fd del syncobj y sync_file
+    struct drm_syncobj_create c2 = {0};
+    ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &c2);
+    struct drm_syncobj_handle hf = {.handle = c2.handle, .flags = DRM_CLOEXEC};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &hf) == 0 && hf.fd >= 0, "HANDLE_TO_FD fd=%d", hf.fd);
+    struct drm_syncobj_handle sf = {.handle = c2.handle,
+                                    .flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &sf) == 0 && sf.fd >= 0,
+          "HANDLE_TO_FD como sync_file fd=%d", sf.fd);
+    struct pollfd pf = {.fd = sf.fd, .events = POLLIN};
+    CHECK(poll(&pf, 1, 0) == 0, "sync_file sin senalar: poll no esta listo");
+    int sfd2 = open("/dev/dri/renderD128", O_RDWR);
+    struct drm_syncobj_handle imp2 = {.fd = hf.fd};
+    CHECK(ioctl(sfd2, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp2) == 0 && imp2.handle,
+          "FD_TO_HANDLE en otro fichero DRM (objeto compartido)");
+
+    pid_t pid = fork();
+    if (pid == 0) { // hijo: senala tras 300 ms desde su propio fichero DRM
+      struct timespec d = {0, 300000000};
+      nanosleep(&d, NULL);
+      uint32_t hh = imp2.handle;
+      struct drm_syncobj_array a2 = {.handles = (uintptr_t)&hh, .count_handles = 1};
+      _exit(ioctl(sfd2, DRM_IOCTL_SYNCOBJ_SIGNAL, &a2) == 0 ? 0 : 1);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t t0 = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    uint32_t h2 = c2.handle;
+    struct drm_syncobj_wait bw = {.handles = (uintptr_t)&h2, .count_handles = 1,
+                                  .timeout_nsec = t0 + 5000000000LL};
+    int brc = ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &bw);
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t el = ((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec - t0) / 1000000;
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECK(brc == 0 && el >= 200 && el < 3000 && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+          "WAIT bloqueante despertado por otro proceso (%lld ms)", (long long)el);
+    CHECK(poll(&pf, 1, 1000) == 1 && (pf.revents & POLLIN), "sync_file pasa a senalado (poll)");
+    struct drm_syncobj_handle imp3 = {.fd = sf.fd,
+                                      .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE};
+    uint32_t h3;
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp3) == 0 && (h3 = imp3.handle), "import de sync_file");
+    struct drm_syncobj_wait w3 = {.handles = (uintptr_t)&h3, .count_handles = 1, .timeout_nsec = now};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &w3) == 0, "syncobj importado de sync_file senalado");
+    struct drm_syncobj_destroy dsy = {.handle = c2.handle};
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_DESTROY, &dsy) == 0, "SYNCOBJ_DESTROY");
+    errno = 0;
+    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_DESTROY, &dsy) < 0, "DESTROY de handle ya destruido falla");
+    close(sf.fd);
+    close(hf.fd);
+    close(sfd2);
+    close(sfd);
+  }
 
   // Limpieza
   CHECK(ioctl(fd, DRM_IOCTL_MODE_RMFB, &fbb.fb_id) == 0, "RMFB");
