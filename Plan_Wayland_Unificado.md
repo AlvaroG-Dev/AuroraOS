@@ -1,5 +1,7 @@
 # Plan unificado: Wayland + drivers gráficos + pendientes de drv_impl_plan
 
+> **Vista de conjunto, cómo reproducir las pruebas y decisiones abiertas: [`docs/Wayland_Estado_y_Decisiones.md`](docs/Wayland_Estado_y_Decisiones.md).** Este fichero es la bitácora detallada por bloques.
+
 Fusiona `Plan_Wayland.md` y `drv_impl_plan.md`. Orden por dependencias; cada bloque termina en un hito verificable en QEMU y no debe romper la suite existente (175/175).
 
 ## OBJETIVO (aclarado por el autor) — leer primero
