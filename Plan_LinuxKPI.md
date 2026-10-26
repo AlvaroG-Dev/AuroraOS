@@ -231,7 +231,7 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
 6. ~~**Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**~~ → **6.18.59** y **20261019** (sección 11); L0.3 repetida, también con NVIDIA 615.78.08.
 7. ~~**RCU antes de usar `xarray`/`idr` con lectores concurrentes**~~ → hecho en L2 (`kfree_rcu` en `xa_node_free`).
-8. **Cambios en Aurora que L2 no ha hecho** (rechazados o pendientes de decisión, ver §11 L2): plazos de espera a 1 ms (hoy ~8 ms), `task_t->lkpi_task` para `current`, exportar `signal_pending`, y el arreglo de `sched_current()` (lectura atómica de `current_task`).
+8. **Cambios en Aurora tras L2**: ~~plazos de espera a 1 ms~~ y ~~`sched_current()` atómico~~ → hechos (§11, «Versión fijada, `sched_current()`, plazos a 1 ms»). Siguen rechazados `task_t->lkpi_task` para `current` y exportar `signal_pending` (necesarios en K8, L4).
 
 ## 11. Decisiones (registro)
 
