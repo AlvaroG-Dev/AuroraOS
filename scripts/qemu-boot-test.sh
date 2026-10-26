@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 T=90
 if [ "$1" = "-t" ]; then T=$2; shift 2; fi
 LOG=${LOG:-/tmp/boot-test.log}
+rm -f "$LOG"   # sin restos de una ejecucion anterior (QMON_WAIT los confundiria)
 printf '%s\n' "$@" > sysroot/system/boot-tests
 trap 'rm -f sysroot/system/boot-tests' EXIT
 make iso >/tmp/boot-test-build.log 2>&1 || { tail -30 /tmp/boot-test-build.log; exit 1; }
