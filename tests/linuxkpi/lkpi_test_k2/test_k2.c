@@ -5,8 +5,9 @@
  * tasklets, irq_work, kthreads, percpu y cpumask. Funcionan con una CPU; el
  * estres con varias esta en lkpi_test_k2_smp.
  *
- * Los plazos de Aurora tienen ~8 ms de resolucion: las comprobaciones de
- * tiempo solo exigen "no antes de" y un margen amplio por arriba (TCG).
+ * Los plazos de Aurora tienen la resolucion del tick (1 ms). En TCG el
+ * tiempo real es ruidoso: las comprobaciones exigen "no antes de" y, por
+ * arriba, un margen amplio (y una media, no un caso suelto).
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -189,6 +190,18 @@ static void test_time(void)
 	j0 = jiffies;
 	KT_EQ(schedule_timeout_uninterruptible(10), 0);
 	KT_ASSERT(time_after_eq(jiffies, j0 + 10), "schedule_timeout(10)");
+
+	/* Resolucion de 1 ms: media de 20 esperas cortas. */
+	j0 = jiffies;
+	for (i = 0; i < 20; i++)
+		schedule_timeout_uninterruptible(1);
+	KT_ASSERT(jiffies - j0 >= 20 && jiffies - j0 <= 80,
+		  "20 x schedule_timeout(1) en %lu jiffies", jiffies - j0);
+	j0 = jiffies;
+	for (i = 0; i < 20; i++)
+		msleep(1);
+	KT_ASSERT(jiffies - j0 >= 20 && jiffies - j0 <= 100, "20 x msleep(1) en %lu jiffies",
+		  jiffies - j0);
 	j0 = jiffies;
 	set_current_state(TASK_RUNNING);
 	KT_ASSERT(schedule_timeout(50) > 0 && time_before(jiffies, j0 + 50),

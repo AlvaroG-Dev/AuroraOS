@@ -2,8 +2,8 @@
 /*
  * timer_list. Las funciones de los timers corren en el hilo lkpi_softirqd
  * (contexto "softirq" de la capa), no en la IRQ del tick. Resolucion: la de
- * los plazos de espera de Aurora (sched_wake_expired, cada 8 ticks), asi que
- * un timer puede llegar hasta ~8 ms tarde; nunca antes.
+ * los plazos de espera de Aurora (el tick, 1 ms): un timer puede llegar uno
+ * o dos ticks tarde (mas con la CPU cargada); nunca antes.
  */
 #ifndef _LKPI_LINUX_TIMER_H
 #define _LKPI_LINUX_TIMER_H

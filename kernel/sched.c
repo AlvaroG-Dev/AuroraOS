@@ -560,10 +560,22 @@ void sched_mark_need_resched(void) {
 // (sched_wake_expired) leyendo bajo sched_lock. En x86 TSO la race
 // era benigna, pero hacerla explícita evita que un cambio futuro de
 // orden de escrituras introduzca un bug sutil.
+// Plazo (tick) mas cercano entre las tareas BLOCKED con wake_deadline.
+// Solo se escribe bajo sched_lock; time_tick() lo lee sin cerrojo para
+// llamar a sched_wake_expired() en el tick en que vence (resolucion de 1 ms)
+// sin recorrer la lista en cada tick. UINT64_MAX = ninguno.
+static volatile uint64_t g_next_wake_deadline = UINT64_MAX;
+
+uint64_t sched_next_wake_deadline(void) {
+  return __atomic_load_n(&g_next_wake_deadline, __ATOMIC_RELAXED);
+}
+
 void sched_set_blocked_deadline(task_t *t, uint64_t deadline) {
   unsigned long flags = spin_lock_irqsave(&sched_lock);
   t->state = TASK_BLOCKED;
   t->wake_deadline = deadline;
+  if (deadline && deadline < g_next_wake_deadline)
+    __atomic_store_n(&g_next_wake_deadline, deadline, __ATOMIC_RELAXED);
   spin_unlock_irqrestore(&sched_lock, flags);
 
 }
@@ -1035,10 +1047,39 @@ uint64_t sched_get_ticks(void) { return tick_count; }
 //     procesan 32 y los demás quedan para el siguiente tick. En la
 //     práctica nunca pasa.
 //
-//  2) La función sigue llamándose desde CPU0, pero ahora a 125 Hz
-//     (tick_count & 7 en time.c). La granularidad de 8 ms es
-//     suficiente para timeouts de usuario y elimina 7/8 del coste.
+//  2) La función se llama desde CPU0 a 125 Hz (tick_count & 7 en time.c)
+//     y, además, en el tick en que vence el plazo más cercano
+//     (g_next_wake_deadline, que se recalcula aquí). Así los plazos tienen
+//     resolución de 1 ms sin recorrer la lista en cada tick.
 // ---------------------------------------------------------------------------
+// [Plazos a 1 ms] Lo que despierta un plazo vencido pasa a READY; si hay
+// una CPU ociosa, sched_make_ready() ya la avisó. Si todas están ocupadas,
+// esperaría hasta SCHED_INTERVAL ticks: se pide un cambio (need_resched,
+// efectivo en su siguiente tick) a la CPU cuya tarea lleva más tiempo
+// seguida. Solo para despertares por plazo; el resto no cambia.
+static void sched_preempt_for_timeouts(void) {
+  int best = -1;
+  uint64_t best_ticks = 0;
+
+  for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+    task_t *cur = sched_read_current(cpu);
+    if (!cur || !sched_task_ptr_valid(cur))
+      continue;
+    if (cur->is_idle)
+      return; // hay una CPU libre
+    uint64_t t = per_cpu(ticks_since_resched, cpu);
+    if (best < 0 || t > best_ticks) {
+      best = cpu;
+      best_ticks = t;
+    }
+  }
+  if (best >= 0) {
+    task_t *cur = sched_read_current(best);
+    if (cur && sched_task_ptr_valid(cur))
+      __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
+  }
+}
+
 void sched_wake_expired(void) {
   uint64_t now = sched_get_ticks();
 #define WAKE_EXPIRED_BATCH 32
@@ -1050,15 +1091,21 @@ void sched_wake_expired(void) {
   timeout_target_t targets[WAKE_EXPIRED_BATCH];
 
   size_t n = 0;
+  uint64_t next = UINT64_MAX;
   unsigned long flags = spin_lock_irqsave(&sched_lock);
 
   if (task_list_head) {
     task_t *p = task_list_head, *s = p;
     do {
+      if (p->state == TASK_BLOCKED && p->wake_deadline > now &&
+          p->wake_deadline < next)
+        next = p->wake_deadline;
       if (p->state == TASK_BLOCKED && p->wake_deadline > 0 &&
           now >= p->wake_deadline && p->waiting_on) {
-        if (n >= WAKE_EXPIRED_BATCH)
+        if (n >= WAKE_EXPIRED_BATCH) {
+          next = now + 1; // lote lleno: el resto, en el siguiente tick
           break;
+        }
         targets[n].task = p;
         targets[n].wq = p->waiting_on;
         targets[n].wait_seq = __atomic_load_n(&p->wait_seq, __ATOMIC_ACQUIRE);
@@ -1069,6 +1116,7 @@ void sched_wake_expired(void) {
       p = p->next;
     } while (p && p != s);
   }
+  __atomic_store_n(&g_next_wake_deadline, next, __ATOMIC_RELAXED);
 
   spin_unlock_irqrestore(&sched_lock, flags);
 
@@ -1077,6 +1125,8 @@ void sched_wake_expired(void) {
                                  targets[i].wait_seq);
     task_put(targets[i].task);
   }
+  if (n > 0)
+    sched_preempt_for_timeouts();
 #undef WAKE_EXPIRED_BATCH
 }
 

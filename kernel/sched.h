@@ -128,6 +128,8 @@ void task_entry_wrapper(void (*fn)(void));
 void task_die_hlt(void);
 
 void sched_wake_expired(void);
+// Tick del plazo de espera mas cercano (UINT64_MAX si no hay ninguno).
+uint64_t sched_next_wake_deadline(void);
 
 // [LinuxKPI RCU] Ticks de la CPU `cpu` que llegaron con preempt_count == 0
 // (estados quiescentes). 0 si la CPU nunca ha tenido un tick.

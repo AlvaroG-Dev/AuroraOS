@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Esperas. udelay/ndelay/mdelay son esperas activas sobre el TSC. msleep y
- * usleep_range duermen; como los plazos de Aurora tienen una resolucion de
- * ~8 ms, usleep_range() con un minimo por debajo de LKPI_USLEEP_SPIN_US hace
- * espera activa en lugar de dormir (llega a tiempo y no tarda 8 ms).
+ * usleep_range duermen; como los plazos de Aurora tienen la resolucion del
+ * tick (1 ms), usleep_range() con un minimo por debajo de LKPI_USLEEP_SPIN_US
+ * hace espera activa en lugar de dormir (no tarda de mas por redondear al
+ * tick).
  */
 #ifndef _LKPI_LINUX_DELAY_H
 #define _LKPI_LINUX_DELAY_H
@@ -13,7 +14,7 @@
 #include <linux/sched.h>
 
 #define MAX_UDELAY_MS 5
-#define LKPI_USLEEP_SPIN_US 2000
+#define LKPI_USLEEP_SPIN_US 1000
 
 void lkpi_ndelay(unsigned long nsecs);
 void lkpi_msleep(unsigned int msecs);

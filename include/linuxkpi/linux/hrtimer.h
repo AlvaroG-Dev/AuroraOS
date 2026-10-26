@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * hrtimer: plazos en ns (ktime_get(), TSC) que se disparan en el hilo
- * lkpi_softirqd. La precision real es la del despertar de ese hilo (hasta
- * ~8 ms tarde, igual que timer_list); nunca se disparan antes de tiempo.
+ * lkpi_softirqd. La precision real es la del despertar de ese hilo (el tick
+ * de Aurora, 1 ms, igual que timer_list); nunca se disparan antes de tiempo.
  */
 #ifndef _LKPI_LINUX_HRTIMER_H
 #define _LKPI_LINUX_HRTIMER_H

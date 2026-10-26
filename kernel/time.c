@@ -80,8 +80,9 @@ void time_tick(void) {
     if (tick_count % KERNEL_HZ == 0) {
       compositor_notify_clock_tick();
     }
-    // [FIX] sched_wake_expired a 125 Hz en vez de 1 kHz.
-    if ((tick_count & 7) == 0) {
+    // [FIX] sched_wake_expired a 125 Hz en vez de 1 kHz, y además en el
+    // tick en que vence el plazo más cercano (resolución de 1 ms).
+    if ((tick_count & 7) == 0 || tick_count >= sched_next_wake_deadline()) {
       sched_wake_expired();
     }
     // Aging de ARP a 1 Hz.

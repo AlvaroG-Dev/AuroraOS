@@ -6115,6 +6115,69 @@ static void test_evdev_keyboard_events(void) {
 REGISTER_TEST("evdev: teclado, SYN, autorepeat, ioctl",
               test_evdev_keyboard_events);
 
+// --- Plazos de espera con resolución de 1 ms ---------------------------------
+// sched_wake_expired() corre también en el tick en que vence el plazo más
+// cercano (antes solo cada 8 ticks). Se mide el instante en que decide el
+// despertar (retira wake_deadline), no cuándo vuelve a correr la tarea, que
+// depende de la carga: un observador con la expulsión desactivada vigila a un
+// kthread que encadena esperas de 3 ticks. Con el código anterior solo ~1/4
+// de los despertares llegaba en el tick del plazo o el siguiente.
+#define DL_1MS_ROUNDS 12
+static wait_queue_t g_dl_1ms_wq;
+static volatile int g_dl_1ms_done;
+
+static bool deadline_1ms_never(void *arg) {
+  (void)arg;
+  return false;
+}
+
+static int deadline_1ms_waiter(void *arg) {
+  (void)arg;
+  for (int i = 0; i < DL_1MS_ROUNDS; i++)
+    wait_event_timeout(&g_dl_1ms_wq, deadline_1ms_never, NULL, 3);
+  __atomic_store_n(&g_dl_1ms_done, 1, __ATOMIC_RELEASE);
+  return 0;
+}
+
+static void test_sched_deadline_1ms(void) {
+  wait_queue_init(&g_dl_1ms_wq);
+  g_dl_1ms_done = 0;
+  struct kthread *kt = kthread_run(deadline_1ms_waiter, NULL, "dl_1ms");
+  TEST_ASSERT(kt != NULL, "kthread_run");
+  if (!kt)
+    return;
+  volatile task_t *t = kthread_task(kt);
+  int seen = 0, on_time = 0;
+  uint64_t guard = sched_get_ticks() + 5000;
+
+  preempt_disable();
+  while (!__atomic_load_n(&g_dl_1ms_done, __ATOMIC_ACQUIRE) &&
+         sched_get_ticks() < guard) {
+    uint64_t dl = t->wake_deadline;
+    if (t->state != TASK_BLOCKED || dl == 0) {
+      __asm__ volatile("pause");
+      continue;
+    }
+    while (t->wake_deadline == dl && sched_get_ticks() < guard)
+      __asm__ volatile("pause");
+    uint64_t at = sched_get_ticks();
+    seen++;
+    if (at <= dl + 1)
+      on_time++;
+  }
+  preempt_enable();
+  kthread_stop(kt);
+
+  klog_printf(KLOG_INFO, "[TEST] plazos 1 ms: %d de %d despertares a tiempo",
+              on_time, seen);
+  TEST_ASSERT(g_dl_1ms_done, "el kthread no terminó sus esperas");
+  TEST_ASSERT(seen >= DL_1MS_ROUNDS / 2, "solo %d esperas observadas", seen);
+  TEST_ASSERT(on_time * 4 >= seen * 3, "%d de %d despertares en el tick del plazo",
+              on_time, seen);
+}
+REGISTER_TEST_FLAGS("sched: plazos de espera con resolución de 1 ms",
+                    test_sched_deadline_1ms, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
 // --- LinuxKPI (Plan_LinuxKPI.md, L0.5) -------------------------------------
 // La capa (linuxkpi.kur) y sus pruebas son .kur en /lib/modules/linuxkpi/.
 // Cada .kur de prueba hace sus comprobaciones en module_init y las cuenta

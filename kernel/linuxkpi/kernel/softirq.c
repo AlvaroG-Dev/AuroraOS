@@ -6,7 +6,7 @@
  * spin_lock_bh() sea un spin_lock() normal.
  *
  * Los timers estan en listas ordenadas por vencimiento. El hilo duerme hasta
- * el primero (resolucion de los plazos de Aurora, ~8 ms) o hasta que llega
+ * el primero (resolucion de los plazos de Aurora, 1 ms) o hasta que llega
  * trabajo nuevo. Quien espera a que termine una funcion en curso
  * (del_timer_sync, hrtimer_cancel, tasklet_kill, irq_work_sync) duerme en
  * lkpi_sq_done.
