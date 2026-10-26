@@ -56,6 +56,17 @@ rm -rf "$PRE/usr/share/icons/Adwaita/cursors"
 copy_dir /usr/share/themes/Default "$PRE/usr/share/themes/Default"
 copy_dir /usr/share/gtk-3.0 "$PRE/usr/share/gtk-3.0"
 copy_dir /usr/share/glvnd "$PRE/usr/share/glvnd"
+# lanzadores (.desktop) propios (los de GTK vienen con NoDisplay=true): aurora-wayland
+# los fija en el Dock
+mkdir -p "$PRE/usr/share/applications"
+mkdesktop() { # id Nombre ejecutable
+    printf '[Desktop Entry]\nType=Application\nName=%s\nExec=/usr/bin/%s\nStartupWMClass=%s\n' "$2" "$3" "$3" \
+        > "$PRE/usr/share/applications/$1.desktop"
+}
+mkdesktop gtk3-widget-factory "GTK Widget Factory" gtk3-widget-factory
+mkdesktop gtk3-icon-browser "GTK Icon Browser" gtk3-icon-browser
+mkdesktop qt5-gallery "Qt Widget Gallery" qt5-gallery
+mkdesktop qt5-application "Qt Application" qt5-application
 copy_dir /usr/share/locale/es "$PRE/usr/share/locale/es" || true
 # cache de loaders de gdk-pixbuf (el postinst la genera en el host)
 LC=$G/gdk-pixbuf-2.0/2.10.0/loaders.cache

@@ -11,6 +11,7 @@
 //
 // No es Weston ni un escritorio aparte: no hay scanout propio (no toca DRM).
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fnmatch.h>
 #include <fcntl.h>
@@ -3023,6 +3024,106 @@ static int has_launcher(const char *app_id) {
   return 0;
 }
 
+// Aplicaciones instaladas: /usr/share/applications/*.desktop (freedesktop).
+// Se fijan en el Dock tras las de dock.conf (hasta MAX_LAUNCHERS) con el icono
+// generico de Aurora. app_id = StartupWMClass o, si falta, el nombre del
+// ejecutable (lo que declaran GTK/Qt con xdg_toplevel.set_app_id).
+#define APPS_DIR "/usr/share/applications"
+static void desktop_exec_clean(char *dst, size_t n, const char *exec) {
+  size_t o = 0;
+  for (const char *p = exec; *p && o + 1 < n; p++) {
+    if (*p == '%' && p[1]) { /* codigos de campo %f %F %u %U %i %c %k */
+      p++;
+      continue;
+    }
+    if (*p == '"')
+      continue;
+    dst[o++] = *p;
+  }
+  while (o && dst[o - 1] == ' ')
+    o--;
+  dst[o] = 0;
+}
+
+static void desktop_launchers_load(void) {
+  DIR *d = opendir(APPS_DIR);
+  if (!d)
+    return;
+  struct dirent *e;
+  while (g_nlaunchers < MAX_LAUNCHERS && (e = readdir(d)) != NULL) {
+    size_t nl = strlen(e->d_name);
+    if (nl < 9 || strcmp(e->d_name + nl - 8, ".desktop") != 0)
+      continue;
+    char path[320];
+    snprintf(path, sizeof(path), APPS_DIR "/%s", e->d_name);
+    FILE *f = fopen(path, "r");
+    if (!f)
+      continue;
+    char name[32] = "", exec[192] = "", wmclass[48] = "", line[512];
+    int in_entry = 0, hidden = 0, is_app = 0;
+    while (fgets(line, sizeof(line), f)) {
+      char *t = trim(line);
+      if (t[0] == '[') {
+        in_entry = !strcmp(t, "[Desktop Entry]");
+        continue;
+      }
+      if (!in_entry)
+        continue;
+      if (!strncmp(t, "Name=", 5) && !name[0])
+        snprintf(name, sizeof(name), "%s", t + 5);
+      else if (!strncmp(t, "Exec=", 5))
+        desktop_exec_clean(exec, sizeof(exec), t + 5);
+      else if (!strncmp(t, "StartupWMClass=", 15))
+        snprintf(wmclass, sizeof(wmclass), "%s", t + 15);
+      else if (!strcmp(t, "NoDisplay=true") || !strcmp(t, "Hidden=true") ||
+               !strcmp(t, "Terminal=true"))
+        hidden = 1;
+      else if (!strcmp(t, "Type=Application"))
+        is_app = 1;
+    }
+    fclose(f);
+    if (!is_app || hidden || !name[0] || !exec[0])
+      continue;
+    // app_id: StartupWMClass o basename del ejecutable.
+    char app_id[48];
+    if (wmclass[0]) {
+      snprintf(app_id, sizeof(app_id), "%s", wmclass);
+    } else {
+      char tmp[192];
+      snprintf(tmp, sizeof(tmp), "%s", exec);
+      char *sp = strchr(tmp, ' ');
+      if (sp)
+        *sp = 0;
+      const char *base = strrchr(tmp, '/');
+      snprintf(app_id, sizeof(app_id), "%s", base ? base + 1 : tmp);
+    }
+    int dup = 0;
+    for (int i = 0; i < g_nlaunchers; i++)
+      if (!strcmp(g_launchers[i].app_id, app_id))
+        dup = 1;
+    if (dup)
+      continue;
+    int i = g_nlaunchers;
+    snprintf(g_launchers[i].name, sizeof(g_launchers[i].name), "%s", name);
+    snprintf(g_launchers[i].app_id, sizeof(g_launchers[i].app_id), "%s", app_id);
+    // Simbolo = iniciales de las dos primeras palabras (o las dos primeras
+    // letras): las baldosas sin icono se distinguen por letras y color.
+    const char *w2 = strchr(name, ' ');
+    g_launchers[i].symbol[0] = name[0];
+    g_launchers[i].symbol[1] = (w2 && w2[1]) ? w2[1] : (name[1] ? name[1] : 0);
+    g_launchers[i].symbol[2] = 0;
+    uint32_t h = 2166136261u; /* color estable por nombre (FNV-1a) */
+    for (const char *c = app_id; *c; c++)
+      h = (h ^ (uint8_t)*c) * 16777619u;
+    g_launchers[i].color = 0xFF000000u | (0x30 + (h & 0x5F)) << 16 |
+                           (0x30 + ((h >> 8) & 0x5F)) << 8 | (0x40 + ((h >> 16) & 0x7F));
+    g_launchers[i].icon[0] = 0; /* sin icono: baldosa con simbolo y color */
+    snprintf(g_launchers[i].cmd, sizeof(g_launchers[i].cmd), "%s", exec);
+    g_nlaunchers++;
+  }
+  closedir(d);
+}
+
 static void launchers_pin(void) {
   for (int i = 0; i < g_nlaunchers; i++) {
     struct {
@@ -3069,7 +3170,7 @@ static void launch_app(int idx) {
   signal(SIGPIPE, SIG_DFL);
   setenv("XDG_RUNTIME_DIR", "/run/user/0", 0);
   setenv("WAYLAND_DISPLAY", "wayland-0", 0);
-  execv(argv[0], argv);
+  execvp(argv[0], argv); /* ruta absoluta o nombre en PATH (.desktop) */
   _exit(127);
 }
 
@@ -3196,6 +3297,7 @@ int main(int argc, char **argv) {
   }
   if (!g_mock) {
     launchers_load();
+    desktop_launchers_load();
     launchers_pin();
   }
   g_launch_timer = wl_event_loop_add_timer(g_loop, launch_poll, NULL);
