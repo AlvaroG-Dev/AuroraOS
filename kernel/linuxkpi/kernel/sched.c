@@ -121,44 +121,9 @@ static struct task_struct *lkpi_task_get_or_create(struct aurora_task *at, const
 	return p;
 }
 
-/*
- * Ver lkpi_preempt_disable() en core.c: sched_current() no es atomico. Lo
- * mismo vale para lo que Aurora hace por dentro con la tarea actual:
- * sched_yield() (sched_tick lee this_cpu(current_task)) y kthread_stop()
- * (wait_common usa sched_current() y, si lee la tarea equivocada, la deja
- * BLOCKED en su cola). Se llaman con las IRQ desactivadas: cada tarea
- * guarda sus propios flags al cambiar, asi que al volver aqui se restauran
- * los nuestros.
- */
-static struct aurora_task *lkpi_aurora_current(void)
+static inline struct aurora_task *lkpi_aurora_current(void)
 {
-	struct aurora_task *at;
-	unsigned long flags;
-
-	local_irq_save(flags);
-	at = aurora_sched_current();
-	local_irq_restore(flags);
-	return at;
-}
-
-static void lkpi_aurora_yield(void)
-{
-	unsigned long flags;
-
-	local_irq_save(flags);
-	aurora_sched_yield();
-	local_irq_restore(flags);
-}
-
-static int lkpi_aurora_kthread_stop(struct aurora_kthread *akt)
-{
-	unsigned long flags;
-	int ret;
-
-	local_irq_save(flags);
-	ret = aurora_kthread_stop(akt);
-	local_irq_restore(flags);
-	return ret;
+	return aurora_sched_current();	/* lectura atomica de %gs:current_task */
 }
 
 struct task_struct *lkpi_get_current(void)
@@ -182,13 +147,7 @@ EXPORT_SYMBOL(lkpi_put_task_struct);
 
 int lkpi_preempt_count(void)
 {
-	unsigned long flags;
-	int n;
-
-	local_irq_save(flags);
-	n = aurora_preempt_count();
-	local_irq_restore(flags);
-	return n;
+	return aurora_preempt_count();
 }
 EXPORT_SYMBOL(lkpi_preempt_count);
 
@@ -202,7 +161,7 @@ EXPORT_SYMBOL(lkpi_in_serving_softirq);
 /*
  * Aparca la tarea actual si su __state no es TASK_RUNNING, hasta que
  * wake_up_process() la despierte o venza `deadline` (tick de Aurora; 0 =
- * sin plazo). Aurora revisa los plazos cada 8 ticks.
+ * sin plazo). Aurora despierta en el tick en que vence el plazo.
  */
 static void lkpi_park_current(struct task_struct *p, u64 deadline)
 {
@@ -219,7 +178,7 @@ static void lkpi_park_current(struct task_struct *p, u64 deadline)
 	aurora_sched_set_blocked_deadline(at, deadline);
 	aurora_spin_unlock_irqrestore(&park->lock, flags);
 
-	lkpi_aurora_yield();
+	aurora_sched_yield();
 
 	/* Si vencio el plazo, Aurora ya nos saco de la cola; si no, no estamos. */
 	flags = aurora_spin_lock_irqsave(&park->lock);
@@ -292,7 +251,7 @@ EXPORT_SYMBOL(lkpi_wake_up_process);
 
 void lkpi_yield(void)
 {
-	lkpi_aurora_yield();
+	aurora_sched_yield();
 }
 EXPORT_SYMBOL(lkpi_yield);
 
@@ -387,7 +346,7 @@ int lkpi_kthread_stop(struct task_struct *p)
 	WRITE_ONCE(kt->should_stop, true);
 	smp_mb();
 	wake_up_process(p);
-	lkpi_aurora_kthread_stop(kt->akt);	/* espera a que el hilo termine */
+	aurora_kthread_stop(kt->akt);	/* espera a que el hilo termine */
 	ret = kt->result;
 	p->__lkpi_kthread = NULL;
 	kfree(kt);

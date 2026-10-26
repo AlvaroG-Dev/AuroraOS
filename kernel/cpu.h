@@ -53,6 +53,20 @@ typedef struct {
 extern cpu_local_t cpu_local_data[MAX_CPUS];
 
 #define this_cpu(field) (cpu_local_data[smp_processor_id()].field)
+
+// Tarea actual de esta CPU con UNA instruccion relativa a %gs. this_cpu()
+// hace dos lecturas (cpu_id y luego cpu_local_data[cpu]): si la tarea se
+// expulsa y migra entre ambas, obtiene la tarea actual de su CPU anterior.
+// Una sola instruccion no se puede partir, asi que el resultado es siempre
+// la tarea que la ejecuta (como `current` en Linux).
+#define CPU_LOCAL_CURRENT_TASK_OFFSET 24
+static inline void *this_cpu_current_task(void) {
+  void *t;
+  __asm__ volatile("movq %%gs:%c1, %0"
+                   : "=r"(t)
+                   : "i"(CPU_LOCAL_CURRENT_TASK_OFFSET));
+  return t;
+}
 #define per_cpu(field, cpu) (cpu_local_data[cpu].field)
 
 extern int cpu_smap_enabled;
@@ -216,5 +230,8 @@ _Static_assert(offsetof(cpu_local_t, user_rsp) == 8,
                "syscall_entry.asm lee [gs:8] como user_rsp");
 _Static_assert(offsetof(cpu_local_t, cpu_id) == CPU_LOCAL_CPU_ID_OFFSET,
                "smp_processor_id() lee %gs:cpu_id");
+_Static_assert(offsetof(cpu_local_t, current_task) ==
+                   CPU_LOCAL_CURRENT_TASK_OFFSET,
+               "this_cpu_current_task() lee %gs:current_task");
 
 #endif

@@ -403,7 +403,8 @@ uint64_t sched_rcu_qs_count(int cpu) {
 }
 
 void sched_tick(void) {
-  task_t *curr = (task_t *)this_cpu(current_task);
+  // Lectura atomica: sched_yield() llega aqui con las IRQ activas.
+  task_t *curr = (task_t *)this_cpu_current_task();
   if (!curr)
     return;
 
@@ -538,7 +539,11 @@ void sched_yield(void) {
   sched_tick();
 }
 
-task_t *sched_current(void) { return (task_t *)this_cpu(current_task); }
+// [FIX] Una sola lectura de %gs:current_task (ver this_cpu_current_task):
+// con this_cpu() una tarea expulsada entre el cpu_id y el current_task podia
+// obtener la tarea de su CPU anterior, y p. ej. preempt_disable() subia el
+// contador de otra tarea.
+task_t *sched_current(void) { return (task_t *)this_cpu_current_task(); }
 
 // ---------------------------------------------------------------------------
 // [SMP 4.4] Marcar need_resched en la tarea actual.
