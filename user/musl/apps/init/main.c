@@ -69,6 +69,8 @@ static char *default_envp[] = {
     "GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
     "NO_AT_BRIDGE=1",
     "QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins",
+    // Tema de plataforma de Aurora: Fusion + paleta + QSS (user/aurora-qt-theme).
+    "QT_QPA_PLATFORMTHEME=aurora",
     "XDG_CONFIG_HOME=/tmp/.config",
     "XDG_CONFIG_DIRS=/usr/share/aurora/xdg",
     "XDG_CACHE_HOME=/tmp/.cache",
