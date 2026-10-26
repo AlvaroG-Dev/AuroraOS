@@ -325,10 +325,10 @@ Objetivo: pasar del compositor/terminal actual a un entorno gráfico usable.
 - [ ] Separar claramente primitivas de dibujo, compositor y window server.
 
 ### 4.4 Aceleración
-- [ ] Definir una abstracción gráfica/GPU.
+- [x] Definir una abstracción gráfica/GPU: `/dev/gpuproxy` + `AUR_CAP_GPU` (`kernel/gpu_proxy.c`), con `virtio_gpu.aur` y `bochs.aur`.
 - [ ] Investigar framebuffer double buffering.
-- [ ] Driver GPU/DRM-KMS cuando exista una base estable para ello.
-- [ ] Aceleración 2D/3D solo después de estabilizar el escritorio.
+- [x] DRM/KMS (`kernel/drm/`, nodos `card0`/`renderD128`, atomic, dumb buffers, EDID) y servidor Wayland nativo (`aurora-wayland`): apps Linux gráficas (foot, GTK3, Qt5, clientes EGL con Mesa llvmpipe) como ventanas normales de Aurora. Ver `Plan_Wayland_Unificado.md`.
+- [~] Aceleración 3D: solo por software (Mesa llvmpipe sobre `wl_shm`); virgl/dma-buf pendientes.
 
 ---
 

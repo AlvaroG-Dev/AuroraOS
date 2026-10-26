@@ -47,7 +47,9 @@ las desviaciones y los siguientes pasos.
     *   [x] `usb_bus` genérico (matchea por vendor/device/interface_class).
     *   [x] Migración de `ahci` y `xhci` al nuevo bus.
     *   [x] Migración de `usbhid`, `usb-storage` y `usb-hub` al bus USB.
-    *   [ ] `platform_bus` y `virtio_bus` (stubs).
+    *   [x] `virtio_bus`: **descartado para `.aur`**: un driver virtio de usuario se enlaza por
+        PCI (1af4:xxxx) como cualquier otro y habla virtio-pci moderno él mismo (ver
+        `virtio_gpu.aur`). `platform_bus` sigue como stub.
 *   [ ] **2.2 Modelo async universal (aur_req)**: **Descartado**. Se ha preferido
     el modelo de primitivas directas (`/dev/dma`, mmap, IRQs) por simplicidad y rendimiento.
 *   [ ] **2.3 Colas por dispositivo**: Descartado (sustituido por el modelo directo).
@@ -90,7 +92,9 @@ las desviaciones y los siguientes pasos.
     sin INTx >15 para `.aur` genéricos (el e1000e.aur usa su INTx legacy).
 *   [~] **4.6 Control Channel (VFS node)**: Resuelto por subsistema en lugar de
     `/dev/aur/<driver>/` genérico: `/dev/net0` (`net_proxy.c`) y `/dev/blkproxy`
-    (`block_proxy.c`, Fase 5.1). Falta un canal genérico para drivers de otras clases.
+    (`block_proxy.c`, Fase 5.1). Se ha mantenido el
+    modelo por subsistema y se añade `/dev/gpuproxy` (Fase 6.1 de la GPU, abajo); no se hará
+    un canal genérico.
 *   [x] **4.7 Bus matching user**: Implementado (`aur_bus.c`). Driver fallback del bus PCI
     que escanea `/usr/lib/aur/*.aur`, compara el manifiesto y lanza el `.aur`; habilita
     bus mastering y MEM/IO antes de lanzarlo. Lanza una instancia por dispositivo declinado
@@ -203,7 +207,10 @@ las desviaciones y los siguientes pasos.
 
 ## FASE 7 y 8 — Tooling, Tests y Extras
 *   [x] **7.1 aurbuild / kurbuild**: Implementados. `aurbuild --info` imprime el manifiesto.
-*   [ ] **7.2-7.4 Matriz de tests**: Pendiente (fuzzing, stress, qemu-matrix).
+*   [~] **7.2-7.4 Matriz de tests**: `tests/wayland/fuzz_test.c` (DRM ioctls aleatorios, dumb buffers
+    abandonados al cerrar, AF_UNIX con SCM_RIGHTS/cierres a medias, pares muertos con SIGKILL) corre
+    en el guest sin caídas del kernel ni de `aurora-wayland` (`tests/wayland/guest/fuzz.sh`). Falta
+    una matriz qemu completa (q35/pc, KVM/TCG) y fuzzing de los proxies de bloque/USB.
 *   [ ] **8.0 IOMMU/VT-d**: Pendiente. Actualmente el DMA no usa IOMMU, por lo que
     un `.aur` malicioso con `AUR_CAP_DMA` podría corromper RAM física. Mitigado por
     el diseño actual (solo `DMA_ALLOC`, no `DMA_MAP`), pero no es seguro a nivel de hardware.
@@ -236,3 +243,30 @@ Cómo se ejecuta	kur_init() se llama desde el loader del kernel.	Se lanza como u
 Acceso al hardware	Directo. Llama a funciones del kernel (ej. pci_read_config, outb).	Indirecto y seguro. Usa mmap (BARs), /dev/dma y /dev/irq.
 ¿Qué pasa si falla?	Kernel Panic. Un fallo de segmentación tumba el sistema.	SIGSEGV. El kernel mata el proceso y sigue funcionando.
 Uso típico	Drivers críticos (AHCI, memoria, buses).	Drivers de usuario, sandboxing, servicios.
+
+---
+
+## FASE GPU — Drivers de pantalla `.aur` (Plan Wayland, Bloques 1 y 6)
+*   [x] **G.1 `AUR_CAP_GPU` + `/dev/gpuproxy`** (`kernel/gpu_proxy.c`, ABI en `aur.h`, un único propietario):
+    `GPUP_INFO` (dónde está el framebuffer), `GPUP_ALLOC_FB` (framebuffer en RAM cuando el firmware no
+    dejó uno), `GPUP_REGISTER` (nombre, modos, EDID de 128 B, `AUR_GPU_NEEDS_PRESENT`) y
+    `GPUP_WAIT_PRESENT` (rectángulo sucio fusionado; el compositor llama a `gpup_notify_dirty()` tras
+    cada `present_rect`, sin bloquear). DRM expone el EDID como propiedad `EDID` del conector y el
+    nombre del adaptador en `DRM_IOCTL_VERSION`. Tests de kernel: `gpuproxy: validación del registro`,
+    `gpuproxy: rectángulo sucio fusionado` (suite 181/181).
+*   [x] **G.2 `bochs.aur`** (1234:1111, `-vga std`): lee EDID (BAR2+0) y registros DISPI por MMIO y registra
+    el adaptador (sin presentación: el framebuffer lineal de GOP ya es visible). *Validado en QEMU:*
+    `GPUP adaptador 'bochs-dispi': edid=128`. Sin cambio de resolución en caliente (el compositor trabaja a
+    la resolución de arranque).
+*   [x] **G.3 `virtio_gpu.aur`** (1af4:1050): virtio-pci moderno (capabilities, cola 0 sondeada), recurso 2D
+    `B8G8R8X8` cuyo backing es el framebuffer, `SET_SCANOUT`, `GET_EDID` si el dispositivo lo ofrece y, por
+    cada rectángulo sucio, `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`. **Pantalla tardía:** con
+    `-vga none -device virtio-gpu-pci` OVMF solo da un GOP «BltOnly» (sin framebuffer lineal) y antes
+    Aurora arrancaba sin pantalla; ahora `main.c` espera hasta 10 s a que el driver pida un framebuffer
+    (`GPUP_ALLOC_FB`, resolución del scanout 0), lo adopta (`fb_adopt_ram`) y arranca consola y compositor.
+    *Validado en QEMU:* escritorio de Aurora a 1280x800 en `virtio-gpu-pci` (captura por `screendump`).
+*   [ ] **G.4 virgl (3D) y G.5 vmsvga**: fuera de alcance (el render GL va por software con Mesa llvmpipe,
+    ver `Plan_Wayland_Unificado.md` 5.A.5).
+*   [x] **1.4 MSI-X para `.aur`**: ya resuelto por `AURMSI_ALLOC_N` (ver 4.5b en `aur.h`); virtio-gpu va por
+    sondeo y no lo necesita. **1.5 colas por CPU**: no necesario por ahora (compositor + clientes + drivers
+    caben en el planificador actual).

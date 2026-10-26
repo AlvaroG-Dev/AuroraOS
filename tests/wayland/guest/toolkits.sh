@@ -9,6 +9,7 @@ mkdir -p /tmp/.config /tmp/.cache /tmp/.local/share
 # Salida hacia el serie sin lanzar un proceso por linea (que se pierden).
 klog() { awk '{ print "TKLOG " substr($0, 1, 200) > "/dev/kmsg"; fflush("/dev/kmsg") }'; }
 [ -n "$STRACE" ] && echo "strace=$STRACE" > /dev/kmsg
+echo "TKLOG env: QT_QPA_PLATFORM=$QT_QPA_PLATFORM GDK_BACKEND=$GDK_BACKEND EGL_PLATFORM=$EGL_PLATFORM n=$(printenv | wc -l)" > /dev/kmsg
 /usr/bin/aurora-wayland >/tmp/aw.log 2>&1 &
 APID=$!
 sleep 3

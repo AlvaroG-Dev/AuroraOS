@@ -16,14 +16,14 @@ Decisiones por defecto (cambiar si no valen): integración **A** (cada toplevel 
 
 ## Bloque 0 — Cimientos (sin dependencias)
 - 0.1 Smoke tests reproducibles + `tests/wayland/run.sh`; activar logs `[SYSCALL-GAP]`/`[OPEN-FAIL]`. (Wayland F0.2-3, 7.2-7.4 de drv_impl_plan)
-- 0.2 Sysroot: libwayland, libdrm, xkbcommon, pixman, libinput, libevdev, mtdev, Mesa (kms_swrast), weston, foot; regenerar `ld.so.cache`.
+- 0.2 **[HECHO]** Sysroot (`scripts/fetch-wayland.sh`, `fetch-weston.sh`, `fetch-mesa.sh`, `fetch-toolkits.sh`): libwayland, libdrm, xkbcommon, pixman, libinput, libevdev, mtdev, Mesa (kms_swrast), weston, foot; regenerar `ld.so.cache`.
 
 ## Bloque 1 — Prerrequisitos de drv_impl_plan que Wayland necesita
-- 1.1 **Canal genérico de dispositivo para .aur (4.6 pendiente)** → base de `gpu_proxy`. Hacerlo antes de Fase 5 de Wayland.
-- 1.2 **`virtio_bus` real (2.1 pendiente)**: requisito de virtio-gpu (y virtio-input opcional).
-- 1.3 **Cap `AUR_CAP_GPU`** en `kernel/aur.h` + `aur_loader.c`.
-- 1.4 **MSI-X para .aur (limitación 4.5)**: virtio-gpu y xhci moderno lo usan; mientras tanto polling/MSI.
-- 1.5 **Per-CPU runqueues (1.7)**: opcional, recomendable antes de cargar compositor + clientes + drivers.
+- 1.1 **[HECHO por subsistema]** Se mantiene el modelo de proxies por clase (`/dev/gpuproxy` junto a net/blk/usb/input); no hay canal genérico.
+- 1.2 **[DESCARTADO para .aur]** `virtio_bus`: `virtio_gpu.aur` habla virtio-pci moderno por PCI; no hace falta bus propio.
+- 1.3 **[HECHO]** Cap `AUR_CAP_GPU` (bit 10) en `kernel/aur.h`; la comprueba `/dev/gpuproxy`.
+- 1.4 **[HECHO]** MSI-X para .aur (`AURMSI_ALLOC_N`); virtio-gpu va por sondeo.
+- 1.5 **[NO NECESARIO por ahora]** Per-CPU runqueues: compositor + clientes + drivers caben en el planificador actual.
 - 1.6 5.6 *winsrv.aur*: **no** se hace; el scanout vive en kernel (decisión A). Marcar como descartado.
 
 ## Bloque 2 — ABI Linux (Wayland F1)
@@ -51,21 +51,21 @@ Decisiones por defecto (cambiar si no valen): integración **A** (cada toplevel 
 **5.A Integración nativa en la interfaz de Aurora (OBJETIVO REAL, en curso):**
 - 5.A.1 **[HECHO, ver notas]** Servidor Wayland de Aurora (`aurora-wayland`, proceso de usuario, `libwayland-server` de Ubuntu): `wl_compositor`, `wl_subcompositor`, `wl_shm`, `wl_output`, `wl_seat`, `xdg_wm_base`/`xdg_toplevel`/`xdg_popup`, `wl_data_device_manager`, `xdg-decoration` (decoración del lado del servidor = la de Aurora).
 - 5.A.2 **[HECHO; maximizar/minimizar pedidos por el cliente, ver notas]** Puente con `winsrv`: un toplevel = una ventana de Aurora (título, tamaño, minimizar/maximizar/cerrar nativos, icono en el Dock); `wl_surface.commit` copia el `wl_buffer` a la ventana; popups y subsuperficies como capas dentro de ella.
-- 5.A.3 **[HECHO salvo cursor con mapa de bits del cliente; ver notas]** Input por foco: teclado/ratón del compositor de Aurora hacia el `wl_seat` del cliente enfocado (keymap con xkbcommon), cursor del cliente (`wl_pointer.set_cursor`) integrado en el cursor de Aurora, portapapeles compartido.
+- 5.A.3 **[HECHO]** Input por foco: teclado/ratón/rueda del compositor de Aurora hacia el `wl_seat` del cliente enfocado (keymap con xkbcommon), portapapeles y selección primaria; el cursor es siempre el de Aurora.
 - 5.A.4 **[HECHO: autoarranque, variables y lanzadores fijados en el Dock]** Lanzar apps Linux gráficas desde el Dock/Finder como cualquier otra app (variables `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` ya preparadas por el sistema).
-- 5.A.5 Mesa/EGL (kms_swrast) para clientes GL por `wl_drm`/dmabuf o `wl_shm` con renderizado por software.
+- 5.A.5 **[HECHO, ver notas]** Mesa/EGL con llvmpipe/softpipe sobre `wl_shm` (plataforma EGL «wayland», sin DRM); GTK3 y Qt5 reales.
 - **Hito real:** `foot`, `weston-terminal`, `weston-flower` y una app GTK/Qt se abren como ventanas normales de Aurora, con teclado y ratón, junto a las apps nativas, sin ningún otro escritorio.
 
 ## Bloque 6 — Drivers gráficos `.aur` (F5)
-- 6.1 `gpu_proxy.c` (patrón input/net proxy) + registro de connector/CRTC/plane/EDID.
-- 6.2 `bochs.aur` (1234:1111) → 6.3 `virtio_gpu.aur` 2D → 6.4 virgl (opcional) → 6.5 vmsvga.
+- 6.1 **[HECHO]** `kernel/gpu_proxy.c` (`/dev/gpuproxy`, patrón input/net proxy): registro de adaptador, EDID (propiedad `EDID` del conector DRM), rectángulos sucios y framebuffer en RAM.
+- 6.2 **[HECHO]** `bochs.aur` (1234:1111) → 6.3 **[HECHO]** `virtio_gpu.aur` 2D → 6.4 virgl y 6.5 vmsvga **[fuera de alcance]** (GL por software con Mesa).
 - Reutiliza supervisor (6.3), watchdog (6.2) y hot-plug PCI (6.4) de drv_impl_plan: añadir plazos/watchdog a `gpu_proxy`.
 
 ## Bloque 7 — Robustez y pulido
-- 7.1 Hardening: tests de estrés (cliente muerto con buffers, cierre de fd en flip), fuzzing de ioctls DRM/AF_UNIX.
-- 7.2 IOMMU/VT-d (8.0): cada `.aur` GPU con `AUR_CAP_DMA` es riesgo; PRIME/dma-buf comparten memoria física.
-- 7.3 `wp_presentation`, dmabuf, hotplug de monitores, multi-CRTC, touch.
-- 7.4 Actualizar `TODO.md`, `ROADMAP.md`, `glibc_port.md`, `drv_impl_plan.md`.
+- 7.1 **[HECHO]** Hardening: `tests/wayland/fuzz_test.c` (ioctls DRM aleatorios, dumb buffers abandonados, AF_UNIX con SCM_RIGHTS, pares muertos): sin caídas.
+- 7.2 **[PENDIENTE]** IOMMU/VT-d (8.0): cada `.aur` GPU con `AUR_CAP_DMA` es riesgo; PRIME/dma-buf comparten memoria física.
+- 7.3 `wp_presentation` **[HECHO]**; dmabuf, hotplug de monitores, multi-CRTC y touch **[PENDIENTES, fuera del producto actual]**.
+- 7.4 **[HECHO]** `TODO.md`, `ROADMAP.md`, `glibc_port.md`, `drv_impl_plan.md` actualizados.
 
 ## Fuera de alcance
 Intel/AMD reales, Xwayland (hasta que 2.1 y dmabuf estén estables).
@@ -135,7 +135,14 @@ SCM_RIGHTS (refcounts de `file*`), Weston exige atomic KMS + libseat, Mesa/LLVM 
   - **Subsuperficies, viewporter, cursor, selección primaria y pantalla completa (5.A.3, hecho y validado en QEMU; capturas `build/capturas/aw_subsurfaces.png`, `aw_fullscreen_foot.png`):**
     - *Árbol de superficies:* cada `wl_surface` guarda su último contenido (`scratch`, ARGB; la raíz se fuerza opaca, las subsuperficies conservan el alfa) y una pila de subsuperficies (`place_above/below`, `set_position`, `sync/desync`). La raíz con subsuperficies mapeadas (o con escala/viewport) se **compone** en un canvas (mezcla premultiplicada) y eso se vuelca a la ventana de Aurora; sin ellas sigue el camino rápido de antes. Posición y orden se aplican en el commit del padre; en modo sync el daño queda retenido en la subsuperficie hasta el commit del padre. Hit-test del puntero por la pila: `wl_pointer.enter/leave` van a la subsuperficie bajo el cursor (con agarre mientras haya botón pulsado).
     - `wp_viewporter` (`set_source`/`set_destination`, vecino más cercano), `wl_surface.set_buffer_scale` (misma ruta de escalado), `wp_fractional_scale_v1` (siempre 1.0), `zwp_primary_selection_device_manager_v1` (probado: `wl-copy --primary` → `wl-paste --primary` en procesos distintos).
-    - *Cursor:* nuevo syscall `ASYS_WIN_SET_CURSOR` (0x1D) → `winsrv_set_cursor` → `CMD_WIN_CURSOR`; la ventana guarda `client_cursor` y el compositor lo usa sobre su área de cliente (`update_cursor_shape`). `kernel/gfx/cursor.c` dibuja ahora texto (I), mano, cruz y «ninguno». `wp_cursor_shape_v1` se traduce a esas formas (flechas de redimensión incluidas) y `wl_pointer.set_cursor(NULL)` oculta el cursor.
+    - *Cursor (decisión del autor):* **el cursor visible es siempre el de Aurora** (flecha y flechas de redimensión nativas); no cambia según la ventana ni la app. `wl_pointer.set_cursor` y `wp_cursor_shape_v1` se aceptan (así los toolkits no intentan cargar temas de cursores) y se ignoran. Se probó una versión con formas por ventana (texto, mano) y se revirtió.
     - `xdg_toplevel.set_fullscreen/unset_fullscreen` = maximizar/restaurar anunciando además el estado `fullscreen` (Aurora conserva menubar y Dock). Probado con `foot --fullscreen`.
     - *Test:* `tests/wayland/aw_sub_test.c` (cliente propio con protocolos generados por `wayland-scanner`; `tests/wayland/build.sh`) + guest `tests/wayland/guest/aw-sub.sh`, que se maneja con `scripts/qemu-drive.py --boot-test /usr/bin/aw-sub.sh --step "SHOT-1=…" --step "SHOT-3=shot …"`. `weston-subsurfaces` de la distro **no** sirve de prueba: necesita EGL (Mesa, 5.A.5) y aborta antes de abrir ventana (`*** %n in writable segment detected ***`, pendiente de investigar si es un fallo de `/proc/self/maps`). Suite del kernel 179/179 tras el cambio de cursor.
     - `tests/wayland/run-aurora-wayland.sh` acepta `AW_TIMEOUT` (sin KVM hacen falta ~600 s).
+  - **Cierre del plan (esta fase):**
+    - *Servidor:* `xdg_toplevel.move/resize` del cliente (`ASYS_WIN_BEGIN_GRAB` 0x1D, solo con el botón izquierdo pulsado), evento `WINSRV_EV_STATE` (12) para anunciar `maximized` cuando Aurora maximiza/restaura (semáforo, doble clic, arrastre), regiones de entrada (`wl_region`/`set_input_region` en el hit-test del puntero), `zxdg_output_v1`, `wp_presentation`, `zwp_idle_inhibit`, `xdg_activation_v1`. **Frame callbacks a 60 Hz** por temporizador (antes inmediatos: un cliente que anima se comía la CPU), y el modo de decoración se anuncia **una sola vez** (si se repetía, GTK3 volvía a pedir el modo cliente en bucle). Apps sin lanzador fijado usan el icono genérico de Aurora en el Dock (`ASYS_WIN_SET_ICON`).
+    - *GTK3/Qt5 sin tocar:* `scripts/fetch-toolkits.sh` (requiere los paquetes en el host de build) copia binarios, plugins (solo Wayland), esquemas, iconos y el cierre de librerías. `GTK` lee `/usr/share/aurora/xdg/gtk-3.0/settings.ini` (`gtk-decoration-layout=` vacío: las headerbars no dibujan botones de ventana; la barra de título es la de Aurora). El entorno (`GDK_BACKEND`, `GSETTINGS_BACKEND=memory`, `QT_PLUGIN_PATH`, `EGL_PLATFORM`, `LIBGL_ALWAYS_SOFTWARE`...) lo fija `init`. Validado en QEMU: `hello-gtk` (GTK3 real, `tests/wayland/hello-gtk.c`) y los clientes EGL; `gtk3-widget-factory` y `qt5-gallery` renderizan bien contra `aurora-wayland` en el host (backend `AW_MOCK=1`), pero en QEMU sin KVM no llegan a pintar en varios minutos (fallos de página que reservan bloques grandes + carga de cientos de iconos SVG).
+    - *Mesa:* `scripts/fetch-mesa.sh` (libgallium + libLLVM 20 de Ubuntu; **no se versionan** por tamaño, ver `.gitignore`; con ellos el initrd pasa de 500 MB: usar QEMU con ≥ 1,5 GB). `weston-simple-egl` (~35 fps con softpipe, llvmpipe por defecto) y `weston-subsurfaces` corren como ventanas de Aurora.
+    - *Depuración en el host:* `AW_MOCK=1 aurora-wayland` (sin winsrv; SIGUSR1 vuelca cada ventana a `/tmp/aw-mock-<id>.ppm`) permite ejecutar GTK/Qt reales con `WAYLAND_DEBUG=1` en el PC de desarrollo; descubrió los bucles de decoración y de frame que en el guest solo se veían como CPU al 100 %.
+    - *Drivers de pantalla:* ver `drv_impl_plan.md` (FASE GPU). `qemu-drive.py` acepta `--extra=ARG` para añadir dispositivos (p. ej. `--extra=-vga --extra=none --extra=-device --extra=virtio-gpu-pci`).
+    - *Pendiente del producto:* dma-buf/PRIME, virgl, Xwayland, multi-monitor/hot-plug, touch, IOMMU. Intermitencias de arranque ya vistas siguen sin reproducirse.

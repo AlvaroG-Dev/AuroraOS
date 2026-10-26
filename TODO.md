@@ -544,3 +544,19 @@ despues. Arranque de Python: 600 ms -> 250 ms.
 **Siguiente bloque sugerido**: `epoll` + `eventfd` (Fase 3.9 del
 glibc_port, ~4 h). Desbloquea `tmux`, `screen`, `python3` asyncio,
 `libuv`, y hace que `pgrep` deje de emitir SYSCALL-GAP 213.
+---
+
+Bloque Gráficos Linux (Plan_Wayland_Unificado.md) ✅ en lo esencial
+
+G.1 AF_UNIX/SCM_RIGHTS, devtmpfs, evdev, DRM/KMS, memfd compartido ✅
+G.2 Servidor Wayland nativo `aurora-wayland`: toplevels/popups/subsuperficies como
+    ventanas de Aurora, teclado/ratón/rueda/portapapeles/selección primaria,
+    viewporter, xdg-output, presentation-time, move/resize/maximizar/pantalla
+    completa, regiones de entrada ✅
+G.3 Cursor único de Aurora (no cambia según la ventana) ✅
+G.4 Mesa llvmpipe + EGL: weston-simple-egl y weston-subsurfaces ✅ (scripts/fetch-mesa.sh)
+G.5 GTK3 y Qt5 reales (hello-gtk validado; widget-factory/gallery cargan pero en TCG
+    tardan minutos) ✅/⚠️ (scripts/fetch-toolkits.sh)
+G.6 Drivers de pantalla .aur: virtio_gpu, bochs; framebuffer tardío ✅
+G.7 Pendiente: dma-buf/PRIME, virgl, hot-plug de monitores, multi-CRTC, touch, Xwayland,
+    cursor con mapa de bits del cliente (decisión: se descarta, cursor único), IOMMU.

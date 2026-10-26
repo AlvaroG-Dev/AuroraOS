@@ -43,6 +43,8 @@ for s in "$ROOT"/tests/wayland/guest/*.sh; do
     cp -f "$s" "$ROOT/precompiled/usr/bin/$(basename "$s")"
     chmod +x "$ROOT/precompiled/usr/bin/$(basename "$s")"
 done
+gcc -O1 -Wall -pthread -o "$ROOT/precompiled/usr/bin/futex_test" "$ROOT/tests/wayland/futex_test.c"
+echo "OK: precompiled/usr/bin/futex_test"
 gcc -O1 -Wall -Wno-unused-result -o "$ROOT/precompiled/usr/bin/fuzz_test" "$ROOT/tests/wayland/fuzz_test.c"
 echo "OK: precompiled/usr/bin/fuzz_test"
 gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/drm_test" "$ROOT/tests/wayland/drm_test.c"

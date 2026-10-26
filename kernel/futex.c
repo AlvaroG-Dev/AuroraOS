@@ -200,9 +200,66 @@ void futex_wake_user(uint64_t uaddr, int nr_wake, uint64_t pml4) {
   futex_do_wake(uaddr, (uint32_t)nr_wake, pml4);
 }
 
+// FUTEX_WAKE_OP: *uaddr2 = op(*uaddr2, oparg) y despierta a `nr_wake` en uaddr y,
+// si cmp(valor_antiguo, cmparg) se cumple, a `nr_wake2` en uaddr2. `encoded` =
+// op(4 bits) | cmp(4) | oparg(12) | cmparg(12) (include/uapi/linux/futex.h).
+// Las modificaciones del kernel se serializan con un cerrojo; no son atomicas
+// frente a atomicos de usuario en otra CPU sobre la misma palabra, pero glibc
+// solo lo usa (__lll_futex_wake_unlock) con la palabra protegida por su lock.
+static spinlock_t futex_op_lock;
+static int64_t futex_wake_op(uint64_t uaddr, uint32_t nr_wake, uint64_t uaddr2,
+                             uint32_t nr_wake2, uint32_t encoded,
+                             uint64_t pml4) {
+  int op = (int)((encoded >> 28) & 0xF);
+  int cmp = (int)((encoded >> 24) & 0xF);
+  int32_t oparg = (int32_t)(encoded << 8) >> 20; // 12 bits con signo
+  int32_t cmparg = (int32_t)(encoded << 20) >> 20;
+  if (op & 8) { // FUTEX_OP_OPARG_SHIFT
+    oparg = 1 << (oparg & 31);
+    op &= 7;
+  }
+  uint32_t old;
+  unsigned long fl = spin_lock_irqsave(&futex_op_lock);
+  if (get_user_u32(&old, (const uint32_t *)uaddr2) < 0) {
+    spin_unlock_irqrestore(&futex_op_lock, fl);
+    return -EFAULT;
+  }
+  uint32_t nv;
+  switch (op) {
+  case 0: nv = (uint32_t)oparg; break;           // SET
+  case 1: nv = old + (uint32_t)oparg; break;     // ADD
+  case 2: nv = old | (uint32_t)oparg; break;     // OR
+  case 3: nv = old & ~(uint32_t)oparg; break;    // ANDN
+  case 4: nv = old ^ (uint32_t)oparg; break;     // XOR
+  default:
+    spin_unlock_irqrestore(&futex_op_lock, fl);
+    return -ENOSYS;
+  }
+  if (put_user_u32((uint32_t *)uaddr2, nv) < 0) {
+    spin_unlock_irqrestore(&futex_op_lock, fl);
+    return -EFAULT;
+  }
+  spin_unlock_irqrestore(&futex_op_lock, fl);
+
+  int32_t o = (int32_t)old;
+  int hit;
+  switch (cmp) {
+  case 0: hit = o == cmparg; break; // EQ
+  case 1: hit = o != cmparg; break; // NE
+  case 2: hit = o < cmparg; break;  // LT
+  case 3: hit = o <= cmparg; break; // LE
+  case 4: hit = o > cmparg; break;  // GT
+  case 5: hit = o >= cmparg; break; // GE
+  default: return -ENOSYS;
+  }
+  int64_t woken = futex_do_wake(uaddr, nr_wake, pml4);
+  if (hit)
+    woken += futex_do_wake(uaddr2, nr_wake2, pml4);
+  return woken;
+}
+
 int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
                   uint64_t timeout_uptr, uint64_t uaddr2, uint64_t val3) {
-  (void)uaddr2;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -273,11 +330,29 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
     return futex_do_wake(uaddr, (uint32_t)val, pml4);
   }
 
-  case FUTEX_REQUEUE:
-  case FUTEX_CMP_REQUEUE:
+  // val2 (nr_requeue / nr_wake2) viaja en el argumento de timeout.
   case FUTEX_WAKE_OP:
-    LOG_WARN("[FUTEX] op %u no soportada", cmd);
-    return -ENOSYS;
+    return futex_wake_op(uaddr, (uint32_t)val, uaddr2, (uint32_t)timeout_uptr,
+                         (uint32_t)val3, pml4);
+
+  // REQUEUE: despierta `val` y *reencola* hasta `val2` en uaddr2. Sin colas
+  // transferibles entre futex, se despiertan tambien los que habria que
+  // reencolar: es correcto (los esperadores revalidan la palabra y vuelven a
+  // dormir) y solo cuesta una estampida.
+  case FUTEX_CMP_REQUEUE: {
+    uint32_t cur;
+    if (get_user_u32(&cur, (const uint32_t *)uaddr) < 0)
+      return -EFAULT;
+    if (cur != (uint32_t)val3)
+      return -EAGAIN;
+  }
+  // fallthrough
+  case FUTEX_REQUEUE: {
+    uint64_t total = (uint64_t)(uint32_t)val + (uint64_t)(uint32_t)timeout_uptr;
+    if (total > 0x7fffffff)
+      total = 0x7fffffff;
+    return futex_do_wake(uaddr, (uint32_t)total, pml4);
+  }
 
   default:
     return -ENOSYS;

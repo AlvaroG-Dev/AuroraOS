@@ -56,6 +56,23 @@ static char *default_envp[] = {
     "SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0",
     "MOZ_ENABLE_WAYLAND=1",
     "ELECTRON_OZONE_PLATFORM_HINT=wayland",
+    // OpenGL/EGL por software (Mesa llvmpipe sobre wl_shm, sin DRM).
+    "EGL_PLATFORM=wayland",
+    "LIBGL_ALWAYS_SOFTWARE=1",
+    "MESA_SHADER_CACHE_DISABLE=true",
+    // GTK3 / Qt5: sin dconf ni bus de accesibilidad, datos en /usr/share y
+    // configuracion de GTK en /usr/share/aurora/xdg (ver settings.ini).
+    "GDK_BACKEND=wayland",
+    "GTK_THEME=Adwaita",
+    "GSETTINGS_BACKEND=memory",
+    "GSETTINGS_SCHEMA_DIR=/usr/share/glib-2.0/schemas",
+    "GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
+    "NO_AT_BRIDGE=1",
+    "QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins",
+    "XDG_CONFIG_HOME=/tmp/.config",
+    "XDG_CONFIG_DIRS=/usr/share/aurora/xdg",
+    "XDG_CACHE_HOME=/tmp/.cache",
+    "XDG_DATA_HOME=/tmp/.local/share",
     NULL,
 };
 

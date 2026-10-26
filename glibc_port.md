@@ -94,3 +94,15 @@ make run-smp-kvm-ahci
 - ABI de referencia: tabla de syscalls Linux x86-64 y documentación de cada syscall.
 
 **Próximo bloque recomendado:** P0, empezando por smoke tests automatizados y reconciliación de estados; después corregir las semánticas que aceptan flags de epoll sin implementarlos. Es la forma más segura de avanzar sin romper los programas que ya funcionan.
+
+## 7. ABI Linux añadido para el stack gráfico (Wayland/GTK/Qt/Mesa)
+
+- AF_UNIX completo (STREAM/DGRAM/SEQPACKET, SCM_RIGHTS, SO_PEERCRED, abstractos), `memfd_create` con
+  `mmap(MAP_SHARED)` real, `timerfd`, `pidfd_open`, `inotify` (stub), `fallocate`, `creat`,
+  `ftruncate`/`truncate`, máscaras de señales con `sig-1` como Linux, `sched_getaffinity` con las CPUs online.
+- devtmpfs + `mknod` de char devices, `/dev/dri/{card0,renderD128}`, `/dev/input/event*`, `/dev/tty0`,
+  sysfs dinámico (`/sys/class/{input,drm}`), udev data mínima y `AF_NETLINK` uevent.
+- `rseq` sigue en `-ENOSYS` (glibc lo tolera). Pendiente: `rt_sigsuspend`, `rt_sigpending`,
+  `rt_sigtimedwait`, SIGPIPE real en sockets, inodos `S_IFSOCK` en el VFS.
+- Rendimiento: en QEMU sin KVM (TCG) los fallos de página que reservan bloques grandes hacen lentas las apps con
+  mucha memoria (GTK widget-factory no llega a pintar en 7 minutos); no se ha medido con KVM.

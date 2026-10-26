@@ -35,7 +35,9 @@ copy_dir() { # origen destino
 G=/usr/lib/x86_64-linux-gnu
 copy_dir $G/gdk-pixbuf-2.0 "$PRE/$MULTI/gdk-pixbuf-2.0"
 copy_dir $G/gio/modules "$PRE/$MULTI/gio/modules"
-for d in platforms wayland-decoration-client wayland-graphics-integration-client \
+# (sin wayland-graphics-integration-client: las apps Qt de widgets usan wl_shm y
+# no cargan Mesa/LLVM al arrancar; una app Qt con OpenGL tendria que anadirlo)
+for d in platforms wayland-decoration-client \
          wayland-shell-integration imageformats iconengines generic platforminputcontexts; do
     copy_dir "$QT/plugins/$d" "$PRE/$MULTI/qt5/plugins/$d"
 done
