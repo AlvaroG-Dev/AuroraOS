@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=XClock
+Exec=/usr/bin/xclock
+StartupWMClass=xclock

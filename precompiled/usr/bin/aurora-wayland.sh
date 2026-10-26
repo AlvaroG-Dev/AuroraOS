@@ -4,6 +4,7 @@
 # Uso: aurora-wayland.sh [segundos] [cliente...]
 export XDG_RUNTIME_DIR=/run/user/0
 export WAYLAND_DISPLAY=wayland-0
+export DISPLAY=:0
 STRACE=${STRACE:-}
 [ -n "$STRACE" ] && echo "strace=$STRACE" > /dev/kmsg
 T=${1:-15}

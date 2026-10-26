@@ -63,6 +63,8 @@ static char *default_envp[] = {
     "MESA_SHADER_CACHE_DISABLE=true",
     // GTK3 / Qt5: sin dconf ni bus de accesibilidad, datos en /usr/share y
     // configuracion de GTK en /usr/share/aurora/xdg (ver settings.ini).
+    // Apps X11: Xwayland (lo arranca aurora-wayland) escucha en :0.
+    "DISPLAY=:0",
     "GDK_BACKEND=wayland",
     "GTK_THEME=Aurora",
     "GSETTINGS_BACKEND=memory",
