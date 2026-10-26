@@ -19,6 +19,7 @@
 #include "compositor.h"
 #include "../bmp.h"
 #include "../boot_console.h"
+#include "../gpu_proxy.h"
 #include "../heap.h"
 #include "../input.h"
 #include "../klog.h"
@@ -36,7 +37,6 @@
 #include "gfx.h"
 #include "gfx_filter.h"
 #include "menubar.h"
-#include "../gpu_proxy.h"
 #include "taskbar.h"
 #include "theme.h"
 #include "window.h"
@@ -44,6 +44,7 @@
 #include <emmintrin.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 extern uint32_t *fb_ptr;
 extern uint32_t fb_width;
@@ -80,7 +81,8 @@ static window_t *pressed_win = NULL;
 static window_btn_state_t pressed_btn = WIN_BTN_NONE;
 static int last_mouse_buttons = 0;
 
-/* Icono del Dock pulsado: como en macOS, la acción ocurre al soltar sobre él. */
+/* Icono del Dock pulsado: como en macOS, la acción ocurre al soltar sobre él.
+ */
 static taskbar_item_t *dock_pressed_item = NULL;
 
 /* Ventana "Acerca de AuroraOS" (una sola instancia). */
@@ -206,12 +208,14 @@ typedef enum {
   CMD_FOCUS,
   CMD_ICON_BMP,
   CMD_TITLE,
-  CMD_MAXIMIZE, /* value: 1 = maximizar, 0 = restaurar */
-  CMD_DOCK_PIN, /* title = nombre, app_id, symbol, color, value = launch_id */
-  CMD_WIN_APP,  /* win + app_id: la ventana pasa al lanzador de esa app */
-  CMD_WIN_GRAB, /* win + value: 0 = mover, otro = RESIZE_EDGE_* (peticion del cliente) */
-  CMD_WIN_RESIZE, /* win + value = (ancho << 16) | alto exteriores (peticion del cliente) */
-  CMD_WIN_CURSOR /* win + value = cursor_shape_t sobre el area de cliente */
+  CMD_MAXIMIZE,   /* value: 1 = maximizar, 0 = restaurar */
+  CMD_DOCK_PIN,   /* title = nombre, app_id, symbol, color, value = launch_id */
+  CMD_WIN_APP,    /* win + app_id: la ventana pasa al lanzador de esa app */
+  CMD_WIN_GRAB,   /* win + value: 0 = mover, otro = RESIZE_EDGE_* (peticion del
+                     cliente) */
+  CMD_WIN_RESIZE, /* win + value = (ancho << 16) | alto exteriores (peticion del
+                     cliente) */
+  CMD_WIN_CURSOR  /* win + value = cursor_shape_t sobre el area de cliente */
 } cmd_type_t;
 
 typedef struct {
@@ -295,8 +299,7 @@ static void compositor_report_frame_stats(uint64_t total_cycles) {
     LOG_DEBUG("[COMP-PERF] avg us: bg=%u win=%u ui=%u blit=%u | max=%u us "
               "(%u frames)",
               (unsigned)us[PH_BG], (unsigned)us[PH_WIN], (unsigned)us[PH_UI],
-              (unsigned)us[PH_BLIT], (unsigned)max_us,
-              (unsigned)g_frame_count);
+              (unsigned)us[PH_BLIT], (unsigned)max_us, (unsigned)g_frame_count);
   }
   for (int i = 0; i < PH_N; i++)
     g_ph_sum[i] = 0;
@@ -305,16 +308,13 @@ static void compositor_report_frame_stats(uint64_t total_cycles) {
 }
 
 /* Marco fantasma del resize en curso: tinte de acento y borde. */
-static rect_t resize_outline_rect(void) {
-  return rect_grow(resize_to, 2);
-}
+static rect_t resize_outline_rect(void) { return rect_grow(resize_to, 2); }
 
 static void draw_resize_outline(uint32_t *dst, int stride, rect_t clip) {
   if (!resize_window || resize_to.w <= 0 || resize_to.h <= 0)
     return;
   rect_t r = resize_to;
-  gfx_fill_rounded_rect(dst, stride, clip, r, AURORA_CORNER_RADIUS,
-                        0x160A84FF);
+  gfx_fill_rounded_rect(dst, stride, clip, r, AURORA_CORNER_RADIUS, 0x160A84FF);
   gfx_draw_rounded_border(dst, stride, clip, r, AURORA_CORNER_RADIUS,
                           0xD8FFFFFF);
   gfx_draw_rounded_border(dst, stride, clip,
@@ -934,14 +934,16 @@ void compositor_set_title(window_t *win, const char *title) {
   cmd_post(&c);
 }
 void compositor_set_maximized(window_t *win, int maximized) {
-  comp_cmd_t c = {.type = CMD_MAXIMIZE, .win = win, .node = NULL,
-                  .value = maximized};
+  comp_cmd_t c = {
+      .type = CMD_MAXIMIZE, .win = win, .node = NULL, .value = maximized};
   cmd_post(&c);
 }
 void compositor_dock_pin(const char *name, const char *app_id,
                          const char *symbol, uint32_t color, uint32_t launch_id,
                          tar_node_t *icon) {
-  comp_cmd_t c = {.type = CMD_DOCK_PIN, .node = icon, .color = color,
+  comp_cmd_t c = {.type = CMD_DOCK_PIN,
+                  .node = icon,
+                  .color = color,
                   .value = (int)launch_id};
   strncpy(c.title, name, sizeof(c.title) - 1);
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
@@ -1534,8 +1536,10 @@ static void compose_scene(rect_t e) {
  * es mucho más corto. */
 static uint32_t *front_shadow = NULL;
 static uint32_t *present_line = NULL;
-#define FRONT_UNKNOWN 0x01234567u /* alpha != 0xFF: nunca sale del compositor */
-#define PRESENT_GAP 16 /* píxeles iguales que se escriben igual para no partir */
+#define FRONT_UNKNOWN 0x01234567u /* alpha != 0xFF: nunca sale del compositor  \
+                                   */
+#define PRESENT_GAP                                                            \
+  16 /* píxeles iguales que se escriben igual para no partir */
 
 static void present_row_delta(int y, int x0, int n) {
   const uint32_t *src = &backbuffer[y * fb_width + x0];
@@ -1579,7 +1583,8 @@ static void present_rect(rect_t clip) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
       uint32_t *dst = &fb_ptr[y * fb_pitch + clip.x];
       const uint32_t *src = &backbuffer[y * fb_width + clip.x];
-      if (fb_bpp == 24) /* fb_ptr es un buffer en RAM; fb_flush_rect empaqueta */
+      if (fb_bpp ==
+          24) /* fb_ptr es un buffer en RAM; fb_flush_rect empaqueta */
         simd_copy_normal(dst, src, clip.w);
       else
         simd_copy_to_vram(dst, src, clip.w);
@@ -1776,7 +1781,8 @@ void compositor_init(void) {
         front_shadow[i] = FRONT_UNKNOWN;
   }
 
-  LOG_INFO("[COMPOSITOR] Motor grafico con aceleracion SIMD SSE2 inicializado.");
+  LOG_INFO(
+      "[COMPOSITOR] Motor grafico con aceleracion SIMD SSE2 inicializado.");
   taskbar_init();
   winsrv_init();
   dock_init((int)fb_width, (int)fb_height);
@@ -1784,7 +1790,8 @@ void compositor_init(void) {
   menubar_set_provider(&k_menu_provider);
   taskbar_refresh_clock();
 
-  bg_wallpaper_node = tar_find_file("system/wallpapers/wallpaper-aurora-blue.bmp");
+  bg_wallpaper_node =
+      tar_find_file("system/wallpapers/wallpaper-aurora-blue.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
   if (wallpaper_cache) {
