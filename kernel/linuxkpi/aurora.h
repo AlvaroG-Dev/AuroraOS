@@ -103,4 +103,103 @@ long aurora_strncpy_from_user(char *dst, const char *src, size_t max) __asm__("s
 /* panic.h */
 void aurora_panic_noctx(const char *fmt, ...) __asm__("panic_noctx") __attribute__((noreturn));
 
+/*
+ * L3: modelo de dispositivos, PCI e interrupciones. Replicas de struct
+ * device, struct driver (bus.h/driver.h) y pci_device_t (pci.h) de Aurora;
+ * kernel/ksymtab_exports.c comprueba tamano y desplazamientos.
+ */
+struct aurora_bus_type;			/* struct bus_type (opaco) */
+struct aurora_driver;
+struct aurora_device {
+	char name[16];			/* "0000:BB:SS.F" en PCI */
+	struct aurora_bus_type *bus;
+	void *priv;			/* struct aurora_pci_device * en PCI */
+	const void *id;
+	const void *matched_id;
+	struct aurora_driver *driver;
+	struct aurora_device *next;
+};
+_Static_assert(sizeof(struct aurora_device) == 64, "struct device de Aurora");
+struct aurora_driver {
+	const char *name;
+	struct aurora_bus_type *bus;
+	const void *id_table;		/* struct aurora_pci_device_id[], vendor 0 = fin */
+	int (*probe)(struct aurora_device *dev);
+	void (*remove)(struct aurora_device *dev);
+	struct aurora_driver *next_on_bus;
+	const char *const *depends;
+	int (*init)(void);
+	void (*shutdown)(void);
+};
+_Static_assert(sizeof(struct aurora_driver) == 72, "struct driver de Aurora");
+struct aurora_pci_device_id {
+	u16 vendor_id, device_id, subvendor, subdevice;
+	u8 class_id, subclass_id, class_mask, pad;
+};
+#define AURORA_PCI_ANY_ID 0xFFFFu
+struct aurora_pci_device {
+	u8 bus, slot, func;
+	u16 vendor_id, device_id, subsystem_vendor_id, subsystem_id;
+	u8 class_id, subclass_id, prog_if, revision_id;
+	u8 header_type, multifunction, irq_line, irq_pin;
+	u32 bar[6];
+	u8 bar_is_io[6];
+	u8 bar_is_64[6];
+	u8 secondary_bus, subordinate_bus;
+};
+_Static_assert(sizeof(struct aurora_pci_device) == 60, "pci_device_t de Aurora");
+extern struct aurora_bus_type aurora_pci_bus __asm__("pci_bus");
+int aurora_bus_add_driver(struct aurora_driver *drv) __asm__("bus_add_driver");
+void aurora_bus_del_driver(struct aurora_driver *drv) __asm__("bus_del_driver");
+const struct aurora_pci_device *aurora_pci_get_devices(int *count) __asm__("pci_get_devices");
+u8 aurora_pci_read_config_byte(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_read_config_byte");
+u16 aurora_pci_read_config_word(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_read_config_word");
+u32 aurora_pci_read_config_dword(u8 bus, u8 slot, u8 func, u8 off)
+	__asm__("pci_read_config_dword");
+void aurora_pci_write_config_byte(u8 bus, u8 slot, u8 func, u8 off, u8 v)
+	__asm__("pci_write_config_byte");
+void aurora_pci_write_config_word(u8 bus, u8 slot, u8 func, u8 off, u16 v)
+	__asm__("pci_write_config_word");
+void aurora_pci_write_config_dword(u8 bus, u8 slot, u8 func, u8 off, u32 v)
+	__asm__("pci_write_config_dword");
+
+/* idt.h: vectores MSI de kernel (0x63..0x67, 0x70..0x7F); -1 si no quedan */
+#define AURORA_MSI_VECTOR_BASE 0x60
+#define AURORA_MSI_VECTOR_END 0x7F
+int aurora_msi_vector_alloc(void) __asm__("msi_vector_alloc");
+void aurora_msi_vector_free(u8 vector) __asm__("msi_vector_free");
+/* irq_threaded.h: irq 0..15 = INTx (IOAPIC), 0x60..0x7F = vector MSI. El
+ * ack corre en la IRQ (IF=0) antes del EOI. irqreturn_t: 0 NONE, 1 HANDLED,
+ * 2 WAKE_THREAD (los mismos valores que Linux). */
+typedef int (*aurora_irq_handler_fn)(int irq, void *dev_id);
+int aurora_irq_request_threaded(unsigned int irq, aurora_irq_handler_fn ack,
+				aurora_irq_handler_fn thread_fn, const char *name, void *dev_id)
+	__asm__("irq_request_threaded");
+void aurora_irq_free(unsigned int irq) __asm__("irq_free");
+/* apic.h */
+/* INTx de PCI: flags del ISO de la MADT si existe; si no, nivel/activa baja */
+void aurora_ioapic_route_pci_intx(u8 irq, u8 vector, u32 dest_apic_id, int masked)
+	__asm__("ioapic_route_pci_intx");
+void aurora_ioapic_mask_irq(u8 irq, int masked) __asm__("ioapic_mask_irq");
+/* smp_boot.h: -1 si la CPU no existe */
+int aurora_smp_cpu_lapic_id(int cpu) __asm__("smp_cpu_lapic_id");
+/* pmm.h: paginas contiguas por debajo de `limit` (alineadas a la potencia de
+ * dos de count); se liberan con pmm_free_pages. 0 si no hay. */
+u64 aurora_pmm_alloc_pages_below(u64 count, u64 limit) __asm__("pmm_alloc_pages_below");
+
+/* sysfs_dyn.h: nodos de /sys (rutas relativas, sin "/sys/") */
+struct aurora_sysfs_attr_ops {
+	long (*show)(void *ctx, char *buf, size_t size);
+	long (*store)(void *ctx, const char *buf, size_t len);
+};
+#define AURORA_SYSFS_PATH_MAX 192
+#define AURORA_SYSFS_ATTR_BUF 4096
+int aurora_sysfs_set_file(const char *path, const char *content) __asm__("sysfs_dyn_set_file");
+int aurora_sysfs_add_symlink(const char *path, const char *target)
+	__asm__("sysfs_dyn_add_symlink");
+int aurora_sysfs_add_attr(const char *path, const struct aurora_sysfs_attr_ops *ops,
+			  void *ctx, u32 mode) __asm__("sysfs_dyn_add_attr");
+int aurora_sysfs_remove(const char *path) __asm__("sysfs_dyn_remove");
+int aurora_sysfs_remove_tree(const char *prefix) __asm__("sysfs_dyn_remove_tree");
+
 #endif

@@ -68,18 +68,7 @@ __LKPI_MMIO(w, u16)
 __LKPI_MMIO(l, u32)
 __LKPI_MMIO(q, u64)
 #undef __LKPI_MMIO
-#define ioread8(a) readb(a)
-#define ioread16(a) readw(a)
-#define ioread32(a) readl(a)
-#define ioread64(a) readq(a)
-#define iowrite8(v, a) writeb(v, a)
-#define iowrite16(v, a) writew(v, a)
-#define iowrite32(v, a) writel(v, a)
-#define iowrite64(v, a) writeq(v, a)
-#define ioread16be(a) be16_to_cpu(readw(a))
-#define ioread32be(a) be32_to_cpu(readl(a))
-#define iowrite16be(v, a) writew(cpu_to_be16(v), a)
-#define iowrite32be(v, a) writel(cpu_to_be32(v), a)
+#define IOMEM_ERR_PTR(err) ((__force void __iomem *)ERR_PTR(err))
 #define mmiowb() barrier()
 
 static inline void memcpy_fromio(void *dst, const volatile void __iomem *src, size_t n)
@@ -128,6 +117,54 @@ static __always_inline void outl(u32 v, u16 port)
 { __asm__ __volatile__("outl %0, %w1" : : "a"(v), "Nd"(port)); }
 #define inb_p inb
 #define outb_p outb
+
+/*
+ * ioread/iowrite (lib/iomap.c en Linux): valen para MMIO y para los puertos
+ * que devuelven pci_iomap()/ioport_map() de un BAR de E/S. Un puerto se
+ * codifica como LKPI_PIO_OFFSET + puerto, por debajo de LKPI_PIO_RESERVED
+ * (nunca es una direccion MMIO valida en la mitad alta).
+ */
+#define LKPI_PIO_OFFSET 0x10000UL
+#define LKPI_PIO_RESERVED 0x40000UL
+static __always_inline bool lkpi_iomap_is_port(const volatile void __iomem *addr)
+{
+	unsigned long a = (unsigned long)addr;
+
+	return a >= LKPI_PIO_OFFSET && a < LKPI_PIO_RESERVED;
+}
+static __always_inline u16 lkpi_iomap_port(const volatile void __iomem *addr)
+{
+	return (u16)((unsigned long)addr - LKPI_PIO_OFFSET);
+}
+static inline void __iomem *ioport_map(unsigned long port, unsigned int nr)
+{
+	return port > 0xffff ? NULL : (void __iomem *)(port + LKPI_PIO_OFFSET);
+}
+static inline void ioport_unmap(void __iomem *addr) { }
+#define __LKPI_IOMAP(sfx, type, rd, wr, inx, outx) \
+static inline type ioread##sfx(const volatile void __iomem *addr) \
+{ \
+	if (lkpi_iomap_is_port(addr)) \
+		return inx(lkpi_iomap_port(addr)); \
+	return rd(addr); \
+} \
+static inline void iowrite##sfx(type val, volatile void __iomem *addr) \
+{ \
+	if (lkpi_iomap_is_port(addr)) \
+		outx(val, lkpi_iomap_port(addr)); \
+	else \
+		wr(val, addr); \
+}
+__LKPI_IOMAP(8, u8, readb, writeb, inb, outb)
+__LKPI_IOMAP(16, u16, readw, writew, inw, outw)
+__LKPI_IOMAP(32, u32, readl, writel, inl, outl)
+#undef __LKPI_IOMAP
+#define ioread64(a) readq(a)
+#define iowrite64(v, a) writeq(v, a)
+#define ioread16be(a) be16_to_cpu(ioread16(a))
+#define ioread32be(a) be32_to_cpu(ioread32(a))
+#define iowrite16be(v, a) iowrite16(cpu_to_be16(v), a)
+#define iowrite32be(v, a) iowrite32(cpu_to_be32(v), a)
 
 #define arch_phys_wc_add(base, size) 0
 #define arch_phys_wc_del(handle) do { } while (0)

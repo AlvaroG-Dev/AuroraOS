@@ -21,11 +21,6 @@
 
 const char *lkpi_errname(int err);
 
-struct va_format {
-	const char *fmt;
-	va_list *va;
-};
-
 #define F_LEFT 0x01
 #define F_PLUS 0x02
 #define F_SPACE 0x04

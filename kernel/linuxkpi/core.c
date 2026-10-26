@@ -195,9 +195,19 @@ int kur_init(void)
 	rc = lkpi_wq_init();
 	if (rc)
 		goto err_rcu;
+	rc = lkpi_device_core_init();
+	if (rc)
+		goto err_wq;
+	rc = lkpi_platform_bus_init();
+	if (rc)
+		goto err_core;
 	pr_info("linuxkpi: capa de compatibilidad con drivers de Linux lista\n");
 	return 0;
 
+err_core:
+	lkpi_device_core_exit();
+err_wq:
+	lkpi_wq_exit();
 err_rcu:
 	lkpi_rcu_exit();
 err_softirq:
@@ -213,6 +223,9 @@ err_mm:
 
 void kur_exit(void)
 {
+	/* El modelo de dispositivos antes que las workqueues y RCU que usa. */
+	lkpi_platform_bus_exit();
+	lkpi_device_core_exit();
 	/* Primero lo que encola trabajo o callbacks; RCU vacia su cola al salir. */
 	lkpi_wq_exit();
 	lkpi_rcu_exit();

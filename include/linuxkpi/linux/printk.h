@@ -11,6 +11,12 @@
 #include <linux/stdarg.h>
 #include <linux/types.h>
 
+/* %pV: formato anidado (dev_printk y compania). */
+struct va_format {
+	const char *fmt;
+	va_list *va;
+};
+
 __printf(1, 2) int lkpi_printk(const char *fmt, ...);
 __printf(1, 0) int lkpi_vprintk(const char *fmt, va_list args);
 

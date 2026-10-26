@@ -18,11 +18,6 @@
 #include <linux/unaligned.h>
 #include "lkpi_test.h"
 
-struct va_format {
-	const char *fmt;
-	va_list *va;
-};
-
 static char *fmt_va(char *buf, size_t n, const char *fmt, ...)
 {
 	struct va_format vaf;
