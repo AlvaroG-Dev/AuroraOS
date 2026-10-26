@@ -6200,6 +6200,15 @@ static void test_lkpi_k3(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k3")
 REGISTER_TEST_FLAGS("linuxkpi: K3 estructuras (list, rbtree, xarray, idr)", test_lkpi_k3,
                     TEST_FLAG_BLOCKING);
 
+static void test_lkpi_k2(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k2")); }
+REGISTER_TEST_FLAGS("linuxkpi: K2 sincronización, tiempo y trabajo diferido (L2)",
+                    test_lkpi_k2, TEST_FLAG_BLOCKING);
+
+// Estrés con varias CPU (hito de L2): mutex/ww_mutex, work + timers, RCU.
+static void test_lkpi_k2_smp(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k2_smp")); }
+REGISTER_TEST_FLAGS("linuxkpi: K2 estrés SMP (mutex, ww_mutex, work+timers, RCU)",
+                    test_lkpi_k2_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
 static void test_lkpi_unload(void) {
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
   TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");
