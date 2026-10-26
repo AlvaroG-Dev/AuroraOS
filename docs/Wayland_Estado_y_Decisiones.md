@@ -101,7 +101,7 @@ Hecho y validado antes y durante esta sesión: `wl_compositor/subcompositor/shm/
 | D2 | Cambio de resolución en caliente | **Decidido: SÍ, hay que hacerlo, pero cuando se pueda** (aplazado: depende de un driver de pantalla real, D5/D6) |
 | D3 | Portapapeles X11: alcance | **Hecho `PRIMARY`** (27-oct-2026); `INCR`/imágenes siguen fuera |
 | D4 | `virtio-gpu` 3D (virgl/venus) | **Decidido: SÍ, no crítico; pendiente** |
-| D5 | Intel/AMD/NVIDIA reales | **ABIERTA** (hardware identificado; falta modelo del portátil y licencia GPL) |
+| D5 | Intel/AMD/NVIDIA reales | **Decidido: capa de compatibilidad con drivers de Linux (LinuxKPI)** para todas; falta modelo del portátil |
 | D10 | NVIDIA con el código abierto de NVIDIA | **Decidido: SÍ, obligatorio** (plan por hitos, necesita hardware real) |
 | D6 | Driver de pantalla nativo | **ABIERTA** (depende de D5) |
 | D7 | EDID por DDC/VBE (BIOS) y CEA | **ABIERTA** |
@@ -154,7 +154,12 @@ Detalle de cada una:
   - El **portátil es el candidato a primer driver nativo de Intel**, pero si es Haswell la generación objetivo cambia: Gen7.5 en vez de la Gen9–12 supuesta en la recomendación. Intel publicó los PRM de Haswell y `i915` lo soporta, pero el motor de pantalla (DDI/pipes/PLL/eDP) difiere del de Gen9+; el volumen de trabajo y los registros no son los mismos. **Hay que confirmar el modelo (`lspci -nn`, o el ID de dispositivo PCI en el log de Aurora) antes de elegir generación.**
   - Para empezar hace falta un **log serie de arranque** del portátil (o su `lspci -nn`/ID PCI) con el ISO actual.
 - **Pregunta pendiente**: ¿es aceptable la licencia GPL en los drivers de GPU si se elige la capa de compatibilidad con Linux (opción a)? (Sin respuesta todavía.)
-- **Decisión**: **ABIERTA** (hardware identificado; falta confirmar el modelo del portátil y la política de licencia).
+- **Decisión (26-oct-2026): opción (a), capa de compatibilidad con los drivers de Linux (estilo LinuxKPI), para Intel, AMD y NVIDIA.** Una sola capa que sirve a todas las GPU y hereda las correcciones de Linux. Se acepta que esos módulos queden bajo GPL (confirma la respuesta a la pregunta de licencia; revisar el alcance exacto al empezar). Consecuencias:
+  - Se necesita (además de lo ya existente): `struct device`/`kobject`/`kref`, `dma_fence`, `ttm`/GEM completo, `i2c`, `firmware` (ya hay `request_firmware`), `ioremap`, workqueues/kthreads (ya hay), RCU, `mutex`/`rwsem`/`completion`, `idr`/`xarray`, `list`/`rbtree`, `pci`/MSI-X, `iommu`/`dma_map` y `acpi` mínimo.
+  - **Se hace primero IOMMU/VT-d (8.0)** y el DMA con máscaras: esos módulos corren en Ring 0 y manejan memoria de la GPU.
+  - **NVIDIA**: `Plan_NVIDIA.md` proponía una capa de SO propia para el núcleo abierto. Con esta decisión también se puede alojar `kernel-open/` de NVIDIA (la capa Linux) sobre la misma LinuxKPI; hay que elegir al empezar (ver nota en `Plan_NVIDIA.md`).
+  - Sigue valiendo: GOP como respaldo en cada hito y pruebas solo en hardware real (o VFIO + KVM).
+  - Pendiente: plan detallado de la capa (`Plan_LinuxKPI.md`), aún sin escribir.
 
 ### D10 — NVIDIA: obligatorio, con el código abierto de NVIDIA (`open-gpu-kernel-modules`)
 - **Decisión (26-oct-2026): SÍ, NVIDIA se implementa sí o sí.** Sustituye al «último y opcional» del Bloque 8.4. Hardware de prueba: RTX 4060 (Ada, AD107) del sobremesa.

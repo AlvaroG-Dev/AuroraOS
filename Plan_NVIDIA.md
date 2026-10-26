@@ -14,6 +14,8 @@ Fuente: `github.com/NVIDIA/open-gpu-kernel-modules` (README, comprobado el 26-oc
 
 **Consecuencia de diseño:** lo que se porta es el **núcleo `src/nvidia` + `src/nvidia-modeset`** (código abierto, independiente del SO) y se escribe una capa de SO **nueva** de Aurora en lugar de `kernel-open/`. Esto es lo mismo que hace NVIDIA para FreeBSD/Solaris y evita emular Linux entero (opción D5(a)).
 
+> **Nota (26-oct-2026, D5):** el autor decidió hacer una capa de compatibilidad con drivers de Linux (LinuxKPI) para todas las GPU. Eso abre una alternativa a la «capa de SO propia» de este plan: alojar `kernel-open/` de NVIDIA (la capa Linux) sobre esa LinuxKPI en lugar de reescribirla. Ventaja: una sola capa y menos código nuevo; coste: LinuxKPI debe estar bastante completa antes de N1. Decidir al terminar T0.2 (cuando se conozca la lista exacta de APIs que usa `kernel-open/`). Las fases N0–N6 no cambian.
+
 ## 1. Qué reutiliza Aurora (ya existe)
 
 | Necesidad | Existe | Dónde |
