@@ -3,10 +3,11 @@
 # o local) para compilar y probar Aurora OS: paquetes del host, pila Wayland,
 # fuentes de Linux fijadas y linux-firmware (LinuxKPI).
 #
-# Pensado para el "Setup script" del entorno de Claude Code en la web (se
-# ejecuta como root antes de la sesion; puede que el repositorio aun no este
-# clonado: entonces solo instala paquetes y el resto lo hace la primera
-# ejecucion dentro del repositorio). Tambien vale a mano:
+# Pensado para el "Setup script" del entorno de Claude Code en la nube: se
+# ejecuta antes de abrir la sesion, una carpeta por encima del repositorio, y
+# el resultado se guarda en cache (las descargas solo se hacen la primera vez).
+# Nunca falla (termina con 0) para no impedir que arranque la sesion. Tambien
+# vale a mano:
 #     bash scripts/claude-env-setup.sh [ruta-del-repositorio]
 #
 # Idempotente: lo que ya esta no se repite. Variables:
@@ -55,7 +56,10 @@ command -v musl-gcc >/dev/null || warn "falta musl-gcc (pruebas de user/musl)"
 # --- 2. Repositorio ----------------------------------------------------------
 REPO="${AURORA_REPO:-${1:-${CLAUDE_PROJECT_DIR:-}}}"
 if [ -z "$REPO" ] || [ ! -f "$REPO/Plan_LinuxKPI.md" ]; then
-    for c in "$PWD" /home/user/AuroraOS /workspace/AuroraOS "$HOME/AuroraOS"; do
+    # El Setup script de Claude Code en la nube empieza una carpeta por encima
+    # del repositorio: se mira tambien en sus subdirectorios.
+    for c in "$PWD" "$PWD"/AuroraOS "$PWD"/*/ /home/user/AuroraOS "$HOME/AuroraOS"; do
+        c=${c%/}
         if [ -f "$c/Plan_LinuxKPI.md" ]; then REPO=$c; break; fi
     done
 fi
@@ -88,3 +92,4 @@ done
 say "listo. ISO: make iso MUSL_CC=/usr/bin/musl-gcc KUR_CC=gcc"
 say "pruebas: python3 scripts/qemu-drive.py -m 6G --done 'passed, '   (suite del kernel)"
 say "         python3 scripts/qemu-drive.py -t 1200 -m 6G --boot-test /usr/bin/lkpi_test --done 'LKPI-TEST:'"
+exit 0
