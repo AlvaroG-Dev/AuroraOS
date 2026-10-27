@@ -384,7 +384,8 @@ static int lkpi_vop_poll(struct aurora_vfs_node *n, short events)
 		return DEFAULT_POLLMASK;
 	init_poll_funcptr(&pt, lkpi_poll_qproc);
 	pt._key = (__poll_t)(unsigned short)events | EPOLLERR | EPOLLHUP;
-	return (int)(f->f_op->poll(f, &pt) & 0xffff);
+	/* Como Linux: solo lo pedido, mas los errores (Aurora no filtra). */
+	return (int)(f->f_op->poll(f, &pt) & pt._key & 0xffff);
 }
 
 static struct aurora_wait_queue *lkpi_vop_poll_wq(struct aurora_vfs_node *n)

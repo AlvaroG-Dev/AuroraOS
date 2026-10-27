@@ -25,6 +25,7 @@
 #include <linux/ioctl.h>
 #include <linux/mm_types.h>
 #include <linux/rcupdate.h>
+#include <linux/signal.h>
 
 struct file;
 struct inode;
