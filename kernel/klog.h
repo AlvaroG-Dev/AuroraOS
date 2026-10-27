@@ -85,4 +85,6 @@ void klog_boot_info(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 //   klog_snapshot()    → copia NO destructiva del ring, NUL-terminated
 // ---------------------------------------------------------------------------
 uint64_t klog_line_count(void);
+// Lineas que ya salieron del ring: secuencia absoluta de la primera que queda.
+uint64_t klog_lines_gone(void);
 size_t klog_snapshot(char *out, size_t max_len);
