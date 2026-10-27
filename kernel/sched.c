@@ -172,6 +172,7 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
 
   // [KTHREAD] tareas nativas no son kthreads
   task->kthread = NULL;
+  task->wake_pending = 0;
 
   task->wake_deadline = 0;
   task->yield_requested = 0;

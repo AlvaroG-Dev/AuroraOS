@@ -90,6 +90,9 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     deadline = sched_get_ticks() + timeout_ticks;
 
   while (1) {
+    // Un aviso anterior a esta evaluacion ya queda cubierto por ella.
+    __atomic_store_n(&self->wake_pending, 0, __ATOMIC_SEQ_CST);
+
     // -----------------------------------------------------------------
     // 1. Evaluar la condición SIN wq->lock (modelo Linux:
     //    prepare_to_wait + test + schedule + finish_wait).
@@ -128,6 +131,15 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       self->wake_reason = 0;
       wait_queue_add_locked(wq, self);
       sched_set_blocked_deadline(self, deadline);
+
+      // Pareja de wait_queue_wake_task(): publicar waiting_on y luego leer
+      // wake_pending (el que despierta hace lo contrario). Si el aviso llego
+      // antes de encolarnos, no nos dormimos y se vuelve a evaluar cond.
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      if (__atomic_load_n(&self->wake_pending, __ATOMIC_SEQ_CST)) {
+        wait_queue_remove_locked(wq, self);
+        sched_make_ready(self);
+      }
 
       if (interruptible && self->proc) {
         uint64_t pend =
@@ -399,7 +411,16 @@ void wait_queue_wake_task(task_t *task) {
   if (!task)
     return;
 
-  wait_queue_t *wq = task->waiting_on;
+  // [FIX despertar perdido] waiting_on se lee sin wq->lock. Si el que espera
+  // ya evaluo su condicion (falsa) pero aun no se ha encolado, aqui se lee
+  // NULL y el aviso se perdia: el padre en waitpid() se dormia para siempre
+  // aunque el hijo ya fuese zombi (cuelgue de bash/wl-copy en
+  // primary-icons.sh y clipboard-x11.sh). Dekker con wait_common: primero
+  // wake_pending y luego leer waiting_on; alguno de los dos ve al otro.
+  __atomic_store_n(&task->wake_pending, 1, __ATOMIC_SEQ_CST);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+  wait_queue_t *wq = __atomic_load_n(&task->waiting_on, __ATOMIC_SEQ_CST);
   if (!wq)
     return;
 

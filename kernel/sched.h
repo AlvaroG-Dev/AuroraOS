@@ -81,6 +81,11 @@ typedef struct task {
   // procesos de usuario. kthread_stop lo pone a NULL antes de liberar
   // el handle, así que un task_t reapeado nunca deja un puntero vivo.
   struct kthread *kthread;
+
+  // Aviso de wait_queue_wake_task() que llego cuando la tarea aun no estaba
+  // en ninguna cola (entre evaluar la condicion y encolarse). wait_common lo
+  // consume tras encolarse y no se duerme. Ver wait_queue_wake_task().
+  volatile int wake_pending;
 } task_t;
 
 void sched_init(void);
