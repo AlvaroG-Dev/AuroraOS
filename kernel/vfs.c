@@ -3209,7 +3209,9 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
     return -1;
   if (f->node && f->node->ops && f->node->ops->llseek) { // [LinuxKPI L4]
     mutex_lock(&f->lock);
-    int64_t r = f->node->ops->llseek(f, offset, whence);
+    int64_t r = f->node->ops->llseek(f, offset, whence, f->offset);
+    if (r >= 0)
+      f->offset = (uint64_t)r;
     mutex_unlock(&f->lock);
     fd_put(f);
     return r;
@@ -3352,12 +3354,11 @@ int64_t vfs_node_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     return -ENOTTY;
   return node->ops->ioctl(node, req, arg);
 }
-// [LinuxKPI L4] kill_fasync: SIGIO (o la señal pedida) al dueño de F_SETOWN.
-// Contexto de tarea (toma cerrojos de la tabla de procesos).
-int vfs_fd_send_sigio(file_descriptor_t *f, int sig) {
-  if (!f || sig <= 0 || sig > 63)
+// [LinuxKPI L4] kill_fasync: SIGIO (o la señal pedida) al dueño de F_SETOWN
+// (pid > 0 o grupo < 0). Contexto de tarea (toma cerrojos de procesos).
+int vfs_send_sigio(int owner, int sig) {
+  if (sig <= 0 || sig > 63)
     return -EINVAL;
-  int owner = __atomic_load_n(&f->owner, __ATOMIC_RELAXED);
   if (owner > 0)
     return process_kill((uint32_t)owner, sig);
   if (owner < 0) {
@@ -3365,6 +3366,10 @@ int vfs_fd_send_sigio(file_descriptor_t *f, int sig) {
     return n < 0 ? n : 0;
   }
   return 0;
+}
+
+int vfs_fd_owner(file_descriptor_t *f) {
+  return f ? __atomic_load_n(&f->owner, __ATOMIC_RELAXED) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -3388,6 +3393,7 @@ vfs_node_t *vfs_node_alloc(const char *name, uint32_t vflags, uint32_t mode,
 }
 
 void *vfs_node_get_priv(vfs_node_t *n) { return n ? n->priv : NULL; }
+vfs_ops_t *vfs_node_ops(vfs_node_t *n) { return n ? n->ops : NULL; }
 void vfs_node_set_priv(vfs_node_t *n, void *priv) {
   if (n)
     n->priv = priv;

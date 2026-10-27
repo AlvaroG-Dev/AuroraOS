@@ -208,9 +208,12 @@ typedef struct vfs_ops {
   //   read_fd/write_fd: `ubuf` es el puntero de USUARIO tal cual (el VFS no
   //     trocea ni copia) y `*pos` el offset del fd, que la operación avanza
   //     como quiera (pread/pwrite pasan una copia). Bytes, 0 o -errno.
-  //   llseek: nuevo offset (y lo guarda en f->offset) o -errno.
+  //   llseek: con el offset actual `cur`; nuevo offset (el VFS lo guarda en
+  //     f->offset) o -errno.
   //   setfl: F_SETFL antes de aplicar `newflags` (O_NONBLOCK, O_ASYNC); si
   //     devuelve error, los flags no cambian. Aquí se engancha fasync.
+  //     Tambien tras F_SETOWN (con los flags de siempre) para que el fichero
+  //     vea el dueño nuevo (vfs_fd_owner).
   //   mmap_dev: mmap() del fichero. El VFS ya creó un VMA_DEV con referencia
   //     al fd (vma->file_fd, file_offset = offset); la operación rellena
   //     vma->dev_ops/dev_priv y mapea ahora o en el fallo de página. Si
@@ -219,7 +222,8 @@ typedef struct vfs_ops {
                      uint64_t *pos);
   int64_t (*write_fd)(struct file_descriptor *f, const void *ubuf, size_t n,
                       uint64_t *pos);
-  int64_t (*llseek)(struct file_descriptor *f, int64_t off, int whence);
+  int64_t (*llseek)(struct file_descriptor *f, int64_t off, int whence,
+                    uint64_t cur);
   int (*setfl)(struct file_descriptor *f, int newflags);
   int (*mmap_dev)(struct file_descriptor *f, struct process *proc,
                   struct vma *vma, uint64_t prot, uint64_t flags);
@@ -459,6 +463,7 @@ vfs_node_t *vfs_node_alloc(const char *name, uint32_t vflags, uint32_t mode,
                            uint32_t rdev, vfs_ops_t *ops, void *priv,
                            uint64_t size);
 void *vfs_node_get_priv(vfs_node_t *n);
+vfs_ops_t *vfs_node_ops(vfs_node_t *n);
 void vfs_node_set_priv(vfs_node_t *n, void *priv);
 vfs_node_t *vfs_fd_node(file_descriptor_t *f);
 int vfs_fd_flags(file_descriptor_t *f);
@@ -472,8 +477,9 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count);
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
                            size_t count);
 int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence);
-// [LinuxKPI L4] Señal (SIGIO) al dueño de F_SETOWN del fd. 0 o -errno.
-int vfs_fd_send_sigio(file_descriptor_t *f, int sig);
+// [LinuxKPI L4] Señal (SIGIO) a un dueño de F_SETOWN (pid > 0, grupo < 0).
+int vfs_send_sigio(int owner, int sig);
+int vfs_fd_owner(file_descriptor_t *f);
 int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st);
 
 int vfs_wait_readable(void *proc_ptr, int fd);

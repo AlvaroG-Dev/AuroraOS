@@ -3458,6 +3458,8 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
   }
   case 8: /* F_SETOWN */
     f->owner = (int)arg;
+    if (f->node && f->node->ops && f->node->ops->setfl)
+      f->node->ops->setfl(f, f->flags); // [LinuxKPI L4] dueño nuevo
     return 0;
   case 9: /* F_GETOWN */
     return f->owner;
