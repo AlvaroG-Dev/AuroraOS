@@ -1722,11 +1722,11 @@ static int ahci_probe(pci_device_t *pci_dev, const pci_device_id_t *id) {
 
       irq_install_handler_ex(irq, ahci_irq_ack, ahci_irq_process);
 
-      ioapic_redirect_irq_ex(irq, 32 + irq, lapic_get_bsp_id(),
-                             0 /* unmasked */, 1 /* level */,
-                             1 /* active-low */);
+      // Nivel, con la polaridad del ISO de la MADT si lo hay (si no, activa
+      // a nivel bajo como dice PCI).
+      ioapic_route_pci_intx(irq, 32 + irq, lapic_get_bsp_id(), 0 /* unmasked */);
 
-      LOG_INFO("[AHCI] IRQ legacy %u instalada como level/active-low", irq);
+      LOG_INFO("[AHCI] IRQ legacy %u instalada (INTx por nivel)", irq);
     }
   }
 

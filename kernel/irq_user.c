@@ -144,12 +144,14 @@ static int aur_irq_open(vfs_node_t *node, int flags) {
     // Las IRQs ISA (teclado, ratón PS/2...) son edge/active-high: usan la
     // redirección por defecto (con ISOs de la MADT). Forzarlas a
     // level/active-low como las INTx de PCI las dejaría siempre disparadas.
+    // Las INTx de PCI van por nivel con la polaridad que declare la MADT
+    // (QEMU pc: 5/9/10/11 activas a nivel ALTO) o, sin ISO, activas a nivel
+    // bajo como dice PCI. Antes se forzaba siempre nivel bajo.
     if (ctx->irq <= 15) {
       if (aur_irq_is_isa(ctx->irq))
         ioapic_redirect_irq(ctx->irq, 32 + ctx->irq, lapic_get_bsp_id(), 0);
       else
-        ioapic_redirect_irq_ex(ctx->irq, 32 + ctx->irq, lapic_get_bsp_id(), 0,
-                               1, 1);
+        ioapic_route_pci_intx(ctx->irq, 32 + ctx->irq, lapic_get_bsp_id(), 0);
     }
 
     ctx->registered = 1;
