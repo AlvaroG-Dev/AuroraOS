@@ -2,7 +2,11 @@
 #define KERNEL_SIGNAL_H
 
 #include "idt.h"
+#include <stdbool.h>
 #include <stdint.h>
+
+struct task;
+struct process;
 
 #define SIGHUP 1
 #define SIGINT 2
@@ -37,6 +41,9 @@
 #define SIGSYS 31
 
 #define SIG_MAX 64
+
+#define SI_USER 0
+#define SI_TIMER (-2) // si_code de una senal de timer_create()
 
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
@@ -76,6 +83,9 @@ struct process;
 // Devuelve `mask` sin los bits de señales ignoradas (SIG_IGN, o SIG_DFL con
 // acción por defecto IGN). SIGKILL/SIGSTOP nunca se filtran.
 uint64_t signal_filter_ignored(struct process *p, uint64_t mask);
+// Igual, pero mirando la mascara y la espera de sigtimedwait del hilo `t`.
+uint64_t signal_filter_ignored_task(struct task *t, struct process *p,
+                                    uint64_t mask);
 
 // [syscall.c] Handlers de rt_sigaction/rt_sigreturn. Se definen en
 // signal.c pero se registran en la tabla de syscalls de syscall.c.
@@ -95,8 +105,28 @@ int64_t k_rt_sigsuspend(uint64_t set, uint64_t sigsetsize, uint64_t a3,
                         uint64_t a4, uint64_t a5);
 int64_t k_pause(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
 
-// Marca SIGPIPE como pendiente en el proceso actual (write sin lector).
+// Marca SIGPIPE como pendiente en el hilo actual (write sin lector).
 void signal_raise_sigpipe(void);
+
+// --- Senales por hilo -------------------------------------------------------
+// Pendientes que ve el hilo `t`: las suyas y las de su proceso.
+uint64_t signal_pending_of(struct task *t);
+// Quita las senales de `mask` de las pendientes de `t` y de su proceso.
+void signal_dequeue_mask(struct task *t, uint64_t mask);
+// tid del hilo (el pid del proceso para el hilo principal).
+uint32_t task_tid(struct task *t);
+// Tras marcar `mask` como pendiente en el proceso de `leader`, despierta a
+// un hilo que la pueda atender (si la bloquean todos, a ninguno).
+void signal_wake_process(struct task *leader, uint64_t mask);
+// Senal dirigida al hilo `t` (tkill/tgkill, SIGEV_THREAD_ID). 0 o -errno.
+int signal_send_thread(struct task *t, int sig);
+// Envia `sig` al hilo con ese tid (o al principal si tid es un pid).
+int signal_send_tid(uint32_t tid, int sig);
+// `sig` esta pendiente en el propio hilo `tid` (no en su proceso).
+bool signal_tid_is_pending(uint32_t tid, int sig);
+// true si la disposicion de `sig` en `p` es ignorarla (SIG_IGN, o SIG_DFL
+// con accion por defecto de ignorar).
+bool signal_is_ignored(struct process *p, int sig);
 
 // [4.3] Entrega una señal al proceso actual usando los regs del fault.
 int signal_deliver_from_exception(int sig, registers_t *regs);

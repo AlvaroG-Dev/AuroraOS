@@ -113,6 +113,10 @@ void task_put(task_t *t) {
   if (!t)
     return;
   if (__sync_sub_and_fetch(&t->refcount, 1) == 0) {
+    if (t->mailbox) {
+      kfree(t->mailbox);
+      t->mailbox = NULL;
+    }
     if (t->stack) {
       kfree(t->stack);
       t->stack = NULL;
@@ -173,6 +177,12 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   // [KTHREAD] tareas nativas no son kthreads
   task->kthread = NULL;
   task->wake_pending = 0;
+  task->tid = 0;
+  task->sig_blocked = 0;
+  task->sig_pending = 0;
+  task->sig_saved_mask = 0;
+  task->sig_waiting = 0;
+  task->sig_suspend_active = 0;
 
   task->wake_deadline = 0;
   task->yield_requested = 0;
@@ -181,10 +191,7 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->wait_entry.next = NULL;
   task->wait_seq = 0;
 
-  task->mailbox.head = 0;
-  task->mailbox.tail = 0;
-  task->mailbox.count = 0;
-  wait_queue_init(&task->mailbox.wq);
+  task->mailbox = NULL; // lo crea ipc.c al usarlo
 
   task->fpu_state = ((uint64_t)task->fpu_raw + 15) & ~0xFULL;
   __asm__ volatile("fninit; fxsave64 (%0)" : : "r"(task->fpu_state) : "memory");
@@ -905,6 +912,74 @@ task_t *sched_find_task(uint32_t task_id) {
 
   spin_unlock_irqrestore(&sched_lock, flags);
   return NULL;
+}
+
+task_t *sched_find_tid_get(uint32_t tid) {
+  if (tid == 0)
+    return NULL;
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  task_t *found = NULL;
+  task_t *curr = task_list_head;
+  if (curr) {
+    do {
+      if (curr->tid == tid && curr->proc && curr->state != TASK_DEAD) {
+        task_get(curr);
+        found = curr;
+        break;
+      }
+      curr = curr->next;
+    } while (curr && curr != task_list_head);
+  }
+  spin_unlock_irqrestore(&sched_lock, flags);
+  return found;
+}
+
+task_t *sched_signal_target_get(struct process *proc, task_t *prefer,
+                                uint64_t sigbit) {
+  if (!proc)
+    return NULL;
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  task_t *found = NULL;
+  if (prefer && prefer->proc == proc && prefer->state != TASK_DEAD &&
+      !(__atomic_load_n(&prefer->sig_blocked, __ATOMIC_ACQUIRE) & sigbit)) {
+    found = prefer;
+  } else if (task_list_head) {
+    task_t *curr = task_list_head;
+    do {
+      if (curr->proc == proc && curr->state != TASK_DEAD &&
+          !(__atomic_load_n(&curr->sig_blocked, __ATOMIC_ACQUIRE) & sigbit)) {
+        found = curr;
+        break;
+      }
+      curr = curr->next;
+    } while (curr && curr != task_list_head);
+  }
+  if (found)
+    task_get(found);
+  spin_unlock_irqrestore(&sched_lock, flags);
+  return found;
+}
+
+task_t *sched_next_thread_get(struct process *proc, task_t *except,
+                              uint64_t sigbit) {
+  if (!proc)
+    return NULL;
+  unsigned long flags = spin_lock_irqsave(&sched_lock);
+  task_t *found = NULL;
+  task_t *curr = task_list_head;
+  if (curr) {
+    do {
+      if (curr->proc == proc && curr != except && curr->state != TASK_DEAD &&
+          !(__atomic_load_n(&curr->sig_pending, __ATOMIC_ACQUIRE) & sigbit)) {
+        task_get(curr);
+        found = curr;
+        break;
+      }
+      curr = curr->next;
+    } while (curr && curr != task_list_head);
+  }
+  spin_unlock_irqrestore(&sched_lock, flags);
+  return found;
 }
 
 /*

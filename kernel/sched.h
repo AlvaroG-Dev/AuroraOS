@@ -44,7 +44,9 @@ typedef struct task {
   uint64_t fpu_state;
   uint64_t cr3;
   uint8_t fpu_raw[512 + 16];
-  ipc_mailbox_t mailbox;
+  // Buzon de IPC: se crea la primera vez que la tarea envia o recibe (ipc.c)
+  // y se libera con la tarea. Antes iba dentro (~1,3 KB en cada task_t).
+  ipc_mailbox_t *mailbox;
   int is_idle;
   struct task *next;
 
@@ -86,6 +88,18 @@ typedef struct task {
   // en ninguna cola (entre evaluar la condicion y encolarse). wait_common lo
   // consume tras encolarse y no se duerme. Ver wait_queue_wake_task().
   volatile int wake_pending;
+
+  // Senales por hilo (como Linux): la mascara es de cada hilo; las
+  // pendientes del proceso estan en process_t y aqui solo las dirigidas a
+  // este hilo (tkill/tgkill, SIGEV_THREAD_ID). tid 0 = hilo principal (su
+  // tid es el pid del proceso); los demas hilos sacan el suyo del contador
+  // de pids (task_tid()).
+  uint32_t tid;
+  uint64_t sig_blocked;
+  uint64_t sig_pending;
+  uint64_t sig_saved_mask; // mascara previa a sigsuspend
+  uint64_t sig_waiting;    // las que espera en sigtimedwait (si no, 0)
+  int sig_suspend_active;
 } task_t;
 
 void sched_init(void);
@@ -103,6 +117,18 @@ void sched_tick(void);
 void sched_yield(void);
 task_t *sched_current(void);
 task_t *sched_find_task(uint32_t task_id);
+
+// Hilo secundario (tid != 0) con ese tid, con referencia. NULL si no hay.
+task_t *sched_find_tid_get(uint32_t tid);
+// Hilo de `proc` que debe atender una senal de proceso `sigbit`: `prefer`
+// (el principal) si vive y no la bloquea; si no, otro hilo vivo que no la
+// bloquee. Con referencia; NULL si todos la bloquean.
+task_t *sched_signal_target_get(struct process *proc, task_t *prefer,
+                                uint64_t sigbit);
+// Un hilo vivo de `proc` distinto de `except` que aun no tenga `sigbit` en
+// sus pendientes propias, con referencia (para recorrerlos marcandolos).
+task_t *sched_next_thread_get(struct process *proc, task_t *except,
+                              uint64_t sigbit);
 
 uint64_t sched_get_ticks(void);
 
@@ -153,7 +179,7 @@ void __sched_canary_check(void);
 _Static_assert(offsetof(task_t, rsp) == 0x00, "switch.asm: rsp @ 0x00");
 _Static_assert(offsetof(task_t, fpu_state) == 0x18, "switch.asm");
 _Static_assert(offsetof(task_t, cr3) == 0x20, "switch.asm");
-_Static_assert(offsetof(task_t, on_cpu) == 0x794, "switch.asm TASK_OFF_ON_CPU");
+_Static_assert(offsetof(task_t, on_cpu) == 0x274, "switch.asm TASK_OFF_ON_CPU");
 _Static_assert(offsetof(spinlock_t, locked) == 0 &&
                    sizeof(((spinlock_t *)0)->locked) == 4,
                "switch.asm libera el lock con mov dword [rdx], 0");
@@ -162,4 +188,8 @@ _Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) +
                        15 <=
                    sizeof(task_t),
                "fpu_raw demasiado cerca del final de task_t");
-_Static_assert(offsetof(task_t, fs_base) == 0x7C0, "switch.asm: fs_base");
+_Static_assert(offsetof(task_t, fs_base) == 0x2A0, "switch.asm: fs_base");
+// sched_task_ptr_valid() exige que las task_t salgan del SLAB (<= 2048 bytes,
+// SLAB_MAX_SIZE). Si crece por encima, kmalloc la sirve del heap grande y
+// sched_kick_idle_cpu() deja de despertar CPUs ociosas.
+_Static_assert(sizeof(task_t) <= 2048, "task_t debe caber en el SLAB");

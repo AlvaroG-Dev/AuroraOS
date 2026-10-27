@@ -129,6 +129,18 @@ typedef struct process {
   // tarea solo la marca DEAD.
   int team_size;
 
+  // exit_group() o senal mortal: el resto de hilos tiene que salir con
+  // este codigo (process_exit_group_current).
+  int group_exiting;
+  int group_exit_code;
+  // Tarea que ejecuto process_exit() (el ultimo hilo en salir, no siempre
+  // el principal). free_reaped_zombie() espera a que termine antes de
+  // liberar el espacio de direcciones. Con referencia.
+  struct task *exit_task;
+  // Referencias cortas que impiden liberar el process_t (p. ej. el hijo que
+  // sale y va a despertar la child_wq de este padre).
+  int pin_count;
+
   // [JOB CONTROL] Estado de parada por SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU.
   //   stopped            1 si el proceso está parado ahora mismo.
   //   stop_signal        señal que lo paró (para WIFSTOPPED).
@@ -197,12 +209,9 @@ typedef struct process {
     uint64_t rlim_max;
   } rlimits[RLIM_NLIMITS];
 
+  // Pendientes del proceso (las de un hilo concreto van en task_t). La
+  // mascara y el estado de sigsuspend son de cada hilo (task_t).
   uint64_t pending_signals;
-  uint64_t blocked_signals;
-  // rt_sigsuspend/pause: mascara original, que el handler (o el retorno a
-  // userland) debe restaurar en lugar de la temporal de la espera.
-  uint64_t suspend_saved_mask;
-  int suspend_active;
   k_sigaction_t sigactions[SIG_MAX];
 
   // [SIGALTSTACK] Pila alternativa para handlers con SA_ONSTACK.
@@ -227,6 +236,12 @@ typedef struct process {
   // sched_tick() cada vez que la tarea de este proceso corre. Al reapear
   // el proceso, process_waitpid lo vuelca a proc_rusage_t.
   uint64_t cpu_ticks_user;
+
+  // setitimer(ITIMER_VIRTUAL/ITIMER_PROF): ticks hasta vencer (0 = desarmado)
+  // y recarga. Los descuenta ptimer_account_tick() en el tick. ITIMER_REAL y
+  // los temporizadores POSIX viven en ptimer.c. fork no los hereda (kzalloc).
+  uint64_t itimer_virt_value, itimer_virt_interval;
+  uint64_t itimer_prof_value, itimer_prof_interval;
 
   // [ENV] Variables de entorno. Array NULL-terminated de strings
   // "KEY=VALUE" kmalloc'd. Cada uno liberado por process_clear_envp.
@@ -316,6 +331,9 @@ void process_wake_parent(uint32_t parent_pid);
 // al padre, mata la tarea actual y NO retorna. Unifica SYS_EXIT y
 // kill_current_process.
 __attribute__((noreturn)) void process_exit_current(int exit_code);
+// exit_group() y senales mortales: marca SIGKILL en el resto de hilos del
+// proceso (salen con el mismo codigo) y sale el actual.
+__attribute__((noreturn)) void process_exit_group_current(int exit_code);
 
 process_t *process_current(void);
 void *process_sbrk(process_t *proc, int64_t increment);
@@ -379,6 +397,8 @@ int process_is_in_pgrp(process_t *p, uint32_t pgid);
 // señalados, o -ESRCH si no existe ningún proceso en ese grupo.
 int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask);
 
+// true si `sig` esta pendiente en el proceso `pid` (que existe y no es zombi).
+bool process_signal_is_pending(uint32_t pid, int sig);
 task_t *process_signal_pid_ex(uint32_t pid, uint64_t signal_mask,
                               int *need_interrupt);
 

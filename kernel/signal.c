@@ -2,6 +2,7 @@
 #include "klog.h"
 #include "process.h"
 #include "sched.h"
+#include "ptimer.h"
 #include "signalfd.h"
 #include "string.h"
 #include "syscall.h"
@@ -50,6 +51,10 @@ sig_action_t signal_default_action(int sig) {
   case SIGXFSZ:
     return SIG_ACT_CORE;
   default:
+    // Senales de tiempo real (32-63): terminar, como Linux. Antes se
+    // ignoraban, y eso permitia descartarlas al enviarlas.
+    if (sig >= 32 && sig < SIG_MAX)
+      return SIG_ACT_TERM;
     return SIG_ACT_IGN;
   }
 }
@@ -215,7 +220,7 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
     if (def == SIG_ACT_TERM || def == SIG_ACT_CORE) {
       LOG_INFO("[SIG] PID=%u SIG %d -> terminar", proc->pid, sig);
       proc->term_signal = sig; // wait4: WIFSIGNALED/WTERMSIG
-      process_exit_current(128 + sig);
+      process_exit_group_current(128 + sig);
     }
     if (def == SIG_ACT_STOP) {
       LOG_INFO("[SIG] PID=%u SIG %d -> stop", proc->pid, sig);
@@ -269,18 +274,30 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   // rsp tras el `ret` del handler vale frame_va+8, y mc = frame_va+0x30
   // = SF_UC_MCONTEXT, consistente con la nueva base.
   uint64_t frame_va = ((sp_base - SF_SIZE) & ~0xFULL) - 8;
-  uint64_t old_mask = proc->blocked_signals;
-  if (proc->suspend_active) { // el handler vuelve a la mascara previa a sigsuspend
-    old_mask = proc->suspend_saved_mask;
-    proc->suspend_active = 0;
+  task_t *cur = sched_current();
+  uint64_t old_mask = cur->sig_blocked;
+  if (cur->sig_suspend_active) { // el handler vuelve a la mascara previa a sigsuspend
+    old_mask = cur->sig_saved_mask;
+    cur->sig_suspend_active = 0;
   }
 
   if (build_frame(frame_va, sig, act, regs, old_mask) < 0) {
     LOG_ERR("[SIG] PID=%u SIG %d: fallo al construir frame", proc->pid, sig);
-    process_exit_current(128 + sig);
+    process_exit_group_current(128 + sig);
+  }
+  // Senal de un temporizador POSIX: si_code = SI_TIMER con id, overrun y
+  // valor (la libc monta SIGEV_THREAD sobre esto).
+  ptimer_siginfo_t pti;
+  if (ptimer_take_siginfo(proc, sig, &pti)) {
+    uint64_t si = frame_va + SF_SIGINFO;
+    if (w_u32(si + 0x08, (uint32_t)SI_TIMER) < 0 ||
+        w_u32(si + 0x10, (uint32_t)pti.timerid) < 0 ||
+        w_u32(si + 0x14, (uint32_t)pti.overrun) < 0 ||
+        w_u64(si + 0x18, pti.value) < 0)
+      process_exit_group_current(128 + sig);
   }
 
-  proc->blocked_signals = old_mask | act->mask | (1ULL << sig);
+  cur->sig_blocked = old_mask | act->mask | (1ULL << sig);
 
   regs->rip = (uint64_t)act->handler;
   regs->rsp = frame_va;
@@ -298,7 +315,8 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
 }
 
 void signal_check_pending(void) {
-  process_t *proc = process_current();
+  task_t *cur = sched_current();
+  process_t *proc = cur ? cur->proc : NULL;
   if (!proc)
     return;
 
@@ -306,35 +324,136 @@ void signal_check_pending(void) {
   if (!regs)
     return;
 
-  uint64_t pending = __atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE);
-  if (pending == 0)
-    return;
+  for (;;) {
+    uint64_t pending = signal_pending_of(cur);
+    if (pending == 0 && !cur->sig_suspend_active)
+      return;
 
-  if (pending & (1ULL << SIGKILL)) {
-    __atomic_fetch_and(&proc->pending_signals, ~(1ULL << SIGKILL),
-                       __ATOMIC_ACQ_REL);
-    LOG_INFO("[SIG] PID=%u SIGKILL", proc->pid);
-    proc->term_signal = SIGKILL;
-    process_exit_current(128 + SIGKILL);
-  }
-
-  uint64_t deliverable = pending & ~proc->blocked_signals;
-  if (deliverable == 0) {
-    if (proc->suspend_active) {
-      proc->blocked_signals = proc->suspend_saved_mask;
-      proc->suspend_active = 0;
+    if (pending & (1ULL << SIGKILL)) {
+      signal_dequeue_mask(cur, 1ULL << SIGKILL);
+      if (proc->group_exiting) // otro hilo hizo exit_group o recibio una mortal
+        process_exit_current(proc->group_exit_code);
+      LOG_INFO("[SIG] PID=%u SIGKILL", proc->pid);
+      proc->term_signal = SIGKILL;
+      process_exit_group_current(128 + SIGKILL);
     }
-    return;
-  }
 
-  for (int sig = 1; sig < SIG_MAX; sig++) {
-    if (!(deliverable & (1ULL << sig)))
+    uint64_t deliverable = pending & ~cur->sig_blocked;
+    if (deliverable == 0) {
+      if (cur->sig_suspend_active) {
+        cur->sig_blocked = cur->sig_saved_mask;
+        cur->sig_suspend_active = 0;
+      }
+      return;
+    }
+
+    int sig = __builtin_ctzll(deliverable);
+    signal_dequeue_mask(cur, 1ULL << sig);
+    // Una senal ignorada se descarta y se mira la siguiente (como Linux):
+    // asi no se devuelve a userland con la mascara temporal de sigsuspend
+    // sin haber ejecutado ningun handler.
+    if (signal_is_ignored(proc, sig))
       continue;
-    __atomic_fetch_and(&proc->pending_signals, ~(1ULL << sig),
-                       __ATOMIC_ACQ_REL);
     deliver(proc, sig, regs);
     return;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Senales por hilo
+// ---------------------------------------------------------------------------
+uint64_t signal_pending_of(task_t *t) {
+  if (!t)
+    return 0;
+  uint64_t p = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE);
+  if (t->proc)
+    p |= __atomic_load_n(&t->proc->pending_signals, __ATOMIC_ACQUIRE);
+  return p;
+}
+
+void signal_dequeue_mask(task_t *t, uint64_t mask) {
+  if (!t)
+    return;
+  __atomic_fetch_and(&t->sig_pending, ~mask, __ATOMIC_ACQ_REL);
+  if (t->proc)
+    __atomic_fetch_and(&t->proc->pending_signals, ~mask, __ATOMIC_ACQ_REL);
+}
+
+uint32_t task_tid(task_t *t) {
+  if (!t)
+    return 0;
+  if (t->tid)
+    return t->tid;
+  return t->proc ? t->proc->pid : t->id;
+}
+
+bool signal_is_ignored(process_t *p, int sig) {
+  if (!p || sig <= 0 || sig >= SIG_MAX || sig == SIGKILL || sig == SIGSTOP)
+    return false;
+  void (*h)(int) = p->sigactions[sig].handler;
+  return h == SIG_IGN ||
+         (h == SIG_DFL && signal_default_action(sig) == SIG_ACT_IGN);
+}
+
+void signal_wake_process(task_t *leader, uint64_t mask) {
+  if (!leader || !mask)
+    return;
+  process_t *p = leader->proc;
+  if (!p)
+    return;
+  // Un hilo por senal (como complete_signal de Linux); casi siempre es una.
+  for (uint64_t m = mask; m; m &= m - 1) {
+    task_t *t = sched_signal_target_get(p, leader, m & -m);
+    if (!t)
+      continue; // todos la bloquean: queda pendiente
+    wait_queue_interrupt_task(t);
+    task_put(t);
+  }
+}
+
+int signal_send_thread(task_t *t, int sig) {
+  if (!t || !t->proc || sig <= 0 || sig >= SIG_MAX)
+    return -EINVAL;
+  if (!signal_filter_ignored_task(t, t->proc, 1ULL << sig))
+    return 0; // ignorada y ni bloqueada ni esperada: descartada, como Linux
+  if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) {
+    // Afectan al proceso entero.
+    return process_kill(t->proc->pid, sig);
+  }
+  __atomic_fetch_or(&t->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
+  signalfd_notify(t->proc, 1ULL << sig);
+  if (!(__atomic_load_n(&t->sig_blocked, __ATOMIC_ACQUIRE) & (1ULL << sig)))
+    wait_queue_interrupt_task(t);
+  return 0;
+}
+
+bool signal_tid_is_pending(uint32_t tid, int sig) {
+  bool r = false;
+  task_t *t = sched_find_tid_get(tid);
+  if (t) {
+    r = (__atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) & (1ULL << sig)) != 0;
+    task_put(t);
+    return r;
+  }
+  process_t *p = process_find_by_pid(tid); // hilo principal
+  if (p && p->task)
+    r = (__atomic_load_n(&p->task->sig_pending, __ATOMIC_ACQUIRE) &
+         (1ULL << sig)) != 0;
+  return r;
+}
+
+int signal_send_tid(uint32_t tid, int sig) {
+  task_t *t = sched_find_tid_get(tid);
+  if (!t) {
+    // tid de un hilo principal = pid de su proceso.
+    process_t *p = process_find_by_pid(tid);
+    if (!p || p->is_zombie || !p->task)
+      return -ESRCH;
+    return signal_send_thread(p->task, sig);
+  }
+  int r = signal_send_thread(t, sig);
+  task_put(t);
+  return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +606,7 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   uint64_t mask = 0;
   if (copy_from_user(&mask, (void *)(rsp + 0x128), 8) < 0)
     return -EFAULT;
-  proc->blocked_signals =
+  sched_current()->sig_blocked =
       sigset_from_user(mask) & ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
 
   return (int64_t)regs->rax;
@@ -500,14 +619,14 @@ int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
   if (sigsetsize != 8)
     return -EINVAL;
 
-  process_t *proc = process_current();
-  if (!proc)
+  task_t *cur = sched_current();
+  if (!cur || !cur->proc)
     return -EFAULT;
 
   if (oldset) {
     if (!access_ok((void *)oldset, 8))
       return -EFAULT;
-    uint64_t old = sigset_to_user(proc->blocked_signals);
+    uint64_t old = sigset_to_user(cur->sig_blocked);
     if (copy_to_user((void *)oldset, &old, 8) < 0)
       return -EFAULT;
   }
@@ -519,17 +638,20 @@ int64_t k_rt_sigprocmask(uint64_t how, uint64_t set, uint64_t oldset,
       return -EFAULT;
     s = sigset_from_user(s);
 
+    uint64_t m = cur->sig_blocked;
     if (how == 0)
-      proc->blocked_signals |= s;
+      m |= s;
     else if (how == 1)
-      proc->blocked_signals &= ~s;
+      m &= ~s;
     else if (how == 2)
-      proc->blocked_signals = s;
+      m = s;
     else
       return -EINVAL;
 
     // SIGKILL y SIGSTOP no son bloqueables.
-    proc->blocked_signals &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    __atomic_store_n(&cur->sig_blocked,
+                     m & ~((1ULL << SIGKILL) | (1ULL << SIGSTOP)),
+                     __ATOMIC_RELEASE);
   }
   return 0;
 }
@@ -544,11 +666,10 @@ int64_t k_rt_sigpending(uint64_t set, uint64_t sigsetsize, uint64_t a3,
   (void)a3; (void)a4; (void)a5;
   if (sigsetsize != 8)
     return -EINVAL;
-  process_t *proc = process_current();
-  if (!proc)
+  task_t *cur = sched_current();
+  if (!cur || !cur->proc)
     return -EFAULT;
-  uint64_t pend = __atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE) &
-                  proc->blocked_signals;
+  uint64_t pend = signal_pending_of(cur) & cur->sig_blocked;
   uint64_t u = sigset_to_user(pend);
   if (!access_ok((void *)set, 8) || copy_to_user((void *)set, &u, 8) < 0)
     return -EFAULT;
@@ -556,9 +677,10 @@ int64_t k_rt_sigpending(uint64_t set, uint64_t sigsetsize, uint64_t a3,
 }
 
 void signal_raise_sigpipe(void) {
-  process_t *proc = process_current();
-  if (proc)
-    __atomic_fetch_or(&proc->pending_signals, 1ULL << SIGPIPE, __ATOMIC_RELEASE);
+  // Como en Linux, SIGPIPE va al hilo que escribio.
+  task_t *cur = sched_current();
+  if (cur && cur->proc)
+    __atomic_fetch_or(&cur->sig_pending, 1ULL << SIGPIPE, __ATOMIC_RELEASE);
 }
 
 static bool never_true(void *a) { (void)a; return false; }
@@ -597,19 +719,29 @@ int64_t k_rt_sigtimedwait(uint64_t set, uint64_t info, uint64_t timeout,
     g_sigwait_wq_init = 1;
   }
 
+  task_t *cur = sched_current();
   uint64_t deadline = has_timeout ? sched_get_ticks() + timeout_ms : 0;
   for (;;) {
-    uint64_t pend = __atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE) & want;
+    uint64_t pend = signal_pending_of(cur) & want;
     if (pend) {
       int sig = __builtin_ctzll(pend);
-      __atomic_fetch_and(&proc->pending_signals, ~(1ULL << sig), __ATOMIC_ACQ_REL);
+      signal_dequeue_mask(cur, 1ULL << sig);
+      ptimer_siginfo_t pti;
+      bool from_timer = ptimer_take_siginfo(proc, sig, &pti);
       if (info) {
         uint8_t si[128];
         memset(si, 0, sizeof(si));
         *(int32_t *)(si + 0) = sig;
-        *(int32_t *)(si + 8) = 0; // SI_USER
-        *(int32_t *)(si + 16) = (int32_t)proc->pid;
-        *(int32_t *)(si + 20) = (int32_t)proc->uid;
+        if (from_timer) {
+          *(int32_t *)(si + 8) = SI_TIMER;
+          *(int32_t *)(si + 16) = pti.timerid;
+          *(int32_t *)(si + 20) = pti.overrun;
+          memcpy(si + 24, &pti.value, 8);
+        } else {
+          *(int32_t *)(si + 8) = 0; // SI_USER
+          *(int32_t *)(si + 16) = (int32_t)proc->pid;
+          *(int32_t *)(si + 20) = (int32_t)proc->uid;
+        }
         if (!access_ok((void *)info, 128) || copy_to_user((void *)info, si, 128) < 0)
           return -EFAULT;
       }
@@ -622,31 +754,50 @@ int64_t k_rt_sigtimedwait(uint64_t set, uint64_t info, uint64_t timeout,
         return -EAGAIN;
       left = deadline - now;
     }
-    // Mientras se espera, las senales pedidas se desbloquean para que despierten
-    // la tarea; se consumen aqui (nunca llegan a un handler).
-    uint64_t saved = proc->blocked_signals;
-    proc->blocked_signals = saved & ~want;
+    // Mientras se espera, las senales pedidas se desbloquean en este hilo
+    // (como Linux) para que una senal de proceso lo elija a el y lo
+    // despierte; se consumen aqui (nunca llegan a un handler).
+    uint64_t saved = cur->sig_blocked;
+    __atomic_store_n(&cur->sig_waiting, want, __ATOMIC_RELEASE);
+    __atomic_store_n(&cur->sig_blocked, saved & ~want, __ATOMIC_RELEASE);
     long r = wait_event_interruptible_timeout(&g_sigwait_wq, never_true, NULL, left);
-    proc->blocked_signals = saved;
-    if (r < 0 && !(__atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE) & want))
+    __atomic_store_n(&cur->sig_blocked, saved, __ATOMIC_RELEASE);
+    __atomic_store_n(&cur->sig_waiting, 0, __ATOMIC_RELEASE);
+    if (r < 0 && !(signal_pending_of(cur) & want))
       return -EINTR; // otra senal (con handler) interrumpio la espera
   }
 }
 
-// Sustituye la mascara y duerme hasta que llegue una senal no bloqueada. La
-// mascara original se restaura al volver del handler (ver deliver()).
+// Sustituye la mascara del hilo y duerme hasta que llegue una senal no
+// bloqueada que no se ignore. La mascara original se restaura al volver del
+// handler (ver deliver()) o en signal_check_pending().
 static int64_t suspend_with_mask(process_t *proc, uint64_t newmask) {
   if (!g_sigwait_wq_init) {
     wait_queue_init(&g_sigwait_wq);
     g_sigwait_wq_init = 1;
   }
-  proc->suspend_saved_mask = proc->blocked_signals;
-  proc->suspend_active = 1;
-  proc->blocked_signals = newmask & ~SIGMASK_UNKILLABLE;
+  task_t *cur = sched_current();
+  cur->sig_saved_mask = cur->sig_blocked;
+  cur->sig_suspend_active = 1;
+  __atomic_store_n(&cur->sig_blocked, newmask & ~SIGMASK_UNKILLABLE,
+                   __ATOMIC_RELEASE);
   for (;;) {
     long r = wait_event_interruptible_timeout(&g_sigwait_wq, never_true, NULL, 0);
-    if (r < 0)
+    if (r >= 0)
+      continue;
+    // Como Linux, una senal ignorada (p. ej. SIGCHLD con SIG_DFL) no saca
+    // de sigsuspend: se descarta y se sigue esperando. Antes volvia con
+    // -EINTR sin ejecutar nada y dejaba puesta la mascara temporal.
+    uint64_t d = signal_pending_of(cur) & ~cur->sig_blocked;
+    uint64_t ign = 0;
+    for (uint64_t m = d; m; m &= m - 1) {
+      int sig = __builtin_ctzll(m);
+      if (signal_is_ignored(proc, sig))
+        ign |= 1ULL << sig;
+    }
+    if (d & ~ign)
       return -EINTR; // signal_check_pending() ejecuta el handler y restaura la mascara
+    signal_dequeue_mask(cur, ign);
   }
 }
 
@@ -666,19 +817,33 @@ int64_t k_rt_sigsuspend(uint64_t set, uint64_t sigsetsize, uint64_t a3,
 
 int64_t k_pause(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
+  task_t *cur = sched_current();
+  if (!cur || !cur->proc)
     return -EFAULT;
-  return suspend_with_mask(proc, proc->blocked_signals);
+  return suspend_with_mask(cur->proc, cur->sig_blocked);
 }
 
 uint64_t signal_filter_ignored(process_t *p, uint64_t mask) {
+  return signal_filter_ignored_task(p ? p->task : NULL, p, mask);
+}
+
+uint64_t signal_filter_ignored_task(task_t *t, process_t *p, uint64_t mask) {
   if (!p)
     return mask;
+  // Como sig_ignored() de Linux: una senal que el hilo bloquea o espera en
+  // sigtimedwait no se descarta, aunque se ignore (el handler puede cambiar
+  // antes de desbloquearla, y sigwaitinfo la recoge igual). musl monta
+  // SIGEV_THREAD sobre esto: SIGTIMER con SIG_DFL, bloqueada y recogida
+  // con sigwaitinfo.
+  uint64_t keep = t ? (__atomic_load_n(&t->sig_blocked, __ATOMIC_ACQUIRE) |
+                       __atomic_load_n(&t->sig_waiting, __ATOMIC_ACQUIRE))
+                    : 0;
   for (int sig = 1; sig < SIG_MAX; sig++) {
     if (!(mask & (1ULL << sig)))
       continue;
     if (sig == SIGKILL || sig == SIGSTOP)
+      continue;
+    if (keep & (1ULL << sig))
       continue;
 
     // [FIX JOB] SIGCHLD nunca se filtra. Aunque su acción por defecto

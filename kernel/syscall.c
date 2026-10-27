@@ -36,6 +36,7 @@
 #include "serial.h"
 #include "signal.h"
 #include "signalfd.h"
+#include "ptimer.h"
 #include "timerfd.h"
 #include "pidfd_inotify.h"
 #include "spinlock.h"
@@ -1192,7 +1193,9 @@ static int64_t k_set_tid_address(uint64_t tidptr, uint64_t a2, uint64_t a3,
   if (!t)
     return -EFAULT;
   t->clear_child_tid = (uint32_t *)tidptr;
-  return (int64_t)t->id;
+  // Devuelve el tid (musl lo guarda como tid del hilo principal y raise()
+  // hace tkill con el). Antes devolvia task->id, que no es ni pid ni tid.
+  return (int64_t)task_tid(t);
 }
 
 // ---------- sysinfo (99) ----------
@@ -1811,29 +1814,25 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     return -EINVAL;
 
   if (kpid > 0) {
-    int need_intr = 0;
-    task_t *t = process_signal_pid_ex((uint32_t)kpid, 1ULL << ksig, &need_intr);
-    if (!t)
-      return -ESRCH;
-    if (need_intr)
-      wait_queue_interrupt_task(t);
-    task_put(t);
-    return 0;
+    int r = process_kill((uint32_t)kpid, ksig);
+    if (r == -ESRCH) {
+      // Como Linux, kill() con el tid de un hilo secundario va a su proceso.
+      task_t *th = sched_find_tid_get((uint32_t)kpid);
+      if (th) {
+        r = th->proc ? process_kill(th->proc->pid, ksig) : -ESRCH;
+        task_put(th);
+      }
+    }
+    return r;
   }
   if (kpid == 0) {
-    process_t *target = process_current();
-    if (!target || !target->task)
+    // kill(0, sig): todo el grupo de procesos del que llama (antes solo se
+    // lo mandaba a si mismo; `timeout` de coreutils cuenta con el grupo).
+    process_t *self = process_current();
+    if (!self)
       return -ESRCH;
-    task_t *t = target->task;
-    task_get(t);
-    uint64_t mask = signal_filter_ignored(target, 1ULL << ksig);
-    if (mask) {
-      __atomic_fetch_or(&target->pending_signals, mask, __ATOMIC_RELEASE);
-      signalfd_notify(target, mask);
-      wait_queue_interrupt_task(t);
-    }
-    task_put(t);
-    return 0;
+    int n = process_signal_pgrp(self->pgid, 1ULL << ksig);
+    return n < 0 ? n : 0;
   }
 
   // kpid < 0: enviar a todos los procesos del grupo -kpid.
@@ -2104,7 +2103,7 @@ static int64_t k_exit_group(uint64_t code, uint64_t a2, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_exit_current((int)code);
+  process_exit_group_current((int)code);
   // no retorna
 }
 
@@ -2431,21 +2430,33 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
 
 // ---------- tkill ----------
 //
-// En Linux, tkill(tid, sig) envía a un thread concreto. Aurora es
-// single-threaded: tid == pid. BusyBox ash lo usa en job control.
+// tkill(tid, sig): señal dirigida a un hilo concreto (tid del hilo
+// principal = pid). BusyBox ash lo usa en job control; musl en raise() y
+// pthread_kill().
 static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
-  return k_kill(tid, sig, 0, 0, 0);
+  if ((int32_t)tid <= 0)
+    return -EINVAL;
+  if (sig == 0) {
+    task_t *t = sched_find_tid_get((uint32_t)tid);
+    if (t) {
+      task_put(t);
+      return 0;
+    }
+    return process_find_by_pid((uint32_t)tid) ? 0 : -ESRCH;
+  }
+  if (sig >= SIG_MAX)
+    return -EINVAL;
+  return signal_send_tid((uint32_t)tid, (int)sig);
 }
 
 // ---------- tgkill ----------
 //
-// tgkill(tgid, tid, sig). En Linux, envía una señal a un thread
-// específico. En Aurora no hay thread groups separados (cada thread es
-// un task_t y un process_t), así que tid == pid y tgid == pid.
+// tgkill(tgid, tid, sig): señal al hilo `tid` del proceso `tgid` (tid
+// del hilo principal = pid). ESRCH si el hilo no es de ese proceso.
 //
 // glibc lo usa en raise() y pthread_kill(). Sin esto, abort() no puede
 // matar el proceso y sigue ejecutando con estado corrupto → hlt.
@@ -2453,16 +2464,21 @@ static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
                         uint64_t a5) {
   (void)a4;
   (void)a5;
-  process_t *self = process_current();
-  task_t *cur = sched_current();
-  if (!self || !cur)
-    return -EFAULT;
-  if ((uint32_t)tgid != self->pid)
+  if ((int32_t)tgid <= 0 || (int32_t)tid <= 0 || sig >= SIG_MAX)
     return -EINVAL;
-  // Aceptar tanto el pid (thread principal) como el task->id crudo.
-  if ((uint32_t)tid != self->pid && (uint32_t)tid != cur->id)
-    return -EINVAL;
-  return k_kill(tid, sig, 0, 0, 0);
+  uint32_t owner = 0;
+  task_t *t = sched_find_tid_get((uint32_t)tid);
+  if (t) {
+    owner = t->proc ? t->proc->pid : 0;
+    task_put(t);
+  } else if (process_find_by_pid((uint32_t)tid)) {
+    owner = (uint32_t)tid; // hilo principal
+  }
+  if (owner == 0 || owner != (uint32_t)tgid)
+    return -ESRCH;
+  if (sig == 0)
+    return 0;
+  return signal_send_tid((uint32_t)tid, (int)sig);
 }
 
 // ---------- readlinkat ----------
@@ -3639,10 +3655,8 @@ static int64_t k_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a3,
   LOG_TRACE("[NANOSLEEP] pid=%u req=%lu ticks left=%lu interrupted=%d "
             "pending=0x%lx blocked=0x%lx",
             spid, (unsigned long)ticks, (unsigned long)left, interrupted,
-            self ? (unsigned long)__atomic_load_n(&self->pending_signals,
-                                                  __ATOMIC_ACQUIRE)
-                 : 0UL,
-            self ? (unsigned long)self->blocked_signals : 0UL);
+            (unsigned long)signal_pending_of(sched_current()),
+            (unsigned long)sched_current()->sig_blocked);
 
   if (rem_ptr) {
     struct k_timespec rem;
@@ -4377,12 +4391,9 @@ static int64_t k_gettid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   task_t *t = sched_current();
   if (!t)
     return -EFAULT;
-  // [glibc] En un proceso sin threads, gettid() == getpid() (thread
-  // principal). Aurora tiene 1 task_t por proceso, así que el pid es
-  // el tid correcto. Devolver t->id rompía abort() de glibc:
-  // getpid()=3, gettid()=38, tgkill(3, 38, SIGABRT) → EINVAL.
-  process_t *p = t->proc;
-  return p ? (int64_t)p->pid : (int64_t)t->id;
+  // Hilo principal: tid == pid (abort() de glibc hace tgkill(getpid(),
+  // gettid())). Hilos de clone(CLONE_THREAD): su tid propio.
+  return (int64_t)task_tid(t);
 }
 
 static int64_t k_sendfile(uint64_t out_fd, uint64_t in_fd, uint64_t offset_ptr,
@@ -6131,66 +6142,7 @@ static int64_t k_capset(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
   return 0;
 }
 
-// ---------- getitimer (36) / setitimer (38) / alarm (37) ----------
-//
-// Aurora no tiene temporizadores por proceso. Git los usa para
-// timeouts internos, y no se cuelga porque el I/O es local.
-// No-op silencioso.
-struct k_timeval_it {
-  int64_t tv_sec;
-  int64_t tv_usec;
-};
-struct k_itimerval {
-  struct k_timeval_it it_interval;
-  struct k_timeval_it it_value;
-};
-_Static_assert(sizeof(struct k_itimerval) == 32, "itimerval x86_64");
-
-static int64_t k_setitimer(uint64_t which, uint64_t new_ptr, uint64_t old_ptr,
-                           uint64_t a4, uint64_t a5) {
-  (void)new_ptr;
-  (void)a4;
-  (void)a5;
-  if (which > 2)
-    return -EINVAL;
-  if (old_ptr) {
-    if (!access_ok((void *)old_ptr, sizeof(struct k_itimerval)))
-      return -EFAULT;
-    struct k_itimerval zero;
-    memset(&zero, 0, sizeof(zero));
-    if (copy_to_user((void *)old_ptr, &zero, sizeof(zero)) < 0)
-      return -EFAULT;
-  }
-  return 0;
-}
-
-static int64_t k_getitimer(uint64_t which, uint64_t cur_ptr, uint64_t a3,
-                           uint64_t a4, uint64_t a5) {
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  if (which > 2)
-    return -EINVAL;
-  if (!cur_ptr)
-    return -EFAULT;
-  if (!access_ok((void *)cur_ptr, sizeof(struct k_itimerval)))
-    return -EFAULT;
-  struct k_itimerval zero;
-  memset(&zero, 0, sizeof(zero));
-  if (copy_to_user((void *)cur_ptr, &zero, sizeof(zero)) < 0)
-    return -EFAULT;
-  return 0;
-}
-
-static int64_t k_alarm(uint64_t sec, uint64_t a2, uint64_t a3, uint64_t a4,
-                       uint64_t a5) {
-  (void)sec;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  return 0;
-}
+// getitimer (36) / setitimer (38) / alarm (37) y timer_* (222-226): ptimer.c
 
 static int64_t k_futex(uint64_t uaddr, uint64_t op, uint64_t val,
                        uint64_t timeout, uint64_t uaddr2) {
@@ -7269,6 +7221,11 @@ static const syscall_entry_t linux_table[] = {
     [SYS_GETITIMER] = {k_getitimer, "getitimer"},
     [SYS_ALARM] = {k_alarm, "alarm"},
     [SYS_SETITIMER] = {k_setitimer, "setitimer"},
+    [222] = {k_timer_create, "timer_create"},
+    [223] = {k_timer_settime, "timer_settime"},
+    [224] = {k_timer_gettime, "timer_gettime"},
+    [225] = {k_timer_getoverrun, "timer_getoverrun"},
+    [226] = {k_timer_delete, "timer_delete"},
     [SYS_TIME] = {k_time, "time"},
     [SYS_CLOCK_SETTIME] = {k_clock_settime, "clock_settime"},
     [SYS_SETTIMEOFDAY] = {k_settimeofday, "settimeofday"},

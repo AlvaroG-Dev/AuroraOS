@@ -5,8 +5,9 @@
 //
 // Semántica Linux:
 //   - Al crear el signalfd con un mask, esas señales se bloquean en el
-//     proceso (blocked_signals |= mask). Así quedan pending_signals
-//     pero no se entregan por handler.
+//     hilo que lo crea (sig_blocked |= mask). Así quedan pendientes
+//     pero no se entregan por handler. (Linux no lo hace: lo hace la
+//     aplicación con sigprocmask; aquí se conserva por compatibilidad.)
 //   - read() consume la primera señal pendiente del mask y la
 //     convierte a siginfo.
 //   - signalfd4(fd >= 0, mask, ...) modifica el mask del signalfd
@@ -14,6 +15,7 @@
 //   - Al cerrar el fd, se desbloquea el mask.
 
 #include "signalfd.h"
+#include "ptimer.h"
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
@@ -75,10 +77,10 @@ static int signalfd_close_op(vfs_node_t *node) {
   if (!ctx)
     return 0;
 
-  // Desbloquear las señales del mask (como Linux al cerrar).
-  process_t *proc = process_current();
-  if (proc)
-    proc->blocked_signals &= ~ctx->mask;
+  // Desbloquear las señales del mask en el hilo que cierra.
+  task_t *cur = sched_current();
+  if (cur && cur->proc)
+    cur->sig_blocked &= ~ctx->mask;
 
   kfree(ctx);
   node->priv = NULL;
@@ -87,11 +89,10 @@ static int signalfd_close_op(vfs_node_t *node) {
 
 static bool signalfd_readable_cond(void *arg) {
   signalfd_ctx_t *ctx = (signalfd_ctx_t *)arg;
-  process_t *proc = process_current();
-  if (!proc)
+  task_t *cur = sched_current();
+  if (!cur || !cur->proc)
     return true;
-  uint64_t pend = __atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE);
-  return (pend & ctx->mask) != 0;
+  return (signal_pending_of(cur) & ctx->mask) != 0;
 }
 
 static int64_t signalfd_read_op(vfs_node_t *node, uint64_t off, size_t sz,
@@ -107,20 +108,27 @@ static int64_t signalfd_read_op(vfs_node_t *node, uint64_t off, size_t sz,
     return -EFAULT;
 
   for (;;) {
-    uint64_t pend =
-        __atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE) & ctx->mask;
+    uint64_t pend = signal_pending_of(sched_current()) & ctx->mask;
     if (pend != 0) {
       int sig = __builtin_ctzll(pend);
-      // Consumir del pending.
-      __atomic_fetch_and(&proc->pending_signals, ~(1ULL << sig),
-                         __ATOMIC_ACQ_REL);
+      // Consumir de las pendientes (del hilo y del proceso).
+      signal_dequeue_mask(sched_current(), 1ULL << sig);
 
       struct signalfd_siginfo si;
       memset(&si, 0, sizeof(si));
       si.ssi_signo = (uint32_t)sig;
-      si.ssi_code = 0; // SI_USER
-      si.ssi_pid = proc->pid;
-      si.ssi_uid = proc->uid;
+      ptimer_siginfo_t pti;
+      if (ptimer_take_siginfo(proc, sig, &pti)) {
+        si.ssi_code = SI_TIMER;
+        si.ssi_tid = (uint32_t)pti.timerid;
+        si.ssi_overrun = (uint32_t)pti.overrun;
+        si.ssi_int = (int32_t)pti.value;
+        si.ssi_ptr = pti.value;
+      } else {
+        si.ssi_code = SI_USER;
+        si.ssi_pid = proc->pid;
+        si.ssi_uid = proc->uid;
+      }
       // buf ya viene del kernel.
       memcpy(buf, &si, sizeof(si));
       return (int64_t)sizeof(si);
@@ -143,8 +151,7 @@ static int signalfd_poll_op(vfs_node_t *node, short events) {
   if (!proc)
     return 0;
   int rev = 0;
-  uint64_t pend =
-      __atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE) & ctx->mask;
+  uint64_t pend = signal_pending_of(sched_current()) & ctx->mask;
   if ((events & 1) && pend)
     rev |= 1; // POLLIN
   return rev;
@@ -238,10 +245,10 @@ static int64_t signalfd_common(uint64_t fd_arg, uint64_t mask_uptr,
     if (!ctx)
       return -EINVAL;
 
-    // Desbloquear el mask anterior, bloquear el nuevo.
-    proc->blocked_signals &= ~ctx->mask;
+    // Desbloquear el mask anterior, bloquear el nuevo (en este hilo).
+    sched_current()->sig_blocked &= ~ctx->mask;
     ctx->mask = mask;
-    proc->blocked_signals |= mask;
+    sched_current()->sig_blocked |= mask;
     wake_up_all(&ctx->wq);
     return (int64_t)kfd;
   }
@@ -270,7 +277,7 @@ static int64_t signalfd_common(uint64_t fd_arg, uint64_t mask_uptr,
     return rc;
   }
 
-  proc->blocked_signals |= mask;
+  sched_current()->sig_blocked |= mask;
   if (flags & SFD_CLOEXEC)
     fd_cloexec_set(proc, free_fd);
   return (int64_t)free_fd;
@@ -315,7 +322,6 @@ void signalfd_cleanup(struct process *proc) {
     if (!f || !f->node || f->node->ops != &signalfd_ops)
       continue;
     signalfd_ctx_t *ctx = (signalfd_ctx_t *)f->node->priv;
-    if (ctx)
-      proc->blocked_signals &= ~ctx->mask;
+    (void)ctx; // el proceso sale: las mascaras de sus hilos ya no importan
   }
 }

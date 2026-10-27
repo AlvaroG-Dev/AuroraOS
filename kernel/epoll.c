@@ -555,10 +555,10 @@ int64_t k_epoll_wait(uint64_t epfd, uint64_t events_uptr, uint64_t maxevents,
 // ============ epoll_pwait / epoll_pwait2 ============
 int64_t k_epoll_pwait(uint64_t epfd, uint64_t events_uptr, uint64_t maxevents,
                       uint64_t timeout, uint64_t sigmask_uptr) {
-  process_t *proc = process_current();
-  if (!proc)
+  task_t *cur = sched_current();
+  if (!cur || !cur->proc)
     return -EFAULT;
-  uint64_t saved_mask = proc->blocked_signals;
+  uint64_t saved_mask = cur->sig_blocked;
   int changed = 0;
   if (sigmask_uptr) {
     if (!access_ok((void *)sigmask_uptr, 8))
@@ -567,12 +567,12 @@ int64_t k_epoll_pwait(uint64_t epfd, uint64_t events_uptr, uint64_t maxevents,
     if (copy_from_user(&m, (void *)sigmask_uptr, 8) < 0)
       return -EFAULT;
     m = sigset_from_user(m) & ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
-    proc->blocked_signals = m;
+    cur->sig_blocked = m;
     changed = 1;
   }
   int64_t rc = k_epoll_wait(epfd, events_uptr, maxevents, timeout, 0);
   if (changed)
-    proc->blocked_signals = saved_mask;
+    cur->sig_blocked = saved_mask;
   return rc;
 }
 

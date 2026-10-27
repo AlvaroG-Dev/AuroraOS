@@ -21,6 +21,7 @@
 #include "tarfs.h"
 #include "uaccess.h"
 #include "vdso.h"
+#include "ptimer.h"
 #include "vfs.h"
 #include "wait.h"
 #include <stddef.h>
@@ -234,8 +235,25 @@ void process_for_each(process_iter_cb_t cb, void *arg) {
 // procesos y no aparecen en wait4.
 // ---------------------------------------------------------------------------
 void process_account_tick(task_t *t) {
-  if (t && t->proc)
+  if (t && t->proc) {
     t->proc->cpu_ticks_user++;
+    ptimer_account_tick(t); // ITIMER_VIRTUAL / ITIMER_PROF
+  }
+}
+
+bool process_signal_is_pending(uint32_t pid, int sig) {
+  bool r = false;
+  unsigned long flags = spin_lock_irqsave(&process_lock);
+  for (process_t *p = process_list; p; p = p->next) {
+    if (p->pid == pid) {
+      r = !p->is_zombie &&
+          (__atomic_load_n(&p->pending_signals, __ATOMIC_ACQUIRE) &
+           (1ULL << sig)) != 0;
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&process_lock, flags);
+  return r;
 }
 
 process_t *process_current(void) {
@@ -291,7 +309,6 @@ static void process_init_signals(process_t *proc) {
   if (!proc)
     return;
   proc->pending_signals = 0;
-  proc->blocked_signals = 0;
   for (int i = 0; i < SIG_MAX; i++) {
     proc->sigactions[i].handler = SIG_DFL;
     proc->sigactions[i].flags = 0;
@@ -1432,15 +1449,23 @@ static bool has_matching_event(void *arg) {
 // Libera un zombi ya desenlazado de process_list. `zombie_task` es la
 // referencia tomada bajo process_lock (puede ser NULL).
 static void free_reaped_zombie(process_t *z, task_t *zombie_task) {
-  if (zombie_task) {
-    // [CONCURRENCIA] Esperar a que la tarea haya terminado de salir
-    // (TASK_DEAD, lo pone process_exit_current justo antes de ceder) y no
-    // esté en ningún CPU: hasta entonces puede seguir corriendo con el CR3
-    // que se libera abajo. on_cpu se limpia en task_switch. Se cede la CPU
-    // en vez de girar porque la tarea puede estar READY esperando a esta.
-    while (zombie_task->state != TASK_DEAD ||
-           __atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
+  // [CONCURRENCIA] Esperar a que la tarea que ejecutó la salida (el último
+  // hilo, que no siempre es el principal) haya terminado de salir
+  // (TASK_DEAD, lo pone process_exit_current justo antes de ceder) y no
+  // esté en ningún CPU: hasta entonces puede seguir corriendo con el CR3
+  // que se libera abajo. on_cpu se limpia en task_switch. Se cede la CPU
+  // en vez de girar porque la tarea puede estar READY esperando a esta.
+  task_t *et = z->exit_task ? z->exit_task : zombie_task;
+  if (et) {
+    while (et->state != TASK_DEAD ||
+           __atomic_load_n(&et->on_cpu, __ATOMIC_ACQUIRE))
       sched_yield();
+  }
+  if (z->exit_task) {
+    task_put(z->exit_task);
+    z->exit_task = NULL;
+  }
+  if (zombie_task) {
 
     zombie_task->proc = NULL;
     task_put(zombie_task);
@@ -1454,6 +1479,9 @@ static void free_reaped_zombie(process_t *z, task_t *zombie_task) {
     task_put(z->task);
     z->task = NULL;
   }
+  // Un hijo que está saliendo puede estar despertando nuestra child_wq.
+  while (__atomic_load_n(&z->pin_count, __ATOMIC_ACQUIRE))
+    sched_yield();
   kfree(z);
 }
 
@@ -1466,7 +1494,7 @@ int process_kill(uint32_t pid, int sig) {
   if (!t)
     return -ESRCH;
   if (need_intr)
-    wait_queue_interrupt_task(t);
+    signal_wake_process(t, 1ULL << sig); // un hilo que no la bloquee
   task_put(t);
   return 0;
 }
@@ -1631,7 +1659,7 @@ void process_exit(process_t *proc, int exit_code) {
       "blocked=0x%lx",
       proc->pid, proc->ppid, proc->pgid, proc->name, exit_code,
       (unsigned long)__atomic_load_n(&proc->pending_signals, __ATOMIC_ACQUIRE),
-      (unsigned long)proc->blocked_signals);
+      (unsigned long)(sched_current() ? sched_current()->sig_blocked : 0));
 
   // [2.4] Soltar el nodo del binario. Si nadie más lo tenía
   // referenciado (los VMAs ya lo han soltado o se soltarán aquí), el
@@ -1642,6 +1670,7 @@ void process_exit(process_t *proc, int exit_code) {
   }
 
   signalfd_cleanup(proc);
+  ptimer_exit(proc->pid);
 
   process_clear_envp(proc);
   process_clear_argv(proc);
@@ -1663,8 +1692,11 @@ void process_exit(process_t *proc, int exit_code) {
   // quedaba para siempre en wait4() con el hijo ya zombi. Era el cuelgue de
   // bash/timeout/wl-copy de primary-icons.sh y clipboard-x11.sh.
   task_t *cur = sched_current();
-  if (cur && cur->proc == proc)
+  if (cur && cur->proc == proc) {
     winsrv_cleanup_task(cur);
+    task_get(cur);
+    proc->exit_task = cur;
+  }
 
   task_t *parent_task = NULL;
   process_t *parent_proc = NULL;
@@ -1685,6 +1717,8 @@ void process_exit(process_t *proc, int exit_code) {
       parent_proc = p;
       if (parent_task)
         task_get(parent_task);
+      // Que no se libere mientras despertamos su child_wq (abajo).
+      __atomic_fetch_add(&p->pin_count, 1, __ATOMIC_ACQ_REL);
     }
     if (my_pid != 1 && p->ppid == my_pid && p->pid != my_pid) {
       p->ppid = 1;
@@ -1713,18 +1747,55 @@ void process_exit(process_t *proc, int exit_code) {
 
   pidfd_notify_exit();
 
+  if (parent_proc) {
+    __atomic_fetch_or(&parent_proc->pending_signals, 1ULL << SIGCHLD,
+                      __ATOMIC_RELEASE);
+    // waitpid() puede estar en cualquier hilo del padre: despertar a todos
+    // los de su child_wq (antes solo al hilo principal).
+    wake_up_all(&parent_proc->child_wq);
+  }
   if (parent_task) {
-    if (parent_proc) {
-      __atomic_fetch_or(&parent_proc->pending_signals, 1ULL << SIGCHLD,
-                        __ATOMIC_RELEASE);
-    }
+    // Y al principal, este donde este esperando: con SIGCHLD pendiente su
+    // espera vuelve con EINTR (bash lo usa para recoger hijos en read()).
     wait_queue_wake_task(parent_task);
     task_put(parent_task);
   }
+  if (parent_proc)
+    __atomic_fetch_sub(&parent_proc->pin_count, 1, __ATOMIC_ACQ_REL);
   if (init_task) {
     wait_queue_wake_task(init_task);
     task_put(init_task);
   }
+}
+
+__attribute__((noreturn)) void process_exit_group_current(int exit_code) {
+  task_t *cur = sched_current();
+  process_t *proc = cur ? cur->proc : NULL;
+  if (proc) {
+    unsigned long flags = spin_lock_irqsave(&process_lock);
+    if (!proc->group_exiting) {
+      proc->group_exiting = 1;
+      proc->group_exit_code = exit_code;
+    } else {
+      exit_code = proc->group_exit_code;
+    }
+    spin_unlock_irqrestore(&process_lock, flags);
+
+    // Como zap_other_threads() de Linux: SIGKILL a cada uno de los demas
+    // hilos. Lo ven al volver a userland o en su proxima espera
+    // interrumpible, y salen con group_exit_code (signal_check_pending).
+    // Antes exit_group() solo terminaba el hilo que lo llamaba: el resto
+    // seguia y el proceso no llegaba nunca a zombi.
+    task_t *t;
+    while ((t = sched_next_thread_get(proc, cur, 1ULL << SIGKILL)) != NULL) {
+      __atomic_fetch_or(&t->sig_pending, 1ULL << SIGKILL, __ATOMIC_RELEASE);
+      if (t->state == TASK_STOPPED)
+        sched_cont_task(t);
+      wait_queue_interrupt_task(t);
+      task_put(t);
+    }
+  }
+  process_exit_current(exit_code);
 }
 
 __attribute__((noreturn)) void process_exit_current(int exit_code) {
@@ -1758,6 +1829,8 @@ __attribute__((noreturn)) void process_exit_current(int exit_code) {
     spin_unlock_irqrestore(&process_lock, flags);
 
     if (last) {
+      if (proc->group_exiting)
+        exit_code = proc->group_exit_code;
       process_exit(proc, exit_code);
     } else {
       // Salida de un thread no-líder. Limpiar sus ventanas (su task
@@ -2121,7 +2194,8 @@ int64_t sys_fork(void) {
   process_init_signals(child);
   for (int i = 0; i < SIG_MAX; i++)
     child->sigactions[i] = parent->sigactions[i];
-  child->blocked_signals = parent->blocked_signals;
+  // La mascara es del hilo: el hijo hereda la del hilo que llama a fork.
+  child_task->sig_blocked = sched_current() ? sched_current()->sig_blocked : 0;
   child->pending_signals = 0;
   // [SIGALTSTACK] POSIX: el altstack se hereda a través de fork.
   // execve NO lo resetea (solo resetea handlers). Por eso no hay
@@ -2231,7 +2305,12 @@ task_t *process_clone_thread(process_t *parent, registers_t *regs,
   int new_size = parent->team_size;
   spin_unlock_irqrestore(&process_lock, flags);
 
-  uint32_t tid = child_task->id;
+  // El tid sale del mismo contador que los pid (como Linux): asi tkill,
+  // tgkill y kill no confunden un hilo con otro proceso. Antes era task->id.
+  uint32_t tid = __sync_add_and_fetch(&next_pid, 1) - 1;
+  child_task->tid = tid;
+  // El hilo nuevo hereda la mascara del que lo crea.
+  child_task->sig_blocked = sched_current() ? sched_current()->sig_blocked : 0;
 
   // CLONE_PARENT_SETTID: escribe el tid en el padre (musl usa &self->tid).
   if (ptid_out) {
@@ -2478,6 +2557,8 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     proc->sigactions[i].restorer = NULL;
     proc->sigactions[i].mask = 0;
   }
+  // execve borra los temporizadores POSIX; los de setitimer/alarm siguen.
+  ptimer_exec(proc->pid);
 
   int was_root = (proc->euid == 0);
   if (new_mode & S_ISUID) {
@@ -2608,7 +2689,7 @@ int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
   task_t *tasks[SIGPGRP_MAX];
   uint32_t ppids[SIGPGRP_MAX];
   int resume_flags[SIGPGRP_MAX];
-  int intr_flags[SIGPGRP_MAX];
+  uint64_t intr_masks[SIGPGRP_MAX];
   int n = 0;
 
   unsigned long flags = spin_lock_irqsave(&process_lock);
@@ -2647,7 +2728,7 @@ int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
       tasks[n] = t;
       ppids[n] = p->ppid;
       resume_flags[n] = resume;
-      intr_flags[n] = (mask != 0);
+      intr_masks[n] = mask;
       n++;
     }
     p = p->next;
@@ -2659,9 +2740,10 @@ int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
       sched_cont_task(tasks[i]);
       process_wake_parent(ppids[i]);
     }
-    // [FIX] Solo interrumpir si quedó una señal entregable.
-    if (intr_flags[i])
-      wait_queue_interrupt_task(tasks[i]);
+    // [FIX] Solo interrumpir si quedó una señal entregable, y al hilo
+    // que no la bloquee.
+    if (intr_masks[i])
+      signal_wake_process(tasks[i], intr_masks[i]);
     task_put(tasks[i]);
   }
   return n > 0 ? n : -ESRCH;
@@ -2740,9 +2822,12 @@ void process_wake_parent(uint32_t parent_pid) {
     return;
   unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
+  process_t *parent = NULL;
   task_t *parent_task = NULL;
   while (p) {
     if (p->pid == parent_pid && !p->is_zombie) {
+      parent = p;
+      __atomic_fetch_add(&p->pin_count, 1, __ATOMIC_ACQ_REL);
       if (p->task) {
         parent_task = p->task;
         task_get(parent_task);
@@ -2753,6 +2838,10 @@ void process_wake_parent(uint32_t parent_pid) {
   }
   spin_unlock_irqrestore(&process_lock, flags);
 
+  if (parent) {
+    wake_up_all(&parent->child_wq); // waitpid en cualquier hilo
+    __atomic_fetch_sub(&parent->pin_count, 1, __ATOMIC_ACQ_REL);
+  }
   if (parent_task) {
     wait_queue_wake_task(parent_task);
     task_put(parent_task);

@@ -329,7 +329,7 @@ void isr_handler(registers_t *regs) {
             (regs->int_num < 32) ? exception_names[regs->int_num] : "?",
             (void *)regs->rip, (void *)regs->rsp,
             (unsigned long)regs->error_code);
-    process_exit_current(-1);
+    process_exit_group_current(-1);
     return;
   }
 
@@ -384,7 +384,7 @@ static void irq_try_deliver_signals(registers_t *regs) {
   rseq_exit_to_user(cur, regs); // rseq: cpu_id y abort de la seccion critica
 
   // Fast path: sin señales pendientes, ni tocamos syscall_regs.
-  if (__atomic_load_n(&cur->proc->pending_signals, __ATOMIC_ACQUIRE) == 0)
+  if (signal_pending_of(cur) == 0 && !cur->sig_suspend_active)
     return;
 
   registers_t *saved = cur->syscall_regs;

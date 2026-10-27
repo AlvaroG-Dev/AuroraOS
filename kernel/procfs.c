@@ -8,6 +8,7 @@
 // correcto, y coherente con el modelo "reconstruir el árbol en cada
 // acceso" del VFS de Aurora.
 
+#include "cmdline.h"
 #include "procfs.h"
 #include "block.h"
 #include "cpu.h"
@@ -272,6 +273,20 @@ static char *gen_version(size_t *out_len) {
   memcpy(buf, v, n);
   buf[n] = '\0';
   *out_len = n;
+  return buf;
+}
+
+// /proc/cmdline: la linea del kernel (cmdline= de aurora.conf) con '\n'.
+static char *gen_cmdline(size_t *out_len) {
+  const char *c = kernel_cmdline();
+  size_t n = strlen(c);
+  char *buf = (char *)kmalloc(n + 2);
+  if (!buf)
+    return NULL;
+  memcpy(buf, c, n);
+  buf[n] = '\n';
+  buf[n + 1] = '\0';
+  *out_len = n + 1;
   return buf;
 }
 
@@ -608,7 +623,7 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
   o = kappend(buf, o, cap, " ");
 
   // ---- 32. blocked ----
-  o += kfmt_u64(buf + o, cap - o, p->blocked_signals >> 1);
+  o += kfmt_u64(buf + o, cap - o, (p->task ? p->task->sig_blocked : 0) >> 1);
   o = kappend(buf, o, cap, " ");
 
   // ---- 33. sigignore ----
@@ -933,7 +948,8 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
       fds_open++;
 
   uint64_t sig_pnd = __atomic_load_n(&p->pending_signals, __ATOMIC_ACQUIRE);
-  uint64_t sig_blk = p->blocked_signals;
+  // Mascara del hilo principal (la de cada hilo iria en /proc/<pid>/task).
+  uint64_t sig_blk = p->task ? p->task->sig_blocked : 0;
 
   uint64_t cpu_mask = 0;
   for (int i = 0; i < MAX_CPUS; i++)
@@ -2134,7 +2150,7 @@ static const char *procfs_root_entries[] = {
     "uptime", "version", "meminfo",     "stat",       "self",
     "mounts", "loadavg", "bus",         "partitions", "swaps",
     "sys",    "vmstat",  "filesystems", "net", // ← AÑADIR
-    "modules",
+    "modules", "cmdline",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -2893,6 +2909,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *b = gen_version(&len);
     return make_file_node("version", b, len);
+  }
+  if (strcmp(name, "cmdline") == 0) {
+    size_t len = 0;
+    char *b = gen_cmdline(&len);
+    return b ? make_file_node("cmdline", b, len) : NULL;
   }
   if (strcmp(name, "meminfo") == 0) {
     size_t len = 0;

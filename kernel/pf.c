@@ -352,7 +352,7 @@ void kill_current_process(registers_t *regs, const char *reason) {
   pf_killed++;
 
   (void)regs;
-  process_exit_current(-1);
+  process_exit_group_current(-1);
 }
 
 // ---------------------------------------------------------------------------

@@ -142,9 +142,8 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       }
 
       if (interruptible && self->proc) {
-        uint64_t pend =
-            __atomic_load_n(&self->proc->pending_signals, __ATOMIC_ACQUIRE);
-        uint64_t blk = self->proc->blocked_signals;
+        uint64_t pend = signal_pending_of(self);
+        uint64_t blk = self->sig_blocked;
         if ((pend & ~blk) != 0) {
           self->wake_reason = -EINTR;
           wait_queue_remove_locked(wq, self);
@@ -177,10 +176,8 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
     }
 
     if (interruptible && self->wake_reason == -EINTR) {
-      uint64_t pend = self->proc ? __atomic_load_n(&self->proc->pending_signals,
-                                                   __ATOMIC_ACQUIRE)
-                                 : 0;
-      uint64_t blk = self->proc ? self->proc->blocked_signals : 0;
+      uint64_t pend = signal_pending_of(self);
+      uint64_t blk = self->sig_blocked;
       uint64_t deliverable = pend & ~blk;
 
       // [A.5] Filtrar señales que el proceso ignora. Si todas las
@@ -189,7 +186,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
       // hace lo mismo en do_signal(). Sin esto, un `pthread_kill`
       // con una señal ignorada despertaba read() con EINTR espurio.
       if (self->proc)
-        deliverable = signal_filter_ignored(self->proc, deliverable);
+        deliverable = signal_filter_ignored_task(self, self->proc, deliverable);
 
       if (deliverable == 0) {
         self->wake_reason = 0;
@@ -198,8 +195,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
         uint64_t cont_only = deliverable & (1ULL << SIGCONT);
 
         if (stops != 0) {
-          __atomic_fetch_and(&self->proc->pending_signals, ~stops,
-                             __ATOMIC_ACQ_REL);
+          signal_dequeue_mask(self, stops);
           int stop_sig = __builtin_ctzll(stops);
           if (self->waiting_on == wq) {
             flags = spin_lock_irqsave(&wq->lock);
@@ -211,8 +207,7 @@ static long wait_common(wait_queue_t *wq, bool (*cond)(void *), void *arg,
           continue;
         }
 
-        __atomic_fetch_and(&self->proc->pending_signals, ~cont_only,
-                           __ATOMIC_ACQ_REL);
+        signal_dequeue_mask(self, cont_only);
         self->wake_reason = 0;
         continue;
       } else {
