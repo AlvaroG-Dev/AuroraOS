@@ -174,3 +174,7 @@ Sin pánicos ni avisos nuevos en los logs. La prueba K6 no omite nada con linux-
 - **linux-firmware**: `scripts/fetch-linux-drivers.sh --firmware --no-nvidia` (≈ 641 MiB de descarga, 2 GiB extraído en `build/linuxkpi_src/`). Sin él, la prueba del fichero real se omite.
 - **El hito** se lanza con `scripts/qemu-drive.py -t 1200 -m 6G --boot-test /usr/bin/lkpi_test --done "LKPI-TEST:"`: espera a que acabe la suite del kernel (que también carga y descarga la capa; la ve en `/proc/modules`), así que en la misma ejecución salen las dos (≈ 95 s).
 - La suite del kernel tarda ahora ≈ 50 s de reloj en este entorno (antes ≈ 6 min).
+- **Entorno automático** (añadido al cerrar la sesión): `scripts/claude-env-setup.sh` instala los paquetes del host (incluidos `rsync` y `musl-tools`, que ahora también pide `scripts/setup-env.sh`), prepara la pila Wayland y descarga Linux 6.18.59 y linux-firmware 20261019. Sirve como «Setup script» del entorno de Claude Code (si el repositorio aún no está clonado, solo instala paquetes) o a mano dentro del repositorio; variables `AURORA_NO_FIRMWARE=1`, `AURORA_NO_LINUX=1`, `AURORA_NO_WAYLAND=1`.
+- **Siguiente sesión**: el prompt de L5 está en `docs/Prompt_L5.md`.
+- **Merge con `main`** (al cerrar la sesión, a petición del autor): primero `main` en la rama (dos commits de documentación: alcance de la capa y portátil Haswell; sin conflictos) y después la rama en `main` por avance rápido.
+
