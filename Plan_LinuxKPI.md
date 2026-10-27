@@ -10,6 +10,21 @@ Estado: **L0, L1, L2, L3 y L4 hechas** (L4 el 27-oct-2026: DMA con bounce, `sg_t
 4. **GOP como respaldo** en todos los hitos con GPU real, y el arranque nunca depende de que la capa funcione.
 5. **Una versión de Linux fijada** (propuesta: la serie LTS más reciente que traiga soporte de Ada/Alder Lake/Haswell, a confirmar en L0) y migraciones deliberadas, nunca «seguir `master`».
 
+### Alcance: qué ahorra la capa y qué sigue siendo trabajo (26-oct-2026)
+
+**Objetivo: todas las GPU** (Intel `i915`/`xe`, AMD `amdgpu`, NVIDIA `kernel-open/`), no solo el hardware del autor. El portátil Haswell (HD 4600) y la RTX 4060 son únicamente los **primeros bancos de prueba reales**; el plan (L7, L8) no se limita a ellos.
+
+**Copiar el driver no basta.** El código del driver de Linux se **recompila contra las cabeceras de Aurora** (`include/linuxkpi/`) y se enlaza como `.kur`; no es compatibilidad binaria y el `.ko` de Linux no se carga tal cual (principio 1). La capa ahorra escribir cada driver (millones de líneas) y permite heredar sus correcciones, pero **no elimina**:
+
+1. **La propia capa** (~40–45 kLOC) y su ampliación: cada driver nuevo puede pedir símbolos que aún no existen (se mide con `linuxkpi-scan.py`, §6.6).
+2. **La semántica**, no solo los nombres: bloqueos, RCU, orden de memoria, DMA y tiempos de Linux. Si Aurora difiere, no falla al compilar sino en ejecución (cuelgues, corrupción), y solo se depura con hardware y log serie.
+3. **Piezas de Aurora que aún no existen** y que la GPU real exige: DMA/IOMMU real (L9), energía, TTM y scheduler de GPU (L6), memoria contigua con límites de dirección y MSI-X por CPU.
+4. **Firmware** de AMD y NVIDIA (con sus licencias; no se versiona).
+5. **La mitad de usuario**: Mesa (o las bibliotecas propietarias de NVIDIA, misma versión que el firmware) y los ioctls que expone cada driver; ver Bloque 8 de `Plan_Wayland_Unificado.md`. Sin ella no hay 3D acelerado aunque el driver de kernel funcione.
+6. **Validación por GPU y por generación** en hardware real: cada una tiene errata y rutas propias. El código es el mismo, pero hay que verlo arrancar.
+
+Con la capa madura, cada driver nuevo debería costar bastante menos que el anterior, pero **no cero**.
+
 ### Licencias
 - El código de Linux es **GPL-2.0** (con partes MIT en DRM). Todo `.kur` derivado de Linux queda bajo GPL (aceptado por el autor, D5).
 - Las **cabeceras y la implementación de la capa**: escribirlas propias (no copiar cabeceras de Linux) y, si se toma código de **FreeBSD `linuxkpi`** (BSD-2), conservar su aviso. Elegir licencia de la capa en L0 (propuesta: GPL-2.0 compatible, para poder alojar los drivers sin fricción), y mantenerla **separada** del resto del kernel de Aurora (directorio, `.kur` propio).
@@ -164,13 +179,14 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 - **Hito:** un driver de memoria de dispositivo simulado (un `.kur` de prueba que usa `ttm` con un «VRAM» en RAM) crea, mapea y evicta buffers; las pruebas de estrés de GEM/`ttm` pasan.
 
 ### L7 — Intel (primer hardware real)
-- **Cuál:** el portátil (probablemente Haswell, `i915` Gen7.5); si hubiese uno con Gen9–12, igual con `i915` y luego `xe` (Gen12+).
+- **Alcance: todas las generaciones de Intel que traiga `i915`/`xe` de la versión de Linux fijada**, no una GPU concreta. `i915` cubre desde Gen2 hasta Gen12 (según la serie de Linux) y `xe` Gen12+ en adelante; el objetivo es compilar y alojar esos dos drivers completos, con las opciones de cada generación (GuC/HuC solo donde existan, power wells, display engine DDI, etc.).
+- **Bancos de prueba reales (no limitan el alcance):** el portátil del autor, Toshiba Portégé R30-A con Core i5-4210M e Intel HD Graphics 4600 (Haswell, Gen7.5, confirmado el 26-oct-2026), es la primera máquina; cualquier otra generación disponible se añade a la matriz de pruebas (§6) y se valida igual.
 - Aquí por primera vez se necesitan: `vga_client`, `acpi` (opregion, `_DSM`, `acpi_video`), `intel_gtt`/GGTT, `i2c` GMBUS, `power wells`, `rc6` desactivado, `GuC/HuC` (firmware) según generación, `drm_display_helper` (DP/HDMI), reset de GPU, DMAR/IOMMU (K5 + L9).
-- **Hitos:** (1) `i915` hace probe y muestra la identidad por serie; (2) pantalla nativa con GOP de respaldo; (3) 3D con Mesa `iris`/`crocus` + `aurora-wayland` con `linux-dmabuf`.
+- **Hitos:** (1) `i915` hace probe y muestra la identidad por serie; (2) pantalla nativa con GOP de respaldo; (3) 3D con el driver de Mesa que corresponda a cada generación (de memoria: `crocus` para las antiguas hasta Gen7.5, `iris` desde Gen8, `anv` para Vulkan; confirmar el reparto exacto contra la versión de Mesa fijada) + `aurora-wayland` con `linux-dmabuf`. Estos tres hitos se repiten por generación disponible.
 - Pruebas: **PC real** con log serie; o **VFIO + KVM** (passthrough de la iGPU) desde Linux en ese PC.
 
 ### L8 — AMD (`amdgpu`) y NVIDIA (`kernel-open/`)
-- `amdgpu`: tamaño enorme (~5 M de líneas); **solo** las partes que usa la GPU concreta del autor (si la hay) y nada de SVM/KFD/compute. Requiere `ttm`, `gpu-sched`, `drm_buddy`, `ioremap` de BARs grandes (ReBAR), `acpi` y firmware.
+- `amdgpu`: tamaño enorme (~5 M de líneas); el objetivo es el driver completo para las GPU de la serie de Linux fijada; lo que se **desactiva** es lo que no sea gráfico o necesite piezas que Aurora no tiene (SVM/HMM, KFD/compute), como decisión de configuración y no por limitarse a una GPU concreta. Requiere `ttm`, `gpu-sched`, `drm_buddy`, `ioremap` de BARs grandes (ReBAR), `acpi` y firmware.
 - NVIDIA: alojar `kernel-open/` (`nvidia.ko`, `nvidia-modeset.ko`, `nvidia-drm.ko`) sobre esta capa, con el núcleo abierto `src/nvidia`/`src/nvidia-modeset` como objetos binarios del paquete de NVIDIA. Fases N1–N5 de `Plan_NVIDIA.md`. **Alternativa**: capa de SO propia (ver nota de ese plan).
 - Pruebas: RTX 4060 por serie o VFIO.
 

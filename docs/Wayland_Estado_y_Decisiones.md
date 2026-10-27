@@ -148,10 +148,10 @@ Detalle de cada una:
 - **Recomendación**: (c) primero para Intel, y (a) como camino a medio plazo para aceleración. **Requiere un PC real con Intel** (y su log serie) para empezar.
 - **Hardware real disponible (dato aportado el 26-oct-2026):**
   - *Sobremesa*: Intel Core i7-12700KF + NVIDIA GeForce RTX 4060.
-  - *Portátil*: «i4-40xx» con Intel HD Graphics integrada (modelo exacto **por confirmar**: «i4» no existe como serie Core; probablemente un Core i3/i5 de la serie 4000, Haswell, con HD Graphics 4xxx, es decir Intel **Gen7.5**).
+  - *Portátil*: **Toshiba Portégé R30-A (17E)**, Core **i5-4210M** con **Intel HD Graphics 4600** (confirmado por el autor, 26-oct-2026): Haswell, Intel **Gen7.5**. Falta anotar su ID PCI exacto (probablemente `8086:0416`, sin verificar) con `lspci -nn` o el log de Aurora.
 - **Implicaciones** (análisis, no decisión):
   - El sufijo **«KF» del i7-12700KF significa que no tiene gráficos integrados**: el sobremesa solo tiene la RTX 4060. Ahí solo cabe GOP + llvmpipe (NVIDIA: sin documentación de pantalla; nouveau/NVK exigen el firmware GSP firmado), así que **no sirve para empezar con Intel**.
-  - El **portátil es el candidato a primer driver nativo de Intel**, pero si es Haswell la generación objetivo cambia: Gen7.5 en vez de la Gen9–12 supuesta en la recomendación. Intel publicó los PRM de Haswell y `i915` lo soporta, pero el motor de pantalla (DDI/pipes/PLL/eDP) difiere del de Gen9+; el volumen de trabajo y los registros no son los mismos. **Hay que confirmar el modelo (`lspci -nn`, o el ID de dispositivo PCI en el log de Aurora) antes de elegir generación.**
+  - El **portátil es el candidato a primer driver nativo de Intel**, y es Haswell, así que la generación objetivo es Gen7.5 y no la Gen9–12 supuesta en la recomendación. Intel publicó los PRM de Haswell y `i915` lo soporta, pero el motor de pantalla (DDI/pipes/PLL/eDP) difiere del de Gen9+; el volumen de trabajo y los registros no son los mismos. Modelo confirmado (R30-A, HD 4600); solo falta anotar el ID PCI.
   - Para empezar hace falta un **log serie de arranque** del portátil (o su `lspci -nn`/ID PCI) con el ISO actual.
 - **Pregunta pendiente**: ¿es aceptable la licencia GPL en los drivers de GPU si se elige la capa de compatibilidad con Linux (opción a)? (Sin respuesta todavía.)
 - **Decisión (26-oct-2026): opción (a), capa de compatibilidad con los drivers de Linux (estilo LinuxKPI), para Intel, AMD y NVIDIA.** Una sola capa que sirve a todas las GPU y hereda las correcciones de Linux. Se acepta que esos módulos queden bajo GPL (confirma la respuesta a la pregunta de licencia; revisar el alcance exacto al empezar). Consecuencias:
@@ -181,7 +181,7 @@ Detalle de cada una:
 
 ### D6 — Driver de pantalla nativo (modeset) y cambio de modo real
 - **Contexto**: depende de D5(c). Sin él: sin cambio de resolución real (D2), sin hot-plug (D1), sin cursor por hardware, sin DPMS real.
-- **Recomendación**: empezar por Intel tomando el estado que deja el firmware y cambiando de modo solo después, con GOP como respaldo automático. La generación objetivo depende del portátil (ver D5: probablemente Gen7.5/Haswell, no Gen9+).
+- **Recomendación**: empezar por Intel tomando el estado que deja el firmware y cambiando de modo solo después, con GOP como respaldo automático. La generación objetivo es Gen7.5/Haswell (Toshiba Portégé R30-A, HD 4600), no Gen9+.
 - **Decisión**: ABIERTA (hardware ya identificado; pendiente confirmar el modelo y obtener el log de arranque). D1 y D2 (hot-plug, multi-monitor y cambio de resolución en caliente) **siguen siendo trabajo obligatorio** sobre este driver, pero se pueden dejar para después de una primera versión que solo muestre imagen con GOP como respaldo.
 
 ### D7 — EDID por DDC/VBE en el arranque BIOS y extensión CEA
