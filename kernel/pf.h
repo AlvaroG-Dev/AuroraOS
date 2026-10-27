@@ -18,6 +18,13 @@
 // paginas compartidas (PTE_SPECIAL|PTE_SHARED_OBJ): ni se liberan al
 // desmapear ni se copian en fork.
 #define VMA_SHARED 5
+// [LinuxKPI L4] mmap de un fichero de dispositivo con vm_operations_struct
+// (vfs_ops.mmap_dev). Las paginas son del driver (PTE_SPECIAL|PTE_SHARED_OBJ):
+// ni se liberan al desmapear ni se copian en fork (se comparten). El VMA lleva
+// referencia al fd (file_fd) y dev_ops: fault desde el #PF; open cuando nace
+// otro VMA con el mismo dev_priv (fork, division por munmap/mprotect); close
+// cuando desaparece (munmap, exit, exec). Recortar un VMA no llama a nada.
+#define VMA_DEV 6
 
 // Límites
 #define MAX_STACK_GROWTH (8 * 1024 * 1024) // Límite RLIMIT_STACK predeterminado
@@ -25,6 +32,20 @@
 struct process;
 struct file_descriptor;
 struct vfs_node;
+struct vma;
+
+typedef struct vma_dev_ops {
+  // Fallo de pagina en `addr` (alineada) del VMA, en el contexto del proceso
+  // dueño. Debe mapear la pagina (vma_dev_map_page) y devolver 0; -errno =
+  // SIGBUS (el proceso muere).
+  int (*fault)(struct vma *vma, uint64_t addr, int write);
+  // `nv` es un VMA nuevo con el dev_priv de `old` (fork o division). Puede
+  // cambiar nv->dev_priv. Si devuelve error en fork, el hijo no lo hereda.
+  int (*open)(struct vma *nv, struct vma *old);
+  void (*close)(struct vma *vma);
+} vma_dev_ops_t;
+
+#define VMA_DEV_DONTCOPY 0x1 // VM_DONTCOPY: fork no lo hereda
 
 typedef struct vma {
   uint64_t start;
@@ -47,6 +68,13 @@ typedef struct vma {
   //   VMA_FILE: == file_fd->node (redundante por claridad).
   //   VMA_ANON / VMA_STACK: NULL.
   struct vfs_node *file_node;
+
+  // [LinuxKPI L4] Solo VMA_DEV.
+  const vma_dev_ops_t *dev_ops;
+  void *dev_priv;
+  struct process *dev_proc; // proceso dueño (para fault/zap)
+  uint32_t dev_flags;       // VMA_DEV_*
+  uint32_t dev_cache;       // bits de cache de la PTE (PTE_NOCACHE/WRITETHRU)
 } vma_t;
 
 vma_t *vma_create_file(struct process *proc, uint64_t start, uint64_t end,
@@ -82,6 +110,8 @@ vma_t *vma_find(struct process *proc, uint64_t addr);
 vma_t *vma_create(struct process *proc, uint64_t start, uint64_t end,
                   uint64_t flags, uint32_t type);
 void vma_destroy_all(struct process *proc);
+// Libera un VMA que no esta en ninguna lista (refs y, si es VMA_DEV, close).
+void vma_free_one(vma_t *v);
 
 // [MMAP] Desmapea todos los VMAs que se solapen con [start, end) y
 // libera sus páginas físicas. start y end deben estar alineados a
@@ -90,6 +120,16 @@ void vma_destroy_all(struct process *proc);
 // Devuelve el número de VMAs tocados (>=0) o un errno negativo (solo
 // -ENOMEM, si falla el kmalloc del split de un VMA).
 int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end);
+
+// [LinuxKPI L4] VMA_DEV `dst` nacido de `src` (division o fork, con `owner`
+// como proceso dueño): copia dev_ops/dev_priv y llama a dev_ops->open.
+int vma_dev_inherit(vma_t *dst, const vma_t *src, struct process *owner);
+// [LinuxKPI L4] VMA_DEV: mapea `phys` en `addr` del VMA (flags del VMA +
+// dev_cache + PTE_SPECIAL|PTE_SHARED_OBJ). Reemplaza lo que hubiera. 0/-errno.
+int vma_dev_map_page(vma_t *vma, uint64_t addr, uint64_t phys);
+// Quita las PTE de [start, end) del VMA (zap_vma_ptes, unmap_mapping_range)
+// con shootdown de TLB. Las paginas no se liberan.
+void vma_dev_zap(vma_t *vma, uint64_t start, uint64_t end);
 
 // Syscalls
 int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,

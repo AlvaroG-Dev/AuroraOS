@@ -594,7 +594,8 @@ static int find_reclaim_candidate_cb(process_t *p, void *arg) {
   // de mmap anónimo disponibles.
   for (int pass = 0; pass < 2; pass++) {
     for (vma_t *v = p->vma_list; v; v = v->next) {
-      if (v->type == VMA_FILE || v->type == VMA_SHARED || v->type == VMA_MMIO)
+      if (v->type == VMA_FILE || v->type == VMA_SHARED || v->type == VMA_MMIO ||
+          v->type == VMA_DEV)
         continue;
       int is_anon = (v->type == VMA_ANON);
       if (pass == 0 && !is_anon)

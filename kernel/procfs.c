@@ -1409,11 +1409,11 @@ static int gen_pid_maps_cb(process_t *p, void *arg) {
     buf[o++] = 'r';
     buf[o++] = (v->flags & PTE_WRITABLE) ? 'w' : '-';
     buf[o++] = (v->flags & PTE_NX) ? '-' : 'x';
-    buf[o++] = 'p';
+    buf[o++] = (v->type == VMA_SHARED || v->type == VMA_DEV) ? 's' : 'p';
     buf[o++] = ' ';
 
     // offset dentro del fichero
-    uint64_t off = (v->type == VMA_FILE) ? v->file_offset : 0;
+    uint64_t off = (v->type == VMA_FILE || v->type == VMA_DEV) ? v->file_offset : 0;
     o += kfmt_hex_min(buf + o, cap - o, off, 8);
     buf[o++] = ' ';
 
@@ -1493,10 +1493,10 @@ static int gen_pid_smaps_cb(process_t *p, void *arg) {
     buf[o++] = 'r';
     buf[o++] = (v->flags & PTE_WRITABLE) ? 'w' : '-';
     buf[o++] = (v->flags & PTE_NX) ? '-' : 'x';
-    buf[o++] = 'p';
+    buf[o++] = (v->type == VMA_SHARED || v->type == VMA_DEV) ? 's' : 'p';
     buf[o++] = ' ';
 
-    uint64_t off = (v->type == VMA_FILE) ? v->file_offset : 0;
+    uint64_t off = (v->type == VMA_FILE || v->type == VMA_DEV) ? v->file_offset : 0;
     o += kfmt_hex_min(buf + o, cap - o, off, 8);
     buf[o++] = ' ';
 

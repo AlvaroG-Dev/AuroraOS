@@ -49,9 +49,34 @@ void vma_inherit_backing(vma_t *dst, const vma_t *src, uint64_t off_delta) {
   }
 }
 
+// [LinuxKPI L4] Un VMA_DEV nuevo (`dst`, ya con su rango y backing) que
+// nace de `src`: copia el estado del driver y llama a dev_ops->open.
+int vma_dev_inherit(vma_t *dst, const vma_t *src, struct process *owner) {
+  if (src->type != VMA_DEV)
+    return 0;
+  dst->dev_ops = src->dev_ops;
+  dst->dev_priv = src->dev_priv;
+  dst->dev_flags = src->dev_flags;
+  dst->dev_cache = src->dev_cache;
+  dst->dev_proc = owner;
+  if (dst->dev_ops && dst->dev_ops->open) {
+    int rc = dst->dev_ops->open(dst, (vma_t *)src);
+    if (rc) {
+      dst->dev_ops = NULL; // sin close
+      return rc;
+    }
+  }
+  return 0;
+}
+
 static void vma_release_backing(vma_t *v) {
   if (!v)
     return;
+  if (v->type == VMA_DEV && v->dev_ops && v->dev_ops->close) {
+    const vma_dev_ops_t *ops = v->dev_ops;
+    v->dev_ops = NULL;
+    ops->close(v);
+  }
   if (v->file_fd) {
     file_descriptor_t *f = v->file_fd;
     v->file_fd = NULL;
@@ -159,6 +184,13 @@ vma_t *vma_create_elf(struct process *proc, uint64_t start, uint64_t end,
   return v;
 }
 
+void vma_free_one(vma_t *v) {
+  if (!v)
+    return;
+  vma_release_backing(v);
+  kfree(v);
+}
+
 void vma_destroy_all(struct process *proc) {
   if (!proc)
     return;
@@ -236,6 +268,12 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   int is_write = (err_code & 0x02) != 0;
   if (is_write && !(vma->flags & PTE_WRITABLE))
     return 0;
+
+  if (vma->type == VMA_DEV) { // [LinuxKPI L4]
+    if (!vma->dev_ops || !vma->dev_ops->fault)
+      return 0;
+    return vma->dev_ops->fault(vma, fault_addr & ~0xFFFULL, is_write) == 0;
+  }
 
   if (vma->type == VMA_SHARED) {
     file_descriptor_t *sf = vma->file_fd;
@@ -626,7 +664,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       if (phys) {
         paging_unmap_page_in(pml4, p);
         // [FASE 4.3] No liberar física de VMA_MMIO (BAR PCI)
-        if (v->type != VMA_MMIO && v->type != VMA_SHARED)
+        if (v->type != VMA_MMIO && v->type != VMA_SHARED && v->type != VMA_DEV)
           pmm_free_page(phys);
       }
     }
@@ -657,6 +695,8 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     right->next = v->next;
     v->end = start;
     v->next = right;
+    if (vma_dev_inherit(right, v, proc) != 0)
+      LOG_WARN("[PF] vm_ops->open fallo al dividir un VMA_DEV");
     touched++;
     pp = &right->next;
   }
@@ -791,6 +831,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->pad = 0;
       right->next = v->next;
       vma_inherit_backing(right, v, end - v->start);
+      vma_dev_inherit(right, v, proc);
 
       v->end = end;
       v->flags = new_flags;
@@ -806,6 +847,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->pad = 0;
       mid->next = v->next;
       vma_inherit_backing(mid, v, addr - v->start);
+      vma_dev_inherit(mid, v, proc);
 
       v->end = addr;
       v->next = mid;
@@ -823,6 +865,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->pad = 0;
       mid->next = right;
       vma_inherit_backing(mid, v, addr - v->start);
+      vma_dev_inherit(mid, v, proc);
 
       right->start = end;
       right->end = v->end;
@@ -831,6 +874,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->pad = 0;
       right->next = v->next;
       vma_inherit_backing(right, v, end - v->start);
+      vma_dev_inherit(right, v, proc);
 
       v->end = addr;
       v->next = mid;
@@ -848,8 +892,13 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
   int multi = (proc->team_size > 1);
   for (uint64_t p = addr; p < end; p += PAGE_SIZE) {
     uint64_t phys = paging_get_phys_in(pml4, p);
-    if (phys) {
-      paging_map_page_in(pml4, p, phys & PTE_FRAME, new_flags);
+    uint64_t raw = 0;
+    if (phys && paging_get_pte_in(pml4, p, &raw) && (raw & PTE_PRESENT)) {
+      // Conservar lo que no es permiso: paginas compartidas o del driver
+      // (PTE_SPECIAL/PTE_SHARED_OBJ, que exit y fork miran) y la cache.
+      uint64_t keep = raw & (PTE_SPECIAL | PTE_SHARED_OBJ | PTE_NOCACHE |
+                             PTE_WRITETHRU);
+      paging_map_page_in(pml4, p, raw & PTE_FRAME, new_flags | keep);
       if (multi)
         paging_invalidate_tlb_global(p);
       else
@@ -994,9 +1043,27 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     // Un char device solo se mapea si lo soporta de verdad (DRM: dumb
     // buffers por get_page); el resto de char devices siguen siendo -EINVAL.
     bool chr_mappable = f->node && (f->node->flags & VFS_CHARDEVICE) &&
-                        f->node->ops && f->node->ops->get_page;
+                        f->node->ops &&
+                        (f->node->ops->get_page || f->node->ops->mmap_dev);
     if (!f->node || (!(f->node->flags & VFS_FILE) && !chr_mappable))
       return -EINVAL;
+
+    if (f->node->ops && f->node->ops->mmap_dev) { // [LinuxKPI L4]
+      if (offset & 0xFFFULL)
+        return -EINVAL;
+      vma_t *v = vma_create_file(proc, base, base + len, pte_flags, f, offset);
+      if (!v)
+        return -ENOMEM;
+      v->type = VMA_DEV;
+      v->dev_proc = proc;
+      int rc = f->node->ops->mmap_dev(f, proc, v, prot, flags);
+      if (rc != 0) {
+        v->dev_ops = NULL; // el driver no lo acepto: sin close
+        vma_unmap_range(proc, base, base + len);
+        return rc;
+      }
+      return (int64_t)base;
+    }
 
     if (f->node->ops && f->node->ops->mmap) {
       vma_t *v = vma_create(proc, base, base + len, pte_flags, VMA_MMIO);
@@ -1083,6 +1150,10 @@ int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
     (void)vma_unmap_range(proc, old_addr + new_size, old_addr + old_size);
     return (int64_t)old_addr;
   }
+
+  // Como Linux con VM_PFNMAP/VM_DONTEXPAND: un mapeo de dispositivo no crece.
+  if (v->type == VMA_DEV || v->type == VMA_MMIO)
+    return -EFAULT;
 
   // --- Grow: ¿hay hueco contiguo detrás? ---
   uint64_t new_end = old_addr + new_size;
@@ -1214,4 +1285,44 @@ int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len,
   default:
     return -EINVAL;
   }
+}
+// ---------------------------------------------------------------------------
+// [LinuxKPI L4] VMA_DEV: mapear y quitar paginas del driver.
+// ---------------------------------------------------------------------------
+int vma_dev_map_page(vma_t *vma, uint64_t addr, uint64_t phys) {
+  if (!vma || vma->type != VMA_DEV || !vma->dev_proc || (addr & 0xFFF) ||
+      addr < vma->start || addr >= vma->end)
+    return -EINVAL;
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(vma->dev_proc->pml4_phys);
+  uint64_t flags = vma->flags | PTE_PRESENT | PTE_SPECIAL | PTE_SHARED_OBJ |
+                   (vma->dev_cache & (PTE_NOCACHE | PTE_WRITETHRU));
+  uint64_t old = 0;
+  int had = paging_get_pte_in(pml4, addr, &old) && (old & PTE_PRESENT);
+  if (paging_map_page_in(pml4, addr, phys & PTE_FRAME, flags) != 0)
+    return -ENOMEM;
+  if (had) {
+    if (vma->dev_proc->team_size > 1 || vma->dev_proc != process_current())
+      paging_invalidate_tlb_global(addr);
+    else
+      paging_invalidate_tlb(addr);
+  }
+  return 0;
+}
+
+void vma_dev_zap(vma_t *vma, uint64_t start, uint64_t end) {
+  if (!vma || vma->type != VMA_DEV || !vma->dev_proc)
+    return;
+  if (start < vma->start)
+    start = vma->start;
+  if (end > vma->end)
+    end = vma->end;
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(vma->dev_proc->pml4_phys);
+  int any = 0;
+  for (uint64_t p = start & ~0xFFFULL; p < end; p += PAGE_SIZE)
+    if (paging_unmap_page_in(pml4, p) == 0)
+      any = 1;
+  // Otro hilo del proceso (u otro proceso, si zapea el driver) puede tener
+  // la traduccion en su TLB.
+  if (any)
+    paging_invalidate_tlb_global(0);
 }

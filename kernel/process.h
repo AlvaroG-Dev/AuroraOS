@@ -442,4 +442,14 @@ void process_set_exe_path(process_t *p, const char *path);
 // No-op si el proceso no es un .aur.
 void process_aur_dump(const process_t *proc);
 
+// [LinuxKPI L4] Identidad de una tarea (task_struct de la capa): tid, pid
+// del proceso (o el tid en hilos del kernel), credenciales y nombre corto.
+typedef struct task_info {
+  uint32_t tid, tgid, uid, euid;
+  struct process *proc; // NULL en hilos del kernel
+  int is_kernel;
+  char comm[16];
+} task_info_t;
+int task_info_get(task_t *t, task_info_t *out);
+
 #endif // PROCESS_H

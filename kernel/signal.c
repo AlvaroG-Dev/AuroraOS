@@ -873,3 +873,13 @@ uint64_t signal_filter_ignored_task(task_t *t, process_t *p, uint64_t mask) {
   }
   return mask;
 }
+// [LinuxKPI L4] signal_pending() de Linux: pendientes (del hilo y del
+// proceso) que el hilo no bloquea. SIGKILL y SIGSTOP no se pueden bloquear.
+// Bit `sig` como el resto de mascaras del kernel. 0 en hilos del kernel.
+uint64_t signal_unblocked_of(task_t *t) {
+  if (!t || !t->proc)
+    return 0;
+  uint64_t blocked = __atomic_load_n(&t->sig_blocked, __ATOMIC_ACQUIRE);
+  blocked &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+  return signal_pending_of(t) & ~blocked;
+}

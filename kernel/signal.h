@@ -111,6 +111,8 @@ void signal_raise_sigpipe(void);
 // --- Senales por hilo -------------------------------------------------------
 // Pendientes que ve el hilo `t`: las suyas y las de su proceso.
 uint64_t signal_pending_of(struct task *t);
+// [LinuxKPI L4] Pendientes que el hilo no bloquea (signal_pending de Linux).
+uint64_t signal_unblocked_of(struct task *t);
 // Quita las senales de `mask` de las pendientes de `t` y de su proceso.
 void signal_dequeue_mask(struct task *t, uint64_t mask);
 // tid del hilo (el pid del proceso para el hilo principal).

@@ -6,6 +6,8 @@
 #include "futex.h"
 #include "gfx/winsrv.h"
 #include "heap.h"
+#include "kthread.h"
+#include "signal.h"
 #include "klog.h"
 #include "mutex.h"
 #include "paging.h"
@@ -2043,6 +2045,13 @@ static int clone_vmas(process_t *parent, process_t *child) {
   vma_t **tail = &child->vma_list;
 
   for (vma_t *v = parent->vma_list; v; v = v->next) {
+    // [LinuxKPI L4] VM_DONTCOPY: el hijo no hereda el mapeo del driver.
+    if (v->type == VMA_DEV && (v->dev_flags & VMA_DEV_DONTCOPY)) {
+      uint64_t *cpml4 = (uint64_t *)phys_to_virt(child->pml4_phys);
+      for (uint64_t p = v->start; p < v->end; p += PAGE_SIZE)
+        paging_unmap_page_in(cpml4, p);
+      continue;
+    }
     vma_t *nv = (vma_t *)kzalloc(sizeof(vma_t));
     if (!nv) {
       vma_destroy_all(child);
@@ -2057,6 +2066,15 @@ static int clone_vmas(process_t *parent, process_t *child) {
 
     // [2.4] Hereda file_fd + file_node con refs propias.
     vma_inherit_backing(nv, v, 0);
+    // [LinuxKPI L4] El driver ve el VMA nuevo (vm_ops->open). Si lo rechaza,
+    // el hijo no lo hereda.
+    if (v->type == VMA_DEV && vma_dev_inherit(nv, v, child) != 0) {
+      uint64_t *cpml4 = (uint64_t *)phys_to_virt(child->pml4_phys);
+      for (uint64_t p = v->start; p < v->end; p += PAGE_SIZE)
+        paging_unmap_page_in(cpml4, p);
+      vma_free_one(nv); // dev_ops ya es NULL: sin close
+      continue;
+    }
 
     *tail = nv;
     tail = &nv->next;
@@ -2870,4 +2888,30 @@ process_t *process_find_by_pml4(uint64_t pml4_phys) {
 process_t *process_load_args(const char *path, int argc,
                              const char *const *argv) {
   return process_load_with_ppid_args(path, argc, argv, 0, NULL, 0);
+}
+
+// [LinuxKPI L4] Identidad de una tarea para el task_struct de la capa.
+int task_info_get(task_t *t, task_info_t *out) {
+  if (!t || !out)
+    return -EINVAL;
+  memset(out, 0, sizeof(*out));
+  out->tid = task_tid(t);
+  process_t *p = t->proc;
+  out->proc = p;
+  if (p) {
+    out->tgid = p->pid;
+    out->uid = p->uid;
+    out->euid = p->euid;
+    const char *n = p->name, *s = p->name;
+    for (; *s; s++)
+      if (*s == '/' && s[1])
+        n = s + 1;
+    strncpy(out->comm, n, sizeof(out->comm) - 1);
+  } else {
+    out->tgid = out->tid;
+    out->is_kernel = 1;
+    const char *n = t->kthread ? kthread_name(t->kthread) : NULL;
+    strncpy(out->comm, n && n[0] ? n : "kworker", sizeof(out->comm) - 1);
+  }
+  return 0;
 }
