@@ -27,7 +27,7 @@ Se hicieron las preguntas de diseño en una sola ronda, con una recomendación e
 | FLR | Implementado, **sin probar** (no hay PCIe con FLR en la máquina `pc`). |
 | `platform_bus` | Básico ya en L3 (lo necesita `simpledrm`). |
 
-Detalle y consecuencias en `Plan_LinuxKPI.md` §11 («26-oct-2026 — L3»).
+Detalle y consecuencias en `Plan_LinuxKPI.md` §11 («26-oct-2026 — L3»). Lo hecho después, a petición del autor, en §9 y en §11 («27-oct-2026 — Tras L3»).
 
 ## 2. Qué se ha hecho
 
@@ -127,11 +127,11 @@ Historia: el primer arranque con la capa nueva ya hizo probe de `edu` y `virtio-
 
 ## 7. Pendiente y decisiones abiertas
 
-1. **Antes de L5**: que `aur_bus` pueda no reclamar ciertos ID (p. ej. opción de arranque) para dar `bochs`/`virtio-gpu` a Linux.
+1. ~~**Antes de L5**: que `aur_bus` pueda no reclamar ciertos ID~~ → hecho: `aur.skip=` en la línea del kernel (§9).
 2. `on_each_cpu()`/IPI de función (L7, `i915`).
 3. ECAM para el espacio de configuración extendido (L7/L8).
 4. Más vectores MSI de kernel o vectores por CPU (L7/L8).
-5. `irq_user.c`: polaridad de las INTx de los `.aur` (posible fallo en QEMU `pc`; decide el autor).
+5. ~~`irq_user.c`: polaridad de las INTx de los `.aur`~~ → corregido, también en el modo sin MSI del AHCI (§9).
 6. Atributos binarios de sysfs y uevents hacia el userland (L4/L5); `device_link` (para `simpledrm`, L5).
 7. MSI de varios mensajes, reset de bus/PM, FLR probado en hardware.
 8. De sesiones anteriores: `current` estable y `signal_pending` (K8, L4), módulos > 64 MiB (L8), decisión NVIDIA.
@@ -149,3 +149,21 @@ Historia: el primer arranque con la capa nueva ya hizo probe de `edu` y `virtio-
 | `377f4fbe` | Capa: PCI, interrupciones y DMA provisional (K5) |
 | `36f88c95` | Pruebas K4, K5 y K5 SMP |
 | (este commit) | Plan §10/§11, estado, `Wayland_Estado_y_Decisiones.md` (D5) y este registro |
+
+## 9. Después de L3 (27-oct-2026, a petición del autor: puntos 1, 2 y 5 del informe)
+
+- **Línea de comandos del kernel y `aur.skip`** (punto 1). Los bootloaders UEFI y BIOS ya leían `cmdline=` de `aurora.conf` pero no se la pasaban al kernel: ahora va en `kernel_boot_info.cmdline` (la estructura pasa de 408 a 664 bytes) y `kernel/cmdline.c` la guarda. `aur.skip=VVVV:DDDD[,…]` (`DDDD` puede ser `*`) hace que `aur_bus` no lance el `.aur` de esos dispositivos; quedan para un driver del kernel (en L5, `cmdline=aur.skip=1234:1111,1af4:1050` para `bochs` y `virtio-gpu` de Linux). Documentado en `bootloader/aurora.conf`. Probado de punta a punta por UEFI con `aur.skip=1234:1111`: `bochs.aur` no se lanza y la suite pasa (199/199); el camino BIOS solo está compilado (QEMU arranca con OVMF). Prueba del kernel nueva del parser y de la lista.
+- **Polaridad de las INTx** (punto 2). `irq_user.c` (INTx de los `.aur`) y el modo sin MSI de `ahci.c` usan `ioapic_route_pci_intx()`. Experimento: con la polaridad antigua (activa a nivel bajo) forzada, la INTx de `edu` sigue llegando, así que **el IOAPIC de QEMU no aplica la polaridad**; el fallo solo podía verse en hardware real, donde manda la MADT.
+- **Medida de `virtio-gpu`** (punto 5, §6). `linuxkpi-scan.py` cuenta el núcleo virtio con `virtio-gpu` y `fetch-linux-drivers.sh` extrae `drivers/virtio`. `virtio-gpu`: 590 → 933 símbolos (K4 16 → 49, K5 40 → 253, de ellos 191 de cabeceras virtio); primer hito en QEMU 694 → 1022; el resto de drivers no cambia (`Plan_LinuxKPI.md` §3.1). Con la medida corregida, la capa daba 114 de los 143 símbolos K4/K5 de los tres drivers fuera de las cabeceras virtio; se añadieron los que no son de pantalla (device tree como Linux sin `CONFIG_OF`, `pm_domain`, `device_link` mínimo, `core_initcall`, `PCI_POSSIBLE_ERROR`): **137 de 143**; faltan `aperture` y `vgaarb` (L5).
+
+### Commits después de L3
+
+| Commit | Contenido |
+|---|---|
+| `58665440` | Aurora: línea de comandos del kernel y `aur.skip` |
+| `712e00fe` | Aurora: INTx de los `.aur` y del AHCI con la polaridad de la MADT |
+| `d4689617` | L0.3: `virtio-gpu` con el núcleo virtio (escáner, descarga, `linuxkpi_api.md`/`.tsv`) |
+| `acb15968` | Capa: lo que faltaba de K4/K5 para el primer hito (DT, `pm_domain`, `device_link`, …) |
+| (este commit) | Plan §3.1/§10/§11, D5 y esta sección |
+
+**Regresión tras estos cambios**: en curso (se completa al terminar).
