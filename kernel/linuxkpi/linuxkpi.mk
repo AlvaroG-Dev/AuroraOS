@@ -9,6 +9,33 @@ LKPI_SRCS    := $(wildcard kernel/linuxkpi/*.c kernel/linuxkpi/kernel/*.c kernel
                            kernel/linuxkpi/fs/*.c kernel/linuxkpi/dma/*.c kernel/linuxkpi/misc/*.c)
 LKPI_SRCS    := $(filter-out kernel/linuxkpi/kur_manifest.c,$(LKPI_SRCS))
 LKPI_OBJS    := $(patsubst kernel/linuxkpi/%.c,$(LKPI_BUILD)/obj/%.o,$(LKPI_SRCS))
+
+# Codigo de Linux que la capa compila tal cual (fences y dma_resv, K7), desde
+# el arbol fijado (scripts/fetch-linux-drivers.sh; no se versiona). Los
+# simbolos se renombran con prefijo lkpi_ en las cabeceras. Un parche minimo
+# versionado en kernel/linuxkpi/patches/<fichero>.patch se aplica a una copia
+# en build/ (el arbol descargado no se toca).
+LKPI_LINUX      ?= build/linuxkpi_src/linux
+LKPI_EXT_SRCS   := drivers/dma-buf/dma-fence.c drivers/dma-buf/dma-fence-array.c \
+                   drivers/dma-buf/dma-fence-chain.c drivers/dma-buf/dma-fence-unwrap.c \
+                   drivers/dma-buf/dma-resv.c drivers/dma-buf/sync_file.c
+LKPI_EXT_OBJS   := $(patsubst %.c,$(LKPI_BUILD)/obj/ext/%.o,$(LKPI_EXT_SRCS))
+LKPI_OBJS       += $(LKPI_EXT_OBJS)
+.SECONDARY: $(patsubst %.c,$(LKPI_BUILD)/ext-src/%.c,$(LKPI_EXT_SRCS))
+
+# Con parche: copia + patch; sin parche: el fichero del arbol.
+$(LKPI_BUILD)/ext-src/%.c: $(LKPI_LINUX)/%.c
+	@test -f $< || { echo "falta $< : ejecuta scripts/fetch-linux-drivers.sh"; exit 1; }
+	@mkdir -p $(dir $@)
+	@cp $< $@
+	@if [ -f kernel/linuxkpi/patches/$(notdir $<).patch ]; then \
+		echo "[LKPI-PATCH] $(notdir $<)"; \
+		patch -s $@ kernel/linuxkpi/patches/$(notdir $<).patch || exit 1; fi
+
+$(LKPI_BUILD)/obj/ext/%.o: $(LKPI_BUILD)/ext-src/%.c $(LKPI_HDRS) kernel/linuxkpi/flags.mk $(wildcard kernel/linuxkpi/patches/*.patch)
+	@mkdir -p $(dir $@)
+	@echo "[LKPI-CC] $(patsubst $(LKPI_BUILD)/ext-src/%,%,$<) (Linux)"
+	@$(LKPI_CC) $(LKPI_CFLAGS) -DKBUILD_MODNAME='"linuxkpi"' -I$(dir $(LKPI_LINUX)/$*.c) -c $< -o $@
 LKPI_HDRS    := $(shell find include/linuxkpi kernel/linuxkpi -name '*.h' 2>/dev/null)
 LKPI_TESTS   := $(patsubst tests/linuxkpi/%/drv.mk,%,$(wildcard tests/linuxkpi/*/drv.mk))
 LKPI_MODDIR  := sysroot/lib/modules/linuxkpi

@@ -22,6 +22,9 @@
 extern uint64_t sched_get_ticks(void);
 
 #define DRM_CLOEXEC 0x80000
+#ifndef EALREADY
+#define EALREADY 114 // Linux: aur_fence_watch sobre un fence ya senalado
+#endif
 #ifndef ETIME
 #define ETIME 62 // Linux: timeout de DRM_IOCTL_SYNCOBJ_WAIT
 #endif
@@ -94,6 +97,8 @@ static void so_put(struct drm_syncobj *o) {
 }
 
 // API para drivers de GPU ----------------------------------------------------
+static void so_fire_watchers(void);
+
 void drm_syncobj_signal_point(struct drm_syncobj *o, uint64_t point) {
   so_init_once();
   unsigned long fl = spin_lock_irqsave(&g_so_lock);
@@ -102,6 +107,7 @@ void drm_syncobj_signal_point(struct drm_syncobj *o, uint64_t point) {
     o->value = point;
   spin_unlock_irqrestore(&g_so_lock, fl);
   wake_up_all(&g_so_wq);
+  so_fire_watchers();
 }
 
 struct drm_syncobj *drm_syncobj_find(drm_file_t *f, uint32_t handle) {
@@ -253,6 +259,145 @@ int drm_resv_import_sync_file(struct drm_syncobj **po, int fd) {
   if (old)
     so_put(old);
   return 0;
+}
+
+// aur_fence: la API de fences para otros subsistemas del kernel -----------------
+// [LinuxKPI L5] Un aur_fence es un syncobj binario (nace sin senalar). La capa
+// LinuxKPI lo envuelve en un dma_fence en los dos sentidos (dma_fence_add_callback
+// <-> aur_fence_watch) sin que kernel/drm dependa de ella. Los observadores
+// (watch) se evaluan con las mismas reglas que las esperas (valor y alias), asi
+// que un fence importado de un sync_file avisa cuando se senala el origen.
+struct so_watch {
+  struct so_watch *next;
+  struct drm_syncobj *o; // referencia propia mientras este en la lista
+  void (*fn)(void *);
+  void *data;
+};
+static struct so_watch *g_watch;
+
+static void so_fire_watchers(void) {
+  for (;;) {
+    struct so_watch *w = NULL, **pp;
+    unsigned long fl = spin_lock_irqsave(&g_so_lock);
+    for (pp = &g_watch; *pp; pp = &(*pp)->next)
+      if (so_signaled_locked((*pp)->o, 1)) {
+        w = *pp;
+        *pp = w->next;
+        break;
+      }
+    spin_unlock_irqrestore(&g_so_lock, fl);
+    if (!w)
+      return;
+    w->fn(w->data);
+    so_put(w->o);
+    kfree(w);
+  }
+}
+
+struct drm_syncobj *aur_fence_create(int signaled) {
+  so_init_once();
+  struct drm_syncobj *o = so_new();
+  if (o && signaled)
+    o->value = 1;
+  return o;
+}
+void aur_fence_get(struct drm_syncobj *o) { so_get(o); }
+void aur_fence_put(struct drm_syncobj *o) {
+  if (o)
+    so_put(o);
+}
+void aur_fence_signal(struct drm_syncobj *o) { drm_syncobj_signal_point(o, 1); }
+bool aur_fence_signaled(struct drm_syncobj *o) { return !o || so_signaled(o, 1); }
+// Despierta a los que esperan o hacen poll sobre fences (la capa lo llama al
+// senalar cualquier dma_fence que haya exportado).
+void aur_fence_wake(void) {
+  so_init_once();
+  wake_up_all(&g_so_wq);
+}
+// 0: encolado (fn se llamara una vez, fuera de cerrojos, de contexto de tarea
+// o de IRQ); -EALREADY: ya senalado, fn no se llama.
+int aur_fence_watch(struct drm_syncobj *o, void (*fn)(void *), void *data) {
+  struct so_watch *w = (struct so_watch *)kzalloc(sizeof(*w));
+  if (!w)
+    return -ENOMEM;
+  w->o = o;
+  w->fn = fn;
+  w->data = data;
+  unsigned long fl = spin_lock_irqsave(&g_so_lock);
+  if (so_signaled_locked(o, 1)) {
+    spin_unlock_irqrestore(&g_so_lock, fl);
+    kfree(w);
+    return -EALREADY;
+  }
+  o->refcnt++;
+  w->next = g_watch;
+  g_watch = w;
+  spin_unlock_irqrestore(&g_so_lock, fl);
+  return 0;
+}
+// 1 si se quito antes de dispararse; 0 si ya no estaba.
+int aur_fence_unwatch(struct drm_syncobj *o, void (*fn)(void *), void *data) {
+  struct so_watch *w = NULL, **pp;
+  unsigned long fl = spin_lock_irqsave(&g_so_lock);
+  for (pp = &g_watch; *pp; pp = &(*pp)->next)
+    if ((*pp)->o == o && (*pp)->fn == fn && (*pp)->data == data) {
+      w = *pp;
+      *pp = w->next;
+      break;
+    }
+  spin_unlock_irqrestore(&g_so_lock, fl);
+  if (!w)
+    return 0;
+  so_put(w->o);
+  kfree(w);
+  return 1;
+}
+// dst pasa a ser un alias del punto 1 de src (dst aun sin senalar).
+int aur_fence_alias(struct drm_syncobj *dst, struct drm_syncobj *src) {
+  so_get(src);
+  unsigned long fl = spin_lock_irqsave(&g_so_lock);
+  dst->alias = src;
+  dst->alias_pt = 1;
+  spin_unlock_irqrestore(&g_so_lock, fl);
+  return 0;
+}
+// *dst se sustituye por un fence nuevo que es un alias de src.
+int aur_fence_alias_replace(struct drm_syncobj **dst, struct drm_syncobj *src) {
+  struct drm_syncobj *n = so_new();
+  if (!n)
+    return -ENOMEM;
+  so_get(src);
+  n->alias = src;
+  n->alias_pt = 1;
+  if (so_signaled(src, 1))
+    n->value = 1;
+  struct drm_syncobj *old = *dst;
+  *dst = n;
+  if (old)
+    so_put(old);
+  return 0;
+}
+// fd de sync_file o de syncobj del proceso actual -> aur_fence nuevo (con
+// referencia) que se senala cuando lo haga el origen.
+int aur_fence_from_fd(int fd, struct drm_syncobj **out) {
+  process_t *proc = process_current();
+  so_fd_t *s = proc ? so_fd_of(proc, fd) : NULL;
+  if (!s)
+    return -EINVAL;
+  struct drm_syncobj *n = so_new();
+  if (!n)
+    return -ENOMEM;
+  so_get(s->o);
+  n->alias = s->o;
+  n->alias_pt = s->pt;
+  if (so_signaled(s->o, s->pt))
+    n->value = 1;
+  *out = n;
+  return 0;
+}
+// aur_fence -> fd de sync_file nuevo en el proceso actual.
+int aur_fence_to_fd(struct drm_syncobj *o, int cloexec, int *fd_out) {
+  return so_make_fd(o, 1, "sync_file", cloexec ? DRM_CLOEXEC : 0, fd_out);
 }
 
 // Estructuras uapi --------------------------------------------------------------

@@ -6408,6 +6408,12 @@ static void test_lkpi_k6(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k6")
 REGISTER_TEST_FLAGS("linuxkpi: L4 DMA, dma_buf, firmware, i2c, backlight, debugfs",
                     test_lkpi_k6, TEST_FLAG_BLOCKING);
 
+// L5 (K7): dma_fence, chain, array, unwrap, dma_resv, sync_file y el enlace con
+// los fences de Aurora. El fence implícito de los dmabuf lo prueba lkpi_test.
+static void test_lkpi_k7(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k7")); }
+REGISTER_TEST_FLAGS("linuxkpi: L5 K7 fences, dma_resv y sync_file", test_lkpi_k7,
+                    TEST_FLAG_BLOCKING);
+
 static void test_lkpi_unload(void) {
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
   TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");

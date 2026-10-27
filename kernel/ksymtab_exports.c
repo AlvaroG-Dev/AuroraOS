@@ -186,6 +186,24 @@ KEXPORT_SYMBOL(vmap_area_free);
 KEXPORT_SYMBOL(dmabuf_node_new_ext);
 KEXPORT_SYMBOL(dmabuf_node_pages);
 KEXPORT_SYMBOL(dmabuf_node_ext_priv);
+/* L5 (K7): fences de Aurora para la capa y fence implicito de los dmabuf. */
+KEXPORT_SYMBOL(aur_fence_create);
+KEXPORT_SYMBOL(aur_fence_get);
+KEXPORT_SYMBOL(aur_fence_put);
+KEXPORT_SYMBOL(aur_fence_signal);
+KEXPORT_SYMBOL(aur_fence_signaled);
+KEXPORT_SYMBOL(aur_fence_wake);
+KEXPORT_SYMBOL(aur_fence_watch);
+KEXPORT_SYMBOL(aur_fence_unwatch);
+KEXPORT_SYMBOL(aur_fence_from_fd);
+KEXPORT_SYMBOL(aur_fence_to_fd);
+KEXPORT_SYMBOL(dmabuf_node_set_resv_ops);
+KEXPORT_SYMBOL(dmabuf_node_export_fence);
+KEXPORT_SYMBOL(dmabuf_node_import_fence);
+_Static_assert(sizeof(struct dmabuf_resv_ops) == 24 &&
+                   offsetof(struct dmabuf_resv_ops, import_fence) == 8 &&
+                   offsetof(struct dmabuf_resv_ops, poll) == 16,
+               "dmabuf_resv_ops cambio: actualizar struct aurora_dmabuf_resv_ops");
 _Static_assert(sizeof(vfs_ops_t) == 29 * 8 && offsetof(vfs_ops_t, read) == 0 &&
                    offsetof(vfs_ops_t, open) == 16 && offsetof(vfs_ops_t, close) == 24 &&
                    offsetof(vfs_ops_t, readdir) == 80 && offsetof(vfs_ops_t, poll) == 112 &&

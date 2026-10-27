@@ -5,7 +5,8 @@
 #
 #   linux/              arbol de Linux (version fijada en
 #                       kernel/linuxkpi/linux-version.mk); por defecto solo
-#                       drivers/gpu, drivers/virtio (lo usa virtio-gpu), include,
+#                       drivers/gpu, drivers/virtio (lo usa virtio-gpu), drivers/dma-buf (fences y
+#                       dma_resv, L5), include,
 #                       arch/x86/include, scripts y COPYING
 #                       (--full para todo).
 #   nvidia-open/        open-gpu-kernel-modules (kernel-open/ + src/).
@@ -72,17 +73,17 @@ fi
 LTB="linux-$LINUX_VERSION.tar.xz"
 fetch "https://cdn.kernel.org/pub/linux/kernel/v${LINUX_SERIES%%.*}.x/$LTB" "$DL/$LTB"
 if [ ! -f "$OUT/linux/.aurora-version" ] ||
-   [ "$(cat "$OUT/linux/.aurora-version")" != "$LINUX_VERSION full=$FULL virtio=1" ]; then
+   [ "$(cat "$OUT/linux/.aurora-version")" != "$LINUX_VERSION full=$FULL virtio=1 dmabuf=1" ]; then
     rm -rf "$OUT/linux"; mkdir -p "$OUT/linux"
     if [ "$FULL" = 1 ]; then
         tar -xJf "$DL/$LTB" -C "$OUT/linux" --strip-components=1
     else
         P="linux-$LINUX_VERSION"
         tar -xJf "$DL/$LTB" -C "$OUT/linux" --strip-components=1 \
-            "$P/COPYING" "$P/LICENSES" "$P/Makefile" "$P/drivers/gpu" "$P/drivers/virtio" \
+            "$P/COPYING" "$P/LICENSES" "$P/Makefile" "$P/drivers/gpu" "$P/drivers/virtio" "$P/drivers/dma-buf" \
             "$P/include" "$P/arch/x86/include" "$P/scripts"
     fi
-    echo "$LINUX_VERSION full=$FULL virtio=1" > "$OUT/linux/.aurora-version"
+    echo "$LINUX_VERSION full=$FULL virtio=1 dmabuf=1" > "$OUT/linux/.aurora-version"
 fi
 echo "OK: Linux $LINUX_VERSION en $OUT/linux"
 
