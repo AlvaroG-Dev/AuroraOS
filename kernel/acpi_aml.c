@@ -1202,16 +1202,13 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
       }
 
       case AML_EXT_OPREGION: {
-        size_t pkg_start = c->pos;
-        uint32_t pkglen = decode_pkglength(c->data, c->len, &c->pos);
-        size_t obj_end = pkg_start + pkglen;
+        // DefOpRegion := ExtOpPrefix 0x80 NameString RegionSpace RegionOffset
+        // RegionLen. No lleva PkgLength (a diferencia de Field/Device/...).
         char name[256];
         if (read_namestring(c->data, c->len, &c->pos, name, sizeof(name)) < 0)
           return;
-        if (c->pos >= obj_end) {
-          c->pos = obj_end;
+        if (c->pos >= c->len)
           break;
-        }
         uint8_t space = c->data[c->pos++];
         aml_object_t *off = parse_term_arg(c);
         aml_object_t *len = parse_term_arg(c);
@@ -1228,7 +1225,6 @@ static void parse_term_list(parse_ctx_t *c, size_t end_pos) {
             n->value = o;
           }
         }
-        c->pos = obj_end;
         break;
       }
 
