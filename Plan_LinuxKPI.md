@@ -316,4 +316,12 @@ A petición del autor (puntos 1, 2 y 5 de lo pendiente de L3):
 Investigado porque salió en 4 de 5 ejecuciones de la regresión tras L3 (regla de §2: «si sale, no la ignores»). Causa: `process_exit()` marcaba `TASK_DEAD` antes de despertar al padre; una expulsión en ese hueco dejaba al padre para siempre en `wait4()`. Decisiones:
 - `TASK_DEAD` solo al final de `process_exit_current()`; `free_reaped_zombie()` espera a `TASK_DEAD` y `on_cpu == 0` cediendo la CPU (`2522f377`). Con el arreglo, 17 de 17 (antes ~1 de cada 3 con los `.kur` de prueba en paralelo). Detalle y tabla en `docs/LinuxKPI_Sesion_L3.md` §9.
 - Se mantiene `wake_pending` en `wait_queue_wake_task()` (`fb581634`): carrera real aunque no era la causa.
-- **No** se hacen ahora `alarm`/`setitimer`/`timer_create` (hoy no hacen nada y `timeout` nunca vence): se propone al autor como trabajo de Aurora aparte.
+- **No** se hacen ahora `alarm`/`setitimer`/`timer_create` (hoy no hacen nada y `timeout` nunca vence): se propone al autor como trabajo de Aurora aparte. (Hecho el mismo día, ver la entrada siguiente.)
+
+### 27-oct-2026 — Correcciones de Aurora tras la investigación del cuelgue
+Con el visto bueno del autor («los que puedas solucionar y que no estén ya marcados en fases posteriores»). Detalle, pruebas y commits en `docs/LinuxKPI_Sesion_L3.md` §10. Decisiones:
+- **Temporizadores de proceso** en `kernel/ptimer.c` (un kthread que duerme hasta el vencimiento más cercano, como `timerfd`), no en el tick: la señal sale de contexto de tarea con `process_kill`. `ITIMER_VIRTUAL`/`PROF` sí en el tick y cuentan todo el tiempo de CPU (Aurora no separa usuario y sistema). Relojes de CPU y `*_ALARM` en `timer_create`: no.
+- **Señales por hilo como Linux**: máscara y pendientes dirigidas en `task_t`, pendientes de proceso y handlers en `process_t`; tid de los hilos del contador de pids. `signalfd` sigue bloqueando su máscara al crearse (no es Linux, pero hay código que lo espera), ahora en el hilo que lo crea. `sigaltstack` sigue siendo del proceso.
+- **Salida del grupo** con SIGKILL a los demás hilos; un hilo en una espera no interrumpible sale cuando vuelve de ella.
+- **El buzón de IPC sale de `task_t`** (se crea al usarlo) para que `task_t` quepa en el SLAB; `_Static_assert(sizeof(task_t) <= 2048)`.
+- Esto no cambia nada de la capa ni de `aurora.h`: `task_t` es opaco para LinuxKPI. Para K8 (L4) sigue pendiente decidir `current`/`signal_pending` de la capa; ahora hay señales por hilo en las que apoyarlo.

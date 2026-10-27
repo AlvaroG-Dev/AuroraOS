@@ -177,7 +177,7 @@ En la regresión de estos cambios `primary-icons.sh` se colgó en 4 de 5 ejecuci
 - **Causa**: `process_exit()` marcaba la tarea `TASK_DEAD` **antes** de poner el zombi, mandar `SIGCHLD` y despertar al padre. Si el tick la expulsaba en ese hueco, el selector no la volvía a elegir (y `reap_dead_tasks` podía liberarla): el despertar no llegaba nunca. Las trazas lo muestran: el hijo escribe su última línea antes del despertar, queda `st=4` (DEAD) y zombi, y la del despertar no sale.
 - **Arreglo** (`2522f377`): `TASK_DEAD` solo en `process_exit_current()`, justo antes de ceder; `free_reaped_zombie()` espera a `TASK_DEAD` y `on_cpu == 0` (cediendo la CPU) antes de liberar el espacio de direcciones del zombi, porque ahora el padre puede recogerlo mientras la tarea termina de salir.
 - **Antes** (`fb581634`) se arregló una carrera real pero mucho menos probable: `wait_queue_wake_task()` leía `waiting_on` sin cerrojo y perdía el aviso si el que espera había evaluado ya su condición y aún no se había encolado (ahora, Dekker con `task->wake_pending`). Sola no bastaba: 3 cuelgues en 19.
-- **Problema aparte, no tocado**: `alarm`, `setitimer` y `timer_create` no funcionan, así que `timeout 20 …` nunca vence y cualquier cuelgue de un hijo es para siempre en vez de un fallo a los 20 s.
+- **Problema aparte**: `alarm`, `setitimer` y `timer_create` no funcionaban, así que `timeout 20 …` nunca vencía y cualquier cuelgue de un hijo era para siempre en vez de un fallo a los 20 s. Corregido después (§10).
 
 | `primary-icons.sh` | Ejecuciones | Cuelgues |
 |---|---|---|
@@ -188,3 +188,37 @@ En la regresión de estos cambios `primary-icons.sh` se colgó en 4 de 5 ejecuci
 | Compilación con trazas y `2522f377` | 6 | 0 |
 
 **Regresión tras estos cambios** (con `2522f377`): suite del kernel 199/199 con `-smp 2` y dos veces con `-smp 4` (16 omitidas; 17 en una de `-smp 4` por el `iso9660: listado de /cdrom` intermitente de siempre); `drm_test`, `sig_test` y `rseq_test` ALL PASS; `clipboard-x11.sh` pasa 2 de 2; `primary-icons.sh` pasa 17 de 17 entre las tandas de arriba y la regresión.
+
+## 10. Correcciones de Aurora encontradas en la investigación (27-oct-2026)
+
+A petición del autor («soluciona los problemas que has encontrado… que no estén ya marcados en fases posteriores»). Ninguno es de LinuxKPI: lo abierto de la capa (§10 del plan: `on_each_cpu`, ECAM, vectores MSI, uevents) sigue asignado a L5–L8.
+
+| Problema | Cómo se encontró | Arreglo |
+|---|---|---|
+| `alarm`/`setitimer`/`getitimer` no hacían nada y no había `timer_create`: `timeout` nunca vencía | Cuelgue de `primary-icons.sh` | `kernel/ptimer.c`: `ITIMER_REAL` y temporizadores POSIX (REALTIME/MONOTONIC/BOOTTIME; `SIGEV_SIGNAL`, `SIGEV_NONE`, `SIGEV_THREAD_ID`) con un kthread como `timerfd`; `ITIMER_VIRTUAL`/`PROF` en el tick. `siginfo` con `SI_TIMER`, id, overrun y valor |
+| La máscara de señales era del proceso: el `sigwaitinfo` del hilo auxiliar de `SIGEV_THREAD` (musl) dejaba todo bloqueado para el proceso y sus hijos (el `sleep` de `timeout` no moría con SIGTERM) | Primera versión de `timer_test` | Máscara, pendientes dirigidas y estado de `sigsuspend`/`sigtimedwait` en `task_t`; una señal de proceso despierta a un hilo que no la bloquee; una bloqueada o esperada no se descarta aunque se ignore |
+| Los hilos no tenían tid propio (era `task->id`): `gettid`, `set_tid_address` (y con él `raise()` de musl), `tkill`/`tgkill` y `pthread_kill` apuntaban mal | Al revisar `tkill` | tid del contador de pids; `tkill`/`tgkill` dirigidas al hilo; `kill(tid)` va a su proceso |
+| `kill(0, sig)` solo se lo mandaba a quien llamaba | Ídem | Al grupo de procesos |
+| Las señales de tiempo real se ignoraban por defecto | Ídem | Terminan, como Linux |
+| `sigsuspend` volvía por una señal ignorada (SIGCHLD con `SIG_DFL`) y dejaba la máscara temporal | Lectura de `signal.c` | Las ignoradas se descartan y se sigue esperando |
+| `exit_group` y las señales mortales solo terminaban el hilo que llamaba: el proceso no llegaba a zombi | Ídem | SIGKILL al resto de hilos (`zap_other_threads`), código del grupo |
+| `free_reaped_zombie` solo esperaba al hilo principal; el padre solo despertaba a su hilo principal (`waitpid` desde otro hilo no volvía) | Revisión del arreglo de `process_exit` | Espera a la tarea que hizo la salida; `wake_up_all` de la `child_wq` del padre (con `pin_count`) |
+| `task_t` medía 2048 bytes justos (tope del SLAB): con los campos nuevos salía del SLAB y `sched_kick_idle_cpu` dejaba de despertar CPUs (fallaba la prueba K2 de 1 ms) | Aviso nuevo `kick_idle … fuera de SLAB` | El buzón de IPC (~1,3 KB) se crea al usarlo: `task_t` queda en 776 bytes (`switch.asm`: `on_cpu` 0x274, `fs_base` 0x2A0) y un `_Static_assert` lo vigila |
+| No había `/proc/cmdline` | Pendiente del punto 1 | Añadido |
+| Por BIOS no se encontraba `aurora.conf` (nombre largo: el FAT del bootloader solo comparaba 8.3) | Primera prueba real del camino BIOS | `fat16_find` casa también por nombre largo (LFN, con checksum) |
+| Pánico en `ata_dma_handle_async_irq` (#PF, CR2=0x48) con un bio de una partición | Ídem (disco IDE) | `ata_dma` guarda disco y tamaño de sector en `submit()`; no lee `bio->bdev` en la IRQ |
+| `iso9660: listado de /cdrom` se omitía a veces con `-smp 4` | Las regresiones | La detección ATA/ATAPI llega a 18 s y `system_init_task` montaba a los 15 s; ahora un kthread monta lo que falte cuando acaban los drivers |
+
+Pruebas nuevas en espacio de usuario: `timer_test` (46 comprobaciones, incluida `timeout 1 sleep 10` → 124 en ~1 s) y `thread_sig_test` (31). El camino BIOS se probó arrancando la ISO como disco IDE con SeaBIOS y `cmdline=quiet aur.skip=1234:1111`: carga `aurora.conf`, `/proc/cmdline` la muestra y `bochs.aur` no se lanza. El montaje tardío se probó bajando la espera a 2 s en una compilación temporal: `/cdrom` se montó 0,6 s después del aviso y la suite pasó 199/199.
+
+| Commit | Contenido |
+|---|---|
+| `de8d2dbb` | `ata_dma` no lee `bio->bdev` en la IRQ |
+| `500575ca` | Bootloader BIOS: ficheros FAT por nombre largo |
+| `af15ac9c` | Montaje tardío de `/cdrom` y `/data` |
+| `fdafd4e9` | Temporizadores, señales por hilo, salida del grupo, `/proc/cmdline`, buzón de IPC fuera de `task_t`, pruebas |
+| (este commit) | Esta sección y Plan §11 |
+
+**Regresión**: suite del kernel 199/199 con `-smp 2` y dos veces con `-smp 4` (16 omitidas en las tres; ya no sale la de `/cdrom`); `drm_test`, `sig_test`, `rseq_test`, `timer_test` y `thread_sig_test` ALL PASS; `clipboard-x11.sh` 2 de 2; `primary-icons.sh` 3 de 3. Sin pánicos ni avisos `fuera de SLAB`.
+
+**Para compilar las pruebas de usuario** hace falta `musl-gcc` en `/usr/bin` (paquete `musl-tools`; `scripts/qemu-drive.py` lo pasa como `MUSL_CC`): el `toolchain/x86_64-linux-musl-cross` del repositorio no trae la libc.
