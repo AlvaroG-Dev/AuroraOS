@@ -1,0 +1,11 @@
+# Ficheros de linux-firmware (LINUX_FIRMWARE_TAG de linux-version.mk) que
+# make iso copia a /lib/firmware del initrd, si existe el arbol descargado
+# (scripts/fetch-linux-drivers.sh --firmware). Una linea por fichero:
+#   <ruta bajo /lib/firmware>  <sha256 del contenido>
+# La ruta puede ser un "Link:" de WHENCE: se copia el contenido del destino
+# con el nombre del enlace. Sin el arbol no se copia nada (las pruebas que lo
+# usan se omiten).
+
+# L4: prueba de request_firmware con un fichero real (DMC de Kaby Lake,
+# enlace a kbl_dmc_ver1_01.bin; 8616 bytes).
+i915/kbl_dmc_ver1.bin  fe489275b3ea09eeb1662bd1434a184a603a01dae18e31df8b61dc9f160fd562

@@ -97,4 +97,13 @@ struct page *lkpi_page_lookup(unsigned long pfn);
 struct page *lkpi_page_alloc_desc(unsigned long pfn);
 bool lkpi_is_direct_map(const void *addr);
 
+/* L4 (dma/): dma_buf. */
+int lkpi_dmabuf_init(void);
+void lkpi_dmabuf_exit(void);
+/* L4 (misc/): i2c y backlight. */
+int lkpi_i2c_init(void);
+void lkpi_i2c_exit(void);
+int lkpi_backlight_init(void);
+void lkpi_backlight_exit(void);
+
 #endif

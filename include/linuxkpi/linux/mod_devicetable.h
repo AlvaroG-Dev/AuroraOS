@@ -27,6 +27,13 @@ struct platform_device_id {
 	kernel_ulong_t driver_data;
 };
 
+#define I2C_NAME_SIZE 20
+#define I2C_MODULE_PREFIX "i2c:"
+struct i2c_device_id {
+	char name[I2C_NAME_SIZE];
+	kernel_ulong_t driver_data;
+};
+
 struct of_device_id {
 	char name[32];
 	char type[32];

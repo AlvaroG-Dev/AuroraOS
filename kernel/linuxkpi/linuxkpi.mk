@@ -5,7 +5,8 @@ include kernel/linuxkpi/linux-version.mk
 
 LKPI_BUILD   := build/linuxkpi
 LKPI_SRCS    := $(wildcard kernel/linuxkpi/*.c kernel/linuxkpi/kernel/*.c kernel/linuxkpi/lib/*.c \
-                           kernel/linuxkpi/mm/*.c kernel/linuxkpi/base/*.c kernel/linuxkpi/pci/*.c)
+                           kernel/linuxkpi/mm/*.c kernel/linuxkpi/base/*.c kernel/linuxkpi/pci/*.c \
+                           kernel/linuxkpi/fs/*.c kernel/linuxkpi/dma/*.c kernel/linuxkpi/misc/*.c)
 LKPI_SRCS    := $(filter-out kernel/linuxkpi/kur_manifest.c,$(LKPI_SRCS))
 LKPI_OBJS    := $(patsubst kernel/linuxkpi/%.c,$(LKPI_BUILD)/obj/%.o,$(LKPI_SRCS))
 LKPI_HDRS    := $(shell find include/linuxkpi kernel/linuxkpi -name '*.h' 2>/dev/null)
@@ -24,10 +25,14 @@ $(LKPI_BUILD)/linuxkpi.kur: $(LKPI_BUILD)/linuxkpi.o tools/kurbuild
 	@echo "[KURBUILD] linuxkpi"
 	@./tools/kurbuild -H $< $@
 
-.PHONY: linuxkpi linuxkpi-tests linuxkpi-drv linuxkpi-clean
-linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests
+.PHONY: linuxkpi linuxkpi-tests linuxkpi-drv linuxkpi-clean linuxkpi-firmware
+linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-firmware
 	@mkdir -p $(LKPI_MODDIR)
 	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
+
+# Ficheros de linux-firmware para el initrd (kernel/linuxkpi/firmware.list).
+linuxkpi-firmware:
+	@scripts/install-linux-firmware.sh sysroot
 
 linuxkpi-tests: tools/kurbuild
 	@for t in $(LKPI_TESTS); do \

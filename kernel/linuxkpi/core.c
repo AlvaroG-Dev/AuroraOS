@@ -12,6 +12,7 @@
 
 #include "aurora.h"
 #include "lkpi_internal.h"
+#include "fs/fs.h"
 
 LKPI_KUR_MANIFEST("linuxkpi");
 
@@ -204,9 +205,34 @@ int kur_init(void)
 	rc = lkpi_pci_init();
 	if (rc)
 		goto err_platform;
+	rc = lkpi_chrdev_init();
+	if (rc)
+		goto err_pci;
+	rc = lkpi_dmabuf_init();
+	if (rc)
+		goto err_chrdev;
+	rc = lkpi_debugfs_init();
+	if (rc)
+		goto err_dmabuf;
+	rc = lkpi_i2c_init();
+	if (rc)
+		goto err_debugfs;
+	rc = lkpi_backlight_init();
+	if (rc)
+		goto err_i2c;
 	pr_info("linuxkpi: capa de compatibilidad con drivers de Linux lista\n");
 	return 0;
 
+err_i2c:
+	lkpi_i2c_exit();
+err_debugfs:
+	lkpi_debugfs_exit();
+err_dmabuf:
+	lkpi_dmabuf_exit();
+err_chrdev:
+	lkpi_chrdev_exit();
+err_pci:
+	lkpi_pci_exit();
 err_platform:
 	lkpi_platform_bus_exit();
 err_core:
@@ -229,6 +255,11 @@ err_mm:
 void kur_exit(void)
 {
 	/* El modelo de dispositivos antes que las workqueues y RCU que usa. */
+	lkpi_backlight_exit();
+	lkpi_i2c_exit();
+	lkpi_debugfs_exit();
+	lkpi_dmabuf_exit();
+	lkpi_chrdev_exit();
 	lkpi_pci_exit();
 	lkpi_platform_bus_exit();
 	lkpi_device_core_exit();
