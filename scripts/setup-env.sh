@@ -55,6 +55,7 @@ soft_step() {
 PKGS=(build-essential binutils nasm clang lld git curl file xxd
       qemu-system-x86 ovmf mtools dosfstools xorriso gdisk
       python3 python3-pil librsvg2-bin fonts-dejavu-core dpkg-dev
+      rsync musl-tools                                   # python-stdlib; musl-gcc de las pruebas
       libpng-dev libxcb1-dev libxcb-composite0-dev libxcb-xfixes0-dev)  # aurora-wayland
 
 missing=()
