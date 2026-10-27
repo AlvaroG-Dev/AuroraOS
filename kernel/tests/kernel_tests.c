@@ -6414,6 +6414,22 @@ static void test_lkpi_k7(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k7")
 REGISTER_TEST_FLAGS("linuxkpi: L5 K7 fences, dma_resv y sync_file", test_lkpi_k7,
                     TEST_FLAG_BLOCKING);
 
+// L5: el nucleo virtio de Linux (lkpi_virtio.kur) y un driver virtio de juguete
+// sobre virtio-rng-pci. Se carga y descarga aquí para que el bus virtio no
+// quede registrado entre tests.
+static void test_lkpi_virtio(void) {
+  struct kur_module *v = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int rc = kur_loader_load_file(LKPI_DIR "/lkpi_virtio.kur", &v);
+  TEST_ASSERT(rc == 0 && v, "lkpi_virtio no carga (rc=%d)", rc);
+  if (rc != 0 || !v)
+    return;
+  lkpi_unload_test(lkpi_load_test("lkpi_test_virtio"));
+  lkpi_unload_test(v);
+}
+REGISTER_TEST_FLAGS("linuxkpi: L5 virtio (bus, virtqueues, virtio-pci)", test_lkpi_virtio,
+                    TEST_FLAG_BLOCKING);
+
 static void test_lkpi_unload(void) {
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
   TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");

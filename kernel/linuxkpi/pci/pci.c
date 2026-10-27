@@ -119,7 +119,8 @@ static u32 cfg32(struct pci_dev *d, int where)
 
 /* --------------------------------------------------- capabilities */
 
-u8 lkpi_pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
+/* Recorre la lista desde el byte `pos`, que contiene el puntero al siguiente. */
+static u8 pci_find_cap_from(struct pci_dev *dev, u8 pos, int cap)
 {
 	u8 id;
 	int ttl = 48;
@@ -136,13 +137,19 @@ u8 lkpi_pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
 	}
 	return 0;
 }
+
+/* pos es el desplazamiento de una capability: se sigue su puntero al siguiente. */
+u8 lkpi_pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
+{
+	return pci_find_cap_from(dev, pos + PCI_CAP_LIST_NEXT, cap);
+}
 EXPORT_SYMBOL(lkpi_pci_find_next_capability);
 
 u8 lkpi_pci_find_capability(struct pci_dev *dev, int cap)
 {
 	if (!(cfg16(dev, PCI_STATUS) & PCI_STATUS_CAP_LIST))
 		return 0;
-	return lkpi_pci_find_next_capability(dev, PCI_CAPABILITY_LIST, cap);
+	return pci_find_cap_from(dev, PCI_CAPABILITY_LIST, cap);
 }
 EXPORT_SYMBOL(lkpi_pci_find_capability);
 

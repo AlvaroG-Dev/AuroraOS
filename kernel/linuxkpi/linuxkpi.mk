@@ -53,9 +53,19 @@ $(LKPI_BUILD)/linuxkpi.kur: $(LKPI_BUILD)/linuxkpi.o tools/kurbuild
 	@./tools/kurbuild -H $< $@
 
 .PHONY: linuxkpi linuxkpi-tests linuxkpi-drv linuxkpi-clean linuxkpi-firmware
-linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-firmware
+linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linuxkpi-firmware
 	@mkdir -p $(LKPI_MODDIR)
 	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
+
+# Modulos de infraestructura de Linux sobre la capa (kernel/linuxkpi/drivers/<n>.mk):
+# el nucleo virtio (L5) y, mas adelante, el de DRM. Se cargan bajo demanda.
+LKPI_MODULES := lkpi_virtio
+.PHONY: linuxkpi-modules
+linuxkpi-modules: tools/kurbuild
+	@for m in $(LKPI_MODULES); do \
+		$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=$$m \
+			KUR_CC="$(KUR_CC)" install || exit 1; \
+	done
 
 # Ficheros de linux-firmware para el initrd (kernel/linuxkpi/firmware.list).
 linuxkpi-firmware:

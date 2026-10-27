@@ -342,7 +342,7 @@ void lkpi_device_destroy(const struct class *cls, dev_t devt);
 #define device_add_groups(d, g) lkpi_device_add_groups(d, g)
 #define device_remove_groups(d, g) lkpi_device_remove_groups(d, g)
 #define devm_device_add_group(d, g) lkpi_devm_device_add_group(d, g)
-#define device_attach(d) lkpi_device_attach(d)
+static inline int device_attach(struct device *d) { return lkpi_device_attach(d); }
 #define device_driver_attach(drv, d) lkpi_device_driver_attach(drv, d)
 #define device_release_driver(d) lkpi_device_release_driver(d)
 #define device_reprobe(d) lkpi_device_reprobe(d)

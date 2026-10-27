@@ -264,7 +264,7 @@ static void __iomem *kt_vrng_map_cap(struct pci_dev *pdev, u8 type, u32 *notify_
 	u8 pos;
 
 	for (pos = pci_find_capability(pdev, PCI_CAP_ID_VNDR); pos;
-	     pos = pci_find_next_capability(pdev, pos + PCI_CAP_LIST_NEXT, PCI_CAP_ID_VNDR)) {
+	     pos = pci_find_next_capability(pdev, pos, PCI_CAP_ID_VNDR)) {
 		u8 t, bar;
 		u32 off;
 

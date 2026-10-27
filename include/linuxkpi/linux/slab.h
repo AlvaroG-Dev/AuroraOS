@@ -9,6 +9,7 @@
 #define _LKPI_LINUX_SLAB_H
 
 #include <linux/compiler.h>
+#include <linux/cache.h>
 #include <linux/gfp.h>
 #include <linux/overflow.h>
 #include <linux/string.h>
