@@ -222,3 +222,14 @@ Pruebas nuevas en espacio de usuario: `timer_test` (46 comprobaciones, incluida 
 **Regresión**: suite del kernel 199/199 con `-smp 2` y dos veces con `-smp 4` (16 omitidas en las tres; ya no sale la de `/cdrom`); `drm_test`, `sig_test`, `rseq_test`, `timer_test` y `thread_sig_test` ALL PASS; `clipboard-x11.sh` 2 de 2; `primary-icons.sh` 3 de 3. Sin pánicos ni avisos `fuera de SLAB`.
 
 **Para compilar las pruebas de usuario** hace falta `musl-gcc` en `/usr/bin` (paquete `musl-tools`; `scripts/qemu-drive.py` lo pasa como `MUSL_CC`): el `toolchain/x86_64-linux-musl-cross` del repositorio no trae la libc.
+
+## 11. Notas para la siguiente sesión (entorno)
+
+- **`scripts/qemu-drive.py` recompila la ISO desde el árbol en cada arranque** (`make iso MUSL_CC=/usr/bin/musl-gcc KUR_CC=gcc`). Una compilación con trazas temporales debe hacerse aparte: `make iso`, copiar `aurora.iso` y arrancar QEMU a mano con esa copia; si se restauran las fuentes antes de que acabe una tanda, las siguientes ejecuciones ya no llevan las trazas.
+- **`make` sin objetivo solo hace `env`**: para la ISO, `make iso`.
+- **Pruebas de usuario (`user/musl/apps/*`)**: hace falta `/usr/bin/musl-gcc` (`apt-get install musl-tools`, musl 1.2.4); el `toolchain/x86_64-linux-musl-cross` del repositorio no trae crt ni libc. Los binarios se suben junto al fuente (`user/musl/<app>`), como el resto.
+- **Arranque por BIOS**: sin OVMF y con la ISO como disco, `qemu-system-x86_64 -m 6G -smp 2 -no-reboot -display none -drive file=aurora.iso,format=raw,if=ide,snapshot=on -serial file:LOG -device edu -device virtio-rng-pci` (~130 s hasta el escritorio: el initrd se lee por int13).
+- **No usar `pgrep -f`/`pkill -f` con un patrón que aparezca en la propia orden** (casa con la shell que espera y no termina nunca): esperar por el PID de QEMU.
+- **Tiempos**: `primary-icons.sh` ~135 s; suite del kernel ~6 min; un cuelgue cuesta el `-t` entero, así que conviene `-t 600` para los guiones gráficos.
+- **`task_t` debe seguir ≤ 2048 bytes** (`_Static_assert`); si cambian `on_cpu` o `fs_base`, actualizar `kernel/switch.asm`.
+- Para K8 (L4): Aurora ya tiene señales por hilo (`task->sig_pending`/`sig_blocked`, `signal_pending_of()`), base para `signal_pending()`/`fatal_signal_pending()` de la capa, que hoy devuelven 0.
