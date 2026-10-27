@@ -3,8 +3,8 @@
  * task_struct minimo para K2 (L2): estado de sueno, schedule() y
  * wake_up_process(). Cada tarea de Aurora que pasa por la capa tiene un
  * task_struct propio (lo crea la capa la primera vez que se pide `current`
- * en esa tarea, o kthread_create). El resto (mm, credenciales, senales,
- * pid real) es K8 (L4).
+ * en esa tarea, o kthread_create). K8 (L4): pid/tgid/comm de Aurora,
+ * current->mm por proceso y senales reales.
  *
  * Duerme sobre una cola de espera de Aurora propia de cada task_struct
  * ("aparcamiento"): schedule() se aparca solo si __state no es
@@ -56,13 +56,15 @@ struct mm_struct;
 struct task_struct {
 	unsigned int __state;
 	unsigned int flags;
-	pid_t pid;
-	pid_t tgid;
+	pid_t pid;			/* tid de Aurora */
+	pid_t tgid;			/* pid del proceso (el tid en hilos del kernel) */
 	char comm[TASK_COMM_LEN];
 	struct mm_struct *mm;
 	struct mm_struct *active_mm;
 	atomic_t __lkpi_usage;		/* referencias (get/put_task_struct) */
 	void *__lkpi_atask;		/* task_t de Aurora */
+	u32 __lkpi_tid;			/* tid de Aurora al publicarlo (validacion) */
+	u32 __lkpi_uid, __lkpi_euid;
 	struct task_struct *__lkpi_hnext; /* cadena de la tabla task_t -> task_struct */
 	void *__lkpi_kthread;		/* datos de kthread de la capa (o NULL) */
 	unsigned int __lkpi_softirq;	/* > 0: ejecuta bottom halves de la capa */
@@ -122,13 +124,30 @@ static inline long schedule_timeout_idle(long t)
 	return schedule_timeout(t);
 }
 
-/* Senales: K8 (L4). Hasta entonces ninguna espera se interrumpe. */
-static inline int signal_pending(struct task_struct *p) { (void)p; return 0; }
-static inline int fatal_signal_pending(struct task_struct *p) { (void)p; return 0; }
+/*
+ * Senales (K8, L4): las de Aurora. signal_pending() = pendientes del hilo o de
+ * su proceso que el hilo no bloquea; fatal = SIGKILL pendiente. Siempre 0 en
+ * hilos del kernel. Una espera interrumpida devuelve -ERESTARTSYS, que el
+ * puente de ficheros convierte en -EINTR (Aurora no reinicia syscalls).
+ */
+int lkpi_signal_pending(struct task_struct *p);
+int lkpi_fatal_signal_pending(struct task_struct *p);
+static inline int signal_pending(struct task_struct *p) { return lkpi_signal_pending(p); }
+static inline int __fatal_signal_pending(struct task_struct *p)
+{
+	return lkpi_fatal_signal_pending(p);
+}
+static inline int fatal_signal_pending(struct task_struct *p)
+{
+	return lkpi_fatal_signal_pending(p);
+}
 static inline int signal_pending_state(unsigned int state, struct task_struct *p)
 {
-	(void)state; (void)p;
-	return 0;
+	if (!(state & (TASK_INTERRUPTIBLE | TASK_WAKEKILL)))
+		return 0;
+	if (!signal_pending(p))
+		return 0;
+	return (state & TASK_INTERRUPTIBLE) || __fatal_signal_pending(p);
 }
 
 static inline pid_t task_pid_nr(struct task_struct *p) { return p->pid; }

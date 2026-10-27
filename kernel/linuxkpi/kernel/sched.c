@@ -6,10 +6,13 @@
  * por su task_t en una tabla hash que se recorre sin cerrojo. Las entradas
  * no se liberan hasta descargar la capa: la de un kthread terminado queda
  * libre (__lkpi_atask == NULL, sin referencias) y se reutiliza en la misma
- * cadena. Las de tareas ajenas (p. ej. el hilo de pruebas) viven hasta la
- * descarga; si Aurora reutiliza la direccion de un task_t muerto, la tarea
- * nueva hereda ese descriptor (sin consecuencias en K2: pid y comm son
- * informativos).
+ * cadena.
+ *
+ * K8 (L4): la entrada guarda el tid de Aurora. Si Aurora reutiliza la
+ * direccion de un task_t muerto, `current` lo nota (otro tid) y refresca la
+ * entrada (pid, comm, mm, credenciales); si un driver aun tiene una
+ * referencia a la vieja (get_task_struct), la deja y publica otra. Igual con
+ * current->mm: un mm_struct por process_t, validado por pid.
  *
  * Dormir: cada task_struct lleva una cola de espera de Aurora propia. Ver
  * linux/sched.h.
@@ -20,6 +23,9 @@
 #include <linux/kthread.h>
 #include <linux/percpu.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/capability.h>
+#include <linux/rwsem.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
@@ -44,6 +50,29 @@ static inline struct aurora_wait_queue *lkpi_park(struct task_struct *p)
 static inline unsigned int lkpi_task_bucket(struct aurora_task *at)
 {
 	return hash_ptr(at, LKPI_TASK_HASH_BITS);
+}
+
+static struct mm_struct *lkpi_mm_lookup(struct aurora_process *proc, u32 pid);
+
+/* pid, comm, credenciales y mm de Aurora. Con lkpi_task_lock tomado. */
+static void lkpi_task_set_identity(struct task_struct *p, struct aurora_task *at,
+				   const char *comm)
+{
+	struct aurora_task_info ti;
+
+	if (aurora_task_info_get(at, &ti) != 0) {
+		memset(&ti, 0, sizeof(ti));
+		ti.tid = ti.tgid = atomic_inc_return(&lkpi_next_pid);
+		ti.is_kernel = 1;
+	}
+	p->__lkpi_tid = ti.tid;
+	p->pid = ti.tid;
+	p->tgid = ti.tgid;
+	p->__lkpi_uid = ti.uid;
+	p->__lkpi_euid = ti.euid;
+	/* Los kthreads de la capa llevan su nombre de Linux; el resto, el de Aurora. */
+	strscpy(p->comm, comm ? comm : ti.comm, sizeof(p->comm));
+	p->mm = p->active_mm = ti.proc ? lkpi_mm_lookup(ti.proc, ti.tgid) : NULL;
 }
 
 static struct task_struct *lkpi_task_lookup(struct aurora_task *at)
@@ -79,8 +108,15 @@ static struct task_struct *lkpi_task_publish(struct aurora_task *at, struct task
 	p = lkpi_task_lookup(at);
 	if (p && !fresh)
 		goto out;
-	if (p)
+	if (p && atomic_read(&p->__lkpi_usage) <= 1)
 		goto init;
+	if (p) {
+		/* Alguien guarda la vieja: queda fuera de la busqueda y se libera
+		 * para reutilizarla cuando suelte su referencia. */
+		smp_store_release(&p->__lkpi_atask, NULL);
+		if (!p->__lkpi_kthread)
+			atomic_dec(&p->__lkpi_usage);	/* la de la tabla */
+	}
 	for (p = lkpi_task_hash[b]; p; p = p->__lkpi_hnext)
 		if (!p->__lkpi_atask && !atomic_read(&p->__lkpi_usage))
 			break;
@@ -93,9 +129,7 @@ static struct task_struct *lkpi_task_publish(struct aurora_task *at, struct task
 init:
 	p->__state = state;
 	p->flags = flags;
-	p->pid = p->tgid = atomic_inc_return(&lkpi_next_pid);
-	strscpy(p->comm, comm, sizeof(p->comm));
-	p->mm = p->active_mm = NULL;
+	lkpi_task_set_identity(p, at, comm);
 	atomic_set(&p->__lkpi_usage, 1);
 	p->__lkpi_kthread = NULL;
 	p->__lkpi_softirq = 0;
@@ -131,7 +165,10 @@ struct task_struct *lkpi_get_current(void)
 	struct aurora_task *at = lkpi_aurora_current();
 	struct task_struct *p = lkpi_task_lookup(at);
 
-	return p ? p : lkpi_task_get_or_create(at, "aurora", TASK_RUNNING, 0, false);
+	if (likely(p) && likely(READ_ONCE(p->__lkpi_tid) == aurora_task_tid(at)))
+		return p;
+	/* Nueva, o una tarea nueva con la direccion de un task_t muerto. */
+	return lkpi_task_get_or_create(at, NULL, TASK_RUNNING, 0, !!p);
 }
 EXPORT_SYMBOL(lkpi_get_current);
 
@@ -142,6 +179,95 @@ void lkpi_put_task_struct(struct task_struct *p)
 		WARN_ON(READ_ONCE(p->__lkpi_atask));
 }
 EXPORT_SYMBOL(lkpi_put_task_struct);
+
+/* ------------------------------------------------------- mm y senales */
+
+#define LKPI_MM_HASH_BITS 6
+static struct mm_struct *lkpi_mm_hash[1 << LKPI_MM_HASH_BITS];
+
+/*
+ * mm_struct del proceso `proc` (pid `pid`). Con lkpi_task_lock tomado. Si la
+ * entrada es de un proceso muerto con la misma direccion de process_t, se
+ * reinicia; si alguien la guarda, se deja y se crea otra.
+ */
+static struct mm_struct *lkpi_mm_lookup(struct aurora_process *proc, u32 pid)
+{
+	unsigned int b = hash_ptr(proc, LKPI_MM_HASH_BITS);
+	struct mm_struct *mm, *freeslot = NULL;
+
+	for (mm = lkpi_mm_hash[b]; mm; mm = mm->__lkpi_hnext) {
+		if (mm->__lkpi_proc == proc && mm->__lkpi_pid == pid)
+			return mm;
+		if (mm->__lkpi_proc == proc)	/* muerto: ya no se encuentra */
+			mm->__lkpi_proc = NULL;
+		if (!mm->__lkpi_proc && atomic_read(&mm->mm_count) <= 1 &&
+		    atomic_read(&mm->mm_users) <= 1 && !freeslot)
+			freeslot = mm;
+	}
+	mm = freeslot;
+	if (!mm) {
+		mm = kzalloc(sizeof(*mm), GFP_ATOMIC);
+		if (!mm)
+			return NULL;
+		mm->__lkpi_hnext = lkpi_mm_hash[b];
+		lkpi_mm_hash[b] = mm;
+	}
+	atomic_set(&mm->mm_users, 1);	/* las de la tabla */
+	atomic_set(&mm->mm_count, 1);
+	init_rwsem(&mm->mmap_lock);
+	mm->task_size = 0x00007FFFFFFFF000UL;
+	mm->__lkpi_pid = pid;
+	mm->__lkpi_proc = proc;
+	return mm;
+}
+
+/* Las entradas de mm viven hasta descargar la capa (como las de tareas). */
+void lkpi_mmput(struct mm_struct *mm)
+{
+	WARN_ON(atomic_dec_return(&mm->mm_users) < 1);
+}
+EXPORT_SYMBOL(lkpi_mmput);
+
+void lkpi_mmdrop(struct mm_struct *mm)
+{
+	WARN_ON(atomic_dec_return(&mm->mm_count) < 1);
+}
+EXPORT_SYMBOL(lkpi_mmdrop);
+
+struct mm_struct *lkpi_get_task_mm(struct task_struct *p)
+{
+	struct mm_struct *mm = READ_ONCE(p->mm);
+
+	if (mm)
+		atomic_inc(&mm->mm_users);
+	return mm;
+}
+EXPORT_SYMBOL(lkpi_get_task_mm);
+
+int lkpi_signal_pending(struct task_struct *p)
+{
+	struct aurora_task *at = READ_ONCE(p->__lkpi_atask);
+
+	return at && aurora_signal_unblocked_of(at) != 0;
+}
+EXPORT_SYMBOL(lkpi_signal_pending);
+
+int lkpi_fatal_signal_pending(struct task_struct *p)
+{
+	struct aurora_task *at = READ_ONCE(p->__lkpi_atask);
+
+	return at && (aurora_signal_unblocked_of(at) & (1ULL << AURORA_SIGKILL));
+}
+EXPORT_SYMBOL(lkpi_fatal_signal_pending);
+
+bool lkpi_capable(int cap)
+{
+	struct task_struct *p = current;
+
+	(void)cap;
+	return !p->mm || p->__lkpi_euid == 0;	/* hilos del kernel o root */
+}
+EXPORT_SYMBOL(lkpi_capable);
 
 /* ----------------------------------------------------- dormir/despertar */
 
@@ -426,6 +552,16 @@ int lkpi_sched_init(void)
 void lkpi_sched_exit(void)
 {
 	unsigned int b;
+
+	for (b = 0; b < ARRAY_SIZE(lkpi_mm_hash); b++) {
+		struct mm_struct *mm = lkpi_mm_hash[b], *n;
+
+		lkpi_mm_hash[b] = NULL;
+		for (; mm; mm = n) {
+			n = mm->__lkpi_hnext;
+			kfree(mm);
+		}
+	}
 
 	for (b = 0; b < ARRAY_SIZE(lkpi_task_hash); b++) {
 		struct task_struct *p = lkpi_task_hash[b], *n;

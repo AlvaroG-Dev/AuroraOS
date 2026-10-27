@@ -12,6 +12,7 @@
 #include <linux/kstrtox.h>
 #include "base.h"
 #include "../lkpi_internal.h"
+#include "../fs/fs.h"
 
 DEFINE_MUTEX(lkpi_dev_mutex);
 
@@ -260,6 +261,8 @@ int lkpi_device_add(struct device *dev)
 		list_add_tail(&dev->lkpi_child_node, &parent->lkpi_children);
 		mutex_unlock(&lkpi_dev_mutex);
 	}
+	if (MAJOR(dev->devt))
+		lkpi_devnode_add(dev);	/* /dev/<nombre> (K8, L4) */
 	lkpi_bus_notify(dev, BUS_NOTIFY_ADD_DEVICE);
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
 	lkpi_bus_probe_device(dev);
@@ -296,6 +299,8 @@ void lkpi_device_del(struct device *dev)
 		return;
 	}
 	lkpi_bus_notify(dev, BUS_NOTIFY_DEL_DEVICE);
+	if (MAJOR(dev->devt))
+		lkpi_devnode_del(dev);
 	lkpi_device_release_driver(dev);
 	if (parent) {
 		mutex_lock(&lkpi_dev_mutex);

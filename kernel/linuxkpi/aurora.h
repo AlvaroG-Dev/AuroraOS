@@ -202,4 +202,145 @@ int aurora_sysfs_add_attr(const char *path, const struct aurora_sysfs_attr_ops *
 int aurora_sysfs_remove(const char *path) __asm__("sysfs_dyn_remove");
 int aurora_sysfs_remove_tree(const char *prefix) __asm__("sysfs_dyn_remove_tree");
 
+/*
+ * L4 (K8): identidad de las tareas y senales. task_info_t de process.h.
+ * Mascaras de senales de Aurora: bit `sig` (no sig - 1 como Linux).
+ */
+struct aurora_process;			/* process_t (opaco) */
+struct aurora_task_info {
+	u32 tid, tgid, uid, euid;
+	struct aurora_process *proc;	/* NULL en hilos del kernel */
+	int is_kernel;
+	char comm[16];
+};
+_Static_assert(sizeof(struct aurora_task_info) == 48, "task_info_t de Aurora");
+int aurora_task_info_get(struct aurora_task *t, struct aurora_task_info *out)
+	__asm__("task_info_get");
+u32 aurora_task_tid(struct aurora_task *t) __asm__("task_tid");
+u64 aurora_signal_unblocked_of(struct aurora_task *t) __asm__("signal_unblocked_of");
+#define AURORA_SIGKILL 9
+
+/*
+ * L4 (K8): VFS, fds y VMA de dispositivo. Replicas de vfs_ops_t,
+ * vfs_dirent_t, vfs_fs_ops_t, vma_t y vma_dev_ops_t (vfs.h, pf.h); el
+ * kernel comprueba tamanos y desplazamientos en ksymtab_exports.c.
+ */
+struct aurora_vfs_node;			/* vfs_node_t (opaco) */
+struct aurora_fd;			/* file_descriptor_t (opaco) */
+struct aurora_vma;
+#define AURORA_VFS_FILE 0x01
+#define AURORA_VFS_DIRECTORY 0x02
+#define AURORA_VFS_CHARDEVICE 0x04
+#define AURORA_S_IFDIR 0040000
+#define AURORA_S_IFCHR 0020000
+#define AURORA_S_IFREG 0100000
+struct aurora_vfs_dirent {
+	char name[128];
+	u32 type;			/* AURORA_VFS_FILE / _DIRECTORY */
+	u64 size;
+};
+_Static_assert(sizeof(struct aurora_vfs_dirent) == 144, "vfs_dirent_t de Aurora");
+struct aurora_vfs_ops {
+	s64 (*read)(struct aurora_vfs_node *n, u64 off, size_t size, void *buf);
+	s64 (*write)(struct aurora_vfs_node *n, u64 off, size_t size, const void *buf);
+	int (*open)(struct aurora_vfs_node *n, int flags);
+	int (*close)(struct aurora_vfs_node *n);
+	bool (*readable)(struct aurora_vfs_node *n);
+	void *create, *mkdir, *unlink, *mknod, *truncate;
+	int (*readdir)(struct aurora_vfs_node *dir, u64 index, struct aurora_vfs_dirent *out);
+	void *rename, *readlink, *symlink;
+	int (*poll)(struct aurora_vfs_node *n, short events);
+	struct aurora_wait_queue *(*poll_wq)(struct aurora_vfs_node *n);
+	s64 (*ioctl)(struct aurora_vfs_node *n, unsigned long req, u64 arg);
+	void *utimes, *chmod, *chown, *link, *fsync, *mmap;
+	int (*get_page)(struct aurora_vfs_node *n, u64 pgoff, u64 *phys);
+	s64 (*read_fd)(struct aurora_fd *f, void *ubuf, size_t n, u64 *pos);
+	s64 (*write_fd)(struct aurora_fd *f, const void *ubuf, size_t n, u64 *pos);
+	s64 (*llseek)(struct aurora_fd *f, s64 off, int whence, u64 cur);
+	int (*setfl)(struct aurora_fd *f, int newflags);
+	int (*mmap_dev)(struct aurora_fd *f, struct aurora_process *proc, struct aurora_vma *vma,
+			u64 prot, u64 flags);
+};
+_Static_assert(sizeof(struct aurora_vfs_ops) == 29 * 8, "vfs_ops_t de Aurora");
+struct aurora_vfs_fs_ops {
+	struct aurora_vfs_node *(*lookup)(void *fs_priv, const char *path);
+	const char *name;
+	void *statfs;
+};
+struct aurora_vma_dev_ops {
+	int (*fault)(struct aurora_vma *vma, u64 addr, int write);
+	int (*open)(struct aurora_vma *nv, struct aurora_vma *old);
+	void (*close)(struct aurora_vma *vma);
+};
+struct aurora_vma {
+	u64 start, end, flags;		/* flags: PTE de usuario (WRITABLE, NX...) */
+	u32 type, pad;
+	void *next, *file_fd;
+	u64 file_offset;
+	void *file_node;
+	const struct aurora_vma_dev_ops *dev_ops;
+	void *dev_priv;
+	struct aurora_process *dev_proc;
+	u32 dev_flags;			/* AURORA_VMA_DEV_* */
+	u32 dev_cache;			/* AURORA_PTE_NOCACHE/WRITETHRU */
+};
+#define AURORA_VMA_DEV_DONTCOPY 0x1
+#define AURORA_PTE_USER 0x004UL
+#define AURORA_O_ASYNC 0x2000
+#define AURORA_O_NONBLOCK 0x800
+#define AURORA_O_CLOEXEC 0x80000
+
+struct aurora_vfs_node *aurora_vfs_node_alloc(const char *name, u32 vflags, u32 mode, u32 rdev,
+					      const struct aurora_vfs_ops *ops, void *priv,
+					      u64 size) __asm__("vfs_node_alloc");
+void aurora_vfs_node_ref(struct aurora_vfs_node *n) __asm__("vfs_node_ref");
+void aurora_vfs_node_free(struct aurora_vfs_node *n) __asm__("vfs_node_free");
+void *aurora_vfs_node_get_priv(struct aurora_vfs_node *n) __asm__("vfs_node_get_priv");
+const struct aurora_vfs_ops *aurora_vfs_node_ops(struct aurora_vfs_node *n) __asm__("vfs_node_ops");
+void aurora_vfs_node_set_priv(struct aurora_vfs_node *n, void *priv) __asm__("vfs_node_set_priv");
+struct aurora_vfs_node *aurora_vfs_fd_node(struct aurora_fd *f) __asm__("vfs_fd_node");
+int aurora_vfs_fd_flags(struct aurora_fd *f) __asm__("vfs_fd_flags");
+struct aurora_fd *aurora_vfs_fd_get_current(int fd) __asm__("vfs_fd_get_current");
+void aurora_vfs_fd_put_ref(struct aurora_fd *f) __asm__("vfs_fd_put_ref");
+int aurora_vfs_fd_reserve(int cloexec) __asm__("vfs_fd_reserve");
+int aurora_vfs_fd_install_node(int fd, struct aurora_vfs_node *n, int flags)
+	__asm__("vfs_fd_install_node");
+void aurora_vfs_fd_unreserve(int fd) __asm__("vfs_fd_unreserve");
+int aurora_vfs_send_sigio(int owner, int sig) __asm__("vfs_send_sigio");
+int aurora_vfs_fd_owner(struct aurora_fd *f) __asm__("vfs_fd_owner");
+int aurora_vfs_mount(const char *path, const struct aurora_vfs_fs_ops *ops, void *fs_priv)
+	__asm__("vfs_mount");
+int aurora_vfs_umount(const char *path) __asm__("vfs_umount");
+/* devtmpfs.h: /dev/<path>; rdev = (major << 8) | minor */
+int aurora_devtmpfs_register(const char *path, u32 rdev, u32 mode, u32 uid, u32 gid,
+			     const struct aurora_vfs_ops *ops, void *priv)
+	__asm__("devtmpfs_register");
+int aurora_devtmpfs_unregister(const char *path) __asm__("devtmpfs_unregister");
+/* pf.h */
+int aurora_vma_dev_map_page(struct aurora_vma *vma, u64 addr, u64 phys)
+	__asm__("vma_dev_map_page");
+void aurora_vma_dev_zap(struct aurora_vma *vma, u64 start, u64 end) __asm__("vma_dev_zap");
+/* vmap.h */
+#define AURORA_VMAP_BASE 0xFFFFD00000000000UL
+#define AURORA_VMAP_SIZE (64UL << 30)
+u64 aurora_vmap_area_alloc(u64 size) __asm__("vmap_area_alloc");
+int aurora_vmap_area_map(u64 va, u64 phys, u64 flags) __asm__("vmap_area_map");
+void aurora_vmap_area_free(u64 va) __asm__("vmap_area_free");
+/* drm.h: dmabuf de Aurora */
+struct aurora_vfs_node *aurora_dmabuf_node_new_ext(u32 npages, const u64 *pages,
+						   void (*release)(void *), void *priv)
+	__asm__("dmabuf_node_new_ext");
+int aurora_dmabuf_node_pages(struct aurora_vfs_node *n, u32 *npages, const u64 **pages)
+	__asm__("dmabuf_node_pages");
+void *aurora_dmabuf_node_ext_priv(struct aurora_vfs_node *n, void (*release)(void *))
+	__asm__("dmabuf_node_ext_priv");
+/* firmware.h de Aurora */
+struct aurora_firmware {
+	size_t size;
+	const u8 *data;
+};
+int aurora_request_firmware(const struct aurora_firmware **fw, const char *name)
+	__asm__("request_firmware");
+void aurora_release_firmware(const struct aurora_firmware *fw) __asm__("release_firmware");
+
 #endif
