@@ -202,10 +202,98 @@ static void fat_make_8_3(const char *name, uint8_t out[11]) {
   }
 }
 
+/* ---------------------------------------------------------------------
+ * Nombres largos (VFAT LFN). mtools guarda "aurora.conf" con nombre largo y
+ * un alias 8.3 ("AURORA~1.CON"), asi que buscar solo por 8.3 no lo
+ * encontraba nunca: el camino BIOS arrancaba sin aurora.conf (sin cmdline,
+ * sin kernel= ni initrd=). Ahora una entrada casa por su 8.3 o por su nombre
+ * largo (ASCII, sin distinguir mayusculas), como hace el firmware UEFI.
+ * --------------------------------------------------------------------- */
+typedef struct {
+  char name[256];
+  uint8_t sum; /* checksum del 8.3 al que pertenece */
+  int valid;
+} fat_lfn_t;
+
+static void lfn_reset(fat_lfn_t *l) { l->valid = 0; }
+
+static void lfn_feed(fat_lfn_t *l, const uint8_t *e) {
+  static const uint8_t off[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+  uint8_t seq = e[0];
+  int n = seq & 0x1F;
+  if (n == 0 || n > 19) {
+    l->valid = 0;
+    return;
+  }
+  if (seq & 0x40) { /* la ultima parte va primera en el directorio */
+    for (int i = 0; i < 256; i++)
+      l->name[i] = 0;
+    l->sum = e[13];
+    l->valid = 1;
+  } else if (!l->valid || e[13] != l->sum) {
+    l->valid = 0;
+    return;
+  }
+  for (int k = 0; k < 13; k++) {
+    int pos = (n - 1) * 13 + k;
+    if (pos >= 255)
+      break;
+    uint16_t c = (uint16_t)(e[off[k]] | (e[off[k] + 1] << 8));
+    l->name[pos] = (c == 0 || c == 0xFFFF) ? 0 : (c < 128 ? (char)c : '?');
+  }
+}
+
+static uint8_t lfn_checksum(const uint8_t *short_name) {
+  uint8_t sum = 0;
+  for (int i = 0; i < 11; i++)
+    sum = (uint8_t)(((sum & 1) << 7) + (sum >> 1) + short_name[i]);
+  return sum;
+}
+
+static char up(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
+
+/* `comp` (longitud `len`, sin '/') es el nombre largo `lfn`. */
+static int lfn_equals(const char *lfn, const char *comp, uint32_t len) {
+  uint32_t i = 0;
+  for (; i < len; i++) {
+    if (!lfn[i] || up(lfn[i]) != up(comp[i]))
+      return 0;
+  }
+  return lfn[i] == 0;
+}
+
+/* Una entrada de directorio: 0 = sigue, 1 = casa, -1 = fin del directorio.
+ * Las entradas LFN se van acumulando en `l`. */
+static int fat_entry_match(const uint8_t *e, fat_lfn_t *l, const uint8_t want[11],
+                           const char *comp, uint32_t comp_len, int want_dir) {
+  if (e[0] == 0)
+    return -1;
+  if (e[0] == 0xE5) {
+    lfn_reset(l);
+    return 0;
+  }
+  if ((e[11] & 0x3F) == 0x0F) {
+    lfn_feed(l, e);
+    return 0;
+  }
+  int lfn_ok = l->valid && l->sum == lfn_checksum(e);
+  const char *lfn = l->name;
+  lfn_reset(l);
+  if (e[11] & 0x08) /* etiqueta de volumen */
+    return 0;
+  if (want_dir && !(e[11] & 0x10))
+    return 0;
+  if (compare_mem(e, want, 11) == 0)
+    return 1;
+  return lfn_ok && lfn_equals(lfn, comp, comp_len);
+}
+
 int fat16_find(const char *path_8_3, fat_file_t *out) {
   if (!out || !path_8_3)
     return -1;
 
+  while (*path_8_3 == '/' || *path_8_3 == '\\')
+    path_8_3++;
   const char *slash = 0;
   for (const char *p = path_8_3; *p; p++)
     if (*p == '/')
@@ -213,6 +301,8 @@ int fat16_find(const char *path_8_3, fat_file_t *out) {
 
   uint16_t dir_cluster = 0;
   uint8_t want[11], dir_want[11];
+  const char *comp = path_8_3, *dir_comp = path_8_3;
+  uint32_t comp_len, dir_len = 0;
 
   if (slash) {
     char dirname[32];
@@ -223,39 +313,60 @@ int fat16_find(const char *path_8_3, fat_file_t *out) {
     dirname[dl] = 0;
     fat_make_8_3(dirname, dir_want);
     fat_make_8_3(slash + 1, want);
+    dir_len = dl;
+    comp = slash + 1;
   } else {
     fat_make_8_3(path_8_3, want);
   }
+  comp_len = 0;
+  while (comp[comp_len])
+    comp_len++;
 
   uint32_t root_bytes = g_fat.root_entries * 32u;
   uint32_t root_byte_off = g_fat.root_start_lba * 512u;
   uint8_t buf[512];
-  uint32_t found_cluster = 0;
+  fat_lfn_t lfn;
+  lfn_reset(&lfn);
 
   if (slash) {
+    uint32_t found_cluster = 0;
+    for (uint32_t off = 0; off < root_bytes && !found_cluster; off += 512) {
+      if (fat_blk_read(root_byte_off + off, 512, buf) != 0)
+        return -1;
+      for (int i = 0; i < 16; i++) {
+        uint8_t *e = buf + i * 32;
+        int m = fat_entry_match(e, &lfn, dir_want, dir_comp, dir_len, 1);
+        if (m < 0)
+          return -1;
+        if (m > 0) {
+          found_cluster = *(uint16_t *)(e + 26);
+          break;
+        }
+      }
+    }
+    if (found_cluster == 0)
+      return -1;
+    dir_cluster = (uint16_t)found_cluster;
+    lfn_reset(&lfn);
+  }
+
+  if (dir_cluster == 0) {
     for (uint32_t off = 0; off < root_bytes; off += 512) {
       if (fat_blk_read(root_byte_off + off, 512, buf) != 0)
         return -1;
       for (int i = 0; i < 16; i++) {
         uint8_t *e = buf + i * 32;
-        if (e[0] == 0)
-          goto root_done;
-        if (e[0] == 0xE5)
-          continue;
-        if (e[11] & 0x08)
-          continue;
-        if (e[11] & 0x10) {
-          if (compare_mem(e, dir_want, 11) == 0) {
-            found_cluster = *(uint16_t *)(e + 26);
-            goto root_done;
-          }
+        int m = fat_entry_match(e, &lfn, want, comp, comp_len, 0);
+        if (m < 0)
+          return -1;
+        if (m > 0) {
+          out->first_cluster = *(uint16_t *)(e + 26);
+          out->size = *(uint32_t *)(e + 28);
+          return 0;
         }
       }
     }
-  root_done:
-    if (found_cluster == 0)
-      return -1;
-    dir_cluster = found_cluster;
+    return -1;
   }
 
   uint32_t cur = dir_cluster;
@@ -263,29 +374,6 @@ int fat16_find(const char *path_8_3, fat_file_t *out) {
   uint8_t *cluster_buf = (uint8_t *)0x28000;
 
   for (int depth = 0; depth < 256; depth++) {
-    if (dir_cluster == 0) {
-      uint32_t byte_off = g_fat.root_start_lba * 512u;
-      for (uint32_t off = 0; off < root_bytes; off += 512) {
-        if (fat_blk_read(byte_off + off, 512, buf) != 0)
-          return -1;
-        for (int i = 0; i < 16; i++) {
-          uint8_t *e = buf + i * 32;
-          if (e[0] == 0)
-            return -1;
-          if (e[0] == 0xE5)
-            continue;
-          if (e[11] & 0x08)
-            continue;
-          if (compare_mem(e, want, 11) == 0) {
-            out->first_cluster = *(uint16_t *)(e + 26);
-            out->size = *(uint32_t *)(e + 28);
-            return 0;
-          }
-        }
-      }
-      return -1;
-    }
-
     uint32_t byte_off =
         g_fat.data_start_lba * 512u + (uint32_t)(cur - 2) * cluster_bytes;
     if (fat_blk_read(byte_off, cluster_bytes, cluster_buf) != 0)
@@ -294,20 +382,17 @@ int fat16_find(const char *path_8_3, fat_file_t *out) {
     uint32_t entries = cluster_bytes / 32;
     for (uint32_t i = 0; i < entries; i++) {
       uint8_t *e = cluster_buf + i * 32;
-      if (e[0] == 0)
+      int m = fat_entry_match(e, &lfn, want, comp, comp_len, 0);
+      if (m < 0)
         return -1;
-      if (e[0] == 0xE5)
-        continue;
-      if (e[11] & 0x08)
-        continue;
-      if (compare_mem(e, want, 11) == 0) {
+      if (m > 0) {
         out->first_cluster = *(uint16_t *)(e + 26);
         out->size = *(uint32_t *)(e + 28);
         return 0;
       }
     }
 
-    cur = fat_next_cluster(cur);
+    cur = fat_next_cluster((uint16_t)cur);
     if (cur >= 0xFFF8)
       return -1;
   }
