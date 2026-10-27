@@ -463,6 +463,9 @@ void stage2_main(uint32_t drive, uint32_t e820_addr, uint32_t e820_count,
   copy_mem(kinfo.acpi_rsdp, rsdp, 64);
   kinfo.initrd_base = initrd_phys;
   kinfo.initrd_size = initrd_size;
+  if (cfg.have_cmdline)
+    copy_mem(kinfo.cmdline, cfg.cmdline, sizeof(kinfo.cmdline) - 1);
+  kinfo.cmdline[sizeof(kinfo.cmdline) - 1] = 0;
 
   struct kernel_boot_info *kinfo_final =
       (struct kernel_boot_info *)(BOOT_PARAMS_ADDR + 0x100);

@@ -13,4 +13,13 @@ extern struct driver aur_bus_driver;
 // ps2.aur) y lo pone bajo el supervisor (reinicio automático). 0 = lanzado.
 int aur_bus_launch(const char *path);
 
+// Opcion de arranque aur.skip=VVVV:DDDD[,VVVV:DDDD...] (cmdline= de
+// aurora.conf): aur_bus no reclama esos dispositivos aunque haya un .aur para
+// ellos, y quedan para un driver del kernel (p. ej. uno de Linux sobre la capa
+// LinuxKPI). DDDD puede ser '*' (todo el fabricante). Ejemplo, bochs y
+// virtio-gpu para Linux: cmdline=aur.skip=1234:1111,1af4:1050
+//
+// aur_bus_skip_match() aplica una lista con ese formato (1 si casa).
+int aur_bus_skip_match(const char *list, uint16_t vendor, uint16_t device);
+
 #endif

@@ -22,10 +22,13 @@ struct __attribute__((packed)) kernel_boot_info {
   uint32_t splash_elapsed_ms; /* Tiempo que lleva corriendo la splash */
   uint32_t edid_len;          /* 0 = sin EDID; 128 o 256 */
   uint8_t edid[256];          /* EDID del monitor (EFI_EDID_ACTIVE/DISCOVERED) */
+  /* Linea de comandos del kernel: la clave cmdline= de aurora.conf, terminada
+   * en NUL ("" si no hay). La lee kernel/cmdline.c. */
+  char cmdline[256];
 };
 
 _Static_assert(
-    sizeof(struct kernel_boot_info) == 408,
+    sizeof(struct kernel_boot_info) == 664,
     "kernel_boot_info cambio de tamano: sincroniza con kernel/main.c");
 
 #endif

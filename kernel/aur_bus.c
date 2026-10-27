@@ -1,6 +1,7 @@
 // kernel/aur_bus.c
 #include "aur_bus.h"
 #include "aur_loader.h"
+#include "cmdline.h"
 #include "elf.h"
 #include "klog.h"
 #include "kthread.h"
@@ -326,6 +327,58 @@ int aur_bus_launch(const char *path) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// aur.skip (ver aur_bus.h)
+// ---------------------------------------------------------------------------
+static int aur_hex4(const char *s, const char *end, uint16_t *out) {
+  uint32_t v = 0;
+  int n = 0;
+  for (; s < end; s++, n++) {
+    char c = *s;
+    int d = (c >= '0' && c <= '9')   ? c - '0'
+            : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+            : (c >= 'A' && c <= 'F') ? c - 'A' + 10
+                                     : -1;
+    if (d < 0 || n >= 4)
+      return -1;
+    v = v * 16 + (uint32_t)d;
+  }
+  if (n == 0)
+    return -1;
+  *out = (uint16_t)v;
+  return 0;
+}
+
+int aur_bus_skip_match(const char *list, uint16_t vendor, uint16_t device) {
+  if (!list)
+    return 0;
+  for (const char *p = list; *p;) {
+    const char *e = p;
+    while (*e && *e != ',')
+      e++;
+    const char *colon = p;
+    while (colon < e && *colon != ':')
+      colon++;
+    uint16_t v, d;
+    if (colon < e && aur_hex4(p, colon, &v) == 0 && v == vendor) {
+      if (colon + 2 == e && colon[1] == '*')
+        return 1;
+      if (aur_hex4(colon + 1, e, &d) == 0 && d == device)
+        return 1;
+    }
+    p = *e ? e + 1 : e;
+  }
+  return 0;
+}
+
+// ¿Lo excluye aur.skip de la línea del kernel?
+static int aur_bus_skipped(const pci_device_t *pdev) {
+  char list[128];
+  if (!pdev || !cmdline_get("aur.skip", list, sizeof(list)))
+    return 0;
+  return aur_bus_skip_match(list, pdev->vendor_id, pdev->device_id);
+}
+
 // Función probe: se llama cuando el bus decide probar este driver contra un
 // dispositivo. Solo loguea (INFO) cuando algún .aur coincide; "ningún .aur"
 // es el caso normal de casi todos los dispositivos PCI.
@@ -337,10 +390,15 @@ static int aur_bus_probe(struct device *dev) {
     if (!aur_bus_match_manifest(dev, &g_aur_mods[i].info))
       continue;
 
+    pci_device_t *pdev = (pci_device_t *)dev->priv;
+    if (aur_bus_skipped(pdev)) {
+      LOG_INFO("[AUR-BUS] %s (%04x:%04x): %s no se lanza (aur.skip)", dev->name,
+               pdev->vendor_id, pdev->device_id, g_aur_mods[i].path);
+      return -ENODEV;
+    }
     LOG_INFO("[AUR-BUS] %s -> %s", dev->name, g_aur_mods[i].path);
     // El .aur no puede escribir el config space: habilitar aquí el bus
     // mastering y MEM/IO para que pueda hacer DMA y usar los BARs.
-    pci_device_t *pdev = (pci_device_t *)dev->priv;
     if (pdev) {
       pci_enable_bus_mastering(pdev);
       pci_enable_io_mem(pdev);
@@ -481,3 +539,35 @@ static void test_aur_info_allows_pci(void) {
   TEST_ASSERT(!aur_info_allows_pci(&info, 0x8086, 0x1, 1, 1), "subclase");
 }
 REGISTER_TEST("aur: manifiesto limita BARs mapeables", test_aur_info_allows_pci);
+
+// Línea del kernel y aur.skip: parser de opciones y listas VVVV:DDDD.
+static void test_aur_skip(void) {
+  char v[32];
+  const char *line = "quiet aur.skip=1234:1111,1af4:* loglevel=7 aur.skip2=x";
+  TEST_ASSERT(cmdline_find(line, "aur.skip", v, sizeof(v)) == 1 &&
+                  strcmp(v, "1234:1111,1af4:*") == 0,
+              "aur.skip='%s'", v);
+  TEST_ASSERT(cmdline_find(line, "quiet", v, sizeof(v)) == 1 && v[0] == 0,
+              "opcion sin valor");
+  TEST_ASSERT_EQ(cmdline_find(line, "aur", v, sizeof(v)), 0); // no es prefijo
+  TEST_ASSERT(cmdline_find(line, "loglevel", v, sizeof(v)) == 1 &&
+                  strcmp(v, "7") == 0,
+              "loglevel='%s'", v);
+  TEST_ASSERT_EQ(cmdline_find("", "aur.skip", v, sizeof(v)), 0);
+  TEST_ASSERT(cmdline_find("a=1 a=2", "a", v, sizeof(v)) == 1 &&
+                  strcmp(v, "2") == 0,
+              "gana la ultima");
+  TEST_ASSERT(cmdline_find("k=0123456789", "k", v, 5) == 1 &&
+                  strcmp(v, "0123") == 0,
+              "valor truncado");
+
+  TEST_ASSERT_EQ(aur_bus_skip_match("1234:1111,1af4:*", 0x1234, 0x1111), 1);
+  TEST_ASSERT_EQ(aur_bus_skip_match("1234:1111,1af4:*", 0x1234, 0x1112), 0);
+  TEST_ASSERT_EQ(aur_bus_skip_match("1234:1111,1af4:*", 0x1af4, 0x1050), 1);
+  TEST_ASSERT_EQ(aur_bus_skip_match("1AF4:1050", 0x1af4, 0x1050), 1);
+  TEST_ASSERT_EQ(aur_bus_skip_match("8086:10d3", 0x1af4, 0x1050), 0);
+  TEST_ASSERT_EQ(aur_bus_skip_match("basura,:,12345:1,1234:", 0x1234, 0x0), 0);
+  TEST_ASSERT_EQ(aur_bus_skip_match("", 0x1234, 0x1111), 0);
+  TEST_ASSERT_EQ(aur_bus_skip_match(NULL, 0x1234, 0x1111), 0);
+}
+REGISTER_TEST("aur_bus: linea del kernel y aur.skip", test_aur_skip);

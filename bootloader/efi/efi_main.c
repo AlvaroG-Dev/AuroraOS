@@ -1382,6 +1382,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
   kinfo.initrd_size = (uint64_t)initrd_size;
 
   find_acpi_rsdp(system_table, kinfo.acpi_rsdp);
+  if (cfg.have_cmdline)
+    copy_mem(kinfo.cmdline, cfg.cmdline,
+             CMDLINE_MAX < sizeof(kinfo.cmdline) ? CMDLINE_MAX
+                                                 : sizeof(kinfo.cmdline));
+  kinfo.cmdline[sizeof(kinfo.cmdline) - 1] = 0;
 
   /* ---------------------------------------------------------------------
    * 9. Saltar al kernel. No retorna.
