@@ -7,7 +7,7 @@
 //
 // Carga linuxkpi.kur y lkpi_test_dev.kur con finit_module y los descarga al
 // final. Como la suite del kernel tambien carga y descarga la capa, espera a
-// que termine (su resumen "[TEST] N tests: ..." en /dev/kmsg).
+// que termine (la capa cargada y luego descargada en /proc/modules).
 //
 // Salida: "LKPI-TEST: ALL PASS (n comprobaciones)" o "LKPI-TEST: FAIL ...".
 #include <errno.h>
@@ -69,37 +69,47 @@ static long now_ms(void)
 /* ------------------------------------------------------- preparativos */
 
 /*
- * /dev/kmsg se lee por indice de linea sobre un anillo que rota: una lectura
- * incremental puede saltarse lineas. Se relee el anillo entero cada segundo.
+ * La suite del kernel carga linuxkpi al principio de sus pruebas y la
+ * descarga al final ("linuxkpi: descarga de la capa"). Se espera a verla
+ * cargada y luego descargada en /proc/modules. (No vale buscar el resumen en
+ * /dev/kmsg: se lee por indice sobre un anillo que rota, y cada lectura deja
+ * una linea de depuracion que lo hace rotar mas.) Si a los 180 s no se ha
+ * visto cargada, se da por terminada.
  */
-static int kmsg_has_summary(void)
+static int layer_loaded(void)
 {
-	char line[512];
-	int fd = open("/dev/kmsg", O_RDONLY), found = 0;
+	char buf[4096];
+	int fd = open("/proc/modules", O_RDONLY);
 	ssize_t n;
 
 	if (fd < 0)
 		return -1;
-	while (!found && (n = read(fd, line, sizeof(line) - 1)) > 0) {
-		line[n] = '\0';
-		found = strstr(line, "[TEST] ") && strstr(line, " tests: ") &&
-			strstr(line, "passed");
-	}
+	n = read(fd, buf, sizeof(buf) - 1);
 	close(fd);
-	return found;
+	if (n < 0)
+		return -1;
+	buf[n] = '\0';
+	return !strncmp(buf, "linuxkpi ", 9) || strstr(buf, "\nlinuxkpi ") != NULL;
 }
 
 static void wait_kernel_suite(void)
 {
 	long t0 = now_ms();
-	int r;
+	int seen = 0, r;
 
-	while ((r = kmsg_has_summary()) == 0 && now_ms() - t0 < 900000)
-		sleep(1);
-	if (r < 0)
-		printf("lkpi_test: sin /dev/kmsg, no se espera a la suite\n");
-	else if (!r)
-		printf("lkpi_test: la suite del kernel no termino en 15 min\n");
+	while (now_ms() - t0 < 900000) {
+		r = layer_loaded();
+		if (r < 0) {
+			printf("lkpi_test: sin /proc/modules, no se espera a la suite\n");
+			return;
+		}
+		if (r)
+			seen = 1;
+		else if (seen || now_ms() - t0 > 180000)
+			return;
+		usleep(200000);
+	}
+	printf("lkpi_test: la suite del kernel no termino en 15 min\n");
 }
 
 static int load(const char *path)
