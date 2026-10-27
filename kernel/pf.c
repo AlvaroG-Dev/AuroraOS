@@ -549,8 +549,8 @@ static int handle_page_fault_inner(registers_t *regs) {
 
   uint64_t fixup = uaccess_lookup_fixup(regs->rip);
   if (fixup) {
-    LOG_WARN("[PF] uaccess fixup: pid=%u rip=%p cr2=%p -> fixup=%p",
-             proc ? proc->pid : 0, (void *)regs->rip, (void *)cr2,
+    LOG_WARN("[PF] uaccess fixup: pid=%u rip=%p cr2=%p err=%lx -> fixup=%p",
+             proc ? proc->pid : 0, (void *)regs->rip, (void *)cr2, err,
              (void *)fixup);
     regs->rip = fixup;
     pf_resolved++;

@@ -4378,6 +4378,16 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   }
   LOG_INFO("[EXECVE] pid=%u rc=%lld", proc->pid, (long long)rc);
 
+  // execve descarta el registro rseq: el area vivia en la imagen anterior y la
+  // nueva libc la registra de nuevo. Si no, rseq_exit_to_user() escribiria en
+  // esa direccion (ahora sin VMA o dentro del .text de la libc nueva).
+  task_t *exec_task = sched_current();
+  if (exec_task) {
+    exec_task->rseq_ptr = 0;
+    exec_task->rseq_len = exec_task->rseq_sig = 0;
+    exec_task->rseq_sw = exec_task->rseq_seen = 0;
+  }
+
   registers_t *regs = syscall_current_regs();
   if (!regs) {
     ret = -EINVAL;
