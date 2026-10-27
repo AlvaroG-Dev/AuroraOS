@@ -2685,6 +2685,7 @@ static void fd_init_wqs(file_descriptor_t *fd) {
   wait_queue_init(&fd->read_wq);
   wait_queue_init(&fd->write_wq);
   fd->flock_mode = 0; // [flock]
+  fd->owner = 0;      // [LinuxKPI L4] F_SETOWN
 }
 
 file_descriptor_t *vfs_create_stdio_fd(int stdio_type) {
@@ -2879,6 +2880,14 @@ int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count) {
   file_descriptor_t *f = fd_get_for_proc(proc, fd);
   if (!f)
     return -1;
+  // [LinuxKPI L4] read con el fd: buffer de usuario y offset por puntero.
+  if (f->node && f->node->ops && f->node->ops->read_fd) {
+    mutex_lock(&f->lock);
+    int64_t r = f->node->ops->read_fd(f, buf, count, &f->offset);
+    mutex_unlock(&f->lock);
+    fd_put(f);
+    return r;
+  }
   if (!f->node || !f->node->ops || !f->node->ops->read) {
     fd_put(f);
     return -1;
@@ -2967,6 +2976,13 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
   file_descriptor_t *f = fd_get_for_proc(proc, fd);
   if (!f)
     return -1;
+  if (f->node && f->node->ops && f->node->ops->write_fd) { // [LinuxKPI L4]
+    mutex_lock(&f->lock);
+    int64_t r = f->node->ops->write_fd(f, buf, count, &f->offset);
+    mutex_unlock(&f->lock);
+    fd_put(f);
+    return r;
+  }
   if (!f->node || !f->node->ops || !f->node->ops->write) {
     fd_put(f);
     return -1;
@@ -3042,6 +3058,12 @@ int64_t vfs_pread_for_proc(void *proc_ptr, int fd, void *buf, size_t count,
   file_descriptor_t *f = fd_get_for_proc(proc, fd);
   if (!f)
     return -1;
+  if (f->node && f->node->ops && f->node->ops->read_fd) { // [LinuxKPI L4]
+    uint64_t pos = offset;
+    int64_t r = f->node->ops->read_fd(f, buf, count, &pos);
+    fd_put(f);
+    return r;
+  }
   if (!f->node || !f->node->ops || !f->node->ops->read) {
     fd_put(f);
     return -1;
@@ -3113,6 +3135,12 @@ int64_t vfs_pwrite_for_proc(void *proc_ptr, int fd, const void *buf,
   file_descriptor_t *f = fd_get_for_proc(proc, fd);
   if (!f)
     return -1;
+  if (f->node && f->node->ops && f->node->ops->write_fd) { // [LinuxKPI L4]
+    uint64_t pos = offset;
+    int64_t r = f->node->ops->write_fd(f, buf, count, &pos);
+    fd_put(f);
+    return r;
+  }
   if (!f->node || !f->node->ops || !f->node->ops->write) {
     fd_put(f);
     return -1;
@@ -3179,6 +3207,13 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
   file_descriptor_t *f = fd_get_for_proc(proc, fd);
   if (!f)
     return -1;
+  if (f->node && f->node->ops && f->node->ops->llseek) { // [LinuxKPI L4]
+    mutex_lock(&f->lock);
+    int64_t r = f->node->ops->llseek(f, offset, whence);
+    mutex_unlock(&f->lock);
+    fd_put(f);
+    return r;
+  }
   mutex_lock(&f->lock);
   if (!f->node) {
     mutex_unlock(&f->lock);
@@ -3316,4 +3351,120 @@ int64_t vfs_node_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   if (!node || !node->ops || !node->ops->ioctl)
     return -ENOTTY;
   return node->ops->ioctl(node, req, arg);
+}
+// [LinuxKPI L4] kill_fasync: SIGIO (o la señal pedida) al dueño de F_SETOWN.
+// Contexto de tarea (toma cerrojos de la tabla de procesos).
+int vfs_fd_send_sigio(file_descriptor_t *f, int sig) {
+  if (!f || sig <= 0 || sig > 63)
+    return -EINVAL;
+  int owner = __atomic_load_n(&f->owner, __ATOMIC_RELAXED);
+  if (owner > 0)
+    return process_kill((uint32_t)owner, sig);
+  if (owner < 0) {
+    int n = process_signal_pgrp((uint32_t)(-owner), 1ULL << sig);
+    return n < 0 ? n : 0;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// [LinuxKPI L4] Nodos y fds para la capa (struct file de Linux = nodo VFS).
+// ---------------------------------------------------------------------------
+vfs_node_t *vfs_node_alloc(const char *name, uint32_t vflags, uint32_t mode,
+                           uint32_t rdev, vfs_ops_t *ops, void *priv,
+                           uint64_t size) {
+  vfs_node_t *n = (vfs_node_t *)kzalloc(sizeof(*n));
+  if (!n)
+    return NULL;
+  strncpy(n->name, name ? name : "anon", sizeof(n->name) - 1);
+  n->flags = vflags;
+  n->mode = mode;
+  n->rdev = rdev;
+  n->ops = ops;
+  n->priv = priv;
+  n->size = size;
+  n->ref_count = 1;
+  return n;
+}
+
+void *vfs_node_get_priv(vfs_node_t *n) { return n ? n->priv : NULL; }
+void vfs_node_set_priv(vfs_node_t *n, void *priv) {
+  if (n)
+    n->priv = priv;
+}
+vfs_node_t *vfs_fd_node(file_descriptor_t *f) { return f ? f->node : NULL; }
+int vfs_fd_flags(file_descriptor_t *f) { return f ? f->flags : 0; }
+
+// Hueco reservado (get_unused_fd_flags): un fd que no hace nada hasta que
+// vfs_fd_install_node lo sustituye. Si el usuario lo cierra antes, se va.
+static vfs_ops_t reserved_ops;
+static vfs_node_t reserved_node = {.name = "reserved", .ops = &reserved_ops,
+                                   .ref_count = 1 << 30};
+
+static int fd_is_reserved(file_descriptor_t *f) {
+  return f && f->node == &reserved_node;
+}
+
+int vfs_fd_reserve(int cloexec) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EBADF;
+  file_descriptor_t *f = (file_descriptor_t *)kzalloc(sizeof(*f));
+  if (!f)
+    return -ENOMEM;
+  f->node = &reserved_node;
+  f->ref_count = 1;
+  fd_init_wqs(f);
+  __atomic_fetch_add(&reserved_node.ref_count, 1, __ATOMIC_RELAXED);
+  int fd = vfs_fd_install_ref(proc, f, cloexec);
+  if (fd < 0) {
+    __atomic_fetch_sub(&reserved_node.ref_count, 1, __ATOMIC_RELAXED);
+    kfree(f);
+  }
+  return fd;
+}
+
+// Sustituye el hueco `fd` por un fd nuevo sobre `node` (consume la referencia
+// del llamante al nodo). -EBADF si el hueco ya no esta (el usuario lo cerro).
+int vfs_fd_install_node(int fd, vfs_node_t *node, int flags) {
+  process_t *proc = process_current();
+  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !node)
+    return -EBADF;
+  file_descriptor_t *nf = (file_descriptor_t *)kzalloc(sizeof(*nf));
+  if (!nf)
+    return -ENOMEM;
+  nf->node = node;
+  nf->flags = flags & ~0x80000; // O_CLOEXEC va en el bitmap del proceso
+  nf->ref_count = 1;
+  fd_init_wqs(nf);
+  mutex_lock(&proc->fd_lock);
+  file_descriptor_t *old = proc->fds[fd];
+  if (!fd_is_reserved(old)) {
+    mutex_unlock(&proc->fd_lock);
+    kfree(nf);
+    return -EBADF;
+  }
+  proc->fds[fd] = nf;
+  mutex_unlock(&proc->fd_lock);
+  fd_put(old);
+  return 0;
+}
+
+void vfs_fd_unreserve(int fd) {
+  process_t *proc = process_current();
+  if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS)
+    return;
+  mutex_lock(&proc->fd_lock);
+  file_descriptor_t *old = proc->fds[fd];
+  if (!fd_is_reserved(old)) {
+    mutex_unlock(&proc->fd_lock);
+    return;
+  }
+  proc->fds[fd] = NULL;
+  mutex_unlock(&proc->fd_lock);
+  fd_put(old);
+}
+
+file_descriptor_t *vfs_fd_get_current(int fd) {
+  return fd_get_for_proc(process_current(), fd);
 }

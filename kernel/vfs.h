@@ -62,6 +62,8 @@
 typedef struct vfs_node vfs_node_t;
 typedef struct vfs_fs_ops vfs_fs_ops_t;
 struct process;   // [FASE 4.3] forward-decl para vfs_ops.mmap
+struct file_descriptor; // [LinuxKPI L4] vfs_ops.*_fd
+struct vma;             // [LinuxKPI L4] vfs_ops.mmap_dev
 
 // ---------------------------------------------------------------------------
 // [4.1] statfs: información del FS montado en un path.
@@ -200,6 +202,27 @@ typedef struct vfs_ops {
   // objeto (estable mientras el nodo viva; el VMA mantiene una ref al nodo).
   // -errno si esta fuera de rango (el proceso muere, como un SIGBUS).
   int (*get_page)(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out);
+
+  // [LinuxKPI L4] Operaciones con el fd (el `struct file` de Linux). Todas
+  // opcionales; si existen, el VFS las prefiere a las de nodo:
+  //   read_fd/write_fd: `ubuf` es el puntero de USUARIO tal cual (el VFS no
+  //     trocea ni copia) y `*pos` el offset del fd, que la operación avanza
+  //     como quiera (pread/pwrite pasan una copia). Bytes, 0 o -errno.
+  //   llseek: nuevo offset (y lo guarda en f->offset) o -errno.
+  //   setfl: F_SETFL antes de aplicar `newflags` (O_NONBLOCK, O_ASYNC); si
+  //     devuelve error, los flags no cambian. Aquí se engancha fasync.
+  //   mmap_dev: mmap() del fichero. El VFS ya creó un VMA_DEV con referencia
+  //     al fd (vma->file_fd, file_offset = offset); la operación rellena
+  //     vma->dev_ops/dev_priv y mapea ahora o en el fallo de página. Si
+  //     devuelve error el VFS deshace el VMA (sin llamar a dev_ops->close).
+  int64_t (*read_fd)(struct file_descriptor *f, void *ubuf, size_t n,
+                     uint64_t *pos);
+  int64_t (*write_fd)(struct file_descriptor *f, const void *ubuf, size_t n,
+                      uint64_t *pos);
+  int64_t (*llseek)(struct file_descriptor *f, int64_t off, int whence);
+  int (*setfl)(struct file_descriptor *f, int newflags);
+  int (*mmap_dev)(struct file_descriptor *f, struct process *proc,
+                  struct vma *vma, uint64_t prot, uint64_t flags);
 } vfs_ops_t;
 
 struct vfs_node {
@@ -275,6 +298,9 @@ typedef struct file_descriptor {
   // Al cerrar el fd no hay cleanup especial: el próximo flock sobre el
   // mismo inode ignora entradas con flock_mode == 0.
   int flock_mode;
+  // [LinuxKPI L4] F_SETOWN: pid (> 0) o grupo (< 0) que recibe SIGIO con
+  // O_ASYNC; 0 = nadie.
+  int owner;
   wait_queue_t read_wq;
   wait_queue_t write_wq;
 } file_descriptor_t;
@@ -426,10 +452,28 @@ int vfs_open_nofollow_for_proc(void *proc_ptr, const char *path, int flags);
 file_descriptor_t *vfs_fd_get_ref(void *proc_ptr, int fd);
 void vfs_fd_put_ref(file_descriptor_t *f);
 int vfs_fd_install_ref(void *proc_ptr, file_descriptor_t *f, int cloexec);
+
+// [LinuxKPI L4] Nodos y fds para la capa (vfs.c). vfs_node_alloc da un nodo
+// con ref_count 1 (se suelta con vfs_node_free; a 0 llama a ops->close).
+vfs_node_t *vfs_node_alloc(const char *name, uint32_t vflags, uint32_t mode,
+                           uint32_t rdev, vfs_ops_t *ops, void *priv,
+                           uint64_t size);
+void *vfs_node_get_priv(vfs_node_t *n);
+void vfs_node_set_priv(vfs_node_t *n, void *priv);
+vfs_node_t *vfs_fd_node(file_descriptor_t *f);
+int vfs_fd_flags(file_descriptor_t *f);
+// fd del proceso actual con referencia (soltar con vfs_fd_put_ref), o NULL.
+file_descriptor_t *vfs_fd_get_current(int fd);
+// get_unused_fd_flags/fd_install/put_unused_fd en el proceso actual.
+int vfs_fd_reserve(int cloexec);
+int vfs_fd_install_node(int fd, vfs_node_t *node, int flags);
+void vfs_fd_unreserve(int fd);
 int64_t vfs_read_for_proc(void *proc_ptr, int fd, void *buf, size_t count);
 int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
                            size_t count);
 int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence);
+// [LinuxKPI L4] Señal (SIGIO) al dueño de F_SETOWN del fd. 0 o -errno.
+int vfs_fd_send_sigio(file_descriptor_t *f, int sig);
 int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st);
 
 int vfs_wait_readable(void *proc_ptr, int fd);

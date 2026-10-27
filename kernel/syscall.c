@@ -3435,10 +3435,18 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     return (int64_t)f->flags;
   case F_SETFL: {
     int newflags = (int)arg;
-    if (newflags & LINUX_O_NONBLOCK)
-      f->flags |= LINUX_O_NONBLOCK;
-    else
-      f->flags &= ~LINUX_O_NONBLOCK;
+    // [LinuxKPI L4] O_ASYNC (SIGIO al dueño de F_SETOWN): solo en ficheros
+    // que lo implementan (setfl); el resto lo ignora, como antes.
+    int want = (f->flags & ~(LINUX_O_NONBLOCK | LINUX_O_ASYNC)) |
+               (newflags & (LINUX_O_NONBLOCK | LINUX_O_ASYNC));
+    if (f->node && f->node->ops && f->node->ops->setfl) {
+      int rc = f->node->ops->setfl(f, want);
+      if (rc < 0)
+        return rc;
+    } else {
+      want &= ~LINUX_O_ASYNC;
+    }
+    f->flags = want;
 
     // Si el fd es un socket, propagar el flag al socket_t.
     socket_t *s = inet_socket_from_fd(proc, kfd);
@@ -3448,6 +3456,11 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
       unix_set_nonblock(proc, kfd, (newflags & LINUX_O_NONBLOCK) != 0);
     return 0;
   }
+  case 8: /* F_SETOWN */
+    f->owner = (int)arg;
+    return 0;
+  case 9: /* F_GETOWN */
+    return f->owner;
   case 1033: /* F_ADD_SEALS */
     if (!f->node || !memfd_is_node(f->node))
       return -EINVAL;
