@@ -69,6 +69,11 @@ typedef struct {
   // `inflight_bio` es la señal de "hay un async en curso". Cuando está
   // a NULL, o no hay async, o el async ya terminó.
   struct bio *inflight_bio;
+  // Disco y tamano de sector del bio en vuelo, copiados en submit: si el bio
+  // va a una particion, part_submit() le devuelve su bdev (la particion) en
+  // cuanto submit() retorna, asi que la IRQ no puede leerlos de bio->bdev.
+  struct ata_device *inflight_dev;
+  uint32_t inflight_sector_size;
   uint64_t xfer_lba;
   uint32_t xfer_left;
   uint8_t *xfer_buf;

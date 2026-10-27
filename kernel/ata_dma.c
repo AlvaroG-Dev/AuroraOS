@@ -515,6 +515,8 @@ int ata_dma_submit_async(struct ata_device *dev, struct bio *bio) {
       return -EBUSY;
     }
     dma->inflight_bio = bio;
+    dma->inflight_dev = dev;
+    dma->inflight_sector_size = bio->bdev->sector_size;
     dma->xfer_state = XFS_FLUSHING;
     dma->last_cmd_tick = sched_get_ticks();
     spin_unlock_irqrestore(&dma->lock, flags);
@@ -542,6 +544,8 @@ int ata_dma_submit_async(struct ata_device *dev, struct bio *bio) {
     return -EBUSY;
   }
   dma->inflight_bio = bio;
+  dma->inflight_dev = dev;
+  dma->inflight_sector_size = bio->bdev->sector_size;
   dma->xfer_lba = bio->lba;
   dma->xfer_buf = (uint8_t *)bio->buf;
   dma->xfer_left = bio->count;
@@ -581,7 +585,7 @@ static void ata_dma_handle_async_irq(ata_dma_state_t *dma, int ch_idx) {
     spin_unlock_irqrestore(&dma->lock, flags);
     return;
   }
-  dev = (struct ata_device *)bio->bdev->private_data;
+  dev = dma->inflight_dev; // no bio->bdev: ver ata_dma.h
 
   int state = dma->xfer_state;
 
@@ -603,7 +607,7 @@ static void ata_dma_handle_async_irq(ata_dma_state_t *dma, int ch_idx) {
       uint32_t consumed = dma->xfer_chunk_sectors;
       dma->xfer_lba += consumed;
       dma->xfer_left -= consumed;
-      dma->xfer_buf += (uint64_t)consumed * bio->bdev->sector_size;
+      dma->xfer_buf += (uint64_t)consumed * dma->inflight_sector_size;
 
       if (dma->xfer_left > 0) {
         need_next_chunk = 1;
