@@ -588,6 +588,49 @@ static void tests_thread(void) {
 }
 
 // ===========================================================================
+// Montajes del arranque: el primer disco FAT32 en /data y el primer CD (2048
+// bytes por sector) con ISO9660 en /cdrom. Cada uno solo una vez.
+// ===========================================================================
+static int g_data_mounted, g_cdrom_mounted;
+
+static void mount_boot_media(void) {
+  for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || b->is_partition || b->is_read_only)
+      continue;
+    if (fat32_mount_bdev(b->name, "/data") == 0) {
+      LOG_INFO("[INIT] Montado %s en /data", b->name);
+      g_data_mounted = 1;
+    }
+  }
+  for (int i = 0; i < blk_count() && !g_cdrom_mounted; i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || b->is_partition || b->sector_size != 2048)
+      continue;
+    if (iso9660_mount_bdev(b->name, "/cdrom") == 0) {
+      LOG_INFO("[INIT] Montado %s en /cdrom", b->name);
+      g_cdrom_mounted = 1;
+    }
+  }
+}
+
+// Si los drivers legacy tardan mas que la espera de system_init_task (la
+// deteccion ATA/ATAPI llega a 18 s con -smp 4), los discos que registran
+// despues no se montaban: /cdrom quedaba sin montar a veces (la prueba
+// "iso9660: listado de /cdrom" se omitia). Esto espera a que acaben y monta
+// lo que falte.
+static int late_mount_task(void *arg) {
+  (void)arg;
+  if (wait_for_completion_timeout(&g_drivers_done, 60000) == 0) {
+    LOG_WARN("[INIT] los drivers no terminaron: sin montaje tardio");
+    return 0;
+  }
+  part_scan_all();
+  mount_boot_media();
+  return 0;
+}
+
+// ===========================================================================
 // system_init_task
 //
 // PID 0 real: arranca como primer task de kernel, coordina los workers y
@@ -645,8 +688,10 @@ static void system_init_task(void) {
   // 8. Subsistemas críticos.
   if (wait_for_completion_timeout(&g_vfs_done, 10000) == 0)
     LOG_WARN("[INIT] VFS timeout");
-  if (wait_for_completion_timeout(&g_drivers_done, 15000) == 0)
-    LOG_WARN("[INIT] Drivers timeout");
+  int drivers_ok = wait_for_completion_timeout(&g_drivers_done, 15000) != 0;
+  if (!drivers_ok)
+    LOG_WARN("[INIT] Drivers timeout (lo que registren despues se montara "
+             "al terminar)");
   if (wait_for_completion_timeout(&g_smp_done, 5000) == 0)
     LOG_WARN("[INIT] SMP timeout");
   else
@@ -670,24 +715,9 @@ static void system_init_task(void) {
   blkp_boot_scanned();
   klog_boot_ok();
 
-  for (int i = 0; i < blk_count(); i++) {
-    block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition || b->is_read_only)
-      continue;
-    if (fat32_mount_bdev(b->name, "/data") == 0) {
-      LOG_INFO("[INIT] Montado %s en /data", b->name);
-      break;
-    }
-  }
-  for (int i = 0; i < blk_count(); i++) {
-    block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition || b->sector_size != 2048)
-      continue;
-    if (iso9660_mount_bdev(b->name, "/cdrom") == 0) {
-      LOG_INFO("[INIT] Montado %s en /cdrom", b->name);
-      break;
-    }
-  }
+  mount_boot_media();
+  if (!drivers_ok)
+    kthread_run(late_mount_task, NULL, "late-mount");
 
   // 10. Reveal de splash + compositor.
   // Sin framebuffer del firmware (GOP solo-Blt: virtio-gpu sin VGA...) se
