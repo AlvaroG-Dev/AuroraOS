@@ -12,32 +12,34 @@ Indice: 6931 cabeceras de Linux, 393977 nombres definidos. Un simbolo cuenta si 
 |---|---:|---:|---:|
 | `bochs` | 1 | 829 | 180 |
 | `simpledrm` | 3 | 1567 | 233 |
-| `virtio-gpu` | 16 | 6511 | 590 |
+| `virtio-gpu` | 26 | 14373 | 933 |
 | `i915` | 726 | 341919 | 3772 |
 | `xe` | 468 | 113746 | 1783 |
 | `amdgpu` | 1985 | 1196265 | 2941 |
 | `nvidia` | 215 | 90262 | 1679 |
 
+`virtio-gpu` incluye el nucleo virtio que necesita (`drivers/virtio/`: bus, anillo, transporte PCI moderno y legado, `virtio_dma_buf`): es quien llama a PCI, a las IRQ y al modelo de dispositivos, y se compila tambien desde las fuentes de Linux.
+
 ## Simbolos distintos por nivel y driver
 
 | Nivel | `bochs` | `simpledrm` | `virtio-gpu` | `i915` | `xe` | `amdgpu` | `nvidia` | Union | de ellos funciones (no inline) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| K0 Base C | 14 | 15 | 43 | 304 | 253 | 242 | 150 | **453** | 35 |
-| K1 Memoria (sin DMA) | 14 | 18 | 38 | 254 | 154 | 120 | 217 | **459** | 94 |
-| K1-dma Memoria: DMA, dma-buf, IOMMU | 0 | 1 | 35 | 44 | 37 | 50 | 71 | **104** | 35 |
-| K2 Sincronizacion, tiempo, trabajo diferido | 0 | 0 | 32 | 311 | 185 | 173 | 161 | **452** | 96 |
-| K3 Estructuras y utilidades | 3 | 9 | 27 | 255 | 157 | 179 | 118 | **405** | 101 |
-| K4 Modelo de dispositivos | 11 | 31 | 16 | 98 | 74 | 100 | 93 | **235** | 90 |
-| K5 PCI, IRQ, energia | 13 | 3 | 40 | 137 | 122 | 236 | 137 | **425** | 153 |
-| K6 Firmware, I2C, ACPI, backlight, debugfs... | 4 | 14 | 4 | 208 | 81 | 207 | 194 | **501** | 137 |
+| K0 Base C | 14 | 15 | 83 | 304 | 253 | 242 | 150 | **455** | 35 |
+| K1 Memoria (sin DMA) | 14 | 18 | 57 | 254 | 154 | 120 | 217 | **464** | 95 |
+| K1-dma Memoria: DMA, dma-buf, IOMMU | 0 | 1 | 51 | 44 | 37 | 50 | 71 | **108** | 35 |
+| K2 Sincronizacion, tiempo, trabajo diferido | 0 | 0 | 46 | 311 | 185 | 173 | 161 | **459** | 97 |
+| K3 Estructuras y utilidades | 3 | 9 | 31 | 255 | 157 | 179 | 118 | **405** | 101 |
+| K4 Modelo de dispositivos | 11 | 31 | 49 | 98 | 74 | 100 | 93 | **251** | 100 |
+| K5 PCI, IRQ, energia | 13 | 3 | 253 | 137 | 122 | 236 | 137 | **606** | 157 |
+| K6 Firmware, I2C, ACPI, backlight, debugfs... | 4 | 14 | 5 | 208 | 81 | 207 | 194 | **501** | 137 |
 | K7 Fences/sync | 0 | 0 | 36 | 81 | 62 | 65 | 33 | **103** | 44 |
 | K8 Entorno de usuario / VFS | 0 | 0 | 3 | 71 | 42 | 42 | 69 | **137** | 52 |
-| K9 Miscelaneo (stubs: trace, kasan, hmm...) | 7 | 3 | 21 | 101 | 66 | 68 | 76 | **193** | 66 |
+| K9 Miscelaneo (stubs: trace, kasan, hmm...) | 7 | 3 | 24 | 101 | 66 | 68 | 76 | **194** | 67 |
 | K9-drm DRM core y helpers (shim propio con la opcion A) | 114 | 138 | 214 | 1616 | 288 | 960 | 342 | **2326** | 647 |
 | K9-ttm TTM, drm_buddy, drm_exec, gpuvm | 0 | 0 | 0 | 70 | 157 | 106 | 0 | **190** | 95 |
 | K9-sched drm/gpu_scheduler | 0 | 0 | 0 | 0 | 24 | 42 | 0 | **46** | 27 |
 | K? Sin clasificar | 0 | 1 | 2 | 14 | 41 | 32 | 18 | **77** | 15 |
-| **Total** | 180 | 233 | 511 | 3564 | 1743 | 2622 | 1679 | **6106** | 1687 |
+| **Total** | 180 | 233 | 854 | 3564 | 1743 | 2622 | 1679 | **6322** | 1704 |
 
 Union acumulada siguiendo el orden de trabajo (cuanto anade cada driver a lo que ya necesitan los anteriores):
 
@@ -45,27 +47,27 @@ Union acumulada siguiendo el orden de trabajo (cuanto anade cada driver a lo que
 |---|---:|---:|---:|
 | `bochs` | 180 | 180 | 114 |
 | `simpledrm` | 124 | 304 | 51 |
-| `virtio-gpu` | 390 | 694 | 130 |
-| `i915` | 3187 | 3881 | 1486 |
-| `xe` | 678 | 4559 | 175 |
-| `amdgpu` | 891 | 5450 | 330 |
-| `nvidia` | 656 | 6106 | 40 |
+| `virtio-gpu` | 718 | 1022 | 130 |
+| `i915` | 3106 | 4128 | 1486 |
+| `xe` | 668 | 4796 | 175 |
+| `amdgpu` | 876 | 5672 | 330 |
+| `nvidia` | 650 | 6322 | 40 |
 
 ## Por tipo de definicion
 
 | Nivel | func | inline | macro | type | enumconst | var |
 |---|---:|---:|---:|---:|---:|---:|
-| K0 | 35 | 75 | 299 | 39 | 3 | 2 |
-| K1 | 94 | 109 | 206 | 23 | 24 | 3 |
-| K1-dma | 35 | 32 | 23 | 11 | 3 | 0 |
-| K2 | 96 | 121 | 180 | 36 | 12 | 7 |
+| K0 | 35 | 75 | 301 | 39 | 3 | 2 |
+| K1 | 95 | 109 | 210 | 23 | 24 | 3 |
+| K1-dma | 35 | 35 | 23 | 12 | 3 | 0 |
+| K2 | 97 | 124 | 180 | 39 | 12 | 7 |
 | K3 | 101 | 113 | 171 | 19 | 1 | 0 |
-| K4 | 90 | 32 | 61 | 34 | 16 | 2 |
-| K5 | 153 | 52 | 144 | 36 | 38 | 2 |
+| K4 | 100 | 34 | 62 | 37 | 16 | 2 |
+| K5 | 157 | 82 | 262 | 65 | 38 | 2 |
 | K6 | 137 | 39 | 182 | 75 | 63 | 5 |
 | K7 | 44 | 31 | 7 | 12 | 8 | 1 |
 | K8 | 52 | 21 | 33 | 25 | 5 | 1 |
-| K9 | 66 | 19 | 64 | 31 | 12 | 1 |
+| K9 | 67 | 19 | 64 | 31 | 12 | 1 |
 | K9-drm | 647 | 147 | 1203 | 165 | 163 | 1 |
 | K9-ttm | 95 | 20 | 30 | 30 | 14 | 1 |
 | K9-sched | 27 | 1 | 2 | 8 | 8 | 0 |
@@ -77,86 +79,87 @@ Formula (orientativa, no medida): funcion 15 lineas, inline 6, tipo 8, macro 2, 
 
 | Nivel | QEMU (bochs, simpledrm, virtio-gpu) | Todos | kLOC QEMU | kLOC todos |
 |---|---:|---:|---:|---:|
-| K0 | 50 | 453 | 0.2 | 1.9 |
-| K1 | 60 | 459 | 0.4 | 2.7 |
-| K1-dma | 35 | 104 | 0.3 | 0.9 |
-| K2 | 32 | 452 | 0.2 | 2.8 |
-| K3 | 32 | 405 | 0.1 | 2.7 |
-| K4 | 47 | 235 | 0.3 | 2.0 |
-| K5 | 53 | 425 | 0.4 | 3.2 |
-| K6 | 22 | 501 | 0.2 | 3.3 |
+| K0 | 89 | 455 | 0.4 | 1.9 |
+| K1 | 78 | 464 | 0.4 | 2.7 |
+| K1-dma | 51 | 108 | 0.4 | 0.9 |
+| K2 | 46 | 459 | 0.3 | 2.9 |
+| K3 | 36 | 405 | 0.2 | 2.7 |
+| K4 | 74 | 251 | 0.6 | 2.1 |
+| K5 | 260 | 606 | 1.4 | 3.9 |
+| K6 | 23 | 501 | 0.2 | 3.3 |
 | K7 | 36 | 103 | 0.3 | 1.0 |
 | K8 | 3 | 137 | 0.0 | 1.2 |
-| K9 | 26 | 193 | 0.1 | 1.5 |
+| K9 | 28 | 194 | 0.1 | 1.5 |
 | K9-drm | 295 | 2326 | 2.4 | 14.5 |
 | K9-ttm | 0 | 190 | 0.0 | 1.9 |
 | K9-sched | 0 | 46 | 0.0 | 0.5 |
 | K? | 3 | 77 | 0.0 | 0.5 |
-| **Total** | | | **5.0** | **40.4** |
+| **Total** | | | **6.8** | **41.4** |
 
 ## Lista por nivel (los 40 mas usados; ordenados por numero de drivers y usos)
 
 Columnas por driver: numero de usos. `-` = no lo usa.
 
-### K0 — Base C (453 simbolos)
+### K0 — Base C (455 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `size_t` | type | `linux/types` | 2 | 16 | 7 | 270 | 295 | 311 | 551 |
-| `ENOMEM` | macro | `asm-generic/errno-base` | 2 | 7 | 37 | 219 | 162 | 493 | 145 |
-| `container_of` | macro | `linux/container_of` | 1 | 2 | 12 | 273 | 185 | 366 | 47 |
-| `IS_ERR` | inline | `linux/err` | 1 | 9 | 15 | 489 | 207 | 63 | 82 |
-| `PTR_ERR` | inline | `linux/err` | 1 | 4 | 10 | 337 | 164 | 54 | 44 |
-| `ENODEV` | macro | `asm-generic/errno-base` | 4 | 1 | 7 | 269 | 67 | 98 | 61 |
-| `ERR_PTR` | inline | `linux/err` | - | 27 | 11 | 297 | 253 | 18 | 44 |
-| `WARN_ON` | macro | `asm-generic/bug` | 2 | - | 10 | 103 | 23 | 174 | 132 |
-| `IS_ENABLED` | macro | `linux/kconfig` | 2 | - | 1 | 200 | 129 | 26 | 20 |
+| `size_t` | type | `linux/types` | 2 | 16 | 27 | 270 | 295 | 311 | 551 |
+| `ENOMEM` | macro | `asm-generic/errno-base` | 2 | 7 | 67 | 219 | 162 | 493 | 145 |
+| `container_of` | macro | `linux/container_of` | 1 | 2 | 16 | 273 | 185 | 366 | 47 |
+| `IS_ERR` | inline | `linux/err` | 1 | 9 | 22 | 489 | 207 | 63 | 82 |
+| `PTR_ERR` | inline | `linux/err` | 1 | 4 | 14 | 337 | 164 | 54 | 44 |
+| `ENODEV` | macro | `asm-generic/errno-base` | 4 | 1 | 24 | 269 | 67 | 98 | 61 |
+| `__iomem` | macro | `linux/compiler_types` | 2 | 2 | 28 | 86 | 10 | 59 | 1 |
+| `ERR_PTR` | inline | `linux/err` | - | 27 | 21 | 297 | 253 | 18 | 44 |
+| `WARN_ON` | macro | `asm-generic/bug` | 2 | - | 14 | 103 | 23 | 174 | 132 |
+| `IS_ENABLED` | macro | `linux/kconfig` | 2 | - | 3 | 200 | 129 | 26 | 20 |
 | `uint32_t` | type | `linux/types` | 1 | 1 | 171 | 1 | 7 | - | 132 |
-| `EIO` | macro | `asm-generic/errno-base` | 1 | - | 1 | 112 | 53 | 79 | 29 |
-| `EBUSY` | macro | `asm-generic/errno-base` | 2 | - | 3 | 52 | 45 | 74 | 29 |
-| `__iomem` | macro | `linux/compiler_types` | 2 | 2 | - | 86 | 10 | 59 | 1 |
-| `EINVAL` | macro | `asm-generic/errno-base` | - | 10 | 53 | - | 282 | 2773 | 198 |
+| `EIO` | macro | `asm-generic/errno-base` | 1 | - | 9 | 112 | 53 | 79 | 29 |
+| `EBUSY` | macro | `asm-generic/errno-base` | 2 | - | 11 | 52 | 45 | 74 | 29 |
+| `EINVAL` | macro | `asm-generic/errno-base` | - | 10 | 72 | - | 282 | 2773 | 198 |
+| `ssize_t` | type | `linux/types` | - | - | 6 | 170 | 146 | 436 | 15 |
+| `unlikely` | macro | `linux/compiler` | - | - | 21 | 309 | 174 | 129 | 19 |
+| `dev_info` | macro | `linux/dev_printk` | - | - | 1 | 3 | 4 | 549 | 2 |
+| `offsetof` | macro | `linux/stddef` | - | - | 49 | 32 | 22 | 329 | 1 |
+| `EOPNOTSUPP` | macro | `asm-generic/errno` | - | - | 10 | 32 | 38 | 307 | 26 |
+| `dev_warn` | macro | `linux/dev_printk` | - | - | 8 | 2 | 2 | 322 | 1 |
 | `ETIMEDOUT` | macro | `asm-generic/errno` | - | - | 1 | 46 | 31 | 168 | 3 |
 | `EFAULT` | macro | `asm-generic/errno-base` | - | - | 5 | 100 | 47 | 74 | 17 |
-| `ENOENT` | macro | `asm-generic/errno-base` | - | - | 6 | 65 | 46 | 96 | 14 |
+| `BUILD_BUG_ON` | macro | `linux/build_bug` | - | - | 33 | 152 | 44 | 2 | 5 |
+| `ENOENT` | macro | `asm-generic/errno-base` | - | - | 11 | 65 | 46 | 96 | 14 |
+| `resource_size_t` | type | `linux/types` | - | - | 2 | 131 | 29 | 10 | 11 |
 | `ALIGN` | macro | `linux/linkage` | - | - | 1 | 31 | 24 | 120 | 4 |
+| `sprintf` | func | `linux/sprintf` | - | - | 2 | 3 | 8 | 164 | 1 |
+| `dma_addr_t` | type | `linux/types` | - | - | 36 | 66 | 9 | 17 | 7 |
+| `ENOSPC` | macro | `asm-generic/errno-base` | - | - | 5 | 63 | 29 | 24 | 4 |
 | `fallthrough` | macro | `linux/compiler_attributes` | - | - | 1 | 88 | 12 | 22 | 2 |
-| `ENOSPC` | macro | `asm-generic/errno-base` | - | - | 1 | 63 | 29 | 24 | 4 |
-| `WRITE_ONCE` | macro | `asm-generic/rwonce` | - | - | 1 | 57 | 30 | 11 | 3 |
+| `snprintf` | func | `linux/sprintf` | - | - | 4 | 30 | 21 | 54 | 14 |
+| `ktime_t` | type | `linux/types` | - | - | 2 | 67 | 21 | 30 | 2 |
+| `BIT_ULL` | macro | `vdso/bits` | - | - | 18 | 40 | 35 | 17 | 3 |
+| `WRITE_ONCE` | macro | `asm-generic/rwonce` | - | - | 6 | 57 | 30 | 11 | 3 |
 | `msecs_to_jiffies` | inline | `linux/jiffies` | - | - | 1 | 25 | 15 | 57 | 4 |
-| `dma_addr_t` | type | `linux/types` | - | - | 1 | 66 | 9 | 17 | 7 |
-| `BIT_ULL` | macro | `vdso/bits` | - | - | 1 | 40 | 35 | 17 | 3 |
-| `WARN_ON_ONCE` | macro | `asm-generic/bug` | - | - | 2 | 19 | 8 | 50 | 6 |
-| `BUG_ON` | macro | `asm-generic/bug` | - | - | 2 | 5 | 1 | 34 | 22 |
+| `likely` | macro | `linux/compiler` | - | - | 1 | 59 | 6 | 15 | 12 |
+| `WARN_ON_ONCE` | macro | `asm-generic/bug` | - | - | 8 | 19 | 8 | 50 | 6 |
+| `BUG_ON` | macro | `asm-generic/bug` | - | - | 25 | 5 | 1 | 34 | 22 |
+| `EPERM` | macro | `asm-generic/errno-base` | - | - | 2 | 20 | 10 | 39 | 12 |
 | `UINT_MAX` | macro | `vdso/limits` | - | - | 1 | 12 | 1 | 41 | 5 |
-| `IS_ERR_OR_NULL` | inline | `linux/err` | - | 1 | - | 19 | 8 | 3 | 23 |
-| `ERR_CAST` | inline | `linux/err` | - | 4 | 2 | 32 | 10 | 1 | - |
-| `uint64_t` | type | `linux/types` | - | - | 22 | - | 11 | 2771 | 102 |
-| `ssize_t` | type | `linux/types` | - | - | - | 170 | 146 | 436 | 15 |
-| `unlikely` | macro | `linux/compiler` | - | - | - | 309 | 174 | 129 | 19 |
-| `dev_info` | macro | `linux/dev_printk` | - | - | - | 3 | 4 | 549 | 2 |
-| `EOPNOTSUPP` | macro | `asm-generic/errno` | - | - | - | 32 | 38 | 307 | 26 |
-| `offsetof` | macro | `linux/stddef` | - | - | - | 32 | 22 | 329 | 1 |
-| `struct list_head` | type | `linux/types` | - | - | 10 | 135 | - | 139 | 47 |
-| `dev_warn` | macro | `linux/dev_printk` | - | - | - | 2 | 2 | 322 | 1 |
-| `__user` | macro | `linux/compiler_types` | - | - | - | 99 | 65 | 112 | 8 |
-| `GENMASK` | macro | `linux/bits` | - | - | - | 54 | 115 | 29 | 6 |
-| `BUILD_BUG_ON` | macro | `linux/build_bug` | - | - | - | 152 | 44 | 2 | 5 |
 
-### K1 — Memoria (sin DMA) (459 simbolos)
+### K1 — Memoria (sin DMA) (464 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `kfree` | func | `linux/slab` | - | 1 | 26 | 332 | 149 | 1361 | 74 |
-| `GFP_KERNEL` | macro | `linux/gfp_types` | - | 8 | 31 | 266 | 170 | 1118 | 35 |
-| `kzalloc` | macro | `linux/slab` | - | 2 | 16 | 111 | 64 | 891 | 8 |
-| `IORESOURCE_MEM` | macro | `linux/ioport` | 2 | 1 | - | 4 | 4 | 15 | 6 |
-| `vmap` | func | `linux/vmalloc` | - | - | 2 | 4 | 129 | 2 | 4 |
-| `kmalloc` | macro | `linux/slab` | - | - | 4 | 42 | 19 | 29 | 22 |
+| `IORESOURCE_MEM` | macro | `linux/ioport` | 2 | 1 | 4 | 4 | 4 | 15 | 6 |
+| `kfree` | func | `linux/slab` | - | 1 | 65 | 332 | 149 | 1361 | 74 |
+| `GFP_KERNEL` | macro | `linux/gfp_types` | - | 8 | 64 | 266 | 170 | 1118 | 35 |
+| `kzalloc` | macro | `linux/slab` | - | 2 | 30 | 111 | 64 | 891 | 8 |
+| `vmap` | func | `linux/vmalloc` | - | - | 3 | 4 | 129 | 2 | 4 |
+| `kmalloc` | macro | `linux/slab` | - | - | 9 | 42 | 19 | 29 | 22 |
 | `copy_to_user` | inline | `linux/uaccess` | - | - | 2 | 19 | 21 | 53 | 6 |
 | `kvfree` | func | `linux/slab` | - | - | 8 | 12 | 12 | 53 | 2 |
 | `GFP_ATOMIC` | macro | `linux/gfp_types` | - | - | 5 | 16 | 18 | 41 | 4 |
 | `copy_from_user` | inline | `linux/uaccess` | - | - | 3 | 27 | 18 | 21 | 12 |
+| `gfp_t` | type | `linux/gfp_types` | - | - | 14 | 45 | 2 | 3 | 5 |
 | `readl` | macro | `asm/io` | 1 | - | - | 3 | 2 | 40 | 9 |
 | `struct resource` | type | `linux/ioport` | - | 5 | - | 15 | 5 | 14 | 9 |
 | `kmem_cache_free` | func | `linux/slab` | - | - | 1 | 14 | 2 | 6 | 1 |
@@ -166,87 +169,89 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `vunmap` | func | `linux/vmalloc` | - | - | 2 | 3 | 1 | 2 | 4 |
 | `iosys_map_set_vaddr` | inline | `linux/iosys-map` | - | 1 | 1 | 6 | 1 | 1 | - |
 | `kmem_cache_create` | macro | `linux/slab` | - | - | 1 | 1 | 3 | 1 | 1 |
+| `kcalloc` | macro | `linux/slab` | - | - | 3 | 15 | 6 | 117 | - |
 | `u64_to_user_ptr` | macro | `linux/util_macros` | - | - | 9 | 51 | 32 | 21 | - |
-| `struct page` | type | `linux/mm_types` | - | - | 1 | 43 | 14 | 5 | - |
-| `PAGE_ALIGN` | macro | `linux/mm` | - | - | 1 | 26 | 29 | 4 | - |
+| `struct page` | type | `linux/mm_types` | - | - | 2 | 43 | 14 | 5 | - |
+| `PAGE_ALIGN` | macro | `linux/mm` | - | - | 4 | 26 | 29 | 4 | - |
 | `struct vm_area_struct` | type | `linux/mm_types` | - | - | 1 | - | 13 | 2 | 44 |
-| `gfp_t` | type | `linux/gfp_types` | - | - | - | 45 | 2 | 3 | 5 |
+| `kmalloc_array` | macro | `linux/slab` | - | - | 4 | 11 | 9 | 34 | - |
 | `struct mm_struct` | type | `linux/mm_types` | - | - | - | 3 | 4 | 36 | 11 |
 | `resource_size` | inline | `linux/ioport` | - | 5 | - | 41 | 2 | - | 4 |
 | `writel` | macro | `asm/io` | 2 | - | - | 8 | 3 | 39 | - |
+| `__GFP_NOWARN` | macro | `linux/gfp_types` | - | - | 4 | 36 | 5 | - | 5 |
 | `page_offset` | inline | `linux/pagemap` | - | - | - | 15 | 10 | 2 | 9 |
+| `offset_in_page` | macro | `linux/mm` | - | - | 1 | 30 | - | 3 | 1 |
 | `memcpy_fromio` | macro | `asm/io` | - | - | - | 5 | 1 | 18 | 1 |
 | `VM_FAULT_NOPAGE` | enumconst | `linux/mm_types` | - | - | - | 3 | 5 | 1 | 9 |
 | `VM_FAULT_SIGBUS` | enumconst | `linux/mm_types` | - | - | - | 6 | 2 | 3 | 7 |
 | `struct vm_fault` | type | `linux/mm` | - | - | - | 3 | 7 | 1 | 7 |
-| `is_vmalloc_addr` | func | `linux/mm` | - | - | 1 | 2 | 1 | - | 11 |
+| `is_vmalloc_addr` | func | `linux/mm` | - | - | 2 | 2 | 1 | - | 11 |
 | `memset_io` | macro | `asm/io` | - | 1 | - | 6 | - | 3 | 1 |
 | `VM_DONTEXPAND` | macro | `linux/mm` | - | - | 1 | 2 | 3 | - | 4 |
-| `kmem_cache_zalloc` | macro | `linux/slab` | - | - | 2 | 4 | 2 | - | 1 |
-| `pgprot_noncached` | macro | `linux/pgtable` | - | - | 1 | 1 | 2 | - | 4 |
-| `struct iosys_map` | type | `linux/iosys-map` | 2 | 3 | - | - | - | 2 | 1 |
-| `iosys_map_set_vaddr_iomem` | inline | `linux/iosys-map` | - | 1 | - | 3 | 2 | 1 | - |
-| `IORESOURCE_UNSET` | macro | `linux/ioport` | - | - | - | 1 | 1 | 2 | 2 |
+| `__GFP_ZERO` | macro | `linux/gfp_types` | - | - | 5 | - | 2 | 1 | 2 |
 
-### K1-dma — Memoria: DMA, dma-buf, IOMMU (104 simbolos)
+### K1-dma — Memoria: DMA, dma-buf, IOMMU (108 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `sg_dma_len` | macro | `linux/scatterlist` | - | - | 4 | 50 | 4 | 1 | 4 |
-| `struct dma_buf_attachment` | type | `linux/dma-buf` | - | - | 13 | 4 | 9 | 12 | 8 |
-| `sg_dma_address` | macro | `linux/scatterlist` | - | - | 4 | 30 | 2 | 3 | 4 |
+| `sg_dma_len` | macro | `linux/scatterlist` | - | - | 5 | 50 | 4 | 1 | 4 |
+| `struct dma_buf_attachment` | type | `linux/dma-buf` | - | - | 14 | 4 | 9 | 12 | 8 |
+| `sg_dma_address` | macro | `linux/scatterlist` | - | - | 5 | 30 | 2 | 3 | 4 |
 | `sg_free_table` | func | `linux/scatterlist` | - | - | 4 | 13 | 7 | 14 | 4 |
 | `DMA_BIDIRECTIONAL` | enumconst | `linux/dma-direction` | - | - | 3 | 8 | 9 | 12 | 9 |
 | `DMA_ATTR_SKIP_CPU_SYNC` | macro | `linux/dma-mapping` | - | - | 2 | 3 | 5 | 9 | 4 |
+| `DMA_TO_DEVICE` | enumconst | `linux/dma-direction` | - | - | 11 | 1 | 2 | 6 | 3 |
+| `DMA_BIT_MASK` | macro | `linux/dma-mapping` | - | - | 5 | 3 | 2 | 7 | 3 |
 | `sg_alloc_table` | func | `linux/scatterlist` | - | - | 2 | 11 | 1 | 3 | 3 |
-| `DMA_TO_DEVICE` | enumconst | `linux/dma-direction` | - | - | 4 | 1 | 2 | 6 | 3 |
+| `sg_page` | inline | `linux/scatterlist` | - | - | 1 | 12 | 1 | 1 | 1 |
 | `sg_set_page` | inline | `linux/scatterlist` | - | - | 2 | 9 | 1 | 1 | 3 |
+| `DMA_FROM_DEVICE` | enumconst | `linux/dma-direction` | - | 2 | 6 | - | 3 | 1 | 3 |
 | `dma_buf_put` | func | `linux/dma-buf` | - | - | 1 | 1 | 1 | 2 | 6 |
-| `DMA_FROM_DEVICE` | enumconst | `linux/dma-direction` | - | 2 | 1 | - | 3 | 1 | 3 |
 | `dma_buf_unmap_attachment` | func | `linux/dma-buf` | - | - | 2 | 1 | 4 | 1 | 1 |
 | `get_dma_buf` | inline | `linux/dma-buf` | - | - | 1 | 1 | 2 | 3 | 1 |
 | `dma_buf_map_attachment` | func | `linux/dma-buf` | - | - | 1 | 1 | 1 | 1 | 1 |
 | `dma_set_max_seg_size` | inline | `linux/dma-mapping` | - | - | 1 | 1 | 1 | 1 | 1 |
-| `enum dma_data_direction` | type | `linux/dma-direction` | - | - | 6 | 3 | - | 13 | 8 |
-| `struct scatterlist` | type | `linux/scatterlist` | - | - | 8 | - | 5 | 2 | 14 |
-| `DMA_BIT_MASK` | macro | `linux/dma-mapping` | - | - | - | 3 | 2 | 7 | 3 |
-| `sg_page` | inline | `linux/scatterlist` | - | - | - | 12 | 1 | 1 | 1 |
-| `dma_mapping_error` | inline | `linux/dma-mapping` | - | - | 1 | - | 2 | 4 | 4 |
+| `struct scatterlist` | type | `linux/scatterlist` | - | - | 37 | - | 5 | 2 | 14 |
+| `enum dma_data_direction` | type | `linux/dma-direction` | - | - | 14 | 3 | - | 13 | 8 |
+| `sg_next` | inline | `linux/scatterlist` | - | - | 5 | 9 | 1 | - | 2 |
+| `dma_mapping_error` | inline | `linux/dma-mapping` | - | - | 2 | - | 2 | 4 | 4 |
 | `dma_unmap_resource` | func | `linux/dma-mapping` | - | - | 1 | - | 2 | 4 | 1 |
+| `dma_set_mask` | func | `linux/dma-mapping` | - | - | 1 | 1 | 1 | - | 3 |
+| `dma_free_coherent` | inline | `linux/dma-mapping` | - | - | 1 | 2 | - | 1 | 1 |
 | `dma_map_resource` | func | `linux/dma-mapping` | - | - | 1 | - | 1 | 2 | 1 |
 | `struct dma_buf_ops` | type | `linux/dma-buf` | - | - | - | 1 | 1 | 2 | 1 |
-| `struct dma_buf` | type | `linux/dma-buf` | - | - | 7 | - | 13 | 24 | - |
-| `sg_next` | inline | `linux/scatterlist` | - | - | - | 9 | 1 | - | 2 |
+| `dma_alloc_coherent` | inline | `linux/dma-mapping` | - | - | 1 | 1 | - | 1 | 1 |
+| `dma_set_coherent_mask` | func | `linux/dma-mapping` | - | - | 1 | 1 | 1 | - | 1 |
+| `struct dma_buf` | type | `linux/dma-buf` | - | - | 11 | - | 13 | 24 | - |
+| `dma_set_mask_and_coherent` | inline | `linux/dma-mapping` | - | - | 3 | - | - | 7 | 1 |
 | `for_each_sgtable_sg` | macro | `linux/scatterlist` | - | - | 2 | - | 4 | 4 | - |
 | `dma_map_sgtable` | func | `linux/dma-mapping` | - | - | - | 3 | 2 | 3 | - |
 | `dma_unmap_sgtable` | inline | `linux/dma-mapping` | - | - | - | 1 | 3 | 4 | - |
 | `struct dma_buf_attach_ops` | type | `linux/dma-buf` | - | - | 1 | - | 3 | 2 | - |
-| `dma_set_mask` | func | `linux/dma-mapping` | - | - | - | 1 | 1 | - | 3 |
 | `dma_buf_detach` | func | `linux/dma-buf` | - | - | 1 | 1 | - | - | 2 |
-| `dma_free_coherent` | inline | `linux/dma-mapping` | - | - | - | 2 | - | 1 | 1 |
+| `dma_max_mapping_size` | func | `linux/dma-mapping` | - | - | 2 | 1 | 1 | - | - |
 | `sg_alloc_table_from_pages_segment` | func | `linux/scatterlist` | - | - | - | 2 | 1 | - | 1 |
 | `DEFINE_DMA_BUF_EXPORT_INFO` | macro | `linux/dma-buf` | - | - | 1 | 1 | - | - | 1 |
-| `dma_alloc_coherent` | inline | `linux/dma-mapping` | - | - | - | 1 | - | 1 | 1 |
 | `dma_buf_dynamic_attach` | func | `linux/dma-buf` | - | - | 1 | - | 1 | 1 | - |
-| `dma_max_mapping_size` | func | `linux/dma-mapping` | - | - | 1 | 1 | 1 | - | - |
-| `dma_set_coherent_mask` | func | `linux/dma-mapping` | - | - | - | 1 | 1 | - | 1 |
-| `struct sg_table` | type | `linux/scatterlist` | - | - | 15 | - | - | 14 | - |
-| `for_each_sg` | macro | `linux/scatterlist` | - | - | - | 2 | - | - | 7 |
+| `dma_map_page_attrs` | func | `linux/dma-mapping` | - | - | 1 | - | - | 1 | 1 |
 
-### K2 — Sincronizacion, tiempo, trabajo diferido (452 simbolos)
+### K2 — Sincronizacion, tiempo, trabajo diferido (459 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
 | `mutex_unlock` | func | `linux/mutex` | - | - | 2 | 343 | 181 | 683 | 59 |
 | `mutex_lock` | macro | `linux/mutex` | - | - | 2 | 274 | 164 | 630 | 46 |
-| `spin_unlock_irqrestore` | inline | `linux/spinlock` | - | - | 2 | 138 | 15 | 161 | 32 |
-| `spin_unlock` | inline | `linux/spinlock` | - | - | 26 | 132 | 51 | 106 | 9 |
-| `spin_lock_irqsave` | macro | `linux/spinlock` | - | - | 2 | 124 | 14 | 134 | 27 |
-| `spin_lock` | inline | `linux/spinlock` | - | - | 23 | 118 | 50 | 92 | 9 |
+| `spin_unlock_irqrestore` | inline | `linux/spinlock` | - | - | 13 | 138 | 15 | 161 | 32 |
+| `spin_unlock` | inline | `linux/spinlock` | - | - | 31 | 132 | 51 | 106 | 9 |
+| `spin_lock_irqsave` | macro | `linux/spinlock` | - | - | 11 | 124 | 14 | 134 | 27 |
+| `spin_lock` | inline | `linux/spinlock` | - | - | 28 | 118 | 50 | 92 | 9 |
 | `atomic_read` | inline | `linux/atomic/atomic-instrumented` | - | - | 3 | 132 | 28 | 75 | 29 |
+| `msleep` | func | `linux/delay` | - | - | 3 | 33 | 14 | 147 | 1 |
+| `spin_unlock_irq` | inline | `linux/spinlock` | - | - | 4 | 129 | 25 | 12 | 3 |
+| `spin_lock_irq` | inline | `linux/spinlock` | - | - | 4 | 125 | 25 | 12 | 3 |
 | `mutex_init` | macro | `linux/mutex` | - | - | 1 | 48 | 13 | 82 | 8 |
-| `spin_lock_init` | macro | `linux/spinlock` | - | - | 6 | 43 | 24 | 39 | 11 |
-| `spinlock_t` | type | `linux/spinlock_types` | - | - | 6 | 42 | 26 | 36 | 10 |
+| `spin_lock_init` | macro | `linux/spinlock` | - | - | 10 | 43 | 24 | 39 | 11 |
+| `spinlock_t` | type | `linux/spinlock_types` | - | - | 8 | 42 | 26 | 36 | 10 |
 | `current` | macro | `asm/current` | - | - | 1 | 22 | 16 | 28 | 46 |
 | `atomic_set` | inline | `linux/atomic/atomic-instrumented` | - | - | 4 | 16 | 5 | 74 | 11 |
 | `INIT_WORK` | macro | `linux/workqueue` | - | - | 3 | 35 | 30 | 37 | 1 |
@@ -260,11 +265,9 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `init_waitqueue_head` | macro | `linux/wait` | - | - | 2 | 9 | 6 | 2 | 6 |
 | `wake_up_all` | macro | `linux/wait` | - | - | 3 | 7 | 13 | 1 | 1 |
 | `wake_up` | macro | `linux/wait` | - | - | 5 | 3 | 4 | 2 | 2 |
+| `init_completion` | inline | `linux/completion` | - | - | 1 | 2 | 5 | 2 | 3 |
 | `struct ww_acquire_ctx` | type | `linux/ww_mutex` | - | - | 1 | 1 | 1 | 9 | 1 |
 | `udelay` | inline | `asm-generic/delay` | - | - | - | 69 | 3 | 489 | 3 |
-| `msleep` | func | `linux/delay` | - | - | - | 33 | 14 | 147 | 1 |
-| `spin_unlock_irq` | inline | `linux/spinlock` | - | - | - | 129 | 25 | 12 | 3 |
-| `spin_lock_irq` | inline | `linux/spinlock` | - | - | - | 125 | 25 | 12 | 3 |
 | `struct mutex` | type | `linux/mutex_types` | - | - | 1 | - | 32 | 70 | 9 |
 | `cancel_delayed_work_sync` | func | `linux/workqueue` | - | - | - | 17 | 3 | 72 | 3 |
 | `flush_work` | func | `linux/workqueue` | - | - | 4 | 30 | 12 | 16 | - |
@@ -276,28 +279,28 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `kref_get` | inline | `linux/kref` | - | - | - | 18 | 7 | 10 | 3 |
 | `mutex_lock_interruptible` | macro | `linux/mutex` | - | - | - | 23 | 4 | 2 | 7 |
 | `kref_get_unless_zero` | inline | `linux/kref` | - | - | - | 25 | 4 | 2 | 1 |
-| `struct timer_list` | type | `linux/timer_types` | - | - | - | 18 | 2 | 4 | 7 |
 
 ### K3 — Estructuras y utilidades (405 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `min` | macro | `linux/minmax` | 1 | 1 | 3 | 380 | 56 | 839 | 14 |
+| `min` | macro | `linux/minmax` | 1 | 1 | 4 | 380 | 56 | 839 | 14 |
 | `ARRAY_SIZE` | macro | `linux/array_size` | 2 | 3 | 4 | 538 | 223 | - | 22 |
-| `memcpy` | macro | `linux/fortify-string` | - | 1 | 3 | 107 | 26 | 539 | 48 |
+| `memcpy` | macro | `linux/fortify-string` | - | 1 | 15 | 107 | 26 | 539 | 48 |
 | `strlen` | macro | `linux/fortify-string` | - | 2 | 2 | 3 | 12 | 51 | 35 |
 | `strscpy` | macro | `linux/string` | - | 1 | 1 | 3 | 6 | 41 | 1 |
 | `max` | macro | `linux/minmax` | - | 2 | - | 486 | 51 | 769 | 16 |
-| `memset` | macro | `linux/fortify-string` | - | - | 27 | 149 | 23 | 943 | 41 |
-| `parent` | inline | `linux/min_heap` | - | - | 7 | 131 | 140 | 119 | 37 |
-| `list_for_each_entry` | macro | `linux/list` | - | - | 5 | 89 | 33 | 147 | 10 |
-| `INIT_LIST_HEAD` | inline | `linux/list` | - | - | 5 | 72 | 51 | 72 | 33 |
+| `memset` | macro | `linux/fortify-string` | - | - | 33 | 149 | 23 | 943 | 41 |
+| `parent` | inline | `linux/min_heap` | - | - | 12 | 131 | 140 | 119 | 37 |
+| `list_for_each_entry` | macro | `linux/list` | - | - | 10 | 89 | 33 | 147 | 10 |
+| `INIT_LIST_HEAD` | inline | `linux/list` | - | - | 11 | 72 | 51 | 72 | 33 |
 | `list_empty` | inline | `linux/list` | - | - | 1 | 75 | 40 | 54 | 26 |
-| `list_for_each_entry_safe` | macro | `linux/list` | - | - | 5 | 53 | 24 | 56 | 7 |
-| `list_del` | inline | `linux/list` | - | - | 5 | 33 | 17 | 44 | 21 |
-| `list_add_tail` | inline | `linux/list` | - | - | 4 | 40 | 19 | 34 | 16 |
+| `list_for_each_entry_safe` | macro | `linux/list` | - | - | 6 | 53 | 24 | 56 | 7 |
+| `list_del` | inline | `linux/list` | - | - | 8 | 33 | 17 | 44 | 21 |
+| `list_add_tail` | inline | `linux/list` | - | - | 6 | 40 | 19 | 34 | 16 |
 | `strcmp` | func | `linux/string` | - | 1 | - | 18 | 8 | 19 | 27 |
 | `array_size` | macro | `linux/overflow` | - | - | 6 | 1 | 4 | 54 | 2 |
+| `list_add` | inline | `linux/list` | - | - | 3 | 19 | 7 | 17 | 8 |
 | `list_first_entry` | macro | `linux/list` | - | - | 1 | 5 | 2 | 14 | 9 |
 | `str_yes_no` | inline | `linux/string_choices` | - | - | 1 | 193 | 27 | 12 | - |
 | `DIV_ROUND_UP` | macro | `linux/math` | - | - | 1 | 157 | 15 | 26 | - |
@@ -307,7 +310,7 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `struct_size` | macro | `linux/overflow` | - | - | 1 | 9 | 3 | 88 | - |
 | `max_t` | macro | `linux/minmax` | - | 2 | - | 31 | 9 | 19 | - |
 | `list_del_init` | inline | `linux/list` | - | - | - | 24 | 25 | 5 | 6 |
-| `list_add` | inline | `linux/list` | - | - | - | 19 | 7 | 17 | 8 |
+| `is_power_of_2` | inline | `linux/log2` | - | - | 1 | 37 | 5 | 5 | - |
 | `list_move_tail` | inline | `linux/list` | - | - | - | 26 | 10 | 4 | 2 |
 | `list_entry` | macro | `linux/list` | - | - | - | 5 | 4 | 10 | 21 |
 | `struct rb_node` | type | `linux/rbtree_types` | - | - | - | 32 | 2 | 1 | 5 |
@@ -321,83 +324,85 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `roundup` | macro | `linux/math` | - | - | 1 | 4 | - | 5 | 2 |
 | `RB_EMPTY_ROOT` | macro | `linux/rbtree` | - | - | - | 4 | 1 | 1 | 2 |
 | `lower_32_bits` | macro | `linux/wordpart` | - | - | - | 67 | 47 | 1050 | - |
-| `upper_32_bits` | macro | `linux/wordpart` | - | - | - | 66 | 47 | 1014 | - |
 
-### K4 — Modelo de dispositivos (235 simbolos)
+### K4 — Modelo de dispositivos (251 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `MODULE_DESCRIPTION` | macro | `linux/module` | 1 | 1 | 1 | 1 | 1 | 2 | 3 |
-| `MODULE_LICENSE` | macro | `linux/module` | 1 | 1 | 1 | 1 | 1 | 2 | 3 |
-| `MODULE_DEVICE_TABLE` | macro | `linux/module` | 1 | 1 | 1 | 1 | 1 | 1 | 3 |
-| `MODULE_PARM_DESC` | macro | `linux/moduleparam` | 3 | - | 1 | 5 | 11 | 99 | 14 |
+| `MODULE_DESCRIPTION` | macro | `linux/module` | 1 | 1 | 7 | 1 | 1 | 2 | 3 |
+| `MODULE_LICENSE` | macro | `linux/module` | 1 | 1 | 7 | 1 | 1 | 2 | 3 |
+| `MODULE_DEVICE_TABLE` | macro | `linux/module` | 1 | 1 | 2 | 1 | 1 | 1 | 3 |
+| `MODULE_PARM_DESC` | macro | `linux/moduleparam` | 3 | - | 2 | 5 | 11 | 99 | 14 |
 | `module_param_named` | macro | `linux/moduleparam` | 1 | - | 2 | 2 | 5 | 76 | 20 |
-| `struct device` | type | `linux/device` | 2 | 2 | 4 | - | - | 212 | 74 |
+| `PCI_ANY_ID` | macro | `linux/mod_devicetable` | 4 | - | 1 | 4 | - | 619 | 38 |
+| `struct device` | type | `linux/device` | 2 | 2 | 25 | - | - | 212 | 74 |
 | `dev_get_drvdata` | inline | `linux/device` | 2 | - | - | 9 | 7 | 139 | 2 |
+| `dev_name` | inline | `linux/device` | - | - | 5 | 10 | 8 | 4 | 7 |
 | `__init` | macro | `linux/init` | - | - | 1 | 9 | 7 | 1 | 14 |
-| `dev_name` | inline | `linux/device` | - | - | 2 | 10 | 8 | 4 | 7 |
-| `MODULE_IMPORT_NS` | macro | `linux/module` | - | - | 1 | 1 | 3 | 1 | 5 |
-| `module_exit` | macro | `linux/module` | - | - | 1 | 1 | 1 | 2 | 6 |
-| `MODULE_AUTHOR` | macro | `linux/module` | 1 | - | 3 | 2 | 1 | 2 | - |
-| `__exit` | macro | `linux/init` | - | - | 1 | 1 | 1 | 2 | 3 |
+| `struct pci_device_id` | type | `linux/mod_devicetable` | 2 | - | 2 | - | 6 | 4 | 15 |
+| `MODULE_AUTHOR` | macro | `linux/module` | 1 | - | 6 | 2 | 1 | 2 | - |
+| `MODULE_IMPORT_NS` | macro | `linux/module` | - | - | 2 | 1 | 3 | 1 | 5 |
+| `module_exit` | macro | `linux/module` | - | - | 2 | 1 | 1 | 2 | 6 |
+| `__exit` | macro | `linux/init` | - | - | 2 | 1 | 1 | 2 | 3 |
 | `module_init` | macro | `linux/module` | - | - | 1 | 1 | 1 | 1 | 3 |
 | `MODULE_FIRMWARE` | macro | `linux/module` | - | - | - | 18 | 1 | 670 | 1 |
-| `PCI_ANY_ID` | macro | `linux/mod_devicetable` | 4 | - | - | 4 | - | 619 | 38 |
+| `sysfs_emit_at` | func | `linux/sysfs` | - | - | 2 | 2 | 2 | 392 | - |
+| `struct device_attribute` | type | `linux/device` | - | - | 5 | 12 | 15 | 176 | - |
+| `sysfs_emit` | func | `linux/sysfs` | - | - | 4 | 35 | 49 | 119 | - |
 | `THIS_MODULE` | macro | `linux/init` | - | - | - | 39 | 14 | 74 | 18 |
+| `EXPORT_SYMBOL` | macro | `linux/export` | - | 12 | 4 | - | - | 7 | 90 |
+| `struct attribute` | type | `linux/sysfs` | - | - | 1 | 29 | 20 | 36 | - |
 | `DMI_PRODUCT_NAME` | enumconst | `linux/mod_devicetable` | - | - | - | 25 | 1 | 17 | 1 |
 | `struct platform_device` | type | `linux/platform_device` | - | 5 | - | 3 | - | 9 | 16 |
-| `struct pci_device_id` | type | `linux/mod_devicetable` | 2 | - | - | - | 6 | 4 | 15 |
+| `module_param` | macro | `linux/moduleparam` | 2 | - | 1 | - | - | 8 | 4 |
 | `dev_pm_set_driver_flags` | inline | `linux/device` | - | - | - | 1 | 1 | 2 | 2 |
 | `device_link_add` | func | `linux/device` | - | 1 | - | 2 | 1 | 1 | - |
 | `struct device_link` | type | `linux/device` | - | 1 | - | 1 | 1 | 2 | - |
-| `sysfs_emit_at` | func | `linux/sysfs` | - | - | - | 2 | 2 | 392 | - |
 | `struct kobject` | type | `linux/kobject` | - | - | - | 80 | 85 | 61 | - |
-| `struct device_attribute` | type | `linux/device` | - | - | - | 12 | 15 | 176 | - |
-| `sysfs_emit` | func | `linux/sysfs` | - | - | - | 35 | 49 | 119 | - |
 | `struct kobj_attribute` | type | `linux/kobject` | - | - | - | 74 | 96 | 26 | - |
-| `EXPORT_SYMBOL` | macro | `linux/export` | - | 12 | - | - | - | 7 | 90 |
-| `struct attribute` | type | `linux/sysfs` | - | - | - | 29 | 20 | 36 | - |
+| `EXPORT_SYMBOL_GPL` | macro | `linux/export` | - | - | 106 | 5 | - | - | 1 |
 | `struct attribute_group` | type | `linux/sysfs` | - | - | - | 10 | 13 | 29 | - |
 | `__ATTR` | macro | `linux/sysfs` | - | - | - | 28 | 18 | 2 | - |
 | `kobj_to_dev` | macro | `linux/device` | - | - | - | 8 | 27 | 12 | - |
 | `kobject_put` | func | `linux/kobject` | - | - | - | 8 | 17 | 17 | - |
+| `struct device_node` | type | `linux/of` | - | 14 | 1 | - | - | - | 26 |
 | `__ATTR_RO` | macro | `linux/sysfs` | - | - | - | 2 | 18 | 12 | - |
+| `of_node_put` | func | `linux/of` | - | 1 | 3 | - | - | - | 15 |
 | `module_param_named_unsafe` | macro | `linux/moduleparam` | - | - | - | 2 | 6 | 9 | - |
-| `struct kobj_type` | type | `linux/kobject` | - | - | - | 2 | 4 | 10 | - |
-| `module_param` | macro | `linux/moduleparam` | 2 | - | - | - | - | 8 | 4 |
-| `sysfs_create_files` | func | `linux/sysfs` | - | - | - | 7 | 5 | 2 | - |
-| `sysfs_create_file` | inline | `linux/sysfs` | - | - | - | 8 | 1 | 4 | - |
 
-### K5 — PCI, IRQ, energia (425 simbolos)
+### K5 — PCI, IRQ, energia (606 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `to_pci_dev` | macro | `linux/pci` | 1 | - | 1 | 63 | 66 | 4 | 21 |
+| `to_pci_dev` | macro | `linux/pci` | 1 | - | 4 | 63 | 66 | 4 | 21 |
+| `pci_get_drvdata` | inline | `linux/pci` | 2 | - | 6 | 3 | 2 | 15 | 25 |
+| `pci_resource_len` | macro | `linux/pci` | 2 | - | 4 | 10 | 7 | 13 | 4 |
+| `pci_resource_start` | macro | `linux/pci` | 2 | - | 2 | 7 | 5 | 11 | 3 |
+| `pci_set_drvdata` | inline | `linux/pci` | 1 | - | 1 | 2 | 1 | 2 | 5 |
+| `struct dev_pm_ops` | type | `linux/pm` | 1 | - | 1 | 2 | 1 | 1 | 3 |
+| `struct pci_driver` | type | `linux/pci` | 1 | - | 1 | 1 | 2 | 1 | 2 |
 | `aperture_remove_conflicting_pci_devices` | func | `linux/aperture` | 1 | - | 1 | 1 | 1 | 1 | 1 |
-| `pci_get_drvdata` | inline | `linux/pci` | 2 | - | - | 3 | 2 | 15 | 25 |
-| `pci_resource_len` | macro | `linux/pci` | 2 | - | - | 10 | 7 | 13 | 4 |
-| `pci_resource_start` | macro | `linux/pci` | 2 | - | - | 7 | 5 | 11 | 3 |
+| `irqreturn_t` | type | `linux/irqreturn` | - | - | 5 | 14 | 4 | 2 | 20 |
+| `pci_read_config_dword` | func | `linux/pci` | - | - | 9 | 10 | 1 | 6 | 13 |
+| `IRQ_NONE` | enumconst | `linux/irqreturn` | - | - | 4 | 21 | 6 | 1 | 4 |
+| `IRQ_HANDLED` | enumconst | `linux/irqreturn` | - | - | 6 | 17 | 5 | 2 | 2 |
+| `pci_set_master` | func | `linux/pci` | - | - | 3 | 2 | 3 | 16 | 2 |
+| `pci_read_config_word` | func | `linux/pci` | - | - | 1 | 11 | 1 | 3 | 9 |
 | `pci_dev_put` | macro | `linux/pci` | - | - | 2 | 3 | 5 | 7 | 3 |
-| `pci_set_drvdata` | inline | `linux/pci` | 1 | - | - | 2 | 1 | 2 | 5 |
-| `struct dev_pm_ops` | type | `linux/pm` | 1 | - | - | 2 | 1 | 1 | 3 |
-| `struct pci_driver` | type | `linux/pci` | 1 | - | - | 1 | 2 | 1 | 2 |
-| `irqreturn_t` | type | `linux/irqreturn` | - | - | - | 14 | 4 | 2 | 20 |
-| `IRQ_NONE` | enumconst | `linux/irqreturn` | - | - | - | 21 | 6 | 1 | 4 |
+| `free_irq` | func | `linux/interrupt` | - | - | 3 | 1 | 2 | 1 | 12 |
+| `pci_disable_device` | func | `linux/pci` | - | - | 4 | 3 | 2 | 6 | 3 |
+| `pci_enable_device` | func | `linux/pci` | - | - | 3 | 2 | 2 | 3 | 2 |
+| `pci_resource_flags` | macro | `linux/pci` | - | - | 1 | 2 | 2 | 2 | 4 |
 | `PCI_FUNC` | macro | `linux/pci` | - | - | - | 1 | 1 | 1 | 29 |
-| `pci_read_config_dword` | func | `linux/pci` | - | - | - | 10 | 1 | 6 | 13 |
-| `IRQ_HANDLED` | enumconst | `linux/irqreturn` | - | - | - | 17 | 5 | 2 | 2 |
-| `pci_read_config_word` | func | `linux/pci` | - | - | - | 11 | 1 | 3 | 9 |
-| `pci_set_master` | func | `linux/pci` | - | - | - | 2 | 3 | 16 | 2 |
 | `PCI_COMMAND` | macro | `linux/pci_regs` | - | - | - | 3 | 4 | 4 | 6 |
-| `free_irq` | func | `linux/interrupt` | - | - | - | 1 | 2 | 1 | 12 |
-| `pci_disable_device` | func | `linux/pci` | - | - | - | 3 | 2 | 6 | 3 |
 | `pci_domain_nr` | inline | `linux/pci` | - | - | - | 2 | 4 | 6 | 2 |
 | `pci_write_config_dword` | func | `linux/pci` | - | - | - | 8 | 2 | 3 | 1 |
+| `pci_name` | inline | `linux/pci` | - | - | 1 | - | 1 | 7 | 4 |
 | `pci_get_domain_bus_and_slot` | func | `linux/pci` | - | - | - | 1 | 5 | 4 | 1 |
-| `pci_resource_flags` | macro | `linux/pci` | - | - | - | 2 | 2 | 2 | 4 |
 | `pm_runtime_get_noresume` | inline | `linux/pm_runtime` | - | - | - | 1 | 4 | 3 | 2 |
-| `pci_enable_device` | func | `linux/pci` | - | - | - | 2 | 2 | 3 | 2 |
+| `PCI_DEVICE` | macro | `linux/pci` | - | - | 1 | 4 | - | 3 | 1 |
 | `pci_save_state` | func | `linux/pci` | - | - | - | 1 | 2 | 3 | 2 |
+| `request_irq` | inline | `linux/interrupt` | - | - | 4 | 1 | 2 | 1 | - |
 | `pm_runtime_suspended` | inline | `linux/pm_runtime` | - | - | - | 2 | 2 | 1 | 2 |
 | `struct pci_bus` | type | `linux/pci` | - | - | - | 1 | 1 | 1 | 4 |
 | `PCI_COMMAND_MEMORY` | macro | `linux/pci_regs` | - | - | - | 1 | 2 | 1 | 2 |
@@ -409,9 +414,6 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `pci_resize_resource` | func | `linux/pci` | - | - | - | 1 | 1 | 1 | 2 |
 | `pci_assign_unassigned_bus_resources` | func | `linux/pci` | - | - | - | 1 | 1 | 1 | 1 |
 | `pci_rebar_get_possible_sizes` | func | `linux/pci` | - | - | - | 1 | 1 | 1 | 1 |
-| `pm_runtime_allow` | func | `linux/pm_runtime` | - | - | - | 1 | 1 | 1 | 1 |
-| `pm_runtime_set_autosuspend_delay` | func | `linux/pm_runtime` | - | - | - | 1 | 1 | 1 | 1 |
-| `pm_runtime_mark_last_busy` | inline | `linux/pm_runtime` | - | - | - | 2 | 2 | 47 | - |
 
 ### K6 — Firmware, I2C, ACPI, backlight, debugfs... (501 simbolos)
 
@@ -548,17 +550,17 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `EPOLLIN` | macro | `linux/eventpoll` | - | - | - | 1 | 2 | - | - |
 | `SYSCTL_ZERO` | macro | `linux/sysctl` | - | - | - | 2 | 1 | - | - |
 
-### K9 — Miscelaneo (stubs: trace, kasan, hmm...) (193 simbolos)
+### K9 — Miscelaneo (stubs: trace, kasan, hmm...) (194 simbolos)
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `u32` | type | `linux/raid/pq` | 2 | 23 | 36 | 5474 | 2916 | 4167 | 68 |
-| `u64` | type | `linux/raid/pq` | 2 | 6 | 12 | 1008 | 1073 | 1128 | 23 |
-| `u16` | type | `linux/raid/pq` | 11 | 1 | - | 867 | 283 | 368 | 35 |
+| `u32` | type | `linux/raid/pq` | 2 | 23 | 79 | 5474 | 2916 | 4167 | 68 |
+| `u64` | type | `linux/raid/pq` | 2 | 6 | 43 | 1008 | 1073 | 1128 | 23 |
+| `u16` | type | `linux/raid/pq` | 11 | 1 | 98 | 867 | 283 | 368 | 35 |
 | `__entry` | macro | `trace/stages/stage3_trace_output` | - | - | 16 | 440 | 161 | 521 | 10 |
-| `PAGE_SIZE` | macro | `linux/raid/pq` | - | - | 5 | 196 | 64 | 329 | 71 |
+| `PAGE_SIZE` | macro | `linux/raid/pq` | - | - | 9 | 196 | 64 | 329 | 71 |
 | `__field` | macro | `linux/genl_magic_func` | - | - | 8 | 197 | 75 | 256 | 2 |
-| `PAGE_SHIFT` | macro | `linux/raid/pq` | - | - | 2 | 151 | 48 | 80 | 30 |
+| `PAGE_SHIFT` | macro | `linux/raid/pq` | - | - | 3 | 151 | 48 | 80 | 30 |
 | `TP_ARGS` | macro | `linux/tracepoint` | - | - | 3 | 74 | 87 | 50 | 2 |
 | `TP_PROTO` | macro | `linux/tracepoint` | - | - | 3 | 74 | 87 | 50 | 2 |
 | `TP_printk` | macro | `trace/stages/stage3_trace_output` | - | - | 1 | 47 | 18 | 38 | 2 |
@@ -578,6 +580,7 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `after` | macro | `net/tcp` | - | - | - | 8 | 3 | 20 | - |
 | `before` | inline | `net/tcp` | - | - | - | 6 | 3 | 19 | - |
 | `BITS_PER_LONG` | macro | `linux/raid/pq` | - | - | - | 16 | 3 | 2 | - |
+| `cpu_relax` | inline | `linux/raid/pq` | - | - | 1 | 6 | - | 6 | - |
 | `struct mmu_interval_notifier` | type | `linux/mmu_notifier` | - | - | - | 2 | 2 | 8 | - |
 | `PERF_HES_STOPPED` | macro | `linux/perf_event` | - | - | - | 2 | 2 | 4 | - |
 | `struct hw_perf_event` | type | `linux/perf_event` | - | - | - | 1 | 1 | 6 | - |
@@ -591,7 +594,6 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 | `struct mmu_interval_notifier_ops` | type | `linux/mmu_notifier` | - | - | - | 1 | 1 | 2 | - |
 | `struct pmu` | type | `linux/perf_event` | - | - | - | 1 | 1 | 2 | - |
 | `PERF_EF_START` | macro | `linux/perf_event` | - | - | - | 1 | 1 | 1 | - |
-| `mmu_interval_notifier_remove` | func | `linux/mmu_notifier` | - | - | - | 1 | 1 | 1 | - |
 
 ### K9-drm — DRM core y helpers (shim propio con la opcion A) (2326 simbolos)
 
@@ -732,7 +734,7 @@ Columnas por driver: numero de usos. `-` = no lo usa.
 
 | Simbolo | Tipo | Cabecera | bochs | simple | virtio | i915 | xe | amdgpu | nvidia |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `free` | macro | `linux/decompress/mm` | - | - | 3 | 21 | 14 | 14 | 15 |
+| `free` | macro | `linux/decompress/mm` | - | - | 4 | 21 | 14 | 14 | 15 |
 | `mode_set` | inline | `linux/hisi_acc_qm` | - | - | 1 | 8 | - | 12 | 1 |
 | `struct gpu_buddy_block` | type | `linux/gpu_buddy` | - | - | - | 5 | 16 | 24 | - |
 | `gpu_buddy_block_offset` | inline | `linux/gpu_buddy` | - | - | - | 4 | 9 | 1 | - |

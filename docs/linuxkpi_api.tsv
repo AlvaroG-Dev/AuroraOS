@@ -1,58 +1,63 @@
 # linuxkpi-scan.py Linux 6.18.59 (kernel.org, version fijada) y NVIDIA open 615.78.08 (GitHub, version fijada)
 simbolo	nivel	tipo	cabecera	usos	n_drivers	bochs	simpledrm	virtio-gpu	i915	xe	amdgpu	nvidia
-size_t	K0	type	linux/types	1452	7	2	16	7	270	295	311	551
-ENOMEM	K0	macro	asm-generic/errno-base	1065	7	2	7	37	219	162	493	145
-container_of	K0	macro	linux/container_of	886	7	1	2	12	273	185	366	47
-IS_ERR	K0	inline	linux/err	866	7	1	9	15	489	207	63	82
-PTR_ERR	K0	inline	linux/err	614	7	1	4	10	337	164	54	44
-ENODEV	K0	macro	asm-generic/errno-base	507	7	4	1	7	269	67	98	61
-ERR_PTR	K0	inline	linux/err	650	6	0	27	11	297	253	18	44
-WARN_ON	K0	macro	asm-generic/bug	444	6	2	0	10	103	23	174	132
-IS_ENABLED	K0	macro	linux/kconfig	378	6	2	0	1	200	129	26	20
+size_t	K0	type	linux/types	1472	7	2	16	27	270	295	311	551
+ENOMEM	K0	macro	asm-generic/errno-base	1095	7	2	7	67	219	162	493	145
+container_of	K0	macro	linux/container_of	890	7	1	2	16	273	185	366	47
+IS_ERR	K0	inline	linux/err	873	7	1	9	22	489	207	63	82
+PTR_ERR	K0	inline	linux/err	618	7	1	4	14	337	164	54	44
+ENODEV	K0	macro	asm-generic/errno-base	524	7	4	1	24	269	67	98	61
+__iomem	K0	macro	linux/compiler_types	188	7	2	2	28	86	10	59	1
+ERR_PTR	K0	inline	linux/err	660	6	0	27	21	297	253	18	44
+WARN_ON	K0	macro	asm-generic/bug	448	6	2	0	14	103	23	174	132
+IS_ENABLED	K0	macro	linux/kconfig	380	6	2	0	3	200	129	26	20
 uint32_t	K0	type	linux/types	313	6	1	1	171	1	7	0	132
-EIO	K0	macro	asm-generic/errno-base	275	6	1	0	1	112	53	79	29
-EBUSY	K0	macro	asm-generic/errno-base	205	6	2	0	3	52	45	74	29
-__iomem	K0	macro	linux/compiler_types	160	6	2	2	0	86	10	59	1
-EINVAL	K0	macro	asm-generic/errno-base	3316	5	0	10	53	0	282	2773	198
+EIO	K0	macro	asm-generic/errno-base	283	6	1	0	9	112	53	79	29
+EBUSY	K0	macro	asm-generic/errno-base	213	6	2	0	11	52	45	74	29
+EINVAL	K0	macro	asm-generic/errno-base	3335	5	0	10	72	0	282	2773	198
+ssize_t	K0	type	linux/types	773	5	0	0	6	170	146	436	15
+unlikely	K0	macro	linux/compiler	652	5	0	0	21	309	174	129	19
+dev_info	K0	macro	linux/dev_printk	559	5	0	0	1	3	4	549	2
+offsetof	K0	macro	linux/stddef	433	5	0	0	49	32	22	329	1
+EOPNOTSUPP	K0	macro	asm-generic/errno	413	5	0	0	10	32	38	307	26
+dev_warn	K0	macro	linux/dev_printk	335	5	0	0	8	2	2	322	1
 ETIMEDOUT	K0	macro	asm-generic/errno	249	5	0	0	1	46	31	168	3
 EFAULT	K0	macro	asm-generic/errno-base	243	5	0	0	5	100	47	74	17
-ENOENT	K0	macro	asm-generic/errno-base	227	5	0	0	6	65	46	96	14
+BUILD_BUG_ON	K0	macro	linux/build_bug	236	5	0	0	33	152	44	2	5
+ENOENT	K0	macro	asm-generic/errno-base	232	5	0	0	11	65	46	96	14
+resource_size_t	K0	type	linux/types	183	5	0	0	2	131	29	10	11
 ALIGN	K0	macro	linux/linkage	180	5	0	0	1	31	24	120	4
+sprintf	K0	func	linux/sprintf	178	5	0	0	2	3	8	164	1
+dma_addr_t	K0	type	linux/types	135	5	0	0	36	66	9	17	7
+ENOSPC	K0	macro	asm-generic/errno-base	125	5	0	0	5	63	29	24	4
 fallthrough	K0	macro	linux/compiler_attributes	125	5	0	0	1	88	12	22	2
-ENOSPC	K0	macro	asm-generic/errno-base	121	5	0	0	1	63	29	24	4
-WRITE_ONCE	K0	macro	asm-generic/rwonce	102	5	0	0	1	57	30	11	3
+snprintf	K0	func	linux/sprintf	123	5	0	0	4	30	21	54	14
+ktime_t	K0	type	linux/types	122	5	0	0	2	67	21	30	2
+BIT_ULL	K0	macro	vdso/bits	113	5	0	0	18	40	35	17	3
+WRITE_ONCE	K0	macro	asm-generic/rwonce	107	5	0	0	6	57	30	11	3
 msecs_to_jiffies	K0	inline	linux/jiffies	102	5	0	0	1	25	15	57	4
-dma_addr_t	K0	type	linux/types	100	5	0	0	1	66	9	17	7
-BIT_ULL	K0	macro	vdso/bits	96	5	0	0	1	40	35	17	3
-WARN_ON_ONCE	K0	macro	asm-generic/bug	85	5	0	0	2	19	8	50	6
-BUG_ON	K0	macro	asm-generic/bug	64	5	0	0	2	5	1	34	22
+likely	K0	macro	linux/compiler	93	5	0	0	1	59	6	15	12
+WARN_ON_ONCE	K0	macro	asm-generic/bug	91	5	0	0	8	19	8	50	6
+BUG_ON	K0	macro	asm-generic/bug	87	5	0	0	25	5	1	34	22
+EPERM	K0	macro	asm-generic/errno-base	83	5	0	0	2	20	10	39	12
 UINT_MAX	K0	macro	vdso/limits	60	5	0	0	1	12	1	41	5
 IS_ERR_OR_NULL	K0	inline	linux/err	54	5	0	1	0	19	8	3	23
 ERR_CAST	K0	inline	linux/err	49	5	0	4	2	32	10	1	0
+phys_addr_t	K0	type	linux/types	31	5	0	0	2	14	4	6	5
 uint64_t	K0	type	linux/types	2906	4	0	0	22	0	11	2771	102
-ssize_t	K0	type	linux/types	767	4	0	0	0	170	146	436	15
-unlikely	K0	macro	linux/compiler	631	4	0	0	0	309	174	129	19
-dev_info	K0	macro	linux/dev_printk	558	4	0	0	0	3	4	549	2
-EOPNOTSUPP	K0	macro	asm-generic/errno	403	4	0	0	0	32	38	307	26
-offsetof	K0	macro	linux/stddef	384	4	0	0	0	32	22	329	1
-struct list_head	K0	type	linux/types	331	4	0	0	10	135	0	139	47
-dev_warn	K0	macro	linux/dev_printk	327	4	0	0	0	2	2	322	1
+dev_err	K0	macro	linux/dev_printk	1350	4	0	0	20	18	5	1307	0
+struct list_head	K0	type	linux/types	334	4	0	0	13	135	0	139	47
 __user	K0	macro	linux/compiler_types	284	4	0	0	0	99	65	112	8
 GENMASK	K0	macro	linux/bits	204	4	0	0	0	54	115	29	6
-BUILD_BUG_ON	K0	macro	linux/build_bug	203	4	0	0	0	152	44	2	5
 loff_t	K0	type	linux/types	203	4	0	0	0	70	24	99	10
-resource_size_t	K0	type	linux/types	181	4	0	0	0	131	29	10	11
-sprintf	K0	func	linux/sprintf	176	4	0	0	0	3	8	164	1
+READ_ONCE	K0	macro	asm-generic/rwonce	183	4	0	0	5	139	16	23	0
 test_bit	K0	macro	linux/bitops	162	4	0	0	0	113	19	22	8
 jiffies	K0	var	linux/jiffies	151	4	0	0	0	48	9	76	18
 pr_info	K0	macro	linux/genl_magic_func	151	4	0	0	0	1	1	129	20
-ktime_t	K0	type	linux/types	120	4	0	0	0	67	21	30	2
 EAGAIN	K0	macro	asm-generic/errno-base	119	4	0	0	0	50	39	23	7
-snprintf	K0	func	linux/sprintf	119	4	0	0	0	30	21	54	14
 set_bit	K0	inline	asm-generic/bitops/instrumented-atomic	111	4	0	0	0	58	4	42	7
-likely	K0	macro	linux/compiler	92	4	0	0	0	59	6	15	12
-EPERM	K0	macro	asm-generic/errno-base	81	4	0	0	0	20	10	39	12
 ENXIO	K0	macro	asm-generic/errno-base	76	4	0	0	0	53	7	4	12
+panic	K0	func	linux/panic	69	4	0	0	2	43	23	0	1
+ktime_get	K0	func	linux/timekeeping	67	4	0	0	2	33	15	17	0
 INT_MAX	K0	macro	vdso/limits	60	4	0	2	0	25	0	6	27
 va_list	K0	type	linux/stdarg	56	4	0	0	0	9	2	14	31
 umode_t	K0	type	linux/types	55	4	0	0	0	16	10	27	2
@@ -64,67 +69,66 @@ for_each_set_bit	K0	macro	linux/find	42	4	0	0	0	9	19	13	1
 U32_MAX	K0	macro	linux/limits	40	4	0	0	0	21	2	16	1
 va_start	K0	macro	linux/stdarg	40	4	0	0	0	7	2	20	11
 WARN	K0	macro	asm-generic/bug	39	4	0	0	0	11	2	19	7
+E2BIG	K0	macro	asm-generic/errno-base	38	4	0	0	2	27	7	2	0
 va_end	K0	macro	linux/stdarg	37	4	0	0	0	8	2	14	13
 uintptr_t	K0	type	linux/types	33	4	0	0	0	7	2	20	4
 __counted_by	K0	macro	linux/compiler_types	31	4	0	0	1	1	2	27	0
-phys_addr_t	K0	type	linux/types	29	4	0	0	0	14	4	6	5
 PAGE_MASK	K0	macro	vdso/page	28	4	0	0	0	5	13	7	3
+might_sleep	K0	macro	linux/kernel	28	4	0	0	2	20	1	5	0
 EINTR	K0	macro	asm-generic/errno-base	27	4	0	0	0	21	4	1	1
 sscanf	K0	func	linux/sprintf	24	4	0	0	0	1	2	15	6
+ktime_sub	K0	macro	linux/ktime	23	4	0	0	2	15	2	4	0
+__force	K0	macro	linux/compiler_types	22	4	0	0	3	14	4	1	0
 noinline	K0	macro	linux/compiler_attributes	20	4	0	0	0	13	1	4	2
 U64_MAX	K0	macro	linux/limits	19	4	0	0	0	6	6	4	3
 U16_MAX	K0	macro	linux/limits	18	4	0	5	0	8	4	1	0
 EEXIST	K0	macro	asm-generic/errno-base	16	4	0	0	1	11	3	1	0
 struct timespec64	K0	type	linux/time64	16	4	0	0	0	1	1	1	13
 ns_to_ktime	K0	inline	linux/ktime	15	4	0	0	0	6	2	6	1
+pci_iounmap	K0	func	asm-generic/pci_iomap	15	4	0	0	9	3	1	0	2
 EOVERFLOW	K0	macro	asm-generic/errno	14	4	0	0	0	2	5	6	1
 smp_rmb	K0	macro	asm-generic/barrier	13	4	0	0	1	5	2	5	0
 BITS_PER_BYTE	K0	macro	linux/bits	11	4	0	0	0	7	1	2	1
 bitmap_empty	K0	inline	linux/bitmap	11	4	0	0	0	5	1	3	2
 CLOCK_MONOTONIC	K0	macro	linux/time	10	4	0	0	0	5	2	1	2
+ktime_to_ms	K0	inline	linux/ktime	10	4	0	0	2	5	1	2	0
 EPROBE_DEFER	K0	macro	linux/errno	9	4	0	3	0	3	2	0	1
 O_CLOEXEC	K0	macro	asm-generic/fcntl	9	4	0	0	1	2	0	1	5
 usecs_to_jiffies	K0	inline	linux/jiffies	9	4	0	0	0	2	1	3	3
 BIT	K0	macro	vdso/bits	2305	3	0	0	0	1721	332	252	0
-dev_err	K0	macro	linux/dev_printk	1330	3	0	0	0	18	5	1307	0
+le16_to_cpu	K0	macro	linux/byteorder/generic	1024	3	0	0	9	1	0	1014	0
 pr_err	K0	macro	linux/printk	248	3	0	0	0	11	0	208	29
-READ_ONCE	K0	macro	asm-generic/rwonce	178	3	0	0	0	139	16	23	0
 IS_ALIGNED	K0	macro	vdso/align	121	3	0	0	0	74	45	2	0
 ETIME	K0	macro	asm-generic/errno	106	3	0	0	0	22	23	61	0
 ffs	K0	macro	asm/bitops	81	3	0	0	0	30	7	44	0
 ENODATA	K0	macro	asm-generic/errno	79	3	0	0	0	14	56	9	0
 EDEADLK	K0	macro	asm-generic/errno	75	3	0	0	0	67	6	2	0
 printk	K0	macro	linux/printk	71	3	0	0	0	2	0	12	57
+BUG	K0	macro	asm/bug	70	3	0	0	4	1	0	65	0
 ENOTSUPP	K0	macro	linux/errno	67	3	0	0	0	4	0	49	14
-panic	K0	func	linux/panic	67	3	0	0	0	43	23	0	1
-ktime_get	K0	func	linux/timekeeping	65	3	0	0	0	33	15	17	0
 GENMASK_ULL	K0	macro	linux/bits	64	3	0	0	0	10	28	26	0
 for_each_if	K0	macro	linux/util_macros	55	3	0	0	0	46	8	1	0
 hweight32	K0	macro	asm-generic/bitops/const_hweight	48	3	0	0	0	15	5	28	0
 pgoff_t	K0	macro	linux/types	47	3	0	0	0	29	16	2	0
 time_after	K0	macro	linux/jiffies	47	3	0	0	0	9	3	35	0
 do_div	K0	macro	asm/div64	42	3	0	0	0	6	0	31	5
-E2BIG	K0	macro	asm-generic/errno-base	36	3	0	0	0	27	7	2	0
 static_assert	K0	macro	linux/build_bug	34	3	0	0	0	14	8	12	0
 ktime_get_boottime_ns	K0	inline	linux/timekeeping	28	3	0	0	0	1	2	25	0
-might_sleep	K0	macro	linux/kernel	26	3	0	0	0	20	1	5	0
+cpu_to_le64	K0	macro	linux/byteorder/generic	26	3	0	0	21	1	0	4	0
 array_index_nospec	K0	macro	linux/nospec	24	3	0	0	0	7	13	4	0
 va_arg	K0	macro	linux/stdarg	23	3	0	0	0	1	0	18	4
 ENOSYS	K0	macro	asm-generic/errno	22	3	0	0	3	0	0	15	4
 ERESTARTSYS	K0	macro	linux/errno	21	3	0	0	0	5	3	13	0
-ktime_sub	K0	macro	linux/ktime	21	3	0	0	0	15	2	4	0
 scnprintf	K0	func	linux/sprintf	21	3	0	0	0	11	5	5	0
 wmb	K0	macro	asm/barrier	21	3	0	0	0	16	2	3	0
 jiffies_to_msecs	K0	func	linux/jiffies	20	3	0	0	0	12	5	3	0
 NSEC_PER_SEC	K0	macro	vdso/time64	19	3	0	0	0	13	4	2	0
-__force	K0	macro	linux/compiler_types	19	3	0	0	0	14	4	1	0
 __set_bit	K0	macro	linux/bitops	19	3	0	0	0	17	1	1	0
 bitmap_zero	K0	inline	linux/bitmap	19	3	0	0	0	2	1	16	0
 pr_notice	K0	macro	linux/printk	18	3	0	0	0	14	0	2	2
 ULONG_MAX	K0	macro	vdso/limits	17	3	0	0	0	3	3	0	11
 ALIGN_DOWN	K0	macro	vdso/align	16	3	0	0	0	1	10	5	0
 __printf	K0	macro	linux/compiler_attributes	16	3	0	0	0	9	3	4	0
-cpu_to_le64	K0	macro	linux/byteorder/generic	16	3	0	0	11	1	0	4	0
 kasprintf	K0	func	linux/sprintf	16	3	0	0	0	13	1	2	0
 vsnprintf	K0	func	linux/sprintf	16	3	0	0	0	2	0	4	10
 bitmap_weight	K0	inline	linux/bitmap	15	3	0	0	0	5	8	2	0
@@ -142,13 +146,14 @@ uint	K0	type	linux/types	9	3	0	0	0	5	2	0	2
 ATOMIC_INIT	K0	macro	linux/types	8	3	0	0	1	0	0	2	5
 O_NONBLOCK	K0	macro	asm-generic/fcntl	8	3	0	0	0	3	2	0	3
 ktime_ms_delta	K0	inline	linux/ktime	8	3	0	0	0	4	3	1	0
-ktime_to_ms	K0	inline	linux/ktime	8	3	0	0	0	5	1	2	0
 EALREADY	K0	macro	asm-generic/errno	7	3	0	0	0	1	3	3	0
 bitmap_zalloc	K0	func	linux/bitmap	7	3	0	0	0	4	2	1	0
 ktime_us_delta	K0	inline	linux/ktime	7	3	0	0	0	3	2	2	0
+SIZE_MAX	K0	macro	linux/limits	6	3	0	0	1	4	1	0	0
 bitmap_free	K0	func	linux/bitmap	6	3	0	0	0	3	2	1	0
-pci_iounmap	K0	func	asm-generic/pci_iomap	6	3	0	0	0	3	1	0	2
+offsetofend	K0	macro	linux/stddef	6	3	0	0	2	3	0	1	0
 EWOULDBLOCK	K0	macro	asm-generic/errno	5	3	0	0	0	1	2	0	2
+__le64	K0	type	linux/types	4	3	0	0	1	1	0	2	0
 fls64	K0	inline	asm/bitops	4	3	0	0	0	1	1	2	0
 hweight64	K0	macro	asm-generic/bitops/const_hweight	4	3	0	0	0	1	2	0	1
 ktime_get_raw_ns	K0	inline	linux/timekeeping	4	3	0	0	0	2	1	1	0
@@ -159,19 +164,20 @@ ktime_set	K0	inline	linux/ktime	3	3	0	0	0	1	0	1	1
 local64_read	K0	macro	asm-generic/local64	3	3	0	0	0	1	1	1	0
 local64_try_cmpxchg	K0	macro	asm-generic/local64	3	3	0	0	0	1	1	1	0
 nsecs_to_jiffies	K0	func	linux/jiffies	3	3	0	0	0	1	1	1	0
-le32_to_cpu	K0	macro	linux/byteorder/generic	1452	2	0	0	25	0	0	1427	0
-le16_to_cpu	K0	macro	linux/byteorder/generic	1015	2	0	0	0	1	0	1014	0
+pci_iomap	K0	func	asm-generic/pci_iomap	3	3	0	0	1	0	1	0	1
+le32_to_cpu	K0	macro	linux/byteorder/generic	1457	2	0	0	30	0	0	1427	0
 int32_t	K0	type	linux/types	509	2	0	0	0	0	0	484	25
-cpu_to_le32	K0	macro	linux/byteorder/generic	356	2	0	0	140	0	0	216	0
+cpu_to_le32	K0	macro	linux/byteorder/generic	366	2	0	0	150	0	0	216	0
 int16_t	K0	type	linux/types	280	2	0	0	0	0	0	279	1
 FIELD_GET	K0	macro	linux/bitfield	229	2	0	0	0	58	171	0	0
 FIELD_PREP	K0	macro	linux/bitfield	229	2	0	0	0	57	172	0	0
+cpu_to_le16	K0	macro	linux/byteorder/generic	229	2	0	0	40	0	0	189	0
+__le32	K0	type	linux/types	185	2	0	0	2	0	0	183	0
 cpu_to_be16	K0	macro	linux/byteorder/generic	158	2	0	0	0	2	0	156	0
 int8_t	K0	type	linux/types	109	2	0	0	0	0	0	108	1
 __BIG_ENDIAN	K0	macro	linux/kconfig	92	2	1	0	0	0	0	91	0
 EPROTO	K0	macro	asm-generic/errno	88	2	0	0	0	26	62	0	0
 __maybe_unused	K0	macro	linux/compiler_attributes	71	2	0	0	0	57	14	0	0
-BUG	K0	macro	asm/bug	66	2	0	0	0	1	0	65	0
 hweight8	K0	macro	asm-generic/bitops/const_hweight	62	2	0	0	0	58	0	4	0
 int64_t	K0	type	linux/types	48	2	0	0	0	0	0	47	1
 __must_check	K0	macro	linux/compiler_attributes	39	2	0	0	0	36	3	0	0
@@ -192,19 +198,23 @@ __poll_t	K0	type	linux/types	12	2	0	0	0	4	8	0	0
 ENOPKG	K0	macro	asm-generic/errno	11	2	0	0	0	1	10	0	0
 __releases	K0	macro	linux/compiler-context-analysis	11	2	0	0	0	9	2	0	0
 hweight16	K0	macro	asm-generic/bitops/const_hweight	11	2	0	0	0	10	0	1	0
+le64_to_cpu	K0	macro	linux/byteorder/generic	11	2	0	0	4	0	0	7	0
 NSEC_PER_MSEC	K0	macro	vdso/time64	10	2	0	0	0	5	0	0	5
 cache_line_size	K0	macro	linux/cache	10	2	0	0	0	0	0	9	1
 ktime_get_boottime	K0	inline	linux/timekeeping	10	2	0	0	0	9	1	0	0
 ktime_get_raw	K0	func	linux/timekeeping	10	2	0	0	0	8	2	0	0
-le64_to_cpu	K0	macro	linux/byteorder/generic	9	2	0	0	2	0	0	7	0
+container_of_const	K0	macro	linux/container_of	9	2	0	0	1	8	0	0	0
 BUILD_BUG_ON_INVALID	K0	macro	linux/build_bug	8	2	0	0	0	7	1	0	0
 EHWPOISON	K0	macro	asm-generic/errno	8	2	0	0	0	0	1	7	0
 EREMOTEIO	K0	macro	asm-generic/errno	8	2	0	0	0	0	1	7	0
 __acquires	K0	macro	linux/compiler-context-analysis	8	2	0	0	0	6	2	0	0
+dev_warn_once	K0	macro	linux/dev_printk	8	2	0	0	1	0	0	7	0
 smp_mb	K0	macro	asm-generic/barrier	8	2	0	0	0	0	5	3	0
 ENOKEY	K0	macro	asm-generic/errno	7	2	0	0	0	2	5	0	0
 NSEC_PER_USEC	K0	macro	vdso/time64	7	2	0	0	0	4	0	0	3
+__le16	K0	type	linux/types	7	2	0	0	5	2	0	0	0
 barrier	K0	macro	linux/compiler	7	2	0	0	0	6	0	1	0
+dev_WARN_ONCE	K0	macro	linux/dev_printk	7	2	0	0	1	0	0	6	0
 ktime_add	K0	macro	linux/ktime	7	2	0	0	0	4	0	3	0
 test_and_clear_bit	K0	inline	asm-generic/bitops/instrumented-atomic	7	2	0	0	0	5	2	0	0
 BUILD_BUG_ON_NOT_POWER_OF_2	K0	macro	linux/build_bug	6	2	0	0	0	3	3	0	0
@@ -216,7 +226,6 @@ be16_to_cpu	K0	macro	linux/byteorder/generic	6	2	0	0	0	2	0	4	0
 be32_to_cpu	K0	macro	linux/byteorder/generic	6	2	0	0	0	0	0	5	1
 bitmap_from_arr32	K0	macro	linux/bitmap	6	2	0	0	0	1	5	0	0
 EMSGSIZE	K0	macro	asm-generic/errno	5	2	0	0	0	1	4	0	0
-SIZE_MAX	K0	macro	linux/limits	5	2	0	0	0	4	1	0	0
 USEC_PER_SEC	K0	macro	vdso/time64	5	2	0	0	0	3	2	0	0
 __fls	K0	inline	asm/bitops	5	2	0	0	0	1	4	0	0
 ktime_to_timespec64	K0	macro	linux/ktime	5	2	0	0	0	3	2	0	0
@@ -231,7 +240,7 @@ POISON_FREE	K0	macro	linux/poison	4	2	0	0	0	3	1	0	0
 S16_MAX	K0	macro	linux/limits	4	2	0	0	0	1	3	0	0
 bitmap_set	K0	inline	linux/bitmap	4	2	0	0	0	0	3	1	0
 get_unaligned_le32	K0	inline	linux/unaligned	4	2	0	0	0	3	0	1	0
-offsetofend	K0	macro	linux/stddef	4	2	0	0	0	3	0	1	0
+pci_iomap_range	K0	func	asm-generic/pci_iomap	4	2	0	0	1	3	0	0	0
 EINPROGRESS	K0	macro	asm-generic/errno	3	2	0	0	0	0	2	0	1
 ELOOP	K0	macro	asm-generic/errno	3	2	0	0	0	0	2	1	0
 ENOTTY	K0	macro	asm-generic/errno-base	3	2	0	0	0	2	0	0	1
@@ -239,7 +248,6 @@ O_LARGEFILE	K0	macro	asm-generic/fcntl	3	2	0	0	0	1	0	0	2
 __LITTLE_ENDIAN	K0	macro	linux/kconfig	3	2	0	0	2	0	0	1	0
 __be32	K0	type	linux/types	3	2	0	0	0	0	0	1	2
 __clear_bit	K0	macro	linux/bitops	3	2	0	0	0	2	0	1	0
-__le64	K0	type	linux/types	3	2	0	0	0	1	0	2	0
 bitmap_clear	K0	inline	linux/bitmap	3	2	0	0	0	0	2	0	1
 bitmap_fill	K0	inline	linux/bitmap	3	2	0	0	0	2	0	1	0
 find_first_zero_bit	K0	inline	linux/find	3	2	0	0	0	0	0	2	1
@@ -271,14 +279,11 @@ jiffies_delta_to_msecs	K0	inline	linux/jiffies	2	2	0	0	0	1	1	0	0
 ktime_add_ms	K0	inline	linux/ktime	2	2	0	0	0	1	1	0	0
 ktime_get_real	K0	inline	linux/timekeeping	2	2	0	0	0	1	1	0	0
 local64_set	K0	macro	asm-generic/local64	2	2	0	0	0	1	1	0	0
-pci_iomap	K0	func	asm-generic/pci_iomap	2	2	0	0	0	0	1	0	1
 sign_extend64	K0	inline	linux/bitops	2	2	0	0	0	1	1	0	0
 smp_load_acquire	K0	macro	asm-generic/barrier	2	2	0	0	1	0	0	0	1
 smp_mb__after_atomic	K0	macro	asm-generic/barrier	2	2	0	0	0	1	1	0	0
 time_after32	K0	macro	linux/time	2	2	0	0	0	1	1	0	0
 uint8_t	K0	type	linux/types	464	1	0	0	0	0	0	0	464
-cpu_to_le16	K0	macro	linux/byteorder/generic	189	1	0	0	0	0	0	189	0
-__le32	K0	type	linux/types	183	1	0	0	0	0	0	183	0
 dev_dbg	K0	macro	linux/dev_printk	170	1	0	0	0	0	0	170	0
 cpu_to_be32	K0	macro	linux/byteorder/generic	110	1	0	0	0	0	0	110	0
 le32_to_cpup	K0	macro	linux/byteorder/generic	59	1	0	0	0	0	0	59	0
@@ -297,19 +302,16 @@ __aligned	K0	macro	linux/compiler_attributes	9	1	0	0	0	0	0	9	0
 __bf_shf	K0	macro	linux/bitfield	9	1	0	0	0	9	0	0	0
 BUILD_BUG_ON_MSG	K0	macro	linux/build_bug	8	1	0	0	0	8	0	0	0
 __mode	K0	macro	linux/compiler_attributes	8	1	0	0	0	0	8	0	0
-container_of_const	K0	macro	linux/container_of	8	1	0	0	0	8	0	0	0
 dev_err_once	K0	macro	linux/dev_printk	8	1	0	0	0	0	0	8	0
 dev_t	K0	type	linux/types	8	1	0	0	0	0	0	0	8
 timespec64_to_ns	K0	inline	linux/time64	8	1	0	0	0	0	0	0	8
 USEC_PER_MSEC	K0	macro	vdso/time64	7	1	0	0	0	0	7	0	0
 __is_constexpr	K0	macro	linux/compiler	7	1	0	0	0	7	0	0	0
-dev_warn_once	K0	macro	linux/dev_printk	7	1	0	0	0	0	0	7	0
 might_sleep_if	K0	macro	linux/kernel	7	1	0	0	0	7	0	0	0
 IS_BUILTIN	K0	macro	linux/kconfig	6	1	0	0	0	0	6	0	0
 POISON_INUSE	K0	macro	linux/poison	6	1	0	0	0	6	0	0	0
 U8_MAX	K0	macro	linux/limits	6	1	0	0	0	6	0	0	0
 __same_type	K0	macro	linux/compiler_types	6	1	0	0	0	6	0	0	0
-dev_WARN_ONCE	K0	macro	linux/dev_printk	6	1	0	0	0	0	0	6	0
 die	K0	func	asm/kdebug	6	1	0	0	0	0	0	6	0
 COUNT_ARGS	K0	macro	linux/args	5	1	0	0	0	0	5	0	0
 EPFNOSUPPORT	K0	macro	asm-generic/errno	5	1	0	0	0	0	5	0	0
@@ -337,7 +339,6 @@ bitmap_to_arr32	K0	macro	linux/bitmap	3	1	0	0	0	0	0	3	0
 clear_bit_unlock	K0	inline	asm-generic/bitops/instrumented-lock	3	1	0	0	0	3	0	0	0
 dev_info_once	K0	macro	linux/dev_printk	3	1	0	0	0	0	0	3	0
 ms_to_ktime	K0	inline	linux/ktime	3	1	0	0	0	3	0	0	0
-pci_iomap_range	K0	func	asm-generic/pci_iomap	3	1	0	0	0	3	0	0	0
 timespec64_sub	K0	inline	linux/time64	3	1	0	0	0	0	0	0	3
 ACCESS_PRIVATE	K0	macro	linux/compiler_types	2	1	0	0	0	0	0	0	2
 COMMA	K0	macro	asm/asm	2	1	0	0	0	0	2	0	0
@@ -349,12 +350,12 @@ INITIAL_JIFFIES	K0	macro	linux/jiffies	2	1	0	0	0	0	0	0	2
 IOMEM_ERR_PTR	K0	macro	linux/err	2	1	0	0	0	2	0	0	0
 POLLHUP	K0	macro	asm-generic/poll	2	1	0	0	0	0	0	0	2
 __ffs64	K0	inline	linux/bitops	2	1	0	0	0	0	2	0	0
-__le16	K0	type	linux/types	2	1	0	0	0	2	0	0	0
 bitmap_andnot	K0	inline	linux/bitmap	2	1	0	0	0	2	0	0	0
 bitmap_complement	K0	inline	linux/bitmap	2	1	0	0	0	0	0	2	0
 bitmap_find_next_zero_area	K0	inline	linux/bitmap	2	1	0	0	0	0	2	0	0
 bitmap_intersects	K0	inline	linux/bitmap	2	1	0	0	0	2	0	0	0
 cache_enable	K0	func	asm/cacheinfo	2	1	0	0	0	0	0	0	2
+data_race	K0	macro	linux/compiler	2	1	0	0	2	0	0	0	0
 dev_WARN	K0	macro	linux/dev_printk	2	1	0	0	0	0	0	2	0
 dev_printk	K0	macro	linux/dev_printk	2	1	0	0	0	0	0	2	0
 dev_warn_ratelimited	K0	macro	linux/dev_printk	2	1	0	0	0	0	0	2	0
@@ -405,6 +406,7 @@ PROT_WRITE	K0	macro	asm-generic/mman-common	1	1	0	0	0	1	0	0	0
 PTR_ALIGN	K0	macro	vdso/align	1	1	0	0	0	1	0	0	0
 PTR_IF	K0	macro	linux/util_macros	1	1	0	0	0	1	0	0	0
 S32_MAX	K0	macro	linux/limits	1	1	0	0	0	1	0	0	0
+SMP_CACHE_BYTES	K0	macro	vdso/cache	1	1	0	0	1	0	0	0	0
 SYSTEM_POWER_OFF	K0	enumconst	linux/kernel	1	1	0	0	0	0	0	1	0
 U64_C	K0	macro	asm-generic/int-ll64	1	1	0	0	0	1	0	0	0
 ULLONG_MAX	K0	macro	vdso/limits	1	1	0	0	0	0	0	1	0
@@ -453,16 +455,17 @@ time_in_range	K0	macro	linux/jiffies	1	1	0	0	0	1	0	0	0
 timespec64_add	K0	inline	linux/time64	1	1	0	0	0	0	0	0	1
 topology_num_cores_per_package	K0	inline	asm/topology	1	1	0	0	0	0	0	1	0
 ullong	K0	type	linux/types	1	1	0	0	0	0	0	1	0
-kfree	K1	func	linux/slab	1943	6	0	1	26	332	149	1361	74
-GFP_KERNEL	K1	macro	linux/gfp_types	1628	6	0	8	31	266	170	1118	35
-kzalloc	K1	macro	linux/slab	1092	6	0	2	16	111	64	891	8
-IORESOURCE_MEM	K1	macro	linux/ioport	32	6	2	1	0	4	4	15	6
-vmap	K1	func	linux/vmalloc	141	5	0	0	2	4	129	2	4
-kmalloc	K1	macro	linux/slab	116	5	0	0	4	42	19	29	22
+IORESOURCE_MEM	K1	macro	linux/ioport	36	7	2	1	4	4	4	15	6
+kfree	K1	func	linux/slab	1982	6	0	1	65	332	149	1361	74
+GFP_KERNEL	K1	macro	linux/gfp_types	1661	6	0	8	64	266	170	1118	35
+kzalloc	K1	macro	linux/slab	1106	6	0	2	30	111	64	891	8
+vmap	K1	func	linux/vmalloc	142	5	0	0	3	4	129	2	4
+kmalloc	K1	macro	linux/slab	121	5	0	0	9	42	19	29	22
 copy_to_user	K1	inline	linux/uaccess	101	5	0	0	2	19	21	53	6
 kvfree	K1	func	linux/slab	87	5	0	0	8	12	12	53	2
 GFP_ATOMIC	K1	macro	linux/gfp_types	84	5	0	0	5	16	18	41	4
 copy_from_user	K1	inline	linux/uaccess	81	5	0	0	3	27	18	21	12
+gfp_t	K1	type	linux/gfp_types	69	5	0	0	14	45	2	3	5
 readl	K1	macro	asm/io	55	5	1	0	0	3	2	40	9
 struct resource	K1	type	linux/ioport	48	5	0	5	0	15	5	14	9
 kmem_cache_free	K1	func	linux/slab	24	5	0	0	1	14	2	6	1
@@ -472,22 +475,26 @@ struct vm_operations_struct	K1	type	linux/mm	13	5	0	0	1	4	3	1	4
 vunmap	K1	func	linux/vmalloc	12	5	0	0	2	3	1	2	4
 iosys_map_set_vaddr	K1	inline	linux/iosys-map	10	5	0	1	1	6	1	1	0
 kmem_cache_create	K1	macro	linux/slab	7	5	0	0	1	1	3	1	1
+kcalloc	K1	macro	linux/slab	141	4	0	0	3	15	6	117	0
 u64_to_user_ptr	K1	macro	linux/util_macros	113	4	0	0	9	51	32	21	0
-struct page	K1	type	linux/mm_types	63	4	0	0	1	43	14	5	0
-PAGE_ALIGN	K1	macro	linux/mm	60	4	0	0	1	26	29	4	0
+struct page	K1	type	linux/mm_types	64	4	0	0	2	43	14	5	0
+PAGE_ALIGN	K1	macro	linux/mm	63	4	0	0	4	26	29	4	0
 struct vm_area_struct	K1	type	linux/mm_types	60	4	0	0	1	0	13	2	44
-gfp_t	K1	type	linux/gfp_types	55	4	0	0	0	45	2	3	5
+kmalloc_array	K1	macro	linux/slab	58	4	0	0	4	11	9	34	0
 struct mm_struct	K1	type	linux/mm_types	54	4	0	0	0	3	4	36	11
 resource_size	K1	inline	linux/ioport	52	4	0	5	0	41	2	0	4
 writel	K1	macro	asm/io	52	4	2	0	0	8	3	39	0
+__GFP_NOWARN	K1	macro	linux/gfp_types	50	4	0	0	4	36	5	0	5
 page_offset	K1	inline	linux/pagemap	36	4	0	0	0	15	10	2	9
+offset_in_page	K1	macro	linux/mm	35	4	0	0	1	30	0	3	1
 memcpy_fromio	K1	macro	asm/io	25	4	0	0	0	5	1	18	1
 VM_FAULT_NOPAGE	K1	enumconst	linux/mm_types	18	4	0	0	0	3	5	1	9
 VM_FAULT_SIGBUS	K1	enumconst	linux/mm_types	18	4	0	0	0	6	2	3	7
 struct vm_fault	K1	type	linux/mm	18	4	0	0	0	3	7	1	7
-is_vmalloc_addr	K1	func	linux/mm	15	4	0	0	1	2	1	0	11
+is_vmalloc_addr	K1	func	linux/mm	16	4	0	0	2	2	1	0	11
 memset_io	K1	macro	asm/io	11	4	0	1	0	6	0	3	1
 VM_DONTEXPAND	K1	macro	linux/mm	10	4	0	0	1	2	3	0	4
+__GFP_ZERO	K1	macro	linux/gfp_types	10	4	0	0	5	0	2	1	2
 kmem_cache_zalloc	K1	macro	linux/slab	9	4	0	0	2	4	2	0	1
 pgprot_noncached	K1	macro	linux/pgtable	8	4	0	0	1	1	2	0	4
 struct iosys_map	K1	type	linux/iosys-map	8	4	2	3	0	0	0	2	1
@@ -495,15 +502,12 @@ iosys_map_set_vaddr_iomem	K1	inline	linux/iosys-map	7	4	0	1	0	3	2	1	0
 IORESOURCE_UNSET	K1	macro	linux/ioport	6	4	0	0	0	1	1	2	2
 VM_MAYWRITE	K1	macro	linux/mm	6	4	0	0	0	1	1	1	3
 devm_request_mem_region	K1	macro	linux/ioport	6	4	2	1	1	2	0	0	0
+virt_to_page	K1	macro	asm/page	6	4	0	0	1	3	1	1	0
 vm_flags_set	K1	inline	linux/mm	5	4	0	0	1	1	2	0	1
 mmap_read_unlock	K1	inline	linux/mmap_lock	4	4	0	0	0	1	1	1	1
 vm_flags_clear	K1	inline	linux/mm	4	4	0	0	0	1	1	1	1
-kcalloc	K1	macro	linux/slab	138	3	0	0	0	15	6	117	0
 page_size	K1	inline	linux/mm	97	3	0	0	0	48	24	0	25
-kmalloc_array	K1	macro	linux/slab	54	3	0	0	0	11	9	34	0
-__GFP_NOWARN	K1	macro	linux/gfp_types	46	3	0	0	0	36	5	0	5
 pte_flags	K1	inline	asm/pgtable_types	46	3	0	0	0	31	9	6	0
-offset_in_page	K1	macro	linux/mm	34	3	0	0	0	30	0	3	1
 put_user	K1	macro	asm/uaccess	33	3	0	0	0	3	4	26	0
 get_user	K1	macro	asm/uaccess	31	3	0	0	0	19	4	8	0
 memcpy_toio	K1	macro	asm/io	27	3	0	0	0	4	0	22	1
@@ -542,8 +546,6 @@ ioremap	K1	macro	asm/io	6	3	0	0	0	2	0	2	2
 struct shrink_control	K1	type	linux/shrinker	6	3	0	0	0	2	2	0	2
 SHRINK_STOP	K1	macro	linux/shrinker	5	3	0	0	0	1	1	0	3
 VM_NORESERVE	K1	macro	linux/mm	5	3	0	0	0	3	1	0	1
-__GFP_ZERO	K1	macro	linux/gfp_types	5	3	0	0	0	0	2	1	2
-virt_to_page	K1	macro	asm/page	5	3	0	0	0	3	1	1	0
 vmalloc_to_page	K1	func	linux/mm	5	3	0	0	1	0	1	0	3
 IORESOURCE_MEM_64	K1	macro	linux/ioport	4	3	0	0	0	1	2	1	0
 VM_MIXEDMAP	K1	macro	linux/mm	4	3	0	0	1	1	0	0	2
@@ -565,17 +567,20 @@ vma_pages	K1	inline	linux/mm	3	3	0	0	0	1	1	0	1
 page_count	K1	inline	linux/page_ref	148	2	0	0	0	9	0	0	139
 devm_add_action_or_reset	K1	macro	linux/device/devres	51	2	0	3	0	0	48	0	0
 poll_timeout_us	K1	macro	linux/iopoll	45	2	0	0	0	31	0	14	0
+iowrite32	K1	macro	asm-generic/io	31	2	0	0	6	25	0	0	0
 IOSYS_MAP_INIT_OFFSET	K1	macro	linux/iosys-map	28	2	0	0	0	4	24	0	0
 iosys_map_is_null	K1	inline	linux/iosys-map	13	2	0	0	0	7	6	0	0
 pgprot_val	K1	macro	asm/pgtable_types	13	2	0	0	0	2	0	0	11
 KMEM_CACHE	K1	macro	linux/slab	11	2	0	0	0	9	0	2	0
 PAGE_KERNEL	K1	macro	asm/pgtable_types	11	2	0	0	0	2	0	0	9
 __pgprot	K1	macro	asm/pgtable_types	11	2	0	0	0	1	0	0	10
+ioread32	K1	macro	asm-generic/io	11	2	0	0	6	5	0	0	0
 get_page	K1	inline	linux/mm	10	2	0	0	0	9	0	0	1
 kmap_local_page	K1	inline	linux/highmem-internal	10	2	0	0	0	8	0	2	0
 fs_reclaim_acquire	K1	func	linux/sched/mm	9	2	0	0	0	3	6	0	0
 fs_reclaim_release	K1	func	linux/sched/mm	9	2	0	0	0	3	6	0	0
 page_address	K1	macro	linux/mm	9	2	0	0	0	4	0	0	5
+ioread8	K1	macro	asm-generic/io	8	2	0	0	5	3	0	0	0
 iosys_map_memcpy_to	K1	inline	linux/iosys-map	8	2	0	0	0	7	1	0	0
 iosys_map_wr	K1	macro	linux/iosys-map	8	2	0	0	0	1	7	0	0
 krealloc	K1	macro	linux/slab	7	2	0	0	0	5	2	0	0
@@ -587,9 +592,12 @@ _IOWR	K1	macro	asm-generic/ioctl	6	2	0	0	0	0	0	3	3
 __GFP_ACCOUNT	K1	macro	linux/gfp_types	6	2	0	0	0	0	4	0	2
 vmalloc	K1	macro	linux/vmalloc	6	2	0	0	0	0	0	4	2
 IORESOURCE_IRQ	K1	macro	linux/ioport	5	2	0	0	0	1	0	4	0
+__GFP_HIGHMEM	K1	macro	linux/gfp_types	5	2	0	0	2	3	0	0	0
 devm_kzalloc	K1	inline	linux/device/devres	5	2	0	0	0	0	2	0	3
+ioread16	K1	macro	asm-generic/io	5	2	0	0	4	1	0	0	0
 memunmap	K1	func	linux/io	5	2	0	0	0	4	0	1	0
 mmput	K1	func	linux/sched/mm	5	2	0	0	0	0	3	2	0
+virt_to_phys	K1	macro	asm/io	5	2	0	0	4	0	0	0	1
 vzalloc	K1	macro	linux/vmalloc	5	2	0	0	0	1	0	4	0
 IORES_DESC_NONE	K1	enumconst	linux/ioport	4	2	0	0	0	1	3	0	0
 PHYS_PFN	K1	macro	linux/pfn	4	2	0	0	0	0	3	0	1
@@ -633,7 +641,6 @@ pagefault_enable	K1	inline	linux/uaccess	2	2	0	0	0	1	0	1	0
 remap_pfn_range	K1	func	linux/mm	2	2	0	0	0	0	1	0	1
 writeb	K1	macro	asm/io	2	2	1	0	0	0	0	1	0
 max_pfn	K1	var	linux/memblock	55	1	0	0	0	0	0	55	0
-iowrite32	K1	macro	asm-generic/io	25	1	0	0	0	25	0	0	0
 MAX_NUMNODES	K1	macro	linux/nodemask_types	13	1	0	0	0	0	0	0	13
 access_ok	K1	macro	asm-generic/access_ok	9	1	0	0	0	9	0	0	0
 enum page_walk_action	K1	type	linux/pagewalk	9	1	0	0	0	0	9	0	0
@@ -643,6 +650,7 @@ virt_addr_valid	K1	macro	asm/page	9	1	0	0	0	0	0	0	9
 DEFINE_RES_MEM	K1	macro	linux/ioport	8	1	0	0	0	8	0	0	0
 io_mapping_map_wc	K1	inline	linux/io-mapping	8	1	0	0	0	8	0	0	0
 io_mapping_unmap	K1	inline	linux/io-mapping	8	1	0	0	0	8	0	0	0
+iowrite16	K1	macro	asm-generic/io	8	1	0	0	8	0	0	0	0
 _IOC_NR	K1	macro	asm-generic/ioctl	7	1	0	0	0	0	0	0	7
 _IOC_SIZE	K1	macro	asm-generic/ioctl	7	1	0	0	0	0	0	0	7
 struct folio	K1	type	linux/mm_types	7	1	0	0	0	7	0	0	0
@@ -653,11 +661,11 @@ page_to_nid	K1	inline	linux/mm	6	1	0	0	0	0	0	0	6
 MM_SHMEMPAGES	K1	enumconst	linux/mm_types_task	5	1	0	0	0	0	0	0	5
 __GFP_NORETRY	K1	macro	linux/gfp_types	5	1	0	0	0	5	0	0	0
 io_mapping_map_atomic_wc	K1	inline	linux/io-mapping	5	1	0	0	0	5	0	0	0
-ioread32	K1	macro	asm-generic/io	5	1	0	0	0	5	0	0	0
 iosys_map_rd	K1	macro	linux/iosys-map	5	1	0	0	0	0	5	0	0
 pat_enabled	K1	func	asm/memtype	5	1	0	0	0	5	0	0	0
 request_mem_region	K1	macro	linux/ioport	5	1	0	0	0	0	0	0	5
 ACTION_CONTINUE	K1	enumconst	linux/pagewalk	4	1	0	0	0	0	4	0	0
+IORESOURCE_IO	K1	macro	linux/ioport	4	1	0	0	4	0	0	0	0
 _IOC_DIR	K1	macro	asm-generic/ioctl	4	1	0	0	0	0	0	0	4
 __copy_from_user	K1	inline	linux/uaccess	4	1	0	0	0	4	0	0	0
 __phys_to_pfn	K1	macro	asm-generic/memory_model	4	1	0	0	0	0	0	0	4
@@ -672,7 +680,6 @@ GFP_USER	K1	macro	linux/gfp_types	3	1	0	0	0	0	3	0	0
 SLAB_TYPESAFE_BY_RCU	K1	macro	linux/slab	3	1	0	0	0	3	0	0	0
 __GFP_COMP	K1	macro	linux/gfp_types	3	1	0	0	0	0	0	0	3
 __GFP_DMA32	K1	macro	linux/gfp_types	3	1	0	0	0	3	0	0	0
-__GFP_HIGHMEM	K1	macro	linux/gfp_types	3	1	0	0	0	3	0	0	0
 __GFP_RECLAIMABLE	K1	macro	linux/gfp_types	3	1	0	0	0	3	0	0	0
 __GFP_THISNODE	K1	macro	linux/gfp_types	3	1	0	0	0	0	0	0	3
 __PAGE_KERNEL_NOCACHE	K1	macro	asm/pgtable_types	3	1	0	0	0	0	0	0	3
@@ -684,7 +691,7 @@ free_page	K1	macro	linux/gfp	3	1	0	0	0	3	0	0	0
 get_num_physpages	K1	inline	linux/mm	3	1	0	0	0	0	0	0	3
 get_user_pages_remote	K1	func	linux/mm	3	1	0	0	0	0	0	0	3
 io_mapping_init_wc	K1	inline	linux/io-mapping	3	1	0	0	0	3	0	0	0
-ioread8	K1	macro	asm-generic/io	3	1	0	0	0	3	0	0	0
+iowrite8	K1	macro	asm-generic/io	3	1	0	0	3	0	0	0	0
 mapping_clear_unevictable	K1	inline	linux/pagemap	3	1	0	0	0	3	0	0	0
 mapping_gfp_mask	K1	inline	linux/pagemap	3	1	0	0	0	3	0	0	0
 node_isset	K1	macro	linux/nodemask	3	1	0	0	0	0	0	0	3
@@ -729,6 +736,7 @@ folio_alloc	K1	macro	linux/gfp	2	1	0	0	0	2	0	0	0
 folio_batch_init	K1	inline	linux/pagevec	2	1	0	0	0	2	0	0	0
 folio_batch_space	K1	inline	linux/pagevec	2	1	0	0	0	2	0	0	0
 folio_pfn	K1	inline	linux/mm	2	1	0	0	0	2	0	0	0
+free_pages_exact	K1	func	linux/gfp	2	1	0	0	2	0	0	0	0
 get_dev_pagemap	K1	func	linux/memremap	2	1	0	0	0	0	0	0	2
 get_user_pages	K1	func	linux/mm	2	1	0	0	0	0	0	0	2
 kunmap	K1	inline	linux/highmem-internal	2	1	0	0	0	2	0	0	0
@@ -801,6 +809,7 @@ __folio_batch_release	K1	func	linux/pagevec	1	1	0	0	0	1	0	0	0
 __get_free_pages	K1	macro	linux/gfp	1	1	0	0	0	0	0	0	1
 __pa	K1	macro	asm/page	1	1	0	0	0	0	0	0	1
 __put_user	K1	macro	asm/uaccess	1	1	0	0	0	1	0	0	0
+alloc_pages_exact	K1	macro	linux/gfp	1	1	0	0	1	0	0	0	0
 arch_io_reserve_memtype_wc	K1	inline	linux/io	1	1	0	0	0	0	0	1	0
 cachemode2protval	K1	func	asm/pgtable_types	1	1	0	0	0	0	0	0	1
 check_move_unevictable_folios	K1	func	linux/swap	1	1	0	0	0	1	0	0	0
@@ -837,7 +846,6 @@ for_each_vma_range	K1	macro	linux/mm	1	1	0	0	0	1	0	0	0
 free_pages	K1	func	linux/gfp	1	1	0	0	0	0	0	0	1
 get_nr_swap_pages	K1	macro	linux/swap	1	1	0	0	0	1	0	0	0
 get_task_mm	K1	func	linux/sched/mm	1	1	0	0	0	0	0	1	0
-ioread16	K1	macro	asm-generic/io	1	1	0	0	0	1	0	0	0
 ioread64	K1	macro	linux/io-64-nonatomic-hi-lo	1	1	0	0	0	0	1	0	0
 iosys_map_memcpy_from	K1	inline	linux/iosys-map	1	1	0	0	0	0	1	0	0
 is_device_private_page	K1	inline	linux/memremap	1	1	0	0	0	0	1	0	0
@@ -901,7 +909,6 @@ unregister_memory_notifier	K1	inline	linux/memory	1	1	0	0	0	0	0	0	1
 unregister_vmap_purge_notifier	K1	func	linux/vmalloc	1	1	0	0	0	1	0	0	0
 user_access_begin	K1	macro	linux/uaccess	1	1	0	0	0	1	0	0	0
 virt_to_folio	K1	inline	linux/mm	1	1	0	0	0	1	0	0	0
-virt_to_phys	K1	macro	asm/io	1	1	0	0	0	0	0	0	1
 vm_flags_mod	K1	inline	linux/mm	1	1	0	0	0	0	1	0	0
 vm_mmap	K1	func	linux/mm	1	1	0	0	0	1	0	0	0
 vma_lookup	K1	func	linux/mm	1	1	0	0	0	0	0	1	0
@@ -912,64 +919,66 @@ writeback_iter	K1	func	linux/writeback	1	1	0	0	0	1	0	0	0
 writew	K1	macro	asm/io	1	1	1	0	0	0	0	0	0
 zone_managed_pages	K1	inline	linux/mmzone	1	1	0	0	0	0	0	1	0
 zone_page_state_snapshot	K1	inline	linux/vmstat	1	1	0	0	0	0	0	0	1
-sg_dma_len	K1-dma	macro	linux/scatterlist	63	5	0	0	4	50	4	1	4
-struct dma_buf_attachment	K1-dma	type	linux/dma-buf	46	5	0	0	13	4	9	12	8
-sg_dma_address	K1-dma	macro	linux/scatterlist	43	5	0	0	4	30	2	3	4
+sg_dma_len	K1-dma	macro	linux/scatterlist	64	5	0	0	5	50	4	1	4
+struct dma_buf_attachment	K1-dma	type	linux/dma-buf	47	5	0	0	14	4	9	12	8
+sg_dma_address	K1-dma	macro	linux/scatterlist	44	5	0	0	5	30	2	3	4
 sg_free_table	K1-dma	func	linux/scatterlist	42	5	0	0	4	13	7	14	4
 DMA_BIDIRECTIONAL	K1-dma	enumconst	linux/dma-direction	41	5	0	0	3	8	9	12	9
 DMA_ATTR_SKIP_CPU_SYNC	K1-dma	macro	linux/dma-mapping	23	5	0	0	2	3	5	9	4
+DMA_TO_DEVICE	K1-dma	enumconst	linux/dma-direction	23	5	0	0	11	1	2	6	3
+DMA_BIT_MASK	K1-dma	macro	linux/dma-mapping	20	5	0	0	5	3	2	7	3
 sg_alloc_table	K1-dma	func	linux/scatterlist	20	5	0	0	2	11	1	3	3
-DMA_TO_DEVICE	K1-dma	enumconst	linux/dma-direction	16	5	0	0	4	1	2	6	3
+sg_page	K1-dma	inline	linux/scatterlist	16	5	0	0	1	12	1	1	1
 sg_set_page	K1-dma	inline	linux/scatterlist	16	5	0	0	2	9	1	1	3
+DMA_FROM_DEVICE	K1-dma	enumconst	linux/dma-direction	15	5	0	2	6	0	3	1	3
 dma_buf_put	K1-dma	func	linux/dma-buf	11	5	0	0	1	1	1	2	6
-DMA_FROM_DEVICE	K1-dma	enumconst	linux/dma-direction	10	5	0	2	1	0	3	1	3
 dma_buf_unmap_attachment	K1-dma	func	linux/dma-buf	9	5	0	0	2	1	4	1	1
 get_dma_buf	K1-dma	inline	linux/dma-buf	8	5	0	0	1	1	2	3	1
 dma_buf_map_attachment	K1-dma	func	linux/dma-buf	5	5	0	0	1	1	1	1	1
 dma_set_max_seg_size	K1-dma	inline	linux/dma-mapping	5	5	0	0	1	1	1	1	1
-enum dma_data_direction	K1-dma	type	linux/dma-direction	30	4	0	0	6	3	0	13	8
-struct scatterlist	K1-dma	type	linux/scatterlist	29	4	0	0	8	0	5	2	14
-DMA_BIT_MASK	K1-dma	macro	linux/dma-mapping	15	4	0	0	0	3	2	7	3
-sg_page	K1-dma	inline	linux/scatterlist	15	4	0	0	0	12	1	1	1
-dma_mapping_error	K1-dma	inline	linux/dma-mapping	11	4	0	0	1	0	2	4	4
+struct scatterlist	K1-dma	type	linux/scatterlist	58	4	0	0	37	0	5	2	14
+enum dma_data_direction	K1-dma	type	linux/dma-direction	38	4	0	0	14	3	0	13	8
+sg_next	K1-dma	inline	linux/scatterlist	17	4	0	0	5	9	1	0	2
+dma_mapping_error	K1-dma	inline	linux/dma-mapping	12	4	0	0	2	0	2	4	4
 dma_unmap_resource	K1-dma	func	linux/dma-mapping	8	4	0	0	1	0	2	4	1
+dma_set_mask	K1-dma	func	linux/dma-mapping	6	4	0	0	1	1	1	0	3
+dma_free_coherent	K1-dma	inline	linux/dma-mapping	5	4	0	0	1	2	0	1	1
 dma_map_resource	K1-dma	func	linux/dma-mapping	5	4	0	0	1	0	1	2	1
 struct dma_buf_ops	K1-dma	type	linux/dma-buf	5	4	0	0	0	1	1	2	1
-struct dma_buf	K1-dma	type	linux/dma-buf	44	3	0	0	7	0	13	24	0
-sg_next	K1-dma	inline	linux/scatterlist	12	3	0	0	0	9	1	0	2
+dma_alloc_coherent	K1-dma	inline	linux/dma-mapping	4	4	0	0	1	1	0	1	1
+dma_set_coherent_mask	K1-dma	func	linux/dma-mapping	4	4	0	0	1	1	1	0	1
+struct dma_buf	K1-dma	type	linux/dma-buf	48	3	0	0	11	0	13	24	0
+dma_set_mask_and_coherent	K1-dma	inline	linux/dma-mapping	11	3	0	0	3	0	0	7	1
 for_each_sgtable_sg	K1-dma	macro	linux/scatterlist	10	3	0	0	2	0	4	4	0
 dma_map_sgtable	K1-dma	func	linux/dma-mapping	8	3	0	0	0	3	2	3	0
 dma_unmap_sgtable	K1-dma	inline	linux/dma-mapping	8	3	0	0	0	1	3	4	0
 struct dma_buf_attach_ops	K1-dma	type	linux/dma-buf	6	3	0	0	1	0	3	2	0
-dma_set_mask	K1-dma	func	linux/dma-mapping	5	3	0	0	0	1	1	0	3
 dma_buf_detach	K1-dma	func	linux/dma-buf	4	3	0	0	1	1	0	0	2
-dma_free_coherent	K1-dma	inline	linux/dma-mapping	4	3	0	0	0	2	0	1	1
+dma_max_mapping_size	K1-dma	func	linux/dma-mapping	4	3	0	0	2	1	1	0	0
 sg_alloc_table_from_pages_segment	K1-dma	func	linux/scatterlist	4	3	0	0	0	2	1	0	1
 DEFINE_DMA_BUF_EXPORT_INFO	K1-dma	macro	linux/dma-buf	3	3	0	0	1	1	0	0	1
-dma_alloc_coherent	K1-dma	inline	linux/dma-mapping	3	3	0	0	0	1	0	1	1
 dma_buf_dynamic_attach	K1-dma	func	linux/dma-buf	3	3	0	0	1	0	1	1	0
-dma_max_mapping_size	K1-dma	func	linux/dma-mapping	3	3	0	0	1	1	1	0	0
-dma_set_coherent_mask	K1-dma	func	linux/dma-mapping	3	3	0	0	0	1	1	0	1
+dma_map_page_attrs	K1-dma	func	linux/dma-mapping	3	3	0	0	1	0	0	1	1
+dma_unmap_page_attrs	K1-dma	func	linux/dma-mapping	3	3	0	0	1	0	0	1	1
 struct sg_table	K1-dma	type	linux/scatterlist	29	2	0	0	15	0	0	14	0
+sg_init_one	K1-dma	func	linux/scatterlist	21	2	0	0	20	0	0	0	1
 for_each_sg	K1-dma	macro	linux/scatterlist	9	2	0	0	0	2	0	0	7
-dma_set_mask_and_coherent	K1-dma	inline	linux/dma-mapping	8	2	0	0	0	0	0	7	1
-sg_init_one	K1-dma	func	linux/scatterlist	7	2	0	0	6	0	0	0	1
+DMA_MAPPING_ERROR	K1-dma	macro	linux/dma-mapping	6	2	0	0	5	0	1	0	0
 dma_buf_unpin	K1-dma	func	linux/dma-buf	5	2	0	0	4	0	0	1	0
 iommu_get_domain_for_dev	K1-dma	func	linux/iommu	5	2	0	0	0	0	0	4	1
 struct iommu_domain	K1-dma	type	linux/iommu	5	2	0	0	0	0	0	4	1
 dma_buf_fd	K1-dma	func	linux/dma-buf	4	2	0	0	0	0	0	3	1
+sg_phys	K1-dma	inline	linux/scatterlist	4	2	0	0	3	0	0	0	1
 dma_buf_get	K1-dma	func	linux/dma-buf	3	2	0	0	0	0	0	1	2
 dma_buf_pin	K1-dma	func	linux/dma-buf	3	2	0	0	2	0	0	1	0
 sg_alloc_table_from_pages	K1-dma	inline	linux/scatterlist	3	2	0	0	0	0	0	2	1
 dma_buf_attach	K1-dma	func	linux/dma-buf	2	2	0	0	0	1	0	0	1
+dma_buf_export	K1-dma	func	linux/dma-buf	2	2	0	0	1	0	0	0	1
 dma_buf_move_notify	K1-dma	func	linux/dma-buf	2	2	0	0	0	0	1	1	0
 dma_map_page	K1-dma	macro	linux/dma-mapping	2	2	0	0	0	0	1	1	0
-dma_map_page_attrs	K1-dma	func	linux/dma-mapping	2	2	0	0	0	0	0	1	1
 dma_map_sg_attrs	K1-dma	func	linux/dma-mapping	2	2	0	0	0	1	0	0	1
-dma_unmap_page_attrs	K1-dma	func	linux/dma-mapping	2	2	0	0	0	0	0	1	1
 dma_unmap_sg	K1-dma	macro	linux/dma-mapping	2	2	0	0	0	1	0	0	1
 sg_assign_page	K1-dma	inline	linux/scatterlist	2	2	0	0	0	1	0	0	1
-sg_phys	K1-dma	inline	linux/scatterlist	2	2	0	0	1	0	0	0	1
 sg_set_buf	K1-dma	inline	linux/scatterlist	22	1	0	0	0	0	0	0	22
 sg_mark_end	K1-dma	inline	linux/scatterlist	8	1	0	0	0	8	0	0	0
 dma_sync_sgtable_for_device	K1-dma	inline	linux/dma-mapping	4	1	0	0	4	0	0	0	0
@@ -988,7 +997,6 @@ struct dma_iova_state	K1-dma	type	linux/dma-mapping	2	1	0	0	0	0	0	0	2
 struct dma_map_ops	K1-dma	type	linux/dma-map-ops	2	1	0	0	0	0	0	0	2
 DMA_ATTR_NO_KERNEL_MAPPING	K1-dma	macro	linux/dma-mapping	1	1	0	0	0	1	0	0	0
 DMA_ATTR_NO_WARN	K1-dma	macro	linux/dma-mapping	1	1	0	0	0	1	0	0	0
-DMA_MAPPING_ERROR	K1-dma	macro	linux/dma-mapping	1	1	0	0	0	0	1	0	0
 IOMMU_DOMAIN_DMA	K1-dma	macro	linux/iommu	1	1	0	0	0	0	0	1	0
 IOMMU_DOMAIN_DMA_FQ	K1-dma	macro	linux/iommu	1	1	0	0	0	0	0	1	0
 IOMMU_DOMAIN_IDENTITY	K1-dma	macro	linux/iommu	1	1	0	0	0	0	0	1	0
@@ -996,16 +1004,18 @@ SG_CHAIN	K1-dma	macro	linux/scatterlist	1	1	0	0	0	1	0	0	0
 SG_MAX_SINGLE_ALLOC	K1-dma	macro	linux/scatterlist	1	1	0	0	0	1	0	0	0
 __IOMMU_DOMAIN_DMA_API	K1-dma	macro	linux/iommu	1	1	0	0	0	0	0	0	1
 dma_addressing_limited	K1-dma	func	linux/dma-mapping	1	1	0	0	0	0	0	1	0
-dma_buf_export	K1-dma	func	linux/dma-buf	1	1	0	0	0	0	0	0	1
 dma_buf_is_dynamic	K1-dma	inline	linux/dma-buf	1	1	0	0	0	0	0	1	0
 dma_get_max_seg_size	K1-dma	inline	linux/dma-mapping	1	1	0	0	0	0	0	0	1
 dma_iova_free	K1-dma	func	linux/dma-mapping	1	1	0	0	0	0	0	0	1
 dma_iova_size	K1-dma	inline	linux/dma-mapping	1	1	0	0	0	0	0	0	1
 dma_iova_try_alloc	K1-dma	func	linux/dma-mapping	1	1	0	0	0	0	0	0	1
 dma_map_sg	K1-dma	macro	linux/dma-mapping	1	1	0	0	0	0	0	0	1
+dma_need_sync	K1-dma	inline	linux/dma-mapping	1	1	0	0	1	0	0	0	0
 dma_sync_sg_for_device	K1-dma	inline	linux/dma-mapping	1	1	0	0	0	0	0	0	1
 dma_sync_sgtable_for_cpu	K1-dma	inline	linux/dma-mapping	1	1	0	0	1	0	0	0	0
 dma_sync_single_for_cpu	K1-dma	inline	linux/dma-mapping	1	1	0	0	0	0	0	0	1
+dma_sync_single_range_for_cpu	K1-dma	inline	linux/dma-mapping	1	1	0	0	1	0	0	0	0
+dma_sync_single_range_for_device	K1-dma	inline	linux/dma-mapping	1	1	0	0	1	0	0	0	0
 dma_unmap_page	K1-dma	macro	linux/dma-mapping	1	1	0	0	0	0	1	0	0
 dma_unmap_sg_attrs	K1-dma	func	linux/dma-mapping	1	1	0	0	0	0	0	0	1
 iommu_is_dma_domain	K1-dma	inline	linux/iommu	1	1	0	0	0	0	0	0	1
@@ -1014,18 +1024,22 @@ iommu_sva_unbind_device	K1-dma	func	linux/iommu	1	1	0	0	0	0	0	0	1
 phys_to_dma	K1-dma	inline	linux/dma-direct	1	1	0	0	0	0	0	0	1
 sg_set_folio	K1-dma	inline	linux/scatterlist	1	1	0	0	0	1	0	0	0
 sg_virt	K1-dma	inline	linux/scatterlist	1	1	0	0	0	1	0	0	0
+struct dma_buf_export_info	K1-dma	type	linux/dma-buf	1	1	0	0	1	0	0	0	0
 struct iommu_sva	K1-dma	type	linux/iommu	1	1	0	0	0	0	0	0	1
 use_dma_iommu	K1-dma	inline	linux/iommu-dma	1	1	0	0	0	0	0	0	1
 mutex_unlock	K2	func	linux/mutex	1268	5	0	0	2	343	181	683	59
 mutex_lock	K2	macro	linux/mutex	1116	5	0	0	2	274	164	630	46
-spin_unlock_irqrestore	K2	inline	linux/spinlock	348	5	0	0	2	138	15	161	32
-spin_unlock	K2	inline	linux/spinlock	324	5	0	0	26	132	51	106	9
-spin_lock_irqsave	K2	macro	linux/spinlock	301	5	0	0	2	124	14	134	27
-spin_lock	K2	inline	linux/spinlock	292	5	0	0	23	118	50	92	9
+spin_unlock_irqrestore	K2	inline	linux/spinlock	359	5	0	0	13	138	15	161	32
+spin_unlock	K2	inline	linux/spinlock	329	5	0	0	31	132	51	106	9
+spin_lock_irqsave	K2	macro	linux/spinlock	310	5	0	0	11	124	14	134	27
+spin_lock	K2	inline	linux/spinlock	297	5	0	0	28	118	50	92	9
 atomic_read	K2	inline	linux/atomic/atomic-instrumented	267	5	0	0	3	132	28	75	29
+msleep	K2	func	linux/delay	198	5	0	0	3	33	14	147	1
+spin_unlock_irq	K2	inline	linux/spinlock	173	5	0	0	4	129	25	12	3
+spin_lock_irq	K2	inline	linux/spinlock	169	5	0	0	4	125	25	12	3
 mutex_init	K2	macro	linux/mutex	152	5	0	0	1	48	13	82	8
-spin_lock_init	K2	macro	linux/spinlock	123	5	0	0	6	43	24	39	11
-spinlock_t	K2	type	linux/spinlock_types	120	5	0	0	6	42	26	36	10
+spin_lock_init	K2	macro	linux/spinlock	127	5	0	0	10	43	24	39	11
+spinlock_t	K2	type	linux/spinlock_types	122	5	0	0	8	42	26	36	10
 current	K2	macro	asm/current	113	5	0	0	1	22	16	28	46
 atomic_set	K2	inline	linux/atomic/atomic-instrumented	110	5	0	0	4	16	5	74	11
 INIT_WORK	K2	macro	linux/workqueue	106	5	0	0	3	35	30	37	1
@@ -1039,11 +1053,9 @@ wait_queue_head_t	K2	type	linux/wait	27	5	0	0	2	10	6	2	7
 init_waitqueue_head	K2	macro	linux/wait	25	5	0	0	2	9	6	2	6
 wake_up_all	K2	macro	linux/wait	25	5	0	0	3	7	13	1	1
 wake_up	K2	macro	linux/wait	16	5	0	0	5	3	4	2	2
+init_completion	K2	inline	linux/completion	13	5	0	0	1	2	5	2	3
 struct ww_acquire_ctx	K2	type	linux/ww_mutex	13	5	0	0	1	1	1	9	1
 udelay	K2	inline	asm-generic/delay	564	4	0	0	0	69	3	489	3
-msleep	K2	func	linux/delay	195	4	0	0	0	33	14	147	1
-spin_unlock_irq	K2	inline	linux/spinlock	169	4	0	0	0	129	25	12	3
-spin_lock_irq	K2	inline	linux/spinlock	165	4	0	0	0	125	25	12	3
 struct mutex	K2	type	linux/mutex_types	112	4	0	0	1	0	32	70	9
 cancel_delayed_work_sync	K2	func	linux/workqueue	95	4	0	0	0	17	3	72	3
 flush_work	K2	func	linux/workqueue	62	4	0	0	4	30	12	16	0
@@ -1058,19 +1070,20 @@ kref_get_unless_zero	K2	inline	linux/kref	32	4	0	0	0	25	4	2	1
 struct timer_list	K2	type	linux/timer_types	31	4	0	0	0	18	2	4	7
 NOTIFY_DONE	K2	macro	linux/notifier	22	4	0	0	0	11	2	7	2
 kref_read	K2	inline	linux/kref	22	4	0	0	0	14	4	3	1
+complete	K2	func	linux/completion	21	4	0	0	2	1	0	10	8
 atomic_dec_and_test	K2	inline	linux/atomic/atomic-instrumented	19	4	0	0	0	14	1	1	3
 complete_all	K2	func	linux/completion	18	4	0	0	0	4	10	1	3
 struct hrtimer	K2	type	linux/hrtimer_types	17	4	0	0	0	11	2	2	2
 HRTIMER_MODE_REL	K2	enumconst	linux/hrtimer	15	4	0	0	0	9	1	2	3
 TASK_COMM_LEN	K2	enumconst	linux/sched	14	4	0	0	1	4	1	8	0
 wait_event_timeout	K2	macro	linux/wait	14	4	0	0	4	1	8	0	1
-init_completion	K2	inline	linux/completion	12	4	0	0	0	2	5	2	3
 hrtimer_cancel	K2	func	linux/hrtimer	11	4	0	0	0	8	1	1	1
 timer_setup	K2	macro	linux/timer	11	4	0	0	0	5	1	2	3
 enum hrtimer_restart	K2	type	linux/hrtimer_types	9	4	0	0	0	6	1	1	1
 NOTIFY_OK	K2	macro	linux/notifier	8	4	0	0	0	2	1	3	2
 hrtimer_setup	K2	func	linux/hrtimer	8	4	0	0	0	5	1	1	1
 hrtimer_start	K2	inline	linux/hrtimer	6	4	0	0	0	3	1	1	1
+IRQF_SHARED	K2	macro	linux/interrupt	5	4	0	0	1	1	2	1	0
 wait_event_interruptible_timeout	K2	macro	linux/wait	5	4	0	0	0	1	2	1	1
 lockdep_assert_held	K2	macro	linux/lockdep	295	3	0	0	0	180	112	3	0
 mdelay	K2	macro	linux/delay	199	3	0	0	0	5	0	181	13
@@ -1093,7 +1106,6 @@ down_write	K2	func	linux/rwsem	22	3	0	0	0	0	16	1	5
 cond_resched	K2	macro	linux/sched	21	3	0	0	0	14	1	0	6
 cancel_delayed_work	K2	func	linux/workqueue	20	3	0	0	0	12	2	6	0
 struct notifier_block	K2	type	linux/notifier	20	3	0	0	0	0	4	9	7
-complete	K2	func	linux/completion	19	3	0	0	0	1	0	10	8
 struct task_struct	K2	type	linux/sched	19	3	0	0	0	0	6	4	9
 preempt_disable	K2	macro	linux/preempt	18	3	0	0	0	6	1	11	0
 down_read	K2	func	linux/rwsem	17	3	0	0	0	0	5	7	5
@@ -1119,6 +1131,7 @@ TASK_INTERRUPTIBLE	K2	macro	linux/sched	8	3	0	0	0	4	1	0	3
 atomic_set_release	K2	inline	linux/atomic/atomic-instrumented	8	3	0	0	0	2	1	5	0
 ndelay	K2	macro	linux/delay	8	3	0	0	0	1	0	6	1
 to_delayed_work	K2	inline	linux/workqueue	8	3	0	0	0	2	0	5	1
+wait_for_completion	K2	func	linux/completion	8	3	0	0	1	0	1	0	6
 NOTIFY_BAD	K2	macro	linux/notifier	7	3	0	0	0	1	0	3	3
 timer_delete_sync	K2	func	linux/timer	7	3	0	0	0	4	0	1	2
 HRTIMER_NORESTART	K2	enumconst	linux/hrtimer_types	6	3	0	0	0	4	0	1	1
@@ -1129,7 +1142,6 @@ wait_for_completion_interruptible	K2	func	linux/completion	6	3	0	0	0	3	1	0	2
 HRTIMER_RESTART	K2	enumconst	linux/hrtimer_types	5	3	0	0	0	3	1	1	0
 drain_workqueue	K2	func	linux/workqueue	5	3	0	0	0	3	1	1	0
 timer_delete	K2	func	linux/timer	5	3	0	0	0	2	1	2	0
-IRQF_SHARED	K2	macro	linux/interrupt	4	3	0	0	0	1	2	1	0
 hrtimer_forward_now	K2	inline	linux/hrtimer	3	3	0	0	0	1	1	1	0
 perf_invalid_context	K2	enumconst	linux/sched	3	3	0	0	0	1	1	1	0
 nop	K2	macro	asm/special_insns	99	2	0	0	0	1	0	98	0
@@ -1174,7 +1186,6 @@ refcount_set	K2	inline	linux/refcount	7	2	0	0	0	6	1	0	0
 scoped_guard	K2	macro	linux/cleanup	7	2	0	0	0	0	2	5	0
 system_highpri_wq	K2	var	linux/workqueue	7	2	0	0	0	5	0	2	0
 system_wq	K2	var	linux/workqueue	7	2	0	0	0	0	3	4	0
-wait_for_completion	K2	func	linux/completion	7	2	0	0	0	0	1	0	6
 add_wait_queue	K2	func	linux/wait	6	2	0	0	0	5	1	0	0
 init_irq_work	K2	inline	linux/irq_work	6	2	0	0	0	5	1	0	0
 irq_handler_t	K2	type	linux/interrupt	6	2	0	0	0	1	5	0	0
@@ -1256,6 +1267,7 @@ lockdep_is_held_type	K2	macro	linux/lockdep	7	1	0	0	0	0	7	0	0
 WQ_MEM_RECLAIM	K2	enumconst	linux/workqueue	6	1	0	0	0	0	6	0	0
 cpu_clock	K2	inline	linux/sched/clock	6	1	0	0	0	0	6	0	0
 llist_for_each_safe	K2	macro	linux/llist	6	1	0	0	0	6	0	0	0
+struct cpumask	K2	type	linux/cpumask_types	6	1	0	0	6	0	0	0	0
 DEFINE_WAIT	K2	macro	linux/wait	5	1	0	0	0	5	0	0	0
 SINGLE_DEPTH_NESTING	K2	macro	linux/lockdep	5	1	0	0	0	5	0	0	0
 atomic64_dec_and_test	K2	inline	linux/atomic/atomic-instrumented	5	1	0	0	0	0	0	0	5
@@ -1265,6 +1277,7 @@ list_add_rcu	K2	inline	linux/rculist	5	1	0	0	0	5	0	0	0
 mutex_lock_interruptible_nested	K2	macro	linux/mutex	5	1	0	0	0	5	0	0	0
 refcount_inc_not_zero	K2	inline	linux/refcount	5	1	0	0	0	5	0	0	0
 round_jiffies_up_relative	K2	func	linux/timer	5	1	0	0	0	5	0	0	0
+struct irq_affinity	K2	type	linux/interrupt	5	1	0	0	5	0	0	0	0
 struct wait_queue_entry	K2	type	linux/wait	5	1	0	0	0	5	0	0	0
 task_unlock	K2	inline	linux/sched/task	5	1	0	0	0	0	0	0	5
 tasklet_kill	K2	func	linux/interrupt	5	1	0	0	0	5	0	0	0
@@ -1320,6 +1333,7 @@ cpu_data	K2	macro	asm/processor	2	1	0	0	0	0	0	2	0
 in_hardirq	K2	macro	linux/preempt	2	1	0	0	0	0	0	0	2
 in_task	K2	macro	linux/preempt	2	1	0	0	0	0	0	2	0
 io_schedule_timeout	K2	func	linux/sched	2	1	0	0	0	2	0	0	0
+irq_update_affinity_hint	K2	inline	linux/interrupt	2	1	0	0	2	0	0	0	0
 llist_add_batch	K2	inline	linux/llist	2	1	0	0	0	2	0	0	0
 lockdep_assert_held_read	K2	macro	linux/lockdep	2	1	0	0	0	0	2	0	0
 lockdep_init_map	K2	macro	linux/lockdep	2	1	0	0	0	2	0	0	0
@@ -1375,6 +1389,7 @@ __this_cpu_dec_return	K2	macro	linux/percpu-defs	1	1	0	0	0	0	0	1	0
 __this_cpu_inc_return	K2	macro	linux/percpu-defs	1	1	0	0	0	0	0	1	0
 __this_cpu_read	K2	macro	linux/percpu-defs	1	1	0	0	0	0	0	1	0
 __var_waitqueue	K2	func	linux/wait_bit	1	1	0	0	0	1	0	0	0
+alloc_cpumask_var	K2	inline	linux/cpumask	1	1	0	0	1	0	0	0	0
 atomic64_add_return	K2	inline	linux/atomic/atomic-instrumented	1	1	0	0	0	0	1	0	0
 atomic64_dec	K2	inline	linux/atomic/atomic-instrumented	1	1	0	0	0	0	0	0	1
 atomic64_xchg	K2	inline	linux/atomic/atomic-instrumented	1	1	0	0	0	0	0	1	0
@@ -1391,10 +1406,13 @@ cpu_feature_enabled	K2	macro	asm/cpufeature	1	1	0	0	0	0	0	0	1
 cpufreq_cpu_get	K2	func	linux/cpufreq	1	1	0	0	0	1	0	0	0
 cpufreq_cpu_put	K2	func	linux/cpufreq	1	1	0	0	0	1	0	0	0
 cpufreq_get	K2	func	linux/cpufreq	1	1	0	0	0	0	0	0	1
+cpumask_copy	K2	inline	linux/cpumask	1	1	0	0	1	0	0	0	0
+cpumask_var_t	K2	type	linux/cpumask_types	1	1	0	0	1	0	0	0	0
 destroy_delayed_work_on_stack	K2	func	linux/workqueue	1	1	0	0	0	1	0	0	0
 devm_mutex_init	K2	macro	linux/mutex	1	1	0	0	0	0	1	0	0
 disable_work_sync	K2	func	linux/workqueue	1	1	0	0	0	0	1	0	0
 down_read_killable	K2	func	linux/rwsem	1	1	0	0	0	0	0	1	0
+free_cpumask_var	K2	func	linux/cpumask	1	1	0	0	1	0	0	0	0
 get_state_synchronize_rcu	K2	func	linux/rcutiny	1	1	0	0	0	1	0	0	0
 get_task_struct	K2	inline	linux/sched/task	1	1	0	0	0	0	0	1	0
 hrtimer_active	K2	func	linux/hrtimer	1	1	0	0	0	1	0	0	0
@@ -1468,22 +1486,23 @@ ww_acquire_done	K2	inline	linux/ww_mutex	1	1	0	0	0	1	0	0	0
 ww_mutex_lock	K2	func	linux/ww_mutex	1	1	0	0	0	0	0	0	1
 ww_mutex_trylock	K2	func	linux/ww_mutex	1	1	0	0	0	1	0	0	0
 ww_mutex_unlock	K2	func	linux/ww_mutex	1	1	0	0	0	0	0	0	1
-min	K3	macro	linux/minmax	1294	7	1	1	3	380	56	839	14
+min	K3	macro	linux/minmax	1295	7	1	1	4	380	56	839	14
 ARRAY_SIZE	K3	macro	linux/array_size	792	6	2	3	4	538	223	0	22
-memcpy	K3	macro	linux/fortify-string	724	6	0	1	3	107	26	539	48
+memcpy	K3	macro	linux/fortify-string	736	6	0	1	15	107	26	539	48
 strlen	K3	macro	linux/fortify-string	105	6	0	2	2	3	12	51	35
 strscpy	K3	macro	linux/string	53	6	0	1	1	3	6	41	1
 max	K3	macro	linux/minmax	1324	5	0	2	0	486	51	769	16
-memset	K3	macro	linux/fortify-string	1183	5	0	0	27	149	23	943	41
-parent	K3	inline	linux/min_heap	434	5	0	0	7	131	140	119	37
-list_for_each_entry	K3	macro	linux/list	284	5	0	0	5	89	33	147	10
-INIT_LIST_HEAD	K3	inline	linux/list	233	5	0	0	5	72	51	72	33
+memset	K3	macro	linux/fortify-string	1189	5	0	0	33	149	23	943	41
+parent	K3	inline	linux/min_heap	439	5	0	0	12	131	140	119	37
+list_for_each_entry	K3	macro	linux/list	289	5	0	0	10	89	33	147	10
+INIT_LIST_HEAD	K3	inline	linux/list	239	5	0	0	11	72	51	72	33
 list_empty	K3	inline	linux/list	196	5	0	0	1	75	40	54	26
-list_for_each_entry_safe	K3	macro	linux/list	145	5	0	0	5	53	24	56	7
-list_del	K3	inline	linux/list	120	5	0	0	5	33	17	44	21
-list_add_tail	K3	inline	linux/list	113	5	0	0	4	40	19	34	16
+list_for_each_entry_safe	K3	macro	linux/list	146	5	0	0	6	53	24	56	7
+list_del	K3	inline	linux/list	123	5	0	0	8	33	17	44	21
+list_add_tail	K3	inline	linux/list	115	5	0	0	6	40	19	34	16
 strcmp	K3	func	linux/string	73	5	0	1	0	18	8	19	27
 array_size	K3	macro	linux/overflow	67	5	0	0	6	1	4	54	2
+list_add	K3	inline	linux/list	54	5	0	0	3	19	7	17	8
 list_first_entry	K3	macro	linux/list	31	5	0	0	1	5	2	14	9
 str_yes_no	K3	inline	linux/string_choices	233	4	0	0	1	193	27	12	0
 DIV_ROUND_UP	K3	macro	linux/math	199	4	0	0	1	157	15	26	0
@@ -1493,7 +1512,7 @@ ilog2	K3	macro	linux/log2	106	4	0	0	0	37	46	22	1
 struct_size	K3	macro	linux/overflow	101	4	0	0	1	9	3	88	0
 max_t	K3	macro	linux/minmax	61	4	0	2	0	31	9	19	0
 list_del_init	K3	inline	linux/list	60	4	0	0	0	24	25	5	6
-list_add	K3	inline	linux/list	51	4	0	0	0	19	7	17	8
+is_power_of_2	K3	inline	linux/log2	48	4	0	0	1	37	5	5	0
 list_move_tail	K3	inline	linux/list	42	4	0	0	0	26	10	4	2
 list_entry	K3	macro	linux/list	40	4	0	0	0	5	4	10	21
 struct rb_node	K3	type	linux/rbtree_types	40	4	0	0	0	32	2	1	5
@@ -1514,7 +1533,6 @@ __stringify	K3	macro	linux/stringify	60	3	0	0	0	40	19	1	0
 div64_u64	K3	inline	linux/math64	59	3	0	0	0	12	2	45	0
 swap	K3	macro	linux/minmax	55	3	0	0	0	11	3	41	0
 SZ_1K	K3	macro	linux/sizes	47	3	0	0	0	20	26	1	0
-is_power_of_2	K3	inline	linux/log2	47	3	0	0	0	37	5	5	0
 xa_for_each	K3	macro	linux/xarray	47	3	0	0	0	12	30	5	0
 SZ_1M	K3	macro	linux/sizes	46	3	0	0	0	17	25	4	0
 round_up	K3	macro	linux/math	40	3	0	0	0	23	10	7	0
@@ -1547,13 +1565,13 @@ xa_err	K3	inline	linux/xarray	7	3	0	0	0	1	4	2	0
 XA_FLAGS_ALLOC	K3	macro	linux/xarray	6	3	0	0	0	2	3	1	0
 kstrtouint_from_user	K3	func	linux/kstrtox	6	3	0	0	0	2	3	1	0
 list_last_entry	K3	macro	linux/list	6	3	0	0	0	2	0	2	2
+struct ida	K3	type	linux/idr	6	3	0	0	3	2	0	1	0
 XA_FLAGS_ALLOC1	K3	macro	linux/xarray	5	3	0	0	0	2	2	1	0
+ida_init	K3	inline	linux/idr	5	3	0	0	3	1	0	1	0
 idr_alloc	K3	func	linux/idr	5	3	0	0	0	1	1	3	0
 idr_init_base	K3	inline	linux/idr	5	3	0	0	0	1	1	3	0
 min3	K3	macro	linux/minmax	5	3	0	0	0	1	1	3	0
-struct ida	K3	type	linux/idr	5	3	0	0	2	2	0	1	0
 struct rb_root_cached	K3	type	linux/rbtree_types	5	3	0	0	0	3	1	1	0
-ida_init	K3	inline	linux/idr	4	3	0	0	2	1	0	1	0
 kstrtoul	K3	inline	linux/kstrtox	4	3	0	0	0	1	1	2	0
 INTERVAL_TREE_DEFINE	K3	macro	linux/interval_tree_generic	3	3	0	0	0	1	1	1	0
 rounddown_pow_of_two	K3	macro	linux/log2	3	3	0	0	0	1	1	1	0
@@ -1592,6 +1610,7 @@ xa_unlock	K3	macro	linux/xarray	8	2	0	0	0	6	0	2	0
 RB_ROOT	K3	macro	linux/rbtree_types	7	2	0	0	0	6	0	0	1
 SZ_128K	K3	macro	linux/sizes	7	2	0	0	0	3	4	0	0
 hash_for_each_safe	K3	macro	linux/hashtable	7	2	0	0	0	1	0	6	0
+ida_free	K3	func	linux/idr	7	2	0	0	6	1	0	0	0
 kstrtoint	K3	func	linux/kstrtox	7	2	0	0	0	3	0	4	0
 mul_u64_u32_div	K3	inline	linux/math64	7	2	0	0	0	3	4	0	0
 rb_insert_color	K3	func	linux/rbtree	7	2	0	0	0	6	0	0	1
@@ -1632,7 +1651,7 @@ UUID_STRING_LEN	K3	macro	linux/uuid	3	2	0	0	0	2	1	0	0
 hash_32	K3	inline	linux/hash	3	2	0	0	0	2	0	0	1
 hash_del	K3	inline	linux/hashtable	3	2	0	0	0	1	0	2	0
 hash_init	K3	macro	linux/hashtable	3	2	0	0	0	1	0	2	0
-ida_free	K3	func	linux/idr	3	2	0	0	2	1	0	0	0
+ida_destroy	K3	func	linux/idr	3	2	0	0	1	0	0	2	0
 kstrtobool	K3	func	linux/kstrtox	3	2	0	0	0	1	2	0	0
 kstrtou8	K3	func	linux/kstrtox	3	2	0	0	0	2	1	0	0
 list_empty_careful	K3	inline	linux/list	3	2	0	0	0	1	2	0	0
@@ -1651,6 +1670,7 @@ hash_add	K3	macro	linux/hashtable	2	2	0	0	0	1	0	1	0
 hash_for_each_possible	K3	macro	linux/hashtable	2	2	0	0	0	1	0	1	0
 hlist_add_head	K3	inline	linux/list	2	2	0	0	0	1	0	0	1
 hlist_for_each_entry	K3	macro	linux/list	2	2	0	0	0	1	0	0	1
+ida_alloc_range	K3	func	linux/idr	2	2	0	0	1	1	0	0	0
 idr_for_each	K3	func	linux/idr	2	2	0	0	0	1	1	0	0
 kstrtou16	K3	func	linux/kstrtox	2	2	0	0	0	1	1	0	0
 list_count_nodes	K3	inline	linux/list	2	2	0	0	0	1	1	0	0
@@ -1710,6 +1730,7 @@ abs_diff	K3	macro	linux/math	3	1	0	0	0	3	0	0	0
 clamp_val	K3	macro	linux/minmax	3	1	0	0	0	3	0	0	0
 crc4	K3	func	linux/crc4	3	1	0	0	0	3	0	0	0
 crypto_shash_tfm_digest	K3	func	crypto/hash	3	1	0	0	0	0	0	0	3
+ida_alloc	K3	inline	linux/idr	3	1	0	0	3	0	0	0	0
 idr_init	K3	inline	linux/idr	3	1	0	0	0	0	0	3	0
 list_for_each_prev_safe	K3	macro	linux/list	3	1	0	0	0	0	0	3	0
 mem_is_zero	K3	inline	linux/string	3	1	0	0	0	3	0	0	0
@@ -1739,8 +1760,6 @@ ecc_digits_from_bytes	K3	func	crypto/internal/ecc	2	1	0	0	0	0	0	0	2
 ecc_make_pub_key	K3	func	crypto/internal/ecc	2	1	0	0	0	0	0	0	2
 ecc_swap_digits	K3	inline	crypto/internal/ecc	2	1	0	0	0	0	0	0	2
 hash_64	K3	macro	linux/hash	2	1	0	0	0	0	0	2	0
-ida_alloc	K3	inline	linux/idr	2	1	0	0	2	0	0	0	0
-ida_destroy	K3	func	linux/idr	2	1	0	0	0	0	0	2	0
 int_pow	K3	func	linux/math	2	1	0	0	0	2	0	0	0
 isalpha	K3	macro	linux/ctype	2	1	0	0	0	0	0	0	2
 kfifo_get	K3	macro	linux/kfifo	2	1	0	0	0	0	0	2	0
@@ -1820,7 +1839,6 @@ guid_gen	K3	func	linux/uuid	1	1	0	0	0	0	0	1	0
 guid_is_null	K3	inline	linux/uuid	1	1	0	0	0	0	0	1	0
 hash_long	K3	macro	linux/hash	1	1	0	0	0	0	0	0	1
 hlist_move_list	K3	inline	linux/list	1	1	0	0	0	0	0	1	0
-ida_alloc_range	K3	func	linux/idr	1	1	0	0	0	1	0	0	0
 idr_replace	K3	func	linux/idr	1	1	0	0	0	0	0	1	0
 import_guid	K3	inline	linux/uuid	1	1	0	0	0	0	0	1	0
 import_uuid	K3	inline	linux/uuid	1	1	0	0	1	0	0	0	0
@@ -1873,44 +1891,47 @@ xa_to_value	K3	inline	linux/xarray	1	1	0	0	0	1	0	0	0
 zlib_deflateEnd	K3	func	linux/zlib	1	1	0	0	0	1	0	0	0
 zlib_deflateInit	K3	macro	linux/zlib	1	1	0	0	0	1	0	0	0
 zlib_deflate_workspacesize	K3	func	linux/zlib	1	1	0	0	0	1	0	0	0
-MODULE_DESCRIPTION	K4	macro	linux/module	10	7	1	1	1	1	1	2	3
-MODULE_LICENSE	K4	macro	linux/module	10	7	1	1	1	1	1	2	3
-MODULE_DEVICE_TABLE	K4	macro	linux/module	9	7	1	1	1	1	1	1	3
-MODULE_PARM_DESC	K4	macro	linux/moduleparam	133	6	3	0	1	5	11	99	14
+MODULE_DESCRIPTION	K4	macro	linux/module	16	7	1	1	7	1	1	2	3
+MODULE_LICENSE	K4	macro	linux/module	16	7	1	1	7	1	1	2	3
+MODULE_DEVICE_TABLE	K4	macro	linux/module	10	7	1	1	2	1	1	1	3
+MODULE_PARM_DESC	K4	macro	linux/moduleparam	134	6	3	0	2	5	11	99	14
 module_param_named	K4	macro	linux/moduleparam	106	6	1	0	2	2	5	76	20
-struct device	K4	type	linux/device	294	5	2	2	4	0	0	212	74
+PCI_ANY_ID	K4	macro	linux/mod_devicetable	666	5	4	0	1	4	0	619	38
+struct device	K4	type	linux/device	315	5	2	2	25	0	0	212	74
 dev_get_drvdata	K4	inline	linux/device	159	5	2	0	0	9	7	139	2
+dev_name	K4	inline	linux/device	34	5	0	0	5	10	8	4	7
 __init	K4	macro	linux/init	32	5	0	0	1	9	7	1	14
-dev_name	K4	inline	linux/device	31	5	0	0	2	10	8	4	7
-MODULE_IMPORT_NS	K4	macro	linux/module	11	5	0	0	1	1	3	1	5
-module_exit	K4	macro	linux/module	11	5	0	0	1	1	1	2	6
-MODULE_AUTHOR	K4	macro	linux/module	9	5	1	0	3	2	1	2	0
-__exit	K4	macro	linux/init	8	5	0	0	1	1	1	2	3
+struct pci_device_id	K4	type	linux/mod_devicetable	29	5	2	0	2	0	6	4	15
+MODULE_AUTHOR	K4	macro	linux/module	12	5	1	0	6	2	1	2	0
+MODULE_IMPORT_NS	K4	macro	linux/module	12	5	0	0	2	1	3	1	5
+module_exit	K4	macro	linux/module	12	5	0	0	2	1	1	2	6
+__exit	K4	macro	linux/init	9	5	0	0	2	1	1	2	3
 module_init	K4	macro	linux/module	7	5	0	0	1	1	1	1	3
 MODULE_FIRMWARE	K4	macro	linux/module	690	4	0	0	0	18	1	670	1
-PCI_ANY_ID	K4	macro	linux/mod_devicetable	665	4	4	0	0	4	0	619	38
+sysfs_emit_at	K4	func	linux/sysfs	398	4	0	0	2	2	2	392	0
+struct device_attribute	K4	type	linux/device	208	4	0	0	5	12	15	176	0
+sysfs_emit	K4	func	linux/sysfs	207	4	0	0	4	35	49	119	0
 THIS_MODULE	K4	macro	linux/init	145	4	0	0	0	39	14	74	18
+EXPORT_SYMBOL	K4	macro	linux/export	113	4	0	12	4	0	0	7	90
+struct attribute	K4	type	linux/sysfs	86	4	0	0	1	29	20	36	0
 DMI_PRODUCT_NAME	K4	enumconst	linux/mod_devicetable	44	4	0	0	0	25	1	17	1
 struct platform_device	K4	type	linux/platform_device	33	4	0	5	0	3	0	9	16
-struct pci_device_id	K4	type	linux/mod_devicetable	27	4	2	0	0	0	6	4	15
+module_param	K4	macro	linux/moduleparam	15	4	2	0	1	0	0	8	4
 dev_pm_set_driver_flags	K4	inline	linux/device	6	4	0	0	0	1	1	2	2
 device_link_add	K4	func	linux/device	5	4	0	1	0	2	1	1	0
 struct device_link	K4	type	linux/device	5	4	0	1	0	1	1	2	0
-sysfs_emit_at	K4	func	linux/sysfs	396	3	0	0	0	2	2	392	0
 struct kobject	K4	type	linux/kobject	226	3	0	0	0	80	85	61	0
-struct device_attribute	K4	type	linux/device	203	3	0	0	0	12	15	176	0
-sysfs_emit	K4	func	linux/sysfs	203	3	0	0	0	35	49	119	0
 struct kobj_attribute	K4	type	linux/kobject	196	3	0	0	0	74	96	26	0
-EXPORT_SYMBOL	K4	macro	linux/export	109	3	0	12	0	0	0	7	90
-struct attribute	K4	type	linux/sysfs	85	3	0	0	0	29	20	36	0
+EXPORT_SYMBOL_GPL	K4	macro	linux/export	112	3	0	0	106	5	0	0	1
 struct attribute_group	K4	type	linux/sysfs	52	3	0	0	0	10	13	29	0
 __ATTR	K4	macro	linux/sysfs	48	3	0	0	0	28	18	2	0
 kobj_to_dev	K4	macro	linux/device	47	3	0	0	0	8	27	12	0
 kobject_put	K4	func	linux/kobject	42	3	0	0	0	8	17	17	0
+struct device_node	K4	type	linux/of	41	3	0	14	1	0	0	0	26
 __ATTR_RO	K4	macro	linux/sysfs	32	3	0	0	0	2	18	12	0
+of_node_put	K4	func	linux/of	19	3	0	1	3	0	0	0	15
 module_param_named_unsafe	K4	macro	linux/moduleparam	17	3	0	0	0	2	6	9	0
 struct kobj_type	K4	type	linux/kobject	16	3	0	0	0	2	4	10	0
-module_param	K4	macro	linux/moduleparam	14	3	2	0	0	0	0	8	4
 sysfs_create_files	K4	func	linux/sysfs	14	3	0	0	0	7	5	2	0
 sysfs_create_file	K4	inline	linux/sysfs	13	3	0	0	0	8	1	4	0
 kobj_sysfs_ops	K4	var	linux/kobject	11	3	0	0	0	2	3	6	0
@@ -1919,18 +1940,18 @@ sysfs_create_group	K4	func	linux/sysfs	9	3	0	0	0	2	3	4	0
 sysfs_remove_group	K4	func	linux/sysfs	9	3	0	0	0	1	4	4	0
 kobject_add	K4	func	linux/kobject	8	3	0	0	0	2	5	1	0
 kobject_init	K4	func	linux/kobject	8	3	0	0	0	2	5	1	0
+ATTRIBUTE_GROUPS	K4	macro	linux/sysfs	6	3	0	0	1	1	0	4	0
 DL_FLAG_STATELESS	K4	macro	linux/device	4	3	0	1	0	2	0	1	0
 platform_device_unregister	K4	func	linux/platform_device	4	3	0	0	0	1	1	2	0
+put_device	K4	func	linux/device	4	3	0	0	2	1	0	1	0
 device_link_del	K4	func	linux/device	3	3	0	1	0	1	0	1	0
 DMI_MATCH	K4	macro	linux/mod_devicetable	100	2	0	0	0	72	0	28	0
 of_property_read_u32	K4	inline	linux/of	81	2	0	2	0	0	0	0	79
-struct device_node	K4	type	linux/of	40	2	0	14	0	0	0	0	26
 DMI_SYS_VENDOR	K4	enumconst	linux/mod_devicetable	36	2	0	0	0	22	0	14	0
 struct dmi_system_id	K4	type	linux/mod_devicetable	22	2	0	0	0	17	0	5	0
 DMI_BOARD_VENDOR	K4	enumconst	linux/mod_devicetable	20	2	0	0	0	17	0	3	0
 struct bin_attribute	K4	type	linux/sysfs	20	2	0	0	0	7	0	13	0
 DMI_EXACT_MATCH	K4	macro	linux/mod_devicetable	19	2	0	0	0	13	0	6	0
-of_node_put	K4	func	linux/of	16	2	0	1	0	0	0	0	15
 MINOR	K4	macro	linux/kdev_t	10	2	0	0	0	0	0	1	9
 sysfs_remove_files	K4	func	linux/sysfs	10	2	0	0	0	0	5	5	0
 struct auxiliary_device	K4	type	linux/auxiliary_bus	9	2	0	0	0	3	6	0	0
@@ -1939,10 +1960,11 @@ kobject_create_and_add	K4	func	linux/kobject	8	2	0	0	0	4	4	0	0
 kobject_init_and_add	K4	func	linux/kobject	8	2	0	0	0	1	0	7	0
 devm_device_add_group	K4	func	linux/device	7	2	0	0	0	0	3	4	0
 of_parse_phandle	K4	inline	linux/of	7	2	0	1	0	0	0	0	6
-EXPORT_SYMBOL_GPL	K4	macro	linux/export	6	2	0	0	0	5	0	0	1
+MODULE_VERSION	K4	macro	linux/module	6	2	0	0	3	0	0	0	3
 auxiliary_device_uninit	K4	inline	linux/auxiliary_bus	6	2	0	0	0	2	4	0	0
+dev_set_name	K4	func	linux/device	6	2	0	0	1	0	0	0	5
+device_unregister	K4	func	linux/device	6	2	0	0	1	0	0	0	5
 sysfs_remove_file	K4	inline	linux/sysfs	6	2	0	0	0	0	1	5	0
-ATTRIBUTE_GROUPS	K4	macro	linux/sysfs	5	2	0	0	0	1	0	4	0
 struct sysfs_ops	K4	type	linux/sysfs	5	2	0	0	0	0	1	4	0
 __ATTR_RW	K4	macro	linux/sysfs	4	2	0	0	0	1	3	0	0
 dev_get_platdata	K4	inline	linux/device	4	2	0	3	0	1	0	0	0
@@ -1963,7 +1985,7 @@ bus_register_notifier	K4	func	linux/device/bus	2	2	0	0	0	1	1	0	0
 dev_fwnode	K4	macro	linux/property	2	2	0	0	0	1	1	0	0
 device_iommu_mapped	K4	inline	linux/device	2	2	0	0	0	1	1	0	0
 platform_device_put	K4	func	linux/platform_device	2	2	0	0	0	0	1	0	1
-put_device	K4	func	linux/device	2	2	0	0	0	1	0	1	0
+struct device_driver	K4	type	linux/device/driver	2	2	0	0	1	0	1	0	0
 struct of_device_id	K4	type	linux/mod_devicetable	2	2	0	1	0	0	0	0	1
 struct platform_driver	K4	type	linux/platform_device	2	2	0	1	0	0	0	0	1
 to_auxiliary_dev	K4	inline	linux/auxiliary_bus	2	2	0	0	0	1	1	0	0
@@ -1982,8 +2004,6 @@ dev_is_removable	K4	inline	linux/device	7	1	0	0	0	0	0	7	0
 device_property_read_u64	K4	inline	linux/property	7	1	0	0	0	0	0	0	7
 sysfs_add_file_to_group	K4	func	linux/sysfs	7	1	0	0	0	0	0	7	0
 MKDEV	K4	macro	linux/kdev_t	6	1	0	0	0	0	0	0	6
-dev_set_name	K4	func	linux/device	5	1	0	0	0	0	0	0	5
-device_unregister	K4	func	linux/device	5	1	0	0	0	0	0	0	5
 of_device_is_available	K4	func	linux/of	5	1	0	0	0	0	0	0	5
 KOBJ_CHANGE	K4	enumconst	linux/kobject	4	1	0	0	0	4	0	0	0
 devres_release_group	K4	func	linux/device/devres	4	1	0	0	0	0	0	4	0
@@ -1992,11 +2012,13 @@ of_get_child_by_name	K4	func	linux/of	4	1	0	0	0	0	0	0	4
 platform_get_irq_byname	K4	func	linux/platform_device	4	1	0	0	0	0	0	0	4
 platform_get_resource_byname	K4	func	linux/platform_device	4	1	0	0	0	0	0	0	4
 MODULE_INFO	K4	macro	linux/moduleparam	3	1	0	0	0	0	0	0	3
-MODULE_VERSION	K4	macro	linux/module	3	1	0	0	0	0	0	0	3
 PROBE_FORCE_SYNCHRONOUS	K4	enumconst	linux/device/driver	3	1	0	0	0	0	0	0	3
+VIRTIO_DEV_ANY_ID	K4	macro	linux/mod_devicetable	3	1	0	0	3	0	0	0	0
+device_attach	K4	func	linux/device	3	1	0	0	3	0	0	0	0
 kobject_set_name	K4	func	linux/kobject	3	1	0	0	0	0	0	3	0
 kset_register	K4	func	linux/kobject	3	1	0	0	0	0	0	3	0
 module_param_unsafe	K4	macro	linux/moduleparam	3	1	0	0	0	0	0	3	0
+struct virtio_device_id	K4	type	linux/mod_devicetable	3	1	0	0	3	0	0	0	0
 sysfs_create_link	K4	func	linux/sysfs	3	1	0	0	0	0	0	3	0
 sysfs_remove_file_from_group	K4	func	linux/sysfs	3	1	0	0	0	0	0	3	0
 sysfs_remove_link	K4	func	linux/sysfs	3	1	0	0	0	0	0	3	0
@@ -2040,15 +2062,20 @@ MODULE_SOFTDEP	K4	macro	linux/module	1	1	0	0	0	0	0	0	1
 PROBE_PREFER_ASYNCHRONOUS	K4	enumconst	linux/device/driver	1	1	0	0	0	0	0	0	1
 PROPERTY_ENTRY_STRING	K4	macro	linux/property	1	1	0	0	0	0	1	0	0
 PROPERTY_ENTRY_U32	K4	macro	linux/property	1	1	0	0	0	0	1	0	0
-VIRTIO_DEV_ANY_ID	K4	macro	linux/mod_devicetable	1	1	0	0	1	0	0	0	0
 __ATTR_RW_MODE	K4	macro	linux/sysfs	1	1	0	0	0	0	0	1	0
+add_uevent_var	K4	func	linux/kobject	1	1	0	0	1	0	0	0	0
 bus_find_device	K4	func	linux/device/bus	1	1	0	0	0	0	0	1	0
+bus_register	K4	func	linux/device/bus	1	1	0	0	1	0	0	0	0
+bus_unregister	K4	func	linux/device/bus	1	1	0	0	1	0	0	0	0
+core_initcall	K4	macro	linux/init	1	1	0	0	1	0	0	0	0
 dev_driver_string	K4	func	linux/device	1	1	0	0	0	0	0	0	1
+dev_of_node	K4	inline	linux/device	1	1	0	0	1	0	0	0	0
 dev_set_drvdata	K4	inline	linux/device	1	1	0	0	0	0	0	1	0
-device_attach	K4	func	linux/device	1	1	0	0	1	0	0	0	0
+device_add	K4	func	linux/device	1	1	0	0	1	0	0	0	0
 device_create	K4	func	linux/device	1	1	0	0	0	0	0	0	1
 device_destroy	K4	func	linux/device	1	1	0	0	0	0	0	0	1
 device_get_next_child_node	K4	func	linux/property	1	1	0	0	0	1	0	0	0
+device_initialize	K4	func	linux/device	1	1	0	0	1	0	0	0	0
 device_link_remove	K4	func	linux/device	1	1	0	0	0	1	0	0	0
 device_register	K4	func	linux/device	1	1	0	0	0	0	0	0	1
 device_set_pm_not_required	K4	inline	linux/device	1	1	0	0	0	0	1	0	0
@@ -2056,9 +2083,12 @@ devm_of_platform_populate	K4	func	linux/of_platform	1	1	0	0	0	0	0	0	1
 devm_remove_action	K4	inline	linux/device/devres	1	1	0	0	0	0	1	0	0
 devres_close_group	K4	func	linux/device/devres	1	1	0	0	0	0	0	1	0
 driver_find	K4	func	linux/device/driver	1	1	0	0	0	0	1	0	0
+driver_register	K4	func	linux/device/driver	1	1	0	0	1	0	0	0	0
+driver_unregister	K4	func	linux/device/driver	1	1	0	0	1	0	0	0	0
 for_each_compatible_node	K4	macro	linux/of	1	1	0	0	0	0	0	0	1
 fwnode_create_software_node	K4	func	linux/property	1	1	0	0	0	0	1	0	0
 fwnode_handle_put	K4	inline	linux/property	1	1	0	0	0	1	0	0	0
+get_device	K4	func	linux/device	1	1	0	0	1	0	0	0	0
 kobject_name	K4	inline	linux/kobject	1	1	0	0	0	0	0	1	0
 module_name	K4	macro	linux/module	1	1	0	0	0	0	0	1	0
 module_param_cb_unsafe	K4	macro	linux/moduleparam	1	1	0	0	0	1	0	0	0
@@ -2068,10 +2098,13 @@ module_put	K4	func	linux/module	1	1	0	0	0	0	0	0	1
 of_address_to_resource	K4	func	linux/of_address	1	1	0	0	0	0	0	0	1
 of_clk_get_parent_count	K4	func	linux/of_clk	1	1	0	1	0	0	0	0	0
 of_count_phandle_with_args	K4	func	linux/of	1	1	0	1	0	0	0	0	0
+of_device_is_compatible	K4	func	linux/of	1	1	0	0	1	0	0	0	0
 of_dma_configure	K4	inline	linux/of_device	1	1	0	0	0	0	0	0	1
 of_find_device_by_node	K4	func	linux/of_platform	1	1	0	0	0	0	0	0	1
 of_find_matching_node	K4	inline	linux/of	1	1	0	0	0	0	0	0	1
 of_fwnode_handle	K4	macro	linux/of	1	1	0	0	0	0	0	0	1
+of_get_available_child_count	K4	inline	linux/of	1	1	0	0	1	0	0	0	0
+of_get_next_available_child	K4	func	linux/of	1	1	0	0	1	0	0	0	0
 of_get_property	K4	func	linux/of	1	1	0	0	0	0	0	0	1
 of_parse_phandle_with_args_map	K4	func	linux/of	1	1	0	0	0	0	0	0	1
 of_property_count_strings	K4	inline	linux/of	1	1	0	0	0	0	0	0	1
@@ -2093,14 +2126,15 @@ platform_driver_unregister	K4	func	linux/platform_device	1	1	0	0	0	0	0	0	1
 platform_get_resource	K4	func	linux/platform_device	1	1	0	1	0	0	0	0	0
 software_node_find_by_name	K4	func	linux/property	1	1	0	0	0	0	0	1	0
 struct acpi_device_id	K4	type	linux/mod_devicetable	1	1	0	0	0	0	0	1	0
+struct bus_type	K4	type	linux/device/bus	1	1	0	0	1	0	0	0	0
 struct class	K4	type	linux/device/class	1	1	0	0	0	0	0	0	1
-struct device_driver	K4	type	linux/device/driver	1	1	0	0	0	0	1	0	0
 struct fwnode_handle	K4	type	linux/fwnode	1	1	0	0	0	1	0	0	0
 struct kernel_param_ops	K4	type	linux/moduleparam	1	1	0	0	0	1	0	0	0
 struct kernfs_node	K4	type	linux/kernfs	1	1	0	0	0	0	0	0	1
+struct kobj_uevent_env	K4	type	linux/kobject	1	1	0	0	1	0	0	0	0
+struct module	K4	type	linux/module	1	1	0	0	1	0	0	0	0
 struct platform_device_info	K4	type	linux/platform_device	1	1	0	0	0	1	0	0	0
 struct property_entry	K4	type	linux/property	1	1	0	0	0	0	1	0	0
-struct virtio_device_id	K4	type	linux/mod_devicetable	1	1	0	0	1	0	0	0	0
 struct x86_cpu_id	K4	type	linux/mod_devicetable	1	1	0	0	0	1	0	0	0
 symbol_get	K4	macro	linux/module	1	1	0	0	0	1	0	0	0
 symbol_put	K4	macro	linux/module	1	1	0	0	0	1	0	0	0
@@ -2108,32 +2142,35 @@ sysfs_merge_group	K4	func	linux/sysfs	1	1	0	0	0	1	0	0	0
 sysfs_update_group	K4	func	linux/sysfs	1	1	0	0	0	0	0	1	0
 try_module_get	K4	func	linux/module	1	1	0	0	0	0	0	0	1
 wait_for_device_probe	K4	func	linux/device/driver	1	1	0	0	0	0	0	0	1
-to_pci_dev	K5	macro	linux/pci	156	6	1	0	1	63	66	4	21
+to_pci_dev	K5	macro	linux/pci	159	6	1	0	4	63	66	4	21
+pci_get_drvdata	K5	inline	linux/pci	53	6	2	0	6	3	2	15	25
+pci_resource_len	K5	macro	linux/pci	40	6	2	0	4	10	7	13	4
+pci_resource_start	K5	macro	linux/pci	30	6	2	0	2	7	5	11	3
+pci_set_drvdata	K5	inline	linux/pci	12	6	1	0	1	2	1	2	5
+struct dev_pm_ops	K5	type	linux/pm	9	6	1	0	1	2	1	1	3
+struct pci_driver	K5	type	linux/pci	8	6	1	0	1	1	2	1	2
 aperture_remove_conflicting_pci_devices	K5	func	linux/aperture	6	6	1	0	1	1	1	1	1
-pci_get_drvdata	K5	inline	linux/pci	47	5	2	0	0	3	2	15	25
-pci_resource_len	K5	macro	linux/pci	36	5	2	0	0	10	7	13	4
-pci_resource_start	K5	macro	linux/pci	28	5	2	0	0	7	5	11	3
+irqreturn_t	K5	type	linux/irqreturn	45	5	0	0	5	14	4	2	20
+pci_read_config_dword	K5	func	linux/pci	39	5	0	0	9	10	1	6	13
+IRQ_NONE	K5	enumconst	linux/irqreturn	36	5	0	0	4	21	6	1	4
+IRQ_HANDLED	K5	enumconst	linux/irqreturn	32	5	0	0	6	17	5	2	2
+pci_set_master	K5	func	linux/pci	26	5	0	0	3	2	3	16	2
+pci_read_config_word	K5	func	linux/pci	25	5	0	0	1	11	1	3	9
 pci_dev_put	K5	macro	linux/pci	20	5	0	0	2	3	5	7	3
-pci_set_drvdata	K5	inline	linux/pci	11	5	1	0	0	2	1	2	5
-struct dev_pm_ops	K5	type	linux/pm	8	5	1	0	0	2	1	1	3
-struct pci_driver	K5	type	linux/pci	7	5	1	0	0	1	2	1	2
-irqreturn_t	K5	type	linux/irqreturn	40	4	0	0	0	14	4	2	20
-IRQ_NONE	K5	enumconst	linux/irqreturn	32	4	0	0	0	21	6	1	4
+free_irq	K5	func	linux/interrupt	19	5	0	0	3	1	2	1	12
+pci_disable_device	K5	func	linux/pci	18	5	0	0	4	3	2	6	3
+pci_enable_device	K5	func	linux/pci	12	5	0	0	3	2	2	3	2
+pci_resource_flags	K5	macro	linux/pci	11	5	0	0	1	2	2	2	4
 PCI_FUNC	K5	macro	linux/pci	32	4	0	0	0	1	1	1	29
-pci_read_config_dword	K5	func	linux/pci	30	4	0	0	0	10	1	6	13
-IRQ_HANDLED	K5	enumconst	linux/irqreturn	26	4	0	0	0	17	5	2	2
-pci_read_config_word	K5	func	linux/pci	24	4	0	0	0	11	1	3	9
-pci_set_master	K5	func	linux/pci	23	4	0	0	0	2	3	16	2
 PCI_COMMAND	K5	macro	linux/pci_regs	17	4	0	0	0	3	4	4	6
-free_irq	K5	func	linux/interrupt	16	4	0	0	0	1	2	1	12
-pci_disable_device	K5	func	linux/pci	14	4	0	0	0	3	2	6	3
 pci_domain_nr	K5	inline	linux/pci	14	4	0	0	0	2	4	6	2
 pci_write_config_dword	K5	func	linux/pci	14	4	0	0	0	8	2	3	1
+pci_name	K5	inline	linux/pci	13	4	0	0	1	0	1	7	4
 pci_get_domain_bus_and_slot	K5	func	linux/pci	11	4	0	0	0	1	5	4	1
-pci_resource_flags	K5	macro	linux/pci	10	4	0	0	0	2	2	2	4
 pm_runtime_get_noresume	K5	inline	linux/pm_runtime	10	4	0	0	0	1	4	3	2
-pci_enable_device	K5	func	linux/pci	9	4	0	0	0	2	2	3	2
+PCI_DEVICE	K5	macro	linux/pci	9	4	0	0	1	4	0	3	1
 pci_save_state	K5	func	linux/pci	8	4	0	0	0	1	2	3	2
+request_irq	K5	inline	linux/interrupt	8	4	0	0	4	1	2	1	0
 pm_runtime_suspended	K5	inline	linux/pm_runtime	7	4	0	0	0	2	2	1	2
 struct pci_bus	K5	type	linux/pci	7	4	0	0	0	1	1	1	4
 PCI_COMMAND_MEMORY	K5	macro	linux/pci_regs	6	4	0	0	0	1	2	1	2
@@ -2153,15 +2190,16 @@ pci_upstream_bridge	K5	inline	linux/pci	18	3	0	0	0	0	1	13	4
 pci_write_config_word	K5	func	linux/pci	15	3	0	0	0	4	0	4	7
 PCI_DEVFN	K5	macro	linux/pci	14	3	0	0	0	5	8	0	1
 pci_get_class	K5	func	linux/pci	14	3	0	0	0	3	0	3	8
-pci_name	K5	inline	linux/pci	12	3	0	0	0	0	1	7	4
+pci_irq_vector	K5	func	linux/pci	14	3	0	0	8	0	5	1	0
+pci_read_config_byte	K5	func	linux/pci	14	3	0	0	7	3	0	0	4
 pci_set_power_state	K5	func	linux/pci	12	3	0	0	0	3	5	4	0
 PCI_D0	K5	macro	linux/pci	10	3	0	0	0	5	3	2	0
 PCI_D3cold	K5	macro	linux/pci	10	3	0	0	0	2	6	2	0
-PCI_DEVICE	K5	macro	linux/pci	8	3	0	0	0	4	0	3	1
 VGA_RSRC_LEGACY_IO	K5	macro	linux/vgaarb	8	3	0	0	2	5	0	1	0
 pci_restore_state	K5	func	linux/pci	8	3	0	0	0	0	2	5	1
 struct irq_data	K5	type	linux/irq	8	3	0	0	0	4	2	2	0
 pcie_find_root_port	K5	inline	linux/pci	7	3	0	0	0	2	2	3	0
+synchronize_irq	K5	func	linux/hardirq	7	3	0	0	3	1	3	0	0
 handle_simple_irq	K5	func	linux/irq	5	3	0	0	0	2	2	1	0
 pm_runtime_forbid	K5	func	linux/pm_runtime	5	3	0	0	0	0	1	3	1
 pm_runtime_put	K5	inline	linux/pm_runtime	5	3	0	0	0	2	2	0	1
@@ -2169,7 +2207,6 @@ unregister_pm_notifier	K5	func	linux/suspend	5	3	0	0	0	0	2	1	2
 PCI_SLOT	K5	macro	linux/pci	4	3	0	0	0	0	1	1	2
 VGA_RSRC_LEGACY_MEM	K5	macro	linux/vgaarb	4	3	0	0	2	1	0	1	0
 pm_runtime_get_if_active	K5	func	linux/pm_runtime	4	3	0	0	0	1	1	2	0
-request_irq	K5	inline	linux/interrupt	4	3	0	0	0	1	2	1	0
 struct irq_chip	K5	type	linux/irq	4	3	0	0	0	2	1	1	0
 PM_HIBERNATION_PREPARE	K5	macro	linux/suspend	3	3	0	0	0	0	1	1	1
 PM_POST_HIBERNATION	K5	macro	linux/suspend	3	3	0	0	0	0	1	1	1
@@ -2177,16 +2214,15 @@ pci_bus_for_each_resource	K5	macro	linux/pci	3	3	0	0	0	1	1	1	0
 register_pm_notifier	K5	func	linux/suspend	3	3	0	0	0	0	1	1	1
 pm_runtime_put_autosuspend	K5	inline	linux/pm_runtime	94	2	0	0	0	2	0	92	0
 pci_info	K5	macro	linux/pci	74	2	0	0	0	0	4	0	70
+struct pci_dev	K5	type	linux/pci	35	2	4	0	31	0	0	0	0
 dev_is_pci	K5	macro	linux/pci	13	2	0	0	1	0	0	0	12
 pcie_capability_read_word	K5	func	linux/pci	13	2	0	0	0	0	0	12	1
 pci_clear_master	K5	func	linux/pci	11	2	0	0	0	0	0	8	3
 PCI_CLASS_DISPLAY_VGA	K5	macro	linux/pci_ids	9	2	0	0	0	1	0	8	0
 pci_write_config_byte	K5	func	linux/pci	8	2	0	0	0	7	0	0	1
-pci_read_config_byte	K5	func	linux/pci	7	2	0	0	0	3	0	0	4
 pm_suspend_target_state	K5	macro	linux/suspend	7	2	0	0	0	1	0	6	0
 pci_dev_id	K5	inline	linux/pci	6	2	0	0	0	0	2	4	0
-pci_irq_vector	K5	func	linux/pci	6	2	0	0	0	0	5	1	0
-struct pci_dev	K5	type	linux/pci	6	2	4	0	2	0	0	0	0
+pci_find_capability	K5	func	linux/pci	6	2	0	0	2	0	0	0	4
 PCI_D1	K5	macro	linux/pci	5	2	0	0	0	4	1	0	0
 PCI_D3hot	K5	macro	linux/pci	5	2	0	0	0	3	2	0	0
 pci_disable_msi	K5	func	linux/pci	5	2	0	0	0	2	0	0	3
@@ -2198,7 +2234,7 @@ generic_handle_irq_safe	K5	func	linux/irqdesc	4	2	0	0	0	1	3	0	0
 irq_free_desc	K5	inline	linux/irq	4	2	0	0	0	3	1	0	0
 pci_channel_state_t	K5	type	linux/pci	4	2	0	0	0	0	0	3	1
 pci_enable_atomic_ops_to_root	K5	func	linux/pci	4	2	0	0	0	0	0	1	3
-synchronize_irq	K5	func	linux/hardirq	4	2	0	0	0	1	3	0	0
+pci_find_ext_capability	K5	func	linux/pci	4	2	0	0	1	0	0	3	0
 PCI_BASE_CLASS_DISPLAY	K5	macro	linux/pci_ids	3	2	0	0	0	0	0	2	1
 PCI_EXP_DEVCAP2_ATOMIC_COMP32	K5	macro	linux/pci_regs	3	2	0	0	0	0	0	2	1
 PCI_EXP_DEVCAP2_ATOMIC_COMP64	K5	macro	linux/pci_regs	3	2	0	0	0	0	0	2	1
@@ -2210,8 +2246,12 @@ irq_alloc_desc	K5	macro	linux/irq	3	2	0	0	0	2	1	0	0
 irq_set_chip_and_handler_name	K5	func	linux/irq	3	2	0	0	0	2	1	0	0
 pci_bus_type	K5	var	linux/pci	3	2	0	0	0	0	1	0	2
 pci_dev_present	K5	func	linux/pci	3	2	0	0	0	2	0	0	1
+pci_device_is_present	K5	func	linux/pci	3	2	0	0	1	0	0	2	0
+pci_disable_sriov	K5	func	linux/pci	3	2	0	0	2	0	1	0	0
 pci_enable_msi	K5	func	linux/pci	3	2	0	0	0	1	0	0	2
+pci_free_irq_vectors	K5	func	linux/pci	3	2	0	0	1	0	0	2	0
 pci_get_device	K5	func	linux/pci	3	2	0	0	1	0	0	0	2
+pci_is_enabled	K5	inline	linux/pci	3	2	0	0	2	0	0	1	0
 pci_unmap_rom	K5	func	linux/pci	3	2	0	0	0	1	0	2	0
 pm_runtime_enable	K5	func	linux/pm_runtime	3	2	0	0	0	0	0	1	2
 vga_put	K5	func	linux/vgaarb	3	2	0	0	1	2	0	0	0
@@ -2222,6 +2262,8 @@ INTEL_RAPTORLAKE_P	K5	macro	asm/intel-family	2	2	0	0	0	1	0	1	0
 INTEL_RAPTORLAKE_S	K5	macro	asm/intel-family	2	2	0	0	0	1	0	1	0
 PCI_CLASS_BRIDGE_HOST	K5	macro	linux/pci_ids	2	2	0	0	0	1	0	0	1
 PCI_DEVID	K5	macro	linux/pci	2	2	0	0	0	1	1	0	0
+PCI_IRQ_MSIX	K5	macro	linux/pci	2	2	0	0	1	0	1	0	0
+PCI_POSSIBLE_ERROR	K5	macro	linux/pci	2	2	0	0	1	0	0	1	0
 PCI_ROM_RESOURCE	K5	enumconst	linux/pci	2	2	0	0	0	0	0	1	1
 PCI_SUBDEVICE_ID_QEMU	K5	macro	linux/pci_ids	2	2	1	0	0	1	0	0	0
 PCI_SUBVENDOR_ID_REDHAT_QUMRANET	K5	macro	linux/pci_ids	2	2	1	0	0	1	0	0	0
@@ -2238,6 +2280,7 @@ irq_set_chip_data	K5	func	linux/irq	2	2	0	0	0	1	1	0	0
 pci_alloc_irq_vectors	K5	func	linux/pci	2	2	0	0	0	0	1	1	0
 pci_d3cold_disable	K5	func	linux/pci	2	2	0	0	0	1	1	0	0
 pci_d3cold_enable	K5	func	linux/pci	2	2	0	0	0	1	1	0	0
+pci_enable_sriov	K5	func	linux/pci	2	2	0	0	1	0	1	0	0
 pci_ignore_hotplug	K5	func	linux/pci	2	2	0	0	0	0	1	1	0
 pci_map_rom	K5	func	linux/pci	2	2	0	0	0	1	0	1	0
 pci_match_id	K5	func	linux/pci	2	2	0	0	0	1	1	0	0
@@ -2248,44 +2291,87 @@ pm_runtime_put_noidle	K5	inline	linux/pm_runtime	2	2	0	0	0	0	1	0	1
 pm_runtime_resume	K5	inline	linux/pm_runtime	2	2	0	0	0	0	1	1	0
 pm_runtime_resume_and_get	K5	inline	linux/pm_runtime	2	2	0	0	0	0	1	1	0
 struct irq_domain_ops	K5	type	linux/irqdomain	2	2	0	0	0	0	1	1	0
+struct pci_error_handlers	K5	type	linux/pci	2	2	0	0	1	0	0	1	0
 struct vga_switcheroo_client_ops	K5	type	linux/vga_switcheroo	2	2	0	0	0	1	0	1	0
 suspend_state_t	K5	type	linux/suspend	2	2	0	0	0	1	0	1	0
 vga_client_register	K5	func	linux/vgaarb	2	2	0	0	0	1	0	1	0
 vga_client_unregister	K5	inline	linux/vgaarb	2	2	0	0	0	1	0	1	0
 vga_switcheroo_register_client	K5	func	linux/vga_switcheroo	2	2	0	0	0	1	0	1	0
 vga_switcheroo_unregister_client	K5	func	linux/vga_switcheroo	2	2	0	0	0	1	0	1	0
-struct virtqueue	K5	type	linux/virtio	13	1	0	0	13	0	0	0	0
+struct virtqueue	K5	type	linux/virtio	147	1	0	0	147	0	0	0	0
+struct virtio_device	K5	type	linux/virtio	135	1	0	0	135	0	0	0	0
+struct virtio_pci_modern_device	K5	type	linux/virtio_pci_modern	34	1	0	0	34	0	0	0	0
+struct virtio_pci_common_cfg	K5	type	linux/virtio_pci	29	1	0	0	29	0	0	0	0
+virtio_has_feature	K5	inline	linux/virtio_config	26	1	0	0	26	0	0	0	0
+struct virtio_pci_cap	K5	type	linux/virtio_pci	18	1	0	0	18	0	0	0	0
+union virtio_map	K5	type	linux/virtio	16	1	0	0	16	0	0	0	0
+VIRTIO_MSI_NO_VECTOR	K5	macro	linux/virtio_pci	15	1	0	0	15	0	0	0	0
+cpu_to_virtio16	K5	inline	linux/virtio_config	15	1	0	0	15	0	0	0	0
+struct virtio_pci_legacy_device	K5	type	linux/virtio_pci_legacy	15	1	0	0	15	0	0	0	0
+struct virtio_admin_cmd	K5	type	linux/virtio	14	1	0	0	14	0	0	0	0
+struct virtio_pci_modern_common_cfg	K5	type	linux/virtio_pci	14	1	0	0	14	0	0	0	0
+vp_iowrite16	K5	inline	linux/virtio_pci_modern	14	1	0	0	14	0	0	0	0
+struct vring_packed_desc	K5	type	linux/virtio_ring	13	1	0	0	13	0	0	0	0
 PCI_EXP_LNKCTL	K5	macro	linux/pci_regs	12	1	0	0	0	0	0	12	0
 PCI_EXP_LNKCTL_HAWD	K5	macro	linux/pci_regs	12	1	0	0	0	0	0	12	0
+dev_to_virtio	K5	macro	linux/virtio	12	1	0	0	12	0	0	0	0
+struct virtio_driver	K5	type	linux/virtio	12	1	0	0	12	0	0	0	0
+VRING_PACKED_EVENT_F_WRAP_CTR	K5	macro	linux/virtio_ring	11	1	0	0	11	0	0	0	0
+vp_ioread16	K5	inline	linux/virtio_pci_modern	11	1	0	0	11	0	0	0	0
 PCI_EXP_LNKCTL2	K5	macro	linux/pci_regs	10	1	0	0	0	0	0	10	0
 PCI_VENDOR_ID_ATI	K5	macro	linux/pci_ids	10	1	0	0	0	0	0	10	0
+drv_to_virtio	K5	macro	linux/virtio	10	1	0	0	10	0	0	0	0
 pcie_capability_clear_and_set_word	K5	inline	linux/pci	10	1	0	0	0	0	0	10	0
 struct generic_pm_domain	K5	type	linux/pm_domain	10	1	0	0	0	0	0	10	0
+struct vring_desc	K5	type	linux/virtio_ring	10	1	0	0	10	0	0	0	0
+VIRTIO_F_ADMIN_VQ	K5	macro	linux/virtio_config	9	1	0	0	9	0	0	0	0
 X86_MATCH_VFM	K5	macro	asm/cpu_device_id	9	1	0	0	0	9	0	0	0
 pm_sleep_ptr	K5	macro	linux/pm	9	1	0	0	0	0	0	9	0
 PCI_EXP_LNKCTL2_ENTER_COMP	K5	macro	linux/pci_regs	8	1	0	0	0	0	0	8	0
 PCI_EXP_LNKCTL2_TX_MARGIN	K5	macro	linux/pci_regs	8	1	0	0	0	0	0	8	0
+VRING_AVAIL_F_NO_INTERRUPT	K5	macro	linux/virtio_ring	8	1	0	0	8	0	0	0	0
 pci_power_t	K5	type	linux/pci	8	1	0	0	0	8	0	0	0
-struct virtio_device	K5	type	linux/virtio	8	1	0	0	8	0	0	0	0
+struct virtqueue_info	K5	type	linux/virtio_config	8	1	0	0	8	0	0	0	0
+VIRTIO_ADMIN_GROUP_TYPE_SRIOV	K5	macro	linux/virtio_pci	7	1	0	0	7	0	0	0	0
 struct msix_entry	K5	type	linux/pci	7	1	0	0	0	0	0	0	7
-virtio_has_feature	K5	inline	linux/virtio_config	7	1	0	0	7	0	0	0	0
+struct virtio_dma_buf_ops	K5	type	linux/virtio_dma_buf	7	1	0	0	7	0	0	0	0
 PCI_CLASS_DISPLAY_OTHER	K5	macro	linux/pci_ids	6	1	0	0	0	0	0	6	0
 PCI_VENDOR_ID_INTEL	K5	macro	linux/pci_ids	6	1	0	0	0	6	0	0	0
 PM_QOS_DEFAULT_VALUE	K5	macro	linux/pm_qos	6	1	0	0	0	6	0	0	0
+VIRTIO_CONFIG_S_FAILED	K5	macro	linux/virtio_config	6	1	0	0	6	0	0	0	0
+VIRTIO_F_VERSION_1	K5	macro	linux/virtio_config	6	1	0	0	6	0	0	0	0
+VRING_DESC_F_INDIRECT	K5	macro	linux/virtio_ring	6	1	0	0	6	0	0	0	0
+VRING_DESC_F_NEXT	K5	macro	linux/virtio_ring	6	1	0	0	6	0	0	0	0
+VRING_DESC_F_WRITE	K5	macro	linux/virtio_ring	6	1	0	0	6	0	0	0	0
+VRING_PACKED_DESC_F_AVAIL	K5	macro	linux/virtio_ring	6	1	0	0	6	0	0	0	0
+VRING_PACKED_EVENT_FLAG_DISABLE	K5	macro	linux/virtio_ring	6	1	0	0	6	0	0	0	0
 cpu_latency_qos_update_request	K5	func	linux/pm_qos	6	1	0	0	0	6	0	0	0
 orderly_poweroff	K5	func	linux/reboot	6	1	0	0	0	0	0	6	0
 pci_ers_result_t	K5	type	linux/pci	6	1	0	0	0	0	0	6	0
+pci_iov_vf_id	K5	func	linux/pci	6	1	0	0	6	0	0	0	0
 pm_notifier	K5	macro	linux/suspend	6	1	0	0	0	0	6	0	0
 PCI_VENDOR_ID_AMD	K5	macro	linux/pci_ids	5	1	0	0	0	0	0	5	0
 PCI_VENDOR_ID_APPLE	K5	macro	linux/pci_ids	5	1	0	0	0	0	0	5	0
+VIRTIO_FEATURES_BITS	K5	macro	linux/virtio_features	5	1	0	0	5	0	0	0	0
+VRING_PACKED_DESC_F_USED	K5	macro	linux/virtio_ring	5	1	0	0	5	0	0	0	0
+__virtio_test_bit	K5	inline	linux/virtio_config	5	1	0	0	5	0	0	0	0
 pci_is_root_bus	K5	inline	linux/pci	5	1	0	0	0	0	0	5	0
 pcie_capability_set_word	K5	inline	linux/pci	5	1	0	0	0	0	0	5	0
+virtio_wmb	K5	inline	linux/virtio_ring	5	1	0	0	5	0	0	0	0
 IRQ_WAKE_THREAD	K5	enumconst	linux/irqreturn	4	1	0	0	0	0	0	0	4
 PCI_BASE_ADDRESS_MEM_TYPE_64	K5	macro	linux/pci_regs	4	1	0	0	0	0	0	0	4
 PCI_BASE_ADDRESS_SPACE	K5	macro	linux/pci_regs	4	1	0	0	0	0	0	0	4
 PCI_BASE_ADDRESS_SPACE_MEMORY	K5	macro	linux/pci_regs	4	1	0	0	0	0	0	0	4
+PCI_CAP_ID_VNDR	K5	macro	linux/pci_regs	4	1	0	0	4	0	0	0	0
+VIRTIO_CONFIG_S_DRIVER_OK	K5	macro	linux/virtio_config	4	1	0	0	4	0	0	0	0
+VIRTIO_FEATURES_U64S	K5	macro	linux/virtio_features	4	1	0	0	4	0	0	0	0
+VIRTIO_F_RING_PACKED	K5	macro	linux/virtio_config	4	1	0	0	4	0	0	0	0
+VIRTIO_F_RING_RESET	K5	macro	linux/virtio_config	4	1	0	0	4	0	0	0	0
+VIRTIO_PCI_QUEUE_SEL	K5	macro	linux/virtio_pci	4	1	0	0	4	0	0	0	0
+VIRTIO_RING_F_INDIRECT_DESC	K5	macro	linux/virtio_ring	4	1	0	0	4	0	0	0	0
+VRING_PACKED_EVENT_FLAG_DESC	K5	macro	linux/virtio_ring	4	1	0	0	4	0	0	0	0
+__virtio_set_bit	K5	inline	linux/virtio_config	4	1	0	0	4	0	0	0	0
 enum irqreturn	K5	type	linux/irqreturn	4	1	0	0	0	4	0	0	0
-pci_find_capability	K5	func	linux/pci	4	1	0	0	0	0	0	0	4
 pci_find_dvsec_capability	K5	func	linux/pci	4	1	0	0	0	0	0	0	4
 pci_is_pcie	K5	inline	linux/pci	4	1	0	0	0	0	0	4	0
 pci_pcie_type	K5	inline	linux/pci	4	1	0	0	0	0	0	4	0
@@ -2294,21 +2380,33 @@ pcie_get_speed_cap	K5	func	linux/pci	4	1	0	0	0	0	0	4	0
 pcie_get_width_cap	K5	func	linux/pci	4	1	0	0	0	0	0	4	0
 request_threaded_irq	K5	func	linux/interrupt	4	1	0	0	0	0	0	0	4
 struct pci_host_bridge	K5	type	linux/pci	4	1	0	0	0	0	0	0	4
+struct virtio_pci_notify_cap	K5	type	linux/virtio_pci	4	1	0	0	4	0	0	0	0
+struct vring_packed_desc_event	K5	type	linux/virtio_ring	4	1	0	0	4	0	0	0	0
 to_pci_host_bridge	K5	macro	linux/pci	4	1	0	0	0	0	0	0	4
+virtio16_to_cpu	K5	inline	linux/virtio_config	4	1	0	0	4	0	0	0	0
+virtio_mb	K5	inline	linux/virtio_ring	4	1	0	0	4	0	0	0	0
+vp_iowrite32	K5	inline	linux/virtio_pci_modern	4	1	0	0	4	0	0	0	0
+vring_size	K5	inline	linux/virtio_ring	4	1	0	0	4	0	0	0	0
+vring_used_event	K5	macro	linux/virtio_ring	4	1	0	0	4	0	0	0	0
 PCIE_LNK_WIDTH_UNKNOWN	K5	enumconst	linux/pci	3	1	0	0	0	0	0	3	0
 PCI_CAP_ID_MSIX	K5	macro	linux/pci_regs	3	1	0	0	0	0	0	0	3
 PCI_ERS_RESULT_DISCONNECT	K5	enumconst	linux/pci	3	1	0	0	0	0	0	3	0
 PCI_EXP_DEVSTA	K5	macro	linux/pci_regs	3	1	0	0	0	0	0	3	0
 PCI_MSIX_FLAGS_ENABLE	K5	macro	linux/pci_regs	3	1	0	0	0	0	0	3	0
 PCI_SPEED_UNKNOWN	K5	enumconst	linux/pci	3	1	0	0	0	0	0	3	0
+PCI_STD_NUM_BARS	K5	macro	linux/pci_regs	3	1	0	0	3	0	0	0	0
 VGA_SWITCHEROO_IGD	K5	enumconst	linux/vga_switcheroo	3	1	0	0	0	0	0	3	0
+VIRTIO_CONFIG_S_ACKNOWLEDGE	K5	macro	linux/virtio_config	3	1	0	0	3	0	0	0	0
+VIRTIO_DEV_PARTS_CAP	K5	macro	linux/virtio_pci	3	1	0	0	3	0	0	0	0
+VIRTIO_F_ORDER_PLATFORM	K5	macro	linux/virtio_config	3	1	0	0	3	0	0	0	0
+VIRTIO_F_SR_IOV	K5	macro	linux/virtio_config	3	1	0	0	3	0	0	0	0
+VIRTIO_RING_F_EVENT_IDX	K5	macro	linux/virtio_ring	3	1	0	0	3	0	0	0	0
 cpu_latency_qos_add_request	K5	func	linux/pm_qos	3	1	0	0	0	3	0	0	0
 cpu_latency_qos_remove_request	K5	func	linux/pm_qos	3	1	0	0	0	3	0	0	0
 disable_irq_nosync	K5	func	linux/interrupt	3	1	0	0	0	0	0	0	3
 enum pci_bus_speed	K5	type	linux/pci	3	1	0	0	0	0	0	3	0
 enum pcie_link_width	K5	type	linux/pci	3	1	0	0	0	0	0	3	0
 enum vga_switcheroo_client_id	K5	type	linux/vga_switcheroo	3	1	0	0	0	0	0	3	0
-pci_find_ext_capability	K5	func	linux/pci	3	1	0	0	0	0	0	3	0
 pci_is_vga	K5	inline	linux/pci	3	1	0	0	3	0	0	0	0
 pci_load_saved_state	K5	func	linux/pci	3	1	0	0	0	0	0	3	0
 pci_num_vf	K5	func	linux/pci	3	1	0	0	0	0	3	0	0
@@ -2317,10 +2415,13 @@ pm_message_t	K5	type	linux/pm	3	1	0	0	0	3	0	0	0
 pm_vt_switch_required	K5	func	linux/pm	3	1	0	0	0	0	0	0	3
 power_group_name	K5	macro	linux/pm	3	1	0	0	0	3	0	0	0
 struct pm_qos_request	K5	type	linux/pm_qos	3	1	0	0	0	3	0	0	0
+struct virtio_config_ops	K5	type	linux/virtio_config	3	1	0	0	3	0	0	0	0
+struct virtio_pci_cap64	K5	type	linux/virtio_pci	3	1	0	0	3	0	0	0	0
 virtio_cread_le	K5	macro	linux/virtio_config	3	1	0	0	3	0	0	0	0
-virtqueue_add_sgs	K5	func	linux/virtio	3	1	0	0	3	0	0	0	0
-virtqueue_kick_prepare	K5	func	linux/virtio	3	1	0	0	3	0	0	0	0
-virtqueue_notify	K5	func	linux/virtio	3	1	0	0	3	0	0	0	0
+virtio_device_ready	K5	inline	linux/virtio_config	3	1	0	0	3	0	0	0	0
+virtio_features_zero	K5	inline	linux/virtio_features	3	1	0	0	3	0	0	0	0
+virtio_store_mb	K5	macro	linux/virtio_ring	3	1	0	0	3	0	0	0	0
+vp_iowrite64_twopart	K5	inline	linux/virtio_pci_modern	3	1	0	0	3	0	0	0	0
 DEV_PM_QOS_MAX_FREQUENCY	K5	enumconst	linux/pm_qos	2	1	0	0	0	0	0	0	2
 DEV_PM_QOS_MIN_FREQUENCY	K5	enumconst	linux/pm_qos	2	1	0	0	0	0	0	0	2
 PCIE_LNK_X1	K5	enumconst	linux/pci	2	1	0	0	0	0	0	2	0
@@ -2349,19 +2450,50 @@ PCI_EXP_LNKCTL2_TLS_8_0GT	K5	macro	linux/pci_regs	2	1	0	0	0	0	0	2	0
 PCI_EXP_TYPE_DOWNSTREAM	K5	macro	linux/pci_regs	2	1	0	0	0	0	0	2	0
 PCI_EXP_TYPE_UPSTREAM	K5	macro	linux/pci_regs	2	1	0	0	0	0	0	2	0
 PCI_PM_CTRL_STATE_MASK	K5	macro	linux/pci_regs	2	1	0	0	0	0	2	0	0
+PCI_VENDOR_ID_REDHAT_QUMRANET	K5	macro	linux/pci_ids	2	1	0	0	2	0	0	0	0
 PM_EVENT_SUSPEND	K5	macro	linux/pm	2	1	0	0	0	2	0	0	0
 PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE	K5	macro	linux/pm_qos	2	1	0	0	0	0	0	0	2
+VIRTIO_ADMIN_CMD_CAP_ID_LIST_QUERY	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_DEVICE_CAP_GET	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_DEV_MODE_SET	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_DEV_PARTS_GET	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_DEV_PARTS_METADATA_GET	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_DEV_PARTS_SET	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_DRIVER_CAP_SET	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_LIST_QUERY	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_LIST_USE	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_RESOURCE_OBJ_CREATE	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_CMD_RESOURCE_OBJ_DESTROY	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_ADMIN_GROUP_TYPE_SELF	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_CONFIG_S_DRIVER	K5	macro	linux/virtio_config	2	1	0	0	2	0	0	0	0
+VIRTIO_CONFIG_S_FEATURES_OK	K5	macro	linux/virtio_config	2	1	0	0	2	0	0	0	0
+VIRTIO_F_ACCESS_PLATFORM	K5	macro	linux/virtio_config	2	1	0	0	2	0	0	0	0
+VIRTIO_F_NOTIFICATION_DATA	K5	macro	linux/virtio_config	2	1	0	0	2	0	0	0	0
+VIRTIO_MSI_CONFIG_VECTOR	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_MSI_QUEUE_VECTOR	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_PCI_CONFIG_OFF	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_PCI_GUEST_FEATURES	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_PCI_ISR	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_PCI_QUEUE_ADDR_SHIFT	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_PCI_QUEUE_PFN	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_PCI_STATUS	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_RESOURCE_OBJ_DEV_PARTS	K5	macro	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+VIRTIO_TRANSPORT_F_END	K5	macro	linux/virtio_config	2	1	0	0	2	0	0	0	0
+VIRTIO_TRANSPORT_F_START	K5	macro	linux/virtio_config	2	1	0	0	2	0	0	0	0
+VRING_PACKED_EVENT_FLAG_ENABLE	K5	macro	linux/virtio_ring	2	1	0	0	2	0	0	0	0
 X86_HYPER_MS_HYPERV	K5	enumconst	asm/hypervisor	2	1	0	0	0	0	0	2	0
+__virtio16	K5	type	linux/virtio_types	2	1	0	0	2	0	0	0	0
 dev_is_pf	K5	macro	linux/pci	2	1	0	0	0	0	2	0	0
 devm_aperture_acquire_for_platform_device	K5	func	linux/aperture	2	1	0	2	0	0	0	0	0
 pci_channel_io_frozen	K5	enumconst	linux/pci	2	1	0	0	0	0	0	2	0
 pci_dev_is_disconnected	K5	inline	linux/pci	2	1	0	0	0	0	0	2	0
-pci_device_is_present	K5	func	linux/pci	2	1	0	0	0	0	0	2	0
 pci_disable_msix	K5	func	linux/pci	2	1	0	0	0	0	0	0	2
-pci_free_irq_vectors	K5	func	linux/pci	2	1	0	0	0	0	0	2	0
+pci_find_next_capability	K5	func	linux/pci	2	1	0	0	2	0	0	0	0
 pci_get_base_class	K5	func	linux/pci	2	1	0	0	0	0	0	2	0
 pci_is_thunderbolt_attached	K5	inline	linux/pci	2	1	0	0	0	0	0	2	0
+pci_release_region	K5	func	linux/pci	2	1	0	0	2	0	0	0	0
 pci_release_regions	K5	func	linux/pci	2	1	0	0	0	0	0	0	2
+pci_release_selected_regions	K5	func	linux/pci	2	1	0	0	2	0	0	0	0
 pci_sriov_set_totalvfs	K5	func	linux/pci	2	1	0	0	0	0	2	0	0
 pci_stop_and_remove_bus_device	K5	func	linux/pci	2	1	0	0	0	0	0	0	2
 pci_wait_for_pending_transaction	K5	func	linux/pci	2	1	0	0	0	0	0	2	0
@@ -2373,9 +2505,20 @@ pm_resume_via_firmware	K5	inline	linux/suspend	2	1	0	0	0	0	0	2	0
 pm_runtime_active	K5	inline	linux/pm_runtime	2	1	0	0	0	0	0	0	2
 pm_vt_switch_unregister	K5	func	linux/pm	2	1	0	0	0	0	0	0	2
 struct irq_domain	K5	type	linux/irqdomain	2	1	0	0	0	0	0	2	0
+struct virtio_admin_cmd_resource_obj_create_data	K5	type	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+struct virtio_admin_cmd_status	K5	type	linux/virtio_pci	2	1	0	0	2	0	0	0	0
+struct virtio_shm_region	K5	type	linux/virtio_config	2	1	0	0	2	0	0	0	0
+struct vring	K5	type	linux/virtio_ring	2	1	0	0	2	0	0	0	0
 vga_get_uninterruptible	K5	inline	linux/vgaarb	2	1	0	0	0	2	0	0	0
-virtqueue_disable_cb	K5	func	linux/virtio	2	1	0	0	2	0	0	0	0
-virtqueue_enable_cb	K5	func	linux/virtio	2	1	0	0	2	0	0	0	0
+virtio32_to_cpu	K5	inline	linux/virtio_config	2	1	0	0	2	0	0	0	0
+virtio_features_test_bit	K5	inline	linux/virtio_features	2	1	0	0	2	0	0	0	0
+virtio_has_dma_quirk	K5	inline	linux/virtio_config	2	1	0	0	2	0	0	0	0
+virtio_rmb	K5	inline	linux/virtio_ring	2	1	0	0	2	0	0	0	0
+virtio_synchronize_cbs	K5	inline	linux/virtio_config	2	1	0	0	2	0	0	0	0
+vp_ioread32	K5	inline	linux/virtio_pci_modern	2	1	0	0	2	0	0	0	0
+vp_ioread8	K5	inline	linux/virtio_pci_modern	2	1	0	0	2	0	0	0	0
+vring_init	K5	inline	linux/virtio_ring	2	1	0	0	2	0	0	0	0
+vring_need_event	K5	inline	linux/virtio_ring	2	1	0	0	2	0	0	0	0
 DPM_FLAG_MAY_SKIP_RESUME	K5	macro	linux/pm	1	1	0	0	0	0	0	1	0
 DPM_FLAG_SMART_PREPARE	K5	macro	linux/pm	1	1	0	0	0	0	0	1	0
 DPM_FLAG_SMART_SUSPEND	K5	macro	linux/pm	1	1	0	0	0	0	0	1	0
@@ -2403,16 +2546,18 @@ PCI_EXP_DEVCTL2_ATOMIC_REQ	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	0	1
 PCI_EXP_LNKSTA	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
 PCI_EXT_CAP_ID_ERR	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
 PCI_EXT_CAP_ID_LTR	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
+PCI_EXT_CAP_ID_SRIOV	K5	macro	linux/pci_regs	1	1	0	0	1	0	0	0	0
 PCI_EXT_CAP_ID_VNDR	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
 PCI_HEADER_TYPE_BRIDGE	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	0	1
 PCI_HEADER_TYPE_NORMAL	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	0	1
+PCI_IRQ_AFFINITY	K5	macro	linux/pci	1	1	0	0	1	0	0	0	0
 PCI_IRQ_ALL_TYPES	K5	macro	linux/pci	1	1	0	0	0	0	0	1	0
 PCI_IRQ_INTX	K5	macro	linux/pci	1	1	0	0	0	0	0	1	0
 PCI_IRQ_MSI	K5	macro	linux/pci	1	1	0	0	0	0	1	0	0
-PCI_IRQ_MSIX	K5	macro	linux/pci	1	1	0	0	0	0	1	0	0
 PCI_LTR_MAX_SNOOP_LAT	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
 PCI_MSIX_FLAGS_QSIZE	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	0	1
-PCI_POSSIBLE_ERROR	K5	macro	linux/pci	1	1	0	0	0	0	0	1	0
+PCI_PM_CTRL	K5	macro	linux/pci_regs	1	1	0	0	1	0	0	0	0
+PCI_PM_CTRL_NO_SOFT_RESET	K5	macro	linux/pci_regs	1	1	0	0	1	0	0	0	0
 PCI_PRIMARY_BUS	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
 PCI_STATUS	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	0	1
 PCI_STATUS_CAP_LIST	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	0	1
@@ -2420,7 +2565,6 @@ PCI_STD_RESOURCES	K5	enumconst	linux/pci	1	1	0	0	0	1	0	0	0
 PCI_STD_RESOURCE_END	K5	enumconst	linux/pci	1	1	0	0	0	1	0	0	0
 PCI_VENDOR_ID	K5	macro	linux/pci_regs	1	1	0	0	0	0	0	1	0
 PCI_VENDOR_ID_DELL	K5	macro	linux/pci_ids	1	1	0	0	0	0	0	1	0
-PCI_VENDOR_ID_REDHAT_QUMRANET	K5	macro	linux/pci_ids	1	1	0	0	1	0	0	0	0
 PM_EVENT_FREEZE	K5	macro	linux/pm	1	1	0	0	0	1	0	0	0
 PM_QOS_MIN_FREQUENCY_DEFAULT_VALUE	K5	macro	linux/pm_qos	1	1	0	0	0	0	0	0	1
 PM_SUSPEND_MEM	K5	macro	linux/suspend	1	1	0	0	0	0	0	1	0
@@ -2434,12 +2578,67 @@ VGA_RSRC_NONE	K5	macro	linux/vgaarb	1	1	0	0	0	0	0	0	1
 VGA_SWITCHEROO_CAN_SWITCH_DDC	K5	enumconst	linux/vga_switcheroo	1	1	0	0	0	1	0	0	0
 VGA_SWITCHEROO_DIS	K5	enumconst	linux/vga_switcheroo	1	1	0	0	0	0	0	1	0
 VGA_SWITCHEROO_OFF	K5	enumconst	linux/vga_switcheroo	1	1	0	0	0	0	0	1	0
-VIRTIO_F_VERSION_1	K5	macro	linux/virtio_config	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_DEV_PARTS_GET_TYPE_ALL	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_DEV_PARTS_METADATA_TYPE_SIZE	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_LEGACY_COMMON_CFG_READ	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_LEGACY_COMMON_CFG_WRITE	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_LEGACY_DEV_CFG_READ	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_LEGACY_DEV_CFG_WRITE	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_CMD_LEGACY_NOTIFY_INFO	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_ADMIN_STATUS_OK	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_F_NOTIF_CONFIG_DATA	K5	macro	linux/virtio_config	1	1	0	0	1	0	0	0	0
 VIRTIO_ID_GPU	K5	macro	linux/virtio_ids	1	1	0	0	1	0	0	0	0
-VIRTIO_RING_F_INDIRECT_DESC	K5	macro	linux/virtio_ring	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_ABI_VERSION	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_BAR	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_CFG_TYPE	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_COMMON_CFG	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_DEVICE_CFG	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_ISR_CFG	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_LEN	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_LENGTH	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_NEXT	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_NOTIFY_CFG	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_OFFSET	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_SHARED_MEMORY_CFG	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_CAP_VNDR	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_ADM_Q_IDX	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_ADM_Q_NUM	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_CFGGENERATION	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_DF	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_DFSELECT	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_GF	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_GFSELECT	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_MSIX	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_NUMQ	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_AVAILHI	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_AVAILLO	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_DESCHI	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_DESCLO	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_ENABLE	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_MSIX	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_NDATA	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_NOFF	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_RESET	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_SELECT	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_SIZE	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_USEDHI	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_Q_USEDLO	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_COMMON_STATUS	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_HOST_FEATURES	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_ISR_CONFIG	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_NOTIFY_CAP_MULT	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_QUEUE_NOTIFY	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_QUEUE_NUM	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_PCI_VRING_ALIGN	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_RESOURCE_OBJ_DEV_PARTS_TYPE_GET	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VIRTIO_RESOURCE_OBJ_DEV_PARTS_TYPE_SET	K5	macro	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+VRING_USED_F_NO_NOTIFY	K5	macro	linux/virtio_ring	1	1	0	0	1	0	0	0	0
 X86_HYPER_NATIVE	K5	enumconst	asm/hypervisor	1	1	0	0	0	1	0	0	0
+__virtio_clear_bit	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
 aperture_remove_conflicting_devices	K5	func	linux/aperture	1	1	0	0	0	0	0	0	1
 cpu_latency_qos_request_active	K5	func	linux/pm_qos	1	1	0	0	0	1	0	0	0
+cpu_to_virtio32	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
+cpu_to_virtio64	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
 dev_pm_domain_attach	K5	func	linux/pm_domain	1	1	0	0	0	0	0	0	1
 dev_pm_domain_attach_by_id	K5	func	linux/pm_domain	1	1	0	1	0	0	0	0	0
 dev_pm_domain_set	K5	func	linux/pm_domain	1	1	0	0	0	0	0	0	1
@@ -2454,8 +2653,10 @@ enum vga_switcheroo_handler_flags_t	K5	type	linux/vga_switcheroo	1	1	0	0	0	0	0	1
 generic_handle_domain_irq	K5	func	linux/irqdesc	1	1	0	0	0	0	0	1	0
 generic_handle_irq	K5	func	linux/irqdesc	1	1	0	0	0	1	0	0	0
 irq_dispose_mapping	K5	func	linux/irqdomain	1	1	0	0	0	0	1	0	0
-is_virtio_device	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+irq_set_affinity_and_hint	K5	inline	linux/interrupt	1	1	0	0	1	0	0	0	0
 ksys_sync_helper	K5	func	linux/suspend	1	1	0	0	0	0	0	1	0
+module_pci_driver	K5	macro	linux/pci	1	1	0	0	1	0	0	0	0
+pci_alloc_irq_vectors_affinity	K5	func	linux/pci	1	1	0	0	1	0	0	0	0
 pci_ats_supported	K5	func	linux/pci-ats	1	1	0	0	0	0	0	0	1
 pci_bus_address	K5	inline	linux/pci	1	1	0	0	0	0	0	0	1
 pci_bus_alloc_resource	K5	func	linux/pci	1	1	0	0	0	1	0	0	0
@@ -2468,21 +2669,23 @@ pci_dbg	K5	macro	linux/pci	1	1	0	0	0	0	1	0	0
 pci_dev_for_each_resource	K5	macro	linux/pci	1	1	0	0	0	0	1	0	0
 pci_dev_get	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_dev_msi_enabled	K5	inline	linux/pci	1	1	0	0	0	0	1	0	0
-pci_disable_sriov	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_enable_msix_range	K5	func	linux/pci	1	1	0	0	0	0	0	0	1
-pci_enable_sriov	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_find_host_bridge	K5	func	linux/pci	1	1	0	0	0	0	0	0	1
+pci_iov_get_pf_drvdata	K5	func	linux/pci	1	1	0	0	1	0	0	0	0
 pci_iov_vf_bar_get_sizes	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_iov_vf_bar_set_size	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_iov_virtfn_devfn	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
-pci_is_enabled	K5	inline	linux/pci	1	1	0	0	0	0	0	1	0
+pci_irq_get_affinity	K5	func	linux/pci	1	1	0	0	1	0	0	0	0
 pci_msix_vec_count	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_physfn	K5	inline	linux/pci	1	1	0	0	0	0	1	0	0
 pci_pme_capable	K5	func	linux/pci	1	1	0	0	0	0	1	0	0
 pci_power_name	K5	inline	linux/pci	1	1	0	0	0	1	0	0	0
+pci_request_region	K5	func	linux/pci	1	1	0	0	1	0	0	0	0
 pci_request_regions	K5	func	linux/pci	1	1	0	0	0	0	0	0	1
+pci_request_selected_regions	K5	func	linux/pci	1	1	0	0	1	0	0	0	0
 pci_reset_function	K5	func	linux/pci	1	1	0	0	0	0	0	1	0
 pci_restore_msi_state	K5	func	linux/pci	1	1	0	0	0	0	0	1	0
+pci_vfs_assigned	K5	func	linux/pci	1	1	0	0	1	0	0	0	0
 pci_wake_from_d3	K5	func	linux/pci	1	1	0	0	0	0	0	1	0
 pcibios_align_resource	K5	func	linux/pci	1	1	0	0	0	1	0	0	0
 pcie_aspm_enabled	K5	func	linux/pci	1	1	0	0	0	0	0	1	0
@@ -2506,14 +2709,19 @@ pm_suspend_in_progress	K5	inline	linux/suspend	1	1	0	0	0	0	1	0	0
 register_virtio_driver	K5	macro	linux/virtio	1	1	0	0	1	0	0	0	0
 struct dev_pm_domain	K5	type	linux/pm	1	1	0	0	0	0	0	1	0
 struct dev_pm_qos	K5	type	linux/pm_qos	1	1	0	0	0	0	0	0	1
-struct pci_error_handlers	K5	type	linux/pci	1	1	0	0	0	0	0	1	0
 struct vga_switcheroo_handler	K5	type	linux/vga_switcheroo	1	1	0	0	0	0	0	1	0
-struct virtio_dma_buf_ops	K5	type	linux/virtio_dma_buf	1	1	0	0	1	0	0	0	0
-struct virtio_driver	K5	type	linux/virtio	1	1	0	0	1	0	0	0	0
-struct virtio_shm_region	K5	type	linux/virtio_config	1	1	0	0	1	0	0	0	0
-struct virtqueue_info	K5	type	linux/virtio_config	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_cap_get_data	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_cap_set_data	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_dev_mode_set_data	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_dev_parts_get_data	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_dev_parts_metadata_data	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_dev_parts_metadata_result	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_hdr	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_query_cap_id_result	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_admin_cmd_resource_obj_cmd_hdr	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_dev_parts_cap	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
+struct virtio_resource_obj_dev_parts	K5	type	linux/virtio_pci	1	1	0	0	1	0	0	0	0
 to_pci_driver	K5	macro	linux/pci	1	1	0	0	0	0	1	0	0
-unregister_virtio_driver	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
 vga_default_device	K5	func	linux/vgaarb	1	1	0	0	0	0	0	1	0
 vga_get_interruptible	K5	inline	linux/vgaarb	1	1	0	0	1	0	0	0	0
 vga_set_legacy_decoding	K5	func	linux/vgaarb	1	1	0	0	0	0	0	0	1
@@ -2524,14 +2732,21 @@ vga_switcheroo_init_domain_pm_ops	K5	func	linux/vga_switcheroo	1	1	0	0	0	0	0	1	0
 vga_switcheroo_register_handler	K5	func	linux/vga_switcheroo	1	1	0	0	0	0	0	1	0
 vga_switcheroo_unregister_handler	K5	func	linux/vga_switcheroo	1	1	0	0	0	0	0	1	0
 virtio_cwrite_le	K5	macro	linux/virtio_config	1	1	0	0	1	0	0	0	0
-virtio_device_ready	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
-virtio_dma_buf_attach	K5	func	linux/virtio_dma_buf	1	1	0	0	1	0	0	0	0
-virtio_dma_buf_export	K5	func	linux/virtio_dma_buf	1	1	0	0	1	0	0	0	0
+virtio_debug_device_exit	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+virtio_debug_device_filter_features	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+virtio_debug_device_init	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+virtio_debug_exit	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+virtio_debug_init	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+virtio_features_copy	K5	inline	linux/virtio_features	1	1	0	0	1	0	0	0	0
+virtio_features_equal	K5	inline	linux/virtio_features	1	1	0	0	1	0	0	0	0
+virtio_features_from_u64	K5	inline	linux/virtio_features	1	1	0	0	1	0	0	0	0
+virtio_features_set_bit	K5	inline	linux/virtio_features	1	1	0	0	1	0	0	0	0
 virtio_find_vqs	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
+virtio_get_features	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
 virtio_get_shm_region	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
-virtio_has_dma_quirk	K5	inline	linux/virtio_config	1	1	0	0	1	0	0	0	0
-virtio_reset_device	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
-virtqueue_get_buf	K5	func	linux/virtio	1	1	0	0	1	0	0	0	0
+vp_iowrite8	K5	inline	linux/virtio_pci_modern	1	1	0	0	1	0	0	0	0
+vq_callback_t	K5	type	linux/virtio_config	1	1	0	0	1	0	0	0	0
+vring_avail_event	K5	macro	linux/virtio_ring	1	1	0	0	1	0	0	0	0
 x86_match_cpu	K5	func	asm/cpu_device_id	1	1	0	0	0	1	0	0	0
 seq_printf	K6	func	linux/seq_file	479	5	0	0	4	267	1	149	58
 seq_puts	K6	inline	linux/seq_file	85	4	0	0	1	53	0	29	2
@@ -2589,6 +2804,7 @@ i2c_new_client_device	K6	func	linux/i2c	3	3	0	0	0	0	1	1	1
 register_acpi_notifier	K6	func	acpi/acpi_bus	3	3	0	0	0	1	0	1	1
 struct i2c_board_info	K6	type	linux/i2c	3	3	0	0	0	0	1	1	1
 unregister_acpi_notifier	K6	func	acpi/acpi_bus	3	3	0	0	0	1	0	1	1
+pr_debug	K6	macro	linux/printk	153	2	0	0	10	0	0	143	0
 struct seq_file	K6	type	linux/seq_file	37	2	0	0	5	0	0	0	32
 KERN_ERR	K6	macro	linux/kern_levels	34	2	0	0	0	1	0	0	33
 hwmon_lock	K6	func	linux/hwmon	32	2	0	0	0	16	16	0	0
@@ -2681,7 +2897,6 @@ i2c_unregister_device	K6	func	linux/i2c	2	2	0	0	0	0	1	0	1
 struct acpi_table_header	K6	type	acpi/actbl	2	2	0	0	0	0	0	1	1
 struct cec_connector_info	K6	type	linux/cec	2	2	0	0	0	1	0	1	0
 SET	K6	macro	video/gbe	150	1	0	0	0	0	150	0	0
-pr_debug	K6	macro	linux/printk	143	1	0	0	0	0	0	143	0
 HDP	K6	macro	dt-bindings/clock/stm32mp1-clks	58	1	0	0	0	0	0	58	0
 BPP	K6	macro	video/udlfb	55	1	0	0	0	0	0	55	0
 DATA	K6	enumconst	linux/hid-over-spi	53	1	0	0	0	0	0	53	0
@@ -3274,13 +3489,13 @@ task_active_pid_ns	K8	func	linux/pid_namespace	1	1	0	0	0	0	0	0	1
 vfs_fallocate	K8	func	linux/fs	1	1	0	0	0	0	0	0	1
 vfs_mmap	K8	inline	linux/fs	1	1	0	0	0	1	0	0	0
 wait_for_random_bytes	K8	func	linux/random	1	1	0	0	0	0	0	0	1
-u32	K9	type	linux/raid/pq	12686	7	2	23	36	5474	2916	4167	68
-u64	K9	type	linux/raid/pq	3252	7	2	6	12	1008	1073	1128	23
-u16	K9	type	linux/raid/pq	1565	6	11	1	0	867	283	368	35
+u32	K9	type	linux/raid/pq	12729	7	2	23	79	5474	2916	4167	68
+u64	K9	type	linux/raid/pq	3283	7	2	6	43	1008	1073	1128	23
+u16	K9	type	linux/raid/pq	1663	7	11	1	98	867	283	368	35
 __entry	K9	macro	trace/stages/stage3_trace_output	1148	5	0	0	16	440	161	521	10
-PAGE_SIZE	K9	macro	linux/raid/pq	665	5	0	0	5	196	64	329	71
+PAGE_SIZE	K9	macro	linux/raid/pq	669	5	0	0	9	196	64	329	71
 __field	K9	macro	linux/genl_magic_func	538	5	0	0	8	197	75	256	2
-PAGE_SHIFT	K9	macro	linux/raid/pq	311	5	0	0	2	151	48	80	30
+PAGE_SHIFT	K9	macro	linux/raid/pq	312	5	0	0	3	151	48	80	30
 TP_ARGS	K9	macro	linux/tracepoint	216	5	0	0	3	74	87	50	2
 TP_PROTO	K9	macro	linux/tracepoint	216	5	0	0	3	74	87	50	2
 TP_printk	K9	macro	trace/stages/stage3_trace_output	106	5	0	0	1	47	18	38	2
@@ -3300,6 +3515,7 @@ struct perf_event	K9	type	linux/perf_event	39	3	0	0	0	17	16	6	0
 after	K9	macro	net/tcp	31	3	0	0	0	8	3	20	0
 before	K9	inline	net/tcp	28	3	0	0	0	6	3	19	0
 BITS_PER_LONG	K9	macro	linux/raid/pq	21	3	0	0	0	16	3	2	0
+cpu_relax	K9	inline	linux/raid/pq	13	3	0	0	1	6	0	6	0
 struct mmu_interval_notifier	K9	type	linux/mmu_notifier	12	3	0	0	0	2	2	8	0
 PERF_HES_STOPPED	K9	macro	linux/perf_event	8	3	0	0	0	2	2	4	0
 struct hw_perf_event	K9	type	linux/perf_event	8	3	0	0	0	1	1	6	0
@@ -3318,7 +3534,6 @@ perf_pmu_register	K9	func	linux/perf_event	3	3	0	0	0	1	1	1	0
 perf_pmu_unregister	K9	func	linux/perf_event	3	3	0	0	0	1	1	1	0
 stack_trace_save	K9	func	linux/stacktrace	3	3	0	0	0	1	1	0	1
 __array	K9	macro	linux/genl_magic_func	12	2	0	0	0	11	0	1	0
-cpu_relax	K9	inline	linux/raid/pq	12	2	0	0	0	6	0	6	0
 struct perf_pmu_events_attr	K9	type	linux/perf_event	6	2	0	0	0	3	3	0	0
 cc_platform_has	K9	func	linux/cc_platform	5	2	0	0	0	0	0	1	4
 outw	K9	macro	linux/logic_pio	4	2	3	0	0	0	0	0	1
@@ -3380,6 +3595,7 @@ dmem_cgroup_uncharge	K9	func	linux/cgroup_dmem	2	1	0	0	0	0	0	0	2
 dmem_cgroup_unregister_region	K9	func	linux/cgroup_dmem	2	1	0	0	0	0	0	0	2
 fault_create_debugfs_attr	K9	func	linux/fault-inject	2	1	0	0	0	0	2	0	0
 hmm_pfn_to_page	K9	inline	linux/hmm	2	1	0	0	0	0	0	2	0
+kmsan_handle_dma	K9	func	linux/kmsan	2	1	0	0	2	0	0	0	0
 kunit_get_current_test	K9	inline	kunit/test-bug	2	1	0	0	0	0	2	0	0
 mmu_interval_check_retry	K9	inline	linux/mmu_notifier	2	1	0	0	0	0	2	0	0
 mpi_alloc	K9	func	linux/mpi	2	1	0	0	0	0	0	0	2
@@ -3393,6 +3609,7 @@ struct rchan	K9	type	linux/relay	2	1	0	0	0	2	0	0	0
 struct rchan_buf	K9	type	linux/relay	2	1	0	0	0	2	0	0	0
 struct soc_device_attribute	K9	type	linux/sys_soc	2	1	0	0	0	0	0	0	2
 update_devfreq	K9	func	linux/devfreq	2	1	0	0	0	0	0	0	2
+xen_domain	K9	macro	xen/xen	2	1	0	0	2	0	0	0	0
 ABORT	K9	enumconst	scsi/scsi_status	1	1	0	0	0	0	0	1	0
 CC_ATTR_GUEST_MEM_ENCRYPT	K9	enumconst	linux/cc_platform	1	1	0	0	0	0	0	0	1
 CC_ATTR_GUEST_SEV_SNP	K9	enumconst	linux/cc_platform	1	1	0	0	0	0	0	0	1
@@ -3465,7 +3682,6 @@ struct pinctrl_map	K9	type	linux/pinctrl/machine	1	1	0	0	0	1	0	0	0
 struct rchan_callbacks	K9	type	linux/relay	1	1	0	0	0	1	0	0	0
 task_cgroup	K9	inline	linux/cgroup	1	1	0	0	0	0	0	0	1
 unregister_oom_notifier	K9	func	linux/oom	1	1	0	0	0	1	0	0	0
-xen_domain	K9	macro	xen/xen	1	1	0	0	1	0	0	0	0
 xen_initial_domain	K9	macro	xen/xen	1	1	0	0	0	0	0	1	0
 DRIVER_MODESET	K9-drm	enumconst	drm/drm_drv	27	7	1	1	2	2	2	1	18
 DRIVER_ATOMIC	K9-drm	enumconst	drm/drm_drv	14	7	1	1	3	3	2	3	1
@@ -6029,7 +6245,7 @@ drm_sched_resume_timeout	K9-sched	func	drm/gpu_scheduler	1	1	0	0	0	0	1	0	0
 drm_sched_suspend_timeout	K9-sched	func	drm/gpu_scheduler	1	1	0	0	0	0	0	1	0
 drm_sched_tdr_queue_imm	K9-sched	func	drm/gpu_scheduler	1	1	0	0	0	0	1	0	0
 struct drm_sched_rq	K9-sched	type	drm/gpu_scheduler	1	1	0	0	0	0	0	1	0
-free	K?	macro	linux/decompress/mm	67	5	0	0	3	21	14	14	15
+free	K?	macro	linux/decompress/mm	68	5	0	0	4	21	14	14	15
 mode_set	K?	inline	linux/hisi_acc_qm	22	4	0	0	1	8	0	12	1
 struct gpu_buddy_block	K?	type	linux/gpu_buddy	45	3	0	0	0	5	16	24	0
 gpu_buddy_block_offset	K?	inline	linux/gpu_buddy	14	3	0	0	0	4	9	1	0

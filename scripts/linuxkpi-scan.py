@@ -34,7 +34,17 @@ DRIVERS = [
       'drivers/gpu/drm/sysfb/drm_sysfb_helper.c|',
       'drivers/gpu/drm/sysfb/drm_sysfb_modeset.c|',
       'drivers/gpu/drm/sysfb/drm_sysfb_helper.h|'], []),
-    ('virtio-gpu', 'linux', ['drivers/gpu/drm/virtio'], []),
+    # virtio-gpu no habla con PCI ni con las IRQ: lo hace el nucleo virtio
+    # (bus virtio, anillo y transporte PCI), que tambien se compila desde las
+    # fuentes de Linux. Se cuenta con el driver: lo que definen esos .c no es
+    # API que deba dar la capa, y sus llamadas a PCI/IRQ/dispositivos si.
+    # Fuera: virtio_pci_admin_legacy_io.c (VFIO) y virtio_debug.c (debugfs).
+    ('virtio-gpu', 'linux',
+     ['drivers/gpu/drm/virtio', 'drivers/virtio/virtio.c', 'drivers/virtio/virtio_ring.c',
+      'drivers/virtio/virtio_anchor.c', 'drivers/virtio/virtio_dma_buf.c',
+      'drivers/virtio/virtio_pci_common.c', 'drivers/virtio/virtio_pci_common.h',
+      'drivers/virtio/virtio_pci_modern.c', 'drivers/virtio/virtio_pci_modern_dev.c',
+      'drivers/virtio/virtio_pci_legacy.c', 'drivers/virtio/virtio_pci_legacy_dev.c'], []),
     ('i915', 'linux', ['drivers/gpu/drm/i915'],
      ['/selftests/', '/gvt/', '/selftest_', 'mock_', '/kunit']),
     ('xe', 'linux', ['drivers/gpu/drm/xe'], ['/tests/', '_kunit', '/kunit']),
@@ -593,6 +603,11 @@ def write_md(a, rows, present, drv_stats, nhdr, nidx):
         nf, nl, ne = drv_stats[n]
         w('| `%s` | %d | %d | %d |' % (n, nf, nl, ne))
     w('')
+    if 'virtio-gpu' in present:
+        w('`virtio-gpu` incluye el nucleo virtio que necesita (`drivers/virtio/`: '
+          'bus, anillo, transporte PCI moderno y legado, `virtio_dma_buf`): es '
+          'quien llama a PCI, a las IRQ y al modelo de dispositivos, y se compila '
+          'tambien desde las fuentes de Linux.\n')
     w('## Simbolos distintos por nivel y driver\n')
     w('| Nivel | ' + ' | '.join('`%s`' % n for n in present) +
       ' | Union | de ellos funciones (no inline) |')
