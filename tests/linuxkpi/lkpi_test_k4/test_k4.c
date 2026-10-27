@@ -10,6 +10,8 @@
 #include <linux/kobject.h>
 #include <linux/kref.h>
 #include <linux/notifier.h>
+#include <linux/of.h>
+#include <linux/pm_domain.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -528,6 +530,51 @@ static void test_platform(void)
 	KT_SYS_IS("bus/platform/drivers/lkpi-k4plat", KT_SYSFS_NONE);
 }
 
+/* device_link (minimo) y lo que en x86 no existe: device tree, dominios PM. */
+static void test_links_and_stubs(void)
+{
+	struct device *a = kzalloc(sizeof(*a), GFP_KERNEL);
+	struct device *b = kzalloc(sizeof(*b), GFP_KERNEL);
+	struct device_link *link;
+	struct device_node *np = NULL;
+	struct property *pp;
+	u32 v = 7;
+	int n = 0;
+
+	if (!a || !b) {
+		KT_ASSERT(0, "sin memoria");
+		kfree(a);
+		kfree(b);
+		return;
+	}
+	kt_released = 0;
+	device_initialize(a);
+	device_initialize(b);
+	a->release = kt_plain_release;
+	b->release = kt_plain_release;
+	dev_set_name(a, "lkpi-k4-cons");
+	dev_set_name(b, "lkpi-k4-prov");
+	link = device_link_add(a, b, DL_FLAG_STATELESS);
+	KT_ASSERT(link && link->consumer == a && link->supplier == b, "device_link_add");
+	KT_EQ(kref_read(&b->kobj.kref), 2);
+	KT_ASSERT(device_link_add(a, a, 0) == NULL, "enlace consigo mismo");
+	device_link_del(link);
+	KT_EQ(kref_read(&b->kobj.kref), 1);
+	put_device(a);
+	put_device(b);
+	KT_EQ(kt_released, 2);
+
+	KT_ASSERT(dev_of_node(a) == NULL, "sin nodo de DT");
+	KT_EQ(of_property_read_u32(np, "x", &v), -ENOSYS);
+	KT_EQ(v, 7);
+	KT_ASSERT(!of_property_present(np, "x") && !of_parse_phandle(np, "x", 0), "of_*");
+	KT_EQ(of_get_available_child_count(np), 0);
+	for_each_property_of_node(np, pp)
+		n++;
+	KT_EQ(n, 0);
+	KT_ASSERT(dev_pm_domain_attach_by_id(NULL, 0) == NULL, "sin dominios PM");
+}
+
 static int __init test_k4_init(void)
 {
 	test_kobject();
@@ -536,6 +583,7 @@ static int __init test_k4_init(void)
 	test_devres();
 	test_class();
 	test_platform();
+	test_links_and_stubs();
 	return 0;
 }
 

@@ -42,6 +42,7 @@ static void test_pci_lookup(struct pci_dev *pdev)
 	KT_EQ(vendor, EDU_VENDOR);
 	KT_EQ(pci_read_config_dword(pdev, 0x100, &v), PCIBIOS_BAD_REGISTER_NUMBER);
 	KT_EQ(v, 0xffffffff);
+	KT_ASSERT(PCI_POSSIBLE_ERROR(v) && !PCI_POSSIBLE_ERROR(vendor), "PCI_POSSIBLE_ERROR");
 	KT_ASSERT(pdev->msi_cap && !pdev->msix_cap, "edu: MSI si, MSI-X no");
 	KT_EQ(pci_msi_vec_count(pdev), 1);
 	KT_EQ(pci_msix_vec_count(pdev), -EINVAL);

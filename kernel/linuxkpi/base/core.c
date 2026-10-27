@@ -681,6 +681,37 @@ void lkpi_device_destroy(const struct class *cls, dev_t devt)
 }
 EXPORT_SYMBOL(lkpi_device_destroy);
 
+/* ------------------------------------------------------ device_link */
+
+struct device_link *lkpi_device_link_add(struct device *consumer, struct device *supplier,
+					 u32 flags)
+{
+	struct device_link *link;
+
+	if (!consumer || !supplier || consumer == supplier)
+		return NULL;
+	link = kzalloc(sizeof(*link), GFP_KERNEL);
+	if (!link)
+		return NULL;
+	link->consumer = get_device(consumer);
+	link->supplier = get_device(supplier);
+	link->flags = flags;
+	dev_dbg(consumer, "device_link con %s (sin orden de probe/energia)\n",
+		dev_name(supplier));
+	return link;
+}
+EXPORT_SYMBOL(lkpi_device_link_add);
+
+void lkpi_device_link_del(struct device_link *link)
+{
+	if (!link)
+		return;
+	put_device(link->consumer);
+	put_device(link->supplier);
+	kfree(link);
+}
+EXPORT_SYMBOL(lkpi_device_link_del);
+
 /* ------------------------------------------------------- dev_printk */
 
 /* El nivel (KERN_*) tiene que ir al principio del formato, no como argumento. */

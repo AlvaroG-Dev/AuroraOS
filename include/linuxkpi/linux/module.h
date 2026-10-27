@@ -39,6 +39,10 @@ struct module;
 #define late_initcall(fn) module_init(fn)
 #define subsys_initcall(fn) module_init(fn)
 #define device_initcall(fn) module_init(fn)
+#define core_initcall(fn) module_init(fn)
+#define postcore_initcall(fn) module_init(fn)
+#define arch_initcall(fn) module_init(fn)
+#define fs_initcall(fn) module_init(fn)
 
 static inline bool try_module_get(struct module *m) { return true; }
 static inline void module_put(struct module *m) { }

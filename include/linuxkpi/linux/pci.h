@@ -80,6 +80,11 @@ typedef unsigned int __bitwise pci_ers_result_t;
 #define PCI_ERS_RESULT_RECOVERED ((pci_ers_result_t)5)
 
 /* Respuestas de los accesos de configuracion */
+/* Lectura de configuracion de un dispositivo que no responde: todo unos. */
+#define PCI_ERROR_RESPONSE (~0ULL)
+#define PCI_SET_ERROR_RESPONSE(val) (*(val) = ((typeof(*(val)))PCI_ERROR_RESPONSE))
+#define PCI_POSSIBLE_ERROR(val) ((val) == ((typeof(val))PCI_ERROR_RESPONSE))
+
 #define PCIBIOS_SUCCESSFUL 0x00
 #define PCIBIOS_FUNC_NOT_SUPPORTED 0x81
 #define PCIBIOS_BAD_VENDOR_ID 0x83

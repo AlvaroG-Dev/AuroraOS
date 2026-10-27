@@ -15,6 +15,7 @@
 #define _LKPI_LINUX_DEVICE_H
 
 #include <linux/types.h>
+#include <linux/bits.h>
 #include <linux/compiler.h>
 #include <linux/kobject.h>
 #include <linux/list.h>
@@ -364,6 +365,37 @@ static inline void device_remove_group(struct device *dev, const struct attribut
 	device_remove_groups(dev, groups);
 }
 DEFINE_FREE(put_device, struct device *, if (_T) put_device(_T))
+
+/* -------------------------------------------------------- device_link */
+
+/*
+ * Enlaces proveedor -> consumidor. MINIMO: se registran (con referencia a los
+ * dos dispositivos) pero no ordenan el probe, el remove ni la energia, que es
+ * para lo que los usa Linux. Basta para drivers que los crean y los borran
+ * (simpledrm con varios dominios de energia, que en x86 no hay).
+ */
+#define DL_FLAG_STATELESS BIT(0)
+#define DL_FLAG_AUTOREMOVE_CONSUMER BIT(1)
+#define DL_FLAG_PM_RUNTIME BIT(2)
+#define DL_FLAG_RPM_ACTIVE BIT(3)
+#define DL_FLAG_AUTOREMOVE_SUPPLIER BIT(4)
+#define DL_FLAG_AUTOPROBE_CONSUMER BIT(5)
+#define DL_FLAG_MANAGED BIT(6)
+#define DL_FLAG_SYNC_STATE_ONLY BIT(7)
+#define DL_FLAG_INFERRED BIT(8)
+#define DL_FLAG_CYCLE BIT(9)
+
+struct device_link {
+	struct device *supplier;
+	struct device *consumer;
+	u32 flags;
+};
+
+struct device_link *lkpi_device_link_add(struct device *consumer, struct device *supplier,
+					 u32 flags);
+void lkpi_device_link_del(struct device_link *link);
+#define device_link_add(c, s, f) lkpi_device_link_add(c, s, f)
+#define device_link_del(l) lkpi_device_link_del(l)
 
 /* ----------------------------------------------------------------- bus */
 
