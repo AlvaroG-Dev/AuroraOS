@@ -1,6 +1,6 @@
 # Plan de implementación: capa de compatibilidad con drivers de Linux (LinuxKPI) para Aurora
 
-Estado: **L0, L1, L2 y L3 hechas** (26-oct-2026; L0.3 repetida sobre Linux 6.18.59 y NVIDIA open 615.78.08, las versiones fijadas, ver §3.1 y §11). Tras L3 (27-oct-2026): `aur.skip=`, polaridad INTx, medida de `virtio-gpu` y correcciones de Aurora (cuelgue de `process_exit`, temporizadores, señales por hilo, salida del grupo, BIOS/LFN, `ata_dma`, montaje tardío), ver `docs/LinuxKPI_Sesion_L3.md` §9–§11. L4 pendiente de confirmación. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md`, `docs/LinuxKPI_Sesion_L2.md` y `docs/LinuxKPI_Sesion_L3.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
+Estado: **L0, L1, L2, L3 y L4 hechas** (L4 el 27-oct-2026: DMA con bounce, `sg_table`, `dma_buf` ↔ PRIME, firmware real, I²C con `i2c-algo-bit`, debugfs, backlight y E/S de usuario con `task_struct`/señales reales; hito `/dev/lkpi_test` desde el espacio de usuario, ver `docs/LinuxKPI_Sesion_L4.md`). **L5 pendiente de confirmación.** L0–L3: 26-oct-2026 (L0.3 repetida sobre Linux 6.18.59 y NVIDIA open 615.78.08, las versiones fijadas, ver §3.1 y §11). Tras L3 (27-oct-2026): `aur.skip=`, polaridad INTx, medida de `virtio-gpu` y correcciones de Aurora (cuelgue de `process_exit`, temporizadores, señales por hilo, salida del grupo, BIOS/LFN, `ata_dma`, montaje tardío), ver `docs/LinuxKPI_Sesion_L3.md` §9–§11. Resúmenes de las sesiones: `docs/LinuxKPI_Sesion_L0_L1.md`, `docs/LinuxKPI_Sesion_L2.md`, `docs/LinuxKPI_Sesion_L3.md` y `docs/LinuxKPI_Sesion_L4.md`. Decisión D5 (opción a): una sola capa para **Intel (`i915`/`xe`), AMD (`amdgpu`) y NVIDIA (`kernel-open/`)**. Contexto: `docs/Wayland_Estado_y_Decisiones.md` (D5, D6, D10), `Plan_NVIDIA.md`, Bloque 8 de `Plan_Wayland_Unificado.md`.
 
 ## 0. Principios
 
@@ -186,12 +186,12 @@ Cada fase deja la suite existente (183 pruebas del kernel + pruebas de usuario) 
 | Cargador `.kur`: reubicaciones adicionales, secciones de `modinfo/param`, `__ksymtab_gpl`, módulos grandes (> 50 MB), versiones/`vermagic` opcional — **hecho en L0.4** salvo módulos > 64 MiB (lectura por trozos, L8) y `vermagic` (no hace falta: `EXPORT_SYMBOL*` va a `.kur_ksymtab`) | L0 |
 | `ksymtab`: exportar los símbolos de la capa con nombres de Linux; `EXPORT_SYMBOL_GPL` como alias | L0–L1 |
 | `kernel/drm/`: opción de compilación «propio» / «Linux sobre LinuxKPI» | L5 |
-| VFS: `cdev` genérico + `file_operations` completo (`fault`, `llseek`, `poll`, `fasync`) | L4 |
+| VFS: `cdev` genérico + `file_operations` completo (`fault`, `llseek`, `poll`, `fasync`) — **hecho en L4** (operaciones por fd en `vfs_ops`, `VMA_DEV`, `F_SETOWN`/`O_ASYNC`) | L4 |
 | `sysfs`: crear atributos desde `kobject`/`device` (`drm/cardN`, `class/drm`, `bus/pci/drivers`) — **hecho en L3** (atributos con `show`/`store` en `sysfs_dyn`; faltan los binarios) | L3 |
 | `udev`/`uevent`: eventos `change` (hot-plug de conector) hacia `libudev` | L5 |
-| Memoria: `shmem` para objetos GEM, páginas con atributos WC/UC, `vmap`, límites por proceso | L1/L4/L6 |
+| Memoria: `shmem` para objetos GEM, páginas con atributos WC/UC, `vmap`, límites por proceso — `vmap` y WC (región `vmap`) **hechos en L4**; falta quitar el alias WB de la ventana directa | L1/L4/L6 |
 | IOMMU/VT-d y `dma_map` real | L9 |
-| `task_struct` mínimo visible a drivers (`current->mm`, `pid`, `comm`) sobre `task_t` | L4 |
+| `task_struct` mínimo visible a drivers (`current->mm`, `pid`, `comm`) sobre `task_t` — **hecho en L4** (sin campo en `task_t`) | L4 |
 
 ## 6. Estrategia de pruebas (sin y con hardware)
 
@@ -233,8 +233,9 @@ L0.1–L0.5 y L1: cabeceras base, `kmalloc`/`list`/`rbtree`/`idr`, pruebas en la
 5. **Primer driver en hardware real**: el portátil Intel (necesita `lspci -nn` y log serie).
 6. ~~**Punto exacto de 6.18.y** y **etiqueta de `linux-firmware`**~~ → **6.18.59** y **20261019** (sección 11); L0.3 repetida, también con NVIDIA 615.78.08.
 7. ~~**RCU antes de usar `xarray`/`idr` con lectores concurrentes**~~ → hecho en L2 (`kfree_rcu` en `xa_node_free`).
-8. **Cambios en Aurora tras L2**: ~~plazos de espera a 1 ms~~ y ~~`sched_current()` atómico~~ → hechos (§11, «Versión fijada, `sched_current()`, plazos a 1 ms»). Siguen rechazados `task_t->lkpi_task` para `current` y exportar `signal_pending` (necesarios en K8, L4).
+8. **Cambios en Aurora tras L2**: ~~plazos de espera a 1 ms~~ y ~~`sched_current()` atómico~~ → hechos (§11, «Versión fijada, `sched_current()`, plazos a 1 ms»). ~~`current` estable y `signal_pending`~~ → resuelto en L4 sin campo en `task_t` (tabla validada por tid y `signal_unblocked_of` de Aurora).
 9. **Abiertas tras L3** (§11, «L3»): (a) ~~opción de arranque para que `aur_bus` no reclame los ID que deba llevar un driver de Linux~~ → hecho: `aur.skip=` (§11, «Tras L3»); (b) `on_each_cpu()`/IPI de función (`IPI_VECTOR_CALL` sin handler; L7, `i915`); (c) ECAM para el espacio de configuración extendido (L7/L8); (d) ampliar los 21 vectores MSI de kernel o darles espacio por CPU (L7/L8); (e) ~~`irq_user.c` fuerza INTx activas a nivel bajo en líneas que la MADT de QEMU declara activas a nivel alto~~ → corregido (§11, «Tras L3»); (f) uevents hacia el userland (L5).
+10. **Abiertas tras L4** (§11, «L4: resultados»): (a) WC sin alias WB en la ventana directa (L7/L9); (b) `dma_resv` con fences y fence implícito de PRIME (K7, L5); (c) Aurora: `poll` no filtra `revents` por los eventos pedidos y `/dev/kmsg` incremental se salta líneas al rotar el anillo (arreglos pequeños fuera del alcance; a decidir); (d) `/dev/i2c-N` y atributos binarios de sysfs.
 
 ## 11. Decisiones (registro)
 
@@ -337,3 +338,13 @@ Preguntas de diseño en una sola ronda; el autor eligió las recomendaciones (1�
 7. **Firmware**: `request_firmware*` de la capa sobre el de Aurora; `make iso` copia a `/lib/firmware` del initrd los ficheros de `kernel/linuxkpi/firmware.list` (con SHA-256, `Link:` de `WHENCE`) si existe el árbol de linux-firmware 20261019; la prueba omite (no falla) el fichero real si falta. Sin `.xz`/`.zst`.
 8. **debugfs**: árbol en memoria de la capa montado como sistema de ficheros en `/sys/kernel/debug` con el mismo puente de `file_operations`.
 9. **Hito**: `lkpi_test_k6` (suite del kernel) para lo interno; `lkpi_test_dev.kur` con `/dev/lkpi_test` (`miscdevice`), cargado y descargado por `user/musl/apps/lkpi_test` con `finit_module`. `i2c`: núcleo + emulación SMBus + `i2c-algo-bit` propio (sin `/dev/i2c-N`); backlight en `/sys/class/backlight`.
+
+### 27-oct-2026 — L4: resultados y cambios durante la sesión
+Detalle, pruebas y commits en `docs/LinuxKPI_Sesion_L4.md`.
+- **SIGIO por pid**: `kill_fasync` no guarda el `file_descriptor_t` (puede liberarse con el nodo aún vivo); `F_SETOWN` avisa al fichero por `setfl` y Aurora envía con `vfs_send_sigio(owner, sig)`. El SIGIO sale siempre de un work (puede pedirse desde una IRQ o un temporizador).
+- **`llseek(f, off, whence, cur)`**: Aurora pasa el offset actual y guarda el resultado; la capa no ve `file_descriptor_t`.
+- **`dma_buf` sin cachés de identidad**: cada `dma_buf_fd()` crea un dmabuf de Aurora (con una referencia al `dma_buf`, soltada cuando Aurora libera el último GEM); cada `dma_buf_get()` de un dmabuf nativo de Aurora crea un envoltorio. Mismo fd de la capa → mismo `dma_buf`; dos `dma_buf_get` del mismo fd nativo → dos `dma_buf` con las mismas páginas.
+- **`poll` filtrado en el puente** (`events | POLLERR | POLLHUP`, como Linux); Aurora no filtra en general y no se ha cambiado.
+- **`mprotect` de Aurora conserva `PTE_SPECIAL`/`PTE_SHARED_OBJ` y la caché** (fallo previo: un memfd `MAP_SHARED` con `mprotect` perdía su página al salir el proceso).
+- **Hito superado**: `/dev/lkpi_test` (driver de Linux en `.kur`) desde `user/musl/apps/lkpi_test`, 101 comprobaciones con `-smp 2` y `-smp 4`; suite del kernel 201/201 (+ `vmap` y K6) con `-smp 2` y `-smp 4`; `drm_test`, `sig_test`, `rseq_test`, `timer_test`, `thread_sig_test`, `clipboard-x11.sh` y `primary-icons.sh` en verde.
+
