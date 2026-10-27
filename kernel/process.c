@@ -1433,11 +1433,14 @@ static bool has_matching_event(void *arg) {
 // referencia tomada bajo process_lock (puede ser NULL).
 static void free_reaped_zombie(process_t *z, task_t *zombie_task) {
   if (zombie_task) {
-    // [CONCURRENCIA] Esperar a que la tarea no esté en ningún CPU.
-    // on_cpu se limpia en task_switch, así que esto es la barrera
-    // mínima antes de soltar la referencia.
-    while (__atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
-      __asm__ volatile("pause");
+    // [CONCURRENCIA] Esperar a que la tarea haya terminado de salir
+    // (TASK_DEAD, lo pone process_exit_current justo antes de ceder) y no
+    // esté en ningún CPU: hasta entonces puede seguir corriendo con el CR3
+    // que se libera abajo. on_cpu se limpia en task_switch. Se cede la CPU
+    // en vez de girar porque la tarea puede estar READY esperando a esta.
+    while (zombie_task->state != TASK_DEAD ||
+           __atomic_load_n(&zombie_task->on_cpu, __ATOMIC_ACQUIRE))
+      sched_yield();
 
     zombie_task->proc = NULL;
     task_put(zombie_task);
@@ -1652,11 +1655,16 @@ void process_exit(process_t *proc, int exit_code) {
   // Si el líder murió antes que otros threads del team, proc->task
   // apunta a una task ya DEAD; limpiar ahí sería un doble cleanup.
   // El último thread en salir es el que tiene ventanas vivas.
+  //
+  // [FIX] La tarea NO se marca TASK_DEAD aquí sino al final de
+  // process_exit_current(), justo antes de ceder. Antes se marcaba aquí y,
+  // si el tick la expulsaba antes de despertar al padre, el selector ya no
+  // la volvía a elegir (y reap_dead_tasks podía liberarla): el padre se
+  // quedaba para siempre en wait4() con el hijo ya zombi. Era el cuelgue de
+  // bash/timeout/wl-copy de primary-icons.sh y clipboard-x11.sh.
   task_t *cur = sched_current();
-  if (cur && cur->proc == proc) {
+  if (cur && cur->proc == proc)
     winsrv_cleanup_task(cur);
-    cur->state = TASK_DEAD;
-  }
 
   task_t *parent_task = NULL;
   process_t *parent_proc = NULL;
