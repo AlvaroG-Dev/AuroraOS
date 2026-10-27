@@ -164,6 +164,27 @@ Historia: el primer arranque con la capa nueva ya hizo probe de `edu` y `virtio-
 | `712e00fe` | Aurora: INTx de los `.aur` y del AHCI con la polaridad de la MADT |
 | `d4689617` | L0.3: `virtio-gpu` con el núcleo virtio (escáner, descarga, `linuxkpi_api.md`/`.tsv`) |
 | `acb15968` | Capa: lo que faltaba de K4/K5 para el primer hito (DT, `pm_domain`, `device_link`, …) |
-| (este commit) | Plan §3.1/§10/§11, D5 y esta sección |
+| `40f65201` | Plan §3.1/§10/§11, D5 y esta sección |
+| `fb581634` | Aurora: despertar perdido en `wait_queue_wake_task` |
+| `2522f377` | Aurora: no marcar `TASK_DEAD` antes de despertar al padre en `process_exit` |
+| (este commit) | Esta sección y Plan §11 |
 
-**Regresión tras estos cambios**: en curso (se completa al terminar).
+### El cuelgue de `bash`/`wl-copy` (investigado y corregido)
+
+En la regresión de estos cambios `primary-icons.sh` se colgó en 4 de 5 ejecuciones (histórico: ~5 de 45); cada cuelgue costaba el *timeout* entero (25 min), de ahí la lentitud. No lo causaban los puntos 1, 2 y 5: es un fallo antiguo de Aurora que se ve más cuando los `.kur` de prueba corren a la vez que el guion (más expulsiones).
+
+- **Síntoma** (volcado temporal de procesos y trazas, no subidas): siempre un padre (`bash`, `timeout`, `wl-copy`) dormido en `wait4()` en su `child_wq` con el hijo ya zombi, a veces en el primer `mkdir` del guion.
+- **Causa**: `process_exit()` marcaba la tarea `TASK_DEAD` **antes** de poner el zombi, mandar `SIGCHLD` y despertar al padre. Si el tick la expulsaba en ese hueco, el selector no la volvía a elegir (y `reap_dead_tasks` podía liberarla): el despertar no llegaba nunca. Las trazas lo muestran: el hijo escribe su última línea antes del despertar, queda `st=4` (DEAD) y zombi, y la del despertar no sale.
+- **Arreglo** (`2522f377`): `TASK_DEAD` solo en `process_exit_current()`, justo antes de ceder; `free_reaped_zombie()` espera a `TASK_DEAD` y `on_cpu == 0` (cediendo la CPU) antes de liberar el espacio de direcciones del zombi, porque ahora el padre puede recogerlo mientras la tarea termina de salir.
+- **Antes** (`fb581634`) se arregló una carrera real pero mucho menos probable: `wait_queue_wake_task()` leía `waiting_on` sin cerrojo y perdía el aviso si el que espera había evaluado ya su condición y aún no se había encolado (ahora, Dekker con `task->wake_pending`). Sola no bastaba: 3 cuelgues en 19.
+- **Problema aparte, no tocado**: `alarm`, `setitimer` y `timer_create` no funcionan, así que `timeout 20 …` nunca vence y cualquier cuelgue de un hijo es para siempre en vez de un fallo a los 20 s.
+
+| `primary-icons.sh` | Ejecuciones | Cuelgues |
+|---|---|---|
+| Sin arreglos (`fin2`, `prim2`) | 5 | 4 |
+| Con `fb581634` | 19 | 3 (+1 que tardó 407 s) |
+| Compilación con trazas, sin el arreglo de `process_exit` | 15 | 11 |
+| Con `2522f377` | 11 | 0 (todas 114–139 s) |
+| Compilación con trazas y `2522f377` | 6 | 0 |
+
+**Regresión tras estos cambios** (con `2522f377`): suite del kernel 199/199 con `-smp 2` y dos veces con `-smp 4` (16 omitidas; 17 en una de `-smp 4` por el `iso9660: listado de /cdrom` intermitente de siempre); `drm_test`, `sig_test` y `rseq_test` ALL PASS; `clipboard-x11.sh` pasa 2 de 2; `primary-icons.sh` pasa 17 de 17 entre las tandas de arriba y la regresión.
