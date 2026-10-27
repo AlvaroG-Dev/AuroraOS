@@ -214,3 +214,56 @@ int drm_ioctl_prime_fd_to_handle(drm_file_t *f, uint64_t arg) {
     drm_handle_close(f, h);
   return rc;
 }
+
+// ---------------------------------------------------------------------------
+// [LinuxKPI L4] dma_buf de la capa LinuxKPI <-> PRIME de Aurora.
+//
+// Un dma_buf exportado por un driver de Linux es un dmabuf de Aurora sobre un
+// GEM con paginas ajenas (drm_gem_new_ext): PRIME_FD_TO_HANDLE, mmap y
+// SCM_RIGHTS funcionan igual que con un dumb buffer. En sentido contrario, la
+// capa lee las paginas de cualquier dmabuf de Aurora (dmabuf_node_pages).
+// ---------------------------------------------------------------------------
+vfs_node_t *dmabuf_node_new_ext(uint32_t npages, const uint64_t *pages,
+                                void (*release)(void *), void *priv) {
+  dmabuf_t *d = (dmabuf_t *)kzalloc(sizeof(*d));
+  if (!d)
+    return NULL;
+  d->resv = drm_resv_new();
+  d->gem = d->resv ? drm_gem_new_ext(npages, pages, release, priv) : NULL;
+  if (!d->gem) {
+    drm_resv_put(d->resv);
+    kfree(d);
+    return NULL;
+  }
+  vfs_node_t *vn = vfs_node_alloc("dmabuf", VFS_FILE, S_IFREG | 0600, 0,
+                                  &dmabuf_ops, d, d->gem->size);
+  if (!vn) {
+    d->gem->ext_release = NULL; // el llamante sigue siendo dueño de todo
+    d->gem->npages = 0;
+    drm_gem_put(d->gem);
+    drm_resv_put(d->resv);
+    kfree(d);
+    return NULL;
+  }
+  return vn;
+}
+
+// Paginas de un dmabuf (estables mientras el nodo viva). -EINVAL si `n` no es
+// un dmabuf.
+int dmabuf_node_pages(vfs_node_t *n, uint32_t *npages, const uint64_t **pages) {
+  if (!n || n->ops != &dmabuf_ops || !n->priv)
+    return -EINVAL;
+  dmabuf_t *d = (dmabuf_t *)n->priv;
+  *npages = d->gem->npages;
+  *pages = d->gem->pages;
+  return 0;
+}
+
+// priv del exportador si `n` es un dmabuf creado por dmabuf_node_new_ext con
+// esa funcion de liberacion; si no, NULL.
+void *dmabuf_node_ext_priv(vfs_node_t *n, void (*release)(void *)) {
+  if (!n || n->ops != &dmabuf_ops || !n->priv)
+    return NULL;
+  dmabuf_t *d = (dmabuf_t *)n->priv;
+  return d->gem->ext_release == release ? d->gem->ext_priv : NULL;
+}

@@ -102,10 +102,40 @@ void drm_gem_put(drm_gem_t *g) {
       *pp = g->next;
   }
   spin_unlock_irqrestore(&g_gem_lock, fl);
-  for (uint32_t i = 0; i < g->npages; i++)
-    pmm_free_page(g->pages[i]);
+  if (g->ext_release) {
+    g->ext_release(g->ext_priv); // las paginas son del exportador
+  } else {
+    for (uint32_t i = 0; i < g->npages; i++)
+      pmm_free_page(g->pages[i]);
+  }
   kfree(g->pages);
   kfree(g);
+}
+
+drm_gem_t *drm_gem_new_ext(uint32_t npages, const uint64_t *pages,
+                           void (*release)(void *), void *priv) {
+  if (!npages || !pages || !release ||
+      (uint64_t)npages * PAGE_SIZE > DUMB_MAX_BYTES)
+    return NULL;
+  drm_gem_t *g = (drm_gem_t *)kzalloc(sizeof(*g));
+  if (!g)
+    return NULL;
+  g->pages = (uint64_t *)kmalloc((size_t)npages * sizeof(uint64_t));
+  if (!g->pages) {
+    kfree(g);
+    return NULL;
+  }
+  memcpy(g->pages, pages, (size_t)npages * sizeof(uint64_t));
+  g->npages = npages;
+  g->size = (size_t)npages * PAGE_SIZE;
+  g->refcnt = 1;
+  g->mapped = true;
+  g->ext_release = release;
+  g->ext_priv = priv;
+  unsigned long fl = spin_lock_irqsave(&g_gem_lock);
+  g->id = g_gem_next_id++;
+  spin_unlock_irqrestore(&g_gem_lock, fl);
+  return g;
 }
 
 // Suelta la referencia del creador (una sola vez).

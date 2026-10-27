@@ -146,3 +146,62 @@ _Static_assert(sizeof(sysfs_dyn_attr_ops_t) == 16,
 // Pruebas en .kur (tests/linuxkpi): informan con TEST_ASSERT del kernel.
 KEXPORT_SYMBOL(test_pass);
 KEXPORT_SYMBOL(test_fail);
+// [LinuxKPI L4] DMA, vmap, dma_buf, firmware y E/S de usuario (K1-DMA, K6,
+// K8). La capa replica vfs_ops_t, vfs_dirent_t, vfs_fs_ops_t, vma_t,
+// vma_dev_ops_t y task_info_t (kernel/linuxkpi/aurora.h).
+#include "devtmpfs.h"
+#include "drm/drm.h"
+#include "pf.h"
+#include "process.h"
+#include "signal.h"
+#include "vfs.h"
+#include "vmap.h"
+KEXPORT_SYMBOL(task_info_get);
+KEXPORT_SYMBOL(signal_unblocked_of);
+KEXPORT_SYMBOL(vfs_node_alloc);
+KEXPORT_SYMBOL(vfs_node_ref);
+KEXPORT_SYMBOL(vfs_node_free);
+KEXPORT_SYMBOL(vfs_node_get_priv);
+KEXPORT_SYMBOL(vfs_node_set_priv);
+KEXPORT_SYMBOL(vfs_fd_node);
+KEXPORT_SYMBOL(vfs_fd_flags);
+KEXPORT_SYMBOL(vfs_fd_get_current);
+KEXPORT_SYMBOL(vfs_fd_put_ref);
+KEXPORT_SYMBOL(vfs_fd_reserve);
+KEXPORT_SYMBOL(vfs_fd_install_node);
+KEXPORT_SYMBOL(vfs_fd_unreserve);
+KEXPORT_SYMBOL(vfs_fd_send_sigio);
+KEXPORT_SYMBOL(vfs_mount);
+KEXPORT_SYMBOL(vfs_umount);
+KEXPORT_SYMBOL(devtmpfs_register);
+KEXPORT_SYMBOL(devtmpfs_unregister);
+KEXPORT_SYMBOL(vma_dev_map_page);
+KEXPORT_SYMBOL(vma_dev_zap);
+KEXPORT_SYMBOL(vmap_area_alloc);
+KEXPORT_SYMBOL(vmap_area_map);
+KEXPORT_SYMBOL(vmap_area_free);
+KEXPORT_SYMBOL(dmabuf_node_new_ext);
+KEXPORT_SYMBOL(dmabuf_node_pages);
+KEXPORT_SYMBOL(dmabuf_node_ext_priv);
+_Static_assert(sizeof(vfs_ops_t) == 29 * 8 && offsetof(vfs_ops_t, read) == 0 &&
+                   offsetof(vfs_ops_t, open) == 16 && offsetof(vfs_ops_t, close) == 24 &&
+                   offsetof(vfs_ops_t, readdir) == 80 && offsetof(vfs_ops_t, poll) == 112 &&
+                   offsetof(vfs_ops_t, poll_wq) == 120 && offsetof(vfs_ops_t, ioctl) == 128 &&
+                   offsetof(vfs_ops_t, get_page) == 184 &&
+                   offsetof(vfs_ops_t, read_fd) == 192 &&
+                   offsetof(vfs_ops_t, mmap_dev) == 224,
+               "vfs_ops_t cambio: actualizar struct aurora_vfs_ops");
+_Static_assert(sizeof(vfs_dirent_t) == 144 && offsetof(vfs_dirent_t, type) == 128 &&
+                   offsetof(vfs_dirent_t, size) == 136,
+               "vfs_dirent_t cambio: actualizar struct aurora_vfs_dirent");
+_Static_assert(sizeof(vfs_fs_ops_t) == 24, "vfs_fs_ops_t cambio: actualizar aurora.h");
+_Static_assert(offsetof(vma_t, start) == 0 && offsetof(vma_t, end) == 8 &&
+                   offsetof(vma_t, flags) == 16 && offsetof(vma_t, file_offset) == 48 &&
+                   offsetof(vma_t, dev_ops) == 64 && offsetof(vma_t, dev_priv) == 72 &&
+                   offsetof(vma_t, dev_proc) == 80 && offsetof(vma_t, dev_flags) == 88 &&
+                   offsetof(vma_t, dev_cache) == 92,
+               "vma_t cambio: actualizar struct aurora_vma");
+_Static_assert(sizeof(vma_dev_ops_t) == 24, "vma_dev_ops_t cambio: actualizar aurora.h");
+_Static_assert(sizeof(task_info_t) == 48 && offsetof(task_info_t, proc) == 16 &&
+                   offsetof(task_info_t, comm) == 28,
+               "task_info_t cambio: actualizar struct aurora_task_info");

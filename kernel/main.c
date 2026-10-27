@@ -28,6 +28,7 @@
 #include "gfx/compositor.h"
 #include "gfx/theme.h"
 #include "heap.h"
+#include "vmap.h"
 #include "idt.h"
 #include "evdev.h"
 #include "drm/drm.h"
@@ -897,6 +898,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   pmm_relocate_bitmap();
   uaccess_init();
   heap_init();
+  vmap_init(); // [LinuxKPI L4] antes del primer proceso
   klog_boot_ok();
 
   // [FASE 3.1] Loader de .kur (necesita heap + vmm_alloc_pages).

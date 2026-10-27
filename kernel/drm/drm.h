@@ -53,6 +53,10 @@ typedef struct drm_gem {
   uint32_t flink_name; // 0 = sin nombre global (DRM_IOCTL_GEM_FLINK)
   struct drm_file *owner;
   struct drm_gem *next; // lista del fichero propietario
+  // [LinuxKPI L4] GEM sobre paginas ajenas (dma_buf exportado por un driver
+  // de Linux): no se liberan al soltar el GEM; se llama a ext_release.
+  void (*ext_release)(void *priv);
+  void *ext_priv;
 } drm_gem_t;
 
 typedef struct drm_fb {
@@ -92,6 +96,17 @@ typedef struct drm_file {
 int drm_gem_create(drm_file_t *f, size_t size, drm_gem_t **out);
 void drm_gem_get(drm_gem_t *g); // toma una referencia
 void drm_gem_put(drm_gem_t *g); // suelta una referencia
+// [LinuxKPI L4] GEM sin dueño sobre `npages` paginas ajenas (se copian las
+// direcciones); al soltar la ultima referencia llama a release(priv).
+struct vfs_node;
+// [LinuxKPI L4] dmabuf de Aurora para la capa (drm_prime.c).
+struct vfs_node *dmabuf_node_new_ext(uint32_t npages, const uint64_t *pages,
+                                     void (*release)(void *), void *priv);
+int dmabuf_node_pages(struct vfs_node *n, uint32_t *npages,
+                      const uint64_t **pages);
+void *dmabuf_node_ext_priv(struct vfs_node *n, void (*release)(void *));
+drm_gem_t *drm_gem_new_ext(uint32_t npages, const uint64_t *pages,
+                           void (*release)(void *), void *priv);
 int drm_handle_alloc(drm_file_t *f, drm_gem_t *g, uint32_t *handle);
 drm_gem_t *drm_handle_lookup(drm_file_t *f, uint32_t handle);
 int drm_handle_close(drm_file_t *f, uint32_t handle);
