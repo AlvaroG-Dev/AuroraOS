@@ -6401,6 +6401,13 @@ static void test_lkpi_k5_smp(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_
 REGISTER_TEST_FLAGS("linuxkpi: K5 SMP (MSI-X repartida, afinidad, estrés de MSI)",
                     test_lkpi_k5_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
+// L4: DMA (bounce, también con edu), scatterlist, dma_pool, vmap, dma_buf,
+// firmware real, i2c-algo-bit, backlight, debugfs y task_struct. Lo que
+// necesita un proceso lo prueba user/musl/apps/lkpi_test.
+static void test_lkpi_k6(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k6")); }
+REGISTER_TEST_FLAGS("linuxkpi: L4 DMA, dma_buf, firmware, i2c, backlight, debugfs",
+                    test_lkpi_k6, TEST_FLAG_BLOCKING);
+
 static void test_lkpi_unload(void) {
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
   TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");
