@@ -89,6 +89,10 @@ bool lkpi_is_vmalloc_addr(const void *x)
 	unsigned long flags;
 	bool r;
 
+	if ((unsigned long)x >= AURORA_VMAP_BASE &&
+	    (unsigned long)x < AURORA_VMAP_BASE + AURORA_VMAP_SIZE)
+		return true;	/* vmap() */
+
 	spin_lock_irqsave(&vm_lock, flags);
 	r = vm_find_locked(x) != NULL;
 	spin_unlock_irqrestore(&vm_lock, flags);
@@ -121,6 +125,105 @@ struct page *lkpi_vmalloc_to_page(const void *addr)
 	return lkpi_page_alloc_desc(lkpi_vmalloc_to_pfn(addr));
 }
 EXPORT_SYMBOL(lkpi_vmalloc_to_page);
+
+/* ---------------------------------------------------------------- vmap */
+
+struct vmap_area_rec {
+	struct list_head list;
+	unsigned long addr;
+	struct page **put_pages;	/* VM_MAP_PUT_PAGES */
+	unsigned int count;
+};
+static LIST_HEAD(vmap_areas);
+
+static u64 lkpi_vmap_pte_flags(unsigned long prot)
+{
+	u64 f = AURORA_PTE_NX;
+
+	if (!prot || (prot & _PAGE_RW))
+		f |= AURORA_PTE_WRITABLE;
+	if (prot && !(prot & _PAGE_NX))
+		f &= ~AURORA_PTE_NX;
+	return f | (prot & (AURORA_PTE_WRITETHRU | AURORA_PTE_NOCACHE));
+}
+
+static void *lkpi_vmap_phys(unsigned long *pfns, struct page **pages, unsigned int count,
+			    unsigned long prot, struct page **put_pages)
+{
+	struct vmap_area_rec *r;
+	unsigned long flags;
+	unsigned int i;
+	u64 va;
+
+	if (!count)
+		return NULL;
+	r = kmalloc(sizeof(*r), GFP_KERNEL);
+	if (!r)
+		return NULL;
+	va = aurora_vmap_area_alloc((u64)count << PAGE_SHIFT);
+	if (!va) {
+		kfree(r);
+		return NULL;
+	}
+	for (i = 0; i < count; i++) {
+		u64 phys = pages ? page_to_phys(pages[i]) : (u64)pfns[i] << PAGE_SHIFT;
+
+		if (aurora_vmap_area_map(va + ((u64)i << PAGE_SHIFT), phys,
+					 lkpi_vmap_pte_flags(prot))) {
+			aurora_vmap_area_free(va);
+			kfree(r);
+			return NULL;
+		}
+	}
+	r->addr = va;
+	r->put_pages = put_pages;
+	r->count = count;
+	spin_lock_irqsave(&vm_lock, flags);
+	list_add(&r->list, &vmap_areas);
+	spin_unlock_irqrestore(&vm_lock, flags);
+	return (void *)va;
+}
+
+void *lkpi_vmap(struct page **pages, unsigned int count, unsigned long flags, unsigned long prot)
+{
+	return lkpi_vmap_phys(NULL, pages, count, prot,
+			      (flags & VM_MAP_PUT_PAGES) ? pages : NULL);
+}
+EXPORT_SYMBOL(lkpi_vmap);
+
+void *lkpi_vmap_pfn(unsigned long *pfns, unsigned int count, unsigned long prot)
+{
+	return lkpi_vmap_phys(pfns, NULL, count, prot, NULL);
+}
+EXPORT_SYMBOL(lkpi_vmap_pfn);
+
+void lkpi_vunmap(const void *addr)
+{
+	struct vmap_area_rec *r, *found = NULL;
+	unsigned long flags;
+	unsigned int i;
+
+	if (!addr)
+		return;
+	spin_lock_irqsave(&vm_lock, flags);
+	list_for_each_entry(r, &vmap_areas, list)
+		if (r->addr == (unsigned long)addr) {
+			list_del(&r->list);
+			found = r;
+			break;
+		}
+	spin_unlock_irqrestore(&vm_lock, flags);
+	if (WARN(!found, "vunmap de un puntero ajeno: %px\n", addr))
+		return;
+	aurora_vmap_area_free(found->addr);
+	if (found->put_pages) {
+		for (i = 0; i < found->count; i++)
+			put_page(found->put_pages[i]);
+		kvfree(found->put_pages);
+	}
+	kfree(found);
+}
+EXPORT_SYMBOL(lkpi_vunmap);
 
 void lkpi_vmalloc_exit(void)
 {

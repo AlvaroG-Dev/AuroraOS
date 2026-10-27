@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * vmalloc: memoria virtualmente contigua (paginas sueltas del PMM mapeadas
- * en el heap de Aurora). vmap() de paginas arbitrarias llega con L4.
+ * en el heap de Aurora). vmap()/vmap_pfn() (L4): paginas arbitrarias en la
+ * region vmap de Aurora, con la cache de `prot` (PAGE_KERNEL,
+ * pgprot_writecombine...); vunmap() quita el mapeo y hace shootdown.
  */
 #ifndef _LKPI_LINUX_VMALLOC_H
 #define _LKPI_LINUX_VMALLOC_H
@@ -9,6 +11,7 @@
 #include <linux/gfp_types.h>
 #include <linux/types.h>
 #include <linux/overflow.h>
+#include <linux/mm_types.h>
 
 struct page;
 
@@ -41,5 +44,23 @@ static inline void vfree(const void *addr) { lkpi_vfree(addr); }
 static inline struct page *vmalloc_to_page(const void *addr) { return lkpi_vmalloc_to_page(addr); }
 unsigned long lkpi_vmalloc_to_pfn(const void *addr);
 #define vmalloc_to_pfn(a) lkpi_vmalloc_to_pfn(a)
+
+#define VM_MAP 0x00000004
+#define VM_IOREMAP 0x00000001
+#define VM_MAP_PUT_PAGES 0x00000200
+void *lkpi_vmap(struct page **pages, unsigned int count, unsigned long flags,
+		unsigned long prot);
+void *lkpi_vmap_pfn(unsigned long *pfns, unsigned int count, unsigned long prot);
+void lkpi_vunmap(const void *addr);
+static inline void *vmap(struct page **pages, unsigned int count, unsigned long flags,
+			 pgprot_t prot)
+{
+	return lkpi_vmap(pages, count, flags, pgprot_val(prot));
+}
+static inline void *vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot)
+{
+	return lkpi_vmap_pfn(pfns, count, pgprot_val(prot));
+}
+static inline void vunmap(const void *addr) { lkpi_vunmap(addr); }
 
 #endif
