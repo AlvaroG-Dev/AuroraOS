@@ -680,6 +680,20 @@ void lkpi_devm_iounmap(struct device *dev, void __iomem *addr);
 void __iomem *lkpi_devm_ioremap_resource(struct device *dev, const struct resource *res,
 					 int type);
 #define devm_ioremap(d, o, s) lkpi_devm_ioremap(d, o, s, 0)
+void *lkpi_memremap(phys_addr_t offset, size_t size, unsigned long flags);
+void lkpi_memunmap(void *addr);
+static inline void lkpi_devm_memunmap(void *p) { lkpi_memunmap(p); }
+static inline void *devm_memremap(struct device *dev, resource_size_t offset, size_t size,
+				  unsigned long flags)
+{
+	void *p = lkpi_memremap(offset, size, flags);
+
+	if (!p)
+		return ERR_PTR(-ENXIO);
+	if (devm_add_action_or_reset(dev, lkpi_devm_memunmap, p))
+		return ERR_PTR(-ENOMEM);
+	return p;
+}
 #define devm_ioremap_uc(d, o, s) lkpi_devm_ioremap(d, o, s, 0)
 #define devm_ioremap_wc(d, o, s) lkpi_devm_ioremap(d, o, s, 1)
 #define devm_iounmap(d, a) lkpi_devm_iounmap(d, a)
@@ -732,5 +746,7 @@ __printf(3, 4) void lkpi_dev_printk(const char *level, const struct device *dev,
 #define dev_WARN_ONCE(dev, condition, format, arg...) \
 	WARN_ONCE(condition, "%s %s: " format, dev_driver_string(dev), dev_name(dev), ##arg)
 #define dev_warn_probe(dev, err, fmt, ...) dev_err_probe(dev, err, fmt, ##__VA_ARGS__)
+
+#include <linux/ratelimit.h>
 
 #endif

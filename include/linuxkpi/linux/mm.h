@@ -250,4 +250,6 @@ static inline vm_fault_t vmf_error(int err)
 	return err == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
 }
 
+#include <linux/vmalloc.h>
+
 #endif

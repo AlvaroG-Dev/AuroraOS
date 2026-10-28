@@ -63,6 +63,19 @@ void drm_sysfs_publish(void) {
   sysfs_dyn_add_symlink("class/drm/card0-Virtual-1", "/sys/" DRM_DEV_BASE "/card0/card0-Virtual-1");
 }
 
+// Quita lo que publish_node/drm_sysfs_publish crearon.
+void drm_sysfs_unpublish(void) {
+  char p[64];
+  sysfs_dyn_remove("class/drm/card0-Virtual-1");
+  sysfs_dyn_remove("class/drm/card0");
+  sysfs_dyn_remove("class/drm/renderD128");
+  snprintf(p, sizeof(p), "dev/char/%d:%d", DRM_MAJOR, DRM_CARD_MINOR);
+  sysfs_dyn_remove(p);
+  snprintf(p, sizeof(p), "dev/char/%d:%d", DRM_MAJOR, DRM_RENDER_MINOR);
+  sysfs_dyn_remove(p);
+  sysfs_dyn_remove_tree(DRM_PARENT);
+}
+
 static void write_text(const char *path, const char *text) {
   vfs_create(path, 0644);
   vfs_node_t *n = vfs_lookup(path);

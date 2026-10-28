@@ -275,11 +275,35 @@ static void lkpi_dma_buf_sample_native_fence(struct dma_buf *dmabuf)
 	aurora_fence_put(af);
 }
 
-int lkpi_dma_buf_fd(struct dma_buf *dmabuf, int flags)
+/* Instala en `fd` (ya reservado) un dmabuf de Aurora que envuelve `dmabuf`. */
+static int lkpi_dma_buf_install(int fd, struct dma_buf *dmabuf)
 {
 	struct aurora_vfs_node *n;
 	u64 *pages;
 	u32 npages;
+	int rc;
+
+	mutex_lock(&dmabuf->__lkpi_lock);
+	rc = lkpi_dma_buf_cpu_pages(dmabuf, &pages, &npages);
+	mutex_unlock(&dmabuf->__lkpi_lock);
+	if (rc)
+		return rc;
+	get_dma_buf(dmabuf);	/* la del dmabuf de Aurora */
+	n = aurora_dmabuf_node_new_ext(npages, pages, lkpi_dmabuf_anode_release, dmabuf);
+	kvfree(pages);
+	if (!n) {
+		lkpi_dma_buf_put(dmabuf);
+		return -ENOMEM;
+	}
+	aurora_dmabuf_node_set_resv_ops(n, lkpi_dmabuf_anode_release, &lkpi_dmabuf_resv_ops);
+	rc = aurora_vfs_fd_install_node(fd, n, O_RDWR);
+	if (rc)
+		aurora_vfs_node_free(n);
+	return rc;
+}
+
+int lkpi_dma_buf_fd(struct dma_buf *dmabuf, int flags)
+{
 	int fd, rc;
 
 	if (!dmabuf || !dmabuf->file)
@@ -287,31 +311,34 @@ int lkpi_dma_buf_fd(struct dma_buf *dmabuf, int flags)
 	fd = aurora_vfs_fd_reserve(!!(flags & O_CLOEXEC));
 	if (fd < 0)
 		return fd;
-	mutex_lock(&dmabuf->__lkpi_lock);
-	rc = lkpi_dma_buf_cpu_pages(dmabuf, &pages, &npages);
-	mutex_unlock(&dmabuf->__lkpi_lock);
-	if (rc)
-		goto err;
-	get_dma_buf(dmabuf);	/* la del dmabuf de Aurora */
-	n = aurora_dmabuf_node_new_ext(npages, pages, lkpi_dmabuf_anode_release, dmabuf);
-	kvfree(pages);
-	if (!n) {
-		lkpi_dma_buf_put(dmabuf);
-		rc = -ENOMEM;
-		goto err;
-	}
-	aurora_dmabuf_node_set_resv_ops(n, lkpi_dmabuf_anode_release, &lkpi_dmabuf_resv_ops);
-	rc = aurora_vfs_fd_install_node(fd, n, O_RDWR);
+	rc = lkpi_dma_buf_install(fd, dmabuf);
 	if (rc) {
-		aurora_vfs_node_free(n);
+		aurora_vfs_fd_unreserve(fd);
 		return rc;
 	}
 	return fd;
-err:
-	aurora_vfs_fd_unreserve(fd);
-	return rc;
 }
 EXPORT_SYMBOL(lkpi_dma_buf_fd);
+
+/*
+ * fd_install(fd, dmabuf->file), como hace drm_prime: el fd del usuario ha de
+ * ser el dmabuf de Aurora (ioctl, fences, SCM_RIGHTS al compositor), no el
+ * fichero de la capa. Consume la referencia del llamante sobre el fichero.
+ */
+bool lkpi_dma_buf_fd_install(unsigned int fd, struct file *file)
+{
+	struct dma_buf *dmabuf;
+	int rc;
+
+	if (file->f_op != &lkpi_dma_buf_fops)
+		return false;
+	dmabuf = file->private_data;
+	rc = lkpi_dma_buf_install((int)fd, dmabuf);
+	if (rc)
+		pr_warn("linuxkpi: fd_install de un dma_buf: %d\n", rc);
+	lkpi_fput(file);
+	return true;
+}
 
 /* ------------------------------------- importar un dmabuf de Aurora */
 

@@ -41,13 +41,15 @@ if [ -d "$ABS/include/drm" ]; then
 fi
 # Cabeceras de subsistemas que DRM usa tal cual (solo declaraciones): HDMI,
 # videomode/display_timing/cmdline y los formatos de bus de media.
-for h in hdmi.h; do
+for h in hdmi.h aperture.h screen_info.h; do
 	[ -e "$ABS/include/linux/$h" ] && [ ! -e "include/linuxkpi/linux/$h" ] && ln -sf "$ABS/include/linux/$h" "$OUT/linux/$h"
 done
-for h in media-bus-format.h cec.h cec-funcs.h fb.h vesa.h; do
+for h in media-bus-format.h cec.h cec-funcs.h fb.h vesa.h screen_info.h; do
 	[ -e "$ABS/include/uapi/linux/$h" ] || continue
 	ln -sf "$ABS/include/uapi/linux/$h" "$OUT/uapi/linux/$h"
 	[ -e "include/linuxkpi/linux/$h" ] || ln -sf "$ABS/include/uapi/linux/$h" "$OUT/linux/$h"
 done
+mkdir -p "$OUT/linux/platform_data"
+[ -e "$ABS/include/linux/platform_data/simplefb.h" ] && ln -sf "$ABS/include/linux/platform_data/simplefb.h" "$OUT/linux/platform_data/simplefb.h"
 [ -d "$ABS/include/video" ] && ln -sfn "$ABS/include/video" "$OUT/video"
 echo "$WANT" > "$STAMP"

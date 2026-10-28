@@ -202,15 +202,22 @@ static struct kobject *lkpi_device_parent_kobj(struct device *dev)
 	return lkpi_devices_kobj;
 }
 
+static bool lkpi_is_drm_minor(struct device *dev)
+{
+	return MAJOR(dev->devt) && dev->class && dev->class->name && !strcmp(dev->class->name, "drm");
+}
+
 int lkpi_device_add(struct device *dev)
 {
 	struct device *parent;
 	struct kobject *pkobj;
+	bool drm_minor;
 	int rc;
 
 	dev = get_device(dev);
 	if (!dev)
 		return -EINVAL;
+	drm_minor = lkpi_is_drm_minor(dev);
 
 	if (dev->init_name) {
 		rc = dev_set_name(dev, "%s", dev->init_name);
@@ -234,6 +241,9 @@ int lkpi_device_add(struct device *dev)
 		rc = -ENOMEM;
 		goto err_parent;
 	}
+	/* un minor DRM de Linux releva a los nodos nativos de kernel/drm (D3) */
+	if (drm_minor)
+		aurora_drm_backend_claim();
 	rc = kobject_add(&dev->kobj, pkobj, "%s", dev_name(dev));
 	if (rc)
 		goto err_parent;
@@ -276,6 +286,8 @@ err_attrs:
 err_kobj:
 	kobject_del(&dev->kobj);
 err_parent:
+	if (drm_minor)
+		aurora_drm_backend_release();
 	put_device(parent);
 err_put:
 	put_device(dev);
@@ -301,6 +313,8 @@ void lkpi_device_del(struct device *dev)
 	lkpi_bus_notify(dev, BUS_NOTIFY_DEL_DEVICE);
 	if (MAJOR(dev->devt))
 		lkpi_devnode_del(dev);
+	if (lkpi_is_drm_minor(dev))
+		aurora_drm_backend_release();
 	lkpi_device_release_driver(dev);
 	if (parent) {
 		mutex_lock(&lkpi_dev_mutex);

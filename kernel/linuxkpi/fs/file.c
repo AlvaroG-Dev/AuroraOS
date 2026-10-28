@@ -479,6 +479,8 @@ EXPORT_SYMBOL(lkpi_put_unused_fd);
 void lkpi_fd_install(unsigned int fd, struct file *file)
 {
 	/* Consume la referencia del llamante; si el hueco ya no esta, se suelta. */
+	if (lkpi_dma_buf_fd_install(fd, file))
+		return;
 	if (aurora_vfs_fd_install_node((int)fd, file->__lkpi_node, (int)file->f_flags))
 		lkpi_fput(file);
 }

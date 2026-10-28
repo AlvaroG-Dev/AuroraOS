@@ -38,10 +38,18 @@ CFLAGS  := $(LKPI_CFLAGS) $(LKPI_DRV_CFLAGS) -DKBUILD_MODNAME='"$(DRV)"' \
 .PHONY: all install
 all: $(D)/$(DRV).kur
 
-$(D)/%.o: $(LKPI_DRV_SRCDIR)/%.c $(HDRS) $(LKPI_DRV_DESC)
+# Con parche (kernel/linuxkpi/patches/<fichero>.patch): copia + patch; sin
+# parche: el fichero del arbol.
+$(D)/%.o: $(LKPI_DRV_SRCDIR)/%.c $(HDRS) $(LKPI_DRV_DESC) $(wildcard kernel/linuxkpi/patches/*.patch)
 	@mkdir -p $(dir $@)
 	@echo "[LKPI-DRV] $(DRV): $<"
-	@$(LKPI_CC) $(CFLAGS) $(LKPI_DRV_CFLAGS_$(notdir $<)) -c $< -o $@
+	@src=$<; \
+	if [ -f kernel/linuxkpi/patches/$(notdir $<).patch ]; then \
+		mkdir -p $(D)/src; cp $< $(D)/src/$(notdir $<); \
+		echo "[LKPI-PATCH] $(notdir $<)"; \
+		patch -s $(D)/src/$(notdir $<) kernel/linuxkpi/patches/$(notdir $<).patch || exit 1; \
+		src=$(D)/src/$(notdir $<); fi; \
+	$(LKPI_CC) $(CFLAGS) -I$(dir $<) $(LKPI_DRV_CFLAGS_$(notdir $<)) -c $$src -o $@
 
 $(D)/local/%.o: %.c $(HDRS) $(LKPI_DRV_DESC)
 	@mkdir -p $(dir $@)

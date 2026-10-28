@@ -316,6 +316,17 @@ int aurora_devtmpfs_register(const char *path, u32 rdev, u32 mode, u32 uid, u32 
 			     const struct aurora_vfs_ops *ops, void *priv)
 	__asm__("devtmpfs_register");
 int aurora_devtmpfs_unregister(const char *path) __asm__("devtmpfs_unregister");
+
+/* aur_bus.c: respaldo con el .aur omitido por aur.skip (4B) */
+int aurora_aur_bus_launch_skipped(u8 bus, u8 slot, u8 func) __asm__("aur_bus_launch_skipped");
+
+/* gpu_proxy.c / cmdline.c */
+int aurora_gpup_get_framebuffer(u64 *phys, u64 *size) __asm__("gpup_get_framebuffer");
+int aurora_cmdline_get(const char *key, char *out, size_t outlen) __asm__("cmdline_get");
+
+/* kernel/drm: el backend nativo cede /dev/dri y /sys/class/drm al de Linux */
+void aurora_drm_backend_claim(void) __asm__("drm_backend_claim");
+void aurora_drm_backend_release(void) __asm__("drm_backend_release");
 /* pf.h */
 int aurora_vma_dev_map_page(struct aurora_vma *vma, u64 addr, u64 phys)
 	__asm__("vma_dev_map_page");

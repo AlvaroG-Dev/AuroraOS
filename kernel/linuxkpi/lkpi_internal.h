@@ -108,4 +108,12 @@ void lkpi_backlight_exit(void);
 void lkpi_pid_exit(void);
 void lkpi_cpu_init(void);
 
+/* dma/dma-buf.c: fd_install de un dma_buf */
+bool lkpi_dma_buf_fd_install(unsigned int fd, struct file *file);
+
+/* display-shadow (mm/ioremap.c, pci/pci.c) */
+int lkpi_display_shadow_add(phys_addr_t start, size_t len, bool copy);
+void lkpi_display_shadow_exit(void);
+void lkpi_display_shadow_probe(void);
+
 #endif

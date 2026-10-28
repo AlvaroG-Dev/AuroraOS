@@ -84,8 +84,9 @@ int main(int argc, char **argv) {
   v.name = name;
   v.name_len = sizeof(name) - 1;
   v.date = NULL; v.date_len = 0; v.desc = NULL; v.desc_len = 0;
-  CHECK(ioctl(fd, DRM_IOCTL_VERSION, &v) == 0 && !strcmp(name, "aurora"),
-        "VERSION name=%s", name);
+  // El backend nativo se llama "aurora"; un driver de Linux (bochs-drm,
+  // simpledrm, virtio_gpu...) trae su propio nombre.
+  CHECK(ioctl(fd, DRM_IOCTL_VERSION, &v) == 0 && name[0], "VERSION name=%s", name);
 
   struct drm_get_cap cap = {.capability = DRM_CAP_DUMB_BUFFER};
   CHECK(ioctl(fd, DRM_IOCTL_GET_CAP, &cap) == 0 && cap.value == 1, "CAP_DUMB_BUFFER");
@@ -118,11 +119,11 @@ int main(int argc, char **argv) {
   CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &gc) == 0 && gc.count_modes >= 1 &&
             gc.connection == 1,
         "GETCONNECTOR modes=%u props=%u", gc.count_modes, gc.count_props);
-  struct drm_mode_modeinfo modes[16];
-  uint32_t cprops[8];
-  uint64_t cvals[8];
-  uint32_t cenc[2];
-  if (gc.count_modes > 16 || gc.count_props > 8 || gc.count_encoders > 2)
+  struct drm_mode_modeinfo modes[64];
+  uint32_t cprops[16];
+  uint64_t cvals[16];
+  uint32_t cenc[4];
+  if (gc.count_modes > 64 || gc.count_props > 16 || gc.count_encoders > 4)
     return 1;
   gc.modes_ptr = (uintptr_t)modes;
   gc.props_ptr = (uintptr_t)cprops;

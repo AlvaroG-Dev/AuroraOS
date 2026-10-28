@@ -1799,17 +1799,49 @@ static vfs_ops_t drm_ops = {
 
 
 
-void drm_init(void) {
-  mutex_init(&g_drm_lock);
-  wait_queue_init(&g_kick_wq);
-  wait_queue_init(&g_tick_wq);
-  wait_queue_init(&g_vbl_wq);
+// Nodos de /dev/dri y /sys del backend nativo (el de Linux, lkpi_drm.kur, los
+// releva mientras tenga algun minor: drm_backend_claim/release).
+static void native_nodes_register(void) {
   devtmpfs_register("dri/card0", DEVT_MKDEV(DRM_MAJOR, DRM_CARD_MINOR), 0660, 0,
                     0, &drm_ops, &g_card_priv);
   devtmpfs_register("dri/renderD128",
                     DEVT_MKDEV(DRM_MAJOR, DRM_RENDER_MINOR), 0666, 0, 0,
                     &drm_ops, &g_render_priv);
   drm_sysfs_publish();
+}
+
+static int g_claims;
+static bool g_native_down;
+
+void drm_backend_claim(void) {
+  mutex_lock(&g_drm_lock);
+  if (g_claims++ == 0 && !g_native_down) {
+    g_native_down = true;
+    devtmpfs_unregister("dri/card0");
+    devtmpfs_unregister("dri/renderD128");
+    drm_sysfs_unpublish();
+    scanout_close();
+    LOG_INFO("[DRM] backend nativo cede /dev/dri al driver de Linux");
+  }
+  mutex_unlock(&g_drm_lock);
+}
+
+void drm_backend_release(void) {
+  mutex_lock(&g_drm_lock);
+  if (g_claims > 0 && --g_claims == 0 && g_native_down) {
+    g_native_down = false;
+    native_nodes_register();
+    LOG_INFO("[DRM] backend nativo recupera /dev/dri");
+  }
+  mutex_unlock(&g_drm_lock);
+}
+
+void drm_init(void) {
+  mutex_init(&g_drm_lock);
+  wait_queue_init(&g_kick_wq);
+  wait_queue_init(&g_tick_wq);
+  wait_queue_init(&g_vbl_wq);
+  native_nodes_register();
   kthread_run(vbl_thread, NULL, "drm-vblank");
   LOG_INFO("[DRM] /dev/dri/card0 y renderD128 listos (KMS atomic, dumb)");
 }

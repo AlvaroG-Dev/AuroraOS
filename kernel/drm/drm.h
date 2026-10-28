@@ -174,6 +174,7 @@ void drm_syncobj_signal_point(struct drm_syncobj *o, uint64_t point);
 
 // drm_sysfs.c ---------------------------------------------------------------
 void drm_sysfs_publish(void);
+void drm_sysfs_unpublish(void);
 void drm_udev_publish(void);
 
 // Utilidades de acceso a userland.
@@ -182,6 +183,14 @@ int drm_get_user(uint64_t arg, void *dst, size_t n);
 
 // Inicializacion (llamar tras devtmpfs/sysfs_dyn, en contexto de tarea).
 void drm_init(void);
+// El backend de Linux (lkpi_drm.kur) toma o devuelve /dev/dri y /sys/class/drm.
+void drm_backend_claim(void);
+void drm_backend_release(void);
+// Scanout del backend de Linux: una ventana del compositor por CRTC.
+void drm_lx_scanout_close(int idx);
+int drm_lx_scanout_open(int idx, int w, int h);
+int drm_lx_scanout_present(int idx, const void *src, uint32_t pitch,
+                           uint32_t fourcc, int w, int h);
 void drm_fb_put(drm_fb_t *fb);
 
 #endif

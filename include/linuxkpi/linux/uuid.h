@@ -43,6 +43,11 @@ static inline void guid_copy(guid_t *dst, const guid_t *src)
 	memcpy(dst, src, sizeof(guid_t));
 }
 
+static inline void export_uuid(u8 *dst, const uuid_t *src) { memcpy(dst, src->b, UUID_SIZE); }
+static inline void import_uuid(uuid_t *dst, const u8 *src) { memcpy(dst->b, src, UUID_SIZE); }
+static inline void import_guid(guid_t *dst, const u8 *src) { memcpy(dst->b, src, UUID_SIZE); }
+static inline void export_guid(u8 *dst, const guid_t *src) { memcpy(dst, src->b, UUID_SIZE); }
+
 static inline bool uuid_equal(const uuid_t *u1, const uuid_t *u2)
 {
 	return memcmp(u1, u2, sizeof(uuid_t)) == 0;

@@ -13,6 +13,7 @@
 #include "ata_dma.h"
 #include "atapi.h"
 #include "aur_bus.h"
+#include "lkpi_boot.h"
 #include "block.h"
 #include "block_proxy.h"
 #include "gpu_proxy.h"
@@ -747,6 +748,10 @@ static void system_init_task(void) {
     sched_create_task(compositor_thread);
     LOG_INFO("[KERNEL] Compositor inicializado");
   }
+
+  // Drivers de Linux (LinuxKPI) pedidos con `lkpi.load=`: despues del
+  // compositor, porque su scanout abre ventanas, y antes del userland.
+  lkpi_boot_load();
 
   // 11. Tests en kthread paralelo. No bloquea: /usr/bin/init arranca
   // inmediatamente y los tests se ejecutan en background. El kthread

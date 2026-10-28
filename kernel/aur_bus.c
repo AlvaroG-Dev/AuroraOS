@@ -415,6 +415,43 @@ static int aur_bus_probe(struct device *dev) {
   return -ENODEV;
 }
 
+// Respaldo (L5, 4B): un driver de Linux sobre LinuxKPI reclamó un dispositivo
+// que aur.skip le había reservado y su probe falló. La capa lo avisa aquí y se
+// lanza el .aur que se había omitido (mismo EDID y modos de siempre).
+int aur_bus_launch_skipped(uint8_t bus, uint8_t slot, uint8_t func) {
+  pci_device_t pdev;
+  if (pci_get_device(bus, slot, func, &pdev) != 0)
+    return -ENODEV;
+  if (!aur_bus_skipped(&pdev))
+    return -ENOENT; // no estaba omitido: lo habrá lanzado el bus
+  if (aur_bus_scan_once() != 0)
+    return -ENODEV;
+  for (int i = 0; i < g_aur_nmods; i++) {
+    const struct aur_module_info *info = &g_aur_mods[i].info;
+    int match = 0;
+    for (int k = 0; k < info->bus_match_count && !match; k++) {
+      const aur_bus_match_t *m = &info->bus_match[k];
+      if (m->bus == AUR_BUS_PCI &&
+          aur_match_pci(m, pdev.vendor_id, pdev.device_id, pdev.class_id,
+                        pdev.subclass_id))
+        match = 1;
+    }
+    if (!match)
+      continue;
+    LOG_WARN("[AUR-BUS] %02x:%02x.%x (%04x:%04x): el driver de Linux falló, "
+             "se lanza %s",
+             bus, slot, func, pdev.vendor_id, pdev.device_id, g_aur_mods[i].path);
+    pci_enable_bus_mastering(&pdev);
+    pci_enable_io_mem(&pdev);
+    process_t *p = aur_spawn(g_aur_mods[i].path, "pci");
+    if (!p)
+      return -EIO;
+    aur_sup_register(g_aur_mods[i].path, "pci", p->pid);
+    return 0;
+  }
+  return -ENOENT;
+}
+
 // Tabla de IDs. Al usar PCI_ANY_ID, este driver acepta probar CUALQUIER
 // dispositivo PCI que haya sido rechazado por los drivers del kernel.
 static const pci_device_id_t aur_pci_id_table[] = {
