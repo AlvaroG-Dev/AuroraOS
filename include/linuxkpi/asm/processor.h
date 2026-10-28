@@ -7,6 +7,8 @@
 
 struct cpuinfo_x86 {
 	unsigned char x86;		/* familia */
+	unsigned char x86_model;
+	bool x86_vendor_intel;
 	unsigned int x86_clflush_size;	/* bytes de una linea de cache para CLFLUSH */
 	unsigned int x86_cache_alignment;
 };

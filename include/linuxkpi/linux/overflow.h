@@ -16,6 +16,8 @@
 	   (_to_shift != _s || *_d < 0 || _a < 0 || (*_d >> _to_shift) != _a); })
 #define overflows_type(n, T) \
 	({ typeof(T) __tmp; __builtin_add_overflow((n), 0, &__tmp); })
+#define castable_to_type(n, T) \
+	__builtin_choose_expr(__builtin_constant_p(n), !overflows_type(n, T), __same_type(n, T))
 #define add_would_overflow(a, b) \
 	({ typeof(a) __tmp; check_add_overflow(a, b, &__tmp); })
 

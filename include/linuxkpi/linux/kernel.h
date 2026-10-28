@@ -35,6 +35,11 @@
 #include <linux/instruction_pointer.h>
 #define TAINT_WARN 9
 #define TAINT_MACHINE_CHECK 4
+#define TAINT_USER 6
+#define TAINT_CRAP 10
+#define TAINT_OOT_MODULE 12
+#define LOCKDEP_STILL_OK 0
+#define LOCKDEP_NOW_UNRELIABLE 1
 #define add_taint(flag, lockdep) do { } while (0)
 #define might_sleep() do { } while (0)
 #define might_sleep_if(cond) do { } while (0)

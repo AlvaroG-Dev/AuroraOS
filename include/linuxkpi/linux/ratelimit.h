@@ -67,4 +67,5 @@ static inline int ___ratelimit(struct ratelimit_state *rs, const char *func)
 }
 #define __ratelimit(state) ___ratelimit(state, __func__)
 
+static inline int ratelimit_state_get_miss(struct ratelimit_state *rs) { return rs->missed; }
 #endif

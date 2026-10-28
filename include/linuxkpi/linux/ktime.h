@@ -57,6 +57,7 @@ static inline ktime_t ktime_get_boottime(void) { return lkpi_ktime_get_ns(); }
 static inline ktime_t ktime_get_real(void) { return lkpi_ktime_get_real_ns(); }
 static inline u64 ktime_get_ns(void) { return lkpi_ktime_get_ns(); }
 static inline u64 ktime_get_raw_ns(void) { return lkpi_ktime_get_ns(); }
+static inline u64 ktime_get_raw_fast_ns(void) { return lkpi_ktime_get_ns(); }
 static inline u64 ktime_get_mono_fast_ns(void) { return lkpi_ktime_get_ns(); }
 static inline u64 ktime_get_boottime_ns(void) { return lkpi_ktime_get_ns(); }
 static inline u64 ktime_get_real_ns(void) { return lkpi_ktime_get_real_ns(); }

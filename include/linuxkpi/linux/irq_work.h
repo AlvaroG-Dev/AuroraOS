@@ -11,7 +11,10 @@
 #include <linux/llist.h>
 
 struct irq_work {
-	struct llist_node llnode;
+	union {
+		struct llist_node llnode;
+		struct { struct llist_node llist; } node;	/* work->node.llist, como Linux */
+	};
 	atomic_t flags;
 	void (*func)(struct irq_work *);
 };

@@ -2,6 +2,7 @@
 /* UUID de 16 bytes (GUID little endian y UUID big endian) y utilidades basicas. */
 #ifndef _LKPI_LINUX_UUID_H
 #define _LKPI_LINUX_UUID_H
+#define UUID_STRING_LEN 36
 
 #include <linux/types.h>
 #include <linux/string.h>
@@ -70,6 +71,21 @@ void generate_random_uuid(unsigned char uuid[16]);
 static inline void uuid_gen(uuid_t *u)
 {
 	generate_random_uuid(u->b);
+}
+
+static inline bool uuid_is_valid(const char *uuid)
+{
+	for (unsigned int i = 0; i < UUID_STRING_LEN; i++) {
+		char c = uuid[i];
+
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			if (c != '-')
+				return false;
+		} else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+			return false;
+		}
+	}
+	return uuid[UUID_STRING_LEN] == '\0';
 }
 
 #endif
