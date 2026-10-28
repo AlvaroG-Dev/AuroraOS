@@ -1024,6 +1024,41 @@ usb_hcd_t g_xhci_hcd = {
     .free_device = xhci_hcd_free_device,
 };
 
+// Chipsets Intel con EHCI + xHCI (Panther Point 7-series, Lynx Point 8-series,
+// Wildcat Point...): hasta que el SO lo pida, el firmware deja los puertos
+// USB2 de las tomas compartidas enrutados al EHCI, y un pendrive USB2 no se
+// ve desde el xHCI. Como Linux (usb_enable_intel_xhci_ports): activar los
+// puertos SuperSpeed (USB3_PSSEN) y pasar los USB2 al xHCI (XUSB2PR) segun
+// lo que el chipset declara disponible (USB3PRM / USB2PRM).
+#define INTEL_XUSB2PR 0xD0
+#define INTEL_USB2PRM 0xD4
+#define INTEL_USB3_PSSEN 0xD8
+#define INTEL_USB3PRM 0xDC
+
+static void xhci_intel_route_ports(pci_device_t *d) {
+  if (d->vendor_id != 0x8086)
+    return;
+  switch (d->device_id) {
+  case 0x1E31: // Panther Point
+  case 0x8C31: // Lynx Point
+  case 0x9C31: // Lynx Point-LP
+  case 0x8CB1: // Wildcat Point
+  case 0x9CB1: // Wildcat Point-LP
+  case 0x9DED: // Cannon Point-LP (no hace dano si no aplica)
+    break;
+  default:
+    return;
+  }
+  uint32_t usb3 = pci_read_config_dword(d->bus, d->slot, d->func, INTEL_USB3PRM);
+  pci_write_config_dword(d->bus, d->slot, d->func, INTEL_USB3_PSSEN, usb3);
+  uint32_t usb2 = pci_read_config_dword(d->bus, d->slot, d->func, INTEL_USB2PRM);
+  pci_write_config_dword(d->bus, d->slot, d->func, INTEL_XUSB2PR, usb2);
+  LOG_INFO("[xHCI] Intel %04x: puertos enrutados al xHCI (USB3PRM=%08x "
+           "USB2PRM=%08x, XUSB2PR=%08x)",
+           d->device_id, usb3, usb2,
+           pci_read_config_dword(d->bus, d->slot, d->func, INTEL_XUSB2PR));
+}
+
 static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
   (void)id;
   if (!pci_dev)
@@ -1033,6 +1068,7 @@ static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
              pci_dev->bus, pci_dev->slot, pci_dev->func, pci_dev->prog_if);
     return -ENODEV;
   }
+  xhci_intel_route_ports(pci_dev);
   if (xhci_user_mode()) {
     LOG_INFO("[xHCI] %02x:%02x.%x: modo usuario activo, cediendo a xhci.aur",
              pci_dev->bus, pci_dev->slot, pci_dev->func);
