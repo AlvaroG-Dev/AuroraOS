@@ -74,3 +74,12 @@ nivel INFO no se ve por qué el panel sigue negro, así que se añaden dos herra
 - `drm.debug=0x1e` (u otra máscara): fija `__drm_debug` como en Linux (lkpi_drm).
 - `lkpi.i915_diag=1`: tras el probe vuelca PIPECONF, plano primario, DDI, panel, backlight,
   pozos de energía y las primeras PTE de la GGTT (`i915-diag:` en el log). Solo lee registros.
+
+## 10. Causa de la pantalla en negro (log con drm.debug + i915_diag)
+
+El volcado mostró el eDP aún activo con la config del BIOS (TRANS_DDI_FUNC_EDP=0x82204000,
+DSPCNTR_A habilitado), pero i915 leyó "hw state readout: disabled" en todos los CRTC/planos y
+limpió la GGTT (`clearing unused GTT space`), de modo que GGTT[0] apuntó a la página scratch y
+el plano escaneó negro. Causa: `pm_runtime_get_if_in_use()`/`get_if_active()` devolvían -EINVAL
+(con CONFIG_PM=1 i915 lo trata como "no hay referencia") y `intel_display_power_get_if_enabled()`
+fallaba para todos los dominios. Ahora devuelven 1 y cuentan la referencia (dispositivo siempre activo).
