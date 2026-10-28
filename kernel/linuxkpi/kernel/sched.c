@@ -67,6 +67,8 @@ static void lkpi_task_set_identity(struct task_struct *p, struct aurora_task *at
 	}
 	p->__lkpi_tid = ti.tid;
 	p->pid = ti.tid;
+	p->group_leader = p;
+	p->exit_code = 0;
 	p->tgid = ti.tgid;
 	p->__lkpi_uid = ti.uid;
 	p->__lkpi_euid = ti.euid;

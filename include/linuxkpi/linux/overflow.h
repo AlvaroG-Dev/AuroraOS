@@ -46,4 +46,26 @@ static inline size_t __must_check size_sub(size_t minuend, size_t subtrahend)
 	size_add(sizeof(*(p)), flex_array_size(p, member, count))
 #define struct_size_t(type, member, count) struct_size((type *)NULL, member, count)
 
+/* [start, start + size) se sale de [0, max)? Los tres con el mismo tipo. */
+#define range_overflows(start, size, max) ({ \
+	typeof(start) start__ = (start); \
+	typeof(size) size__ = (size); \
+	typeof(max) max__ = (max); \
+	(void)(&start__ == &size__); \
+	(void)(&start__ == &max__); \
+	start__ >= max__ || size__ > max__ - start__; \
+})
+#define range_overflows_t(type, start, size, max) \
+	range_overflows((type)(start), (type)(size), (type)(max))
+#define range_end_overflows(start, size, max) ({ \
+	typeof(start) start__ = (start); \
+	typeof(size) size__ = (size); \
+	typeof(max) max__ = (max); \
+	(void)(&start__ == &size__); \
+	(void)(&start__ == &max__); \
+	start__ > max__ || size__ > max__ - start__; \
+})
+#define range_end_overflows_t(type, start, size, max) \
+	range_end_overflows((type)(start), (type)(size), (type)(max))
+
 #endif

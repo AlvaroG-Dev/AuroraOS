@@ -90,6 +90,7 @@ struct task_struct *lkpi_kthread_create_internal(int (*fn)(void *), void *data,
 						 const char *name);
 
 /* Registro pfn -> struct page (mm/page.c). */
+#define LKPI_PAGE_SPLIT 0x8	/* tras split_page(): cada pagina se libera sola; freelist = base del array */
 #define LKPI_PAGE_OWNED 0x1	/* el array salio de lkpi_alloc_pages */
 #define LKPI_PAGE_FOREIGN 0x2	/* descriptor suelto de un marco ajeno */
 struct page;

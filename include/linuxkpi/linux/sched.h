@@ -62,6 +62,8 @@ struct task_struct {
 	char comm[TASK_COMM_LEN];
 	struct mm_struct *mm;
 	struct mm_struct *active_mm;
+	struct task_struct *group_leader; /* la propia tarea: la capa no agrupa hilos */
+	int exit_code;
 	atomic_t __lkpi_usage;		/* referencias (get/put_task_struct) */
 	void *__lkpi_atask;		/* task_t de Aurora */
 	u32 __lkpi_tid;			/* tid de Aurora al publicarlo (validacion) */
@@ -80,6 +82,10 @@ int lkpi_wake_up_state(struct task_struct *p, unsigned int state);
 void lkpi_yield(void);
 void lkpi_put_task_struct(struct task_struct *p);
 
+#define current_is_kswapd() 0
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
 #define current lkpi_get_current()
 #define get_current() lkpi_get_current()
 

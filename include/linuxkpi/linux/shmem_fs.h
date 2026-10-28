@@ -30,6 +30,12 @@ static inline struct page *shmem_read_mapping_page_gfp(struct address_space *m, 
 {
 	return read_mapping_page(m, index, NULL);
 }
+/* Sin dispositivo de swap no hay escritura a disco: las paginas se quedan en RAM. */
+struct writeback_control;
+static inline int shmem_writeout(struct folio *folio, struct writeback_control *wbc, struct list_head *plug)
+{
+	return -EBUSY;
+}
 #define shmem_read_mapping_page(m, i) shmem_read_mapping_page_gfp(m, i, 0)
 
 #endif

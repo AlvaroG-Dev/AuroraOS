@@ -10,6 +10,7 @@
 #include <linux/fs.h>
 #include <linux/gfp.h>
 #include <linux/pagevec.h>
+#include <linux/highmem.h>
 
 #define AS_UNEVICTABLE 3
 

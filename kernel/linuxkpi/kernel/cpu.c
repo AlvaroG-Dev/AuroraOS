@@ -21,6 +21,7 @@ static void lkpi_cpu_probe(void)
 
 	lkpi_cpuid(0, 0, &max, &b, &c, &d);
 	lkpi_cpuid(1, 0, &a, &b, &lkpi_cpuid_leaf1_ecx, &lkpi_cpuid_leaf1_edx);
+	lkpi_boot_cpu_data.x86 = ((a >> 8) & 0xf) == 0xf ? 0xf + ((a >> 20) & 0xff) : (a >> 8) & 0xf;
 	lkpi_boot_cpu_data.x86_clflush_size = ((b >> 8) & 0xff) * 8;
 	lkpi_boot_cpu_data.x86_cache_alignment = lkpi_boot_cpu_data.x86_clflush_size ?: 64;
 	if (max >= 7) {

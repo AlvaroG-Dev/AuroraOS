@@ -6,6 +6,7 @@
 #include <linux/types.h>
 
 struct cpuinfo_x86 {
+	unsigned char x86;		/* familia */
 	unsigned int x86_clflush_size;	/* bytes de una linea de cache para CLFLUSH */
 	unsigned int x86_cache_alignment;
 };

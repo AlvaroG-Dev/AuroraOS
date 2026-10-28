@@ -10,6 +10,7 @@
 #include <linux/export.h>
 #include <linux/gfp.h>
 #include <linux/mm.h>
+#include <linux/shrinker.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 
@@ -54,6 +55,22 @@ unsigned long lkpi_totalram_pages(void)
 	return aurora_pmm_total_pages();
 }
 EXPORT_SYMBOL(lkpi_totalram_pages);
+
+void lkpi_si_meminfo(struct sysinfo *si)
+{
+	memset(si, 0, sizeof(*si));
+	si->totalram = aurora_pmm_total_pages();
+	si->freeram = aurora_pmm_free_pages_count();
+	si->mem_unit = PAGE_SIZE;
+}
+EXPORT_SYMBOL(lkpi_si_meminfo);
+
+/* "Swap" en RAM: la mitad de lo libre (ver linux/swap.h). */
+long lkpi_nr_swap_pages(void)
+{
+	return aurora_pmm_free_pages_count() / 2;
+}
+EXPORT_SYMBOL(lkpi_nr_swap_pages);
 
 static struct page *hash_lookup_locked(unsigned long pfn)
 {
@@ -151,6 +168,8 @@ struct page *lkpi_alloc_pages(gfp_t gfp, unsigned int order)
 		return NULL;
 	}
 	phys = aurora_pmm_alloc_pages(count);
+	if (!phys && !(gfp & (__GFP_NORETRY | __GFP_NOWARN)) && lkpi_shrink_slab(gfp, count))
+		phys = aurora_pmm_alloc_pages(count);
 	if (!phys)
 		return NULL;
 	if ((gfp & (__GFP_DMA | __GFP_DMA32)) &&
@@ -194,8 +213,53 @@ struct page *lkpi_alloc_pages(gfp_t gfp, unsigned int order)
 }
 EXPORT_SYMBOL(lkpi_alloc_pages);
 
+/* split_page(): cada pagina del bloque pasa a asignarse y liberarse sola. */
+void lkpi_split_page(struct page *page, unsigned int order)
+{
+	unsigned long count = 1UL << order, flags, i;
+
+	if (!order)
+		return;
+	if (WARN_ON_ONCE(!(page->lkpi_flags & LKPI_PAGE_OWNED) || page->head || page->order != order))
+		return;
+	spin_lock_irqsave(&page_lock, flags);
+	for (i = 0; i < count; i++) {
+		struct page *p = &page[i];
+
+		p->head = NULL;
+		p->order = 0;
+		__clear_bit(PG_head, &p->flags);
+		atomic_set(&p->_refcount, 1);
+		p->lkpi_flags |= LKPI_PAGE_OWNED | LKPI_PAGE_SPLIT;
+		p->freelist = page;
+	}
+	page->inuse = count;
+	spin_unlock_irqrestore(&page_lock, flags);
+}
+EXPORT_SYMBOL(lkpi_split_page);
+
+static void free_split_page(struct page *p)
+{
+	struct page *base = p->freelist;
+	unsigned long flags;
+	bool last;
+
+	spin_lock_irqsave(&page_lock, flags);
+	hash_del_locked(p);
+	pages_owned--;
+	last = --base->inuse == 0;
+	spin_unlock_irqrestore(&page_lock, flags);
+	aurora_pmm_free_pages((u64)p->pfn << PAGE_SHIFT, 1);
+	if (last)
+		aurora_kfree(base);
+}
+
 static void free_owned_block(struct page *head)
 {
+	if (head->lkpi_flags & LKPI_PAGE_SPLIT) {
+		free_split_page(head);
+		return;
+	}
 	unsigned long count = 1UL << head->order, flags, i;
 	u64 phys = (u64)head->pfn << PAGE_SHIFT;
 
