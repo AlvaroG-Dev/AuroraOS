@@ -66,7 +66,8 @@ static inline bool uuid_is_null(const uuid_t *uuid)
 	return uuid_equal(uuid, &null);
 }
 
-void generate_random_uuid(unsigned char uuid[16]);
+void lkpi_generate_random_uuid(unsigned char uuid[16]);
+#define generate_random_uuid lkpi_generate_random_uuid
 
 static inline void uuid_gen(uuid_t *u)
 {

@@ -77,3 +77,11 @@ u32 lkpi_prandom_u32(void)
 	return (u32)(lkpi_xorshift() >> 16);
 }
 EXPORT_SYMBOL(lkpi_prandom_u32);
+
+void lkpi_generate_random_uuid(unsigned char uuid[16])
+{
+	lkpi_get_random_bytes(uuid, 16);
+	uuid[6] = (uuid[6] & 0x0f) | 0x40;	/* version 4 */
+	uuid[8] = (uuid[8] & 0x3f) | 0x80;	/* variante RFC 4122 */
+}
+EXPORT_SYMBOL(lkpi_generate_random_uuid);

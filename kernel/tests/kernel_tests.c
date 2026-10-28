@@ -6493,6 +6493,32 @@ static void test_lkpi_ttm_smp(void) { if (lkpi_boot_owned()) return; lkpi_ttm_ru
 REGISTER_TEST_FLAGS("linuxkpi: L6 ttm estrés SMP (hilos compitiendo por el VRAM)",
                     test_lkpi_ttm_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
+// L7: i915 completo (lkpi_i915.kur) sobre drm, ttm y los helpers de display.
+// Sin GPU Intel en QEMU solo se comprueba que enlaza, inicializa (registro del
+// driver PCI, tracepoints, params) y se descarga sin dejar nada; el sondeo real
+// lo valida el autor en hardware (Gen7.5, Toshiba Portégé R30-A).
+static void test_lkpi_i915_load(void) {
+  if (lkpi_boot_owned())
+    return;
+  static const char *const names[] = {"lkpi_drm", "lkpi_ttm", "lkpi_drm_display", "lkpi_i915"};
+  struct kur_module *m[4] = {0};
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int n = 0;
+  for (; n < 4; n++) {
+    char path[96];
+    snprintf(path, sizeof path, LKPI_DIR "/%s.kur", names[n]);
+    int rc = kur_loader_load_file(path, &m[n]);
+    TEST_ASSERT(rc == 0 && m[n], "%s no carga (rc=%d)", names[n], rc);
+    if (rc != 0 || !m[n])
+      break;
+  }
+  for (int i = n - 1; i >= 0; i--)
+    if (m[i])
+      lkpi_unload_test(m[i]);
+}
+REGISTER_TEST_FLAGS("linuxkpi: L7 i915 (carga y descarga sin GPU Intel)", test_lkpi_i915_load,
+                    TEST_FLAG_BLOCKING);
+
 static void test_lkpi_unload(void) {
   if (lkpi_boot_owned())
     return;
