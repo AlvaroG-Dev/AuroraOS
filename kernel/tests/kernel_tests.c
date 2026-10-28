@@ -28,6 +28,7 @@
 #include "../klog.h"
 #include "../kthread.h"
 #include "../paging.h"
+#include "../pci.h"
 #include "../part.h"
 #include "../pipe.h"
 #include "../pmm.h"
@@ -6497,9 +6498,25 @@ REGISTER_TEST_FLAGS("linuxkpi: L6 ttm estrés SMP (hilos compitiendo por el VRAM
 // Sin GPU Intel en QEMU solo se comprueba que enlaza, inicializa (registro del
 // driver PCI, tracepoints, params) y se descarga sin dejar nada; el sondeo real
 // lo valida el autor en hardware (Gen7.5, Toshiba Portégé R30-A).
+// Con una GPU Intel real (hardware) cargar lkpi_i915 hace probe sobre ella en
+// pleno arranque (#UD en el Portégé R30-A, Haswell): la prueba es para QEMU.
+// El i915 real se prueba a mano con `lkpi.load=`.
+static bool lkpi_intel_gpu_present(void) {
+  int n = 0;
+  const pci_device_t *d = pci_get_devices(&n);
+  for (int i = 0; d && i < n; i++)
+    if (d[i].vendor_id == 0x8086 && d[i].class_id == 0x03)
+      return true;
+  return false;
+}
+
 static void test_lkpi_i915_load(void) {
   if (lkpi_boot_owned())
     return;
+  if (lkpi_intel_gpu_present()) {
+    LOG_INFO("[TEST] i915: GPU Intel real presente, no se carga lkpi_i915");
+    return;
+  }
   static const char *const names[] = {"lkpi_drm", "lkpi_ttm", "lkpi_drm_display", "lkpi_i915"};
   struct kur_module *m[4] = {0};
   TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
