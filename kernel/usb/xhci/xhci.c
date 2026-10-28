@@ -1024,6 +1024,38 @@ usb_hcd_t g_xhci_hcd = {
     .free_device = xhci_hcd_free_device,
 };
 
+// Chipsets Intel (Panther Point, Lynx Point, Wildcat Point...): con arranque
+// BIOS los puertos USB 2.0 quedan enrutados al EHCI y los SuperSpeed sin
+// activar en el xHCI hasta que el SO lo pide (XUSB2PR / USB3_PSSEN, igual que
+// usb_enable_intel_xhci_ports() de Linux). Sin esto el xHCI no ve ningun
+// dispositivo (ni el pendrive, ni teclado ni raton USB).
+static int xhci_intel_route_ports(pci_device_t *d) {
+  if (d->vendor_id != 0x8086)
+    return 0;
+  switch (d->device_id) {
+  case 0x1e31:            // Panther Point (serie 7)
+  case 0x8c31: case 0x9c31: // Lynx Point / Lynx Point-LP (serie 8)
+  case 0x8cb1: case 0x9cb1: // Wildcat Point (serie 9)
+  case 0x9d2f: case 0xa12f: // Sunrise Point (serie 100)
+    break;
+  default:
+    return 0;
+  }
+  uint8_t b = d->bus, sl = d->slot, f = d->func;
+  uint32_t usb2prm = pci_read_config_dword(b, sl, f, 0xD4);
+  uint32_t usb3prm = pci_read_config_dword(b, sl, f, 0xDC);
+  uint32_t pre2 = pci_read_config_dword(b, sl, f, 0xD0);
+  uint32_t pre3 = pci_read_config_dword(b, sl, f, 0xD8);
+  pci_write_config_dword(b, sl, f, 0xD8, usb3prm);
+  pci_write_config_dword(b, sl, f, 0xD0, usb2prm);
+  LOG_INFO("[xHCI] %02x:%02x.%x Intel %04x: enrutado de puertos a xHCI "
+           "(XUSB2PR %08x->%08x, USB3_PSSEN %08x->%08x)",
+           b, sl, f, d->device_id, (unsigned)pre2,
+           (unsigned)pci_read_config_dword(b, sl, f, 0xD0), (unsigned)pre3,
+           (unsigned)pci_read_config_dword(b, sl, f, 0xD8));
+  return 1;
+}
+
 static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
   (void)id;
   if (!pci_dev)
@@ -1033,6 +1065,7 @@ static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
              pci_dev->bus, pci_dev->slot, pci_dev->func, pci_dev->prog_if);
     return -ENODEV;
   }
+  xhci_intel_route_ports(pci_dev);
   if (xhci_user_mode()) {
     LOG_INFO("[xHCI] %02x:%02x.%x: modo usuario activo, cediendo a xhci.aur",
              pci_dev->bus, pci_dev->slot, pci_dev->func);
