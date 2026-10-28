@@ -271,4 +271,10 @@ static inline vm_fault_t vmf_error(int err)
 #include <linux/shrinker.h>
 #include <linux/mmap_lock.h>
 
+
+static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	vma->vm_file = file;
+}
+static inline struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr) { return NULL; }
 #endif

@@ -122,6 +122,27 @@ static const struct device_type lkpi_i2c_adapter_type = {
 	.release = lkpi_i2c_adapter_release,
 };
 
+static void i2c_default_lock_bus(struct i2c_adapter *adap, unsigned int flags)
+{
+	mutex_lock(&adap->bus_lock);
+}
+
+static int i2c_default_trylock_bus(struct i2c_adapter *adap, unsigned int flags)
+{
+	return mutex_trylock(&adap->bus_lock);
+}
+
+static void i2c_default_unlock_bus(struct i2c_adapter *adap, unsigned int flags)
+{
+	mutex_unlock(&adap->bus_lock);
+}
+
+static const struct i2c_lock_operations i2c_default_lock_ops = {
+	.lock_bus = i2c_default_lock_bus,
+	.trylock_bus = i2c_default_trylock_bus,
+	.unlock_bus = i2c_default_unlock_bus,
+};
+
 static int lkpi_i2c_register_adapter(struct i2c_adapter *adap)
 {
 	int rc;
@@ -129,6 +150,8 @@ static int lkpi_i2c_register_adapter(struct i2c_adapter *adap)
 	if (WARN(!adap->name[0], "adaptador I2C sin nombre\n") || !adap->algo)
 		return -EINVAL;
 	mutex_init(&adap->bus_lock);
+	if (!adap->lock_ops)
+		adap->lock_ops = &i2c_default_lock_ops;
 	INIT_LIST_HEAD(&adap->userspace_clients);
 	if (!adap->timeout)
 		adap->timeout = HZ;
@@ -342,9 +365,9 @@ int lkpi_i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 {
 	int ret;
 
-	mutex_lock(&adap->bus_lock);
+	i2c_lock_bus(adap, I2C_LOCK_SEGMENT);
 	ret = lkpi___i2c_transfer(adap, msgs, num);
-	mutex_unlock(&adap->bus_lock);
+	i2c_unlock_bus(adap, I2C_LOCK_SEGMENT);
 	return ret;
 }
 EXPORT_SYMBOL(lkpi_i2c_transfer);
@@ -469,14 +492,14 @@ s32 lkpi_i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short fl
 	s32 res;
 
 	flags &= I2C_M_TEN | I2C_CLIENT_PEC;
-	mutex_lock(&adapter->bus_lock);
+	i2c_lock_bus(adapter, I2C_LOCK_SEGMENT);
 	if (adapter->algo->smbus_xfer)
 		res = adapter->algo->smbus_xfer(adapter, addr, flags, read_write, command,
 						protocol, data);
 	else
 		res = lkpi_i2c_smbus_emulated(adapter, addr, flags, read_write, command, protocol,
 					      data);
-	mutex_unlock(&adapter->bus_lock);
+	i2c_unlock_bus(adapter, I2C_LOCK_SEGMENT);
 	return res;
 }
 EXPORT_SYMBOL(lkpi_i2c_smbus_xfer);

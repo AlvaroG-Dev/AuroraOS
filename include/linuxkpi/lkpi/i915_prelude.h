@@ -25,6 +25,8 @@
 #include <linux/ratelimit.h>
 #include <linux/iosys-map.h>
 #include <linux/pci.h>
+#include <linux/acpi.h>
+#include <linux/writeback.h>
 #include <linux/mm.h>
 #include <linux/kstrtox.h>
 #endif

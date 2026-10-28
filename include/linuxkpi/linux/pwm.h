@@ -16,4 +16,11 @@ static inline unsigned int pwm_get_period(const struct pwm_device *pwm) { return
 static inline int pwm_config(struct pwm_device *pwm, int duty_ns, int period_ns) { return -ENODEV; }
 static inline int pwm_enable(struct pwm_device *pwm) { return -ENODEV; }
 static inline void pwm_disable(struct pwm_device *pwm) {}
+
+static inline bool pwm_is_enabled(const struct pwm_device *pwm) { return false; }
+static inline int pwm_set_relative_duty_cycle(struct pwm_state *state, unsigned int duty_cycle, unsigned int scale)
+{
+	return -ENODEV;
+}
+static inline unsigned int pwm_get_relative_duty_cycle(const struct pwm_state *state, unsigned int scale) { return 0; }
 #endif

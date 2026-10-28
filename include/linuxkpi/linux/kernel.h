@@ -87,4 +87,7 @@ enum system_states { SYSTEM_BOOTING, SYSTEM_SCHEDULING, SYSTEM_FREEING_INITMEM,
 #define system_state SYSTEM_RUNNING
 #define oops_in_progress 0
 
+
+#define U64_C(x) x##ULL
+#define U32_C(x) x##U
 #endif

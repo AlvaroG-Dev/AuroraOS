@@ -63,4 +63,8 @@ static inline void *vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t p
 }
 static inline void vunmap(const void *addr) { lkpi_vunmap(addr); }
 
+
+struct notifier_block;
+static inline int register_vmap_purge_notifier(struct notifier_block *nb) { return 0; }
+static inline int unregister_vmap_purge_notifier(struct notifier_block *nb) { return 0; }
 #endif

@@ -14,6 +14,8 @@ struct cpuinfo_x86 {
 };
 
 extern struct cpuinfo_x86 lkpi_boot_cpu_data;
+/* Aurora programa PAT (WC) en el arranque */
+static inline bool pat_enabled(void) { return true; }
 #define boot_cpu_data lkpi_boot_cpu_data
 
 #endif

@@ -97,4 +97,9 @@ static inline unsigned long lcm(unsigned long a, unsigned long b)
 	return (a && b) ? (a / gcd(a, b)) * b : 0;
 }
 
+
+u64 lkpi_int_pow(u64 base, unsigned int exp);
+unsigned int lkpi_intlog10(u32 x);
+#define int_pow lkpi_int_pow
+#define intlog10 lkpi_intlog10
 #endif

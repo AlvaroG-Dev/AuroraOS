@@ -108,3 +108,28 @@ struct file *lkpi_shmem_file_setup(const char *name, loff_t size, unsigned long 
 	return f;
 }
 EXPORT_SYMBOL(lkpi_shmem_file_setup);
+
+/* Escritura de kernel en un fichero shmem de la capa (cache de paginas propia). */
+ssize_t lkpi_kernel_write(struct file *file, const void *buf, size_t count, loff_t *pos)
+{
+	struct address_space *m = file->f_mapping;
+	const char *src = buf;
+	size_t done = 0;
+
+	while (done < count) {
+		pgoff_t idx = (*pos + done) >> PAGE_SHIFT;
+		size_t off = (*pos + done) & ~PAGE_MASK, n = min_t(size_t, PAGE_SIZE - off, count - done);
+		struct folio *folio = lkpi_shmem_read_folio(m, idx);
+
+		if (IS_ERR(folio))
+			return done ? (ssize_t)done : PTR_ERR(folio);
+		memcpy((char *)page_address(&folio->page) + off, src + done, n);
+		put_page(&folio->page);
+		done += n;
+	}
+	*pos += done;
+	if (*pos > i_size_read(file->f_inode))
+		file->f_inode->i_size = *pos;
+	return done;
+}
+EXPORT_SYMBOL(lkpi_kernel_write);

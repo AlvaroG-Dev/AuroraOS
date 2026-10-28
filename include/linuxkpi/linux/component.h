@@ -11,6 +11,7 @@ struct component_ops {
 };
 
 static inline int component_add(struct device *dev, const struct component_ops *ops) { return 0; }
+static inline int component_add_typed(struct device *dev, const struct component_ops *ops, int subcomponent) { return 0; }
 static inline void component_del(struct device *dev, const struct component_ops *ops) { }
 
 #endif

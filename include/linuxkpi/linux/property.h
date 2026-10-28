@@ -37,4 +37,9 @@ static inline int fwnode_property_read_u32(const struct fwnode_handle *fwnode, c
 	return -ENXIO;
 }
 
+
+static inline struct fwnode_handle *device_get_next_child_node(const struct device *dev, struct fwnode_handle *child)
+{
+	return NULL;
+}
 #endif

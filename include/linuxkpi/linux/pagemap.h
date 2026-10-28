@@ -67,4 +67,12 @@ static inline struct page *read_mapping_page(struct address_space *m, pgoff_t in
 	return IS_ERR(folio) ? ERR_CAST(folio) : &folio->page;
 }
 
+
+static inline struct folio *virt_to_folio(const void *x) { return page_folio(virt_to_page(x)); }
+static inline struct folio *folio_alloc(gfp_t gfp, unsigned int order)
+{
+	struct page *p = alloc_pages(gfp, order);
+
+	return p ? page_folio(p) : NULL;
+}
 #endif

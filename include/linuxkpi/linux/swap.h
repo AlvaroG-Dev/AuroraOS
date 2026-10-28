@@ -16,4 +16,5 @@ long lkpi_nr_swap_pages(void);
 #define get_nr_swap_pages() lkpi_nr_swap_pages()
 #define total_swap_pages lkpi_nr_swap_pages()
 
+#define SWAP_CLUSTER_MAX 32UL
 #endif

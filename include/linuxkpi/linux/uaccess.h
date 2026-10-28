@@ -100,4 +100,14 @@ static inline void *memdup_array_user(const void __user *src, size_t n, size_t s
 #define user_write_access_begin user_access_begin
 #define user_write_access_end user_access_end
 
+
+#define unsafe_put_user(x, ptr, label) do { if (put_user(x, ptr)) goto label; } while (0)
+#define unsafe_get_user(x, ptr, label) do { if (get_user(x, ptr)) goto label; } while (0)
+#define unsafe_copy_to_user(to, from, n, label) do { if (copy_to_user(to, from, n)) goto label; } while (0)
+#define unsafe_copy_from_user(to, from, n, label) do { if (copy_from_user(to, from, n)) goto label; } while (0)
+#define __copy_to_user_inatomic copy_to_user
+#define __copy_from_user_inatomic copy_from_user
+#define copy_from_user_inatomic_nontemporal(to, from, n) copy_from_user(to, from, n)
+void *lkpi_strndup_user(const char __user *s, long n);
+#define strndup_user lkpi_strndup_user
 #endif

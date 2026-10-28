@@ -53,6 +53,7 @@ struct i2c_msg {
 #define I2C_FUNC_SMBUS_WORD_DATA (I2C_FUNC_SMBUS_READ_WORD_DATA | I2C_FUNC_SMBUS_WRITE_WORD_DATA)
 #define I2C_FUNC_SMBUS_BLOCK_DATA \
 	(I2C_FUNC_SMBUS_READ_BLOCK_DATA | I2C_FUNC_SMBUS_WRITE_BLOCK_DATA)
+#define I2C_FUNC_SMBUS_BLOCK_PROC_CALL 0x00008000
 #define I2C_FUNC_SMBUS_I2C_BLOCK \
 	(I2C_FUNC_SMBUS_READ_I2C_BLOCK | I2C_FUNC_SMBUS_WRITE_I2C_BLOCK)
 #define I2C_FUNC_SMBUS_EMUL \
@@ -110,11 +111,18 @@ struct i2c_adapter_quirks {
 	u16 max_write_len, max_read_len, max_comb_1st_msg_len, max_comb_2nd_msg_len;
 };
 
+struct i2c_lock_operations {
+	void (*lock_bus)(struct i2c_adapter *adapter, unsigned int flags);
+	int (*trylock_bus)(struct i2c_adapter *adapter, unsigned int flags);
+	void (*unlock_bus)(struct i2c_adapter *adapter, unsigned int flags);
+};
+
 struct i2c_adapter {
 	struct module *owner;
 	unsigned int class;
 	const struct i2c_algorithm *algo;
 	void *algo_data;
+	const struct i2c_lock_operations *lock_ops;	/* NULL = bloqueo por defecto (bus_lock) */
 	struct mutex bus_lock;
 	int timeout;			/* jiffies */
 	int retries;
@@ -268,21 +276,33 @@ static inline u8 i2c_8bit_addr_from_msg(const struct i2c_msg *msg)
 {
 	return (msg->addr << 1) | (msg->flags & I2C_M_RD);
 }
-static inline void i2c_lock_bus(struct i2c_adapter *adap, unsigned int flags) { mutex_lock(&adap->bus_lock); }
+#define I2C_LOCK_ROOT_ADAPTER 0x01
+#define I2C_LOCK_SEGMENT 0x02
+static inline void i2c_lock_bus(struct i2c_adapter *adap, unsigned int flags)
+{
+	adap->lock_ops->lock_bus(adap, flags);
+}
 static inline int i2c_trylock_bus(struct i2c_adapter *adap, unsigned int flags)
 {
-	return mutex_trylock(&adap->bus_lock);
+	return adap->lock_ops->trylock_bus(adap, flags);
 }
 static inline void i2c_unlock_bus(struct i2c_adapter *adap, unsigned int flags)
 {
-	mutex_unlock(&adap->bus_lock);
+	adap->lock_ops->unlock_bus(adap, flags);
 }
-#define I2C_LOCK_ROOT_ADAPTER 0x01
-#define I2C_LOCK_SEGMENT 0x02
 static inline struct i2c_client *i2c_new_ancillary_device(struct i2c_client *client,
 							  const char *name, u16 addr)
 {
 	return lkpi_i2c_new_dummy_device(client->adapter, addr);
 }
 
+
+/* ACPI: sin handles por dispositivo (ver linux/acpi.h) */
+struct acpi_resource;
+struct acpi_resource_i2c_serialbus;
+static inline bool i2c_acpi_get_i2c_resource(struct acpi_resource *ares, struct acpi_resource_i2c_serialbus **i2c)
+{
+	return false;
+}
+static inline struct i2c_adapter *i2c_acpi_find_adapter_by_handle(void *handle) { return NULL; }
 #endif

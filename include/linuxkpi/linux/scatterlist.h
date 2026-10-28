@@ -55,6 +55,7 @@ static inline void sg_assign_page(struct scatterlist *sg, struct page *page)
 	unsigned long flags = sg->page_link & SG_PAGE_LINK_MASK;
 	sg->page_link = flags | (unsigned long)page;
 }
+#define sg_set_folio(sg, folio, len, off) sg_set_page(sg, &(folio)->page, len, off)
 static inline void sg_set_page(struct scatterlist *sg, struct page *page, unsigned int len,
 			       unsigned int offset)
 {

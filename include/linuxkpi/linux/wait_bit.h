@@ -53,4 +53,7 @@ static inline void clear_and_wake_up_bit(int bit, unsigned long *word)
 	wake_up_bit(word, bit);
 }
 
+
+#define ___wait_var_event(var, cond, state, exclusive, ret, cmd) \
+	__lkpi_wait_event(*lkpi_bit_waitqueue(var), cond, state, exclusive, ret, cmd)
 #endif

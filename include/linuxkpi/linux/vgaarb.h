@@ -34,4 +34,6 @@ static inline int vga_client_register(struct pci_dev *pdev,
 }
 static inline void vga_set_legacy_decoding(struct pci_dev *pdev, unsigned int decodes) { }
 
+
+static inline void vga_client_unregister(struct pci_dev *pdev) { }
 #endif
