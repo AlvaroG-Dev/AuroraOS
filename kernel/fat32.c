@@ -3721,7 +3721,10 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
     return -EINVAL;
   }
   if (memcmp(bpb->fs_type, "FAT32   ", 8) != 0) {
-    LOG_DEBUG("[FAT32] no es FAT32 (fs_type != 'FAT32   ')");
+    LOG_DEBUG("[FAT32] %s: no es FAT32 (fs_type != 'FAT32   '; bytes %02x "
+              "%02x %02x %02x %02x %02x %02x %02x)",
+              bdev->name, buf[82], buf[83], buf[84], buf[85], buf[86], buf[87],
+              buf[88], buf[89]);
     return -EINVAL;
   }
   if (bpb->bytes_per_sector < 512 || bpb->bytes_per_sector > 4096 ||

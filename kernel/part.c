@@ -92,8 +92,14 @@ static int part_submit(block_device_t *part, bio_t *bio) {
 
   int rc = parent->ops->submit(parent, bio);
 
-  bio->lba = orig_lba;
-  bio->bdev = orig_bdev;
+  // Un driver asincrono que devuelve -EINPROGRESS conserva el bio y lo lee
+  // despues desde su hilo (usb-storage usa bio->lba/bio->buf en el worker):
+  // restaurar aqui el LBA relativo hacia que leyera el sector 0 del DISCO en
+  // lugar del de la particion. Solo se restaura si el bio ya termino.
+  if (rc != -EINPROGRESS) {
+    bio->lba = orig_lba;
+    bio->bdev = orig_bdev;
+  }
 
   return rc;
 }
