@@ -96,8 +96,8 @@ void lkpi_put_task_struct(struct task_struct *p);
 #define task_is_running(p) (READ_ONCE((p)->__state) == TASK_RUNNING)
 #define task_state_index(p) 0
 
-#define schedule() lkpi_schedule()
-#define schedule_timeout(t) lkpi_schedule_timeout(t)
+static inline void schedule(void) { lkpi_schedule(); }
+static inline long schedule_timeout(long t) { return lkpi_schedule_timeout(t); }
 #define io_schedule() lkpi_schedule()
 #define io_schedule_timeout(t) lkpi_schedule_timeout(t)
 #define wake_up_process(p) lkpi_wake_up_process(p)

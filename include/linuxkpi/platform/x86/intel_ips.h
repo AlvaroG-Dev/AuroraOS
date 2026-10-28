@@ -3,6 +3,5 @@
 #define _LKPI_PLATFORM_X86_INTEL_IPS_H
 /* Intel Intelligent Power Sharing (Ironlake): el driver ips no existe; i915 no lo enlaza. */
 #include <linux/types.h>
-static inline void ips_ping_for_i915_load(void) {}
-static inline void ips_link_to_i915_driver(void) {}
+void ips_link_to_i915_driver(void);
 #endif

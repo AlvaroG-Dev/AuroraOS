@@ -6,4 +6,7 @@
 #include <linux/mm.h>
 #include <asm/processor.h>
 
+
+#define _PAGE_BIT_PAT	7
+#define _PAGE_PAT	(1UL << _PAGE_BIT_PAT)
 #endif

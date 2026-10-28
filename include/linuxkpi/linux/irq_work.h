@@ -46,8 +46,8 @@ static inline bool irq_work_is_busy(struct irq_work *work)
 
 bool lkpi_irq_work_queue(struct irq_work *work);
 void lkpi_irq_work_sync(struct irq_work *work);
-#define irq_work_queue(w) lkpi_irq_work_queue(w)
+static inline bool irq_work_queue(struct irq_work *w) { return lkpi_irq_work_queue(w); }
 #define irq_work_queue_on(w, cpu) lkpi_irq_work_queue(w)
-#define irq_work_sync(w) lkpi_irq_work_sync(w)
+static inline void irq_work_sync(struct irq_work *w) { lkpi_irq_work_sync(w); }
 
 #endif

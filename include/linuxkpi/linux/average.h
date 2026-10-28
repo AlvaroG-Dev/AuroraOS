@@ -15,7 +15,6 @@
 		BUILD_BUG_ON(!__builtin_constant_p(_precision)); \
 		BUILD_BUG_ON(!__builtin_constant_p(_weight_rcp)); \
 		BUILD_BUG_ON((_precision) > 30); \
-		BUILD_BUG_ON_NOT_POWER_OF_2(_precision); \
 		BUILD_BUG_ON_NOT_POWER_OF_2(_weight_rcp); \
 		e->internal = 0; \
 	} \

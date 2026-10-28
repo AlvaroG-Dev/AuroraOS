@@ -58,7 +58,7 @@ struct dev_pm_info {
 	bool is_prepared:1;
 	bool is_suspended:1;
 	bool should_wakeup:1;
-	int usage_count;		/* runtime PM: solo se cuenta */
+	atomic_t usage_count;		/* runtime PM: solo se cuenta */
 	int disable_depth;
 };
 

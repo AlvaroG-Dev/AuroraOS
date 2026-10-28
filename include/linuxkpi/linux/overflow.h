@@ -16,8 +16,14 @@
 	   (_to_shift != _s || *_d < 0 || _a < 0 || (*_d >> _to_shift) != _a); })
 #define overflows_type(n, T) \
 	({ typeof(T) __tmp; __builtin_add_overflow((n), 0, &__tmp); })
+#define __lkpi_type_max(t) ((t)(~(t)0 >> (is_signed_type(t) ? 1 : 0)))
+#define __lkpi_type_min(t) ((t)(is_signed_type(t) ? ~__lkpi_type_max(t) : 0))
+#define __overflows_type_constexpr(x, T) ( \
+	is_unsigned_type(typeof(x)) ? (x) > __lkpi_type_max(typeof(T)) : \
+	is_unsigned_type(typeof(T)) ? (x) < 0 || (x) > __lkpi_type_max(typeof(T)) : \
+	(x) < __lkpi_type_min(typeof(T)) || (x) > __lkpi_type_max(typeof(T)))
 #define castable_to_type(n, T) \
-	__builtin_choose_expr(__builtin_constant_p(n), !overflows_type(n, T), __same_type(n, T))
+	__builtin_choose_expr(__is_constexpr(n), !__overflows_type_constexpr(n, T), __same_type(n, T))
 #define add_would_overflow(a, b) \
 	({ typeof(a) __tmp; check_add_overflow(a, b, &__tmp); })
 

@@ -8,6 +8,7 @@ struct auxiliary_device {
 	const char *name;
 	u32 id;
 };
+#define to_auxiliary_dev(__dev) container_of(__dev, struct auxiliary_device, dev)
 static inline int auxiliary_device_init(struct auxiliary_device *auxdev) { return -ENODEV; }
 static inline int __auxiliary_device_add(struct auxiliary_device *auxdev, const char *modname) { return -ENODEV; }
 #define auxiliary_device_add(auxdev) __auxiliary_device_add(auxdev, KBUILD_MODNAME)

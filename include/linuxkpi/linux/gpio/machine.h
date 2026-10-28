@@ -24,7 +24,7 @@ struct gpiod_lookup_table {
 };
 #define GPIO_LOOKUP(_key, _chip_hwnum, _con_id, _flags) GPIO_LOOKUP_IDX(_key, _chip_hwnum, _con_id, 0, _flags)
 #define GPIO_LOOKUP_IDX(_key, _chip_hwnum, _con_id, _idx, _flags) \
-	{ .key = _key, .chip_hwnum = _chip_hwnum, .con_id = _con_id, .idx = _idx, .flags = _flags }
+	(struct gpiod_lookup){ .key = _key, .chip_hwnum = _chip_hwnum, .con_id = _con_id, .idx = _idx, .flags = _flags }
 static inline void gpiod_add_lookup_table(struct gpiod_lookup_table *table) {}
 static inline void gpiod_remove_lookup_table(struct gpiod_lookup_table *table) {}
 #endif

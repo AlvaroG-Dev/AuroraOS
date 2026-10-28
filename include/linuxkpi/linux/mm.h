@@ -277,4 +277,9 @@ static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
 	vma->vm_file = file;
 }
 static inline struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr) { return NULL; }
+
+/* Sin arbol de VMA de usuario: el iterador no visita nada (userptr/probe_range fallan con -EFAULT). */
+struct vma_iterator { struct mm_struct *mm; unsigned long addr; };
+#define VMA_ITERATOR(name, _mm, _addr) struct vma_iterator name = { .mm = (_mm), .addr = (_addr) }
+#define for_each_vma_range(vmi, vma, end) for ((vma) = NULL; (vma); )
 #endif

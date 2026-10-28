@@ -88,4 +88,17 @@ static inline bool uuid_is_valid(const char *uuid)
 	return uuid[UUID_STRING_LEN] == '\0';
 }
 
+static inline bool guid_is_null(const guid_t *guid)
+{
+	for (int i = 0; i < UUID_SIZE; i++)
+		if (guid->b[i])
+			return false;
+	return true;
+}
+static inline void guid_gen(guid_t *lu)
+{
+	generate_random_uuid(lu->b);
+	lu->b[7] = (lu->b[7] & 0x0F) | 0x40;
+	lu->b[8] = (lu->b[8] & 0x3F) | 0x80;
+}
 #endif

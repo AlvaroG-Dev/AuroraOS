@@ -527,5 +527,6 @@ static inline const char *pci_power_name(pci_power_t state)
 
 	return (unsigned int)state < ARRAY_SIZE(names) ? names[state] : "unknown";
 }
-#define pci_bus_for_each_resource(bus, res) for ((res) = NULL; (res); )
+#define pci_bus_for_each_resource(bus, res, ...) for ((res) = NULL; (res); )
+static inline void pci_assign_unassigned_bus_resources(struct pci_bus *bus) {}
 #endif

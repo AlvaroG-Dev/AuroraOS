@@ -7,7 +7,7 @@
 struct rchan_buf { size_t subbufs_produced; size_t subbufs_consumed; size_t padding[1]; };
 struct rchan;
 struct rchan_callbacks {
-	int (*subbuf_start)(struct rchan_buf *buf, void *subbuf, void *prev_subbuf, size_t prev_padding);
+	int (*subbuf_start)(struct rchan_buf *buf, void *subbuf, void *prev_subbuf);
 	struct dentry *(*create_buf_file)(const char *filename, struct dentry *parent, umode_t mode,
 					  struct rchan_buf *buf, int *is_global);
 	int (*remove_buf_file)(struct dentry *dentry);

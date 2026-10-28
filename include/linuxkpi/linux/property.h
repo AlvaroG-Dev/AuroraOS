@@ -42,4 +42,10 @@ static inline struct fwnode_handle *device_get_next_child_node(const struct devi
 {
 	return NULL;
 }
+static inline bool fwnode_device_is_available(const struct fwnode_handle *fwnode) { return false; }
+static inline struct fwnode_handle *fwnode_find_reference(const struct fwnode_handle *fwnode, const char *name,
+							  unsigned int index)
+{
+	return ERR_PTR(-ENOENT);
+}
 #endif

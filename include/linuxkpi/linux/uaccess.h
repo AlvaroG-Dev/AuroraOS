@@ -44,10 +44,10 @@ static inline long strncpy_from_user(char *dst, const char __user *src, long cou
 	return lkpi_strncpy_from_user(dst, src, count);
 }
 #define put_user(x, ptr) \
-	({ __typeof__(*(ptr)) __pu_val = (x); \
+	({ __unqual_scalar_typeof(*(ptr)) __pu_val = (x); \
 	   copy_to_user((ptr), &__pu_val, sizeof(*(ptr))) ? -EFAULT : 0; })
 #define get_user(x, ptr) \
-	({ __typeof__(*(ptr)) __gu_val; int __gu_err = \
+	({ __unqual_scalar_typeof(*(ptr)) __gu_val; int __gu_err = \
 		copy_from_user(&__gu_val, (ptr), sizeof(*(ptr))) ? -EFAULT : 0; \
 	   (x) = __gu_err ? (__typeof__(*(ptr)))0 : __gu_val; __gu_err; })
 #define __put_user put_user

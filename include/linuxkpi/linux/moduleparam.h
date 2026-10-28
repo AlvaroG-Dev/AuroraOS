@@ -56,6 +56,7 @@ struct kparam_array {
 		__section("__param") __aligned(sizeof(void *)) = \
 		{ __param_str_##name, NULL, ops, (perm), level, flags, { arg } }
 
+#define module_param_cb_unsafe(name, ops, arg, perm) module_param_cb(name, ops, arg, perm)
 #define module_param_cb(name, ops, arg, perm) \
 	__module_param_call(MODULE_PARAM_PREFIX, name, ops, arg, perm, -1, 0)
 #define module_param_named(name, value, type, perm) \
