@@ -316,6 +316,19 @@ int aurora_devtmpfs_register(const char *path, u32 rdev, u32 mode, u32 uid, u32 
 			     const struct aurora_vfs_ops *ops, void *priv)
 	__asm__("devtmpfs_register");
 int aurora_devtmpfs_unregister(const char *path) __asm__("devtmpfs_unregister");
+/* nl_uevent.h: uevent hacia los monitores de libudev; msg = "add@/devices/..\0K=V\0..." */
+void aurora_nl_uevent_broadcast(const char *msg, size_t len) __asm__("nl_uevent_broadcast");
+
+/* aur_bus.c: respaldo con el .aur omitido por aur.skip (4B) */
+int aurora_aur_bus_launch_skipped(u8 bus, u8 slot, u8 func) __asm__("aur_bus_launch_skipped");
+
+/* gpu_proxy.c / cmdline.c */
+int aurora_gpup_get_framebuffer(u64 *phys, u64 *size) __asm__("gpup_get_framebuffer");
+int aurora_cmdline_get(const char *key, char *out, size_t outlen) __asm__("cmdline_get");
+
+/* kernel/drm: el backend nativo cede /dev/dri y /sys/class/drm al de Linux */
+void aurora_drm_backend_claim(void) __asm__("drm_backend_claim");
+void aurora_drm_backend_release(void) __asm__("drm_backend_release");
 /* pf.h */
 int aurora_vma_dev_map_page(struct aurora_vma *vma, u64 addr, u64 phys)
 	__asm__("vma_dev_map_page");
@@ -334,6 +347,39 @@ int aurora_dmabuf_node_pages(struct aurora_vfs_node *n, u32 *npages, const u64 *
 	__asm__("dmabuf_node_pages");
 void *aurora_dmabuf_node_ext_priv(struct aurora_vfs_node *n, void (*release)(void *))
 	__asm__("dmabuf_node_ext_priv");
+/*
+ * L5 (K7): fences de Aurora (drm_syncobj.c: un syncobj binario) y fence
+ * implicito de los dmabuf. aurora_fence es opaco; el kernel comprueba
+ * struct dmabuf_resv_ops con un _Static_assert.
+ */
+struct aurora_fence;
+struct aurora_fence *aurora_fence_create(int signaled) __asm__("aur_fence_create");
+void aurora_fence_get(struct aurora_fence *f) __asm__("aur_fence_get");
+void aurora_fence_put(struct aurora_fence *f) __asm__("aur_fence_put");
+void aurora_fence_signal(struct aurora_fence *f) __asm__("aur_fence_signal");
+bool aurora_fence_signaled(struct aurora_fence *f) __asm__("aur_fence_signaled");
+void aurora_fence_wake(void) __asm__("aur_fence_wake");
+/* 0: encolado (fn se llama una vez); -EALREADY: ya senalado, fn no se llama */
+int aurora_fence_watch(struct aurora_fence *f, void (*fn)(void *), void *data)
+	__asm__("aur_fence_watch");
+int aurora_fence_unwatch(struct aurora_fence *f, void (*fn)(void *), void *data)
+	__asm__("aur_fence_unwatch");
+int aurora_fence_from_fd(int fd, struct aurora_fence **out) __asm__("aur_fence_from_fd");
+int aurora_fence_to_fd(struct aurora_fence *f, int cloexec, int *fd_out)
+	__asm__("aur_fence_to_fd");
+struct aurora_dmabuf_resv_ops {
+	struct aurora_fence *(*export_fence)(void *priv, u32 flags);
+	int (*import_fence)(void *priv, u32 flags, struct aurora_fence *f);
+	int (*poll)(void *priv, short events);
+};
+int aurora_dmabuf_node_set_resv_ops(struct aurora_vfs_node *n, void (*release)(void *),
+				    const struct aurora_dmabuf_resv_ops *ops)
+	__asm__("dmabuf_node_set_resv_ops");
+int aurora_dmabuf_node_export_fence(struct aurora_vfs_node *n, u32 flags,
+				    struct aurora_fence **out)
+	__asm__("dmabuf_node_export_fence");
+int aurora_dmabuf_node_import_fence(struct aurora_vfs_node *n, u32 flags,
+				    struct aurora_fence *f) __asm__("dmabuf_node_import_fence");
 /* firmware.h de Aurora */
 struct aurora_firmware {
 	size_t size;

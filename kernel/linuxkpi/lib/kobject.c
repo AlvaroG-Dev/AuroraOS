@@ -622,14 +622,14 @@ char *lkpi_kobject_get_path(const struct kobject *kobj, gfp_t gfp)
 }
 EXPORT_SYMBOL(lkpi_kobject_get_path);
 
-/* Los uevents todavia no salen al userland (L5): libudev no los vera. */
+/* Los eventos de dispositivos salen por netlink (base/core.c); el resto no */
 int lkpi_kobject_uevent_env(struct kobject *kobj, enum kobject_action action, char *envp[])
 {
 	if (action == KOBJ_ADD)
 		kobj->state_add_uevent_sent = 1;
 	else if (action == KOBJ_REMOVE)
 		kobj->state_remove_uevent_sent = 1;
-	return 0;
+	return lkpi_device_uevent_send(kobj, action, envp);
 }
 EXPORT_SYMBOL(lkpi_kobject_uevent_env);
 

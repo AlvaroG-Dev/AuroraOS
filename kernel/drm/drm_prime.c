@@ -27,6 +27,7 @@ struct drm_prime_handle {
 typedef struct dmabuf {
   drm_gem_t *gem;
   struct drm_syncobj *resv; // fence implicito (senalado = sin trabajo pendiente)
+  const struct dmabuf_resv_ops *rops; // [LinuxKPI L5] el fence lo lleva el dma_resv
 } dmabuf_t;
 
 static int dmabuf_get_page(vfs_node_t *node, uint64_t pgoff, uint64_t *phys) {
@@ -51,6 +52,8 @@ static int dmabuf_close(vfs_node_t *node) {
 // Listo para leer/escribir cuando el fence implicito esta senalado.
 static int dmabuf_poll(vfs_node_t *node, short events) {
   dmabuf_t *d = (dmabuf_t *)node->priv;
+  if (d && d->rops)
+    return d->rops->poll(d->gem->ext_priv, events);
   if (d && !drm_resv_signaled(d->resv))
     return 0;
   return events & (1 | 4);
@@ -82,7 +85,15 @@ static int64_t dmabuf_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     if (!d || !a.flags || (a.flags & ~(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)))
       return -EINVAL;
     int fdn;
-    rc = drm_resv_export_sync_file(d->resv, &fdn);
+    if (d->rops) {
+      aur_fence_t *fe = d->rops->export_fence(d->gem->ext_priv, a.flags);
+      if (!fe)
+        return -ENOMEM;
+      rc = aur_fence_to_fd(fe, 1, &fdn);
+      aur_fence_put(fe);
+    } else {
+      rc = drm_resv_export_sync_file(d->resv, &fdn);
+    }
     if (rc)
       return rc;
     a.fd = fdn;
@@ -95,7 +106,16 @@ static int64_t dmabuf_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
       return rc;
     if (!d || !a.flags || (a.flags & ~(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)))
       return -EINVAL;
-    rc = drm_resv_import_sync_file(&d->resv, a.fd);
+    if (d->rops) {
+      aur_fence_t *fe;
+      rc = aur_fence_from_fd(a.fd, &fe);
+      if (rc == 0) {
+        rc = d->rops->import_fence(d->gem->ext_priv, a.flags, fe);
+        aur_fence_put(fe);
+      }
+    } else {
+      rc = drm_resv_import_sync_file(&d->resv, a.fd);
+    }
     if (rc == 0)
       wake_up_all(drm_syncobj_wq());
     return rc;
@@ -266,4 +286,53 @@ void *dmabuf_node_ext_priv(vfs_node_t *n, void (*release)(void *)) {
     return NULL;
   dmabuf_t *d = (dmabuf_t *)n->priv;
   return d->gem->ext_release == release ? d->gem->ext_priv : NULL;
+}
+
+// [LinuxKPI L5] El fence implicito del dmabuf lo lleva el dma_resv de la capa.
+int dmabuf_node_set_resv_ops(vfs_node_t *n, void (*release)(void *),
+                             const struct dmabuf_resv_ops *ops) {
+  if (!n || n->ops != &dmabuf_ops || !n->priv)
+    return -EINVAL;
+  dmabuf_t *d = (dmabuf_t *)n->priv;
+  if (d->gem->ext_release != release)
+    return -EINVAL;
+  d->rops = ops;
+  return 0;
+}
+
+// Fence implicito de un dmabuf (cualquiera): referencia nueva; senalado si no
+// hay trabajo pendiente.
+int dmabuf_node_export_fence(vfs_node_t *n, uint32_t flags, aur_fence_t **out) {
+  if (!n || n->ops != &dmabuf_ops || !n->priv)
+    return -EINVAL;
+  dmabuf_t *d = (dmabuf_t *)n->priv;
+  if (d->rops) {
+    *out = d->rops->export_fence(d->gem->ext_priv, flags);
+    return *out ? 0 : -ENOMEM;
+  }
+  aur_fence_t *fe = NULL;
+  if (!d->resv)
+    return -EINVAL;
+  fe = aur_fence_create(0);
+  if (!fe)
+    return -ENOMEM;
+  if (aur_fence_alias(fe, d->resv) != 0) {
+    aur_fence_put(fe);
+    return -ENOMEM;
+  }
+  *out = fe;
+  return 0;
+}
+
+int dmabuf_node_import_fence(vfs_node_t *n, uint32_t flags, aur_fence_t *f) {
+  (void)flags;
+  if (!n || n->ops != &dmabuf_ops || !n->priv)
+    return -EINVAL;
+  dmabuf_t *d = (dmabuf_t *)n->priv;
+  if (d->rops)
+    return d->rops->import_fence(d->gem->ext_priv, flags, f);
+  int rc = aur_fence_alias_replace(&d->resv, f);
+  if (rc == 0)
+    wake_up_all(drm_syncobj_wq());
+  return rc;
 }

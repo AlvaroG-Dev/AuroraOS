@@ -30,16 +30,23 @@ struct module;
 #define MODULE_PARM_DESC(p, d) MODULE_INFO(parm, #p ":" d)
 #define MODULE_DEVICE_TABLE(type, name)
 
+/* Un .kur de varios ficheros con initcall propio (lkpi_virtio) los redefine con -D. */
+#ifndef module_init
 #define module_init(initfn) \
 	int kur_init(void); \
 	int kur_init(void) { return initfn(); }
+#endif
+#ifndef module_exit
 #define module_exit(exitfn) \
 	void kur_exit(void); \
 	void kur_exit(void) { exitfn(); }
+#endif
 #define late_initcall(fn) module_init(fn)
 #define subsys_initcall(fn) module_init(fn)
 #define device_initcall(fn) module_init(fn)
+#ifndef core_initcall
 #define core_initcall(fn) module_init(fn)
+#endif
 #define postcore_initcall(fn) module_init(fn)
 #define arch_initcall(fn) module_init(fn)
 #define fs_initcall(fn) module_init(fn)

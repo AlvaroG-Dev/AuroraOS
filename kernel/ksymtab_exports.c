@@ -150,12 +150,26 @@ KEXPORT_SYMBOL(test_fail);
 // K8). La capa replica vfs_ops_t, vfs_dirent_t, vfs_fs_ops_t, vma_t,
 // vma_dev_ops_t y task_info_t (kernel/linuxkpi/aurora.h).
 #include "devtmpfs.h"
+#include "nl_uevent.h"
+#include "aur_bus.h"
 #include "drm/drm.h"
+#include "cmdline.h"
+#include "gpu_proxy.h"
 #include "pf.h"
 #include "process.h"
 #include "signal.h"
 #include "vfs.h"
 #include "vmap.h"
+KEXPORT_SYMBOL(aur_bus_launch_skipped);
+KEXPORT_SYMBOL(nl_uevent_broadcast);
+KEXPORT_SYMBOL(drm_backend_claim);
+KEXPORT_SYMBOL(drm_backend_release);
+KEXPORT_SYMBOL(drm_lx_scanout_open);
+KEXPORT_SYMBOL(drm_lx_scanout_close);
+KEXPORT_SYMBOL(drm_lx_scanout_present);
+KEXPORT_SYMBOL(gpup_get_framebuffer);
+KEXPORT_SYMBOL(gpup_get_fb_mode);
+KEXPORT_SYMBOL(cmdline_get);
 KEXPORT_SYMBOL(task_info_get);
 KEXPORT_SYMBOL(signal_unblocked_of);
 KEXPORT_SYMBOL(task_tid);
@@ -186,6 +200,24 @@ KEXPORT_SYMBOL(vmap_area_free);
 KEXPORT_SYMBOL(dmabuf_node_new_ext);
 KEXPORT_SYMBOL(dmabuf_node_pages);
 KEXPORT_SYMBOL(dmabuf_node_ext_priv);
+/* L5 (K7): fences de Aurora para la capa y fence implicito de los dmabuf. */
+KEXPORT_SYMBOL(aur_fence_create);
+KEXPORT_SYMBOL(aur_fence_get);
+KEXPORT_SYMBOL(aur_fence_put);
+KEXPORT_SYMBOL(aur_fence_signal);
+KEXPORT_SYMBOL(aur_fence_signaled);
+KEXPORT_SYMBOL(aur_fence_wake);
+KEXPORT_SYMBOL(aur_fence_watch);
+KEXPORT_SYMBOL(aur_fence_unwatch);
+KEXPORT_SYMBOL(aur_fence_from_fd);
+KEXPORT_SYMBOL(aur_fence_to_fd);
+KEXPORT_SYMBOL(dmabuf_node_set_resv_ops);
+KEXPORT_SYMBOL(dmabuf_node_export_fence);
+KEXPORT_SYMBOL(dmabuf_node_import_fence);
+_Static_assert(sizeof(struct dmabuf_resv_ops) == 24 &&
+                   offsetof(struct dmabuf_resv_ops, import_fence) == 8 &&
+                   offsetof(struct dmabuf_resv_ops, poll) == 16,
+               "dmabuf_resv_ops cambio: actualizar struct aurora_dmabuf_resv_ops");
 _Static_assert(sizeof(vfs_ops_t) == 29 * 8 && offsetof(vfs_ops_t, read) == 0 &&
                    offsetof(vfs_ops_t, open) == 16 && offsetof(vfs_ops_t, close) == 24 &&
                    offsetof(vfs_ops_t, readdir) == 80 && offsetof(vfs_ops_t, poll) == 112 &&

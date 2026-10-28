@@ -55,6 +55,14 @@ struct lkpi_test_dmabuf {
 	__u32 pad;
 };
 
+/* K7: fence implicito de un dma_buf exportado */
+#define LKPI_FENCE_ATTACH 1	/* fd: dma_buf; pone un fence de escritura pendiente en su resv */
+#define LKPI_FENCE_SIGNAL 2	/* senala el fence puesto */
+struct lkpi_test_fence {
+	__s32 fd;
+	__u32 op;
+};
+
 #define LKPI_TEST_IOC_MAGIC 'L'
 #define LKPI_IOC_INFO _IOR(LKPI_TEST_IOC_MAGIC, 1, struct lkpi_test_info)
 #define LKPI_IOC_FIRMWARE _IOWR(LKPI_TEST_IOC_MAGIC, 2, struct lkpi_test_fw)
@@ -63,6 +71,7 @@ struct lkpi_test_dmabuf {
 #define LKPI_IOC_DMABUF_EXPORT _IOWR(LKPI_TEST_IOC_MAGIC, 5, struct lkpi_test_dmabuf)
 #define LKPI_IOC_DMABUF_IMPORT _IOWR(LKPI_TEST_IOC_MAGIC, 6, struct lkpi_test_dmabuf)
 #define LKPI_IOC_ZAP _IO(LKPI_TEST_IOC_MAGIC, 7)	/* unmap_mapping_range */
+#define LKPI_IOC_FENCE _IOW(LKPI_TEST_IOC_MAGIC, 8, struct lkpi_test_fence)
 
 /* Patron de los buffers: byte i = seed + i * 7. */
 #define LKPI_TEST_PATTERN(seed, i) ((unsigned char)((seed) + (i) * 7))

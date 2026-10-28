@@ -32,8 +32,7 @@
 #define lower_32_bits(n) ((u32)((n) & 0xffffffff))
 #define upper_16_bits(n) ((u16)((n) >> 16))
 #define lower_16_bits(n) ((u16)((n) & 0xffff))
-#define _RET_IP_ (unsigned long)__builtin_return_address(0)
-#define _THIS_IP_ ({ __label__ __here; __here: (unsigned long)&&__here; })
+#include <linux/instruction_pointer.h>
 #define TAINT_WARN 9
 #define TAINT_MACHINE_CHECK 4
 #define add_taint(flag, lockdep) do { } while (0)

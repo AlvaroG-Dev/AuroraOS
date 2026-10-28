@@ -16,9 +16,17 @@ struct lkpi_kur_export_entry {
 	u64 addr;
 };
 
+/*
+ * El nombre exportado es el simbolo ya expandido: el codigo de Linux que se
+ * compila tal cual (dma-fence.c...) usa nombres de Linux que las cabeceras
+ * de la capa renombran con macros objeto (dma_fence_signal ->
+ * lkpi_dma_fence_signal); el ksymtab lleva el nombre con prefijo.
+ */
+#define __LKPI_STR(x) #x
+#define __LKPI_XSTR(x) __LKPI_STR(x)
 #define __LKPI_EXPORT(sym) \
 	static const struct lkpi_kur_export_entry __kur_exp_##sym \
-	__used __section(".kur_ksymtab") = { #sym, (u64)(uintptr_t)&(sym) }
+	__used __section(".kur_ksymtab") = { __LKPI_XSTR(sym), (u64)(uintptr_t)&(sym) }
 
 #define EXPORT_SYMBOL(sym) __LKPI_EXPORT(sym)
 #define EXPORT_SYMBOL_GPL(sym) __LKPI_EXPORT(sym)

@@ -46,6 +46,7 @@ struct pin_cookie { };
 #define lock_release(...) do { } while (0)
 #define lock_acquire_exclusive(...) do { } while (0)
 #define lock_acquire_shared(...) do { } while (0)
+#define lock_acquire_shared_recursive(...) do { } while (0)
 #define lock_map_acquire(l) do { (void)(l); } while (0)
 #define lock_map_acquire_read(l) do { (void)(l); } while (0)
 #define lock_map_acquire_try(l) do { (void)(l); } while (0)

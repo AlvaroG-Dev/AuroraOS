@@ -11,6 +11,8 @@
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/gfp_types.h>
+#include <linux/slab.h>
+#include <linux/overflow.h>
 
 #define TASK_SIZE_MAX 0x00007FFFFFFFF000UL
 
@@ -65,6 +67,30 @@ static inline unsigned long clear_user(void __user *to, unsigned long n)
 void *lkpi_memdup_user(const void __user *src, size_t len);
 #define memdup_user lkpi_memdup_user
 #define vmemdup_user lkpi_memdup_user
+
+static inline void *memdup_user_nul(const void __user *src, size_t len)
+{
+	char *p = kmalloc(len + 1, GFP_USER);
+
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+	if (copy_from_user(p, src, len)) {
+		kfree(p);
+		return ERR_PTR(-EFAULT);
+	}
+	p[len] = '\0';
+	return p;
+}
+
+static inline void *memdup_array_user(const void __user *src, size_t n, size_t size)
+{
+	size_t bytes;
+
+	if (check_mul_overflow(n, size, &bytes))
+		return ERR_PTR(-EOVERFLOW);
+	return lkpi_memdup_user(src, bytes);
+}
+#define vmemdup_array_user memdup_array_user
 #define pagefault_disable() do { } while (0)
 #define pagefault_enable() do { } while (0)
 #define user_access_begin(p, n) access_ok(p, n)

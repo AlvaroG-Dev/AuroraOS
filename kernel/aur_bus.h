@@ -20,6 +20,10 @@ int aur_bus_launch(const char *path);
 // virtio-gpu para Linux: cmdline=aur.skip=1234:1111,1af4:1050
 //
 // aur_bus_skip_match() aplica una lista con ese formato (1 si casa).
+// Respaldo: lanza el .aur omitido por aur.skip de ese dispositivo (la capa
+// LinuxKPI lo pide cuando el probe del driver de Linux falla). 0 = lanzado.
+int aur_bus_launch_skipped(uint8_t bus, uint8_t slot, uint8_t func);
+
 int aur_bus_skip_match(const char *list, uint16_t vendor, uint16_t device);
 
 #endif

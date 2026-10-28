@@ -136,6 +136,37 @@ bool drm_resv_signaled(struct drm_syncobj *o);
 int drm_resv_export_sync_file(struct drm_syncobj *o, int *fd_out); // fd nuevo
 int drm_resv_import_sync_file(struct drm_syncobj **o, int fd);      // reemplaza el fence
 wait_queue_t *drm_syncobj_wq(void);
+// [LinuxKPI L5] aur_fence: fences para otros subsistemas (un syncobj binario).
+// La capa LinuxKPI los envuelve en dma_fence; ver drm_syncobj.c.
+typedef struct drm_syncobj aur_fence_t;
+aur_fence_t *aur_fence_create(int signaled);
+void aur_fence_get(aur_fence_t *f);
+void aur_fence_put(aur_fence_t *f);
+void aur_fence_signal(aur_fence_t *f);
+bool aur_fence_signaled(aur_fence_t *f);
+void aur_fence_wake(void);
+int aur_fence_watch(aur_fence_t *f, void (*fn)(void *), void *data);
+int aur_fence_unwatch(aur_fence_t *f, void (*fn)(void *), void *data);
+int aur_fence_from_fd(int fd, aur_fence_t **out);
+int aur_fence_to_fd(aur_fence_t *f, int cloexec, int *fd_out);
+int aur_fence_alias(aur_fence_t *dst, aur_fence_t *src);
+int aur_fence_alias_replace(aur_fence_t **dst, aur_fence_t *src);
+// [LinuxKPI L5] Fence implicito de un dmabuf de un driver de Linux: lo sirve
+// su dma_resv. export_fence devuelve una referencia nueva (senalado si no hay
+// trabajo pendiente) para flags DMA_BUF_SYNC_*; import_fence recibe el fence
+// (prestado) que pasa a ser el implicito; poll devuelve los eventos listos.
+struct dmabuf_resv_ops {
+  aur_fence_t *(*export_fence)(void *priv, uint32_t flags);
+  int (*import_fence)(void *priv, uint32_t flags, aur_fence_t *f);
+  int (*poll)(void *priv, short events);
+};
+struct vfs_node;
+int dmabuf_node_set_resv_ops(struct vfs_node *n, void (*release)(void *),
+                             const struct dmabuf_resv_ops *ops);
+// Fence implicito de cualquier dmabuf de Aurora (nativo o de la capa).
+int dmabuf_node_export_fence(struct vfs_node *n, uint32_t flags, aur_fence_t **out);
+int dmabuf_node_import_fence(struct vfs_node *n, uint32_t flags, aur_fence_t *f);
+
 // Para drivers de GPU: busca un syncobj por handle y senala un punto
 // (point 0 = binario). Despierta a los que esperan.
 struct drm_syncobj *drm_syncobj_find(drm_file_t *f, uint32_t handle);
@@ -143,6 +174,7 @@ void drm_syncobj_signal_point(struct drm_syncobj *o, uint64_t point);
 
 // drm_sysfs.c ---------------------------------------------------------------
 void drm_sysfs_publish(void);
+void drm_sysfs_unpublish(void);
 void drm_udev_publish(void);
 
 // Utilidades de acceso a userland.
@@ -151,6 +183,14 @@ int drm_get_user(uint64_t arg, void *dst, size_t n);
 
 // Inicializacion (llamar tras devtmpfs/sysfs_dyn, en contexto de tarea).
 void drm_init(void);
+// El backend de Linux (lkpi_drm.kur) toma o devuelve /dev/dri y /sys/class/drm.
+void drm_backend_claim(void);
+void drm_backend_release(void);
+// Scanout del backend de Linux: una ventana del compositor por CRTC.
+void drm_lx_scanout_close(int idx);
+int drm_lx_scanout_open(int idx, int w, int h);
+int drm_lx_scanout_present(int idx, const void *src, uint32_t pitch,
+                           uint32_t fourcc, int w, int h);
 void drm_fb_put(drm_fb_t *fb);
 
 #endif

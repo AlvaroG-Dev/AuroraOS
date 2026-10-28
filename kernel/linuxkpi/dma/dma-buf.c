@@ -31,8 +31,7 @@
 #include "../lkpi_internal.h"
 #include "../fs/fs.h"
 
-DEFINE_WW_CLASS(lkpi_reservation_ww_class);
-EXPORT_SYMBOL(lkpi_reservation_ww_class);
+/* lkpi_reservation_ww_class la define dma-resv.c de Linux (K7) */
 
 /* "Dispositivo" de la CPU: attachment interno para sacar las paginas. */
 static struct device lkpi_dmabuf_cpu_dev;
@@ -192,11 +191,119 @@ static int lkpi_dma_buf_cpu_pages(struct dma_buf *dmabuf, u64 **out, u32 *npages
 	return 0;
 }
 
-int lkpi_dma_buf_fd(struct dma_buf *dmabuf, int flags)
+/* ------------------------------------- fence implicito <-> Aurora (K7) */
+
+#define LKPI_DMA_BUF_SYNC_WRITE 2
+
+/* EXPORT_SYNC_FILE: el fence (singleton) del uso pedido, para el sync_file */
+static struct aurora_fence *lkpi_dmabuf_resv_export(void *priv, u32 flags)
+{
+	struct dma_buf *dmabuf = priv;
+	struct dma_fence *fence = NULL;
+	struct aurora_fence *af;
+
+	if (dma_resv_get_singleton(dmabuf->resv,
+				   dma_resv_usage_rw(!!(flags & LKPI_DMA_BUF_SYNC_WRITE)), &fence))
+		return NULL;
+	af = lkpi_dma_fence_to_aurora(fence);
+	dma_fence_put(fence);
+	return af;
+}
+
+/* IMPORT_SYNC_FILE: el fence del sync_file pasa al dma_resv */
+static int lkpi_dmabuf_resv_import(void *priv, u32 flags, struct aurora_fence *af)
+{
+	struct dma_buf *dmabuf = priv;
+	struct dma_fence *fence = lkpi_dma_fence_from_aurora(af);
+	int rc;
+
+	if (!fence)
+		return -ENOMEM;
+	rc = dma_resv_lock_interruptible(dmabuf->resv, NULL);
+	if (!rc) {
+		rc = dma_resv_reserve_fences(dmabuf->resv, 1);
+		if (!rc)
+			dma_resv_add_fence(dmabuf->resv, fence,
+					   (flags & LKPI_DMA_BUF_SYNC_WRITE) ?
+					   DMA_RESV_USAGE_WRITE : DMA_RESV_USAGE_READ);
+		dma_resv_unlock(dmabuf->resv);
+	}
+	dma_fence_put(fence);
+	return rc;
+}
+
+/* poll: POLLIN espera a los escritores; POLLOUT, a lectores y escritores */
+static int lkpi_dmabuf_resv_poll(void *priv, short events)
+{
+	struct dma_buf *dmabuf = priv;
+	int ready = 0;
+
+	if ((events & 1) && dma_resv_test_signaled(dmabuf->resv, DMA_RESV_USAGE_WRITE))
+		ready |= 1;
+	if ((events & 4) && dma_resv_test_signaled(dmabuf->resv, DMA_RESV_USAGE_READ))
+		ready |= 4;
+	return ready;
+}
+
+static const struct aurora_dmabuf_resv_ops lkpi_dmabuf_resv_ops = {
+	.export_fence = lkpi_dmabuf_resv_export,
+	.import_fence = lkpi_dmabuf_resv_import,
+	.poll = lkpi_dmabuf_resv_poll,
+};
+
+/*
+ * Un dma_buf que envuelve un dmabuf nativo de Aurora toma su fence implicito
+ * al importarlo (no hay aviso posterior: se muestrea en dma_buf_get).
+ */
+static void lkpi_dma_buf_sample_native_fence(struct dma_buf *dmabuf)
+{
+	struct aurora_fence *af;
+	struct dma_fence *fence;
+
+	if (aurora_dmabuf_node_export_fence(dmabuf->__lkpi_import_node, 3, &af))
+		return;
+	if (!aurora_fence_signaled(af)) {
+		fence = lkpi_dma_fence_from_aurora(af);
+		if (fence) {
+			dma_resv_lock(dmabuf->resv, NULL);
+			if (!dma_resv_reserve_fences(dmabuf->resv, 1))
+				dma_resv_add_fence(dmabuf->resv, fence, DMA_RESV_USAGE_WRITE);
+			dma_resv_unlock(dmabuf->resv);
+			dma_fence_put(fence);
+		}
+	}
+	aurora_fence_put(af);
+}
+
+/* Instala en `fd` (ya reservado) un dmabuf de Aurora que envuelve `dmabuf`. */
+static int lkpi_dma_buf_install(int fd, struct dma_buf *dmabuf)
 {
 	struct aurora_vfs_node *n;
 	u64 *pages;
 	u32 npages;
+	int rc;
+
+	mutex_lock(&dmabuf->__lkpi_lock);
+	rc = lkpi_dma_buf_cpu_pages(dmabuf, &pages, &npages);
+	mutex_unlock(&dmabuf->__lkpi_lock);
+	if (rc)
+		return rc;
+	get_dma_buf(dmabuf);	/* la del dmabuf de Aurora */
+	n = aurora_dmabuf_node_new_ext(npages, pages, lkpi_dmabuf_anode_release, dmabuf);
+	kvfree(pages);
+	if (!n) {
+		lkpi_dma_buf_put(dmabuf);
+		return -ENOMEM;
+	}
+	aurora_dmabuf_node_set_resv_ops(n, lkpi_dmabuf_anode_release, &lkpi_dmabuf_resv_ops);
+	rc = aurora_vfs_fd_install_node(fd, n, O_RDWR);
+	if (rc)
+		aurora_vfs_node_free(n);
+	return rc;
+}
+
+int lkpi_dma_buf_fd(struct dma_buf *dmabuf, int flags)
+{
 	int fd, rc;
 
 	if (!dmabuf || !dmabuf->file)
@@ -204,30 +311,34 @@ int lkpi_dma_buf_fd(struct dma_buf *dmabuf, int flags)
 	fd = aurora_vfs_fd_reserve(!!(flags & O_CLOEXEC));
 	if (fd < 0)
 		return fd;
-	mutex_lock(&dmabuf->__lkpi_lock);
-	rc = lkpi_dma_buf_cpu_pages(dmabuf, &pages, &npages);
-	mutex_unlock(&dmabuf->__lkpi_lock);
-	if (rc)
-		goto err;
-	get_dma_buf(dmabuf);	/* la del dmabuf de Aurora */
-	n = aurora_dmabuf_node_new_ext(npages, pages, lkpi_dmabuf_anode_release, dmabuf);
-	kvfree(pages);
-	if (!n) {
-		lkpi_dma_buf_put(dmabuf);
-		rc = -ENOMEM;
-		goto err;
-	}
-	rc = aurora_vfs_fd_install_node(fd, n, O_RDWR);
+	rc = lkpi_dma_buf_install(fd, dmabuf);
 	if (rc) {
-		aurora_vfs_node_free(n);
+		aurora_vfs_fd_unreserve(fd);
 		return rc;
 	}
 	return fd;
-err:
-	aurora_vfs_fd_unreserve(fd);
-	return rc;
 }
 EXPORT_SYMBOL(lkpi_dma_buf_fd);
+
+/*
+ * fd_install(fd, dmabuf->file), como hace drm_prime: el fd del usuario ha de
+ * ser el dmabuf de Aurora (ioctl, fences, SCM_RIGHTS al compositor), no el
+ * fichero de la capa. Consume la referencia del llamante sobre el fichero.
+ */
+bool lkpi_dma_buf_fd_install(unsigned int fd, struct file *file)
+{
+	struct dma_buf *dmabuf;
+	int rc;
+
+	if (file->f_op != &lkpi_dma_buf_fops)
+		return false;
+	dmabuf = file->private_data;
+	rc = lkpi_dma_buf_install((int)fd, dmabuf);
+	if (rc)
+		pr_warn("linuxkpi: fd_install de un dma_buf: %d\n", rc);
+	lkpi_fput(file);
+	return true;
+}
 
 /* ------------------------------------- importar un dmabuf de Aurora */
 
@@ -385,6 +496,7 @@ struct dma_buf *lkpi_dma_buf_get(int fd)
 			kfree(a);
 		} else {
 			dmabuf->__lkpi_import_node = node;
+			lkpi_dma_buf_sample_native_fence(dmabuf);
 		}
 	}
 	aurora_vfs_fd_put_ref(afd);

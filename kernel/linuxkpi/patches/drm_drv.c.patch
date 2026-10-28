@@ -1,0 +1,11 @@
+--- drm_drv.c
++++ drm_drv.c
+@@ -723,7 +723,7 @@
+ 
+ 	kref_init(&dev->ref);
+ 	dev->dev = get_device(parent);
+-	dev->driver = driver;
++	dev->driver = lkpi_drm_driver_fixup(dev->dev, driver);	/* LKPI: render node y syncobj */
+ 
+ 	INIT_LIST_HEAD(&dev->managed.resources);
+ 	spin_lock_init(&dev->managed.lock);

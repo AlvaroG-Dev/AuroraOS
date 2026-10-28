@@ -1,0 +1,10 @@
+--- dma-fence.c
++++ dma-fence.c
+@@ -387,6 +387,7 @@
+ 		INIT_LIST_HEAD(&cur->node);
+ 		cur->func(fence, cur);
+ 	}
++	lkpi_dma_fence_signalled(fence);	/* LKPI: despierta a los poll de Aurora */
+ 
+ 	return 0;
+ }

@@ -39,6 +39,12 @@ struct dentry {
 	struct inode *inode;
 };
 
+struct inode *lkpi_d_inode(struct dentry *d)
+{
+	return d ? d->inode : NULL;
+}
+EXPORT_SYMBOL(lkpi_d_inode);
+
 static DEFINE_MUTEX(lkpi_debugfs_mutex);
 static LIST_HEAD(lkpi_debugfs_all);
 static struct dentry lkpi_debugfs_root;

@@ -45,4 +45,8 @@
 #define swap(a, b) \
 	do { typeof(a) __tmp = (a); (a) = (b); (b) = __tmp; } while (0)
 
+/* Versiones constantes (aptas para tamanos de array) */
+#define MIN_T(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
+#define MAX_T(type, a, b) ((type)(a) > (type)(b) ? (type)(a) : (type)(b))
+
 #endif

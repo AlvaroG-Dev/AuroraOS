@@ -1,0 +1,20 @@
+--- drm_atomic_helper.c
++++ drm_atomic_helper.c
+@@ -1565,6 +1565,8 @@
+ void drm_atomic_helper_commit_modeset_disables(struct drm_device *dev,
+ 					       struct drm_atomic_state *state)
+ {
++	lkpi_drm_pace(state);	/* LKPI: 60 Hz de vblank por software */
++
+ 	disable_outputs(dev, state);
+ 
+ 	drm_atomic_helper_update_legacy_modeset_state(dev, state);
+@@ -2731,6 +2733,8 @@
+ 	struct drm_crtc_commit *commit;
+ 	int i;
+ 
++	lkpi_drm_present(state);	/* LKPI: copia el plano primario a la ventana del compositor */
++
+ 	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
+ 		commit = new_crtc_state->commit;
+ 		if (!commit)

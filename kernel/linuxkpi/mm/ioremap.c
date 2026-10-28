@@ -15,6 +15,7 @@
 #include <linux/io.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 
 #include "../aurora.h"
@@ -63,7 +64,105 @@ static bool page_ours_locked(phys_addr_t page, const struct io_map *except)
 	return false;
 }
 
+/*
+ * Display-shadow (L5): el framebuffer del firmware (GOP) y los BAR del
+ * dispositivo que lo aloja son del compositor. Un driver de Linux que los
+ * mapea recibe una copia en RAM (los BAR pequenos con el contenido actual de
+ * los registros), asi sus modos, su VRAM y sus registros no tocan la pantalla.
+ */
+struct io_shadow {
+	struct list_head list;
+	phys_addr_t start;
+	size_t len;
+	void *mem;
+};
+static LIST_HEAD(io_shadows);
+
+static void __iomem *ioremap_real(phys_addr_t phys, size_t size, int type);
+
+int lkpi_display_shadow_add(phys_addr_t start, size_t len, bool copy)
+{
+	struct io_shadow *s = kzalloc(sizeof(*s), GFP_KERNEL);
+
+	if (!s)
+		return -ENOMEM;
+	s->mem = kvzalloc(len, GFP_KERNEL);
+	if (!s->mem) {
+		kfree(s);
+		return -ENOMEM;
+	}
+	s->start = start;
+	s->len = len;
+	if (copy) {
+		void __iomem *real = ioremap_real(start, len, LKPI_IOREMAP_UC);
+
+		if (real) {
+			/* los registros de los dispositivos de pantalla son de 16 bits */
+			for (size_t i = 0; i + 1 < len; i += 2)
+				*(u16 *)((char *)s->mem + i) = readw(real + i);
+			lkpi_iounmap(real);
+		}
+	}
+	spin_lock(&io_lock);
+	list_add(&s->list, &io_shadows);
+	spin_unlock(&io_lock);
+	return 0;
+}
+
+static void *shadow_find(phys_addr_t phys, size_t size)
+{
+	struct io_shadow *s;
+	void *mem = NULL;
+
+	spin_lock(&io_lock);
+	list_for_each_entry(s, &io_shadows, list)
+		if (phys >= s->start && phys + size <= s->start + s->len) {
+			mem = (char *)s->mem + (phys - s->start);
+			break;
+		}
+	spin_unlock(&io_lock);
+	return mem;
+}
+
+static bool shadow_owns(const void *addr)
+{
+	struct io_shadow *s;
+	bool own = false;
+
+	spin_lock(&io_lock);
+	list_for_each_entry(s, &io_shadows, list)
+		if ((const char *)addr >= (char *)s->mem && (const char *)addr < (char *)s->mem + s->len) {
+			own = true;
+			break;
+		}
+	spin_unlock(&io_lock);
+	return own;
+}
+
+void lkpi_display_shadow_exit(void)
+{
+	struct io_shadow *s, *tmp;
+
+	list_for_each_entry_safe(s, tmp, &io_shadows, list) {
+		list_del(&s->list);
+		kvfree(s->mem);
+		kfree(s);
+	}
+}
+
 void __iomem *lkpi_ioremap(phys_addr_t phys, size_t size, int type)
+{
+	void *shadow;
+
+	lkpi_display_shadow_probe();
+	shadow = shadow_find(phys, size);
+	if (shadow)
+		return (void __iomem *)shadow;
+	return ioremap_real(phys, size, type);
+}
+EXPORT_SYMBOL(lkpi_ioremap);
+
+static void __iomem *ioremap_real(phys_addr_t phys, size_t size, int type)
 {
 	phys_addr_t start = phys & PAGE_MASK, pg;
 	size_t len = PAGE_ALIGN(phys + size) - start;
@@ -114,7 +213,6 @@ void __iomem *lkpi_ioremap(phys_addr_t phys, size_t size, int type)
 	spin_unlock(&io_lock);
 	return m->va;
 }
-EXPORT_SYMBOL(lkpi_ioremap);
 
 static void io_unmap_locked(struct io_map *m)
 {
@@ -132,7 +230,7 @@ void lkpi_iounmap(volatile void __iomem *addr)
 {
 	struct io_map *m, *found = NULL;
 
-	if (!addr || lkpi_is_direct_map((const void *)addr))
+	if (!addr || lkpi_is_direct_map((const void *)addr) || shadow_owns((const void *)addr))
 		return;
 	spin_lock(&io_lock);
 	list_for_each_entry(m, &io_maps, list)
@@ -170,6 +268,7 @@ EXPORT_SYMBOL(lkpi_memunmap);
 
 void lkpi_ioremap_exit(void)
 {
+	lkpi_display_shadow_exit();
 	struct io_map *m, *tmp;
 	unsigned long n = 0;
 

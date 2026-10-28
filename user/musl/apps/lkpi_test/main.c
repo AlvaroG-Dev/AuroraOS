@@ -362,6 +362,9 @@ static void test_firmware(int fd)
 /* DRM (uapi de Linux, solo lo necesario). */
 struct drm_gem_close { uint32_t handle, pad; };
 struct drm_prime_handle { uint32_t handle, flags; int32_t fd; };
+struct dma_buf_export_sync_file { uint32_t flags; int32_t fd; };
+#define DMA_BUF_SYNC_READ (1 << 0)
+#define DMA_BUF_IOCTL_EXPORT_SYNC_FILE _IOWR('b', 2, struct dma_buf_export_sync_file)
 struct drm_mode_create_dumb { uint32_t height, width, bpp, flags, handle, pitch; uint64_t size; };
 struct drm_mode_map_dumb { uint32_t handle, pad; uint64_t offset; };
 struct drm_mode_destroy_dumb { uint32_t handle; };
@@ -466,6 +469,48 @@ out:
 	close(card);
 }
 
+/* K7: el fence implicito que el driver de Linux pone en el dma_resv del buffer
+ * lo ven poll(), EXPORT_SYNC_FILE y el SCM_RIGHTS de Aurora. */
+static void test_implicit_fence(int fd)
+{
+	struct lkpi_test_dmabuf d = { .seed = 0x21 };
+	struct lkpi_test_fence fa;
+	struct dma_buf_export_sync_file ex = { .flags = DMA_BUF_SYNC_READ, .fd = -1 };
+	struct pollfd pf;
+
+	if (xioctl(fd, LKPI_IOC_DMABUF_EXPORT, &d) != 0 || d.fd < 0) {
+		check(0, "dma_buf exportado para el fence implicito");
+		return;
+	}
+	pf = (struct pollfd){ .fd = d.fd, .events = POLLIN };
+	check(poll(&pf, 1, 0) == 1, "dma_buf sin fence: lectura lista");
+	fa = (struct lkpi_test_fence){ .fd = d.fd, .op = LKPI_FENCE_ATTACH };
+	if (xioctl(fd, LKPI_IOC_FENCE, &fa) != 0) {
+		check(0, "el driver pone un fence de escritura en el dma_resv");
+		close(d.fd);
+		return;
+	}
+	pf.revents = 0;
+	check(poll(&pf, 1, 0) == 0, "con fence de escritura pendiente: poll(POLLIN) no esta listo");
+	check(xioctl(d.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0 && ex.fd >= 0,
+	      "EXPORT_SYNC_FILE del fence del driver");
+	if (ex.fd >= 0) {
+		struct pollfd sp = { .fd = ex.fd, .events = POLLIN };
+
+		check(poll(&sp, 1, 0) == 0, "el sync_file exportado esta pendiente");
+		fa.op = LKPI_FENCE_SIGNAL;
+		check(xioctl(fd, LKPI_IOC_FENCE, &fa) == 0, "el driver senala el fence");
+		check(poll(&sp, 1, 1000) == 1, "el sync_file pasa a senalado");
+		close(ex.fd);
+	} else {
+		fa.op = LKPI_FENCE_SIGNAL;
+		xioctl(fd, LKPI_IOC_FENCE, &fa);
+	}
+	pf.revents = 0;
+	check(poll(&pf, 1, 1000) == 1 && (pf.revents & POLLIN), "dma_buf listo tras senalar");
+	close(d.fd);
+}
+
 static void test_debugfs(void)
 {
 	char buf[256];
@@ -509,6 +554,7 @@ int main(void)
 		test_events(fd);
 		test_firmware(fd);
 		test_dmabuf(fd);
+		test_implicit_fence(fd);
 		test_debugfs();
 		a = info(fd);
 		close(fd);

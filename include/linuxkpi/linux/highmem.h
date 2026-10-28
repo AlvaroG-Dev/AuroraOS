@@ -3,6 +3,7 @@
 #ifndef _LKPI_LINUX_HIGHMEM_H
 #define _LKPI_LINUX_HIGHMEM_H
 
+#include <linux/jump_label.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 

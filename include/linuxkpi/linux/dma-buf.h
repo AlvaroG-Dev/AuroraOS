@@ -25,6 +25,10 @@
 #include <linux/iosys-map.h>
 #include <linux/scatterlist.h>
 #include <linux/err.h>
+#include <linux/file.h>
+#include <linux/dma-mapping.h>
+#include <linux/dma-fence.h>
+#include <linux/wait.h>
 
 struct device;
 struct dma_buf;

@@ -1,0 +1,11 @@
+--- sync_file.c
++++ sync_file.c
+@@ -107,7 +107,7 @@
+ 
+ 	sync_file = sync_file_fdget(fd);
+ 	if (!sync_file)
+-		return NULL;
++		return lkpi_dma_fence_from_aurora_fd(fd);	/* LKPI: sync_file de Aurora */
+ 
+ 	fence = dma_fence_get(sync_file->fence);
+ 	fput(sync_file->file);

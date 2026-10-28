@@ -87,6 +87,24 @@ void gpup_set_framebuffer(uint64_t phys, uint64_t size, uint32_t w, uint32_t h,
   g_fb.bpp = bpp;
 }
 
+int gpup_get_framebuffer(uint64_t *phys, uint64_t *size) {
+  if (!g_fb.fb_phys)
+    return 0;
+  *phys = g_fb.fb_phys;
+  *size = g_fb.fb_size;
+  return 1;
+}
+
+int gpup_get_fb_mode(uint32_t *w, uint32_t *h, uint32_t *pitch, uint32_t *bpp) {
+  if (!g_fb.fb_phys)
+    return 0;
+  *w = g_fb.width;
+  *h = g_fb.height;
+  *pitch = g_fb.pitch;
+  *bpp = g_fb.bpp;
+  return 1;
+}
+
 void gpup_notify_dirty(int x, int y, int w, int h) {
   if (!__atomic_load_n(&g_needs_present, __ATOMIC_ACQUIRE))
     return;

@@ -28,6 +28,8 @@
 #include <linux/printk.h>
 #include <linux/err.h>
 #include <linux/overflow.h>
+#include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/stdarg.h>
 #include <linux/kdev_t.h>
@@ -342,7 +344,7 @@ void lkpi_device_destroy(const struct class *cls, dev_t devt);
 #define device_add_groups(d, g) lkpi_device_add_groups(d, g)
 #define device_remove_groups(d, g) lkpi_device_remove_groups(d, g)
 #define devm_device_add_group(d, g) lkpi_devm_device_add_group(d, g)
-#define device_attach(d) lkpi_device_attach(d)
+static inline int device_attach(struct device *d) { return lkpi_device_attach(d); }
 #define device_driver_attach(drv, d) lkpi_device_driver_attach(drv, d)
 #define device_release_driver(d) lkpi_device_release_driver(d)
 #define device_reprobe(d) lkpi_device_reprobe(d)
@@ -530,6 +532,18 @@ struct class_attribute {
 #define CLASS_ATTR_RO(_name) struct class_attribute class_attr_##_name = __ATTR_RO(_name)
 #define CLASS_ATTR_WO(_name) struct class_attribute class_attr_##_name = __ATTR_WO(_name)
 
+struct class_attribute_string {
+	struct class_attribute attr;
+	char *str;
+};
+ssize_t lkpi_show_class_attr_string(const struct class *class, const struct class_attribute *attr,
+				    char *buf);
+#define CLASS_ATTR_STRING(_name, _mode, _str) \
+	struct class_attribute_string class_attr_##_name = { \
+		.attr = { .attr = { .name = __stringify(_name), .mode = _mode }, \
+			  .show = lkpi_show_class_attr_string }, \
+		.str = _str }
+
 struct class_dev_iter;
 int lkpi_class_register(const struct class *cls);
 void lkpi_class_unregister(const struct class *cls);
@@ -666,6 +680,20 @@ void lkpi_devm_iounmap(struct device *dev, void __iomem *addr);
 void __iomem *lkpi_devm_ioremap_resource(struct device *dev, const struct resource *res,
 					 int type);
 #define devm_ioremap(d, o, s) lkpi_devm_ioremap(d, o, s, 0)
+void *lkpi_memremap(phys_addr_t offset, size_t size, unsigned long flags);
+void lkpi_memunmap(void *addr);
+static inline void lkpi_devm_memunmap(void *p) { lkpi_memunmap(p); }
+static inline void *devm_memremap(struct device *dev, resource_size_t offset, size_t size,
+				  unsigned long flags)
+{
+	void *p = lkpi_memremap(offset, size, flags);
+
+	if (!p)
+		return ERR_PTR(-ENXIO);
+	if (devm_add_action_or_reset(dev, lkpi_devm_memunmap, p))
+		return ERR_PTR(-ENOMEM);
+	return p;
+}
 #define devm_ioremap_uc(d, o, s) lkpi_devm_ioremap(d, o, s, 0)
 #define devm_ioremap_wc(d, o, s) lkpi_devm_ioremap(d, o, s, 1)
 #define devm_iounmap(d, a) lkpi_devm_iounmap(d, a)
@@ -718,5 +746,7 @@ __printf(3, 4) void lkpi_dev_printk(const char *level, const struct device *dev,
 #define dev_WARN_ONCE(dev, condition, format, arg...) \
 	WARN_ONCE(condition, "%s %s: " format, dev_driver_string(dev), dev_name(dev), ##arg)
 #define dev_warn_probe(dev, err, fmt, ...) dev_err_probe(dev, err, fmt, ##__VA_ARGS__)
+
+#include <linux/ratelimit.h>
 
 #endif

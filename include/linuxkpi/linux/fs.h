@@ -69,6 +69,11 @@ struct address_space {
 	struct list_head i_mmap;	/* vm_area_struct.__lkpi_mapping */
 	unsigned long nrpages;
 	void *private_data;
+	gfp_t gfp_mask;
+	unsigned long flags;		/* AS_* */
+	struct page **__lkpi_pages;	/* shmem: paginas por indice (NULL = hueco) */
+	unsigned long __lkpi_cap;
+	struct mutex __lkpi_pages_lock;
 };
 
 struct inode {
@@ -254,6 +259,20 @@ struct inode *lkpi_alloc_anon_inode(struct super_block *sb);
 void lkpi_iput(struct inode *inode);
 static inline void ihold(struct inode *inode) { atomic_inc(&inode->i_count); }
 #define iput(i) lkpi_iput(i)
+/* sin modulos descargables por fichero: fops_get/put no cuentan referencias */
+#define fops_get(fops) (fops)
+#define fops_put(fops) do { (void)(fops); } while (0)
+#define replace_fops(f, fops) do { (f)->f_op = (fops); } while (0)
+struct inode *lkpi_d_inode(struct dentry *d);
+#define d_inode(d) lkpi_d_inode(d)
 #define alloc_anon_inode(sb) lkpi_alloc_anon_inode(sb)
+
+/* Clonar un fichero abierto (leases de DRM): no soportado en la capa */
+static inline struct file *file_clone_open(struct file *file)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
+#include <linux/uaccess.h>
 
 #endif

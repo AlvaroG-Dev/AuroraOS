@@ -5,6 +5,9 @@
 LKPI_CC      ?= $(KUR_CC)
 LKPI_LD      ?= ld
 LKPI_INC     := include/linuxkpi
+# Cabeceras de interfaz del arbol de Linux (UAPI virtio, drm): ver scripts/lkpi-ext-inc.sh
+LKPI_EXTINC  := build/linuxkpi/ext-inc
+_LKPI_EXTINC_RUN := $(shell scripts/lkpi-ext-inc.sh >&2)
 LKPI_CFLAGS  := -std=gnu11 -nostdinc -ffreestanding -O2 \
                 -mcmodel=kernel -mno-red-zone -fno-pic -fno-pie -fno-common \
                 -fno-stack-protector -fno-asynchronous-unwind-tables \
@@ -13,5 +16,5 @@ LKPI_CFLAGS  := -std=gnu11 -nostdinc -ffreestanding -O2 \
                 -mno-fp-ret-in-387 -ffunction-sections -fdata-sections \
                 -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function \
                 -Werror=implicit-function-declaration -Werror=incompatible-pointer-types \
-                -D__KERNEL__ -DMODULE -I$(LKPI_INC) \
+                -D__KERNEL__ -DMODULE -I$(LKPI_INC) -idirafter $(LKPI_EXTINC) \
                 -include linux/kconfig.h -include linux/compiler_types.h
