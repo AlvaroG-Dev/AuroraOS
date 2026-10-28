@@ -23,3 +23,20 @@ Notas:
   `plog_base`/`plog_size` (680 bytes en total).
 - Pendiente: reinicio automatico en panic (hoy se queda en `cli; hlt`; hay
   que pulsar reset) y volcado desde el camino BIOS (ahi `plog_base` = 0).
+
+## Log en vivo a un fichero del USB (para depurar i915)
+
+- `make iso` anade al final de la imagen una particion MBR 2 FAT32
+  `AURORADATA` (`USB_DATA_MB=64`; `USB_DATA_MB=0` la desactiva). Al volcar la
+  ISO al USB (dd / Rufus modo DD) el kernel la monta en `/data`
+  (`mount_boot_media` ahora tambien prueba particiones FAT32).
+- Con `cmdline=klog.file=/data/aurora.log` en `aurora.conf`, el hilo
+  `klog-file` vuelca el log nuevo cada 500 ms con fsync. `/data` se monta
+  antes de `lkpi_boot_load()`, asi que cubre la carga de i915. Si el USB tarda
+  en enumerarse, el hilo reintenta el montaje hasta 60 s.
+- Funciona tambien con arranque BIOS (sin region persistente usa un buffer en
+  el heap y copia el ring de klog).
+- Si el kernel se cuelga con las IRQs cortadas, el hilo no corre: el fichero
+  llega hasta ~500 ms antes y el resto esta en la RAM persistente
+  (`prev.log` / `last_kmsg.log` tras el reset).
+- Opt-in: sin `klog.file` no se escribe nada.

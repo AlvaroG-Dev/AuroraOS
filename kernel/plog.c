@@ -4,6 +4,7 @@
 #include "klog.h"
 #include "paging.h"
 #include "string.h"
+#include "heap.h"
 
 static struct plog_header *g_cur;
 static struct plog_header *g_prev;
@@ -41,6 +42,44 @@ void plog_putc(char c) {
   uint32_t nh = h->head + 1;
   h->head = nh >= h->capacity ? 0 : nh;
   h->total++;
+}
+
+int plog_ensure_buffer(void) {
+  if (g_cur)
+    return 0;
+  size_t sz = PLOG_SLOT_SIZE;
+  struct plog_header *h = (struct plog_header *)kmalloc(sz);
+  if (!h)
+    return -1;
+  plog_init(h, 0);
+  g_cur = h;
+  static char tmp[16384];
+  size_t n = klog_peek(tmp, sizeof(tmp));
+  for (size_t i = 0; i < n; i++)
+    plog_putc(tmp[i]);
+  return 0;
+}
+
+size_t plog_cur_read(uint64_t *pos, char *out, size_t max) {
+  struct plog_header *h = g_cur;
+  if (!h)
+    return 0;
+  uint64_t total = h->total;
+  if (total > h->capacity && *pos < total - h->capacity)
+    *pos = total - h->capacity;
+  if (*pos >= total)
+    return 0;
+  uint64_t avail = total - *pos;
+  size_t n = avail < max ? (size_t)avail : max;
+  uint32_t cap = h->capacity;
+  uint32_t p = (uint32_t)(*pos % cap);
+  for (size_t i = 0; i < n; i++) {
+    out[i] = (char)plog_data(h)[p];
+    if (++p >= cap)
+      p = 0;
+  }
+  *pos += n;
+  return n;
 }
 
 size_t plog_prev_len(void) { return g_prev ? plog_len(g_prev) : 0; }

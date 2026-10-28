@@ -635,6 +635,16 @@ static void mount_boot_media(void) {
       g_data_mounted = 1;
     }
   }
+  // Particiones FAT32 (p. ej. la de datos AURORADATA al final del USB).
+  for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || !b->is_partition || b->is_read_only)
+      continue;
+    if (fat32_mount_bdev(b->name, "/data") == 0) {
+      LOG_INFO("[INIT] Montado %s en /data", b->name);
+      g_data_mounted = 1;
+    }
+  }
   for (int i = 0; i < blk_count() && !g_cdrom_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->sector_size != 2048)
@@ -649,6 +659,77 @@ static void mount_boot_media(void) {
     prev_log_saved = 1;
     save_prev_log_to_data();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Log en vivo a fichero (cmdline klog.file=/data/aurora.log): vuelca los bytes
+// nuevos del log cada ~500 ms con fsync, para que si el kernel se cuelga
+// (p. ej. al arrancar i915) el fichero tenga todo hasta casi ese instante.
+// Si el cuelgue es total (IRQs cortadas), queda el log en RAM persistente
+// (/proc/last_kmsg, prev.log, last_kmsg.log en el siguiente arranque).
+// ---------------------------------------------------------------------------
+static char g_klog_file_path[128];
+
+static void klog_file_sleep(uint64_t ms) {
+  static completion_t never;
+  static int init;
+  if (!init) {
+    completion_init(&never);
+    init = 1;
+  }
+  wait_for_completion_timeout(&never, ms);
+}
+
+static int klog_file_task(void *arg) {
+  (void)arg;
+  // Esperar a /data: el USB puede enumerarse tarde.
+  for (int i = 0; i < 60 && !g_data_mounted; i++) {
+    klog_file_sleep(1000);
+    part_scan_all();
+    mount_boot_media();
+  }
+  if (!g_data_mounted) {
+    LOG_WARN("[KLOG] sin /data montado: no se escribe %s", g_klog_file_path);
+    return 0;
+  }
+  vfs_unlink(g_klog_file_path);
+  if (vfs_create(g_klog_file_path, 0644) != 0) {
+    LOG_WARN("[KLOG] no se pudo crear %s", g_klog_file_path);
+    return 0;
+  }
+  LOG_INFO("[KLOG] log en vivo -> %s", g_klog_file_path);
+  uint64_t pos = 0, off = 0;
+  static char chunk[4096];
+  for (;;) {
+    size_t n;
+    int wrote = 0;
+    while ((n = plog_cur_read(&pos, chunk, sizeof(chunk))) > 0) {
+      vfs_node_t *node = vfs_lookup(g_klog_file_path);
+      if (!node)
+        break;
+      if (node->ops && node->ops->write)
+        node->ops->write(node, off, n, chunk);
+      off += n;
+      wrote = 1;
+      if (n < sizeof(chunk) && node->ops && node->ops->fsync)
+        node->ops->fsync(node);
+      vfs_node_free(node);
+    }
+    (void)wrote;
+    klog_file_sleep(500);
+  }
+  return 0;
+}
+
+static void klog_file_start(void) {
+  if (!cmdline_get("klog.file", g_klog_file_path, sizeof(g_klog_file_path)) ||
+      g_klog_file_path[0] != '/')
+    return;
+  if (plog_ensure_buffer() != 0) {
+    LOG_WARN("[KLOG] sin memoria para el buffer de log");
+    return;
+  }
+  kthread_run(klog_file_task, NULL, "klog-file");
 }
 
 // Si los drivers legacy tardan mas que la espera de system_init_task (la
@@ -755,6 +836,7 @@ static void system_init_task(void) {
   mount_boot_media();
   if (!drivers_ok)
     kthread_run(late_mount_task, NULL, "late-mount");
+  klog_file_start();
 
   // 10. Reveal de splash + compositor.
   // Sin framebuffer del firmware (GOP solo-Blt: virtio-gpu sin VGA...) se
