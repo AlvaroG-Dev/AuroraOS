@@ -75,6 +75,28 @@ _Static_assert(sizeof(struct gpt_entry) == 128, "gpt_entry != 128 bytes");
 // campos del bio justo tras el retorno, así que end_io() ve el bio
 // en su forma original.
 // ===========================================================================
+typedef struct part_bio_ctx {
+  bio_end_io_fn end_io;
+  void *end_io_data;
+  uint64_t lba;
+  block_device_t *bdev;
+} part_bio_ctx_t;
+
+// Restaura el bio original y suelta el contexto.
+static void part_bio_restore(bio_t *bio, part_bio_ctx_t *c) {
+  bio->lba = c->lba;
+  bio->bdev = c->bdev;
+  bio->end_io = c->end_io;
+  bio->end_io_data = c->end_io_data;
+  kfree(c);
+}
+
+static void part_end_io(bio_t *bio) {
+  part_bio_restore(bio, (part_bio_ctx_t *)bio->end_io_data);
+  if (bio->end_io)
+    bio->end_io(bio);
+}
+
 static int part_submit(block_device_t *part, bio_t *bio) {
   block_device_t *parent = part->parent;
   if (!parent || !parent->ops || !parent->ops->submit)
@@ -84,23 +106,28 @@ static int part_submit(block_device_t *part, bio_t *bio) {
   if (bio->lba > part->num_sectors || bio->count > part->num_sectors - bio->lba)
     return -ERANGE;
 
-  uint64_t orig_lba = bio->lba;
-  block_device_t *orig_bdev = bio->bdev;
+  part_bio_ctx_t *c = (part_bio_ctx_t *)kmalloc(sizeof(*c));
+  if (!c)
+    return -ENOMEM;
+  c->end_io = bio->end_io;
+  c->end_io_data = bio->end_io_data;
+  c->lba = bio->lba;
+  c->bdev = bio->bdev;
 
-  bio->lba = orig_lba + part->start_lba;
+  // El bio queda con el LBA del disco y el padre como bdev hasta que complete:
+  // usb_storage y block_proxy encolan el propio bio y leen bio->lba despues
+  // de volver de submit() (restaurarlo al volver hacia que sda1/sda2 leyeran
+  // los sectores de sda 0..n).
+  bio->lba = c->lba + part->start_lba;
   bio->bdev = parent;
+  bio->end_io = part_end_io;
+  bio->end_io_data = c;
 
   int rc = parent->ops->submit(parent, bio);
 
-  // Un driver asincrono que devuelve -EINPROGRESS conserva el bio y lo lee
-  // despues desde su hilo (usb-storage usa bio->lba/bio->buf en el worker):
-  // restaurar aqui el LBA relativo hacia que leyera el sector 0 del DISCO en
-  // lugar del de la particion. Solo se restaura si el bio ya termino.
-  if (rc != -EINPROGRESS) {
-    bio->lba = orig_lba;
-    bio->bdev = orig_bdev;
-  }
-
+  // Sincrono (o error): nadie llamara a part_end_io si no lo hizo ya.
+  if (rc != -EINPROGRESS && bio->end_io == part_end_io && bio->end_io_data == c)
+    part_bio_restore(bio, c);
   return rc;
 }
 
