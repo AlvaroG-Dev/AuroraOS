@@ -88,7 +88,17 @@ static ssize_t uevent_show(struct device *dev, struct device_attribute *attr, ch
 	if (MAJOR(dev->devt)) {
 		add_uevent_var(env, "MAJOR=%u", MAJOR(dev->devt));
 		add_uevent_var(env, "MINOR=%u", MINOR(dev->devt));
-		add_uevent_var(env, "DEVNAME=%s", dev_name(dev));
+		/* DEVNAME es la ruta bajo /dev que da devnode() (p. ej. dri/card0) */
+		const char *devname = NULL;
+		char *tmp = NULL;
+		umode_t mode = 0;
+
+		if (dev->type && dev->type->devnode)
+			devname = tmp = dev->type->devnode(dev, &mode, NULL, NULL);
+		if (!devname && dev->class && dev->class->devnode)
+			devname = tmp = dev->class->devnode(dev, &mode);
+		add_uevent_var(env, "DEVNAME=%s", devname ? devname : dev_name(dev));
+		kfree(tmp);
 	}
 	if (dev->type && dev->type->name)
 		add_uevent_var(env, "DEVTYPE=%s", dev->type->name);
