@@ -1,0 +1,19 @@
+--- a/i915_gem_stolen.c
++++ b/i915_gem_stolen.c
+@@ -974,12 +974,16 @@
+ 	return mem;
+ }
+ 
++void lkpi_intel_stolen_detect(struct pci_dev *pdev, int ver);
++
+ struct intel_memory_region*
+ i915_gem_stolen_smem_setup(struct drm_i915_private *i915, u16 type,
+ 			   u16 instance)
+ {
+ 	struct intel_memory_region *mem;
+ 
++	/* Aurora: sin early-quirks de x86, la capa lee BSM/GMCH_CTRL (glue.c) */
++	lkpi_intel_stolen_detect(to_pci_dev(i915->drm.dev), GRAPHICS_VER(i915));
+ 	mem = intel_memory_region_create(i915,
+ 					 intel_graphics_stolen_res.start,
+ 					 resource_size(&intel_graphics_stolen_res),

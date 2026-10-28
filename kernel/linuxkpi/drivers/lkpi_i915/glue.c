@@ -98,8 +98,58 @@ dma_addr_t intel_gmch_gtt_read_entry(unsigned int pg, bool *is_present, bool *is
 	return 0;
 }
 
-struct resource intel_graphics_stolen_res;
+struct resource intel_graphics_stolen_res = {
+	.name = "Graphics Stolen Memory",
+	.flags = IORESOURCE_MEM,
+};
 EXPORT_SYMBOL(intel_graphics_stolen_res);
+
+/*
+ * Memoria stolen (Gen6-Gen9): en Linux la rellena arch/x86/kernel/early-quirks.c
+ * al arrancar; aqui se lee de la configuracion PCI del 00:02.0 antes de crear
+ * la region (parche en i915_gem_stolen.c). Sin ella i915 cree que no hay
+ * stolen, no encuentra el framebuffer del firmware y apaga el plano (pantalla
+ * en negro). BSM (0x5c) da la base; GMCH_CTRL (0x50) el tamano. Gen11+ y
+ * Cherryview leen otros registros y quedan sin stolen (se avisa).
+ */
+#define LKPI_INTEL_GMCH_CTRL	0x50
+#define LKPI_INTEL_BSM		0x5c
+
+void lkpi_intel_stolen_detect(struct pci_dev *pdev, int ver)
+{
+	u16 ctrl;
+	u32 bsm;
+	u64 size, base;
+
+	if (resource_size(&intel_graphics_stolen_res) > 1)
+		return;
+	if (ver < 6 || ver > 9) {
+		pr_warn("i915: memoria stolen de Gen%d sin soporte en la capa\n", ver);
+		return;
+	}
+	pci_read_config_word(pdev, LKPI_INTEL_GMCH_CTRL, &ctrl);
+	pci_read_config_dword(pdev, LKPI_INTEL_BSM, &bsm);
+	base = bsm & ~((1u << 20) - 1);
+	if (ver < 8) {
+		size = (u64)((ctrl >> 3) & 0x1f) << 25;
+	} else {
+		u32 gms = (ctrl >> 8) & 0xff;
+
+		if (ver == 9 && gms >= 0xf0)
+			size = (u64)(gms - 0xf0 + 1) << 22;
+		else
+			size = (u64)gms << 25;
+	}
+	if (!base || !size) {
+		pr_warn("i915: sin memoria stolen (BSM=%08x GMCH_CTRL=%04x)\n", bsm, ctrl);
+		return;
+	}
+	intel_graphics_stolen_res.start = base;
+	intel_graphics_stolen_res.end = base + size - 1;
+	pr_info("i915: memoria stolen %llu MiB en %#llx\n", (unsigned long long)(size >> 20),
+		(unsigned long long)base);
+}
+EXPORT_SYMBOL(lkpi_intel_stolen_detect);
 
 void ips_link_to_i915_driver(void) {}
 

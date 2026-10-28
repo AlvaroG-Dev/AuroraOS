@@ -28,6 +28,7 @@ struct io_map {
 	size_t len;			/* multiplo de pagina */
 	int type;
 	unsigned long *ours;		/* bit i: la pagina i la mapeo la capa */
+	bool dyn;			/* lo devolvio lkpi_ioremap_dyn() (io_mapping) */
 };
 
 static LIST_HEAD(io_maps);
@@ -225,6 +226,68 @@ static void io_unmap_locked(struct io_map *m)
 			aurora_mmio_unmap(pg, PAGE_SIZE);
 	}
 }
+
+/*
+ * io_mapping y sombra: un io_mapping mapea la apertura (GMADR) entera una vez y
+ * accede por aritmetica de punteros, lo que se saltaba la sombra del
+ * framebuffer del firmware (i915 escribia sobre la pantalla). Ahora la parte
+ * del rango que solapa una sombra se mapea pagina a pagina (aqui) y pasa por
+ * ella; el resto sigue siendo un solo mapeo.
+ */
+u64 lkpi_shadow_overlap_end(phys_addr_t start, size_t size)
+{
+	struct io_shadow *s;
+	u64 end = 0;
+
+	spin_lock(&io_lock);
+	list_for_each_entry(s, &io_shadows, list)
+		if (s->start < start + size && s->start + s->len > start) {
+			u64 e = min_t(u64, s->start + s->len, start + size) - start;
+
+			if (e > end)
+				end = e;
+		}
+	spin_unlock(&io_lock);
+	return end;
+}
+EXPORT_SYMBOL(lkpi_shadow_overlap_end);
+
+void __iomem *lkpi_ioremap_dyn(phys_addr_t phys, size_t size)
+{
+	void __iomem *va = lkpi_ioremap(phys, size, LKPI_IOREMAP_WC);
+	struct io_map *m;
+
+	if (!va || shadow_owns((const void *)va))
+		return va;
+	spin_lock(&io_lock);
+	list_for_each_entry(m, &io_maps, list)
+		if (m->va == va && !m->dyn) {
+			m->dyn = true;
+			break;
+		}
+	spin_unlock(&io_lock);
+	return va;
+}
+EXPORT_SYMBOL(lkpi_ioremap_dyn);
+
+void lkpi_io_mapping_unmap(void __iomem *addr)
+{
+	struct io_map *m;
+	bool dyn = false;
+
+	if (!addr || shadow_owns((const void *)addr))
+		return;
+	spin_lock(&io_lock);
+	list_for_each_entry(m, &io_maps, list)
+		if (m->va == addr && m->dyn) {
+			dyn = true;
+			break;
+		}
+	spin_unlock(&io_lock);
+	if (dyn)
+		lkpi_iounmap(addr);
+}
+EXPORT_SYMBOL(lkpi_io_mapping_unmap);
 
 void lkpi_iounmap(volatile void __iomem *addr)
 {
