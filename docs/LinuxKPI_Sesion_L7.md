@@ -83,3 +83,11 @@ limpió la GGTT (`clearing unused GTT space`), de modo que GGTT[0] apuntó a la 
 el plano escaneó negro. Causa: `pm_runtime_get_if_in_use()`/`get_if_active()` devolvían -EINVAL
 (con CONFIG_PM=1 i915 lo trata como "no hay referencia") y `intel_display_power_get_if_enabled()`
 fallaba para todos los dominios. Ahora devuelven 1 y cuentan la referencia (dispositivo siempre activo).
+
+## 11. Hito 1 cumplido en hardware real (28-oct-2026)
+
+Con 0b85e013 la Portégé (HD 4600) dibuja: i915 lee el pipe A/plano primario/eDP como `enabled`
+y conserva la imagen del BIOS; el escritorio sale como una ventana gris «AuroraOS DRM» con menos
+parpadeo. Quedan: (a) el compositor aún no presenta con page-flip de i915 (parpadeo residual);
+(b) hito 2 del plan: pantalla nativa con GOP de respaldo (modeset propio, vblank, hotplug);
+(c) hito 3: 3D con Mesa `crocus` + linux-dmabuf. `xe` sigue diferido (sin Gen12+).
