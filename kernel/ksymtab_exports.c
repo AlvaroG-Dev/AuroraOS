@@ -154,6 +154,7 @@ KEXPORT_SYMBOL(test_fail);
 #include "nl_uevent.h"
 #include "aur_bus.h"
 #include "drm/drm.h"
+#include "drm/kms_present.h"
 #include "cmdline.h"
 #include "gpu_proxy.h"
 #include "pf.h"
@@ -168,6 +169,9 @@ KEXPORT_SYMBOL(drm_backend_release);
 KEXPORT_SYMBOL(drm_lx_scanout_open);
 KEXPORT_SYMBOL(drm_lx_scanout_close);
 KEXPORT_SYMBOL(drm_lx_scanout_present);
+KEXPORT_SYMBOL(drm_lx_kms_register);
+KEXPORT_SYMBOL(drm_lx_kms_unregister);
+KEXPORT_SYMBOL(drm_lx_kms_screen_size);
 KEXPORT_SYMBOL(gpup_get_framebuffer);
 KEXPORT_SYMBOL(gpup_get_fb_mode);
 KEXPORT_SYMBOL(cmdline_get);

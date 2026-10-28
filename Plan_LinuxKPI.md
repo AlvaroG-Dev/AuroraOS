@@ -417,3 +417,13 @@ Detalle en `docs/LinuxKPI_Sesion_L7.md`. Decisiones:
 - La sombra de un BAR grande se limita a 32 MiB (`lkpi_vmalloc` usa `kmalloc(size + 4 KiB)` y el heap no pasa de 64 MiB); si no hay memoria se avisa en vez de callar.
 - `clflushopt` solo si CPUID lo anuncia. Detalle en `docs/LinuxKPI_Sesion_L7.md` §8.
 
+### 28-oct-2026 — L7 hito 2: presentacion del compositor por KMS (doble buffer, page-flip, vblank)
+Detalle en `docs/LinuxKPI_Sesion_L7.md` §12. Decisiones:
+- **Quien presenta:** el compositor del kernel (`aurora-wayland` no toca DRM). No se añade presentacion por ioctls de userland: el compositor es kernel y un cliente DRM del kernel evita copias y ioctls por frame.
+- **Cliente `drm_client` de Linux, sin fbdev:** se engancha con un parche minimo en `drm_client_setup()` (`patches/drm_client_setup.c.patch`) y hace el modeset propio con dos buffers dumb XRGB8888. Commit atomico bloqueante por frame (`drm_client_modeset_commit`): con i915 espera al vblank real (flip_done); sin vblank de hardware (bochs, simpledrm, virtio-gpu 2D) el ritmo lo sigue marcando el compositor (16 ms). Se descarta `DRM_IOCTL_MODE_PAGE_FLIP` con evento desde userland y el commit no bloqueante: complican el hilo del compositor sin ganancia hasta que se mida en hardware.
+- **Modo:** el del tamaño del compositor (el GOP: 1366x768 en la Portégé). El compositor no cambia de resolucion en caliente; si el conector no tiene ese modo no se hace KMS. Modeset en el primer flip (frame ya pintado, sin pantalla negra).
+- **GOP de respaldo:** 3 commits fallidos del primer modeset (que no sean `-EBUSY`) → backend `-ENODEV` y el compositor vuelve a volcar a VRAM. `-EBUSY` (otro maestro DRM de userland): no se intercambia y se reintenta.
+- **Coherencia:** en i915 el mapeo del buffer es WB; se hace `clflush` de las filas escritas antes de cada commit (`lkpi.kms_flush`). Buffer age 2: el trasero recibe tambien el daño del frame anterior.
+- **Politica:** `lkpi.kms=auto` (por defecto) solo para i915; `1` para cualquier driver (QEMU); `0` apaga y deja el comportamiento del hito 1. i915 sigue sin autocargarse.
+- **Medida:** `[COMP-PERF]` añade, en GOP, la exposicion al barrido (porcentaje del periodo de refresco con VRAM en escritura) y, en KMS, flips/fallos/vblanks perdidos/duracion del commit. Diagnostico en la Portégé: `drm.debug=0x14 lkpi.i915_diag=1` y trazas `kms:` (vblank avanza, modo elegido, modeset hecho).
+- Aurora cambia: `kernel/drm/drm_linux_scanout.c` (registro del backend), `kernel/gfx/compositor.c` (presentacion y estadisticas), `ksymtab_exports.c`. D1/D2/D5/D6/D10 no se alteran. No se empieza L8 sin confirmacion.

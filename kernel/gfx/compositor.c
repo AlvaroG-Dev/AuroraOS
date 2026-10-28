@@ -18,6 +18,7 @@
 // una ventana en movimiento nunca se quede a medio copiar en pantalla.
 #include "compositor.h"
 #include "../bmp.h"
+#include "../drm/kms_present.h"
 #include "../boot_console.h"
 #include "../gpu_proxy.h"
 #include "../heap.h"
@@ -280,6 +281,14 @@ static uint64_t g_ph_cur[PH_N];
 static uint64_t g_frame_cycles_max = 0;
 static uint32_t g_frame_count = 0;
 
+/* Presentación por KMS (kms_present.h): flips, tiempo de commit (bloquea hasta
+ * el vblank con hardware real), vblanks perdidos y commits fallidos. */
+static struct {
+  uint32_t flips, fails, missed, frames_kms;
+  uint64_t commit_us_sum;
+  uint32_t commit_us_max;
+} g_kms_st;
+
 static void compositor_report_frame_stats(uint64_t total_cycles) {
   for (int i = 0; i < PH_N; i++) {
     g_ph_sum[i] += g_ph_cur[i];
@@ -300,6 +309,24 @@ static void compositor_report_frame_stats(uint64_t total_cycles) {
               "(%u frames)",
               (unsigned)us[PH_BG], (unsigned)us[PH_WIN], (unsigned)us[PH_UI],
               (unsigned)us[PH_BLIT], (unsigned)max_us, (unsigned)g_frame_count);
+    if (g_kms_st.frames_kms) {
+      LOG_DEBUG("[COMP-PERF] KMS: %u flips, %u fallidos, %u vblanks perdidos | "
+                "commit avg=%u max=%u us",
+                (unsigned)g_kms_st.flips, (unsigned)g_kms_st.fails,
+                (unsigned)g_kms_st.missed,
+                (unsigned)(g_kms_st.flips
+                               ? g_kms_st.commit_us_sum / g_kms_st.flips
+                               : 0),
+                (unsigned)g_kms_st.commit_us_max);
+    } else {
+      /* Sin vsync el volcado a VRAM se solapa con el barrido de la pantalla
+       * durante `blit` de cada periodo de refresco (16.7 ms a 60 Hz): ese
+       * porcentaje es la exposición al parpadeo/tearing del camino GOP. */
+      LOG_DEBUG("[COMP-PERF] GOP: volcado sin vsync, exposicion al barrido "
+                "%u%% (blit avg %u us de 16667)",
+                (unsigned)(us[PH_BLIT] * 100 / 16667), (unsigned)us[PH_BLIT]);
+    }
+    memset(&g_kms_st, 0, sizeof(g_kms_st));
   }
   for (int i = 0; i < PH_N; i++)
     g_ph_sum[i] = 0;
@@ -1575,9 +1602,80 @@ static void present_row_delta(int y, int x0, int n) {
   }
 }
 
+/* ---- Presentación por KMS: doble buffer con page-flip ------------------
+ * El compositor pinta en `backbuffer` (RAM) como siempre; con un backend KMS
+ * activo los rectángulos dañados se copian además al buffer trasero del
+ * driver DRM y al final del frame se presenta con un commit atómico (vblank
+ * real) y se intercambian los buffers. El buffer trasero lleva dos frames de
+ * retraso: al final de cada frame se le copia también el daño del anterior
+ * (`kms_prev`). Si el commit falla (otro maestro DRM, p. ej.) no se
+ * intercambia y el daño se acumula en `kms_pending`. */
+static const struct drm_lx_kms_ops *kms = NULL; /* solo durante un frame */
+static uint32_t *kms_back = NULL;
+static uint32_t kms_pitch = 0;
+static uint32_t kms_gen_seen = 0;
+static rect_t kms_cur, kms_prev, kms_pending;
+
+static rect_t kms_union(rect_t a, rect_t b) {
+  if (a.w <= 0 || a.h <= 0)
+    return b;
+  if (b.w <= 0 || b.h <= 0)
+    return a;
+  return rect_bounding_box(a, b);
+}
+
+static void kms_copy_rect(rect_t clip) {
+  rect_t cr = cursor_rect();
+  for (int y = clip.y; y < clip.y + clip.h; y++) {
+    const uint32_t *src = &backbuffer[y * fb_width + clip.x];
+    uint32_t *dst = &kms_back[(size_t)y * kms_pitch + clip.x];
+    if (y >= cr.y && y < cr.y + cr.h && cr.x < clip.x + clip.w &&
+        cr.x + cr.w > clip.x) {
+      simd_copy_normal(present_line, src, (size_t)clip.w);
+      draw_cursor_row(present_line, clip.x, clip.w, y);
+      src = present_line;
+    }
+    simd_copy_normal(dst, src, (size_t)clip.w);
+  }
+}
+
+static void kms_frame_end(void) {
+  rect_t prev = rect_clip(kms_prev, screen_rect());
+  if (prev.w > 0 && prev.h > 0)
+    kms_copy_rect(prev);
+  rect_t d = rect_clip(kms_union(kms_cur, prev), screen_rect());
+  int dirty[4] = {d.x, d.y, d.w, d.h};
+  uint32_t commit_us = 0, gap = 0;
+  int r = kms->flip(dirty, &commit_us, &gap);
+  g_kms_st.frames_kms++;
+  if (r == 0) {
+    g_kms_st.flips++;
+    g_kms_st.commit_us_sum += commit_us;
+    if (commit_us > g_kms_st.commit_us_max)
+      g_kms_st.commit_us_max = commit_us;
+    if (gap > 1)
+      g_kms_st.missed += gap - 1;
+    kms_prev = kms_union(kms_cur, kms_pending);
+    kms_pending = (rect_t){0, 0, 0, 0};
+  } else {
+    g_kms_st.fails++;
+    kms_pending = kms_union(kms_pending, kms_cur);
+    kms_prev = (rect_t){0, 0, 0, 0};
+  }
+  if (r == -19 /* -ENODEV */)
+    drm_lx_kms_dead();
+  kms = NULL;
+  drm_lx_kms_end();
+}
+
 static void present_rect(rect_t clip) {
   if (!fb_ptr)
     return;
+  if (kms) {
+    kms_copy_rect(clip);
+    kms_cur = kms_union(kms_cur, clip);
+    return;
+  }
   preempt_disable();
   if (fb_bpp == 24 || !front_shadow || !present_line) {
     for (int y = clip.y; y < clip.y + clip.h; y++) {
@@ -1648,9 +1746,33 @@ static void render_rect(rect_t clip) {
 /* Devuelve 1 si se pintó algo. */
 static int compositor_render(void) {
   rect_t list[DAMAGE_MAX];
+  /* Backend KMS nuevo o retirado: historial de buffers invalido, repintar
+   * entero (y, al volver al GOP, rehacer el volcado diferencial). */
+  uint32_t gen = drm_lx_kms_generation();
+  if (gen != kms_gen_seen) {
+    kms_gen_seen = gen;
+    kms_prev = kms_pending = (rect_t){0, 0, 0, 0};
+    if (front_shadow)
+      for (size_t i = 0; i < (size_t)fb_width * fb_height; i++)
+        front_shadow[i] = FRONT_UNKNOWN;
+    compositor_invalidate_rect(screen_rect());
+  }
   int n = damage_take(list);
   if (n == 0)
     return 0;
+
+  /* Backend KMS: toma el buffer trasero para todo el frame. */
+  kms = (fb_bpp == 32 && present_line) ? drm_lx_kms_begin((int)fb_width,
+                                                          (int)fb_height)
+                                       : NULL;
+  if (kms) {
+    kms_back = kms->back(&kms_pitch);
+    if (!kms_back) {
+      kms = NULL;
+      drm_lx_kms_end();
+    }
+  }
+  kms_cur = (rect_t){0, 0, 0, 0};
 
   uint64_t t0 = comp_rdtsc();
   for (int i = 0; i < n; i++) {
@@ -1658,6 +1780,8 @@ static int compositor_render(void) {
     if (r.w > 0 && r.h > 0)
       render_rect(r);
   }
+  if (kms)
+    kms_frame_end();
   compositor_report_frame_stats(comp_rdtsc() - t0);
   return 1;
 }

@@ -91,3 +91,54 @@ y conserva la imagen del BIOS; el escritorio sale como una ventana gris «Aurora
 parpadeo. Quedan: (a) el compositor aún no presenta con page-flip de i915 (parpadeo residual);
 (b) hito 2 del plan: pantalla nativa con GOP de respaldo (modeset propio, vblank, hotplug);
 (c) hito 3: 3D con Mesa `crocus` + linux-dmabuf. `xe` sigue diferido (sin Gen12+).
+
+## 12. Hito 2: presentacion por KMS con doble buffer (28-oct-2026)
+
+Problema: el compositor volcaba al framebuffer del GOP sin vsync (volcado diferencial a VRAM) y, con
+i915 cargado, ademas cada commit copiaba el plano primario a una ventana gris «AuroraOS DRM». El
+panel se leia a mitad del volcado: parpadeo. `aurora-wayland` no toca DRM (sus ventanas son del
+compositor del kernel), asi que el unico presentador es `kernel/gfx/compositor.c`.
+
+**Medida.** `[COMP-PERF]` ahora distingue el camino:
+- GOP: `GOP: volcado sin vsync, exposicion al barrido N% (blit avg X us de 16667)`. Es la fraccion de
+  cada periodo de refresco (60 Hz) durante la que se escribe VRAM; el barrido de la pantalla cae
+  dentro de esa ventana con esa probabilidad. Es un proxy (sin hardware no se lee la linea de barrido).
+- KMS: `KMS: N flips, F fallidos, M vblanks perdidos | commit avg=.. max=.. us`. El commit es
+  bloqueante: con vblank real su duracion es el periodo del refresco; `M` cuenta vblanks de mas entre
+  dos flips consecutivos.
+
+**Diseno** (`kernel/drm/kms_present.h`, `kernel/linuxkpi/drivers/lkpi_drm/kms_present.c`):
+- Un cliente DRM del kernel (API `drm_client` de Linux, sin fbdev) se engancha al final de
+  `drm_client_setup()` (parche `drm_client_setup.c.patch`; i915, bochs, virtio-gpu y simpledrm ya la llaman).
+  Hace `drm_client_modeset_probe`, elige el modo de **igual tamaño que el compositor** (el eDP de la
+  Portégé: 1366x768; si el conector no lo tiene, no hace nada y sigue el GOP), reserva dos buffers
+  dumb XRGB8888 (`drm_client_framebuffer_create`) y los mapea (`drm_client_buffer_vmap`: i915 lo hace WB).
+- Registra un backend en el kernel (`drm_lx_kms_register`). El compositor, por cada frame con daño, copia
+  los rectangulos al buffer trasero (con el cursor) y llama a `flip()`: commit atomico bloqueante del
+  cliente (`drm_client_modeset_commit`, plano primario con el fb trasero) y intercambio. **El modeset del
+  panel ocurre en el primer flip**, con el frame ya pintado: no hay pantalla negra intermedia.
+- Buffer age 2: al final de cada frame se copia tambien el daño del frame anterior al trasero; si un
+  commit falla (otro maestro DRM → `-EBUSY`) no se intercambia y el daño se acumula.
+- En i915 se hace `clflush` de las filas escritas antes del commit (mapeo WB, el escaneo de Haswell no
+  es coherente con la cache); `lkpi.kms_flush=0|1` lo fuerza.
+- Los commits del cliente no pasan por el ritmo por software (`lkpi_drm_pace`) ni por la ventana
+  «AuroraOS DRM» (`lkpi_drm_present`); los de userland (drm_test, etc.) siguen igual.
+- **GOP de respaldo:** si el modeset propio falla 3 veces seguidas (que no sean `-EBUSY`) el backend
+  devuelve `-ENODEV` y el compositor vuelve al volcado a VRAM; si no hay modo del tamaño del compositor,
+  ni se registra.
+
+**Opciones de arranque:** `lkpi.kms=` `auto` (por defecto, solo i915) | `1` (cualquier driver DRM de
+Linux; para QEMU: bochs, virtio-gpu) | `0` (apagado: GOP + ventana «AuroraOS DRM» como en el hito 1).
+`lkpi.kms_flush=`; `drm.debug=0x14` (KMS+ATOMIC) y `lkpi.i915_diag=1` como antes. Trazas del cliente:
+`kms: vblank avanza|NO avanza (contador a -> b en 60 ms)`, `kms: modeset propio hecho (WxH, vblank real)`,
+y `kms: commit de N ms (vblank/flip_done sin IRQ?)` si el commit tarda mas de 3 s.
+
+**Para la Portégé** (`/data/aurora.log`): arrancar con `lkpi.load=linuxkpi,lkpi_drm,lkpi_ttm,lkpi_drm_display,lkpi_i915 lkpi.shadow=fb lkpi.i915_diag=1 drm.debug=0x14`.
+Buscar `kms:` (modo elegido, vblank avanza, modeset hecho) y `[COMP-PERF] KMS:` (flips, commit ≈ 16.7 ms,
+vblanks perdidos 0). Si el panel se queda congelado, `lkpi.kms=0` devuelve el comportamiento del hito 1.
+
+**Limites:** el compositor no cambia de resolucion en caliente (si el panel nativo no tiene el modo del
+GOP, no se hace KMS); sin multi-monitor (un CRTC); sin hotplug de conectores mas alla de reintentar el
+probe en cada evento; si el modulo se descarga con el KMS activo el compositor vuelve al GOP pero la
+pantalla ya no la barre el GOP; page-flip no bloqueante con evento (sin esperar en el hilo del
+compositor) queda para cuando se mida en hardware.

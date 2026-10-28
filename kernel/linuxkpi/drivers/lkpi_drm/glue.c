@@ -59,7 +59,7 @@ void lkpi_drm_pace(struct drm_atomic_state *state)
 	ktime_t now = ktime_get();
 	s64 ms;
 
-	if (state->legacy_cursor_update)
+	if (state->legacy_cursor_update || lkpi_kms_committing())
 		return;
 	ms = ktime_to_ms(ktime_sub(now, last));
 	if (last && ms >= 0 && ms < LKPI_FRAME_MS)
@@ -73,6 +73,9 @@ void lkpi_drm_present(struct drm_atomic_state *state)
 	struct drm_crtc_state *cs;
 	int i;
 
+	/* El commit del cliente KMS del compositor ya es la presentacion real. */
+	if (lkpi_kms_committing())
+		return;
 	for_each_new_crtc_in_state(state, crtc, cs, i) {
 		struct drm_framebuffer *fb = crtc->primary ? crtc->primary->state->fb : NULL;
 		struct iosys_map map[DRM_FORMAT_MAX_PLANES];

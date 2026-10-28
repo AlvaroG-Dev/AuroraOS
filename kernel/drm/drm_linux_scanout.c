@@ -8,6 +8,7 @@
 // salidas.
 
 #include "drm.h"
+#include "kms_present.h"
 #include "../uaccess.h"
 #include "../gfx/compositor.h"
 #include "../gfx/window.h"
@@ -144,4 +145,76 @@ int drm_lx_scanout_present(int idx, const void *src, uint32_t pitch,
   mutex_unlock(&g_lx_lock);
   compositor_invalidate_rect((rect_t){ix, iy, iw, ih});
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Presentacion por KMS (kms_present.h)
+// ---------------------------------------------------------------------------
+
+extern uint32_t fb_width, fb_height;
+
+static mutex_t g_kms_lock; // retiene el backend mientras el compositor lo usa
+static bool g_kms_lock_init;
+static const struct drm_lx_kms_ops *g_kms_ops;
+static volatile uint32_t g_kms_gen;
+
+static void kms_init(void) {
+  if (!g_kms_lock_init) {
+    mutex_init(&g_kms_lock);
+    g_kms_lock_init = true;
+  }
+}
+
+void drm_lx_kms_screen_size(int *w, int *h) {
+  *w = (int)fb_width;
+  *h = (int)fb_height;
+}
+
+int drm_lx_kms_register(const struct drm_lx_kms_ops *ops) {
+  if (!ops || !ops->back || !ops->flip)
+    return -EINVAL;
+  kms_init();
+  mutex_lock(&g_kms_lock);
+  if (g_kms_ops) {
+    mutex_unlock(&g_kms_lock);
+    return -EBUSY;
+  }
+  g_kms_ops = ops;
+  g_kms_gen++;
+  mutex_unlock(&g_kms_lock);
+  compositor_invalidate_rect((rect_t){0, 0, (int)fb_width, (int)fb_height});
+  LOG_INFO("[KMS] presentacion por %s %dx%d (vblank %s)", ops->name, ops->w,
+           ops->h, ops->hw_vblank ? "real" : "por software");
+  return 0;
+}
+
+void drm_lx_kms_unregister(const struct drm_lx_kms_ops *ops) {
+  kms_init();
+  mutex_lock(&g_kms_lock);
+  if (g_kms_ops == ops) {
+    g_kms_ops = NULL;
+    g_kms_gen++;
+    LOG_INFO("[KMS] presentacion por KMS terminada, de vuelta al GOP");
+  }
+  mutex_unlock(&g_kms_lock);
+  compositor_invalidate_rect((rect_t){0, 0, (int)fb_width, (int)fb_height});
+}
+
+const struct drm_lx_kms_ops *drm_lx_kms_begin(int w, int h) {
+  kms_init();
+  mutex_lock(&g_kms_lock);
+  if (g_kms_ops && g_kms_ops->w == w && g_kms_ops->h == h)
+    return g_kms_ops;
+  mutex_unlock(&g_kms_lock);
+  return NULL;
+}
+
+void drm_lx_kms_end(void) { mutex_unlock(&g_kms_lock); }
+
+uint32_t drm_lx_kms_generation(void) { return g_kms_gen; }
+
+void drm_lx_kms_dead(void) {
+  LOG_WARN("[KMS] backend de presentacion inservible, de vuelta al GOP");
+  g_kms_ops = NULL;
+  g_kms_gen++;
 }
