@@ -267,6 +267,13 @@ static inline vm_fault_t vmf_error(int err)
 	return err == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
 }
 
+/* En Linux lo declara linux/mm.h (drm_vma_manager.h lo usa sin incluir fs.h);
+ * misma declaracion y macro que linux/fs.h. */
+struct address_space;
+void lkpi_unmap_mapping_range(struct address_space *mapping, loff_t holebegin,
+			      loff_t holelen, int even_cows);
+#define unmap_mapping_range(m, b, l, e) lkpi_unmap_mapping_range(m, b, l, e)
+
 #include <linux/vmalloc.h>
 #include <linux/shrinker.h>
 #include <linux/mmap_lock.h>
