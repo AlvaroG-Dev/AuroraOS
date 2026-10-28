@@ -663,7 +663,7 @@ static void mount_boot_media(void) {
 
 // ---------------------------------------------------------------------------
 // Log en vivo a fichero (cmdline klog.file=/data/aurora.log): vuelca los bytes
-// nuevos del log cada ~500 ms con fsync, para que si el kernel se cuelga
+// nuevos del log cada ~100 ms con fsync, para que si el kernel se cuelga
 // (p. ej. al arrancar i915) el fichero tenga todo hasta casi ese instante.
 // Si el cuelgue es total (IRQs cortadas), queda el log en RAM persistente
 // (/proc/last_kmsg, prev.log, last_kmsg.log en el siguiente arranque).
@@ -727,7 +727,7 @@ static int klog_file_task(void *arg) {
       vfs_node_free(node);
     }
     (void)wrote;
-    klog_file_sleep(500);
+    klog_file_sleep(100);
   }
   return 0;
 }
