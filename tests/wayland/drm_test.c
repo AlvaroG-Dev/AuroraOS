@@ -10,7 +10,9 @@
 #include <drm/drm_mode.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/netlink.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -557,6 +559,34 @@ int main(int argc, char **argv) {
     close(hf.fd);
     close(sfd2);
     close(sfd);
+  }
+
+  // uevents hacia userland: escribir "change" en uevent reenvia el evento
+  // (backend Linux); el nativo no los emite y se omite.
+  {
+    int nl = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT);
+    struct sockaddr_nl sa = {.nl_family = AF_NETLINK, .nl_groups = 1};
+    int ufd = open("/sys/class/drm/card0/uevent", O_WRONLY);
+    if (nl >= 0 && bind(nl, (struct sockaddr *)&sa, sizeof(sa)) == 0 && ufd >= 0 &&
+        write(ufd, "change", 6) == 6) {
+      char ub[2048];
+      struct pollfd up = {.fd = nl, .events = POLLIN};
+      ssize_t un = poll(&up, 1, 2000) == 1 ? recv(nl, ub, sizeof(ub) - 1, 0) : -1;
+      int ok_a = 0, ok_s = 0, ok_d = 0;
+      for (ssize_t o = 0; un > 0 && o < un; o += strlen(ub + o) + 1) {
+        ok_a |= !strcmp(ub + o, "ACTION=change");
+        ok_s |= !strcmp(ub + o, "SUBSYSTEM=drm");
+        ok_d |= !strcmp(ub + o, "DEVNAME=dri/card0");
+      }
+      CHECK(un > 0 && !strncmp(ub, "change@/", 8) && ok_a && ok_s && ok_d,
+            "uevent change de card0 por NETLINK_KOBJECT_UEVENT");
+    } else {
+      printf("[drm_test] SKIP uevent por netlink (backend sin emision)\n");
+    }
+    if (ufd >= 0)
+      close(ufd);
+    if (nl >= 0)
+      close(nl);
   }
 
   // Limpieza

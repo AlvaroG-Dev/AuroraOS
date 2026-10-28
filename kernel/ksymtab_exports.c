@@ -150,6 +150,7 @@ KEXPORT_SYMBOL(test_fail);
 // K8). La capa replica vfs_ops_t, vfs_dirent_t, vfs_fs_ops_t, vma_t,
 // vma_dev_ops_t y task_info_t (kernel/linuxkpi/aurora.h).
 #include "devtmpfs.h"
+#include "nl_uevent.h"
 #include "aur_bus.h"
 #include "drm/drm.h"
 #include "cmdline.h"
@@ -160,6 +161,7 @@ KEXPORT_SYMBOL(test_fail);
 #include "vfs.h"
 #include "vmap.h"
 KEXPORT_SYMBOL(aur_bus_launch_skipped);
+KEXPORT_SYMBOL(nl_uevent_broadcast);
 KEXPORT_SYMBOL(drm_backend_claim);
 KEXPORT_SYMBOL(drm_backend_release);
 KEXPORT_SYMBOL(drm_lx_scanout_open);

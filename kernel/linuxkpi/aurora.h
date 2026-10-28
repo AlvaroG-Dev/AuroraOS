@@ -316,6 +316,8 @@ int aurora_devtmpfs_register(const char *path, u32 rdev, u32 mode, u32 uid, u32 
 			     const struct aurora_vfs_ops *ops, void *priv)
 	__asm__("devtmpfs_register");
 int aurora_devtmpfs_unregister(const char *path) __asm__("devtmpfs_unregister");
+/* nl_uevent.h: uevent hacia los monitores de libudev; msg = "add@/devices/..\0K=V\0..." */
+void aurora_nl_uevent_broadcast(const char *msg, size_t len) __asm__("nl_uevent_broadcast");
 
 /* aur_bus.c: respaldo con el .aur omitido por aur.skip (4B) */
 int aurora_aur_bus_launch_skipped(u8 bus, u8 slot, u8 func) __asm__("aur_bus_launch_skipped");

@@ -77,22 +77,17 @@ static const struct kobj_type lkpi_device_ktype = {
 
 /* ---------------------------------------------------- uevent y dev */
 
-static ssize_t uevent_show(struct device *dev, struct device_attribute *attr, char *buf)
+/* Variables de entorno del dispositivo: lo que ve uevent y lo que sale por netlink */
+static void lkpi_dev_uevent_env(struct device *dev, struct kobj_uevent_env *env)
 {
-	struct kobj_uevent_env *env;
-	int len = 0;
-
-	env = kzalloc(sizeof(*env), GFP_KERNEL);
-	if (!env)
-		return -ENOMEM;
 	if (MAJOR(dev->devt)) {
-		add_uevent_var(env, "MAJOR=%u", MAJOR(dev->devt));
-		add_uevent_var(env, "MINOR=%u", MINOR(dev->devt));
 		/* DEVNAME es la ruta bajo /dev que da devnode() (p. ej. dri/card0) */
 		const char *devname = NULL;
 		char *tmp = NULL;
 		umode_t mode = 0;
 
+		add_uevent_var(env, "MAJOR=%u", MAJOR(dev->devt));
+		add_uevent_var(env, "MINOR=%u", MINOR(dev->devt));
 		if (dev->type && dev->type->devnode)
 			devname = tmp = dev->type->devnode(dev, &mode, NULL, NULL);
 		if (!devname && dev->class && dev->class->devnode)
@@ -110,17 +105,86 @@ static ssize_t uevent_show(struct device *dev, struct device_attribute *attr, ch
 		dev->class->dev_uevent(dev, env);
 	if (dev->type && dev->type->uevent)
 		dev->type->uevent(dev, env);
+}
+
+static ssize_t uevent_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct kobj_uevent_env *env;
+	int len = 0;
+
+	env = kzalloc(sizeof(*env), GFP_KERNEL);
+	if (!env)
+		return -ENOMEM;
+	lkpi_dev_uevent_env(dev, env);
 	for (int i = 0; i < env->envp_idx; i++)
 		len += sysfs_emit_at(buf, len, "%s\n", env->envp[i]);
 	kfree(env);
 	return len;
 }
 
-/* Escribir en uevent pediria reenviar el evento: todavia no salen (L5). */
+/*
+ * kobject_uevent(): el evento de un dispositivo sale por NETLINK_KOBJECT_UEVENT
+ * en el formato del nucleo ("add@/devices/..\0ACTION=add\0DEVPATH=..\0..."), que
+ * es lo que libudev (Weston, libinput, logind) espera. `extra` son las variables
+ * del llamador (HOTPLUG=1, CONNECTOR=.. de drm_kms_helper_hotplug_event).
+ */
+int lkpi_device_uevent_send(struct kobject *kobj, enum kobject_action action, char *extra[])
+{
+	static const char *const names[] = { "add", "remove", "change", "move", "online",
+					     "offline", "bind", "unbind" };
+	static atomic_t seqnum;
+	struct device *dev;
+	struct kobj_uevent_env *env;
+	const char *subsys = NULL;
+	char *path, *msg;
+	size_t cap = 4096, n = 0;
+	int i;
+
+	if (kobj->ktype != &lkpi_device_ktype || (unsigned int)action >= ARRAY_SIZE(names))
+		return 0;
+	dev = container_of(kobj, struct device, kobj);
+	if (dev->class)
+		subsys = dev->class->name;
+	else if (dev->bus)
+		subsys = dev->bus->name;
+	if (!subsys)
+		return 0;
+	env = kzalloc(sizeof(*env), GFP_KERNEL);
+	msg = kmalloc(cap, GFP_KERNEL);
+	path = kobject_get_path(kobj, GFP_KERNEL);
+	if (!env || !msg || !path)
+		goto out;
+	lkpi_dev_uevent_env(dev, env);
+	n += scnprintf(msg + n, cap - n, "%s@%s", names[action], path) + 1;
+	n += scnprintf(msg + n, cap - n, "ACTION=%s", names[action]) + 1;
+	n += scnprintf(msg + n, cap - n, "DEVPATH=%s", path) + 1;
+	n += scnprintf(msg + n, cap - n, "SUBSYSTEM=%s", subsys) + 1;
+	for (i = 0; i < env->envp_idx && n < cap; i++)
+		n += scnprintf(msg + n, cap - n, "%s", env->envp[i]) + 1;
+	for (i = 0; extra && extra[i] && n < cap; i++)
+		n += scnprintf(msg + n, cap - n, "%s", extra[i]) + 1;
+	if (n < cap)
+		n += scnprintf(msg + n, cap - n, "SEQNUM=%d", atomic_inc_return(&seqnum)) + 1;
+	aurora_nl_uevent_broadcast(msg, min(n, cap));
+out:
+	kfree(path);
+	kfree(msg);
+	kfree(env);
+	return 0;
+}
+
+/* Escribir "add", "change"... en uevent reenvia el evento (udevadm trigger) */
 static ssize_t uevent_store(struct device *dev, struct device_attribute *attr,
 			    const char *buf, size_t count)
 {
-	return count;
+	static const char *const names[] = { "add", "remove", "change", "move", "online",
+					     "offline", "bind", "unbind" };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++)
+		if (sysfs_streq(buf, names[i]))
+			return lkpi_device_uevent_send(&dev->kobj, i, NULL) ?: count;
+	return -EINVAL;
 }
 static DEVICE_ATTR_RW(uevent);
 

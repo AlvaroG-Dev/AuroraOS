@@ -9,6 +9,8 @@
 // `lkpi.load` no se carga nada: la capa y sus pruebas siguen siendo cosa de
 // la suite y del espacio de usuario (finit_module).
 
+#include <stdbool.h>
+
 #include "lkpi_boot.h"
 #include "cmdline.h"
 #include "klog.h"
@@ -16,6 +18,26 @@
 #include "string.h"
 
 #define LKPI_BOOT_DIR "/lib/modules/linuxkpi/"
+
+// DRM_BACKEND=native (make) o drm.backend=native (cmdline): el backend nativo
+// sirve siempre /dev/dri y los modulos DRM de Linux no se cargan.
+static bool drm_native_only(void) {
+#ifdef DRM_BACKEND_NATIVE
+  return true;
+#else
+  char v[16];
+  return cmdline_get("drm.backend", v, sizeof(v)) && !strcmp(v, "native");
+#endif
+}
+
+static bool is_drm_module(const char *name) {
+  static const char *const drm[] = {"lkpi_drm", "lkpi_bochs", "lkpi_simpledrm",
+                                    "lkpi_virtio_gpu"};
+  for (unsigned i = 0; i < sizeof(drm) / sizeof(drm[0]); i++)
+    if (!strcmp(name, drm[i]))
+      return true;
+  return false;
+}
 
 int lkpi_boot_load(void) {
   char list[256];
@@ -29,7 +51,9 @@ int lkpi_boot_load(void) {
       e++;
     char sep = *e;
     *e = '\0';
-    if (*p) {
+    if (*p && is_drm_module(p) && drm_native_only()) {
+      LOG_INFO("[LKPI] %s omitido (DRM_BACKEND=native)", p);
+    } else if (*p) {
       char path[128];
       snprintf(path, sizeof(path), LKPI_BOOT_DIR "%s.kur", p);
       struct kur_module *m = NULL;

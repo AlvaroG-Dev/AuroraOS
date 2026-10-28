@@ -26,6 +26,14 @@ else
              -Wno-unused-parameter -Wframe-larger-than=2048
 endif
 
+# Backend de /dev/dri: auto (por omision; el driver de Linux, si hay y sondea,
+# releva al nativo) o native (los modulos DRM de LinuxKPI no se cargan).
+# Cambiarlo exige `make clean` de kernel/lkpi_boot.o.
+DRM_BACKEND ?= auto
+ifeq ($(DRM_BACKEND),native)
+    CFLAGS += -DDRM_BACKEND_NATIVE=1
+endif
+
 LD      = $(CC)
 LDFLAGS = -nostdlib -T linker.ld -no-pie -Wl,--build-id=none
 
