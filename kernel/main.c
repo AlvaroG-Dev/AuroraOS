@@ -682,14 +682,25 @@ static void klog_file_sleep(uint64_t ms) {
 
 static int klog_file_task(void *arg) {
   (void)arg;
-  // Esperar a /data: el USB puede enumerarse tarde.
-  for (int i = 0; i < 60 && !g_data_mounted; i++) {
+  // Esperar a /data: el USB puede enumerarse tarde. Solo se reintenta el
+  // escaneo/montaje cuando aparece un block device nuevo (si no, cada
+  // reintento repite los mismos avisos de [PART]/[FAT32] y tapa la pantalla).
+  int last_blk = blk_count();
+  if (!g_data_mounted)
+    LOG_INFO("[KLOG] esperando a /data (%d block devices)...", last_blk);
+  for (int i = 0; i < 120 && !g_data_mounted; i++) {
     klog_file_sleep(1000);
+    int n = blk_count();
+    if (n == last_blk)
+      continue;
+    last_blk = n;
+    LOG_INFO("[KLOG] nuevo block device (%d en total): reintento de /data", n);
     part_scan_all();
     mount_boot_media();
   }
   if (!g_data_mounted) {
-    LOG_WARN("[KLOG] sin /data montado: no se escribe %s", g_klog_file_path);
+    LOG_WARN("[KLOG] sin /data montado tras 120 s (%d block devices): no se "
+             "escribe %s", last_blk, g_klog_file_path);
     return 0;
   }
   vfs_unlink(g_klog_file_path);
