@@ -430,3 +430,10 @@ Detalle en `docs/LinuxKPI_Sesion_L7.md` §12. Decisiones:
 - (Correccion, misma fecha) i915 sin FBDEV_EMULATION no llama a `drm_client_setup()`: parche `i915_driver.c.patch` para que lo haga al final de `i915_driver_register()`. Detectado con el log de la Portégé (sin lineas `kms:`).
 - (Correccion, misma fecha) `nth_page()` de la capa pasa de `page + n` a `lkpi_pfn_to_page(pfn + n)`: las `struct page` no son un array por pfn y i915 coalesce paginas contiguas en el sg (GPF en `drm_clflush_sg`, visto en la Portégé). El KMS cierra la ventana «AuroraOS DRM» del commit inicial del driver.
 - (Correccion, misma fecha) Primer KMS verificado en la Portégé. El daño del frame anterior se repasa desde `front_shadow` (imagen final presentada), no desde el `backbuffer`: `compose_scene()` repinta fuera del clip y dejaba rayas en el Dock.
+
+### 28-oct-2026 — Estado del plan tras el hito 2 de L7
+- **Hecho:** L0–L6 completas; L7 hitos 1 (probe y dibujo) y 2 (presentacion KMS con doble buffer, verificada en la Portégé: vblank real, 0 flips fallidos; rayas del Dock corregidas pendientes de confirmar en hardware).
+- **Falta de L7:** hito 3 (3D con Mesa `crocus` + `linux-dmabuf` en `aurora-wayland`); medir y bajar los vblanks perdidos (0-10 por 120 flips: commit no bloqueante con evento); `on_each_cpu`/IPI de funcion, ECAM y vm_mmap de GEM (stubs de §4 de la sesion L7); cursor por plano de hardware; hotplug de conectores y cambio de resolucion en caliente.
+- **L9 (en paralelo, "obligatoria antes de L7" segun §8 pero aun sin hacer):** IOMMU/VT-d, `pm_runtime` real, suspend/resume, TDR. Es el riesgo abierto mas serio antes de dar L7 por cerrado.
+- **L8:** AMD (sin hardware de pruebas) y NVIDIA (`Plan_NVIDIA.md`, RTX 4060). `Plan_Power.md` (apagado/reinicio ACPI) se ha integrado en esta rama.
+- Rama integrada: `claude/power-acpi-apm-plan` mergeada; el resto de ramas claude/ ya estaban contenidas. `main` sigue sin recibir esta rama (a peticion del usuario).
