@@ -12,10 +12,14 @@
 #   5. iconos del Dock y del sistema      -> assets/system/icons/*.bmp
 #   6. pila Wayland (libs, weston, foot, fuentes, aurora-wayland, GTK/Qt, X11)
 #   7. OVMF_VARS.fd
+#   8. LinuxKPI: arbol de Linux fijado + linux-firmware (fetch-linux-drivers.sh)
 #
 # Variables:
 #   WITH_MESA=1   tambien baja Mesa/LLVM (scripts/fetch-mesa.sh; +500 MB en el
 #                 initrd, necesita QEMU con >= 1,5 GB)
+#   WITH_LKPI=0   no baja el arbol de Linux ni linux-firmware (por defecto 1: la
+#                 capa LinuxKPI y sus drivers no compilan sin ellos)
+#   WITH_NVIDIA=1 tambien baja open-gpu-kernel-modules (L8; no hace falta aun)
 #   SKIP_ENV=1    no hace nada (lo respeta el Makefile)
 #   ENV_OFFLINE=1 no intenta instalar ni descargar: solo avisa de lo que falta
 set -uo pipefail
@@ -55,7 +59,7 @@ soft_step() {
 PKGS=(build-essential binutils nasm clang lld git curl file xxd
       qemu-system-x86 ovmf mtools dosfstools xorriso gdisk
       python3 python3-pil librsvg2-bin fonts-dejavu-core dpkg-dev
-      rsync musl-tools                                   # python-stdlib; musl-gcc de las pruebas
+      rsync musl-tools patch                                   # python-stdlib; musl-gcc de las pruebas
       libpng-dev libxcb1-dev libxcb-composite0-dev libxcb-xfixes0-dev)  # aurora-wayland
 
 missing=()
@@ -169,6 +173,20 @@ fi
 if [ ! -f OVMF_VARS.fd ] && [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ]; then
     say "copiando OVMF_VARS.fd"
     cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd
+fi
+
+# --- 8. LinuxKPI: fuentes de Linux y firmware ------------------------------------
+# build/linuxkpi_src/linux (version fijada en kernel/linuxkpi/linux-version.mk) y
+# build/linuxkpi_src/linux-firmware. No se versionan. Sin ellos `make iso` falla
+# al compilar linuxkpi y sus .kur (i915, drm, ttm...).
+if [ "${WITH_LKPI:-1}" = "1" ]; then
+    lk_args=(--firmware)
+    [ "${WITH_NVIDIA:-0}" = "1" ] || lk_args+=(--no-nvidia)
+    if [ ! -f build/linuxkpi_src/linux/drivers/gpu/drm/i915/i915_driver.c ] || \
+       [ ! -d build/linuxkpi_src/linux-firmware ]; then
+        run_step "fuentes de Linux y linux-firmware (fetch-linux-drivers.sh ${lk_args[*]})" \
+            bash scripts/fetch-linux-drivers.sh "${lk_args[@]}"
+    fi
 fi
 
 # --- Avisos de cosas que no se pueden regenerar solas --------------------------

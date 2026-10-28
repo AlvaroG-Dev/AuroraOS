@@ -85,3 +85,4 @@ linuxkpi-drv: tools/kurbuild
 
 linuxkpi-clean:
 	rm -rf $(LKPI_BUILD) $(LKPI_MODDIR)
+include kernel/linuxkpi/run.mk
