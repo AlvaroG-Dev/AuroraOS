@@ -142,3 +142,12 @@ GOP, no se hace KMS); sin multi-monitor (un CRTC); sin hotplug de conectores mas
 probe en cada evento; si el modulo se descarga con el KMS activo el compositor vuelve al GOP pero la
 pantalla ya no la barre el GOP; page-flip no bloqueante con evento (sin esperar en el hilo del
 compositor) queda para cuando se mida en hardware.
+
+**Corrección tras la primera prueba en la Portégé (log de Álvaro, 28-oct-2026):** no salió ninguna
+línea `kms:` y el compositor siguió en GOP (`[COMP-PERF] GOP: ... exposicion 0-4%`). Causa: i915
+compilado sin FBDEV_EMULATION usa un `intel_fbdev_setup()` vacío y nadie llama a `drm_client_setup()`,
+que es donde cuelga el cliente KMS. Nuevo `patches/i915_driver.c.patch`: `i915_driver_register()` llama a
+`drm_client_setup()` al final. (bochs/virtio-gpu/simpledrm ya la llamaban, por eso QEMU funcionaba.)
+Nota del mismo log: la exposicion al barrido del camino GOP medida en la Portégé es baja (0-4 %), asi que
+el parpadeo no se explica solo por el volcado; si persiste con KMS activo, el siguiente sospechoso es el
+pipe/panel (PSR, backlight) y no el compositor.
