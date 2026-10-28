@@ -6,5 +6,5 @@ LKPI_DRV_SRCDIR := $(LKPI_LINUX)/drivers/gpu/drm/virtio
 LKPI_DRV_SRCS   := virtgpu_drv.c virtgpu_kms.c virtgpu_gem.c virtgpu_vram.c virtgpu_display.c \
                    virtgpu_vq.c virtgpu_fence.c virtgpu_object.c virtgpu_debugfs.c virtgpu_plane.c \
                    virtgpu_ioctl.c virtgpu_prime.c virtgpu_trace_points.c virtgpu_submit.c
-LKPI_DRV_CFLAGS := $(LKPI_DRM_CFLAGS) -I$(LKPI_LINUX)/drivers/gpu/drm
+LKPI_DRV_CFLAGS := $(LKPI_DRM_CFLAGS) -DCONFIG_DRM_VIRTIO_GPU_KMS=1 -I$(LKPI_LINUX)/drivers/gpu/drm
 LKPI_DRV_INSTALL := linuxkpi
