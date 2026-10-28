@@ -9,6 +9,7 @@
 // acceso" del VFS de Aurora.
 
 #include "cmdline.h"
+#include "plog.h"
 #include "procfs.h"
 #include "block.h"
 #include "cpu.h"
@@ -271,6 +272,19 @@ static char *gen_version(size_t *out_len) {
   if (!buf)
     return NULL;
   memcpy(buf, v, n);
+  buf[n] = '\0';
+  *out_len = n;
+  return buf;
+}
+
+// /proc/last_kmsg: log del arranque anterior, conservado en RAM tras un
+// reinicio caliente (panic + reset, cuelgue + boton reset). Vacio si no hay.
+static char *gen_last_kmsg(size_t *out_len) {
+  size_t cap = plog_prev_len();
+  char *buf = (char *)kmalloc(cap + 1);
+  if (!buf)
+    return NULL;
+  size_t n = plog_prev_read(buf, cap);
   buf[n] = '\0';
   *out_len = n;
   return buf;
@@ -2150,7 +2164,7 @@ static const char *procfs_root_entries[] = {
     "uptime", "version", "meminfo",     "stat",       "self",
     "mounts", "loadavg", "bus",         "partitions", "swaps",
     "sys",    "vmstat",  "filesystems", "net", // ← AÑADIR
-    "modules", "cmdline",
+    "modules", "cmdline", "last_kmsg",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -2914,6 +2928,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *b = gen_cmdline(&len);
     return b ? make_file_node("cmdline", b, len) : NULL;
+  }
+  if (strcmp(name, "last_kmsg") == 0) {
+    size_t len = 0;
+    char *b = gen_last_kmsg(&len);
+    return b ? make_file_node("last_kmsg", b, len) : NULL;
   }
   if (strcmp(name, "meminfo") == 0) {
     size_t len = 0;

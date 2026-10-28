@@ -3,6 +3,7 @@
 
 #include "../bootloader/include/kernel_boot_info.h"
 #include "cmdline.h"
+#include "plog.h"
 #include "display_edid.h"
 #include "acpi.h"
 #include "acpi_aml.h"
@@ -595,6 +596,35 @@ static void tests_thread(void) {
 // ===========================================================================
 static int g_data_mounted, g_cdrom_mounted;
 
+// Guarda el log del arranque anterior (RAM persistente) en /data/last_kmsg.log
+// para poder leerlo desde otro PC sacando el pendrive. Mejor esfuerzo.
+static void save_prev_log_to_data(void) {
+  size_t len = plog_prev_len();
+  if (!len)
+    return;
+  char *buf = kmalloc(len + 1);
+  if (!buf)
+    return;
+  size_t n = plog_prev_read(buf, len);
+  const char *path = "/data/last_kmsg.log";
+  vfs_unlink(path);
+  if (vfs_create(path, 0644) == 0) {
+    vfs_node_t *node = vfs_lookup(path);
+    if (node) {
+      if (node->ops && node->ops->write)
+        node->ops->write(node, 0, n, buf);
+      if (node->ops && node->ops->fsync)
+        node->ops->fsync(node); // el sync diferido de FAT32 no llega a tiempo
+      vfs_node_free(node);
+      LOG_INFO("[INIT] log del arranque anterior (%lu bytes) -> %s",
+               (unsigned long)n, path);
+    }
+  } else {
+    LOG_WARN("[INIT] no se pudo crear %s", path);
+  }
+  kfree(buf);
+}
+
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
@@ -613,6 +643,11 @@ static void mount_boot_media(void) {
       LOG_INFO("[INIT] Montado %s en /cdrom", b->name);
       g_cdrom_mounted = 1;
     }
+  }
+  static int prev_log_saved;
+  if (g_data_mounted && !prev_log_saved) {
+    prev_log_saved = 1;
+    save_prev_log_to_data();
   }
 }
 
@@ -873,6 +908,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
   paging_init((uint64_t *)cr3, max_phys_addr);
+  plog_attach(boot.plog_base, boot.plog_size);
 
   {
     uint64_t *pml4 = paging_get_pml4();

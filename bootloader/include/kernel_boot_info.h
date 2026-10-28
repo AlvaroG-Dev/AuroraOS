@@ -25,10 +25,15 @@ struct __attribute__((packed)) kernel_boot_info {
   /* Linea de comandos del kernel: la clave cmdline= de aurora.conf, terminada
    * en NUL ("" si no hay). La lee kernel/cmdline.c. */
   char cmdline[256];
+  /* Log persistente (persist_log.h): base fisica de la region de
+   * PLOG_PAGES paginas reservada por el bootloader, o 0 si no hay. La
+   * ranura 0 es el log actual y la 1 el del arranque anterior. */
+  uint64_t plog_base;
+  uint64_t plog_size;
 };
 
 _Static_assert(
-    sizeof(struct kernel_boot_info) == 664,
+    sizeof(struct kernel_boot_info) == 680,
     "kernel_boot_info cambio de tamano: sincroniza con kernel/main.c");
 
 #endif
