@@ -214,6 +214,10 @@ static inline void vm_flags_init(struct vm_area_struct *vma, vm_flags_t flags)
 	vma->__vm_flags = flags;
 }
 #define vm_flags_reset vm_flags_init
+static inline bool is_cow_mapping(vm_flags_t flags)
+{
+	return (flags & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE;
+}
 static inline bool vma_is_anonymous(struct vm_area_struct *vma) { return !vma->vm_ops; }
 
 int lkpi_remap_pfn_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,

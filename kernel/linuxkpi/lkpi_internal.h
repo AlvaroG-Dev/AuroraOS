@@ -105,5 +105,7 @@ int lkpi_i2c_init(void);
 void lkpi_i2c_exit(void);
 int lkpi_backlight_init(void);
 void lkpi_backlight_exit(void);
+void lkpi_pid_exit(void);
+void lkpi_cpu_init(void);
 
 #endif

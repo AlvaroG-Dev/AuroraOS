@@ -13,6 +13,7 @@
 #include <linux/compiler.h>
 #include <linux/stringify.h>
 #include <linux/errno.h>
+#include <linux/stat.h>
 #include <linux/string.h>
 
 struct kobject;

@@ -28,6 +28,9 @@
 #define SLAB_RED_ZONE ((slab_flags_t)0x00000400U)
 
 #define ARCH_KMALLOC_MINALIGN 8
+#ifndef ARCH_DMA_MINALIGN
+#define ARCH_DMA_MINALIGN 64
+#endif
 #define ARCH_SLAB_MINALIGN 8
 #define KMALLOC_MAX_SIZE (1UL << (12 + 10))
 #define KMALLOC_MAX_CACHE_SIZE 4096
@@ -95,6 +98,7 @@ static inline size_t ksize(const void *p) { return lkpi_ksize(p); }
 #define kcalloc_node(n, s, g, node) kcalloc(n, s, g)
 #define kmalloc_array_node(n, s, g, node) kmalloc_array(n, s, g)
 #define kmalloc_track_caller(s, g) kmalloc(s, g)
+#define kmalloc_node_track_caller(s, g, n) kmalloc_node(s, g, n)
 #define kmalloc_size_roundup(s) (s)
 #define kmalloc_obj(p, g) ((typeof(p))kmalloc(sizeof(*(p)), g))
 

@@ -1099,3 +1099,12 @@ void lkpi_device_core_exit(void)
 	lkpi_virtual_kobj = lkpi_class_kobj = lkpi_bus_kobj = lkpi_devices_kobj = NULL;
 	lkpi_kobject_exit_layer();
 }
+
+ssize_t lkpi_show_class_attr_string(const struct class *class, const struct class_attribute *attr,
+				    char *buf)
+{
+	const struct class_attribute_string *cs = container_of(attr, struct class_attribute_string, attr);
+
+	return sysfs_emit(buf, "%s\n", cs->str);
+}
+EXPORT_SYMBOL(lkpi_show_class_attr_string);

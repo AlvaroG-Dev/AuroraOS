@@ -22,6 +22,7 @@
 #include <linux/preempt.h>
 #include <linux/irqflags.h>
 #include <linux/string.h>
+#include <linux/pid.h>
 #include <asm/barrier.h>
 
 #define TASK_RUNNING 0x00000000
@@ -153,7 +154,12 @@ static inline int signal_pending_state(unsigned int state, struct task_struct *p
 static inline pid_t task_pid_nr(struct task_struct *p) { return p->pid; }
 static inline pid_t task_tgid_nr(struct task_struct *p) { return p->tgid; }
 static inline pid_t task_pid_vnr(struct task_struct *p) { return p->pid; }
-#define task_pid(p) ((void *)(p))
+static inline struct pid *task_pid(struct task_struct *p) { return lkpi_pid_of(p->pid); }
+static inline struct pid *task_tgid(struct task_struct *p) { return lkpi_pid_of(p->tgid); }
+static inline struct pid *get_task_pid(struct task_struct *p, enum pid_type type)
+{
+	return get_pid(lkpi_pid_of(type == PIDTYPE_PID ? p->pid : p->tgid));
+}
 #define get_task_comm(buf, tsk) ({ strscpy(buf, (tsk)->comm, sizeof(buf)); (buf); })
 #define __get_task_comm(buf, len, tsk) ({ strscpy(buf, (tsk)->comm, len); (buf); })
 #define set_task_comm(tsk, name) strscpy((tsk)->comm, name, TASK_COMM_LEN)
@@ -178,5 +184,9 @@ static inline struct task_struct *get_task_struct(struct task_struct *p)
 	return p;
 }
 #define put_task_struct(p) lkpi_put_task_struct(p)
+
+/* Linux trae las capacidades transitivamente por sched.h (cred) */
+#include <linux/capability.h>
+#include <linux/cred.h>
 
 #endif

@@ -59,7 +59,7 @@ linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linuxkpi-fi
 
 # Modulos de infraestructura de Linux sobre la capa (kernel/linuxkpi/drivers/<n>.mk):
 # el nucleo virtio (L5) y, mas adelante, el de DRM. Se cargan bajo demanda.
-LKPI_MODULES := lkpi_virtio
+LKPI_MODULES := lkpi_virtio lkpi_drm
 .PHONY: linuxkpi-modules
 linuxkpi-modules: tools/kurbuild
 	@for m in $(LKPI_MODULES); do \

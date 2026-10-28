@@ -63,7 +63,19 @@
 	__scalar_type_to_expr_cases(long long), \
 	default : (x)))
 
-#define compiletime_assert(cond, msg) _Static_assert(cond, msg)
+/*
+ * Como Linux: una llamada a una funcion con atributo error que el optimizador
+ * elimina si cond se cumple. Sirve tambien cuando cond solo se resuelve al
+ * optimizar (cea_mode_for_vic(8)->vtotal ...). Solo en sentencias.
+ */
+#define __lkpi_ct_name(n) __lkpi_compiletime_assert_##n
+#define __lkpi_ct_assert(cond, msg, n) \
+	do { \
+		extern void __lkpi_ct_name(n)(void) __attribute__((__error__(msg))); \
+		if (!(cond)) \
+			__lkpi_ct_name(n)(); \
+	} while (0)
+#define compiletime_assert(cond, msg) __lkpi_ct_assert(cond, msg, __COUNTER__)
 #define compiletime_assert_atomic_type(t) \
 	compiletime_assert(sizeof(t) <= sizeof(long), "tipo no atomico")
 #define __native_word(t) \

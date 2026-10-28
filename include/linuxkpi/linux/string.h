@@ -175,4 +175,17 @@ static inline void *kmemdup_array(const void *src, size_t count, size_t size, gf
 	return kmemdup(src, count * size, gfp);
 }
 
+#include <linux/string_choices.h>
+
+/* true si los n bytes son cero */
+static inline bool mem_is_zero(const void *s, size_t n)
+{
+	const unsigned char *p = s;
+
+	while (n--)
+		if (*p++)
+			return false;
+	return true;
+}
+
 #endif

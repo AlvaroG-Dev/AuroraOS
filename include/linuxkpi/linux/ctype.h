@@ -2,6 +2,7 @@
 #ifndef _LKPI_LINUX_CTYPE_H
 #define _LKPI_LINUX_CTYPE_H
 
+#include <linux/bits.h>
 #include <linux/compiler.h>
 
 static inline int isdigit(int c) { return '0' <= c && c <= '9'; }

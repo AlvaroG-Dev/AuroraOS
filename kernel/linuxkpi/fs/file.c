@@ -73,6 +73,11 @@ void lkpi_address_space_init(struct address_space *mapping, struct inode *host)
 	mutex_init(&mapping->i_mmap_mutex);
 	INIT_LIST_HEAD(&mapping->i_mmap);
 	mapping->nrpages = 0;
+	mapping->gfp_mask = GFP_HIGHUSER;
+	mapping->flags = 0;
+	mapping->__lkpi_pages = NULL;
+	mapping->__lkpi_cap = 0;
+	mutex_init(&mapping->__lkpi_pages_lock);
 }
 EXPORT_SYMBOL(lkpi_address_space_init);
 

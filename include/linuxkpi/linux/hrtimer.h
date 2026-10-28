@@ -36,9 +36,11 @@ enum hrtimer_restart {
 };
 
 struct hrtimer {
-	struct list_head node;		/* node.next == NULL: no encolado */
+	struct {
+		struct list_head link;	/* link.next == NULL: no encolado */
+		ktime_t expires;	/* como timerqueue_node: DRM lee node.expires */
+	} node;
 	ktime_t _softexpires;
-	ktime_t node_expires;
 	enum hrtimer_restart (*function)(struct hrtimer *);
 	clockid_t clockid;
 	u8 state;
@@ -65,7 +67,7 @@ u64 lkpi_hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval);
 #define hrtimer_start_range_ns(t, tim, delta, mode) lkpi_hrtimer_start_range_ns(t, tim, delta, mode)
 #define hrtimer_start(t, tim, mode) lkpi_hrtimer_start_range_ns(t, tim, 0, mode)
 #define hrtimer_start_expires(t, mode) \
-	lkpi_hrtimer_start_range_ns(t, (t)->node_expires, 0, HRTIMER_MODE_ABS)
+	lkpi_hrtimer_start_range_ns(t, (t)->node.expires, 0, HRTIMER_MODE_ABS)
 #define hrtimer_try_to_cancel(t) lkpi_hrtimer_try_to_cancel(t)
 #define hrtimer_cancel(t) lkpi_hrtimer_cancel(t)
 #define hrtimer_active(t) lkpi_hrtimer_active(t)
@@ -81,22 +83,22 @@ static inline bool hrtimer_callback_running(const struct hrtimer *t)
 {
 	return lkpi_hrtimer_active(t) && !hrtimer_is_queued(t);
 }
-static inline ktime_t hrtimer_get_expires(const struct hrtimer *t) { return t->node_expires; }
+static inline ktime_t hrtimer_get_expires(const struct hrtimer *t) { return t->node.expires; }
 static inline ktime_t hrtimer_get_softexpires(const struct hrtimer *t) { return t->_softexpires; }
-static inline s64 hrtimer_get_expires_ns(const struct hrtimer *t) { return t->node_expires; }
+static inline s64 hrtimer_get_expires_ns(const struct hrtimer *t) { return t->node.expires; }
 static inline void hrtimer_set_expires(struct hrtimer *t, ktime_t time)
 {
-	t->node_expires = time;
+	t->node.expires = time;
 	t->_softexpires = time;
 }
 static inline void hrtimer_set_expires_range_ns(struct hrtimer *t, ktime_t time, u64 delta)
 {
 	t->_softexpires = time;
-	t->node_expires = time + delta;
+	t->node.expires = time + delta;
 }
 static inline void hrtimer_add_expires_ns(struct hrtimer *t, u64 ns)
 {
-	t->node_expires += ns;
+	t->node.expires += ns;
 	t->_softexpires += ns;
 }
 static inline void hrtimer_add_expires(struct hrtimer *t, ktime_t time)
@@ -105,7 +107,7 @@ static inline void hrtimer_add_expires(struct hrtimer *t, ktime_t time)
 }
 static inline ktime_t hrtimer_expires_remaining(const struct hrtimer *t)
 {
-	return t->node_expires - ktime_get();
+	return t->node.expires - ktime_get();
 }
 #define hrtimer_get_remaining(t) hrtimer_expires_remaining(t)
 /* Funcion, no macro: un macro hrtimer_restart() romperia "enum hrtimer_restart (*f)(...)". */

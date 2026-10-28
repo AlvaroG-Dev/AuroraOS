@@ -6,6 +6,7 @@
 #ifndef _LKPI_LINUX_PRINTK_H
 #define _LKPI_LINUX_PRINTK_H
 
+#include <linux/instruction_pointer.h>
 #include <linux/compiler.h>
 #include <linux/kern_levels.h>
 #include <linux/stdarg.h>

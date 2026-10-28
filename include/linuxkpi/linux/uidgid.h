@@ -17,4 +17,17 @@ static inline u32 __kgid_val(kgid_t gid) { return gid.val; }
 static inline bool uid_eq(kuid_t a, kuid_t b) { return a.val == b.val; }
 static inline bool gid_eq(kgid_t a, kgid_t b) { return a.val == b.val; }
 
+#define overflowuid 65534
+#define overflowgid 65534
+struct user_namespace;
+extern struct user_namespace init_user_ns;
+static inline u32 from_kuid(struct user_namespace *ns, kuid_t uid) { return uid.val; }
+static inline u32 from_kuid_munged(struct user_namespace *ns, kuid_t uid) { return uid.val; }
+static inline u32 from_kgid(struct user_namespace *ns, kgid_t gid) { return gid.val; }
+static inline u32 from_kgid_munged(struct user_namespace *ns, kgid_t gid) { return gid.val; }
+static inline kuid_t make_kuid(struct user_namespace *ns, u32 uid) { return KUIDT_INIT(uid); }
+static inline kgid_t make_kgid(struct user_namespace *ns, u32 gid) { return KGIDT_INIT(gid); }
+static inline bool uid_valid(kuid_t uid) { return uid.val != (u32)-1; }
+static inline bool gid_valid(kgid_t gid) { return gid.val != (u32)-1; }
+
 #endif

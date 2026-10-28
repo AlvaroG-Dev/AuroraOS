@@ -28,6 +28,8 @@
 #include <linux/printk.h>
 #include <linux/err.h>
 #include <linux/overflow.h>
+#include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/stdarg.h>
 #include <linux/kdev_t.h>
@@ -529,6 +531,18 @@ struct class_attribute {
 #define CLASS_ATTR_RW(_name) struct class_attribute class_attr_##_name = __ATTR_RW(_name)
 #define CLASS_ATTR_RO(_name) struct class_attribute class_attr_##_name = __ATTR_RO(_name)
 #define CLASS_ATTR_WO(_name) struct class_attribute class_attr_##_name = __ATTR_WO(_name)
+
+struct class_attribute_string {
+	struct class_attribute attr;
+	char *str;
+};
+ssize_t lkpi_show_class_attr_string(const struct class *class, const struct class_attribute *attr,
+				    char *buf);
+#define CLASS_ATTR_STRING(_name, _mode, _str) \
+	struct class_attribute_string class_attr_##_name = { \
+		.attr = { .attr = { .name = __stringify(_name), .mode = _mode }, \
+			  .show = lkpi_show_class_attr_string }, \
+		.str = _str }
 
 struct class_dev_iter;
 int lkpi_class_register(const struct class *cls);
