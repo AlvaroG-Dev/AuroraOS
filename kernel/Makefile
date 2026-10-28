@@ -37,7 +37,7 @@ endif
 LD      = $(CC)
 LDFLAGS = -nostdlib -T linker.ld -no-pie -Wl,--build-id=none
 
-OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o serial.o gdt.o idt.o paging.o pmm.o \
+OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o serial.o plog.o gdt.o idt.o paging.o pmm.o \
         buddy.o spinlock.o heap.o slab.o sched.o ps2.o rtc.o tarfs.o vfs.o ipc.o bmp.o pci.o cpu.o simd.o boot_console.o\
         process.o elf.o klog.o pf.o panic.o driver.o input.o wait.o tty.o test.o acpi.o apic.o time.o block.o ata_pio.o \
         ata_common.o atapi.o ata_dma.o ahci.o completion.o part.o fat32.o pipe.o pty.o gfx/gfx.o gfx/window.o \
