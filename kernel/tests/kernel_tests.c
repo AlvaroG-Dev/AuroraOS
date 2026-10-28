@@ -6462,6 +6462,37 @@ static void test_lkpi_drm(void) {
 REGISTER_TEST_FLAGS("linuxkpi: L5 DRM/KMS (núcleo de Linux, modeset atómico)", test_lkpi_drm,
                     TEST_FLAG_BLOCKING);
 
+// L6 (K9): shrinker, split_page, swap en RAM, kmap con cache WC, io_mapping,
+// mmu_notifier (stub) y hmm desactivado, sobre la capa sola.
+static void test_lkpi_k9(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k9")); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 shrinker, split_page, swap en RAM, mmu_notifier", test_lkpi_k9,
+                    TEST_FLAG_BLOCKING);
+
+// L6: ttm, drm_buddy y gpu-sched (lkpi_ttm.kur sobre lkpi_drm.kur) con un driver
+// de memoria de dispositivo simulado: VRAM en RAM gestionada con drm_buddy, GTT,
+// evicion, swap a shmem y un motor de copia detrás de un drm_gpu_scheduler.
+static void lkpi_ttm_run(const char *test) {
+  struct kur_module *d = NULL, *t = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int rc = kur_loader_load_file(LKPI_DIR "/lkpi_drm.kur", &d);
+  TEST_ASSERT(rc == 0 && d, "lkpi_drm no carga (rc=%d)", rc);
+  if (rc != 0 || !d)
+    return;
+  rc = kur_loader_load_file(LKPI_DIR "/lkpi_ttm.kur", &t);
+  TEST_ASSERT(rc == 0 && t, "lkpi_ttm no carga (rc=%d)", rc);
+  if (rc == 0 && t) {
+    lkpi_unload_test(lkpi_load_test(test));
+    lkpi_unload_test(t);
+  }
+  lkpi_unload_test(d);
+}
+static void test_lkpi_ttm(void) { if (lkpi_boot_owned()) return; lkpi_ttm_run("lkpi_test_ttm"); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 ttm, drm_buddy y gpu-sched (VRAM simulada)", test_lkpi_ttm,
+                    TEST_FLAG_BLOCKING);
+static void test_lkpi_ttm_smp(void) { if (lkpi_boot_owned()) return; lkpi_ttm_run("lkpi_test_ttm_smp"); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 ttm estrés SMP (hilos compitiendo por el VRAM)",
+                    test_lkpi_ttm_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
 static void test_lkpi_unload(void) {
   if (lkpi_boot_owned())
     return;
