@@ -1636,13 +1636,24 @@ static void kms_copy_rect(rect_t clip) {
       src = present_line;
     }
     simd_copy_normal(dst, src, (size_t)clip.w);
+    /* `front_shadow` guarda la ultima imagen final presentada (cursor
+     * incluido) y solo recibe rectangulos ya terminados. El backbuffer no
+     * vale para repasar el daño del frame anterior: compose_scene() repinta
+     * fuera del clip (margen del desenfoque del Dock) sin Dock ni menus. */
+    simd_copy_normal(&front_shadow[y * fb_width + clip.x], src, (size_t)clip.w);
   }
+}
+
+static void kms_copy_prev(rect_t r) {
+  for (int y = r.y; y < r.y + r.h; y++)
+    simd_copy_normal(&kms_back[(size_t)y * kms_pitch + r.x],
+                     &front_shadow[y * fb_width + r.x], (size_t)r.w);
 }
 
 static void kms_frame_end(void) {
   rect_t prev = rect_clip(kms_prev, screen_rect());
   if (prev.w > 0 && prev.h > 0)
-    kms_copy_rect(prev);
+    kms_copy_prev(prev);
   rect_t d = rect_clip(kms_union(kms_cur, prev), screen_rect());
   int dirty[4] = {d.x, d.y, d.w, d.h};
   uint32_t commit_us = 0, gap = 0;
@@ -1762,7 +1773,7 @@ static int compositor_render(void) {
     return 0;
 
   /* Backend KMS: toma el buffer trasero para todo el frame. */
-  kms = (fb_bpp == 32 && present_line) ? drm_lx_kms_begin((int)fb_width,
+  kms = (fb_bpp == 32 && present_line && front_shadow) ? drm_lx_kms_begin((int)fb_width,
                                                           (int)fb_height)
                                        : NULL;
   if (kms) {

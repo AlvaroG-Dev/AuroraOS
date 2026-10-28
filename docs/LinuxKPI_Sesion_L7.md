@@ -160,3 +160,10 @@ se asigna sola) e i915 junta paginas fisicamente contiguas en un mismo sg. Ahora
 `nth_page` = `lkpi_pfn_to_page(page->pfn + n)`. Ademas, al activarse el KMS se cierra la ventana
 «AuroraOS DRM» que abrio el commit inicial del driver. Con `make linuxkpi-clean && make linuxkpi` por
 cambiar una cabecera de la capa.
+
+**Tercer log de la Portégé: el KMS funciona** (`vblank avanza`, `modeset propio`, `[COMP-PERF] KMS: 120 flips, 0 fallidos`,
+commit ≈ 11-15 ms con picos de 24 ms; 0-10 vblanks perdidos por cada 120 flips, a vigilar). Fallo visual restante: rayas en el Dock al
+mover una ventana o pasar el cursor. Causa: el daño del frame anterior se repasaba desde el
+`backbuffer`, pero `compose_scene(e)` repinta fuera del clip (margen del desenfoque del Dock) sin Dock ni
+menus, asi que esas zonas del backbuffer no son una imagen final. Ahora el repaso sale de `front_shadow`
+(ultima imagen final presentada, solo recibe rectangulos terminados).
