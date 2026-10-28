@@ -39,7 +39,9 @@ static inline struct page *virt_to_page(const void *addr) { return lkpi_virt_to_
 #define pfn_to_virt(pfn) __va((phys_addr_t)(pfn) << PAGE_SHIFT)
 #define virt_addr_valid(kaddr) lkpi_virt_addr_valid((const void *)(kaddr))
 bool lkpi_virt_addr_valid(const void *addr);
-#define nth_page(page, n) ((page) + (n))
+/* Las struct page de la capa no son un array contiguo por pfn (cada pagina de shmem se asigna sola):
+ * i915 junta paginas fisicamente contiguas en un mismo sg y page + n apuntaria a basura. */
+#define nth_page(page, n) ((n) ? lkpi_pfn_to_page((page)->pfn + (n)) : (page))
 #define page_to_virt(page) page_address(page)
 #define lowmem_page_address(page) page_address(page)
 #define offset_in_page(p) ((unsigned long)(p) & ~PAGE_MASK)

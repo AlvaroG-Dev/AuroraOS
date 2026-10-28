@@ -151,3 +151,12 @@ que es donde cuelga el cliente KMS. Nuevo `patches/i915_driver.c.patch`: `i915_d
 Nota del mismo log: la exposicion al barrido del camino GOP medida en la Portégé es baja (0-4 %), asi que
 el parpadeo no se explica solo por el volcado; si persiste con KMS activo, el siguiente sospechoso es el
 pipe/panel (PSR, backlight) y no el compositor.
+
+**Segundo log de la Portégé (GPF):** con el cliente ya enganchado, el modeset elige 1366x768 en el pipe A,
+se crean los dos buffers dumb (`FB:122`, `FB:123`) y al mapear el segundo i915 llama a `drm_clflush_sg()`,
+que cae con `#GP` en `clflush` (rip dentro de `drm_clflush_sg+0xca`). Causa: `nth_page(page, n)` de la capa
+era `page + n`, pero las `struct page` de la capa no forman un array contiguo por pfn (cada pagina de shmem
+se asigna sola) e i915 junta paginas fisicamente contiguas en un mismo sg. Ahora
+`nth_page` = `lkpi_pfn_to_page(page->pfn + n)`. Ademas, al activarse el KMS se cierra la ventana
+«AuroraOS DRM» que abrio el commit inicial del driver. Con `make linuxkpi-clean && make linuxkpi` por
+cambiar una cabecera de la capa.

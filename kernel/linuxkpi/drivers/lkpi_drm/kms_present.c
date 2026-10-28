@@ -37,6 +37,7 @@
 
 int lkpi_cmdline_get(const char *key, char *out, size_t outlen) __asm__("cmdline_get");
 void lkpi_kms_screen_size(int *w, int *h) __asm__("drm_lx_kms_screen_size");
+void lkpi_scan_close(int idx) __asm__("drm_lx_scanout_close");
 int lkpi_kms_register(const struct drm_lx_kms_ops *ops) __asm__("drm_lx_kms_register");
 void lkpi_kms_unregister(const struct drm_lx_kms_ops *ops) __asm__("drm_lx_kms_unregister");
 
@@ -294,6 +295,8 @@ static int kms_client_hotplug(struct drm_client_dev *client)
 		K.active = false;
 		goto fail;
 	}
+	/* La ventana «AuroraOS DRM» que abrio el commit inicial del driver ya no pinta nada. */
+	lkpi_scan_close(drm_crtc_index(K.crtc));
 	drm_info(dev, "kms: %s %dx%d@%d con dos buffers, presentacion por page-flip\n", set->connectors[0]->name,
 		 w, h, drm_mode_vrefresh(set->mode));
 	return 0;
