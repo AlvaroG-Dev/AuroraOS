@@ -104,8 +104,15 @@ int drm_get_panel_orientation_quirk(int width, int height)
 int lkpi_drm_core_init(void);
 void lkpi_drm_core_exit(void);
 
+extern unsigned long __drm_debug;
+
 static int __init lkpi_drm_init(void)
 {
+	char opt[16];
+
+	/* drm.debug=0x1e en la linea del kernel, como el parametro de Linux */
+	if (lkpi_cmdline_get("drm.debug", opt, sizeof(opt)))
+		__drm_debug = simple_strtoul(opt, NULL, 0);
 	return lkpi_drm_core_init();
 }
 

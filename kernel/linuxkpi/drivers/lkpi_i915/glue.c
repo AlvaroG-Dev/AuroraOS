@@ -153,4 +153,57 @@ EXPORT_SYMBOL(lkpi_intel_stolen_detect);
 
 void ips_link_to_i915_driver(void) {}
 
+/*
+ * Diagnostico (`lkpi.i915_diag=1`): tras el probe vuelca el estado real de pipe
+ * A, plano primario, DDI, panel y retroiluminacion, y las primeras PTE de la
+ * GGTT, para saber por que la pantalla queda en negro (plano apagado, pipe
+ * parado, panel sin energia o backlight a cero). Solo lee registros.
+ */
+int lkpi_cmdline_get(const char *key, char *out, size_t outlen) __asm__("cmdline_get");
+
+void lkpi_i915_diag(void)
+{
+	static const struct { const char *n; u32 off; } regs[] = {
+		{ "PIPECONF_A", 0x70008 }, { "PIPECONF_B", 0x71008 }, { "PIPECONF_C", 0x72008 },
+		{ "HTOTAL_A", 0x60000 }, { "HTOTAL_B", 0x61000 },
+		{ "DSPCNTR_A", 0x70180 }, { "DSPSTRIDE_A", 0x70188 }, { "DSPSURF_A", 0x7019c },
+		{ "DSPCNTR_B", 0x71180 }, { "DSPSURF_B", 0x7119c },
+		{ "TRANS_DDI_FUNC_A", 0x60400 }, { "TRANS_DDI_FUNC_EDP", 0x6f400 },
+		{ "DDI_BUF_CTL_A", 0x64000 }, { "DDI_BUF_CTL_B", 0x64100 },
+		{ "DDI_BUF_CTL_C", 0x64200 }, { "DDI_BUF_CTL_D", 0x64300 },
+		{ "PP_STATUS", 0xc7200 }, { "PP_CONTROL", 0xc7204 },
+		{ "BLC_PWM_CPU_CTL2", 0x48250 }, { "BLC_PWM_CPU_CTL", 0x48254 },
+		{ "BLC_PWM_PCH_CTL1", 0xc8250 }, { "BLC_PWM_PCH_CTL2", 0xc8254 },
+		{ "HSW_PWR_WELL_CTL1", 0x45400 }, { "HSW_PWR_WELL_CTL2", 0x45404 },
+		{ "GFX_FLSH_CNTL", 0x101008 },
+	};
+	struct pci_dev *pdev = NULL;
+	void __iomem *mmio;
+	char opt[8];
+	unsigned int i;
+
+	if (!lkpi_cmdline_get("lkpi.i915_diag", opt, sizeof(opt)) || opt[0] == '0')
+		return;
+	while ((pdev = pci_get_class(PCI_CLASS_DISPLAY_VGA << 8, pdev))) {
+		if (pdev->vendor != PCI_VENDOR_ID_INTEL || !pdev->driver)
+			continue;
+		mmio = ioremap(pci_resource_start(pdev, 0), 4 << 20);
+		if (!mmio)
+			continue;
+		pr_info("i915-diag: %s BAR0=%#llx\n", pci_name(pdev),
+			(unsigned long long)pci_resource_start(pdev, 0));
+		for (i = 0; i < ARRAY_SIZE(regs); i++)
+			pr_info("i915-diag: %-18s [%#07x] = %#010x\n", regs[i].n, regs[i].off,
+				readl(mmio + regs[i].off));
+		{
+			u32 surf = readl(mmio + 0x7019c);
+			u32 pte0 = readl(mmio + (2 << 20));
+			u32 pteS = readl(mmio + (2 << 20) + (surf >> 12) * 4);
+
+			pr_info("i915-diag: GGTT[0]=%#x GGTT[surf]=%#x (surf=%#x)\n", pte0, pteS, surf);
+		}
+		iounmap(mmio);
+	}
+}
+
 MODULE_LICENSE("GPL");

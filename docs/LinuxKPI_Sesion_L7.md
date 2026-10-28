@@ -65,3 +65,12 @@ Log de Álvaro con `klog.file`. Todo lo que falló venía de una sola causa de d
 | `#UD` en `drm_clflush_virt_range` | Bug de la capa (clflushopt sin CPUID) | Corregido en 33d30846 |
 
 Siguiente: probar con `lkpi.shadow=fb`; lo que falle entonces ya es de i915 sobre la capa real (forcewake, power wells, GMBUS, GGTT). El 3er paso (pantalla nativa) exige que el compositor pinte en un buffer KMS de i915 en lugar del framebuffer del firmware; no está hecho.
+
+## 9. Segundo sondeo real (pantalla aún en negro) y diagnóstico
+
+Log de la Portégé con e574cc04: `memoria stolen 32 MiB en 0xcda00000`, `Initialized i915 1.6.0`,
+sin errores, y el sistema y el compositor siguen vivos (COMP-PERF hasta el final). Con el log a
+nivel INFO no se ve por qué el panel sigue negro, así que se añaden dos herramientas de arranque:
+- `drm.debug=0x1e` (u otra máscara): fija `__drm_debug` como en Linux (lkpi_drm).
+- `lkpi.i915_diag=1`: tras el probe vuelca PIPECONF, plano primario, DDI, panel, backlight,
+  pozos de energía y las primeras PTE de la GGTT (`i915-diag:` en el log). Solo lee registros.
