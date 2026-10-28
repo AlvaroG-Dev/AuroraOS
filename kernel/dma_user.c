@@ -50,7 +50,11 @@ static int dma_buf_mmap(vfs_node_t *node, struct process *proc,
 
   // Mapeo Write-Back (por defecto en x86) para máximo rendimiento.
   // La coherencia con el hardware se garantiza con DMA_SYNC (clflush).
-  uint64_t pte_flags = PTE_USER | PTE_NX;
+  /* PTE_SPECIAL: el buffer es del nodo dma_buf (lo libera dma_buf_close).
+   * Sin la marca, paging_free_user_space() devolvia las paginas al PMM al
+   * salir el proceso y close las liberaba otra vez ("doble free"); el HBA
+   * seguia haciendo DMA sobre paginas ya reutilizadas. */
+  uint64_t pte_flags = PTE_USER | PTE_NX | PTE_SPECIAL;
   if (prot & 0x02 /* PROT_WRITE */)
     pte_flags |= PTE_WRITABLE;
 

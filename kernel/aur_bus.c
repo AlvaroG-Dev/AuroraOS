@@ -202,6 +202,41 @@ static enum sup_action aur_sup_step(struct aur_sup *s, uint64_t now, int reap,
 
 static process_t *aur_spawn(const char *path, const char *arg);
 
+// Un driver PCI que se va para siempre deja su dispositivo con bus master
+// activo: el HBA/NIC seguiria haciendo DMA sobre buffers que el kernel ya ha
+// devuelto al PMM (y que se reutilizan: backbuffer, heap...). Se apaga el bus
+// master del BDF "dddd:bb:ss.f" que recibio como argumento.
+static void aur_quiesce_pci(const char *bdf) {
+  unsigned v[4] = {0, 0, 0, 0};
+  int n = 0, digits = 0;
+  for (const char *c = bdf; *c && n < 4; c++) {
+    int d;
+    if (*c >= '0' && *c <= '9')
+      d = *c - '0';
+    else if (*c >= 'a' && *c <= 'f')
+      d = *c - 'a' + 10;
+    else if ((*c == ':' && n < 2) || (*c == '.' && n == 2)) {
+      if (!digits)
+        return;
+      n++;
+      digits = 0;
+      continue;
+    } else
+      return;
+    v[n] = v[n] * 16 + (unsigned)d;
+    digits++;
+  }
+  if (n != 3 || !digits || v[0] != 0 || v[1] > 255 || v[2] > 31 || v[3] > 7)
+    return;
+  uint16_t cmd = pci_read_config_word((uint8_t)v[1], (uint8_t)v[2],
+                                      (uint8_t)v[3], 0x04);
+  if (!(cmd & PCI_CMD_BUS_MASTER))
+    return;
+  pci_write_config_word((uint8_t)v[1], (uint8_t)v[2], (uint8_t)v[3], 0x04,
+                        (uint16_t)(cmd & ~PCI_CMD_BUS_MASTER));
+  LOG_INFO("[AUR-SUP] %s: bus master desactivado (driver ya no esta)", bdf);
+}
+
 static bool aur_sup_never(void *arg) {
   (void)arg;
   return false;
@@ -246,8 +281,15 @@ static int aur_sup_thread(void *arg) {
         memcpy(path, s->path, sizeof(path));
         memcpy(arg, s->arg, sizeof(arg));
       }
+      int gone = state == SUP_RUNNING && reap != -EBUSY &&
+                 (s->state == SUP_FREE || s->state == SUP_GIVEN_UP);
+      char gone_arg[sizeof(s->arg)];
+      if (gone)
+        memcpy(gone_arg, s->arg, sizeof(gone_arg));
       spin_unlock_irqrestore(&g_sup_lock, fl);
 
+      if (gone)
+        aur_quiesce_pci(gone_arg);
       if (act != SUP_RESTART_NOW)
         continue;
       process_t *p = aur_spawn(path, arg);
