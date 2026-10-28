@@ -69,7 +69,7 @@ Regresión con la configuración normal (sin `lkpi.load`) tras todos los cambios
 
 ## 5. Pendiente / fuera de alcance
 
-- **`kmscube`**: no hay Mesa en `precompiled/`; se probará con la pila gráfica 3D.
+- **`kmscube`**: faltan `libgallium` y `libLLVM` (`scripts/fetch-mesa.sh`, necesita red y QEMU con ≥ 1,5 GB) y el binario `kmscube` (paquete de Ubuntu, pasarlo como argumento a `fetch-mesa.sh`). La ruta GBM sobre DRM (`kms_swrast` con dumb + PRIME) no se ha ejercitado nunca en Aurora y puede destapar ioctls o fallos de `mmap`.
 - Cursor de `virtio-gpu` no compuesto en la ventana de scanout.
 - Hot-plug físico de monitores (QEMU no lo genera): solo se probó el reenvío de uevents.
 - Que el syncobj nativo adopte la ABI de Linux en `IMPORT_SYNC_FILE` (handle existente).
