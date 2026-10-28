@@ -244,8 +244,13 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
   dump_registers(regs);
   dump_scheduler();
   dump_paging();
+  /* El volcado de heap/slab son cientos de lineas: por pantalla taparia el
+   * motivo del panic. Se hace con el hook de framebuffer apagado. */
+  void (*fb_saved)(char, klog_level_t, klog_fb_style_t) = klog_fb_hook;
+  klog_fb_hook = NULL;
   dump_slab();
   dump_heap();
+  klog_fb_hook = fb_saved;
 
   uint64_t gs_base = rdmsr(0xC0000101);
   uint64_t kgs_base = rdmsr(0xC0000102);
@@ -262,6 +267,25 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
   if (regs) {
     serial_puts("\n--- Backtrace ---");
     backtrace(regs->rbp, regs->rip, 16);
+  }
+
+  /* Resumen final en pantalla: es lo ultimo que queda visible. */
+  if (regs) {
+    LOG_PANIC("==> vector=%lu err=0x%lx rip=0x%lx rsp=0x%lx",
+              (unsigned long)regs->int_num, (unsigned long)regs->error_code,
+              (unsigned long)regs->rip, (unsigned long)regs->rsp);
+    const uint8_t *ip = (const uint8_t *)regs->rip;
+    if (is_kernel_text(regs->rip))
+      LOG_PANIC("==> bytes en rip: %02x %02x %02x %02x %02x %02x %02x %02x",
+                ip[0], ip[1], ip[2], ip[3], ip[4], ip[5], ip[6], ip[7]);
+    uint64_t f = regs->rbp;
+    for (int i = 0; i < 6 && f && !(f & 7); i++) {
+      uint64_t *fr = (uint64_t *)f;
+      if (!is_kernel_text(fr[1]))
+        break;
+      LOG_PANIC("==> bt#%d 0x%lx", i, (unsigned long)fr[1]);
+      f = fr[0];
+    }
   }
 
   serial_puts("\n=======================================================\n");
