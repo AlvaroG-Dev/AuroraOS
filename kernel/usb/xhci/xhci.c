@@ -1024,36 +1024,39 @@ usb_hcd_t g_xhci_hcd = {
     .free_device = xhci_hcd_free_device,
 };
 
-// Chipsets Intel (Panther Point, Lynx Point, Wildcat Point...): con arranque
-// BIOS los puertos USB 2.0 quedan enrutados al EHCI y los SuperSpeed sin
-// activar en el xHCI hasta que el SO lo pide (XUSB2PR / USB3_PSSEN, igual que
-// usb_enable_intel_xhci_ports() de Linux). Sin esto el xHCI no ve ningun
-// dispositivo (ni el pendrive, ni teclado ni raton USB).
-static int xhci_intel_route_ports(pci_device_t *d) {
+// Chipsets Intel con EHCI + xHCI (Panther Point 7-series, Lynx Point 8-series,
+// Wildcat Point...): hasta que el SO lo pida, el firmware deja los puertos
+// USB2 de las tomas compartidas enrutados al EHCI, y un pendrive USB2 no se
+// ve desde el xHCI. Como Linux (usb_enable_intel_xhci_ports): activar los
+// puertos SuperSpeed (USB3_PSSEN) y pasar los USB2 al xHCI (XUSB2PR) segun
+// lo que el chipset declara disponible (USB3PRM / USB2PRM).
+#define INTEL_XUSB2PR 0xD0
+#define INTEL_USB2PRM 0xD4
+#define INTEL_USB3_PSSEN 0xD8
+#define INTEL_USB3PRM 0xDC
+
+static void xhci_intel_route_ports(pci_device_t *d) {
   if (d->vendor_id != 0x8086)
-    return 0;
+    return;
   switch (d->device_id) {
-  case 0x1e31:            // Panther Point (serie 7)
-  case 0x8c31: case 0x9c31: // Lynx Point / Lynx Point-LP (serie 8)
-  case 0x8cb1: case 0x9cb1: // Wildcat Point (serie 9)
-  case 0x9d2f: case 0xa12f: // Sunrise Point (serie 100)
+  case 0x1E31: // Panther Point
+  case 0x8C31: // Lynx Point
+  case 0x9C31: // Lynx Point-LP
+  case 0x8CB1: // Wildcat Point
+  case 0x9CB1: // Wildcat Point-LP
+  case 0x9DED: // Cannon Point-LP (no hace dano si no aplica)
     break;
   default:
-    return 0;
+    return;
   }
-  uint8_t b = d->bus, sl = d->slot, f = d->func;
-  uint32_t usb2prm = pci_read_config_dword(b, sl, f, 0xD4);
-  uint32_t usb3prm = pci_read_config_dword(b, sl, f, 0xDC);
-  uint32_t pre2 = pci_read_config_dword(b, sl, f, 0xD0);
-  uint32_t pre3 = pci_read_config_dword(b, sl, f, 0xD8);
-  pci_write_config_dword(b, sl, f, 0xD8, usb3prm);
-  pci_write_config_dword(b, sl, f, 0xD0, usb2prm);
-  LOG_INFO("[xHCI] %02x:%02x.%x Intel %04x: enrutado de puertos a xHCI "
-           "(XUSB2PR %08x->%08x, USB3_PSSEN %08x->%08x)",
-           b, sl, f, d->device_id, (unsigned)pre2,
-           (unsigned)pci_read_config_dword(b, sl, f, 0xD0), (unsigned)pre3,
-           (unsigned)pci_read_config_dword(b, sl, f, 0xD8));
-  return 1;
+  uint32_t usb3 = pci_read_config_dword(d->bus, d->slot, d->func, INTEL_USB3PRM);
+  pci_write_config_dword(d->bus, d->slot, d->func, INTEL_USB3_PSSEN, usb3);
+  uint32_t usb2 = pci_read_config_dword(d->bus, d->slot, d->func, INTEL_USB2PRM);
+  pci_write_config_dword(d->bus, d->slot, d->func, INTEL_XUSB2PR, usb2);
+  LOG_INFO("[xHCI] Intel %04x: puertos enrutados al xHCI (USB3PRM=%08x "
+           "USB2PRM=%08x, XUSB2PR=%08x)",
+           d->device_id, usb3, usb2,
+           pci_read_config_dword(d->bus, d->slot, d->func, INTEL_XUSB2PR));
 }
 
 static int xhci_probe_inner(pci_device_t *pci_dev, const pci_device_id_t *id) {
