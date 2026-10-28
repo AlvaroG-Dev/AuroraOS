@@ -504,8 +504,8 @@ static struct ttm_placement kt_p_sys = { 1, &kt_pl_sys };
 static struct ttm_placement kt_p_vram_tt = { 2, kt_pl_vram_tt };
 
 /* El BO se crea reservado y validado; se devuelve sin reservar. */
-static struct kt_bo *kt_bo_create(struct kt_dev *kd, size_t size, struct ttm_placement *p,
-				  int *errp)
+static struct kt_bo *kt_bo_create_type(struct kt_dev *kd, size_t size, struct ttm_placement *p,
+				       enum ttm_bo_type type, int *errp)
 {
 	struct kt_bo *b = kzalloc(sizeof(*b), GFP_KERNEL);
 	int ret;
@@ -516,8 +516,7 @@ static struct kt_bo *kt_bo_create(struct kt_dev *kd, size_t size, struct ttm_pla
 	}
 	drm_gem_private_object_init(&kd->drm, &b->bo.base, size);
 	atomic_inc(&kd->bos);
-	ret = ttm_bo_init_validate(&kd->bdev, &b->bo, ttm_bo_type_kernel, p, 1, false, NULL, NULL,
-				   kt_bo_destroy);
+	ret = ttm_bo_init_validate(&kd->bdev, &b->bo, type, p, 1, false, NULL, NULL, kt_bo_destroy);
 	if (ret) {
 		/* ttm_bo_init_validate ya llamo a destroy */
 		*errp = ret;
@@ -525,6 +524,12 @@ static struct kt_bo *kt_bo_create(struct kt_dev *kd, size_t size, struct ttm_pla
 	}
 	*errp = 0;
 	return b;
+}
+
+static struct kt_bo *kt_bo_create(struct kt_dev *kd, size_t size, struct ttm_placement *p,
+				  int *errp)
+{
+	return kt_bo_create_type(kd, size, p, ttm_bo_type_kernel, errp);
 }
 
 static int kt_bo_validate(struct kt_bo *b, struct ttm_placement *p)
@@ -1273,6 +1278,272 @@ static void test_ttm_shrinker(struct kt_dev *kd)
 	kd->tt_caching = ttm_cached;
 }
 
+
+#ifdef KT_DEVICE
+/* --------------------------------------------------- /dev/lkpi_ttm (L6) */
+
+#include <linux/fs.h>
+#include <linux/idr.h>
+#include <linux/miscdevice.h>
+#include <linux/uaccess.h>
+#include "lkpi_test_ttm_uapi.h"
+
+struct ktd_file {
+	struct mutex lock;
+	struct idr bos;			/* handle -> struct kt_bo */
+	struct kt_bo *ballast[64];
+	unsigned int nballast;
+};
+
+static struct ttm_placement *ktd_placement(u32 dom)
+{
+	switch (dom) {
+	case LKPI_TTM_DOM_VRAM:
+		return &kt_p_vram;
+	case LKPI_TTM_DOM_GTT:
+		return &kt_p_tt;
+	case LKPI_TTM_DOM_VRAM_GTT:
+		return &kt_p_vram_tt;
+	}
+	return NULL;
+}
+
+static int ktd_open(struct inode *inode, struct file *file)
+{
+	struct ktd_file *f = kzalloc(sizeof(*f), GFP_KERNEL);
+
+	if (!f)
+		return -ENOMEM;
+	mutex_init(&f->lock);
+	idr_init(&f->bos);
+	file->private_data = f;
+	/* como drm_open(): los PTE de los BO cuelgan del address_space del dispositivo */
+	file->f_mapping = kt->drm.anon_inode->i_mapping;
+	return 0;
+}
+
+static int ktd_release(struct inode *inode, struct file *file)
+{
+	struct ktd_file *f = file->private_data;
+	struct kt_bo *b;
+	int id;
+	unsigned int i;
+
+	idr_for_each_entry(&f->bos, b, id)
+		kt_bo_free(b);
+	idr_destroy(&f->bos);
+	for (i = 0; i < f->nballast; i++)
+		kt_bo_free(f->ballast[i]);
+	kfree(f);
+	return 0;
+}
+
+static struct kt_bo *ktd_lookup(struct ktd_file *f, u32 handle)
+{
+	return idr_find(&f->bos, handle);
+}
+
+static long ktd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct ktd_file *f = file->private_data;
+	void __user *uarg = (void __user *)arg;
+	long ret = 0;
+
+	mutex_lock(&f->lock);
+	switch (cmd) {
+	case LKPI_TTM_IOC_CREATE: {
+		struct lkpi_ttm_create c;
+		struct ttm_placement *p;
+		struct kt_bo *b;
+		int err, id;
+
+		if (copy_from_user(&c, uarg, sizeof(c))) {
+			ret = -EFAULT;
+			break;
+		}
+		p = ktd_placement(c.domain);
+		if (!p || !c.size || c.size > (1u << 20)) {
+			ret = -EINVAL;
+			break;
+		}
+		b = kt_bo_create_type(kt, PAGE_ALIGN(c.size), p, ttm_bo_type_device, &err);
+		if (!b) {
+			ret = err;
+			break;
+		}
+		id = idr_alloc(&f->bos, b, 1, 0, GFP_KERNEL);
+		if (id < 0) {
+			kt_bo_free(b);
+			ret = id;
+			break;
+		}
+		c.handle = id;
+		c.offset = drm_vma_node_offset_addr(&b->bo.base.vma_node);
+		if (copy_to_user(uarg, &c, sizeof(c)))
+			ret = -EFAULT;
+		break;
+	}
+	case LKPI_TTM_IOC_MOVE: {
+		struct lkpi_ttm_move m;
+		struct ttm_placement *p;
+		struct kt_bo *b;
+
+		if (copy_from_user(&m, uarg, sizeof(m))) {
+			ret = -EFAULT;
+			break;
+		}
+		b = ktd_lookup(f, m.handle);
+		p = ktd_placement(m.domain);
+		ret = (!b || !p) ? -EINVAL : kt_bo_validate(b, p);
+		break;
+	}
+	case LKPI_TTM_IOC_INFO: {
+		struct lkpi_ttm_info i;
+		struct kt_bo *b;
+
+		if (copy_from_user(&i, uarg, sizeof(i))) {
+			ret = -EFAULT;
+			break;
+		}
+		b = ktd_lookup(f, i.handle);
+		if (!b) {
+			ret = -EINVAL;
+			break;
+		}
+		dma_resv_lock(b->bo.base.resv, NULL);
+		i.mem_type = b->bo.resource ? b->bo.resource->mem_type : 0;
+		dma_resv_unlock(b->bo.base.resv);
+		i.usage_vram = kt->vram.man.usage;
+		i.size = b->bo.base.size;
+		if (copy_to_user(uarg, &i, sizeof(i)))
+			ret = -EFAULT;
+		break;
+	}
+	case LKPI_TTM_IOC_FILL:
+	case LKPI_TTM_IOC_CHECK: {
+		struct lkpi_ttm_pattern pt;
+		struct kt_bo *b;
+
+		if (copy_from_user(&pt, uarg, sizeof(pt))) {
+			ret = -EFAULT;
+			break;
+		}
+		b = ktd_lookup(f, pt.handle);
+		if (!b) {
+			ret = -EINVAL;
+			break;
+		}
+		pt.bad = kt_bo_rw(b, pt.seed, cmd == LKPI_TTM_IOC_CHECK);
+		if (cmd == LKPI_TTM_IOC_CHECK && copy_to_user(uarg, &pt, sizeof(pt)))
+			ret = -EFAULT;
+		break;
+	}
+	case LKPI_TTM_IOC_DESTROY: {
+		u32 h;
+		struct kt_bo *b;
+
+		if (copy_from_user(&h, uarg, sizeof(h))) {
+			ret = -EFAULT;
+			break;
+		}
+		b = idr_remove(&f->bos, h);
+		if (!b)
+			ret = -EINVAL;
+		else
+			kt_bo_free(b);
+		break;
+	}
+	case LKPI_TTM_IOC_PRESSURE: {
+		struct lkpi_ttm_pressure pr;
+		unsigned int i;
+
+		if (copy_from_user(&pr, uarg, sizeof(pr))) {
+			ret = -EFAULT;
+			break;
+		}
+		for (i = 0; i < f->nballast; i++)
+			kt_bo_free(f->ballast[i]);
+		f->nballast = 0;
+		for (i = 0; i < pr.count && i < ARRAY_SIZE(f->ballast); i++) {
+			int err;
+			struct kt_bo *b = kt_bo_create(kt, 256 * 1024, &kt_p_vram, &err);
+
+			if (!b) {
+				ret = err;
+				break;
+			}
+			f->ballast[f->nballast++] = b;
+		}
+		break;
+	}
+	default:
+		ret = -ENOTTY;
+	}
+	mutex_unlock(&f->lock);
+	return ret;
+}
+
+static int ktd_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct drm_vma_offset_node *node;
+	struct ttm_buffer_object *bo = NULL;
+	int ret;
+
+	drm_vma_offset_lock_lookup(kt->bdev.vma_manager);
+	node = drm_vma_offset_exact_lookup_locked(kt->bdev.vma_manager, vma->vm_pgoff,
+						  vma_pages(vma));
+	if (node) {
+		bo = container_of(node, struct ttm_buffer_object, base.vma_node);
+		if (!kref_get_unless_zero(&bo->kref))
+			bo = NULL;
+	}
+	drm_vma_offset_unlock_lookup(kt->bdev.vma_manager);
+	if (!bo)
+		return -EINVAL;
+	ret = ttm_bo_mmap_obj(vma, bo);
+	ttm_bo_put(bo);
+	return ret;
+}
+
+static const struct file_operations ktd_fops = {
+	.owner = THIS_MODULE,
+	.open = ktd_open,
+	.release = ktd_release,
+	.unlocked_ioctl = ktd_ioctl,
+	.mmap = ktd_mmap,
+};
+
+static struct miscdevice ktd_misc = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "lkpi_ttm",
+	.fops = &ktd_fops,
+	.mode = 0666,
+};
+
+static int __init test_ttm_dev_init(void)
+{
+	int ret = kt_setup();
+
+	if (!ret)
+		ret = misc_register(&ktd_misc);
+	if (ret) {
+		kt_teardown();
+		return ret;
+	}
+	return 0;
+}
+
+static void __exit test_ttm_dev_exit(void)
+{
+	misc_deregister(&ktd_misc);
+	kt_teardown();
+}
+
+module_init(test_ttm_dev_init);
+module_exit(test_ttm_dev_exit);
+MODULE_LICENSE("GPL");
+#else
+
 /* --------------------------------------------------------------- init */
 
 static int __init test_ttm_init(void)
@@ -1318,3 +1589,4 @@ static void __exit test_ttm_exit(void)
 module_init(test_ttm_init);
 module_exit(test_ttm_exit);
 MODULE_LICENSE("GPL");
+#endif /* KT_DEVICE */

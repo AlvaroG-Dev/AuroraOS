@@ -4,6 +4,8 @@
 // mmap de memoria DMA y por fallo de pagina (fork, mprotect, zap), poll,
 // epoll, fasync (SIGIO), esperas interrumpidas por senales (EINTR y SIGKILL),
 // firmware real, dma_buf con /dev/dri/card0 en los dos sentidos y debugfs.
+// L6: buffers de ttm (/dev/lkpi_ttm, tests/linuxkpi/lkpi_test_ttm) mapeados
+// con ttm_bo_vm: VRAM -> GTT -> VRAM y evicion por presion con el mapa vivo.
 //
 // Carga linuxkpi.kur y lkpi_test_dev.kur con finit_module y los descarga al
 // final. Como la suite del kernel tambien carga y descarga la capa, espera a
@@ -30,6 +32,7 @@
 #include <unistd.h>
 
 #include "../../../../tests/linuxkpi/lkpi_test_dev/lkpi_test_uapi.h"
+#include "../../../../tests/linuxkpi/lkpi_test_ttm/lkpi_test_ttm_uapi.h"
 
 #define MODDIR "/lib/modules/linuxkpi"
 
@@ -534,6 +537,141 @@ static void test_debugfs(void)
 		close(fd);
 }
 
+
+/* ------------------------------------------------------- L6: ttm_bo_vm */
+
+static void ttm_fill_user(unsigned *p, size_t size, unsigned seed)
+{
+	size_t npages = size / 4096, pg, i;
+
+	for (pg = 0; pg < npages; pg += 16) {
+		size_t n = npages - pg < 16 ? npages - pg : 16;
+
+		for (i = 0; i < n * 1024; i += 61)
+			p[pg * 1024 + i] = LKPI_TTM_WORD(seed, pg, i);
+	}
+}
+
+static int ttm_check_user(const unsigned *p, size_t size, unsigned seed)
+{
+	size_t npages = size / 4096, pg, i;
+	int bad = 0;
+
+	for (pg = 0; pg < npages; pg += 16) {
+		size_t n = npages - pg < 16 ? npages - pg : 16;
+
+		for (i = 0; i < n * 1024; i += 61)
+			if (p[pg * 1024 + i] != LKPI_TTM_WORD(seed, pg, i))
+				bad++;
+	}
+	return bad;
+}
+
+static int ttm_mem(int fd, unsigned handle, unsigned *usage)
+{
+	struct lkpi_ttm_info in = { .handle = handle };
+
+	if (xioctl(fd, LKPI_TTM_IOC_INFO, &in))
+		return -1;
+	if (usage)
+		*usage = in.usage_vram;
+	return in.mem_type;
+}
+
+static int ttm_kcheck(int fd, unsigned handle, unsigned seed)
+{
+	struct lkpi_ttm_pattern pt = { .handle = handle, .seed = seed };
+
+	if (xioctl(fd, LKPI_TTM_IOC_CHECK, &pt))
+		return -1;
+	return pt.bad;
+}
+
+static void test_ttm_user(void)
+{
+	const size_t size = 256 * 1024;
+	struct lkpi_ttm_create c = { .size = size, .domain = LKPI_TTM_DOM_VRAM };
+	struct lkpi_ttm_create g = { .size = 64 * 1024, .domain = LKPI_TTM_DOM_GTT };
+	struct lkpi_ttm_move mv;
+	struct lkpi_ttm_pattern pt;
+	struct lkpi_ttm_pressure pr;
+	unsigned *p, *q;
+	unsigned usage;
+	int fd, rc;
+
+	rc = load(MODDIR "/lkpi_drm.kur");
+	check(rc == 0, "cargar lkpi_drm.kur (%d)", rc);
+	rc = load(MODDIR "/lkpi_ttm.kur");
+	check(rc == 0, "cargar lkpi_ttm.kur (%d)", rc);
+	rc = load(MODDIR "/tests/lkpi_test_ttm_dev.kur");
+	check(rc == 0, "cargar lkpi_test_ttm_dev.kur (%d)", rc);
+	fd = open(LKPI_TTM_DEV, O_RDWR | O_CLOEXEC);
+	check(fd >= 0, "abrir " LKPI_TTM_DEV);
+	if (fd < 0)
+		return;
+	/* un BO en VRAM, mapeado y escrito desde el proceso */
+	check(xioctl(fd, LKPI_TTM_IOC_CREATE, &c) == 0 && c.handle, "ttm: crear BO en VRAM");
+	check(ttm_mem(fd, c.handle, &usage) == 2 && usage >= size, "ttm: el BO esta en VRAM");
+	p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)c.offset);
+	check(p != MAP_FAILED, "ttm: mmap del BO (offset %llx)", (unsigned long long)c.offset);
+	if (p == MAP_FAILED) {
+		close(fd);
+		return;
+	}
+	ttm_fill_user(p, size, 0xa11ce);
+	check(ttm_check_user(p, size, 0xa11ce) == 0, "ttm: el proceso lee lo que escribio (VRAM)");
+	check(ttm_kcheck(fd, c.handle, 0xa11ce) == 0, "ttm: el kernel ve lo escrito desde el mapa");
+	/* VRAM -> GTT: se retiran los PTE y el mapa vuelve a fallar sobre paginas del sistema */
+	mv.handle = c.handle;
+	mv.domain = LKPI_TTM_DOM_GTT;
+	check(xioctl(fd, LKPI_TTM_IOC_MOVE, &mv) == 0, "ttm: mover VRAM -> GTT");
+	check(ttm_mem(fd, c.handle, &usage) == 1 && usage == 0, "ttm: ahora en GTT, VRAM libre");
+	check(ttm_check_user(p, size, 0xa11ce) == 0, "ttm: el contenido sobrevive al movimiento (mapa vivo)");
+	ttm_fill_user(p, size, 0xb0b);
+	check(ttm_kcheck(fd, c.handle, 0xb0b) == 0, "ttm: el kernel ve lo escrito en GTT");
+	/* GTT -> VRAM */
+	mv.domain = LKPI_TTM_DOM_VRAM;
+	check(xioctl(fd, LKPI_TTM_IOC_MOVE, &mv) == 0, "ttm: mover GTT -> VRAM");
+	check(ttm_mem(fd, c.handle, NULL) == 2, "ttm: de vuelta en VRAM");
+	check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: el contenido sobrevive a la vuelta");
+	/* presion: 16 BO de 256 KiB solo-VRAM llenan los 4 MiB y expulsan al nuestro */
+	pr.count = 16;
+	pr.pad = 0;
+	check(xioctl(fd, LKPI_TTM_IOC_PRESSURE, &pr) == 0, "ttm: llenar la VRAM con 16 BO");
+	check(ttm_mem(fd, c.handle, &usage) == 1, "ttm: la presion expulso nuestro BO a GTT");
+	check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: expulsado con el mapa vivo, el dato sigue");
+	pr.count = 0;
+	check(xioctl(fd, LKPI_TTM_IOC_PRESSURE, &pr) == 0, "ttm: soltar la presion");
+	/* un segundo BO solo en GTT; dos mapas a la vez */
+	check(xioctl(fd, LKPI_TTM_IOC_CREATE, &g) == 0 && g.handle != c.handle, "ttm: crear BO en GTT");
+	q = mmap(NULL, g.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)g.offset);
+	check(q != MAP_FAILED, "ttm: mmap del segundo BO");
+	if (q != MAP_FAILED) {
+		ttm_fill_user(q, g.size, 0xc0de);
+		check(ttm_kcheck(fd, g.handle, 0xc0de) == 0, "ttm: el kernel ve el segundo BO");
+		mv.handle = g.handle;
+		mv.domain = LKPI_TTM_DOM_VRAM;
+		check(xioctl(fd, LKPI_TTM_IOC_MOVE, &mv) == 0, "ttm: subir el segundo BO a VRAM");
+		check(ttm_check_user(q, g.size, 0xc0de) == 0, "ttm: el segundo BO conserva el dato");
+		check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: el primero tambien");
+		munmap(q, g.size);
+	}
+	/* pedir una pagina fuera del BO no es posible: el mmap debe fallar */
+	errno = 0;
+	check(mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)c.offset + (64 << 20)) == MAP_FAILED,
+	      "ttm: mmap de un offset sin BO falla");
+	munmap(p, size);
+	check(xioctl(fd, LKPI_TTM_IOC_DESTROY, &c.handle) == 0, "ttm: destruir el primer BO");
+	check(xioctl(fd, LKPI_TTM_IOC_DESTROY, &g.handle) == 0, "ttm: destruir el segundo BO");
+	memset(&pt, 0, sizeof(pt));
+	pt.handle = c.handle;
+	check(xioctl(fd, LKPI_TTM_IOC_CHECK, &pt) != 0, "ttm: el handle destruido ya no existe");
+	close(fd);
+	check(syscall(SYS_delete_module, "lkpi_test_ttm_dev", O_NONBLOCK) == 0, "descargar lkpi_test_ttm_dev");
+	check(syscall(SYS_delete_module, "lkpi_ttm", O_NONBLOCK) == 0, "descargar lkpi_ttm");
+	check(syscall(SYS_delete_module, "lkpi_drm", O_NONBLOCK) == 0, "descargar lkpi_drm");
+}
+
 int main(void)
 {
 	struct lkpi_test_info a, b;
@@ -568,6 +706,7 @@ int main(void)
 	check(syscall(SYS_delete_module, "lkpi_test_dev", O_NONBLOCK) == 0,
 	      "descargar lkpi_test_dev");
 	check(stat(LKPI_TEST_DEV, &st) == -1 && errno == ENOENT, "/dev/lkpi_test desaparece");
+	test_ttm_user();
 	check(syscall(SYS_delete_module, "linuxkpi", O_NONBLOCK) == 0, "descargar linuxkpi");
 	if (g_fail)
 		printf("LKPI-TEST: FAIL %d de %d (%d omitidas)\n", g_fail, g_pass + g_fail, g_skip);
