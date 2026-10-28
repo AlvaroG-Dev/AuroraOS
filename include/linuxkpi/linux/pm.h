@@ -58,7 +58,7 @@ struct dev_pm_info {
 	bool is_prepared:1;
 	bool is_suspended:1;
 	bool should_wakeup:1;
-	int usage_count;		/* runtime PM: solo se cuenta */
+	atomic_t usage_count;		/* runtime PM: solo se cuenta */
 	int disable_depth;
 };
 
@@ -104,4 +104,20 @@ static inline int device_init_wakeup(struct device *dev, bool enable) { return 0
 static inline int device_set_wakeup_enable(struct device *dev, bool enable) { return 0; }
 static inline bool device_may_wakeup(struct device *dev) { return false; }
 
+
+typedef int suspend_state_t;
+#define PM_SUSPEND_ON		0
+#define PM_SUSPEND_TO_IDLE	1
+#define PM_SUSPEND_STANDBY	2
+#define PM_SUSPEND_MEM		3
+#define PM_SUSPEND_MAX		4
+#define pm_suspend_target_state	PM_SUSPEND_ON
+#define DPM_FLAG_NO_DIRECT_COMPLETE	BIT(0)
+#define DPM_FLAG_SMART_PREPARE		BIT(1)
+#define DPM_FLAG_SMART_SUSPEND		BIT(2)
+#define DPM_FLAG_MAY_SKIP_RESUME	BIT(3)
+struct device;
+static inline void dev_pm_set_driver_flags(struct device *dev, u32 flags) {}
+extern const char lkpi_power_group_name[];
+#define power_group_name lkpi_power_group_name
 #endif

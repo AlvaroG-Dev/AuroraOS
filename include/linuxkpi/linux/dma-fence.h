@@ -19,6 +19,7 @@
 #include <linux/kref.h>
 #include <linux/sched.h>
 #include <linux/printk.h>
+#include <linux/rbtree.h>
 #include <linux/rcupdate.h>
 #include <linux/timekeeping.h>
 #include <linux/ktime.h>

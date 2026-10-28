@@ -5,7 +5,7 @@
 
 #include <linux/lockdep_types.h>
 
-#define lockdep_init_map(map, name, key, sub) do { (void)(map); (void)(key); } while (0)
+#define lockdep_init_map(map, name, key, sub) do { (void)(key); } while (0)
 #define lockdep_init_map_type(map, name, key, sub, ...) do { (void)(map); } while (0)
 #define lockdep_set_class(lock, key) do { (void)(lock); (void)(key); } while (0)
 #define lockdep_set_class_and_name(lock, key, name) do { (void)(lock); (void)(key); } while (0)

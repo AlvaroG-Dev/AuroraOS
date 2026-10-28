@@ -6462,6 +6462,63 @@ static void test_lkpi_drm(void) {
 REGISTER_TEST_FLAGS("linuxkpi: L5 DRM/KMS (núcleo de Linux, modeset atómico)", test_lkpi_drm,
                     TEST_FLAG_BLOCKING);
 
+// L6 (K9): shrinker, split_page, swap en RAM, kmap con cache WC, io_mapping,
+// mmu_notifier (stub) y hmm desactivado, sobre la capa sola.
+static void test_lkpi_k9(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k9")); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 shrinker, split_page, swap en RAM, mmu_notifier", test_lkpi_k9,
+                    TEST_FLAG_BLOCKING);
+
+// L6: ttm, drm_buddy y gpu-sched (lkpi_ttm.kur sobre lkpi_drm.kur) con un driver
+// de memoria de dispositivo simulado: VRAM en RAM gestionada con drm_buddy, GTT,
+// evicion, swap a shmem y un motor de copia detrás de un drm_gpu_scheduler.
+static void lkpi_ttm_run(const char *test) {
+  struct kur_module *d = NULL, *t = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int rc = kur_loader_load_file(LKPI_DIR "/lkpi_drm.kur", &d);
+  TEST_ASSERT(rc == 0 && d, "lkpi_drm no carga (rc=%d)", rc);
+  if (rc != 0 || !d)
+    return;
+  rc = kur_loader_load_file(LKPI_DIR "/lkpi_ttm.kur", &t);
+  TEST_ASSERT(rc == 0 && t, "lkpi_ttm no carga (rc=%d)", rc);
+  if (rc == 0 && t) {
+    lkpi_unload_test(lkpi_load_test(test));
+    lkpi_unload_test(t);
+  }
+  lkpi_unload_test(d);
+}
+static void test_lkpi_ttm(void) { if (lkpi_boot_owned()) return; lkpi_ttm_run("lkpi_test_ttm"); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 ttm, drm_buddy y gpu-sched (VRAM simulada)", test_lkpi_ttm,
+                    TEST_FLAG_BLOCKING);
+static void test_lkpi_ttm_smp(void) { if (lkpi_boot_owned()) return; lkpi_ttm_run("lkpi_test_ttm_smp"); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 ttm estrés SMP (hilos compitiendo por el VRAM)",
+                    test_lkpi_ttm_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
+// L7: i915 completo (lkpi_i915.kur) sobre drm, ttm y los helpers de display.
+// Sin GPU Intel en QEMU solo se comprueba que enlaza, inicializa (registro del
+// driver PCI, tracepoints, params) y se descarga sin dejar nada; el sondeo real
+// lo valida el autor en hardware (Gen7.5, Toshiba Portégé R30-A).
+static void test_lkpi_i915_load(void) {
+  if (lkpi_boot_owned())
+    return;
+  static const char *const names[] = {"lkpi_drm", "lkpi_ttm", "lkpi_drm_display", "lkpi_i915"};
+  struct kur_module *m[4] = {0};
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int n = 0;
+  for (; n < 4; n++) {
+    char path[96];
+    snprintf(path, sizeof path, LKPI_DIR "/%s.kur", names[n]);
+    int rc = kur_loader_load_file(path, &m[n]);
+    TEST_ASSERT(rc == 0 && m[n], "%s no carga (rc=%d)", names[n], rc);
+    if (rc != 0 || !m[n])
+      break;
+  }
+  for (int i = n - 1; i >= 0; i--)
+    if (m[i])
+      lkpi_unload_test(m[i]);
+}
+REGISTER_TEST_FLAGS("linuxkpi: L7 i915 (carga y descarga sin GPU Intel)", test_lkpi_i915_load,
+                    TEST_FLAG_BLOCKING);
+
 static void test_lkpi_unload(void) {
   if (lkpi_boot_owned())
     return;

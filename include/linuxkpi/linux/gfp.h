@@ -62,4 +62,8 @@ static inline bool gfpflags_allow_blocking(const gfp_t gfp)
 #define numa_mem_id() 0
 #define dev_to_node(dev) NUMA_NO_NODE
 
+/* Contexto de reclamacion de lockdep: sin lockdep, no hace nada. */
+#define fs_reclaim_acquire(gfp) do { (void)(gfp); } while (0)
+#define fs_reclaim_release(gfp) do { (void)(gfp); } while (0)
+
 #endif

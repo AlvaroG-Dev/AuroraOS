@@ -482,4 +482,51 @@ static inline bool pci_msix_can_alloc_dyn(struct pci_dev *dev) { return false; }
 #define pci_WARN_ONCE(pdev, condition, fmt, arg...) WARN_ONCE(condition, "%s %s: " fmt, \
 	dev_driver_string(&(pdev)->dev), pci_name(pdev), ##arg)
 
+
+#define PCIBIOS_MIN_MEM 0x10000000UL
+#define PCI_DEVID(bus, devfn) ((((u16)(bus)) << 8) | (devfn))
+typedef resource_size_t (*resource_alignf)(void *data, const struct resource *res, resource_size_t size,
+					   resource_size_t align);
+resource_size_t lkpi_pcibios_align_resource(void *data, const struct resource *res, resource_size_t size,
+					     resource_size_t align);
+#define pcibios_align_resource lkpi_pcibios_align_resource
+int lkpi_pci_bus_read_config_byte(struct pci_bus *bus, unsigned int devfn, int where, u8 *val);
+int lkpi_pci_bus_read_config_word(struct pci_bus *bus, unsigned int devfn, int where, u16 *val);
+int lkpi_pci_bus_read_config_dword(struct pci_bus *bus, unsigned int devfn, int where, u32 *val);
+int lkpi_pci_bus_write_config_byte(struct pci_bus *bus, unsigned int devfn, int where, u8 val);
+#define pci_bus_read_config_byte lkpi_pci_bus_read_config_byte
+#define pci_bus_read_config_word lkpi_pci_bus_read_config_word
+#define pci_bus_read_config_dword lkpi_pci_bus_read_config_dword
+#define pci_bus_write_config_byte lkpi_pci_bus_write_config_byte
+int lkpi_pci_dev_present(const struct pci_device_id *ids);
+#define pci_dev_present lkpi_pci_dev_present
+struct pci_dev *lkpi_pcie_find_root_port(struct pci_dev *dev);
+#define pcie_find_root_port lkpi_pcie_find_root_port
+/* Sin reasignacion de recursos PCI (resize BAR, ROM, reserva de ventanas): fallan con -ENOSYS / NULL. */
+static inline void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size) { return NULL; }
+static inline void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom) {}
+static inline int pci_resize_resource(struct pci_dev *dev, int i, int size, int exclude_bars) { return -ENOSYS; }
+static inline void pci_release_resource(struct pci_dev *dev, int resno) {}
+static inline u32 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar) { return 0; }
+static inline int pci_rebar_bytes_to_size(u64 bytes)
+{
+	int size = ilog2(bytes) - 20;	/* 1 MiB = 0 */
+
+	return size < 0 ? 0 : size;
+}
+static inline int pci_bus_alloc_resource(struct pci_bus *bus, struct resource *res, resource_size_t size,
+					 resource_size_t align, resource_size_t min, unsigned long type_mask,
+					 resource_alignf alignf, void *alignf_data)
+{
+	return -ENOSYS;
+}
+static inline bool pnp_range_reserved(resource_size_t start, resource_size_t end) { return false; }
+static inline const char *pci_power_name(pci_power_t state)
+{
+	static const char * const names[] = { "D0", "D1", "D2", "D3hot", "D3cold", "unknown" };
+
+	return (unsigned int)state < ARRAY_SIZE(names) ? names[state] : "unknown";
+}
+#define pci_bus_for_each_resource(bus, res, ...) for ((res) = NULL; (res); )
+static inline void pci_assign_unassigned_bus_resources(struct pci_bus *bus) {}
 #endif

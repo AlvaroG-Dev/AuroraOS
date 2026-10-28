@@ -91,10 +91,22 @@ static inline void folio_put(struct folio *folio) { put_page(&folio->page); }
 static inline unsigned long folio_nr_pages(const struct folio *folio) { return 1UL << folio->page.order; }
 static inline size_t folio_size(const struct folio *folio) { return PAGE_SIZE << folio->page.order; }
 static inline unsigned long folio_pfn(const struct folio *folio) { return folio->page.pfn; }
+static inline bool want_init_on_free(void) { return false; }
+static inline bool want_init_on_alloc(gfp_t flags) { return false; }
+/* Parte una asignacion de orden > 0 en paginas sueltas (ttm_pool). */
+void lkpi_split_page(struct page *page, unsigned int order);
+#define split_page(page, order) lkpi_split_page(page, order)
 #define page_size(page) (PAGE_SIZE << compound_order(page))
 #define totalram_pages() lkpi_totalram_pages()
 unsigned long lkpi_totalram_pages(void);
-#define si_meminfo(i) do { } while (0)
+struct sysinfo {
+	unsigned long totalram, freeram, sharedram, bufferram;
+	unsigned long totalswap, freeswap;
+	unsigned long totalhigh, freehigh;
+	unsigned int mem_unit;
+};
+void lkpi_si_meminfo(struct sysinfo *si);
+#define si_meminfo(i) lkpi_si_meminfo(i)
 #define is_vmalloc_addr(x) lkpi_is_vmalloc_addr((const void *)(x))
 bool lkpi_is_vmalloc_addr(const void *x);
 
@@ -156,11 +168,16 @@ static inline int get_order(unsigned long size)
 #define VM_FAULT_DONE_COW 0x001000
 #define VM_FAULT_ERROR (VM_FAULT_OOM | VM_FAULT_SIGBUS | VM_FAULT_SIGSEGV | VM_FAULT_HWPOISON)
 
+static inline bool fault_flag_allow_retry_first(unsigned int flags)
+{
+	return (flags & 0x04) && !(flags & 0x1000);	/* ALLOW_RETRY y no TRIED */
+}
 #define FAULT_FLAG_WRITE 0x01
 #define FAULT_FLAG_MKWRITE 0x02
 #define FAULT_FLAG_ALLOW_RETRY 0x04
 #define FAULT_FLAG_RETRY_NOWAIT 0x08
 #define FAULT_FLAG_KILLABLE 0x10
+#define FAULT_FLAG_TRIED 0x1000
 #define FAULT_FLAG_USER 0x40
 #define FAULT_FLAG_REMOTE 0x80
 #define FAULT_FLAG_INTERRUPTIBLE 0x200
@@ -258,5 +275,18 @@ void lkpi_unmap_mapping_range(struct address_space *mapping, loff_t holebegin,
 #define unmap_mapping_range(m, b, l, e) lkpi_unmap_mapping_range(m, b, l, e)
 
 #include <linux/vmalloc.h>
+#include <linux/shrinker.h>
+#include <linux/mmap_lock.h>
 
+
+static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	vma->vm_file = file;
+}
+static inline struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr) { return NULL; }
+
+/* Sin arbol de VMA de usuario: el iterador no visita nada (userptr/probe_range fallan con -EFAULT). */
+struct vma_iterator { struct mm_struct *mm; unsigned long addr; };
+#define VMA_ITERATOR(name, _mm, _addr) struct vma_iterator name = { .mm = (_mm), .addr = (_addr) }
+#define for_each_vma_range(vmi, vma, end) for ((vma) = NULL; (vma); )
 #endif

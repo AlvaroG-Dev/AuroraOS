@@ -81,11 +81,15 @@ bootloader-bios: | env
 
 # [FIX] Reglas explícitas para que 'make' sepa cómo generar los archivos
 # si los pide como dependencia (ej: desde $(EFI_IMG) o iso_root)
-$(BOOTX64_EFI): | env
+# FORCE: el sub-make decide si hay que reconstruir (antes un BOOTX64.EFI viejo
+# sobrevivia a cambios de kernel_boot_info.h y el kernel leia basura).
+$(BOOTX64_EFI): FORCE | env
 	$(MAKE) -C bootloader/efi
 
-$(BIOS_IMG): | env
+$(BIOS_IMG): FORCE | env
 	$(MAKE) -C bootloader/bios
+
+FORCE:
 
 # Imagenes de disco de prueba: las crea scripts/setup-env.sh.
 tests/test_disk.img tests/extra_disk.img: | env

@@ -29,6 +29,7 @@ void aurora_kfree(void *p) __asm__("kfree");
 u64 aurora_pmm_alloc_pages(u64 count) __asm__("pmm_alloc_pages");
 void aurora_pmm_free_pages(u64 phys, u64 count) __asm__("pmm_free_pages");
 u64 aurora_pmm_total_pages(void) __asm__("pmm_total_pages");
+u64 aurora_pmm_free_pages_count(void) __asm__("pmm_free_pages_count");
 
 /* paging.h */
 #define AURORA_PHYS_MAP_BASE 0xFFFF800000000000UL

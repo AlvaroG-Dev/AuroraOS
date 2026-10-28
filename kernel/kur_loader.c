@@ -470,7 +470,9 @@ static int kur_load_internal(const void *data, size_t size, int slot,
   for (uint32_t i = 0; i < e.shnum; i++) {
     const Elf64_Shdr *s = &e.shdrs[i];
     sec_off[i] = KUR_NOT_LOADED;
-    if (i == 0 || !(s->sh_flags & SHF_ALLOC) || s->sh_size == 0) continue;
+    if (i == 0 || !(s->sh_flags & SHF_ALLOC)) continue;
+    // Una sección vacía también tiene dirección (una relocación puede apuntar
+    // a su símbolo de sección, p. ej. el final de un array vacío): ocupa 0 bytes.
     uint64_t align = s->sh_addralign ? s->sh_addralign : 1;
     if (align & (align - 1)) align = 16;
     if (align > KUR_MAX_ALIGN) {

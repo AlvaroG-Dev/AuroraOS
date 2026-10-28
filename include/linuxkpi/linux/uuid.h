@@ -2,6 +2,7 @@
 /* UUID de 16 bytes (GUID little endian y UUID big endian) y utilidades basicas. */
 #ifndef _LKPI_LINUX_UUID_H
 #define _LKPI_LINUX_UUID_H
+#define UUID_STRING_LEN 36
 
 #include <linux/types.h>
 #include <linux/string.h>
@@ -65,11 +66,40 @@ static inline bool uuid_is_null(const uuid_t *uuid)
 	return uuid_equal(uuid, &null);
 }
 
-void generate_random_uuid(unsigned char uuid[16]);
+void lkpi_generate_random_uuid(unsigned char uuid[16]);
+#define generate_random_uuid lkpi_generate_random_uuid
 
 static inline void uuid_gen(uuid_t *u)
 {
 	generate_random_uuid(u->b);
 }
 
+static inline bool uuid_is_valid(const char *uuid)
+{
+	for (unsigned int i = 0; i < UUID_STRING_LEN; i++) {
+		char c = uuid[i];
+
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			if (c != '-')
+				return false;
+		} else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+			return false;
+		}
+	}
+	return uuid[UUID_STRING_LEN] == '\0';
+}
+
+static inline bool guid_is_null(const guid_t *guid)
+{
+	for (int i = 0; i < UUID_SIZE; i++)
+		if (guid->b[i])
+			return false;
+	return true;
+}
+static inline void guid_gen(guid_t *lu)
+{
+	generate_random_uuid(lu->b);
+	lu->b[7] = (lu->b[7] & 0x0F) | 0x40;
+	lu->b[8] = (lu->b[8] & 0x3F) | 0x80;
+}
 #endif

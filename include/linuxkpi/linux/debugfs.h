@@ -68,18 +68,54 @@ bool lkpi_debugfs_initialized(void);
 #define debugfs_remove_recursive(d) lkpi_debugfs_remove(d)
 #define debugfs_lookup(n, p) lkpi_debugfs_lookup(n, p)
 #define debugfs_lookup_and_remove(n, p) lkpi_debugfs_lookup_and_remove(n, p)
-#define debugfs_create_u8(n, m, p, v) lkpi_debugfs_create_u8(n, m, p, v)
-#define debugfs_create_u16(n, m, p, v) lkpi_debugfs_create_u16(n, m, p, v)
-#define debugfs_create_u32(n, m, p, v) lkpi_debugfs_create_u32(n, m, p, v)
-#define debugfs_create_u64(n, m, p, v) lkpi_debugfs_create_u64(n, m, p, v)
-#define debugfs_create_x8(n, m, p, v) lkpi_debugfs_create_x8(n, m, p, v)
-#define debugfs_create_x16(n, m, p, v) lkpi_debugfs_create_x16(n, m, p, v)
-#define debugfs_create_x32(n, m, p, v) lkpi_debugfs_create_x32(n, m, p, v)
-#define debugfs_create_x64(n, m, p, v) lkpi_debugfs_create_x64(n, m, p, v)
-#define debugfs_create_ulong(n, m, p, v) lkpi_debugfs_create_ulong(n, m, p, v)
-#define debugfs_create_size_t(n, m, p, v) lkpi_debugfs_create_size_t(n, m, p, v)
-#define debugfs_create_atomic_t(n, m, p, v) lkpi_debugfs_create_atomic_t(n, m, p, v)
-#define debugfs_create_bool(n, m, p, v) lkpi_debugfs_create_bool(n, m, p, v)
+static inline void debugfs_create_u8(const char *n, umode_t m, struct dentry *p, u8 *v)
+{
+	lkpi_debugfs_create_u8(n, m, p, v);
+}
+static inline void debugfs_create_u16(const char *n, umode_t m, struct dentry *p, u16 *v)
+{
+	lkpi_debugfs_create_u16(n, m, p, v);
+}
+static inline void debugfs_create_u32(const char *n, umode_t m, struct dentry *p, u32 *v)
+{
+	lkpi_debugfs_create_u32(n, m, p, v);
+}
+static inline void debugfs_create_u64(const char *n, umode_t m, struct dentry *p, u64 *v)
+{
+	lkpi_debugfs_create_u64(n, m, p, v);
+}
+static inline void debugfs_create_x8(const char *n, umode_t m, struct dentry *p, u8 *v)
+{
+	lkpi_debugfs_create_x8(n, m, p, v);
+}
+static inline void debugfs_create_x16(const char *n, umode_t m, struct dentry *p, u16 *v)
+{
+	lkpi_debugfs_create_x16(n, m, p, v);
+}
+static inline void debugfs_create_x32(const char *n, umode_t m, struct dentry *p, u32 *v)
+{
+	lkpi_debugfs_create_x32(n, m, p, v);
+}
+static inline void debugfs_create_x64(const char *n, umode_t m, struct dentry *p, u64 *v)
+{
+	lkpi_debugfs_create_x64(n, m, p, v);
+}
+static inline void debugfs_create_ulong(const char *n, umode_t m, struct dentry *p, unsigned long *v)
+{
+	lkpi_debugfs_create_ulong(n, m, p, v);
+}
+static inline void debugfs_create_size_t(const char *n, umode_t m, struct dentry *p, size_t *v)
+{
+	lkpi_debugfs_create_size_t(n, m, p, v);
+}
+static inline void debugfs_create_atomic_t(const char *n, umode_t m, struct dentry *p, atomic_t *v)
+{
+	lkpi_debugfs_create_atomic_t(n, m, p, v);
+}
+static inline void debugfs_create_bool(const char *n, umode_t m, struct dentry *p, bool *v)
+{
+	lkpi_debugfs_create_bool(n, m, p, v);
+}
 #define debugfs_create_blob(n, m, p, b) lkpi_debugfs_create_blob(n, m, p, b)
 #define debugfs_create_regset32(n, m, p, r) lkpi_debugfs_create_regset32(n, m, p, r)
 #define debugfs_initialized() lkpi_debugfs_initialized()
@@ -119,4 +155,7 @@ static const struct file_operations __fops = { \
 #define DEFINE_DEBUGFS_ATTRIBUTE_SIGNED(__fops, __get, __set, __fmt) \
 	DEFINE_SIMPLE_ATTRIBUTE_XSIGNED(__fops, __get, __set, __fmt, true)
 
+
+struct debugfs_u32_array;
+static inline void debugfs_create_str(const char *name, umode_t mode, struct dentry *parent, char **value) {}
 #endif

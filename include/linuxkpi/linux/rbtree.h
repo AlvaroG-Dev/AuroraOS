@@ -11,6 +11,7 @@
 #include <linux/stddef.h>
 #include <linux/compiler.h>
 #include <linux/types.h>
+#include <linux/seqlock.h>
 
 #define rb_parent(r) ((struct rb_node *)((r)->__rb_parent_color & ~3))
 #define rb_entry(ptr, type, member) container_of(ptr, type, member)

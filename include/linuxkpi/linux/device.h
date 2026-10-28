@@ -749,4 +749,8 @@ __printf(3, 4) void lkpi_dev_printk(const char *level, const struct device *dev,
 
 #include <linux/ratelimit.h>
 
+
+static inline void device_link_remove(void *consumer, struct device *supplier) {}
+/* Sin IOMMU hasta L9 */
+static inline bool device_iommu_mapped(struct device *dev) { return false; }
 #endif

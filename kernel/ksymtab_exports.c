@@ -62,6 +62,7 @@ KEXPORT_SYMBOL(klog_vprintf);
 KEXPORT_SYMBOL(pmm_alloc_pages);
 KEXPORT_SYMBOL(pmm_free_pages);
 KEXPORT_SYMBOL(pmm_total_pages);
+KEXPORT_SYMBOL(pmm_free_pages_count);
 KEXPORT_SYMBOL(paging_get_phys);
 KEXPORT_SYMBOL(mmio_map);
 KEXPORT_SYMBOL(mmio_unmap);

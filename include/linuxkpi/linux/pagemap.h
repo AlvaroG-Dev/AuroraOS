@@ -10,6 +10,7 @@
 #include <linux/fs.h>
 #include <linux/gfp.h>
 #include <linux/pagevec.h>
+#include <linux/highmem.h>
 
 #define AS_UNEVICTABLE 3
 
@@ -44,6 +45,20 @@ static inline unsigned long invalidate_mapping_pages(struct address_space *m, pg
 	return 0;
 }
 
+/*
+ * Los folios de la capa son paginas sueltas de un solo dueno (el fichero shmem
+ * o el pool de TTM): lock, reclaim y writeback no tienen competencia y no
+ * hacen nada; "dirty" es set_page_dirty().
+ */
+static inline void folio_lock(struct folio *folio) { }
+static inline void folio_unlock(struct folio *folio) { }
+static inline bool folio_trylock(struct folio *folio) { return true; }
+static inline bool folio_mapped(const struct folio *folio) { return false; }
+static inline bool folio_clear_dirty_for_io(struct folio *folio) { return true; }
+static inline void folio_set_reclaim(struct folio *folio) { }
+static inline void folio_clear_reclaim(struct folio *folio) { }
+static inline bool folio_test_writeback(const struct folio *folio) { return false; }
+
 struct folio *lkpi_shmem_read_folio(struct address_space *mapping, pgoff_t index);
 static inline struct page *read_mapping_page(struct address_space *m, pgoff_t index, struct file *f)
 {
@@ -52,4 +67,12 @@ static inline struct page *read_mapping_page(struct address_space *m, pgoff_t in
 	return IS_ERR(folio) ? ERR_CAST(folio) : &folio->page;
 }
 
+
+static inline struct folio *virt_to_folio(const void *x) { return page_folio(virt_to_page(x)); }
+static inline struct folio *folio_alloc(gfp_t gfp, unsigned int order)
+{
+	struct page *p = alloc_pages(gfp, order);
+
+	return p ? page_folio(p) : NULL;
+}
 #endif
