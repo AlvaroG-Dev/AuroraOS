@@ -214,6 +214,15 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
   }
   in_panic = 1;
   __asm__ volatile("cli");
+  {
+    extern void boot_console_panic_screen(void);
+    boot_console_panic_screen();
+    if (regs)
+      LOG_PANIC("vector=%lu err=0x%lx rip=0x%lx rsp=0x%lx cr2=0x%lx",
+                (unsigned long)regs->int_num, (unsigned long)regs->error_code,
+                (unsigned long)regs->rip, (unsigned long)regs->rsp,
+                (unsigned long)({ uint64_t c2; __asm__ volatile("mov %%cr2, %0" : "=r"(c2)); c2; }));
+  }
 
   serial_puts("\n");
   serial_puts("\n=======================================================\n");

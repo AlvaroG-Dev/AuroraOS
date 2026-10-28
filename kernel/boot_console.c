@@ -234,6 +234,17 @@ void boot_console_putchar(char c, klog_level_t level, klog_fb_style_t style) {
   g_col++;
 }
 
+// Pantalla de panic: limpia y reengancha klog al framebuffer para que los
+// LOG_PANIC del panic() sean visibles aunque el compositor ya tenga la
+// pantalla (sin serie, un fallo tras arrancar el escritorio era invisible).
+void boot_console_panic_screen(void) {
+  if (!g_shadow)
+    return;
+  boot_console_overlay_enable(0);
+  klog_fb_hook = boot_console_putchar;
+  boot_console_clear();
+}
+
 void boot_console_hook_install(void) { klog_fb_hook = boot_console_putchar; }
 
 void boot_console_hook_remove(void) {
