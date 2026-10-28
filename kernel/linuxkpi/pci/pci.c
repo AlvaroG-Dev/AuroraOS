@@ -584,6 +584,7 @@ void lkpi_display_shadow_probe(void)
 	struct pci_dev *p = NULL;
 	char opt[8];
 	u64 fbp, fbs;
+	bool fb_only = false;
 
 	if (READ_ONCE(done) || READ_ONCE(probing))
 		return;
@@ -593,8 +594,13 @@ void lkpi_display_shadow_probe(void)
 		return;
 	}
 	probing = true;
-	if (aurora_cmdline_get("lkpi.shadow", opt, sizeof(opt)) && opt[0] == '0')
-		goto out;
+	/* lkpi.shadow=0: sin sombra; =fb: solo el BAR que aloja el framebuffer
+	 * (los registros del dispositivo son reales: i915 los necesita). */
+	if (aurora_cmdline_get("lkpi.shadow", opt, sizeof(opt))) {
+		if (opt[0] == '0')
+			goto out;
+		fb_only = opt[0] == 'f';
+	}
 	if (!aurora_gpup_get_framebuffer(&fbp, &fbs))
 		goto out;
 	while ((p = lkpi_pci_get_next(lkpi_match_display, NULL, p)) != NULL) {
@@ -602,17 +608,29 @@ void lkpi_display_shadow_probe(void)
 			continue;
 		for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
 			struct resource *r = &p->resource[i];
-			u64 len = r->end - r->start + 1;
+			u64 len = r->end - r->start + 1, start = r->start;
+			bool has_fb = fbp >= r->start && fbp < r->end;
 
 			if (!(r->flags & IORESOURCE_MEM) || r->end <= r->start)
 				continue;
-			if (len > (64ULL << 20))
-				len = 64ULL << 20;
-			lkpi_display_shadow_add(r->start, len, len <= 0x10000);
+			if (fb_only && !has_fb)
+				continue;
+			/* lkpi_vmalloc() no pasa de 64 MiB - 4 KiB (limite del heap): la
+			 * sombra de un BAR grande cubre solo el framebuffer del firmware. */
+			if (len > (32ULL << 20)) {
+				len = 32ULL << 20;
+				if (has_fb && fbp + fbs > start + len) {
+					start = fbp & ~0xfffULL;
+					len = min_t(u64, ALIGN(fbp + fbs, PAGE_SIZE) - start, len);
+				}
+			}
+			if (lkpi_display_shadow_add(start, len, len <= 0x10000))
+				pr_err("linuxkpi: %s: sin memoria para la sombra de BAR%d (%llu KiB)\n",
+				       pci_name(p), i, (unsigned long long)(len >> 10));
 		}
 		lkpi_vga_set_default_device(p);
-		pr_info("linuxkpi: %s aloja el framebuffer del firmware: sus BAR son una sombra\n",
-			pci_name(p));
+		pr_info("linuxkpi: %s aloja el framebuffer del firmware: %s en sombra\n",
+			pci_name(p), fb_only ? "su BAR del framebuffer" : "sus BAR");
 		pci_dev_put(p);
 		break;
 	}

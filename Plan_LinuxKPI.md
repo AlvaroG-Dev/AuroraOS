@@ -411,3 +411,9 @@ Detalle en `docs/LinuxKPI_Sesion_L7.md`. Decisiones:
 - Aurora: el cargador de `.kur` asigna dirección a secciones `SHF_ALLOC` vacías (relocaciones contra su símbolo). El resto de Aurora no cambia; D1/D2/D5/D6/D10 no se alteran.
 - i915 nunca se autocarga (`lkpi.load=` explícito). `xe` diferido hasta tener hardware Gen12+.
 - Validado en QEMU: compilar, enlazar, cargar y descargar (suite 208/208) y toda la regresión. El probe real lo valida el autor.
+
+### 28-oct-2026 — L7: primer probe real de i915 (Haswell HD 4600)
+- El display-shadow de L5 dejaba los registros de la GPU (BAR0) en RAM: forcewake, SBI y FDI no podían responder. Nueva opción de arranque `lkpi.shadow=fb` (solo el BAR del framebuffer en sombra; `0` = nada, por defecto = todos los BAR). i915 sigue sin autocargarse.
+- La sombra de un BAR grande se limita a 32 MiB (`lkpi_vmalloc` usa `kmalloc(size + 4 KiB)` y el heap no pasa de 64 MiB); si no hay memoria se avisa en vez de callar.
+- `clflushopt` solo si CPUID lo anuncia. Detalle en `docs/LinuxKPI_Sesion_L7.md` §8.
+

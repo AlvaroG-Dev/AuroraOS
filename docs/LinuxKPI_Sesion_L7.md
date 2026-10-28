@@ -53,3 +53,15 @@ Tras cambiar `struct` en cabeceras de la capa hay que reconstruir limpio (`make 
 ## 7. Regresión
 
 Suite del kernel 208/208 con `-smp 2` y `-smp 4`; `lkpi_test` 141; `drm_test` nativo, bochs, simpledrm y virtio-gpu (2 salidas); `sig_test`, `rseq_test`, `timer_test`, `thread_sig_test`; `clipboard-x11.sh` y `primary-icons.sh` (valores revisados). El fallo de K7 (fences sin liberar) visto en la pasada con objetos viejos no se reprodujo tras reconstruir.
+
+## 8. Primer probe real (Portégé R30-A, HD 4600, 28-oct-2026)
+
+Log de Álvaro con `klog.file`. Todo lo que falló venía de una sola causa de diseño más un límite de la capa:
+
+| Síntoma | Qué es | Dónde se resuelve |
+|---|---|---|
+| `kmalloc(67112960) excede el límite de 67108864` | **Bug de la capa**: la sombra de display (L5) reservaba 64 MiB con `kvzalloc`, que cae en `lkpi_vmalloc` = `kmalloc(size + 4 KiB)` y el heap rechaza > 64 MiB | Corregido: sombra de BAR grande ≤ 32 MiB (solo la parte del framebuffer) y aviso si falla |
+| `render: timed out waiting for forcewake ack`, `timeout waiting for SBI`, `FDI mPHY reset assert timeout`, WARN en `intel_display_power_well.c:299`, `i915_irq.c:105` y `engine mmio_base` | **Esperado por diseño** (display-shadow de L5): con el framebuffer del firmware en la GPU, sus BAR —incluido BAR0, los registros— eran una copia en RAM y la GPU nunca recibía los accesos | Nueva opción `lkpi.shadow=fb`: solo el BAR del framebuffer (GMADR) queda en sombra, los registros son reales. `lkpi.shadow=0` quita toda la sombra |
+| `#UD` en `drm_clflush_virt_range` | Bug de la capa (clflushopt sin CPUID) | Corregido en 33d30846 |
+
+Siguiente: probar con `lkpi.shadow=fb`; lo que falle entonces ya es de i915 sobre la capa real (forcewake, power wells, GMBUS, GGTT). El 3er paso (pantalla nativa) exige que el compositor pinte en un buffer KMS de i915 en lugar del framebuffer del firmware; no está hecho.
