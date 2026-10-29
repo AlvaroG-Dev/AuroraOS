@@ -46,6 +46,22 @@ void aurora_vmm_free_pages(u64 vaddr, u64 num_pages) __asm__("vmm_free_pages");
 void *aurora_mmio_map(u64 phys, u64 size, u64 flags) __asm__("mmio_map");
 void aurora_mmio_unmap(u64 phys, u64 size) __asm__("mmio_unmap");
 
+/* power.h: apagado y reinicio. action: 0 = apagar, 1 = reiniciar, 2 = parar.
+ * Fases de notificador: 0 = preparar, 1 = dispositivos, 2 = final (sin dormir). */
+#define AURORA_POWER_OFF 0
+#define AURORA_POWER_RESTART 1
+#define AURORA_POWER_HALT 2
+#define AURORA_POWER_PHASE_PREPARE 0
+#define AURORA_POWER_PHASE_DEVICES 1
+#define AURORA_POWER_PHASE_FINAL 2
+typedef void (*aurora_power_notifier_fn)(int action, int phase, void *ctx);
+void aurora_power_request(int action, const char *reason) __asm__("power_request")
+	__attribute__((noreturn));
+int aurora_power_register_notifier(aurora_power_notifier_fn fn, void *ctx, int prio)
+	__asm__("power_register_notifier");
+int aurora_power_unregister_notifier(aurora_power_notifier_fn fn, void *ctx)
+	__asm__("power_unregister_notifier");
+
 /* sched.h / timerfd.h */
 u64 aurora_sched_get_ticks(void) __asm__("sched_get_ticks");
 s64 aurora_kernel_realtime_ms(void) __asm__("kernel_realtime_ms");

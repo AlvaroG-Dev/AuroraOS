@@ -18,6 +18,7 @@
 #include "sched.h"   // sched_get_ticks, sched_current
 #include "aur_loader.h"
 #include "firmware.h"
+#include "power.h"
 
 KEXPORT_SYMBOL(klog_printf);
 KEXPORT_SYMBOL(klog_puts);
@@ -247,3 +248,9 @@ _Static_assert(sizeof(vma_dev_ops_t) == 24, "vma_dev_ops_t cambio: actualizar au
 _Static_assert(sizeof(task_info_t) == 48 && offsetof(task_info_t, proc) == 16 &&
                    offsetof(task_info_t, comm) == 28,
                "task_info_t cambio: actualizar struct aurora_task_info");
+
+// Apagado/reinicio (Plan_Power.md P7): LinuxKPI registra sus notificadores y
+// pide el apagado desde kernel_power_off()/kernel_restart().
+KEXPORT_SYMBOL(power_request);
+KEXPORT_SYMBOL(power_register_notifier);
+KEXPORT_SYMBOL(power_unregister_notifier);

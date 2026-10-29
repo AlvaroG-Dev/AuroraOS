@@ -221,8 +221,14 @@ int kur_init(void)
 	rc = lkpi_backlight_init();
 	if (rc)
 		goto err_i2c;
+	rc = lkpi_reboot_init();
+	if (rc)
+		goto err_backlight;
 	pr_info("linuxkpi: capa de compatibilidad con drivers de Linux lista\n");
 	return 0;
+
+err_backlight:
+	lkpi_backlight_exit();
 
 err_i2c:
 	lkpi_i2c_exit();
@@ -255,6 +261,7 @@ err_mm:
 
 void kur_exit(void)
 {
+	lkpi_reboot_exit();
 	/* El modelo de dispositivos antes que las workqueues y RCU que usa. */
 	lkpi_backlight_exit();
 	lkpi_i2c_exit();

@@ -30,10 +30,15 @@ struct __attribute__((packed)) kernel_boot_info {
    * ranura 0 es el log actual y la 1 el del arranque anterior. */
   uint64_t plog_base;
   uint64_t plog_size;
+  /* UEFI: puntero fisico a EFI_RUNTIME_SERVICES (ResetSystem para apagar y
+   * reiniciar, kernel/efi_rt.c). 0 en BIOS. No se llama a
+   * SetVirtualAddressMap: las regiones runtime siguen en su direccion fisica
+   * y el kernel las mapea en identidad al usarlas. */
+  uint64_t efi_runtime_services;
 };
 
 _Static_assert(
-    sizeof(struct kernel_boot_info) == 680,
+    sizeof(struct kernel_boot_info) == 688,
     "kernel_boot_info cambio de tamano: sincroniza con kernel/main.c");
 
 #endif

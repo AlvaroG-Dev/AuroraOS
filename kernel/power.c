@@ -8,6 +8,7 @@
 #include "block.h"
 #include "cmdline.h"
 #include "driver.h"
+#include "efi_rt.h"
 #include "fat32.h"
 #include "io.h"
 #include "klog.h"
@@ -58,7 +59,7 @@ int power_unregister_notifier(power_notifier_fn fn, void *ctx) {
   return -1;
 }
 
-static void call_notifiers(power_action_t action) {
+static void call_notifiers(power_action_t action, int phase) {
   // Copia ordenada por prioridad; los callbacks corren sin el lock.
   struct {
     power_notifier_fn fn;
@@ -82,7 +83,7 @@ static void call_notifiers(power_action_t action) {
     snap[j + 1] = k;
   }
   for (int i = 0; i < n; i++)
-    snap[i].fn(action, snap[i].ctx);
+    snap[i].fn(action, phase, snap[i].ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,14 @@ static int running_in_vm(void) {
   return (c >> 31) & 1;
 }
 
+static void restart_efi(void) {
+  if (!efi_rt_available())
+    return;
+  LOG_INFO("[POWER] reinicio: UEFI ResetSystem(EfiResetCold)");
+  efi_rt_reset(EFI_RESET_COLD);
+  power_delay_us(100000);
+}
+
 static void restart_cf9(void) {
   LOG_INFO("[POWER] reinicio: puerto 0xCF9");
   outb(0xCF9, 0x02); // SYS_RST suave, flanco 0->1 en RST_CPU abajo
@@ -197,15 +206,30 @@ void power_backend_restart(void) {
   else if (!strcmp(opt, "triple"))
     restart_triple_fault();
 
+  if (!strcmp(opt, "efi"))
+    restart_efi();
   acpi_pm_restart(); // RESET_REG si el FADT lo declara; vuelve si falla
+  restart_efi();
   restart_cf9();
   restart_kbd();
   restart_triple_fault();
 }
 
 void power_backend_poweroff(void) {
+  char opt[16] = "";
+  cmdline_get("poweroff", opt, sizeof(opt));
+  if (!strcmp(opt, "efi") && efi_rt_available()) {
+    LOG_INFO("[POWER] apagado: UEFI ResetSystem(EfiResetShutdown) primero");
+    efi_rt_reset(EFI_RESET_SHUTDOWN);
+    power_delay_us(100000);
+  }
   if (acpi_pm_poweroff() != 0)
     LOG_WARN("[POWER] S5 ACPI no disponible o sin efecto");
+  if (efi_rt_available()) {
+    LOG_INFO("[POWER] apagado: UEFI ResetSystem(EfiResetShutdown)");
+    efi_rt_reset(EFI_RESET_SHUTDOWN);
+    power_delay_us(100000);
+  }
   if (running_in_vm()) {
     LOG_INFO("[POWER] apagado: puertos de emuladores");
     outw(0x604, 0x2000);  // QEMU (PIIX4/ICH9 ACPI), Bochs
@@ -235,7 +259,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   }
   LOG_INFO("[POWER] %s solicitado (%s)", name, reason ? reason : "-");
 
-  call_notifiers(action);
+  call_notifiers(action, POWER_PHASE_PREPARE);
 
   // Volcar los FS antes de tocar procesos: los drivers de disco aun viven.
   if (fat32_sync_all() != 0)
@@ -261,8 +285,10 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   }
 
   drivers_shutdown_all();
+  call_notifiers(action, POWER_PHASE_DEVICES);
 
   __asm__ volatile("cli");
+  call_notifiers(action, POWER_PHASE_FINAL);
   LOG_INFO("[POWER] ejecutando %s", name);
 
   if (action == POWER_ACTION_OFF)

@@ -6,6 +6,7 @@
 #include "plog.h"
 #include "display_edid.h"
 #include "acpi.h"
+#include "efi_rt.h"
 #include "acpi_aml.h"
 #include "acpi_pm.h"
 #include "ahci.h"
@@ -990,6 +991,8 @@ void kmain(struct kernel_boot_info *kinfo) {
     }
   }
   parse_memmap();
+  efi_rt_collect(boot.efi_runtime_services, (const void *)boot.memmap,
+                 boot.memmap_size, boot.memmap_desc_size);
 
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
   extern void pmm_reserve_range(uint64_t, uint64_t);
@@ -1041,6 +1044,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   // 7. ACPI MADT.
   klog_boot_step("[BOOT] ACPI MADT...");
   acpi_init(boot.acpi_rsdp);
+  efi_rt_init();
   klog_boot_ok();
 
   // 8. APIC + PIT.
