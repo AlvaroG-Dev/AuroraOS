@@ -1191,6 +1191,7 @@ static int fat32_sync_full_locked(fat32_fs_t *fs) {
 // Registro de volumenes montados, solo para fat32_sync_all() (apagado).
 #define FAT32_MAX_MOUNTED 8
 static fat32_fs_t *g_fat32_mounted[FAT32_MAX_MOUNTED];
+int fat32_sync(void *fs_priv);
 
 static void fat32_registry_set(fat32_fs_t *fs, int add) {
   for (int i = 0; i < FAT32_MAX_MOUNTED; i++) {
