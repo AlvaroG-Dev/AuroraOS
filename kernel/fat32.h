@@ -44,6 +44,10 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out);
 // nodos abiertos apuntando a este FS (cerrar todos los fds antes).
 void fat32_umount(void *fs_priv);
 
+// Vuelca cache de datos, FAT y FSInfo de todos los volumenes montados
+// (apagado). 0 si todo fue bien.
+int fat32_sync_all(void);
+
 // Devuelve el vfs_fs_ops_t para pasar a vfs_mount().
 vfs_fs_ops_t *fat32_get_vfs_ops(void);
 

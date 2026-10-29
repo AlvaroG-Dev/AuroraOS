@@ -1188,6 +1188,35 @@ static int fat32_sync_full_locked(fat32_fs_t *fs) {
   return fat32_sync_impl(fs, 1);
 }
 
+// Registro de volumenes montados, solo para fat32_sync_all() (apagado).
+#define FAT32_MAX_MOUNTED 8
+static fat32_fs_t *g_fat32_mounted[FAT32_MAX_MOUNTED];
+
+static void fat32_registry_set(fat32_fs_t *fs, int add) {
+  for (int i = 0; i < FAT32_MAX_MOUNTED; i++) {
+    fat32_fs_t *cur = __atomic_load_n(&g_fat32_mounted[i], __ATOMIC_ACQUIRE);
+    if (add && !cur) {
+      fat32_fs_t *exp = NULL;
+      if (__atomic_compare_exchange_n(&g_fat32_mounted[i], &exp, fs, 0,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    } else if (!add && cur == fs) {
+      __atomic_store_n(&g_fat32_mounted[i], NULL, __ATOMIC_RELEASE);
+      return;
+    }
+  }
+}
+
+int fat32_sync_all(void) {
+  int err = 0;
+  for (int i = 0; i < FAT32_MAX_MOUNTED; i++) {
+    fat32_fs_t *fs = __atomic_load_n(&g_fat32_mounted[i], __ATOMIC_ACQUIRE);
+    if (fs && fat32_sync(fs) != 0)
+      err = -1;
+  }
+  return err;
+}
+
 int fat32_sync(void *fs_priv) {
   if (!fs_priv)
     return -EINVAL;
@@ -3868,6 +3897,7 @@ int fat32_mount(block_device_t *bdev, void **fs_priv_out) {
   fat32_validate_on_mount(fs);
 
   *fs_priv_out = fs;
+  fat32_registry_set(fs, 1);
   return 0;
 }
 
@@ -3875,6 +3905,7 @@ void fat32_umount(void *fs_priv) {
   if (!fs_priv)
     return;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
+  fat32_registry_set(fs, 0);
   fat32_mutex_lock(&fs->lock);
 
   // Persistir tanto la data cache como la FAT antes de destruirlas.

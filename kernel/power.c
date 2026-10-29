@@ -8,6 +8,7 @@
 #include "block.h"
 #include "cmdline.h"
 #include "driver.h"
+#include "fat32.h"
 #include "io.h"
 #include "klog.h"
 #include "process.h"
@@ -125,6 +126,11 @@ static int collect_cb(process_t *p, void *arg) {
   pidlist_t *l = arg;
   if (p->pid == 0 || p->pid == l->self)
     return 0;
+  // Los drivers de usuario (.aur) respaldan discos y entrada: se paran
+  // despues, con drivers_shutdown_all(); ademas su supervisor los relanza.
+  size_t nl = strlen(p->name);
+  if (nl >= 4 && !strcmp(p->name + nl - 4, ".aur"))
+    return 0;
   if (l->n < MAX_KILL_PIDS)
     l->pids[l->n++] = p->pid;
   return l->n >= MAX_KILL_PIDS;
@@ -231,11 +237,16 @@ __attribute__((noreturn)) void power_request(power_action_t action,
 
   call_notifiers(action);
 
+  // Volcar los FS antes de tocar procesos: los drivers de disco aun viven.
+  if (fat32_sync_all() != 0)
+    LOG_WARN("[POWER] fat32_sync_all fallo");
+
   // Procesos de usuario: SIGTERM, margen corto, SIGKILL.
   if (signal_all(SIGTERM) > 0) {
     power_wait_ms(500);
     signal_all(SIGKILL);
     power_wait_ms(100);
+    fat32_sync_all(); // por si algun proceso escribio mientras moria
   }
 
   // FAT32 escribe de forma sincrona, pero la cache de escritura del disco
