@@ -347,6 +347,14 @@ int lkpi_device_add(struct device *dev)
 		list_add_tail(&dev->lkpi_child_node, &parent->lkpi_children);
 		mutex_unlock(&lkpi_dev_mutex);
 	}
+	if (drm_minor && parent) {
+		/* Linux cuelga las clases en <padre>/drm/<nombre>; libdrm (drmNodeIsDRM)
+		 * exige que exista <padre>/drm. */
+		char nm[40];
+
+		snprintf(nm, sizeof(nm), "drm/%s", dev_name(dev));
+		sysfs_create_link(&parent->kobj, &dev->kobj, nm);
+	}
 	if (MAJOR(dev->devt)) {
 		lkpi_devnode_add(dev);	/* /dev/<nombre> (K8, L4) */
 		if (lkpi_devchar_kobj) {
@@ -403,8 +411,15 @@ void lkpi_device_del(struct device *dev)
 			sysfs_remove_link(lkpi_devchar_kobj, nm);
 		}
 	}
-	if (lkpi_is_drm_minor(dev))
+	if (lkpi_is_drm_minor(dev)) {
+		if (parent) {
+			char nm[40];
+
+			snprintf(nm, sizeof(nm), "drm/%s", dev_name(dev));
+			sysfs_remove_link(&parent->kobj, nm);
+		}
 		aurora_drm_backend_release();
+	}
 	lkpi_device_release_driver(dev);
 	if (parent) {
 		mutex_lock(&lkpi_dev_mutex);
