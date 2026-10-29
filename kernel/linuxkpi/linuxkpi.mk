@@ -84,10 +84,13 @@ linuxkpi-drv: tools/kurbuild
 	@$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=$(DRV) KUR_CC="$(KUR_CC)" install
 
 # make nvidia: driver NVIDIA open (Plan_NVIDIA.md N2) -> sysroot/lib/modules/linuxkpi/nvidia.kur.
-# Requiere scripts/fetch-linux-drivers.sh y haber compilado nv-kernel.o; no va en
-# `linuxkpi` (tarda y necesita las fuentes de NVIDIA). Se carga con lkpi.load=linuxkpi,nvidia.
+# Descarga las fuentes y compila nv-kernel.o si faltan; no va en
+# `linuxkpi` (la primera vez tarda). Se carga con lkpi.load=linuxkpi,nvidia.
 .PHONY: nvidia
 nvidia: tools/kurbuild
+	@[ -d build/linuxkpi_src/nvidia-open/src ] || scripts/fetch-linux-drivers.sh
+	@[ -f build/linuxkpi_src/nvidia-open/src/nvidia/_out/Linux_x86_64/nv-kernel.o ] || \
+		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia -j$$(nproc)
 	@[ -f build/nvidia-kpi/out/conftest/functions.h ] || scripts/nvidia-conftest.sh
 	@scripts/nvidia-kpi-cc.sh | grep -E "^compilan" 
 	@scripts/nvidia-link.sh | grep "^OK"
