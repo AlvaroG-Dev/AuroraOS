@@ -40,3 +40,24 @@ Notas:
   llega hasta ~500 ms antes y el resto esta en la RAM persistente
   (`prev.log` / `last_kmsg.log` tras el reset).
 - Opt-in: sin `klog.file` no se escribe nada.
+
+## /data no se monta en UEFI en hardware real (2026-10-29, causa NO confirmada)
+
+Sintoma: pendrive con la ISO volcada, `klog.file=/data/aurora.log`. BIOS monta
+`/data`; UEFI (RTX 4060 / i7-12700KF) no monta el FAT32. QEMU+OVMF funciona,
+tambien solo-USB (sin CD), con 2 G y con 12 G de RAM, tras d13a6607.
+
+Descartado en QEMU: tabla MBR de la imagen (part 1 FAT16 `EFIBOOT` tipo 0c,
+part 2 FAT32 `AURORADATA`), orden de montaje, RAM > 4 GiB, ausencia de CD.
+No reproducible sin el hardware. Cambios defensivos hechos (no probados en el
+PC real):
+- `usb_storage`: clear-halt / reset recovery BOT y esperas en TEST UNIT READY,
+  INQUIRY y READ CAPACITY (un pendrive real hace STALL/NOT READY; QEMU no).
+- `klog_file_task`: reintento de `/data` cada 10 s, ademas de al aparecer un
+  block device.
+- Diagnostico: a los 20 s, 60 s y 120 s sin `/data` se escribe un resumen
+  `[DIAG]` (block devices, tamano de sector, resultado de FAT32) y se activa
+  solo el overlay de logs (el mismo que F12). Opcional `klog.reboot=60`:
+  reinicio en caliente (una sola vez) para que el bootloader guarde
+  `\aurora\prev.log`.
+- Prueba: `scripts/usb-data-test.sh` (USB solo, y USB enchufado en caliente).
