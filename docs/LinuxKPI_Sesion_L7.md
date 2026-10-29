@@ -192,3 +192,20 @@ Decisiones y razones en Plan §11 (29-oct-2026). Resumen de lo hecho:
 - **Limites**: `on_each_cpu`/IPI sigue ejecutando solo en la CPU local (afecta a `wbinvd` en SMP); sin ECAM; el mapeo del dma-buf de un bo de i915 desde `aurora-wayland` (copia al almacen de la superficie) depende de la coherencia de cache del mapeo: si se ven restos o lineas viejas, es el primer sospechoso.
 - **Regresion (29-oct-2026)**: suite del kernel 208/208 con `-smp 2` y `-smp 4`, `lkpi_test` 145, `drm_test` (nativo, bochs, simpledrm, virtio-gpu) y `kms-bochs`: OK. Aviso de entorno: con Mesa/LLVM (`libgallium`, `libLLVM`, ~500 MB) dentro del initrd la suite `-smp 2` dio 2 fallos de memoria (`test_k9.c:260` «la RAM del respaldo se libera» y el estres SMP de ttm); sin Mesa en el initrd, 208/208. Hacer la regresion del kernel sin Mesa y las pruebas de `gbm.sh` con ella. `userland` (sig_test, etc.) no se repitio: este hito no toca senales ni temporizadores.
 
+
+## 15. Cierre del hito 3 en la Portégé y arranque automatico (29-oct-2026)
+
+Verificado por Alvaro en la Toshiba Portégé R30-A (Haswell GT2, `8086:0416`): Mesa `crocus` renderiza (`GL_RENDERER=Mesa Intel(R) HD Graphics 4600 (HSW GT2)`, OpenGL ES 3.2, pixel `33c759`, `aw_gbm_test` ALL PASS) y el escritorio presenta por KMS sin parpadeo, **sin ningun parametro de arranque**.
+
+Cadena de fallos resuelta, en orden:
+
+1. **sysfs para libdrm** (`/sys/dev/char/<maj:min>`, `device`, `config`, `subsystem_*`, `revision`, `<padre>/drm/<nodo>`): Mesa identifica la GPU y elige crocus.
+2. **`LIBGL_ALWAYS_SOFTWARE`** forzada por `init`: ahora `init` la quita si el driver de `card0` (`DRIVER=` en su uevent) es i915/amdgpu/radeon/nouveau.
+3. **Panic en `eb_relocate_entry`** (execbuffer2): `__i915_gem_object_get_page` hacia `sg_page(sg) + offset`; la capa no tiene vmemmap y los marcos contiguos fusionados en un sg apuntaban a basura. Parche `kernel/linuxkpi/patches/i915_gem_pages.c.patch` (`nth_page`). El backtrace del panic ahora sigue frames dentro de `.kur`.
+4. **Arranque automatico** (`kernel/lkpi_boot.c`): sin `lkpi.load=`, una GPU Intel (8086, clase VGA) carga `linuxkpi,lkpi_drm,lkpi_ttm,lkpi_drm_display,lkpi_i915`. Opt-out `lkpi.auto=off`; `lkpi.load=` explicito manda; `drm.backend=native` lo impide. Bochs, virtio-gpu y simpledrm NO se autocargan (cambiaria el backend por omision en QEMU). AMD/NVIDIA: L8.
+5. **Suite del kernel**: no carga/descarga la capa si el arranque ya la cargo (`lkpi_boot_loaded()`); sin esto la suite descargaba lkpi sobre i915 vivo y daba un GPF.
+6. **Sombra del framebuffer** (`lkpi_display_shadow_probe`): sin `lkpi.shadow=`, una GPU Intel usa `fb` (solo el BAR del framebuffer); antes se sombreaban todos los BAR, registros incluidos, y i915 no arrancaba bien (parpadeo del GOP, sin ventana de DRM).
+
+`aurora.conf` minimo para la Portégé: `cmdline=klog.file=/data/aurora.log`. Mesa sigue siendo opcional (`WITH_MESA=1` o `scripts/fetch-mesa.sh`).
+
+Pendiente: presentar un cliente GPU por `linux-dmabuf` en el compositor (`aw_gbm_test` sin `--no-wayland`) en hardware real; `grep` en tuberia del terminal de Aurora; `on_each_cpu`/IPI local; L8/L9 no empezados (esperan confirmacion).
