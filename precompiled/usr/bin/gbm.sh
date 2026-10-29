@@ -13,7 +13,7 @@ shift
 # nodo primario (card0): en un nodo render da EACCES. Un driver de GPU usa renderD128.
 case "$MODE" in
   swrast) export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=${GALLIUM_DRIVER:-llvmpipe}; NODE=${NODE:-/dev/dri/card0} ;;
-  *) export MESA_LOADER_DRIVER_OVERRIDE=$MODE; NODE=${NODE:-/dev/dri/renderD128} ;;
+  *) unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER; export MESA_LOADER_DRIVER_OVERRIDE=$MODE; NODE=${NODE:-/dev/dri/renderD128} ;;
 esac
 export MESA_DEBUG=1 LIBGL_DEBUG=verbose EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-debug}
 /usr/bin/aurora-wayland >/tmp/aw.log 2>&1 &
