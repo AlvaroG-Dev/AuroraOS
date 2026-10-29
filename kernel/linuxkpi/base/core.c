@@ -20,6 +20,8 @@ struct kobject *lkpi_devices_kobj;
 struct kobject *lkpi_bus_kobj;
 struct kobject *lkpi_class_kobj;
 struct kobject *lkpi_virtual_kobj;
+/* /sys/dev/char/<major>:<minor> -> dispositivo (libdrm y Mesa los leen para identificar la GPU) */
+static struct kobject *lkpi_sysdev_kobj, *lkpi_devchar_kobj;
 
 void lkpi_dev_snap_put(struct lkpi_dev_snap *s)
 {
@@ -345,8 +347,15 @@ int lkpi_device_add(struct device *dev)
 		list_add_tail(&dev->lkpi_child_node, &parent->lkpi_children);
 		mutex_unlock(&lkpi_dev_mutex);
 	}
-	if (MAJOR(dev->devt))
+	if (MAJOR(dev->devt)) {
 		lkpi_devnode_add(dev);	/* /dev/<nombre> (K8, L4) */
+		if (lkpi_devchar_kobj) {
+			char nm[24];
+
+			snprintf(nm, sizeof(nm), "%u:%u", MAJOR(dev->devt), MINOR(dev->devt));
+			sysfs_create_link(lkpi_devchar_kobj, &dev->kobj, nm);
+		}
+	}
 	lkpi_bus_notify(dev, BUS_NOTIFY_ADD_DEVICE);
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
 	lkpi_bus_probe_device(dev);
@@ -385,8 +394,15 @@ void lkpi_device_del(struct device *dev)
 		return;
 	}
 	lkpi_bus_notify(dev, BUS_NOTIFY_DEL_DEVICE);
-	if (MAJOR(dev->devt))
+	if (MAJOR(dev->devt)) {
 		lkpi_devnode_del(dev);
+		if (lkpi_devchar_kobj) {
+			char nm[24];
+
+			snprintf(nm, sizeof(nm), "%u:%u", MAJOR(dev->devt), MINOR(dev->devt));
+			sysfs_remove_link(lkpi_devchar_kobj, nm);
+		}
+	}
 	if (lkpi_is_drm_minor(dev))
 		aurora_drm_backend_release();
 	lkpi_device_release_driver(dev);
@@ -1044,6 +1060,8 @@ int lkpi_class_add_device(struct device *dev)
 		return -EINVAL;
 	}
 	rc = sysfs_create_link(&dev->kobj, &cp->kobj, "subsystem");
+	if (!rc && dev->parent)
+		sysfs_create_link(&dev->kobj, &dev->parent->kobj, "device");	/* como Linux */
 	if (!rc)
 		rc = sysfs_create_link(&cp->kobj, &dev->kobj, dev_name(dev));
 	if (!rc)
@@ -1066,6 +1084,8 @@ void lkpi_class_remove_device(struct device *dev)
 	cp = lkpi_class_priv_find_locked(dev->class);
 	list_del_init(&dev->lkpi_class_node);
 	mutex_unlock(&lkpi_dev_mutex);
+	if (dev->parent)
+		sysfs_remove_link(&dev->kobj, "device");
 	if (cp && dev->lkpi_class_link)
 		sysfs_remove_link(&cp->kobj, dev->lkpi_class_link);
 	kfree(dev->lkpi_class_link);
@@ -1175,11 +1195,18 @@ int lkpi_device_core_init(void)
 		lkpi_device_core_exit();
 		return -ENOMEM;
 	}
+	/* opcional: sin /sys/dev/char el resto funciona */
+	lkpi_sysdev_kobj = kobject_create_and_add("dev", NULL);
+	if (lkpi_sysdev_kobj)
+		lkpi_devchar_kobj = kobject_create_and_add("char", lkpi_sysdev_kobj);
 	return 0;
 }
 
 void lkpi_device_core_exit(void)
 {
+	kobject_put(lkpi_devchar_kobj);
+	kobject_put(lkpi_sysdev_kobj);
+	lkpi_devchar_kobj = lkpi_sysdev_kobj = NULL;
 	kobject_put(lkpi_virtual_kobj);
 	kobject_put(lkpi_class_kobj);
 	kobject_put(lkpi_bus_kobj);

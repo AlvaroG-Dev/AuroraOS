@@ -1161,6 +1161,32 @@ static struct attribute *lkpi_pci_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(lkpi_pci_dev);
 
+/* /sys/.../config: libdrm (drmParsePciDeviceInfo) saca de aqui vendor, device,
+ * subsistema y revision; sin el, Mesa no puede elegir driver (crocus) y cae a swrast. */
+static ssize_t config_read(struct file *f, struct kobject *kobj, const struct bin_attribute *a,
+			   char *buf, loff_t off, size_t count)
+{
+	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj));
+	size_t i;
+
+	if (off >= 256)
+		return 0;
+	if (count > 256 - off)
+		count = 256 - off;
+	for (i = 0; i < count; i++) {
+		u8 v = 0;
+
+		pci_read_config_byte(pdev, off + i, &v);
+		buf[i] = v;
+	}
+	return count;
+}
+static const struct bin_attribute lkpi_pci_config_attr = {
+	.attr = { .name = "config", .mode = 0444 },
+	.size = 256,
+	.read = config_read,
+};
+
 static int lkpi_pci_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
 	const struct pci_dev *p = container_of_const(dev, struct pci_dev, dev);
@@ -1274,6 +1300,7 @@ static int lkpi_pci_shadow_probe(struct aurora_device *adev)
 		pci_dev_put(pdev);
 		return rc;
 	}
+	device_create_bin_file(&pdev->dev, &lkpi_pci_config_attr);
 	rc = device_driver_attach(&sh->pdrv->driver, &pdev->dev);
 	if (rc) {
 		/* El probe de Linux fallo: Aurora puede ofrecerlo a otro driver, y si
