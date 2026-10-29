@@ -57,7 +57,8 @@ static char *default_envp[] = {
     "SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0",
     "MOZ_ENABLE_WAYLAND=1",
     "ELECTRON_OZONE_PLATFORM_HINT=wayland",
-    // OpenGL/EGL por software (Mesa llvmpipe sobre wl_shm, sin DRM).
+    // OpenGL/EGL: por software (Mesa llvmpipe sobre wl_shm) salvo que haya
+    // una GPU con driver de Linux (ver gpu_env_setup(): quita la linea).
     "EGL_PLATFORM=wayland",
     "LIBGL_ALWAYS_SOFTWARE=1",
     "MESA_SHADER_CACHE_DISABLE=true",
@@ -82,6 +83,47 @@ static char *default_envp[] = {
     "XDG_DATA_HOME=/tmp/.local/share",
     NULL,
 };
+
+// ¿Hay una GPU con 3D por hardware? Lo dice el driver de Linux que ha
+// atado a card0 (DRIVER= en su uevent). Con bochs/simpledrm/virtio o el
+// backend nativo no hay y Mesa sigue en llvmpipe; con i915/amdgpu/nouveau
+// Mesa elige solo crocus/iris/radeonsi/nouveau segun el PCI id, como en
+// Linux, sin pedirle nada al usuario.
+static int gpu_has_hw_3d(void) {
+  static const char *const hw[] = {"i915", "amdgpu", "radeon", "nouveau", NULL};
+  char buf[512];
+  int fd = open("/sys/class/drm/card0/device/uevent", O_RDONLY);
+  if (fd < 0)
+    return 0;
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return 0;
+  buf[n] = '\0';
+  char *d = strstr(buf, "DRIVER=");
+  if (!d)
+    return 0;
+  d += 7;
+  for (int i = 0; hw[i]; i++) {
+    size_t l = strlen(hw[i]);
+    if (!strncmp(d, hw[i], l) && (d[l] == '\n' || d[l] == '\0'))
+      return 1;
+  }
+  return 0;
+}
+
+static void gpu_env_setup(void) {
+  if (!gpu_has_hw_3d())
+    return;
+  for (int i = 0; default_envp[i]; i++) {
+    if (!strncmp(default_envp[i], "LIBGL_ALWAYS_SOFTWARE=", 22)) {
+      for (int j = i; default_envp[j]; j++)
+        default_envp[j] = default_envp[j + 1];
+      printf("init: GPU con 3D por hardware, Mesa elige su driver\n");
+      return;
+    }
+  }
+}
 
 static pid_t spawn_terminal(void) {
   pid_t pid = fork();
@@ -164,6 +206,7 @@ static void setup_gtk4_config(void) {
 
 int main(void) {
   setup_gtk4_config();
+  gpu_env_setup();
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
   int testing = access("/system/boot-tests", F_OK) == 0;
   run_boot_tests();

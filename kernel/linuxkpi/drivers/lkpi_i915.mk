@@ -2,7 +2,7 @@
 # La lista de fuentes sale del Makefile de Linux (scripts/lkpi-kbuild-srcs.py) con
 # X86, ACPI, DEBUG_FS y CAPTURE_ERROR; sin GVT, selftests, PERF_EVENTS (i915_pmu),
 # HWMON, FBDEV_EMULATION, PXP ni DP_TUNNEL. Depende de lkpi_drm.kur, lkpi_ttm.kur y
-# lkpi_drm_display.kur. No se carga solo: hace falta lkpi.load= explicito (Plan §11, L7).
+# lkpi_drm_display.kur. Se carga solo si hay una GPU Intel (kernel/lkpi_boot.c); lkpi.load= manda, lkpi.auto=off lo desactiva.
 include kernel/linuxkpi/drivers/lkpi_drm_cflags.mk
 include kernel/linuxkpi/drivers/lkpi_i915_cflags.mk
 LKPI_DRV_SRCDIR := $(LKPI_LINUX)/drivers/gpu/drm/i915
