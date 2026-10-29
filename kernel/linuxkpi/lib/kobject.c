@@ -27,6 +27,7 @@ struct lkpi_sysfs_file {
 	struct list_head node;
 	struct kobject *kobj;
 	const struct attribute *attr;
+	const struct bin_attribute *bin;	/* fichero binario: show lee con bin->read(off 0) */
 	bool is_link;
 	char path[];
 };
@@ -65,6 +66,11 @@ static long lkpi_sysfs_show_cb(void *ctx, char *buf, size_t size)
 	struct lkpi_sysfs_file *f = ctx;
 	const struct sysfs_ops *ops = f->kobj->ktype ? f->kobj->ktype->sysfs_ops : NULL;
 
+	if (f->bin) {
+		size_t n = min_t(size_t, f->bin->size ? f->bin->size : PAGE_SIZE, size);
+
+		return f->bin->read ? f->bin->read(NULL, f->kobj, f->bin, buf, 0, n) : -EIO;
+	}
 	if (!ops || !ops->show)
 		return -EIO;
 	return ops->show(f->kobj, (struct attribute *)f->attr, buf);
@@ -97,8 +103,18 @@ static const struct aurora_sysfs_attr_ops lkpi_sysfs_attr_ops = {
 	.store = lkpi_sysfs_store_cb,
 };
 
+static int lkpi_sysfs_add_bin(struct kobject *kobj, const char *subdir,
+			      const struct attribute *attr, umode_t mode,
+			      const struct bin_attribute *bin);
 static int lkpi_sysfs_add(struct kobject *kobj, const char *subdir,
 			  const struct attribute *attr, umode_t mode)
+{
+	return lkpi_sysfs_add_bin(kobj, subdir, attr, mode, NULL);
+}
+
+static int lkpi_sysfs_add_bin(struct kobject *kobj, const char *subdir,
+			      const struct attribute *attr, umode_t mode,
+			      const struct bin_attribute *bin)
 {
 	struct lkpi_sysfs_file *f;
 	char *dir, *path;
@@ -120,6 +136,7 @@ static int lkpi_sysfs_add(struct kobject *kobj, const char *subdir,
 	}
 	f->kobj = kobj;
 	f->attr = attr;
+	f->bin = bin;
 	strcpy(f->path, path);
 	kfree(path);
 	rc = aurora_sysfs_add_attr(f->path, &lkpi_sysfs_attr_ops, f, mode & 0777);
@@ -201,13 +218,21 @@ EXPORT_SYMBOL(lkpi_sysfs_remove_files);
 /* Los binarios (EDID, ROM, config...) no se publican todavia (L4/L5). */
 int lkpi_sysfs_create_bin_file(struct kobject *kobj, const struct bin_attribute *attr)
 {
-	pr_debug("linuxkpi: sysfs: %s/%s binario no publicado\n",
-		 kobj->lkpi_path ? kobj->lkpi_path : kobj->name, attr->attr.name);
-	return 0;
+	/* Solo lectura, hasta PAGE_SIZE (config de PCI: 256 bytes). */
+	if (!kobj || !attr)
+		return -EINVAL;
+	if (!attr->read)
+		return 0;
+	return lkpi_sysfs_add_bin(kobj, NULL, &attr->attr, attr->attr.mode ? attr->attr.mode : 0444,
+				  attr);
 }
 EXPORT_SYMBOL(lkpi_sysfs_create_bin_file);
 
-void lkpi_sysfs_remove_bin_file(struct kobject *kobj, const struct bin_attribute *attr) { }
+void lkpi_sysfs_remove_bin_file(struct kobject *kobj, const struct bin_attribute *attr)
+{
+	if (kobj && attr && attr->read)
+		lkpi_sysfs_del(kobj, NULL, attr->attr.name);
+}
 EXPORT_SYMBOL(lkpi_sysfs_remove_bin_file);
 
 static void lkpi_group_remove_files(struct kobject *kobj, const struct attribute_group *grp,
