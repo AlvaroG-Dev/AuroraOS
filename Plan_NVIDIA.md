@@ -170,3 +170,13 @@ Rama `claude/project-thread-tuxtci`. Versión fijada: NVIDIA open **615.78.08** 
 ### 29-oct-2026 — Decisiones del autor
 
 1. **LinuxKPI** (`kernel-open/` sobre la capa) en lugar de capa de SO propia. 2. **Licencia:** GPL-2.0 para lo que corra sobre LinuxKPI. 3. Hay Linux en el sobremesa (VFIO+KVM posible) y el **log persistente en el pendrive de arranque** (como con `i915`) sirve de registro sin puerto serie (`docs/Log_Persistente.md`).
+
+### 29-oct-2026 — T0.4: `nv-kernel.o` (src/nvidia) compilado con su propio Makefile
+
+`make -C src/nvidia -j4` (gcc 13.3, host) termina sin errores en pocos minutos y produce `src/nvidia/_out/Linux_x86_64/nv-kernel.o`: **20,1 MB** (text 14,4 MB, data 68 KB, bss 33 KB), sin `.tdata/.tbss` ni `.init_array`.
+- **Reubicaciones:** solo `R_X86_64_PLT32` (76 914), `32S` (61 780), `64` (27 040) y `PC32` (7 978). `kur_loader.c` ya soporta las cuatro; sin GOTPCREL ni TLS. Tamaño < `KUR_MAX_SIZE` (64 MiB): el límite del cargador basta (queda 3× de margen, también para `nv-modeset-kernel.o`).
+- **Símbolos sin resolver (425):** 165 `os_*`, 122 `nv_*`, 71 `libspdm_*` (criptografía: la implementa `kernel-open/nvidia/libspdm_*.c` sobre la API de crypto de Linux; con LinuxKPI hará falta `crypto_shash`/`crypto_aead`/`akcipher` mínimos, o desactivar la atestación SPDM, que una GPU de consumo no usa), 35 `nvswitch_*` y 17 `nvlink_*` (NVSwitch/NVLink: stubs, no aplican a la 4060), `nvidia_caps_root`, `out_string` y 13 `__x86_indirect_thunk_*`.
+- **Retpolines:** el Makefile de NVIDIA compila con `-mindirect-branch=thunk-extern` si el compilador lo admite. Aurora no tiene `__x86_indirect_thunk_{rax..r15}`: hay que añadirlos al kernel (13 símbolos, `jmp *%reg` con barrera) o compilar con `-mindirect-branch=keep`. Recomendado: añadirlos a LinuxKPI (también los pedirán `i915`/`amdgpu` en cuanto se compilen con retpoline).
+- El objeto se compila con las flags de NVIDIA (kernel-module-like, `-msoft-float`, sin red zone); falta fijar si hace falta `-mcmodel=kernel` (las `32S` indican que sí, como el resto de `.kur`).
+
+**Siguiente (T0.5):** `.kur` de humo con `os_*` simulados que enlace `nv-kernel.o` (con stubs para `libspdm/nvswitch/nvlink` y los thunks) y llame a una función pura del RM; valida cargador y ABI en QEMU.
