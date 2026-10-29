@@ -180,3 +180,14 @@ Rama `claude/project-thread-tuxtci`. Versión fijada: NVIDIA open **615.78.08** 
 - El objeto se compila con las flags de NVIDIA (kernel-module-like, `-msoft-float`, sin red zone); falta fijar si hace falta `-mcmodel=kernel` (las `32S` indican que sí, como el resto de `.kur`).
 
 **Siguiente (T0.5):** `.kur` de humo con `os_*` simulados que enlace `nv-kernel.o` (con stubs para `libspdm/nvswitch/nvlink` y los thunks) y llame a una función pura del RM; valida cargador y ABI en QEMU.
+
+### 29-oct-2026 — T0.5: el RM de NVIDIA carga y ejecuta en Aurora (QEMU, sin hardware)
+
+`scripts/nvidia-smoke.sh` enlaza `nv-kernel.o` (20 MB, sin modificar) con una capa de SO de mentira generada a partir de `nm -u` (todos los símbolos sin resolver devuelven 0 y se anotan en el log al primer uso; más los 15 `__x86_indirect_thunk_*` en asm) y con `tests/nvidia_smoke/nvsmoke.c`, y produce `build/nvidia-smoke/nvsmoke.kur` (20,2 MB, SHA-256 embebido). Se carga con `lkpi.load=nvsmoke` (copiado a `sysroot/lib/modules/linuxkpi/`).
+
+Resultado en QEMU (smp, TCG): el `.kur` carga, `kur_init` llama a `rm_is_supported_pci_device()` del RM y las 4 comprobaciones pasan (`10de:2882` AD107 → soportado, `10de:2684` → soportado, vendor Intel → no, clase de red → no): **`[nvsmoke] ALL PASS`**. Quedan validados: cargador `.kur` con un objeto de 20 MB y ~173 000 reubicaciones, ABI de llamada, reubicaciones `PLT32/32S/64/PC32` en el rango alto del kernel y el límite de 64 MiB.
+- **Observación:** la carga tarda ~23 s en TCG (leer 20 MB y aplicar las reubicaciones); no es problema en hardware real, pero conviene medirlo en la 4060 y, si pesa, optimizar la búsqueda de símbolos del cargador.
+- Ninguna función de la capa de SO falsa se llamó en esta prueba (la función es pura); la lista de stubs llamados irá apareciendo en N1/N2.
+- Reproducir: `make -C build/linuxkpi_src/nvidia-open/src/nvidia -j4 && scripts/nvidia-smoke.sh && cp build/nvidia-smoke/nvsmoke.kur sysroot/lib/modules/linuxkpi/ && python3 scripts/qemu-drive.py -m 6G --cmdline "lkpi.load=nvsmoke" --done "nvsmoke] ALL PASS"` (tras `make iso`; el ISO no rastrea `sysroot/`, así que hay que forzar `rm kernel/initrd.tar` si el módulo cambia).
+
+**N0 completa** (T0.1–T0.5). Siguiente: N1 (`nv-probe`: identificar la GPU por BAR0, solo lecturas) con el log persistente del pendrive; ver preguntas en el hilo.
