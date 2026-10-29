@@ -148,3 +148,21 @@ T0.1–T0.5 y la generalización de `drm_core.c` a varios CRTC con pruebas en QE
 2. ¿Hay otro Linux en ese PC para usar **VFIO + KVM**? (acelera muchísimo el desarrollo).
 3. Licencia: ¿se acepta que los módulos NVIDIA de Aurora queden bajo MIT/GPL según indique T0.1?
 4. Vía 3D: ¿5a (pila propietaria de NVIDIA, antes) o 5b (abierta, después)? Recomendado: 5a.
+
+## 10. Registro de decisiones y resultados
+
+### 29-oct-2026 — N0: T0.1 (licencias), T0.2 (interfaz `os_*`), T0.3 (`fetch-nvidia.sh`)
+
+Rama `claude/project-thread-tuxtci`. Versión fijada: NVIDIA open **615.78.08** (`kernel/linuxkpi/linux-version.mk`); fuentes en `build/linuxkpi_src/nvidia-open` (clon de la etiqueta; `scripts/fetch-linux-drivers.sh` ya lo hacía).
+
+**T0.1 — Licencias (comprobado sobre 615.78.08).**
+- `COPYING`: «salvo indicación contraria, los ficheros son **MIT**». SPDX: 2933 ficheros `MIT`; 1 `Apache-2.0 WITH LLVM-exception` (`src/nvidia/inc/libraries/nvport/clang/stdatomic.h`), 1 `Linux-OpenIB` (`kernel-open/nvidia-peermem/peer_mem.h`, fuera de alcance). 1012 `.c/.h` sin SPDX (cabeceras antiguas; revisar al incorporarlos, no bloquea).
+- `src/nvidia`, `src/nvidia-modeset` y `src/common` son MIT. `kernel-open/*` declara `MODULE_LICENSE("Dual MIT/GPL")`. Los `g_bindata_*.c` (microcódigo de arranque del GSP, 64 ficheros, 47 MB) también llevan cabecera MIT.
+- **Conclusión:** el núcleo abierto puede enlazarse con código GPL-2.0 (la capa LinuxKPI) y con el resto de Aurora sin obligar a GPL en este último; MIT es compatible en ambos sentidos. Se mantiene la política «fuentes de NVIDIA no versionadas, solo scripts de descarga». Decisión formal sobre la licencia de los módulos Aurora: **pregunta 3 de §9, sigue abierta** (recomendación: la capa `nv-os-aurora` propia, MIT; los módulos que alojen `kernel-open/` sobre LinuxKPI, GPL-2.0 como el resto de la capa).
+- **Corrección a la nota de L8 de `Plan_LinuxKPI.md`:** `src/nvidia` **no** viene como objeto binario: se compila desde fuente (aquí con las flags de Aurora). El **firmware GSP** (`gsp_ga10x.bin`, que usa Ada/AD107) **no** está en las fuentes: viene en el paquete `.run` (`firmware/`), igual que los componentes de usuario. Lo que sí hay codificado en `src/nvidia/generated/g_bindata_*.c` es el microcódigo de arranque (Booter, bootloader del GSP, scrubber).
+
+**T0.2 — Interfaz de SO.** `scripts/nvidia-os-api.py` genera `docs/nv_os_api.md`: **165** funciones `os_*` (`os-interface.h`), **180** `nv_*` que el RM invoca en la capa de SO, **97** `rm_*` que exporta el RM (no hay que escribirlas) y **53** `nvkms_*` de nvidia-modeset, cada una con su número de usos y el fichero de `kernel-open/` que la implementa hoy. Solo 11 `os_*` carecen de usos: son stubs triviales. Este es el tamaño real de la «capa de SO propia» (≈ las 165 + 180 + 53 funciones, más `nvidia-drm`); la alternativa LinuxKPI sigue siendo reutilizar esas implementaciones. **La decisión (D5/pregunta 4 de `Plan_LinuxKPI.md` §10) no se toma aquí**: sigue pendiente del autor; recomendación: LinuxKPI (`kernel-open/`), porque el 57 % de los símbolos ya existe y la capa propia obliga a reescribir ~90 k líneas.
+
+**T0.3 — `scripts/fetch-nvidia.sh`.** Descarga `NVIDIA-Linux-x86_64-615.78.08.run` (existe en `download.nvidia.com`, comprobado con HEAD) a `build/nvidia/` y extrae `firmware/` y las bibliotecas de usuario **sin ejecutar el `.run`** (lee la cabecera makeself, `tail | xz | tar`). Comprueba que las fuentes de `nvidia-open` son de la misma versión. **Pendiente de ejecutar** (≈ 350 MB): en esta sesión el clasificador de permisos bloqueó descargar y ejecutar; el script se ha escrito y comprobado solo con `bash -n`.
+
+**Siguiente (T0.4/T0.5):** compilar `src/nvidia` con las flags del kernel de Aurora y comprobar el cargador `.kur` (tamaño y reubicaciones); depende de la decisión LinuxKPI-vs-capa propia solo en lo que se enlaza, no en el objeto de `src/nvidia`.
