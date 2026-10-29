@@ -167,3 +167,15 @@ mover una ventana o pasar el cursor. Causa: el daño del frame anterior se repas
 `backbuffer`, pero `compose_scene(e)` repinta fuera del clip (margen del desenfoque del Dock) sin Dock ni
 menus, asi que esas zonas del backbuffer no son una imagen final. Ahora el repaso sale de `front_shadow`
 (ultima imagen final presentada, solo recibe rectangulos terminados).
+
+## 13. Regresion final del hito 2 (29-oct-2026, codigo de 4d7183b0)
+
+QEMU sin KVM, un solo QEMU a la vez (`scripts/lkpi-regress.sh`): suite del kernel con `-smp 2` y `-smp 4`,
+`lkpi_test`, `drm_test` (nativo, bochs, simpledrm, virtio-gpu 2 salidas), `sig_test`, `rseq_test`,
+`timer_test`, `thread_sig_test`, `clipboard-x11.sh` y `primary-icons.sh`: **todo OK**. Prueba de KMS con
+`lkpi.kms=1` en bochs: modeset propio hecho, 114 flips, 0 fallidos. Pendiente solo lo que exige hardware:
+confirmar en la Portégé que las rayas del Dock han desaparecido y bajar los vblanks perdidos.
+
+**Pendiente del bloque (hito 2):** (1) confirmar el Dock en hardware; (2) commit no bloqueante con evento de
+page-flip si los vblanks perdidos persisten; (3) virtio-gpu/bochs con `lkpi.kms=1` en la regresion
+automatica (ya en `scripts/lkpi-regress.sh kms`); (4) hito 3 de L7.

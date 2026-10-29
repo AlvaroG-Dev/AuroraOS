@@ -1,7 +1,7 @@
 #!/bin/bash
 # scripts/lkpi-regress.sh — bateria de regresion de LinuxKPI en QEMU (un solo
 # QEMU a la vez, via scripts/qemu-drive.py). Uso:
-#   scripts/lkpi-regress.sh {suite|lkpi_test|drm_test|userland|all}
+#   scripts/lkpi-regress.sh {suite|lkpi_test|drm_test|kms|userland|all}
 # Sale con 1 si alguna prueba falla; resumen al final. Logs en /tmp/lkpi-*.log.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -34,6 +34,9 @@ drm_test() {
     run drm-virtio-gpu "ALL PASS" -t 900 --cmdline "aur.skip=1af4:1050 lkpi.load=linuxkpi,lkpi_virtio,lkpi_drm,lkpi_virtio_gpu" \
         --extra=-vga --extra=none --extra=-device --extra=virtio-gpu-pci,max_outputs=2 --boot-test /usr/bin/drm_test --done "ALL PASS"
 }
+kms() {
+    run kms-bochs "kms: modeset propio hecho" -t 600 --cmdline "aur.skip=1234:1111 lkpi.load=linuxkpi,lkpi_drm,lkpi_bochs lkpi.kms=1" --done "COMP-PERF] KMS"
+}
 userland() {
     for t in sig_test rseq_test timer_test thread_sig_test; do
         run $t "ALL PASS" -t 600 --boot-test /usr/bin/$t --done "ALL PASS"
@@ -43,9 +46,9 @@ userland() {
 }
 
 case "${1:-all}" in
-    suite) suite ;; lkpi_test) lkpi_test ;; drm_test) drm_test ;; userland) userland ;;
-    all) suite; lkpi_test; drm_test; userland ;;
-    *) echo "uso: $0 {suite|lkpi_test|drm_test|userland|all}"; exit 2 ;;
+    suite) suite ;; lkpi_test) lkpi_test ;; drm_test) drm_test ;; kms) kms ;; userland) userland ;;
+    all) suite; lkpi_test; drm_test; kms; userland ;;
+    *) echo "uso: $0 {suite|lkpi_test|drm_test|kms|userland|all}"; exit 2 ;;
 esac
 if [ ${#FAILS[@]} -gt 0 ]; then echo "[lkpi-regress] FALLAN: ${FAILS[*]}"; exit 1; fi
 echo "[lkpi-regress] todo OK"
