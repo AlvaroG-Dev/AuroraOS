@@ -208,4 +208,4 @@ Cadena de fallos resuelta, en orden:
 
 `aurora.conf` minimo para la Portégé: `cmdline=klog.file=/data/aurora.log`. Mesa sigue siendo opcional (`WITH_MESA=1` o `scripts/fetch-mesa.sh`).
 
-Pendiente: presentar un cliente GPU por `linux-dmabuf` en el compositor (`aw_gbm_test` sin `--no-wayland`) en hardware real; `grep` en tuberia del terminal de Aurora; `on_each_cpu`/IPI local; L8/L9 no empezados (esperan confirmacion).
+Verificado despues (29-oct-2026): `linux-dmabuf` con `aw_gbm_test` en el compositor funciona en la Portégé. Pendiente: `grep` en tuberia del terminal de Aurora; `on_each_cpu`/IPI local; L8/L9 no empezados (esperan confirmacion).

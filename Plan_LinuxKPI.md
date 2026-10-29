@@ -464,3 +464,4 @@ Detalle en `docs/LinuxKPI_Sesion_L7.md` §12. Decisiones:
   5. `on_each_cpu`/IPI solo en la CPU local (afecta a `wbinvd` en SMP); sin ECAM.
   6. Restos del hito 2 pendientes de logs: franjas del Dock y perdida de vblank.
   7. L8 (AMD/NVIDIA) y L9 sin empezar; esperan confirmacion (recomendado L9 antes que NVIDIA).
+- **linux-dmabuf verificado en la Portégé (29-oct-2026):** `aw_gbm_test` (sin `--no-wayland`, con el compositor en marcha) presenta por `zwp_linux_dmabuf_v1` con crocus sobre la GPU real; confirmado por Alvaro. El pendiente 1 de la lista consolidada queda cumplido: **L7 hito 3 completo**.
