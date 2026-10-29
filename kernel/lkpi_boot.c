@@ -64,6 +64,10 @@ static const char *lkpi_autodetect(void) {
   return NULL;
 }
 
+static int boot_loaded;
+
+int lkpi_boot_loaded(void) { return boot_loaded; }
+
 int lkpi_boot_load(void) {
   char list[256];
   if (!cmdline_get("lkpi.load", list, sizeof(list)) || !list[0]) {
@@ -96,5 +100,6 @@ int lkpi_boot_load(void) {
     }
     p = sep ? e + 1 : e;
   }
+  boot_loaded = loaded > 0;
   return loaded;
 }
