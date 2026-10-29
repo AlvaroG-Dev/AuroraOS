@@ -27,6 +27,7 @@
 #include "klog.h"
 #include "mutex.h"
 #include "net/net_proxy.h"
+#include "pf.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
@@ -3488,6 +3489,36 @@ void vfs_fd_unreserve(int fd) {
   proc->fds[fd] = NULL;
   mutex_unlock(&proc->fd_lock);
   fd_put(old);
+}
+
+// [LinuxKPI L7] vm_mmap/vm_munmap de los drivers: mapea un nodo del VFS en el
+// proceso actual sin que el usuario tenga un fd (GEM_MMAP legacy de i915).
+// Un fd temporal lleva el nodo a sys_mmap; el VMA conserva sus propias
+// referencias, asi que el fd se cierra al volver. Devuelve la direccion o
+// -errno.
+int64_t vfs_mmap_node_current(vfs_node_t *node, uint64_t addr, uint64_t len,
+                              uint64_t prot, uint64_t flags, uint64_t off) {
+  process_t *proc = process_current();
+  if (!proc || !node)
+    return -EINVAL;
+  int fd = vfs_fd_reserve(1);
+  if (fd < 0)
+    return fd;
+  vfs_node_ref(node);
+  int rc = vfs_fd_install_node(fd, node, 0);
+  if (rc) {
+    vfs_node_free(node);
+    vfs_fd_unreserve(fd);
+    return rc;
+  }
+  int64_t r = sys_mmap(proc, addr, len, prot, flags, fd, off);
+  vfs_close_for_proc(proc, fd);
+  return r;
+}
+
+int64_t vfs_munmap_current(uint64_t addr, uint64_t len) {
+  process_t *proc = process_current();
+  return proc ? sys_munmap(proc, addr, len) : -EINVAL;
 }
 
 file_descriptor_t *vfs_fd_get_current(int fd) {

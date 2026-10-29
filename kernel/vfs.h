@@ -450,6 +450,9 @@ int vfs_resolve_path(const char *cwd, const char *in, char *out, size_t outlen);
 // --- FDs por proceso ---
 int vfs_open_for_proc(void *proc_ptr, const char *path, int flags);
 int vfs_close_for_proc(void *proc_ptr, int fd);
+int64_t vfs_mmap_node_current(vfs_node_t *node, uint64_t addr, uint64_t len,
+                              uint64_t prot, uint64_t flags, uint64_t off);
+int64_t vfs_munmap_current(uint64_t addr, uint64_t len);
 int vfs_open_nofollow_for_proc(void *proc_ptr, const char *path, int flags);
 // Referencias a file_descriptor_t (SCM_RIGHTS): get toma una ref sobre el fd
 // del proceso, put la suelta, install consume la ref en el primer fd libre.

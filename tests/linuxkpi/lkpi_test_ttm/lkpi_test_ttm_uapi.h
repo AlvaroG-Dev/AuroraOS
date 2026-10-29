@@ -61,6 +61,15 @@ struct lkpi_ttm_pressure {
 	__u32 pad;
 };
 
+/* L7: vm_mmap de un fichero shmem (GEM_MMAP legacy de i915): el kernel crea el
+ * fichero con un patron, lo mapea en el proceso y devuelve la direccion. */
+struct lkpi_ttm_vmmap {
+	__u64 size;		/* in */
+	__u32 seed;		/* in: patron con el que el kernel rellena el fichero */
+	__s32 bad;		/* out (solo VMCHECK): palabras que no coinciden con `seed` */
+	__u64 addr;		/* out (VMMAP) */
+};
+
 #define LKPI_TTM_IOC_MAGIC 'T'
 #define LKPI_TTM_IOC_CREATE _IOWR(LKPI_TTM_IOC_MAGIC, 1, struct lkpi_ttm_create)
 #define LKPI_TTM_IOC_MOVE _IOW(LKPI_TTM_IOC_MAGIC, 2, struct lkpi_ttm_move)
@@ -69,6 +78,10 @@ struct lkpi_ttm_pressure {
 #define LKPI_TTM_IOC_CHECK _IOWR(LKPI_TTM_IOC_MAGIC, 5, struct lkpi_ttm_pattern)
 #define LKPI_TTM_IOC_DESTROY _IOW(LKPI_TTM_IOC_MAGIC, 6, __u32)	/* handle */
 #define LKPI_TTM_IOC_PRESSURE _IOW(LKPI_TTM_IOC_MAGIC, 7, struct lkpi_ttm_pressure)
+
+#define LKPI_TTM_IOC_VMMAP _IOWR(LKPI_TTM_IOC_MAGIC, 8, struct lkpi_ttm_vmmap)
+#define LKPI_TTM_IOC_VMCHECK _IOWR(LKPI_TTM_IOC_MAGIC, 9, struct lkpi_ttm_vmmap)
+#define LKPI_TTM_IOC_VMUNMAP _IOW(LKPI_TTM_IOC_MAGIC, 10, struct lkpi_ttm_vmmap)
 
 /* Mismo patron que escribe el kernel en kt_bo_rw: palabra i (i multiplo de 61). */
 #define LKPI_TTM_WORD(seed, pg16, i) \

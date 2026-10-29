@@ -343,3 +343,27 @@ void lkpi_unmap_mapping_range(struct address_space *mapping, loff_t holebegin, l
 	mutex_unlock(&mapping->i_mmap_mutex);
 }
 EXPORT_SYMBOL(lkpi_unmap_mapping_range);
+
+/*
+ * vm_mmap/vm_munmap: mapean un fichero de la capa en el proceso actual. Solo
+ * con contexto de proceso de usuario (ioctl de i915 GEM_MMAP legacy).
+ */
+int64_t lkpi_vfs_mmap_node_current(struct aurora_vfs_node *n, u64 addr, u64 len, u64 prot,
+				   u64 flags, u64 off) __asm__("vfs_mmap_node_current");
+int64_t lkpi_vfs_munmap_current(u64 addr, u64 len) __asm__("vfs_munmap_current");
+
+unsigned long lkpi_vm_mmap(struct file *file, unsigned long addr, unsigned long len,
+			   unsigned long prot, unsigned long flag, unsigned long offset)
+{
+	if (!file || !file->__lkpi_node)
+		return -EBADF;
+	return (unsigned long)lkpi_vfs_mmap_node_current(file->__lkpi_node, addr, len, prot,
+							 flag & ~0x20UL, offset);
+}
+EXPORT_SYMBOL(lkpi_vm_mmap);
+
+int lkpi_vm_munmap(unsigned long start, size_t len)
+{
+	return (int)lkpi_vfs_munmap_current(start, len);
+}
+EXPORT_SYMBOL(lkpi_vm_munmap);

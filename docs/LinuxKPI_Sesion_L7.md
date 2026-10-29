@@ -179,3 +179,16 @@ confirmar en la Portégé que las rayas del Dock han desaparecido y bajar los vb
 **Pendiente del bloque (hito 2):** (1) confirmar el Dock en hardware; (2) commit no bloqueante con evento de
 page-flip si los vblanks perdidos persisten; (3) virtio-gpu/bochs con `lkpi.kms=1` en la regresion
 automatica (ya en `scripts/lkpi-regress.sh kms`); (4) hito 3 de L7.
+
+## 14. Hito 3: Mesa `crocus` y `linux-dmabuf` (29-oct-2026, rama `claude/l7-hito3-crocus-dmabuf`)
+
+Decisiones y razones en Plan §11 (29-oct-2026). Resumen de lo hecho:
+
+- **Mesa**: no hay que compilarlo; el de Ubuntu (`fetch-mesa.sh`, 25.2.8) trae `crocus`. `linux-dmabuf` ya estaba en `aurora-wayland`.
+- **`vm_mmap`/`vm_munmap`** en la capa (antes `-ENODEV`): `vfs_mmap_node_current`/`vfs_munmap_current` en el kernel (fd temporal + `sys_mmap`) y `->mmap` con fallo de pagina en los ficheros shmem. Desbloquea `I915_GEM_MMAP` legacy. `I915_MMAP_WC` sigue sin soporte (sin `find_vma`).
+- **`tests/wayland/aw_gbm_test.c` + `guest/gbm.sh`**: GBM → EGL → GLES2 → dma-buf → toplevel de `aurora-wayland`. `swrast` usa `card0` (los dumb buffers no se permiten en nodos render de Linux); `crocus`/`iris` usan `renderD128`.
+- **Pruebas en QEMU**: `lkpi_test` 145/145 (4 nuevas de `vm_mmap`); `aw_gbm_test` ALL PASS con el backend nativo y con virtio-gpu de Linux (llvmpipe, `GL_RENDERER=llvmpipe`, pixel de la barra verde `33c759`).
+- **Sin verificar (necesita la Portégé)**: todo lo que toque la GPU Intel con Mesa. Receta en Plan §11. Si falla, el primer dato es la linea `FAIL ...` de `aw_gbm_test` (indica el paso: `gbm_create_device`, `eglInitialize`, `gbm_bo_create`, `eglCreateImage`, `framebuffer incompleto`, `el pixel leido no es el pintado`, `gbm_bo_get_fd`, linux-dmabuf) junto con `drm.debug=0x14` y `lkpi.i915_diag=1`.
+- **Limites**: `on_each_cpu`/IPI sigue ejecutando solo en la CPU local (afecta a `wbinvd` en SMP); sin ECAM; el mapeo del dma-buf de un bo de i915 desde `aurora-wayland` (copia al almacen de la superficie) depende de la coherencia de cache del mapeo: si se ven restos o lineas viejas, es el primer sospechoso.
+- **Regresion (29-oct-2026)**: suite del kernel 208/208 con `-smp 2` y `-smp 4`, `lkpi_test` 145, `drm_test` (nativo, bochs, simpledrm, virtio-gpu) y `kms-bochs`: OK. Aviso de entorno: con Mesa/LLVM (`libgallium`, `libLLVM`, ~500 MB) dentro del initrd la suite `-smp 2` dio 2 fallos de memoria (`test_k9.c:260` «la RAM del respaldo se libera» y el estres SMP de ttm); sin Mesa en el initrd, 208/208. Hacer la regresion del kernel sin Mesa y las pruebas de `gbm.sh` con ella. `userland` (sig_test, etc.) no se repitio: este hito no toca senales ni temporizadores.
+
