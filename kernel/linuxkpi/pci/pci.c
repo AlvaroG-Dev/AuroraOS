@@ -584,7 +584,7 @@ void lkpi_display_shadow_probe(void)
 	struct pci_dev *p = NULL;
 	char opt[8];
 	u64 fbp, fbs;
-	bool fb_only = false;
+	bool fb_only = false, fb_only_set = false;
 
 	if (READ_ONCE(done) || READ_ONCE(probing))
 		return;
@@ -595,17 +595,21 @@ void lkpi_display_shadow_probe(void)
 	}
 	probing = true;
 	/* lkpi.shadow=0: sin sombra; =fb: solo el BAR que aloja el framebuffer
-	 * (los registros del dispositivo son reales: i915 los necesita). */
+	 * (los registros del dispositivo son reales: i915 los necesita). Sin la
+	 * opcion, una GPU Intel real usa fb y el resto (QEMU) sombra completa. */
 	if (aurora_cmdline_get("lkpi.shadow", opt, sizeof(opt))) {
 		if (opt[0] == '0')
 			goto out;
 		fb_only = opt[0] == 'f';
+		fb_only_set = true;
 	}
 	if (!aurora_gpup_get_framebuffer(&fbp, &fbs))
 		goto out;
 	while ((p = lkpi_pci_get_next(lkpi_match_display, NULL, p)) != NULL) {
 		if (!lkpi_bar_has(p, fbp))
 			continue;
+		if (!fb_only_set)
+			fb_only = p->vendor == PCI_VENDOR_ID_INTEL;
 		for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
 			struct resource *r = &p->resource[i];
 			u64 len = r->end - r->start + 1, start = r->start;
