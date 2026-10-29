@@ -359,3 +359,16 @@ void lkpi_mm_exit(void)
 	if (pages_owned)
 		pr_warn("linuxkpi: %lu paginas sin liberar al descargar\n", pages_owned);
 }
+
+/* Un nodo, una zona con toda la RAM utilizable (N2). */
+static struct pglist_data lkpi_node0;
+
+struct pglist_data *lkpi_node_data(int nid)
+{
+	struct zone *z = &lkpi_node0.node_zones[0];
+
+	z->zone_start_pfn = 0;
+	z->spanned_pages = z->managed_pages = z->present_pages = aurora_pmm_total_pages();
+	return &lkpi_node0;
+}
+EXPORT_SYMBOL(lkpi_node_data);

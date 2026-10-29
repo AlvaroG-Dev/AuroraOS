@@ -83,6 +83,7 @@ typedef unsigned int fmode_t;
 
 /* Paginas mapeadas de un fichero: los vm_area_struct vivos que lo mapean. */
 struct address_space {
+	const void *a_ops;
 	struct inode *host;
 	struct mutex i_mmap_mutex;
 	struct list_head i_mmap;	/* vm_area_struct.__lkpi_mapping */
@@ -321,4 +322,5 @@ struct vm_area_struct;
 static inline int vfs_mmap(struct file *file, struct vm_area_struct *vma) { return -ENODEV; }
 ssize_t lkpi_kernel_write(struct file *file, const void *buf, size_t count, loff_t *pos);
 #define kernel_write lkpi_kernel_write
+static inline int filp_close(struct file *filp, void *id) { return 0; }
 #endif

@@ -54,7 +54,12 @@
 
 struct mm_struct;
 
+struct fs_struct;
+struct files_struct;
 struct task_struct {
+	struct fs_struct *fs;
+	struct files_struct *files;
+	void *stack;			/* Aurora no expone la pila del hilo: siempre NULL */
 	unsigned int __state;
 	unsigned int flags;
 	pid_t pid;			/* tid de Aurora */
