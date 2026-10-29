@@ -15,7 +15,7 @@ case "$MODE" in
   swrast) export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=${GALLIUM_DRIVER:-llvmpipe}; NODE=${NODE:-/dev/dri/card0} ;;
   *) export MESA_LOADER_DRIVER_OVERRIDE=$MODE; NODE=${NODE:-/dev/dri/renderD128} ;;
 esac
-export MESA_DEBUG=1 EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-warning}
+export MESA_DEBUG=1 LIBGL_DEBUG=verbose EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-debug}
 /usr/bin/aurora-wayland >/tmp/aw.log 2>&1 &
 APID=$!
 sleep 3
@@ -23,6 +23,9 @@ timeout ${GBM_TIMEOUT:-120} /usr/bin/aw_gbm_test "$NODE" "$@" --exit >/tmp/gbm.o
 RC=$?
 sleep 2
 kill -TERM $APID 2>/dev/null
+# Todo lo que escribe el cliente (stdout y stderr de Mesa) tambien al log del kernel:
+# en la Portegé la salida de la consola no se guarda, /data/aurora.log si.
+grep -a -v 'No DRI config supports' /tmp/gbm.out | head -400 | while IFS= read -r l; do echo "GBMLOG $l" > /dev/kmsg; done
 grep -a '^\[aw_gbm_test\]\|libEGL warning\|libEGL error\|^MESA\|crocus\|i915\|INTEL' /tmp/gbm.out | head -80
 echo "=== aw.log ==="
 grep -a "aurora-wayland\]" /tmp/aw.log | tail -10
