@@ -67,6 +67,15 @@ typedef struct {
 
   // [SMP] Multiprocessor Wakeup Structure.
   acpi_wakeup_t wakeup;
+
+  // MCFG: ventanas ECAM (config PCI extendida). Vacio si no hay tabla.
+  int mcfg_count;
+  struct {
+    uint64_t base;      // base fisica de la ventana
+    uint16_t segment;
+    uint8_t start_bus;
+    uint8_t end_bus;
+  } mcfg[4];
 } acpi_info_t;
 
 // ---------------------------------------------------------------------------

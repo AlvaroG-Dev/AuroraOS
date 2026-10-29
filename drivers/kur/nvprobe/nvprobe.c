@@ -16,6 +16,9 @@
 
 extern void klog_printf(int level, const char *fmt, ...);
 extern int cmdline_get(const char *key, char *out, size_t outlen);
+extern int pci_ecam_available(void);
+extern uint32_t pci_read_config_ext_dword(uint8_t, uint8_t, uint8_t, uint16_t);
+extern uint16_t pci_find_ext_capability(uint8_t, uint8_t, uint8_t, uint16_t);
 
 const struct kur_manifest __kur_manifest = {
     .magic       = KUR_MAGIC,
@@ -127,7 +130,25 @@ static void probe_one(const pci_device_t *d, int do_size) {
   uint8_t msix = find_cap(d, 0x11);
   uint8_t msi = find_cap(d, 0x05);
   if (msix) L("MSI-X: %u entradas", (pci_read_config_word(d->bus, d->slot, d->func, msix + 2) & 0x7FF) + 1);
-  L("MSI=%s MSI-X=%s  ReBAR/config extendida: no disponible (sin ECAM)", msi ? "si" : "no", msix ? "si" : "no");
+  L("MSI=%s MSI-X=%s", msi ? "si" : "no", msix ? "si" : "no");
+  if (!pci_ecam_available()) {
+    L("config extendida (ReBAR): no disponible (sin MCFG)");
+  } else {
+    uint16_t rb = pci_find_ext_capability(d->bus, d->slot, d->func, 0x15);
+    if (!rb) {
+      L("ReBAR: sin capacidad extendida 0x15 (config extendida por ECAM OK)");
+    } else {
+      uint32_t c0 = pci_read_config_ext_dword(d->bus, d->slot, d->func, rb + 8);
+      unsigned nbars = (c0 >> 5) & 7;
+      L("ReBAR en 0x%03x, %u BAR redimensionables", rb, nbars);
+      for (unsigned i = 0; i < nbars && i < 6; i++) {
+        uint32_t cap = pci_read_config_ext_dword(d->bus, d->slot, d->func, rb + 4 + 8 * i);
+        uint32_t ctl = pci_read_config_ext_dword(d->bus, d->slot, d->func, rb + 8 + 8 * i);
+        L("  ReBAR BAR%u: actual 2^%u MiB, soportados (mascara tamanos 1MiB..)=0x%08x", ctl & 7,
+          (ctl >> 8) & 0x1F, cap >> 4);
+      }
+    }
+  }
 
   if (!bar0 || bar0 >= (1ULL << 40)) { L("BAR0 no utilizable (0x%llx)", (unsigned long long)bar0); return; }
   if (!(cmd & 2)) { L("MEM desactivado en el comando PCI: no se lee BAR0 (el firmware no activo la GPU)"); return; }
@@ -143,9 +164,28 @@ static void probe_one(const pci_device_t *d, int do_size) {
     (b42 >> 12) & 0xF, arch_name(arch, impl));
 }
 
+// nvprobe=ecam: autoprueba de ECAM (compara con el acceso por puertos).
+static void ecam_selftest(void) {
+  int same = 0, diff = 0, ext = 0;
+  L("ECAM %s", pci_ecam_available() ? "disponible (MCFG)" : "NO disponible");
+  for (int bus = 0; bus < 4; bus++)
+    for (int slot = 0; slot < 32; slot++)
+      for (int fn = 0; fn < 8; fn++) {
+        uint32_t a = pci_read_config_dword(bus, slot, fn, 0);
+        if ((a & 0xFFFF) == 0xFFFF) continue;
+        uint32_t b = pci_read_config_ext_dword(bus, slot, fn, 0);
+        if (a == b) same++; else diff++;
+        uint16_t c = 0;
+        for (int id = 1; id < 0x30 && !c; id++) c = pci_find_ext_capability(bus, slot, fn, id);
+        if (c) { ext++; L("  %02x:%02x.%x id=%08x con capacidad extendida en 0x%03x", bus, slot, fn, a, c); }
+      }
+  L("ECAM vs puertos: %d iguales, %d distintos; %d funciones con cap. extendida", same, diff, ext);
+}
+
 int kur_init(void) {
   char opt[16];
   if (!cmdline_get("nvprobe", opt, sizeof opt) || !opt[0] || opt[0] == '0') return 0; // opt-in
+  if (opt[0] == 'e') { ecam_selftest(); return 0; }
   int do_size = opt[0] == 's';
   int found = 0, scanned = 0;
   L("N1: buscando GPU NVIDIA en el bus PCI (solo lectura%s)", do_size ? ", midiendo BAR" : "");
