@@ -7,9 +7,9 @@
 #   build/nvidia/firmware/                       gsp_*.bin (GSP-RM) del paquete
 #   build/nvidia/userlib/                        libnvidia-*, libEGL_nvidia, ...
 #
-# El .run NUNCA se ejecuta: es un script makeself (cabecera de shell + tar xz).
+# El .run NUNCA se ejecuta: es un script makeself (cabecera de shell + tar zstd/xz).
 # Se lee la cabecera como texto, se localiza el inicio de la carga (`skip=`) y
-# se extrae solo el tar con `tail | xz | tar`, que es equivalente a -x pero sin
+# se extrae solo el tar con `tail | zstd | tar`, que es equivalente a -x pero sin
 # ejecutar codigo de la descarga.
 #
 # Las fuentes del nucleo abierto (open-gpu-kernel-modules) las baja
@@ -60,9 +60,16 @@ echo "OK: $RUN ($(du -h "$OUT/$RUN" | cut -f1)) sha256=$SUM"
 if [ ! -f "$OUT/pkg/.aurora-version" ] || [ "$(cat "$OUT/pkg/.aurora-version")" != "$V" ]; then
     rm -rf "$OUT/pkg"; mkdir -p "$OUT/pkg"
     # makeself: la cabecera tiene `skip=N` (linea donde empieza la carga).
-    SKIP="$(head -n 700 "$OUT/$RUN" | sed -n 's/^skip="\{0,1\}\([0-9]\+\)"\{0,1\}$/\1/p' | head -1)"
+    SKIP="$(head -n 700 "$OUT/$RUN" | sed -n 's/^skip="\{0,1\}\([0-9]\+\)"\{0,1\}$/\1/p' | head -1 || true)"
     [ -n "$SKIP" ] || { echo "no se encuentra skip= en la cabecera de $RUN" >&2; exit 1; }
-    tail -n +"$SKIP" "$OUT/$RUN" | xz -dc | tar -x -C "$OUT/pkg"
+    # La carga es zstd (28 b5 2f fd) en 615.x; xz (fd 37 7a 58) en versiones antiguas.
+    MAGIC="$(tail -n +"$SKIP" "$OUT/$RUN" | head -c 4 | od -An -tx1 | tr -d ' \n' || true)"
+    case "$MAGIC" in
+        28b52ffd) DEC="zstd -dc" ;;
+        fd377a58) DEC="xz -dc" ;;
+        *) echo "formato de carga desconocido ($MAGIC)" >&2; exit 1 ;;
+    esac
+    tail -n +"$SKIP" "$OUT/$RUN" | $DEC | tar -x -C "$OUT/pkg"
     echo "$V" > "$OUT/pkg/.aurora-version"
 fi
 rm -rf "$OUT/firmware" "$OUT/userlib"
