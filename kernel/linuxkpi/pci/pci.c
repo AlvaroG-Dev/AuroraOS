@@ -1139,6 +1139,21 @@ static ssize_t device_show(struct device *dev, struct device_attribute *a, char 
 	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->device);
 }
 static DEVICE_ATTR_RO(device);
+static ssize_t subsystem_vendor_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->subsystem_vendor);
+}
+static DEVICE_ATTR_RO(subsystem_vendor);
+static ssize_t subsystem_device_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->subsystem_device);
+}
+static DEVICE_ATTR_RO(subsystem_device);
+static ssize_t revision_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%02x\n", to_pci_dev(dev)->revision);
+}
+static DEVICE_ATTR_RO(revision);
 static ssize_t class_show(struct device *dev, struct device_attribute *a, char *buf)
 {
 	return sysfs_emit(buf, "0x%06x\n", to_pci_dev(dev)->class);
@@ -1157,6 +1172,7 @@ static DEVICE_ATTR_RO(enable);
 
 static struct attribute *lkpi_pci_dev_attrs[] = {
 	&dev_attr_vendor.attr, &dev_attr_device.attr, &dev_attr_class.attr,
+	&dev_attr_subsystem_vendor.attr, &dev_attr_subsystem_device.attr, &dev_attr_revision.attr,
 	&dev_attr_irq.attr, &dev_attr_enable.attr, NULL,
 };
 ATTRIBUTE_GROUPS(lkpi_pci_dev);
