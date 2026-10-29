@@ -2251,6 +2251,30 @@ aml_object_t *aml_eval(const char *path) {
   return n->value;
 }
 
+aml_object_t *aml_eval_int_args(const char *path, const uint64_t *args,
+                                int nargs) {
+  if (!g_ready || !g_root || !path)
+    return NULL;
+  aml_node_t *n = lookup_path_caller(path);
+  if (!n || !n->value)
+    return NULL;
+  if (n->value->type != AML_METHOD)
+    return n->value;
+  aml_object_t *objs[AML_MAX_ARGS];
+  if (nargs > AML_MAX_ARGS)
+    nargs = AML_MAX_ARGS;
+  for (int i = 0; i < nargs; i++)
+    objs[i] = make_integer(args[i]);
+  return eval_method(n->value, objs, nargs, 0);
+}
+
+int aml_method_exists(const char *path) {
+  if (!g_ready || !g_root || !path)
+    return 0;
+  aml_node_t *n = lookup_path_caller(path);
+  return n && n->value && n->value->type == AML_METHOD;
+}
+
 uint64_t aml_to_integer(aml_object_t *obj) {
   if (!obj)
     return 0;

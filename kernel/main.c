@@ -6,6 +6,7 @@
 #include "plog.h"
 #include "display_edid.h"
 #include "acpi.h"
+#include "acpi_button.h"
 #include "efi_rt.h"
 #include "acpi_aml.h"
 #include "acpi_pm.h"
@@ -287,6 +288,7 @@ static int acpi_init_task(void *arg) {
 
   LOG_INFO("[INIT] ACPI PM (P-states, S-states)...");
   acpi_pm_init();
+  acpi_button_init();
 
   LOG_INFO("[INIT] PM: aplicar política...");
   cpu_apply_pm_policy();

@@ -2,6 +2,7 @@
 #include "acpi_pm.h"
 #include "acpi.h"
 #include "acpi_aml.h"
+#include "cmdline.h"
 #include "cpu.h"
 #include "io.h"
 #include "klog.h"
@@ -652,10 +653,37 @@ static int acpi_pm_ensure_enabled(const acpi_fadt_t *f) {
   return -1;
 }
 
+// \_PTS (Prepare To Sleep) y \_GTS (Going To Sleep): metodos del firmware que
+// algunas placas necesitan antes de SLP_EN (S5 incluido). Un fallo del
+// interprete no es fatal: se registra y se sigue, como hace Linux.
+// acpi.pts=0 en la cmdline las desactiva.
+static int acpi_methods_enabled(void) {
+  char v[8];
+  return !(cmdline_get("acpi.pts", v, sizeof(v)) && !strcmp(v, "0"));
+}
+
+static void acpi_run_sleep_method(const char *path, uint8_t state) {
+  if (!acpi_methods_enabled() || !aml_method_exists(path))
+    return;
+  uint64_t arg = state;
+  LOG_INFO("[ACPI PM] %s(%u)", path, state);
+  aml_object_t *r = aml_eval_int_args(path, &arg, 1);
+  if (!r)
+    LOG_WARN("[ACPI PM] %s fallo en el interprete AML", path);
+}
+
+// Activa el modo ACPI si hace falta (SCI_EN). 0 = activo.
+int acpi_pm_enable(void) {
+  const acpi_fadt_t *f = acpi_get_fadt();
+  if (!f || !f->valid || !pm1a_present(f))
+    return -1;
+  return acpi_pm_ensure_enabled(f);
+}
+
 // Entrada a un S-state. Como Linux (acpi_hw_legacy_sleep): primero SLP_TYP
 // sin SLP_EN, luego con SLP_EN (varios chipsets Intel lo exigen). Vuelve si
 // la maquina no se durmio/apago.
-static int acpi_enter_sleep(uint8_t slp_typa, uint8_t slp_typb) {
+static int acpi_enter_sleep(uint8_t state, uint8_t slp_typa, uint8_t slp_typb) {
   const acpi_fadt_t *f = acpi_get_fadt();
   if (!f || !f->valid || !pm1a_present(f)) {
     LOG_ERR("[ACPI PM] FADT sin PM1a_CNT, no puedo hacer S-state");
@@ -663,6 +691,9 @@ static int acpi_enter_sleep(uint8_t slp_typa, uint8_t slp_typb) {
   }
   acpi_pm_ensure_enabled(f); // si falla se intenta igualmente
 
+  // Ambas antes de `cli`: el interprete AML puede esperar con el reloj.
+  acpi_run_sleep_method("\\_PTS", state);
+  acpi_run_sleep_method("\\_GTS", state);
   __asm__ volatile("cli");
 
   // Limpiar WAK_STS (bit 15 de PM1_STS, escribir 1 lo borra).
@@ -711,7 +742,7 @@ int acpi_pm_poweroff(void) {
   }
   LOG_INFO("[ACPI PM] Apagado S5 (SLP_TYPa=%u SLP_TYPb=%u)", g_s5.slp_typa,
            g_s5.slp_typb);
-  return acpi_enter_sleep(g_s5.slp_typa, g_s5.slp_typb);
+  return acpi_enter_sleep(5, g_s5.slp_typa, g_s5.slp_typb);
 }
 
 // Reinicio por RESET_REG (FADT). Vuelve si no hay o no surte efecto.
@@ -753,5 +784,5 @@ void acpi_pm_suspend(void) {
     LOG_ERR("[ACPI PM] S3 no soportado");
     return;
   }
-  (void)acpi_enter_sleep(g_s3.slp_typa, g_s3.slp_typb);
+  (void)acpi_enter_sleep(3, g_s3.slp_typa, g_s3.slp_typb);
 }
