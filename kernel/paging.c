@@ -410,6 +410,19 @@ void paging_init(uint64_t *boot_pml4, uint64_t max_phys_addr) {
 
   LOG_INFO("[PAGING] PML4 virtual en %p | Modo: PHYS_MAP_BASE + MMIO_MAP_BASE",
            (void *)kernel_pml4);
+
+  // Las dos entradas PML4 de la ventana MMIO (1 TiB) se crean ya: los
+  // procesos copian kernel_pml4[256..511] al nacer, asi que una entrada
+  // creada despues por mmio_map (p. ej. un BAR de 64 bits por encima de
+  // 512 GiB, que UEFI coloca asi y BIOS no) no llegaria a los procesos
+  // existentes y daria #PF al tocar el BAR bajo su CR3 (sin USB -> sin /data).
+  for (uint64_t i = PML4_INDEX(MMIO_MAP_BASE); i <= PML4_INDEX(MMIO_MAP_BASE) + 1; i++) {
+    if (kernel_pml4[i] & PTE_PRESENT)
+      continue;
+    uint64_t *pdpt = alloc_page_table_early();
+    if (pdpt)
+      kernel_pml4[i] = ((uint64_t)pdpt & PTE_FRAME) | PTE_PRESENT | PTE_WRITABLE;
+  }
 }
 
 uint64_t *paging_get_pml4(void) { return kernel_pml4; }
