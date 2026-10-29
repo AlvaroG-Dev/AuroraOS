@@ -6,6 +6,7 @@
  * virt_to_page(); para marcos que no salieron de aqui se crea un descriptor
  * suelto que vive hasta que se descarga la capa.
  */
+#include <linux/mmzone.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/gfp.h>
