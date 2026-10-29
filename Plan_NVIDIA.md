@@ -191,3 +191,8 @@ Resultado en QEMU (smp, TCG): el `.kur` carga, `kur_init` llama a `rm_is_support
 - Reproducir: `make -C build/linuxkpi_src/nvidia-open/src/nvidia -j4 && scripts/nvidia-smoke.sh && cp build/nvidia-smoke/nvsmoke.kur sysroot/lib/modules/linuxkpi/ && python3 scripts/qemu-drive.py -m 6G --cmdline "lkpi.load=nvsmoke" --done "nvsmoke] ALL PASS"` (tras `make iso`; el ISO no rastrea `sysroot/`, así que hay que forzar `rm kernel/initrd.tar` si el módulo cambia).
 
 **N0 completa** (T0.1–T0.5). Siguiente: N1 (`nv-probe`: identificar la GPU por BAR0, solo lecturas) con el log persistente del pendrive; ver preguntas en el hilo.
+
+### 29-oct-2026 — N1: `nvprobe.kur` (identidad de la GPU, solo lectura)
+
+`drivers/kur/nvprobe/` (se carga solo desde `/lib/modules`, como `hello`; **opt-in**: no hace nada sin `nvprobe=1` en `cmdline=`). Escanea el bus PCI por su cuenta (los `.kur` de `/lib/modules` cargan antes de que el kernel enumere PCI, y `pci_get_devices()` salía vacío), y para cada `10de:*` clase 0x03 registra por klog: ID/subsistema/revisión, comando PCI, los 6 BAR como direcciones de 64 bits leídas de la config (`pci_device_t.bar` es de 32 bits y trunca los BAR altos de la 4060), capacidad PCIe (gen/ancho máximo y actual), MSI/MSI-X, y mapea **una página** de BAR0 para leer `NV_PMC_BOOT_0` y `NV_PMC_BOOT_42` (arquitectura/implementación → `AD107`). No activa bus master ni toca el GOP. `nvprobe=size` mide además los BAR (apaga la decodificación de memoria unos µs: puede parpadear la imagen si el GOP está en esa GPU). La config extendida (ReBAR) no se lee: sin ECAM.
+QEMU (sin GPU NVIDIA): carga, ve 8 funciones PCI y dice «no hay GPU NVIDIA». El camino con GPU solo se puede validar en la 4060.
