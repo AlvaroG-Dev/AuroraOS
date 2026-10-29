@@ -127,6 +127,9 @@ static void parse_fadt(const acpi_sdt_header_t *hdr) {
   g_fadt.sci_int = *(const uint16_t *)(p + 0x2E);
   g_fadt.flags = *(const uint32_t *)(p + 0x70);
   g_fadt.dsdt_paddr = *(const uint32_t *)(p + 0x28);
+  g_fadt.smi_cmd = *(const uint32_t *)(p + 0x30);
+  g_fadt.acpi_enable = p[0x34];
+  g_fadt.acpi_disable = p[0x35];
 
   // FADT extendido (ACPI 2.0+). Solo si length >= 0xF4 (244).
   if (length >= 0xF4) {
@@ -140,6 +143,13 @@ static void parse_fadt(const acpi_sdt_header_t *hdr) {
     g_fadt.reset_reg = *(const uint64_t *)(p + 0x78);
     g_fadt.reset_value = p[0x80];
 
+    // X_PM1a_CNT_BLK (0x94) y X_PM1b_CNT_BLK (0xA0): GAS; la direccion de
+    // 64 bits va 4 bytes despues del inicio (space, width, offset, access).
+    g_fadt.x_pm1a_cnt_space = p[0x94] & 0x7F;
+    g_fadt.x_pm1a_cnt = *(const uint64_t *)(p + 0x98);
+    g_fadt.x_pm1b_cnt_space = p[0xA0] & 0x7F;
+    g_fadt.x_pm1b_cnt = *(const uint64_t *)(p + 0xA4);
+
     // X_DSDT en 0x8C. Si está, tiene prioridad sobre el DSDT de 32 bits.
     uint64_t x_dsdt = *(const uint64_t *)(p + 0x8C);
     if (x_dsdt)
@@ -147,6 +157,11 @@ static void parse_fadt(const acpi_sdt_header_t *hdr) {
   }
   g_fadt.valid = 1;
 
+  LOG_INFO("[ACPI PM] FADT: smi_cmd=0x%x en/dis=0x%x/0x%x flags=0x%x%s%s",
+           g_fadt.smi_cmd, g_fadt.acpi_enable, g_fadt.acpi_disable,
+           g_fadt.flags,
+           (g_fadt.flags & ACPI_FADT_RESET_REG_SUP) ? " RESET_REG_SUP" : "",
+           (g_fadt.flags & ACPI_FADT_HW_REDUCED) ? " HW_REDUCED" : "");
   LOG_INFO("[ACPI PM] FADT: pm1a_cnt=0x%x pm1b_cnt=0x%x pm_tmr=0x%x "
            "reset_reg=0x%lx space=%u reset_val=0x%x dsdt=0x%lx",
            g_fadt.pm1a_cnt_blk, g_fadt.pm1b_cnt_blk, g_fadt.pm_tmr_blk,

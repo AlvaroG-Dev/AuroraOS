@@ -87,12 +87,23 @@ typedef struct {
   uint32_t flags;
   uint64_t reset_reg;
   uint8_t reset_value;
-  uint8_t reset_reg_space; // 0=IO, 1=MMIO, 2=PCI
+  uint8_t reset_reg_space; // GAS: 0=memoria, 1=E/S, 2=PCI config
+  uint32_t smi_cmd;        // puerto SMI_CMD (0 si no hay)
+  uint8_t acpi_enable;     // valor a escribir en SMI_CMD para activar ACPI
+  uint8_t acpi_disable;
+  uint8_t x_pm1a_cnt_space; // X_PM1a_CNT_BLK (GAS); addr 0 si no existe
+  uint64_t x_pm1a_cnt;
+  uint8_t x_pm1b_cnt_space;
+  uint64_t x_pm1b_cnt;
   uint64_t dsdt_paddr;
   uint64_t xsdt_paddr;
   uint32_t ssdt_paddrs[8]; // máximo 8 SSDTs
   int ssdt_count;
 } acpi_fadt_t;
+
+// Bits de acpi_fadt_t.flags (FADT.Flags).
+#define ACPI_FADT_RESET_REG_SUP (1u << 10)
+#define ACPI_FADT_HW_REDUCED (1u << 20)
 
 const acpi_fadt_t *acpi_get_fadt(void);
 const uint8_t *acpi_get_dsdt(void);

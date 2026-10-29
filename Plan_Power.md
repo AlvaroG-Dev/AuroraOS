@@ -1,6 +1,8 @@
 # Plan_Power: apagado, reinicio y gestión de energía (ACPI + APM + LinuxKPI)
 
-Estado: **plan**, nada implementado. Rama `claude/power-acpi-apm-plan` (parte de `claude/beautiful-newton-1neyw4`).
+Estado: **P0–P2 implementadas** en la rama `claude/power-acpi` (probado en QEMU q35+OVMF con `scripts/power-test.sh off|reboot`; falta probar en la Portégé y el i7). El resto sigue siendo plan. Rama del plan: `claude/power-acpi-apm-plan` (parte de `claude/beautiful-newton-1neyw4`).
+
+Hecho en P0–P2: `kernel/power.c/.h` (notificadores, SIGTERM/SIGKILL, `bdev_flush`, `drivers_shutdown_all`, backends 0xCF9/8042/triple fault/puertos de emulador, `reboot=pci|kbd|triple`), FADT ampliado (SMI_CMD, ACPI_ENABLE, X_PM1x_CNT, flags), S5 con ACPI_ENABLE y SLP_TYP en dos pasos (sin inventar SLP_TYP si falta `_S5`), RESET_REG con soporte PCI y comprobación de `RESET_REG_SUP`, syscall `reboot` (root, `RESTART2`, magics extra), utilidad `power off|reboot|halt`. Pendiente dentro de P1/P2: `_PTS/_GTS` (el intérprete no pasa argumentos), parada de APs por IPI (el vector 0xFE no tiene manejador) y `.shutdown` de PS/2 y de los drivers de disco.
 Hardware de prueba real: Toshiba Portégé R30-A (BIOS/CSM, Haswell) e i7-12700KF (UEFI). Verificación rápida en QEMU.
 
 ## 1. Estado actual (revisado en el código)

@@ -5,6 +5,7 @@
 // Todos los handlers tienen prefijo k_ (Linux) o a_ (Aurora) para
 // distinguir de un vistazo a qué ABI pertenecen.
 
+#include "power.h"
 #include "syscall.h"
 #include "rseq.h"
 #include "smp_boot.h"
@@ -6195,22 +6196,35 @@ static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 #define LINUX_REBOOT_CMD_RESTART 0x01234567
 #define LINUX_REBOOT_CMD_HALT 0xcdef0123
 #define LINUX_REBOOT_CMD_POWER_OFF 0x4321fedc
+#define LINUX_REBOOT_CMD_RESTART2 0xa1b2c3d4
+#define LINUX_REBOOT_CMD_CAD_ON 0x89abcdef
+#define LINUX_REBOOT_CMD_CAD_OFF 0x00000000
 
 static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
                         uint64_t a5) {
   (void)arg;
   (void)a5;
-  if (m1 != LINUX_REBOOT_MAGIC1 || m2 != LINUX_REBOOT_MAGIC2)
+  if (m1 != LINUX_REBOOT_MAGIC1 ||
+      (m2 != LINUX_REBOOT_MAGIC2 && m2 != 85072278 && m2 != 369367448 &&
+       m2 != 537993216))
     return -EINVAL;
-  if (cmd == LINUX_REBOOT_CMD_RESTART) {
-    outb(0x64, 0xFE); // 8042 reset
-    return 0;
+  process_t *proc = process_current();
+  if (!proc || proc->euid != 0)
+    return -EPERM;
+  switch ((uint32_t)cmd) {
+  case LINUX_REBOOT_CMD_RESTART:
+  case LINUX_REBOOT_CMD_RESTART2:
+    power_request(POWER_ACTION_RESTART, "reboot(2)");
+  case LINUX_REBOOT_CMD_HALT:
+    power_request(POWER_ACTION_HALT, "reboot(2)");
+  case LINUX_REBOOT_CMD_POWER_OFF:
+    power_request(POWER_ACTION_OFF, "reboot(2)");
+  case LINUX_REBOOT_CMD_CAD_ON:
+  case LINUX_REBOOT_CMD_CAD_OFF:
+    return 0; // Ctrl-Alt-Del no esta enlazado todavia
+  default:
+    return -EINVAL;
   }
-  if (cmd == LINUX_REBOOT_CMD_HALT || cmd == LINUX_REBOOT_CMD_POWER_OFF) {
-    for (;;)
-      __asm__ volatile("cli; hlt");
-  }
-  return -EINVAL;
 }
 
 static int64_t k_swapon(uint64_t path_uptr, uint64_t flags, uint64_t a3,

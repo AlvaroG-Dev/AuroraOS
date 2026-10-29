@@ -6,6 +6,8 @@
 #include "io.h"
 #include "klog.h"
 #include "paging.h"
+#include "pci.h"
+#include "power.h"
 #include "string.h"
 
 // ---------------------------------------------------------------------------
@@ -597,58 +599,153 @@ void acpi_pm_dump(void) {
 // ---------------------------------------------------------------------------
 // Shutdown / Reboot / Suspend
 // ---------------------------------------------------------------------------
-static void acpi_enter_sleep(uint8_t slp_typa, uint8_t slp_typb) {
-  const acpi_fadt_t *f = acpi_get_fadt();
-  if (!f || !f->valid || f->pm1a_cnt_blk == 0) {
-    LOG_ERR("[ACPI PM] FADT inválido, no puedo hacer S-state");
-    return;
+// Acceso a PM1x_CNT: bloque legacy (E/S) y, si no hay, X_PM1x_CNT_BLK (GAS).
+static uint16_t pm1_cnt_read(uint32_t blk, uint8_t space, uint64_t xaddr) {
+  if (blk)
+    return inw((uint16_t)blk);
+  if (space == 1 && xaddr)
+    return inw((uint16_t)xaddr);
+  if (space == 0 && xaddr)
+    return *(volatile uint16_t *)phys_to_virt(xaddr);
+  return 0;
+}
+
+static void pm1_cnt_write(uint32_t blk, uint8_t space, uint64_t xaddr,
+                          uint16_t v) {
+  if (blk)
+    outw((uint16_t)blk, v);
+  else if (space == 1 && xaddr)
+    outw((uint16_t)xaddr, v);
+  else if (space == 0 && xaddr)
+    *(volatile uint16_t *)phys_to_virt(xaddr) = v;
+}
+
+static int pm1a_present(const acpi_fadt_t *f) {
+  return f->pm1a_cnt_blk || f->x_pm1a_cnt;
+}
+
+static void pm_delay_us(uint32_t us) {
+  while (us--)
+    inb(0x80);
+}
+
+// Activa el modo ACPI si el firmware lo dejo en modo legacy (SCI_EN=0):
+// ACPI_ENABLE en SMI_CMD y espera a que SCI_EN suba. 0 = ACPI activo.
+static int acpi_pm_ensure_enabled(const acpi_fadt_t *f) {
+  if (f->flags & ACPI_FADT_HW_REDUCED)
+    return 0;
+  if (pm1_cnt_read(f->pm1a_cnt_blk, f->x_pm1a_cnt_space, f->x_pm1a_cnt) & 1)
+    return 0;
+  if (!f->smi_cmd || !f->acpi_enable) {
+    LOG_WARN("[ACPI PM] SCI_EN=0 y sin SMI_CMD/ACPI_ENABLE");
+    return -1;
   }
+  LOG_INFO("[ACPI PM] SCI_EN=0: ACPI_ENABLE (0x%x) en SMI_CMD 0x%x",
+           f->acpi_enable, f->smi_cmd);
+  outb((uint16_t)f->smi_cmd, f->acpi_enable);
+  for (int i = 0; i < 3000; i++) { // hasta ~3 s
+    if (pm1_cnt_read(f->pm1a_cnt_blk, f->x_pm1a_cnt_space, f->x_pm1a_cnt) & 1)
+      return 0;
+    pm_delay_us(1000);
+  }
+  LOG_WARN("[ACPI PM] SCI_EN no subio tras ACPI_ENABLE");
+  return -1;
+}
+
+// Entrada a un S-state. Como Linux (acpi_hw_legacy_sleep): primero SLP_TYP
+// sin SLP_EN, luego con SLP_EN (varios chipsets Intel lo exigen). Vuelve si
+// la maquina no se durmio/apago.
+static int acpi_enter_sleep(uint8_t slp_typa, uint8_t slp_typb) {
+  const acpi_fadt_t *f = acpi_get_fadt();
+  if (!f || !f->valid || !pm1a_present(f)) {
+    LOG_ERR("[ACPI PM] FADT sin PM1a_CNT, no puedo hacer S-state");
+    return -1;
+  }
+  acpi_pm_ensure_enabled(f); // si falla se intenta igualmente
 
   __asm__ volatile("cli");
 
-  uint16_t a = ((uint16_t)(slp_typa & 0x7) << 10) | (1 << 13);
-  outw((uint16_t)f->pm1a_cnt_blk, a);
+  // Limpiar WAK_STS (bit 15 de PM1_STS, escribir 1 lo borra).
+  if (f->pm1a_evt_blk)
+    outw((uint16_t)f->pm1a_evt_blk, 0x8000);
+  if (f->pm1b_evt_blk)
+    outw((uint16_t)f->pm1b_evt_blk, 0x8000);
 
-  if (f->pm1b_cnt_blk) {
-    uint16_t b = ((uint16_t)(slp_typb & 0x7) << 10) | (1 << 13);
-    outw((uint16_t)f->pm1b_cnt_blk, b);
+  uint16_t a = pm1_cnt_read(f->pm1a_cnt_blk, f->x_pm1a_cnt_space, f->x_pm1a_cnt);
+  a = (uint16_t)((a & ~(0x7u << 10) & ~(1u << 13)) |
+                 ((uint16_t)(slp_typa & 0x7) << 10));
+  uint16_t b = 0;
+  int have_b = f->pm1b_cnt_blk || f->x_pm1b_cnt;
+  if (have_b) {
+    b = pm1_cnt_read(f->pm1b_cnt_blk, f->x_pm1b_cnt_space, f->x_pm1b_cnt);
+    b = (uint16_t)((b & ~(0x7u << 10) & ~(1u << 13)) |
+                   ((uint16_t)(slp_typb & 0x7) << 10));
   }
 
-  for (;;)
-    __asm__ volatile("hlt");
+  pm1_cnt_write(f->pm1a_cnt_blk, f->x_pm1a_cnt_space, f->x_pm1a_cnt, a);
+  if (have_b)
+    pm1_cnt_write(f->pm1b_cnt_blk, f->x_pm1b_cnt_space, f->x_pm1b_cnt, b);
+
+  a |= (1u << 13);
+  pm1_cnt_write(f->pm1a_cnt_blk, f->x_pm1a_cnt_space, f->x_pm1a_cnt, a);
+  if (have_b) {
+    b |= (1u << 13);
+    pm1_cnt_write(f->pm1b_cnt_blk, f->x_pm1b_cnt_space, f->x_pm1b_cnt, b);
+  }
+
+  // En S5 la maquina se apaga en milisegundos; esperar hasta 2 s.
+  pm_delay_us(2000000);
+  return -1;
 }
 
-void acpi_pm_shutdown(void) {
-  LOG_INFO("[ACPI PM] Shutdown (S5)");
-  if (g_s5.valid) {
-    acpi_enter_sleep(g_s5.slp_typa, g_s5.slp_typb);
-  }
-  outw(0x604, 0x2000);
+int acpi_pm_poweroff(void) {
   const acpi_fadt_t *f = acpi_get_fadt();
-  if (f && f->pm1a_cnt_blk) {
-    outw((uint16_t)f->pm1a_cnt_blk, (5 << 10) | (1 << 13));
+  if (!f || !f->valid) {
+    LOG_WARN("[ACPI PM] poweroff: sin FADT");
+    return -1;
   }
-  for (;;)
-    __asm__ volatile("cli; hlt");
+  if (!g_s5.valid) {
+    // No se inventa SLP_TYP: dejar que actue el siguiente backend.
+    LOG_WARN("[ACPI PM] poweroff: el DSDT no define _S5_");
+    return -1;
+  }
+  LOG_INFO("[ACPI PM] Apagado S5 (SLP_TYPa=%u SLP_TYPb=%u)", g_s5.slp_typa,
+           g_s5.slp_typb);
+  return acpi_enter_sleep(g_s5.slp_typa, g_s5.slp_typb);
 }
 
-void acpi_pm_reboot(void) {
-  LOG_INFO("[ACPI PM] Reboot");
+// Reinicio por RESET_REG (FADT). Vuelve si no hay o no surte efecto.
+int acpi_pm_restart(void) {
   const acpi_fadt_t *f = acpi_get_fadt();
-  if (f && f->reset_reg && f->reset_value) {
-    if (f->reset_reg_space == 1) {
-      outb((uint16_t)f->reset_reg, f->reset_value);
-    } else if (f->reset_reg_space == 0) {
-      volatile uint8_t *p = (volatile uint8_t *)phys_to_virt(f->reset_reg);
-      *p = f->reset_value;
-    }
-    for (volatile int i = 0; i < 1000000; i++)
-      __asm__ volatile("pause");
+  if (!f || !f->valid || !(f->flags & ACPI_FADT_RESET_REG_SUP) ||
+      !f->reset_reg) {
+    LOG_INFO("[ACPI PM] reinicio: sin RESET_REG");
+    return -1;
   }
-  outb(0x64, 0xFE);
-  for (;;)
-    __asm__ volatile("cli; hlt");
+  LOG_INFO("[ACPI PM] reinicio: RESET_REG space=%u addr=0x%lx val=0x%x",
+           f->reset_reg_space, (unsigned long)f->reset_reg, f->reset_value);
+  switch (f->reset_reg_space) {
+  case 0:
+    *(volatile uint8_t *)phys_to_virt(f->reset_reg) = f->reset_value;
+    break;
+  case 1:
+    outb((uint16_t)f->reset_reg, f->reset_value);
+    break;
+  case 2: // PCI config: bus 0, device en bits 32-47, funcion en 16-31
+    pci_write_config_byte(0, (uint8_t)((f->reset_reg >> 32) & 0x1F),
+                          (uint8_t)((f->reset_reg >> 16) & 0x7),
+                          (uint8_t)(f->reset_reg & 0xFF), f->reset_value);
+    break;
+  default:
+    return -1;
+  }
+  pm_delay_us(500000);
+  return -1;
 }
+
+void acpi_pm_shutdown(void) { power_request(POWER_ACTION_OFF, "acpi_pm"); }
+
+void acpi_pm_reboot(void) { power_request(POWER_ACTION_RESTART, "acpi_pm"); }
 
 void acpi_pm_suspend(void) {
   LOG_INFO("[ACPI PM] Suspend (S3)");
@@ -656,5 +753,5 @@ void acpi_pm_suspend(void) {
     LOG_ERR("[ACPI PM] S3 no soportado");
     return;
   }
-  acpi_enter_sleep(g_s3.slp_typa, g_s3.slp_typb);
+  (void)acpi_enter_sleep(g_s3.slp_typa, g_s3.slp_typb);
 }
