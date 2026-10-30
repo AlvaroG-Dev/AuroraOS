@@ -645,6 +645,16 @@ void lkpi_display_shadow_probe(void)
 		 * PMC_BOOT_0/42 = 0 y rechaza la GPU. */
 		if (p->vendor == 0x8086 || p->vendor == 0x10de)
 			only_fb = true;
+		/* NVIDIA: nada en sombra. RM prueba el copy engine escribiendo VRAM por el
+		 * BAR1 y leyendo por DMA; con el BAR1 en sombra (RAM) el CPU escribe en
+		 * RAM y la GPU copia VRAM real, y memmgrTestCeUtils falla. */
+		if (p->vendor == 0x10de) {
+			lkpi_vga_set_default_device(p);
+			pr_info("linuxkpi: %s aloja el framebuffer del firmware: sin sombra (NVIDIA)\n",
+				pci_name(p));
+			pci_dev_put(p);
+			break;
+		}
 		for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
 			struct resource *r = &p->resource[i];
 			u64 len = r->end - r->start + 1, start = r->start;
