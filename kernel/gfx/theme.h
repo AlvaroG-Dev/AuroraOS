@@ -11,19 +11,14 @@
 // "vivos" son los semáforos de las ventanas y el acento de selección. Los
 // paneles flotantes (Dock, menús, tooltips) usan "cristal": fondo desenfocado
 // y saturado + tinte + borde especular (ver gfx_glass_panel).
-// Para volver al índigo de Aurora basta con cambiar AURORA_ACCENT*.
+// Para cambiar el color de marca basta con cambiar AURORA_ACCENT*.
 // ============================================================================
 
 // --- Acento único ---
-#define AURORA_ACCENT 0xFF0A84FF
-#define AURORA_ACCENT_HOVER 0xFF409CFF
-#define AURORA_ACCENT_DIM 0x550A84FF
-
-// --- Marca: "cinta de aurora" (docs/Diseno_Identidad_Grafica.md) ---
-// Solo para momentos de marca (logo, splash, foco, Dock); la UI usa AURORA_ACCENT.
-#define AURORA_BRAND_TEAL 0xFF3DF2C4
-#define AURORA_BRAND_BLUE AURORA_ACCENT
-#define AURORA_BRAND_VIOLET 0xFF8E5CF6
+#define AURORA_ACCENT 0xFF2DD4A0 /* verde aurora (docs/Diseno_Identidad_Grafica.md) */
+#define AURORA_ACCENT_HOVER 0xFF5BE3B8
+#define AURORA_ACCENT_DIM 0x552DD4A0
+#define AURORA_ACCENT_TEXT 0xFF06241A /* texto sobre el acento */
 
 // --- Escala de grises ---
 #define AURORA_BLACK 0xFF0A0A0A

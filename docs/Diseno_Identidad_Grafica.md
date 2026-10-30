@@ -1,104 +1,73 @@
-# AuroraOS — Identidad gráfica (propuesta v0)
+# AuroraOS — Identidad gráfica (propuesta v1)
 
-Estado: **propuesta**, pendiente de elegir alternativa (§3). Escrita tras revisar
-`kernel/gfx/theme.h`, `dock.c`, `about.c` (logo), `bootloader/common/aurora_splash_core.h`,
-`gen_wallpaper.py` y `kernel/gfx/fonts/`.
+Sin degradados como seña de identidad: **un color sólido de marca** sobre la base de
+grises neutros que ya existe (`kernel/gfx/theme.h`). Hoy el acento es `#0A84FF`, el azul
+de macOS, y los semáforos de ventana (`#FF5F57/#FEBC2E/#28C840`) son los de macOS.
 
-## 1. Punto de partida (lo que ya hay)
+## 1. Por qué verde (psicología del color)
 
-| Elemento | Hoy |
-|---|---|
-| Tema | `theme.h`: grises neutros + **un** acento `#0A84FF`; modo oscuro estilo macOS Tahoe, cristal (blur+saturación+borde especular), semáforos, sombra en dos capas. |
-| Logo | Esfera con degradado cian `#64D2FF` → azul `#0A84FF` → índigo `#5E5CE6` y tres cintas blancas (la "aurora"), dibujada por código en `about.c`. |
-| Splash | Wordmark vectorial "AuroraOS" letra a letra + spinner, fondo azul-negro (`#050810`→`#0A1022`), núcleo común BIOS/UEFI/kernel. |
-| Fondo | `gen_wallpaper.py`: ondas azules procedurales. |
-| Tipografía | Inter (UI) y JetBrains Mono (terminal), solo tamaño 14 pre-rasterizado. |
+- **Azul**: confianza y calma, pero es el color de macOS, Windows, Ubuntu-Unity, Facebook...
+  Es el menos diferenciador del mercado de sistemas operativos.
+- **Rojo/naranja**: energía, urgencia; Ubuntu y Fedora ya lo ocupan y cansa en uso largo.
+- **Morado/índigo**: creativo y premium, pero poco asociado a "sistema fiable" y muy usado en apps.
+- **Verde**: asociado a naturaleza, equilibrio, "listo / correcto" y descanso visual (el ojo
+  distingue más matices de verde que de cualquier otro tono). Encaja con el nombre
+  (aurora boreal verde, el color más común de la aurora) y con terminales clásicos.
+  Lo usan pocos sistemas de escritorio: Linux Mint, Android (logo) y poco más, ninguno en
+  modo oscuro con grises neutros. Riesgo: confundirlo con "éxito"; se evita no usándolo
+  además como indicador de OK en la UI, ver §3.
 
-Diagnóstico: la base técnica es sólida y coherente, pero visualmente es "macOS en azul". Lo
-único propio es la esfera con cintas, y apenas aparece fuera de *Acerca de*. Falta un
-**rasgo firma** reconocible a primera vista.
+## 2. Candidatos (todos sólidos, pensados para fondo oscuro)
 
-## 2. Idea central: «la cinta de aurora»
+| | Nombre | Hex | Carácter |
+|---|---|---|---|
+| **A (recomendado)** | Verde aurora | `#2DD4A0` | Verde-menta vivo; se lee muy bien sobre gris oscuro, fresco y moderno. |
+| B | Verde esmeralda | `#10B981` | Más clásico y sobrio; menos luminoso. |
+| C | Verde lima | `#7BE04A` | Muy energético y "hacker"; cansa más y choca con el cristal. |
 
-Un único motivo recurrente: una **cinta de degradado teal → azul → violeta** (la aurora
-boreal) que aparece solo en momentos de marca y nunca como relleno de UI general.
+Derivados del elegido (A): hover `#5BE3B8`, tenue (selección inactiva) `#2DD4A0` al 33 %,
+texto sobre acento **oscuro** `#06241A` (el blanco sobre verde claro no llega a contraste 4.5:1).
 
-- Degradado firma `AURORA_RIBBON`: `#3DF2C4` (verde aurora) → `#0A84FF` (azul sistema) → `#8E5CF6` (violeta).
-- El acento de UI sigue siendo **uno** (azul), para no ensuciar la sobriedad actual.
-- Dónde se usa la cinta: logo, línea de progreso del splash, foco de la ventana activa
-  (hilo de 1 px bajo la barra de título), indicador de app abierta en el Dock, barra de
-  progreso, selección en el prompt del terminal y wallpaper por defecto.
-- Coste: todo es interpolación de enteros sobre 2–3 colores; sin librerías ni texturas.
+## 3. Botones de ventana y estados
 
-## 3. Alternativas
+Los semáforos rojo/amarillo/verde son la seña más reconocible de macOS. Opciones:
 
-**A — Aurora Boreal (recomendada).** Cinta teal→azul→violeta como firma; UI gris neutro +
-acento azul. Fondo: cielo casi negro azulado con cinta difusa. Es la más distintiva y la
-más fiel al nombre.
+1. **Monocromo de marca (recomendado):** los tres botones son círculos grises
+   (`#4A4A4D`) y al pasar el ratón por el grupo se tiñen: cerrar `#FF6B6B` coral,
+   minimizar `#F2C14E` ámbar, maximizar el verde aurora. Misma ergonomía, aspecto propio.
+2. Botones a la derecha, rectángulos redondeados con glifo (estilo propio, más cercano a Windows).
+3. Conservar los semáforos y cambiar solo el acento.
 
-**B — Aurora Índigo (conservadora).** Sin verde: cinta azul→índigo→magenta suave, acento
-`#5E5CE6`. Más cercana al look actual y a macOS; menos reconocible, pero sin cambios
-visibles en el resto de la UI.
+Estados: error `#FF6B6B`, aviso `#F2C14E`, info `#5AB0FF`; el verde de marca es el
+único acento, no se usa "verde" para significar "correcto" (para eso, un check con
+glifo neutro).
 
-## 4. Especificación (alternativa A)
+## 4. Resto del sistema (sin degradados de marca)
 
-**Paleta**
+- **Superficies:** grises neutros actuales; cristal en Dock y menús sin cambios.
+- **Logo:** esfera/disco sólido verde aurora con las tres cintas blancas (quitar el
+  degradado cian→índigo de `about.c`). Versión monocroma blanca sobre fondo claro.
+- **Dock:** punto de app abierta y foco = verde aurora, sin degradado.
+- **Terminal:** fondo `#0E1412` (negro con un matiz verde casi imperceptible), texto
+  `#E6EFEA`, cursor `#2DD4A0`; ANSI: rojo `#FF6B6B`, verde `#2DD4A0`, amarillo `#F2C14E`,
+  azul `#5AB0FF`, magenta `#C792EA`, cian `#5EEAD4`.
+- **Splash:** fondo negro-verdoso muy oscuro (`#07100D`), wordmark `#E6EFEA`, spinner verde
+  aurora (`ASP_COL_SPIN`, `ASP_TOP/BOT_*` en `aurora_splash_core.h`).
+- **Wallpaper:** noche con una única cinta de aurora verde difuminada; conservar el azul
+  actual como "Aurora Azul" alternativo.
+- **Tipografía:** Inter (UI) y JetBrains Mono (terminal); sin cambios.
+- **Animaciones:** las actuales; sin añadidos.
 
-| Token | Valor | Uso |
-|---|---|---|
-| `AURORA_BRAND_TEAL` | `#3DF2C4` | extremo verde de la cinta |
-| `AURORA_BRAND_BLUE` | `#0A84FF` | = acento de UI |
-| `AURORA_BRAND_VIOLET` | `#8E5CF6` | extremo violeta de la cinta |
-| Fondo marca | `#050810` → `#0A1022` | splash y wallpaper (ya en uso) |
-| Texto marca | `#E8F0FF` | wordmark (ya en uso) |
+## 5. Implementación
 
-**Tipografía.** Inter para UI, JetBrains Mono para terminal (ya integradas). Wordmark
-"AuroraOS" en Inter Semibold con "Aurora" en peso medio y "OS" en peso ligero; ligero
-espaciado (+2 %). Pendiente: rasterizar 12/13/17/22 px si se quiere jerarquía real.
-
-**Logo.** Mantener la esfera, pero teñir las cintas con `AURORA_RIBBON` en vez de blanco
-puro, y con un mínimo de 16 px de legibilidad: versión simplificada de **una** cinta para
-tamaños ≤ 32 px (favicon, icono del Dock, ventana). Versión monocroma blanca para
-sobre-fondos claros.
-
-**Iconos.** Estilo "squircle" con degradado vertical suave de un solo matiz por app,
-glifo blanco; las apps de sistema (Terminal, Archivos, Ajustes) usan matices distintos
-dentro de la gama teal–azul–violeta para que el Dock quede armónico.
-
-**Ventanas.** Se conservan radio 20, semáforos y sombra de dos capas. Novedad: hilo de
-1 px con `AURORA_RIBBON` bajo la barra de título solo en la ventana con foco.
-
-**Dock y barra de menús.** Cristal actual. El punto de app abierta pasa a ser un
-degradado corto de la cinta; el logo ocupa el primer menú con su
-versión de una cinta.
-
-**Terminal.** Fondo `#0E121C` (azul-negro de marca, ligeramente translúcido), texto
-`#E8F0FF`, cursor teal `#3DF2C4`, ANSI de 16 colores calibrado a la gama (rojo `#FF6B6B`,
-verde `#3DF2C4`, amarillo `#FFD166`, azul `#5AB0FF`, magenta `#B48CFF`, cian `#64D2FF`).
-
-**Animaciones.** Se conservan las actuales (abrir 240 ms, cerrar 170, genie 460). Añadir:
-un único "barrido" de la cinta (800 ms, ease-out) al terminar el splash antes de revelar
-el escritorio. Curva común: ease-out cúbica; nada por encima de 500 ms salvo el genie.
-
-**Boot splash.** Ya comparte núcleo BIOS/UEFI/kernel, así que el cambio es solo de
-constantes: spinner `ASP_COL_SPIN` pasa a recorrer la cinta (un color por paso de los
-12) y el halo gana un tinte teal. Cero costes nuevos.
-
-**Wallpaper por defecto.** Regenerar `gen_wallpaper.py` con paleta de cielo nocturno
-y 1–2 cintas de aurora desenfocadas; conservar el azul actual como "Aurora Azul".
-
-## 5. Plan de implementación
-
-1. **Hecho en esta rama:** tokens de marca añadidos a `theme.h` (aditivo, sin cambio visual).
-2. Usar `AURORA_RIBBON` en `about.c` (logo) y en el indicador del Dock.
-3. Splash: spinner en cinta + barrido final (tocar `aurora_splash_core.h`, probar en QEMU BIOS y UEFI).
-4. Terminal: paleta ANSI y color de cursor.
-5. Wallpaper nuevo + iconos del Dock.
-6. Rasterizar tamaños de fuente adicionales.
+1. **En esta rama:** `AURORA_ACCENT` pasa a verde aurora (`theme.h`) más tokens derivados.
+   Todo lo que usa el acento (selección de menús, Dock, orbe de la barra de menús) cambia solo.
+2. Pendiente de decisión: botones de ventana (§3), logo sin degradado, splash, terminal, wallpaper.
+3. Detalle a revisar al probar: texto blanco sobre el acento en la selección de menús
+   (`AURORA_MENU_HILITE`) pasará a texto oscuro.
 
 ## 6. Decisiones para Alvaro
 
-1. ¿Alternativa **A** (teal→azul→violeta) o **B** (azul→índigo→magenta)?
-2. ¿Mantienes el nombre en `AuroraOS` camel-case o prefieres `Aurora`/`aurora`?
-3. ¿Referencias que te gusten o que quieras evitar (macOS, GNOME, Windows 11, KDE...)?
-4. ¿Modo claro además del oscuro? Hoy solo hay oscuro.
+1. ¿Verde A, B o C?
+2. ¿Botones de ventana: opción 1, 2 o 3?
+3. ¿Modo claro además del oscuro?
