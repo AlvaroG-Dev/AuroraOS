@@ -89,6 +89,7 @@ linuxkpi-drv: tools/kurbuild
 .PHONY: nvidia
 nvidia: tools/kurbuild
 	@[ -d build/linuxkpi_src/nvidia-open/src ] || scripts/fetch-linux-drivers.sh
+	@scripts/nvidia-src-patch.sh
 	@[ -f build/linuxkpi_src/nvidia-open/src/nvidia/_out/Linux_x86_64/nv-kernel.o ] || \
 		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia -j$$(nproc)
 	@[ -f build/nvidia-kpi/out/conftest/functions.h ] || scripts/nvidia-conftest.sh
