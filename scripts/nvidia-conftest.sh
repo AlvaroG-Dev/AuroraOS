@@ -25,7 +25,7 @@ CF="$($CONF build_cflags) -include linux/kconfig.h -include linux/compiler_types
 
 # Listas de pruebas (de los .Kbuild de cada modulo y de header-presence-tests.mk)
 HDRS=$(sed -n 's/^NV_HEADER_PRESENCE_TESTS *+\?= *//p;s/^ *\([a-z0-9_/.+-]*\.h\) *\\\?$/\1/p' "$K/header-presence-tests.mk" | tr -d '\\' | tr -s ' \n' '\n' | grep '\.h$' | sort -u)
-list() { grep -hE "^NV_CONFTEST_$1_COMPILE_TESTS *\+=" "$K"/*/*.Kbuild "$K/Kbuild" 2>/dev/null | sed 's/.*+= *//' | sort -u; }
+list() { grep -hE "^NV_CONFTEST_$1_COMPILE_TESTS *\+=" "$K"/*/*.Kbuild "$K"/*/*-sources.mk "$K/Kbuild" 2>/dev/null | sed 's/.*+= *//' | sort -u; }
 
 echo "[conftest] cabeceras: $(echo "$HDRS" | wc -l)"
 for h in $HDRS; do

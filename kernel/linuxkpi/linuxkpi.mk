@@ -103,6 +103,10 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@scripts/nvidia-modeset-cc.sh | grep -E "^compilan"
 	@scripts/nvidia-modeset-link.sh | grep "^OK"
 	@cp -f build/nvidia-kpi/ms/nvidia-modeset.kur $(LKPI_MODDIR)/nvidia-modeset.kur
+	@$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=lkpi_drm KUR_CC="$(KUR_CC)" install
+	@scripts/nvidia-drm-cc.sh | grep -E "^compilan"
+	@scripts/nvidia-drm-link.sh | grep "^OK"
+	@cp -f build/nvidia-kpi/drm/nvidia-drm.kur $(LKPI_MODDIR)/nvidia-drm.kur
 	@[ -f build/nvidia/firmware/gsp_ga10x.bin ] || scripts/fetch-nvidia.sh
 	@mkdir -p sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)
 	@cp -f build/nvidia/firmware/gsp_ga10x.bin build/nvidia/firmware/ucodes_ga10x.bin sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)/

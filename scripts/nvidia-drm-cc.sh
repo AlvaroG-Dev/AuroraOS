@@ -13,7 +13,7 @@ show:
 	@echo $(LKPI_CFLAGS) $(LKPI_DRM_CFLAGS)
 MK
 FL="$(make -s -f build/nvidia-kpi/nvdrm-flags.mk show) -DNVRM -DKBUILD_MODNAME=\"nvidia_drm\" -DNV_VERSION_STRING=\"615.78.08\" -DNV_KERNEL_INTERFACE_LAYER -DNV_SPECTRE_V2=0 -DNVIDIA_UNDEF_LEGACY_BIT_MACROS -UDEBUG -U_DEBUG -DNDEBUG -DNV_BUILD_MODULE_INSTANCES=0 -include linux/mm.h -ffreestanding -Wno-cast-qual -Wno-format-extra-args -Wno-error=undef -I$K/common/inc -I$K -I$K/nvidia-drm -Ibuild/nvidia-kpi/out -I$NV/src/common/sdk/nvidia/inc -I$NV/src/common/inc -I$NV/src/nvidia-modeset/kapi/interface -I$NV/src/nvidia-modeset/include -I$NV/src/common/unix/common/inc -I$NV/src/common/modeset/hdmipacket -I$NV/src/common/modeset/timing"
-SRCS=${*:-$(cd $K/nvidia-drm && ls nvidia-drm*.c | grep -v '^nvidia-drm-linux.c$' | sed 's/\.c$//')}
+SRCS=${*:-$(sed -n 's|^NVIDIA_DRM_SOURCES += nvidia-drm/\(.*\)\.c$|\1|p' $K/nvidia-drm/nvidia-drm-sources.mk) nvidia-drm-linux}
 ok=0; bad=0; : > $O/errors.txt
 for f in $SRCS; do
     f=${f%.c}
