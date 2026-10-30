@@ -30,7 +30,8 @@ typedef struct {
   int dynamic; /* añade la lista de ventanas */
 } menu_t;
 
-static const item_t k_aurora[] = {{"Acerca de AuroraOS", MENU_ACT_ABOUT, 0}};
+static const item_t k_aurora[] = {{"Acerca de AuroraOS", MENU_ACT_ABOUT, 0},
+                                  {"Modo claro / oscuro", MENU_ACT_THEME, 0}};
 static const item_t k_app[] = {{"Minimizar", MENU_ACT_MINIMIZE, 1},
                                {"Cerrar", MENU_ACT_CLOSE, 1}};
 static const item_t k_file[] = {{"Cerrar ventana", MENU_ACT_CLOSE, 1}};
@@ -40,7 +41,7 @@ static const item_t k_help[] = {{"Acerca de AuroraOS", MENU_ACT_ABOUT, 0}};
 
 /* 0 orbe, 1 app (negrita, su título es dinámico), 2.. menús fijos */
 static const menu_t k_menus[] = {
-    {NULL, k_aurora, 1, 0},   {NULL, k_app, 2, 0},
+    {NULL, k_aurora, 2, 0},   {NULL, k_app, 2, 0},
     {"Archivo", k_file, 1, 0}, {"Ventana", k_window, 2, 1},
     {"Ayuda", k_help, 1, 0},
 };
@@ -453,7 +454,9 @@ void menubar_render(uint32_t *dst, int stride, rect_t clip) {
     gfx_draw_string(dst, stride, clip, mr.x + 18,
                     gfx_text_center_y(FONT_ID_MAIN_REGULAR, cy, ITEM_H),
                     it->label,
-                    enabled ? AURORA_TEXT_PRIMARY : AURORA_TEXT_DISABLED,
+                    !enabled ? AURORA_TEXT_DISABLED
+                    : (row == M.hover ? g_theme->accent_text
+                                      : AURORA_TEXT_PRIMARY),
                     FONT_ID_MAIN_REGULAR);
     cy += ITEM_H;
   }
@@ -476,7 +479,9 @@ void menubar_render(uint32_t *dst, int stride, rect_t clip) {
       }
       gfx_draw_string(dst, stride, clip, mr.x + 32,
                       gfx_text_center_y(FONT_ID_MAIN_REGULAR, cy, ITEM_H),
-                      M.dyn_title[i], AURORA_TEXT_PRIMARY,
+                      M.dyn_title[i],
+                      row == M.hover ? g_theme->accent_text
+                                     : AURORA_TEXT_PRIMARY,
                       FONT_ID_MAIN_REGULAR);
       cy += ITEM_H;
     }

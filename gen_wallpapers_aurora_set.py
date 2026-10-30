@@ -28,9 +28,9 @@ def stars(seed, n, ymax=0.7, gain=200):
     s = np.asarray(Image.fromarray((s * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.6))).astype(float) / 255
     return (s * 3.0 * gain)[..., None]
 
-def finish(col, name, seed=3):
+def finish(col, name, seed=3, vig_amt=0.35):
     rs = np.random.RandomState(seed)
-    vig = 1.0 - 0.35 * (((u - 0.5) ** 2 + (v - 0.5) ** 2) * 2.0)
+    vig = 1.0 - vig_amt * (((u - 0.5) ** 2 + (v - 0.5) ** 2) * 2.0)
     col = col * np.clip(vig, 0.6, 1.0)[..., None]
     col += (rs.rand(H, W, 1) - 0.5) * 2.0
     img = Image.fromarray(np.clip(col, 0, 255).astype(np.uint8), "RGB")
@@ -96,8 +96,25 @@ col += rib[..., None] * cc * 1.2 + halo[..., None] * cc * 0.10
 col = 255 * (1 - np.exp(-col / 200))
 finish(col, "aurora-grafito")
 
+
+# 6) Alba (modo claro): menta muy pálida con velos de aurora y colinas suaves
+top = np.array([238, 247, 244.0]); bot = np.array([205, 232, 226.0])
+col = top + (bot - top) * (v ** 1.3)[..., None]
+for cx, cy, rx, ry, c, g in [(0.25, 0.30, 0.55, 0.45, np.array([150, 232, 185.0]), 0.55),
+                             (0.80, 0.22, 0.50, 0.45, np.array([140, 222, 232.0]), 0.50),
+                             (0.55, 0.62, 0.70, 0.35, np.array([170, 238, 200.0]), 0.35)]:
+    d = np.sqrt(((u - cx) / rx) ** 2 + ((v - cy) / ry) ** 2)
+    a = (np.exp(-(d ** 2) * 2.0) * g)[..., None]
+    col = col * (1 - a) + c * a
+for base_y, amp, f, ph, shade, g in [(0.80, 0.045, 1.1, 0.2, np.array([176, 218, 208.0]), 0.55),
+                                     (0.89, 0.035, 1.8, 0.7, np.array([150, 200, 190.0]), 0.65)]:
+    rg = base_y + amp * np.sin(2 * np.pi * (u * f + ph)) + amp * 0.4 * np.sin(2 * np.pi * (u * f * 2.6 + ph * 2))
+    m = (sstep(-0.004, 0.004, v - rg) * g)[..., None]
+    col = col * (1 - m) + shade * m
+finish(col, "aurora-alba", vig_amt=0.04)
+
 # hoja de contacto
-names = ["aurora-calma", "aurora-noche", "aurora-bruma", "aurora-cima", "aurora-grafito"]
+names = ["aurora-calma", "aurora-noche", "aurora-bruma", "aurora-cima", "aurora-grafito", "aurora-alba"]
 tw, th = 640, 360
 sheet = Image.new("RGB", (tw * 2 + 30, th * 3 + 40), (12, 14, 14))
 for i, n_ in enumerate(names):

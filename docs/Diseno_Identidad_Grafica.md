@@ -88,3 +88,11 @@ glifo neutro).
 1. ¿Verde A, B o C?
 2. ¿Botones de ventana: opción 1, 2 o 3?
 3. ¿Modo claro además del oscuro?
+
+## Modo claro / oscuro
+
+- Paletas en `kernel/gfx/theme.c` (`k_dark`, `k_light`), accesibles vía `g_theme`; los macros `AURORA_*` de `theme.h` leen la paleta activa.
+- Cambio desde el menú Aurora → "Modo claro / oscuro". Cambia fondo (aurora-noche ↔ aurora-alba), marcos, menús, Dock y terminal.
+- La terminal consulta `sys_theme_get()` (ASYS_THEME_GET) y remapea sus colores.
+- Iconos del Dock (también los de apps Linux GTK/Qt): si el icono no cubre su cuadro, se le pone una baldosa del color del tema; si el glifo tiene poco contraste con ella, se invierte la baldosa.
+- Pendiente: persistir el modo entre reinicios; tematizar el contenido dibujado por clientes externos (GTK/Qt).

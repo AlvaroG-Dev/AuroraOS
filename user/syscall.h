@@ -104,6 +104,7 @@
 #define ASYS_WIN_POLL_EVENT (ASYS_BASE + 0x13)
 #define ASYS_WIN_REGISTER_CONSOLE (ASYS_BASE + 0x14)
 #define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
+#define ASYS_THEME_GET (ASYS_BASE + 0x70)
 #define ASYS_WIN_SET_RAW_INPUT (ASYS_BASE + 0x16)
 #define ASYS_WIN_CREATE_EX (ASYS_BASE + 0x17)
 #define ASYS_WIN_SET_TITLE (ASYS_BASE + 0x18)
@@ -379,6 +380,10 @@ static inline int sys_win_poll_event(int win_id, winsrv_event_t *ev,
 }
 static inline int sys_win_register_console(int win_id) {
   return (int)syscall(ASYS_WIN_REGISTER_CONSOLE, (uint64_t)win_id, 0, 0, 0, 0);
+}
+// Modo del escritorio: bit 0 = claro, resto = contador de cambios.
+static inline uint32_t sys_theme_get(void) {
+  return (uint32_t)syscall(ASYS_THEME_GET, 0, 0, 0, 0, 0);
 }
 static inline int sys_win_set_icon(int win_id, const char *path) {
   return (int)syscall(ASYS_WIN_SET_ICON, (uint64_t)win_id, (uint64_t)path, 0, 0,

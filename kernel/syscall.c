@@ -6,6 +6,7 @@
 // distinguir de un vistazo a qué ABI pertenecen.
 
 #include "syscall.h"
+#include "gfx/theme.h"
 #include "rseq.h"
 #include "smp_boot.h"
 #include "cpu.h"
@@ -6840,6 +6841,13 @@ static int64_t a_win_register_console(uint64_t win_id, uint64_t a2, uint64_t a3,
     return -EFAULT;
   return winsrv_register_console(proc->task, (int)win_id);
 }
+static int64_t a_theme_get(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  return (int64_t)(((uint64_t)theme_generation() << 1) |
+                   (uint64_t)theme_is_light());
+}
+
 static int64_t a_win_set_icon(uint64_t win_id, uint64_t path, uint64_t a3,
                               uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -7348,6 +7356,7 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_WIN_REGISTER_CONSOLE -
         ASYS_BASE] = {a_win_register_console, "asys_win_register_console"},
     [ASYS_WIN_SET_ICON - ASYS_BASE] = {a_win_set_icon, "asys_win_set_icon"},
+    [ASYS_THEME_GET - ASYS_BASE] = {a_theme_get, "asys_theme_get"},
     [ASYS_WIN_SET_RAW_INPUT -
         ASYS_BASE] = {a_win_set_raw_input, "asys_win_set_raw_input"},
     [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},

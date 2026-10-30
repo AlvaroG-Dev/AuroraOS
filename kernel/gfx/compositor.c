@@ -463,6 +463,26 @@ static int prov_has_focused(void) { return focused_window() != NULL; }
 static const menubar_provider_t k_menu_provider = {
     prov_count, prov_title, prov_focused, prov_has_focused};
 
+static void reload_wallpaper(void);
+
+/* Aplica el modo (claro/oscuro) a todo lo que dibuja el kernel y avisa a los
+ * clientes (la terminal consulta theme_generation() por syscall). */
+static void apply_theme_change(void) {
+  reload_wallpaper();
+  for (int i = 0;; i++) {
+    window_t *w = win_by_index(i);
+    if (!w)
+      break;
+    w->dirty = 1; /* repintar marco y contenido con la paleta nueva */
+    window_redraw_surface(w);
+  }
+  if (about_win)
+    about_paint(about_win);
+  dock_theme_changed();
+  menubar_close();
+  compositor_invalidate_rect(screen_rect());
+}
+
 static void run_menu_action(menu_action_t act) {
   window_t *w = focused_window();
   if ((int)act >= MENU_ACT_FOCUS_BASE) {
@@ -478,6 +498,10 @@ static void run_menu_action(menu_action_t act) {
     break;
   case MENU_ACT_ABOUT:
     open_about_window();
+    break;
+  case MENU_ACT_THEME:
+    theme_set_light(!theme_is_light());
+    apply_theme_change();
     break;
   case MENU_ACT_MINIMIZE:
     if (w)
@@ -1790,8 +1814,9 @@ void compositor_init(void) {
   menubar_set_provider(&k_menu_provider);
   taskbar_refresh_clock();
 
-  bg_wallpaper_node =
-      tar_find_file("system/wallpapers/aurora-noche.bmp");
+  bg_wallpaper_node = tar_find_file(theme_is_light()
+                                        ? "system/wallpapers/aurora-alba.bmp"
+                                        : "system/wallpapers/aurora-noche.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
   if (wallpaper_cache) {
@@ -1867,6 +1892,20 @@ void compositor_init(void) {
 
   cursor_drawn = cursor_rect();
   compositor_invalidate_rect(screen_rect());
+}
+
+/* Vuelve a pintar el fondo según el modo actual. Si falta el BMP se deja el
+ * anterior. */
+static void reload_wallpaper(void) {
+  tar_node_t *n = tar_find_file(theme_is_light()
+                                    ? "system/wallpapers/aurora-alba.bmp"
+                                    : "system/wallpapers/aurora-noche.bmp");
+  if (!n || !wallpaper_cache)
+    return;
+  rect_t full_clip = {0, 0, (int)fb_width, (int)fb_height};
+  if (bmp_draw_scaled(n, wallpaper_cache, fb_width, full_clip, 0, 0, fb_width,
+                      fb_height) == 0)
+    bg_wallpaper_node = n;
 }
 
 void compositor_thread(void) {
