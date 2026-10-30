@@ -12,6 +12,7 @@
 #ifndef AURORA_SPLASH_CORE_H
 #define AURORA_SPLASH_CORE_H
 #include "aurora_logo_data.h"
+#include "aurora_emblem_mask.h"
 #include <stdint.h>
 
 
@@ -41,6 +42,10 @@
 #define ASP_GLOW_B 16
 #define ASP_COL_TITLE 0x00E6F2EEu
 #define ASP_COL_SPIN 0x003EE89Bu
+#define ASP_EMB_C0 0x006BF083u /* emblema: extremo izquierdo (verde) */
+#define ASP_EMB_C1 0x0000D4D8u /* emblema: extremo derecho (turquesa) */
+#define ASP_EMB_FADE 420
+#define ASP_EMB_GAP_PCT 45 /* separación emblema-título, % de cap */
 
 #define ASP_GAP_UNITS 230
 
@@ -55,6 +60,8 @@ typedef struct {
   int32_t dotx16[12], doty16[12];
   int32_t glow_cx, glow_cy, glow_r2, glow_gain, glow_sh;
   int title_final;
+  int32_t emb_x, emb_y, emb_w, emb_h;
+  int emb_final;
 } asp_t;
 
 typedef void (*asp_row_fn)(void *ctx, int x, int y, int w, const uint32_t *px);
@@ -171,8 +178,14 @@ ASP_FN void asp_layout(asp_t *s, uint32_t w, uint32_t h) {
   if (s->dot_r16 < 28)
     s->dot_r16 = 28;
   s->spin_half = s->spin_r + (s->dot_r16 >> 4) + 3;
-  int32_t block_h = cap + gap + 2 * s->spin_r;
-  int32_t top = ((int32_t)h - block_h) / 2 - (int32_t)h / 40;
+  int32_t eh = cap * 120 / 100, egap = cap * ASP_EMB_GAP_PCT / 100;
+  s->emb_h = eh;
+  s->emb_w = eh * ASP_EMB_W / ASP_EMB_H;
+  int32_t block_h = eh + egap + cap + gap + 2 * s->spin_r;
+  int32_t top0 = ((int32_t)h - block_h) / 2 - (int32_t)h / 40;
+  s->emb_x = ((int32_t)w - s->emb_w) / 2;
+  s->emb_y = top0;
+  int32_t top = top0 + eh + egap;
   s->title_x = ((int32_t)w - total_w) / 2 - s->padx;
   s->title_y = top - s->pady;
   s->spin_cx = (int32_t)w / 2;
@@ -191,6 +204,7 @@ ASP_FN void asp_layout(asp_t *s, uint32_t w, uint32_t h) {
   int32_t norm = s->glow_r2 >> s->glow_sh;
   s->glow_gain = norm > 0 ? (int32_t)((65536u * 256u) / (uint32_t)norm) : 1;
   s->title_final = 0;
+  s->emb_final = 0;
 }
 
 /* ---------------- Máscara del título (se hace UNA vez) ---------------------
@@ -329,6 +343,56 @@ ASP_FN void asp_draw_title(const asp_t *s, uint32_t ms, uint32_t master,
   }
 }
 
+
+/* Emblema (máscara alfa 8 bits, bilineal entera, degradado horizontal). */
+ASP_FN uint32_t asp_emb_px(uint32_t x, uint32_t y) {
+  uint32_t i = y * ASP_EMB_W + x;
+  uint32_t n = (k_asp_emb[i >> 1] >> ((i & 1) ? 0 : 4)) & 15;
+  return n * 17;
+}
+
+ASP_FN uint32_t asp_emb_alpha(const asp_t *s, int32_t x, int32_t y) {
+  uint32_t fx = ((uint32_t)x * (ASP_EMB_W - 1) << 8) / (uint32_t)(s->emb_w - 1 ? s->emb_w - 1 : 1);
+  uint32_t fy = ((uint32_t)y * (ASP_EMB_H - 1) << 8) / (uint32_t)(s->emb_h - 1 ? s->emb_h - 1 : 1);
+  uint32_t x0 = fx >> 8, y0 = fy >> 8, ax = fx & 255, ay = fy & 255;
+  uint32_t x1 = x0 + 1 < ASP_EMB_W ? x0 + 1 : x0, y1 = y0 + 1 < ASP_EMB_H ? y0 + 1 : y0;
+  uint32_t a00 = asp_emb_px(x0, y0), a10 = asp_emb_px(x1, y0);
+  uint32_t a01 = asp_emb_px(x0, y1), a11 = asp_emb_px(x1, y1);
+  uint32_t top = a00 * (256 - ax) + a10 * ax, bot = a01 * (256 - ax) + a11 * ax;
+  return (top * (256 - ay) + bot * ay) >> 16;
+}
+
+ASP_FN void asp_draw_emblem(const asp_t *s, uint32_t ms, asp_row_fn put,
+                            void *ctx, uint32_t *line) {
+  uint32_t f = ms >= ASP_EMB_FADE ? 255 : asp_smooth(ms * 255 / ASP_EMB_FADE);
+  int32_t x0 = s->emb_x < 0 ? 0 : s->emb_x;
+  int32_t x1 = s->emb_x + s->emb_w > s->w ? s->w : s->emb_x + s->emb_w;
+  if (x1 - x0 > ASP_MAX_W)
+    x1 = x0 + ASP_MAX_W;
+  if (x1 <= x0)
+    return;
+  for (int32_t my = 0; my < s->emb_h; my++) {
+    int32_t sy = s->emb_y + my;
+    if (sy < 0 || sy >= s->h)
+      continue;
+    asp_row_t rw;
+    asp_row_begin(s, sy, &rw);
+    for (int32_t sx = x0; sx < x1; sx++) {
+      uint32_t c = asp_bg_px(s, &rw, sx, sy);
+      uint32_t a = asp_emb_alpha(s, sx - s->emb_x, my);
+      if (a) {
+        uint32_t t = (uint32_t)(sx - s->emb_x) * 255 / (uint32_t)(s->emb_w > 1 ? s->emb_w - 1 : 1);
+        uint32_t r = (((ASP_EMB_C0 >> 16) & 255) * (255 - t) + ((ASP_EMB_C1 >> 16) & 255) * t) / 255;
+        uint32_t g = (((ASP_EMB_C0 >> 8) & 255) * (255 - t) + ((ASP_EMB_C1 >> 8) & 255) * t) / 255;
+        uint32_t b = ((ASP_EMB_C0 & 255) * (255 - t) + (ASP_EMB_C1 & 255) * t) / 255;
+        c = asp_mix((r << 16) | (g << 8) | b, c, (a * f + 127) / 255);
+      }
+      line[sx - x0] = c;
+    }
+    put(ctx, x0, sy, x1 - x0, line);
+  }
+}
+
 ASP_FN void asp_draw_spinner(const asp_t *s, uint32_t ms, uint32_t master,
                              asp_row_fn put, void *ctx, uint32_t *line) {
   if (ms <= ASP_SPIN_START)
@@ -387,6 +451,13 @@ ASP_FN void asp_draw_spinner(const asp_t *s, uint32_t ms, uint32_t master,
 /* Frame normal: el título solo se redibuja mientras anima. */
 ASP_FN void asp_frame(asp_t *s, uint32_t ms, asp_row_fn put, void *ctx,
                       uint32_t *line) {
+  if (ms < ASP_EMB_FADE) {
+    asp_draw_emblem(s, ms, put, ctx, line);
+    s->emb_final = 0;
+  } else if (!s->emb_final) {
+    asp_draw_emblem(s, ms, put, ctx, line);
+    s->emb_final = 1;
+  }
   if (ms < ASP_TITLE_END) {
     asp_draw_title(s, ms, 255, put, ctx, line);
     s->title_final = 0;

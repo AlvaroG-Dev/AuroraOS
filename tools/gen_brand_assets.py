@@ -176,3 +176,24 @@ if LSRC.exists():
             f.write("    " + ", ".join(f"0x{v:08X}" for v in flat[i:i + 8]) + ",\n")
         f.write("};\n")
     print("wordmark", WW, wh)
+
+
+# Máscara alfa de 4 bits del emblema para el splash (bootloader/common/aurora_emblem_mask.h).
+# stage2 BIOS tiene muy poco margen (.data debe quedar bajo 0x10000), por eso 4 bits.
+MW = 112
+mh = round(bb.height * MW / bb.width)
+mk = np.asarray(bb.resize((MW, mh), Image.LANCZOS))[..., 3].astype(int)
+q = np.clip(np.round(mk / 17.0), 0, 15).astype(int).flatten()
+if len(q) % 2:
+    q = np.append(q, 0)
+packed = [(int(q[i]) << 4) | int(q[i + 1]) for i in range(0, len(q), 2)]
+with open(ROOT / "bootloader/common/aurora_emblem_mask.h", "w") as f:
+    f.write("/* bootloader/common/aurora_emblem_mask.h - generado por tools/gen_brand_assets.py (no editar) */\n")
+    f.write("#ifndef AURORA_EMBLEM_MASK_H\n#define AURORA_EMBLEM_MASK_H\n#include <stdint.h>\n\n")
+    f.write(f"#define ASP_EMB_W {MW}\n#define ASP_EMB_H {mh}\n\n")
+    f.write("/* alfa de 4 bits, 2 píxeles por byte (nibble alto = píxel par) */\n")
+    f.write(f"static const uint8_t k_asp_emb[{len(packed)}] = {{\n")
+    for i in range(0, len(packed), 24):
+        f.write("    " + ", ".join(str(v) for v in packed[i:i + 24]) + ",\n")
+    f.write("};\n\n#endif\n")
+print("splash mask", MW, mh, len(packed), "bytes")

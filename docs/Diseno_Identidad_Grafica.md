@@ -15,7 +15,7 @@ Logo: tres cintas con transición de verde (`#6BF083`/`#3EE89B`) a turquesa (`#0
 ---
 # (histórico) v2, decisiones de Alvaro
 
-**Decidido:** verde intermedio entre A y C = `#54DA75` (hover `#7BE594`, texto sobre acento `#08260F`); semáforos conservados pero con colores propios: cerrar naranja-rojo `#FF6A3D`, minimizar turquesa `#00D4D8`, maximizar verde aurora `#3EE89B`; habrá modo claro (pendiente de diseñar). Lo que sigue es el razonamiento original; donde un valor difiera, manda esta línea.
+**Decidido:** verde intermedio entre A y C = `#54DA75` (hover `#7BE594`, texto sobre acento `#08260F`); semáforos conservados pero con colores propios: cerrar naranja-rojo `#FF6A3D`, minimizar azul `#4DA3FF`, maximizar verde aurora `#3EE89B`; habrá modo claro (pendiente de diseñar). Lo que sigue es el razonamiento original; donde un valor difiera, manda esta línea.
 
 Sin degradados como seña de identidad: **un color sólido de marca** sobre la base de
 grises neutros que ya existe (`kernel/gfx/theme.h`). Hoy el acento es `#0A84FF`, el azul

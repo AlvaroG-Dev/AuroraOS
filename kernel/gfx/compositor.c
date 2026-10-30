@@ -548,7 +548,7 @@ static void open_about_window(void) {
                               WIN_FLAGS_FIXED_SIZE);
   if (!w)
     return;
-  win_set_icon_text(w, "A", AURORA_ACCENT);
+  win_set_icon_text(w, "@", AURORA_ACCENT);
   about_paint(w);
   about_win = w;
   do_attach(w);
@@ -1791,7 +1791,7 @@ void compositor_init(void) {
   taskbar_refresh_clock();
 
   bg_wallpaper_node =
-      tar_find_file("system/wallpapers/wallpaper-aurora.bmp");
+      tar_find_file("system/wallpapers/aurora-noche.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
   if (wallpaper_cache) {

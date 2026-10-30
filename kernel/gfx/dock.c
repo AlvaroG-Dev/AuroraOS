@@ -1,5 +1,6 @@
 // kernel/gfx/dock.c
 #include "dock.h"
+#include "brand.h"
 #include "../bmp.h"
 #include "../heap.h"
 #include "font_manager.h"
@@ -381,6 +382,10 @@ static void make_fallback_tile(taskbar_item_t *it) {
   uint32_t base = it->icon_color ? (it->icon_color | 0xFF000000) : AURORA_ACCENT;
   if (base == 0xFF0078D4 || base == 0xFF60CDFF)
     base = AURORA_ACCENT; /* colores heredados de Windows -> acento de sistema */
+  /* Símbolo reservado "@": icono de Aurora (emblema sobre baldosa oscura). */
+  int is_brand = it->icon_symbol[0] == '@' && it->icon_symbol[1] == '\0';
+  if (is_brand)
+    base = 0xFF141F22;
 
   const int inset = S / 24, radius = S * 9 / 40;
   rect_t tile = {inset, inset, S - 2 * inset, S - 2 * inset};
@@ -400,6 +405,11 @@ static void make_fallback_tile(taskbar_item_t *it) {
     }
   }
   gfx_draw_rounded_border(it->dock_icon, S, clip, tile, radius, 0x24FFFFFF);
+
+  if (is_brand) {
+    brand_draw_emblem(it->dock_icon, S, clip, S / 2, S / 2, S * 46 / 100);
+    return;
+  }
 
   /* Símbolo: se dibuja a 24x24 y se amplía con bilineal para que quede liso. */
   static uint32_t tmp[24 * 24]; /* solo hilo del compositor */
