@@ -1791,7 +1791,7 @@ void compositor_init(void) {
   taskbar_refresh_clock();
 
   bg_wallpaper_node =
-      tar_find_file("system/wallpapers/wallpaper-aurora-blue.bmp");
+      tar_find_file("system/wallpapers/wallpaper-aurora.bmp");
 
   wallpaper_cache = (uint32_t *)kmalloc(size);
   if (wallpaper_cache) {

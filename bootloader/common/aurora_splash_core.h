@@ -29,18 +29,18 @@
 #define ASP_SPIN_FADE 350
 #define ASP_STEP_MS 84 /* 12 pasos = ~1 vuelta/seg */
 
-/* Paleta (azul-negro discreto) */
-#define ASP_TOP_R 5
-#define ASP_TOP_G 8
-#define ASP_TOP_B 16
-#define ASP_BOT_R 10
-#define ASP_BOT_G 16
-#define ASP_BOT_B 34
-#define ASP_GLOW_R 4 /* niveles añadidos en el centro del halo */
-#define ASP_GLOW_G 12
-#define ASP_GLOW_B 26
-#define ASP_COL_TITLE 0x00E8F0FFu
-#define ASP_COL_SPIN 0x005AB0FFu
+/* Paleta (negro-verdoso discreto; spinner en verde aurora #3EE89B) */
+#define ASP_TOP_R 3
+#define ASP_TOP_G 7
+#define ASP_TOP_B 10
+#define ASP_BOT_R 5
+#define ASP_BOT_G 20
+#define ASP_BOT_B 24
+#define ASP_GLOW_R 2 /* niveles añadidos en el centro del halo */
+#define ASP_GLOW_G 20
+#define ASP_GLOW_B 16
+#define ASP_COL_TITLE 0x00E6F2EEu
+#define ASP_COL_SPIN 0x003EE89Bu
 
 #define ASP_GAP_UNITS 230
 

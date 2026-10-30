@@ -68,7 +68,7 @@ DEPFLAGS = -MMD -MP
 # -O0 para depurar (-g y el frame pointer se mantienen).
 GFX_CFLAGS = $(CFLAGS) -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns
 GFX_DEPS = gfx/gfx.h gfx/theme.h gfx/window.h gfx/compositor.h gfx/dock.h \
-           gfx/menubar.h gfx/taskbar.h gfx/cursor.h gfx/winsrv.h gfx/about.h gfx/brand.h gfx/brand_emblem_data.h \
+           gfx/menubar.h gfx/taskbar.h gfx/cursor.h gfx/winsrv.h gfx/about.h gfx/brand.h gfx/brand_emblem_data.h gfx/brand_wordmark_data.h \
            simd.h
 
 gfx/%.o: gfx/%.c $(GFX_DEPS)

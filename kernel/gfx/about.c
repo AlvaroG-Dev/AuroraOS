@@ -22,29 +22,6 @@ static inline uint32_t lerp_rgb(uint32_t a, uint32_t b, int t /*0..256*/) {
   return 0xFF000000 | (r << 16) | (g << 8) | bl;
 }
 
-/* Texto ampliado `scale256`/256 veces (la fuente del sistema es de 14 px). */
-static void draw_big_text(uint32_t *buf, int stride, rect_t clip, int cx,
-                          int y, const char *s, uint32_t color,
-                          int scale256) {
-  static uint32_t tmp[200 * 24]; /* solo hilo del compositor */
-  const int TW = 200, TH = 24;
-  int tw = gfx_text_width(s, FONT_ID_MAIN_BOLD) + 2;
-  if (tw > TW)
-    tw = TW;
-  for (int i = 0; i < TW * TH; i++)
-    tmp[i] = color & 0x00FFFFFF; /* transparente del mismo color: sin halo */
-  gfx_draw_string(tmp, TW, (rect_t){0, 0, tw, TH}, 1,
-                  gfx_text_center_y(FONT_ID_MAIN_BOLD, 0, TH), s, color,
-                  FONT_ID_MAIN_BOLD);
-  /* Pasar a una imagen compacta tw x TH para el escalado. */
-  for (int y = 0; y < TH; y++)
-    for (int x = 0; x < tw; x++)
-      tmp[y * tw + x] = tmp[y * TW + x];
-  int dw = tw * scale256 / 256, dh = TH * scale256 / 256;
-  gfx_blit_scaled(buf, stride, clip, cx - dw / 2, y, dw, dh, tmp, tw, TH,
-                  GFX_FILTER_BILINEAR);
-}
-
 static void draw_centered(uint32_t *buf, int stride, rect_t clip, int cx,
                           int top, int h, const char *s, uint32_t color,
                           font_id_t f) {
@@ -126,7 +103,7 @@ void about_paint(window_t *win) {
     buf[i] = AURORA_WIN_BG;
 
   brand_draw_emblem(buf, W, clip, cx, 84, 84);
-  draw_big_text(buf, W, clip, cx, 154, "AuroraOS", AURORA_TEXT_PRIMARY, 448);
+  brand_draw_wordmark(buf, W, clip, cx, 160, 170);
   draw_centered(buf, W, clip, cx, 196, 20, "Sistema operativo de 64 bits",
                 AURORA_TEXT_TERTIARY, FONT_ID_MAIN_REGULAR);
 

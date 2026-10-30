@@ -154,3 +154,25 @@ with open(ROOT / "kernel/gfx/brand_emblem_data.h", "w") as f:
         f.write("    " + ", ".join(f"0x{v:08X}" for v in flat[i:i + 8]) + ",\n")
     f.write("};\n")
 print("kernel data", KW, kh)
+
+# Wordmark "aurora OS" solo (texto blanco) embebido para Acerca de.
+if LSRC.exists():
+    ta = alpha[:, cut:]
+    tys, txs = np.where(ta > 0.5)
+    ta = ta[tys.min():tys.max() + 1, txs.min():txs.max() + 1]
+    tim = Image.fromarray((ta * 255).astype(np.uint8), "L")
+    WW = 320
+    wh = round(tim.height * WW / tim.width)
+    tim = tim.resize((WW, wh), Image.LANCZOS)
+    a8 = np.asarray(tim).astype(np.uint32)
+    wargb = (a8 << 24) | 0x00F2F6F4
+    with open(ROOT / "kernel/gfx/brand_wordmark_data.h", "w") as f:
+        f.write("/* kernel/gfx/brand_wordmark_data.h - generado por tools/gen_brand_assets.py (no editar) */\n")
+        f.write("#pragma once\n#include <stdint.h>\n\n")
+        f.write(f"#define BRAND_WORDMARK_W {WW}\n#define BRAND_WORDMARK_H {wh}\n\n")
+        f.write("static const uint32_t brand_wordmark_argb[BRAND_WORDMARK_W * BRAND_WORDMARK_H] = {\n")
+        flat = wargb.flatten()
+        for i in range(0, len(flat), 8):
+            f.write("    " + ", ".join(f"0x{v:08X}" for v in flat[i:i + 8]) + ",\n")
+        f.write("};\n")
+    print("wordmark", WW, wh)
