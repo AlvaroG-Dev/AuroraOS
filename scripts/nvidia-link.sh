@@ -14,7 +14,8 @@ ls $O/*.o >/dev/null
 CC=${KUR_CC:-gcc}
 CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
 
-ld -r -o $B/nvidia-all.o $O/*.o "$NK"
+$CC $CF -c kernel/linuxkpi/nvidia/nv_aurora_glue.c -o $B/glue.o
+ld -r -o $B/nvidia-all.o $O/*.o $B/glue.o "$NK"
 # Simbolos que ni LinuxKPI ni el kernel exportan.
 nm build/linuxkpi/linuxkpi.o | awk '$2 ~ /[TDBRtdbrW]/{print $3}' > $B/have.txt
 grep -o 'KEXPORT_SYMBOL([a-zA-Z_0-9]*' kernel/ksymtab_exports.c | sed 's/.*(//' >> $B/have.txt
