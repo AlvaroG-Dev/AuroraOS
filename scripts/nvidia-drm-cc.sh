@@ -17,8 +17,10 @@ SRCS=${*:-$(sed -n 's|^NVIDIA_DRM_SOURCES += nvidia-drm/\(.*\)\.c$|\1|p' $K/nvid
 ok=0; bad=0; : > $O/errors.txt
 for f in $SRCS; do
     f=${f%.c}
+    rm -f $O/$f.o
     if gcc $FL -c $K/nvidia-drm/$f.c -o $O/$f.o 2> $O/$f.err; then ok=$((ok+1)); else bad=$((bad+1)); fi
     grep -E "error|fatal" $O/$f.err | sed "s|^[^ ]*/||;s|^|$f: |" >> $O/errors.txt
 done
 echo "compilan: $ok  con errores: $bad  ($(grep -c . $O/errors.txt) mensajes)"
 sed 's/^[^:]*: //;s/^[0-9]*:[0-9]*: //' $O/errors.txt | sort | uniq -c | sort -rn | head -${TOP:-25}
+[ $bad -eq 0 ] || exit 1

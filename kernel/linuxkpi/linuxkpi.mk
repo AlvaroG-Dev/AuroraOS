@@ -92,7 +92,7 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@scripts/nvidia-src-patch.sh
 	@[ -f build/linuxkpi_src/nvidia-open/src/nvidia/_out/Linux_x86_64/nv-kernel.o ] || \
 		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia -j$$(nproc)
-	@[ -f build/nvidia-kpi/out/conftest/functions.h ] || scripts/nvidia-conftest.sh
+	@[ build/nvidia-kpi/out/conftest/functions.h -nt scripts/nvidia-conftest.sh ] || scripts/nvidia-conftest.sh
 	@scripts/nvidia-kpi-cc.sh | grep -E "^compilan" 
 	@scripts/nvidia-link.sh | grep "^OK"
 	@mkdir -p $(LKPI_MODDIR)
@@ -104,7 +104,7 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@scripts/nvidia-modeset-link.sh | grep "^OK"
 	@cp -f build/nvidia-kpi/ms/nvidia-modeset.kur $(LKPI_MODDIR)/nvidia-modeset.kur
 	@$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=lkpi_drm KUR_CC="$(KUR_CC)" install
-	@scripts/nvidia-drm-cc.sh | grep -E "^compilan"
+	@scripts/nvidia-drm-cc.sh > build/nvidia-kpi/drm/cc.log || { head -20 build/nvidia-kpi/drm/obj/errors.txt; exit 1; }; grep -E "^compilan" build/nvidia-kpi/drm/cc.log
 	@scripts/nvidia-drm-link.sh | grep "^OK"
 	@cp -f build/nvidia-kpi/drm/nvidia-drm.kur $(LKPI_MODDIR)/nvidia-drm.kur
 	@[ -f build/nvidia/firmware/gsp_ga10x.bin ] || scripts/fetch-nvidia.sh
