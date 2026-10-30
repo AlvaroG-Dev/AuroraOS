@@ -98,6 +98,11 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@mkdir -p $(LKPI_MODDIR)
 	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
 	@cp -f build/nvidia-kpi/nvidia.kur $(LKPI_MODDIR)/nvidia.kur
+	@[ -f build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/Linux_x86_64/nv-modeset-kernel.o ] || \
+		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia-modeset -j$$(nproc) >/dev/null
+	@scripts/nvidia-modeset-cc.sh | grep -E "^compilan"
+	@scripts/nvidia-modeset-link.sh | grep "^OK"
+	@cp -f build/nvidia-kpi/ms/nvidia-modeset.kur $(LKPI_MODDIR)/nvidia-modeset.kur
 	@[ -f build/nvidia/firmware/gsp_ga10x.bin ] || scripts/fetch-nvidia.sh
 	@mkdir -p sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)
 	@cp -f build/nvidia/firmware/gsp_ga10x.bin build/nvidia/firmware/ucodes_ga10x.bin sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)/
