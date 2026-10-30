@@ -87,7 +87,7 @@ linuxkpi-drv: tools/kurbuild
 # Descarga las fuentes y compila nv-kernel.o si faltan; no va en
 # `linuxkpi` (la primera vez tarda). Se carga con lkpi.load=linuxkpi,nvidia.
 .PHONY: nvidia
-nvidia: tools/kurbuild
+nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@[ -d build/linuxkpi_src/nvidia-open/src ] || scripts/fetch-linux-drivers.sh
 	@scripts/nvidia-src-patch.sh
 	@[ -f build/linuxkpi_src/nvidia-open/src/nvidia/_out/Linux_x86_64/nv-kernel.o ] || \
@@ -96,6 +96,7 @@ nvidia: tools/kurbuild
 	@scripts/nvidia-kpi-cc.sh | grep -E "^compilan" 
 	@scripts/nvidia-link.sh | grep "^OK"
 	@mkdir -p $(LKPI_MODDIR)
+	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
 	@cp -f build/nvidia-kpi/nvidia.kur $(LKPI_MODDIR)/nvidia.kur
 	@[ -f build/nvidia/firmware/gsp_ga10x.bin ] || scripts/fetch-nvidia.sh
 	@mkdir -p sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)

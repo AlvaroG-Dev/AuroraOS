@@ -30,6 +30,12 @@ for r in rax rbx rcx rdx rsi rdi rbp r8 r9 r10 r11 r12 r13 r14 r15; do
     echo "__asm__(\".text\\n.globl __x86_indirect_thunk_$r\\n__x86_indirect_thunk_$r:\\n\\tjmp *%$r\\n\");"
 done
 } > $B/nvidia_stubs.c
+# Lo que debe dar LinuxKPI (lkpi_*) nunca se rellena con un stub: si falta, la
+# capa esta desactualizada (make nvidia reconstruye linuxkpi.kur antes de enlazar).
+if grep -q '^lkpi_' $B/missing.txt; then
+    echo "faltan simbolos de LinuxKPI en build/linuxkpi/linuxkpi.o:" >&2
+    grep '^lkpi_' $B/missing.txt >&2; exit 1
+fi
 $CC $CF -c $B/nvidia_stubs.c -o $B/stubs.o
 $CC $CF -DKBUILD_MODNAME='"nvidia"' -c kernel/linuxkpi/kur_manifest.c -o $B/manifest.o
 ld -r -o $B/nvidia.o $B/nvidia-all.o $B/stubs.o $B/manifest.o
