@@ -109,6 +109,7 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 # Prueba de /dev/nvidiactl al arrancar (sin Wayland; la salida va a aurora.log
 # por /dev/kmsg). nvidia-test-off la quita para volver al arranque normal.
 nvidia-test: nvidia
+	@mkdir -p sysroot/system
 	@echo /usr/bin/nvctl_test > sysroot/system/boot-tests
 	@echo "[NVIDIA] sysroot/system/boot-tests escrito: make iso arrancara nvctl_test sin escritorio"
 
