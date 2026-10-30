@@ -1,6 +1,6 @@
 --- nv.c	2026-10-29 13:23:35.557793588 +0000
-+++ nv.c	2026-10-30 17:23:44.765044158 +0000
-@@ -910,6 +910,43 @@
++++ ../../../../../build/nvidia-kpi/wk/nv.c	2026-10-30 18:10:38.558083811 +0000
+@@ -910,6 +910,78 @@
      }
  }
  
@@ -11,6 +11,7 @@
 + */
 +extern int cmdline_get(const char *key, char *out, size_t outlen);
 +extern void klog_printf(int level, const char *fmt, ...);
++static int nv_aurora_fake_active;
 +static void nv_aurora_fake_gpu(nvidia_stack_t *sp)
 +{
 +    char opt[8];
@@ -21,6 +22,7 @@
 +
 +    if (!cmdline_get("nvidia.fake", opt, sizeof(opt)) || opt[0] != '1')
 +        return;
++    nv_aurora_fake_active = 1;
 +    nv = kzalloc(sizeof(*nv), GFP_KERNEL);
 +    ap = kzalloc(sizeof(*ap), GFP_KERNEL);
 +    regs = (volatile NvU32 *)get_zeroed_page(GFP_KERNEL);
@@ -41,14 +43,85 @@
 +    klog_printf(3, "[nvidia] fake: pagina WB leida=0x%x", regs[0]);
 +}
 +
++/*
++ * Aurora: no hay udev/nvidia-modprobe que haga mknod; el driver crea los
++ * nodos de /dev (nvidiactl y nvidiaN) con device_create sobre LinuxKPI.
++ */
++static struct class *nv_aurora_class;
++
++void nv_aurora_devnode_add(int minor)
++{
++    struct device *d;
++
++    if (nv_aurora_class == NULL)
++    {
++        nv_aurora_class = class_create("nvidia");
++        if (IS_ERR(nv_aurora_class))
++        {
++            nv_aurora_class = NULL;
++            return;
++        }
++    }
++    if (minor == NV_MINOR_DEVICE_NUMBER_CONTROL_DEVICE)
++        d = device_create(nv_aurora_class, NULL, MKDEV(NV_MAJOR_DEVICE_NUMBER, minor), NULL, "nvidiactl");
++    else
++        d = device_create(nv_aurora_class, NULL, MKDEV(NV_MAJOR_DEVICE_NUMBER, minor), NULL, "nvidia%d", minor);
++    if (IS_ERR(d))
++        nv_printf(NV_DBG_ERRORS, "NVRM: no se pudo crear el nodo /dev de minor %d\n", minor);
++}
++
++void nv_aurora_devnode_remove(int minor)
++{
++    if (nv_aurora_class != NULL)
++        device_destroy(nv_aurora_class, MKDEV(NV_MAJOR_DEVICE_NUMBER, minor));
++}
++
  static int __init nvidia_init_module(void)
  {
      int rc;
-@@ -962,6 +999,7 @@
+@@ -962,8 +1034,9 @@
          goto caps_imex_exit;
      }
  
 +    nv_aurora_fake_gpu(sp);
      count = nvos_count_devices(&num_pci_devices, &num_platform_devices);
-     if ((count == 0) && (!is_nvswitch_present))
+-    if ((count == 0) && (!is_nvswitch_present))
++    if ((count == 0) && (!is_nvswitch_present) && !nv_aurora_fake_active)
      {
+         nv_printf(NV_DBG_ERRORS, "NVRM: No NVIDIA GPU found.\n");
+         rc = -ENODEV;
+@@ -1020,7 +1093,7 @@
+             "NVRM: again.\n");
+     }
+ 
+-    if ((atomic_read(&num_probed_nv_devices) == 0) && (!is_nvswitch_present))
++    if ((atomic_read(&num_probed_nv_devices) == 0) && (!is_nvswitch_present) && !nv_aurora_fake_active)
+     {
+         rc = -ENODEV;
+         nv_printf(NV_DBG_ERRORS, "NVRM: No NVIDIA devices probed.\n");
+@@ -1038,7 +1111,7 @@
+             atomic_read(&num_probed_nv_devices) - atomic_read(&num_nv_devices));
+     }
+ 
+-    if ((atomic_read(&num_nv_devices) == 0) && (!is_nvswitch_present))
++    if ((atomic_read(&num_nv_devices) == 0) && (!is_nvswitch_present) && !nv_aurora_fake_active)
+     {
+         rc = -ENODEV;
+         nv_printf(NV_DBG_ERRORS,
+@@ -1070,6 +1143,8 @@
+         goto partial_chrdev_exit;
+     }
+ 
++    nv_aurora_devnode_add(NV_MINOR_DEVICE_NUMBER_CONTROL_DEVICE);
++
+     __nv_init_sp = sp;
+ 
+     return 0;
+@@ -1113,6 +1188,7 @@
+ {
+     nvidia_stack_t *sp = __nv_init_sp;
+ 
++    nv_aurora_devnode_remove(NV_MINOR_DEVICE_NUMBER_CONTROL_DEVICE);
+     nv_unregister_chrdev(NV_MINOR_DEVICE_NUMBER_CONTROL_DEVICE, 1,
+         &nv_linux_control_device_cdev);
+     nv_unregister_chrdev(0, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1,
