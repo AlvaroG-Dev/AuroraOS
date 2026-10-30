@@ -1,6 +1,6 @@
 --- nv.c	2026-10-29 13:23:35.557793588 +0000
-+++ nv.c	2026-10-30 16:07:14.378807929 +0000
-@@ -910,6 +910,39 @@
++++ nv.c	2026-10-30 17:23:44.765044158 +0000
+@@ -910,6 +910,43 @@
      }
  }
  
@@ -26,6 +26,7 @@
 +    regs = (volatile NvU32 *)get_zeroed_page(GFP_KERNEL);
 +    if (!nv || !ap || !regs)
 +        return;
++    set_memory_uc((unsigned long)regs, 1);   /* prueba de set_memory_uc/wb de la capa */
 +    regs[0] = 0x197000a1;          /* NV_PMC_BOOT_0  */
 +    regs[0xa00 / 4] = 0x197a1000;  /* NV_PMC_BOOT_42 */
 +    ap->cpu_address = virt_to_phys((void *)regs);
@@ -35,12 +36,15 @@
 +    nv->pci_info.device_id = 0x2882;
 +    st = rm_is_supported_device(sp, nv);
 +    klog_printf(3, "[nvidia] fake AD107: rm_is_supported_device -> 0x%x", st);
++    klog_printf(3, "[nvidia] fake: pagina UC leida=0x%x", regs[0]);
++    set_memory_wb((unsigned long)regs, 1);
++    klog_printf(3, "[nvidia] fake: pagina WB leida=0x%x", regs[0]);
 +}
 +
  static int __init nvidia_init_module(void)
  {
      int rc;
-@@ -962,6 +995,7 @@
+@@ -962,6 +999,7 @@
          goto caps_imex_exit;
      }
  

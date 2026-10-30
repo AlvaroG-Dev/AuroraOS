@@ -28,6 +28,7 @@ KEXPORT_SYMBOL(kfree);
 KEXPORT_SYMBOL(vmm_alloc_pages);
 KEXPORT_SYMBOL(vmm_free_pages);
 KEXPORT_SYMBOL(paging_map_page);
+KEXPORT_SYMBOL(paging_invalidate_tlb_global);
 
 KEXPORT_SYMBOL(sched_get_ticks);
 KEXPORT_SYMBOL(sched_current);

@@ -373,3 +373,35 @@ struct pglist_data *lkpi_node_data(int nid)
 	return &lkpi_node0;
 }
 EXPORT_SYMBOL(lkpi_node_data);
+
+/* ------------------------------------------- atributos de cache de la RAM */
+
+void *lkpi_page_address_of(struct page *page)
+{
+	return page_address(page);
+}
+EXPORT_SYMBOL(lkpi_page_address_of);
+
+/* UC (PCD|PWT) o WB de las paginas de la ventana fisica; vuelca las lineas de
+ * cache antes de cambiar el atributo y hace TLB shootdown global despues. */
+int lkpi_set_memory_cache(unsigned long addr, int numpages, int uncached)
+{
+	u64 flags = AURORA_PTE_WRITABLE | AURORA_PTE_NX | AURORA_PTE_GLOBAL;
+
+	if (numpages <= 0 || !lkpi_is_direct_map((void *)addr))
+		return 0;
+	if (uncached)
+		flags |= AURORA_PTE_NOCACHE | AURORA_PTE_WRITETHRU;
+	for (int i = 0; i < numpages; i++) {
+		unsigned long va = (addr & PAGE_MASK) + ((unsigned long)i << PAGE_SHIFT);
+
+		for (unsigned long p = va; p < va + PAGE_SIZE; p += 64)
+			__asm__ volatile("clflush (%0)" : : "r"(p) : "memory");
+		if (aurora_paging_map_page(va, va - AURORA_PHYS_MAP_BASE, flags))
+			return -ENOMEM;
+	}
+	__asm__ volatile("mfence" : : : "memory");
+	aurora_paging_invalidate_tlb_global(0);
+	return 0;
+}
+EXPORT_SYMBOL(lkpi_set_memory_cache);
