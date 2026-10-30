@@ -86,7 +86,7 @@ linuxkpi-drv: tools/kurbuild
 # make nvidia: driver NVIDIA open (Plan_NVIDIA.md N2) -> sysroot/lib/modules/linuxkpi/nvidia.kur.
 # Descarga las fuentes y compila nv-kernel.o si faltan; no va en
 # `linuxkpi` (la primera vez tarda). Se carga con lkpi.load=linuxkpi,nvidia.
-.PHONY: nvidia
+.PHONY: nvidia nvidia-test nvidia-test-off
 nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@[ -d build/linuxkpi_src/nvidia-open/src ] || scripts/fetch-linux-drivers.sh
 	@scripts/nvidia-src-patch.sh
@@ -101,8 +101,20 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@[ -f build/nvidia/firmware/gsp_ga10x.bin ] || scripts/fetch-nvidia.sh
 	@mkdir -p sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)
 	@cp -f build/nvidia/firmware/gsp_ga10x.bin build/nvidia/firmware/ucodes_ga10x.bin sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)/
+	@mkdir -p sysroot/usr/bin
+	@$(or $(MUSL_CC),musl-gcc) -static -O1 -Wall -o sysroot/usr/bin/nvctl_test tests/nvidia/nvctl_test.c -Ibuild/linuxkpi_src/nvidia-open/kernel-open/common/inc -Ibuild/linuxkpi_src/nvidia-open/src/common/sdk/nvidia/inc
 	@rm -f kernel/initrd.tar
 	@echo "[NVIDIA] instalado en $(LKPI_MODDIR)/nvidia.kur (arranca con lkpi.load=linuxkpi,nvidia)"
+
+# Prueba de /dev/nvidiactl al arrancar (sin Wayland; la salida va a aurora.log
+# por /dev/kmsg). nvidia-test-off la quita para volver al arranque normal.
+nvidia-test: nvidia
+	@echo /usr/bin/nvctl_test > sysroot/system/boot-tests
+	@echo "[NVIDIA] sysroot/system/boot-tests escrito: make iso arrancara nvctl_test sin escritorio"
+
+nvidia-test-off:
+	@rm -f sysroot/system/boot-tests kernel/initrd.tar
+	@echo "[NVIDIA] boot-tests quitado"
 
 linuxkpi-clean:
 	rm -rf $(LKPI_BUILD) $(LKPI_MODDIR)
