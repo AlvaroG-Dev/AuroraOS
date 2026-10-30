@@ -95,3 +95,42 @@ for s in (256, 128, 64):
 save_bmp32(fit(tile, 128), OUT / "aurora-icon-128.bmp")
 save_bmp32(fit(tile, 64), OUT / "aurora-icon-64.bmp")
 print("ok", emb.size)
+
+
+# ---------------------------------------------------------------------------
+# Lockup horizontal (emblema + wordmark "aurora OS")
+# ---------------------------------------------------------------------------
+LSRC = ROOT / "assets/brand/source/lockup_chatgpt.jpg"
+if LSRC.exists():
+    L = Image.open(LSRC).convert("RGB")
+    EMB_X1 = 500  # el emblema acaba en x=474 y el texto empieza en x=527
+    LS = 3
+    lbig = L.resize((L.width * LS, L.height * LS), Image.LANCZOS)
+    lum = np.asarray(lbig).astype(float).max(axis=2)
+    a_raw = sstep(60, 150, lum)
+    def soft(arr, sigma):
+        b = np.asarray(Image.fromarray((arr * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(sigma))).astype(float) / 255
+        return sstep(0.35, 0.65, b)
+    cut = EMB_X1 * LS
+    alpha = np.zeros_like(a_raw)
+    alpha[:, :cut] = soft(a_raw, 3.0)[:, :cut]      # emblema: más suavizado
+    alpha[:, cut:] = soft(a_raw, 1.4)[:, cut:]      # texto: respeta trazos finos
+    Hh, Ww = alpha.shape
+    ys, xs = np.where(alpha > 0.5)
+    ex0 = xs[xs < cut].min(); ex1 = xs[xs < cut].max()
+    t = np.clip((np.arange(Ww) - ex0) / (ex1 - ex0), 0, 1)[None, :, None]
+    rgb = g0 + (g1 - g0) * t
+    rgb = np.broadcast_to(rgb, (Hh, Ww, 3)).copy()
+    rgb[:, cut:] = (0xF2, 0xF6, 0xF4)  # texto blanco roto
+    out = Image.fromarray(np.dstack([rgb, alpha[..., None] * 255]).clip(0, 255).astype(np.uint8), "RGBA")
+    out = out.crop(out.getbbox())
+    pad = 40
+    canvas = Image.new("RGBA", (out.width + 2 * pad, out.height + 2 * pad), (0, 0, 0, 0))
+    canvas.alpha_composite(out, (pad, pad))
+    canvas.save(OUT / "aurora-logo-horizontal.png")
+    for h in (96, 48):
+        s_ = h / canvas.height
+        r = canvas.resize((round(canvas.width * s_), h), Image.LANCZOS)
+        r.save(OUT / f"aurora-logo-horizontal-h{h}.png")
+        save_bmp32(r, OUT / f"aurora-logo-horizontal-h{h}.bmp")
+    print("lockup", canvas.size)
