@@ -15,10 +15,10 @@
 // ============================================================================
 
 // --- Acento único ---
-#define AURORA_ACCENT 0xFF2DD4A0 /* verde aurora (docs/Diseno_Identidad_Grafica.md) */
-#define AURORA_ACCENT_HOVER 0xFF5BE3B8
-#define AURORA_ACCENT_DIM 0x552DD4A0
-#define AURORA_ACCENT_TEXT 0xFF06241A /* texto sobre el acento */
+#define AURORA_ACCENT 0xFF54DA75 /* verde aurora (docs/Diseno_Identidad_Grafica.md) */
+#define AURORA_ACCENT_HOVER 0xFF7BE594
+#define AURORA_ACCENT_DIM 0x5554DA75
+#define AURORA_ACCENT_TEXT 0xFF08260F /* texto sobre el acento */
 
 // --- Escala de grises ---
 #define AURORA_BLACK 0xFF0A0A0A
@@ -51,16 +51,16 @@
 #define AURORA_TITLEBAR_HAIRLINE 0x66000000 /* separación barra/contenido */
 
 // --- Semáforos (izquierda de la barra de título) ---
-#define AURORA_TL_CLOSE 0xFFFF5F57
-#define AURORA_TL_MINIMIZE 0xFFFEBC2E
-#define AURORA_TL_MAXIMIZE 0xFF28C840
+#define AURORA_TL_CLOSE 0xFFFF5C8A
+#define AURORA_TL_MINIMIZE 0xFFFFB547
+#define AURORA_TL_MAXIMIZE 0xFF3CC8E0
 #define AURORA_TL_INACTIVE 0xFF4A4A4D
 #define AURORA_TL_RIM 0x33000000   /* borde fino oscuro */
 /* Glifos (×, −, flechas de zoom) al pasar el ratón: tono oscuro de cada
  * botón, como en macOS, en vez de un negro genérico. */
-#define AURORA_TL_GLYPH_CLOSE 0xE0640806
-#define AURORA_TL_GLYPH_MINIMIZE 0xE0804C00
-#define AURORA_TL_GLYPH_MAXIMIZE 0xE0065012
+#define AURORA_TL_GLYPH_CLOSE 0xE0640A24
+#define AURORA_TL_GLYPH_MINIMIZE 0xE0804400
+#define AURORA_TL_GLYPH_MAXIMIZE 0xE0064C5A
 #define AURORA_TL_PRESSED 0x40000000 /* oscurecido mientras se pulsa */
 
 // --- Texto ---
