@@ -252,7 +252,10 @@ static void lkpi_pci_read_bars(struct pci_dev *pdev)
 			continue;
 		}
 		r->start = v & PCI_BASE_ADDRESS_MEM_MASK;
-		r->flags = IORESOURCE_MEM;
+		/* Como decode_bar() de Linux: los bits bajos del BAR (tipo 64 bit,
+		 * prefetch) se conservan; el driver de NVIDIA los compara con
+		 * PCI_BASE_ADDRESS_MEM_TYPE_64/PREFETCH. */
+		r->flags = IORESOURCE_MEM | (v & ~PCI_BASE_ADDRESS_MEM_MASK & 0xf);
 		if (v & PCI_BASE_ADDRESS_MEM_PREFETCH)
 			r->flags |= IORESOURCE_PREFETCH;
 		if ((v & PCI_BASE_ADDRESS_MEM_TYPE_MASK) == PCI_BASE_ADDRESS_MEM_TYPE_64 && i < 5) {
@@ -301,7 +304,7 @@ static void lkpi_pci_size_bars(struct pci_dev *pdev)
 			continue;
 		}
 		base = orig & PCI_BASE_ADDRESS_MEM_MASK;
-		r->flags = IORESOURCE_MEM | IORESOURCE_SIZEALIGN;
+		r->flags = IORESOURCE_MEM | IORESOURCE_SIZEALIGN | (orig & ~PCI_BASE_ADDRESS_MEM_MASK & 0xf);
 		if (orig & PCI_BASE_ADDRESS_MEM_PREFETCH)
 			r->flags |= IORESOURCE_PREFETCH;
 		if ((orig & PCI_BASE_ADDRESS_MEM_TYPE_MASK) == PCI_BASE_ADDRESS_MEM_TYPE_64 &&
