@@ -9,7 +9,7 @@
  * bloqueante, que en i915 espera al vblank real (page-flip), y se intercambian.
  * Si algo falla antes del primer commit, el compositor sigue en el GOP.
  *
- * Politica (`lkpi.kms=`): auto (por defecto) solo para i915; 1 para cualquier
+ * Politica (`lkpi.kms=`): auto (por defecto) para i915 y nvidia-drm; 1 para cualquier
  * driver (QEMU: bochs, virtio-gpu); 0 desactiva. `lkpi.kms_flush=1|0` fuerza o
  * quita el clflush de lo escrito (por defecto solo i915: el mapeo es WB y el
  * barrido de pantalla de Haswell no es coherente con la cache de la CPU).
@@ -320,7 +320,7 @@ void lkpi_kms_client_setup(struct drm_device *dev)
 
 	if (K.inuse || !drm_core_check_feature(dev, DRIVER_MODESET))
 		return;
-	want = !strcmp(dev->driver->name, "i915");
+	want = !strcmp(dev->driver->name, "i915") || !strcmp(dev->driver->name, "nvidia-drm");
 	if (lkpi_cmdline_get("lkpi.kms", opt, sizeof(opt)))
 		want = opt[0] == '1' || (opt[0] != '0' && want);
 	if (!want)
