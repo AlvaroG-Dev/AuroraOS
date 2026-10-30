@@ -51,15 +51,15 @@
 #define AURORA_TITLEBAR_HAIRLINE 0x66000000 /* separación barra/contenido */
 
 // --- Semáforos (izquierda de la barra de título) ---
-#define AURORA_TL_CLOSE 0xFFFF5C8A
-#define AURORA_TL_MINIMIZE 0xFFFFB547
+#define AURORA_TL_CLOSE 0xFFFF6A3D
+#define AURORA_TL_MINIMIZE 0xFFFFD23F
 #define AURORA_TL_MAXIMIZE 0xFF3CC8E0
 #define AURORA_TL_INACTIVE 0xFF4A4A4D
 #define AURORA_TL_RIM 0x33000000   /* borde fino oscuro */
 /* Glifos (×, −, flechas de zoom) al pasar el ratón: tono oscuro de cada
  * botón, como en macOS, en vez de un negro genérico. */
-#define AURORA_TL_GLYPH_CLOSE 0xE0640A24
-#define AURORA_TL_GLYPH_MINIMIZE 0xE0804400
+#define AURORA_TL_GLYPH_CLOSE 0xE06B2410
+#define AURORA_TL_GLYPH_MINIMIZE 0xE0805A00
 #define AURORA_TL_GLYPH_MAXIMIZE 0xE0064C5A
 #define AURORA_TL_PRESSED 0x40000000 /* oscurecido mientras se pulsa */
 

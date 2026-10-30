@@ -1,6 +1,6 @@
 # AuroraOS — Identidad gráfica (v2, decisiones de Alvaro aplicadas)
 
-**Decidido:** verde intermedio entre A y C = `#54DA75` (hover `#7BE594`, texto sobre acento `#08260F`); semáforos conservados pero con colores propios: cerrar rosa `#FF5C8A`, minimizar ámbar `#FFB547`, maximizar turquesa `#3CC8E0`; habrá modo claro (pendiente de diseñar). Lo que sigue es el razonamiento original; donde un valor difiera, manda esta línea.
+**Decidido:** verde intermedio entre A y C = `#54DA75` (hover `#7BE594`, texto sobre acento `#08260F`); semáforos conservados pero con colores propios: cerrar naranja-rojo `#FF6A3D`, minimizar amarillo `#FFD23F`, maximizar turquesa `#3CC8E0`; habrá modo claro (pendiente de diseñar). Lo que sigue es el razonamiento original; donde un valor difiera, manda esta línea.
 
 Sin degradados como seña de identidad: **un color sólido de marca** sobre la base de
 grises neutros que ya existe (`kernel/gfx/theme.h`). Hoy el acento es `#0A84FF`, el azul
