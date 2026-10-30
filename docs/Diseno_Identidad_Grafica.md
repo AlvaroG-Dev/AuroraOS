@@ -69,7 +69,7 @@ dentro de la gama teal–azul–violeta para que el Dock quede armónico.
 1 px con `AURORA_RIBBON` bajo la barra de título solo en la ventana con foco.
 
 **Dock y barra de menús.** Cristal actual. El punto de app abierta pasa a ser un
-degradado corto de la cinta; el logo ocupa el primer menú (`` equivalente) con su
+degradado corto de la cinta; el logo ocupa el primer menú con su
 versión de una cinta.
 
 **Terminal.** Fondo `#0E121C` (azul-negro de marca, ligeramente translúcido), texto
