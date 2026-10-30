@@ -19,6 +19,12 @@
 #define AURORA_ACCENT_HOVER 0xFF409CFF
 #define AURORA_ACCENT_DIM 0x550A84FF
 
+// --- Marca: "cinta de aurora" (docs/Diseno_Identidad_Grafica.md) ---
+// Solo para momentos de marca (logo, splash, foco, Dock); la UI usa AURORA_ACCENT.
+#define AURORA_BRAND_TEAL 0xFF3DF2C4
+#define AURORA_BRAND_BLUE AURORA_ACCENT
+#define AURORA_BRAND_VIOLET 0xFF8E5CF6
+
 // --- Escala de grises ---
 #define AURORA_BLACK 0xFF0A0A0A
 #define AURORA_GRAY_950 0xFF141414
