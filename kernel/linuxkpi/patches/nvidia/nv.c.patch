@@ -1,0 +1,50 @@
+--- nv.c	2026-10-29 13:23:35.557793588 +0000
++++ nv.c	2026-10-30 16:07:14.378807929 +0000
+@@ -910,6 +910,39 @@
+     }
+ }
+ 
++/*
++ * Aurora (N2): GPU "de mentira" para ejercitar rm_is_supported_device sin hardware.
++ * Con la opcion de arranque nvidia.fake=1 se prepara una pagina con PMC_BOOT_0 y
++ * PMC_BOOT_42 de una AD107 y se llama a RM como lo haria el probe.
++ */
++extern int cmdline_get(const char *key, char *out, size_t outlen);
++extern void klog_printf(int level, const char *fmt, ...);
++static void nv_aurora_fake_gpu(nvidia_stack_t *sp)
++{
++    char opt[8];
++    nv_state_t *nv;
++    nv_aperture_t *ap;
++    volatile NvU32 *regs;
++    NV_STATUS st;
++
++    if (!cmdline_get("nvidia.fake", opt, sizeof(opt)) || opt[0] != '1')
++        return;
++    nv = kzalloc(sizeof(*nv), GFP_KERNEL);
++    ap = kzalloc(sizeof(*ap), GFP_KERNEL);
++    regs = (volatile NvU32 *)get_zeroed_page(GFP_KERNEL);
++    if (!nv || !ap || !regs)
++        return;
++    regs[0] = 0x197000a1;          /* NV_PMC_BOOT_0  */
++    regs[0xa00 / 4] = 0x197a1000;  /* NV_PMC_BOOT_42 */
++    ap->cpu_address = virt_to_phys((void *)regs);
++    ap->size = PAGE_SIZE;
++    nv->regs = ap;
++    nv->pci_info.vendor_id = 0x10de;
++    nv->pci_info.device_id = 0x2882;
++    st = rm_is_supported_device(sp, nv);
++    klog_printf(3, "[nvidia] fake AD107: rm_is_supported_device -> 0x%x", st);
++}
++
+ static int __init nvidia_init_module(void)
+ {
+     int rc;
+@@ -962,6 +995,7 @@
+         goto caps_imex_exit;
+     }
+ 
++    nv_aurora_fake_gpu(sp);
+     count = nvos_count_devices(&num_pci_devices, &num_platform_devices);
+     if ((count == 0) && (!is_nvswitch_present))
+     {

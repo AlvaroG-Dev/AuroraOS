@@ -604,8 +604,15 @@ void lkpi_display_shadow_probe(void)
 	if (!aurora_gpup_get_framebuffer(&fbp, &fbs))
 		goto out;
 	while ((p = lkpi_pci_get_next(lkpi_match_display, NULL, p)) != NULL) {
+		bool only_fb = fb_only;
+
 		if (!lkpi_bar_has(p, fbp))
 			continue;
+		/* GPUs reales (Intel, NVIDIA): los registros (BAR0) son de verdad; solo el
+		 * BAR del framebuffer va en sombra. Con sombra en BAR0 RM de NVIDIA lee
+		 * PMC_BOOT_0/42 = 0 y rechaza la GPU. */
+		if (p->vendor == 0x8086 || p->vendor == 0x10de)
+			only_fb = true;
 		for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
 			struct resource *r = &p->resource[i];
 			u64 len = r->end - r->start + 1, start = r->start;
@@ -613,7 +620,7 @@ void lkpi_display_shadow_probe(void)
 
 			if (!(r->flags & IORESOURCE_MEM) || r->end <= r->start)
 				continue;
-			if (fb_only && !has_fb)
+			if (only_fb && !has_fb)
 				continue;
 			/* lkpi_vmalloc() no pasa de 64 MiB - 4 KiB (limite del heap): la
 			 * sombra de un BAR grande cubre solo el framebuffer del firmware. */
@@ -630,7 +637,7 @@ void lkpi_display_shadow_probe(void)
 		}
 		lkpi_vga_set_default_device(p);
 		pr_info("linuxkpi: %s aloja el framebuffer del firmware: %s en sombra\n",
-			pci_name(p), fb_only ? "su BAR del framebuffer" : "sus BAR");
+			pci_name(p), only_fb ? "su BAR del framebuffer" : "sus BAR");
 		pci_dev_put(p);
 		break;
 	}
