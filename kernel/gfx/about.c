@@ -1,5 +1,6 @@
 // kernel/gfx/about.c
 #include "about.h"
+#include "brand.h"
 #include "../cpu.h"
 #include "../smp_boot.h"
 #include "../string.h"
@@ -19,44 +20,6 @@ static inline uint32_t lerp_rgb(uint32_t a, uint32_t b, int t /*0..256*/) {
   uint32_t g = (((a >> 8) & 0xFF) * (256 - t) + ((b >> 8) & 0xFF) * t) >> 8;
   uint32_t bl = ((a & 0xFF) * (256 - t) + (b & 0xFF) * t) >> 8;
   return 0xFF000000 | (r << 16) | (g << 8) | bl;
-}
-
-/* Logo: esfera con degradado cian -> azul -> índigo, brillo superior y tres
- * cintas de luz (la "aurora"). */
-static void draw_logo(uint32_t *buf, int stride, rect_t clip, float cx,
-                      float cy, float r) {
-  int y0 = (int)(cy - r) - 1, y1 = (int)(cy + r) + 2;
-  for (int y = y0; y < y1; y++) {
-    int t = (int)(((float)y - (cy - r)) / (2.0f * r) * 512.0f);
-    t = t < 0 ? 0 : (t > 512 ? 512 : t);
-    uint32_t c = t < 256 ? lerp_rgb(0xFF64D2FF, 0xFF0A84FF, t)
-                         : lerp_rgb(0xFF0A84FF, 0xFF5E5CE6, t - 256);
-    rect_t row = rect_clip(clip, (rect_t){clip.x, y, clip.w, 1});
-    if (row.w > 0)
-      gfx_fill_circle(buf, stride, row, cx, cy, r, c);
-  }
-  gfx_fill_circle(buf, stride, clip, cx, cy - r * 0.34f, r * 0.64f,
-                  0x1EFFFFFF);
-
-  /* Cintas: misma curva desplazada, cada una más fina y tenue. */
-  static const float k_pts[5][2] = {
-      {-0.62f, 0.26f}, {-0.30f, -0.02f}, {0.02f, 0.12f},
-      {0.32f, -0.06f}, {0.60f, -0.30f}};
-  static const struct {
-    float dy, hw;
-    uint32_t col;
-  } k_ribbon[3] = {{0.0f, 2.6f, 0xD8FFFFFF},
-                   {0.18f, 1.7f, 0x90FFFFFF},
-                   {0.33f, 1.1f, 0x58FFFFFF}};
-  for (int k = 0; k < 3; k++) {
-    for (int i = 0; i < 4; i++) {
-      gfx_draw_capsule(
-          buf, stride, clip, cx + k_pts[i][0] * r,
-          cy + (k_pts[i][1] + k_ribbon[k].dy) * r, cx + k_pts[i + 1][0] * r,
-          cy + (k_pts[i + 1][1] + k_ribbon[k].dy) * r, k_ribbon[k].hw,
-          k_ribbon[k].col);
-    }
-  }
 }
 
 /* Texto ampliado `scale256`/256 veces (la fuente del sistema es de 14 px). */
@@ -162,7 +125,7 @@ void about_paint(window_t *win) {
   for (int i = 0; i < W * H; i++)
     buf[i] = AURORA_WIN_BG;
 
-  draw_logo(buf, W, clip, (float)cx, 84.0f, 54.0f);
+  brand_draw_emblem(buf, W, clip, cx, 84, 84);
   draw_big_text(buf, W, clip, cx, 154, "AuroraOS", AURORA_TEXT_PRIMARY, 448);
   draw_centered(buf, W, clip, cx, 196, 20, "Sistema operativo de 64 bits",
                 AURORA_TEXT_TERTIARY, FONT_ID_MAIN_REGULAR);

@@ -1,5 +1,6 @@
 // kernel/gfx/menubar.c
 #include "menubar.h"
+#include "brand.h"
 #include "../heap.h"
 #include "font_manager.h"
 #include "taskbar.h"
@@ -404,14 +405,8 @@ void menubar_render(uint32_t *dst, int stride, rect_t clip) {
         AURORA_MENUBAR_PILL);
   }
 
-  /* Orbe de Aurora. */
-  int oy = (MENUBAR_H - ORB_D) / 2;
-  rect_t orb = {ORB_X, oy, ORB_D, ORB_D};
-  gfx_fill_rounded_rect(dst, stride, clip, orb, ORB_D / 2, AURORA_ACCENT);
-  gfx_fill_rounded_rect(dst, stride, clip,
-                        (rect_t){orb.x + 2, orb.y + 1, orb.w - 4, orb.h / 2},
-                        (orb.h - 4) / 2, 0x70FFFFFF & 0x70FFFFFF);
-  gfx_draw_rounded_border(dst, stride, clip, orb, ORB_D / 2, 0x40FFFFFF);
+  /* Emblema de Aurora. */
+  brand_draw_emblem(dst, stride, clip, ORB_X + ORB_D / 2, MENUBAR_H / 2, ORB_D + 2);
 
   /* Títulos. */
   for (int m = 1; m < NMENUS; m++) {

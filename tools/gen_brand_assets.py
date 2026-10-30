@@ -134,3 +134,23 @@ if LSRC.exists():
         r.save(OUT / f"aurora-logo-horizontal-h{h}.png")
         save_bmp32(r, OUT / f"aurora-logo-horizontal-h{h}.bmp")
     print("lockup", canvas.size)
+
+# ---------------------------------------------------------------------------
+# Datos embebidos para el kernel: kernel/gfx/brand_emblem_data.h (ARGB recto)
+# ---------------------------------------------------------------------------
+KW = 192
+bb = emb.crop(emb.getbbox())
+kh = round(bb.height * KW / bb.width)
+k = bb.resize((KW, kh), Image.LANCZOS)
+arr = np.asarray(k).astype(np.uint32)
+argb = (arr[..., 3] << 24) | (arr[..., 0] << 16) | (arr[..., 1] << 8) | arr[..., 2]
+with open(ROOT / "kernel/gfx/brand_emblem_data.h", "w") as f:
+    f.write("/* kernel/gfx/brand_emblem_data.h - generado por tools/gen_brand_assets.py (no editar) */\n")
+    f.write("#pragma once\n#include <stdint.h>\n\n")
+    f.write(f"#define BRAND_EMBLEM_W {KW}\n#define BRAND_EMBLEM_H {kh}\n\n")
+    f.write("static const uint32_t brand_emblem_argb[BRAND_EMBLEM_W * BRAND_EMBLEM_H] = {\n")
+    flat = argb.flatten()
+    for i in range(0, len(flat), 8):
+        f.write("    " + ", ".join(f"0x{v:08X}" for v in flat[i:i + 8]) + ",\n")
+    f.write("};\n")
+print("kernel data", KW, kh)
