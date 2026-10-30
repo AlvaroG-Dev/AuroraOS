@@ -11,17 +11,26 @@
 
 static inline void pm_runtime_enable(struct device *dev) { dev->power.disable_depth = 0; }
 static inline void pm_runtime_disable(struct device *dev) { dev->power.disable_depth = 1; }
-static inline int pm_runtime_get_sync(struct device *dev) { dev->power.usage_count++; return 1; }
-static inline int pm_runtime_resume_and_get(struct device *dev) { dev->power.usage_count++; return 0; }
-static inline int pm_runtime_get(struct device *dev) { dev->power.usage_count++; return 1; }
-static inline void pm_runtime_get_noresume(struct device *dev) { dev->power.usage_count++; }
-static inline int pm_runtime_get_if_in_use(struct device *dev) { return -EINVAL; }
-static inline int pm_runtime_get_if_active(struct device *dev) { return -EINVAL; }
-static inline int pm_runtime_put(struct device *dev) { dev->power.usage_count--; return 0; }
-static inline int pm_runtime_put_sync(struct device *dev) { dev->power.usage_count--; return 0; }
-static inline int pm_runtime_put_autosuspend(struct device *dev) { dev->power.usage_count--; return 0; }
-static inline void pm_runtime_put_noidle(struct device *dev) { dev->power.usage_count--; }
-static inline int pm_runtime_put_sync_autosuspend(struct device *dev) { dev->power.usage_count--; return 0; }
+static inline int pm_runtime_get_sync(struct device *dev) { atomic_inc(&dev->power.usage_count); return 1; }
+static inline int pm_runtime_resume_and_get(struct device *dev) { atomic_inc(&dev->power.usage_count); return 0; }
+static inline int pm_runtime_get(struct device *dev) { atomic_inc(&dev->power.usage_count); return 1; }
+static inline void pm_runtime_get_noresume(struct device *dev) { atomic_inc(&dev->power.usage_count); }
+/* Dispositivo siempre activo: "en uso" si alguien ya tiene referencia. Con -EINVAL
+ * (como un kernel sin PM) i915 cree apagados todos los dominios de energia y
+ * su lectura del hardware da pipes y planos "disabled" (pantalla en negro). */
+static inline int pm_runtime_get_if_in_use(struct device *dev)
+{
+	if (atomic_read(&dev->power.usage_count) <= 0)
+		return 0;
+	atomic_inc(&dev->power.usage_count);
+	return 1;
+}
+static inline int pm_runtime_get_if_active(struct device *dev) { atomic_inc(&dev->power.usage_count); return 1; }
+static inline int pm_runtime_put(struct device *dev) { atomic_dec(&dev->power.usage_count); return 0; }
+static inline int pm_runtime_put_sync(struct device *dev) { atomic_dec(&dev->power.usage_count); return 0; }
+static inline int pm_runtime_put_autosuspend(struct device *dev) { atomic_dec(&dev->power.usage_count); return 0; }
+static inline void pm_runtime_put_noidle(struct device *dev) { atomic_dec(&dev->power.usage_count); }
+static inline int pm_runtime_put_sync_autosuspend(struct device *dev) { atomic_dec(&dev->power.usage_count); return 0; }
 static inline void pm_runtime_mark_last_busy(struct device *dev) { }
 static inline void pm_runtime_use_autosuspend(struct device *dev) { }
 static inline void pm_runtime_dont_use_autosuspend(struct device *dev) { }

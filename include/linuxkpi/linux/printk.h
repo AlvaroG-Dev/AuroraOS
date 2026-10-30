@@ -6,6 +6,7 @@
 #ifndef _LKPI_LINUX_PRINTK_H
 #define _LKPI_LINUX_PRINTK_H
 
+#include <linux/instruction_pointer.h>
 #include <linux/compiler.h>
 #include <linux/kern_levels.h>
 #include <linux/stdarg.h>
@@ -87,4 +88,8 @@ void lkpi_print_hex_dump(const char *level, const char *prefix_str,
 #define print_hex_dump_debug(prefix, type, rs, gs, buf, len, ascii) \
 	do { } while (0)
 
+
+int lkpi_hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize, char *linebuf,
+			    size_t linebuflen, bool ascii);
+#define hex_dump_to_buffer lkpi_hex_dump_to_buffer
 #endif

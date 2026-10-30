@@ -15,6 +15,12 @@ void gpup_init(void);
 void gpup_set_framebuffer(uint64_t phys, uint64_t size, uint32_t w, uint32_t h,
                           uint32_t pitch, uint32_t bpp);
 
+// Dónde está el framebuffer del firmware (0 si no hay): la capa LinuxKPI lo usa
+// para no dejar que un driver de Linux pise la pantalla del compositor.
+int gpup_get_framebuffer(uint64_t *phys, uint64_t *size);
+// Su modo: ancho, alto, bytes por fila y bits por pixel.
+int gpup_get_fb_mode(uint32_t *w, uint32_t *h, uint32_t *pitch, uint32_t *bpp);
+
 // El compositor ha volcado el rectangulo (x, y, w, h) al framebuffer. Si hay un
 // driver GPU registrado con AUR_GPU_NEEDS_PRESENT se acumula; si no, no hace
 // nada. Seguro desde cualquier contexto (no bloquea).

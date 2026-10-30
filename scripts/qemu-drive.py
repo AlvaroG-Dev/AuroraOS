@@ -17,6 +17,7 @@ ap.add_argument('--log', default='/tmp/boot-test.log')
 ap.add_argument('--boot-test', action='append', default=[])
 ap.add_argument('--step', action='append', default=[])
 ap.add_argument('--done', default='DRIVE-DONE')
+ap.add_argument('--cmdline', default='', help='linea del kernel (cmdline= de aurora.conf), p. ej. "aur.skip=1234:1111 lkpi.load=linuxkpi,lkpi_drm"')
 ap.add_argument('--qemu', action='append', default=[], help='argumento extra para QEMU (repetible)')
 ap.add_argument('--extra', action='append', default=[], help='argumento extra para QEMU (repetible), p. ej. --extra=-vga --extra=none')
 a = ap.parse_args()
@@ -26,7 +27,18 @@ os.chdir(root)
 bt = os.path.join('sysroot', 'system', 'boot-tests')
 if a.boot_test:
     open(bt, 'w').write('\n'.join(a.boot_test) + '\n')
-r = subprocess.run(['make', 'iso', 'MUSL_CC=/usr/bin/musl-gcc', 'KUR_CC=gcc'],
+# aurora.conf con la linea del kernel pedida (solo se reescribe si cambia, para
+# que make rehaga la imagen del ESP cuando toca y no en vano).
+conf = open('bootloader/aurora.conf').read().splitlines()
+conf = [l for l in conf if not l.strip().startswith('cmdline=')]
+if a.cmdline:
+    conf.append('cmdline=' + a.cmdline)
+conf = '\n'.join(conf) + '\n'
+os.makedirs('build', exist_ok=True)
+cf = 'build/drive-aurora.conf'
+if not os.path.exists(cf) or open(cf).read() != conf:
+    open(cf, 'w').write(conf)
+r = subprocess.run(['make', 'iso', 'MUSL_CC=/usr/bin/musl-gcc', 'KUR_CC=gcc', 'AURORA_CONF=' + cf],
                    stdout=open('/tmp/drive-build.log', 'w'), stderr=subprocess.STDOUT)
 if os.path.exists(bt):
     os.remove(bt)

@@ -3,6 +3,7 @@
 
 #include "../bootloader/include/kernel_boot_info.h"
 #include "cmdline.h"
+#include "plog.h"
 #include "display_edid.h"
 #include "acpi.h"
 #include "acpi_aml.h"
@@ -13,6 +14,7 @@
 #include "ata_dma.h"
 #include "atapi.h"
 #include "aur_bus.h"
+#include "lkpi_boot.h"
 #include "block.h"
 #include "block_proxy.h"
 #include "gpu_proxy.h"
@@ -594,10 +596,49 @@ static void tests_thread(void) {
 // ===========================================================================
 static int g_data_mounted, g_cdrom_mounted;
 
+// Guarda el log del arranque anterior (RAM persistente) en /data/last_kmsg.log
+// para poder leerlo desde otro PC sacando el pendrive. Mejor esfuerzo.
+static void save_prev_log_to_data(void) {
+  size_t len = plog_prev_len();
+  if (!len)
+    return;
+  char *buf = kmalloc(len + 1);
+  if (!buf)
+    return;
+  size_t n = plog_prev_read(buf, len);
+  const char *path = "/data/last_kmsg.log";
+  vfs_unlink(path);
+  if (vfs_create(path, 0644) == 0) {
+    vfs_node_t *node = vfs_lookup(path);
+    if (node) {
+      if (node->ops && node->ops->write)
+        node->ops->write(node, 0, n, buf);
+      if (node->ops && node->ops->fsync)
+        node->ops->fsync(node); // el sync diferido de FAT32 no llega a tiempo
+      vfs_node_free(node);
+      LOG_INFO("[INIT] log del arranque anterior (%lu bytes) -> %s",
+               (unsigned long)n, path);
+    }
+  } else {
+    LOG_WARN("[INIT] no se pudo crear %s", path);
+  }
+  kfree(buf);
+}
+
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
+      continue;
+    if (fat32_mount_bdev(b->name, "/data") == 0) {
+      LOG_INFO("[INIT] Montado %s en /data", b->name);
+      g_data_mounted = 1;
+    }
+  }
+  // Particiones FAT32 (p. ej. la de datos AURORADATA al final del USB).
+  for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b || !b->is_partition || b->is_read_only)
       continue;
     if (fat32_mount_bdev(b->name, "/data") == 0) {
       LOG_INFO("[INIT] Montado %s en /data", b->name);
@@ -613,6 +654,93 @@ static void mount_boot_media(void) {
       g_cdrom_mounted = 1;
     }
   }
+  static int prev_log_saved;
+  if (g_data_mounted && !prev_log_saved) {
+    prev_log_saved = 1;
+    save_prev_log_to_data();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Log en vivo a fichero (cmdline klog.file=/data/aurora.log): vuelca los bytes
+// nuevos del log cada ~100 ms con fsync, para que si el kernel se cuelga
+// (p. ej. al arrancar i915) el fichero tenga todo hasta casi ese instante.
+// Si el cuelgue es total (IRQs cortadas), queda el log en RAM persistente
+// (/proc/last_kmsg, prev.log, last_kmsg.log en el siguiente arranque).
+// ---------------------------------------------------------------------------
+static char g_klog_file_path[128];
+
+static void klog_file_sleep(uint64_t ms) {
+  static completion_t never;
+  static int init;
+  if (!init) {
+    completion_init(&never);
+    init = 1;
+  }
+  wait_for_completion_timeout(&never, ms);
+}
+
+static int klog_file_task(void *arg) {
+  (void)arg;
+  // Esperar a /data: el USB puede enumerarse tarde. Solo se reintenta el
+  // escaneo/montaje cuando aparece un block device nuevo (si no, cada
+  // reintento repite los mismos avisos de [PART]/[FAT32] y tapa la pantalla).
+  int last_blk = blk_count();
+  if (!g_data_mounted)
+    LOG_INFO("[KLOG] esperando a /data (%d block devices)...", last_blk);
+  for (int i = 0; i < 120 && !g_data_mounted; i++) {
+    klog_file_sleep(1000);
+    int n = blk_count();
+    if (n == last_blk)
+      continue;
+    last_blk = n;
+    LOG_INFO("[KLOG] nuevo block device (%d en total): reintento de /data", n);
+    part_scan_all();
+    mount_boot_media();
+  }
+  if (!g_data_mounted) {
+    LOG_WARN("[KLOG] sin /data montado tras 120 s (%d block devices): no se "
+             "escribe %s", last_blk, g_klog_file_path);
+    return 0;
+  }
+  vfs_unlink(g_klog_file_path);
+  if (vfs_create(g_klog_file_path, 0644) != 0) {
+    LOG_WARN("[KLOG] no se pudo crear %s", g_klog_file_path);
+    return 0;
+  }
+  LOG_INFO("[KLOG] log en vivo -> %s", g_klog_file_path);
+  uint64_t pos = 0, off = 0;
+  static char chunk[4096];
+  for (;;) {
+    size_t n;
+    int wrote = 0;
+    while ((n = plog_cur_read(&pos, chunk, sizeof(chunk))) > 0) {
+      vfs_node_t *node = vfs_lookup(g_klog_file_path);
+      if (!node)
+        break;
+      if (node->ops && node->ops->write)
+        node->ops->write(node, off, n, chunk);
+      off += n;
+      wrote = 1;
+      if (n < sizeof(chunk) && node->ops && node->ops->fsync)
+        node->ops->fsync(node);
+      vfs_node_free(node);
+    }
+    (void)wrote;
+    klog_file_sleep(100);
+  }
+  return 0;
+}
+
+static void klog_file_start(void) {
+  if (!cmdline_get("klog.file", g_klog_file_path, sizeof(g_klog_file_path)) ||
+      g_klog_file_path[0] != '/')
+    return;
+  if (plog_ensure_buffer() != 0) {
+    LOG_WARN("[KLOG] sin memoria para el buffer de log");
+    return;
+  }
+  kthread_run(klog_file_task, NULL, "klog-file");
 }
 
 // Si los drivers legacy tardan mas que la espera de system_init_task (la
@@ -719,6 +847,7 @@ static void system_init_task(void) {
   mount_boot_media();
   if (!drivers_ok)
     kthread_run(late_mount_task, NULL, "late-mount");
+  klog_file_start();
 
   // 10. Reveal de splash + compositor.
   // Sin framebuffer del firmware (GOP solo-Blt: virtio-gpu sin VGA...) se
@@ -747,6 +876,10 @@ static void system_init_task(void) {
     sched_create_task(compositor_thread);
     LOG_INFO("[KERNEL] Compositor inicializado");
   }
+
+  // Drivers de Linux (LinuxKPI) pedidos con `lkpi.load=`: despues del
+  // compositor, porque su scanout abre ventanas, y antes del userland.
+  lkpi_boot_load();
 
   // 11. Tests en kthread paralelo. No bloquea: /usr/bin/init arranca
   // inmediatamente y los tests se ejecutan en background. El kthread
@@ -868,6 +1001,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
   paging_init((uint64_t *)cr3, max_phys_addr);
+  plog_attach(boot.plog_base, boot.plog_size);
 
   {
     uint64_t *pml4 = paging_get_pml4();

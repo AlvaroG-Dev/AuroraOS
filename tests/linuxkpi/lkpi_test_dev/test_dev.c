@@ -20,6 +20,8 @@
 #include <linux/crc32.h>
 #include <linux/debugfs.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-fence.h>
+#include <linux/dma-resv.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
 #include <linux/fs.h>
@@ -277,6 +279,75 @@ static int lt_dmabuf_export(struct lkpi_test_dmabuf *a)
 	return 0;
 }
 
+/* K7: un fence pendiente en el dma_resv del dma_buf exportado (fence implicito) */
+struct lt_fence {
+	struct dma_fence base;
+	spinlock_t lock;
+};
+
+static struct lt_fence *lt_fence_cur;
+static DEFINE_MUTEX(lt_fence_lock);
+
+static const char *lt_fence_name(struct dma_fence *f)
+{
+	return "lkpi_test";
+}
+
+static const struct dma_fence_ops lt_fence_ops = {
+	.get_driver_name = lt_fence_name,
+	.get_timeline_name = lt_fence_name,
+};
+
+static int lt_fence_op(const struct lkpi_test_fence *a)
+{
+	struct dma_buf *db;
+	struct lt_fence *lf;
+	int rc = 0;
+
+	mutex_lock(&lt_fence_lock);
+	if (a->op == LKPI_FENCE_SIGNAL) {
+		lf = lt_fence_cur;
+		if (!lf) {
+			rc = -ENOENT;
+		} else {
+			lt_fence_cur = NULL;
+			dma_fence_signal(&lf->base);
+			dma_fence_put(&lf->base);
+		}
+		goto out;
+	}
+	if (a->op != LKPI_FENCE_ATTACH || lt_fence_cur) {
+		rc = -EINVAL;
+		goto out;
+	}
+	db = dma_buf_get(a->fd);
+	if (IS_ERR(db)) {
+		rc = PTR_ERR(db);
+		goto out;
+	}
+	lf = kzalloc(sizeof(*lf), GFP_KERNEL);
+	if (!lf) {
+		dma_buf_put(db);
+		rc = -ENOMEM;
+		goto out;
+	}
+	spin_lock_init(&lf->lock);
+	dma_fence_init(&lf->base, &lt_fence_ops, &lf->lock, dma_fence_context_alloc(1), 1);
+	dma_resv_lock(db->resv, NULL);
+	rc = dma_resv_reserve_fences(db->resv, 1);
+	if (!rc) {
+		dma_resv_add_fence(db->resv, &lf->base, DMA_RESV_USAGE_WRITE);
+		lt_fence_cur = lf;	/* la referencia propia se suelta al senalar */
+	}
+	dma_resv_unlock(db->resv);
+	if (rc)
+		dma_fence_put(&lf->base);
+	dma_buf_put(db);
+out:
+	mutex_unlock(&lt_fence_lock);
+	return rc;
+}
+
 static int lt_dmabuf_import(struct lkpi_test_dmabuf *a)
 {
 	struct dma_buf_attachment *att;
@@ -388,6 +459,13 @@ static long lt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (rc)
 			return rc;
 		return copy_to_user(uarg, &d, sizeof(d)) ? -EFAULT : 0;
+	}
+	case LKPI_IOC_FENCE: {
+		struct lkpi_test_fence fa;
+
+		if (copy_from_user(&fa, uarg, sizeof(fa)))
+			return -EFAULT;
+		return lt_fence_op(&fa);
 	}
 	case LKPI_IOC_ZAP:
 		unmap_mapping_range(file->f_mapping, 0, 0, 1);

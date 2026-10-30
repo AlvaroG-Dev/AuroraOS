@@ -42,4 +42,12 @@
 #define __no_sanitize_or_inline __always_inline
 #define __noinline_for_stack noinline
 
+#define noinline_for_stack noinline
+#define __diag_push()
+#define __diag_pop()
+#define __diag_ignore_all(option, comment)
+#ifndef is_signed_type
+#define is_signed_type(type)   (((type)(-1)) < (__force type)1)
+#define is_unsigned_type(type) (!is_signed_type(type))
+#endif
 #endif

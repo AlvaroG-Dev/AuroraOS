@@ -69,4 +69,53 @@ static inline int __must_check kstrtobool(const char *s, bool *res)
 
 /* Variantes desde memoria de usuario: L4 (K8). */
 
+
+#include <linux/uaccess.h>
+#include <linux/slab.h>
+static inline int kstrtoull_from_user(const char __user *s, size_t count, unsigned int base, unsigned long long *res)
+{
+	char buf[24];
+
+	count = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, s, count))
+		return -EFAULT;
+	buf[count] = '\0';
+	return kstrtoull(buf, base, res);
+}
+#define __KSTRTO_FROM_USER(name, type, wide, wfn) \
+static inline int name(const char __user *s, size_t count, unsigned int base, type *res) \
+{ \
+	wide tmp; \
+	int ret = wfn(s, count, base, &tmp); \
+	if (ret) \
+		return ret; \
+	if ((type)tmp != tmp) \
+		return -ERANGE; \
+	*res = tmp; \
+	return 0; \
+}
+static inline int kstrtoll_from_user(const char __user *s, size_t count, unsigned int base, long long *res)
+{
+	char buf[24];
+
+	count = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, s, count))
+		return -EFAULT;
+	buf[count] = '\0';
+	return kstrtoll(buf, base, res);
+}
+__KSTRTO_FROM_USER(kstrtouint_from_user, unsigned int, unsigned long long, kstrtoull_from_user)
+__KSTRTO_FROM_USER(kstrtoint_from_user, int, long long, kstrtoll_from_user)
+__KSTRTO_FROM_USER(kstrtoul_from_user, unsigned long, unsigned long long, kstrtoull_from_user)
+__KSTRTO_FROM_USER(kstrtol_from_user, long, long long, kstrtoll_from_user)
+static inline int kstrtobool_from_user(const char __user *s, size_t count, bool *res)
+{
+	char buf[16];
+
+	count = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, s, count))
+		return -EFAULT;
+	buf[count] = '\0';
+	return kstrtobool(buf, res);
+}
 #endif

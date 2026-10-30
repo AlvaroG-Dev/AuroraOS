@@ -4,6 +4,8 @@
 // mmap de memoria DMA y por fallo de pagina (fork, mprotect, zap), poll,
 // epoll, fasync (SIGIO), esperas interrumpidas por senales (EINTR y SIGKILL),
 // firmware real, dma_buf con /dev/dri/card0 en los dos sentidos y debugfs.
+// L6: buffers de ttm (/dev/lkpi_ttm, tests/linuxkpi/lkpi_test_ttm) mapeados
+// con ttm_bo_vm: VRAM -> GTT -> VRAM y evicion por presion con el mapa vivo.
 //
 // Carga linuxkpi.kur y lkpi_test_dev.kur con finit_module y los descarga al
 // final. Como la suite del kernel tambien carga y descarga la capa, espera a
@@ -30,6 +32,7 @@
 #include <unistd.h>
 
 #include "../../../../tests/linuxkpi/lkpi_test_dev/lkpi_test_uapi.h"
+#include "../../../../tests/linuxkpi/lkpi_test_ttm/lkpi_test_ttm_uapi.h"
 
 #define MODDIR "/lib/modules/linuxkpi"
 
@@ -362,6 +365,9 @@ static void test_firmware(int fd)
 /* DRM (uapi de Linux, solo lo necesario). */
 struct drm_gem_close { uint32_t handle, pad; };
 struct drm_prime_handle { uint32_t handle, flags; int32_t fd; };
+struct dma_buf_export_sync_file { uint32_t flags; int32_t fd; };
+#define DMA_BUF_SYNC_READ (1 << 0)
+#define DMA_BUF_IOCTL_EXPORT_SYNC_FILE _IOWR('b', 2, struct dma_buf_export_sync_file)
 struct drm_mode_create_dumb { uint32_t height, width, bpp, flags, handle, pitch; uint64_t size; };
 struct drm_mode_map_dumb { uint32_t handle, pad; uint64_t offset; };
 struct drm_mode_destroy_dumb { uint32_t handle; };
@@ -466,6 +472,48 @@ out:
 	close(card);
 }
 
+/* K7: el fence implicito que el driver de Linux pone en el dma_resv del buffer
+ * lo ven poll(), EXPORT_SYNC_FILE y el SCM_RIGHTS de Aurora. */
+static void test_implicit_fence(int fd)
+{
+	struct lkpi_test_dmabuf d = { .seed = 0x21 };
+	struct lkpi_test_fence fa;
+	struct dma_buf_export_sync_file ex = { .flags = DMA_BUF_SYNC_READ, .fd = -1 };
+	struct pollfd pf;
+
+	if (xioctl(fd, LKPI_IOC_DMABUF_EXPORT, &d) != 0 || d.fd < 0) {
+		check(0, "dma_buf exportado para el fence implicito");
+		return;
+	}
+	pf = (struct pollfd){ .fd = d.fd, .events = POLLIN };
+	check(poll(&pf, 1, 0) == 1, "dma_buf sin fence: lectura lista");
+	fa = (struct lkpi_test_fence){ .fd = d.fd, .op = LKPI_FENCE_ATTACH };
+	if (xioctl(fd, LKPI_IOC_FENCE, &fa) != 0) {
+		check(0, "el driver pone un fence de escritura en el dma_resv");
+		close(d.fd);
+		return;
+	}
+	pf.revents = 0;
+	check(poll(&pf, 1, 0) == 0, "con fence de escritura pendiente: poll(POLLIN) no esta listo");
+	check(xioctl(d.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0 && ex.fd >= 0,
+	      "EXPORT_SYNC_FILE del fence del driver");
+	if (ex.fd >= 0) {
+		struct pollfd sp = { .fd = ex.fd, .events = POLLIN };
+
+		check(poll(&sp, 1, 0) == 0, "el sync_file exportado esta pendiente");
+		fa.op = LKPI_FENCE_SIGNAL;
+		check(xioctl(fd, LKPI_IOC_FENCE, &fa) == 0, "el driver senala el fence");
+		check(poll(&sp, 1, 1000) == 1, "el sync_file pasa a senalado");
+		close(ex.fd);
+	} else {
+		fa.op = LKPI_FENCE_SIGNAL;
+		xioctl(fd, LKPI_IOC_FENCE, &fa);
+	}
+	pf.revents = 0;
+	check(poll(&pf, 1, 1000) == 1 && (pf.revents & POLLIN), "dma_buf listo tras senalar");
+	close(d.fd);
+}
+
 static void test_debugfs(void)
 {
 	char buf[256];
@@ -489,6 +537,163 @@ static void test_debugfs(void)
 		close(fd);
 }
 
+
+/* ------------------------------------------------------- L6: ttm_bo_vm */
+
+static void ttm_fill_user(unsigned *p, size_t size, unsigned seed)
+{
+	size_t npages = size / 4096, pg, i;
+
+	for (pg = 0; pg < npages; pg += 16) {
+		size_t n = npages - pg < 16 ? npages - pg : 16;
+
+		for (i = 0; i < n * 1024; i += 61)
+			p[pg * 1024 + i] = LKPI_TTM_WORD(seed, pg, i);
+	}
+}
+
+static int ttm_check_user(const unsigned *p, size_t size, unsigned seed)
+{
+	size_t npages = size / 4096, pg, i;
+	int bad = 0;
+
+	for (pg = 0; pg < npages; pg += 16) {
+		size_t n = npages - pg < 16 ? npages - pg : 16;
+
+		for (i = 0; i < n * 1024; i += 61)
+			if (p[pg * 1024 + i] != LKPI_TTM_WORD(seed, pg, i))
+				bad++;
+	}
+	return bad;
+}
+
+static int ttm_mem(int fd, unsigned handle, unsigned *usage)
+{
+	struct lkpi_ttm_info in = { .handle = handle };
+
+	if (xioctl(fd, LKPI_TTM_IOC_INFO, &in))
+		return -1;
+	if (usage)
+		*usage = in.usage_vram;
+	return in.mem_type;
+}
+
+static int ttm_kcheck(int fd, unsigned handle, unsigned seed)
+{
+	struct lkpi_ttm_pattern pt = { .handle = handle, .seed = seed };
+
+	if (xioctl(fd, LKPI_TTM_IOC_CHECK, &pt))
+		return -1;
+	return pt.bad;
+}
+
+static void test_ttm_user(void)
+{
+	const size_t size = 256 * 1024;
+	struct lkpi_ttm_create c = { .size = size, .domain = LKPI_TTM_DOM_VRAM };
+	struct lkpi_ttm_create g = { .size = 64 * 1024, .domain = LKPI_TTM_DOM_GTT };
+	struct lkpi_ttm_move mv;
+	struct lkpi_ttm_pattern pt;
+	struct lkpi_ttm_pressure pr;
+	unsigned *p, *q;
+	unsigned usage;
+	int fd, rc;
+
+	rc = load(MODDIR "/lkpi_drm.kur");
+	check(rc == 0, "cargar lkpi_drm.kur (%d)", rc);
+	rc = load(MODDIR "/lkpi_ttm.kur");
+	check(rc == 0, "cargar lkpi_ttm.kur (%d)", rc);
+	rc = load(MODDIR "/tests/lkpi_test_ttm_dev.kur");
+	check(rc == 0, "cargar lkpi_test_ttm_dev.kur (%d)", rc);
+	fd = open(LKPI_TTM_DEV, O_RDWR | O_CLOEXEC);
+	check(fd >= 0, "abrir " LKPI_TTM_DEV);
+	if (fd < 0)
+		return;
+	/* un BO en VRAM, mapeado y escrito desde el proceso */
+	check(xioctl(fd, LKPI_TTM_IOC_CREATE, &c) == 0 && c.handle, "ttm: crear BO en VRAM");
+	check(ttm_mem(fd, c.handle, &usage) == 2 && usage >= size, "ttm: el BO esta en VRAM");
+	p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)c.offset);
+	check(p != MAP_FAILED, "ttm: mmap del BO (offset %llx)", (unsigned long long)c.offset);
+	if (p == MAP_FAILED) {
+		close(fd);
+		return;
+	}
+	ttm_fill_user(p, size, 0xa11ce);
+	check(ttm_check_user(p, size, 0xa11ce) == 0, "ttm: el proceso lee lo que escribio (VRAM)");
+	check(ttm_kcheck(fd, c.handle, 0xa11ce) == 0, "ttm: el kernel ve lo escrito desde el mapa");
+	/* VRAM -> GTT: se retiran los PTE y el mapa vuelve a fallar sobre paginas del sistema */
+	mv.handle = c.handle;
+	mv.domain = LKPI_TTM_DOM_GTT;
+	check(xioctl(fd, LKPI_TTM_IOC_MOVE, &mv) == 0, "ttm: mover VRAM -> GTT");
+	check(ttm_mem(fd, c.handle, &usage) == 1 && usage == 0, "ttm: ahora en GTT, VRAM libre");
+	check(ttm_check_user(p, size, 0xa11ce) == 0, "ttm: el contenido sobrevive al movimiento (mapa vivo)");
+	ttm_fill_user(p, size, 0xb0b);
+	check(ttm_kcheck(fd, c.handle, 0xb0b) == 0, "ttm: el kernel ve lo escrito en GTT");
+	/* GTT -> VRAM */
+	mv.domain = LKPI_TTM_DOM_VRAM;
+	check(xioctl(fd, LKPI_TTM_IOC_MOVE, &mv) == 0, "ttm: mover GTT -> VRAM");
+	check(ttm_mem(fd, c.handle, NULL) == 2, "ttm: de vuelta en VRAM");
+	check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: el contenido sobrevive a la vuelta");
+	/* presion: 16 BO de 256 KiB solo-VRAM llenan los 4 MiB y expulsan al nuestro */
+	pr.count = 16;
+	pr.pad = 0;
+	check(xioctl(fd, LKPI_TTM_IOC_PRESSURE, &pr) == 0, "ttm: llenar la VRAM con 16 BO");
+	check(ttm_mem(fd, c.handle, &usage) == 1, "ttm: la presion expulso nuestro BO a GTT");
+	check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: expulsado con el mapa vivo, el dato sigue");
+	pr.count = 0;
+	check(xioctl(fd, LKPI_TTM_IOC_PRESSURE, &pr) == 0, "ttm: soltar la presion");
+	/* un segundo BO solo en GTT; dos mapas a la vez */
+	check(xioctl(fd, LKPI_TTM_IOC_CREATE, &g) == 0 && g.handle != c.handle, "ttm: crear BO en GTT");
+	q = mmap(NULL, g.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)g.offset);
+	check(q != MAP_FAILED, "ttm: mmap del segundo BO");
+	if (q != MAP_FAILED) {
+		ttm_fill_user(q, g.size, 0xc0de);
+		check(ttm_kcheck(fd, g.handle, 0xc0de) == 0, "ttm: el kernel ve el segundo BO");
+		mv.handle = g.handle;
+		mv.domain = LKPI_TTM_DOM_VRAM;
+		check(xioctl(fd, LKPI_TTM_IOC_MOVE, &mv) == 0, "ttm: subir el segundo BO a VRAM");
+		check(ttm_check_user(q, g.size, 0xc0de) == 0, "ttm: el segundo BO conserva el dato");
+		check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: el primero tambien");
+		munmap(q, g.size);
+	}
+	/* L7: vm_mmap de un fichero shmem desde un ioctl (GEM_MMAP legacy de i915) */
+	{
+		struct lkpi_ttm_vmmap vm = { .size = 64 * 1024, .seed = 0x5eed };
+		unsigned *w;
+		unsigned i, bad = 0;
+		int vrc = xioctl(fd, LKPI_TTM_IOC_VMMAP, &vm);
+
+		check(vrc == 0 && vm.addr, "vm_mmap: el ioctl mapea un fichero shmem (%d)", vrc);
+		if (vrc == 0 && vm.addr) {
+			w = (unsigned *)(uintptr_t)vm.addr;
+			for (i = 0; i < vm.size / 4; i += 61)
+				if (w[i] != (0x5eedu ^ (unsigned)(i * 2654435761U)))
+					bad++;
+			check(bad == 0, "vm_mmap: el proceso ve lo que escribio el kernel (%u malas)", bad);
+			for (i = 0; i < vm.size / 4; i++)
+				w[i] = 0xcafe ^ (unsigned)(i * 2654435761U);
+			vm.seed = 0xcafe;
+			check(xioctl(fd, LKPI_TTM_IOC_VMCHECK, &vm) == 0 && vm.bad == 0,
+			      "vm_mmap: el kernel ve lo que escribio el proceso (%d malas)", vm.bad);
+			check(xioctl(fd, LKPI_TTM_IOC_VMUNMAP, &vm) == 0, "vm_munmap");
+		}
+	}
+	/* pedir una pagina fuera del BO no es posible: el mmap debe fallar */
+	errno = 0;
+	check(mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)c.offset + (64 << 20)) == MAP_FAILED,
+	      "ttm: mmap de un offset sin BO falla");
+	munmap(p, size);
+	check(xioctl(fd, LKPI_TTM_IOC_DESTROY, &c.handle) == 0, "ttm: destruir el primer BO");
+	check(xioctl(fd, LKPI_TTM_IOC_DESTROY, &g.handle) == 0, "ttm: destruir el segundo BO");
+	memset(&pt, 0, sizeof(pt));
+	pt.handle = c.handle;
+	check(xioctl(fd, LKPI_TTM_IOC_CHECK, &pt) != 0, "ttm: el handle destruido ya no existe");
+	close(fd);
+	check(syscall(SYS_delete_module, "lkpi_test_ttm_dev", O_NONBLOCK) == 0, "descargar lkpi_test_ttm_dev");
+	check(syscall(SYS_delete_module, "lkpi_ttm", O_NONBLOCK) == 0, "descargar lkpi_ttm");
+	check(syscall(SYS_delete_module, "lkpi_drm", O_NONBLOCK) == 0, "descargar lkpi_drm");
+}
+
 int main(void)
 {
 	struct lkpi_test_info a, b;
@@ -509,6 +714,7 @@ int main(void)
 		test_events(fd);
 		test_firmware(fd);
 		test_dmabuf(fd);
+		test_implicit_fence(fd);
 		test_debugfs();
 		a = info(fd);
 		close(fd);
@@ -522,6 +728,7 @@ int main(void)
 	check(syscall(SYS_delete_module, "lkpi_test_dev", O_NONBLOCK) == 0,
 	      "descargar lkpi_test_dev");
 	check(stat(LKPI_TEST_DEV, &st) == -1 && errno == ENOENT, "/dev/lkpi_test desaparece");
+	test_ttm_user();
 	check(syscall(SYS_delete_module, "linuxkpi", O_NONBLOCK) == 0, "descargar linuxkpi");
 	if (g_fail)
 		printf("LKPI-TEST: FAIL %d de %d (%d omitidas)\n", g_fail, g_pass + g_fail, g_skip);

@@ -34,6 +34,6 @@
 #define virt_rmb() smp_rmb()
 #define virt_wmb() smp_wmb()
 #define virt_store_mb(var, value) smp_store_mb(var, value)
-#define cpu_relax() __asm__ __volatile__("pause" ::: "memory")
+static __always_inline void cpu_relax(void) { __asm__ __volatile__("pause" ::: "memory"); }
 
 #endif

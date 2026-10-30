@@ -6,6 +6,7 @@
  * al abrir se crea el struct file con las fops del driver y el inode de la
  * dentry (i_private = data). Ver linux/debugfs.h.
  */
+#define LKPI_DENTRY_PRIVATE 1
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/atomic.h>
@@ -26,6 +27,7 @@
 #define LKPI_DEBUGFS_MOUNT "/sys/kernel/debug"
 
 struct dentry {
+	struct qstr d_name;		/* publico (linux/fs.h), primero */
 	struct lkpi_vnode_src src;	/* primero: origen del nodo de fichero */
 	char *name;
 	struct dentry *parent;
@@ -38,6 +40,12 @@ struct dentry {
 	const struct file_operations *fops;
 	struct inode *inode;
 };
+
+struct inode *lkpi_d_inode(struct dentry *d)
+{
+	return d ? d->inode : NULL;
+}
+EXPORT_SYMBOL(lkpi_d_inode);
 
 static DEFINE_MUTEX(lkpi_debugfs_mutex);
 static LIST_HEAD(lkpi_debugfs_all);
@@ -65,6 +73,7 @@ static struct file *lkpi_debugfs_open(struct lkpi_vnode_src *src, unsigned int f
 		return ERR_PTR(-ENOMEM);
 	}
 	f->f_inode = d->inode;
+	f->f_path.dentry = d;
 	f->f_mapping = d->inode->i_mapping;
 	if (f->f_op && f->f_op->open)
 		rc = f->f_op->open(f->f_inode, f);
@@ -180,6 +189,8 @@ static struct dentry *lkpi_debugfs_new(const char *name, umode_t mode, struct de
 		kfree(d);
 		return ERR_PTR(-ENOMEM);
 	}
+	d->d_name.name = (const unsigned char *)d->name;
+	d->d_name.len = strlen(d->name);
 	d->src.magic = LKPI_VNODE_MAGIC;
 	d->src.open = lkpi_debugfs_open;
 	d->mode = mode & 0777;

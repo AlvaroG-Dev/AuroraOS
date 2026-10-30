@@ -13,6 +13,7 @@
 #include <linux/compiler.h>
 #include <linux/stringify.h>
 #include <linux/errno.h>
+#include <linux/stat.h>
 #include <linux/string.h>
 
 struct kobject;
@@ -135,4 +136,6 @@ __printf(3, 4) int lkpi_sysfs_emit_at(char *buf, int at, const char *fmt, ...);
 /* Sin poll() sobre ficheros de sysfs todavia: nadie espera la notificacion. */
 static inline void sysfs_notify(struct kobject *kobj, const char *dir, const char *attr) { }
 
+
+#define sysfs_merge_group(k, g) lkpi_sysfs_create_group(k, g)
 #endif

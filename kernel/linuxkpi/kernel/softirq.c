@@ -28,7 +28,7 @@
 
 static DEFINE_RAW_SPINLOCK(lkpi_sq_lock);
 static LIST_HEAD(lkpi_timers);			/* por expires (jiffies) */
-static LIST_HEAD(lkpi_hrtimers);		/* por node_expires (ns) */
+static LIST_HEAD(lkpi_hrtimers);		/* por node.expires (ns) */
 static struct tasklet_struct *lkpi_tl_head;
 static struct tasklet_struct **lkpi_tl_tail = &lkpi_tl_head;
 static LLIST_HEAD(lkpi_irq_works);
@@ -188,9 +188,9 @@ static long lkpi_run_timers(void)
 void lkpi_hrtimer_setup(struct hrtimer *t, enum hrtimer_restart (*fn)(struct hrtimer *),
 			clockid_t clock_id, enum hrtimer_mode mode)
 {
-	t->node.next = NULL;
-	t->node.prev = NULL;
-	t->_softexpires = t->node_expires = 0;
+	t->node.link.next = NULL;
+	t->node.link.prev = NULL;
+	t->_softexpires = t->node.expires = 0;
 	t->function = fn;
 	t->clockid = clock_id;
 	t->state = HRTIMER_STATE_INACTIVE;
@@ -203,18 +203,18 @@ static bool lkpi_hrtimer_enqueue(struct hrtimer *t)
 {
 	struct hrtimer *pos;
 
-	list_for_each_entry(pos, &lkpi_hrtimers, node)
-		if (t->node_expires < pos->node_expires)
+	list_for_each_entry(pos, &lkpi_hrtimers, node.link)
+		if (t->node.expires < pos->node.expires)
 			break;
-	list_add_tail(&t->node, &pos->node);
+	list_add_tail(&t->node.link, &pos->node.link);
 	t->state = HRTIMER_STATE_ENQUEUED;
-	return lkpi_hrtimers.next == &t->node;
+	return lkpi_hrtimers.next == &t->node.link;
 }
 
 static void lkpi_hrtimer_dequeue(struct hrtimer *t)
 {
-	list_del(&t->node);
-	t->node.next = NULL;
+	list_del(&t->node.link);
+	t->node.link.next = NULL;
 	t->state = HRTIMER_STATE_INACTIVE;
 }
 
@@ -277,7 +277,7 @@ EXPORT_SYMBOL(lkpi_hrtimer_active);
 /* Avanza el vencimiento en multiplos de `interval` hasta pasar `now`. */
 u64 lkpi_hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval)
 {
-	ktime_t delta = now - t->node_expires;
+	ktime_t delta = now - t->node.expires;
 	u64 orun = 1;
 
 	if (delta < 0)
@@ -287,7 +287,7 @@ u64 lkpi_hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval)
 	if (delta >= interval) {
 		orun = div64_u64(delta, interval);
 		hrtimer_add_expires_ns(t, orun * interval);
-		if (t->node_expires > now)
+		if (t->node.expires > now)
 			return orun;
 		orun++;
 	}
@@ -304,13 +304,13 @@ static long lkpi_run_hrtimers(void)
 
 	raw_spin_lock_irqsave(&lkpi_sq_lock, flags);
 	while (!list_empty(&lkpi_hrtimers)) {
-		struct hrtimer *t = list_first_entry(&lkpi_hrtimers, struct hrtimer, node);
+		struct hrtimer *t = list_first_entry(&lkpi_hrtimers, struct hrtimer, node.link);
 		enum hrtimer_restart (*fn)(struct hrtimer *) = t->function;
 		enum hrtimer_restart r = HRTIMER_NORESTART;
 		ktime_t now = ktime_get();
 
-		if (now < t->node_expires) {
-			next = (long)nsecs_to_jiffies(t->node_expires - now);
+		if (now < t->node.expires) {
+			next = (long)nsecs_to_jiffies(t->node.expires - now);
 			break;
 		}
 		lkpi_hrtimer_dequeue(t);

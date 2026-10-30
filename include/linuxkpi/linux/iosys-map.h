@@ -73,4 +73,29 @@ static inline void iosys_map_memset(struct iosys_map *dst, size_t offset, int va
 		memset(dst->vaddr + offset, value, len);
 }
 
+
+/* Lectura/escritura de un campo de un struct apuntado por el mapa (iosys_map_rd/wr de Linux). */
+#define iosys_map_rd(map__, offset__, type__) ({ \
+	type__ val__; \
+	if ((map__)->is_iomem) \
+		memcpy_fromio(&val__, (map__)->vaddr_iomem + (offset__), sizeof(val__)); \
+	else \
+		memcpy(&val__, (map__)->vaddr + (offset__), sizeof(val__)); \
+	val__; \
+})
+#define iosys_map_wr(map__, offset__, type__, val__) ({ \
+	type__ val___ = (val__); \
+	if ((map__)->is_iomem) \
+		memcpy_toio((map__)->vaddr_iomem + (offset__), &val___, sizeof(val___)); \
+	else \
+		memcpy((map__)->vaddr + (offset__), &val___, sizeof(val___)); \
+})
+#define iosys_map_rd_field(map__, struct_offset__, struct_type__, field__) ({ \
+	struct_type__ *s__ = (struct_type__ *)NULL; \
+	iosys_map_rd(map__, struct_offset__ + offsetof(struct_type__, field__), typeof(s__->field__)); \
+})
+#define iosys_map_wr_field(map__, struct_offset__, struct_type__, field__, val__) ({ \
+	struct_type__ *s__ = (struct_type__ *)NULL; \
+	iosys_map_wr(map__, struct_offset__ + offsetof(struct_type__, field__), typeof(s__->field__), val__); \
+})
 #endif

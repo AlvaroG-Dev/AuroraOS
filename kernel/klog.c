@@ -15,6 +15,16 @@ static char ring[KLOG_RING_SIZE];
 static volatile size_t ring_head = 0;
 static volatile size_t ring_tail = 0;
 static volatile size_t ring_count = 0;
+// Lineas que ya salieron del ring (por rotacion, lectura o borrado): el
+// numero de secuencia absoluto de la primera linea del ring. /dev/kmsg lo usa.
+static volatile uint64_t ring_lines_gone = 0;
+
+static inline void ring_drop_tail(void) {
+  if (ring[ring_tail] == '\n')
+    ring_lines_gone++;
+  ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
+  ring_count--;
+}
 void (*klog_fb_hook)(char c, klog_level_t level, klog_fb_style_t style) = NULL;
 
 typedef struct {
@@ -81,18 +91,15 @@ static void ring_push(char c) {
       // Estrategia simple: mientras el byte del tail NO sea '\n',
       // lo descartamos. Tras el bucle, descartamos también el '\n'.
       while (ring_count > 0 && ring[ring_tail] != '\n') {
-        ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
-        ring_count--;
+        ring_drop_tail();
       }
       if (ring_count > 0 && ring[ring_tail] == '\n') {
-        ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
-        ring_count--;
+        ring_drop_tail();
       }
     } else {
       // Caso rápido: el tail ya está en '\n' (línea anterior limpia).
       // Avanzamos un byte para descartar el '\n' y dejamos hueco.
-      ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
-      ring_count--;
+      ring_drop_tail();
     }
   }
 
@@ -616,8 +623,7 @@ size_t klog_read(char *out, size_t max_len) {
   size_t n = 0;
   while (n < max_len && ring_count > 0) {
     out[n++] = ring[ring_tail];
-    ring_tail = (ring_tail + 1) % KLOG_RING_SIZE;
-    ring_count--;
+    ring_drop_tail();
   }
   serial_lock_release(flags);
   return n;
@@ -628,6 +634,8 @@ size_t klog_available(void) { return ring_count; }
 void klog_clear(void) {
   // Nota: ring_head/tail/count son volatile size_t. Escribirlos sin lock
   // desde aquí es benigno pero puede perder bytes concurrentes. Aceptable.
+  while (ring_count > 0)
+    ring_drop_tail();
   ring_head = ring_tail = ring_count = 0;
 }
 
@@ -816,6 +824,8 @@ void klog_boot_info(const char *fmt, ...) {
 // ---------------------------------------------------------------------------
 // [dmesg] Número de líneas en el ring. No consume.
 // ---------------------------------------------------------------------------
+uint64_t klog_lines_gone(void) { return ring_lines_gone; }
+
 uint64_t klog_line_count(void) {
   unsigned long flags;
   serial_lock_acquire(&flags);

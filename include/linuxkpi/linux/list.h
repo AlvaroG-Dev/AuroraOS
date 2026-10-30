@@ -3,6 +3,7 @@
 #ifndef _LKPI_LINUX_LIST_H
 #define _LKPI_LINUX_LIST_H
 
+#include <linux/bits.h>
 #include <linux/container_of.h>
 #include <linux/compiler.h>
 #include <linux/poison.h>

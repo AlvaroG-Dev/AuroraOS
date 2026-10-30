@@ -11,6 +11,7 @@
 //   sepa leer ISO9660: solo FAT, garantizado por UEFI.
 
 #include "../include/kernel_boot_info.h"
+#include "../include/persist_log.h"
 #include "efi_min.h"
 #include "splash.h"
 #include <stdarg.h>
@@ -1185,6 +1186,85 @@ static void jump_to_kernel(VOID *kernel_entry, EFI_HANDLE image_handle,
  * Entry point
  * ===========================================================================
  */
+
+/* ---------------------------------------------------------------------------
+ * Log persistente (persist_log.h)
+ *
+ * Reserva la region ANTES de cargar kernel/initrd para que AllocateMaxAddress
+ * devuelva la misma direccion en cada arranque (mismo firmware y misma
+ * configuracion). Si la ranura actual trae un log valido del arranque
+ * anterior, lo pasa a la ranura 1 y lo guarda en \aurora\prev.log del ESP
+ * (mejor esfuerzo: puede fallar si el volumen es de solo lectura).
+ * --------------------------------------------------------------------------- */
+typedef EFI_STATUS (*EFI_FILE_WRITE_FN)(EFI_FILE_PROTOCOL *This,
+                                        UINTN *BufferSize, VOID *Buffer);
+typedef EFI_STATUS (*EFI_FILE_DELETE_FN)(EFI_FILE_PROTOCOL *This);
+
+static UINT64 g_plog_base;
+
+static void plog_save_prev_file(EFI_FILE *root, struct plog_header *prev) {
+  static const CHAR16 path[] = L"\\aurora\\prev.log";
+  EFI_FILE *f = NULL;
+  UINT32 len = plog_len(prev);
+  EFI_PHYSICAL_ADDRESS tmp = 0xFFFFFFFF;
+  UINTN pages = (len + 0xFFF) / 0x1000;
+
+  if (!root || len == 0)
+    return;
+  if (EFI_ERROR(gBS->AllocatePages(AllocateMaxAddress, EfiLoaderData, pages,
+                                   &tmp)))
+    return;
+  UINT32 n = plog_linear(prev, (UINT8 *)tmp, len);
+
+  /* Borrar el fichero anterior (si existe) para no dejar cola vieja. */
+  if (!EFI_ERROR(root->Open(root, &f, (CHAR16 *)path,
+                            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) &&
+      f)
+    ((EFI_FILE_DELETE_FN)f->Delete)(f);
+  f = NULL;
+  EFI_STATUS st = root->Open(
+      root, &f, (CHAR16 *)path,
+      EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+  if (EFI_ERROR(st) || !f) {
+    efi_print(L"[BOOT] plog: no puedo crear prev.log (%r)\n", st);
+  } else {
+    UINTN wsz = n;
+    st = ((EFI_FILE_WRITE_FN)f->Write)(f, &wsz, (VOID *)tmp);
+    f->Close(f);
+    if (EFI_ERROR(st))
+      efi_print(L"[BOOT] plog: error escribiendo prev.log (%r)\n", st);
+    else
+      efi_print(L"[BOOT] plog: log anterior (%d bytes) -> \\aurora\\prev.log\n",
+                (INT64)n);
+  }
+  gBS->FreePages(tmp, pages);
+}
+
+static void persist_log_setup(EFI_FILE *root) {
+  EFI_PHYSICAL_ADDRESS addr = 0xFFFFFFFF;
+  if (EFI_ERROR(gBS->AllocatePages(AllocateMaxAddress, EfiReservedMemoryType,
+                                   PLOG_PAGES, &addr)))
+    return;
+  struct plog_header *cur = (struct plog_header *)addr;
+  struct plog_header *prev = (struct plog_header *)(addr + PLOG_SLOT_SIZE);
+  UINT64 seq = 1;
+
+  if (plog_valid(cur)) {
+    seq = cur->boot_seq + 1;
+    if (cur->total > 0) {
+      copy_mem(prev, cur, PLOG_SLOT_SIZE);
+      efi_print(L"[BOOT] plog: log del arranque anterior en RAM (%d bytes)\n",
+                (INT64)plog_len(prev));
+      plog_save_prev_file(root, prev);
+    }
+  } else if (!plog_valid(prev)) {
+    zero_mem(prev, PLOG_HDR_SIZE);
+  }
+  zero_mem(cur, PLOG_HDR_SIZE);
+  plog_init(cur, seq);
+  g_plog_base = addr;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
   gImageHandle = image_handle;
   gST = system_table;
@@ -1259,6 +1339,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     return EFI_NOT_FOUND;
   }
   efi_print(L"[BOOT] Kernel: %s\n", kernel_path_used);
+
+  persist_log_setup(kernel_root);
 
   /* ---------------------------------------------------------------------
    * 4. Framebuffer + page tables.
@@ -1380,6 +1462,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
   kinfo.memmap_desc_ver = mem_map.desc_version;
   kinfo.initrd_base = (uint64_t)initrd_phys;
   kinfo.initrd_size = (uint64_t)initrd_size;
+  kinfo.plog_base = g_plog_base;
+  kinfo.plog_size = g_plog_base ? PLOG_PAGES * 4096ULL : 0;
 
   find_acpi_rsdp(system_table, kinfo.acpi_rsdp);
   if (cfg.have_cmdline)

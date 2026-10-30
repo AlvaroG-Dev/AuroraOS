@@ -2,6 +2,7 @@
 // Driver serial COM1 — thread-safe, reentrante y con lock compartido para klog
 
 #include "serial.h"
+#include "plog.h"
 #include "cpu.h" // [FIX] smp_processor_id / this_cpu
 #include "io.h"
 #include "spinlock.h"
@@ -52,6 +53,7 @@ static void serial_write_byte_locked(char c) {
 }
 
 void serial_putc_locked(char c) {
+  plog_putc(c); // espejo en RAM persistente (no-op si no hay region)
   if (c == '\n') {
     serial_write_byte_locked('\r');
   }

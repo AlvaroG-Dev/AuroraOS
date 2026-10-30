@@ -90,6 +90,7 @@ struct task_struct *lkpi_kthread_create_internal(int (*fn)(void *), void *data,
 						 const char *name);
 
 /* Registro pfn -> struct page (mm/page.c). */
+#define LKPI_PAGE_SPLIT 0x8	/* tras split_page(): cada pagina se libera sola; freelist = base del array */
 #define LKPI_PAGE_OWNED 0x1	/* el array salio de lkpi_alloc_pages */
 #define LKPI_PAGE_FOREIGN 0x2	/* descriptor suelto de un marco ajeno */
 struct page;
@@ -105,5 +106,18 @@ int lkpi_i2c_init(void);
 void lkpi_i2c_exit(void);
 int lkpi_backlight_init(void);
 void lkpi_backlight_exit(void);
+void lkpi_pid_exit(void);
+void lkpi_cpu_init(void);
+
+/* dma/dma-buf.c: fd_install de un dma_buf */
+bool lkpi_dma_buf_fd_install(unsigned int fd, struct file *file);
+
+/* display-shadow (mm/ioremap.c, pci/pci.c) */
+int lkpi_display_shadow_add(phys_addr_t start, size_t len, bool copy);
+void lkpi_display_shadow_exit(void);
+void lkpi_display_shadow_probe(void);
+
+/* base/core.c: uevent de un dispositivo hacia netlink (lib/kobject.c) */
+int lkpi_device_uevent_send(struct kobject *kobj, enum kobject_action action, char *extra[]);
 
 #endif

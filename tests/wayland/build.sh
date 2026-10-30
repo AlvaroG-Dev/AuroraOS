@@ -38,6 +38,14 @@ gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/aw_dmabuf_test" "$ROOT/tests/wayland
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" -lwayland-client \
     -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aw_dmabuf_test"
+# L7 hito 3: cliente EGL/GBM (Mesa crocus/swrast) + linux-dmabuf. Las
+# declaraciones de GBM/EGL/GLES2 son locales; se enlaza contra las libs de libs/glibc.
+gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/aw_gbm_test" "$ROOT/tests/wayland/aw_gbm_test.c" \
+    "$GEN/xdg-shell-protocol.c" "$GEN/linux-dmabuf-unstable-v1-protocol.c" \
+    -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" -L"$ROOT/libs/glibc/lib/x86_64-linux-gnu" \
+    -lwayland-client -l:libEGL.so.1 -l:libGLESv2.so.2 -l:libgbm.so.1 \
+    -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu" -Wl,-rpath-link,"$ROOT/libs/glibc/lib/x86_64-linux-gnu"
+echo "OK: precompiled/usr/bin/aw_gbm_test"
 # App GTK3 minima (necesita libgtk-3-dev en el host de build; se omite si falta).
 if pkg-config --exists gtk+-3.0 2>/dev/null; then
     gcc -O1 -Wall -o "$ROOT/precompiled/usr/bin/hello-gtk" "$ROOT/tests/wayland/hello-gtk.c" \

@@ -80,12 +80,16 @@ typedef unsigned int fmode_t;
 typedef unsigned int gfp_t;
 typedef unsigned int slab_flags_t;
 typedef long long time64_t;
+typedef s64 ktime_t;
 typedef long __kernel_time_t;
 typedef long clock_t;
 typedef unsigned long blkcnt_t;
 typedef unsigned long sector_t;
 typedef unsigned long pgoff_t;
 typedef unsigned short __kernel_sa_family_t;
+typedef unsigned long __kernel_size_t;
+typedef long __kernel_ssize_t;
+typedef long __kernel_ptrdiff_t;
 
 typedef struct {
 	int counter;

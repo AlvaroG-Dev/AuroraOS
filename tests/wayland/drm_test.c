@@ -10,7 +10,9 @@
 #include <drm/drm_mode.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/netlink.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,7 @@
 #include <unistd.h>
 
 static int g_fail;
+static int g_pending_sf; // el syncobj sin senalar se exporta como sync_file (nativo)
 #define CHECK(cond, ...)                                                       \
   do {                                                                         \
     if (cond) {                                                                \
@@ -84,8 +87,9 @@ int main(int argc, char **argv) {
   v.name = name;
   v.name_len = sizeof(name) - 1;
   v.date = NULL; v.date_len = 0; v.desc = NULL; v.desc_len = 0;
-  CHECK(ioctl(fd, DRM_IOCTL_VERSION, &v) == 0 && !strcmp(name, "aurora"),
-        "VERSION name=%s", name);
+  // El backend nativo se llama "aurora"; un driver de Linux (bochs-drm,
+  // simpledrm, virtio_gpu...) trae su propio nombre.
+  CHECK(ioctl(fd, DRM_IOCTL_VERSION, &v) == 0 && name[0], "VERSION name=%s", name);
 
   struct drm_get_cap cap = {.capability = DRM_CAP_DUMB_BUFFER};
   CHECK(ioctl(fd, DRM_IOCTL_GET_CAP, &cap) == 0 && cap.value == 1, "CAP_DUMB_BUFFER");
@@ -98,17 +102,23 @@ int main(int argc, char **argv) {
   struct drm_mode_card_res res;
   memset(&res, 0, sizeof(res));
   CHECK(ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0 &&
-            res.count_crtcs == 1 && res.count_connectors == 1 &&
-            res.count_encoders == 1,
+            res.count_crtcs >= 1 && res.count_crtcs <= 8 &&
+            res.count_connectors >= 1 && res.count_connectors <= 8 &&
+            res.count_encoders >= 1 && res.count_encoders <= 8,
         "GETRESOURCES crtcs=%u conns=%u encs=%u", res.count_crtcs,
         res.count_connectors, res.count_encoders);
-  uint32_t crtc = 0, conn = 0, enc = 0;
-  res.crtc_id_ptr = (uintptr_t)&crtc;
-  res.connector_id_ptr = (uintptr_t)&conn;
-  res.encoder_id_ptr = (uintptr_t)&enc;
+  if (res.count_crtcs > 8 || res.count_connectors > 8 || res.count_encoders > 8)
+    return 1;
+  // Hay varios objetos con salidas multiples (virtio-gpu max_outputs=N): se usa el primero.
+  uint32_t crtcs[8] = {0}, conns[8] = {0}, encs[8] = {0};
+  res.crtc_id_ptr = (uintptr_t)crtcs;
+  res.connector_id_ptr = (uintptr_t)conns;
+  res.encoder_id_ptr = (uintptr_t)encs;
   res.fb_id_ptr = 0;
   res.count_fbs = 0;
-  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0 && crtc && conn && enc,
+  uint32_t crtc = crtcs[0], conn = conns[0], enc = encs[0];
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0 && (crtc = crtcs[0]) &&
+            (conn = conns[0]) && (enc = encs[0]),
         "GETRESOURCES ids crtc=%u conn=%u enc=%u", crtc, conn, enc);
 
   // Conector: dos pasadas
@@ -118,11 +128,11 @@ int main(int argc, char **argv) {
   CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &gc) == 0 && gc.count_modes >= 1 &&
             gc.connection == 1,
         "GETCONNECTOR modes=%u props=%u", gc.count_modes, gc.count_props);
-  struct drm_mode_modeinfo modes[16];
-  uint32_t cprops[8];
-  uint64_t cvals[8];
-  uint32_t cenc[2];
-  if (gc.count_modes > 16 || gc.count_props > 8 || gc.count_encoders > 2)
+  struct drm_mode_modeinfo modes[64];
+  uint32_t cprops[16];
+  uint64_t cvals[16];
+  uint32_t cenc[4];
+  if (gc.count_modes > 64 || gc.count_props > 16 || gc.count_encoders > 4)
     return 1;
   gc.modes_ptr = (uintptr_t)modes;
   gc.props_ptr = (uintptr_t)cprops;
@@ -134,17 +144,19 @@ int main(int argc, char **argv) {
         "preferred mode %s (%ux%u)", mode.name, mode.hdisplay, mode.vdisplay);
 
   struct drm_mode_get_encoder ge = {.encoder_id = enc};
-  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &ge) == 0 && ge.possible_crtcs == 1,
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &ge) == 0 && (ge.possible_crtcs & 1),
         "GETENCODER");
 
   // Planos
   struct drm_mode_get_plane_res pr;
   memset(&pr, 0, sizeof(pr));
-  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr) == 0 && pr.count_planes == 1,
+  CHECK(ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr) == 0 && pr.count_planes >= 1 && pr.count_planes <= 16,
         "GETPLANERESOURCES n=%u", pr.count_planes);
-  uint32_t plane = 0;
-  pr.plane_id_ptr = (uintptr_t)&plane;
-  ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr);
+  uint32_t planes[16] = {0}, plane;
+  pr.plane_id_ptr = (uintptr_t)planes;
+  if (pr.count_planes <= 16)
+    ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr);
+  plane = planes[0];
   CHECK(plane != 0, "plane id=%u", plane);
 
   // Dumb buffer
@@ -188,6 +200,17 @@ int main(int argc, char **argv) {
   CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &gcr) == 0 && gcr.fb_id == fb2.fb_id &&
             gcr.mode_valid && gcr.mode.hdisplay == mode.hdisplay,
         "GETCRTC devuelve el modo activo");
+  if (res.count_crtcs > 1 && res.count_connectors > 1) { // multi-CRTC: segunda salida
+    struct drm_mode_crtc sc2 = sc;
+    sc2.crtc_id = crtcs[1];
+    sc2.set_connectors_ptr = (uintptr_t)&conns[1];
+    CHECK(ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &sc2) == 0, "SETCRTC del segundo CRTC (%u)", crtcs[1]);
+    struct drm_mode_crtc g2 = {.crtc_id = crtcs[1]};
+    CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &g2) == 0 && g2.fb_id == fb2.fb_id && g2.mode_valid,
+          "GETCRTC del segundo CRTC activo");
+    struct drm_mode_crtc off = {.crtc_id = crtcs[1]};
+    CHECK(ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &off) == 0, "SETCRTC apaga el segundo CRTC");
+  }
 
   // Segundo buffer + PAGE_FLIP con evento
   struct drm_mode_create_dumb cd2 = cd;
@@ -321,12 +344,27 @@ int main(int argc, char **argv) {
         "FD_TO_HANDLE en renderD128 handle=%u", imp.handle);
   struct drm_mode_map_dumb imd = {.handle = imp.handle};
   uint32_t *ipx = MAP_FAILED;
-  if (ioctl(rfd2, DRM_IOCTL_MODE_MAP_DUMB, &imd) == 0)
-    ipx = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, rfd2, imd.offset);
+  int mfd = rfd2;
+  if (ioctl(rfd2, DRM_IOCTL_MODE_MAP_DUMB, &imd) < 0 && errno == EACCES) {
+    // Linux no permite los ioctl dumb en nodos render: el mismo GEM por card0.
+    mfd = open("/dev/dri/card0", O_RDWR);
+    struct drm_prime_handle cimp = {.fd = dbuf};
+    if (mfd >= 0 && ioctl(mfd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &cimp) == 0) {
+      imd.handle = cimp.handle;
+      if (ioctl(mfd, DRM_IOCTL_MODE_MAP_DUMB, &imd) < 0)
+        imd.offset = 0;
+    }
+  } else {
+    imd.handle = imp.handle;
+  }
+  if (imd.offset)
+    ipx = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, imd.offset);
   CHECK(ipx != MAP_FAILED && ipx[0] == 0xE0A030 && ipx[1] == 0xCAFE01,
         "mmap del GEM importado ve el mismo contenido");
   if (ipx != MAP_FAILED)
     munmap(ipx, cd.size);
+  if (mfd != rfd2 && mfd >= 0)
+    close(mfd);
   struct drm_prime_handle bad_fd = {.fd = 0};
   CHECK(ioctl(rfd2, DRM_IOCTL_PRIME_FD_TO_HANDLE, &bad_fd) < 0, "FD_TO_HANDLE con fd que no es dmabuf falla");
   struct drm_gem_close gcl = {.handle = imp.handle};
@@ -380,7 +418,10 @@ int main(int argc, char **argv) {
     ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &nc);
     struct drm_syncobj_handle nh = {.handle = nc.handle,
                                     .flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE};
-    ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &nh);
+    // Linux: un syncobj sin fence no se exporta como sync_file (EINVAL); el
+    // backend nativo si (fence pendiente). Sin fence pendiente se omite la parte.
+    g_pending_sf = ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &nh) == 0;
+    if (g_pending_sf) {
     struct dma_buf_import_sync_file im = {.flags = DMA_BUF_SYNC_WRITE, .fd = nh.fd};
     CHECK(ioctl(dph.fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &im) == 0, "IMPORT_SYNC_FILE");
     struct pollfd bpf = {.fd = dph.fd, .events = POLLIN};
@@ -394,6 +435,7 @@ int main(int argc, char **argv) {
     struct dma_buf_export_sync_file bad0 = {.flags = 0, .fd = -1};
     CHECK(ioctl(dph.fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &bad0) < 0, "EXPORT sin flags falla");
     close(nh.fd);
+    }
     close(sfd);
     close(dph.fd);
   }
@@ -416,6 +458,7 @@ int main(int argc, char **argv) {
     int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
     uint32_t h0 = c0.handle, h1 = c1.handle;
     struct drm_syncobj_wait w = {.handles = (uintptr_t)&h1, .count_handles = 1,
+                                 .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
                                  .timeout_nsec = now};
     CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &w) == 0, "WAIT de un syncobj ya senalado");
     w.handles = (uintptr_t)&h0;
@@ -443,7 +486,8 @@ int main(int argc, char **argv) {
           (unsigned long long)q);
     uint64_t p3 = 3, p7 = 7;
     struct drm_syncobj_timeline_wait tw = {.handles = (uintptr_t)&h0, .points = (uintptr_t)&p3,
-                                           .count_handles = 1, .timeout_nsec = now};
+                                           .count_handles = 1, .timeout_nsec = now,
+                                           .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT};
     CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &tw) == 0, "TIMELINE_WAIT punto 3 (<=5)");
     tw.points = (uintptr_t)&p7;
     tw.timeout_nsec = now + 30000000LL;
@@ -454,14 +498,17 @@ int main(int argc, char **argv) {
     // fd del syncobj y sync_file
     struct drm_syncobj_create c2 = {0};
     ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &c2);
-    struct drm_syncobj_handle hf = {.handle = c2.handle, .flags = DRM_CLOEXEC};
+    struct drm_syncobj_handle hf = {.handle = c2.handle, .flags = 0};
     CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &hf) == 0 && hf.fd >= 0, "HANDLE_TO_FD fd=%d", hf.fd);
     struct drm_syncobj_handle sf = {.handle = c2.handle,
                                     .flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE};
-    CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &sf) == 0 && sf.fd >= 0,
-          "HANDLE_TO_FD como sync_file fd=%d", sf.fd);
-    struct pollfd pf = {.fd = sf.fd, .events = POLLIN};
-    CHECK(poll(&pf, 1, 0) == 0, "sync_file sin senalar: poll no esta listo");
+    struct pollfd pf = {.fd = -1, .events = POLLIN};
+    if (g_pending_sf) {
+      CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &sf) == 0 && sf.fd >= 0,
+            "HANDLE_TO_FD como sync_file fd=%d", sf.fd);
+      pf.fd = sf.fd;
+      CHECK(poll(&pf, 1, 0) == 0, "sync_file sin senalar: poll no esta listo");
+    }
     int sfd2 = open("/dev/dri/renderD128", O_RDWR);
     struct drm_syncobj_handle imp2 = {.fd = hf.fd};
     CHECK(ioctl(sfd2, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp2) == 0 && imp2.handle,
@@ -479,6 +526,7 @@ int main(int argc, char **argv) {
     int64_t t0 = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
     uint32_t h2 = c2.handle;
     struct drm_syncobj_wait bw = {.handles = (uintptr_t)&h2, .count_handles = 1,
+                                  .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
                                   .timeout_nsec = t0 + 5000000000LL};
     int brc = ioctl(sfd, DRM_IOCTL_SYNCOBJ_WAIT, &bw);
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -487,8 +535,17 @@ int main(int argc, char **argv) {
     waitpid(pid, &st, 0);
     CHECK(brc == 0 && el >= 200 && el < 3000 && WIFEXITED(st) && WEXITSTATUS(st) == 0,
           "WAIT bloqueante despertado por otro proceso (%lld ms)", (long long)el);
+    if (!g_pending_sf) { // Linux: el fence existe solo tras senalar
+      CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &sf) == 0 && sf.fd >= 0,
+            "HANDLE_TO_FD como sync_file (ya senalado) fd=%d", sf.fd);
+      pf.fd = sf.fd;
+    }
     CHECK(poll(&pf, 1, 1000) == 1 && (pf.revents & POLLIN), "sync_file pasa a senalado (poll)");
-    struct drm_syncobj_handle imp3 = {.fd = sf.fd,
+    // ABI de Linux: el sync_file se importa a un handle existente (el nativo
+    // devuelve uno nuevo en imp3.handle).
+    struct drm_syncobj_create c3 = {0};
+    ioctl(sfd, DRM_IOCTL_SYNCOBJ_CREATE, &c3);
+    struct drm_syncobj_handle imp3 = {.handle = c3.handle, .fd = sf.fd,
                                       .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE};
     uint32_t h3;
     CHECK(ioctl(sfd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp3) == 0 && (h3 = imp3.handle), "import de sync_file");
@@ -502,6 +559,34 @@ int main(int argc, char **argv) {
     close(hf.fd);
     close(sfd2);
     close(sfd);
+  }
+
+  // uevents hacia userland: escribir "change" en uevent reenvia el evento
+  // (backend Linux); el nativo no los emite y se omite.
+  {
+    int nl = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT);
+    struct sockaddr_nl sa = {.nl_family = AF_NETLINK, .nl_groups = 1};
+    int ufd = open("/sys/class/drm/card0/uevent", O_WRONLY);
+    if (nl >= 0 && bind(nl, (struct sockaddr *)&sa, sizeof(sa)) == 0 && ufd >= 0 &&
+        write(ufd, "change", 6) == 6) {
+      char ub[2048];
+      struct pollfd up = {.fd = nl, .events = POLLIN};
+      ssize_t un = poll(&up, 1, 2000) == 1 ? recv(nl, ub, sizeof(ub) - 1, 0) : -1;
+      int ok_a = 0, ok_s = 0, ok_d = 0;
+      for (ssize_t o = 0; un > 0 && o < un; o += strlen(ub + o) + 1) {
+        ok_a |= !strcmp(ub + o, "ACTION=change");
+        ok_s |= !strcmp(ub + o, "SUBSYSTEM=drm");
+        ok_d |= !strcmp(ub + o, "DEVNAME=dri/card0");
+      }
+      CHECK(un > 0 && !strncmp(ub, "change@/", 8) && ok_a && ok_s && ok_d,
+            "uevent change de card0 por NETLINK_KOBJECT_UEVENT");
+    } else {
+      printf("[drm_test] SKIP uevent por netlink (backend sin emision)\n");
+    }
+    if (ufd >= 0)
+      close(ufd);
+    if (nl >= 0)
+      close(nl);
   }
 
   // Limpieza

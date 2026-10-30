@@ -276,4 +276,6 @@ long lkpi_wait_woken(struct wait_queue_entry *e, unsigned int mode, long timeout
 			spin_lock_irq(&(lock))); \
 	   __ret; })
 
+
+#define __init_waitqueue_head(wq, name, key) __lkpi_init_waitqueue_head(wq)
 #endif

@@ -39,7 +39,26 @@ struct iov_iter;
 struct dir_context;
 struct file_lock;
 struct super_block;
+struct vfsmount;
+struct qstr {
+	const unsigned char *name;
+	unsigned int len;
+};
+/*
+ * Vista publica de dentry: solo el nombre. La definicion completa es privada
+ * de fs/debugfs.c (LKPI_DENTRY_PRIVATE) y empieza por el mismo campo.
+ */
+#ifndef LKPI_DENTRY_PRIVATE
+struct dentry {
+	struct qstr d_name;
+};
+#else
 struct dentry;
+#endif
+struct path {
+	struct vfsmount *mnt;
+	struct dentry *dentry;
+};
 
 typedef unsigned int fmode_t;
 #define FMODE_READ ((__force fmode_t)(1 << 0))
@@ -69,6 +88,11 @@ struct address_space {
 	struct list_head i_mmap;	/* vm_area_struct.__lkpi_mapping */
 	unsigned long nrpages;
 	void *private_data;
+	gfp_t gfp_mask;
+	unsigned long flags;		/* AS_* */
+	struct page **__lkpi_pages;	/* shmem: paginas por indice (NULL = hueco) */
+	unsigned long __lkpi_cap;
+	struct mutex __lkpi_pages_lock;
 };
 
 struct inode {
@@ -104,6 +128,7 @@ struct file {
 	const struct file_operations *f_op;
 	struct inode *f_inode;
 	struct address_space *f_mapping;
+	struct path f_path;
 	unsigned int f_flags;
 	fmode_t f_mode;
 	loff_t f_pos;
@@ -254,6 +279,46 @@ struct inode *lkpi_alloc_anon_inode(struct super_block *sb);
 void lkpi_iput(struct inode *inode);
 static inline void ihold(struct inode *inode) { atomic_inc(&inode->i_count); }
 #define iput(i) lkpi_iput(i)
+/* sin modulos descargables por fichero: fops_get/put no cuentan referencias */
+#define fops_get(fops) (fops)
+#define fops_put(fops) do { (void)(fops); } while (0)
+#define replace_fops(f, fops) do { (f)->f_op = (fops); } while (0)
+struct inode *lkpi_d_inode(struct dentry *d);
+#define d_inode(d) lkpi_d_inode(d)
 #define alloc_anon_inode(sb) lkpi_alloc_anon_inode(sb)
 
+/* Clonar un fichero abierto (leases de DRM): no soportado en la capa */
+static inline struct file *file_clone_open(struct file *file)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
+#include <linux/uaccess.h>
+
+
+#include <linux/uio.h>
+#define MAX_RW_COUNT (INT_MAX & PAGE_MASK)
+struct kiocb {
+	struct file *ki_filp;
+	loff_t ki_pos;
+	int ki_flags;
+};
+static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
+{
+	kiocb->ki_filp = filp;
+	kiocb->ki_pos = 0;
+	kiocb->ki_flags = 0;
+}
+static inline bool force_o_largefile(void) { return true; }
+static inline struct file *get_file_active(struct file **f) { return *f; }
+/* mmap de un fichero en el espacio de usuario del proceso actual (mm/mmap.c). */
+unsigned long lkpi_vm_mmap(struct file *file, unsigned long addr, unsigned long len,
+			   unsigned long prot, unsigned long flag, unsigned long offset);
+int lkpi_vm_munmap(unsigned long start, size_t len);
+#define vm_mmap lkpi_vm_mmap
+#define vm_munmap lkpi_vm_munmap
+struct vm_area_struct;
+static inline int vfs_mmap(struct file *file, struct vm_area_struct *vma) { return -ENODEV; }
+ssize_t lkpi_kernel_write(struct file *file, const void *buf, size_t count, loff_t *pos);
+#define kernel_write lkpi_kernel_write
 #endif

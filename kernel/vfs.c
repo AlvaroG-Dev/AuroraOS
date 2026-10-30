@@ -27,6 +27,7 @@
 #include "klog.h"
 #include "mutex.h"
 #include "net/net_proxy.h"
+#include "pf.h"
 #include "process.h"
 #include "procfs.h"
 #include "pty.h"
@@ -1651,7 +1652,6 @@ static size_t kmsg_parse_prefix(const char *line, size_t line_len,
 
 static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
                              void *buf) {
-  LOG_DEBUG("[KMSG-READ] offset=%lu size=%zu", (unsigned long)offset, size);
   (void)node;
   if (!buf || size == 0)
     return 0;
@@ -1662,16 +1662,30 @@ static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
   char *snap = (char *)kmalloc(SNAP_CAP);
   if (!snap)
     return -ENOMEM;
-  size_t snap_len = klog_snapshot(snap, SNAP_CAP);
+  // `offset` es la secuencia absoluta del registro; la primera línea del
+  // ring tiene la secuencia klog_lines_gone(). Se repite si el ring rota
+  // mientras se copia.
+  size_t snap_len;
+  uint64_t first;
+  do {
+    first = klog_lines_gone();
+    snap_len = klog_snapshot(snap, SNAP_CAP);
+  } while (first != klog_lines_gone());
+  if (offset < first) {
+    // Registros ya sobrescritos: como Linux, EPIPE (el lector se recoloca
+    // con SEEK_DATA).
+    kfree(snap);
+    return -EPIPE;
+  }
   if (snap_len == 0) {
     kfree(snap);
     return 0;
   }
 
-  // Avanzar a la línea número `offset`.
+  // Avanzar a la línea de secuencia `offset`.
   const char *p = snap;
   const char *end = snap + snap_len;
-  uint64_t idx = 0;
+  uint64_t idx = first;
   while (idx < offset && p < end) {
     while (p < end && *p != '\n')
       p++;
@@ -1707,7 +1721,7 @@ static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
   rec[h++] = (char)('0' + (level & 7));
   rec[h++] = ',';
 
-  uint64_t seq = offset + 1;
+  uint64_t seq = offset;
   {
     char t[24];
     int n = 0;
@@ -1758,8 +1772,6 @@ static int64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset, size_t size,
 
   memcpy(buf, rec, copy);
   kfree(rec);
-  LOG_DEBUG("[KMSG-READ] -> devolviendo %zu bytes, record=<%.32s...>", copy,
-            rec);
   return (int64_t)copy;
 }
 
@@ -2537,8 +2549,7 @@ static vfs_node_t *devfs_lookup(void *fs_priv, const char *path) {
       // [dmesg] /dev/kmsg usa offset como índice de registro, no como
       // byte-count.
       if (strcmp(name, "kmsg") == 0)
-        LOG_DEBUG("[KMSG-OPEN] alguien abrió /dev/kmsg");
-      n->offset_is_index = 1;
+        n->offset_is_index = 1;
 
       return n;
     }
@@ -3242,7 +3253,8 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
     // [dmesg] Para /dev/kmsg (offset_is_index), END = fin del ring.
     if (f->node->offset_is_index) {
       extern uint64_t klog_line_count(void);
-      new_off = klog_line_count();
+      extern uint64_t klog_lines_gone(void);
+      new_off = klog_lines_gone() + klog_line_count();
       if (offset < 0 && (uint64_t)(-offset) > new_off) {
         mutex_unlock(&f->lock);
         fd_put(f);
@@ -3266,7 +3278,8 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
       fd_put(f);
       return -1;
     }
-    new_off = 0;
+    extern uint64_t klog_lines_gone(void);
+    new_off = klog_lines_gone();
   } else {
     mutex_unlock(&f->lock);
     fd_put(f);
@@ -3339,8 +3352,15 @@ void vfs_notify_writable(file_descriptor_t *fd) {
 int vfs_node_poll(vfs_node_t *node, short events) {
   if (!node)
     return 0;
-  if (node->ops && node->ops->poll)
-    return node->ops->poll(node, events);
+  if (node->ops && node->ops->poll) {
+    // Como Linux: solo los eventos pedidos, mas POLLERR, POLLHUP y POLLNVAL.
+    int mask = (int)(unsigned short)events | 0x8 | 0x10 | 0x20;
+    if (events & 0x40) // POLLRDNORM
+      mask |= 1;
+    if (events & 0x100) // POLLWRNORM
+      mask |= 4;
+    return node->ops->poll(node, events) & mask;
+  }
   int r = 0;
   if (events & 1)
     r |= 1;
@@ -3469,6 +3489,36 @@ void vfs_fd_unreserve(int fd) {
   proc->fds[fd] = NULL;
   mutex_unlock(&proc->fd_lock);
   fd_put(old);
+}
+
+// [LinuxKPI L7] vm_mmap/vm_munmap de los drivers: mapea un nodo del VFS en el
+// proceso actual sin que el usuario tenga un fd (GEM_MMAP legacy de i915).
+// Un fd temporal lleva el nodo a sys_mmap; el VMA conserva sus propias
+// referencias, asi que el fd se cierra al volver. Devuelve la direccion o
+// -errno.
+int64_t vfs_mmap_node_current(vfs_node_t *node, uint64_t addr, uint64_t len,
+                              uint64_t prot, uint64_t flags, uint64_t off) {
+  process_t *proc = process_current();
+  if (!proc || !node)
+    return -EINVAL;
+  int fd = vfs_fd_reserve(1);
+  if (fd < 0)
+    return fd;
+  vfs_node_ref(node);
+  int rc = vfs_fd_install_node(fd, node, 0);
+  if (rc) {
+    vfs_node_free(node);
+    vfs_fd_unreserve(fd);
+    return rc;
+  }
+  int64_t r = sys_mmap(proc, addr, len, prot, flags, fd, off);
+  vfs_close_for_proc(proc, fd);
+  return r;
+}
+
+int64_t vfs_munmap_current(uint64_t addr, uint64_t len) {
+  process_t *proc = process_current();
+  return proc ? sys_munmap(proc, addr, len) : -EINVAL;
 }
 
 file_descriptor_t *vfs_fd_get_current(int fd) {

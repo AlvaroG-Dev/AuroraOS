@@ -176,6 +176,7 @@ void kur_exit(void);
 
 int kur_init(void)
 {
+	lkpi_cpu_init();
 	int rc = lkpi_mm_init();
 	if (rc)
 		return rc;
@@ -267,6 +268,7 @@ void kur_exit(void)
 	lkpi_wq_exit();
 	lkpi_rcu_exit();
 	lkpi_softirq_exit();
+	lkpi_pid_exit();
 	lkpi_sched_exit();
 	lkpi_ioremap_exit();
 	lkpi_vmalloc_exit();

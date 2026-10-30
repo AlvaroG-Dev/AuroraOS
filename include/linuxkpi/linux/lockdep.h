@@ -5,7 +5,7 @@
 
 #include <linux/lockdep_types.h>
 
-#define lockdep_init_map(map, name, key, sub) do { (void)(map); (void)(key); } while (0)
+#define lockdep_init_map(map, name, key, sub) do { (void)(key); } while (0)
 #define lockdep_init_map_type(map, name, key, sub, ...) do { (void)(map); } while (0)
 #define lockdep_set_class(lock, key) do { (void)(lock); (void)(key); } while (0)
 #define lockdep_set_class_and_name(lock, key, name) do { (void)(lock); (void)(key); } while (0)
@@ -46,6 +46,7 @@ struct pin_cookie { };
 #define lock_release(...) do { } while (0)
 #define lock_acquire_exclusive(...) do { } while (0)
 #define lock_acquire_shared(...) do { } while (0)
+#define lock_acquire_shared_recursive(...) do { } while (0)
 #define lock_map_acquire(l) do { (void)(l); } while (0)
 #define lock_map_acquire_read(l) do { (void)(l); } while (0)
 #define lock_map_acquire_try(l) do { (void)(l); } while (0)

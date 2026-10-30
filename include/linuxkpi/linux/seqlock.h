@@ -194,4 +194,5 @@ static inline void done_seqretry(seqlock_t *sl, int seq)
 		read_sequnlock_excl(sl);
 }
 
+#define seqprop_sequence(s) READ_ONCE((s)->sequence)
 #endif

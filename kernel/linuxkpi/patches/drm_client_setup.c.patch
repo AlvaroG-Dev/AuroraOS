@@ -1,0 +1,10 @@
+--- drm_client_setup.c
++++ drm_client_setup.c
+@@ -52,6 +52,7 @@
+ 		return;
+ 	}
+ #endif
++	lkpi_kms_client_setup(dev);	/* LKPI: cliente KMS del compositor (kms_present.c) */
+ 	if (strcmp(drm_client_default, ""))
+ 		drm_warn(dev, "Unknown DRM client %s\n", drm_client_default);
+ }

@@ -32,10 +32,14 @@
 #define lower_32_bits(n) ((u32)((n) & 0xffffffff))
 #define upper_16_bits(n) ((u16)((n) >> 16))
 #define lower_16_bits(n) ((u16)((n) & 0xffff))
-#define _RET_IP_ (unsigned long)__builtin_return_address(0)
-#define _THIS_IP_ ({ __label__ __here; __here: (unsigned long)&&__here; })
+#include <linux/instruction_pointer.h>
 #define TAINT_WARN 9
 #define TAINT_MACHINE_CHECK 4
+#define TAINT_USER 6
+#define TAINT_CRAP 10
+#define TAINT_OOT_MODULE 12
+#define LOCKDEP_STILL_OK 0
+#define LOCKDEP_NOW_UNRELIABLE 1
 #define add_taint(flag, lockdep) do { } while (0)
 #define might_sleep() do { } while (0)
 #define might_sleep_if(cond) do { } while (0)
@@ -83,4 +87,7 @@ enum system_states { SYSTEM_BOOTING, SYSTEM_SCHEDULING, SYSTEM_FREEING_INITMEM,
 #define system_state SYSTEM_RUNNING
 #define oops_in_progress 0
 
+
+#define U64_C(x) x##ULL
+#define U32_C(x) x##U
 #endif

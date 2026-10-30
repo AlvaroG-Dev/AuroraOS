@@ -10,7 +10,12 @@ int acpi_pm_init(void);
 // Estado actual del subsistema PM.
 void acpi_pm_dump(void);
 
-// Acciones
+// Backends ACPI (vuelven con -1 si no hay o no surten efecto). Los usa
+// power.c; el resto del kernel debe llamar a power_request().
+int acpi_pm_poweroff(void); // S5
+int acpi_pm_restart(void);  // RESET_REG del FADT
+
+// Acciones (envoltorios de power_request)
 void acpi_pm_reboot(void);
 void acpi_pm_shutdown(void);
 void acpi_pm_suspend(void); // S3

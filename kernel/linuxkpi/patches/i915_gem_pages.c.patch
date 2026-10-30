@@ -1,0 +1,12 @@
+--- a/i915_gem_pages.c
++++ b/i915_gem_pages.c
+@@ -765,7 +765,8 @@
+ 	GEM_BUG_ON(!i915_gem_object_has_struct_page(obj));
+ 
+ 	sg = i915_gem_object_get_sg(obj, n, &offset);
+-	return sg_page(sg) + offset;
++	/* Las paginas de la capa no son contiguas en memoria (sin vmemmap). */
++	return nth_page(sg_page(sg), offset);
+ }
+ 
+ /* Like i915_gem_object_get_page(), but mark the returned page dirty */

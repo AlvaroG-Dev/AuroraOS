@@ -22,6 +22,7 @@
 #include <linux/preempt.h>
 #include <linux/irqflags.h>
 #include <linux/string.h>
+#include <linux/pid.h>
 #include <asm/barrier.h>
 
 #define TASK_RUNNING 0x00000000
@@ -61,6 +62,8 @@ struct task_struct {
 	char comm[TASK_COMM_LEN];
 	struct mm_struct *mm;
 	struct mm_struct *active_mm;
+	struct task_struct *group_leader; /* la propia tarea: la capa no agrupa hilos */
+	int exit_code;
 	atomic_t __lkpi_usage;		/* referencias (get/put_task_struct) */
 	void *__lkpi_atask;		/* task_t de Aurora */
 	u32 __lkpi_tid;			/* tid de Aurora al publicarlo (validacion) */
@@ -79,6 +82,10 @@ int lkpi_wake_up_state(struct task_struct *p, unsigned int state);
 void lkpi_yield(void);
 void lkpi_put_task_struct(struct task_struct *p);
 
+#define current_is_kswapd() 0
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
 #define current lkpi_get_current()
 #define get_current() lkpi_get_current()
 
@@ -89,8 +96,8 @@ void lkpi_put_task_struct(struct task_struct *p);
 #define task_is_running(p) (READ_ONCE((p)->__state) == TASK_RUNNING)
 #define task_state_index(p) 0
 
-#define schedule() lkpi_schedule()
-#define schedule_timeout(t) lkpi_schedule_timeout(t)
+static inline void schedule(void) { lkpi_schedule(); }
+static inline long schedule_timeout(long t) { return lkpi_schedule_timeout(t); }
 #define io_schedule() lkpi_schedule()
 #define io_schedule_timeout(t) lkpi_schedule_timeout(t)
 #define wake_up_process(p) lkpi_wake_up_process(p)
@@ -153,7 +160,12 @@ static inline int signal_pending_state(unsigned int state, struct task_struct *p
 static inline pid_t task_pid_nr(struct task_struct *p) { return p->pid; }
 static inline pid_t task_tgid_nr(struct task_struct *p) { return p->tgid; }
 static inline pid_t task_pid_vnr(struct task_struct *p) { return p->pid; }
-#define task_pid(p) ((void *)(p))
+static inline struct pid *task_pid(struct task_struct *p) { return lkpi_pid_of(p->pid); }
+static inline struct pid *task_tgid(struct task_struct *p) { return lkpi_pid_of(p->tgid); }
+static inline struct pid *get_task_pid(struct task_struct *p, enum pid_type type)
+{
+	return get_pid(lkpi_pid_of(type == PIDTYPE_PID ? p->pid : p->tgid));
+}
 #define get_task_comm(buf, tsk) ({ strscpy(buf, (tsk)->comm, sizeof(buf)); (buf); })
 #define __get_task_comm(buf, len, tsk) ({ strscpy(buf, (tsk)->comm, len); (buf); })
 #define set_task_comm(tsk, name) strscpy((tsk)->comm, name, TASK_COMM_LEN)
@@ -178,5 +190,9 @@ static inline struct task_struct *get_task_struct(struct task_struct *p)
 	return p;
 }
 #define put_task_struct(p) lkpi_put_task_struct(p)
+
+/* Linux trae las capacidades transitivamente por sched.h (cred) */
+#include <linux/capability.h>
+#include <linux/cred.h>
 
 #endif

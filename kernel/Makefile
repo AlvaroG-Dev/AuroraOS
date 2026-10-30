@@ -26,19 +26,27 @@ else
              -Wno-unused-parameter -Wframe-larger-than=2048
 endif
 
+# Backend de /dev/dri: auto (por omision; el driver de Linux, si hay y sondea,
+# releva al nativo) o native (los modulos DRM de LinuxKPI no se cargan).
+# Cambiarlo exige `make clean` de kernel/lkpi_boot.o.
+DRM_BACKEND ?= auto
+ifeq ($(DRM_BACKEND),native)
+    CFLAGS += -DDRM_BACKEND_NATIVE=1
+endif
+
 LD      = $(CC)
 LDFLAGS = -nostdlib -T linker.ld -no-pie -Wl,--build-id=none
 
-OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o serial.o gdt.o idt.o paging.o pmm.o \
+OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o serial.o plog.o gdt.o idt.o paging.o pmm.o \
         buddy.o spinlock.o heap.o slab.o sched.o ps2.o rtc.o tarfs.o vfs.o ipc.o bmp.o pci.o cpu.o simd.o boot_console.o\
         process.o elf.o klog.o pf.o panic.o driver.o input.o wait.o tty.o test.o acpi.o apic.o time.o block.o ata_pio.o \
         ata_common.o atapi.o ata_dma.o ahci.o completion.o part.o fat32.o pipe.o pty.o gfx/gfx.o gfx/window.o \
         ipi.o gfx/compositor.o gfx/taskbar.o gfx/font_aa.o gfx/font_manager.o gfx/winsrv.o gfx/gfx_filter.o iso9660.o \
-        uaccess.o uaccess_asm.o uaccess_faults.o signal.o procfs.o futex.o swap.o sysctl.o epoll.o signalfd.o unix_socket.o devtmpfs.o evdev.o drm/drm_core.o drm/drm_dumb.o drm/drm_prime.o drm/drm_syncobj.o display_edid.o rseq.o firmware.o drm/drm_sysfs.o vt.o sysfs_dyn.o cmdline.o nl_uevent.o timerfd.o ptimer.o pidfd_inotify.o \
+        uaccess.o uaccess_asm.o uaccess_faults.o signal.o procfs.o futex.o swap.o sysctl.o epoll.o signalfd.o unix_socket.o devtmpfs.o evdev.o drm/drm_core.o drm/drm_dumb.o drm/drm_prime.o drm/drm_syncobj.o display_edid.o rseq.o firmware.o drm/drm_sysfs.o drm/drm_linux_scanout.o lkpi_boot.o vt.o sysfs_dyn.o cmdline.o nl_uevent.o timerfd.o ptimer.o pidfd_inotify.o \
         memfd.o sysfs.o tests/pmm_stress.o tests/kernel_tests.o smp_trampoline.o smp_boot.o vdso.o vdso_blob.o tmpfs.o \
 		net/skb.o net/netif.o net/checksum.o net/net_tests.o net/loopback.o net/loopback_tests.o net/ip.o net/ip_tests.o \
 		net/arp.o net/arp_tests.o net/icmp.o net/icmp_tests.o net/net_proxy.o net/ping.o net/udp.o net/udp_tests.o \
-		net/socket.o net/inet_socket.o net/socket_tests.o net/tcp.o net/tcp_tests.o net/dhcp.o acpi_aml.o acpi_pm.o \
+		net/socket.o net/inet_socket.o net/socket_tests.o net/tcp.o net/tcp_tests.o net/dhcp.o acpi_aml.o acpi_pm.o power.o \
 		usb/usb_dma.o usb/usb_core.o usb/usb_urb.o usb/xhci/xhci_ring.o usb/xhci/xhci.o usb/xhci/xhci_cmd.o usb/xhci/xhci_port.o \
 		usb/xhci/xhci_control.o usb/usb_hid.o usb/usb_storage.o usb/usb_hub.o usb/hid_parser.o usb/usb_uas.o boot_splash.o kthread.o workqueue.o \
 		irq_threaded.o ksymtab.o ksymtab_exports.o kur_loader.o sha256.o bus.o aur_loader.o dma_user.o gfx/dock.o gfx/menubar.o gfx/cursor.o gfx/about.o gfx/brand.o gfx/theme.o irq_user.o aur_bus.o block_proxy.o input_proxy.o gpu_proxy.o msi_user.o usb/usb_proxy.o kmod_sys.o vmap.o

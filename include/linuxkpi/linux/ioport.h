@@ -121,4 +121,7 @@ void lkpi_devm_release_region(struct device *dev, struct resource *parent,
 #define devm_release_mem_region(dev, start, n) \
 	lkpi_devm_release_region(dev, &iomem_resource, (start), (n))
 
+
+#define IORES_DESC_NONE 0
+static inline int release_resource(struct resource *old) { return 0; }
 #endif

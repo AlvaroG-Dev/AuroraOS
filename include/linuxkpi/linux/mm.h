@@ -39,7 +39,9 @@ static inline struct page *virt_to_page(const void *addr) { return lkpi_virt_to_
 #define pfn_to_virt(pfn) __va((phys_addr_t)(pfn) << PAGE_SHIFT)
 #define virt_addr_valid(kaddr) lkpi_virt_addr_valid((const void *)(kaddr))
 bool lkpi_virt_addr_valid(const void *addr);
-#define nth_page(page, n) ((page) + (n))
+/* Las struct page de la capa no son un array contiguo por pfn (cada pagina de shmem se asigna sola):
+ * i915 junta paginas fisicamente contiguas en un mismo sg y page + n apuntaria a basura. */
+#define nth_page(page, n) ((n) ? lkpi_pfn_to_page((page)->pfn + (n)) : (page))
 #define page_to_virt(page) page_address(page)
 #define lowmem_page_address(page) page_address(page)
 #define offset_in_page(p) ((unsigned long)(p) & ~PAGE_MASK)
@@ -91,10 +93,22 @@ static inline void folio_put(struct folio *folio) { put_page(&folio->page); }
 static inline unsigned long folio_nr_pages(const struct folio *folio) { return 1UL << folio->page.order; }
 static inline size_t folio_size(const struct folio *folio) { return PAGE_SIZE << folio->page.order; }
 static inline unsigned long folio_pfn(const struct folio *folio) { return folio->page.pfn; }
+static inline bool want_init_on_free(void) { return false; }
+static inline bool want_init_on_alloc(gfp_t flags) { return false; }
+/* Parte una asignacion de orden > 0 en paginas sueltas (ttm_pool). */
+void lkpi_split_page(struct page *page, unsigned int order);
+#define split_page(page, order) lkpi_split_page(page, order)
 #define page_size(page) (PAGE_SIZE << compound_order(page))
 #define totalram_pages() lkpi_totalram_pages()
 unsigned long lkpi_totalram_pages(void);
-#define si_meminfo(i) do { } while (0)
+struct sysinfo {
+	unsigned long totalram, freeram, sharedram, bufferram;
+	unsigned long totalswap, freeswap;
+	unsigned long totalhigh, freehigh;
+	unsigned int mem_unit;
+};
+void lkpi_si_meminfo(struct sysinfo *si);
+#define si_meminfo(i) lkpi_si_meminfo(i)
 #define is_vmalloc_addr(x) lkpi_is_vmalloc_addr((const void *)(x))
 bool lkpi_is_vmalloc_addr(const void *x);
 
@@ -156,11 +170,16 @@ static inline int get_order(unsigned long size)
 #define VM_FAULT_DONE_COW 0x001000
 #define VM_FAULT_ERROR (VM_FAULT_OOM | VM_FAULT_SIGBUS | VM_FAULT_SIGSEGV | VM_FAULT_HWPOISON)
 
+static inline bool fault_flag_allow_retry_first(unsigned int flags)
+{
+	return (flags & 0x04) && !(flags & 0x1000);	/* ALLOW_RETRY y no TRIED */
+}
 #define FAULT_FLAG_WRITE 0x01
 #define FAULT_FLAG_MKWRITE 0x02
 #define FAULT_FLAG_ALLOW_RETRY 0x04
 #define FAULT_FLAG_RETRY_NOWAIT 0x08
 #define FAULT_FLAG_KILLABLE 0x10
+#define FAULT_FLAG_TRIED 0x1000
 #define FAULT_FLAG_USER 0x40
 #define FAULT_FLAG_REMOTE 0x80
 #define FAULT_FLAG_INTERRUPTIBLE 0x200
@@ -214,6 +233,10 @@ static inline void vm_flags_init(struct vm_area_struct *vma, vm_flags_t flags)
 	vma->__vm_flags = flags;
 }
 #define vm_flags_reset vm_flags_init
+static inline bool is_cow_mapping(vm_flags_t flags)
+{
+	return (flags & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE;
+}
 static inline bool vma_is_anonymous(struct vm_area_struct *vma) { return !vma->vm_ops; }
 
 int lkpi_remap_pfn_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,
@@ -246,4 +269,26 @@ static inline vm_fault_t vmf_error(int err)
 	return err == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
 }
 
+/* En Linux lo declara linux/mm.h (drm_vma_manager.h lo usa sin incluir fs.h);
+ * misma declaracion y macro que linux/fs.h. */
+struct address_space;
+void lkpi_unmap_mapping_range(struct address_space *mapping, loff_t holebegin,
+			      loff_t holelen, int even_cows);
+#define unmap_mapping_range(m, b, l, e) lkpi_unmap_mapping_range(m, b, l, e)
+
+#include <linux/vmalloc.h>
+#include <linux/shrinker.h>
+#include <linux/mmap_lock.h>
+
+
+static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	vma->vm_file = file;
+}
+static inline struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr) { return NULL; }
+
+/* Sin arbol de VMA de usuario: el iterador no visita nada (userptr/probe_range fallan con -EFAULT). */
+struct vma_iterator { struct mm_struct *mm; unsigned long addr; };
+#define VMA_ITERATOR(name, _mm, _addr) struct vma_iterator name = { .mm = (_mm), .addr = (_addr) }
+#define for_each_vma_range(vmi, vma, end) for ((vma) = NULL; (vma); )
 #endif

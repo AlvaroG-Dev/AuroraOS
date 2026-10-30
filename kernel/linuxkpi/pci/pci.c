@@ -119,7 +119,8 @@ static u32 cfg32(struct pci_dev *d, int where)
 
 /* --------------------------------------------------- capabilities */
 
-u8 lkpi_pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
+/* Recorre la lista desde el byte `pos`, que contiene el puntero al siguiente. */
+static u8 pci_find_cap_from(struct pci_dev *dev, u8 pos, int cap)
 {
 	u8 id;
 	int ttl = 48;
@@ -136,13 +137,19 @@ u8 lkpi_pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
 	}
 	return 0;
 }
+
+/* pos es el desplazamiento de una capability: se sigue su puntero al siguiente. */
+u8 lkpi_pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
+{
+	return pci_find_cap_from(dev, pos + PCI_CAP_LIST_NEXT, cap);
+}
 EXPORT_SYMBOL(lkpi_pci_find_next_capability);
 
 u8 lkpi_pci_find_capability(struct pci_dev *dev, int cap)
 {
 	if (!(cfg16(dev, PCI_STATUS) & PCI_STATUS_CAP_LIST))
 		return 0;
-	return lkpi_pci_find_next_capability(dev, PCI_CAPABILITY_LIST, cap);
+	return pci_find_cap_from(dev, PCI_CAPABILITY_LIST, cap);
 }
 EXPORT_SYMBOL(lkpi_pci_find_capability);
 
@@ -543,6 +550,115 @@ struct pci_dev *lkpi_pci_get_class(unsigned int class, struct pci_dev *from)
 	return lkpi_pci_get_next(lkpi_pci_match_class, &class, from);
 }
 EXPORT_SYMBOL(lkpi_pci_get_class);
+
+static struct pci_dev *lkpi_vga_default;
+void lkpi_vga_set_default_device(struct pci_dev *pdev);
+
+/*
+ * Display-shadow: el dispositivo de pantalla que aloja el framebuffer del
+ * firmware (alguno de sus BAR contiene la direccion fisica del GOP) pasa a
+ * ser "sombra" para los drivers de Linux: ver mm/ioremap.c. Se calcula la
+ * primera vez que alguien hace ioremap. `lkpi.shadow=0` en la linea del
+ * kernel lo desactiva (un driver de pantalla de Linux con control real, L5b).
+ */
+static bool lkpi_bar_has(struct pci_dev *p, u64 addr)
+{
+	for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
+		struct resource *r = &p->resource[i];
+
+		if ((r->flags & IORESOURCE_MEM) && r->end > r->start && addr >= r->start && addr <= r->end)
+			return true;
+	}
+	return false;
+}
+
+static bool lkpi_match_display(struct pci_dev *p, const void *data)
+{
+	return (p->class >> 16) == PCI_BASE_CLASS_DISPLAY;
+}
+
+void lkpi_display_shadow_probe(void)
+{
+	static DEFINE_MUTEX(probe_lock);
+	static bool done, probing;
+	struct pci_dev *p = NULL;
+	char opt[8];
+	u64 fbp, fbs;
+	bool fb_only = false, fb_only_set = false;
+
+	if (READ_ONCE(done) || READ_ONCE(probing))
+		return;
+	mutex_lock(&probe_lock);
+	if (done || probing) {
+		mutex_unlock(&probe_lock);
+		return;
+	}
+	probing = true;
+	/* lkpi.shadow=0: sin sombra; =fb: solo el BAR que aloja el framebuffer
+	 * (los registros del dispositivo son reales: i915 los necesita). Sin la
+	 * opcion, una GPU Intel real usa fb y el resto (QEMU) sombra completa. */
+	if (aurora_cmdline_get("lkpi.shadow", opt, sizeof(opt))) {
+		if (opt[0] == '0')
+			goto out;
+		fb_only = opt[0] == 'f';
+		fb_only_set = true;
+	}
+	if (!aurora_gpup_get_framebuffer(&fbp, &fbs))
+		goto out;
+	while ((p = lkpi_pci_get_next(lkpi_match_display, NULL, p)) != NULL) {
+		if (!lkpi_bar_has(p, fbp))
+			continue;
+		if (!fb_only_set)
+			fb_only = p->vendor == PCI_VENDOR_ID_INTEL;
+		for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
+			struct resource *r = &p->resource[i];
+			u64 len = r->end - r->start + 1, start = r->start;
+			bool has_fb = fbp >= r->start && fbp < r->end;
+
+			if (!(r->flags & IORESOURCE_MEM) || r->end <= r->start)
+				continue;
+			if (fb_only && !has_fb)
+				continue;
+			/* lkpi_vmalloc() no pasa de 64 MiB - 4 KiB (limite del heap): la
+			 * sombra de un BAR grande cubre solo el framebuffer del firmware. */
+			if (len > (32ULL << 20)) {
+				len = 32ULL << 20;
+				if (has_fb && fbp + fbs > start + len) {
+					start = fbp & ~0xfffULL;
+					len = min_t(u64, ALIGN(fbp + fbs, PAGE_SIZE) - start, len);
+				}
+			}
+			if (lkpi_display_shadow_add(start, len, len <= 0x10000))
+				pr_err("linuxkpi: %s: sin memoria para la sombra de BAR%d (%llu KiB)\n",
+				       pci_name(p), i, (unsigned long long)(len >> 10));
+		}
+		lkpi_vga_set_default_device(p);
+		pr_info("linuxkpi: %s aloja el framebuffer del firmware: %s en sombra\n",
+			pci_name(p), fb_only ? "su BAR del framebuffer" : "sus BAR");
+		pci_dev_put(p);
+		break;
+	}
+out:
+	WRITE_ONCE(done, true);
+	probing = false;
+	mutex_unlock(&probe_lock);
+}
+
+/* VGA de arranque (vgaarb): el que se fije o, si no, el primero de clase VGA. */
+
+struct pci_dev *lkpi_vga_default_device(void)
+{
+	if (!lkpi_vga_default)
+		lkpi_vga_default = lkpi_pci_get_class(PCI_CLASS_DISPLAY_VGA << 8, NULL);
+	return lkpi_vga_default;
+}
+EXPORT_SYMBOL(lkpi_vga_default_device);
+
+void lkpi_vga_set_default_device(struct pci_dev *pdev)
+{
+	lkpi_vga_default = pdev;
+}
+EXPORT_SYMBOL(lkpi_vga_set_default_device);
 
 struct pci_dev *lkpi_pci_get_domain_bus_and_slot(int domain, unsigned int bus,
 						 unsigned int devfn)
@@ -1027,6 +1143,21 @@ static ssize_t device_show(struct device *dev, struct device_attribute *a, char 
 	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->device);
 }
 static DEVICE_ATTR_RO(device);
+static ssize_t subsystem_vendor_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->subsystem_vendor);
+}
+static DEVICE_ATTR_RO(subsystem_vendor);
+static ssize_t subsystem_device_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->subsystem_device);
+}
+static DEVICE_ATTR_RO(subsystem_device);
+static ssize_t revision_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%02x\n", to_pci_dev(dev)->revision);
+}
+static DEVICE_ATTR_RO(revision);
 static ssize_t class_show(struct device *dev, struct device_attribute *a, char *buf)
 {
 	return sysfs_emit(buf, "0x%06x\n", to_pci_dev(dev)->class);
@@ -1045,9 +1176,36 @@ static DEVICE_ATTR_RO(enable);
 
 static struct attribute *lkpi_pci_dev_attrs[] = {
 	&dev_attr_vendor.attr, &dev_attr_device.attr, &dev_attr_class.attr,
+	&dev_attr_subsystem_vendor.attr, &dev_attr_subsystem_device.attr, &dev_attr_revision.attr,
 	&dev_attr_irq.attr, &dev_attr_enable.attr, NULL,
 };
 ATTRIBUTE_GROUPS(lkpi_pci_dev);
+
+/* /sys/.../config: libdrm (drmParsePciDeviceInfo) saca de aqui vendor, device,
+ * subsistema y revision; sin el, Mesa no puede elegir driver (crocus) y cae a swrast. */
+static ssize_t config_read(struct file *f, struct kobject *kobj, const struct bin_attribute *a,
+			   char *buf, loff_t off, size_t count)
+{
+	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj));
+	size_t i;
+
+	if (off >= 256)
+		return 0;
+	if (count > 256 - off)
+		count = 256 - off;
+	for (i = 0; i < count; i++) {
+		u8 v = 0;
+
+		pci_read_config_byte(pdev, off + i, &v);
+		buf[i] = v;
+	}
+	return count;
+}
+static const struct bin_attribute lkpi_pci_config_attr = {
+	.attr = { .name = "config", .mode = 0444 },
+	.size = 256,
+	.read = config_read,
+};
 
 static int lkpi_pci_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
@@ -1162,12 +1320,15 @@ static int lkpi_pci_shadow_probe(struct aurora_device *adev)
 		pci_dev_put(pdev);
 		return rc;
 	}
+	device_create_bin_file(&pdev->dev, &lkpi_pci_config_attr);
 	rc = device_driver_attach(&sh->pdrv->driver, &pdev->dev);
 	if (rc) {
-		/* El probe de Linux fallo: Aurora puede ofrecerlo a otro driver. */
+		/* El probe de Linux fallo: Aurora puede ofrecerlo a otro driver, y si
+		 * aur.skip se lo habia reservado a Linux, se lanza el .aur omitido (4B). */
 		device_del(&pdev->dev);
 		pdev->lkpi_adev = NULL;
 		pci_dev_put(pdev);
+		aurora_aur_bus_launch_skipped(ap->bus, ap->slot, ap->func);
 		return -ENODEV;
 	}
 	/* La referencia de la creacion queda para el vinculo (se suelta en remove). */

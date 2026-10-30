@@ -2,7 +2,7 @@
 TARGET  = BOOTX64.EFI
 SRCS    = efi_main.c splash.c
 OBJS    = $(SRCS:.c=.o)
-HDRS    = efi_min.h splash.h ../include/kernel_boot_info.h
+HDRS    = efi_min.h splash.h ../include/kernel_boot_info.h ../include/persist_log.h
 
 CC      = clang
 LD      = lld-link
@@ -27,7 +27,10 @@ LDFLAGS = -subsystem:efi_application \
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
+# Depende de fuentes y cabeceras (los .o se borran tras enlazar): solo se
+# reconstruye cuando cambia algo.
+$(TARGET): $(SRCS) $(HDRS)
+	@$(MAKE) --no-print-directory $(OBJS)
 	@echo "  [lld-link] subsys  = efi_application"
 	$(LD) $(LDFLAGS) $(OBJS) -out:$(TARGET)
 	rm -f $(OBJS)

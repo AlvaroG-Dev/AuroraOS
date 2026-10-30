@@ -622,7 +622,10 @@ static int sysfs_resource_mmap(vfs_node_t *node, struct process *proc,
              r->device);
     return -EPERM;
   }
-  if (offset >= r->size || length > r->size - offset)
+  /* Un BAR menor que una pagina (ABAR de AHCI en Haswell: 0x800) solo se
+   * puede mapear por paginas enteras; se redondea hacia arriba. */
+  uint64_t map_size = (r->size + 0xFFFULL) & ~0xFFFULL;
+  if (offset >= map_size || length > map_size - offset)
     return -EINVAL;
   if ((offset & 0xFFFULL) != 0)
     return -EINVAL;

@@ -18,4 +18,12 @@ static __always_inline int raw_smp_processor_id(void)
 #define get_cpu() ({ preempt_disable(); smp_processor_id(); })
 #define put_cpu() preempt_enable()
 
+
+/* Solo la CPU actual: sin handler de IPI de funcion (IPI_VECTOR_CALL, pendiente de L7/IPI). */
+static inline void on_each_cpu(void (*func)(void *info), void *info, int wait)
+{
+	preempt_disable();
+	func(info);
+	preempt_enable();
+}
 #endif

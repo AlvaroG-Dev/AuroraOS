@@ -73,6 +73,7 @@ void lkpi_seq_hex_dump(struct seq_file *m, const char *prefix_str, int prefix_ty
 #define seq_vprintf lkpi_seq_vprintf
 #define seq_puts(m, s) lkpi_seq_puts(m, s)
 #define seq_putc(m, c) lkpi_seq_putc(m, c)
+#define seq_user_ns(m) (&init_user_ns)
 #define seq_write(m, d, l) lkpi_seq_write(m, d, l)
 #define seq_hex_dump lkpi_seq_hex_dump
 static inline bool seq_has_overflowed(struct seq_file *m) { return m->count == m->size; }

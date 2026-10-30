@@ -73,6 +73,11 @@ void lkpi_address_space_init(struct address_space *mapping, struct inode *host)
 	mutex_init(&mapping->i_mmap_mutex);
 	INIT_LIST_HEAD(&mapping->i_mmap);
 	mapping->nrpages = 0;
+	mapping->gfp_mask = GFP_HIGHUSER;
+	mapping->flags = 0;
+	mapping->__lkpi_pages = NULL;
+	mapping->__lkpi_cap = 0;
+	mutex_init(&mapping->__lkpi_pages_lock);
 }
 EXPORT_SYMBOL(lkpi_address_space_init);
 
@@ -474,6 +479,8 @@ EXPORT_SYMBOL(lkpi_put_unused_fd);
 void lkpi_fd_install(unsigned int fd, struct file *file)
 {
 	/* Consume la referencia del llamante; si el hueco ya no esta, se suelta. */
+	if (lkpi_dma_buf_fd_install(fd, file))
+		return;
 	if (aurora_vfs_fd_install_node((int)fd, file->__lkpi_node, (int)file->f_flags))
 		lkpi_fput(file);
 }

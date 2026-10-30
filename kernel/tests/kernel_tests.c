@@ -28,6 +28,7 @@
 #include "../klog.h"
 #include "../kthread.h"
 #include "../paging.h"
+#include "../pci.h"
 #include "../part.h"
 #include "../pipe.h"
 #include "../pmm.h"
@@ -6298,14 +6299,24 @@ REGISTER_TEST_FLAGS("sysfs: atributos dinámicos con show/store", test_sysfs_dyn
 // Cada .kur de prueba hace sus comprobaciones en module_init y las cuenta
 // aquí con test_pass/test_fail (exportados en ksymtab_exports.c), dentro del
 // REGISTER_TEST que lo carga. Tras cargarlo, se descarga.
+#include "../cmdline.h"
 #include "../kur_loader.h"
 #include "../ksymtab.h"
+#include "../lkpi_boot.h"
 
 #define LKPI_DIR "/lib/modules/linuxkpi"
 
 // .fini_array de lkpi_test_loader lo incrementa al descargarse.
 volatile int kur_test_fini_counter;
 KEXPORT_SYMBOL(kur_test_fini_counter);
+
+// Con `lkpi.load=` en la línea del kernel la capa y los drivers de Linux los
+// cargó el arranque y los usa el userland: estas pruebas (que cargan y
+// descargan la capa) no se ejecutan.
+static bool lkpi_boot_owned(void) {
+  char v[8];
+  return cmdline_get("lkpi.load", v, sizeof(v)) != 0 || lkpi_boot_loaded();
+}
 
 static struct kur_module *lkpi_layer(void) {
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
@@ -6331,6 +6342,8 @@ static void lkpi_unload_test(struct kur_module *m) {
 }
 
 static void test_lkpi_loader(void) {
+  if (lkpi_boot_owned())
+    return;
   int dyn_before = kur_dynsym_count();
   int fini_before = kur_test_fini_counter;
   struct kur_module *m = lkpi_load_test("lkpi_test_loader");
@@ -6354,6 +6367,8 @@ REGISTER_TEST_FLAGS("linuxkpi: cargador .kur para módulos grandes (L0.4)",
                     test_lkpi_loader, TEST_FLAG_BLOCKING);
 
 static void test_lkpi_layer_exports(void) {
+  if (lkpi_boot_owned())
+    return;
   struct kur_module *m = lkpi_layer();
   TEST_ASSERT(m != NULL, "linuxkpi.kur no carga");
   if (!m)
@@ -6366,49 +6381,165 @@ static void test_lkpi_layer_exports(void) {
 REGISTER_TEST_FLAGS("linuxkpi: carga de la capa y sus exports", test_lkpi_layer_exports,
                     TEST_FLAG_BLOCKING);
 
-static void test_lkpi_k0(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k0")); }
+static void test_lkpi_k0(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k0")); }
 REGISTER_TEST_FLAGS("linuxkpi: K0 base (printk, formatos, bits, atómicos)", test_lkpi_k0,
                     TEST_FLAG_BLOCKING);
 
-static void test_lkpi_k1(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k1")); }
+static void test_lkpi_k1(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k1")); }
 REGISTER_TEST_FLAGS("linuxkpi: K1 memoria (kmalloc, páginas, vmalloc, ioremap)",
                     test_lkpi_k1, TEST_FLAG_BLOCKING);
 
-static void test_lkpi_k3(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k3")); }
+static void test_lkpi_k3(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k3")); }
 REGISTER_TEST_FLAGS("linuxkpi: K3 estructuras (list, rbtree, xarray, idr)", test_lkpi_k3,
                     TEST_FLAG_BLOCKING);
 
-static void test_lkpi_k2(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k2")); }
+static void test_lkpi_k2(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k2")); }
 REGISTER_TEST_FLAGS("linuxkpi: K2 sincronización, tiempo y trabajo diferido (L2)",
                     test_lkpi_k2, TEST_FLAG_BLOCKING);
 
 // Estrés con varias CPU (hito de L2): mutex/ww_mutex, work + timers, RCU.
-static void test_lkpi_k2_smp(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k2_smp")); }
+static void test_lkpi_k2_smp(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k2_smp")); }
 REGISTER_TEST_FLAGS("linuxkpi: K2 estrés SMP (mutex, ww_mutex, work+timers, RCU)",
                     test_lkpi_k2_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
-static void test_lkpi_k4(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k4")); }
+static void test_lkpi_k4(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k4")); }
 REGISTER_TEST_FLAGS("linuxkpi: K4 modelo de dispositivos (kobject, sysfs, bus, devres) (L3)",
                     test_lkpi_k4, TEST_FLAG_BLOCKING);
 
 // Hito de L3: drivers PCI de Linux de juguete sobre edu y virtio-rng-pci de
 // QEMU (scripts/qemu-drive.py los añade; si no están, se omite).
-static void test_lkpi_k5(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k5")); }
+static void test_lkpi_k5(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k5")); }
 REGISTER_TEST_FLAGS("linuxkpi: K5 PCI, IRQ y DMA con edu y virtio-rng (L3)", test_lkpi_k5,
                     TEST_FLAG_BLOCKING);
 
-static void test_lkpi_k5_smp(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k5_smp")); }
+static void test_lkpi_k5_smp(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k5_smp")); }
 REGISTER_TEST_FLAGS("linuxkpi: K5 SMP (MSI-X repartida, afinidad, estrés de MSI)",
                     test_lkpi_k5_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
 
 // L4: DMA (bounce, también con edu), scatterlist, dma_pool, vmap, dma_buf,
 // firmware real, i2c-algo-bit, backlight, debugfs y task_struct. Lo que
 // necesita un proceso lo prueba user/musl/apps/lkpi_test.
-static void test_lkpi_k6(void) { lkpi_unload_test(lkpi_load_test("lkpi_test_k6")); }
+static void test_lkpi_k6(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k6")); }
 REGISTER_TEST_FLAGS("linuxkpi: L4 DMA, dma_buf, firmware, i2c, backlight, debugfs",
                     test_lkpi_k6, TEST_FLAG_BLOCKING);
 
+// L5 (K7): dma_fence, chain, array, unwrap, dma_resv, sync_file y el enlace con
+// los fences de Aurora. El fence implícito de los dmabuf lo prueba lkpi_test.
+static void test_lkpi_k7(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k7")); }
+REGISTER_TEST_FLAGS("linuxkpi: L5 K7 fences, dma_resv y sync_file", test_lkpi_k7,
+                    TEST_FLAG_BLOCKING);
+
+// L5: el nucleo virtio de Linux (lkpi_virtio.kur) y un driver virtio de juguete
+// sobre virtio-rng-pci. Se carga y descarga aquí para que el bus virtio no
+// quede registrado entre tests.
+static void test_lkpi_virtio(void) {
+  if (lkpi_boot_owned())
+    return;
+  struct kur_module *v = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int rc = kur_loader_load_file(LKPI_DIR "/lkpi_virtio.kur", &v);
+  TEST_ASSERT(rc == 0 && v, "lkpi_virtio no carga (rc=%d)", rc);
+  if (rc != 0 || !v)
+    return;
+  lkpi_unload_test(lkpi_load_test("lkpi_test_virtio"));
+  lkpi_unload_test(v);
+}
+REGISTER_TEST_FLAGS("linuxkpi: L5 virtio (bus, virtqueues, virtio-pci)", test_lkpi_virtio,
+                    TEST_FLAG_BLOCKING);
+
+// L5: el núcleo DRM/KMS de Linux (lkpi_drm.kur) con un driver DRM de juguete:
+// registro de minors, sondeo de modos y un modeset atómico completo.
+static void test_lkpi_drm(void) {
+  if (lkpi_boot_owned())
+    return;
+  struct kur_module *d = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int rc = kur_loader_load_file(LKPI_DIR "/lkpi_drm.kur", &d);
+  TEST_ASSERT(rc == 0 && d, "lkpi_drm no carga (rc=%d)", rc);
+  if (rc == 0 && d) {
+    lkpi_unload_test(lkpi_load_test("lkpi_test_drm"));
+    lkpi_unload_test(d);
+  }
+}
+REGISTER_TEST_FLAGS("linuxkpi: L5 DRM/KMS (núcleo de Linux, modeset atómico)", test_lkpi_drm,
+                    TEST_FLAG_BLOCKING);
+
+// L6 (K9): shrinker, split_page, swap en RAM, kmap con cache WC, io_mapping,
+// mmu_notifier (stub) y hmm desactivado, sobre la capa sola.
+static void test_lkpi_k9(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_k9")); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 shrinker, split_page, swap en RAM, mmu_notifier", test_lkpi_k9,
+                    TEST_FLAG_BLOCKING);
+
+// L6: ttm, drm_buddy y gpu-sched (lkpi_ttm.kur sobre lkpi_drm.kur) con un driver
+// de memoria de dispositivo simulado: VRAM en RAM gestionada con drm_buddy, GTT,
+// evicion, swap a shmem y un motor de copia detrás de un drm_gpu_scheduler.
+static void lkpi_ttm_run(const char *test) {
+  struct kur_module *d = NULL, *t = NULL;
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int rc = kur_loader_load_file(LKPI_DIR "/lkpi_drm.kur", &d);
+  TEST_ASSERT(rc == 0 && d, "lkpi_drm no carga (rc=%d)", rc);
+  if (rc != 0 || !d)
+    return;
+  rc = kur_loader_load_file(LKPI_DIR "/lkpi_ttm.kur", &t);
+  TEST_ASSERT(rc == 0 && t, "lkpi_ttm no carga (rc=%d)", rc);
+  if (rc == 0 && t) {
+    lkpi_unload_test(lkpi_load_test(test));
+    lkpi_unload_test(t);
+  }
+  lkpi_unload_test(d);
+}
+static void test_lkpi_ttm(void) { if (lkpi_boot_owned()) return; lkpi_ttm_run("lkpi_test_ttm"); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 ttm, drm_buddy y gpu-sched (VRAM simulada)", test_lkpi_ttm,
+                    TEST_FLAG_BLOCKING);
+static void test_lkpi_ttm_smp(void) { if (lkpi_boot_owned()) return; lkpi_ttm_run("lkpi_test_ttm_smp"); }
+REGISTER_TEST_FLAGS("linuxkpi: L6 ttm estrés SMP (hilos compitiendo por el VRAM)",
+                    test_lkpi_ttm_smp, TEST_FLAG_BLOCKING | TEST_FLAG_NEEDS_SMP);
+
+// L7: i915 completo (lkpi_i915.kur) sobre drm, ttm y los helpers de display.
+// Sin GPU Intel en QEMU solo se comprueba que enlaza, inicializa (registro del
+// driver PCI, tracepoints, params) y se descarga sin dejar nada; el sondeo real
+// lo valida el autor en hardware (Gen7.5, Toshiba Portégé R30-A).
+// Con una GPU Intel real (hardware) cargar lkpi_i915 hace probe sobre ella en
+// pleno arranque (#UD en el Portégé R30-A, Haswell): la prueba es para QEMU.
+// El i915 real se prueba a mano con `lkpi.load=`.
+static bool lkpi_intel_gpu_present(void) {
+  int n = 0;
+  const pci_device_t *d = pci_get_devices(&n);
+  for (int i = 0; d && i < n; i++)
+    if (d[i].vendor_id == 0x8086 && d[i].class_id == 0x03)
+      return true;
+  return false;
+}
+
+static void test_lkpi_i915_load(void) {
+  if (lkpi_boot_owned())
+    return;
+  if (lkpi_intel_gpu_present()) {
+    LOG_INFO("[TEST] i915: GPU Intel real presente, no se carga lkpi_i915");
+    return;
+  }
+  static const char *const names[] = {"lkpi_drm", "lkpi_ttm", "lkpi_drm_display", "lkpi_i915"};
+  struct kur_module *m[4] = {0};
+  TEST_ASSERT(lkpi_layer() != NULL, "linuxkpi.kur no carga");
+  int n = 0;
+  for (; n < 4; n++) {
+    char path[96];
+    snprintf(path, sizeof path, LKPI_DIR "/%s.kur", names[n]);
+    int rc = kur_loader_load_file(path, &m[n]);
+    TEST_ASSERT(rc == 0 && m[n], "%s no carga (rc=%d)", names[n], rc);
+    if (rc != 0 || !m[n])
+      break;
+  }
+  for (int i = n - 1; i >= 0; i--)
+    if (m[i])
+      lkpi_unload_test(m[i]);
+}
+REGISTER_TEST_FLAGS("linuxkpi: L7 i915 (carga y descarga sin GPU Intel)", test_lkpi_i915_load,
+                    TEST_FLAG_BLOCKING);
+
 static void test_lkpi_unload(void) {
+  if (lkpi_boot_owned())
+    return;
   struct kur_module *m = kur_loader_find_by_name("linuxkpi");
   TEST_ASSERT(m != NULL, "linuxkpi no estaba cargada");
   if (!m)

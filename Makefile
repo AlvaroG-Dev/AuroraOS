@@ -81,11 +81,15 @@ bootloader-bios: | env
 
 # [FIX] Reglas explícitas para que 'make' sepa cómo generar los archivos
 # si los pide como dependencia (ej: desde $(EFI_IMG) o iso_root)
-$(BOOTX64_EFI): | env
+# FORCE: el sub-make decide si hay que reconstruir (antes un BOOTX64.EFI viejo
+# sobrevivia a cambios de kernel_boot_info.h y el kernel leia basura).
+$(BOOTX64_EFI): FORCE | env
 	$(MAKE) -C bootloader/efi
 
-$(BIOS_IMG): | env
+$(BIOS_IMG): FORCE | env
 	$(MAKE) -C bootloader/bios
+
+FORCE:
 
 # Imagenes de disco de prueba: las crea scripts/setup-env.sh.
 tests/test_disk.img tests/extra_disk.img: | env
@@ -425,6 +429,8 @@ iso_root: $(EFI_IMG) $(BOOTX64_EFI) $(BIOS_IMG)
 	@ls -lh $(ISO_ROOT)/efi.img $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI $(ISO_ROOT)/boot/bios.img
 
 # ---------------------------------------------------------------------------
+USB_DATA_MB ?= 64
+
 # aurora.iso: ISO híbrida (BIOS + UEFI) para CD y USB.
 # ---------------------------------------------------------------------------
 $(ISO_OUT): iso_root
@@ -472,6 +478,26 @@ $(ISO_OUT): iso_root
 	 \
 	 echo "  [ISO] Inyectando stage2.bin en LBA 1"; \
 	 dd if=bootloader/bios/stage2.bin of=$(ISO_OUT) bs=512 seek=1 conv=notrunc status=none
+
+	@# Particion 2 (FAT32 "AURORADATA") al final de la imagen: al volcar la ISO
+	@# a un USB el kernel la monta en /data y ahi escribe el log en vivo
+	@# (cmdline klog.file=/data/aurora.log). USB_DATA_MB=0 la desactiva.
+	@if [ "$(USB_DATA_MB)" != "0" ]; then \
+	 echo "[ISO] Anadiendo particion de datos FAT32 ($(USB_DATA_MB) MB) para el log..."; \
+	 iso_sz=$$(stat -c%s $(ISO_OUT)); \
+	 start_mb=$$(( (iso_sz + 1048575) / 1048576 )); \
+	 truncate -s $$((start_mb * 1048576)) $(ISO_OUT); \
+	 rm -f build/usbdata.img; \
+	 dd if=/dev/zero of=build/usbdata.img bs=1M count=$(USB_DATA_MB) status=none; \
+	 mkfs.fat -F 32 -n AURORADATA build/usbdata.img >/dev/null; \
+	 cat build/usbdata.img >> $(ISO_OUT); \
+	 start_lba=$$((start_mb * 2048)); n_sec=$$(( $(USB_DATA_MB) * 2048 )); \
+	 printf "00 fe ff ff 0c fe ff ff" > build/mbr_part2.hex; \
+	 printf " %02x%02x%02x%02x" $$((start_lba & 255)) $$(((start_lba >> 8) & 255)) $$(((start_lba >> 16) & 255)) $$(((start_lba >> 24) & 255)) >> build/mbr_part2.hex; \
+	 printf " %02x%02x%02x%02x\n" $$((n_sec & 255)) $$(((n_sec >> 8) & 255)) $$(((n_sec >> 16) & 255)) $$(((n_sec >> 24) & 255)) >> build/mbr_part2.hex; \
+	 xxd -r -p build/mbr_part2.hex build/mbr_part2.bin; \
+	 dd if=build/mbr_part2.bin of=$(ISO_OUT) bs=1 seek=462 conv=notrunc status=none; \
+	 fi
 
 	@echo "[ISO] $(ISO_OUT) listo para CD/USB:"
 	@ls -lh $(ISO_OUT)

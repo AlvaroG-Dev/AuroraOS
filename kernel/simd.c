@@ -251,9 +251,13 @@ copy_nt_sse2(uint32_t *dst, const uint32_t *src, size_t n) {
     __m128i v = _mm_loadu_si128((const __m128i *)&src[i]);
     _mm_stream_si128((__m128i *)&dst[i], v);
   }
-  _mm_sfence();
   for (; i < n; i++)
     dst[i] = src[i];
+  /* El sfence va DESPUES de la cola escalar: los stores normales a VRAM (WC)
+   * tambien quedan en los buffers de combinacion hasta que algo los desaloja;
+   * con rectangulos pequenos (cursor) todo es cola y el ultimo trozo
+   * tardaba en llegar a la pantalla. */
+  _mm_sfence();
 }
 
 __attribute__((target("avx2"))) static void
@@ -267,9 +271,13 @@ copy_nt_avx2(uint32_t *dst, const uint32_t *src, size_t n) {
     __m256i v = _mm256_loadu_si256((const __m256i *)&src[i]);
     _mm256_stream_si256((__m256i *)&dst[i], v);
   }
-  _mm_sfence();
   for (; i < n; i++)
     dst[i] = src[i];
+  /* El sfence va DESPUES de la cola escalar: los stores normales a VRAM (WC)
+   * tambien quedan en los buffers de combinacion hasta que algo los desaloja;
+   * con rectangulos pequenos (cursor) todo es cola y el ultimo trozo
+   * tardaba en llegar a la pantalla. */
+  _mm_sfence();
 }
 
 __attribute__((target("avx512f"))) static void
@@ -283,9 +291,13 @@ copy_nt_avx512(uint32_t *dst, const uint32_t *src, size_t n) {
     __m512i v = _mm512_loadu_si512((const void *)&src[i]);
     _mm512_stream_si512((void *)&dst[i], v);
   }
-  _mm_sfence();
   for (; i < n; i++)
     dst[i] = src[i];
+  /* El sfence va DESPUES de la cola escalar: los stores normales a VRAM (WC)
+   * tambien quedan en los buffers de combinacion hasta que algo los desaloja;
+   * con rectangulos pequenos (cursor) todo es cola y el ultimo trozo
+   * tardaba en llegar a la pantalla. */
+  _mm_sfence();
 }
 
 // ============================================================================
@@ -382,6 +394,7 @@ void simd_copy_to_vram(uint32_t *dst, const uint32_t *src, size_t n) {
   if (n == 0)
     return;
   s_copy_vram(dst, src, n);
+  _mm_sfence(); /* tambien en la variante escalar */
 }
 
 void simd_copy_normal(uint32_t *dst, const uint32_t *src, size_t n) {

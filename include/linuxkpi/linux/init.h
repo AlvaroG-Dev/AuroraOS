@@ -20,4 +20,8 @@
 #define __exit_p(x) x
 #define __init_memblock
 
+/* Opciones de la linea de ordenes del kernel de Linux: la capa no las analiza */
+#define __setup(str, fn) static const void *const __setup_##fn __used = (const void *)(fn)
+#define early_param(str, fn) __setup(str, fn)
+
 #endif

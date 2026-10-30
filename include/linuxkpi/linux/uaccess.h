@@ -11,6 +11,8 @@
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/gfp_types.h>
+#include <linux/slab.h>
+#include <linux/overflow.h>
 
 #define TASK_SIZE_MAX 0x00007FFFFFFFF000UL
 
@@ -42,10 +44,10 @@ static inline long strncpy_from_user(char *dst, const char __user *src, long cou
 	return lkpi_strncpy_from_user(dst, src, count);
 }
 #define put_user(x, ptr) \
-	({ __typeof__(*(ptr)) __pu_val = (x); \
+	({ __unqual_scalar_typeof(*(ptr)) __pu_val = (x); \
 	   copy_to_user((ptr), &__pu_val, sizeof(*(ptr))) ? -EFAULT : 0; })
 #define get_user(x, ptr) \
-	({ __typeof__(*(ptr)) __gu_val; int __gu_err = \
+	({ __unqual_scalar_typeof(*(ptr)) __gu_val; int __gu_err = \
 		copy_from_user(&__gu_val, (ptr), sizeof(*(ptr))) ? -EFAULT : 0; \
 	   (x) = __gu_err ? (__typeof__(*(ptr)))0 : __gu_val; __gu_err; })
 #define __put_user put_user
@@ -65,6 +67,30 @@ static inline unsigned long clear_user(void __user *to, unsigned long n)
 void *lkpi_memdup_user(const void __user *src, size_t len);
 #define memdup_user lkpi_memdup_user
 #define vmemdup_user lkpi_memdup_user
+
+static inline void *memdup_user_nul(const void __user *src, size_t len)
+{
+	char *p = kmalloc(len + 1, GFP_USER);
+
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+	if (copy_from_user(p, src, len)) {
+		kfree(p);
+		return ERR_PTR(-EFAULT);
+	}
+	p[len] = '\0';
+	return p;
+}
+
+static inline void *memdup_array_user(const void __user *src, size_t n, size_t size)
+{
+	size_t bytes;
+
+	if (check_mul_overflow(n, size, &bytes))
+		return ERR_PTR(-EOVERFLOW);
+	return lkpi_memdup_user(src, bytes);
+}
+#define vmemdup_array_user memdup_array_user
 #define pagefault_disable() do { } while (0)
 #define pagefault_enable() do { } while (0)
 #define user_access_begin(p, n) access_ok(p, n)
@@ -74,4 +100,14 @@ void *lkpi_memdup_user(const void __user *src, size_t len);
 #define user_write_access_begin user_access_begin
 #define user_write_access_end user_access_end
 
+
+#define unsafe_put_user(x, ptr, label) do { if (put_user(x, ptr)) goto label; } while (0)
+#define unsafe_get_user(x, ptr, label) do { if (get_user(x, ptr)) goto label; } while (0)
+#define unsafe_copy_to_user(to, from, n, label) do { if (copy_to_user(to, from, n)) goto label; } while (0)
+#define unsafe_copy_from_user(to, from, n, label) do { if (copy_from_user(to, from, n)) goto label; } while (0)
+#define __copy_to_user_inatomic copy_to_user
+#define __copy_from_user_inatomic copy_from_user
+#define copy_from_user_inatomic_nontemporal(to, from, n) copy_from_user(to, from, n)
+void *lkpi_strndup_user(const char __user *s, long n);
+#define strndup_user lkpi_strndup_user
 #endif

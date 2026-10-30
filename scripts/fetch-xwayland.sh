@@ -20,6 +20,16 @@ done
 # teclado: Xwayland compila el keymap con xkbcomp contra /usr/share/X11/xkb
 rm -rf "$PRE/usr/share/X11/xkb"
 cp -a /usr/share/X11/xkb "$PRE/usr/share/X11/xkb"
+# xkeyboard-config puede ser mas nuevo que el xkbcomp copiado y nombrar keysyms
+# que este no conoce (XF86CameraAccess*, XF86NavChart...): xkbcomp avisa de cada
+# uno en el arranque de Xwayland. Se compila un keymap con el xkbcomp copiado y
+# se quitan de symbols/inet las teclas cuyo keysym no resuelve.
+XKB="$PRE/usr/share/X11/xkb"
+printf 'xkb_keymap {\n xkb_keycodes { include "evdev+aliases(qwerty)" };\n xkb_types { include "complete" };\n xkb_compat { include "complete" };\n xkb_symbols { include "pc+us+inet(evdev)" };\n};\n' > /tmp/aurora-km.xkb
+"$PRE/usr/bin/xkbcomp" -w 1 "-R$XKB" -xkm - /tmp/aurora-km.xkm < /tmp/aurora-km.xkb 2>&1 |
+    sed -n 's/.*resolve keysym \([A-Za-z0-9_]*\).*/\1/p' | sort -u | while read -r k; do
+        sed -i "/\[ $k[ ]*\]/d" "$XKB/symbols/inet"
+    done
 [ -d /usr/share/X11/app-defaults ] && cp -a /usr/share/X11/app-defaults "$PRE/usr/share/X11/" || true
 
 mkdesktop() { # id Nombre ejecutable

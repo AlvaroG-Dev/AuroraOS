@@ -191,4 +191,7 @@ void lkpi_workqueue_set_max_active(struct workqueue_struct *wq, int max_active);
 #define disable_delayed_work_sync(dw) lkpi_disable_work(&(dw)->work, true, true)
 #define enable_delayed_work(dw) lkpi_enable_work(&(dw)->work)
 
+/* DRM (drm_atomic.h) espera tener struct completion con workqueue.h */
+#include <linux/completion.h>
+
 #endif

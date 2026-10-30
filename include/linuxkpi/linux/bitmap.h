@@ -155,4 +155,20 @@ static inline void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap,
 	for (i = 0; i < halfwords; i++)
 		buf[i] = (u32)(bitmap[i / 2] >> (32 * (i % 2)));
 }
+
+void lkpi_bitmap_shift_right(unsigned long *dst, const unsigned long *src, unsigned int shift, unsigned int nbits);
+int lkpi_bitmap_find_free_region(unsigned long *bitmap, unsigned int bits, int order);
+void lkpi_bitmap_release_region(unsigned long *bitmap, unsigned int pos, int order);
+#define bitmap_shift_right lkpi_bitmap_shift_right
+#define bitmap_find_free_region lkpi_bitmap_find_free_region
+#define bitmap_release_region lkpi_bitmap_release_region
+static inline int bitmap_allocate_region(unsigned long *bitmap, unsigned int pos, int order)
+{
+	for (unsigned int i = pos; i < pos + (1U << order); i++)
+		if (test_bit(i, bitmap))
+			return -EBUSY;
+	for (unsigned int i = pos; i < pos + (1U << order); i++)
+		__set_bit(i, bitmap);
+	return 0;
+}
 #endif

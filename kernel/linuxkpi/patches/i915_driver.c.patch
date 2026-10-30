@@ -1,0 +1,20 @@
+--- i915_driver.c
++++ i915_driver.c
+@@ -43,6 +43,7 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_client.h>
+ #include <drm/drm_client_event.h>
++#include <drm/clients/drm_client_setup.h>
+ #include <drm/drm_ioctl.h>
+ #include <drm/drm_managed.h>
+ #include <drm/drm_probe_helper.h>
+@@ -662,6 +663,9 @@
+ 	if (i915_switcheroo_register(dev_priv))
+ 		drm_err(&dev_priv->drm, "Failed to register vga switcheroo!\n");
+ 
++	/* Aurora: sin FBDEV_EMULATION nadie llama a drm_client_setup(); el cliente KMS del compositor cuelga de ahi */
++	drm_client_setup(&dev_priv->drm, NULL);
++
+ 	return 0;
+ }
+ 
