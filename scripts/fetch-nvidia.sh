@@ -39,6 +39,12 @@ for a in "$@"; do
 done
 mkdir -p "$OUT"
 
+# El .run de 615.x lleva la carga en zstd: se comprueba antes de bajar 500 MB.
+if [ "$EXTRACT" = 1 ] && ! command -v zstd >/dev/null 2>&1 && ! command -v unzstd >/dev/null 2>&1; then
+    echo "falta zstd (necesario para extraer el firmware): sudo apt install zstd" >&2
+    exit 1
+fi
+
 SRC="$ROOT/build/linuxkpi_src/nvidia-open"
 if [ "$(cat "$SRC/.aurora-version" 2>/dev/null)" != "$V" ]; then
     echo "faltan las fuentes de NVIDIA open $V: ejecuta scripts/fetch-linux-drivers.sh" >&2
@@ -65,7 +71,7 @@ if [ ! -f "$OUT/pkg/.aurora-version" ] || [ "$(cat "$OUT/pkg/.aurora-version")" 
     # La carga es zstd (28 b5 2f fd) en 615.x; xz (fd 37 7a 58) en versiones antiguas.
     MAGIC="$(tail -n +"$SKIP" "$OUT/$RUN" | head -c 4 | od -An -tx1 | tr -d ' \n' || true)"
     case "$MAGIC" in
-        28b52ffd) DEC="zstd -dc" ;;
+        28b52ffd) if command -v zstd >/dev/null 2>&1; then DEC="zstd -dc"; else DEC="unzstd -c"; fi ;;
         fd377a58) DEC="xz -dc" ;;
         *) echo "formato de carga desconocido ($MAGIC)" >&2; exit 1 ;;
     esac
