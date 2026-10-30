@@ -327,7 +327,7 @@ void lkpi_kms_client_setup(struct drm_device *dev)
 		return;
 
 	mutex_init(&K.lock);
-	K.flush = !strcmp(dev->driver->name, "i915");
+	K.flush = !strcmp(dev->driver->name, "i915") || !strcmp(dev->driver->name, "nvidia-drm");
 	if (lkpi_cmdline_get("lkpi.kms_flush", opt, sizeof(opt)))
 		K.flush = opt[0] == '1';
 	K.dev = dev;
