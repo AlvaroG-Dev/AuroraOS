@@ -754,6 +754,8 @@ static void pci_bus_remove(struct device *dev) {
 // ---------------------------------------------------------------------------
 #define PCIE_CAP_ID 0x10
 #define PCIE_SLOT_IMPLEMENTED (1u << 8) // PCIe Capabilities
+#define PCIE_SLTCAP 0x14
+#define PCIE_SLTCAP_HPC (1u << 6) // Hot-Plug Capable
 #define PCIE_SLTCTL 0x18
 #define PCIE_SLTSTA 0x1A
 #define PCIE_SLTSTA_ABP (1u << 0) // Attention Button Pressed
@@ -773,6 +775,10 @@ static void pci_slot_events(void) {
     uint8_t b = br->bus, s = br->slot, f = br->func;
     uint8_t cap = pci_find_capability(b, s, f, PCIE_CAP_ID);
     if (!cap || !(pci_read_config_word(b, s, f, cap + 2) & PCIE_SLOT_IMPLEMENTED))
+      continue;
+    // Como pciehp: solo slots con Hot-Plug Capable. Los puertos raiz de una
+    // placa de sobremesa (slot de la GPU) no lo son y no se les escribe.
+    if (!(pci_read_config_dword(b, s, f, cap + PCIE_SLTCAP) & PCIE_SLTCAP_HPC))
       continue;
 
     uint16_t sta = pci_read_config_word(b, s, f, cap + PCIE_SLTSTA);
