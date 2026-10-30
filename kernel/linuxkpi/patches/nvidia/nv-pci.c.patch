@@ -1,0 +1,11 @@
+--- nv-pci.c	2026-10-29 13:23:35.553793588 +0000
++++ nv-pci.c	2026-10-30 14:37:17.254255459 +0000
+@@ -415,6 +415,8 @@
+ 
+ static NvBool nv_treat_missing_irq_as_error(void)
+ {
++    /* Aurora: sin INTx de firmware/ACPI (pci_dev->irq == 0); la GPU usa MSI. */
++    return NV_FALSE;
+ #if defined(NV_LINUX_PCIE_MSI_SUPPORTED)
+     return (nv_get_hypervisor_type() != OS_HYPERVISOR_HYPERV);
+ #else

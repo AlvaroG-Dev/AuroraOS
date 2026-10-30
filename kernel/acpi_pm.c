@@ -645,6 +645,19 @@ void acpi_pm_reboot(void) {
     for (volatile int i = 0; i < 1000000; i++)
       __asm__ volatile("pause");
   }
+  /* Reset PCI de la plataforma (como Linux reboot=pci): 0xCF9 con RST_CPU|SYS_RST
+   * (0x06) y luego FULL_RST (0x0E), que pulsa PERST# a los slots PCIe. Sin esto un
+   * dispositivo que un driver dejo a medias (GPU) puede no reiniciarse y la BIOS
+   * arranca sin imagen hasta apagar la fuente. */
+  outb(0xCF9, 0x02);
+  for (volatile int i = 0; i < 100000; i++)
+    __asm__ volatile("pause");
+  outb(0xCF9, 0x06);
+  for (volatile int i = 0; i < 1000000; i++)
+    __asm__ volatile("pause");
+  outb(0xCF9, 0x0E);
+  for (volatile int i = 0; i < 1000000; i++)
+    __asm__ volatile("pause");
   outb(0x64, 0xFE);
   for (;;)
     __asm__ volatile("cli; hlt");
