@@ -1,0 +1,18 @@
+--- nvidia-drm-drv.c	2026-10-29 13:23:35.499603637 +0000
++++ ../../../../../build/nvidia-kpi/wk2/nvidia-drm-drv.c	2026-10-30 19:36:13.533485755 +0000
+@@ -2117,6 +2117,15 @@
+         goto failed_drm_register;
+     }
+ 
++    /*
++     * Aurora: sin fbdev, pero el cliente KMS del compositor
++     * (lkpi_drm kms_present.c) cuelga de drm_client_setup().
++     */
++    if (drm_core_check_feature(dev, DRIVER_MODESET)) {
++        extern void drm_client_setup(struct drm_device *dev, const struct drm_format_info *format);
++        drm_client_setup(dev, NULL);
++    }
++
+ #if defined(NV_DRM_FBDEV_AVAILABLE)
+     if (nv_drm_fbdev_module_param &&
+         drm_core_check_feature(dev, DRIVER_MODESET)) {
