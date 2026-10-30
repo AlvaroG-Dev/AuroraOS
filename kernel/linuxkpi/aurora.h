@@ -157,6 +157,11 @@ u8 aurora_pci_read_config_byte(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_re
 u16 aurora_pci_read_config_word(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_read_config_word");
 u32 aurora_pci_read_config_dword(u8 bus, u8 slot, u8 func, u8 off)
 	__asm__("pci_read_config_dword");
+int aurora_pci_ecam_available(void) __asm__("pci_ecam_available");
+u32 aurora_pci_read_config_ext_dword(u8 bus, u8 slot, u8 func, u16 off)
+	__asm__("pci_read_config_ext_dword");
+u16 aurora_pci_find_ext_capability(u8 bus, u8 slot, u8 func, u16 id)
+	__asm__("pci_find_ext_capability");
 void aurora_pci_write_config_byte(u8 bus, u8 slot, u8 func, u8 off, u8 v)
 	__asm__("pci_write_config_byte");
 void aurora_pci_write_config_word(u8 bus, u8 slot, u8 func, u8 off, u16 v)

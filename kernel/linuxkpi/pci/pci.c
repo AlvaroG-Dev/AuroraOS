@@ -41,8 +41,27 @@ static bool lkpi_cfg_ok(int where, int size)
 	return where >= 0 && where + size <= PCI_CFG_SPACE_SIZE && !(where & (size - 1));
 }
 
+/* Offsets 256..4095 (capacidades extendidas): solo lectura, por ECAM si hay MCFG. */
+static bool lkpi_cfg_ext_ok(int where, int size)
+{
+	return where >= PCI_CFG_SPACE_SIZE && where + size <= PCI_CFG_SPACE_EXP_SIZE &&
+	       !(where & (size - 1)) && aurora_pci_ecam_available();
+}
+
+static u32 lkpi_cfg_ext_read(const struct pci_dev *dev, int where, int size)
+{
+	u32 v = aurora_pci_read_config_ext_dword(bus_of(dev), slot_of(dev), func_of(dev),
+						 where & ~3);
+
+	return size == 4 ? v : (v >> ((where & 3) * 8)) & (size == 2 ? 0xffff : 0xff);
+}
+
 int lkpi_pci_read_config_byte(const struct pci_dev *dev, int where, u8 *val)
 {
+	if (lkpi_cfg_ext_ok(where, 1)) {
+		*val = lkpi_cfg_ext_read(dev, where, 1);
+		return PCIBIOS_SUCCESSFUL;
+	}
 	if (!lkpi_cfg_ok(where, 1)) {
 		*val = 0xff;
 		return PCIBIOS_BAD_REGISTER_NUMBER;
@@ -54,6 +73,10 @@ EXPORT_SYMBOL(lkpi_pci_read_config_byte);
 
 int lkpi_pci_read_config_word(const struct pci_dev *dev, int where, u16 *val)
 {
+	if (lkpi_cfg_ext_ok(where, 2)) {
+		*val = lkpi_cfg_ext_read(dev, where, 2);
+		return PCIBIOS_SUCCESSFUL;
+	}
 	if (!lkpi_cfg_ok(where, 2)) {
 		*val = 0xffff;
 		return PCIBIOS_BAD_REGISTER_NUMBER;
@@ -65,6 +88,10 @@ EXPORT_SYMBOL(lkpi_pci_read_config_word);
 
 int lkpi_pci_read_config_dword(const struct pci_dev *dev, int where, u32 *val)
 {
+	if (lkpi_cfg_ext_ok(where, 4)) {
+		*val = lkpi_cfg_ext_read(dev, where, 4);
+		return PCIBIOS_SUCCESSFUL;
+	}
 	if (!lkpi_cfg_ok(where, 4)) {
 		*val = 0xffffffff;
 		return PCIBIOS_BAD_REGISTER_NUMBER;
@@ -153,10 +180,12 @@ u8 lkpi_pci_find_capability(struct pci_dev *dev, int cap)
 }
 EXPORT_SYMBOL(lkpi_pci_find_capability);
 
-/* Sin ECAM (Aurora usa 0xCF8/0xCFC): el espacio extendido no se ve. */
+/* Sin MCFG (Aurora usa 0xCF8/0xCFC) el espacio extendido no se ve: devuelve 0. */
 u16 lkpi_pci_find_ext_capability(struct pci_dev *dev, int cap)
 {
-	return 0;
+	if (!aurora_pci_ecam_available())
+		return 0;
+	return aurora_pci_find_ext_capability(bus_of(dev), slot_of(dev), func_of(dev), cap);
 }
 EXPORT_SYMBOL(lkpi_pci_find_ext_capability);
 

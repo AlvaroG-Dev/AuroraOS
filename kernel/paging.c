@@ -851,8 +851,16 @@ void *mmio_map(uint64_t phys, uint64_t size, uint64_t flags) {
     }
   }
 
-  LOG_DEBUG("[MMIO] Mapeado phys=%p size=%lu -> virt=%p flags=%p", (void *)phys,
-            (unsigned long)size, (void *)(MMIO_MAP_BASE + phys), (void *)flags);
+  // Un driver como el de NVIDIA mapea el BAR0 pagina a pagina (miles de veces):
+  // solo se anotan las primeras y los mapas grandes (cada linea va al log persistente).
+  static unsigned mmio_small_logged;
+  if (size >= 0x10000 || mmio_small_logged < 32) {
+    if (size < 0x10000)
+      mmio_small_logged++;
+    LOG_DEBUG("[MMIO] Mapeado phys=%p size=%lu -> virt=%p flags=%p",
+              (void *)phys, (unsigned long)size,
+              (void *)(MMIO_MAP_BASE + phys), (void *)flags);
+  }
 
   return (void *)(MMIO_MAP_BASE + phys);
 }
