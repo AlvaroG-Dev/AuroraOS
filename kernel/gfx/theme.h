@@ -15,10 +15,14 @@
 // ============================================================================
 
 // --- Acento único ---
-#define AURORA_ACCENT 0xFF54DA75 /* verde aurora (docs/Diseno_Identidad_Grafica.md) */
-#define AURORA_ACCENT_HOVER 0xFF7BE594
-#define AURORA_ACCENT_DIM 0x5554DA75
-#define AURORA_ACCENT_TEXT 0xFF08260F /* texto sobre el acento */
+#define AURORA_ACCENT 0xFF3EE89B /* verde aurora (docs/Diseno_Identidad_Grafica.md) */
+#define AURORA_ACCENT_HOVER 0xFF6BF083
+#define AURORA_ACCENT_DIM 0x553EE89B
+#define AURORA_ACCENT_TEXT 0xFF04261A /* texto sobre el acento */
+
+// --- Segundo color de marca (extremo turquesa del logo) ---
+#define AURORA_TEAL 0xFF00D4D8
+#define AURORA_TEAL_BRIGHT 0xFF00EEEE
 
 // --- Escala de grises ---
 #define AURORA_BLACK 0xFF0A0A0A
@@ -53,7 +57,7 @@
 // --- Semáforos (izquierda de la barra de título) ---
 #define AURORA_TL_CLOSE 0xFFFF6A3D
 #define AURORA_TL_MINIMIZE 0xFFFFD23F
-#define AURORA_TL_MAXIMIZE 0xFF3CC8E0
+#define AURORA_TL_MAXIMIZE 0xFF00D4D8
 #define AURORA_TL_INACTIVE 0xFF4A4A4D
 #define AURORA_TL_RIM 0x33000000   /* borde fino oscuro */
 /* Glifos (×, −, flechas de zoom) al pasar el ratón: tono oscuro de cada

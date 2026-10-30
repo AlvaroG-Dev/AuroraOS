@@ -1,4 +1,19 @@
-# AuroraOS — Identidad gráfica (v2, decisiones de Alvaro aplicadas)
+# AuroraOS — Identidad gráfica (v3)
+
+**Paleta de marca vigente (muestreada del logo elegido por Alvaro, 2026-10-30):**
+
+| Token | Hex | Uso |
+|---|---|---|
+| `AURORA_ACCENT` verde aurora | `#3EE89B` | acento de UI, selección, Dock, foco |
+| `AURORA_ACCENT_HOVER` verde claro | `#6BF083` | hover, extremo claro del logo |
+| `AURORA_TEAL` turquesa | `#00D4D8` (brillante `#00EEEE`) | segundo color: maximizar, extremo del logo |
+| Texto sobre acento | `#04261A` | |
+| Fondo | `#05070A` / baldosa `#141F22` | |
+
+Logo: tres cintas con transición de verde (`#6BF083`/`#3EE89B`) a turquesa (`#00D4D8`→`#00EEEE`), wordmark "aurora" minúscula espaciada + "OS" ligero. La transición verde→turquesa solo se usa en el logo; la interfaz usa colores sólidos.
+
+---
+# (histórico) v2, decisiones de Alvaro
 
 **Decidido:** verde intermedio entre A y C = `#54DA75` (hover `#7BE594`, texto sobre acento `#08260F`); semáforos conservados pero con colores propios: cerrar naranja-rojo `#FF6A3D`, minimizar amarillo `#FFD23F`, maximizar turquesa `#3CC8E0`; habrá modo claro (pendiente de diseñar). Lo que sigue es el razonamiento original; donde un valor difiera, manda esta línea.
 
