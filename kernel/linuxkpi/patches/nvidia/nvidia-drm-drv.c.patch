@@ -1,6 +1,25 @@
 --- nvidia-drm-drv.c	2026-10-29 13:23:35.499603637 +0000
-+++ ../../../../../build/nvidia-kpi/wk2/nvidia-drm-drv.c	2026-10-30 19:36:13.533485755 +0000
-@@ -2117,6 +2117,15 @@
++++ ../../../../../build/nvidia-kpi/wk2/nvidia-drm-drv.c	2026-10-31 09:24:44.923862571 +0000
+@@ -781,6 +781,18 @@
+         return -ENODEV;
+     }
+ 
++    /*
++     * Aurora: el cliente KMS del compositor (lkpi_drm kms_present.c) hace los
++     * modesets desde el kernel, sin DRM master de por medio: sin propiedad
++     * de NVKMS, NVKMS_IOCTL_SET_MODE se rechaza. Se toma ahora, como con fbdev.
++     */
++    if (!nvKms->grabOwnership(pDevice)) {
++        nvKms->freeDevice(pDevice);
++        NV_DRM_DEV_LOG_ERR(nv_dev, "Failed to grab NVKMS modeset ownership");
++        return -EBUSY;
++    }
++    nv_dev->hasFramebufferConsole = NV_TRUE;
++
+ #if defined(NV_DRM_FBDEV_AVAILABLE)
+     /*
+      * If fbdev is enabled, take modeset ownership now before other DRM clients
+@@ -2117,6 +2129,15 @@
          goto failed_drm_register;
      }
  
