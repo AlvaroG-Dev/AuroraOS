@@ -5,11 +5,11 @@ Contexto: `ROADMAP.md` marca «Usuarios y grupos» como hecho, pero eso es **sol
 
 ## 0. Principios
 
-1. **Semántica idéntica a Linux** para lo que ve el espacio de usuario (musl, glibc, busybox, Weston, Mesa): mismos números de syscall, mismos errno, mismos formatos de `/etc/passwd`, `/etc/shadow`, `/etc/group`. No inventar una API propia de usuarios.
+1. **Semántica idéntica a Linux** para lo que ve el espacio de usuario (**glibc**, Weston, Mesa): mismos números de syscall, mismos errno, mismos formatos de `/etc/passwd`, `/etc/shadow`, `/etc/group`. No inventar una API propia de usuarios. **La libc de Aurora es glibc.**
 2. **Primero lo verificable en QEMU**, hito a hito; el hardware real (Portégé, 12700KF) solo para confirmar al final.
 3. **No romper el arranque ni el LiveUSB.** Hoy todo corre como root; el paso a «usuario normal» es gradual y reversible con `aurora.conf` / cmdline (`aur.login=off` devuelve el comportamiento actual).
 4. **Se sustituye `euid == 0` por comprobaciones de capacidad** (`capable(CAP_X)`) solo cuando el resto esté estable (fase U6). Antes, root sigue siendo «todopoderoso» como en Linux sin caps.
-5. **Sin PAM de momento.** NSS «files» + `/etc/shadow` directo (como Alpine/busybox). PAM solo si algún programa portado lo exige (U8, opcional).
+5. **Sin PAM de momento.** NSS «files» de glibc + `/etc/shadow` directo. PAM solo si algún programa portado lo exige (U8, opcional).
 6. **Seguridad práctica, no teórica:** el objetivo es que un programa de un usuario normal no pueda tocar el sistema ni a otro usuario; no es un modelo multi-inquilino hostil (sin namespaces ni seccomp en este plan).
 
 ## 1. Qué existe ya (verificado en el código, 31-oct-2026)
@@ -30,22 +30,22 @@ Contexto: `ROADMAP.md` marca «Usuarios y grupos» como hecho, pero eso es **sol
 
 ## 2. Qué falta (huecos reales)
 
-1. **Todo arranca como root** (`process.c:554`; `init` y la terminal gráfica). No hay `login`, `getty`, `su`, `sudo`/`doas`, `passwd`, `adduser`; `shadow` tiene todas las cuentas bloqueadas (`*`).
+1. **Todo arranca como root** (`process.c:554`; `init` y la terminal gráfica). No hay `login`, `getty`, `su`, `sudo`/`sudo`, `passwd`, `adduser`; `shadow` tiene todas las cuentas bloqueadas (`*`).
 2. **El almacenamiento no guarda propietarios.** FAT32 (`/data`) pone `uid=gid=0` en cada nodo (`fat32.c:3324`), `chown` es un no-op y el modo se guarda solo en RAM (`fat32_ram_mode_*`), así que se pierde al reiniciar. El raíz es tarfs de solo lectura. Sin esto no hay `/data/home/<usuario>` privado ni persistencia de contraseñas.
 3. **`/etc` vive en tmpfs** sembrado desde tarfs: un `passwd` cambiado se pierde al apagar. Además la siembra de reserva (`root:/root`) no coincide con `etc/passwd` (`root:/`).
 4. **Detalles del VFS/kernel sin cerrar:** `vfs_check_access` usa `euid`/`egid` y no `fsuid`/`fsgid`; no hay bit *sticky* (`/tmp`); `kill()` y `/proc/<pid>` no comprueban propietario (verificar en U1); sin `nosuid`/`noexec` en montajes; `AT_SECURE` va a 0 incluso tras setuid (`process.c:501`); `no_new_privs` ignorado; `setgroups` no se hereda/inicializa desde `/etc/group` (nadie llama a `initgroups`).
 5. **Modelo de privilegios binario** (`euid == 0`): ~20 comprobaciones dispersas (`syscall.c` 12, `vfs.c` 6, `kmod_sys.c`, `process.c`). No hay capabilities: `ping` o un servidor en el puerto 80 exigen ser root entero.
 6. **Sesión gráfica:** `aurora-wayland` y la terminal corren como root y abren `/dev/dri/*` y `/dev/input/*` directamente. No hay propiedad de dispositivos por grupo (`video`, `input`, `render`), ni `XDG_RUNTIME_DIR` por usuario, ni «seat».
-7. **Herramientas de usuario ausentes** en la ISO (el `busybox` construido por `build_busybox.sh` debe incluir `login/getty/su/passwd/adduser/addgroup/deluser/id/chpasswd/doas`; hay que comprobar su `.config`).
+7. **Herramientas de usuario ausentes** en la ISO: hay que compilar contra glibc **shadow-utils** (`passwd`, `useradd`, `groupadd`, `chpasswd`, `su`, `login`) y **util-linux** (`agetty`/`getty`, `login`, `su`, `runuser`) o, si pesan demasiado, escribir versiones pequeñas propias (`aurora-login`, `aurora-su`, `aurora-passwd`) sobre `getpwnam_r`/`crypt`. `id`, `whoami`, `groups` vienen de coreutils (o de los propios de Aurora).
 
 ## 3. Decisiones que necesito de Alvaro (con recomendación)
 
 | # | Decisión | Opciones | Recomendación |
 |---|---|---|---|
 | **DU1** | Cómo guardar propietario/modo en `/data` (FAT32 no los tiene) | (a) fichero de metadatos *sidecar* (`/data/.aurora-meta`, tabla `cluster inicial → mode/uid/gid`) ; (b) escribir un driver **ext2/ext4** propio y pasar `/data` a eso; (c) UMSDOS-style por fichero | **(a) ahora, (b) después** en un plan aparte. (a) cabe en 1 hito y no obliga a reformatear el USB; (b) es el destino correcto pero es un proyecto grande. |
-| **DU2** | Comportamiento del LiveUSB por defecto | (a) autologin como `alvaro` (uid 1000) con `doas` sin contraseña para el grupo `wheel`; (b) autologin como root (como hoy); (c) pantalla de login siempre | **(a)**: ya se usa como un usuario normal pero sin fricción en el portátil de pruebas. `aur.login=root` queda de escotilla. |
-| **DU3** | Programa para elevar privilegios | `sudo` real, `doas` (busybox 1.36 lo trae) o solo `su` | **`doas` + `su`** de busybox primero; `sudo` real solo si algún programa lo necesita (U8). |
-| **DU4** | Hash de contraseñas | SHA-512 (`$6$`, soportado por musl y glibc) / yescrypt | **SHA-512**. yescrypt solo si se migra del todo a glibc. |
+| **DU2** | Comportamiento del LiveUSB por defecto | (a) autologin como `alvaro` (uid 1000) con `sudo`/`su` sin contraseña para el grupo `wheel`; (b) autologin como root (como hoy); (c) pantalla de login siempre | **(a)**: ya se usa como un usuario normal pero sin fricción en el portátil de pruebas. `aur.login=root` queda de escotilla. |
+| **DU3** | Programa para elevar privilegios | `sudo` real (sobre glibc), `su` de shadow-utils/util-linux, o un `aurora-su` propio | **`su` de shadow-utils + `sudo` real** si compila sin PAM (`--without-pam`); si no, `aurora-su` propio (pequeño, setuid-root). |
+| **DU4** | Hash de contraseñas | SHA-512 (`$6$`) / yescrypt (por defecto en glibc moderna con `libxcrypt`) | **SHA-512** (`$6$`), universalmente soportado por `libcrypt` de glibc/libxcrypt; yescrypt más adelante. |
 | **DU5** | Cambiar de usuario en la sesión gráfica | solo login inicial / cambio rápido de usuario | **Solo login inicial** en este plan; el cambio rápido queda como idea (U7.4). |
 
 Mientras no conteste, el plan avanza con las recomendaciones; ninguna de las fases U0–U2 depende de ellas.
@@ -91,13 +91,13 @@ Sin esto, los usuarios no sobreviven a un reinicio.
 
 ### U3. Cuentas, contraseñas y herramientas (M)
 
-- **U3.1** Auditar `build_busybox.sh`/`.config` y activar: `login`, `getty`, `su`, `passwd`, `chpasswd`, `adduser`/`addgroup`/`deluser`/`delgroup`, `id`, `whoami`, `groups`, `doas`, `vipw`, con `FEATURE_SHADOWPASSWDS`, `USE_BB_CRYPT`/SHA-512 y `FEATURE_SUID`.
-- **U3.2** Instalar los binarios que necesitan setuid-root (`su`, `passwd`, `doas`, `login`) con modo `4755` en el sysroot. **Verificar que tarfs conserva `04755`** (`tarfs.c:435` aplica `file_mode & 07777`, debería) y que `/etc/busybox.conf` restringe qué *applets* son setuid.
-- **U3.3** Permisos de `/etc`: `shadow` `0640 root:shadow` (grupo `shadow` nuevo), `passwd`/`group` `0644`. `doas.conf` con `permit nopass :wheel` (DU2-a) o `permit persist :wheel`.
+- **U3.1** Construir contra glibc (`libs/glibc`): **shadow-utils** (`passwd`, `useradd/usermod/userdel`, `groupadd`, `chpasswd`, `su`, `login`), **util-linux** (`agetty`, `login`, `runuser`) y **libxcrypt** si hace falta `crypt()`. Añadir script `scripts/build_shadow.sh` (con fuentes bajo `third_party/`), todos con `--without-pam`. Si alguno resulta demasiado pesado, se sustituye por `aurora-login/su/passwd` propios (≈300 líneas cada uno).
+- **U3.2** Instalar los binarios que necesitan setuid-root (`su`, `passwd`, `sudo`, `login`) con modo `4755` en el sysroot. **Verificar que tarfs conserva `04755`** (`tarfs.c:435` aplica `file_mode & 07777`, debería).
+- **U3.3** Permisos de `/etc`: `shadow` `0640 root:shadow` (grupo `shadow` nuevo), `passwd`/`group` `0644`. `/etc/sudoers` (`%wheel ALL=(ALL) NOPASSWD: ALL` en el LiveUSB, DU2-a; con contraseña si no).
 - **U3.4** Cuentas por defecto: `root` (bloqueada para login, sí con `su`), `alvaro` (1000, grupos `wheel users video input render audio`), `nobody`, y cuentas de sistema para servicios (`dbus`, `messagebus` si se porta). Hash real para `alvaro` generado en la construcción con `mkpasswd`/Python (nunca una contraseña en claro en el repo; contraseña inicial a definir por Alvaro, cambiable con `passwd`).
-- **U3.5** Comprobar que musl **y** glibc resuelven usuarios: `getpwnam`, `getpwuid`, `getgrnam`, `getgrouplist`, `initgroups`, `getlogin`, `ttyname`. Prueba `user/apps/nss_test`. Revisar `nsswitch.conf` y que no se intente `dns`/`systemd` en `passwd`.
-- **Hito U3:** en QEMU, desde un shell root: `adduser -D -h /data/home/test test`, `passwd test`, `su - test`, `id` (uid/gid/grupos correctos), `doas id` desde `wheel` → uid 0, y `su` con contraseña errónea falla con retardo.
-- **Riesgos:** `libcrypt` en el toolchain (busybox trae la suya); retardo de `login` tras fallo requiere `nanosleep` fiable (ya existe); `shadow` en tmpfs (resuelto en U2.3).
+- **U3.5** Comprobar que glibc resuelve usuarios: `getpwnam`, `getpwuid`, `getgrnam`, `getgrouplist`, `initgroups`, `getlogin`, `ttyname`. Prueba `user/apps/nss_test`. `nsswitch.conf` solo con `files` (sin `systemd`/`dns` en `passwd`); glibc carga NSS dinámico (`libnss_files.so`): verificar que está en la ISO y que el cargador lo encuentra.
+- **Hito U3:** en QEMU, desde un shell root: `useradd -m -d /data/home/test test`, `passwd test`, `su - test`, `id` (uid/gid/grupos correctos), `sudo id` desde `wheel` → uid 0, y `su` con contraseña errónea falla con retardo.
+- **Riesgos:** `libcrypt`/`libxcrypt` en el toolchain glibc; dependencias de PAM al compilar (`--without-pam`); retardo de `login` tras fallo requiere `nanosleep` fiable (ya existe); `shadow` en tmpfs (resuelto en U2.3).
 
 ### U4. Login en consola e `init` por usuario (M)
 
@@ -105,9 +105,9 @@ Sin esto, los usuarios no sobreviven a un reinicio.
 - **U4.2** Cadena `init → getty → login → shell`: `login` verifica contra `shadow`, aplica `initgroups`+`setgid`+`setuid`, hace `chdir` a `$HOME`, pone `HOME/USER/LOGNAME/SHELL/PATH`, abre el TTY de control (`TIOCSCTTY`, `tty.c:482`) y deja `/dev/ttyN` a `0620 usuario:tty`.
 - **U4.3** Autologin configurable (DU2): `/etc/aurora.conf` con `login=auto:alvaro` | `login=prompt` | `login=root`; cmdline `aur.login=...` manda sobre el fichero.
 - **U4.4** `/etc/motd`, `/etc/issue`, `/var/run/utmp`/`wtmp` mínimos si algún programa los pide (`who`, `last`): primero comprobar quién los necesita, no hacerlos por adelantado.
-- **U4.5** `poweroff`/`reboot` para usuarios no-root: pasan por `doas` o por un helper con permiso (`wheel`), no por abrir el kernel a todos (hoy los hace root y `power.c` no comprueba nada: añadir comprobación de privilegio).
+- **U4.5** `poweroff`/`reboot` para usuarios no-root: pasan por `sudo` o por un helper con permiso (`wheel`), no por abrir el kernel a todos (hoy los hace root y `power.c` no comprueba nada: añadir comprobación de privilegio).
 - **Hito U4:** QEMU arranca, muestra `login:`, `alvaro` entra con su contraseña, `id` da uid=1000, `ls /data/home/alvaro` funciona, no puede escribir en `/etc`, ni `kill` a un proceso de root. `aur.login=root` conserva el arranque actual (compatibilidad con `check_boot.sh`).
-- **Riesgo alto:** el terminal gráfico actual corre como root y todos los scripts de prueba asumen root; hay que actualizarlos a `aur.login=root` o ejecutar con `doas`. Mitigación: introducir `aur.login=root` como valor por defecto *durante* U4 y cambiar el defecto a `auto:alvaro` solo al terminar U5.
+- **Riesgo alto:** el terminal gráfico actual corre como root y todos los scripts de prueba asumen root; hay que actualizarlos a `aur.login=root` o ejecutar con `sudo`. Mitigación: introducir `aur.login=root` como valor por defecto *durante* U4 y cambiar el defecto a `auto:alvaro` solo al terminar U5.
 
 ### U5. Dispositivos, grupos y sesión gráfica por usuario (L)
 
@@ -130,9 +130,9 @@ Sustituir «root o nada» por privilegios finos, con compatibilidad Linux.
 - **U6.1** Modelo: `cap_permitted/effective/inheritable/bounding/ambient` (64 bits cada uno) en `process_t`; reglas de `execve` de Linux (transformación por UID: uid 0 mantiene todo; setuid root las gana; el resto las pierde). `capget/capset` reales (reemplazar el stub de `syscall.c:6117`), `prctl(PR_CAPBSET_READ/DROP, PR_CAP_AMBIENT, PR_SET_KEEPCAPS)`, `/proc/<pid>/status` con `CapInh/CapPrm/CapEff/CapBnd/CapAmb`.
 - **U6.2** `capable(int cap)` en el kernel y migrar las ~20 comprobaciones `euid == 0` (inventario en `syscall.c`, `vfs.c`, `kmod_sys.c`, `process.c`) a la capacidad correcta: `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_FOWNER`, `CAP_FSETID`, `CAP_KILL`, `CAP_SETUID/SETGID/SETPCAP`, `CAP_SYS_MODULE` (`init_module`), `CAP_SYS_ADMIN` (`mount`, `pivot_root`), `CAP_SYS_BOOT` (`reboot`), `CAP_SYS_TIME`, `CAP_SYS_RAWIO` (`ioperm`/`iopl`/`/dev/mem`), `CAP_SYS_NICE`, `CAP_NET_ADMIN`, `CAP_NET_RAW` (ping, raw sockets), `CAP_NET_BIND_SERVICE` (puertos <1024), `CAP_MKNOD`, `CAP_SYS_CHROOT`.
 - **U6.3** Con `euid == 0` el proceso sigue obteniendo todas las capacidades por defecto: **comportamiento visible idéntico** al actual para root; los no-root no ganan nada nuevo salvo lo que se les conceda.
-- **U6.4** Ficheros con capacidades (`setcap`, xattr `security.capability`): fuera de alcance; se usa setuid + `doas` y, para `ping`, socket ICMP sin privilegios (`net.ipv4.ping_group_range`, que **no existe aún** en `sysctl.c`; habría que añadirlo).
+- **U6.4** Ficheros con capacidades (`setcap`, xattr `security.capability`): fuera de alcance; se usa setuid + `sudo` y, para `ping`, socket ICMP sin privilegios (`net.ipv4.ping_group_range`, que **no existe aún** en `sysctl.c`; habría que añadirlo).
 - **U6.5** Relacionar las `AUR_CAP_*` de los drivers `.aur` (`aur.h:36`): cargar un `.aur`/`.kur` exige `CAP_SYS_MODULE`; el conjunto `AUR_CAP_*` de cada driver sigue siendo independiente (es sobre hardware, no sobre usuarios).
-- **Hito U6:** `ping` y un servidor en el puerto 80 funcionan como `alvaro` solo con la capacidad (`doas`-less) concedida por `capset`; sin ella, `EPERM`. Todo el resto de pruebas de root sigue pasando.
+- **Hito U6:** `ping` y un servidor en el puerto 80 funcionan como `alvaro` solo con la capacidad (sin `sudo`) concedida por `capset`; sin ella, `EPERM`. Todo el resto de pruebas de root sigue pasando.
 - **Riesgo:** cualquier comprobación olvidada deja una puerta abierta *o* rompe un programa que dependía de root: por eso U6 va después y con inventario de `euid == 0` hecho con `grep`.
 
 ### U7. Endurecimiento y pulido (M)
@@ -141,12 +141,12 @@ Sustituir «root o nada» por privilegios finos, con compatibilidad Linux.
 - **U7.2** Límites: `setrlimit/getrlimit` por proceso (si no están), `RLIMIT_NPROC`, `RLIMIT_NOFILE` por usuario (anti *fork bomb* básico).
 - **U7.3** Cuotas de memoria por usuario: **no** en este plan; solo registrar la idea.
 - **U7.4** Cambio rápido de usuario (DU5): varias sesiones, varios compositores, conmutación de VT/DRM master. Solo si Alvaro lo pide; depende de multi-seat de U5.3.
-- **U7.5** Auditoría: registro en `klog` de logins fallidos/correctos, `su`/`doas` y violaciones (`EPERM` en `init_module`, `mount`), consultable con `dmesg`.
+- **U7.5** Auditoría: registro en `klog` de logins fallidos/correctos, `su`/`sudo` y violaciones (`EPERM` en `init_module`, `mount`), consultable con `dmesg`.
 - **Hito U7:** un usuario sin privilegios no puede ver el entorno de otro (`/proc/<pid>/environ`), ni adjuntarse con ptrace, ni agotar los PIDs del sistema.
 
 ### U8. Opcionales según lo que se porte
 
-- **U8.1** `sudo` real (si algún script lo exige).
+- **U8.1** Si `sudo` no entró en U3 (por PAM), portarlo aquí.
 - **U8.2** PAM mínimo (`libpam` + `pam_unix`) solo si se porta un software que lo requiera (p. ej. un greeter externo, `polkit`).
 - **U8.3** `polkit`/`logind`-shim para apps de escritorio que piden «autenticación»: ver `Plan_Wayland_Unificado.md`.
 - **U8.4** Cifrado de `/data` por usuario: fuera de alcance.
@@ -179,7 +179,7 @@ U0 ─► U1 ─► U2 ─► U3 ─► U4 ─► U5 ─► U6 ─► U7 ─► 
 2. **Pérdida de datos en `/data`** por el *sidecar* (U2): renombrado atómico, copia de seguridad `.aurora-meta.bak`, valores por defecto si falla.
 3. **Contraseñas inseguras en la imagen:** nunca contraseñas en claro en el repo; hash generado al construir; contraseña inicial elegida por Alvaro.
 4. **LiveUSB sin persistencia** si no hay partición `/data` escribible: el sistema debe seguir arrancando con las cuentas de la imagen (solo lectura) y avisar.
-5. **Divergencia con glibc/musl:** los dos se prueban en cada hito de U3 (`libs/glibc` y `third_party/musl-1.2.5`).
+5. **Divergencia glibc/Aurora:** NSS dinámico, `crypt` y `initgroups` de glibc se prueban en cada hito de U3 (`libs/glibc`).
 6. **Alcance:** U5–U6 son grandes; se pueden parar en U4 con un sistema ya usable (login y permisos reales) sin comprometer lo demás.
 
 ## 8. Resumen de hitos (para seguimiento)
@@ -189,7 +189,7 @@ U0 ─► U1 ─► U2 ─► U3 ─► U4 ─► U5 ─► U6 ─► U7 ─► 
 | U0 | Pruebas de línea base | S | `cred_test`, `perm_test` pasan |
 | U1 | `fsuid`, sticky, kill, `AT_SECURE`, `no_new_privs`, `chown` fino | M | tests ampliados |
 | U2 | Metadatos persistentes + `/etc` persistente | M–L | `chown` sobrevive al reinicio |
-| U3 | busybox `login/su/passwd/adduser/doas` + NSS | M | `su -`, `doas id`, `id` |
+| U3 | shadow-utils/util-linux (glibc) o `aurora-login/su/passwd` + NSS | M | `su -`, `sudo id`, `id` |
 | U4 | `init → getty → login → shell`, autologin | M | login en QEMU |
 | U5 | Propietarios de `/dev`, sesión gráfica por usuario | L | escritorio como uid 1000 |
 | U6 | Capabilities reales | M–L | `ping` sin root |
