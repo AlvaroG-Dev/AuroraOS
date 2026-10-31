@@ -26,6 +26,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -1267,7 +1268,13 @@ static void surface_damage_up(struct surface *s, rc_t d) {
 #define DRM_FMT_XRGB8888 0x34325258u
 #define DRM_FMT_ARGB8888 0x34325241u
 
+#define DRM_MOD_LINEAR 0ull
+/* Block-linear de NVIDIA (el que reserva libnvidia-allocator en la 4060). */
+#define DRM_MOD_NV_BL 0x0300000000e08014ull
+
 struct dmabuf_buf {
+  int gpu; /* modificador no lineal: la CPU no puede leerlo (vidmem) */
+  uint64_t modifier;
   int fd;
   int w, h, stride, offset;
   uint32_t format;
@@ -1276,6 +1283,7 @@ struct dmabuf_buf {
 };
 
 struct dmabuf_params {
+  uint64_t modifier;
   int fd; /* -1 = plano 0 sin anadir */
   uint32_t offset, stride;
   int used;
@@ -1298,6 +1306,8 @@ static struct dmabuf_buf *dmabuf_buf_from(struct wl_resource *buf) {
 static int dmabuf_buf_map(struct dmabuf_buf *b) {
   if (b->map)
     return 1;
+  if (b->gpu)
+    return 0;
   off_t len = lseek(b->fd, 0, SEEK_END);
   size_t need = (size_t)b->offset + (size_t)b->stride * b->h;
   if (len < 0 || (size_t)len < need)
@@ -1347,7 +1357,9 @@ static struct wl_resource *dmabuf_make_buffer(struct wl_client *c,
     b->stride = (int)p->stride;
     b->offset = (int)p->offset;
     b->format = format;
-    if (!dmabuf_buf_map(b)) {
+    b->modifier = p->modifier;
+    b->gpu = p->modifier != DRM_MOD_LINEAR;
+    if (!b->gpu && !dmabuf_buf_map(b)) {
       close(b->fd);
       free(b);
       b = NULL;
@@ -1363,7 +1375,8 @@ static struct wl_resource *dmabuf_make_buffer(struct wl_client *c,
   }
   struct wl_resource *buf = wl_resource_create(c, &wl_buffer_interface, 1, id);
   if (!buf) {
-    munmap(b->map, b->map_len);
+    if (b->map)
+      munmap(b->map, b->map_len);
     close(b->fd);
     free(b);
     wl_client_post_no_memory(c);
@@ -1402,10 +1415,12 @@ static void dparams_add(struct wl_client *c, struct wl_resource *r, int32_t fd,
                            "plano 0 ya anadido");
     return;
   }
-  if (mod_hi != 0 || mod_lo != 0) { /* solo DRM_FORMAT_MOD_LINEAR */
+  uint64_t mod = ((uint64_t)mod_hi << 32) | mod_lo;
+  if (mod != DRM_MOD_LINEAR && mod != DRM_MOD_NV_BL) {
     close(fd);
     return; /* el create posterior fallara por plano ausente */
   }
+  p->modifier = mod;
   p->fd = fd;
   p->offset = offset;
   p->stride = stride;
@@ -1446,9 +1461,101 @@ static void dmabuf_create_params(struct wl_client *c, struct wl_resource *r,
   p->fd = -1;
   wl_resource_set_implementation(pr, &dparams_impl, p, dparams_free);
 }
+// Feedback v4: nodo de render de la GPU + tabla de (formato, modificador).
+static const struct { uint32_t fmt; uint64_t mod; } g_dmabuf_tab[] = {
+    {DRM_FMT_XRGB8888, DRM_MOD_LINEAR}, {DRM_FMT_ARGB8888, DRM_MOD_LINEAR},
+    {DRM_FMT_XRGB8888, DRM_MOD_NV_BL},  {DRM_FMT_ARGB8888, DRM_MOD_NV_BL},
+};
+#define DMABUF_TAB_N ((int)(sizeof(g_dmabuf_tab) / sizeof(g_dmabuf_tab[0])))
+static int g_dmabuf_tab_fd = -1;
+
+static dev_t dmabuf_main_device(void) {
+  struct stat st;
+  if (stat("/dev/dri/renderD128", &st) == 0)
+    return st.st_rdev;
+  if (stat("/dev/dri/card0", &st) == 0)
+    return st.st_rdev;
+  return 0;
+}
+
+static int dmabuf_table_fd(void) {
+  if (g_dmabuf_tab_fd >= 0)
+    return g_dmabuf_tab_fd;
+  char path[] = "/tmp/aw-dmabuf-tab-XXXXXX";
+  int fd = mkstemp(path);
+  if (fd < 0)
+    return -1;
+  unlink(path);
+  for (int i = 0; i < DMABUF_TAB_N; i++) {
+    struct { uint32_t fmt, pad; uint64_t mod; } e = {g_dmabuf_tab[i].fmt, 0,
+                                                      g_dmabuf_tab[i].mod};
+    if (write(fd, &e, sizeof(e)) != (ssize_t)sizeof(e)) {
+      close(fd);
+      return -1;
+    }
+  }
+  g_dmabuf_tab_fd = fd;
+  return fd;
+}
+
+static void dfb_destroy(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static const struct zwp_linux_dmabuf_feedback_v1_interface dfb_impl = {
+    .destroy = dfb_destroy,
+};
+static void dmabuf_send_feedback(struct wl_client *c, struct wl_resource *dm,
+                                 uint32_t id) {
+  struct wl_resource *fb = wl_resource_create(
+      c, &zwp_linux_dmabuf_feedback_v1_interface, wl_resource_get_version(dm), id);
+  if (!fb) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(fb, &dfb_impl, NULL, NULL);
+  dev_t dev = dmabuf_main_device();
+  struct wl_array darr;
+  wl_array_init(&darr);
+  dev_t *dp = wl_array_add(&darr, sizeof(dev));
+  if (dp)
+    *dp = dev;
+  zwp_linux_dmabuf_feedback_v1_send_main_device(fb, &darr);
+  int tfd = dmabuf_table_fd();
+  if (tfd >= 0)
+    zwp_linux_dmabuf_feedback_v1_send_format_table(
+        fb, tfd, (uint32_t)(DMABUF_TAB_N * 16));
+  zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(fb, &darr);
+  zwp_linux_dmabuf_feedback_v1_send_tranche_flags(fb, 0);
+  struct wl_array idx;
+  wl_array_init(&idx);
+  for (uint16_t i = 0; i < DMABUF_TAB_N; i++) {
+    uint16_t *ip = wl_array_add(&idx, sizeof(*ip));
+    if (ip)
+      *ip = i;
+  }
+  zwp_linux_dmabuf_feedback_v1_send_tranche_formats(fb, &idx);
+  zwp_linux_dmabuf_feedback_v1_send_tranche_done(fb);
+  zwp_linux_dmabuf_feedback_v1_send_done(fb);
+  wl_array_release(&idx);
+  wl_array_release(&darr);
+  fprintf(stderr, "[aurora-wayland] dmabuf feedback v%d: main_device=%u:%u\n",
+          wl_resource_get_version(dm), (unsigned)major(dev), (unsigned)minor(dev));
+}
+static void dmabuf_get_default_feedback(struct wl_client *c, struct wl_resource *r,
+                                        uint32_t id) {
+  dmabuf_send_feedback(c, r, id);
+}
+static void dmabuf_get_surface_feedback(struct wl_client *c, struct wl_resource *r,
+                                        uint32_t id, struct wl_resource *surf) {
+  (void)surf;
+  dmabuf_send_feedback(c, r, id);
+}
 static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
     .destroy = noop_destroy,
     .create_params = dmabuf_create_params,
+    .get_default_feedback = dmabuf_get_default_feedback,
+    .get_surface_feedback = dmabuf_get_surface_feedback,
 };
 static void dmabuf_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
   (void)d;
@@ -1458,11 +1565,15 @@ static void dmabuf_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
     return;
   }
   wl_resource_set_implementation(r, &dmabuf_impl, NULL, NULL);
+  if (v >= 4) /* v4: todo va por feedback */
+    return;
   static const uint32_t fmts[] = {DRM_FMT_XRGB8888, DRM_FMT_ARGB8888};
   for (unsigned i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
-    if (v >= 3)
+    if (v >= 3) {
       zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], 0, 0); /* LINEAR */
-    else
+      zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], (uint32_t)(DRM_MOD_NV_BL >> 32),
+                                        (uint32_t)DRM_MOD_NV_BL);
+    } else
       zwp_linux_dmabuf_v1_send_format(r, fmts[i]);
   }
 }
@@ -1560,6 +1671,12 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         ingest_dmg = surface_ingest(s, db->map + db->offset, db->w, db->h,
                                     db->stride, db->format == DRM_FMT_ARGB8888);
         ingested = 1;
+      }
+      if (db && db->gpu) {
+        static int warned;
+        if (!warned++)
+          fprintf(stderr, "[aurora-wayland] dmabuf GPU (mod=0x%llx) %dx%d: sin lectura por CPU aun, no se muestra\n",
+                  (unsigned long long)db->modifier, db->w, db->h);
       }
       // Ya copiamos el contenido: el cliente puede reutilizar el buffer.
       wl_buffer_send_release(s->buffer);
@@ -4700,7 +4817,7 @@ int main(int argc, char **argv) {
   wl_global_create(g_display, &xdg_wm_base_interface, 3, NULL, wm_bind);
   wl_global_create(g_display, &zwp_primary_selection_device_manager_v1_interface, 1,
                    NULL, psm_bind);
-  wl_global_create(g_display, &zwp_linux_dmabuf_v1_interface, 3, NULL, dmabuf_bind);
+  wl_global_create(g_display, &zwp_linux_dmabuf_v1_interface, 4, NULL, dmabuf_bind);
   wl_global_create(g_display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
   wl_global_create(g_display, &wp_fractional_scale_manager_v1_interface, 1, NULL,
                    fsm_bind);
