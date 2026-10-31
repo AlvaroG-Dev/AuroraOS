@@ -10,7 +10,7 @@
         run-iso run-iso-tcg run-iso-as-usb run-smp-kvm-xhci-storage run-smp-kvm-xhci-storage-debug \
         run-bios run-bios-debug run-bios-usb run-smp-kvm-xhci-hub run-smp-kvm-xhci-hub-debug \
         tap-setup tap-teardown tap-status run-smp-kvm-xhci-uas \
-        python-stdlib env clean
+        python-stdlib env clean sysroot drivers nvidia assets-check
 
 # ---------------------------------------------------------------------------
 # Preparacion del entorno (paquetes del host, toolchain musl, pila Wayland,
@@ -55,6 +55,17 @@ normal: iso
 # SYSROOT / USERLAND
 # ===========================================================================
 
+# Opciones de la ISO "completa". Todo se copia en cada build, sin pasos manuales:
+#   WITH_NVIDIA=1  (por defecto) compila e instala nvidia/nvidia-modeset/
+#                  nvidia-drm.kur + firmware GSP (primera vez: descarga y tarda).
+#                  WITH_NVIDIA=0 lo omite (ISO sin driver NVIDIA).
+#   WITH_MESA=1    ademas baja Mesa/LLVM (+500 MB; opt-in por tamano).
+WITH_NVIDIA ?= 1
+export WITH_NVIDIA
+
+# 'sysroot' es PHONY: antes, si el directorio ya existia make lo daba por
+# actualizado y NUNCA recopiaba assets/ ni etc/. Ahora se sincroniza siempre,
+# de forma incremental (cp -u: solo lo nuevo o modificado).
 sysroot:
 	@mkdir -p sysroot/system/icons sysroot/system/wallpapers
 	@mkdir -p sysroot/etc
@@ -63,13 +74,34 @@ sysroot:
 		echo "Aurora OS v0.1.0 Initramfs Config" > sysroot/system/config.txt; \
 	fi
 	@if [ -d assets ]; then \
-		echo "[Makefile] Copiando assets a sysroot..."; \
-		cp -r assets/* sysroot/ 2>/dev/null || true; \
+		echo "[Makefile] Sincronizando assets/ -> sysroot/ (iconos, fondos, marca)..."; \
+		cp -auf assets/. sysroot/; \
 	fi
 	@if [ -d etc ]; then \
-		echo "[Makefile] Copiando etc/ a sysroot/etc/..."; \
-		cp -f etc/passwd etc/group etc/shadow etc/hosts etc/resolv.conf sysroot/etc/ 2>/dev/null || true; \
+		echo "[Makefile] Sincronizando etc/ -> sysroot/etc/..."; \
+		cp -auf etc/. sysroot/etc/; \
 	fi
+
+# Comprueba que lo imprescindible esta en sysroot/ antes de empaquetar el
+# initrd: avisa (o falla con STRICT=1) si algo no llego a la ISO.
+assets-check: sysroot
+	@missing=0; \
+	for f in system/icons/app-terminal.bmp system/icons/app-monitor.bmp \
+	         system/icons/folder-icon.bmp system/wallpapers/aurora-noche.bmp \
+	         lib/modules/linuxkpi/linuxkpi.kur usr/lib/aur \
+	         usr/bin/aurora-wayland usr/bin/weston usr/bin/foot \
+	         usr/lib/aurora-gtk/modules/libaurora-theme.so \
+	         usr/lib/x86_64-linux-gnu/qt5/plugins/platformthemes/libaurora.so \
+	         usr/share/applications; do \
+		if [ ! -e "sysroot/$$f" ]; then echo "[assets-check] FALTA sysroot/$$f"; missing=1; fi; \
+	done; \
+	if [ "$(WITH_NVIDIA)" = "1" ]; then \
+		for f in nvidia nvidia-modeset nvidia-drm; do \
+			[ -e "sysroot/lib/modules/linuxkpi/$$f.kur" ] || { echo "[assets-check] FALTA $$f.kur"; missing=1; }; \
+		done; \
+	fi; \
+	if [ "$$missing" = "1" ] && [ "$(STRICT)" = "1" ]; then exit 1; fi; \
+	[ "$$missing" = "0" ] && echo "[assets-check] OK" || true
 
 bootloader: bootloader-efi bootloader-bios
 
@@ -136,7 +168,9 @@ python-stdlib:
 # INITRD
 # ===========================================================================
 
-initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
+NVIDIA_DEP := $(if $(filter 1,$(WITH_NVIDIA)),nvidia)
+
+initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) assets-check | env
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \

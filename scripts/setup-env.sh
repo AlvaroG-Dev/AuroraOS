@@ -19,7 +19,8 @@
 #                 initrd, necesita QEMU con >= 1,5 GB)
 #   WITH_LKPI=0   no baja el arbol de Linux ni linux-firmware (por defecto 1: la
 #                 capa LinuxKPI y sus drivers no compilan sin ellos)
-#   WITH_NVIDIA=1 tambien baja open-gpu-kernel-modules (L8; no hace falta aun)
+#   WITH_NVIDIA=0 no baja open-gpu-kernel-modules ni compila nvidia*.kur (por
+#                 defecto 1: el Makefile construye el driver NVIDIA siempre)
 #   SKIP_ENV=1    no hace nada (lo respeta el Makefile)
 #   ENV_OFFLINE=1 no intenta instalar ni descargar: solo avisa de lo que falta
 set -uo pipefail
@@ -153,6 +154,15 @@ if [ ! -x "$PRE/bin/gtk3-widget-factory" ] || [ ! -x "$PRE/bin/qt5-gallery" ]; t
     fi
     soft_step "GTK3/Qt5 (fetch-toolkits.sh)" bash scripts/fetch-toolkits.sh
 fi
+# Modulo GTK3 y plugins Qt5 de Aurora: se recompilan si faltan o cambian sus fuentes
+GTKM="$PRE/lib/aurora-gtk/modules/libaurora-theme.so"
+if [ ! -f "$GTKM" ] || [ -n "$(find user/aurora-gtk-module -type f -newer "$GTKM" -print -quit 2>/dev/null)" ]; then
+    soft_step "modulo GTK3 de Aurora (build-gtk-module.sh)" bash scripts/build-gtk-module.sh
+fi
+QTP="$PRE/lib/x86_64-linux-gnu/qt5/plugins/platformthemes/libaurora.so"
+if [ ! -f "$QTP" ] || [ -n "$(find user/aurora-qt-theme -type f -newer "$QTP" -print -quit 2>/dev/null)" ]; then
+    soft_step "plugins Qt5 de Aurora (build-qt-theme.sh)" bash scripts/build-qt-theme.sh
+fi
 # Xwayland + apps X11
 if [ ! -x "$PRE/bin/Xwayland" ]; then
     xw=(xwayland x11-apps xterm x11-xkb-utils xkb-data xclip xsel libxcb1-dev libxcb-composite0-dev)
@@ -181,7 +191,7 @@ fi
 # al compilar linuxkpi y sus .kur (i915, drm, ttm...).
 if [ "${WITH_LKPI:-1}" = "1" ]; then
     lk_args=(--firmware)
-    [ "${WITH_NVIDIA:-0}" = "1" ] || lk_args+=(--no-nvidia)
+    [ "${WITH_NVIDIA:-1}" = "1" ] || lk_args+=(--no-nvidia)
     if [ ! -f build/linuxkpi_src/linux/drivers/gpu/drm/i915/i915_driver.c ] || \
        [ ! -d build/linuxkpi_src/linux-firmware ]; then
         run_step "fuentes de Linux y linux-firmware (fetch-linux-drivers.sh ${lk_args[*]})" \
