@@ -43,6 +43,11 @@ struct gbm_device *gbm_create_device(int fd);
 void gbm_device_destroy(struct gbm_device *);
 const char *gbm_device_get_backend_name(struct gbm_device *);
 struct gbm_bo *gbm_bo_create(struct gbm_device *, uint32_t w, uint32_t h, uint32_t fmt, uint32_t flags);
+struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *, uint32_t w, uint32_t h, uint32_t fmt,
+                                            const uint64_t *mods, unsigned count);
+int gbm_device_is_format_supported(struct gbm_device *, uint32_t fmt, uint32_t flags);
+#define GBM_BO_USE_SCANOUT (1u << 0)
+#define GBM_BO_USE_WRITE (1u << 3)
 uint32_t gbm_bo_get_stride(struct gbm_bo *);
 int gbm_bo_get_fd(struct gbm_bo *);
 uint64_t gbm_bo_get_modifier(struct gbm_bo *);
@@ -303,9 +308,33 @@ int main(int argc, char **argv) {
   printf("[aw_gbm_test] GL_VENDOR=%s\n[aw_gbm_test] GL_RENDERER=%s\n[aw_gbm_test] GL_VERSION=%s\n",
          glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION));
 
-  struct gbm_bo *bo = gbm_bo_create(gbm, W, H, FOURCC_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+  /* Varias combinaciones: el backend de NVIDIA (nvidia-drm_gbm) no acepta todas las de Mesa.
+   * Se usa la primera que funcione y se informa de cada intento (para un solo ciclo de prueba). */
+  static const struct { uint32_t flags; const char *name; } tries[] = {
+    {GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR, "RENDERING|LINEAR"},
+    {GBM_BO_USE_RENDERING, "RENDERING"},
+    {GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT, "RENDERING|SCANOUT"},
+    {GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR, "RENDERING|SCANOUT|LINEAR"},
+    {GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE, "RENDERING|WRITE"},
+    {0, "0"},
+  };
+  struct gbm_bo *bo = NULL;
+  for (unsigned i = 0; i < sizeof(tries) / sizeof(tries[0]) && !bo; i++) {
+    int sup = gbm_device_is_format_supported(gbm, FOURCC_XRGB8888, tries[i].flags);
+    errno = 0;
+    bo = gbm_bo_create(gbm, W, H, FOURCC_XRGB8888, tries[i].flags);
+    printf("[aw_gbm_test] gbm_bo_create flags=%s supported=%d -> %s (errno=%d)\n", tries[i].name, sup,
+           bo ? "OK" : "NULL", bo ? 0 : errno);
+  }
+  if (!bo) {
+    static const uint64_t lin[] = {0ULL /* DRM_FORMAT_MOD_LINEAR */};
+    errno = 0;
+    bo = gbm_bo_create_with_modifiers(gbm, W, H, FOURCC_XRGB8888, lin, 1);
+    printf("[aw_gbm_test] gbm_bo_create_with_modifiers(LINEAR) -> %s (errno=%d)\n", bo ? "OK" : "NULL", bo ? 0 : errno);
+    fflush(stdout);
+  }
   if (!bo)
-    return fail("gbm_bo_create (XRGB8888 LINEAR RENDERING)");
+    return fail("gbm_bo_create (ninguna combinacion)");
   uint32_t stride = gbm_bo_get_stride(bo);
   printf("[aw_gbm_test] bo %dx%d stride=%u modifier=0x%llx\n", W, H, stride, (unsigned long long)gbm_bo_get_modifier(bo));
   EGLImage img = eglCreateImage(dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, bo, NULL);

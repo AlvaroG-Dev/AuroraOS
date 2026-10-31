@@ -417,6 +417,31 @@ static s64 lkpi_vop_ioctl(struct aurora_vfs_node *n, unsigned long req, u64 arg)
 			pr_info("lkpi: nv ioctl nr=0x%lx size=0x%lx ret=%ld\n", req & 0xff, (req >> 16) & 0x3fff, r);
 		}
 	}
+	if (r >= 0 && ((req >> 8) & 0xff) == 'F' && (req & 0xff) != 0x29) {
+		/*
+		 * Diagnostico NVIDIA con strace activo: volcado hexadecimal de los parametros
+		 * (tras la llamada) de todos los ioctl de nvidiactl salvo RM_FREE. El `status`
+		 * de cada NVOS* va dentro: VID_HEAP_CONTROL 0x4a (+0x14), MAP_MEMORY 0x4e (+0x28)...
+		 */
+		extern char g_strace_comm[32];
+		static int lkpi_nv_dump_logged;
+		if (g_strace_comm[0] && !strcmp(current->comm, g_strace_comm) && lkpi_nv_dump_logged < 1500) {
+			u32 w[48];
+			unsigned long sz = (req >> 16) & 0x3fff, n, i;
+			char line[48 * 9 + 8];
+			int o = 0;
+
+			if (sz > sizeof(w))
+				sz = sizeof(w);
+			n = sz / 4;
+			if (n && !copy_from_user(w, (void __user *)arg, n * 4)) {
+				lkpi_nv_dump_logged++;
+				for (i = 0; i < n; i++)
+					o += snprintf(line + o, sizeof(line) - o, "%x ", w[i]);
+				pr_info("lkpi: nv dump nr=0x%lx sz=0x%lx: %s\n", req & 0xff, (req >> 16) & 0x3fff, line);
+			}
+		}
+	}
 	if (r < 0) {
 		/* Diagnostico: ioctl fallidos (libs de NVIDIA, nvidia-smi...). Maximo 128 lineas. */
 		static int lkpi_ioctl_fail_logged;
