@@ -381,32 +381,38 @@ static s64 lkpi_vop_ioctl(struct aurora_vfs_node *n, unsigned long req, u64 arg)
 		 * Diagnostico NVIDIA: el ioctl de nvidiactl devuelve 0 aunque el RM rechace
 		 * la peticion; el error va en el campo `status` de NVOS54 (RM_CONTROL 0x2a:
 		 * cmd en +8, status en +0x1c) o NVOS64 (RM_ALLOC 0x2b: clase en +0xc,
-		 * status en +0x28). Maximo 300 lineas (todas las llamadas, no solo las fallidas).
+		 * status en +0x28). Los fallos (status != 0) se registran siempre (max. 300);
+		 * todas las llamadas solo del proceso con `strace=NOMBRE` activo (max. 3000).
 		 */
-		static int lkpi_rm_fail_logged;
+		extern char g_strace_comm[32];
+		static int lkpi_rm_fail_logged, lkpi_rm_all_logged;
 		unsigned long nr = req & 0xff;
-		if (lkpi_rm_fail_logged < 300 && (nr == 0x2a || nr == 0x2b)) {
+		if (nr == 0x2a || nr == 0x2b) {
 			u32 w[12] = {0};
 			unsigned long sz = (req >> 16) & 0x3fff;
 			if (sz > sizeof(w))
 				sz = sizeof(w);
 			if (!copy_from_user(w, (void __user *)arg, sz)) {
 				u32 st = nr == 0x2a ? w[7] : w[10];
-				{
-					/* se registran todas las llamadas (tambien status=0) mientras no se sepa cual falla */
-					lkpi_rm_fail_logged++;
-					pr_info("lkpi: RM %s status=0x%x %s=0x%x hClient=0x%x hObj=0x%x\n",
-						nr == 0x2a ? "CONTROL" : "ALLOC", st,
+				bool traced = g_strace_comm[0] && !strcmp(current->comm, g_strace_comm);
+				if ((st && lkpi_rm_fail_logged < 300) || (traced && lkpi_rm_all_logged < 3000)) {
+					if (st)
+						lkpi_rm_fail_logged++;
+					else
+						lkpi_rm_all_logged++;
+					pr_info("lkpi: RM %s %s status=0x%x %s=0x%x hClient=0x%x hObj=0x%x pid=%d\n",
+						nr == 0x2a ? "CONTROL" : "ALLOC", current->comm, st,
 						nr == 0x2a ? "cmd" : "class", nr == 0x2a ? w[2] : w[3],
-						w[0], w[1]);
+						w[0], w[1], current->pid);
 				}
 			}
 		}
 	}
 	if (((req >> 8) & 0xff) == 'F' && (req & 0xff) != 0x2a && (req & 0xff) != 0x2b) {
 		/* Diagnostico NVIDIA: resto de ioctl de nvidiactl/nvidia0 (REGISTER_FD, NUMA_INFO...). */
+		extern char g_strace_comm[32];
 		static int lkpi_nv_ioctl_logged;
-		if (lkpi_nv_ioctl_logged < 200) {
+		if ((r < 0 || (g_strace_comm[0] && !strcmp(current->comm, g_strace_comm))) && lkpi_nv_ioctl_logged < 1000) {
 			lkpi_nv_ioctl_logged++;
 			pr_info("lkpi: nv ioctl nr=0x%lx size=0x%lx ret=%ld\n", req & 0xff, (req >> 16) & 0x3fff, r);
 		}

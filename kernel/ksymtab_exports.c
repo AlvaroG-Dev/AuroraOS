@@ -258,3 +258,7 @@ _Static_assert(sizeof(task_info_t) == 48 && offsetof(task_info_t, proc) == 16 &&
 KEXPORT_SYMBOL(power_request);
 KEXPORT_SYMBOL(power_register_notifier);
 KEXPORT_SYMBOL(power_unregister_notifier);
+
+// Diagnostico NVIDIA (fs/file.c de LinuxKPI): `strace=NOMBRE` en /dev/kmsg.
+extern char g_strace_comm[32];
+KEXPORT_SYMBOL(g_strace_comm);
