@@ -25,6 +25,7 @@
 #include <linux/workqueue.h>
 #include <linux/hardirq.h>
 #include <linux/cdev.h>
+#include <linux/fdtable.h>
 
 #include "../aurora.h"
 #include "../lkpi_internal.h"
@@ -800,3 +801,34 @@ ssize_t lkpi_memory_read_from_buffer(void *to, size_t count, loff_t *ppos, const
 	return count;
 }
 EXPORT_SYMBOL(lkpi_memory_read_from_buffer);
+
+/*
+ * iterate_fd(): lo usa NVIDIA (nv_is_gpu_accessible) para comprobar que el proceso
+ * tiene abierto /dev/nvidiaN antes de dejarle crear un NV01_DEVICE_0; con el stub
+ * anterior (siempre 0) el RM devolvia NV_ERR_INSUFFICIENT_PERMISSIONS (0x1b).
+ * Recorre los fds del proceso actual y llama a fn con los que son ficheros de la capa.
+ */
+int iterate_fd(struct files_struct *files, unsigned int n,
+	       int (*fn)(const void *, struct file *, unsigned int), const void *p)
+{
+	unsigned int fd;
+	int res = 0;
+
+	for (fd = n; fd < 256 && !res; fd++) {
+		struct aurora_fd *afd = aurora_vfs_fd_get_current((int)fd);
+		struct aurora_vfs_node *node;
+
+		if (!afd)
+			continue;
+		node = aurora_vfs_fd_node(afd);
+		if (node && aurora_vfs_node_ops(node) == &lkpi_file_vops) {
+			struct file *f = lkpi_vnode_file(node);
+
+			if (f)
+				res = fn(p, f, fd);
+		}
+		aurora_vfs_fd_put_ref(afd);
+	}
+	return res;
+}
+EXPORT_SYMBOL(iterate_fd);

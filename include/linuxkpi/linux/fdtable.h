@@ -4,5 +4,7 @@
 #define _LKPI_LINUX_FDTABLE_H
 #include <linux/types.h>
 struct files_struct;
-static inline int iterate_fd(struct files_struct *f, unsigned n, int (*fn)(const void *, struct file *, unsigned), const void *p) { return 0; }
+struct file;
+/* Recorre los fds del proceso actual que sean ficheros de la capa (fs/file.c); `f` se ignora. */
+int iterate_fd(struct files_struct *f, unsigned n, int (*fn)(const void *, struct file *, unsigned), const void *p);
 #endif
