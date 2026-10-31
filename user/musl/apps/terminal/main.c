@@ -237,7 +237,9 @@ int main(int argc, char **argv) {
   int win = sys_win_create(80, 60, win_w, win_h + TERM_TITLEBAR_H, "Terminal");
   if (win < 0)
     return 1;
-  sys_win_set_icon(win, "/system/icons/terminal-window-dark.bmp");
+  sys_win_set_icon(win, (sys_theme_get() & 1)
+                            ? "/system/icons/terminal-window-light.bmp"
+                            : "/system/icons/terminal-window-dark.bmp");
 
   g_win = win;
   g_cw = win_w;
@@ -327,6 +329,8 @@ int main(int argc, char **argv) {
       if (th != theme_seen) {
         theme_seen = th;
         terminal_set_theme(&g_term, (int)(th & 1));
+        sys_win_set_icon(g_win, (th & 1) ? "/system/icons/terminal-window-light.bmp"
+                                         : "/system/icons/terminal-window-dark.bmp");
         const uint32_t bgp = 0xFF000000u | term_default_bg();
         for (int i = 0; i < g_cw * g_ch; i++)
           g_pixels[i] = bgp;

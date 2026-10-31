@@ -977,6 +977,21 @@ static void xs_map(struct xsurf *xs, int w, int h) {
       if (aw_icon_for(key, names, nn, ip, sizeof(ip)))
         icon = ip;
     }
+    if (icon[0] == '/' && !strcmp(icon, "/system/icons/app-generic.bmp") &&
+        xs->tl->title[0]) {
+      // Sin icono por app_id: el titulo (en minusculas, con guiones) suele
+      // coincidir con el nombre del icono (p. ej. "Hello GTK" -> hello-gtk).
+      char tn[64];
+      size_t k = 0;
+      for (const char *c = xs->tl->title; *c && k < sizeof(tn) - 1; c++)
+        tn[k++] = (*c == ' ') ? '-' : (char)((*c >= 'A' && *c <= 'Z') ? *c + 32 : *c);
+      tn[k] = 0;
+      const char *names[1] = {tn};
+      char key[80];
+      snprintf(key, sizeof(key), "title-%s", tn);
+      if (aw_icon_for(key, names, 1, ip, sizeof(ip)))
+        icon = ip;
+    }
     syscall(ASYS_WIN_SET_ICON, (long)id, icon);
   }
   xs->cw = w;
