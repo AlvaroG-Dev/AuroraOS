@@ -778,6 +778,19 @@ int usb_hid_probe(usb_device_t *dev) {
       kfree(h);
       continue;
     }
+    /* Ratón relativo: segundo hilo sobre el mismo endpoint. Con una sola
+     * petición en vuelo el endpoint queda sin TD mientras el hilo despierta
+     * y reenvía; el receptor 2.4G descarta los informes de ese hueco y el
+     * cursor recorre poco. Con dos, xhci.aur encola el siguiente TD en
+     * cuanto completa el anterior. Los deltas se suman, el orden da igual. */
+    if (h->kind == HID_KIND_MOUSE) {
+      int rel = !h->use_report_protocol;
+      for (int i = 0; h->use_report_protocol && i < h->report.num_fields; i++)
+        if (h->report.fields[i].is_relative)
+          rel = 1;
+      if (rel)
+        (void)usb_hid_spawn_kthread(h);
+    }
     probed++;
   }
   return probed;
