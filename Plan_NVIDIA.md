@@ -277,3 +277,8 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 - Verificar el movimiento del ratón en hardware tras los dos hilos HID.
 
 **Propuesta:** vblank por IRQ, apagar debug y recortar el arranque; L8/L9 después.
+
+### N5a paso 2: eglCreateImage con EGL_BAD_PARAMETER (causa encontrada)
+- En el log: `linuxkpi: fd_install de un dma_buf: -12` justo tras `DRM_IOCTL_PRIME_HANDLE_TO_FD`. El bo de gbm es **vidmem** (la 4060 tiene `hasVideoMemory`), y nvidia-drm no puede dar `sg_table` de vidmem (`pages_count == 0` -> -ENOMEM). La capa exigia paginas de CPU para envolver el dma_buf en un dmabuf de Aurora, el fd quedaba sin instalar y EGL recibia un fd invalido.
+- Fix (`kernel/linuxkpi/dma/dma-buf.c`, `lkpi_dma_buf_cpu_pages`): si no hay paginas de CPU, el dmabuf de Aurora se construye sobre una pagina de relleno (el dma_buf original viaja en `ext_priv`, asi que al reimportar NVIDIA reconoce su propio GEM). Log: `linuxkpi: dma_buf '...' sin paginas de CPU`.
+- Limite conocido: mmap de CPU de un dmabuf vidmem no da el contenido real (compositor con SHM/CPU no valdra; solo ruta GPU).

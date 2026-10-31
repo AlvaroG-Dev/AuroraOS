@@ -152,6 +152,26 @@ static void lkpi_dmabuf_anode_release(void *priv)
 	lkpi_dma_buf_put(priv);
 }
 
+/*
+ * Pagina de relleno para dma_bufs sin paginas accesibles por la CPU (memoria
+ * de video: nvidia-drm no puede dar sg_table de vidmem). El dma_buf sigue
+ * siendo valido para el GPU (se identifica por dmabuf->priv al reimportarlo);
+ * el dmabuf de Aurora que lo envuelve apunta toda su extension a esta pagina.
+ */
+static u64 lkpi_dma_buf_scratch_phys(void)
+{
+	static u64 phys;
+	struct page *pg;
+
+	if (phys)
+		return phys;
+	pg = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!pg)
+		return 0;
+	phys = page_to_phys(pg);
+	return phys;
+}
+
 /* Paginas del dma_buf para la CPU (una vez). Con __lkpi_lock tomado. */
 static int lkpi_dma_buf_cpu_pages(struct dma_buf *dmabuf, u64 **out, u32 *npages)
 {
@@ -161,15 +181,37 @@ static int lkpi_dma_buf_cpu_pages(struct dma_buf *dmabuf, u64 **out, u32 *npages
 
 	if (!dmabuf->__lkpi_cpu_sgt) {
 		struct dma_buf_attachment *a;
-		struct sg_table *sgt;
+		struct sg_table *sgt = NULL;
+		int err = 0;
 
 		a = lkpi_dma_buf_dynamic_attach(dmabuf, &lkpi_dmabuf_cpu_dev, NULL, NULL);
-		if (IS_ERR(a))
-			return PTR_ERR(a);
-		sgt = lkpi_dma_buf_map_attachment_unlocked(a, DMA_BIDIRECTIONAL);
-		if (IS_ERR(sgt)) {
-			lkpi_dma_buf_detach(dmabuf, a);
-			return PTR_ERR(sgt);
+		if (IS_ERR(a)) {
+			err = PTR_ERR(a);
+			a = NULL;
+		} else {
+			sgt = lkpi_dma_buf_map_attachment_unlocked(a, DMA_BIDIRECTIONAL);
+			if (IS_ERR(sgt)) {
+				err = PTR_ERR(sgt);
+				lkpi_dma_buf_detach(dmabuf, a);
+				a = NULL;
+			}
+		}
+		if (err) {
+			u64 sp = lkpi_dma_buf_scratch_phys();
+			u32 i;
+
+			pr_info("linuxkpi: dma_buf '%s' sin paginas de CPU (%d): vidmem, pagina de relleno\n",
+				dmabuf->exp_name ? dmabuf->exp_name : "?", err);
+			if (!sp)
+				return err;
+			pages = kvmalloc_array(want, sizeof(u64), GFP_KERNEL);
+			if (!pages)
+				return -ENOMEM;
+			for (i = 0; i < want; i++)
+				pages[i] = sp;
+			*out = pages;
+			*npages = want;
+			return 0;
 		}
 		dmabuf->__lkpi_cpu_attach = a;
 		dmabuf->__lkpi_cpu_sgt = sgt;
