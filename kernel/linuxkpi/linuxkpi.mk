@@ -141,6 +141,11 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 		ln -sf ../libnvidia-allocator.so.$$V $$L/gbm/nvidia-drm_gbm.so; \
 		cp -f build/nvidia/pkg/10_nvidia.json sysroot/usr/share/glvnd/egl_vendor.d/10_nvidia.json; \
 		cp -f build/nvidia/pkg/15_nvidia_gbm.json sysroot/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json; \
+		for f in libnvidia-egl-wayland.so.1.1.20 libnvidia-egl-wayland2.so.1.0.2 libnvidia-wayland-client.so.$$V; do cp -f $$U/$$f $$L/ || exit 1; done; \
+		ln -sf libnvidia-egl-wayland.so.1.1.20 $$L/libnvidia-egl-wayland.so.1; \
+		ln -sf libnvidia-egl-wayland2.so.1.0.2 $$L/libnvidia-egl-wayland2.so.1; \
+		ln -sf libnvidia-wayland-client.so.$$V $$L/libnvidia-wayland-client.so.1; \
+		cp -f build/nvidia/pkg/10_nvidia_wayland.json build/nvidia/pkg/09_nvidia_wayland2.json sysroot/usr/share/egl/egl_external_platform.d/; \
 	fi
 	@rm -f kernel/initrd.tar
 	@echo "[NVIDIA] instalado en $(LKPI_MODDIR)/nvidia.kur (arranca con lkpi.load=linuxkpi,nvidia)"
