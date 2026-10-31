@@ -81,7 +81,20 @@ static const struct wl_callback_listener frame_l = {frame_done};
 
 static double now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec / 1e9; }
 
+/* EGL_KHR_debug: egl-wayland2 (y el driver) explican aqui por que fallan */
+static void egl_dbg(EGLenum error, const char *cmd, EGLint type, void *thread, void *obj, const char *msg) {
+  (void)thread; (void)obj;
+  printf("[aw_nvwl] EGLDEBUG %s type=0x%x err=0x%x: %s\n", cmd ? cmd : "?", type, error, msg ? msg : "");
+  fflush(stdout);
+}
+
 int main(int argc, char **argv) {
+  {
+    EGLint (*dbg)(void *, const intptr_t *) = (void *)eglGetProcAddress("eglDebugMessageControlKHR");
+    intptr_t at[] = {0x33B9, 1, 0x33BA, 1, 0x33BB, 1, 0x33BC, 1, EGL_NONE};
+    if (dbg) printf("[aw_nvwl] eglDebugMessageControlKHR -> %d\n", dbg((void *)egl_dbg, at));
+    else printf("[aw_nvwl] sin eglDebugMessageControlKHR\n");
+  }
   int frames = argc > 1 ? atoi(argv[1]) : 5, hold = argc > 2 ? atoi(argv[2]) : 5;
   setvbuf(stdout, NULL, _IONBF, 0);
   struct wl_display *dpy = wl_display_connect(NULL);
