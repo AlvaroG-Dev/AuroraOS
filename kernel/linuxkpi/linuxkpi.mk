@@ -118,6 +118,14 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@cp -f build/nvidia/firmware/gsp_ga10x.bin build/nvidia/firmware/ucodes_ga10x.bin sysroot/lib/firmware/nvidia/$(NVIDIA_OPEN_VERSION)/
 	@mkdir -p sysroot/usr/bin
 	@$(or $(MUSL_CC),musl-gcc) -static -O1 -Wall -o sysroot/usr/bin/nvctl_test tests/nvidia/nvctl_test.c -Ibuild/linuxkpi_src/nvidia-open/kernel-open/common/inc -Ibuild/linuxkpi_src/nvidia-open/src/common/sdk/nvidia/inc
+	@# N4: nvidia-smi real + NVML (glibc; el initrd ya lleva loader y libc). libnvidia-ml se carga por dlopen("libnvidia-ml.so.1").
+	@if [ -f build/nvidia/pkg/nvidia-smi ] && [ -f build/nvidia/userlib/libnvidia-ml.so.$(NVIDIA_OPEN_VERSION) ]; then \
+		mkdir -p sysroot/usr/lib64 sysroot/lib64; \
+		cp -f build/nvidia/pkg/nvidia-smi sysroot/usr/bin/nvidia-smi; \
+		cp -f build/nvidia/userlib/libnvidia-ml.so.$(NVIDIA_OPEN_VERSION) sysroot/usr/lib64/; \
+		ln -sf libnvidia-ml.so.$(NVIDIA_OPEN_VERSION) sysroot/usr/lib64/libnvidia-ml.so.1; \
+		cp -af sysroot/usr/lib64/libnvidia-ml.so* sysroot/lib64/; \
+	fi
 	@rm -f kernel/initrd.tar
 	@echo "[NVIDIA] instalado en $(LKPI_MODDIR)/nvidia.kur (arranca con lkpi.load=linuxkpi,nvidia)"
 
