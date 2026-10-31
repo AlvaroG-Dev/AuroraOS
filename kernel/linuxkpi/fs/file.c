@@ -375,6 +375,16 @@ static s64 lkpi_vop_ioctl(struct aurora_vfs_node *n, unsigned long req, u64 arg)
 	if (!f->f_op->unlocked_ioctl)
 		return -ENOTTY;
 	r = f->f_op->unlocked_ioctl(f, (unsigned int)req, (unsigned long)arg);
+	if (r < 0) {
+		/* Diagnostico: ioctl fallidos (libs de NVIDIA, nvidia-smi...). Maximo 128 lineas. */
+		static int lkpi_ioctl_fail_logged;
+		if (lkpi_ioctl_fail_logged < 128) {
+			lkpi_ioctl_fail_logged++;
+			pr_info("lkpi: ioctl fallido cmd=0x%lx (dir=%lu tipo='%c' nr=0x%lx size=%lu) ret=%ld\n",
+				req, (req >> 30) & 3, (char)((req >> 8) & 0xff), req & 0xff,
+				(req >> 16) & 0x3fff, r);
+		}
+	}
 	return r < 0 ? lkpi_errno_user(r) : r;
 }
 
