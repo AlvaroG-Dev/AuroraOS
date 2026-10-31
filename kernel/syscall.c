@@ -7512,6 +7512,33 @@ static void strace_path(uint64_t num, uint64_t a1, uint64_t a2, char *out,
   out[n - 1] = 0;
 }
 
+// Volcado de los primeros bytes de un sendmsg/recvmsg trazado: con Wayland son
+// las cabeceras (id de objeto, tam<<16|opcode) de los primeros mensajes.
+static void strace_msg_dump(const char *what, uint64_t msg, int64_t ret) {
+  static int budget = 600;
+  if (budget <= 0 || ret <= 0 || !msg || msg >= USER_LIMIT)
+    return;
+  uint64_t hdr[7];
+  if (copy_from_user(hdr, (const void *)msg, sizeof(hdr)) < 0)
+    return;
+  uint64_t iov = hdr[2], iovlen = hdr[3];
+  if (!iovlen || !iov || iov >= USER_LIMIT)
+    return;
+  uint64_t ent[2];
+  if (copy_from_user(ent, (const void *)iov, sizeof(ent)) < 0 || !ent[0] || ent[0] >= USER_LIMIT)
+    return;
+  uint32_t w[12] = {0};
+  size_t n = ent[1] < sizeof(w) ? ent[1] : sizeof(w);
+  if ((int64_t)n > ret)
+    n = (size_t)ret;
+  if (copy_from_user(w, (const void *)ent[0], n) < 0)
+    return;
+  budget--;
+  LOG_INFO("[STRACE-MSG] %s ret=%ld iov=%lu ctl=%lu: %x %x %x %x %x %x %x %x", what, (long)ret,
+           (unsigned long)iovlen, (unsigned long)hdr[5], w[0], w[1], w[2], w[3], w[4], w[5],
+           w[6], w[7]);
+}
+
 uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t num = regs->rax;
   uint64_t arg1 = regs->rdi;
@@ -7558,6 +7585,8 @@ uint64_t syscall_handler_c(registers_t *regs) {
 
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
 
+  if (tracing && (num == 46 || num == 47))
+    strace_msg_dump(num == 46 ? "sendmsg" : "recvmsg", arg2, (int64_t)ret);
   if (tracing)
     LOG_INFO("[STRACE] %s(%lu) a=%lx,%lx,%lx '%s' -> %ld", linux_table[num < (uint64_t)LINUX_TABLE_N ? num : 0].name ? linux_table[num < (uint64_t)LINUX_TABLE_N ? num : 0].name : "?", (unsigned long)num, (unsigned long)arg1, (unsigned long)arg2, (unsigned long)arg3, tr_path, (long)ret);
 
