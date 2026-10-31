@@ -8,4 +8,5 @@
 // siguiente llamada, o NULL si no se pudo (motivo en stderr).
 const uint8_t *gpuimp_read(int fd, int w, int h, uint32_t stride, uint32_t offset,
                            uint32_t fourcc, uint64_t modifier);
+int gpuimp_query_modifiers(uint32_t fourcc, uint64_t *mods, int max);
 #endif

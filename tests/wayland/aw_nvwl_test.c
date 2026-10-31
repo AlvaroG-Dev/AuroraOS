@@ -41,6 +41,7 @@ EGLBoolean eglMakeCurrent(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
 EGLBoolean eglSwapBuffers(EGLDisplay, EGLSurface);
 EGLBoolean eglSwapInterval(EGLDisplay, EGLint);
 EGLint eglGetError(void);
+void *(*eglGetProcAddress(const char *))(void);
 void glClearColor(float, float, float, float);
 void glClear(unsigned);
 void glViewport(int, int, int, int);
@@ -108,6 +109,21 @@ int main(int argc, char **argv) {
   EGLBoolean r = eglInitialize(edpy, &maj, &min);
   STEP("eglInitialize -> %d (%d.%d) vendor=%s", r, maj, min, eglQueryString(edpy, EGL_VENDOR)); EGLERR();
   if (!r) return 1;
+  {
+    const char *ex = eglQueryString(edpy, EGL_EXTENSIONS);
+    STEP("EGL ext: dma_buf_import_modifiers=%d", ex && strstr(ex, "EGL_EXT_image_dma_buf_import_modifiers") != NULL);
+    EGLBoolean (*qm)(EGLDisplay, EGLint, EGLint, uint64_t *, EGLBoolean *, EGLint *) =
+        (void *)eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+    if (qm) {
+      uint64_t m[64]; EGLBoolean e[64]; EGLint nn = 0;
+      for (unsigned f = 0; f < 2; f++) {
+        uint32_t fcc = f ? 0x34325241u : 0x34325258u;
+        int rr = qm(edpy, (EGLint)fcc, 64, m, e, &nn);
+        STEP("eglQueryDmaBufModifiersEXT(0x%x) -> %d n=%d", fcc, rr, nn);
+        for (int i = 0; i < nn && i < 12; i++) STEP("   mod[%d]=0x%llx external_only=%d", i, (unsigned long long)m[i], e[i]);
+      }
+    }
+  }
   eglBindAPI(EGL_OPENGL_ES_API);
   EGLConfig cfg; EGLint n = 0;
   EGLint ca[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,

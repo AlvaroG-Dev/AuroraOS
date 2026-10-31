@@ -1270,8 +1270,6 @@ static void surface_damage_up(struct surface *s, rc_t d) {
 #define DRM_FMT_ARGB8888 0x34325241u
 
 #define DRM_MOD_LINEAR 0ull
-/* Block-linear de NVIDIA (el que reserva libnvidia-allocator en la 4060). */
-#define DRM_MOD_NV_BL 0x0300000000e08014ull
 
 struct dmabuf_buf {
   int gpu; /* modificador no lineal: la CPU no puede leerlo (vidmem) */
@@ -1396,6 +1394,7 @@ static struct wl_resource *dmabuf_make_buffer(struct wl_client *c,
   return buf;
 }
 
+static int dmabuf_mod_ok(uint64_t mod);
 static void dparams_destroy(struct wl_client *c, struct wl_resource *r) {
   (void)c;
   wl_resource_destroy(r);
@@ -1424,7 +1423,7 @@ static void dparams_add(struct wl_client *c, struct wl_resource *r, int32_t fd,
     return;
   }
   uint64_t mod = ((uint64_t)mod_hi << 32) | mod_lo;
-  if (mod != DRM_MOD_LINEAR && mod != DRM_MOD_NV_BL) {
+  if (!dmabuf_mod_ok(mod)) {
     fprintf(stderr, "[aurora-wayland] dmabuf add: modificador 0x%llx no soportado\n",
             (unsigned long long)mod);
     close(fd);
@@ -1472,12 +1471,41 @@ static void dmabuf_create_params(struct wl_client *c, struct wl_resource *r,
   wl_resource_set_implementation(pr, &dparams_impl, p, dparams_free);
 }
 // Feedback v4: nodo de render de la GPU + tabla de (formato, modificador).
-static const struct { uint32_t fmt; uint64_t mod; } g_dmabuf_tab[] = {
-    {DRM_FMT_XRGB8888, DRM_MOD_LINEAR}, {DRM_FMT_ARGB8888, DRM_MOD_LINEAR},
-    {DRM_FMT_XRGB8888, DRM_MOD_NV_BL},  {DRM_FMT_ARGB8888, DRM_MOD_NV_BL},
-};
-#define DMABUF_TAB_N ((int)(sizeof(g_dmabuf_tab) / sizeof(g_dmabuf_tab[0])))
+// Tabla de (formato, modificador): LINEAR (lo lee la CPU) + los modificadores de render que
+// reporta el EGL de la GPU (NVIDIA: block-linear con varias alturas/kinds). Se construye una vez.
+static struct { uint32_t fmt; uint64_t mod; } g_dmabuf_tab[2 + 2 * 64];
+static int g_dmabuf_tab_n;
+static uint64_t g_gpu_mods[64];
+static int g_gpu_mods_n;
+static int g_dmabuf_tab_built;
 static int g_dmabuf_tab_fd = -1;
+
+static void dmabuf_tab_build(void) {
+  if (g_dmabuf_tab_built)
+    return;
+  g_dmabuf_tab_built = 1;
+  g_gpu_mods_n = gpuimp_query_modifiers(DRM_FMT_XRGB8888, g_gpu_mods, 64);
+  static const uint32_t fmts[] = {DRM_FMT_XRGB8888, DRM_FMT_ARGB8888};
+  for (int f = 0; f < 2; f++) {
+    g_dmabuf_tab[g_dmabuf_tab_n].fmt = fmts[f];
+    g_dmabuf_tab[g_dmabuf_tab_n++].mod = DRM_MOD_LINEAR;
+    for (int m = 0; m < g_gpu_mods_n; m++) {
+      if (g_gpu_mods[m] == DRM_MOD_LINEAR)
+        continue;
+      g_dmabuf_tab[g_dmabuf_tab_n].fmt = fmts[f];
+      g_dmabuf_tab[g_dmabuf_tab_n++].mod = g_gpu_mods[m];
+    }
+  }
+  fprintf(stderr, "[aurora-wayland] dmabuf: %d entradas en la tabla (%d modificadores de GPU)\n",
+          g_dmabuf_tab_n, g_gpu_mods_n);
+}
+static int dmabuf_mod_ok(uint64_t mod) {
+  dmabuf_tab_build();
+  for (int i = 0; i < g_dmabuf_tab_n; i++)
+    if (g_dmabuf_tab[i].mod == mod)
+      return 1;
+  return 0;
+}
 
 static dev_t dmabuf_main_device(void) {
   struct stat st;
@@ -1489,6 +1517,7 @@ static dev_t dmabuf_main_device(void) {
 }
 
 static int dmabuf_table_fd(void) {
+  dmabuf_tab_build();
   if (g_dmabuf_tab_fd >= 0)
     return g_dmabuf_tab_fd;
   char path[] = "/tmp/aw-dmabuf-tab-XXXXXX";
@@ -1496,7 +1525,7 @@ static int dmabuf_table_fd(void) {
   if (fd < 0)
     return -1;
   unlink(path);
-  for (int i = 0; i < DMABUF_TAB_N; i++) {
+  for (int i = 0; i < g_dmabuf_tab_n; i++) {
     struct { uint32_t fmt, pad; uint64_t mod; } e = {g_dmabuf_tab[i].fmt, 0,
                                                       g_dmabuf_tab[i].mod};
     if (write(fd, &e, sizeof(e)) != (ssize_t)sizeof(e)) {
@@ -1534,12 +1563,12 @@ static void dmabuf_send_feedback(struct wl_client *c, struct wl_resource *dm,
   int tfd = dmabuf_table_fd();
   if (tfd >= 0)
     zwp_linux_dmabuf_feedback_v1_send_format_table(
-        fb, tfd, (uint32_t)(DMABUF_TAB_N * 16));
+        fb, tfd, (uint32_t)(g_dmabuf_tab_n * 16));
   zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(fb, &darr);
   zwp_linux_dmabuf_feedback_v1_send_tranche_flags(fb, 0);
   struct wl_array idx;
   wl_array_init(&idx);
-  for (uint16_t i = 0; i < DMABUF_TAB_N; i++) {
+  for (uint16_t i = 0; i < g_dmabuf_tab_n; i++) {
     uint16_t *ip = wl_array_add(&idx, sizeof(*ip));
     if (ip)
       *ip = i;
@@ -1580,9 +1609,11 @@ static void dmabuf_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id) {
   static const uint32_t fmts[] = {DRM_FMT_XRGB8888, DRM_FMT_ARGB8888};
   for (unsigned i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
     if (v >= 3) {
-      zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], 0, 0); /* LINEAR */
-      zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], (uint32_t)(DRM_MOD_NV_BL >> 32),
-                                        (uint32_t)DRM_MOD_NV_BL);
+      dmabuf_tab_build();
+      for (int t = 0; t < g_dmabuf_tab_n; t++)
+        if (g_dmabuf_tab[t].fmt == fmts[i])
+          zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], (uint32_t)(g_dmabuf_tab[t].mod >> 32),
+                                            (uint32_t)g_dmabuf_tab[t].mod);
     } else
       zwp_linux_dmabuf_v1_send_format(r, fmts[i]);
   }

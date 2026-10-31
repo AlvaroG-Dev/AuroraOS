@@ -17,7 +17,7 @@ timeout $T $CLI >/tmp/nvwl.out 2>&1
 RC=$?
 [ -n "$APID" ] && kill -TERM $APID 2>/dev/null
 echo "NVWL rc=$RC (124 = siguio dibujando hasta el timeout = OK)" > /dev/kmsg
-echo "NVWL out: $(grep -a '^\[aw_nvwl\]' /tmp/nvwl.out | head -60 | tr '\n' '|')" > /dev/kmsg
+echo "NVWL out: $(grep -a '^\[aw_nvwl\]' /tmp/nvwl.out | head -100 | tr '\n' '|')" > /dev/kmsg
 echo "NVWL err: $(grep -av '^\[aw_nvwl\]' /tmp/nvwl.out | head -c 1500 | tr '\n' '|')" > /dev/kmsg
 head -40 /tmp/nvwl.out
 echo "[nvwl.sh] RESULT rc=$RC"

@@ -171,3 +171,36 @@ const uint8_t *gpuimp_read(int fd, int w, int h, uint32_t stride, uint32_t offse
   G.eglDestroyImage(G.dpy, img);
   return res;
 }
+
+/* Modificadores que el EGL de la GPU acepta para renderizar en `fourcc` (los que un cliente
+ * puede usar de verdad: se omiten los external_only). Devuelve cuantos. */
+int gpuimp_query_modifiers(uint32_t fourcc, uint64_t *mods, int max) {
+  if (!G.tried) {
+    G.tried = 1;
+    fprintf(stderr, "[aurora-wayland] gpuimp: iniciando EGL...\n");
+    G.ok = gpuimp_init();
+  }
+  if (!G.ok || max <= 0)
+    return 0;
+  EGLBoolean (*q)(EGLDisplay, EGLint, EGLint, uint64_t *, EGLBoolean *, EGLint *) =
+      (EGLBoolean (*)(EGLDisplay, EGLint, EGLint, uint64_t *, EGLBoolean *, EGLint *))
+          G.eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+  if (!q) {
+    fprintf(stderr, "[aurora-wayland] gpuimp: sin eglQueryDmaBufModifiersEXT\n");
+    return 0;
+  }
+  uint64_t all[64];
+  EGLBoolean ext[64];
+  EGLint n = 0;
+  if (!q(G.dpy, (EGLint)fourcc, 64, all, ext, &n) || n < 0) {
+    fprintf(stderr, "[aurora-wayland] gpuimp: eglQueryDmaBufModifiersEXT fallo (0x%x)\n", G.eglGetError());
+    return 0;
+  }
+  int out = 0;
+  for (int i = 0; i < n && i < 64 && out < max; i++)
+    if (!ext[i])
+      mods[out++] = all[i];
+  fprintf(stderr, "[aurora-wayland] gpuimp: fourcc 0x%x -> %d modificadores de render (de %d)\n", fourcc,
+          out, (int)n);
+  return out;
+}
