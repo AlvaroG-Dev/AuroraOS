@@ -1335,6 +1335,11 @@ static struct wl_resource *dmabuf_make_buffer(struct wl_client *c,
                                               int w, int h, uint32_t format,
                                               uint32_t flags, int immed) {
   struct dmabuf_params *p = wl_resource_get_user_data(pr);
+  static int dbg_n;
+  if (dbg_n++ < 40)
+    fprintf(stderr, "[aurora-wayland] dmabuf create%s %dx%d fmt=0x%x flags=%u mod=0x%llx stride=%u fd=%d\n",
+            immed ? "_immed" : "", w, h, format, flags, (unsigned long long)p->modifier,
+            p->stride, p->fd);
   if (p->used) {
     wl_resource_post_error(pr, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED,
                            "params ya usado");
@@ -1367,6 +1372,8 @@ static struct wl_resource *dmabuf_make_buffer(struct wl_client *c,
     }
   }
   if (!b) {
+    fprintf(stderr, "[aurora-wayland] dmabuf rechazado (%dx%d fmt=0x%x flags=%u mod=0x%llx)\n", w, h,
+            format, flags, (unsigned long long)p->modifier);
     if (immed)
       wl_resource_post_error(pr, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT,
                              "dmabuf no soportado");
@@ -1418,6 +1425,8 @@ static void dparams_add(struct wl_client *c, struct wl_resource *r, int32_t fd,
   }
   uint64_t mod = ((uint64_t)mod_hi << 32) | mod_lo;
   if (mod != DRM_MOD_LINEAR && mod != DRM_MOD_NV_BL) {
+    fprintf(stderr, "[aurora-wayland] dmabuf add: modificador 0x%llx no soportado\n",
+            (unsigned long long)mod);
     close(fd);
     return; /* el create posterior fallara por plano ausente */
   }
@@ -1680,6 +1689,12 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         ingest_dmg = surface_ingest(s, db->map + db->offset, db->w, db->h,
                                     db->stride, db->format == DRM_FMT_ARGB8888);
         ingested = 1;
+      }
+      if (db) {
+        static int dbg_c;
+        if (dbg_c++ < 30)
+          fprintf(stderr, "[aurora-wayland] commit dmabuf %dx%d gpu=%d ingested=%d tree=%d\n", db->w,
+                  db->h, db->gpu, ingested, tree_member);
       }
       // Ya copiamos el contenido: el cliente puede reutilizar el buffer.
       wl_buffer_send_release(s->buffer);

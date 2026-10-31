@@ -118,10 +118,13 @@ const uint8_t *gpuimp_read(int fd, int w, int h, uint32_t stride, uint32_t offse
                            uint32_t fourcc, uint64_t modifier) {
   if (!G.tried) {
     G.tried = 1;
+    fprintf(stderr, "[aurora-wayland] gpuimp: iniciando EGL...\n");
     G.ok = gpuimp_init();
   }
   if (!G.ok)
     return NULL;
+  if (G.fails < 5 && !G.logged_ok)
+    fprintf(stderr, "[aurora-wayland] gpuimp: eglCreateImage %dx%d...\n", w, h);
   intptr_t at[] = {0x3057, w, 0x3056, h, 0x3271, fourcc, 0x3272, fd, 0x3273, offset,
                    0x3274, stride, 0x3443, (intptr_t)(modifier & 0xffffffffu),
                    0x3444, (intptr_t)(modifier >> 32), EGL_NONE};
