@@ -6,11 +6,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 B=build/nvidia-kpi/ms; O=$B/obj
-NM=build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/Linux_x86_64/nv-modeset-kernel.o
+# Fase de diagnostico: nvkms con DEBUG=1 (trazas [kapi] de nvKmsKapiLogDebug y nvEvoLog*Debug).
+NM=build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/dbg/nv-modeset-kernel.o
 [ -f "$NM" ] || { echo "falta $NM" >&2; exit 1; }
 CC=${KUR_CC:-gcc}
 CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
-ld -r -o $B/ms-all.o $O/nvidia-modeset-linux.o $O/nv-kthread-q.o "$NM"
+strip --strip-debug -o $B/nv-modeset-kernel.o "$NM"
+ld -r -o $B/ms-all.o $O/nvidia-modeset-linux.o $O/nv-kthread-q.o $B/nv-modeset-kernel.o
 nm build/linuxkpi/linuxkpi.o | awk '$2 ~ /[TDBRtdbrW]/{print $3}' > $B/have.txt
 grep -o 'KEXPORT_SYMBOL([a-zA-Z_0-9]*' kernel/ksymtab_exports.c | sed 's/.*(//' >> $B/have.txt
 # exports de nvidia.kur (EXPORT_SYMBOL en kernel-open/nvidia)

@@ -1,0 +1,11 @@
+--- nvidia-modeset-linux.c	2026-10-29 13:23:35.504741948 +0000
++++ ../../../../../build/nvidia-kpi/wk3/nvidia-modeset-linux.c	2026-10-31 09:04:11.260066894 +0000
+@@ -136,7 +136,7 @@
+ module_param_named(fail_alloc_core_channel, fail_alloc_core_channel_method, int, 0444);
+ 
+ MODULE_PARM_DESC(debug, "Enable debug logging");
+-static int debug = 0;
++static int debug = 1; /* Aurora: trazas de nvkms durante el bring-up */
+ module_param_named(debug, debug, int, 0644);
+ 
+ #if IS_ENABLED(CONFIG_EXTCON_DISP_CABLE_STATE)
