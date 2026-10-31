@@ -28,7 +28,7 @@ gen "$PROTO/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml" idle-inhibit-uns
 gen "$PROTO/staging/xdg-activation/xdg-activation-v1.xml" xdg-activation-v1
 gen "$PROTO/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml" linux-dmabuf-unstable-v1
 gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora-wayland" \
-    "$ROOT/user/aurora-wayland/aurora-wayland.c" "$ROOT/user/aurora-wayland/icons.c" "$GEN/xdg-shell-protocol.c" \
+    "$ROOT/user/aurora-wayland/aurora-wayland.c" "$ROOT/user/aurora-wayland/icons.c" "$ROOT/user/aurora-wayland/gpuimp.c" "$GEN/xdg-shell-protocol.c" \
     "$GEN/xdg-decoration-unstable-v1-protocol.c" \
     "$GEN/org-kde-kwin-server-decoration-protocol.c" \
     "$GEN/viewporter-protocol.c" "$GEN/fractional-scale-v1-protocol.c" \

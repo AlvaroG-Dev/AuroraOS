@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include "gpuimp.h"
 #include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -1667,16 +1668,18 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
                                         WL_SHM_FORMAT_ARGB8888);
         wl_shm_buffer_end_access(shm);
         ingested = 1;
+      } else if (db && db->gpu && tree_member) {
+        const uint8_t *px = gpuimp_read(db->fd, db->w, db->h, (uint32_t)db->stride,
+                                        (uint32_t)db->offset, db->format, db->modifier);
+        if (px) {
+          ingest_dmg = surface_ingest(s, px, db->w, db->h, db->w * 4,
+                                      db->format == DRM_FMT_ARGB8888);
+          ingested = 1;
+        }
       } else if (db && tree_member && dmabuf_buf_map(db)) {
         ingest_dmg = surface_ingest(s, db->map + db->offset, db->w, db->h,
                                     db->stride, db->format == DRM_FMT_ARGB8888);
         ingested = 1;
-      }
-      if (db && db->gpu) {
-        static int warned;
-        if (!warned++)
-          fprintf(stderr, "[aurora-wayland] dmabuf GPU (mod=0x%llx) %dx%d: sin lectura por CPU aun, no se muestra\n",
-                  (unsigned long long)db->modifier, db->w, db->h);
       }
       // Ya copiamos el contenido: el cliente puede reutilizar el buffer.
       wl_buffer_send_release(s->buffer);
