@@ -70,6 +70,9 @@ static char *default_envp[] = {
     "XENVIRONMENT=/usr/share/aurora/xdg/Xresources",
     "GDK_BACKEND=wayland",
     "GTK_THEME=Aurora",
+    // Modulo que cambia el tema GTK3 en vivo con el modo claro/oscuro.
+    "GTK_MODULES=aurora-theme",
+    "GTK_PATH=/usr/lib/aurora-gtk",
     "GSETTINGS_BACKEND=memory",
     "GSETTINGS_SCHEMA_DIR=/usr/share/glib-2.0/schemas",
     "GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",

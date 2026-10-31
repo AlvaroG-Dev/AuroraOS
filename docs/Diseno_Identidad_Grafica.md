@@ -97,10 +97,11 @@ glifo neutro).
 - Iconos del Dock (también los de apps Linux GTK/Qt): si el icono no cubre su cuadro, se le pone una baldosa del color del tema; si el glifo tiene poco contraste con ella, se invierte la baldosa.
 - Persistencia: el modo se guarda en `/data/aurora-theme` ("light"/"dark") y un hilo de arranque (`theme-restore`) lo restaura en cuanto `/data` esta montado; la opcion de cmdline `theme=light|dark` manda sobre el fichero. Sin `/data` (solo ISO) el modo dura la sesion.
 - GTK3/GTK4: temas `Aurora` (oscuro) y `Aurora-light` generados por `tools/gen_gtk_theme.py` (acento verde, sin degradados). `aurora-wayland` fija `GTK_THEME` y el `gtk.css` de libadwaita segun el modo **al lanzar** cada app: las apps ya abiertas no cambian hasta reabrirlas.
-- Qt5: plugins recompilados (`scripts/build-qt-theme.sh`) con acento verde; sigue siendo solo oscuro (el estilo tiene grises fijos).
+- Qt5: plugins (`scripts/build-qt-theme.sh`) con acento verde y modo claro/oscuro; sondean `ASYS_THEME_GET` cada 0,4 s y repintan en vivo (el estilo pasa sus grises por `GC()`).
+- GTK3 en vivo: modulo `user/aurora-gtk-module` (`scripts/build-gtk-module.sh`, `GTK_MODULES=aurora-theme`) cambia `Aurora`/`Aurora-light` al alternar. GTK4/libadwaita sigue eligiendose solo al lanzar.
 
 ## Menus, energia y monitor
 
 - Menu Aurora: Acerca de, Modo claro/oscuro, Reiniciar, Apagar (via `power_request`). Menu "Aplicaciones": Terminal, Monitor de rendimiento, Acerca de.
 - Monitor de rendimiento (`user/musl/apps/taskmgr`): pestañas Procesos y Rendimiento; usa `ASYS_SYSINFO` / `ASYS_PROCLIST` (CPU por nucleo desde `sched_tick`, memoria del PMM, memoria virtual por proceso; no hay RSS barato).
-- Pendiente: tema claro para Qt, apps ya abiertas siguiendo el cambio de modo, confirmacion antes de apagar.
+- Pendiente: GTK4/libadwaita en vivo, confirmacion antes de apagar, pulir detalles del Qt claro.
