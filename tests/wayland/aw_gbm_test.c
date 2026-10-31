@@ -337,9 +337,30 @@ int main(int argc, char **argv) {
     return fail("gbm_bo_create (ninguna combinacion)");
   uint32_t stride = gbm_bo_get_stride(bo);
   printf("[aw_gbm_test] bo %dx%d stride=%u modifier=0x%llx\n", W, H, stride, (unsigned long long)gbm_bo_get_modifier(bo));
+  /* Mesa importa el gbm_bo como pixmap nativo; NVIDIA solo por dma-buf (EGL_EXT_image_dma_buf_import
+   * + modificadores). Se prueba primero lo de Mesa y, si falla, el dma-buf. */
   EGLImage img = eglCreateImage(dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, bo, NULL);
+  printf("[aw_gbm_test] eglCreateImage(NATIVE_PIXMAP) -> %s (egl=0x%x)\n", img ? "OK" : "NULL", img ? 0 : eglGetError());
+  if (!img) {
+    int ifd = gbm_bo_get_fd(bo);
+    uint64_t mod = gbm_bo_get_modifier(bo);
+    intptr_t at[] = {0x3057 /*WIDTH*/, W, 0x3056 /*HEIGHT*/, H, 0x3271 /*LINUX_DRM_FOURCC_EXT*/, FOURCC_XRGB8888,
+                     0x3272 /*PLANE0_FD*/, ifd, 0x3273 /*PLANE0_OFFSET*/, 0, 0x3274 /*PLANE0_PITCH*/, stride,
+                     0x3443 /*MODIFIER_LO*/, (intptr_t)(mod & 0xffffffffu), 0x3444 /*MODIFIER_HI*/, (intptr_t)(mod >> 32),
+                     0x3038 /*NONE*/};
+    img = eglCreateImage(dpy, EGL_NO_CONTEXT, 0x3270 /*EGL_LINUX_DMA_BUF_EXT*/, NULL, at);
+    printf("[aw_gbm_test] eglCreateImage(DMA_BUF fd=%d mod=0x%llx) -> %s (egl=0x%x)\n", ifd, (unsigned long long)mod,
+           img ? "OK" : "NULL", img ? 0 : eglGetError());
+    if (!img) {
+      /* sin modificadores explicitos (algunos drivers los rechazan si son INVALID) */
+      intptr_t at2[] = {0x3057, W, 0x3056, H, 0x3271, FOURCC_XRGB8888, 0x3272, ifd, 0x3273, 0, 0x3274, stride, 0x3038};
+      img = eglCreateImage(dpy, EGL_NO_CONTEXT, 0x3270, NULL, at2);
+      printf("[aw_gbm_test] eglCreateImage(DMA_BUF sin modificador) -> %s (egl=0x%x)\n", img ? "OK" : "NULL", img ? 0 : eglGetError());
+    }
+    fflush(stdout);
+  }
   if (!img)
-    return fail("eglCreateImage(gbm_bo)");
+    return fail("eglCreateImage(gbm_bo / dma-buf)");
   void (*img_to_rb)(GLenum, EGLImage) = (void (*)(GLenum, EGLImage))eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
   if (!img_to_rb)
     return fail("glEGLImageTargetRenderbufferStorageOES");

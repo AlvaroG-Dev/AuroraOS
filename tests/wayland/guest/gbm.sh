@@ -38,6 +38,8 @@ sleep 2
 # Todo lo que escribe el cliente (stdout y stderr de Mesa) tambien al log del kernel:
 # en la Portegé la salida de la consola no se guarda, /data/aurora.log si.
 grep -a -v 'No DRI config supports' /tmp/gbm.out | head -400 | while IFS= read -r l; do echo "GBMLOG $l" > /dev/kmsg; done
+# Resumen en UNA linea del log del kernel (el bucle anterior pierde lineas en /dev/kmsg):
+echo "GBMSUM $(grep -a '^\[aw_gbm_test\]' /tmp/gbm.out | head -40 | tr '\n' '|')" > /dev/kmsg
 grep -a '^\[aw_gbm_test\]\|libEGL warning\|libEGL error\|^MESA\|crocus\|i915\|INTEL\|nvidia\|NVIDIA' /tmp/gbm.out | head -80
 echo "=== aw.log ==="
 grep -a "aurora-wayland\]" /tmp/aw.log | tail -10
