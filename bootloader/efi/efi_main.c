@@ -1464,6 +1464,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
   kinfo.initrd_size = (uint64_t)initrd_size;
   kinfo.plog_base = g_plog_base;
   kinfo.plog_size = g_plog_base ? PLOG_PAGES * 4096ULL : 0;
+  kinfo.efi_runtime_services = (UINT64)(UINTN)system_table->RuntimeServices;
 
   find_acpi_rsdp(system_table, kinfo.acpi_rsdp);
   if (cfg.have_cmdline)

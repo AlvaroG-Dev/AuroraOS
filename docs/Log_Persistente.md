@@ -20,7 +20,7 @@ Notas:
   Se comprueba con la linea `[PLOG] ... log anterior: N bytes` del arranque.
 - Formato y constantes: `bootloader/include/persist_log.h`. Dos ranuras de
   128 KiB: 0 = arranque actual, 1 = anterior. `kernel_boot_info` lleva
-  `plog_base`/`plog_size` (680 bytes en total).
+  `plog_base`/`plog_size` (688 bytes en total).
 - Pendiente: reinicio automatico en panic (hoy se queda en `cli; hlt`; hay
   que pulsar reset) y volcado desde el camino BIOS (ahi `plog_base` = 0).
 

@@ -2251,6 +2251,124 @@ aml_object_t *aml_eval(const char *path) {
   return n->value;
 }
 
+aml_object_t *aml_eval_int_args(const char *path, const uint64_t *args,
+                                int nargs) {
+  if (!g_ready || !g_root || !path)
+    return NULL;
+  aml_node_t *n = lookup_path_caller(path);
+  if (!n || !n->value)
+    return NULL;
+  if (n->value->type != AML_METHOD)
+    return n->value;
+  aml_object_t *objs[AML_MAX_ARGS];
+  if (nargs > AML_MAX_ARGS)
+    nargs = AML_MAX_ARGS;
+  for (int i = 0; i < nargs; i++)
+    objs[i] = make_integer(args[i]);
+  return eval_method(n->value, objs, nargs, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostico de energia: dispositivos de boton/EC/tapa y metodos de GPE.
+// Sirve para saber, en hardware real, como llega el evento del boton de
+// encendido (fijo, dispositivo PNP0C0C por GPE, EC con _Qxx).
+// ---------------------------------------------------------------------------
+static void diag_path(const aml_node_t *n, char *out, size_t cap) {
+  const aml_node_t *chain[16];
+  int depth = 0;
+  for (; n && n != g_root && depth < 16; n = n->parent)
+    chain[depth++] = n;
+  size_t pos = 0;
+  for (int i = depth - 1; i >= 0 && pos + 6 < cap; i--) {
+    out[pos++] = i == depth - 1 ? '\\' : '.';
+    for (int k = 0; k < 4; k++)
+      out[pos++] = chain[i]->name[k];
+  }
+  if (depth == 0 && cap > 1)
+    out[pos++] = '\\';
+  out[pos] = 0;
+}
+
+static int diag_hid_kind(const aml_node_t *n, const char **kind) {
+  for (const aml_node_t *c = n->children; c; c = c->sibling) {
+    if (memcmp(c->name, "_HID", 4) != 0 || !c->value)
+      continue;
+    if (c->value->type == AML_INTEGER) {
+      // EISAID: 0x0C0CD041 = PNP0C0C, etc. (orden de bytes de EISAID).
+      switch ((uint32_t)c->value->integer) {
+      case 0x0C0CD041: *kind = "PNP0C0C (boton de encendido)"; return 1;
+      case 0x0E0CD041: *kind = "PNP0C0E (boton de suspension)"; return 1;
+      case 0x0D0CD041: *kind = "PNP0C0D (tapa)"; return 1;
+      case 0x090CD041: *kind = "PNP0C09 (EC)"; return 1;
+      }
+    } else if (c->value->type == AML_STRING && c->value->string.data) {
+      const char *s = c->value->string.data;
+      if (!strcmp(s, "PNP0C0C")) { *kind = "PNP0C0C (boton de encendido)"; return 1; }
+      if (!strcmp(s, "PNP0C0E")) { *kind = "PNP0C0E (boton de suspension)"; return 1; }
+      if (!strcmp(s, "PNP0C0D")) { *kind = "PNP0C0D (tapa)"; return 1; }
+      if (!strcmp(s, "PNP0C09")) { *kind = "PNP0C09 (EC)"; return 1; }
+    }
+  }
+  return 0;
+}
+
+static void diag_walk(const aml_node_t *n, int depth) {
+  if (depth > 12)
+    return;
+  const char *kind = NULL;
+  char path[96];
+  if (n != g_root && diag_hid_kind(n, &kind)) {
+    diag_path(n, path, sizeof(path));
+    LOG_INFO("[AML] diag: %s en %s", kind, path);
+    if (!strcmp(kind, "PNP0C09 (EC)")) {
+      char qs[160];
+      size_t pos = 0;
+      for (const aml_node_t *c = n->children; c; c = c->sibling) {
+        if (c->name[0] == '_' && c->name[1] == 'Q' && pos + 6 < sizeof(qs)) {
+          memcpy(qs + pos, c->name, 4);
+          pos += 4;
+          qs[pos++] = ' ';
+        }
+        if (!memcmp(c->name, "_GPE", 4) && c->value &&
+            c->value->type == AML_INTEGER)
+          LOG_INFO("[AML] diag:   EC _GPE=%lu", (unsigned long)c->value->integer);
+      }
+      qs[pos] = 0;
+      LOG_INFO("[AML] diag:   EC metodos _Qxx: %s", pos ? qs : "(ninguno)");
+    }
+  }
+  if (n->name[0] == '_' && n->name[1] == 'G' && n->name[2] == 'P' &&
+      n->name[3] == 'E') {
+    char gs[240];
+    size_t pos = 0;
+    for (const aml_node_t *c = n->children; c; c = c->sibling) {
+      if (c->name[0] == '_' && (c->name[1] == 'L' || c->name[1] == 'E') &&
+          pos + 6 < sizeof(gs)) {
+        memcpy(gs + pos, c->name, 4);
+        pos += 4;
+        gs[pos++] = ' ';
+      }
+    }
+    gs[pos] = 0;
+    LOG_INFO("[AML] diag: metodos de GPE: %s", pos ? gs : "(ninguno)");
+  }
+  for (const aml_node_t *c = n->children; c; c = c->sibling)
+    diag_walk(c, depth + 1);
+}
+
+void aml_diag_power(void) {
+  if (!g_ready || !g_root)
+    return;
+  diag_walk(g_root, 0);
+}
+
+int aml_method_exists(const char *path) {
+  if (!g_ready || !g_root || !path)
+    return 0;
+  aml_node_t *n = lookup_path_caller(path);
+  return n && n->value && n->value->type == AML_METHOD;
+}
+
 uint64_t aml_to_integer(aml_object_t *obj) {
   if (!obj)
     return 0;

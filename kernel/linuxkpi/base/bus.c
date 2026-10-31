@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/notifier.h>
+#include <linux/reboot.h>
 #include "base.h"
 #include "../lkpi_internal.h"
 
@@ -907,3 +908,47 @@ void lkpi_driver_remove_file(const struct device_driver *drv, const struct drive
 		sysfs_remove_file(&drv->p->kobj, &attr->attr);
 }
 EXPORT_SYMBOL(lkpi_driver_remove_file);
+
+/*
+ * device_shutdown(): como en Linux, recorre los dispositivos en orden inverso
+ * al de registro (buses del ultimo al primero) y llama a bus->shutdown o, si
+ * no hay, a driver->shutdown. Lo invoca power.c en la fase DEVICES del
+ * apagado (kernel/linuxkpi/kernel/reboot.c). Si el mutex del modelo esta
+ * tomado por otra tarea no se espera: un apagado no debe colgarse aqui.
+ */
+void device_shutdown(void)
+{
+	struct lkpi_bus_priv *bp;
+	int nbus = 0, i;
+
+	if (!mutex_trylock(&lkpi_dev_mutex)) {
+		pr_warn("linuxkpi: device_shutdown: modelo de dispositivos ocupado, se omite\n");
+		return;
+	}
+	list_for_each_entry(bp, &lkpi_buses, node)
+		nbus++;
+	{
+		struct lkpi_dev_snap snaps[nbus ? nbus : 1];
+
+		i = 0;
+		list_for_each_entry_reverse(bp, &lkpi_buses, node)
+			snaps[i++] = lkpi_bus_snap(bp);
+		mutex_unlock(&lkpi_dev_mutex);
+
+		for (i = 0; i < nbus; i++) {
+			for (int j = snaps[i].n - 1; j >= 0; j--) {
+				struct device *dev = snaps[i].devs[j];
+
+				if (dev->bus && dev->bus->shutdown) {
+					dev_dbg(dev, "shutdown (bus)\n");
+					dev->bus->shutdown(dev);
+				} else if (dev->driver && dev->driver->shutdown) {
+					dev_dbg(dev, "shutdown (driver)\n");
+					dev->driver->shutdown(dev);
+				}
+			}
+			lkpi_dev_snap_put(&snaps[i]);
+		}
+	}
+}
+EXPORT_SYMBOL(device_shutdown);
