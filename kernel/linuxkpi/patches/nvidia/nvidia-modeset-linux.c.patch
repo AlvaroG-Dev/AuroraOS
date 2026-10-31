@@ -9,3 +9,35 @@
  module_param_named(debug, debug, int, 0644);
  
  #if IS_ENABLED(CONFIG_EXTCON_DISP_CABLE_STATE)
+@@ -2098,6 +2098,8 @@
+ };
+ 
+ static struct cdev nvkms_device_cdev;
++/* Aurora: sin udev, el nodo /dev/nvidia-modeset (lo abre libnvidia-eglcore) lo crea el driver. */
++static struct class *nvkms_aurora_class;
+ 
+ static int __init nvkms_register_chrdev(void)
+ {
+@@ -2115,11 +2117,22 @@
+         return ret;
+     }
+ 
++    nvkms_aurora_class = class_create("nvidia-modeset");
++    if (!IS_ERR(nvkms_aurora_class)) {
++        device_create(nvkms_aurora_class, NULL, NVKMS_RDEV, NULL, "nvidia-modeset");
++    } else {
++        nvkms_aurora_class = NULL;
++    }
++
+     return ret;
+ }
+ 
+ static void nvkms_unregister_chrdev(void)
+ {
++    if (nvkms_aurora_class != NULL) {
++        device_destroy(nvkms_aurora_class, NVKMS_RDEV);
++        class_destroy(nvkms_aurora_class);
++    }
+     cdev_del(&nvkms_device_cdev);
+     unregister_chrdev_region(NVKMS_RDEV, 1);
+ }
