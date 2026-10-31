@@ -49,7 +49,7 @@ OBJS = boot.o isr_stubs.o switch.o syscall.o syscall_entry.o main.o string.o ser
 		net/socket.o net/inet_socket.o net/socket_tests.o net/tcp.o net/tcp_tests.o net/dhcp.o acpi_aml.o acpi_pm.o power.o \
 		usb/usb_dma.o usb/usb_core.o usb/usb_urb.o usb/xhci/xhci_ring.o usb/xhci/xhci.o usb/xhci/xhci_cmd.o usb/xhci/xhci_port.o \
 		usb/xhci/xhci_control.o usb/usb_hid.o usb/usb_storage.o usb/usb_hub.o usb/hid_parser.o usb/usb_uas.o boot_splash.o kthread.o workqueue.o \
-		irq_threaded.o ksymtab.o ksymtab_exports.o kur_loader.o sha256.o bus.o aur_loader.o dma_user.o gfx/dock.o gfx/menubar.o gfx/cursor.o gfx/about.o irq_user.o aur_bus.o block_proxy.o input_proxy.o gpu_proxy.o msi_user.o usb/usb_proxy.o kmod_sys.o vmap.o
+		irq_threaded.o ksymtab.o ksymtab_exports.o kur_loader.o sha256.o bus.o aur_loader.o dma_user.o gfx/dock.o gfx/menubar.o gfx/cursor.o gfx/about.o gfx/brand.o gfx/theme.o irq_user.o aur_bus.o block_proxy.o input_proxy.o gpu_proxy.o msi_user.o usb/usb_proxy.o kmod_sys.o vmap.o
 
 		 
 TARGET  = kernel.elf
@@ -76,7 +76,7 @@ DEPFLAGS = -MMD -MP
 # -O0 para depurar (-g y el frame pointer se mantienen).
 GFX_CFLAGS = $(CFLAGS) -O2 -fno-strict-aliasing -fno-tree-loop-distribute-patterns
 GFX_DEPS = gfx/gfx.h gfx/theme.h gfx/window.h gfx/compositor.h gfx/dock.h \
-           gfx/menubar.h gfx/taskbar.h gfx/cursor.h gfx/winsrv.h gfx/about.h \
+           gfx/menubar.h gfx/taskbar.h gfx/cursor.h gfx/winsrv.h gfx/about.h gfx/brand.h gfx/brand_emblem_data.h gfx/brand_wordmark_data.h \
            simd.h
 
 gfx/%.o: gfx/%.c $(GFX_DEPS)

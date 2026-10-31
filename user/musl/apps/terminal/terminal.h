@@ -115,6 +115,7 @@ typedef struct {
 
 // --- API ---
 int  terminal_init(terminal_t *t, int cols, int rows);
+void terminal_set_theme(terminal_t *t, int light);
 void terminal_shutdown(terminal_t *t);
 void terminal_resize(terminal_t *t, int new_cols, int new_rows);
 void terminal_feed(terminal_t *t, const uint8_t *buf, size_t n);

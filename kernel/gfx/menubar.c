@@ -1,5 +1,6 @@
 // kernel/gfx/menubar.c
 #include "menubar.h"
+#include "brand.h"
 #include "../heap.h"
 #include "font_manager.h"
 #include "taskbar.h"
@@ -29,7 +30,16 @@ typedef struct {
   int dynamic; /* añade la lista de ventanas */
 } menu_t;
 
-static const item_t k_aurora[] = {{"Acerca de AuroraOS", MENU_ACT_ABOUT, 0}};
+static const item_t k_aurora[] = {{"Acerca de AuroraOS", MENU_ACT_ABOUT, 0},
+                                  {"Modo claro / oscuro", MENU_ACT_THEME, 0},
+                                  {NULL, MENU_ACT_NONE, 0},
+                                  {"Reiniciar", MENU_ACT_RESTART, 0},
+                                  {"Apagar", MENU_ACT_SHUTDOWN, 0}};
+static const item_t k_apps[] = {
+    {"Terminal", MENU_ACT_LAUNCH_TERMINAL, 0},
+    {"Monitor de rendimiento", MENU_ACT_LAUNCH_TASKMGR, 0},
+    {NULL, MENU_ACT_NONE, 0},
+    {"Acerca de AuroraOS", MENU_ACT_ABOUT, 0}};
 static const item_t k_app[] = {{"Minimizar", MENU_ACT_MINIMIZE, 1},
                                {"Cerrar", MENU_ACT_CLOSE, 1}};
 static const item_t k_file[] = {{"Cerrar ventana", MENU_ACT_CLOSE, 1}};
@@ -39,8 +49,8 @@ static const item_t k_help[] = {{"Acerca de AuroraOS", MENU_ACT_ABOUT, 0}};
 
 /* 0 orbe, 1 app (negrita, su título es dinámico), 2.. menús fijos */
 static const menu_t k_menus[] = {
-    {NULL, k_aurora, 1, 0},   {NULL, k_app, 2, 0},
-    {"Archivo", k_file, 1, 0}, {"Ventana", k_window, 2, 1},
+    {NULL, k_aurora, 5, 0},   {NULL, k_app, 2, 0},
+    {"Aplicaciones", k_apps, 4, 0}, {"Archivo", k_file, 1, 0}, {"Ventana", k_window, 2, 1},
     {"Ayuda", k_help, 1, 0},
 };
 #define NMENUS ((int)(sizeof(k_menus) / sizeof(k_menus[0])))
@@ -404,14 +414,8 @@ void menubar_render(uint32_t *dst, int stride, rect_t clip) {
         AURORA_MENUBAR_PILL);
   }
 
-  /* Orbe de Aurora. */
-  int oy = (MENUBAR_H - ORB_D) / 2;
-  rect_t orb = {ORB_X, oy, ORB_D, ORB_D};
-  gfx_fill_rounded_rect(dst, stride, clip, orb, ORB_D / 2, AURORA_ACCENT);
-  gfx_fill_rounded_rect(dst, stride, clip,
-                        (rect_t){orb.x + 2, orb.y + 1, orb.w - 4, orb.h / 2},
-                        (orb.h - 4) / 2, 0x70FFFFFF & 0x70FFFFFF);
-  gfx_draw_rounded_border(dst, stride, clip, orb, ORB_D / 2, 0x40FFFFFF);
+  /* Emblema de Aurora. */
+  brand_draw_emblem(dst, stride, clip, ORB_X + ORB_D / 2, MENUBAR_H / 2, ORB_D + 2);
 
   /* Títulos. */
   for (int m = 1; m < NMENUS; m++) {
@@ -458,7 +462,9 @@ void menubar_render(uint32_t *dst, int stride, rect_t clip) {
     gfx_draw_string(dst, stride, clip, mr.x + 18,
                     gfx_text_center_y(FONT_ID_MAIN_REGULAR, cy, ITEM_H),
                     it->label,
-                    enabled ? AURORA_TEXT_PRIMARY : AURORA_TEXT_DISABLED,
+                    !enabled ? AURORA_TEXT_DISABLED
+                    : (row == M.hover ? g_theme->accent_text
+                                      : AURORA_TEXT_PRIMARY),
                     FONT_ID_MAIN_REGULAR);
     cy += ITEM_H;
   }
@@ -481,7 +487,9 @@ void menubar_render(uint32_t *dst, int stride, rect_t clip) {
       }
       gfx_draw_string(dst, stride, clip, mr.x + 32,
                       gfx_text_center_y(FONT_ID_MAIN_REGULAR, cy, ITEM_H),
-                      M.dyn_title[i], AURORA_TEXT_PRIMARY,
+                      M.dyn_title[i],
+                      row == M.hover ? g_theme->accent_text
+                                     : AURORA_TEXT_PRIMARY,
                       FONT_ID_MAIN_REGULAR);
       cy += ITEM_H;
     }

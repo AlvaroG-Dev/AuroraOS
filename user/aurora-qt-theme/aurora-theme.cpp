@@ -8,6 +8,11 @@
 #include <QApplication>
 #include <QFont>
 #include <QPalette>
+#include <QTimer>
+#include <cstdlib>
+#include <cstring>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <qpa/qplatformtheme.h>
 #include <qpa/qplatformthemeplugin.h>
 
@@ -18,8 +23,8 @@ const QColor kWin(0x1E, 0x1E, 0x1E);       // AURORA_WIN_BG
 const QColor kField(0x1A, 0x1A, 0x1A);     // AURORA_GRAY_900
 const QColor kAlt(0x24, 0x24, 0x24);       // AURORA_GRAY_800
 const QColor kRaised(0x2E, 0x2E, 0x2E);    // AURORA_GRAY_700
-const QColor kAccent(0x0A, 0x84, 0xFF);    // AURORA_ACCENT
-const QColor kAccentHover(0x40, 0x9C, 0xFF);
+const QColor kAccent(0x3E, 0xE8, 0x9B);    // AURORA_ACCENT (verde aurora)
+const QColor kAccentHover(0x6B, 0xF0, 0x83);
 
 class AuroraTheme : public QPlatformTheme {
 public:
@@ -90,7 +95,20 @@ public:
   }
 
 private:
+  static bool pollLight() {
+    long v = syscall(0x1070); // ASYS_THEME_GET
+    if (v < 0) {
+      const char *e = getenv("AURORA_THEME");
+      return e && !strcmp(e, "light");
+    }
+    return v & 1;
+  }
+
   void buildPalette() {
+    if (m_light) {
+      buildLight();
+      return;
+    }
     QPalette p;
     const QColor text(Qt::white);
     const QColor dim(255, 255, 255, 89); // AURORA_TEXT_DISABLED
@@ -110,7 +128,7 @@ private:
     p.setColor(QPalette::Dark, QColor(0x14, 0x14, 0x14));
     p.setColor(QPalette::Shadow, Qt::black);
     p.setColor(QPalette::Highlight, kAccent);
-    p.setColor(QPalette::HighlightedText, Qt::white);
+    p.setColor(QPalette::HighlightedText, QColor(0x04, 0x26, 0x1A)); // AURORA_ACCENT_TEXT
     p.setColor(QPalette::Link, kAccentHover);
     p.setColor(QPalette::LinkVisited, QColor(0xBF, 0x5A, 0xF2));
     p.setColor(QPalette::PlaceholderText, QColor(255, 255, 255, 120));
@@ -120,11 +138,64 @@ private:
     m_palette = p;
   }
 
+  void buildLight() {
+    QPalette p;
+    const QColor text(0x14, 0x21, 0x1B), win(0xF4, 0xF7, 0xF5), white(Qt::white);
+    const QColor dim(0x14, 0x21, 0x1B, 89);
+    p.setColor(QPalette::Window, win);
+    p.setColor(QPalette::WindowText, text);
+    p.setColor(QPalette::Base, white);
+    p.setColor(QPalette::AlternateBase, QColor(0xEE, 0xF2, 0xF0));
+    p.setColor(QPalette::ToolTipBase, QColor(0x2E, 0x2E, 0x2E));
+    p.setColor(QPalette::ToolTipText, Qt::white);
+    p.setColor(QPalette::Text, text);
+    p.setColor(QPalette::Button, QColor(0xE9, 0xEE, 0xEC));
+    p.setColor(QPalette::ButtonText, text);
+    p.setColor(QPalette::BrightText, Qt::black);
+    p.setColor(QPalette::Light, white);
+    p.setColor(QPalette::Midlight, QColor(0xDD, 0xE4, 0xE1));
+    p.setColor(QPalette::Mid, QColor(0xC9, 0xD3, 0xCE));
+    p.setColor(QPalette::Dark, QColor(0xA9, 0xB5, 0xAF));
+    p.setColor(QPalette::Shadow, Qt::black);
+    p.setColor(QPalette::Highlight, kAccent);
+    p.setColor(QPalette::HighlightedText, QColor(0x04, 0x26, 0x1A));
+    p.setColor(QPalette::Link, QColor(0x1C, 0x8A, 0x5C));
+    p.setColor(QPalette::LinkVisited, QColor(0x7A, 0x3E, 0xB8));
+    p.setColor(QPalette::PlaceholderText, QColor(0x14, 0x21, 0x1B, 120));
+    for (auto r : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText})
+      p.setColor(QPalette::Disabled, r, dim);
+    p.setColor(QPalette::Disabled, QPalette::Highlight, QColor(0xC9, 0xD3, 0xCE));
+    m_palette = p;
+  }
+
+public:
+  // Sondeo del modo: al cambiar, se reconstruye la paleta y se aplica.
+  void startPolling() {
+    auto *t = new QTimer(qApp);
+    QObject::connect(t, &QTimer::timeout, qApp, [this]() {
+      const bool l = pollLight();
+      if (l == m_light || !qApp)
+        return;
+      m_light = l;
+      buildPalette();
+      QApplication::setPalette(m_palette);
+    });
+    t->start(400);
+  }
+
+private:
+  bool m_light = pollLight();
   QPalette m_palette;
   QFont m_font, m_mono;
 };
 
 } // namespace
+
+static QPlatformTheme *makeTheme() {
+  auto *t = new AuroraTheme;
+  QTimer::singleShot(0, [t]() { if (qApp) t->startPolling(); });
+  return t;
+}
 
 class AuroraThemePlugin : public QPlatformThemePlugin {
   Q_OBJECT
@@ -132,7 +203,7 @@ class AuroraThemePlugin : public QPlatformThemePlugin {
 public:
   QPlatformTheme *create(const QString &key, const QStringList &) override {
     return key.compare(QLatin1String("aurora"), Qt::CaseInsensitive) == 0
-               ? new AuroraTheme
+               ? makeTheme()
                : nullptr;
   }
 };

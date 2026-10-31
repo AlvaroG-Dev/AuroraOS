@@ -1,5 +1,6 @@
 // kernel/gfx/dock.c
 #include "dock.h"
+#include "brand.h"
 #include "../bmp.h"
 #include "../heap.h"
 #include "font_manager.h"
@@ -66,6 +67,13 @@ void dock_set_cursor(int x, int y) {
 }
 
 void dock_invalidate_layout(void) { D.force = 1; }
+
+/* Cambio de modo claro/oscuro: los iconos con baldosa de tema se rehacen. */
+void dock_theme_changed(void) {
+  for (taskbar_item_t *it = taskbar_items_head(); it; it = it->next)
+    it->dock_icon_state = 0;
+  D.force = 1;
+}
 
 int dock_reserved_height(void) { return DOCK_HEIGHT + DOCK_MARGIN_BOTTOM * 2; }
 
@@ -381,6 +389,10 @@ static void make_fallback_tile(taskbar_item_t *it) {
   uint32_t base = it->icon_color ? (it->icon_color | 0xFF000000) : AURORA_ACCENT;
   if (base == 0xFF0078D4 || base == 0xFF60CDFF)
     base = AURORA_ACCENT; /* colores heredados de Windows -> acento de sistema */
+  /* Símbolo reservado "@": icono de Aurora (emblema sobre baldosa oscura). */
+  int is_brand = it->icon_symbol[0] == '@' && it->icon_symbol[1] == '\0';
+  if (is_brand)
+    base = 0xFF141F22;
 
   const int inset = S / 24, radius = S * 9 / 40;
   rect_t tile = {inset, inset, S - 2 * inset, S - 2 * inset};
@@ -400,6 +412,11 @@ static void make_fallback_tile(taskbar_item_t *it) {
     }
   }
   gfx_draw_rounded_border(it->dock_icon, S, clip, tile, radius, 0x24FFFFFF);
+
+  if (is_brand) {
+    brand_draw_emblem(it->dock_icon, S, clip, S / 2, S / 2, S * 46 / 100);
+    return;
+  }
 
   /* Símbolo: se dibuja a 24x24 y se amplía con bilineal para que quede liso. */
   static uint32_t tmp[24 * 24]; /* solo hilo del compositor */
@@ -465,6 +482,51 @@ static void bake_shadow_and_premultiply(uint32_t *icon) {
   }
 }
 
+/* Si el icono no es una baldosa a sangre (p. ej. un glifo de GTK/Qt sobre
+ * fondo transparente), lo monta sobre una baldosa del color del tema, para que
+ * todos los iconos del Dock tengan fondo y respeten el modo claro/oscuro. */
+static void apply_theme_backing(uint32_t *icon) {
+  const int S = DOCK_ICON_SRC;
+  static uint32_t glyph[DOCK_ICON_SRC * DOCK_ICON_SRC];
+  long cover = 0;
+  for (int i = 0; i < S * S; i++)
+    cover += icon[i] >> 24;
+  /* Cobertura media de alfa; una baldosa redondeada a sangre pasa del 80 %. */
+  if (cover * 100 / ((long)S * S * 255) >= 70)
+    return;
+  for (int i = 0; i < S * S; i++) {
+    glyph[i] = icon[i];
+    icon[i] = 0;
+  }
+  /* Luminosidad media del glifo (ponderada por alfa): si se parece a la de la
+   * baldosa del tema, se invierte la baldosa para que el glifo se lea. */
+  long lum = 0, wsum = 0;
+  for (int i = 0; i < S * S; i++) {
+    long a = glyph[i] >> 24;
+    long y = (((glyph[i] >> 16) & 0xFF) * 3 + ((glyph[i] >> 8) & 0xFF) * 6 +
+              (glyph[i] & 0xFF)) / 10;
+    lum += y * a;
+    wsum += a;
+  }
+  lum = wsum ? lum / wsum : 128;
+  uint32_t tc = g_theme->icon_tile;
+  long tl = (((tc >> 16) & 0xFF) * 3 + ((tc >> 8) & 0xFF) * 6 + (tc & 0xFF)) / 10;
+  int inverted = (lum > tl ? lum - tl : tl - lum) < 90;
+  if (inverted)
+    tc = theme_is_light() ? 0xFF1B2622 : 0xFFF2F6F4;
+  int tile_light = ((((tc >> 16) & 0xFF) * 3 + ((tc >> 8) & 0xFF) * 6 +
+                     (tc & 0xFF)) / 10) > 128;
+  rect_t clip = {0, 0, S, S};
+  const int inset = S / 24, radius = S * 9 / 40;
+  rect_t tile = {inset, inset, S - 2 * inset, S - 2 * inset};
+  gfx_fill_rounded_rect(icon, S, clip, tile, radius, tc);
+  gfx_draw_rounded_border(icon, S, clip, tile, radius,
+                          tile_light ? 0x20000000 : 0x24FFFFFF);
+  int g = S * 70 / 100;
+  gfx_blit_scaled(icon, S, clip, (S - g) / 2, (S - g) / 2, g, g, glyph, S, S,
+                  GFX_FILTER_BILINEAR);
+}
+
 static int ensure_icon(taskbar_item_t *it) {
   if (it->dock_icon && it->dock_icon_state == 1)
     return 1;
@@ -477,8 +539,11 @@ static int ensure_icon(taskbar_item_t *it) {
     it->dock_icon[i] = 0;
 
   int ok = 0;
-  if (it->icon_bmp_node)
+  if (it->icon_bmp_node) {
     ok = (bmp_draw_icon_scaled(it->icon_bmp_node, it->dock_icon, S, S) == 0);
+    if (ok)
+      apply_theme_backing(it->dock_icon);
+  }
   if (!ok) {
     for (int i = 0; i < S * S; i++)
       it->dock_icon[i] = 0;

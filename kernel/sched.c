@@ -410,11 +410,34 @@ uint64_t sched_rcu_qs_count(int cpu) {
   return __atomic_load_n(&g_rcu_qs_count[cpu], __ATOMIC_ACQUIRE);
 }
 
+static volatile uint64_t g_cpu_busy_ticks[MAX_CPUS];
+static volatile uint64_t g_cpu_idle_ticks[MAX_CPUS];
+
+uint64_t sched_cpu_busy_ticks(int cpu) {
+  if (cpu < 0 || cpu >= MAX_CPUS)
+    return 0;
+  return __atomic_load_n(&g_cpu_busy_ticks[cpu], __ATOMIC_RELAXED);
+}
+
+uint64_t sched_cpu_idle_ticks(int cpu) {
+  if (cpu < 0 || cpu >= MAX_CPUS)
+    return 0;
+  return __atomic_load_n(&g_cpu_idle_ticks[cpu], __ATOMIC_RELAXED);
+}
+
 void sched_tick(void) {
   // Lectura atomica: sched_yield() llega aqui con las IRQ activas.
   task_t *curr = (task_t *)this_cpu_current_task();
   if (!curr)
     return;
+
+  // Carga por CPU para el monitor de rendimiento (solo escribe su CPU).
+  {
+    int ccpu = smp_processor_id();
+    volatile uint64_t *c =
+        curr->is_idle ? &g_cpu_idle_ticks[ccpu] : &g_cpu_busy_ticks[ccpu];
+    __atomic_store_n(c, *c + 1, __ATOMIC_RELAXED);
+  }
 
   if (curr->preempt_count == 0) {
     int qcpu = smp_processor_id();
