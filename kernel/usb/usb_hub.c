@@ -31,6 +31,10 @@
 #define C_PORT_SUSPEND 18
 #define C_PORT_OVER_CURRENT 19
 #define C_PORT_RESET 20
+// Solo hubs SuperSpeed (USB 3.x, tabla 10-10 de la especificacion)
+#define C_PORT_LINK_STATE 25
+#define C_PORT_CONFIG_ERROR 26
+#define C_BH_PORT_RESET 29
 
 #define PORT_STAT_CONNECTION 0x0001
 #define PORT_STAT_ENABLE 0x0002
@@ -46,6 +50,9 @@
 #define PORT_CHANGE_SUSPEND 0x0004
 #define PORT_CHANGE_OVERCURRENT 0x0008
 #define PORT_CHANGE_RESET 0x0010
+#define PORT_CHANGE_BH_RESET 0x0020   // SS: warm reset terminado
+#define PORT_CHANGE_LINK_STATE 0x0040 // SS
+#define PORT_CHANGE_CONFIG_ERR 0x0080 // SS
 
 typedef struct __attribute__((packed)) {
   uint8_t bDescLength;
@@ -66,6 +73,7 @@ typedef struct usb_hub_dev {
   int is_ss;
   char name[32];
   uint32_t busy[8]; // puertos en enumeración (evita doble attach)
+  uint32_t attached[8]; // puertos con dispositivo ya enumerado
 } usb_hub_dev_t;
 
 static void hub_delay_ms(uint32_t ms) {
@@ -143,30 +151,40 @@ static int hub_get_descriptor(usb_device_t *dev, usb_hub_desc_t *desc) {
   return 0;
 }
 
-static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
+// do_reset=0: el puerto ya esta habilitado porque el propio hub SuperSpeed lo
+// reseteo al conectar (un hub USB 3 entrena el enlace y hace el reset solo; el
+// host no debe pedirlo y solo ve C_PORT_RESET). Se salta el reset.
+static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port, int do_reset) {
   usb_device_t *hdev = hub->dev;
-
-  int rc = hub_set_port_feature(hdev, port, PORT_RESET);
-  if (rc != 0) {
-    LOG_ERR("[HUB] %s port %u: PORT_RESET falló: %d", hub->name, port, rc);
-    return rc;
-  }
-
+  int rc;
   uint16_t status = 0, change = 0;
-  int ok = 0;
-  for (int i = 0; i < 500; i++) {
-    rc = hub_get_port_status(hdev, port, &status, &change);
-    if (rc == 0 && (change & PORT_CHANGE_RESET)) {
-      ok = 1;
-      break;
+
+  if (do_reset) {
+    rc = hub_set_port_feature(hdev, port, PORT_RESET);
+    if (rc != 0) {
+      LOG_ERR("[HUB] %s port %u: PORT_RESET falló: %d", hub->name, port, rc);
+      return rc;
     }
-    for (int k = 0; k < 10; k++)
-      sched_yield();
-  }
-  if (!ok) {
-    LOG_ERR("[HUB] %s port %u: timeout esperando C_PORT_RESET", hub->name,
-            port);
-    return -ETIMEDOUT;
+
+    int ok = 0;
+    for (int i = 0; i < 500; i++) {
+      rc = hub_get_port_status(hdev, port, &status, &change);
+      if (rc == 0 && (change & PORT_CHANGE_RESET)) {
+        ok = 1;
+        break;
+      }
+      for (int k = 0; k < 10; k++)
+        sched_yield();
+    }
+    if (!ok) {
+      LOG_ERR("[HUB] %s port %u: timeout esperando C_PORT_RESET", hub->name,
+              port);
+      return -ETIMEDOUT;
+    }
+  } else {
+    rc = hub_get_port_status(hdev, port, &status, &change);
+    if (rc != 0)
+      return rc;
   }
   hub_clear_port_feature(hdev, port, C_PORT_RESET);
   if (!(status & PORT_STAT_ENABLE)) {
@@ -206,6 +224,8 @@ static int hub_port_attach(usb_hub_dev_t *hub, uint8_t port) {
     usb_device_free(dev);
     return rc;
   }
+  __atomic_fetch_or(&hub->attached[port >> 5], 1u << (port & 31),
+                    __ATOMIC_ACQ_REL);
   return 0;
 }
 
@@ -215,7 +235,15 @@ static void hub_port_change(usb_hub_dev_t *hub, uint8_t port) {
   if (rc != 0)
     return;
 
-  if (change == 0)
+  uint32_t abit = 1u << (port & 31);
+  int attached = (__atomic_load_n(&hub->attached[port >> 5], __ATOMIC_ACQUIRE) &
+                  abit) != 0;
+  // Puerto de hub SS ya habilitado por el hub (conectado + habilitado) y sin
+  // dispositivo enumerado: hay que enumerarlo aunque no haya cambio pendiente.
+  int ss_ready = hub->is_ss && (status & PORT_STAT_CONNECTION) &&
+                 (status & PORT_STAT_ENABLE) && !attached;
+
+  if (change == 0 && !ss_ready)
     return;
 
   LOG_DEBUG("[HUB] %s port %u: status=0x%04x change=0x%04x", hub->name, port,
@@ -225,8 +253,24 @@ static void hub_port_change(usb_hub_dev_t *hub, uint8_t port) {
     hub_clear_port_feature(hub->dev, port, C_PORT_CONNECTION);
     if (!(status & PORT_STAT_CONNECTION)) {
       LOG_INFO("[HUB] %s port %u: disconnected", hub->name, port);
+      __atomic_fetch_and(&hub->attached[port >> 5], ~abit, __ATOMIC_ACQ_REL);
       return;
     }
+  }
+
+  // C_PORT_RESET (y los cambios propios de SS) se limpian siempre: si no, el
+  // endpoint interrupt del hub repite el mismo cambio sin parar (hub SS con
+  // un pendrive: el puerto quedaba habilitado + C_PORT_RESET y nunca se
+  // enumeraba).
+  if (change & PORT_CHANGE_RESET)
+    hub_clear_port_feature(hub->dev, port, C_PORT_RESET);
+  if (hub->is_ss) {
+    if (change & PORT_CHANGE_BH_RESET)
+      hub_clear_port_feature(hub->dev, port, C_BH_PORT_RESET);
+    if (change & PORT_CHANGE_LINK_STATE)
+      hub_clear_port_feature(hub->dev, port, C_PORT_LINK_STATE);
+    if (change & PORT_CHANGE_CONFIG_ERR)
+      hub_clear_port_feature(hub->dev, port, C_PORT_CONFIG_ERROR);
   }
 
   if (change & PORT_CHANGE_ENABLE)
@@ -238,7 +282,12 @@ static void hub_port_change(usb_hub_dev_t *hub, uint8_t port) {
 
   if ((status & PORT_STAT_CONNECTION) && !(status & PORT_STAT_ENABLE)) {
     if (hub_port_try_lock(hub, port)) {
-      hub_port_attach(hub, port);
+      hub_port_attach(hub, port, 1);
+      hub_port_unlock(hub, port);
+    }
+  } else if (ss_ready) {
+    if (hub_port_try_lock(hub, port)) {
+      hub_port_attach(hub, port, 0);
       hub_port_unlock(hub, port);
     }
   }

@@ -69,3 +69,11 @@ scripts/__pycache__/
 # Dependencias de cabeceras del kernel (-MMD)
 *.d
 kernel/.deps-stamp
+
+# Artefactos generados (NVIDIA N1/N2)
+/build/nvidia/
+/build/nvidia-kpi/
+/build/nvidia-smoke/
+/build/drive-aurora.conf
+/build/mbr_part2.hex
+drivers/kur/nvprobe/nvprobe.kur

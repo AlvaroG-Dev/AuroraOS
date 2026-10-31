@@ -45,6 +45,9 @@ static bool is_drm_module(const char *name) {
 
 #define LKPI_AUTO_INTEL                                                        \
   "linuxkpi,lkpi_drm,lkpi_ttm,lkpi_drm_display,lkpi_i915"
+// NVIDIA (open-gpu-kernel-modules): RM + nvkms + nvidia-drm (make nvidia).
+#define LKPI_AUTO_NVIDIA                                                       \
+  "linuxkpi,lkpi_drm,nvidia,nvidia-modeset,nvidia-drm"
 
 // Lista de modulos para el hardware presente, o NULL si no hay ninguno que
 // tenga driver de Linux en la capa.
@@ -59,6 +62,11 @@ static const char *lkpi_autodetect(void) {
       LOG_INFO("[LKPI] GPU Intel %04x:%04x detectada: pila i915", dev.vendor_id,
                dev.device_id);
       return LKPI_AUTO_INTEL;
+    }
+    if (dev.vendor_id == 0x10de) {
+      LOG_INFO("[LKPI] GPU NVIDIA %04x:%04x detectada: pila nvidia", dev.vendor_id,
+               dev.device_id);
+      return LKPI_AUTO_NVIDIA;
     }
   }
   return NULL;

@@ -110,4 +110,5 @@ static inline void *memdup_array_user(const void __user *src, size_t n, size_t s
 #define copy_from_user_inatomic_nontemporal(to, from, n) copy_from_user(to, from, n)
 void *lkpi_strndup_user(const char __user *s, long n);
 #define strndup_user lkpi_strndup_user
+#define TASK_SIZE TASK_SIZE_MAX
 #endif

@@ -176,6 +176,15 @@ typedef struct {
 // ===========================================================================
 uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func,
                                uint8_t offset);
+
+// Config extendida (offsets 0..4095) por ECAM (MCFG de ACPI). Devuelve 0xFFFFFFFF
+// y pci_ecam_available()==0 si no hay MCFG o el bus queda fuera de sus ventanas.
+int pci_ecam_available(void);
+uint32_t pci_read_config_ext_dword(uint8_t bus, uint8_t slot, uint8_t func,
+                                   uint16_t offset);
+// Offset de la capacidad extendida `id` (ReBAR=0x15) o 0 si no esta.
+uint16_t pci_find_ext_capability(uint8_t bus, uint8_t slot, uint8_t func,
+                                 uint16_t id);
 uint16_t pci_read_config_word(uint8_t bus, uint8_t slot, uint8_t func,
                               uint8_t offset);
 uint8_t pci_read_config_byte(uint8_t bus, uint8_t slot, uint8_t func,

@@ -1,0 +1,32 @@
+--- nv-pci.c	2026-10-29 13:23:35.553793588 +0000
++++ ../../../../../build/nvidia-kpi/wk/nv-pci.c	2026-10-30 18:03:31.571105678 +0000
+@@ -413,8 +413,13 @@
+ #endif
+ }
+ 
++void nv_aurora_devnode_add(int minor);
++void nv_aurora_devnode_remove(int minor);
++
+ static NvBool nv_treat_missing_irq_as_error(void)
+ {
++    /* Aurora: sin INTx de firmware/ACPI (pci_dev->irq == 0); la GPU usa MSI. */
++    return NV_FALSE;
+ #if defined(NV_LINUX_PCIE_MSI_SUPPORTED)
+     return (nv_get_hypervisor_type() != OS_HYPERVISOR_HYPERV);
+ #else
+@@ -2576,6 +2581,7 @@
+     LOCK_NV_LINUX_DEVICES();
+     nv_linux_add_device_locked(nvl);
+     UNLOCK_NV_LINUX_DEVICES();
++    nv_aurora_devnode_add(nvl->minor_num);
+ 
+     /*
+      * Create the procfs entry only after all the initialization operations for
+@@ -2626,6 +2632,7 @@
+ #if defined(NV_VGPU_KVM_BUILD)
+ err_free_all:
+ #endif
++    nv_aurora_devnode_remove(nvl->minor_num);
+     nv_procfs_remove_gpu(nvl);
+     LOCK_NV_LINUX_DEVICES();
+     nv_linux_remove_device_locked(nvl);

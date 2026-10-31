@@ -462,6 +462,27 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
   }
   collect_dsdt_ssdts(entries, entries_count, is_64bit);
 
+  // MCFG: 36 bytes de cabecera SDT + 8 reservados, luego entradas de 16 bytes
+  // {base u64, segmento u16, bus inicial u8, bus final u8, reservado u32}.
+  acpi_sdt_header_t *mcfg = find_table(entries, entries_count, is_64bit, "MCFG");
+  if (mcfg && mcfg->length >= 44 && acpi_checksum_ok(mcfg, mcfg->length)) {
+    const uint8_t *e = (const uint8_t *)mcfg + 44;
+    for (uint32_t off = 44; off + 16 <= mcfg->length && g_acpi.mcfg_count < 4;
+         off += 16, e += 16) {
+      uint64_t base;
+      uint16_t seg;
+      memcpy(&base, e, 8);
+      memcpy(&seg, e + 8, 2);
+      int n = g_acpi.mcfg_count++;
+      g_acpi.mcfg[n].base = base;
+      g_acpi.mcfg[n].segment = seg;
+      g_acpi.mcfg[n].start_bus = e[10];
+      g_acpi.mcfg[n].end_bus = e[11];
+      LOG_INFO("[ACPI] MCFG: ECAM seg=%u buses %u-%u base=0x%llx", seg, e[10],
+               e[11], (unsigned long long)base);
+    }
+  }
+
   g_acpi.valid = 1;
   LOG_INFO("[ACPI] Parseo completo: %d CPUs, %d IOAPICs, %d ISOs",
            g_acpi.cpu_count, g_acpi.ioapic_count, g_acpi.iso_count);

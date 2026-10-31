@@ -47,6 +47,7 @@ unsigned long lkpi_vmalloc_to_pfn(const void *addr);
 
 #define VM_MAP 0x00000004
 #define VM_IOREMAP 0x00000001
+#define VM_USERMAP 0x00000008
 #define VM_MAP_PUT_PAGES 0x00000200
 void *lkpi_vmap(struct page **pages, unsigned int count, unsigned long flags,
 		unsigned long prot);

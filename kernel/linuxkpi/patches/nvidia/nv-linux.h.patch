@@ -1,0 +1,11 @@
+--- nv-linux.h	2026-10-29 13:23:35.491354425 +0000
++++ nv-linux.h	2026-10-29 19:13:18.892271069 +0000
+@@ -145,7 +145,7 @@
+  * is permitted to change its cred structure. Therefore, current_euid()
+  * does not require the RCU's read lock on current->cred.
+  */
+-#define NV_CURRENT_EUID() (__kuid_val(current->cred->euid))
++#define NV_CURRENT_EUID() (__kuid_val(current_euid()))
+ 
+ #if defined(CONFIG_VGA_ARB)
+ #include <linux/vgaarb.h>

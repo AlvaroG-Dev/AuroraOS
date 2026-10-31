@@ -25,4 +25,5 @@ static inline u32 get_random_u32_below(u32 ceil)
 }
 static inline u32 get_random_u32_above(u32 floor) { return floor + 1 + get_random_u32_below(~floor); }
 static inline u32 get_random_u32_inclusive(u32 floor, u32 ceil) { return floor + get_random_u32_below(ceil - floor + 1); }
+static inline int wait_for_random_bytes(void) { return 0; }
 #endif

@@ -754,6 +754,8 @@ static void pci_bus_remove(struct device *dev) {
 // ---------------------------------------------------------------------------
 #define PCIE_CAP_ID 0x10
 #define PCIE_SLOT_IMPLEMENTED (1u << 8) // PCIe Capabilities
+#define PCIE_SLTCAP 0x14
+#define PCIE_SLTCAP_HPC (1u << 6) // Hot-Plug Capable
 #define PCIE_SLTCTL 0x18
 #define PCIE_SLTSTA 0x1A
 #define PCIE_SLTSTA_ABP (1u << 0) // Attention Button Pressed
@@ -773,6 +775,10 @@ static void pci_slot_events(void) {
     uint8_t b = br->bus, s = br->slot, f = br->func;
     uint8_t cap = pci_find_capability(b, s, f, PCIE_CAP_ID);
     if (!cap || !(pci_read_config_word(b, s, f, cap + 2) & PCIE_SLOT_IMPLEMENTED))
+      continue;
+    // Como pciehp: solo slots con Hot-Plug Capable. Los puertos raiz de una
+    // placa de sobremesa (slot de la GPU) no lo son y no se les escribe.
+    if (!(pci_read_config_dword(b, s, f, cap + PCIE_SLTCAP) & PCIE_SLTCAP_HPC))
       continue;
 
     uint16_t sta = pci_read_config_word(b, s, f, cap + PCIE_SLTSTA);
@@ -1328,3 +1334,55 @@ static void test_pci_msix_table_size(void) {
               "MSI-X en dispositivo inexistente falla");
 }
 REGISTER_TEST("pci: tabla MSI-X coherente", test_pci_msix_table_size);
+
+// ===========================================================================
+// ECAM (config PCI extendida). Cada bus ocupa 1 MiB (dev<<15 | func<<12 | off);
+// se mapea bajo demanda y por bus. Solo lectura: no hace falta mas para
+// descubrir capacidades extendidas (ReBAR, ACS, SR-IOV...).
+// ===========================================================================
+#include "acpi.h"
+
+static volatile uint32_t *g_ecam_bus[256];
+
+int pci_ecam_available(void) { return acpi_get_info()->mcfg_count > 0; }
+
+static volatile uint32_t *ecam_bus(uint8_t bus) {
+  if (g_ecam_bus[bus])
+    return g_ecam_bus[bus];
+  const acpi_info_t *a = acpi_get_info();
+  for (int i = 0; i < a->mcfg_count; i++) {
+    if (a->mcfg[i].segment != 0 || bus < a->mcfg[i].start_bus ||
+        bus > a->mcfg[i].end_bus)
+      continue;
+    uint64_t phys = a->mcfg[i].base + ((uint64_t)(bus - a->mcfg[i].start_bus) << 20);
+    void *v = mmio_map(phys, 1ULL << 20, PTE_WRITABLE | PTE_NOCACHE);
+    if (v)
+      g_ecam_bus[bus] = v;
+    return g_ecam_bus[bus];
+  }
+  return NULL;
+}
+
+uint32_t pci_read_config_ext_dword(uint8_t bus, uint8_t slot, uint8_t func,
+                                   uint16_t offset) {
+  if (slot > 31 || func > 7 || offset > 0xFFC)
+    return 0xFFFFFFFFu;
+  volatile uint32_t *b = ecam_bus(bus);
+  if (!b)
+    return 0xFFFFFFFFu;
+  return b[(((uint32_t)slot << 15) | ((uint32_t)func << 12) | (offset & ~3u)) / 4];
+}
+
+uint16_t pci_find_ext_capability(uint8_t bus, uint8_t slot, uint8_t func,
+                                 uint16_t id) {
+  uint16_t off = 0x100;
+  for (int n = 0; n < 96 && off >= 0x100; n++) {
+    uint32_t h = pci_read_config_ext_dword(bus, slot, func, off);
+    if (h == 0 || h == 0xFFFFFFFFu)
+      return 0;
+    if ((h & 0xFFFF) == id)
+      return off;
+    off = (h >> 20) & 0xFFC;
+  }
+  return 0;
+}

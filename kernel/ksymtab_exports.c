@@ -29,6 +29,7 @@ KEXPORT_SYMBOL(kfree);
 KEXPORT_SYMBOL(vmm_alloc_pages);
 KEXPORT_SYMBOL(vmm_free_pages);
 KEXPORT_SYMBOL(paging_map_page);
+KEXPORT_SYMBOL(paging_invalidate_tlb_global);
 
 KEXPORT_SYMBOL(sched_get_ticks);
 KEXPORT_SYMBOL(sched_current);
@@ -108,6 +109,9 @@ KEXPORT_SYMBOL(bus_del_driver);
 KEXPORT_SYMBOL(device_unregister);
 KEXPORT_SYMBOL(pci_bus);
 KEXPORT_SYMBOL(pci_get_devices);
+KEXPORT_SYMBOL(pci_ecam_available);
+KEXPORT_SYMBOL(pci_read_config_ext_dword);
+KEXPORT_SYMBOL(pci_find_ext_capability);
 KEXPORT_SYMBOL(pci_read_config_byte);
 KEXPORT_SYMBOL(pci_read_config_word);
 KEXPORT_SYMBOL(pci_read_config_dword);

@@ -41,8 +41,27 @@ static bool lkpi_cfg_ok(int where, int size)
 	return where >= 0 && where + size <= PCI_CFG_SPACE_SIZE && !(where & (size - 1));
 }
 
+/* Offsets 256..4095 (capacidades extendidas): solo lectura, por ECAM si hay MCFG. */
+static bool lkpi_cfg_ext_ok(int where, int size)
+{
+	return where >= PCI_CFG_SPACE_SIZE && where + size <= PCI_CFG_SPACE_EXP_SIZE &&
+	       !(where & (size - 1)) && aurora_pci_ecam_available();
+}
+
+static u32 lkpi_cfg_ext_read(const struct pci_dev *dev, int where, int size)
+{
+	u32 v = aurora_pci_read_config_ext_dword(bus_of(dev), slot_of(dev), func_of(dev),
+						 where & ~3);
+
+	return size == 4 ? v : (v >> ((where & 3) * 8)) & (size == 2 ? 0xffff : 0xff);
+}
+
 int lkpi_pci_read_config_byte(const struct pci_dev *dev, int where, u8 *val)
 {
+	if (lkpi_cfg_ext_ok(where, 1)) {
+		*val = lkpi_cfg_ext_read(dev, where, 1);
+		return PCIBIOS_SUCCESSFUL;
+	}
 	if (!lkpi_cfg_ok(where, 1)) {
 		*val = 0xff;
 		return PCIBIOS_BAD_REGISTER_NUMBER;
@@ -54,6 +73,10 @@ EXPORT_SYMBOL(lkpi_pci_read_config_byte);
 
 int lkpi_pci_read_config_word(const struct pci_dev *dev, int where, u16 *val)
 {
+	if (lkpi_cfg_ext_ok(where, 2)) {
+		*val = lkpi_cfg_ext_read(dev, where, 2);
+		return PCIBIOS_SUCCESSFUL;
+	}
 	if (!lkpi_cfg_ok(where, 2)) {
 		*val = 0xffff;
 		return PCIBIOS_BAD_REGISTER_NUMBER;
@@ -65,6 +88,10 @@ EXPORT_SYMBOL(lkpi_pci_read_config_word);
 
 int lkpi_pci_read_config_dword(const struct pci_dev *dev, int where, u32 *val)
 {
+	if (lkpi_cfg_ext_ok(where, 4)) {
+		*val = lkpi_cfg_ext_read(dev, where, 4);
+		return PCIBIOS_SUCCESSFUL;
+	}
 	if (!lkpi_cfg_ok(where, 4)) {
 		*val = 0xffffffff;
 		return PCIBIOS_BAD_REGISTER_NUMBER;
@@ -153,10 +180,12 @@ u8 lkpi_pci_find_capability(struct pci_dev *dev, int cap)
 }
 EXPORT_SYMBOL(lkpi_pci_find_capability);
 
-/* Sin ECAM (Aurora usa 0xCF8/0xCFC): el espacio extendido no se ve. */
+/* Sin MCFG (Aurora usa 0xCF8/0xCFC) el espacio extendido no se ve: devuelve 0. */
 u16 lkpi_pci_find_ext_capability(struct pci_dev *dev, int cap)
 {
-	return 0;
+	if (!aurora_pci_ecam_available())
+		return 0;
+	return aurora_pci_find_ext_capability(bus_of(dev), slot_of(dev), func_of(dev), cap);
 }
 EXPORT_SYMBOL(lkpi_pci_find_ext_capability);
 
@@ -252,7 +281,10 @@ static void lkpi_pci_read_bars(struct pci_dev *pdev)
 			continue;
 		}
 		r->start = v & PCI_BASE_ADDRESS_MEM_MASK;
-		r->flags = IORESOURCE_MEM;
+		/* Como decode_bar() de Linux: los bits bajos del BAR (tipo 64 bit,
+		 * prefetch) se conservan; el driver de NVIDIA los compara con
+		 * PCI_BASE_ADDRESS_MEM_TYPE_64/PREFETCH. */
+		r->flags = IORESOURCE_MEM | (v & ~PCI_BASE_ADDRESS_MEM_MASK & 0xf);
 		if (v & PCI_BASE_ADDRESS_MEM_PREFETCH)
 			r->flags |= IORESOURCE_PREFETCH;
 		if ((v & PCI_BASE_ADDRESS_MEM_TYPE_MASK) == PCI_BASE_ADDRESS_MEM_TYPE_64 && i < 5) {
@@ -301,7 +333,7 @@ static void lkpi_pci_size_bars(struct pci_dev *pdev)
 			continue;
 		}
 		base = orig & PCI_BASE_ADDRESS_MEM_MASK;
-		r->flags = IORESOURCE_MEM | IORESOURCE_SIZEALIGN;
+		r->flags = IORESOURCE_MEM | IORESOURCE_SIZEALIGN | (orig & ~PCI_BASE_ADDRESS_MEM_MASK & 0xf);
 		if (orig & PCI_BASE_ADDRESS_MEM_PREFETCH)
 			r->flags |= IORESOURCE_PREFETCH;
 		if ((orig & PCI_BASE_ADDRESS_MEM_TYPE_MASK) == PCI_BASE_ADDRESS_MEM_TYPE_64 &&
@@ -606,10 +638,25 @@ void lkpi_display_shadow_probe(void)
 	if (!aurora_gpup_get_framebuffer(&fbp, &fbs))
 		goto out;
 	while ((p = lkpi_pci_get_next(lkpi_match_display, NULL, p)) != NULL) {
+		bool only_fb = fb_only;
+
 		if (!lkpi_bar_has(p, fbp))
 			continue;
-		if (!fb_only_set)
-			fb_only = p->vendor == PCI_VENDOR_ID_INTEL;
+		/* GPUs reales (Intel, NVIDIA): los registros (BAR0) son de verdad; solo el
+		 * BAR del framebuffer va en sombra (si lkpi.shadow no dice otra cosa). Con
+		 * sombra en BAR0 RM de NVIDIA lee PMC_BOOT_0/42 = 0 y rechaza la GPU. */
+		if (!fb_only_set && (p->vendor == PCI_VENDOR_ID_INTEL || p->vendor == 0x10de))
+			only_fb = true;
+		/* NVIDIA: nada en sombra. RM prueba el copy engine escribiendo VRAM por el
+		 * BAR1 y leyendo por DMA; con el BAR1 en sombra (RAM) el CPU escribe en
+		 * RAM y la GPU copia VRAM real, y memmgrTestCeUtils falla. */
+		if (p->vendor == 0x10de) {
+			lkpi_vga_set_default_device(p);
+			pr_info("linuxkpi: %s aloja el framebuffer del firmware: sin sombra (NVIDIA)\n",
+				pci_name(p));
+			pci_dev_put(p);
+			break;
+		}
 		for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
 			struct resource *r = &p->resource[i];
 			u64 len = r->end - r->start + 1, start = r->start;
@@ -617,7 +664,7 @@ void lkpi_display_shadow_probe(void)
 
 			if (!(r->flags & IORESOURCE_MEM) || r->end <= r->start)
 				continue;
-			if (fb_only && !has_fb)
+			if (only_fb && !has_fb)
 				continue;
 			/* lkpi_vmalloc() no pasa de 64 MiB - 4 KiB (limite del heap): la
 			 * sombra de un BAR grande cubre solo el framebuffer del firmware. */
@@ -634,7 +681,7 @@ void lkpi_display_shadow_probe(void)
 		}
 		lkpi_vga_set_default_device(p);
 		pr_info("linuxkpi: %s aloja el framebuffer del firmware: %s en sombra\n",
-			pci_name(p), fb_only ? "su BAR del framebuffer" : "sus BAR");
+			pci_name(p), only_fb ? "su BAR del framebuffer" : "sus BAR");
 		pci_dev_put(p);
 		break;
 	}

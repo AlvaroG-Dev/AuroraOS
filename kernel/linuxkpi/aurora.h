@@ -173,6 +173,11 @@ u8 aurora_pci_read_config_byte(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_re
 u16 aurora_pci_read_config_word(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_read_config_word");
 u32 aurora_pci_read_config_dword(u8 bus, u8 slot, u8 func, u8 off)
 	__asm__("pci_read_config_dword");
+int aurora_pci_ecam_available(void) __asm__("pci_ecam_available");
+u32 aurora_pci_read_config_ext_dword(u8 bus, u8 slot, u8 func, u16 off)
+	__asm__("pci_read_config_ext_dword");
+u16 aurora_pci_find_ext_capability(u8 bus, u8 slot, u8 func, u16 id)
+	__asm__("pci_find_ext_capability");
 void aurora_pci_write_config_byte(u8 bus, u8 slot, u8 func, u8 off, u8 v)
 	__asm__("pci_write_config_byte");
 void aurora_pci_write_config_word(u8 bus, u8 slot, u8 func, u8 off, u16 v)
@@ -354,6 +359,8 @@ void aurora_vma_dev_zap(struct aurora_vma *vma, u64 start, u64 end) __asm__("vma
 #define AURORA_VMAP_BASE 0xFFFFD00000000000UL
 #define AURORA_VMAP_SIZE (64UL << 30)
 u64 aurora_vmap_area_alloc(u64 size) __asm__("vmap_area_alloc");
+int aurora_paging_map_page(u64 virt, u64 phys, u64 flags) __asm__("paging_map_page");
+void aurora_paging_invalidate_tlb_global(u64 virt) __asm__("paging_invalidate_tlb_global");
 int aurora_vmap_area_map(u64 va, u64 phys, u64 flags) __asm__("vmap_area_map");
 void aurora_vmap_area_free(u64 va) __asm__("vmap_area_free");
 /* drm.h: dmabuf de Aurora */
