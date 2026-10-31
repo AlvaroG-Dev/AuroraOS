@@ -61,6 +61,7 @@ static struct {
 	bool started;		/* primer commit hecho */
 	bool flush;
 	bool hw_vblank;
+	bool vbl_deferred;	/* sondeo de vblank pendiente hasta el primer commit */
 	int bad;
 	u64 last_vbl;
 	ktime_t last_flip;
@@ -78,6 +79,30 @@ static u32 *kms_back(u32 *pitch_px)
 		return NULL;
 	*pitch_px = K.buf[K.cur]->fb->pitches[0] / 4;
 	return K.map[K.cur].is_iomem ? (u32 __force *)K.map[K.cur].vaddr_iomem : K.map[K.cur].vaddr;
+}
+
+/*
+ * Comprueba si el vblank por hardware llega de verdad: si el contador no
+ * avanza, el pipe esta apagado o la IRQ no llega (el commit bloqueante
+ * esperaria al timeout de flip_done) y se usa el temporizador.
+ */
+static void kms_probe_vblank(struct drm_device *dev)
+{
+	u64 c0;
+	bool alive;
+
+	K.hw_vblank = drm_dev_has_vblank(dev) && drm_crtc_index(K.crtc) < dev->num_crtcs &&
+		      drm_crtc_vblank_get(K.crtc) == 0;
+	if (!K.hw_vblank)
+		return;
+	c0 = drm_crtc_vblank_count(K.crtc);
+	msleep(60);
+	alive = drm_crtc_vblank_count(K.crtc) != c0;
+	drm_info(dev, "kms: vblank %s (contador %llu -> %llu en 60 ms)\n", alive ? "avanza" : "NO avanza", c0,
+		 drm_crtc_vblank_count(K.crtc));
+	drm_crtc_vblank_put(K.crtc);
+	if (!alive)
+		K.hw_vblank = false;
 }
 
 static int kms_flip(const int dirty[4], u32 *commit_us, u32 *vbl_gap)
@@ -130,6 +155,13 @@ static int kms_flip(const int dirty[4], u32 *commit_us, u32 *vbl_gap)
 	if (ktime_to_ms(ktime_sub(t1, t0)) > 3000 && K.frames++ % 20 == 0)
 		drm_err(K.dev, "kms: commit de %lld ms (vblank/flip_done sin IRQ?); `lkpi.kms=0` vuelve al GOP\n",
 			ktime_to_ms(ktime_sub(t1, t0)));
+	if (K.vbl_deferred) {
+		K.vbl_deferred = false;
+		mutex_lock(&K.lock);
+		kms_probe_vblank(K.dev);
+		K.ops.hw_vblank = K.hw_vblank;
+		mutex_unlock(&K.lock);
+	}
 	if (!K.started) {
 		K.started = true;
 		drm_info(K.dev, "kms: modeset propio hecho (%dx%d, %s)\n", K.w, K.h,
@@ -267,20 +299,15 @@ static int kms_client_hotplug(struct drm_client_dev *client)
 		K.map[i] = map;
 	}
 
-	K.hw_vblank = drm_dev_has_vblank(dev) && drm_crtc_index(K.crtc) < dev->num_crtcs &&
-		      drm_crtc_vblank_get(K.crtc) == 0;
-	if (K.hw_vblank) {
-		/* Diagnostico para hardware real: si el contador no avanza, el
-		 * pipe esta apagado o la IRQ de vblank no llega (el commit
-		 * bloqueante esperaria al timeout de flip_done). */
-		u64 c0 = drm_crtc_vblank_count(K.crtc);
-
-		msleep(60);
-		drm_info(dev, "kms: vblank %s (contador %llu -> %llu en 60 ms)\n",
-			 drm_crtc_vblank_count(K.crtc) != c0 ? "avanza" : "NO avanza", c0,
-			 drm_crtc_vblank_count(K.crtc));
-		drm_crtc_vblank_put(K.crtc);
-	}
+	/*
+	 * nvidia-drm: activar el vblank con el pipe aun sin modo hace que NVKMS
+	 * divida por cero (timings a 0, CalculateRgTriggerToActiveLineOffset);
+	 * se sondea despues del primer commit.
+	 */
+	K.vbl_deferred = !strcmp(dev->driver->name, "nvidia-drm");
+	K.hw_vblank = false;
+	if (!K.vbl_deferred)
+		kms_probe_vblank(dev);
 	K.cur = 0;
 	K.bad = 0;
 	K.last_vbl = 0;

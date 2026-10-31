@@ -86,6 +86,7 @@ linuxkpi-drv: tools/kurbuild
 # make nvidia: driver NVIDIA open (Plan_NVIDIA.md N2) -> sysroot/lib/modules/linuxkpi/nvidia.kur.
 # Descarga las fuentes y compila nv-kernel.o si faltan; no va en
 # `linuxkpi` (la primera vez tarda). Se carga con lkpi.load=linuxkpi,nvidia.
+NVKMS_DEBUG ?= 1
 .PHONY: nvidia nvidia-test nvidia-test-off
 nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@[ -d build/linuxkpi_src/nvidia-open/src ] || scripts/fetch-linux-drivers.sh
@@ -98,10 +99,15 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@mkdir -p $(LKPI_MODDIR)
 	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
 	@cp -f build/nvidia-kpi/nvidia.kur $(LKPI_MODDIR)/nvidia.kur
-	@[ -f build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/dbg/nv-modeset-kernel.o ] || \
-		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia-modeset DEBUG=1 OUTPUTDIR=_out/dbg -j$$(nproc) >/dev/null
+	@if [ "$(NVKMS_DEBUG)" = 1 ]; then \
+		[ -f build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/dbg/nv-modeset-kernel.o ] || \
+		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia-modeset DEBUG=1 OUTPUTDIR=_out/dbg -j$$(nproc) >/dev/null; \
+	else \
+		[ -f build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/Linux_x86_64/nv-modeset-kernel.o ] || \
+		$(MAKE) --no-print-directory -C build/linuxkpi_src/nvidia-open/src/nvidia-modeset -j$$(nproc) >/dev/null; \
+	fi
 	@scripts/nvidia-modeset-cc.sh | grep -E "^compilan"
-	@scripts/nvidia-modeset-link.sh | grep "^OK"
+	@NVKMS_DEBUG=$(NVKMS_DEBUG) scripts/nvidia-modeset-link.sh | grep "^OK"
 	@cp -f build/nvidia-kpi/ms/nvidia-modeset.kur $(LKPI_MODDIR)/nvidia-modeset.kur
 	@$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=lkpi_drm KUR_CC="$(KUR_CC)" install
 	@scripts/nvidia-drm-cc.sh > build/nvidia-kpi/drm/cc.log || { head -20 build/nvidia-kpi/drm/obj/errors.txt; exit 1; }; grep -E "^compilan" build/nvidia-kpi/drm/cc.log

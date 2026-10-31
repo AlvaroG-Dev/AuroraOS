@@ -25,6 +25,7 @@
 
 #include "kur_loader.h"
 #include "elf.h"
+#include "cmdline.h"
 #include "uaccess.h"
 #include "heap.h"
 #include "klog.h"
@@ -276,6 +277,8 @@ static int register_module_exports(struct kur_module *mod,
     return -ENOEXEC;
   }
   size_t n_entries = e->shdrs[exp_idx].sh_size / sizeof(struct kur_export_entry);
+  char vb[4];
+  int verbose_exports = cmdline_get("kur.verbose", vb, sizeof(vb)) && vb[0] == '1';
   const struct kur_export_entry *entries =
       (const struct kur_export_entry *)(base + sec_off[exp_idx]);
 
@@ -310,7 +313,10 @@ static int register_module_exports(struct kur_module *mod,
     g_dynsym[h] = d;
     g_dynsym_count++;
     spin_unlock_irqrestore(&g_dynsym_lock, flags);
-    LOG_DEBUG("[KUR] export '%s' @ %p", name, (void *)addr);
+    // Una linea por export (linuxkpi 894, lkpi_drm 772...): en hardware real
+    // cada linea de klog cuesta ~20 ms, ~35 s de arranque. Solo con kur.verbose=1.
+    if (verbose_exports)
+      LOG_DEBUG("[KUR] export '%s' @ %p", name, (void *)addr);
   }
   if (n_entries)
     LOG_INFO("[KUR] '%s': %zu exports registrados", mod->name, n_entries);

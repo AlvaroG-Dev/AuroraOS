@@ -2906,8 +2906,8 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
 //
 // CLOCK_REALTIME (0) debe devolver epoch UNIX — es lo que usan
 // touch/date/gettimeofday para saber "ahora".
-// CLOCK_MONOTONIC (1), CLOCK_PROCESS_CPUTIME_ID (2), CLOCK_BOOTTIME (7)
-// devuelven tiempo desde el boot, que es lo que ya hacíamos.
+// CLOCK_MONOTONIC (1), CLOCK_BOOTTIME (7) y el resto devuelven tiempo desde el
+// boot. CLOCK_PROCESS_CPUTIME_ID (2) devuelve la CPU consumida por el proceso.
 #define CLOCK_REALTIME_ 0
 #define CLOCK_MONOTONIC_ 1
 
@@ -2977,6 +2977,11 @@ static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
     int64_t now_ms = realtime_now_ms();
     ts.sec = now_ms / 1000;
     ts.nsec = (now_ms % 1000) * 1000000;
+  } else if (clockid == 2) { // CLOCK_PROCESS_CPUTIME_ID: CPU del proceso (ticks de 1 ms)
+    process_t *cp = process_current();
+    uint64_t t = cp ? cp->cpu_ticks_user : 0;
+    ts.sec = (int64_t)(t / 1000);
+    ts.nsec = (int64_t)((t % 1000) * 1000000);
   } else {
     uint64_t t = sched_get_ticks();
     ts.sec = (int64_t)(t / 1000);

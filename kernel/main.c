@@ -863,8 +863,11 @@ static int klog_file_task(void *arg) {
 }
 
 static void klog_file_start(void) {
-  if (!cmdline_get("klog.file", g_klog_file_path, sizeof(g_klog_file_path)) ||
-      g_klog_file_path[0] != '/')
+  // Sin `klog.file=` el log va a /data/aurora.log; `klog.file=off` (o una
+  // ruta no absoluta) lo desactiva.
+  if (!cmdline_get("klog.file", g_klog_file_path, sizeof(g_klog_file_path)))
+    strcpy(g_klog_file_path, "/data/aurora.log");
+  if (g_klog_file_path[0] != '/')
     return;
   if (plog_ensure_buffer() != 0) {
     LOG_WARN("[KLOG] sin memoria para el buffer de log");
@@ -1071,6 +1074,12 @@ void kmain(struct kernel_boot_info *kinfo) {
   memcpy(&boot, kinfo, sizeof(boot));
   g_boot_info = boot;
   cmdline_init(boot.cmdline);
+  {
+    // Salida por UART: solo en VM por defecto (ver serial.c); serial=on|off fuerza.
+    char sv[8];
+    if (cmdline_get("serial", sv, sizeof(sv)))
+      serial_set_enabled(!strcmp(sv, "on") || !strcmp(sv, "1"));
+  }
   display_edid_init(boot.edid, boot.edid_len);
 
   // 5. Tablas de sistema.

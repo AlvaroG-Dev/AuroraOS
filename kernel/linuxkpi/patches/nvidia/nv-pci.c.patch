@@ -30,3 +30,12 @@
      nv_procfs_remove_gpu(nvl);
      LOCK_NV_LINUX_DEVICES();
      nv_linux_remove_device_locked(nvl);
+@@ -2965,4 +2972,8 @@
+ static void
+ nv_pci_shutdown(struct pci_dev *pci_dev)
+ {
++    /* Aurora: el reinicio/apagado resetea la GPU por hardware (CF9/ACPI); el desmontaje del RM+GSP aqui se cuelga. */
++    if (pci_get_drvdata(pci_dev) != NULL)
++        return;
++
+     nv_linux_state_t *nvl = pci_get_drvdata(pci_dev);

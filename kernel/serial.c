@@ -40,7 +40,24 @@ static int serial_ready_locked(void) {
 // Con 100000 el timeout era de ~100 ms por carácter, y una línea de log
 // de 100 chars podía tener el lock cogido durante 10 segundos si el UART
 // se atascaba. Eso bloqueaba todas las demás CPUs en spin_lock_irqsave.
+// En hardware real el UART (si existe) transmite a 115200 baudios, ~87 us por
+// caracter: una linea de log son 10-20 ms con IRQs apagadas y el lock global
+// cogido, sin que esa CPU atienda IPIs (TLB shootdown de 14+ ms) ni IRQs, y
+// sin nadie leyendo el puerto. Por defecto se apaga fuera de VM; el log sigue
+// en RAM (plog) y en /data/aurora.log. `serial=on` en cmdline lo reactiva.
+static volatile int g_serial_enabled = 1;
+
+void serial_set_enabled(int on) { g_serial_enabled = on; }
+
+static int serial_running_in_vm(void) {
+  uint32_t a = 1, b = 0, c = 0, d = 0;
+  __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+  return (c >> 31) & 1;
+}
+
 static void serial_write_byte_locked(char c) {
+  if (!g_serial_enabled)
+    return;
   int timeout = 1000;
   while (!serial_ready_locked() && timeout-- > 0)
     __asm__ volatile("pause");
@@ -68,6 +85,7 @@ void serial_init(void) {
   spin_init(&serial_lock);
   serial_lock_owner_cpu = -1;
   g_serial_dropped = 0;
+  g_serial_enabled = serial_running_in_vm();
 
   outb(SERIAL_PORT_COM1 + 1, 0x00);
   outb(SERIAL_PORT_COM1 + 3, 0x80);

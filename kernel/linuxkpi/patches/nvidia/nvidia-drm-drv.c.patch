@@ -1,9 +1,20 @@
 --- nvidia-drm-drv.c	2026-10-29 13:23:35.499603637 +0000
 +++ ../../../../../build/nvidia-kpi/wk2/nvidia-drm-drv.c	2026-10-31 09:24:44.923862571 +0000
-@@ -781,6 +781,18 @@
+@@ -781,6 +781,29 @@
          return -ENODEV;
      }
- 
+
++    /*
++     * Aurora: los parametros de modulo no se leen de la cmdline; `nvidia-drm.vblank=1`
++     * activa el vblank por hardware (callback de NVKMS) en lugar del temporizador.
++     */
++    {
++        extern int cmdline_get(const char *key, char *out, unsigned long outlen);
++        char vb[8];
++        if (cmdline_get("nvidia-drm.vblank", vb, sizeof(vb)) && vb[0] == '1')
++            nv_drm_vblank_module_param = true;
++    }
++
 +    /*
 +     * Aurora: el cliente KMS del compositor (lkpi_drm kms_present.c) hace los
 +     * modesets desde el kernel, sin DRM master de por medio: sin propiedad
@@ -19,7 +30,7 @@
  #if defined(NV_DRM_FBDEV_AVAILABLE)
      /*
       * If fbdev is enabled, take modeset ownership now before other DRM clients
-@@ -2117,6 +2129,15 @@
+@@ -2117,6 +2140,15 @@
          goto failed_drm_register;
      }
  

@@ -216,6 +216,7 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
   }
   in_panic = 1;
   __asm__ volatile("cli");
+  serial_set_enabled(1); // un panic siempre sale por serie (el coste ya no importa)
   {
     extern void boot_console_panic_screen(void);
     boot_console_panic_screen();

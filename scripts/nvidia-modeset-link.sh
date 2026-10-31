@@ -6,8 +6,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 B=build/nvidia-kpi/ms; O=$B/obj
-# Fase de diagnostico: nvkms con DEBUG=1 (trazas [kapi] de nvKmsKapiLogDebug y nvEvoLog*Debug).
-NM=build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/dbg/nv-modeset-kernel.o
+# Por defecto nvkms con DEBUG=1 (trazas [kapi] de nvKmsKapiLogDebug y
+# nvEvoLog*Debug) mientras dura el bring-up; NVKMS_DEBUG=0 usa el build release.
+if [ "${NVKMS_DEBUG:-1}" = 1 ]; then OUTD=dbg; else OUTD=Linux_x86_64; fi
+NM=build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/$OUTD/nv-modeset-kernel.o
 [ -f "$NM" ] || { echo "falta $NM" >&2; exit 1; }
 CC=${KUR_CC:-gcc}
 CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
