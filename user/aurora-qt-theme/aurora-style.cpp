@@ -18,9 +18,10 @@
 
 namespace {
 
-const QColor kAccent(0x0A, 0x84, 0xFF);   // AURORA_ACCENT
-const QColor kAccentHi(0x40, 0x9C, 0xFF); // AURORA_ACCENT_HOVER
-const QColor kAccentLo(0x0A, 0x6F, 0xDB);
+const QColor kAccent(0x3E, 0xE8, 0x9B);   // AURORA_ACCENT (verde aurora)
+const QColor kAccentHi(0x6B, 0xF0, 0x83); // AURORA_ACCENT_HOVER
+const QColor kAccentLo(0x2D, 0xB8, 0x78);
+const QColor kOnAccent(0x04, 0x26, 0x1A); // AURORA_ACCENT_TEXT
 const QColor kMenuBg(0x2A, 0x2A, 0x2C);
 const QColor kBar(0x26, 0x26, 0x28); // AURORA_TITLEBAR_ACTIVE
 
@@ -259,12 +260,12 @@ public:
       roundRect(p, b, 4, fill, QPen(on ? alpha(Qt::black, 60) : white(64), 1.0));
       if (o->state & State_NoChange) {
         p->setRenderHint(QPainter::Antialiasing);
-        p->setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap));
+        p->setPen(QPen(kOnAccent, 1.8, Qt::SolidLine, Qt::RoundCap));
         p->drawLine(QPointF(b.left() + 4, b.center().y()),
                     QPointF(b.right() - 4, b.center().y()));
       } else if (o->state & State_On) {
         p->setRenderHint(QPainter::Antialiasing);
-        p->setPen(QPen(Qt::white, 1.9, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p->setPen(QPen(kOnAccent, 1.9, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         QPainterPath c;
         c.moveTo(b.left() + b.width() * 0.26, b.top() + b.height() * 0.54);
         c.lineTo(b.left() + b.width() * 0.43, b.top() + b.height() * 0.71);
@@ -288,7 +289,7 @@ public:
       if (on) {
         p->setRenderHint(QPainter::Antialiasing);
         p->setPen(Qt::NoPen);
-        p->setBrush(Qt::white);
+        p->setBrush(kOnAccent);
         p->drawEllipse(b.center(), b.width() * 0.19, b.width() * 0.19);
       }
       if (o->state & State_HasFocus && (o->state & State_KeyboardFocusChange))
@@ -343,7 +344,7 @@ public:
       if (const auto *b = qstyleoption_cast<const QStyleOptionButton *>(o)) {
         if (b->features & QStyleOptionButton::DefaultButton) {
           QStyleOptionButton nb(*b);
-          nb.palette.setColor(QPalette::ButtonText, Qt::white);
+          nb.palette.setColor(QPalette::ButtonText, kOnAccent);
           QProxyStyle::drawControl(ce, &nb, p, w);
           return;
         }
@@ -361,9 +362,9 @@ public:
         if ((mi->state & State_Selected) && enabled) {
           roundRect(p, QRectF(mi->rect).adjusted(4, 1, -4, -1), 5, kAccent);
           nm.state &= ~State_Selected;
-          nm.palette.setColor(QPalette::Text, Qt::white);
-          nm.palette.setColor(QPalette::ButtonText, Qt::white);
-          nm.palette.setColor(QPalette::WindowText, Qt::white);
+          nm.palette.setColor(QPalette::Text, kOnAccent);
+          nm.palette.setColor(QPalette::ButtonText, kOnAccent);
+          nm.palette.setColor(QPalette::WindowText, kOnAccent);
         } else {
           nm.state &= ~State_Selected;
         }
@@ -483,7 +484,7 @@ public:
         // Popup button de macOS: cuadrado de acento con el par de chevrons.
         const QRectF a = QRectF(subControlRect(CC_ComboBox, cb, SC_ComboBoxArrow, w));
         roundRect(p, a, 4.5, enabled ? kAccent : QColor(0x4A, 0x4A, 0x4C));
-        const QColor ch = enabled ? QColor(Qt::white) : white(110);
+        const QColor ch = enabled ? kOnAccent : white(110);
         drawChevron(p, QPointF(a.center().x(), a.center().y() - 3.2), 6.5, true, ch, 1.5);
         drawChevron(p, QPointF(a.center().x(), a.center().y() + 3.2), 6.5, false, ch, 1.5);
         return;
@@ -574,7 +575,7 @@ private:
     QColor top, bot;
     if (def && enabled) {
       top = pressed ? kAccentLo : kAccentHi;
-      bot = pressed ? QColor(0x0A, 0x5C, 0xB8) : kAccent;
+      bot = pressed ? QColor(0x2D, 0xB8, 0x78) : kAccent;
     } else if (!enabled) {
       top = QColor(0x2A, 0x2A, 0x2C);
       bot = QColor(0x26, 0x26, 0x28);
@@ -586,6 +587,7 @@ private:
       if (pressed || checked)
         top = QColor(0x30, 0x30, 0x32), bot = QColor(0x3A, 0x3A, 0x3C);
     }
+    top = bot; // sin degradados: color solido
     QLinearGradient g(r.topLeft(), r.bottomLeft());
     g.setColorAt(0, top);
     g.setColorAt(1, bot);

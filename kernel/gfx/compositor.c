@@ -20,6 +20,12 @@
 #include "../bmp.h"
 #include "../drm/kms_present.h"
 #include "../boot_console.h"
+#include "../cmdline.h"
+#include "../completion.h"
+#include "../kthread.h"
+#include "../power.h"
+#include "../process.h"
+#include "../vfs.h"
 #include "../gpu_proxy.h"
 #include "../heap.h"
 #include "../input.h"
@@ -216,7 +222,8 @@ typedef enum {
                      cliente) */
   CMD_WIN_RESIZE, /* win + value = (ancho << 16) | alto exteriores (peticion del
                      cliente) */
-  CMD_WIN_CURSOR  /* win + value = cursor_shape_t sobre el area de cliente */
+  CMD_WIN_CURSOR, /* win + value = cursor_shape_t sobre el area de cliente */
+  CMD_THEME_SET   /* value: 1 = claro, 0 = oscuro (restaurado de /data) */
 } cmd_type_t;
 
 typedef struct {
@@ -492,6 +499,71 @@ static const menubar_provider_t k_menu_provider = {
 
 static void reload_wallpaper(void);
 
+/* ---- Modo claro/oscuro persistente ------------------------------------
+ * Se guarda en /data/aurora-theme ("light"/"dark"). /data puede montarse
+ * tarde (USB): un hilo de arranque reintenta durante ~2 min hasta que haya
+ * fichero. cmdline `theme=light|dark` manda sobre el fichero. */
+#define THEME_FILE "/data/aurora-theme"
+
+static void theme_save(void) {
+  const char *txt = theme_is_light() ? "light\n" : "dark\n";
+  vfs_node_t *n = vfs_lookup(THEME_FILE);
+  if (!n) {
+    if (vfs_create(THEME_FILE, 0644) != 0)
+      return; /* sin /data: el modo solo dura esta sesion */
+    n = vfs_lookup(THEME_FILE);
+    if (!n)
+      return;
+  }
+  if (n->ops && n->ops->write)
+    n->ops->write(n, 0, strlen(txt), (void *)txt);
+  if (n->ops && n->ops->fsync)
+    n->ops->fsync(n);
+  vfs_node_free(n);
+}
+
+/* Hilo de arranque: espera a /data (hasta ~2 min) y pide al compositor el
+ * modo guardado. cmdline `theme=light|dark` manda sobre el fichero. */
+static int theme_restore_thread(void *arg) {
+  (void)arg;
+  static completion_t never;
+  completion_init(&never);
+  char val[16] = {0};
+  int have = cmdline_get("theme", val, sizeof(val));
+  for (int i = 0; !have && i < 120; i++) {
+    void *buf = NULL;
+    size_t len = 0;
+    if (vfs_read_all(THEME_FILE, &buf, &len) == 0 && buf) {
+      size_t n = len < sizeof(val) - 1 ? len : sizeof(val) - 1;
+      memcpy(val, buf, n);
+      kfree(buf);
+      have = 1;
+      break;
+    }
+    wait_for_completion_timeout(&never, 1000);
+  }
+  if (have) {
+    comp_cmd_t c = {.type = CMD_THEME_SET, .value = !strncmp(val, "light", 5)};
+    cmd_post(&c);
+  }
+  return 0;
+}
+
+/* Acciones de energia y lanzadores: en un kthread para no bloquear el
+ * compositor (el apagado ordenado espera a procesos y discos). */
+static int power_thread(void *arg) {
+  power_request((power_action_t)(uintptr_t)arg, "menu Aurora");
+}
+
+static int launch_thread(void *arg) {
+  process_load((const char *)arg);
+  return 0;
+}
+
+static void launch_app(const char *path) {
+  kthread_run(launch_thread, (void *)path, "launch");
+}
+
 /* Aplica el modo (claro/oscuro) a todo lo que dibuja el kernel y avisa a los
  * clientes (la terminal consulta theme_generation() por syscall). */
 static void apply_theme_change(void) {
@@ -529,6 +601,20 @@ static void run_menu_action(menu_action_t act) {
   case MENU_ACT_THEME:
     theme_set_light(!theme_is_light());
     apply_theme_change();
+    theme_save();
+    break;
+  case MENU_ACT_LAUNCH_TERMINAL:
+    launch_app("/usr/bin/terminal");
+    break;
+  case MENU_ACT_LAUNCH_TASKMGR:
+    launch_app("/usr/bin/taskmgr");
+    break;
+  case MENU_ACT_RESTART:
+    kthread_run(power_thread, (void *)(uintptr_t)POWER_ACTION_RESTART,
+                "power");
+    break;
+  case MENU_ACT_SHUTDOWN:
+    kthread_run(power_thread, (void *)(uintptr_t)POWER_ACTION_OFF, "power");
     break;
   case MENU_ACT_MINIMIZE:
     if (w)
@@ -908,6 +994,12 @@ static void exec_cmd(const comp_cmd_t *c) {
     break;
   case CMD_DOCK_PIN:
     do_dock_pin(c);
+    break;
+  case CMD_THEME_SET:
+    if (!!c->value != theme_is_light()) {
+      theme_set_light(c->value);
+      apply_theme_change();
+    }
     break;
   case CMD_WIN_APP:
     if (stack_contains(c->win))
@@ -1948,6 +2040,7 @@ void compositor_init(void) {
   menubar_init((int)fb_width, (int)fb_height);
   menubar_set_provider(&k_menu_provider);
   taskbar_refresh_clock();
+  kthread_run(theme_restore_thread, NULL, "theme-restore");
 
   bg_wallpaper_node = tar_find_file(theme_is_light()
                                         ? "system/wallpapers/aurora-alba.bmp"

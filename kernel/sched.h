@@ -193,3 +193,6 @@ _Static_assert(offsetof(task_t, fs_base) == 0x2A0, "switch.asm: fs_base");
 // SLAB_MAX_SIZE). Si crece por encima, kmalloc la sirve del heap grande y
 // sched_kick_idle_cpu() deja de despertar CPUs ociosas.
 _Static_assert(sizeof(task_t) <= 2048, "task_t debe caber en el SLAB");
+// Ticks (1 ms) que cada CPU ha pasado ejecutando algo / en idle.
+uint64_t sched_cpu_busy_ticks(int cpu);
+uint64_t sched_cpu_idle_ticks(int cpu);

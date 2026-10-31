@@ -257,6 +257,8 @@
 #define ASYS_WIN_REGISTER_CONSOLE (ASYS_BASE + 0x14)
 #define ASYS_WIN_SET_ICON (ASYS_BASE + 0x15)
 #define ASYS_THEME_GET (ASYS_BASE + 0x70)
+#define ASYS_SYSINFO (ASYS_BASE + 0x71)
+#define ASYS_PROCLIST (ASYS_BASE + 0x72)
 #define ASYS_WIN_SET_RAW_INPUT (ASYS_BASE + 0x16)
 #define ASYS_WIN_CREATE_EX (ASYS_BASE + 0x17)
 #define ASYS_WIN_SET_TITLE (ASYS_BASE + 0x18)
@@ -364,5 +366,28 @@ void syscall_register_service(const char *name, uint32_t task_id);
 // (st_dev) y procfs (columna maj:min de mountinfo). Deben coincidir para
 // que coreutils df no deduplique todos los mounts a uno solo.
 uint64_t fs_dev_id(const void *fs);
+
+
+// Monitor de rendimiento (ASYS_SYSINFO / ASYS_PROCLIST). Mismo layout en
+// user/syscall.h.
+#define AURORA_SYSINFO_MAX_CPUS 64
+typedef struct {
+  uint32_t ncpu;
+  uint32_t nprocs;
+  uint64_t mem_total_kb;
+  uint64_t mem_free_kb;
+  uint64_t uptime_ms;
+  uint64_t cpu_busy[AURORA_SYSINFO_MAX_CPUS]; // ticks de 1 ms
+  uint64_t cpu_idle[AURORA_SYSINFO_MAX_CPUS];
+} aurora_sysinfo_t;
+
+typedef struct {
+  uint32_t pid;
+  uint32_t ppid;
+  char state; // R S T Z
+  char name[16];
+  uint64_t cpu_ticks;
+  uint64_t vsize_kb;
+} aurora_procinfo_t;
 
 #endif

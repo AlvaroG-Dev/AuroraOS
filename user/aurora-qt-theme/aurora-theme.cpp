@@ -18,8 +18,8 @@ const QColor kWin(0x1E, 0x1E, 0x1E);       // AURORA_WIN_BG
 const QColor kField(0x1A, 0x1A, 0x1A);     // AURORA_GRAY_900
 const QColor kAlt(0x24, 0x24, 0x24);       // AURORA_GRAY_800
 const QColor kRaised(0x2E, 0x2E, 0x2E);    // AURORA_GRAY_700
-const QColor kAccent(0x0A, 0x84, 0xFF);    // AURORA_ACCENT
-const QColor kAccentHover(0x40, 0x9C, 0xFF);
+const QColor kAccent(0x3E, 0xE8, 0x9B);    // AURORA_ACCENT (verde aurora)
+const QColor kAccentHover(0x6B, 0xF0, 0x83);
 
 class AuroraTheme : public QPlatformTheme {
 public:
@@ -110,7 +110,7 @@ private:
     p.setColor(QPalette::Dark, QColor(0x14, 0x14, 0x14));
     p.setColor(QPalette::Shadow, Qt::black);
     p.setColor(QPalette::Highlight, kAccent);
-    p.setColor(QPalette::HighlightedText, Qt::white);
+    p.setColor(QPalette::HighlightedText, QColor(0x04, 0x26, 0x1A)); // AURORA_ACCENT_TEXT
     p.setColor(QPalette::Link, kAccentHover);
     p.setColor(QPalette::LinkVisited, QColor(0xBF, 0x5A, 0xF2));
     p.setColor(QPalette::PlaceholderText, QColor(255, 255, 255, 120));

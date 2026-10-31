@@ -1,0 +1,378 @@
+/* Tema GTK3 de Aurora (claro). Base: Adwaita oscuro (estructura y metricas de los
+ * widgets) con la paleta, los radios y el acento de kernel/gfx/theme.h. La
+ * barra de titulo y los semaforos los dibuja Aurora, no GTK. */
+@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk.css");
+
+/* ---- Paleta (AURORA_* de theme.h) ---- */
+@define-color aurora_accent #3EE89B;
+@define-color aurora_accent_hover #1C8A5C;
+@define-color aurora_win #F4F7F5;       /* AURORA_WIN_BG */
+@define-color aurora_titlebar #E6EBE9;  /* AURORA_TITLEBAR_ACTIVE */
+@define-color aurora_card #FFFFFF;      /* AURORA_GRAY_800 */
+@define-color aurora_field #FFFFFF;     /* AURORA_GRAY_900 */
+@define-color aurora_raised #E9EEEC;    /* AURORA_GRAY_700 */
+@define-color aurora_raised_hover #DDE4E1; /* AURORA_GRAY_600 */
+@define-color aurora_line rgba(0, 0, 0, 0.14);
+@define-color aurora_text #14211B;
+@define-color aurora_text_2 rgba(20, 33, 27, 0.80);
+@define-color aurora_text_3 rgba(20, 33, 27, 0.60);
+
+@define-color theme_bg_color @aurora_win;
+@define-color theme_fg_color @aurora_text;
+@define-color theme_base_color @aurora_field;
+@define-color theme_text_color @aurora_text;
+@define-color theme_selected_bg_color @aurora_accent;
+@define-color theme_selected_fg_color #04261A;
+@define-color theme_tooltip_bg_color #2E2E2E;
+@define-color theme_tooltip_fg_color #FFFFFF;
+@define-color theme_unfocused_bg_color @aurora_win;
+@define-color theme_unfocused_fg_color @aurora_text_2;
+@define-color theme_unfocused_base_color @aurora_field;
+@define-color theme_unfocused_text_color @aurora_text_2;
+@define-color theme_unfocused_selected_bg_color #2DB878;
+@define-color theme_unfocused_selected_fg_color #04261A;
+@define-color insensitive_bg_color #E9EEEC;
+@define-color insensitive_fg_color rgba(20, 33, 27, 0.35);
+@define-color insensitive_base_color #F0F3F1;
+@define-color insensitive_base_fg_color rgba(20, 33, 27, 0.35);
+@define-color borders rgba(0, 0, 0, 0.14);
+@define-color unfocused_borders rgba(0, 0, 0, 0.10);
+@define-color warning_color #FEBC2E;
+@define-color error_color #FF5F57;
+@define-color success_color #28C840;
+@define-color content_view_bg @aurora_field;
+
+/* ---- Tipografia ---- */
+* {
+  font-family: "Inter", "DejaVu Sans", sans-serif;
+  -gtk-icon-style: symbolic;
+}
+window, .background {
+  background-color: @aurora_win;
+  color: @aurora_text;
+}
+label.dim-label, .dim-label { color: @aurora_text_3; opacity: 1; }
+.title { font-weight: bold; }
+.subtitle { color: @aurora_text_3; font-size: smaller; }
+
+/* ---- Sin botones de ventana ni sombras CSD (los pone Aurora) ---- */
+headerbar .titlebutton,
+.titlebar .titlebutton {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  border: none;
+  background: none;
+  -gtk-icon-source: none;
+}
+window.csd,
+decoration {
+  box-shadow: none;
+  margin: 0;
+  border-radius: 0;
+}
+
+/* ---- Barras ---- */
+headerbar, .titlebar {
+  border-radius: 0;
+  background-image: none;
+  background-color: @aurora_titlebar;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.16);
+  box-shadow: none;
+  color: @aurora_text;
+}
+toolbar, .toolbar, .inline-toolbar, actionbar {
+  background-color: @aurora_titlebar;
+  background-image: none;
+  border-color: rgba(0, 0, 0, 0.16);
+  padding: 4px;
+}
+statusbar { color: @aurora_text_3; }
+separator { background-color: @aurora_line; min-width: 1px; min-height: 1px; }
+
+/* ---- Botones ---- */
+button {
+  background-image: linear-gradient(to bottom, #FFFFFF, #FFFFFF);
+  background-color: @aurora_raised;
+  color: @aurora_text;
+  border: 1px solid rgba(0, 0, 0, 0.16);
+  border-radius: 6px;
+  padding: 3px 12px;
+  min-height: 22px;
+  box-shadow: inset 0 1px rgba(0, 0, 0, 0.08);
+  text-shadow: none;
+  transition: background-color 120ms ease;
+}
+button:hover { background-image: linear-gradient(to bottom, #EEF2F0, #EEF2F0); }
+button:active, button:checked {
+  background-image: linear-gradient(to bottom, #FFFFFF, #FFFFFF);
+  box-shadow: none;
+}
+button:disabled {
+  background-image: none;
+  background-color: #E9EEEC;
+  color: @insensitive_fg_color;
+  box-shadow: none;
+}
+button.flat, toolbar button, headerbar button {
+  background-image: none;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+button.flat:hover, toolbar button:hover, headerbar button:hover {
+  background-color: rgba(0, 0, 0, 0.06);
+}
+button.flat:active, button.flat:checked,
+toolbar button:active, toolbar button:checked,
+headerbar button:active, headerbar button:checked {
+  background-color: rgba(0, 0, 0, 0.10);
+}
+button.suggested-action, button.default {
+  background-image: linear-gradient(to bottom, #3EE89B, #3EE89B);
+  background-color: @aurora_accent;
+  border-color: rgba(0, 0, 0, 0.25);
+  color: #04261A;
+}
+button.suggested-action:hover, button.default:hover {
+  background-image: linear-gradient(to bottom, #3EE89B, #3EE89B);
+}
+button.suggested-action:active { background-image: linear-gradient(to bottom, #2DB878, #2DB878); }
+button.destructive-action {
+  background-color: #FF5F57;
+  border-color: rgba(0, 0, 0, 0.25);
+  color: #FFFFFF;
+}
+button.destructive-action:hover { background-color: #FF7A73; }
+button.circular { border-radius: 9999px; padding: 3px; }
+.linked > button { border-radius: 0; }
+.linked > button:first-child { border-radius: 6px 0 0 6px; }
+.linked > button:last-child { border-radius: 0 6px 6px 0; }
+.linked > button:only-child { border-radius: 6px; }
+
+/* ---- Campos de texto ---- */
+entry, spinbutton, .view, textview text {
+  background-color: @aurora_field;
+  color: @aurora_text;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 6px;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.16);
+  min-height: 22px;
+  caret-color: @aurora_accent;
+}
+entry:focus, spinbutton:focus-within {
+  border-color: @aurora_accent;
+  box-shadow: 0 0 0 3px alpha(@aurora_accent, 0.40);
+}
+entry:disabled { color: @insensitive_fg_color; }
+entry selection, .view selection, textview text selection, label selection {
+  background-color: alpha(@aurora_accent, 0.55);
+  color: #04261A;
+}
+spinbutton button {
+  border-radius: 0;
+  box-shadow: none;
+  background-color: transparent;
+  border-color: transparent;
+}
+
+/* ---- Casillas, radios e interruptores ---- */
+check, radio {
+  background-image: none;
+  background-color: @aurora_raised;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  min-width: 16px;
+  min-height: 16px;
+  box-shadow: none;
+}
+check { border-radius: 4px; }
+radio { border-radius: 9999px; }
+check:hover, radio:hover { border-color: rgba(0, 0, 0, 0.25); }
+check:checked, check:indeterminate, radio:checked, radio:indeterminate {
+  background-color: @aurora_accent;
+  border-color: @aurora_accent;
+  color: #04261A;
+}
+check:disabled, radio:disabled { opacity: 0.4; }
+switch {
+  background-image: none;
+  background-color: #C9D3CE;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 9999px;
+  min-height: 22px;
+  color: transparent;
+  text-shadow: none;
+}
+switch:checked { background-color: @aurora_accent; border-color: @aurora_accent; }
+switch slider {
+  background-image: none;
+  background-color: #FFFFFF;
+  border: none;
+  border-radius: 9999px;
+  min-width: 18px;
+  min-height: 18px;
+  margin: 1px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* ---- Barras de desplazamiento ---- */
+scrollbar {
+  background-color: transparent;
+  border: none;
+}
+scrollbar slider {
+  background-color: rgba(0, 0, 0, 0.19);
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  min-width: 8px;
+  min-height: 8px;
+}
+scrollbar slider:hover { background-color: rgba(0, 0, 0, 0.30); }
+scrollbar slider:active { background-color: rgba(0, 0, 0, 0.39); }
+scrollbar.overlay-indicator:not(.hovering) slider { min-width: 4px; min-height: 4px; }
+scrollbar button { min-width: 0; min-height: 0; padding: 0; opacity: 0; }
+
+/* ---- Escalas y barras de progreso ---- */
+scale trough, progressbar trough {
+  background-color: #C9D3CE;
+  border: none;
+  border-radius: 9999px;
+  min-height: 4px;
+  min-width: 4px;
+}
+scale highlight, progressbar progress {
+  background-image: none;
+  background-color: @aurora_accent;
+  border: none;
+  border-radius: 9999px;
+}
+scale slider {
+  background-image: none;
+  background-color: #FFFFFF;
+  border: 1px solid rgba(0, 0, 0, 0.30);
+  border-radius: 9999px;
+  min-width: 16px;
+  min-height: 16px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+levelbar block.filled { background-color: @aurora_accent; border-radius: 3px; }
+levelbar block.empty { background-color: #C9D3CE; border-radius: 3px; }
+
+/* ---- Pestanas ---- */
+notebook > header {
+  background-color: @aurora_titlebar;
+  border-color: rgba(0, 0, 0, 0.16);
+}
+notebook > header > tabs > tab {
+  background-color: transparent;
+  border: none;
+  border-radius: 6px;
+  margin: 3px 2px;
+  padding: 3px 12px;
+  color: @aurora_text_2;
+  box-shadow: none;
+}
+notebook > header > tabs > tab:hover { background-color: rgba(0, 0, 0, 0.04); }
+notebook > header > tabs > tab:checked {
+  background-color: rgba(0, 0, 0, 0.09);
+  color: @aurora_text;
+}
+notebook > stack { background-color: @aurora_win; }
+stackswitcher button { padding: 3px 14px; }
+
+/* ---- Listas, arboles y vistas ---- */
+list, listview, treeview.view, iconview {
+  background-color: @aurora_field;
+  color: @aurora_text;
+}
+row, treeview.view {
+  border-radius: 0;
+}
+list row, listview row { padding: 2px 6px; }
+list row:hover, treeview.view:hover { background-color: rgba(0, 0, 0, 0.03); }
+row:selected, treeview.view:selected, iconview:selected,
+list row:selected, .view:selected {
+  background-color: @aurora_accent;
+  color: #04261A;
+}
+treeview.view header button {
+  background-color: @aurora_titlebar;
+  border-radius: 0;
+  border-color: rgba(0, 0, 0, 0.16);
+  box-shadow: none;
+  color: @aurora_text_2;
+}
+frame > border, .frame { border-color: @aurora_line; border-radius: 6px; }
+scrolledwindow viewport { background-color: transparent; }
+scrolledwindow.frame, .frame { border: 1px solid @aurora_line; }
+
+/* ---- Menus, popovers y tooltips ---- */
+menu, .menu, .popup,
+popover, popover.background, popover > contents {
+  background-color: #FFFFFF;
+  color: @aurora_text;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+menu, .menu { padding: 4px 0; }
+menuitem, modelbutton {
+  border-radius: 5px;
+  margin: 0 4px;
+  padding: 4px 10px;
+  color: @aurora_text;
+}
+menuitem:hover, modelbutton:hover, modelbutton:focus {
+  background-color: @aurora_accent;
+  color: #04261A;
+}
+menuitem:disabled, modelbutton:disabled { color: @insensitive_fg_color; }
+menubar, .menubar {
+  background-color: @aurora_titlebar;
+  color: @aurora_text;
+  box-shadow: none;
+}
+menubar > menuitem { border-radius: 5px; margin: 2px; padding: 2px 8px; }
+tooltip, tooltip.background {
+  background-color: #2E2E2E;
+  color: #FFFFFF;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+tooltip label { color: #FFFFFF; }
+
+/* ---- Combos, calendario, avisos y dialogos ---- */
+combobox button, button.combo { padding: 3px 10px; }
+calendar { background-color: @aurora_field; border-color: @aurora_line; color: @aurora_text; }
+calendar:selected { background-color: @aurora_accent; color: #04261A; border-radius: 6px; }
+calendar.header { color: @aurora_text_2; }
+infobar, .info { background-color: #1C6B4A; color: #FFFFFF; border-radius: 0; }
+infobar.warning { background-color: #8A6A10; }
+infobar.error { background-color: #9B2B26; }
+messagedialog .dialog-action-area button { margin: 0; border-radius: 0; }
+dialog, messagedialog { background-color: @aurora_win; }
+expander arrow { color: @aurora_text_2; }
+paned > separator { background-color: rgba(0, 0, 0, 0.16); }
+:link, link { color: @aurora_accent_hover; }
+*:focus { outline-color: alpha(@aurora_accent, 0.55); }
+
+/* (selectores repetidos: mas especificidad que los de Adwaita) */
+window *:selected:selected:backdrop:backdrop {
+  background-color: #2DB878;
+  color: #04261A;
+}
+/* ---- Ventana sin foco: la seleccion conserva el verde (Adwaita usa su azul) ---- */
+row:selected:backdrop, treeview.view:selected:backdrop, iconview:selected:backdrop,
+list row:selected:backdrop, .view:selected:backdrop, check:checked:backdrop,
+radio:checked:backdrop, switch:checked:backdrop, calendar:selected:backdrop {
+  background-color: #2DB878;
+  color: #04261A;
+}
+button.suggested-action:backdrop, button.default:backdrop {
+  background-image: linear-gradient(to bottom, #2DB878, #2DB878);
+  background-color: #2DB878;
+  color: #04261A;
+}

@@ -6872,6 +6872,80 @@ static int64_t a_theme_get(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                    (uint64_t)theme_is_light());
 }
 
+static int64_t a_sysinfo(uint64_t uptr, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  static aurora_sysinfo_t si; // ~1 KB: fuera de la pila del kernel
+  memset(&si, 0, sizeof(si));
+  int n = smp_online_cpus();
+  if (n < 1)
+    n = 1;
+  if (n > AURORA_SYSINFO_MAX_CPUS)
+    n = AURORA_SYSINFO_MAX_CPUS;
+  si.ncpu = (uint32_t)n;
+  for (int i = 0; i < n; i++) {
+    si.cpu_busy[i] = sched_cpu_busy_ticks(i);
+    si.cpu_idle[i] = sched_cpu_idle_ticks(i);
+  }
+  si.mem_total_kb = pmm_total_usable_pages() * (PAGE_SIZE / 1024);
+  si.mem_free_kb = pmm_free_pages_count() * (PAGE_SIZE / 1024);
+  si.uptime_ms = sched_get_ticks();
+  if (copy_to_user((void *)uptr, &si, sizeof(si)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+typedef struct {
+  aurora_procinfo_t *out;
+  int max;
+  int n;
+} proclist_ctx_t;
+
+static int proclist_cb(process_t *p, void *arg) {
+  proclist_ctx_t *c = (proclist_ctx_t *)arg;
+  if (c->n >= c->max)
+    return 1;
+  aurora_procinfo_t *e = &c->out[c->n++];
+  memset(e, 0, sizeof(*e));
+  e->pid = p->pid;
+  e->ppid = p->ppid;
+  if (p->is_zombie)
+    e->state = 'Z';
+  else if (p->stopped)
+    e->state = 'T';
+  else if (p->task && p->task->state == TASK_BLOCKED)
+    e->state = 'S';
+  else
+    e->state = 'R';
+  strncpy(e->name, p->name, sizeof(e->name) - 1);
+  e->cpu_ticks = p->cpu_ticks_user;
+  uint64_t vs = 0;
+  for (vma_t *v = p->vma_list; v; v = v->next)
+    vs += v->end - v->start;
+  e->vsize_kb = vs / 1024;
+  return 0;
+}
+
+#define PROCLIST_MAX 256
+static int64_t a_proclist(uint64_t uptr, uint64_t max, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  if (max > PROCLIST_MAX)
+    max = PROCLIST_MAX;
+  aurora_procinfo_t *buf =
+      (aurora_procinfo_t *)kmalloc(sizeof(aurora_procinfo_t) * PROCLIST_MAX);
+  if (!buf)
+    return -ENOMEM;
+  proclist_ctx_t c = {buf, (int)max, 0};
+  process_for_each(proclist_cb, &c);
+  int64_t rc = c.n;
+  if (c.n > 0 &&
+      copy_to_user((void *)uptr, buf, sizeof(aurora_procinfo_t) * c.n) < 0)
+    rc = -EFAULT;
+  kfree(buf);
+  return rc;
+}
+
 static int64_t a_win_set_icon(uint64_t win_id, uint64_t path, uint64_t a3,
                               uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -7381,6 +7455,8 @@ static const syscall_entry_t aurora_table[] = {
         ASYS_BASE] = {a_win_register_console, "asys_win_register_console"},
     [ASYS_WIN_SET_ICON - ASYS_BASE] = {a_win_set_icon, "asys_win_set_icon"},
     [ASYS_THEME_GET - ASYS_BASE] = {a_theme_get, "asys_theme_get"},
+    [ASYS_SYSINFO - ASYS_BASE] = {a_sysinfo, "asys_sysinfo"},
+    [ASYS_PROCLIST - ASYS_BASE] = {a_proclist, "asys_proclist"},
     [ASYS_WIN_SET_RAW_INPUT -
         ASYS_BASE] = {a_win_set_raw_input, "asys_win_set_raw_input"},
     [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},

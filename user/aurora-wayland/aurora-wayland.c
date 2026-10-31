@@ -130,6 +130,7 @@ static int win_create_ex(int x, int y, int w, int h, const char *title,
 #define WINSRV_STATE_RESTORE 3
 #define ASYS_DOCK_PIN (ASYS_BASE + 0x1A)
 #define ASYS_DOCK_POLL_LAUNCH (ASYS_BASE + 0x1B)
+#define ASYS_THEME_GET (ASYS_BASE + 0x70)
 #define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C)
 #define ASYS_WIN_BEGIN_GRAB (ASYS_BASE + 0x1D)
 #define ASYS_WIN_RESIZE (ASYS_BASE + 0x1E)
@@ -4582,6 +4583,17 @@ static void launch_app(int idx) {
   setenv("XDG_RUNTIME_DIR", "/run/user/0", 0);
   setenv("WAYLAND_DISPLAY", "wayland-0", 0);
   setenv("DISPLAY", ":0", 0);
+  /* Modo claro/oscuro del escritorio: la app lo toma al arrancar (GTK3/GTK4
+   * por tema; libadwaita lee ~/.config/gtk-4.0/gtk.css, un enlace por modo). */
+  {
+    int light = (int)(syscall(ASYS_THEME_GET) & 1);
+    setenv("GTK_THEME", light ? "Aurora-light" : "Aurora", 1);
+    setenv("AURORA_THEME", light ? "light" : "dark", 1);
+    unlink("/tmp/.config/gtk-4.0/gtk.css");
+    symlink(light ? "/usr/share/aurora/xdg/gtk-4.0/gtk-light.css"
+                  : "/usr/share/aurora/xdg/gtk-4.0/gtk.css",
+            "/tmp/.config/gtk-4.0/gtk.css");
+  }
   execvp(argv[0], argv); /* ruta absoluta o nombre en PATH (.desktop) */
   _exit(127);
 }

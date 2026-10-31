@@ -4,8 +4,8 @@
 @import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-dark.css");
 
 /* ---- Paleta (AURORA_* de theme.h) ---- */
-@define-color aurora_accent #0A84FF;
-@define-color aurora_accent_hover #409CFF;
+@define-color aurora_accent #3EE89B;
+@define-color aurora_accent_hover #6BF083;
 @define-color aurora_win #1E1E1E;       /* AURORA_WIN_BG */
 @define-color aurora_titlebar #262628;  /* AURORA_TITLEBAR_ACTIVE */
 @define-color aurora_card #242424;      /* AURORA_GRAY_800 */
@@ -22,15 +22,15 @@
 @define-color theme_base_color @aurora_field;
 @define-color theme_text_color @aurora_text;
 @define-color theme_selected_bg_color @aurora_accent;
-@define-color theme_selected_fg_color #FFFFFF;
+@define-color theme_selected_fg_color #04261A;
 @define-color theme_tooltip_bg_color #2E2E2E;
 @define-color theme_tooltip_fg_color #FFFFFF;
 @define-color theme_unfocused_bg_color @aurora_win;
 @define-color theme_unfocused_fg_color @aurora_text_2;
 @define-color theme_unfocused_base_color @aurora_field;
 @define-color theme_unfocused_text_color @aurora_text_2;
-@define-color theme_unfocused_selected_bg_color #0A6FDB;
-@define-color theme_unfocused_selected_fg_color #FFFFFF;
+@define-color theme_unfocused_selected_bg_color #2DB878;
+@define-color theme_unfocused_selected_fg_color #04261A;
 @define-color insensitive_bg_color #242424;
 @define-color insensitive_fg_color rgba(255, 255, 255, 0.35);
 @define-color insensitive_base_color #1A1A1A;
@@ -94,7 +94,7 @@ separator { background-color: @aurora_line; min-width: 1px; min-height: 1px; }
 
 /* ---- Botones ---- */
 button {
-  background-image: linear-gradient(to bottom, #48484A, #3A3A3C);
+  background-image: linear-gradient(to bottom, #3A3A3C, #3A3A3C);
   background-color: @aurora_raised;
   color: @aurora_text;
   border: 1px solid rgba(0, 0, 0, 0.35);
@@ -105,9 +105,9 @@ button {
   text-shadow: none;
   transition: background-color 120ms ease;
 }
-button:hover { background-image: linear-gradient(to bottom, #545456, #444446); }
+button:hover { background-image: linear-gradient(to bottom, #444446, #444446); }
 button:active, button:checked {
-  background-image: linear-gradient(to bottom, #303032, #3A3A3C);
+  background-image: linear-gradient(to bottom, #3A3A3C, #3A3A3C);
   box-shadow: none;
 }
 button:disabled {
@@ -131,15 +131,15 @@ headerbar button:active, headerbar button:checked {
   background-color: rgba(255, 255, 255, 0.18);
 }
 button.suggested-action, button.default {
-  background-image: linear-gradient(to bottom, #409CFF, #0A84FF);
+  background-image: linear-gradient(to bottom, #3EE89B, #3EE89B);
   background-color: @aurora_accent;
   border-color: rgba(0, 0, 0, 0.25);
-  color: #FFFFFF;
+  color: #04261A;
 }
 button.suggested-action:hover, button.default:hover {
-  background-image: linear-gradient(to bottom, #5AAAFF, #1A8FFF);
+  background-image: linear-gradient(to bottom, #3EE89B, #3EE89B);
 }
-button.suggested-action:active { background-image: linear-gradient(to bottom, #0A6FDB, #0A5CB8); }
+button.suggested-action:active { background-image: linear-gradient(to bottom, #2DB878, #2DB878); }
 button.destructive-action {
   background-color: #FF5F57;
   border-color: rgba(0, 0, 0, 0.25);
@@ -193,7 +193,7 @@ check:hover, radio:hover { border-color: rgba(255, 255, 255, 0.45); }
 check:checked, check:indeterminate, radio:checked, radio:indeterminate {
   background-color: @aurora_accent;
   border-color: @aurora_accent;
-  color: #FFFFFF;
+  color: #04261A;
 }
 check:disabled, radio:disabled { opacity: 0.4; }
 switch {
@@ -295,7 +295,7 @@ list row:hover, treeview.view:hover { background-color: rgba(255, 255, 255, 0.06
 row:selected, treeview.view:selected, iconview:selected,
 list row:selected, .view:selected {
   background-color: @aurora_accent;
-  color: #FFFFFF;
+  color: #04261A;
 }
 treeview.view header button {
   background-color: @aurora_titlebar;
@@ -326,7 +326,7 @@ menuitem, modelbutton {
 }
 menuitem:hover, modelbutton:hover, modelbutton:focus {
   background-color: @aurora_accent;
-  color: #FFFFFF;
+  color: #04261A;
 }
 menuitem:disabled, modelbutton:disabled { color: @insensitive_fg_color; }
 menubar, .menubar {
@@ -347,9 +347,9 @@ tooltip label { color: #FFFFFF; }
 /* ---- Combos, calendario, avisos y dialogos ---- */
 combobox button, button.combo { padding: 3px 10px; }
 calendar { background-color: @aurora_field; border-color: @aurora_line; color: @aurora_text; }
-calendar:selected { background-color: @aurora_accent; color: #FFFFFF; border-radius: 6px; }
+calendar:selected { background-color: @aurora_accent; color: #04261A; border-radius: 6px; }
 calendar.header { color: @aurora_text_2; }
-infobar, .info { background-color: #0A4F99; color: #FFFFFF; border-radius: 0; }
+infobar, .info { background-color: #1C6B4A; color: #FFFFFF; border-radius: 0; }
 infobar.warning { background-color: #8A6A10; }
 infobar.error { background-color: #9B2B26; }
 messagedialog .dialog-action-area button { margin: 0; border-radius: 0; }
@@ -358,3 +358,21 @@ expander arrow { color: @aurora_text_2; }
 paned > separator { background-color: rgba(0, 0, 0, 0.45); }
 :link, link { color: @aurora_accent_hover; }
 *:focus { outline-color: alpha(@aurora_accent, 0.55); }
+
+/* (selectores repetidos: mas especificidad que los de Adwaita) */
+window *:selected:selected:backdrop:backdrop {
+  background-color: #2DB878;
+  color: #04261A;
+}
+/* ---- Ventana sin foco: la seleccion conserva el verde (Adwaita usa su azul) ---- */
+row:selected:backdrop, treeview.view:selected:backdrop, iconview:selected:backdrop,
+list row:selected:backdrop, .view:selected:backdrop, check:checked:backdrop,
+radio:checked:backdrop, switch:checked:backdrop, calendar:selected:backdrop {
+  background-color: #2DB878;
+  color: #04261A;
+}
+button.suggested-action:backdrop, button.default:backdrop {
+  background-image: linear-gradient(to bottom, #2DB878, #2DB878);
+  background-color: #2DB878;
+  color: #04261A;
+}
