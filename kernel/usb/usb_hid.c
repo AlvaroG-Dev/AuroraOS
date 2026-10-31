@@ -39,6 +39,8 @@ typedef struct usb_hid_dev {
   int32_t mouse_abs_x;
   int32_t mouse_abs_y;
   uint8_t mouse_abs_valid; // bit 0 = X, bit 1 = Y
+  uint8_t mouse_btn_last;  // botones del último evento emitido
+  uint8_t mouse_btn_valid;
 
   // Modificadores (uno por bit; usage 0xE0..0xE7 de la page 0x07).
   uint8_t mod_lctrl, mod_lshift, mod_lalt, mod_lgui;
@@ -487,8 +489,14 @@ static void usb_hid_process_mouse_full(usb_hid_dev_t *h, const uint8_t *data,
   if (dy < -32768)
     dy = -32768;
 
-  usb_hid_emit(h, buttons, (int16_t)dx, (int16_t)dy);
+  // Muchos receptores 2.4G mandan informes sin cambios a ritmo fijo: no
+  // despertar al compositor por un informe que no mueve nada ni cambia botones.
   memcpy(h->prev_data, data, len < 64 ? len : 64);
+  if (dx == 0 && dy == 0 && h->mouse_btn_valid && buttons == h->mouse_btn_last)
+    return;
+  h->mouse_btn_last = buttons;
+  h->mouse_btn_valid = 1;
+  usb_hid_emit(h, buttons, (int16_t)dx, (int16_t)dy);
 }
 
 // ===========================================================================
@@ -778,19 +786,10 @@ int usb_hid_probe(usb_device_t *dev) {
       kfree(h);
       continue;
     }
-    /* Ratón relativo: segundo hilo sobre el mismo endpoint. Con una sola
-     * petición en vuelo el endpoint queda sin TD mientras el hilo despierta
-     * y reenvía; el receptor 2.4G descarta los informes de ese hueco y el
-     * cursor recorre poco. Con dos, xhci.aur encola el siguiente TD en
-     * cuanto completa el anterior. Los deltas se suman, el orden da igual. */
-    if (h->kind == HID_KIND_MOUSE) {
-      int rel = !h->use_report_protocol;
-      for (int i = 0; h->use_report_protocol && i < h->report.num_fields; i++)
-        if (h->report.fields[i].is_relative)
-          rel = 1;
-      if (rel)
-        (void)usb_hid_spawn_kthread(h);
-    }
+    /* Un solo hilo por endpoint: xhci.aur mantiene el anillo armado y guarda
+     * los informes en un FIFO (stream), así que no hace falta una segunda
+     * petición en vuelo; con dos hilos los informes se procesaban fuera de
+     * orden (botones) y se duplicaban los despertares. */
     probed++;
   }
   return probed;
