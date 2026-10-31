@@ -126,6 +126,22 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 		ln -sf libnvidia-ml.so.$(NVIDIA_OPEN_VERSION) sysroot/usr/lib64/libnvidia-ml.so.1; \
 		cp -af sysroot/usr/lib64/libnvidia-ml.so* sysroot/lib64/; \
 	fi
+	@# N5a: pila GL/EGL propietaria de NVIDIA (~210 MB). NVIDIA_GL=0 la omite.
+	@if [ "$(NVIDIA_GL)" != "0" ] && [ -f build/nvidia/userlib/libEGL_nvidia.so.$(NVIDIA_OPEN_VERSION) ]; then \
+		L=sysroot/usr/lib/x86_64-linux-gnu; U=build/nvidia/userlib; V=$(NVIDIA_OPEN_VERSION); \
+		mkdir -p $$L/gbm sysroot/usr/share/glvnd/egl_vendor.d sysroot/usr/share/egl/egl_external_platform.d; \
+		for f in libEGL_nvidia.so.$$V libGLESv2_nvidia.so.$$V libGLESv1_CM_nvidia.so.$$V libnvidia-glsi.so.$$V \
+		         libnvidia-eglcore.so.$$V libnvidia-glcore.so.$$V libnvidia-gpucomp.so.$$V libnvidia-tls.so.$$V \
+		         libnvidia-allocator.so.$$V libnvidia-egl-gbm.so.1.1.3; do cp -f $$U/$$f $$L/ || exit 1; done; \
+		ln -sf libEGL_nvidia.so.$$V $$L/libEGL_nvidia.so.0; \
+		ln -sf libGLESv2_nvidia.so.$$V $$L/libGLESv2_nvidia.so.2; \
+		ln -sf libGLESv1_CM_nvidia.so.$$V $$L/libGLESv1_CM_nvidia.so.1; \
+		ln -sf libnvidia-egl-gbm.so.1.1.3 $$L/libnvidia-egl-gbm.so.1; \
+		ln -sf libnvidia-allocator.so.$$V $$L/libnvidia-allocator.so.1; \
+		ln -sf ../libnvidia-allocator.so.$$V $$L/gbm/nvidia-drm_gbm.so; \
+		cp -f build/nvidia/pkg/10_nvidia.json sysroot/usr/share/glvnd/egl_vendor.d/10_nvidia.json; \
+		cp -f build/nvidia/pkg/15_nvidia_gbm.json sysroot/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json; \
+	fi
 	@rm -f kernel/initrd.tar
 	@echo "[NVIDIA] instalado en $(LKPI_MODDIR)/nvidia.kur (arranca con lkpi.load=linuxkpi,nvidia)"
 
