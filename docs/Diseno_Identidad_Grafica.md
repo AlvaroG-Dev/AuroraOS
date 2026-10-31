@@ -105,3 +105,10 @@ glifo neutro).
 - Menu Aurora: Acerca de, Modo claro/oscuro, Reiniciar, Apagar (via `power_request`). Menu "Aplicaciones": Terminal, Monitor de rendimiento, Acerca de.
 - Monitor de rendimiento (`user/musl/apps/taskmgr`): pestañas Procesos y Rendimiento; usa `ASYS_SYSINFO` / `ASYS_PROCLIST` (CPU por nucleo desde `sched_tick`, memoria del PMM, memoria virtual por proceso; no hay RSS barato).
 - Pendiente: GTK4/libadwaita en vivo, confirmacion antes de apagar, pulir detalles del Qt claro.
+
+## Iconos de las apps
+
+- Regla: baldosa redondeada de color solido propio de cada app, glifo blanco, sin degradados. El verde aurora es de la identidad del sistema y los acentos, **no** de las apps.
+- Generador: `tools/gen_app_iconset.py [--bmp]` -> `assets/brand/appicons/*.png` y `assets/system/icons/app-<nombre>.bmp`.
+- Colores: Archivos azul #3D8BFF, Notas amarillo #FFC82E, Configuracion grafito #59606B, Calculadora naranja #FF8A3D, Monitor violeta #7C6CFF, Imagenes coral #F2545B, Terminal casi negro con prompt verde.
+- Solo el Monitor y la Terminal existen como apps; el resto son iconos listos para cuando existan.

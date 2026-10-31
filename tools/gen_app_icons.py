@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Iconos de apps nativas de Aurora (BMP 32 bpp con alfa, 128x128).
 
-Salida: assets/system/icons/taskmgr.bmp (monitor de rendimiento) y
-app-generic.bmp (icono de reserva de Aurora para apps sin icono).
+Salida: app-generic.bmp (icono de reserva de Aurora para apps sin icono).
 Baldosa verde-grafito con barras de actividad en verde aurora."""
 import os
 import numpy as np
@@ -21,29 +20,7 @@ def save_bmp32(im, path):
         f.write(hdr + dib + bgra.tobytes())
 
 
-S = 512  # se dibuja grande y se reduce (antialias)
-im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-d = ImageDraw.Draw(im)
-d.rounded_rectangle((16, 16, S - 16, S - 16), radius=112, fill=(0x12, 0x1B, 0x18, 255))
-d.rounded_rectangle((16, 16, S - 16, S - 16), radius=112, outline=(0x2A, 0x3D, 0x36, 255), width=6)
-# cuadricula
-for k in (1, 2, 3):
-    y = 96 + k * 80
-    d.line((72, y, S - 72, y), fill=(0x26, 0x35, 0x30, 255), width=4)
-# barras
-vals = [0.35, 0.55, 0.42, 0.7, 0.5, 0.85, 0.62]
-bw, gap = 38, 14
-x0 = (S - (len(vals) * bw + (len(vals) - 1) * gap)) // 2
-base = S - 100
-for i, v in enumerate(vals):
-    h = int(300 * v)
-    x = x0 + i * (bw + gap)
-    d.rounded_rectangle((x, base - h, x + bw, base), radius=10, fill=(0x3E, 0xE8, 0x9B, 255))
-im = im.resize((128, 128), Image.LANCZOS)
-out = os.path.join(os.path.dirname(__file__), "..", "assets", "system", "icons", "taskmgr.bmp")
-save_bmp32(im, out)
-print("OK", out)
-
+S = 512
 
 # ---- Icono generico: ventana con barra de titulo, en verde aurora ----
 g = Image.new("RGBA", (S, S), (0, 0, 0, 0))

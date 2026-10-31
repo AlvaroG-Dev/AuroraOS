@@ -427,7 +427,7 @@ int main(void) {
                          "Monitor de rendimiento");
   if (g_win < 0)
     return 1;
-  sys_win_set_icon(g_win, "/system/icons/taskmgr.bmp");
+  sys_win_set_icon(g_win, "/system/icons/app-monitor.bmp");
 
   g_theme_seen = sys_theme_get();
   P = (g_theme_seen & 1) ? &PAL_LIGHT : &PAL_DARK;
