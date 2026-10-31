@@ -157,11 +157,29 @@ fi
 # Modulo GTK3 y plugins Qt5 de Aurora: se recompilan si faltan o cambian sus fuentes
 GTKM="$PRE/lib/aurora-gtk/modules/libaurora-theme.so"
 if [ ! -f "$GTKM" ] || [ -n "$(find user/aurora-gtk-module -type f -newer "$GTKM" -print -quit 2>/dev/null)" ]; then
-    soft_step "modulo GTK3 de Aurora (build-gtk-module.sh)" bash scripts/build-gtk-module.sh
+    if ! pkg-config --exists gtk+-3.0 2>/dev/null && [ "$OFFLINE" != "1" ]; then
+        SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+        say "instalando libgtk-3-dev pkg-config"
+        $SUDO apt-get install -y libgtk-3-dev pkg-config || warn "no se instalo libgtk-3-dev"
+    fi
+    if pkg-config --exists gtk+-3.0 2>/dev/null; then
+        soft_step "modulo GTK3 de Aurora (build-gtk-module.sh)" bash scripts/build-gtk-module.sh
+    else
+        warn "sin libgtk-3-dev: se usa el libaurora-theme.so precompilado de precompiled/"
+    fi
 fi
 QTP="$PRE/lib/x86_64-linux-gnu/qt5/plugins/platformthemes/libaurora.so"
 if [ ! -f "$QTP" ] || [ -n "$(find user/aurora-qt-theme -type f -newer "$QTP" -print -quit 2>/dev/null)" ]; then
-    soft_step "plugins Qt5 de Aurora (build-qt-theme.sh)" bash scripts/build-qt-theme.sh
+    if ! command -v qmake >/dev/null 2>&1 && [ "$OFFLINE" != "1" ]; then
+        SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+        say "instalando qtbase5-dev qtbase5-private-dev qt5-qmake"
+        $SUDO apt-get install -y qtbase5-dev qtbase5-private-dev qt5-qmake || warn "no se instalo qtbase5-dev"
+    fi
+    if command -v qmake >/dev/null 2>&1; then
+        soft_step "plugins Qt5 de Aurora (build-qt-theme.sh)" bash scripts/build-qt-theme.sh
+    else
+        warn "sin qmake: se usan los plugins Qt precompilados de precompiled/"
+    fi
 fi
 # Xwayland + apps X11
 if [ ! -x "$PRE/bin/Xwayland" ]; then
