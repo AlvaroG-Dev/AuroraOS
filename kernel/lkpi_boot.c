@@ -58,6 +58,8 @@ static const char *lkpi_autodetect(void) {
   uint8_t bus = 0, slot = 0, func = 0;	// 0:0.0 es el puente de host
   pci_device_t dev;
   while (pci_find_next_device(0x03, 0x00, &bus, &slot, &func, &dev) == 0) {
+    LOG_INFO("[LKPI] GPU PCI %02x:%02x.%x %04x:%04x", bus, slot, func,
+             dev.vendor_id, dev.device_id);
     if (dev.vendor_id == 0x8086) {
       LOG_INFO("[LKPI] GPU Intel %04x:%04x detectada: pila i915", dev.vendor_id,
                dev.device_id);
@@ -72,6 +74,38 @@ static const char *lkpi_autodetect(void) {
   return NULL;
 }
 
+// ¿Hay una GPU (PCI clase VGA) de este fabricante?
+static bool gpu_vendor_present(uint16_t vendor) {
+  uint8_t bus = 0, slot = 0, func = 0;
+  pci_device_t dev;
+  while (pci_find_next_device(0x03, 0x00, &bus, &slot, &func, &dev) == 0)
+    if (dev.vendor_id == vendor)
+      return true;
+  return false;
+}
+
+// Un `lkpi.load=` pensado para otra maquina (p. ej. el de NVIDIA que queda en
+// el aurora.conf del pendrive) carga una pila sin GPU y deja la Intel sin
+// driver. Si pide nvidia y no hay GPU 10de pero si una Intel, se usa la pila
+// i915. Sin GPU Intel (QEMU, pruebas) el pedido explicito se respeta.
+static bool list_has(const char *list, const char *needle) {
+  size_t n = strlen(needle);
+  for (; *list; list++)
+    if (!strncmp(list, needle, n))
+      return true;
+  return false;
+}
+
+static void lkpi_fix_mismatch(char *list, size_t cap) {
+  if (!list_has(list, "nvidia") || gpu_vendor_present(0x10de))
+    return;
+  if (!gpu_vendor_present(0x8086))
+    return;
+  LOG_WARN("[LKPI] lkpi.load=%s pide NVIDIA pero no hay GPU 10de; hay GPU Intel: "
+           "se usa la pila i915 (quita lkpi.load= de aurora.conf)", list);
+  snprintf(list, cap, "%s", LKPI_AUTO_INTEL);
+}
+
 static int boot_loaded;
 
 int lkpi_boot_loaded(void) { return boot_loaded; }
@@ -83,6 +117,10 @@ int lkpi_boot_load(void) {
     if (!auto_list)
       return 0;
     snprintf(list, sizeof(list), "%s", auto_list);
+  } else {
+    LOG_INFO("[LKPI] lkpi.load explicito: %s", list);
+    if (!drm_native_only())
+      lkpi_fix_mismatch(list, sizeof(list));
   }
 
   int loaded = 0;
