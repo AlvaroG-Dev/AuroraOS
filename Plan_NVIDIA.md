@@ -254,3 +254,19 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 - 2026-10-31: Ratón (anterior a NVIDIA): clics perdidos y movimiento lento en USB. Causa: `hid_parser` acumulaba `bit_offset`/`input_len` sumando todos los Report ID, de modo que `report_len` (p.ej. 15 B con mps=7 en el MOSART) superaba el informe real y el TD del xHC no completaba con un solo informe (informes concatenados/perdidos). Los offsets de los campos de IDs posteriores también eran erróneos. Arreglo: offsets por Report ID e `input_len` = máximo de un solo informe.
 
 - 2026-10-31: Ratón, movimiento (2): los clics ya iban bien tras el fix del parser (informe de 7 B). Con una única petición interrupt-IN en vuelo el endpoint queda sin TD mientras el hilo HID despierta y reenvía; el receptor 2.4G descarta informes en ese hueco. Ahora los ratones relativos usan dos hilos sobre el mismo endpoint (xhci.aur encola el siguiente TD al completar el anterior). QEMU xhci+usb-mouse: arranca y ambos hilos inician. Pendiente de confirmar en HW.
+
+## 11. Estado y pendiente (2026-10-31)
+
+**Hecho (RTX 4060 / AD107, probado en hardware):** RM y GSP inician (`RmInitAdapter`), `nvctl_test` ALL PASS, nodos `/dev/nvidiactl` y `/dev/nvidia0`, `nvidia-modeset` y `nvidia-drm` cargan con `card0` y `renderD128`, modeset por `kms_present` (HDMI-A-1 1920x1080@60), terminal y Dock visibles. La pila se autocarga al detectar vendor 0x10de (`lkpi.auto=off` lo desactiva; `lkpi.load=` explícito manda). Ratón USB corregido (parser HID por Report ID y dos peticiones interrupt-IN en vuelo), aparte de NVIDIA.
+
+**Pendiente:**
+- Apagar nvkms Debug Build y `debug=1` cuando esté estable.
+- Primer modeset ~4 s: no hay IRQ de vblank por hardware (vblank por software); enlazar la IRQ.
+- Aviso `configureHDCPDisableAuthentication failed`: inofensivo, silenciar.
+- Arranque ~110 s hasta el escritorio con la pila NVIDIA: analizar dónde se va el tiempo.
+- Aceleración 3D (L8/L9, crocus/dmabuf): no empezada; requiere confirmación de Alvaro.
+- Sin probar: VirtualBox; monitor grande sin POST (BIOS/CSM/cable, no atribuido a Aurora).
+- Ajeno a NVIDIA: 5 tests `pmm` fallan desde antes.
+- Verificar el movimiento del ratón en hardware tras los dos hilos HID.
+
+**Propuesta:** vblank por IRQ, apagar debug y recortar el arranque; L8/L9 después.
