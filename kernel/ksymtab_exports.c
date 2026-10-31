@@ -195,6 +195,8 @@ KEXPORT_SYMBOL(vfs_fd_put_ref);
 KEXPORT_SYMBOL(vfs_fd_reserve);
 KEXPORT_SYMBOL(vfs_fd_install_node);
 KEXPORT_SYMBOL(vfs_fd_unreserve);
+KEXPORT_SYMBOL(vfs_mmap_node_current);
+KEXPORT_SYMBOL(vfs_munmap_current);
 KEXPORT_SYMBOL(vfs_send_sigio);
 KEXPORT_SYMBOL(vfs_fd_owner);
 KEXPORT_SYMBOL(vfs_mount);

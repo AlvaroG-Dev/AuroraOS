@@ -18,7 +18,8 @@ static int in_panic = 0;
 static int is_kernel_text(uint64_t addr) {
   uint64_t start = (uint64_t)&__text_start;
   uint64_t end = (uint64_t)&__text_end;
-  return addr >= start && addr < end;
+  /* Los modulos .kur cargan su codigo en la mitad alta, fuera de .text. */
+  return (addr >= start && addr < end) || addr >= 0xffffffff80000000ULL;
 }
 
 void backtrace(uint64_t rbp, uint64_t rip, int max_frames) {
@@ -30,7 +31,8 @@ void backtrace(uint64_t rbp, uint64_t rip, int max_frames) {
   int frame = 1;
 
   while (frame < max_frames) {
-    if (frame_rbp == 0 || (frame_rbp & 0x7) != 0)
+    if (frame_rbp == 0 || (frame_rbp & 0x7) != 0 ||
+        frame_rbp < 0xffff800000000000ULL)
       break;
 
     uint64_t *f = (uint64_t *)frame_rbp;

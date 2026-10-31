@@ -616,7 +616,7 @@ void lkpi_display_shadow_probe(void)
 	struct pci_dev *p = NULL;
 	char opt[8];
 	u64 fbp, fbs;
-	bool fb_only = false;
+	bool fb_only = false, fb_only_set = false;
 
 	if (READ_ONCE(done) || READ_ONCE(probing))
 		return;
@@ -627,11 +627,13 @@ void lkpi_display_shadow_probe(void)
 	}
 	probing = true;
 	/* lkpi.shadow=0: sin sombra; =fb: solo el BAR que aloja el framebuffer
-	 * (los registros del dispositivo son reales: i915 los necesita). */
+	 * (los registros del dispositivo son reales: i915 los necesita). Sin la
+	 * opcion, una GPU Intel real usa fb y el resto (QEMU) sombra completa. */
 	if (aurora_cmdline_get("lkpi.shadow", opt, sizeof(opt))) {
 		if (opt[0] == '0')
 			goto out;
 		fb_only = opt[0] == 'f';
+		fb_only_set = true;
 	}
 	if (!aurora_gpup_get_framebuffer(&fbp, &fbs))
 		goto out;
@@ -641,9 +643,9 @@ void lkpi_display_shadow_probe(void)
 		if (!lkpi_bar_has(p, fbp))
 			continue;
 		/* GPUs reales (Intel, NVIDIA): los registros (BAR0) son de verdad; solo el
-		 * BAR del framebuffer va en sombra. Con sombra en BAR0 RM de NVIDIA lee
-		 * PMC_BOOT_0/42 = 0 y rechaza la GPU. */
-		if (p->vendor == 0x8086 || p->vendor == 0x10de)
+		 * BAR del framebuffer va en sombra (si lkpi.shadow no dice otra cosa). Con
+		 * sombra en BAR0 RM de NVIDIA lee PMC_BOOT_0/42 = 0 y rechaza la GPU. */
+		if (!fb_only_set && (p->vendor == PCI_VENDOR_ID_INTEL || p->vendor == 0x10de))
 			only_fb = true;
 		/* NVIDIA: nada en sombra. RM prueba el copy engine escribiendo VRAM por el
 		 * BAR1 y leyendo por DMA; con el BAR1 en sombra (RAM) el CPU escribe en
@@ -1188,6 +1190,21 @@ static ssize_t device_show(struct device *dev, struct device_attribute *a, char 
 	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->device);
 }
 static DEVICE_ATTR_RO(device);
+static ssize_t subsystem_vendor_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->subsystem_vendor);
+}
+static DEVICE_ATTR_RO(subsystem_vendor);
+static ssize_t subsystem_device_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%04x\n", to_pci_dev(dev)->subsystem_device);
+}
+static DEVICE_ATTR_RO(subsystem_device);
+static ssize_t revision_show(struct device *dev, struct device_attribute *a, char *buf)
+{
+	return sysfs_emit(buf, "0x%02x\n", to_pci_dev(dev)->revision);
+}
+static DEVICE_ATTR_RO(revision);
 static ssize_t class_show(struct device *dev, struct device_attribute *a, char *buf)
 {
 	return sysfs_emit(buf, "0x%06x\n", to_pci_dev(dev)->class);
@@ -1206,9 +1223,36 @@ static DEVICE_ATTR_RO(enable);
 
 static struct attribute *lkpi_pci_dev_attrs[] = {
 	&dev_attr_vendor.attr, &dev_attr_device.attr, &dev_attr_class.attr,
+	&dev_attr_subsystem_vendor.attr, &dev_attr_subsystem_device.attr, &dev_attr_revision.attr,
 	&dev_attr_irq.attr, &dev_attr_enable.attr, NULL,
 };
 ATTRIBUTE_GROUPS(lkpi_pci_dev);
+
+/* /sys/.../config: libdrm (drmParsePciDeviceInfo) saca de aqui vendor, device,
+ * subsistema y revision; sin el, Mesa no puede elegir driver (crocus) y cae a swrast. */
+static ssize_t config_read(struct file *f, struct kobject *kobj, const struct bin_attribute *a,
+			   char *buf, loff_t off, size_t count)
+{
+	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj));
+	size_t i;
+
+	if (off >= 256)
+		return 0;
+	if (count > 256 - off)
+		count = 256 - off;
+	for (i = 0; i < count; i++) {
+		u8 v = 0;
+
+		pci_read_config_byte(pdev, off + i, &v);
+		buf[i] = v;
+	}
+	return count;
+}
+static const struct bin_attribute lkpi_pci_config_attr = {
+	.attr = { .name = "config", .mode = 0444 },
+	.size = 256,
+	.read = config_read,
+};
 
 static int lkpi_pci_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
@@ -1323,6 +1367,7 @@ static int lkpi_pci_shadow_probe(struct aurora_device *adev)
 		pci_dev_put(pdev);
 		return rc;
 	}
+	device_create_bin_file(&pdev->dev, &lkpi_pci_config_attr);
 	rc = device_driver_attach(&sh->pdrv->driver, &pdev->dev);
 	if (rc) {
 		/* El probe de Linux fallo: Aurora puede ofrecerlo a otro driver, y si

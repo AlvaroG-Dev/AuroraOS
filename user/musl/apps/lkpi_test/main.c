@@ -656,6 +656,28 @@ static void test_ttm_user(void)
 		check(ttm_check_user(p, size, 0xb0b) == 0, "ttm: el primero tambien");
 		munmap(q, g.size);
 	}
+	/* L7: vm_mmap de un fichero shmem desde un ioctl (GEM_MMAP legacy de i915) */
+	{
+		struct lkpi_ttm_vmmap vm = { .size = 64 * 1024, .seed = 0x5eed };
+		unsigned *w;
+		unsigned i, bad = 0;
+		int vrc = xioctl(fd, LKPI_TTM_IOC_VMMAP, &vm);
+
+		check(vrc == 0 && vm.addr, "vm_mmap: el ioctl mapea un fichero shmem (%d)", vrc);
+		if (vrc == 0 && vm.addr) {
+			w = (unsigned *)(uintptr_t)vm.addr;
+			for (i = 0; i < vm.size / 4; i += 61)
+				if (w[i] != (0x5eedu ^ (unsigned)(i * 2654435761U)))
+					bad++;
+			check(bad == 0, "vm_mmap: el proceso ve lo que escribio el kernel (%u malas)", bad);
+			for (i = 0; i < vm.size / 4; i++)
+				w[i] = 0xcafe ^ (unsigned)(i * 2654435761U);
+			vm.seed = 0xcafe;
+			check(xioctl(fd, LKPI_TTM_IOC_VMCHECK, &vm) == 0 && vm.bad == 0,
+			      "vm_mmap: el kernel ve lo que escribio el proceso (%d malas)", vm.bad);
+			check(xioctl(fd, LKPI_TTM_IOC_VMUNMAP, &vm) == 0, "vm_munmap");
+		}
+	}
 	/* pedir una pagina fuera del BO no es posible: el mmap debe fallar */
 	errno = 0;
 	check(mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)c.offset + (64 << 20)) == MAP_FAILED,

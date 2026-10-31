@@ -312,12 +312,12 @@ static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
 }
 static inline bool force_o_largefile(void) { return true; }
 static inline struct file *get_file_active(struct file **f) { return *f; }
-/* mmap de un fichero de otro llamante en el espacio de usuario: sin vm_mmap hasta L9 (userptr/GEM legacy). */
-static inline unsigned long vm_mmap(struct file *file, unsigned long addr, unsigned long len,
-				    unsigned long prot, unsigned long flag, unsigned long offset)
-{
-	return -ENODEV;
-}
+/* mmap de un fichero en el espacio de usuario del proceso actual (mm/mmap.c). */
+unsigned long lkpi_vm_mmap(struct file *file, unsigned long addr, unsigned long len,
+			   unsigned long prot, unsigned long flag, unsigned long offset);
+int lkpi_vm_munmap(unsigned long start, size_t len);
+#define vm_mmap lkpi_vm_mmap
+#define vm_munmap lkpi_vm_munmap
 struct vm_area_struct;
 static inline int vfs_mmap(struct file *file, struct vm_area_struct *vma) { return -ENODEV; }
 ssize_t lkpi_kernel_write(struct file *file, const void *buf, size_t count, loff_t *pos);

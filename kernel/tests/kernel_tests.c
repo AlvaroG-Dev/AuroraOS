@@ -6302,6 +6302,7 @@ REGISTER_TEST_FLAGS("sysfs: atributos dinámicos con show/store", test_sysfs_dyn
 #include "../cmdline.h"
 #include "../kur_loader.h"
 #include "../ksymtab.h"
+#include "../lkpi_boot.h"
 
 #define LKPI_DIR "/lib/modules/linuxkpi"
 
@@ -6314,7 +6315,7 @@ KEXPORT_SYMBOL(kur_test_fini_counter);
 // descargan la capa) no se ejecutan.
 static bool lkpi_boot_owned(void) {
   char v[8];
-  return cmdline_get("lkpi.load", v, sizeof(v)) != 0;
+  return cmdline_get("lkpi.load", v, sizeof(v)) != 0 || lkpi_boot_loaded();
 }
 
 static struct kur_module *lkpi_layer(void) {

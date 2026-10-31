@@ -1285,6 +1285,9 @@ static void test_ttm_shrinker(struct kt_dev *kd)
 #include <linux/fs.h>
 #include <linux/idr.h>
 #include <linux/miscdevice.h>
+#include <linux/mman.h>
+#include <linux/pagemap.h>
+#include <linux/shmem_fs.h>
 #include <linux/uaccess.h>
 #include "lkpi_test_ttm_uapi.h"
 
@@ -1293,7 +1296,14 @@ struct ktd_file {
 	struct idr bos;			/* handle -> struct kt_bo */
 	struct kt_bo *ballast[64];
 	unsigned int nballast;
+	struct file *shm;		/* L7: fichero shmem de VMMAP */
+	u64 shm_size;
 };
+
+static u32 ktd_vm_word(u32 seed, unsigned long i)
+{
+	return seed ^ (u32)(i * 2654435761U);
+}
 
 static struct ttm_placement *ktd_placement(u32 dom)
 {
@@ -1334,6 +1344,8 @@ static int ktd_release(struct inode *inode, struct file *file)
 	idr_destroy(&f->bos);
 	for (i = 0; i < f->nballast; i++)
 		kt_bo_free(f->ballast[i]);
+	if (f->shm)
+		fput(f->shm);
 	kfree(f);
 	return 0;
 }
@@ -1474,6 +1486,95 @@ static long ktd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			}
 			f->ballast[f->nballast++] = b;
 		}
+		break;
+	}
+	case LKPI_TTM_IOC_VMMAP: {
+		struct lkpi_ttm_vmmap v;
+		unsigned long addr, i, n;
+		loff_t pos = 0;
+		u32 *buf;
+
+		if (copy_from_user(&v, uarg, sizeof(v))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (f->shm || !v.size || v.size > (1u << 20)) {
+			ret = -EINVAL;
+			break;
+		}
+		v.size = PAGE_ALIGN(v.size);
+		f->shm = shmem_file_setup("ktd-vmmap", v.size, 0);
+		if (IS_ERR(f->shm)) {
+			ret = PTR_ERR(f->shm);
+			f->shm = NULL;
+			break;
+		}
+		f->shm_size = v.size;
+		buf = kvmalloc(v.size, GFP_KERNEL);
+		if (!buf) {
+			ret = -ENOMEM;
+			break;
+		}
+		n = v.size / sizeof(u32);
+		for (i = 0; i < n; i++)
+			buf[i] = ktd_vm_word(v.seed, i);
+		ret = kernel_write(f->shm, buf, v.size, &pos);
+		kvfree(buf);
+		if (ret != (long)v.size) {
+			ret = ret < 0 ? ret : -EIO;
+			break;
+		}
+		ret = 0;
+		addr = vm_mmap(f->shm, 0, v.size, PROT_READ | PROT_WRITE, MAP_SHARED, 0);
+		if (IS_ERR_VALUE(addr)) {
+			ret = (long)addr;
+			break;
+		}
+		v.addr = addr;
+		if (copy_to_user(uarg, &v, sizeof(v)))
+			ret = -EFAULT;
+		break;
+	}
+	case LKPI_TTM_IOC_VMCHECK: {
+		struct lkpi_ttm_vmmap v;
+		unsigned long i, per = PAGE_SIZE / sizeof(u32);
+		pgoff_t pg;
+
+		if (copy_from_user(&v, uarg, sizeof(v))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (!f->shm) {
+			ret = -EINVAL;
+			break;
+		}
+		v.bad = 0;
+		for (pg = 0; pg < f->shm_size >> PAGE_SHIFT; pg++) {
+			struct page *p = shmem_read_mapping_page(f->shm->f_mapping, pg);
+			u32 *w;
+
+			if (IS_ERR(p)) {
+				ret = PTR_ERR(p);
+				break;
+			}
+			w = page_address(p);
+			for (i = 0; i < per; i++)
+				if (w[i] != ktd_vm_word(v.seed, pg * per + i))
+					v.bad++;
+			put_page(p);
+		}
+		if (!ret && copy_to_user(uarg, &v, sizeof(v)))
+			ret = -EFAULT;
+		break;
+	}
+	case LKPI_TTM_IOC_VMUNMAP: {
+		struct lkpi_ttm_vmmap v;
+
+		if (copy_from_user(&v, uarg, sizeof(v))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = f->shm ? vm_munmap(v.addr, f->shm_size) : -EINVAL;
 		break;
 	}
 	default:

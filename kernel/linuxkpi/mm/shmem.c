@@ -92,8 +92,34 @@ static int shmem_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/* mmap de usuario de un fichero shmem (vm_mmap de GEM_MMAP legacy de i915). */
+static vm_fault_t shmem_fault(struct vm_fault *vmf)
+{
+	struct file *file = vmf->vma->vm_file;
+	struct folio *folio;
+
+	if (vmf->pgoff >= DIV_ROUND_UP(i_size_read(file->f_inode), PAGE_SIZE))
+		return VM_FAULT_SIGBUS;
+	folio = lkpi_shmem_read_folio(file->f_mapping, vmf->pgoff);
+	if (IS_ERR(folio))
+		return VM_FAULT_OOM;
+	vmf->page = &folio->page;	/* con la referencia de la lectura */
+	return 0;
+}
+
+static const struct vm_operations_struct shmem_vm_ops = {
+	.fault = shmem_fault,
+};
+
+static int shmem_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	vma->vm_ops = &shmem_vm_ops;
+	return 0;
+}
+
 static const struct file_operations shmem_fops = {
 	.release = shmem_release,
+	.mmap = shmem_mmap,
 	.llseek = noop_llseek,
 };
 
