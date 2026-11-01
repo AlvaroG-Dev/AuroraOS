@@ -141,6 +141,12 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 		ln -sf ../libnvidia-allocator.so.$$V $$L/gbm/nvidia-drm_gbm.so; \
 		cp -f build/nvidia/pkg/10_nvidia.json sysroot/usr/share/glvnd/egl_vendor.d/10_nvidia.json; \
 		cp -f build/nvidia/pkg/15_nvidia_gbm.json sysroot/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json; \
+		for f in libGLX_nvidia.so.$$V libnvidia-glvkspirv.so.$$V; do cp -f $$U/$$f $$L/ || exit 1; done; \
+		ln -sf libGLX_nvidia.so.$$V $$L/libGLX_nvidia.so.0; \
+		cp -af libs/glibc/lib/x86_64-linux-gnu/libvulkan.so.1* $$L/; \
+		mkdir -p sysroot/lib/x86_64-linux-gnu && cp -af libs/glibc/lib/x86_64-linux-gnu/libvulkan.so.1* sysroot/lib/x86_64-linux-gnu/; \
+		mkdir -p sysroot/usr/share/vulkan/icd.d; \
+		cp -f build/nvidia/pkg/nvidia_icd.json sysroot/usr/share/vulkan/icd.d/nvidia_icd.json; \
 		for f in libnvidia-egl-wayland.so.1.1.20 libnvidia-egl-wayland2.so.1.0.2 libnvidia-wayland-client.so.$$V; do cp -f $$U/$$f $$L/ || exit 1; done; \
 		ln -sf libnvidia-egl-wayland.so.1.1.20 $$L/libnvidia-egl-wayland.so.1; \
 		ln -sf libnvidia-egl-wayland2.so.1.0.2 $$L/libnvidia-egl-wayland2.so.1; \

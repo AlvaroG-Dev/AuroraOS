@@ -313,3 +313,7 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 **Limitaciones conocidas:** sin explicit sync (`wp_linux_drm_syncobj_v1`; wayland2 se usa con `__NV_DISABLE_EXPLICIT_SYNC=1`); egl-wayland 1.x da EGL_BAD_ACCESS (no investigado: se usa wayland2); lectura por CPU de cada frame (lento a pantalla grande); sin Vulkan (falta loader + ICD) ni GLX (glxgears); get_user_pages/pin_user_pages, /proc/driver/nvidia y nvidia-uvm siguen sin implementar.
 
 **Cambios de kernel colaterales:** `iterate_fd` real (causa del "Unknown Error" de nvidia-smi); tuberias S_IFIFO con inodo unico; `/dev/nvidia-modeset`; trazado por nombre ampliado (`[STRACE-MSG]`).
+
+### N5b (2026-11-01): Vulkan — preparado, pendiente de probar en la 4060
+- ISO: `libvulkan.so.1` (loader 1.3.275 del host, en `libs/glibc`), ICD de NVIDIA (`/usr/share/vulkan/icd.d/nvidia_icd.json` -> `libGLX_nvidia.so.0`, api 1.4.351) y `libnvidia-glvkspirv` (instalados por `make nvidia`).
+- Test `aw_vk_test` + `vk.sh [--no-wayland] [segundos]` (usa `VK_ICD_FILENAMES`, `__NV_DISABLE_EXPLICIT_SYNC=1`). Etapa 1: instancia/dispositivo/cola, `vkCmdFillBuffer` en la GPU, `vkWaitForFences` y lectura CPU (`0xcafebabe`). Etapa 2 (Wayland): `VK_KHR_wayland_surface`, swapchain y 3 cuadros de colores. Salida `[aw_vk] ...` y lineas `VK out/err` en el log del kernel.
