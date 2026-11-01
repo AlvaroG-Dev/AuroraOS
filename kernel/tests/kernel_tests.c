@@ -6683,7 +6683,7 @@ static void test_fsprobe_signatures(void) {
   TEST_ASSERT(fs_probe(&dev) == FS_FAT32, "FAT32 por BPB");
   memset(g_bc_ram, 0, SECT * NSECT);
   memcpy(g_bc_ram + 32769, "CD001", 5);
-  TEST_ASSERT(fs_probe(&dev) == FS_UNKNOWN, "iso fuera de rango (disco pequeño)");
+  TEST_ASSERT(fs_probe(&dev) == FS_ISO9660, "iso por CD001");
   kfree(g_bc_ram);
   g_bc_ram = NULL;
 }
