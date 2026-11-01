@@ -2452,6 +2452,21 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
 // tkill(tid, sig): señal dirigida a un hilo concreto (tid del hilo
 // principal = pid). BusyBox ash lo usa en job control; musl en raise() y
 // pthread_kill().
+// [U1.3] Permisos de tkill/tgkill: el hilo `tid` pertenece a un proceso cuyo
+// uid debe ser señalable por el llamante.
+static int tid_signal_allowed(uint32_t tid) {
+  process_t *target = NULL;
+  task_t *t = sched_find_tid_get(tid);
+  if (t) {
+    target = t->proc;
+    int ok = target ? process_may_signal(process_current(), target) : 1;
+    task_put(t);
+    return ok;
+  }
+  target = process_find_by_pid(tid);
+  return target ? process_may_signal(process_current(), target) : 1;
+}
+
 static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
   (void)a3;
@@ -2469,6 +2484,8 @@ static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
   }
   if (sig >= SIG_MAX)
     return -EINVAL;
+  if (!tid_signal_allowed((uint32_t)tid))
+    return -EPERM;
   return signal_send_tid((uint32_t)tid, (int)sig);
 }
 
@@ -2495,6 +2512,8 @@ static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
   }
   if (owner == 0 || owner != (uint32_t)tgid)
     return -ESRCH;
+  if (!tid_signal_allowed((uint32_t)tid))
+    return -EPERM;
   if (sig == 0)
     return 0;
   return signal_send_tid((uint32_t)tid, (int)sig);

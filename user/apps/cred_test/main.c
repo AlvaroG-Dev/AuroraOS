@@ -174,6 +174,19 @@ static void msleep(long ms) {
 }
 
 static int k_target_pid;
+static int c_chgrp_own(void *a) { return err_of(sc(SYS_chown, (long)a, -1, 1000, 0)); }
+static int c_chgrp_other(void *a) { return err_of(sc(SYS_chown, (long)a, -1, 2000, 0)); }
+static int c_chown_uid_other(void *a) { return err_of(sc(SYS_chown, (long)a, 1001, -1, 0)); }
+static int c_tgkill0(void *a) {
+  (void)a;
+  return err_of(sc(234, k_target_pid, k_target_pid, 0, 0));
+}
+static unsigned stat_mode(const char *p) {
+  unsigned char buf[144];
+  if (sc(4, (long)p, (long)buf, 0, 0) < 0)
+    return 0xffffffffu;
+  return *(unsigned *)(buf + 24);
+}
 static int c_kill0(void *a) {
   (void)a;
   return err_of(sc(SYS_kill, k_target_pid, 0, 0, 0));
@@ -264,10 +277,22 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void) {
     check("kill0_otro_uid_eperm", run_as(1000, 1000, c_kill0, 0), EPERM);
     check("kill0_mismo_uid_ok", run_as(1001, 1001, c_kill0, 0), 0);
     check("kill0_root_ok", err_of(sc(SYS_kill, a, 0, 0, 0)), 0);
+    check("tgkill0_otro_uid_eperm", run_as(1000, 1000, c_tgkill0, 0), EPERM);
     sc(SYS_kill, a, 9, 0, 0);
     int st = 0;
     sc(SYS_wait4, a, (long)&st, 0, 0);
   }
+
+  // --- U1.5: chown fino ---
+  check("dueno_cambia_grupo_a_suyo", run_as(1000, 1000, c_chgrp_own, "/tmp/ct/own1000"), 0);
+  check("dueno_no_cambia_a_grupo_ajeno", run_as(1000, 1000, c_chgrp_other, "/tmp/ct/own1000"), EPERM);
+  check("dueno_no_regala_fichero", run_as(1000, 1000, c_chown_uid_other, "/tmp/ct/own1000"), EPERM);
+  touch("/tmp/ct/suid", 04755, 0, 0);
+  sc(SYS_chmod, (long)"/tmp/ct/suid", 04755, 0, 0);
+  check("setuid_presente_antes", (long)(stat_mode("/tmp/ct/suid") & 04000), 04000);
+  sc(SYS_chown, (long)"/tmp/ct/suid", 1000, -1, 0);
+  check("chown_borra_setuid", (long)(stat_mode("/tmp/ct/suid") & 04000), 0);
+  sc(SYS_unlink, (long)"/tmp/ct/suid", 0, 0, 0);
 
   // --- U1.4: no_new_privs ---
   check("prctl_no_new_privs_set_get_herencia", run_as(1000, 1000, c_nnp, 0), 0);

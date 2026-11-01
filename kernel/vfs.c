@@ -1307,18 +1307,54 @@ int vfs_chmod(const char *path, uint32_t mode) {
   return rc;
 }
 
+// [U1.5] Reglas de chown(2) de Linux sin capabilities: root puede todo; el
+// dueño solo puede cambiar el grupo a uno al que pertenece (uid sin cambio).
+static int chown_permitted(process_t *proc, vfs_node_t *node, uint32_t uid,
+                           uint32_t gid) {
+  if (proc->euid == 0)
+    return 0;
+  if (proc->fsuid != node->uid)
+    return -EPERM;
+  if (uid != (uint32_t)-1 && uid != node->uid)
+    return -EPERM;
+  if (gid != (uint32_t)-1 && gid != node->gid) {
+    int ok = (gid == proc->fsgid || gid == proc->egid || gid == proc->gid);
+    for (int i = 0; !ok && i < proc->ngroups; i++)
+      ok = (proc->groups[i] == gid);
+    if (!ok)
+      return -EPERM;
+  }
+  return 0;
+}
+
+// Un chown con éxito sobre un fichero regular borra setuid (y setgid si hay
+// bit de ejecución de grupo), como Linux.
+static void chown_clear_suid(vfs_node_t *node) {
+  if ((node->mode & S_IFMT) != S_IFREG)
+    return;
+  uint32_t clear = S_ISUID;
+  if (node->mode & 0010)
+    clear |= S_ISGID;
+  if (!(node->mode & clear))
+    return;
+  uint32_t nm = node->mode & 07777 & ~clear;
+  if (node->ops && node->ops->chmod && node->ops->chmod(node, nm) == 0)
+    node->mode = (node->mode & S_IFMT) | nm;
+}
+
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
 
-  // Solo root puede cambiar el owner en Aurora (sin CAP_CHOWN por ahora).
-  if (proc->euid != 0)
-    return -EPERM;
-
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node)
     return -ENOENT;
+  int perm = chown_permitted(proc, node, uid, gid);
+  if (perm != 0) {
+    vfs_node_free(node);
+    return perm;
+  }
 
   if (!node->ops || !node->ops->chown) {
     vfs_node_free(node);
@@ -1330,6 +1366,7 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
       node->uid = uid;
     if (gid != (uint32_t)-1)
       node->gid = gid;
+    chown_clear_suid(node);
   }
   vfs_node_free(node);
   return rc;
@@ -1366,8 +1403,11 @@ int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
   if (!f || !f->node)
     return -EBADF;
   process_t *proc = process_current();
-  if (!proc || proc->euid != 0)
+  if (!proc)
     return -EPERM;
+  int perm = chown_permitted(proc, f->node, uid, gid);
+  if (perm != 0)
+    return perm;
 
   if (!f->node->ops || !f->node->ops->chown)
     return -EROFS;
@@ -1377,6 +1417,7 @@ int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
       f->node->uid = uid;
     if (gid != (uint32_t)-1)
       f->node->gid = gid;
+    chown_clear_suid(f->node);
   }
   return rc;
 }
