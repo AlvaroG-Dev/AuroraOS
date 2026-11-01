@@ -1155,7 +1155,7 @@ _AUR_ARGS_$(notdir $(1)) := $(strip $(shell grep -m1 '^AUR_ARGS' $(1)/config.mk 
 
 $(1)/$(notdir $(1)).elf: $(wildcard $(1)/*.c)
 	@echo "[AUR-CC] $(notdir $(1))"
-	@$(AUR_CC) -O2 -fno-stack-protector -o $$@ $$^
+	@$(AUR_CC) -std=gnu11 -O2 -fno-stack-protector -o $$@ $$^
 
 $(1)/$(notdir $(1)).aur: $(1)/$(notdir $(1)).elf $(1)/config.mk tools/aurbuild
 	@echo "[AURBUILD] $(notdir $(1))"
