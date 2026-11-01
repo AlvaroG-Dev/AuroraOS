@@ -53,7 +53,7 @@ Dos niveles, porque no cuestan lo mismo:
 | Límites por proceso | `MAX_PROCESS_FDS=256`; pila 8 MiB; `rlimits[16]` por proceso | Suficiente salvo `make -jN` con jobserver y `ld` con muchos objetos; subir a 1024 es trivial. |
 | **`VFS_PATH_MAX = 128`** | Ruta completa (cwd, `node->name`, `exe_path`) y nombre de dirent, en `kernel/vfs.h:60` | **Bloqueo duro.** Rutas como `/data/build/gcc-13.3.0/x86_64-linux-gnu/libstdc++-v3/include/bits/…` superan 128 bytes; GCC, glibc y el árbol de fuentes de `kernel/` también. Hace falta `PATH_MAX=4096`. `Plan_Ext2.md` D5 lo deja fuera; aquí pasa a ser **requisito**. |
 | `rename` | `vfs_rename` **no sobrescribe** (`-EEXIST`) según `Plan_Ext2.md` §1 | **Bloqueo duro.** `ld`, `ar`, `as`, `make`, `mv`, `install`, `config.status` y `libtool` dependen de reemplazar ficheros. |
-| `uname` | `sysname = "Aurora"` (`kernel/syscall.c:2257`) | `config.guess` de autoconf **falla** con SO desconocido. Hay que pasar siempre `--build=` y `--host=` (§3), o decidir D3. |
+| `uname` | `sysname = "Aurora"` (`kernel/syscall.c:2257`) | Se mantiene: con el triplete propio `config.guess` lo reconocerá (§2.2). Hasta entonces, pasar `--build=`/`--host=`. |
 | `/tmp` | tmpfs de **64 MB** (`kernel/tmpfs.c:1001`), `/var` 16 MB, `/run` 4 MB, `/etc` 4 MB; todo en RAM | `cc1` para ficheros grandes, `-flto`, `ar`/`ld` intermedios y `tar` ya no caben; usar `TMPDIR` en disco. |
 | Memoria virtual | `mmap`/`mremap`/`mprotect`/`madvise` presentes; `mmap_race`, `vma_*` tests | `cc1plus`/`lto1` piden cientos de MB de VA y RSS de 0,5–2 GB para compilar GCC (§4.3). **[por medir]** |
 | Almacenamiento | FAT32 RW con LFN, sin symlinks, sin hard links reales, sin propietarios/modos (modos solo en RAM), mtime en segundos, `/data` por defecto de 64 MB (`USB_DATA_MB`), buffer cache de 256×512 B (`fat32.c`), sync diferido | Insuficiente para un build real, sobre todo por los symlinks y el espacio (§4.4). |
@@ -63,16 +63,38 @@ Dos niveles, porque no cuestan lo mismo:
 
 ---
 
-## 2. Decisión de fondo: triplete y libc
+## 2. Decisión de fondo: triplete propio `x86_64-pc-aurora-gnu`
 
-**Recomendación: `x86_64-linux-gnu` (con glibc 2.39), sin triplete propio ni parches a GCC/binutils.**
+**Decisión de Alvaro (2026-11-01): AuroraOS tiene su propio triplete y el toolchain se identifica como AuroraOS, no como Linux.** Triplete: **`x86_64-pc-aurora-gnu`** (kernel `aurora`, libc `gnu` = glibc; mismo esquema que `x86_64-pc-kfreebsd-gnu`, que `config.sub` ya sabe leer). Alternativa más corta: `x86_64-aurora` (os=`aurora`, libc implícita).
 
-- AuroraOS ya es un SO *binario-compatible con Linux/glibc*; así lo exige la mitad del userland. Un triplete `x86_64-aurora` obligaría a mantener parches en GCC, binutils, glibc, libstdc++, libtool, config.sub… durante cada actualización, y a recompilar toda la pila de terceros. No aporta nada: el compilador no distingue SOs más que para cabeceras, rutas del enlazador dinámico y `crt*.o`, y esos son los de Linux.
-- Para identificar la procedencia se puede usar un **vendor propio** que `config.sub` acepta sin parches: `x86_64-aurora-linux-gnu` (por ejemplo para `--host`). Es cosmético; los directorios de GCC (`lib/gcc/<triplete>/13.3.0`) llevarían ese nombre. Recomiendo `x86_64-pc-linux-gnu` / `x86_64-linux-gnu` para el *target* (así la libgcc y libstdc++ del Ubuntu 24.04 siguen siendo válidas, y los binarios producidos son idénticos a los del host), y `aurora` solo si se quiere distinguir en `--host` de los *canadian cross* (§5).
+### 2.1 Qué cambia y qué NO cambia
+
+- **No cambia la ABI en ejecución.** Los binarios siguen siendo ELF x86-64 que llaman a la glibc 2.39 precompilada y al kernel por syscalls Linux. El triplete solo afecta a las **herramientas** (rutas, macros predefinidas, nombres). Por eso glibc, Perl, Python, Wayland… precompilados siguen funcionando sin recompilar.
+- **Sí cambia la identidad visible:** `gcc -dumpmachine` → `x86_64-pc-aurora-gnu`; `gcc -dM -E` define `__aurora__` (y `__AURORAOS__`); rutas `/opt/aurora-tc/lib/gcc/x86_64-pc-aurora-gnu/13.3.0`; `uname -s` = `Aurora` (se mantiene); `/etc/os-release` con `ID=aurora`.
+- **Compatibilidad de macros (decisión D3):** muchos programas usan `#ifdef __linux__` para elegir código que AuroraOS sí soporta (epoll, `/proc`, `getrandom`…). Recomiendo que el GCC de AuroraOS defina **`__aurora__` y además `__linux__`/`__gnu_linux__`/`__unix__`** (igual que otros derivados que reutilizan la ABI), de modo que el protagonismo de la marca sea de Aurora en nombre, triplete y herramientas, pero el software ajeno compile sin parchear. La alternativa (no definir `__linux__`) obliga a parchear cada paquete de terceros.
+
+### 2.2 Parches pequeños necesarios (lista cerrada)
+
+Todos son adiciones mínimas copiando lo que ya existe para `linux-gnu`; ninguno toca el generador de código. Se guardan como `patches/` en el repo, versionados por paquete:
+
+| Paquete | Ficheros | Cambio |
+|---|---|---|
+| **config.sub / config.guess** (copia común, usada por todos) | `config.sub`, `config.guess` | Aceptar `aurora*` como kernel/OS; `config.guess` devuelve `x86_64-pc-aurora-gnu` si `uname -s` = `Aurora`. Una única copia mantenida en `third_party/aurora-config/` y un script `scripts/aurora-autoreconf.sh` que la copia sobre cualquier árbol de fuentes antes de `configure`. |
+| **binutils** | `bfd/config.bfd`, `gas/configure.tgt`, `ld/configure.tgt`, `ld/emulparams/` | Nueva fila `x86_64-*-aurora*` que reutiliza `elf_x86_64` (y `elf_i386`) y los mismos `targ_defvec`. Ruta del cargador por defecto `/lib64/ld-linux-x86-64.so.2` sin cambios. |
+| **GCC** | `gcc/config.gcc`, nuevo `gcc/config/aurora.h`, `gcc/config/i386/aurora64.h`, `libgcc/config.host`, `fixincludes/mkfixinc.sh`, `libstdc++-v3/configure.host`, `libgomp`/`libatomic` hosts | `aurora.h` incluye `gnu-user.h`/`linux.h` (y por tanto `crt1.o`, `ld.so`, `libc.so` como hoy) y añade `-D__aurora__ -D__AURORAOS__` y la identidad `TARGET_OS_CPP_BUILTINS`. `libstdc++` usa `config/os/gnu-linux`. |
+| **glibc** | **ninguno** mientras use la precompilada de Ubuntu | Si algún día se recompila glibc, habrá que parchear `sysdeps/` (su configure detecta `linux`); se pospone (fuera de alcance). |
+| **autoconf generados de terceros** | `configure` de cada paquete | Se resuelve con la copia común de `config.sub`; para los pocos que prueban `*-linux*` en sus `configure.ac` (p. ej. libtool, `ltmain.sh`) se añade `*-aurora*` por `sed`. Lista a mantener en `docs/Paquetes_Aurora.md`. |
+| **libtool** | `ltmain.sh`/`libtool.m4` | Tratar `aurora*` como `linux*` (soname versioning, `-rpath`). Es la fuente habitual de enlazado estático "silencioso"; hay que probar `.so.N.M` en G3. |
+| **make, bash, coreutils, tar, sed…** | solo `config.sub/guess` | Nada más. |
+| **kernel** | `uname` ya es "Aurora" | `sysctl kernel.ostype=Aurora`, `/proc/version` y `/etc/os-release` coherentes. |
+
+### 2.3 Coste y riesgos de esta decisión (en claro)
+
+- Cada paquete nuevo que se quiera compilar dentro de AuroraOS necesita el paso de **config.sub/guess** (automatizado) y, ocasionalmente, un `sed` a su `configure`. Con `--build=x86_64-pc-aurora-gnu` explícito se evita `config.guess`, pero `config.sub` debe conocer `aurora`.
+- Paquetes con `case $host in *-linux*)` en `configure.ac`/`meson.build`/`CMake` (p. ej. algunos con detección de `epoll`, `-ldl`, versiones de símbolos, `-Wl,--version-script`) pueden caer a una rama genérica y compilar sin una característica. Mitigación: tabla de excepciones y una prueba por paquete; si hay muchos, el atajo es pasar `--host=x86_64-pc-linux-gnu` solo para esos paquetes (se documenta como excepción, no como norma).
+- Los binarios Ubuntu del Escalón A (G2) siguen identificándose como `x86_64-linux-gnu` (rutas `lib/gcc/x86_64-linux-gnu/13`). Está bien: es la fase de pruebas del kernel. El renombrado a `aurora` llega con el toolchain propio (G5). Mientras tanto se enlaza `lib/gcc/x86_64-pc-aurora-gnu → x86_64-linux-gnu` si hace falta.
+- Mantener parches en GCC 13.x implica rehacerlos al subir de versión (pocos ficheros; el diff estimado es de < 300 líneas entre GCC, binutils y config.sub). Fijar GCC 13.3 y binutils 2.42 hasta nuevo aviso.
 - **No** musl y **no** busybox (decisión previa del proyecto). El `toolchain/x86_64-linux-musl-cross` de 287 MB queda solo para lo musl que exista (tcc); puede retirarse cuando tcc deje de ser necesario (G9).
-- **`uname -s`:** ver decisión D3. Sea cual sea, el plan siempre pasa `--build`/`--host` explícitos.
-
----
 
 ## 3. Qué hay que llevar a AuroraOS (inventario)
 
@@ -120,7 +142,7 @@ LLVM/Mesa, Qt, GTK, Weston, Xwayland, Wayland, ICD de Vulkan, NVIDIA open-gpu-ke
 | K3 | symlinks y hard links persistentes en el disco de trabajo | `libstdc++.so.6 → …6.0.32`, `cc → gcc`, `libtool`, `make install`, glibc | los da ext2 (E3) |
 | K4 | `/tmp` grande o `TMPDIR` en disco; subir `tmpfs` de `/tmp` a ≥ 25 % de la RAM (dinámico) o 512 MB | `cc1`, `ld`, `ar`, `tar` | S |
 | K5 | `MAX_PROCESS_FDS` → 1024 y `RLIMIT_NOFILE` coherente | `make -j`, `ld` | S |
-| K6 | `uname` / `config.guess` (D3) | autoconf | S |
+| K6 | `config.sub`/`config.guess` con `aurora` (§2.2) y `ostype`/`os-release` coherentes | autoconf | S |
 
 ### 4.2 Muy recomendables (rendimiento y robustez)
 
@@ -173,7 +195,7 @@ Tres escalones; cada uno es un hito con prueba objetiva.
 
 **Escalón A — usar las herramientas de Ubuntu tal cual (G0–G3).** Como AuroraOS ya ejecuta binarios Linux/glibc, se copian al disco de herramientas los `.deb` ya compilados (`gcc-13`, `binutils`, `make`, `libc6-dev`, `libstdc++-13-dev`, `linux-libc-dev`, gmp/mpfr/mpc/isl) con una variante de `scripts/fetch-bin.sh` (`scripts/fetch-devtools.sh`, que use `apt-get download` + `dpkg -x` sin root, como ya hace `fetch-wayland.sh`). Esto prueba el kernel con el compilador más exigente imaginable **sin escribir un solo parche de toolchain**. Es también el plan B que siempre funciona.
 
-**Escalón B — construir en el host un toolchain propio que corra en AuroraOS (G4–G5).** Es el *cross* con `--host=x86_64-aurora-linux-gnu` (§2). Como el ABI es el mismo que `x86_64-linux-gnu`, no hace falta un cross-compilador real: basta un **GCC del host con `--build=x86_64-pc-linux-gnu --host=x86_64-aurora-linux-gnu --target=x86_64-aurora-linux-gnu`** (el host acepta el triplete porque `config.sub` conoce `linux-gnu`; si no, usar `x86_64-pc-linux-gnu`). Sirve para: (1) fijar versiones exactas y flags (`--disable-multilib`, `--with-sysroot=/`, `--enable-languages=c,c++`, `--disable-nls`, `--disable-libsanitizer`, `--enable-default-pie`, `--with-system-zlib`), (2) generar un tarball reproducible `aurora-toolchain-13.3.0.tar.xz` independiente de la versión de Ubuntu, (3) tener un binario de referencia contra el que comparar (§8).
+**Escalón B — construir en el host un toolchain propio que corra en AuroraOS (G4–G5).** Con el triplete propio (§2) esto **sí es un cross-compilador real**: en el host se compila binutils+GCC parcheados con `--build=x86_64-pc-linux-gnu --host=x86_64-pc-aurora-gnu --target=x86_64-pc-aurora-gnu --with-sysroot=<sysroot AuroraOS>`. Como la ABI de ejecución es la de glibc/Linux, el resultado corre en AuroraOS y es el primer toolchain "Aurora" de verdad. Sirve para: (1) fijar versiones exactas y flags (`--disable-multilib`, `--with-sysroot=/`, `--enable-languages=c,c++`, `--disable-nls`, `--disable-libsanitizer`, `--enable-default-pie`, `--with-system-zlib`), (2) generar un tarball reproducible `aurora-toolchain-13.3.0.tar.xz` independiente de la versión de Ubuntu, (3) tener un binario de referencia contra el que comparar (§8).
 
 **Escalón C — que AuroraOS se compile a sí misma (G5–G8).**
 
@@ -188,7 +210,7 @@ AuroraOS:                          gcc nativo compila ──► kernel + userlan
 AuroraOS:                          xorriso/mtools/mkfs.fat ──► aurora.iso
 ```
 
-- **No hace falta canadian cross de verdad** (build ≠ host ≠ target). Como el host de desarrollo y AuroraOS comparten ABI, un build normal en el host con `--host=x86_64-pc-linux-gnu` produce binarios que corren en AuroraOS. El canadian cross solo se usaría si algún día se cambia de triplete (D1), y se dejaría documentado, no implementado.
+- **Con triplete propio hace falta un cross (Escalón B) y, para dejar de depender del host, un canadian cross:** `--build=x86_64-pc-linux-gnu --host=x86_64-pc-aurora-gnu --target=x86_64-pc-aurora-gnu` produce el GCC nativo de AuroraOS (stage0); ese stage0, ya dentro de AuroraOS, compila stage1/2/3 con `--build=--host=--target=x86_64-pc-aurora-gnu`. Es más trabajo que antes, pero es lo que da identidad propia.
 - Bootstrap de 3 etapas dentro de AuroraOS (`make bootstrap`) cuesta ~3× una compilación normal (en un i7-12700KF con KVM: GCC completo ≈ 20–40 min a -j8 en Linux; **dentro de AuroraOS contar 2–5× más** por el coste de `fork`/FS, todo **[por medir]**). Para el día a día: `--disable-bootstrap` y un solo `make`. El bootstrap completo se hace en el hito de validación, no en cada CI.
 - Reproducibilidad: `SOURCE_DATE_EPOCH`, `-ffile-prefix-map`, `-fdebug-prefix-map`, rutas de build idénticas (`/work/build`) en host y AuroraOS, `LC_ALL=C`, y `--disable-nls`. Sin eso la comparación binaria (§8) falla por rutas y fechas.
 
@@ -227,7 +249,7 @@ Hito **H1**: `gcc hello.c -o hello && ./hello` dentro de AuroraOS.
 Hito **H2**: compilador nativo estable. Sustituye el disco de herramientas por ext2 (symlinks, hard links, modos) y el disco de trabajo `/work` por ext2.
 
 - G3.1 `mke2fs -t ext2 -I 256` en el host; `fetch-devtools.sh` genera la imagen con `debugfs`/`mke2fs -d` (sin root).
-- G3.2 Tests de `autoconf`: `sh configure` de un paquete pequeño (`zlib`, `make`, `sed`) con salida a `/work`. Debe pasar sin `config.guess` manual (D3 resuelto).
+- G3.2 Tests de `autoconf`: `sh configure` de un paquete pequeño (`zlib`, `make`, `sed`) con salida a `/work`. Debe pasar sin `config.guess` manual (config.sub/guess con `aurora`, §2.2).
 - G3.3 **Compilar `make` 4.4 con el gcc nativo**, instalar en `/usr/local`, usarlo para compilar un segundo `make` (Hito **H3**). Compararlo contra el compilado en el host (§8).
 - G3.4 Ídem `gzip`, `sed`, `tar`, `bash` (H3 ampliado): sirven de test de regresión del kernel y se añaden a la smoke suite.
 
@@ -327,7 +349,7 @@ Para que la ISO "completa" sea reproducible sin red, el Makefile ya guarda los b
 | RAM insuficiente (initrd 500 MB en RAM + tmpfs + build) | media | cuelgues no deterministas | 8 GB para H5/H6, `TMPDIR` en disco, probar OOM en G1.3 |
 | Bugs de concurrencia (futex, `mmap_race`, señales) que se manifiestan sólo con 10 000 procesos | media | fallos esporádicos del build | `make -j1` primero, luego -jN; cada fallo → test mínimo; revisar `ref_count` no atómico anotado en `TODO.md` |
 | mtime con resolución de 1–2 s | media | `make` no reconstruye / reconstruye mal | ext2 inodos 256 B + `utimensat` ns; `touch` explícitos; `.NOTPARALLEL` temporal |
-| `config.guess` / `uname` "Aurora" | segura | `configure` aborta | D3; mientras tanto `--build=`/`--host=` siempre |
+| `config.sub`/`config.guess` no conocen `aurora` en cada paquete | segura | `configure` aborta o cae a rama genérica | copia común de config.sub/guess + `scripts/aurora-autoreconf.sh`; tabla de excepciones (§2.3) |
 | Conflicto de cabeceras musl/glibc en `/usr/include` | segura | `gcc` usa cabeceras equivocadas | G0.2 |
 | `lto1`/bootstrap necesitan > 4 GB | media | OOM | `--disable-lto`, `-j1`/`-j2`, swap (si `swap.c` sirve) o más RAM |
 | ext2 no listo a tiempo | media | G3+ bloqueados | G0–G2 progresan igual; el sidecar de DU1 **no** sirve para symlinks, no usarlo como puente aquí |
@@ -371,9 +393,9 @@ Estimación gruesa (una persona + asistente, sin contar `Plan_Ext2`): G0–G2 �
 
 | # | Decisión | Opciones | Recomendación |
 |---|---|---|---|
-| **D1** | Triplete | (a) `x86_64-linux-gnu` sin parches; (b) triplete propio `x86_64-aurora` con parches a GCC/binutils/glibc | **(a)**, con vendor opcional `x86_64-aurora-linux-gnu` solo cosmético. |
+| **D1** | Triplete | **Decidido por Alvaro:** propio, `x86_64-pc-aurora-gnu` (alternativa `x86_64-aurora`), con parches pequeños (§2.2) | Confirmar el nombre exacto; recomiendo `x86_64-pc-aurora-gnu`. |
 | **D2** | Primer escalón | (a) usar `.deb` de Ubuntu (Escalón A) hasta H4 y construir el propio después; (b) construir desde el principio un toolchain propio en el host | **(a):** rápido y prueba el kernel de inmediato; (b) llega después como H5 igualmente. |
-| **D3** | `uname -s` | (a) mantener "Aurora" y pasar `--build/--host` siempre; (b) devolver "Linux" (con `/proc/sys/kernel/ostype` y `/etc/os-release` identificando AuroraOS); (c) "Linux" solo para procesos con un flag/entorno | **(b)**: glibc, autoconf, Python (`platform`), Perl y muchos scripts asumen "Linux"; hoy se arreglan caso a caso con `--build`. Identidad: `NAME="AuroraOS"` en `/etc/os-release`, `nodename` y `release` propios. |
+| **D3** | Macros predefinidas y `uname` | (a) solo `__aurora__`, sin `__linux__` (parchear terceros); (b) `__aurora__` **y** `__linux__`/`__gnu_linux__` (compat); `uname -s` sigue siendo "Aurora" en ambos | **(b)**: marca propia visible, sin parchear cada paquete. `uname` se mantiene "Aurora" porque ahora `config.sub/guess` lo entienden. |
 | **D4** | Dónde vive el toolchain | (a) en el initrd (+300 MB de RAM); (b) disco/partición aparte `aurora-devtools.img`; (c) tarball extraído en `/work` | **(b)**. El initrd ya es de 500 MB en RAM. |
 | **D5** | Sistema de ficheros del disco de trabajo | (a) FAT32 (solo H1); (b) ext2 (`Plan_Ext2` E3); (c) esperar a ext4 | **(b)**; FAT32 sirve únicamente para H1. Hacer E0–E3 del plan ext2 **antes** de G3, y K1 (`VFS_PATH_MAX`) dentro de E0. |
 | **D6** | Qué hacer con `user/musl` y `tcc` | (a) mantenerlos con el toolchain musl (llevarlo a la ISO de desarrollo); (b) migrarlos a glibc y retirar musl-cross | **(b)** a largo plazo (G9); (a) mientras tanto. El plan no necesita musl. |
