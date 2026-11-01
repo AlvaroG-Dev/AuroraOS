@@ -122,6 +122,15 @@ void ipi_handler_tlb(void) {
   tlb_service();
 }
 
+void ipi_halt_others(void) {
+  if (!smp_boot_params || smp_boot_params->aps_ready == 0)
+    return;
+  ipi_send_allbutself(IPI_VECTOR_HALT);
+  // Margen para que los APs entren en el handler (~1 ms).
+  for (int i = 0; i < 1000; i++)
+    __asm__ volatile("outb %%al, $0x80" : : "a"(0));
+}
+
 // [H3] TLB shootdown cross-CPU.
 void ipi_tlb_shootdown(uint64_t addr) {
   // smp_processor_id() debe ser estable mientras dura el protocolo:

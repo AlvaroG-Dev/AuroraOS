@@ -11,6 +11,7 @@
 #include "efi_rt.h"
 #include "fat32.h"
 #include "io.h"
+#include "ipi.h"
 #include "klog.h"
 #include "kthread.h"
 #include "serial.h"
@@ -292,6 +293,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   call_notifiers(action, POWER_PHASE_DEVICES);
 
   __asm__ volatile("cli");
+  ipi_halt_others(); // los APs paran antes del paso final
   call_notifiers(action, POWER_PHASE_FINAL);
   LOG_INFO("[POWER] ejecutando %s", name);
 
