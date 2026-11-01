@@ -34,15 +34,18 @@ PY
 
 patch_guess() {
     local f=$1
-    grep -q 'x86_64-pc-aurora-gnu' "$f" && return 0
-    python3 -I - "$f" <<'PY'
+    grep -q 'x86_64:Aurora:' "$f" && return 0
+    # Dos niveles (decision de Alvaro): a los terceros se les da el triplete
+    # linux (su libtool solo conoce linux*); el toolchain propio usa aurora
+    # (AURORA_GUESS=x86_64-pc-aurora-gnu).
+    python3 -I - "$f" "${AURORA_GUESS:-x86_64-pc-linux-gnu}" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
 m = "    aarch64:Linux:*:*)"
 if m not in s:
     sys.exit("config.guess inesperado (version no soportada): " + p)
-add = "    x86_64:Aurora:*:*)\n\tGUESS=x86_64-pc-aurora-gnu\n\t;;\n"
+add = "    x86_64:Aurora:*:*)\n\tGUESS=" + sys.argv[2] + "\n\t;;\n"
 s = s.replace(m, add + m, 1)
 open(p, "w").write(s)
 PY
@@ -51,7 +54,7 @@ PY
 if [ "${1:-}" = "--selftest" ]; then
     t=$(mktemp -d)
     cp /usr/share/misc/config.sub /usr/share/misc/config.guess "$t/"
-    patch_sub "$t/config.sub"; patch_guess "$t/config.guess"
+    patch_sub "$t/config.sub"; AURORA_GUESS=x86_64-pc-aurora-gnu patch_guess "$t/config.guess"
     r=$(sh "$t/config.sub" x86_64-pc-aurora-gnu)
     [ "$r" = "x86_64-pc-aurora-gnu" ] || { echo "FALLO config.sub: $r"; exit 1; }
     sh "$t/config.sub" x86_64-pc-linux-gnu >/dev/null || { echo "FALLO: linux-gnu roto"; exit 1; }

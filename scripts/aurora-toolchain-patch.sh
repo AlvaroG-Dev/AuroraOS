@@ -27,6 +27,7 @@ PY
 }
 
 # --- config.sub / config.guess en ambos arboles ------------------------------
+export AURORA_GUESS=x86_64-pc-aurora-gnu
 "$ROOT/scripts/aurora-config-sub.sh" "$BU" >/dev/null
 "$ROOT/scripts/aurora-config-sub.sh" "$GCC" >/dev/null
 
