@@ -69,3 +69,7 @@ scripts/__pycache__/
 # Dependencias de cabeceras del kernel (-MMD)
 *.d
 kernel/.deps-stamp
+
+# Imagenes y salidas de las pruebas ext2
+build/ext2-*/
+build/mbr_part2.hex
