@@ -25,6 +25,7 @@
 #include "cpu.h"
 #include "driver.h"
 #include "elf.h"
+#include "bcache.h"
 #include "fat32.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
@@ -371,6 +372,7 @@ static int vfs_init_task(void *arg) {
 
   LOG_INFO("[INIT] VFS...");
   vfs_init();
+  bc_init();
 
   LOG_INFO("[INIT] IPC...");
   ipc_init();
