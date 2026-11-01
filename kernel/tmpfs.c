@@ -927,6 +927,9 @@ static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n", NULL, 0},
     {"/etc/group", "root:x:0:\n", NULL, 0},
     {"/etc/shadow", "root:*:19000:0:99999:7:::\n", NULL, 0},
+    {"/etc/shells", "/bin/sh\n/bin/bash\n", NULL, 0},
+    {"/etc/sudo-nopasswd", "# sudo sin contrasena para wheel (LiveUSB)\n", NULL, 0},
+    {"/etc/skel/.profile", "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n", NULL, 0},
     {"/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n", NULL, 0},
     {"/etc/resolv.conf", "", NULL, 0},
     {"/etc/profile", "# /etc/profile\n", NULL, 0},
@@ -1074,6 +1077,7 @@ void tmpfs_init(void) {
       // tmpfs_create no crea directorios padre. Los seeds anidados
       // (hoy solo /etc/ssl/certs/ca-certificates.crt) necesitan que
       // su cadena de padres exista antes del loop.
+      vfs_mkdir("/etc/skel", 0755);
       vfs_mkdir("/etc/ssl", 0755);
       vfs_mkdir("/etc/ssl/certs", 0755);
       int seeded = 0, from_tar = 0;

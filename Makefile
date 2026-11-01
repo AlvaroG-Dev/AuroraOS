@@ -355,6 +355,11 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	fi
 
 # ---------------------------------------------------------------------------
+# Herramientas de cuentas (login, su, passwd, useradd, sudo) sobre glibc.
+# ---------------------------------------------------------------------------
+	@scripts/build-users.sh
+
+# ---------------------------------------------------------------------------
 # Git HTTP(S) transport helper.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando helper HTTP(S) de Git..."
