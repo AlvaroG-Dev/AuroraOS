@@ -6226,10 +6226,10 @@ static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  // No tenemos write-back cache: FAT32 sincroniza en cada write,
-  // tarfs es RO, procfs/sysfs/devfs no escriben a disco. No hay nada
-  // que volcar. Devolver 0 es correcto (Linux también lo hace en
-  // sistemas sin dirty pages).
+  // [U2] FAT32 mantiene sync diferido y la tabla de metadatos POSIX
+  // (.aurora-meta): sync(2) vuelca ambos. El resto de FS no tiene nada
+  // pendiente (tarfs RO, procfs/sysfs/devfs/tmpfs sin disco).
+  fat32_sync_all();
   return 0;
 }
 

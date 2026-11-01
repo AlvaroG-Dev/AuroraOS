@@ -11,6 +11,8 @@
 #include "fat32.h"
 #include "heap.h"
 #include "klog.h"
+#include "process.h"
+#include "vfs.h"
 #include "rtc.h"
 #include "sched.h"
 #include "spinlock.h"
@@ -153,6 +155,17 @@ static void fat32_mutex_unlock(fat32_mutex_t *m) {
   wake_up_all(&m->waiters);
 }
 
+// [U2] Entrada de metadatos (32 bytes, también formato en disco).
+struct fat32_meta_ent {
+  uint64_t lba;
+  uint32_t off;
+  uint32_t mode; // 07777
+  uint32_t uid;
+  uint32_t gid;
+  uint32_t is_dir;
+  uint32_t pad;
+};
+
 typedef struct {
   block_device_t *bdev;
   fat32_mutex_t lock;
@@ -181,17 +194,14 @@ typedef struct {
   int use_second_fat;
   uint32_t fs_info_sector;
 
-  // [3.4.c] Mapa temporal de modos en RAM, indexado por la posición
-  // física del short entry (dirent_lba, dirent_off). FAT32 no tiene
-  // campo de modo, así que guardamos aquí lo que el proceso pidió en
-  // create/mkdir. Se pierde al desmontar (y no debería persistir —
-  // Linux vfat hace lo mismo sin máscaras).
-  struct {
-    uint64_t lba;
-    uint32_t off;
-    uint32_t mode;
-  } ram_modes[128];
-  int ram_modes_n;
+  // [U2] Metadatos POSIX (modo, uid, gid) indexados por la posición física
+  // del short entry (dirent_lba, dirent_off). FAT32 no los tiene; se
+  // persisten en <mount>/.aurora-meta (fat32_meta_flush / fat32_meta_load).
+  struct fat32_meta_ent *meta;
+  int meta_n, meta_cap;
+  int meta_dirty;
+  int meta_busy; // flush/load en curso: no marcar sucio
+  char mount_path[64];
   // [B] Buffer cache de sectores de datos. NULL si la asignación falló
   // al montar (fallback a bdev_* directo).
   struct fat32_bcache *bcache;
@@ -268,9 +278,12 @@ static vfs_ops_t fat32_node_ops;
 static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
                         const char *src_name, uint32_t dst_parent_cluster,
                         const char *dst_name);
-static void fat32_ram_mode_set(fat32_fs_t *fs, uint64_t lba, uint32_t off,
-                               uint32_t mode);
-static uint32_t fat32_ram_mode_get(fat32_fs_t *fs, uint64_t lba, uint32_t off);
+static void fat32_meta_set_full(fat32_fs_t *fs, uint64_t lba, uint32_t off,
+                                uint32_t mode, uint32_t uid, uint32_t gid,
+                                int is_dir);
+static struct fat32_meta_ent *fat32_meta_find(fat32_fs_t *fs, uint64_t lba,
+                                              uint32_t off);
+static int fat32_meta_flush(fat32_fs_t *fs);
 static void fat32_ram_mode_del(fat32_fs_t *fs, uint64_t lba, uint32_t off);
 static int fat32_rename_find_cb(const char *name, const struct fat32_dirent *e,
                                 uint64_t lba, uint32_t off,
@@ -1222,6 +1235,7 @@ int fat32_sync(void *fs_priv) {
   if (!fs_priv)
     return -EINVAL;
   fat32_fs_t *fs = (fat32_fs_t *)fs_priv;
+  (void)fat32_meta_flush(fs); // [U2] antes de volcar la FAT y los datos
   fat32_mutex_lock(&fs->lock);
   int rc = fat32_sync_full_locked(fs);
   fat32_mutex_unlock(&fs->lock);
@@ -2737,7 +2751,9 @@ static int fat32_create_entry(fat32_fs_t *fs, uint32_t parent_cluster,
     uint64_t short_lba = cluster_to_sector(fs, slot_cluster) +
                          short_off_in_cluster / fs->bytes_per_sector;
     uint32_t short_off = short_off_in_cluster % fs->bytes_per_sector;
-    fat32_ram_mode_set(fs, short_lba, short_off, mode & 07777);
+    process_t *cp = process_current();
+    fat32_meta_set_full(fs, short_lba, short_off, mode & 07777,
+                        cp ? cp->fsuid : 0, cp ? cp->fsgid : 0, is_dir);
   }
 
   // Persist the newly written directory entries before reporting success.
@@ -3124,13 +3140,18 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
   // [3.4.c] Preservar el modo RAM del src en el dst.
   // Calculamos la posición física del nuevo short entry y copiamos.
   {
-    uint32_t old_mode = fat32_ram_mode_get(fs, src.short_lba, src.short_off);
+    struct fat32_meta_ent old_e;
+    struct fat32_meta_ent *oe = fat32_meta_find(fs, src.short_lba, src.short_off);
+    uint32_t old_mode = oe ? oe->mode : 0;
+    if (oe)
+      old_e = *oe;
     if (old_mode != 0) {
       uint32_t new_off_in_cluster = slot_off + (uint32_t)lfn_count * 32;
       uint64_t new_lba = cluster_to_sector(fs, slot_cluster) +
                          new_off_in_cluster / fs->bytes_per_sector;
       uint32_t new_off = new_off_in_cluster % fs->bytes_per_sector;
-      fat32_ram_mode_set(fs, new_lba, new_off, old_mode);
+      fat32_meta_set_full(fs, new_lba, new_off, old_e.mode, old_e.uid,
+                          old_e.gid, (int)old_e.is_dir);
     }
   }
 
@@ -3173,17 +3194,28 @@ static int fat32_rename(fat32_fs_t *fs, uint32_t src_parent_cluster,
 // rsync -p, y cualquier cosa que haga un chmod "defensivo".
 //
 // Los bits de modo que ve `ls -l` siguen viniendo del mapa RAM
-// (fat32_ram_mode_get) y del default 0644/0755 según tipo.
+// (fat32_meta_find) y del default 0644/0755 según tipo.
 static int fat32_node_chmod(vfs_node_t *node, uint32_t mode) {
-  (void)node;
-  (void)mode;
+  fat32_node_priv_t *np = node ? (fat32_node_priv_t *)node->priv : NULL;
+  if (!np || !np->fs || np->dirent_lba == 0)
+    return 0; // raíz/sintéticos: no-op como antes
+  fat32_mutex_lock(&np->fs->lock);
+  fat32_meta_set_full(np->fs, np->dirent_lba, np->dirent_off, mode & 07777,
+                      node->uid, node->gid, np->is_dir);
+  fat32_mutex_unlock(&np->fs->lock);
   return 0;
 }
 
 static int fat32_node_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
-  (void)node;
-  (void)uid;
-  (void)gid;
+  fat32_node_priv_t *np = node ? (fat32_node_priv_t *)node->priv : NULL;
+  if (!np || !np->fs || np->dirent_lba == 0)
+    return 0;
+  fat32_mutex_lock(&np->fs->lock);
+  fat32_meta_set_full(np->fs, np->dirent_lba, np->dirent_off,
+                      node->mode & 07777,
+                      uid != (uint32_t)-1 ? uid : node->uid,
+                      gid != (uint32_t)-1 ? gid : node->gid, np->is_dir);
+  fat32_mutex_unlock(&np->fs->lock);
   return 0;
 }
 
@@ -3210,51 +3242,225 @@ static vfs_ops_t fat32_node_ops = {
 // Construcción de nodos
 // ===========================================================================
 
-// [3.4.c] Guarda el modo asociado a un short entry en el mapa en RAM.
-// Sin lock propio: el llamante debe tener fs->lock.
-static void fat32_ram_mode_set(fat32_fs_t *fs, uint64_t lba, uint32_t off,
-                               uint32_t mode) {
+// [U2] Tabla de metadatos en RAM. Sin lock propio: el llamante debe tener
+// fs->lock (o ser el montaje/flush con meta_busy).
+static struct fat32_meta_ent *fat32_meta_find(fat32_fs_t *fs, uint64_t lba,
+                                              uint32_t off) {
+  for (int i = 0; i < fs->meta_n; i++)
+    if (fs->meta[i].lba == lba && fs->meta[i].off == off)
+      return &fs->meta[i];
+  return NULL;
+}
+
+#define FAT32_META_MAX 65536
+
+static void fat32_meta_set_full(fat32_fs_t *fs, uint64_t lba, uint32_t off,
+                                uint32_t mode, uint32_t uid, uint32_t gid,
+                                int is_dir) {
   if (!fs)
     return;
-  for (int i = 0; i < fs->ram_modes_n; i++) {
-    if (fs->ram_modes[i].lba == lba && fs->ram_modes[i].off == off) {
-      fs->ram_modes[i].mode = mode;
-      return;
+  struct fat32_meta_ent *e = fat32_meta_find(fs, lba, off);
+  if (!e) {
+    if (fs->meta_n >= FAT32_META_MAX)
+      return; // tabla llena: cae a los valores por defecto
+    if (fs->meta_n >= fs->meta_cap) {
+      int ncap = fs->meta_cap ? fs->meta_cap * 2 : 256;
+      struct fat32_meta_ent *nm =
+          (struct fat32_meta_ent *)kmalloc((size_t)ncap * sizeof(*nm));
+      if (!nm)
+        return;
+      if (fs->meta_n)
+        memcpy(nm, fs->meta, (size_t)fs->meta_n * sizeof(*nm));
+      if (fs->meta)
+        kfree(fs->meta);
+      fs->meta = nm;
+      fs->meta_cap = ncap;
     }
+    e = &fs->meta[fs->meta_n++];
   }
-  int cap = (int)(sizeof(fs->ram_modes) / sizeof(fs->ram_modes[0]));
-  if (fs->ram_modes_n < cap) {
-    int i = fs->ram_modes_n++;
-    fs->ram_modes[i].lba = lba;
-    fs->ram_modes[i].off = off;
-    fs->ram_modes[i].mode = mode;
-  }
-  // Si la tabla está llena, cae silenciosamente al default (0644/0755).
+  e->lba = lba;
+  e->off = off;
+  e->mode = mode & 07777;
+  e->uid = uid;
+  e->gid = gid;
+  e->is_dir = is_dir ? 1 : 0;
+  e->pad = 0;
+  if (!fs->meta_busy)
+    fs->meta_dirty = 1;
 }
 
-// [3.4.c] Devuelve el modo asociado, o 0 si no hay override.
-static uint32_t fat32_ram_mode_get(fat32_fs_t *fs, uint64_t lba, uint32_t off) {
-  if (!fs)
-    return 0;
-  for (int i = 0; i < fs->ram_modes_n; i++) {
-    if (fs->ram_modes[i].lba == lba && fs->ram_modes[i].off == off)
-      return fs->ram_modes[i].mode;
-  }
-  return 0;
-}
-
-// [3.4.c] Borra la entrada del mapa (al hacer unlink/rename).
+// Borra la entrada (al hacer unlink/rename).
 static void fat32_ram_mode_del(fat32_fs_t *fs, uint64_t lba, uint32_t off) {
   if (!fs)
     return;
-  for (int i = 0; i < fs->ram_modes_n; i++) {
-    if (fs->ram_modes[i].lba == lba && fs->ram_modes[i].off == off) {
-      int last = --fs->ram_modes_n;
-      if (i != last)
-        fs->ram_modes[i] = fs->ram_modes[last];
-      return;
-    }
+  struct fat32_meta_ent *e = fat32_meta_find(fs, lba, off);
+  if (!e)
+    return;
+  int last = --fs->meta_n;
+  if (e != &fs->meta[last])
+    *e = fs->meta[last];
+  if (!fs->meta_busy)
+    fs->meta_dirty = 1;
+}
+
+// ---- Persistencia: <mount>/.aurora-meta -----------------------------------
+// Formato: cabecera {magic 'AURM', versión 1, n, crc32 de las entradas}
+// seguida de n struct fat32_meta_ent. Se escribe primero .aurora-meta.new y
+// después .aurora-meta; al cargar vale el primero con CRC correcto.
+#define FAT32_META_MAGIC 0x4D525541u
+struct fat32_meta_hdr {
+  uint32_t magic, version, n, crc;
+};
+
+static uint32_t fat32_meta_crc32(const void *data, size_t len) {
+  const uint8_t *p = (const uint8_t *)data;
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i = 0; i < len; i++) {
+    c ^= p[i];
+    for (int k = 0; k < 8; k++)
+      c = (c >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(c & 1));
   }
+  return ~c;
+}
+
+static void fat32_meta_path(fat32_fs_t *fs, const char *name, char *out,
+                            size_t cap) {
+  size_t n = strlen(fs->mount_path);
+  if (n >= cap)
+    n = cap - 1;
+  memcpy(out, fs->mount_path, n);
+  size_t m = strlen(name);
+  if (n + 1 + m + 1 > cap) {
+    out[n] = '\0';
+    return;
+  }
+  out[n] = '/';
+  memcpy(out + n + 1, name, m + 1);
+}
+
+static int fat32_meta_write_file(const char *path, const void *buf,
+                                 size_t len) {
+  vfs_node_t *node = vfs_lookup(path);
+  if (!node) {
+    int rc = vfs_create(path, 0600);
+    if (rc != 0 && rc != -EEXIST)
+      return rc;
+    node = vfs_lookup(path);
+    if (!node)
+      return -EIO;
+  }
+  int rc = 0;
+  if (!node->ops || !node->ops->write || !node->ops->truncate) {
+    rc = -EIO;
+  } else {
+    rc = node->ops->truncate(node, 0);
+    if (rc == 0 && node->ops->write(node, 0, len, buf) != (int64_t)len)
+      rc = -EIO;
+    if (rc == 0 && node->ops->fsync)
+      node->ops->fsync(node);
+  }
+  vfs_node_free(node);
+  return rc;
+}
+
+// Escribe la tabla si está sucia. Llamar SIN fs->lock. Se ejecuta con
+// credenciales de root (el llamante puede ser un usuario haciendo sync()).
+static int fat32_meta_flush(fat32_fs_t *fs) {
+  if (!fs || !fs->mount_path[0] || !fs->meta_dirty || fs->meta_busy)
+    return 0;
+  fat32_mutex_lock(&fs->lock);
+  size_t n = (size_t)fs->meta_n;
+  size_t len = sizeof(struct fat32_meta_hdr) + n * sizeof(struct fat32_meta_ent);
+  uint8_t *buf = (uint8_t *)kmalloc(len);
+  if (!buf) {
+    fat32_mutex_unlock(&fs->lock);
+    return -ENOMEM;
+  }
+  struct fat32_meta_hdr *h = (struct fat32_meta_hdr *)buf;
+  if (n)
+    memcpy(buf + sizeof(*h), fs->meta, n * sizeof(struct fat32_meta_ent));
+  h->magic = FAT32_META_MAGIC;
+  h->version = 1;
+  h->n = (uint32_t)n;
+  h->crc = fat32_meta_crc32(buf + sizeof(*h), n * sizeof(struct fat32_meta_ent));
+  fs->meta_dirty = 0;
+  fs->meta_busy = 1;
+  fat32_mutex_unlock(&fs->lock);
+
+  process_t *p = process_current();
+  uint32_t su = 0, sg = 0;
+  if (p) {
+    su = p->fsuid;
+    sg = p->fsgid;
+    p->fsuid = 0;
+    p->fsgid = 0;
+  }
+  char pn[96], pm[96];
+  fat32_meta_path(fs, ".aurora-meta.new", pn, sizeof(pn));
+  fat32_meta_path(fs, ".aurora-meta", pm, sizeof(pm));
+  int rc = fat32_meta_write_file(pn, buf, len);
+  if (rc == 0)
+    rc = fat32_meta_write_file(pm, buf, len);
+  if (p) {
+    p->fsuid = su;
+    p->fsgid = sg;
+  }
+  fs->meta_busy = 0;
+  kfree(buf);
+  if (rc != 0) {
+    fs->meta_dirty = 1;
+    LOG_WARN("[FAT32] no se pudo guardar .aurora-meta (rc=%d)", rc);
+  }
+  return rc;
+}
+
+static int fat32_meta_load_file(fat32_fs_t *fs, const char *path) {
+  vfs_node_t *node = vfs_lookup(path);
+  if (!node)
+    return -ENOENT;
+  int rc = -EINVAL;
+  size_t sz = (size_t)node->size;
+  size_t maxsz = sizeof(struct fat32_meta_hdr) +
+                 (size_t)FAT32_META_MAX * sizeof(struct fat32_meta_ent);
+  if (sz >= sizeof(struct fat32_meta_hdr) && sz <= maxsz && node->ops &&
+      node->ops->read) {
+    uint8_t *buf = (uint8_t *)kmalloc(sz);
+    if (buf && node->ops->read(node, 0, sz, buf) == (int64_t)sz) {
+      struct fat32_meta_hdr *h = (struct fat32_meta_hdr *)buf;
+      size_t body = (size_t)h->n * sizeof(struct fat32_meta_ent);
+      if (h->magic == FAT32_META_MAGIC && h->version == 1 &&
+          sz == sizeof(*h) + body &&
+          h->crc == fat32_meta_crc32(buf + sizeof(*h), body)) {
+        fs->meta_n = 0;
+        const struct fat32_meta_ent *src =
+            (const struct fat32_meta_ent *)(buf + sizeof(*h));
+        for (uint32_t i = 0; i < h->n; i++)
+          fat32_meta_set_full(fs, src[i].lba, src[i].off, src[i].mode,
+                              src[i].uid, src[i].gid, (int)src[i].is_dir);
+        rc = 0;
+      }
+    }
+    if (buf)
+      kfree(buf);
+  }
+  vfs_node_free(node);
+  return rc;
+}
+
+static void fat32_meta_load(fat32_fs_t *fs) {
+  char pm[96], pn[96];
+  fat32_meta_path(fs, ".aurora-meta", pm, sizeof(pm));
+  fat32_meta_path(fs, ".aurora-meta.new", pn, sizeof(pn));
+  fs->meta_busy = 1;
+  int rc = fat32_meta_load_file(fs, pm);
+  if (rc != 0)
+    rc = fat32_meta_load_file(fs, pn);
+  fs->meta_busy = 0;
+  fs->meta_dirty = 0;
+  if (rc == 0)
+    LOG_INFO("[FAT32] metadatos POSIX cargados: %d entradas", fs->meta_n);
+  else
+    LOG_INFO("[FAT32] sin .aurora-meta valido: modos por defecto (root 0755/0644)");
 }
 
 static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
@@ -3313,16 +3519,17 @@ static vfs_node_t *fat32_make_node(fat32_fs_t *fs, uint32_t cluster,
   // [3.4.c] Si este dirent tiene un modo guardado en RAM (creado en
   // esta sesión), lo usamos. Si no, defaults tipo vfat: 0755 dir,
   // 0644 file, root:root.
-  uint32_t ram_mode = 0;
-  if (dirent_lba != 0)
-    ram_mode = fat32_ram_mode_get(fs, dirent_lba, dirent_off);
-
-  if (ram_mode != 0)
-    n->mode = (is_dir ? S_IFDIR : S_IFREG) | (ram_mode & 07777);
-  else
+  struct fat32_meta_ent *me =
+      dirent_lba != 0 ? fat32_meta_find(fs, dirent_lba, dirent_off) : NULL;
+  if (me && (int)me->is_dir == (is_dir ? 1 : 0) && me->mode != 0) {
+    n->mode = (is_dir ? S_IFDIR : S_IFREG) | (me->mode & 07777);
+    n->uid = me->uid;
+    n->gid = me->gid;
+  } else {
     n->mode = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
-  n->uid = 0;
-  n->gid = 0;
+    n->uid = 0;
+    n->gid = 0;
+  }
   return n;
 }
 
@@ -3917,6 +4124,10 @@ void fat32_umount(void *fs_priv) {
     LOG_ERR("[FAT32] umount: no se pudieron persistir todos los datos (rc=%d)",
             sync_rc);
 
+  if (fs->meta)
+    kfree(fs->meta);
+  fs->meta = NULL;
+
   if (fs->fat_cache)
     kfree(fs->fat_cache);
 
@@ -3947,6 +4158,15 @@ int fat32_mount_bdev(const char *bdev_name, const char *mount_path) {
   if (rc != 0) {
     fat32_umount(priv);
     return rc;
+  }
+  // [U2] Cargar los metadatos POSIX persistentes del volumen.
+  {
+    fat32_fs_t *mfs = (fat32_fs_t *)priv;
+    size_t ml = strlen(mount_path);
+    if (ml < sizeof(mfs->mount_path)) {
+      memcpy(mfs->mount_path, mount_path, ml + 1);
+      fat32_meta_load(mfs);
+    }
   }
   return 0;
 }
