@@ -609,6 +609,10 @@ static void usb_hid_device_kthread(void) {
 
   uint8_t buf[64];
   int err_count = 0;
+  // Diagnóstico: informes recibidos por ventana de 2 s (el log sirve para ver
+  // si el ratón llega al ritmo esperado y cuántos informes son sin movimiento).
+  uint64_t diag_t0 = sched_get_ticks();
+  uint32_t diag_n = 0, diag_zero = 0, diag_err = 0;
 
   while (1) {
     int actual = 0;
@@ -626,6 +630,14 @@ static void usb_hid_device_kthread(void) {
         d->dev->hcd->interrupt_xfer(d->dev, d->in_ep, buf, len, 0, &actual);
     if (rc == 0 && actual > 0) {
       err_count = 0;
+      diag_n++;
+      if (d->kind == HID_KIND_MOUSE) {
+        int nz = 0;
+        for (int i = 1; i < actual; i++)
+          nz |= buf[i];
+        if (!nz)
+          diag_zero++;
+      }
       if (d->kind == HID_KIND_KEYBOARD) {
         if (d->use_report_protocol)
           usb_hid_process_kbd_full(d, buf, actual);
@@ -638,10 +650,21 @@ static void usb_hid_device_kthread(void) {
           usb_hid_process_mouse_boot(d, buf, actual);
       }
     } else if (rc < 0) {
+      diag_err++;
       if (++err_count == 1 || (err_count & 0x3F) == 0)
         LOG_WARN("[HID] %s: transfer rc=%d", d->name, rc);
       for (int i = 0; i < 50; i++)
         sched_yield();
+    }
+    uint64_t dn = sched_get_ticks();
+    if (dn - diag_t0 >= 2000) {
+      if (diag_n || diag_err)
+        LOG_DEBUG("[HID] %s: %u informes/%u ms (%u sin datos en bytes 1+), "
+                  "%u errores",
+                  d->name, diag_n, (unsigned)(dn - diag_t0), diag_zero,
+                  diag_err);
+      diag_t0 = dn;
+      diag_n = diag_zero = diag_err = 0;
     }
   }
 }

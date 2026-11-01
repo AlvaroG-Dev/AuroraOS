@@ -362,6 +362,11 @@ struct stream {
 };
 static struct stream streams[STREAM_MAX];
 static int stream_disabled;
+// Diagnóstico (se imprime cada 2 s si hubo actividad).
+static struct {
+  uint64_t it, ev, rep, deliv, drop, fifo_max, wake_irq, wake_to;
+  uint64_t wait_us; // tiempo dormido en epoll
+} g_st;
 
 static volatile uint8_t *mmio, *opb, *rtb, *dbb;
 static size_t mmio_len;
@@ -406,6 +411,45 @@ static uint64_t now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static uint64_t now_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+}
+
+static uint64_t cpu_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+  return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+}
+
+static void stats_tick(void) {
+  static uint64_t t_last, cpu_last;
+  uint64_t t = now_us();
+  if (!t_last) {
+    t_last = t;
+    cpu_last = cpu_us();
+    return;
+  }
+  if (t - t_last < 2000000)
+    return;
+  uint64_t c = cpu_us();
+  if (g_st.rep || g_st.deliv)
+    printf("[xhci.aur] diag %llu ms: vueltas=%llu ev=%llu informes=%llu "
+           "entregados=%llu fifo_max=%llu descartados=%llu timeouts=%llu "
+           "dormido=%llu ms cpu=%llu ms\n",
+           (unsigned long long)((t - t_last) / 1000),
+           (unsigned long long)g_st.it, (unsigned long long)g_st.ev,
+           (unsigned long long)g_st.rep, (unsigned long long)g_st.deliv,
+           (unsigned long long)g_st.fifo_max, (unsigned long long)g_st.drop,
+           (unsigned long long)g_st.wake_to,
+           (unsigned long long)(g_st.wait_us / 1000),
+           (unsigned long long)((c - cpu_last) / 1000));
+  memset(&g_st, 0, sizeof(g_st));
+  t_last = t;
+  cpu_last = c;
 }
 
 static int fls32(uint32_t x) {
@@ -812,6 +856,7 @@ static int pump_events(void) {
     n++;
     dispatch_event(&e);
   }
+  g_st.ev += (unsigned)n;
   if (n) {
     uint64_t next = ring_phys(&evt_ring, evt_ring.deq);
     wr32(rtb, RT_ERDP + 4, (uint32_t)(next >> 32));
@@ -1128,6 +1173,7 @@ static void stream_deliver(struct stream *s) {
     s->head = (s->head + 1) % STREAM_FIFO;
     s->count--;
     q->stream_wait = 0;
+    g_st.deliv++;
     req_finish(best, 0, n, 0, 0);
   }
 }
@@ -1150,15 +1196,19 @@ static void stream_event(struct stream *s, struct epst *e, const trb_t *ev) {
     if (n > STREAM_RLEN)
       n = STREAM_RLEN;
     if (n > 0) {
+      g_st.rep++;
       if (s->count == STREAM_FIFO) { // lleno: se descarta el más viejo
         s->head = (s->head + 1) % STREAM_FIFO;
         s->count--;
         s->dropped++;
+        g_st.drop++;
       }
       unsigned t = (s->head + s->count) % STREAM_FIFO;
       s->fifo[t].len = (uint8_t)n;
       memcpy(s->fifo[t].data, s->vbuf + (size_t)idx * STREAM_RLEN, n);
       s->count++;
+      if (s->count > g_st.fifo_max)
+        g_st.fifo_max = s->count;
     }
     stream_arm(s, e, (unsigned)idx); // el anillo nunca se queda sin TD
     ring_doorbell(s->slot, s->dci);
@@ -2096,7 +2146,11 @@ static int msi_setup(const char *bdf) {
 // Duerme hasta una IRQ (o petición nueva si `with_proxy`) o `ms`.
 static void wait_event_ms(int with_proxy, int ms) {
   struct epoll_event ev[2];
+  uint64_t t0 = now_us();
   int n = epoll_wait(with_proxy ? ep_both : ep_irq, ev, 2, ms);
+  g_st.wait_us += now_us() - t0;
+  if (n == 0)
+    g_st.wake_to++;
   for (int i = 0; i < n; i++) {
     if (ev[i].data.fd != g_irq_fd)
       continue;
@@ -2162,6 +2216,8 @@ int main(int argc, char **argv) {
 
   for (;;) {
     int progress = 0;
+    g_st.it++;
+    stats_tick();
 
     // 1. Peticiones nuevas del kernel (mientras haya petición y buffer libres).
     for (;;) {
