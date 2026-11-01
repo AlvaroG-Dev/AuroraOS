@@ -23,6 +23,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
+#include "process.h"
 #include "rtc.h"
 #include "string.h"
 #include "uaccess.h"
@@ -109,6 +110,16 @@ static void free_node_locked(tmpfs_fs_t *fs, tmpfs_node_t *n) {
     n->data = NULL;
   }
   kfree(n);
+}
+
+// [U1] Propietario de lo que crea el proceso actual: fsuid/fsgid (Linux).
+static inline uint32_t creator_uid(void) {
+  process_t *p = process_current();
+  return p ? p->fsuid : 0;
+}
+static inline uint32_t creator_gid(void) {
+  process_t *p = process_current();
+  return p ? p->fsgid : 0;
 }
 
 static vfs_node_t *wrap_locked(tmpfs_node_t *n) {
@@ -335,8 +346,8 @@ static int tmpfs_create_op(vfs_node_t *dir_vn, const char *name,
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFREG | (mode & 07777);
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -398,8 +409,8 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFDIR | (mode & 07777);
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -552,8 +563,8 @@ static int tmpfs_symlink_op(vfs_node_t *dir_vn, const char *name,
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFLNK | 0777;
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -764,6 +775,12 @@ struct vfs_fs_ops *tmpfs_get_vfs_ops(void) {
 // ---------------------------------------------------------------------------
 // API publica
 // ---------------------------------------------------------------------------
+void tmpfs_set_root_mode(void *fsp, uint32_t mode) {
+  tmpfs_fs_t *fs = (tmpfs_fs_t *)fsp;
+  if (fs && fs->root)
+    fs->root->mode = S_IFDIR | (mode & 07777);
+}
+
 void *tmpfs_new(size_t max_bytes) {
   tmpfs_fs_t *fs = (tmpfs_fs_t *)kzalloc(sizeof(*fs));
   if (!fs)
@@ -1002,6 +1019,7 @@ void tmpfs_init(void) {
   if (!tmp) {
     LOG_ERR("[TMPFS] sin memoria para /tmp");
   } else {
+    tmpfs_set_root_mode(tmp, 01777); // [U1.2] /tmp: sticky + rwx para todos
     int rc = vfs_mount("/tmp", tmpfs_get_vfs_ops(), tmp);
     if (rc != 0) {
       LOG_ERR("[TMPFS] mount /tmp: %d", rc);
@@ -1056,6 +1074,7 @@ void tmpfs_init(void) {
   if (!shm) {
     LOG_ERR("[TMPFS] sin memoria para /dev/shm");
   } else {
+    tmpfs_set_root_mode(shm, 01777);
     int rc = vfs_mount("/dev/shm", tmpfs_get_vfs_ops(), shm);
     if (rc != 0) {
       LOG_ERR("[TMPFS] mount /dev/shm: %d", rc);

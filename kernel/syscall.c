@@ -855,7 +855,7 @@ static int64_t k_access(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
   // [3.4.d] access(2) usa REAL uid/gid, no efectivos. Como hoy no hay
   // setuid activo, euid == uid siempre; cuando lo haya, habrá que
   // cambiar vfs_check_access para aceptar un flag.
-  int acc = vfs_check_access(node, (int)mode);
+  int acc = vfs_check_access_real(node, (int)mode);
   vfs_node_free(node);
   return acc;
 }
@@ -1770,15 +1770,24 @@ static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
 //   4  PR_SET_DUMPABLE    → ignorar
 //   15 PR_SET_NAME        → ignorar
 //   16 PR_GET_NAME        → escribir "" en el buffer del usuario
-//   38 PR_SET_NO_NEW_PRIVS → ignorar
+//   38/39 PR_SET/GET_NO_NEW_PRIVS → real (execve ya no concede setuid)
 static int64_t k_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
                        uint64_t arg4, uint64_t arg5) {
-  (void)arg3;
-  (void)arg4;
-  (void)arg5;
   switch (option) {
   case 3: /* PR_GET_DUMPABLE */
     return 1;
+  case 38: /* PR_SET_NO_NEW_PRIVS: solo 1, irreversible */ {
+    if (arg2 != 1 || arg3 || arg4 || arg5)
+      return -EINVAL;
+    process_t *pp = process_current();
+    if (pp)
+      pp->no_new_privs = 1;
+    return 0;
+  }
+  case 39: /* PR_GET_NO_NEW_PRIVS */ {
+    process_t *pp = process_current();
+    return pp ? pp->no_new_privs : 0;
+  }
   case 16: /* PR_GET_NAME */ {
     if (arg2 && access_ok((void *)arg2, 16)) {
       // Copiamos 16 bytes de ceros (Linux pone el nombre del proceso
@@ -1805,8 +1814,12 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
 
   // Señal 0 = comprobar existencia, sin enviar. Linux la acepta.
   if (ksig == 0) {
-    if (kpid > 0)
-      return process_find_by_pid((uint32_t)kpid) ? 0 : -ESRCH;
+    if (kpid > 0) {
+      process_t *tp = process_find_by_pid((uint32_t)kpid);
+      if (!tp)
+        return -ESRCH;
+      return process_may_signal(process_current(), tp) ? 0 : -EPERM;
+    }
     if (kpid == 0)
       return process_current() ? 0 : -ESRCH;
     return process_pgrp_exists((uint32_t)(-kpid)) ? 0 : -ESRCH;
@@ -1816,6 +1829,10 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     return -EINVAL;
 
   if (kpid > 0) {
+    // [U1.3] Permisos de kill(2).
+    process_t *tp = process_find_by_pid((uint32_t)kpid);
+    if (tp && !process_may_signal(process_current(), tp))
+      return -EPERM;
     int r = process_kill((uint32_t)kpid, ksig);
     if (r == -ESRCH) {
       // Como Linux, kill() con el tid de un hilo secundario va a su proceso.
@@ -1833,13 +1850,13 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     process_t *self = process_current();
     if (!self)
       return -ESRCH;
-    int n = process_signal_pgrp(self->pgid, 1ULL << ksig);
+    int n = process_signal_pgrp_checked(self->pgid, 1ULL << ksig, self);
     return n < 0 ? n : 0;
   }
 
   // kpid < 0: enviar a todos los procesos del grupo -kpid.
   uint32_t grp = (uint32_t)(-kpid);
-  int n = process_signal_pgrp(grp, 1ULL << ksig);
+  int n = process_signal_pgrp_checked(grp, 1ULL << ksig, process_current());
   return n < 0 ? n : 0;
 }
 

@@ -1,6 +1,7 @@
 # Plan de implementación: usuarios, grupos y permisos en AuroraOS (nativo + compatibilidad Linux)
 
-Estado: **PLANIFICADO, nada implementado** (31-oct-2026). Parte de `main` (a71d9c57). Solo plan; sin código.
+Estado (1-nov-2026): **U0 hecha y U1 parcial** en la rama `claude/plan-usuarios`. `user/apps/cred_test` (25 pruebas) pasa en QEMU: `fsuid` en el VFS y `access()` con uid real (U1.1), sticky en `/tmp` y `/dev/shm` + permisos en `rename` + propietario de lo creado en tmpfs = `fsuid` (U1.2), permisos de `kill(2)` por uid (U1.3, falta `tkill/tgkill`), `AT_UID/EUID/GID/EGID/AT_SECURE` reales y `PR_SET/GET_NO_NEW_PRIVS` (U1.4, el `nosuid` de montajes queda pendiente), setuid en `execve` al estilo Linux (el uid real no cambia; suid=euid). Pendiente de U1: U1.5 (chown fino), U1.6, U1.7, `tkill/tgkill`, `nosuid`. Se compila con `make iso WITH_NVIDIA=0`; ejecutar la prueba: `WITH_NVIDIA=0 scripts/qemu-boot-test.sh /usr/bin/cred_test`.
+Parte de `main` (a71d9c57).
 Contexto: `ROADMAP.md` marca «Usuarios y grupos» como hecho, pero eso es **solo la mitad kernel**. Este plan cubre lo que falta para que haya usuarios *de verdad* (login, contraseñas, privilegios mínimos, sesión gráfica por usuario).
 
 ## 0. Principios

@@ -334,6 +334,9 @@ typedef struct {
   uint16_t phnum;
   uint16_t phent;
   uint64_t vdso_base; // ← NUEVO
+  // [U1.4] Credenciales que verá el proceso tras execve (AT_UID.. y AT_SECURE).
+  uint32_t uid, euid, gid, egid;
+  int secure;
 } proc_auxv_info_t;
 
 // ---------------------------------------------------------------------------
@@ -492,13 +495,13 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
   PUSH_AUXV(33, ai ? ai->vdso_base : 0);      // AT_SYSINFO_EHDR ← NUEVO
   PUSH_AUXV(8, 0);                            // AT_FLAGS
   PUSH_AUXV(9, ai ? ai->entry : 0);           // AT_ENTRY
-  PUSH_AUXV(11, 0);                           // AT_UID
-  PUSH_AUXV(12, 0);                           // AT_EUID
-  PUSH_AUXV(13, 0);                           // AT_GID
-  PUSH_AUXV(14, 0);                           // AT_EGID
+  PUSH_AUXV(11, ai ? (uint64_t)ai->uid : 0);   // AT_UID
+  PUSH_AUXV(12, ai ? (uint64_t)ai->euid : 0);   // AT_EUID
+  PUSH_AUXV(13, ai ? (uint64_t)ai->gid : 0);   // AT_GID
+  PUSH_AUXV(14, ai ? (uint64_t)ai->egid : 0);   // AT_EGID
   PUSH_AUXV(16, 0);                           // AT_HWCAP
   PUSH_AUXV(17, 100);                         // AT_CLKTCK
-  PUSH_AUXV(23, 0);                           // AT_SECURE
+  PUSH_AUXV(23, ai ? (uint64_t)(ai->secure != 0) : 0); // AT_SECURE
   PUSH_AUXV(25, random_va);                   // AT_RANDOM
   PUSH_AUXV(26, 0);                           // AT_HWCAP2
   PUSH_AUXV(31, execfn_va);                   // AT_EXECFN
@@ -2231,6 +2234,7 @@ int64_t sys_fork(void) {
   child->sgid = parent->sgid;
   child->fsgid = parent->fsgid;
   child->umask = parent->umask;
+  child->no_new_privs = parent->no_new_privs;
   child->ngroups = parent->ngroups;
   for (int i = 0; i < NGROUPS_MAX; i++)
     child->groups[i] = parent->groups[i];
@@ -2417,6 +2421,19 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   uint32_t new_mode = exe_node->mode;
   uint32_t new_uid = exe_node->uid;
   uint32_t new_gid = exe_node->gid;
+  // [U1.4] Credenciales resultantes (Linux): el bit setuid/setgid fija
+  // euid/suid (egid/sgid) al dueño del fichero, salvo no_new_privs. El uid
+  // real no cambia. Se calculan aquí para que el auxv (AT_UID.., AT_SECURE)
+  // ya refleje los valores finales.
+  uint32_t x_euid = proc->euid, x_egid = proc->egid;
+  if (!proc->no_new_privs) {
+    if (new_mode & S_ISUID)
+      x_euid = new_uid;
+    if (new_mode & S_ISGID)
+      x_egid = new_gid;
+  }
+  int x_secure = (x_euid != proc->uid) || (x_egid != proc->gid) ||
+                 (x_euid != proc->euid) || (x_egid != proc->egid);
 
   uint64_t new_pml4_phys = paging_clone_kernel_space();
   if (!new_pml4_phys) {
@@ -2536,6 +2553,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
       .phnum = phnum,
       .phent = phent,
       .vdso_base = vdso_base,
+      .uid = proc->uid,
+      .euid = x_euid,
+      .gid = proc->gid,
+      .egid = x_egid,
+      .secure = x_secure,
   };
   uint64_t user_rsp = setup_arg_block(new_pml4, stack_top, argc, argv, envc,
                                       envp, &ai, path, at_base);
@@ -2578,23 +2600,12 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   // execve borra los temporizadores POSIX; los de setitimer/alarm siguen.
   ptimer_exec(proc->pid);
 
-  int was_root = (proc->euid == 0);
-  if (new_mode & S_ISUID) {
-    proc->euid = new_uid;
-    proc->fsuid = new_uid;
-    if (was_root) {
-      proc->uid = new_uid;
-      proc->suid = new_uid;
-    }
-  }
-  if (new_mode & S_ISGID) {
-    proc->egid = new_gid;
-    proc->fsgid = new_gid;
-    if (was_root) {
-      proc->gid = new_gid;
-      proc->sgid = new_gid;
-    }
-  }
+  proc->euid = x_euid;
+  proc->suid = x_euid;
+  proc->fsuid = x_euid;
+  proc->egid = x_egid;
+  proc->sgid = x_egid;
+  proc->fsgid = x_egid;
 
   proc->fs_base = 0;
   if (proc->task)
@@ -2699,7 +2710,47 @@ int process_is_in_pgrp(process_t *p, uint32_t pgid) {
   return p->pgid == pgid;
 }
 
+// [U1.3] Regla de kill(2) de Linux: root puede todo; el resto solo si su uid
+// real o efectivo coincide con el uid real o guardado del destino.
+int process_may_signal(const process_t *sender, const process_t *target) {
+  if (!sender || !target || sender == target)
+    return 1;
+  if (sender->euid == 0)
+    return 1;
+  return sender->uid == target->uid || sender->uid == target->suid ||
+         sender->euid == target->uid || sender->euid == target->suid;
+}
+
+static int process_signal_pgrp_as(uint32_t pgid_arg, uint64_t signal_mask,
+                                  const process_t *sender);
+
+// Como process_signal_pgrp pero respetando permisos de `sender`.
+// -ESRCH si el grupo no existe, -EPERM si existe pero no se puede señalar a nadie.
+int process_signal_pgrp_checked(uint32_t pgid_arg, uint64_t signal_mask,
+                                const process_t *sender) {
+  int members = 0, allowed = 0;
+  unsigned long fl = spin_lock_irqsave(&process_lock);
+  for (process_t *q = process_list; q; q = q->next) {
+    if (q->pgid == pgid_arg && !q->is_zombie && q->task) {
+      members++;
+      if (process_may_signal(sender, q))
+        allowed++;
+    }
+  }
+  spin_unlock_irqrestore(&process_lock, fl);
+  if (!members)
+    return -ESRCH;
+  if (!allowed)
+    return -EPERM;
+  return process_signal_pgrp_as(pgid_arg, signal_mask, sender);
+}
+
 int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
+  return process_signal_pgrp_as(pgid_arg, signal_mask, NULL);
+}
+
+static int process_signal_pgrp_as(uint32_t pgid_arg, uint64_t signal_mask,
+                                  const process_t *sender) {
   if (pgid_arg == 0)
     return -ESRCH;
 
@@ -2713,7 +2764,8 @@ int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
   unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
   while (p && n < SIGPGRP_MAX) {
-    if (p->pgid == pgid_arg && !p->is_zombie && p->task) {
+    if (p->pgid == pgid_arg && !p->is_zombie && p->task &&
+        (!sender || process_may_signal(sender, p))) {
       task_t *t = p->task;
       task_get(t);
 

@@ -11,6 +11,8 @@ struct vfs_fs_ops;
 // resultante se pasa a vfs_mount(path, tmpfs_get_vfs_ops(), priv).
 // Devuelve NULL si no hay memoria.
 void *tmpfs_new(size_t max_bytes);
+// [U1.2] Cambia el modo del directorio raíz de una instancia (p. ej. 01777).
+void tmpfs_set_root_mode(void *fs, uint32_t mode);
 
 // Libera una instancia creada con tmpfs_new. NO libera el arbol de
 // nodos (asume que el FS vive hasta el final del boot). Se mejorara

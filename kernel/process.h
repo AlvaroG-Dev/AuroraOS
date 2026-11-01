@@ -199,6 +199,8 @@ typedef struct process {
   uint32_t sgid;
   uint32_t fsgid;
   uint32_t umask;
+  // [U1.4] prctl(PR_SET_NO_NEW_PRIVS): execve ya no concede setuid/setgid.
+  uint8_t no_new_privs;
   uint32_t groups[NGROUPS_MAX];
   int ngroups;
 
@@ -396,6 +398,10 @@ int process_is_in_pgrp(process_t *p, uint32_t pgid);
 // pgid == pgid_arg. Ignora a zombies. Devuelve el número de procesos
 // señalados, o -ESRCH si no existe ningún proceso en ese grupo.
 int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask);
+// [U1.3] kill(2): permisos de Linux entre procesos.
+int process_may_signal(const process_t *sender, const process_t *target);
+int process_signal_pgrp_checked(uint32_t pgid_arg, uint64_t signal_mask,
+                                const process_t *sender);
 
 // true si `sig` esta pendiente en el proceso `pid` (que existe y no es zombi).
 bool process_signal_is_pending(uint32_t pid, int sig);

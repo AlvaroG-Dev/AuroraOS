@@ -834,6 +834,8 @@ int vfs_mkdir(const char *path, uint32_t mode) {
   return rc;
 }
 
+static int sticky_check(vfs_node_t *parent, const char *path);
+
 int vfs_unlink(const char *path) {
   if (!path)
     return -EINVAL;
@@ -854,6 +856,11 @@ int vfs_unlink(const char *path) {
   if (!parent->ops || !parent->ops->unlink) {
     vfs_node_free(parent);
     return -EROFS;
+  }
+  acc = sticky_check(parent, path);
+  if (acc != 0) {
+    vfs_node_free(parent);
+    return acc;
   }
   rc = parent->ops->unlink(parent, base);
   vfs_node_free(parent);
@@ -1111,6 +1118,20 @@ int vfs_rename(const char *oldpath, const char *newpath) {
     vfs_node_free(src_parent);
     vfs_node_free(dst_parent);
     return -EROFS;
+  }
+
+  // [U1.2] Permisos de directorio y sticky (origen y, si existe, destino).
+  rc = vfs_check_access(src_parent, VFS_W_OK | VFS_X_OK);
+  if (rc == 0 && dst_parent != src_parent)
+    rc = vfs_check_access(dst_parent, VFS_W_OK | VFS_X_OK);
+  if (rc == 0)
+    rc = sticky_check(src_parent, oldpath);
+  if (rc == 0)
+    rc = sticky_check(dst_parent, newpath);
+  if (rc != 0) {
+    vfs_node_free(src_parent);
+    vfs_node_free(dst_parent);
+    return rc;
   }
 
   rc = src_parent->ops->rename(src_parent, src_base, dst_parent, dst_base);
@@ -1372,7 +1393,8 @@ int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
 //
 // No sigue symlinks: se llama con el nodo ya resuelto por vfs_lookup.
 // ---------------------------------------------------------------------------
-int vfs_check_access(vfs_node_t *node, int mask) {
+static int check_access_ids(vfs_node_t *node, int mask, uint32_t uid,
+                            uint32_t gid) {
   if (!node)
     return -EINVAL;
   if (mask == VFS_F_OK)
@@ -1384,21 +1406,17 @@ int vfs_check_access(vfs_node_t *node, int mask) {
     return 0;
 
   // Root bypasea todo.
-  if (proc->euid == 0)
+  if (uid == 0)
     return 0;
 
   uint32_t bits;
-  if (proc->euid == node->uid) {
+  if (uid == node->uid) {
     bits = (node->mode >> 6) & 7;
-  } else if (proc->egid == node->gid) {
-    bits = (node->mode >> 3) & 7;
   } else {
-    int in_group = 0;
-    for (int i = 0; i < proc->ngroups; i++) {
-      if (proc->groups[i] == node->gid) {
+    int in_group = (gid == node->gid);
+    for (int i = 0; !in_group && i < proc->ngroups; i++) {
+      if (proc->groups[i] == node->gid)
         in_group = 1;
-        break;
-      }
     }
     bits = in_group ? ((node->mode >> 3) & 7) : (node->mode & 7);
   }
@@ -1414,6 +1432,40 @@ int vfs_check_access(vfs_node_t *node, int mask) {
   if ((bits & need) == need)
     return 0;
   return -EACCES;
+}
+
+// [U1.1] Acceso del sistema de ficheros: Linux usa fsuid/fsgid (que siguen
+// al euid/egid salvo que se use setfsuid/setfsgid).
+int vfs_check_access(vfs_node_t *node, int mask) {
+  process_t *proc = process_current();
+  if (!proc)
+    return node ? 0 : -EINVAL;
+  return check_access_ids(node, mask, proc->fsuid, proc->fsgid);
+}
+
+// [U1.1] access(2)/faccessat(2): usan el uid/gid REAL.
+int vfs_check_access_real(vfs_node_t *node, int mask) {
+  process_t *proc = process_current();
+  if (!proc)
+    return node ? 0 : -EINVAL;
+  return check_access_ids(node, mask, proc->uid, proc->gid);
+}
+
+// [U1.2] Bit sticky: en un directorio con S_ISVTX solo el dueño del fichero,
+// el dueño del directorio o root pueden borrar/renombrar la entrada.
+// Devuelve 0 si se permite, -EPERM si no. `path` es la entrada afectada.
+static int sticky_check(vfs_node_t *parent, const char *path) {
+  process_t *proc = process_current();
+  if (!proc || !parent || !(parent->mode & S_ISVTX))
+    return 0;
+  if (proc->fsuid == 0 || proc->fsuid == parent->uid)
+    return 0;
+  vfs_node_t *child = vfs_lookup_nofollow(path);
+  if (!child)
+    return 0; // no existe: lo resolverá la operación (ENOENT)
+  int owner = (child->uid == proc->fsuid);
+  vfs_node_free(child);
+  return owner ? 0 : -EPERM;
 }
 
 // ===========================================================================
