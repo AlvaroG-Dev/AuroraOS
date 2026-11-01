@@ -183,4 +183,4 @@ void ipi_tlb_shootdown(uint64_t addr) {
   preempt_enable();
 }
 
-void ipi_tlb_shootdown_all(void) { ipi_tlb_shootdown(0); }
+void ipi_tlb_shootdown_all(void) { ipi_tlb_shootdown(0); }

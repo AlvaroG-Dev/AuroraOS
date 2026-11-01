@@ -319,4 +319,4 @@ __attribute__((noreturn)) void panic_noctx(const char *fmt, ...) {
   __builtin_unreachable();
 }
 
-int panic_in_progress(void) { return in_panic; }
+int panic_in_progress(void) { return in_panic; }
