@@ -1166,12 +1166,31 @@ static void stream_deliver(struct stream *s) {
     if (best < 0)
       break;
     struct req *q = &reqs[best];
-    unsigned n = s->fifo[s->head].len;
-    if (n > q->olen)
-      n = q->olen;
-    memcpy(req_buf(q), s->fifo[s->head].data, n);
-    s->head = (s->head + 1) % STREAM_FIFO;
-    s->count--;
+    unsigned stride = s->len, n;
+    if (q->olen > stride) {
+      // Varios informes en una petición: uno cada `stride` bytes (rellenados
+      // con ceros); el kernel los separa por el MPS del endpoint.
+      unsigned cap = q->olen / stride, k = 0;
+      uint8_t *dst = req_buf(q);
+      while (s->count && k < cap) {
+        unsigned l = s->fifo[s->head].len;
+        if (l > stride)
+          l = stride;
+        memset(dst + (size_t)k * stride, 0, stride);
+        memcpy(dst + (size_t)k * stride, s->fifo[s->head].data, l);
+        s->head = (s->head + 1) % STREAM_FIFO;
+        s->count--;
+        k++;
+      }
+      n = k * stride;
+    } else {
+      n = s->fifo[s->head].len;
+      if (n > q->olen)
+        n = q->olen;
+      memcpy(req_buf(q), s->fifo[s->head].data, n);
+      s->head = (s->head + 1) % STREAM_FIFO;
+      s->count--;
+    }
     q->stream_wait = 0;
     g_st.deliv++;
     req_finish(best, 0, n, 0, 0);
@@ -1263,9 +1282,11 @@ static void req_start(int qi) {
   // Interrupt IN sin plazo (HID): modo continuo.
   if (q->r.op == AUR_USB_OP_XFER && q->r.is_in &&
       q->r.ep_type == EP_INTERRUPT && q->r.timeout_ms == 0 &&
-      q->r.len <= STREAM_RLEN && !stream_disabled) {
+      q->r.max_packet > 0 && q->r.max_packet <= STREAM_RLEN &&
+      q->r.len <= 8u * q->r.max_packet && !stream_disabled) {
+    // Cada TD del stream es de un paquete (un informe).
     struct stream *s = e->stream ? &streams[e->stream - 1]
-                                 : stream_start(slot, dci, q->r.len);
+                                 : stream_start(slot, dci, q->r.max_packet);
     if (s) {
       q->state = RQ_QUEUED;
       q->stream_wait = 1;

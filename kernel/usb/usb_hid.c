@@ -607,47 +607,69 @@ static void usb_hid_device_kthread(void) {
            d->use_report_protocol ? "Report Protocol" : "Boot Protocol",
            d->report_len);
 
-  uint8_t buf[64];
+  uint8_t buf[256];
   int err_count = 0;
   // Diagnóstico: informes recibidos por ventana de 2 s (el log sirve para ver
   // si el ratón llega al ritmo esperado y cuántos informes son sin movimiento).
   uint64_t diag_t0 = sched_get_ticks();
-  uint32_t diag_n = 0, diag_zero = 0, diag_err = 0;
+  uint32_t diag_n = 0, diag_zero = 0, diag_err = 0, diag_calls = 0;
 
   while (1) {
     int actual = 0;
     int len = d->report_len;
-    if (len <= 0 || len > (int)sizeof(buf))
+    if (len <= 0 || len > 64)
       len = 8;
     // Pedir al menos wMaxPacketSize: informes más largos que el buffer
     // provocan Babble y halt del endpoint en el xHC.
     if (d->in_ep && len < (int)d->in_ep->max_packet)
       len = (int)d->in_ep->max_packet;
-    if (len > (int)sizeof(buf))
-      len = (int)sizeof(buf);
+    if (len > 64)
+      len = 64;
 
-    int rc =
-        d->dev->hcd->interrupt_xfer(d->dev, d->in_ep, buf, len, 0, &actual);
+    // Si el informe cabe en un paquete se piden hasta 8 a la vez, uno cada
+    // `stride` bytes: con carga (compositor, Xwayland) el hilo de xhci.aur y
+    // éste tardan varios ms en volver a turnarse y un informe por viaje no
+    // da abasto con un ratón a 1 kHz.
+    int stride = len, batch = 1;
+    if (d->in_ep && d->in_ep->max_packet && len == (int)d->in_ep->max_packet) {
+      batch = (int)sizeof(buf) / stride;
+      if (batch > 8)
+        batch = 8;
+    }
+
+    int rc = d->dev->hcd->interrupt_xfer(d->dev, d->in_ep, buf, stride * batch,
+                                         0, &actual);
     if (rc == 0 && actual > 0) {
       err_count = 0;
-      diag_n++;
-      if (d->kind == HID_KIND_MOUSE) {
-        int nz = 0;
-        for (int i = 1; i < actual; i++)
-          nz |= buf[i];
-        if (!nz)
-          diag_zero++;
+      diag_calls++;
+      int nrep = 1, rlen = actual;
+      if (batch > 1 && actual > stride) {
+        nrep = (actual + stride - 1) / stride;
+        rlen = stride;
       }
-      if (d->kind == HID_KIND_KEYBOARD) {
-        if (d->use_report_protocol)
-          usb_hid_process_kbd_full(d, buf, actual);
-        else
-          usb_hid_process_kbd_boot(d, buf, actual);
-      } else if (d->kind == HID_KIND_MOUSE) {
-        if (d->use_report_protocol)
-          usb_hid_process_mouse_full(d, buf, actual);
-        else
-          usb_hid_process_mouse_boot(d, buf, actual);
+      for (int r = 0; r < nrep; r++) {
+        const uint8_t *rp = buf + (size_t)r * stride;
+        int n = (nrep > 1 && (r + 1) * stride > actual) ? actual - r * stride
+                                                         : rlen;
+        diag_n++;
+        if (d->kind == HID_KIND_MOUSE) {
+          int nz = 0;
+          for (int i = 1; i < n; i++)
+            nz |= rp[i];
+          if (!nz)
+            diag_zero++;
+        }
+        if (d->kind == HID_KIND_KEYBOARD) {
+          if (d->use_report_protocol)
+            usb_hid_process_kbd_full(d, rp, n);
+          else
+            usb_hid_process_kbd_boot(d, rp, n);
+        } else if (d->kind == HID_KIND_MOUSE) {
+          if (d->use_report_protocol)
+            usb_hid_process_mouse_full(d, rp, n);
+          else
+            usb_hid_process_mouse_boot(d, rp, n);
+        }
       }
     } else if (rc < 0) {
       diag_err++;
@@ -659,12 +681,12 @@ static void usb_hid_device_kthread(void) {
     uint64_t dn = sched_get_ticks();
     if (dn - diag_t0 >= 2000) {
       if (diag_n || diag_err)
-        LOG_DEBUG("[HID] %s: %u informes/%u ms (%u sin datos en bytes 1+), "
-                  "%u errores",
-                  d->name, diag_n, (unsigned)(dn - diag_t0), diag_zero,
-                  diag_err);
+        LOG_DEBUG("[HID] %s: %u informes en %u viajes/%u ms (%u sin datos en "
+                  "bytes 1+), %u errores",
+                  d->name, diag_n, diag_calls, (unsigned)(dn - diag_t0),
+                  diag_zero, diag_err);
       diag_t0 = dn;
-      diag_n = diag_zero = diag_err = 0;
+      diag_n = diag_zero = diag_err = diag_calls = 0;
     }
   }
 }
