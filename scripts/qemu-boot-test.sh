@@ -56,4 +56,4 @@ timeout "$T" qemu-system-x86_64 \
   -drive if=pflash,format=raw,file=OVMF_VARS.fd \
   -m "${QEMU_MEM:-2G}" -no-reboot -smp "${QEMU_SMP:-2}" -cdrom aurora.iso -display none \
   -monitor unix:${QMON_SOCK:-/tmp/qmon.sock},server,nowait \
-  -serial file:"$LOG" || true
+  ${QEMU_EXTRA:-} -serial file:"$LOG" || true

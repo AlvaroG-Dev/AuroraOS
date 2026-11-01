@@ -236,7 +236,7 @@ _Static_assert(sizeof(vfs_ops_t) == 29 * 8 && offsetof(vfs_ops_t, read) == 0 &&
 _Static_assert(sizeof(vfs_dirent_t) == 272 && offsetof(vfs_dirent_t, type) == 256 &&
                    offsetof(vfs_dirent_t, size) == 264,
                "vfs_dirent_t cambio: actualizar struct aurora_vfs_dirent");
-_Static_assert(sizeof(vfs_fs_ops_t) == 24, "vfs_fs_ops_t cambio: actualizar aurora.h");
+_Static_assert(sizeof(vfs_fs_ops_t) == 40, "vfs_fs_ops_t cambio: actualizar aurora.h");
 _Static_assert(offsetof(vma_t, start) == 0 && offsetof(vma_t, end) == 8 &&
                    offsetof(vma_t, flags) == 16 && offsetof(vma_t, file_offset) == 48 &&
                    offsetof(vma_t, dev_ops) == 64 && offsetof(vma_t, dev_priv) == 72 &&

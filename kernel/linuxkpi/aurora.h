@@ -267,6 +267,8 @@ struct aurora_vfs_fs_ops {
 	struct aurora_vfs_node *(*lookup)(void *fs_priv, const char *path);
 	const char *name;
 	void *statfs;
+	void *umount;
+	void *sync;
 };
 struct aurora_vma_dev_ops {
 	int (*fault)(struct aurora_vma *vma, u64 addr, int write);

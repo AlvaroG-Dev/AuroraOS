@@ -4,6 +4,7 @@
 // (0xCF9, 8042, puertos de emuladores, triple fault). El apagado ACPI (S5) y
 // el reset por RESET_REG viven en acpi_pm.c.
 #include "power.h"
+#include "vfs.h"
 #include "acpi_pm.h"
 #include "block.h"
 #include "cmdline.h"
@@ -238,8 +239,8 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   call_notifiers(action);
 
   // Volcar los FS antes de tocar procesos: los drivers de disco aun viven.
-  if (fat32_sync_all() != 0)
-    LOG_WARN("[POWER] fat32_sync_all fallo");
+  if (fat32_sync_all() != 0 || vfs_sync_all() != 0)
+    LOG_WARN("[POWER] sync de FS fallo");
 
   // Procesos de usuario: SIGTERM, margen corto, SIGKILL.
   if (signal_all(SIGTERM) > 0) {
@@ -247,6 +248,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
     signal_all(SIGKILL);
     power_wait_ms(100);
     fat32_sync_all(); // por si algun proceso escribio mientras moria
+    vfs_sync_all();
   }
 
   // FAT32 escribe de forma sincrona, pero la cache de escritura del disco

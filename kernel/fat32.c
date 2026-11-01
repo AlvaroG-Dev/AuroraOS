@@ -3672,6 +3672,8 @@ static vfs_fs_ops_t fat32_fs_ops = {
     .lookup = fat32_lookup,
     .statfs = fat32_statfs,
     .name = "fat32",
+    .umount = fat32_umount,
+    .sync = fat32_sync,
 };
 
 vfs_fs_ops_t *fat32_get_vfs_ops(void) { return &fat32_fs_ops; }

@@ -98,6 +98,12 @@ typedef struct vfs_stat {
   uint32_t uid;
   uint32_t gid;
   uint32_t rdev; // [4.4] Nuevo
+  // [ext2 E0.1] 0 = el FS no lo sabe: syscall.c usa el valor de siempre
+  // (nlink 1/2, atime=ctime=mtime, blocks = size/512).
+  uint32_t nlink;
+  int64_t atime_sec;
+  int64_t ctime_sec;
+  uint64_t blocks; // en unidades de 512 bytes
 } vfs_stat_t;
 
 typedef struct vfs_dirent {
@@ -271,6 +277,13 @@ struct vfs_node {
   // byte-count. vfs_read_for_proc avanzará f->offset en 1 tras cada
   // read() en lugar de por bytes leídos. Lo usa /dev/kmsg.
   int offset_is_index;
+
+  // [ext2 E0.1] Metadatos que solo conocen los FS con inodos reales. 0 = el
+  // FS no los rellena (stat usa el valor por defecto).
+  uint32_t nlink;
+  int64_t atime_sec;
+  int64_t ctime_sec;
+  uint64_t blocks; // unidades de 512 bytes
 };
 
 // ---------------------------------------------------------------------------
@@ -292,6 +305,13 @@ struct vfs_fs_ops {
 
   // [4.1] Rellena `out` con info del FS. Opcional.
   int (*statfs)(void *fs_priv, struct vfs_statfs *out);
+
+  // [ext2 E0.1] Opcionales (NULL = nada que hacer).
+  //   umount: libera el estado del FS tras quitarlo de la tabla de mounts
+  //     (lo llama vfs_umount_fs; vfs_umount a secas NO lo llama).
+  //   sync:   vuelca la caché sucia del FS al medio (sync(2), apagado).
+  void (*umount)(void *fs_priv);
+  int (*sync)(void *fs_priv);
 };
 
 typedef struct file_descriptor {
@@ -333,6 +353,26 @@ int vfs_mount(const char *path, vfs_fs_ops_t *ops, void *fs_priv);
 // Desmonta el FS en `path`. Devuelve 0 si OK, -ENOENT si no existe,
 // -EBUSY si hay otro mount anidado bajo ese path.
 int vfs_umount(const char *path);
+
+// [ext2 E0.1] Banderas de montaje (valores MS_* de Linux).
+#define VFS_MS_RDONLY 1
+#define VFS_MS_NOSUID 2
+#define VFS_MS_NODEV 4
+#define VFS_MS_NOEXEC 8
+#define VFS_MS_SYNCHRONOUS 16
+#define VFS_MS_NOATIME 1024
+
+// Como vfs_umount, pero: -EBUSY si algún proceso tiene un fd o su cwd bajo
+// `path`; vuelca el FS (ops->sync) y llama a ops->umount(priv) (libera el
+// estado). Es lo que usa umount2(2).
+int vfs_umount_fs(const char *path);
+
+// Banderas (VFS_MS_*) del montaje que cubre `path`; 0 si ninguna.
+unsigned long vfs_mount_flags(const char *path);
+// Cambia las banderas del montaje que está exactamente en `path`.
+int vfs_set_mount_flags(const char *path, unsigned long mflags);
+// Vuelca todos los FS montados con ops->sync. Devuelve 0 si todos OK.
+int vfs_sync_all(void);
 
 // [2.2] pivot_root.
 //
@@ -401,7 +441,7 @@ int vfs_symlink(const char *target, const char *linkpath);
 //   -ENOENT      directorio padre no existe
 //   -ENOTDIR     algún componente intermedio no es directorio
 //   -EEXIST      ya existe un archivo/dir con ese nombre
-//   -EROFS       el FS es read-only
+//   -EROFS       el FS es read-only (o montado con VFS_MS_RDONLY)
 //   -ENAMETOOLONG nombre no cabe (p.ej. >8.3 en FAT32 sin LFN)
 //   -EINVAL      path inválido (raíz, "..", etc.)
 int vfs_create(const char *path, uint32_t mode);
@@ -426,7 +466,7 @@ int vfs_readdir(const char *path, uint64_t index, vfs_dirent_t *out);
 
 // [PR RENAME] Renombra o mueve `oldpath` a `newpath`.
 //   -ENOENT   src no existe
-//   -EEXIST   dst ya existe (no soportamos overwrite todavía)
+//   (si dst existe, el FS decide: tmpfs y FAT32 sobrescriben como POSIX)
 //   -EXDEV    src y dst en FS distintos
 //   -EINVAL   path inválido
 int vfs_rename(const char *oldpath, const char *newpath);
