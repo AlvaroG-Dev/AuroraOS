@@ -348,6 +348,21 @@ int main(int argc, char **argv) {
         } else if (ll == 6 && !strncmp(lp, "prompt", 6)) {
           login_mode = 2;
         }
+      } else {
+        // [U5b] aur.session=user:<n> sin aur.login: entra directo como ese usuario.
+        char *sp = find_sub(cl, "aur.session=user:");
+        if (sp) {
+          sp += 17;
+          size_t sl = 0;
+          while (sp[sl] && sp[sl] != ' ' && sp[sl] != '\t' && sp[sl] != '\r' &&
+                 sp[sl] != '\n')
+            sl++;
+          if (sl && sl < sizeof(login_user)) {
+            memcpy(login_user, sp, sl);
+            login_user[sl] = '\0';
+            login_mode = 1;
+          }
+        }
       }
     }
   }

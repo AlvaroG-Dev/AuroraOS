@@ -18,6 +18,8 @@
 //     launcher (taskbar, Ctrl+Alt+T, ...). Pendiente Fase 4.
 
 #include <errno.h>
+#include <grp.h>
+#include <pwd.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -128,6 +130,74 @@ static void gpu_env_setup(void) {
   }
 }
 
+// [U5b] aur.session=user:<nombre>: el compositor y sus apps corren como ese
+// usuario (instalado). Sin el parametro, todo sigue como root (live).
+static struct passwd g_sess_pw;
+static char g_sess_buf[512];
+static int g_sess_ok;
+static char g_sess_env[4][160];
+static char *g_sess_envp[96];
+
+static void session_init(void) {
+  char cl[1024];
+  int fd = open("/proc/cmdline", O_RDONLY);
+  ssize_t n = fd >= 0 ? read(fd, cl, sizeof(cl) - 1) : -1;
+  if (fd >= 0)
+    close(fd);
+  if (n <= 0)
+    return;
+  cl[n] = '\0';
+  char *p = strstr(cl, "aur.session=user:");
+  if (!p)
+    return;
+  p += 17;
+  char name[64];
+  size_t l = strcspn(p, " \t\r\n");
+  if (l == 0 || l >= sizeof(name))
+    return;
+  memcpy(name, p, l);
+  name[l] = '\0';
+  struct passwd *res = NULL;
+  if (getpwnam_r(name, &g_sess_pw, g_sess_buf, sizeof(g_sess_buf), &res) != 0 ||
+      !res || res->pw_uid == 0) {
+    fprintf(stderr, "init: aur.session=user:%s: usuario no valido, sigo como root\n", name);
+    return;
+  }
+  g_sess_ok = 1;
+  // Entorno de la sesion: igual que default_envp con HOME/USER/XDG propios.
+  snprintf(g_sess_env[0], 160, "XDG_RUNTIME_DIR=/run/user/%u", res->pw_uid);
+  snprintf(g_sess_env[1], 160, "HOME=%s", res->pw_dir);
+  snprintf(g_sess_env[2], 160, "USER=%s", res->pw_name);
+  snprintf(g_sess_env[3], 160, "LOGNAME=%s", res->pw_name);
+  int j = 0;
+  for (int i = 0; default_envp[i] && j < 90; i++) {
+    const char *e = default_envp[i];
+    if (!strncmp(e, "XDG_RUNTIME_DIR=", 16) || !strncmp(e, "HOME=", 5) ||
+        !strncmp(e, "USER=", 5) || !strncmp(e, "LOGNAME=", 8))
+      continue;
+    g_sess_envp[j++] = default_envp[i];
+  }
+  for (int i = 0; i < 4; i++)
+    g_sess_envp[j++] = g_sess_env[i];
+  g_sess_envp[j] = NULL;
+
+  // Directorios de la sesion (los crea root antes de bajar privilegios).
+  char rt[64];
+  snprintf(rt, sizeof(rt), "/run/user/%u", res->pw_uid);
+  mkdir(rt, 0700);
+  chown(rt, res->pw_uid, res->pw_gid);
+  static const char *const own[] = {"/tmp/.config", "/tmp/.config/gtk-4.0",
+                                    "/tmp/.cache", "/tmp/.local",
+                                    "/tmp/.local/share", NULL};
+  for (int i = 0; own[i]; i++) {
+    mkdir(own[i], 0755);
+    chown(own[i], res->pw_uid, res->pw_gid);
+  }
+  printf("init: sesion de usuario %s (uid %u)\n", res->pw_name, res->pw_uid);
+}
+
+static char **session_envp(void) { return g_sess_ok ? g_sess_envp : default_envp; }
+
 static pid_t spawn_terminal(void) {
   pid_t pid = fork();
   if (pid < 0) {
@@ -136,7 +206,7 @@ static pid_t spawn_terminal(void) {
   }
   if (pid == 0) {
     char *argv[] = {(char *)TERMINAL_PATH, NULL};
-    execve(TERMINAL_PATH, argv, default_envp);
+    execve(TERMINAL_PATH, argv, session_envp());
     perror("init: execve " TERMINAL_PATH);
     _exit(127);
   }
@@ -162,7 +232,15 @@ static pid_t spawn_wayland(void) {
         close(fd);
     }
     char *argv[] = {(char *)WAYLAND_PATH, NULL};
-    execve(WAYLAND_PATH, argv, default_envp);
+    if (g_sess_ok) {
+      // [U5b] compositor sin root; los nodos /dev dan acceso por grupo.
+      if (initgroups(g_sess_pw.pw_name, g_sess_pw.pw_gid) != 0 ||
+          setgid(g_sess_pw.pw_gid) != 0 || setuid(g_sess_pw.pw_uid) != 0) {
+        fprintf(stderr, "init: no pude bajar privilegios del compositor\n");
+        _exit(127);
+      }
+    }
+    execve(WAYLAND_PATH, argv, session_envp());
     _exit(127);
   }
   return pid;
@@ -210,8 +288,9 @@ static void setup_gtk4_config(void) {
 int main(void) {
   setup_gtk4_config();
   gpu_env_setup();
+  session_init();
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
-  int testing = access("/system/boot-tests", F_OK) == 0;
+  int testing = access("/system/boot-tests", F_OK) == 0 && !g_sess_ok;
   run_boot_tests();
   pid_t term = spawn_terminal();
   pid_t wl = testing ? -1 : spawn_wayland();

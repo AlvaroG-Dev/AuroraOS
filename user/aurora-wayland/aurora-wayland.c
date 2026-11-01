@@ -4911,7 +4911,7 @@ int main(int argc, char **argv) {
   /* [U5] Sesiones de usuarios no root: enlaza el socket en cada
    * /run/user/<uid> existente (el compositor sigue como root; /run/user/0 es
    * 0711, asi que los clientes lo atraviesan sin poder listarlo). */
-  {
+  if (geteuid() == 0) {
     struct passwd *pw;
     setpwent();
     while ((pw = getpwent())) {
