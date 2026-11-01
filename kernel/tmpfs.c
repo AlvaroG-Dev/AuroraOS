@@ -23,6 +23,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
+#include "pmm.h"
 #include "rtc.h"
 #include "string.h"
 #include "uaccess.h"
@@ -998,7 +999,14 @@ void tmpfs_init(void) {
   // ---------------------------------------------------------------------
   // [2] /tmp
   // ---------------------------------------------------------------------
-  void *tmp = tmpfs_new(64 * 1024 * 1024);
+  // [Plan_GCC K4] /tmp = 1/4 de la RAM, entre 64 MB y 1 GB (antes fijo a
+  // 64 MB: cc1, ld, ar y tar de un build real no cabian).
+  uint64_t tmp_mb = (pmm_total_usable_pages() * 4096ULL / 4) >> 20;
+  if (tmp_mb < 64)
+    tmp_mb = 64;
+  if (tmp_mb > 1024)
+    tmp_mb = 1024;
+  void *tmp = tmpfs_new((size_t)tmp_mb * 1024 * 1024);
   if (!tmp) {
     LOG_ERR("[TMPFS] sin memoria para /tmp");
   } else {
@@ -1007,7 +1015,7 @@ void tmpfs_init(void) {
       LOG_ERR("[TMPFS] mount /tmp: %d", rc);
       tmpfs_destroy(tmp);
     } else {
-      LOG_INFO("[TMPFS] /tmp montado (64 MB)");
+      LOG_INFO("[TMPFS] /tmp montado (%llu MB)", (unsigned long long)tmp_mb);
     }
   }
 

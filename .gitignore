@@ -77,3 +77,4 @@ kernel/.deps-stamp
 /build/drive-aurora.conf
 /build/mbr_part2.hex
 drivers/kur/nvprobe/nvprobe.kur
+build/devtools/

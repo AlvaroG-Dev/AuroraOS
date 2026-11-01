@@ -406,6 +406,14 @@ Estimación gruesa (una persona + asistente, sin contar `Plan_Ext2`): G0–G2 �
 
 ---
 
+## 11b. Avance (2026-11-01)
+
+- **K5 hecho:** `MAX_PROCESS_FDS` 256 → 1024 (`kernel/vfs.h`). Compila; sin probar en QEMU.
+- **K4 hecho:** `/tmp` = 1/4 de la RAM entre 64 MB y 1 GB (`kernel/tmpfs.c`). Compila; sin probar en QEMU.
+- **K6 (parte herramienta) hecho:** `scripts/aurora-config-sub.sh` parchea `config.sub`/`config.guess` para `x86_64-pc-aurora-gnu`; `--selftest` OK con el config.sub de Ubuntu.
+- **G2.1 (parte descarga) hecho:** `scripts/fetch-devtools.sh` baja 49 .deb (gcc-13, g++-13, binutils, make, libc6-dev, libstdc++-13-dev, nasm, patch, m4 y dependencias) y extrae 242 MB a `build/devtools/root`; `--img` genera `build/aurora-devtools.img` (FAT32, symlinks copiados). La imagen no se ha probado en AuroraOS.
+- **Pendiente de G0:** K1 (`VFS_PATH_MAX`, cambio grande y delicado), K2 (`rename` con sobrescritura, se coordina con `Plan_Ext2` E0), G0.2 (mover cabeceras musl de tcc), G0.1 (auditoría de syscalls en QEMU), `uname`/`os-release`.
+
 ## 12. Primeros pasos concretos (si Alvaro dice "adelante")
 
 1. G0.1–G0.4 (limpiar cabeceras de `/usr/include`, subir límites, tests de smoke).

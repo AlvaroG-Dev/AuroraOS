@@ -54,7 +54,7 @@
 #define VFS_W_OK 2
 #define VFS_R_OK 4
 
-#define MAX_PROCESS_FDS 256
+#define MAX_PROCESS_FDS 1024 // make -jN y ld necesitan > 256 (Plan_GCC K5)
 
 // Longitud máxima de un path normalizado (coincide con name[] de vfs_node).
 #define VFS_PATH_MAX 128
