@@ -314,7 +314,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
 // Ctrl-Alt-Supr
 // ---------------------------------------------------------------------------
 static volatile int g_cad_pending;
-static volatile int g_cad_hard;
+static volatile int g_cad_hard = 1; // como Linux: reinicio directo hasta que init pida CAD_OFF
 
 void power_cad(void) { g_cad_pending = 1; }
 void power_cad_set(int hard_reboot) { g_cad_hard = !!hard_reboot; }
