@@ -71,5 +71,19 @@ sudo id                   # uid=0 (alvaro está en wheel)
 ```
 **Aviso:** con esta opción los programas gráficos lanzados desde ese shell aún no conectan con el escritorio (llega con U5). Para volver atrás, quita `aur.login=...`.
 
+## 6. Sesión gráfica como usuario (U5a/U5b)
+En `bootloader/aurora.conf` **añade** al final de tu `cmdline=` actual (no borres lo que ya tengas):
+`aur.session=user:alvaro`
+Ejemplo Portégé: `cmdline=aur.session=user:alvaro`. Ejemplo 4060: `cmdline=nvidia-drm.vblank=1 aur.session=user:alvaro`.
+Antes de arrancar (una vez, como root): `printf 'video:x:44:alvaro\ninput:x:104:alvaro\nrender:x:105:alvaro\n' >> /etc/group && sync`
+
+Pruebas (en la terminal que se abre, ya como alvaro):
+1. `id` → `uid=1000(alvaro)`, con grupos `wheel video input render`.
+2. `echo $XDG_RUNTIME_DIR; ls -l /run/user/1000` → `/run/user/1000`, con `wayland-0`.
+3. Escritorio: ¿arranca, se mueve el ratón y responde el teclado? (`ls -l /dev/input/event0` debe ser grupo 104).
+4. Abrir una app gráfica desde el Dock y otra desde la terminal (p. ej. `xterm`). Si falla, mira `ps` y `dmesg | tail -60`.
+5. `touch /etc/x` (debe fallar), `sudo id` (uid=0) y, tras `sync` y reiniciar, `id` sigue igual.
+Volver atrás: quita `aur.session=...` y todo vuelve a root.
+
 ## Qué enviarme si algo falla
 Salida del comando que falla y `dmesg | tail -60` (o la foto del F12). Un apagado brusco sin `sync`/`poweroff` pierde los cambios de la sesión: es lo esperado.
