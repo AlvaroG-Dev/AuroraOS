@@ -6,6 +6,7 @@ export XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=wayland-0
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 export GBM_BACKENDS_PATH=/usr/lib/x86_64-linux-gnu/gbm
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export __NV_DISABLE_EXPLICIT_SYNC=${NVWL_NOSYNC:-1}
 export EGL_PLATFORM=wayland EGL_LOG_LEVEL=debug WAYLAND_DEBUG=${WAYLAND_DEBUG:-0}
 T=${1:-8}; CLI=${2:-aw_nvwl_test}
 if ! ls $XDG_RUNTIME_DIR/wayland-0 >/dev/null 2>&1; then
@@ -18,12 +19,13 @@ run_one() { # nombre json extra-env
   timeout $T $CLI >/tmp/nvwl-$NAME.out 2>&1
   RC=$?
   echo "NVWL[$NAME] rc=$RC (124 = siguio dibujando hasta el timeout = OK)" > /dev/kmsg
-  echo "NVWL[$NAME] out: $(grep -a '^\[aw_nvwl\]' /tmp/nvwl-$NAME.out | grep -av 'mod\[' | head -100 | tr '\n' '|')" > /dev/kmsg
-  echo "NVWL[$NAME] err: $(grep -av '^\[aw_nvwl\]' /tmp/nvwl-$NAME.out | head -c 1500 | tr '\n' '|')" > /dev/kmsg
+  echo "NVWL[$NAME] out: $(grep -a '^\[aw_nvwl\]' /tmp/nvwl-$NAME.out | sed '/mod\[/d' | head -100 | tr '\n' '|')" > /dev/kmsg
+  echo "NVWL[$NAME] err: $(sed '/^\[aw_nvwl\]/d' /tmp/nvwl-$NAME.out | head -c 1500 | tr '\n' '|')" > /dev/kmsg
   echo "=== $NAME rc=$RC ==="
-  grep -a '^\[aw_nvwl\]' /tmp/nvwl-$NAME.out | grep -av 'mod\[' | head -40
-  grep -av '^\[aw_nvwl\]' /tmp/nvwl-$NAME.out | head -5
+  grep -a '^\[aw_nvwl\]' /tmp/nvwl-$NAME.out | sed '/mod\[/d' | head -40
+  sed '/^\[aw_nvwl\]/d' /tmp/nvwl-$NAME.out | head -5
 }
+# Cliente propio: nvwl.sh 40 weston-simple-egl  (usa wayland2 si NVWL_PLATFORM=/usr/share/egl/egl_external_platform.d/09_nvidia_wayland2.json)
 # Con NVWL_PLATFORM se prueba solo esa; sin el, las dos: egl-wayland (1.x) y egl-wayland2 sin explicit sync.
 if [ -n "$NVWL_PLATFORM" ]; then
   run_one custom "$NVWL_PLATFORM" ""
