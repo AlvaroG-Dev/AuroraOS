@@ -27,6 +27,7 @@
 #include "elf.h"
 #include "bcache.h"
 #include "fat32.h"
+#include "fsprobe.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
 #include "gfx/theme.h"
@@ -627,10 +628,30 @@ static void save_prev_log_to_data(void) {
   kfree(buf);
 }
 
+// Registra una sola vez el tipo detectado de cada dispositivo. Devuelve 1 si
+// es ext2/3/4: aún no hay driver, así que no se prueba como FAT32 (daría un
+// aviso de BPB inválido en cada reintento).
+static int boot_probe_is_ext2(block_device_t *b) {
+  static char seen[16][16];
+  enum fs_kind k = fs_probe(b);
+  for (int i = 0; i < 16; i++)
+    if (strcmp(seen[i], b->name) == 0)
+      return k == FS_EXT2;
+  for (int i = 0; i < 16; i++)
+    if (!seen[i][0]) {
+      strncpy(seen[i], b->name, sizeof(seen[i]) - 1);
+      LOG_INFO("[FSPROBE] %s: %s", b->name, fs_kind_name(k));
+      break;
+    }
+  return k == FS_EXT2;
+}
+
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
+      continue;
+    if (boot_probe_is_ext2(b))
       continue;
     if (fat32_mount_bdev(b->name, "/data") == 0) {
       LOG_INFO("[INIT] Montado %s en /data", b->name);
@@ -641,6 +662,8 @@ static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || !b->is_partition || b->is_read_only)
+      continue;
+    if (boot_probe_is_ext2(b))
       continue;
     if (fat32_mount_bdev(b->name, "/data") == 0) {
       LOG_INFO("[INIT] Montado %s en /data", b->name);

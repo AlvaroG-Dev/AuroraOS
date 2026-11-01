@@ -6554,6 +6554,7 @@ REGISTER_TEST_FLAGS("linuxkpi: descarga de la capa", test_lkpi_unload, TEST_FLAG
 // [ext2 E0.2] bcache sobre un disco RAM (no toca ningún disco real).
 // ===========================================================================
 #include "../bcache.h"
+#include "../fsprobe.h"
 
 static uint8_t *g_bc_ram;
 static int g_bc_writes;
@@ -6657,3 +6658,33 @@ static void test_bcache_basic(void) {
   g_bc_ram = NULL;
 }
 REGISTER_TEST("bcache: lectura, write-back, expulsión", test_bcache_basic);
+
+static void test_fsprobe_signatures(void) {
+  const uint32_t SECT = 512, NSECT = 128;
+  g_bc_ram = kzalloc(SECT * NSECT);
+  TEST_ASSERT(g_bc_ram != NULL, "sin memoria");
+  if (!g_bc_ram)
+    return;
+  block_device_t dev;
+  memset(&dev, 0, sizeof(dev));
+  strcpy(dev.name, "fpram0");
+  dev.num_sectors = NSECT;
+  dev.sector_size = SECT;
+  dev.ops = &bc_ram_ops;
+
+  TEST_ASSERT(fs_probe(&dev) == FS_UNKNOWN, "disco vacío");
+  g_bc_ram[1024 + 56] = 0x53;
+  g_bc_ram[1024 + 57] = 0xEF;
+  TEST_ASSERT(fs_probe(&dev) == FS_EXT2, "ext2 por s_magic");
+  memset(g_bc_ram, 0, SECT * NSECT);
+  memcpy(g_bc_ram + 82, "FAT32   ", 8);
+  g_bc_ram[510] = 0x55;
+  g_bc_ram[511] = 0xAA;
+  TEST_ASSERT(fs_probe(&dev) == FS_FAT32, "FAT32 por BPB");
+  memset(g_bc_ram, 0, SECT * NSECT);
+  memcpy(g_bc_ram + 32769, "CD001", 5);
+  TEST_ASSERT(fs_probe(&dev) == FS_UNKNOWN, "iso fuera de rango (disco pequeño)");
+  kfree(g_bc_ram);
+  g_bc_ram = NULL;
+}
+REGISTER_TEST("fsprobe: firmas ext2/FAT32", test_fsprobe_signatures);
