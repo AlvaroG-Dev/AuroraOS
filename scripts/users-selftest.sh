@@ -31,4 +31,6 @@ t xdg_su 'run/user/1000' bash -c 'su alvaro -c "echo \$XDG_RUNTIME_DIR"'
 t run0_atravesable 'drwx--x--x' bash -c 'ls -ld /run/user/0'
 t input_grupo '104' bash -c 'ls -ln /dev/input/event0'
 t grupo_video 'video' bash -c 'su alvaro -c "id -Gn"'
+t touch_ajeno 'denied|Permission|permitido|not permitted' bash -c 'su alvaro -c "touch /etc/hosts" 2>&1; true'
+t link_tmp 'ok' bash -c 'su alvaro -c "echo x > /tmp/lk1 && ln /tmp/lk1 /tmp/lk2 && cat /tmp/lk2 && echo ok" 2>&1'
 echo "[users] RESULT pass=$ok fail=$bad"

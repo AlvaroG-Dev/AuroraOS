@@ -424,6 +424,64 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
   return 0;
 }
 
+// link(2): tmpfs no comparte nodos entre nombres, asi que el enlace duro de un
+// fichero regular se emula con una COPIA (nlink=1, sin identidad compartida).
+// Basta para el patron habitual link(tmp, lock) + unlink(tmp) (locks de X11).
+static int tmpfs_link_op(vfs_node_t *dir_vn, const char *name,
+                         vfs_node_t *target) {
+  tmpfs_node_t *dir = (tmpfs_node_t *)dir_vn->priv;
+  tmpfs_node_t *src = target ? (tmpfs_node_t *)target->priv : NULL;
+  if (!dir || !dir->fs || !src || src->fs != dir->fs)
+    return -EXDEV;
+  if ((dir->mode & S_IFMT) != S_IFDIR)
+    return -ENOTDIR;
+  if ((src->mode & S_IFMT) != S_IFREG)
+    return -EPERM;
+  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+    return -EINVAL;
+  tmpfs_fs_t *fs = dir->fs;
+  mutex_lock(&fs->lock);
+  if (lookup_child_locked(dir, name)) {
+    mutex_unlock(&fs->lock);
+    return -EEXIST;
+  }
+  if (src->capacity && fs->used_bytes + src->capacity > fs->max_bytes) {
+    mutex_unlock(&fs->lock);
+    return -ENOSPC;
+  }
+  tmpfs_node_t *n = (tmpfs_node_t *)kzalloc(sizeof(*n));
+  if (!n) {
+    mutex_unlock(&fs->lock);
+    return -ENOMEM;
+  }
+  if (src->capacity) {
+    n->data = (uint8_t *)kmalloc(src->capacity);
+    if (!n->data) {
+      kfree(n);
+      mutex_unlock(&fs->lock);
+      return -ENOMEM;
+    }
+    memcpy(n->data, src->data, src->size);
+    n->capacity = src->capacity;
+    fs->used_bytes += src->capacity;
+  }
+  size_t l = strlen(name);
+  memcpy(n->name, name, l);
+  n->name[l] = '\0';
+  n->mode = src->mode;
+  n->uid = src->uid;
+  n->gid = src->gid;
+  n->size = src->size;
+  n->mtime = rtc_get_epoch();
+  n->inode = fs->next_inode++;
+  n->nlink = 1;
+  n->fs = fs;
+  link_child_locked(dir, n);
+  dir->mtime = n->mtime;
+  mutex_unlock(&fs->lock);
+  return 0;
+}
+
 static int tmpfs_unlink_op(vfs_node_t *dir_vn, const char *name) {
   tmpfs_node_t *dir = (tmpfs_node_t *)dir_vn->priv;
   if (!dir || !dir->fs)
@@ -685,6 +743,7 @@ static vfs_ops_t tmpfs_dir_ops = {
     .mknod = tmpfs_mknod_op,
     .mkdir = tmpfs_mkdir_op,
     .unlink = tmpfs_unlink_op,
+    .link = tmpfs_link_op,
     .rename = tmpfs_rename_op,
     .symlink = tmpfs_symlink_op,
     .readdir = tmpfs_readdir_op,

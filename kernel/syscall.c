@@ -4641,6 +4641,16 @@ struct k_ts64 {
   int64_t tv_nsec;
 };
 
+// [U1] utimensat: hora concreta = dueño o root; NULL/UTIME_NOW = dueño, root
+// o con permiso de escritura.
+static int utimes_permitted(process_t *proc, vfs_node_t *node, int explicit_time) {
+  if (proc->euid == 0 || proc->fsuid == node->uid)
+    return 0;
+  if (explicit_time)
+    return -EPERM;
+  return vfs_check_access(node, 2) == 0 ? 0 : -EACCES;
+}
+
 static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
                            uint64_t times_uptr, uint64_t flags, uint64_t a5) {
   (void)a5;
@@ -4651,6 +4661,7 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     return -EINVAL; // solo AT_SYMLINK_NOFOLLOW
 
   int64_t mtime_sec = 0;
+  int ut_explicit = 0; // hora concreta: solo dueño/root (Linux); si no, basta escribir
   if (times_uptr) {
     struct k_ts64 times[2];
     if (!access_ok((void *)times_uptr, sizeof(times)))
@@ -4661,8 +4672,10 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
       return 0;
     if (times[1].tv_nsec == UTIME_NOW)
       mtime_sec = rtc_get_epoch();
-    else
+    else {
       mtime_sec = times[1].tv_sec;
+      ut_explicit = 1;
+    }
   } else {
     mtime_sec = rtc_get_epoch();
   }
@@ -4679,6 +4692,11 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     vfs_node_t *node = proc->fds[kfd]->node;
     if (!node)
       return -EBADF;
+    {
+      int prc = utimes_permitted(proc, node, ut_explicit);
+      if (prc)
+        return prc;
+    }
     if (node->ops && node->ops->utimes)
       return node->ops->utimes(node, mtime_sec);
     return 0;
@@ -4691,6 +4709,15 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
   if (rc != 0) {
     return rc;
+  }
+  {
+    vfs_node_t *un = vfs_lookup(path);
+    if (un) {
+      int prc = utimes_permitted(proc, un, ut_explicit);
+      vfs_node_free(un);
+      if (prc)
+        return prc;
+    }
   }
   return vfs_utimes(path, mtime_sec);
 }
