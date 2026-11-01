@@ -18,11 +18,34 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SYSROOT="$ROOT/sysroot"
 
-# Detectar versión del host.
-HOST_PY="$(command -v python3 || true)"
+# Version de Python del GUEST: la del binario precompilado (python3.X). El
+# stdlib debe ser de esa misma version; si el host trae otra (p. ej. 3.14 en
+# Kali), se busca un python3.X en el host y, si no hay, se omite sin romper
+# la build (la ISO arranca igual, solo sin stdlib de Python).
+GUEST_VER=""
+for f in "$ROOT"/precompiled/usr/bin/python3.[0-9]*; do
+    [ -e "$f" ] || continue
+    GUEST_VER="${f##*/python}"
+    break
+done
+
+HOST_PY=""
+if [ -n "$GUEST_VER" ]; then
+    HOST_PY="$(command -v "python$GUEST_VER" || true)"
+fi
 if [ -z "$HOST_PY" ]; then
-    echo "!! no encuentro python3 en el host" >&2
-    exit 1
+    CAND="$(command -v python3 || true)"
+    if [ -n "$CAND" ]; then
+        CAND_VER="$("$CAND" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+        if [ -z "$GUEST_VER" ] || [ "$CAND_VER" = "$GUEST_VER" ]; then
+            HOST_PY="$CAND"
+        fi
+    fi
+fi
+if [ -z "$HOST_PY" ]; then
+    echo "!! aviso: el guest usa Python ${GUEST_VER:-?} y el host no tiene esa version;" >&2
+    echo "   se omite el stdlib de Python (instala python${GUEST_VER:-3} en el host para incluirlo)." >&2
+    exit 0
 fi
 
 HOST_VER="$("$HOST_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
@@ -30,7 +53,7 @@ SRC="$("$HOST_PY" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
 
 if [ ! -d "$SRC" ]; then
     echo "!! stdlib del host no encontrado en $SRC" >&2
-    exit 1
+    exit 0
 fi
 
 DST="$SYSROOT/usr/lib/python${HOST_VER}"
