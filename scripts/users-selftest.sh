@@ -24,4 +24,6 @@ t sudo_wheel 'uid=0' bash -c 'su testu -c "sudo id"'
 t sudo_no_wheel 'no pertenece' bash -c 'useradd plain >/dev/null 2>&1; su plain -c "sudo id"; true'
 t login_force 'testu' bash -c 'echo id | aurora-login -f testu'
 t no_lee_shadow 'denegado|Permission|denied|No such' bash -c 'su testu -c "cat /etc/shadow"; true'
+t chown_cmd '1000 1000' bash -c 'mkdir -p /data/pr && touch /data/pr/f && chown 1000:1000 /data/pr/f && ls -ln /data/pr/f | awk "{print \$3, \$4}"'
+t sync_cmd 'ok' bash -c 'sync && echo ok'
 echo "[users] RESULT pass=$ok fail=$bad"

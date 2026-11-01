@@ -4620,6 +4620,18 @@ static int64_t k_lchown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
   return k_chown(path_ptr, uid, gid, a4, a5);
 }
 
+// fchownat(dfd, path, uid, gid, flags): coreutils chown usa esta.
+static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
+                          uint64_t gid, uint64_t flags) {
+  if (flags & ~0x1100ULL) // AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    return -EINVAL;
+  if ((flags & 0x1000ULL) && (!path_ptr || !*(const char *)path_ptr))
+    return k_fchown(dfd, uid, gid, 0, 0);
+  if (((const char *)path_ptr)[0] != '/' && (int)dfd != AT_FDCWD)
+    return -EINVAL;
+  return k_chown(path_ptr, uid, gid, 0, 0);
+}
+
 // ---------- [4.2] utimensat ----------
 #define UTIME_NOW 0x3FFFFFFFLL
 #define UTIME_OMIT 0x3FFFFFFELL
@@ -7269,6 +7281,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_STAT] = {k_stat, "stat"},
     [SYS_FSTAT] = {k_fstat, "fstat"},
     [SYS_FCHMODAT] = {k_fchmodat, "fchmodat"},
+    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},

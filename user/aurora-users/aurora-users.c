@@ -652,6 +652,10 @@ int main(int argc, char **argv) {
     return cmd_passwd(argc, argv);
   if (!strcmp(b, "aurora-useradd") || !strcmp(b, "useradd"))
     return cmd_useradd(argc, argv);
+  if (!strcmp(b, "sync")) {
+    sync();
+    return 0;
+  }
   if (!strcmp(b, "aurora-sudo") || !strcmp(b, "sudo"))
     return cmd_sudo(argc, argv);
   fprintf(stderr, "aurora-users: llamar como aurora-login|su|passwd|useradd|sudo (era '%s')\n", b);
