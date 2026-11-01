@@ -308,7 +308,12 @@ int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end) {
   rn->name[1] = '\0';
   rn->flags = VFS_FILE;
   rn->size = 0;
-  rn->inode = 0;
+  // S_IFIFO + inodo unico por tuberia: GNU grep compara dev/ino de stdin y stdout
+  // (si ambos parecen el mismo fichero regular dice "input file is also the output").
+  static uint64_t g_pipe_ino = 0x40000000ull;
+  uint64_t pino = __atomic_add_fetch(&g_pipe_ino, 1, __ATOMIC_RELAXED);
+  rn->mode = 0010000 | 0600;
+  rn->inode = pino;
   rn->ops = &pipe_read_ops;
   rn->fs = NULL;
   rn->priv = re;
@@ -320,7 +325,8 @@ int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end) {
   wn->name[1] = '\0';
   wn->flags = VFS_FILE;
   wn->size = 0;
-  wn->inode = 0;
+  wn->mode = 0010000 | 0600;
+  wn->inode = pino;
   wn->ops = &pipe_write_ops;
   wn->fs = NULL;
   wn->priv = we;

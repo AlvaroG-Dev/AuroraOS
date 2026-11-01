@@ -12,7 +12,7 @@ NK=build/linuxkpi_src/nvidia-open/src/nvidia/_out/Linux_x86_64/nv-kernel.o
 [ -f "$NK" ] || { echo "falta $NK" >&2; exit 1; }
 ls $O/*.o >/dev/null
 CC=${KUR_CC:-gcc}
-CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
+CF="-std=gnu11 -fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
 
 $CC $CF -c kernel/linuxkpi/nvidia/nv_aurora_glue.c -o $B/glue.o
 ld -r -o $B/nvidia-all.o $O/*.o $B/glue.o "$NK"

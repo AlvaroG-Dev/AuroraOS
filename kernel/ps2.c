@@ -11,6 +11,7 @@
 #include "input.h"
 #include "aur_bus.h"
 #include "klog.h"
+#include "power.h"
 #include "sched.h"
 #include "serial.h"
 #include "tty.h" // [TTY]
@@ -229,6 +230,7 @@ static const char *ps2_plain_seq(uint8_t code) {
 static int left_shift_pressed = 0;
 static int right_shift_pressed = 0;
 static int ctrl_pressed = 0;
+static int alt_pressed = 0;
 
 // [6.1] Prefijo 0xE0 (scancode extendido). Set 1 usa 0xE0 delante de
 // las teclas que no caben en la tabla original: flechas, Home/End,
@@ -285,10 +287,22 @@ static void process_keyboard_byte(uint8_t sc) {
     extended_pending = 0;
     return;
   }
+  if (code == 0x38) { // Alt / AltGr (con o sin prefijo E0)
+    alt_pressed = pressed;
+    extended_pending = 0;
+    return;
+  }
 
   // Todo lo demás solo importa en press.
   if (!pressed) {
     extended_pending = 0;
+    return;
+  }
+
+  // Ctrl-Alt-Supr (Supr = 0x53, con o sin E0)
+  if (code == 0x53 && ctrl_pressed && alt_pressed) {
+    extended_pending = 0;
+    power_cad();
     return;
   }
 

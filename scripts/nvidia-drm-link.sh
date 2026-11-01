@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 B=build/nvidia-kpi/drm; O=$B/obj
 CC=${KUR_CC:-gcc}
-CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
+CF="-std=gnu11 -fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
 n=$(ls $O/*.o | wc -l)
 [ "$n" -ge 20 ] || { echo "faltan objetos de nvidia-drm ($n de 20): mira $O/errors.txt" >&2; exit 1; }
 ld -r -o $B/drm-all.o $O/*.o

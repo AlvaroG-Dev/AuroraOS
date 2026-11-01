@@ -221,6 +221,14 @@ ipi_stub_resched:
     add rsp, 16
     iretq
 
+; IPI_VECTOR_HALT (0xFE): parar este CPU para siempre (apagado/reinicio).
+global ipi_stub_halt
+ipi_stub_halt:
+    cli
+.hang:
+    hlt
+    jmp .hang
+
 global ipi_stub_tlb
 ipi_stub_tlb:
     push 0

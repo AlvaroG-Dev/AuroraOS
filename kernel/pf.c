@@ -529,6 +529,15 @@ static int handle_page_fault_inner(registers_t *regs) {
     }
     LOG_ERR("[PF] PID=%u addr=%p rip=%p cr2=%p - not in any VMA",
             proc ? proc->pid : 0, (void *)cr2, (void *)regs->rip, (void *)cr2);
+    {
+      // Diagnostico: registros y direccion de retorno del llamador.
+      uint64_t ret = 0;
+      if (copy_from_user(&ret, (const void *)regs->rsp, sizeof(ret)) != 0)
+        ret = 0;
+      LOG_ERR("[PF]   rsp=%p ret=%p rdi=%p rsi=%p rax=%p rdx=%p",
+              (void *)regs->rsp, (void *)ret, (void *)regs->rdi,
+              (void *)regs->rsi, (void *)regs->rax, (void *)regs->rdx);
+    }
     kill_current_process(regs, "address not in any VMA");
     return 1;
   }

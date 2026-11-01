@@ -87,6 +87,129 @@ static void button_report(void) {
   aml_diag_power();
 }
 
+
+// ---------------------------------------------------------------------------
+// Boton de encendido por controlador embebido (portatiles como la Portege).
+//
+// El EC avisa de sus eventos con SCI_EVT (bit 5 del estado, puerto de
+// comandos). Se sondea ese bit y, si esta activo, se envia QR_EC (0x84) y se
+// lee el numero de consulta. Si la consulta corresponde a un _Qxx cuyo cuerpo
+// hace Notify(PNP0C0C, 0x80) (analisis estatico, ver aml_find_ec) se trata
+// como pulsacion. `acpi.ecbutton=0xNN` fuerza el numero de consulta del boton
+// si el analisis falla. Todas las consultas se registran en el log.
+// ---------------------------------------------------------------------------
+#define EC_OBF 0x01
+#define EC_IBF 0x02
+#define EC_SCI 0x20
+#define EC_QR 0x84
+
+static aml_ec_info_t g_ec;
+static int g_ec_force_q = -1;
+
+static int ec_wait(uint16_t cmd_port, uint8_t mask, int want_set) {
+  for (int i = 0; i < 50000; i++) {
+    uint8_t st = inb(cmd_port);
+    if (!!(st & mask) == want_set)
+      return 0;
+    inb(0x80); // ~1 us
+  }
+  return -1;
+}
+
+// Devuelve el numero de consulta (0..255), 0 si no habia, -1 si hay error.
+static int ec_query(void) {
+  if (ec_wait(g_ec.cmd_port, EC_IBF, 0))
+    return -1;
+  outb(g_ec.cmd_port, EC_QR);
+  if (ec_wait(g_ec.cmd_port, EC_OBF, 1))
+    return -1;
+  return inb(g_ec.data_port);
+}
+
+static int ec_is_button_q(int q) {
+  if (g_ec_force_q >= 0)
+    return q == g_ec_force_q;
+  return (g_ec.power_q[q >> 3] >> (q & 7)) & 1;
+}
+
+static int ec_button_thread(void *arg) {
+  (void)arg;
+  int logged = 0;
+  for (;;) {
+    wait_queue_t wq;
+    wait_queue_init(&wq);
+    wait_event_timeout(&wq, never_true, NULL, 200);
+    uint8_t st = inb(g_ec.cmd_port);
+    if (st == 0xFF)
+      continue; // sin EC / bus flotante
+    int budget = 8; // vaciar la cola de eventos sin quedarse en bucle
+    while ((st & EC_SCI) && budget--) {
+      int q = ec_query();
+      if (q < 0) {
+        if (logged++ < 5)
+          LOG_WARN("[ACPI] EC: fallo al leer la consulta (estado=0x%x)", st);
+        break;
+      }
+      if (q == 0)
+        break;
+      if (logged++ < 40)
+        LOG_INFO("[ACPI] EC: consulta _Q%02X%s", q,
+                 ec_is_button_q(q) ? " (boton de encendido)" : "");
+      if (ec_is_button_q(q) && !g_pressed) {
+        g_pressed = 1;
+        LOG_INFO("[ACPI] boton de encendido (EC)");
+        power_request(POWER_ACTION_OFF, "boton de encendido");
+      }
+      st = inb(g_ec.cmd_port);
+    }
+  }
+  return 0;
+}
+
+static int ec_button_init(void) {
+  char v[16];
+  if (cmdline_get("acpi.ec", v, sizeof(v)) && !strcmp(v, "0")) {
+    LOG_INFO("[ACPI] boton por EC desactivado por acpi.ec=0");
+    return -1;
+  }
+  if (aml_find_ec(&g_ec) != 0 || !g_ec.found) {
+    LOG_INFO("[ACPI] boton por EC: no hay dispositivo PNP0C09");
+    return -1;
+  }
+  LOG_INFO("[ACPI] EC: datos=0x%x comandos=0x%x (%s), %d metodos _Qxx, "
+           "%d notifican al boton",
+           g_ec.data_port, g_ec.cmd_port, g_ec.crs_ok ? "_CRS" : "por defecto",
+           g_ec.nq, g_ec.power_q_count);
+  if (cmdline_get("acpi.ecbutton", v, sizeof(v))) {
+    unsigned x = 0;
+    const char *p = v;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+      p += 2;
+    for (; *p; p++) {
+      int d = (*p >= '0' && *p <= '9')   ? *p - '0'
+              : (*p >= 'a' && *p <= 'f') ? *p - 'a' + 10
+              : (*p >= 'A' && *p <= 'F') ? *p - 'A' + 10
+                                         : -1;
+      if (d < 0)
+        break;
+      x = x * 16 + (unsigned)d;
+    }
+    g_ec_force_q = (int)(x & 0xFF);
+    LOG_INFO("[ACPI] EC: consulta del boton forzada a _Q%02X", g_ec_force_q);
+  } else if (!g_ec.power_q_count) {
+    LOG_WARN("[ACPI] EC: ningun _Qxx notifica al boton; pulsa el boton y "
+             "mira el log (acpi.ecbutton=0xNN lo fuerza)");
+  }
+  if (inb(g_ec.cmd_port) == 0xFF) {
+    LOG_WARN("[ACPI] EC: el puerto de comandos 0x%x lee 0xFF; sin EC",
+             g_ec.cmd_port);
+    return -1;
+  }
+  if (!kthread_run(ec_button_thread, NULL, "acpi-ec-button"))
+    return -1;
+  return 0;
+}
+
 int acpi_button_init(void) {
   char v[8];
   if (cmdline_get("acpi.button", v, sizeof(v)) && !strcmp(v, "0")) {
@@ -100,9 +223,12 @@ int acpi_button_init(void) {
   // Flag FIXED_PWR_BUTTON (bit 4): si esta a 1 el boton NO es fijo, lo
   // gestiona un dispositivo del espacio de nombres (EC).
   if (f->flags & (1u << 4)) {
-    LOG_INFO("[ACPI] boton de encendido por metodo de control: sin soporte aun");
+    LOG_INFO("[ACPI] boton de encendido por metodo de control (EC)");
     kthread_run(button_thread, NULL, "acpi-report"); // informe diferido
-    return -1;
+    // No se llama a acpi_pm_enable() aqui: activar el modo ACPI en el
+    // arranque (SMI_CMD) cambia el comportamiento del firmware (SCI, USB
+    // legacy) y no hace falta para sondear el EC.
+    return ec_button_init();
   }
   if (acpi_pm_enable() != 0)
     return -1;

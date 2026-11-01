@@ -321,8 +321,8 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	@for lib in libnss_dns.so.2 libnss_files.so.2 libnss_compat.so.2; do \
 		for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do \
 			if [ -e "$$d/$$lib" ]; then \
-				cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
-				cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
+				[ -e "sysroot/lib/x86_64-linux-gnu/$$lib" ] || cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
+				[ -e "sysroot/usr/lib/x86_64-linux-gnu/$$lib" ] || cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
 				echo "[Makefile]   nss: $$lib"; \
 				break; \
 			fi; \
@@ -333,16 +333,22 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 # libgcc_s.so.1.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando libgcc_s.so.1..."
-	@for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do \
-		if [ -e "$$d/libgcc_s.so.1" ]; then \
-			cp -Lf "$$d/libgcc_s.so.1" sysroot/lib/x86_64-linux-gnu/; \
-			mkdir -p sysroot/lib64 sysroot/usr/lib/x86_64-linux-gnu; \
-			cp -Lf "$$d/libgcc_s.so.1" sysroot/lib64/ 2>/dev/null || true; \
-			cp -Lf "$$d/libgcc_s.so.1" sysroot/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
-			echo "[Makefile]   libgcc_s: $$d"; \
-			break; \
-		fi; \
-	done
+	@if [ -e sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1 ]; then \
+		mkdir -p sysroot/lib64; \
+		[ -e sysroot/lib64/libgcc_s.so.1 ] || cp -Lf sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1 sysroot/lib64/; \
+		echo "[Makefile]   libgcc_s: la de libs/glibc"; \
+	else \
+		for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do \
+			if [ -e "$$d/libgcc_s.so.1" ]; then \
+				cp -Lf "$$d/libgcc_s.so.1" sysroot/lib/x86_64-linux-gnu/; \
+				mkdir -p sysroot/lib64 sysroot/usr/lib/x86_64-linux-gnu; \
+				cp -Lf "$$d/libgcc_s.so.1" sysroot/lib64/ 2>/dev/null || true; \
+				cp -Lf "$$d/libgcc_s.so.1" sysroot/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
+				echo "[Makefile]   libgcc_s (host): $$d"; \
+				break; \
+			fi; \
+		done; \
+	fi
 
 # ---------------------------------------------------------------------------
 # precompiled/.
@@ -360,10 +366,17 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	@scripts/build-users.sh
 
 # ---------------------------------------------------------------------------
-# Git HTTP(S) transport helper.
+# Git HTTP(S) transport helper. Sus dependencias del host NO pisan lo que ya
+# puso libs/glibc (libc.so.6, libm...): una libc del host de otra version junto
+# al ld.so de libs/glibc rompe todos los programas dinamicos.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando helper HTTP(S) de Git..."
 	@helper=/usr/lib/git-core/git-remote-http; \
+	host_glibc=$$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $$2}'); \
+	guest_glibc=$$(strings -a libs/glibc/lib/x86_64-linux-gnu/libc.so.6 2>/dev/null | sed -n 's/.*release version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -1); \
+	if [ -n "$$guest_glibc" ] && [ "$$host_glibc" != "$$guest_glibc" ]; then \
+		echo "[Makefile]   AVISO: glibc del host ($$host_glibc) != libs/glibc ($$guest_glibc): se omite el helper HTTP(S) de Git (sus libs del host no cargarian en la ISO)"; \
+	else \
 	if [ ! -x "$$helper" ]; then \
 		echo "[Makefile]   ERROR: no se encontró $$helper"; \
 		exit 1; \
@@ -376,10 +389,11 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	ldd "$$helper" | awk '{ for (i = 1; i <= NF; i++) if ($$i ~ /^\//) { print $$i; break } }' | \
 	while IFS= read -r dep; do \
 		if [ -f "$$dep" ]; then \
-			cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
-			cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
+			[ -e "sysroot/lib/x86_64-linux-gnu/$$(basename "$$dep")" ] || cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
+			[ -e "sysroot/usr/lib/x86_64-linux-gnu/$$(basename "$$dep")" ] || cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
 		fi; \
-	done
+	done; \
+	fi
 
 # ---------------------------------------------------------------------------
 # /bin/sh.
@@ -425,6 +439,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		echo "[Makefile]   ldconfig no encontrado (glibc hará probing)"; \
 	fi
 
+	@scripts/check-sysroot-libc.sh
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 
 kernel: initrd.tar
@@ -1160,7 +1175,7 @@ _AUR_ARGS_$(notdir $(1)) := $(strip $(shell grep -m1 '^AUR_ARGS' $(1)/config.mk 
 
 $(1)/$(notdir $(1)).elf: $(wildcard $(1)/*.c)
 	@echo "[AUR-CC] $(notdir $(1))"
-	@$(AUR_CC) -O2 -fno-stack-protector -o $$@ $$^
+	@$(AUR_CC) -std=gnu11 -O2 -fno-stack-protector -o $$@ $$^
 
 $(1)/$(notdir $(1)).aur: $(1)/$(notdir $(1)).elf $(1)/config.mk tools/aurbuild
 	@echo "[AURBUILD] $(notdir $(1))"
