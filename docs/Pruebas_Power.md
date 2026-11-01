@@ -60,6 +60,9 @@ Cada prueba: anotar **OK / se cuelga / no hace nada**, y si falla, qué línea
 | C2 | Con el sistema gráfico abierto y una app abierta | las apps reciben SIGTERM y el sistema apaga sin errores de FS |
 | C3 | Apagar dos veces seguidas desde dos terminales | no hay doble apagado ni cuelgue raro (el segundo se ignora) |
 | C4 | `reboot` como usuario no root | `EPERM` |
+| C5 | Ctrl-Alt-Supr (teclado PS/2) | sin init en PID 1 reinicia; con init recibe SIGINT. Log `[POWER] Ctrl-Alt-Supr`. Teclado USB aún no |
+| C6 | `shutdown -h now`, `shutdown -r now`, `shutdown -H now` | apaga / reinicia / para |
+| C7 | `panic=5` en `cmdline=` (solo con un panic provocado) | tras el volcado cuenta ~5 s y reinicia |
 
 ## D. QEMU (ya pasadas; repetir si cambias algo)
 

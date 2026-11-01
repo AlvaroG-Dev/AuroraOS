@@ -1,6 +1,7 @@
 // kernel/main.c
 // Punto de entrada del kernel Aurora OS.
 
+#include "power.h"
 #include "../bootloader/include/kernel_boot_info.h"
 #include "cmdline.h"
 #include "plog.h"
@@ -289,6 +290,7 @@ static int acpi_init_task(void *arg) {
   LOG_INFO("[INIT] ACPI PM (P-states, S-states)...");
   acpi_pm_init();
   acpi_button_init();
+  power_cad_init();
 
   LOG_INFO("[INIT] PM: aplicar política...");
   cpu_apply_pm_policy();

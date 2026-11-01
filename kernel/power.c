@@ -12,6 +12,10 @@
 #include "fat32.h"
 #include "io.h"
 #include "klog.h"
+#include "kthread.h"
+#include "serial.h"
+#include "sched.h"
+#include "wait.h"
 #include "process.h"
 #include "signal.h"
 #include "spinlock.h"
@@ -302,4 +306,53 @@ __attribute__((noreturn)) void power_request(power_action_t action,
     LOG_ERR("[POWER] ningun backend de %s funciono; parando", name);
   halt_forever();
   __builtin_unreachable();
+}
+
+// ---------------------------------------------------------------------------
+// Ctrl-Alt-Supr
+// ---------------------------------------------------------------------------
+static volatile int g_cad_pending;
+static volatile int g_cad_hard;
+
+void power_cad(void) { g_cad_pending = 1; }
+void power_cad_set(int hard_reboot) { g_cad_hard = !!hard_reboot; }
+
+static bool cad_never(void *arg) {
+  (void)arg;
+  return false;
+}
+
+static int cad_thread(void *arg) {
+  (void)arg;
+  for (;;) {
+    wait_queue_t wq;
+    wait_queue_init(&wq);
+    wait_event_timeout(&wq, cad_never, NULL, 100);
+    if (!g_cad_pending)
+      continue;
+    g_cad_pending = 0;
+    LOG_INFO("[POWER] Ctrl-Alt-Supr");
+    if (!g_cad_hard && process_kill(1, SIGINT) == 0)
+      continue;
+    power_request(POWER_ACTION_RESTART, "Ctrl-Alt-Supr");
+  }
+  return 0;
+}
+
+void power_cad_init(void) { kthread_run(cad_thread, NULL, "power-cad"); }
+
+void power_panic_restart(void) {
+  char v[12] = "";
+  if (!cmdline_get("panic", v, sizeof(v)))
+    return;
+  uint32_t secs = 0;
+  for (const char *p = v; *p >= '0' && *p <= '9'; p++)
+    secs = secs * 10 + (uint32_t)(*p - '0');
+  if (!secs || secs > 3600)
+    return;
+  serial_puts("\npanic=: reiniciando tras la cuenta atras\n");
+  for (uint32_t i = secs; i > 0; i--) {
+    power_delay_us(1000000);
+  }
+    power_backend_restart();
 }

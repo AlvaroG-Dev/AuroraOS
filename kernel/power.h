@@ -47,4 +47,18 @@ __attribute__((noreturn)) void power_request(power_action_t action,
 void power_backend_restart(void);
 void power_backend_poweroff(void);
 
+// Ctrl-Alt-Supr (Plan_Power.md P6). power_cad() se puede llamar desde una IRQ:
+// solo marca la peticion. Con CAD desactivado (por defecto, como cuando init
+// lo configura en Linux) manda SIGINT a PID 1 y, si no hay init, reinicia;
+// con CAD activado reinicia directamente. power_cad_init() crea el hilo que
+// la atiende.
+void power_cad(void);
+
+// Reinicio tras un panic (cmdline panic=N, N segundos; 0 o ausente = no
+// reiniciar). Solo usa los backends minimos, sin sync ni locks. Vuelve si
+// panic= no esta activo.
+void power_panic_restart(void);
+void power_cad_set(int hard_reboot);
+void power_cad_init(void);
+
 #endif

@@ -6226,8 +6226,11 @@ static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
   case LINUX_REBOOT_CMD_POWER_OFF:
     power_request(POWER_ACTION_OFF, "reboot(2)");
   case LINUX_REBOOT_CMD_CAD_ON:
+    power_cad_set(1); // Ctrl-Alt-Supr reinicia directamente
+    return 0;
   case LINUX_REBOOT_CMD_CAD_OFF:
-    return 0; // Ctrl-Alt-Del no esta enlazado todavia
+    power_cad_set(0); // Ctrl-Alt-Supr manda SIGINT a init
+    return 0;
   default:
     return -EINVAL;
   }
