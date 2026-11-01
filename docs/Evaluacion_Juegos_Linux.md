@@ -104,3 +104,22 @@ Estimación de esfuerzo **relativo** (sin fechas): G0–G2 pequeño; G3 medio-gr
 1. ¿Se empieza por **G0–G2** (SDL2 + Doom, bajo riesgo, se prueba también en QEMU) o por **G3** (rendimiento de la 4060)? *Recomendación: G0–G2 primero*, porque dan un juego jugable y exponen los huecos reales (H7) antes de invertir en el compositor.
 2. ¿Audio por **HDA nativo** (`.aur` propio) o **vía LinuxKPI** (`snd-hda-intel` real)? La LinuxKPI ya existe (L0–L7), pero no se debe abrir L8/L9 sin su confirmación.
 3. ¿Se descarta formalmente Rocket League/Steam (G8) o se deja como meta a largo plazo?
+
+## 9. Juegos de Windows (Steam) mediante Wine/Proton
+
+Un `.exe` de Windows no corre solo: hay que traducirlo con **Wine** (Proton = Wine + DXVK/VKD3D + parches de Valve). Wine es un programa Linux más, así que depende de la capa de compatibilidad de AuroraOS, no de un «modo Windows». Análisis por deducción (no probado):
+
+| Requisito de Wine/Proton | Estado en AuroraOS |
+|---|---|
+| Wine 64 bits (`wine64`, `wineserver`) como binario glibc | Posible en principio: es un binario Linux dinámico normal |
+| Carga de PE en direcciones fijas (~0x140000000 y bajas) y reserva de espacios grandes con `mmap`/`MAP_FIXED_NOREPLACE` | Por comprobar: mapeos fijos, `mprotect` fino, `MAP_NORESERVE` |
+| `wineserver` | Sockets AF_UNIX con SCM_RIGHTS (hecho), `futex`, `epoll`, `memfd` (hecho), `mmap` compartido (hecho); `inotify` hoy es stub |
+| Sincronización: esync (eventfd, hecho), fsync (`futex_waitv`, **ausente**), ntsync (`/dev/ntsync`, **ausente**) | Solo esync, más lento pero funciona sin lo ausente |
+| DXVK (D3D9/10/11→Vulkan), VKD3D-Proton (D3D12→Vulkan) | Exigen Vulkan 1.3 amplio (varias extensiones). Hoy solo probado: instancia, `vkCmdFillBuffer` y swapchain; **faltan pipelines, shaders, descriptor indexing, timeline semaphores**, etc. |
+| 32 bits (`wine32`, WoW64) | **Ausente (no hay IA-32)**. Wine reciente trae WoW64 «nuevo» que ejecuta .exe de 32 bits desde un proceso de 64 bits, sin kernel IA-32, pero requiere pruebas y algunas llamadas (`modify_ldt`, segmentos) que AuroraOS no tiene |
+| Steam cliente | Windows: `steam.exe` bajo Wine (CEF/Chromium lento, red y TLS necesarios); Linux: ver §4 |
+| Anti-cheat | EAC/BattlEye funcionan en Proton solo si el editor lo habilita y el entorno parece Linux real; Rocket League no |
+| Audio | Wine usa ALSA/Pulse: depende de H1 |
+| Pantalla, ratón relativo, mandos | Mismos huecos H3–H6 |
+
+Orden realista: primero C0–C4 nativos; luego **Wine con un juego 2D/D3D9 sencillo** (p. ej. un juego indie sin anti-cheat), después DXVK (D3D11) y, mucho después, VKD3D (D3D12). Sin audio (G5), Vulkan completo (nuevo hito) y 32 bits/WoW64 no hay juegos de Steam jugables. **G9 propuesto:** `wine64` arranca y ejecuta `notepad.exe`/`winecfg`; **G10:** un juego D3D9/D3D11 sin anti-cheat vía DXVK.
