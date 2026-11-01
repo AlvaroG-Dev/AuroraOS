@@ -321,8 +321,8 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	@for lib in libnss_dns.so.2 libnss_files.so.2 libnss_compat.so.2; do \
 		for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do \
 			if [ -e "$$d/$$lib" ]; then \
-				cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
-				cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
+				[ -e "sysroot/lib/x86_64-linux-gnu/$$lib" ] || cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
+				[ -e "sysroot/usr/lib/x86_64-linux-gnu/$$lib" ] || cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
 				echo "[Makefile]   nss: $$lib"; \
 				break; \
 			fi; \
@@ -355,7 +355,9 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	fi
 
 # ---------------------------------------------------------------------------
-# Git HTTP(S) transport helper.
+# Git HTTP(S) transport helper. Sus dependencias del host NO pisan lo que ya
+# puso libs/glibc (libc.so.6, libm...): una libc del host de otra version junto
+# al ld.so de libs/glibc rompe todos los programas dinamicos.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando helper HTTP(S) de Git..."
 	@helper=/usr/lib/git-core/git-remote-http; \
@@ -371,8 +373,8 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	ldd "$$helper" | awk '{ for (i = 1; i <= NF; i++) if ($$i ~ /^\//) { print $$i; break } }' | \
 	while IFS= read -r dep; do \
 		if [ -f "$$dep" ]; then \
-			cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
-			cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
+			[ -e "sysroot/lib/x86_64-linux-gnu/$$(basename "$$dep")" ] || cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
+			[ -e "sysroot/usr/lib/x86_64-linux-gnu/$$(basename "$$dep")" ] || cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
 		fi; \
 	done
 
