@@ -41,6 +41,22 @@ static void die(const char *fmt, ...) {
   exit(1);
 }
 
+// Rastro en el log del kernel (/dev/kmsg): diagnóstico de sesiones sin consola.
+static void klog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void klog(const char *fmt, ...) {
+  char b[200];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(b, sizeof(b), fmt, ap);
+  va_end(ap);
+  int fd = open("/dev/kmsg", O_WRONLY);
+  if (fd >= 0) {
+    ssize_t r = write(fd, b, strlen(b));
+    (void)r;
+    close(fd);
+  }
+}
+
 // ---- contraseñas ----------------------------------------------------------
 
 static int read_secret(const char *prompt, char *buf, size_t cap) {
@@ -94,6 +110,7 @@ static int account_locked(const struct passwd *pw) {
 // ---- cambio de identidad --------------------------------------------------
 
 static void become(const struct passwd *pw, int login_env) {
+  klog("[aurora-users] become %s (uid %u) euid=%u", pw->pw_name, pw->pw_uid, geteuid());
   if (initgroups(pw->pw_name, pw->pw_gid) != 0 && geteuid() == 0)
     die("initgroups: %s", strerror(errno));
   if (setgid(pw->pw_gid) != 0)
@@ -101,17 +118,15 @@ static void become(const struct passwd *pw, int login_env) {
   if (setuid(pw->pw_uid) != 0)
     die("setuid: %s", strerror(errno));
   const char *shell = pw->pw_shell && *pw->pw_shell ? pw->pw_shell : "/bin/sh";
-  if (login_env) {
-    clearenv();
+  // Se conserva el entorno de la sesión (WAYLAND_DISPLAY, XDG_*, TERM...):
+  // la sesión gráfica por usuario llega en U5. Solo se fija la identidad.
+  if (login_env && !getenv("PATH"))
     setenv("PATH", DEFAULT_PATH, 1);
-    const char *term = getenv("TERM");
-    if (term)
-      setenv("TERM", term, 1);
-  }
   setenv("HOME", pw->pw_dir, 1);
   setenv("USER", pw->pw_name, 1);
   setenv("LOGNAME", pw->pw_name, 1);
   setenv("SHELL", shell, 1);
+  klog("[aurora-users] identidad cambiada a %s uid=%u", pw->pw_name, getuid());
 }
 
 static void exec_shell(const struct passwd *pw, int login, const char *cmd) {
@@ -140,6 +155,7 @@ static int cmd_login(int argc, char **argv) {
     if (strcmp(argv[i], "-f") == 0 && i + 1 < argc)
       force = argv[++i];
   }
+  klog("[aurora-users] login uid=%u euid=%u force=%s", getuid(), geteuid(), force ? force : "-");
   if (force && geteuid() != 0)
     die("login: -f requiere privilegios de root");
   for (int tries = 0; tries < 5; tries++) {
