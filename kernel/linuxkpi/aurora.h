@@ -236,11 +236,11 @@ struct aurora_vma;
 #define AURORA_S_IFCHR 0020000
 #define AURORA_S_IFREG 0100000
 struct aurora_vfs_dirent {
-	char name[128];
+	char name[256];
 	u32 type;			/* AURORA_VFS_FILE / _DIRECTORY */
 	u64 size;
 };
-_Static_assert(sizeof(struct aurora_vfs_dirent) == 144, "vfs_dirent_t de Aurora");
+_Static_assert(sizeof(struct aurora_vfs_dirent) == 272, "vfs_dirent_t de Aurora");
 struct aurora_vfs_ops {
 	s64 (*read)(struct aurora_vfs_node *n, u64 off, size_t size, void *buf);
 	s64 (*write)(struct aurora_vfs_node *n, u64 off, size_t size, const void *buf);

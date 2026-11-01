@@ -34,7 +34,7 @@
 // Estructuras
 // ---------------------------------------------------------------------------
 typedef struct tmpfs_node {
-  char name[VFS_PATH_MAX];
+  char name[VFS_NAME_MAX];
   uint32_t mode; // S_IF* | perms
   uint32_t uid;
   uint32_t gid;
@@ -315,7 +315,7 @@ static int tmpfs_create_op(vfs_node_t *dir_vn, const char *name,
     return -EINVAL;
   if ((dir->mode & S_IFMT) != S_IFDIR)
     return -ENOTDIR;
-  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+  if (!name || !name[0] || strlen(name) >= VFS_NAME_MAX)
     return -EINVAL;
 
   tmpfs_fs_t *fs = dir->fs;
@@ -378,7 +378,7 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
     return -EINVAL;
   if ((dir->mode & S_IFMT) != S_IFDIR)
     return -ENOTDIR;
-  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+  if (!name || !name[0] || strlen(name) >= VFS_NAME_MAX)
     return -EINVAL;
 
   tmpfs_fs_t *fs = dir->fs;
@@ -707,7 +707,7 @@ static vfs_node_t *tmpfs_lookup_impl(void *fs_priv, const char *path) {
 
     if (seg_len == 0)
       continue;
-    if (seg_len >= VFS_PATH_MAX) {
+    if (seg_len >= VFS_NAME_MAX) {
       mutex_unlock(&fs->lock);
       return NULL;
     }
@@ -715,7 +715,7 @@ static vfs_node_t *tmpfs_lookup_impl(void *fs_priv, const char *path) {
       mutex_unlock(&fs->lock);
       return NULL;
     }
-    char name[VFS_PATH_MAX];
+    char name[VFS_NAME_MAX];
     memcpy(name, seg, seg_len);
     name[seg_len] = '\0';
 
@@ -746,7 +746,7 @@ static int tmpfs_statfs_impl(void *fs_priv, struct vfs_statfs *out) {
   out->f_bavail = out->f_bfree;
   out->f_files = 0;
   out->f_ffree = 0;
-  out->f_namelen = VFS_PATH_MAX - 1;
+  out->f_namelen = VFS_NAME_MAX - 1;
   mutex_unlock(&fs->lock);
   return 0;
 }

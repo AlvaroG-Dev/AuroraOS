@@ -57,7 +57,11 @@
 #define MAX_PROCESS_FDS 256
 
 // Longitud máxima de un path normalizado (coincide con name[] de vfs_node).
-#define VFS_PATH_MAX 128
+#define VFS_PATH_MAX 512
+
+// Longitud máxima de UN componente (NAME_MAX de Linux = 255 + NUL). ext2 admite
+// nombres de 255 bytes; vfs_dirent_t.name y los nombres de tmpfs usan esto.
+#define VFS_NAME_MAX 256
 
 typedef struct vfs_node vfs_node_t;
 typedef struct vfs_fs_ops vfs_fs_ops_t;
@@ -97,7 +101,7 @@ typedef struct vfs_stat {
 } vfs_stat_t;
 
 typedef struct vfs_dirent {
-  char name[VFS_PATH_MAX];
+  char name[VFS_NAME_MAX];
   uint32_t type; // VFS_FILE o VFS_DIRECTORY
   uint64_t size;
 } vfs_dirent_t;

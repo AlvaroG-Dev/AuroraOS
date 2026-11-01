@@ -2179,8 +2179,8 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     return -EFAULT;
 
   // Buffer en pila para un linux_dirent64 con nombre de hasta
-  // VFS_PATH_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 128 + padding ≈ 160.
-  uint8_t kbuf[256];
+  // VFS_NAME_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 255 + NUL + padding ≈ 280.
+  uint8_t kbuf[320]; // 19 + 255 + NUL, alineado a 8
   size_t pos = 0;
   uint64_t index = f->offset;
   uint64_t start_index = index;
