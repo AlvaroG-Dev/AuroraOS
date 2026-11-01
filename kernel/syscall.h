@@ -96,6 +96,7 @@
 #define SYS_CHMOD 90
 #define SYS_FCHMOD 91
 #define SYS_CHOWN 92
+#define SYS_FCHOWNAT 260
 #define SYS_FCHOWN 93
 #define SYS_LCHOWN 94
 #define SYS_UMASK 95

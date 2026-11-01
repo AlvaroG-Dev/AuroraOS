@@ -4598,6 +4598,24 @@ static int64_t k_lchown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
   return k_chown(path_ptr, uid, gid, a4, a5);
 }
 
+// fchownat(dfd, path, uid, gid, flags): AT_FDCWD o ruta absoluta; con
+// AT_EMPTY_PATH y ruta vacia equivale a fchown(dfd).
+static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
+                          uint64_t gid, uint64_t flags) {
+  char c = 0;
+  if ((flags & 0x1000) && path_ptr && copy_from_user(&c, (const void *)path_ptr, 1) == 0 &&
+      c == '\0')
+    return k_fchown(dfd, uid, gid, 0, 0);
+  if ((int)dfd != AT_FDCWD) {
+    char first = 0;
+    if (!path_ptr || copy_from_user(&first, (const void *)path_ptr, 1) != 0)
+      return -EFAULT;
+    if (first != '/')
+      return -EINVAL;
+  }
+  return k_chown(path_ptr, uid, gid, 0, 0);
+}
+
 // ---------- [4.2] utimensat ----------
 #define UTIME_NOW 0x3FFFFFFFLL
 #define UTIME_OMIT 0x3FFFFFFELL
@@ -7313,6 +7331,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CHMOD] = {k_chmod, "chmod"},
     [SYS_FCHMOD] = {k_fchmod, "fchmod"},
     [SYS_CHOWN] = {k_chown, "chown"},
+    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_FCHOWN] = {k_fchown, "fchown"},
     [SYS_LCHOWN] = {k_lchown, "lchown"},
     [SYS_GETRUSAGE] = {k_getrusage, "getrusage"},

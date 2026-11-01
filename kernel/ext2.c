@@ -50,6 +50,9 @@
 #define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
 #define EXT2_INDEX_FL 0x1000
 #define EXT2_LINK_MAX 32000
+#ifndef EXDEV
+#define EXDEV 18
+#endif
 #define EXT2_XATTR_MAGIC 0xEA020000u
 
 #define EXT2_STATE_VALID 0x0001
@@ -1917,6 +1920,234 @@ static int ext2_fsync_op(vfs_node_t *node) {
   return bc_sync_dev(en->fs->bdev) == 0 ? 0 : -EIO;
 }
 
+// ---------------------------------------------------------------------------
+// E3: rename y link
+// ---------------------------------------------------------------------------
+static int ext2_set_dotdot(ext2_fs_t *fs, ext2_ino_t *dir, uint32_t parent) {
+  uint32_t pblk;
+  int rc = ext2_bmap(fs, &dir->di, 0, &pblk);
+  if (rc != 0)
+    return rc;
+  if (pblk == 0)
+    return -EIO;
+  bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+  if (!b)
+    return -EIO;
+  uint8_t *blk = bc_data(b);
+  // "." ocupa rec_len bytes; ".." empieza justo después.
+  uint16_t dot_rl;
+  memcpy(&dot_rl, blk + 4, 2);
+  if (dot_rl < 12u || (uint32_t)dot_rl + 12 > fs->bs || blk[dot_rl + 6] != 2 ||
+      blk[dot_rl + 8] != '.' || blk[dot_rl + 9] != '.') {
+    bc_put(b);
+    return -EIO;
+  }
+  memcpy(blk + dot_rl, &parent, 4);
+  bc_mark_dirty(b);
+  bc_put(b);
+  return 0;
+}
+
+// ¿`anc` es `dir` o un ancestro suyo? (sube por "..")
+static int ext2_is_ancestor(ext2_fs_t *fs, uint32_t anc, uint32_t dir) {
+  uint32_t cur = dir;
+  for (int i = 0; i < 4096; i++) {
+    if (cur == anc)
+      return 1;
+    if (cur == EXT2_ROOT_INO)
+      return 0;
+    ext2_inode_t di;
+    if (ext2_read_inode(fs, cur, &di) != 0)
+      return 1; // en duda, denegar
+    uint32_t up;
+    if (ext2_dir_find(fs, &di, ext2_file_size(fs, &di), "..", 2, &up) != 0)
+      return 1;
+    if (up == cur)
+      return 0;
+    cur = up;
+  }
+  return 1;
+}
+
+static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
+                          vfs_node_t *ddvn, const char *dname) {
+  ext2_node_t *sden = sdvn ? sdvn->priv : NULL, *dden = ddvn ? ddvn->priv : NULL;
+  if (!sden || !dden || !sname || !dname)
+    return -EINVAL;
+  ext2_fs_t *fs = sden->fs;
+  if (dden->fs != fs)
+    return -EXDEV;
+  size_t sl = strlen(sname), dl = strlen(dname);
+  int rc = ext2_name_check(sname, sl);
+  if (rc == 0)
+    rc = ext2_name_check(dname, dl);
+  if (rc != 0)
+    return rc;
+  if ((sl == 1 && sname[0] == '.') || (sl == 2 && sname[0] == '.' && sname[1] == '.') ||
+      (dl == 1 && dname[0] == '.') || (dl == 2 && dname[0] == '.' && dname[1] == '.'))
+    return -EINVAL;
+  ext2_ino_t *sp = sden->ip, *dp = dden->ip;
+
+  mutex_lock(&fs->lock);
+  ext2_ino_t *sip = NULL, *dip = NULL;
+  rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((sp->di.i_mode & S_IFMT) != S_IFDIR || (dp->di.i_mode & S_IFMT) != S_IFDIR) {
+    rc = -ENOTDIR;
+    goto out;
+  }
+  if (dp->di.i_links_count == 0) {
+    rc = -ENOENT;
+    goto out;
+  }
+  uint32_t sino, dino = 0;
+  rc = ext2_dir_find(fs, &sp->di, sp->size, sname, sl, &sino);
+  if (rc != 0)
+    goto out;
+  sip = ext2_iget(fs, sino);
+  if (!sip) {
+    rc = -EIO;
+    goto out;
+  }
+  int sdir = (sip->di.i_mode & S_IFMT) == S_IFDIR;
+  int drc = ext2_dir_find(fs, &dp->di, dp->size, dname, dl, &dino);
+  if (drc != 0 && drc != -ENOENT) {
+    rc = drc;
+    goto out;
+  }
+  int exists = (drc == 0);
+  if (exists && dino == sino) // mismo fichero (p. ej. dos hard links): nada
+    goto out;
+  if (exists) {
+    dip = ext2_iget(fs, dino);
+    if (!dip) {
+      rc = -EIO;
+      goto out;
+    }
+    int ddir = (dip->di.i_mode & S_IFMT) == S_IFDIR;
+    if (sdir && !ddir) {
+      rc = -ENOTDIR;
+      goto out;
+    }
+    if (!sdir && ddir) {
+      rc = -EISDIR;
+      goto out;
+    }
+    if (ddir && !ext2_dir_is_empty(fs, dip)) {
+      rc = -ENOTEMPTY;
+      goto out;
+    }
+  }
+  int moving_dir = sdir && sp != dp;
+  if (moving_dir) {
+    if (ext2_is_ancestor(fs, sino, dp->ino)) { // mover un dir dentro de sí mismo
+      rc = -EINVAL;
+      goto out;
+    }
+    if (dp->di.i_links_count >= EXT2_LINK_MAX && !(exists && dip)) {
+      rc = -EMLINK;
+      goto out;
+    }
+  }
+
+  uint8_t ft = ext2_type_to_ft(sip->di.i_mode & S_IFMT);
+  if (exists) {
+    uint32_t rino;
+    rc = ext2_dir_remove(fs, dp, dname, dl, &rino);
+    if (rc != 0)
+      goto out;
+    if ((dip->di.i_mode & S_IFMT) == S_IFDIR) {
+      dip->di.i_links_count = 0;
+      if (dp->di.i_links_count > 2)
+        dp->di.i_links_count--;
+    } else if (dip->di.i_links_count > 0) {
+      dip->di.i_links_count--;
+    }
+    dip->di.i_ctime = ext2_now();
+    if (dip->di.i_links_count == 0)
+      dip->di.i_dtime = ext2_now();
+    ext2_ip_flush(fs, dip);
+  }
+  rc = ext2_dir_add(fs, dp, dname, dl, sino, ft);
+  if (rc != 0)
+    goto out; // (si dst existía, ya se quitó: fsck lo ve como inodo huérfano)
+  uint32_t rino2;
+  rc = ext2_dir_remove(fs, sp, sname, sl, &rino2);
+  if (rc != 0)
+    goto out;
+  if (moving_dir) {
+    ext2_set_dotdot(fs, sip, dp->ino);
+    if (sp->di.i_links_count > 2)
+      sp->di.i_links_count--;
+    dp->di.i_links_count++;
+    ext2_ip_flush(fs, sp);
+    ext2_ip_flush(fs, dp);
+  }
+  sip->di.i_ctime = ext2_now();
+  ext2_ip_flush(fs, sip);
+out:
+  if (dip)
+    ext2_iput(fs, dip);
+  if (sip)
+    ext2_iput(fs, sip);
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_link_op(vfs_node_t *dvn, const char *name, vfs_node_t *target) {
+  ext2_node_t *den = dvn ? dvn->priv : NULL, *ten = target ? target->priv : NULL;
+  if (!den || !ten || !name)
+    return -EINVAL;
+  ext2_fs_t *fs = den->fs;
+  if (ten->fs != fs)
+    return -EXDEV;
+  size_t nl = strlen(name);
+  int rc = ext2_name_check(name, nl);
+  if (rc != 0)
+    return rc;
+  ext2_ino_t *dp = den->ip, *tip = ten->ip;
+  mutex_lock(&fs->lock);
+  rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((dp->di.i_mode & S_IFMT) != S_IFDIR) {
+    rc = -ENOTDIR;
+    goto out;
+  }
+  if ((tip->di.i_mode & S_IFMT) == S_IFDIR) {
+    rc = -EPERM;
+    goto out;
+  }
+  if (tip->di.i_links_count == 0 || dp->di.i_links_count == 0) {
+    rc = -ENOENT;
+    goto out;
+  }
+  if (tip->di.i_links_count >= EXT2_LINK_MAX) {
+    rc = -EMLINK;
+    goto out;
+  }
+  uint32_t tmp;
+  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &tmp);
+  if (rc == 0) {
+    rc = -EEXIST;
+    goto out;
+  }
+  if (rc != -ENOENT)
+    goto out;
+  rc = ext2_dir_add(fs, dp, name, nl, tip->ino,
+                    ext2_type_to_ft(tip->di.i_mode & S_IFMT));
+  if (rc != 0)
+    goto out;
+  tip->di.i_links_count++;
+  tip->di.i_ctime = ext2_now();
+  rc = ext2_ip_flush(fs, tip);
+  ext2_refresh_vnode(target, tip);
+out:
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
 static vfs_ops_t ext2_node_ops = {
     .read = ext2_node_read,
     .write = ext2_node_write,
@@ -1930,6 +2161,8 @@ static vfs_ops_t ext2_node_ops = {
     .readdir = ext2_node_readdir,
     .readlink = ext2_node_readlink,
     .symlink = ext2_symlink_op,
+    .rename = ext2_rename_op,
+    .link = ext2_link_op,
     .utimes = ext2_utimes_op,
     .chmod = ext2_chmod_op,
     .chown = ext2_chown_op,
