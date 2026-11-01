@@ -255,7 +255,7 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 
 - 2026-10-31: Ratón, movimiento (2): los clics ya iban bien tras el fix del parser (informe de 7 B). Con una única petición interrupt-IN en vuelo el endpoint queda sin TD mientras el hilo HID despierta y reenvía; el receptor 2.4G descarta informes en ese hueco. Ahora los ratones relativos usan dos hilos sobre el mismo endpoint (xhci.aur encola el siguiente TD al completar el anterior). QEMU xhci+usb-mouse: arranca y ambos hilos inician. Pendiente de confirmar en HW.
 
-## 11. Estado y pendiente (2026-10-31)
+## 11. Estado y pendiente (actualizado 2026-11-01)
 
 **Hecho (RTX 4060 / AD107, probado en hardware):** RM y GSP inician (`RmInitAdapter`), `nvctl_test` ALL PASS, nodos `/dev/nvidiactl` y `/dev/nvidia0`, `nvidia-modeset` y `nvidia-drm` cargan con `card0` y `renderD128`, modeset por `kms_present` (HDMI-A-1 1920x1080@60), terminal y Dock visibles. La pila se autocarga al detectar vendor 0x10de (`lkpi.auto=off` lo desactiva; `lkpi.load=` explícito manda). Ratón USB corregido (parser HID por Report ID y dos peticiones interrupt-IN en vuelo), aparte de NVIDIA.
 
@@ -294,3 +294,22 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 - **N5a paso 5, resultado 5 (2026-11-01): `egl-wayland2` FUNCIONA de punta a punta.** `NVWL[wayland2]` rc=0: eglCreatePlatformWindowSurface OK, el cliente (aw_nvwl_test) crea buffers GBM de NVIDIA (modificador 0x300000000606014), los envia por linux-dmabuf, el compositor los importa por EGL y los lee con `gpuimp` (`primer frame leido de la GPU 320x200`), 5 commits y ventana visible (el ultimo cuadro magenta salio como ventana morada). Primer cliente Wayland acelerado por la 4060 mostrado en el escritorio. egl-wayland 1.x (`wayland1`) sigue con EGL_BAD_ACCESS: se usa wayland2 (con `__NV_DISABLE_EXPLICIT_SYNC=1`). Pendiente: explicit sync (wp_linux_drm_syncobj_v1), rendimiento (glReadPixels por frame), weston-simple-egl/glxgears/vkcube sobre wayland2.
 - Kernel: las tuberias ahora son S_IFIFO con inodo unico (antes S_IFREG/ino 0: GNU grep decia "input file is also the output" en `a | grep | b`).
 - **N5a hito (2026-11-01): `weston-simple-egl` sobre egl-wayland2 + 4060 anima el triangulo en el escritorio** (rc=124 = siguio dibujando hasta el timeout). Cliente Wayland con GL por la GPU propietaria, mostrado via linux-dmabuf + lectura EGL en el compositor. Pendiente: explicit sync, copia por CPU (rendimiento), glxgears (GLX/Xwayland), vkcube (Vulkan: loader + ICD).
+
+### Resumen N5a (2026-11-01): 3D acelerado por la RTX 4060 en el escritorio
+**Funciona (verificado en la 4060 real):** `nvidia-smi`; EGL 1.5/GLES 3.2 propietario; GBM (`nvidia-drm_gbm`); import de dma-buf en EGL y render offscreen (`gbm.sh nvidia`); presentacion por linux-dmabuf (`gbm.sh nvidia`); cliente Wayland con egl-wayland2 (`nvwl.sh`, `aw_nvwl_test`); `weston-simple-egl` animado (triangulo girando).
+
+**Arquitectura de la ruta Wayland:**
+1. Cliente (egl-wayland2) -> `libnvidia-allocator` reserva buffers en VRAM (modificadores block-linear `0x300000000606010..15` / `0xe08010..15`) -> `zwp_linux_dmabuf_v1` v4.
+2. `aurora-wayland` anuncia dmabuf v4 con feedback (main_device = renderD128) y una tabla de formato/modificador construida con `eglQueryDmaBufModifiersEXT` de la GPU (`gpuimp_query_modifiers`).
+3. En cada commit de un buffer no lineal, `user/aurora-wayland/gpuimp.c` (dlopen de libEGL/GBM/GLES2) importa el dma-buf (`EGL_LINUX_DMA_BUF_EXT`), `glFinish` + `glReadPixels` y pasa los pixeles a `surface_ingest` (copia por CPU: pendiente optimizar).
+4. Capa LinuxKPI (`kernel/linuxkpi/dma/dma-buf.c`): un dma_buf de vidmem (sin sg_table) se envuelve con una pagina de relleno; el dma_buf original viaja en `ext_priv` para que NVIDIA reconozca su GEM al reimportar.
+
+**Como probar (en la maquina con la 4060):**
+- `nvidia-smi`
+- `gbm.sh nvidia --no-wayland` y `gbm.sh nvidia` -> `ALL PASS`
+- `nvwl.sh 40` -> `NVWL[wayland2] rc=0` y ventana magenta; `NVWL_PLATFORM=/usr/share/egl/egl_external_platform.d/09_nvidia_wayland2.json nvwl.sh 20 weston-simple-egl` -> triangulo animado, rc=124.
+- Depuracion: `echo strace=NOMBRE > /dev/kmsg` (volcado de syscalls y de cabeceras Wayland de sendmsg/recvmsg), logs `lkpi: RM ...`, `[aurora-wayland] dmabuf ...`, `gpuimp: ...` en aurora.log.
+
+**Limitaciones conocidas:** sin explicit sync (`wp_linux_drm_syncobj_v1`; wayland2 se usa con `__NV_DISABLE_EXPLICIT_SYNC=1`); egl-wayland 1.x da EGL_BAD_ACCESS (no investigado: se usa wayland2); lectura por CPU de cada frame (lento a pantalla grande); sin Vulkan (falta loader + ICD) ni GLX (glxgears); get_user_pages/pin_user_pages, /proc/driver/nvidia y nvidia-uvm siguen sin implementar.
+
+**Cambios de kernel colaterales:** `iterate_fd` real (causa del "Unknown Error" de nvidia-smi); tuberias S_IFIFO con inodo unico; `/dev/nvidia-modeset`; trazado por nombre ampliado (`[STRACE-MSG]`).
