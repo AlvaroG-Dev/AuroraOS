@@ -1160,7 +1160,7 @@ void tmpfs_init(void) {
     } else {
       // XDG_RUNTIME_DIR=/run/user/<uid> (Wayland: socket y locks).
       vfs_mkdir("/run/user", 0755);
-      vfs_mkdir("/run/user/0", 0700);
+      vfs_mkdir("/run/user/0", 0711); // [U5] traversable: los sockets llevan su propio modo
       LOG_INFO("[TMPFS] /run montado (4 MB)");
     }
   }

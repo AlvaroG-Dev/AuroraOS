@@ -118,6 +118,12 @@ static void become(const struct passwd *pw, int login_env) {
   klog("[aurora-users] become %s (uid %u) euid=%u", pw->pw_name, pw->pw_uid, geteuid());
   if (initgroups(pw->pw_name, pw->pw_gid) != 0 && geteuid() == 0)
     die("initgroups: %s", strerror(errno));
+  if (geteuid() == 0 && pw->pw_uid != 0) {
+    char rt[64];
+    snprintf(rt, sizeof(rt), "/run/user/%u", pw->pw_uid);
+    if (mkdir(rt, 0700) == 0 && chown(rt, pw->pw_uid, pw->pw_gid) != 0)
+      klog("[aurora-users] chown %s: %s", rt, strerror(errno));
+  }
   if (setgid(pw->pw_gid) != 0)
     die("setgid: %s", strerror(errno));
   if (setuid(pw->pw_uid) != 0)
@@ -131,6 +137,14 @@ static void become(const struct passwd *pw, int login_env) {
   setenv("USER", pw->pw_name, 1);
   setenv("LOGNAME", pw->pw_name, 1);
   setenv("SHELL", shell, 1);
+  if (pw->pw_uid != 0) {
+    // [U5] sesión de usuario: /run/user/UID propio y socket Wayland compartido.
+    char rt[64];
+    snprintf(rt, sizeof(rt), "/run/user/%u", pw->pw_uid);
+    setenv("XDG_RUNTIME_DIR", rt, 1);
+    if (!getenv("WAYLAND_DISPLAY"))
+      setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+  }
   klog("[aurora-users] identidad cambiada a %s uid=%u", pw->pw_name, getuid());
 }
 
