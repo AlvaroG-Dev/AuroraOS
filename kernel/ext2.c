@@ -1480,11 +1480,15 @@ static int64_t ext2_node_write(vfs_node_t *node, uint64_t offset, size_t size,
   ext2_ino_t *ip = en->ip;
   if (size == 0)
     return 0;
-  if (offset + size < offset)
-    return -EFBIG;
 
   mutex_lock(&fs->lock);
+  if (offset == (uint64_t)-1) // O_APPEND: al final real del inodo compartido
+    offset = ip->size;
   int64_t done = 0;
+  if (offset + size < offset) {
+    mutex_unlock(&fs->lock);
+    return -EFBIG;
+  }
   int rc = ext2_begin_write(fs);
   if (rc != 0)
     goto out;
@@ -1780,6 +1784,10 @@ static int ext2_mkdir_op(vfs_node_t *dir, const char *name, uint32_t mode) {
 static int ext2_mknod_op(vfs_node_t *dir, const char *name, uint32_t mode,
                          uint32_t rdev) {
   uint32_t t = mode & S_IFMT;
+  if (t == 0) { // vfs_mknod() quita el tipo: con rdev es un char device
+    t = rdev ? S_IFCHR : S_IFREG;
+    mode |= t;
+  }
   if (t != S_IFCHR && t != S_IFBLK && t != S_IFIFO && t != S_IFSOCK && t != S_IFREG)
     return -EPERM;
   return ext2_new_inode_op(dir, name, mode, rdev, NULL);
@@ -1985,7 +1993,7 @@ static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
     return rc;
   if ((sl == 1 && sname[0] == '.') || (sl == 2 && sname[0] == '.' && sname[1] == '.') ||
       (dl == 1 && dname[0] == '.') || (dl == 2 && dname[0] == '.' && dname[1] == '.'))
-    return -EINVAL;
+    return -EBUSY; // como Linux
   ext2_ino_t *sp = sden->ip, *dp = dden->ip;
 
   mutex_lock(&fs->lock);

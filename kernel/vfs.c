@@ -2934,6 +2934,16 @@ static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
     return -ENOENT;
   }
 
+  unsigned long mflags = vfs_mount_flags(path);
+  if ((mflags & VFS_MS_NODEV) &&
+      ((node->flags & VFS_CHARDEVICE) || (node->mode & S_IFMT) == S_IFCHR ||
+       (node->mode & S_IFMT) == S_IFBLK)) { // mount -o nodev
+    vfs_node_free(node);
+    return -EACCES;
+  }
+  if (mflags & VFS_MS_SYNCHRONOUS)
+    flags |= VFS_O_SYNC;
+
   // [3.4.d] Comprobar permiso según los flags de apertura.
   int acc_mask = (flags & (O_WRONLY | O_RDWR)) ? VFS_W_OK : VFS_R_OK;
   int acc_rc = vfs_check_access(node, acc_mask);
@@ -3186,7 +3196,12 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       break;
     }
 
-    int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
+    // O_APPEND: dos fds sobre el mismo fichero deben añadir al final real,
+    // no a su copia del tamaño. ext2 acepta (uint64_t)-1 como "al final".
+    int append_ext2 = (f->flags & VFS_O_APPEND) && f->node->fs &&
+                      f->node->fs->name && strcmp(f->node->fs->name, "ext2") == 0;
+    int64_t bytes = f->node->ops->write(
+        f->node, append_ext2 ? (uint64_t)-1 : f->offset, chunk, kbuf);
     if (bytes < 0) {
       if (total == 0) {
         kfree(kbuf);
@@ -3203,13 +3218,16 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       return total > 0 ? (int64_t)total : -EIO;
     }
 
-    f->offset += (uint64_t)bytes;
+    f->offset = append_ext2 ? (uint64_t)f->node->size : f->offset + (uint64_t)bytes;
     total += (size_t)bytes;
     if ((size_t)bytes < chunk)
       break;
   }
 
   kfree(kbuf);
+  if (total > 0 && (f->flags & VFS_O_SYNC) && f->node && f->node->ops &&
+      f->node->ops->fsync)
+    f->node->ops->fsync(f->node); // O_SYNC / mount -o sync
   mutex_unlock(&f->lock);
   fd_put(f);
   return (int64_t)total;
@@ -3367,6 +3385,9 @@ int64_t vfs_pwrite_for_proc(void *proc_ptr, int fd, const void *buf,
   }
 
   kfree(kbuf);
+  if (total > 0 && (f->flags & VFS_O_SYNC) && f->node && f->node->ops &&
+      f->node->ops->fsync)
+    f->node->ops->fsync(f->node); // O_SYNC / mount -o sync
   mutex_unlock(&f->lock);
   fd_put(f);
   return (int64_t)total;

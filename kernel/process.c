@@ -2409,6 +2409,10 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     vfs_node_free(exe_node);
     return -EACCES;
   }
+  if (vfs_mount_flags(path) & VFS_MS_NOEXEC) { // mount -o noexec
+    vfs_node_free(exe_node);
+    return -EACCES;
+  }
   if ((exe_node->mode & 0111) == 0) {
     vfs_node_free(exe_node);
     return -EACCES;

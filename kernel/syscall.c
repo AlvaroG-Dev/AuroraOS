@@ -528,6 +528,8 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
 
   // O_NONBLOCK viaja hasta ops->open y queda en fd->flags (F_GETFL).
   aflags |= (linux_flags & LINUX_O_NONBLOCK);
+  if (linux_flags & 010000) // O_DSYNC (incluido en O_SYNC)
+    aflags |= VFS_O_SYNC;
   int fd = vfs_open_for_proc(proc, kpath, aflags);
   if (fd < 0) {
     // git/coreutils sondean ENOENT constantemente (buscan un objeto
@@ -550,8 +552,10 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
   }
   if (linux_flags & LINUX_O_APPEND) {
     file_descriptor_t *f = proc->fds[fd];
-    if (f && f->node)
+    if (f && f->node) {
       f->offset = f->node->size;
+      f->flags |= VFS_O_APPEND; // write() reposiciona al final en cada llamada
+    }
   }
   return fd;
 }
@@ -991,14 +995,8 @@ static int64_t k_unlink(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
-    return -EFAULT;
-  char p[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path, p, sizeof(p));
-  if (rc != 0)
-    return rc;
-  return vfs_unlink(p);
+  // unlink(2) = unlinkat(AT_FDCWD, path, 0): un directorio da -EISDIR.
+  return k_unlinkat((uint64_t)AT_FDCWD, path, 0, 0, 0);
 }
 
 static int64_t k_rename(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,

@@ -21,6 +21,9 @@
 #define VFS_SOCK_ENT 0x20
 #define VFS_BLK_ENT 0x40
 
+// Bit interno de fd->flags: cada write() se vuelca (O_SYNC/O_DSYNC o mount -o sync).
+#define VFS_O_SYNC 0x40000000
+#define VFS_O_APPEND 0x20000000 // fd con O_APPEND: write() añade al final
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
 #define O_RDWR 0x0002
