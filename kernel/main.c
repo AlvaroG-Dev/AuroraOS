@@ -80,6 +80,7 @@
 #include "tty.h"
 #include "vdso.h"
 #include "workqueue.h"
+#include "tmpfs.h"
 #include <stddef.h>
 #include <stdint.h>
 
