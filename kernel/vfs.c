@@ -774,7 +774,8 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
     node->ref_count = 1;
   }
 
-  if (!node && ops->name && strcmp(ops->name, "sysfs") == 0) {
+  if (!node && ops->name &&
+      (strcmp(ops->name, "sysfs") == 0 || strcmp(ops->name, "ext2") == 0)) {
     char expanded[VFS_PATH_MAX];
     if (expand_mid_symlink(norm, expanded, sizeof(expanded)))
       return vfs_lookup_rec(expanded, depth + 1, no_follow);
@@ -1305,6 +1306,8 @@ int vfs_readlink(const char *path, char *buf, size_t bufsize) {
 int vfs_utimes(const char *path, int64_t mtime_sec) {
   if (!path)
     return -EINVAL;
+  if (vfs_mount_flags(path) & VFS_MS_RDONLY)
+    return -EROFS;
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node) {
     return -ENOENT;
@@ -1402,6 +1405,8 @@ int vfs_chmod(const char *path, uint32_t mode) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
+  if (path && (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
 
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node)
@@ -1440,6 +1445,8 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
+  if (path && (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
 
   // Solo root puede cambiar el owner en Aurora (sin CAP_CHOWN por ahora).
   if (proc->euid != 0)

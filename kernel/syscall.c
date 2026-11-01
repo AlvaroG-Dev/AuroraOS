@@ -12,6 +12,7 @@
 #include "cpu.h"
 #include "epoll.h"
 #include "kmod_sys.h"
+#include "ext2.h"
 #include "fat32.h"
 #include "iso9660.h"
 #include "tmpfs.h"
@@ -2224,6 +2225,12 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
       d->d_type = DT_CHR;
     else if (ent.type == VFS_SYMLINK_ENT)
       d->d_type = 10; // DT_LNK
+    else if (ent.type == VFS_FIFO_ENT)
+      d->d_type = 1; // DT_FIFO
+    else if (ent.type == VFS_SOCK_ENT)
+      d->d_type = 12; // DT_SOCK
+    else if (ent.type == VFS_BLK_ENT)
+      d->d_type = 6; // DT_BLK
     else
       d->d_type = DT_REG;
     memcpy(d->d_name, ent.name, namelen);
@@ -6291,7 +6298,10 @@ static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
 
   int is_vfat = strcmp(type, "vfat") == 0 || strcmp(type, "msdos") == 0;
   int is_iso = strcmp(type, "iso9660") == 0;
-  if (!is_vfat && !is_iso)
+  // ext3/ext4 se aceptan como nombre: el driver rechaza lo que no soporta.
+  int is_ext2 = strcmp(type, "ext2") == 0 || strcmp(type, "ext3") == 0 ||
+                strcmp(type, "ext4") == 0;
+  if (!is_vfat && !is_iso && !is_ext2)
     return -ENODEV;
 
   // "/dev/sda1" -> "sda1"
@@ -6302,9 +6312,11 @@ static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
   if (!*bn)
     return -EINVAL;
 
-  rc = is_vfat ? fat32_mount_bdev(bn, target) : iso9660_mount_bdev(bn, target);
+  rc = is_vfat  ? fat32_mount_bdev(bn, target)
+       : is_ext2 ? ext2_mount_bdev(bn, target)
+                 : iso9660_mount_bdev(bn, target);
   if (rc == 0) {
-    if (is_iso)
+    if (is_iso || is_ext2) // ext2 es solo lectura hasta E2
       keep |= VFS_MS_RDONLY;
     vfs_set_mount_flags(target, keep);
   }

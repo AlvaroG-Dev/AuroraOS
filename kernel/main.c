@@ -26,6 +26,7 @@
 #include "driver.h"
 #include "elf.h"
 #include "bcache.h"
+#include "ext2.h"
 #include "fat32.h"
 #include "fsprobe.h"
 #include "gdt.h"
@@ -651,8 +652,13 @@ static void mount_boot_media(void) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
       continue;
-    if (boot_probe_is_ext2(b))
+    if (boot_probe_is_ext2(b)) {
+      if (ext2_mount_bdev(b->name, "/data") == 0) {
+        LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
+        g_data_mounted = 1;
+      }
       continue;
+    }
     if (fat32_mount_bdev(b->name, "/data") == 0) {
       LOG_INFO("[INIT] Montado %s en /data", b->name);
       g_data_mounted = 1;
@@ -663,8 +669,13 @@ static void mount_boot_media(void) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || !b->is_partition || b->is_read_only)
       continue;
-    if (boot_probe_is_ext2(b))
+    if (boot_probe_is_ext2(b)) {
+      if (ext2_mount_bdev(b->name, "/data") == 0) {
+        LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
+        g_data_mounted = 1;
+      }
       continue;
+    }
     if (fat32_mount_bdev(b->name, "/data") == 0) {
       LOG_INFO("[INIT] Montado %s en /data", b->name);
       g_data_mounted = 1;

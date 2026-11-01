@@ -16,6 +16,10 @@
 #define VFS_DIRECTORY 0x02
 #define VFS_CHARDEVICE 0x04
 #define VFS_SYMLINK_ENT 0x08 // solo en vfs_dirent_t.type (getdents -> DT_LNK)
+// Solo en vfs_dirent_t.type (getdents -> DT_FIFO/DT_SOCK/DT_BLK), como ext2.
+#define VFS_FIFO_ENT 0x10
+#define VFS_SOCK_ENT 0x20
+#define VFS_BLK_ENT 0x40
 
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
