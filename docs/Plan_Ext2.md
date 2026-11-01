@@ -81,7 +81,7 @@ Rev 0: inodos de 128 bytes, `s_first_ino = 11`, sin features, backups del superb
 1. `vfs_stat_t` + `nlink`, `atime`, `ctime`, `blocks`, `blksize`; `struct stat/statx` los exponen (comprobar `k_stat/k_statx`); `vfs_node_t` + `nlink` (los FS que no lo saben devuelven 1).
 2. `utimes` hoy solo cambia `mtime`: añadir `utimens(node, atime, mtime)` (`utimensat` ya existe como syscall).
 3. `rename` con **sobrescritura** (fichero sobre fichero, dir vacío sobre dir vacío, errores `ENOTDIR/EISDIR/ENOTEMPTY`, `RENAME_NOREPLACE` opcional) — el VFS decide la política; el FS recibe `rename` con destino existente.
-4. **Nombres**: ext2 admite 255 bytes; `VFS_PATH_MAX` = 128 limita ruta completa y `dirent.name`. v1: ext2 devuelve `-ENAMETOOLONG` para nombres >127 y `e2fsck`-lectura de dirs con nombres largos los **omite en `readdir`** con aviso. Ampliar `VFS_PATH_MAX` (afecta `tmpfs_node`, `vfs_node_t`, cada `kmalloc` de nodo) es una tarea aparte (D5).
+4. **Nombres**: ext2 admite 255 bytes; `VFS_PATH_MAX` = 128 limita ruta completa y `dirent.name`. **Decisión D5-b (Alvaro): se amplía en E0** (ver E0.0): nombre de componente 255 bytes (`NAME_MAX`) y ruta completa mayor (objetivo 4096, a fijar tras medir el coste en `vfs_node_t`/`tmpfs_node`; `node->name` deja de guardar la ruta completa si hace falta).
 5. **Opciones de montaje**: `struct vfs_mount` guarda flags (`MS_RDONLY`, `MS_NOSUID`, `MS_NODEV`, `MS_NOEXEC`, `MS_NOATIME`, `MS_SYNCHRONOUS`) y `execve`/`open` los consultan (`nosuid` pendiente de U1.4). Syscalls `mount(2)` (tipos `ext2`, `vfat`, `iso9660`, `tmpfs`, bind y `MS_REMOUNT`) y `umount2(2)`; `vfs_umount` falla con `-EBUSY` si hay nodos abiertos o mounts anidados.
 6. `vfs_fs_ops_t` gana opcionales: `sync(priv)`, `remount(priv, flags)`, `umount(priv)`, `probe(bdev)`.
 
@@ -132,6 +132,7 @@ Se sigue el estilo de `fat32.c`: mutex por FS (el de FAT32 es propio porque el m
 Cada fase tiene un **hito verificable** en QEMU con una imagen creada por el host; ninguna se da por buena sin `e2fsck -fn` limpio cuando escribe.
 
 ### E0 — Cimientos (M–L)
+- E0.0 **Ampliar `VFS_PATH_MAX`/`vfs_dirent_t.name`** (D5-b): auditar todos los usos (`tmpfs_node`, `vfs_node_t`, `fat32_make_node`, `kmalloc` de nodos, `getdents`), separar `VFS_NAME_MAX=255` de `VFS_PATH_MAX`, regresión de `ls`, `find`, `rm -rf`, `git`. Va **primero y en su propio commit**.
 - E0.1 Cambios de VFS de §3.1 (stat extendido, `utimens`, `rename` con sobrescritura **y su test con tmpfs/FAT32**, flags de montaje, `mount(2)`/`umount2(2)`, `fs->sync`). Compatibilidad: FAT32/tmpfs/tarfs/iso9660 siguen igual (los campos nuevos tienen valores por defecto).
 - E0.2 `bcache` (§3.3) con prueba de kernel propia (lectura/escritura/evicción/flush sobre `tests/test_disk.img`).
 - E0.3 `vfs_sync_all` (§3.4) y enganche en `power.c`.
@@ -311,7 +312,7 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
 | **Sin journal**: tras corte hay que correr `e2fsck` y un pendrive quitado sin `umount` queda "sucio" | Montar ro si sucio (D3), `sync` periódico agresivo para `/data` en LiveUSB (`commit=5`), `e2fsck -p` en arranque cuando exista. Es el compromiso de ext2; ext3-journal queda explícitamente fuera. |
 | **Locking**: el VFS por rutas + nodos nuevos por `lookup` hace fácil introducir carreras entre dos `open` del mismo inodo | Caché de inodos única + mutex por FS en E2/E3; refinar en E7 con prueba de estrés SMP. |
 | **`rename` con sobrescritura y directorios** (ciclos, `..`) es la parte más delicada | E3.1 tiene suite propia y verificación con `e2fsck` tras cada caso; no se mezcla con otros cambios. |
-| **`VFS_PATH_MAX = 128`** hace que rutas profundas reales fallen | Documentado (D5); ampliar es una tarea de VFS independiente que también afecta a tmpfs/FAT32. |
+| **Ampliar `VFS_PATH_MAX`** (D5-b) toca tmpfs, FAT32 y todos los nodos | E0.0 aislado en su commit, con regresión de FAT32/tmpfs antes de seguir; medir memoria por nodo. |
 | **Memoria**: caché de bloques + de inodos en un kernel con `kmalloc` simple | Tope configurable, evicción, y no más de una tabla de inodos de 1024 entradas por FS al principio. |
 | **Fragmentación y rendimiento** (asignador simple, USB lento) | Preasignación y agrupación de E/S en E7; medir con `dd`/`git` antes y después. |
 | **Port de e2fsprogs** consume tiempo (autotools, syscalls menos comunes) | Hacerlo después de E3 (cuando el FS ya es estable) y con la lista de requisitos de §6.1 como lista de comprobación; plan B: `mke2fs` del host para crear imágenes y `ext2_check` del kernel para diagnóstico. |
@@ -338,7 +339,9 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
 
 ---
 
-## 11. Decisiones para Alvaro
+## 11. Decisiones
+
+**Tomadas por Alvaro (2026-11-01):** D1-a, D2-b, D3-a, D4-a, **D5-b** (distinta de mi recomendación: se amplía `VFS_PATH_MAX` en E0.0), D6-a, D7-a, D8-a, D9-a. La tabla conserva las opciones originales.
 
 | # | Decisión | Opciones | Recomendación |
 |---|---|---|---|
