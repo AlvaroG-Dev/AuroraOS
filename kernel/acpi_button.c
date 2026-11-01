@@ -225,7 +225,9 @@ int acpi_button_init(void) {
   if (f->flags & (1u << 4)) {
     LOG_INFO("[ACPI] boton de encendido por metodo de control (EC)");
     kthread_run(button_thread, NULL, "acpi-report"); // informe diferido
-    acpi_pm_enable();
+    // No se llama a acpi_pm_enable() aqui: activar el modo ACPI en el
+    // arranque (SMI_CMD) cambia el comportamiento del firmware (SCI, USB
+    // legacy) y no hace falta para sondear el EC.
     return ec_button_init();
   }
   if (acpi_pm_enable() != 0)
