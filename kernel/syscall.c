@@ -6243,10 +6243,11 @@ static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
     unsigned long nf = fl & ~(unsigned long)(K_MS_REMOUNT | K_MS_BIND);
     {
       struct vfs_fs_ops *ro_ops = vfs_get_mount_ops(target);
-      // ext2 es de solo lectura hasta E2: no se puede pasar a rw.
-      if (ro_ops && ro_ops->name && strcmp(ro_ops->name, "ext2") == 0 &&
-          !(nf & VFS_MS_RDONLY))
-        return -EROFS;
+      if (ro_ops && ro_ops->name && strcmp(ro_ops->name, "ext2") == 0) {
+        int erc = ext2_remount(vfs_get_mount_priv(target), !(nf & VFS_MS_RDONLY));
+        if (erc != 0)
+          return erc;
+      }
     }
     if (nf & VFS_MS_RDONLY) { // rw -> ro: volcar antes de cerrar la puerta
       struct vfs_fs_ops *o = vfs_get_mount_ops(target);
@@ -6320,10 +6321,10 @@ static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
     return -EINVAL;
 
   rc = is_vfat  ? fat32_mount_bdev(bn, target)
-       : is_ext2 ? ext2_mount_bdev(bn, target)
+       : is_ext2 ? ext2_mount_bdev_rw(bn, target, !(keep & VFS_MS_RDONLY))
                  : iso9660_mount_bdev(bn, target);
   if (rc == 0) {
-    if (is_iso || is_ext2) // ext2 es solo lectura hasta E2
+    if (is_iso)
       keep |= VFS_MS_RDONLY;
     vfs_set_mount_flags(target, keep);
   }
