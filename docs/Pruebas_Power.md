@@ -34,7 +34,7 @@ Cada prueba: anotar **OK / se cuelga / no hace nada**, y si falla, qué línea
 | A5 | Apagado con GPU i915 | A1 con `lkpi.load=linuxkpi,lkpi_drm,lkpi_ttm,lkpi_drm_display,lkpi_i915` | se apaga sin dejar la pantalla colgada; en el log aparece el `shutdown` de i915 (usar `drm.debug=0x1e lkpi.i915_diag=1` si falla) |
 | A6 | Reinicio con GPU i915 | A2 con i915 cargado | vuelve a arrancar y dibuja con i915 |
 | A7 | `_PTS`/`_GTS` | A1 y mirar el log | líneas `\_PTS(5)` y `\_GTS(5)`; si no apaga, repetir con `acpi.pts=0` y comparar |
-| A8 | Botón de encendido | pulsar una vez el botón en el escritorio | si es botón fijo: apagado ordenado. Si el log dice "botón por método de control: sin soporte", es lo esperado (falta el driver de EC) y no se apaga |
+| A8 | Botón de encendido (EC) | pulsar una vez el botón en el escritorio | apagado ordenado. En el log: `[ACPI] EC: datos=0x62 comandos=0x66 ... N notifican al boton` y, al pulsar, `[ACPI] EC: consulta _QXX (boton de encendido)`. Si no apaga: copiar las líneas `[ACPI] EC:` (muestran el número de consulta real) y repetir con `acpi.ecbutton=0xXX`; `acpi.ec=0` lo desactiva |
 | A9 | Apagado limpio de disco | tras A1, arrancar y mirar el log | sin avisos de FAT32 sucio ni `sync bcache flush falló` |
 | A10 | ACPI desactivado en la BIOS (si la Portégé lo permite) | opcional | solo informativo: APM aún no está implementado |
 
@@ -77,4 +77,4 @@ El log (`/data/aurora.log`) y, si la máquina no llegó a arrancar, una foto de 
 
 ## Todavía no implementado (no probar)
 
-APM, botón/tapa por EC (`_Qxx`), suspensión S3/S4, Ctrl-Alt-Del, `kexec`.
+APM, tapa por EC, suspensión S3/S4, Ctrl-Alt-Del, `kexec`.
