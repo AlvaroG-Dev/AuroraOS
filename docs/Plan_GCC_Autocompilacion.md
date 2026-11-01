@@ -414,6 +414,14 @@ Estimación gruesa (una persona + asistente, sin contar `Plan_Ext2`): G0–G2 �
 - **G2.1 (parte descarga) hecho:** `scripts/fetch-devtools.sh` baja 49 .deb (gcc-13, g++-13, binutils, make, libc6-dev, libstdc++-13-dev, nasm, patch, m4 y dependencias) y extrae 242 MB a `build/devtools/root`; `--img` genera `build/aurora-devtools.img` (FAT32, symlinks copiados). La imagen no se ha probado en AuroraOS.
 - **Pendiente de G0:** K1 (`VFS_PATH_MAX`, cambio grande y delicado), K2 (`rename` con sobrescritura, se coordina con `Plan_Ext2` E0), G0.2 (mover cabeceras musl de tcc), G0.1 (auditoría de syscalls en QEMU), `uname`/`os-release`.
 
+### Avance 2 (Escalón B, cross en el host) — hecho y verificado en el host
+
+- Decisión de Alvaro (tarjeta): **dos niveles**. Las herramientas se identifican como `x86_64-pc-aurora-gnu`; a los programas de terceros `config.guess` les dará `x86_64-pc-linux-gnu` (libtool de cada paquete solo conoce `linux*`; no se tocan terceros). Falta implementar ese segundo nivel en `config.guess` de AuroraOS (hoy el script devuelve aurora).
+- `scripts/aurora-toolchain-patch.sh` + `toolchain-aurora/aurora.h`: parchea binutils 2.42 (4 ficheros de destino) y GCC 13.3 (`config.gcc`, `libgcc/config.host`, `libstdc++-v3/configure.host`, y los `configure` generados de los directorios de bibliotecas, donde se añade `aurora*` junto a `linux*`). Son ~24 ficheros tocados por sed/python, no unas pocas líneas: más de lo que estimé al principio.
+- `scripts/mk-aurora-sysroot.sh` y `scripts/build-aurora-toolchain.sh` construyen sysroot y cross. **Probado** (en el host, 4 núcleos, ~35 min en total): `x86_64-pc-aurora-gnu-gcc -dumpmachine` → `x86_64-pc-aurora-gnu`; define `__aurora__`, `__AURORAOS__`, `__linux__` y `__gnu_linux__`; compila C y C++ (libstdc++) y enlaza dinámico (intérprete `/lib64/ld-linux-x86-64.so.2`), estático y `-shared`; los binarios se ejecutan correctamente en el host (misma ABI).
+- Hallazgos: `libs/glibc` no trae `libmvec.so.1` ni `libutil.so.1` (el `libm.so` de glibc los referencia con `AS_NEEDED`); el sysroot los toma del host. Sin `makeinfo` hay que pasar `MAKEINFO=true`.
+- **Aún no probado en AuroraOS:** ejecutar estos binarios en QEMU. Bloqueos para el siguiente paso: ISO/QEMU funcionando con la rama de ext2 fusionada (disco de trabajo con symlinks), `fork` sin COW (medir), y mmap `MAP_SHARED` escribible (E3).
+
 ## 12. Primeros pasos concretos (si Alvaro dice "adelante")
 
 1. G0.1–G0.4 (limpiar cabeceras de `/usr/include`, subir límites, tests de smoke).

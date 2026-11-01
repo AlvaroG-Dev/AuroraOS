@@ -14,15 +14,20 @@ patch_sub() {
     local f=$1
     grep -q 'aurora\*-gnu\*' "$f" && return 0
     python3 -I - "$f" <<'PY'
-import sys
+import re, sys
 p = sys.argv[1]
 s = open(p).read()
-a = "| netbsd*-eabi* | kopensolaris*-gnu* | cloudabi*-eabi* \\"
-b = "kfreebsd*-gnu* | kopensolaris*-gnu*)"
-if a not in s or b not in s:
+# 1) lista de pares KERNEL-OS de tres campos
+t = "| uclinux-gnu* | kfreebsd*-gnu* |"
+if t not in s:
     sys.exit("config.sub inesperado (version no soportada): " + p)
-s = s.replace(a, "| netbsd*-eabi* | kopensolaris*-gnu* | aurora*-gnu* | cloudabi*-eabi* \\", 1)
-s = s.replace("\tkfreebsd*-gnu* | kopensolaris*-gnu*)", "\tkfreebsd*-gnu* | kopensolaris*-gnu* | aurora*-gnu*)", 1)
+s = s.replace(t, "| uclinux-gnu* | aurora*-gnu* | kfreebsd*-gnu* |", 1)
+# 2) validacion KERNEL-OS (con o sin '-' final segun la version)
+m = re.search(r"(?m)^(\t)(kfreebsd\*-gnu\*(-?) \| kopensolaris\*-gnu\*-?\))", s)
+if not m:
+    sys.exit("config.sub inesperado (validacion KERNEL-OS): " + p)
+suf = m.group(3)
+s = s[:m.start()] + "\taurora*-gnu*" + suf + " | " + s[m.start()+1:]
 open(p, "w").write(s)
 PY
 }
