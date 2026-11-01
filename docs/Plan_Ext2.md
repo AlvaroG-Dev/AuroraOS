@@ -131,7 +131,7 @@ Se sigue el estilo de `fat32.c`: mutex por FS (el de FAT32 es propio porque el m
 
 Cada fase tiene un **hito verificable** en QEMU con una imagen creada por el host; ninguna se da por buena sin `e2fsck -fn` limpio cuando escribe.
 
-### E0 — Cimientos (M–L)
+### E0 — Cimientos (M–L) — **HECHA (2026-11-01)**: E0.0 a E0.4, ver commits de la rama `claude/project-thread-uq4oep`.
 - E0.0 **Ampliar `VFS_PATH_MAX`/`vfs_dirent_t.name`** (D5-b): auditar todos los usos (`tmpfs_node`, `vfs_node_t`, `fat32_make_node`, `kmalloc` de nodos, `getdents`), separar `VFS_NAME_MAX=255` de `VFS_PATH_MAX`, regresión de `ls`, `find`, `rm -rf`, `git`. Va **primero y en su propio commit**.
 - E0.1 Cambios de VFS de §3.1 (stat extendido, `utimens`, flags de montaje, `mount(2)`/`umount2(2)`, `fs->sync`). Compatibilidad: FAT32/tmpfs/tarfs/iso9660 siguen igual (los campos nuevos tienen valores por defecto).
 - E0.2 `bcache` (§3.3) con prueba de kernel propia (lectura/escritura/evicción/flush sobre `tests/test_disk.img`).
@@ -139,7 +139,7 @@ Cada fase tiene un **hito verificable** en QEMU con una imagen creada por el hos
 - E0.4 `fsprobe` y reescritura de `mount_boot_media` para usar el sondeo (FAT32 e ISO9660 siguen funcionando igual; `try_mount_data` acepta ext2).
 - **Hito E0:** `make iso` arranca igual que antes (`scripts/check_boot.sh`), `mount -t vfat` y `mount -t tmpfs` funcionan desde el shell, `rename` sobrescribe en tmpfs y FAT32, y los tests existentes de kernel no empeoran (los 5 `pmm` que ya fallan se dejan como están).
 
-### E1 — Lectura (M)
+### E1 — Lectura (M) — **HECHA (2026-11-01)**: `kernel/ext2.c`; matriz de 8 imágenes del host (stat + sha256 coinciden), ext4 rechazado, 30 imágenes corruptas sin caída. Sin caché de inodos todavía (no hace falta en solo lectura; llega con E2). Pruebas: `tests/ext2/{gen_images,run_read_test,run_matrix,gen_fuzz,run_fuzz}`.
 - E1.1 Superbloque, validación y features (§2.1–2.2); descriptores de grupo; `statfs`.
 - E1.2 Caché de inodos, `bmap` completo (12/1/2/3 niveles), huecos, tamaño de 64 bits.
 - E1.3 Directorios (lineales, `dir_index` por recorrido lineal), `lookup`, `readdir` (`d_type` desde `file_type` o `i_mode`), `readlink` (rápido y lento), `stat` completo con uid/gid de 32 bits, `nlink`, `blocks`.

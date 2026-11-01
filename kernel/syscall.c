@@ -6241,6 +6241,13 @@ static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
     if (!vfs_get_mount_ops(target))
       return -EINVAL;
     unsigned long nf = fl & ~(unsigned long)(K_MS_REMOUNT | K_MS_BIND);
+    {
+      struct vfs_fs_ops *ro_ops = vfs_get_mount_ops(target);
+      // ext2 es de solo lectura hasta E2: no se puede pasar a rw.
+      if (ro_ops && ro_ops->name && strcmp(ro_ops->name, "ext2") == 0 &&
+          !(nf & VFS_MS_RDONLY))
+        return -EROFS;
+    }
     if (nf & VFS_MS_RDONLY) { // rw -> ro: volcar antes de cerrar la puerta
       struct vfs_fs_ops *o = vfs_get_mount_ops(target);
       void *pv = vfs_get_mount_priv(target);
