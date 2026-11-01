@@ -12,7 +12,7 @@ if [ "${NVKMS_DEBUG:-1}" = 1 ]; then OUTD=dbg; else OUTD=Linux_x86_64; fi
 NM=build/linuxkpi_src/nvidia-open/src/nvidia-modeset/_out/$OUTD/nv-modeset-kernel.o
 [ -f "$NM" ] || { echo "falta $NM" >&2; exit 1; }
 CC=${KUR_CC:-gcc}
-CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
+CF="-std=gnu11 -fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel -Iinclude/linuxkpi"
 strip --strip-debug -o $B/nv-modeset-kernel.o "$NM"
 ld -r -o $B/ms-all.o $O/nvidia-modeset-linux.o $O/nv-kthread-q.o $B/nv-modeset-kernel.o
 nm build/linuxkpi/linuxkpi.o | awk '$2 ~ /[TDBRtdbrW]/{print $3}' > $B/have.txt
