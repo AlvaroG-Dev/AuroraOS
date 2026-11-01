@@ -37,6 +37,10 @@
 #define SYS_prctl 157
 #define SYS_pause 34
 #define SYS_write 1
+#define SYS_socket 41
+#define SYS_bind 49
+#define SYS_capget 125
+#define SYS_capset 126
 #define SYS_exit_group 231
 
 #define O_RDONLY 0
@@ -133,6 +137,63 @@ static int c_create(void *a) {
   if (fd >= 0)
     sc(SYS_close, fd, 0, 0, 0);
   return err_of(fd);
+}
+
+// ---- [U6] capabilities ----
+struct cap_hdr { unsigned version; int pid; };
+struct cap_dat { unsigned eff, prm, inh; };
+static int capbind(unsigned short port) {
+  long fd = sc(SYS_socket, 2, 1, 0, 0);
+  if (fd < 0)
+    return (int)-fd;
+  struct { unsigned short fam, port; unsigned addr; char z[8]; } sa;
+  char *q = (char *)&sa;
+  for (unsigned i = 0; i < sizeof(sa); i++)
+    q[i] = 0;
+  sa.fam = 2;
+  sa.port = (unsigned short)((port >> 8) | (port << 8));
+  long r = sc(SYS_bind, fd, (long)&sa, 16, 0);
+  sc(SYS_close, fd, 0, 0, 0);
+  return err_of(r);
+}
+static int c_cap_none(void *a) {
+  (void)a;
+  struct cap_hdr h = {0x20080522u, 0};
+  struct cap_dat d[2];
+  if (sc(SYS_capget, (long)&h, (long)d, 0, 0) != 0)
+    return 1;
+  return (d[0].eff | d[0].prm | d[1].eff | d[1].prm) ? 2 : 0;
+}
+static int c_bind80(void *a) { (void)a; return capbind(80); }
+// Conserva permitidas con KEEPCAPS, las recupera con capset y las gasta.
+static int c_keepcaps(void *a) {
+  (void)a;
+  sc(SYS_prctl, 8, 1, 0, 0);
+  if (sc(SYS_setuid, 1000, 0, 0, 0) != 0)
+    return 100;
+  struct cap_hdr h = {0x20080522u, 0};
+  struct cap_dat d[2];
+  sc(SYS_capget, (long)&h, (long)d, 0, 0);
+  if (d[0].eff != 0 || !(d[0].prm & (1u << 10)))
+    return 101; // eff debe estar vacio y prm conservado
+  if (capbind(80) != EACCES)
+    return 102;
+  d[0].eff = d[0].prm = (1u << 10); // CAP_NET_BIND_SERVICE
+  d[0].inh = 0;
+  d[1].eff = d[1].prm = d[1].inh = 0;
+  if (sc(SYS_capset, (long)&h, (long)d, 0, 0) != 0)
+    return 103;
+  if (capbind(80) != 0)
+    return 104;
+  if (err_of(sc(SYS_chown, (long)"/tmp/ct/own1000", 0, 0, 0)) != EPERM)
+    return 105; // sin CAP_CHOWN no hay chown
+  if (err_of(sc(SYS_setuid, 0, 0, 0, 0)) != EPERM)
+    return 106;
+  // no puede ampliar: pedir otra capacidad permitida que ya no tiene
+  d[0].eff = d[0].prm = (1u << 10) | (1u << 0);
+  if (err_of(sc(SYS_capset, (long)&h, (long)d, 0, 0)) != EPERM)
+    return 107;
+  return 0;
 }
 static int c_unlink(void *a) { return err_of(sc(SYS_unlink, (long)a, 0, 0, 0)); }
 static int c_setuid_root(void *a) {
@@ -296,6 +357,19 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void) {
 
   // --- U1.4: no_new_privs ---
   check("prctl_no_new_privs_set_get_herencia", run_as(1000, 1000, c_nnp, 0), 0);
+
+  // --- U6: capabilities ---
+  check("root_bind80_ok", capbind(80), 0);
+  check("uid1000_sin_caps", run_as(1000, 1000, c_cap_none, 0), 0);
+  check("uid1000_bind80_eacces", run_as(1000, 1000, c_bind80, 0), EACCES);
+  {
+    long kp = sc(SYS_fork, 0, 0, 0, 0);
+    if (kp == 0)
+      sc(SYS_exit, c_keepcaps(0), 0, 0, 0);
+    int kst = 0;
+    sc(SYS_wait4, kp, (long)&kst, 0, 0);
+    check("keepcaps_capset_bind80", (kst >> 8) & 0xff, 0);
+  }
 
   // limpieza
   sc(SYS_unlink, (long)"/tmp/ct/priv", 0, 0, 0);

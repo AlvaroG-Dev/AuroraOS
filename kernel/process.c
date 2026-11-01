@@ -563,6 +563,9 @@ static void process_init_creds(process_t *proc) {
   proc->sgid = 0;
   proc->fsgid = 0;
   proc->umask = 022;
+  proc->cap_eff = proc->cap_prm = proc->cap_bnd = CAP_FULL_MASK;
+  proc->cap_inh = proc->cap_amb = 0;
+  proc->keepcaps = 0;
   // [5.1] Coherente con Linux: el proceso inicial arranca con el grupo
   // root como suplementario. Sin esto, `id` omite `groups=` y algunos
   // applets que iteran getgroups() ven una lista vacía.
@@ -2235,6 +2238,12 @@ int64_t sys_fork(void) {
   child->fsgid = parent->fsgid;
   child->umask = parent->umask;
   child->no_new_privs = parent->no_new_privs;
+  child->cap_eff = parent->cap_eff;
+  child->cap_prm = parent->cap_prm;
+  child->cap_inh = parent->cap_inh;
+  child->cap_bnd = parent->cap_bnd;
+  child->cap_amb = parent->cap_amb;
+  child->keepcaps = parent->keepcaps;
   child->ngroups = parent->ngroups;
   for (int i = 0; i < NGROUPS_MAX; i++)
     child->groups[i] = parent->groups[i];
@@ -2603,6 +2612,18 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   // execve borra los temporizadores POSIX; los de setitimer/alarm siguen.
   ptimer_exec(proc->pid);
 
+  {
+    // [U6] Capacidades tras execve (Linux, sin caps de fichero): un proceso
+    // "root" (uid o euid 0) gana permitidas = bounding; el resto, solo ambient.
+    uint64_t fp = (proc->uid == 0 || x_euid == 0) ? CAP_FULL_MASK : 0;
+    uint64_t fe = (x_euid == 0) ? CAP_FULL_MASK : 0;
+    uint64_t amb = (x_euid != proc->euid || x_egid != proc->egid) ? 0 : proc->cap_amb;
+    uint64_t prm = (proc->cap_inh & fp) | (fp & proc->cap_bnd) | amb;
+    proc->cap_amb = amb;
+    proc->cap_prm = prm;
+    proc->cap_eff = fe ? prm : amb;
+    proc->keepcaps = 0;
+  }
   proc->euid = x_euid;
   proc->suid = x_euid;
   proc->fsuid = x_euid;
@@ -2715,10 +2736,33 @@ int process_is_in_pgrp(process_t *p, uint32_t pgid) {
 
 // [U1.3] Regla de kill(2) de Linux: root puede todo; el resto solo si su uid
 // real o efectivo coincide con el uid real o guardado del destino.
+int capable(int cap) {
+  process_t *p = process_current();
+  if (!p)
+    return 1;
+  return (p->cap_eff >> cap) & 1;
+}
+
+void process_caps_after_setuid(process_t *p, uint32_t ouid, uint32_t oeuid,
+                               uint32_t osuid) {
+  if ((ouid == 0 || oeuid == 0 || osuid == 0) && p->uid != 0 && p->euid != 0 &&
+      p->suid != 0) {
+    if (!p->keepcaps) {
+      p->cap_prm = 0;
+      p->cap_eff = 0;
+    }
+    p->cap_amb = 0;
+  }
+  if (oeuid == 0 && p->euid != 0)
+    p->cap_eff = 0;
+  if (oeuid != 0 && p->euid == 0)
+    p->cap_eff = p->cap_prm;
+}
+
 int process_may_signal(const process_t *sender, const process_t *target) {
   if (!sender || !target || sender == target)
     return 1;
-  if (sender->euid == 0)
+  if (sender->cap_eff & (1ULL << CAP_KILL))
     return 1;
   return sender->uid == target->uid || sender->uid == target->suid ||
          sender->euid == target->uid || sender->euid == target->suid;

@@ -35,7 +35,7 @@
 
 static int kmod_may_load(void) {
   process_t *p = process_current();
-  return p && p->euid == 0;
+  return p && cap_raised(p, CAP_SYS_MODULE);
 }
 
 static int64_t kmod_load_buffer(const void *data, size_t size) {

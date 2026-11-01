@@ -1278,7 +1278,7 @@ int vfs_chmod(const char *path, uint32_t mode) {
   if (!node)
     return -ENOENT;
 
-  int is_root = (proc->euid == 0);
+  int is_root = cap_raised(proc, CAP_FOWNER);
   int is_owner = (proc->euid == node->uid);
 
   if (!is_root && !is_owner) {
@@ -1311,7 +1311,7 @@ int vfs_chmod(const char *path, uint32_t mode) {
 // dueño solo puede cambiar el grupo a uno al que pertenece (uid sin cambio).
 static int chown_permitted(process_t *proc, vfs_node_t *node, uint32_t uid,
                            uint32_t gid) {
-  if (proc->euid == 0)
+  if (cap_raised(proc, CAP_CHOWN))
     return 0;
   if (proc->fsuid != node->uid)
     return -EPERM;
@@ -1379,7 +1379,7 @@ int vfs_fchmod(file_descriptor_t *f, uint32_t mode) {
   if (!proc)
     return -EPERM;
 
-  int is_root = (proc->euid == 0);
+  int is_root = cap_raised(proc, CAP_FOWNER);
   int is_owner = (proc->euid == f->node->uid);
   if (!is_root && !is_owner)
     return -EPERM;
@@ -1446,8 +1446,8 @@ static int check_access_ids(vfs_node_t *node, int mask, uint32_t uid,
   if (!proc)
     return 0;
 
-  // Root bypasea todo.
-  if (uid == 0)
+  // CAP_DAC_OVERRIDE (root la tiene siempre salvo que la suelte).
+  if (uid == 0 && cap_raised(proc, CAP_DAC_OVERRIDE))
     return 0;
 
   uint32_t bits;
@@ -1472,6 +1472,19 @@ static int check_access_ids(vfs_node_t *node, int mask, uint32_t uid,
 
   if ((bits & need) == need)
     return 0;
+  // [U6] DAC por capacidad para no-root (y root sin DAC_OVERRIDE).
+  {
+    int is_dir = (node->flags & VFS_DIRECTORY) != 0;
+    uint32_t rest = need & ~(bits & need);
+    if (cap_raised(proc, CAP_DAC_OVERRIDE)) {
+      if (!(rest & 1) || is_dir || (node->mode & 0111))
+        return 0;
+    }
+    if (cap_raised(proc, CAP_DAC_READ_SEARCH)) {
+      if ((rest & ~5u) == 0 && (!(rest & 1) || is_dir))
+        return 0;
+    }
+  }
   return -EACCES;
 }
 
@@ -1499,7 +1512,7 @@ static int sticky_check(vfs_node_t *parent, const char *path) {
   process_t *proc = process_current();
   if (!proc || !parent || !(parent->mode & S_ISVTX))
     return 0;
-  if (proc->fsuid == 0 || proc->fsuid == parent->uid)
+  if (cap_raised(proc, CAP_FOWNER) || proc->fsuid == parent->uid)
     return 0;
   vfs_node_t *child = vfs_lookup_nofollow(path);
   if (!child)

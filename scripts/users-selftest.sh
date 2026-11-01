@@ -34,4 +34,7 @@ t grupo_video 'video' bash -c 'su alvaro -c "id -Gn"'
 t touch_ajeno 'denied|Permission|permitido|not permitted' bash -c 'su alvaro -c "touch /etc/hosts" 2>&1; true'
 t link_tmp 'ok' bash -c 'su alvaro -c "echo x > /tmp/lk1 && ln /tmp/lk1 /tmp/lk2 && cat /tmp/lk2 && echo ok" 2>&1'
 t raiz_atravesable 'drwxr-xr-x' bash -c 'ls -ld /; su alvaro -c "cd / && pwd"'
+t caps_root '000001ffffffffff' bash -c 'grep CapEff /proc/self/status'
+t caps_user_vacias 'CapEff:.0000000000000000' bash -c 'su alvaro -c "grep CapEff /proc/self/status"'
+t caps_sudo_completas '000001ffffffffff' bash -c 'su alvaro -c "sudo grep CapEff /proc/self/status"'
 echo "[users] RESULT pass=$ok fail=$bad"
