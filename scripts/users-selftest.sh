@@ -33,4 +33,5 @@ t input_grupo '104' bash -c 'ls -ln /dev/input/event0'
 t grupo_video 'video' bash -c 'su alvaro -c "id -Gn"'
 t touch_ajeno 'denied|Permission|permitido|not permitted' bash -c 'su alvaro -c "touch /etc/hosts" 2>&1; true'
 t link_tmp 'ok' bash -c 'su alvaro -c "echo x > /tmp/lk1 && ln /tmp/lk1 /tmp/lk2 && cat /tmp/lk2 && echo ok" 2>&1'
+t raiz_atravesable 'drwxr-xr-x' bash -c 'ls -ld /; su alvaro -c "cd / && pwd"'
 echo "[users] RESULT pass=$ok fail=$bad"
