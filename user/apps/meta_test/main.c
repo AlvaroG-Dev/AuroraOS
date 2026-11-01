@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#define SYS_read 0
 #define SYS_write 1
 #define SYS_open 2
 #define SYS_close 3
@@ -114,6 +115,52 @@ static void expect(const char *name, const char *p, unsigned m, unsigned u,
   }
 }
 
+#define O_APPEND 02000
+#define O_RDONLY 0
+static const char k_line[] = "mtuser:x:2000:2000::/:/bin/false\n";
+static int etc_has_line(void) {
+  long fd = sc(SYS_open, (long)"/etc/passwd", O_RDONLY, 0, 0);
+  if (fd < 0)
+    return 0;
+  static char buf[8192];
+  long n = sc(SYS_read, fd, (long)buf, sizeof(buf) - 1, 0);
+  sc(SYS_close, fd, 0, 0, 0);
+  if (n <= 0)
+    return 0;
+  buf[n] = 0;
+  for (long i = 0; i + 6 < n; i++)
+    if (buf[i] == 'm' && buf[i + 1] == 't' && buf[i + 2] == 'u' &&
+        buf[i + 3] == 's' && buf[i + 4] == 'e' && buf[i + 5] == 'r')
+      return 1;
+  return 0;
+}
+static int etc_remove_line(void) {
+  long fd = sc(SYS_open, (long)"/etc/passwd", O_RDONLY, 0, 0);
+  if (fd < 0)
+    return -1;
+  static char buf[8192], out[8192];
+  long n = sc(SYS_read, fd, (long)buf, sizeof(buf) - 1, 0);
+  sc(SYS_close, fd, 0, 0, 0);
+  long o = 0, i = 0;
+  while (i < n) {
+    long j = i;
+    while (j < n && buf[j] != '\n')
+      j++;
+    int mt = (j - i >= 6 && buf[i] == 'm' && buf[i + 1] == 't' && buf[i + 2] == 'u' &&
+              buf[i + 3] == 's' && buf[i + 4] == 'e' && buf[i + 5] == 'r');
+    if (!mt)
+      for (long k = i; k <= j && k < n; k++)
+        out[o++] = buf[k];
+    i = j + 1;
+  }
+  fd = sc(SYS_open, (long)"/etc/passwd", O_WRONLY | 01000 /*O_TRUNC*/, 0, 0);
+  if (fd < 0)
+    return -1;
+  sc(SYS_write, fd, (long)out, o, 0);
+  sc(SYS_close, fd, 0, 0, 0);
+  return 0;
+}
+
 __attribute__((noreturn, force_align_arg_pointer)) void _start(void) {
   unsigned m, u, g;
   if (st("/data", &m, &u, &g) != 0) {
@@ -142,10 +189,21 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void) {
     check("hijo_uid1000_crea_en_data", (stt >> 8) & 0xff, 0);
     expect("fase1_f", "/data/mt/f", 0640, 1000, 1001);
     expect("fase1_own_dueno_creador", "/data/mt/own", 0644 & ~022u, 1000, 1000);
+    {
+      long fd = sc(SYS_open, (long)"/etc/passwd", O_WRONLY | O_APPEND, 0, 0);
+      check("etc_passwd_append", fd >= 0 ? 0 : fd, 0);
+      if (fd >= 0) {
+        sc(SYS_write, fd, (long)k_line, sizeof(k_line) - 1, 0);
+        sc(SYS_close, fd, 0, 0, 0);
+      }
+    }
     sc(SYS_sync, 0, 0, 0, 0);
     puts_("[meta_test] PHASE1 hecha, reiniciar y volver a ejecutar\n");
   } else {
     puts_("[meta_test] PHASE2 comprobar tras reinicio\n");
+    check("etc_passwd_persiste", etc_has_line(), 1);
+    etc_remove_line();
+    expect("etc_shadow_0600", "/etc/shadow", 0600, 0, 0);
     expect("fase2_f", "/data/mt/f", 0640, 1000, 1001);
     expect("fase2_d", "/data/mt/d", 0750, 1000, 1000);
     expect("fase2_own", "/data/mt/own", 0644, 1000, 1000);

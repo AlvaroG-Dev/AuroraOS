@@ -926,6 +926,7 @@ typedef struct {
 static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n", NULL, 0},
     {"/etc/group", "root:x:0:\n", NULL, 0},
+    {"/etc/shadow", "root:*:19000:0:99999:7:::\n", NULL, 0},
     {"/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n", NULL, 0},
     {"/etc/resolv.conf", "", NULL, 0},
     {"/etc/profile", "# /etc/profile\n", NULL, 0},
@@ -940,6 +941,99 @@ static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/ssl/certs/ca-certificates.crt", NULL, NULL, 0},
 };
 #define N_ETC_SEEDS (sizeof(g_etc_seeds) / sizeof(g_etc_seeds[0]))
+
+// ---------------------------------------------------------------------------
+// [U2.3] /etc persistente: passwd, group y shadow viven en /data/etc cuando
+// /data está montado. /etc es un tmpfs sembrado en cada arranque, así que:
+//   - al montarse /data: si existen en /data/etc se copian a /etc; si no,
+//     se crean allí a partir de lo que haya en /etc (primera vez);
+//   - en sync(2)/apagado (etc_persist_flush): si /etc/X difiere de
+//     /data/etc/X se reescribe en /data/etc.
+// ---------------------------------------------------------------------------
+static const char *const k_etc_acct[] = {"passwd", "group", "shadow"};
+#define N_ETC_ACCT 3
+
+static int etc_write_file(const char *path, const char *data, size_t len,
+                          uint32_t mode) {
+  int rc = vfs_create(path, mode);
+  if (rc != 0 && rc != -EEXIST)
+    return rc;
+  vfs_node_t *n = vfs_lookup(path);
+  if (!n)
+    return -ENOENT;
+  if (!n->ops || !n->ops->write) {
+    vfs_node_free(n);
+    return -EINVAL;
+  }
+  rc = 0;
+  if (n->ops->truncate)
+    rc = n->ops->truncate(n, 0);
+  if (rc == 0 && len && n->ops->write(n, 0, len, data) != (int64_t)len)
+    rc = -EIO;
+  if (rc == 0 && n->ops->chmod && (n->mode & 07777) != mode) {
+    if (n->ops->chmod(n, mode) == 0)
+      n->mode = (n->mode & S_IFMT) | mode;
+  }
+  vfs_node_free(n);
+  return rc;
+}
+
+static uint32_t etc_acct_mode(int i) { return i == 2 ? 0600 : 0644; }
+
+// Ejecuta con fsuid/fsgid = 0 (el que llama a sync() puede no ser root).
+static void etc_persist_run(int on_mount) {
+  vfs_node_t *dd = vfs_lookup("/data");
+  if (!dd)
+    return;
+  vfs_node_free(dd);
+
+  process_t *p = process_current();
+  uint32_t su = 0, sg = 0;
+  if (p) {
+    su = p->fsuid;
+    sg = p->fsgid;
+    p->fsuid = 0;
+    p->fsgid = 0;
+  }
+  int rc = vfs_mkdir("/data/etc", 0755);
+  if (rc == 0 || rc == -EEXIST) {
+    for (int i = 0; i < N_ETC_ACCT; i++) {
+      char pe[48], pd[48];
+      size_t ne = 0, nd = 0;
+      pe[0] = pd[0] = '\0';
+      strcpy(pe, "/etc/");
+      strcpy(pe + 5, k_etc_acct[i]);
+      strcpy(pd, "/data/etc/");
+      strcpy(pd + 10, k_etc_acct[i]);
+      char *be = tmpfs_read_file(pe, &ne);
+      char *bd = tmpfs_read_file(pd, &nd);
+      if (on_mount && bd) {
+        // /data manda: cargar en /etc.
+        etc_write_file(pe, bd, nd, etc_acct_mode(i));
+      } else if (be && (!bd || nd != ne || memcmp(bd, be, ne) != 0)) {
+        // /etc cambió (o primera vez): guardar en /data.
+        int wr = etc_write_file(pd, be, ne, etc_acct_mode(i));
+        if (wr != 0)
+          LOG_WARN("[ETC] no se pudo guardar %s (rc=%d)", pd, wr);
+      }
+      if (be)
+        kfree(be);
+      if (bd)
+        kfree(bd);
+    }
+  }
+  if (p) {
+    p->fsuid = su;
+    p->fsgid = sg;
+  }
+}
+
+void etc_persist_on_data_mount(void) {
+  etc_persist_run(1);
+  LOG_INFO("[ETC] passwd/group/shadow sincronizados con /data/etc");
+}
+
+void etc_persist_flush(void) { etc_persist_run(0); }
 
 // ---------------------------------------------------------------------------
 // tmpfs_init: monta /etc, /tmp, /var, /run, /dev/shm y pre-popula /etc.

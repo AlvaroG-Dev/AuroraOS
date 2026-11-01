@@ -45,6 +45,7 @@
 #include "string.h"
 #include "swap.h"
 #include "uaccess.h"
+#include "tmpfs.h"
 #include "vfs.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -6229,6 +6230,7 @@ static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   // [U2] FAT32 mantiene sync diferido y la tabla de metadatos POSIX
   // (.aurora-meta): sync(2) vuelca ambos. El resto de FS no tiene nada
   // pendiente (tarfs RO, procfs/sysfs/devfs/tmpfs sin disco).
+  etc_persist_flush(); // [U2.3] passwd/group/shadow -> /data/etc
   fat32_sync_all();
   return 0;
 }

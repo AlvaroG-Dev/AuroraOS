@@ -13,6 +13,9 @@ struct vfs_fs_ops;
 void *tmpfs_new(size_t max_bytes);
 // [U1.2] Cambia el modo del directorio raíz de una instancia (p. ej. 01777).
 void tmpfs_set_root_mode(void *fs, uint32_t mode);
+// [U2.3] /etc persistente (passwd/group/shadow en /data/etc).
+void etc_persist_on_data_mount(void);
+void etc_persist_flush(void);
 
 // Libera una instancia creada con tmpfs_new. NO libera el arbol de
 // nodos (asume que el FS vive hasta el final del boot). Se mejorara
