@@ -7,10 +7,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/user/aurora-users/aurora-users.c"
 OUT="$ROOT/sysroot/usr/bin"
 mkdir -p "$OUT"
-gcc -O2 -Wall -Wextra -Wno-unused-result -o "$OUT/aurora-users" "$SRC" -lcrypt
+# crypt(): se enlaza la libcrypt.so.1 de libs/glibc (la de la ISO) y no hace
+# falta libcrypt-dev ni crypt.h en el host.
+GLIBC_CRYPT="$ROOT/libs/glibc/lib/x86_64-linux-gnu/libcrypt.so.1"
+[ -f "$GLIBC_CRYPT" ] || GLIBC_CRYPT=$(ls /lib/x86_64-linux-gnu/libcrypt.so.1 /usr/lib/x86_64-linux-gnu/libcrypt.so.1 2>/dev/null | head -1)
+[ -f "$GLIBC_CRYPT" ] || { echo "[Makefile]   ERROR: no hay libcrypt.so.1 (ni en libs/glibc ni en el host)" >&2; exit 1; }
+gcc -O2 -Wall -Wextra -Wno-unused-result -DAU_NO_CRYPT_H -o "$OUT/aurora-users" "$SRC" "$GLIBC_CRYPT"
 # Aviso si el binario exige una glibc mas nueva que la de la ISO (libs/glibc).
-need=$(objdump -T "$OUT/aurora-users" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
-have=$(strings -a "$ROOT/libs/glibc/lib/x86_64-linux-gnu/libc.so.6" 2>/dev/null | sed -n 's/.*release version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -1)
+need=$(objdump -T "$OUT/aurora-users" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1 || true)
+have=$(strings -a "$ROOT/libs/glibc/lib/x86_64-linux-gnu/libc.so.6" 2>/dev/null | sed -n 's/.*release version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -1 || true)
 if [ -n "$need" ] && [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | tail -1)" != "$have" ]; then
   echo "[Makefile]   AVISO: aurora-users exige GLIBC_$need y libs/glibc es $have: puede no cargar en la ISO" >&2
 fi

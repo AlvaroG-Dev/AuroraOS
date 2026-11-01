@@ -8,7 +8,12 @@
 // Ver Plan_Usuarios.md (U3).
 
 #define _GNU_SOURCE
+#ifdef AU_NO_CRYPT_H
+/* Sin libcrypt-dev en el host: declaración propia (se enlaza libcrypt.so.1). */
+extern char *crypt(const char *key, const char *salt);
+#else
 #include <crypt.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
