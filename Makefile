@@ -356,6 +356,10 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	@echo "[Makefile] Copiando precompiled/ a sysroot/..."
 	@if [ -d precompiled ]; then \
 		cp -a precompiled/. sysroot/; \
+		if [ -d precompiled/lib/x86_64-linux-gnu/security ]; then \
+			mkdir -p sysroot/usr/lib/x86_64-linux-gnu/security; \
+			cp -a precompiled/lib/x86_64-linux-gnu/security/. sysroot/usr/lib/x86_64-linux-gnu/security/; \
+		fi; \
 	else \
 		echo "[Makefile]   (precompiled/ no existe)"; \
 	fi
