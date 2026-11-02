@@ -4756,8 +4756,18 @@ static int64_t k_fchmodat(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
                           uint64_t flags, uint64_t a5) {
   (void)flags;
   (void)a5;
-  if ((int)dfd != AT_FDCWD)
-    return -EINVAL;
+  if ((int)dfd != AT_FDCWD) {
+    // [Plan_GCC] dirfd real + ruta relativa (GNU tar, coreutils/gnulib).
+    process_t *proc = process_current();
+    if (!proc)
+      return -EFAULT;
+    char path[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)dfd, (const char *)path_ptr, path,
+                             sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_chmod(path, (uint32_t)mode);
+  }
   return k_chmod(path_ptr, mode, 0, 0, 0);
 }
 
@@ -4809,11 +4819,16 @@ static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
       c == '\0')
     return k_fchown(dfd, uid, gid, 0, 0);
   if ((int)dfd != AT_FDCWD) {
-    char first = 0;
-    if (!path_ptr || copy_from_user(&first, (const void *)path_ptr, 1) != 0)
+    // [Plan_GCC] dirfd real + ruta relativa (antes: EINVAL).
+    process_t *proc = process_current();
+    if (!proc)
       return -EFAULT;
-    if (first != '/')
-      return -EINVAL;
+    char path[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)dfd, (const char *)path_ptr, path,
+                             sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_chown(path, (uint32_t)uid, (uint32_t)gid);
   }
   return k_chown(path_ptr, uid, gid, 0, 0);
 }
@@ -4869,9 +4884,7 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   // [4.2] futimens(fd, times) → utimensat(fd, NULL, times, 0).
   // BusyBox touch abre el fichero con O_CREAT y luego aplica futimens.
   // Sin este path, dfd != AT_FDCWD → EINVAL → mtime se queda en 1980.
-  if ((int)dfd != AT_FDCWD) {
-    if (path_uptr != 0)
-      return -EINVAL; // path relativo a dfd: no soportado todavía
+  if ((int)dfd != AT_FDCWD && path_uptr == 0) {
     int kfd = (int)dfd;
     if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
       return -EBADF;
@@ -4892,7 +4905,9 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     return -EINVAL;
 
   char path[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  // [Plan_GCC] ruta relativa a dfd (tar/gnulib usan utimensat(dirfd, nombre)).
+  int rc = resolve_at_path(proc, (int)dfd, (const char *)path_uptr, path,
+                           sizeof(path));
   if (rc != 0) {
     return rc;
   }
