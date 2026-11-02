@@ -47,4 +47,8 @@ t pam_clave_mala 'FALLO' bash -c 'pamcheck alvaro mala; true'
 t pam_user_ok 'pamcheck: OK' bash -c 'su testu -c "pamcheck testu new1"'
 t pam_user_mala 'FALLO' bash -c 'su testu -c "pamcheck testu zzz"; true'
 t pam_svc_su 'pamcheck: OK' bash -c 'pamcheck -s su alvaro pw'
+t switch_instalado 'rwsr-xr-x.*aurora-switch' bash -c 'ls -l /usr/bin/aurora-switch'
+t switch_en_path_user 'aurora-switch' bash -c 'su alvaro -c "command -v aurora-switch"'
+t switch_sudo_path 'aurora-switch' bash -c 'su alvaro -c "sudo sh -c \"command -v aurora-switch\""'
+t switch_sin_args 'uso' bash -c 'su alvaro -c "aurora-switch" 2>&1; true'
 echo "[users] RESULT pass=$ok fail=$bad"
