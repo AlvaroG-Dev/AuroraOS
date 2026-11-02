@@ -3,6 +3,7 @@ volatile int smp_sched_active = 0;
 #include "smp_boot.h"
 #include "acpi.h"
 #include "apic.h"
+#include "cmdline.h"
 #include "cpu.h"
 #include "gdt.h"
 #include "idt.h"
@@ -54,7 +55,12 @@ static void delay_ms(int ms) {
 #define DIAG(c) __asm__ volatile("outb %0, $0xE9" : : "a"((char)(c)))
 
 // [DIAG] Dump del estado de smp_boot_params.
+// ~20 lineas por AP: en hardware real cada linea de klog cuesta decenas de ms
+// (hasta ~10 s de arranque con 20 CPUs), asi que solo con smp.debug=1.
 static void dump_smp_boot_params(const char *tag) {
+  char v[4];
+  if (!cmdline_get("smp.debug", v, sizeof(v)) || v[0] != '1')
+    return;
   LOG_DEBUG("[%s] smp_boot_params = %p", tag, (void *)smp_boot_params);
   LOG_DEBUG("[%s]   ap_stack_top[0..1] = %llx, %llx", tag,
             (unsigned long long)smp_boot_params->ap_stack_top[0],
@@ -201,6 +207,7 @@ void ap_entry(void) {
     cr0 &= ~((1ULL << 2) | (1ULL << 3));   // clear EM, TS
     cr0 &= ~((1ULL << 29) | (1ULL << 30)); // clear NW, CD  [FIX]
     cr0 |= (1ULL << 1);                    // set MP
+    cr0 |= (1ULL << 16);                   // set WP (COW de fork)
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     __asm__ volatile("fninit");

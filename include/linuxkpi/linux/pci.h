@@ -153,6 +153,7 @@ struct pci_dev {
 	unsigned int is_busmaster:1;
 	unsigned int no_msi:1;
 	unsigned int msi_enabled:1;
+	unsigned int ats_enabled:1;
 	unsigned int msix_enabled:1;
 	unsigned int is_managed:1;
 	unsigned int is_virtfn:1;
@@ -421,6 +422,13 @@ static inline struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int dev
 {
 	return pci_get_domain_bus_and_slot(0, bus->number, devfn);
 }
+
+struct msix_entry { u32 vector; u16 entry; };
+static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minv, int maxv) { return -ENOSYS; }
+static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec) { return -ENOSYS; }
+static inline void pci_disable_msix(struct pci_dev *dev) {}
+static inline void pci_stop_and_remove_bus_device(struct pci_dev *dev) {}
+static inline dma_addr_t pci_bus_address(struct pci_dev *pdev, int bar) { return pci_resource_start(pdev, bar); }
 
 /* Drivers */
 int lkpi_pci_register_driver(struct pci_driver *drv, struct module *owner, const char *mod_name);

@@ -58,6 +58,7 @@ typedef struct {
   usb_endpoint_t *bulk_out;
   uint32_t next_tag;
   uint8_t lun;
+  uint8_t iface;
   uint8_t dev_type;
   uint32_t num_sectors;
   uint32_t sector_size;
@@ -93,6 +94,31 @@ static void usb_storage_assign_name(const char *prefix, char *out) {
   strcpy(out, prefix);
 }
 
+static bool usb_storage_never(void *arg) {
+  (void)arg;
+  return false;
+}
+
+static void usb_storage_sleep(uint32_t ms) {
+  wait_queue_t wq;
+  wait_queue_init(&wq);
+  wait_event_timeout(&wq, usb_storage_never, NULL, ms);
+}
+
+// Recuperacion BOT (USB Mass Storage Bulk-Only 5.3.4): los pendrives reales
+// dejan el endpoint en STALL (HALT en el dispositivo) cuando un comando falla
+// o aun no esta listo; el host debe limpiar ENDPOINT_HALT o el siguiente
+// transfer vuelve a fallar. QEMU nunca hace STALL, por eso no se veia.
+static void usb_storage_clear_halt(usb_storage_t *s, usb_endpoint_t *ep) {
+  (void)usb_control_transfer(s->dev, 0x02, 0x01, 0, ep->addr, NULL, 0, 1000);
+}
+
+static void usb_storage_reset_recovery(usb_storage_t *s) {
+  (void)usb_control_transfer(s->dev, 0x21, 0xFF, 0, s->iface, NULL, 0, 1000);
+  usb_storage_clear_halt(s, s->bulk_in);
+  usb_storage_clear_halt(s, s->bulk_out);
+}
+
 static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
                                 void *data, uint32_t data_len, int dir_in,
                                 uint32_t timeout_ms) {
@@ -115,47 +141,60 @@ static int usb_storage_bot_xfer(usb_storage_t *s, const uint8_t *cb, int cb_len,
 
   int rc = s->dev->hcd->bulk_xfer(s->dev, s->bulk_out, s->cbw_buf.virt,
                                   sizeof(*cbw), 0, timeout_ms);
-  if (rc < 0)
-    return rc;
-  if (rc != (int)sizeof(*cbw))
-    return -EIO;
+  if (rc < 0 || rc != (int)sizeof(*cbw)) {
+    usb_storage_reset_recovery(s);
+    return rc < 0 ? rc : -EIO;
+  }
 
+  // Un fallo en la fase de datos no aborta: el dispositivo aun debe enviar el
+  // CSW (tras limpiar el HALT del endpoint de datos).
+  int data_rc = 0;
   if (data && data_len > 0) {
     if (dir_in) {
       rc = s->dev->hcd->bulk_xfer(s->dev, s->bulk_in, s->data_buf.virt,
                                   (int)data_len, 1, timeout_ms);
-      if (rc < 0)
-        return rc;
-      if (rc != (int)data_len)
-        return -EIO;
-      usb_dma_sync(&s->data_buf, USB_DMA_FROM_DEVICE);
-      memcpy(data, s->data_buf.virt, data_len);
+      if (rc < 0 || rc != (int)data_len) {
+        data_rc = rc < 0 ? rc : -EIO;
+        usb_storage_clear_halt(s, s->bulk_in);
+      } else {
+        usb_dma_sync(&s->data_buf, USB_DMA_FROM_DEVICE);
+        memcpy(data, s->data_buf.virt, data_len);
+      }
     } else {
       memcpy(s->data_buf.virt, data, data_len);
       usb_dma_sync(&s->data_buf, USB_DMA_TO_DEVICE);
       rc = s->dev->hcd->bulk_xfer(s->dev, s->bulk_out, s->data_buf.virt,
                                   (int)data_len, 0, timeout_ms);
-      if (rc < 0)
-        return rc;
-      if (rc != (int)data_len)
-        return -EIO;
+      if (rc < 0 || rc != (int)data_len) {
+        data_rc = rc < 0 ? rc : -EIO;
+        usb_storage_clear_halt(s, s->bulk_out);
+      }
     }
   }
 
-  memset(s->csw_buf.virt, 0, sizeof(usb_bot_csw_t));
-  rc = s->dev->hcd->bulk_xfer(s->dev, s->bulk_in, s->csw_buf.virt,
-                              sizeof(usb_bot_csw_t), 1, timeout_ms);
-  if (rc < 0)
-    return rc;
-  if (rc != (int)sizeof(usb_bot_csw_t))
-    return -EIO;
+  // CSW: si el endpoint sigue en STALL se limpia y se reintenta una vez.
+  for (int attempt = 0;; attempt++) {
+    memset(s->csw_buf.virt, 0, sizeof(usb_bot_csw_t));
+    rc = s->dev->hcd->bulk_xfer(s->dev, s->bulk_in, s->csw_buf.virt,
+                                sizeof(usb_bot_csw_t), 1, timeout_ms);
+    if (rc == (int)sizeof(usb_bot_csw_t))
+      break;
+    if (attempt >= 1) {
+      usb_storage_reset_recovery(s);
+      return data_rc ? data_rc : (rc < 0 ? rc : -EIO);
+    }
+    usb_storage_clear_halt(s, s->bulk_in);
+  }
   usb_dma_sync(&s->csw_buf, USB_DMA_FROM_DEVICE);
 
   usb_bot_csw_t *csw = (usb_bot_csw_t *)s->csw_buf.virt;
-  if (csw->signature != BOT_CSW_SIG)
-    return -EIO;
-  if (csw->tag != tag)
-    return -EIO;
+  if (csw->signature != BOT_CSW_SIG || csw->tag != tag || csw->status == 2) {
+    // CSW invalido o Phase Error: hace falta reset recovery.
+    usb_storage_reset_recovery(s);
+    return data_rc ? data_rc : -EIO;
+  }
+  if (data_rc)
+    return data_rc;
   if (csw->status != 0)
     return -EIO;
   return 0;
@@ -468,6 +507,7 @@ int usb_storage_probe(usb_device_t *dev) {
     s->bulk_out = bulk_out;
     s->next_tag = 0;
     s->lun = 0;
+    s->iface = itf->number;
     spin_init(&s->queue_lock);
     wait_queue_init(&s->queue_wq);
     strcpy(s->name, "usbstg");
@@ -493,18 +533,33 @@ int usb_storage_probe(usb_device_t *dev) {
       goto fail_free;
     }
 
+    // Un pendrive real tarda desde cientos de ms hasta varios s en estar listo
+    // tras enumerarse (NOT READY / UNIT ATTENTION): se espera hasta ~8 s en vez
+    // de rendirse tras 3 intentos sin pausa.
+    uint8_t sense[18] = {0};
+    int tries = 0;
     rc = scsi_test_unit_ready(s);
-    for (int r = 0; r < 3 && rc != 0; r++) {
-      uint8_t sense[18];
+    while (rc != 0 && tries < 80) {
+      memset(sense, 0, sizeof(sense));
       (void)scsi_request_sense(s, sense, sizeof(sense));
+      usb_storage_sleep(100);
+      tries++;
       rc = scsi_test_unit_ready(s);
     }
     if (rc != 0) {
-      LOG_ERR("[USB-STG] TEST_UNIT_READY falló: %d", rc);
+      LOG_ERR("[USB-STG] TEST_UNIT_READY falló: %d (sense %02x/%02x/%02x, %d "
+              "intentos)", rc, sense[2] & 0x0F, sense[12], sense[13], tries);
       goto fail_free;
     }
+    if (tries)
+      LOG_INFO("[USB-STG] dispositivo listo tras %d reintentos (~%d ms)", tries,
+               tries * 100);
 
     rc = scsi_inquiry(s);
+    for (int r = 0; r < 3 && rc != 0; r++) {
+      usb_storage_sleep(200);
+      rc = scsi_inquiry(s);
+    }
     if (rc != 0) {
       LOG_ERR("[USB-STG] INQUIRY falló: %d", rc);
       goto fail_free;
@@ -516,6 +571,11 @@ int usb_storage_probe(usb_device_t *dev) {
 
     uint32_t last = 0, bs = 0;
     rc = scsi_read_capacity_10(s, &last, &bs);
+    for (int r = 0; r < 5 && rc != 0; r++) {
+      (void)scsi_request_sense(s, sense, sizeof(sense));
+      usb_storage_sleep(200);
+      rc = scsi_read_capacity_10(s, &last, &bs);
+    }
     if (rc != 0) {
       LOG_ERR("[USB-STG] %s: READ_CAPACITY falló: %d", s->name, rc);
       goto fail_free;

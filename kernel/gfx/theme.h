@@ -5,19 +5,47 @@
 // Colors format: 0xAARRGGBB
 
 // ============================================================================
+// Tema en tiempo de ejecución (oscuro / claro)
+// ----------------------------------------------------------------------------
+// Las superficies y el texto dependen del modo; el acento, los semáforos y la
+// geometría son comunes. Los AURORA_* de abajo que cambian con el modo son
+// macros que leen g_theme, así que NO sirven en inicializadores estáticos.
+// ============================================================================
+typedef struct {
+  uint32_t win_bg, surface_card, bg_base, titlebar_active, titlebar_inactive;
+  uint32_t border_active, border_inactive, tl_inactive;
+  uint32_t text_primary, text_secondary, text_tertiary, text_disabled;
+  uint32_t menu_tint, tooltip_tint, dock_tint;
+  uint32_t menubar_scrim, menubar_text_shadow, menubar_pill;
+  uint32_t icon_tile;   /* baldosa que se pone detrás de iconos sin fondo */
+  uint32_t accent_text; /* texto sobre el acento */
+  int light;
+} aurora_theme_t;
+
+extern const aurora_theme_t *g_theme;
+void theme_set_light(int light);
+int theme_is_light(void);
+uint32_t theme_generation(void); /* sube con cada cambio de modo */
+
+// ============================================================================
 // AURORA OS — identidad visual (escritorio estilo macOS Tahoe, modo oscuro)
 // ----------------------------------------------------------------------------
 // Base de grises neutros + UN acento (azul de sistema). Los únicos colores
 // "vivos" son los semáforos de las ventanas y el acento de selección. Los
 // paneles flotantes (Dock, menús, tooltips) usan "cristal": fondo desenfocado
 // y saturado + tinte + borde especular (ver gfx_glass_panel).
-// Para volver al índigo de Aurora basta con cambiar AURORA_ACCENT*.
+// Para cambiar el color de marca basta con cambiar AURORA_ACCENT*.
 // ============================================================================
 
 // --- Acento único ---
-#define AURORA_ACCENT 0xFF0A84FF
-#define AURORA_ACCENT_HOVER 0xFF409CFF
-#define AURORA_ACCENT_DIM 0x550A84FF
+#define AURORA_ACCENT 0xFF3EE89B /* verde aurora (docs/Diseno_Identidad_Grafica.md) */
+#define AURORA_ACCENT_HOVER 0xFF6BF083
+#define AURORA_ACCENT_DIM 0x553EE89B
+#define AURORA_ACCENT_TEXT 0xFF04261A /* texto sobre el acento */
+
+// --- Segundo color de marca (extremo turquesa del logo) ---
+#define AURORA_TEAL 0xFF00D4D8
+#define AURORA_TEAL_BRIGHT 0xFF00EEEE
 
 // --- Escala de grises ---
 #define AURORA_BLACK 0xFF0A0A0A
@@ -35,38 +63,38 @@
 #define AURORA_WHITE 0xFFFFFFFF
 
 // --- Superficies ---
-#define AURORA_BG_DARK AURORA_GRAY_950
-#define AURORA_MICA_BASE AURORA_GRAY_900
-#define AURORA_SURFACE_CARD 0xFF1E1E1E
-#define AURORA_WIN_BG 0xFF1E1E1E /* cuerpo de la ventana, opaco */
+#define AURORA_BG_DARK (g_theme->bg_base)
+#define AURORA_MICA_BASE (g_theme->win_bg)
+#define AURORA_SURFACE_CARD (g_theme->surface_card)
+#define AURORA_WIN_BG (g_theme->win_bg)
 
 // --- Ventanas ---
-#define AURORA_TITLEBAR_ACTIVE 0xFF262628
-#define AURORA_TITLEBAR_INACTIVE 0xFF212123
-#define AURORA_BORDER_ACTIVE 0x2EFFFFFF
-#define AURORA_BORDER_INACTIVE 0x1AFFFFFF
+#define AURORA_TITLEBAR_ACTIVE (g_theme->titlebar_active)
+#define AURORA_TITLEBAR_INACTIVE (g_theme->titlebar_inactive)
+#define AURORA_BORDER_ACTIVE (g_theme->border_active)
+#define AURORA_BORDER_INACTIVE (g_theme->border_inactive)
 #define AURORA_TITLEBAR_SEP 0x00000000 /* Tahoe: sin separador */
 
 #define AURORA_TITLEBAR_HAIRLINE 0x66000000 /* separación barra/contenido */
 
 // --- Semáforos (izquierda de la barra de título) ---
-#define AURORA_TL_CLOSE 0xFFFF5F57
-#define AURORA_TL_MINIMIZE 0xFFFEBC2E
-#define AURORA_TL_MAXIMIZE 0xFF28C840
-#define AURORA_TL_INACTIVE 0xFF4A4A4D
+#define AURORA_TL_CLOSE 0xFFFF6A3D
+#define AURORA_TL_MINIMIZE 0xFF4DA3FF
+#define AURORA_TL_MAXIMIZE 0xFF3EE89B
+#define AURORA_TL_INACTIVE (g_theme->tl_inactive)
 #define AURORA_TL_RIM 0x33000000   /* borde fino oscuro */
 /* Glifos (×, −, flechas de zoom) al pasar el ratón: tono oscuro de cada
  * botón, como en macOS, en vez de un negro genérico. */
-#define AURORA_TL_GLYPH_CLOSE 0xE0640806
-#define AURORA_TL_GLYPH_MINIMIZE 0xE0804C00
-#define AURORA_TL_GLYPH_MAXIMIZE 0xE0065012
+#define AURORA_TL_GLYPH_CLOSE 0xE06B2410
+#define AURORA_TL_GLYPH_MINIMIZE 0xE0083A7A
+#define AURORA_TL_GLYPH_MAXIMIZE 0xE00A5A38
 #define AURORA_TL_PRESSED 0x40000000 /* oscurecido mientras se pulsa */
 
 // --- Texto ---
-#define AURORA_TEXT_PRIMARY AURORA_WHITE
-#define AURORA_TEXT_SECONDARY 0xCCFFFFFF
-#define AURORA_TEXT_TERTIARY 0x99FFFFFF
-#define AURORA_TEXT_DISABLED 0x55FFFFFF
+#define AURORA_TEXT_PRIMARY (g_theme->text_primary)
+#define AURORA_TEXT_SECONDARY (g_theme->text_secondary)
+#define AURORA_TEXT_TERTIARY (g_theme->text_tertiary)
+#define AURORA_TEXT_DISABLED (g_theme->text_disabled)
 
 // --- Iconos ---
 #define AURORA_ICON_DEFAULT 0xFFE8E8F0
@@ -76,16 +104,16 @@
 // --- Barra de menús: transparente (Tahoe). Solo un velo muy tenue arriba para
 // que el texto blanco se lea sobre fondos claros. ---
 #define AURORA_MENUBAR_H 28
-#define AURORA_MENUBAR_SCRIM 0x40000000   /* alpha arriba, se desvanece a 0 */
-#define AURORA_MENUBAR_TEXT_SHADOW 0x70000000
-#define AURORA_MENUBAR_PILL 0x38FFFFFF    /* título resaltado (menú abierto) */
+#define AURORA_MENUBAR_SCRIM (g_theme->menubar_scrim)
+#define AURORA_MENUBAR_TEXT_SHADOW (g_theme->menubar_text_shadow)
+#define AURORA_MENUBAR_PILL (g_theme->menubar_pill)
 
 // --- Cristal líquido ---
 #define AURORA_GLASS_BLUR 12              /* radio del box-blur (2 pasadas) */
 #define AURORA_GLASS_SAT 300              /* saturación del fondo, 256 = igual */
-#define AURORA_DOCK_TINT 0x3CFFFFFF
-#define AURORA_MENU_TINT 0x9A1E1E22
-#define AURORA_TOOLTIP_TINT 0xB0202024
+#define AURORA_DOCK_TINT (g_theme->dock_tint)
+#define AURORA_MENU_TINT (g_theme->menu_tint)
+#define AURORA_TOOLTIP_TINT (g_theme->tooltip_tint)
 #define AURORA_MENU_BG AURORA_MENU_TINT
 #define AURORA_MENU_HILITE AURORA_ACCENT
 

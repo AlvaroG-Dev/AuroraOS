@@ -84,7 +84,8 @@ char *lkpi_bin2hex(char *dst, const void *src, size_t count);
 enum system_states { SYSTEM_BOOTING, SYSTEM_SCHEDULING, SYSTEM_FREEING_INITMEM,
 		     SYSTEM_RUNNING, SYSTEM_HALT, SYSTEM_POWER_OFF, SYSTEM_RESTART,
 		     SYSTEM_SUSPEND };
-#define system_state SYSTEM_RUNNING
+/* Estado global; lo actualiza kernel/linuxkpi/kernel/reboot.c al apagar. */
+extern enum system_states system_state;
 #define oops_in_progress 0
 
 

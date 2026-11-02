@@ -10,7 +10,7 @@
         run-iso run-iso-tcg run-iso-as-usb run-smp-kvm-xhci-storage run-smp-kvm-xhci-storage-debug \
         run-bios run-bios-debug run-bios-usb run-smp-kvm-xhci-hub run-smp-kvm-xhci-hub-debug \
         tap-setup tap-teardown tap-status run-smp-kvm-xhci-uas \
-        python-stdlib env clean
+        python-stdlib env clean sysroot drivers nvidia assets-check
 
 # ---------------------------------------------------------------------------
 # Preparacion del entorno (paquetes del host, toolchain musl, pila Wayland,
@@ -55,6 +55,17 @@ normal: iso
 # SYSROOT / USERLAND
 # ===========================================================================
 
+# Opciones de la ISO "completa". Todo se copia en cada build, sin pasos manuales:
+#   WITH_NVIDIA=1  (por defecto) compila e instala nvidia/nvidia-modeset/
+#                  nvidia-drm.kur + firmware GSP (primera vez: descarga y tarda).
+#                  WITH_NVIDIA=0 lo omite (ISO sin driver NVIDIA).
+#   WITH_MESA=1    ademas baja Mesa/LLVM (+500 MB; opt-in por tamano).
+WITH_NVIDIA ?= 1
+export WITH_NVIDIA
+
+# 'sysroot' es PHONY: antes, si el directorio ya existia make lo daba por
+# actualizado y NUNCA recopiaba assets/ ni etc/. Ahora se sincroniza siempre,
+# de forma incremental (cp -u: solo lo nuevo o modificado).
 sysroot:
 	@mkdir -p sysroot/system/icons sysroot/system/wallpapers
 	@mkdir -p sysroot/etc
@@ -63,13 +74,34 @@ sysroot:
 		echo "Aurora OS v0.1.0 Initramfs Config" > sysroot/system/config.txt; \
 	fi
 	@if [ -d assets ]; then \
-		echo "[Makefile] Copiando assets a sysroot..."; \
-		cp -r assets/* sysroot/ 2>/dev/null || true; \
+		echo "[Makefile] Sincronizando assets/ -> sysroot/ (iconos, fondos, marca)..."; \
+		cp -auf assets/. sysroot/; \
 	fi
 	@if [ -d etc ]; then \
-		echo "[Makefile] Copiando etc/ a sysroot/etc/..."; \
-		cp -f etc/passwd etc/group etc/shadow etc/hosts etc/resolv.conf sysroot/etc/ 2>/dev/null || true; \
+		echo "[Makefile] Sincronizando etc/ -> sysroot/etc/..."; \
+		cp -auf etc/. sysroot/etc/; \
 	fi
+
+# Comprueba que lo imprescindible esta en sysroot/ antes de empaquetar el
+# initrd: avisa (o falla con STRICT=1) si algo no llego a la ISO.
+assets-check: sysroot
+	@missing=0; \
+	for f in system/icons/app-terminal.bmp system/icons/app-monitor.bmp \
+	         system/icons/folder-icon.bmp system/wallpapers/aurora-noche.bmp \
+	         lib/modules/linuxkpi/linuxkpi.kur usr/lib/aur \
+	         usr/bin/aurora-wayland usr/bin/weston usr/bin/foot \
+	         usr/lib/aurora-gtk/modules/libaurora-theme.so \
+	         usr/lib/x86_64-linux-gnu/qt5/plugins/platformthemes/libaurora.so \
+	         usr/share/applications; do \
+		if [ ! -e "sysroot/$$f" ]; then echo "[assets-check] FALTA sysroot/$$f"; missing=1; fi; \
+	done; \
+	if [ "$(WITH_NVIDIA)" = "1" ]; then \
+		for f in nvidia nvidia-modeset nvidia-drm; do \
+			[ -e "sysroot/lib/modules/linuxkpi/$$f.kur" ] || { echo "[assets-check] FALTA $$f.kur"; missing=1; }; \
+		done; \
+	fi; \
+	if [ "$$missing" = "1" ] && [ "$(STRICT)" = "1" ]; then exit 1; fi; \
+	[ "$$missing" = "0" ] && echo "[assets-check] OK" || true
 
 bootloader: bootloader-efi bootloader-bios
 
@@ -136,7 +168,9 @@ python-stdlib:
 # INITRD
 # ===========================================================================
 
-initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
+NVIDIA_DEP := $(if $(filter 1,$(WITH_NVIDIA)),nvidia)
+
+initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) assets-check | env
 	@echo "[Makefile] Preparando estructura de sysroot/..."
 	@mkdir -p sysroot/bin sysroot/sbin \
 	          sysroot/usr/bin sysroot/usr/sbin \
@@ -287,8 +321,8 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
 	@for lib in libnss_dns.so.2 libnss_files.so.2 libnss_compat.so.2; do \
 		for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do \
 			if [ -e "$$d/$$lib" ]; then \
-				cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
-				cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
+				[ -e "sysroot/lib/x86_64-linux-gnu/$$lib" ] || cp -Lf "$$d/$$lib" sysroot/lib/x86_64-linux-gnu/; \
+				[ -e "sysroot/usr/lib/x86_64-linux-gnu/$$lib" ] || cp -Lf "$$d/$$lib" sysroot/usr/lib/x86_64-linux-gnu/; \
 				echo "[Makefile]   nss: $$lib"; \
 				break; \
 			fi; \
@@ -299,16 +333,22 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
 # libgcc_s.so.1.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Copiando libgcc_s.so.1..."
-	@for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do \
-		if [ -e "$$d/libgcc_s.so.1" ]; then \
-			cp -Lf "$$d/libgcc_s.so.1" sysroot/lib/x86_64-linux-gnu/; \
-			mkdir -p sysroot/lib64 sysroot/usr/lib/x86_64-linux-gnu; \
-			cp -Lf "$$d/libgcc_s.so.1" sysroot/lib64/ 2>/dev/null || true; \
-			cp -Lf "$$d/libgcc_s.so.1" sysroot/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
-			echo "[Makefile]   libgcc_s: $$d"; \
-			break; \
-		fi; \
-	done
+	@if [ -e sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1 ]; then \
+		mkdir -p sysroot/lib64; \
+		[ -e sysroot/lib64/libgcc_s.so.1 ] || cp -Lf sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1 sysroot/lib64/; \
+		echo "[Makefile]   libgcc_s: la de libs/glibc"; \
+	else \
+		for d in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do \
+			if [ -e "$$d/libgcc_s.so.1" ]; then \
+				cp -Lf "$$d/libgcc_s.so.1" sysroot/lib/x86_64-linux-gnu/; \
+				mkdir -p sysroot/lib64 sysroot/usr/lib/x86_64-linux-gnu; \
+				cp -Lf "$$d/libgcc_s.so.1" sysroot/lib64/ 2>/dev/null || true; \
+				cp -Lf "$$d/libgcc_s.so.1" sysroot/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
+				echo "[Makefile]   libgcc_s (host): $$d"; \
+				break; \
+			fi; \
+		done; \
+	fi
 
 # ---------------------------------------------------------------------------
 # precompiled/.
@@ -321,10 +361,17 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
 	fi
 
 # ---------------------------------------------------------------------------
-# Git HTTP(S) transport helper.
+# Git HTTP(S) transport helper. Sus dependencias del host NO pisan lo que ya
+# puso libs/glibc (libc.so.6, libm...): una libc del host de otra version junto
+# al ld.so de libs/glibc rompe todos los programas dinamicos.
 # ---------------------------------------------------------------------------
 	@echo "[Makefile] Instalando helper HTTP(S) de Git..."
 	@helper=/usr/lib/git-core/git-remote-http; \
+	host_glibc=$$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $$2}'); \
+	guest_glibc=$$(strings -a libs/glibc/lib/x86_64-linux-gnu/libc.so.6 2>/dev/null | sed -n 's/.*release version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -1); \
+	if [ -n "$$guest_glibc" ] && [ "$$host_glibc" != "$$guest_glibc" ]; then \
+		echo "[Makefile]   AVISO: glibc del host ($$host_glibc) != libs/glibc ($$guest_glibc): se omite el helper HTTP(S) de Git (sus libs del host no cargarian en la ISO)"; \
+	else \
 	if [ ! -x "$$helper" ]; then \
 		echo "[Makefile]   ERROR: no se encontró $$helper"; \
 		exit 1; \
@@ -337,10 +384,11 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
 	ldd "$$helper" | awk '{ for (i = 1; i <= NF; i++) if ($$i ~ /^\//) { print $$i; break } }' | \
 	while IFS= read -r dep; do \
 		if [ -f "$$dep" ]; then \
-			cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
-			cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
+			[ -e "sysroot/lib/x86_64-linux-gnu/$$(basename "$$dep")" ] || cp -Lf "$$dep" sysroot/lib/x86_64-linux-gnu/; \
+			[ -e "sysroot/usr/lib/x86_64-linux-gnu/$$(basename "$$dep")" ] || cp -Lf "$$dep" sysroot/usr/lib/x86_64-linux-gnu/; \
 		fi; \
-	done
+	done; \
+	fi
 
 # ---------------------------------------------------------------------------
 # /bin/sh.
@@ -386,6 +434,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers | env
 		echo "[Makefile]   ldconfig no encontrado (glibc hará probing)"; \
 	fi
 
+	@scripts/check-sysroot-libc.sh
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 
 kernel: initrd.tar
@@ -1121,7 +1170,7 @@ _AUR_ARGS_$(notdir $(1)) := $(strip $(shell grep -m1 '^AUR_ARGS' $(1)/config.mk 
 
 $(1)/$(notdir $(1)).elf: $(wildcard $(1)/*.c)
 	@echo "[AUR-CC] $(notdir $(1))"
-	@$(AUR_CC) -O2 -fno-stack-protector -o $$@ $$^
+	@$(AUR_CC) -std=gnu11 -O2 -fno-stack-protector -o $$@ $$^
 
 $(1)/$(notdir $(1)).aur: $(1)/$(notdir $(1)).elf $(1)/config.mk tools/aurbuild
 	@echo "[AURBUILD] $(notdir $(1))"

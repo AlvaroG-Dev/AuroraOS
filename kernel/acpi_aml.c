@@ -2251,6 +2251,272 @@ aml_object_t *aml_eval(const char *path) {
   return n->value;
 }
 
+aml_object_t *aml_eval_int_args(const char *path, const uint64_t *args,
+                                int nargs) {
+  if (!g_ready || !g_root || !path)
+    return NULL;
+  aml_node_t *n = lookup_path_caller(path);
+  if (!n || !n->value)
+    return NULL;
+  if (n->value->type != AML_METHOD)
+    return n->value;
+  aml_object_t *objs[AML_MAX_ARGS];
+  if (nargs > AML_MAX_ARGS)
+    nargs = AML_MAX_ARGS;
+  for (int i = 0; i < nargs; i++)
+    objs[i] = make_integer(args[i]);
+  return eval_method(n->value, objs, nargs, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostico de energia: dispositivos de boton/EC/tapa y metodos de GPE.
+// Sirve para saber, en hardware real, como llega el evento del boton de
+// encendido (fijo, dispositivo PNP0C0C por GPE, EC con _Qxx).
+// ---------------------------------------------------------------------------
+static void diag_path(const aml_node_t *n, char *out, size_t cap) {
+  const aml_node_t *chain[16];
+  int depth = 0;
+  for (; n && n != g_root && depth < 16; n = n->parent)
+    chain[depth++] = n;
+  size_t pos = 0;
+  for (int i = depth - 1; i >= 0 && pos + 6 < cap; i--) {
+    out[pos++] = i == depth - 1 ? '\\' : '.';
+    for (int k = 0; k < 4; k++)
+      out[pos++] = chain[i]->name[k];
+  }
+  if (depth == 0 && cap > 1)
+    out[pos++] = '\\';
+  out[pos] = 0;
+}
+
+static int diag_hid_kind(const aml_node_t *n, const char **kind) {
+  for (const aml_node_t *c = n->children; c; c = c->sibling) {
+    if (memcmp(c->name, "_HID", 4) != 0 || !c->value)
+      continue;
+    if (c->value->type == AML_INTEGER) {
+      // EISAID: 0x0C0CD041 = PNP0C0C, etc. (orden de bytes de EISAID).
+      switch ((uint32_t)c->value->integer) {
+      case 0x0C0CD041: *kind = "PNP0C0C (boton de encendido)"; return 1;
+      case 0x0E0CD041: *kind = "PNP0C0E (boton de suspension)"; return 1;
+      case 0x0D0CD041: *kind = "PNP0C0D (tapa)"; return 1;
+      case 0x090CD041: *kind = "PNP0C09 (EC)"; return 1;
+      }
+    } else if (c->value->type == AML_STRING && c->value->string.data) {
+      const char *s = c->value->string.data;
+      if (!strcmp(s, "PNP0C0C")) { *kind = "PNP0C0C (boton de encendido)"; return 1; }
+      if (!strcmp(s, "PNP0C0E")) { *kind = "PNP0C0E (boton de suspension)"; return 1; }
+      if (!strcmp(s, "PNP0C0D")) { *kind = "PNP0C0D (tapa)"; return 1; }
+      if (!strcmp(s, "PNP0C09")) { *kind = "PNP0C09 (EC)"; return 1; }
+    }
+  }
+  return 0;
+}
+
+static void diag_walk(const aml_node_t *n, int depth) {
+  if (depth > 12)
+    return;
+  const char *kind = NULL;
+  char path[96];
+  if (n != g_root && diag_hid_kind(n, &kind)) {
+    diag_path(n, path, sizeof(path));
+    LOG_INFO("[AML] diag: %s en %s", kind, path);
+    if (!strcmp(kind, "PNP0C09 (EC)")) {
+      char qs[160];
+      size_t pos = 0;
+      for (const aml_node_t *c = n->children; c; c = c->sibling) {
+        if (c->name[0] == '_' && c->name[1] == 'Q' && pos + 6 < sizeof(qs)) {
+          memcpy(qs + pos, c->name, 4);
+          pos += 4;
+          qs[pos++] = ' ';
+        }
+        if (!memcmp(c->name, "_GPE", 4) && c->value &&
+            c->value->type == AML_INTEGER)
+          LOG_INFO("[AML] diag:   EC _GPE=%lu", (unsigned long)c->value->integer);
+      }
+      qs[pos] = 0;
+      LOG_INFO("[AML] diag:   EC metodos _Qxx: %s", pos ? qs : "(ninguno)");
+    }
+  }
+  if (n->name[0] == '_' && n->name[1] == 'G' && n->name[2] == 'P' &&
+      n->name[3] == 'E') {
+    char gs[240];
+    size_t pos = 0;
+    for (const aml_node_t *c = n->children; c; c = c->sibling) {
+      if (c->name[0] == '_' && (c->name[1] == 'L' || c->name[1] == 'E') &&
+          pos + 6 < sizeof(gs)) {
+        memcpy(gs + pos, c->name, 4);
+        pos += 4;
+        gs[pos++] = ' ';
+      }
+    }
+    gs[pos] = 0;
+    LOG_INFO("[AML] diag: metodos de GPE: %s", pos ? gs : "(ninguno)");
+  }
+  for (const aml_node_t *c = n->children; c; c = c->sibling)
+    diag_walk(c, depth + 1);
+}
+
+void aml_diag_power(void) {
+  if (!g_ready || !g_root)
+    return;
+  diag_walk(g_root, 0);
+}
+
+
+// ---------------------------------------------------------------------------
+// Controlador embebido: puertos y consultas _Qxx que pulsan el boton.
+// Sin ejecutar AML (el interprete no tiene campos de EC): se busca en el
+// cuerpo de cada _Qxx un Notify (0x86) cuyo objetivo sea un dispositivo
+// PNP0C0C y el valor 0x80.
+// ---------------------------------------------------------------------------
+static int node_is_kind(const aml_node_t *n, const char *prefix) {
+  const char *k = NULL;
+  return diag_hid_kind(n, &k) && !strncmp(k, prefix, 7);
+}
+
+static const aml_node_t *find_kind(const aml_node_t *n, const char *prefix,
+                                   int depth) {
+  if (depth > 12)
+    return NULL;
+  if (n != g_root && node_is_kind(n, prefix))
+    return n;
+  for (const aml_node_t *c = n->children; c; c = c->sibling) {
+    const aml_node_t *r = find_kind(c, prefix, depth + 1);
+    if (r)
+      return r;
+  }
+  return NULL;
+}
+
+// Recoge los nombres (4 letras) de todos los PNP0C0C.
+static int collect_buttons(const aml_node_t *n, char (*names)[4], int max,
+                           int cnt, int depth) {
+  if (depth > 12)
+    return cnt;
+  if (n != g_root && node_is_kind(n, "PNP0C0C") && cnt < max)
+    memcpy(names[cnt++], n->name, 4);
+  for (const aml_node_t *c = n->children; c; c = c->sibling)
+    cnt = collect_buttons(c, names, max, cnt, depth + 1);
+  return cnt;
+}
+
+// Lee los puertos de E/S de un _CRS (descriptores 0x47 y 0x4B).
+static int crs_ports(aml_object_t *crs, uint16_t *ports, int max) {
+  uint32_t len = 0;
+  uint8_t *b = aml_to_buffer(crs, &len);
+  int n = 0;
+  uint32_t i = 0;
+  while (b && i < len && n < max) {
+    uint8_t tag = b[i];
+    if (tag & 0x80) {
+      if (i + 3 > len)
+        break;
+      i += 3u + (b[i + 1] | (b[i + 2] << 8));
+      continue;
+    }
+    uint8_t type = (tag >> 3) & 0xF, sl = tag & 7;
+    if (type == 0xF)
+      break;
+    if (i + 1u + sl > len)
+      break;
+    if (type == 0x8 && sl >= 7)
+      ports[n++] = (uint16_t)(b[i + 2] | (b[i + 3] << 8));
+    else if (type == 0x9 && sl >= 3)
+      ports[n++] = (uint16_t)(b[i + 1] | (b[i + 2] << 8));
+    i += 1u + sl;
+  }
+  return n;
+}
+
+static int hexv(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+// 1 si el cuerpo contiene Notify(<alguno de names>, 0x80).
+static int body_notifies_button(const uint8_t *code, uint32_t len,
+                                char (*names)[4], int nnames) {
+  for (uint32_t i = 0; i + 6 < len; i++) {
+    if (code[i] != 0x86)
+      continue;
+    uint32_t p = i + 1;
+    while (p < len && (code[p] == '\\' || code[p] == '^'))
+      p++;
+    uint32_t segs = 1;
+    if (p < len && code[p] == 0x2E) { segs = 2; p++; }
+    else if (p < len && code[p] == 0x2F) { if (p + 1 >= len) break; segs = code[p + 1]; p += 2; }
+    else if (p < len && code[p] == 0x00) continue;
+    if (segs == 0 || p + 4u * segs + 2 > len)
+      continue;
+    const uint8_t *last = code + p + 4 * (segs - 1);
+    uint32_t v = p + 4 * segs;
+    int val = -1;
+    if (code[v] == 0x0A)
+      val = code[v + 1];
+    if (val != 0x80)
+      continue;
+    for (int k = 0; k < nnames; k++)
+      if (!memcmp(last, names[k], 4))
+        return 1;
+  }
+  return 0;
+}
+
+int aml_find_ec(aml_ec_info_t *out) {
+  if (!out)
+    return -1;
+  memset(out, 0, sizeof(*out));
+  if (!g_ready || !g_root)
+    return -1;
+  const aml_node_t *ec = find_kind(g_root, "PNP0C09", 0);
+  if (!ec)
+    return -1;
+  out->found = 1;
+  out->data_port = 0x62;
+  out->cmd_port = 0x66;
+
+  char path[96], crs_path[110];
+  diag_path(ec, path, sizeof(path));
+  size_t pl = strlen(path);
+  memcpy(crs_path, path, pl);
+  memcpy(crs_path + pl, "._CRS", 6);
+  uint16_t ports[4];
+  int np = crs_ports(aml_eval(crs_path), ports, 4);
+  if (np >= 2) {
+    out->data_port = ports[0];
+    out->cmd_port = ports[1];
+    out->crs_ok = 1;
+  }
+
+  char names[8][4];
+  int nb = collect_buttons(g_root, names, 8, 0, 0);
+  for (const aml_node_t *c = ec->children; c; c = c->sibling) {
+    if (c->name[0] != '_' || c->name[1] != 'Q' || !c->value ||
+        c->value->type != AML_METHOD)
+      continue;
+    int h = hexv(c->name[2]), l = hexv(c->name[3]);
+    if (h < 0 || l < 0)
+      continue;
+    out->nq++;
+    unsigned q = (unsigned)(h * 16 + l);
+    if (body_notifies_button(c->value->method.code, c->value->method.code_len,
+                             names, nb)) {
+      out->power_q[q >> 3] |= (uint8_t)(1u << (q & 7));
+      out->power_q_count++;
+    }
+  }
+  return 0;
+}
+
+int aml_method_exists(const char *path) {
+  if (!g_ready || !g_root || !path)
+    return 0;
+  aml_node_t *n = lookup_path_caller(path);
+  return n && n->value && n->value->type == AML_METHOD;
+}
+
 uint64_t aml_to_integer(aml_object_t *obj) {
   if (!obj)
     return 0;

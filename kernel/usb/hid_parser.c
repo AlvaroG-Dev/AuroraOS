@@ -76,7 +76,10 @@ int hid_parse_report_descriptor(const uint8_t *desc, int desc_len,
   int l_num_usages = 0;
   uint32_t l_usage_min = 0, l_usage_max = 0;
 
-  uint32_t in_bits = 0, out_bits = 0, feat_bits = 0;
+  /* Los offsets de Input son por Report ID (HID 1.11 6.2.2.7): cada ID
+   * empieza en el bit 0 de su propio informe. */
+  uint32_t id_bits[256] = {0};
+  uint32_t in_bits = 0, in_max_bits = 0, out_bits = 0, feat_bits = 0;
   int i = 0;
 
   while (i < desc_len) {
@@ -102,10 +105,14 @@ int hid_parse_report_descriptor(const uint8_t *desc, int desc_len,
 
     if (type == HID_ITEM_TYPE_MAIN) {
       if (tag == 0x8) { // Input
+        in_bits = id_bits[g_report_id];
         hid_add_fields(report, &in_bits, NULL, g_usage_page, g_logical_min,
                        g_logical_max, g_report_size, g_report_count,
                        g_report_id, has_report_id, data, l_usages, l_num_usages,
                        l_usage_min, l_usage_max);
+        id_bits[g_report_id] = in_bits;
+        if (in_bits > in_max_bits)
+          in_max_bits = in_bits;
         l_num_usages = 0;
         l_usage_min = l_usage_max = 0;
       } else if (tag == 0x9) { // Output — bits SEPARADOS
@@ -162,7 +169,7 @@ int hid_parse_report_descriptor(const uint8_t *desc, int desc_len,
 
   report->has_report_id = has_report_id;
   report->report_id = g_report_id;
-  report->input_len = (in_bits + 7) / 8;
+  report->input_len = (in_max_bits + 7) / 8;
   report->output_len = (out_bits + 7) / 8;
   report->feature_len = (feat_bits + 7) / 8;
   return 0;

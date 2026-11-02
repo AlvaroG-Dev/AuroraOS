@@ -1,11 +1,14 @@
 // kernel/main.c
 // Punto de entrada del kernel Aurora OS.
 
+#include "power.h"
 #include "../bootloader/include/kernel_boot_info.h"
 #include "cmdline.h"
 #include "plog.h"
 #include "display_edid.h"
 #include "acpi.h"
+#include "acpi_button.h"
+#include "efi_rt.h"
 #include "acpi_aml.h"
 #include "acpi_pm.h"
 #include "ahci.h"
@@ -289,6 +292,8 @@ static int acpi_init_task(void *arg) {
 
   LOG_INFO("[INIT] ACPI PM (P-states, S-states)...");
   acpi_pm_init();
+  acpi_button_init();
+  power_cad_init();
 
   LOG_INFO("[INIT] PM: aplicar política...");
   cpu_apply_pm_policy();
@@ -647,39 +652,121 @@ static int boot_probe_is_ext2(block_device_t *b) {
   return k == FS_EXT2;
 }
 
+// Ultimo resultado de fat32_mount_bdev por dispositivo (para el resumen
+// [DIAG] en pantalla cuando /data no se monta).
+#define MOUNT_RC_MAX 12
+static struct {
+  char name[16];
+  int rc;
+} g_mount_rc[MOUNT_RC_MAX];
+
+static void note_mount_rc(const char *name, int rc) {
+  int free_slot = -1;
+  for (int i = 0; i < MOUNT_RC_MAX; i++) {
+    if (g_mount_rc[i].name[0] && strcmp(g_mount_rc[i].name, name) == 0) {
+      g_mount_rc[i].rc = rc;
+      return;
+    }
+    if (free_slot < 0 && !g_mount_rc[i].name[0])
+      free_slot = i;
+  }
+  if (free_slot >= 0) {
+    strncpy(g_mount_rc[free_slot].name, name, sizeof(g_mount_rc[0].name) - 1);
+    g_mount_rc[free_slot].rc = rc;
+  }
+}
+
+static int mount_rc_of(const char *name, int *rc) {
+  for (int i = 0; i < MOUNT_RC_MAX; i++)
+    if (g_mount_rc[i].name[0] && strcmp(g_mount_rc[i].name, name) == 0) {
+      *rc = g_mount_rc[i].rc;
+      return 1;
+    }
+  return 0;
+}
+
+static int try_mount_data(block_device_t *b) {
+  if (boot_probe_is_ext2(b)) { // ext2/3/4: solo lectura al arrancar (D9)
+    int erc = ext2_mount_bdev(b->name, "/data");
+    note_mount_rc(b->name, erc);
+    if (erc == 0) {
+      LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
+      g_data_mounted = 1;
+    }
+    return erc;
+  }
+  int rc = fat32_mount_bdev(b->name, "/data");
+  note_mount_rc(b->name, rc);
+  if (rc == 0) {
+    LOG_INFO("[INIT] Montado %s en /data", b->name);
+    g_data_mounted = 1;
+  }
+  return rc;
+}
+
+// Resumen de ~10 lineas de los block devices y del intento de montar /data.
+// Sale por LOG_WARN (serie, RAM persistente, y pantalla con el overlay F12 que
+// se activa solo) para poder diagnosticar con una foto sin depender del USB.
+static void boot_media_diag(const char *why, uint64_t secs) {
+  int n = blk_count();
+  LOG_WARN("[DIAG] %s (t=%llus): /data %s, %d block devices", why,
+           (unsigned long long)secs, g_data_mounted ? "montado" : "NO montado",
+           n);
+  int shown = 0;
+  for (int i = 0; i < n && shown < 8; i++) {
+    block_device_t *b = blk_get_by_index(i);
+    if (!b)
+      continue;
+    int rc = 0;
+    int has_rc = mount_rc_of(b->name, &rc);
+    char rcs[24] = "-";
+    if (has_rc) {
+      if (rc == 0)
+        strcpy(rcs, "ok");
+      else {
+        rcs[0] = 'e';
+        rcs[1] = 'r';
+        rcs[2] = 'r';
+        rcs[3] = ' ';
+        int v = rc < 0 ? -rc : rc, k = 4;
+        char tmp[8];
+        int t = 0;
+        do {
+          tmp[t++] = (char)('0' + v % 10);
+          v /= 10;
+        } while (v && t < 7);
+        while (t)
+          rcs[k++] = tmp[--t];
+        rcs[k] = '\0';
+      }
+    }
+    LOG_WARN("[DIAG]  %s%s %llu sect x %uB %s%s fat32=%s", b->name,
+             b->is_partition ? " (part)" : "",
+             (unsigned long long)b->num_sectors, (unsigned)b->sector_size,
+             b->is_read_only ? "RO" : "RW",
+             b->is_partition ? "" : (b->sector_size == 2048 ? " cd" : ""), rcs);
+    shown++;
+  }
+  if (n == 0)
+    LOG_WARN("[DIAG]  ningun block device: el USB no se enumero como disco "
+             "(buscar [xHCI]/[USB-STG] en el log)");
+  boot_console_overlay_enable(1);
+  compositor_invalidate_rect((rect_t){0, 0, 16384, 16384});
+}
+
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || b->is_partition || b->is_read_only)
       continue;
-    if (boot_probe_is_ext2(b)) {
-      if (ext2_mount_bdev(b->name, "/data") == 0) {
-        LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
-        g_data_mounted = 1;
-      }
-      continue;
-    }
-    if (fat32_mount_bdev(b->name, "/data") == 0) {
-      LOG_INFO("[INIT] Montado %s en /data", b->name);
-      g_data_mounted = 1;
-    }
+    try_mount_data(b);
   }
   // Particiones FAT32 (p. ej. la de datos AURORADATA al final del USB).
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
     if (!b || !b->is_partition || b->is_read_only)
       continue;
-    if (boot_probe_is_ext2(b)) {
-      if (ext2_mount_bdev(b->name, "/data") == 0) {
-        LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
-        g_data_mounted = 1;
-      }
-      continue;
-    }
-    if (fat32_mount_bdev(b->name, "/data") == 0) {
-      LOG_INFO("[INIT] Montado %s en /data", b->name);
-      g_data_mounted = 1;
-    }
+    try_mount_data(b);
   }
   for (int i = 0; i < blk_count() && !g_cdrom_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
@@ -724,17 +811,57 @@ static int klog_file_task(void *arg) {
   int last_blk = blk_count();
   if (!g_data_mounted)
     LOG_INFO("[KLOG] esperando a /data (%d block devices)...", last_blk);
-  for (int i = 0; i < 120 && !g_data_mounted; i++) {
+  // Reinicio en caliente opcional (cmdline klog.reboot=<s>): si /data no se
+  // montó, el kernel se reinicia para que el bootloader UEFI vuelque el log de
+  // este arranque en \aurora\prev.log. Una sola vez: si el log anterior ya
+  // trae la marca, no se repite (evita un bucle de reinicios).
+  char rb[16];
+  uint64_t reboot_s = 0;
+  if (cmdline_get("klog.reboot", rb, sizeof(rb))) {
+    for (const char *p = rb; *p >= '0' && *p <= '9'; p++)
+      reboot_s = reboot_s * 10 + (uint64_t)(*p - '0');
+    size_t plen = plog_prev_len();
+    if (reboot_s && plen) {
+      char *pb = kmalloc(plen + 1);
+      if (pb) {
+        size_t got = plog_prev_read(pb, plen);
+        pb[got] = '\0';
+        static const char mark[] = "[DIAG] reinicio en caliente";
+        for (size_t k = 0; k + sizeof(mark) - 1 <= got; k++)
+          if (memcmp(pb + k, mark, sizeof(mark) - 1) == 0) {
+            reboot_s = 0;
+            break;
+          }
+        kfree(pb);
+      }
+    }
+  }
+  for (int i = 1; i <= 120 && !g_data_mounted; i++) {
     klog_file_sleep(1000);
     int n = blk_count();
-    if (n == last_blk)
-      continue;
-    last_blk = n;
-    LOG_INFO("[KLOG] nuevo block device (%d en total): reintento de /data", n);
-    part_scan_all();
-    mount_boot_media();
+    // Reintento ante un block device nuevo, y ademas cada 10 s: un pendrive
+    // real puede fallar la primera lectura de la tabla de particiones
+    // (NOT READY) sin que cambie el numero de dispositivos.
+    if (n != last_blk)
+      LOG_INFO("[KLOG] nuevo block device (%d en total): reintento de /data",
+               n);
+    if (n != last_blk || i % 10 == 0) {
+      last_blk = n;
+      part_scan_all();
+      mount_boot_media();
+    }
+    if (!g_data_mounted && (i == 20 || i == 60))
+      boot_media_diag("esperando /data", (uint64_t)i);
+    if (!g_data_mounted && reboot_s && (uint64_t)i >= reboot_s) {
+      LOG_WARN("[DIAG] reinicio en caliente forzado (klog.reboot=%llu): el "
+               "bootloader guardara este log en \\aurora\\prev.log",
+               (unsigned long long)reboot_s);
+      klog_file_sleep(1500);
+      acpi_pm_reboot();
+    }
   }
   if (!g_data_mounted) {
+    boot_media_diag("sin /data tras 120 s", 120);
     LOG_WARN("[KLOG] sin /data montado tras 120 s (%d block devices): no se "
              "escribe %s", last_blk, g_klog_file_path);
     return 0;
@@ -769,8 +896,11 @@ static int klog_file_task(void *arg) {
 }
 
 static void klog_file_start(void) {
-  if (!cmdline_get("klog.file", g_klog_file_path, sizeof(g_klog_file_path)) ||
-      g_klog_file_path[0] != '/')
+  // Sin `klog.file=` el log va a /data/aurora.log; `klog.file=off` (o una
+  // ruta no absoluta) lo desactiva.
+  if (!cmdline_get("klog.file", g_klog_file_path, sizeof(g_klog_file_path)))
+    strcpy(g_klog_file_path, "/data/aurora.log");
+  if (g_klog_file_path[0] != '/')
     return;
   if (plog_ensure_buffer() != 0) {
     LOG_WARN("[KLOG] sin memoria para el buffer de log");
@@ -977,6 +1107,12 @@ void kmain(struct kernel_boot_info *kinfo) {
   memcpy(&boot, kinfo, sizeof(boot));
   g_boot_info = boot;
   cmdline_init(boot.cmdline);
+  {
+    // Salida por UART: solo en VM por defecto (ver serial.c); serial=on|off fuerza.
+    char sv[8];
+    if (cmdline_get("serial", sv, sizeof(sv)))
+      serial_set_enabled(!strcmp(sv, "on") || !strcmp(sv, "1"));
+  }
   display_edid_init(boot.edid, boot.edid_len);
 
   // 5. Tablas de sistema.
@@ -1026,6 +1162,8 @@ void kmain(struct kernel_boot_info *kinfo) {
     }
   }
   parse_memmap();
+  efi_rt_collect(boot.efi_runtime_services, (const void *)boot.memmap,
+                 boot.memmap_size, boot.memmap_desc_size);
 
   pmm_init(boot.memmap, boot.memmap_size, boot.memmap_desc_size);
   extern void pmm_reserve_range(uint64_t, uint64_t);
@@ -1067,6 +1205,16 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   pmm_relocate_bitmap();
   uaccess_init();
+  {
+    // [COW] CR0.WP: el kernel tambien respeta las paginas de solo lectura, asi
+    // un copy_to_user sobre una pagina COW provoca #PF en vez de escribir en
+    // el frame compartido. Despues de uaccess_init (que parchea .text) y antes
+    // de arrancar los APs (que lo activan en smp_boot.c).
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1ULL << 16);
+    __asm__ volatile("movq %0, %%cr0" : : "r"(cr0));
+  }
   heap_init();
   vmap_init(); // [LinuxKPI L4] antes del primer proceso
   klog_boot_ok();
@@ -1077,6 +1225,7 @@ void kmain(struct kernel_boot_info *kinfo) {
   // 7. ACPI MADT.
   klog_boot_step("[BOOT] ACPI MADT...");
   acpi_init(boot.acpi_rsdp);
+  efi_rt_init();
   klog_boot_ok();
 
   // 8. APIC + PIT.

@@ -60,7 +60,12 @@ struct dev_pm_info {
 	bool should_wakeup:1;
 	atomic_t usage_count;		/* runtime PM: solo se cuenta */
 	int disable_depth;
+	spinlock_t lock;
+	bool runtime_auto;
+	int runtime_status;
 };
+#define RPM_ACTIVE 0
+#define RPM_SUSPENDED 2
 
 struct dev_pm_domain {
 	struct dev_pm_ops ops;
@@ -120,4 +125,7 @@ struct device;
 static inline void dev_pm_set_driver_flags(struct device *dev, u32 flags) {}
 extern const char lkpi_power_group_name[];
 #define power_group_name lkpi_power_group_name
+struct device;
+static inline void pm_vt_switch_required(struct device *dev, bool required) {}
+static inline void pm_vt_switch_unregister(struct device *dev) {}
 #endif

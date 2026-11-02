@@ -62,7 +62,11 @@ typedef struct { unsigned long pgprot; } pgprot_t;
  * la capa al pedir current->mm). mmap_lock lo toman los drivers; Aurora no
  * lo conoce (sus mmap/munmap usan su propio cerrojo).
  */
+enum { MM_FILEPAGES, MM_ANONPAGES, MM_SWAPENTS, MM_SHMEMPAGES, NR_MM_COUNTERS };
+struct mm_rss_stat { atomic_long_t count[NR_MM_COUNTERS]; };
+
 struct mm_struct {
+	struct mm_rss_stat rss_stat;
 	atomic_t mm_users;
 	atomic_t mm_count;
 	struct rw_semaphore mmap_lock;

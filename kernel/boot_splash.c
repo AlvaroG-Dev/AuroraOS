@@ -24,7 +24,7 @@ uint32_t g_boot_splash_initial_ms = 0;
 #define FRAME_MS 16
 #define FADE_MS 120
 #define WIPE_MS 300
-#define COL_DESKTOP 0xFF101828u
+#define COL_DESKTOP 0xFF05100Fu
 #define TSC_HZ_DEFAULT 3000000000ULL
 
 static asp_t S;

@@ -46,6 +46,22 @@ void aurora_vmm_free_pages(u64 vaddr, u64 num_pages) __asm__("vmm_free_pages");
 void *aurora_mmio_map(u64 phys, u64 size, u64 flags) __asm__("mmio_map");
 void aurora_mmio_unmap(u64 phys, u64 size) __asm__("mmio_unmap");
 
+/* power.h: apagado y reinicio. action: 0 = apagar, 1 = reiniciar, 2 = parar.
+ * Fases de notificador: 0 = preparar, 1 = dispositivos, 2 = final (sin dormir). */
+#define AURORA_POWER_OFF 0
+#define AURORA_POWER_RESTART 1
+#define AURORA_POWER_HALT 2
+#define AURORA_POWER_PHASE_PREPARE 0
+#define AURORA_POWER_PHASE_DEVICES 1
+#define AURORA_POWER_PHASE_FINAL 2
+typedef void (*aurora_power_notifier_fn)(int action, int phase, void *ctx);
+void aurora_power_request(int action, const char *reason) __asm__("power_request")
+	__attribute__((noreturn));
+int aurora_power_register_notifier(aurora_power_notifier_fn fn, void *ctx, int prio)
+	__asm__("power_register_notifier");
+int aurora_power_unregister_notifier(aurora_power_notifier_fn fn, void *ctx)
+	__asm__("power_unregister_notifier");
+
 /* sched.h / timerfd.h */
 u64 aurora_sched_get_ticks(void) __asm__("sched_get_ticks");
 s64 aurora_kernel_realtime_ms(void) __asm__("kernel_realtime_ms");
@@ -157,6 +173,11 @@ u8 aurora_pci_read_config_byte(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_re
 u16 aurora_pci_read_config_word(u8 bus, u8 slot, u8 func, u8 off) __asm__("pci_read_config_word");
 u32 aurora_pci_read_config_dword(u8 bus, u8 slot, u8 func, u8 off)
 	__asm__("pci_read_config_dword");
+int aurora_pci_ecam_available(void) __asm__("pci_ecam_available");
+u32 aurora_pci_read_config_ext_dword(u8 bus, u8 slot, u8 func, u16 off)
+	__asm__("pci_read_config_ext_dword");
+u16 aurora_pci_find_ext_capability(u8 bus, u8 slot, u8 func, u16 id)
+	__asm__("pci_find_ext_capability");
 void aurora_pci_write_config_byte(u8 bus, u8 slot, u8 func, u8 off, u8 v)
 	__asm__("pci_write_config_byte");
 void aurora_pci_write_config_word(u8 bus, u8 slot, u8 func, u8 off, u16 v)
@@ -340,6 +361,8 @@ void aurora_vma_dev_zap(struct aurora_vma *vma, u64 start, u64 end) __asm__("vma
 #define AURORA_VMAP_BASE 0xFFFFD00000000000UL
 #define AURORA_VMAP_SIZE (64UL << 30)
 u64 aurora_vmap_area_alloc(u64 size) __asm__("vmap_area_alloc");
+int aurora_paging_map_page(u64 virt, u64 phys, u64 flags) __asm__("paging_map_page");
+void aurora_paging_invalidate_tlb_global(u64 virt) __asm__("paging_invalidate_tlb_global");
 int aurora_vmap_area_map(u64 va, u64 phys, u64 flags) __asm__("vmap_area_map");
 void aurora_vmap_area_free(u64 va) __asm__("vmap_area_free");
 /* drm.h: dmabuf de Aurora */

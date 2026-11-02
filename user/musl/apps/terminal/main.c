@@ -237,7 +237,9 @@ int main(int argc, char **argv) {
   int win = sys_win_create(80, 60, win_w, win_h + TERM_TITLEBAR_H, "Terminal");
   if (win < 0)
     return 1;
-  sys_win_set_icon(win, "/system/icons/terminal-window-dark.bmp");
+  sys_win_set_icon(win, (sys_theme_get() & 1)
+                            ? "/system/icons/terminal-window-light.bmp"
+                            : "/system/icons/terminal-window-dark.bmp");
 
   g_win = win;
   g_cw = win_w;
@@ -251,7 +253,7 @@ int main(int argc, char **argv) {
 
   // Fondo inicial para el padding; el render dibuja también la celda y el
   // cursor antes del primer blit.
-  const uint32_t k_bg = 0xFF000000u | 0x002B36u;
+  const uint32_t k_bg = 0xFF000000u | term_default_bg();
   for (int i = 0; i < g_cw * g_ch; i++)
     g_pixels[i] = k_bg;
 
@@ -318,7 +320,25 @@ int main(int argc, char **argv) {
   ioctl(master, TIOCSPGRP, &child_pgid);
   g_cursor_last_ms = monotonic_ms();
 
+  uint32_t theme_seen = sys_theme_get();
+  terminal_set_theme(&g_term, (int)(theme_seen & 1));
   while (1) {
+    // 0. Modo claro/oscuro: si cambió, reasigna colores y repinta todo.
+    {
+      uint32_t th = sys_theme_get();
+      if (th != theme_seen) {
+        theme_seen = th;
+        terminal_set_theme(&g_term, (int)(th & 1));
+        sys_win_set_icon(g_win, (th & 1) ? "/system/icons/terminal-window-light.bmp"
+                                         : "/system/icons/terminal-window-dark.bmp");
+        const uint32_t bgp = 0xFF000000u | term_default_bg();
+        for (int i = 0; i < g_cw * g_ch; i++)
+          g_pixels[i] = bgp;
+        flush_to_window();
+        // Blit completo: el margen (padding) también cambia de color.
+        sys_win_blit(g_win, 0, 0, g_cw, g_ch, 0, 0, g_cw, g_pixels);
+      }
+    }
     // 1. Eventos de la ventana.
     winsrv_event_t ev;
     int events_processed = 0;
@@ -369,7 +389,7 @@ int main(int argc, char **argv) {
         if (!new_pixels)
           break;
 
-        const uint32_t k_bg = 0xFF000000u | 0x002B36u;
+        const uint32_t k_bg = 0xFF000000u | term_default_bg();
         for (int i = 0; i < new_cw * new_ch; i++)
           new_pixels[i] = k_bg;
 

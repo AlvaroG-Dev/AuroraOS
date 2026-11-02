@@ -1925,8 +1925,9 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 }
 
 // ---------------------------------------------------------------------------
-// [fork] Clonar el espacio de usuario: copia cada PTE presente del padre
-// a páginas físicas nuevas en el hijo. Sin COW — lento pero simple.
+// [fork] Clonar el espacio de usuario con copy-on-write: cada PTE presente
+// del padre se comparte con el hijo (solo lectura + PTE_COW, refcount en el
+// PMM). Las paginas de swap, MMIO y objetos compartidos siguen su regla propia.
 //
 // Se hace con walk manual (no paging_get_phys_in por VA, que sería
 // 256*512*512 iteraciones): recorremos las tablas directamente y
@@ -1996,7 +1997,9 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           // phys_to_virt(BAR) (p.ej. 0x810a0000 del e1000e) cae FUERA
           // de la ventana física de 512MB → #PF en el memcpy.
           // Paginas de objetos compartidos (memfd MAP_SHARED): mismo fisico.
-          if (pte & PTE_SHARED_OBJ) {
+          // PTE_SPECIAL (vDSO, buffers DMA de usuario): frame ajeno al proceso,
+          // tampoco se copia ni se libera en exit.
+          if (pte & (PTE_SHARED_OBJ | PTE_SPECIAL)) {
             if (paging_map_page_in(child_pml4, virt, pte & PTE_FRAME,
                                    pte & (0xFFF | PTE_NX)) != 0)
               return -1;
@@ -2016,6 +2019,32 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           }
 
           uint64_t old_phys = pte & PTE_FRAME;
+
+          // [COW] Pagina privada de RAM: padre e hijo comparten el frame, de
+          // solo lectura y marcado PTE_COW. La primera escritura de cualquiera
+          // de los dos cae en pf_handle_cow(), que copia (o, si el otro ya
+          // salio, devuelve la escritura sin copiar). El refcount del frame
+          // lo lleva el PMM. Se marcan tambien las paginas no escribibles
+          // (codigo): un mprotect(PROT_WRITE) posterior no debe poder escribir
+          // en un frame compartido.
+          if (pmm_page_share(old_phys) == 0) {
+            uint64_t cow_pte = (pte & ~(uint64_t)PTE_WRITABLE) | PTE_COW;
+            if (paging_map_page_in(child_pml4, virt, old_phys, cow_pte) != 0) {
+              pmm_free_page(old_phys); // suelta la referencia recien tomada
+              LOG_ERR("[FORK] paging_map_page_in (COW) falló en %p",
+                      (void *)virt);
+              return -1;
+            }
+            if (cow_pte != pte) {
+              // Degradar el PTE del padre. El flush de TLB (todas las CPUs,
+              // por si hay hilos del padre en otras) lo hace sys_fork una
+              // sola vez al terminar el recorrido.
+              __atomic_store_n(&pt_parent[l], cow_pte, __ATOMIC_RELEASE);
+            }
+            continue;
+          }
+
+          // Sin refcount disponible (saturado o sin tabla): copia completa.
           uint64_t new_phys = pmm_alloc_page();
           if (!new_phys) {
             LOG_ERR("[FORK] sin memoria clonando página");
@@ -2118,7 +2147,12 @@ int64_t sys_fork(void) {
   uint64_t *child_pml4 = (uint64_t *)phys_to_virt(child_pml4_phys);
 
   // 2. Copiar user space.
-  if (clone_user_space(parent_pml4, child_pml4) != 0) {
+  int cu_rc = clone_user_space(parent_pml4, child_pml4);
+  // [COW] Los PTE del padre pasaron a solo lectura: ninguna CPU puede seguir
+  // escribiendo por un TLB viejo. Un solo shootdown para todo el espacio
+  // (tambien si el clon fallo a medias).
+  paging_invalidate_tlb_global(0);
+  if (cu_rc != 0) {
     paging_free_user_space(child_pml4_phys);
     mutex_unlock(&parent->mm_lock);
     return -ENOMEM;

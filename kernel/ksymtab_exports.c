@@ -18,6 +18,7 @@
 #include "sched.h"   // sched_get_ticks, sched_current
 #include "aur_loader.h"
 #include "firmware.h"
+#include "power.h"
 
 KEXPORT_SYMBOL(klog_printf);
 KEXPORT_SYMBOL(klog_puts);
@@ -28,6 +29,7 @@ KEXPORT_SYMBOL(kfree);
 KEXPORT_SYMBOL(vmm_alloc_pages);
 KEXPORT_SYMBOL(vmm_free_pages);
 KEXPORT_SYMBOL(paging_map_page);
+KEXPORT_SYMBOL(paging_invalidate_tlb_global);
 
 KEXPORT_SYMBOL(sched_get_ticks);
 KEXPORT_SYMBOL(sched_current);
@@ -107,6 +109,9 @@ KEXPORT_SYMBOL(bus_del_driver);
 KEXPORT_SYMBOL(device_unregister);
 KEXPORT_SYMBOL(pci_bus);
 KEXPORT_SYMBOL(pci_get_devices);
+KEXPORT_SYMBOL(pci_ecam_available);
+KEXPORT_SYMBOL(pci_read_config_ext_dword);
+KEXPORT_SYMBOL(pci_find_ext_capability);
 KEXPORT_SYMBOL(pci_read_config_byte);
 KEXPORT_SYMBOL(pci_read_config_word);
 KEXPORT_SYMBOL(pci_read_config_dword);
@@ -247,3 +252,13 @@ _Static_assert(sizeof(vma_dev_ops_t) == 24, "vma_dev_ops_t cambio: actualizar au
 _Static_assert(sizeof(task_info_t) == 48 && offsetof(task_info_t, proc) == 16 &&
                    offsetof(task_info_t, comm) == 28,
                "task_info_t cambio: actualizar struct aurora_task_info");
+
+// Apagado/reinicio (Plan_Power.md P7): LinuxKPI registra sus notificadores y
+// pide el apagado desde kernel_power_off()/kernel_restart().
+KEXPORT_SYMBOL(power_request);
+KEXPORT_SYMBOL(power_register_notifier);
+KEXPORT_SYMBOL(power_unregister_notifier);
+
+// Diagnostico NVIDIA (fs/file.c de LinuxKPI): `strace=NOMBRE` en /dev/kmsg.
+extern char g_strace_comm[32];
+KEXPORT_SYMBOL(g_strace_comm);

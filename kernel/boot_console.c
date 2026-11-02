@@ -88,6 +88,31 @@ static void blit_cell_to_fb(uint32_t col, uint32_t row) {
 
 // Scroll en RAM (memmove cacheable) + un único blit del área completa
 // al FB. Coste: ~1 ms el memmove + ~5 ms el blit, en lugar de 2 s.
+// Con el FB de la GPU detrás de PCIe (BAR1) un volcado de pantalla completa
+// cuesta ~80 ms: hacerlo por línea de log dominaba el arranque. Ahora el
+// scroll solo marca la sombra como sucia y se vuelca como mucho cada
+// FLUSH_CYCLES ciclos (y al quitar el hook / en panic).
+#define FLUSH_CYCLES 150000000ull
+static int g_dirty = 0;
+static uint64_t g_last_flush = 0;
+
+static inline uint64_t bc_rdtsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+
+static void flush_if_due(int force) {
+  if (!g_dirty)
+    return;
+  uint64_t now = bc_rdtsc();
+  if (!force && now - g_last_flush < FLUSH_CYCLES)
+    return;
+  blit_rows_to_fb(0, 0, g_shadow_h);
+  g_dirty = 0;
+  g_last_flush = bc_rdtsc();
+}
+
 static void scroll_one_row(void) {
   if (!g_shadow)
     return;
@@ -96,7 +121,8 @@ static void scroll_one_row(void) {
   __builtin_memmove(g_shadow, src,
                     (size_t)move_rows * g_shadow_w * sizeof(uint32_t));
   shadow_fill(0, g_shadow_h - g_cell_h, g_shadow_w, g_cell_h, COL_BG);
-  blit_rows_to_fb(0, 0, g_shadow_h);
+  g_dirty = 1;
+  flush_if_due(0);
 }
 
 static uint32_t color_for(klog_level_t level, klog_fb_style_t style) {
@@ -177,6 +203,7 @@ void boot_console_clear(void) {
     return;
   shadow_fill(0, 0, g_shadow_w, g_shadow_h, COL_BG);
   blit_rows_to_fb(0, 0, g_shadow_h);
+  g_dirty = 0;
   g_col = 0;
   g_row = 0;
 }
@@ -229,8 +256,12 @@ void boot_console_putchar(char c, klog_level_t level, klog_fb_style_t style) {
                        buf, fg, g_font);
   }
 
-  // Sólo esta celda al FB (140 dwords = 560 bytes).
-  blit_cell_to_fb(g_col, g_row);
+  // Sólo esta celda al FB (140 dwords = 560 bytes); si hay scroll pendiente
+  // se volcará todo junto cuando toque.
+  if (g_dirty)
+    flush_if_due(0);
+  else
+    blit_cell_to_fb(g_col, g_row);
   g_col++;
 }
 
@@ -249,6 +280,8 @@ void boot_console_hook_install(void) { klog_fb_hook = boot_console_putchar; }
 
 void boot_console_hook_remove(void) {
   klog_fb_hook = NULL;
+  if (g_shadow)
+    flush_if_due(1);
   // No liberamos g_shadow: liberarla aquí podría dar UAF si algún CPU
   // aún está dentro del hook desde otro mensaje. Son ~4 MB y sólo se
   // asignan una vez por boot. Aceptable.

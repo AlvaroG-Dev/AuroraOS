@@ -25,6 +25,7 @@ struct module;
 #define MODULE_DESCRIPTION(d) MODULE_INFO(description, d)
 #define MODULE_VERSION(v) MODULE_INFO(version, v)
 #define MODULE_ALIAS(a) MODULE_INFO(alias, a)
+#define MODULE_ALIAS_CHARDEV_MAJOR(major) MODULE_ALIAS("char-major-" __stringify(major) "-*")
 #define MODULE_SOFTDEP(s) MODULE_INFO(softdep, s)
 #define MODULE_FIRMWARE(f) MODULE_INFO(firmware, f)
 #define MODULE_PARM_DESC(p, d) MODULE_INFO(parm, #p ":" d)

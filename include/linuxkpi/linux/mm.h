@@ -27,6 +27,7 @@ void lkpi_page_release(struct page *page);
 phys_addr_t lkpi_virt_to_phys(const void *addr);
 
 static inline unsigned long page_to_pfn(const struct page *page) { return page->pfn; }
+#define page_to_nid(page) 0
 static inline struct page *pfn_to_page(unsigned long pfn) { return lkpi_pfn_to_page(pfn); }
 static inline void *page_address(const struct page *page) { return page->virtual; }
 static inline phys_addr_t page_to_phys(const struct page *page)
@@ -190,7 +191,34 @@ static inline bool fault_flag_allow_retry_first(unsigned int flags)
 #define PAGE_KERNEL __pgprot(_PAGE_PRESENT | _PAGE_RW | _PAGE_NX)
 #define PAGE_KERNEL_RO __pgprot(_PAGE_PRESENT | _PAGE_NX)
 #define PAGE_KERNEL_IO PAGE_KERNEL
+#define PAGE_KERNEL_NOENC PAGE_KERNEL
+#define __PAGE_KERNEL_NOCACHE (_PAGE_PRESENT | _PAGE_RW | _PAGE_NX | _PAGE_PCD)
+#define FOLL_WRITE 0x01
+#define FOLL_TOUCH 0x02
+#define FOLL_GET 0x04
+#define FOLL_FORCE 0x10
+#define FOLL_LONGTERM 0x100
 #define PAGE_KERNEL_NOCACHE __pgprot(_PAGE_PRESENT | _PAGE_RW | _PAGE_NX | _PAGE_PCD)
+/* Modos de cache de x86 (asm/pgtable_types.h) y su codificacion en el PTE:
+ * Aurora programa el PAT con WC en la entrada 3 (PWT|PCD), como pgprot_writecombine. */
+enum page_cache_mode {
+	_PAGE_CACHE_MODE_WB = 0,
+	_PAGE_CACHE_MODE_WC = 1,
+	_PAGE_CACHE_MODE_UC_MINUS = 2,
+	_PAGE_CACHE_MODE_UC = 3,
+	_PAGE_CACHE_MODE_WT = 4,
+	_PAGE_CACHE_MODE_WP = 5,
+};
+static inline unsigned long cachemode2protval(enum page_cache_mode mode)
+{
+	switch (mode) {
+	case _PAGE_CACHE_MODE_WC: return _PAGE_PWT | _PAGE_PCD;
+	case _PAGE_CACHE_MODE_UC_MINUS:
+	case _PAGE_CACHE_MODE_UC: return _PAGE_PCD;
+	case _PAGE_CACHE_MODE_WT: return _PAGE_PWT;
+	default: return 0;
+	}
+}
 static inline pgprot_t pgprot_writecombine(pgprot_t p)
 {
 	return __pgprot((pgprot_val(p) & ~_PAGE_CACHE_MASK) | _PAGE_PWT | _PAGE_PCD);
@@ -286,9 +314,15 @@ static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
 	vma->vm_file = file;
 }
 static inline struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr) { return NULL; }
+static inline struct vm_area_struct *find_vma_intersection(struct mm_struct *mm, unsigned long s, unsigned long e) { return NULL; }
 
 /* Sin arbol de VMA de usuario: el iterador no visita nada (userptr/probe_range fallan con -EFAULT). */
 struct vma_iterator { struct mm_struct *mm; unsigned long addr; };
 #define VMA_ITERATOR(name, _mm, _addr) struct vma_iterator name = { .mm = (_mm), .addr = (_addr) }
 #define for_each_vma_range(vmi, vma, end) for ((vma) = NULL; (vma); )
+/* N2: get_user_pages/fisico<->pfn/numero de paginas (sin espacio de usuario real). */
+static inline long get_user_pages(unsigned long start, unsigned long nr, unsigned int flags, struct page **pages) { return -EFAULT; }
+#define __phys_to_pfn(p) ((unsigned long)(p) >> PAGE_SHIFT)
+unsigned long lkpi_totalram_pages(void);
+#define get_num_physpages() lkpi_totalram_pages()
 #endif

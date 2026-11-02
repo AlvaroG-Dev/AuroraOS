@@ -25,6 +25,7 @@
 #include <linux/workqueue.h>
 #include <linux/hardirq.h>
 #include <linux/cdev.h>
+#include <linux/fdtable.h>
 
 #include "../aurora.h"
 #include "../lkpi_internal.h"
@@ -375,6 +376,82 @@ static s64 lkpi_vop_ioctl(struct aurora_vfs_node *n, unsigned long req, u64 arg)
 	if (!f->f_op->unlocked_ioctl)
 		return -ENOTTY;
 	r = f->f_op->unlocked_ioctl(f, (unsigned int)req, (unsigned long)arg);
+	if (r >= 0 && ((req >> 8) & 0xff) == 'F' && ((req >> 16) & 0x3fff) >= 0x20) {
+		/*
+		 * Diagnostico NVIDIA: el ioctl de nvidiactl devuelve 0 aunque el RM rechace
+		 * la peticion; el error va en el campo `status` de NVOS54 (RM_CONTROL 0x2a:
+		 * cmd en +8, status en +0x1c) o NVOS64 (RM_ALLOC 0x2b: clase en +0xc,
+		 * status en +0x28). Los fallos (status != 0) se registran siempre (max. 300);
+		 * todas las llamadas solo del proceso con `strace=NOMBRE` activo (max. 3000).
+		 */
+		extern char g_strace_comm[32];
+		static int lkpi_rm_fail_logged, lkpi_rm_all_logged;
+		unsigned long nr = req & 0xff;
+		if (nr == 0x2a || nr == 0x2b) {
+			u32 w[12] = {0};
+			unsigned long sz = (req >> 16) & 0x3fff;
+			if (sz > sizeof(w))
+				sz = sizeof(w);
+			if (!copy_from_user(w, (void __user *)arg, sz)) {
+				u32 st = nr == 0x2a ? w[7] : w[10];
+				bool traced = g_strace_comm[0] && !strcmp(current->comm, g_strace_comm);
+				if ((st && lkpi_rm_fail_logged < 300) || (traced && lkpi_rm_all_logged < 3000)) {
+					if (st)
+						lkpi_rm_fail_logged++;
+					else
+						lkpi_rm_all_logged++;
+					pr_info("lkpi: RM %s %s status=0x%x %s=0x%x hClient=0x%x hObj=0x%x pid=%d\n",
+						nr == 0x2a ? "CONTROL" : "ALLOC", current->comm, st,
+						nr == 0x2a ? "cmd" : "class", nr == 0x2a ? w[2] : w[3],
+						w[0], w[1], current->pid);
+				}
+			}
+		}
+	}
+	if (((req >> 8) & 0xff) == 'F' && (req & 0xff) != 0x2a && (req & 0xff) != 0x2b) {
+		/* Diagnostico NVIDIA: resto de ioctl de nvidiactl/nvidia0 (REGISTER_FD, NUMA_INFO...). */
+		extern char g_strace_comm[32];
+		static int lkpi_nv_ioctl_logged;
+		if ((r < 0 || (g_strace_comm[0] && !strcmp(current->comm, g_strace_comm))) && lkpi_nv_ioctl_logged < 1000) {
+			lkpi_nv_ioctl_logged++;
+			pr_info("lkpi: nv ioctl nr=0x%lx size=0x%lx ret=%ld\n", req & 0xff, (req >> 16) & 0x3fff, r);
+		}
+	}
+	if (r >= 0 && ((req >> 8) & 0xff) == 'F' && (req & 0xff) != 0x29) {
+		/*
+		 * Diagnostico NVIDIA con strace activo: volcado hexadecimal de los parametros
+		 * (tras la llamada) de todos los ioctl de nvidiactl salvo RM_FREE. El `status`
+		 * de cada NVOS* va dentro: VID_HEAP_CONTROL 0x4a (+0x14), MAP_MEMORY 0x4e (+0x28)...
+		 */
+		extern char g_strace_comm[32];
+		static int lkpi_nv_dump_logged;
+		if (g_strace_comm[0] && !strcmp(current->comm, g_strace_comm) && lkpi_nv_dump_logged < 1500) {
+			u32 w[48];
+			unsigned long sz = (req >> 16) & 0x3fff, n, i;
+			char line[48 * 9 + 8];
+			int o = 0;
+
+			if (sz > sizeof(w))
+				sz = sizeof(w);
+			n = sz / 4;
+			if (n && !copy_from_user(w, (void __user *)arg, n * 4)) {
+				lkpi_nv_dump_logged++;
+				for (i = 0; i < n; i++)
+					o += snprintf(line + o, sizeof(line) - o, "%x ", w[i]);
+				pr_info("lkpi: nv dump nr=0x%lx sz=0x%lx: %s\n", req & 0xff, (req >> 16) & 0x3fff, line);
+			}
+		}
+	}
+	if (r < 0) {
+		/* Diagnostico: ioctl fallidos (libs de NVIDIA, nvidia-smi...). Maximo 128 lineas. */
+		static int lkpi_ioctl_fail_logged;
+		if (lkpi_ioctl_fail_logged < 128) {
+			lkpi_ioctl_fail_logged++;
+			pr_info("lkpi: ioctl fallido cmd=0x%lx (dir=%lu tipo='%c' nr=0x%lx size=%lu) ret=%ld\n",
+				req, (req >> 30) & 3, (char)((req >> 8) & 0xff), req & 0xff,
+				(req >> 16) & 0x3fff, r);
+		}
+	}
 	return r < 0 ? lkpi_errno_user(r) : r;
 }
 
@@ -755,3 +832,34 @@ ssize_t lkpi_memory_read_from_buffer(void *to, size_t count, loff_t *ppos, const
 	return count;
 }
 EXPORT_SYMBOL(lkpi_memory_read_from_buffer);
+
+/*
+ * iterate_fd(): lo usa NVIDIA (nv_is_gpu_accessible) para comprobar que el proceso
+ * tiene abierto /dev/nvidiaN antes de dejarle crear un NV01_DEVICE_0; con el stub
+ * anterior (siempre 0) el RM devolvia NV_ERR_INSUFFICIENT_PERMISSIONS (0x1b).
+ * Recorre los fds del proceso actual y llama a fn con los que son ficheros de la capa.
+ */
+int iterate_fd(struct files_struct *files, unsigned int n,
+	       int (*fn)(const void *, struct file *, unsigned int), const void *p)
+{
+	unsigned int fd;
+	int res = 0;
+
+	for (fd = n; fd < 256 && !res; fd++) {
+		struct aurora_fd *afd = aurora_vfs_fd_get_current((int)fd);
+		struct aurora_vfs_node *node;
+
+		if (!afd)
+			continue;
+		node = aurora_vfs_fd_node(afd);
+		if (node && aurora_vfs_node_ops(node) == &lkpi_file_vops) {
+			struct file *f = lkpi_vnode_file(node);
+
+			if (f)
+				res = fn(p, f, fd);
+		}
+		aurora_vfs_fd_put_ref(afd);
+	}
+	return res;
+}
+EXPORT_SYMBOL(iterate_fd);

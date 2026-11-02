@@ -14,21 +14,50 @@
 #include <QStyleFactory>
 #include <QStyleOption>
 #include <QStylePlugin>
+#include <QTimer>
 #include <QWidget>
+#include <cstdlib>
+#include <cstring>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 namespace {
 
-const QColor kAccent(0x0A, 0x84, 0xFF);   // AURORA_ACCENT
-const QColor kAccentHi(0x40, 0x9C, 0xFF); // AURORA_ACCENT_HOVER
-const QColor kAccentLo(0x0A, 0x6F, 0xDB);
-const QColor kMenuBg(0x2A, 0x2A, 0x2C);
-const QColor kBar(0x26, 0x26, 0x28); // AURORA_TITLEBAR_ACTIVE
+const QColor kAccent(0x3E, 0xE8, 0x9B);   // AURORA_ACCENT (verde aurora)
+const QColor kAccentHi(0x6B, 0xF0, 0x83); // AURORA_ACCENT_HOVER
+const QColor kAccentLo(0x2D, 0xB8, 0x78);
+const QColor kOnAccent(0x04, 0x26, 0x1A); // AURORA_ACCENT_TEXT
+// Modo claro/oscuro: lo fija el tema de plataforma (AURORA_THEME y sondeo del
+// kernel). Los grises oscuros del estilo se pasan por GC(), que en claro los
+// invierte; el texto y los trazos "blancos" usan white()/fg().
+bool gLight = false;
+// ASYS_THEME_GET (0x1000 + 0x70): (generacion << 1) | claro. Fuera de Aurora o
+// si falla, se usa AURORA_THEME.
+bool pollLight() {
+  long v = syscall(0x1070);
+  if (v < 0) {
+    const char *e = getenv("AURORA_THEME");
+    return e && !strcmp(e, "light");
+  }
+  return v & 1;
+}
+QColor GC(int r, int g, int b) {
+  const int mx = qMax(r, qMax(g, b)), mn = qMin(r, qMin(g, b));
+  if (!gLight || mx >= 0x60 || mx - mn > 4)
+    return QColor(r, g, b);
+  const int l = (r + g + b) / 3;
+  const int o = 255 - int((l - 0x10) * 0.42) - 12;
+  return QColor(o - 1, o, o - 1);
+}
+#define kMenuBg GC(0x2A, 0x2A, 0x2C)
+#define kBar GC(0x26, 0x26, 0x28) // AURORA_TITLEBAR_ACTIVE
 
 QColor alpha(QColor c, int a) {
   c.setAlpha(a);
   return c;
 }
-QColor white(int a) { return alpha(Qt::white, a); }
+QColor white(int a) { return alpha(gLight ? QColor(0x14, 0x21, 0x1B) : QColor(Qt::white), a); }
+QColor fg() { return gLight ? QColor(0x14, 0x21, 0x1B) : QColor(Qt::white); }
 QColor shade(const QColor &c, int amount) { // >0 aclara, <0 oscurece
   return amount >= 0 ? c.lighter(100 + amount) : c.darker(100 - amount);
 }
@@ -78,6 +107,18 @@ public:
     QFont f(QStringLiteral("Inter"));
     f.setPointSize(10);
     app->setFont(f);
+    gLight = pollLight();
+    // Cambio de modo en vivo: se sondea el kernel y se repinta todo.
+    auto *t = new QTimer(app);
+    QObject::connect(t, &QTimer::timeout, app, [app]() {
+      const bool l = pollLight();
+      if (l == gLight)
+        return;
+      gLight = l;
+      for (QWidget *w : app->allWidgets())
+        w->update();
+    });
+    t->start(400);
   }
   using QProxyStyle::polish;
   void polish(QWidget *w) override {
@@ -251,20 +292,20 @@ public:
       const QRectF b = QRectF(o->rect).adjusted(0.5, 0.5, -0.5, -0.5);
       const bool on = o->state & (State_On | State_NoChange);
       QColor fill = on ? (down && !(o->state & State_On) ? kAccentLo : kAccent)
-                       : QColor(0x3A, 0x3A, 0x3C);
+                       : GC(0x3A, 0x3A, 0x3C);
       if (hover && !on)
-        fill = QColor(0x48, 0x48, 0x4A);
+        fill = GC(0x48, 0x48, 0x4A);
       p->save();
       p->setOpacity(enabled ? 1.0 : 0.4);
       roundRect(p, b, 4, fill, QPen(on ? alpha(Qt::black, 60) : white(64), 1.0));
       if (o->state & State_NoChange) {
         p->setRenderHint(QPainter::Antialiasing);
-        p->setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap));
+        p->setPen(QPen(kOnAccent, 1.8, Qt::SolidLine, Qt::RoundCap));
         p->drawLine(QPointF(b.left() + 4, b.center().y()),
                     QPointF(b.right() - 4, b.center().y()));
       } else if (o->state & State_On) {
         p->setRenderHint(QPainter::Antialiasing);
-        p->setPen(QPen(Qt::white, 1.9, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p->setPen(QPen(kOnAccent, 1.9, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         QPainterPath c;
         c.moveTo(b.left() + b.width() * 0.26, b.top() + b.height() * 0.54);
         c.lineTo(b.left() + b.width() * 0.43, b.top() + b.height() * 0.71);
@@ -279,8 +320,8 @@ public:
     case PE_IndicatorRadioButton: {
       const QRectF b = QRectF(o->rect).adjusted(0.5, 0.5, -0.5, -0.5);
       const bool on = o->state & State_On;
-      QColor fill = on ? kAccent : (hover ? QColor(0x48, 0x48, 0x4A)
-                                          : QColor(0x3A, 0x3A, 0x3C));
+      QColor fill = on ? kAccent : (hover ? GC(0x48, 0x48, 0x4A)
+                                          : GC(0x3A, 0x3A, 0x3C));
       p->save();
       p->setOpacity(enabled ? 1.0 : 0.4);
       roundRect(p, b, b.width() / 2, fill,
@@ -288,7 +329,7 @@ public:
       if (on) {
         p->setRenderHint(QPainter::Antialiasing);
         p->setPen(Qt::NoPen);
-        p->setBrush(Qt::white);
+        p->setBrush(kOnAccent);
         p->drawEllipse(b.center(), b.width() * 0.19, b.width() * 0.19);
       }
       if (o->state & State_HasFocus && (o->state & State_KeyboardFocusChange))
@@ -307,7 +348,7 @@ public:
       p->restore();
       return;
     case PE_PanelTipLabel:
-      roundRect(p, r, 6, QColor(0x2E, 0x2E, 0x2E), QPen(white(36), 1.0));
+      roundRect(p, r, 6, GC(0x2E, 0x2E, 0x2E), QPen(white(36), 1.0));
       return;
     case PE_FrameGroupBox:
       roundRect(p, r, 8, white(8), QPen(white(36), 1.0));
@@ -343,7 +384,7 @@ public:
       if (const auto *b = qstyleoption_cast<const QStyleOptionButton *>(o)) {
         if (b->features & QStyleOptionButton::DefaultButton) {
           QStyleOptionButton nb(*b);
-          nb.palette.setColor(QPalette::ButtonText, Qt::white);
+          nb.palette.setColor(QPalette::ButtonText, kOnAccent);
           QProxyStyle::drawControl(ce, &nb, p, w);
           return;
         }
@@ -361,9 +402,9 @@ public:
         if ((mi->state & State_Selected) && enabled) {
           roundRect(p, QRectF(mi->rect).adjusted(4, 1, -4, -1), 5, kAccent);
           nm.state &= ~State_Selected;
-          nm.palette.setColor(QPalette::Text, Qt::white);
-          nm.palette.setColor(QPalette::ButtonText, Qt::white);
-          nm.palette.setColor(QPalette::WindowText, Qt::white);
+          nm.palette.setColor(QPalette::Text, kOnAccent);
+          nm.palette.setColor(QPalette::ButtonText, kOnAccent);
+          nm.palette.setColor(QPalette::WindowText, kOnAccent);
         } else {
           nm.state &= ~State_Selected;
         }
@@ -414,7 +455,7 @@ public:
     case CE_TabBarTabLabel:
       if (const auto *t = qstyleoption_cast<const QStyleOptionTab *>(o)) {
         QStyleOptionTab nt(*t);
-        const QColor c = (t->state & State_Selected) ? QColor(Qt::white) : white(204);
+        const QColor c = (t->state & State_Selected) ? fg() : white(204);
         nt.palette.setColor(QPalette::WindowText, c);
         nt.palette.setColor(QPalette::ButtonText, c);
         nt.palette.setColor(QPalette::Text, c);
@@ -426,7 +467,7 @@ public:
       const QRectF r = QRectF(o->rect);
       const qreal h = qMin<qreal>(r.height(), 8);
       const QRectF g(r.left(), r.center().y() - h / 2, r.width(), h);
-      roundRect(p, g, h / 2, QColor(0x3A, 0x3A, 0x3C));
+      roundRect(p, g, h / 2, GC(0x3A, 0x3A, 0x3C));
       return;
     }
     case CE_ProgressBarContents:
@@ -482,8 +523,8 @@ public:
         }
         // Popup button de macOS: cuadrado de acento con el par de chevrons.
         const QRectF a = QRectF(subControlRect(CC_ComboBox, cb, SC_ComboBoxArrow, w));
-        roundRect(p, a, 4.5, enabled ? kAccent : QColor(0x4A, 0x4A, 0x4C));
-        const QColor ch = enabled ? QColor(Qt::white) : white(110);
+        roundRect(p, a, 4.5, enabled ? kAccent : GC(0x4A, 0x4A, 0x4C));
+        const QColor ch = enabled ? kOnAccent : white(110);
         drawChevron(p, QPointF(a.center().x(), a.center().y() - 3.2), 6.5, true, ch, 1.5);
         drawChevron(p, QPointF(a.center().x(), a.center().y() + 3.2), 6.5, false, ch, 1.5);
         return;
@@ -499,7 +540,7 @@ public:
         const qreal t = 4;
         QRectF g = horiz ? QRectF(groove.left(), groove.center().y() - t / 2, groove.width(), t)
                          : QRectF(groove.center().x() - t / 2, groove.top(), t, groove.height());
-        roundRect(p, g, t / 2, QColor(0x3A, 0x3A, 0x3C));
+        roundRect(p, g, t / 2, GC(0x3A, 0x3A, 0x3C));
         QRectF fill = g;
         if (horiz)
           fill.setRight(handle.center().x());
@@ -574,18 +615,19 @@ private:
     QColor top, bot;
     if (def && enabled) {
       top = pressed ? kAccentLo : kAccentHi;
-      bot = pressed ? QColor(0x0A, 0x5C, 0xB8) : kAccent;
+      bot = pressed ? QColor(0x2D, 0xB8, 0x78) : kAccent;
     } else if (!enabled) {
-      top = QColor(0x2A, 0x2A, 0x2C);
-      bot = QColor(0x26, 0x26, 0x28);
+      top = GC(0x2A, 0x2A, 0x2C);
+      bot = GC(0x26, 0x26, 0x28);
     } else {
-      top = QColor(0x48, 0x48, 0x4A);
-      bot = QColor(0x3A, 0x3A, 0x3C);
+      top = GC(0x48, 0x48, 0x4A);
+      bot = GC(0x3A, 0x3A, 0x3C);
       if (hover)
         top = shade(top, 12), bot = shade(bot, 12);
       if (pressed || checked)
-        top = QColor(0x30, 0x30, 0x32), bot = QColor(0x3A, 0x3A, 0x3C);
+        top = GC(0x30, 0x30, 0x32), bot = GC(0x3A, 0x3A, 0x3C);
     }
+    top = bot; // sin degradados: color solido
     QLinearGradient g(r.topLeft(), r.bottomLeft());
     g.setColorAt(0, top);
     g.setColorAt(1, bot);

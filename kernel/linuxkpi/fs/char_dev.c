@@ -82,7 +82,7 @@ static struct lkpi_chrdev_region *lkpi_region_add(unsigned int major, unsigned i
 		if (m < CHRDEV_MAJOR_DYN_END)
 			for (m = 511; m >= 384 && lkpi_major_used(m); m--)
 				;
-		if (m < 384) {
+		if (m < 384 && (m < CHRDEV_MAJOR_DYN_END || m > 254)) {
 			mutex_unlock(&lkpi_chrdev_mutex);
 			kfree(r);
 			return ERR_PTR(-EBUSY);

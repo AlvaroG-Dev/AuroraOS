@@ -20,6 +20,8 @@ ap.add_argument('--done', default='DRIVE-DONE')
 ap.add_argument('--cmdline', default='', help='linea del kernel (cmdline= de aurora.conf), p. ej. "aur.skip=1234:1111 lkpi.load=linuxkpi,lkpi_drm"')
 ap.add_argument('--qemu', action='append', default=[], help='argumento extra para QEMU (repetible)')
 ap.add_argument('--extra', action='append', default=[], help='argumento extra para QEMU (repetible), p. ej. --extra=-vga --extra=none')
+ap.add_argument('--no-cdrom', action='store_true', help='no conectar aurora.iso como CD (arranque solo desde el USB, como en un PC sin lector)')
+ap.add_argument('--no-build', action='store_true', help='no ejecutar make iso (usa aurora.iso tal cual)')
 a = ap.parse_args()
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(root)
@@ -38,7 +40,7 @@ os.makedirs('build', exist_ok=True)
 cf = 'build/drive-aurora.conf'
 if not os.path.exists(cf) or open(cf).read() != conf:
     open(cf, 'w').write(conf)
-r = subprocess.run(['make', 'iso', 'MUSL_CC=/usr/bin/musl-gcc', 'KUR_CC=gcc', 'AURORA_CONF=' + cf],
+r = subprocess.run(['true'] if a.no_build else ['make', 'iso', 'MUSL_CC=/usr/bin/musl-gcc', 'KUR_CC=gcc', 'AURORA_CONF=' + cf],
                    stdout=open('/tmp/drive-build.log', 'w'), stderr=subprocess.STDOUT)
 if os.path.exists(bt):
     os.remove(bt)
@@ -53,7 +55,7 @@ q = subprocess.Popen([
     'qemu-system-x86_64',
     '-drive', 'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd',
     '-drive', 'if=pflash,format=raw,file=OVMF_VARS.fd',
-    '-m', a.m, '-no-reboot', '-smp', '2', '-cdrom', 'aurora.iso',
+    '-m', a.m, '-no-reboot', '-smp', '2'] + ([] if a.no_cdrom else ['-cdrom', 'aurora.iso']) + [
     '-display', 'none', '-monitor', 'unix:/tmp/qmon.sock,server,nowait',
     '-serial', 'file:' + a.log,
     # Dispositivos PCI para las pruebas de LinuxKPI (L3): `edu` (MMIO, INTx,

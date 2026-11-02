@@ -33,4 +33,5 @@ static __always_inline void arch_local_irq_restore(unsigned long flags)
 #define lockdep_assert_irqs_disabled() do { } while (0)
 #define lockdep_assert_irqs_enabled() do { } while (0)
 
+#define X86_EFLAGS_IF 0x00000200
 #endif

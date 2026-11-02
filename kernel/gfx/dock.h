@@ -36,6 +36,7 @@ int dock_update(int dt_ms);
 
 // Fuerza recálculo y repintado (item añadido/quitado, icono nuevo, foco).
 void dock_invalidate_layout(void);
+void dock_theme_changed(void);
 
 // Si la geometría cambió desde la última llamada, devuelve 1 y rellena `out`
 // con el rectángulo a repintar (unión de lo anterior y lo nuevo).

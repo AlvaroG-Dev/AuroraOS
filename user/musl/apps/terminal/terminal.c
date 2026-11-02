@@ -9,15 +9,36 @@
 // ============================================================================
 // Colores por defecto
 // ============================================================================
-// Mismo esquema Solarized Dark que ya usaba el terminal actual.
-static const uint32_t PALETTE[16] = {
-    0x073642, 0xDC322F, 0x859900, 0xB58900, 0x268BD2, 0xD33682,
-    0x2AA198, 0xEEE8D5, 0x002B36, 0xCB4B16, 0x586E75, 0x657B83,
-    0x839496, 0x6C71C4, 0x93A1A1, 0xFDF6E3,
+// Paleta de Aurora, en dos variantes (oscuro/claro). La activa se copia a
+// PALETTE y a g_def_fg/g_def_bg; terminal_set_theme() reasigna los colores ya
+// dibujados de una a otra por valor.
+static const uint32_t PALETTE_DARK[16] = {
+    0x1B2622, 0xFF6B6B, 0x3EE89B, 0xF2C14E, 0x5AB0FF, 0xC792EA,
+    0x5EEAD4, 0xC9D6D0, 0x4A5A54, 0xFF8E8E, 0x6BF083, 0xFFD97A,
+    0x8CC6FF, 0xDDB6F5, 0x8FF3E3, 0xFFFFFF,
 };
+static const uint32_t PALETTE_LIGHT[16] = {
+    0x24332D, 0xD93636, 0x16A15F, 0xB7791F, 0x2563C9, 0x9C4BC4,
+    0x0F8F8A, 0x6B7B74, 0x7C8B85, 0xE05757, 0x1FB872, 0xD08A2A,
+    0x3F7FE0, 0xB466D8, 0x22A8A2, 0x2B3A34,
+};
+#define DEF_FG_DARK 0xE6EFEA
+#define DEF_BG_DARK 0x0E1412
+#define DEF_FG_LIGHT 0x1B2B24
+#define DEF_BG_LIGHT 0xF7FAF8
 
-#define DEF_FG PALETTE[12] // base0  #839496
-#define DEF_BG PALETTE[8]  // base03 #002B36
+static uint32_t PALETTE[16] = {
+    0x1B2622, 0xFF6B6B, 0x3EE89B, 0xF2C14E, 0x5AB0FF, 0xC792EA,
+    0x5EEAD4, 0xC9D6D0, 0x4A5A54, 0xFF8E8E, 0x6BF083, 0xFFD97A,
+    0x8CC6FF, 0xDDB6F5, 0x8FF3E3, 0xFFFFFF,
+};
+static uint32_t g_def_fg = DEF_FG_DARK;
+static uint32_t g_def_bg = DEF_BG_DARK;
+static int g_theme_light = 0;
+static int g_hist_cols = 0; // ancho (en celdas) de cada línea del history
+
+#define DEF_FG g_def_fg
+#define DEF_BG g_def_bg
 
 // [FIX #10a] Toggle del gradiente de fondo.
 //
@@ -412,6 +433,7 @@ int terminal_init(terminal_t *t, int cols, int rows) {
   }
 
   t->history_size = TERM_HISTORY_LINES;
+  g_hist_cols = cols;
   t->history = malloc(sizeof(cell_t) * t->history_size * cols);
   if (!t->history) {
     free(t->primary.cells);
@@ -1817,3 +1839,62 @@ void terminal_mouse_event(terminal_t *t, int col, int row, int button,
     t->response_len += n;
   }
 }
+
+
+// ============================================================================
+// Tema claro / oscuro
+// ============================================================================
+static uint32_t remap_color(uint32_t c, const uint32_t *from, uint32_t from_fg,
+                            uint32_t from_bg, const uint32_t *to,
+                            uint32_t to_fg, uint32_t to_bg) {
+  c &= 0x00FFFFFF;
+  if (c == from_bg)
+    return to_bg;
+  if (c == from_fg)
+    return to_fg;
+  for (int i = 0; i < 16; i++)
+    if (c == from[i])
+      return to[i];
+  return c; // color de 256/truecolor: se deja
+}
+
+static void remap_cells(cell_t *cells, size_t n, const uint32_t *from,
+                        uint32_t ffg, uint32_t fbg, const uint32_t *to,
+                        uint32_t tfg, uint32_t tbg) {
+  if (!cells)
+    return;
+  for (size_t i = 0; i < n; i++) {
+    cells[i].fg = remap_color(cells[i].fg, from, ffg, fbg, to, tfg, tbg);
+    cells[i].bg = remap_color(cells[i].bg, from, ffg, fbg, to, tfg, tbg);
+  }
+}
+
+// Cambia el modo y reasigna los colores del contenido ya escrito.
+void terminal_set_theme(terminal_t *t, int light) {
+  light = light ? 1 : 0;
+  if (light == g_theme_light)
+    return;
+  uint32_t from[16], ffg = g_def_fg, fbg = g_def_bg;
+  for (int i = 0; i < 16; i++)
+    from[i] = PALETTE[i];
+  const uint32_t *to = light ? PALETTE_LIGHT : PALETTE_DARK;
+  uint32_t tfg = light ? DEF_FG_LIGHT : DEF_FG_DARK;
+  uint32_t tbg = light ? DEF_BG_LIGHT : DEF_BG_DARK;
+  remap_cells(t->primary.cells, (size_t)t->primary.alloc_rows * t->primary.alloc_cols, from, ffg, fbg, to, tfg, tbg);
+  remap_cells(t->alternate.cells, (size_t)t->alternate.alloc_rows * t->alternate.alloc_cols, from, ffg, fbg, to, tfg, tbg);
+  if (t->history)
+    remap_cells(t->history, (size_t)t->history_size * (size_t)g_hist_cols, from, ffg, fbg, to, tfg, tbg);
+  t->cur_fg = remap_color(t->cur_fg, from, ffg, fbg, to, tfg, tbg);
+  t->cur_bg = remap_color(t->cur_bg, from, ffg, fbg, to, tfg, tbg);
+  t->s_fg = remap_color(t->s_fg, from, ffg, fbg, to, tfg, tbg);
+  t->s_bg = remap_color(t->s_bg, from, ffg, fbg, to, tfg, tbg);
+  for (int i = 0; i < 16; i++)
+    PALETTE[i] = to[i];
+  g_def_fg = tfg;
+  g_def_bg = tbg;
+  g_theme_light = light;
+  dirty_mark(t, 0, 0);
+  dirty_mark(t, t->primary.cols - 1, t->primary.rows - 1);
+}
+
+static uint32_t term_default_bg(void) { return g_def_bg; }

@@ -7,6 +7,7 @@
 
 #include "power.h"
 #include "syscall.h"
+#include "gfx/theme.h"
 #include "rseq.h"
 #include "smp_boot.h"
 #include "cpu.h"
@@ -2920,8 +2921,8 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
 //
 // CLOCK_REALTIME (0) debe devolver epoch UNIX — es lo que usan
 // touch/date/gettimeofday para saber "ahora".
-// CLOCK_MONOTONIC (1), CLOCK_PROCESS_CPUTIME_ID (2), CLOCK_BOOTTIME (7)
-// devuelven tiempo desde el boot, que es lo que ya hacíamos.
+// CLOCK_MONOTONIC (1), CLOCK_BOOTTIME (7) y el resto devuelven tiempo desde el
+// boot. CLOCK_PROCESS_CPUTIME_ID (2) devuelve la CPU consumida por el proceso.
 #define CLOCK_REALTIME_ 0
 #define CLOCK_MONOTONIC_ 1
 
@@ -2991,6 +2992,11 @@ static int64_t k_clock_gettime(uint64_t clockid, uint64_t tp, uint64_t a3,
     int64_t now_ms = realtime_now_ms();
     ts.sec = now_ms / 1000;
     ts.nsec = (now_ms % 1000) * 1000000;
+  } else if (clockid == 2) { // CLOCK_PROCESS_CPUTIME_ID: CPU del proceso (ticks de 1 ms)
+    process_t *cp = process_current();
+    uint64_t t = cp ? cp->cpu_ticks_user : 0;
+    ts.sec = (int64_t)(t / 1000);
+    ts.nsec = (int64_t)((t % 1000) * 1000000);
   } else {
     uint64_t t = sched_get_ticks();
     ts.sec = (int64_t)(t / 1000);
@@ -4011,10 +4017,9 @@ static int64_t k_fork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 // y el spawn de ash para ahorrar la copia de memoria en el caso
 // "fork + execve inmediato".
 //
-// Aquí lo implementamos como fork(). El hijo tendrá su propia copia
-// del espacio, lo cual es correcto y algo más lento pero sin efectos
-// observables para el patrón fork+execve: el hijo llama a execve
-// justo después y descarta su copia.
+// Aquí lo implementamos como fork(), que ahora es copy-on-write: no se copia
+// memoria hasta que alguien escribe, así que el patrón fork+execve cuesta casi
+// lo mismo que un vfork real (solo se clonan las tablas de páginas).
 //
 // La diferencia real (padre bloqueado hasta execve) la omitimos por
 // ahora: busybox `time` espera con wait4 inmediatamente después, así
@@ -6396,8 +6401,11 @@ static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
   case LINUX_REBOOT_CMD_POWER_OFF:
     power_request(POWER_ACTION_OFF, "reboot(2)");
   case LINUX_REBOOT_CMD_CAD_ON:
+    power_cad_set(1); // Ctrl-Alt-Supr reinicia directamente
+    return 0;
   case LINUX_REBOOT_CMD_CAD_OFF:
-    return 0; // Ctrl-Alt-Del no esta enlazado todavia
+    power_cad_set(0); // Ctrl-Alt-Supr manda SIGINT a init
+    return 0;
   default:
     return -EINVAL;
   }
@@ -7040,6 +7048,87 @@ static int64_t a_win_register_console(uint64_t win_id, uint64_t a2, uint64_t a3,
     return -EFAULT;
   return winsrv_register_console(proc->task, (int)win_id);
 }
+static int64_t a_theme_get(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  return (int64_t)(((uint64_t)theme_generation() << 1) |
+                   (uint64_t)theme_is_light());
+}
+
+static int64_t a_sysinfo(uint64_t uptr, uint64_t a2, uint64_t a3, uint64_t a4,
+                         uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  static aurora_sysinfo_t si; // ~1 KB: fuera de la pila del kernel
+  memset(&si, 0, sizeof(si));
+  int n = smp_online_cpus();
+  if (n < 1)
+    n = 1;
+  if (n > AURORA_SYSINFO_MAX_CPUS)
+    n = AURORA_SYSINFO_MAX_CPUS;
+  si.ncpu = (uint32_t)n;
+  for (int i = 0; i < n; i++) {
+    si.cpu_busy[i] = sched_cpu_busy_ticks(i);
+    si.cpu_idle[i] = sched_cpu_idle_ticks(i);
+  }
+  si.mem_total_kb = pmm_total_usable_pages() * (PAGE_SIZE / 1024);
+  si.mem_free_kb = pmm_free_pages_count() * (PAGE_SIZE / 1024);
+  si.uptime_ms = sched_get_ticks();
+  if (copy_to_user((void *)uptr, &si, sizeof(si)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+typedef struct {
+  aurora_procinfo_t *out;
+  int max;
+  int n;
+} proclist_ctx_t;
+
+static int proclist_cb(process_t *p, void *arg) {
+  proclist_ctx_t *c = (proclist_ctx_t *)arg;
+  if (c->n >= c->max)
+    return 1;
+  aurora_procinfo_t *e = &c->out[c->n++];
+  memset(e, 0, sizeof(*e));
+  e->pid = p->pid;
+  e->ppid = p->ppid;
+  if (p->is_zombie)
+    e->state = 'Z';
+  else if (p->stopped)
+    e->state = 'T';
+  else if (p->task && p->task->state == TASK_BLOCKED)
+    e->state = 'S';
+  else
+    e->state = 'R';
+  strncpy(e->name, p->name, sizeof(e->name) - 1);
+  e->cpu_ticks = p->cpu_ticks_user;
+  uint64_t vs = 0;
+  for (vma_t *v = p->vma_list; v; v = v->next)
+    vs += v->end - v->start;
+  e->vsize_kb = vs / 1024;
+  return 0;
+}
+
+#define PROCLIST_MAX 256
+static int64_t a_proclist(uint64_t uptr, uint64_t max, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  if (max > PROCLIST_MAX)
+    max = PROCLIST_MAX;
+  aurora_procinfo_t *buf =
+      (aurora_procinfo_t *)kmalloc(sizeof(aurora_procinfo_t) * PROCLIST_MAX);
+  if (!buf)
+    return -ENOMEM;
+  proclist_ctx_t c = {buf, (int)max, 0};
+  process_for_each(proclist_cb, &c);
+  int64_t rc = c.n;
+  if (c.n > 0 &&
+      copy_to_user((void *)uptr, buf, sizeof(aurora_procinfo_t) * c.n) < 0)
+    rc = -EFAULT;
+  kfree(buf);
+  return rc;
+}
+
 static int64_t a_win_set_icon(uint64_t win_id, uint64_t path, uint64_t a3,
                               uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -7551,6 +7640,9 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_WIN_REGISTER_CONSOLE -
         ASYS_BASE] = {a_win_register_console, "asys_win_register_console"},
     [ASYS_WIN_SET_ICON - ASYS_BASE] = {a_win_set_icon, "asys_win_set_icon"},
+    [ASYS_THEME_GET - ASYS_BASE] = {a_theme_get, "asys_theme_get"},
+    [ASYS_SYSINFO - ASYS_BASE] = {a_sysinfo, "asys_sysinfo"},
+    [ASYS_PROCLIST - ASYS_BASE] = {a_proclist, "asys_proclist"},
     [ASYS_WIN_SET_RAW_INPUT -
         ASYS_BASE] = {a_win_set_raw_input, "asys_win_set_raw_input"},
     [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},
@@ -7601,6 +7693,33 @@ static void strace_path(uint64_t num, uint64_t a1, uint64_t a2, char *out,
   out[n - 1] = 0;
 }
 
+// Volcado de los primeros bytes de un sendmsg/recvmsg trazado: con Wayland son
+// las cabeceras (id de objeto, tam<<16|opcode) de los primeros mensajes.
+static void strace_msg_dump(const char *what, uint64_t msg, int64_t ret) {
+  static int budget = 600;
+  if (budget <= 0 || ret <= 0 || !msg || msg >= USER_LIMIT)
+    return;
+  uint64_t hdr[7];
+  if (copy_from_user(hdr, (const void *)msg, sizeof(hdr)) < 0)
+    return;
+  uint64_t iov = hdr[2], iovlen = hdr[3];
+  if (!iovlen || !iov || iov >= USER_LIMIT)
+    return;
+  uint64_t ent[2];
+  if (copy_from_user(ent, (const void *)iov, sizeof(ent)) < 0 || !ent[0] || ent[0] >= USER_LIMIT)
+    return;
+  uint32_t w[12] = {0};
+  size_t n = ent[1] < sizeof(w) ? ent[1] : sizeof(w);
+  if ((int64_t)n > ret)
+    n = (size_t)ret;
+  if (copy_from_user(w, (const void *)ent[0], n) < 0)
+    return;
+  budget--;
+  LOG_INFO("[STRACE-MSG] %s ret=%ld iov=%lu ctl=%lu: %x %x %x %x %x %x %x %x", what, (long)ret,
+           (unsigned long)iovlen, (unsigned long)hdr[5], w[0], w[1], w[2], w[3], w[4], w[5],
+           w[6], w[7]);
+}
+
 uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t num = regs->rax;
   uint64_t arg1 = regs->rdi;
@@ -7647,6 +7766,8 @@ uint64_t syscall_handler_c(registers_t *regs) {
 
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
 
+  if (tracing && (num == 46 || num == 47))
+    strace_msg_dump(num == 46 ? "sendmsg" : "recvmsg", arg2, (int64_t)ret);
   if (tracing)
     LOG_INFO("[STRACE] %s(%lu) a=%lx,%lx,%lx '%s' -> %ld", linux_table[num < (uint64_t)LINUX_TABLE_N ? num : 0].name ? linux_table[num < (uint64_t)LINUX_TABLE_N ? num : 0].name : "?", (unsigned long)num, (unsigned long)arg1, (unsigned long)arg2, (unsigned long)arg3, tr_path, (long)ret);
 

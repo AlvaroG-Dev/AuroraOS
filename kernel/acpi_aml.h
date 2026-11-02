@@ -99,6 +99,29 @@ void aml_dump_namespace(void); // debug
 // no lo liberes.
 aml_object_t *aml_eval(const char *path);
 
+// Igual que aml_eval, pero pasa `nargs` argumentos enteros (Arg0..) al
+// metodo (p. ej. \_PTS(5)). Si el nodo no es un metodo devuelve su valor.
+aml_object_t *aml_eval_int_args(const char *path, const uint64_t *args,
+                                int nargs);
+// Registra en el log los dispositivos de boton/EC/tapa y los metodos de GPE
+// del espacio de nombres (diagnostico del boton de encendido).
+void aml_diag_power(void);
+// Controlador embebido (PNP0C09): puertos de datos/comandos (de _CRS, o
+// 0x62/0x66 si no se pueden leer) y el mapa de consultas _Qxx cuyo cuerpo
+// hace Notify(<PNP0C0C>, 0x80), es decir, las que son el boton de encendido.
+typedef struct {
+  int found;
+  uint16_t data_port, cmd_port;
+  int crs_ok;            // puertos leidos de _CRS
+  int nq;                // numero de metodos _Qxx
+  uint8_t power_q[32];   // bitmap de consultas que notifican al boton
+  int power_q_count;
+} aml_ec_info_t;
+int aml_find_ec(aml_ec_info_t *out);
+
+// 1 si `path` existe y es un metodo.
+int aml_method_exists(const char *path);
+
 // Helpers
 uint64_t aml_to_integer(aml_object_t *obj);
 const char *aml_to_string(aml_object_t *obj);

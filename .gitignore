@@ -72,4 +72,10 @@ kernel/.deps-stamp
 
 # Imagenes y salidas de las pruebas ext2
 build/ext2-*/
-build/mbr_part2.hex
+# Artefactos generados (NVIDIA N1/N2)
+/build/nvidia/
+/build/nvidia-kpi/
+/build/nvidia-smoke/
+/build/drive-aurora.conf
+/build/mbr_part2.hex
+drivers/kur/nvprobe/nvprobe.kur

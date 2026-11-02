@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "paging.h"
+#include "power.h"
 #include "sched.h"
 #include "serial.h"
 #include "slab.h"
@@ -216,6 +217,7 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
   }
   in_panic = 1;
   __asm__ volatile("cli");
+  serial_set_enabled(1); // un panic siempre sale por serie (el coste ya no importa)
   {
     extern void boot_console_panic_screen(void);
     boot_console_panic_screen();
@@ -292,6 +294,8 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
 
   serial_puts("\n=======================================================\n");
   serial_puts("System Halted.\n");
+
+  power_panic_restart(); // panic=N en la cmdline; si no, sigue y para
 
   while (1) {
     __asm__ volatile("cli; hlt");

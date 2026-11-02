@@ -753,4 +753,6 @@ __printf(3, 4) void lkpi_dev_printk(const char *level, const struct device *dev,
 static inline void device_link_remove(void *consumer, struct device *supplier) {}
 /* Sin IOMMU hasta L9 */
 static inline bool device_iommu_mapped(struct device *dev) { return false; }
+/* dev_printk_emit (syslog estructurado): aqui un dev_printk plano (N2). */
+#define dev_printk_emit(lvl, dev, fmt, ...) ({ lkpi_dev_printk("", dev, fmt, ##__VA_ARGS__); (int)0; })
 #endif

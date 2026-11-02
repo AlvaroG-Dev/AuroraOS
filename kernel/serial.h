@@ -22,6 +22,10 @@
 
 void serial_init(void);
 
+// Activa/desactiva la salida al UART (el espejo plog sigue). Por defecto solo
+// activa en VM; ver serial.c. cmdline `serial=on|off` lo fuerza.
+void serial_set_enabled(int on);
+
 // API pública (cada llamada coge el lock internamente)
 void serial_putc(char c);
 void serial_puts(const char *str);
