@@ -39,6 +39,8 @@ typedef struct usb_hid_dev {
   int32_t mouse_abs_x;
   int32_t mouse_abs_y;
   uint8_t mouse_abs_valid; // bit 0 = X, bit 1 = Y
+  uint8_t mouse_btn_last;  // botones del último evento emitido
+  uint8_t mouse_btn_valid;
 
   // Modificadores (uno por bit; usage 0xE0..0xE7 de la page 0x07).
   uint8_t mod_lctrl, mod_lshift, mod_lalt, mod_lgui;
@@ -487,8 +489,14 @@ static void usb_hid_process_mouse_full(usb_hid_dev_t *h, const uint8_t *data,
   if (dy < -32768)
     dy = -32768;
 
-  usb_hid_emit(h, buttons, (int16_t)dx, (int16_t)dy);
+  // Muchos receptores 2.4G mandan informes sin cambios a ritmo fijo: no
+  // despertar al compositor por un informe que no mueve nada ni cambia botones.
   memcpy(h->prev_data, data, len < 64 ? len : 64);
+  if (dx == 0 && dy == 0 && h->mouse_btn_valid && buttons == h->mouse_btn_last)
+    return;
+  h->mouse_btn_last = buttons;
+  h->mouse_btn_valid = 1;
+  usb_hid_emit(h, buttons, (int16_t)dx, (int16_t)dy);
 }
 
 // ===========================================================================
@@ -599,41 +607,86 @@ static void usb_hid_device_kthread(void) {
            d->use_report_protocol ? "Report Protocol" : "Boot Protocol",
            d->report_len);
 
-  uint8_t buf[64];
+  uint8_t buf[256];
   int err_count = 0;
+  // Diagnóstico: informes recibidos por ventana de 2 s (el log sirve para ver
+  // si el ratón llega al ritmo esperado y cuántos informes son sin movimiento).
+  uint64_t diag_t0 = sched_get_ticks();
+  uint32_t diag_n = 0, diag_zero = 0, diag_err = 0, diag_calls = 0;
 
   while (1) {
     int actual = 0;
     int len = d->report_len;
-    if (len <= 0 || len > (int)sizeof(buf))
+    if (len <= 0 || len > 64)
       len = 8;
     // Pedir al menos wMaxPacketSize: informes más largos que el buffer
     // provocan Babble y halt del endpoint en el xHC.
     if (d->in_ep && len < (int)d->in_ep->max_packet)
       len = (int)d->in_ep->max_packet;
-    if (len > (int)sizeof(buf))
-      len = (int)sizeof(buf);
+    if (len > 64)
+      len = 64;
 
-    int rc =
-        d->dev->hcd->interrupt_xfer(d->dev, d->in_ep, buf, len, 0, &actual);
+    // Si el informe cabe en un paquete se piden hasta 8 a la vez, uno cada
+    // `stride` bytes: con carga (compositor, Xwayland) el hilo de xhci.aur y
+    // éste tardan varios ms en volver a turnarse y un informe por viaje no
+    // da abasto con un ratón a 1 kHz.
+    int stride = len, batch = 1;
+    if (d->in_ep && d->in_ep->max_packet && len == (int)d->in_ep->max_packet) {
+      batch = (int)sizeof(buf) / stride;
+      if (batch > 8)
+        batch = 8;
+    }
+
+    int rc = d->dev->hcd->interrupt_xfer(d->dev, d->in_ep, buf, stride * batch,
+                                         0, &actual);
     if (rc == 0 && actual > 0) {
       err_count = 0;
-      if (d->kind == HID_KIND_KEYBOARD) {
-        if (d->use_report_protocol)
-          usb_hid_process_kbd_full(d, buf, actual);
-        else
-          usb_hid_process_kbd_boot(d, buf, actual);
-      } else if (d->kind == HID_KIND_MOUSE) {
-        if (d->use_report_protocol)
-          usb_hid_process_mouse_full(d, buf, actual);
-        else
-          usb_hid_process_mouse_boot(d, buf, actual);
+      diag_calls++;
+      int nrep = 1, rlen = actual;
+      if (batch > 1 && actual > stride) {
+        nrep = (actual + stride - 1) / stride;
+        rlen = stride;
+      }
+      for (int r = 0; r < nrep; r++) {
+        const uint8_t *rp = buf + (size_t)r * stride;
+        int n = (nrep > 1 && (r + 1) * stride > actual) ? actual - r * stride
+                                                         : rlen;
+        diag_n++;
+        if (d->kind == HID_KIND_MOUSE) {
+          int nz = 0;
+          for (int i = 1; i < n; i++)
+            nz |= rp[i];
+          if (!nz)
+            diag_zero++;
+        }
+        if (d->kind == HID_KIND_KEYBOARD) {
+          if (d->use_report_protocol)
+            usb_hid_process_kbd_full(d, rp, n);
+          else
+            usb_hid_process_kbd_boot(d, rp, n);
+        } else if (d->kind == HID_KIND_MOUSE) {
+          if (d->use_report_protocol)
+            usb_hid_process_mouse_full(d, rp, n);
+          else
+            usb_hid_process_mouse_boot(d, rp, n);
+        }
       }
     } else if (rc < 0) {
+      diag_err++;
       if (++err_count == 1 || (err_count & 0x3F) == 0)
         LOG_WARN("[HID] %s: transfer rc=%d", d->name, rc);
       for (int i = 0; i < 50; i++)
         sched_yield();
+    }
+    uint64_t dn = sched_get_ticks();
+    if (dn - diag_t0 >= 2000) {
+      if (diag_n || diag_err)
+        LOG_DEBUG("[HID] %s: %u informes en %u viajes/%u ms (%u sin datos en "
+                  "bytes 1+), %u errores",
+                  d->name, diag_n, diag_calls, (unsigned)(dn - diag_t0),
+                  diag_zero, diag_err);
+      diag_t0 = dn;
+      diag_n = diag_zero = diag_err = diag_calls = 0;
     }
   }
 }
@@ -778,19 +831,10 @@ int usb_hid_probe(usb_device_t *dev) {
       kfree(h);
       continue;
     }
-    /* Ratón relativo: segundo hilo sobre el mismo endpoint. Con una sola
-     * petición en vuelo el endpoint queda sin TD mientras el hilo despierta
-     * y reenvía; el receptor 2.4G descarta los informes de ese hueco y el
-     * cursor recorre poco. Con dos, xhci.aur encola el siguiente TD en
-     * cuanto completa el anterior. Los deltas se suman, el orden da igual. */
-    if (h->kind == HID_KIND_MOUSE) {
-      int rel = !h->use_report_protocol;
-      for (int i = 0; h->use_report_protocol && i < h->report.num_fields; i++)
-        if (h->report.fields[i].is_relative)
-          rel = 1;
-      if (rel)
-        (void)usb_hid_spawn_kthread(h);
-    }
+    /* Un solo hilo por endpoint: xhci.aur mantiene el anillo armado y guarda
+     * los informes en un FIFO (stream), así que no hace falta una segunda
+     * petición en vuelo; con dos hilos los informes se procesaban fuera de
+     * orden (botones) y se duplicaban los despertares. */
     probed++;
   }
   return probed;
