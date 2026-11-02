@@ -423,6 +423,17 @@ Estimación gruesa (una persona + asistente, sin contar `Plan_Ext2`): G0–G2 �
 - **Actualización 2026-11-02:** `fork` con COW hecho en la rama `claude/project-thread-cxw685` (sin fusionar): fork de 192 MB de ~5 s a ~130 ms en QEMU; el bloqueo "fork sin COW" queda resuelto.
 - **Aún no probado en AuroraOS:** ejecutar estos binarios en QEMU. Bloqueos para el siguiente paso: ISO/QEMU funcionando con la rama de ext2 fusionada (disco de trabajo con symlinks), `fork` sin COW (medir), y mmap `MAP_SHARED` escribible (E3).
 
+### Avance 3 (2026-11-02): primera ejecución dentro de AuroraOS (QEMU, `tests/gcc/run_hello_test.sh`)
+
+main fusionado (fork COW, ext2 E0-E4, usuarios). Imagen ext2 de 768 MB con el toolchain de Ubuntu montada en `/data`.
+
+- **OK:** hello en C y C++ del cross (dinámicos) se ejecutan; ven `__aurora__`.
+- **OK:** el gcc nativo de Ubuntu ejecuta la cadena completa cc1 → as → collect2 → ld y produce un ejecutable estático (`gcc -static`, rc=0).
+- **Bug de kernel 1 (corregido):** `execve` truncaba en silencio argv a 16 entradas y envp a 64 de 256 B (gcc→cc1/ld llegaban cortados: "missing filename after -o"). Ahora pool de heap de 256 KiB, hasta 256 argumentos y 256 variables, `E2BIG` si se supera (`kernel/syscall.c`, `process.h`). Los caminos `spawn` mantienen sus límites antiguos.
+- **Bug de kernel 2 (abierto):** un binario **estático** de glibc (hecho con el cross) acaba en `Segmentation fault` al arrancar; los dinámicos van bien. Sospecha: arranque de glibc estática (TLS/IRELATIVE/auxv).
+- **Cuello de botella 3 (abierto): lectura de ext2 muy lenta.** Leer `cc1` (~30 MB) tarda ~41 s (≈0,7 MB/s) y cada compilación 1–2 min de reloj con CPU casi nula: una E/S por bloque de 4 KiB, sin lectura anticipada. Un bootstrap de GCC no es viable así; hace falta readahead/E/S multibloque en el driver ext2 y/o en AHCI.
+- La prueba dinámica nativa (`gcc hello.c`) se probará cuando la lectura sea razonable; ya está preparada con el runtime de la ISO en el sysroot de `/data`.
+
 ## 12. Primeros pasos concretos (si Alvaro dice "adelante")
 
 1. G0.1–G0.4 (limpiar cabeceras de `/usr/include`, subir límites, tests de smoke).

@@ -15,13 +15,16 @@
 #define WUNTRACED 2
 #define WCONTINUED 8
 
-#define PROCESS_ARGV_MAX 16
+// [Plan_GCC] 16 argumentos truncaban en silencio las lineas de cc1/ld/collect2.
+#define PROCESS_ARGV_MAX 256
+// Tope del conjunto argv+envp copiado en execve (Linux: ARG_MAX >= 128 KiB).
+#define PROCESS_ARGENV_POOL (256 * 1024)
 // Longitud maxima de cada argumento de execve/spawn (p. ej. el "sh -c <orden>"
 // que usa Xwayland para lanzar xkbcomp tiene ~250 bytes).
-#define PROCESS_ARG_STR_MAX 1024
+#define PROCESS_ARG_STR_MAX 4096
 
-#define PROCESS_ENVP_MAX 64 /* init ya pasa 32 variables; hace falta holgura + NULL */
-#define PROCESS_ENV_STR_MAX 256
+#define PROCESS_ENVP_MAX 256 /* make/configure heredan entornos grandes; +NULL */
+#define PROCESS_ENV_STR_MAX 4096
 
 #define NGROUPS_MAX 32
 

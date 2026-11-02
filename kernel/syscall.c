@@ -59,8 +59,11 @@
 #define EISCONN 106
 #endif
 
-#define SPAWN_ARGS_MAX PROCESS_ARGV_MAX
-#define SPAWN_ARG_STR_MAX PROCESS_ARG_STR_MAX
+// spawn: limites fijos pequeños (buffers planos); execve usa un pool (PROCESS_ARGENV_POOL).
+#define SPAWN_ARGS_MAX 16
+#define SPAWN_ARG_STR_MAX 1024
+#define SPAWN_ENVP_MAX 64
+#define SPAWN_ENV_STR_MAX 256
 
 extern void syscall_entry(void);
 
@@ -4486,24 +4489,25 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   process_set_exe_path(proc, path); // ← NUEVO
   LOG_INFO("[EXECVE] pid=%u path=%s", proc->pid, path);
 
-  // Buffers en heap: 16*128 + 32*256 = 10 KB no caben cómodos en el
-  // stack de kernel sin disparar -Wframe-larger-than.
-  enum {
-    ARGV_BYTES = PROCESS_ARGV_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
-  };
-  char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
+  // [Plan_GCC] argv/envp en un pool compacto de heap (antes: 16 argumentos
+  // fijos de 1 KiB y 64 variables de 256 B, truncados EN SILENCIO: gcc llama a
+  // cc1/as/ld con decenas de argumentos y llegaban cortados). Limites: hasta
+  // PROCESS_ARGV_MAX/PROCESS_ENVP_MAX entradas y PROCESS_ARGENV_POOL bytes en
+  // total (E2BIG si se superan, como Linux).
+  size_t ptr_bytes = (size_t)(PROCESS_ARGV_MAX + PROCESS_ENVP_MAX) * sizeof(char *);
+  char *buf = (char *)kmalloc(ptr_bytes + PROCESS_ARGENV_POOL);
   if (!buf) {
     ret = -ENOMEM;
     goto out;
   }
-  char *argv_storage = buf;
-  char *env_storage = buf + ARGV_BYTES;
+  const char **kargv = (const char **)buf;
+  const char **kenvp = kargv + PROCESS_ARGV_MAX;
+  char *pool = buf + ptr_bytes;
+  size_t pool_used = 0;
 
-  const char *kargv[PROCESS_ARGV_MAX];
   int argc = 0;
   if (argv_ptr) {
-    for (int i = 0; i < PROCESS_ARGV_MAX; i++) {
+    for (int i = 0;; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(argv_ptr + (uint64_t)i * 8)) <
           0) {
@@ -4513,27 +4517,35 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&argv_storage[i * SPAWN_ARG_STR_MAX],
-                                 (const char *)uptr, SPAWN_ARG_STR_MAX);
+      if (i >= PROCESS_ARGV_MAX) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      size_t room = PROCESS_ARGENV_POOL - pool_used;
+      if (room > PROCESS_ARG_STR_MAX)
+        room = PROCESS_ARG_STR_MAX;
+      long m = room ? strncpy_from_user(&pool[pool_used], (const char *)uptr, room)
+                    : (long)room;
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
         goto out;
       }
-      if (m >= SPAWN_ARG_STR_MAX) { // antes se truncaba en silencio (128 B)
+      if ((size_t)m >= room) { // sin sitio (o cadena demasiado larga)
         kfree(buf);
         ret = -E2BIG;
         goto out;
       }
-      kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
+      kargv[i] = &pool[pool_used];
+      pool_used += (size_t)m + 1;
       argc++;
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0;; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -4543,14 +4555,28 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      if (i >= PROCESS_ENVP_MAX - 1) { // deja hueco al NULL de process_set_envp
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      size_t room = PROCESS_ARGENV_POOL - pool_used;
+      if (room > PROCESS_ENV_STR_MAX)
+        room = PROCESS_ENV_STR_MAX;
+      long m = room ? strncpy_from_user(&pool[pool_used], (const char *)uptr, room)
+                    : (long)room;
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
         goto out;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      if ((size_t)m >= room) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      kenvp[i] = &pool[pool_used];
+      pool_used += (size_t)m + 1;
       envc++;
     }
   }
@@ -6980,7 +7006,7 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
 
   enum {
     ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+    ENVP_BYTES = SPAWN_ENVP_MAX * SPAWN_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
   if (!buf)
@@ -7019,10 +7045,10 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
+  const char *kenvp[SPAWN_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0; i < SPAWN_ENVP_MAX; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -7031,13 +7057,13 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      long m = strncpy_from_user(&env_storage[i * SPAWN_ENV_STR_MAX],
+                                 (const char *)uptr, SPAWN_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
         return -EFAULT;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      kenvp[i] = &env_storage[i * SPAWN_ENV_STR_MAX];
       envc++;
     }
   }
@@ -7083,7 +7109,7 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
 
   enum {
     ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+    ENVP_BYTES = SPAWN_ENVP_MAX * SPAWN_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
   if (!buf)
@@ -7122,10 +7148,10 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
+  const char *kenvp[SPAWN_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0; i < SPAWN_ENVP_MAX; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -7134,13 +7160,13 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      long m = strncpy_from_user(&env_storage[i * SPAWN_ENV_STR_MAX],
+                                 (const char *)uptr, SPAWN_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
         return -EFAULT;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      kenvp[i] = &env_storage[i * SPAWN_ENV_STR_MAX];
       envc++;
     }
   }
