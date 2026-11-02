@@ -128,6 +128,7 @@ typedef struct ext2_ino {
   uint64_t size;
   uint32_t goal; // último bloque asignado (localidad)
   int live;      // tenía enlaces al cargarse: puede evictarse
+  int orphan;    // está en la lista de huérfanos del superbloque
   ext2_pg_t *pages; // páginas mapeadas con MAP_SHARED
 } ext2_ino_t;
 
@@ -146,6 +147,8 @@ typedef struct {
   int rw;         // montado para escritura
   int rev1;
   int disk_clean; // el superbloque en disco lleva VALID_FS
+  int mnt_pending; // al primer sb_store: s_mnt_count++ y s_mtime
+  uint32_t counts_fixed; // grupos cuyos contadores corrigió ext2_check()
   uint32_t s_state;
   uint32_t gen;   // sube con cada cambio de directorio (invalida cursores)
   uint32_t itable_blocks, bad_groups;
@@ -409,6 +412,11 @@ static int ext2_sb_store(ext2_fs_t *fs, uint16_t state) {
   sb.s_free_inodes_count = fs->free_inodes;
   sb.s_state = state;
   sb.s_wtime = ext2_now();
+  if (fs->mnt_pending) {
+    fs->mnt_pending = 0;
+    sb.s_mnt_count++;
+    sb.s_mtime = sb.s_wtime;
+  }
   if (sb.s_rev_level == 1)
     sb.s_feature_ro_compat = fs->ro_compat;
   memcpy(d + off, &sb, sizeof(sb));
@@ -988,11 +996,77 @@ out:
   ip->di.i_file_acl = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Lista de huérfanos en disco (s_last_orphan, rev 1): inodos ya sin enlaces
+// pero aún abiertos. Si cae la luz, e2fsck los libera; en el kernel el FS
+// sucio se monta solo lectura, así que la lista solo la usa el host.
+// i_dtime del inodo guarda el siguiente de la cadena.
+// ---------------------------------------------------------------------------
+#define EXT2_SB_LAST_ORPHAN 232
+
+static ext2_ino_t *ext2_iget(ext2_fs_t *fs, uint32_t ino);
+static void ext2_iput(ext2_fs_t *fs, ext2_ino_t *ip);
+
+static int ext2_sb_rd32(ext2_fs_t *fs, uint32_t off, uint32_t *v) {
+  uint32_t pos = 1024 + off;
+  bc_buf_t *b = bc_get(fs->bdev, pos / fs->bs, fs->bs);
+  if (!b)
+    return -EIO;
+  memcpy(v, (uint8_t *)bc_data(b) + pos % fs->bs, 4);
+  bc_put(b);
+  return 0;
+}
+static int ext2_sb_wr32(ext2_fs_t *fs, uint32_t off, uint32_t v) {
+  uint32_t pos = 1024 + off;
+  bc_buf_t *b = bc_get(fs->bdev, pos / fs->bs, fs->bs);
+  if (!b)
+    return -EIO;
+  memcpy((uint8_t *)bc_data(b) + pos % fs->bs, &v, 4);
+  bc_mark_dirty(b);
+  bc_put(b);
+  return 0;
+}
+
+static void ext2_orphan_add(ext2_fs_t *fs, ext2_ino_t *ip) {
+  uint32_t head;
+  if (!fs->rev1 || ip->orphan || ext2_sb_rd32(fs, EXT2_SB_LAST_ORPHAN, &head) != 0)
+    return;
+  ip->di.i_dtime = head; // siguiente
+  ext2_ip_flush(fs, ip); // primero el inodo, luego la cabeza
+  if (ext2_sb_wr32(fs, EXT2_SB_LAST_ORPHAN, ip->ino) == 0)
+    ip->orphan = 1;
+}
+
+static void ext2_orphan_del(ext2_fs_t *fs, ext2_ino_t *ip) {
+  uint32_t head;
+  if (!ip->orphan || ext2_sb_rd32(fs, EXT2_SB_LAST_ORPHAN, &head) != 0)
+    return;
+  if (head == ip->ino) {
+    ext2_sb_wr32(fs, EXT2_SB_LAST_ORPHAN, ip->di.i_dtime);
+  } else {
+    for (uint32_t n = head, steps = 0; n && steps < fs->inodes_count; steps++) {
+      ext2_ino_t *p = ext2_iget(fs, n);
+      if (!p)
+        break;
+      if (p->di.i_dtime == ip->ino) {
+        p->di.i_dtime = ip->di.i_dtime;
+        ext2_ip_flush(fs, p);
+        ext2_iput(fs, p);
+        break;
+      }
+      n = p->di.i_dtime;
+      ext2_iput(fs, p);
+    }
+  }
+  ip->orphan = 0;
+}
+
 // El último nodo soltó un inodo sin enlaces: liberar bloques e inodo.
 static void ext2_evict(ext2_fs_t *fs, ext2_ino_t *ip) {
   if (ext2_begin_write(fs) != 0)
     return;
   int is_dir = (ip->di.i_mode & S_IFMT) == S_IFDIR;
+  ext2_orphan_del(fs, ip);
   ext2_trunc_blocks(fs, ip, 0);
   ext2_free_xattr(fs, ip);
   ip->di.i_dtime = ext2_now();
@@ -2075,6 +2149,8 @@ static int ext2_unlink_op(vfs_node_t *dvn, const char *name) {
   if (cip->di.i_links_count == 0)
     cip->di.i_dtime = ext2_now();
   ext2_ip_flush(fs, cip);
+  if (cip->di.i_links_count == 0 && cip->refs > 1)
+    ext2_orphan_add(fs, cip); // sigue abierto: a la lista de huérfanos
   ext2_iput(fs, cip); // si era el último, se libera aquí
 out:
   mutex_unlock(&fs->lock);
@@ -2340,6 +2416,8 @@ static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
     if (dip->di.i_links_count == 0)
       dip->di.i_dtime = ext2_now();
     ext2_ip_flush(fs, dip);
+    if (dip->di.i_links_count == 0 && dip->refs > 1)
+      ext2_orphan_add(fs, dip);
   }
   rc = ext2_dir_add(fs, dp, dname, dl, sino, ft);
   if (rc != 0)
@@ -2445,6 +2523,77 @@ static vfs_ops_t ext2_node_ops = {
 // ---------------------------------------------------------------------------
 // Montaje
 // ---------------------------------------------------------------------------
+// Comprobación ligera al montar: recuenta los bits libres de cada bitmap y los
+// compara con los descriptores de grupo. Si difieren (típico tras un corte),
+// los contadores en RAM se corrigen (statfs y la asignación dejan de
+// fiarse de cifras viejas) y se marcan para escribirse al pasar a rw.
+// Devuelve cuántos grupos discrepaban.
+static uint32_t ext2_count_zero(const uint8_t *m, uint32_t nbits) {
+  uint32_t z = 0, i = 0;
+  for (; i + 8 <= nbits; i += 8) {
+    uint32_t v = m[i / 8];
+    v = v - ((v >> 1) & 0x55);
+    v = (v & 0x33) + ((v >> 2) & 0x33);
+    z += 8 - ((v + (v >> 4)) & 0x0F);
+  }
+  for (; i < nbits; i++)
+    z += !bit_test(m, i);
+  return z;
+}
+
+static uint32_t ext2_check(ext2_fs_t *fs) {
+  uint32_t bad = 0, tb = 0, ti = 0;
+  for (uint32_t g = 0; g < fs->ngroups; g++) {
+    ext2_group_t *gr = &fs->groups[g];
+    if (!gr->block_bitmap || !gr->inode_bitmap) {
+      tb += gr->free_blocks;
+      ti += gr->free_inodes;
+      continue;
+    }
+    int diff = 0;
+    bc_buf_t *b = bc_get(fs->bdev, gr->block_bitmap, fs->bs);
+    if (b) {
+      uint32_t n = ext2_group_nblocks(fs, g);
+      if (n > fs->bs * 8)
+        n = fs->bs * 8;
+      uint32_t z = ext2_count_zero(bc_data(b), n);
+      bc_put(b);
+      if (z != gr->free_blocks) {
+        LOG_WARN("[EXT2] %s: grupo %u: bloques libres %u, bitmap dice %u",
+                 fs->bdev->name, g, gr->free_blocks, z);
+        gr->free_blocks = z;
+        diff = 1;
+      }
+    }
+    b = bc_get(fs->bdev, gr->inode_bitmap, fs->bs);
+    if (b) {
+      uint32_t n = fs->inodes_per_group;
+      if (n > fs->bs * 8)
+        n = fs->bs * 8;
+      uint32_t z = ext2_count_zero(bc_data(b), n);
+      bc_put(b);
+      if (z != gr->free_inodes) {
+        LOG_WARN("[EXT2] %s: grupo %u: inodos libres %u, bitmap dice %u",
+                 fs->bdev->name, g, gr->free_inodes, z);
+        gr->free_inodes = z;
+        diff = 1;
+      }
+    }
+    bad += diff;
+    tb += gr->free_blocks;
+    ti += gr->free_inodes;
+  }
+  if (tb != fs->free_blocks || ti != fs->free_inodes) {
+    if (bad || (fs->s_state & EXT2_STATE_VALID))
+      LOG_WARN("[EXT2] %s: totales del superbloque (%u bloques, %u inodos "
+               "libres) corregidos a %u/%u", fs->bdev->name, fs->free_blocks,
+               fs->free_inodes, tb, ti);
+    fs->free_blocks = tb;
+    fs->free_inodes = ti;
+  }
+  return bad;
+}
+
 int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
   if (!bdev || !fs_priv_out)
     return -EINVAL;
@@ -2621,6 +2770,7 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
   if (bad_groups)
     LOG_WARN("[EXT2] %s: %u grupos con tabla de inodos inválida (ignorados)",
              dn, bad_groups);
+  fs->counts_fixed = ext2_check(fs);
   *fs_priv_out = fs;
   return 0;
 }
@@ -2683,6 +2833,26 @@ static int ext2_flushd(void *arg) {
   return 0;
 }
 
+// Como el ext2 de Linux: avisa si toca revisar el FS (no impide montar).
+static void ext2_mnt_warn(ext2_fs_t *fs) {
+  uint32_t blk = 1024 / fs->bs, off = 1024 % fs->bs;
+  bc_buf_t *b = bc_get(fs->bdev, blk, fs->bs);
+  if (!b)
+    return;
+  ext2_sb_t sb;
+  memcpy(&sb, (uint8_t *)bc_data(b) + off, sizeof(sb));
+  bc_put(b);
+  if (sb.s_max_mnt_count > 0 && (int)sb.s_mnt_count >= sb.s_max_mnt_count)
+    LOG_WARN("[EXT2] %s: %u montajes desde la última comprobación (máx. %d): "
+             "conviene ejecutar e2fsck en el host", fs->bdev->name,
+             sb.s_mnt_count, sb.s_max_mnt_count);
+  uint32_t now = ext2_now();
+  if (sb.s_checkinterval && sb.s_lastcheck &&
+      now > sb.s_lastcheck + sb.s_checkinterval)
+    LOG_WARN("[EXT2] %s: pasó el intervalo de comprobación: conviene ejecutar "
+             "e2fsck en el host", fs->bdev->name);
+}
+
 // Pasa el FS a escribible si es seguro. Con el mutex tomado.
 static int ext2_set_rw_locked(ext2_fs_t *fs) {
   const char *dn = fs->bdev->name;
@@ -2712,8 +2882,10 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
              fs->bad_groups);
     return -EROFS;
   }
+  ext2_mnt_warn(fs);
   fs->rw = 1;
   fs->disk_clean = 1;
+  fs->mnt_pending = 1;
   int rc = ext2_sb_commit(fs, 0); // sucio a disco antes de tocar nada
   if (rc != 0) {
     fs->rw = 0;
@@ -2725,6 +2897,11 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
       g_flushd_started = 0;
       LOG_WARN("[EXT2] sin hilo de volcado periódico (solo en sync/umount)");
     }
+  }
+  if (fs->counts_fixed) { // persistir lo que corrigió ext2_check()
+    for (uint32_t g = 0; g < fs->ngroups; g++)
+      ext2_gd_write(fs, g);
+    fs->counts_fixed = 0;
   }
   LOG_INFO("[EXT2] %s: montado para lectura/escritura", dn);
   return 0;
@@ -2753,6 +2930,39 @@ static int ext2_sync_op(void *fs_priv) {
   return rc;
 }
 
+// Garantiza /lost+found (e2fsck lo necesita para reconectar inodos). Sin el
+// mutex tomado: crea el directorio con la misma ruta que mkdir.
+static void ext2_ensure_lostfound(ext2_fs_t *fs) {
+  static const char name[] = "lost+found";
+  mutex_lock(&fs->lock);
+  ext2_ino_t *root = fs->rw ? ext2_iget(fs, EXT2_ROOT_INO) : NULL;
+  if (!root) {
+    mutex_unlock(&fs->lock);
+    return;
+  }
+  uint32_t tmp;
+  int rc = ext2_dir_find(fs, &root->di, root->size, name, sizeof(name) - 1, &tmp);
+  mutex_unlock(&fs->lock);
+  if (rc == -ENOENT) {
+    vfs_node_t *dn = kzalloc(sizeof(*dn));
+    ext2_node_t *en = kzalloc(sizeof(*en));
+    if (dn && en) {
+      en->fs = fs;
+      en->ino = EXT2_ROOT_INO;
+      en->ip = root;
+      dn->priv = en;
+      rc = ext2_new_inode_op(dn, name, S_IFDIR | 0700, 0, NULL);
+      LOG_INFO("[EXT2] %s: lost+found %s", fs->bdev->name,
+               rc == 0 ? "creado" : "no se pudo crear");
+    }
+    kfree(dn);
+    kfree(en);
+  }
+  mutex_lock(&fs->lock);
+  ext2_iput(fs, root);
+  mutex_unlock(&fs->lock);
+}
+
 int ext2_remount(void *fs_priv, int rw) {
   ext2_fs_t *fs = fs_priv;
   if (!fs)
@@ -2768,8 +2978,11 @@ int ext2_remount(void *fs_priv, int rw) {
   }
   int now_rw = fs->rw;
   mutex_unlock(&fs->lock);
-  if (rc == 0)
+  if (rc == 0) {
     ext2_rw_register(fs, now_rw);
+    if (now_rw)
+      ext2_ensure_lostfound(fs);
+  }
   return rc;
 }
 
