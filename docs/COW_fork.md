@@ -44,7 +44,7 @@ en el mismo camino.
 | | antes | ahora |
 |---|---|---|
 | fork con 192 MB tocados | 5262 ms, 197 MB consumidos | ~130-190 ms, 428 KB |
-| 1500 fork+exit | fuga de ~14 MB en el kernel | ~1,9 MB (heap del kernel) |
+| 1500 fork+exit | fuga de ~14 MB en el kernel | 0 (los ~1,9 MB vistos antes eran la cache del overlay, ver abajo) |
 | 300 fork/vfork+execve | fuga 2,4 MB | 0 |
 
 Tras cada fase la suma de referencias extra vuelve a 0 (comprobado con un contador
@@ -64,6 +64,21 @@ Requiere `kernel/kernel.elf` (`make -C kernel`) y `bootloader/efi/BOOTX64.EFI`
 (`make bootloader-efi`). Con el initrd mínimo fallan las pruebas del kernel que
 necesitan ficheros que no están (linuxkpi .kur, firmware, bibliotecas en tarfs):
 es esperado.
+
+## Falso positivo de "fuga" de ~1,9 MB (2026-11-02)
+
+`tests/cow/run.sh` fallaba de forma intermitente con ~1904 KB "perdidos". No es
+una fuga: es una única `kmalloc` de 1.943.552 B (475 páginas de heap) en
+`overlay_rebuild_cache` (kernel/boot_console.c), la capa cacheada del overlay de
+log del kernel. Se crea en el primer fotograma del compositor con el overlay
+activo (sin disco el arranque lo activa en `main.c`), y ese instante depende de la
+carga de TCG, así que cae en cualquier fase del test (forks, exec o SMP) y solo
+en una por pasada. Con la prueba antigua el umbral de 512 KB (exec) fallaba y el de
+3 MB (forks) lo escondía. Medido con 18 pasadas: sin esa reserva los forks dan 0 KB
+y los exec 0-4 KB. La prueba ahora juzga cada bucle por mitades y toma la menor
+(`no_leak`): una fuga real crece en las dos mitades, la reserva única en una. El
+test SMP repite la ronda dos veces (la primera deja 130-200 KB de caches calientes;
+la segunda 0).
 
 ## Límites conocidos
 
