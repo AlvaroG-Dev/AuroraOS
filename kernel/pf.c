@@ -14,6 +14,7 @@
 #include "string.h"
 #include "swap.h"
 #include "uaccess.h"
+#include "vfs.h"
 #include <stddef.h>
 
 // ---------------------------------------------------------------------------
@@ -1202,6 +1203,13 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     if ((flags & MMAP_MAP_SHARED) && f->node->ops && f->node->ops->get_page) {
       if (offset & 0xFFFULL)
         return -EINVAL;
+      // ext2: MAP_SHARED + PROT_WRITE exige el fichero abierto en O_RDWR y un
+      // montaje escribible (como Linux); si no, EACCES.
+      if ((prot & MMAP_PROT_WRITE) && f->node->fs && f->node->fs->name &&
+          strcmp(f->node->fs->name, "ext2") == 0 &&
+          ((f->flags & 3) != O_RDWR ||
+           (vfs_mount_flags(f->node->name) & VFS_MS_RDONLY)))
+        return -EACCES;
       vma_t *v = vma_create_file(proc, base, base + len, pte_flags, f, offset);
       if (!v)
         return -ENOMEM;

@@ -10,7 +10,9 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char *en(int e) {
@@ -37,12 +39,80 @@ static long nl(const char *p) { struct stat s; return stat(p, &s) ? -1 : (long)s
 static int ex(const char *p) { struct stat s; return lstat(p, &s) == 0; }
 #define V(name, fmt, ...) printf("%s: " fmt "\n", name, __VA_ARGS__)
 
+
+// --mmap <dir>: MAP_SHARED escribible sobre el fichero. Imprime OK/FALLO por paso.
+static int mm_fail;
+#define CHK(name, cond) do { int _c = (cond); printf("mmap %s: %s\n", name, _c ? "OK" : "FALLO"); if (!_c) mm_fail = 1; } while (0)
+static int run_mmap(const char *dir) {
+  mkdir(dir, 0755);
+  char path[300]; snprintf(path, sizeof path, "%s/m1", dir);
+  const size_t SZ = 3 * 4096 + 100;
+  unsigned char *ref = malloc(SZ);
+  for (size_t i = 0; i < SZ; i++) ref[i] = (unsigned char)(i * 7 + 3);
+  int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHK("crear", fd >= 0 && write(fd, ref, SZ) == (ssize_t)SZ);
+  unsigned char *m = mmap(NULL, SZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHK("mmap rw shared", m != MAP_FAILED);
+  if (m == MAP_FAILED) return 1;
+  CHK("lectura inicial", memcmp(m, ref, SZ) == 0);
+  m[10] = 0xAA; ref[10] = 0xAA; m[4096 + 2000] = 0xBB; ref[4096 + 2000] = 0xBB; m[SZ - 1] = 0xCC; ref[SZ - 1] = 0xCC;
+  unsigned char *chk = malloc(SZ);
+  CHK("read() ve la escritura por mmap", pread(fd, chk, SZ, 0) == (ssize_t)SZ && memcmp(chk, ref, SZ) == 0);
+  memset(chk, 0x5A, 300); if (pwrite(fd, chk, 300, 5000) != 300) {} memset(ref + 5000, 0x5A, 300);
+  CHK("mmap ve write()", memcmp(m, ref, SZ) == 0);
+  CHK("msync", msync(m, SZ, MS_SYNC) == 0);
+  // fork: el hijo escribe en la pagina compartida
+  pid_t pid = fork();
+  if (pid == 0) { m[100] = 0xDD; _exit(0); }
+  int st; waitpid(pid, &st, 0); ref[100] = 0xDD;
+  CHK("fork comparte la pagina", m[100] == 0xDD);
+  // truncar hacia abajo y volver a crecer: la cola debe quedar a cero
+  CHK("ftruncate 5000", ftruncate(fd, 5000) == 0);
+  CHK("ftruncate 3*4096+100", ftruncate(fd, SZ) == 0);
+  memset(ref + 5000, 0, SZ - 5000);
+  CHK("cola a cero tras truncar", memcmp(m, ref, SZ) == 0);
+  m[SZ - 2] = 0xEE; ref[SZ - 2] = 0xEE;
+  CHK("munmap", munmap(m, SZ) == 0);
+  CHK("read tras munmap", pread(fd, chk, SZ, 0) == (ssize_t)SZ && memcmp(chk, ref, SZ) == 0);
+  close(fd);
+  // hueco: fichero disperso, escribir una pagina del medio
+  snprintf(path, sizeof path, "%s/m2", dir);
+  fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  CHK("ftruncate sparse", ftruncate(fd, 10 * 4096) == 0);
+  unsigned char *h = mmap(NULL, 10 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHK("mmap sparse", h != MAP_FAILED);
+  CHK("hueco lee ceros", h[3 * 4096] == 0 && h[9 * 4096 + 5] == 0);
+  memset(h + 4 * 4096, 0x77, 4096); h[9 * 4096 + 4095] = 0x42;
+  // sin msync ni munmap: el cierre/flush debe bastar
+  close(fd);
+  fd = open(path, O_RDONLY);
+  unsigned char b4 = 0, b9 = 0; if (pread(fd, &b4, 1, 4 * 4096 + 17) < 0) {} if (pread(fd, &b9, 1, 9 * 4096 + 4095) < 0) {}
+  CHK("pagina de hueco visible por read()", b4 == 0x77 && b9 == 0x42);
+  close(fd);
+  // permisos: abrir en solo lectura y pedir PROT_WRITE|MAP_SHARED -> EACCES
+  fd = open(path, O_RDONLY);
+  errno = 0; void *bad = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHK("O_RDONLY + PROT_WRITE -> EACCES", bad == MAP_FAILED && errno == EACCES);
+  void *ro = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+  CHK("O_RDONLY + PROT_READ shared ok", ro != MAP_FAILED);
+  close(fd);
+  // mapeo que se queda abierto al terminar (la prueba cierra y sale sin munmap)
+  snprintf(path, sizeof path, "%s/m3", dir);
+  fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  if (ftruncate(fd, 8192)) {}
+  unsigned char *k = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (k != MAP_FAILED) { memset(k, 0x31, 8192); }
+  printf("mmap fin (m3 queda mapeado)\n"); fflush(stdout);
+  return mm_fail;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) return 2;
   if (!strcmp(argv[1], "--remount") && argc == 4) { // <punto> <flags MS_*>
     errno = 0; int r = mount(NULL, argv[2], NULL, MS_REMOUNT | strtoul(argv[3], 0, 0), NULL);
     printf("remount %s flags=%s: %s\n", argv[2], argv[3], r ? en(errno) : "ok"); fflush(stdout); _exit(r != 0);
   }
+  if (!strcmp(argv[1], "--mmap") && argc == 3) { int r = run_mmap(argv[2]); fflush(stdout); _exit(r); }
   if (!strcmp(argv[1], "--open") && argc == 3) {
     errno = 0; int fd = open(argv[2], O_RDONLY); printf("open %s: %s\n", argv[2], fd < 0 ? en(errno) : "ok"); fflush(stdout); _exit(fd < 0);
   }

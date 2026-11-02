@@ -47,6 +47,7 @@
 #define SYS_SELECT 23
 #define SYS_SCHED_YIELD 24
 #define SYS_MREMAP 25
+#define SYS_MSYNC 26
 #define SYS_MADVISE 28
 #define SYS_DUP 32
 #define SYS_DUP2 33

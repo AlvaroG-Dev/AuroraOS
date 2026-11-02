@@ -1158,6 +1158,34 @@ static int64_t k_madvise(uint64_t addr, uint64_t len, uint64_t advice,
   return sys_madvise(proc, addr, len, advice);
 }
 
+// msync(addr, len, flags): vuelca los ficheros respaldados por MAP_SHARED que
+// toquen [addr, addr+len). Siempre síncrono (MS_ASYNC/MS_SYNC dan igual).
+static int64_t k_msync(uint64_t addr, uint64_t len, uint64_t flags, uint64_t a4,
+                       uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((addr & 0xFFF) || (flags & ~7ULL))
+    return -EINVAL;
+  uint64_t end = addr + len;
+  if (end < addr)
+    return -ENOMEM;
+  int rc = 0;
+  for (vma_t *v = proc->vma_list; v; v = v->next) {
+    if (v->end <= addr || v->start >= end)
+      continue;
+    if (v->type == VMA_SHARED && v->file_fd && v->file_fd->node &&
+        v->file_fd->node->ops && v->file_fd->node->ops->fsync) {
+      int r = v->file_fd->node->ops->fsync(v->file_fd->node);
+      if (r != 0)
+        rc = r;
+    }
+  }
+  return rc;
+}
+
 static int64_t k_brk(uint64_t addr, uint64_t a2, uint64_t a3, uint64_t a4,
                      uint64_t a5) {
   (void)a2;
@@ -7411,6 +7439,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_MMAP] = {k_mmap, "mmap"},
     [SYS_MREMAP] = {k_mremap, "mremap"},
     [SYS_MPROTECT] = {k_mprotect, "mprotect"},
+    [SYS_MSYNC] = {k_msync, "msync"},
     [SYS_MADVISE] = {k_madvise, "madvise"},
     [SYS_FSTATFS] = {k_fstatfs, "fstatfs"},
     [SYS_STATFS] = {k_statfs, "statfs"},

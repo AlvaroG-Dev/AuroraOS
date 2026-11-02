@@ -20,6 +20,8 @@
 #include "completion.h"
 #include "kthread.h"
 #include "mutex.h"
+#include "paging.h"
+#include "pmm.h"
 #include "process.h"
 #include "rtc.h"
 #include "string.h"
@@ -109,6 +111,12 @@ typedef struct {
   uint32_t free_blocks, free_inodes, used_dirs;
 } ext2_group_t;
 
+typedef struct ext2_pg {
+  struct ext2_pg *next;
+  uint64_t pgoff; // página de 4 KiB dentro del fichero
+  uint64_t phys;
+} ext2_pg_t;
+
 // Inodo en memoria, compartido por todos los nodos VFS abiertos sobre él.
 // Toda modificación se escribe en la bcache (write_inode) al terminar la
 // operación, así que la bcache es siempre la verdad.
@@ -120,6 +128,7 @@ typedef struct ext2_ino {
   uint64_t size;
   uint32_t goal; // último bloque asignado (localidad)
   int live;      // tenía enlaces al cargarse: puede evictarse
+  ext2_pg_t *pages; // páginas mapeadas con MAP_SHARED
 } ext2_ino_t;
 
 typedef struct {
@@ -1016,9 +1025,139 @@ static ext2_ino_t *ext2_iget(ext2_fs_t *fs, uint32_t ino) {
   return ip;
 }
 
+// ---------------------------------------------------------------------------
+// mmap(MAP_SHARED): páginas de 4 KiB compartidas con los procesos
+// ---------------------------------------------------------------------------
+// Solo existen páginas de los trozos que alguien mapeó. La página es la copia
+// que ven los procesos; la bcache sigue siendo la verdad para read()/write().
+// Coherencia: write() actualiza la página; read(), fsync, sync, umount, el
+// cierre del último nodo y el hilo de volcado hacen "página -> bcache" cuando
+// difieren (no hay forma barata de saber si un proceso escribió, así que se
+// compara). Un mapeo no puede alargar el fichero (más allá del final = SIGBUS).
+#define EXT2_PG 4096u
+
+static ext2_pg_t *ext2_pg_find(ext2_ino_t *ip, uint64_t pgoff) {
+  for (ext2_pg_t *p = ip->pages; p; p = p->next)
+    if (p->pgoff == pgoff)
+      return p;
+  return NULL;
+}
+
+// Copia a la bcache lo que los procesos hayan cambiado en la página.
+static int ext2_pg_push(ext2_fs_t *fs, ext2_ino_t *ip, ext2_pg_t *pg) {
+  uint8_t *mem = phys_to_virt(pg->phys);
+  uint64_t base = pg->pgoff * EXT2_PG;
+  if (base >= ip->size)
+    return 0;
+  int changed = 0, rc = 0;
+  for (uint32_t off = 0; off < EXT2_PG; off += fs->bs) {
+    uint64_t pos = base + off;
+    if (pos >= ip->size)
+      break;
+    uint32_t n = fs->bs;
+    if (pos + n > ip->size)
+      n = (uint32_t)(ip->size - pos);
+    uint32_t pblk;
+    rc = ext2_bmap(fs, &ip->di, pos / fs->bs, &pblk);
+    if (rc != 0)
+      break;
+    if (pblk == 0) { // hueco: solo si el proceso escribió algo distinto de ceros
+      int zero = 1;
+      for (uint32_t i = 0; i < n && zero; i++)
+        if (mem[off + i])
+          zero = 0;
+      if (zero)
+        continue;
+      rc = ext2_begin_write(fs);
+      if (rc == 0)
+        rc = ext2_bmap_create(fs, ip, pos / fs->bs, 1, &pblk);
+      if (rc != 0) {
+        LOG_WARN("[EXT2] %s: sin espacio para volcar una página mmap (ino %u)",
+                 fs->bdev->name, ip->ino);
+        break;
+      }
+      changed = 1;
+    }
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b) {
+      rc = -EIO;
+      break;
+    }
+    uint8_t *d = bc_data(b);
+    if (memcmp(d, mem + off, n) != 0) {
+      rc = ext2_begin_write(fs); // solo si hay algo que escribir
+      if (rc != 0) {
+        bc_put(b);
+        break;
+      }
+      memcpy(d, mem + off, n);
+      bc_mark_dirty(b);
+      changed = 1;
+    }
+    bc_put(b);
+  }
+  if (changed) {
+    ip->di.i_mtime = ip->di.i_ctime = ext2_now();
+    int frc = ext2_ip_flush(fs, ip);
+    if (rc == 0)
+      rc = frc;
+  }
+  return rc;
+}
+
+// Vuelca todas las páginas mapeadas de un inodo. Con fs->lock tomado.
+static int ext2_pg_sync_ino(ext2_fs_t *fs, ext2_ino_t *ip) {
+  if (!ip->pages || !fs->rw || ip->di.i_links_count == 0)
+    return 0;
+  int rc = 0;
+  for (ext2_pg_t *p = ip->pages; p; p = p->next) {
+    int r = ext2_pg_push(fs, ip, p);
+    if (r != 0)
+      rc = r;
+  }
+  return rc;
+}
+
+static void ext2_pg_sync_all(ext2_fs_t *fs) {
+  for (ext2_ino_t *ip = fs->icache; ip; ip = ip->next)
+    if (ip->pages)
+      ext2_pg_sync_ino(fs, ip);
+}
+
+// write()/truncate sobre un rango: las páginas mapeadas ven lo nuevo.
+static void ext2_pg_pull(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t off,
+                         uint64_t len) {
+  for (ext2_pg_t *p = ip->pages; p; p = p->next) {
+    uint64_t base = p->pgoff * EXT2_PG;
+    if (base >= off + len || base + EXT2_PG <= off)
+      continue;
+    uint64_t lo = off > base ? off : base;
+    uint64_t hi = off + len < base + EXT2_PG ? off + len : base + EXT2_PG;
+    uint8_t *dst = (uint8_t *)phys_to_virt(p->phys) + (lo - base);
+    uint64_t valid = ip->size > lo ? (ip->size < hi ? ip->size : hi) - lo : 0;
+    if (valid)
+      ext2_read_data(fs, &ip->di, ip->size, lo, (size_t)valid, dst);
+    if (valid < hi - lo) // más allá del final: ceros
+      memset(dst + valid, 0, (size_t)(hi - lo - valid));
+  }
+}
+
+static void ext2_pg_free_all(ext2_ino_t *ip) {
+  while (ip->pages) {
+    ext2_pg_t *p = ip->pages;
+    ip->pages = p->next;
+    pmm_free_page(p->phys);
+    kfree(p);
+  }
+}
+
 static void ext2_iput(ext2_fs_t *fs, ext2_ino_t *ip) {
   if (!ip || --ip->refs > 0)
     return;
+  if (ip->pages) { // último nodo: nadie mapea ya estas páginas
+    ext2_pg_sync_ino(fs, ip);
+    ext2_pg_free_all(ip);
+  }
   if (ip->live && ip->di.i_links_count == 0 && ip->ino != EXT2_ROOT_INO &&
       fs->rw)
     ext2_evict(fs, ip);
@@ -1350,8 +1489,11 @@ static int64_t ext2_node_read(vfs_node_t *node, uint64_t offset, size_t size,
   int64_t rc;
   if ((en->ip->di.i_mode & S_IFMT) == S_IFDIR)
     rc = -EISDIR;
-  else
+  else {
+    if (en->ip->pages && fs->rw) // lo escrito por mmap debe verse en read()
+      ext2_pg_sync_ino(fs, en->ip);
     rc = ext2_read_data(fs, &en->ip->di, en->ip->size, offset, size, buf);
+  }
   mutex_unlock(&fs->lock);
   return rc;
 }
@@ -1606,6 +1748,8 @@ static int64_t ext2_node_write(vfs_node_t *node, uint64_t offset, size_t size,
     int frc = ext2_ip_flush(fs, ip);
     if (frc != 0 && rc == 0)
       rc = frc;
+    if (ip->pages)
+      ext2_pg_pull(fs, ip, offset, (uint64_t)done);
     ext2_refresh_vnode(node, ip);
   }
   // Si los bloques cambiaron pero no se escribió nada (ENOSPC a medias):
@@ -1640,6 +1784,8 @@ static int ext2_node_truncate(vfs_node_t *node, uint64_t new_size) {
     rc = -EFBIG;
     goto out;
   }
+  if (ip->pages)
+    ext2_pg_sync_ino(fs, ip); // antes de cambiar el tamaño
   if (new_size < ip->size) {
     ext2_trunc_blocks(fs, ip, (new_size + fs->bs - 1) / fs->bs);
     uint32_t tail = (uint32_t)(new_size % fs->bs);
@@ -1658,6 +1804,8 @@ static int ext2_node_truncate(vfs_node_t *node, uint64_t new_size) {
   ext2_set_size(fs, ip, new_size);
   ip->di.i_mtime = ip->di.i_ctime = ext2_now();
   rc = ext2_ip_flush(fs, ip);
+  if (ip->pages)
+    ext2_pg_pull(fs, ip, new_size, 1ULL << 40); // todo lo que queda más allá: ceros
   ext2_refresh_vnode(node, ip);
 out:
   mutex_unlock(&fs->lock);
@@ -1997,7 +2145,51 @@ static int ext2_fsync_op(vfs_node_t *node) {
   ext2_node_t *en = node ? node->priv : NULL;
   if (!en)
     return -EINVAL;
+  mutex_lock(&en->fs->lock);
+  ext2_pg_sync_ino(en->fs, en->ip); // cambios hechos a través de mmap
+  mutex_unlock(&en->fs->lock);
   return bc_sync_dev(en->fs->bdev) == 0 ? 0 : -EIO;
+}
+
+// mmap(MAP_SHARED): página `pgoff` (4 KiB) del fichero. Más allá del final
+// -> -EFAULT (el proceso recibe SIGBUS). La página vive mientras el inodo.
+static int ext2_get_page_op(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en || !phys_out)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  ext2_ino_t *ip = en->ip;
+  if (EXT2_PG % fs->bs)
+    return -ENODEV;
+  mutex_lock(&fs->lock);
+  int rc = 0;
+  if ((ip->di.i_mode & S_IFMT) != S_IFREG) {
+    rc = -ENODEV;
+  } else if (pgoff * EXT2_PG >= ip->size) {
+    rc = -EFAULT;
+  } else {
+    ext2_pg_t *pg = ext2_pg_find(ip, pgoff);
+    if (!pg) {
+      pg = kzalloc(sizeof(*pg));
+      uint64_t ph = pg ? pmm_alloc_page() : 0;
+      if (!pg || !ph) {
+        kfree(pg);
+        rc = -ENOMEM;
+      } else {
+        uint8_t *mem = phys_to_virt(ph);
+        memset(mem, 0, EXT2_PG);
+        ext2_read_data(fs, &ip->di, ip->size, pgoff * EXT2_PG, EXT2_PG, mem);
+        pg->pgoff = pgoff;
+        pg->phys = ph;
+        pg->next = ip->pages;
+        ip->pages = pg;
+      }
+    }
+    if (rc == 0)
+      *phys_out = pg->phys;
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
 }
 
 // ---------------------------------------------------------------------------
@@ -2247,6 +2439,7 @@ static vfs_ops_t ext2_node_ops = {
     .chmod = ext2_chmod_op,
     .chown = ext2_chown_op,
     .fsync = ext2_fsync_op,
+    .get_page = ext2_get_page_op,
 };
 
 // ---------------------------------------------------------------------------
@@ -2478,8 +2671,10 @@ static int ext2_flushd(void *arg) {
       if (!fs)
         continue;
       mutex_lock(&fs->lock);
-      if (fs->rw)
+      if (fs->rw) {
+        ext2_pg_sync_all(fs);
         ext2_commit_frees(fs);
+      }
       mutex_unlock(&fs->lock);
     }
     mutex_unlock(&g_rw_lock);
@@ -2539,6 +2734,7 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
 static int ext2_flush_clean_locked(ext2_fs_t *fs) {
   if (!fs->rw)
     return bc_sync_dev(fs->bdev) == 0 ? 0 : -EIO;
+  ext2_pg_sync_all(fs); // páginas mmap
   ext2_commit_frees(fs); // liberaciones diferidas (con su barrera)
   int rc = bc_sync_dev(fs->bdev); // datos y metadatos primero
   if (rc != 0)
