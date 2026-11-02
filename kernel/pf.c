@@ -526,6 +526,12 @@ static int handle_page_fault_inner(registers_t *regs) {
         }
       }
       // Página presente + cualquier fallo = violación de permisos.
+      {
+        struct process *dp = process_current();
+        LOG_WARN("[PF] violacion de permisos: PID=%u rip=%p cr2=%p err=0x%lx",
+                 dp ? dp->pid : 0, (void *)regs->rip, (void *)cr2,
+                 (unsigned long)err);
+      }
       signal_deliver_from_exception(SIGSEGV, regs);
       pf_resolved++;
       return 1;

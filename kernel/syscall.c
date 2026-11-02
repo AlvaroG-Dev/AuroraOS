@@ -4608,6 +4608,15 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   }
   regs->rip = new_entry;
   regs->rsp = new_rsp;
+  // [Plan_GCC] Como en Linux (start_thread), el programa nuevo arranca con los
+  // registros a cero. Antes conservaba los del execve: rdx = envp del padre
+  // (un puntero a su heap). El ABI x86-64 dice que rdx en _start es el
+  // "rtld_fini" que debe registrarse con atexit; un binario ESTATICO de glibc
+  // lo llamaba al salir (rip = puntero al heap, NX) y moria con SIGSEGV tras
+  // imprimir. Los dinamicos no lo notaban: ld.so pone su propio rdx.
+  regs->r15 = regs->r14 = regs->r13 = regs->r12 = regs->r11 = regs->r10 = 0;
+  regs->r9 = regs->r8 = regs->rdi = regs->rsi = regs->rbp = regs->rbx = 0;
+  regs->rdx = regs->rcx = 0;
   LOG_INFO("[EXECVE-IRET] pid=%u rip=%p rsp=%p", proc->pid, (void *)regs->rip,
            (void *)regs->rsp);
 
