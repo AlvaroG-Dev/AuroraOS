@@ -321,4 +321,4 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 
 ### N5b paso 3: cubo Vulkan (aw_vkcube)
 Cliente `tests/wayland/aw_vkcube.c` (shaders GLSL en `tests/wayland/shaders/`, SPIR-V incluido como cabecera): render pass color+profundidad D32, pipeline grafica, vertex buffer de 36 vertices, push constant con la MVP, swapchain FIFO. Imprime FPS cada 2 s y la media final.
-Prueba: `vkcube.sh [segundos] [fps_max]` con el escritorio abierto. Esperado: cubo de colores girando y `ALL PASS: N cuadros ... fps medios`. Resultado: pendiente de Alvaro.
+Prueba: `vkcube.sh [segundos] [fps_max]` con el escritorio abierto. Esperado: cubo de colores girando y `ALL PASS: N cuadros ... fps medios`. Resultado (Alvaro, 2026-11-02, RTX 4060, ventana 480x360): ALL PASS, 693 cuadros en 15 s; ~55 fps estables tras un arranque lento (6.9 fps en los primeros 2 s, compilacion de shaders/pipeline), sin errores en el log.
