@@ -20,6 +20,10 @@ int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw);
 // FS limpio. 0 o -errno (-EROFS si no se puede escribir).
 int ext2_remount(void *fs_priv, int rw);
 
+// Etiqueta del volumen (s_volume_name, hasta 16 caracteres + NUL) de un
+// dispositivo con ext2. 0 o -errno.
+int ext2_read_label(block_device_t *bdev, char out[17]);
+
 // Variante en dos pasos (la usa mount(2)): ext2_mount valida y devuelve el
 // estado; ext2_get_vfs_ops() es el vfs_fs_ops_t para vfs_mount.
 int ext2_mount(block_device_t *bdev, void **fs_priv_out);

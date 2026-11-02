@@ -488,6 +488,9 @@ iso_root: $(EFI_IMG) $(BOOTX64_EFI) $(BIOS_IMG)
 
 # ---------------------------------------------------------------------------
 USB_DATA_MB ?= 64
+# Sistema de ficheros de la particion de datos (AURORADATA): fat32 (por defecto)
+# o ext2 (rw si se desmontó limpio; uid/gid/modos reales). Ver docs/Plan_Ext2.md.
+USB_DATA_FS ?= fat32
 
 # aurora.iso: ISO híbrida (BIOS + UEFI) para CD y USB.
 # ---------------------------------------------------------------------------
@@ -540,17 +543,26 @@ $(ISO_OUT): iso_root
 	@# Particion 2 (FAT32 "AURORADATA") al final de la imagen: al volcar la ISO
 	@# a un USB el kernel la monta en /data y ahi escribe el log en vivo
 	@# (cmdline klog.file=/data/aurora.log). USB_DATA_MB=0 la desactiva.
+	@# USB_DATA_FS=ext2 formatea esa particion como ext2 (tipo MBR 0x83).
 	@if [ "$(USB_DATA_MB)" != "0" ]; then \
-	 echo "[ISO] Anadiendo particion de datos FAT32 ($(USB_DATA_MB) MB) para el log..."; \
+	 echo "[ISO] Anadiendo particion de datos $(USB_DATA_FS) ($(USB_DATA_MB) MB) para el log..."; \
 	 iso_sz=$$(stat -c%s $(ISO_OUT)); \
 	 start_mb=$$(( (iso_sz + 1048575) / 1048576 )); \
 	 truncate -s $$((start_mb * 1048576)) $(ISO_OUT); \
 	 rm -f build/usbdata.img; \
 	 dd if=/dev/zero of=build/usbdata.img bs=1M count=$(USB_DATA_MB) status=none; \
-	 mkfs.fat -F 32 -n AURORADATA build/usbdata.img >/dev/null; \
+	 if [ "$(USB_DATA_FS)" = "ext2" ]; then \
+	   export PATH="$$PATH:/sbin:/usr/sbin"; \
+	   command -v mke2fs >/dev/null || { echo "[ISO] ERROR: USB_DATA_FS=ext2 necesita mke2fs (paquete e2fsprogs)"; exit 1; }; \
+	   mke2fs -q -F -t ext2 -b 4096 -L AURORADATA -m 0 -O ^resize_inode -E root_owner=0:0 build/usbdata.img || exit 1; \
+	   ptype=83; \
+	 else \
+	   mkfs.fat -F 32 -n AURORADATA build/usbdata.img >/dev/null; \
+	   ptype=0c; \
+	 fi; \
 	 cat build/usbdata.img >> $(ISO_OUT); \
 	 start_lba=$$((start_mb * 2048)); n_sec=$$(( $(USB_DATA_MB) * 2048 )); \
-	 printf "00 fe ff ff 0c fe ff ff" > build/mbr_part2.hex; \
+	 printf "00 fe ff ff $$ptype fe ff ff" > build/mbr_part2.hex; \
 	 printf " %02x%02x%02x%02x" $$((start_lba & 255)) $$(((start_lba >> 8) & 255)) $$(((start_lba >> 16) & 255)) $$(((start_lba >> 24) & 255)) >> build/mbr_part2.hex; \
 	 printf " %02x%02x%02x%02x\n" $$((n_sec & 255)) $$(((n_sec >> 8) & 255)) $$(((n_sec >> 16) & 255)) $$(((n_sec >> 24) & 255)) >> build/mbr_part2.hex; \
 	 xxd -r -p build/mbr_part2.hex build/mbr_part2.bin; \

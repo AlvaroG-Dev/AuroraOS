@@ -2807,6 +2807,29 @@ static vfs_fs_ops_t ext2_fs_ops = {
 
 vfs_fs_ops_t *ext2_get_vfs_ops(void) { return &ext2_fs_ops; }
 
+int ext2_read_label(block_device_t *bdev, char out[17]) {
+  if (!bdev || !out || bdev->sector_size == 0 || bdev->sector_size > EXT2_MAX_BS)
+    return -EINVAL;
+  uint32_t ss = bdev->sector_size, first = 1024 / ss;
+  uint32_t nsec = (1024 + ss - 1) / ss;
+  uint8_t *raw = kmalloc((size_t)(nsec ? nsec : 1) * ss);
+  if (!raw)
+    return -ENOMEM;
+  int rc = bdev_read(bdev, first, nsec ? nsec : 1, raw) == 0 ? 0 : -EIO;
+  if (rc == 0) {
+    ext2_sb_t sb;
+    memcpy(&sb, raw + (1024 - (size_t)first * ss), sizeof(sb));
+    if (sb.s_magic != EXT2_MAGIC)
+      rc = -EINVAL;
+    else {
+      memcpy(out, sb.s_volume_name, 16);
+      out[16] = '\0';
+    }
+  }
+  kfree(raw);
+  return rc;
+}
+
 int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {
   if (!bdev_name || !mount_path)
     return -EINVAL;
