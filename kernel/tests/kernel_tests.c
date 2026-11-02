@@ -1283,22 +1283,35 @@ REGISTER_TEST("smp: cpu_local_data[0] inicializado",
               test_smp_cpu_local_data_exists);
 
 static void test_smp_this_cpu_macro(void) {
+  // El tick del temporizador incrementa/pone a cero ticks_since_resched de
+  // esta CPU: con interrupciones activas, la IRQ puede caer entre la
+  // escritura y la lectura (bajo carga fallaba de forma intermitente).
+  // Se prueba con las interrupciones desactivadas.
+  unsigned long fl;
+  __asm__ volatile("pushfq; popq %0; cli" : "=r"(fl)::"memory");
   int cpu = smp_processor_id();
   uint64_t saved = this_cpu(ticks_since_resched);
   this_cpu(ticks_since_resched) = 0xDEADBEEF;
-  TEST_ASSERT(cpu_local_data[cpu].ticks_since_resched == 0xDEADBEEF,
+  uint64_t got = cpu_local_data[cpu].ticks_since_resched;
+  this_cpu(ticks_since_resched) = saved;
+  if (fl & (1UL << 9))
+    __asm__ volatile("sti" ::: "memory");
+  TEST_ASSERT(got == 0xDEADBEEF,
               "this_cpu(ticks_since_resched) no escribió en cpu_local_data[%d]",
               cpu);
-  this_cpu(ticks_since_resched) = saved;
 }
 REGISTER_TEST("smp: this_cpu() accede al CPU actual", test_smp_this_cpu_macro);
 
 static void test_smp_per_cpu_macro(void) {
-  per_cpu(ticks_since_resched, 3) = 0xCAFEBABE;
+  // Slot que no es de ninguna CPU real (el tick de CPU 3 tocaba el campo
+  // a la vez en máquinas con >= 4 CPU).
+  const int slot = MAX_CPUS - 1;
+  per_cpu(ticks_since_resched, slot) = 0xCAFEBABE;
   TEST_ASSERT(
-      cpu_local_data[3].ticks_since_resched == 0xCAFEBABE,
-      "per_cpu(ticks_since_resched, 3) no escribió en cpu_local_data[3]");
-  per_cpu(ticks_since_resched, 3) = 0;
+      cpu_local_data[slot].ticks_since_resched == 0xCAFEBABE,
+      "per_cpu(ticks_since_resched, %d) no escribió en cpu_local_data[%d]",
+      slot, slot);
+  per_cpu(ticks_since_resched, slot) = 0;
 }
 REGISTER_TEST("smp: per_cpu() accede al slot correcto", test_smp_per_cpu_macro);
 
