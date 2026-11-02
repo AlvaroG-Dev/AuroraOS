@@ -40,7 +40,7 @@ NATIVE_ALL = hello calc filetest ipctest pftest waitpid_stress \
 CORE_APPS := $(foreach a,$(NATIVE_ALL),$(if $(wildcard apps/$a/main.c),$a))
 CORE_APPS := $(filter-out shell,$(CORE_APPS))
 
-STANDALONE_APPS = syscall_linux_test
+STANDALONE_APPS = syscall_linux_test cred_test meta_test
 SPECIAL_APPS = elf_rotest
 
 APPS = $(CORE_APPS) $(STANDALONE_APPS) $(SPECIAL_APPS)
@@ -77,6 +77,18 @@ $(CORE_APPS): %: apps/%/main.c $(LIB_OBJS)
 shell: apps/shell/main.c $(SHELL_LIBS)
 	$(CC) $(CFLAGS) -c $< -o $@.o
 	$(LD) -o $@ $(SHELL_LIBS) $@.o $(LDFLAGS)
+	@mkdir -p $(SYSDIR)
+	cp $@ $(SYSDIR)/
+
+meta_test: apps/meta_test/main.c
+	$(CC) $(CFLAGS) -c $< -o $@.o
+	$(LD) -o $@ $@.o $(LDFLAGS) -static
+	@mkdir -p $(SYSDIR)
+	cp $@ $(SYSDIR)/
+
+cred_test: apps/cred_test/main.c
+	$(CC) $(CFLAGS) -c $< -o $@.o
+	$(LD) -o $@ $@.o $(LDFLAGS) -static
 	@mkdir -p $(SYSDIR)
 	cp $@ $(SYSDIR)/
 

@@ -361,6 +361,11 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	fi
 
 # ---------------------------------------------------------------------------
+# Herramientas de cuentas (login, su, passwd, useradd, sudo) sobre glibc.
+# ---------------------------------------------------------------------------
+	@scripts/build-users.sh
+
+# ---------------------------------------------------------------------------
 # Git HTTP(S) transport helper. Sus dependencias del host NO pisan lo que ya
 # puso libs/glibc (libc.so.6, libm...): una libc del host de otra version junto
 # al ld.so de libs/glibc rompe todos los programas dinamicos.

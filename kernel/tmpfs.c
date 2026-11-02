@@ -23,6 +23,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
+#include "process.h"
 #include "rtc.h"
 #include "string.h"
 #include "uaccess.h"
@@ -109,6 +110,16 @@ static void free_node_locked(tmpfs_fs_t *fs, tmpfs_node_t *n) {
     n->data = NULL;
   }
   kfree(n);
+}
+
+// [U1] Propietario de lo que crea el proceso actual: fsuid/fsgid (Linux).
+static inline uint32_t creator_uid(void) {
+  process_t *p = process_current();
+  return p ? p->fsuid : 0;
+}
+static inline uint32_t creator_gid(void) {
+  process_t *p = process_current();
+  return p ? p->fsgid : 0;
 }
 
 static vfs_node_t *wrap_locked(tmpfs_node_t *n) {
@@ -335,8 +346,8 @@ static int tmpfs_create_op(vfs_node_t *dir_vn, const char *name,
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFREG | (mode & 07777);
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -398,8 +409,8 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFDIR | (mode & 07777);
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -409,6 +420,64 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
   link_child_locked(dir, n);
   dir->mtime = n->mtime;
 
+  mutex_unlock(&fs->lock);
+  return 0;
+}
+
+// link(2): tmpfs no comparte nodos entre nombres, asi que el enlace duro de un
+// fichero regular se emula con una COPIA (nlink=1, sin identidad compartida).
+// Basta para el patron habitual link(tmp, lock) + unlink(tmp) (locks de X11).
+static int tmpfs_link_op(vfs_node_t *dir_vn, const char *name,
+                         vfs_node_t *target) {
+  tmpfs_node_t *dir = (tmpfs_node_t *)dir_vn->priv;
+  tmpfs_node_t *src = target ? (tmpfs_node_t *)target->priv : NULL;
+  if (!dir || !dir->fs || !src || src->fs != dir->fs)
+    return -EXDEV;
+  if ((dir->mode & S_IFMT) != S_IFDIR)
+    return -ENOTDIR;
+  if ((src->mode & S_IFMT) != S_IFREG)
+    return -EPERM;
+  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+    return -EINVAL;
+  tmpfs_fs_t *fs = dir->fs;
+  mutex_lock(&fs->lock);
+  if (lookup_child_locked(dir, name)) {
+    mutex_unlock(&fs->lock);
+    return -EEXIST;
+  }
+  if (src->capacity && fs->used_bytes + src->capacity > fs->max_bytes) {
+    mutex_unlock(&fs->lock);
+    return -ENOSPC;
+  }
+  tmpfs_node_t *n = (tmpfs_node_t *)kzalloc(sizeof(*n));
+  if (!n) {
+    mutex_unlock(&fs->lock);
+    return -ENOMEM;
+  }
+  if (src->capacity) {
+    n->data = (uint8_t *)kmalloc(src->capacity);
+    if (!n->data) {
+      kfree(n);
+      mutex_unlock(&fs->lock);
+      return -ENOMEM;
+    }
+    memcpy(n->data, src->data, src->size);
+    n->capacity = src->capacity;
+    fs->used_bytes += src->capacity;
+  }
+  size_t l = strlen(name);
+  memcpy(n->name, name, l);
+  n->name[l] = '\0';
+  n->mode = src->mode;
+  n->uid = src->uid;
+  n->gid = src->gid;
+  n->size = src->size;
+  n->mtime = rtc_get_epoch();
+  n->inode = fs->next_inode++;
+  n->nlink = 1;
+  n->fs = fs;
+  link_child_locked(dir, n);
+  dir->mtime = n->mtime;
   mutex_unlock(&fs->lock);
   return 0;
 }
@@ -552,8 +621,8 @@ static int tmpfs_symlink_op(vfs_node_t *dir_vn, const char *name,
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFLNK | 0777;
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -674,6 +743,7 @@ static vfs_ops_t tmpfs_dir_ops = {
     .mknod = tmpfs_mknod_op,
     .mkdir = tmpfs_mkdir_op,
     .unlink = tmpfs_unlink_op,
+    .link = tmpfs_link_op,
     .rename = tmpfs_rename_op,
     .symlink = tmpfs_symlink_op,
     .readdir = tmpfs_readdir_op,
@@ -764,6 +834,12 @@ struct vfs_fs_ops *tmpfs_get_vfs_ops(void) {
 // ---------------------------------------------------------------------------
 // API publica
 // ---------------------------------------------------------------------------
+void tmpfs_set_root_mode(void *fsp, uint32_t mode) {
+  tmpfs_fs_t *fs = (tmpfs_fs_t *)fsp;
+  if (fs && fs->root)
+    fs->root->mode = S_IFDIR | (mode & 07777);
+}
+
 void *tmpfs_new(size_t max_bytes) {
   tmpfs_fs_t *fs = (tmpfs_fs_t *)kzalloc(sizeof(*fs));
   if (!fs)
@@ -909,6 +985,10 @@ typedef struct {
 static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n", NULL, 0},
     {"/etc/group", "root:x:0:\n", NULL, 0},
+    {"/etc/shadow", "root:*:19000:0:99999:7:::\n", NULL, 0},
+    {"/etc/shells", "/bin/sh\n/bin/bash\n", NULL, 0},
+    {"/etc/sudo-nopasswd", "# sudo sin contrasena para wheel (LiveUSB)\n", NULL, 0},
+    {"/etc/skel/.profile", "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n", NULL, 0},
     {"/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n", NULL, 0},
     {"/etc/resolv.conf", "", NULL, 0},
     {"/etc/profile", "# /etc/profile\n", NULL, 0},
@@ -923,6 +1003,99 @@ static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/ssl/certs/ca-certificates.crt", NULL, NULL, 0},
 };
 #define N_ETC_SEEDS (sizeof(g_etc_seeds) / sizeof(g_etc_seeds[0]))
+
+// ---------------------------------------------------------------------------
+// [U2.3] /etc persistente: passwd, group y shadow viven en /data/etc cuando
+// /data está montado. /etc es un tmpfs sembrado en cada arranque, así que:
+//   - al montarse /data: si existen en /data/etc se copian a /etc; si no,
+//     se crean allí a partir de lo que haya en /etc (primera vez);
+//   - en sync(2)/apagado (etc_persist_flush): si /etc/X difiere de
+//     /data/etc/X se reescribe en /data/etc.
+// ---------------------------------------------------------------------------
+static const char *const k_etc_acct[] = {"passwd", "group", "shadow"};
+#define N_ETC_ACCT 3
+
+static int etc_write_file(const char *path, const char *data, size_t len,
+                          uint32_t mode) {
+  int rc = vfs_create(path, mode);
+  if (rc != 0 && rc != -EEXIST)
+    return rc;
+  vfs_node_t *n = vfs_lookup(path);
+  if (!n)
+    return -ENOENT;
+  if (!n->ops || !n->ops->write) {
+    vfs_node_free(n);
+    return -EINVAL;
+  }
+  rc = 0;
+  if (n->ops->truncate)
+    rc = n->ops->truncate(n, 0);
+  if (rc == 0 && len && n->ops->write(n, 0, len, data) != (int64_t)len)
+    rc = -EIO;
+  if (rc == 0 && n->ops->chmod && (n->mode & 07777) != mode) {
+    if (n->ops->chmod(n, mode) == 0)
+      n->mode = (n->mode & S_IFMT) | mode;
+  }
+  vfs_node_free(n);
+  return rc;
+}
+
+static uint32_t etc_acct_mode(int i) { return i == 2 ? 0600 : 0644; }
+
+// Ejecuta con fsuid/fsgid = 0 (el que llama a sync() puede no ser root).
+static void etc_persist_run(int on_mount) {
+  vfs_node_t *dd = vfs_lookup("/data");
+  if (!dd)
+    return;
+  vfs_node_free(dd);
+
+  process_t *p = process_current();
+  uint32_t su = 0, sg = 0;
+  if (p) {
+    su = p->fsuid;
+    sg = p->fsgid;
+    p->fsuid = 0;
+    p->fsgid = 0;
+  }
+  int rc = vfs_mkdir("/data/etc", 0755);
+  if (rc == 0 || rc == -EEXIST) {
+    for (int i = 0; i < N_ETC_ACCT; i++) {
+      char pe[48], pd[48];
+      size_t ne = 0, nd = 0;
+      pe[0] = pd[0] = '\0';
+      strcpy(pe, "/etc/");
+      strcpy(pe + 5, k_etc_acct[i]);
+      strcpy(pd, "/data/etc/");
+      strcpy(pd + 10, k_etc_acct[i]);
+      char *be = tmpfs_read_file(pe, &ne);
+      char *bd = tmpfs_read_file(pd, &nd);
+      if (on_mount && bd) {
+        // /data manda: cargar en /etc.
+        etc_write_file(pe, bd, nd, etc_acct_mode(i));
+      } else if (be && (!bd || nd != ne || memcmp(bd, be, ne) != 0)) {
+        // /etc cambió (o primera vez): guardar en /data.
+        int wr = etc_write_file(pd, be, ne, etc_acct_mode(i));
+        if (wr != 0)
+          LOG_WARN("[ETC] no se pudo guardar %s (rc=%d)", pd, wr);
+      }
+      if (be)
+        kfree(be);
+      if (bd)
+        kfree(bd);
+    }
+  }
+  if (p) {
+    p->fsuid = su;
+    p->fsgid = sg;
+  }
+}
+
+void etc_persist_on_data_mount(void) {
+  etc_persist_run(1);
+  LOG_INFO("[ETC] passwd/group/shadow sincronizados con /data/etc");
+}
+
+void etc_persist_flush(void) { etc_persist_run(0); }
 
 // ---------------------------------------------------------------------------
 // tmpfs_init: monta /etc, /tmp, /var, /run, /dev/shm y pre-popula /etc.
@@ -963,6 +1136,7 @@ void tmpfs_init(void) {
       // tmpfs_create no crea directorios padre. Los seeds anidados
       // (hoy solo /etc/ssl/certs/ca-certificates.crt) necesitan que
       // su cadena de padres exista antes del loop.
+      vfs_mkdir("/etc/skel", 0755);
       vfs_mkdir("/etc/ssl", 0755);
       vfs_mkdir("/etc/ssl/certs", 0755);
       int seeded = 0, from_tar = 0;
@@ -1002,6 +1176,7 @@ void tmpfs_init(void) {
   if (!tmp) {
     LOG_ERR("[TMPFS] sin memoria para /tmp");
   } else {
+    tmpfs_set_root_mode(tmp, 01777); // [U1.2] /tmp: sticky + rwx para todos
     int rc = vfs_mount("/tmp", tmpfs_get_vfs_ops(), tmp);
     if (rc != 0) {
       LOG_ERR("[TMPFS] mount /tmp: %d", rc);
@@ -1044,7 +1219,7 @@ void tmpfs_init(void) {
     } else {
       // XDG_RUNTIME_DIR=/run/user/<uid> (Wayland: socket y locks).
       vfs_mkdir("/run/user", 0755);
-      vfs_mkdir("/run/user/0", 0700);
+      vfs_mkdir("/run/user/0", 0711); // [U5] traversable: los sockets llevan su propio modo
       LOG_INFO("[TMPFS] /run montado (4 MB)");
     }
   }
@@ -1056,6 +1231,7 @@ void tmpfs_init(void) {
   if (!shm) {
     LOG_ERR("[TMPFS] sin memoria para /dev/shm");
   } else {
+    tmpfs_set_root_mode(shm, 01777);
     int rc = vfs_mount("/dev/shm", tmpfs_get_vfs_ops(), shm);
     if (rc != 0) {
       LOG_ERR("[TMPFS] mount /dev/shm: %d", rc);

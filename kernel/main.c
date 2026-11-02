@@ -83,6 +83,7 @@
 #include "tty.h"
 #include "vdso.h"
 #include "workqueue.h"
+#include "tmpfs.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -700,6 +701,7 @@ static int try_mount_data(block_device_t *b) {
   if (rc == 0) {
     LOG_INFO("[INIT] Montado %s en /data", b->name);
     g_data_mounted = 1;
+    etc_persist_on_data_mount(); // [U2.3]
   }
   return rc;
 }
