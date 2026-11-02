@@ -115,6 +115,7 @@ static int account_locked(const struct passwd *pw) {
 // ---- cambio de identidad --------------------------------------------------
 
 static void become(const struct passwd *pw, int login_env) {
+  klog("[AUDIT] cambio de identidad de uid=%u a %s (uid %u)", getuid(), pw->pw_name, pw->pw_uid);
   klog("[aurora-users] become %s (uid %u) euid=%u", pw->pw_name, pw->pw_uid, geteuid());
   if (initgroups(pw->pw_name, pw->pw_gid) != 0 && geteuid() == 0)
     die("initgroups: %s", strerror(errno));
@@ -199,6 +200,7 @@ static int cmd_login(int argc, char **argv) {
       pw = getpwnam(user);
       if (!pw || check_password(pw, pass) != 0) {
         memset(pass, 0, sizeof(pass));
+        klog("[AUDIT] login FALLIDO usuario=%s", user);
         sleep(2);
         fputs("Login incorrect\n", stderr);
         continue;
@@ -238,6 +240,7 @@ static int cmd_su(int argc, char **argv) {
     int bad = check_password(pw, pass);
     memset(pass, 0, sizeof(pass));
     if (bad) {
+      klog("[AUDIT] su FALLIDO de uid=%u a %s", getuid(), pw->pw_name);
       sleep(2);
       die("su: autenticacion fallida");
     }
@@ -637,6 +640,7 @@ static int cmd_sudo(int argc, char **argv) {
       int bad = !again || check_password(again, pass);
       memset(pass, 0, sizeof(pass));
       if (bad) {
+        klog("[AUDIT] sudo FALLIDO uid=%u", getuid());
         sleep(2);
         die("sudo: autenticacion fallida");
       }

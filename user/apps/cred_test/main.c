@@ -41,6 +41,8 @@
 #define SYS_bind 49
 #define SYS_capget 125
 #define SYS_capset 126
+#define SYS_settimeofday 164
+#define SYS_sethostname 170
 #define SYS_exit_group 231
 
 #define O_RDONLY 0
@@ -163,6 +165,15 @@ static int c_cap_none(void *a) {
   if (sc(SYS_capget, (long)&h, (long)d, 0, 0) != 0)
     return 1;
   return (d[0].eff | d[0].prm | d[1].eff | d[1].prm) ? 2 : 0;
+}
+static int c_sethostname(void *a) {
+  (void)a;
+  return err_of(sc(SYS_sethostname, (long)"x", 1, 0, 0));
+}
+static int c_settimeofday(void *a) {
+  (void)a;
+  long tv[2] = {1700000000L, 0};
+  return err_of(sc(SYS_settimeofday, (long)tv, 0, 0, 0));
 }
 static int c_bind80(void *a) { (void)a; return capbind(80); }
 // Conserva permitidas con KEEPCAPS, las recupera con capset y las gasta.
@@ -362,6 +373,8 @@ __attribute__((noreturn, force_align_arg_pointer)) void _start(void) {
   check("root_bind80_ok", capbind(80), 0);
   check("uid1000_sin_caps", run_as(1000, 1000, c_cap_none, 0), 0);
   check("uid1000_bind80_eacces", run_as(1000, 1000, c_bind80, 0), EACCES);
+  check("uid1000_sethostname_eperm", run_as(1000, 1000, c_sethostname, 0), EPERM);
+  check("uid1000_settimeofday_eperm", run_as(1000, 1000, c_settimeofday, 0), EPERM);
   {
     long kp = sc(SYS_fork, 0, 0, 0, 0);
     if (kp == 0)

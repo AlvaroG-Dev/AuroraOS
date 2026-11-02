@@ -3412,6 +3412,8 @@ static int64_t k_clock_settime(uint64_t clockid, uint64_t tp, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_TIME))
+    return -EPERM;
   // Solo soportamos CLOCK_REALTIME (0). El resto son inmutables
   // (MONOTONIC, BOOTTIME) o por-proceso (CPUTIME).
   if (clockid != 0)
@@ -3434,6 +3436,8 @@ static int64_t k_settimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (tv_ptr && !capable(CAP_SYS_TIME))
+    return -EPERM;
   if (tv_ptr) {
     if (!access_ok((void *)tv_ptr, sizeof(struct k_timeval)))
       return -EFAULT;
@@ -4151,6 +4155,8 @@ static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -5032,6 +5038,10 @@ static int64_t k_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_uptr,
       if (nr.rlim_max > MAX_PROCESS_FDS)
         nr.rlim_max = MAX_PROCESS_FDS;
     }
+    // [U6] subir el limite duro exige CAP_SYS_RESOURCE.
+    if (nr.rlim_max > self->rlimits[resource].rlim_max &&
+        !cap_raised(self, CAP_SYS_RESOURCE))
+      return -EPERM;
     self->rlimits[resource].rlim_cur = nr.rlim_cur;
     self->rlimits[resource].rlim_max = nr.rlim_max;
   }
@@ -5065,6 +5075,8 @@ static int64_t k_sethostname(uint64_t name_uptr, uint64_t len, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   if (len > sizeof(g_hostname) - 1)
     return -EINVAL;
   if (len == 0)
@@ -5226,6 +5238,8 @@ static int64_t k_setdomainname(uint64_t name_uptr, uint64_t len, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   if (len >= sizeof(g_domainname))
     return -EINVAL;
   if (len == 0) {
@@ -6462,6 +6476,8 @@ static int64_t k_swapon(uint64_t path_uptr, uint64_t flags, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;

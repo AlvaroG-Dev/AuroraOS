@@ -2096,11 +2096,34 @@ static int clone_vmas(process_t *parent, process_t *child) {
 // ---------------------------------------------------------------------------
 extern registers_t *syscall_current_regs(void);
 
+struct nproc_ctx {
+  uint32_t uid;
+  int n;
+};
+static int nproc_count_cb(process_t *p, void *arg) {
+  struct nproc_ctx *c = (struct nproc_ctx *)arg;
+  if (p->uid == c->uid)
+    c->n++;
+  return 0;
+}
+
 int64_t sys_fork(void) {
   process_t *parent = process_current();
   if (!parent) {
     LOG_ERR("[FORK] sin proceso actual");
     return -EINVAL;
+  }
+
+  // [U7.2] RLIMIT_NPROC por usuario (anti fork-bomb). Root y CAP_SYS_RESOURCE
+  // quedan exentos, como en Linux.
+  if (!cap_raised(parent, CAP_SYS_RESOURCE) && !cap_raised(parent, CAP_SYS_ADMIN)) {
+    struct nproc_ctx c = {parent->uid, 0};
+    process_for_each(nproc_count_cb, &c);
+    if ((uint64_t)c.n >= parent->rlimits[RLIMIT_NPROC].rlim_cur) {
+      LOG_INFO("[AUDIT] fork denegado: uid=%u alcanza RLIMIT_NPROC (%d)",
+               (unsigned)parent->uid, c.n);
+      return -EAGAIN;
+    }
   }
 
   registers_t *regs = syscall_current_regs();
