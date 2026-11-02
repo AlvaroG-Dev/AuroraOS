@@ -554,7 +554,8 @@ $(ISO_OUT): iso_root
 	 if [ "$(USB_DATA_FS)" = "ext2" ]; then \
 	   export PATH="$$PATH:/sbin:/usr/sbin"; \
 	   command -v mke2fs >/dev/null || { echo "[ISO] ERROR: USB_DATA_FS=ext2 necesita mke2fs (paquete e2fsprogs)"; exit 1; }; \
-	   mke2fs -q -F -t ext2 -b 4096 -L AURORADATA -m 0 -O ^resize_inode -E root_owner=0:0 build/usbdata.img || exit 1; \
+	   mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 build/usbdata.img || exit 1; \
+	   echo "[ISO] ext2 creado: $$(dumpe2fs -h build/usbdata.img 2>/dev/null | grep -i '^Filesystem features' | tr -s ' ')"; \
 	   ptype=83; \
 	 else \
 	   mkfs.fat -F 32 -n AURORADATA build/usbdata.img >/dev/null; \
