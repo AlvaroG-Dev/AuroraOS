@@ -4582,6 +4582,13 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   }
   regs->rip = new_entry;
   regs->rsp = new_rsp;
+  // Como Linux (ELF_PLAT_INIT): el programa nuevo arranca con los registros a
+  // cero. %rdx importa: la ABI x86-64 lo define como puntero de atexit para el
+  // _start de glibc estatico, y un resto del execve hacia saltar a basura al
+  // terminar (SIGSEGV tras exit()).
+  regs->r15 = regs->r14 = regs->r13 = regs->r12 = 0;
+  regs->r10 = regs->r9 = regs->r8 = 0;
+  regs->rdi = regs->rsi = regs->rbp = regs->rbx = regs->rdx = 0;
   LOG_INFO("[EXECVE-IRET] pid=%u rip=%p rsp=%p", proc->pid, (void *)regs->rip,
            (void *)regs->rsp);
 

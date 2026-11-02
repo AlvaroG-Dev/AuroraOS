@@ -186,6 +186,7 @@ Ver §5. Orden de escritura, huérfanos en disco (`s_last_orphan`), política `s
 
 ### E6 — Herramientas de usuario (M–L)
 Ver §6. `e2fsprogs` portado con glibc: `mke2fs`, `e2fsck`, `tune2fs`, `dumpe2fs`, `debugfs`, `resize2fs` (este último opcional), más `blkid` de util-linux (ya hay `libblkid.so.1`).
+> **Estado E6 (2026-11-02): hecha.** `scripts/build-e2fsprogs.sh` compila e2fsprogs 1.47.0 estático con la glibc del host (sin hilos, sin sigcatcher, sin chequeo de versión de kernel de mke2fs) y deja `mke2fs`, `e2fsck`, `tune2fs`, `dumpe2fs` y `debugfs` (+ enlaces `mkfs.ext2`, `fsck.ext2`, `e2label`...) en `precompiled/usr/sbin`; `/etc/mke2fs.conf` y `/etc/fstab` son semillas del tmpfs de /etc. Pruebas: `tests/ext2/run_e2fsprogs_test.sh` (mke2fs sobre disco en blanco, mount, copia, umount, `e2fsck -fp` rc 0, y el host da `e2fsck -fn` 0 y contenido idéntico) y `tests/ext2/run_e2fsck_repair_test.sh` (e2fsck de AuroraOS repara un FS estropeado en el host: rc 1 y luego rc 0; el host lo ve limpio). Hallazgos en el kernel: `execve` no ponía a cero los registros (`%rdx` es el puntero de atexit para el `_start` de glibc estático: saltaba a basura al terminar cualquier binario estático); corregido. Pendiente de E6: `blkid`/`resize2fs`, e2fsck interactivo (hace falta tty) y el USB real.
 - **Hito E6:** desde AuroraOS: `mke2fs -t ext2 /dev/sdb1` sobre un USB, montarlo, copiar, `umount`, `e2fsck -f` (exit 0), y el host monta ese mismo USB.
 
 ### E7 — Rendimiento y raíz instalada (L)
