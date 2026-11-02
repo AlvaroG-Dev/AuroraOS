@@ -5,6 +5,7 @@
 // el reset por RESET_REG viven en acpi_pm.c.
 #include "power.h"
 #include "vfs.h"
+#include "tmpfs.h"
 #include "acpi_pm.h"
 #include "block.h"
 #include "cmdline.h"
@@ -268,6 +269,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   call_notifiers(action, POWER_PHASE_PREPARE);
 
   // Volcar los FS antes de tocar procesos: los drivers de disco aun viven.
+  etc_persist_flush(); // [U2.3]
   if (fat32_sync_all() != 0 || vfs_sync_all() != 0)
     LOG_WARN("[POWER] sync de FS fallo");
 

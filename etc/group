@@ -1,5 +1,9 @@
 root:x:0:
-wheel:x:10:root
+wheel:x:10:root,alvaro
 users:x:100:
 alvaro:x:1000:
 nogroup:x:65534:
+tty:x:5:
+video:x:44:alvaro
+input:x:104:alvaro
+render:x:105:alvaro

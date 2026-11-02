@@ -1803,9 +1803,9 @@ static vfs_ops_t drm_ops = {
 // releva mientras tenga algun minor: drm_backend_claim/release).
 static void native_nodes_register(void) {
   devtmpfs_register("dri/card0", DEVT_MKDEV(DRM_MAJOR, DRM_CARD_MINOR), 0660, 0,
-                    0, &drm_ops, &g_card_priv);
+                    44, &drm_ops, &g_card_priv);
   devtmpfs_register("dri/renderD128",
-                    DEVT_MKDEV(DRM_MAJOR, DRM_RENDER_MINOR), 0666, 0, 0,
+                    DEVT_MKDEV(DRM_MAJOR, DRM_RENDER_MINOR), 0666, 0, 105,
                     &drm_ops, &g_render_priv);
   drm_sysfs_publish();
 }

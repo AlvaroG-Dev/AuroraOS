@@ -48,6 +48,7 @@
 #include "string.h"
 #include "swap.h"
 #include "uaccess.h"
+#include "tmpfs.h"
 #include "vfs.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -870,7 +871,7 @@ static int64_t k_access(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
   // [3.4.d] access(2) usa REAL uid/gid, no efectivos. Como hoy no hay
   // setuid activo, euid == uid siempre; cuando lo haya, habrá que
   // cambiar vfs_check_access para aceptar un flag.
-  int acc = vfs_check_access(node, (int)mode);
+  int acc = vfs_check_access_real(node, (int)mode);
   vfs_node_free(node);
   return acc;
 }
@@ -1354,7 +1355,7 @@ static int64_t k_getegid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 //   - root: uid = euid = suid = uid_new
 //   - no-root, uid_new == uid || euid || suid: euid = uid_new
 //   - no-root, otro: EPERM
-static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
+static int64_t k_setuid_raw(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a2;
   (void)a3;
@@ -1364,7 +1365,7 @@ static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
   if (!p)
     return -EFAULT;
   uint32_t u = (uint32_t)uid;
-  if (p->euid == 0) {
+  if (cap_raised(p, CAP_SETUID)) {
     p->uid = u;
     p->euid = u;
     p->suid = u;
@@ -1379,6 +1380,16 @@ static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
   return -EPERM;
 }
 
+static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  process_t *p = process_current();
+  uint32_t ou = p ? p->uid : 0, oe = p ? p->euid : 0, os = p ? p->suid : 0;
+  int64_t rc = k_setuid_raw(uid, a2, a3, a4, a5);
+  if (rc == 0 && p)
+    process_caps_after_setuid(p, ou, oe, os);
+  return rc;
+}
+
 static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a2;
@@ -1389,7 +1400,7 @@ static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
   if (!p)
     return -EFAULT;
   uint32_t g = (uint32_t)gid;
-  if (p->euid == 0) {
+  if (cap_raised(p, CAP_SETGID)) {
     p->gid = g;
     p->egid = g;
     p->sgid = g;
@@ -1405,7 +1416,7 @@ static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
 }
 
 // setreuid(ruid, euid). -1 significa "no cambiar".
-static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
+static int64_t k_setreuid_raw(uint64_t ruid, uint64_t euid, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
@@ -1415,7 +1426,7 @@ static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
     return -EFAULT;
   int32_t r = (int32_t)ruid;
   int32_t e = (int32_t)euid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETUID));
 
   if (r != -1) {
     if (!was_root && (uint32_t)r != p->uid && (uint32_t)r != p->euid)
@@ -1435,6 +1446,16 @@ static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
   return 0;
 }
 
+static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  process_t *p = process_current();
+  uint32_t ou = p ? p->uid : 0, oe = p ? p->euid : 0, os = p ? p->suid : 0;
+  int64_t rc = k_setreuid_raw(ruid, euid, a3, a4, a5);
+  if (rc == 0 && p)
+    process_caps_after_setuid(p, ou, oe, os);
+  return rc;
+}
+
 static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -1445,7 +1466,7 @@ static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
     return -EFAULT;
   int32_t r = (int32_t)rgid;
   int32_t e = (int32_t)egid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETGID));
 
   if (r != -1) {
     if (!was_root && (uint32_t)r != p->gid && (uint32_t)r != p->egid)
@@ -1467,7 +1488,7 @@ static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
 // setresuid(ruid, euid, suid). -1 = no cambiar.
 // Linux: si el proceso no es root, cada valor solo puede ir a uid/euid/suid
 // actuales. Si lo es, puede ir a cualquier valor.
-static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
+static int64_t k_setresuid_raw(uint64_t ruid, uint64_t euid, uint64_t suid,
                            uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
@@ -1475,7 +1496,7 @@ static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
   if (!p)
     return -EFAULT;
   int32_t r = (int32_t)ruid, e = (int32_t)euid, s = (int32_t)suid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETUID));
 
   if (!was_root) {
     // Cada valor debe estar entre los uid/euid/suid actuales.
@@ -1500,6 +1521,16 @@ static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
   return 0;
 }
 
+static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
+                           uint64_t a4, uint64_t a5) {
+  process_t *p = process_current();
+  uint32_t ou = p ? p->uid : 0, oe = p ? p->euid : 0, os = p ? p->suid : 0;
+  int64_t rc = k_setresuid_raw(ruid, euid, suid, a4, a5);
+  if (rc == 0 && p)
+    process_caps_after_setuid(p, ou, oe, os);
+  return rc;
+}
+
 static int64_t k_setresgid(uint64_t rgid, uint64_t egid, uint64_t sgid,
                            uint64_t a4, uint64_t a5) {
   (void)a4;
@@ -1508,7 +1539,7 @@ static int64_t k_setresgid(uint64_t rgid, uint64_t egid, uint64_t sgid,
   if (!p)
     return -EFAULT;
   int32_t r = (int32_t)rgid, e = (int32_t)egid, s = (int32_t)sgid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETGID));
 
   if (!was_root) {
     if (r != -1 && (uint32_t)r != p->gid && (uint32_t)r != p->egid &&
@@ -1587,9 +1618,19 @@ static int64_t k_setfsuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
     return -EFAULT;
   uint32_t old = p->fsuid;
   uint32_t u = (uint32_t)uid;
-  if (p->euid == 0 || u == p->uid || u == p->euid || u == p->suid ||
+  if (cap_raised(p, CAP_SETUID) || u == p->uid || u == p->euid || u == p->suid ||
       u == p->fsuid)
     p->fsuid = u;
+  {
+    // [U6] Capacidades "de sistema de ficheros" siguen a fsuid (Linux).
+    const uint64_t fsmask = (1ULL << CAP_CHOWN) | (1ULL << CAP_DAC_OVERRIDE) |
+                            (1ULL << CAP_DAC_READ_SEARCH) | (1ULL << CAP_FOWNER) |
+                            (1ULL << CAP_FSETID);
+    if (old == 0 && p->fsuid != 0)
+      p->cap_eff &= ~fsmask;
+    else if (old != 0 && p->fsuid == 0)
+      p->cap_eff |= (p->cap_prm & fsmask);
+  }
   return (int64_t)old; // Linux devuelve el valor anterior
 }
 
@@ -1604,7 +1645,7 @@ static int64_t k_setfsgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
     return -EFAULT;
   uint32_t old = p->fsgid;
   uint32_t g = (uint32_t)gid;
-  if (p->euid == 0 || g == p->gid || g == p->egid || g == p->sgid ||
+  if (cap_raised(p, CAP_SETGID) || g == p->gid || g == p->egid || g == p->sgid ||
       g == p->fsgid)
     p->fsgid = g;
   return (int64_t)old;
@@ -1643,7 +1684,7 @@ static int64_t k_setgroups(uint64_t size, uint64_t list, uint64_t a3,
   process_t *p = process_current();
   if (!p)
     return -EFAULT;
-  if (p->euid != 0)
+  if (!cap_raised(p, CAP_SETGID))
     return -EPERM;
   if (size > NGROUPS_MAX)
     return -EINVAL;
@@ -1807,15 +1848,75 @@ static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
 //   4  PR_SET_DUMPABLE    → ignorar
 //   15 PR_SET_NAME        → ignorar
 //   16 PR_GET_NAME        → escribir "" en el buffer del usuario
-//   38 PR_SET_NO_NEW_PRIVS → ignorar
+//   38/39 PR_SET/GET_NO_NEW_PRIVS → real (execve ya no concede setuid)
 static int64_t k_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
                        uint64_t arg4, uint64_t arg5) {
-  (void)arg3;
-  (void)arg4;
-  (void)arg5;
   switch (option) {
   case 3: /* PR_GET_DUMPABLE */
     return 1;
+  case 8: /* PR_SET_KEEPCAPS */ {
+    process_t *pp = process_current();
+    if (!pp || arg2 > 1)
+      return -EINVAL;
+    pp->keepcaps = (uint8_t)arg2;
+    return 0;
+  }
+  case 7: /* PR_GET_KEEPCAPS */ {
+    process_t *pp = process_current();
+    return pp ? pp->keepcaps : 0;
+  }
+  case 23: /* PR_CAPBSET_READ */ {
+    process_t *pp = process_current();
+    if (!pp || arg2 > CAP_LAST_CAP)
+      return -EINVAL;
+    return (pp->cap_bnd >> arg2) & 1;
+  }
+  case 24: /* PR_CAPBSET_DROP */ {
+    process_t *pp = process_current();
+    if (!pp || arg2 > CAP_LAST_CAP)
+      return -EINVAL;
+    if (!cap_raised(pp, CAP_SETPCAP))
+      return -EPERM;
+    pp->cap_bnd &= ~(1ULL << arg2);
+    return 0;
+  }
+  case 47: /* PR_CAP_AMBIENT: 1=IS_SET 2=RAISE 3=LOWER 4=CLEAR_ALL */ {
+    process_t *pp = process_current();
+    if (!pp)
+      return -EINVAL;
+    if (arg2 == 4) {
+      pp->cap_amb = 0;
+      return 0;
+    }
+    if (arg3 > CAP_LAST_CAP)
+      return -EINVAL;
+    uint64_t bit = 1ULL << arg3;
+    if (arg2 == 1)
+      return (pp->cap_amb & bit) != 0;
+    if (arg2 == 3) {
+      pp->cap_amb &= ~bit;
+      return 0;
+    }
+    if (arg2 == 2) {
+      if (!(pp->cap_prm & bit) || !(pp->cap_inh & bit))
+        return -EPERM;
+      pp->cap_amb |= bit;
+      return 0;
+    }
+    return -EINVAL;
+  }
+  case 38: /* PR_SET_NO_NEW_PRIVS: solo 1, irreversible */ {
+    if (arg2 != 1 || arg3 || arg4 || arg5)
+      return -EINVAL;
+    process_t *pp = process_current();
+    if (pp)
+      pp->no_new_privs = 1;
+    return 0;
+  }
+  case 39: /* PR_GET_NO_NEW_PRIVS */ {
+    process_t *pp = process_current();
+    return pp ? pp->no_new_privs : 0;
+  }
   case 16: /* PR_GET_NAME */ {
     if (arg2 && access_ok((void *)arg2, 16)) {
       // Copiamos 16 bytes de ceros (Linux pone el nombre del proceso
@@ -1842,8 +1943,12 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
 
   // Señal 0 = comprobar existencia, sin enviar. Linux la acepta.
   if (ksig == 0) {
-    if (kpid > 0)
-      return process_find_by_pid((uint32_t)kpid) ? 0 : -ESRCH;
+    if (kpid > 0) {
+      process_t *tp = process_find_by_pid((uint32_t)kpid);
+      if (!tp)
+        return -ESRCH;
+      return process_may_signal(process_current(), tp) ? 0 : -EPERM;
+    }
     if (kpid == 0)
       return process_current() ? 0 : -ESRCH;
     return process_pgrp_exists((uint32_t)(-kpid)) ? 0 : -ESRCH;
@@ -1853,6 +1958,10 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     return -EINVAL;
 
   if (kpid > 0) {
+    // [U1.3] Permisos de kill(2).
+    process_t *tp = process_find_by_pid((uint32_t)kpid);
+    if (tp && !process_may_signal(process_current(), tp))
+      return -EPERM;
     int r = process_kill((uint32_t)kpid, ksig);
     if (r == -ESRCH) {
       // Como Linux, kill() con el tid de un hilo secundario va a su proceso.
@@ -1870,13 +1979,13 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     process_t *self = process_current();
     if (!self)
       return -ESRCH;
-    int n = process_signal_pgrp(self->pgid, 1ULL << ksig);
+    int n = process_signal_pgrp_checked(self->pgid, 1ULL << ksig, self);
     return n < 0 ? n : 0;
   }
 
   // kpid < 0: enviar a todos los procesos del grupo -kpid.
   uint32_t grp = (uint32_t)(-kpid);
-  int n = process_signal_pgrp(grp, 1ULL << ksig);
+  int n = process_signal_pgrp_checked(grp, 1ULL << ksig, process_current());
   return n < 0 ? n : 0;
 }
 
@@ -2478,6 +2587,21 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
 // tkill(tid, sig): señal dirigida a un hilo concreto (tid del hilo
 // principal = pid). BusyBox ash lo usa en job control; musl en raise() y
 // pthread_kill().
+// [U1.3] Permisos de tkill/tgkill: el hilo `tid` pertenece a un proceso cuyo
+// uid debe ser señalable por el llamante.
+static int tid_signal_allowed(uint32_t tid) {
+  process_t *target = NULL;
+  task_t *t = sched_find_tid_get(tid);
+  if (t) {
+    target = t->proc;
+    int ok = target ? process_may_signal(process_current(), target) : 1;
+    task_put(t);
+    return ok;
+  }
+  target = process_find_by_pid(tid);
+  return target ? process_may_signal(process_current(), target) : 1;
+}
+
 static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
   (void)a3;
@@ -2495,6 +2619,8 @@ static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
   }
   if (sig >= SIG_MAX)
     return -EINVAL;
+  if (!tid_signal_allowed((uint32_t)tid))
+    return -EPERM;
   return signal_send_tid((uint32_t)tid, (int)sig);
 }
 
@@ -2521,6 +2647,8 @@ static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
   }
   if (owner == 0 || owner != (uint32_t)tgid)
     return -ESRCH;
+  if (!tid_signal_allowed((uint32_t)tid))
+    return -EPERM;
   if (sig == 0)
     return 0;
   return signal_send_tid((uint32_t)tid, (int)sig);
@@ -3327,6 +3455,8 @@ static int64_t k_clock_settime(uint64_t clockid, uint64_t tp, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_TIME))
+    return -EPERM;
   // Solo soportamos CLOCK_REALTIME (0). El resto son inmutables
   // (MONOTONIC, BOOTTIME) o por-proceso (CPUTIME).
   if (clockid != 0)
@@ -3349,6 +3479,8 @@ static int64_t k_settimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (tv_ptr && !capable(CAP_SYS_TIME))
+    return -EPERM;
   if (tv_ptr) {
     if (!access_ok((void *)tv_ptr, sizeof(struct k_timeval)))
       return -EFAULT;
@@ -4069,6 +4201,8 @@ static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -4633,6 +4767,8 @@ static int64_t k_lchown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
 // AT_EMPTY_PATH y ruta vacia equivale a fchown(dfd).
 static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
                           uint64_t gid, uint64_t flags) {
+  if (flags & ~0x1100ULL) // AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    return -EINVAL;
   char c = 0;
   if ((flags & 0x1000) && path_ptr && copy_from_user(&c, (const void *)path_ptr, 1) == 0 &&
       c == '\0')
@@ -4656,6 +4792,16 @@ struct k_ts64 {
   int64_t tv_nsec;
 };
 
+// [U1] utimensat: hora concreta = dueño o root; NULL/UTIME_NOW = dueño, root
+// o con permiso de escritura.
+static int utimes_permitted(process_t *proc, vfs_node_t *node, int explicit_time) {
+  if (cap_raised(proc, CAP_FOWNER) || proc->fsuid == node->uid)
+    return 0;
+  if (explicit_time)
+    return -EPERM;
+  return vfs_check_access(node, 2) == 0 ? 0 : -EACCES;
+}
+
 static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
                            uint64_t times_uptr, uint64_t flags, uint64_t a5) {
   (void)a5;
@@ -4666,6 +4812,7 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     return -EINVAL; // solo AT_SYMLINK_NOFOLLOW
 
   int64_t mtime_sec = 0;
+  int ut_explicit = 0; // hora concreta: solo dueño/root (Linux); si no, basta escribir
   if (times_uptr) {
     struct k_ts64 times[2];
     if (!access_ok((void *)times_uptr, sizeof(times)))
@@ -4676,8 +4823,10 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
       return 0;
     if (times[1].tv_nsec == UTIME_NOW)
       mtime_sec = rtc_get_epoch();
-    else
+    else {
       mtime_sec = times[1].tv_sec;
+      ut_explicit = 1;
+    }
   } else {
     mtime_sec = rtc_get_epoch();
   }
@@ -4694,6 +4843,11 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     vfs_node_t *node = proc->fds[kfd]->node;
     if (!node)
       return -EBADF;
+    {
+      int prc = utimes_permitted(proc, node, ut_explicit);
+      if (prc)
+        return prc;
+    }
     if (node->ops && node->ops->utimes)
       return node->ops->utimes(node, mtime_sec);
     return 0;
@@ -4706,6 +4860,15 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
   if (rc != 0) {
     return rc;
+  }
+  {
+    vfs_node_t *un = vfs_lookup(path);
+    if (un) {
+      int prc = utimes_permitted(proc, un, ut_explicit);
+      vfs_node_free(un);
+      if (prc)
+        return prc;
+    }
   }
   return vfs_utimes(path, mtime_sec);
 }
@@ -4826,7 +4989,7 @@ static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
   uint32_t perm = ((uint32_t)mode & 0777) & ~proc->umask;
 
   if (type == S_IFCHR) {
-    if (proc->euid != 0)
+    if (!cap_raised(proc, CAP_MKNOD))
       return -EPERM;
     uint64_t maj = ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfffULL);
     uint64_t min = (dev & 0xff) | ((dev >> 12) & ~0xffULL);
@@ -4929,6 +5092,10 @@ static int64_t k_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_uptr,
       if (nr.rlim_max > MAX_PROCESS_FDS)
         nr.rlim_max = MAX_PROCESS_FDS;
     }
+    // [U6] subir el limite duro exige CAP_SYS_RESOURCE.
+    if (nr.rlim_max > self->rlimits[resource].rlim_max &&
+        !cap_raised(self, CAP_SYS_RESOURCE))
+      return -EPERM;
     self->rlimits[resource].rlim_cur = nr.rlim_cur;
     self->rlimits[resource].rlim_max = nr.rlim_max;
   }
@@ -4962,6 +5129,8 @@ static int64_t k_sethostname(uint64_t name_uptr, uint64_t len, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   if (len > sizeof(g_hostname) - 1)
     return -EINVAL;
   if (len == 0)
@@ -5123,6 +5292,8 @@ static int64_t k_setdomainname(uint64_t name_uptr, uint64_t len, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   if (len >= sizeof(g_domainname))
     return -EINVAL;
   if (len == 0) {
@@ -5441,6 +5612,8 @@ static int64_t k_bind(uint64_t fd, uint64_t addr, uint64_t addrlen, uint64_t a4,
   int rc = copy_sockaddr_in_from_user(addr, addrlen, &ip, &port);
   if (rc != 0)
     return rc;
+  if (port != 0 && port < 1024 && !cap_raised(proc, CAP_NET_BIND_SERVICE))
+    return -EACCES;
   return socket_bind(s, ip, port);
 }
 
@@ -6186,10 +6359,13 @@ struct k_cap_hdr {
   int32_t pid;
 };
 struct k_cap_data {
-  uint32_t effective, permitted, inheritable;
-  uint32_t pad;
+  uint32_t effective, permitted, inheritable; // 12 bytes, como Linux
 };
 #define _LINUX_CAPABILITY_VERSION_3 0x20080522u
+static void cap_split(uint64_t v, uint32_t out[2]) {
+  out[0] = (uint32_t)v;
+  out[1] = (uint32_t)(v >> 32);
+}
 static int64_t k_capget(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a3;
@@ -6203,26 +6379,42 @@ static int64_t k_capget(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
   if (copy_from_user(&h, (void *)hdr, sizeof(h)) < 0)
     return -EFAULT;
   if (h.version != _LINUX_CAPABILITY_VERSION_3) {
-    // Devolvemos la versión soportada; Linux hace lo mismo y el caller
-    // reintenta.
     h.version = _LINUX_CAPABILITY_VERSION_3;
     if (copy_to_user((void *)hdr, &h, sizeof(h)) < 0)
       return -EFAULT;
     return -EINVAL;
   }
+  process_t *self = process_current();
+  process_t *t = self;
+  if (h.pid < 0)
+    return -EINVAL;
+  if (h.pid != 0 && self && (uint32_t)h.pid != self->pid)
+    t = process_find_by_pid((uint32_t)h.pid);
+  if (!t)
+    return -ESRCH;
   if (data) {
-    if (access_ok((void *)data, 2 * sizeof(struct k_cap_data))) {
-      struct k_cap_data z[2];
-      memset(z, 0, sizeof(z));
-      (void)copy_to_user((void *)data, z, sizeof(z));
+    if (!access_ok((void *)data, 2 * sizeof(struct k_cap_data)))
+      return -EFAULT;
+    struct k_cap_data d[2];
+    uint32_t e[2], p2[2], i2[2];
+    cap_split(t->cap_eff, e);
+    cap_split(t->cap_prm, p2);
+    cap_split(t->cap_inh, i2);
+    for (int k = 0; k < 2; k++) {
+      d[k].effective = e[k];
+      d[k].permitted = p2[k];
+      d[k].inheritable = i2[k];
     }
+    if (copy_to_user((void *)data, d, sizeof(d)) < 0)
+      return -EFAULT;
   }
   return 0;
 }
 
+// capset: solo el propio proceso. Reglas de Linux: eff ⊆ prm, prm nuevo ⊆
+// prm actual, inh nuevo ⊆ (inh | prm) salvo con CAP_SETPCAP y ⊆ bounding.
 static int64_t k_capset(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
-  (void)data;
   (void)a3;
   (void)a4;
   (void)a5;
@@ -6233,8 +6425,39 @@ static int64_t k_capset(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
   struct k_cap_hdr h;
   if (copy_from_user(&h, (void *)hdr, sizeof(h)) < 0)
     return -EFAULT;
-  if (h.version != _LINUX_CAPABILITY_VERSION_3)
+  if (h.version != _LINUX_CAPABILITY_VERSION_3) {
+    h.version = _LINUX_CAPABILITY_VERSION_3;
+    (void)copy_to_user((void *)hdr, &h, sizeof(h));
     return -EINVAL;
+  }
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  if (h.pid != 0 && (uint32_t)h.pid != p->pid)
+    return -EPERM;
+  if (!data || !access_ok((void *)data, 2 * sizeof(struct k_cap_data)))
+    return -EFAULT;
+  struct k_cap_data d[2];
+  if (copy_from_user(d, (void *)data, sizeof(d)) < 0)
+    return -EFAULT;
+  uint64_t ne = (uint64_t)d[0].effective | ((uint64_t)d[1].effective << 32);
+  uint64_t np = (uint64_t)d[0].permitted | ((uint64_t)d[1].permitted << 32);
+  uint64_t ni = (uint64_t)d[0].inheritable | ((uint64_t)d[1].inheritable << 32);
+  ne &= CAP_FULL_MASK;
+  np &= CAP_FULL_MASK;
+  ni &= CAP_FULL_MASK;
+  if (np & ~p->cap_prm)
+    return -EPERM;
+  if (ne & ~np)
+    return -EPERM;
+  if (!cap_raised(p, CAP_SETPCAP) && (ni & ~(p->cap_inh | p->cap_prm)))
+    return -EPERM;
+  if (ni & ~(p->cap_inh | p->cap_bnd))
+    return -EPERM;
+  p->cap_eff = ne;
+  p->cap_prm = np;
+  p->cap_inh = ni;
+  p->cap_amb &= (np & ni);
   return 0;
 }
 
@@ -6254,6 +6477,7 @@ static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
+  etc_persist_flush(); // [U2.3] passwd/group/shadow -> /data/etc
   // Vuelca todos los FS con caché propia (FAT32 difiere las escrituras; ext2
   // también lo hará). tarfs/procfs/sysfs/devfs/tmpfs no tienen ops->sync.
   vfs_sync_all();
@@ -6418,7 +6642,7 @@ static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
        m2 != 537993216))
     return -EINVAL;
   process_t *proc = process_current();
-  if (!proc || proc->euid != 0)
+  if (!proc || !cap_raised(proc, CAP_SYS_BOOT))
     return -EPERM;
   switch ((uint32_t)cmd) {
   case LINUX_REBOOT_CMD_RESTART:
@@ -6445,6 +6669,8 @@ static int64_t k_swapon(uint64_t path_uptr, uint64_t flags, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -6680,7 +6906,7 @@ static int64_t a_aur_info(uint64_t pid, uint64_t buf, uint64_t a3, uint64_t a4,
 
   process_t *target = self;
   if (pid != 0 && (uint32_t)pid != self->pid) {
-    if (self->euid != 0)
+    if (!cap_raised(self, CAP_SYS_PTRACE))
       return -EPERM;
     target = process_find_by_pid((uint32_t)pid);
     if (!target)
@@ -7434,6 +7660,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_STAT] = {k_stat, "stat"},
     [SYS_FSTAT] = {k_fstat, "fstat"},
     [SYS_FCHMODAT] = {k_fchmodat, "fchmodat"},
+    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},

@@ -1042,6 +1042,19 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
   }
   buf[o++] = '\n';
 
+  {
+    static const char *const kn[5] = {"CapInh:\t", "CapPrm:\t", "CapEff:\t",
+                                      "CapBnd:\t", "CapAmb:\t"};
+    uint64_t kv[5] = {p->cap_inh, p->cap_prm, p->cap_eff, p->cap_bnd,
+                      p->cap_amb};
+    for (int ci = 0; ci < 5; ci++) {
+      o = kappend(buf, o, cap, kn[ci]);
+      for (int sh = 60; sh >= 0; sh -= 4)
+        buf[o++] = "0123456789abcdef"[(kv[ci] >> sh) & 0xf];
+      buf[o++] = '\n';
+    }
+  }
+
   // ===== Memoria =====
 #define KB_LINE(key, bytes)                                                    \
   do {                                                                         \
@@ -2756,6 +2769,23 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     }
 
     const char *rest = slash + 1;
+
+    // [U7.1] Equivalente a PTRACE_MODE_READ de Linux: fd, cwd, exe, root,
+    // maps y smaps de otro usuario solo con CAP_SYS_PTRACE. cmdline, stat,
+    // status... siguen siendo publicos (como sin hidepid).
+    if (!strncmp(rest, "fd", 2) || !strcmp(rest, "cwd") || !strcmp(rest, "exe") ||
+        !strcmp(rest, "root") || !strcmp(rest, "maps") || !strcmp(rest, "smaps")) {
+      process_t *caller = process_current();
+      process_t *tp = process_find_by_pid(pid);
+      if (caller && tp && !cap_raised(caller, CAP_SYS_PTRACE) &&
+          !(caller->fsuid == tp->uid && caller->fsuid == tp->euid &&
+            caller->fsuid == tp->suid && caller->fsgid == tp->gid &&
+            caller->fsgid == tp->egid && caller->fsgid == tp->sgid)) {
+        LOG_INFO("[AUDIT] proc/%u/%s denegado a uid=%u", (unsigned)pid, rest,
+                 (unsigned)caller->fsuid);
+        return NULL;
+      }
+    }
 
     // <pid>/fd/N — symlink al path del nodo subyacente.
     if (strncmp(rest, "fd/", 3) == 0) {

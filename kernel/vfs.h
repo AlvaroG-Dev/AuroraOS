@@ -599,6 +599,8 @@ int vfs_fchown(file_descriptor_t *fd, uint32_t uid, uint32_t gid);
 // Root (euid==0) bypasea; el bit X de ficheros regulares se comprueba
 // aparte en execve (Linux hace lo mismo: root no ejecuta sin ningún x).
 int vfs_check_access(vfs_node_t *node, int mask);
+// access(2): igual pero con uid/gid reales.
+int vfs_check_access_real(vfs_node_t *node, int mask);
 
 // [2.4] Devuelve el fs_ops del mount más específico que cubre `path`.
 // NULL si no hay ningún mount aplicable.

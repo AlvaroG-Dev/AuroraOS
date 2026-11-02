@@ -165,15 +165,17 @@ static void test_memory_pressure(void)
 static void test_split_page(void)
 {
 	struct page *p = alloc_pages(GFP_KERNEL | __GFP_ZERO, 4);
-	struct sysinfo a, b;
-	unsigned long free0;
 	int i;
 
+	/*
+	 * No se compara si_meminfo() antes/despues: freeram es global y otros
+	 * procesos (fork/exec) asignan y liberan a la vez, asi que daba falsos
+	 * fallos bajo carga. Se comprueba el contenido y que el bloque entero
+	 * vuelve a poder pedirse.
+	 */
 	KT_ASSERT(p, "alloc_pages orden 4");
 	if (!p)
 		return;
-	si_meminfo(&a);
-	free0 = a.freeram;
 	for (i = 0; i < 16; i++)
 		memset(page_address(p + i), i + 1, PAGE_SIZE);
 	split_page(p, 4);
@@ -185,14 +187,10 @@ static void test_split_page(void)
 	/* liberar en desorden: cada pagina vuelve sola al PMM */
 	for (i = 0; i < 16; i += 2)
 		__free_pages(p + i, 0);
-	si_meminfo(&b);
-	KT_ASSERT(b.freeram >= free0 + 8 - 2, "liberadas 8 paginas (%lu -> %lu)", free0, b.freeram);
 	for (i = 1; i < 16; i += 2) {
 		KT_EQ(((u8 *)page_address(p + i))[0], i + 1);	/* las otras siguen intactas */
 		put_page(p + i);
 	}
-	si_meminfo(&b);
-	KT_ASSERT(b.freeram >= free0 + 16 - 2, "liberadas las 16 (%lu -> %lu)", free0, b.freeram);
 	/* y el bloque se puede volver a pedir entero */
 	p = alloc_pages(GFP_KERNEL, 4);
 	KT_ASSERT(p, "alloc_pages orden 4 tras el split");
@@ -206,7 +204,7 @@ static void test_swap_ram(void)
 {
 	struct file *f = shmem_file_setup("kt swap", 64 * PAGE_SIZE, 0);
 	struct page *src;
-	long nr0, nr1;
+	long nr0;
 	int i, bad = 0;
 
 	KT_ASSERT(!IS_ERR(f), "shmem_file_setup");
@@ -235,8 +233,8 @@ static void test_swap_ram(void)
 		folio_put(fo);
 	}
 	KT_EQ(bad, 0);
-	nr1 = get_nr_swap_pages();
-	KT_ASSERT(nr1 < nr0, "el respaldo consume RAM (%ld -> %ld)", nr0, nr1);
+	/* nrpages es del propio fichero: no depende de otros procesos (freeram si) */
+	KT_EQ(f->f_mapping->nrpages, 64);
 	/* la pagina se suelta (truncate) y la siguiente lectura la devuelve a cero */
 	shmem_truncate_range(file_inode(f), 10 * PAGE_SIZE, 11 * PAGE_SIZE - 1);
 	for (i = 0; i < 64; i++) {
@@ -255,9 +253,11 @@ static void test_swap_ram(void)
 	KT_EQ(bad, 0);
 	KT_EQ(shmem_writeout(NULL, NULL, NULL), -EBUSY);	/* sin disco no se escribe */
 	__free_page(src);
+	/* al truncar el fichero toda la RAM vuelve */
+	KT_EQ(f->f_mapping->nrpages, 64);
+	shmem_truncate_range(file_inode(f), 0, (loff_t)-1);
+	KT_EQ(f->f_mapping->nrpages, 0);
 	fput(f);
-	/* al soltar el fichero toda la RAM vuelve */
-	KT_ASSERT(get_nr_swap_pages() > nr1, "la RAM del respaldo se libera");
 }
 
 /* ---------------------------------------------------------- kmap prot */

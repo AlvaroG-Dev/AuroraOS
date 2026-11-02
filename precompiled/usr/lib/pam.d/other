@@ -1,0 +1,6 @@
+# Pila PAM por defecto de AuroraOS: autenticacion contra /etc/shadow (pam_unix).
+# Para no-root, pam_unix delega en /usr/sbin/unix_chkpwd (setuid root).
+auth     required pam_unix.so
+account  required pam_unix.so
+password required pam_unix.so obscure sha512
+session  required pam_unix.so

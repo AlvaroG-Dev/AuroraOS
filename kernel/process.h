@@ -199,6 +199,11 @@ typedef struct process {
   uint32_t sgid;
   uint32_t fsgid;
   uint32_t umask;
+  // [U1.4] prctl(PR_SET_NO_NEW_PRIVS): execve ya no concede setuid/setgid.
+  uint8_t no_new_privs;
+  // [U6] Capabilities (Linux): root las tiene todas; el resto, solo las que reciba.
+  uint64_t cap_eff, cap_prm, cap_inh, cap_bnd, cap_amb;
+  uint8_t keepcaps; // prctl(PR_SET_KEEPCAPS)
   uint32_t groups[NGROUPS_MAX];
   int ngroups;
 
@@ -336,6 +341,40 @@ __attribute__((noreturn)) void process_exit_current(int exit_code);
 __attribute__((noreturn)) void process_exit_group_current(int exit_code);
 
 process_t *process_current(void);
+
+// [U6] Capacidades (numeros de Linux).
+#define CAP_CHOWN 0
+#define CAP_DAC_OVERRIDE 1
+#define CAP_DAC_READ_SEARCH 2
+#define CAP_FOWNER 3
+#define CAP_FSETID 4
+#define CAP_KILL 5
+#define CAP_SETGID 6
+#define CAP_SETUID 7
+#define CAP_SETPCAP 8
+#define CAP_NET_BIND_SERVICE 10
+#define CAP_NET_ADMIN 12
+#define CAP_NET_RAW 13
+#define CAP_SYS_MODULE 16
+#define CAP_SYS_RAWIO 17
+#define CAP_SYS_CHROOT 18
+#define CAP_SYS_PTRACE 19
+#define CAP_SYS_ADMIN 21
+#define CAP_SYS_BOOT 22
+#define CAP_SYS_NICE 23
+#define CAP_SYS_RESOURCE 24
+#define CAP_SYS_TIME 25
+#define CAP_MKNOD 27
+#define CAP_LAST_CAP 40
+#define CAP_FULL_MASK ((1ULL << (CAP_LAST_CAP + 1)) - 1)
+static inline int cap_raised(const process_t *p, int cap) {
+  return p && ((p->cap_eff >> cap) & 1);
+}
+// ¿El proceso actual tiene la capacidad? Contexto kernel (sin proceso): si.
+int capable(int cap);
+// Ajusta las caps tras un cambio de uid/euid/suid (reglas de setuid de Linux).
+void process_caps_after_setuid(process_t *p, uint32_t ouid, uint32_t oeuid,
+                               uint32_t osuid);
 void *process_sbrk(process_t *proc, int64_t increment);
 
 process_t *process_spawn_child_args(process_t *parent, const char *path,
@@ -396,6 +435,10 @@ int process_is_in_pgrp(process_t *p, uint32_t pgid);
 // pgid == pgid_arg. Ignora a zombies. Devuelve el número de procesos
 // señalados, o -ESRCH si no existe ningún proceso en ese grupo.
 int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask);
+// [U1.3] kill(2): permisos de Linux entre procesos.
+int process_may_signal(const process_t *sender, const process_t *target);
+int process_signal_pgrp_checked(uint32_t pgid_arg, uint64_t signal_mask,
+                                const process_t *sender);
 
 // true si `sig` esta pendiente en el proceso `pid` (que existe y no es zombi).
 bool process_signal_is_pending(uint32_t pid, int sig);
