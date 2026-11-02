@@ -32,6 +32,8 @@ for t in login su passwd sudo; do
 done
 cp -f "$OUT/aurora-users" "$OUT/useradd"
 chmod 0755 "$OUT/useradd"
+cp -f "$OUT/aurora-users" "$OUT/aurora-switch"
+chmod 4755 "$OUT/aurora-switch"
 cp -f "$OUT/aurora-users" "$OUT/sync"
 chmod 0755 "$OUT/sync"
 echo "[Makefile]   aurora-users: login su passwd sudo (setuid) + useradd"

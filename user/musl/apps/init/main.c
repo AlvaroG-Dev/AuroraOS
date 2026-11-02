@@ -17,6 +17,7 @@
 //   - Relanzar el terminal tras un cierre limpio -> hace falta un
 //     launcher (taskbar, Ctrl+Alt+T, ...). Pendiente Fase 4.
 
+#include <dirent.h>
 #include <errno.h>
 #include <grp.h>
 #include <pwd.h>
@@ -138,29 +139,47 @@ static int g_sess_ok;
 static char g_sess_env[4][160];
 static char *g_sess_envp[96];
 
-static void session_init(void) {
+static void write_session_file(const char *name) {
+  int fd = open("/run/aurora-session", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd >= 0) {
+    if (write(fd, name, strlen(name)) < 0) {}
+    close(fd);
+  }
+}
+
+// Usuario de sesion pedido en la linea de comandos (aur.session=user:<n>).
+static int session_from_cmdline(char *name, size_t cap) {
   char cl[1024];
   int fd = open("/proc/cmdline", O_RDONLY);
   ssize_t n = fd >= 0 ? read(fd, cl, sizeof(cl) - 1) : -1;
   if (fd >= 0)
     close(fd);
   if (n <= 0)
-    return;
+    return 0;
   cl[n] = '\0';
   char *p = strstr(cl, "aur.session=user:");
   if (!p)
-    return;
+    return 0;
   p += 17;
-  char name[64];
   size_t l = strcspn(p, " \t\r\n");
-  if (l == 0 || l >= sizeof(name))
-    return;
+  if (l == 0 || l >= cap)
+    return 0;
   memcpy(name, p, l);
   name[l] = '\0';
+  return 1;
+}
+
+static void session_init(const char *name) {
+  g_sess_ok = 0;
+  if (!name || !*name || !strcmp(name, "root")) {
+    write_session_file("root");
+    return;
+  }
   struct passwd *res = NULL;
   if (getpwnam_r(name, &g_sess_pw, g_sess_buf, sizeof(g_sess_buf), &res) != 0 ||
       !res || res->pw_uid == 0) {
-    fprintf(stderr, "init: aur.session=user:%s: usuario no valido, sigo como root\n", name);
+    fprintf(stderr, "init: sesion '%s': usuario no valido, sigo como root\n", name);
+    write_session_file("root");
     return;
   }
   g_sess_ok = 1;
@@ -193,6 +212,7 @@ static void session_init(void) {
     mkdir(own[i], 0755);
     chown(own[i], res->pw_uid, res->pw_gid);
   }
+  write_session_file(res->pw_name);
   printf("init: sesion de usuario %s (uid %u)\n", res->pw_name, res->pw_uid);
 }
 
@@ -285,10 +305,106 @@ static void setup_gtk4_config(void) {
     perror("init: gtk-4.0/gtk.css");
 }
 
+// ---- [U7.4] cambio de usuario: reinicio de sesion --------------------------
+static volatile sig_atomic_t g_switch;
+
+static int pid_ppid_uid(int pid, int *ppid, long *uid) {
+  char path[48], buf[1024];
+  snprintf(path, sizeof(path), "/proc/%d/status", pid);
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return -1;
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return -1;
+  buf[n] = '\0';
+  char *pp = strstr(buf, "PPid:");
+  char *up = strstr(buf, "Uid:");
+  if (!pp || !up)
+    return -1;
+  *ppid = atoi(pp + 5);
+  *uid = atol(up + 4);
+  return 0;
+}
+
+// Mata la sesion actual: descendientes del terminal y del compositor y, si la
+// sesion no es root, todo lo que corra con ese uid (nunca los .aur de root).
+static void kill_session(pid_t term, pid_t wl) {
+  static int pids[1024], ppids[1024];
+  static long uids[1024];
+  int cnt = 0;
+  for (int round = 0; round < 2; round++) {
+    cnt = 0;
+    DIR *d = opendir("/proc");
+    struct dirent *de;
+    while (d && (de = readdir(d)) && cnt < 1024) {
+      int pid = atoi(de->d_name);
+      if (pid <= 1)
+        continue;
+      int pp;
+      long u;
+      if (pid_ppid_uid(pid, &pp, &u) == 0) {
+        pids[cnt] = pid;
+        ppids[cnt] = pp;
+        uids[cnt] = u;
+        cnt++;
+      }
+    }
+    if (d)
+      closedir(d);
+    // marcar descendientes de term/wl
+    static char mark[1024];
+    memset(mark, 0, sizeof(mark));
+    for (int i = 0; i < cnt; i++)
+      if (pids[i] == term || pids[i] == wl)
+        mark[i] = 1;
+    for (int pass = 0; pass < 8; pass++)
+      for (int i = 0; i < cnt; i++)
+        if (!mark[i])
+          for (int j = 0; j < cnt; j++)
+            if (mark[j] && ppids[i] == pids[j]) {
+              mark[i] = 1;
+              break;
+            }
+    for (int i = 0; i < cnt; i++) {
+      int hit = mark[i] || (g_sess_ok && uids[i] == (long)g_sess_pw.pw_uid);
+      if (hit)
+        kill(pids[i], round == 0 ? SIGTERM : SIGKILL);
+    }
+    if (round == 0) {
+      for (int w = 0; w < 20; w++) {
+        usleep(100000);
+        while (waitpid(-1, NULL, WNOHANG) > 0) {}
+      }
+    }
+  }
+  while (waitpid(-1, NULL, WNOHANG) > 0) {}
+}
+
+static void read_switch_request(char *name, size_t cap) {
+  name[0] = '\0';
+  int fd = open("/run/aurora-session-request", O_RDONLY);
+  if (fd < 0)
+    return;
+  ssize_t n = read(fd, name, cap - 1);
+  close(fd);
+  unlink("/run/aurora-session-request");
+  if (n <= 0) {
+    name[0] = '\0';
+    return;
+  }
+  name[n] = '\0';
+  name[strcspn(name, "\r\n ")] = '\0';
+}
+
 int main(void) {
   setup_gtk4_config();
   gpu_env_setup();
-  session_init();
+  {
+    char sname[64];
+    session_init(session_from_cmdline(sname, sizeof(sname)) ? sname : NULL);
+  }
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
   int testing = access("/system/boot-tests", F_OK) == 0 && !g_sess_ok;
   run_boot_tests();
@@ -298,8 +414,38 @@ int main(void) {
 
   for (;;) {
     int status = 0;
-    pid_t pid = waitpid(-1, &status, 0);
+    // Sondeo (no bloqueante): ademas de reapear hijos, vigila la peticion de
+    // cambio de sesion que deja aurora-switch en /run (una senal a PID 1 no es
+    // fiable aqui: el kernel la trata con la accion por defecto).
+    pid_t pid = waitpid(-1, &status, WNOHANG);
+    if (pid == 0) {
+      if (access("/run/aurora-session-request", F_OK) == 0)
+        g_switch = 1;
+      else {
+        usleep(200000);
+        continue;
+      }
+      pid = -1;
+      errno = EINTR;
+    }
 
+    if (g_switch) {
+      g_switch = 0;
+      char want[64];
+      read_switch_request(want, sizeof(want));
+      if (want[0]) {
+        fprintf(stderr, "init: cambio de sesion a '%s'\n", want);
+        kill_session(term, wl);
+        term = -1;
+        wl = -1;
+        session_init(want);
+        wl_restarts = 0;
+        term = spawn_terminal();
+        wl = testing ? -1 : spawn_wayland();
+      }
+      if (pid < 0)
+        continue;
+    }
     if (pid < 0) {
       if (errno == EINTR)
         continue;

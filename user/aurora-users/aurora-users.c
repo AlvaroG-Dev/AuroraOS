@@ -23,6 +23,7 @@ extern char *crypt(const char *key, const char *salt);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <termios.h>
@@ -659,6 +660,41 @@ static int cmd_sudo(int argc, char **argv) {
   die("sudo: %s: %s", argv[i], strerror(errno));
 }
 
+// ---- switch ---------------------------------------------------------------
+// aurora-switch <usuario>: reinicia la sesion grafica como ese usuario (init
+// mata la sesion actual y relanza compositor y terminal). Root no pide clave;
+// el resto, la del usuario destino.
+static int cmd_switch(int argc, char **argv) {
+  if (argc != 2)
+    die("uso: aurora-switch <usuario>");
+  struct passwd *pw = getpwnam(argv[1]);
+  if (!pw)
+    die("aurora-switch: usuario '%s' desconocido", argv[1]);
+  if (geteuid() != 0)
+    die("aurora-switch: debe ser setuid root");
+  if (getuid() != 0) {
+    if (pw->pw_uid == getuid())
+      die("aurora-switch: ya eres %s", pw->pw_name);
+    char pass[256];
+    if (read_secret("Password: ", pass, sizeof(pass)) != 0)
+      return 1;
+    int bad = check_password(pw, pass);
+    memset(pass, 0, sizeof(pass));
+    if (bad) {
+      klog("[AUDIT] switch FALLIDO de uid=%u a %s", getuid(), pw->pw_name);
+      sleep(2);
+      die("aurora-switch: autenticacion fallida");
+    }
+  }
+  int fd = open("/run/aurora-session-request", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0)
+    die("aurora-switch: no puedo escribir la peticion: %s", strerror(errno));
+  dprintf(fd, "%s\n", pw->pw_name);
+  close(fd);
+  klog("[AUDIT] switch de sesion: uid=%u -> %s", getuid(), pw->pw_name);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   char *a0 = strdup(argv[0]);
   const char *b = basename(a0);
@@ -670,6 +706,8 @@ int main(int argc, char **argv) {
     return cmd_passwd(argc, argv);
   if (!strcmp(b, "aurora-useradd") || !strcmp(b, "useradd"))
     return cmd_useradd(argc, argv);
+  if (!strcmp(b, "aurora-switch"))
+    return cmd_switch(argc, argv);
   if (!strcmp(b, "sync")) {
     sync();
     return 0;

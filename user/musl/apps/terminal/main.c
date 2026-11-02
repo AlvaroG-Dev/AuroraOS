@@ -349,18 +349,25 @@ int main(int argc, char **argv) {
           login_mode = 2;
         }
       } else {
-        // [U5b] aur.session=user:<n> sin aur.login: entra directo como ese usuario.
-        char *sp = find_sub(cl, "aur.session=user:");
-        if (sp) {
-          sp += 17;
-          size_t sl = 0;
-          while (sp[sl] && sp[sl] != ' ' && sp[sl] != '\t' && sp[sl] != '\r' &&
-                 sp[sl] != '\n')
-            sl++;
-          if (sl && sl < sizeof(login_user)) {
-            memcpy(login_user, sp, sl);
-            login_user[sl] = '\0';
-            login_mode = 1;
+        // [U5b/U7.4] Sin aur.login: la sesion actual (/run/aurora-session, la
+        // escribe init y cambia con aurora-switch) decide el usuario.
+        int sfd = open("/run/aurora-session", O_RDONLY);
+        if (sfd >= 0) {
+          char sb[64];
+          long sn = read(sfd, sb, sizeof(sb) - 1);
+          close(sfd);
+          if (sn > 0) {
+            sb[sn] = '\0';
+            long sl = 0;
+            while (sb[sl] && sb[sl] != '\n' && sb[sl] != ' ')
+              sl++;
+            sb[sl] = '\0';
+            int is_root = (sl == 4 && sb[0] == 'r' && sb[1] == 'o' && sb[2] == 'o' &&
+                           sb[3] == 't');
+            if (sl > 0 && !is_root && (unsigned long)sl < sizeof(login_user)) {
+              memcpy(login_user, sb, (unsigned long)sl + 1);
+              login_mode = 1;
+            }
           }
         }
       }
