@@ -686,11 +686,14 @@ static int cmd_switch(int argc, char **argv) {
       die("aurora-switch: autenticacion fallida");
     }
   }
-  int fd = open("/run/aurora-session-request", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  // Escritura atomica: temporal + rename, para que init nunca vea una peticion vacia.
+  int fd = open("/run/.aurora-session-request.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (fd < 0)
     die("aurora-switch: no puedo escribir la peticion: %s", strerror(errno));
   dprintf(fd, "%s\n", pw->pw_name);
   close(fd);
+  if (rename("/run/.aurora-session-request.tmp", "/run/aurora-session-request") != 0)
+    die("aurora-switch: rename: %s", strerror(errno));
   klog("[AUDIT] switch de sesion: uid=%u -> %s", getuid(), pw->pw_name);
   return 0;
 }

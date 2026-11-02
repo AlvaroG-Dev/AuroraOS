@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TERMINAL_PATH "/usr/bin/terminal"
@@ -389,11 +390,11 @@ static void read_switch_request(char *name, size_t cap) {
     return;
   ssize_t n = read(fd, name, cap - 1);
   close(fd);
-  unlink("/run/aurora-session-request");
-  if (n <= 0) {
+  if (n <= 0) { // peticion a medio escribir: se reintenta en la proxima vuelta
     name[0] = '\0';
     return;
   }
+  unlink("/run/aurora-session-request");
   name[n] = '\0';
   name[strcspn(name, "\r\n ")] = '\0';
 }
@@ -418,6 +419,15 @@ int main(void) {
     // cambio de sesion que deja aurora-switch en /run (una senal a PID 1 no es
     // fiable aqui: el kernel la trata con la accion por defecto).
     pid_t pid = waitpid(-1, &status, WNOHANG);
+    {
+      static struct timespec last;
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      long gap = (now.tv_sec - last.tv_sec) * 1000 + (now.tv_nsec - last.tv_nsec) / 1000000;
+      if (last.tv_sec && gap > 2000)
+        fprintf(stderr, "init: bucle detenido %ld ms\n", gap);
+      last = now;
+    }
     if (pid == 0) {
       if (access("/run/aurora-session-request", F_OK) == 0)
         g_switch = 1;
