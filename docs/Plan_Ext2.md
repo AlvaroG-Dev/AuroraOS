@@ -182,6 +182,7 @@ Ver §5. Orden de escritura, huérfanos en disco (`s_last_orphan`), política `s
 - E5.3 `/etc/fstab` mínimo; `mount -a` en el arranque (util-linux `mount` precompilado lo usa con `mount(2)`); `/proc/mounts` coherente con `mountinfo`.
 - E5.4 `klog.file=/data/aurora.log` y `last_kmsg.log` (`save_prev_log_to_data`) funcionan sobre ext2; el log en vivo usa `fsync` con la frecuencia actual, ahora respaldado por la caché (comprobar impacto: ~1 escritura/100 ms).
 - **Hito E5:** ISO con `USB_DATA_FS=ext2`: arranca en QEMU y en el pendrive, `/data` es ext2 rw, el log en vivo se guarda, tras `poweroff` el host monta el USB y lee el log.
+- **Estado E5 (2026-11-02): E5.1, E5.2 y E5.4 hechas; E5.3 (fstab/mount -a) pendiente.** `USB_DATA_FS=ext2` (por defecto sigue fat32) crea la partición 2 con `mke2fs` y tipo MBR 0x83. `try_mount_data` monta ext2 con etiqueta `AURORADATA` en rw (si devuelve -EROFS avisa y monta ro); otros ext2 se montan ro. Verificado en QEMU con arranque UEFI solo-USB: `/data` rw, `klog.file=/data/aurora.log` en vivo, y tras `power off` el host ejecuta `e2fsck -fn` limpio y lee `aurora.log` y los ficheros escritos. Tras corte brusco hace falta `e2fsck` en el host (sin journal hasta E6). Falta probar en el pendrive real.
 
 ### E6 — Herramientas de usuario (M–L)
 Ver §6. `e2fsprogs` portado con glibc: `mke2fs`, `e2fsck`, `tune2fs`, `dumpe2fs`, `debugfs`, `resize2fs` (este último opcional), más `blkid` de util-linux (ya hay `libblkid.so.1`).
