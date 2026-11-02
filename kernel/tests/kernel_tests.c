@@ -6569,3 +6569,142 @@ static void test_lkpi_unload(void) {
   TEST_ASSERT(kur_loader_find_by_name("linuxkpi") == NULL, "linuxkpi sigue cargada");
 }
 REGISTER_TEST_FLAGS("linuxkpi: descarga de la capa", test_lkpi_unload, TEST_FLAG_BLOCKING);
+
+// ===========================================================================
+// [ext2 E0.2] bcache sobre un disco RAM (no toca ningún disco real).
+// ===========================================================================
+#include "../bcache.h"
+#include "../fsprobe.h"
+
+static uint8_t *g_bc_ram;
+static int g_bc_writes;
+
+static int bc_ram_submit(block_device_t *bdev, bio_t *bio) {
+  uint32_t ss = bdev->sector_size;
+  if (bio->op == BIO_READ)
+    memcpy(bio->buf, g_bc_ram + bio->lba * ss, (size_t)bio->count * ss);
+  else if (bio->op == BIO_WRITE) {
+    memcpy(g_bc_ram + bio->lba * ss, bio->buf, (size_t)bio->count * ss);
+    g_bc_writes++;
+  }
+  bio->error = 0;
+  return 0;
+}
+static block_ops_t bc_ram_ops = {.submit = bc_ram_submit};
+
+static void test_bcache_basic(void) {
+  const uint32_t SECT = 512, NSECT = 256; // 128 KiB
+  g_bc_ram = kzalloc(SECT * NSECT);
+  TEST_ASSERT(g_bc_ram != NULL, "sin memoria");
+  if (!g_bc_ram)
+    return;
+  for (uint32_t i = 0; i < SECT * NSECT; i++)
+    g_bc_ram[i] = (uint8_t)(i * 7 + (i >> 8));
+  g_bc_writes = 0;
+
+  block_device_t dev;
+  memset(&dev, 0, sizeof(dev));
+  strcpy(dev.name, "bcram0");
+  dev.num_sectors = NSECT;
+  dev.sector_size = SECT;
+  dev.ops = &bc_ram_ops;
+
+  uint8_t expect[1024];
+  memcpy(expect, g_bc_ram + 3 * 1024, 1024);
+  bc_buf_t *b = bc_get(&dev, 3, 1024);
+  TEST_ASSERT(b != NULL, "bc_get falló");
+  TEST_ASSERT(b && memcmp(bc_data(b), expect, 1024) == 0, "contenido leído");
+
+  // Fuera de rango y bs inválido.
+  TEST_ASSERT(bc_get(&dev, 1000000, 1024) == NULL, "bloque fuera de rango");
+  TEST_ASSERT(bc_get(&dev, 0, 1000) == NULL, "bs no potencia de 2");
+  TEST_ASSERT(bc_get(&dev, 0, 256) == NULL, "bs < sector");
+
+  // Escritura diferida: no llega al disco hasta sync.
+  ((uint8_t *)bc_data(b))[10] = 0xAB;
+  bc_mark_dirty(b);
+  TEST_ASSERT(g_bc_ram[3 * 1024 + 10] != 0xAB, "write-back: aún no escrito");
+  TEST_ASSERT(bc_invalidate_dev(&dev) == -EBUSY, "invalidate con ref activa");
+  bc_put(b);
+  TEST_ASSERT(bc_sync_dev(&dev) == 0, "sync");
+  TEST_ASSERT(g_bc_ram[3 * 1024 + 10] == 0xAB, "tras sync está en disco");
+  TEST_ASSERT(g_bc_writes == 1, "una sola escritura (%d)", g_bc_writes);
+
+  // Acierto en caché: no relee (cambio el disco por debajo y debe verse lo viejo).
+  g_bc_ram[3 * 1024 + 11] = 0x5A;
+  b = bc_get(&dev, 3, 1024);
+  TEST_ASSERT(b && ((uint8_t *)bc_data(b))[11] != 0x5A, "hit sin releer");
+  bc_put(b);
+  // Tras invalidar sí relee.
+  TEST_ASSERT(bc_invalidate_dev(&dev) == 0, "invalidate");
+  b = bc_get(&dev, 3, 1024);
+  TEST_ASSERT(b && ((uint8_t *)bc_data(b))[11] == 0x5A, "relee tras invalidar");
+  bc_put(b);
+
+  // bc_get_new: a cero sin leer.
+  b = bc_get_new(&dev, 9, 1024);
+  int zero = 1;
+  for (uint32_t i = 0; b && i < 1024; i++)
+    if (((uint8_t *)bc_data(b))[i])
+      zero = 0;
+  TEST_ASSERT(b && zero, "get_new a cero");
+  bc_put(b);
+
+  // Expulsión: con tope de 8 KiB y 32 bloques sucios, no se pierde ninguno.
+  bc_set_limit(8 * 1024);
+  for (uint32_t i = 0; i < 32; i++) {
+    b = bc_get(&dev, 20 + i, 1024);
+    TEST_ASSERT(b != NULL, "get %u", i);
+    if (!b)
+      break;
+    ((uint8_t *)bc_data(b))[0] = (uint8_t)(0xC0 + i);
+    bc_mark_dirty(b);
+    bc_put(b);
+  }
+  struct bc_stats st;
+  bc_get_stats(&st);
+  TEST_ASSERT(st.bufs <= 9, "tope respetado (%llu bufs)", (unsigned long long)st.bufs);
+  TEST_ASSERT(st.evictions > 0, "hubo expulsiones");
+  TEST_ASSERT(bc_sync_dev(&dev) == 0, "sync final");
+  int ok = 1;
+  for (uint32_t i = 0; i < 32; i++)
+    if (g_bc_ram[(20 + i) * 1024] != (uint8_t)(0xC0 + i))
+      ok = 0;
+  TEST_ASSERT(ok, "ningún bloque sucio perdido por la expulsión");
+
+  TEST_ASSERT(bc_invalidate_dev(&dev) == 0, "invalidate final");
+  bc_set_limit(16 * 1024 * 1024);
+  kfree(g_bc_ram);
+  g_bc_ram = NULL;
+}
+REGISTER_TEST("bcache: lectura, write-back, expulsión", test_bcache_basic);
+
+static void test_fsprobe_signatures(void) {
+  const uint32_t SECT = 512, NSECT = 128;
+  g_bc_ram = kzalloc(SECT * NSECT);
+  TEST_ASSERT(g_bc_ram != NULL, "sin memoria");
+  if (!g_bc_ram)
+    return;
+  block_device_t dev;
+  memset(&dev, 0, sizeof(dev));
+  strcpy(dev.name, "fpram0");
+  dev.num_sectors = NSECT;
+  dev.sector_size = SECT;
+  dev.ops = &bc_ram_ops;
+
+  TEST_ASSERT(fs_probe(&dev) == FS_UNKNOWN, "disco vacío");
+  g_bc_ram[1024 + 56] = 0x53;
+  g_bc_ram[1024 + 57] = 0xEF;
+  TEST_ASSERT(fs_probe(&dev) == FS_EXT2, "ext2 por s_magic");
+  memset(g_bc_ram, 0, SECT * NSECT);
+  memcpy(g_bc_ram + 82, "FAT32   ", 8);
+  g_bc_ram[510] = 0x55;
+  g_bc_ram[511] = 0xAA;
+  TEST_ASSERT(fs_probe(&dev) == FS_FAT32, "FAT32 por BPB");
+  memset(g_bc_ram, 0, SECT * NSECT);
+  memcpy(g_bc_ram + 32769, "CD001", 5);
+  TEST_ASSERT(fs_probe(&dev) == FS_ISO9660, "iso por CD001");
+  kfree(g_bc_ram);
+  g_bc_ram = NULL;
+}
+REGISTER_TEST("fsprobe: firmas ext2/FAT32", test_fsprobe_signatures);

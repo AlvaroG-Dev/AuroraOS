@@ -13,7 +13,10 @@
 #include "cpu.h"
 #include "epoll.h"
 #include "kmod_sys.h"
+#include "ext2.h"
 #include "fat32.h"
+#include "iso9660.h"
+#include "tmpfs.h"
 #include "futex.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
@@ -342,19 +345,19 @@ static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size, uint64_t dev,
   }
   out->st_dev = (int64_t)dev;
   out->st_ino = vs->inode;
-  out->st_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
+  out->st_nlink = vs->nlink ? vs->nlink : ((vs->flags & VFS_DIRECTORY) ? 2 : 1);
   out->st_mode = mode;
   out->st_uid = vs->uid;
   out->st_gid = vs->gid;
   out->st_rdev = (int64_t)vs->rdev;
   out->st_size = (int64_t)size;
   out->st_blksize = 512;
-  out->st_blocks = (int64_t)((size + 511) / 512);
+  out->st_blocks = vs->blocks ? (int64_t)vs->blocks : (int64_t)((size + 511) / 512);
   out->st_mtime_sec = vs->mtime_sec;
   out->st_mtime_nsec = 0;
-  out->st_atime_sec = vs->mtime_sec;
+  out->st_atime_sec = vs->atime_sec ? vs->atime_sec : vs->mtime_sec;
   out->st_atime_nsec = 0;
-  out->st_ctime_sec = vs->mtime_sec;
+  out->st_ctime_sec = vs->ctime_sec ? vs->ctime_sec : vs->mtime_sec;
   out->st_ctime_nsec = 0;
 }
 
@@ -526,6 +529,8 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
 
   // O_NONBLOCK viaja hasta ops->open y queda en fd->flags (F_GETFL).
   aflags |= (linux_flags & LINUX_O_NONBLOCK);
+  if (linux_flags & 010000) // O_DSYNC (incluido en O_SYNC)
+    aflags |= VFS_O_SYNC;
   int fd = vfs_open_for_proc(proc, kpath, aflags);
   if (fd < 0) {
     // git/coreutils sondean ENOENT constantemente (buscan un objeto
@@ -548,8 +553,10 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
   }
   if (linux_flags & LINUX_O_APPEND) {
     file_descriptor_t *f = proc->fds[fd];
-    if (f && f->node)
+    if (f && f->node) {
       f->offset = f->node->size;
+      f->flags |= VFS_O_APPEND; // write() reposiciona al final en cada llamada
+    }
   }
   return fd;
 }
@@ -716,6 +723,10 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .uid = node->uid,
       .gid = node->gid,
       .rdev = node->rdev,
+      .nlink = node->nlink,
+      .atime_sec = node->atime_sec,
+      .ctime_sec = node->ctime_sec,
+      .blocks = node->blocks,
   };
   // [df] Capturar el device ANTES de liberar el nodo.
   uint64_t dev = fs_dev_id(node->fs);
@@ -821,6 +832,10 @@ static int64_t k_fstatat(uint64_t dfd, uint64_t path, uint64_t statbuf,
       .uid = node->uid,
       .gid = node->gid,
       .rdev = node->rdev,
+      .nlink = node->nlink,
+      .atime_sec = node->atime_sec,
+      .ctime_sec = node->ctime_sec,
+      .blocks = node->blocks,
   };
   // [df] Capturar el device ANTES de liberar el nodo.
   uint64_t dev = fs_dev_id(node->fs);
@@ -981,14 +996,8 @@ static int64_t k_unlink(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
-    return -EFAULT;
-  char p[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path, p, sizeof(p));
-  if (rc != 0)
-    return rc;
-  return vfs_unlink(p);
+  // unlink(2) = unlinkat(AT_FDCWD, path, 0): un directorio da -EISDIR.
+  return k_unlinkat((uint64_t)AT_FDCWD, path, 0, 0, 0);
 }
 
 static int64_t k_rename(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
@@ -1147,6 +1156,34 @@ static int64_t k_madvise(uint64_t addr, uint64_t len, uint64_t advice,
   if (!proc)
     return -EFAULT;
   return sys_madvise(proc, addr, len, advice);
+}
+
+// msync(addr, len, flags): vuelca los ficheros respaldados por MAP_SHARED que
+// toquen [addr, addr+len). Siempre síncrono (MS_ASYNC/MS_SYNC dan igual).
+static int64_t k_msync(uint64_t addr, uint64_t len, uint64_t flags, uint64_t a4,
+                       uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((addr & 0xFFF) || (flags & ~7ULL))
+    return -EINVAL;
+  uint64_t end = addr + len;
+  if (end < addr)
+    return -ENOMEM;
+  int rc = 0;
+  for (vma_t *v = proc->vma_list; v; v = v->next) {
+    if (v->end <= addr || v->start >= end)
+      continue;
+    if (v->type == VMA_SHARED && v->file_fd && v->file_fd->node &&
+        v->file_fd->node->ops && v->file_fd->node->ops->fsync) {
+      int r = v->file_fd->node->ops->fsync(v->file_fd->node);
+      if (r != 0)
+        rc = r;
+    }
+  }
+  return rc;
 }
 
 static int64_t k_brk(uint64_t addr, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -2180,8 +2217,8 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     return -EFAULT;
 
   // Buffer en pila para un linux_dirent64 con nombre de hasta
-  // VFS_PATH_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 128 + padding ≈ 160.
-  uint8_t kbuf[256];
+  // VFS_NAME_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 255 + NUL + padding ≈ 280.
+  uint8_t kbuf[320]; // 19 + 255 + NUL, alineado a 8
   size_t pos = 0;
   uint64_t index = f->offset;
   uint64_t start_index = index;
@@ -2215,6 +2252,12 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
       d->d_type = DT_CHR;
     else if (ent.type == VFS_SYMLINK_ENT)
       d->d_type = 10; // DT_LNK
+    else if (ent.type == VFS_FIFO_ENT)
+      d->d_type = 1; // DT_FIFO
+    else if (ent.type == VFS_SOCK_ENT)
+      d->d_type = 12; // DT_SOCK
+    else if (ent.type == VFS_BLK_ENT)
+      d->d_type = 6; // DT_BLK
     else
       d->d_type = DT_REG;
     memcpy(d->d_name, ent.name, namelen);
@@ -3839,16 +3882,16 @@ static void vfs_to_statx(const vfs_stat_t *vs, uint64_t size, uint64_t dev,
 
   out->stx_mask = STATX_BASIC_STATS;
   out->stx_blksize = 512;
-  out->stx_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
+  out->stx_nlink = vs->nlink ? vs->nlink : ((vs->flags & VFS_DIRECTORY) ? 2 : 1);
   out->stx_uid = vs->uid;
   out->stx_gid = vs->gid;
   out->stx_mode = (uint16_t)(mode & 0xFFFF);
   out->stx_ino = vs->inode;
   out->stx_size = size;
-  out->stx_blocks = (size + 511) / 512;
-  out->stx_atime.tv_sec = vs->mtime_sec;
+  out->stx_blocks = vs->blocks ? vs->blocks : (size + 511) / 512;
+  out->stx_atime.tv_sec = vs->atime_sec ? vs->atime_sec : vs->mtime_sec;
   out->stx_mtime.tv_sec = vs->mtime_sec;
-  out->stx_ctime.tv_sec = vs->mtime_sec;
+  out->stx_ctime.tv_sec = vs->ctime_sec ? vs->ctime_sec : vs->mtime_sec;
 
   uint32_t ftype = mode & S_IFMT;
   if (ftype == S_IFCHR || ftype == S_IFBLK) {
@@ -3968,6 +4011,10 @@ static int64_t k_statx(uint64_t dfd, uint64_t path_uptr, uint64_t flags,
       .uid = node->uid,
       .gid = node->gid,
       .rdev = node->rdev,
+      .nlink = node->nlink,
+      .atime_sec = node->atime_sec,
+      .ctime_sec = node->ctime_sec,
+      .blocks = node->blocks,
   };
   uint64_t dev = fs_dev_id(node->fs);
   vfs_node_free(node);
@@ -4580,6 +4627,24 @@ static int64_t k_lchown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
   // lchown == chown para FS que no soportan symlink-follow at chown.
   // tarfs es RO, así que devolverá -EROFS igual.
   return k_chown(path_ptr, uid, gid, a4, a5);
+}
+
+// fchownat(dfd, path, uid, gid, flags): AT_FDCWD o ruta absoluta; con
+// AT_EMPTY_PATH y ruta vacia equivale a fchown(dfd).
+static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
+                          uint64_t gid, uint64_t flags) {
+  char c = 0;
+  if ((flags & 0x1000) && path_ptr && copy_from_user(&c, (const void *)path_ptr, 1) == 0 &&
+      c == '\0')
+    return k_fchown(dfd, uid, gid, 0, 0);
+  if ((int)dfd != AT_FDCWD) {
+    char first = 0;
+    if (!path_ptr || copy_from_user(&first, (const void *)path_ptr, 1) != 0)
+      return -EFAULT;
+    if (first != '/')
+      return -EINVAL;
+  }
+  return k_chown(path_ptr, uid, gid, 0, 0);
 }
 
 // ---------- [4.2] utimensat ----------
@@ -6189,11 +6254,150 @@ static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  // No tenemos write-back cache: FAT32 sincroniza en cada write,
-  // tarfs es RO, procfs/sysfs/devfs no escriben a disco. No hay nada
-  // que volcar. Devolver 0 es correcto (Linux también lo hace en
-  // sistemas sin dirty pages).
+  // Vuelca todos los FS con caché propia (FAT32 difiere las escrituras; ext2
+  // también lo hará). tarfs/procfs/sysfs/devfs/tmpfs no tienen ops->sync.
+  vfs_sync_all();
   return 0;
+}
+
+// ---------- mount(2) / umount2(2) ----------
+// Valores MS_* de Linux (coinciden con VFS_MS_* en los bits que usamos).
+#define K_MS_REMOUNT 32
+#define K_MS_BIND 4096
+#define K_MS_KNOWN_FLAGS                                                       \
+  (VFS_MS_RDONLY | VFS_MS_NOSUID | VFS_MS_NODEV | VFS_MS_NOEXEC |              \
+   VFS_MS_SYNCHRONOUS | VFS_MS_NOATIME | K_MS_REMOUNT | K_MS_BIND)
+
+// mount(source, target, fstype, flags, data). Solo root.
+// Tipos: vfat/msdos (FAT32), iso9660, tmpfs; MS_BIND; MS_REMOUNT (solo flags).
+static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
+                       uint64_t mflags, uint64_t data_ptr) {
+  (void)data_ptr;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (proc->euid != 0)
+    return -EPERM;
+
+  char target[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)tgt_ptr, target, sizeof(target));
+  if (rc != 0)
+    return rc;
+
+  unsigned long fl = (unsigned long)mflags & K_MS_KNOWN_FLAGS;
+
+  if (fl & K_MS_REMOUNT) {
+    if (!vfs_get_mount_ops(target))
+      return -EINVAL;
+    unsigned long nf = fl & ~(unsigned long)(K_MS_REMOUNT | K_MS_BIND);
+    {
+      struct vfs_fs_ops *ro_ops = vfs_get_mount_ops(target);
+      if (ro_ops && ro_ops->name && strcmp(ro_ops->name, "ext2") == 0) {
+        int erc = ext2_remount(vfs_get_mount_priv(target), !(nf & VFS_MS_RDONLY));
+        if (erc != 0)
+          return erc;
+      }
+    }
+    if (nf & VFS_MS_RDONLY) { // rw -> ro: volcar antes de cerrar la puerta
+      struct vfs_fs_ops *o = vfs_get_mount_ops(target);
+      void *pv = vfs_get_mount_priv(target);
+      if (o && o->sync && pv)
+        o->sync(pv);
+    }
+    return vfs_set_mount_flags(target, nf);
+  }
+
+  char src[VFS_PATH_MAX];
+  src[0] = '\0';
+  if (src_ptr) {
+    long n = strncpy_from_user(src, (const char *)src_ptr, sizeof(src));
+    if (n < 0)
+      return -EFAULT;
+    if ((size_t)n >= sizeof(src))
+      return -ENAMETOOLONG;
+  }
+
+  if (fl & K_MS_BIND) {
+    char sp[VFS_PATH_MAX];
+    rc = resolve_user_path(proc, (const char *)src_ptr, sp, sizeof(sp));
+    if (rc != 0)
+      return rc;
+    return vfs_mount_bind(target, sp);
+  }
+
+  char type[16];
+  long tn = strncpy_from_user(type, (const char *)type_ptr, sizeof(type));
+  if (tn < 0)
+    return -EFAULT;
+  if ((size_t)tn >= sizeof(type))
+    return -ENODEV;
+
+  // Debe existir el punto de montaje y ser un directorio.
+  vfs_node_t *mp = vfs_lookup(target);
+  if (!mp)
+    return -ENOENT;
+  int is_dir = (mp->flags & VFS_DIRECTORY) != 0;
+  vfs_node_free(mp);
+  if (!is_dir)
+    return -ENOTDIR;
+
+  unsigned long keep = fl & ~(unsigned long)(K_MS_REMOUNT | K_MS_BIND);
+
+  if (strcmp(type, "tmpfs") == 0) {
+    void *priv = tmpfs_new(64 * 1024 * 1024);
+    if (!priv)
+      return -ENOMEM;
+    rc = vfs_mount(target, tmpfs_get_vfs_ops(), priv);
+    if (rc == 0)
+      vfs_set_mount_flags(target, keep);
+    return rc;
+  }
+
+  int is_vfat = strcmp(type, "vfat") == 0 || strcmp(type, "msdos") == 0;
+  int is_iso = strcmp(type, "iso9660") == 0;
+  // ext3/ext4 se aceptan como nombre: el driver rechaza lo que no soporta.
+  int is_ext2 = strcmp(type, "ext2") == 0 || strcmp(type, "ext3") == 0 ||
+                strcmp(type, "ext4") == 0;
+  if (!is_vfat && !is_iso && !is_ext2)
+    return -ENODEV;
+
+  // "/dev/sda1" -> "sda1"
+  const char *bn = src;
+  for (const char *c = src; *c; c++)
+    if (*c == '/')
+      bn = c + 1;
+  if (!*bn)
+    return -EINVAL;
+
+  rc = is_vfat  ? fat32_mount_bdev(bn, target)
+       : is_ext2 ? ext2_mount_bdev_rw(bn, target, !(keep & VFS_MS_RDONLY))
+                 : iso9660_mount_bdev(bn, target);
+  if (rc == 0) {
+    if (is_iso)
+      keep |= VFS_MS_RDONLY;
+    vfs_set_mount_flags(target, keep);
+  }
+  return rc;
+}
+
+#define K_MNT_FORCE 1
+#define K_MNT_DETACH 2
+static int64_t k_umount2(uint64_t path_ptr, uint64_t uflags, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)uflags; // FORCE/DETACH no soportados: se comporta como umount normal
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (proc->euid != 0)
+    return -EPERM;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return vfs_umount_fs(path);
 }
 
 #define LINUX_REBOOT_MAGIC1 0xfee1dead
@@ -7235,6 +7439,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_MMAP] = {k_mmap, "mmap"},
     [SYS_MREMAP] = {k_mremap, "mremap"},
     [SYS_MPROTECT] = {k_mprotect, "mprotect"},
+    [SYS_MSYNC] = {k_msync, "msync"},
     [SYS_MADVISE] = {k_madvise, "madvise"},
     [SYS_FSTATFS] = {k_fstatfs, "fstatfs"},
     [SYS_STATFS] = {k_statfs, "statfs"},
@@ -7242,6 +7447,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CHMOD] = {k_chmod, "chmod"},
     [SYS_FCHMOD] = {k_fchmod, "fchmod"},
     [SYS_CHOWN] = {k_chown, "chown"},
+    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_FCHOWN] = {k_fchown, "fchown"},
     [SYS_LCHOWN] = {k_lchown, "lchown"},
     [SYS_GETRUSAGE] = {k_getrusage, "getrusage"},
@@ -7398,6 +7604,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_EVENTFD] = {k_eventfd, "eventfd"},
     [SYS_EVENTFD2] = {k_eventfd2, "eventfd2"},
     [SYS_SYNC] = {k_sync, "sync"},
+    [SYS_MOUNT] = {k_mount, "mount"},
+    [SYS_UMOUNT2] = {k_umount2, "umount2"},
     [SYS_REBOOT] = {k_reboot, "reboot"},
     [SYS_SWAPON] = {k_swapon, "swapon"},
     [SYS_SWAPOFF] = {k_swapoff, "swapoff"},

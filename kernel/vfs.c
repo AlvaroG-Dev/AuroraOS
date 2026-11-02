@@ -93,6 +93,7 @@ struct vfs_mount {
   vfs_fs_ops_t *ops;
   void *fs_priv;
   int is_bind;
+  unsigned long mflags; // VFS_MS_*
   char bind_source[VFS_PATH_MAX];
   struct vfs_mount *next;
 };
@@ -459,6 +460,147 @@ void *vfs_get_mount_priv(const char *path) {
   return ret;
 }
 
+
+// ---------------------------------------------------------------------------
+// [ext2 E0.1] Banderas de montaje, umount con comprobación de uso, sync global.
+// ---------------------------------------------------------------------------
+unsigned long vfs_mount_flags(const char *path) {
+  if (!path)
+    return 0;
+  char norm[VFS_PATH_MAX];
+  if (normalize_path(path, norm, sizeof(norm)) != 0)
+    return 0;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  unsigned long ret = 0;
+  size_t best_len = 0, norm_len = strlen(norm);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    size_t ml = strlen(m->path);
+    if (ml <= best_len)
+      continue;
+    int match = (ml == 1 && m->path[0] == '/') ||
+                (ml <= norm_len && strncmp(norm, m->path, ml) == 0 &&
+                 (norm[ml] == '\0' || norm[ml] == '/'));
+    if (match) {
+      best_len = ml;
+      ret = m->mflags;
+    }
+  }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  return ret;
+}
+
+int vfs_set_mount_flags(const char *path, unsigned long mflags) {
+  if (!path)
+    return -EINVAL;
+  char norm[VFS_PATH_MAX];
+  int rc = normalize_path(path, norm, sizeof(norm));
+  if (rc != 0)
+    return rc;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  rc = -EINVAL;
+  for (struct vfs_mount *m = g_mounts; m; m = m->next)
+    if (strcmp(m->path, norm) == 0) {
+      m->mflags = mflags;
+      rc = 0;
+      break;
+    }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  return rc;
+}
+
+int vfs_sync_all(void) {
+  struct {
+    vfs_fs_ops_t *ops;
+    void *priv;
+  } snap[32];
+  int n = 0;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m && n < 32; m = m->next)
+    if (!m->is_bind && m->ops && m->ops->sync) {
+      snap[n].ops = m->ops;
+      snap[n].priv = m->fs_priv;
+      n++;
+    }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  int worst = 0;
+  for (int i = 0; i < n; i++) {
+    int rc = snap[i].ops->sync(snap[i].priv);
+    if (rc != 0)
+      worst = rc;
+  }
+  return worst;
+}
+
+struct umount_busy_arg {
+  const char *path;
+  size_t len;
+  int busy;
+};
+
+static int path_is_under(const char *p, const char *mp, size_t mlen) {
+  if (mlen == 1) // "/" : todo cuelga de ahí
+    return p[0] == '/';
+  return strncmp(p, mp, mlen) == 0 && (p[mlen] == '\0' || p[mlen] == '/');
+}
+
+static int umount_busy_cb(process_t *p, void *argp) {
+  struct umount_busy_arg *a = (struct umount_busy_arg *)argp;
+  if (path_is_under(p->cwd, a->path, a->len)) {
+    a->busy = 1;
+    return 1;
+  }
+  for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+    file_descriptor_t *f = p->fds[i];
+    if (f && f->node && path_is_under(f->node->name, a->path, a->len)) {
+      a->busy = 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int vfs_umount_fs(const char *path) {
+  if (!path)
+    return -EINVAL;
+  char norm[VFS_PATH_MAX];
+  int rc = normalize_path(path, norm, sizeof(norm));
+  if (rc != 0)
+    return rc;
+  if (strcmp(norm, "/") == 0)
+    return -EBUSY;
+
+  // Solo cuentan los mounts con FS propio; un bind no tiene estado que liberar.
+  vfs_fs_ops_t *ops = NULL;
+  void *priv = NULL;
+  int is_bind = 0, found = 0;
+  unsigned long fl = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next)
+    if (strcmp(m->path, norm) == 0) {
+      ops = m->ops;
+      priv = m->fs_priv;
+      is_bind = m->is_bind;
+      found = 1;
+      break;
+    }
+  spin_unlock_irqrestore(&g_mounts_lock, fl);
+  if (!found)
+    return -ENOENT;
+
+  struct umount_busy_arg ba = {.path = norm, .len = strlen(norm), .busy = 0};
+  process_for_each(umount_busy_cb, &ba);
+  if (ba.busy)
+    return -EBUSY;
+
+  if (!is_bind && ops && ops->sync)
+    ops->sync(priv);
+  rc = vfs_umount(norm); // -EBUSY si hay mounts anidados
+  if (rc != 0)
+    return rc;
+  if (!is_bind && ops && ops->umount)
+    ops->umount(priv);
+  return 0;
+}
+
 // ===========================================================================
 // Lookup
 // ===========================================================================
@@ -632,7 +774,8 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
     node->ref_count = 1;
   }
 
-  if (!node && ops->name && strcmp(ops->name, "sysfs") == 0) {
+  if (!node && ops->name &&
+      (strcmp(ops->name, "sysfs") == 0 || strcmp(ops->name, "ext2") == 0)) {
     char expanded[VFS_PATH_MAX];
     if (expand_mid_symlink(norm, expanded, sizeof(expanded)))
       return vfs_lookup_rec(expanded, depth + 1, no_follow);
@@ -742,6 +885,12 @@ static vfs_node_t *resolve_parent(const char *path, char *base_out,
   if (!(parent->flags & VFS_DIRECTORY)) {
     vfs_node_free(parent);
     *rc_out = -ENOTDIR;
+    return NULL;
+  }
+  // Mounts con VFS_MS_RDONLY: ninguna modificación del espacio de nombres.
+  if (vfs_mount_flags(dir_path) & VFS_MS_RDONLY) {
+    vfs_node_free(parent);
+    *rc_out = -EROFS;
     return NULL;
   }
   *rc_out = 0;
@@ -863,6 +1012,8 @@ int vfs_unlink(const char *path) {
 int vfs_truncate(const char *path, uint64_t new_size) {
   if (!path)
     return -EINVAL;
+  if (vfs_mount_flags(path) & VFS_MS_RDONLY)
+    return -EROFS;
 
   vfs_node_t *node = vfs_lookup(path);
   if (!node)
@@ -1155,6 +1306,8 @@ int vfs_readlink(const char *path, char *buf, size_t bufsize) {
 int vfs_utimes(const char *path, int64_t mtime_sec) {
   if (!path)
     return -EINVAL;
+  if (vfs_mount_flags(path) & VFS_MS_RDONLY)
+    return -EROFS;
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node) {
     return -ENOENT;
@@ -1252,6 +1405,8 @@ int vfs_chmod(const char *path, uint32_t mode) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
+  if (path && (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
 
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node)
@@ -1290,6 +1445,8 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
+  if (path && (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
 
   // Solo root puede cambiar el owner en Aurora (sin CAP_CHOWN por ahora).
   if (proc->euid != 0)
@@ -2740,6 +2897,11 @@ static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
   if (free_fd == -1)
     return -EMFILE;
 
+  // Escritura/creación/truncado en un mount de solo lectura.
+  if ((flags & (O_WRONLY | O_RDWR | O_CREAT | 0x200 /*O_TRUNC*/)) &&
+      (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
+
   // /dev/ptmx y /dev/pts/N crean recursos frescos en cada open. La
   // firma de ops->open no permite pasar contexto por-open, así que
   // interceptamos aquí.
@@ -2771,6 +2933,16 @@ static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
     LOG_TRACE("[VFS-OPEN-FAIL] lookup('%s')=NULL", path);
     return -ENOENT;
   }
+
+  unsigned long mflags = vfs_mount_flags(path);
+  if ((mflags & VFS_MS_NODEV) &&
+      ((node->flags & VFS_CHARDEVICE) || (node->mode & S_IFMT) == S_IFCHR ||
+       (node->mode & S_IFMT) == S_IFBLK)) { // mount -o nodev
+    vfs_node_free(node);
+    return -EACCES;
+  }
+  if (mflags & VFS_MS_SYNCHRONOUS)
+    flags |= VFS_O_SYNC;
 
   // [3.4.d] Comprobar permiso según los flags de apertura.
   int acc_mask = (flags & (O_WRONLY | O_RDWR)) ? VFS_W_OK : VFS_R_OK;
@@ -3024,7 +3196,12 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       break;
     }
 
-    int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
+    // O_APPEND: dos fds sobre el mismo fichero deben añadir al final real,
+    // no a su copia del tamaño. ext2 acepta (uint64_t)-1 como "al final".
+    int append_ext2 = (f->flags & VFS_O_APPEND) && f->node->fs &&
+                      f->node->fs->name && strcmp(f->node->fs->name, "ext2") == 0;
+    int64_t bytes = f->node->ops->write(
+        f->node, append_ext2 ? (uint64_t)-1 : f->offset, chunk, kbuf);
     if (bytes < 0) {
       if (total == 0) {
         kfree(kbuf);
@@ -3041,13 +3218,16 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       return total > 0 ? (int64_t)total : -EIO;
     }
 
-    f->offset += (uint64_t)bytes;
+    f->offset = append_ext2 ? (uint64_t)f->node->size : f->offset + (uint64_t)bytes;
     total += (size_t)bytes;
     if ((size_t)bytes < chunk)
       break;
   }
 
   kfree(kbuf);
+  if (total > 0 && (f->flags & VFS_O_SYNC) && f->node && f->node->ops &&
+      f->node->ops->fsync)
+    f->node->ops->fsync(f->node); // O_SYNC / mount -o sync
   mutex_unlock(&f->lock);
   fd_put(f);
   return (int64_t)total;
@@ -3205,6 +3385,9 @@ int64_t vfs_pwrite_for_proc(void *proc_ptr, int fd, const void *buf,
   }
 
   kfree(kbuf);
+  if (total > 0 && (f->flags & VFS_O_SYNC) && f->node && f->node->ops &&
+      f->node->ops->fsync)
+    f->node->ops->fsync(f->node); // O_SYNC / mount -o sync
   mutex_unlock(&f->lock);
   fd_put(f);
   return (int64_t)total;
@@ -3309,6 +3492,10 @@ int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st) {
   st->uid = f->node->uid;
   st->gid = f->node->gid;
   st->rdev = f->node->rdev;
+  st->nlink = f->node->nlink;
+  st->atime_sec = f->node->atime_sec;
+  st->ctime_sec = f->node->ctime_sec;
+  st->blocks = f->node->blocks;
   clac();
   return 0;
 }
