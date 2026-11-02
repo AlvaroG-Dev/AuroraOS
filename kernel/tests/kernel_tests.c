@@ -4816,7 +4816,10 @@ static void test_vfs_check_access_owner_group_other(void) {
 
   // 1. Root: todo OK.
   fake.euid = 0;
+  fake.fsuid = 0;
+  fake.cap_eff = CAP_FULL_MASK;
   fake.egid = 0;
+  fake.fsgid = 0;
   fake.ngroups = 0;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "root R");
   TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "root W");
@@ -4824,25 +4827,37 @@ static void test_vfs_check_access_owner_group_other(void) {
 
   // 2. Owner uid=1000: rw-.
   fake.euid = 1000;
+  fake.fsuid = 1000;
+  fake.cap_eff = 0;
   fake.egid = 1000;
+  fake.fsgid = 1000;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "owner R");
   TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "owner W");
   TEST_ASSERT(vfs_check_access(&n, VFS_X_OK) != 0, "owner X debe fallar");
 
   // 3. Group gid=1000, uid distinto: r--.
   fake.euid = 2000;
+  fake.fsuid = 2000;
+  fake.cap_eff = 0;
   fake.egid = 1000;
+  fake.fsgid = 1000;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "group R");
   TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) != 0, "group W debe fallar");
 
   // 4. Otro uid/gid: ---.
   fake.euid = 3000;
+  fake.fsuid = 3000;
+  fake.cap_eff = 0;
   fake.egid = 3000;
+  fake.fsgid = 3000;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) != 0, "other R debe fallar");
 
   // 5. Grupo suplementario: egid=3000 pero groups[0]=1000.
   fake.euid = 3000;
+  fake.fsuid = 3000;
+  fake.cap_eff = 0;
   fake.egid = 3000;
+  fake.fsgid = 3000;
   fake.groups[0] = 1000;
   fake.ngroups = 1;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "suppl group R");
@@ -4869,7 +4884,10 @@ static void test_vfs_check_access_root_x_file(void) {
   n.mode = S_IFREG | 0000; // sin ningún bit
 
   fake.euid = 0;
+  fake.fsuid = 0;
+  fake.cap_eff = CAP_FULL_MASK;
   fake.egid = 0;
+  fake.fsgid = 0;
 
   // Root bypasea R/W aunque no tenga bits...
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "root R sobre 0000");
