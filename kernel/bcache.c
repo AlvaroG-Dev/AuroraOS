@@ -10,6 +10,7 @@
 #define BC_HASH_BUCKETS 1024
 #define BC_DEFAULT_LIMIT (16u * 1024u * 1024u)
 #define BC_MAX_BS 4096u
+#define BC_RA_MAX 64u // bloques por lectura anticipada
 
 struct bc_buf {
   block_device_t *bdev;
@@ -205,6 +206,74 @@ bc_buf_t *bc_get_new(block_device_t *bdev, uint64_t blk, uint32_t bs) {
     mutex_unlock(&g_bc_lock);
   }
   return b;
+}
+
+int bc_present(block_device_t *bdev, uint64_t blk) {
+  if (!g_bc_inited || !bdev)
+    return 0;
+  mutex_lock(&g_bc_lock);
+  int r = hash_find(bdev, blk) != NULL;
+  mutex_unlock(&g_bc_lock);
+  return r;
+}
+
+// Lectura anticipada: trae de una sola petición los bloques consecutivos
+// blk..blk+count-1 que aún no estén en caché (se detiene en el primero que ya
+// esté). Los deja sin referencias. Devuelve cuántos cargó (0 si no hizo nada;
+// el llamante sigue con bc_get normal, que informa de los errores).
+int bc_readahead(block_device_t *bdev, uint64_t blk, uint32_t count,
+                 uint32_t bs) {
+  if (!bc_args_ok(bdev, bs) || count == 0)
+    return 0;
+  if (count > BC_RA_MAX)
+    count = BC_RA_MAX;
+  uint64_t nblocks = bdev->num_sectors * bdev->sector_size / bs;
+  mutex_lock(&g_bc_lock);
+  uint32_t n = 0;
+  while (n < count && blk + n < nblocks && !hash_find(bdev, blk + n))
+    n++;
+  if (n == 0) {
+    mutex_unlock(&g_bc_lock);
+    return 0;
+  }
+  bc_shrink_locked((size_t)n * bs);
+  uint8_t *tmp = kmalloc((size_t)n * bs);
+  if (!tmp) {
+    mutex_unlock(&g_bc_lock);
+    return 0;
+  }
+  uint32_t ss = bdev->sector_size;
+  if (bdev_read(bdev, blk * (uint64_t)(bs / ss), n * (bs / ss), tmp) != 0) {
+    kfree(tmp);
+    mutex_unlock(&g_bc_lock);
+    return 0;
+  }
+  uint32_t loaded = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    bc_buf_t *b = kzalloc(sizeof(*b));
+    uint8_t *data = b ? kmalloc(bs) : NULL;
+    if (!b || !data) {
+      kfree(b);
+      kfree(data);
+      break;
+    }
+    memcpy(data, tmp + (size_t)i * bs, bs);
+    b->bdev = bdev;
+    b->blk = blk + i;
+    b->bs = bs;
+    b->data = data;
+    uint32_t h = bc_hash(bdev, b->blk);
+    b->hnext = g_hash[h];
+    g_hash[h] = b;
+    lru_push_front(b);
+    g_bytes += bs;
+    g_stats.bufs++;
+    g_stats.misses++;
+    loaded++;
+  }
+  kfree(tmp);
+  mutex_unlock(&g_bc_lock);
+  return (int)loaded;
 }
 
 void *bc_data(bc_buf_t *b) { return b ? b->data : NULL; }

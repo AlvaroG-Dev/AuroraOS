@@ -129,6 +129,7 @@ typedef struct ext2_ino {
   uint32_t goal; // último bloque asignado (localidad)
   int live;      // tenía enlaces al cargarse: puede evictarse
   int orphan;    // está en la lista de huérfanos del superbloque
+  uint64_t ra_next; // fin de la última lectura (detecta lectura secuencial)
   ext2_pg_t *pages; // páginas mapeadas con MAP_SHARED
 } ext2_ino_t;
 
@@ -264,15 +265,19 @@ static uint64_t ext2_file_size(const ext2_fs_t *fs, const ext2_inode_t *di) {
 }
 
 // Lee hasta `size` bytes del inodo desde `offset`. Bytes leídos o -errno.
-static int64_t ext2_read_data(ext2_fs_t *fs, const ext2_inode_t *di,
-                              uint64_t fsize, uint64_t offset, size_t size,
-                              void *buf) {
+// Ante un fallo de caché trae de una sola petición todos los bloques
+// físicamente contiguos que pide la lectura más `extra` de lectura anticipada
+// (máx. 64): una petición grande al disco en vez de una por bloque de 4 KiB.
+static int64_t ext2_read_data_x(ext2_fs_t *fs, const ext2_inode_t *di,
+                                uint64_t fsize, uint64_t offset, size_t size,
+                                void *buf, uint32_t extra) {
   if (offset >= fsize || size == 0)
     return 0;
   if (size > fsize - offset)
     size = (size_t)(fsize - offset);
   uint8_t *dst = buf;
   size_t done = 0;
+  uint64_t flast = (fsize + fs->bs - 1) / fs->bs; // bloques lógicos del fichero
   while (done < size) {
     uint64_t pos = offset + done;
     uint64_t lblk = pos / fs->bs;
@@ -287,6 +292,22 @@ static int64_t ext2_read_data(ext2_fs_t *fs, const ext2_inode_t *di,
     if (pblk == 0) {
       memset(dst + done, 0, n);
     } else {
+      if (!bc_present(fs->bdev, pblk)) {
+        uint64_t want = ((size - done) + boff + fs->bs - 1) / fs->bs + extra;
+        if (want > flast - lblk)
+          want = flast - lblk;
+        if (want > 64)
+          want = 64;
+        uint32_t run = 1;
+        while (run < want) {
+          uint32_t nb;
+          if (ext2_bmap(fs, di, lblk + run, &nb) != 0 || nb != pblk + run)
+            break;
+          run++;
+        }
+        if (run > 1)
+          bc_readahead(fs->bdev, pblk, run, fs->bs);
+      }
       bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
       if (!b)
         return done ? (int64_t)done : -EIO;
@@ -296,6 +317,12 @@ static int64_t ext2_read_data(ext2_fs_t *fs, const ext2_inode_t *di,
     done += n;
   }
   return (int64_t)done;
+}
+
+static int64_t ext2_read_data(ext2_fs_t *fs, const ext2_inode_t *di,
+                              uint64_t fsize, uint64_t offset, size_t size,
+                              void *buf) {
+  return ext2_read_data_x(fs, di, fsize, offset, size, buf, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,7 +1593,11 @@ static int64_t ext2_node_read(vfs_node_t *node, uint64_t offset, size_t size,
   else {
     if (en->ip->pages && fs->rw) // lo escrito por mmap debe verse en read()
       ext2_pg_sync_ino(fs, en->ip);
-    rc = ext2_read_data(fs, &en->ip->di, en->ip->size, offset, size, buf);
+    // Lectura secuencial (o el comienzo del fichero): pedir más por adelantado.
+    uint32_t extra = (offset == en->ip->ra_next || offset == 0) ? 31 : 0;
+    rc = ext2_read_data_x(fs, &en->ip->di, en->ip->size, offset, size, buf, extra);
+    if (rc > 0)
+      en->ip->ra_next = offset + (uint64_t)rc;
   }
   mutex_unlock(&fs->lock);
   return rc;
@@ -2254,7 +2285,7 @@ static int ext2_get_page_op(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out
       } else {
         uint8_t *mem = phys_to_virt(ph);
         memset(mem, 0, EXT2_PG);
-        ext2_read_data(fs, &ip->di, ip->size, pgoff * EXT2_PG, EXT2_PG, mem);
+        ext2_read_data_x(fs, &ip->di, ip->size, pgoff * EXT2_PG, EXT2_PG, mem, 15);
         pg->pgoff = pgoff;
         pg->phys = ph;
         pg->next = ip->pages;

@@ -31,6 +31,13 @@ bc_buf_t *bc_get(block_device_t *bdev, uint64_t blk, uint32_t bs);
 // bloques recién asignados que se van a sobrescribir entero.
 bc_buf_t *bc_get_new(block_device_t *bdev, uint64_t blk, uint32_t bs);
 
+// 1 si el bloque ya está en caché (sin leerlo).
+int bc_present(block_device_t *bdev, uint64_t blk);
+// Lee de una sola petición hasta `count` bloques consecutivos que falten (se
+// para en el primero presente). Devuelve cuántos cargó. Sin referencias.
+int bc_readahead(block_device_t *bdev, uint64_t blk, uint32_t count,
+                 uint32_t bs);
+
 void *bc_data(bc_buf_t *b);
 uint32_t bc_size(const bc_buf_t *b);
 void bc_mark_dirty(bc_buf_t *b);
