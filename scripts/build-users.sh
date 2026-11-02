@@ -47,4 +47,15 @@ fi
 for f in "$ROOT/sysroot/sbin/unix_chkpwd" "$ROOT/sysroot/usr/sbin/unix_chkpwd"; do
   [ -f "$f" ] && chmod 4755 "$f"
 done
-echo "[Makefile]   aurora-users: login su passwd sudo (setuid) + useradd"
+# Comprobacion final: si falta algo, el build falla en vez de dar una ISO sin
+# la herramienta (p. ej. aurora-switch "no se encuentra" en el hardware).
+missing=""
+for f in aurora-login aurora-su aurora-passwd aurora-sudo aurora-switch aurora-useradd \
+         login su passwd sudo useradd sync $( [ -f "$GLIBC_PAM" ] && echo pamcheck ); do
+  [ -x "$OUT/$f" ] || missing="$missing $f"
+done
+if [ -n "$missing" ]; then
+  echo "[Makefile]   ERROR: faltan en sysroot/usr/bin:$missing" >&2
+  exit 1
+fi
+echo "[Makefile]   aurora-users: login su passwd sudo aurora-switch (setuid) + useradd + sync + pamcheck: OK"
