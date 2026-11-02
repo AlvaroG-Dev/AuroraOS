@@ -1001,6 +1001,7 @@ static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/bash.bashrc", NULL, NULL, 0},
     {"/etc/ld.so.cache", NULL, NULL, 0},
     {"/etc/localtime", NULL, NULL, 0},
+    {"/etc/fstab", NULL, NULL, 0},
     {"/etc/ssl/certs/ca-certificates.crt", NULL, NULL, 0},
 };
 #define N_ETC_SEEDS (sizeof(g_etc_seeds) / sizeof(g_etc_seeds[0]))

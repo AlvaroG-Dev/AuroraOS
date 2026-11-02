@@ -675,16 +675,33 @@ static int cmd_switch(int argc, char **argv) {
   if (getuid() != 0) {
     if (pw->pw_uid == getuid())
       die("aurora-switch: ya eres %s", pw->pw_name);
+    // Como sudo: quien esta en wheel se autentica con SU clave (o sin clave
+    // si existe /etc/sudo-nopasswd, el LiveUSB); el resto, con la del destino.
+    const struct passwd *me = caller_pw();
+    int wheel = 0;
+    const struct passwd *auth = pw;
+    if (me) {
+      struct passwd me_copy = *me;
+      char me_name[64];
+      snprintf(me_name, sizeof(me_name), "%s", me->pw_name);
+      me_copy.pw_name = me_name;
+      wheel = in_group(&me_copy, "wheel");
+      if (wheel)
+        auth = getpwnam(me_name);
+    }
+    if (wheel && access("/etc/sudo-nopasswd", F_OK) == 0)
+      goto authorized;
     char pass[256];
     if (read_secret("Password: ", pass, sizeof(pass)) != 0)
       return 1;
-    int bad = check_password(pw, pass);
+    int bad = !auth || check_password(auth, pass);
     memset(pass, 0, sizeof(pass));
     if (bad) {
       klog("[AUDIT] switch FALLIDO de uid=%u a %s", getuid(), pw->pw_name);
       sleep(2);
       die("aurora-switch: autenticacion fallida");
     }
+  authorized:;
   }
   // Escritura atomica: temporal + rename, para que init nunca vea una peticion vacia.
   int fd = open("/run/.aurora-session-request.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0600);

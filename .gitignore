@@ -81,3 +81,5 @@ build/ext2-*/
 drivers/kur/nvprobe/nvprobe.kur
 build/devtools/
 build/gcc-test/
+!pam.d
+!pam.d/**

@@ -297,6 +297,7 @@ struct epst {
   struct ring ring;
   int req;          // índice de la petición en vuelo o -1
   int need_recover; // pendiente de Stop/Reset + Set TR Dequeue
+  int stream;       // 1 + índice en streams[] (interrupt IN continuo), 0 = no
 };
 
 struct slot {
@@ -331,7 +332,41 @@ struct req {
   uint32_t td_len[TD_MAX_TRBS];
   int td_n;
   uint32_t td_total;
+  uint32_t olen;       // len pedido por el kernel (antes de redondear a MPS)
+  int stream_wait;     // espera un informe de un stream (interrupt IN)
 };
+
+// Endpoints interrupt IN en modo continuo (ratón, teclado). El kernel pide los
+// informes de uno en uno y entre petición y petición el endpoint se quedaba sin
+// TD en el anillo: el receptor 2.4G descartaba los informes de ese hueco (el
+// cursor "iba lento") y cada informe costaba varias vueltas del bucle. Ahora
+// el .aur mantiene STREAM_TDS TDs siempre armados, vuelve a armar cada uno en
+// cuanto completa y guarda los informes en un FIFO hasta que el kernel los pide.
+#define STREAM_MAX 8
+#define STREAM_TDS 8
+#define STREAM_RLEN 64
+#define STREAM_FIFO 64
+struct stream {
+  int used;
+  unsigned slot, dci;
+  uint32_t len;                 // tamaño de cada TD (múltiplo de MPS)
+  uint8_t *vbuf;                // STREAM_TDS * STREAM_RLEN, DMA
+  uint64_t pbuf;
+  uint64_t trb_phys[STREAM_TDS];
+  struct {
+    uint8_t len;
+    uint8_t data[STREAM_RLEN];
+  } fifo[STREAM_FIFO];
+  unsigned head, count;
+  unsigned dropped;
+};
+static struct stream streams[STREAM_MAX];
+static int stream_disabled;
+// Diagnóstico (se imprime cada 2 s si hubo actividad).
+static struct {
+  uint64_t it, ev, rep, deliv, drop, fifo_max, wake_irq, wake_to;
+  uint64_t wait_us; // tiempo dormido en epoll
+} g_st;
 
 static volatile uint8_t *mmio, *opb, *rtb, *dbb;
 static size_t mmio_len;
@@ -376,6 +411,45 @@ static uint64_t now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static uint64_t now_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+}
+
+static uint64_t cpu_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+  return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+}
+
+static void stats_tick(void) {
+  static uint64_t t_last, cpu_last;
+  uint64_t t = now_us();
+  if (!t_last) {
+    t_last = t;
+    cpu_last = cpu_us();
+    return;
+  }
+  if (t - t_last < 2000000)
+    return;
+  uint64_t c = cpu_us();
+  if (g_st.rep || g_st.deliv)
+    printf("[xhci.aur] diag %llu ms: vueltas=%llu ev=%llu informes=%llu "
+           "entregados=%llu fifo_max=%llu descartados=%llu timeouts=%llu "
+           "dormido=%llu ms cpu=%llu ms\n",
+           (unsigned long long)((t - t_last) / 1000),
+           (unsigned long long)g_st.it, (unsigned long long)g_st.ev,
+           (unsigned long long)g_st.rep, (unsigned long long)g_st.deliv,
+           (unsigned long long)g_st.fifo_max, (unsigned long long)g_st.drop,
+           (unsigned long long)g_st.wake_to,
+           (unsigned long long)(g_st.wait_us / 1000),
+           (unsigned long long)((c - cpu_last) / 1000));
+  memset(&g_st, 0, sizeof(g_st));
+  t_last = t;
+  cpu_last = c;
 }
 
 static int fls32(uint32_t x) {
@@ -578,6 +652,7 @@ static void ring_doorbell(unsigned slot, unsigned target) {
 // ============================================================================
 static void req_release(int qi);
 static void ep_release(unsigned slot, unsigned dci, int qi);
+static void stream_event(struct stream *s, struct epst *e, const trb_t *ev);
 
 static void req_finish(int qi, int status, uint32_t actual, uint32_t out0,
                        uint32_t out1) {
@@ -752,6 +827,11 @@ static void dispatch_event(const trb_t *e) {
     unsigned slot = EVT_SLOT(*e), dci = EVT_EP(*e);
     if (slot < 1 || slot > MAX_SLOTS || dci < 1 || dci > 31)
       break;
+    if (slots[slot].ep[dci].stream) {
+      stream_event(&streams[slots[slot].ep[dci].stream - 1],
+                   &slots[slot].ep[dci], e);
+      break;
+    }
     int qi = slots[slot].ep[dci].req;
     if (qi < 0 || reqs[qi].state != RQ_ACTIVE)
       break;
@@ -776,6 +856,7 @@ static int pump_events(void) {
     n++;
     dispatch_event(&e);
   }
+  g_st.ev += (unsigned)n;
   if (n) {
     uint64_t next = ring_phys(&evt_ring, evt_ring.deq);
     wr32(rtb, RT_ERDP + 4, (uint32_t)(next >> 32));
@@ -1018,6 +1099,170 @@ static int control_enqueue(struct epst *e, struct req *q) {
   return 0;
 }
 
+// ----------------------------------------------------------------------------
+// Streams de interrupt IN
+// ----------------------------------------------------------------------------
+static void stream_arm(struct stream *s, struct epst *e, unsigned i) {
+  trb_t trb = {0};
+  trb.param = s->pbuf + (uint64_t)i * STREAM_RLEN;
+  trb.status = s->len;
+  trb.control = TRB_TYPE(TRB_NORMAL) | TRB_ISP | TRB_IOC;
+  ring_enqueue(&e->ring, &trb);
+  s->trb_phys[i] = ring_phys(&e->ring, e->ring.enq - 1);
+}
+
+static struct stream *stream_start(unsigned slot, unsigned dci, uint32_t len) {
+  struct epst *e = &slots[slot].ep[dci];
+  struct stream *s = NULL;
+  for (int i = 0; i < STREAM_MAX; i++)
+    if (!streams[i].used) {
+      s = &streams[i];
+      break;
+    }
+  if (!s)
+    return NULL;
+  if (!s->vbuf) {
+    uint64_t ph = 0;
+    uint8_t *v = dma_alloc(STREAM_TDS * STREAM_RLEN, &ph);
+    if (!v || !dma_low_ok(ph, STREAM_TDS * STREAM_RLEN)) {
+      stream_disabled = 1; // sin DMA bajo 4 GiB: camino clásico
+      return NULL;
+    }
+    s->vbuf = v;
+    s->pbuf = ph;
+  }
+  s->used = 1;
+  s->slot = slot;
+  s->dci = dci;
+  s->len = len;
+  s->head = s->count = 0;
+  e->stream = (int)(s - streams) + 1;
+  for (unsigned i = 0; i < STREAM_TDS; i++)
+    stream_arm(s, e, i);
+  ring_doorbell(slot, dci);
+  return s;
+}
+
+static void stream_release(struct stream *s) {
+  if (!s->used)
+    return;
+  slots[s->slot].ep[s->dci].stream = 0;
+  s->used = 0;
+  s->head = s->count = 0;
+}
+
+// Reparte los informes guardados entre las peticiones del kernel en espera
+// (la de menor tag primero).
+static void stream_deliver(struct stream *s) {
+  while (s->count) {
+    int best = -1;
+    for (int i = 0; i < MAX_REQS; i++) {
+      struct req *q = &reqs[i];
+      if (q->state == RQ_QUEUED && q->stream_wait && !q->internal &&
+          q->r.slot == s->slot && q->dci == s->dci &&
+          (best < 0 || q->r.tag < reqs[best].r.tag))
+        best = i;
+    }
+    if (best < 0)
+      break;
+    struct req *q = &reqs[best];
+    unsigned stride = s->len, n;
+    if (q->olen > stride) {
+      // Varios informes en una petición: uno cada `stride` bytes (rellenados
+      // con ceros); el kernel los separa por el MPS del endpoint.
+      unsigned cap = q->olen / stride, k = 0;
+      uint8_t *dst = req_buf(q);
+      while (s->count && k < cap) {
+        unsigned l = s->fifo[s->head].len;
+        if (l > stride)
+          l = stride;
+        memset(dst + (size_t)k * stride, 0, stride);
+        memcpy(dst + (size_t)k * stride, s->fifo[s->head].data, l);
+        s->head = (s->head + 1) % STREAM_FIFO;
+        s->count--;
+        k++;
+      }
+      n = k * stride;
+    } else {
+      n = s->fifo[s->head].len;
+      if (n > q->olen)
+        n = q->olen;
+      memcpy(req_buf(q), s->fifo[s->head].data, n);
+      s->head = (s->head + 1) % STREAM_FIFO;
+      s->count--;
+    }
+    q->stream_wait = 0;
+    g_st.deliv++;
+    req_finish(best, 0, n, 0, 0);
+  }
+}
+
+static void stream_event(struct stream *s, struct epst *e, const trb_t *ev) {
+  int idx = -1;
+  for (unsigned i = 0; i < STREAM_TDS; i++)
+    if (s->trb_phys[i] == ev->param) {
+      idx = (int)i;
+      break;
+    }
+  if (idx < 0)
+    return; // evento viejo
+  uint32_t cc = EVT_CC(*ev), res = ev->status & 0xFFFFFF;
+
+  if (cc == CC_SUCCESS || cc == CC_SHORT_PACKET) {
+    uint32_t n = s->len;
+    if (cc == CC_SHORT_PACKET)
+      n = res < s->len ? s->len - res : 0;
+    if (n > STREAM_RLEN)
+      n = STREAM_RLEN;
+    if (n > 0) {
+      g_st.rep++;
+      if (s->count == STREAM_FIFO) { // lleno: se descarta el más viejo
+        s->head = (s->head + 1) % STREAM_FIFO;
+        s->count--;
+        s->dropped++;
+        g_st.drop++;
+      }
+      unsigned t = (s->head + s->count) % STREAM_FIFO;
+      s->fifo[t].len = (uint8_t)n;
+      memcpy(s->fifo[t].data, s->vbuf + (size_t)idx * STREAM_RLEN, n);
+      s->count++;
+      if (s->count > g_st.fifo_max)
+        g_st.fifo_max = s->count;
+    }
+    stream_arm(s, e, (unsigned)idx); // el anillo nunca se queda sin TD
+    ring_doorbell(s->slot, s->dci);
+    stream_deliver(s);
+    return;
+  }
+
+  // Error (STALL, Babble, Transaction Error...): se tira el stream, se avisa
+  // a una petición en espera y el endpoint se recupera como siempre; la
+  // siguiente petición lo vuelve a armar.
+  fprintf(stderr, "[xhci.aur] stream cc=%u (slot %u ep %u)\n", cc, s->slot,
+          s->dci);
+  unsigned slot = s->slot, dci = s->dci;
+  int best = -1;
+  for (int i = 0; i < MAX_REQS; i++) {
+    struct req *q = &reqs[i];
+    if (q->state == RQ_QUEUED && q->stream_wait && !q->internal &&
+        q->r.slot == slot && q->dci == dci &&
+        (best < 0 || q->r.tag < reqs[best].r.tag))
+      best = i;
+  }
+  stream_release(s);
+  e->need_recover = 1;
+  if (best >= 0) {
+    reqs[best].stream_wait = 0;
+    req_finish(best, -EIO, 0, 0, 0);
+  }
+}
+
+static void stream_kill_slot(unsigned slot) {
+  for (int i = 0; i < STREAM_MAX; i++)
+    if (streams[i].used && streams[i].slot == slot)
+      stream_release(&streams[i]);
+}
+
 // Arranca (o encola) una petición CONTROL / XFER ya registrada.
 static void req_start(int qi) {
   struct req *q = &reqs[qi];
@@ -1032,6 +1277,22 @@ static void req_start(int qi) {
   if (e->req != -1 || e->need_recover) {
     q->state = RQ_QUEUED;
     return;
+  }
+
+  // Interrupt IN sin plazo (HID): modo continuo.
+  if (q->r.op == AUR_USB_OP_XFER && q->r.is_in &&
+      q->r.ep_type == EP_INTERRUPT && q->r.timeout_ms == 0 &&
+      q->r.max_packet > 0 && q->r.max_packet <= STREAM_RLEN &&
+      q->r.len <= 8u * q->r.max_packet && !stream_disabled) {
+    // Cada TD del stream es de un paquete (un informe).
+    struct stream *s = e->stream ? &streams[e->stream - 1]
+                                 : stream_start(slot, dci, q->r.max_packet);
+    if (s) {
+      q->state = RQ_QUEUED;
+      q->stream_wait = 1;
+      stream_deliver(s);
+      return;
+    }
   }
 
   int rc;
@@ -1247,6 +1508,7 @@ static void kill_slot_requests(unsigned slot) {
 static int op_free_device(unsigned slot) {
   if (slot < 1 || slot > MAX_SLOTS || !slots[slot].used)
     return 0;
+  stream_kill_slot(slot);
   kill_slot_requests(slot);
   cmd_disable_slot(slot);
   dcbaa[slot] = 0;
@@ -1341,6 +1603,7 @@ static int op_configure_ep(const struct aur_usb_req *rq) {
   e->dir_in = (uint8_t)dir_in;
   e->mps = rq->max_packet;
   e->req = -1;
+  e->stream = 0;
   return 0;
 }
 
@@ -1780,6 +2043,7 @@ static void handle_new(int qi) {
   case AUR_USB_OP_CONTROL:
   case AUR_USB_OP_XFER: {
     unsigned slot = rq->slot;
+    q->olen = rq->len;
     if (rq->op == AUR_USB_OP_CONTROL) {
       q->dci = 1;
       if (rq->len > BUF_SIZE)
@@ -1903,7 +2167,11 @@ static int msi_setup(const char *bdf) {
 // Duerme hasta una IRQ (o petición nueva si `with_proxy`) o `ms`.
 static void wait_event_ms(int with_proxy, int ms) {
   struct epoll_event ev[2];
+  uint64_t t0 = now_us();
   int n = epoll_wait(with_proxy ? ep_both : ep_irq, ev, 2, ms);
+  g_st.wait_us += now_us() - t0;
+  if (n == 0)
+    g_st.wake_to++;
   for (int i = 0; i < n; i++) {
     if (ev[i].data.fd != g_irq_fd)
       continue;
@@ -1969,6 +2237,8 @@ int main(int argc, char **argv) {
 
   for (;;) {
     int progress = 0;
+    g_st.it++;
+    stats_tick();
 
     // 1. Peticiones nuevas del kernel (mientras haya petición y buffer libres).
     for (;;) {
