@@ -80,3 +80,4 @@ build/ext2-*/
 /build/mbr_part2.hex
 drivers/kur/nvprobe/nvprobe.kur
 build/devtools/
+build/gcc-test/
