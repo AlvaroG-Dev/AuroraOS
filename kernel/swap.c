@@ -682,7 +682,10 @@ int swap_reclaim_one(void) {
   // escribió, el PF handler ya marcó el PTE como RW. Abortamos el
   // reclaim (el slot se libera, la página se queda donde estaba).
   if (!paging_get_pte_in(pml4, c.vaddr, &check) ||
-      (check & PTE_FRAME) != phys || (check & PTE_WRITABLE)) {
+      (check & PTE_FRAME) != phys || (check & PTE_WRITABLE) ||
+      (check & PTE_COW) || pmm_page_is_shared(phys)) {
+    // [COW] Si un fork compartio el frame mientras escribiamos, no se
+    // intercambia (el PTE ya lo gestiona el COW).
     swap_free_slot((uint32_t)type, slot);
     return 0;
   }
