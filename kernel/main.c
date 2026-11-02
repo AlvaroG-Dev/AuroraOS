@@ -1176,6 +1176,16 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   pmm_relocate_bitmap();
   uaccess_init();
+  {
+    // [COW] CR0.WP: el kernel tambien respeta las paginas de solo lectura, asi
+    // un copy_to_user sobre una pagina COW provoca #PF en vez de escribir en
+    // el frame compartido. Despues de uaccess_init (que parchea .text) y antes
+    // de arrancar los APs (que lo activan en smp_boot.c).
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1ULL << 16);
+    __asm__ volatile("movq %0, %%cr0" : : "r"(cr0));
+  }
   heap_init();
   vmap_init(); // [LinuxKPI L4] antes del primer proceso
   klog_boot_ok();

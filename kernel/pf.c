@@ -377,6 +377,75 @@ static int pf_try_demand_paging(struct process *proc, uint64_t cr2,
 }
 
 // ---------------------------------------------------------------------------
+// [COW] Fallo de escritura sobre una pagina presente de solo lectura.
+//
+// Devuelve 1 si lo resolvio (hay que reintentar la instruccion), 0 si no era
+// un fallo COW (violacion real de permisos), -1 si no hay memoria.
+//
+// Si el frame sigue compartido (refcount > 1) copia a un frame propio; si el
+// otro dueño ya salio o ya copio, basta con volver a hacer escribible el PTE.
+// Se serializa con fork (que degrada los PTE del padre) usando mm_lock.
+// Tambien cubre el fallo "espurio" de un TLB viejo: el PTE ya es escribible
+// y solo hay que invalidar la entrada local.
+// ---------------------------------------------------------------------------
+static int pf_handle_cow(struct process *proc, uint64_t cr2) {
+  uint64_t page_va = cr2 & ~0xFFFULL;
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  uint64_t pte;
+
+  mutex_lock(&proc->mm_lock);
+  if (!paging_get_pte_in(pml4, page_va, &pte) || !(pte & PTE_PRESENT) ||
+      !(pte & PTE_USER)) {
+    mutex_unlock(&proc->mm_lock);
+    return 0;
+  }
+  if (pte & PTE_WRITABLE) {
+    // Otra CPU (u otro hilo) ya resolvio este COW: TLB desfasado.
+    mutex_unlock(&proc->mm_lock);
+    paging_invalidate_tlb(page_va);
+    return 1;
+  }
+  if (!(pte & PTE_COW)) {
+    mutex_unlock(&proc->mm_lock);
+    return 0;
+  }
+  // Una pagina COW solo se hace escribible si el VMA lo permite. Sin VMA
+  // (region brk, pila) las paginas siempre fueron de lectura/escritura.
+  vma_t *vma = vma_find(proc, page_va);
+  if (vma && !(vma->flags & PTE_WRITABLE)) {
+    mutex_unlock(&proc->mm_lock);
+    return 0;
+  }
+
+  uint64_t old_phys = pte & PTE_FRAME;
+  uint64_t keep = pte & ~(uint64_t)(PTE_FRAME | PTE_COW);
+
+  if (!pmm_page_is_shared(old_phys)) {
+    // Ultimo dueño: sin copia.
+    paging_set_pte_in(pml4, page_va, keep | old_phys | PTE_WRITABLE);
+    mutex_unlock(&proc->mm_lock);
+    return 1;
+  }
+
+  uint64_t new_phys = pmm_alloc_page();
+  if (!new_phys) {
+    mutex_unlock(&proc->mm_lock);
+    return -1;
+  }
+  memcpy(phys_to_virt(new_phys), phys_to_virt(old_phys), PAGE_SIZE);
+  paging_set_pte_in(pml4, page_va, keep | new_phys | PTE_WRITABLE);
+  mutex_unlock(&proc->mm_lock);
+  // Otro hilo del proceso en otra CPU puede conservar la traduccion vieja
+  // (solo lectura, al frame viejo): hay que invalidarla en todas antes de
+  // soltar el frame, o podria leer un frame ya reutilizado.
+  if (proc->team_size > 1)
+    paging_invalidate_tlb_global(page_va);
+  // Soltar nuestra referencia al frame viejo (lo libera si era la ultima).
+  pmm_free_page(old_phys);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
 // Matar el proceso actual
 // ---------------------------------------------------------------------------
 void kill_current_process(registers_t *regs, const char *reason) {
@@ -420,6 +489,21 @@ static int handle_page_fault_inner(registers_t *regs) {
   if (user) {
 
     if (present) {
+      // [COW] Escritura sobre pagina compartida por fork.
+      if ((err & 0x02) != 0) {
+        struct process *cproc = process_current();
+        if (cproc) {
+          int crc = pf_handle_cow(cproc, cr2);
+          if (crc > 0) {
+            pf_resolved++;
+            return 1;
+          }
+          if (crc < 0) {
+            kill_current_process(regs, "out of memory (COW)");
+            return 1;
+          }
+        }
+      }
       // [SWAP] ¿Violación de escritura sobre una página RW que kswapd
       // marcó temporalmente RO para reclaimarla?
       if ((err & 0x02) != 0) {
@@ -550,6 +634,17 @@ static int handle_page_fault_inner(registers_t *regs) {
   }
 
   struct process *proc = process_current();
+
+  // [COW] El kernel (copy_to_user, etc.) escribio sobre una pagina compartida
+  // por fork. Con CR0.WP llega aqui como fallo de proteccion.
+  if ((err & 0x03) == 0x03 && proc && proc->pml4_phys) {
+    int crc = pf_handle_cow(proc, cr2);
+    if (crc > 0) {
+      pf_resolved++;
+      return 1;
+    }
+    // crc < 0 (sin memoria) o 0: sigue al fixup de uaccess -> -EFAULT.
+  }
 
   if ((err & 0x01) == 0 && pf_try_demand_paging(proc, cr2, err)) {
     pf_resolved++;
@@ -907,8 +1002,13 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       // Conservar lo que no es permiso: paginas compartidas o del driver
       // (PTE_SPECIAL/PTE_SHARED_OBJ, que exit y fork miran) y la cache.
       uint64_t keep = raw & (PTE_SPECIAL | PTE_SHARED_OBJ | PTE_NOCACHE |
-                             PTE_WRITETHRU);
-      paging_map_page_in(pml4, p, raw & PTE_FRAME, new_flags | keep);
+                             PTE_WRITETHRU | PTE_COW);
+      uint64_t pflags = new_flags | keep;
+      // [COW] Una pagina aun compartida por fork no puede volverse
+      // escribible aqui: la primera escritura la copiara en pf_handle_cow.
+      if (raw & PTE_COW)
+        pflags &= ~(uint64_t)PTE_WRITABLE;
+      paging_map_page_in(pml4, p, raw & PTE_FRAME, pflags);
       if (multi)
         need_global = 1;
       else

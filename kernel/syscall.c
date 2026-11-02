@@ -4130,10 +4130,9 @@ static int64_t k_fork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 // y el spawn de ash para ahorrar la copia de memoria en el caso
 // "fork + execve inmediato".
 //
-// Aquí lo implementamos como fork(). El hijo tendrá su propia copia
-// del espacio, lo cual es correcto y algo más lento pero sin efectos
-// observables para el patrón fork+execve: el hijo llama a execve
-// justo después y descarta su copia.
+// Aquí lo implementamos como fork(), que ahora es copy-on-write: no se copia
+// memoria hasta que alguien escribe, así que el patrón fork+execve cuesta casi
+// lo mismo que un vfork real (solo se clonan las tablas de páginas).
 //
 // La diferencia real (padre bloqueado hasta execve) la omitimos por
 // ahora: busybox `time` espera con wait4 inmediatamente después, así
