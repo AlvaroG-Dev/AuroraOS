@@ -1,0 +1,4 @@
+# /etc/fstab de Aurora OS. Lo lee "mount -a" al arrancar (init).
+# /data lo monta el kernel solo (por etiqueta AURORADATA); no hace falta línea.
+# Ejemplo para un segundo disco ext2:
+# /dev/sdb1   /mnt/disco   ext2   defaults,noatime   0 0

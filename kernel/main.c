@@ -688,10 +688,27 @@ static int mount_rc_of(const char *name, int *rc) {
 
 static int try_mount_data(block_device_t *b) {
   if (boot_probe_is_ext2(b)) { // ext2/3/4: solo lectura al arrancar (D9)
-    int erc = ext2_mount_bdev(b->name, "/data");
+    // Solo la partición etiquetada AURORADATA se monta para escribir (la que
+    // crea el Makefile con USB_DATA_FS=ext2); cualquier otro ext2, solo lectura.
+    // Si el FS no se desmontó limpio el driver rechaza escribir y se cae a ro.
+    char label[17] = "";
+    int want_rw = ext2_read_label(b, label) == 0 &&
+                  strcmp(label, "AURORADATA") == 0;
+    int erc = -EROFS;
+    int is_rw = 0;
+    if (want_rw) {
+      erc = ext2_mount_bdev_rw(b->name, "/data", 1);
+      is_rw = erc == 0;
+      if (erc == -EROFS)
+        LOG_WARN("[INIT] %s (AURORADATA) no se puede montar rw: se monta solo "
+                 "lectura (ejecuta e2fsck en el host)", b->name);
+    }
+    if (!is_rw)
+      erc = ext2_mount_bdev(b->name, "/data");
     note_mount_rc(b->name, erc);
     if (erc == 0) {
-      LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
+      LOG_INFO("[INIT] Montado %s (ext2, %s) en /data", b->name,
+               is_rw ? "lectura/escritura" : "solo lectura");
       g_data_mounted = 1;
     }
     return erc;

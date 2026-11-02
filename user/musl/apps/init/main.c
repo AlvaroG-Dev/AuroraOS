@@ -267,6 +267,27 @@ static pid_t spawn_wayland(void) {
   return pid;
 }
 
+// Si existe /etc/fstab con entradas, monta lo que falte (mount -a). El /data
+// de arranque lo monta el kernel; mount -a salta lo ya montado. Sin fstab o con
+// error no pasa nada: solo se deja constancia en /dev/kmsg.
+static void run_fstab(void) {
+  if (access("/etc/fstab", R_OK) != 0 || access("/usr/bin/mount", X_OK) != 0)
+    return;
+  // Los discos aparecen despues (los drivers de usuario arrancan en paralelo):
+  // se reintenta en segundo plano hasta ~60 s. mount -a salta lo ya montado.
+  pid_t pid = fork();
+  if (pid == 0) {
+    char *argv[] = {"sh", "-c",
+                    "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 "
+                    "21 22 23 24 25 26 27 28 29 30; do "
+                    "/usr/bin/mount -a > /dev/null 2>&1 && exit 0; sleep 2; done; "
+                    "/usr/bin/mount -a > /dev/kmsg 2>&1",
+                    NULL};
+    execve("/bin/bash", argv, default_envp);
+    _exit(127);
+  }
+}
+
 // Si existe /system/boot-tests, ejecuta cada linea con sh y manda su salida a
 // /dev/kmsg (serie). Sirve para tests automaticos en QEMU sin teclado.
 static void run_boot_tests(void) {
@@ -408,6 +429,7 @@ int main(void) {
   }
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
   int testing = access("/system/boot-tests", F_OK) == 0 && !g_sess_ok;
+  run_fstab();
   run_boot_tests();
   pid_t term = spawn_terminal();
   pid_t wl = testing ? -1 : spawn_wayland();
