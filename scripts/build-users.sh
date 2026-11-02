@@ -36,4 +36,15 @@ cp -f "$OUT/aurora-users" "$OUT/aurora-switch"
 chmod 4755 "$OUT/aurora-switch"
 cp -f "$OUT/aurora-users" "$OUT/sync"
 chmod 0755 "$OUT/sync"
+
+# [U8.2] pamcheck contra libpam.so.0 de la glibc del guest (sin cabeceras PAM).
+GLIBC_PAM="$ROOT/libs/glibc/lib/x86_64-linux-gnu/libpam.so.0"
+if [ -f "$GLIBC_PAM" ]; then
+  gcc -O2 -Wall -o "$OUT/pamcheck" "$ROOT/user/aurora-users/pamcheck.c" "$GLIBC_PAM"
+  chmod 0755 "$OUT/pamcheck"
+fi
+# unix_chkpwd (pam_unix para no-root) necesita setuid root; git no guarda ese bit.
+for f in "$ROOT/sysroot/sbin/unix_chkpwd" "$ROOT/sysroot/usr/sbin/unix_chkpwd"; do
+  [ -f "$f" ] && chmod 4755 "$f"
+done
 echo "[Makefile]   aurora-users: login su passwd sudo (setuid) + useradd"

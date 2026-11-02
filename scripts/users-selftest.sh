@@ -42,4 +42,9 @@ t proc_ajeno_maps_denegado 'denied|Permission|No such|cannot' bash -c 'su alvaro
 t proc_cmdline_publico 'init|[a-z]' bash -c 'su alvaro -c "cat /proc/1/cmdline"'
 t proc_propio_maps 'r-xp|r--p|rw-p|\[' bash -c 'su alvaro -c "cat /proc/self/maps" | head -3'
 t nproc_limite 'temporarily|Resource|retry|Cannot fork|fork' bash -c 'su alvaro -c "ulimit -u 6; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 20 & done; wait" 2>&1; true'
+t pam_root_ok 'pamcheck: OK' bash -c 'pamcheck alvaro pw'
+t pam_clave_mala 'FALLO' bash -c 'pamcheck alvaro mala; true'
+t pam_user_ok 'pamcheck: OK' bash -c 'su testu -c "pamcheck testu new1"'
+t pam_user_mala 'FALLO' bash -c 'su testu -c "pamcheck testu zzz"; true'
+t pam_svc_su 'pamcheck: OK' bash -c 'pamcheck -s su alvaro pw'
 echo "[users] RESULT pass=$ok fail=$bad"

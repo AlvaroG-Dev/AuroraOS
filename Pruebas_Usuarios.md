@@ -85,5 +85,13 @@ Pruebas (en la terminal que se abre, ya como alvaro):
 5. `touch /etc/x` (debe fallar), `sudo id` (uid=0) y, tras `sync` y reiniciar, `id` sigue igual.
 Volver atrás: quita `aur.session=...` y todo vuelve a root.
 
+## 7. Cambio de usuario y PAM (U7.4 / U8)
+Con la sesión de `alvaro` (sección 6) en marcha, en su terminal:
+1. `aurora-switch root` → pide la clave de root. Si la cuenta de root no tiene (`passwd root` antes, como root), usa `sudo aurora-switch root`. La sesión se reinicia: escritorio nuevo y terminal como root (`id` → uid=0).
+2. Como root: `aurora-switch alvaro` (sin clave) → vuelve al escritorio de alvaro.
+3. PAM: `pamcheck alvaro <clave>` → `pamcheck: OK`; con clave mala → `FALLO`. También `pamcheck -s su alvaro <clave>` y, como alvaro, `pamcheck alvaro <su clave>` (pasa por `/usr/sbin/unix_chkpwd`).
+4. Auditoría: `dmesg | grep AUDIT` muestra los cambios de identidad, `su`/`sudo`/`login` fallidos y los accesos denegados.
+Si algo falla: reinicia sin `aur.session=` y todo vuelve a root.
+
 ## Qué enviarme si algo falla
 Salida del comando que falla y `dmesg | tail -60` (o la foto del F12). Un apagado brusco sin `sync`/`poweroff` pierde los cambios de la sesión: es lo esperado.
