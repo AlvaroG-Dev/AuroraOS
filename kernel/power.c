@@ -4,6 +4,8 @@
 // (0xCF9, 8042, puertos de emuladores, triple fault). El apagado ACPI (S5) y
 // el reset por RESET_REG viven en acpi_pm.c.
 #include "power.h"
+#include "vfs.h"
+#include "tmpfs.h"
 #include "acpi_pm.h"
 #include "block.h"
 #include "cmdline.h"
@@ -11,7 +13,12 @@
 #include "efi_rt.h"
 #include "fat32.h"
 #include "io.h"
+#include "ipi.h"
 #include "klog.h"
+#include "kthread.h"
+#include "serial.h"
+#include "sched.h"
+#include "wait.h"
 #include "process.h"
 #include "signal.h"
 #include "spinlock.h"
@@ -262,8 +269,9 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   call_notifiers(action, POWER_PHASE_PREPARE);
 
   // Volcar los FS antes de tocar procesos: los drivers de disco aun viven.
-  if (fat32_sync_all() != 0)
-    LOG_WARN("[POWER] fat32_sync_all fallo");
+  etc_persist_flush(); // [U2.3]
+  if (fat32_sync_all() != 0 || vfs_sync_all() != 0)
+    LOG_WARN("[POWER] sync de FS fallo");
 
   // Procesos de usuario: SIGTERM, margen corto, SIGKILL.
   if (signal_all(SIGTERM) > 0) {
@@ -271,6 +279,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
     signal_all(SIGKILL);
     power_wait_ms(100);
     fat32_sync_all(); // por si algun proceso escribio mientras moria
+    vfs_sync_all();
   }
 
   // FAT32 escribe de forma sincrona, pero la cache de escritura del disco
@@ -288,6 +297,7 @@ __attribute__((noreturn)) void power_request(power_action_t action,
   call_notifiers(action, POWER_PHASE_DEVICES);
 
   __asm__ volatile("cli");
+  ipi_halt_others(); // los APs paran antes del paso final
   call_notifiers(action, POWER_PHASE_FINAL);
   LOG_INFO("[POWER] ejecutando %s", name);
 
@@ -302,4 +312,53 @@ __attribute__((noreturn)) void power_request(power_action_t action,
     LOG_ERR("[POWER] ningun backend de %s funciono; parando", name);
   halt_forever();
   __builtin_unreachable();
+}
+
+// ---------------------------------------------------------------------------
+// Ctrl-Alt-Supr
+// ---------------------------------------------------------------------------
+static volatile int g_cad_pending;
+static volatile int g_cad_hard = 1; // como Linux: reinicio directo hasta que init pida CAD_OFF
+
+void power_cad(void) { g_cad_pending = 1; }
+void power_cad_set(int hard_reboot) { g_cad_hard = !!hard_reboot; }
+
+static bool cad_never(void *arg) {
+  (void)arg;
+  return false;
+}
+
+static int cad_thread(void *arg) {
+  (void)arg;
+  for (;;) {
+    wait_queue_t wq;
+    wait_queue_init(&wq);
+    wait_event_timeout(&wq, cad_never, NULL, 100);
+    if (!g_cad_pending)
+      continue;
+    g_cad_pending = 0;
+    LOG_INFO("[POWER] Ctrl-Alt-Supr");
+    if (!g_cad_hard && process_kill(1, SIGINT) == 0)
+      continue;
+    power_request(POWER_ACTION_RESTART, "Ctrl-Alt-Supr");
+  }
+  return 0;
+}
+
+void power_cad_init(void) { kthread_run(cad_thread, NULL, "power-cad"); }
+
+void power_panic_restart(void) {
+  char v[12] = "";
+  if (!cmdline_get("panic", v, sizeof(v)))
+    return;
+  uint32_t secs = 0;
+  for (const char *p = v; *p >= '0' && *p <= '9'; p++)
+    secs = secs * 10 + (uint32_t)(*p - '0');
+  if (!secs || secs > 3600)
+    return;
+  serial_puts("\npanic=: reiniciando tras la cuenta atras\n");
+  for (uint32_t i = secs; i > 0; i--) {
+    power_delay_us(1000000);
+  }
+    power_backend_restart();
 }

@@ -651,7 +651,15 @@ static int kt_setup(void)
 			.num_rqs = DRM_SCHED_PRIORITY_COUNT,
 			.credit_limit = 16,
 			.hang_limit = 0,
-			.timeout = msecs_to_jiffies(200),
+			/*
+			 * Con la maquina cargada (forks, otros tests, CPUs
+			 * compartidas) el motor puede tardar mas de 200 ms en
+			 * ejecutar un trabajo; el temporizador lo daba entonces
+			 * por colgado y liberaba el job mientras el motor aun lo
+			 * usaba (use-after-free -> #GP con veneno de lista). El
+			 * unico test que necesita el timeout espera 5 s.
+			 */
+			.timeout = msecs_to_jiffies(2000),
 			.name = "kt_gfx",
 			.dev = kd->drm.dev,
 		};

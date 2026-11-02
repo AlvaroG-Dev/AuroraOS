@@ -110,7 +110,7 @@ nvidia: tools/kurbuild $(LKPI_BUILD)/linuxkpi.kur
 	@NVKMS_DEBUG=$(NVKMS_DEBUG) scripts/nvidia-modeset-link.sh | grep "^OK"
 	@cp -f build/nvidia-kpi/ms/nvidia-modeset.kur $(LKPI_MODDIR)/nvidia-modeset.kur
 	@$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=lkpi_drm KUR_CC="$(KUR_CC)" install
-	@scripts/nvidia-drm-cc.sh > build/nvidia-kpi/drm/cc.log || { head -20 build/nvidia-kpi/drm/obj/errors.txt; exit 1; }; grep -E "^compilan" build/nvidia-kpi/drm/cc.log
+	@mkdir -p build/nvidia-kpi/drm && scripts/nvidia-drm-cc.sh > build/nvidia-kpi/drm/cc.log || { head -20 build/nvidia-kpi/drm/obj/errors.txt; exit 1; }; grep -E "^compilan" build/nvidia-kpi/drm/cc.log
 	@scripts/nvidia-drm-link.sh | grep "^OK"
 	@cp -f build/nvidia-kpi/drm/nvidia-drm.kur $(LKPI_MODDIR)/nvidia-drm.kur
 	@[ -f build/nvidia/firmware/gsp_ga10x.bin ] || scripts/fetch-nvidia.sh

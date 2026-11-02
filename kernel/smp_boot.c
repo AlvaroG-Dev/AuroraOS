@@ -207,6 +207,7 @@ void ap_entry(void) {
     cr0 &= ~((1ULL << 2) | (1ULL << 3));   // clear EM, TS
     cr0 &= ~((1ULL << 29) | (1ULL << 30)); // clear NW, CD  [FIX]
     cr0 |= (1ULL << 1);                    // set MP
+    cr0 |= (1ULL << 16);                   // set WP (COW de fork)
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     __asm__ volatile("fninit");

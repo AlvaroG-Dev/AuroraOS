@@ -218,6 +218,20 @@ static void __attribute__((unused)) term_paste(const char *text, size_t len) {
 }
 
 // ---------------------------------------------------------------------------
+// [U4] Búsqueda de subcadena (este programa no incluye <string.h> de libc).
+static char *find_sub(char *hay, const char *needle) {
+  for (; *hay; hay++) {
+    const char *a = hay, *b = needle;
+    while (*a && *b && *a == *b) {
+      a++;
+      b++;
+    }
+    if (!*b)
+      return hay;
+  }
+  return (char *)0;
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -308,9 +322,66 @@ int main(int argc, char **argv) {
   struct winsize ws = {ROWS, COLS, 0, 0};
   ioctl(master, TIOCSWINSZ, &ws);
 
+  // [U4] Login: aur.login=root (defecto, shell directo como root) |
+  // auto:<usuario> (aurora-login -f usuario) | prompt (pide usuario y clave).
+  char login_user[64] = "";
+  int login_mode = 0; // 0 = root/sh, 1 = auto, 2 = prompt
+  {
+    char cl[1024];
+    int cfd = open("/proc/cmdline", O_RDONLY);
+    long cn = cfd >= 0 ? read(cfd, cl, sizeof(cl) - 1) : -1;
+    if (cfd >= 0)
+      close(cfd);
+    if (cn > 0) {
+      cl[cn] = '\0';
+      char *lp = find_sub(cl, "aur.login=");
+      if (lp) {
+        lp += 10;
+        size_t ll = 0;
+        while (lp[ll] && lp[ll] != ' ' && lp[ll] != '\t' && lp[ll] != '\r' &&
+               lp[ll] != '\n')
+          ll++;
+        if (ll >= 5 && !strncmp(lp, "auto:", 5) && ll - 5 < sizeof(login_user)) {
+          memcpy(login_user, lp + 5, ll - 5);
+          login_user[ll - 5] = '\0';
+          login_mode = login_user[0] ? 1 : 0;
+        } else if (ll == 6 && !strncmp(lp, "prompt", 6)) {
+          login_mode = 2;
+        }
+      } else {
+        // [U5b/U7.4] Sin aur.login: la sesion actual (/run/aurora-session, la
+        // escribe init y cambia con aurora-switch) decide el usuario.
+        int sfd = open("/run/aurora-session", O_RDONLY);
+        if (sfd >= 0) {
+          char sb[64];
+          long sn = read(sfd, sb, sizeof(sb) - 1);
+          close(sfd);
+          if (sn > 0) {
+            sb[sn] = '\0';
+            long sl = 0;
+            while (sb[sl] && sb[sl] != '\n' && sb[sl] != ' ')
+              sl++;
+            sb[sl] = '\0';
+            int is_root = (sl == 4 && sb[0] == 'r' && sb[1] == 'o' && sb[2] == 'o' &&
+                           sb[3] == 't');
+            if (sl > 0 && !is_root && (unsigned long)sl < sizeof(login_user)) {
+              memcpy(login_user, sb, (unsigned long)sl + 1);
+              login_mode = 1;
+            }
+          }
+        }
+      }
+    }
+  }
   char *sh_argv[] = {"/usr/bin/sh", NULL};
+  char *login_auto_argv[] = {"/usr/bin/aurora-login", "-f", login_user, NULL};
+  char *login_prompt_argv[] = {"/usr/bin/aurora-login", NULL};
+  char **child_argv = sh_argv;
+  if (login_mode && access("/usr/bin/aurora-login", 1) == 0)
+    child_argv = login_mode == 1 ? login_auto_argv : login_prompt_argv;
   spawn_fds_t fds = {slave, slave, slave};
-  int child = spawn_args_fds("/usr/bin/sh", sh_argv, 1, &fds);
+  int child_argc = (child_argv == login_auto_argv) ? 3 : 1;
+  int child = spawn_args_fds(child_argv[0], child_argv, child_argc, &fds);
   close(slave);
   if (child < 0)
     enter_dead_mode();

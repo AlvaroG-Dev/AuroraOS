@@ -70,6 +70,8 @@ scripts/__pycache__/
 *.d
 kernel/.deps-stamp
 
+# Imagenes y salidas de las pruebas ext2
+build/ext2-*/
 # Artefactos generados (NVIDIA N1/N2)
 /build/nvidia/
 /build/nvidia-kpi/

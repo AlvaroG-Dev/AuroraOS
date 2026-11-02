@@ -1,0 +1,2839 @@
+// kernel/ext2.c — ext2 (rev 0 y 1). E1: lectura. E2: escritura.
+//
+// Escritura (E2): sin journal. Al montar rw se borra EXT2_VALID_FS en el
+// superbloque y se vuelca ANTES de tocar nada; vuelve a ponerse en sync/umount.
+// Un fallo de corriente deja el FS "sucio" y el siguiente montaje es de solo
+// lectura (e2fsck del host lo repara). Todo cambio de metadatos pasa por la
+// caché de bloques (bcache) y todas las operaciones serializan en fs->lock.
+//
+// Todo lo que viene del disco se trata como hostil: cada número de bloque,
+// de inodo, rec_len y longitud se valida antes de usarse. Un disco corrupto
+// debe dar -EIO / NULL, nunca un fallo del kernel ni un bucle infinito.
+
+#include "ext2.h"
+
+#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+
+#include "bcache.h"
+#include "heap.h"
+#include "klog.h"
+#include "completion.h"
+#include "kthread.h"
+#include "mutex.h"
+#include "paging.h"
+#include "pmm.h"
+#include "process.h"
+#include "rtc.h"
+#include "string.h"
+
+#define EXT2_MAGIC 0xEF53
+#define EXT2_ROOT_INO 2
+#define EXT2_NDIR_BLOCKS 12
+#define EXT2_IND_BLOCK 12
+#define EXT2_DIND_BLOCK 13
+#define EXT2_TIND_BLOCK 14
+#define EXT2_N_BLOCKS 15
+#define EXT2_NAME_LEN 255
+#define EXT2_MAX_BS 4096u
+#define EXT2_GOOD_OLD_INODE_SIZE 128
+#define EXT2_GOOD_OLD_FIRST_INO 11
+#define EXT2_MAX_DIR_ENTRIES_PER_BLOCK 1024 // cota de pasos por bloque
+
+// Features. Solo lectura: las ro_compat desconocidas no impiden leer.
+#define EXT2_FEATURE_COMPAT_HAS_JOURNAL 0x0004
+#define EXT2_FEATURE_INCOMPAT_FILETYPE 0x0002
+#define EXT2_FEATURE_INCOMPAT_RECOVER 0x0004
+#define EXT2_INCOMPAT_SUPPORTED (EXT2_FEATURE_INCOMPAT_FILETYPE)
+#define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER 0x0001
+#define EXT2_FEATURE_RO_COMPAT_LARGE_FILE 0x0002
+#define EXT2_FEATURE_COMPAT_DIR_INDEX 0x0020
+// Lo que sabemos escribir sin romper nada (el resto: montaje solo lectura).
+#define EXT2_COMPAT_RW_OK 0x003F
+#define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
+#define EXT2_INDEX_FL 0x1000
+#define EXT2_LINK_MAX 32000
+#ifndef EXDEV
+#define EXDEV 18
+#endif
+#define EXT2_XATTR_MAGIC 0xEA020000u
+
+#define EXT2_STATE_VALID 0x0001
+
+typedef struct __attribute__((packed)) {
+  uint32_t s_inodes_count, s_blocks_count, s_r_blocks_count;
+  uint32_t s_free_blocks_count, s_free_inodes_count;
+  uint32_t s_first_data_block, s_log_block_size, s_log_frag_size;
+  uint32_t s_blocks_per_group, s_frags_per_group, s_inodes_per_group;
+  uint32_t s_mtime, s_wtime;
+  uint16_t s_mnt_count;
+  int16_t s_max_mnt_count;
+  uint16_t s_magic, s_state, s_errors, s_minor_rev;
+  uint32_t s_lastcheck, s_checkinterval, s_creator_os, s_rev_level;
+  uint16_t s_def_resuid, s_def_resgid;
+  // rev 1
+  uint32_t s_first_ino;
+  uint16_t s_inode_size, s_block_group_nr;
+  uint32_t s_feature_compat, s_feature_incompat, s_feature_ro_compat;
+  uint8_t s_uuid[16];
+  char s_volume_name[16];
+} ext2_sb_t;
+
+typedef struct __attribute__((packed)) {
+  uint32_t bg_block_bitmap, bg_inode_bitmap, bg_inode_table;
+  uint16_t bg_free_blocks_count, bg_free_inodes_count, bg_used_dirs_count;
+  uint16_t bg_pad;
+  uint32_t bg_reserved[3];
+} ext2_gd_t;
+
+typedef struct __attribute__((packed)) {
+  uint16_t i_mode, i_uid;
+  uint32_t i_size, i_atime, i_ctime, i_mtime, i_dtime;
+  uint16_t i_gid, i_links_count;
+  uint32_t i_blocks, i_flags, i_osd1;
+  uint32_t i_block[EXT2_N_BLOCKS];
+  uint32_t i_generation, i_file_acl, i_size_high, i_faddr;
+  uint8_t i_frag, i_fsize;
+  uint16_t i_pad1;
+  uint16_t i_uid_high, i_gid_high;
+  uint32_t i_reserved2;
+} ext2_inode_t; // los 128 bytes originales
+
+typedef struct __attribute__((packed)) {
+  uint32_t inode;
+  uint16_t rec_len;
+  uint8_t name_len, file_type;
+  // char name[]
+} ext2_dirent_t;
+
+typedef struct {
+  uint32_t inode_table; // 0 = descriptor inválido
+  uint32_t block_bitmap, inode_bitmap; // 0 = grupo inutilizable para escribir
+  uint32_t free_blocks, free_inodes, used_dirs;
+} ext2_group_t;
+
+typedef struct ext2_pg {
+  struct ext2_pg *next;
+  uint64_t pgoff; // página de 4 KiB dentro del fichero
+  uint64_t phys;
+} ext2_pg_t;
+
+// Inodo en memoria, compartido por todos los nodos VFS abiertos sobre él.
+// Toda modificación se escribe en la bcache (write_inode) al terminar la
+// operación, así que la bcache es siempre la verdad.
+typedef struct ext2_ino {
+  struct ext2_ino *next;
+  uint32_t ino;
+  int refs;
+  ext2_inode_t di;
+  uint64_t size;
+  uint32_t goal; // último bloque asignado (localidad)
+  int live;      // tenía enlaces al cargarse: puede evictarse
+  ext2_pg_t *pages; // páginas mapeadas con MAP_SHARED
+} ext2_ino_t;
+
+typedef struct {
+  block_device_t *bdev;
+  uint32_t bs, log_bs;
+  uint32_t inodes_count, blocks_count, r_blocks_count;
+  uint32_t free_blocks, free_inodes;
+  uint32_t first_data_block, blocks_per_group, inodes_per_group;
+  uint32_t inode_size, first_ino, ngroups;
+  uint32_t compat, incompat, ro_compat;
+  int filetype;
+  ext2_group_t *groups;
+  mutex_t lock; // serializa TODAS las operaciones del FS
+  // E2
+  int rw;         // montado para escritura
+  int rev1;
+  int disk_clean; // el superbloque en disco lleva VALID_FS
+  uint32_t s_state;
+  uint32_t gen;   // sube con cada cambio de directorio (invalida cursores)
+  uint32_t itable_blocks, bad_groups;
+  ext2_ino_t *icache; // inodos con referencias
+  // Liberaciones diferidas hasta que el inodo/dir que dejó de apuntar esté en
+  // disco (barrera): evita que un corte deje un bloque libre y reutilizado
+  // mientras otro inodo sin volcar aún lo referencia.
+  uint32_t *pend_blk, *pend_ino;
+  uint32_t npend_blk, cap_blk, npend_ino, cap_ino;
+} ext2_fs_t;
+
+typedef struct {
+  ext2_fs_t *fs;
+  uint32_t ino;
+  ext2_ino_t *ip; // inodo compartido
+  // Cursor de readdir (acelera getdents secuencial): próximo índice y su
+  // posición (bloque lógico, desplazamiento) en el directorio.
+  uint64_t rd_index;
+  uint32_t rd_lblk, rd_off, rd_gen;
+} ext2_node_t;
+
+static vfs_ops_t ext2_node_ops;
+static vfs_fs_ops_t ext2_fs_ops;
+
+static inline uint16_t u16(const void *p) {
+  uint16_t v;
+  memcpy(&v, p, 2);
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// Inodos
+// ---------------------------------------------------------------------------
+static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out) {
+  if (ino == 0 || ino > fs->inodes_count)
+    return -EINVAL;
+  uint32_t grp = (ino - 1) / fs->inodes_per_group;
+  uint32_t idx = (ino - 1) % fs->inodes_per_group;
+  if (grp >= fs->ngroups || fs->groups[grp].inode_table == 0)
+    return -EIO;
+  uint64_t byte = (uint64_t)idx * fs->inode_size;
+  uint64_t blk = (uint64_t)fs->groups[grp].inode_table + byte / fs->bs;
+  uint32_t off = (uint32_t)(byte % fs->bs);
+  if (blk >= fs->blocks_count || off + sizeof(*out) > fs->bs)
+    return -EIO;
+  bc_buf_t *b = bc_get(fs->bdev, blk, fs->bs);
+  if (!b)
+    return -EIO;
+  memcpy(out, (uint8_t *)bc_data(b) + off, sizeof(*out));
+  bc_put(b);
+  return 0;
+}
+
+// Bloque físico del bloque lógico `lblk`. *out = 0 para un hueco.
+static int ext2_bmap(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t lblk,
+                     uint32_t *out) {
+  uint32_t apb = fs->bs / 4;
+  uint32_t ptr;
+  int depth;
+  uint32_t idx[3];
+
+  if (lblk < EXT2_NDIR_BLOCKS) {
+    ptr = di->i_block[lblk];
+    depth = 0;
+  } else {
+    lblk -= EXT2_NDIR_BLOCKS;
+    if (lblk < apb) {
+      ptr = di->i_block[EXT2_IND_BLOCK];
+      depth = 1;
+      idx[0] = (uint32_t)lblk;
+    } else if ((lblk -= apb) < (uint64_t)apb * apb) {
+      ptr = di->i_block[EXT2_DIND_BLOCK];
+      depth = 2;
+      idx[0] = (uint32_t)(lblk / apb);
+      idx[1] = (uint32_t)(lblk % apb);
+    } else if ((lblk -= (uint64_t)apb * apb) < (uint64_t)apb * apb * apb) {
+      ptr = di->i_block[EXT2_TIND_BLOCK];
+      depth = 3;
+      idx[0] = (uint32_t)(lblk / ((uint64_t)apb * apb));
+      idx[1] = (uint32_t)((lblk / apb) % apb);
+      idx[2] = (uint32_t)(lblk % apb);
+    } else {
+      *out = 0;
+      return 0; // más allá del máximo direccionable
+    }
+  }
+
+  for (int d = 0; d < depth; d++) {
+    if (ptr == 0) {
+      *out = 0;
+      return 0;
+    }
+    if (ptr < fs->first_data_block || ptr >= fs->blocks_count)
+      return -EIO;
+    bc_buf_t *b = bc_get(fs->bdev, ptr, fs->bs);
+    if (!b)
+      return -EIO;
+    memcpy(&ptr, (uint8_t *)bc_data(b) + (size_t)idx[d] * 4, 4);
+    bc_put(b);
+  }
+  if (ptr != 0 && (ptr < fs->first_data_block || ptr >= fs->blocks_count))
+    return -EIO;
+  *out = ptr;
+  return 0;
+}
+
+static uint64_t ext2_file_size(const ext2_fs_t *fs, const ext2_inode_t *di) {
+  uint64_t sz = di->i_size;
+  if ((di->i_mode & S_IFMT) == S_IFREG &&
+      (fs->ro_compat & EXT2_FEATURE_RO_COMPAT_LARGE_FILE))
+    sz |= (uint64_t)di->i_size_high << 32;
+  return sz;
+}
+
+// Lee hasta `size` bytes del inodo desde `offset`. Bytes leídos o -errno.
+static int64_t ext2_read_data(ext2_fs_t *fs, const ext2_inode_t *di,
+                              uint64_t fsize, uint64_t offset, size_t size,
+                              void *buf) {
+  if (offset >= fsize || size == 0)
+    return 0;
+  if (size > fsize - offset)
+    size = (size_t)(fsize - offset);
+  uint8_t *dst = buf;
+  size_t done = 0;
+  while (done < size) {
+    uint64_t pos = offset + done;
+    uint64_t lblk = pos / fs->bs;
+    uint32_t boff = (uint32_t)(pos % fs->bs);
+    size_t n = fs->bs - boff;
+    if (n > size - done)
+      n = size - done;
+    uint32_t pblk;
+    int rc = ext2_bmap(fs, di, lblk, &pblk);
+    if (rc != 0)
+      return done ? (int64_t)done : rc;
+    if (pblk == 0) {
+      memset(dst + done, 0, n);
+    } else {
+      bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+      if (!b)
+        return done ? (int64_t)done : -EIO;
+      memcpy(dst + done, (uint8_t *)bc_data(b) + boff, n);
+      bc_put(b);
+    }
+    done += n;
+  }
+  return (int64_t)done;
+}
+
+// ---------------------------------------------------------------------------
+// Directorios
+// ---------------------------------------------------------------------------
+// Valida la entrada en `p` (dentro de un bloque de `bs` bytes, en off).
+static int ext2_dirent_ok(const ext2_fs_t *fs, const uint8_t *blk, uint32_t off,
+                          uint16_t *rec_len, uint32_t *ino, uint8_t *nlen) {
+  if (off + 8 > fs->bs)
+    return 0;
+  ext2_dirent_t d;
+  memcpy(&d, blk + off, sizeof(d));
+  if (d.rec_len < 8 || (d.rec_len & 3) || off + d.rec_len > fs->bs)
+    return 0;
+  if ((uint32_t)8 + d.name_len > d.rec_len)
+    return 0;
+  *rec_len = d.rec_len;
+  *ino = d.inode;
+  *nlen = d.name_len;
+  return 1;
+}
+
+// Busca `name` en el directorio. 0 y *ino_out, -ENOENT, o -EIO.
+static int ext2_dir_find(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t dsize,
+                         const char *name, size_t nlen, uint32_t *ino_out) {
+  uint64_t nblocks = (dsize + fs->bs - 1) / fs->bs;
+  for (uint64_t l = 0; l < nblocks; l++) {
+    uint32_t pblk;
+    int rc = ext2_bmap(fs, di, l, &pblk);
+    if (rc != 0)
+      return rc;
+    if (pblk == 0)
+      continue;
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b)
+      return -EIO;
+    const uint8_t *blk = bc_data(b);
+    uint32_t off = 0;
+    int bad = 0;
+    for (int steps = 0; off < fs->bs && steps < EXT2_MAX_DIR_ENTRIES_PER_BLOCK;
+         steps++) {
+      uint16_t rl;
+      uint32_t ino;
+      uint8_t nl;
+      if (!ext2_dirent_ok(fs, blk, off, &rl, &ino, &nl)) {
+        bad = 1;
+        break;
+      }
+      if (ino != 0 && nl == nlen && memcmp(blk + off + 8, name, nlen) == 0) {
+        bc_put(b);
+        if (ino > fs->inodes_count)
+          return -EIO;
+        *ino_out = ino;
+        return 0;
+      }
+      off += rl;
+    }
+    bc_put(b);
+    if (bad) {
+      LOG_WARN("[EXT2] %s: directorio corrupto (bloque lógico %llu)",
+               fs->bdev->name, (unsigned long long)l);
+      return -EIO;
+    }
+  }
+  return -ENOENT;
+}
+
+// ---------------------------------------------------------------------------
+// E2: base de escritura (superbloque, bitmaps, inodos en memoria)
+// ---------------------------------------------------------------------------
+static inline uint32_t ext2_now(void) { return (uint32_t)rtc_get_epoch(); }
+static inline int bit_test(const uint8_t *m, uint32_t i) {
+  return (m[i >> 3] >> (i & 7)) & 1;
+}
+static inline void bit_set(uint8_t *m, uint32_t i) { m[i >> 3] |= 1u << (i & 7); }
+static inline void bit_clr(uint8_t *m, uint32_t i) {
+  m[i >> 3] &= (uint8_t)~(1u << (i & 7));
+}
+// Primer bit a 0 en [from, nbits) o UINT32_MAX.
+static uint32_t bit_find_zero(const uint8_t *m, uint32_t from, uint32_t nbits) {
+  uint32_t i = from;
+  while (i < nbits) {
+    if ((i & 7) == 0 && i + 8 <= nbits && m[i >> 3] == 0xFF) {
+      i += 8;
+      continue;
+    }
+    if (!bit_test(m, i))
+      return i;
+    i++;
+  }
+  return UINT32_MAX;
+}
+
+static uint32_t ext2_group_first(const ext2_fs_t *fs, uint32_t g) {
+  return fs->first_data_block + g * fs->blocks_per_group;
+}
+static uint32_t ext2_group_nblocks(const ext2_fs_t *fs, uint32_t g) {
+  uint32_t first = ext2_group_first(fs, g);
+  uint32_t left = fs->blocks_count - first;
+  return left < fs->blocks_per_group ? left : fs->blocks_per_group;
+}
+
+// Escribe el superbloque (contadores, estado) en la bcache. `state` es el
+// valor de s_state a dejar.
+static int ext2_sb_store(ext2_fs_t *fs, uint16_t state) {
+  uint32_t blk = 1024 / fs->bs, off = 1024 % fs->bs;
+  bc_buf_t *b = bc_get(fs->bdev, blk, fs->bs);
+  if (!b)
+    return -EIO;
+  ext2_sb_t sb;
+  uint8_t *d = bc_data(b);
+  memcpy(&sb, d + off, sizeof(sb));
+  sb.s_free_blocks_count = fs->free_blocks;
+  sb.s_free_inodes_count = fs->free_inodes;
+  sb.s_state = state;
+  sb.s_wtime = ext2_now();
+  if (sb.s_rev_level == 1)
+    sb.s_feature_ro_compat = fs->ro_compat;
+  memcpy(d + off, &sb, sizeof(sb));
+  bc_mark_dirty(b);
+  bc_put(b);
+  return 0;
+}
+
+// Superbloque a disco ya (con la barrera): se usa para pasar a "sucio" antes
+// de la primera escritura y a "limpio" al sincronizar.
+static int ext2_sb_commit(ext2_fs_t *fs, int clean) {
+  uint16_t st = (uint16_t)(fs->s_state & ~EXT2_STATE_VALID);
+  if (clean)
+    st |= EXT2_STATE_VALID;
+  int rc = ext2_sb_store(fs, st);
+  if (rc == 0)
+    rc = bc_sync_dev(fs->bdev);
+  if (rc == 0)
+    fs->disk_clean = clean;
+  return rc;
+}
+
+// Antes de cualquier cambio: el FS debe ser escribible y el disco marcado
+// como sucio (con barrera) por si cae la corriente a mitad.
+static int ext2_begin_write(ext2_fs_t *fs) {
+  if (!fs->rw)
+    return -EROFS;
+  if (fs->disk_clean) {
+    int rc = ext2_sb_commit(fs, 0);
+    if (rc != 0) {
+      LOG_ERR("[EXT2] %s: no se pudo marcar el FS como sucio (%d)",
+              fs->bdev->name, rc);
+      fs->rw = 0;
+      return -EIO;
+    }
+  }
+  return 0;
+}
+
+static int ext2_gd_write(ext2_fs_t *fs, uint32_t g) {
+  uint32_t per = fs->bs / sizeof(ext2_gd_t);
+  bc_buf_t *b = bc_get(fs->bdev, fs->first_data_block + 1 + g / per, fs->bs);
+  if (!b)
+    return -EIO;
+  uint8_t *p = (uint8_t *)bc_data(b) + (g % per) * sizeof(ext2_gd_t);
+  ext2_gd_t gd;
+  memcpy(&gd, p, sizeof(gd));
+  gd.bg_free_blocks_count = (uint16_t)fs->groups[g].free_blocks;
+  gd.bg_free_inodes_count = (uint16_t)fs->groups[g].free_inodes;
+  gd.bg_used_dirs_count = (uint16_t)fs->groups[g].used_dirs;
+  memcpy(p, &gd, sizeof(gd));
+  bc_mark_dirty(b);
+  bc_put(b);
+  return 0;
+}
+
+static int ext2_inode_slot(const ext2_fs_t *fs, uint32_t ino, uint64_t *blk,
+                           uint32_t *off) {
+  if (ino == 0 || ino > fs->inodes_count)
+    return -EINVAL;
+  uint32_t grp = (ino - 1) / fs->inodes_per_group;
+  uint32_t idx = (ino - 1) % fs->inodes_per_group;
+  if (grp >= fs->ngroups || fs->groups[grp].inode_table == 0)
+    return -EIO;
+  uint64_t byte = (uint64_t)idx * fs->inode_size;
+  *blk = (uint64_t)fs->groups[grp].inode_table + byte / fs->bs;
+  *off = (uint32_t)(byte % fs->bs);
+  if (*blk >= fs->blocks_count || *off + fs->inode_size > fs->bs)
+    return -EIO;
+  return 0;
+}
+
+// Escribe los 128 bytes base del inodo (la parte extendida no se toca).
+// zero_rest: pone a cero toda la ranura antes (inodo recién asignado).
+static int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, const ext2_inode_t *di,
+                            int zero_rest) {
+  uint64_t blk;
+  uint32_t off;
+  int rc = ext2_inode_slot(fs, ino, &blk, &off);
+  if (rc != 0)
+    return rc;
+  bc_buf_t *b = bc_get(fs->bdev, blk, fs->bs);
+  if (!b)
+    return -EIO;
+  uint8_t *d = (uint8_t *)bc_data(b) + off;
+  if (zero_rest)
+    memset(d, 0, fs->inode_size);
+  memcpy(d, di, sizeof(*di));
+  bc_mark_dirty(b);
+  bc_put(b);
+  return 0;
+}
+
+static void ext2_set_size(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t sz) {
+  ip->size = sz;
+  ip->di.i_size = (uint32_t)sz;
+  if ((ip->di.i_mode & S_IFMT) == S_IFREG &&
+      (fs->ro_compat & EXT2_FEATURE_RO_COMPAT_LARGE_FILE))
+    ip->di.i_size_high = (uint32_t)(sz >> 32);
+}
+
+static inline int ext2_ip_flush(ext2_fs_t *fs, ext2_ino_t *ip) {
+  return ext2_write_inode(fs, ip->ino, &ip->di, 0);
+}
+
+static void ext2_blocks_add(ext2_fs_t *fs, ext2_ino_t *ip, int nblk) {
+  uint32_t u = fs->bs >> 9;
+  if (nblk > 0)
+    ip->di.i_blocks += u;
+  else
+    ip->di.i_blocks = ip->di.i_blocks > u ? ip->di.i_blocks - u : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Bloques
+// ---------------------------------------------------------------------------
+static int ext2_blk_is_meta(const ext2_fs_t *fs, uint32_t g, uint32_t blk) {
+  const ext2_group_t *gr = &fs->groups[g];
+  return blk == gr->block_bitmap || blk == gr->inode_bitmap ||
+         (blk >= gr->inode_table && blk < gr->inode_table + fs->itable_blocks);
+}
+
+static void ext2_commit_frees(ext2_fs_t *fs);
+
+static int ext2_alloc_block_try(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
+  process_t *p = process_current();
+  if (fs->free_blocks == 0 ||
+      (fs->free_blocks <= fs->r_blocks_count && p && p->euid != 0))
+    return -ENOSPC;
+  uint32_t g0 = 0, gbit = 0;
+  if (goal >= fs->first_data_block && goal < fs->blocks_count) {
+    g0 = (goal - fs->first_data_block) / fs->blocks_per_group;
+    gbit = (goal - fs->first_data_block) % fs->blocks_per_group;
+  }
+  for (uint32_t n = 0; n < fs->ngroups; n++) {
+    uint32_t g = (g0 + n) % fs->ngroups;
+    ext2_group_t *gr = &fs->groups[g];
+    if (gr->free_blocks == 0 || gr->block_bitmap == 0)
+      continue;
+    uint32_t first = ext2_group_first(fs, g), nbits = ext2_group_nblocks(fs, g);
+    bc_buf_t *b = bc_get(fs->bdev, gr->block_bitmap, fs->bs);
+    if (!b)
+      return -EIO;
+    uint8_t *m = bc_data(b);
+    uint32_t from = (n == 0) ? gbit : 0;
+    uint32_t bit = bit_find_zero(m, from, nbits);
+    if (bit == UINT32_MAX && from > 0)
+      bit = bit_find_zero(m, 0, from);
+    if (bit != UINT32_MAX && ext2_blk_is_meta(fs, g, first + bit)) {
+      LOG_WARN("[EXT2] %s: bitmap de bloques incoherente (grupo %u): bloque de "
+               "metadatos libre", fs->bdev->name, g);
+      bit = UINT32_MAX;
+    }
+    if (bit == UINT32_MAX) {
+      bc_put(b);
+      LOG_WARN("[EXT2] %s: grupo %u dice tener bloques libres pero su bitmap "
+               "está lleno", fs->bdev->name, g);
+      gr->free_blocks = 0;
+      continue;
+    }
+    bit_set(m, bit);
+    bc_mark_dirty(b);
+    bc_put(b);
+    gr->free_blocks--;
+    fs->free_blocks--;
+    ext2_gd_write(fs, g);
+    *out = first + bit;
+    return 0;
+  }
+  return -ENOSPC;
+}
+
+static void ext2_free_block_now(ext2_fs_t *fs, uint32_t blk) {
+  if (blk < fs->first_data_block || blk >= fs->blocks_count) {
+    LOG_WARN("[EXT2] %s: liberar bloque fuera de rango (%u)", fs->bdev->name,
+             blk);
+    return;
+  }
+  uint32_t g = (blk - fs->first_data_block) / fs->blocks_per_group;
+  uint32_t bit = (blk - fs->first_data_block) % fs->blocks_per_group;
+  ext2_group_t *gr = &fs->groups[g];
+  if (gr->block_bitmap == 0 || ext2_blk_is_meta(fs, g, blk))
+    return;
+  bc_buf_t *b = bc_get(fs->bdev, gr->block_bitmap, fs->bs);
+  if (!b)
+    return;
+  uint8_t *m = bc_data(b);
+  if (!bit_test(m, bit)) {
+    bc_put(b);
+    LOG_WARN("[EXT2] %s: doble liberación del bloque %u", fs->bdev->name, blk);
+    return;
+  }
+  bit_clr(m, bit);
+  bc_mark_dirty(b);
+  bc_put(b);
+  gr->free_blocks++;
+  fs->free_blocks++;
+  ext2_gd_write(fs, g);
+}
+
+static int ext2_pend_push(uint32_t **arr, uint32_t *n, uint32_t *cap,
+                          uint32_t v) {
+  if (*n == *cap) {
+    uint32_t nc = *cap ? *cap * 2 : 256;
+    uint32_t *na = kmalloc((size_t)nc * 4);
+    if (!na)
+      return -ENOMEM;
+    if (*arr) {
+      memcpy(na, *arr, (size_t)*n * 4);
+      kfree(*arr);
+    }
+    *arr = na;
+    *cap = nc;
+  }
+  (*arr)[(*n)++] = v;
+  return 0;
+}
+
+// Liberar (diferido): el bit sigue ocupado hasta la próxima barrera.
+static void ext2_free_block(ext2_fs_t *fs, uint32_t blk) {
+  if (ext2_pend_push(&fs->pend_blk, &fs->npend_blk, &fs->cap_blk, blk) != 0)
+    ext2_free_block_now(fs, blk); // sin memoria: se libera ya
+}
+
+// Asignar; si no hay sitio pero hay liberaciones pendientes, se fuerza la
+// barrera para recuperarlas y se reintenta.
+static int ext2_alloc_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
+  int rc = ext2_alloc_block_try(fs, goal, out);
+  if (rc == -ENOSPC && fs->npend_blk) {
+    ext2_commit_frees(fs);
+    rc = ext2_alloc_block_try(fs, goal, out);
+  }
+  return rc;
+}
+
+// Bloque nuevo a ceros (datos o indirecto) ya sucio en la bcache.
+static int ext2_new_zero_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
+  uint32_t blk;
+  int rc = ext2_alloc_block(fs, goal, &blk);
+  if (rc != 0)
+    return rc;
+  bc_buf_t *b = bc_get_new(fs->bdev, blk, fs->bs);
+  if (!b) {
+    ext2_free_block_now(fs, blk);
+    return -EIO;
+  }
+  memset(bc_data(b), 0, fs->bs);
+  bc_mark_dirty(b);
+  bc_put(b);
+  *out = blk;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Inodos: asignar / liberar / caché
+// ---------------------------------------------------------------------------
+static int ext2_alloc_inode_try(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
+                                uint32_t *out) {
+  if (fs->free_inodes == 0)
+    return -ENOSPC;
+  uint32_t g0 = 0;
+  if (parent_ino >= 1 && parent_ino <= fs->inodes_count)
+    g0 = (parent_ino - 1) / fs->inodes_per_group;
+  uint32_t avg_i = fs->free_inodes / fs->ngroups;
+  uint32_t avg_b = fs->free_blocks / fs->ngroups;
+  for (int pass = 0; pass < 2; pass++) {
+    for (uint32_t n = 0; n < fs->ngroups; n++) {
+      uint32_t g = (g0 + n) % fs->ngroups;
+      ext2_group_t *gr = &fs->groups[g];
+      if (gr->free_inodes == 0 || gr->inode_bitmap == 0 || gr->inode_table == 0)
+        continue;
+      // Directorios: preferir grupos con espacio de sobra (los reparte).
+      if (is_dir && pass == 0 &&
+          (gr->free_inodes < avg_i || gr->free_blocks < avg_b))
+        continue;
+      uint32_t nbits = fs->inodes_per_group;
+      if ((uint64_t)(g + 1) * fs->inodes_per_group > fs->inodes_count)
+        nbits = fs->inodes_count - g * fs->inodes_per_group;
+      bc_buf_t *b = bc_get(fs->bdev, gr->inode_bitmap, fs->bs);
+      if (!b)
+        return -EIO;
+      uint8_t *m = bc_data(b);
+      uint32_t from = 0, bit;
+      for (;;) {
+        bit = bit_find_zero(m, from, nbits);
+        if (bit == UINT32_MAX)
+          break;
+        if (g * fs->inodes_per_group + bit + 1 < fs->first_ino) {
+          from = bit + 1; // inodos reservados
+          continue;
+        }
+        break;
+      }
+      if (bit == UINT32_MAX) {
+        bc_put(b);
+        gr->free_inodes = 0;
+        continue;
+      }
+      bit_set(m, bit);
+      bc_mark_dirty(b);
+      bc_put(b);
+      gr->free_inodes--;
+      fs->free_inodes--;
+      if (is_dir)
+        gr->used_dirs++;
+      ext2_gd_write(fs, g);
+      *out = g * fs->inodes_per_group + bit + 1;
+      return 0;
+    }
+  }
+  return -ENOSPC;
+}
+
+static void ext2_free_inode_now(ext2_fs_t *fs, uint32_t ino, int is_dir) {
+  if (ino < fs->first_ino || ino > fs->inodes_count)
+    return;
+  uint32_t g = (ino - 1) / fs->inodes_per_group;
+  uint32_t bit = (ino - 1) % fs->inodes_per_group;
+  ext2_group_t *gr = &fs->groups[g];
+  if (gr->inode_bitmap == 0)
+    return;
+  bc_buf_t *b = bc_get(fs->bdev, gr->inode_bitmap, fs->bs);
+  if (!b)
+    return;
+  uint8_t *m = bc_data(b);
+  if (!bit_test(m, bit)) {
+    bc_put(b);
+    LOG_WARN("[EXT2] %s: doble liberación del inodo %u", fs->bdev->name, ino);
+    return;
+  }
+  bit_clr(m, bit);
+  bc_mark_dirty(b);
+  bc_put(b);
+  gr->free_inodes++;
+  fs->free_inodes++;
+  if (is_dir && gr->used_dirs > 0)
+    gr->used_dirs--;
+  ext2_gd_write(fs, g);
+}
+
+static void ext2_free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
+  if (ext2_pend_push(&fs->pend_ino, &fs->npend_ino, &fs->cap_ino,
+                     ino | (is_dir ? 0x80000000u : 0)) != 0)
+    ext2_free_inode_now(fs, ino, is_dir);
+}
+
+static int ext2_alloc_inode(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
+                            uint32_t *out) {
+  int rc = ext2_alloc_inode_try(fs, parent_ino, is_dir, out);
+  if (rc == -ENOSPC && fs->npend_ino) {
+    ext2_commit_frees(fs);
+    rc = ext2_alloc_inode_try(fs, parent_ino, is_dir, out);
+  }
+  return rc;
+}
+
+// Barrera + liberación real de lo diferido. Con fs->lock tomado.
+static void ext2_commit_frees(ext2_fs_t *fs) {
+  if (!fs->npend_blk && !fs->npend_ino)
+    return;
+  if (bc_sync_dev(fs->bdev) != 0) // inodos/directorios ya en disco
+    return;                       // si falla, se reintenta más tarde
+  for (uint32_t i = 0; i < fs->npend_blk; i++)
+    ext2_free_block_now(fs, fs->pend_blk[i]);
+  for (uint32_t i = 0; i < fs->npend_ino; i++)
+    ext2_free_inode_now(fs, fs->pend_ino[i] & 0x7fffffffu,
+                        (fs->pend_ino[i] & 0x80000000u) != 0);
+  fs->npend_blk = fs->npend_ino = 0;
+}
+
+// Un inodo tiene punteros a bloques en i_block[]? (no: dispositivos, FIFOs,
+// sockets ni symlinks rápidos).
+static int ext2_has_blocks(const ext2_fs_t *fs, const ext2_inode_t *di) {
+  uint16_t t = di->i_mode & S_IFMT;
+  if (t == S_IFREG || t == S_IFDIR)
+    return 1;
+  if (t == S_IFLNK) {
+    int ea = di->i_file_acl ? (int)(fs->bs >> 9) : 0;
+    return (int)di->i_blocks - ea != 0;
+  }
+  return 0;
+}
+
+// Maneja el camino de indirección de `lblk`: devuelve la profundidad 0..3 y
+// rellena idx[0] (ranura de i_block) e idx[1..d] (índices en cada bloque), o -1
+// si está más allá del máximo direccionable.
+static int ext2_path(const ext2_fs_t *fs, uint64_t lblk, uint32_t idx[4]) {
+  uint64_t apb = fs->bs / 4;
+  if (lblk < EXT2_NDIR_BLOCKS) {
+    idx[0] = (uint32_t)lblk;
+    return 0;
+  }
+  lblk -= EXT2_NDIR_BLOCKS;
+  if (lblk < apb) {
+    idx[0] = EXT2_IND_BLOCK;
+    idx[1] = (uint32_t)lblk;
+    return 1;
+  }
+  lblk -= apb;
+  if (lblk < apb * apb) {
+    idx[0] = EXT2_DIND_BLOCK;
+    idx[1] = (uint32_t)(lblk / apb);
+    idx[2] = (uint32_t)(lblk % apb);
+    return 2;
+  }
+  lblk -= apb * apb;
+  if (lblk < apb * apb * apb) {
+    idx[0] = EXT2_TIND_BLOCK;
+    idx[1] = (uint32_t)(lblk / (apb * apb));
+    idx[2] = (uint32_t)((lblk / apb) % apb);
+    idx[3] = (uint32_t)(lblk % apb);
+    return 3;
+  }
+  return -1;
+}
+
+static uint32_t ext2_ip_goal(const ext2_fs_t *fs, const ext2_ino_t *ip) {
+  if (ip->goal)
+    return ip->goal + 1;
+  uint32_t g = (ip->ino - 1) / fs->inodes_per_group;
+  return ext2_group_first(fs, g);
+}
+
+// Bloque físico del lógico `lblk`; si `create`, lo asigna (y los indirectos
+// que falten). *out = 0 si es un hueco y !create. Modifica ip->di: el
+// llamante debe volcar el inodo (ext2_ip_flush).
+static int ext2_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk,
+                            int create, uint32_t *out) {
+  uint32_t idx[4];
+  int d = ext2_path(fs, lblk, idx);
+  if (d < 0)
+    return -EFBIG;
+  uint32_t *slot = (uint32_t *)(void *)&ip->di.i_block[idx[0]];
+  uint32_t ptr = *slot;
+  bc_buf_t *parent = NULL;
+  int rc = 0;
+  for (int level = 0;; level++) {
+    if (ptr == 0) {
+      if (!create) {
+        *out = 0;
+        goto done;
+      }
+      uint32_t nb;
+      rc = ext2_new_zero_block(fs, ext2_ip_goal(fs, ip), &nb);
+      if (rc != 0)
+        goto done;
+      ext2_blocks_add(fs, ip, 1);
+      ip->goal = nb;
+      *slot = nb;
+      if (parent)
+        bc_mark_dirty(parent);
+      ptr = nb;
+    }
+    if (level == d)
+      break;
+    if (ptr < fs->first_data_block || ptr >= fs->blocks_count) {
+      rc = -EIO;
+      goto done;
+    }
+    bc_buf_t *b = bc_get(fs->bdev, ptr, fs->bs);
+    if (!b) {
+      rc = -EIO;
+      goto done;
+    }
+    if (parent)
+      bc_put(parent);
+    parent = b;
+    slot = (uint32_t *)bc_data(b) + idx[level + 1];
+    ptr = *slot;
+  }
+  if (ptr != 0 && (ptr < fs->first_data_block || ptr >= fs->blocks_count)) {
+    rc = -EIO;
+    goto done;
+  }
+  *out = ptr;
+done:
+  if (parent)
+    bc_put(parent);
+  return rc;
+}
+
+// Libera el subárbol colgado de *pp (profundidad `depth`), cuyo primer bloque
+// lógico es `base`, conservando los bloques lógicos < keep. Devuelve 1 si el
+// bloque apuntado por *pp se liberó (y *pp queda a 0).
+static int ext2_free_tree(ext2_fs_t *fs, ext2_ino_t *ip, uint32_t *pp,
+                          int depth, uint64_t base, uint64_t keep) {
+  uint32_t ptr = *pp;
+  if (!ptr)
+    return 0;
+  if (ptr < fs->first_data_block || ptr >= fs->blocks_count) {
+    LOG_WARN("[EXT2] %s: inodo %u con puntero inválido %u (descartado)",
+             fs->bdev->name, ip->ino, ptr);
+    *pp = 0;
+    return 0;
+  }
+  if (depth == 0) {
+    if (base < keep)
+      return 0;
+    ext2_free_block(fs, ptr);
+    ext2_blocks_add(fs, ip, -1);
+    *pp = 0;
+    return 1;
+  }
+  uint64_t apb = fs->bs / 4, child_span = 1;
+  for (int i = 1; i < depth; i++)
+    child_span *= apb;
+  bc_buf_t *b = bc_get(fs->bdev, ptr, fs->bs);
+  if (!b)
+    return 0;
+  uint32_t *e = bc_data(b);
+  int any_left = 0, changed = 0;
+  for (uint64_t i = 0; i < apb; i++) {
+    if (!e[i])
+      continue;
+    uint64_t cbase = base + i * child_span;
+    if (cbase + child_span <= keep) {
+      any_left = 1;
+      continue;
+    }
+    uint32_t v = e[i];
+    ext2_free_tree(fs, ip, &v, depth - 1, cbase, keep);
+    if (v != e[i]) {
+      e[i] = v;
+      changed = 1;
+    }
+    if (v)
+      any_left = 1;
+  }
+  if (changed)
+    bc_mark_dirty(b);
+  bc_put(b);
+  if (any_left)
+    return 0;
+  ext2_free_block(fs, ptr);
+  ext2_blocks_add(fs, ip, -1);
+  *pp = 0;
+  return 1;
+}
+
+// Libera todos los bloques con índice lógico >= keep.
+static void ext2_trunc_blocks(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t keep) {
+  if (!ext2_has_blocks(fs, &ip->di))
+    return;
+  for (uint32_t i = 0; i < EXT2_NDIR_BLOCKS; i++)
+    ext2_free_tree(fs, ip, (uint32_t *)(void *)&ip->di.i_block[i], 0, i, keep);
+  uint64_t apb = fs->bs / 4;
+  ext2_free_tree(fs, ip, (uint32_t *)(void *)&ip->di.i_block[EXT2_IND_BLOCK], 1, EXT2_NDIR_BLOCKS,
+                 keep);
+  ext2_free_tree(fs, ip, (uint32_t *)(void *)&ip->di.i_block[EXT2_DIND_BLOCK], 2,
+                 EXT2_NDIR_BLOCKS + apb, keep);
+  ext2_free_tree(fs, ip, (uint32_t *)(void *)&ip->di.i_block[EXT2_TIND_BLOCK], 3,
+                 EXT2_NDIR_BLOCKS + apb + apb * apb, keep);
+  ip->goal = 0;
+}
+
+// Libera el bloque de atributos extendidos (compartido: cuenta de referencias).
+static void ext2_free_xattr(ext2_fs_t *fs, ext2_ino_t *ip) {
+  uint32_t blk = ip->di.i_file_acl;
+  if (!blk)
+    return;
+  if (blk >= fs->first_data_block && blk < fs->blocks_count) {
+    bc_buf_t *b = bc_get(fs->bdev, blk, fs->bs);
+    if (b) {
+      uint32_t *h = bc_data(b); // h_magic, h_refcount
+      if (h[0] == EXT2_XATTR_MAGIC && h[1] > 1) {
+        h[1]--;
+        bc_mark_dirty(b);
+        bc_put(b);
+        goto out;
+      }
+      bc_put(b);
+    }
+    ext2_free_block(fs, blk);
+    ext2_blocks_add(fs, ip, -1);
+  }
+out:
+  ip->di.i_file_acl = 0;
+}
+
+// El último nodo soltó un inodo sin enlaces: liberar bloques e inodo.
+static void ext2_evict(ext2_fs_t *fs, ext2_ino_t *ip) {
+  if (ext2_begin_write(fs) != 0)
+    return;
+  int is_dir = (ip->di.i_mode & S_IFMT) == S_IFDIR;
+  ext2_trunc_blocks(fs, ip, 0);
+  ext2_free_xattr(fs, ip);
+  ip->di.i_dtime = ext2_now();
+  ext2_set_size(fs, ip, 0);
+  ip->di.i_size_high = 0;
+  ip->di.i_blocks = 0;
+  ext2_ip_flush(fs, ip);
+  ext2_free_inode(fs, ip->ino, is_dir);
+}
+
+static ext2_ino_t *ext2_iget(ext2_fs_t *fs, uint32_t ino) {
+  for (ext2_ino_t *p = fs->icache; p; p = p->next)
+    if (p->ino == ino) {
+      p->refs++;
+      return p;
+    }
+  ext2_ino_t *ip = kzalloc(sizeof(*ip));
+  if (!ip)
+    return NULL;
+  if (ext2_read_inode(fs, ino, &ip->di) != 0) {
+    kfree(ip);
+    return NULL;
+  }
+  ip->ino = ino;
+  ip->refs = 1;
+  ip->live = ip->di.i_links_count > 0;
+  ip->size = ext2_file_size(fs, &ip->di);
+  ip->next = fs->icache;
+  fs->icache = ip;
+  return ip;
+}
+
+// ---------------------------------------------------------------------------
+// mmap(MAP_SHARED): páginas de 4 KiB compartidas con los procesos
+// ---------------------------------------------------------------------------
+// Solo existen páginas de los trozos que alguien mapeó. La página es la copia
+// que ven los procesos; la bcache sigue siendo la verdad para read()/write().
+// Coherencia: write() actualiza la página; read(), fsync, sync, umount, el
+// cierre del último nodo y el hilo de volcado hacen "página -> bcache" cuando
+// difieren (no hay forma barata de saber si un proceso escribió, así que se
+// compara). Un mapeo no puede alargar el fichero (más allá del final = SIGBUS).
+#define EXT2_PG 4096u
+
+static ext2_pg_t *ext2_pg_find(ext2_ino_t *ip, uint64_t pgoff) {
+  for (ext2_pg_t *p = ip->pages; p; p = p->next)
+    if (p->pgoff == pgoff)
+      return p;
+  return NULL;
+}
+
+// Copia a la bcache lo que los procesos hayan cambiado en la página.
+static int ext2_pg_push(ext2_fs_t *fs, ext2_ino_t *ip, ext2_pg_t *pg) {
+  uint8_t *mem = phys_to_virt(pg->phys);
+  uint64_t base = pg->pgoff * EXT2_PG;
+  if (base >= ip->size)
+    return 0;
+  int changed = 0, rc = 0;
+  for (uint32_t off = 0; off < EXT2_PG; off += fs->bs) {
+    uint64_t pos = base + off;
+    if (pos >= ip->size)
+      break;
+    uint32_t n = fs->bs;
+    if (pos + n > ip->size)
+      n = (uint32_t)(ip->size - pos);
+    uint32_t pblk;
+    rc = ext2_bmap(fs, &ip->di, pos / fs->bs, &pblk);
+    if (rc != 0)
+      break;
+    if (pblk == 0) { // hueco: solo si el proceso escribió algo distinto de ceros
+      int zero = 1;
+      for (uint32_t i = 0; i < n && zero; i++)
+        if (mem[off + i])
+          zero = 0;
+      if (zero)
+        continue;
+      rc = ext2_begin_write(fs);
+      if (rc == 0)
+        rc = ext2_bmap_create(fs, ip, pos / fs->bs, 1, &pblk);
+      if (rc != 0) {
+        LOG_WARN("[EXT2] %s: sin espacio para volcar una página mmap (ino %u)",
+                 fs->bdev->name, ip->ino);
+        break;
+      }
+      changed = 1;
+    }
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b) {
+      rc = -EIO;
+      break;
+    }
+    uint8_t *d = bc_data(b);
+    if (memcmp(d, mem + off, n) != 0) {
+      rc = ext2_begin_write(fs); // solo si hay algo que escribir
+      if (rc != 0) {
+        bc_put(b);
+        break;
+      }
+      memcpy(d, mem + off, n);
+      bc_mark_dirty(b);
+      changed = 1;
+    }
+    bc_put(b);
+  }
+  if (changed) {
+    ip->di.i_mtime = ip->di.i_ctime = ext2_now();
+    int frc = ext2_ip_flush(fs, ip);
+    if (rc == 0)
+      rc = frc;
+  }
+  return rc;
+}
+
+// Vuelca todas las páginas mapeadas de un inodo. Con fs->lock tomado.
+static int ext2_pg_sync_ino(ext2_fs_t *fs, ext2_ino_t *ip) {
+  if (!ip->pages || !fs->rw || ip->di.i_links_count == 0)
+    return 0;
+  int rc = 0;
+  for (ext2_pg_t *p = ip->pages; p; p = p->next) {
+    int r = ext2_pg_push(fs, ip, p);
+    if (r != 0)
+      rc = r;
+  }
+  return rc;
+}
+
+static void ext2_pg_sync_all(ext2_fs_t *fs) {
+  for (ext2_ino_t *ip = fs->icache; ip; ip = ip->next)
+    if (ip->pages)
+      ext2_pg_sync_ino(fs, ip);
+}
+
+// write()/truncate sobre un rango: las páginas mapeadas ven lo nuevo.
+static void ext2_pg_pull(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t off,
+                         uint64_t len) {
+  for (ext2_pg_t *p = ip->pages; p; p = p->next) {
+    uint64_t base = p->pgoff * EXT2_PG;
+    if (base >= off + len || base + EXT2_PG <= off)
+      continue;
+    uint64_t lo = off > base ? off : base;
+    uint64_t hi = off + len < base + EXT2_PG ? off + len : base + EXT2_PG;
+    uint8_t *dst = (uint8_t *)phys_to_virt(p->phys) + (lo - base);
+    uint64_t valid = ip->size > lo ? (ip->size < hi ? ip->size : hi) - lo : 0;
+    if (valid)
+      ext2_read_data(fs, &ip->di, ip->size, lo, (size_t)valid, dst);
+    if (valid < hi - lo) // más allá del final: ceros
+      memset(dst + valid, 0, (size_t)(hi - lo - valid));
+  }
+}
+
+static void ext2_pg_free_all(ext2_ino_t *ip) {
+  while (ip->pages) {
+    ext2_pg_t *p = ip->pages;
+    ip->pages = p->next;
+    pmm_free_page(p->phys);
+    kfree(p);
+  }
+}
+
+static void ext2_iput(ext2_fs_t *fs, ext2_ino_t *ip) {
+  if (!ip || --ip->refs > 0)
+    return;
+  if (ip->pages) { // último nodo: nadie mapea ya estas páginas
+    ext2_pg_sync_ino(fs, ip);
+    ext2_pg_free_all(ip);
+  }
+  if (ip->live && ip->di.i_links_count == 0 && ip->ino != EXT2_ROOT_INO &&
+      fs->rw)
+    ext2_evict(fs, ip);
+  for (ext2_ino_t **pp = &fs->icache; *pp; pp = &(*pp)->next)
+    if (*pp == ip) {
+      *pp = ip->next;
+      break;
+    }
+  kfree(ip);
+}
+
+// ---------------------------------------------------------------------------
+// Directorios: insertar / quitar entradas
+// ---------------------------------------------------------------------------
+static inline uint32_t ext2_dirent_need(size_t nlen) {
+  return (uint32_t)((8 + nlen + 3) & ~3u);
+}
+
+static void ext2_dirent_put(uint8_t *p, uint32_t ino, uint16_t rec_len,
+                            const char *name, size_t nlen, uint8_t ft) {
+  ext2_dirent_t d = {ino, rec_len, (uint8_t)nlen, ft};
+  memcpy(p, &d, sizeof(d));
+  if (nlen)
+    memcpy(p + 8, name, nlen);
+}
+
+static void ext2_dir_touch(ext2_fs_t *fs, ext2_ino_t *dp) {
+  dp->di.i_mtime = dp->di.i_ctime = ext2_now();
+  dp->di.i_flags &= ~EXT2_INDEX_FL; // escribimos lineal: sin árbol htree
+  fs->gen++;
+}
+
+static int ext2_dir_add(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
+                        size_t nlen, uint32_t ino, uint8_t ftype) {
+  uint32_t need = ext2_dirent_need(nlen);
+  uint64_t nblocks = (dp->size + fs->bs - 1) / fs->bs;
+  uint8_t ft = fs->filetype ? ftype : 0;
+  for (uint64_t l = 0; l < nblocks; l++) {
+    uint32_t pblk;
+    int rc = ext2_bmap(fs, &dp->di, l, &pblk);
+    if (rc != 0)
+      return rc;
+    if (pblk == 0)
+      continue;
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b)
+      return -EIO;
+    uint8_t *blk = bc_data(b);
+    uint32_t off = 0;
+    for (int steps = 0; off < fs->bs && steps < EXT2_MAX_DIR_ENTRIES_PER_BLOCK;
+         steps++) {
+      uint16_t rl;
+      uint32_t eino;
+      uint8_t nl;
+      if (!ext2_dirent_ok(fs, blk, off, &rl, &eino, &nl)) {
+        bc_put(b);
+        return -EIO;
+      }
+      uint32_t used = eino ? ext2_dirent_need(nl) : 0;
+      if (rl >= used + need) {
+        if (eino) {
+          uint16_t nrl = (uint16_t)used;
+          memcpy(blk + off + 4, &nrl, 2);
+          ext2_dirent_put(blk + off + used, ino, (uint16_t)(rl - used), name,
+                          nlen, ft);
+        } else {
+          ext2_dirent_put(blk + off, ino, rl, name, nlen, ft);
+        }
+        bc_mark_dirty(b);
+        bc_put(b);
+        ext2_dir_touch(fs, dp);
+        return ext2_ip_flush(fs, dp);
+      }
+      off += rl;
+    }
+    bc_put(b);
+  }
+  // Sin hueco: bloque nuevo al final.
+  uint32_t pblk;
+  int rc = ext2_bmap_create(fs, dp, nblocks, 1, &pblk);
+  if (rc != 0) {
+    ext2_ip_flush(fs, dp);
+    return rc;
+  }
+  bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+  if (!b)
+    return -EIO;
+  ext2_dirent_put(bc_data(b), ino, (uint16_t)fs->bs, name, nlen, ft);
+  bc_mark_dirty(b);
+  bc_put(b);
+  ext2_set_size(fs, dp, (nblocks + 1) * fs->bs);
+  ext2_dir_touch(fs, dp);
+  return ext2_ip_flush(fs, dp);
+}
+
+// Quita la entrada `name`. Devuelve su inodo en *ino_out.
+static int ext2_dir_remove(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
+                           size_t nlen, uint32_t *ino_out) {
+  uint64_t nblocks = (dp->size + fs->bs - 1) / fs->bs;
+  for (uint64_t l = 0; l < nblocks; l++) {
+    uint32_t pblk;
+    int rc = ext2_bmap(fs, &dp->di, l, &pblk);
+    if (rc != 0)
+      return rc;
+    if (pblk == 0)
+      continue;
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b)
+      return -EIO;
+    uint8_t *blk = bc_data(b);
+    uint32_t off = 0, prev = UINT32_MAX;
+    for (int steps = 0; off < fs->bs && steps < EXT2_MAX_DIR_ENTRIES_PER_BLOCK;
+         steps++) {
+      uint16_t rl;
+      uint32_t eino;
+      uint8_t nl;
+      if (!ext2_dirent_ok(fs, blk, off, &rl, &eino, &nl)) {
+        bc_put(b);
+        return -EIO;
+      }
+      if (eino && nl == nlen && memcmp(blk + off + 8, name, nlen) == 0) {
+        if (prev != UINT32_MAX) {
+          uint16_t prl;
+          memcpy(&prl, blk + prev + 4, 2);
+          prl = (uint16_t)(prl + rl);
+          memcpy(blk + prev + 4, &prl, 2);
+        } else {
+          uint32_t z = 0;
+          memcpy(blk + off, &z, 4);
+        }
+        bc_mark_dirty(b);
+        bc_put(b);
+        *ino_out = eino;
+        ext2_dir_touch(fs, dp);
+        return ext2_ip_flush(fs, dp);
+      }
+      prev = off;
+      off += rl;
+    }
+    bc_put(b);
+  }
+  return -ENOENT;
+}
+
+// 1 si el directorio solo contiene "." y "..".
+static int ext2_dir_is_empty(ext2_fs_t *fs, const ext2_ino_t *dp) {
+  uint64_t nblocks = (dp->size + fs->bs - 1) / fs->bs;
+  for (uint64_t l = 0; l < nblocks; l++) {
+    uint32_t pblk;
+    if (ext2_bmap(fs, &dp->di, l, &pblk) != 0)
+      return 0;
+    if (pblk == 0)
+      continue;
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b)
+      return 0;
+    const uint8_t *blk = bc_data(b);
+    uint32_t off = 0;
+    for (int steps = 0; off < fs->bs && steps < EXT2_MAX_DIR_ENTRIES_PER_BLOCK;
+         steps++) {
+      uint16_t rl;
+      uint32_t eino;
+      uint8_t nl;
+      if (!ext2_dirent_ok(fs, blk, off, &rl, &eino, &nl)) {
+        bc_put(b);
+        return 0;
+      }
+      if (eino) {
+        const uint8_t *nm = blk + off + 8;
+        int dot = nl == 1 && nm[0] == '.';
+        int dotdot = nl == 2 && nm[0] == '.' && nm[1] == '.';
+        if (!dot && !dotdot) {
+          bc_put(b);
+          return 0;
+        }
+      }
+      off += rl;
+    }
+    bc_put(b);
+  }
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Nodos VFS
+// ---------------------------------------------------------------------------
+static uint32_t ext2_decode_rdev(const ext2_inode_t *di) {
+  uint32_t maj, min;
+  if (di->i_block[0]) { // codificación antigua: 8+8 bits
+    maj = (di->i_block[0] >> 8) & 0xFF;
+    min = di->i_block[0] & 0xFF;
+  } else { // nueva: i_block[1]
+    uint32_t v = di->i_block[1];
+    maj = (v & 0xFFF00) >> 8;
+    min = (v & 0xFF) | ((v >> 12) & 0xFFF00);
+  }
+  return (maj << 8) | (min & 0xFF); // formato Aurora (major<<8|minor)
+}
+
+// Lee el destino de un symlink en buf (sin NUL). Longitud o -errno.
+static int ext2_read_link(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t sz,
+                          char *buf, size_t bufsize) {
+  if (sz == 0 || sz > 4095)
+    return -EIO;
+  size_t n = sz < bufsize ? (size_t)sz : bufsize;
+  int ea = di->i_file_acl ? (int)(fs->bs >> 9) : 0;
+  if ((int)di->i_blocks - ea == 0) { // symlink rápido: vive en i_block[]
+    if (sz >= sizeof(di->i_block))
+      return -EIO;
+    memcpy(buf, di->i_block, n);
+    return (int)n;
+  }
+  int64_t rc = ext2_read_data(fs, di, sz, 0, n, buf);
+  return rc < 0 ? (int)rc : (int)rc;
+}
+
+static void ext2_refresh_vnode(vfs_node_t *n, const ext2_ino_t *ip) {
+  const ext2_inode_t *di = &ip->di;
+  n->size = (size_t)ip->size;
+  n->mode = di->i_mode;
+  n->uid = (uint32_t)di->i_uid | ((uint32_t)di->i_uid_high << 16);
+  n->gid = (uint32_t)di->i_gid | ((uint32_t)di->i_gid_high << 16);
+  n->mtime_sec = di->i_mtime;
+  n->atime_sec = di->i_atime;
+  n->ctime_sec = di->i_ctime;
+  n->nlink = di->i_links_count;
+  n->blocks = di->i_blocks;
+}
+
+static vfs_node_t *ext2_make_node(ext2_fs_t *fs, uint32_t ino) {
+  ext2_node_t *en = kzalloc(sizeof(*en));
+  if (!en)
+    return NULL;
+  ext2_ino_t *ip = ext2_iget(fs, ino);
+  if (!ip) {
+    kfree(en);
+    return NULL;
+  }
+  en->fs = fs;
+  en->ino = ino;
+  en->ip = ip;
+  const ext2_inode_t *di = &ip->di;
+  uint32_t mode = di->i_mode;
+  if (di->i_links_count == 0 && ino != EXT2_ROOT_INO) {
+    ext2_iput(fs, ip); // inodo borrado: no debería ser alcanzable
+    kfree(en);
+    return NULL;
+  }
+
+  vfs_node_t *n = kzalloc(sizeof(*n));
+  if (!n) {
+    ext2_iput(fs, ip);
+    kfree(en);
+    return NULL;
+  }
+  n->flags = ((mode & S_IFMT) == S_IFDIR) ? VFS_DIRECTORY : VFS_FILE;
+  n->inode = ino;
+  n->ops = &ext2_node_ops;
+  n->fs = &ext2_fs_ops;
+  n->priv = en;
+  ext2_refresh_vnode(n, ip);
+  if ((mode & S_IFMT) == S_IFCHR || (mode & S_IFMT) == S_IFBLK)
+    n->rdev = ext2_decode_rdev(di);
+  if ((mode & S_IFMT) == S_IFLNK) {
+    char tmp[VFS_PATH_MAX];
+    int len = ext2_read_link(fs, di, ip->size, tmp, sizeof(tmp) - 1);
+    if (len > 0) {
+      memcpy(n->link_target, tmp, (size_t)len);
+      n->link_target[len] = '\0';
+      n->is_symlink = 1;
+    } else {
+      LOG_WARN("[EXT2] %s: symlink ino %u ilegible o demasiado largo",
+               fs->bdev->name, ino);
+      ext2_iput(fs, ip);
+      kfree(en);
+      kfree(n);
+      return NULL;
+    }
+  }
+  return n;
+}
+
+static vfs_node_t *ext2_lookup_locked(ext2_fs_t *fs, const char *path) {
+  if (!fs || !path)
+    return NULL;
+  uint32_t ino = EXT2_ROOT_INO;
+  const char *p = path;
+  while (*p) {
+    while (*p == '/')
+      p++;
+    if (!*p)
+      break;
+    const char *seg = p;
+    while (*p && *p != '/')
+      p++;
+    size_t nl = (size_t)(p - seg);
+    if (nl > EXT2_NAME_LEN)
+      return NULL;
+    ext2_inode_t di;
+    if (ext2_read_inode(fs, ino, &di) != 0)
+      return NULL;
+    if ((di.i_mode & S_IFMT) != S_IFDIR)
+      return NULL; // symlinks intermedios: los expande el VFS
+    uint32_t next;
+    if (ext2_dir_find(fs, &di, ext2_file_size(fs, &di), seg, nl, &next) != 0)
+      return NULL;
+    ino = next;
+  }
+  return ext2_make_node(fs, ino);
+}
+
+static vfs_node_t *ext2_lookup(void *fs_priv, const char *path) {
+  ext2_fs_t *fs = fs_priv;
+  if (!fs)
+    return NULL;
+  mutex_lock(&fs->lock);
+  vfs_node_t *n = ext2_lookup_locked(fs, path);
+  mutex_unlock(&fs->lock);
+  return n;
+}
+
+static int64_t ext2_node_read(vfs_node_t *node, uint64_t offset, size_t size,
+                              void *buf) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en || !buf)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  mutex_lock(&fs->lock);
+  int64_t rc;
+  if ((en->ip->di.i_mode & S_IFMT) == S_IFDIR)
+    rc = -EISDIR;
+  else {
+    if (en->ip->pages && fs->rw) // lo escrito por mmap debe verse en read()
+      ext2_pg_sync_ino(fs, en->ip);
+    rc = ext2_read_data(fs, &en->ip->di, en->ip->size, offset, size, buf);
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_node_open(vfs_node_t *node, int flags) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -EINVAL;
+  if ((flags & (O_WRONLY | O_RDWR | 0x200 /*O_TRUNC*/)) && !en->fs->rw)
+    return -EROFS;
+  return 0;
+}
+
+static int ext2_node_close(vfs_node_t *node) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (en) {
+    mutex_lock(&en->fs->lock);
+    ext2_iput(en->fs, en->ip);
+    mutex_unlock(&en->fs->lock);
+    kfree(en);
+    node->priv = NULL;
+  }
+  return 0;
+}
+
+static int ext2_node_readlink(vfs_node_t *node, char *buf, size_t bufsize) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en || (en->ip->di.i_mode & S_IFMT) != S_IFLNK || bufsize < 2)
+    return -EINVAL;
+  mutex_lock(&en->fs->lock);
+  int n = ext2_read_link(en->fs, &en->ip->di, en->ip->size, buf, bufsize - 1);
+  mutex_unlock(&en->fs->lock);
+  if (n < 0)
+    return n;
+  buf[n] = '\0';
+  return n;
+}
+
+// Tipo de entrada para getdents a partir de file_type o de i_mode.
+static uint32_t ext2_ft_to_vfs(uint8_t ft) {
+  switch (ft) {
+  case 2: return VFS_DIRECTORY;
+  case 3: return VFS_CHARDEVICE;
+  case 4: return VFS_BLK_ENT;
+  case 5: return VFS_FIFO_ENT;
+  case 6: return VFS_SOCK_ENT;
+  case 7: return VFS_SYMLINK_ENT;
+  default: return VFS_FILE;
+  }
+}
+static uint32_t ext2_mode_to_vfs(uint16_t mode) {
+  switch (mode & S_IFMT) {
+  case S_IFDIR: return VFS_DIRECTORY;
+  case S_IFCHR: return VFS_CHARDEVICE;
+  case S_IFBLK: return VFS_BLK_ENT;
+  case S_IFIFO: return VFS_FIFO_ENT;
+  case S_IFSOCK: return VFS_SOCK_ENT;
+  case S_IFLNK: return VFS_SYMLINK_ENT;
+  default: return VFS_FILE;
+  }
+}
+
+// readdir por índice con cursor cacheado en el nodo.
+static int ext2_node_readdir(vfs_node_t *dir, uint64_t index,
+                             vfs_dirent_t *out) {
+  ext2_node_t *en = dir ? dir->priv : NULL;
+  if (!en || !out)
+    return -EINVAL;
+  if ((en->ip->di.i_mode & S_IFMT) != S_IFDIR)
+    return -ENOTDIR;
+  ext2_fs_t *fs = en->fs;
+  out->name[0] = '\0';
+  out->type = 0;
+  out->size = 0;
+
+  mutex_lock(&fs->lock);
+  uint64_t cur_idx = en->rd_index;
+  uint32_t lblk = en->rd_lblk, off = en->rd_off;
+  if (en->rd_gen != fs->gen) { // el directorio cambió: cursor inválido
+    cur_idx = 0;
+    lblk = 0;
+    off = 0;
+    en->rd_gen = fs->gen;
+  }
+  if (index < cur_idx) {
+    cur_idx = 0;
+    lblk = 0;
+    off = 0;
+  }
+  uint64_t nblocks = (en->ip->size + fs->bs - 1) / fs->bs;
+  int rc = 0;
+
+  while (lblk < nblocks) {
+    uint32_t pblk;
+    rc = ext2_bmap(fs, &en->ip->di, lblk, &pblk);
+    if (rc != 0)
+      goto out;
+    if (pblk == 0) {
+      lblk++;
+      off = 0;
+      continue;
+    }
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b) {
+      rc = -EIO;
+      goto out;
+    }
+    const uint8_t *blk = bc_data(b);
+    int steps = 0;
+    while (off < fs->bs) {
+      uint16_t rl;
+      uint32_t ino;
+      uint8_t nl;
+      if (++steps > EXT2_MAX_DIR_ENTRIES_PER_BLOCK ||
+          !ext2_dirent_ok(fs, blk, off, &rl, &ino, &nl)) {
+        bc_put(b);
+        rc = -EIO;
+        goto out;
+      }
+      if (ino != 0 && ino <= fs->inodes_count) {
+        if (cur_idx == index) {
+          size_t n = nl < sizeof(out->name) - 1 ? nl : sizeof(out->name) - 1;
+          memcpy(out->name, blk + off + 8, n);
+          out->name[n] = '\0';
+          uint8_t ft = fs->filetype ? ((const uint8_t *)blk)[off + 7] : 0;
+          out->type = ext2_ft_to_vfs(ft);
+          if (ft == 0) { // sin file_type: hay que mirar el inodo
+            ext2_inode_t ci;
+            if (ext2_read_inode(fs, ino, &ci) == 0) {
+              out->type = ext2_mode_to_vfs(ci.i_mode);
+              out->size = ci.i_size;
+            }
+          } else if (ft == 1) {
+            ext2_inode_t ci;
+            if (ext2_read_inode(fs, ino, &ci) == 0)
+              out->size = ext2_file_size(fs, &ci);
+          }
+          // Siguiente posición para el siguiente índice.
+          en->rd_index = index + 1;
+          en->rd_lblk = lblk;
+          en->rd_off = off + rl;
+          bc_put(b);
+          rc = 0;
+          goto out;
+        }
+        cur_idx++;
+      }
+      off += rl;
+    }
+    bc_put(b);
+    lblk++;
+    off = 0;
+  }
+  // Fin del directorio: nombre vacío. Se deja el cursor al final.
+  en->rd_index = cur_idx;
+  en->rd_lblk = lblk;
+  en->rd_off = 0;
+out:
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_statfs(void *fs_priv, struct vfs_statfs *out) {
+  ext2_fs_t *fs = fs_priv;
+  if (!fs || !out)
+    return -EINVAL;
+  memset(out, 0, sizeof(*out));
+  out->f_type = EXT2_MAGIC;
+  out->f_bsize = fs->bs;
+  out->f_frsize = fs->bs;
+  out->f_blocks = fs->blocks_count;
+  out->f_bfree = fs->free_blocks;
+  out->f_bavail = fs->free_blocks > fs->r_blocks_count
+                      ? fs->free_blocks - fs->r_blocks_count
+                      : 0;
+  out->f_files = fs->inodes_count;
+  out->f_ffree = fs->free_inodes;
+  out->f_namelen = EXT2_NAME_LEN;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// E2: operaciones de escritura sobre nodos VFS
+// ---------------------------------------------------------------------------
+static int ext2_enable_large_file(ext2_fs_t *fs) {
+  if (fs->ro_compat & EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
+    return 0;
+  fs->ro_compat |= EXT2_FEATURE_RO_COMPAT_LARGE_FILE;
+  return ext2_sb_commit(fs, 0); // a disco ya: el FS tiene ficheros >2 GiB
+}
+
+static int64_t ext2_node_write(vfs_node_t *node, uint64_t offset, size_t size,
+                               const void *buf) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en || (!buf && size))
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  ext2_ino_t *ip = en->ip;
+  if (size == 0)
+    return 0;
+
+  mutex_lock(&fs->lock);
+  if (offset == (uint64_t)-1) // O_APPEND: al final real del inodo compartido
+    offset = ip->size;
+  int64_t done = 0;
+  if (offset + size < offset) {
+    mutex_unlock(&fs->lock);
+    return -EFBIG;
+  }
+  int rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((ip->di.i_mode & S_IFMT) != S_IFREG) {
+    rc = ((ip->di.i_mode & S_IFMT) == S_IFDIR) ? -EISDIR : -EINVAL;
+    goto out;
+  }
+  uint64_t end = offset + size;
+  if (end > 0x7fffffffULL && !fs->rev1) {
+    rc = -EFBIG;
+    goto out;
+  }
+  if (end > 0x7fffffffULL && (rc = ext2_enable_large_file(fs)) != 0)
+    goto out;
+
+  const uint8_t *src = buf;
+  while ((size_t)done < size) {
+    uint64_t pos = offset + (uint64_t)done;
+    uint64_t lblk = pos / fs->bs;
+    uint32_t boff = (uint32_t)(pos % fs->bs);
+    size_t n = fs->bs - boff;
+    if (n > size - (size_t)done)
+      n = size - (size_t)done;
+    uint32_t pblk;
+    rc = ext2_bmap_create(fs, ip, lblk, 1, &pblk);
+    if (rc != 0)
+      break;
+    bc_buf_t *b = (n == fs->bs) ? bc_get_new(fs->bdev, pblk, fs->bs)
+                                : bc_get(fs->bdev, pblk, fs->bs);
+    if (!b) {
+      rc = -EIO;
+      break;
+    }
+    memcpy((uint8_t *)bc_data(b) + boff, src + done, n);
+    bc_mark_dirty(b);
+    bc_put(b);
+    done += (int64_t)n;
+  }
+  if (done > 0) {
+    if (offset + (uint64_t)done > ip->size)
+      ext2_set_size(fs, ip, offset + (uint64_t)done);
+    ip->di.i_mtime = ip->di.i_ctime = ext2_now();
+    int frc = ext2_ip_flush(fs, ip);
+    if (frc != 0 && rc == 0)
+      rc = frc;
+    if (ip->pages)
+      ext2_pg_pull(fs, ip, offset, (uint64_t)done);
+    ext2_refresh_vnode(node, ip);
+  }
+  // Si los bloques cambiaron pero no se escribió nada (ENOSPC a medias):
+  if (done == 0 && rc != 0)
+    ext2_ip_flush(fs, ip);
+out:
+  mutex_unlock(&fs->lock);
+  return done > 0 ? done : rc;
+}
+
+static int ext2_node_truncate(vfs_node_t *node, uint64_t new_size) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  ext2_ino_t *ip = en->ip;
+  mutex_lock(&fs->lock);
+  int rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((ip->di.i_mode & S_IFMT) != S_IFREG) {
+    rc = ((ip->di.i_mode & S_IFMT) == S_IFDIR) ? -EISDIR : -EINVAL;
+    goto out;
+  }
+  if (new_size == ip->size)
+    goto out;
+  if (new_size > 0x7fffffffULL && (rc = ext2_enable_large_file(fs)) != 0)
+    goto out;
+  uint32_t idx[4];
+  if (ext2_path(fs, (new_size + fs->bs - 1) / fs->bs, idx) < 0 &&
+      new_size > ip->size) {
+    rc = -EFBIG;
+    goto out;
+  }
+  if (ip->pages)
+    ext2_pg_sync_ino(fs, ip); // antes de cambiar el tamaño
+  if (new_size < ip->size) {
+    ext2_trunc_blocks(fs, ip, (new_size + fs->bs - 1) / fs->bs);
+    uint32_t tail = (uint32_t)(new_size % fs->bs);
+    if (tail) { // el resto del último bloque debe quedar a ceros
+      uint32_t pblk;
+      if (ext2_bmap(fs, &ip->di, new_size / fs->bs, &pblk) == 0 && pblk) {
+        bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+        if (b) {
+          memset((uint8_t *)bc_data(b) + tail, 0, fs->bs - tail);
+          bc_mark_dirty(b);
+          bc_put(b);
+        }
+      }
+    }
+  }
+  ext2_set_size(fs, ip, new_size);
+  ip->di.i_mtime = ip->di.i_ctime = ext2_now();
+  rc = ext2_ip_flush(fs, ip);
+  if (ip->pages)
+    ext2_pg_pull(fs, ip, new_size, 1ULL << 40); // todo lo que queda más allá: ceros
+  ext2_refresh_vnode(node, ip);
+out:
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_name_check(const char *name, size_t nl) {
+  if (nl == 0)
+    return -EINVAL;
+  if (nl > EXT2_NAME_LEN)
+    return -ENAMETOOLONG;
+  for (size_t i = 0; i < nl; i++)
+    if (name[i] == '/')
+      return -EINVAL;
+  return 0;
+}
+
+static uint8_t ext2_type_to_ft(uint16_t type) {
+  switch (type) {
+  case S_IFREG: return 1;
+  case S_IFDIR: return 2;
+  case S_IFCHR: return 3;
+  case S_IFBLK: return 4;
+  case S_IFIFO: return 5;
+  case S_IFSOCK: return 6;
+  case S_IFLNK: return 7;
+  default: return 0;
+  }
+}
+
+static void ext2_encode_rdev(ext2_inode_t *di, uint32_t rdev) {
+  uint32_t maj = (rdev >> 8) & 0xFFF, min = rdev & 0xFF;
+  memset(di->i_block, 0, sizeof(di->i_block));
+  if (maj < 256 && min < 256)
+    di->i_block[0] = (maj << 8) | min;
+  else
+    di->i_block[1] = (min & 0xFF) | (maj << 8) | ((min & ~0xFFu) << 12);
+}
+
+// Crea un inodo (fichero, directorio, symlink, dispositivo, FIFO, socket) con
+// nombre `name` en `dvn`.
+static int ext2_new_inode_op(vfs_node_t *dvn, const char *name, uint32_t mode,
+                             uint32_t rdev, const char *target) {
+  ext2_node_t *den = dvn ? dvn->priv : NULL;
+  if (!den || !name)
+    return -EINVAL;
+  ext2_fs_t *fs = den->fs;
+  ext2_ino_t *dp = den->ip;
+  size_t nl = strlen(name);
+  int rc = ext2_name_check(name, nl);
+  if (rc != 0)
+    return rc;
+  uint16_t type = (uint16_t)(mode & S_IFMT);
+  if (type == 0)
+    type = S_IFREG;
+  size_t tlen = target ? strlen(target) : 0;
+  if (type == S_IFLNK && (tlen == 0 || tlen >= VFS_PATH_MAX))
+    return tlen ? -ENAMETOOLONG : -EINVAL;
+
+  mutex_lock(&fs->lock);
+  rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((dp->di.i_mode & S_IFMT) != S_IFDIR) {
+    rc = -ENOTDIR;
+    goto out;
+  }
+  if (dp->di.i_links_count == 0) {
+    rc = -ENOENT;
+    goto out;
+  }
+  if ((nl == 1 && name[0] == '.') || (nl == 2 && name[0] == '.' && name[1] == '.')) {
+    rc = -EEXIST;
+    goto out;
+  }
+  uint32_t tmp;
+  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &tmp);
+  if (rc == 0) {
+    rc = -EEXIST;
+    goto out;
+  }
+  if (rc != -ENOENT)
+    goto out;
+  if (type == S_IFDIR && dp->di.i_links_count >= EXT2_LINK_MAX) {
+    rc = -EMLINK;
+    goto out;
+  }
+  if (type != S_IFREG && type != S_IFDIR && type != S_IFLNK &&
+      type != S_IFCHR && type != S_IFBLK && type != S_IFIFO &&
+      type != S_IFSOCK) {
+    rc = -EINVAL;
+    goto out;
+  }
+
+  uint32_t ino;
+  rc = ext2_alloc_inode(fs, dp->ino, type == S_IFDIR, &ino);
+  if (rc != 0)
+    goto out;
+
+  ext2_ino_t nip;
+  memset(&nip, 0, sizeof(nip));
+  nip.ino = ino;
+  ext2_inode_t *di = &nip.di;
+  process_t *pr = process_current();
+  uint32_t uid = pr ? pr->euid : 0, gid = pr ? pr->egid : 0;
+  if (dp->di.i_mode & S_ISGID) { // directorio setgid: hereda el grupo
+    gid = (uint32_t)dp->di.i_gid | ((uint32_t)dp->di.i_gid_high << 16);
+    if (type == S_IFDIR)
+      mode |= S_ISGID;
+  }
+  di->i_mode = (uint16_t)(type | (mode & 07777));
+  di->i_uid = (uint16_t)uid;
+  di->i_uid_high = (uint16_t)(uid >> 16);
+  di->i_gid = (uint16_t)gid;
+  di->i_gid_high = (uint16_t)(gid >> 16);
+  di->i_atime = di->i_ctime = di->i_mtime = ext2_now();
+  di->i_links_count = (type == S_IFDIR) ? 2 : 1;
+  di->i_generation = ext2_now() ^ (ino * 2654435761u);
+
+  uint32_t data_blk = 0;
+  if (type == S_IFDIR) {
+    rc = ext2_new_zero_block(fs, ext2_group_first(fs, (ino - 1) / fs->inodes_per_group),
+                             &data_blk);
+    if (rc != 0)
+      goto undo_inode;
+    bc_buf_t *b = bc_get(fs->bdev, data_blk, fs->bs);
+    if (!b) {
+      rc = -EIO;
+      goto undo_block;
+    }
+    uint8_t *d = bc_data(b);
+    uint8_t ft = fs->filetype ? 2 : 0;
+    ext2_dirent_put(d, ino, 12, ".", 1, ft);
+    ext2_dirent_put(d + 12, dp->ino, (uint16_t)(fs->bs - 12), "..", 2, ft);
+    bc_mark_dirty(b);
+    bc_put(b);
+    di->i_block[0] = data_blk;
+    di->i_blocks = fs->bs >> 9;
+    ext2_set_size(fs, &nip, fs->bs);
+  } else if (type == S_IFLNK) {
+    if (tlen < sizeof(di->i_block)) { // symlink rápido
+      memcpy(di->i_block, target, tlen);
+    } else {
+      rc = ext2_new_zero_block(fs, ext2_group_first(fs, (ino - 1) / fs->inodes_per_group),
+                               &data_blk);
+      if (rc != 0)
+        goto undo_inode;
+      bc_buf_t *b = bc_get(fs->bdev, data_blk, fs->bs);
+      if (!b) {
+        rc = -EIO;
+        goto undo_block;
+      }
+      memcpy(bc_data(b), target, tlen);
+      bc_mark_dirty(b);
+      bc_put(b);
+      di->i_block[0] = data_blk;
+      di->i_blocks = fs->bs >> 9;
+    }
+    ext2_set_size(fs, &nip, tlen);
+  } else if (type == S_IFCHR || type == S_IFBLK) {
+    ext2_encode_rdev(di, rdev);
+  }
+
+  rc = ext2_write_inode(fs, ino, di, 1);
+  if (rc != 0)
+    goto undo_block;
+  rc = ext2_dir_add(fs, dp, name, nl, ino, ext2_type_to_ft(type));
+  if (rc != 0) {
+    di->i_links_count = 0;
+    di->i_dtime = ext2_now();
+    ext2_write_inode(fs, ino, di, 0);
+    goto undo_block;
+  }
+  if (type == S_IFDIR) { // ".." del hijo apunta al padre
+    dp->di.i_links_count++;
+    ext2_ip_flush(fs, dp);
+  }
+  goto out;
+
+undo_block:
+  if (data_blk)
+    ext2_free_block_now(fs, data_blk);
+undo_inode:
+  ext2_free_inode_now(fs, ino, type == S_IFDIR);
+out:
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_create_op(vfs_node_t *dir, const char *name, uint32_t mode) {
+  return ext2_new_inode_op(dir, name, S_IFREG | (mode & 07777), 0, NULL);
+}
+static int ext2_mkdir_op(vfs_node_t *dir, const char *name, uint32_t mode) {
+  return ext2_new_inode_op(dir, name, S_IFDIR | (mode & 07777), 0, NULL);
+}
+static int ext2_mknod_op(vfs_node_t *dir, const char *name, uint32_t mode,
+                         uint32_t rdev) {
+  uint32_t t = mode & S_IFMT;
+  if (t == 0) { // vfs_mknod() quita el tipo: con rdev es un char device
+    t = rdev ? S_IFCHR : S_IFREG;
+    mode |= t;
+  }
+  if (t != S_IFCHR && t != S_IFBLK && t != S_IFIFO && t != S_IFSOCK && t != S_IFREG)
+    return -EPERM;
+  return ext2_new_inode_op(dir, name, mode, rdev, NULL);
+}
+static int ext2_symlink_op(vfs_node_t *dir, const char *name,
+                           const char *target) {
+  if (!target)
+    return -EINVAL;
+  return ext2_new_inode_op(dir, name, S_IFLNK | 0777, 0, target);
+}
+
+// unlink(2) y rmdir(2): borra la entrada; el inodo se libera al cerrarse el
+// último nodo abierto sobre él.
+static int ext2_unlink_op(vfs_node_t *dvn, const char *name) {
+  ext2_node_t *den = dvn ? dvn->priv : NULL;
+  if (!den || !name)
+    return -EINVAL;
+  ext2_fs_t *fs = den->fs;
+  ext2_ino_t *dp = den->ip;
+  size_t nl = strlen(name);
+  int rc = ext2_name_check(name, nl);
+  if (rc != 0)
+    return rc;
+  if ((nl == 1 && name[0] == '.') || (nl == 2 && name[0] == '.' && name[1] == '.'))
+    return -EINVAL;
+
+  mutex_lock(&fs->lock);
+  rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((dp->di.i_mode & S_IFMT) != S_IFDIR) {
+    rc = -ENOTDIR;
+    goto out;
+  }
+  uint32_t ino;
+  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &ino);
+  if (rc != 0)
+    goto out;
+  ext2_ino_t *cip = ext2_iget(fs, ino);
+  if (!cip) {
+    rc = -EIO;
+    goto out;
+  }
+  int isdir = (cip->di.i_mode & S_IFMT) == S_IFDIR;
+  if (isdir && !ext2_dir_is_empty(fs, cip)) {
+    rc = -ENOTEMPTY;
+    ext2_iput(fs, cip);
+    goto out;
+  }
+  uint32_t rino;
+  rc = ext2_dir_remove(fs, dp, name, nl, &rino);
+  if (rc != 0) {
+    ext2_iput(fs, cip);
+    goto out;
+  }
+  if (isdir) {
+    cip->di.i_links_count = 0;
+    if (dp->di.i_links_count > 2)
+      dp->di.i_links_count--;
+    ext2_ip_flush(fs, dp);
+  } else if (cip->di.i_links_count > 0) {
+    cip->di.i_links_count--;
+  }
+  cip->di.i_ctime = ext2_now();
+  if (cip->di.i_links_count == 0)
+    cip->di.i_dtime = ext2_now();
+  ext2_ip_flush(fs, cip);
+  ext2_iput(fs, cip); // si era el último, se libera aquí
+out:
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_chmod_op(vfs_node_t *node, uint32_t mode) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  mutex_lock(&fs->lock);
+  int rc = ext2_begin_write(fs);
+  if (rc == 0) {
+    en->ip->di.i_mode =
+        (uint16_t)((en->ip->di.i_mode & S_IFMT) | (mode & 07777));
+    en->ip->di.i_ctime = ext2_now();
+    rc = ext2_ip_flush(fs, en->ip);
+    ext2_refresh_vnode(node, en->ip);
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_chown_op(vfs_node_t *node, uint32_t uid, uint32_t gid) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  mutex_lock(&fs->lock);
+  int rc = ext2_begin_write(fs);
+  if (rc == 0) {
+    ext2_inode_t *di = &en->ip->di;
+    if (uid != (uint32_t)-1) {
+      di->i_uid = (uint16_t)uid;
+      di->i_uid_high = (uint16_t)(uid >> 16);
+    }
+    if (gid != (uint32_t)-1) {
+      di->i_gid = (uint16_t)gid;
+      di->i_gid_high = (uint16_t)(gid >> 16);
+    }
+    di->i_ctime = ext2_now();
+    rc = ext2_ip_flush(fs, en->ip);
+    ext2_refresh_vnode(node, en->ip);
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_utimes_op(vfs_node_t *node, int64_t mtime_sec) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  mutex_lock(&fs->lock);
+  int rc = ext2_begin_write(fs);
+  if (rc == 0) {
+    en->ip->di.i_mtime = (uint32_t)mtime_sec;
+    en->ip->di.i_ctime = ext2_now();
+    rc = ext2_ip_flush(fs, en->ip);
+    ext2_refresh_vnode(node, en->ip);
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_fsync_op(vfs_node_t *node) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -EINVAL;
+  mutex_lock(&en->fs->lock);
+  ext2_pg_sync_ino(en->fs, en->ip); // cambios hechos a través de mmap
+  mutex_unlock(&en->fs->lock);
+  return bc_sync_dev(en->fs->bdev) == 0 ? 0 : -EIO;
+}
+
+// mmap(MAP_SHARED): página `pgoff` (4 KiB) del fichero. Más allá del final
+// -> -EFAULT (el proceso recibe SIGBUS). La página vive mientras el inodo.
+static int ext2_get_page_op(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en || !phys_out)
+    return -EINVAL;
+  ext2_fs_t *fs = en->fs;
+  ext2_ino_t *ip = en->ip;
+  if (EXT2_PG % fs->bs)
+    return -ENODEV;
+  mutex_lock(&fs->lock);
+  int rc = 0;
+  if ((ip->di.i_mode & S_IFMT) != S_IFREG) {
+    rc = -ENODEV;
+  } else if (pgoff * EXT2_PG >= ip->size) {
+    rc = -EFAULT;
+  } else {
+    ext2_pg_t *pg = ext2_pg_find(ip, pgoff);
+    if (!pg) {
+      pg = kzalloc(sizeof(*pg));
+      uint64_t ph = pg ? pmm_alloc_page() : 0;
+      if (!pg || !ph) {
+        kfree(pg);
+        rc = -ENOMEM;
+      } else {
+        uint8_t *mem = phys_to_virt(ph);
+        memset(mem, 0, EXT2_PG);
+        ext2_read_data(fs, &ip->di, ip->size, pgoff * EXT2_PG, EXT2_PG, mem);
+        pg->pgoff = pgoff;
+        pg->phys = ph;
+        pg->next = ip->pages;
+        ip->pages = pg;
+      }
+    }
+    if (rc == 0)
+      *phys_out = pg->phys;
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+// ---------------------------------------------------------------------------
+// E3: rename y link
+// ---------------------------------------------------------------------------
+static int ext2_set_dotdot(ext2_fs_t *fs, ext2_ino_t *dir, uint32_t parent) {
+  uint32_t pblk;
+  int rc = ext2_bmap(fs, &dir->di, 0, &pblk);
+  if (rc != 0)
+    return rc;
+  if (pblk == 0)
+    return -EIO;
+  bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+  if (!b)
+    return -EIO;
+  uint8_t *blk = bc_data(b);
+  // "." ocupa rec_len bytes; ".." empieza justo después.
+  uint16_t dot_rl;
+  memcpy(&dot_rl, blk + 4, 2);
+  if (dot_rl < 12u || (uint32_t)dot_rl + 12 > fs->bs || blk[dot_rl + 6] != 2 ||
+      blk[dot_rl + 8] != '.' || blk[dot_rl + 9] != '.') {
+    bc_put(b);
+    return -EIO;
+  }
+  memcpy(blk + dot_rl, &parent, 4);
+  bc_mark_dirty(b);
+  bc_put(b);
+  return 0;
+}
+
+// ¿`anc` es `dir` o un ancestro suyo? (sube por "..")
+static int ext2_is_ancestor(ext2_fs_t *fs, uint32_t anc, uint32_t dir) {
+  uint32_t cur = dir;
+  for (int i = 0; i < 4096; i++) {
+    if (cur == anc)
+      return 1;
+    if (cur == EXT2_ROOT_INO)
+      return 0;
+    ext2_inode_t di;
+    if (ext2_read_inode(fs, cur, &di) != 0)
+      return 1; // en duda, denegar
+    uint32_t up;
+    if (ext2_dir_find(fs, &di, ext2_file_size(fs, &di), "..", 2, &up) != 0)
+      return 1;
+    if (up == cur)
+      return 0;
+    cur = up;
+  }
+  return 1;
+}
+
+static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
+                          vfs_node_t *ddvn, const char *dname) {
+  ext2_node_t *sden = sdvn ? sdvn->priv : NULL, *dden = ddvn ? ddvn->priv : NULL;
+  if (!sden || !dden || !sname || !dname)
+    return -EINVAL;
+  ext2_fs_t *fs = sden->fs;
+  if (dden->fs != fs)
+    return -EXDEV;
+  size_t sl = strlen(sname), dl = strlen(dname);
+  int rc = ext2_name_check(sname, sl);
+  if (rc == 0)
+    rc = ext2_name_check(dname, dl);
+  if (rc != 0)
+    return rc;
+  if ((sl == 1 && sname[0] == '.') || (sl == 2 && sname[0] == '.' && sname[1] == '.') ||
+      (dl == 1 && dname[0] == '.') || (dl == 2 && dname[0] == '.' && dname[1] == '.'))
+    return -EBUSY; // como Linux
+  ext2_ino_t *sp = sden->ip, *dp = dden->ip;
+
+  mutex_lock(&fs->lock);
+  ext2_ino_t *sip = NULL, *dip = NULL;
+  rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((sp->di.i_mode & S_IFMT) != S_IFDIR || (dp->di.i_mode & S_IFMT) != S_IFDIR) {
+    rc = -ENOTDIR;
+    goto out;
+  }
+  if (dp->di.i_links_count == 0) {
+    rc = -ENOENT;
+    goto out;
+  }
+  uint32_t sino, dino = 0;
+  rc = ext2_dir_find(fs, &sp->di, sp->size, sname, sl, &sino);
+  if (rc != 0)
+    goto out;
+  sip = ext2_iget(fs, sino);
+  if (!sip) {
+    rc = -EIO;
+    goto out;
+  }
+  int sdir = (sip->di.i_mode & S_IFMT) == S_IFDIR;
+  int drc = ext2_dir_find(fs, &dp->di, dp->size, dname, dl, &dino);
+  if (drc != 0 && drc != -ENOENT) {
+    rc = drc;
+    goto out;
+  }
+  int exists = (drc == 0);
+  if (exists && dino == sino) // mismo fichero (p. ej. dos hard links): nada
+    goto out;
+  if (exists) {
+    dip = ext2_iget(fs, dino);
+    if (!dip) {
+      rc = -EIO;
+      goto out;
+    }
+    int ddir = (dip->di.i_mode & S_IFMT) == S_IFDIR;
+    if (sdir && !ddir) {
+      rc = -ENOTDIR;
+      goto out;
+    }
+    if (!sdir && ddir) {
+      rc = -EISDIR;
+      goto out;
+    }
+    if (ddir && !ext2_dir_is_empty(fs, dip)) {
+      rc = -ENOTEMPTY;
+      goto out;
+    }
+  }
+  int moving_dir = sdir && sp != dp;
+  if (moving_dir) {
+    if (ext2_is_ancestor(fs, sino, dp->ino)) { // mover un dir dentro de sí mismo
+      rc = -EINVAL;
+      goto out;
+    }
+    if (dp->di.i_links_count >= EXT2_LINK_MAX && !(exists && dip)) {
+      rc = -EMLINK;
+      goto out;
+    }
+  }
+
+  uint8_t ft = ext2_type_to_ft(sip->di.i_mode & S_IFMT);
+  if (exists) {
+    uint32_t rino;
+    rc = ext2_dir_remove(fs, dp, dname, dl, &rino);
+    if (rc != 0)
+      goto out;
+    if ((dip->di.i_mode & S_IFMT) == S_IFDIR) {
+      dip->di.i_links_count = 0;
+      if (dp->di.i_links_count > 2)
+        dp->di.i_links_count--;
+    } else if (dip->di.i_links_count > 0) {
+      dip->di.i_links_count--;
+    }
+    dip->di.i_ctime = ext2_now();
+    if (dip->di.i_links_count == 0)
+      dip->di.i_dtime = ext2_now();
+    ext2_ip_flush(fs, dip);
+  }
+  rc = ext2_dir_add(fs, dp, dname, dl, sino, ft);
+  if (rc != 0)
+    goto out; // (si dst existía, ya se quitó: fsck lo ve como inodo huérfano)
+  uint32_t rino2;
+  rc = ext2_dir_remove(fs, sp, sname, sl, &rino2);
+  if (rc != 0)
+    goto out;
+  if (moving_dir) {
+    ext2_set_dotdot(fs, sip, dp->ino);
+    if (sp->di.i_links_count > 2)
+      sp->di.i_links_count--;
+    dp->di.i_links_count++;
+    ext2_ip_flush(fs, sp);
+    ext2_ip_flush(fs, dp);
+  }
+  sip->di.i_ctime = ext2_now();
+  ext2_ip_flush(fs, sip);
+out:
+  if (dip)
+    ext2_iput(fs, dip);
+  if (sip)
+    ext2_iput(fs, sip);
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static int ext2_link_op(vfs_node_t *dvn, const char *name, vfs_node_t *target) {
+  ext2_node_t *den = dvn ? dvn->priv : NULL, *ten = target ? target->priv : NULL;
+  if (!den || !ten || !name)
+    return -EINVAL;
+  ext2_fs_t *fs = den->fs;
+  if (ten->fs != fs)
+    return -EXDEV;
+  size_t nl = strlen(name);
+  int rc = ext2_name_check(name, nl);
+  if (rc != 0)
+    return rc;
+  ext2_ino_t *dp = den->ip, *tip = ten->ip;
+  mutex_lock(&fs->lock);
+  rc = ext2_begin_write(fs);
+  if (rc != 0)
+    goto out;
+  if ((dp->di.i_mode & S_IFMT) != S_IFDIR) {
+    rc = -ENOTDIR;
+    goto out;
+  }
+  if ((tip->di.i_mode & S_IFMT) == S_IFDIR) {
+    rc = -EPERM;
+    goto out;
+  }
+  if (tip->di.i_links_count == 0 || dp->di.i_links_count == 0) {
+    rc = -ENOENT;
+    goto out;
+  }
+  if (tip->di.i_links_count >= EXT2_LINK_MAX) {
+    rc = -EMLINK;
+    goto out;
+  }
+  uint32_t tmp;
+  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &tmp);
+  if (rc == 0) {
+    rc = -EEXIST;
+    goto out;
+  }
+  if (rc != -ENOENT)
+    goto out;
+  rc = ext2_dir_add(fs, dp, name, nl, tip->ino,
+                    ext2_type_to_ft(tip->di.i_mode & S_IFMT));
+  if (rc != 0)
+    goto out;
+  tip->di.i_links_count++;
+  tip->di.i_ctime = ext2_now();
+  rc = ext2_ip_flush(fs, tip);
+  ext2_refresh_vnode(target, tip);
+out:
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+static vfs_ops_t ext2_node_ops = {
+    .read = ext2_node_read,
+    .write = ext2_node_write,
+    .open = ext2_node_open,
+    .close = ext2_node_close,
+    .create = ext2_create_op,
+    .mkdir = ext2_mkdir_op,
+    .unlink = ext2_unlink_op,
+    .mknod = ext2_mknod_op,
+    .truncate = ext2_node_truncate,
+    .readdir = ext2_node_readdir,
+    .readlink = ext2_node_readlink,
+    .symlink = ext2_symlink_op,
+    .rename = ext2_rename_op,
+    .link = ext2_link_op,
+    .utimes = ext2_utimes_op,
+    .chmod = ext2_chmod_op,
+    .chown = ext2_chown_op,
+    .fsync = ext2_fsync_op,
+    .get_page = ext2_get_page_op,
+};
+
+// ---------------------------------------------------------------------------
+// Montaje
+// ---------------------------------------------------------------------------
+int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
+  if (!bdev || !fs_priv_out)
+    return -EINVAL;
+  const char *dn = bdev->name;
+  uint32_t ss = bdev->sector_size;
+  if (ss == 0 || ss > EXT2_MAX_BS)
+    return -EINVAL;
+
+  // Superbloque: 1024 bytes en el byte 1024.
+  uint32_t first = 1024 / ss;
+  uint32_t nsec = (1024 + ss - 1) / ss;
+  if (nsec == 0)
+    nsec = 1;
+  uint8_t *raw = kmalloc((size_t)nsec * ss);
+  if (!raw)
+    return -ENOMEM;
+  if (bdev_read(bdev, first, nsec, raw) != 0) {
+    kfree(raw);
+    return -EIO;
+  }
+  ext2_sb_t sb;
+  memcpy(&sb, raw + (1024 - (size_t)first * ss), sizeof(sb));
+  kfree(raw);
+
+  if (sb.s_magic != EXT2_MAGIC)
+    return -EINVAL;
+  if (sb.s_rev_level > 1) {
+    LOG_ERR("[EXT2] %s: revisión %u no soportada", dn, sb.s_rev_level);
+    return -EINVAL;
+  }
+  uint32_t compat = 0, incompat = 0, ro_compat = 0;
+  uint32_t isz = EXT2_GOOD_OLD_INODE_SIZE, first_ino = EXT2_GOOD_OLD_FIRST_INO;
+  if (sb.s_rev_level == 1) {
+    compat = sb.s_feature_compat;
+    incompat = sb.s_feature_incompat;
+    ro_compat = sb.s_feature_ro_compat;
+    isz = sb.s_inode_size;
+    first_ino = sb.s_first_ino;
+  }
+  if (incompat & EXT2_FEATURE_INCOMPAT_RECOVER) {
+    LOG_ERR("[EXT2] %s: el journal necesita recuperación (ejecuta e2fsck)", dn);
+    return -EINVAL;
+  }
+  if (incompat & ~EXT2_INCOMPAT_SUPPORTED) {
+    LOG_ERR("[EXT2] %s: features incompatibles no soportadas 0x%x "
+            "(extents/64bit/flex_bg/meta_bg... son ext4)",
+            dn, incompat & ~EXT2_INCOMPAT_SUPPORTED);
+    return -EINVAL;
+  }
+  if (sb.s_log_block_size > 2) {
+    LOG_ERR("[EXT2] %s: bloque de %u bytes no soportado (máx 4096)", dn,
+            1024u << (sb.s_log_block_size > 20 ? 20 : sb.s_log_block_size));
+    return -EINVAL;
+  }
+  uint32_t bs = 1024u << sb.s_log_block_size;
+  if (bs < ss || (bs % ss)) {
+    LOG_ERR("[EXT2] %s: bloque %u incompatible con sectores de %u", dn, bs, ss);
+    return -EINVAL;
+  }
+  if (isz < EXT2_GOOD_OLD_INODE_SIZE || isz > bs || (isz & (isz - 1)) ||
+      first_ino < 2) {
+    LOG_ERR("[EXT2] %s: tamaño de inodo/first_ino inválidos (%u/%u)", dn, isz,
+            first_ino);
+    return -EINVAL;
+  }
+  uint32_t fdb = (bs == 1024) ? 1 : 0;
+  if (sb.s_first_data_block != fdb || sb.s_blocks_per_group == 0 ||
+      sb.s_blocks_per_group > 8 * bs || sb.s_inodes_per_group == 0 ||
+      sb.s_inodes_per_group > 8 * bs || sb.s_blocks_count <= fdb ||
+      sb.s_inodes_count == 0) {
+    LOG_ERR("[EXT2] %s: geometría inválida", dn);
+    return -EINVAL;
+  }
+  uint64_t dev_blocks = bdev_size_bytes(bdev) / bs;
+  if (sb.s_blocks_count > dev_blocks) {
+    LOG_ERR("[EXT2] %s: el FS (%u bloques) es mayor que el dispositivo (%llu)",
+            dn, sb.s_blocks_count, (unsigned long long)dev_blocks);
+    return -EINVAL;
+  }
+  uint32_t ngroups =
+      (sb.s_blocks_count - fdb + sb.s_blocks_per_group - 1) / sb.s_blocks_per_group;
+  if (ngroups == 0 || (uint64_t)ngroups * sb.s_inodes_per_group < sb.s_inodes_count ||
+      (uint64_t)(ngroups - 1) * sb.s_inodes_per_group >= sb.s_inodes_count) {
+    LOG_ERR("[EXT2] %s: nº de inodos incoherente con los grupos", dn);
+    return -EINVAL;
+  }
+  uint32_t gd_per_blk = bs / sizeof(ext2_gd_t);
+  uint32_t gdt_blocks = (ngroups + gd_per_blk - 1) / gd_per_blk;
+  if (fdb + 1 + gdt_blocks > sb.s_blocks_count)
+    return -EINVAL;
+
+  ext2_fs_t *fs = kzalloc(sizeof(*fs));
+  if (!fs)
+    return -ENOMEM;
+  fs->groups = kzalloc((size_t)ngroups * sizeof(ext2_group_t));
+  if (!fs->groups) {
+    kfree(fs);
+    return -ENOMEM;
+  }
+  mutex_init(&fs->lock);
+  fs->bdev = bdev;
+  fs->bs = bs;
+  fs->log_bs = sb.s_log_block_size;
+  fs->inodes_count = sb.s_inodes_count;
+  fs->blocks_count = sb.s_blocks_count;
+  fs->r_blocks_count = sb.s_r_blocks_count;
+  fs->free_blocks = sb.s_free_blocks_count;
+  fs->free_inodes = sb.s_free_inodes_count;
+  fs->first_data_block = fdb;
+  fs->blocks_per_group = sb.s_blocks_per_group;
+  fs->inodes_per_group = sb.s_inodes_per_group;
+  fs->inode_size = isz;
+  fs->first_ino = first_ino;
+  fs->ngroups = ngroups;
+  fs->compat = compat;
+  fs->incompat = incompat;
+  fs->ro_compat = ro_compat;
+  fs->filetype = (incompat & EXT2_FEATURE_INCOMPAT_FILETYPE) != 0;
+
+  uint32_t itable_blocks =
+      (uint32_t)(((uint64_t)sb.s_inodes_per_group * isz + bs - 1) / bs);
+  uint32_t bad_groups = 0;
+  for (uint32_t g = 0; g < ngroups; g++) {
+    uint32_t gb = fdb + 1 + g / gd_per_blk;
+    bc_buf_t *b = bc_get(bdev, gb, bs);
+    if (!b) {
+      kfree(fs->groups);
+      kfree(fs);
+      return -EIO;
+    }
+    ext2_gd_t gd;
+    memcpy(&gd, (uint8_t *)bc_data(b) + (g % gd_per_blk) * sizeof(gd), sizeof(gd));
+    bc_put(b);
+    ext2_group_t *gr = &fs->groups[g];
+    if (gd.bg_inode_table >= fdb && gd.bg_inode_table < sb.s_blocks_count &&
+        (uint64_t)gd.bg_inode_table + itable_blocks <= sb.s_blocks_count)
+      gr->inode_table = gd.bg_inode_table;
+    else
+      bad_groups++;
+    if (gd.bg_block_bitmap >= fdb && gd.bg_block_bitmap < sb.s_blocks_count &&
+        gd.bg_inode_bitmap >= fdb && gd.bg_inode_bitmap < sb.s_blocks_count) {
+      gr->block_bitmap = gd.bg_block_bitmap;
+      gr->inode_bitmap = gd.bg_inode_bitmap;
+    } else if (gr->inode_table) {
+      bad_groups++;
+    }
+    gr->free_blocks = gd.bg_free_blocks_count;
+    gr->free_inodes = gd.bg_free_inodes_count;
+    gr->used_dirs = gd.bg_used_dirs_count;
+  }
+  fs->itable_blocks = itable_blocks;
+  fs->bad_groups = bad_groups;
+  fs->s_state = sb.s_state;
+  fs->rev1 = sb.s_rev_level == 1;
+
+  // La raíz debe ser un directorio legible.
+  ext2_inode_t root;
+  if (ext2_read_inode(fs, EXT2_ROOT_INO, &root) != 0 ||
+      (root.i_mode & S_IFMT) != S_IFDIR) {
+    LOG_ERR("[EXT2] %s: inodo raíz ilegible o no es un directorio", dn);
+    bc_invalidate_dev(bdev);
+    kfree(fs->groups);
+    kfree(fs);
+    return -EINVAL;
+  }
+
+  LOG_INFO("[EXT2] montado %s: rev %u, bloque %u B, %u grupos, "
+           "%u inodos de %u B, features c/i/ro=0x%x/0x%x/0x%x%s%s",
+           dn, sb.s_rev_level, bs, ngroups, fs->inodes_count, isz, compat,
+           incompat, ro_compat,
+           (sb.s_state & EXT2_STATE_VALID) ? "" : " [NO DESMONTADO LIMPIO]",
+           (compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) ? " [ext3 con journal]"
+                                                      : "");
+  if (bad_groups)
+    LOG_WARN("[EXT2] %s: %u grupos con tabla de inodos inválida (ignorados)",
+             dn, bad_groups);
+  *fs_priv_out = fs;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Escritura: habilitar, sincronizar, desmontar
+// ---------------------------------------------------------------------------
+static int g_flushd_started;
+#define EXT2_MAX_RW 8
+static ext2_fs_t *g_rw_fs[EXT2_MAX_RW];
+static mutex_t g_rw_lock; // orden: g_rw_lock -> fs->lock
+static int g_rw_lock_init;
+
+static void ext2_rw_register(ext2_fs_t *fs, int add) {
+  if (!g_rw_lock_init) {
+    mutex_init(&g_rw_lock);
+    g_rw_lock_init = 1;
+  }
+  mutex_lock(&g_rw_lock);
+  for (int i = 0; add && i < EXT2_MAX_RW; i++)
+    if (g_rw_fs[i] == fs) {
+      mutex_unlock(&g_rw_lock);
+      return; // ya registrado
+    }
+  for (int i = 0; i < EXT2_MAX_RW; i++) {
+    if (add && !g_rw_fs[i]) {
+      g_rw_fs[i] = fs;
+      break;
+    }
+    if (!add && g_rw_fs[i] == fs)
+      g_rw_fs[i] = NULL;
+  }
+  mutex_unlock(&g_rw_lock);
+}
+
+// Vuelca la caché cada pocos segundos para acotar lo que se pierde si se va la
+// luz y libera lo diferido. El estado "limpio" NO se marca aquí: solo en
+// sync/umount.
+static int ext2_flushd(void *arg) {
+  (void)arg;
+  completion_t never;
+  completion_init(&never);
+  while (!kthread_should_stop()) {
+    wait_for_completion_timeout(&never, 5000);
+    mutex_lock(&g_rw_lock);
+    for (int i = 0; i < EXT2_MAX_RW; i++) {
+      ext2_fs_t *fs = g_rw_fs[i];
+      if (!fs)
+        continue;
+      mutex_lock(&fs->lock);
+      if (fs->rw) {
+        ext2_pg_sync_all(fs);
+        ext2_commit_frees(fs);
+      }
+      mutex_unlock(&fs->lock);
+    }
+    mutex_unlock(&g_rw_lock);
+    bc_sync_all();
+  }
+  return 0;
+}
+
+// Pasa el FS a escribible si es seguro. Con el mutex tomado.
+static int ext2_set_rw_locked(ext2_fs_t *fs) {
+  const char *dn = fs->bdev->name;
+  if (fs->rw)
+    return 0;
+  if (fs->bdev->is_read_only) {
+    LOG_WARN("[EXT2] %s: dispositivo de solo lectura", dn);
+    return -EROFS;
+  }
+  if (!(fs->s_state & EXT2_STATE_VALID)) {
+    LOG_WARN("[EXT2] %s: no se desmontó limpio: solo lectura (ejecuta e2fsck "
+             "en el host)", dn);
+    return -EROFS;
+  }
+  if (fs->s_state & 2 /*ERROR_FS*/) {
+    LOG_WARN("[EXT2] %s: el FS tiene errores registrados: solo lectura", dn);
+    return -EROFS;
+  }
+  if ((fs->compat & ~EXT2_COMPAT_RW_OK) || (fs->ro_compat & ~EXT2_RO_COMPAT_RW_OK)) {
+    LOG_WARN("[EXT2] %s: features no soportadas para escribir (c=0x%x ro=0x%x): "
+             "solo lectura", dn, fs->compat & ~EXT2_COMPAT_RW_OK,
+             fs->ro_compat & ~EXT2_RO_COMPAT_RW_OK);
+    return -EROFS;
+  }
+  if (fs->bad_groups) {
+    LOG_WARN("[EXT2] %s: %u grupos con metadatos inválidos: solo lectura", dn,
+             fs->bad_groups);
+    return -EROFS;
+  }
+  fs->rw = 1;
+  fs->disk_clean = 1;
+  int rc = ext2_sb_commit(fs, 0); // sucio a disco antes de tocar nada
+  if (rc != 0) {
+    fs->rw = 0;
+    return -EIO;
+  }
+  if (!g_flushd_started) {
+    g_flushd_started = 1;
+    if (!kthread_run(ext2_flushd, NULL, "ext2-flushd")) {
+      g_flushd_started = 0;
+      LOG_WARN("[EXT2] sin hilo de volcado periódico (solo en sync/umount)");
+    }
+  }
+  LOG_INFO("[EXT2] %s: montado para lectura/escritura", dn);
+  return 0;
+}
+
+// Todo a disco y, si estaba escribible, marca el FS como limpio.
+static int ext2_flush_clean_locked(ext2_fs_t *fs) {
+  if (!fs->rw)
+    return bc_sync_dev(fs->bdev) == 0 ? 0 : -EIO;
+  ext2_pg_sync_all(fs); // páginas mmap
+  ext2_commit_frees(fs); // liberaciones diferidas (con su barrera)
+  int rc = bc_sync_dev(fs->bdev); // datos y metadatos primero
+  if (rc != 0)
+    return -EIO;
+  rc = ext2_sb_commit(fs, 1); // contadores del superbloque + VALID
+  return rc == 0 ? 0 : -EIO;
+}
+
+static int ext2_sync_op(void *fs_priv) {
+  ext2_fs_t *fs = fs_priv;
+  if (!fs)
+    return -EINVAL;
+  mutex_lock(&fs->lock);
+  int rc = ext2_flush_clean_locked(fs);
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+int ext2_remount(void *fs_priv, int rw) {
+  ext2_fs_t *fs = fs_priv;
+  if (!fs)
+    return -EINVAL;
+  mutex_lock(&fs->lock);
+  int rc = 0;
+  if (rw) {
+    rc = ext2_set_rw_locked(fs);
+  } else if (fs->rw) {
+    rc = ext2_flush_clean_locked(fs);
+    if (rc == 0)
+      fs->rw = 0;
+  }
+  int now_rw = fs->rw;
+  mutex_unlock(&fs->lock);
+  if (rc == 0)
+    ext2_rw_register(fs, now_rw);
+  return rc;
+}
+
+void ext2_umount(void *fs_priv) {
+  ext2_fs_t *fs = fs_priv;
+  if (!fs)
+    return;
+  ext2_rw_register(fs, 0); // el hilo de volcado ya no lo toca
+  mutex_lock(&fs->lock);
+  if (ext2_flush_clean_locked(fs) != 0)
+    LOG_ERR("[EXT2] %s: error al volcar en el desmontaje (el FS queda sucio)",
+            fs->bdev->name);
+  if (fs->icache)
+    LOG_WARN("[EXT2] %s: inodos con referencias al desmontar", fs->bdev->name);
+  mutex_unlock(&fs->lock);
+  bc_invalidate_dev(fs->bdev);
+  while (fs->icache) {
+    ext2_ino_t *n = fs->icache->next;
+    kfree(fs->icache);
+    fs->icache = n;
+  }
+  kfree(fs->pend_blk);
+  kfree(fs->pend_ino);
+  kfree(fs->groups);
+  kfree(fs);
+}
+
+static vfs_fs_ops_t ext2_fs_ops = {
+    .lookup = ext2_lookup,
+    .statfs = ext2_statfs,
+    .name = "ext2",
+    .umount = ext2_umount,
+    .sync = ext2_sync_op,
+};
+
+vfs_fs_ops_t *ext2_get_vfs_ops(void) { return &ext2_fs_ops; }
+
+int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {
+  if (!bdev_name || !mount_path)
+    return -EINVAL;
+  block_device_t *bdev = blk_lookup(bdev_name);
+  if (!bdev)
+    return -ENOENT;
+  void *priv = NULL;
+  int rc = ext2_mount(bdev, &priv);
+  if (rc != 0)
+    return rc;
+  if (rw) {
+    rc = ext2_remount(priv, 1);
+    if (rc != 0) {
+      ext2_umount(priv);
+      return rc;
+    }
+  }
+  rc = vfs_mount(mount_path, &ext2_fs_ops, priv);
+  if (rc != 0) {
+    ext2_umount(priv);
+    return rc;
+  }
+  if (!rw)
+    vfs_set_mount_flags(mount_path, VFS_MS_RDONLY);
+  return 0;
+}
+
+int ext2_mount_bdev(const char *bdev_name, const char *mount_path) {
+  return ext2_mount_bdev_rw(bdev_name, mount_path, 0);
+}

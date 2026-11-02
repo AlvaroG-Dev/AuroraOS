@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "klog.h"
 #include "paging.h"
+#include "power.h"
 #include "sched.h"
 #include "serial.h"
 #include "slab.h"
@@ -293,6 +294,8 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
 
   serial_puts("\n=======================================================\n");
   serial_puts("System Halted.\n");
+
+  power_panic_restart(); // panic=N en la cmdline; si no, sigue y para
 
   while (1) {
     __asm__ volatile("cli; hlt");

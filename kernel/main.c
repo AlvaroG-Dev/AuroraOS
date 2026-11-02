@@ -1,6 +1,7 @@
 // kernel/main.c
 // Punto de entrada del kernel Aurora OS.
 
+#include "power.h"
 #include "../bootloader/include/kernel_boot_info.h"
 #include "cmdline.h"
 #include "plog.h"
@@ -27,7 +28,10 @@
 #include "cpu.h"
 #include "driver.h"
 #include "elf.h"
+#include "bcache.h"
+#include "ext2.h"
 #include "fat32.h"
+#include "fsprobe.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
 #include "gfx/theme.h"
@@ -79,6 +83,7 @@
 #include "tty.h"
 #include "vdso.h"
 #include "workqueue.h"
+#include "tmpfs.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -289,6 +294,7 @@ static int acpi_init_task(void *arg) {
   LOG_INFO("[INIT] ACPI PM (P-states, S-states)...");
   acpi_pm_init();
   acpi_button_init();
+  power_cad_init();
 
   LOG_INFO("[INIT] PM: aplicar política...");
   cpu_apply_pm_policy();
@@ -374,6 +380,7 @@ static int vfs_init_task(void *arg) {
 
   LOG_INFO("[INIT] VFS...");
   vfs_init();
+  bc_init();
 
   LOG_INFO("[INIT] IPC...");
   ipc_init();
@@ -628,6 +635,24 @@ static void save_prev_log_to_data(void) {
   kfree(buf);
 }
 
+// Registra una sola vez el tipo detectado de cada dispositivo. Devuelve 1 si
+// es ext2/3/4: aún no hay driver, así que no se prueba como FAT32 (daría un
+// aviso de BPB inválido en cada reintento).
+static int boot_probe_is_ext2(block_device_t *b) {
+  static char seen[16][16];
+  enum fs_kind k = fs_probe(b);
+  for (int i = 0; i < 16; i++)
+    if (strcmp(seen[i], b->name) == 0)
+      return k == FS_EXT2;
+  for (int i = 0; i < 16; i++)
+    if (!seen[i][0]) {
+      strncpy(seen[i], b->name, sizeof(seen[i]) - 1);
+      LOG_INFO("[FSPROBE] %s: %s", b->name, fs_kind_name(k));
+      break;
+    }
+  return k == FS_EXT2;
+}
+
 // Ultimo resultado de fat32_mount_bdev por dispositivo (para el resumen
 // [DIAG] en pantalla cuando /data no se monta).
 #define MOUNT_RC_MAX 12
@@ -662,11 +687,21 @@ static int mount_rc_of(const char *name, int *rc) {
 }
 
 static int try_mount_data(block_device_t *b) {
+  if (boot_probe_is_ext2(b)) { // ext2/3/4: solo lectura al arrancar (D9)
+    int erc = ext2_mount_bdev(b->name, "/data");
+    note_mount_rc(b->name, erc);
+    if (erc == 0) {
+      LOG_INFO("[INIT] Montado %s (ext2, solo lectura) en /data", b->name);
+      g_data_mounted = 1;
+    }
+    return erc;
+  }
   int rc = fat32_mount_bdev(b->name, "/data");
   note_mount_rc(b->name, rc);
   if (rc == 0) {
     LOG_INFO("[INIT] Montado %s en /data", b->name);
     g_data_mounted = 1;
+    etc_persist_on_data_mount(); // [U2.3]
   }
   return rc;
 }
@@ -1172,6 +1207,16 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   pmm_relocate_bitmap();
   uaccess_init();
+  {
+    // [COW] CR0.WP: el kernel tambien respeta las paginas de solo lectura, asi
+    // un copy_to_user sobre una pagina COW provoca #PF en vez de escribir en
+    // el frame compartido. Despues de uaccess_init (que parchea .text) y antes
+    // de arrancar los APs (que lo activan en smp_boot.c).
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1ULL << 16);
+    __asm__ volatile("movq %0, %%cr0" : : "r"(cr0));
+  }
   heap_init();
   vmap_init(); // [LinuxKPI L4] antes del primer proceso
   klog_boot_ok();
