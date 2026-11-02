@@ -83,6 +83,17 @@ static int verifyp(unsigned char *p, u64 n, unsigned char seed) {
   return 1;
 }
 
+// Fuga por mitades. El kernel reserva una vez, en un momento que no controlamos,
+// una cache de ~1,9 MB (la capa del overlay de log de boot_console.c, se crea
+// en el primer fotograma del compositor). Una fuga real crece en las dos mitades
+// de un bucle; esa reserva unica solo cae en una. Por eso se juzga la menor.
+static i64 leak_kb(u64 a, u64 b) { return (i64)(a - b) / 1024; }
+static int no_leak(u64 f0, u64 fm, u64 f1, i64 limit_kb_half) {
+  i64 h1 = leak_kb(f0, fm), h2 = leak_kb(fm, f1);
+  out("COW-TEST: info fuga por mitades: "); outnum(h1); out(" KB / "); outnum(h2); out(" KB\n");
+  return (h1 < h2 ? h1 : h2) < limit_kb_half;
+}
+
 static int g_data = 1234;           // .data
 static char g_buf[8192] = {1};      // .data
 
@@ -202,9 +213,10 @@ static void t_mass(void) {
   u64 len = 2 << 20;
   unsigned char *m = xmmap(len);
   fillp(m, len, 5);
-  u64 f0 = freeram();
+  u64 f0 = freeram(), fm = f0;
   int bad = 0;
   for (int i = 0; i < 1500; i++) {
+    if (i == 750) fm = freeram();
     i64 pid = xfork();
     if (pid == 0) { m[(i % 512) * 4096] ^= 0xff; xexit(0); }
     if (waitpid_(pid) != 0) bad++;
@@ -213,20 +225,21 @@ static void t_mass(void) {
   check(bad == 0, "1500 fork+exit");
   check(verifyp(m, len, 5), "padre intacto tras 1500 forks");
   out("COW-TEST: info fuga tras 1500 forks: "); outnum((i64)(f0 - f1) / 1024); out(" KB\n");
-  // ~1.3 KB por fork quedan en el heap del kernel (estructuras de proceso);
-  // es previo al COW (antes: ~9 KB). Los frames se comprueban aparte.
-  check((i64)(f0 - f1) < (3 << 20), "sin fuga de frames tras fork masivo");
+  // Medido: 0 KB por fork en estado estable (los ~1,9 MB que se veian aqui eran
+  // la cache del overlay, ver no_leak). 256 KB por mitad = 350 B/fork.
+  check(no_leak(f0, fm, f1, 256), "sin fuga de frames tras fork masivo");
   sc(SYS_munmap, (i64)m, len, 0, 0, 0, 0);
 }
 
 // --- 6. fork+exec masivo -----------------------------------------------------------
 static int g_argc; static char **g_argv;
 static void t_exec(const char *self) {
-  u64 f0 = freeram();
+  u64 f0 = freeram(), fm = f0;
   int bad = 0;
   char *argv[] = {(char *)self, "exec-child", 0};
   char *envp[] = {0};
   for (int i = 0; i < 300; i++) {
+    if (i == 150) fm = freeram();
     i64 pid = (i & 1) ? sc(SYS_vfork, 0, 0, 0, 0, 0, 0) : xfork();
     if (pid == 0) { sc(SYS_execve, (i64)self, (i64)argv, (i64)envp, 0, 0, 0); xexit(99); }
     if (waitpid_(pid) != 0) bad++;
@@ -234,7 +247,7 @@ static void t_exec(const char *self) {
   u64 f1 = freeram();
   check(bad == 0, "300 fork/vfork+execve");
   out("COW-TEST: info fuga tras 300 exec: "); outnum((i64)(f0 - f1) / 1024); out(" KB\n");
-  check((i64)(f0 - f1) < (512 << 10), "sin fuga tras fork+exec masivo");
+  check(no_leak(f0, fm, f1, 256), "sin fuga tras fork+exec masivo");
 }
 
 // --- 7. concurrencia SMP: N hijos escribiendo a la vez ------------------------------
@@ -242,7 +255,9 @@ static void t_smp(void) {
   u64 len = 32ULL << 20;
   unsigned char *m = xmmap(len);
   fillp(m, len, 21);
-  u64 f0 = freeram();
+  u64 f0 = freeram(), fm = f0;
+  int bad = 0;
+  for (int round = 0; round < 2; round++) {
   i64 pids[8];
   for (int k = 0; k < 8; k++) {
     pids[k] = xfork();
@@ -258,13 +273,14 @@ static void t_smp(void) {
       xexit(ok ? 0 : 1);
     }
   }
-  int bad = 0;
   for (int k = 0; k < 8; k++) if (waitpid_(pids[k]) != 0) bad++;
+  if (round == 0) fm = freeram();
+  }
   check(bad == 0, "8 hijos x 3 nietos escribiendo en paralelo");
   check(verifyp(m, len, 21), "padre intacto tras concurrencia");
   u64 f1 = freeram();
   out("COW-TEST: info fuga tras concurrencia: "); outnum((i64)(f0 - f1) / 1024); out(" KB\n");
-  check((i64)(f0 - f1) < (2 << 20), "sin fuga tras concurrencia SMP");
+  check(no_leak(f0, fm, f1, 1024), "sin fuga tras concurrencia SMP");
   sc(SYS_munmap, (i64)m, len, 0, 0, 0, 0);
 }
 
