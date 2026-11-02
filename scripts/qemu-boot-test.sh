@@ -16,7 +16,7 @@ LOG=${LOG:-/tmp/boot-test.log}
 rm -f "$LOG"   # sin restos de una ejecucion anterior (QMON_WAIT los confundiria)
 printf '%s\n' "$@" > sysroot/system/boot-tests
 trap 'rm -f sysroot/system/boot-tests' EXIT
-make iso >/tmp/boot-test-build.log 2>&1 || { tail -30 /tmp/boot-test-build.log; exit 1; }
+[ -n "${SKIP_BUILD:-}" ] || make iso >/tmp/boot-test-build.log 2>&1 || { tail -30 /tmp/boot-test-build.log; exit 1; }
 rm -f sysroot/system/boot-tests
 trap - EXIT
 cp /usr/share/OVMF/OVMF_VARS_4M.fd OVMF_VARS.fd
@@ -51,7 +51,7 @@ PY
   ) &
 fi
 
-timeout "$T" qemu-system-x86_64 \
+timeout -s "${QEMU_KILL_SIG:-TERM}" "$T" qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=OVMF_VARS.fd \
   -m "${QEMU_MEM:-2G}" -no-reboot -smp "${QEMU_SMP:-2}" -cdrom aurora.iso -display none \

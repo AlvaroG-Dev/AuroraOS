@@ -141,6 +141,11 @@ typedef struct {
   uint32_t gen;   // sube con cada cambio de directorio (invalida cursores)
   uint32_t itable_blocks, bad_groups;
   ext2_ino_t *icache; // inodos con referencias
+  // Liberaciones diferidas hasta que el inodo/dir que dejó de apuntar esté en
+  // disco (barrera): evita que un corte deje un bloque libre y reutilizado
+  // mientras otro inodo sin volcar aún lo referencia.
+  uint32_t *pend_blk, *pend_ino;
+  uint32_t npend_blk, cap_blk, npend_ino, cap_ino;
 } ext2_fs_t;
 
 typedef struct {
@@ -517,7 +522,9 @@ static int ext2_blk_is_meta(const ext2_fs_t *fs, uint32_t g, uint32_t blk) {
          (blk >= gr->inode_table && blk < gr->inode_table + fs->itable_blocks);
 }
 
-static int ext2_alloc_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
+static void ext2_commit_frees(ext2_fs_t *fs);
+
+static int ext2_alloc_block_try(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
   process_t *p = process_current();
   if (fs->free_blocks == 0 ||
       (fs->free_blocks <= fs->r_blocks_count && p && p->euid != 0))
@@ -565,7 +572,7 @@ static int ext2_alloc_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
   return -ENOSPC;
 }
 
-static void ext2_free_block(ext2_fs_t *fs, uint32_t blk) {
+static void ext2_free_block_now(ext2_fs_t *fs, uint32_t blk) {
   if (blk < fs->first_data_block || blk >= fs->blocks_count) {
     LOG_WARN("[EXT2] %s: liberar bloque fuera de rango (%u)", fs->bdev->name,
              blk);
@@ -593,6 +600,41 @@ static void ext2_free_block(ext2_fs_t *fs, uint32_t blk) {
   ext2_gd_write(fs, g);
 }
 
+static int ext2_pend_push(uint32_t **arr, uint32_t *n, uint32_t *cap,
+                          uint32_t v) {
+  if (*n == *cap) {
+    uint32_t nc = *cap ? *cap * 2 : 256;
+    uint32_t *na = kmalloc((size_t)nc * 4);
+    if (!na)
+      return -ENOMEM;
+    if (*arr) {
+      memcpy(na, *arr, (size_t)*n * 4);
+      kfree(*arr);
+    }
+    *arr = na;
+    *cap = nc;
+  }
+  (*arr)[(*n)++] = v;
+  return 0;
+}
+
+// Liberar (diferido): el bit sigue ocupado hasta la próxima barrera.
+static void ext2_free_block(ext2_fs_t *fs, uint32_t blk) {
+  if (ext2_pend_push(&fs->pend_blk, &fs->npend_blk, &fs->cap_blk, blk) != 0)
+    ext2_free_block_now(fs, blk); // sin memoria: se libera ya
+}
+
+// Asignar; si no hay sitio pero hay liberaciones pendientes, se fuerza la
+// barrera para recuperarlas y se reintenta.
+static int ext2_alloc_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
+  int rc = ext2_alloc_block_try(fs, goal, out);
+  if (rc == -ENOSPC && fs->npend_blk) {
+    ext2_commit_frees(fs);
+    rc = ext2_alloc_block_try(fs, goal, out);
+  }
+  return rc;
+}
+
 // Bloque nuevo a ceros (datos o indirecto) ya sucio en la bcache.
 static int ext2_new_zero_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
   uint32_t blk;
@@ -601,7 +643,7 @@ static int ext2_new_zero_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
     return rc;
   bc_buf_t *b = bc_get_new(fs->bdev, blk, fs->bs);
   if (!b) {
-    ext2_free_block(fs, blk);
+    ext2_free_block_now(fs, blk);
     return -EIO;
   }
   memset(bc_data(b), 0, fs->bs);
@@ -614,8 +656,8 @@ static int ext2_new_zero_block(ext2_fs_t *fs, uint32_t goal, uint32_t *out) {
 // ---------------------------------------------------------------------------
 // Inodos: asignar / liberar / caché
 // ---------------------------------------------------------------------------
-static int ext2_alloc_inode(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
-                            uint32_t *out) {
+static int ext2_alloc_inode_try(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
+                                uint32_t *out) {
   if (fs->free_inodes == 0)
     return -ENOSPC;
   uint32_t g0 = 0;
@@ -671,7 +713,7 @@ static int ext2_alloc_inode(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
   return -ENOSPC;
 }
 
-static void ext2_free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
+static void ext2_free_inode_now(ext2_fs_t *fs, uint32_t ino, int is_dir) {
   if (ino < fs->first_ino || ino > fs->inodes_count)
     return;
   uint32_t g = (ino - 1) / fs->inodes_per_group;
@@ -696,6 +738,36 @@ static void ext2_free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
   if (is_dir && gr->used_dirs > 0)
     gr->used_dirs--;
   ext2_gd_write(fs, g);
+}
+
+static void ext2_free_inode(ext2_fs_t *fs, uint32_t ino, int is_dir) {
+  if (ext2_pend_push(&fs->pend_ino, &fs->npend_ino, &fs->cap_ino,
+                     ino | (is_dir ? 0x80000000u : 0)) != 0)
+    ext2_free_inode_now(fs, ino, is_dir);
+}
+
+static int ext2_alloc_inode(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
+                            uint32_t *out) {
+  int rc = ext2_alloc_inode_try(fs, parent_ino, is_dir, out);
+  if (rc == -ENOSPC && fs->npend_ino) {
+    ext2_commit_frees(fs);
+    rc = ext2_alloc_inode_try(fs, parent_ino, is_dir, out);
+  }
+  return rc;
+}
+
+// Barrera + liberación real de lo diferido. Con fs->lock tomado.
+static void ext2_commit_frees(ext2_fs_t *fs) {
+  if (!fs->npend_blk && !fs->npend_ino)
+    return;
+  if (bc_sync_dev(fs->bdev) != 0) // inodos/directorios ya en disco
+    return;                       // si falla, se reintenta más tarde
+  for (uint32_t i = 0; i < fs->npend_blk; i++)
+    ext2_free_block_now(fs, fs->pend_blk[i]);
+  for (uint32_t i = 0; i < fs->npend_ino; i++)
+    ext2_free_inode_now(fs, fs->pend_ino[i] & 0x7fffffffu,
+                        (fs->pend_ino[i] & 0x80000000u) != 0);
+  fs->npend_blk = fs->npend_ino = 0;
 }
 
 // Un inodo tiene punteros a bloques en i_block[]? (no: dispositivos, FIFOs,
@@ -1767,9 +1839,9 @@ static int ext2_new_inode_op(vfs_node_t *dvn, const char *name, uint32_t mode,
 
 undo_block:
   if (data_blk)
-    ext2_free_block(fs, data_blk);
+    ext2_free_block_now(fs, data_blk);
 undo_inode:
-  ext2_free_inode(fs, ino, type == S_IFDIR);
+  ext2_free_inode_now(fs, ino, type == S_IFDIR);
 out:
   mutex_unlock(&fs->lock);
   return rc;
@@ -2364,15 +2436,53 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
 // Escritura: habilitar, sincronizar, desmontar
 // ---------------------------------------------------------------------------
 static int g_flushd_started;
+#define EXT2_MAX_RW 8
+static ext2_fs_t *g_rw_fs[EXT2_MAX_RW];
+static mutex_t g_rw_lock; // orden: g_rw_lock -> fs->lock
+static int g_rw_lock_init;
+
+static void ext2_rw_register(ext2_fs_t *fs, int add) {
+  if (!g_rw_lock_init) {
+    mutex_init(&g_rw_lock);
+    g_rw_lock_init = 1;
+  }
+  mutex_lock(&g_rw_lock);
+  for (int i = 0; add && i < EXT2_MAX_RW; i++)
+    if (g_rw_fs[i] == fs) {
+      mutex_unlock(&g_rw_lock);
+      return; // ya registrado
+    }
+  for (int i = 0; i < EXT2_MAX_RW; i++) {
+    if (add && !g_rw_fs[i]) {
+      g_rw_fs[i] = fs;
+      break;
+    }
+    if (!add && g_rw_fs[i] == fs)
+      g_rw_fs[i] = NULL;
+  }
+  mutex_unlock(&g_rw_lock);
+}
 
 // Vuelca la caché cada pocos segundos para acotar lo que se pierde si se va la
-// luz. El estado "limpio" NO se marca aquí: solo en sync/umount.
+// luz y libera lo diferido. El estado "limpio" NO se marca aquí: solo en
+// sync/umount.
 static int ext2_flushd(void *arg) {
   (void)arg;
   completion_t never;
   completion_init(&never);
   while (!kthread_should_stop()) {
     wait_for_completion_timeout(&never, 5000);
+    mutex_lock(&g_rw_lock);
+    for (int i = 0; i < EXT2_MAX_RW; i++) {
+      ext2_fs_t *fs = g_rw_fs[i];
+      if (!fs)
+        continue;
+      mutex_lock(&fs->lock);
+      if (fs->rw)
+        ext2_commit_frees(fs);
+      mutex_unlock(&fs->lock);
+    }
+    mutex_unlock(&g_rw_lock);
     bc_sync_all();
   }
   return 0;
@@ -2429,6 +2539,7 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
 static int ext2_flush_clean_locked(ext2_fs_t *fs) {
   if (!fs->rw)
     return bc_sync_dev(fs->bdev) == 0 ? 0 : -EIO;
+  ext2_commit_frees(fs); // liberaciones diferidas (con su barrera)
   int rc = bc_sync_dev(fs->bdev); // datos y metadatos primero
   if (rc != 0)
     return -EIO;
@@ -2459,7 +2570,10 @@ int ext2_remount(void *fs_priv, int rw) {
     if (rc == 0)
       fs->rw = 0;
   }
+  int now_rw = fs->rw;
   mutex_unlock(&fs->lock);
+  if (rc == 0)
+    ext2_rw_register(fs, now_rw);
   return rc;
 }
 
@@ -2467,6 +2581,7 @@ void ext2_umount(void *fs_priv) {
   ext2_fs_t *fs = fs_priv;
   if (!fs)
     return;
+  ext2_rw_register(fs, 0); // el hilo de volcado ya no lo toca
   mutex_lock(&fs->lock);
   if (ext2_flush_clean_locked(fs) != 0)
     LOG_ERR("[EXT2] %s: error al volcar en el desmontaje (el FS queda sucio)",
@@ -2480,6 +2595,8 @@ void ext2_umount(void *fs_priv) {
     kfree(fs->icache);
     fs->icache = n;
   }
+  kfree(fs->pend_blk);
+  kfree(fs->pend_ino);
   kfree(fs->groups);
   kfree(fs);
 }
