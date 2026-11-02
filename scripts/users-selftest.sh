@@ -51,4 +51,6 @@ t switch_instalado 'rwsr-xr-x.*aurora-switch' bash -c 'ls -l /usr/bin/aurora-swi
 t switch_en_path_user 'aurora-switch' bash -c 'su alvaro -c "command -v aurora-switch"'
 t switch_sudo_path 'aurora-switch' bash -c 'su alvaro -c "sudo sh -c \"command -v aurora-switch\""'
 t switch_sin_args 'uso' bash -c 'su alvaro -c "aurora-switch" 2>&1; true'
+t switch_no_wheel_clave_mala 'autenticacion fallida' bash -c 'su plain -c "echo mala | aurora-switch alvaro" 2>&1; true'
+t switch_wheel_sin_clave 'init: cambio|^$|ok' bash -c 'su alvaro -c "aurora-switch root && echo ok" 2>&1'
 echo "[users] RESULT pass=$ok fail=$bad"
