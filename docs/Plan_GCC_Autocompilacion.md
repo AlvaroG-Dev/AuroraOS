@@ -464,3 +464,9 @@ main fusionado (fork COW, ext2 E0-E4, usuarios). Imagen ext2 de 768 MB con el to
 - `scripts/fetch-devtools.sh` ya no usa apt del host: `scripts/ubuntu-fetch-debs.py` resuelve y baja los .deb directamente del archivo de Ubuntu 24.04, así que en Kali se obtiene la misma glibc 2.39 que la ISO.
 - tmpfs guarda los ficheros en páginas del PMM (tabla de punteros), no en un krealloc contiguo del heap (límite 64 MB/bloque, 256 MB total). /tmp = 1/2 de la RAM entre 64 MB y 2 GB, las páginas se piden al escribir. Con QEMU 2 GB: /tmp 586 MB y `dd` de 300 MB OK.
 - Verificado en QEMU con la ISO: `tests/gcc/run_iso_tools_test.sh` (todas las herramientas en PATH, gcc compila y ejecuta hello, fichero de 300 MB en /tmp, mkfs.fat+mmd+mcopy+mdir); tests del kernel 211/211.
+
+## Avance 7 (2026-11-04): ISO completa por defecto
+
+- Por defecto `make iso` incluye: LinuxKPI (i915, drm, ttm, virtio-gpu...), NVIDIA (WITH_NVIDIA=1), Mesa/LLVM (WITH_MESA=1, `fetch-mesa.sh` ya no usa apt del host), DEV TOOLS (WITH_DEVTOOLS=1), /data en ext2 (USB_DATA_FS=ext2) y el código fuente del repo en `/data/AuroraOS` (WITH_SOURCE=1; solo ficheros versionados, sin .git; partición de 3 GB, `SRC_DATA_MB`). La ISO pasa a ~4,5 GB. Desactivar: `WITH_MESA=0 WITH_NVIDIA=0 WITH_DEVTOOLS=0 WITH_SOURCE=0 USB_DATA_FS=fat32`. QEMU_MEM por defecto 3G.
+- /data con las fuentes solo se monta al arrancar la ISO como USB (`make run-iso-as-usb`); con `-cdrom` /data es el tarfs.
+- Red en QEMU: DHCP, ARP y el ping a la puerta (10.0.2.2) funcionan. `ping 8.8.8.8` da 100 % de pérdida con `-nic user` si el host no permite sockets ICMP a QEMU: `sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"`. Probar con TCP/DNS (curl). Bug real corregido: DHCP escribía /etc/resolv.conf sin truncar y dejaba "ameserver 8.8.8.8" (ahora DNS del DHCP + 8.8.8.8).

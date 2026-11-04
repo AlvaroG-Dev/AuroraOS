@@ -18,7 +18,7 @@
 # asi que en un build normal cuesta una comprobacion rapida.
 #   make env              preparar a mano
 #   SKIP_ENV=1 make ...   saltarse la comprobacion
-#   WITH_MESA=1 make ...  ademas, bajar Mesa/LLVM (initrd +500 MB)
+#   WITH_MESA=0 make ...  no bajar Mesa/LLVM (por defecto se incluye, +500 MB)
 # ---------------------------------------------------------------------------
 env:
 	@bash scripts/setup-env.sh
@@ -72,11 +72,15 @@ normal: iso
 #   WITH_NVIDIA=1  (por defecto) compila e instala nvidia/nvidia-modeset/
 #                  nvidia-drm.kur + firmware GSP (primera vez: descarga y tarda).
 #                  WITH_NVIDIA=0 lo omite (ISO sin driver NVIDIA).
-#   WITH_MESA=1    ademas baja Mesa/LLVM (+500 MB; opt-in por tamano).
+#   WITH_MESA=1    (por defecto) incluye Mesa/LLVM (OpenGL/EGL por software, +500 MB);
+#                  WITH_MESA=0 lo omite. Con Mesa conviene QEMU_MEM=3G.
+#   LinuxKPI (i915, drm, ttm, virtio-gpu...) va siempre; WITH_LKPI=0 en setup-env lo omite.
 WITH_NVIDIA ?= 1
+WITH_MESA ?= 1
 # Herramientas de desarrollo (gcc, make, nasm, mtools, xorriso...) dentro de la ISO.
 WITH_DEVTOOLS ?= 1
 export WITH_NVIDIA
+export WITH_MESA
 
 # 'sysroot' es PHONY: antes, si el directorio ya existia make lo daba por
 # actualizado y NUNCA recopiaba assets/ ni etc/. Ahora se sincroniza siempre,
@@ -526,10 +530,17 @@ iso_root: $(EFI_IMG) $(BOOTX64_EFI) $(BIOS_IMG)
 	@ls -lh $(ISO_ROOT)/efi.img $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI $(ISO_ROOT)/boot/bios.img
 
 # ---------------------------------------------------------------------------
-USB_DATA_MB ?= 64
+# WITH_SOURCE=1 (por defecto): la particion de datos (ext2) lleva el arbol de
+# fuentes del repo en /data/AuroraOS (solo ficheros versionados, sin .git), listo
+# para compilar dentro de AuroraOS (make SELFHOST=1 iso). Necesita ~1 GB de
+# fuentes + espacio de trabajo: USB_DATA_MB=3072. WITH_SOURCE=0 -> 64 MB.
+WITH_SOURCE ?= 1
+SRC_DATA_MB ?= 3072
+USB_DATA_MB ?= $(if $(filter ext2-1,$(USB_DATA_FS)-$(WITH_SOURCE)),$(SRC_DATA_MB),64)
 # Sistema de ficheros de la particion de datos (AURORADATA): fat32 (por defecto)
-# o ext2 (rw si se desmontó limpio; uid/gid/modos reales). Ver docs/Plan_Ext2.md.
-USB_DATA_FS ?= fat32
+# o ext2 (por defecto; rw si se desmontó limpio; uid/gid/modos reales; necesita
+# mke2fs/e2fsprogs). USB_DATA_FS=fat32 vuelve a FAT32. Ver docs/Plan_Ext2.md.
+USB_DATA_FS ?= ext2
 
 # aurora.iso: ISO híbrida (BIOS + UEFI) para CD y USB.
 # ---------------------------------------------------------------------------
@@ -593,7 +604,15 @@ $(ISO_OUT): iso_root
 	 if [ "$(USB_DATA_FS)" = "ext2" ]; then \
 	   export PATH="$$PATH:/sbin:/usr/sbin"; \
 	   command -v mke2fs >/dev/null || { echo "[ISO] ERROR: USB_DATA_FS=ext2 necesita mke2fs (paquete e2fsprogs)"; exit 1; }; \
-	   mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 build/usbdata.img || exit 1; \
+	   srcopt=""; \
+	   if [ "$(WITH_SOURCE)" = "1" ]; then \
+	     echo "[ISO] Copiando fuentes del repo a /AuroraOS de la particion de datos..."; \
+	     rm -rf build/src_tree; mkdir -p build/src_tree/AuroraOS; \
+	     git ls-files -z --exclude-standard | tar --null -T - --exclude='build/capturas' --exclude='build/*.png' -cf - 2>/dev/null | tar -xf - -C build/src_tree/AuroraOS || exit 1; \
+	     srcopt="-d build/src_tree"; \
+	   fi; \
+	   mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 $$srcopt build/usbdata.img || exit 1; \
+	   rm -rf build/src_tree; \
 	   echo "[ISO] ext2 creado: $$(dumpe2fs -h build/usbdata.img 2>/dev/null | grep -i '^Filesystem features' | tr -s ' ')"; \
 	   ptype=83; \
 	 else \
@@ -622,8 +641,8 @@ image: $(ISO_OUT)
 
 # RAM del guest: el initrd (~500 MB) se carga entero en memoria; con 512M el
 # firmware devuelve EFI_OUT_OF_RESOURCES ("initrd no cargado"), no hay init y
-# no arranca ni el dock ni las apps. Con Mesa (WITH_MESA=1) subir a 3G.
-QEMU_MEM ?= 2G
+# no arranca ni el dock ni las apps. Con Mesa (por defecto) subir a 3G.
+QEMU_MEM ?= 3G
 
 # Aceleracion para 'run' / 'run-smp': KVM si /dev/kvm es accesible (el
 # compositor va fluido), y TCG puro si no (muy lento: el raton se atasca).

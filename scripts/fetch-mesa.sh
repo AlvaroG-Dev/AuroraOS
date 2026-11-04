@@ -30,11 +30,9 @@ PKGS=(
 )
 mkdir -p "$DEBS" "$X" "$LIBDIR" "$PRE/$MULTI"
 cd "$DEBS"
-for p in "${PKGS[@]}"; do
-    ls "${p}"_*.deb >/dev/null 2>&1 || apt-get download "$p" >/dev/null 2>&1 \
-        || echo "  (sin paquete: $p)"
-done
-for d in *.deb; do dpkg -x "$d" "$X"; done
+# Independiente del host (en Kali apt daria otra glibc): indice de Ubuntu 24.04.
+NODEPS=1 python3 "$ROOT/scripts/ubuntu-fetch-debs.py" "$DEBS" '^$' "${PKGS[@]}"
+for d in *.deb; do dpkg-deb -x "$d" "$X"; done
 
 # Librerias -> libs/glibc (no se pisan las que ya estan: son de la misma distro).
 find "$X/$MULTI" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' |

@@ -322,13 +322,23 @@ static void dhcp_write_resolv_conf(uint32_t dns) {
     return;
   }
 
-  char buf[64];
+  // El DNS del DHCP primero y 8.8.8.8 de respaldo. Antes se escribia solo la
+  // 1a linea sobre el contenido previo sin truncar: sobraba el resto de la
+  // linea anterior ("nameserver 10.0.2.3\nameserver..." pisaba una 'n').
+  char buf[96];
   int o = 0;
   const char *ns = "nameserver ";
   while (*ns)
     buf[o++] = *ns++;
   o += fmt_ip(buf + o, dns);
   buf[o++] = '\n';
+  if (dns != 0x08080808u) {
+    const char *fb = "nameserver 8.8.8.8\n";
+    while (*fb)
+      buf[o++] = *fb++;
+  }
+  if (n->ops->truncate)
+    n->ops->truncate(n, 0);
 
   int64_t wr = n->ops->write(n, 0, (size_t)o, buf);
   if (wr < 0) {

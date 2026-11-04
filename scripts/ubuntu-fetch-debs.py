@@ -44,8 +44,11 @@ while todo:
     if n in seen: continue
     if n not in pk: n = prov.get(n, n)
     if n in seen or n not in pk or skip.match(n): continue
-    seen.add(n); todo += deps(pk[n])
-print(f"[devtools] {len(seen)} paquetes (con dependencias)")
+    seen.add(n)
+    if not os.environ.get('NODEPS'): todo += deps(pk[n])
+print(f"[ubuntu-debs] {len(seen)} paquetes")
+for w in want:
+    if w not in pk and w not in prov: print(f"  (sin paquete: {w})")
 for n in sorted(seen):
     fn = pk[n]["Filename"]; out = os.path.join(dest, os.path.basename(fn))
     if os.path.exists(out): continue
