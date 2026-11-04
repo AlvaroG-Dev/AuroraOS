@@ -4623,6 +4623,91 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
     }
   }
 
+  // Scripts "#!interprete [arg]" (como binfmt_script de Linux): hasta 4 niveles.
+  // argv pasa a [interprete, arg?, ruta_del_script, argv[1..]].
+  for (int depth = 0; depth < 4; depth++) {
+    char hdr[256];
+    int hn = 0;
+    vfs_node_t *sn = vfs_lookup(path);
+    if (sn) {
+      if (!(sn->flags & VFS_DIRECTORY) && sn->ops && sn->ops->read) {
+        int64_t rd = sn->ops->read(sn, 0, sizeof(hdr) - 1, hdr);
+        hn = rd > 0 ? (int)rd : 0;
+      }
+      vfs_node_free(sn);
+    }
+    if (hn < 3 || hdr[0] != '#' || hdr[1] != '!')
+      break;
+    hdr[hn] = '\0';
+    char *nl = (char *)memchr(hdr, '\n', (size_t)hn);
+    if (nl)
+      *nl = '\0';
+    char *ip = hdr + 2;
+    while (*ip == ' ' || *ip == '\t')
+      ip++;
+    char *ie = ip;
+    while (*ie && *ie != ' ' && *ie != '\t')
+      ie++;
+    char *oa = NULL;
+    if (*ie) {
+      *ie++ = '\0';
+      while (*ie == ' ' || *ie == '\t')
+        ie++;
+      if (*ie) {
+        oa = ie;
+        size_t ol = strlen(oa);
+        while (ol && (oa[ol - 1] == ' ' || oa[ol - 1] == '\t' ||
+                      oa[ol - 1] == '\r'))
+          oa[--ol] = '\0';
+        if (!ol)
+          oa = NULL;
+      }
+    }
+    size_t il = strlen(ip);
+    while (il && ip[il - 1] == '\r')
+      ip[--il] = '\0';
+    if (il == 0 || ip[0] != '/' || il >= VFS_PATH_MAX) {
+      kfree(buf);
+      ret = -ENOENT;
+      goto out;
+    }
+    int extra = oa ? 2 : 1; // interprete (+ arg) delante de la ruta del script
+    size_t pl = strlen(path), ol2 = oa ? strlen(oa) : 0;
+    if (argc + extra > PROCESS_ARGV_MAX ||
+        pool_used + pl + 1 + il + 1 + ol2 + 1 > PROCESS_ARGENV_POOL) {
+      kfree(buf);
+      ret = -E2BIG;
+      goto out;
+    }
+    char *spath = &pool[pool_used];
+    memcpy(spath, path, pl + 1);
+    pool_used += pl + 1;
+    char *ipool = &pool[pool_used];
+    memcpy(ipool, ip, il + 1);
+    pool_used += il + 1;
+    char *opool = NULL;
+    if (oa) {
+      opool = &pool[pool_used];
+      memcpy(opool, oa, ol2 + 1);
+      pool_used += ol2 + 1;
+    }
+    if (argc == 0) {
+      argc = 1; // argv[0] inexistente: se rellena con la ruta del script
+      kargv[0] = spath;
+    } else {
+      kargv[0] = spath;
+    }
+    for (int i = argc - 1; i >= 0; i--)
+      kargv[i + extra] = kargv[i];
+    kargv[0] = ipool;
+    if (opool)
+      kargv[1] = opool;
+    argc += extra;
+    memcpy(path, ip, il + 1);
+    process_set_exe_path(proc, path);
+    LOG_INFO("[EXECVE] #! -> %s", path);
+  }
+
   uint64_t new_entry = 0, new_rsp = 0;
   rc = process_execve_prepare(path, argc, kargv, envc, kenvp, &new_entry,
                               &new_rsp);
