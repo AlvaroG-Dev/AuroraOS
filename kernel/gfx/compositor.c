@@ -48,7 +48,7 @@
 #include "theme.h"
 #include "window.h"
 #include "winsrv.h"
-#include <emmintrin.h>
+#include "x86_intrin.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>

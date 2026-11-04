@@ -1,7 +1,7 @@
 // kernel/gfx/cursor.c
 #include "cursor.h"
 #include "gfx.h"
-#include <emmintrin.h>
+#include "x86_intrin.h"
 
 #define SS 4            /* supermuestreo por eje */
 #define OUTLINE_W 1.05f /* grosor del borde blanco, px */
