@@ -53,7 +53,21 @@ $(LKPI_BUILD)/linuxkpi.kur: $(LKPI_BUILD)/linuxkpi.o tools/kurbuild
 	@./tools/kurbuild -H $< $@
 
 .PHONY: linuxkpi linuxkpi-tests linuxkpi-drv linuxkpi-clean linuxkpi-firmware
-linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linuxkpi-firmware
+# SELFHOST=1 (compilando dentro de AuroraOS): no hay arbol de Linux ni
+# linux-firmware, asi que se reutilizan los .kur y el firmware ya instalados en
+# el sistema en ejecucion (LKPI_PREBUILT, por defecto /lib/modules/linuxkpi).
+LKPI_PREBUILT ?= /lib/modules/linuxkpi
+LKPI_PREBUILT_FW ?= /lib/firmware
+.PHONY: linuxkpi-prebuilt linuxkpi-build
+linuxkpi: $(if $(filter 1,$(SELFHOST)),linuxkpi-prebuilt,linuxkpi-build)
+linuxkpi-prebuilt:
+	@test -f $(LKPI_PREBUILT)/linuxkpi.kur || { echo "[LKPI] SELFHOST: falta $(LKPI_PREBUILT)/linuxkpi.kur"; exit 1; }
+	@echo "[LKPI] SELFHOST: reutilizando .kur de $(LKPI_PREBUILT)"
+	@mkdir -p $(LKPI_MODDIR) sysroot/lib/firmware
+	@cp -af $(LKPI_PREBUILT)/. $(LKPI_MODDIR)/
+	@if [ -d $(LKPI_PREBUILT_FW) ]; then cp -a $(LKPI_PREBUILT_FW)/. sysroot/lib/firmware/; fi
+
+linuxkpi-build: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linuxkpi-firmware
 	@mkdir -p $(LKPI_MODDIR)
 	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
 
