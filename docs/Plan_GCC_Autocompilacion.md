@@ -457,3 +457,10 @@ main fusionado (fork COW, ext2 E0-E4, usuarios). Imagen ext2 de 768 MB con el to
 - `tests/gcc/run_tools_test.sh` (QEMU): nasm, mkfs.fat, mmd, mcopy, mdir, xorriso, xxd, gawk, sfdisk, sgdisk, m4, bison y flex funcionan dentro de AuroraOS. Para mtools hace falta `GCONV_PATH=/usr/lib/x86_64-linux-gnu/gconv` (o los gconv en la ISO).
 - `make SELFHOST=1 ...`: SKIP_ENV, WITH_NVIDIA=0, WITH_MESA=0 y no recompila user/musl (se usan los binarios versionados).
 - Limitación conocida del kernel: un fichero de /tmp (tmpfs) no puede crecer por encima de ~32 MB (krealloc duplica la capacidad y falla a 64 MB: `dd` da ENOMEM). Imágenes grandes (ISO, initrd.tar) deben escribirse en /data (ext2) hasta que tmpfs use páginas en lugar de un bloque contiguo.
+
+## Avance 6 (2026-11-04): herramientas en la ISO y /tmp grande
+
+- `make iso` (WITH_DEVTOOLS=1 por defecto) instala en la ISO gcc/g++ 13, binutils, make, nasm, mtools (+gconv), dosfstools, xorriso, fdisk/gdisk, xxd, gawk, bison, flex, m4, bc, patch y las cabeceras/libc.a de glibc. WITH_DEVTOOLS=0 las omite. La ISO pasa de ~650 MB a ~920 MB. Las cabeceras y libc.a de glibc sustituyen a las de musl del tcc (tcc queda en desuso).
+- `scripts/fetch-devtools.sh` ya no usa apt del host: `scripts/ubuntu-fetch-debs.py` resuelve y baja los .deb directamente del archivo de Ubuntu 24.04, así que en Kali se obtiene la misma glibc 2.39 que la ISO.
+- tmpfs guarda los ficheros en páginas del PMM (tabla de punteros), no en un krealloc contiguo del heap (límite 64 MB/bloque, 256 MB total). /tmp = 1/2 de la RAM entre 64 MB y 2 GB, las páginas se piden al escribir. Con QEMU 2 GB: /tmp 586 MB y `dd` de 300 MB OK.
+- Verificado en QEMU con la ISO: `tests/gcc/run_iso_tools_test.sh` (todas las herramientas en PATH, gcc compila y ejecuta hello, fichero de 300 MB en /tmp, mkfs.fat+mmd+mcopy+mdir); tests del kernel 211/211.

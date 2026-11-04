@@ -33,17 +33,11 @@ cd "$DEBS"
 # los paquetes que ya trae la ISO (libc6, bash, coreutils...: libs/glibc/ y
 # precompiled/) para no duplicarlos.
 SKIP='^(libc6|libgcc-s1|libstdc\+\+6|bash|dash|coreutils|debconf|dpkg|perl-base|base-files|gcc-14-base|gcc-13-base|debianutils|sed|grep|tar|gzip|findutils|diffutils|libcrypt1)$'
-mapfile -t ALL < <(apt-cache depends --recurse --no-recommends --no-suggests \
-    --no-conflicts --no-breaks --no-replaces --no-enhances "${PKGS[@]}" \
-    | grep '^[a-z0-9]' | grep -v ':i386' | sort -u | grep -Ev "$SKIP")
-echo "[devtools] ${#ALL[@]} paquetes (con dependencias)"
+# Se resuelve contra el archivo de Ubuntu 24.04 (no contra apt del host: en Kali
+# los paquetes llevarian otra glibc que la de la ISO).
+python3 "$ROOT/scripts/ubuntu-fetch-debs.py" "$DEBS" "$SKIP" "${PKGS[@]}"
 
-for p in "${ALL[@]}"; do
-    ls "${p}_"*.deb >/dev/null 2>&1 && continue
-    apt-get download "$p" >/dev/null 2>&1 || echo "[devtools] AVISO: no se pudo bajar $p (virtual?)"
-done
-
-for d in *.deb; do dpkg -x "$d" "$TREE"; done
+for d in *.deb; do dpkg-deb -x "$d" "$TREE"; done
 rm -rf "$TREE/usr/share/doc" "$TREE/usr/share/man" "$TREE/usr/share/info" \
        "$TREE/usr/share/locale" "$TREE/usr/share/lintian" "$TREE/usr/share/bug"
 # mtools convierte a la codepage 850 con iconv: necesita los modulos gconv de glibc
@@ -51,7 +45,7 @@ rm -rf "$TREE/usr/share/doc" "$TREE/usr/share/man" "$TREE/usr/share/info" \
 G=/usr/lib/x86_64-linux-gnu/gconv
 if [ -d "$G" ]; then mkdir -p "$TREE/usr/lib/x86_64-linux-gnu"; rm -rf "$TREE/usr/lib/x86_64-linux-gnu/gconv"; cp -a "$G" "$TREE/usr/lib/x86_64-linux-gnu/gconv"; fi
 # usr-merge: sgdisk etc. caen en /sbin y /bin; Aurora usa /usr/{bin,sbin}.
-for d in sbin bin; do [ -d "$TREE/$d" ] && [ ! -L "$TREE/$d" ] && { mkdir -p "$TREE/usr/$d"; cp -an "$TREE/$d/." "$TREE/usr/$d/"; rm -rf "$TREE/$d"; }; done
+for d in sbin bin; do [ -d "$TREE/$d" ] && [ ! -L "$TREE/$d" ] && { mkdir -p "$TREE/usr/$d"; cp -a --update=none "$TREE/$d/." "$TREE/usr/$d/"; rm -rf "$TREE/$d"; }; done
 echo "[devtools] extraido en $TREE ($(du -sh "$TREE" | cut -f1))"
 [ -x "$TREE/usr/bin/x86_64-linux-gnu-gcc-13" ] || echo "[devtools] AVISO: falta gcc-13 en el arbol"
 
