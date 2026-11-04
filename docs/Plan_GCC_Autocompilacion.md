@@ -450,3 +450,10 @@ main fusionado (fork COW, ext2 E0-E4, usuarios). Imagen ext2 de 768 MB con el to
 5. Con K1/K2 hechos (puede coordinarse con la fase E0 de `Plan_Ext2`): retomar G3 en cuanto ext2 E3 esté disponible.
 
 **Qué no se hace sin confirmación expresa:** modificar el sistema de build de la ISO existente (`Makefile`) más allá de añadir targets nuevos con prefijo `devtools-`/`selfhost-`, tocar el bootloader, o empezar LinuxKPI L8/L9.
+
+## Avance 5 (2026-11-04): herramientas de empaquetado y modo SELFHOST
+
+- `scripts/fetch-devtools.sh` ahora baja también mtools, dosfstools, xorriso, fdisk, gdisk, xxd, gawk, bison, flex, bc (nasm y m4 ya estaban), aplana /sbin y /bin dentro de /usr y copia los módulos gconv del host (mtools convierte a codepage 850 con iconv; sin ellos `mmd/mcopy` fallan con "Error setting code page").
+- `tests/gcc/run_tools_test.sh` (QEMU): nasm, mkfs.fat, mmd, mcopy, mdir, xorriso, xxd, gawk, sfdisk, sgdisk, m4, bison y flex funcionan dentro de AuroraOS. Para mtools hace falta `GCONV_PATH=/usr/lib/x86_64-linux-gnu/gconv` (o los gconv en la ISO).
+- `make SELFHOST=1 ...`: SKIP_ENV, WITH_NVIDIA=0, WITH_MESA=0 y no recompila user/musl (se usan los binarios versionados).
+- Limitación conocida del kernel: un fichero de /tmp (tmpfs) no puede crecer por encima de ~32 MB (krealloc duplica la capacidad y falla a 64 MB: `dd` da ENOMEM). Imágenes grandes (ISO, initrd.tar) deben escribirse en /data (ext2) hasta que tmpfs use páginas en lugar de un bloque contiguo.

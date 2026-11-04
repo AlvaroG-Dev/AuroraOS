@@ -23,6 +23,19 @@
 env:
 	@bash scripts/setup-env.sh
 
+# ---------------------------------------------------------------------------
+# SELFHOST=1: modo minimo para compilar AuroraOS DENTRO de AuroraOS
+# (Plan_GCC_Autocompilacion.md, punto 3). Sin preparacion de entorno del host
+# (apt, musl, Wayland...), sin NVIDIA/Mesa; se usan los binarios ya
+# versionados/precompilados. Herramientas: scripts/fetch-devtools.sh.
+# ---------------------------------------------------------------------------
+ifeq ($(SELFHOST),1)
+export SKIP_ENV := 1
+WITH_NVIDIA := 0
+export WITH_MESA := 0
+export SELFHOST
+endif
+
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
 # Drivers en Ring 3 (.aur) por defecto. Con =0 se usa el driver del kernel.
@@ -135,7 +148,9 @@ user-native: | env
 	$(MAKE) -C user all
 
 user-musl: | env
-	@if [ -f user/musl/Makefile ]; then \
+	@if [ "$(SELFHOST)" = "1" ]; then \
+		echo "[Makefile] SELFHOST: user/musl no se recompila (binarios versionados)"; \
+	elif [ -f user/musl/Makefile ]; then \
 		echo "[Makefile] Build musl userland..."; \
 		$(MAKE) -C user/musl all; \
 	else \
