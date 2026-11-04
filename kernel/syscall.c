@@ -44,6 +44,7 @@
 #include "ptimer.h"
 #include "timerfd.h"
 #include "pidfd_inotify.h"
+#include "mutex.h"
 #include "spinlock.h"
 #include "string.h"
 #include "swap.h"
@@ -4467,7 +4468,12 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
 // ruta. El lock se inicializa estáticamente: NO puede haber un "lazy init"
 // concurrente que reinicialice el spinlock mientras otra CPU ya lo está
 // usando.
-static spinlock_t g_execve_lock = {0};
+// [Plan_GCC] MUTEX, no spinlock: process_execve_prepare lee el ELF del disco
+// (ext2 -> driver AHCI de usuario) y duerme. Con un spinlock con IRQs
+// desactivadas, dos CPUs hacian execve a la vez, la segunda giraba sin
+// interrupciones y el que dormia con el cerrojo nunca despertaba: cuelgue total
+// (visto en `./configure`, que lanza muchos procesos).
+static mutex_t g_execve_lock = {0};
 
 static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                         uint64_t a4, uint64_t a5) {
@@ -4477,7 +4483,7 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   if (!proc)
     return -EFAULT;
 
-  unsigned long exec_flags = spin_lock_irqsave(&g_execve_lock);
+  mutex_lock(&g_execve_lock);
   int64_t ret = -EFAULT;
 
   char path[VFS_PATH_MAX];
@@ -4623,7 +4629,7 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   ret = 0;
 
 out:
-  spin_unlock_irqrestore(&g_execve_lock, exec_flags);
+  mutex_unlock(&g_execve_lock);
   return ret;
 }
 
@@ -4769,6 +4775,20 @@ static int64_t k_fchmodat(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
     return vfs_chmod(path, (uint32_t)mode);
   }
   return k_chmod(path_ptr, mode, 0, 0, 0);
+}
+
+// fchmodat2(dfd, path, mode, flags) [452]: glibc >= 2.39 lo usa para
+// fchmodat(..., AT_SYMLINK_NOFOLLOW) (GNU tar lo llama en cada directorio).
+// Sin esta syscall el fallback de glibc (open O_PATH + /proc/self/fd) daba EINVAL.
+static int64_t k_fchmodat2(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
+                           uint64_t flags, uint64_t a5) {
+  if (flags & ~0x1100ULL) // AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    return -EINVAL;
+  char c = 0;
+  if ((flags & 0x1000) && path_ptr &&
+      copy_from_user(&c, (const void *)path_ptr, 1) == 0 && c == '\0')
+    return k_fchmod(dfd, mode, 0, 0, 0);
+  return k_fchmodat(dfd, path_ptr, mode, 0, a5);
 }
 
 // ---------- chown / fchown / lchown ----------
@@ -7902,7 +7922,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SIGNALFD4] = {k_signalfd4, "signalfd4"},
     [303] = {k_name_to_handle_at, "name_to_handle_at"},
     [439] = {k_faccessat, "faccessat2"},
-    [439] = {k_faccessat, "faccessat2"},
+    [452] = {k_fchmodat2, "fchmodat2"},
     [SYS_TRUNCATE] = {k_truncate, "truncate"},
     [SYS_FTRUNCATE] = {k_ftruncate, "ftruncate"},
     [SYS_FALLOCATE] = {k_fallocate, "fallocate"},

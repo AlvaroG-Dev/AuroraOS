@@ -60,7 +60,7 @@ export QEMU_EXTRA="-drive file=$IMG,if=none,id=e2,format=raw -device ahci,id=ahc
 bash scripts/qemu-boot-test.sh -t "$T" \
  "sleep ${SETTLE:-45}" \
  'umount /data; mount -t ext2 /dev/sda /data; echo @@MOUNT rc=$?' \
- 'rm -f /data/work/done; (sh /data/tc/build_make.sh > /dev/kmsg 2>&1) > /dev/null 2>&1 &' \
+ 'rm -f /data/work/done; (sh /data/tc/build_make.sh > /dev/kmsg 2>&1 &)' \
  'W() { while [ ! -e /data/work/done ]; do sleep 10; done; }; W' \
  'W() { while [ ! -e /data/work/done ]; do sleep 10; done; }; W' \
  'W() { while [ ! -e /data/work/done ]; do sleep 10; done; }; W' \

@@ -434,6 +434,13 @@ main fusionado (fork COW, ext2 E0-E4, usuarios). Imagen ext2 de 768 MB con el to
 - **Cuello de botella 3 (abierto): lectura de ext2 muy lenta.** Leer `cc1` (~30 MB) tarda ~41 s (≈0,7 MB/s) y cada compilación 1–2 min de reloj con CPU casi nula: una E/S por bloque de 4 KiB, sin lectura anticipada. Un bootstrap de GCC no es viable así; hace falta readahead/E/S multibloque en el driver ext2 y/o en AHCI.
 - La prueba dinámica nativa (`gcc hello.c`) se probará cuando la lectura sea razonable; ya está preparada con el runtime de la ISO en el sysroot de `/data`.
 
+### Avance 4 (2026-11-04): compilar make dentro de AuroraOS (`tests/gcc/run_make_test.sh`)
+
+- **Bug de kernel 4 (corregido, grave):** `k_execve` tomaba un *spinlock con IRQs desactivadas* (`g_execve_lock`) y dentro leía el ELF del disco (ext2 → driver AHCI de usuario), es decir, dormía. Con dos CPUs ejecutando `execve` a la vez, una giraba sin interrupciones y el dueño del cerrojo no podía despertar: **cuelgue total** (ambas CPUs en `spin_lock_irqsave`, visto con el monitor de QEMU a los ~3 min de `./configure`). Ahora es un mutex que duerme.
+- **Bug de kernel 5 (corregido):** `fchmodat`, `fchownat` y `utimensat` devolvían EINVAL con dirfd real + ruta relativa (GNU tar/gnulib), y faltaba la syscall `fchmodat2` (452) que glibc 2.39 usa con `AT_SYMLINK_NOFOLLOW`. Ahora `tar xzf` de make-4.4.1 en ext2 termina con rc=0 y sin errores.
+- **Rendimiento:** con TCG (sin KVM) `./configure` de make avanza ~90 comprobaciones por hora de reloj del guest (cada `gcc` de prueba tarda ~20 s del guest): inviable aquí; con KVM debería ser decenas de veces más rápido. Sospecha: la caché de bloques no retiene `cc1`/`as`/`ld` (~50 MB) entre ejecuciones y se vuelven a leer cada vez; a medir en el hilo de ext2.
+- **Infraestructura de pruebas (no corregido):** el ejecutor `/system/boot-tests` de `init` usa `waitpid` sin reintentar en `EINTR`, por lo que órdenes largas se solapan con la siguiente; el test lo evita lanzando la compilación en segundo plano y esperando con un bucle. Además `toolchain/x86_64-linux-musl-cross` de este entorno no trae `crt1.o`, así que `user/musl` no se puede recompilar aquí (el binario `user/musl/init` está versionado).
+
 ## 12. Primeros pasos concretos (si Alvaro dice "adelante")
 
 1. G0.1–G0.4 (limpiar cabeceras de `/usr/include`, subir límites, tests de smoke).
