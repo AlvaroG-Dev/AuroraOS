@@ -2489,10 +2489,24 @@ static int64_t k_symlinkat(uint64_t target_ptr, uint64_t newdfd,
                            uint64_t linkpath_ptr, uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  // Aurora no soporta dirfd != AT_FDCWD todavía. Fallback a k_symlink.
-  if ((int)newdfd != AT_FDCWD)
+  if ((int)newdfd == AT_FDCWD)
+    return k_symlink(target_ptr, linkpath_ptr, 0, 0, 0);
+  // dirfd real (GNU tar crea los symlinks con symlinkat(dirfd)).
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char target[VFS_PATH_MAX];
+  long tl = strncpy_from_user(target, (const char *)target_ptr, sizeof(target));
+  if (tl < 0)
+    return -EFAULT;
+  if (tl == 0)
     return -EINVAL;
-  return k_symlink(target_ptr, linkpath_ptr, 0, 0, 0);
+  char linkpath[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)newdfd, (const char *)linkpath_ptr,
+                           linkpath, sizeof(linkpath));
+  if (rc != 0)
+    return rc;
+  return vfs_symlink(target, linkpath);
 }
 
 // ---------- sigaltstack (131) ----------
