@@ -360,3 +360,22 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
 | **D7** | Bloque al formatear (`/data` del LiveUSB de 64 MB; discos grandes) | (a) 4096 siempre; (b) 1024 para <512 MB como `mke2fs` por defecto | **(a) 4096** (menos metadatos y E/S, igual al tamaño de página). El driver **lee** 1024/2048/4096 de todas formas. |
 | **D8** | Raíz instalada | (a) kernel+initrd en ESP FAT32, raíz ext2 con `pivot_root` (sin lector ext2 en el bootloader); (b) bootloader capaz de leer ext2 y arrancar de ahí | **(a).** No hay que tocar `bootloader/` salvo pasar `root=`; (b) queda para cuando se quiera `/boot` en ext2. |
 | **D9** | Cuándo hacer ext2 el `/data` por defecto en la ISO | (a) tras E4 (corte de energía limpio); (b) tras E3; (c) nunca, opción `USB_DATA_FS` | **(a).** Hasta entonces `USB_DATA_FS=ext2` es opt-in. |
+
+## Estado E7 (2026-11-04)
+
+- **Caché de bloques con retención** (`kernel/bcache.c`): hash de 65536 cubos,
+  `bc_get_cached`, `bc_readahead` (hasta 64 bloques), volcado coalescido de
+  bloques sucios contiguos (hasta 64 bloques por escritura), `bc_autosize()` y
+  `bc_reclaim()` desde kswapd cuando la RAM libre baja de la marca alta. Un
+  fichero releído (cc1, as, ld) se sirve de memoria: 12,5 MB/s en caliente
+  frente a 2,3 MB/s en frío en QEMU.
+- **E7.1** caché de nombres (dir, nombre) -> inodo para directorios de >= 2
+  bloques (32768 entradas, se rellena en lookup y readdir, se invalida al
+  borrar/renombrar/liberar el dir): `ls -l` de 10000 ficheros pasa de >50 s a
+  11 s en QEMU. Sin htree ni preasignación contigua (no hacía falta).
+- **E7.4** `aurora-fsck` (init): si AURORADATA estaba sucia y el kernel la montó
+  ro, ejecuta `e2fsck -p` y remonta rw si el código es <= 1. Se desactiva con
+  `fsck.repair=0`; no corre en modo boot-tests. Test: `run_autofsck_test.sh`.
+- **E7.3 Instalador: aparcado** por orden de Alvaro (hilo aparte).
+- init: `waitpid` de las líneas de boot-tests reintenta ante EINTR (antes un
+  SIGCHLD solapaba comandos y falseaba tests).

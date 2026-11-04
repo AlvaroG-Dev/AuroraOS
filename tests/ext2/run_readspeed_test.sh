@@ -15,6 +15,7 @@ bash scripts/qemu-boot-test.sh -t "${T:-420}" 'sleep 40' \
  'umount /data; mount -t ext2 -o ro /dev/sda /data; echo @@M rc=$?' \
  'sha256sum /data/small | sed "s/^/@@SHA /"' \
  'dd if=/data/big1 of=/dev/null bs=64k 2>&1 | tail -1 | sed "s/^/@@R64K /"' \
+ 'dd if=/data/big1 of=/dev/null bs=64k 2>&1 | tail -1 | sed "s/^/@@WARM /"' \
  'dd if=/data/big2 of=/dev/null bs=4k 2>&1 | tail -1 | sed "s/^/@@R4K /"' \
  'dd if=/data/big3 of=/dev/null bs=1M 2>&1 | tail -1 | sed "s/^/@@R1M /"' \
  'echo @@DONE; power off' >/dev/null 2>&1

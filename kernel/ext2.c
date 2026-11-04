@@ -158,6 +158,7 @@ typedef struct {
   // disco (barrera): evita que un corte deje un bloque libre y reutilizado
   // mientras otro inodo sin volcar aún lo referencia.
   uint32_t *pend_blk, *pend_ino;
+  struct ext2_dc *dcache; // caché de nombres de directorios grandes
   uint32_t npend_blk, cap_blk, npend_ino, cap_ino;
 } ext2_fs_t;
 
@@ -292,7 +293,8 @@ static int64_t ext2_read_data_x(ext2_fs_t *fs, const ext2_inode_t *di,
     if (pblk == 0) {
       memset(dst + done, 0, n);
     } else {
-      if (!bc_present(fs->bdev, pblk)) {
+      bc_buf_t *b = bc_get_cached(fs->bdev, pblk, fs->bs);
+      if (!b) {
         uint64_t want = ((size - done) + boff + fs->bs - 1) / fs->bs + extra;
         if (want > flast - lblk)
           want = flast - lblk;
@@ -307,8 +309,8 @@ static int64_t ext2_read_data_x(ext2_fs_t *fs, const ext2_inode_t *di,
         }
         if (run > 1)
           bc_readahead(fs->bdev, pblk, run, fs->bs);
+        b = bc_get(fs->bdev, pblk, fs->bs);
       }
-      bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
       if (!b)
         return done ? (int64_t)done : -EIO;
       memcpy(dst + done, (uint8_t *)bc_data(b) + boff, n);
@@ -388,6 +390,73 @@ static int ext2_dir_find(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t dsize,
     }
   }
   return -ENOENT;
+}
+
+
+// Caché directa (dir, nombre) -> inodo para directorios de >= 2 bloques: evita
+// el escaneo lineal (ls -l sobre miles de ficheros era cuadrático). Solo
+// entradas positivas; se invalida al borrar/renombrar y al liberar el dir.
+#define EXT2_DC_N 32768
+#define EXT2_DC_NAME 23
+struct ext2_dc {
+  uint32_t dir, ino;
+  uint8_t nl;
+  char name[EXT2_DC_NAME];
+};
+static uint32_t ext2_dc_slot(uint32_t dir, const char *n, size_t nl) {
+  uint32_t h = 2166136261u ^ dir;
+  for (size_t i = 0; i < nl; i++)
+    h = (h ^ (uint8_t)n[i]) * 16777619u;
+  h ^= h >> 15;
+  return h & (EXT2_DC_N - 1);
+}
+static void ext2_dc_inval(ext2_fs_t *fs, uint32_t dir, const char *n,
+                          size_t nl) {
+  if (!fs->dcache || nl > EXT2_DC_NAME)
+    return;
+  struct ext2_dc *e = &fs->dcache[ext2_dc_slot(dir, n, nl)];
+  if (e->dir == dir && e->nl == nl && memcmp(e->name, n, nl) == 0)
+    e->dir = 0;
+}
+static void ext2_dc_drop_dir(ext2_fs_t *fs, uint32_t dir) {
+  if (!fs->dcache)
+    return;
+  for (uint32_t i = 0; i < EXT2_DC_N; i++)
+    if (fs->dcache[i].dir == dir)
+      fs->dcache[i].dir = 0;
+}
+static void ext2_dc_put(ext2_fs_t *fs, uint32_t dir, const char *n, size_t nl,
+                        uint32_t ino) {
+  if (nl > EXT2_DC_NAME || !dir)
+    return;
+  if (!fs->dcache)
+    fs->dcache = kzalloc(sizeof(struct ext2_dc) * EXT2_DC_N);
+  if (!fs->dcache)
+    return;
+  struct ext2_dc *e = &fs->dcache[ext2_dc_slot(dir, n, nl)];
+  e->dir = dir;
+  e->ino = ino;
+  e->nl = (uint8_t)nl;
+  memcpy(e->name, n, nl);
+}
+static int ext2_dir_find(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t dsize,
+                         const char *name, size_t nlen, uint32_t *ino_out);
+static int ext2_dir_lookup(ext2_fs_t *fs, uint32_t dino, const ext2_inode_t *di,
+                           uint64_t dsize, const char *name, size_t nlen,
+                           uint32_t *ino_out) {
+  if (dsize < 2ull * fs->bs || nlen > EXT2_DC_NAME || dino == 0)
+    return ext2_dir_find(fs, di, dsize, name, nlen, ino_out);
+  if (fs->dcache) {
+    struct ext2_dc *e = &fs->dcache[ext2_dc_slot(dino, name, nlen)];
+    if (e->dir == dino && e->nl == nlen && memcmp(e->name, name, nlen) == 0) {
+      *ino_out = e->ino;
+      return 0;
+    }
+  }
+  int rc = ext2_dir_find(fs, di, dsize, name, nlen, ino_out);
+  if (rc == 0)
+    ext2_dc_put(fs, dino, name, nlen, *ino_out);
+  return rc;
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,6 +1163,8 @@ static void ext2_evict(ext2_fs_t *fs, ext2_ino_t *ip) {
     return;
   int is_dir = (ip->di.i_mode & S_IFMT) == S_IFDIR;
   ext2_orphan_del(fs, ip);
+  if (is_dir)
+    ext2_dc_drop_dir(fs, ip->ino);
   ext2_trunc_blocks(fs, ip, 0);
   ext2_free_xattr(fs, ip);
   ip->di.i_dtime = ext2_now();
@@ -1392,6 +1463,7 @@ static int ext2_dir_remove(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
         bc_mark_dirty(b);
         bc_put(b);
         *ino_out = eino;
+        ext2_dc_inval(fs, dp->ino, name, nlen);
         ext2_dir_touch(fs, dp);
         return ext2_ip_flush(fs, dp);
       }
@@ -1563,7 +1635,7 @@ static vfs_node_t *ext2_lookup_locked(ext2_fs_t *fs, const char *path) {
     if ((di.i_mode & S_IFMT) != S_IFDIR)
       return NULL; // symlinks intermedios: los expande el VFS
     uint32_t next;
-    if (ext2_dir_find(fs, &di, ext2_file_size(fs, &di), seg, nl, &next) != 0)
+    if (ext2_dir_lookup(fs, ino, &di, ext2_file_size(fs, &di), seg, nl, &next) != 0)
       return NULL;
     ino = next;
   }
@@ -1723,6 +1795,8 @@ static int ext2_node_readdir(vfs_node_t *dir, uint64_t index,
           size_t n = nl < sizeof(out->name) - 1 ? nl : sizeof(out->name) - 1;
           memcpy(out->name, blk + off + 8, n);
           out->name[n] = '\0';
+          if (en->ip->size >= 2ull * fs->bs && n == nl)
+            ext2_dc_put(fs, en->ip->ino, out->name, n, ino);
           uint8_t ft = fs->filetype ? ((const uint8_t *)blk)[off + 7] : 0;
           out->type = ext2_ft_to_vfs(ft);
           if (ft == 0) { // sin file_type: hay que mirar el inodo
@@ -1987,7 +2061,7 @@ static int ext2_new_inode_op(vfs_node_t *dvn, const char *name, uint32_t mode,
     goto out;
   }
   uint32_t tmp;
-  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &tmp);
+  rc = ext2_dir_lookup(fs, dp->ino, &dp->di, dp->size, name, nl, &tmp);
   if (rc == 0) {
     rc = -EEXIST;
     goto out;
@@ -2148,7 +2222,7 @@ static int ext2_unlink_op(vfs_node_t *dvn, const char *name) {
     goto out;
   }
   uint32_t ino;
-  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &ino);
+  rc = ext2_dir_lookup(fs, dp->ino, &dp->di, dp->size, name, nl, &ino);
   if (rc != 0)
     goto out;
   ext2_ino_t *cip = ext2_iget(fs, ino);
@@ -2322,6 +2396,7 @@ static int ext2_set_dotdot(ext2_fs_t *fs, ext2_ino_t *dir, uint32_t parent) {
     return -EIO;
   }
   memcpy(blk + dot_rl, &parent, 4);
+  ext2_dc_inval(fs, dir->ino, "..", 2);
   bc_mark_dirty(b);
   bc_put(b);
   return 0;
@@ -2381,7 +2456,7 @@ static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
     goto out;
   }
   uint32_t sino, dino = 0;
-  rc = ext2_dir_find(fs, &sp->di, sp->size, sname, sl, &sino);
+  rc = ext2_dir_lookup(fs, sp->ino, &sp->di, sp->size, sname, sl, &sino);
   if (rc != 0)
     goto out;
   sip = ext2_iget(fs, sino);
@@ -2390,7 +2465,7 @@ static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
     goto out;
   }
   int sdir = (sip->di.i_mode & S_IFMT) == S_IFDIR;
-  int drc = ext2_dir_find(fs, &dp->di, dp->size, dname, dl, &dino);
+  int drc = ext2_dir_lookup(fs, dp->ino, &dp->di, dp->size, dname, dl, &dino);
   if (drc != 0 && drc != -ENOENT) {
     rc = drc;
     goto out;
@@ -2509,7 +2584,7 @@ static int ext2_link_op(vfs_node_t *dvn, const char *name, vfs_node_t *target) {
     goto out;
   }
   uint32_t tmp;
-  rc = ext2_dir_find(fs, &dp->di, dp->size, name, nl, &tmp);
+  rc = ext2_dir_lookup(fs, dp->ino, &dp->di, dp->size, name, nl, &tmp);
   if (rc == 0) {
     rc = -EEXIST;
     goto out;
@@ -2972,7 +3047,7 @@ static void ext2_ensure_lostfound(ext2_fs_t *fs) {
     return;
   }
   uint32_t tmp;
-  int rc = ext2_dir_find(fs, &root->di, root->size, name, sizeof(name) - 1, &tmp);
+  int rc = ext2_dir_lookup(fs, root->ino, &root->di, root->size, name, sizeof(name) - 1, &tmp);
   mutex_unlock(&fs->lock);
   if (rc == -ENOENT) {
     vfs_node_t *dn = kzalloc(sizeof(*dn));
@@ -3037,6 +3112,7 @@ void ext2_umount(void *fs_priv) {
   }
   kfree(fs->pend_blk);
   kfree(fs->pend_ino);
+  kfree(fs->dcache);
   kfree(fs->groups);
   kfree(fs);
 }

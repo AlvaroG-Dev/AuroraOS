@@ -288,6 +288,23 @@ static void run_fstab(void) {
   }
 }
 
+// E7.4: repara AURORADATA si el kernel la monto en solo lectura por estar sucia.
+static void run_autofsck(void) {
+  if (access("/usr/sbin/aurora-fsck", X_OK) != 0)
+    return;
+  pid_t pid = fork();
+  if (pid == 0) {
+    char *argv[] = {"sh", "-c",
+                    "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do "
+                    "ls /dev/sd? /dev/nvme?n? /dev/vd? > /dev/null 2>&1 && break; "
+                    "sleep 2; done; sleep 5; "
+                    "/usr/sbin/aurora-fsck > /dev/kmsg 2>&1",
+                    NULL};
+    execve("/bin/bash", argv, default_envp);
+    _exit(127);
+  }
+}
+
 // Si existe /system/boot-tests, ejecuta cada linea con sh y manda su salida a
 // /dev/kmsg (serie). Sirve para tests automaticos en QEMU sin teclado.
 static void run_boot_tests(void) {
@@ -309,8 +326,11 @@ static void run_boot_tests(void) {
       execve("/bin/bash", argv, default_envp);
       _exit(127);
     }
-    if (pid > 0)
-      waitpid(pid, NULL, 0);
+    if (pid > 0) {
+      // Una senal (p. ej. SIGCHLD de run_fstab) no debe solapar las lineas.
+      while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+        ;
+    }
   }
   fclose(f);
 }
@@ -430,6 +450,8 @@ int main(void) {
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
   int testing = access("/system/boot-tests", F_OK) == 0 && !g_sess_ok;
   run_fstab();
+  if (!testing)
+    run_autofsck();
   run_boot_tests();
   pid_t term = spawn_terminal();
   pid_t wl = testing ? -1 : spawn_wayland();

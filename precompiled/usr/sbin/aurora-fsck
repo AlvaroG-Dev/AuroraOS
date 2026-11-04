@@ -1,0 +1,24 @@
+#!/bin/bash
+# E7.4: fsck al arrancar de la particion AURORADATA. El kernel monta un FS sucio
+# (corte de luz) en solo lectura; aqui se repara con e2fsck -p y, si queda bien,
+# se vuelve a montar rw. Desactivar con fsck.repair=0 en la linea del kernel.
+grep -q 'fsck.repair=0' /proc/cmdline 2>/dev/null && exit 0
+for dev in /dev/sd?* /dev/nvme*n*p* /dev/vd?*; do
+  [ -b "$dev" ] || continue
+  info=$(/usr/sbin/dumpe2fs -h "$dev" 2>/dev/null) || continue
+  case "$info" in *"volume name:"*AURORADATA*) ;; *) continue ;; esac
+  case "$info" in *"state:"*"not clean"*) ;; *) exit 0 ;; esac
+  echo "aurora-fsck: $dev sucio, ejecutando e2fsck -p"
+  umount /data 2>/dev/null
+  /usr/sbin/e2fsck -p "$dev"
+  rc=$?
+  echo "aurora-fsck: e2fsck rc=$rc"
+  if [ $rc -le 1 ]; then
+    mount -t ext2 -o rw "$dev" /data && echo "aurora-fsck: /data en rw"
+  else
+    mount -t ext2 -o ro "$dev" /data
+    echo "aurora-fsck: reparacion incompleta; /data queda en solo lectura"
+  fi
+  exit $rc
+done
+exit 0

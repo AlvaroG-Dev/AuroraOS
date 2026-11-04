@@ -5,9 +5,10 @@
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
+#include "pmm.h"
 #include "string.h"
 
-#define BC_HASH_BUCKETS 1024
+#define BC_HASH_BUCKETS 65536u
 #define BC_DEFAULT_LIMIT (16u * 1024u * 1024u)
 #define BC_MAX_BS 4096u
 #define BC_RA_MAX 64u // bloques por lectura anticipada
@@ -33,7 +34,7 @@ static struct bc_stats g_stats;
 static inline uint32_t bc_hash(block_device_t *bdev, uint64_t blk) {
   uint64_t h = (uint64_t)(uintptr_t)bdev * 11400714819323198485ULL;
   h ^= blk * 2654435761ULL;
-  return (uint32_t)(h >> 20) & (BC_HASH_BUCKETS - 1);
+  return (uint32_t)(h >> 16) & (BC_HASH_BUCKETS - 1);
 }
 
 void bc_init(void) {
@@ -208,6 +209,25 @@ bc_buf_t *bc_get_new(block_device_t *bdev, uint64_t blk, uint32_t bs) {
   return b;
 }
 
+// Como bc_get pero solo si ya está en caché (NULL si no): una sola toma del
+// cerrojo en el camino caliente de lecturas.
+bc_buf_t *bc_get_cached(block_device_t *bdev, uint64_t blk, uint32_t bs) {
+  if (!g_bc_inited || !bdev)
+    return NULL;
+  mutex_lock(&g_bc_lock);
+  bc_buf_t *b = hash_find(bdev, blk);
+  if (b && b->bs == bs) {
+    g_stats.hits++;
+    b->refs++;
+    lru_unlink(b);
+    lru_push_front(b);
+  } else {
+    b = NULL;
+  }
+  mutex_unlock(&g_bc_lock);
+  return b;
+}
+
 int bc_present(block_device_t *bdev, uint64_t blk) {
   if (!g_bc_inited || !bdev)
     return 0;
@@ -299,12 +319,88 @@ void bc_put(bc_buf_t *b) {
   mutex_unlock(&g_bc_lock);
 }
 
+// Escritura agrupada: los sucios se ordenan por (dispositivo, bloque) y los
+// bloques contiguos salen en una sola petición (hasta BC_RA_MAX). Con el disco
+// real esto convierte miles de escrituras de 4 KiB en pocas de 256 KiB.
+#define BC_SYNC_BATCH 2048u
+
+static void bc_sort_dirty(bc_buf_t **a, uint32_t n) {
+  // Shell sort: sin recursión ni memoria extra.
+  for (uint32_t gap = n / 2; gap > 0; gap /= 2)
+    for (uint32_t i = gap; i < n; i++) {
+      bc_buf_t *t = a[i];
+      uint32_t j = i;
+      while (j >= gap &&
+             ((uintptr_t)a[j - gap]->bdev > (uintptr_t)t->bdev ||
+              ((a[j - gap]->bdev == t->bdev) && a[j - gap]->blk > t->blk))) {
+        a[j] = a[j - gap];
+        j -= gap;
+      }
+      a[j] = t;
+    }
+}
+
 static int bc_sync_locked(block_device_t *bdev) {
   int rc = 0;
-  for (bc_buf_t *b = g_lru_tail; b; b = b->prev)
-    if (b->dirty && (!bdev || b->bdev == bdev))
-      if (bc_write_locked(b) != 0)
-        rc = -EIO;
+  if (!g_stats.dirty)
+    return 0;
+  bc_buf_t **arr = kmalloc(sizeof(*arr) * BC_SYNC_BATCH);
+  uint8_t *tmp = kmalloc((size_t)BC_RA_MAX * BC_MAX_BS);
+  if (!arr || !tmp) { // sin memoria para agrupar: de uno en uno
+    kfree(arr);
+    kfree(tmp);
+    for (bc_buf_t *b = g_lru_tail; b; b = b->prev)
+      if (b->dirty && (!bdev || b->bdev == bdev))
+        if (bc_write_locked(b) != 0)
+          rc = -EIO;
+    return rc;
+  }
+  for (;;) {
+    uint32_t n = 0;
+    for (bc_buf_t *b = g_lru_tail; b && n < BC_SYNC_BATCH; b = b->prev)
+      if (b->dirty && (!bdev || b->bdev == bdev))
+        arr[n++] = b;
+    if (n == 0)
+      break;
+    bc_sort_dirty(arr, n);
+    uint32_t progress = 0;
+    for (uint32_t i = 0; i < n;) {
+      uint32_t run = 1;
+      while (i + run < n && run < BC_RA_MAX && arr[i + run]->bdev == arr[i]->bdev &&
+             arr[i + run]->bs == arr[i]->bs &&
+             arr[i + run]->blk == arr[i]->blk + run)
+        run++;
+      if (run == 1) {
+        if (bc_write_locked(arr[i]) == 0)
+          progress++;
+        else
+          rc = -EIO;
+      } else {
+        uint32_t bs = arr[i]->bs, ss = arr[i]->bdev->sector_size;
+        for (uint32_t k = 0; k < run; k++)
+          memcpy(tmp + (size_t)k * bs, arr[i + k]->data, bs);
+        if (bdev_write(arr[i]->bdev, arr[i]->blk * (uint64_t)(bs / ss),
+                       run * (bs / ss), tmp) == 0) {
+          for (uint32_t k = 0; k < run; k++) {
+            arr[i + k]->dirty = 0;
+            if (g_stats.dirty)
+              g_stats.dirty--;
+          }
+          g_stats.writes += run;
+          progress += run;
+        } else {
+          LOG_ERR("[BCACHE] error escribiendo %s bloques %llu..+%u",
+                  arr[i]->bdev->name, (unsigned long long)arr[i]->blk, run);
+          rc = -EIO;
+        }
+      }
+      i += run;
+    }
+    if (progress == 0 || n < BC_SYNC_BATCH)
+      break; // sin avance (error persistente) o ya no quedan más
+  }
+  kfree(arr);
+  kfree(tmp);
   return rc;
 }
 
@@ -358,6 +454,41 @@ void bc_set_limit(size_t bytes) {
   g_limit = bytes;
   bc_shrink_locked(0);
   mutex_unlock(&g_bc_lock);
+}
+
+// Cota de la caché según la RAM: un cuarto, entre 16 y 512 MiB. Así los
+// binarios grandes (cc1, ld, ...) se quedan en memoria entre ejecuciones.
+void bc_autosize(void) {
+  uint64_t ram = pmm_total_usable_pages() * 4096ULL;
+  uint64_t lim = ram / 4;
+  if (lim < (16ULL << 20))
+    lim = 16ULL << 20;
+  if (lim > (512ULL << 20))
+    lim = 512ULL << 20;
+  bc_set_limit((size_t)lim);
+  LOG_INFO("[BCACHE] cota de la caché de bloques: %lu MiB (RAM %lu MiB)",
+           (unsigned long)(lim >> 20), (unsigned long)(ram >> 20));
+}
+
+// Devuelve memoria al sistema: expulsa hasta `bytes` de búfers sin uso (los
+// más antiguos). Lo llama kswapd cuando queda poca memoria libre.
+size_t bc_reclaim(size_t bytes) {
+  if (!g_bc_inited)
+    return 0;
+  size_t freed = 0;
+  mutex_lock(&g_bc_lock);
+  bc_buf_t *b = g_lru_tail;
+  while (b && freed < bytes) {
+    bc_buf_t *prev = b->prev;
+    if (b->refs == 0 && !b->dirty) {
+      freed += b->bs;
+      bc_free_locked(b);
+      g_stats.evictions++;
+    }
+    b = prev;
+  }
+  mutex_unlock(&g_bc_lock);
+  return freed;
 }
 
 void bc_get_stats(struct bc_stats *out) {

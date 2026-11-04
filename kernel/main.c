@@ -381,6 +381,7 @@ static int vfs_init_task(void *arg) {
   LOG_INFO("[INIT] VFS...");
   vfs_init();
   bc_init();
+  bc_autosize();
 
   LOG_INFO("[INIT] IPC...");
   ipc_init();

@@ -31,6 +31,8 @@ bc_buf_t *bc_get(block_device_t *bdev, uint64_t blk, uint32_t bs);
 // bloques recién asignados que se van a sobrescribir entero.
 bc_buf_t *bc_get_new(block_device_t *bdev, uint64_t blk, uint32_t bs);
 
+// El búfer si ya está en caché (con referencia), NULL si no (no lee del disco).
+bc_buf_t *bc_get_cached(block_device_t *bdev, uint64_t blk, uint32_t bs);
 // 1 si el bloque ya está en caché (sin leerlo).
 int bc_present(block_device_t *bdev, uint64_t blk);
 // Lee de una sola petición hasta `count` bloques consecutivos que falten (se
@@ -52,6 +54,9 @@ int bc_invalidate_dev(block_device_t *bdev);
 
 // Cota de memoria en bytes (por defecto 16 MiB). Expulsa lo que sobre.
 void bc_set_limit(size_t bytes);
+// Cota según la RAM (1/4, 16..512 MiB) y reclamo bajo presión de memoria.
+void bc_autosize(void);
+size_t bc_reclaim(size_t bytes);
 
 struct bc_stats {
   uint64_t hits, misses, evictions, writes, bufs, dirty;

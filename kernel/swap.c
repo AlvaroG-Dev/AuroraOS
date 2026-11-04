@@ -1,5 +1,6 @@
 // kernel/swap.c
 #include "swap.h"
+#include "bcache.h"
 #include "block.h"
 #include "heap.h"
 #include "klog.h"
@@ -725,6 +726,14 @@ void kswapd_main(void) {
   while (1) {
     // Dormir ~0.5 segundos (nunca despierta por condición, solo por timeout)
     wait_event_interruptible_timeout(&wq, kswapd_never, NULL, 500);
+
+    // Poca memoria libre: primero se devuelve la caché de bloques (es lo más
+    // barato de reponer), con o sin swap.
+    {
+      uint64_t fp = pmm_free_pages_count();
+      if (g_swap_high_wm && fp < g_swap_high_wm)
+        bc_reclaim((size_t)(g_swap_high_wm - fp) * 4096);
+    }
 
     if (swap_device_count() == 0)
       continue;
