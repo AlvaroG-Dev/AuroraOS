@@ -6,7 +6,7 @@
 #include "font_manager.h"
 #include "theme.h"
 #include <emmintrin.h>
-#include <immintrin.h>
+#include "x86_intrin.h"
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
