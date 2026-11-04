@@ -1,0 +1,10 @@
+#!/bin/sh
+# Extrae el codigo fuente de AuroraOS incluido en la ISO.
+# Uso: aurora-src [directorio_padre]   (por defecto /root -> /root/AuroraOS)
+dest="${1:-/root}"
+tgz=/usr/src/auroraos.tar.gz
+[ -f "$tgz" ] || { echo "aurora-src: falta $tgz (ISO hecha con WITH_SOURCE=0)"; exit 1; }
+mkdir -p "$dest" || exit 1
+echo "Extrayendo $tgz en $dest/AuroraOS ..."
+tar -xzf "$tgz" -C "$dest" || exit 1
+echo "Listo. Compila con:  cd $dest/AuroraOS && make SELFHOST=1 iso"

@@ -486,6 +486,21 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		ln -sf ../usr/sbin/mkfs.fat sysroot/sbin/mkfs.fat 2>/dev/null || true; \
 	fi
 
+# ---------------------------------------------------------------------------
+# Codigo fuente de AuroraOS dentro de la ISO (para compilar desde AuroraOS):
+# /usr/src/auroraos.tar.gz (ficheros versionados en git, sin toolchain cruzado
+# del host, sin build/, sin busybox/ncurses). Se extrae con `aurora-src [dir]`
+# (por defecto /root/AuroraOS). WITH_SOURCE=0 lo omite.
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_SOURCE)" = "1" ] && git rev-parse --git-dir >/dev/null 2>&1; then \
+		echo "[Makefile] Empaquetando codigo fuente en /usr/src/auroraos.tar.gz..."; \
+		mkdir -p sysroot/usr/src sysroot/usr/bin; \
+		git ls-files -z | grep -zvE '^(build/capturas/|build/[a-z_]*shot\.png|sysroot/|toolchain/|third_party/(busybox|ncurses)|kernel/initrd\.tar|.*\.iso$$)' \
+		  | tar --null -T - --transform 's,^,AuroraOS/,S' -czf sysroot/usr/src/auroraos.tar.gz; \
+		install -m 755 scripts/aurora-src sysroot/usr/bin/aurora-src; \
+		ls -lh sysroot/usr/src/auroraos.tar.gz; \
+	fi
+
 	@scripts/check-sysroot-libc.sh
 	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
 
@@ -530,7 +545,8 @@ iso_root: $(EFI_IMG) $(BOOTX64_EFI) $(BIOS_IMG)
 	@ls -lh $(ISO_ROOT)/efi.img $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI $(ISO_ROOT)/boot/bios.img
 
 # ---------------------------------------------------------------------------
-# WITH_SOURCE=1 (por defecto): la particion de datos (ext2) lleva el arbol de
+# WITH_SOURCE=1 (por defecto; tambien controla /usr/src/auroraos.tar.gz + aurora-src
+# del initrd, que sirve con -cdrom): la particion de datos (ext2) lleva el arbol de
 # fuentes del repo en /data/AuroraOS (solo ficheros versionados, sin .git), listo
 # para compilar dentro de AuroraOS (make SELFHOST=1 iso). Necesita ~1 GB de
 # fuentes + espacio de trabajo: USB_DATA_MB=3072. WITH_SOURCE=0 -> 64 MB.
