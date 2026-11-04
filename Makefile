@@ -23,6 +23,19 @@
 env:
 	@bash scripts/setup-env.sh
 
+# ---------------------------------------------------------------------------
+# SELFHOST=1: modo minimo para compilar AuroraOS DENTRO de AuroraOS
+# (Plan_GCC_Autocompilacion.md, punto 3). Sin preparacion de entorno del host
+# (apt, musl, Wayland...), sin NVIDIA/Mesa; se usan los binarios ya
+# versionados/precompilados. Herramientas: scripts/fetch-devtools.sh.
+# ---------------------------------------------------------------------------
+ifeq ($(SELFHOST),1)
+export SKIP_ENV := 1
+WITH_NVIDIA := 0
+export WITH_MESA := 0
+export SELFHOST
+endif
+
 RESOLV_CONF ?= nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n
 
 # Drivers en Ring 3 (.aur) por defecto. Con =0 se usa el driver del kernel.
@@ -61,6 +74,8 @@ normal: iso
 #                  WITH_NVIDIA=0 lo omite (ISO sin driver NVIDIA).
 #   WITH_MESA=1    ademas baja Mesa/LLVM (+500 MB; opt-in por tamano).
 WITH_NVIDIA ?= 1
+# Herramientas de desarrollo (gcc, make, nasm, mtools, xorriso...) dentro de la ISO.
+WITH_DEVTOOLS ?= 1
 export WITH_NVIDIA
 
 # 'sysroot' es PHONY: antes, si el directorio ya existia make lo daba por
@@ -135,7 +150,9 @@ user-native: | env
 	$(MAKE) -C user all
 
 user-musl: | env
-	@if [ -f user/musl/Makefile ]; then \
+	@if [ "$(SELFHOST)" = "1" ]; then \
+		echo "[Makefile] SELFHOST: user/musl no se recompila (binarios versionados)"; \
+	elif [ -f user/musl/Makefile ]; then \
 		echo "[Makefile] Build musl userland..."; \
 		$(MAKE) -C user/musl all; \
 	else \
@@ -441,6 +458,28 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 			|| echo "[Makefile]   ldconfig falló (no crítico)"; \
 	else \
 		echo "[Makefile]   ldconfig no encontrado (glibc hará probing)"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Herramientas de desarrollo en la ISO (Plan_GCC_Autocompilacion.md): gcc/g++ 13,
+# binutils, make, nasm, mtools, dosfstools, xorriso, fdisk/gdisk, xxd, gawk,
+# bison, flex, m4, bc, patch + gconv. Salen de scripts/fetch-devtools.sh (.deb de
+# Ubuntu 24.04, misma glibc que la ISO). WITH_DEVTOOLS=0 las omite (ISO ~260 MB
+# mas pequena). Las cabeceras/libc.a de glibc sustituyen a las de musl del tcc.
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_DEVTOOLS)" = "1" ]; then \
+		[ -x build/devtools/root/usr/bin/x86_64-linux-gnu-gcc-13 ] || bash scripts/fetch-devtools.sh || exit 1; \
+		echo "[Makefile] Instalando herramientas de desarrollo en la ISO..."; \
+		rm -rf sysroot/usr/include; mkdir -p sysroot/usr/include; \
+		rm -f sysroot/usr/lib/libc.a sysroot/lib/libc.a; \
+		cp -a --update=none build/devtools/root/usr/. sysroot/usr/; \
+		for t in gcc cc; do ln -sf x86_64-linux-gnu-gcc-13 sysroot/usr/bin/$$t; done; \
+		ln -sf x86_64-linux-gnu-g++-13 sysroot/usr/bin/g++; ln -sf g++ sysroot/usr/bin/c++; \
+		ln -sf x86_64-linux-gnu-cpp-13 sysroot/usr/bin/cpp; \
+		for t in as ld ar ranlib nm objdump objcopy strip strings readelf size addr2line ld.bfd; do \
+			[ -e sysroot/usr/bin/$$t ] || ln -sf x86_64-linux-gnu-$$t sysroot/usr/bin/$$t; done; \
+		ln -sf mkfs.fat sysroot/usr/sbin/mkfs.vfat 2>/dev/null || true; \
+		ln -sf ../usr/sbin/mkfs.fat sysroot/sbin/mkfs.fat 2>/dev/null || true; \
 	fi
 
 	@scripts/check-sysroot-libc.sh

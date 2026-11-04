@@ -23,6 +23,8 @@
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
+#include "paging.h"
+#include "pmm.h"
 #include "process.h"
 #include "rtc.h"
 #include "string.h"
@@ -46,8 +48,13 @@ typedef struct tmpfs_node {
   int nlink;
   int vfs_refs;
 
-  uint8_t *data;   // files: contenido; symlinks: target sin NUL
-  size_t capacity; // bytes reservados en data (>= size)
+  // symlinks: data = target sin NUL (kmalloc contiguo), capacity = su longitud.
+  // ficheros: data = tabla de punteros a paginas de 4 KB (uint8_t **) tomadas
+  //           del PMM (sin limite del heap del kernel), capacity = bytes en
+  //           paginas (multiplo de 4096), tab_cap = entradas de la tabla.
+  uint8_t *data;
+  size_t capacity;
+  size_t tab_cap;
 
   struct tmpfs_fs *fs;
   struct tmpfs_node *parent;
@@ -98,6 +105,104 @@ static void unlink_child_locked(tmpfs_node_t *dir, tmpfs_node_t *child) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Almacenamiento paginado de ficheros (permite /tmp de GBs; antes un unico
+// krealloc contiguo limitado por el heap de 256 MB / 64 MB por bloque).
+// ---------------------------------------------------------------------------
+#define TMPFS_PG 4096UL
+
+static inline int node_paged(const tmpfs_node_t *n) {
+  return (n->mode & S_IFMT) != S_IFLNK;
+}
+
+static void file_free_pages(tmpfs_node_t *n) {
+  if (!n->data)
+    return;
+  uint8_t **tab = (uint8_t **)n->data;
+  size_t np = n->capacity / TMPFS_PG;
+  for (size_t i = 0; i < np; i++)
+    if (tab[i])
+      pmm_free_page(virt_to_phys(tab[i]));
+  kfree(n->data);
+  n->data = NULL;
+  n->capacity = 0;
+  n->tab_cap = 0;
+}
+
+// Garantiza paginas (a cero) hasta cubrir `end` bytes. No toca used_bytes.
+static int file_reserve(tmpfs_node_t *n, size_t end) {
+  size_t want = (end + TMPFS_PG - 1) / TMPFS_PG;
+  size_t have = n->capacity / TMPFS_PG;
+  if (want <= have)
+    return 0;
+  if (want > n->tab_cap) {
+    size_t nc = n->tab_cap ? n->tab_cap : 16;
+    while (nc < want)
+      nc *= 2;
+    uint8_t **nt = (uint8_t **)krealloc(n->data, nc * sizeof(uint8_t *));
+    if (!nt)
+      return -ENOMEM;
+    memset(nt + n->tab_cap, 0, (nc - n->tab_cap) * sizeof(uint8_t *));
+    n->data = (uint8_t *)nt;
+    n->tab_cap = nc;
+  }
+  uint8_t **tab = (uint8_t **)n->data;
+  size_t i;
+  for (i = have; i < want; i++) {
+    uint64_t ph = pmm_alloc_page();
+    if (!ph)
+      break;
+    tab[i] = (uint8_t *)phys_to_virt(ph);
+    memset(tab[i], 0, TMPFS_PG);
+  }
+  if (i < want) {
+    for (size_t j = have; j < i; j++) {
+      pmm_free_page(virt_to_phys(tab[j]));
+      tab[j] = NULL;
+    }
+    return -ENOMEM;
+  }
+  n->capacity = want * TMPFS_PG;
+  return 0;
+}
+
+static void file_copy_out(const tmpfs_node_t *n, size_t off, void *buf,
+                          size_t len) {
+  uint8_t **tab = (uint8_t **)n->data;
+  uint8_t *d = (uint8_t *)buf;
+  while (len) {
+    size_t po = off % TMPFS_PG, c = TMPFS_PG - po;
+    if (c > len)
+      c = len;
+    memcpy(d, tab[off / TMPFS_PG] + po, c);
+    d += c; off += c; len -= c;
+  }
+}
+
+static void file_copy_in(tmpfs_node_t *n, size_t off, const void *buf,
+                         size_t len) {
+  uint8_t **tab = (uint8_t **)n->data;
+  const uint8_t *sp = (const uint8_t *)buf;
+  while (len) {
+    size_t po = off % TMPFS_PG, c = TMPFS_PG - po;
+    if (c > len)
+      c = len;
+    memcpy(tab[off / TMPFS_PG] + po, sp, c);
+    sp += c; off += c; len -= c;
+  }
+}
+
+static void file_zero(tmpfs_node_t *n, size_t from, size_t to) {
+  uint8_t **tab = (uint8_t **)n->data;
+  while (from < to) {
+    size_t po = from % TMPFS_PG, c = TMPFS_PG - po;
+    if (c > to - from)
+      c = to - from;
+    memset(tab[from / TMPFS_PG] + po, 0, c);
+    from += c;
+  }
+}
+
 static void free_node_locked(tmpfs_fs_t *fs, tmpfs_node_t *n) {
   if (!n)
     return;
@@ -106,8 +211,12 @@ static void free_node_locked(tmpfs_fs_t *fs, tmpfs_node_t *n) {
       fs->used_bytes -= n->capacity;
     else
       fs->used_bytes = 0;
-    kfree(n->data);
-    n->data = NULL;
+    if (node_paged(n))
+      file_free_pages(n);
+    else {
+      kfree(n->data);
+      n->data = NULL;
+    }
   }
   kfree(n);
 }
@@ -179,8 +288,18 @@ static int64_t tmpfs_read_op(vfs_node_t *vn, uint64_t off, size_t sz,
   }
   size_t avail = (size_t)(n->size - off);
   size_t n_copy = (sz < avail) ? sz : avail;
-  if (n_copy > 0 && n->data)
-    memcpy(buf, n->data + off, n_copy);
+  if (n_copy > 0 && n->data) {
+    if (node_paged(n)) {
+      size_t cap_end = n->capacity;
+      size_t c1 = (off < cap_end) ? ((cap_end - off) < n_copy ? (cap_end - off) : n_copy) : 0;
+      if (c1)
+        file_copy_out(n, (size_t)off, buf, c1);
+      if (c1 < n_copy)
+        memset((uint8_t *)buf + c1, 0, n_copy - c1);
+    } else {
+      memcpy(buf, n->data + off, n_copy);
+    }
+  }
   mutex_unlock(&fs->lock);
   return (int64_t)n_copy;
 }
@@ -208,34 +327,23 @@ static int64_t tmpfs_write_op(vfs_node_t *vn, uint64_t off, size_t sz,
   size_t end = (size_t)off + sz;
 
   if (end > n->capacity) {
-    size_t new_cap = n->capacity ? n->capacity : 4096;
-    while (new_cap < end) {
-      if (new_cap > SIZE_MAX / 2) {
-        mutex_unlock(&fs->lock);
-        return -ENOMEM;
-      }
-      new_cap *= 2;
-    }
+    size_t new_cap = (end + TMPFS_PG - 1) & ~(TMPFS_PG - 1);
     size_t delta = new_cap - n->capacity;
     if (fs->used_bytes + delta > fs->max_bytes) {
       mutex_unlock(&fs->lock);
       return -ENOSPC;
     }
-    uint8_t *nd = (uint8_t *)krealloc(n->data, new_cap);
-    if (!nd) {
+    if (file_reserve(n, end) != 0) {
       mutex_unlock(&fs->lock);
       return -ENOMEM;
     }
-    memset(nd + n->capacity, 0, delta);
-    n->data = nd;
-    n->capacity = new_cap;
     fs->used_bytes += delta;
   }
 
   if (off > n->size)
-    memset(n->data + n->size, 0, (size_t)off - n->size);
+    file_zero(n, (size_t)n->size, (size_t)off);
 
-  memcpy(n->data + off, buf, sz);
+  file_copy_in(n, (size_t)off, buf, sz);
   if (end > n->size)
     n->size = end;
   n->mtime = rtc_get_epoch();
@@ -282,30 +390,23 @@ static int tmpfs_truncate_op(vfs_node_t *vn, uint64_t new_size) {
   if (new_size == 0) {
     if (n->data) {
       fs->used_bytes -= n->capacity;
-      kfree(n->data);
-      n->data = NULL;
-      n->capacity = 0;
+      file_free_pages(n);
     }
   } else if (new_size > n->capacity) {
-    size_t new_cap = new_size;
-    if (new_cap < 4096)
-      new_cap = 4096;
+    size_t new_cap = (new_size + TMPFS_PG - 1) & ~(TMPFS_PG - 1);
     size_t delta = new_cap - n->capacity;
     if (fs->used_bytes + delta > fs->max_bytes) {
       mutex_unlock(&fs->lock);
       return -ENOSPC;
     }
-    uint8_t *nd = (uint8_t *)krealloc(n->data, new_cap);
-    if (!nd) {
+    if (file_reserve(n, new_size) != 0) {
       mutex_unlock(&fs->lock);
       return -ENOMEM;
     }
-    memset(nd + n->capacity, 0, delta);
-    n->data = nd;
-    n->capacity = new_cap;
     fs->used_bytes += delta;
+    file_zero(n, (size_t)n->size, (size_t)new_size);
   } else if (new_size > n->size) {
-    memset(n->data + n->size, 0, (size_t)new_size - n->size);
+    file_zero(n, (size_t)n->size, (size_t)new_size);
   }
 
   n->size = new_size;
@@ -455,14 +556,20 @@ static int tmpfs_link_op(vfs_node_t *dir_vn, const char *name,
     return -ENOMEM;
   }
   if (src->capacity) {
-    n->data = (uint8_t *)kmalloc(src->capacity);
-    if (!n->data) {
+    n->mode = S_IFREG;
+    if (file_reserve(n, src->capacity) != 0) {
+      file_free_pages(n);
       kfree(n);
       mutex_unlock(&fs->lock);
       return -ENOMEM;
     }
-    memcpy(n->data, src->data, src->size);
-    n->capacity = src->capacity;
+    for (size_t o = 0; o < src->size;) {
+      size_t c = TMPFS_PG - (o % TMPFS_PG);
+      if (c > src->size - o)
+        c = src->size - o;
+      file_copy_in(n, o, ((uint8_t **)src->data)[o / TMPFS_PG] + (o % TMPFS_PG), c);
+      o += c;
+    }
     fs->used_bytes += src->capacity;
   }
   size_t l = strlen(name);
@@ -878,8 +985,12 @@ static void free_tree_recursive(tmpfs_fs_t *fs, tmpfs_node_t *n) {
       c = next;
     }
   }
-  if (n->data)
-    kfree(n->data);
+  if (n->data) {
+    if (node_paged(n))
+      file_free_pages(n);
+    else
+      kfree(n->data);
+  }
   kfree(n);
 }
 
@@ -1174,7 +1285,14 @@ void tmpfs_init(void) {
   // ---------------------------------------------------------------------
   // [2] /tmp
   // ---------------------------------------------------------------------
-  void *tmp = tmpfs_new(64 * 1024 * 1024);
+  // [Plan_GCC K4] /tmp = 1/2 de la RAM (las paginas se piden al usarlas), entre 64 MB y 2 GB (antes fijo a
+  // 64 MB: cc1, ld, ar y tar de un build real no cabian).
+  uint64_t tmp_mb = (pmm_total_usable_pages() * 4096ULL / 2) >> 20;
+  if (tmp_mb < 64)
+    tmp_mb = 64;
+  if (tmp_mb > 2048)
+    tmp_mb = 2048;
+  void *tmp = tmpfs_new((size_t)tmp_mb * 1024 * 1024);
   if (!tmp) {
     LOG_ERR("[TMPFS] sin memoria para /tmp");
   } else {
@@ -1184,7 +1302,7 @@ void tmpfs_init(void) {
       LOG_ERR("[TMPFS] mount /tmp: %d", rc);
       tmpfs_destroy(tmp);
     } else {
-      LOG_INFO("[TMPFS] /tmp montado (64 MB)");
+      LOG_INFO("[TMPFS] /tmp montado (%llu MB)", (unsigned long long)tmp_mb);
     }
   }
 

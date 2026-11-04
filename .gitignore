@@ -79,5 +79,7 @@ build/ext2-*/
 /build/drive-aurora.conf
 /build/mbr_part2.hex
 drivers/kur/nvprobe/nvprobe.kur
+build/devtools/
+build/gcc-test/
 !pam.d
 !pam.d/**

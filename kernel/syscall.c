@@ -44,6 +44,7 @@
 #include "ptimer.h"
 #include "timerfd.h"
 #include "pidfd_inotify.h"
+#include "mutex.h"
 #include "spinlock.h"
 #include "string.h"
 #include "swap.h"
@@ -59,8 +60,11 @@
 #define EISCONN 106
 #endif
 
-#define SPAWN_ARGS_MAX PROCESS_ARGV_MAX
-#define SPAWN_ARG_STR_MAX PROCESS_ARG_STR_MAX
+// spawn: limites fijos pequeños (buffers planos); execve usa un pool (PROCESS_ARGENV_POOL).
+#define SPAWN_ARGS_MAX 16
+#define SPAWN_ARG_STR_MAX 1024
+#define SPAWN_ENVP_MAX 64
+#define SPAWN_ENV_STR_MAX 256
 
 extern void syscall_entry(void);
 
@@ -4464,7 +4468,12 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
 // ruta. El lock se inicializa estáticamente: NO puede haber un "lazy init"
 // concurrente que reinicialice el spinlock mientras otra CPU ya lo está
 // usando.
-static spinlock_t g_execve_lock = {0};
+// [Plan_GCC] MUTEX, no spinlock: process_execve_prepare lee el ELF del disco
+// (ext2 -> driver AHCI de usuario) y duerme. Con un spinlock con IRQs
+// desactivadas, dos CPUs hacian execve a la vez, la segunda giraba sin
+// interrupciones y el que dormia con el cerrojo nunca despertaba: cuelgue total
+// (visto en `./configure`, que lanza muchos procesos).
+static mutex_t g_execve_lock = {0};
 
 static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                         uint64_t a4, uint64_t a5) {
@@ -4474,7 +4483,7 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   if (!proc)
     return -EFAULT;
 
-  unsigned long exec_flags = spin_lock_irqsave(&g_execve_lock);
+  mutex_lock(&g_execve_lock);
   int64_t ret = -EFAULT;
 
   char path[VFS_PATH_MAX];
@@ -4486,24 +4495,25 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   process_set_exe_path(proc, path); // ← NUEVO
   LOG_INFO("[EXECVE] pid=%u path=%s", proc->pid, path);
 
-  // Buffers en heap: 16*128 + 32*256 = 10 KB no caben cómodos en el
-  // stack de kernel sin disparar -Wframe-larger-than.
-  enum {
-    ARGV_BYTES = PROCESS_ARGV_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
-  };
-  char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
+  // [Plan_GCC] argv/envp en un pool compacto de heap (antes: 16 argumentos
+  // fijos de 1 KiB y 64 variables de 256 B, truncados EN SILENCIO: gcc llama a
+  // cc1/as/ld con decenas de argumentos y llegaban cortados). Limites: hasta
+  // PROCESS_ARGV_MAX/PROCESS_ENVP_MAX entradas y PROCESS_ARGENV_POOL bytes en
+  // total (E2BIG si se superan, como Linux).
+  size_t ptr_bytes = (size_t)(PROCESS_ARGV_MAX + PROCESS_ENVP_MAX) * sizeof(char *);
+  char *buf = (char *)kmalloc(ptr_bytes + PROCESS_ARGENV_POOL);
   if (!buf) {
     ret = -ENOMEM;
     goto out;
   }
-  char *argv_storage = buf;
-  char *env_storage = buf + ARGV_BYTES;
+  const char **kargv = (const char **)buf;
+  const char **kenvp = kargv + PROCESS_ARGV_MAX;
+  char *pool = buf + ptr_bytes;
+  size_t pool_used = 0;
 
-  const char *kargv[PROCESS_ARGV_MAX];
   int argc = 0;
   if (argv_ptr) {
-    for (int i = 0; i < PROCESS_ARGV_MAX; i++) {
+    for (int i = 0;; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(argv_ptr + (uint64_t)i * 8)) <
           0) {
@@ -4513,27 +4523,35 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&argv_storage[i * SPAWN_ARG_STR_MAX],
-                                 (const char *)uptr, SPAWN_ARG_STR_MAX);
+      if (i >= PROCESS_ARGV_MAX) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      size_t room = PROCESS_ARGENV_POOL - pool_used;
+      if (room > PROCESS_ARG_STR_MAX)
+        room = PROCESS_ARG_STR_MAX;
+      long m = room ? strncpy_from_user(&pool[pool_used], (const char *)uptr, room)
+                    : (long)room;
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
         goto out;
       }
-      if (m >= SPAWN_ARG_STR_MAX) { // antes se truncaba en silencio (128 B)
+      if ((size_t)m >= room) { // sin sitio (o cadena demasiado larga)
         kfree(buf);
         ret = -E2BIG;
         goto out;
       }
-      kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
+      kargv[i] = &pool[pool_used];
+      pool_used += (size_t)m + 1;
       argc++;
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0;; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -4543,14 +4561,28 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      if (i >= PROCESS_ENVP_MAX - 1) { // deja hueco al NULL de process_set_envp
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      size_t room = PROCESS_ARGENV_POOL - pool_used;
+      if (room > PROCESS_ENV_STR_MAX)
+        room = PROCESS_ENV_STR_MAX;
+      long m = room ? strncpy_from_user(&pool[pool_used], (const char *)uptr, room)
+                    : (long)room;
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
         goto out;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      if ((size_t)m >= room) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      kenvp[i] = &pool[pool_used];
+      pool_used += (size_t)m + 1;
       envc++;
     }
   }
@@ -4582,20 +4614,22 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   }
   regs->rip = new_entry;
   regs->rsp = new_rsp;
-  // Como Linux (ELF_PLAT_INIT): el programa nuevo arranca con los registros a
-  // cero. %rdx importa: la ABI x86-64 lo define como puntero de atexit para el
-  // _start de glibc estatico, y un resto del execve hacia saltar a basura al
-  // terminar (SIGSEGV tras exit()).
-  regs->r15 = regs->r14 = regs->r13 = regs->r12 = 0;
-  regs->r10 = regs->r9 = regs->r8 = 0;
-  regs->rdi = regs->rsi = regs->rbp = regs->rbx = regs->rdx = 0;
+  // [Plan_GCC] Como en Linux (start_thread), el programa nuevo arranca con los
+  // registros a cero. Antes conservaba los del execve: rdx = envp del padre
+  // (un puntero a su heap). El ABI x86-64 dice que rdx en _start es el
+  // "rtld_fini" que debe registrarse con atexit; un binario ESTATICO de glibc
+  // lo llamaba al salir (rip = puntero al heap, NX) y moria con SIGSEGV tras
+  // imprimir. Los dinamicos no lo notaban: ld.so pone su propio rdx.
+  regs->r15 = regs->r14 = regs->r13 = regs->r12 = regs->r11 = regs->r10 = 0;
+  regs->r9 = regs->r8 = regs->rdi = regs->rsi = regs->rbp = regs->rbx = 0;
+  regs->rdx = regs->rcx = 0;
   LOG_INFO("[EXECVE-IRET] pid=%u rip=%p rsp=%p", proc->pid, (void *)regs->rip,
            (void *)regs->rsp);
 
   ret = 0;
 
 out:
-  spin_unlock_irqrestore(&g_execve_lock, exec_flags);
+  mutex_unlock(&g_execve_lock);
   return ret;
 }
 
@@ -4728,9 +4762,33 @@ static int64_t k_fchmodat(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
                           uint64_t flags, uint64_t a5) {
   (void)flags;
   (void)a5;
-  if ((int)dfd != AT_FDCWD)
-    return -EINVAL;
+  if ((int)dfd != AT_FDCWD) {
+    // [Plan_GCC] dirfd real + ruta relativa (GNU tar, coreutils/gnulib).
+    process_t *proc = process_current();
+    if (!proc)
+      return -EFAULT;
+    char path[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)dfd, (const char *)path_ptr, path,
+                             sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_chmod(path, (uint32_t)mode);
+  }
   return k_chmod(path_ptr, mode, 0, 0, 0);
+}
+
+// fchmodat2(dfd, path, mode, flags) [452]: glibc >= 2.39 lo usa para
+// fchmodat(..., AT_SYMLINK_NOFOLLOW) (GNU tar lo llama en cada directorio).
+// Sin esta syscall el fallback de glibc (open O_PATH + /proc/self/fd) daba EINVAL.
+static int64_t k_fchmodat2(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
+                           uint64_t flags, uint64_t a5) {
+  if (flags & ~0x1100ULL) // AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    return -EINVAL;
+  char c = 0;
+  if ((flags & 0x1000) && path_ptr &&
+      copy_from_user(&c, (const void *)path_ptr, 1) == 0 && c == '\0')
+    return k_fchmod(dfd, mode, 0, 0, 0);
+  return k_fchmodat(dfd, path_ptr, mode, 0, a5);
 }
 
 // ---------- chown / fchown / lchown ----------
@@ -4781,11 +4839,16 @@ static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
       c == '\0')
     return k_fchown(dfd, uid, gid, 0, 0);
   if ((int)dfd != AT_FDCWD) {
-    char first = 0;
-    if (!path_ptr || copy_from_user(&first, (const void *)path_ptr, 1) != 0)
+    // [Plan_GCC] dirfd real + ruta relativa (antes: EINVAL).
+    process_t *proc = process_current();
+    if (!proc)
       return -EFAULT;
-    if (first != '/')
-      return -EINVAL;
+    char path[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)dfd, (const char *)path_ptr, path,
+                             sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_chown(path, (uint32_t)uid, (uint32_t)gid);
   }
   return k_chown(path_ptr, uid, gid, 0, 0);
 }
@@ -4841,9 +4904,7 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   // [4.2] futimens(fd, times) → utimensat(fd, NULL, times, 0).
   // BusyBox touch abre el fichero con O_CREAT y luego aplica futimens.
   // Sin este path, dfd != AT_FDCWD → EINVAL → mtime se queda en 1980.
-  if ((int)dfd != AT_FDCWD) {
-    if (path_uptr != 0)
-      return -EINVAL; // path relativo a dfd: no soportado todavía
+  if ((int)dfd != AT_FDCWD && path_uptr == 0) {
     int kfd = (int)dfd;
     if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
       return -EBADF;
@@ -4864,7 +4925,9 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     return -EINVAL;
 
   char path[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  // [Plan_GCC] ruta relativa a dfd (tar/gnulib usan utimensat(dirfd, nombre)).
+  int rc = resolve_at_path(proc, (int)dfd, (const char *)path_uptr, path,
+                           sizeof(path));
   if (rc != 0) {
     return rc;
   }
@@ -6987,7 +7050,7 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
 
   enum {
     ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+    ENVP_BYTES = SPAWN_ENVP_MAX * SPAWN_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
   if (!buf)
@@ -7026,10 +7089,10 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
+  const char *kenvp[SPAWN_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0; i < SPAWN_ENVP_MAX; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -7038,13 +7101,13 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      long m = strncpy_from_user(&env_storage[i * SPAWN_ENV_STR_MAX],
+                                 (const char *)uptr, SPAWN_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
         return -EFAULT;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      kenvp[i] = &env_storage[i * SPAWN_ENV_STR_MAX];
       envc++;
     }
   }
@@ -7090,7 +7153,7 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
 
   enum {
     ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+    ENVP_BYTES = SPAWN_ENVP_MAX * SPAWN_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
   if (!buf)
@@ -7129,10 +7192,10 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
+  const char *kenvp[SPAWN_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0; i < SPAWN_ENVP_MAX; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -7141,13 +7204,13 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      long m = strncpy_from_user(&env_storage[i * SPAWN_ENV_STR_MAX],
+                                 (const char *)uptr, SPAWN_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
         return -EFAULT;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      kenvp[i] = &env_storage[i * SPAWN_ENV_STR_MAX];
       envc++;
     }
   }
@@ -7859,7 +7922,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SIGNALFD4] = {k_signalfd4, "signalfd4"},
     [303] = {k_name_to_handle_at, "name_to_handle_at"},
     [439] = {k_faccessat, "faccessat2"},
-    [439] = {k_faccessat, "faccessat2"},
+    [452] = {k_fchmodat2, "fchmodat2"},
     [SYS_TRUNCATE] = {k_truncate, "truncate"},
     [SYS_FTRUNCATE] = {k_ftruncate, "ftruncate"},
     [SYS_FALLOCATE] = {k_fallocate, "fallocate"},

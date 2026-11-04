@@ -526,15 +526,11 @@ static int handle_page_fault_inner(registers_t *regs) {
         }
       }
       // Página presente + cualquier fallo = violación de permisos.
-      LOG_WARN("[PF] violación de permisos: PID=%u rip=%p cr2=%p err=0x%lx",
-               process_current() ? process_current()->pid : 0,
-               (void *)regs->rip, (void *)cr2, (unsigned long)err);
       {
-        uint64_t q0 = 0, q1 = 0;
-        copy_from_user(&q0, (const void *)regs->rsp, 8);
-        copy_from_user(&q1, (const void *)(regs->rsp + 8), 8);
-        LOG_WARN("[PF]   rsp=%p [rsp]=%p %p rax=%p rdi=%p", (void *)regs->rsp,
-                 (void *)q0, (void *)q1, (void *)regs->rax, (void *)regs->rdi);
+        struct process *dp = process_current();
+        LOG_WARN("[PF] violacion de permisos: PID=%u rip=%p cr2=%p err=0x%lx",
+                 dp ? dp->pid : 0, (void *)regs->rip, (void *)cr2,
+                 (unsigned long)err);
       }
       signal_deliver_from_exception(SIGSEGV, regs);
       pf_resolved++;
@@ -619,21 +615,6 @@ static int handle_page_fault_inner(registers_t *regs) {
     }
 
     if (cr2 >= proc->stack_guard && cr2 < proc->stack_guard + PAGE_SIZE) {
-      LOG_ERR("[PF] PID=%u guard page: rip=%p rsp=%p cr2=%p", proc->pid,
-              (void *)regs->rip, (void *)regs->rsp, (void *)cr2);
-      {
-        // Diagnóstico: direcciones de código que hay en lo alto de la pila.
-        uint64_t sp = ((regs->rsp | 0xFFFULL) + 1), seen = 0;
-        for (int i = 0; i < 4096 && seen < 24; i++) {
-          uint64_t v;
-          if (copy_from_user(&v, (void *)(sp + 8ULL * i), 8) != 0)
-            break;
-          if (v >= 0x401000 && v < 0x700000) {
-            LOG_ERR("[PF]   pila+%d: %p", i * 8, (void *)v);
-            seen++;
-          }
-        }
-      }
       kill_current_process(regs, "stack overflow (guard page)");
       return 1;
     }
