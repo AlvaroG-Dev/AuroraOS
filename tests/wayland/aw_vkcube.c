@@ -1,6 +1,6 @@
 /* N5b: cubo Vulkan giratorio sobre Wayland (RTX 4060): render pass con profundidad, pipeline con
  * shaders SPIR-V (tests/wayland/shaders), vertex buffer, push constants (MVP) y swapchain.
- * Uso: aw_vkcube [segundos] [fps_max]  -> imprime el FPS medio al terminar. */
+ * Uso: aw_vkcube [segundos] [fps_max] [ancho] [alto]  -> imprime el FPS medio al terminar. */
 #define VK_USE_PLATFORM_WAYLAND_KHR
 #include <vulkan/vulkan.h>
 #include <math.h>
@@ -127,8 +127,8 @@ int main(int argc, char **argv) {
   VkSurfaceFormatKHR fm[32];
   if (nf > 32) nf = 32;
   CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(pd, vs, &nf, fm));
-  uint32_t W = caps.currentExtent.width == 0xFFFFFFFFu ? 480 : caps.currentExtent.width;
-  uint32_t H = caps.currentExtent.height == 0xFFFFFFFFu ? 360 : caps.currentExtent.height;
+  uint32_t W = caps.currentExtent.width == 0xFFFFFFFFu ? (argc > 3 ? (uint32_t)atoi(argv[3]) : 480) : caps.currentExtent.width;
+  uint32_t H = caps.currentExtent.height == 0xFFFFFFFFu ? (argc > 4 ? (uint32_t)atoi(argv[4]) : 360) : caps.currentExtent.height;
   VkFormat cfmt = fm[0].format;
   VkSwapchainCreateInfoKHR sci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vs,
       .minImageCount = caps.minImageCount < 2 ? 2 : caps.minImageCount, .imageFormat = cfmt, .imageColorSpace = fm[0].colorSpace,

@@ -1272,6 +1272,7 @@ static void surface_damage_up(struct surface *s, rc_t d) {
 #define DRM_MOD_LINEAR 0ull
 
 struct dmabuf_buf {
+  void *gh; /* import de GPU cacheado (gpuimp) */
   int gpu; /* modificador no lineal: la CPU no puede leerlo (vidmem) */
   uint64_t modifier;
   int fd;
@@ -1324,6 +1325,7 @@ static void dmabuf_buf_destroy_res(struct wl_resource *r) {
     return;
   if (b->map)
     munmap(b->map, b->map_len);
+  gpuimp_release(b->gh);
   close(b->fd);
   free(b);
 }
@@ -1709,7 +1711,7 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         wl_shm_buffer_end_access(shm);
         ingested = 1;
       } else if (db && db->gpu && tree_member) {
-        const uint8_t *px = gpuimp_read(db->fd, db->w, db->h, (uint32_t)db->stride,
+        const uint8_t *px = gpuimp_read(&db->gh, db->fd, db->w, db->h, (uint32_t)db->stride,
                                         (uint32_t)db->offset, db->format, db->modifier);
         if (px) {
           ingest_dmg = surface_ingest(s, px, db->w, db->h, db->w * 4,

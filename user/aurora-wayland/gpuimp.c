@@ -3,6 +3,8 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <time.h>
+#include <string.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -23,6 +25,7 @@ typedef int GLint, GLsizei;
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_RGBA 0x1908
+#define GL_BGRA_EXT 0x80E1
 #define GL_UNSIGNED_BYTE 0x1401
 
 static struct {
@@ -52,6 +55,7 @@ static struct {
   void (*glFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
   GLenum (*glCheckFramebufferStatus)(GLenum);
   void (*glFinish)(void);
+  GLenum (*glGetError)(void);
   void (*glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
   void (*glDeleteRenderbuffers)(GLsizei, const GLuint *);
   void (*glDeleteFramebuffers)(GLsizei, const GLuint *);
@@ -78,7 +82,7 @@ static int gpuimp_init(void) {
   SYM(G.egl, eglGetError);
   SYM(G.gles, glGenRenderbuffers); SYM(G.gles, glBindRenderbuffer); SYM(G.gles, glGenFramebuffers);
   SYM(G.gles, glBindFramebuffer); SYM(G.gles, glFramebufferRenderbuffer);
-  SYM(G.gles, glCheckFramebufferStatus); SYM(G.gles, glFinish); SYM(G.gles, glReadPixels);
+  SYM(G.gles, glCheckFramebufferStatus); SYM(G.gles, glFinish); SYM(G.gles, glGetError); SYM(G.gles, glReadPixels);
   SYM(G.gles, glDeleteRenderbuffers); SYM(G.gles, glDeleteFramebuffers);
   int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
   if (fd < 0) {
@@ -114,8 +118,40 @@ static int gpuimp_init(void) {
   return 1;
 }
 
-const uint8_t *gpuimp_read(int fd, int w, int h, uint32_t stride, uint32_t offset,
+struct gpuimp_h {
+  EGLImage img;
+  GLuint rb, fb;
+  int w, h, bad;
+};
+
+static double gi_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static void gpuimp_free_res(struct gpuimp_h *h) {
+  if (h->fb) G.glDeleteFramebuffers(1, &h->fb);
+  if (h->rb) G.glDeleteRenderbuffers(1, &h->rb);
+  if (h->img) G.eglDestroyImage(G.dpy, h->img);
+  h->fb = h->rb = 0;
+  h->img = NULL;
+}
+
+/* Libera el import cacheado de un buffer (al destruirse el wl_buffer). */
+void gpuimp_release(void *hp) {
+  if (hp && G.ok) {
+    gpuimp_free_res(hp);
+    free(hp);
+  }
+}
+
+/* El import (EGLImage + renderbuffer + FBO) se crea una vez por wl_buffer y se reutiliza en
+ * cada cuadro: antes se creaba y destruia en cada commit. GPUIMP_NOCACHE=1 lo desactiva. */
+const uint8_t *gpuimp_read(void **hp, int fd, int w, int h, uint32_t stride, uint32_t offset,
                            uint32_t fourcc, uint64_t modifier) {
+  static int nocache = -1, bgra = -1, nfr;
+  static double t_read, t_swz, t_imp;
   if (!G.tried) {
     G.tried = 1;
     fprintf(stderr, "[aurora-wayland] gpuimp: iniciando EGL...\n");
@@ -123,52 +159,102 @@ const uint8_t *gpuimp_read(int fd, int w, int h, uint32_t stride, uint32_t offse
   }
   if (!G.ok)
     return NULL;
-  if (G.fails < 5 && !G.logged_ok)
-    fprintf(stderr, "[aurora-wayland] gpuimp: eglCreateImage %dx%d...\n", w, h);
-  intptr_t at[] = {0x3057, w, 0x3056, h, 0x3271, fourcc, 0x3272, fd, 0x3273, offset,
-                   0x3274, stride, 0x3443, (intptr_t)(modifier & 0xffffffffu),
-                   0x3444, (intptr_t)(modifier >> 32), EGL_NONE};
-  EGLImage img = G.eglCreateImage(G.dpy, NULL, 0x3270, NULL, at);
-  if (!img) {
-    if (G.fails++ < 5)
-      fprintf(stderr, "[aurora-wayland] gpuimp: eglCreateImage %dx%d mod=0x%llx fallo (0x%x)\n", w, h,
-              (unsigned long long)modifier, G.eglGetError());
-    return NULL;
+  if (nocache < 0) {
+    const char *e = getenv("GPUIMP_NOCACHE");
+    nocache = e && *e == '1';
+    fprintf(stderr, "[aurora-wayland] gpuimp: cache de imports %s\n", nocache ? "desactivada" : "activa");
   }
-  G.glGenRenderbuffers(1, &G.rb);
-  G.glBindRenderbuffer(GL_RENDERBUFFER, G.rb);
-  G.img_to_rb(GL_RENDERBUFFER, img);
-  G.glGenFramebuffers(1, &G.fb);
-  G.glBindFramebuffer(GL_FRAMEBUFFER, G.fb);
-  G.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, G.rb);
-  const uint8_t *res = NULL;
-  if (G.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-    size_t need = (size_t)w * h * 4;
-    if (G.buf_len < need) {
-      free(G.buf);
-      G.buf = malloc(need);
-      G.buf_len = G.buf ? need : 0;
+  struct gpuimp_h *H = hp && !nocache ? *hp : NULL;
+  struct gpuimp_h tmp;
+  if (H && H->bad)
+    return NULL;
+  double t0 = gi_now();
+  if (!H) {
+    if (G.fails < 5 && !G.logged_ok)
+      fprintf(stderr, "[aurora-wayland] gpuimp: eglCreateImage %dx%d...\n", w, h);
+    intptr_t at[] = {0x3057, w, 0x3056, h, 0x3271, fourcc, 0x3272, fd, 0x3273, offset,
+                     0x3274, stride, 0x3443, (intptr_t)(modifier & 0xffffffffu),
+                     0x3444, (intptr_t)(modifier >> 32), EGL_NONE};
+    EGLImage img = G.eglCreateImage(G.dpy, NULL, 0x3270, NULL, at);
+    if (!img) {
+      if (G.fails++ < 5)
+        fprintf(stderr, "[aurora-wayland] gpuimp: eglCreateImage %dx%d mod=0x%llx fallo (0x%x)\n", w, h,
+                (unsigned long long)modifier, G.eglGetError());
+      return NULL;
     }
-    if (G.buf) {
-      G.glFinish();
+    struct gpuimp_h *n = (hp && !nocache) ? calloc(1, sizeof(*n)) : &tmp;
+    if (!n)
+      n = &tmp;
+    memset(n, 0, sizeof(*n));
+    n->img = img; n->w = w; n->h = h;
+    G.glGenRenderbuffers(1, &n->rb);
+    G.glBindRenderbuffer(GL_RENDERBUFFER, n->rb);
+    G.img_to_rb(GL_RENDERBUFFER, img);
+    G.glGenFramebuffers(1, &n->fb);
+    G.glBindFramebuffer(GL_FRAMEBUFFER, n->fb);
+    G.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, n->rb);
+    if (G.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      if (G.fails++ < 5)
+        fprintf(stderr, "[aurora-wayland] gpuimp: framebuffer incompleto\n");
+      n->bad = 1;
+    }
+    if (n != &tmp)
+      *hp = n;
+    H = n;
+    t_imp += gi_now() - t0;
+    t0 = gi_now();
+    if (H->bad) {
+      if (H == &tmp) {
+        G.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gpuimp_free_res(&tmp);
+      }
+      return NULL;
+    }
+  } else {
+    G.glBindFramebuffer(GL_FRAMEBUFFER, H->fb);
+  }
+  const uint8_t *res = NULL;
+  size_t need = (size_t)w * h * 4;
+  if (G.buf_len < need) {
+    free(G.buf);
+    G.buf = malloc(need);
+    G.buf_len = G.buf ? need : 0;
+  }
+  if (G.buf) {
+    G.glFinish();
+    int swz = 1;
+    if (bgra != 0) {
+      G.glGetError();
+      G.glReadPixels(0, 0, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, G.buf);
+      if (G.glGetError() == 0) swz = 0;
+      if (bgra < 0) {
+        bgra = !swz;
+        fprintf(stderr, "[aurora-wayland] gpuimp: lectura BGRA directa %s\n", bgra ? "si" : "no (se intercambia R/B por CPU)");
+      }
+    }
+    double t1 = gi_now();
+    if (swz) {
       G.glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, G.buf);
-      /* RGBA -> BGRA (memoria de XRGB8888) */
+      t1 = gi_now();
       for (size_t i = 0; i < need; i += 4) {
         uint8_t r = G.buf[i];
         G.buf[i] = G.buf[i + 2];
         G.buf[i + 2] = r;
       }
-      res = G.buf;
-      if (!G.logged_ok++)
-        fprintf(stderr, "[aurora-wayland] gpuimp: primer frame leido de la GPU %dx%d\n", w, h);
     }
-  } else if (G.fails++ < 5) {
-    fprintf(stderr, "[aurora-wayland] gpuimp: framebuffer incompleto\n");
+    double t2 = gi_now();
+    t_read += t1 - t0; t_swz += t2 - t1;
+    res = G.buf;
+    if (!G.logged_ok++)
+      fprintf(stderr, "[aurora-wayland] gpuimp: primer frame leido de la GPU %dx%d\n", w, h);
+    if (++nfr % 120 == 0)
+      fprintf(stderr, "[aurora-wayland] gpuimp: %d cuadros %dx%d: lectura %.2f ms, swizzle %.2f ms, import %.2f ms (medias)\n",
+              nfr, w, h, t_read / nfr, t_swz / nfr, t_imp / nfr);
   }
-  G.glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  G.glDeleteFramebuffers(1, &G.fb);
-  G.glDeleteRenderbuffers(1, &G.rb);
-  G.eglDestroyImage(G.dpy, img);
+  if (H == &tmp) {
+    G.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gpuimp_free_res(&tmp);
+  }
   return res;
 }
 

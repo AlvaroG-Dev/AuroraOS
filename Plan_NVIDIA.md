@@ -322,3 +322,8 @@ Cierra la «abierta tras L3 (c)» de `Plan_LinuxKPI.md` §10 en su parte de lect
 ### N5b paso 3: cubo Vulkan (aw_vkcube)
 Cliente `tests/wayland/aw_vkcube.c` (shaders GLSL en `tests/wayland/shaders/`, SPIR-V incluido como cabecera): render pass color+profundidad D32, pipeline grafica, vertex buffer de 36 vertices, push constant con la MVP, swapchain FIFO. Imprime FPS cada 2 s y la media final.
 Prueba: `vkcube.sh [segundos] [fps_max]` con el escritorio abierto. Esperado: cubo de colores girando y `ALL PASS: N cuadros ... fps medios`. Resultado (Alvaro, 2026-11-02, RTX 4060, ventana 480x360): ALL PASS, 693 cuadros en 15 s; ~55 fps estables tras un arranque lento (6.9 fps en los primeros 2 s, compilacion de shaders/pipeline), sin errores en el log.
+
+### N5b paso 4: copia por CPU mas barata (2026-11-04)
+`gpuimp_read` ya no crea y destruye EGLImage + renderbuffer + FBO en cada commit: el import se cachea en el `dmabuf_buf` (`gh`) y se libera al destruirse el wl_buffer (`gpuimp_release`). Ademas intenta `glReadPixels(GL_BGRA_EXT)` y solo intercambia R/B por CPU si no esta soportado. Cada 120 cuadros el compositor registra `gpuimp: N cuadros WxH: lectura X ms, swizzle Y ms, import Z ms` (medias). `GPUIMP_NOCACHE=1` en el entorno del compositor vuelve al comportamiento anterior.
+Prueba: `vkcube.sh 15 0 1280 720` (ancho/alto como 3.er y 4.o argumento; antes eran 480x360 fijos) y comparar fps y las lineas `gpuimp:` del log. Resultado: pendiente.
+Explicit sync: el kernel ya tiene syncobj timeline (kernel/drm/drm_syncobj.c) y el XML del protocolo esta en wayland-protocols; falta la parte del compositor. Se deja para despues: con `__NV_DISABLE_EXPLICIT_SYNC=1` todo funciona.
