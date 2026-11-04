@@ -322,14 +322,21 @@ static void dhcp_write_resolv_conf(uint32_t dns) {
     return;
   }
 
-  char buf[64];
+  // Contenido completo (el servidor DHCP + respaldo + opciones). Se trunca
+  // antes de escribir: si no, el resto del resolv.conf antiguo queda
+  // desalineado ("ameserver 8.8.8.8").
+  char buf[128];
   int o = 0;
   const char *ns = "nameserver ";
   while (*ns)
     buf[o++] = *ns++;
   o += fmt_ip(buf + o, dns);
   buf[o++] = '\n';
+  const char *tail = "nameserver 8.8.8.8\noptions timeout:2 attempts:2\n";
+  while (*tail)
+    buf[o++] = *tail++;
 
+  vfs_truncate("/etc/resolv.conf", 0);
   int64_t wr = n->ops->write(n, 0, (size_t)o, buf);
   if (wr < 0) {
     LOG_WARN("[DHCP] no se pudo escribir /etc/resolv.conf (rc=%lld)",

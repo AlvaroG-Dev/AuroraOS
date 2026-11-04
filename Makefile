@@ -76,6 +76,7 @@ normal: iso
 WITH_NVIDIA ?= 1
 # Herramientas de desarrollo (gcc, make, nasm, mtools, xorriso...) dentro de la ISO.
 WITH_DEVTOOLS ?= 1
+WITH_SOURCE ?= 1
 export WITH_NVIDIA
 
 # 'sysroot' es PHONY: antes, si el directorio ya existia make lo daba por
@@ -480,6 +481,21 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 			[ -e sysroot/usr/bin/$$t ] || ln -sf x86_64-linux-gnu-$$t sysroot/usr/bin/$$t; done; \
 		ln -sf mkfs.fat sysroot/usr/sbin/mkfs.vfat 2>/dev/null || true; \
 		ln -sf ../usr/sbin/mkfs.fat sysroot/sbin/mkfs.fat 2>/dev/null || true; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Codigo fuente de AuroraOS dentro de la ISO (para compilar desde AuroraOS):
+# /usr/src/auroraos.tar.gz (ficheros versionados en git, sin toolchain cruzado
+# del host, sin build/, sin busybox/ncurses). Se extrae con `aurora-src [dir]`
+# (por defecto /root/AuroraOS). WITH_SOURCE=0 lo omite.
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_SOURCE)" = "1" ] && git rev-parse --git-dir >/dev/null 2>&1; then \
+		echo "[Makefile] Empaquetando codigo fuente en /usr/src/auroraos.tar.gz..."; \
+		mkdir -p sysroot/usr/src sysroot/usr/bin; \
+		git ls-files -z | grep -zvE '^(build/capturas/|build/[a-z_]*shot\.png|sysroot/|toolchain/|third_party/(busybox|ncurses)|kernel/initrd\.tar|.*\.iso$$)' \
+		  | tar --null -T - --transform 's,^,AuroraOS/,S' -czf sysroot/usr/src/auroraos.tar.gz; \
+		install -m 755 scripts/aurora-src sysroot/usr/bin/aurora-src; \
+		ls -lh sysroot/usr/src/auroraos.tar.gz; \
 	fi
 
 	@scripts/check-sysroot-libc.sh
