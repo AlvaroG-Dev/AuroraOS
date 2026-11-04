@@ -8,18 +8,19 @@
 set -u
 cd "$(dirname "$0")/../.."
 N=${N:-10}; SEED=${SEED:-1}; BS=${BS:-1024}
-W=build/ext2-crash; mkdir -p $W
+W=${WDIR:-build/ext2-crash}; mkdir -p $W
 BASE=$W/base.img
 if [ ! -f $BASE ] || [ -n "${REBASE:-}" ]; then
   rm -rf $W/tree; mkdir -p $W/tree/stable
   for d in 0 1 2 3 4 5; do mkdir -p $W/tree/stable/s$d; for f in 1 2 3 4 5 6 7 8; do seq 1 $((d*900+f*300)) > $W/tree/stable/s$d/file$f; done; done
   head -c 3000000 /dev/urandom > $W/tree/stable/s0/blob
+  [ -f $W/src.tar ] && cp $W/src.tar $W/tree/stable/
   mkdir -p $W/tree/w
-  rm -f $BASE; mke2fs -q -F -t ext2 -b $BS -I 256 -d $W/tree $BASE 128M || exit 2
+  rm -f $BASE; mke2fs -q -F -t ext2 -b $BS -I 256 -d $W/tree $BASE ${SIZE:-128M} || exit 2
   (cd $W/tree/stable && find . -type f -exec sha256sum {} \; | LC_ALL=C sort -k2) > $W/stable.sha
 fi
 export WITH_NVIDIA=${WITH_NVIDIA:-0}
-cp tests/ext2/crash_load.sh sysroot/system/crash_load.sh
+cp tests/ext2/${LOADFILE:-crash_load.sh} sysroot/system/crash_load.sh
 trap 'rm -f sysroot/system/crash_load.sh' EXIT
 LOAD='bash /system/crash_load.sh'
 RANDOM=$SEED
@@ -34,11 +35,11 @@ for it in $(seq 1 $N); do
     "sleep 25" 'umount /data; mount -t ext2 /dev/sda /data; echo @@MOUNT rc=$?' "$LOAD" >/dev/null 2>&1 &
   BG=$!
   # esperar al montaje rw (la velocidad de TCG varia mucho) y cortar tras un retardo aleatorio
-  until pgrep -f "qemu-system-x86_64.*ext2-crash/it.img" >/dev/null; do sleep 2; done  # (la 1a vez hay 'make iso')
+  until pgrep -f "qemu-system-x86_64.*$(basename $W)/it.img" >/dev/null; do sleep 2; done  # (la 1a vez hay 'make iso')
   for _ in $(seq 1 600); do tr -d '\r' < $LOG 2>/dev/null | grep -a -q '@@MOUNT rc=' && break; sleep 1; done
   KT=$((${KMIN:-5} + RANDOM % ${KSPAN:-60}))
   sleep $KT
-  pkill -KILL -f "qemu-system-x86_64.*ext2-crash/it.img"
+  pkill -KILL -f "qemu-system-x86_64.*$(basename $W)/it.img"
   wait $BG 2>/dev/null
   mounted=$(tr -d '\r' < $LOG | grep -a -c '@@MOUNT rc=0')
   e2fsck -fy $IMG > $W/fsck1.txt 2>&1; rc1=$?
