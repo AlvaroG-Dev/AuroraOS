@@ -77,6 +77,7 @@ mkdir -p "$DST"
 
 # rsync con exclusiones: tests, GUI, herramientas de dev, cache.
 # --delete deja el sysroot idéntico al host para esta versión.
+if command -v rsync >/dev/null 2>&1; then
 rsync -a --delete \
   --exclude 'test/' \
   --exclude 'tests/' \
@@ -91,6 +92,12 @@ rsync -a --delete \
   --exclude '*.pyo' \
   --exclude 'site-packages/' \
   "$SRC/" "$DST/"
+else
+  # Sin rsync (p. ej. compilando dentro de AuroraOS): tar con las mismas
+  # exclusiones; se vacia DST para igualar el efecto de --delete.
+  rm -rf "$DST"; mkdir -p "$DST"
+  tar -C "$SRC" --exclude 'test/' --exclude 'tests/' --exclude 'tkinter/' --exclude 'idlelib/' --exclude 'lib2to3/' --exclude 'ensurepip/' --exclude 'distutils/' --exclude 'venv/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.pyo' --exclude 'site-packages/' -cf - . | tar -C "$DST" -xf -
+fi
 
 # Precompilar .py → .pyc. Reduce el arranque de Python ~5x y evita que
 # Python intente escribir __pycache__ en el rootfs RO.

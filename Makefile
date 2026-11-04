@@ -618,7 +618,7 @@ $(ISO_OUT): iso_root
 	 echo "[ISO] Anadiendo particion de datos $(USB_DATA_FS) ($(USB_DATA_MB) MB) para el log..."; \
 	 iso_sz=$$(stat -c%s $(ISO_OUT)); \
 	 start_mb=$$(( (iso_sz + 1048575) / 1048576 )); \
-	 truncate -s $$((start_mb * 1048576)) $(ISO_OUT); \
+	 dd if=/dev/null of=$(ISO_OUT) bs=1M seek=$$start_mb count=0 status=none; \
 	 rm -f build/usbdata.img; \
 	 dd if=/dev/zero of=build/usbdata.img bs=1M count=$(USB_DATA_MB) status=none; \
 	 if [ "$(USB_DATA_FS)" = "ext2" ]; then \
@@ -628,7 +628,11 @@ $(ISO_OUT): iso_root
 	   if [ "$(WITH_SOURCE)" = "1" ]; then \
 	     echo "[ISO] Copiando fuentes del repo a /AuroraOS de la particion de datos..."; \
 	     rm -rf build/src_tree; mkdir -p build/src_tree/AuroraOS; \
-	     git ls-files -z --exclude-standard | tar --null -T - --exclude='build/capturas' --exclude='build/*.png' -cf - 2>/dev/null | tar -xf - -C build/src_tree/AuroraOS || exit 1; \
+	     if git rev-parse --git-dir >/dev/null 2>&1; then \
+	       git ls-files -z --exclude-standard | tar --null -T - --exclude='build/capturas' --exclude='build/*.png' -cf - 2>/dev/null | tar -xf - -C build/src_tree/AuroraOS || exit 1; \
+	     else \
+	       tar --exclude=./build --exclude=./sysroot --exclude=./aurora.iso --exclude=./kernel/initrd.tar -cf - . | tar -xf - -C build/src_tree/AuroraOS || exit 1; \
+	     fi; \
 	     srcopt="-d build/src_tree"; \
 	   fi; \
 	   mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 $$srcopt build/usbdata.img || exit 1; \
