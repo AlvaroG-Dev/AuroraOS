@@ -29,6 +29,10 @@ env:
 # (apt, musl, Wayland...), sin NVIDIA/Mesa; se usan los binarios ya
 # versionados/precompilados. Herramientas: scripts/fetch-devtools.sh.
 # ---------------------------------------------------------------------------
+# Dentro de AuroraOS (uname -s = Aurora) el modo SELFHOST es el de por defecto.
+ifeq ($(shell uname -s 2>/dev/null),Aurora)
+SELFHOST ?= 1
+endif
 ifeq ($(SELFHOST),1)
 export SKIP_ENV := 1
 WITH_NVIDIA := 0

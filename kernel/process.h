@@ -402,6 +402,7 @@ process_t *process_spawn_child_args_fds(process_t *parent, const char *path,
 // [fork] Duplica el proceso actual. Devuelve el pid del hijo al padre,
 // 0 al hijo (vía frame de iretq), o negativo en error.
 int64_t sys_fork(void);
+int64_t sys_fork_ex(uint64_t child_rsp);
 
 // [clone] Crea un thread del proceso actual. Comparte process_t,
 // mm, fds, cwd, signal actions y credenciales con el padre.

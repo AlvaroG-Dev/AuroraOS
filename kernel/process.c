@@ -2136,7 +2136,13 @@ static int nproc_count_cb(process_t *p, void *arg) {
   return 0;
 }
 
-int64_t sys_fork(void) {
+int64_t sys_fork_ex(uint64_t child_rsp);
+int64_t sys_fork(void) { return sys_fork_ex(0); }
+
+// child_rsp != 0: el hijo arranca con esa pila (clone(CLONE_VM|CLONE_VFORK, stack)
+// de posix_spawn de glibc, emulado con fork COW: el hijo ve una copia de la
+// memoria del padre, incluida la pila que el padre preparo con fn/arg).
+int64_t sys_fork_ex(uint64_t child_rsp) {
   process_t *parent = process_current();
   if (!parent) {
     LOG_ERR("[FORK] sin proceso actual");
@@ -2188,7 +2194,10 @@ int64_t sys_fork(void) {
   }
 
   // 3. Crear tarea del hijo con los regs del padre.
-  task_t *child_task = sched_create_forked_user_task(regs, child_pml4_phys);
+  registers_t fork_regs = *regs;
+  if (child_rsp)
+    fork_regs.rsp = child_rsp;
+  task_t *child_task = sched_create_forked_user_task(&fork_regs, child_pml4_phys);
   if (!child_task) {
     LOG_ERR("[FORK] sched_create_forked_user_task falló");
     paging_free_user_space(child_pml4_phys);

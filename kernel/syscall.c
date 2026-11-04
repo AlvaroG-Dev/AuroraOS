@@ -4270,6 +4270,7 @@ static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
 #define CLONE_PARENT_SETTID 0x00100000ULL
 #define CLONE_CHILD_CLEARTID 0x00200000ULL
 #define CLONE_DETACHED 0x00400000ULL
+#define CLONE_VFORK 0x00004000ULL
 #define CLONE_CHILD_SETTID 0x01000000ULL
 
 static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
@@ -4284,15 +4285,18 @@ static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
   uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
                        CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |
                        CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
-                       CLONE_CHILD_CLEARTID | CLONE_DETACHED;
+                       CLONE_CHILD_CLEARTID | CLONE_DETACHED | CLONE_VFORK;
   uint64_t unknown = flags & ~(supported | 0xffULL);
   if (unknown) {
     LOG_WARN("[CLONE] flags no soportados: 0x%lx", (unsigned long)unknown);
     return -EINVAL;
   }
 
+  // posix_spawn de glibc: clone(CLONE_VM|CLONE_VFORK|SIGCHLD, pila_nueva).
+  // Se emula con fork COW arrancando el hijo en la pila indicada (el padre no
+  // se bloquea; si el exec del hijo falla, sale con 127 como en vfork).
   if (!(flags & CLONE_THREAD))
-    return sys_fork();
+    return sys_fork_ex((flags & CLONE_VFORK) ? stack : 0);
   if (!(flags & CLONE_VM))
     return -EINVAL;
 
