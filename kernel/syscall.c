@@ -483,20 +483,26 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
   if (want_dir || no_follow) {
     vfs_node_t *probe =
         no_follow ? vfs_lookup_nofollow(kpath) : vfs_lookup(kpath);
-    if (!probe)
-      return -ENOENT;
-    int is_dir = (probe->flags & VFS_DIRECTORY) != 0;
-    int is_sym = probe->is_symlink;
-    vfs_node_free(probe);
+    // Con O_CREAT un fichero que aun no existe es normal (glibc sem_open /
+    // shm_open: O_CREAT|O_EXCL|O_NOFOLLOW): se crea mas abajo.
+    if (!probe && !want_dir && (linux_flags & LINUX_O_CREAT)) {
+      // nada que comprobar
+    } else {
+      if (!probe)
+        return -ENOENT;
+      int is_dir = (probe->flags & VFS_DIRECTORY) != 0;
+      int is_sym = probe->is_symlink;
+      vfs_node_free(probe);
 
-    if (no_follow && is_sym) {
-      // O_PATH|O_NOFOLLOW: el fd apunta al propio symlink (systemd/libudev).
-      if (linux_flags & 0x200000)
-        return vfs_open_nofollow_for_proc(proc, kpath, O_RDONLY);
-      return -ELOOP;
+      if (no_follow && is_sym) {
+        // O_PATH|O_NOFOLLOW: el fd apunta al propio symlink (systemd/libudev).
+        if (linux_flags & 0x200000)
+          return vfs_open_nofollow_for_proc(proc, kpath, O_RDONLY);
+        return -ELOOP;
+      }
+      if (want_dir && !is_dir)
+        return -ENOTDIR;
     }
-    if (want_dir && !is_dir)
-      return -ENOTDIR;
   }
 
   int aflags;
@@ -3069,6 +3075,8 @@ static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
 }
 
 // ---------- ioctl ----------
+static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                       uint64_t a5);
 static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
                        uint64_t a5) {
   (void)a4;
@@ -3081,6 +3089,16 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
     return -EBADF;
 
   unsigned long kreq = (unsigned long)(uint32_t)req;
+
+  // FIONBIO (os.set_blocking de Python, muchos programas): O_NONBLOCK on/off.
+  if (kreq == 0x5421UL) {
+    int v = 0;
+    if (copy_from_user(&v, (void *)arg, sizeof(v)) < 0)
+      return -EFAULT;
+    int cur = proc->fds[kfd]->flags;
+    int nf = v ? (cur | LINUX_O_NONBLOCK) : (cur & ~LINUX_O_NONBLOCK);
+    return k_fcntl(fd, 4 /* F_SETFL */, (uint64_t)nf, 0, 0);
+  }
 
   // [NET] Intentar ioctls de interfaz de red. Si no aplica, fallback
   // al nodo VFS.

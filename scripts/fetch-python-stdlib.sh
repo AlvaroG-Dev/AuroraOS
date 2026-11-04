@@ -105,12 +105,20 @@ fi
 # así que repetir make image no recompila nada.
 echo
 echo "Precompilando stdlib a .pyc (unchecked-hash)..."
+# -j 0 usa multiprocessing (semaforos POSIX); si no funciona (p. ej. dentro de
+# AuroraOS) se reintenta en un solo proceso.
 "$HOST_PY" -m compileall \
     --invalidation-mode unchecked-hash \
     -q -j 0 \
-    "$DST" || {
-    echo "!! compileall falló" >&2
-    exit 1
+    "$DST" 2>/tmp/compileall.err || {
+    echo "   compileall -j 0 fallo; reintentando con -j 1"
+    "$HOST_PY" -m compileall \
+        --invalidation-mode unchecked-hash \
+        -q -j 1 \
+        "$DST" || {
+        echo "!! compileall falló" >&2
+        exit 1
+    }
 }
 PYC_COUNT="$(find "$DST" -name '*.pyc' | wc -l)"
 echo "  .pyc generados: $PYC_COUNT"
