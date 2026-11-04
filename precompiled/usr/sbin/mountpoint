@@ -1,0 +1,6 @@
+#!/bin/bash
+# mountpoint [-q] DIR : 0 si DIR es un punto de montaje.
+q=0; [ "$1" = -q ] && { q=1; shift; }
+p=${1%/}; [ -z "$p" ] && p=/
+if grep -q " $p " /proc/mounts; then [ $q = 1 ] || echo "$1 is a mountpoint"; exit 0; fi
+[ $q = 1 ] || echo "$1 is not a mountpoint"; exit 1

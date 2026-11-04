@@ -1,0 +1,7 @@
+#!/bin/bash
+# findfs LABEL=x | UUID=x : imprime el dispositivo con esa etiqueta/UUID.
+case "$1" in
+  LABEL=*) exec /usr/sbin/blkid -L "${1#LABEL=}" ;;
+  UUID=*)  exec /usr/sbin/blkid -U "${1#UUID=}" ;;
+  *) echo "uso: findfs LABEL=etiqueta | UUID=uuid" >&2; exit 2 ;;
+esac

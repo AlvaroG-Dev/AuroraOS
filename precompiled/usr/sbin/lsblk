@@ -1,0 +1,9 @@
+#!/bin/bash
+# lsblk simple: NAME MAJ:MIN TAMAÑO TIPO-FS ETIQUETA (desde /proc/partitions y blkid)
+printf '%-12s %-8s %10s  %-8s %s\n' NAME MAJ:MIN SIZE FSTYPE LABEL
+while read -r maj min blocks name; do
+  case "$maj" in major|"") continue ;; esac
+  t=$(/usr/sbin/blkid -s TYPE -o value "/dev/$name" 2>/dev/null)
+  l=$(/usr/sbin/blkid -s LABEL -o value "/dev/$name" 2>/dev/null)
+  printf '%-12s %-8s %9sK  %-8s %s\n' "$name" "$maj:$min" "$blocks" "$t" "$l"
+done < /proc/partitions
