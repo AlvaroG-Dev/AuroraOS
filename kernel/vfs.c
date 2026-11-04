@@ -3563,12 +3563,39 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
     // vuelve al principio del ring. dmesg lo usa para posicionarse
     // antes de leer el log completo. NO saltar al final.
     if (!f->node->offset_is_index) {
+      // Ficheros normales: sin huecos, todo es dato (como ext4 sin extents
+      // dispersos). cp/tar/rsync lo usan para detectar ficheros dispersos.
+      if (offset < 0) {
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -EINVAL;
+      }
+      if ((uint64_t)offset >= f->node->size) {
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -ENXIO;
+      }
+      new_off = (uint64_t)offset;
+      f->offset = new_off;
       mutex_unlock(&f->lock);
       fd_put(f);
-      return -1;
+      return (int64_t)new_off;
     }
     extern uint64_t klog_lines_gone(void);
     new_off = klog_lines_gone();
+  } else if (whence == 4 /* SEEK_HOLE */ && !f->node->offset_is_index) {
+    // El unico "hueco" es el que hay justo en EOF.
+    if (offset < 0) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -EINVAL;
+    }
+    if ((uint64_t)offset >= f->node->size) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -ENXIO;
+    }
+    new_off = f->node->size;
   } else {
     mutex_unlock(&f->lock);
     fd_put(f);
