@@ -1,0 +1,5 @@
+#!/bin/bash
+# uuidgen: UUID v4 aleatorio.
+h=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+v=$(printf '%x' $(( (0x${h:16:1} & 3) | 8 )))
+echo "${h:0:8}-${h:8:4}-4${h:13:3}-${v}${h:17:3}-${h:20:12}"
