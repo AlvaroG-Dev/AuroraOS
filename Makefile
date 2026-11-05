@@ -476,7 +476,15 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 # mas pequena). Las cabeceras/libc.a de glibc sustituyen a las de musl del tcc.
 # ---------------------------------------------------------------------------
 	@if [ "$(WITH_DEVTOOLS)" = "1" ]; then \
-		[ -x build/devtools/root/usr/bin/x86_64-linux-gnu-gcc-13 ] || bash scripts/fetch-devtools.sh || exit 1; \
+		if [ ! -x build/devtools/root/usr/bin/x86_64-linux-gnu-gcc-13 ]; then \
+			if [ "$(SELFHOST)" = "1" ] && [ -x /usr/bin/x86_64-linux-gnu-gcc-13 ]; then \
+				echo "[Makefile] SELFHOST: reutilizando las devtools del sistema en ejecucion (sin red)"; \
+				mkdir -p build/devtools/root/usr; \
+				for d in bin sbin lib libexec include share/misc share/bison share/aclocal; do \
+					[ -d /usr/$$d ] && { mkdir -p build/devtools/root/usr/$$d; cp -a /usr/$$d/. build/devtools/root/usr/$$d/; }; \
+				done; \
+			else bash scripts/fetch-devtools.sh || exit 1; fi; \
+		fi; \
 		echo "[Makefile] Instalando herramientas de desarrollo en la ISO..."; \
 		rm -rf sysroot/usr/include; mkdir -p sysroot/usr/include; \
 		rm -f sysroot/usr/lib/libc.a sysroot/lib/libc.a; \
