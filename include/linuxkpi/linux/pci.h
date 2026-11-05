@@ -464,12 +464,22 @@ int lkpi_pci_msix_vec_count(struct pci_dev *dev);
 #define pci_irq_get_affinity(d, v) lkpi_pci_irq_get_affinity(d, v)
 #define pci_msi_vec_count(d) lkpi_pci_msi_vec_count(d)
 #define pci_msix_vec_count(d) lkpi_pci_msix_vec_count(d)
+/* Como en Linux, tras pci_disable_msi() la INTx sigue disponible para
+ * request_irq(pdev->irq): la capa deja un descriptor INTx vivo; pci_enable_msi()
+ * lo suelta antes de pedir el MSI. */
 static inline int pci_enable_msi(struct pci_dev *dev)
 {
-	int rc = pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI);
+	int rc;
+	if (dev->lkpi_irqs)
+		pci_free_irq_vectors(dev);
+	rc = pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI);
 	return rc < 0 ? rc : 0;
 }
-static inline void pci_disable_msi(struct pci_dev *dev) { pci_free_irq_vectors(dev); }
+static inline void pci_disable_msi(struct pci_dev *dev)
+{
+	pci_free_irq_vectors(dev);
+	pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_INTX);
+}
 static inline bool pci_msix_can_alloc_dyn(struct pci_dev *dev) { return false; }
 
 /* Mensajes */
@@ -583,5 +593,5 @@ static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *
 	int n = pci_enable_msix_range(dev, e, nvec, nvec);
 	return n < 0 ? n : 0;
 }
-static inline void pci_disable_msix(struct pci_dev *dev) { pci_free_irq_vectors(dev); }
+static inline void pci_disable_msix(struct pci_dev *dev) { pci_free_irq_vectors(dev); pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_INTX); }
 #endif
