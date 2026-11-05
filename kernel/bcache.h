@@ -43,6 +43,8 @@ int bc_readahead(block_device_t *bdev, uint64_t blk, uint32_t count,
 void *bc_data(bc_buf_t *b);
 uint32_t bc_size(const bc_buf_t *b);
 void bc_mark_dirty(bc_buf_t *b);
+// Datos de ficheros: se vuelcan antes que los metadatos (data=ordered).
+void bc_mark_dirty_data(bc_buf_t *b);
 void bc_put(bc_buf_t *b);
 
 // Escribe todos los búfers sucios de `bdev` y hace bdev_flush. 0 o -EIO.

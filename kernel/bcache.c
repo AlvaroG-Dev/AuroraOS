@@ -19,6 +19,7 @@ struct bc_buf {
   uint32_t bs;
   int refs;
   uint8_t dirty;
+  uint8_t datablk; // contenido de fichero: se escribe antes que los metadatos
   uint8_t *data;
   struct bc_buf *hnext;
   struct bc_buf *prev, *next; // LRU: head = más reciente
@@ -94,6 +95,7 @@ static int bc_write_locked(bc_buf_t *b) {
     return -EIO;
   }
   b->dirty = 0;
+  b->datablk = 0;
   g_stats.writes++;
   if (g_stats.dirty)
     g_stats.dirty--;
@@ -310,6 +312,21 @@ void bc_mark_dirty(bc_buf_t *b) {
   mutex_unlock(&g_bc_lock);
 }
 
+// Como bc_mark_dirty para datos de ficheros (data=ordered): en cada volcado
+// salen antes que los metadatos (inodos, bitmaps, directorios), con una barrera
+// entre medias, para que un corte no deje un inodo apuntando a bloques viejos.
+void bc_mark_dirty_data(bc_buf_t *b) {
+  if (!b)
+    return;
+  mutex_lock(&g_bc_lock);
+  if (!b->dirty) {
+    b->dirty = 1;
+    g_stats.dirty++;
+  }
+  b->datablk = 1;
+  mutex_unlock(&g_bc_lock);
+}
+
 void bc_put(bc_buf_t *b) {
   if (!b)
     return;
@@ -355,13 +372,27 @@ static int bc_sync_locked(block_device_t *bdev) {
           rc = -EIO;
     return rc;
   }
-  for (;;) {
+  for (int phase = 0; phase < 2; phase++) {
+   int wrote_data = 0;
+   block_device_t *flush_dev[4] = {0};
+   for (;;) {
     uint32_t n = 0;
     for (bc_buf_t *b = g_lru_tail; b && n < BC_SYNC_BATCH; b = b->prev)
-      if (b->dirty && (!bdev || b->bdev == bdev))
+      if (b->dirty && (!bdev || b->bdev == bdev) && (phase == 0) == (b->datablk != 0))
         arr[n++] = b;
     if (n == 0)
       break;
+    if (phase == 0) {
+      wrote_data = 1;
+      for (uint32_t k = 0; k < n; k++) {
+        int seen = 0, slot = -1;
+        for (int d = 0; d < 4; d++) {
+          if (flush_dev[d] == arr[k]->bdev) seen = 1;
+          if (!flush_dev[d] && slot < 0) slot = d;
+        }
+        if (!seen && slot >= 0) flush_dev[slot] = arr[k]->bdev;
+      }
+    }
     bc_sort_dirty(arr, n);
     uint32_t progress = 0;
     for (uint32_t i = 0; i < n;) {
@@ -383,6 +414,7 @@ static int bc_sync_locked(block_device_t *bdev) {
                        run * (bs / ss), tmp) == 0) {
           for (uint32_t k = 0; k < run; k++) {
             arr[i + k]->dirty = 0;
+            arr[i + k]->datablk = 0;
             if (g_stats.dirty)
               g_stats.dirty--;
           }
@@ -398,6 +430,11 @@ static int bc_sync_locked(block_device_t *bdev) {
     }
     if (progress == 0 || n < BC_SYNC_BATCH)
       break; // sin avance (error persistente) o ya no quedan más
+   }
+   if (phase == 0 && wrote_data)
+     for (int d = 0; d < 4; d++)
+       if (flush_dev[d] && bdev_flush(flush_dev[d]) != 0)
+         rc = -EIO; // barrera: los datos antes que los metadatos
   }
   kfree(arr);
   kfree(tmp);

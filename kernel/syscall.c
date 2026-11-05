@@ -5170,7 +5170,8 @@ static int64_t k_truncate(uint64_t path_uptr, uint64_t length, uint64_t a3,
 static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
                         uint64_t mode, uint64_t dev) {
   int type = (int)(mode & S_IFMT);
-  if (type != 0 && type != S_IFREG && type != S_IFCHR)
+  if (type != 0 && type != S_IFREG && type != S_IFCHR && type != S_IFIFO &&
+      type != S_IFSOCK)
     return -EPERM;
   char path[VFS_PATH_MAX];
   int rc = resolve_at_path(proc, dfd, (const char *)path_uptr, path,
@@ -5188,6 +5189,8 @@ static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
       return -EINVAL;
     return vfs_mknod(path, perm, (uint32_t)((maj << 8) | min));
   }
+  if (type == S_IFIFO || type == S_IFSOCK) // nodo sin datos (tar, cp -a, mkfifo)
+    return vfs_mknod_raw(path, (uint32_t)type | perm, 0);
   // [3.4.c] mknod(PATH, mode) usa `mode & 0777` filtrado por umask.
   if (perm == 0)
     perm = 0666 & ~proc->umask;
