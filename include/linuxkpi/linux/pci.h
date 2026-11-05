@@ -537,4 +537,28 @@ static inline const char *pci_power_name(pci_power_t state)
 }
 #define pci_bus_for_each_resource(bus, res, ...) for ((res) = NULL; (res); )
 static inline void pci_assign_unassigned_bus_resources(struct pci_bus *bus) {}
+/* --- drivers de red (Plan_Red.md) --- */
+#ifndef PCIE_LINK_STATE_L0S
+#define PCIE_LINK_STATE_L0S	(1 << 0)
+#define PCIE_LINK_STATE_L1	(1 << 1)
+#define PCIE_LINK_STATE_CLKPM	(1 << 2)
+#define PCIE_LINK_STATE_L1_1	(1 << 3)
+#define PCIE_LINK_STATE_L1_2	(1 << 4)
+#endif
+#ifndef PCI_EXP_LNKCTL_CLKREQ_EN
+#define PCI_EXP_LNKCTL_CLKREQ_EN 0x0100
+#endif
+/* ASPM nunca se activa en la capa: no hay nada que desactivar. */
+static inline int pci_disable_link_state(struct pci_dev *dev, int state) { return 0; }
+static inline int pci_disable_link_state_locked(struct pci_dev *dev, int state) { return 0; }
+static inline int pcie_set_readrq(struct pci_dev *dev, int rq) { return 0; }
+static inline int pcie_get_readrq(struct pci_dev *dev) { return 512; }
+static inline int pci_reset_bus(struct pci_dev *dev) { return -ENOTTY; }
+static inline bool pci_dev_msi_enabled(struct pci_dev *dev) { return dev->msi_enabled; }
+static inline int pci_prepare_to_sleep(struct pci_dev *dev) { return 0; }
+static inline bool pci_dev_run_wake(struct pci_dev *dev) { return false; }
+static inline int pcim_set_mwi(struct pci_dev *dev) { return 0; }
+static inline int pci_set_mwi(struct pci_dev *dev) { return 0; }
+static inline void pci_clear_mwi(struct pci_dev *dev) { }
+u16 pci_status_get_and_clear_errors(struct pci_dev *pdev);
 #endif
