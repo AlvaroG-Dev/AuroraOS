@@ -83,3 +83,4 @@ build/devtools/
 build/gcc-test/
 !pam.d
 !pam.d/**
+build/aurora-test.conf
