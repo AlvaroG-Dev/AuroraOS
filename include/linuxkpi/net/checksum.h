@@ -17,6 +17,7 @@ static inline __sum16 csum_fold(__wsum csum)
 	sum = (sum & 0xffff) + (sum >> 16);
 	return (__force __sum16)~sum;
 }
+static inline void csum_replace_by_diff(__sum16 *sum, __wsum diff) { *sum = csum_fold((__force __wsum)((__force u32)diff + ~(__force u32)csum_unfold(*sum))); }
 /* pseudo-cabecera IPv4: direcciones en orden de red, len/proto en host */
 static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr, __u32 len, __u8 proto, __wsum sum)
 {

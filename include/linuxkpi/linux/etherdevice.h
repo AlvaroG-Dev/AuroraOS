@@ -39,6 +39,8 @@ static inline u32 eth_hw_addr_crc(struct netdev_hw_addr *ha) { return ether_crc(
 static inline struct ethhdr *eth_hdr(const struct sk_buff *skb) { return (struct ethhdr *)skb_mac_header(skb); }
 static inline bool eth_proto_is_802_3(__be16 proto)
 { return ntohs(proto) >= ETH_P_802_3_MIN; }
+unsigned int eth_get_headlen(const struct net_device *dev, const void *data, unsigned int len);
+static inline int eth_skb_pad(struct sk_buff *skb) { return skb_put_padto(skb, ETH_ZLEN); }
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev);
 int eth_mac_addr(struct net_device *dev, void *p);
 int eth_validate_addr(struct net_device *dev);

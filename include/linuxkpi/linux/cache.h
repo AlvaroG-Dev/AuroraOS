@@ -13,5 +13,8 @@
 #define ____cacheline_aligned		__attribute__((__aligned__(SMP_CACHE_BYTES)))
 #define ____cacheline_aligned_in_smp	____cacheline_aligned
 #endif
+#ifndef ____cacheline_internodealigned_in_smp
+#define ____cacheline_internodealigned_in_smp	____cacheline_aligned
+#endif
 
 #endif

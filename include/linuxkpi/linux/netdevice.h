@@ -24,6 +24,8 @@
 #include <linux/cache.h>
 #include <linux/ratelimit.h>
 #include <linux/interrupt.h>
+#include <linux/jump_label.h>
+#include <linux/smp.h>
 #include <linux/delay.h>
 
 struct phy_device;
@@ -59,6 +61,11 @@ typedef u64 netdev_features_t;
 #define NETIF_F_TSO_ECN		(1ULL << 24)
 #define NETIF_F_GSO_UDP_TUNNEL	(1ULL << 25)
 #define NETIF_F_HW_TC		(1ULL << 26)
+#define NETIF_F_GSO_GRE		(1ULL << 40)
+#define NETIF_F_GSO_GRE_CSUM	(1ULL << 41)
+#define NETIF_F_GSO_IPXIP4	(1ULL << 42)
+#define NETIF_F_GSO_IPXIP6	(1ULL << 43)
+#define NETIF_F_GSO_UDP_TUNNEL_CSUM (1ULL << 44)
 #define NETIF_F_RX_UDP_TUNNEL_PORT (1ULL << 27)
 
 #define IFF_LIVE_ADDR_CHANGE 0x100000
@@ -173,7 +180,13 @@ struct net_device {
 	const struct net_device_ops *netdev_ops;
 	const struct ethtool_ops *ethtool_ops;
 	unsigned int mtu, min_mtu, max_mtu;
-	unsigned short needed_headroom, needed_tailroom;
+	unsigned short needed_headroom, needed_tailroom, hard_header_len;
+	netdev_features_t gso_partial_features, mpls_features;
+	u64 xdp_features;
+	s16 num_tc;
+	struct { u16 count, offset; } tc_to_txq[16];
+	const struct xdp_metadata_ops *xdp_metadata_ops;
+	const struct xsk_tx_metadata_ops *xsk_tx_metadata_ops;
 	unsigned long mem_start, mem_end;
 	unsigned char addr_len;
 	unsigned char addr_assign_type;
@@ -205,9 +218,29 @@ struct net_device {
 	struct timer_list lkpi_watchdog;
 	int lkpi_carrier;
 	int lkpi_running;
+	bool dismantle;
 	atomic_t lkpi_txq_stopped;
 };
 
+enum tc_setup_type;
+struct xdp_frame;
+struct bpf_prog;
+struct xdp_metadata_ops;
+struct xsk_tx_metadata_ops;
+struct skb_shared_hwtstamps;
+struct xsk_buff_pool;
+struct netlink_ext_ack;
+enum bpf_netdev_command { XDP_SETUP_PROG, XDP_SETUP_PROG_HW, BPF_OFFLOAD_MAP_ALLOC, XDP_SETUP_XSK_POOL };
+struct netdev_bpf {
+	enum bpf_netdev_command command;
+	union {
+		struct { u32 flags; struct bpf_prog *prog; struct netlink_ext_ack *extack; };
+		struct { struct xsk_buff_pool *pool; u16 queue_id; } xsk;
+	};
+};
+static inline void netdev_reset_tc(struct net_device *dev) { }
+static inline int netdev_set_num_tc(struct net_device *dev, u8 num_tc) { return 0; }
+static inline int netdev_set_tc_queue(struct net_device *dev, u8 tc, u16 count, u16 offset) { return 0; }
 struct net_device_ops {
 	int (*ndo_init)(struct net_device *dev);
 	void (*ndo_uninit)(struct net_device *dev);
@@ -239,6 +272,11 @@ struct net_device_ops {
 	int (*ndo_set_vf_trust)(struct net_device *dev, int vf, bool setting);
 	int (*ndo_get_vf_config)(struct net_device *dev, int vf, void *ivf);
 	int (*ndo_set_vf_link_state)(struct net_device *dev, int vf, int link_state);
+	int (*ndo_setup_tc)(struct net_device *dev, enum tc_setup_type type, void *type_data);
+	int (*ndo_bpf)(struct net_device *dev, struct netdev_bpf *bpf);
+	int (*ndo_xdp_xmit)(struct net_device *dev, int n, struct xdp_frame **xdp, u32 flags);
+	int (*ndo_xsk_wakeup)(struct net_device *dev, u32 queue_id, u32 flags);
+	ktime_t (*ndo_get_tstamp)(struct net_device *dev, const struct skb_shared_hwtstamps *hwtstamps, bool cycles);
 };
 
 /* ---- API principal ---- */
@@ -275,6 +313,19 @@ static inline struct sk_buff *napi_alloc_skb_ip_align(struct napi_struct *n, uns
 static inline struct sk_buff *dev_alloc_skb(unsigned int length) { return alloc_skb(length + NET_SKB_PAD, GFP_ATOMIC); }
 
 /* NAPI */
+static inline int netif_set_real_num_queues(struct net_device *dev, unsigned int txq, unsigned int rxq)
+{ dev->real_num_tx_queues = txq; dev->real_num_rx_queues = rxq; return 0; }
+static inline bool __netif_subqueue_stopped(const struct net_device *dev, u16 q) { return test_bit(__QUEUE_STATE_DRV_XOFF, &dev->_tx[q].state); }
+static inline int __dev_uc_sync(struct net_device *dev, int (*sync)(struct net_device *, const unsigned char *), int (*unsync)(struct net_device *, const unsigned char *)) { return 0; }
+static inline void __dev_uc_unsync(struct net_device *dev, int (*unsync)(struct net_device *, const unsigned char *)) { }
+static inline int __dev_mc_sync(struct net_device *dev, int (*sync)(struct net_device *, const unsigned char *), int (*unsync)(struct net_device *, const unsigned char *)) { return 0; }
+static inline void __dev_mc_unsync(struct net_device *dev, int (*unsync)(struct net_device *, const unsigned char *)) { }
+#define NETIF_F_TSO_MANGLEID (1ULL << 29)
+#define netdev_err_once(dev, fmt, ...) netdev_warn_once(dev, fmt, ##__VA_ARGS__)
+static inline void __netif_tx_lock(struct netdev_queue *txq, int cpu) { }
+static inline void __netif_tx_unlock(struct netdev_queue *txq) { }
+static inline void __netif_tx_lock_bh(struct netdev_queue *txq) { }
+static inline void __netif_tx_unlock_bh(struct netdev_queue *txq) { }
 #define NETDEV_QUEUE_TYPE_RX 0
 #define NETDEV_QUEUE_TYPE_TX 1
 static inline void netif_napi_set_irq(struct napi_struct *napi, int irq) { }
@@ -295,6 +346,7 @@ void netif_napi_del(struct napi_struct *napi);
 void napi_enable(struct napi_struct *n);
 void napi_disable(struct napi_struct *n);
 bool napi_schedule_prep(struct napi_struct *n);
+static inline bool napi_if_scheduled_mark_missed(struct napi_struct *n) { return false; }
 void __napi_schedule(struct napi_struct *n);
 static inline void napi_schedule(struct napi_struct *n) { if (napi_schedule_prep(n)) __napi_schedule(n); }
 static inline void napi_schedule_irqoff(struct napi_struct *n) { napi_schedule(n); }

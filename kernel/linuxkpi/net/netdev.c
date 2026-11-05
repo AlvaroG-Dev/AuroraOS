@@ -687,3 +687,54 @@ EXPORT_SYMBOL(skb_checksum_help);
 EXPORT_SYMBOL(skb_copy_bits);
 EXPORT_SYMBOL(skb_header_pointer_slow);
 EXPORT_SYMBOL(skb_linearize);
+
+/* Cabecera "util" de una trama: sin analizador de flujos, la cabecera Ethernet
+ * mas lo que quepa de IP/TCP razonablemente (igc copia esto al area lineal). */
+unsigned int eth_get_headlen(const struct net_device *dev, const void *data, unsigned int len)
+{
+	return len < 128 ? len : 128;
+}
+EXPORT_SYMBOL(eth_get_headlen);
+
+/* ---- ethtool: cadenas de estadisticas ---- */
+void ethtool_puts(u8 **data, const char *str)
+{
+	strscpy((char *)*data, str, ETH_GSTRING_LEN);
+	*data += ETH_GSTRING_LEN;
+}
+EXPORT_SYMBOL(ethtool_puts);
+
+void ethtool_sprintf(u8 **data, const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	vsnprintf((char *)*data, ETH_GSTRING_LEN, fmt, args);
+	va_end(args);
+	*data += ETH_GSTRING_LEN;
+}
+EXPORT_SYMBOL(ethtool_sprintf);
+
+/* ---- MAC Merge (frame preemption, 802.3br): no soportado en la capa.
+ * El driver se registra pero el MM queda desactivado. ---- */
+void ethtool_mmsv_init(struct ethtool_mmsv *mmsv, struct net_device *dev, const struct ethtool_mmsv_ops *ops)
+{
+	memset(mmsv, 0, sizeof(*mmsv));
+	mmsv->ops = ops;
+	mmsv->dev = dev;
+	spin_lock_init(&mmsv->lock);
+}
+EXPORT_SYMBOL(ethtool_mmsv_init);
+void ethtool_mmsv_stop(struct ethtool_mmsv *mmsv) { }
+EXPORT_SYMBOL(ethtool_mmsv_stop);
+void ethtool_mmsv_link_state_handle(struct ethtool_mmsv *mmsv, bool up) { }
+EXPORT_SYMBOL(ethtool_mmsv_link_state_handle);
+void ethtool_mmsv_event_handle(struct ethtool_mmsv *mmsv, enum ethtool_mmsv_event event) { }
+EXPORT_SYMBOL(ethtool_mmsv_event_handle);
+void ethtool_mmsv_get_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_state *state)
+{
+	memset(state, 0, sizeof(*state));
+}
+EXPORT_SYMBOL(ethtool_mmsv_get_mm);
+void ethtool_mmsv_set_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_cfg *cfg) { }
+EXPORT_SYMBOL(ethtool_mmsv_set_mm);

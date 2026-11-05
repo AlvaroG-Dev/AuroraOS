@@ -101,6 +101,9 @@ struct dev_pm_domain {
 #define DEFINE_RUNTIME_DEV_PM_OPS(name, suspend_fn, resume_fn, idle_fn) \
 	const struct dev_pm_ops name = { SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
 					 RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn) }
+#define _DEFINE_DEV_PM_OPS(name, suspend_fn, resume_fn, runtime_suspend_fn, runtime_resume_fn, idle_fn) \
+	const struct dev_pm_ops name = { SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn) \
+					 RUNTIME_PM_OPS(runtime_suspend_fn, runtime_resume_fn, idle_fn) }
 #define pm_sleep_ptr(p) (p)
 #define pm_ptr(p) (p)
 

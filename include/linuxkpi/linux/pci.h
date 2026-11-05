@@ -575,6 +575,9 @@ u16 pci_status_get_and_clear_errors(struct pci_dev *pdev);
 #define PCI_EXP_LNKCTL_ASPM_L1 0x0002
 #define PCI_EXP_LNKCTL_ASPMC 0x0003
 #endif
+#define pci_request_mem_regions(d, n) lkpi_pci_request_selected_regions(d, pci_select_bars(d, IORESOURCE_MEM), n)
+static inline void pcie_print_link_status(struct pci_dev *pdev) { }
+static inline void pci_disable_ptm(struct pci_dev *pdev) { }
 static inline void pci_release_mem_regions(struct pci_dev *pdev) { pci_release_regions(pdev); }
 static inline int pci_pcie_cap(struct pci_dev *dev) { return dev->pcie_cap; }
 /* MSI-X "antiguo": la capa asigna 0..n-1 y se devuelven sus IRQ en e[].vector. */

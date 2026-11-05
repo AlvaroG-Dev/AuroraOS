@@ -28,6 +28,8 @@
 #define SKBTX_HW_TSTAMP (1 << 0)
 #define SKBTX_SW_TSTAMP (1 << 1)
 #define SKBTX_IN_PROGRESS (1 << 2)
+#define SKBTX_HW_TSTAMP_NETDEV (1 << 3)
+#define SKBTX_HW_TSTAMP_USE_CYCLES (1 << 4)
 #define MAX_SKB_FRAGS 17
 #define SKB_DATA_ALIGN(x) ALIGN(x, SMP_CACHE_BYTES)
 #define SKB_WITH_OVERHEAD(x) ((x) - SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
@@ -49,7 +51,7 @@ typedef struct skb_frag {
 	unsigned int offset;
 } skb_frag_t;
 
-struct skb_shared_hwtstamps { ktime_t hwtstamp; };
+struct skb_shared_hwtstamps { ktime_t hwtstamp; void *netdev_data; };
 struct skb_shared_info {
 	__u8 flags;
 	struct skb_shared_hwtstamps hwtstamps;
@@ -67,9 +69,11 @@ typedef unsigned int sk_buff_data_t;
 
 struct net_device;
 
+struct sock { u32 sk_tsflags; };
 struct sk_buff {
 	struct sk_buff *next, *prev;
 	struct net_device *dev;
+	struct sock *sk;
 	char cb[48] __aligned(8);
 	unsigned int len, data_len;
 	__u16 mac_len, hdr_len;
@@ -78,6 +82,7 @@ struct sk_buff {
 	__u8 ip_summed;
 	__u8 cloned;
 	__u8 no_fcs:1;
+	__u8 encapsulation:1;
 	__u8 vlan_present;
 	__u16 vlan_tci;
 	__be16 vlan_proto;
@@ -242,6 +247,28 @@ static inline void skb_frag_ref(struct sk_buff *skb, int f) { }
 static inline void skb_frag_unref(struct sk_buff *skb, int f) { }
 static inline unsigned int skb_frag_off_dummy(void) { return 0; }
 
+static inline unsigned char *skb_checksum_start(const struct sk_buff *skb) { return skb->head + skb->csum_start; }
+static inline bool skb_csum_is_sctp(struct sk_buff *skb) { return false; }
+static inline void __page_frag_cache_drain(struct page *page, unsigned int count) { put_page(page); }
+int skb_checksum_help(struct sk_buff *skb);
+#define net_err_ratelimited(fmt, ...) do { } while (0)
+#define net_info_ratelimited(fmt, ...) do { } while (0)
+
+static inline void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page, int off, int size, unsigned int truesize)
+{
+	skb_fill_page_desc(skb, i, page, off, size);
+	skb->len += size; skb->data_len += size; skb->truesize += truesize;
+}
+static inline void net_prefetch(void *p) { prefetch(p); }
+static inline struct sk_buff *napi_build_skb(void *data, unsigned int frag_size)
+{
+	/* igc: el buffer es una pagina; copia lineal para no compartir el frag */
+	return NULL;
+}
+static inline void skb_metadata_set(struct sk_buff *skb, u8 meta_len) { }
+static inline void *__skb_pull(struct sk_buff *skb, unsigned int len) { skb->len -= len; return skb->data += len; }
+static inline void dummy_skb_end(void) { }
+
 /* ---- colas ---- */
 static inline void skb_queue_head_init(struct sk_buff_head *list)
 { spin_lock_init(&list->lock); list->prev = list->next = (struct sk_buff *)list; list->qlen = 0; }
@@ -262,4 +289,11 @@ static inline struct sk_buff *__skb_dequeue(struct sk_buff_head *list)
 static inline __u32 skb_queue_len(const struct sk_buff_head *list) { return list->qlen; }
 static inline int skb_queue_empty(const struct sk_buff_head *list) { return list->next == (const struct sk_buff *)list; }
 
+#endif
+
+#ifndef _LKPI_DEV_ALLOC_PAGES
+#define _LKPI_DEV_ALLOC_PAGES
+#include <linux/gfp.h>
+#define dev_alloc_pages(order) alloc_pages(GFP_ATOMIC | __GFP_NOWARN | __GFP_COMP, order)
+static inline bool dev_page_is_reusable(const struct page *page) { return true; }
 #endif
