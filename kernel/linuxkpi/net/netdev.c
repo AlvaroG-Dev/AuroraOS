@@ -656,3 +656,34 @@ u16 pci_status_get_and_clear_errors(struct pci_dev *pdev)
 	return status;
 }
 EXPORT_SYMBOL(pci_status_get_and_clear_errors);
+
+/* ethtool: conversion de los modos de enlace legacy (net/ethtool/ioctl.c) */
+void ethtool_convert_legacy_u32_to_link_mode(unsigned long *dst, u32 legacy_u32)
+{
+	bitmap_zero(dst, __ETHTOOL_LINK_MODE_MASK_NBITS);
+	dst[0] = legacy_u32;
+}
+EXPORT_SYMBOL(ethtool_convert_legacy_u32_to_link_mode);
+
+bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32, const unsigned long *src)
+{
+	bool retval = true;
+
+	/* alguno de los bits 32.. activo: no cabe en la forma legacy */
+	if (find_next_bit(src, __ETHTOOL_LINK_MODE_MASK_NBITS, 32) < __ETHTOOL_LINK_MODE_MASK_NBITS)
+		retval = false;
+	*legacy_u32 = src[0];
+	return retval;
+}
+EXPORT_SYMBOL(ethtool_convert_link_mode_to_legacy_u32);
+
+EXPORT_SYMBOL(eth_platform_get_mac_address);
+EXPORT_SYMBOL(netdev_name);
+EXPORT_SYMBOL(netif_set_real_num_rx_queues);
+EXPORT_SYMBOL(netif_set_real_num_tx_queues);
+EXPORT_SYMBOL(pskb_expand_head);
+EXPORT_SYMBOL(rtnl_is_locked);
+EXPORT_SYMBOL(skb_checksum_help);
+EXPORT_SYMBOL(skb_copy_bits);
+EXPORT_SYMBOL(skb_header_pointer_slow);
+EXPORT_SYMBOL(skb_linearize);

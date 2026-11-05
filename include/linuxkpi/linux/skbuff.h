@@ -25,6 +25,9 @@
 #define PACKET_BROADCAST 1
 #define PACKET_MULTICAST 2
 #define PACKET_OTHERHOST 3
+#define SKBTX_HW_TSTAMP (1 << 0)
+#define SKBTX_SW_TSTAMP (1 << 1)
+#define SKBTX_IN_PROGRESS (1 << 2)
 #define MAX_SKB_FRAGS 17
 #define SKB_DATA_ALIGN(x) ALIGN(x, SMP_CACHE_BYTES)
 #define SKB_WITH_OVERHEAD(x) ((x) - SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
@@ -46,8 +49,10 @@ typedef struct skb_frag {
 	unsigned int offset;
 } skb_frag_t;
 
+struct skb_shared_hwtstamps { ktime_t hwtstamp; };
 struct skb_shared_info {
 	__u8 flags;
+	struct skb_shared_hwtstamps hwtstamps;
 	__u8 meta_len;
 	__u8 nr_frags;
 	__u8 tx_flags;
@@ -72,6 +77,7 @@ struct sk_buff {
 	__u8 pkt_type;
 	__u8 ip_summed;
 	__u8 cloned;
+	__u8 no_fcs:1;
 	__u8 vlan_present;
 	__u16 vlan_tci;
 	__be16 vlan_proto;
@@ -215,6 +221,26 @@ static inline __wsum csum_unfold(__sum16 n) { return (__force __wsum)n; }
 static inline void skb_tx_hash_dummy(void) { }
 static inline u32 skb_get_hash(struct sk_buff *skb) { return 0; }
 static inline unsigned int skb_frag_off(const skb_frag_t *frag) { return frag->offset; }
+
+static inline struct skb_shared_hwtstamps *skb_hwtstamps(struct sk_buff *skb) { return &skb_shinfo(skb)->hwtstamps; }
+static inline void skb_tstamp_tx(struct sk_buff *orig_skb, struct skb_shared_hwtstamps *hwtstamps) { }
+enum pkt_hash_types { PKT_HASH_TYPE_NONE, PKT_HASH_TYPE_L2, PKT_HASH_TYPE_L3, PKT_HASH_TYPE_L4 };
+static inline void skb_set_hash(struct sk_buff *skb, __u32 hash, enum pkt_hash_types type) { }
+static inline void skb_fill_page_desc(struct sk_buff *skb, int i, struct page *page, int off, int size)
+{
+	skb_frag_t *f = &skb_shinfo(skb)->frags[i];
+	f->page = page; f->offset = off; f->len = size;
+	skb_shinfo(skb)->nr_frags = i + 1;
+}
+static inline void *__pskb_pull_tail(struct sk_buff *skb, int delta) { return NULL; }
+static inline int pskb_trim(struct sk_buff *skb, unsigned int len) { skb_trim(skb, len); return 0; }
+static inline bool pskb_may_pull(struct sk_buff *skb, unsigned int len) { return len <= skb_headlen(skb); }
+static inline unsigned int skb_tcp_all_headers(const struct sk_buff *skb)
+{ return skb_transport_offset(skb) + ((skb_transport_header(skb)[12] >> 4) * 4); }
+static inline unsigned int skb_inner_transport_offset_dummy(void) { return 0; }
+static inline void skb_frag_ref(struct sk_buff *skb, int f) { }
+static inline void skb_frag_unref(struct sk_buff *skb, int f) { }
+static inline unsigned int skb_frag_off_dummy(void) { return 0; }
 
 /* ---- colas ---- */
 static inline void skb_queue_head_init(struct sk_buff_head *list)

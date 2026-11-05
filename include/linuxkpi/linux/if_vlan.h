@@ -2,10 +2,12 @@
 #define _LKPI_LINUX_IF_VLAN_H
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <uapi/linux/if_vlan.h>
 #define VLAN_HLEN 4
 #define VLAN_ETH_HLEN 18
 #define VLAN_ETH_ZLEN 64
+#define VLAN_ETH_FRAME_LEN 1518
 #define VLAN_VID_MASK 0x0fff
 #define VLAN_N_VID 4096
 #define VLAN_CFI_MASK 0x1000

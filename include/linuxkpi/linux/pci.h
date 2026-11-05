@@ -153,6 +153,7 @@ struct pci_dev {
 	unsigned int is_busmaster:1;
 	unsigned int no_msi:1;
 	unsigned int msi_enabled:1;
+	unsigned int pme_poll:1;
 	unsigned int ats_enabled:1;
 	unsigned int msix_enabled:1;
 	unsigned int is_managed:1;
@@ -424,9 +425,7 @@ static inline struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int dev
 }
 
 struct msix_entry { u32 vector; u16 entry; };
-static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minv, int maxv) { return -ENOSYS; }
-static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec) { return -ENOSYS; }
-static inline void pci_disable_msix(struct pci_dev *dev) {}
+
 static inline void pci_stop_and_remove_bus_device(struct pci_dev *dev) {}
 static inline dma_addr_t pci_bus_address(struct pci_dev *pdev, int bar) { return pci_resource_start(pdev, bar); }
 
@@ -561,4 +560,28 @@ static inline int pcim_set_mwi(struct pci_dev *dev) { return 0; }
 static inline int pci_set_mwi(struct pci_dev *dev) { return 0; }
 static inline void pci_clear_mwi(struct pci_dev *dev) { }
 u16 pci_status_get_and_clear_errors(struct pci_dev *pdev);
+#ifndef PCI_EXP_LNKCTL_ASPM_L0S
+#define PCI_EXP_LNKCTL_ASPM_L0S 0x0001
+#define PCI_EXP_LNKCTL_ASPM_L1 0x0002
+#define PCI_EXP_LNKCTL_ASPMC 0x0003
+#endif
+static inline void pci_release_mem_regions(struct pci_dev *pdev) { pci_release_regions(pdev); }
+static inline int pci_pcie_cap(struct pci_dev *dev) { return dev->pcie_cap; }
+/* MSI-X "antiguo": la capa asigna 0..n-1 y se devuelven sus IRQ en e[].vector. */
+static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minv, int maxv)
+{
+	int i, n = lkpi_pci_alloc_irq_vectors_affinity(dev, minv, maxv, PCI_IRQ_MSIX, NULL);
+
+	if (n < 0)
+		return n;
+	for (i = 0; i < n; i++)
+		e[i].vector = lkpi_pci_irq_vector(dev, i);
+	return n;
+}
+static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec)
+{
+	int n = pci_enable_msix_range(dev, e, nvec, nvec);
+	return n < 0 ? n : 0;
+}
+static inline void pci_disable_msix(struct pci_dev *dev) { pci_free_irq_vectors(dev); }
 #endif

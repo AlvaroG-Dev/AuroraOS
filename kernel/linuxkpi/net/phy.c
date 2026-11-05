@@ -758,3 +758,24 @@ int phy_do_ioctl_running(struct net_device *dev, struct ifreq *ifr, int cmd)
 	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL(phy_do_ioctl_running);
+
+int __mdiobus_modify_changed(struct mii_bus *bus, int addr, u32 regnum, u16 mask, u16 set)
+{
+	int new, ret = __mdiobus_read(bus, addr, regnum);
+
+	if (ret < 0)
+		return ret;
+	new = (ret & ~mask) | set;
+	if (new == ret)
+		return 0;
+	ret = __mdiobus_write(bus, addr, regnum, new);
+	return ret < 0 ? ret : 1;
+}
+EXPORT_SYMBOL(__mdiobus_modify_changed);
+
+int __mdiobus_modify(struct mii_bus *bus, int addr, u32 regnum, u16 mask, u16 set)
+{
+	int ret = __mdiobus_modify_changed(bus, addr, regnum, mask, set);
+	return ret < 0 ? ret : 0;
+}
+EXPORT_SYMBOL(__mdiobus_modify);

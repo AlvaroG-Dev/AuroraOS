@@ -1,6 +1,7 @@
 #ifndef _LKPI_LINUX_TCP_H
 #define _LKPI_LINUX_TCP_H
 #include <linux/skbuff.h>
+#include <linux/in.h>
 struct tcphdr {
 	__be16 source, dest;
 	__be32 seq, ack_seq;

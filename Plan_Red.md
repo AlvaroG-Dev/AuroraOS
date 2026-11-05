@@ -62,3 +62,15 @@ Orden condicionado por N0: si el Portégé es Realtek, N4 sube antes que N3.
 ## 6. Fuera de alcance
 
 Wi-Fi, offloads (TSO/GRO), VLAN, XDP, SR-IOV, L8/L9 (esperan a Alvaro).
+
+## 7. Estado (2026-11-05)
+
+| Fase | Estado |
+|---|---|
+| N0 log de NIC PCI | hecho |
+| N1 capa LinuxKPI-NET (`net_device`, `sk_buff`, NAPI en tasklet, mini-phylib/MDIO, puente `netif_t`) | hecho (`kernel/linuxkpi/net/`, `kernel/net/netif_lkpi.c`) |
+| N3 `e1000e` de Linux 6.18 (`lkpi_e1000e.kur`) | **verificado en QEMU** (82574L, MSI-X): enlace 1000 Mbps, DHCP 10.0.2.15. Pendiente: camino MSI (el test MSI del driver falla en QEMU; los I217/I219 reales usan MSI) e INTx |
+| N4 `r8169` de Linux 6.18 (`lkpi_r8169.kur`) | compila y enlaza; **sin probar** (QEMU no emula RTL8168) |
+| N2 `virtio_net`, N5 `igc`, N6 autocarga | pendientes |
+
+Prueba: `scripts/qemu-drive.py --cmdline "aur.skip=8086:10d3 lkpi.load=linuxkpi,lkpi_e1000e" --extra=-nic --extra=user,model=e1000e --done "DHCP] lease"`.

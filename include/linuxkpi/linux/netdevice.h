@@ -24,6 +24,7 @@
 #include <linux/cache.h>
 #include <linux/ratelimit.h>
 #include <linux/interrupt.h>
+#include <linux/delay.h>
 
 struct phy_device;
 struct mii_bus;
@@ -173,6 +174,7 @@ struct net_device {
 	const struct ethtool_ops *ethtool_ops;
 	unsigned int mtu, min_mtu, max_mtu;
 	unsigned short needed_headroom, needed_tailroom;
+	unsigned long mem_start, mem_end;
 	unsigned char addr_len;
 	unsigned char addr_assign_type;
 	unsigned char dev_addr_buf[MAX_ADDR_LEN];
@@ -228,7 +230,7 @@ struct net_device_ops {
 	int (*ndo_vlan_rx_kill_vid)(struct net_device *dev, __be16 proto, u16 vid);
 	void (*ndo_poll_controller)(struct net_device *dev);
 	int (*ndo_hwtstamp_get)(struct net_device *dev, struct kernel_hwtstamp_config *cfg);
-	int (*ndo_hwtstamp_set)(struct net_device *dev, struct kernel_hwtstamp_config *cfg, void *extack);
+	int (*ndo_hwtstamp_set)(struct net_device *dev, struct kernel_hwtstamp_config *cfg, struct netlink_ext_ack *extack);
 	u16 (*ndo_select_queue)(struct net_device *dev, struct sk_buff *skb, struct net_device *sb_dev);
 	int (*ndo_set_vf_mac)(struct net_device *dev, int queue, u8 *mac);
 	int (*ndo_set_vf_vlan)(struct net_device *dev, int queue, u16 vlan, u8 qos, __be16 proto);
@@ -273,6 +275,18 @@ static inline struct sk_buff *napi_alloc_skb_ip_align(struct napi_struct *n, uns
 static inline struct sk_buff *dev_alloc_skb(unsigned int length) { return alloc_skb(length + NET_SKB_PAD, GFP_ATOMIC); }
 
 /* NAPI */
+#define NETDEV_QUEUE_TYPE_RX 0
+#define NETDEV_QUEUE_TYPE_TX 1
+static inline void netif_napi_set_irq(struct napi_struct *napi, int irq) { }
+static inline void netif_queue_set_napi(struct net_device *dev, unsigned int q_idx, int type, struct napi_struct *napi) { }
+static inline unsigned long dev_trans_start(struct net_device *dev) { return jiffies; }
+static inline void netdev_rss_key_fill(void *buffer, size_t len) { memset(buffer, 0x5a, len); }
+static inline struct sk_buff *__netdev_alloc_skb_ip_align(struct net_device *dev, unsigned int length, gfp_t gfp)
+{
+	struct sk_buff *skb = __netdev_alloc_skb(dev, length + NET_IP_ALIGN, gfp);
+	if (skb) skb_reserve(skb, NET_IP_ALIGN);
+	return skb;
+}
 void netif_napi_add_weight(struct net_device *dev, struct napi_struct *napi, int (*poll)(struct napi_struct *, int), int weight);
 #define netif_napi_add(dev, napi, poll) netif_napi_add_weight(dev, napi, poll, NAPI_POLL_WEIGHT)
 #define netif_napi_add_tx(dev, napi, poll) netif_napi_add_weight(dev, napi, poll, NAPI_POLL_WEIGHT)
@@ -305,6 +319,10 @@ static inline void netif_start_queue(struct net_device *dev) { netif_tx_start_qu
 static inline void netif_tx_stop_queue(struct netdev_queue *q) { set_bit(__QUEUE_STATE_DRV_XOFF, &q->state); }
 static inline void netif_stop_queue(struct net_device *dev) { netif_tx_stop_queue(netdev_get_tx_queue(dev, 0)); }
 static inline bool netif_tx_queue_stopped(const struct netdev_queue *q) { return test_bit(__QUEUE_STATE_DRV_XOFF, &q->state); }
+static inline bool netif_xmit_stopped(const struct netdev_queue *q) { return q->state & ((1UL << __QUEUE_STATE_DRV_XOFF) | (1UL << __QUEUE_STATE_STACK_XOFF)); }
+static inline netdev_features_t passthru_features_check(struct sk_buff *skb, struct net_device *dev, netdev_features_t features) { return features; }
+static inline u32 netif_msg_init(int debug_value, int default_msg_enable_bits)
+{ if (debug_value < 0 || debug_value >= 32) return default_msg_enable_bits; if (debug_value == 0) return 0; return (1U << debug_value) - 1; }
 static inline bool netif_queue_stopped(const struct net_device *dev) { return netif_tx_queue_stopped(netdev_get_tx_queue(dev, 0)); }
 void netif_tx_wake_queue(struct netdev_queue *q);
 static inline void netif_wake_queue(struct net_device *dev) { netif_tx_wake_queue(netdev_get_tx_queue(dev, 0)); }
@@ -387,5 +405,12 @@ const char *netdev_name(const struct net_device *dev);
 #define netif_dbg(priv, type, dev, fmt, ...) do { } while (0)
 #define netif_level(l, priv, type, dev, fmt, ...) do { } while (0)
 
+static inline struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev, struct rtnl_link_stats64 *storage)
+{
+	if (dev->netdev_ops->ndo_get_stats64) { memset(storage, 0, sizeof(*storage)); dev->netdev_ops->ndo_get_stats64(dev, storage); }
+	else if (dev->netdev_ops->ndo_get_stats) netdev_stats_to_stats64(storage, dev->netdev_ops->ndo_get_stats(dev));
+	else netdev_stats_to_stats64(storage, &dev->stats);
+	return storage;
+}
 #define module_pci_driver_dummy
 #endif
