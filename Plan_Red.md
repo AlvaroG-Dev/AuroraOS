@@ -71,6 +71,11 @@ Wi-Fi, offloads (TSO/GRO), VLAN, XDP, SR-IOV, L8/L9 (esperan a Alvaro).
 | N1 capa LinuxKPI-NET (`net_device`, `sk_buff`, NAPI en tasklet, mini-phylib/MDIO, puente `netif_t`) | hecho (`kernel/linuxkpi/net/`, `kernel/net/netif_lkpi.c`) |
 | N3 `e1000e` de Linux 6.18 (`lkpi_e1000e.kur`) | **verificado en QEMU** (82574L, MSI-X): enlace 1000 Mbps, DHCP 10.0.2.15. Pendiente: camino MSI (el test MSI del driver falla en QEMU; los I217/I219 reales usan MSI) e INTx |
 | N4 `r8169` de Linux 6.18 (`lkpi_r8169.kur`) | compila y enlaza; **sin probar** (QEMU no emula RTL8168) |
-| N2 `virtio_net`, N5 `igc`, N6 autocarga | pendientes |
+| N5 `igc` (I225/I226, `lkpi_igc.kur`) | compila y enlaza (XDP, TSN, PTP y MAC-merge son stubs); **sin probar** (QEMU no emula igc) |
+| N6 autocarga por PCI ID | **hecha y probada en QEMU**: `kernel/lkpi_boot.c` + `kernel/lkpi_nic_ids.h` (generada por `scripts/gen-lkpi-nic-ids.py` desde las tablas de los drivers; 154 IDs). Funciona con y sin `lkpi.load=`. `net.auto=off` la desactiva. 8086:10d3 sigue con `e1000e.aur` salvo `aur.skip=8086:10d3` |
+| `lkpi.irq=nomsix\|nomsi` | para probar MSI/INTx en QEMU |
+| N2 `virtio_net`, igb/e1000 (QEMU las emula), tg3, alx | pendientes |
+
+Nota: la ISO con devtools pesa 1,7 GB de initrd; en QEMU hace falta `-m 4096` o el initrd no carga.
 
 Prueba: `scripts/qemu-drive.py --cmdline "aur.skip=8086:10d3 lkpi.load=linuxkpi,lkpi_e1000e" --extra=-nic --extra=user,model=e1000e --done "DHCP] lease"`.
