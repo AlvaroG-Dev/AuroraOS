@@ -597,6 +597,7 @@ int usb_storage_probe(usb_device_t *dev) {
     bdev->num_sectors = s->num_sectors;
     bdev->sector_size = s->sector_size;
     bdev->is_read_only = is_cdrom ? 1 : 0;
+    bdev->is_usb = 1;
     bdev->ops = &usb_storage_ops;
     bdev->private_data = s;
     s->bdev = bdev;

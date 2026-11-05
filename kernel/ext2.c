@@ -43,7 +43,19 @@
 #define EXT2_FEATURE_COMPAT_HAS_JOURNAL 0x0004
 #define EXT2_FEATURE_INCOMPAT_FILETYPE 0x0002
 #define EXT2_FEATURE_INCOMPAT_RECOVER 0x0004
-#define EXT2_INCOMPAT_SUPPORTED (EXT2_FEATURE_INCOMPAT_FILETYPE)
+// ext4 (E8): se lee, no se escribe. Journal sin recuperar: se lee tal cual.
+#define EXT4_FEATURE_INCOMPAT_EXTENTS 0x0040
+#define EXT4_FEATURE_INCOMPAT_64BIT 0x0080
+#define EXT4_FEATURE_INCOMPAT_FLEX_BG 0x0200
+#define EXT4_FEATURE_INCOMPAT_CSUM_SEED 0x2000
+#define EXT4_FEATURE_INCOMPAT_LARGEDIR 0x4000
+#define EXT4_EXTENTS_FL 0x00080000u
+#define EXT4_EXT_MAGIC 0xF30A
+#define EXT2_INCOMPAT_SUPPORTED                                              \
+  (EXT2_FEATURE_INCOMPAT_FILETYPE | EXT2_FEATURE_INCOMPAT_RECOVER |          \
+   EXT4_FEATURE_INCOMPAT_EXTENTS | EXT4_FEATURE_INCOMPAT_64BIT |             \
+   EXT4_FEATURE_INCOMPAT_FLEX_BG | EXT4_FEATURE_INCOMPAT_CSUM_SEED |         \
+   EXT4_FEATURE_INCOMPAT_LARGEDIR)
 #define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER 0x0001
 #define EXT2_FEATURE_RO_COMPAT_LARGE_FILE 0x0002
 #define EXT2_FEATURE_COMPAT_DIR_INDEX 0x0020
@@ -204,9 +216,91 @@ static int ext2_read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out) {
   return 0;
 }
 
+// ext4: busca `lblk` en el árbol de extents (cabecera en i_block o en un
+// bloque). *out = 0 para un hueco o un extent sin inicializar (lee ceros).
+static int ext4_extent_map(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t lblk,
+                           uint32_t *out) {
+  const uint8_t *node = (const uint8_t *)di->i_block;
+  size_t nbytes = sizeof(di->i_block);
+  bc_buf_t *held = NULL;
+  *out = 0;
+  for (int level = 0; level < 8; level++) {
+    uint16_t magic, entries, maxe, depth;
+    memcpy(&magic, node, 2);
+    memcpy(&entries, node + 2, 2);
+    memcpy(&maxe, node + 4, 2);
+    memcpy(&depth, node + 6, 2);
+    if (magic != EXT4_EXT_MAGIC || entries > maxe ||
+        12u + (size_t)entries * 12u > nbytes || depth > 5) {
+      if (held)
+        bc_put(held);
+      return -EIO;
+    }
+    if (depth == 0) {
+      int rc = 0;
+      for (int i = (int)entries - 1; i >= 0; i--) {
+        const uint8_t *e = node + 12 + (size_t)i * 12;
+        uint32_t eb, lo;
+        uint16_t len, hi;
+        memcpy(&eb, e, 4);
+        memcpy(&len, e + 4, 2);
+        memcpy(&hi, e + 6, 2);
+        memcpy(&lo, e + 8, 4);
+        if (eb > lblk)
+          continue;
+        uint32_t n = len > 32768 ? (uint32_t)len - 32768 : len;
+        if (lblk - eb < n && len <= 32768) {
+          uint64_t pb = ((uint64_t)hi << 32 | lo) + (lblk - eb);
+          if (pb == 0 || pb >= fs->blocks_count)
+            rc = -EIO;
+          else
+            *out = (uint32_t)pb;
+        }
+        break;
+      }
+      if (held)
+        bc_put(held);
+      return rc;
+    }
+    uint64_t child = 0;
+    int found = 0;
+    for (int i = (int)entries - 1; i >= 0; i--) {
+      const uint8_t *e = node + 12 + (size_t)i * 12;
+      uint32_t eb, lo;
+      uint16_t hi;
+      memcpy(&eb, e, 4);
+      memcpy(&lo, e + 4, 4);
+      memcpy(&hi, e + 8, 2);
+      if (eb <= lblk) {
+        child = (uint64_t)hi << 32 | lo;
+        found = 1;
+        break;
+      }
+    }
+    if (held)
+      bc_put(held);
+    held = NULL;
+    if (!found)
+      return 0; // antes del primer extent: hueco
+    if (child == 0 || child >= fs->blocks_count)
+      return -EIO;
+    held = bc_get(fs->bdev, (uint32_t)child, fs->bs);
+    if (!held)
+      return -EIO;
+    node = bc_data(held);
+    nbytes = fs->bs;
+  }
+  if (held)
+    bc_put(held);
+  return -EIO;
+}
+
 // Bloque físico del bloque lógico `lblk`. *out = 0 para un hueco.
 static int ext2_bmap(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t lblk,
                      uint32_t *out) {
+  if ((fs->incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) &&
+      (di->i_flags & EXT4_EXTENTS_FL))
+    return ext4_extent_map(fs, di, lblk, out);
   uint32_t apb = fs->bs / 4;
   uint32_t ptr;
   int depth;
@@ -2722,6 +2816,8 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
   }
   ext2_sb_t sb;
   memcpy(&sb, raw + (1024 - (size_t)first * ss), sizeof(sb));
+  uint8_t sbraw[1024];
+  memcpy(sbraw, raw + (1024 - (size_t)first * ss), sizeof(sbraw));
   kfree(raw);
 
   if (sb.s_magic != EXT2_MAGIC)
@@ -2739,15 +2835,31 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
     isz = sb.s_inode_size;
     first_ino = sb.s_first_ino;
   }
-  if (incompat & EXT2_FEATURE_INCOMPAT_RECOVER) {
-    LOG_ERR("[EXT2] %s: el journal necesita recuperación (ejecuta e2fsck)", dn);
-    return -EINVAL;
-  }
+  if (incompat & EXT2_FEATURE_INCOMPAT_RECOVER)
+    LOG_WARN("[EXT2] %s: el journal necesita recuperación: se lee sin "
+             "reproducirlo (solo lectura; ejecuta e2fsck)", dn);
   if (incompat & ~EXT2_INCOMPAT_SUPPORTED) {
     LOG_ERR("[EXT2] %s: features incompatibles no soportadas 0x%x "
-            "(extents/64bit/flex_bg/meta_bg... son ext4)",
+            "(meta_bg/mmp/inline_data/encrypt...)",
             dn, incompat & ~EXT2_INCOMPAT_SUPPORTED);
     return -EINVAL;
+  }
+  uint16_t desc_size = 0;
+  uint32_t blocks_hi = 0;
+  memcpy(&desc_size, sbraw + 254, 2);
+  memcpy(&blocks_hi, sbraw + 336, 4);
+  uint32_t gdsz = sizeof(ext2_gd_t);
+  if (incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
+    if (desc_size < 64 || desc_size > 1024 || (desc_size & (desc_size - 1))) {
+      LOG_ERR("[EXT2] %s: tamaño de descriptor de grupo inválido (%u)", dn,
+              desc_size);
+      return -EINVAL;
+    }
+    gdsz = desc_size;
+    if (blocks_hi) {
+      LOG_ERR("[EXT2] %s: FS de más de 2^32 bloques no soportado", dn);
+      return -EINVAL;
+    }
   }
   if (sb.s_log_block_size > 2) {
     LOG_ERR("[EXT2] %s: bloque de %u bytes no soportado (máx 4096)", dn,
@@ -2786,7 +2898,7 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
     LOG_ERR("[EXT2] %s: nº de inodos incoherente con los grupos", dn);
     return -EINVAL;
   }
-  uint32_t gd_per_blk = bs / sizeof(ext2_gd_t);
+  uint32_t gd_per_blk = bs / gdsz;
   uint32_t gdt_blocks = (ngroups + gd_per_blk - 1) / gd_per_blk;
   if (fdb + 1 + gdt_blocks > sb.s_blocks_count)
     return -EINVAL;
@@ -2831,8 +2943,21 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
       return -EIO;
     }
     ext2_gd_t gd;
-    memcpy(&gd, (uint8_t *)bc_data(b) + (g % gd_per_blk) * sizeof(gd), sizeof(gd));
+    const uint8_t *gp = (uint8_t *)bc_data(b) + (size_t)(g % gd_per_blk) * gdsz;
+    memcpy(&gd, gp, sizeof(gd));
+    uint32_t hi_ptrs = 0;
+    if (gdsz >= 64) { // 64bit: mitades altas (solo se admiten FS < 2^32 bloques)
+      uint32_t h0, h1, h2;
+      memcpy(&h0, gp + 0x20, 4);
+      memcpy(&h1, gp + 0x24, 4);
+      memcpy(&h2, gp + 0x28, 4);
+      hi_ptrs = h0 | h1 | h2;
+    }
     bc_put(b);
+    if (hi_ptrs) {
+      bad_groups++;
+      continue;
+    }
     ext2_group_t *gr = &fs->groups[g];
     if (gd.bg_inode_table >= fdb && gd.bg_inode_table < sb.s_blocks_count &&
         (uint64_t)gd.bg_inode_table + itable_blocks <= sb.s_blocks_count)
@@ -2876,7 +3001,14 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
   if (bad_groups)
     LOG_WARN("[EXT2] %s: %u grupos con tabla de inodos inválida (ignorados)",
              dn, bad_groups);
-  fs->counts_fixed = ext2_check(fs);
+  // ext4/uninit_bg: los bitmaps pueden no estar inicializados en disco, asi que
+  // no se recuentan (el FS se monta solo para lectura de todos modos).
+  if (!(incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE) &&
+      !(ro_compat & ~EXT2_RO_COMPAT_RW_OK))
+    fs->counts_fixed = ext2_check(fs);
+  else
+    LOG_INFO("[EXT2] %s: FS tipo ext4 (incompat=0x%x ro=0x%x): solo lectura",
+             dn, incompat, ro_compat);
   *fs_priv_out = fs;
   return 0;
 }
@@ -2975,6 +3107,11 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
   }
   if (fs->s_state & 2 /*ERROR_FS*/) {
     LOG_WARN("[EXT2] %s: el FS tiene errores registrados: solo lectura", dn);
+    return -EROFS;
+  }
+  if (fs->incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE) {
+    LOG_WARN("[EXT2] %s: FS ext4/con journal pendiente (incompat=0x%x): solo "
+             "lectura", dn, fs->incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE);
     return -EROFS;
   }
   if ((fs->compat & ~EXT2_COMPAT_RW_OK) || (fs->ro_compat & ~EXT2_RO_COMPAT_RW_OK)) {

@@ -379,3 +379,21 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
 - **E7.3 Instalador: aparcado** por orden de Alvaro (hilo aparte).
 - init: `waitpid` de las líneas de boot-tests reintenta ante EINTR (antes un
   SIGCHLD solapaba comandos y falseaba tests).
+
+## Estado E8 y montaje al arrancar (2026-11-05)
+
+- **E8 (ext4 solo lectura) hecha:** extents (árbol de cualquier profundidad;
+  los extents sin inicializar leen ceros), `64bit` (descriptores de 64 B, FS
+  < 2^32 bloques), `flex_bg`, `huge_file`, `dir_nlink`, `extra_isize`,
+  `metadata_csum` (no se verifica), htree (se lee en lineal) y journal sin
+  recuperar (se lee tal cual, con aviso). Siguen rechazados `meta_bg`, `mmp`,
+  `inline_data`, `encrypt`, `casefold`, `ea_inode` y bloques > 4096. Cualquier
+  FS con features ext4 se monta siempre `ro` y no ejecuta `ext2_check`.
+  Test: `tests/ext2/run_ext4_test.sh` (64bit+csum+flex_bg y la variante sin
+  ellas; 5 MB, fichero con 300 extents, disperso, htree de 3000 entradas,
+  symlinks rápido y lento): sha256 y tamaños idénticos al host.
+- **Montaje al arrancar:** solo se monta lo que cuelga de USB (`block_device_t.is_usb`,
+  heredado por las particiones) y los volúmenes con etiqueta `AURORADATA`. Los
+  demás discos conservan su nombre `/dev/sdX` (visible con `lsblk`/`blkid`) y se
+  anota en el log que no se montan. `automount=all` en la línea del kernel
+  devuelve el comportamiento anterior.

@@ -774,17 +774,45 @@ static void boot_media_diag(const char *why, uint64_t secs) {
   compositor_invalidate_rect((rect_t){0, 0, 16384, 16384});
 }
 
+// Al arrancar solo se monta el USB (y volumenes etiquetados AURORADATA, que son
+// los de datos de Aurora): los demas discos quedan con su nombre (/dev/sdX,
+// visibles en lsblk/blkid) pero sin montar. cmdline automount=all lo desactiva.
+static int boot_may_automount(block_device_t *b) {
+  static int all = -1;
+  if (all < 0) {
+    char v[8];
+    all = cmdline_get("automount", v, sizeof(v)) && strcmp(v, "all") == 0;
+  }
+  if (all || b->is_usb)
+    return 1;
+  char label[17] = "";
+  if (ext2_read_label(b, label) == 0 && strcmp(label, "AURORADATA") == 0)
+    return 1;
+  static char noted[16][16];
+  for (int i = 0; i < 16; i++) {
+    if (strcmp(noted[i], b->name) == 0)
+      return 0;
+    if (!noted[i][0]) {
+      strncpy(noted[i], b->name, sizeof(noted[i]) - 1);
+      LOG_INFO("[INIT] %s: disco no USB, no se monta al arrancar (automount=all "
+               "o mount a mano)", b->name);
+      break;
+    }
+  }
+  return 0;
+}
+
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition || b->is_read_only)
+    if (!b || b->is_partition || b->is_read_only || !boot_may_automount(b))
       continue;
     try_mount_data(b);
   }
   // Particiones FAT32 (p. ej. la de datos AURORADATA al final del USB).
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || !b->is_partition || b->is_read_only)
+    if (!b || !b->is_partition || b->is_read_only || !boot_may_automount(b))
       continue;
     try_mount_data(b);
   }

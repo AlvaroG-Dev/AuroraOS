@@ -16,6 +16,10 @@ LOG=${LOG:-/tmp/boot-test.log}
 rm -f "$LOG"   # sin restos de una ejecucion anterior (QMON_WAIT los confundiria)
 printf '%s\n' "$@" > sysroot/system/boot-tests
 trap 'rm -f sysroot/system/boot-tests' EXIT
+# Los tests montan a mano el disco de pruebas (AHCI, no USB): automount=all
+# devuelve el montaje automatico de cualquier disco al arrancar.
+mkdir -p build && sed 's/^cmdline=.*/& automount=all/' bootloader/aurora.conf > build/aurora-test.conf
+export AURORA_CONF=build/aurora-test.conf
 [ -n "${SKIP_BUILD:-}" ] || make iso >/tmp/boot-test-build.log 2>&1 || { tail -30 /tmp/boot-test-build.log; exit 1; }
 rm -f sysroot/system/boot-tests
 trap - EXIT

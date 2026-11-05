@@ -81,6 +81,7 @@ typedef struct block_device {
   uint32_t sector_size;
   int is_read_only;
   int is_partition;
+  int is_usb; // colgado de un bus USB (las particiones heredan el valor)
   struct block_device *parent;
   uint64_t start_lba;
 
