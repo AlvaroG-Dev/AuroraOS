@@ -747,7 +747,8 @@ static int tcp_rx_queue_payload(tcp_conn_t *c, skb_t *skb, uint32_t seq,
 
   if (c->rx_buffered_bytes >= TCP_RX_BUFFER_BYTES ||
       payload_len > TCP_RX_BUFFER_BYTES - c->rx_buffered_bytes ||
-      c->rx_count + c->ooo_count >= TCP_RX_MAX_SKBS) {
+      c->rx_count + c->ooo_count >= TCP_RX_MAX_SKBS ||
+      skb_pool_free_count() < TCP_SKB_RESERVE) {
     spin_unlock_irqrestore(&c->rx_lock, flags);
     return 0;
   }

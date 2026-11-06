@@ -9,7 +9,7 @@
 #include "skb.h"
 #include <stddef.h>
 
-#define PROXY_QUEUE_MAX 64
+#define PROXY_QUEUE_MAX 256
 
 extern void dhcp_start(netif_t *n);
 #define DHCP_RESTART 0x200

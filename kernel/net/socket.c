@@ -711,6 +711,12 @@ void socket_rx_enqueue(socket_t *s, skb_t *skb) {
     return;
   skb->next = NULL;
   unsigned long flags = spin_lock_irqsave(&s->lock);
+  // Tope por socket (UDP/raw): sin el, un socket que nadie lee agota el pool.
+  if (!s->tcp && s->rx_count >= 128) {
+    spin_unlock_irqrestore(&s->lock, flags);
+    skb_free(skb);
+    return;
+  }
   if (s->rx_tail)
     s->rx_tail->next = skb;
   else
