@@ -3,7 +3,7 @@
 
 
 .PHONY: all bootloader bootloader-efi bootloader-bios \
-        kernel user user-native user-musl image iso iso_root \
+        kernel user user-native user-musl image iso installer-iso iso_root \
         normal run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug run-smp-kvm-ahci run-smp-kvm-ahci-debug \
         run-kvm-ahci run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap run-smp-kvm-xhci run-smp-kvm-xhci-debug \
@@ -192,6 +192,11 @@ python-stdlib:
 # ===========================================================================
 # INITRD
 # ===========================================================================
+
+# INSTALLER=1: initrd de la ISO instaladora en vivo (sin Qt/GTK/Python/Perl...;
+# ver installer/initrd-exclude.txt y docs del instalador). Usar `make installer-iso`.
+INSTALLER ?= 0
+INITRD_TAR_OPTS := $(if $(filter 1,$(INSTALLER)),--exclude-from=installer/initrd-exclude.txt)
 
 NVIDIA_DEP := $(if $(filter 1,$(WITH_NVIDIA)),nvidia)
 
@@ -514,7 +519,8 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	fi
 
 	@scripts/check-sysroot-libc.sh
-	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
+	tar --format=ustar --owner=0 --group=0 $(INITRD_TAR_OPTS) -cf kernel/initrd.tar -C sysroot .
+	@ls -lh kernel/initrd.tar
 
 kernel: initrd.tar
 	$(MAKE) -C kernel
@@ -662,6 +668,12 @@ $(ISO_OUT): iso_root
 
 	@echo "[ISO] $(ISO_OUT) listo para CD/USB:"
 	@ls -lh $(ISO_OUT)
+
+# ISO instaladora ligera (aurora-installer.iso): solo lo esencial para instalar.
+INSTALLER_ISO ?= aurora-installer.iso
+installer-iso:
+	$(MAKE) INSTALLER=1 WITH_DEVTOOLS=0 WITH_MESA=0 WITH_NVIDIA=0 WITH_SOURCE=0 \
+	        USB_DATA_MB=0 ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
 
 # Alias.
 iso: $(ISO_OUT)

@@ -1,0 +1,22 @@
+# Rutas (relativas a sysroot, formato tar --exclude) que NO van en el initrd de la
+# ISO instaladora en vivo. Se instalan despues como paquetes opcionales.
+./usr/lib/python3*
+./usr/share/perl
+./usr/share/perl5
+./usr/lib/x86_64-linux-gnu/perl*
+./usr/bin/perl*
+./usr/bin/python3*
+./usr/lib/git-core
+./usr/include
+./usr/share/gtk-3.0
+./usr/share/mime
+./usr/lib/aurora-gtk
+./usr/lib/aurora-qt
+*/libQt5*
+*/libgtk-*
+*/libgdk-*
+*/libgdk_pixbuf-*
+*/qt5
+*/libicudata.so*
+*/libicui18n.so*
+*/libicuuc.so*
