@@ -10,6 +10,7 @@
 // resto.
 
 #include "vfs.h"
+#include "part.h"
 #include "block.h" // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "cpu.h"
 #include "devtmpfs.h"
@@ -2330,6 +2331,7 @@ static const devfs_entry_t devfs_entries[] = {
 // ===========================================================================
 
 #define BLKGETSIZE 0x1260
+#define BLKRRPART 0x125f
 #define BLKSSZGET 0x1268
 #define BLKGETSIZE64 0x80081272
 
@@ -2486,6 +2488,14 @@ static int64_t devfs_block_ioctl(vfs_node_t *node, unsigned long req,
       return -EFAULT;
     if (copy_to_user((void *)arg, &sz, sizeof(sz)) < 0)
       return -EFAULT;
+    return 0;
+  }
+  if (req == BLKRRPART) {
+    // Relee la tabla de particiones (fdisk/aurora-install tras escribirla). Solo
+    // sobre un disco entero; part_scan no vuelve a registrar lo ya escaneado.
+    if (bdev->is_partition)
+      return -EINVAL;
+    part_scan(bdev);
     return 0;
   }
   if (req == BLKSSZGET) {

@@ -1,0 +1,98 @@
+#!/bin/bash
+# aurora-install: instala AuroraOS en un disco (UEFI). Motor del instalador;
+# la app grafica `aurora-installer` lo llama y lee el progreso.
+#
+#   aurora-install --disk /dev/sdb [--root-label AURORAROOT] [--esp-mb 512]
+#                  [--yes] [--no-reboot]
+#
+# Hace: tabla GPT (ESP FAT32 + raiz ext2) -> mkfs -> copia del sistema -> ESP con
+# BOOTX64.EFI + kernel + initrd minimo + aurora.conf (root=UUID=...) -> comprueba.
+# Progreso: "<porcentaje> <mensaje>" por la salida y en /run/aurora-install.progress.
+# DESTRUYE el contenido del disco. Sin --yes pide confirmacion escribiendo el nombre.
+set -u
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+ASSETS=${AURORA_INSTALL_ASSETS:-/usr/share/aurora-installer}
+PROG=/run/aurora-install.progress
+DISK=; LABEL=AURORAROOT; ESP_MB=512; YES=0; REBOOT=1; DRY=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --disk) DISK=$2; shift 2 ;;
+    --root-label) LABEL=$2; shift 2 ;;
+    --esp-mb) ESP_MB=$2; shift 2 ;;
+    --yes) YES=1; shift ;;
+    --no-reboot) REBOOT=0; shift ;;
+    -h|--help) sed -n 2,14p "$0"; exit 0 ;;
+    *) echo "opcion desconocida: $1" >&2; exit 2 ;;
+  esac
+done
+step() { echo "$1 $2"; echo "$1 $2" > "$PROG" 2>/dev/null; echo "[aurora-install] $2" > /dev/kmsg 2>/dev/null; }
+die()  { echo "ERROR: $*" >&2; echo "-1 $*" > "$PROG" 2>/dev/null; echo "[aurora-install] ERROR: $*" > /dev/kmsg 2>/dev/null; exit 1; }
+
+[ -n "$DISK" ] && [ -b "$DISK" ] || die "indica --disk /dev/<disco> (bloque existente)"
+case $DISK in *[0-9]) PART=${DISK}p ;; *) PART=$DISK ;; esac
+# Sin 'p': en Aurora los discos son sda -> sda1; nvme0n1 -> nvme0n1p1.
+case $DISK in */nvme*|*/mmcblk*) PART=${DISK}p ;; *) PART=$DISK ;; esac
+for f in kernel.elf BOOTX64.EFI boot-initrd.tar aurora.conf; do
+  [ -f "$ASSETS/$f" ] || die "falta $ASSETS/$f (la ISO no es de instalador)"
+done
+if [ "$YES" != 1 ]; then
+  echo "Se BORRARA todo el disco $DISK. Escribe su nombre para continuar:"
+  read -r ans; [ "$ans" = "${DISK#/dev/}" ] || die "cancelado"
+fi
+
+step 2 "Particionando $DISK (GPT: ESP ${ESP_MB} MiB + raiz ext2)"
+printf 'g\nn\n1\n\n+%sM\nt\n1\nn\n2\n\n\nw\n' "$ESP_MB" | fdisk "$DISK" > /run/aurora-fdisk.log 2>&1 || cat /run/aurora-fdisk.log > /dev/kmsg 2>/dev/null
+sleep 1
+[ -b "${PART}1" ] && [ -b "${PART}2" ] || die "el kernel no ve ${PART}1/${PART}2 tras particionar (relee la tabla o reinicia)"
+
+step 8 "Formateando la ESP (FAT32)"
+mkfs.fat -F 32 -s 8 -n AURORAESP "${PART}1" $((ESP_MB * 1024 - 1024)) >/dev/null || die "mkfs.fat fallo"
+step 12 "Creando el sistema de ficheros raiz (ext2, 4 KiB)"
+mke2fs -q -F -t ext2 -b 4096 -I 256 -i 32768 -L "$LABEL" -m 1 \
+  -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 "${PART}2" \
+  || die "mke2fs fallo"
+UUID=$(blkid -s UUID -o value "${PART}2" 2>/dev/null)
+[ -n "$UUID" ] || UUID=$(dumpe2fs -h "${PART}2" 2>/dev/null | awk '/^Filesystem UUID/{print $3}')
+[ -n "$UUID" ] || die "no se pudo leer el UUID de ${PART}2"
+
+step 15 "Montando destino"
+mkdir -p /run/aurora-target
+mount -t ext2 "${PART}2" /run/aurora-target || die "no se pudo montar ${PART}2"
+
+step 20 "Copiando el sistema (puede tardar varios minutos)"
+mkdir -p /run/aurora-target/{proc,dev,sys,run,tmp,data,root,mnt,oldroot,newroot}
+chmod 1777 /run/aurora-target/tmp
+tar -C / --numeric-owner -cf - \
+    --exclude=./proc --exclude=./dev --exclude=./sys --exclude=./run --exclude=./tmp \
+    --exclude=./data --exclude=./mnt --exclude=./oldroot --exclude=./newroot \
+    --exclude=./system/boot-tests --exclude=./usr/share/aurora-installer --exclude=./etc/aurora-installer . \
+  | tar -C /run/aurora-target --numeric-owner -xpf - || die "la copia del sistema fallo"
+rm -f /run/aurora-target/usr/sbin/aurora-install
+
+step 80 "Escribiendo /etc/fstab"
+{
+  echo "# /etc/fstab (generado por aurora-install)"
+  echo "UUID=$UUID  /  ext2  defaults,noatime  0 1"
+} > /run/aurora-target/etc/fstab 2>/dev/null || true
+sync
+umount /run/aurora-target || die "no se pudo desmontar el destino limpiamente"
+
+step 86 "Instalando el cargador de arranque (ESP)"
+mkdir -p /run/aurora-esp
+mount -t vfat "${PART}1" /run/aurora-esp || die "no se pudo montar la ESP"
+mkdir -p /run/aurora-esp/EFI/BOOT /run/aurora-esp/aurora
+cp "$ASSETS/BOOTX64.EFI"      /run/aurora-esp/EFI/BOOT/BOOTX64.EFI
+cp "$ASSETS/kernel.elf"       /run/aurora-esp/aurora/kernel.elf
+cp "$ASSETS/boot-initrd.tar"  /run/aurora-esp/aurora/initrd.tar
+sed -e 's|^cmdline=.*||' -e 's|^kernel=.*||' "$ASSETS/aurora.conf" > /run/aurora-esp/aurora/aurora.conf
+BASECMD=$(sed -n 's/^cmdline=//p' "$ASSETS/aurora.conf" | head -1)
+{ echo; echo "kernel=\\aurora\\kernel.elf"
+  echo "cmdline=$BASECMD root=UUID=$UUID rootwait=45"; } >> /run/aurora-esp/aurora/aurora.conf
+sync
+umount /run/aurora-esp
+
+step 94 "Comprobando el sistema de ficheros"
+e2fsck -fn "${PART}2" >/dev/null 2>&1 || die "e2fsck -fn encontro errores en ${PART}2"
+step 100 "Instalacion completada (root=UUID=$UUID)"
+[ "$REBOOT" = 1 ] && echo "Retira el medio de instalacion y reinicia."
+exit 0

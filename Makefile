@@ -518,6 +518,23 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		ls -lh sysroot/usr/src/auroraos.tar.gz; \
 	fi
 
+# ---------------------------------------------------------------------------
+# ISO instaladora: motor aurora-install + lo necesario para dejar un disco
+# arrancable (kernel, cargador UEFI, initrd minimo con aurora-boot, aurora.conf).
+# En una build normal se retiran para que no engorden la ISO completa.
+# ---------------------------------------------------------------------------
+	@if [ "$(INSTALLER)" = "1" ]; then \
+		echo "[Makefile] INSTALLER: preparando /usr/share/aurora-installer..."; \
+		$(MAKE) -C bootloader/efi >/dev/null && $(MAKE) -C kernel >/dev/null || exit 1; \
+		mkdir -p sysroot/usr/share/aurora-installer sysroot/usr/sbin; \
+		install -m 755 scripts/aurora-install sysroot/usr/sbin/aurora-install; \
+		cp -f $(BOOTX64_EFI) $(KERNEL_ELF) $(AURORA_CONF) sysroot/usr/share/aurora-installer/; \
+		echo 1 > sysroot/etc/aurora-installer; \
+		scripts/mk-boot-initrd.sh sysroot sysroot/usr/share/aurora-installer/boot-initrd.tar || exit 1; \
+	else \
+		rm -rf sysroot/usr/share/aurora-installer sysroot/usr/sbin/aurora-install sysroot/etc/aurora-installer; \
+	fi
+
 	@scripts/check-sysroot-libc.sh
 	tar --format=ustar --owner=0 --group=0 $(INITRD_TAR_OPTS) -cf kernel/initrd.tar -C sysroot .
 	@ls -lh kernel/initrd.tar
