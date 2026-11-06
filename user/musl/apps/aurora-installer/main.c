@@ -341,6 +341,11 @@ static void start_install(void) {
     if (pk[0]) { argv[a++] = "--packages"; argv[a++] = pk; }
     argv[a] = NULL;
     execv("/usr/sbin/aurora-install", argv);
+    {
+      static const char m[] = "-1 No se encuentra /usr/sbin/aurora-install: la ISO esta incompleta o desactualizada (reconstruye con make installer-iso)\n";
+      int pf = openat(-100, "/run/aurora-install.progress", O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0644);
+      if (pf >= 0) { write(pf, m, sizeof(m) - 1); close(pf); }
+    }
     _exit(127);
   }
   g_pid = pid;
