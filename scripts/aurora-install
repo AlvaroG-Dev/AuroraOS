@@ -3,6 +3,7 @@
 # la app grafica `aurora-installer` lo llama y lee el progreso.
 #
 #   aurora-install --disk /dev/sdb [--root-label AURORAROOT] [--esp-mb 512]
+#                  [--data-mb 1024] [--user NOMBRE --hash-file F] [--packages "g1 g2"]
 #                  [--yes] [--no-reboot]
 #
 # Hace: tabla GPT (ESP FAT32 + raiz ext2) -> mkfs -> copia del sistema -> ESP con
@@ -13,12 +14,18 @@ set -u
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 ASSETS=${AURORA_INSTALL_ASSETS:-/usr/share/aurora-installer}
 PROG=/run/aurora-install.progress
-DISK=; LABEL=AURORAROOT; ESP_MB=512; YES=0; REBOOT=1; DRY=0
+DISK=; LABEL=AURORAROOT; ESP_MB=512; DATA_MB=1024; YES=0; REBOOT=1; DRY=0
+UNAME=; HASHFILE=; PACKAGES=; FULLNAME=
 while [ $# -gt 0 ]; do
   case $1 in
     --disk) DISK=$2; shift 2 ;;
     --root-label) LABEL=$2; shift 2 ;;
     --esp-mb) ESP_MB=$2; shift 2 ;;
+    --data-mb) DATA_MB=$2; shift 2 ;;
+    --user) UNAME=$2; shift 2 ;;
+    --full-name) FULLNAME=$2; shift 2 ;;
+    --hash-file) HASHFILE=$2; shift 2 ;;
+    --packages) PACKAGES=$2; shift 2 ;;
     --yes) YES=1; shift ;;
     --no-reboot) REBOOT=0; shift ;;
     -h|--help) sed -n 2,14p "$0"; exit 0 ;;
@@ -40,10 +47,17 @@ if [ "$YES" != 1 ]; then
   read -r ans; [ "$ans" = "${DISK#/dev/}" ] || die "cancelado"
 fi
 
-step 2 "Particionando $DISK (GPT: ESP ${ESP_MB} MiB + raiz ext2)"
-printf 'g\nn\n1\n\n+%sM\nt\n1\nn\n2\n\n\nw\n' "$ESP_MB" | fdisk "$DISK" > /run/aurora-fdisk.log 2>&1 || cat /run/aurora-fdisk.log > /dev/kmsg 2>/dev/null
+step 2 "Particionando $DISK (GPT: ESP ${ESP_MB} MiB + raiz ext2 + datos)"
+DISK_KB=$(awk -v d="${DISK#/dev/}" '$4==d{print $3}' /proc/partitions)
+[ -n "$DISK_KB" ] || die "no se pudo leer el tamano de $DISK"
+DISK_MB=$((DISK_KB / 1024))
+[ "$DISK_MB" -ge 2048 ] || die "disco demasiado pequeno (${DISK_MB} MiB; minimo 2048)"
+# La particion de datos (/data: usuarios, homes) no puede comerse el disco entero.
+[ "$DATA_MB" -le $((DISK_MB / 4)) ] || DATA_MB=$((DISK_MB / 4))
+ROOT_MB=$((DISK_MB - ESP_MB - DATA_MB - 4))
+printf 'g\nn\n1\n\n+%sM\nt\n1\nn\n2\n\n+%sM\nn\n3\n\n\nw\n' "$ESP_MB" "$ROOT_MB" | fdisk "$DISK" > /run/aurora-fdisk.log 2>&1 || cat /run/aurora-fdisk.log > /dev/kmsg 2>/dev/null
 sleep 1
-[ -b "${PART}1" ] && [ -b "${PART}2" ] || die "el kernel no ve ${PART}1/${PART}2 tras particionar (relee la tabla o reinicia)"
+[ -b "${PART}1" ] && [ -b "${PART}2" ] && [ -b "${PART}3" ] || die "el kernel no ve ${PART}1/2/3 tras particionar (relee la tabla o reinicia)"
 
 step 8 "Formateando la ESP (FAT32)"
 mkfs.fat -F 32 -s 8 -n AURORAESP "${PART}1" $((ESP_MB * 1024 - 1024)) >/dev/null || die "mkfs.fat fallo"
@@ -55,6 +69,10 @@ UUID=$(blkid -s UUID -o value "${PART}2" 2>/dev/null)
 [ -n "$UUID" ] || UUID=$(dumpe2fs -h "${PART}2" 2>/dev/null | awk '/^Filesystem UUID/{print $3}')
 [ -n "$UUID" ] || die "no se pudo leer el UUID de ${PART}2"
 
+step 14 "Creando la particion de datos (/data)"
+mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 \
+  -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 "${PART}3" \
+  || die "mke2fs (datos) fallo"
 step 15 "Montando destino"
 mkdir -p /run/aurora-target
 mount -t ext2 "${PART}2" /run/aurora-target || die "no se pudo montar ${PART}2"
@@ -74,8 +92,37 @@ step 80 "Escribiendo /etc/fstab"
   echo "# /etc/fstab (generado por aurora-install)"
   echo "UUID=$UUID  /  ext2  defaults,noatime  0 1"
 } > /run/aurora-target/etc/fstab 2>/dev/null || true
+if [ -n "$PACKAGES" ]; then
+  # Se instalan en el primer arranque con red (aurora-firstboot en el init).
+  mkdir -p /run/aurora-target/usr/lib/aurora-apt
+  echo "$PACKAGES" > /run/aurora-target/usr/lib/aurora-apt/firstboot-packages
+fi
 sync
 umount /run/aurora-target || die "no se pudo desmontar el destino limpiamente"
+
+step 82 "Creando la cuenta y /data"
+mkdir -p /run/aurora-data
+mount -t ext2 "${PART}3" /run/aurora-data || die "no se pudo montar ${PART}3"
+mkdir -p /run/aurora-data/etc /run/aurora-data/home
+if [ -n "$UNAME" ] && [ -f "$HASHFILE" ]; then
+  HASH=$(head -1 "$HASHFILE")
+  UIDN=1001
+  while grep -q "^[^:]*:[^:]*:$UIDN:" /etc/passwd; do UIDN=$((UIDN + 1)); done
+  # Cuentas del sistema (root bloqueada, nobody) + la nueva; se descarta la cuenta de desarrollo "alvaro".
+  grep -v '^alvaro:' /etc/passwd > /run/aurora-data/etc/passwd
+  echo "$UNAME:x:$UIDN:$UIDN:${FULLNAME:-$UNAME}:/data/home/$UNAME:/bin/bash" >> /run/aurora-data/etc/passwd
+  grep -v '^alvaro:' /etc/group | sed -E "s/^(wheel|video|input|render):x:([0-9]+):(.*)$/\1:x:\2:\3,$UNAME/; s/:,/:/" > /run/aurora-data/etc/group
+  echo "$UNAME:x:$UIDN:" >> /run/aurora-data/etc/group
+  grep -v '^alvaro:' /etc/shadow > /run/aurora-data/etc/shadow
+  echo "$UNAME:$HASH:19000:0:99999:7:::" >> /run/aurora-data/etc/shadow
+  chmod 600 /run/aurora-data/etc/shadow
+  mkdir -p "/run/aurora-data/home/$UNAME"
+  [ -d /etc/skel ] && cp -a /etc/skel/. "/run/aurora-data/home/$UNAME/" 2>/dev/null
+  chown -R "$UIDN:$UIDN" "/run/aurora-data/home/$UNAME" 2>/dev/null
+  chmod 700 "/run/aurora-data/home/$UNAME"
+fi
+sync
+umount /run/aurora-data || die "no se pudo desmontar /data limpiamente"
 
 step 86 "Instalando el cargador de arranque (ESP)"
 mkdir -p /run/aurora-esp
@@ -85,14 +132,17 @@ cp "$ASSETS/BOOTX64.EFI"      /run/aurora-esp/EFI/BOOT/BOOTX64.EFI
 cp "$ASSETS/kernel.elf"       /run/aurora-esp/aurora/kernel.elf
 cp "$ASSETS/boot-initrd.tar"  /run/aurora-esp/aurora/initrd.tar
 sed -e 's|^cmdline=.*||' -e 's|^kernel=.*||' "$ASSETS/aurora.conf" > /run/aurora-esp/aurora/aurora.conf
-BASECMD=$(sed -n 's/^cmdline=//p' "$ASSETS/aurora.conf" | head -1)
+BASECMD=$(sed -n 's/^cmdline=//p' "$ASSETS/aurora.conf" | head -1 | sed -E 's/(^| )aur\.(kiosk|mode)=[^ ]*//g')
+SESSCMD=
+[ -n "$UNAME" ] && SESSCMD="aur.session=user:$UNAME aur.login=auto:$UNAME"
 { echo; echo "kernel=\\aurora\\kernel.elf"
-  echo "cmdline=$BASECMD root=UUID=$UUID rootwait=45"; } >> /run/aurora-esp/aurora/aurora.conf
+  echo "cmdline=$BASECMD root=UUID=$UUID rootwait=45 $SESSCMD"; } >> /run/aurora-esp/aurora/aurora.conf
 sync
 umount /run/aurora-esp
 
 step 94 "Comprobando el sistema de ficheros"
 e2fsck -fn "${PART}2" >/dev/null 2>&1 || die "e2fsck -fn encontro errores en ${PART}2"
+e2fsck -fn "${PART}3" >/dev/null 2>&1 || die "e2fsck -fn encontro errores en ${PART}3"
 step 100 "Instalacion completada (root=UUID=$UUID)"
 [ "$REBOOT" = 1 ] && echo "Retira el medio de instalacion y reinicia."
 exit 0

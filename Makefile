@@ -83,6 +83,8 @@ WITH_NVIDIA ?= 1
 WITH_MESA ?= 1
 # Herramientas de desarrollo (gcc, make, nasm, mtools, xorriso...) dentro de la ISO.
 WITH_DEVTOOLS ?= 1
+# APT/dpkg de Ubuntu 24.04 (misma glibc) para instalar paquetes con red: aurora-pkg.
+WITH_APT ?= 1
 export WITH_NVIDIA
 export WITH_MESA
 
@@ -519,6 +521,28 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 	fi
 
 # ---------------------------------------------------------------------------
+# APT + dpkg de Ubuntu 24.04 (scripts/fetch-apt.sh). Los binarios reales van a
+# /usr/lib/aurora-apt/bin y en /usr/bin quedan envoltorios que fijan APT_CONFIG y el
+# admindir de dpkg (todo el estado en /usr/lib/aurora-apt: /etc y /var son tmpfs).
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_APT)" = "1" ]; then \
+		[ -x build/apt/root/usr/bin/apt-get ] || bash scripts/fetch-apt.sh || exit 1; \
+		echo "[Makefile] Instalando APT/dpkg + aurora-pkg..."; \
+		A=sysroot/usr/lib/aurora-apt; mkdir -p $$A/bin $$A/etc $$A/dpkg $$A/state/lists/partial $$A/cache/archives/partial; \
+		cp -a --update=none build/apt/root/usr/. sysroot/usr/; \
+		for n in apt apt-get apt-cache apt-config apt-mark apt-key apt-cdrom dpkg dpkg-deb dpkg-query dpkg-divert dpkg-statoverride dpkg-trigger update-alternatives; do \
+			[ -e build/apt/root/usr/bin/$$n ] || continue; \
+			cp -f build/apt/root/usr/bin/$$n $$A/bin/$$n; \
+			install -m 755 installer/apt/wrapper.sh sysroot/usr/bin/$$n; \
+		done; \
+		install -m 644 installer/apt/apt.conf $$A/apt.conf; \
+		install -m 644 installer/apt/sources.list $$A/etc/sources.list; \
+		mkdir -p $$A/etc/trusted.gpg.d $$A/etc/sources.list.d $$A/etc/apt.conf.d $$A/etc/preferences.d; touch $$A/etc/apt.conf.d/.keep $$A/etc/sources.list.d/.keep $$A/etc/preferences.d/.keep; cp -f build/apt/root/etc/apt/trusted.gpg.d/*.gpg $$A/etc/trusted.gpg.d/ 2>/dev/null || true; \
+		install -m 644 installer/apt/status $$A/dpkg/status; : > $$A/dpkg/available; mkdir -p $$A/dpkg/info $$A/dpkg/updates $$A/dpkg/alternatives; \
+		install -m 755 installer/apt/aurora-pkg sysroot/usr/bin/aurora-pkg; \
+	fi
+
+# ---------------------------------------------------------------------------
 # ISO instaladora: motor aurora-install + lo necesario para dejar un disco
 # arrancable (kernel, cargador UEFI, initrd minimo con aurora-boot, aurora.conf).
 # En una build normal se retiran para que no engorden la ISO completa.
@@ -689,8 +713,11 @@ $(ISO_OUT): iso_root
 # ISO instaladora ligera (aurora-installer.iso): solo lo esencial para instalar.
 INSTALLER_ISO ?= aurora-installer.iso
 installer-iso:
+	@mkdir -p build
+	@sed 's/^cmdline=.*/& aur.kiosk=1 aur.mode=installer/' $(AURORA_CONF) > build/aurora-installer.conf
 	$(MAKE) INSTALLER=1 WITH_DEVTOOLS=0 WITH_MESA=0 WITH_NVIDIA=0 WITH_SOURCE=0 \
-	        USB_DATA_MB=0 ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
+	        USB_DATA_MB=0 AURORA_CONF=build/aurora-installer.conf \
+	        ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
 
 # Alias.
 iso: $(ISO_OUT)

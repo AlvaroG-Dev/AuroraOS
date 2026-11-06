@@ -3603,6 +3603,9 @@ static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
 // Comandos Linux x86_64:
 //   F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4,
 //   F_DUPFD_CLOEXEC=1030.
+static int64_t k_flock(uint64_t fd, uint64_t operation, uint64_t a3,
+                       uint64_t a4, uint64_t a5);
+
 static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
                        uint64_t a5) {
   (void)a4;
@@ -3673,6 +3676,32 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     if (unix_fd_is_socket(proc, kfd))
       unix_set_nonblock(proc, kfd, (newflags & LINUX_O_NONBLOCK) != 0);
     return 0;
+  }
+  // Bloqueos de registro (apt, dpkg, sqlite...). Se aproximan con flock sobre el
+  // fichero entero: advisory, sin rangos (cualquier rango bloquea todo el fichero).
+  case 5:  /* F_GETLK */
+  case 36: /* F_OFD_GETLK */ {
+    short t = 2; /* F_UNLCK: se informa de que nada lo impide */
+    if (copy_to_user((void *)arg, &t, sizeof(t)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  case 6: case 7: case 37: case 38: /* F_SETLK/F_SETLKW/F_OFD_SETLK/F_OFD_SETLKW */ {
+    short t;
+    if (copy_from_user(&t, (const void *)arg, sizeof(t)) < 0)
+      return -EFAULT;
+    uint64_t op;
+    if (t == 0)
+      op = 1; /* F_RDLCK -> LOCK_SH */
+    else if (t == 1)
+      op = 2; /* F_WRLCK -> LOCK_EX */
+    else if (t == 2)
+      op = 8; /* F_UNLCK -> LOCK_UN */
+    else
+      return -EINVAL;
+    if (op != 8 && (cmd == 6 || cmd == 37))
+      op |= 4; /* LOCK_NB */
+    return k_flock(fd, op, 0, 0, 0);
   }
   case 8: /* F_SETOWN */
     f->owner = (int)arg;
@@ -7503,6 +7532,13 @@ static int64_t a_theme_get(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                    (uint64_t)theme_is_light());
 }
 
+extern uint32_t fb_width, fb_height;
+static int64_t a_screen_size(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                             uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  return (int64_t)(((uint64_t)fb_width << 16) | (fb_height & 0xFFFF));
+}
+
 static int64_t a_sysinfo(uint64_t uptr, uint64_t a2, uint64_t a3, uint64_t a4,
                          uint64_t a5) {
   (void)a2; (void)a3; (void)a4; (void)a5;
@@ -8093,6 +8129,7 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_THEME_GET - ASYS_BASE] = {a_theme_get, "asys_theme_get"},
     [ASYS_SYSINFO - ASYS_BASE] = {a_sysinfo, "asys_sysinfo"},
     [ASYS_PROCLIST - ASYS_BASE] = {a_proclist, "asys_proclist"},
+    [ASYS_SCREEN_SIZE - ASYS_BASE] = {a_screen_size, "asys_screen_size"},
     [ASYS_WIN_SET_RAW_INPUT -
         ASYS_BASE] = {a_win_set_raw_input, "asys_win_set_raw_input"},
     [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},

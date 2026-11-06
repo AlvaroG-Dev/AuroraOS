@@ -1,0 +1,31 @@
+#!/bin/bash
+# aurora-pkg: instala paquetes de Ubuntu 24.04 con APT cuando hay red.
+#   aurora-pkg update
+#   aurora-pkg install <paquete|grupo>...     grupos: devtools, fuentes-dev, python, perl, gtk, qt
+#   aurora-pkg remove|search|show|list <...>
+#   aurora-pkg check                         (hay red? responde el espejo?)
+set -e
+group() {
+  case $1 in
+    devtools)   echo "gcc-13 g++-13 binutils make libc6-dev nasm mtools dosfstools xorriso gdisk xxd gawk bison flex bc patch m4" ;;
+    python)     echo "python3-minimal python3.12-minimal libpython3.12-stdlib" ;;
+    perl)       echo "perl-modules-5.38 perl" ;;
+    gtk)        echo "libgtk-3-0t64 libgtk-4-1" ;;
+    qt)         echo "libqt5widgets5t64 libqt5gui5t64" ;;
+    *)          echo "$1" ;;
+  esac
+}
+cmd=${1:-}; shift || true
+case $cmd in
+  update) exec apt-get update ;;
+  check)  curl -fsS --max-time 15 -o /dev/null http://archive.ubuntu.com/ubuntu/dists/noble/Release && echo "red OK" ;;
+  install)
+    pk=(); for a in "$@"; do for p in $(group "$a"); do pk+=("$p"); done; done
+    apt-get update
+    exec apt-get install -y --no-install-recommends "${pk[@]}" ;;
+  remove)  exec apt-get remove -y "$@" ;;
+  search)  exec apt-cache search "$@" ;;
+  show)    exec apt-cache show "$@" ;;
+  list)    exec dpkg-query -W ;;
+  *) sed -n 2,8p "$0"; exit 2 ;;
+esac
