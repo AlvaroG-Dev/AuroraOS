@@ -16,6 +16,14 @@ group() {
   esac
 }
 cmd=${1:-}; shift || true
+# update/install/remove escriben en /usr/lib/aurora-apt (de root): pedir privilegios.
+case $cmd in
+  update|install|remove)
+    if [ "$(id -u)" != 0 ]; then
+      if command -v sudo >/dev/null 2>&1; then exec sudo "$0" "$cmd" "$@"; fi
+      echo "aurora-pkg $cmd necesita root (usa: sudo aurora-pkg $cmd ...)" >&2; exit 1
+    fi ;;
+esac
 case $cmd in
   update) exec apt-get update ;;
   check)  curl -fsS --max-time 15 -o /dev/null http://archive.ubuntu.com/ubuntu/dists/noble/Release && echo "red OK" ;;
@@ -27,5 +35,5 @@ case $cmd in
   search)  exec apt-cache search "$@" ;;
   show)    exec apt-cache show "$@" ;;
   list)    exec dpkg-query -W ;;
-  *) sed -n 2,8p "$0"; exit 2 ;;
+  *) sed -n 2,6p "$0"; exit 2 ;;
 esac
