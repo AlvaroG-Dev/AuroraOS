@@ -82,7 +82,7 @@ mkdir -p /run/aurora-target/{proc,dev,sys,run,tmp,data,root,mnt,oldroot,newroot}
 chmod 1777 /run/aurora-target/tmp
 tar -C / --numeric-owner -cf - \
     --exclude=./proc --exclude=./dev --exclude=./sys --exclude=./run --exclude=./tmp \
-    --exclude=./data --exclude=./mnt --exclude=./oldroot --exclude=./newroot \
+    --exclude=./data --exclude=./mnt --exclude=./cdrom --exclude=./media --exclude=./oldroot --exclude=./newroot \
     --exclude=./system/boot-tests --exclude=./usr/share/aurora-installer --exclude=./etc/aurora-installer . \
   | tar -C /run/aurora-target --numeric-owner -xpf - || die "la copia del sistema fallo"
 rm -f /run/aurora-target/usr/sbin/aurora-install
@@ -101,6 +101,8 @@ sync
 umount /run/aurora-target || die "no se pudo desmontar el destino limpiamente"
 
 step 82 "Creando la cuenta y /data"
+# init puede haber montado la nueva particion AURORADATA en /data: soltarla
+grep -q " /data " /proc/mounts 2>/dev/null && umount /data 2>/dev/null
 mkdir -p /run/aurora-data
 mount -t ext2 "${PART}3" /run/aurora-data || die "no se pudo montar ${PART}3"
 mkdir -p /run/aurora-data/etc /run/aurora-data/home
