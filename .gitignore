@@ -86,3 +86,5 @@ build/gcc-test/
 build/aurora-test.conf
 build/inst_vars.fd
 build/install-test.img
+build/installer-disk.img
+build/installer_vars.fd

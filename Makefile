@@ -552,7 +552,8 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		$(MAKE) -C bootloader/efi >/dev/null && $(MAKE) -C kernel >/dev/null || exit 1; \
 		mkdir -p sysroot/usr/share/aurora-installer sysroot/usr/sbin; \
 		install -m 755 scripts/aurora-install sysroot/usr/sbin/aurora-install; \
-		cp -f $(BOOTX64_EFI) $(KERNEL_ELF) $(AURORA_CONF) sysroot/usr/share/aurora-installer/; \
+		cp -f $(BOOTX64_EFI) $(KERNEL_ELF) sysroot/usr/share/aurora-installer/; \
+		cp -f $(AURORA_CONF) sysroot/usr/share/aurora-installer/aurora.conf; \
 		echo 1 > sysroot/etc/aurora-installer; \
 		scripts/mk-boot-initrd.sh sysroot sysroot/usr/share/aurora-installer/boot-initrd.tar || exit 1; \
 	else \
@@ -718,6 +719,56 @@ installer-iso:
 	$(MAKE) INSTALLER=1 WITH_DEVTOOLS=0 WITH_MESA=0 WITH_NVIDIA=0 WITH_SOURCE=0 \
 	        USB_DATA_MB=0 AURORA_CONF=build/aurora-installer.conf \
 	        ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
+
+# Arrancar la ISO instaladora en QEMU con un disco virtual vacio donde instalar.
+#   make run-installer       UEFI (OVMF)       <- la ruta soportada por el instalador
+#   make run-installer-bios  BIOS (SeaBIOS)    <- arranca el live; el instalador aun
+#                                                 solo escribe discos UEFI (ESP+GPT)
+# INSTALLER_DISK_GB (def. 8) fija el tamano; el disco se conserva entre ejecuciones
+# (borrarlo: make installer-disk-clean). Tras instalar, arranca el disco instalado
+# sin la ISO con:  make run-installer-disk
+INSTALLER_DISK    ?= build/installer-disk.img
+INSTALLER_DISK_GB ?= 8
+QEMU_INST_ACCEL   ?= $(QEMU_ACCEL)
+
+$(INSTALLER_DISK):
+	@mkdir -p build
+	truncate -s $(INSTALLER_DISK_GB)G $@
+
+installer-disk-clean:
+	rm -f $(INSTALLER_DISK) build/installer_vars.fd
+
+run-installer: $(INSTALLER_ISO) $(INSTALLER_DISK)
+	@[ -f build/installer_vars.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=build/installer_vars.fd \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-cdrom $(INSTALLER_ISO) \
+		-drive file=$(INSTALLER_DISK),format=raw,if=ide,index=0 \
+		-serial stdio
+
+run-installer-bios: $(INSTALLER_ISO) $(INSTALLER_DISK)
+	qemu-system-x86_64 \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-cdrom $(INSTALLER_ISO) \
+		-drive file=$(INSTALLER_DISK),format=raw,if=ide,index=0 \
+		-boot d -serial stdio
+
+# Arrancar solo el disco ya instalado (UEFI, sin ISO).
+run-installer-disk: $(INSTALLER_DISK)
+	@[ -f build/installer_vars.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=build/installer_vars.fd \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-drive file=$(INSTALLER_DISK),format=raw,if=ide,index=0 \
+		-serial stdio
+
+.PHONY: run-installer run-installer-bios run-installer-disk installer-disk-clean
 
 # Alias.
 iso: $(ISO_OUT)
