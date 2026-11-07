@@ -219,6 +219,50 @@ static void session_init(const char *name) {
 
 static char **session_envp(void) { return g_sess_ok ? g_sess_envp : default_envp; }
 
+// aur.mode=installer (ISO instaladora): en lugar del terminal se lanza la app
+// grafica del instalador a pantalla completa y no se arranca el servidor Wayland.
+static const char *g_term_path = TERMINAL_PATH;
+static int g_installer_mode;
+
+static void detect_installer_mode(void) {
+  char cl[2048] = "";
+  int fd = open("/proc/cmdline", O_RDONLY);
+  if (fd >= 0) {
+    ssize_t n = read(fd, cl, sizeof(cl) - 1);
+    close(fd);
+    cl[n > 0 ? n : 0] = 0;
+  }
+  if (strstr(cl, "aur.mode=installer") && access("/usr/bin/aurora-installer", X_OK) == 0) {
+    g_installer_mode = 1;
+    g_term_path = "/usr/bin/aurora-installer";
+  }
+}
+
+// Paquetes pendientes del instalador (/usr/lib/aurora-apt/firstboot-packages):
+// se instalan con APT en cuanto haya red, reintentando en segundo plano.
+static void run_firstboot_packages(void) {
+  if (access("/usr/lib/aurora-apt/firstboot-packages", R_OK) != 0 ||
+      access("/usr/bin/aurora-pkg", X_OK) != 0)
+    return;
+  pid_t pid = fork();
+  if (pid == 0) {
+    char *argv[] = {"bash", "-c",
+                    "for i in $(seq 1 60); do "
+                    "aurora-pkg check >/dev/null 2>&1 && "
+                    "aurora-pkg install $(cat /usr/lib/aurora-apt/firstboot-packages) "
+                    "&& rm -f /usr/lib/aurora-apt/firstboot-packages && exit 0; "
+                    "sleep 20; done",
+                    NULL};
+    int fd = open("/dev/kmsg", O_WRONLY);
+    if (fd >= 0) {
+      dup2(fd, 1);
+      dup2(fd, 2);
+    }
+    execve("/bin/bash", argv, default_envp);
+    _exit(127);
+  }
+}
+
 static pid_t spawn_terminal(void) {
   pid_t pid = fork();
   if (pid < 0) {
@@ -226,9 +270,9 @@ static pid_t spawn_terminal(void) {
     return -1;
   }
   if (pid == 0) {
-    char *argv[] = {(char *)TERMINAL_PATH, NULL};
-    execve(TERMINAL_PATH, argv, session_envp());
-    perror("init: execve " TERMINAL_PATH);
+    char *argv[] = {(char *)g_term_path, NULL};
+    execve(g_term_path, argv, session_envp());
+    perror("init: execve terminal");
     _exit(127);
   }
   return pid;
@@ -448,8 +492,13 @@ int main(void) {
     session_init(session_from_cmdline(sname, sizeof(sname)) ? sname : NULL);
   }
   // En modo de pruebas (boot-tests) cada test arranca su propio servidor.
+  detect_installer_mode();
   int testing = access("/system/boot-tests", F_OK) == 0 && !g_sess_ok;
+  if (g_installer_mode)
+    testing = 1; // sin Wayland ni pruebas: solo el instalador
   run_fstab();
+  if (!testing)
+    run_firstboot_packages();
   if (!testing)
     run_autofsck();
   run_boot_tests();

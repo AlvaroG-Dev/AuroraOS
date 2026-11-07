@@ -29,7 +29,8 @@
 
 // Buffer máximo del kernel por conexión. Techo que autotune puede alcanzar.
 #define TCP_RX_BUFFER_BYTES (4u * 1024u * 1024u) // 4 MB
-#define TCP_RX_MAX_SKBS 4096                     // 4096 × 1460 = 5.8 MB
+#define TCP_RX_MAX_SKBS 384                      // 384 × 1460 = 560 KB por conexion (el pool global es de 2048 skbs: un tope mayor dejaba a una sola conexion agotarlo)
+#define TCP_SKB_RESERVE 192                      // skbs que RX de datos nunca toca: para ACK/TX y el resto de la pila
 
 // Autotune: ventana inicial pequeña para arrancar; crece en función del
 // rate medido × RTT. Nunca baja del mínimo. Nunca sube del techo.

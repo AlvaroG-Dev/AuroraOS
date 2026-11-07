@@ -109,7 +109,7 @@ int winsrv_create_window_ex(task_t *owner, int x, int y, int w, int h,
   wflags &= WINSRV_USER_FLAGS;
   // Un popup puede ser mas pequeno que una ventana normal (menus, tooltips).
   int min = (wflags & WIN_FLAGS_POPUP) ? 8 : 64;
-  if (w < min || h < min || w > 2048 || h > 2048)
+  if (w < min || h < min || w > (aurora_kiosk() ? 4096 : 2048) || h > (aurora_kiosk() ? 4096 : 2048))
     return -1;
 
   char ktitle[64];

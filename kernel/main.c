@@ -786,7 +786,11 @@ static void boot_media_diag(const char *why, uint64_t secs) {
   if (n == 0)
     LOG_WARN("[DIAG]  ningun block device: el USB no se enumero como disco "
              "(buscar [xHCI]/[USB-STG] en el log)");
-  boot_console_overlay_enable(1);
+  { /* quiosco (instalador): sin overlay de logs sobre la UI; F12 lo muestra */
+    extern int aurora_kiosk(void);
+    if (!aurora_kiosk())
+      boot_console_overlay_enable(1);
+  }
   compositor_invalidate_rect((rect_t){0, 0, 16384, 16384});
 }
 

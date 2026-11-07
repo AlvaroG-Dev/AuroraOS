@@ -3,7 +3,7 @@
 
 
 .PHONY: all bootloader bootloader-efi bootloader-bios \
-        kernel user user-native user-musl image iso iso_root \
+        kernel user user-native user-musl image iso installer-iso iso_root \
         normal run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug run-smp-kvm-ahci run-smp-kvm-ahci-debug \
         run-kvm-ahci run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap run-smp-kvm-xhci run-smp-kvm-xhci-debug \
@@ -83,6 +83,8 @@ WITH_NVIDIA ?= 1
 WITH_MESA ?= 1
 # Herramientas de desarrollo (gcc, make, nasm, mtools, xorriso...) dentro de la ISO.
 WITH_DEVTOOLS ?= 1
+# APT/dpkg de Ubuntu 24.04 (misma glibc) para instalar paquetes con red: aurora-pkg.
+WITH_APT ?= 1
 export WITH_NVIDIA
 export WITH_MESA
 
@@ -192,6 +194,11 @@ python-stdlib:
 # ===========================================================================
 # INITRD
 # ===========================================================================
+
+# INSTALLER=1: initrd de la ISO instaladora en vivo (sin Qt/GTK/Python/Perl...;
+# ver installer/initrd-exclude.txt y docs del instalador). Usar `make installer-iso`.
+INSTALLER ?= 0
+INITRD_TAR_OPTS := $(if $(filter 1,$(INSTALLER)),--exclude-from=installer/initrd-exclude.txt)
 
 NVIDIA_DEP := $(if $(filter 1,$(WITH_NVIDIA)),nvidia)
 
@@ -513,8 +520,50 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		ls -lh sysroot/usr/src/auroraos.tar.gz; \
 	fi
 
+# ---------------------------------------------------------------------------
+# APT + dpkg de Ubuntu 24.04 (scripts/fetch-apt.sh). Los binarios reales van a
+# /usr/lib/aurora-apt/bin y en /usr/bin quedan envoltorios que fijan APT_CONFIG y el
+# admindir de dpkg (todo el estado en /usr/lib/aurora-apt: /etc y /var son tmpfs).
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_APT)" = "1" ]; then \
+		[ -x build/apt/root/usr/bin/apt-get ] || bash scripts/fetch-apt.sh || exit 1; \
+		echo "[Makefile] Instalando APT/dpkg + aurora-pkg..."; \
+		A=sysroot/usr/lib/aurora-apt; mkdir -p $$A/bin $$A/etc $$A/dpkg $$A/state/lists/partial $$A/cache/archives/partial; \
+		cp -a --update=none build/apt/root/usr/. sysroot/usr/; \
+		for n in apt apt-get apt-cache apt-config apt-mark apt-key apt-cdrom dpkg dpkg-deb dpkg-query dpkg-divert dpkg-statoverride dpkg-trigger update-alternatives; do \
+			[ -e build/apt/root/usr/bin/$$n ] || continue; \
+			cp -f build/apt/root/usr/bin/$$n $$A/bin/$$n; \
+			install -m 755 installer/apt/wrapper.sh sysroot/usr/bin/$$n; \
+		done; \
+		install -m 644 installer/apt/apt.conf $$A/apt.conf; \
+		install -m 644 installer/apt/sources.list $$A/etc/sources.list; \
+		mkdir -p $$A/etc/trusted.gpg.d $$A/etc/sources.list.d $$A/etc/apt.conf.d $$A/etc/preferences.d; touch $$A/etc/apt.conf.d/.keep $$A/etc/sources.list.d/.keep $$A/etc/preferences.d/.keep; cp -f build/apt/root/etc/apt/trusted.gpg.d/*.gpg $$A/etc/trusted.gpg.d/ 2>/dev/null || true; \
+		install -m 644 installer/apt/status $$A/dpkg/status; : > $$A/dpkg/available; mkdir -p $$A/dpkg/info $$A/dpkg/updates $$A/dpkg/alternatives; \
+		install -m 755 installer/apt/aurora-pkg sysroot/usr/bin/aurora-pkg; \
+	fi
+
+# ---------------------------------------------------------------------------
+# ISO instaladora: motor aurora-install + lo necesario para dejar un disco
+# arrancable (kernel, cargador UEFI, initrd minimo con aurora-boot, aurora.conf).
+# En una build normal se retiran para que no engorden la ISO completa.
+# ---------------------------------------------------------------------------
+	@if [ "$(INSTALLER)" = "1" ]; then \
+		echo "[Makefile] INSTALLER: preparando /usr/share/aurora-installer..."; \
+		$(MAKE) -C bootloader/efi >/dev/null && $(MAKE) -C kernel >/dev/null || exit 1; \
+		mkdir -p sysroot/usr/share/aurora-installer sysroot/usr/sbin; \
+		install -m 755 scripts/aurora-install sysroot/usr/sbin/aurora-install; \
+		cp -f $(BOOTX64_EFI) $(KERNEL_ELF) sysroot/usr/share/aurora-installer/; \
+		cp -f $(AURORA_CONF) sysroot/usr/share/aurora-installer/aurora.conf; \
+		echo 1 > sysroot/etc/aurora-installer; \
+		mkdir -p sysroot/system/brand && cp -f assets/brand/aurora-emblem-192.argb sysroot/system/brand/; \
+		scripts/mk-boot-initrd.sh sysroot sysroot/usr/share/aurora-installer/boot-initrd.tar || exit 1; \
+	else \
+		rm -rf sysroot/usr/share/aurora-installer sysroot/usr/sbin/aurora-install sysroot/etc/aurora-installer sysroot/system/brand; \
+	fi
+
 	@scripts/check-sysroot-libc.sh
-	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
+	tar --format=ustar --owner=0 --group=0 $(INITRD_TAR_OPTS) -cf kernel/initrd.tar -C sysroot .
+	@ls -lh kernel/initrd.tar
 
 kernel: initrd.tar
 	$(MAKE) -C kernel
@@ -662,6 +711,68 @@ $(ISO_OUT): iso_root
 
 	@echo "[ISO] $(ISO_OUT) listo para CD/USB:"
 	@ls -lh $(ISO_OUT)
+
+# ISO instaladora ligera (aurora-installer.iso): solo lo esencial para instalar.
+INSTALLER_ISO ?= aurora-installer.iso
+installer-iso:
+	@mkdir -p build
+	@sed 's/^cmdline=.*/& aur.kiosk=1 aur.mode=installer/' $(AURORA_CONF) > build/aurora-installer.conf
+	$(MAKE) INSTALLER=1 WITH_DEVTOOLS=0 WITH_MESA=0 WITH_NVIDIA=0 WITH_SOURCE=0 \
+	        USB_DATA_MB=0 AURORA_CONF=build/aurora-installer.conf \
+	        ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
+
+# Arrancar la ISO instaladora en QEMU con un disco SATA (AHCI) virtual vacio donde instalar.
+#   make run-installer       UEFI (OVMF)       <- la ruta soportada por el instalador
+#   make run-installer-bios  BIOS (SeaBIOS)    <- arranca el live; el instalador aun
+#                                                 solo escribe discos UEFI (ESP+GPT)
+# INSTALLER_DISK_GB (def. 8) fija el tamano; el disco se conserva entre ejecuciones
+# (borrarlo: make installer-disk-clean). Tras instalar, arranca el disco instalado
+# sin la ISO con:  make run-installer-disk
+INSTALLER_DISK    ?= build/installer-disk.img
+INSTALLER_DISK_GB ?= 8
+QEMU_INST_ACCEL   ?= $(QEMU_ACCEL)
+
+$(INSTALLER_DISK):
+	@mkdir -p build
+	truncate -s $(INSTALLER_DISK_GB)G $@
+
+installer-disk-clean:
+	rm -f $(INSTALLER_DISK) build/installer_vars.fd
+
+run-installer: $(INSTALLER_ISO) $(INSTALLER_DISK)
+	@cp -f /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd   # NVRAM limpia: sin entradas de arranque viejas, OVMF busca \EFI\BOOT\BOOTX64.EFI
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=build/installer_vars.fd \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-cdrom $(INSTALLER_ISO) \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
+		-serial stdio
+
+run-installer-bios: $(INSTALLER_ISO) $(INSTALLER_DISK)
+	qemu-system-x86_64 \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-cdrom $(INSTALLER_ISO) \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
+		-boot d -serial stdio
+
+# Arrancar solo el disco ya instalado (UEFI, sin ISO).
+run-installer-disk: $(INSTALLER_DISK)
+	@cp -f /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd   # NVRAM limpia: sin entradas de arranque viejas, OVMF busca \EFI\BOOT\BOOTX64.EFI
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=build/installer_vars.fd \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
+		-serial stdio
+
+.PHONY: run-installer run-installer-bios run-installer-disk installer-disk-clean
 
 # Alias.
 iso: $(ISO_OUT)

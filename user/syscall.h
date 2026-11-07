@@ -403,6 +403,7 @@ typedef struct {
 } aurora_procinfo_t;
 #define ASYS_SYSINFO (ASYS_BASE + 0x71)
 #define ASYS_PROCLIST (ASYS_BASE + 0x72)
+#define ASYS_SCREEN_SIZE (ASYS_BASE + 0x73)
 static inline int sys_sysinfo(aurora_sysinfo_t *si) {
   return (int)syscall(ASYS_SYSINFO, (uint64_t)si, 0, 0, 0, 0);
 }
@@ -410,6 +411,9 @@ static inline int sys_proclist(aurora_procinfo_t *out, int max) {
   return (int)syscall(ASYS_PROCLIST, (uint64_t)out, (uint64_t)max, 0, 0, 0);
 }
 
+static inline uint32_t sys_screen_size(void) {
+  return (uint32_t)syscall(ASYS_SCREEN_SIZE, 0, 0, 0, 0, 0);
+}
 static inline uint32_t sys_theme_get(void) {
   return (uint32_t)syscall(ASYS_THEME_GET, 0, 0, 0, 0, 0);
 }
