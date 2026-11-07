@@ -79,3 +79,15 @@ Wi-Fi, offloads (TSO/GRO), VLAN, XDP, SR-IOV, L8/L9 (esperan a Alvaro).
 Nota: la ISO con devtools pesa 1,7 GB de initrd; en QEMU hace falta `-m 4096` o el initrd no carga.
 
 Prueba: `scripts/qemu-drive.py --cmdline "aur.skip=8086:10d3 lkpi.load=linuxkpi,lkpi_e1000e" --extra=-nic --extra=user,model=e1000e --done "DHCP] lease"`.
+
+## 8. WiFi (placa ASUS TUF GAMING Z790-PLUS WIFI D4) — N7
+
+Según la ficha de ASUS: LAN Ethernet 2,5 Gb (Intel I225-V, driver `igc`; si fuera Realtek 8125 lo cubre `r8169`, ambos ya portados) y Wi-Fi 6 + BT 5.2 (Intel CNVi, previsiblemente AX201/AX211, driver `iwlwifi`). Hay que confirmar los PCI ID con el log del equipo (`[NET] pci ... 02`, y `lspci -nn` en Kali para la tarjeta Wi-Fi).
+
+`iwlwifi` no cabe en la capa actual: necesita `cfg80211` + `mac80211` (la pila inalámbrica de Linux, ~150 kLOC con rfkill, regdb, nl80211), `iwlwifi` + `iwlmvm` (~100 kLOC), firmware de `linux-firmware` (`iwlwifi-so-a0-*`/`QuZ`), `request_firmware` ya existe (L4). Fases:
+- N7.0 confirmar chip y firmware requerido (log de Alvaro).
+- N7.1 `cfg80211`/`mac80211` sobre la capa (workqueues, timers, rcu, netlink mínimo en lugar de nl80211, `wiphy`/`ieee80211_hw`).
+- N7.2 `iwlwifi` PCIe (transport) + `iwlmvm`, carga de firmware, escaneo.
+- N7.3 asociación WPA2 con un `wpa_supplicant` (glibc) hablando con una interfaz propia (no nl80211): decidir entre portar nl80211 mínimo o un `ioctl`/chardev propio.
+- Bluetooth (`btusb`) queda aparte.
+Riesgo alto: es el mayor porte hasta ahora. Se hace por fases y sin tocar el camino Ethernet.
