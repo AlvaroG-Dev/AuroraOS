@@ -740,7 +740,7 @@ installer-disk-clean:
 	rm -f $(INSTALLER_DISK) build/installer_vars.fd
 
 run-installer: $(INSTALLER_ISO) $(INSTALLER_DISK)
-	@[ -f build/installer_vars.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd
+	@cp -f /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd   # NVRAM limpia: sin entradas de arranque viejas, OVMF busca \EFI\BOOT\BOOTX64.EFI
 	qemu-system-x86_64 \
 		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 		-drive if=pflash,format=raw,file=build/installer_vars.fd \
@@ -762,7 +762,7 @@ run-installer-bios: $(INSTALLER_ISO) $(INSTALLER_DISK)
 
 # Arrancar solo el disco ya instalado (UEFI, sin ISO).
 run-installer-disk: $(INSTALLER_DISK)
-	@[ -f build/installer_vars.fd ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd
+	@cp -f /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd   # NVRAM limpia: sin entradas de arranque viejas, OVMF busca \EFI\BOOT\BOOTX64.EFI
 	qemu-system-x86_64 \
 		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 		-drive if=pflash,format=raw,file=build/installer_vars.fd \
