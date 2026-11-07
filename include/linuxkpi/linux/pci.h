@@ -122,6 +122,7 @@ struct pci_bus {
 struct lkpi_pci_irqs;			/* vectores de la capa (pci/msi.c) */
 
 struct pci_dev {
+	unsigned int dev_flags;
 	struct list_head bus_list;
 	struct pci_bus *bus;
 	struct pci_bus *subordinate;
@@ -522,6 +523,11 @@ struct pci_dev *lkpi_pcie_find_root_port(struct pci_dev *dev);
 /* Sin reasignacion de recursos PCI (resize BAR, ROM, reserva de ventanas): fallan con -ENOSYS / NULL. */
 static inline void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size) { return NULL; }
 static inline void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom) {}
+static inline int pci_assign_resource(struct pci_dev *dev, int i) { return -ENOSYS; }
+static inline bool pci_pme_capable(struct pci_dev *dev, int state) { return false; }
+static inline void pci_lock_rescan_remove(void) { }
+static inline void pci_unlock_rescan_remove(void) { }
+static inline struct pci_bus *pci_rescan_bus(struct pci_bus *bus) { return bus; }
 static inline int pci_resize_resource(struct pci_dev *dev, int i, int size, int exclude_bars) { return -ENOSYS; }
 static inline void pci_release_resource(struct pci_dev *dev, int resno) {}
 static inline u32 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar) { return 0; }
@@ -597,4 +603,8 @@ static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *
 	return n < 0 ? n : 0;
 }
 static inline void pci_disable_msix(struct pci_dev *dev) { pci_free_irq_vectors(dev); pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_INTX); }
+#define pci_ioremap_bar(d, b) pci_iomap(d, b, 0)
+static inline int pcix_get_mmrbc(struct pci_dev *dev) { return 512; }
+static inline int pcix_set_mmrbc(struct pci_dev *dev, int mmrbc) { return 0; }
+#define PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG (1u << 9)
 #endif

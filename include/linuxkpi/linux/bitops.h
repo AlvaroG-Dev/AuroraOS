@@ -135,4 +135,7 @@ static __always_inline s64 sign_extend64(u64 value, int index)
 	for ((b) = 0; (b) = find_next_bit((addr), (size), b), \
 	     (e) = find_next_zero_bit((addr), (size), (b) + 1), (b) < (size); (b) = (e) + 1)
 
+#ifndef HWEIGHT32
+#define HWEIGHT32(w) hweight32(w)
+#endif
 #endif

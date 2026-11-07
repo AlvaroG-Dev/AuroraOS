@@ -82,7 +82,7 @@ Prueba: `scripts/qemu-drive.py --cmdline "aur.skip=8086:10d3 lkpi.load=linuxkpi,
 
 ## 8. WiFi (placa ASUS TUF GAMING Z790-PLUS WIFI D4) — N7
 
-Según la ficha de ASUS: LAN Ethernet 2,5 Gb (Intel I225-V, driver `igc`; si fuera Realtek 8125 lo cubre `r8169`, ambos ya portados) y Wi-Fi 6 + BT 5.2 (Intel CNVi, previsiblemente AX201/AX211, driver `iwlwifi`). Hay que confirmar los PCI ID con el log del equipo (`[NET] pci ... 02`, y `lspci -nn` en Kali para la tarjeta Wi-Fi).
+Confirmado con `lspci` de Alvaro: LAN **Intel I226-V (8086:125c)** → `igc` (ya en la tabla de autocarga); Wi-Fi **Raptor Lake-S PCH CNVi 8086:7a70** → `iwlwifi` (`iwl_so_long_latency_imr_mac_cfg`). Confirmado por `dmesg` en Linux: **Intel Wi-Fi 6 AX201 160MHz**, RF HR B5, firmware `iwlwifi-so-a0-hr-b0-89.ucode` (v89), op_mode `iwlmvm`. Según la ficha de ASUS: LAN Ethernet 2,5 Gb (Intel I225-V, driver `igc`; si fuera Realtek 8125 lo cubre `r8169`, ambos ya portados) y Wi-Fi 6 + BT 5.2 (Intel CNVi, previsiblemente AX201/AX211, driver `iwlwifi`). Hay que confirmar los PCI ID con el log del equipo (`[NET] pci ... 02`, y `lspci -nn` en Kali para la tarjeta Wi-Fi).
 
 `iwlwifi` no cabe en la capa actual: necesita `cfg80211` + `mac80211` (la pila inalámbrica de Linux, ~150 kLOC con rfkill, regdb, nl80211), `iwlwifi` + `iwlmvm` (~100 kLOC), firmware de `linux-firmware` (`iwlwifi-so-a0-*`/`QuZ`), `request_firmware` ya existe (L4). Fases:
 - N7.0 confirmar chip y firmware requerido (log de Alvaro).
@@ -91,3 +91,13 @@ Según la ficha de ASUS: LAN Ethernet 2,5 Gb (Intel I225-V, driver `igc`; si fue
 - N7.3 asociación WPA2 con un `wpa_supplicant` (glibc) hablando con una interfaz propia (no nl80211): decidir entre portar nl80211 mínimo o un `ioctl`/chardev propio.
 - Bluetooth (`btusb`) queda aparte.
 Riesgo alto: es el mayor porte hasta ahora. Se hace por fases y sin tocar el camino Ethernet.
+
+## Estado (2026-11-07, rama claude/project-thread-ll4256)
+| Pieza | Estado |
+|---|---|
+| r8169, e1000e, igc | compilan y cargan; e1000e probado en QEMU; r8169/igc pendientes de hardware real |
+| igb, e1000, virtio_net (driver compacto propio) | DHCP verificado en QEMU |
+| alx | compila; sin probar |
+| cfg80211, mac80211, iwlwifi, iwlmvm | cargan en QEMU; asociación AX201 pendiente de hardware (WPA2-PSK/abierta, `aurora-wifi scan/connect/status`) |
+| tg3, btusb | pendientes (tg3 necesita stubs de phylib) |
+Limitaciones: e1000 sin jumbo frames; Wi-Fi sin WPA3/TKIP/WEP/802.1X; DHCP solo en el primer carrier-up.

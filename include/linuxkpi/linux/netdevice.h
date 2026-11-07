@@ -33,6 +33,9 @@ struct mii_bus;
 struct ethtool_ops;
 
 typedef u64 netdev_features_t;
+struct ifla_vf_info;
+struct ndmsg;
+struct nlattr;
 #define NETIF_F_SG		(1ULL << 0)
 #define NETIF_F_IP_CSUM		(1ULL << 1)
 #define NETIF_F_HW_CSUM		(1ULL << 3)
@@ -61,6 +64,7 @@ typedef u64 netdev_features_t;
 #define NETIF_F_TSO_ECN		(1ULL << 24)
 #define NETIF_F_GSO_UDP_TUNNEL	(1ULL << 25)
 #define NETIF_F_HW_TC		(1ULL << 26)
+#define NETIF_F_GSO_SOFTWARE (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_GSO_UDP_L4)
 #define NETIF_F_GSO_GRE		(1ULL << 40)
 #define NETIF_F_GSO_GRE_CSUM	(1ULL << 41)
 #define NETIF_F_GSO_IPXIP4	(1ULL << 42)
@@ -75,6 +79,7 @@ typedef u64 netdev_features_t;
 #define IFF_SUPP_NOFCS	0x80000
 #define IFF_RXFH_CONFIGURED (1<<0)
 #define NET_NAME_UNKNOWN 0
+#define NET_NAME_ENUM 1
 #define NET_ADDR_PERM 0
 #define NET_ADDR_RANDOM 1
 #define NETDEV_ALIGN 32
@@ -170,8 +175,15 @@ struct net_device_ops;
 struct kernel_hwtstamp_config;
 struct ifreq;
 
+#include <net/net_namespace.h>
+struct wireless_dev;
 struct net_device {
 	char name[IFNAMSIZ];
+	struct wireless_dev *ieee80211_ptr;
+	possible_net_t nd_net;
+	bool netns_immutable;
+	bool needs_free_netdev;
+	unsigned short hard_header_len_unused;
 	struct device dev;
 	unsigned long state;
 	netdev_features_t features, hw_features, wanted_features, vlan_features, hw_enc_features;
@@ -222,7 +234,8 @@ struct net_device {
 	atomic_t lkpi_txq_stopped;
 };
 
-enum tc_setup_type;
+struct net_device_path_ctx; struct net_device_path;
+enum tc_setup_type { TC_QUERY_CAPS = 1, TC_SETUP_QDISC_MQPRIO, TC_SETUP_QDISC_TAPRIO, TC_SETUP_QDISC_ETF, TC_SETUP_QDISC_CBS, TC_SETUP_BLOCK, TC_SETUP_FT, TC_SETUP_QDISC_FIFO };
 struct xdp_frame;
 struct bpf_prog;
 struct xdp_metadata_ops;
@@ -270,8 +283,10 @@ struct net_device_ops {
 	int (*ndo_set_vf_rate)(struct net_device *dev, int vf, int min_tx_rate, int max_tx_rate);
 	int (*ndo_set_vf_spoofchk)(struct net_device *dev, int vf, bool setting);
 	int (*ndo_set_vf_trust)(struct net_device *dev, int vf, bool setting);
-	int (*ndo_get_vf_config)(struct net_device *dev, int vf, void *ivf);
+	int (*ndo_get_vf_config)(struct net_device *dev, int vf, struct ifla_vf_info *ivf);
+	int (*ndo_fdb_add)(struct ndmsg *ndm, struct nlattr *tb[], struct net_device *dev, const unsigned char *addr, u16 vid, u16 flags, bool *notified, struct netlink_ext_ack *extack);
 	int (*ndo_set_vf_link_state)(struct net_device *dev, int vf, int link_state);
+	int (*ndo_fill_forward_path)(struct net_device_path_ctx *ctx, struct net_device_path *path);
 	int (*ndo_setup_tc)(struct net_device *dev, enum tc_setup_type type, void *type_data);
 	int (*ndo_bpf)(struct net_device *dev, struct netdev_bpf *bpf);
 	int (*ndo_xdp_xmit)(struct net_device *dev, int n, struct xdp_frame **xdp, u32 flags);
@@ -296,7 +311,7 @@ static inline struct net_device *to_net_dev(struct device *d) { return container
 
 int netif_rx(struct sk_buff *skb);
 int netif_receive_skb(struct sk_buff *skb);
-typedef enum { GRO_MERGED, GRO_MERGED_FREE, GRO_HELD, GRO_NORMAL, GRO_CONSUMED } gro_result_t;
+typedef enum { GRO_MERGED, GRO_MERGED_FREE, GRO_HELD, GRO_NORMAL, GRO_CONSUMED, GRO_DROP } gro_result_t;
 gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb);
 struct sk_buff *napi_alloc_skb(struct napi_struct *napi, unsigned int length);
 struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int length, gfp_t gfp);
@@ -348,7 +363,7 @@ void napi_disable(struct napi_struct *n);
 bool napi_schedule_prep(struct napi_struct *n);
 static inline bool napi_if_scheduled_mark_missed(struct napi_struct *n) { return false; }
 void __napi_schedule(struct napi_struct *n);
-static inline void napi_schedule(struct napi_struct *n) { if (napi_schedule_prep(n)) __napi_schedule(n); }
+static inline bool napi_schedule(struct napi_struct *n) { if (napi_schedule_prep(n)) { __napi_schedule(n); return true; } return false; }
 static inline void napi_schedule_irqoff(struct napi_struct *n) { napi_schedule(n); }
 static inline void __napi_schedule_irqoff(struct napi_struct *n) { __napi_schedule(n); }
 bool napi_complete_done(struct napi_struct *n, int work_done);
@@ -465,4 +480,56 @@ static inline struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev, st
 	return storage;
 }
 #define module_pci_driver_dummy
+
+/* ---- un solo espacio de nombres y notificadores de dispositivo (cfg80211) ---- */
+#include <linux/notifier.h>
+static inline struct net *dev_net(const struct net_device *dev) { return read_pnet(&dev->nd_net); }
+static inline void dev_net_set(struct net_device *dev, struct net *net) { write_pnet(&dev->nd_net, net); }
+enum netdev_cmd { NETDEV_UP = 1, NETDEV_DOWN, NETDEV_REBOOT, NETDEV_CHANGE, NETDEV_REGISTER, NETDEV_UNREGISTER, NETDEV_CHANGEMTU,
+	NETDEV_CHANGEADDR, NETDEV_PRE_CHANGEADDR, NETDEV_GOING_DOWN, NETDEV_CHANGENAME, NETDEV_FEAT_CHANGE, NETDEV_BONDING_FAILOVER,
+	NETDEV_PRE_UP, NETDEV_PRE_TYPE_CHANGE, NETDEV_POST_TYPE_CHANGE, NETDEV_POST_INIT, NETDEV_PRE_UNINIT, NETDEV_RELEASE, NETDEV_NOTIFY_PEERS };
+struct netdev_notifier_info { struct net_device *dev; struct netlink_ext_ack *extack; };
+static inline struct net_device *netdev_notifier_info_to_dev(const struct netdev_notifier_info *info) { return info->dev; }
+int register_netdevice_notifier(struct notifier_block *nb);
+int unregister_netdevice_notifier(struct notifier_block *nb);
+int call_netdevice_notifiers(unsigned long val, struct net_device *dev);
+int register_netdevice(struct net_device *dev);
+void unregister_netdevice(struct net_device *dev);
+#define unregister_netdevice_queue(dev, head) unregister_netdevice(dev)
+struct net_device *dev_get_by_index(struct net *net, int ifindex);
+struct net_device *__dev_get_by_index(struct net *net, int ifindex);
+#define IFF_DONT_BRIDGE 0x800
+static inline bool netif_is_bridge_port(const struct net_device *dev) { return false; }
+static inline int dev_change_net_namespace(struct net_device *dev, struct net *net, const char *pat) { return net == &init_net ? 0 : -EOPNOTSUPP; }
+static inline void dev_set_uevent_suppress(struct device *dev, int val) { }
+#define net_dbg_ratelimited(fmt, ...) do { } while (0)
+#define __net_init
+#define __net_exit
+#include <linux/percpu.h>
+struct net_device_path { int type; };
+enum net_device_path_type { DEV_PATH_ETHERNET = 0, DEV_PATH_VLAN, DEV_PATH_BRIDGE, DEV_PATH_PPPOE, DEV_PATH_DSA, DEV_PATH_MTK_WDMA };
+struct net_device_path_ctx { const struct net_device *dev; u8 daddr[6]; int num_vlans; };
+static inline void netif_addr_lock_bh(struct net_device *dev) { }
+static inline void netif_addr_unlock_bh(struct net_device *dev) { }
+static inline void netif_receive_skb_list(struct list_head *head)
+{ struct sk_buff *skb, *n; list_for_each_entry_safe(skb, n, head, list) { list_del(&skb->list); netif_receive_skb(skb); } }
+void ether_setup(struct net_device *dev);
+int dev_queue_xmit(struct sk_buff *skb);
+int dev_alloc_name(struct net_device *dev, const char *name);
+static inline void netdev_set_default_ethtool_ops(struct net_device *dev, const struct ethtool_ops *ops) { if (!dev->ethtool_ops) dev->ethtool_ops = ops; }
+void kfree_skb_list(struct sk_buff *segs);
+void skb_complete_wifi_ack(struct sk_buff *skb, bool acked);
+/* listas de direcciones: sin sincronizacion de multicast */
+static inline void __hw_addr_init(struct netdev_hw_addr_list *list) { INIT_LIST_HEAD(&list->list); list->count = 0; }
+static inline int __hw_addr_sync(struct netdev_hw_addr_list *to_list, struct netdev_hw_addr_list *from_list, int addr_len) { return 0; }
+static inline void __hw_addr_unsync(struct netdev_hw_addr_list *to_list, struct netdev_hw_addr_list *from_list, int addr_len) { }
+static inline struct net_device *alloc_netdev_dummy(int sizeof_priv) { return lkpi_alloc_netdev_mqs(sizeof_priv, "dummy", 1, 1); }
+#include <linux/in6.h>
+#define netdev_hw_addr_list_count(l) ((l)->count)
+#define netdev_hw_addr_list_for_each(ha, l) list_for_each_entry(ha, &(l)->list, list)
+void lkpi_netif_wifi_link(struct net_device *dev, bool up);
+static inline struct sk_buff *napi_get_frags(struct napi_struct *napi) { return NULL; }
+static inline gro_result_t napi_gro_frags(struct napi_struct *napi) { return GRO_DROP; }
+static inline void napi_free_frags(struct napi_struct *napi) { }
+#define netdev_WARN_ONCE(dev, fmt, ...) WARN_ONCE(1, fmt, ##__VA_ARGS__)
 #endif

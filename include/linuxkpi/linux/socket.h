@@ -8,4 +8,7 @@ struct sockaddr { unsigned short sa_family; char sa_data[14]; };
 #define SIOCSMIIREG 0x8949
 #define SIOCSHWTSTAMP 0x89b0
 #define SIOCGHWTSTAMP 0x89b1
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0x40
+#endif
 #endif

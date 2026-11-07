@@ -26,4 +26,5 @@ static inline void *dma_pool_zalloc(struct dma_pool *pool, gfp_t mem_flags, dma_
 	return lkpi_dma_pool_alloc(pool, mem_flags | __GFP_ZERO, handle);
 }
 
+#define dmam_pool_create(n, d, s, a, b) dma_pool_create(n, d, s, a, b)
 #endif

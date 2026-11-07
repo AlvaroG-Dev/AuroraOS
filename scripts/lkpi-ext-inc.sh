@@ -14,7 +14,7 @@ SRC=${LKPI_LINUX:-build/linuxkpi_src/linux}
 OUT=build/linuxkpi/ext-inc
 [ -d "$SRC/include/uapi" ] || exit 0
 STAMP="$OUT/.stamp"
-WANT="$(cat "$SRC/.aurora-version" 2>/dev/null || echo none)+net12"
+WANT="$(cat "$SRC/.aurora-version" 2>/dev/null || echo none)+net20"
 [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ] && exit 0
 rm -rf "$OUT"
 mkdir -p "$OUT/linux" "$OUT/uapi/linux" "$OUT/drm"
@@ -54,6 +54,7 @@ done
 # estas solo rellenan lo que no tiene version propia (kernel primero, UAPI despues).
 mkdir -p "$OUT/net" "$OUT/kreal"
 ln -sf "$ABS/include/linux/ethtool.h" "$OUT/kreal/ethtool.h"
+ln -sf "$ABS/include/net/genetlink.h" "$OUT/kreal/genetlink.h"
 for f in "$ABS"/include/uapi/linux/*.h; do [ -e "$OUT/uapi/linux/$(basename "$f")" ] || ln -sf "$f" "$OUT/uapi/linux/$(basename "$f")"; done
 ln -sfn "$ABS/include/uapi/linux/hdlc" "$OUT/linux/hdlc"
 for h in if.h libc-compat.h; do [ -e "include/linuxkpi/linux/$h" ] || [ -e "$OUT/linux/$h" ] || ln -sf "$ABS/include/uapi/linux/$h" "$OUT/linux/$h"; done
@@ -74,4 +75,16 @@ done
 mkdir -p "$OUT/linux/platform_data"
 [ -e "$ABS/include/linux/platform_data/simplefb.h" ] && ln -sf "$ABS/include/linux/platform_data/simplefb.h" "$OUT/linux/platform_data/simplefb.h"
 [ -d "$ABS/include/video" ] && ln -sfn "$ABS/include/video" "$OUT/video"
+# Wi-Fi (Plan_Red.md N7): cabeceras de cfg80211/mac80211/ieee80211 del arbol tal cual.
+for h in ieee80211.h if_arp.h wireless.h nl80211.h rfkill.h mpls.h genetlink.h once_lite.h; do
+	if [ -e "$ABS/include/uapi/linux/$h" ]; then ln -sf "$ABS/include/uapi/linux/$h" "$OUT/uapi/linux/$h"; fi
+	[ -e "include/linuxkpi/linux/$h" ] && continue
+	if [ -e "$ABS/include/linux/$h" ]; then ln -sf "$ABS/include/linux/$h" "$OUT/linux/$h"
+	elif [ -e "$ABS/include/uapi/linux/$h" ]; then ln -sf "$ABS/include/uapi/linux/$h" "$OUT/linux/$h"; fi
+done
+for f in "$ABS"/include/linux/ieee80211-*.h; do [ -e "$f" ] && ln -sf "$f" "$OUT/linux/$(basename "$f")"; done
+ln -sf "$ABS/include/net/mac80211.h" "$OUT/kreal/mac80211.h"
+for h in dropreason.h dropreason-core.h codel.h codel_impl.h fq.h fq_impl.h netlink.h cfg80211.h regulatory.h ieee80211_radiotap.h cfg80211-wext.h iw_handler.h; do
+	[ -e "include/linuxkpi/net/$h" ] || { [ -e "$ABS/include/net/$h" ] && ln -sf "$ABS/include/net/$h" "$OUT/net/$h"; }
+done
 echo "$WANT" > "$STAMP"

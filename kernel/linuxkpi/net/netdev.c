@@ -12,6 +12,7 @@
  *    (TCP retransmite).
  *  - NAPI: un tasklet de la capa (contexto "softirq", expulsion desactivada).
  */
+#include <linux/if_arp.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/netdevice.h>
@@ -59,10 +60,69 @@ void kfree_skb(struct sk_buff *skb)
 		return;
 	if (!refcount_dec_and_test(&skb->users))
 		return;
-	kfree(skb->head);
+	/* fragmentos de pagina que el driver cedio al skb (skb_add_rx_frag) */
+	if (skb->head) {
+		struct skb_shared_info *sh = skb_shinfo(skb);
+		unsigned int i;
+
+		for (i = 0; i < sh->nr_frags; i++)
+			if (sh->frags[i].page)
+				put_page(sh->frags[i].page);
+	}
+	if (skb->head_frag)
+		put_page(virt_to_head_page(skb->head));	/* cabeza en una pagina del driver */
+	else
+		kfree(skb->head);
 	kfree(skb);
 }
 EXPORT_SYMBOL(kfree_skb);
+
+/*
+ * build_skb: el skb usa `data` como cabeza (que el driver reservo con espacio
+ * para skb_shared_info al final). frag_size != 0: `data` esta en una pagina
+ * (netdev_alloc_frag / paginas de RX de igb/igc) y se libera con put_page.
+ */
+struct sk_buff *build_skb(void *data, unsigned int frag_size)
+{
+	struct sk_buff *skb = kzalloc(sizeof(*skb), GFP_ATOMIC);
+	unsigned int size = frag_size ? frag_size : ksize(data);
+
+	if (!skb)
+		return NULL;
+	size = SKB_WITH_OVERHEAD(size);
+	skb->head = data;
+	skb->data = data;
+	skb->tail = 0;
+	skb->end = size;
+	skb->truesize = frag_size ? frag_size : ksize(data);
+	skb->head_frag = frag_size ? 1 : 0;
+	refcount_set(&skb->users, 1);
+	skb->mac_header = skb->network_header = skb->transport_header = (typeof(skb->mac_header))~0U;
+	memset(skb_end_pointer(skb), 0, sizeof(struct skb_shared_info));
+	return skb;
+}
+EXPORT_SYMBOL(build_skb);
+
+struct sk_buff *napi_build_skb(void *data, unsigned int frag_size)
+{
+	return build_skb(data, frag_size);
+}
+EXPORT_SYMBOL(napi_build_skb);
+
+void *netdev_alloc_frag(unsigned int fragsz)
+{
+	unsigned long a = __get_free_pages(GFP_ATOMIC | __GFP_COMP, get_order(fragsz));
+
+	return (void *)a;
+}
+EXPORT_SYMBOL(netdev_alloc_frag);
+
+void skb_free_frag(void *addr)
+{
+	if (addr)
+		put_page(virt_to_head_page(addr));
+}
+EXPORT_SYMBOL(skb_free_frag);
 
 struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int length, gfp_t gfp)
 {
@@ -109,7 +169,13 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, gfp_t gfp)
 	if (!nd)
 		return -ENOMEM;
 	memcpy(nd + nhead, skb->head, skb->end);
-	kfree(skb->head);
+	memcpy(nd + dsz, skb->head + skb->end, sizeof(struct skb_shared_info));	/* frags */
+	if (skb->head_frag) {
+		put_page(virt_to_head_page(skb->head));
+		skb->head_frag = 0;
+	} else {
+		kfree(skb->head);
+	}
 	skb->head = nd;
 	skb->data = nd + off + nhead;
 	skb->end = dsz;
@@ -212,6 +278,7 @@ struct lkpi_ndev_extra {
 	struct ethtool_netdev_state ethtool;
 	spinlock_t xmit_lock;
 	void *handle;		/* aurora_netif_register() */
+	bool wifi_link;		/* Wi-Fi: la pila de Aurora ve enlace solo tras el 4-way handshake */
 };
 
 struct net_device *lkpi_alloc_netdev_mqs(int sizeof_priv, const char *name,
@@ -404,14 +471,52 @@ EXPORT_SYMBOL(napi_complete_done);
 
 /* RX ---------------------------------------------------------------- */
 
+/* Wi-Fi: el gestor de aurora_wifi (lkpi_cfg80211) se queda con las tramas EAPOL. */
+void (*lkpi_eapol_rx_hook)(struct net_device *dev, struct sk_buff *skb);
+EXPORT_SYMBOL(lkpi_eapol_rx_hook);
+
 static void lkpi_deliver(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
 	struct lkpi_ndev_extra *x = dev ? NDX(dev) : NULL;
 
+	if (dev && dev->ieee80211_ptr && skb->protocol == htons(ETH_P_PAE) &&
+	    lkpi_eapol_rx_hook) {
+		lkpi_eapol_rx_hook(dev, skb);	/* toma posesion del skb */
+		return;
+	}
+
 	if (x && x->handle && netif_running(dev)) {
 		/* eth_type_trans() quito la cabecera Ethernet: se repone */
 		skb_push(skb, ETH_HLEN);
+		if (skb->data_len) {
+			/* igb/igc/e1000e con paginas: se aplana en un buffer lineal */
+			struct skb_shared_info *sh = skb_shinfo(skb);
+			unsigned int lin = skb_headlen(skb), off, i;
+			u8 *flat = kmalloc(skb->len, GFP_ATOMIC);
+
+			if (flat) {
+				memcpy(flat, skb->data, lin);
+				off = lin;
+				for (i = 0; i < sh->nr_frags && off < skb->len; i++) {
+					unsigned int l = min_t(unsigned int, sh->frags[i].len, skb->len - off);
+
+					memcpy(flat + off, page_address(sh->frags[i].page) + sh->frags[i].offset, l);
+					off += l;
+				}
+				if (!aurora_netif_rx(x->handle, flat, skb->len)) {
+					dev->stats.rx_packets++;
+					dev->stats.rx_bytes += skb->len;
+				} else {
+					dev->stats.rx_dropped++;
+				}
+				kfree(flat);
+			} else {
+				dev->stats.rx_dropped++;
+			}
+			kfree_skb(skb);
+			return;
+		}
 		if (!aurora_netif_rx(x->handle, skb->data, skb->len)) {
 			dev->stats.rx_packets++;
 			dev->stats.rx_bytes += skb->len;
@@ -480,17 +585,31 @@ int netif_set_real_num_rx_queues(struct net_device *dev, unsigned int rxq)
 
 /* estado / registro --------------------------------------------------- */
 
+/* Wi-Fi: enlace hacia la pila de Aurora (DHCP) solo cuando aurora_wifi lo pide. */
+void lkpi_netif_wifi_link(struct net_device *dev, bool up)
+{
+	struct lkpi_ndev_extra *x = NDX(dev);
+
+	x->wifi_link = up;
+	if (x->handle)
+		aurora_netif_carrier(x->handle, up ? 1 : 0);
+}
+EXPORT_SYMBOL(lkpi_netif_wifi_link);
+
 void netif_carrier_on(struct net_device *dev)
 {
-	if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle)
+	if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle &&
+	    !dev->ieee80211_ptr)
 		aurora_netif_carrier(NDX(dev)->handle, 1);
 }
 EXPORT_SYMBOL(netif_carrier_on);
 
 void netif_carrier_off(struct net_device *dev)
 {
-	if (!test_and_set_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle)
+	if (!test_and_set_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle) {
+		NDX(dev)->wifi_link = false;
 		aurora_netif_carrier(NDX(dev)->handle, 0);
+	}
 }
 EXPORT_SYMBOL(netif_carrier_off);
 
@@ -738,3 +857,261 @@ void ethtool_mmsv_get_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_state *sta
 EXPORT_SYMBOL(ethtool_mmsv_get_mm);
 void ethtool_mmsv_set_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_cfg *cfg) { }
 EXPORT_SYMBOL(ethtool_mmsv_set_mm);
+
+/* ---- un solo espacio de nombres, indices de dispositivo y notificadores ---- */
+struct net init_net;
+EXPORT_SYMBOL(init_net);
+
+static DEFINE_MUTEX(lkpi_notif_lock);
+static LIST_HEAD(lkpi_notifiers);
+struct lkpi_notif { struct list_head node; struct notifier_block *nb; };
+static struct net_device *lkpi_devs[32];
+static int lkpi_next_ifindex = 1;
+
+int call_netdevice_notifiers(unsigned long val, struct net_device *dev)
+{
+	struct lkpi_notif *n;
+	struct netdev_notifier_info info = { .dev = dev };
+	int ret = NOTIFY_DONE;
+
+	mutex_lock(&lkpi_notif_lock);
+	list_for_each_entry(n, &lkpi_notifiers, node) {
+		ret = n->nb->notifier_call(n->nb, val, &info);
+		if (ret & NOTIFY_STOP_MASK)
+			break;
+	}
+	mutex_unlock(&lkpi_notif_lock);
+	return ret;
+}
+EXPORT_SYMBOL(call_netdevice_notifiers);
+
+int register_netdevice_notifier(struct notifier_block *nb)
+{
+	struct lkpi_notif *n = kzalloc(sizeof(*n), GFP_KERNEL);
+	int i;
+
+	if (!n)
+		return -ENOMEM;
+	n->nb = nb;
+	mutex_lock(&lkpi_notif_lock);
+	list_add_tail(&n->node, &lkpi_notifiers);
+	/* como Linux: se le notifican los dispositivos que ya existen */
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++) {
+		struct netdev_notifier_info info = { .dev = lkpi_devs[i] };
+		if (!lkpi_devs[i])
+			continue;
+		nb->notifier_call(nb, NETDEV_REGISTER, &info);
+		if (netif_running(lkpi_devs[i]))
+			nb->notifier_call(nb, NETDEV_UP, &info);
+	}
+	mutex_unlock(&lkpi_notif_lock);
+	return 0;
+}
+EXPORT_SYMBOL(register_netdevice_notifier);
+
+int unregister_netdevice_notifier(struct notifier_block *nb)
+{
+	struct lkpi_notif *n, *t;
+
+	mutex_lock(&lkpi_notif_lock);
+	list_for_each_entry_safe(n, t, &lkpi_notifiers, node) {
+		if (n->nb != nb)
+			continue;
+		list_del(&n->node);
+		kfree(n);
+	}
+	mutex_unlock(&lkpi_notif_lock);
+	return 0;
+}
+EXPORT_SYMBOL(unregister_netdevice_notifier);
+
+static void lkpi_dev_index_add(struct net_device *dev)
+{
+	int i;
+
+	dev->ifindex = lkpi_next_ifindex++;
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++)
+		if (!lkpi_devs[i]) {
+			lkpi_devs[i] = dev;
+			return;
+		}
+}
+
+static void lkpi_dev_index_del(struct net_device *dev)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++)
+		if (lkpi_devs[i] == dev)
+			lkpi_devs[i] = NULL;
+}
+
+struct net_device *__dev_get_by_index(struct net *net, int ifindex)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++)
+		if (lkpi_devs[i] && lkpi_devs[i]->ifindex == ifindex)
+			return lkpi_devs[i];
+	return NULL;
+}
+EXPORT_SYMBOL(__dev_get_by_index);
+
+struct net_device *dev_get_by_index(struct net *net, int ifindex)
+{
+	return __dev_get_by_index(net, ifindex);
+}
+EXPORT_SYMBOL(dev_get_by_index);
+
+/* register_netdevice: alta "de dentro" (mac80211/cfg80211 llaman con el rtnl). No
+ * crea la interfaz de Aurora: eso lo hace quien levante el dispositivo. */
+int register_netdevice(struct net_device *dev)
+{
+	int ret;
+
+	if (dev->netdev_ops && dev->netdev_ops->ndo_init) {
+		ret = dev->netdev_ops->ndo_init(dev);
+		if (ret)
+			return ret;
+	}
+	lkpi_dev_index_add(dev);
+	call_netdevice_notifiers(NETDEV_POST_INIT, dev);
+	call_netdevice_notifiers(NETDEV_REGISTER, dev);
+	return 0;
+}
+EXPORT_SYMBOL(register_netdevice);
+
+void unregister_netdevice(struct net_device *dev)
+{
+	if (netif_running(dev))
+		dev_close(dev);
+	call_netdevice_notifiers(NETDEV_UNREGISTER, dev);
+	lkpi_dev_index_del(dev);
+	if (dev->netdev_ops && dev->netdev_ops->ndo_uninit)
+		dev->netdev_ops->ndo_uninit(dev);
+}
+EXPORT_SYMBOL(unregister_netdevice);
+
+/* pernet: un solo espacio, init() al registrar y exit() al retirar */
+int register_pernet_device(struct pernet_operations *ops)
+{
+	return ops->init ? ops->init(&init_net) : 0;
+}
+EXPORT_SYMBOL(register_pernet_device);
+void unregister_pernet_device(struct pernet_operations *ops)
+{
+	if (ops->pre_exit)
+		ops->pre_exit(&init_net);
+	if (ops->exit)
+		ops->exit(&init_net);
+}
+EXPORT_SYMBOL(unregister_pernet_device);
+int register_pernet_subsys(struct pernet_operations *ops) { return register_pernet_device(ops); }
+EXPORT_SYMBOL(register_pernet_subsys);
+void unregister_pernet_subsys(struct pernet_operations *ops) { unregister_pernet_device(ops); }
+EXPORT_SYMBOL(unregister_pernet_subsys);
+const struct kobj_ns_type_operations net_ns_type_operations;
+EXPORT_SYMBOL(net_ns_type_operations);
+
+/* ---- copias de skb: sin datos compartidos (clone == copy) ----
+ * La capa no comparte paquetes entre skbs; clonar copia el contenido. */
+struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp)
+{
+	struct sk_buff *n = __alloc_skb(skb->end, gfp, 0, -1);
+	unsigned char *head;
+	refcount_t users;
+
+	if (!n)
+		return NULL;
+	head = n->head;
+	users = n->users;
+	memcpy(n, skb, sizeof(*n));
+	n->head = head;
+	n->users = users;
+	n->next = n->prev = NULL;
+	memcpy(head, skb->head, skb->end);
+	n->data = head + (skb->data - skb->head);
+	return n;
+}
+EXPORT_SYMBOL(skb_copy);
+
+struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp) { return skb_copy(skb, gfp); }
+EXPORT_SYMBOL(skb_clone);
+struct sk_buff *pskb_copy(struct sk_buff *skb, gfp_t gfp) { return skb_copy(skb, gfp); }
+EXPORT_SYMBOL(pskb_copy);
+
+struct sk_buff *skb_copy_expand(const struct sk_buff *skb, int newheadroom, int newtailroom, gfp_t gfp)
+{
+	struct sk_buff *n = alloc_skb(newheadroom + skb->len + newtailroom, gfp);
+
+	if (!n)
+		return NULL;
+	skb_reserve(n, newheadroom);
+	skb_put_data(n, skb->data, skb->len);
+	n->dev = skb->dev;
+	n->protocol = skb->protocol;
+	n->priority = skb->priority;
+	n->queue_mapping = skb->queue_mapping;
+	memcpy(n->cb, skb->cb, sizeof(n->cb));
+	return n;
+}
+EXPORT_SYMBOL(skb_copy_expand);
+
+struct sk_buff *skb_realloc_headroom(struct sk_buff *skb, unsigned int headroom)
+{
+	if (skb_headroom(skb) >= headroom)
+		return skb_copy(skb, GFP_ATOMIC);
+	return skb_copy_expand(skb, headroom, skb_tailroom(skb), GFP_ATOMIC);
+}
+EXPORT_SYMBOL(skb_realloc_headroom);
+
+void ether_setup(struct net_device *dev)
+{
+	dev->type = ARPHRD_ETHER;
+	dev->hard_header_len = ETH_HLEN;
+	dev->min_mtu = ETH_MIN_MTU;
+	dev->max_mtu = ETH_DATA_LEN;
+	dev->mtu = ETH_DATA_LEN;
+	dev->addr_len = ETH_ALEN;
+	dev->flags = IFF_BROADCAST | IFF_MULTICAST;
+}
+EXPORT_SYMBOL(ether_setup);
+
+int dev_queue_xmit(struct sk_buff *skb)
+{
+	struct net_device *dev = skb->dev;
+
+	if (!dev || !dev->netdev_ops || !dev->netdev_ops->ndo_start_xmit) {
+		kfree_skb(skb);
+		return -ENODEV;
+	}
+	return dev->netdev_ops->ndo_start_xmit(skb, dev) == NETDEV_TX_OK ? 0 : -EBUSY;
+}
+EXPORT_SYMBOL(dev_queue_xmit);
+
+int dev_alloc_name(struct net_device *dev, const char *name)
+{
+	static int n;
+	int len = strlen(name);
+
+	if (len >= 2 && !strcmp(name + len - 2, "%d"))
+		snprintf(dev->name, sizeof(dev->name), "%.*s%d", len - 2, name, n++);
+	else
+		strscpy(dev->name, name, sizeof(dev->name));
+	return 0;
+}
+EXPORT_SYMBOL(dev_alloc_name);
+
+void kfree_skb_list(struct sk_buff *segs)
+{
+	while (segs) {
+		struct sk_buff *next = segs->next;
+
+		kfree_skb(segs);
+		segs = next;
+	}
+}
+EXPORT_SYMBOL(kfree_skb_list);
+
+void skb_complete_wifi_ack(struct sk_buff *skb, bool acked) { kfree_skb(skb); }
+EXPORT_SYMBOL(skb_complete_wifi_ack);

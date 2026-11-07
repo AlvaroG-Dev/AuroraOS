@@ -21,14 +21,6 @@
 
 #include "i915_mm.h"
 
-struct new_utsname lkpi_init_utsname = {
-	.sysname = "Linux",
-	.nodename = "aurora",
-	.release = "6.18.59-aurora",
-	.version = "#1",
-	.machine = "x86_64",
-};
-EXPORT_SYMBOL(lkpi_init_utsname);
 
 /* ------------------------------------------------------------ mapeos */
 

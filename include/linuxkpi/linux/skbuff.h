@@ -71,7 +71,7 @@ struct net_device;
 
 struct sock { u32 sk_tsflags; };
 struct sk_buff {
-	struct sk_buff *next, *prev;
+	union { struct { struct sk_buff *next, *prev; }; struct list_head list; };
 	struct net_device *dev;
 	struct sock *sk;
 	char cb[48] __aligned(8);
@@ -83,6 +83,10 @@ struct sk_buff {
 	__u8 cloned;
 	__u8 no_fcs:1;
 	__u8 encapsulation:1;
+	__u8 head_frag:1;
+	__u8 wifi_acked_valid:1;
+	__u8 wifi_acked:1;
+	void (*destructor)(struct sk_buff *skb);
 	__u8 vlan_present;
 	__u16 vlan_tci;
 	__be16 vlan_proto;
@@ -118,7 +122,7 @@ static inline void napi_consume_skb(struct sk_buff *skb, int budget) { kfree_skb
 static inline void kfree_skb_reason(struct sk_buff *skb, int reason) { kfree_skb(skb); }
 #define dev_kfree_skb_irq_reason(s, r) kfree_skb(s)
 #define dev_kfree_skb_any_reason(s, r) kfree_skb(s)
-#define SKB_DROP_REASON_NOT_SPECIFIED 0
+#include <net/dropreason.h>
 
 static inline struct skb_shared_info *skb_shinfo(const struct sk_buff *skb)
 { return (struct skb_shared_info *)(skb->head + skb->end); }
@@ -260,11 +264,10 @@ static inline void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page
 	skb->len += size; skb->data_len += size; skb->truesize += truesize;
 }
 static inline void net_prefetch(void *p) { prefetch(p); }
-static inline struct sk_buff *napi_build_skb(void *data, unsigned int frag_size)
-{
-	/* igc: el buffer es una pagina; copia lineal para no compartir el frag */
-	return NULL;
-}
+struct sk_buff *build_skb(void *data, unsigned int frag_size);
+struct sk_buff *napi_build_skb(void *data, unsigned int frag_size);
+void *netdev_alloc_frag(unsigned int fragsz);
+void skb_free_frag(void *addr);
 static inline void skb_metadata_set(struct sk_buff *skb, u8 meta_len) { }
 static inline void *__skb_pull(struct sk_buff *skb, unsigned int len) { skb->len -= len; return skb->data += len; }
 static inline void dummy_skb_end(void) { }
@@ -296,4 +299,99 @@ static inline int skb_queue_empty(const struct sk_buff_head *list) { return list
 #include <linux/gfp.h>
 #define dev_alloc_pages(order) alloc_pages(GFP_ATOMIC | __GFP_NOWARN | __GFP_COMP, order)
 static inline bool dev_page_is_reusable(const struct page *page) { return true; }
+#ifndef _LKPI_SKB_WIFI
+#define _LKPI_SKB_WIFI
+static inline bool skb_has_frag_list(const struct sk_buff *skb) { return false; }
+static inline void *pskb_pull(struct sk_buff *skb, unsigned int len) { return len > skb->len ? NULL : skb_pull(skb, len); }
+static inline void skb_postpull_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { }
+static inline void __skb_queue_purge(struct sk_buff_head *list) { struct sk_buff *skb; while ((skb = __skb_dequeue(list)) != NULL) kfree_skb(skb); }
+#endif
+/* ---- colas completas (net/core/skbuff.c + include/linux/skbuff.h) ---- */
+#ifndef _LKPI_SKB_QUEUES
+#define _LKPI_SKB_QUEUES
+static inline struct sk_buff *skb_peek(const struct sk_buff_head *list_)
+{ struct sk_buff *skb = list_->next; return skb == (struct sk_buff *)list_ ? NULL : skb; }
+static inline struct sk_buff *skb_peek_tail(const struct sk_buff_head *list_)
+{ struct sk_buff *skb = list_->prev; return skb == (struct sk_buff *)list_ ? NULL : skb; }
+static inline void __skb_queue_head_init(struct sk_buff_head *list) { list->prev = list->next = (struct sk_buff *)list; list->qlen = 0; }
+static inline bool skb_queue_is_last(const struct sk_buff_head *list, const struct sk_buff *skb) { return skb->next == (struct sk_buff *)list; }
+static inline bool skb_queue_is_first(const struct sk_buff_head *list, const struct sk_buff *skb) { return skb->prev == (struct sk_buff *)list; }
+static inline struct sk_buff *skb_queue_next(const struct sk_buff_head *list, const struct sk_buff *skb) { return skb->next; }
+static inline struct sk_buff *skb_queue_prev(const struct sk_buff_head *list, const struct sk_buff *skb) { return skb->prev; }
+static inline void __skb_insert(struct sk_buff *newsk, struct sk_buff *prev, struct sk_buff *next, struct sk_buff_head *list)
+{ newsk->next = next; newsk->prev = prev; next->prev = newsk; prev->next = newsk; list->qlen++; }
+static inline void __skb_queue_before(struct sk_buff_head *list, struct sk_buff *next, struct sk_buff *newsk) { __skb_insert(newsk, next->prev, next, list); }
+static inline void __skb_queue_after(struct sk_buff_head *list, struct sk_buff *prev, struct sk_buff *newsk) { __skb_insert(newsk, prev, prev->next, list); }
+static inline void __skb_queue_head(struct sk_buff_head *list, struct sk_buff *newsk) { __skb_queue_after(list, (struct sk_buff *)list, newsk); }
+static inline void __skb_unlink(struct sk_buff *skb, struct sk_buff_head *list)
+{ struct sk_buff *next = skb->next, *prev = skb->prev; skb->next = skb->prev = NULL; list->qlen--; next->prev = prev; prev->next = next; }
+static inline void skb_queue_head(struct sk_buff_head *list, struct sk_buff *newsk)
+{ unsigned long f; spin_lock_irqsave(&list->lock, f); __skb_queue_head(list, newsk); spin_unlock_irqrestore(&list->lock, f); }
+static inline void skb_queue_tail(struct sk_buff_head *list, struct sk_buff *newsk)
+{ unsigned long f; spin_lock_irqsave(&list->lock, f); __skb_queue_tail(list, newsk); spin_unlock_irqrestore(&list->lock, f); }
+static inline struct sk_buff *skb_dequeue(struct sk_buff_head *list)
+{ unsigned long f; struct sk_buff *r; spin_lock_irqsave(&list->lock, f); r = __skb_dequeue(list); spin_unlock_irqrestore(&list->lock, f); return r; }
+static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
+{ struct sk_buff *skb = skb_peek_tail(list); if (skb) __skb_unlink(skb, list); return skb; }
+static inline struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
+{ unsigned long f; struct sk_buff *r; spin_lock_irqsave(&list->lock, f); r = __skb_dequeue_tail(list); spin_unlock_irqrestore(&list->lock, f); return r; }
+static inline void skb_unlink(struct sk_buff *skb, struct sk_buff_head *list)
+{ unsigned long f; spin_lock_irqsave(&list->lock, f); __skb_unlink(skb, list); spin_unlock_irqrestore(&list->lock, f); }
+static inline void skb_queue_purge(struct sk_buff_head *list)
+{ struct sk_buff *skb; while ((skb = skb_dequeue(list)) != NULL) kfree_skb(skb); }
+static inline void skb_insert(struct sk_buff *old, struct sk_buff *newsk, struct sk_buff_head *list)
+{ unsigned long f; spin_lock_irqsave(&list->lock, f); __skb_insert(newsk, old->prev, old, list); spin_unlock_irqrestore(&list->lock, f); }
+static inline void __skb_queue_splice(const struct sk_buff_head *list, struct sk_buff *prev, struct sk_buff *next)
+{
+	struct sk_buff *first = list->next, *last = list->prev;
+	first->prev = prev; prev->next = first; last->next = next; next->prev = last;
+}
+static inline void skb_queue_splice(const struct sk_buff_head *list, struct sk_buff_head *head)
+{ if (!skb_queue_empty(list)) { __skb_queue_splice(list, (struct sk_buff *)head, head->next); head->qlen += list->qlen; } }
+static inline void skb_queue_splice_init(struct sk_buff_head *list, struct sk_buff_head *head)
+{ if (!skb_queue_empty(list)) { __skb_queue_splice(list, (struct sk_buff *)head, head->next); head->qlen += list->qlen; __skb_queue_head_init(list); } }
+static inline void skb_queue_splice_tail(const struct sk_buff_head *list, struct sk_buff_head *head)
+{ if (!skb_queue_empty(list)) { __skb_queue_splice(list, head->prev, (struct sk_buff *)head); head->qlen += list->qlen; } }
+static inline void skb_queue_splice_tail_init(struct sk_buff_head *list, struct sk_buff_head *head)
+{ if (!skb_queue_empty(list)) { __skb_queue_splice(list, head->prev, (struct sk_buff *)head); head->qlen += list->qlen; __skb_queue_head_init(list); } }
+#define skb_queue_walk(queue, skb) for (skb = (queue)->next; skb != (struct sk_buff *)(queue); skb = skb->next)
+#define skb_queue_walk_safe(queue, skb, tmp) for (skb = (queue)->next, tmp = skb->next; skb != (struct sk_buff *)(queue); skb = tmp, tmp = skb->next)
+#define skb_queue_walk_from(queue, skb) for (; skb != (struct sk_buff *)(queue); skb = skb->next)
+#define skb_queue_reverse_walk(queue, skb) for (skb = (queue)->prev; skb != (struct sk_buff *)(queue); skb = skb->prev)
+static inline void skb_list_del_init(struct sk_buff *skb) { list_del_init(&skb->list); }
+static inline void *skb_put_u8(struct sk_buff *skb, u8 val) { u8 *p = skb_put(skb, 1); *p = val; return p; }
+static inline bool skb_mac_header_was_set(const struct sk_buff *skb) { return skb->mac_header != (typeof(skb->mac_header))~0U; }
+struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp);
+struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp);
+struct sk_buff *pskb_copy(struct sk_buff *skb, gfp_t gfp);
+struct sk_buff *skb_copy_expand(const struct sk_buff *skb, int newheadroom, int newtailroom, gfp_t gfp);
+struct sk_buff *skb_realloc_headroom(struct sk_buff *skb, unsigned int headroom);
+static inline bool skb_cloned(const struct sk_buff *skb) { return false; }
+static inline bool skb_header_cloned(const struct sk_buff *skb) { return false; }
+static inline struct sk_buff *skb_unshare(struct sk_buff *skb, gfp_t gfp) { return skb; }
+static inline struct sk_buff *skb_share_check(struct sk_buff *skb, gfp_t gfp) { return skb; }
+#endif
+#define __skb_peek(list_) ((list_)->next)
+#ifndef _LKPI_SKB_MORE
+#define _LKPI_SKB_MORE
+typedef u64 netdev_features_t;
+#define skb_list_walk_safe(first, skb, next_skb) \
+	for ((skb) = (first), (next_skb) = (skb) ? (skb)->next : NULL; (skb); \
+	     (skb) = (next_skb), (next_skb) = (skb) ? (skb)->next : NULL)
+static inline void skb_set_mac_header(struct sk_buff *skb, const int offset) { skb->mac_header = skb->data - skb->head + offset; }
+static inline void skb_set_inner_transport_header(struct sk_buff *skb, const int offset) { }
+static inline bool skb_needs_linearize(struct sk_buff *skb, netdev_features_t features) { return false; }
+static inline int skb_ensure_writable(struct sk_buff *skb, unsigned int write_len) { return write_len <= skb->len ? 0 : -EFAULT; }
+static inline int skb_csum_hwoffload_help(struct sk_buff *skb, const netdev_features_t features) { return 0; }
+static inline void skb_copy_queue_mapping(struct sk_buff *to, const struct sk_buff *from) { to->queue_mapping = from->queue_mapping; }
+static inline int skb_clone_writable(const struct sk_buff *skb, unsigned int len) { return 1; }
+static inline struct sk_buff *skb_clone_sk(struct sk_buff *skb) { return NULL; }
+static inline bool sk_requests_wifi_status(struct sock *sk) { return false; }
+static inline void sk_pacing_shift_update(struct sock *sk, int val) { }
+static inline int __skb_linearize(struct sk_buff *skb) { return 0; }
+static inline int __pskb_trim(struct sk_buff *skb, unsigned int len) { if (len < skb->len) { skb->len = len; skb->tail = skb->data - skb->head + len; } return 0; }
+#endif
+#define skb_walk_frags(skb, iter) for (iter = skb_shinfo(skb)->frag_list; iter; iter = iter->next)
+static inline void skb_postpush_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { }
+/* frags de pagina: sin soporte (jumbo en e1000 cae al descarte) */
 #endif

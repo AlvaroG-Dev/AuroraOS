@@ -78,4 +78,6 @@ struct kparam_array {
 #ifndef __MODULE_STRING
 #include <linux/stringify.h>
 #define __MODULE_STRING(x) __stringify(x)
+#define kernel_param_lock(mod) do { } while (0)
+#define kernel_param_unlock(mod) do { } while (0)
 #endif

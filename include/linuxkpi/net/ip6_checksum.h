@@ -3,6 +3,8 @@
 #include <linux/skbuff.h>
 #include <linux/ipv6.h>
 #include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/in6.h>
 /* La capa no genera checksums por software: el driver los hace por hardware
  * o el skb se completa aqui. */
 int skb_checksum_help(struct sk_buff *skb);

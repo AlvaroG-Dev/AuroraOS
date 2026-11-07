@@ -9,3 +9,15 @@
 # L4: prueba de request_firmware con un fichero real (DMC de Kaby Lake,
 # enlace a kbl_dmc_ver1_01.bin; 8616 bytes).
 i915/kbl_dmc_ver1.bin  fe489275b3ea09eeb1662bd1434a184a603a01dae18e31df8b61dc9f160fd562
+
+# N7.3: Wi-Fi Intel (iwlwifi). AX201/AX211 (so-a0-hr-b0), AX210, AX200, 9260, 8265, 7265D.
+iwlwifi-so-a0-hr-b0-89.ucode  6c4a1b2b4720865ee954a055b5aac19377187b142e1b7c5567524c61445bde20
+iwlwifi-so-a0-gf-a0-89.ucode  fae8230ebd1426dfb7d5b5594fdd89e346af5144080659d010b8d2a2fd2f7d4a
+iwlwifi-so-a0-gf-a0.pnvm  78abe08cf33bc209b96a887c7e3db8855a1d9650edacf849c4fa0d4596bcfac5
+iwlwifi-ty-a0-gf-a0-89.ucode  792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0
+iwlwifi-ty-a0-gf-a0.pnvm  9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0
+iwlwifi-cc-a0-77.ucode  1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab
+iwlwifi-QuZ-a0-hr-b0-77.ucode  39d79587dd035bc84172b6bcf6de81217560088b0ceb06304d5121ba56db8d83
+iwlwifi-9260-th-b0-jf-b0-46.ucode  05f4c12514fddfd56fea660b3d2eb6b6e6f4a87a324d5d40464050312ddca911
+iwlwifi-8265-36.ucode  1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56
+iwlwifi-7265D-29.ucode  c52bcaa0595f64d5fb32b7db3dd4b832ea7bf78f1037bcafc19d9c0f5c5c617e
