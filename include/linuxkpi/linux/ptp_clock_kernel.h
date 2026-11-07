@@ -18,6 +18,7 @@ struct ptp_clock_request;
 struct ptp_system_timestamp { struct timespec64 pre_ts; struct timespec64 post_ts; int clockid; };
 struct system_time_snapshot { u64 cycles; ktime_t real; ktime_t raw; unsigned int clock_was_set_seq; u8 cs_id; u8 cs_was_changed_seq; };
 struct system_device_crosststamp;
+struct system_device_crosststamp { ktime_t device; ktime_t sys_realtime; ktime_t sys_monoraw; };
 struct ptp_clock_info {
 	struct module *owner;
 	char name[PTP_CLOCK_NAME_LEN];
@@ -27,6 +28,8 @@ struct ptp_clock_info {
 	int (*adjtime)(struct ptp_clock_info *ptp, s64 delta);
 	int (*gettimex64)(struct ptp_clock_info *ptp, struct timespec64 *ts, struct ptp_system_timestamp *sts);
 	int (*settime64)(struct ptp_clock_info *p, const struct timespec64 *ts);
+	int (*gettime64)(struct ptp_clock_info *ptp, struct timespec64 *ts);
+	int (*getcrosststamp)(struct ptp_clock_info *ptp, struct system_device_crosststamp *cts);
 	int (*enable)(struct ptp_clock_info *ptp, struct ptp_clock_request *request, int on);
 };
 static inline struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info, struct device *parent)

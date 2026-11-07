@@ -359,7 +359,7 @@ void napi_disable(struct napi_struct *n);
 bool napi_schedule_prep(struct napi_struct *n);
 static inline bool napi_if_scheduled_mark_missed(struct napi_struct *n) { return false; }
 void __napi_schedule(struct napi_struct *n);
-static inline void napi_schedule(struct napi_struct *n) { if (napi_schedule_prep(n)) __napi_schedule(n); }
+static inline bool napi_schedule(struct napi_struct *n) { if (napi_schedule_prep(n)) { __napi_schedule(n); return true; } return false; }
 static inline void napi_schedule_irqoff(struct napi_struct *n) { napi_schedule(n); }
 static inline void __napi_schedule_irqoff(struct napi_struct *n) { __napi_schedule(n); }
 bool napi_complete_done(struct napi_struct *n, int work_done);
@@ -519,4 +519,8 @@ void skb_complete_wifi_ack(struct sk_buff *skb, bool acked);
 static inline void __hw_addr_init(struct netdev_hw_addr_list *list) { INIT_LIST_HEAD(&list->list); list->count = 0; }
 static inline int __hw_addr_sync(struct netdev_hw_addr_list *to_list, struct netdev_hw_addr_list *from_list, int addr_len) { return 0; }
 static inline void __hw_addr_unsync(struct netdev_hw_addr_list *to_list, struct netdev_hw_addr_list *from_list, int addr_len) { }
+static inline struct net_device *alloc_netdev_dummy(int sizeof_priv) { return lkpi_alloc_netdev_mqs(sizeof_priv, "dummy", 1, 1); }
+#include <linux/in6.h>
+#define netdev_hw_addr_list_count(l) ((l)->count)
+#define netdev_hw_addr_list_for_each(ha, l) list_for_each_entry(ha, &(l)->list, list)
 #endif

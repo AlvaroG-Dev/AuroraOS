@@ -59,4 +59,5 @@ static inline void u64_to_ether_addr(u64 u, u8 *addr)
 	int i;
 	for (i = ETH_ALEN - 1; i >= 0; i--) { addr[i] = u & 0xff; u = u >> 8; }
 }
+static inline bool ether_addr_equal_unaligned(const u8 *a, const u8 *b) { return !memcmp(a, b, ETH_ALEN); }
 #endif

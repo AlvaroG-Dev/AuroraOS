@@ -237,4 +237,14 @@
 #define PCI_EXT_CAP_ID_DPC 0x1D
 #define PCI_EXT_CAP_ID_L1SS 0x1E
 
+#ifndef PCI_EXP_LNKSTA_CLS_8_0GB
+#define PCI_EXP_LNKSTA_CLS_8_0GB 0x0003
+#endif
+#ifndef PCI_ERR_ROOT_COMMAND
+#define PCI_ERR_ROOT_COMMAND 0x2c
+#define PCI_ERR_ROOT_ERR_SRC 0x34
+#endif
+#ifndef PCI_EXP_DEVCTL2_LTR_EN
+#define PCI_EXP_DEVCTL2_LTR_EN 0x0400
+#endif
 #endif

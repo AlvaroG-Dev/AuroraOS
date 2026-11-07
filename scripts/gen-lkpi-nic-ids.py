@@ -21,6 +21,16 @@ def scan_defs(path):
         defs.setdefault(m.group(1), int(m.group(2), 0))
 scan_defs(os.path.join(SRC, "include/linux/pci_ids.h"))
 out = []
+# Wi-Fi Intel: iwl_hw_card_ids[] con IWL_PCI_DEVICE(dev, subdev, cfg); solo las
+# configuraciones MVM compiladas en lkpi_iwlwifi (cfg/7000..sc).
+WIFI = "lkpi_cfg80211,lkpi_mac80211,lkpi_iwlwifi,lkpi_iwlmvm"
+IWL = os.path.join(SRC, "drivers/net/wireless/intel/iwlwifi")
+have = set()
+for c in ("7000", "8000", "9000", "22000", "ax210", "bz", "sc"):
+    have |= set(re.findall(r"const struct iwl_mac_cfg (\w+)\s*=", open(os.path.join(IWL, "cfg", c + ".c")).read()))
+tbl = re.search(r"iwl_hw_card_ids\[\]\s*=\s*\{(.*?)\n\};", open(os.path.join(IWL, "pcie/drv.c")).read(), re.S).group(1)
+for m in re.finditer(r"IWL_PCI_DEVICE\(\s*(0x[0-9a-fA-F]+)\s*,\s*\w+\s*,\s*(\w+)\s*\)", tbl):
+    if m.group(2) in have: out.append((0x8086, int(m.group(1), 16), WIFI))
 for mod, f, tbl, dirs in DRIVERS:
     for d in dirs:
         for fn in os.listdir(os.path.join(SRC, d)):

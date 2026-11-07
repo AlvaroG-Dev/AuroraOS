@@ -392,4 +392,6 @@ static inline void sk_pacing_shift_update(struct sock *sk, int val) { }
 static inline int __skb_linearize(struct sk_buff *skb) { return 0; }
 static inline int __pskb_trim(struct sk_buff *skb, unsigned int len) { if (len < skb->len) { skb->len = len; skb->tail = skb->data - skb->head + len; } return 0; }
 #endif
+#define skb_walk_frags(skb, iter) for (iter = skb_shinfo(skb)->frag_list; iter; iter = iter->next)
+static inline void skb_postpush_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { }
 #endif

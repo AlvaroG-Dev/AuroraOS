@@ -74,4 +74,5 @@ static inline void ktime_get_raw_ts64(struct timespec64 *ts) { *ts = ns_to_times
 #define _LKPI_TS64_COMPARE
 static inline int timespec64_compare(const struct timespec64 *a, const struct timespec64 *b)
 { if (a->tv_sec != b->tv_sec) return a->tv_sec < b->tv_sec ? -1 : 1; return a->tv_nsec < b->tv_nsec ? -1 : a->tv_nsec > b->tv_nsec; }
+static inline time64_t ktime_get_boottime_seconds(void) { return lkpi_ktime_get_ns() / NSEC_PER_SEC; }
 #endif

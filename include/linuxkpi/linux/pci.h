@@ -522,6 +522,11 @@ struct pci_dev *lkpi_pcie_find_root_port(struct pci_dev *dev);
 /* Sin reasignacion de recursos PCI (resize BAR, ROM, reserva de ventanas): fallan con -ENOSYS / NULL. */
 static inline void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size) { return NULL; }
 static inline void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom) {}
+static inline int pci_assign_resource(struct pci_dev *dev, int i) { return -ENOSYS; }
+static inline bool pci_pme_capable(struct pci_dev *dev, int state) { return false; }
+static inline void pci_lock_rescan_remove(void) { }
+static inline void pci_unlock_rescan_remove(void) { }
+static inline struct pci_bus *pci_rescan_bus(struct pci_bus *bus) { return bus; }
 static inline int pci_resize_resource(struct pci_dev *dev, int i, int size, int exclude_bars) { return -ENOSYS; }
 static inline void pci_release_resource(struct pci_dev *dev, int resno) {}
 static inline u32 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar) { return 0; }

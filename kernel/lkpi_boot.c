@@ -123,7 +123,7 @@ static bool list_has_module(const char *list, const char *name) {
   return false;
 }
 
-static void list_add_module(char *list, size_t cap, const char *name) {
+static void list_add_one(char *list, size_t cap, const char *name) {
   if (list_has_module(list, name))
     return;
   size_t l = strlen(list);
@@ -132,6 +132,23 @@ static void list_add_module(char *list, size_t cap, const char *name) {
     return;
   }
   snprintf(list + l, cap - l, "%s%s", l ? "," : "", name);
+}
+
+// `name` puede ser una lista "a,b,c" (pila Wi-Fi: cfg80211,mac80211,...).
+static void list_add_module(char *list, size_t cap, const char *name) {
+  char one[48];
+  for (const char *p = name; *p;) {
+    const char *e = p;
+    while (*e && *e != ',')
+      e++;
+    size_t n = (size_t)(e - p);
+    if (n >= sizeof(one))
+      n = sizeof(one) - 1;
+    memcpy(one, p, n);
+    one[n] = 0;
+    list_add_one(list, cap, one);
+    p = *e ? e + 1 : e;
+  }
 }
 
 // Anade a `list` el driver de Linux de cada NIC PCI conocida. Devuelve cuantas.

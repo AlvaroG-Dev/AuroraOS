@@ -81,4 +81,7 @@ static inline size_t __must_check size_sub(size_t minuend, size_t subtrahend)
 	union { u8 bytes[struct_size_t(type, member, count)]; type obj; } name##_u __aligned(_Alignof(type)) = {}; \
 	type *name = (type *)&name##_u
 #endif
+#ifndef __struct_size
+#define __struct_size(p) __builtin_object_size(p, 0)
+#endif
 #endif

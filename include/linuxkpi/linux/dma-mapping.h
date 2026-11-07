@@ -236,4 +236,5 @@ static inline void dma_sync_sgtable_for_device(struct device *dev, struct sg_tab
 #define dma_unmap_addr_set(PTR, ADDR_NAME, VAL)	(((PTR)->ADDR_NAME) = (VAL))
 #define dma_unmap_len(PTR, LEN_NAME)		((PTR)->LEN_NAME)
 #define dma_unmap_len_set(PTR, LEN_NAME, VAL)	(((PTR)->LEN_NAME) = (VAL))
+#include <linux/dmapool.h>
 #endif
