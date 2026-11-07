@@ -340,17 +340,23 @@ static int lkpi_enable_msix(struct pci_dev *dev, int min, int max, unsigned int 
 	resource_size_t phys;
 	u16 ctrl;
 
-	if (!tsize || dev->no_msi)
+	if (!tsize || dev->no_msi) {
+		pci_info(dev, "MSI-X: sin tabla (tsize=%d no_msi=%d)\n", tsize, dev->no_msi);
 		return -EINVAL;
+	}
 	if (lkpi_irq_mode_blocked('x'))
 		return -EINVAL;
 	if (max > tsize)
 		max = tsize;
-	if (max < min)
+	if (max < min) {
+		pci_info(dev, "MSI-X: min=%u > tabla=%d\n", min, tsize);
 		return -ENOSPC;
+	}
 	phys = lkpi_msix_table_phys(dev);
-	if (!phys)
+	if (!phys) {
+		pci_info(dev, "MSI-X: sin direccion de tabla\n");
 		return -EINVAL;
+	}
 	irqs = lkpi_irqs_alloc(max);
 	cpus = kcalloc(max, sizeof(*cpus), GFP_KERNEL);
 	if (!irqs || !cpus) {

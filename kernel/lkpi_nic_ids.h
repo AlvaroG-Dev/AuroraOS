@@ -31,6 +31,8 @@ static const struct { uint16_t vendor, device; uint8_t native; const char *modul
     {0x1969, 0xe091, 0, "lkpi_alx"},
     {0x1969, 0xe0a1, 0, "lkpi_alx"},
     {0x1969, 0xe0b1, 0, "lkpi_alx"},
+    {0x1af4, 0x1000, 0, "lkpi_virtio,lkpi_virtio_net"},
+    {0x1af4, 0x1041, 0, "lkpi_virtio,lkpi_virtio_net"},
     {0x8086, 0x02f0, 0, "lkpi_cfg80211,lkpi_mac80211,lkpi_iwlwifi,lkpi_iwlmvm"},
     {0x8086, 0x0438, 0, "lkpi_igb"},
     {0x8086, 0x043a, 0, "lkpi_igb"},

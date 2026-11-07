@@ -34,6 +34,9 @@ for c in ("7000", "8000", "9000", "22000", "ax210", "bz", "sc"):
 tbl = re.search(r"iwl_hw_card_ids\[\]\s*=\s*\{(.*?)\n\};", open(os.path.join(IWL, "pcie/drv.c")).read(), re.S).group(1)
 for m in re.finditer(r"IWL_PCI_DEVICE\(\s*(0x[0-9a-fA-F]+)\s*,\s*\w+\s*,\s*(\w+)\s*\)", tbl):
     if m.group(2) in have: out.append((0x8086, int(m.group(1), 16), WIFI))
+# virtio-net (transicional 1af4:1000 y moderno 1af4:1041) sobre el bus virtio de la capa.
+for dev in (0x1000, 0x1041):
+    out.append((0x1af4, dev, "lkpi_virtio,lkpi_virtio_net"))
 for mod, f, tbl, dirs in DRIVERS:
     for d in dirs:
         for fn in os.listdir(os.path.join(SRC, d)):
