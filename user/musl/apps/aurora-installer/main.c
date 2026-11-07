@@ -1,13 +1,14 @@
 // user/musl/apps/aurora-installer/main.c
 //
-// Instalador grafico de AuroraOS (estilo asistente de macOS): pantalla completa,
-// sin Dock ni barra de menus (el kernel lo hace con aur.kiosk=1), barra lateral con
-// los pasos y un panel de contenido. Es la cara de /usr/sbin/aurora-install:
-// recoge disco, cuenta y paquetes opcionales, lanza el motor y muestra su progreso
+// Instalador grafico de AuroraOS, al estilo del Asistente de macOS. Pantalla
+// completa negra-grafito (el kernel quita Dock y barra de menus con aur.kiosk=1) y
+// una unica ventana de tamano fijo, centrada, con los tres botones de ventana: solo
+// el rojo esta activo y apaga el equipo. Es la cara de /usr/sbin/aurora-install:
+// recoge disco, cuenta y extras opcionales, lanza el motor y muestra su progreso
 // (/run/aurora-install.progress). Colores solidos, verde aurora solo como acento.
 //
-// Pasos: Bienvenida -> Disco -> Cuenta -> Paquetes -> Resumen -> Instalando -> Listo.
-// Teclado: Tab cambia de campo, Intro continua, Retroceso borra.
+// Pasos: Bienvenida -> Disco -> Cuenta -> Extras -> (confirmacion) -> Instalando -> Listo.
+// Teclado: Tab/Intro cambian de campo, Intro continua y confirma, Esc cancela.
 
 #define syscall aurora_syscall
 #define puts aurora_puts_userlib
@@ -44,25 +45,25 @@ extern void _exit(int status) __attribute__((noreturn));
 #define WNOHANG_ 1
 
 typedef struct {
-  uint32_t bg, card, line, text, dim, accent, accent_text, danger, field;
+  uint32_t bg, shadow, win, bar, card, line, text, dim, accent, accent_text, danger, field, off;
 } palette_t;
-static const palette_t PAL_DARK = {0xFF0E1412, 0xFF16201C, 0xFF263530, 0xFFE8F2EE, 0xFF8FA39B,
-                                   0xFF3EE89B, 0xFF04261A, 0xFFFF6A3D, 0xFF111A17};
-static const palette_t PAL_LIGHT = {0xFFF4F8F6, 0xFFFFFFFF, 0xFFD2E0D9, 0xFF14201B, 0xFF5B6E66,
-                                    0xFF3EE89B, 0xFF04261A, 0xFFD9481F, 0xFFFFFFFF};
-static const palette_t *P = &PAL_DARK;
+// Solo modo oscuro: fondo negro grafito, ventana gris oscuro.
+static const palette_t PAL = {0xFF111113, 0xFF08080A, 0xFF242427, 0xFF2D2D31, 0xFF2D2D31, 0xFF3C3C41,
+                              0xFFF2F2F4, 0xFF9C9CA3, 0xFF3EE89B, 0xFF04261A, 0xFFFF6A3D, 0xFF19191B,
+                              0xFF55555B};
+static const palette_t *P = &PAL;
 
 static int W, H;
 static uint32_t *g_px;
 static const font_aa_t *g_font;
 static int g_win = -1, g_dirty = 1;
-static uint32_t g_theme_seen;
 
 // ---- Pasos ----
-enum { S_WELCOME, S_DISK, S_ACCOUNT, S_PACKAGES, S_SUMMARY, S_INSTALL, S_DONE, S_N };
-static const char *k_step_name[S_N] = {"Bienvenida", "Disco",     "Cuenta", "Paquetes",
-                                       "Resumen",    "Instalando", "Listo"};
+enum { S_WELCOME, S_DISK, S_ACCOUNT, S_EXTRAS, S_INSTALL, S_DONE, S_N };
+#define N_DOTS 4 // pasos con puntos: Bienvenida, Disco, Cuenta, Extras
 static int g_step = S_WELCOME;
+static int g_confirm; // hoja "borrar el disco e instalar"
+static int g_user_touched;
 
 // ---- Discos ----
 #define MAX_DISKS 8
@@ -81,10 +82,11 @@ static char g_err[96];
 
 // ---- Paquetes ----
 static const char *k_pkg_id[] = {"devtools", "python", "perl", "gtk", "qt"};
-static const char *k_pkg_name[] = {"Herramientas de desarrollo (GCC, make, nasm...)",
-                                   "Python 3", "Perl", "Librerias GTK (apps GTK)",
-                                   "Librerias Qt5 (apps Qt)"};
-static const char *k_pkg_size[] = {"~250 MB", "~25 MB", "~35 MB", "~60 MB", "~70 MB"};
+static const char *k_pkg_name[] = {"Herramientas de desarrollo", "Python 3", "Perl",
+                                   "Apps GTK", "Apps Qt"};
+static const char *k_pkg_desc[] = {"GCC, make, nasm y utilidades", "Interprete y biblioteca estandar",
+                                   "Interprete y modulos", "Librerias GTK 3 y 4", "Librerias Qt 5"};
+static const char *k_pkg_size[] = {"250 MB", "25 MB", "35 MB", "60 MB", "70 MB"};
 #define N_PKG 5
 static int g_pkg_on[N_PKG];
 
@@ -297,8 +299,8 @@ static int valid_user(const char *u) {
 }
 static int validate_account(void) {
   g_err[0] = 0;
-  if (!valid_user(g_user)) { scopy(g_err, "Usuario no valido (a-z, 0-9, _ y -; no 'root')", sizeof(g_err)); return 0; }
-  if (slen(g_pass) < 4) { scopy(g_err, "La contrasena debe tener al menos 4 caracteres", sizeof(g_err)); return 0; }
+  if (!valid_user(g_user)) { scopy(g_err, "Usa solo minusculas, numeros, _ y - (no 'root')", sizeof(g_err)); return 0; }
+  if (slen(g_pass) < 4) { scopy(g_err, "La contrasena necesita al menos 4 caracteres", sizeof(g_err)); return 0; }
   if (!sequal(g_pass, g_pass2)) { scopy(g_err, "Las contrasenas no coinciden", sizeof(g_err)); return 0; }
   return 1;
 }
@@ -375,169 +377,207 @@ static void poll_install(void) {
 }
 
 // ---- Interfaz ----
-#define BTN_H 44
+#define BTN_H 40
+#define WIN_W 900
+#define WIN_H 640
+#define BAR_H 44
 typedef struct { int x, y, w, h; } rect_t;
-static rect_t g_btn_next, g_btn_back, g_btn_a, g_btn_b;
-static int g_next_on, g_back_on, g_a_on, g_b_on;
-static const char *g_next_lbl, *g_a_lbl, *g_b_lbl;
+static int WX, WY, WW, WH; // ventana (posicion y tamano fijo)
+static rect_t g_btn_next, g_btn_back, g_btn_a, g_btn_ok, g_btn_cancel;
+static int g_next_on, g_back_on, g_a_on;
+static const char *g_next_lbl, *g_a_lbl;
 static rect_t g_disk_rect[MAX_DISKS], g_pkg_rect[N_PKG], g_field_rect[4];
+static int g_close_on;
 
-static void button(rect_t r, const char *lbl, int primary, int enabled) {
-  uint32_t bg = primary ? (enabled ? P->accent : P->line) : P->card;
-  uint32_t fg = primary ? (enabled ? P->accent_text : P->dim) : P->text;
-  if (!primary) ring(r.x, r.y, r.w, r.h, 10, P->line, P->card);
-  else fill_round(r.x, r.y, r.w, r.h, 10, bg);
+static int hit(rect_t r, int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
+static void ctext(int cx, int y, const char *s, uint32_t col, int sc) {
+  text_sc(cx - text_w(s, sc) / 2, y, s, col, sc);
+}
+static void button(rect_t r, const char *lbl, int primary, uint32_t bg_override) {
+  if (bg_override) fill_round(r.x, r.y, r.w, r.h, 9, bg_override);
+  else if (primary) fill_round(r.x, r.y, r.w, r.h, 9, P->accent);
+  else fill_round(r.x, r.y, r.w, r.h, 9, P->card), ring(r.x, r.y, r.w, r.h, 9, P->line, P->card);
+  uint32_t fg = (primary || bg_override) ? P->accent_text : P->text;
   text(r.x + (r.w - text_w(lbl, 1)) / 2, r.y + (r.h - 18) / 2, lbl, fg);
 }
-static int hit(rect_t r, int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
-
 static void draw_field(int idx, int x, int y, int w, const char *label, const char *val, int secret) {
   text(x, y, label, P->dim);
-  rect_t r = {x, y + 22, w, 44};
+  rect_t r = {x, y + 22, w, 42};
   g_field_rect[idx] = r;
-  ring(r.x, r.y, r.w, r.h, 10, g_field == idx ? P->accent : P->line, P->field);
+  ring(r.x, r.y, r.w, r.h, 9, g_field == idx ? P->accent : P->line, P->field);
   char shown[80]; int n = slen(val); if (n > 78) n = 78;
   for (int i = 0; i < n; i++) shown[i] = secret ? '*' : val[i];
   shown[n] = 0;
-  text(r.x + 14, r.y + 13, shown, P->text);
-  if (g_field == idx && ((now_ms() / 500) & 1)) fill(r.x + 14 + n * adv(), r.y + 10, 2, 24, P->accent);
+  text(r.x + 14, r.y + 12, shown, P->text);
+  if (g_field == idx && ((now_ms() / 500) & 1)) fill(r.x + 14 + n * adv(), r.y + 9, 2, 24, P->accent);
+}
+static void thick_line(int x0, int y0, int x1, int y1, int r, uint32_t c) {
+  int dx = x1 - x0, dy = y1 - y0, n = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+  if (n == 0) n = 1;
+  for (int i = 0; i <= n; i++) circle(x0 + dx * i / n, y0 + dy * i / n, r, c);
+}
+static void switch_ctl(int x, int y, int on) {
+  fill_round(x, y, 46, 26, 13, on ? P->accent : P->off);
+  circle(on ? x + 33 : x + 13, y + 13, 10, 0xFFFFFFFF);
 }
 
 static void draw(void) {
+  int cxm = WX + WW / 2; // centro horizontal de la ventana
   fill(0, 0, W, H, P->bg);
-  int sw = W >= 1000 ? 300 : 220;
-  fill(0, 0, sw, H, P->card);
-  fill(sw - 1, 0, 1, H, P->line);
-  // Marca
-  fill_round(40, 44, 52, 52, 14, P->accent);
-  text_sc(56, 50, "A", P->accent_text, 3);
-  text_sc(108, 52, "AuroraOS", P->text, 2);
-  text(110, 84, "Instalador", P->dim);
-  // Pasos
-  int y = 170;
-  for (int i = 0; i < S_N; i++) {
-    int cy = y + 12;
-    if (i < g_step) { circle(56, cy, 9, P->accent); }
-    else if (i == g_step) { circle(56, cy, 9, P->accent); circle(56, cy, 4, P->card); }
-    else { circle(56, cy, 9, P->line); circle(56, cy, 7, P->card); }
-    text(80, y + 3, k_step_name[i], i == g_step ? P->text : (i < g_step ? P->dim : P->dim));
-    y += 44;
+  // Sombra y ventana
+  fill_round(WX - 10, WY - 2, WW + 20, WH + 22, 22, P->shadow);
+  fill_round(WX - 1, WY - 1, WW + 2, WH + 2, 15, P->line);
+  fill_round(WX, WY, WW, WH, 14, P->win);
+  fill_round(WX, WY, WW, BAR_H, 14, P->bar);
+  fill(WX, WY + BAR_H / 2, WW, BAR_H / 2, P->bar);
+  fill(WX, WY + BAR_H, WW, 1, P->line);
+  // Semaforo: solo el rojo funciona (apaga). Minimizar y maximizar, apagados.
+  g_close_on = g_step != S_INSTALL;
+  circle(WX + 24, WY + BAR_H / 2, 7, g_close_on ? 0xFFFF6A3D : P->off);
+  circle(WX + 48, WY + BAR_H / 2, 7, P->off);
+  circle(WX + 72, WY + BAR_H / 2, 7, P->off);
+  if (g_close_on) { // aspa del boton cerrar
+    thick_line(WX + 21, WY + BAR_H / 2 - 3, WX + 27, WY + BAR_H / 2 + 3, 0, 0xFF5A1A08);
+    thick_line(WX + 27, WY + BAR_H / 2 - 3, WX + 21, WY + BAR_H / 2 + 3, 0, 0xFF5A1A08);
   }
+  ctext(cxm, WY + 14, "Instalar AuroraOS", P->dim, 1);
 
-  int cx = sw + (W - sw >= 1000 ? 100 : 56);
-  int cw = W - cx - (W - sw >= 1000 ? 100 : 56);
-  if (cw > 760) cw = 760;
-  int by = H - 100;
-  g_next_on = g_back_on = g_a_on = g_b_on = 0;
+  int by = WY + WH - 70; // fila de botones
+  int pad = 44;
+  g_next_on = g_back_on = g_a_on = 0;
+  int cw = 600, cx = cxm - cw / 2; // columna de contenido centrada
+  int ty = WY + BAR_H + 44;         // y del titulo
 
   switch (g_step) {
   case S_WELCOME:
-    text_sc(cx, 90, "Te damos la bienvenida", P->text, 2);
-    text(cx, 150, "Este asistente instalara AuroraOS en tu equipo.", P->dim);
-    text(cx, 182, "Necesitaras un disco de al menos 2 GB. Se creara:", P->dim);
-    text(cx + 20, 220, "- una particion de arranque (ESP)", P->text);
-    text(cx + 20, 248, "- el sistema (ext2) y una particion de datos con tu cuenta", P->text);
-    text(cx, 300, "Se borrara el contenido del disco que elijas.", P->danger);
-    g_next_lbl = "Continuar"; g_next_on = 1;
+    fill_round(cxm - 52, ty + 6, 104, 104, 26, P->accent);
+    ctext(cxm, ty + 24, "A", P->accent_text, 6);
+    ctext(cxm, ty + 150, "Te damos la bienvenida", P->text, 3);
+    ctext(cxm, ty + 206, "Vamos a instalar AuroraOS en este equipo.", P->dim, 1);
+    ctext(cxm, ty + 232, "Solo te haran falta unos minutos.", P->dim, 1);
+    g_next_lbl = "Empezar"; g_next_on = 1;
     g_a_lbl = "Abrir terminal"; g_a_on = 1;
     break;
   case S_DISK:
-    text_sc(cx, 90, "Elige el disco", P->text, 2);
-    text(cx, 148, "Todo su contenido sera borrado.", P->danger);
-    if (!g_ndisks) text(cx, 200, "No se ha encontrado ningun disco.", P->dim);
+    ctext(cxm, ty, "Elige donde instalar", P->text, 2);
+    ctext(cxm, ty + 48, "Se borrara todo el contenido del disco elegido.", P->dim, 1);
+    if (!g_ndisks) ctext(cxm, ty + 140, "No se ha encontrado ningun disco.", P->dim, 1);
     for (int i = 0; i < g_ndisks; i++) {
-      rect_t r = {cx, 190 + i * 76, cw, 64};
+      rect_t r = {cx, ty + 96 + i * 74, cw, 62};
       g_disk_rect[i] = r;
       int dis = g_disks[i].is_boot || g_disks[i].too_small;
       ring(r.x, r.y, r.w, r.h, 12, i == g_sel_disk ? P->accent : P->line, P->card);
-      circle(r.x + 30, r.y + 32, 10, i == g_sel_disk ? P->accent : P->line);
-      if (i != g_sel_disk) circle(r.x + 30, r.y + 32, 7, P->card);
-      char l[96] = "/dev/"; sappend(l, g_disks[i].name, sizeof(l));
-      text(r.x + 60, r.y + 12, l, dis ? P->dim : P->text);
-      char sz[48]; utoa_(g_disks[i].mb, sz); sappend(sz, " MiB", sizeof(sz));
-      if (g_disks[i].is_boot) sappend(sz, "  (medio de instalacion)", sizeof(sz));
-      else if (g_disks[i].too_small) sappend(sz, "  (demasiado pequeno)", sizeof(sz));
-      text(r.x + 60, r.y + 36, sz, P->dim);
+      circle(r.x + 32, r.y + 31, 10, i == g_sel_disk ? P->accent : P->off);
+      if (i != g_sel_disk) circle(r.x + 32, r.y + 31, 7, P->card);
+      else circle(r.x + 32, r.y + 31, 4, P->accent_text);
+      char l[96] = "Disco ("; sappend(l, g_disks[i].name, sizeof(l)); sappend(l, ")", sizeof(l));
+      text(r.x + 62, r.y + 11, l, dis ? P->dim : P->text);
+      char sz[48];
+      if (g_disks[i].mb >= 1024) { utoa_(g_disks[i].mb / 1024, sz); sappend(sz, " GB", sizeof(sz)); }
+      else { utoa_(g_disks[i].mb, sz); sappend(sz, " MB", sizeof(sz)); }
+      if (g_disks[i].is_boot) sappend(sz, "  -  medio de instalacion", sizeof(sz));
+      else if (g_disks[i].too_small) sappend(sz, "  -  demasiado pequeno", sizeof(sz));
+      text(r.x + 62, r.y + 34, sz, P->dim);
     }
     g_next_lbl = "Continuar"; g_next_on = g_sel_disk >= 0; g_back_on = 1;
     break;
   case S_ACCOUNT: {
-    text_sc(cx, 90, "Crea tu cuenta", P->text, 2);
-    draw_field(0, cx, 150, cw, "Nombre completo (opcional)", g_full, 0);
-    draw_field(1, cx, 240, cw, "Nombre de usuario", g_user, 0);
-    draw_field(2, cx, 330, cw, "Contrasena", g_pass, 1);
-    draw_field(3, cx, 420, cw, "Repetir contrasena", g_pass2, 1);
-    if (g_err[0]) text(cx, 500, g_err, P->danger);
+    ctext(cxm, ty - 8, "Crea tu cuenta", P->text, 2);
+    int fy = ty + 44;
+    draw_field(0, cx, fy, cw, "Nombre completo", g_full, 0);
+    draw_field(1, cx, fy + 84, cw, "Nombre de usuario", g_user, 0);
+    draw_field(2, cx, fy + 168, cw, "Contrasena", g_pass, 1);
+    draw_field(3, cx, fy + 252, cw, "Repetir contrasena", g_pass2, 1);
+    if (g_err[0]) ctext(cxm, fy + 336, g_err, P->danger, 1);
     g_next_lbl = "Continuar"; g_next_on = 1; g_back_on = 1;
     break;
   }
-  case S_PACKAGES:
-    text_sc(cx, 90, "Paquetes opcionales", P->text, 2);
-    text(cx, 148, "Se descargan de Ubuntu 24.04 con APT en el primer arranque con red.", P->dim);
+  case S_EXTRAS:
+    ctext(cxm, ty - 8, "Extras opcionales", P->text, 2);
+    ctext(cxm, ty + 38, "Se descargan despues, la primera vez que haya red.", P->dim, 1);
+    ctext(cxm, ty + 60, "Puedes saltarte todo esto y anadirlos mas tarde.", P->dim, 1);
     for (int i = 0; i < N_PKG; i++) {
-      rect_t r = {cx, 190 + i * 64, cw, 52};
+      rect_t r = {cx, ty + 98 + i * 64, cw, 54};
       g_pkg_rect[i] = r;
       ring(r.x, r.y, r.w, r.h, 12, P->line, P->card);
-      fill_round(r.x + 16, r.y + 14, 24, 24, 6, g_pkg_on[i] ? P->accent : P->line);
-      if (!g_pkg_on[i]) fill_round(r.x + 18, r.y + 16, 20, 20, 5, P->card);
-      else text(r.x + 22, r.y + 16, "v", P->accent_text);
-      text(r.x + 56, r.y + 16, k_pkg_name[i], P->text);
-      text(r.x + r.w - 100, r.y + 16, k_pkg_size[i], P->dim);
+      text(r.x + 20, r.y + 8, k_pkg_name[i], P->text);
+      char d[64]; d[0] = 0; scopy(d, k_pkg_desc[i], sizeof(d)); sappend(d, "  -  ", sizeof(d)); sappend(d, k_pkg_size[i], sizeof(d));
+      text(r.x + 20, r.y + 29, d, P->dim);
+      switch_ctl(r.x + r.w - 46 - 18, r.y + 14, g_pkg_on[i]);
     }
-    g_next_lbl = "Continuar"; g_next_on = 1; g_back_on = 1;
-    break;
-  case S_SUMMARY: {
-    text_sc(cx, 90, "Todo listo para instalar", P->text, 2);
-    char l[160];
-    l[0] = 0; scopy(l, "Disco:   /dev/", sizeof(l)); sappend(l, g_disks[g_sel_disk].name, sizeof(l));
-    text(cx, 160, l, P->text);
-    l[0] = 0; scopy(l, "Usuario: ", sizeof(l)); sappend(l, g_user, sizeof(l));
-    text(cx, 192, l, P->text);
-    l[0] = 0; scopy(l, "Extras:  ", sizeof(l));
-    int any = 0;
-    for (int i = 0; i < N_PKG; i++) if (g_pkg_on[i]) { if (any) sappend(l, ", ", sizeof(l)); sappend(l, k_pkg_id[i], sizeof(l)); any = 1; }
-    if (!any) sappend(l, "ninguno", sizeof(l));
-    text(cx, 224, l, P->text);
-    text(cx, 290, "Se borrara todo el contenido del disco seleccionado.", P->danger);
     g_next_lbl = "Instalar"; g_next_on = 1; g_back_on = 1;
     break;
-  }
   case S_INSTALL: {
-    text_sc(cx, 90, "Instalando AuroraOS", P->text, 2);
-    text(cx, 150, g_msg, P->dim);
-    rect_t r = {cx, 200, cw, 14};
-    fill_round(r.x, r.y, r.w, r.h, 7, P->line);
-    int fw = r.w * g_pct / 100;
-    if (fw > 14) fill_round(r.x, r.y, fw, r.h, 7, P->accent);
+    ctext(cxm, ty + 40, "Instalando AuroraOS", P->text, 2);
     char pc[16]; utoa_((unsigned long long)g_pct, pc); sappend(pc, " %", sizeof(pc));
-    text(cx, 232, pc, P->text);
-    text(cx, 290, "No apagues el equipo. Puede tardar varios minutos.", P->dim);
+    ctext(cxm, ty + 100, pc, P->accent, 3);
+    rect_t r = {cxm - 240, ty + 170, 480, 10};
+    fill_round(r.x, r.y, r.w, r.h, 5, P->line);
+    int fw = r.w * g_pct / 100;
+    if (fw > 10) fill_round(r.x, r.y, fw, r.h, 5, P->accent);
+    ctext(cxm, ty + 204, g_msg, P->dim, 1);
+    ctext(cxm, ty + 270, "No apagues el equipo. Puede tardar varios minutos.", P->dim, 1);
     break;
   }
   case S_DONE:
     if (g_failed) {
-      text_sc(cx, 90, "La instalacion ha fallado", P->danger, 2);
-      text(cx, 150, g_msg, P->text);
-      text(cx, 190, "Puedes volver atras y reintentarlo, o abrir un terminal.", P->dim);
+      circle(cxm, ty + 52, 40, P->danger);
+      ctext(cxm, ty + 30, "!", P->accent_text, 4);
+      ctext(cxm, ty + 120, "No se ha podido instalar", P->text, 2);
+      ctext(cxm, ty + 172, g_msg, P->dim, 1);
+      ctext(cxm, ty + 204, "Puedes volver atras y reintentarlo, o abrir un terminal.", P->dim, 1);
       g_next_lbl = "Volver"; g_next_on = 1;
       g_a_lbl = "Abrir terminal"; g_a_on = 1;
     } else {
-      text_sc(cx, 90, "Instalacion completada", P->text, 2);
-      text(cx, 150, "Retira el medio de instalacion y reinicia para empezar a usar AuroraOS.", P->dim);
-      char l[96] = "Tu usuario: "; sappend(l, g_user, sizeof(l));
-      text(cx, 190, l, P->text);
+      circle(cxm, ty + 52, 40, P->accent);
+      thick_line(cxm - 16, ty + 54, cxm - 5, ty + 66, 3, P->accent_text);
+      thick_line(cxm - 5, ty + 66, cxm + 18, ty + 38, 3, P->accent_text);
+      ctext(cxm, ty + 120, "AuroraOS esta instalado", P->text, 2);
+      char l[96] = "Tu usuario es "; sappend(l, g_user, sizeof(l));
+      ctext(cxm, ty + 172, l, P->text, 1);
+      ctext(cxm, ty + 204, "Retira el medio de instalacion y reinicia para empezar.", P->dim, 1);
       g_next_lbl = "Reiniciar"; g_next_on = 1;
       g_a_lbl = "Apagar"; g_a_on = 1;
     }
     break;
   }
 
-  g_btn_next = (rect_t){W - 80 - 200, by, 200, BTN_H};
-  g_btn_back = (rect_t){W - 80 - 200 - 16 - 140, by, 140, BTN_H};
-  g_btn_a = (rect_t){cx, by, 200, BTN_H};
-  if (g_next_on) button(g_btn_next, g_next_lbl, 1, 1);
-  if (g_back_on) button(g_btn_back, "Atras", 0, 1);
-  if (g_a_on) button(g_btn_a, g_a_lbl, 0, 1);
+  // Puntos de progreso (solo en los pasos de datos)
+  if (g_step < N_DOTS)
+    for (int i = 0; i < N_DOTS; i++)
+      circle(cxm - (N_DOTS - 1) * 12 + i * 24, by + BTN_H / 2, i == g_step ? 5 : 4, i == g_step ? P->text : P->off);
+  g_btn_next = (rect_t){WX + WW - pad - 160, by, 160, BTN_H};
+  g_btn_back = (rect_t){WX + WW - pad - 160 - 12 - 120, by, 120, BTN_H};
+  g_btn_a = (rect_t){WX + pad, by, 160, BTN_H};
+  if (g_step == S_WELCOME || g_step == S_DONE) g_btn_next.x = WX + WW - pad - 160;
+  if (g_next_on) button(g_btn_next, g_next_lbl, 1, 0);
+  if (g_back_on) button(g_btn_back, "Atras", 0, 0);
+  if (g_a_on) button(g_btn_a, g_a_lbl, 0, 0);
+
+  // Hoja de confirmacion (sobre la ventana)
+  if (g_confirm) {
+    // Oscurecer la ventana tras la hoja (respetando las esquinas redondeadas).
+    for (int j = WY; j < WY + WH && j < H; j++)
+      for (int i = WX; i < WX + WW && i < W; i++) {
+        int ex = i < WX + 14 ? WX + 14 - i : (i >= WX + WW - 14 ? i - (WX + WW - 15) : 0);
+        int ey = j < WY + 14 ? WY + 14 - j : (j >= WY + WH - 14 ? j - (WY + WH - 15) : 0);
+        if (ex && ey && ex * ex + ey * ey > 196) continue;
+        uint32_t c = g_px[j * W + i];
+        g_px[j * W + i] = 0xFF000000u | (((c >> 16 & 0xFF) * 45 / 100) << 16) | (((c >> 8 & 0xFF) * 45 / 100) << 8) | ((c & 0xFF) * 45 / 100);
+      }
+    rect_t sh = {cxm - 270, WY + WH / 2 - 130, 540, 260};
+    fill_round(sh.x - 1, sh.y - 1, sh.w + 2, sh.h + 2, 17, P->line);
+    fill_round(sh.x, sh.y, sh.w, sh.h, 16, P->bar);
+    ctext(cxm, sh.y + 32, "Borrar el disco e instalar?", P->text, 2);
+    char l[120] = "Se borrara todo el contenido de ";
+    sappend(l, g_disks[g_sel_disk].name, sizeof(l)); sappend(l, ".", sizeof(l));
+    ctext(cxm, sh.y + 96, l, P->dim, 1);
+    ctext(cxm, sh.y + 122, "Esta accion no se puede deshacer.", P->dim, 1);
+    g_btn_cancel = (rect_t){sh.x + 36, sh.y + sh.h - 76, 200, BTN_H};
+    g_btn_ok = (rect_t){sh.x + sh.w - 36 - 240, sh.y + sh.h - 76, 240, BTN_H};
+    button(g_btn_cancel, "Cancelar", 0, 0);
+    button(g_btn_ok, "Borrar e instalar", 0, P->danger);
+  }
   sys_win_blit(g_win, 0, 0, W, H, 0, 0, W, g_px);
   g_dirty = 0;
 }
@@ -546,11 +586,10 @@ static void go_next(void) {
   switch (g_step) {
   case S_WELCOME: scan_disks(); g_step = S_DISK; break;
   case S_DISK: if (g_sel_disk >= 0) g_step = S_ACCOUNT; break;
-  case S_ACCOUNT: if (validate_account()) g_step = S_PACKAGES; break;
-  case S_PACKAGES: g_step = S_SUMMARY; break;
-  case S_SUMMARY: start_install(); break;
+  case S_ACCOUNT: if (validate_account()) g_step = S_EXTRAS; break;
+  case S_EXTRAS: g_confirm = 1; break;
   case S_DONE:
-    if (g_failed) { g_step = S_SUMMARY; g_failed = 0; }
+    if (g_failed) { g_step = S_EXTRAS; g_failed = 0; }
     else run_cmd("/usr/bin/reboot", NULL);
     break;
   }
@@ -569,11 +608,29 @@ static char *field_buf(int f, int *cap) {
   default: *cap = sizeof(g_pass2); return g_pass2;
   }
 }
+// Sugiere el usuario a partir del nombre completo (primera palabra, minusculas).
+static void suggest_user(void) {
+  int n = 0;
+  for (int i = 0; g_full[i] && g_full[i] != ' ' && n < 20; i++) {
+    char c = g_full[i];
+    if (c >= 'A' && c <= 'Z') c += 32;
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) g_user[n++] = c;
+  }
+  g_user[n] = 0;
+}
 static void on_char(int c) {
+  if (g_confirm) {
+    if (c == 27) { g_confirm = 0; g_dirty = 1; }
+    else if (c == 10 || c == 13) { g_confirm = 0; start_install(); g_dirty = 1; }
+    return;
+  }
   if (g_step == S_ACCOUNT) {
     int cap; char *b;
     if (c == 9) { g_field = (g_field + 1) % 4; g_dirty = 1; return; }
-    if (c == 10 || c == 13) { go_next(); return; }
+    if (c == 10 || c == 13) {
+      if (g_field < 3) { g_field++; g_dirty = 1; } else go_next();
+      return;
+    }
     b = field_buf(g_field, &cap);
     int n = slen(b);
     if (c == 8 || c == 127) { if (n) b[n - 1] = 0; }
@@ -581,12 +638,23 @@ static void on_char(int c) {
       if (g_field == 1 && c >= 'A' && c <= 'Z') c += 32;
       b[n] = (char)c; b[n + 1] = 0;
     }
+    if (g_field == 0 && !g_user_touched) suggest_user();
+    if (g_field == 1) g_user_touched = 1;
     g_dirty = 1;
   } else if (c == 10 || c == 13) {
     if (g_step != S_INSTALL) go_next();
   }
 }
 static void on_click(int x, int y) {
+  if (g_confirm) {
+    if (hit(g_btn_ok, x, y)) { g_confirm = 0; start_install(); }
+    else if (hit(g_btn_cancel, x, y)) g_confirm = 0;
+    g_dirty = 1;
+    return;
+  }
+  // Boton rojo: apagar (no durante la instalacion)
+  int dx = x - (WX + 24), dy = y - (WY + BAR_H / 2);
+  if (g_close_on && dx * dx + dy * dy <= 100) { run_cmd("/usr/bin/poweroff", NULL); return; }
   if (g_a_on && hit(g_btn_a, x, y)) {
     if (g_step == S_DONE && !g_failed) run_cmd("/usr/bin/poweroff", NULL);
     else run_cmd("/usr/bin/terminal", NULL);
@@ -597,7 +665,7 @@ static void on_click(int x, int y) {
   if (g_step == S_DISK)
     for (int i = 0; i < g_ndisks; i++)
       if (hit(g_disk_rect[i], x, y) && !g_disks[i].is_boot && !g_disks[i].too_small) { g_sel_disk = i; g_dirty = 1; }
-  if (g_step == S_PACKAGES)
+  if (g_step == S_EXTRAS)
     for (int i = 0; i < N_PKG; i++)
       if (hit(g_pkg_rect[i], x, y)) { g_pkg_on[i] ^= 1; g_dirty = 1; }
   if (g_step == S_ACCOUNT)
@@ -618,8 +686,10 @@ int main(void) {
   g_win = sys_win_create(0, 0, W, H, "Instalador de AuroraOS");
   if (g_win < 0) return 1;
   sys_win_set_icon(g_win, "/system/icons/app-generic.bmp");
-  g_theme_seen = sys_theme_get();
-  P = (g_theme_seen & 1) ? &PAL_LIGHT : &PAL_DARK;
+  WW = WIN_W; WH = WIN_H;
+  if (WW > W - 40) WW = W - 40;
+  if (WH > H - 40) WH = H - 40;
+  WX = (W - WW) / 2; WY = (H - WH) / 2;
   text_clip_setup();
 
   uint64_t last = 0;
@@ -637,8 +707,6 @@ int main(void) {
         g_dirty = 1;
       }
     }
-    uint32_t th = sys_theme_get();
-    if (th != g_theme_seen) { g_theme_seen = th; P = (th & 1) ? &PAL_LIGHT : &PAL_DARK; g_dirty = 1; }
     uint64_t t = now_ms();
     if (t - last >= 250) {
       last = t;

@@ -33,7 +33,7 @@ for c in sys.argv[1:]:
         except Exception: pass
     elif c.startswith('type:'):
         for ch in c[5:]:
-            k = {'_':'shift-minus','-':'minus'}.get(ch, ch)
+            k = {'_':'shift-minus','-':'minus'}.get(ch, ('shift-'+ch.lower()) if ch.isupper() else ch)
             s.send(('sendkey %s\n' % k).encode()); time.sleep(0.35)
     else:
         s.send((c+'\n').encode()); time.sleep(0.5)
@@ -44,10 +44,10 @@ for i in $(seq 1 600); do grep -aq "Cargando /usr/bin/init" $L1 2>/dev/null && b
 sleep 40
 mon shot:1-bienvenida "sendkey ret"; sleep 3
 mon shot:2-disco "sendkey ret"; sleep 2
-mon "sendkey tab" "type:tester" "sendkey tab" "type:secret1" "sendkey tab" "type:secret1"; sleep 1
+mon "type:Tester" "sendkey tab" "sendkey tab" "type:secret1" "sendkey tab" "type:secret1"; sleep 1
 mon shot:3-cuenta "sendkey ret"; sleep 2
-mon shot:4-paquetes "sendkey ret"; sleep 2
-mon shot:5-resumen "sendkey ret"; sleep 20
+mon shot:4-extras "sendkey ret"; sleep 2
+mon shot:5-confirmar "sendkey ret"; sleep 20
 mon shot:6-instalando
 for i in $(seq 1 ${T1:-1800}); do grep -aq "Instalacion completada\|ERROR:" $L1 2>/dev/null && break; sleep 2; done
 sleep 8
