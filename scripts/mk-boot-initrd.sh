@@ -13,6 +13,9 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/usr/bin" "$T/usr/lib" "$T/lib" "$T/system"
 mkdir -p "$T"/{proc,dev,sys,run,tmp,newroot,oldroot,data,root,bin,sbin}
 cp "$BOOT" "$T/usr/bin/init"
+# e2fsck estatico: reparar la raiz tras un apagado brusco, antes de montarla.
+mkdir -p "$T/usr/sbin"
+for f in "$SYS/usr/sbin/e2fsck" "$(dirname "$0")/../precompiled/usr/sbin/e2fsck"; do [ -x "$f" ] && { cp "$f" "$T/usr/sbin/e2fsck"; break; }; done
 # Los drivers .aur (ahci, xhci, ps2...) son ELF dinamicos: necesitan ld.so + libc.
 mkdir -p "$T/lib64" "$T/lib/x86_64-linux-gnu" "$T/usr/lib/x86_64-linux-gnu"
 cp -aL "$SYS/lib64/ld-linux-x86-64.so.2" "$T/lib64/"

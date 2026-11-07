@@ -1748,9 +1748,16 @@ struct mounts_ctx {
   size_t cap;
 };
 
+// Tras pivot_root el arbol viejo queda bajo /oldroot: es ruido para el usuario.
+static int mount_hidden(const char *path) {
+  return strncmp(path, "/oldroot", 8) == 0 && (path[8] == '\0' || path[8] == '/');
+}
+
 static int append_mount_line(const char *path, const char *fs_name, int is_bind,
                              const char *bind_source, void *arg) {
   struct mounts_ctx *mc = (struct mounts_ctx *)arg;
+  if (mount_hidden(path))
+    return 0;
   const char *opts = (strcmp(fs_name, "tarfs") == 0) ? "ro" : "rw";
 
   mc->len = kappend(mc->buf, mc->len, mc->cap, "none ");
@@ -1802,6 +1809,8 @@ static int mountinfo_collect_cb(const char *path, const char *fs_name,
   (void)is_bind;
   (void)bind_source;
   struct mountinfo_collect_ctx *c = (struct mountinfo_collect_ctx *)arg;
+  if (mount_hidden(path))
+    return 0;
   if (c->n >= c->cap)
     return 1;
 

@@ -21,6 +21,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef SYS_pivot_root
@@ -145,6 +146,66 @@ static void save_mounts(void) {
   fclose(f);
 }
 
+
+// Tras un apagado brusco el ext2 queda sucio y el kernel lo monta solo lectura (sin
+// escritura no arrancan ni el dock ni las apps). Se repara ANTES de montarlo, como
+// hace el initramfs de Linux. fsck.repair=0 en la linea de comandos lo desactiva.
+static void fsck_dev(const char *dev, const char *what) {
+  char v[8];
+  if (cmdline_get("fsck.repair", v, sizeof(v)) && v[0] == '0')
+    return;
+  if (access("/usr/sbin/e2fsck", X_OK) != 0)
+    return;
+  for (int pass = 0; pass < 2; pass++) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      char *argv[] = {"e2fsck", pass ? "-fy" : "-p", (char *)dev, NULL};
+      char *envp[] = {"PATH=/usr/sbin:/usr/bin:/sbin:/bin", NULL};
+      execve("/usr/sbin/e2fsck", argv, envp);
+      _exit(127);
+    }
+    if (pid < 0)
+      return;
+    int st = 0;
+    waitpid(pid, &st, 0);
+    int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+    char b[16];
+    snprintf(b, sizeof(b), "%d", rc);
+    say(what, b);
+    if (rc < 4)
+      return; // 0 limpio, 1/2 corregido
+  }
+}
+
+// El kernel monta AURORADATA en /data antes de que corra este programa; si estaba
+// sucia la monta solo lectura y asi se queda toda la sesion (sin /data escribible no
+// hay hogar de usuario: no salen ni el dock ni las apps). Se mira el estado en el
+// superbloque (s_state, bit 0 = limpio) y, si esta sucia, se desmonta, se repara y
+// se vuelve a montar en lectura/escritura.
+static void fix_data(void) {
+  char v[8], dev[96];
+  if (cmdline_get("fsck.repair", v, sizeof(v)) && v[0] == '0')
+    return;
+  if (find_root("LABEL=AURORADATA", dev, sizeof(dev)) != 0)
+    return;
+  int fd = open(dev, O_RDONLY);
+  if (fd < 0)
+    return;
+  unsigned char sb[2] = {1, 0};
+  ssize_t n = pread(fd, sb, 2, 1024 + 58);
+  close(fd);
+  if (n != 2 || (sb[0] & 1))
+    return; // limpia (o ilegible): nada que hacer
+  say("[aurora-boot] %s sucia: reparando antes de montar /data", dev);
+  if (umount("/data") != 0) {
+    say("[aurora-boot] no se pudo desmontar /data (%s)", strerror(errno));
+    return;
+  }
+  fsck_dev(dev, "[aurora-boot] e2fsck de /data: codigo %s");
+  if (mount(dev, "/data", "ext2", 0, NULL) != 0)
+    say("[aurora-boot] no se pudo volver a montar /data (%s)", strerror(errno));
+}
+
 int main(void) {
   char spec[160] = "", dev[96] = "", wait_s[16] = "";
   int wait = 45;
@@ -165,6 +226,8 @@ int main(void) {
     say("[aurora-boot] no se encontro la raiz %s", spec);
     goto fail;
   }
+  fsck_dev(dev, "[aurora-boot] e2fsck de la raiz: codigo %s");
+  fix_data();
   mkdir("/newroot", 0755);
   if (mount(dev, "/newroot", "ext2", 0, NULL) != 0) {
     say("[aurora-boot] no se pudo montar %s como ext2", dev);
