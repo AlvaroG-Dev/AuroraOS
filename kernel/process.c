@@ -1679,6 +1679,10 @@ void process_exit(process_t *proc, int exit_code) {
 
   signalfd_cleanup(proc);
   ptimer_exit(proc->pid);
+  {
+    extern void posix_lock_release_pid(uint32_t pid);
+    posix_lock_release_pid(proc->pid); // [fcntl POSIX locks]
+  }
 
   process_clear_envp(proc);
   process_clear_argv(proc);
@@ -2506,8 +2510,9 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   // ya refleje los valores finales.
   uint32_t x_euid = proc->euid, x_egid = proc->egid;
   // [U2] nosuid: los volúmenes FAT32 (/data, USB) nunca conceden setuid/setgid.
-  int nosuid = exe_node->fs && exe_node->fs->name &&
-               strcmp(exe_node->fs->name, "fat32") == 0;
+  int nosuid = (exe_node->fs && exe_node->fs->name &&
+                strcmp(exe_node->fs->name, "fat32") == 0) ||
+               (vfs_mount_flags(path) & VFS_MS_NOSUID); // mount -o nosuid
   if (!proc->no_new_privs && !nosuid) {
     if (new_mode & S_ISUID)
       x_euid = new_uid;

@@ -25,6 +25,7 @@
 #include "process.h"
 #include "rtc.h"
 #include "string.h"
+#include "uaccess.h"
 
 #define EXT2_MAGIC 0xEF53
 #define EXT2_ROOT_INO 2
@@ -63,6 +64,19 @@
 #define EXT2_COMPAT_RW_OK 0x003F
 #define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
 #define EXT2_INDEX_FL 0x1000
+// Flags de inodo que chattr puede cambiar (FS_IOC_SETFLAGS) y cuales se imponen.
+#define EXT2_SYNC_FL 0x00000008u
+#define EXT2_IMMUTABLE_FL 0x00000010u
+#define EXT2_APPEND_FL 0x00000020u
+#define EXT2_NODUMP_FL 0x00000040u
+#define EXT2_NOATIME_FL 0x00000080u
+#define EXT2_DIRSYNC_FL 0x00010000u
+#define EXT2_USER_FLAGS (EXT2_SYNC_FL | EXT2_IMMUTABLE_FL | EXT2_APPEND_FL | \
+                         EXT2_NODUMP_FL | EXT2_NOATIME_FL | EXT2_DIRSYNC_FL)
+#define EXT2_PROTECT_FL (EXT2_IMMUTABLE_FL | EXT2_APPEND_FL)
+#define FS_IOC_GETFLAGS_ 0x80086601UL
+#define FS_IOC_SETFLAGS_ 0x40086602UL
+#define FS_IOC_GETVERSION_ 0x80087601UL
 #define EXT2_LINK_MAX 32000
 #ifndef EXDEV
 #define EXDEV 18
@@ -1357,7 +1371,7 @@ static int ext2_pg_push(ext2_fs_t *fs, ext2_ino_t *ip, ext2_pg_t *pg) {
         break;
       }
       memcpy(d, mem + off, n);
-      bc_mark_dirty(b);
+      bc_mark_dirty_data(b);
       changed = 1;
     }
     bc_put(b);
@@ -1983,6 +1997,11 @@ static int64_t ext2_node_write(vfs_node_t *node, uint64_t offset, size_t size,
     rc = ((ip->di.i_mode & S_IFMT) == S_IFDIR) ? -EISDIR : -EINVAL;
     goto out;
   }
+  if ((ip->di.i_flags & EXT2_IMMUTABLE_FL) ||
+      ((ip->di.i_flags & EXT2_APPEND_FL) && offset != ip->size)) {
+    rc = -EPERM;
+    goto out;
+  }
   uint64_t end = offset + size;
   if (end > 0x7fffffffULL && !fs->rev1) {
     rc = -EFBIG;
@@ -2010,7 +2029,7 @@ static int64_t ext2_node_write(vfs_node_t *node, uint64_t offset, size_t size,
       break;
     }
     memcpy((uint8_t *)bc_data(b) + boff, src + done, n);
-    bc_mark_dirty(b);
+    bc_mark_dirty_data(b);
     bc_put(b);
     done += (int64_t)n;
   }
@@ -2045,6 +2064,10 @@ static int ext2_node_truncate(vfs_node_t *node, uint64_t new_size) {
     goto out;
   if ((ip->di.i_mode & S_IFMT) != S_IFREG) {
     rc = ((ip->di.i_mode & S_IFMT) == S_IFDIR) ? -EISDIR : -EINVAL;
+    goto out;
+  }
+  if (ip->di.i_flags & EXT2_PROTECT_FL) {
+    rc = -EPERM;
     goto out;
   }
   if (new_size == ip->size)
@@ -2325,6 +2348,11 @@ static int ext2_unlink_op(vfs_node_t *dvn, const char *name) {
     goto out;
   }
   int isdir = (cip->di.i_mode & S_IFMT) == S_IFDIR;
+  if (cip->di.i_flags & EXT2_PROTECT_FL) {
+    rc = -EPERM;
+    ext2_iput(fs, cip);
+    goto out;
+  }
   if (isdir && !ext2_dir_is_empty(fs, cip)) {
     rc = -ENOTEMPTY;
     ext2_iput(fs, cip);
@@ -2363,6 +2391,8 @@ static int ext2_chmod_op(vfs_node_t *node, uint32_t mode) {
   ext2_fs_t *fs = en->fs;
   mutex_lock(&fs->lock);
   int rc = ext2_begin_write(fs);
+  if (rc == 0 && (en->ip->di.i_flags & EXT2_IMMUTABLE_FL))
+    rc = -EPERM;
   if (rc == 0) {
     en->ip->di.i_mode =
         (uint16_t)((en->ip->di.i_mode & S_IFMT) | (mode & 07777));
@@ -2381,6 +2411,8 @@ static int ext2_chown_op(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   ext2_fs_t *fs = en->fs;
   mutex_lock(&fs->lock);
   int rc = ext2_begin_write(fs);
+  if (rc == 0 && (en->ip->di.i_flags & EXT2_IMMUTABLE_FL))
+    rc = -EPERM;
   if (rc == 0) {
     ext2_inode_t *di = &en->ip->di;
     if (uid != (uint32_t)-1) {
@@ -2406,11 +2438,53 @@ static int ext2_utimes_op(vfs_node_t *node, int64_t mtime_sec) {
   ext2_fs_t *fs = en->fs;
   mutex_lock(&fs->lock);
   int rc = ext2_begin_write(fs);
+  if (rc == 0 && (en->ip->di.i_flags & EXT2_IMMUTABLE_FL))
+    rc = -EPERM;
   if (rc == 0) {
     en->ip->di.i_mtime = (uint32_t)mtime_sec;
     en->ip->di.i_ctime = ext2_now();
     rc = ext2_ip_flush(fs, en->ip);
     ext2_refresh_vnode(node, en->ip);
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
+// FS_IOC_GETFLAGS / SETFLAGS / GETVERSION (lsattr, chattr).
+static int64_t ext2_node_ioctl(vfs_node_t *node, unsigned long req,
+                               uint64_t arg) {
+  ext2_node_t *en = node ? node->priv : NULL;
+  if (!en)
+    return -ENOTTY;
+  ext2_fs_t *fs = en->fs;
+  ext2_ino_t *ip = en->ip;
+  process_t *p = process_current();
+  if (req == FS_IOC_GETFLAGS_ || req == FS_IOC_GETVERSION_) {
+    mutex_lock(&fs->lock);
+    long v = (req == FS_IOC_GETFLAGS_) ? (long)ip->di.i_flags : (long)ip->di.i_generation;
+    mutex_unlock(&fs->lock);
+    return copy_to_user((void *)arg, &v, sizeof(v)) < 0 ? -EFAULT : 0;
+  }
+  if (req != FS_IOC_SETFLAGS_)
+    return -ENOTTY;
+  long v = 0;
+  if (copy_from_user(&v, (void *)arg, sizeof(v)) < 0)
+    return -EFAULT;
+  uint32_t want = (uint32_t)v & EXT2_USER_FLAGS;
+  mutex_lock(&fs->lock);
+  int rc = ext2_begin_write(fs);
+  if (rc == 0) {
+    uint32_t old = ip->di.i_flags;
+    uint32_t uid = ip->di.i_uid | ((uint32_t)ip->di.i_uid_high << 16);
+    if (!p || (p->euid != 0 && p->euid != uid))
+      rc = -EPERM;
+    else if (((old ^ want) & EXT2_PROTECT_FL) && p->euid != 0)
+      rc = -EPERM; // immutable/append-only: solo root (CAP_LINUX_IMMUTABLE)
+    else {
+      ip->di.i_flags = (old & ~EXT2_USER_FLAGS) | want;
+      ip->di.i_ctime = ext2_now();
+      rc = ext2_ip_flush(fs, ip);
+    }
   }
   mutex_unlock(&fs->lock);
   return rc;
@@ -2559,6 +2633,10 @@ static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
     goto out;
   }
   int sdir = (sip->di.i_mode & S_IFMT) == S_IFDIR;
+  if (sip->di.i_flags & EXT2_PROTECT_FL) {
+    rc = -EPERM;
+    goto out;
+  }
   int drc = ext2_dir_lookup(fs, dp->ino, &dp->di, dp->size, dname, dl, &dino);
   if (drc != 0 && drc != -ENOENT) {
     rc = drc;
@@ -2574,6 +2652,10 @@ static int ext2_rename_op(vfs_node_t *sdvn, const char *sname,
       goto out;
     }
     int ddir = (dip->di.i_mode & S_IFMT) == S_IFDIR;
+    if (dip->di.i_flags & EXT2_PROTECT_FL) {
+      rc = -EPERM;
+      goto out;
+    }
     if (sdir && !ddir) {
       rc = -ENOTDIR;
       goto out;
@@ -2673,6 +2755,10 @@ static int ext2_link_op(vfs_node_t *dvn, const char *name, vfs_node_t *target) {
     rc = -ENOENT;
     goto out;
   }
+  if (tip->di.i_flags & EXT2_PROTECT_FL) {
+    rc = -EPERM;
+    goto out;
+  }
   if (tip->di.i_links_count >= EXT2_LINK_MAX) {
     rc = -EMLINK;
     goto out;
@@ -2716,6 +2802,7 @@ static vfs_ops_t ext2_node_ops = {
     .utimes = ext2_utimes_op,
     .chmod = ext2_chmod_op,
     .chown = ext2_chown_op,
+    .ioctl = ext2_node_ioctl,
     .fsync = ext2_fsync_op,
     .get_page = ext2_get_page_op,
 };

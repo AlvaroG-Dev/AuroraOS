@@ -397,3 +397,22 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
   demás discos conservan su nombre `/dev/sdX` (visible con `lsblk`/`blkid`) y se
   anota en el log que no se montan. `automount=all` en la línea del kernel
   devuelve el comportamiento anterior.
+
+## Cierre de pendientes (2026-11-05)
+
+- **lsattr/chattr:** ioctls `FS_IOC_GETFLAGS/SETFLAGS/GETVERSION` en ext2. Los
+  flags `immutable` y `append-only` (solo root puede ponerlos) se imponen en
+  write, truncate, unlink, rename, link, chmod, chown y utimes.
+- **nosuid:** `mount -o nosuid` (y remount) hace que execve ignore setuid/setgid
+  en ese montaje, para cualquier FS (antes solo FAT32).
+- **mknod FIFO/socket por syscall:** crea el nodo en ext2 y tmpfs (tar, cp -a).
+  Abrir un FIFO con nombre como tubería sigue sin existir en el VFS; los
+  dispositivos de bloque por mknod siguen en EPERM.
+- **data=ordered:** `bc_mark_dirty_data`: en cada volcado salen primero los
+  bloques de datos de ficheros, se hace `bdev_flush` y después los metadatos.
+  Tras el cambio los cortes de luz dejan el FS sin huérfanos pendientes en las
+  14 iteraciones probadas (1 KiB con la carga aleatoria; 4 KiB con extracción
+  de tar y carga paralela), todas con `e2fsck -fy` = 0.
+- Tests: `run_pending_test.sh`, `run_crash_test.sh` con `SIZE/BS/LOADFILE/WDIR`.
+- **Sigue fuera:** instalador E7.3 (a petición de Alvaro), abrir FIFOs con
+  nombre, mknod de bloque, ioctls de ext4 no relacionados con flags.

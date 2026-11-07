@@ -3594,6 +3594,235 @@ static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
   return (int64_t)buflen;
 }
 
+// ---------- fcntl: locks de registro (F_GETLK/F_SETLK/F_SETLKW + OFD) ----------
+//
+// apt/dpkg/sqlite/etc. toman locks con fcntl(F_SETLK[W]) o F_OFD_SETLK[W].
+// Antes caían en `default: -EINVAL` ("no se pudo adquirir el lock", -22).
+//
+// Tabla global de rangos [start,end) (end=UINT64_MAX = hasta EOF). Clave del
+// dueño: POSIX → pid del proceso; OFD → puntero a la open file description.
+// Los locks POSIX se sueltan al cerrar cualquier fd del fichero y al salir
+// el proceso (posix_lock_release_*); los OFD, al morir la descripción.
+#define PLOCK_MAX 512
+#define PL_RD 0
+#define PL_WR 1
+#define PL_UN 2
+struct k_flock64 {
+  int16_t l_type;
+  int16_t l_whence;
+  int32_t _pad0;
+  int64_t l_start;
+  int64_t l_len;
+  int32_t l_pid;
+  int32_t _pad1;
+};
+_Static_assert(sizeof(struct k_flock64) == 32, "struct flock x86_64");
+
+struct plock {
+  void *fs;
+  uint64_t ino;
+  uint64_t owner;
+  uint32_t pid;
+  uint64_t start, end;
+  int type; // PL_RD / PL_WR
+  int used;
+};
+static struct plock g_plocks[PLOCK_MAX];
+static spinlock_t g_plock_lock;
+
+static int plock_overlap(const struct plock *l, uint64_t s, uint64_t e) {
+  return l->start < e && s < l->end;
+}
+
+// Busca un lock ajeno que choque. Llamar con g_plock_lock tomado.
+static struct plock *plock_find_conflict(void *fs, uint64_t ino,
+                                         uint64_t owner, int type, uint64_t s,
+                                         uint64_t e) {
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (!l->used || l->fs != fs || l->ino != ino || l->owner == owner)
+      continue;
+    if (!plock_overlap(l, s, e))
+      continue;
+    if (type == PL_WR || l->type == PL_WR)
+      return l;
+  }
+  return NULL;
+}
+
+// Quita [s,e) de los locks del dueño (recorta/parte). 0 ok, -ENOLCK sin hueco.
+// Llamar con g_plock_lock tomado.
+static int plock_remove_range(void *fs, uint64_t ino, uint64_t owner,
+                              uint64_t s, uint64_t e) {
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (!l->used || l->fs != fs || l->ino != ino || l->owner != owner ||
+        !plock_overlap(l, s, e))
+      continue;
+    int left = l->start < s, right = l->end > e;
+    if (left && right) {
+      int j;
+      for (j = 0; j < PLOCK_MAX; j++)
+        if (!g_plocks[j].used)
+          break;
+      if (j == PLOCK_MAX)
+        return -ENOLCK;
+      g_plocks[j] = *l;
+      g_plocks[j].start = e;
+      l->end = s;
+    } else if (left) {
+      l->end = s;
+    } else if (right) {
+      l->start = e;
+    } else {
+      l->used = 0;
+    }
+  }
+  return 0;
+}
+
+static int plock_insert(void *fs, uint64_t ino, uint64_t owner, uint32_t pid,
+                        int type, uint64_t s, uint64_t e) {
+  int rc = plock_remove_range(fs, ino, owner, s, e);
+  if (rc < 0)
+    return rc;
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (l->used)
+      continue;
+    l->fs = fs;
+    l->ino = ino;
+    l->owner = owner;
+    l->pid = pid;
+    l->start = s;
+    l->end = e;
+    l->type = type;
+    l->used = 1;
+    return 0;
+  }
+  return -ENOLCK;
+}
+
+// Cierre de un fd (POSIX: suelta todos los locks del proceso sobre el fichero).
+void posix_lock_release_file(uint32_t pid, void *fs, uint64_t ino) {
+  unsigned long fl = spin_lock_irqsave(&g_plock_lock);
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (l->used && l->pid == pid && l->owner == (uint64_t)pid && l->fs == fs &&
+        l->ino == ino)
+      l->used = 0;
+  }
+  spin_unlock_irqrestore(&g_plock_lock, fl);
+}
+
+void posix_lock_release_pid(uint32_t pid) {
+  unsigned long fl = spin_lock_irqsave(&g_plock_lock);
+  for (int i = 0; i < PLOCK_MAX; i++)
+    if (g_plocks[i].used && g_plocks[i].pid == pid &&
+        g_plocks[i].owner == (uint64_t)pid)
+      g_plocks[i].used = 0;
+  spin_unlock_irqrestore(&g_plock_lock, fl);
+}
+
+// La descripción OFD muere: soltar sus locks.
+void posix_lock_release_ofd(void *desc) {
+  unsigned long fl = spin_lock_irqsave(&g_plock_lock);
+  for (int i = 0; i < PLOCK_MAX; i++)
+    if (g_plocks[i].used && g_plocks[i].owner == (uint64_t)desc &&
+        g_plocks[i].pid == 0)
+      g_plocks[i].used = 0;
+  spin_unlock_irqrestore(&g_plock_lock, fl);
+}
+
+static int64_t k_fcntl_lock(process_t *proc, file_descriptor_t *f, uint64_t cmd,
+                            uint64_t arg) {
+  int ofd = (cmd >= 36 && cmd <= 38);       // F_OFD_GETLK/SETLK/SETLKW
+  int getlk = (cmd == 5 || cmd == 36);      // F_GETLK
+  int wait = (cmd == 7 || cmd == 38);       // F_SETLKW
+  if (!f->node)
+    return -EBADF;
+  if (!arg || !access_ok((void *)arg, sizeof(struct k_flock64)))
+    return -EFAULT;
+  struct k_flock64 fl;
+  if (copy_from_user(&fl, (void *)arg, sizeof(fl)) < 0)
+    return -EFAULT;
+  if (fl.l_type != PL_RD && fl.l_type != PL_WR && fl.l_type != PL_UN)
+    return -EINVAL;
+  if (ofd && fl.l_pid != 0)
+    return -EINVAL;
+  if (fl.l_type == PL_RD && (f->flags & 3) == 1)
+    return -EBADF; // RDLCK sobre fd O_WRONLY
+  if (fl.l_type == PL_WR && (f->flags & 3) == 0)
+    return -EBADF; // WRLCK sobre fd O_RDONLY
+
+  int64_t base;
+  switch (fl.l_whence) {
+  case 0: base = 0; break;
+  case 1: base = (int64_t)f->offset; break;
+  case 2: base = (int64_t)f->node->size; break;
+  default: return -EINVAL;
+  }
+  int64_t st = base + fl.l_start;
+  uint64_t s, e;
+  if (fl.l_len >= 0) {
+    if (st < 0)
+      return -EINVAL;
+    s = (uint64_t)st;
+    e = fl.l_len == 0 ? UINT64_MAX : s + (uint64_t)fl.l_len;
+  } else { // len negativo: [st+len, st)
+    int64_t b = st + fl.l_len;
+    if (b < 0)
+      return -EINVAL;
+    s = (uint64_t)b;
+    e = (uint64_t)st;
+  }
+  if (e <= s && e != UINT64_MAX)
+    return -EINVAL;
+
+  void *fs = (void *)f->node->fs;
+  uint64_t ino = (uint64_t)f->node->inode;
+  uint64_t owner = ofd ? (uint64_t)(uintptr_t)f : (uint64_t)proc->pid;
+  uint32_t pid = ofd ? 0 : proc->pid;
+
+  if (getlk) {
+    unsigned long fx = spin_lock_irqsave(&g_plock_lock);
+    struct plock *c = plock_find_conflict(
+        fs, ino, owner, fl.l_type == PL_UN ? PL_RD : fl.l_type, s, e);
+    if (c) {
+      fl.l_type = (int16_t)c->type;
+      fl.l_whence = 0;
+      fl.l_start = (int64_t)c->start;
+      fl.l_len = c->end == UINT64_MAX ? 0 : (int64_t)(c->end - c->start);
+      fl.l_pid = ofd ? -1 : (int32_t)c->pid;
+    } else {
+      fl.l_type = PL_UN;
+    }
+    spin_unlock_irqrestore(&g_plock_lock, fx);
+    if (copy_to_user((void *)arg, &fl, sizeof(fl)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+
+  for (;;) {
+    unsigned long fx = spin_lock_irqsave(&g_plock_lock);
+    int rc;
+    if (fl.l_type == PL_UN) {
+      rc = plock_remove_range(fs, ino, owner, s, e);
+    } else if (plock_find_conflict(fs, ino, owner, fl.l_type, s, e)) {
+      rc = -EAGAIN;
+    } else {
+      rc = plock_insert(fs, ino, owner, pid, fl.l_type, s, e);
+    }
+    spin_unlock_irqrestore(&g_plock_lock, fx);
+    if (rc != -EAGAIN || !wait)
+      return rc;
+    wait_queue_t wq;
+    wait_queue_init(&wq);
+    if (wait_event_interruptible_timeout(&wq, sleep_never_true, NULL, 10) < 0)
+      return -EINTR;
+  }
+}
+
 // ---------- fcntl ----------
 //
 // musl lo usa en __stdio_init_file (F_GETFD, F_GETFL) y en las rutas de
@@ -3681,6 +3910,13 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     return 0;
   case 9: /* F_GETOWN */
     return f->owner;
+  case 5:  /* F_GETLK */
+  case 6:  /* F_SETLK */
+  case 7:  /* F_SETLKW */
+  case 36: /* F_OFD_GETLK */
+  case 37: /* F_OFD_SETLK */
+  case 38: /* F_OFD_SETLKW */
+    return k_fcntl_lock(proc, f, cmd, arg);
   case 1033: /* F_ADD_SEALS */
     if (!f->node || !memfd_is_node(f->node))
       return -EINVAL;
@@ -5170,7 +5406,8 @@ static int64_t k_truncate(uint64_t path_uptr, uint64_t length, uint64_t a3,
 static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
                         uint64_t mode, uint64_t dev) {
   int type = (int)(mode & S_IFMT);
-  if (type != 0 && type != S_IFREG && type != S_IFCHR)
+  if (type != 0 && type != S_IFREG && type != S_IFCHR && type != S_IFIFO &&
+      type != S_IFSOCK)
     return -EPERM;
   char path[VFS_PATH_MAX];
   int rc = resolve_at_path(proc, dfd, (const char *)path_uptr, path,
@@ -5188,6 +5425,8 @@ static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
       return -EINVAL;
     return vfs_mknod(path, perm, (uint32_t)((maj << 8) | min));
   }
+  if (type == S_IFIFO || type == S_IFSOCK) // nodo sin datos (tar, cp -a, mkfifo)
+    return vfs_mknod_raw(path, (uint32_t)type | perm, 0);
   // [3.4.c] mknod(PATH, mode) usa `mode & 0777` filtrado por umask.
   if (perm == 0)
     perm = 0666 & ~proc->umask;
