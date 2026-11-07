@@ -24,7 +24,7 @@ static inline dma_addr_t xsk_buff_raw_get_dma(struct xsk_buff_pool *p, u64 a) { 
 static inline void xsk_buff_raw_dma_sync_for_device(struct xsk_buff_pool *p, dma_addr_t d, size_t s) { }
 static inline void xsk_buff_dma_sync_for_cpu(struct xdp_buff *x) { }
 static inline void *xsk_buff_raw_get_data(struct xsk_buff_pool *p, u64 a) { return NULL; }
-static inline struct xsk_tx_metadata *xsk_buff_get_metadata(struct xsk_buff_pool *p, u64 a, void *o) { return NULL; }
+static inline struct xsk_tx_metadata *xsk_buff_get_metadata(struct xsk_buff_pool *p, u64 a, u32 o) { return NULL; }
 static inline void *xsk_buff_raw_get_ctx_dummy(void) { return NULL; }
 static inline void xsk_tx_metadata_request(const struct xsk_buff_pool *p, struct xsk_tx_metadata **m, const struct xsk_tx_metadata_ops *o, void *priv) { }
 static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *m, struct xsk_tx_metadata_compl *c) { }
