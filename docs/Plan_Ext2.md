@@ -416,3 +416,11 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
 - Tests: `run_pending_test.sh`, `run_crash_test.sh` con `SIZE/BS/LOADFILE/WDIR`.
 - **Sigue fuera:** instalador E7.3 (a petición de Alvaro), abrir FIFOs con
   nombre, mknod de bloque, ioctls de ext4 no relacionados con flags.
+
+## E9: escritura ext4 y journal (2026-11-07, rama claude/project-thread-uq4oep, sin fusionar a main)
+
+- **E9.1 Journal jbd2:** al montar rw con `needs_recovery` se reproduce el journal interno (pasadas SCAN/REVOKE/REPLAY, csum v2/v3, revocaciones), se deja `start=0` y se quita `needs_recovery`. Journal externo y fast commit: se rechazan. Test: `tests/ext2/run_journal_test.sh` (oráculo `debugfs jr`).
+- **E9.2/E9.3 Extents:** crear, ampliar, partir hojas (profundidad 0 y 1) y truncar. 64bit (descriptores de 64 B), flex_bg, huge_file, dir_nlink, extra_isize. Los ficheros y directorios nuevos usan mapa de bloques clásico (ext4 lo admite). Limitaciones: escribir en un extent sin inicializar (fallocate) da error; árboles de profundidad >1 no se amplían.
+- **E9.4 metadata_csum:** crc32c de inodos, descriptores de grupo, bitmaps, cola de bloques de extents, cola de bloques de directorio, bloque xattr (refcount) y superbloque. Los grupos INODE_UNINIT/BLOCK_UNINIT se materializan al montar rw; `bg_itable_unused` se mantiene. Un directorio htree se desindexa (nodos vacíos con cola) en su primera modificación.
+- **Límites:** las escrituras no pasan por el journal (modo ordered); sigue en solo lectura con uninit_bg sin csum, mmp, largedir y csum_seed.
+- **Test:** `tests/ext2/run_ext4w_test.sh` (FEAT=, BS=): e2fsck limpio con 1K/2K/4K, con y sin metadata_csum/64bit/flex_bg.
