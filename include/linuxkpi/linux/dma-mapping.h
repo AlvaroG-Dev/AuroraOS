@@ -227,3 +227,13 @@ static inline void dma_sync_sgtable_for_device(struct device *dev, struct sg_tab
 }
 
 #endif
+
+/* DEFINE_DMA_UNMAP_*: la capa guarda siempre la direccion/longitud */
+#ifndef DEFINE_DMA_UNMAP_ADDR
+#define DEFINE_DMA_UNMAP_ADDR(ADDR_NAME)	dma_addr_t ADDR_NAME
+#define DEFINE_DMA_UNMAP_LEN(LEN_NAME)		__u32 LEN_NAME
+#define dma_unmap_addr(PTR, ADDR_NAME)		((PTR)->ADDR_NAME)
+#define dma_unmap_addr_set(PTR, ADDR_NAME, VAL)	(((PTR)->ADDR_NAME) = (VAL))
+#define dma_unmap_len(PTR, LEN_NAME)		((PTR)->LEN_NAME)
+#define dma_unmap_len_set(PTR, LEN_NAME, VAL)	(((PTR)->LEN_NAME) = (VAL))
+#endif

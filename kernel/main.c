@@ -488,12 +488,28 @@ static int drivers_init_task(void *arg) {
 // ARPs espontáneos si QEMU emite alguno (no debería, pero mejor
 // prevenir).
 // ---------------------------------------------------------------------------
+// Plan_Red.md N0: deja en el log cada NIC PCI (clase 0x02) para saber qué
+// driver hace falta en cada máquina real sin necesitar lspci.
+static void net_log_pci_nics(void) {
+  uint8_t bus = 0, slot = 0, func = 0;
+  pci_device_t d;
+  int n = 0;
+  while (pci_find_next_device(0x02, 0xFF, &bus, &slot, &func, &d) == 0) {
+    LOG_INFO("[NET] pci %02x:%02x.%u %04x:%04x subclase=%02x irq=%u", bus, slot,
+             func, d.vendor_id, d.device_id, d.subclass_id, d.irq_line);
+    n++;
+  }
+  if (n == 0)
+    LOG_WARN("[NET] no hay ninguna NIC PCI (clase 0x02)");
+}
+
 static int net_init_task(void *arg) {
   (void)arg;
   if (wait_for_completion_timeout(&g_vfs_done, 5000) == 0)
     LOG_WARN("[INIT] VFS timeout, red puede fallar");
 
   LOG_INFO("[INIT] Networking...");
+  net_log_pci_nics();
   net_init();
   loopback_init();
   ip_init();

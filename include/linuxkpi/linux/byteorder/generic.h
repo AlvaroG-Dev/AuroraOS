@@ -48,6 +48,7 @@
 #define le16_to_cpus(p) do { (void)(p); } while (0)
 #define cpu_to_le32s(p) do { (void)(p); } while (0)
 #define cpu_to_le16s(p) do { (void)(p); } while (0)
+#define cpu_to_be16s(p) swab16s((u16 *)(p))
 #define be32_to_cpus(p) swab32s((u32 *)(p))
 #define cpu_to_be32s(p) swab32s((u32 *)(p))
 

@@ -3092,6 +3092,9 @@ int vfs_open_nofollow_for_proc(void *proc_ptr, const char *path, int flags) {
   return vfs_open_impl(proc_ptr, path, flags, 1);
 }
 
+void posix_lock_release_ofd(void *desc);
+void posix_lock_release_file(uint32_t pid, void *fs, uint64_t ino);
+
 static file_descriptor_t *fd_get_for_proc(process_t *proc, int fd) {
   if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS)
     return NULL;
@@ -3108,6 +3111,7 @@ static void fd_put(file_descriptor_t *f) {
     return;
   int new_rc = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
   if (new_rc == 0) {
+    posix_lock_release_ofd(f); // [fcntl OFD locks]
     vfs_node_free(f->node);
     kfree(f);
   }
@@ -3127,6 +3131,9 @@ int vfs_close_for_proc(void *proc_ptr, int fd) {
   proc->fds[fd] = NULL;
   mutex_unlock(&proc->fd_lock);
 
+  // [fcntl POSIX locks] cerrar cualquier fd suelta los locks del proceso.
+  if (f->node)
+    posix_lock_release_file(proc->pid, (void *)f->node->fs, f->node->inode);
   fd_put(f);
   return 0;
 }
