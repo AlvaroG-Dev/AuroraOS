@@ -62,7 +62,11 @@
 #define EXT2_FEATURE_COMPAT_DIR_INDEX 0x0020
 // Lo que sabemos escribir sin romper nada (el resto: montaje solo lectura).
 #define EXT2_COMPAT_RW_OK 0x003F
-#define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
+// ext4 escribible (E9): extents, 64bit, flex_bg; huge_file/dir_nlink/extra_isize.
+// Sigue en solo lectura con metadata_csum, uninit_bg, mmp, largedir o csum_seed.
+#define EXT2_INCOMPAT_RW_OK (EXT2_FEATURE_INCOMPAT_FILETYPE | EXT4_FEATURE_INCOMPAT_EXTENTS | \
+                             EXT4_FEATURE_INCOMPAT_64BIT | EXT4_FEATURE_INCOMPAT_FLEX_BG)
+#define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE | 0x0008 | 0x0020 | 0x0040 | EXT4_RO_COMPAT_METADATA_CSUM)
 #define EXT2_INDEX_FL 0x1000
 // Flags de inodo que chattr puede cambiar (FS_IOC_SETFLAGS) y cuales se imponen.
 #define EXT2_SYNC_FL 0x00000008u
@@ -84,6 +88,8 @@
 #define EXT2_XATTR_MAGIC 0xEA020000u
 
 #define EXT2_STATE_VALID 0x0001
+#define EXT4_RO_COMPAT_METADATA_CSUM 0x0400u
+static uint32_t ext4_crc32c(uint32_t crc, const void *buf, size_t len);
 
 typedef struct __attribute__((packed)) {
   uint32_t s_inodes_count, s_blocks_count, s_r_blocks_count;
@@ -135,6 +141,8 @@ typedef struct {
   uint32_t inode_table; // 0 = descriptor inválido
   uint32_t block_bitmap, inode_bitmap; // 0 = grupo inutilizable para escribir
   uint32_t free_blocks, free_inodes, used_dirs;
+  uint16_t flags;         // bg_flags (INODE_UNINIT 1, BLOCK_UNINIT 2, ITABLE_ZEROED 4)
+  uint32_t itable_unused; // bg_itable_unused (solo con metadata_csum)
 } ext2_group_t;
 
 typedef struct ext2_pg {
@@ -167,6 +175,11 @@ typedef struct {
   uint32_t first_data_block, blocks_per_group, inodes_per_group;
   uint32_t inode_size, first_ino, ngroups;
   uint32_t compat, incompat, ro_compat;
+  uint32_t journal_ino; // s_journal_inum (jbd2 interno)
+  uint32_t gdsz;        // tamaño del descriptor de grupo (32, o 64 con 64bit)
+  int csum;             // metadata_csum activo
+  uint32_t csum_seed;   // crc32c(~0, uuid)
+  uint32_t gdt_blocks, resgdt;
   int filetype;
   ext2_group_t *groups;
   mutex_t lock; // serializa TODAS las operaciones del FS
@@ -624,6 +637,10 @@ static int ext2_sb_store(ext2_fs_t *fs, uint16_t state) {
   if (sb.s_rev_level == 1)
     sb.s_feature_ro_compat = fs->ro_compat;
   memcpy(d + off, &sb, sizeof(sb));
+  if (fs->csum) {
+    uint32_t c = ext4_crc32c(~0u, d + off, 1020);
+    memcpy(d + off + 1020, &c, 4);
+  }
   bc_mark_dirty(b);
   bc_put(b);
   return 0;
@@ -661,17 +678,56 @@ static int ext2_begin_write(ext2_fs_t *fs) {
 }
 
 static int ext2_gd_write(ext2_fs_t *fs, uint32_t g) {
-  uint32_t per = fs->bs / sizeof(ext2_gd_t);
+  uint32_t per = fs->bs / fs->gdsz;
   bc_buf_t *b = bc_get(fs->bdev, fs->first_data_block + 1 + g / per, fs->bs);
   if (!b)
     return -EIO;
-  uint8_t *p = (uint8_t *)bc_data(b) + (g % per) * sizeof(ext2_gd_t);
+  uint8_t *p = (uint8_t *)bc_data(b) + (g % per) * fs->gdsz;
   ext2_gd_t gd;
   memcpy(&gd, p, sizeof(gd));
   gd.bg_free_blocks_count = (uint16_t)fs->groups[g].free_blocks;
   gd.bg_free_inodes_count = (uint16_t)fs->groups[g].free_inodes;
   gd.bg_used_dirs_count = (uint16_t)fs->groups[g].used_dirs;
   memcpy(p, &gd, sizeof(gd));
+  if (fs->gdsz >= 64) { // mitades altas de los contadores
+    uint16_t hb = (uint16_t)(fs->groups[g].free_blocks >> 16);
+    uint16_t hi = (uint16_t)(fs->groups[g].free_inodes >> 16);
+    uint16_t hd = (uint16_t)(fs->groups[g].used_dirs >> 16);
+    memcpy(p + 0x2C, &hb, 2);
+    memcpy(p + 0x2E, &hi, 2);
+    memcpy(p + 0x30, &hd, 2);
+  }
+  if (fs->csum) {
+    ext2_group_t *gr = &fs->groups[g];
+    uint16_t v16 = gr->flags;
+    memcpy(p + 0x12, &v16, 2);
+    v16 = (uint16_t)gr->itable_unused;
+    memcpy(p + 0x1C, &v16, 2);
+    if (fs->gdsz >= 64) {
+      v16 = (uint16_t)(gr->itable_unused >> 16);
+      memcpy(p + 0x32, &v16, 2);
+    }
+    for (int k = 0; k < 2; k++) {
+      uint32_t bm = k ? gr->inode_bitmap : gr->block_bitmap;
+      if (!bm)
+        continue;
+      bc_buf_t *bb = bc_get(fs->bdev, bm, fs->bs);
+      if (!bb)
+        continue;
+      uint32_t c = ext4_crc32c(fs->csum_seed, bc_data(bb),
+                               (k ? fs->inodes_per_group : fs->blocks_per_group) / 8);
+      bc_put(bb);
+      uint16_t lo = (uint16_t)c, hi = (uint16_t)(c >> 16);
+      memcpy(p + (k ? 0x1A : 0x18), &lo, 2);
+      if (fs->gdsz >= 64)
+        memcpy(p + (k ? 0x3A : 0x38), &hi, 2);
+    }
+    memset(p + 0x1E, 0, 2);
+    uint32_t c = ext4_crc32c(fs->csum_seed, &g, 4);
+    c = ext4_crc32c(c, p, fs->gdsz);
+    uint16_t c16 = (uint16_t)c;
+    memcpy(p + 0x1E, &c16, 2);
+  }
   bc_mark_dirty(b);
   bc_put(b);
   return 0;
@@ -709,6 +765,23 @@ static int ext2_write_inode(ext2_fs_t *fs, uint32_t ino, const ext2_inode_t *di,
   if (zero_rest)
     memset(d, 0, fs->inode_size);
   memcpy(d, di, sizeof(*di));
+  if (fs->csum && fs->inode_size >= 160) {
+    uint16_t extra;
+    memcpy(&extra, d + 0x80, 2);
+    int has_hi = extra >= 4;
+    memset(d + 0x7C, 0, 2);
+    if (has_hi)
+      memset(d + 0x82, 0, 2);
+    uint32_t gen;
+    memcpy(&gen, d + 0x64, 4);
+    uint32_t c = ext4_crc32c(fs->csum_seed, &ino, 4);
+    c = ext4_crc32c(c, &gen, 4);
+    c = ext4_crc32c(c, d, fs->inode_size);
+    uint16_t lo = (uint16_t)c, hi = (uint16_t)(c >> 16);
+    memcpy(d + 0x7C, &lo, 2);
+    if (has_hi)
+      memcpy(d + 0x82, &hi, 2);
+  }
   bc_mark_dirty(b);
   bc_put(b);
   return 0;
@@ -922,6 +995,12 @@ static int ext2_alloc_inode_try(ext2_fs_t *fs, uint32_t parent_ino, int is_dir,
       bit_set(m, bit);
       bc_mark_dirty(b);
       bc_put(b);
+      if (fs->csum) {
+        uint32_t top = bit + 1;
+        if (top > fs->inodes_per_group - gr->itable_unused)
+          gr->itable_unused = fs->inodes_per_group - top;
+        gr->flags &= (uint16_t)~1u;
+      }
       gr->free_inodes--;
       fs->free_inodes--;
       if (is_dir)
@@ -1047,8 +1126,12 @@ static uint32_t ext2_ip_goal(const ext2_fs_t *fs, const ext2_ino_t *ip) {
 // Bloque físico del lógico `lblk`; si `create`, lo asigna (y los indirectos
 // que falten). *out = 0 si es un hueco y !create. Modifica ip->di: el
 // llamante debe volcar el inodo (ext2_ip_flush).
+static int ext4_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk, int create,
+                            uint32_t *out);
 static int ext2_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk,
                             int create, uint32_t *out) {
+  if (ip->di.i_flags & EXT4_EXTENTS_FL)
+    return ext4_bmap_create(fs, ip, lblk, create, out);
   uint32_t idx[4];
   int d = ext2_path(fs, lblk, idx);
   if (d < 0)
@@ -1100,6 +1183,318 @@ done:
   if (parent)
     bc_put(parent);
   return rc;
+}
+
+
+// ---------------------------------------------------------------------------
+// E9.2: escritura en ficheros con extents (árbol de profundidad 0 o 1)
+// ---------------------------------------------------------------------------
+#define E4_HDR 12u
+static inline uint16_t e4_u16(const uint8_t *p) { uint16_t v; memcpy(&v, p, 2); return v; }
+static inline uint32_t e4_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static inline void e4_set16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
+static inline void e4_set32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+#define E4_ENT(n, i) ((n) + E4_HDR + (size_t)(i) * 12)
+#define E4_ENTRIES(n) e4_u16((n) + 2)
+#define E4_MAXE(n) e4_u16((n) + 4)
+#define E4_DEPTH(n) e4_u16((n) + 6)
+// extent: eb(4) len(2) hi(2) lo(4). índice: eb(4) leaf_lo(4) leaf_hi(2) pad(2)
+#define E4_LEN(e) ((uint32_t)e4_u16((e) + 4))
+static inline uint32_t e4_nblk(const uint8_t *e) {
+  uint32_t l = E4_LEN(e);
+  return l > 32768 ? l - 32768 : l;
+}
+static inline int e4_unwritten(const uint8_t *e) { return E4_LEN(e) > 32768; }
+
+static int e4_node_ok(const ext2_fs_t *fs, const uint8_t *n, size_t nbytes) {
+  (void)fs;
+  return e4_u16(n) == EXT4_EXT_MAGIC && E4_ENTRIES(n) <= E4_MAXE(n) &&
+         E4_HDR + (size_t)E4_MAXE(n) * 12 <= nbytes && E4_DEPTH(n) <= 1;
+}
+
+// Marca sucio un bloque de extents recalculando su checksum (tail tras los maxe).
+static void e4_leaf_dirty(ext2_fs_t *fs, ext2_ino_t *ip, bc_buf_t *b) {
+  uint8_t *n = bc_data(b);
+  if (fs->csum) {
+    size_t off = E4_HDR + (size_t)E4_MAXE(n) * 12;
+    if (off + 4 <= fs->bs) {
+      uint32_t c = ext4_crc32c(fs->csum_seed, &ip->ino, 4);
+      c = ext4_crc32c(c, &ip->di.i_generation, 4);
+      c = ext4_crc32c(c, n, off);
+      memcpy(n + off, &c, 4);
+    }
+  }
+  bc_mark_dirty(b);
+}
+
+// Libera `n` bloques desde `pb`.
+static void e4_free_run(ext2_fs_t *fs, ext2_ino_t *ip, uint32_t pb, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) {
+    if (pb + i >= fs->first_data_block && pb + i < fs->blocks_count) {
+      ext2_free_block(fs, pb + i);
+      ext2_blocks_add(fs, ip, -1);
+    }
+  }
+}
+
+// Recorta las hojas de `n` dejando solo los bloques lógicos < keep. Devuelve
+// cuántas entradas quedan.
+static uint16_t e4_trim_leaf(ext2_fs_t *fs, ext2_ino_t *ip, uint8_t *n,
+                             uint64_t keep, int *changed) {
+  uint16_t ne = E4_ENTRIES(n);
+  while (ne > 0) {
+    uint8_t *e = E4_ENT(n, ne - 1);
+    uint32_t eb = e4_u32(e), cnt = e4_nblk(e), lo = e4_u32(e + 8);
+    if (e4_u16(e + 6) != 0)
+      break; // bloque físico > 2^32: no lo tocamos
+    if (eb >= keep) {
+      e4_free_run(fs, ip, lo, cnt);
+      ne--;
+      *changed = 1;
+      continue;
+    }
+    if ((uint64_t)eb + cnt > keep) {
+      uint32_t nl = (uint32_t)(keep - eb);
+      e4_free_run(fs, ip, lo + nl, cnt - nl);
+      e4_set16(e + 4, (uint16_t)(e4_unwritten(e) ? 32768 + nl : nl));
+      *changed = 1;
+    }
+    break;
+  }
+  e4_set16(n + 2, ne);
+  return ne;
+}
+
+static void ext4_trunc_blocks(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t keep) {
+  uint8_t *root = (uint8_t *)ip->di.i_block;
+  if (!e4_node_ok(fs, root, sizeof(ip->di.i_block))) {
+    LOG_WARN("[EXT2] %s: árbol de extents inválido en ino %u", fs->bdev->name, ip->ino);
+    return;
+  }
+  int ch = 0;
+  if (E4_DEPTH(root) == 0) {
+    e4_trim_leaf(fs, ip, root, keep, &ch);
+  } else {
+    uint16_t ni = E4_ENTRIES(root);
+    while (ni > 0) {
+      uint8_t *ie = E4_ENT(root, ni - 1);
+      uint32_t leaf = e4_u32(ie + 4);
+      if (e4_u16(ie + 8) != 0 || leaf < fs->first_data_block || leaf >= fs->blocks_count)
+        break;
+      bc_buf_t *b = bc_get(fs->bdev, leaf, fs->bs);
+      if (!b)
+        break;
+      uint8_t *ln = bc_data(b);
+      if (!e4_node_ok(fs, ln, fs->bs) || E4_DEPTH(ln) != 0) {
+        bc_put(b);
+        break;
+      }
+      int lch = 0;
+      uint16_t left = e4_trim_leaf(fs, ip, ln, keep, &lch);
+      if (lch)
+        e4_leaf_dirty(fs, ip, b);
+      bc_put(b);
+      if (left > 0)
+        break; // sigue habiendo extents por debajo de keep: las hojas previas no cambian
+      ext2_free_block(fs, leaf);
+      ext2_blocks_add(fs, ip, -1);
+      ni--;
+      e4_set16(root + 2, ni);
+    }
+    if (ni == 0) {
+      e4_set16(root + 6, 0); // vuelve a profundidad 0
+      e4_set16(root + 2, 0);
+    }
+  }
+  ip->goal = 0;
+}
+
+// Busca el extent no inicializado que cubre `lblk` (para negar la escritura).
+static int ext4_covered_unwritten(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t lblk) {
+  const uint8_t *node = (const uint8_t *)di->i_block;
+  bc_buf_t *held = NULL;
+  int res = 0;
+  if (E4_DEPTH(node) == 1) {
+    uint16_t ni = E4_ENTRIES(node);
+    uint32_t leaf = 0;
+    for (int i = (int)ni - 1; i >= 0; i--)
+      if (e4_u32(E4_ENT(node, i)) <= lblk) {
+        leaf = e4_u32(E4_ENT(node, i) + 4);
+        break;
+      }
+    if (!leaf || leaf >= fs->blocks_count)
+      return 0;
+    held = bc_get(fs->bdev, leaf, fs->bs);
+    if (!held)
+      return 0;
+    node = bc_data(held);
+    if (!e4_node_ok(fs, node, fs->bs))
+      goto out;
+  }
+  for (int i = (int)E4_ENTRIES(node) - 1; i >= 0; i--) {
+    const uint8_t *e = E4_ENT(node, i);
+    if (e4_u32(e) <= lblk) {
+      res = e4_unwritten(e) && lblk - e4_u32(e) < e4_nblk(e);
+      break;
+    }
+  }
+out:
+  if (held)
+    bc_put(held);
+  return res;
+}
+
+static void e4_write_hdr(uint8_t *n, uint16_t entries, uint16_t maxe, uint16_t depth) {
+  e4_set16(n, EXT4_EXT_MAGIC);
+  e4_set16(n + 2, entries);
+  e4_set16(n + 4, maxe);
+  e4_set16(n + 6, depth);
+  e4_set32(n + 8, 0);
+}
+
+// Inserta (lblk -> pb) de un bloque. -ENOSPC si no cabe en un árbol de profundidad 1.
+static int ext4_insert(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk, uint32_t pb) {
+  uint8_t *root = (uint8_t *)ip->di.i_block;
+  if (!e4_node_ok(fs, root, sizeof(ip->di.i_block)))
+    return -EIO;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint8_t *node = root;
+    bc_buf_t *lb = NULL;
+    int idx = -1;
+    uint16_t maxe = E4_MAXE(root);
+    if (E4_DEPTH(root) == 1) {
+      uint16_t ni = E4_ENTRIES(root);
+      if (ni == 0)
+        return -EIO;
+      idx = 0;
+      for (int i = (int)ni - 1; i >= 0; i--)
+        if (e4_u32(E4_ENT(root, i)) <= lblk) {
+          idx = i;
+          break;
+        }
+      uint32_t leaf = e4_u32(E4_ENT(root, idx) + 4);
+      if (e4_u16(E4_ENT(root, idx) + 8) != 0 || leaf < fs->first_data_block ||
+          leaf >= fs->blocks_count)
+        return -EIO;
+      lb = bc_get(fs->bdev, leaf, fs->bs);
+      if (!lb)
+        return -EIO;
+      node = bc_data(lb);
+      if (!e4_node_ok(fs, node, fs->bs) || E4_DEPTH(node) != 0) {
+        bc_put(lb);
+        return -EIO;
+      }
+      maxe = E4_MAXE(node);
+    }
+    uint16_t ne = E4_ENTRIES(node);
+    uint16_t pos = 0;
+    while (pos < ne && e4_u32(E4_ENT(node, pos)) <= lblk)
+      pos++;
+    if (pos > 0) { // extender el extent anterior si es contiguo
+      uint8_t *pe = E4_ENT(node, pos - 1);
+      uint32_t peb = e4_u32(pe), pl = E4_LEN(pe), plo = e4_u32(pe + 8);
+      if (pl < 32768 && e4_u16(pe + 6) == 0 && (uint64_t)peb + pl == lblk &&
+          plo + pl == pb) {
+        e4_set16(pe + 4, (uint16_t)(pl + 1));
+        if (lb) { e4_leaf_dirty(fs, ip, lb); bc_put(lb); }
+        return 0;
+      }
+    }
+    if (ne < maxe) {
+      memmove(E4_ENT(node, pos + 1), E4_ENT(node, pos), (size_t)(ne - pos) * 12);
+      uint8_t *e = E4_ENT(node, pos);
+      e4_set32(e, (uint32_t)lblk);
+      e4_set16(e + 4, 1);
+      e4_set16(e + 6, 0);
+      e4_set32(e + 8, pb);
+      e4_set16(node + 2, ne + 1);
+      if (lb) {
+        if (idx >= 0 && pos == 0 && lblk < e4_u32(E4_ENT(root, idx)))
+          e4_set32(E4_ENT(root, idx), (uint32_t)lblk);
+        e4_leaf_dirty(fs, ip, lb);
+        bc_put(lb);
+      }
+      return 0;
+    }
+    // Nodo lleno: crecer (profundidad 0) o partir la hoja (profundidad 1).
+    uint32_t nb;
+    int rc = ext2_new_zero_block(fs, ext2_ip_goal(fs, ip), &nb);
+    if (rc != 0) {
+      if (lb) bc_put(lb);
+      return rc;
+    }
+    ext2_blocks_add(fs, ip, 1);
+    bc_buf_t *nbuf = bc_get_new(fs->bdev, nb, fs->bs);
+    if (!nbuf) {
+      if (lb) bc_put(lb);
+      ext2_free_block(fs, nb);
+      ext2_blocks_add(fs, ip, -1);
+      return -EIO;
+    }
+    uint8_t *nn = bc_data(nbuf);
+    uint16_t cap = (uint16_t)((fs->bs - E4_HDR) / 12);
+    if (idx < 0) { // profundidad 0 -> 1: todo el contenido de la raíz pasa a la hoja
+      memset(nn, 0, fs->bs);
+      e4_write_hdr(nn, ne, cap, 0);
+      memcpy(E4_ENT(nn, 0), E4_ENT(root, 0), (size_t)ne * 12);
+      uint32_t first = ne ? e4_u32(E4_ENT(root, 0)) : 0;
+      e4_write_hdr(root, 1, E4_MAXE(root), 1);
+      uint8_t *ie = E4_ENT(root, 0);
+      memset(ie, 0, 12);
+      e4_set32(ie, first);
+      e4_set32(ie + 4, nb);
+    } else { // partir la hoja en dos: la mitad alta va al bloque nuevo
+      uint16_t ni = E4_ENTRIES(root);
+      if (ni >= E4_MAXE(root)) {
+        bc_put(nbuf);
+        bc_put(lb);
+        ext2_free_block(fs, nb);
+        ext2_blocks_add(fs, ip, -1);
+        return -ENOSPC;
+      }
+      uint16_t half = ne / 2, cnt = ne - half;
+      memset(nn, 0, fs->bs);
+      e4_write_hdr(nn, cnt, cap, 0);
+      memcpy(E4_ENT(nn, 0), E4_ENT(node, half), (size_t)cnt * 12);
+      e4_set16(node + 2, half);
+      memmove(E4_ENT(root, idx + 2), E4_ENT(root, idx + 1), (size_t)(ni - idx - 1) * 12);
+      uint8_t *ie = E4_ENT(root, idx + 1);
+      memset(ie, 0, 12);
+      e4_set32(ie, e4_u32(E4_ENT(nn, 0)));
+      e4_set32(ie + 4, nb);
+      e4_set16(root + 2, ni + 1);
+      e4_leaf_dirty(fs, ip, lb);
+    }
+    e4_leaf_dirty(fs, ip, nbuf);
+    bc_put(nbuf);
+    if (lb)
+      bc_put(lb);
+  }
+  return -ENOSPC;
+}
+
+static int ext4_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk, int create,
+                            uint32_t *out) {
+  int rc = ext4_extent_map(fs, &ip->di, lblk, out);
+  if (rc != 0 || *out != 0 || !create)
+    return rc;
+  if (lblk > 0xFFFFFFFEULL)
+    return -EFBIG;
+  if (ext4_covered_unwritten(fs, &ip->di, lblk))
+    return -EOPNOTSUPP; // escribir en un extent sin inicializar: pendiente
+  uint32_t nb;
+  rc = ext2_new_zero_block(fs, ext2_ip_goal(fs, ip), &nb);
+  if (rc != 0)
+    return rc;
+  rc = ext4_insert(fs, ip, lblk, nb);
+  if (rc != 0) {
+    ext2_free_block(fs, nb);
+    return rc;
+  }
+  ext2_blocks_add(fs, ip, 1);
+  ip->goal = nb;
+  *out = nb;
+  return 0;
 }
 
 // Libera el subárbol colgado de *pp (profundidad `depth`), cuyo primer bloque
@@ -1164,6 +1559,10 @@ static int ext2_free_tree(ext2_fs_t *fs, ext2_ino_t *ip, uint32_t *pp,
 static void ext2_trunc_blocks(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t keep) {
   if (!ext2_has_blocks(fs, &ip->di))
     return;
+  if (ip->di.i_flags & EXT4_EXTENTS_FL) {
+    ext4_trunc_blocks(fs, ip, keep);
+    return;
+  }
   for (uint32_t i = 0; i < EXT2_NDIR_BLOCKS; i++)
     ext2_free_tree(fs, ip, (uint32_t *)(void *)&ip->di.i_block[i], 0, i, keep);
   uint64_t apb = fs->bs / 4;
@@ -1187,6 +1586,13 @@ static void ext2_free_xattr(ext2_fs_t *fs, ext2_ino_t *ip) {
       uint32_t *h = bc_data(b); // h_magic, h_refcount
       if (h[0] == EXT2_XATTR_MAGIC && h[1] > 1) {
         h[1]--;
+        if (fs->csum) { // h_checksum en +16: crc32c(seed, nº de bloque u64, bloque)
+          uint64_t bn = blk;
+          memset((uint8_t *)h + 16, 0, 4);
+          uint32_t c = ext4_crc32c(fs->csum_seed, &bn, 8);
+          c = ext4_crc32c(c, h, fs->bs);
+          memcpy((uint8_t *)h + 16, &c, 4);
+        }
         bc_mark_dirty(b);
         bc_put(b);
         goto out;
@@ -1464,6 +1870,79 @@ static void ext2_dirent_put(uint8_t *p, uint32_t ino, uint16_t rec_len,
     memcpy(p + 8, name, nlen);
 }
 
+// metadata_csum: cada bloque de directorio termina en un "dirent" falso de 12 B
+// (ino 0, tipo 0xDE) con el crc32c del bloque.
+static int ext2_dir_has_tail(const ext2_fs_t *fs, const uint8_t *blk) {
+  const uint8_t *t = blk + fs->bs - 12;
+  uint32_t i0;
+  uint16_t rl;
+  memcpy(&i0, t, 4);
+  memcpy(&rl, t + 4, 2);
+  return i0 == 0 && rl == 12 && t[6] == 0 && t[7] == 0xDE;
+}
+static void ext2_dir_init_tail(const ext2_fs_t *fs, uint8_t *blk) {
+  uint8_t *t = blk + fs->bs - 12;
+  memset(t, 0, 12);
+  uint16_t rl = 12;
+  memcpy(t + 4, &rl, 2);
+  t[7] = 0xDE;
+}
+static void ext2_dir_csum_set(const ext2_fs_t *fs, uint32_t ino, uint32_t gen,
+                              uint8_t *blk) {
+  if (!fs->csum || !ext2_dir_has_tail(fs, blk))
+    return;
+  uint32_t c = ext4_crc32c(fs->csum_seed, &ino, 4);
+  c = ext4_crc32c(c, &gen, 4);
+  c = ext4_crc32c(c, blk, fs->bs - 12);
+  memcpy(blk + fs->bs - 4, &c, 4);
+}
+
+// Con checksums, un directorio htree se desindexa antes de tocarlo: los nodos
+// del índice pasan a ser bloques vacíos con su cola y la raíz conserva solo
+// "." y "..". Se hace una vez (se limpia EXT2_INDEX_FL).
+static int ext2_dir_unindex(ext2_fs_t *fs, ext2_ino_t *dp) {
+  if (!fs->csum || !(dp->di.i_flags & EXT2_INDEX_FL))
+    return 0;
+  uint64_t nblocks = (dp->size + fs->bs - 1) / fs->bs;
+  for (uint64_t l = 0; l < nblocks; l++) {
+    uint32_t pblk;
+    int rc = ext2_bmap(fs, &dp->di, l, &pblk);
+    if (rc != 0)
+      return rc;
+    if (pblk == 0)
+      continue;
+    bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
+    if (!b)
+      return -EIO;
+    uint8_t *blk = bc_data(b);
+    if (!ext2_dir_has_tail(fs, blk)) {
+      uint32_t i0;
+      uint16_t rl0, rl1;
+      memcpy(&i0, blk, 4);
+      memcpy(&rl0, blk + 4, 2);
+      memcpy(&rl1, blk + 12 + 4, 2);
+      if (l == 0 && rl0 == 12 && rl1 == fs->bs - 12) {
+        uint16_t nrl = (uint16_t)(fs->bs - 24);
+        memcpy(blk + 16, &nrl, 2);
+        memset(blk + 24, 0, fs->bs - 24);
+      } else if (l != 0 && i0 == 0 && rl0 == fs->bs) {
+        memset(blk, 0, fs->bs);
+        uint16_t nrl = (uint16_t)(fs->bs - 12);
+        memcpy(blk + 4, &nrl, 2);
+      } else {
+        bc_put(b);
+        return -EIO;
+      }
+      ext2_dir_init_tail(fs, blk);
+      ext2_dir_csum_set(fs, dp->ino, dp->di.i_generation, blk);
+      bc_mark_dirty(b);
+    }
+    bc_put(b);
+  }
+  dp->di.i_flags &= ~EXT2_INDEX_FL;
+  return ext2_ip_flush(fs, dp);
+}
+
 static void ext2_dir_touch(ext2_fs_t *fs, ext2_ino_t *dp) {
   dp->di.i_mtime = dp->di.i_ctime = ext2_now();
   dp->di.i_flags &= ~EXT2_INDEX_FL; // escribimos lineal: sin árbol htree
@@ -1475,6 +1954,9 @@ static int ext2_dir_add(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
   uint32_t need = ext2_dirent_need(nlen);
   uint64_t nblocks = (dp->size + fs->bs - 1) / fs->bs;
   uint8_t ft = fs->filetype ? ftype : 0;
+  int urc = ext2_dir_unindex(fs, dp);
+  if (urc != 0)
+    return urc;
   for (uint64_t l = 0; l < nblocks; l++) {
     uint32_t pblk;
     int rc = ext2_bmap(fs, &dp->di, l, &pblk);
@@ -1487,7 +1969,8 @@ static int ext2_dir_add(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
       return -EIO;
     uint8_t *blk = bc_data(b);
     uint32_t off = 0;
-    for (int steps = 0; off < fs->bs && steps < EXT2_MAX_DIR_ENTRIES_PER_BLOCK;
+    uint32_t lim = (fs->csum && ext2_dir_has_tail(fs, blk)) ? fs->bs - 12 : fs->bs;
+    for (int steps = 0; off < lim && steps < EXT2_MAX_DIR_ENTRIES_PER_BLOCK;
          steps++) {
       uint16_t rl;
       uint32_t eino;
@@ -1506,6 +1989,7 @@ static int ext2_dir_add(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
         } else {
           ext2_dirent_put(blk + off, ino, rl, name, nlen, ft);
         }
+        ext2_dir_csum_set(fs, dp->ino, dp->di.i_generation, blk);
         bc_mark_dirty(b);
         bc_put(b);
         ext2_dir_touch(fs, dp);
@@ -1525,7 +2009,11 @@ static int ext2_dir_add(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
   bc_buf_t *b = bc_get(fs->bdev, pblk, fs->bs);
   if (!b)
     return -EIO;
-  ext2_dirent_put(bc_data(b), ino, (uint16_t)fs->bs, name, nlen, ft);
+  ext2_dirent_put(bc_data(b), ino, (uint16_t)(fs->csum ? fs->bs - 12 : fs->bs), name, nlen, ft);
+  if (fs->csum) {
+    ext2_dir_init_tail(fs, bc_data(b));
+    ext2_dir_csum_set(fs, dp->ino, dp->di.i_generation, bc_data(b));
+  }
   bc_mark_dirty(b);
   bc_put(b);
   ext2_set_size(fs, dp, (nblocks + 1) * fs->bs);
@@ -1537,6 +2025,9 @@ static int ext2_dir_add(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
 static int ext2_dir_remove(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
                            size_t nlen, uint32_t *ino_out) {
   uint64_t nblocks = (dp->size + fs->bs - 1) / fs->bs;
+  int urc = ext2_dir_unindex(fs, dp);
+  if (urc != 0)
+    return urc;
   for (uint64_t l = 0; l < nblocks; l++) {
     uint32_t pblk;
     int rc = ext2_bmap(fs, &dp->di, l, &pblk);
@@ -1568,6 +2059,7 @@ static int ext2_dir_remove(ext2_fs_t *fs, ext2_ino_t *dp, const char *name,
           uint32_t z = 0;
           memcpy(blk + off, &z, 4);
         }
+        ext2_dir_csum_set(fs, dp->ino, dp->di.i_generation, blk);
         bc_mark_dirty(b);
         bc_put(b);
         *ino_out = eino;
@@ -2075,7 +2567,8 @@ static int ext2_node_truncate(vfs_node_t *node, uint64_t new_size) {
   if (new_size > 0x7fffffffULL && (rc = ext2_enable_large_file(fs)) != 0)
     goto out;
   uint32_t idx[4];
-  if (ext2_path(fs, (new_size + fs->bs - 1) / fs->bs, idx) < 0 &&
+  if (!(ip->di.i_flags & EXT4_EXTENTS_FL) &&
+      ext2_path(fs, (new_size + fs->bs - 1) / fs->bs, idx) < 0 &&
       new_size > ip->size) {
     rc = -EFBIG;
     goto out;
@@ -2235,7 +2728,11 @@ static int ext2_new_inode_op(vfs_node_t *dvn, const char *name, uint32_t mode,
     uint8_t *d = bc_data(b);
     uint8_t ft = fs->filetype ? 2 : 0;
     ext2_dirent_put(d, ino, 12, ".", 1, ft);
-    ext2_dirent_put(d + 12, dp->ino, (uint16_t)(fs->bs - 12), "..", 2, ft);
+    ext2_dirent_put(d + 12, dp->ino, (uint16_t)(fs->csum ? fs->bs - 24 : fs->bs - 12), "..", 2, ft);
+    if (fs->csum) {
+      ext2_dir_init_tail(fs, d);
+      ext2_dir_csum_set(fs, ino, di->i_generation, d);
+    }
     bc_mark_dirty(b);
     bc_put(b);
     di->i_block[0] = data_blk;
@@ -2546,7 +3043,10 @@ static int ext2_get_page_op(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out
 // ---------------------------------------------------------------------------
 static int ext2_set_dotdot(ext2_fs_t *fs, ext2_ino_t *dir, uint32_t parent) {
   uint32_t pblk;
-  int rc = ext2_bmap(fs, &dir->di, 0, &pblk);
+  int rc = ext2_dir_unindex(fs, dir);
+  if (rc != 0)
+    return rc;
+  rc = ext2_bmap(fs, &dir->di, 0, &pblk);
   if (rc != 0)
     return rc;
   if (pblk == 0)
@@ -2565,6 +3065,7 @@ static int ext2_set_dotdot(ext2_fs_t *fs, ext2_ino_t *dir, uint32_t parent) {
   }
   memcpy(blk + dot_rl, &parent, 4);
   ext2_dc_inval(fs, dir->ino, "..", 2);
+  ext2_dir_csum_set(fs, dir->ino, dir->di.i_generation, blk);
   bc_mark_dirty(b);
   bc_put(b);
   return 0;
@@ -3016,6 +3517,7 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
   fs->compat = compat;
   fs->incompat = incompat;
   fs->ro_compat = ro_compat;
+  memcpy(&fs->journal_ino, sbraw + 224, 4);
   fs->filetype = (incompat & EXT2_FEATURE_INCOMPAT_FILETYPE) != 0;
 
   uint32_t itable_blocks =
@@ -3032,6 +3534,8 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
     ext2_gd_t gd;
     const uint8_t *gp = (uint8_t *)bc_data(b) + (size_t)(g % gd_per_blk) * gdsz;
     memcpy(&gd, gp, sizeof(gd));
+    uint8_t raw[64] = {0};
+    memcpy(raw, gp, gdsz < 64 ? gdsz : 64);
     uint32_t hi_ptrs = 0;
     if (gdsz >= 64) { // 64bit: mitades altas (solo se admiten FS < 2^32 bloques)
       uint32_t h0, h1, h2;
@@ -3061,8 +3565,35 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
     gr->free_blocks = gd.bg_free_blocks_count;
     gr->free_inodes = gd.bg_free_inodes_count;
     gr->used_dirs = gd.bg_used_dirs_count;
+    gr->flags = gd.bg_pad;
+    {
+      uint16_t iu;
+      memcpy(&iu, raw + 0x1C, 2);
+      gr->itable_unused = iu;
+    }
+    if (gdsz >= 64) {
+      uint16_t hb, hi, hd, hu;
+      memcpy(&hb, raw + 0x2C, 2);
+      memcpy(&hi, raw + 0x2E, 2);
+      memcpy(&hd, raw + 0x30, 2);
+      memcpy(&hu, raw + 0x32, 2);
+      gr->itable_unused |= (uint32_t)hu << 16;
+      gr->free_blocks |= (uint32_t)hb << 16;
+      gr->free_inodes |= (uint32_t)hi << 16;
+      gr->used_dirs |= (uint32_t)hd << 16;
+    }
   }
   fs->itable_blocks = itable_blocks;
+  fs->gdsz = gdsz;
+  fs->gdt_blocks = gdt_blocks;
+  {
+    uint16_t rg;
+    memcpy(&rg, sbraw + 0xCE, 2);
+    fs->resgdt = rg;
+  }
+  fs->csum = (ro_compat & EXT4_RO_COMPAT_METADATA_CSUM) != 0;
+  if (fs->csum)
+    fs->csum_seed = ext4_crc32c(~0u, sbraw + 0x68, 16);
   fs->bad_groups = bad_groups;
   fs->s_state = sb.s_state;
   fs->rev1 = sb.s_rev_level == 1;
@@ -3178,6 +3709,69 @@ static void ext2_mnt_warn(ext2_fs_t *fs) {
              "e2fsck en el host", fs->bdev->name);
 }
 
+// ¿El grupo `g` lleva copia del superbloque y de la GDT? (sparse_super)
+static int ext2_group_has_super(const ext2_fs_t *fs, uint32_t g) {
+  if (!(fs->ro_compat & EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER) || g <= 1)
+    return 1;
+  for (uint32_t b = 3; b <= 7; b += 2) {
+    uint64_t x = b;
+    while (x < g)
+      x *= b;
+    if (x == g)
+      return 1;
+  }
+  return 0;
+}
+
+// metadata_csum: los grupos marcados INODE_UNINIT/BLOCK_UNINIT no tienen el
+// bitmap en disco. Los materializamos antes de escribir para poder asignar.
+static void ext2_init_uninit_groups(ext2_fs_t *fs) {
+  if (!fs->csum)
+    return;
+  for (uint32_t g = 0; g < fs->ngroups; g++) {
+    ext2_group_t *gr = &fs->groups[g];
+    if (!(gr->flags & 3))
+      continue;
+    if ((gr->flags & 1) && gr->inode_bitmap) {
+      bc_buf_t *b = bc_get_new(fs->bdev, gr->inode_bitmap, fs->bs);
+      if (b) {
+        uint8_t *im = bc_data(b);
+        memset(im, 0, fs->bs);
+        for (uint32_t i = fs->inodes_per_group; i < fs->bs * 8; i++)
+          bit_set(im, i);
+        bc_mark_dirty(b);
+        bc_put(b);
+      }
+      gr->itable_unused = fs->inodes_per_group;
+    }
+    if ((gr->flags & 2) && gr->block_bitmap) {
+      bc_buf_t *b = bc_get_new(fs->bdev, gr->block_bitmap, fs->bs);
+      if (b) {
+        uint8_t *m = bc_data(b);
+        memset(m, 0, fs->bs);
+        uint32_t first = ext2_group_first(fs, g), nb = ext2_group_nblocks(fs, g);
+        uint32_t meta = ext2_group_has_super(fs, g) ? 1 + fs->gdt_blocks + fs->resgdt : 0;
+        for (uint32_t i = 0; i < meta && i < nb; i++)
+          bit_set(m, i);
+        uint32_t rngs[3][2] = {{gr->block_bitmap, 1}, {gr->inode_bitmap, 1},
+                               {gr->inode_table, fs->itable_blocks}};
+        for (int r = 0; r < 3; r++)
+          for (uint32_t i = 0; i < rngs[r][1]; i++) {
+            uint32_t x = rngs[r][0] + i;
+            if (x >= first && x < first + nb)
+              bit_set(m, x - first);
+          }
+        for (uint32_t i = nb; i < fs->bs * 8; i++)
+          bit_set(m, i);
+        bc_mark_dirty(b);
+        bc_put(b);
+      }
+    }
+    gr->flags &= (uint16_t)~3u;
+    ext2_gd_write(fs, g);
+  }
+}
+
 // Pasa el FS a escribible si es seguro. Con el mutex tomado.
 static int ext2_set_rw_locked(ext2_fs_t *fs) {
   const char *dn = fs->bdev->name;
@@ -3196,9 +3790,9 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
     LOG_WARN("[EXT2] %s: el FS tiene errores registrados: solo lectura", dn);
     return -EROFS;
   }
-  if (fs->incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE) {
+  if (fs->incompat & ~EXT2_INCOMPAT_RW_OK) {
     LOG_WARN("[EXT2] %s: FS ext4/con journal pendiente (incompat=0x%x): solo "
-             "lectura", dn, fs->incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE);
+             "lectura", dn, fs->incompat & ~EXT2_INCOMPAT_RW_OK);
     return -EROFS;
   }
   if ((fs->compat & ~EXT2_COMPAT_RW_OK) || (fs->ro_compat & ~EXT2_RO_COMPAT_RW_OK)) {
@@ -3212,6 +3806,7 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
              fs->bad_groups);
     return -EROFS;
   }
+  ext2_init_uninit_groups(fs);
   ext2_mnt_warn(fs);
   fs->rw = 1;
   fs->disk_clean = 1;
@@ -3374,6 +3969,334 @@ int ext2_read_label(block_device_t *bdev, char out[17]) {
   return rc;
 }
 
+
+// ---------------------------------------------------------------------------
+// E9.1: reproducción del journal (jbd2) al montar para escritura
+// ---------------------------------------------------------------------------
+#define JBD2_MAGIC 0xC03B3998u
+#define JBD2_DESC 1
+#define JBD2_COMMIT 2
+#define JBD2_SB_V1 3
+#define JBD2_SB_V2 4
+#define JBD2_REVOKE 5
+#define JBD2_INC_REVOKE 0x1u
+#define JBD2_INC_64BIT 0x2u
+#define JBD2_INC_CSUM_V2 0x8u
+#define JBD2_INC_CSUM_V3 0x10u
+#define JBD2_INC_FAST_COMMIT 0x20u
+#define JBD2_TAG_ESCAPE 1u
+#define JBD2_TAG_SAME_UUID 2u
+#define JBD2_TAG_DELETED 4u
+#define JBD2_TAG_LAST 8u
+#define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM 0x0400u
+
+static uint32_t be32(const uint8_t *p) {
+  return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+static uint16_t be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static void put_be32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+  p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+
+// CRC-32C (Castagnoli) en bruto, como crc32c_le() de Linux: sin inversiones.
+static uint32_t g_crc32c_tab[256];
+static int g_crc32c_init;
+static uint32_t ext4_crc32c(uint32_t crc, const void *buf, size_t len) {
+  if (!g_crc32c_init) {
+    for (uint32_t i = 0; i < 256; i++) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; k++)
+        c = (c & 1) ? (c >> 1) ^ 0x82F63B78u : c >> 1;
+      g_crc32c_tab[i] = c;
+    }
+    g_crc32c_init = 1;
+  }
+  const uint8_t *p = buf;
+  while (len--)
+    crc = g_crc32c_tab[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+  return crc;
+}
+
+typedef struct {
+  ext2_fs_t *fs;
+  ext2_inode_t ji;
+  uint32_t maxlen, first, seq, start, feat_incompat;
+  uint32_t tag_bytes;
+  uint32_t *rev_blk, *rev_seq; // bloques revocados y la transacción que los revoca
+  uint32_t nrev, caprev;
+  uint8_t *tmp;
+} jrn_t;
+
+static int jrn_pblk(jrn_t *j, uint32_t idx, uint32_t *out) {
+  if (idx >= j->maxlen)
+    return -EIO;
+  int rc = ext2_bmap(j->fs, &j->ji, idx, out);
+  if (rc == 0 && *out == 0)
+    rc = -EIO;
+  return rc;
+}
+static uint32_t jrn_next(const jrn_t *j, uint32_t idx) {
+  idx++;
+  return idx >= j->maxlen ? j->first + (idx - j->maxlen) : idx;
+}
+static const uint8_t *jrn_get(jrn_t *j, uint32_t idx, bc_buf_t **h) {
+  uint32_t pb;
+  if (jrn_pblk(j, idx, &pb) != 0)
+    return NULL;
+  *h = bc_get(j->fs->bdev, pb, j->fs->bs);
+  return *h ? bc_data(*h) : NULL;
+}
+
+// Cuántas etiquetas (bloques de datos) lleva un bloque descriptor.
+static uint32_t jrn_count_tags(const jrn_t *j, const uint8_t *d) {
+  uint32_t bs = j->fs->bs, p = 12, n = 0;
+  uint32_t tail = (j->feat_incompat & (JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3)) ? 4 : 0;
+  while (p + j->tag_bytes <= bs - tail) {
+    uint32_t flags = (j->feat_incompat & JBD2_INC_CSUM_V3) ? be32(d + p + 4)
+                                                          : be16(d + p + 6);
+    n++;
+    p += j->tag_bytes;
+    if (!(flags & JBD2_TAG_SAME_UUID))
+      p += 16;
+    if (flags & JBD2_TAG_LAST)
+      break;
+  }
+  return n;
+}
+
+static int jrn_revoke_add(jrn_t *j, uint32_t blk, uint32_t seq) {
+  for (uint32_t i = 0; i < j->nrev; i++)
+    if (j->rev_blk[i] == blk) {
+      if ((int32_t)(seq - j->rev_seq[i]) > 0)
+        j->rev_seq[i] = seq;
+      return 0;
+    }
+  if (j->nrev == j->caprev) {
+    uint32_t nc = j->caprev ? j->caprev * 2 : 256;
+    uint32_t *nb = kmalloc((size_t)nc * 4), *ns = kmalloc((size_t)nc * 4);
+    if (!nb || !ns) {
+      kfree(nb);
+      kfree(ns);
+      return -ENOMEM;
+    }
+    if (j->nrev) {
+      memcpy(nb, j->rev_blk, (size_t)j->nrev * 4);
+      memcpy(ns, j->rev_seq, (size_t)j->nrev * 4);
+    }
+    kfree(j->rev_blk);
+    kfree(j->rev_seq);
+    j->rev_blk = nb;
+    j->rev_seq = ns;
+    j->caprev = nc;
+  }
+  j->rev_blk[j->nrev] = blk;
+  j->rev_seq[j->nrev++] = seq;
+  return 0;
+}
+
+// Recorre el journal. pass 0: busca el final; 1: recoge revocaciones; 2: aplica.
+static int jrn_pass(jrn_t *j, int pass, uint32_t *end_seq) {
+  ext2_fs_t *fs = j->fs;
+  uint32_t idx = j->start, seq = j->seq;
+  int is64 = (fs->incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0;
+  uint32_t steps = 0;
+  for (;;) {
+    if (++steps > j->maxlen * 2)
+      return -EIO;
+    if (pass != 0 && (int32_t)(seq - *end_seq) >= 0)
+      break; // más allá de la última transacción confirmada
+    bc_buf_t *h = NULL;
+    const uint8_t *d = jrn_get(j, idx, &h);
+    if (!d)
+      return -EIO;
+    if (be32(d) != JBD2_MAGIC || be32(d + 8) != seq) {
+      bc_put(h);
+      break;
+    }
+    uint32_t type = be32(d + 4);
+    if (type == JBD2_COMMIT) {
+      bc_put(h);
+      seq++;
+      idx = jrn_next(j, idx);
+    } else if (type == JBD2_REVOKE) {
+      if (pass == 1) {
+        uint32_t used = be32(d + 12), esz = (j->feat_incompat & JBD2_INC_64BIT) ? 8 : 4;
+        if (used > fs->bs)
+          used = fs->bs;
+        for (uint32_t o = 16; o + esz <= used; o += esz) {
+          uint32_t b = (esz == 8) ? be32(d + o + 4) : be32(d + o);
+          if (jrn_revoke_add(j, b, seq) != 0) {
+            bc_put(h);
+            return -ENOMEM;
+          }
+        }
+      }
+      bc_put(h);
+      idx = jrn_next(j, idx);
+    } else if (type == JBD2_DESC) {
+      uint32_t tail = (j->feat_incompat & (JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3)) ? 4 : 0;
+      uint32_t p = 12;
+      uint32_t didx = jrn_next(j, idx);
+      int rc = 0;
+      while (p + j->tag_bytes <= fs->bs - tail) {
+        uint32_t blk = be32(d + p), flags;
+        if (j->feat_incompat & JBD2_INC_CSUM_V3) {
+          flags = be32(d + p + 4);
+          if (is64) blk = blk; // la mitad alta se ignora (FS < 2^32 bloques)
+        } else {
+          flags = be16(d + p + 6);
+        }
+        if (pass == 2) {
+          int revoked = 0;
+          for (uint32_t r = 0; r < j->nrev; r++)
+            if (j->rev_blk[r] == blk && (int32_t)(j->rev_seq[r] - seq) >= 0)
+              revoked = 1;
+          if (!revoked && !(flags & JBD2_TAG_DELETED)) {
+            bc_buf_t *sh = NULL;
+            const uint8_t *src = jrn_get(j, didx, &sh);
+            if (!src) {
+              rc = -EIO;
+              break;
+            }
+            if (blk >= fs->blocks_count) {
+              bc_put(sh);
+              rc = -EIO;
+              break;
+            }
+            memcpy(j->tmp, src, fs->bs);
+            bc_put(sh);
+            if (flags & JBD2_TAG_ESCAPE)
+              put_be32(j->tmp, JBD2_MAGIC);
+            bc_buf_t *dh = bc_get_new(fs->bdev, blk, fs->bs);
+            if (!dh) {
+              rc = -EIO;
+              break;
+            }
+            memcpy(bc_data(dh), j->tmp, fs->bs);
+            bc_mark_dirty(dh);
+            bc_put(dh);
+          }
+        }
+        didx = jrn_next(j, didx);
+        p += j->tag_bytes;
+        if (!(flags & JBD2_TAG_SAME_UUID))
+          p += 16;
+        if (flags & JBD2_TAG_LAST)
+          break;
+      }
+      bc_put(h);
+      if (rc != 0)
+        return rc;
+      idx = didx;
+    } else {
+      bc_put(h);
+      break;
+    }
+  }
+  if (pass == 0)
+    *end_seq = seq;
+  return 0;
+}
+
+// Reproduce el journal de `fs` (montado en solo lectura) y lo deja limpio:
+// escribe los bloques de las transacciones confirmadas, pone s_start=0 en el
+// journal y quita needs_recovery del superbloque. 0 o -errno.
+static int ext2_journal_replay(ext2_fs_t *fs) {
+  if (!(fs->compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) || fs->journal_ino == 0)
+    return -ENODEV; // journal externo: no soportado
+  jrn_t j;
+  memset(&j, 0, sizeof(j));
+  j.fs = fs;
+  if (ext2_read_inode(fs, fs->journal_ino, &j.ji) != 0)
+    return -EIO;
+  bc_buf_t *sbh = NULL;
+  j.maxlen = UINT32_MAX; // para que jrn_pblk(0) funcione antes de conocerlo
+  const uint8_t *jsb = jrn_get(&j, 0, &sbh);
+  if (!jsb)
+    return -EIO;
+  uint32_t type = be32(jsb + 4), bsz = be32(jsb + 12);
+  if (be32(jsb) != JBD2_MAGIC || (type != JBD2_SB_V1 && type != JBD2_SB_V2) ||
+      bsz != fs->bs) {
+    bc_put(sbh);
+    LOG_ERR("[EXT2] %s: superbloque del journal inválido", fs->bdev->name);
+    return -EINVAL;
+  }
+  j.maxlen = be32(jsb + 16);
+  j.first = be32(jsb + 20);
+  j.seq = be32(jsb + 24);
+  j.start = be32(jsb + 28);
+  uint32_t feat_in = (type == JBD2_SB_V2) ? be32(jsb + 40) : 0;
+  bc_put(sbh);
+  if (feat_in & JBD2_INC_FAST_COMMIT) {
+    LOG_ERR("[EXT2] %s: journal con fast commit no soportado", fs->bdev->name);
+    return -EOPNOTSUPP;
+  }
+  if (feat_in & ~(JBD2_INC_REVOKE | JBD2_INC_64BIT | JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3 | 4u)) {
+    LOG_ERR("[EXT2] %s: features del journal no soportadas 0x%x", fs->bdev->name, feat_in);
+    return -EOPNOTSUPP;
+  }
+  j.feat_incompat = feat_in;
+  if (j.maxlen < 8 || j.first == 0 || j.first >= j.maxlen)
+    return -EINVAL;
+  uint32_t tb = (feat_in & JBD2_INC_CSUM_V3) ? 16u : 12u;
+  if (!(feat_in & JBD2_INC_CSUM_V3)) {
+    if (feat_in & JBD2_INC_CSUM_V2) tb += 2;
+    if (!(feat_in & JBD2_INC_64BIT)) tb -= 4;
+  }
+  j.tag_bytes = tb;
+  j.tmp = kmalloc(fs->bs);
+  if (!j.tmp)
+    return -ENOMEM;
+  int rc = 0;
+  uint32_t end_seq = j.seq;
+  if (j.start != 0) {
+    rc = jrn_pass(&j, 0, &end_seq);
+    if (rc == 0) rc = jrn_pass(&j, 1, &end_seq);
+    if (rc == 0) rc = jrn_pass(&j, 2, &end_seq);
+    LOG_INFO("[EXT2] %s: journal reproducido (secuencias %u..%u, %u revocaciones) rc=%d",
+             fs->bdev->name, j.seq, end_seq, j.nrev, rc);
+  }
+  kfree(j.rev_blk);
+  kfree(j.rev_seq);
+  kfree(j.tmp);
+  if (rc != 0)
+    return rc;
+  // Journal limpio: start=0 y secuencia siguiente.
+  uint32_t pb;
+  if (jrn_pblk(&j, 0, &pb) != 0)
+    return -EIO;
+  bc_buf_t *jb = bc_get(fs->bdev, pb, fs->bs);
+  if (!jb)
+    return -EIO;
+  uint8_t *jd = bc_data(jb);
+  put_be32(jd + 24, j.start ? end_seq + 1 : j.seq);
+  put_be32(jd + 28, 0);
+  if (feat_in & (JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3)) {
+    put_be32(jd + 0xFC, 0);
+    put_be32(jd + 0xFC, ext4_crc32c(~0u, jd, 1024));
+  }
+  bc_mark_dirty(jb);
+  bc_put(jb);
+  // Superbloque del FS: quitar needs_recovery (y recalcular su checksum).
+  uint32_t sblk = 1024 / fs->bs, soff = 1024 % fs->bs;
+  bc_buf_t *sb = bc_get(fs->bdev, sblk, fs->bs);
+  if (!sb)
+    return -EIO;
+  uint8_t *sd = (uint8_t *)bc_data(sb) + soff;
+  uint32_t inc;
+  memcpy(&inc, sd + 96, 4);
+  inc &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+  memcpy(sd + 96, &inc, 4);
+  if (fs->ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM) {
+    uint32_t c = ext4_crc32c(~0u, sd, 1020);
+    memcpy(sd + 1020, &c, 4);
+  }
+  bc_mark_dirty(sb);
+  bc_put(sb);
+  return bc_sync_dev(fs->bdev) == 0 ? 0 : -EIO;
+}
+
 int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {
   if (!bdev_name || !mount_path)
     return -EINVAL;
@@ -3384,6 +4307,17 @@ int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {
   int rc = ext2_mount(bdev, &priv);
   if (rc != 0)
     return rc;
+  if (rw && (((ext2_fs_t *)priv)->incompat & EXT2_FEATURE_INCOMPAT_RECOVER)) {
+    // E9.1: reproducir el journal y volver a montar con el estado ya al día.
+    int jrc = ext2_journal_replay(priv);
+    ext2_umount(priv);
+    priv = NULL;
+    if (jrc != 0)
+      return jrc;
+    rc = ext2_mount(bdev, &priv);
+    if (rc != 0)
+      return rc;
+  }
   if (rw) {
     rc = ext2_remount(priv, 1);
     if (rc != 0) {
