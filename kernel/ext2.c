@@ -3735,7 +3735,10 @@ static void ext2_init_uninit_groups(ext2_fs_t *fs) {
     if ((gr->flags & 1) && gr->inode_bitmap) {
       bc_buf_t *b = bc_get_new(fs->bdev, gr->inode_bitmap, fs->bs);
       if (b) {
-        memset(bc_data(b), 0, fs->bs);
+        uint8_t *im = bc_data(b);
+        memset(im, 0, fs->bs);
+        for (uint32_t i = fs->inodes_per_group; i < fs->bs * 8; i++)
+          bit_set(im, i);
         bc_mark_dirty(b);
         bc_put(b);
       }

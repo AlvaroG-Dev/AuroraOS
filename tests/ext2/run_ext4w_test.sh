@@ -20,7 +20,8 @@ bash scripts/qemu-boot-test.sh -t "${T:-600}" 'sleep 30' \
  'cd /data; for i in $(seq 0 399); do dd if=/dev/urandom of=fragw bs=4096 seek=$((i*3)) count=1 conv=notrunc 2>/dev/null; done; sha256sum fragw | sed "s/^/@@SHA /"' \
  'cd /data; head -c 3000000 /dev/urandom >> big; sha256sum big | sed "s/^/@@SHA /"; dd if=/dev/urandom of=frag bs=4096 seek=100 count=50 conv=notrunc 2>/dev/null; sha256sum frag | sed "s/^/@@SHA /"' \
  'cd /data; head -c 10000 /dev/urandom > dir/nuevo; sha256sum dir/nuevo | sed "s/^/@@SHA /"; dd if=/dev/null of=gone bs=1 seek=123457 count=0 2>/dev/null; sha256sum gone | sed "s/^/@@SHA /"; rm small' \
- 'cd /data; mkdir -p n/a/b; for i in $(seq 1 200); do echo $i > n/a/b/f$i; done; rm n/a/b/f1*; touch many/nuevo_a many/nuevo_b; rm many/archivo_con_nombre_largo_5.txt; mv many/nuevo_a many/renombrado; mkdir many/sub; mv many/sub n/sub2; echo "@@N $(ls n/a/b | wc -l)"' \
+ 'cd /data; mkdir -p n/a/b; for i in $(seq 1 200); do echo $i > n/a/b/f$i; done; rm n/a/b/f1*; echo "@@N $(ls n/a/b | wc -l)"' \
+ 'cd /data; touch many/nuevo_a many/nuevo_b; rm many/archivo_con_nombre_largo_5.txt; mv many/nuevo_a many/renombrado; mkdir many/sub; mv many/sub n/sub2; echo @@MANY ok' \
  'cd /data; cp big big2; sha256sum big2 | sed "s/^/@@SHA /"; : > frag; rm big; sync; echo @@SYNC rc=$?' \
  'umount /data; echo @@UMOUNT rc=$?; echo @@DONE; power off' >/dev/null 2>&1
 tr -d '\r' < $LOG | grep -a "@@\|\[EXT2\]" | grep -av "bash -c" | cut -c1-160
