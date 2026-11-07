@@ -326,4 +326,5 @@ static inline long get_user_pages(unsigned long start, unsigned long nr, unsigne
 #define __phys_to_pfn(p) ((unsigned long)(p) >> PAGE_SHIFT)
 unsigned long lkpi_totalram_pages(void);
 #define get_num_physpages() lkpi_totalram_pages()
+#define virt_to_head_page(x) virt_to_page(x)
 #endif

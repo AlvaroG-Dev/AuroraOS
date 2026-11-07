@@ -158,4 +158,5 @@ static const struct file_operations __fops = { \
 
 struct debugfs_u32_array;
 static inline void debugfs_create_str(const char *name, umode_t mode, struct dentry *parent, char **value) {}
+static inline int debugfs_change_name(struct dentry *dentry, const char *fmt, ...) { return 0; }
 #endif

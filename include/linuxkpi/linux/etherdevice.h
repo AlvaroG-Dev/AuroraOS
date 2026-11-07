@@ -48,4 +48,15 @@ int eth_platform_get_mac_address(struct device *dev, u8 *mac_addr);
 struct net_device *alloc_etherdev_mqs(int sizeof_priv, unsigned int txqs, unsigned int rxqs);
 #define alloc_etherdev(sizeof_priv) alloc_etherdev_mq(sizeof_priv, 1)
 #define alloc_etherdev_mq(sizeof_priv, count) alloc_etherdev_mqs(sizeof_priv, count, count)
+static inline u64 ether_addr_to_u64(const u8 *addr)
+{
+	u64 u = 0; int i;
+	for (i = 0; i < ETH_ALEN; i++) u = u << 8 | addr[i];
+	return u;
+}
+static inline void u64_to_ether_addr(u64 u, u8 *addr)
+{
+	int i;
+	for (i = ETH_ALEN - 1; i >= 0; i--) { addr[i] = u & 0xff; u = u >> 8; }
+}
 #endif

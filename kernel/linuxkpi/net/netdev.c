@@ -738,3 +738,158 @@ void ethtool_mmsv_get_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_state *sta
 EXPORT_SYMBOL(ethtool_mmsv_get_mm);
 void ethtool_mmsv_set_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_cfg *cfg) { }
 EXPORT_SYMBOL(ethtool_mmsv_set_mm);
+
+/* ---- un solo espacio de nombres, indices de dispositivo y notificadores ---- */
+struct net init_net;
+EXPORT_SYMBOL(init_net);
+
+static DEFINE_MUTEX(lkpi_notif_lock);
+static LIST_HEAD(lkpi_notifiers);
+struct lkpi_notif { struct list_head node; struct notifier_block *nb; };
+static struct net_device *lkpi_devs[32];
+static int lkpi_next_ifindex = 1;
+
+int call_netdevice_notifiers(unsigned long val, struct net_device *dev)
+{
+	struct lkpi_notif *n;
+	struct netdev_notifier_info info = { .dev = dev };
+	int ret = NOTIFY_DONE;
+
+	mutex_lock(&lkpi_notif_lock);
+	list_for_each_entry(n, &lkpi_notifiers, node) {
+		ret = n->nb->notifier_call(n->nb, val, &info);
+		if (ret & NOTIFY_STOP_MASK)
+			break;
+	}
+	mutex_unlock(&lkpi_notif_lock);
+	return ret;
+}
+EXPORT_SYMBOL(call_netdevice_notifiers);
+
+int register_netdevice_notifier(struct notifier_block *nb)
+{
+	struct lkpi_notif *n = kzalloc(sizeof(*n), GFP_KERNEL);
+	int i;
+
+	if (!n)
+		return -ENOMEM;
+	n->nb = nb;
+	mutex_lock(&lkpi_notif_lock);
+	list_add_tail(&n->node, &lkpi_notifiers);
+	/* como Linux: se le notifican los dispositivos que ya existen */
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++) {
+		struct netdev_notifier_info info = { .dev = lkpi_devs[i] };
+		if (!lkpi_devs[i])
+			continue;
+		nb->notifier_call(nb, NETDEV_REGISTER, &info);
+		if (netif_running(lkpi_devs[i]))
+			nb->notifier_call(nb, NETDEV_UP, &info);
+	}
+	mutex_unlock(&lkpi_notif_lock);
+	return 0;
+}
+EXPORT_SYMBOL(register_netdevice_notifier);
+
+int unregister_netdevice_notifier(struct notifier_block *nb)
+{
+	struct lkpi_notif *n, *t;
+
+	mutex_lock(&lkpi_notif_lock);
+	list_for_each_entry_safe(n, t, &lkpi_notifiers, node) {
+		if (n->nb != nb)
+			continue;
+		list_del(&n->node);
+		kfree(n);
+	}
+	mutex_unlock(&lkpi_notif_lock);
+	return 0;
+}
+EXPORT_SYMBOL(unregister_netdevice_notifier);
+
+static void lkpi_dev_index_add(struct net_device *dev)
+{
+	int i;
+
+	dev->ifindex = lkpi_next_ifindex++;
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++)
+		if (!lkpi_devs[i]) {
+			lkpi_devs[i] = dev;
+			return;
+		}
+}
+
+static void lkpi_dev_index_del(struct net_device *dev)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++)
+		if (lkpi_devs[i] == dev)
+			lkpi_devs[i] = NULL;
+}
+
+struct net_device *__dev_get_by_index(struct net *net, int ifindex)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(lkpi_devs); i++)
+		if (lkpi_devs[i] && lkpi_devs[i]->ifindex == ifindex)
+			return lkpi_devs[i];
+	return NULL;
+}
+EXPORT_SYMBOL(__dev_get_by_index);
+
+struct net_device *dev_get_by_index(struct net *net, int ifindex)
+{
+	return __dev_get_by_index(net, ifindex);
+}
+EXPORT_SYMBOL(dev_get_by_index);
+
+/* register_netdevice: alta "de dentro" (mac80211/cfg80211 llaman con el rtnl). No
+ * crea la interfaz de Aurora: eso lo hace quien levante el dispositivo. */
+int register_netdevice(struct net_device *dev)
+{
+	int ret;
+
+	if (dev->netdev_ops && dev->netdev_ops->ndo_init) {
+		ret = dev->netdev_ops->ndo_init(dev);
+		if (ret)
+			return ret;
+	}
+	lkpi_dev_index_add(dev);
+	call_netdevice_notifiers(NETDEV_POST_INIT, dev);
+	call_netdevice_notifiers(NETDEV_REGISTER, dev);
+	return 0;
+}
+EXPORT_SYMBOL(register_netdevice);
+
+void unregister_netdevice(struct net_device *dev)
+{
+	if (netif_running(dev))
+		dev_close(dev);
+	call_netdevice_notifiers(NETDEV_UNREGISTER, dev);
+	lkpi_dev_index_del(dev);
+	if (dev->netdev_ops && dev->netdev_ops->ndo_uninit)
+		dev->netdev_ops->ndo_uninit(dev);
+}
+EXPORT_SYMBOL(unregister_netdevice);
+
+/* pernet: un solo espacio, init() al registrar y exit() al retirar */
+int register_pernet_device(struct pernet_operations *ops)
+{
+	return ops->init ? ops->init(&init_net) : 0;
+}
+EXPORT_SYMBOL(register_pernet_device);
+void unregister_pernet_device(struct pernet_operations *ops)
+{
+	if (ops->pre_exit)
+		ops->pre_exit(&init_net);
+	if (ops->exit)
+		ops->exit(&init_net);
+}
+EXPORT_SYMBOL(unregister_pernet_device);
+int register_pernet_subsys(struct pernet_operations *ops) { return register_pernet_device(ops); }
+EXPORT_SYMBOL(register_pernet_subsys);
+void unregister_pernet_subsys(struct pernet_operations *ops) { unregister_pernet_device(ops); }
+EXPORT_SYMBOL(unregister_pernet_subsys);
+const struct kobj_ns_type_operations net_ns_type_operations;
+EXPORT_SYMBOL(net_ns_type_operations);

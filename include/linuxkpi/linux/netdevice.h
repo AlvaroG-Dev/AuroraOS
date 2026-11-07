@@ -170,8 +170,14 @@ struct net_device_ops;
 struct kernel_hwtstamp_config;
 struct ifreq;
 
+#include <net/net_namespace.h>
+struct wireless_dev;
 struct net_device {
 	char name[IFNAMSIZ];
+	struct wireless_dev *ieee80211_ptr;
+	possible_net_t nd_net;
+	bool netns_immutable;
+	unsigned short hard_header_len_unused;
 	struct device dev;
 	unsigned long state;
 	netdev_features_t features, hw_features, wanted_features, vlan_features, hw_enc_features;
@@ -465,4 +471,29 @@ static inline struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev, st
 	return storage;
 }
 #define module_pci_driver_dummy
+
+/* ---- un solo espacio de nombres y notificadores de dispositivo (cfg80211) ---- */
+#include <linux/notifier.h>
+static inline struct net *dev_net(const struct net_device *dev) { return read_pnet(&dev->nd_net); }
+static inline void dev_net_set(struct net_device *dev, struct net *net) { write_pnet(&dev->nd_net, net); }
+enum netdev_cmd { NETDEV_UP = 1, NETDEV_DOWN, NETDEV_REBOOT, NETDEV_CHANGE, NETDEV_REGISTER, NETDEV_UNREGISTER, NETDEV_CHANGEMTU,
+	NETDEV_CHANGEADDR, NETDEV_PRE_CHANGEADDR, NETDEV_GOING_DOWN, NETDEV_CHANGENAME, NETDEV_FEAT_CHANGE, NETDEV_BONDING_FAILOVER,
+	NETDEV_PRE_UP, NETDEV_PRE_TYPE_CHANGE, NETDEV_POST_TYPE_CHANGE, NETDEV_POST_INIT, NETDEV_PRE_UNINIT, NETDEV_RELEASE, NETDEV_NOTIFY_PEERS };
+struct netdev_notifier_info { struct net_device *dev; struct netlink_ext_ack *extack; };
+static inline struct net_device *netdev_notifier_info_to_dev(const struct netdev_notifier_info *info) { return info->dev; }
+int register_netdevice_notifier(struct notifier_block *nb);
+int unregister_netdevice_notifier(struct notifier_block *nb);
+int call_netdevice_notifiers(unsigned long val, struct net_device *dev);
+int register_netdevice(struct net_device *dev);
+void unregister_netdevice(struct net_device *dev);
+#define unregister_netdevice_queue(dev, head) unregister_netdevice(dev)
+struct net_device *dev_get_by_index(struct net *net, int ifindex);
+struct net_device *__dev_get_by_index(struct net *net, int ifindex);
+#define IFF_DONT_BRIDGE 0x800
+static inline bool netif_is_bridge_port(const struct net_device *dev) { return false; }
+static inline int dev_change_net_namespace(struct net_device *dev, struct net *net, const char *pat) { return net == &init_net ? 0 : -EOPNOTSUPP; }
+static inline void dev_set_uevent_suppress(struct device *dev, int val) { }
+#define net_dbg_ratelimited(fmt, ...) do { } while (0)
+#define __net_init
+#define __net_exit
 #endif

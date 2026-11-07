@@ -4,7 +4,7 @@
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/err.h>
-enum rfkill_type { RFKILL_TYPE_ALL = 0, RFKILL_TYPE_WLAN, RFKILL_TYPE_BLUETOOTH, RFKILL_TYPE_UWB, RFKILL_TYPE_WIMAX, RFKILL_TYPE_WWAN, RFKILL_TYPE_GPS, RFKILL_TYPE_FM, RFKILL_TYPE_NFC, NUM_RFKILL_TYPES };
+#include <uapi/linux/rfkill.h>
 struct rfkill;
 struct rfkill_ops { void (*poll)(struct rfkill *rfkill, void *data); void (*query)(struct rfkill *rfkill, void *data); int (*set_block)(void *data, bool blocked); };
 static inline struct rfkill *rfkill_alloc(const char *name, struct device *parent, const enum rfkill_type type, const struct rfkill_ops *ops, void *ops_data) { return NULL; }

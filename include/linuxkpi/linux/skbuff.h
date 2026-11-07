@@ -83,6 +83,7 @@ struct sk_buff {
 	__u8 cloned;
 	__u8 no_fcs:1;
 	__u8 encapsulation:1;
+	__u8 head_frag:1;
 	__u8 vlan_present;
 	__u16 vlan_tci;
 	__be16 vlan_proto;
@@ -296,4 +297,11 @@ static inline int skb_queue_empty(const struct sk_buff_head *list) { return list
 #include <linux/gfp.h>
 #define dev_alloc_pages(order) alloc_pages(GFP_ATOMIC | __GFP_NOWARN | __GFP_COMP, order)
 static inline bool dev_page_is_reusable(const struct page *page) { return true; }
+#ifndef _LKPI_SKB_WIFI
+#define _LKPI_SKB_WIFI
+static inline bool skb_has_frag_list(const struct sk_buff *skb) { return false; }
+static inline void *pskb_pull(struct sk_buff *skb, unsigned int len) { return len > skb->len ? NULL : skb_pull(skb, len); }
+static inline void skb_postpull_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { }
+static inline void __skb_queue_purge(struct sk_buff_head *list) { struct sk_buff *skb; while ((skb = __skb_dequeue(list)) != NULL) kfree_skb(skb); }
+#endif
 #endif
