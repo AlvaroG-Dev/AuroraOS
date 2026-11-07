@@ -16,7 +16,7 @@
 
 #include "../../../lib/env.h"
 #include "../../../lib/file.h"
-#include "../../../lib/font_system.h"
+#include "../../../lib/font_aa.h"
 #include "../../../lib/malloc.h"
 #include "../../../lib/process.h"
 #include "../../../lib/string.h"
@@ -27,7 +27,12 @@
 #undef puts
 #undef printf
 
-#include "../../../lib/font_system.c"
+#include "uitext.h"
+#include "fonts/interregular_13.h"
+#include "fonts/interregular_15.h"
+#include "fonts/intersemibold_15.h"
+#include "fonts/intersemibold_34.h"
+#include "fonts/intersemibold_48.h"
 
 // libc (glibc/musl estatica): se declaran a mano para no chocar con syscall.h.
 extern int fork(void);
@@ -55,7 +60,6 @@ static const palette_t *P = &PAL;
 
 static int W, H;
 static uint32_t *g_px;
-static const font_aa_t *g_font;
 static int g_win = -1, g_dirty = 1;
 
 // ---- Pasos ----
@@ -84,8 +88,8 @@ static char g_err[96];
 static const char *k_pkg_id[] = {"devtools", "python", "perl", "gtk", "qt"};
 static const char *k_pkg_name[] = {"Herramientas de desarrollo", "Python 3", "Perl",
                                    "Apps GTK", "Apps Qt"};
-static const char *k_pkg_desc[] = {"GCC, make, nasm y utilidades", "Interprete y biblioteca estandar",
-                                   "Interprete y modulos", "Librerias GTK 3 y 4", "Librerias Qt 5"};
+static const char *k_pkg_desc[] = {"GCC, make, nasm y utilidades", "Intérprete y biblioteca estándar",
+                                   "Intérprete y módulos", "Librerías GTK 3 y 4", "Librerías Qt 5"};
 static const char *k_pkg_size[] = {"250 MB", "25 MB", "35 MB", "60 MB", "70 MB"};
 #define N_PKG 5
 static int g_pkg_on[N_PKG];
@@ -94,7 +98,6 @@ static int g_pkg_on[N_PKG];
 static int g_pid = -1, g_pct, g_failed;
 static char g_msg[200];
 
-static void text_clip_setup(void) {}
 
 // ---- Dibujo ----
 static void fill(int x, int y, int w, int h, uint32_t c) {
@@ -138,43 +141,17 @@ static void circle(int cx, int cy, int r, uint32_t c) {
       if (i * i + j * j <= r * r)
         px(cx + i, cy + j, c);
 }
-static int adv(void) { return g_font ? g_font->glyphs['M'].advance : 8; }
-static int text_w(const char *s, int sc) {
-  int n = 0;
-  for (; *s; s++) n++;
-  return n * adv() * sc;
+// Fuentes del sistema (Inter): cuerpo, pequena, botones, titulo y cifra grande.
+enum { F_SMALL, F_BODY, F_BTN, F_TITLE, F_BIG };
+static const font_aa_t *k_fonts[] = {&font_inter_regular_regular_13, &font_inter_regular_regular_15,
+                                     &font_inter_semibold_regular_15, &font_inter_semibold_regular_34,
+                                     &font_inter_semibold_regular_48};
+static int text_wf(const char *s, int f) { return font_aa_text_width(k_fonts[f], s); }
+static void textf(int x, int y, const char *s, uint32_t col, int f) {
+  rect_t clip = {0, 0, W, H};
+  gfx_draw_string_aa(g_px, W, clip, x, y, s, 0xFF000000u | (col & 0xFFFFFF), k_fonts[f]);
 }
-// Texto con escala entera (la fuente solo trae un tamano: los titulos se agrandan).
-static void text_sc(int x, int y, const char *s, uint32_t col, int sc) {
-  if (!g_font) return;
-  int a = adv();
-  int baseline = y + (g_font->height - 3) * sc;
-  uint32_t sr = (col >> 16) & 0xFF, sg = (col >> 8) & 0xFF, sb = col & 0xFF;
-  for (; *s; s++, x += a * sc) {
-    unsigned char ch = (unsigned char)*s;
-    if (ch >= 128) continue;
-    const glyph_aa_t *g = &g_font->glyphs[ch];
-    if (!g->bitmap || !g->width || !g->height) continue;
-    int gx = x + ((a - g->width) / 2 + g->bearing_x) * sc;
-    int gy = baseline - g->bearing_y * sc;
-    for (int j = 0; j < g->height; j++)
-      for (int i = 0; i < g->width; i++) {
-        uint32_t al = g->bitmap[j * g->width + i];
-        if (!al) continue;
-        for (int dj = 0; dj < sc; dj++)
-          for (int di = 0; di < sc; di++) {
-            int xx = gx + i * sc + di, yy = gy + j * sc + dj;
-            if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-            uint32_t d = g_px[yy * W + xx];
-            uint32_t r = (sr * al + ((d >> 16) & 0xFF) * (255 - al)) / 255;
-            uint32_t gg = (sg * al + ((d >> 8) & 0xFF) * (255 - al)) / 255;
-            uint32_t b = (sb * al + (d & 0xFF) * (255 - al)) / 255;
-            g_px[yy * W + xx] = 0xFF000000u | (r << 16) | (gg << 8) | b;
-          }
-      }
-  }
-}
-static void text(int x, int y, const char *s, uint32_t col) { text_sc(x, y, s, col, 1); }
+static void text(int x, int y, const char *s, uint32_t col) { textf(x, y, s, col, F_BODY); }
 
 // ---- Utilidades ----
 static void scopy(char *d, const char *s, int cap) {
@@ -299,9 +276,9 @@ static int valid_user(const char *u) {
 }
 static int validate_account(void) {
   g_err[0] = 0;
-  if (!valid_user(g_user)) { scopy(g_err, "Usa solo minusculas, numeros, _ y - (no 'root')", sizeof(g_err)); return 0; }
-  if (slen(g_pass) < 4) { scopy(g_err, "La contrasena necesita al menos 4 caracteres", sizeof(g_err)); return 0; }
-  if (!sequal(g_pass, g_pass2)) { scopy(g_err, "Las contrasenas no coinciden", sizeof(g_err)); return 0; }
+  if (!valid_user(g_user)) { scopy(g_err, "Usa solo minúsculas, números, _ y - (no 'root')", sizeof(g_err)); return 0; }
+  if (slen(g_pass) < 4) { scopy(g_err, "La contraseña necesita al menos 4 caracteres", sizeof(g_err)); return 0; }
+  if (!sequal(g_pass, g_pass2)) { scopy(g_err, "Las contraseñas no coinciden", sizeof(g_err)); return 0; }
   return 1;
 }
 
@@ -330,7 +307,7 @@ static void start_install(void) {
   pk[0] = 0;
   for (int i = 0; i < N_PKG; i++)
     if (g_pkg_on[i]) { if (pk[0]) sappend(pk, " ", sizeof(pk)); sappend(pk, k_pkg_id[i], sizeof(pk)); }
-  g_pct = 1; g_failed = 0; scopy(g_msg, "Iniciando la instalacion...", sizeof(g_msg));
+  g_pct = 1; g_failed = 0; scopy(g_msg, "Iniciando la instalación...", sizeof(g_msg));
   unlink("/run/aurora-install.progress");
   int pid = fork();
   if (pid == 0) {
@@ -376,12 +353,62 @@ static void poll_install(void) {
   g_dirty = 1;
 }
 
+
+// ---- Emblema de AuroraOS (assets/brand/aurora-emblem-192.argb: w,h y BGRA con alfa) ----
+static uint32_t *g_emb;
+static int g_emb_w, g_emb_h;
+static void load_emblem(void) {
+  static char *buf;
+  buf = (char *)malloc(8 + 192 * 192 * 4);
+  if (!buf) return;
+  int fd = open("/system/brand/aurora-emblem-192.argb", O_RDONLY_);
+  if (fd < 0) { free(buf); return; }
+  long tot = 0, n;
+  while (tot < 8 + 192 * 192 * 4 && (n = read(fd, buf + tot, (unsigned long)(8 + 192 * 192 * 4 - tot))) > 0) tot += n;
+  close(fd);
+  g_emb_w = *(int *)buf; g_emb_h = *(int *)(buf + 4);
+  if (tot < 8 + g_emb_w * g_emb_h * 4 || g_emb_w != 192 || g_emb_h != 192) { free(buf); return; }
+  g_emb = (uint32_t *)(buf + 8);
+}
+// Dibuja el emblema centrado en cx con ancho `size` (muestreo bilineal).
+static void draw_emblem(int cx, int top, int size) {
+  if (!g_emb) { // sin el recurso: baldosa verde
+    fill_round(cx - size / 2, top, size, size, size / 4, P->accent);
+    return;
+  }
+  int x0 = cx - size / 2;
+  for (int j = 0; j < size; j++)
+    for (int i = 0; i < size; i++) {
+      int fx = i * (g_emb_w - 1) * 256 / (size - 1), fy = j * (g_emb_h - 1) * 256 / (size - 1);
+      int ix = fx >> 8, iy = fy >> 8, ax = fx & 255, ay = fy & 255;
+      int ix1 = ix + 1 < g_emb_w ? ix + 1 : ix, iy1 = iy + 1 < g_emb_h ? iy + 1 : iy;
+      uint32_t p[4] = {g_emb[iy * g_emb_w + ix], g_emb[iy * g_emb_w + ix1], g_emb[iy1 * g_emb_w + ix], g_emb[iy1 * g_emb_w + ix1]};
+      uint32_t w[4] = {(256 - ax) * (256 - ay), ax * (256 - ay), (256 - ax) * ay, ax * ay};
+      uint32_t ch[4] = {0, 0, 0, 0}; // a, r, g, b ponderados (premultiplicados por alfa)
+      for (int k = 0; k < 4; k++) {
+        uint32_t a = p[k] >> 24;
+        ch[0] += a * w[k];
+        ch[1] += ((p[k] >> 16) & 0xFF) * a * w[k] / 255;
+        ch[2] += ((p[k] >> 8) & 0xFF) * a * w[k] / 255;
+        ch[3] += (p[k] & 0xFF) * a * w[k] / 255;
+      }
+      uint32_t a = ch[0] >> 16;
+      if (!a) continue;
+      uint32_t r = ch[1] >> 16, g = ch[2] >> 16, b = ch[3] >> 16;
+      int x = x0 + i, y = top + j;
+      if (x < 0 || y < 0 || x >= W || y >= H) continue;
+      uint32_t d = g_px[y * W + x];
+      uint32_t inv = 255 - a;
+      uint32_t or_ = r + ((d >> 16) & 0xFF) * inv / 255, og = g + ((d >> 8) & 0xFF) * inv / 255, ob = b + (d & 0xFF) * inv / 255;
+      g_px[y * W + x] = 0xFF000000u | (or_ > 255 ? 255 : or_) << 16 | (og > 255 ? 255 : og) << 8 | (ob > 255 ? 255 : ob);
+    }
+}
+
 // ---- Interfaz ----
 #define BTN_H 40
 #define WIN_W 900
 #define WIN_H 640
 #define BAR_H 44
-typedef struct { int x, y, w, h; } rect_t;
 static int WX, WY, WW, WH; // ventana (posicion y tamano fijo)
 static rect_t g_btn_next, g_btn_back, g_btn_a, g_btn_ok, g_btn_cancel;
 static int g_next_on, g_back_on, g_a_on;
@@ -390,15 +417,15 @@ static rect_t g_disk_rect[MAX_DISKS], g_pkg_rect[N_PKG], g_field_rect[4];
 static int g_close_on;
 
 static int hit(rect_t r, int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
-static void ctext(int cx, int y, const char *s, uint32_t col, int sc) {
-  text_sc(cx - text_w(s, sc) / 2, y, s, col, sc);
+static void ctext(int cx, int y, const char *s, uint32_t col, int f) {
+  textf(cx - text_wf(s, f) / 2, y, s, col, f);
 }
 static void button(rect_t r, const char *lbl, int primary, uint32_t bg_override) {
   if (bg_override) fill_round(r.x, r.y, r.w, r.h, 9, bg_override);
   else if (primary) fill_round(r.x, r.y, r.w, r.h, 9, P->accent);
   else fill_round(r.x, r.y, r.w, r.h, 9, P->card), ring(r.x, r.y, r.w, r.h, 9, P->line, P->card);
   uint32_t fg = (primary || bg_override) ? P->accent_text : P->text;
-  text(r.x + (r.w - text_w(lbl, 1)) / 2, r.y + (r.h - 18) / 2, lbl, fg);
+  textf(r.x + (r.w - text_wf(lbl, F_BTN)) / 2, r.y + (r.h - 19) / 2, lbl, fg, F_BTN);
 }
 static void draw_field(int idx, int x, int y, int w, const char *label, const char *val, int secret) {
   text(x, y, label, P->dim);
@@ -408,8 +435,8 @@ static void draw_field(int idx, int x, int y, int w, const char *label, const ch
   char shown[80]; int n = slen(val); if (n > 78) n = 78;
   for (int i = 0; i < n; i++) shown[i] = secret ? '*' : val[i];
   shown[n] = 0;
-  text(r.x + 14, r.y + 12, shown, P->text);
-  if (g_field == idx && ((now_ms() / 500) & 1)) fill(r.x + 14 + n * adv(), r.y + 9, 2, 24, P->accent);
+  text(r.x + 14, r.y + 11, shown, P->text);
+  if (g_field == idx && ((now_ms() / 500) & 1)) fill(r.x + 14 + text_wf(shown, F_BODY), r.y + 9, 2, 24, P->accent);
 }
 static void thick_line(int x0, int y0, int x1, int y1, int r, uint32_t c) {
   int dx = x1 - x0, dy = y1 - y0, n = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
@@ -440,7 +467,7 @@ static void draw(void) {
     thick_line(WX + 21, WY + BAR_H / 2 - 3, WX + 27, WY + BAR_H / 2 + 3, 0, 0xFF5A1A08);
     thick_line(WX + 27, WY + BAR_H / 2 - 3, WX + 21, WY + BAR_H / 2 + 3, 0, 0xFF5A1A08);
   }
-  ctext(cxm, WY + 14, "Instalar AuroraOS", P->dim, 1);
+  ctext(cxm, WY + 14, "Instalar AuroraOS", P->dim, F_BODY);
 
   int by = WY + WH - 70; // fila de botones
   int pad = 44;
@@ -450,18 +477,17 @@ static void draw(void) {
 
   switch (g_step) {
   case S_WELCOME:
-    fill_round(cxm - 52, ty + 6, 104, 104, 26, P->accent);
-    ctext(cxm, ty + 24, "A", P->accent_text, 6);
-    ctext(cxm, ty + 150, "Te damos la bienvenida", P->text, 3);
-    ctext(cxm, ty + 206, "Vamos a instalar AuroraOS en este equipo.", P->dim, 1);
-    ctext(cxm, ty + 232, "Solo te haran falta unos minutos.", P->dim, 1);
+    draw_emblem(cxm, ty + 4, 128);
+        ctext(cxm, ty + 150, "Te damos la bienvenida", P->text, F_BIG);
+    ctext(cxm, ty + 220, "Vamos a instalar AuroraOS en este equipo.", P->dim, F_BODY);
+    ctext(cxm, ty + 246, "Solo te harán falta unos minutos.", P->dim, F_BODY);
     g_next_lbl = "Empezar"; g_next_on = 1;
     g_a_lbl = "Abrir terminal"; g_a_on = 1;
     break;
   case S_DISK:
-    ctext(cxm, ty, "Elige donde instalar", P->text, 2);
-    ctext(cxm, ty + 48, "Se borrara todo el contenido del disco elegido.", P->dim, 1);
-    if (!g_ndisks) ctext(cxm, ty + 140, "No se ha encontrado ningun disco.", P->dim, 1);
+    ctext(cxm, ty, "Elige dónde instalar", P->text, F_TITLE);
+    ctext(cxm, ty + 48, "Se borrará todo el contenido del disco elegido.", P->dim, F_BODY);
+    if (!g_ndisks) ctext(cxm, ty + 140, "No se ha encontrado ningún disco.", P->dim, F_BODY);
     for (int i = 0; i < g_ndisks; i++) {
       rect_t r = {cx, ty + 96 + i * 74, cw, 62};
       g_disk_rect[i] = r;
@@ -482,20 +508,20 @@ static void draw(void) {
     g_next_lbl = "Continuar"; g_next_on = g_sel_disk >= 0; g_back_on = 1;
     break;
   case S_ACCOUNT: {
-    ctext(cxm, ty - 8, "Crea tu cuenta", P->text, 2);
+    ctext(cxm, ty - 8, "Crea tu cuenta", P->text, F_TITLE);
     int fy = ty + 44;
     draw_field(0, cx, fy, cw, "Nombre completo", g_full, 0);
     draw_field(1, cx, fy + 84, cw, "Nombre de usuario", g_user, 0);
-    draw_field(2, cx, fy + 168, cw, "Contrasena", g_pass, 1);
-    draw_field(3, cx, fy + 252, cw, "Repetir contrasena", g_pass2, 1);
-    if (g_err[0]) ctext(cxm, fy + 336, g_err, P->danger, 1);
+    draw_field(2, cx, fy + 168, cw, "Contraseña", g_pass, 1);
+    draw_field(3, cx, fy + 252, cw, "Repetir contraseña", g_pass2, 1);
+    if (g_err[0]) ctext(cxm, fy + 336, g_err, P->danger, F_BODY);
     g_next_lbl = "Continuar"; g_next_on = 1; g_back_on = 1;
     break;
   }
   case S_EXTRAS:
-    ctext(cxm, ty - 8, "Extras opcionales", P->text, 2);
-    ctext(cxm, ty + 38, "Se descargan despues, la primera vez que haya red.", P->dim, 1);
-    ctext(cxm, ty + 60, "Puedes saltarte todo esto y anadirlos mas tarde.", P->dim, 1);
+    ctext(cxm, ty - 8, "Extras opcionales", P->text, F_TITLE);
+    ctext(cxm, ty + 38, "Se descargan después, la primera vez que haya red.", P->dim, F_BODY);
+    ctext(cxm, ty + 60, "Puedes saltarte esto y añadirlos más tarde.", P->dim, F_BODY);
     for (int i = 0; i < N_PKG; i++) {
       rect_t r = {cx, ty + 98 + i * 64, cw, 54};
       g_pkg_rect[i] = r;
@@ -508,34 +534,34 @@ static void draw(void) {
     g_next_lbl = "Instalar"; g_next_on = 1; g_back_on = 1;
     break;
   case S_INSTALL: {
-    ctext(cxm, ty + 40, "Instalando AuroraOS", P->text, 2);
+    ctext(cxm, ty + 40, "Instalando AuroraOS", P->text, F_TITLE);
     char pc[16]; utoa_((unsigned long long)g_pct, pc); sappend(pc, " %", sizeof(pc));
-    ctext(cxm, ty + 100, pc, P->accent, 3);
+    ctext(cxm, ty + 100, pc, P->accent, F_BIG);
     rect_t r = {cxm - 240, ty + 170, 480, 10};
     fill_round(r.x, r.y, r.w, r.h, 5, P->line);
     int fw = r.w * g_pct / 100;
     if (fw > 10) fill_round(r.x, r.y, fw, r.h, 5, P->accent);
-    ctext(cxm, ty + 204, g_msg, P->dim, 1);
-    ctext(cxm, ty + 270, "No apagues el equipo. Puede tardar varios minutos.", P->dim, 1);
+    ctext(cxm, ty + 204, g_msg, P->dim, F_BODY);
+    ctext(cxm, ty + 270, "No apagues el equipo. Puede tardar varios minutos.", P->dim, F_BODY);
     break;
   }
   case S_DONE:
     if (g_failed) {
       circle(cxm, ty + 52, 40, P->danger);
-      ctext(cxm, ty + 30, "!", P->accent_text, 4);
-      ctext(cxm, ty + 120, "No se ha podido instalar", P->text, 2);
-      ctext(cxm, ty + 172, g_msg, P->dim, 1);
-      ctext(cxm, ty + 204, "Puedes volver atras y reintentarlo, o abrir un terminal.", P->dim, 1);
+      ctext(cxm, ty + 30, "!", P->accent_text, F_BIG);
+      ctext(cxm, ty + 120, "No se ha podido instalar", P->text, F_TITLE);
+      ctext(cxm, ty + 172, g_msg, P->dim, F_BODY);
+      ctext(cxm, ty + 204, "Puedes volver atrás y reintentarlo, o abrir un terminal.", P->dim, F_BODY);
       g_next_lbl = "Volver"; g_next_on = 1;
       g_a_lbl = "Abrir terminal"; g_a_on = 1;
     } else {
       circle(cxm, ty + 52, 40, P->accent);
       thick_line(cxm - 16, ty + 54, cxm - 5, ty + 66, 3, P->accent_text);
       thick_line(cxm - 5, ty + 66, cxm + 18, ty + 38, 3, P->accent_text);
-      ctext(cxm, ty + 120, "AuroraOS esta instalado", P->text, 2);
+      ctext(cxm, ty + 120, "AuroraOS está instalado", P->text, F_TITLE);
       char l[96] = "Tu usuario es "; sappend(l, g_user, sizeof(l));
-      ctext(cxm, ty + 172, l, P->text, 1);
-      ctext(cxm, ty + 204, "Retira el medio de instalacion y reinicia para empezar.", P->dim, 1);
+      ctext(cxm, ty + 172, l, P->text, F_BODY);
+      ctext(cxm, ty + 204, "Retira el medio de instalación y reinicia para empezar.", P->dim, F_BODY);
       g_next_lbl = "Reiniciar"; g_next_on = 1;
       g_a_lbl = "Apagar"; g_a_on = 1;
     }
@@ -551,7 +577,7 @@ static void draw(void) {
   g_btn_a = (rect_t){WX + pad, by, 160, BTN_H};
   if (g_step == S_WELCOME || g_step == S_DONE) g_btn_next.x = WX + WW - pad - 160;
   if (g_next_on) button(g_btn_next, g_next_lbl, 1, 0);
-  if (g_back_on) button(g_btn_back, "Atras", 0, 0);
+  if (g_back_on) button(g_btn_back, "Atrás", 0, 0);
   if (g_a_on) button(g_btn_a, g_a_lbl, 0, 0);
 
   // Hoja de confirmacion (sobre la ventana)
@@ -568,11 +594,11 @@ static void draw(void) {
     rect_t sh = {cxm - 270, WY + WH / 2 - 130, 540, 260};
     fill_round(sh.x - 1, sh.y - 1, sh.w + 2, sh.h + 2, 17, P->line);
     fill_round(sh.x, sh.y, sh.w, sh.h, 16, P->bar);
-    ctext(cxm, sh.y + 32, "Borrar el disco e instalar?", P->text, 2);
-    char l[120] = "Se borrara todo el contenido de ";
+    ctext(cxm, sh.y + 32, "¿Borrar el disco e instalar?", P->text, F_TITLE);
+    char l[120] = "Se borrará todo el contenido de ";
     sappend(l, g_disks[g_sel_disk].name, sizeof(l)); sappend(l, ".", sizeof(l));
-    ctext(cxm, sh.y + 96, l, P->dim, 1);
-    ctext(cxm, sh.y + 122, "Esta accion no se puede deshacer.", P->dim, 1);
+    ctext(cxm, sh.y + 96, l, P->dim, F_BODY);
+    ctext(cxm, sh.y + 122, "Esta acción no se puede deshacer.", P->dim, F_BODY);
     g_btn_cancel = (rect_t){sh.x + 36, sh.y + sh.h - 76, 200, BTN_H};
     g_btn_ok = (rect_t){sh.x + sh.w - 36 - 240, sh.y + sh.h - 76, 240, BTN_H};
     button(g_btn_cancel, "Cancelar", 0, 0);
@@ -674,8 +700,6 @@ static void on_click(int x, int y) {
 }
 
 int main(void) {
-  g_font = font_system_mono();
-  if (!g_font) return 1;
   uint32_t sz = sys_screen_size();
   W = (int)(sz >> 16); H = (int)(sz & 0xFFFF);
   if (W < 640 || H < 480) { W = 1024; H = 768; }
@@ -686,11 +710,11 @@ int main(void) {
   g_win = sys_win_create(0, 0, W, H, "Instalador de AuroraOS");
   if (g_win < 0) return 1;
   sys_win_set_icon(g_win, "/system/icons/app-generic.bmp");
+  load_emblem();
   WW = WIN_W; WH = WIN_H;
   if (WW > W - 40) WW = W - 40;
   if (WH > H - 40) WH = H - 40;
   WX = (W - WW) / 2; WY = (H - WH) / 2;
-  text_clip_setup();
 
   uint64_t last = 0;
   for (;;) {

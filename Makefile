@@ -555,9 +555,10 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		cp -f $(BOOTX64_EFI) $(KERNEL_ELF) sysroot/usr/share/aurora-installer/; \
 		cp -f $(AURORA_CONF) sysroot/usr/share/aurora-installer/aurora.conf; \
 		echo 1 > sysroot/etc/aurora-installer; \
+		mkdir -p sysroot/system/brand && cp -f assets/brand/aurora-emblem-192.argb sysroot/system/brand/; \
 		scripts/mk-boot-initrd.sh sysroot sysroot/usr/share/aurora-installer/boot-initrd.tar || exit 1; \
 	else \
-		rm -rf sysroot/usr/share/aurora-installer sysroot/usr/sbin/aurora-install sysroot/etc/aurora-installer; \
+		rm -rf sysroot/usr/share/aurora-installer sysroot/usr/sbin/aurora-install sysroot/etc/aurora-installer sysroot/system/brand; \
 	fi
 
 	@scripts/check-sysroot-libc.sh
