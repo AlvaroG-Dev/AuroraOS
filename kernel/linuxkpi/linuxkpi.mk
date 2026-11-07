@@ -77,6 +77,9 @@ linuxkpi-build: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linux
 LKPI_MODULES := lkpi_virtio lkpi_drm lkpi_ttm lkpi_drm_display lkpi_i915 lkpi_bochs lkpi_simpledrm lkpi_virtio_gpu lkpi_r8169 lkpi_e1000e lkpi_igc
 .PHONY: linuxkpi-modules
 linuxkpi-modules: tools/kurbuild
+	@[ -f $(LKPI_LINUX)/drivers/net/ethernet/realtek/r8169_main.c ] || { \
+		echo "[LKPI] faltan las fuentes de red de Linux (drivers/net): scripts/fetch-linux-drivers.sh"; \
+		scripts/fetch-linux-drivers.sh || exit 1; }
 	@for m in $(LKPI_MODULES); do \
 		$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=$$m \
 			KUR_CC="$(KUR_CC)" install || exit 1; \
