@@ -721,7 +721,7 @@ installer-iso:
 	        USB_DATA_MB=0 AURORA_CONF=build/aurora-installer.conf \
 	        ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
 
-# Arrancar la ISO instaladora en QEMU con un disco virtual vacio donde instalar.
+# Arrancar la ISO instaladora en QEMU con un disco SATA (AHCI) virtual vacio donde instalar.
 #   make run-installer       UEFI (OVMF)       <- la ruta soportada por el instalador
 #   make run-installer-bios  BIOS (SeaBIOS)    <- arranca el live; el instalador aun
 #                                                 solo escribe discos UEFI (ESP+GPT)
@@ -747,7 +747,8 @@ run-installer: $(INSTALLER_ISO) $(INSTALLER_DISK)
 		-m $(QEMU_MEM) -no-reboot -no-shutdown \
 		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
 		-cdrom $(INSTALLER_ISO) \
-		-drive file=$(INSTALLER_DISK),format=raw,if=ide,index=0 \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
 		-serial stdio
 
 run-installer-bios: $(INSTALLER_ISO) $(INSTALLER_DISK)
@@ -755,7 +756,8 @@ run-installer-bios: $(INSTALLER_ISO) $(INSTALLER_DISK)
 		-m $(QEMU_MEM) -no-reboot -no-shutdown \
 		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
 		-cdrom $(INSTALLER_ISO) \
-		-drive file=$(INSTALLER_DISK),format=raw,if=ide,index=0 \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
 		-boot d -serial stdio
 
 # Arrancar solo el disco ya instalado (UEFI, sin ISO).
@@ -766,7 +768,8 @@ run-installer-disk: $(INSTALLER_DISK)
 		-drive if=pflash,format=raw,file=build/installer_vars.fd \
 		-m $(QEMU_MEM) -no-reboot -no-shutdown \
 		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
-		-drive file=$(INSTALLER_DISK),format=raw,if=ide,index=0 \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
 		-serial stdio
 
 .PHONY: run-installer run-installer-bios run-installer-disk installer-disk-clean
