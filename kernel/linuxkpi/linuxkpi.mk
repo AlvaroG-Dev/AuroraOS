@@ -6,7 +6,8 @@ include kernel/linuxkpi/linux-version.mk
 LKPI_BUILD   := build/linuxkpi
 LKPI_SRCS    := $(wildcard kernel/linuxkpi/*.c kernel/linuxkpi/kernel/*.c kernel/linuxkpi/lib/*.c \
                            kernel/linuxkpi/mm/*.c kernel/linuxkpi/base/*.c kernel/linuxkpi/pci/*.c \
-                           kernel/linuxkpi/fs/*.c kernel/linuxkpi/dma/*.c kernel/linuxkpi/misc/*.c)
+                           kernel/linuxkpi/fs/*.c kernel/linuxkpi/dma/*.c kernel/linuxkpi/misc/*.c \
+                           kernel/linuxkpi/net/*.c)
 LKPI_SRCS    := $(filter-out kernel/linuxkpi/kur_manifest.c,$(LKPI_SRCS))
 LKPI_OBJS    := $(patsubst kernel/linuxkpi/%.c,$(LKPI_BUILD)/obj/%.o,$(LKPI_SRCS))
 
@@ -73,9 +74,12 @@ linuxkpi-build: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linux
 
 # Modulos de infraestructura de Linux sobre la capa (kernel/linuxkpi/drivers/<n>.mk):
 # el nucleo virtio (L5) y, mas adelante, el de DRM. Se cargan bajo demanda.
-LKPI_MODULES := lkpi_virtio lkpi_drm lkpi_ttm lkpi_drm_display lkpi_i915 lkpi_bochs lkpi_simpledrm lkpi_virtio_gpu
+LKPI_MODULES := lkpi_virtio lkpi_drm lkpi_ttm lkpi_drm_display lkpi_i915 lkpi_bochs lkpi_simpledrm lkpi_virtio_gpu lkpi_r8169 lkpi_e1000e lkpi_igc
 .PHONY: linuxkpi-modules
 linuxkpi-modules: tools/kurbuild
+	@[ -f $(LKPI_LINUX)/drivers/net/ethernet/realtek/r8169_main.c ] || { \
+		echo "[LKPI] faltan las fuentes de red de Linux (drivers/net): scripts/fetch-linux-drivers.sh"; \
+		scripts/fetch-linux-drivers.sh || exit 1; }
 	@for m in $(LKPI_MODULES); do \
 		$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=$$m \
 			KUR_CC="$(KUR_CC)" install || exit 1; \

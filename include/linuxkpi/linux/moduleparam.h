@@ -74,3 +74,8 @@ struct kparam_array {
 #define core_param(name, var, type, perm) module_param_named(name, var, type, perm)
 
 #endif
+
+#ifndef __MODULE_STRING
+#include <linux/stringify.h>
+#define __MODULE_STRING(x) __stringify(x)
+#endif
