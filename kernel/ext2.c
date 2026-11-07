@@ -62,7 +62,11 @@
 #define EXT2_FEATURE_COMPAT_DIR_INDEX 0x0020
 // Lo que sabemos escribir sin romper nada (el resto: montaje solo lectura).
 #define EXT2_COMPAT_RW_OK 0x003F
-#define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
+// ext4 escribible (E9): extents, 64bit, flex_bg; huge_file/dir_nlink/extra_isize.
+// Sigue en solo lectura con metadata_csum, uninit_bg, mmp, largedir o csum_seed.
+#define EXT2_INCOMPAT_RW_OK (EXT2_FEATURE_INCOMPAT_FILETYPE | EXT4_FEATURE_INCOMPAT_EXTENTS | \
+                             EXT4_FEATURE_INCOMPAT_64BIT | EXT4_FEATURE_INCOMPAT_FLEX_BG)
+#define EXT2_RO_COMPAT_RW_OK (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT2_FEATURE_RO_COMPAT_LARGE_FILE | 0x0008 | 0x0020 | 0x0040)
 #define EXT2_INDEX_FL 0x1000
 // Flags de inodo que chattr puede cambiar (FS_IOC_SETFLAGS) y cuales se imponen.
 #define EXT2_SYNC_FL 0x00000008u
@@ -168,6 +172,7 @@ typedef struct {
   uint32_t inode_size, first_ino, ngroups;
   uint32_t compat, incompat, ro_compat;
   uint32_t journal_ino; // s_journal_inum (jbd2 interno)
+  uint32_t gdsz;        // tamaño del descriptor de grupo (32, o 64 con 64bit)
   int filetype;
   ext2_group_t *groups;
   mutex_t lock; // serializa TODAS las operaciones del FS
@@ -662,17 +667,25 @@ static int ext2_begin_write(ext2_fs_t *fs) {
 }
 
 static int ext2_gd_write(ext2_fs_t *fs, uint32_t g) {
-  uint32_t per = fs->bs / sizeof(ext2_gd_t);
+  uint32_t per = fs->bs / fs->gdsz;
   bc_buf_t *b = bc_get(fs->bdev, fs->first_data_block + 1 + g / per, fs->bs);
   if (!b)
     return -EIO;
-  uint8_t *p = (uint8_t *)bc_data(b) + (g % per) * sizeof(ext2_gd_t);
+  uint8_t *p = (uint8_t *)bc_data(b) + (g % per) * fs->gdsz;
   ext2_gd_t gd;
   memcpy(&gd, p, sizeof(gd));
   gd.bg_free_blocks_count = (uint16_t)fs->groups[g].free_blocks;
   gd.bg_free_inodes_count = (uint16_t)fs->groups[g].free_inodes;
   gd.bg_used_dirs_count = (uint16_t)fs->groups[g].used_dirs;
   memcpy(p, &gd, sizeof(gd));
+  if (fs->gdsz >= 64) { // mitades altas de los contadores
+    uint16_t hb = (uint16_t)(fs->groups[g].free_blocks >> 16);
+    uint16_t hi = (uint16_t)(fs->groups[g].free_inodes >> 16);
+    uint16_t hd = (uint16_t)(fs->groups[g].used_dirs >> 16);
+    memcpy(p + 0x2C, &hb, 2);
+    memcpy(p + 0x2E, &hi, 2);
+    memcpy(p + 0x30, &hd, 2);
+  }
   bc_mark_dirty(b);
   bc_put(b);
   return 0;
@@ -1048,8 +1061,12 @@ static uint32_t ext2_ip_goal(const ext2_fs_t *fs, const ext2_ino_t *ip) {
 // Bloque físico del lógico `lblk`; si `create`, lo asigna (y los indirectos
 // que falten). *out = 0 si es un hueco y !create. Modifica ip->di: el
 // llamante debe volcar el inodo (ext2_ip_flush).
+static int ext4_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk, int create,
+                            uint32_t *out);
 static int ext2_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk,
                             int create, uint32_t *out) {
+  if (ip->di.i_flags & EXT4_EXTENTS_FL)
+    return ext4_bmap_create(fs, ip, lblk, create, out);
   uint32_t idx[4];
   int d = ext2_path(fs, lblk, idx);
   if (d < 0)
@@ -1101,6 +1118,303 @@ done:
   if (parent)
     bc_put(parent);
   return rc;
+}
+
+
+// ---------------------------------------------------------------------------
+// E9.2: escritura en ficheros con extents (árbol de profundidad 0 o 1)
+// ---------------------------------------------------------------------------
+#define E4_HDR 12u
+static inline uint16_t e4_u16(const uint8_t *p) { uint16_t v; memcpy(&v, p, 2); return v; }
+static inline uint32_t e4_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static inline void e4_set16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
+static inline void e4_set32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+#define E4_ENT(n, i) ((n) + E4_HDR + (size_t)(i) * 12)
+#define E4_ENTRIES(n) e4_u16((n) + 2)
+#define E4_MAXE(n) e4_u16((n) + 4)
+#define E4_DEPTH(n) e4_u16((n) + 6)
+// extent: eb(4) len(2) hi(2) lo(4). índice: eb(4) leaf_lo(4) leaf_hi(2) pad(2)
+#define E4_LEN(e) ((uint32_t)e4_u16((e) + 4))
+static inline uint32_t e4_nblk(const uint8_t *e) {
+  uint32_t l = E4_LEN(e);
+  return l > 32768 ? l - 32768 : l;
+}
+static inline int e4_unwritten(const uint8_t *e) { return E4_LEN(e) > 32768; }
+
+static int e4_node_ok(const ext2_fs_t *fs, const uint8_t *n, size_t nbytes) {
+  (void)fs;
+  return e4_u16(n) == EXT4_EXT_MAGIC && E4_ENTRIES(n) <= E4_MAXE(n) &&
+         E4_HDR + (size_t)E4_MAXE(n) * 12 <= nbytes && E4_DEPTH(n) <= 1;
+}
+
+// Libera `n` bloques desde `pb`.
+static void e4_free_run(ext2_fs_t *fs, ext2_ino_t *ip, uint32_t pb, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) {
+    if (pb + i >= fs->first_data_block && pb + i < fs->blocks_count) {
+      ext2_free_block(fs, pb + i);
+      ext2_blocks_add(fs, ip, -1);
+    }
+  }
+}
+
+// Recorta las hojas de `n` dejando solo los bloques lógicos < keep. Devuelve
+// cuántas entradas quedan.
+static uint16_t e4_trim_leaf(ext2_fs_t *fs, ext2_ino_t *ip, uint8_t *n,
+                             uint64_t keep, int *changed) {
+  uint16_t ne = E4_ENTRIES(n);
+  while (ne > 0) {
+    uint8_t *e = E4_ENT(n, ne - 1);
+    uint32_t eb = e4_u32(e), cnt = e4_nblk(e), lo = e4_u32(e + 8);
+    if (e4_u16(e + 6) != 0)
+      break; // bloque físico > 2^32: no lo tocamos
+    if (eb >= keep) {
+      e4_free_run(fs, ip, lo, cnt);
+      ne--;
+      *changed = 1;
+      continue;
+    }
+    if ((uint64_t)eb + cnt > keep) {
+      uint32_t nl = (uint32_t)(keep - eb);
+      e4_free_run(fs, ip, lo + nl, cnt - nl);
+      e4_set16(e + 4, (uint16_t)(e4_unwritten(e) ? 32768 + nl : nl));
+      *changed = 1;
+    }
+    break;
+  }
+  e4_set16(n + 2, ne);
+  return ne;
+}
+
+static void ext4_trunc_blocks(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t keep) {
+  uint8_t *root = (uint8_t *)ip->di.i_block;
+  if (!e4_node_ok(fs, root, sizeof(ip->di.i_block))) {
+    LOG_WARN("[EXT2] %s: árbol de extents inválido en ino %u", fs->bdev->name, ip->ino);
+    return;
+  }
+  int ch = 0;
+  if (E4_DEPTH(root) == 0) {
+    e4_trim_leaf(fs, ip, root, keep, &ch);
+  } else {
+    uint16_t ni = E4_ENTRIES(root);
+    while (ni > 0) {
+      uint8_t *ie = E4_ENT(root, ni - 1);
+      uint32_t leaf = e4_u32(ie + 4);
+      if (e4_u16(ie + 8) != 0 || leaf < fs->first_data_block || leaf >= fs->blocks_count)
+        break;
+      bc_buf_t *b = bc_get(fs->bdev, leaf, fs->bs);
+      if (!b)
+        break;
+      uint8_t *ln = bc_data(b);
+      if (!e4_node_ok(fs, ln, fs->bs) || E4_DEPTH(ln) != 0) {
+        bc_put(b);
+        break;
+      }
+      int lch = 0;
+      uint16_t left = e4_trim_leaf(fs, ip, ln, keep, &lch);
+      if (lch)
+        bc_mark_dirty(b);
+      bc_put(b);
+      if (left > 0)
+        break; // sigue habiendo extents por debajo de keep: las hojas previas no cambian
+      ext2_free_block(fs, leaf);
+      ext2_blocks_add(fs, ip, -1);
+      ni--;
+      e4_set16(root + 2, ni);
+    }
+    if (ni == 0) {
+      e4_set16(root + 6, 0); // vuelve a profundidad 0
+      e4_set16(root + 2, 0);
+    }
+  }
+  ip->goal = 0;
+}
+
+// Busca el extent no inicializado que cubre `lblk` (para negar la escritura).
+static int ext4_covered_unwritten(ext2_fs_t *fs, const ext2_inode_t *di, uint64_t lblk) {
+  const uint8_t *node = (const uint8_t *)di->i_block;
+  bc_buf_t *held = NULL;
+  int res = 0;
+  if (E4_DEPTH(node) == 1) {
+    uint16_t ni = E4_ENTRIES(node);
+    uint32_t leaf = 0;
+    for (int i = (int)ni - 1; i >= 0; i--)
+      if (e4_u32(E4_ENT(node, i)) <= lblk) {
+        leaf = e4_u32(E4_ENT(node, i) + 4);
+        break;
+      }
+    if (!leaf || leaf >= fs->blocks_count)
+      return 0;
+    held = bc_get(fs->bdev, leaf, fs->bs);
+    if (!held)
+      return 0;
+    node = bc_data(held);
+    if (!e4_node_ok(fs, node, fs->bs))
+      goto out;
+  }
+  for (int i = (int)E4_ENTRIES(node) - 1; i >= 0; i--) {
+    const uint8_t *e = E4_ENT(node, i);
+    if (e4_u32(e) <= lblk) {
+      res = e4_unwritten(e) && lblk - e4_u32(e) < e4_nblk(e);
+      break;
+    }
+  }
+out:
+  if (held)
+    bc_put(held);
+  return res;
+}
+
+static void e4_write_hdr(uint8_t *n, uint16_t entries, uint16_t maxe, uint16_t depth) {
+  e4_set16(n, EXT4_EXT_MAGIC);
+  e4_set16(n + 2, entries);
+  e4_set16(n + 4, maxe);
+  e4_set16(n + 6, depth);
+  e4_set32(n + 8, 0);
+}
+
+// Inserta (lblk -> pb) de un bloque. -ENOSPC si no cabe en un árbol de profundidad 1.
+static int ext4_insert(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk, uint32_t pb) {
+  uint8_t *root = (uint8_t *)ip->di.i_block;
+  if (!e4_node_ok(fs, root, sizeof(ip->di.i_block)))
+    return -EIO;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint8_t *node = root;
+    bc_buf_t *lb = NULL;
+    int idx = -1;
+    uint16_t maxe = E4_MAXE(root);
+    if (E4_DEPTH(root) == 1) {
+      uint16_t ni = E4_ENTRIES(root);
+      if (ni == 0)
+        return -EIO;
+      idx = 0;
+      for (int i = (int)ni - 1; i >= 0; i--)
+        if (e4_u32(E4_ENT(root, i)) <= lblk) {
+          idx = i;
+          break;
+        }
+      uint32_t leaf = e4_u32(E4_ENT(root, idx) + 4);
+      if (e4_u16(E4_ENT(root, idx) + 8) != 0 || leaf < fs->first_data_block ||
+          leaf >= fs->blocks_count)
+        return -EIO;
+      lb = bc_get(fs->bdev, leaf, fs->bs);
+      if (!lb)
+        return -EIO;
+      node = bc_data(lb);
+      if (!e4_node_ok(fs, node, fs->bs) || E4_DEPTH(node) != 0) {
+        bc_put(lb);
+        return -EIO;
+      }
+      maxe = E4_MAXE(node);
+    }
+    uint16_t ne = E4_ENTRIES(node);
+    uint16_t pos = 0;
+    while (pos < ne && e4_u32(E4_ENT(node, pos)) <= lblk)
+      pos++;
+    if (pos > 0) { // extender el extent anterior si es contiguo
+      uint8_t *pe = E4_ENT(node, pos - 1);
+      uint32_t peb = e4_u32(pe), pl = E4_LEN(pe), plo = e4_u32(pe + 8);
+      if (pl < 32768 && e4_u16(pe + 6) == 0 && (uint64_t)peb + pl == lblk &&
+          plo + pl == pb) {
+        e4_set16(pe + 4, (uint16_t)(pl + 1));
+        if (lb) { bc_mark_dirty(lb); bc_put(lb); }
+        return 0;
+      }
+    }
+    if (ne < maxe) {
+      memmove(E4_ENT(node, pos + 1), E4_ENT(node, pos), (size_t)(ne - pos) * 12);
+      uint8_t *e = E4_ENT(node, pos);
+      e4_set32(e, (uint32_t)lblk);
+      e4_set16(e + 4, 1);
+      e4_set16(e + 6, 0);
+      e4_set32(e + 8, pb);
+      e4_set16(node + 2, ne + 1);
+      if (lb) {
+        if (idx >= 0 && pos == 0 && lblk < e4_u32(E4_ENT(root, idx)))
+          e4_set32(E4_ENT(root, idx), (uint32_t)lblk);
+        bc_mark_dirty(lb);
+        bc_put(lb);
+      }
+      return 0;
+    }
+    // Nodo lleno: crecer (profundidad 0) o partir la hoja (profundidad 1).
+    uint32_t nb;
+    int rc = ext2_new_zero_block(fs, ext2_ip_goal(fs, ip), &nb);
+    if (rc != 0) {
+      if (lb) bc_put(lb);
+      return rc;
+    }
+    ext2_blocks_add(fs, ip, 1);
+    bc_buf_t *nbuf = bc_get_new(fs->bdev, nb, fs->bs);
+    if (!nbuf) {
+      if (lb) bc_put(lb);
+      ext2_free_block(fs, nb);
+      ext2_blocks_add(fs, ip, -1);
+      return -EIO;
+    }
+    uint8_t *nn = bc_data(nbuf);
+    uint16_t cap = (uint16_t)((fs->bs - E4_HDR) / 12);
+    if (idx < 0) { // profundidad 0 -> 1: todo el contenido de la raíz pasa a la hoja
+      memset(nn, 0, fs->bs);
+      e4_write_hdr(nn, ne, cap, 0);
+      memcpy(E4_ENT(nn, 0), E4_ENT(root, 0), (size_t)ne * 12);
+      uint32_t first = ne ? e4_u32(E4_ENT(root, 0)) : 0;
+      e4_write_hdr(root, 1, E4_MAXE(root), 1);
+      uint8_t *ie = E4_ENT(root, 0);
+      memset(ie, 0, 12);
+      e4_set32(ie, first);
+      e4_set32(ie + 4, nb);
+    } else { // partir la hoja en dos: la mitad alta va al bloque nuevo
+      uint16_t ni = E4_ENTRIES(root);
+      if (ni >= E4_MAXE(root)) {
+        bc_put(nbuf);
+        bc_put(lb);
+        ext2_free_block(fs, nb);
+        ext2_blocks_add(fs, ip, -1);
+        return -ENOSPC;
+      }
+      uint16_t half = ne / 2, cnt = ne - half;
+      memset(nn, 0, fs->bs);
+      e4_write_hdr(nn, cnt, cap, 0);
+      memcpy(E4_ENT(nn, 0), E4_ENT(node, half), (size_t)cnt * 12);
+      e4_set16(node + 2, half);
+      memmove(E4_ENT(root, idx + 2), E4_ENT(root, idx + 1), (size_t)(ni - idx - 1) * 12);
+      uint8_t *ie = E4_ENT(root, idx + 1);
+      memset(ie, 0, 12);
+      e4_set32(ie, e4_u32(E4_ENT(nn, 0)));
+      e4_set32(ie + 4, nb);
+      e4_set16(root + 2, ni + 1);
+      bc_mark_dirty(lb);
+    }
+    bc_mark_dirty(nbuf);
+    bc_put(nbuf);
+    if (lb)
+      bc_put(lb);
+  }
+  return -ENOSPC;
+}
+
+static int ext4_bmap_create(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t lblk, int create,
+                            uint32_t *out) {
+  int rc = ext4_extent_map(fs, &ip->di, lblk, out);
+  if (rc != 0 || *out != 0 || !create)
+    return rc;
+  if (lblk > 0xFFFFFFFEULL)
+    return -EFBIG;
+  if (ext4_covered_unwritten(fs, &ip->di, lblk))
+    return -EOPNOTSUPP; // escribir en un extent sin inicializar: pendiente
+  uint32_t nb;
+  rc = ext2_new_zero_block(fs, ext2_ip_goal(fs, ip), &nb);
+  if (rc != 0)
+    return rc;
+  rc = ext4_insert(fs, ip, lblk, nb);
+  if (rc != 0) {
+    ext2_free_block(fs, nb);
+    return rc;
+  }
+  ext2_blocks_add(fs, ip, 1);
+  ip->goal = nb;
+  *out = nb;
+  return 0;
 }
 
 // Libera el subárbol colgado de *pp (profundidad `depth`), cuyo primer bloque
@@ -1165,6 +1479,10 @@ static int ext2_free_tree(ext2_fs_t *fs, ext2_ino_t *ip, uint32_t *pp,
 static void ext2_trunc_blocks(ext2_fs_t *fs, ext2_ino_t *ip, uint64_t keep) {
   if (!ext2_has_blocks(fs, &ip->di))
     return;
+  if (ip->di.i_flags & EXT4_EXTENTS_FL) {
+    ext4_trunc_blocks(fs, ip, keep);
+    return;
+  }
   for (uint32_t i = 0; i < EXT2_NDIR_BLOCKS; i++)
     ext2_free_tree(fs, ip, (uint32_t *)(void *)&ip->di.i_block[i], 0, i, keep);
   uint64_t apb = fs->bs / 4;
@@ -2076,7 +2394,8 @@ static int ext2_node_truncate(vfs_node_t *node, uint64_t new_size) {
   if (new_size > 0x7fffffffULL && (rc = ext2_enable_large_file(fs)) != 0)
     goto out;
   uint32_t idx[4];
-  if (ext2_path(fs, (new_size + fs->bs - 1) / fs->bs, idx) < 0 &&
+  if (!(ip->di.i_flags & EXT4_EXTENTS_FL) &&
+      ext2_path(fs, (new_size + fs->bs - 1) / fs->bs, idx) < 0 &&
       new_size > ip->size) {
     rc = -EFBIG;
     goto out;
@@ -3063,8 +3382,18 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
     gr->free_blocks = gd.bg_free_blocks_count;
     gr->free_inodes = gd.bg_free_inodes_count;
     gr->used_dirs = gd.bg_used_dirs_count;
+    if (gdsz >= 64) {
+      uint16_t hb, hi, hd;
+      memcpy(&hb, gp + 0x2C, 2);
+      memcpy(&hi, gp + 0x2E, 2);
+      memcpy(&hd, gp + 0x30, 2);
+      gr->free_blocks |= (uint32_t)hb << 16;
+      gr->free_inodes |= (uint32_t)hi << 16;
+      gr->used_dirs |= (uint32_t)hd << 16;
+    }
   }
   fs->itable_blocks = itable_blocks;
+  fs->gdsz = gdsz;
   fs->bad_groups = bad_groups;
   fs->s_state = sb.s_state;
   fs->rev1 = sb.s_rev_level == 1;
@@ -3198,9 +3527,9 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
     LOG_WARN("[EXT2] %s: el FS tiene errores registrados: solo lectura", dn);
     return -EROFS;
   }
-  if (fs->incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE) {
+  if (fs->incompat & ~EXT2_INCOMPAT_RW_OK) {
     LOG_WARN("[EXT2] %s: FS ext4/con journal pendiente (incompat=0x%x): solo "
-             "lectura", dn, fs->incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE);
+             "lectura", dn, fs->incompat & ~EXT2_INCOMPAT_RW_OK);
     return -EROFS;
   }
   if ((fs->compat & ~EXT2_COMPAT_RW_OK) || (fs->ro_compat & ~EXT2_RO_COMPAT_RW_OK)) {
