@@ -264,11 +264,10 @@ static inline void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page
 	skb->len += size; skb->data_len += size; skb->truesize += truesize;
 }
 static inline void net_prefetch(void *p) { prefetch(p); }
-static inline struct sk_buff *napi_build_skb(void *data, unsigned int frag_size)
-{
-	/* igc: el buffer es una pagina; copia lineal para no compartir el frag */
-	return NULL;
-}
+struct sk_buff *build_skb(void *data, unsigned int frag_size);
+struct sk_buff *napi_build_skb(void *data, unsigned int frag_size);
+void *netdev_alloc_frag(unsigned int fragsz);
+void skb_free_frag(void *addr);
 static inline void skb_metadata_set(struct sk_buff *skb, u8 meta_len) { }
 static inline void *__skb_pull(struct sk_buff *skb, unsigned int len) { skb->len -= len; return skb->data += len; }
 static inline void dummy_skb_end(void) { }
@@ -394,4 +393,5 @@ static inline int __pskb_trim(struct sk_buff *skb, unsigned int len) { if (len <
 #endif
 #define skb_walk_frags(skb, iter) for (iter = skb_shinfo(skb)->frag_list; iter; iter = iter->next)
 static inline void skb_postpush_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { }
+/* frags de pagina: sin soporte (jumbo en e1000 cae al descarte) */
 #endif

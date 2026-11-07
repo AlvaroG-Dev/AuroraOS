@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LKPI_LINUX_ETHERDEVICE_H
 #define _LKPI_LINUX_ETHERDEVICE_H
+#include <linux/unaligned.h>
 #include <linux/netdevice.h>
 #include <linux/if_ether.h>
 #include <linux/random.h>
@@ -60,4 +61,5 @@ static inline void u64_to_ether_addr(u64 u, u8 *addr)
 	for (i = ETH_ALEN - 1; i >= 0; i--) { addr[i] = u & 0xff; u = u >> 8; }
 }
 static inline bool ether_addr_equal_unaligned(const u8 *a, const u8 *b) { return !memcmp(a, b, ETH_ALEN); }
+static inline bool is_link_local_ether_addr(const u8 *addr) { static const u8 m[] = {0x01,0x80,0xc2,0,0,0}; return addr[0]==m[0] && addr[1]==m[1] && addr[2]==m[2] && addr[3]==m[3] && addr[4]==m[4] && (addr[5] & 0xf0) == 0; }
 #endif

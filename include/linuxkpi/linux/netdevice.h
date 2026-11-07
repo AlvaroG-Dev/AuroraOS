@@ -33,6 +33,9 @@ struct mii_bus;
 struct ethtool_ops;
 
 typedef u64 netdev_features_t;
+struct ifla_vf_info;
+struct ndmsg;
+struct nlattr;
 #define NETIF_F_SG		(1ULL << 0)
 #define NETIF_F_IP_CSUM		(1ULL << 1)
 #define NETIF_F_HW_CSUM		(1ULL << 3)
@@ -280,7 +283,8 @@ struct net_device_ops {
 	int (*ndo_set_vf_rate)(struct net_device *dev, int vf, int min_tx_rate, int max_tx_rate);
 	int (*ndo_set_vf_spoofchk)(struct net_device *dev, int vf, bool setting);
 	int (*ndo_set_vf_trust)(struct net_device *dev, int vf, bool setting);
-	int (*ndo_get_vf_config)(struct net_device *dev, int vf, void *ivf);
+	int (*ndo_get_vf_config)(struct net_device *dev, int vf, struct ifla_vf_info *ivf);
+	int (*ndo_fdb_add)(struct ndmsg *ndm, struct nlattr *tb[], struct net_device *dev, const unsigned char *addr, u16 vid, u16 flags, bool *notified, struct netlink_ext_ack *extack);
 	int (*ndo_set_vf_link_state)(struct net_device *dev, int vf, int link_state);
 	int (*ndo_fill_forward_path)(struct net_device_path_ctx *ctx, struct net_device_path *path);
 	int (*ndo_setup_tc)(struct net_device *dev, enum tc_setup_type type, void *type_data);
@@ -307,7 +311,7 @@ static inline struct net_device *to_net_dev(struct device *d) { return container
 
 int netif_rx(struct sk_buff *skb);
 int netif_receive_skb(struct sk_buff *skb);
-typedef enum { GRO_MERGED, GRO_MERGED_FREE, GRO_HELD, GRO_NORMAL, GRO_CONSUMED } gro_result_t;
+typedef enum { GRO_MERGED, GRO_MERGED_FREE, GRO_HELD, GRO_NORMAL, GRO_CONSUMED, GRO_DROP } gro_result_t;
 gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb);
 struct sk_buff *napi_alloc_skb(struct napi_struct *napi, unsigned int length);
 struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int length, gfp_t gfp);
@@ -524,4 +528,8 @@ static inline struct net_device *alloc_netdev_dummy(int sizeof_priv) { return lk
 #define netdev_hw_addr_list_count(l) ((l)->count)
 #define netdev_hw_addr_list_for_each(ha, l) list_for_each_entry(ha, &(l)->list, list)
 void lkpi_netif_wifi_link(struct net_device *dev, bool up);
+static inline struct sk_buff *napi_get_frags(struct napi_struct *napi) { return NULL; }
+static inline gro_result_t napi_gro_frags(struct napi_struct *napi) { return GRO_DROP; }
+static inline void napi_free_frags(struct napi_struct *napi) { }
+#define netdev_WARN_ONCE(dev, fmt, ...) WARN_ONCE(1, fmt, ##__VA_ARGS__)
 #endif

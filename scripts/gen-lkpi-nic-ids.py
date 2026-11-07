@@ -10,6 +10,9 @@ DRIVERS = [
     ("lkpi_r8169", "drivers/net/ethernet/realtek/r8169_main.c", "rtl8169_pci_tbl", ["drivers/net/ethernet/realtek"]),
     ("lkpi_e1000e", "drivers/net/ethernet/intel/e1000e/netdev.c", "e1000_pci_tbl", ["drivers/net/ethernet/intel/e1000e"]),
     ("lkpi_igc", "drivers/net/ethernet/intel/igc/igc_main.c", "igc_pci_tbl", ["drivers/net/ethernet/intel/igc"]),
+    ("lkpi_e1000", "drivers/net/ethernet/intel/e1000/e1000_main.c", "e1000_pci_tbl", ["drivers/net/ethernet/intel/e1000"]),
+    ("lkpi_igb", "drivers/net/ethernet/intel/igb/igb_main.c", "igb_pci_tbl", ["drivers/net/ethernet/intel/igb"]),
+    ("lkpi_alx", "drivers/net/ethernet/atheros/alx/main.c", "alx_pci_tbl", ["drivers/net/ethernet/atheros/alx"]),
 ]
 # Atendidos por un .aur nativo: el .aur manda salvo que aur.skip lo omita (entonces, Linux).
 NATIVE = {(0x8086, 0x10d3)}
@@ -39,6 +42,8 @@ for mod, f, tbl, dirs in DRIVERS:
     m = re.search(tbl + r"\[\]\s*=\s*\{(.*?)\n\};", txt, re.S)
     if not m: sys.exit("no encuentro " + tbl)
     body = re.sub(r"/\*.*?\*/", "", m.group(1), flags=re.S)
+    for e in re.finditer(r"INTEL_E1000_ETHERNET_DEVICE\(\s*(0x[0-9a-fA-F]+)\s*\)", body):
+        out.append((0x8086, int(e.group(1), 16), mod))
     for e in re.finditer(r"\{([^{}]*)\}", body):
         raw = e.group(1).strip()
         if not raw or raw == "0": continue
@@ -47,6 +52,9 @@ for mod, f, tbl, dirs in DRIVERS:
             if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", x): return int(x, 0)
             return defs.get(x)
         vend = dev = None
+        mm = re.match(r"INTEL_E1000_ETHERNET_DEVICE\(\s*(\w+)\s*\)", raw)
+        if mm:
+            out.append((0x8086, val(mm.group(1)), mod)); continue
         mm = re.match(r"PCI_VDEVICE\(\s*(\w+)\s*,\s*(\w+)\s*\)", raw)
         if mm:
             vend = defs.get("PCI_VENDOR_ID_" + mm.group(1)); dev = val(mm.group(2))

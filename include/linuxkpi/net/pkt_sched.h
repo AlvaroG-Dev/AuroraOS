@@ -39,4 +39,5 @@ struct tc_taprio_qopt_offload {
 };
 struct tc_cbs_qopt_offload { u8 enable; s32 queue; s32 hicredit; s32 locredit; s32 idleslope; s32 sendslope; };
 struct tc_etf_qopt_offload { u8 enable; s32 queue; };
+static inline void skb_txtime_consumed(struct sk_buff *skb) { skb->tstamp = 0; }
 #endif

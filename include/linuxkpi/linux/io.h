@@ -171,4 +171,6 @@ __LKPI_IOMAP(32, u32, readl, writel, inl, outl)
 #define arch_io_reserve_memtype_wc(base, size) 0
 #define arch_io_free_memtype_wc(base, size) do { } while (0)
 
+static inline void ioread16_rep(const void __iomem *a, void *buf, unsigned long n) { u16 *b = buf; while (n--) *b++ = ioread16(a); }
+static inline void iowrite16_rep(void __iomem *a, const void *buf, unsigned long n) { const u16 *b = buf; while (n--) iowrite16(*b++, a); }
 #endif

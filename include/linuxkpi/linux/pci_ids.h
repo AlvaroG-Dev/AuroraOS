@@ -64,4 +64,13 @@
 #define PCI_VENDOR_ID_GIGABYTE	0x1458
 #define PCI_VENDOR_ID_NCUBE	0x10ff
 #endif
+#ifndef PCI_VENDOR_ID_HP
+#define PCI_VENDOR_ID_HP 0x103c
+#endif
+#ifndef PCI_VENDOR_ID_DELL
+#define PCI_VENDOR_ID_DELL 0x1028
+#endif
+#ifndef PCI_VENDOR_ID_ATTANSIC
+#define PCI_VENDOR_ID_ATTANSIC 0x1969
+#endif
 #endif

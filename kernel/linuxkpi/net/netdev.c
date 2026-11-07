@@ -60,10 +60,69 @@ void kfree_skb(struct sk_buff *skb)
 		return;
 	if (!refcount_dec_and_test(&skb->users))
 		return;
-	kfree(skb->head);
+	/* fragmentos de pagina que el driver cedio al skb (skb_add_rx_frag) */
+	if (skb->head) {
+		struct skb_shared_info *sh = skb_shinfo(skb);
+		unsigned int i;
+
+		for (i = 0; i < sh->nr_frags; i++)
+			if (sh->frags[i].page)
+				put_page(sh->frags[i].page);
+	}
+	if (skb->head_frag)
+		put_page(virt_to_head_page(skb->head));	/* cabeza en una pagina del driver */
+	else
+		kfree(skb->head);
 	kfree(skb);
 }
 EXPORT_SYMBOL(kfree_skb);
+
+/*
+ * build_skb: el skb usa `data` como cabeza (que el driver reservo con espacio
+ * para skb_shared_info al final). frag_size != 0: `data` esta en una pagina
+ * (netdev_alloc_frag / paginas de RX de igb/igc) y se libera con put_page.
+ */
+struct sk_buff *build_skb(void *data, unsigned int frag_size)
+{
+	struct sk_buff *skb = kzalloc(sizeof(*skb), GFP_ATOMIC);
+	unsigned int size = frag_size ? frag_size : ksize(data);
+
+	if (!skb)
+		return NULL;
+	size = SKB_WITH_OVERHEAD(size);
+	skb->head = data;
+	skb->data = data;
+	skb->tail = 0;
+	skb->end = size;
+	skb->truesize = frag_size ? frag_size : ksize(data);
+	skb->head_frag = frag_size ? 1 : 0;
+	refcount_set(&skb->users, 1);
+	skb->mac_header = skb->network_header = skb->transport_header = (typeof(skb->mac_header))~0U;
+	memset(skb_end_pointer(skb), 0, sizeof(struct skb_shared_info));
+	return skb;
+}
+EXPORT_SYMBOL(build_skb);
+
+struct sk_buff *napi_build_skb(void *data, unsigned int frag_size)
+{
+	return build_skb(data, frag_size);
+}
+EXPORT_SYMBOL(napi_build_skb);
+
+void *netdev_alloc_frag(unsigned int fragsz)
+{
+	unsigned long a = __get_free_pages(GFP_ATOMIC | __GFP_COMP, get_order(fragsz));
+
+	return (void *)a;
+}
+EXPORT_SYMBOL(netdev_alloc_frag);
+
+void skb_free_frag(void *addr)
+{
+	if (addr)
+		put_page(virt_to_head_page(addr));
+}
+EXPORT_SYMBOL(skb_free_frag);
 
 struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int length, gfp_t gfp)
 {
@@ -110,7 +169,13 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, gfp_t gfp)
 	if (!nd)
 		return -ENOMEM;
 	memcpy(nd + nhead, skb->head, skb->end);
-	kfree(skb->head);
+	memcpy(nd + dsz, skb->head + skb->end, sizeof(struct skb_shared_info));	/* frags */
+	if (skb->head_frag) {
+		put_page(virt_to_head_page(skb->head));
+		skb->head_frag = 0;
+	} else {
+		kfree(skb->head);
+	}
 	skb->head = nd;
 	skb->data = nd + off + nhead;
 	skb->end = dsz;
@@ -424,6 +489,34 @@ static void lkpi_deliver(struct sk_buff *skb)
 	if (x && x->handle && netif_running(dev)) {
 		/* eth_type_trans() quito la cabecera Ethernet: se repone */
 		skb_push(skb, ETH_HLEN);
+		if (skb->data_len) {
+			/* igb/igc/e1000e con paginas: se aplana en un buffer lineal */
+			struct skb_shared_info *sh = skb_shinfo(skb);
+			unsigned int lin = skb_headlen(skb), off, i;
+			u8 *flat = kmalloc(skb->len, GFP_ATOMIC);
+
+			if (flat) {
+				memcpy(flat, skb->data, lin);
+				off = lin;
+				for (i = 0; i < sh->nr_frags && off < skb->len; i++) {
+					unsigned int l = min_t(unsigned int, sh->frags[i].len, skb->len - off);
+
+					memcpy(flat + off, page_address(sh->frags[i].page) + sh->frags[i].offset, l);
+					off += l;
+				}
+				if (!aurora_netif_rx(x->handle, flat, skb->len)) {
+					dev->stats.rx_packets++;
+					dev->stats.rx_bytes += skb->len;
+				} else {
+					dev->stats.rx_dropped++;
+				}
+				kfree(flat);
+			} else {
+				dev->stats.rx_dropped++;
+			}
+			kfree_skb(skb);
+			return;
+		}
 		if (!aurora_netif_rx(x->handle, skb->data, skb->len)) {
 			dev->stats.rx_packets++;
 			dev->stats.rx_bytes += skb->len;
