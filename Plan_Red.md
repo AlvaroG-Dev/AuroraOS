@@ -91,3 +91,13 @@ Confirmado con `lspci` de Alvaro: LAN **Intel I226-V (8086:125c)** → `igc` (ya
 - N7.3 asociación WPA2 con un `wpa_supplicant` (glibc) hablando con una interfaz propia (no nl80211): decidir entre portar nl80211 mínimo o un `ioctl`/chardev propio.
 - Bluetooth (`btusb`) queda aparte.
 Riesgo alto: es el mayor porte hasta ahora. Se hace por fases y sin tocar el camino Ethernet.
+
+## Estado (2026-11-07, rama claude/project-thread-ll4256)
+| Pieza | Estado |
+|---|---|
+| r8169, e1000e, igc | compilan y cargan; e1000e probado en QEMU; r8169/igc pendientes de hardware real |
+| igb, e1000, virtio_net (driver compacto propio) | DHCP verificado en QEMU |
+| alx | compila; sin probar |
+| cfg80211, mac80211, iwlwifi, iwlmvm | cargan en QEMU; asociación AX201 pendiente de hardware (WPA2-PSK/abierta, `aurora-wifi scan/connect/status`) |
+| tg3, btusb | pendientes (tg3 necesita stubs de phylib) |
+Limitaciones: e1000 sin jumbo frames; Wi-Fi sin WPA3/TKIP/WEP/802.1X; DHCP solo en el primer carrier-up.
