@@ -12,8 +12,13 @@
 #include "nl80211.h"
 #include "core.h"
 
-int nl80211_init(void) { return 0; }
-void nl80211_exit(void) { }
+extern int aurora_wifi_init(void);
+extern void aurora_wifi_exit(void);
+extern void aurora_wifi_connect_result(struct net_device *dev, int status);
+extern void aurora_wifi_disconnected(struct net_device *dev);
+extern void aurora_wifi_timeout(struct net_device *dev, const char *what);
+int nl80211_init(void) { return aurora_wifi_init(); }
+void nl80211_exit(void) { aurora_wifi_exit(); }
 void *nl80211hdr_put(struct sk_buff *skb, u32 portid, u32 seq, int flags, u8 cmd) { return NULL; }
 bool nl80211_put_sta_rate(struct sk_buff *msg, struct rate_info *info, int attr) { return false; }
 int nl80211_parse_chandef(struct cfg80211_registered_device *rdev, struct netlink_ext_ack *extack,
@@ -30,12 +35,20 @@ void nl80211_send_rx_auth(struct cfg80211_registered_device *rdev, struct net_de
 void nl80211_send_rx_assoc(struct cfg80211_registered_device *rdev, struct net_device *netdev, const struct cfg80211_rx_assoc_resp_data *data) { }
 void nl80211_send_deauth(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *buf, size_t len, bool reconnect, gfp_t gfp) { }
 void nl80211_send_disassoc(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *buf, size_t len, bool reconnect, gfp_t gfp) { }
-void nl80211_send_auth_timeout(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *addr, gfp_t gfp) { }
-void nl80211_send_assoc_timeout(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *addr, gfp_t gfp) { }
-void nl80211_send_connect_result(struct cfg80211_registered_device *rdev, struct net_device *netdev, struct cfg80211_connect_resp_params *params, gfp_t gfp) { }
+void nl80211_send_auth_timeout(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *addr, gfp_t gfp) {
+	aurora_wifi_timeout(netdev, "sin respuesta a la autenticacion");
+}
+void nl80211_send_assoc_timeout(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *addr, gfp_t gfp) {
+	aurora_wifi_timeout(netdev, "sin respuesta a la asociacion");
+}
+void nl80211_send_connect_result(struct cfg80211_registered_device *rdev, struct net_device *netdev, struct cfg80211_connect_resp_params *params, gfp_t gfp) {
+	aurora_wifi_connect_result(netdev, params->status);
+}
 void nl80211_send_roamed(struct cfg80211_registered_device *rdev, struct net_device *netdev, struct cfg80211_roam_info *info, gfp_t gfp) { }
 void nl80211_send_port_authorized(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *peer_addr, const u8 *td_bitmap, u8 td_bitmap_len) { }
-void nl80211_send_disconnected(struct cfg80211_registered_device *rdev, struct net_device *netdev, u16 reason, const u8 *ie, size_t ie_len, bool from_ap) { }
+void nl80211_send_disconnected(struct cfg80211_registered_device *rdev, struct net_device *netdev, u16 reason, const u8 *ie, size_t ie_len, bool from_ap) {
+	aurora_wifi_disconnected(netdev);
+}
 void nl80211_michael_mic_failure(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *addr, enum nl80211_key_type key_type, int key_id, const u8 *tsc, gfp_t gfp) { }
 void nl80211_send_beacon_hint_event(struct wiphy *wiphy, struct ieee80211_channel *channel_before, struct ieee80211_channel *channel_after) { }
 void nl80211_send_ibss_bssid(struct cfg80211_registered_device *rdev, struct net_device *netdev, const u8 *bssid, gfp_t gfp) { }

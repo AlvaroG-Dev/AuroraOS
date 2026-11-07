@@ -213,6 +213,7 @@ struct lkpi_ndev_extra {
 	struct ethtool_netdev_state ethtool;
 	spinlock_t xmit_lock;
 	void *handle;		/* aurora_netif_register() */
+	bool wifi_link;		/* Wi-Fi: la pila de Aurora ve enlace solo tras el 4-way handshake */
 };
 
 struct net_device *lkpi_alloc_netdev_mqs(int sizeof_priv, const char *name,
@@ -405,10 +406,20 @@ EXPORT_SYMBOL(napi_complete_done);
 
 /* RX ---------------------------------------------------------------- */
 
+/* Wi-Fi: el gestor de aurora_wifi (lkpi_cfg80211) se queda con las tramas EAPOL. */
+void (*lkpi_eapol_rx_hook)(struct net_device *dev, struct sk_buff *skb);
+EXPORT_SYMBOL(lkpi_eapol_rx_hook);
+
 static void lkpi_deliver(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
 	struct lkpi_ndev_extra *x = dev ? NDX(dev) : NULL;
+
+	if (dev && dev->ieee80211_ptr && skb->protocol == htons(ETH_P_PAE) &&
+	    lkpi_eapol_rx_hook) {
+		lkpi_eapol_rx_hook(dev, skb);	/* toma posesion del skb */
+		return;
+	}
 
 	if (x && x->handle && netif_running(dev)) {
 		/* eth_type_trans() quito la cabecera Ethernet: se repone */
@@ -481,17 +492,31 @@ int netif_set_real_num_rx_queues(struct net_device *dev, unsigned int rxq)
 
 /* estado / registro --------------------------------------------------- */
 
+/* Wi-Fi: enlace hacia la pila de Aurora (DHCP) solo cuando aurora_wifi lo pide. */
+void lkpi_netif_wifi_link(struct net_device *dev, bool up)
+{
+	struct lkpi_ndev_extra *x = NDX(dev);
+
+	x->wifi_link = up;
+	if (x->handle)
+		aurora_netif_carrier(x->handle, up ? 1 : 0);
+}
+EXPORT_SYMBOL(lkpi_netif_wifi_link);
+
 void netif_carrier_on(struct net_device *dev)
 {
-	if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle)
+	if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle &&
+	    !dev->ieee80211_ptr)
 		aurora_netif_carrier(NDX(dev)->handle, 1);
 }
 EXPORT_SYMBOL(netif_carrier_on);
 
 void netif_carrier_off(struct net_device *dev)
 {
-	if (!test_and_set_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle)
+	if (!test_and_set_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle) {
+		NDX(dev)->wifi_link = false;
 		aurora_netif_carrier(NDX(dev)->handle, 0);
+	}
 }
 EXPORT_SYMBOL(netif_carrier_off);
 

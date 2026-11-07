@@ -523,4 +523,5 @@ static inline struct net_device *alloc_netdev_dummy(int sizeof_priv) { return lk
 #include <linux/in6.h>
 #define netdev_hw_addr_list_count(l) ((l)->count)
 #define netdev_hw_addr_list_for_each(ha, l) list_for_each_entry(ha, &(l)->list, list)
+void lkpi_netif_wifi_link(struct net_device *dev, bool up);
 #endif
