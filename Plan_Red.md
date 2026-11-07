@@ -82,7 +82,7 @@ Prueba: `scripts/qemu-drive.py --cmdline "aur.skip=8086:10d3 lkpi.load=linuxkpi,
 
 ## 8. WiFi (placa ASUS TUF GAMING Z790-PLUS WIFI D4) — N7
 
-Según la ficha de ASUS: LAN Ethernet 2,5 Gb (Intel I225-V, driver `igc`; si fuera Realtek 8125 lo cubre `r8169`, ambos ya portados) y Wi-Fi 6 + BT 5.2 (Intel CNVi, previsiblemente AX201/AX211, driver `iwlwifi`). Hay que confirmar los PCI ID con el log del equipo (`[NET] pci ... 02`, y `lspci -nn` en Kali para la tarjeta Wi-Fi).
+Confirmado con `lspci` de Alvaro: LAN **Intel I226-V (8086:125c)** → `igc` (ya en la tabla de autocarga); Wi-Fi **Raptor Lake-S PCH CNVi 8086:7a70** → `iwlwifi` (`iwl_so_long_latency_imr_mac_cfg`, firmware `iwlwifi-so-a0-hr-b0-*` si es AX201 o `so-a0-gf-a0-*` si es AX211). Según la ficha de ASUS: LAN Ethernet 2,5 Gb (Intel I225-V, driver `igc`; si fuera Realtek 8125 lo cubre `r8169`, ambos ya portados) y Wi-Fi 6 + BT 5.2 (Intel CNVi, previsiblemente AX201/AX211, driver `iwlwifi`). Hay que confirmar los PCI ID con el log del equipo (`[NET] pci ... 02`, y `lspci -nn` en Kali para la tarjeta Wi-Fi).
 
 `iwlwifi` no cabe en la capa actual: necesita `cfg80211` + `mac80211` (la pila inalámbrica de Linux, ~150 kLOC con rfkill, regdb, nl80211), `iwlwifi` + `iwlmvm` (~100 kLOC), firmware de `linux-firmware` (`iwlwifi-so-a0-*`/`QuZ`), `request_firmware` ya existe (L4). Fases:
 - N7.0 confirmar chip y firmware requerido (log de Alvaro).
