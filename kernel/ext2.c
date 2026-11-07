@@ -167,6 +167,7 @@ typedef struct {
   uint32_t first_data_block, blocks_per_group, inodes_per_group;
   uint32_t inode_size, first_ino, ngroups;
   uint32_t compat, incompat, ro_compat;
+  uint32_t journal_ino; // s_journal_inum (jbd2 interno)
   int filetype;
   ext2_group_t *groups;
   mutex_t lock; // serializa TODAS las operaciones del FS
@@ -3016,6 +3017,7 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
   fs->compat = compat;
   fs->incompat = incompat;
   fs->ro_compat = ro_compat;
+  memcpy(&fs->journal_ino, sbraw + 224, 4);
   fs->filetype = (incompat & EXT2_FEATURE_INCOMPAT_FILETYPE) != 0;
 
   uint32_t itable_blocks =
@@ -3374,6 +3376,334 @@ int ext2_read_label(block_device_t *bdev, char out[17]) {
   return rc;
 }
 
+
+// ---------------------------------------------------------------------------
+// E9.1: reproducción del journal (jbd2) al montar para escritura
+// ---------------------------------------------------------------------------
+#define JBD2_MAGIC 0xC03B3998u
+#define JBD2_DESC 1
+#define JBD2_COMMIT 2
+#define JBD2_SB_V1 3
+#define JBD2_SB_V2 4
+#define JBD2_REVOKE 5
+#define JBD2_INC_REVOKE 0x1u
+#define JBD2_INC_64BIT 0x2u
+#define JBD2_INC_CSUM_V2 0x8u
+#define JBD2_INC_CSUM_V3 0x10u
+#define JBD2_INC_FAST_COMMIT 0x20u
+#define JBD2_TAG_ESCAPE 1u
+#define JBD2_TAG_SAME_UUID 2u
+#define JBD2_TAG_DELETED 4u
+#define JBD2_TAG_LAST 8u
+#define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM 0x0400u
+
+static uint32_t be32(const uint8_t *p) {
+  return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+static uint16_t be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static void put_be32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+  p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+
+// CRC-32C (Castagnoli) en bruto, como crc32c_le() de Linux: sin inversiones.
+static uint32_t g_crc32c_tab[256];
+static int g_crc32c_init;
+static uint32_t ext4_crc32c(uint32_t crc, const void *buf, size_t len) {
+  if (!g_crc32c_init) {
+    for (uint32_t i = 0; i < 256; i++) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; k++)
+        c = (c & 1) ? (c >> 1) ^ 0x82F63B78u : c >> 1;
+      g_crc32c_tab[i] = c;
+    }
+    g_crc32c_init = 1;
+  }
+  const uint8_t *p = buf;
+  while (len--)
+    crc = g_crc32c_tab[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+  return crc;
+}
+
+typedef struct {
+  ext2_fs_t *fs;
+  ext2_inode_t ji;
+  uint32_t maxlen, first, seq, start, feat_incompat;
+  uint32_t tag_bytes;
+  uint32_t *rev_blk, *rev_seq; // bloques revocados y la transacción que los revoca
+  uint32_t nrev, caprev;
+  uint8_t *tmp;
+} jrn_t;
+
+static int jrn_pblk(jrn_t *j, uint32_t idx, uint32_t *out) {
+  if (idx >= j->maxlen)
+    return -EIO;
+  int rc = ext2_bmap(j->fs, &j->ji, idx, out);
+  if (rc == 0 && *out == 0)
+    rc = -EIO;
+  return rc;
+}
+static uint32_t jrn_next(const jrn_t *j, uint32_t idx) {
+  idx++;
+  return idx >= j->maxlen ? j->first + (idx - j->maxlen) : idx;
+}
+static const uint8_t *jrn_get(jrn_t *j, uint32_t idx, bc_buf_t **h) {
+  uint32_t pb;
+  if (jrn_pblk(j, idx, &pb) != 0)
+    return NULL;
+  *h = bc_get(j->fs->bdev, pb, j->fs->bs);
+  return *h ? bc_data(*h) : NULL;
+}
+
+// Cuántas etiquetas (bloques de datos) lleva un bloque descriptor.
+static uint32_t jrn_count_tags(const jrn_t *j, const uint8_t *d) {
+  uint32_t bs = j->fs->bs, p = 12, n = 0;
+  uint32_t tail = (j->feat_incompat & (JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3)) ? 4 : 0;
+  while (p + j->tag_bytes <= bs - tail) {
+    uint32_t flags = (j->feat_incompat & JBD2_INC_CSUM_V3) ? be32(d + p + 4)
+                                                          : be16(d + p + 6);
+    n++;
+    p += j->tag_bytes;
+    if (!(flags & JBD2_TAG_SAME_UUID))
+      p += 16;
+    if (flags & JBD2_TAG_LAST)
+      break;
+  }
+  return n;
+}
+
+static int jrn_revoke_add(jrn_t *j, uint32_t blk, uint32_t seq) {
+  for (uint32_t i = 0; i < j->nrev; i++)
+    if (j->rev_blk[i] == blk) {
+      if ((int32_t)(seq - j->rev_seq[i]) > 0)
+        j->rev_seq[i] = seq;
+      return 0;
+    }
+  if (j->nrev == j->caprev) {
+    uint32_t nc = j->caprev ? j->caprev * 2 : 256;
+    uint32_t *nb = kmalloc((size_t)nc * 4), *ns = kmalloc((size_t)nc * 4);
+    if (!nb || !ns) {
+      kfree(nb);
+      kfree(ns);
+      return -ENOMEM;
+    }
+    if (j->nrev) {
+      memcpy(nb, j->rev_blk, (size_t)j->nrev * 4);
+      memcpy(ns, j->rev_seq, (size_t)j->nrev * 4);
+    }
+    kfree(j->rev_blk);
+    kfree(j->rev_seq);
+    j->rev_blk = nb;
+    j->rev_seq = ns;
+    j->caprev = nc;
+  }
+  j->rev_blk[j->nrev] = blk;
+  j->rev_seq[j->nrev++] = seq;
+  return 0;
+}
+
+// Recorre el journal. pass 0: busca el final; 1: recoge revocaciones; 2: aplica.
+static int jrn_pass(jrn_t *j, int pass, uint32_t *end_seq) {
+  ext2_fs_t *fs = j->fs;
+  uint32_t idx = j->start, seq = j->seq;
+  int is64 = (fs->incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0;
+  uint32_t steps = 0;
+  for (;;) {
+    if (++steps > j->maxlen * 2)
+      return -EIO;
+    if (pass != 0 && (int32_t)(seq - *end_seq) >= 0)
+      break; // más allá de la última transacción confirmada
+    bc_buf_t *h = NULL;
+    const uint8_t *d = jrn_get(j, idx, &h);
+    if (!d)
+      return -EIO;
+    if (be32(d) != JBD2_MAGIC || be32(d + 8) != seq) {
+      bc_put(h);
+      break;
+    }
+    uint32_t type = be32(d + 4);
+    if (type == JBD2_COMMIT) {
+      bc_put(h);
+      seq++;
+      idx = jrn_next(j, idx);
+    } else if (type == JBD2_REVOKE) {
+      if (pass == 1) {
+        uint32_t used = be32(d + 12), esz = (j->feat_incompat & JBD2_INC_64BIT) ? 8 : 4;
+        if (used > fs->bs)
+          used = fs->bs;
+        for (uint32_t o = 16; o + esz <= used; o += esz) {
+          uint32_t b = (esz == 8) ? be32(d + o + 4) : be32(d + o);
+          if (jrn_revoke_add(j, b, seq) != 0) {
+            bc_put(h);
+            return -ENOMEM;
+          }
+        }
+      }
+      bc_put(h);
+      idx = jrn_next(j, idx);
+    } else if (type == JBD2_DESC) {
+      uint32_t tail = (j->feat_incompat & (JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3)) ? 4 : 0;
+      uint32_t p = 12;
+      uint32_t didx = jrn_next(j, idx);
+      int rc = 0;
+      while (p + j->tag_bytes <= fs->bs - tail) {
+        uint32_t blk = be32(d + p), flags;
+        if (j->feat_incompat & JBD2_INC_CSUM_V3) {
+          flags = be32(d + p + 4);
+          if (is64) blk = blk; // la mitad alta se ignora (FS < 2^32 bloques)
+        } else {
+          flags = be16(d + p + 6);
+        }
+        if (pass == 2) {
+          int revoked = 0;
+          for (uint32_t r = 0; r < j->nrev; r++)
+            if (j->rev_blk[r] == blk && (int32_t)(j->rev_seq[r] - seq) >= 0)
+              revoked = 1;
+          if (!revoked && !(flags & JBD2_TAG_DELETED)) {
+            bc_buf_t *sh = NULL;
+            const uint8_t *src = jrn_get(j, didx, &sh);
+            if (!src) {
+              rc = -EIO;
+              break;
+            }
+            if (blk >= fs->blocks_count) {
+              bc_put(sh);
+              rc = -EIO;
+              break;
+            }
+            memcpy(j->tmp, src, fs->bs);
+            bc_put(sh);
+            if (flags & JBD2_TAG_ESCAPE)
+              put_be32(j->tmp, JBD2_MAGIC);
+            bc_buf_t *dh = bc_get_new(fs->bdev, blk, fs->bs);
+            if (!dh) {
+              rc = -EIO;
+              break;
+            }
+            memcpy(bc_data(dh), j->tmp, fs->bs);
+            bc_mark_dirty(dh);
+            bc_put(dh);
+          }
+        }
+        didx = jrn_next(j, didx);
+        p += j->tag_bytes;
+        if (!(flags & JBD2_TAG_SAME_UUID))
+          p += 16;
+        if (flags & JBD2_TAG_LAST)
+          break;
+      }
+      bc_put(h);
+      if (rc != 0)
+        return rc;
+      idx = didx;
+    } else {
+      bc_put(h);
+      break;
+    }
+  }
+  if (pass == 0)
+    *end_seq = seq;
+  return 0;
+}
+
+// Reproduce el journal de `fs` (montado en solo lectura) y lo deja limpio:
+// escribe los bloques de las transacciones confirmadas, pone s_start=0 en el
+// journal y quita needs_recovery del superbloque. 0 o -errno.
+static int ext2_journal_replay(ext2_fs_t *fs) {
+  if (!(fs->compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) || fs->journal_ino == 0)
+    return -ENODEV; // journal externo: no soportado
+  jrn_t j;
+  memset(&j, 0, sizeof(j));
+  j.fs = fs;
+  if (ext2_read_inode(fs, fs->journal_ino, &j.ji) != 0)
+    return -EIO;
+  bc_buf_t *sbh = NULL;
+  j.maxlen = UINT32_MAX; // para que jrn_pblk(0) funcione antes de conocerlo
+  const uint8_t *jsb = jrn_get(&j, 0, &sbh);
+  if (!jsb)
+    return -EIO;
+  uint32_t type = be32(jsb + 4), bsz = be32(jsb + 12);
+  if (be32(jsb) != JBD2_MAGIC || (type != JBD2_SB_V1 && type != JBD2_SB_V2) ||
+      bsz != fs->bs) {
+    bc_put(sbh);
+    LOG_ERR("[EXT2] %s: superbloque del journal inválido", fs->bdev->name);
+    return -EINVAL;
+  }
+  j.maxlen = be32(jsb + 16);
+  j.first = be32(jsb + 20);
+  j.seq = be32(jsb + 24);
+  j.start = be32(jsb + 28);
+  uint32_t feat_in = (type == JBD2_SB_V2) ? be32(jsb + 40) : 0;
+  bc_put(sbh);
+  if (feat_in & JBD2_INC_FAST_COMMIT) {
+    LOG_ERR("[EXT2] %s: journal con fast commit no soportado", fs->bdev->name);
+    return -EOPNOTSUPP;
+  }
+  if (feat_in & ~(JBD2_INC_REVOKE | JBD2_INC_64BIT | JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3 | 4u)) {
+    LOG_ERR("[EXT2] %s: features del journal no soportadas 0x%x", fs->bdev->name, feat_in);
+    return -EOPNOTSUPP;
+  }
+  j.feat_incompat = feat_in;
+  if (j.maxlen < 8 || j.first == 0 || j.first >= j.maxlen)
+    return -EINVAL;
+  uint32_t tb = (feat_in & JBD2_INC_CSUM_V3) ? 16u : 12u;
+  if (!(feat_in & JBD2_INC_CSUM_V3)) {
+    if (feat_in & JBD2_INC_CSUM_V2) tb += 2;
+    if (!(feat_in & JBD2_INC_64BIT)) tb -= 4;
+  }
+  j.tag_bytes = tb;
+  j.tmp = kmalloc(fs->bs);
+  if (!j.tmp)
+    return -ENOMEM;
+  int rc = 0;
+  uint32_t end_seq = j.seq;
+  if (j.start != 0) {
+    rc = jrn_pass(&j, 0, &end_seq);
+    if (rc == 0) rc = jrn_pass(&j, 1, &end_seq);
+    if (rc == 0) rc = jrn_pass(&j, 2, &end_seq);
+    LOG_INFO("[EXT2] %s: journal reproducido (secuencias %u..%u, %u revocaciones) rc=%d",
+             fs->bdev->name, j.seq, end_seq, j.nrev, rc);
+  }
+  kfree(j.rev_blk);
+  kfree(j.rev_seq);
+  kfree(j.tmp);
+  if (rc != 0)
+    return rc;
+  // Journal limpio: start=0 y secuencia siguiente.
+  uint32_t pb;
+  if (jrn_pblk(&j, 0, &pb) != 0)
+    return -EIO;
+  bc_buf_t *jb = bc_get(fs->bdev, pb, fs->bs);
+  if (!jb)
+    return -EIO;
+  uint8_t *jd = bc_data(jb);
+  put_be32(jd + 24, j.start ? end_seq + 1 : j.seq);
+  put_be32(jd + 28, 0);
+  if (feat_in & (JBD2_INC_CSUM_V2 | JBD2_INC_CSUM_V3)) {
+    put_be32(jd + 0xFC, 0);
+    put_be32(jd + 0xFC, ext4_crc32c(~0u, jd, 1024));
+  }
+  bc_mark_dirty(jb);
+  bc_put(jb);
+  // Superbloque del FS: quitar needs_recovery (y recalcular su checksum).
+  uint32_t sblk = 1024 / fs->bs, soff = 1024 % fs->bs;
+  bc_buf_t *sb = bc_get(fs->bdev, sblk, fs->bs);
+  if (!sb)
+    return -EIO;
+  uint8_t *sd = (uint8_t *)bc_data(sb) + soff;
+  uint32_t inc;
+  memcpy(&inc, sd + 96, 4);
+  inc &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+  memcpy(sd + 96, &inc, 4);
+  if (fs->ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM) {
+    uint32_t c = ext4_crc32c(~0u, sd, 1020);
+    memcpy(sd + 1020, &c, 4);
+  }
+  bc_mark_dirty(sb);
+  bc_put(sb);
+  return bc_sync_dev(fs->bdev) == 0 ? 0 : -EIO;
+}
+
 int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {
   if (!bdev_name || !mount_path)
     return -EINVAL;
@@ -3384,6 +3714,17 @@ int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {
   int rc = ext2_mount(bdev, &priv);
   if (rc != 0)
     return rc;
+  if (rw && (((ext2_fs_t *)priv)->incompat & EXT2_FEATURE_INCOMPAT_RECOVER)) {
+    // E9.1: reproducir el journal y volver a montar con el estado ya al día.
+    int jrc = ext2_journal_replay(priv);
+    ext2_umount(priv);
+    priv = NULL;
+    if (jrc != 0)
+      return jrc;
+    rc = ext2_mount(bdev, &priv);
+    if (rc != 0)
+      return rc;
+  }
   if (rw) {
     rc = ext2_remount(priv, 1);
     if (rc != 0) {
