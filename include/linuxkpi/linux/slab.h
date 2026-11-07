@@ -150,4 +150,9 @@ static inline void kmem_cache_destroy(struct kmem_cache *c) { lkpi_kmem_cache_de
 static inline unsigned int kmem_cache_size(struct kmem_cache *c) { return lkpi_kmem_cache_size(c); }
 static inline int kmem_cache_shrink(struct kmem_cache *c) { return 0; }
 
+#include <linux/cleanup.h>
+#ifndef _LKPI_DEFINE_FREE_KFREE
+#define _LKPI_DEFINE_FREE_KFREE
+DEFINE_FREE(kfree, void *, if (!IS_ERR_OR_NULL(_T)) kfree(_T))
+#endif
 #endif

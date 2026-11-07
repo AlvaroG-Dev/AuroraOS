@@ -61,6 +61,7 @@ typedef u64 netdev_features_t;
 #define NETIF_F_TSO_ECN		(1ULL << 24)
 #define NETIF_F_GSO_UDP_TUNNEL	(1ULL << 25)
 #define NETIF_F_HW_TC		(1ULL << 26)
+#define NETIF_F_GSO_SOFTWARE (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_GSO_UDP_L4)
 #define NETIF_F_GSO_GRE		(1ULL << 40)
 #define NETIF_F_GSO_GRE_CSUM	(1ULL << 41)
 #define NETIF_F_GSO_IPXIP4	(1ULL << 42)
@@ -75,6 +76,7 @@ typedef u64 netdev_features_t;
 #define IFF_SUPP_NOFCS	0x80000
 #define IFF_RXFH_CONFIGURED (1<<0)
 #define NET_NAME_UNKNOWN 0
+#define NET_NAME_ENUM 1
 #define NET_ADDR_PERM 0
 #define NET_ADDR_RANDOM 1
 #define NETDEV_ALIGN 32
@@ -177,6 +179,7 @@ struct net_device {
 	struct wireless_dev *ieee80211_ptr;
 	possible_net_t nd_net;
 	bool netns_immutable;
+	bool needs_free_netdev;
 	unsigned short hard_header_len_unused;
 	struct device dev;
 	unsigned long state;
@@ -228,7 +231,8 @@ struct net_device {
 	atomic_t lkpi_txq_stopped;
 };
 
-enum tc_setup_type;
+struct net_device_path_ctx; struct net_device_path;
+enum tc_setup_type { TC_QUERY_CAPS = 1, TC_SETUP_QDISC_MQPRIO, TC_SETUP_QDISC_TAPRIO, TC_SETUP_QDISC_ETF, TC_SETUP_QDISC_CBS, TC_SETUP_BLOCK, TC_SETUP_FT, TC_SETUP_QDISC_FIFO };
 struct xdp_frame;
 struct bpf_prog;
 struct xdp_metadata_ops;
@@ -278,6 +282,7 @@ struct net_device_ops {
 	int (*ndo_set_vf_trust)(struct net_device *dev, int vf, bool setting);
 	int (*ndo_get_vf_config)(struct net_device *dev, int vf, void *ivf);
 	int (*ndo_set_vf_link_state)(struct net_device *dev, int vf, int link_state);
+	int (*ndo_fill_forward_path)(struct net_device_path_ctx *ctx, struct net_device_path *path);
 	int (*ndo_setup_tc)(struct net_device *dev, enum tc_setup_type type, void *type_data);
 	int (*ndo_bpf)(struct net_device *dev, struct netdev_bpf *bpf);
 	int (*ndo_xdp_xmit)(struct net_device *dev, int n, struct xdp_frame **xdp, u32 flags);
@@ -496,4 +501,22 @@ static inline void dev_set_uevent_suppress(struct device *dev, int val) { }
 #define net_dbg_ratelimited(fmt, ...) do { } while (0)
 #define __net_init
 #define __net_exit
+#include <linux/percpu.h>
+struct net_device_path { int type; };
+enum net_device_path_type { DEV_PATH_ETHERNET = 0, DEV_PATH_VLAN, DEV_PATH_BRIDGE, DEV_PATH_PPPOE, DEV_PATH_DSA, DEV_PATH_MTK_WDMA };
+struct net_device_path_ctx { const struct net_device *dev; u8 daddr[6]; int num_vlans; };
+static inline void netif_addr_lock_bh(struct net_device *dev) { }
+static inline void netif_addr_unlock_bh(struct net_device *dev) { }
+static inline void netif_receive_skb_list(struct list_head *head)
+{ struct sk_buff *skb, *n; list_for_each_entry_safe(skb, n, head, list) { list_del(&skb->list); netif_receive_skb(skb); } }
+void ether_setup(struct net_device *dev);
+int dev_queue_xmit(struct sk_buff *skb);
+int dev_alloc_name(struct net_device *dev, const char *name);
+static inline void netdev_set_default_ethtool_ops(struct net_device *dev, const struct ethtool_ops *ops) { if (!dev->ethtool_ops) dev->ethtool_ops = ops; }
+void kfree_skb_list(struct sk_buff *segs);
+void skb_complete_wifi_ack(struct sk_buff *skb, bool acked);
+/* listas de direcciones: sin sincronizacion de multicast */
+static inline void __hw_addr_init(struct netdev_hw_addr_list *list) { INIT_LIST_HEAD(&list->list); list->count = 0; }
+static inline int __hw_addr_sync(struct netdev_hw_addr_list *to_list, struct netdev_hw_addr_list *from_list, int addr_len) { return 0; }
+static inline void __hw_addr_unsync(struct netdev_hw_addr_list *to_list, struct netdev_hw_addr_list *from_list, int addr_len) { }
 #endif

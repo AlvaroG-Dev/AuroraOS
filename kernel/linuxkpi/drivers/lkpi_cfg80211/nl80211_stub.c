@@ -46,3 +46,100 @@ void cfg80211_free_coalesce(struct cfg80211_coalesce *coalesce) { kfree(coalesce
 void nl80211_mlo_reconf_add_done(struct net_device *dev, struct cfg80211_mlo_reconf_done_data *data) { }
 void cfg80211_cqm_rssi_notify_work(struct wiphy *wiphy, struct wiphy_work *work) { }
 void cfg80211_schedule_channels_check(struct wireless_dev *wdev) { }
+
+/* Notificaciones de nl80211.c: se descartan (N7.1) */
+void cfg80211_assoc_comeback(struct net_device *netdev,
+			     const u8 *ap_addr, u32 timeout) { }
+int cfg80211_bss_color_notify(struct net_device *dev,
+			      enum nl80211_commands cmd, u8 count,
+			      u64 color_bitmap, u8 link_id) { return 0; }
+void cfg80211_ch_switch_notify(struct net_device *dev,
+			       struct cfg80211_chan_def *chandef,
+			       unsigned int link_id) { }
+void cfg80211_ch_switch_started_notify(struct net_device *dev,
+				       struct cfg80211_chan_def *chandef,
+				       unsigned int link_id, u8 count,
+				       bool quiet) { }
+int cfg80211_check_station_change(struct wiphy *wiphy,
+				  struct station_parameters *params,
+				  enum cfg80211_station_type statype) { return 0; }
+void cfg80211_control_port_tx_status(struct wireless_dev *wdev, u64 cookie,
+				     const u8 *buf, size_t len, bool ack,
+				     gfp_t gfp) { }
+void cfg80211_cqm_beacon_loss_notify(struct net_device *dev, gfp_t gfp) { }
+void cfg80211_cqm_pktloss_notify(struct net_device *dev,
+				 const u8 *peer, u32 num_packets, gfp_t gfp) { }
+void cfg80211_del_sta_sinfo(struct net_device *dev, const u8 *mac_addr,
+			    struct station_info *sinfo, gfp_t gfp) { }
+void cfg80211_epcs_changed(struct net_device *netdev, bool enabled) { }
+void cfg80211_gtk_rekey_notify(struct net_device *dev, const u8 *bssid,
+			       const u8 *replay_ctr, gfp_t gfp) { }
+void cfg80211_links_removed(struct net_device *dev, u16 link_mask) { }
+void cfg80211_mgmt_tx_status_ext(struct wireless_dev *wdev,
+				 struct cfg80211_tx_status *status, gfp_t gfp) { }
+void cfg80211_nan_func_terminated(struct wireless_dev *wdev,
+				  u8 inst_id,
+				  enum nl80211_nan_func_term_reason reason,
+				  u64 cookie, gfp_t gfp) { }
+void cfg80211_nan_match(struct wireless_dev *wdev,
+			struct cfg80211_nan_match_params *match, gfp_t gfp) { }
+void cfg80211_new_sta(struct net_device *dev, const u8 *mac_addr,
+		      struct station_info *sinfo, gfp_t gfp) { }
+void cfg80211_probe_status(struct net_device *dev, const u8 *addr,
+			   u64 cookie, bool acked, s32 ack_signal,
+			   bool is_valid_ack_signal, gfp_t gfp) { }
+void cfg80211_ready_on_channel(struct wireless_dev *wdev, u64 cookie,
+			       struct ieee80211_channel *chan,
+			       unsigned int duration, gfp_t gfp) { }
+void cfg80211_remain_on_channel_expired(struct wireless_dev *wdev, u64 cookie,
+					struct ieee80211_channel *chan,
+					gfp_t gfp) { }
+void cfg80211_report_obss_beacon_khz(struct wiphy *wiphy, const u8 *frame,
+				     size_t len, int freq, int sig_dbm) { }
+bool cfg80211_rx_control_port(struct net_device *dev, struct sk_buff *skb,
+			      bool unencrypted, int link_id) { return false; }
+bool cfg80211_rx_spurious_frame(struct net_device *dev, const u8 *addr,
+				int link_id, gfp_t gfp) { return false; }
+bool cfg80211_rx_unexpected_4addr_frame(struct net_device *dev, const u8 *addr,
+					int link_id, gfp_t gfp) { return false; }
+void cfg80211_rx_unprot_mlme_mgmt(struct net_device *dev,
+				  const u8 *buf, size_t len) { }
+void cfg80211_sta_opmode_change_notify(struct net_device *dev, const u8 *mac,
+				       struct sta_opmode_info *sta_opmode,
+				       gfp_t gfp) { }
+void cfg80211_tdls_oper_request(struct net_device *dev, const u8 *peer,
+				enum nl80211_tdls_operation oper,
+				u16 reason_code, gfp_t gfp) { }
+void cfg80211_tx_mgmt_expired(struct wireless_dev *wdev, u64 cookie,
+			      struct ieee80211_channel *chan, gfp_t gfp) { }
+
+void cfg80211_cqm_rssi_notify(struct net_device *dev, enum nl80211_cqm_rssi_threshold_event rssi_event, s32 rssi_level, gfp_t gfp) { }
+EXPORT_SYMBOL(cfg80211_assoc_comeback);
+EXPORT_SYMBOL(cfg80211_bss_color_notify);
+EXPORT_SYMBOL(cfg80211_ch_switch_notify);
+EXPORT_SYMBOL(cfg80211_ch_switch_started_notify);
+EXPORT_SYMBOL(cfg80211_check_station_change);
+EXPORT_SYMBOL(cfg80211_control_port_tx_status);
+EXPORT_SYMBOL(cfg80211_cqm_beacon_loss_notify);
+EXPORT_SYMBOL(cfg80211_cqm_pktloss_notify);
+EXPORT_SYMBOL(cfg80211_cqm_rssi_notify);
+EXPORT_SYMBOL(cfg80211_del_sta_sinfo);
+EXPORT_SYMBOL(cfg80211_epcs_changed);
+EXPORT_SYMBOL(cfg80211_gtk_rekey_notify);
+EXPORT_SYMBOL(cfg80211_links_removed);
+EXPORT_SYMBOL(cfg80211_mgmt_tx_status_ext);
+EXPORT_SYMBOL(cfg80211_nan_func_terminated);
+EXPORT_SYMBOL(cfg80211_nan_match);
+EXPORT_SYMBOL(cfg80211_new_sta);
+EXPORT_SYMBOL(cfg80211_probe_status);
+EXPORT_SYMBOL(cfg80211_ready_on_channel);
+EXPORT_SYMBOL(cfg80211_remain_on_channel_expired);
+EXPORT_SYMBOL(cfg80211_report_obss_beacon_khz);
+EXPORT_SYMBOL(cfg80211_rx_control_port);
+EXPORT_SYMBOL(cfg80211_rx_spurious_frame);
+EXPORT_SYMBOL(cfg80211_rx_unexpected_4addr_frame);
+EXPORT_SYMBOL(cfg80211_rx_unprot_mlme_mgmt);
+EXPORT_SYMBOL(cfg80211_sta_opmode_change_notify);
+EXPORT_SYMBOL(cfg80211_tdls_oper_request);
+EXPORT_SYMBOL(cfg80211_tx_mgmt_expired);
+EXPORT_SYMBOL(cfg80211_schedule_channels_check);

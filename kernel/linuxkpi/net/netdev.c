@@ -12,6 +12,7 @@
  *    (TCP retransmite).
  *  - NAPI: un tasklet de la capa (contexto "softirq", expulsion desactivada).
  */
+#include <linux/if_arp.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/netdevice.h>
@@ -893,3 +894,106 @@ void unregister_pernet_subsys(struct pernet_operations *ops) { unregister_pernet
 EXPORT_SYMBOL(unregister_pernet_subsys);
 const struct kobj_ns_type_operations net_ns_type_operations;
 EXPORT_SYMBOL(net_ns_type_operations);
+
+/* ---- copias de skb: sin datos compartidos (clone == copy) ----
+ * La capa no comparte paquetes entre skbs; clonar copia el contenido. */
+struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp)
+{
+	struct sk_buff *n = __alloc_skb(skb->end, gfp, 0, -1);
+	unsigned char *head;
+	refcount_t users;
+
+	if (!n)
+		return NULL;
+	head = n->head;
+	users = n->users;
+	memcpy(n, skb, sizeof(*n));
+	n->head = head;
+	n->users = users;
+	n->next = n->prev = NULL;
+	memcpy(head, skb->head, skb->end);
+	n->data = head + (skb->data - skb->head);
+	return n;
+}
+EXPORT_SYMBOL(skb_copy);
+
+struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp) { return skb_copy(skb, gfp); }
+EXPORT_SYMBOL(skb_clone);
+struct sk_buff *pskb_copy(struct sk_buff *skb, gfp_t gfp) { return skb_copy(skb, gfp); }
+EXPORT_SYMBOL(pskb_copy);
+
+struct sk_buff *skb_copy_expand(const struct sk_buff *skb, int newheadroom, int newtailroom, gfp_t gfp)
+{
+	struct sk_buff *n = alloc_skb(newheadroom + skb->len + newtailroom, gfp);
+
+	if (!n)
+		return NULL;
+	skb_reserve(n, newheadroom);
+	skb_put_data(n, skb->data, skb->len);
+	n->dev = skb->dev;
+	n->protocol = skb->protocol;
+	n->priority = skb->priority;
+	n->queue_mapping = skb->queue_mapping;
+	memcpy(n->cb, skb->cb, sizeof(n->cb));
+	return n;
+}
+EXPORT_SYMBOL(skb_copy_expand);
+
+struct sk_buff *skb_realloc_headroom(struct sk_buff *skb, unsigned int headroom)
+{
+	if (skb_headroom(skb) >= headroom)
+		return skb_copy(skb, GFP_ATOMIC);
+	return skb_copy_expand(skb, headroom, skb_tailroom(skb), GFP_ATOMIC);
+}
+EXPORT_SYMBOL(skb_realloc_headroom);
+
+void ether_setup(struct net_device *dev)
+{
+	dev->type = ARPHRD_ETHER;
+	dev->hard_header_len = ETH_HLEN;
+	dev->min_mtu = ETH_MIN_MTU;
+	dev->max_mtu = ETH_DATA_LEN;
+	dev->mtu = ETH_DATA_LEN;
+	dev->addr_len = ETH_ALEN;
+	dev->flags = IFF_BROADCAST | IFF_MULTICAST;
+}
+EXPORT_SYMBOL(ether_setup);
+
+int dev_queue_xmit(struct sk_buff *skb)
+{
+	struct net_device *dev = skb->dev;
+
+	if (!dev || !dev->netdev_ops || !dev->netdev_ops->ndo_start_xmit) {
+		kfree_skb(skb);
+		return -ENODEV;
+	}
+	return dev->netdev_ops->ndo_start_xmit(skb, dev) == NETDEV_TX_OK ? 0 : -EBUSY;
+}
+EXPORT_SYMBOL(dev_queue_xmit);
+
+int dev_alloc_name(struct net_device *dev, const char *name)
+{
+	static int n;
+	int len = strlen(name);
+
+	if (len >= 2 && !strcmp(name + len - 2, "%d"))
+		snprintf(dev->name, sizeof(dev->name), "%.*s%d", len - 2, name, n++);
+	else
+		strscpy(dev->name, name, sizeof(dev->name));
+	return 0;
+}
+EXPORT_SYMBOL(dev_alloc_name);
+
+void kfree_skb_list(struct sk_buff *segs)
+{
+	while (segs) {
+		struct sk_buff *next = segs->next;
+
+		kfree_skb(segs);
+		segs = next;
+	}
+}
+EXPORT_SYMBOL(kfree_skb_list);
+
+void skb_complete_wifi_ack(struct sk_buff *skb, bool acked) { kfree_skb(skb); }
+EXPORT_SYMBOL(skb_complete_wifi_ack);

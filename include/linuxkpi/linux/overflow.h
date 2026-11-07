@@ -76,4 +76,9 @@ static inline size_t __must_check size_sub(size_t minuend, size_t subtrahend)
 #define range_end_overflows_t(type, start, size, max) \
 	range_end_overflows((type)(start), (type)(size), (type)(max))
 
+#ifndef DEFINE_RAW_FLEX
+#define DEFINE_RAW_FLEX(type, name, member, count) \
+	union { u8 bytes[struct_size_t(type, member, count)]; type obj; } name##_u __aligned(_Alignof(type)) = {}; \
+	type *name = (type *)&name##_u
+#endif
 #endif

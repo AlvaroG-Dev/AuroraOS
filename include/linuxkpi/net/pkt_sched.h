@@ -6,7 +6,6 @@
 #include <linux/netdevice.h>
 #include <linux/ktime.h>
 #include <linux/netlink.h>
-enum tc_setup_type { TC_QUERY_CAPS = 1, TC_SETUP_QDISC_MQPRIO, TC_SETUP_QDISC_TAPRIO, TC_SETUP_QDISC_ETF, TC_SETUP_QDISC_CBS };
 #define TC_QOPT_MAX_QUEUE 16
 #define TC_MQPRIO_HW_OFFLOAD_TCS 2
 #define TC_MAX_QUEUE 16
