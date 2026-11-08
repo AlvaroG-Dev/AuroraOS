@@ -57,4 +57,13 @@ struct netlink_skb_parms { struct { u32 uid, gid; } creds; u32 portid; u32 dst_g
 #endif
 #define NLMSG_DEFAULT_SIZE (NLMSG_GOODSIZE - NLMSG_HDRLEN)
 static inline void nl_set_extack_cookie_u64(struct netlink_ext_ack *extack, u64 cookie) { if (extack) { memcpy(extack->cookie, &cookie, sizeof(cookie)); extack->cookie_len = sizeof(cookie); } }
+/* Funciones de netlink que usa net/netlink.h del arbol (inline nlmsg_put,
+ * nlmsg_new_large, nlmsg_unicast...). Implementadas como stubs en
+ * kernel/linuxkpi/net/netlink_stub.c. */
+int netlink_unicast(struct sock *ssk, struct sk_buff *skb, __u32 portid, int nonblock);
+int netlink_broadcast(struct sock *ssk, struct sk_buff *skb, __u32 portid, __u32 group, gfp_t allocation);
+int netlink_broadcast_filtered(struct sock *ssk, struct sk_buff *skb, __u32 portid, __u32 group,
+			       gfp_t allocation, netlink_filter_fn filter, void *filter_data);
+struct nlmsghdr *__nlmsg_put(struct sk_buff *skb, u32 portid, u32 seq, int type, int len, int flags);
+struct sk_buff *netlink_alloc_large_skb(unsigned int size, int broadcast);
 #endif
