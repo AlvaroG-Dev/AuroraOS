@@ -141,23 +141,109 @@ struct sk_buff *napi_alloc_skb(struct napi_struct *napi, unsigned int length)
 }
 EXPORT_SYMBOL(napi_alloc_skb);
 
+/* Copia `len` bytes desde `offset` del skb (area lineal y fragmentos de pagina). */
+int skb_copy_bits(const struct sk_buff *skb, int offset, void *to, int len)
+{
+	const struct skb_shared_info *sh = skb_shinfo(skb);
+	unsigned int hl = skb_headlen(skb), i;
+	u8 *dst = to;
+
+	if (offset < 0 || len < 0 || offset + len > (int)skb->len)
+		return -EFAULT;
+	if (offset < (int)hl) {
+		unsigned int n = min_t(unsigned int, len, hl - offset);
+
+		memcpy(dst, skb->data + offset, n);
+		dst += n; len -= n; offset += n;
+	}
+	offset -= hl;
+	for (i = 0; len > 0 && i < sh->nr_frags; i++) {
+		const skb_frag_t *f = &sh->frags[i];
+
+		if (offset >= (int)f->len) {
+			offset -= f->len;
+			continue;
+		}
+		{
+			unsigned int n = min_t(unsigned int, len, f->len - offset);
+
+			memcpy(dst, (u8 *)page_address(f->page) + f->offset + offset, n);
+			dst += n; len -= n; offset = 0;
+		}
+	}
+	return len ? -EFAULT : 0;
+}
+
 void *skb_header_pointer_slow(const struct sk_buff *skb, int offset, int len, void *buffer)
 {
-	if (offset < 0 || offset + len > (int)skb->len)
+	if (skb_copy_bits(skb, offset, buffer, len))
 		return NULL;
-	memcpy(buffer, skb->data + offset, len);	/* lineal: no se llega */
 	return buffer;
 }
 
-int skb_copy_bits(const struct sk_buff *skb, int offset, void *to, int len)
+/* Pasa los fragmentos de pagina al area lineal (ampliando la cabeza si hace falta). */
+int skb_linearize(struct sk_buff *skb)
 {
-	if (offset < 0 || offset + len > (int)skb->len)
-		return -EFAULT;
-	memcpy(to, skb->data + offset, len);
+	struct skb_shared_info *sh;
+	unsigned int i, extra = skb->data_len;
+	u8 *dst;
+
+	if (!extra && !skb_shinfo(skb)->nr_frags)
+		return 0;
+	if (skb_tailroom(skb) < (int)extra &&
+	    pskb_expand_head(skb, 0, extra - skb_tailroom(skb), GFP_ATOMIC))
+		return -ENOMEM;
+	sh = skb_shinfo(skb);
+	dst = skb_tail_pointer(skb);
+	for (i = 0; i < sh->nr_frags; i++) {
+		skb_frag_t *f = &sh->frags[i];
+
+		if (!f->page)
+			continue;
+		memcpy(dst, (u8 *)page_address(f->page) + f->offset, f->len);
+		dst += f->len;
+		put_page(f->page);
+		f->page = NULL;
+	}
+	skb->tail += extra;
+	skb->data_len = 0;
+	sh->nr_frags = 0;
 	return 0;
 }
 
-int skb_linearize(struct sk_buff *skb) { return 0; }
+void *__pskb_pull_tail(struct sk_buff *skb, int delta)
+{
+	if (delta < 0 || (unsigned int)delta > skb->len - skb_headlen(skb))
+		return NULL;
+	if (skb_linearize(skb))
+		return NULL;
+	return skb_tail_pointer(skb);
+}
+
+int __pskb_trim(struct sk_buff *skb, unsigned int len)
+{
+	if (len >= skb->len)
+		return 0;
+	if (skb_linearize(skb))
+		return -ENOMEM;
+	skb->len = len;
+	skb->tail = skb->data - skb->head + len;
+	return 0;
+}
+
+void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page, int off, int size,
+		     unsigned int truesize)
+{
+	if (size > 0) {
+		if (skb_tailroom(skb) < size &&
+		    pskb_expand_head(skb, 0, size - skb_tailroom(skb), GFP_ATOMIC)) {
+			put_page(page);	/* sin memoria: se pierde el trozo */
+			return;
+		}
+		memcpy(skb_put(skb, size), (u8 *)page_address(page) + off, size);
+	}
+	put_page(page);
+}
 
 int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, gfp_t gfp)
 {
@@ -427,8 +513,19 @@ static void lkpi_napi_run(unsigned long data)
 		return;
 	}
 	work = n->poll(n, n->weight);
-	if (work >= n->weight && test_bit(NAPI_SCHED, &n->state))
-		tasklet_schedule(&n->lkpi_tl);	/* sigue pendiente */
+	if (work >= n->weight && test_bit(NAPI_SCHED, &n->state)) {
+		/* Sigue pendiente. Si pasa de 200000 vueltas seguidas con el presupuesto agotado
+		 * hay un bucle en el driver: se corta para no dejar la CPU sin planificar. */
+		if (++n->lkpi_spins > 200000) {
+			pr_warn("linuxkpi: NAPI de %s sin parar (200000 vueltas seguidas), se detiene\n",
+				n->dev ? n->dev->name : "?");
+			n->lkpi_spins = 0;
+			return;
+		}
+		tasklet_schedule(&n->lkpi_tl);
+	} else {
+		n->lkpi_spins = 0;
+	}
 }
 
 void netif_napi_add_weight(struct net_device *dev, struct napi_struct *napi,
@@ -846,6 +943,9 @@ EXPORT_SYMBOL(pskb_expand_head);
 EXPORT_SYMBOL(rtnl_is_locked);
 EXPORT_SYMBOL(skb_checksum_help);
 EXPORT_SYMBOL(skb_copy_bits);
+EXPORT_SYMBOL(__pskb_pull_tail);
+EXPORT_SYMBOL(__pskb_trim);
+EXPORT_SYMBOL(skb_add_rx_frag);
 EXPORT_SYMBOL(skb_header_pointer_slow);
 EXPORT_SYMBOL(skb_linearize);
 
@@ -1059,20 +1159,44 @@ EXPORT_SYMBOL(net_ns_type_operations);
  * La capa no comparte paquetes entre skbs; clonar copia el contenido. */
 struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp)
 {
-	struct sk_buff *n = __alloc_skb(skb->end, gfp, 0, -1);
-	unsigned char *head;
-	refcount_t users;
+	unsigned int hr = skb_headroom(skb);
+	int tr = (int)skb->end - (int)skb->tail;
+	struct sk_buff *n;
 
+	if (tr < 0)
+		tr = 0;
+	n = __alloc_skb(hr + skb->len + tr, gfp, 0, -1);
 	if (!n)
 		return NULL;
-	head = n->head;
-	users = n->users;
-	memcpy(n, skb, sizeof(*n));
-	n->head = head;
-	n->users = users;
-	n->next = n->prev = NULL;
-	memcpy(head, skb->head, skb->end);
-	n->data = head + (skb->data - skb->head);
+	skb_reserve(n, hr);
+	skb_put(n, skb->len);
+	if (skb_copy_bits(skb, 0, n->data, skb->len)) {
+		kfree_skb(n);
+		return NULL;
+	}
+	n->dev = skb->dev;
+	memcpy(n->cb, skb->cb, sizeof(n->cb));
+	n->mac_len = skb->mac_len;
+	n->hdr_len = skb->hdr_len;
+	n->queue_mapping = skb->queue_mapping;
+	n->pkt_type = skb->pkt_type;
+	n->ip_summed = skb->ip_summed;
+	n->no_fcs = skb->no_fcs;
+	n->encapsulation = skb->encapsulation;
+	n->wifi_acked_valid = skb->wifi_acked_valid;
+	n->wifi_acked = skb->wifi_acked;
+	n->vlan_present = skb->vlan_present;
+	n->vlan_tci = skb->vlan_tci;
+	n->vlan_proto = skb->vlan_proto;
+	n->protocol = skb->protocol;
+	n->mac_header = skb->mac_header;
+	n->network_header = skb->network_header;
+	n->transport_header = skb->transport_header;
+	n->priority = skb->priority;
+	n->csum = skb->csum;
+	n->csum_start = skb->csum_start;
+	n->csum_offset = skb->csum_offset;
+	n->tstamp = skb->tstamp;
 	return n;
 }
 EXPORT_SYMBOL(skb_copy);

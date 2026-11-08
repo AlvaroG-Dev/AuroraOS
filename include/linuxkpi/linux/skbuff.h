@@ -241,9 +241,17 @@ static inline void skb_fill_page_desc(struct sk_buff *skb, int i, struct page *p
 	f->page = page; f->offset = off; f->len = size;
 	skb_shinfo(skb)->nr_frags = i + 1;
 }
-static inline void *__pskb_pull_tail(struct sk_buff *skb, int delta) { return NULL; }
-static inline int pskb_trim(struct sk_buff *skb, unsigned int len) { skb_trim(skb, len); return 0; }
-static inline bool pskb_may_pull(struct sk_buff *skb, unsigned int len) { return len <= skb_headlen(skb); }
+void *__pskb_pull_tail(struct sk_buff *skb, int delta);
+int __pskb_trim(struct sk_buff *skb, unsigned int len);
+static inline int pskb_trim(struct sk_buff *skb, unsigned int len) { return skb->len <= len ? 0 : __pskb_trim(skb, len); }
+static inline bool pskb_may_pull(struct sk_buff *skb, unsigned int len)
+{
+	if (len <= skb_headlen(skb))
+		return true;
+	if (len > skb->len)
+		return false;
+	return __pskb_pull_tail(skb, len - skb_headlen(skb)) != NULL;
+}
 static inline unsigned int skb_tcp_all_headers(const struct sk_buff *skb)
 { return skb_transport_offset(skb) + ((skb_transport_header(skb)[12] >> 4) * 4); }
 static inline unsigned int skb_inner_transport_offset_dummy(void) { return 0; }
@@ -258,11 +266,9 @@ int skb_checksum_help(struct sk_buff *skb);
 #define net_err_ratelimited(fmt, ...) do { } while (0)
 #define net_info_ratelimited(fmt, ...) do { } while (0)
 
-static inline void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page, int off, int size, unsigned int truesize)
-{
-	skb_fill_page_desc(skb, i, page, off, size);
-	skb->len += size; skb->data_len += size; skb->truesize += truesize;
-}
+/* La capa no usa fragmentos de pagina en el skb: copia al area lineal y suelta la
+ * referencia a la pagina (los skb siempre son lineales para mac80211 y la pila). */
+void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page, int off, int size, unsigned int truesize);
 static inline void net_prefetch(void *p) { prefetch(p); }
 struct sk_buff *build_skb(void *data, unsigned int frag_size);
 struct sk_buff *napi_build_skb(void *data, unsigned int frag_size);
@@ -388,8 +394,7 @@ static inline int skb_clone_writable(const struct sk_buff *skb, unsigned int len
 static inline struct sk_buff *skb_clone_sk(struct sk_buff *skb) { return NULL; }
 static inline bool sk_requests_wifi_status(struct sock *sk) { return false; }
 static inline void sk_pacing_shift_update(struct sock *sk, int val) { }
-static inline int __skb_linearize(struct sk_buff *skb) { return 0; }
-static inline int __pskb_trim(struct sk_buff *skb, unsigned int len) { if (len < skb->len) { skb->len = len; skb->tail = skb->data - skb->head + len; } return 0; }
+static inline int __skb_linearize(struct sk_buff *skb) { return skb_linearize(skb); }
 #endif
 #define skb_walk_frags(skb, iter) for (iter = skb_shinfo(skb)->frag_list; iter; iter = iter->next)
 static inline void skb_postpush_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { }
