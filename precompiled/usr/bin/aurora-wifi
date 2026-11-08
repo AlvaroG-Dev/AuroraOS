@@ -16,7 +16,10 @@ wait_not() { # espera a que el estado deje de ser "$1", maximo $2 s
 
 case "$1" in
 scan)
-    printf 'scan\n' > "$D" || exit 1
+    if ! (printf 'scan\n' > "$D") 2>/dev/null; then
+        echo "aurora-wifi: no hay interfaz Wi-Fi activa (el driver no tomo el adaptador; mira 'iwlwifi' en el log: suele faltar firmware)" >&2
+        exit 1
+    fi
     sleep 1
     wait_not scanning 15
     sleep 1
