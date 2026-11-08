@@ -17,6 +17,7 @@ if [ ! -f $BASE ] || [ -n "${REBASE:-}" ]; then
   [ -f $W/src.tar ] && cp $W/src.tar $W/tree/stable/
   mkdir -p $W/tree/w
   rm -f $BASE; mke2fs -q -F -t ${FSTYPE:-ext2} ${MKOPTS:-} -b $BS -I 256 -d $W/tree $BASE ${SIZE:-128M} || exit 2
+  [ -n "${JCSUM:-}" ] && printf 'jo -c\njc\n' | debugfs -w -f - $BASE >/dev/null 2>&1
   (cd $W/tree/stable && find . -type f -exec sha256sum {} \; | LC_ALL=C sort -k2) > $W/stable.sha
 fi
 export WITH_NVIDIA=${WITH_NVIDIA:-0}
@@ -55,6 +56,6 @@ for it in $(seq 1 $N); do
   [ $dup -eq 0 ] || verdict="$verdict DUPLICADOS=$dup"
   [ $st = OK ] || verdict="$verdict STABLE-$st"
   echo "it=$it kill=+${KT}s mount=$mounted jr_only_rc=$jr fsck1_rc=$rc1 fsck2_rc=$rc2 dup=$dup stable=$st -> $verdict"
-  if [ "$verdict" != OK ]; then fail=1; cp $IMG $W/fail_$it.img; cp $W/fsck1.txt $W/fail_$it.fsck1; fi
+  if [ "$verdict" != OK ]; then fail=1; cp $IMG $W/fail_$it.img; cp $LOG $W/fail_$it.log; cp $W/fsck1.txt $W/fail_$it.fsck1; fi
 done
 exit $fail
