@@ -631,7 +631,13 @@ static void usb_hid_device_kthread(void) {
     // éste tardan varios ms en volver a turnarse y un informe por viaje no
     // da abasto con un ratón a 1 kHz.
     int stride = len, batch = 1;
-    if (d->in_ep && d->in_ep->max_packet && len == (int)d->in_ep->max_packet) {
+    //
+    // Solo para ratones: un informe de teclado (8 bytes) llena justo un paquete
+    // (MPS 8), el xHC no ve «paquete corto» y el TD de 64 bytes no termina hasta
+    // reunir 8 informes (4 pulsaciones: pulsar+soltar). Un teclado inactivo
+    // dejaría las teclas retenidas segundos, y se entregarían al foco nuevo.
+    if (d->kind == HID_KIND_MOUSE && d->in_ep && d->in_ep->max_packet &&
+        len == (int)d->in_ep->max_packet) {
       batch = (int)sizeof(buf) / stride;
       if (batch > 8)
         batch = 8;
