@@ -3,7 +3,7 @@
 
 
 .PHONY: all bootloader bootloader-efi bootloader-bios \
-        kernel user user-native user-musl image iso iso_root \
+        kernel user user-native user-musl image iso installer-iso iso_root \
         normal run run-debug run-smp run-smp-debug \
         run-smp-kvm run-smp-kvm-debug run-smp-kvm-ahci run-smp-kvm-ahci-debug \
         run-kvm-ahci run-smp-kvm-ahci-3disk run-smp-kvm-ahci-tap run-smp-kvm-xhci run-smp-kvm-xhci-debug \
@@ -18,7 +18,7 @@
 # asi que en un build normal cuesta una comprobacion rapida.
 #   make env              preparar a mano
 #   SKIP_ENV=1 make ...   saltarse la comprobacion
-#   WITH_MESA=1 make ...  ademas, bajar Mesa/LLVM (initrd +500 MB)
+#   WITH_MESA=0 make ...  no bajar Mesa/LLVM (por defecto se incluye, +500 MB)
 # ---------------------------------------------------------------------------
 env:
 	@bash scripts/setup-env.sh
@@ -29,6 +29,10 @@ env:
 # (apt, musl, Wayland...), sin NVIDIA/Mesa; se usan los binarios ya
 # versionados/precompilados. Herramientas: scripts/fetch-devtools.sh.
 # ---------------------------------------------------------------------------
+# Dentro de AuroraOS (uname -s = Aurora) el modo SELFHOST es el de por defecto.
+ifeq ($(shell uname -s 2>/dev/null),Aurora)
+SELFHOST ?= 1
+endif
 ifeq ($(SELFHOST),1)
 export SKIP_ENV := 1
 WITH_NVIDIA := 0
@@ -72,11 +76,17 @@ normal: iso
 #   WITH_NVIDIA=1  (por defecto) compila e instala nvidia/nvidia-modeset/
 #                  nvidia-drm.kur + firmware GSP (primera vez: descarga y tarda).
 #                  WITH_NVIDIA=0 lo omite (ISO sin driver NVIDIA).
-#   WITH_MESA=1    ademas baja Mesa/LLVM (+500 MB; opt-in por tamano).
+#   WITH_MESA=1    (por defecto) incluye Mesa/LLVM (OpenGL/EGL por software, +500 MB);
+#                  WITH_MESA=0 lo omite. Con Mesa conviene QEMU_MEM=3G.
+#   LinuxKPI (i915, drm, ttm, virtio-gpu...) va siempre; WITH_LKPI=0 en setup-env lo omite.
 WITH_NVIDIA ?= 1
+WITH_MESA ?= 1
 # Herramientas de desarrollo (gcc, make, nasm, mtools, xorriso...) dentro de la ISO.
 WITH_DEVTOOLS ?= 1
+# APT/dpkg de Ubuntu 24.04 (misma glibc) para instalar paquetes con red: aurora-pkg.
+WITH_APT ?= 1
 export WITH_NVIDIA
+export WITH_MESA
 
 # 'sysroot' es PHONY: antes, si el directorio ya existia make lo daba por
 # actualizado y NUNCA recopiaba assets/ ni etc/. Ahora se sincroniza siempre,
@@ -184,6 +194,11 @@ python-stdlib:
 # ===========================================================================
 # INITRD
 # ===========================================================================
+
+# INSTALLER=1: initrd de la ISO instaladora en vivo (sin Qt/GTK/Python/Perl...;
+# ver installer/initrd-exclude.txt y docs del instalador). Usar `make installer-iso`.
+INSTALLER ?= 0
+INITRD_TAR_OPTS := $(if $(filter 1,$(INSTALLER)),--exclude-from=installer/initrd-exclude.txt)
 
 NVIDIA_DEP := $(if $(filter 1,$(WITH_NVIDIA)),nvidia)
 
@@ -468,7 +483,15 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 # mas pequena). Las cabeceras/libc.a de glibc sustituyen a las de musl del tcc.
 # ---------------------------------------------------------------------------
 	@if [ "$(WITH_DEVTOOLS)" = "1" ]; then \
-		[ -x build/devtools/root/usr/bin/x86_64-linux-gnu-gcc-13 ] || bash scripts/fetch-devtools.sh || exit 1; \
+		if [ ! -x build/devtools/root/usr/bin/x86_64-linux-gnu-gcc-13 ]; then \
+			if [ "$(SELFHOST)" = "1" ] && [ -x /usr/bin/x86_64-linux-gnu-gcc-13 ]; then \
+				echo "[Makefile] SELFHOST: reutilizando las devtools del sistema en ejecucion (sin red)"; \
+				mkdir -p build/devtools/root/usr; \
+				for d in bin sbin lib libexec include share/misc share/bison share/aclocal; do \
+					[ -d /usr/$$d ] && { mkdir -p build/devtools/root/usr/$$d; cp -a /usr/$$d/. build/devtools/root/usr/$$d/; }; \
+				done; \
+			else bash scripts/fetch-devtools.sh || exit 1; fi; \
+		fi; \
 		echo "[Makefile] Instalando herramientas de desarrollo en la ISO..."; \
 		rm -rf sysroot/usr/include; mkdir -p sysroot/usr/include; \
 		rm -f sysroot/usr/lib/libc.a sysroot/lib/libc.a; \
@@ -482,8 +505,65 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		ln -sf ../usr/sbin/mkfs.fat sysroot/sbin/mkfs.fat 2>/dev/null || true; \
 	fi
 
+# ---------------------------------------------------------------------------
+# Codigo fuente de AuroraOS dentro de la ISO (para compilar desde AuroraOS):
+# /usr/src/auroraos.tar.gz (ficheros versionados en git, sin toolchain cruzado
+# del host, sin build/, sin busybox/ncurses). Se extrae con `aurora-src [dir]`
+# (por defecto /root/AuroraOS). WITH_SOURCE=0 lo omite.
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_SOURCE)" = "1" ] && git rev-parse --git-dir >/dev/null 2>&1; then \
+		echo "[Makefile] Empaquetando codigo fuente en /usr/src/auroraos.tar.gz..."; \
+		mkdir -p sysroot/usr/src sysroot/usr/bin; \
+		git ls-files -z | grep -zvE '^(build/capturas/|build/[a-z_]*shot\.png|sysroot/|toolchain/|third_party/(busybox|ncurses)|kernel/initrd\.tar|.*\.iso$$)' \
+		  | tar --null -T - --transform 's,^,AuroraOS/,S' -czf sysroot/usr/src/auroraos.tar.gz; \
+		install -m 755 scripts/aurora-src sysroot/usr/bin/aurora-src; \
+		ls -lh sysroot/usr/src/auroraos.tar.gz; \
+	fi
+
+# ---------------------------------------------------------------------------
+# APT + dpkg de Ubuntu 24.04 (scripts/fetch-apt.sh). Los binarios reales van a
+# /usr/lib/aurora-apt/bin y en /usr/bin quedan envoltorios que fijan APT_CONFIG y el
+# admindir de dpkg (todo el estado en /usr/lib/aurora-apt: /etc y /var son tmpfs).
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_APT)" = "1" ]; then \
+		[ -x build/apt/root/usr/bin/apt-get ] || bash scripts/fetch-apt.sh || exit 1; \
+		echo "[Makefile] Instalando APT/dpkg + aurora-pkg..."; \
+		A=sysroot/usr/lib/aurora-apt; mkdir -p $$A/bin $$A/etc $$A/dpkg $$A/state/lists/partial $$A/cache/archives/partial; \
+		cp -a --update=none build/apt/root/usr/. sysroot/usr/; \
+		for n in apt apt-get apt-cache apt-config apt-mark apt-key apt-cdrom dpkg dpkg-deb dpkg-query dpkg-divert dpkg-statoverride dpkg-trigger update-alternatives; do \
+			[ -e build/apt/root/usr/bin/$$n ] || continue; \
+			cp -f build/apt/root/usr/bin/$$n $$A/bin/$$n; \
+			install -m 755 installer/apt/wrapper.sh sysroot/usr/bin/$$n; \
+		done; \
+		install -m 644 installer/apt/apt.conf $$A/apt.conf; \
+		install -m 644 installer/apt/sources.list $$A/etc/sources.list; \
+		mkdir -p $$A/etc/trusted.gpg.d $$A/etc/sources.list.d $$A/etc/apt.conf.d $$A/etc/preferences.d; touch $$A/etc/apt.conf.d/.keep $$A/etc/sources.list.d/.keep $$A/etc/preferences.d/.keep; cp -f build/apt/root/etc/apt/trusted.gpg.d/*.gpg $$A/etc/trusted.gpg.d/ 2>/dev/null || true; \
+		install -m 644 installer/apt/status $$A/dpkg/status; : > $$A/dpkg/available; mkdir -p $$A/dpkg/info $$A/dpkg/updates $$A/dpkg/alternatives; \
+		install -m 755 installer/apt/aurora-pkg sysroot/usr/bin/aurora-pkg; \
+	fi
+
+# ---------------------------------------------------------------------------
+# ISO instaladora: motor aurora-install + lo necesario para dejar un disco
+# arrancable (kernel, cargador UEFI, initrd minimo con aurora-boot, aurora.conf).
+# En una build normal se retiran para que no engorden la ISO completa.
+# ---------------------------------------------------------------------------
+	@if [ "$(INSTALLER)" = "1" ]; then \
+		echo "[Makefile] INSTALLER: preparando /usr/share/aurora-installer..."; \
+		$(MAKE) -C bootloader/efi >/dev/null && $(MAKE) -C kernel >/dev/null || exit 1; \
+		mkdir -p sysroot/usr/share/aurora-installer sysroot/usr/sbin; \
+		install -m 755 scripts/aurora-install sysroot/usr/sbin/aurora-install; \
+		cp -f $(BOOTX64_EFI) $(KERNEL_ELF) sysroot/usr/share/aurora-installer/; \
+		cp -f $(AURORA_CONF) sysroot/usr/share/aurora-installer/aurora.conf; \
+		echo 1 > sysroot/etc/aurora-installer; \
+		mkdir -p sysroot/system/brand && cp -f assets/brand/aurora-emblem-192.argb sysroot/system/brand/; \
+		scripts/mk-boot-initrd.sh sysroot sysroot/usr/share/aurora-installer/boot-initrd.tar || exit 1; \
+	else \
+		rm -rf sysroot/usr/share/aurora-installer sysroot/usr/sbin/aurora-install sysroot/etc/aurora-installer sysroot/system/brand; \
+	fi
+
 	@scripts/check-sysroot-libc.sh
-	tar --format=ustar --owner=0 --group=0 -cf kernel/initrd.tar -C sysroot .
+	tar --format=ustar --owner=0 --group=0 $(INITRD_TAR_OPTS) -cf kernel/initrd.tar -C sysroot .
+	@ls -lh kernel/initrd.tar
 
 kernel: initrd.tar
 	$(MAKE) -C kernel
@@ -526,10 +606,18 @@ iso_root: $(EFI_IMG) $(BOOTX64_EFI) $(BIOS_IMG)
 	@ls -lh $(ISO_ROOT)/efi.img $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI $(ISO_ROOT)/boot/bios.img
 
 # ---------------------------------------------------------------------------
-USB_DATA_MB ?= 64
+# WITH_SOURCE=1 (por defecto; tambien controla /usr/src/auroraos.tar.gz + aurora-src
+# del initrd, que sirve con -cdrom): la particion de datos (ext2) lleva el arbol de
+# fuentes del repo en /data/AuroraOS (solo ficheros versionados, sin .git), listo
+# para compilar dentro de AuroraOS (make SELFHOST=1 iso). Necesita ~1 GB de
+# fuentes + espacio de trabajo: USB_DATA_MB=3072. WITH_SOURCE=0 -> 64 MB.
+WITH_SOURCE ?= 1
+SRC_DATA_MB ?= 3072
+USB_DATA_MB ?= $(if $(filter ext2-1,$(USB_DATA_FS)-$(WITH_SOURCE)),$(SRC_DATA_MB),64)
 # Sistema de ficheros de la particion de datos (AURORADATA): fat32 (por defecto)
-# o ext2 (rw si se desmontó limpio; uid/gid/modos reales). Ver docs/Plan_Ext2.md.
-USB_DATA_FS ?= fat32
+# o ext2 (por defecto; rw si se desmontó limpio; uid/gid/modos reales; necesita
+# mke2fs/e2fsprogs). USB_DATA_FS=fat32 vuelve a FAT32. Ver docs/Plan_Ext2.md.
+USB_DATA_FS ?= ext2
 
 # aurora.iso: ISO híbrida (BIOS + UEFI) para CD y USB.
 # ---------------------------------------------------------------------------
@@ -587,13 +675,25 @@ $(ISO_OUT): iso_root
 	 echo "[ISO] Anadiendo particion de datos $(USB_DATA_FS) ($(USB_DATA_MB) MB) para el log..."; \
 	 iso_sz=$$(stat -c%s $(ISO_OUT)); \
 	 start_mb=$$(( (iso_sz + 1048575) / 1048576 )); \
-	 truncate -s $$((start_mb * 1048576)) $(ISO_OUT); \
+	 dd if=/dev/null of=$(ISO_OUT) bs=1M seek=$$start_mb count=0 status=none; \
 	 rm -f build/usbdata.img; \
 	 dd if=/dev/zero of=build/usbdata.img bs=1M count=$(USB_DATA_MB) status=none; \
 	 if [ "$(USB_DATA_FS)" = "ext2" ]; then \
 	   export PATH="$$PATH:/sbin:/usr/sbin"; \
 	   command -v mke2fs >/dev/null || { echo "[ISO] ERROR: USB_DATA_FS=ext2 necesita mke2fs (paquete e2fsprogs)"; exit 1; }; \
-	   mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 build/usbdata.img || exit 1; \
+	   srcopt=""; \
+	   if [ "$(WITH_SOURCE)" = "1" ]; then \
+	     echo "[ISO] Copiando fuentes del repo a /AuroraOS de la particion de datos..."; \
+	     rm -rf build/src_tree; mkdir -p build/src_tree/AuroraOS; \
+	     if git rev-parse --git-dir >/dev/null 2>&1; then \
+	       git ls-files -z --exclude-standard | tar --null -T - --exclude='build/capturas' --exclude='build/*.png' -cf - 2>/dev/null | tar -xf - -C build/src_tree/AuroraOS || exit 1; \
+	     else \
+	       tar --exclude=./build --exclude=./sysroot --exclude=./aurora.iso --exclude=./kernel/initrd.tar -cf - . | tar -xf - -C build/src_tree/AuroraOS || exit 1; \
+	     fi; \
+	     srcopt="-d build/src_tree"; \
+	   fi; \
+	   mke2fs -q -F -t ext2 -b 4096 -I 256 -L AURORADATA -m 0 -O none,sparse_super,large_file,filetype,ext_attr,dir_index -E root_owner=0:0 $$srcopt build/usbdata.img || exit 1; \
+	   rm -rf build/src_tree; \
 	   echo "[ISO] ext2 creado: $$(dumpe2fs -h build/usbdata.img 2>/dev/null | grep -i '^Filesystem features' | tr -s ' ')"; \
 	   ptype=83; \
 	 else \
@@ -612,6 +712,68 @@ $(ISO_OUT): iso_root
 	@echo "[ISO] $(ISO_OUT) listo para CD/USB:"
 	@ls -lh $(ISO_OUT)
 
+# ISO instaladora ligera (aurora-installer.iso): solo lo esencial para instalar.
+INSTALLER_ISO ?= aurora-installer.iso
+installer-iso:
+	@mkdir -p build
+	@sed 's/^cmdline=.*/& aur.kiosk=1 aur.mode=installer/' $(AURORA_CONF) > build/aurora-installer.conf
+	$(MAKE) INSTALLER=1 WITH_DEVTOOLS=0 WITH_MESA=0 WITH_NVIDIA=0 WITH_SOURCE=0 \
+	        USB_DATA_MB=0 AURORA_CONF=build/aurora-installer.conf \
+	        ISO_OUT=$(INSTALLER_ISO) $(INSTALLER_ISO)
+
+# Arrancar la ISO instaladora en QEMU con un disco SATA (AHCI) virtual vacio donde instalar.
+#   make run-installer       UEFI (OVMF)       <- la ruta soportada por el instalador
+#   make run-installer-bios  BIOS (SeaBIOS)    <- arranca el live; el instalador aun
+#                                                 solo escribe discos UEFI (ESP+GPT)
+# INSTALLER_DISK_GB (def. 8) fija el tamano; el disco se conserva entre ejecuciones
+# (borrarlo: make installer-disk-clean). Tras instalar, arranca el disco instalado
+# sin la ISO con:  make run-installer-disk
+INSTALLER_DISK    ?= build/installer-disk.img
+INSTALLER_DISK_GB ?= 8
+QEMU_INST_ACCEL   ?= $(QEMU_ACCEL)
+
+$(INSTALLER_DISK):
+	@mkdir -p build
+	truncate -s $(INSTALLER_DISK_GB)G $@
+
+installer-disk-clean:
+	rm -f $(INSTALLER_DISK) build/installer_vars.fd
+
+run-installer: $(INSTALLER_ISO) $(INSTALLER_DISK)
+	@cp -f /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd   # NVRAM limpia: sin entradas de arranque viejas, OVMF busca \EFI\BOOT\BOOTX64.EFI
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=build/installer_vars.fd \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-cdrom $(INSTALLER_ISO) \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
+		-serial stdio
+
+run-installer-bios: $(INSTALLER_ISO) $(INSTALLER_DISK)
+	qemu-system-x86_64 \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-cdrom $(INSTALLER_ISO) \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
+		-boot d -serial stdio
+
+# Arrancar solo el disco ya instalado (UEFI, sin ISO).
+run-installer-disk: $(INSTALLER_DISK)
+	@cp -f /usr/share/OVMF/OVMF_VARS_4M.fd build/installer_vars.fd   # NVRAM limpia: sin entradas de arranque viejas, OVMF busca \EFI\BOOT\BOOTX64.EFI
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=build/installer_vars.fd \
+		-m $(QEMU_MEM) -no-reboot -no-shutdown \
+		$(QEMU_NET_SLIRP) $(QEMU_INST_ACCEL) -smp 4 \
+		-device ahci,id=ahci_inst -drive if=none,id=sata_inst,file=$(INSTALLER_DISK),format=raw \
+		-device ide-hd,drive=sata_inst,bus=ahci_inst.0 \
+		-serial stdio
+
+.PHONY: run-installer run-installer-bios run-installer-disk installer-disk-clean
+
 # Alias.
 iso: $(ISO_OUT)
 image: $(ISO_OUT)
@@ -622,8 +784,8 @@ image: $(ISO_OUT)
 
 # RAM del guest: el initrd (~500 MB) se carga entero en memoria; con 512M el
 # firmware devuelve EFI_OUT_OF_RESOURCES ("initrd no cargado"), no hay init y
-# no arranca ni el dock ni las apps. Con Mesa (WITH_MESA=1) subir a 3G.
-QEMU_MEM ?= 2G
+# no arranca ni el dock ni las apps. Con Mesa (por defecto) subir a 3G.
+QEMU_MEM ?= 3G
 
 # Aceleracion para 'run' / 'run-smp': KVM si /dev/kvm es accesible (el
 # compositor va fluido), y TCG puro si no (muy lento: el raton se atasca).

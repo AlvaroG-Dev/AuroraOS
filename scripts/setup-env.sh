@@ -15,7 +15,7 @@
 #   8. LinuxKPI: arbol de Linux fijado + linux-firmware (fetch-linux-drivers.sh)
 #
 # Variables:
-#   WITH_MESA=1   tambien baja Mesa/LLVM (scripts/fetch-mesa.sh; +500 MB en el
+#   WITH_MESA=0   no baja (por defecto 1) Mesa/LLVM (scripts/fetch-mesa.sh; +500 MB en el
 #                 initrd, necesita QEMU con >= 1,5 GB)
 #   WITH_LKPI=0   no baja el arbol de Linux ni linux-firmware (por defecto 1: la
 #                 capa LinuxKPI y sus drivers no compilan sin ellos)
@@ -193,7 +193,7 @@ if [ ! -x "$PRE/bin/Xwayland" ]; then
     soft_step "Xwayland (fetch-xwayland.sh)" bash scripts/fetch-xwayland.sh
 fi
 # Mesa/LLVM: opcional por tamano
-if [ "${WITH_MESA:-0}" = "1" ] && ! ls "$LIBDIR"/libgallium* >/dev/null 2>&1; then
+if [ "${WITH_MESA:-1}" = "1" ] && ! ls "$LIBDIR"/libgallium* >/dev/null 2>&1; then
     run_step "Mesa (fetch-mesa.sh)" bash scripts/fetch-mesa.sh
 fi
 

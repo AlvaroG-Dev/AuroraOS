@@ -8,6 +8,7 @@
 #include <linux/math.h>
 #include <linux/minmax.h>
 #include <linux/time64.h>
+#include <linux/typecheck.h>
 
 #define HZ CONFIG_HZ
 #define USER_HZ 100
@@ -69,4 +70,10 @@ static inline clock_t jiffies_to_clock_t(unsigned long x) { return x / (HZ / USE
 #define time_after32(a, b) ((s32)((u32)(b) - (u32)(a)) < 0)
 #define time_before32(a, b) time_after32(b, a)
 #define time_after_eq32(a, b) ((s32)((u32)(a) - (u32)(b)) >= 0)
+#ifndef secs_to_jiffies
+#define secs_to_jiffies(_secs) ((unsigned long)(_secs) * HZ)
+#endif
+#ifndef jiffies_delta_to_msecs
+#define jiffies_delta_to_msecs(j) jiffies_to_msecs(j)
+#endif
 #endif

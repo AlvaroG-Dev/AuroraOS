@@ -1,0 +1,36 @@
+#!/bin/bash
+# lsblk simple: NAME TYPE MAJ:MIN SIZE FSTYPE LABEL MOUNTPOINT, desde /proc/partitions
+# y blkid. Leer el tipo de FS y la etiqueta exige abrir el dispositivo en bruto, que
+# solo puede root: sin serlo se intenta con `sudo -n` y, si no se puede, quedan en blanco.
+BLKID=/usr/sbin/blkid
+if [ "$(id -u)" != 0 ]; then
+  if sudo -n true 2>/dev/null; then BLKID="sudo -n /usr/sbin/blkid"; else BLKID=""; fi
+fi
+declare -A MPU MPL # punto de montaje por UUID / etiqueta (de /etc/fstab)
+while read -r dev mp _; do
+  case "$dev" in UUID=*) MPU[${dev#UUID=}]=$mp ;; LABEL=*) MPL[${dev#LABEL=}]=$mp ;; esac
+done < <(grep -v '^#' /etc/fstab 2>/dev/null)
+human() {
+  local k=$1
+  if [ "$k" -ge 1048576 ]; then echo "$((k / 1048576)).$(((k % 1048576) * 10 / 1048576))G"
+  elif [ "$k" -ge 1024 ]; then echo "$((k / 1024))M"; else echo "${k}K"; fi
+}
+printf '%-10s %-5s %-8s %7s  %-7s %-14s %s\n' NAME TYPE MAJ:MIN SIZE FSTYPE LABEL MOUNTPOINT
+while read -r maj min blocks name; do
+  case "$maj" in major|"") continue ;; esac
+  case "$name" in
+    nvme*p[0-9]*|mmcblk*p[0-9]*|sd*[0-9]|hd*[0-9]|vd*[0-9]) ty=part ;;
+    *) ty=disk ;;
+  esac
+  t=""; l=""; u=""
+  if [ -n "$BLKID" ]; then
+    t=$($BLKID -s TYPE -o value "/dev/$name" 2>/dev/null)
+    l=$($BLKID -s LABEL -o value "/dev/$name" 2>/dev/null)
+    u=$($BLKID -s UUID -o value "/dev/$name" 2>/dev/null)
+  fi
+  mp=${MPU[$u]:-${MPL[$l]:-}}
+  [ -z "$u" ] && mp=""
+  printf '%-10s %-5s %-8s %7s  %-7s %-14s %s\n' "$name" "$ty" "$maj:$min" "$(human "$blocks")" "$t" "$l" "$mp"
+done < /proc/partitions
+[ -z "$BLKID" ] && echo "(sin permisos de lectura de discos: ejecuta 'sudo lsblk' para ver FSTYPE y LABEL)" >&2
+exit 0

@@ -42,7 +42,10 @@ int bc_readahead(block_device_t *bdev, uint64_t blk, uint32_t count,
 
 void *bc_data(bc_buf_t *b);
 uint32_t bc_size(const bc_buf_t *b);
+uint64_t bc_block_no(const bc_buf_t *b);
 void bc_mark_dirty(bc_buf_t *b);
+// Datos de ficheros: se vuelcan antes que los metadatos (data=ordered).
+void bc_mark_dirty_data(bc_buf_t *b);
 void bc_put(bc_buf_t *b);
 
 // Escribe todos los búfers sucios de `bdev` y hace bdev_flush. 0 o -EIO.
@@ -51,6 +54,15 @@ int bc_sync_all(void);
 // Descarta todos los búfers de `bdev` (tras sync). -EBUSY si alguno tiene
 // referencias. Se usa en umount para que el siguiente montaje relea el disco.
 int bc_invalidate_dev(block_device_t *bdev);
+
+// Journal (jbd2) de un dispositivo: los metadatos sucios (los que no son datos de
+// ficheros) se escriben como UNA transacción por commit() y solo después en su
+// sitio; luego done() deja el journal vacío. commit() se llama con la caché
+// bloqueada: no puede llamar a bc_*. max_blocks = bloques por transacción.
+typedef int (*bc_commit_fn)(void *priv, bc_buf_t **bufs, uint32_t n);
+typedef void (*bc_done_fn)(void *priv);
+void bc_set_journal(block_device_t *bdev, bc_commit_fn commit, bc_done_fn done,
+                    void *priv, uint32_t max_blocks); // commit == NULL: quitarlo
 
 // Cota de memoria en bytes (por defecto 16 MiB). Expulsa lo que sobre.
 void bc_set_limit(size_t bytes);

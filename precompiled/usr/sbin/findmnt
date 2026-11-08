@@ -1,0 +1,3 @@
+#!/bin/bash
+# findmnt simple: lista /proc/mounts (opcional: filtrar por punto de montaje).
+if [ -n "$1" ]; then grep " $1 " /proc/mounts; else cat /proc/mounts; fi

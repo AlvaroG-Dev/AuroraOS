@@ -320,6 +320,18 @@ static resource_size_t lkpi_msix_table_phys(struct pci_dev *dev)
 	return pci_resource_start(dev, bir) + (tbl & PCI_MSIX_TABLE_OFFSET);
 }
 
+/* lkpi.irq=nomsix|nomsi: pruebas de los caminos MSI / INTx de los drivers
+ * (QEMU siempre ofrece MSI-X; el hardware real a veces solo MSI). */
+static bool lkpi_irq_mode_blocked(char what)
+{
+	char opt[32];
+
+	if (!aurora_cmdline_get("lkpi.irq", opt, sizeof(opt)))
+		return false;
+	return what == 'x' ? (!strncmp(opt, "nomsix", 6) || !strncmp(opt, "nomsi", 5)) :
+			     !strncmp(opt, "nomsi", 5) && opt[5] != 'x';
+}
+
 static int lkpi_enable_msix(struct pci_dev *dev, int min, int max, unsigned int flags,
 			    struct irq_affinity *affd)
 {
@@ -328,15 +340,23 @@ static int lkpi_enable_msix(struct pci_dev *dev, int min, int max, unsigned int 
 	resource_size_t phys;
 	u16 ctrl;
 
-	if (!tsize || dev->no_msi)
+	if (!tsize || dev->no_msi) {
+		pci_info(dev, "MSI-X: sin tabla (tsize=%d no_msi=%d)\n", tsize, dev->no_msi);
+		return -EINVAL;
+	}
+	if (lkpi_irq_mode_blocked('x'))
 		return -EINVAL;
 	if (max > tsize)
 		max = tsize;
-	if (max < min)
+	if (max < min) {
+		pci_info(dev, "MSI-X: min=%u > tabla=%d\n", min, tsize);
 		return -ENOSPC;
+	}
 	phys = lkpi_msix_table_phys(dev);
-	if (!phys)
+	if (!phys) {
+		pci_info(dev, "MSI-X: sin direccion de tabla\n");
 		return -EINVAL;
+	}
 	irqs = lkpi_irqs_alloc(max);
 	cpus = kcalloc(max, sizeof(*cpus), GFP_KERNEL);
 	if (!irqs || !cpus) {
@@ -411,7 +431,7 @@ static int lkpi_enable_msi(struct pci_dev *dev, int min, unsigned int flags,
 	int cpu, rc;
 	u16 ctrl;
 
-	if (!dev->msi_cap || dev->no_msi || min > 1)
+	if (!dev->msi_cap || dev->no_msi || min > 1 || lkpi_irq_mode_blocked('m'))
 		return -EINVAL;		/* MSI de varios mensajes: no (vectores alineados) */
 	irqs = lkpi_irqs_alloc(1);
 	if (!irqs)

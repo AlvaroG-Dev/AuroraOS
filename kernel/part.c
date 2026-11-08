@@ -222,6 +222,7 @@ static int register_partition(block_device_t *disk, uint64_t start,
   p->sector_size = disk->sector_size;
   p->is_read_only = disk->is_read_only;
   p->is_partition = 1;
+  p->is_usb = disk->is_usb;
   p->parent = disk;
   p->start_lba = start;
   p->ops = &part_ops;

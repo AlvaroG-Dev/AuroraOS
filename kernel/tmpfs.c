@@ -55,6 +55,7 @@ typedef struct tmpfs_node {
   uint8_t *data;
   size_t capacity;
   size_t tab_cap;
+  int mapped; // alguna pagina se ha entregado a un mmap(MAP_SHARED): no liberarlas al truncar
 
   struct tmpfs_fs *fs;
   struct tmpfs_node *parent;
@@ -354,6 +355,30 @@ static int64_t tmpfs_write_op(vfs_node_t *vn, uint64_t off, size_t sz,
   return (int64_t)sz;
 }
 
+// mmap(MAP_SHARED) por demanda (glibc sem_open/shm_open sobre /dev/shm, Python
+// multiprocessing): entrega la pagina fisica del fichero. Los PTE van marcados
+// PTE_SPECIAL|PTE_SHARED_OBJ: el fichero es el dueño de la pagina.
+static int tmpfs_get_page_op(vfs_node_t *vn, uint64_t pgoff,
+                             uint64_t *phys_out) {
+  tmpfs_node_t *n = vn ? (tmpfs_node_t *)vn->priv : NULL;
+  if (!n || !n->fs || !phys_out)
+    return -EINVAL;
+  if ((n->mode & S_IFMT) != S_IFREG)
+    return -ENODEV;
+  tmpfs_fs_t *fs = n->fs;
+  mutex_lock(&fs->lock);
+  int rc = 0;
+  if (pgoff * TMPFS_PG >= n->size || !n->data || pgoff >= n->capacity / TMPFS_PG) {
+    rc = -EFAULT;
+  } else {
+    uint8_t **tab = (uint8_t **)n->data;
+    *phys_out = virt_to_phys(tab[pgoff]);
+    n->mapped = 1;
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
+}
+
 static int tmpfs_open_op(vfs_node_t *vn, int flags) {
   // Un fichero socket (bind de AF_UNIX) no se puede abrir (ENXIO), salvo O_PATH.
   if ((vn->mode & S_IFMT) == S_IFSOCK && !(flags & 010000000))
@@ -388,7 +413,10 @@ static int tmpfs_truncate_op(vfs_node_t *vn, uint64_t new_size) {
   mutex_lock(&fs->lock);
 
   if (new_size == 0) {
-    if (n->data) {
+    if (n->data && n->mapped) {
+      // Hay mapeos compartidos vivos: se conservan las paginas (a cero).
+      file_zero(n, 0, n->capacity);
+    } else if (n->data) {
       fs->used_bytes -= n->capacity;
       file_free_pages(n);
     }
@@ -837,6 +865,7 @@ static vfs_ops_t tmpfs_file_ops = {
     .open = tmpfs_open_op,
     .close = tmpfs_close_op,
     .truncate = tmpfs_truncate_op,
+    .get_page = tmpfs_get_page_op,
     .utimes = tmpfs_utimes_op,
     .chmod = tmpfs_chmod_op,
     .chown = tmpfs_chown_op,
@@ -1309,7 +1338,15 @@ void tmpfs_init(void) {
   // ---------------------------------------------------------------------
   // [3] /var + subdirs
   // ---------------------------------------------------------------------
-  void *var = tmpfs_new(16 * 1024 * 1024);
+  // [apt] /var = 1/4 de la RAM (las paginas se piden al usarlas), entre 64 MB y
+  // 1 GB. Con 16 MB fijos `apt-get update` fallaba con ENOSPC (write 28):
+  // /var/lib/apt/lists y /var/cache/apt/*.bin de Ubuntu suman cientos de MB.
+  uint64_t var_mb = (pmm_total_usable_pages() * 4096ULL / 4) >> 20;
+  if (var_mb < 64)
+    var_mb = 64;
+  if (var_mb > 1024)
+    var_mb = 1024;
+  void *var = tmpfs_new((size_t)var_mb * 1024 * 1024);
   if (!var) {
     LOG_ERR("[TMPFS] sin memoria para /var");
   } else {
@@ -1321,7 +1358,7 @@ void tmpfs_init(void) {
       vfs_mkdir("/var/tmp", 01777);
       vfs_mkdir("/var/log", 0755);
       vfs_mkdir("/var/run", 0755);
-      LOG_INFO("[TMPFS] /var montado (16 MB)");
+      LOG_INFO("[TMPFS] /var montado (%llu MB)", (unsigned long long)var_mb);
     }
   }
 

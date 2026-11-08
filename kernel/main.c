@@ -488,12 +488,28 @@ static int drivers_init_task(void *arg) {
 // ARPs espontáneos si QEMU emite alguno (no debería, pero mejor
 // prevenir).
 // ---------------------------------------------------------------------------
+// Plan_Red.md N0: deja en el log cada NIC PCI (clase 0x02) para saber qué
+// driver hace falta en cada máquina real sin necesitar lspci.
+static void net_log_pci_nics(void) {
+  uint8_t bus = 0, slot = 0, func = 0;
+  pci_device_t d;
+  int n = 0;
+  while (pci_find_next_device(0x02, 0xFF, &bus, &slot, &func, &d) == 0) {
+    LOG_INFO("[NET] pci %02x:%02x.%u %04x:%04x subclase=%02x irq=%u", bus, slot,
+             func, d.vendor_id, d.device_id, d.subclass_id, d.irq_line);
+    n++;
+  }
+  if (n == 0)
+    LOG_WARN("[NET] no hay ninguna NIC PCI (clase 0x02)");
+}
+
 static int net_init_task(void *arg) {
   (void)arg;
   if (wait_for_completion_timeout(&g_vfs_done, 5000) == 0)
     LOG_WARN("[INIT] VFS timeout, red puede fallar");
 
   LOG_INFO("[INIT] Networking...");
+  net_log_pci_nics();
   net_init();
   loopback_init();
   ip_init();
@@ -770,21 +786,53 @@ static void boot_media_diag(const char *why, uint64_t secs) {
   if (n == 0)
     LOG_WARN("[DIAG]  ningun block device: el USB no se enumero como disco "
              "(buscar [xHCI]/[USB-STG] en el log)");
-  boot_console_overlay_enable(1);
+  { /* quiosco (instalador): sin overlay de logs sobre la UI; F12 lo muestra */
+    extern int aurora_kiosk(void);
+    if (!aurora_kiosk())
+      boot_console_overlay_enable(1);
+  }
   compositor_invalidate_rect((rect_t){0, 0, 16384, 16384});
+}
+
+// Al arrancar solo se monta el USB (y volumenes etiquetados AURORADATA, que son
+// los de datos de Aurora): los demas discos quedan con su nombre (/dev/sdX,
+// visibles en lsblk/blkid) pero sin montar. cmdline automount=all lo desactiva.
+static int boot_may_automount(block_device_t *b) {
+  static int all = -1;
+  if (all < 0) {
+    char v[8];
+    all = cmdline_get("automount", v, sizeof(v)) && strcmp(v, "all") == 0;
+  }
+  if (all || b->is_usb)
+    return 1;
+  char label[17] = "";
+  if (ext2_read_label(b, label) == 0 && strcmp(label, "AURORADATA") == 0)
+    return 1;
+  static char noted[16][16];
+  for (int i = 0; i < 16; i++) {
+    if (strcmp(noted[i], b->name) == 0)
+      return 0;
+    if (!noted[i][0]) {
+      strncpy(noted[i], b->name, sizeof(noted[i]) - 1);
+      LOG_INFO("[INIT] %s: disco no USB, no se monta al arrancar (automount=all "
+               "o mount a mano)", b->name);
+      break;
+    }
+  }
+  return 0;
 }
 
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition || b->is_read_only)
+    if (!b || b->is_partition || b->is_read_only || !boot_may_automount(b))
       continue;
     try_mount_data(b);
   }
   // Particiones FAT32 (p. ej. la de datos AURORADATA al final del USB).
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || !b->is_partition || b->is_read_only)
+    if (!b || !b->is_partition || b->is_read_only || !boot_may_automount(b))
       continue;
     try_mount_data(b);
   }
@@ -1180,6 +1228,15 @@ void kmain(struct kernel_boot_info *kinfo) {
       if (end > max_phys_addr)
         max_phys_addr = end;
     }
+  }
+  // La ventana fisica debe cubrir tambien el initrd: el bootloader UEFI lo
+  // deja en EfiLoaderData, que puede quedar POR ENCIMA de la ultima region
+  // CONVENTIONAL (PCs reales con >4 GiB sin hueco bajo 4 GiB para un initrd de
+  // ~1,8 GB). Sin esto, tarfs_init() leia fuera de la ventana -> #PF.
+  if (boot.initrd_base && boot.initrd_size) {
+    uint64_t iend = boot.initrd_base + boot.initrd_size;
+    if (iend > boot.initrd_base && iend > max_phys_addr)
+      max_phys_addr = iend;
   }
   parse_memmap();
   efi_rt_collect(boot.efi_runtime_services, (const void *)boot.memmap,

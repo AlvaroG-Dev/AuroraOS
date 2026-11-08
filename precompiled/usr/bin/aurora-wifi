@@ -1,0 +1,62 @@
+#!/bin/sh
+# aurora-wifi: control del Wi-Fi (gestor propio en cfg80211, /dev/aurora-wifi).
+#   aurora-wifi scan                 busca redes y las lista
+#   aurora-wifi list                 redes vistas en el ultimo escaneo
+#   aurora-wifi status               estado de la conexion
+#   aurora-wifi connect SSID [CLAVE] conecta (abierta o WPA2-PSK; sin CLAVE la pide si hace falta)
+#   aurora-wifi disconnect
+D=/dev/aurora-wifi
+[ -c "$D" ] || { echo "aurora-wifi: no hay $D (no hay adaptador Wi-Fi con driver cargado)" >&2; exit 1; }
+
+state() { sed -n 's/^state //p' "$D"; }
+wait_not() { # espera a que el estado deje de ser "$1", maximo $2 s
+    i=0
+    while [ "$(state)" = "$1" ] && [ $i -lt "$2" ]; do sleep 1; i=$((i+1)); done
+}
+
+case "$1" in
+scan)
+    printf 'scan\n' > "$D" || exit 1
+    sleep 1
+    wait_not scanning 15
+    sleep 1
+    sed -n 's/^bss //p' "$D" | sort -k3 -n -r | while read bssid freq sig sec ssid; do
+        printf '%-8s %5s MHz %4s dBm  %s\n' "$sec" "$freq" "$sig" "$ssid"
+    done
+    ;;
+list)
+    sed -n 's/^bss //p' "$D" | sort -k3 -n -r | while read bssid freq sig sec ssid; do
+        printf '%-8s %5s MHz %4s dBm  %s\n' "$sec" "$freq" "$sig" "$ssid"
+    done
+    ;;
+status)
+    cat "$D" | grep -v '^bss '
+    ;;
+connect)
+    ssid="$2"; pass="$3"
+    [ -n "$ssid" ] || { echo "uso: aurora-wifi connect SSID [CLAVE]" >&2; exit 2; }
+    sec=$(sed -n 's/^bss //p' "$D" | while read b f sg sc n; do
+        [ "$n" = "$ssid" ] && { echo "$sc"; break; }; done)
+    if [ -z "$pass" ] && [ -n "$sec" ] && [ "$sec" != open ]; then
+        printf 'Clave de "%s": ' "$ssid" >&2
+        stty -echo 2>/dev/null; read pass; stty echo 2>/dev/null; echo >&2
+    fi
+    printf 'connect\t%s\t%s\n' "$ssid" "$pass" > "$D" || {
+        echo "aurora-wifi: no se pudo iniciar (red no vista, sin soporte o clave invalida; haz scan antes)" >&2; exit 1; }
+    i=0
+    while [ $i -lt 30 ]; do
+        s=$(state)
+        case "$s" in connected|failed) break ;; esac
+        sleep 1; i=$((i+1))
+    done
+    cat "$D" | grep -v '^bss '
+    [ "$(state)" = connected ]
+    ;;
+disconnect)
+    printf 'disconnect\n' > "$D"
+    ;;
+*)
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

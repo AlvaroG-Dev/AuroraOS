@@ -303,6 +303,8 @@ void menubar_close(void) {
 }
 
 int menubar_mouse_move(int x, int y) {
+  if (aurora_kiosk())
+    return 0;
   if (M.open >= 0) {
     int t = title_at(x, y);
     if (t >= 0 && t != M.open) { /* como macOS: cambia de menú al pasar */
@@ -339,6 +341,8 @@ static menu_action_t row_action(int m, int row) {
 int menubar_mouse_press(int x, int y, menu_action_t *act) {
   if (act)
     *act = MENU_ACT_NONE;
+  if (aurora_kiosk())
+    return 0;
 
   if (M.open >= 0) {
     int m = M.open;

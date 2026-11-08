@@ -379,3 +379,51 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─► E5 ─► E6 ─► E7 ─► 
 - **E7.3 Instalador: aparcado** por orden de Alvaro (hilo aparte).
 - init: `waitpid` de las líneas de boot-tests reintenta ante EINTR (antes un
   SIGCHLD solapaba comandos y falseaba tests).
+
+## Estado E8 y montaje al arrancar (2026-11-05)
+
+- **E8 (ext4 solo lectura) hecha:** extents (árbol de cualquier profundidad;
+  los extents sin inicializar leen ceros), `64bit` (descriptores de 64 B, FS
+  < 2^32 bloques), `flex_bg`, `huge_file`, `dir_nlink`, `extra_isize`,
+  `metadata_csum` (no se verifica), htree (se lee en lineal) y journal sin
+  recuperar (se lee tal cual, con aviso). Siguen rechazados `meta_bg`, `mmp`,
+  `inline_data`, `encrypt`, `casefold`, `ea_inode` y bloques > 4096. Cualquier
+  FS con features ext4 se monta siempre `ro` y no ejecuta `ext2_check`.
+  Test: `tests/ext2/run_ext4_test.sh` (64bit+csum+flex_bg y la variante sin
+  ellas; 5 MB, fichero con 300 extents, disperso, htree de 3000 entradas,
+  symlinks rápido y lento): sha256 y tamaños idénticos al host.
+- **Montaje al arrancar:** solo se monta lo que cuelga de USB (`block_device_t.is_usb`,
+  heredado por las particiones) y los volúmenes con etiqueta `AURORADATA`. Los
+  demás discos conservan su nombre `/dev/sdX` (visible con `lsblk`/`blkid`) y se
+  anota en el log que no se montan. `automount=all` en la línea del kernel
+  devuelve el comportamiento anterior.
+
+## Cierre de pendientes (2026-11-05)
+
+- **lsattr/chattr:** ioctls `FS_IOC_GETFLAGS/SETFLAGS/GETVERSION` en ext2. Los
+  flags `immutable` y `append-only` (solo root puede ponerlos) se imponen en
+  write, truncate, unlink, rename, link, chmod, chown y utimes.
+- **nosuid:** `mount -o nosuid` (y remount) hace que execve ignore setuid/setgid
+  en ese montaje, para cualquier FS (antes solo FAT32).
+- **mknod FIFO/socket por syscall:** crea el nodo en ext2 y tmpfs (tar, cp -a).
+  Abrir un FIFO con nombre como tubería sigue sin existir en el VFS; los
+  dispositivos de bloque por mknod siguen en EPERM.
+- **data=ordered:** `bc_mark_dirty_data`: en cada volcado salen primero los
+  bloques de datos de ficheros, se hace `bdev_flush` y después los metadatos.
+  Tras el cambio los cortes de luz dejan el FS sin huérfanos pendientes en las
+  14 iteraciones probadas (1 KiB con la carga aleatoria; 4 KiB con extracción
+  de tar y carga paralela), todas con `e2fsck -fy` = 0.
+- Tests: `run_pending_test.sh`, `run_crash_test.sh` con `SIZE/BS/LOADFILE/WDIR`.
+- **Sigue fuera:** instalador E7.3 (a petición de Alvaro), abrir FIFOs con
+  nombre, mknod de bloque, ioctls de ext4 no relacionados con flags.
+
+## E9: escritura ext4 y journal (2026-11-07, rama claude/project-thread-uq4oep, sin fusionar a main)
+
+- **E9.1 Journal jbd2:** al montar rw con `needs_recovery` se reproduce el journal interno (pasadas SCAN/REVOKE/REPLAY, csum v2/v3, revocaciones), se deja `start=0` y se quita `needs_recovery`. Journal externo y fast commit: se rechazan. Test: `tests/ext2/run_journal_test.sh` (oráculo `debugfs jr`).
+- **E9.2/E9.3 Extents:** crear, ampliar, partir hojas (profundidad 0 y 1) y truncar. 64bit (descriptores de 64 B), flex_bg, huge_file, dir_nlink, extra_isize. Los ficheros y directorios nuevos usan mapa de bloques clásico (ext4 lo admite). Limitaciones: escribir en un extent sin inicializar (fallocate) da error; árboles de profundidad >1 no se amplían.
+- **E9.4 metadata_csum:** crc32c de inodos, descriptores de grupo, bitmaps, cola de bloques de extents, cola de bloques de directorio, bloque xattr (refcount) y superbloque. Los grupos INODE_UNINIT/BLOCK_UNINIT se materializan al montar rw; `bg_itable_unused` se mantiene. Un directorio htree se desindexa (nodos vacíos con cola) en su primera modificación.
+- **L1-L3 (cierre de límites):** extents genéricos (profundidad hasta 5, división de nodos con propagación al padre), escritura en extents sin inicializar (se parte el extent y solo ese bloque pasa a inicializado, a ceros) y ficheros/directorios/symlinks lentos nuevos con árbol de extents.
+- **L4 Journal en escritura:** cada volcado de metadatos (bcache) es una transacción jbd2 completa (descriptores + bloques + commit, csum v3 si el journal lo lleva) que se checkpointea enseguida y deja el journal vacío. Los datos de ficheros siguen data=ordered (antes, con barrera). Con el journal activo el superbloque lleva needs_recovery mientras está sucio y un FS con journal que quedó sin desmontar se vuelve a montar rw tras reproducir el journal. Hook en `bcache.c` (`bc_set_journal`): los metadatos de un dispositivo con journal nunca salen de la caché sin pasar por él. Transacciones de hasta ~1000 bloques; el kernel sincroniza antes de pasar de 768 sucios. Soportado: journal interno con revoke/64bit/csum v3. No soportado (se escribe como antes, y un FS sucio queda en solo lectura): journal externo, csum v2, async/fast commit.
+- **Cortes de luz en ext4:** `FSTYPE=ext4 MKOPTS=... [JCSUM=1] tests/ext2/run_crash_test.sh`. 8 iteraciones sin csum y 6 con csum + journal csum v3: reproducir solo el journal (`debugfs jr`) deja el FS consistente (`e2fsck -fn` = 0) en todas.
+- **Pendiente:** profundidad máxima de extents 5; no se prueban los cortes de luz con cientos de iteraciones; sin probar en el USB real ni en el Portégé.
+- **Test:** `tests/ext2/run_ext4w_test.sh` (FEAT=, BS=): e2fsck limpio con 1K/2K/4K, con y sin metadata_csum/64bit/flex_bg.

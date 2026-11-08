@@ -6,7 +6,8 @@ include kernel/linuxkpi/linux-version.mk
 LKPI_BUILD   := build/linuxkpi
 LKPI_SRCS    := $(wildcard kernel/linuxkpi/*.c kernel/linuxkpi/kernel/*.c kernel/linuxkpi/lib/*.c \
                            kernel/linuxkpi/mm/*.c kernel/linuxkpi/base/*.c kernel/linuxkpi/pci/*.c \
-                           kernel/linuxkpi/fs/*.c kernel/linuxkpi/dma/*.c kernel/linuxkpi/misc/*.c)
+                           kernel/linuxkpi/fs/*.c kernel/linuxkpi/dma/*.c kernel/linuxkpi/misc/*.c \
+                           kernel/linuxkpi/net/*.c)
 LKPI_SRCS    := $(filter-out kernel/linuxkpi/kur_manifest.c,$(LKPI_SRCS))
 LKPI_OBJS    := $(patsubst kernel/linuxkpi/%.c,$(LKPI_BUILD)/obj/%.o,$(LKPI_SRCS))
 
@@ -53,15 +54,32 @@ $(LKPI_BUILD)/linuxkpi.kur: $(LKPI_BUILD)/linuxkpi.o tools/kurbuild
 	@./tools/kurbuild -H $< $@
 
 .PHONY: linuxkpi linuxkpi-tests linuxkpi-drv linuxkpi-clean linuxkpi-firmware
-linuxkpi: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linuxkpi-firmware
+# SELFHOST=1 (compilando dentro de AuroraOS): no hay arbol de Linux ni
+# linux-firmware, asi que se reutilizan los .kur y el firmware ya instalados en
+# el sistema en ejecucion (LKPI_PREBUILT, por defecto /lib/modules/linuxkpi).
+LKPI_PREBUILT ?= /lib/modules/linuxkpi
+LKPI_PREBUILT_FW ?= /lib/firmware
+.PHONY: linuxkpi-prebuilt linuxkpi-build
+linuxkpi: $(if $(filter 1,$(SELFHOST)),linuxkpi-prebuilt,linuxkpi-build)
+linuxkpi-prebuilt:
+	@test -f $(LKPI_PREBUILT)/linuxkpi.kur || { echo "[LKPI] SELFHOST: falta $(LKPI_PREBUILT)/linuxkpi.kur"; exit 1; }
+	@echo "[LKPI] SELFHOST: reutilizando .kur de $(LKPI_PREBUILT)"
+	@mkdir -p $(LKPI_MODDIR) sysroot/lib/firmware
+	@cp -af $(LKPI_PREBUILT)/. $(LKPI_MODDIR)/
+	@if [ -d $(LKPI_PREBUILT_FW) ]; then cp -a $(LKPI_PREBUILT_FW)/. sysroot/lib/firmware/; fi
+
+linuxkpi-build: $(LKPI_BUILD)/linuxkpi.kur linuxkpi-tests linuxkpi-modules linuxkpi-firmware
 	@mkdir -p $(LKPI_MODDIR)
 	@cp -f $(LKPI_BUILD)/linuxkpi.kur $(LKPI_MODDIR)/linuxkpi.kur
 
 # Modulos de infraestructura de Linux sobre la capa (kernel/linuxkpi/drivers/<n>.mk):
 # el nucleo virtio (L5) y, mas adelante, el de DRM. Se cargan bajo demanda.
-LKPI_MODULES := lkpi_virtio lkpi_drm lkpi_ttm lkpi_drm_display lkpi_i915 lkpi_bochs lkpi_simpledrm lkpi_virtio_gpu
+LKPI_MODULES := lkpi_virtio lkpi_drm lkpi_ttm lkpi_drm_display lkpi_i915 lkpi_bochs lkpi_simpledrm lkpi_virtio_gpu lkpi_r8169 lkpi_e1000e lkpi_igc lkpi_cfg80211 lkpi_mac80211 lkpi_iwlwifi lkpi_iwlmvm lkpi_e1000 lkpi_igb lkpi_alx lkpi_virtio_net
 .PHONY: linuxkpi-modules
 linuxkpi-modules: tools/kurbuild
+	@[ -f $(LKPI_LINUX)/drivers/net/ethernet/intel/igb/igb_main.c ] || { \
+		echo "[LKPI] faltan las fuentes de red de Linux (drivers/net): scripts/fetch-linux-drivers.sh"; \
+		scripts/fetch-linux-drivers.sh || exit 1; }
 	@for m in $(LKPI_MODULES); do \
 		$(MAKE) --no-print-directory -f kernel/linuxkpi/drv.mk DRV=$$m \
 			KUR_CC="$(KUR_CC)" install || exit 1; \

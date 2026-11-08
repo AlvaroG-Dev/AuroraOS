@@ -31,9 +31,15 @@ fi
 make -j"$(nproc)" >make.log 2>&1
 DEST="$OLDPWD/precompiled/usr/sbin"
 mkdir -p "$DEST"
-for b in e2fsck/e2fsck misc/mke2fs misc/tune2fs misc/dumpe2fs debugfs/debugfs; do
-  install -m 755 -s "$b" "$DEST/$(basename "$b")"
+# Utilidades de depuracion y mantenimiento (resize2fs, e2image, filefrag...).
+for b in e2fsck/e2fsck misc/mke2fs misc/tune2fs misc/dumpe2fs debugfs/debugfs \
+         resize/resize2fs misc/e2image misc/e2freefrag misc/filefrag \
+         misc/lsattr misc/chattr misc/badblocks misc/logsave misc/mklost+found \
+         e2fsck/e2undo misc/e2mmpstatus; do
+  [ -f "$b" ] && install -m 755 -s "$b" "$DEST/$(basename "$b")"
 done
+# blkid, findfs, uuidgen, lsblk, findmnt y mountpoint no vienen en e2fsprogs 1.47:
+# blkid es user/tools/blkid.c y el resto son scripts ya en precompiled/usr/sbin.
 cd "$DEST"
 for l in mkfs.ext2 mkfs.ext3 mkfs.ext4; do ln -sf mke2fs "$l"; done
 for l in fsck.ext2 fsck.ext3 fsck.ext4; do ln -sf e2fsck "$l"; done

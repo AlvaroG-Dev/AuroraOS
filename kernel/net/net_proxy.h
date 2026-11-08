@@ -9,6 +9,8 @@
 // Inicializa la interfaz virtual eth0 y la conecta al stack IP del kernel.
 // Se llama desde net_init_task() en main.c.
 void net_proxy_init(void);
+netif_t *net_proxy_netif(void);
+int net_proxy_claimed(void);
 
 // VFS ops para /dev/net0. Se registran en vfs.c.
 extern vfs_ops_t net_proxy_ops;

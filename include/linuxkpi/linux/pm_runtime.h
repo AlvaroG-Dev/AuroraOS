@@ -48,4 +48,9 @@ static inline int pm_runtime_idle(struct device *dev) { return -ENOSYS; }
 static inline int pm_runtime_resume(struct device *dev) { return 0; }
 static inline int devm_pm_runtime_enable(struct device *dev) { pm_runtime_enable(dev); return 0; }
 
+static inline int pm_request_resume(struct device *dev) { return 0; }
+static inline int pm_schedule_suspend(struct device *dev, unsigned int delay) { return 0; }
+static inline bool pm_suspend_via_firmware(void) { return false; }
+static inline int device_wakeup_enable(struct device *dev) { return 0; }
+static inline bool device_can_wakeup(struct device *dev) { return false; }
 #endif

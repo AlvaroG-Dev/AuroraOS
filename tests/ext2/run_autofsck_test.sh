@@ -12,6 +12,7 @@ bash scripts/qemu-boot-test.sh -t "${T:-300}" 'sleep 30' \
  'umount /data; mount -t ext2 -o ro /dev/sda /data; echo @@PRE rc=$?; touch /data/x 2>&1 | sed "s/^/@@PRE_TOUCH /"' \
  '/usr/sbin/aurora-fsck 2>&1 | sed "s/^/@@FSCK /"' \
  'touch /data/escrito && echo @@POST_RW_OK; cat /data/hola.txt | sed "s/^/@@HOLA /"; umount /data; echo @@UM $?' \
+ 'umount /data; mount -t ext2 /dev/sda /data; echo hola > /data/ab; sleep 600 < /data/ab & sleep 1; /usr/sbin/aurora-fsck 2>&1 | sed "s/^/@@LIVE /"; echo @@LIVE_END; cat /data/ab; touch /data/vivo && echo @@LIVE_RW_OK' \
  'echo @@DONE; power off' >/dev/null 2>&1
 tr -d '\r' < $LOG | grep -a "@@" | grep -av "bash -c" | cut -c1-140
 echo "-- host e2fsck:"; e2fsck -fn $IMG | tail -2

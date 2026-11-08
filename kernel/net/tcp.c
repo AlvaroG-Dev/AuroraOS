@@ -396,14 +396,31 @@ void tcp_conn_remove(tcp_conn_t *c) {
   unsigned h =
       tcp_hash(c->local_ip, c->local_port, c->remote_ip, c->remote_port);
   unsigned long flags = spin_lock_irqsave(&g_tcp_lock);
+  int found = 0;
   tcp_conn_t **pp = &g_tcp_buckets[h];
   while (*pp) {
     if (*pp == c) {
       *pp = c->next;
       c->next = NULL;
+      found = 1;
       break;
     }
     pp = &(*pp)->next;
+  }
+  // Si la tupla cambio tras insertarla (otro hash), la conexion sigue en su
+  // cubo antiguo: sin este barrido quedaria un puntero colgante tras liberarla
+  // (use-after-free en tcp_timer_tick, visto con apt y varias conexiones).
+  for (int i = 0; !found && i < TCP_HASH_BUCKETS; i++) {
+    pp = &g_tcp_buckets[i];
+    while (*pp) {
+      if (*pp == c) {
+        *pp = c->next;
+        c->next = NULL;
+        found = 1;
+        break;
+      }
+      pp = &(*pp)->next;
+    }
   }
   spin_unlock_irqrestore(&g_tcp_lock, flags);
 }
@@ -730,7 +747,8 @@ static int tcp_rx_queue_payload(tcp_conn_t *c, skb_t *skb, uint32_t seq,
 
   if (c->rx_buffered_bytes >= TCP_RX_BUFFER_BYTES ||
       payload_len > TCP_RX_BUFFER_BYTES - c->rx_buffered_bytes ||
-      c->rx_count + c->ooo_count >= TCP_RX_MAX_SKBS) {
+      c->rx_count + c->ooo_count >= TCP_RX_MAX_SKBS ||
+      skb_pool_free_count() < TCP_SKB_RESERVE) {
     spin_unlock_irqrestore(&c->rx_lock, flags);
     return 0;
   }

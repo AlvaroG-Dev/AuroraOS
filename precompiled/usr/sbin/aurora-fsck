@@ -8,8 +8,24 @@ for dev in /dev/sd?* /dev/nvme*n*p* /dev/vd?*; do
   info=$(/usr/sbin/dumpe2fs -h "$dev" 2>/dev/null) || continue
   case "$info" in *"volume name:"*AURORADATA*) ;; *) continue ;; esac
   case "$info" in *"state:"*"not clean"*) ;; *) exit 0 ;; esac
+  # Con el FS montado en rw el superbloque en disco figura "not clean" aunque
+  # todo vaya bien: solo se actua si /data NO se puede escribir (montado ro por
+  # sucio) o no esta montado. NUNCA se ejecuta e2fsck sobre un FS montado.
+  if grep -q ' /data ext2' /proc/mounts 2>/dev/null; then
+    if /usr/bin/touch /data/.aurora-fsck-probe 2>/dev/null; then
+      rm -f /data/.aurora-fsck-probe
+      exit 0
+    fi
+    if ! umount /data 2>/dev/null; then
+      echo "aurora-fsck: no se pudo desmontar /data; no se ejecuta e2fsck"
+      exit 1
+    fi
+    if grep -q ' /data ext2' /proc/mounts 2>/dev/null; then
+      echo "aurora-fsck: /data sigue montado; no se ejecuta e2fsck"
+      exit 1
+    fi
+  fi
   echo "aurora-fsck: $dev sucio, ejecutando e2fsck -p"
-  umount /data 2>/dev/null
   /usr/sbin/e2fsck -p "$dev"
   rc=$?
   echo "aurora-fsck: e2fsck rc=$rc"
