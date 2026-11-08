@@ -90,6 +90,10 @@
 #define EXT2_STATE_VALID 0x0001
 #define EXT4_RO_COMPAT_METADATA_CSUM 0x0400u
 static uint32_t ext4_crc32c(uint32_t crc, const void *buf, size_t len);
+struct ext2_fs;
+static int ext2_jnl_open(struct ext2_fs *fs);
+static void ext2_jnl_close(struct ext2_fs *fs);
+static int ext2_jnl_probe_fs(struct ext2_fs *fs);
 
 typedef struct __attribute__((packed)) {
   uint32_t s_inodes_count, s_blocks_count, s_r_blocks_count;
@@ -167,7 +171,7 @@ typedef struct ext2_ino {
   ext2_pg_t *pages; // páginas mapeadas con MAP_SHARED
 } ext2_ino_t;
 
-typedef struct {
+typedef struct ext2_fs {
   block_device_t *bdev;
   uint32_t bs, log_bs;
   uint32_t inodes_count, blocks_count, r_blocks_count;
@@ -178,6 +182,8 @@ typedef struct {
   uint32_t journal_ino; // s_journal_inum (jbd2 interno)
   uint32_t gdsz;        // tamaño del descriptor de grupo (32, o 64 con 64bit)
   int csum;             // metadata_csum activo
+  int jn_ok;            // journal interno que sabemos escribir
+  struct ext2_jnl *jn;  // journal activo (solo con el FS montado rw)
   uint32_t csum_seed;   // crc32c(~0, uuid)
   uint32_t gdt_blocks, resgdt;
   int filetype;
@@ -628,6 +634,12 @@ static int ext2_sb_store(ext2_fs_t *fs, uint16_t state) {
   sb.s_free_blocks_count = fs->free_blocks;
   sb.s_free_inodes_count = fs->free_inodes;
   sb.s_state = state;
+  if (fs->jn) { // con el journal activo, sucio = needs_recovery
+    if (state & EXT2_STATE_VALID)
+      sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+    else
+      sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
+  }
   sb.s_wtime = ext2_now();
   if (fs->mnt_pending) {
     fs->mnt_pending = 0;
@@ -665,6 +677,12 @@ static int ext2_sb_commit(ext2_fs_t *fs, int clean) {
 static int ext2_begin_write(ext2_fs_t *fs) {
   if (!fs->rw)
     return -EROFS;
+  if (fs->jn) { // que una transacción nunca desborde el journal
+    struct bc_stats st;
+    bc_get_stats(&st);
+    if (st.dirty > 768)
+      bc_sync_dev(fs->bdev);
+  }
   if (fs->disk_clean) {
     int rc = ext2_sb_commit(fs, 0);
     if (rc != 0) {
@@ -3759,6 +3777,7 @@ int ext2_mount(block_device_t *bdev, void **fs_priv_out) {
     return -EINVAL;
   }
 
+  fs->jn_ok = (compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) ? ext2_jnl_probe_fs(fs) : 0;
   LOG_INFO("[EXT2] montado %s: rev %u, bloque %u B, %u grupos, "
            "%u inodos de %u B, features c/i/ro=0x%x/0x%x/0x%x%s%s",
            dn, sb.s_rev_level, bs, ngroups, fs->inodes_count, isz, compat,
@@ -3931,7 +3950,7 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
     LOG_WARN("[EXT2] %s: dispositivo de solo lectura", dn);
     return -EROFS;
   }
-  if (!(fs->s_state & EXT2_STATE_VALID)) {
+  if (!(fs->s_state & EXT2_STATE_VALID) && !fs->jn_ok) {
     LOG_WARN("[EXT2] %s: no se desmontó limpio: solo lectura (ejecuta e2fsck "
              "en el host)", dn);
     return -EROFS;
@@ -3956,6 +3975,11 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
              fs->bad_groups);
     return -EROFS;
   }
+  if (fs->jn_ok && ext2_jnl_open(fs) != 0) {
+    LOG_WARN("[EXT2] %s: no se pudo abrir el journal: se escribe sin él", dn);
+    if (!(fs->s_state & EXT2_STATE_VALID))
+      return -EROFS;
+  }
   ext2_init_uninit_groups(fs);
   ext2_mnt_warn(fs);
   fs->rw = 1;
@@ -3964,6 +3988,7 @@ static int ext2_set_rw_locked(ext2_fs_t *fs) {
   int rc = ext2_sb_commit(fs, 0); // sucio a disco antes de tocar nada
   if (rc != 0) {
     fs->rw = 0;
+    ext2_jnl_close(fs);
     return -EIO;
   }
   if (!g_flushd_started) {
@@ -4048,8 +4073,10 @@ int ext2_remount(void *fs_priv, int rw) {
     rc = ext2_set_rw_locked(fs);
   } else if (fs->rw) {
     rc = ext2_flush_clean_locked(fs);
-    if (rc == 0)
+    if (rc == 0) {
       fs->rw = 0;
+      ext2_jnl_close(fs);
+    }
   }
   int now_rw = fs->rw;
   mutex_unlock(&fs->lock);
@@ -4070,6 +4097,7 @@ void ext2_umount(void *fs_priv) {
   if (ext2_flush_clean_locked(fs) != 0)
     LOG_ERR("[EXT2] %s: error al volcar en el desmontaje (el FS queda sucio)",
             fs->bdev->name);
+  ext2_jnl_close(fs);
   if (fs->icache)
     LOG_WARN("[EXT2] %s: inodos con referencias al desmontar", fs->bdev->name);
   mutex_unlock(&fs->lock);
@@ -4445,6 +4473,268 @@ static int ext2_journal_replay(ext2_fs_t *fs) {
   bc_mark_dirty(sb);
   bc_put(sb);
   return bc_sync_dev(fs->bdev) == 0 ? 0 : -EIO;
+}
+
+// ---------------------------------------------------------------------------
+// E9 (L4): escritura por el journal. Cada volcado de metadatos es una
+// transacción jbd2 completa (descriptores + bloques + commit) que se
+// "checkpointea" enseguida y deja el journal vacío (start = 0). Si se va la luz
+// a medias, el siguiente montaje reproduce la transacción (o la ignora si no
+// llegó a confirmarse).
+// ---------------------------------------------------------------------------
+typedef struct ext2_jnl {
+  ext2_fs_t *fs;
+  uint32_t *map;
+  uint32_t maxlen, first, seq, tag_bytes, cap, seed;
+  int v3;
+  uint8_t uuid[16];
+  uint8_t *jsb, *desc, *tmp;
+} ext2_jnl_t;
+
+static void put_be16(uint8_t *p, uint16_t v) {
+  p[0] = (uint8_t)(v >> 8);
+  p[1] = (uint8_t)v;
+}
+
+// Lee y valida el superbloque del journal. 0 si lo sabemos escribir.
+static int jnl_read_sb(ext2_fs_t *fs, jrn_t *j, uint32_t *feat, uint8_t *uuid) {
+  if (!(fs->compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) || fs->journal_ino == 0)
+    return -ENODEV;
+  memset(j, 0, sizeof(*j));
+  j->fs = fs;
+  if (ext2_read_inode(fs, fs->journal_ino, &j->ji) != 0)
+    return -EIO;
+  j->maxlen = UINT32_MAX;
+  bc_buf_t *h = NULL;
+  const uint8_t *sb = jrn_get(j, 0, &h);
+  if (!sb)
+    return -EIO;
+  uint32_t type = be32(sb + 4);
+  int ok = be32(sb) == JBD2_MAGIC && type == JBD2_SB_V2 && be32(sb + 12) == fs->bs;
+  if (ok) {
+    j->maxlen = be32(sb + 16);
+    j->first = be32(sb + 20);
+    j->seq = be32(sb + 24);
+    j->start = be32(sb + 28);
+    *feat = be32(sb + 40);
+    if (uuid)
+      memcpy(uuid, sb + 0x30, 16);
+  }
+  bc_put(h);
+  if (!ok || j->maxlen < 64 || j->first == 0 || j->first >= j->maxlen)
+    return -EINVAL;
+  // Soportado: revoke, 64bit y csum v3 (el v2, async commit y fast commit no).
+  if (*feat & ~(JBD2_INC_REVOKE | JBD2_INC_64BIT | JBD2_INC_CSUM_V3))
+    return -EOPNOTSUPP;
+  return 0;
+}
+
+static int ext2_jnl_probe_fs(ext2_fs_t *fs) {
+  jrn_t j;
+  uint32_t feat = 0;
+  return jnl_read_sb(fs, &j, &feat, NULL) == 0;
+}
+
+static int jnl_wr(ext2_jnl_t *j, uint32_t idx, const void *buf) {
+  ext2_fs_t *fs = j->fs;
+  uint32_t ss = fs->bdev->sector_size;
+  return bdev_write(fs->bdev, (uint64_t)j->map[idx] * (fs->bs / ss), fs->bs / ss, buf);
+}
+static uint32_t jnl_next(const ext2_jnl_t *j, uint32_t idx) {
+  idx++;
+  return idx >= j->maxlen ? j->first : idx;
+}
+
+static int jnl_write_sb(ext2_jnl_t *j, uint32_t start, uint32_t seq) {
+  put_be32(j->jsb + 24, seq);
+  put_be32(j->jsb + 28, start);
+  if (j->v3) {
+    put_be32(j->jsb + 0xFC, 0);
+    put_be32(j->jsb + 0xFC, ext4_crc32c(~0u, j->jsb, 1024));
+  }
+  return jnl_wr(j, 0, j->jsb);
+}
+
+// Escribe `n` bloques de metadatos como una transacción y la confirma.
+static int jnl_commit(void *priv, bc_buf_t **bufs, uint32_t n) {
+  ext2_jnl_t *j = priv;
+  ext2_fs_t *fs = j->fs;
+  uint32_t bs = fs->bs, tb = j->tag_bytes, tail = j->v3 ? 4 : 0;
+  uint32_t seq = j->seq, idx = j->first, i = 0;
+  uint8_t seqb[4];
+  put_be32(seqb, seq);
+  while (i < n) {
+    uint32_t didx = idx;
+    uint8_t *d = j->desc;
+    memset(d, 0, bs);
+    put_be32(d, JBD2_MAGIC);
+    put_be32(d + 4, JBD2_DESC);
+    put_be32(d + 8, seq);
+    idx = jnl_next(j, idx);
+    uint32_t p = 12, cnt = 0, last_p = 0;
+    while (i < n) {
+      uint32_t need = tb + (cnt == 0 ? 16 : 0);
+      if (p + need > bs - tail)
+        break;
+      const uint8_t *src = bc_data(bufs[i]);
+      uint32_t flags = cnt ? JBD2_TAG_SAME_UUID : 0;
+      memcpy(j->tmp, src, bs);
+      if (be32(j->tmp) == JBD2_MAGIC) {
+        memset(j->tmp, 0, 4);
+        flags |= JBD2_TAG_ESCAPE;
+      }
+      uint32_t blk = (uint32_t)bc_block_no(bufs[i]);
+      uint32_t c = 0;
+      if (j->v3) {
+        c = ext4_crc32c(j->seed, seqb, 4);
+        c = ext4_crc32c(c, j->tmp, bs);
+        put_be32(d + p, blk);
+        put_be32(d + p + 4, flags);
+        put_be32(d + p + 8, 0);
+        put_be32(d + p + 12, c);
+      } else {
+        put_be32(d + p, blk);
+        put_be16(d + p + 4, 0);
+        put_be16(d + p + 6, (uint16_t)flags);
+        if (tb >= 12)
+          put_be32(d + p + 8, 0);
+      }
+      if (jnl_wr(j, idx, j->tmp) != 0)
+        return -EIO;
+      idx = jnl_next(j, idx);
+      last_p = p;
+      p += tb;
+      if (cnt == 0) {
+        memcpy(d + p, j->uuid, 16);
+        p += 16;
+      }
+      cnt++;
+      i++;
+    }
+    if (j->v3) {
+      uint32_t f = be32(d + last_p + 4) | JBD2_TAG_LAST;
+      put_be32(d + last_p + 4, f);
+      put_be32(d + bs - 4, 0);
+      put_be32(d + bs - 4, ext4_crc32c(j->seed, d, bs));
+    } else {
+      uint16_t f = be16(d + last_p + 6) | JBD2_TAG_LAST;
+      put_be16(d + last_p + 6, f);
+    }
+    if (jnl_wr(j, didx, d) != 0)
+      return -EIO;
+  }
+  if (bdev_flush(fs->bdev) != 0) // descriptores y datos antes que el commit
+    return -EIO;
+  uint8_t *cb = j->desc;
+  memset(cb, 0, bs);
+  put_be32(cb, JBD2_MAGIC);
+  put_be32(cb + 4, JBD2_COMMIT);
+  put_be32(cb + 8, seq);
+  uint64_t now = rtc_get_epoch();
+  put_be32(cb + 48, (uint32_t)(now >> 32));
+  put_be32(cb + 52, (uint32_t)now);
+  if (j->v3)
+    put_be32(cb + 16, ext4_crc32c(j->seed, cb, bs));
+  if (jnl_wr(j, idx, cb) != 0 || bdev_flush(fs->bdev) != 0)
+    return -EIO;
+  if (jnl_write_sb(j, j->first, seq) != 0 || bdev_flush(fs->bdev) != 0)
+    return -EIO;
+  return 0;
+}
+
+// Checkpoint hecho: el journal vuelve a estar vacío.
+static void jnl_done(void *priv) {
+  ext2_jnl_t *j = priv;
+  j->seq++;
+  if (jnl_write_sb(j, 0, j->seq) == 0)
+    bdev_flush(j->fs->bdev);
+}
+
+static int ext2_jnl_open(ext2_fs_t *fs) {
+  if (fs->jn)
+    return 0;
+  jrn_t jr;
+  uint32_t feat = 0;
+  ext2_jnl_t *j = kmalloc(sizeof(*j));
+  if (!j)
+    return -ENOMEM;
+  memset(j, 0, sizeof(*j));
+  int rc = jnl_read_sb(fs, &jr, &feat, j->uuid);
+  if (rc != 0 || jr.start != 0) {
+    kfree(j);
+    return rc ? rc : -EBUSY; // con start != 0 hay que reproducirlo antes
+  }
+  j->fs = fs;
+  j->maxlen = jr.maxlen;
+  j->first = jr.first;
+  j->seq = jr.seq;
+  j->v3 = (feat & JBD2_INC_CSUM_V3) != 0;
+  j->tag_bytes = j->v3 ? 16u : ((feat & JBD2_INC_64BIT) ? 12u : 8u);
+  j->seed = ext4_crc32c(~0u, j->uuid, 16);
+  j->map = kmalloc((size_t)j->maxlen * 4);
+  j->jsb = kmalloc(fs->bs);
+  j->desc = kmalloc(fs->bs);
+  j->tmp = kmalloc(fs->bs);
+  if (!j->map || !j->jsb || !j->desc || !j->tmp) {
+    rc = -ENOMEM;
+    goto fail;
+  }
+  for (uint32_t k = 0; k < j->maxlen; k++) {
+    uint32_t pb;
+    if (jrn_pblk(&jr, k, &pb) != 0) {
+      rc = -EIO;
+      goto fail;
+    }
+    j->map[k] = pb;
+  }
+  {
+    bc_buf_t *h = bc_get(fs->bdev, j->map[0], fs->bs);
+    if (!h) {
+      rc = -EIO;
+      goto fail;
+    }
+    memcpy(j->jsb, bc_data(h), fs->bs);
+    bc_put(h);
+  }
+  // Una transacción debe caber entera (descriptores + bloques + commit).
+  uint32_t room = j->maxlen - j->first - 2;
+  uint32_t per_desc = (fs->bs - 12 - (j->v3 ? 4 : 0) - 16) / j->tag_bytes;
+  if (per_desc == 0) {
+    rc = -EINVAL;
+    goto fail;
+  }
+  j->cap = (uint32_t)((uint64_t)room * per_desc / (per_desc + 1));
+  if (j->cap > 1024)
+    j->cap = 1024;
+  if (j->cap < 8) {
+    rc = -EINVAL;
+    goto fail;
+  }
+  fs->jn = j;
+  bc_set_journal(fs->bdev, jnl_commit, jnl_done, j, j->cap);
+  LOG_INFO("[EXT2] %s: escrituras por el journal (%u bloques, transacciones de hasta %u)",
+           fs->bdev->name, j->maxlen, j->cap);
+  return 0;
+fail:
+  kfree(j->map);
+  kfree(j->jsb);
+  kfree(j->desc);
+  kfree(j->tmp);
+  kfree(j);
+  return rc;
+}
+
+static void ext2_jnl_close(ext2_fs_t *fs) {
+  ext2_jnl_t *j = fs->jn;
+  if (!j)
+    return;
+  bc_set_journal(fs->bdev, NULL, NULL, NULL, 0);
+  fs->jn = NULL;
+  kfree(j->map);
+  kfree(j->jsb);
+  kfree(j->desc);
+  kfree(j->tmp);
+  kfree(j);
 }
 
 int ext2_mount_bdev_rw(const char *bdev_name, const char *mount_path, int rw) {

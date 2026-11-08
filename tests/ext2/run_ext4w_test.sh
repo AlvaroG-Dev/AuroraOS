@@ -32,6 +32,6 @@ bash scripts/qemu-boot-test.sh -t "${T:-600}" 'sleep 30' \
  'umount /data; echo @@UMOUNT rc=$?; echo @@DONE; power off' >/dev/null 2>&1
 tr -d '\r' < $LOG | grep -a "@@\|\[EXT2\]" | grep -av "bash -c" | cut -c1-160
 echo "-- host:"
-e2fsck -fn $IMG 2>&1 | tail -6; echo "fsck_rc=${PIPESTATUS[0]}"
+dumpe2fs -h $IMG 2>/dev/null | grep -a "Journal sequence\|Journal start\|^Filesystem features\|Filesystem state"; e2fsck -fn $IMG 2>&1 | tail -6; echo "fsck_rc=${PIPESTATUS[0]}"
 for f in fragw frag gone big2 dir/nuevo ufile deep; do printf '%s ' $f; debugfs -R "cat $f" $IMG 2>/dev/null | sha256sum | cut -c1-64; done
 debugfs -R "ls n/a/b" $IMG 2>/dev/null | wc -w
