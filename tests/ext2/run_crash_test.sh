@@ -20,7 +20,7 @@ if [ ! -f $BASE ] || [ -n "${REBASE:-}" ]; then
   [ -n "${JCSUM:-}" ] && printf 'jo -c\njc\n' | debugfs -w -f - $BASE >/dev/null 2>&1
   (cd $W/tree/stable && find . -type f -exec sha256sum {} \; | LC_ALL=C sort -k2) > $W/stable.sha
 fi
-export WITH_NVIDIA=${WITH_NVIDIA:-0}
+export WITH_NVIDIA=${WITH_NVIDIA:-0} QEMU_MEM=${QEMU_MEM:-4G}
 cp tests/ext2/${LOADFILE:-crash_load.sh} sysroot/system/crash_load.sh
 trap 'rm -f sysroot/system/crash_load.sh' EXIT
 LOAD='bash /system/crash_load.sh'
