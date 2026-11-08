@@ -528,6 +528,7 @@ static inline struct net_device *alloc_netdev_dummy(int sizeof_priv) { return lk
 #define netdev_hw_addr_list_count(l) ((l)->count)
 #define netdev_hw_addr_list_for_each(ha, l) list_for_each_entry(ha, &(l)->list, list)
 void lkpi_netif_wifi_link(struct net_device *dev, bool up);
+int lkpi_netif_wifi_attach(struct net_device *dev);
 static inline struct sk_buff *napi_get_frags(struct napi_struct *napi) { return NULL; }
 static inline gro_result_t napi_gro_frags(struct napi_struct *napi) { return GRO_DROP; }
 static inline void napi_free_frags(struct napi_struct *napi) { }
