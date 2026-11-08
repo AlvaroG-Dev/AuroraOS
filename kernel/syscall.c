@@ -8516,7 +8516,7 @@ uint64_t syscall_handler_c(registers_t *regs) {
     LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld", (unsigned long)num,
               (void *)arg1, (unsigned long)arg2, (long)ret);
   } else if (!boring_enoent && !expected_would_block && (int64_t)ret < 0 &&
-             (int64_t)ret > -4096) {
+             (int64_t)ret > -4096 && (int64_t)ret != -4 /* EINTR: ruido */) {
     LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
   }
 
