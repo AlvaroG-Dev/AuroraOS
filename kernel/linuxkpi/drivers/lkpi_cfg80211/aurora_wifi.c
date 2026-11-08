@@ -20,6 +20,7 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
+#include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/rtnetlink.h>
@@ -62,6 +63,23 @@ static struct {
 	char *snap;
 	size_t snap_len;
 } aw;
+
+/* rtnl con tope de tiempo: si otro hilo lo retiene (p. ej. un driver colgado) el
+ * comando devuelve -EBUSY y deja en el log quien lo tiene, en vez de colgar al usuario. */
+static int aw_rtnl_lock(void)
+{
+	int i, pid;
+	void *ra;
+
+	for (i = 0; i < 80; i++) {
+		if (rtnl_trylock())
+			return 0;
+		msleep(50);
+	}
+	lkpi_rtnl_owner(&pid, &ra);
+	pr_warn("aurora-wifi: rtnl ocupado >4 s (dueno pid=%d desde %pS)\n", pid, ra);
+	return -EBUSY;
+}
 
 static void aw_fail(const char *why)
 {
@@ -199,7 +217,8 @@ static int aw_scan(void)
 	int i, n_channels, err;
 	enum nl80211_band band;
 
-	rtnl_lock();
+	if (aw_rtnl_lock())
+		return -EBUSY;
 	rdev = aw_find_iface(&dev);
 	if (!rdev) {
 		rtnl_unlock();
@@ -255,7 +274,9 @@ static int aw_scan(void)
 			creq->req.rates[i] = (1 << wiphy->bands[i]->n_bitrates) - 1;
 	eth_broadcast_addr(creq->req.bssid);
 	rdev->scan_req = creq;
+	pr_info("aurora-wifi: scan en %s, %d canales\n", dev->name, creq->req.n_channels);
 	err = rdev_scan(rdev, creq);
+	pr_info("aurora-wifi: scan: rdev_scan=%d\n", err);
 	if (err) {
 		rdev->scan_req = NULL;
 		kfree(creq);
@@ -292,7 +313,8 @@ static int aw_connect(const char *ssid, size_t ssid_len, const char *pass)
 		return -EINVAL;
 
 	pr_info("aurora-wifi: connect '%.*s'\n", (int)ssid_len, ssid);
-	rtnl_lock();
+	if (aw_rtnl_lock())
+		return -EBUSY;
 	rdev = aw_find_iface(&dev);
 	if (!rdev) {
 		rtnl_unlock();
@@ -402,7 +424,8 @@ static int aw_disconnect(void)
 	struct net_device *dev;
 	int err = 0;
 
-	rtnl_lock();
+	if (aw_rtnl_lock())
+		return -EBUSY;
 	rdev = aw_find_iface(&dev);
 	if (!rdev) {
 		rtnl_unlock();
@@ -648,7 +671,10 @@ static void aw_snapshot(void)
 	char *b = aw.snap;
 	enum aw_state st;
 
-	rtnl_lock();
+	if (aw_rtnl_lock()) {
+		aw.snap_len = scnprintf(aw.snap, SNAP_MAX, "state busy\niface none\n");
+		return;
+	}
 	mutex_lock(&aw.lock);
 	rdev = aw_find_iface(&dev);
 	st = aw.state;

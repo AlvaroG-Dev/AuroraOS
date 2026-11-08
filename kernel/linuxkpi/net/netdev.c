@@ -266,8 +266,27 @@ EXPORT_SYMBOL(ethtool_op_get_ts_info);
 /* ----------------------------------------------------------- net_device */
 
 static DEFINE_MUTEX(lkpi_rtnl);
-void rtnl_lock(void) { mutex_lock(&lkpi_rtnl); }
-void rtnl_unlock(void) { mutex_unlock(&lkpi_rtnl); }
+/* Dueno del rtnl (diagnostico de cuelgues: quien lo tiene y desde donde). */
+static void *lkpi_rtnl_ra;
+static int lkpi_rtnl_pid;
+void rtnl_lock(void)
+{
+	mutex_lock(&lkpi_rtnl);
+	lkpi_rtnl_ra = __builtin_return_address(0);
+	lkpi_rtnl_pid = current->pid;
+}
+void rtnl_unlock(void) { lkpi_rtnl_ra = NULL; mutex_unlock(&lkpi_rtnl); }
+int rtnl_trylock(void)
+{
+	if (!mutex_trylock(&lkpi_rtnl))
+		return 0;
+	lkpi_rtnl_ra = __builtin_return_address(0);
+	lkpi_rtnl_pid = current->pid;
+	return 1;
+}
+EXPORT_SYMBOL(rtnl_trylock);
+void lkpi_rtnl_owner(int *pid, void **ra) { *pid = lkpi_rtnl_pid; *ra = lkpi_rtnl_ra; }
+EXPORT_SYMBOL(lkpi_rtnl_owner);
 int rtnl_is_locked(void) { return mutex_is_locked(&lkpi_rtnl); }
 EXPORT_SYMBOL(rtnl_lock);
 EXPORT_SYMBOL(rtnl_unlock);
