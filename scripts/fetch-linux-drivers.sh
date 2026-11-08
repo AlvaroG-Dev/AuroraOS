@@ -73,17 +73,17 @@ fi
 LTB="linux-$LINUX_VERSION.tar.xz"
 fetch "https://cdn.kernel.org/pub/linux/kernel/v${LINUX_SERIES%%.*}.x/$LTB" "$DL/$LTB"
 if [ ! -f "$OUT/linux/.aurora-version" ] ||
-   [ "$(cat "$OUT/linux/.aurora-version")" != "$LINUX_VERSION full=$FULL virtio=1 dmabuf=1 video=1" ]; then
+   [ "$(cat "$OUT/linux/.aurora-version")" != "$LINUX_VERSION full=$FULL virtio=1 dmabuf=1 video=1 net=3" ]; then
     rm -rf "$OUT/linux"; mkdir -p "$OUT/linux"
     if [ "$FULL" = 1 ]; then
         tar -xJf "$DL/$LTB" -C "$OUT/linux" --strip-components=1
     else
         P="linux-$LINUX_VERSION"
         tar -xJf "$DL/$LTB" -C "$OUT/linux" --strip-components=1 \
-            "$P/COPYING" "$P/LICENSES" "$P/Makefile" "$P/drivers/gpu" "$P/drivers/virtio" "$P/drivers/dma-buf" "$P/drivers/video" \
+            "$P/COPYING" "$P/LICENSES" "$P/Makefile" "$P/drivers/gpu" "$P/drivers/virtio" "$P/drivers/dma-buf" "$P/drivers/video" "$P/drivers/net/ethernet/realtek" "$P/drivers/net/ethernet/intel/e1000e" "$P/drivers/net/ethernet/intel/igc" "$P/drivers/net/ethernet/intel/e1000" "$P/drivers/net/ethernet/intel/igb" "$P/drivers/net/ethernet/broadcom/tg3.c" "$P/drivers/net/ethernet/broadcom/tg3.h" "$P/drivers/net/ethernet/atheros/alx" "$P/drivers/net/mii.c" "$P/drivers/net/virtio_net.c" "$P/drivers/net/wireless/intel/iwlwifi" "$P/net/wireless" "$P/net/mac80211" \
             "$P/include" "$P/arch/x86/include" "$P/scripts"
     fi
-    echo "$LINUX_VERSION full=$FULL virtio=1 dmabuf=1 video=1" > "$OUT/linux/.aurora-version"
+    echo "$LINUX_VERSION full=$FULL virtio=1 dmabuf=1 video=1 net=3" > "$OUT/linux/.aurora-version"
 fi
 echo "OK: Linux $LINUX_VERSION en $OUT/linux"
 

@@ -1679,6 +1679,10 @@ void process_exit(process_t *proc, int exit_code) {
 
   signalfd_cleanup(proc);
   ptimer_exit(proc->pid);
+  {
+    extern void posix_lock_release_pid(uint32_t pid);
+    posix_lock_release_pid(proc->pid); // [fcntl POSIX locks]
+  }
 
   process_clear_envp(proc);
   process_clear_argv(proc);

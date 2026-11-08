@@ -86,4 +86,7 @@ void lkpi_free_percpu(void __percpu *p);
 	((typeof(type) __percpu *)lkpi_alloc_percpu(sizeof(type), __alignof__(type), gfp))
 #define free_percpu(p) lkpi_free_percpu(p)
 
+#ifndef alloc_percpu_gfp
+#define alloc_percpu_gfp(type, gfp) alloc_percpu(type)
+#endif
 #endif

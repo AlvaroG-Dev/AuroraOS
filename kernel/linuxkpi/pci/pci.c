@@ -449,6 +449,9 @@ static struct pci_dev *lkpi_pci_dev_create(u8 bus, u8 slot, u8 func)
 	pci_read_config_byte(pdev, PCI_INTERRUPT_LINE, &line);
 	/* INTx: la linea que dejo el firmware, si es una IRQ del IOAPIC (1..15). */
 	pdev->irq = (pdev->pin && line > 0 && line < 16) ? line : 0;
+	if (pdev->pin && !pdev->irq)
+		pr_info("PCI %02x:%02x.%d: INTx sin linea utilizable (pin=%u line=0x%02x)\n",
+			bus, slot, func, pdev->pin, line);
 	pdev->msi_cap = pci_find_capability(pdev, PCI_CAP_ID_MSI);
 	pdev->msix_cap = pci_find_capability(pdev, PCI_CAP_ID_MSIX);
 	pdev->pm_cap = pci_find_capability(pdev, PCI_CAP_ID_PM);

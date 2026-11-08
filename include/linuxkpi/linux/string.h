@@ -188,4 +188,6 @@ static inline bool mem_is_zero(const void *s, size_t n)
 	return true;
 }
 
+static inline void *kvmemdup(const void *src, size_t len, gfp_t gfp) { return kmemdup(src, len, gfp); }
+#define request_module_nowait(...) (0)
 #endif

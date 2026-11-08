@@ -104,6 +104,10 @@ uint32_t theme_generation(void); /* sube con cada cambio de modo */
 // --- Barra de menús: transparente (Tahoe). Solo un velo muy tenue arriba para
 // que el texto blanco se lea sobre fondos claros. ---
 #define AURORA_MENUBAR_H 28
+
+/* Modo quiosco (cmdline aur.kiosk=1): instalador a pantalla completa, sin Dock
+ * ni barra de menus y con las ventanas sin decoracion y centradas. */
+int aurora_kiosk(void);
 #define AURORA_MENUBAR_SCRIM (g_theme->menubar_scrim)
 #define AURORA_MENUBAR_TEXT_SHADOW (g_theme->menubar_text_shadow)
 #define AURORA_MENUBAR_PILL (g_theme->menubar_pill)

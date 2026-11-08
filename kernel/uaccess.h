@@ -37,6 +37,7 @@
 #define ENOTTY 25
 #define EFBIG 27
 #define ENOSPC 28
+#define ENOLCK 37
 #define ESPIPE 29
 #define EROFS 30
 #define EMLINK 31

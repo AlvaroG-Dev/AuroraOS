@@ -49,4 +49,7 @@ unsigned int lkpi_hardirq_count(void);
 #define migrate_disable() preempt_disable()
 #define migrate_enable() preempt_enable()
 
+#ifndef softirq_count
+#define softirq_count() 0
+#endif
 #endif

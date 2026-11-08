@@ -75,7 +75,9 @@ void dock_theme_changed(void) {
   D.force = 1;
 }
 
-int dock_reserved_height(void) { return DOCK_HEIGHT + DOCK_MARGIN_BOTTOM * 2; }
+int dock_reserved_height(void) {
+  return aurora_kiosk() ? 0 : DOCK_HEIGHT + DOCK_MARGIN_BOTTOM * 2;
+}
 
 rect_t dock_get_panel_rect(void) { return D.panel; }
 rect_t dock_get_damage_rect(void) { return D.damage; }
@@ -358,7 +360,7 @@ int dock_take_damage(rect_t *out) {
 }
 
 taskbar_item_t *dock_hit_test(int x, int y) {
-  if (D.n == 0)
+  if (D.n == 0 || aurora_kiosk())
     return NULL;
   for (int i = 0; i < D.n; i++) {
     rect_t r = D.slots[i].r;

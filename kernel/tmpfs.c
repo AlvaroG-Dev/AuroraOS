@@ -1338,7 +1338,15 @@ void tmpfs_init(void) {
   // ---------------------------------------------------------------------
   // [3] /var + subdirs
   // ---------------------------------------------------------------------
-  void *var = tmpfs_new(16 * 1024 * 1024);
+  // [apt] /var = 1/4 de la RAM (las paginas se piden al usarlas), entre 64 MB y
+  // 1 GB. Con 16 MB fijos `apt-get update` fallaba con ENOSPC (write 28):
+  // /var/lib/apt/lists y /var/cache/apt/*.bin de Ubuntu suman cientos de MB.
+  uint64_t var_mb = (pmm_total_usable_pages() * 4096ULL / 4) >> 20;
+  if (var_mb < 64)
+    var_mb = 64;
+  if (var_mb > 1024)
+    var_mb = 1024;
+  void *var = tmpfs_new((size_t)var_mb * 1024 * 1024);
   if (!var) {
     LOG_ERR("[TMPFS] sin memoria para /var");
   } else {
@@ -1350,7 +1358,7 @@ void tmpfs_init(void) {
       vfs_mkdir("/var/tmp", 01777);
       vfs_mkdir("/var/log", 0755);
       vfs_mkdir("/var/run", 0755);
-      LOG_INFO("[TMPFS] /var montado (16 MB)");
+      LOG_INFO("[TMPFS] /var montado (%llu MB)", (unsigned long long)var_mb);
     }
   }
 

@@ -22,6 +22,7 @@ static uint8_t *g_skb_bufs = NULL;
 static spinlock_t g_skb_lock;
 static skb_t *g_skb_free_list;
 static int g_skb_used;
+static unsigned long g_skb_exhausted;
 
 void skb_init(void) {
   spin_init(&g_skb_lock);
@@ -70,8 +71,16 @@ skb_t *skb_alloc(void) {
   }
   spin_unlock_irqrestore(&g_skb_lock, flags);
 
-  if (!s)
+  if (!s) {
+    static unsigned long last_warn;
+    unsigned long now = (unsigned long)__atomic_load_n(&g_skb_exhausted, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_skb_exhausted, 1, __ATOMIC_RELAXED);
+    (void)last_warn;
+    if ((now & 0x3FF) == 0)
+      LOG_WARN("[SKB] pool agotado (%d/%d en uso, %lu fallos)", SKB_POOL_SIZE,
+               SKB_POOL_SIZE, now + 1);
     return NULL;
+  }
 
   s->head = SKB_DEFAULT_HEADROOM;
   s->tail = s->head;

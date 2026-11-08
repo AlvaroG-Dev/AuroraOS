@@ -84,3 +84,7 @@ build/gcc-test/
 !pam.d
 !pam.d/**
 build/aurora-test.conf
+build/inst_vars.fd
+build/install-test.img
+build/installer-disk.img
+build/installer_vars.fd
