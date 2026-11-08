@@ -91,6 +91,11 @@ static int acpi_checksum_ok(const void *table, uint32_t length) {
   return sum == 0;
 }
 
+// Raiz de tablas guardada por acpi_init para acpi_find_table() (DMAR, etc.).
+static uint64_t *g_root_entries;
+static int g_root_count;
+static int g_root_is64;
+
 static acpi_sdt_header_t *find_table(uint64_t *root_entries, int count,
                                      int is_64bit, const char *signature) {
   for (int i = 0; i < count; i++) {
@@ -417,6 +422,9 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
             is_64bit ? "XSDT" : "RSDT");
 
   uint64_t *entries = (uint64_t *)((uint8_t *)root + sizeof(acpi_sdt_header_t));
+  g_root_entries = entries;
+  g_root_count = entries_count;
+  g_root_is64 = is_64bit;
   acpi_sdt_header_t *madt_hdr =
       find_table(entries, entries_count, is_64bit, "APIC");
   if (!madt_hdr) {
@@ -496,6 +504,17 @@ void acpi_init(const uint8_t rsdp_bytes[64]) {
 }
 
 const acpi_info_t *acpi_get_info(void) { return &g_acpi; }
+
+const void *acpi_find_table(const char sig[4], uint32_t *len) {
+  if (!g_root_entries)
+    return NULL;
+  const acpi_sdt_header_t *h = find_table(g_root_entries, g_root_count, g_root_is64, sig);
+  if (!h || h->length < sizeof(acpi_sdt_header_t) || !acpi_checksum_ok(h, h->length))
+    return NULL;
+  if (len)
+    *len = h->length;
+  return h;
+}
 
 void acpi_dump(void) {
   if (!g_acpi.valid) {

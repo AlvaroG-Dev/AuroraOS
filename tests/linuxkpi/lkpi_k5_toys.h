@@ -320,7 +320,9 @@ static int kt_vrng_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return -ENODEV;
 	}
 	iowrite32(1, v->common + VCOM_GFSELECT);
-	iowrite32(1, v->common + VCOM_GF);
+	/* VERSION_1 (bit 32) y, si se ofrece, ACCESS_PLATFORM (bit 33): con una
+	 * IOMMU el dispositivo debe traducir con ella (iommu_platform=on). */
+	iowrite32(1 | (feat & 2), v->common + VCOM_GF);
 	iowrite32(0, v->common + VCOM_GFSELECT);
 	iowrite32(0, v->common + VCOM_GF);
 	iowrite8(VSTAT_ACK | VSTAT_DRIVER | VSTAT_FEATURES_OK, v->common + VCOM_STATUS);

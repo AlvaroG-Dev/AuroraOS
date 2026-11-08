@@ -234,6 +234,9 @@ struct device {
 	bool lkpi_deferred;
 	char *lkpi_class_link;		/* class/<clase>/<nombre> */
 	char *lkpi_bus_link;		/* bus/<bus>/devices/<nombre> */
+	struct list_head lkpi_pm_node;	/* L9.3: orden de registro para suspend/resume */
+	void *lkpi_iommu_dom;		/* L9: dominio VT-d privado (kernel/iommu.c) o NULL */
+	bool lkpi_iommu_tried;		/* ya se pidio dominio (no se reintenta) */
 };
 
 #define kobj_to_dev(__kobj) container_of_const(__kobj, struct device, kobj)
@@ -751,8 +754,8 @@ __printf(3, 4) void lkpi_dev_printk(const char *level, const struct device *dev,
 
 
 static inline void device_link_remove(void *consumer, struct device *supplier) {}
-/* Sin IOMMU hasta L9 */
-static inline bool device_iommu_mapped(struct device *dev) { return false; }
+/* L9: verdadero si el dispositivo tiene un dominio VT-d privado (iommu=on). */
+static inline bool device_iommu_mapped(struct device *dev) { return dev->iommu_group != NULL; }
 /* dev_printk_emit (syslog estructurado): aqui un dev_printk plano (N2). */
 #define dev_printk_emit(lvl, dev, fmt, ...) ({ lkpi_dev_printk("", dev, fmt, ##__VA_ARGS__); (int)0; })
 #endif

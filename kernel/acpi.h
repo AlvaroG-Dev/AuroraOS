@@ -121,6 +121,10 @@ const uint8_t *acpi_get_ssdt(int i);
 
 void acpi_init(const uint8_t rsdp_bytes[64]);
 const acpi_info_t *acpi_get_info(void);
+
+// Tabla ACPI por firma ("DMAR", ...) con el checksum ya validado; NULL si no
+// existe. `len` recibe la longitud total.
+const void *acpi_find_table(const char sig[4], uint32_t *len);
 void acpi_dump(void);
 
 #endif

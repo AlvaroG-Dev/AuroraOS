@@ -99,6 +99,19 @@ struct page *lkpi_page_alloc_desc(unsigned long pfn);
 bool lkpi_is_direct_map(const void *addr);
 
 /* L4 (dma/): dma_buf. */
+struct lkpi_pm_stats {
+	unsigned int suspends, resumes, errors;
+};
+extern struct lkpi_pm_stats lkpi_pm_stats;
+int lkpi_pm_init(void);
+void lkpi_pm_exit(void);
+int lkpi_pm_suspend_devices(void);
+void lkpi_pm_resume_devices(void);
+int lkpi_pm_cycle_devices(void);
+void lkpi_pm_device_added(struct device *dev);
+void lkpi_pm_device_removed(struct device *dev);
+int lkpi_dma_dev_attach(struct device *dev);
+void lkpi_dma_dev_detach(struct device *dev);
 int lkpi_dmabuf_init(void);
 void lkpi_dmabuf_exit(void);
 /* L4 (misc/): i2c y backlight. */

@@ -6535,6 +6535,18 @@ static void test_lkpi_k9(void) { if (lkpi_boot_owned()) return; lkpi_unload_test
 REGISTER_TEST_FLAGS("linuxkpi: L6 shrinker, split_page, swap en RAM, mmu_notifier", test_lkpi_k9,
                     TEST_FLAG_BLOCKING);
 
+// L9.1: IOMMU / VT-d con edu (dominio privado, IOVA, permisos, fallos). Se
+// omite si Aurora no arranco con iommu=on y un intel-iommu en QEMU.
+static void test_lkpi_iommu(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_iommu")); }
+REGISTER_TEST_FLAGS("linuxkpi: L9 IOMMU/VT-d con edu (dominios, IOVA, permisos, fallos)", test_lkpi_iommu,
+                    TEST_FLAG_BLOCKING);
+
+// L9.2/L9.3: runtime PM (get/put, autosuspend, forbid/allow, D3hot de PCI) y
+// suspend/resume de dispositivos. El motor real exige lkpi.runtime_pm=on.
+static void test_lkpi_pm(void) { if (lkpi_boot_owned()) return; lkpi_unload_test(lkpi_load_test("lkpi_test_pm")); }
+REGISTER_TEST_FLAGS("linuxkpi: L9 runtime PM y suspend/resume de dispositivos", test_lkpi_pm,
+                    TEST_FLAG_BLOCKING);
+
 // L6: ttm, drm_buddy y gpu-sched (lkpi_ttm.kur sobre lkpi_drm.kur) con un driver
 // de memoria de dispositivo simulado: VRAM en RAM gestionada con drm_buddy, GTT,
 // evicion, swap a shmem y un motor de copia detrás de un drm_gpu_scheduler.

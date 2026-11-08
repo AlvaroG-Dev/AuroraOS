@@ -470,3 +470,10 @@ Detalle en `docs/LinuxKPI_Sesion_L7.md` §12. Decisiones:
 - **Fusionado:** `claude/l7-hito3-crocus-dmabuf` (Mesa crocus + linux-dmabuf + autodeteccion Intel, probado en la Portégé, HD 4600) y `claude/power-acpi` (`poweroff`/`reboot`/`halt`, confirmado por Alvaro). Ambos entran en `beautiful-newton` sin conflictos y de ahi a `main`. Documentacion de cada uno: arriba (hito 3) y `Plan_Power.md`.
 - **Ramas revisadas:** `power-acpi-apm-plan`, `fix-compositor-hang`, `project-thread-n05hn0` y `project-thread-v3dezm` ya estaban contenidas en `main`. **No se toca** `claude/project-thread-tuxtci` (NVIDIA N0, 4 commits propios).
 - **Verificacion:** `make` del kernel OK tras los merges. La regresion QEMU (`scripts/lkpi-regress.sh`) no se pudo ejecutar en el contenedor de la sesion (faltan las fuentes de Linux para `make image`); queda por pasar en la maquina de Alvaro.
+
+## L9: resultados (2026-11-08)
+
+- **Hecho:** IOMMU Intel VT-d (`kernel/iommu.c`: DMAR/DRHD/RMRR, pass-through por omisión, dominio privado solo para dispositivos que usan la API DMA de LinuxKPI, IOVA top-down, cuarentena por fallos), `pm_runtime` real y suspend/resume por fases (`kernel/linuxkpi/base/pm.c`), D3hot/reset por PM en PCI y TDR genérico (`linux/lkpi_tdr.h`). Detalle en `docs/LinuxKPI_Sesion_L9.md`.
+- **Por omisión apagado:** `iommu=on` y `lkpi.runtime_pm=on` en la línea de comandos. Sin ellos el comportamiento es el de antes (la i915 de la Portégé no cambia).
+- **Probado:** solo QEMU (212/213 con IOMMU, igual que la base). **Sin probar en hardware real.**
+- **Pendiente:** límites de memoria por cliente, entrada real a S3, IR/ATS/PASID, conectar el TDR a i915/NVIDIA, probar en la Portégé (`iommu=on iommu.igfx=off` primero). L8 sigue sin empezar.

@@ -104,6 +104,7 @@ _Static_assert(sizeof(wait_queue_t) == 32 && offsetof(wait_queue_t, lock) == 0,
 #include "apic.h"
 #include "idt.h"
 #include "irq_threaded.h"
+#include "iommu.h"
 #include "sysfs_dyn.h"
 KEXPORT_SYMBOL(bus_del_driver);
 KEXPORT_SYMBOL(device_unregister);
@@ -267,3 +268,17 @@ KEXPORT_SYMBOL(power_unregister_notifier);
 // Diagnostico NVIDIA (fs/file.c de LinuxKPI): `strace=NOMBRE` en /dev/kmsg.
 extern char g_strace_comm[32];
 KEXPORT_SYMBOL(g_strace_comm);
+
+// L9: IOMMU / VT-d
+KEXPORT_SYMBOL(iommu_active);
+KEXPORT_SYMBOL(iommu_domain_get);
+KEXPORT_SYMBOL(iommu_domain_find);
+KEXPORT_SYMBOL(iommu_domain_release);
+KEXPORT_SYMBOL(iommu_dma_map);
+KEXPORT_SYMBOL(iommu_dma_unmap);
+KEXPORT_SYMBOL(iommu_iova_to_phys);
+KEXPORT_SYMBOL(iommu_domain_get_stats);
+KEXPORT_SYMBOL(iommu_get_stats);
+KEXPORT_SYMBOL(iommu_fault_poll);
+KEXPORT_SYMBOL(iommu_suspend);
+KEXPORT_SYMBOL(iommu_resume);

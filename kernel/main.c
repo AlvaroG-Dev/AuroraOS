@@ -18,6 +18,7 @@
 #include "atapi.h"
 #include "aur_bus.h"
 #include "lkpi_boot.h"
+#include "iommu.h"
 #include "block.h"
 #include "block_proxy.h"
 #include "gpu_proxy.h"
@@ -1113,6 +1114,9 @@ static void system_init_task(void) {
 
   // Drivers de Linux (LinuxKPI) pedidos con `lkpi.load=`: despues del
   // compositor, porque su scanout abre ventanas, y antes del userland.
+  // IOMMU (VT-d) si se pidio con iommu=on: antes de cargar drivers que hagan
+  // DMA, para que sus mapeos ya salgan por las tablas del dominio.
+  iommu_init();
   lkpi_boot_load();
 
   // 11. Tests en kthread paralelo. No bloquea: /usr/bin/init arranca

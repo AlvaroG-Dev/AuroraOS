@@ -22,11 +22,89 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/pci.h>
+#include <linux/iommu.h>
 #include "../aurora.h"
 #include "../lkpi_internal.h"
 
 struct lkpi_dma_stats lkpi_dma_stats;
 EXPORT_SYMBOL(lkpi_dma_stats);
+
+/* ----------------------------------------------------------- IOMMU (L9)
+ *
+ * Con `iommu=on` y VT-d, un dispositivo PCI que se enlaza a un driver recibe
+ * un dominio privado (dma_configure del bus). La direccion de bus que ve el
+ * dispositivo es entonces una IOVA del dominio, no la fisica: el dispositivo
+ * solo alcanza lo que el driver ha mapeado. El asignador de IOVA respeta la
+ * mascara DMA del dispositivo, asi que nunca hace falta bounce. Sin dominio
+ * (iommu apagado, dispositivo no PCI o sin DRHD) todo sigue como antes.
+ */
+struct iommu_domain lkpi_iommu_dummy_domain = { .type = IOMMU_DOMAIN_DMA };
+EXPORT_SYMBOL(lkpi_iommu_dummy_domain);
+static int lkpi_iommu_group_marker;
+
+static inline struct aurora_iommu_domain *lkpi_dev_dom(struct device *dev)
+{
+	return dev ? dev->lkpi_iommu_dom : NULL;
+}
+
+int lkpi_dma_dev_attach(struct device *dev)
+{
+	struct pci_dev *pdev;
+	struct aurora_iommu_domain *dom;
+
+	if (dev->lkpi_iommu_dom || !dev_is_pci(dev) || !aurora_iommu_active())
+		return 0;
+	pdev = to_pci_dev(dev);
+	dom = aurora_iommu_domain_get(PCI_DEVID(pdev->bus->number, pdev->devfn));
+	if (dom) {
+		dev->lkpi_iommu_dom = dom;
+		dev->iommu_group = (struct iommu_group *)&lkpi_iommu_group_marker;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(lkpi_dma_dev_attach);
+
+void lkpi_dma_dev_detach(struct device *dev)
+{
+	struct pci_dev *pdev;
+	struct aurora_iommu_domain_stats st;
+
+	if (!dev->lkpi_iommu_dom)
+		return;
+	pdev = to_pci_dev(dev);
+	aurora_iommu_domain_get_stats(dev->lkpi_iommu_dom, &st);
+	if (st.pages_live)
+		dev_warn(dev, "IOMMU: el driver se va con %llu paginas aun mapeadas\n",
+			 (unsigned long long)st.pages_live);
+	if (st.faults)
+		dev_info(dev, "IOMMU: %llu fallos de traduccion durante la vida del driver\n",
+			 (unsigned long long)st.faults);
+	dev->lkpi_iommu_dom = NULL;
+	dev->iommu_group = NULL;
+	aurora_iommu_domain_release(PCI_DEVID(pdev->bus->number, pdev->devfn));
+}
+EXPORT_SYMBOL(lkpi_dma_dev_detach);
+
+static unsigned lkpi_iommu_prot(enum dma_data_direction dir)
+{
+	switch (dir) {
+	case DMA_TO_DEVICE:
+		return AURORA_IOMMU_R;
+	case DMA_FROM_DEVICE:
+		return AURORA_IOMMU_W;
+	default:
+		return AURORA_IOMMU_R | AURORA_IOMMU_W;
+	}
+}
+
+/* IOVA -> fisica para un `dma_addr` obtenido de este dispositivo. */
+static phys_addr_t lkpi_dma_to_phys(struct device *dev, dma_addr_t addr)
+{
+	struct aurora_iommu_domain *dom = lkpi_dev_dom(dev);
+
+	return dom ? aurora_iommu_iova_to_phys(dom, addr) : addr;
+}
 
 static inline bool lkpi_is_vmap_addr(const void *p)
 {
@@ -80,6 +158,16 @@ void *lkpi_dma_alloc_attrs(struct device *dev, size_t size, dma_addr_t *dma_hand
 	}
 	memset((void *)(AURORA_PHYS_MAP_BASE + phys), 0, count << PAGE_SHIFT);
 	*dma_handle = phys;
+	if (lkpi_dev_dom(dev)) {
+		u64 iova = aurora_iommu_dma_map(lkpi_dev_dom(dev), phys, count << PAGE_SHIFT,
+						AURORA_IOMMU_R | AURORA_IOMMU_W, mask);
+
+		if (iova == AURORA_IOMMU_ERR) {
+			aurora_pmm_free_pages(phys, count);
+			return NULL;
+		}
+		*dma_handle = iova;
+	}
 	if (attrs & DMA_ATTR_WRITE_COMBINE) {
 		u64 vaddr = aurora_vmap_area_alloc(count << PAGE_SHIFT);
 
@@ -98,6 +186,8 @@ void *lkpi_dma_alloc_attrs(struct device *dev, size_t size, dma_addr_t *dma_hand
 	va = (void *)(AURORA_PHYS_MAP_BASE + phys);
 	return va;
 err:
+	if (lkpi_dev_dom(dev))
+		aurora_iommu_dma_unmap(lkpi_dev_dom(dev), *dma_handle, count << PAGE_SHIFT);
 	aurora_pmm_free_pages(phys, count);
 	return NULL;
 }
@@ -106,13 +196,20 @@ EXPORT_SYMBOL(lkpi_dma_alloc_attrs);
 void lkpi_dma_free_attrs(struct device *dev, size_t size, void *cpu_addr, dma_addr_t dma_handle,
 			 unsigned long attrs)
 {
+	phys_addr_t phys = dma_handle;
+	u64 count = 1ULL << get_order(size);
+
 	if (!cpu_addr)
 		return;
+	if (lkpi_dev_dom(dev)) {
+		phys = aurora_iommu_iova_to_phys(lkpi_dev_dom(dev), dma_handle);
+		aurora_iommu_dma_unmap(lkpi_dev_dom(dev), dma_handle, count << PAGE_SHIFT);
+	}
 	if (lkpi_is_vmap_addr(cpu_addr))
 		aurora_vmap_area_free((u64)cpu_addr);
 	else
-		WARN_ON((u64)cpu_addr - AURORA_PHYS_MAP_BASE != dma_handle);
-	aurora_pmm_free_pages(dma_handle, 1ULL << get_order(size));
+		WARN_ON((u64)cpu_addr - AURORA_PHYS_MAP_BASE != phys);
+	aurora_pmm_free_pages(phys, count);
 }
 EXPORT_SYMBOL(lkpi_dma_free_attrs);
 
@@ -143,7 +240,8 @@ int lkpi_dma_mmap_attrs(struct device *dev, struct vm_area_struct *vma, void *cp
 		return -ENXIO;
 	if (attrs & DMA_ATTR_WRITE_COMBINE)
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	return remap_pfn_range(vma, vma->vm_start, (dma_addr >> PAGE_SHIFT) + off,
+	return remap_pfn_range(vma, vma->vm_start,
+			       (lkpi_dma_to_phys(dev, dma_addr) >> PAGE_SHIFT) + off,
 			       user_count << PAGE_SHIFT, vma->vm_page_prot);
 }
 EXPORT_SYMBOL(lkpi_dma_mmap_attrs);
@@ -154,7 +252,8 @@ int lkpi_dma_get_sgtable_attrs(struct device *dev, struct sg_table *sgt, void *c
 	int rc = sg_alloc_table(sgt, 1, GFP_KERNEL);
 
 	if (!rc)
-		sg_set_page(sgt->sgl, pfn_to_page(dma_addr >> PAGE_SHIFT), PAGE_ALIGN(size), 0);
+		sg_set_page(sgt->sgl, pfn_to_page(lkpi_dma_to_phys(dev, dma_addr) >> PAGE_SHIFT),
+			    PAGE_ALIGN(size), 0);
 	return rc;
 }
 EXPORT_SYMBOL(lkpi_dma_get_sgtable_attrs);
@@ -231,6 +330,11 @@ dma_addr_t lkpi_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 	if (WARN_ON_ONCE(!valid_dma_direction(dir)) || !size)
 		return DMA_MAPPING_ERROR;
 	atomic64_inc(&lkpi_dma_stats.maps);
+	if (lkpi_dev_dom(dev)) {
+		u64 iova = aurora_iommu_dma_map(lkpi_dev_dom(dev), phys, size, lkpi_iommu_prot(dir), mask);
+
+		return iova == AURORA_IOMMU_ERR ? DMA_MAPPING_ERROR : iova;
+	}
 	if (phys + size - 1 <= mask)
 		return phys;
 	return lkpi_bounce_map(dev, phys, size, dir, attrs, mask);
@@ -257,6 +361,12 @@ EXPORT_SYMBOL(lkpi_dma_map_single_attrs);
 dma_addr_t lkpi_dma_map_resource(struct device *dev, phys_addr_t phys_addr, size_t size,
 				 enum dma_data_direction dir, unsigned long attrs)
 {
+	if (lkpi_dev_dom(dev)) {
+		u64 iova = aurora_iommu_dma_map(lkpi_dev_dom(dev), phys_addr, size,
+						AURORA_IOMMU_R | AURORA_IOMMU_W, lkpi_dev_mask(dev));
+
+		return iova == AURORA_IOMMU_ERR ? DMA_MAPPING_ERROR : iova;
+	}
 	return phys_addr;	/* MMIO de otro dispositivo: sin bounce */
 }
 EXPORT_SYMBOL(lkpi_dma_map_resource);
@@ -267,6 +377,10 @@ void lkpi_dma_unmap_page_attrs(struct device *dev, dma_addr_t addr, size_t size,
 	struct lkpi_bounce *b;
 	unsigned long flags;
 
+	if (lkpi_dev_dom(dev)) {
+		aurora_iommu_dma_unmap(lkpi_dev_dom(dev), addr, size);
+		return;
+	}
 	spin_lock_irqsave(&lkpi_bounce_lock, flags);
 	b = lkpi_bounce_find(addr);
 	if (b)
@@ -306,6 +420,8 @@ static void lkpi_dma_sync(dma_addr_t addr, size_t size, enum dma_data_direction 
 void lkpi_dma_sync_single_for_cpu(struct device *dev, dma_addr_t addr, size_t size,
 				  enum dma_data_direction dir)
 {
+	if (lkpi_dev_dom(dev))
+		return;		/* sin bounce: x86 es coherente */
 	lkpi_dma_sync(addr, size, dir, true);
 }
 EXPORT_SYMBOL(lkpi_dma_sync_single_for_cpu);
@@ -313,6 +429,8 @@ EXPORT_SYMBOL(lkpi_dma_sync_single_for_cpu);
 void lkpi_dma_sync_single_for_device(struct device *dev, dma_addr_t addr, size_t size,
 				     enum dma_data_direction dir)
 {
+	if (lkpi_dev_dom(dev))
+		return;
 	lkpi_dma_sync(addr, size, dir, false);
 }
 EXPORT_SYMBOL(lkpi_dma_sync_single_for_device);
@@ -353,6 +471,8 @@ void lkpi_dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sgl, int n
 	struct scatterlist *sg;
 	int i;
 
+	if (lkpi_dev_dom(dev))
+		return;
 	for_each_sg(sgl, sg, nelems, i)
 		lkpi_dma_sync(sg->dma_address, sg_dma_len(sg), dir, true);
 }
@@ -364,6 +484,8 @@ void lkpi_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sgl, in
 	struct scatterlist *sg;
 	int i;
 
+	if (lkpi_dev_dom(dev))
+		return;
 	for_each_sg(sgl, sg, nelems, i)
 		lkpi_dma_sync(sg->dma_address, sg_dma_len(sg), dir, false);
 }

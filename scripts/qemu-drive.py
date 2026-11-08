@@ -61,7 +61,11 @@ q = subprocess.Popen([
     # Dispositivos PCI para las pruebas de LinuxKPI (L3): `edu` (MMIO, INTx,
     # MSI, DMA con mascara de 28 bits) y `virtio-rng-pci` (MSI-X, virtqueue).
     # Ningun driver de Aurora los reclama.
-    '-device', 'edu', '-device', 'virtio-rng-pci'] + a.extra)
+    '-device', 'edu',
+    # Con una IOMMU virtual, virtio solo traduce si se pide iommu_platform.
+    '-device', 'virtio-rng-pci' + (',disable-legacy=on,iommu_platform=on,ats=off'
+                                   if any('intel-iommu' in x for x in a.extra) else '')]
+    + a.extra)
 
 for _ in range(60):
     if os.path.exists('/tmp/qmon.sock'):

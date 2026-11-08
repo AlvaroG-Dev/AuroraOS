@@ -210,8 +210,11 @@ void lkpi_device_initialize(struct device *dev)
 	INIT_LIST_HEAD(&dev->lkpi_class_node);
 	INIT_LIST_HEAD(&dev->lkpi_children);
 	INIT_LIST_HEAD(&dev->lkpi_child_node);
+	INIT_LIST_HEAD(&dev->lkpi_pm_node);
 	dev->numa_node = -1;
 	dev->power.disable_depth = 1;
+	dev->power.runtime_auto = true;
+	dev->power.runtime_status = RPM_ACTIVE;
 	dev->can_match = false;
 	dev->dma_coherent = true;
 }
@@ -366,6 +369,7 @@ int lkpi_device_add(struct device *dev)
 	}
 	lkpi_bus_notify(dev, BUS_NOTIFY_ADD_DEVICE);
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
+	lkpi_pm_device_added(dev);
 	lkpi_bus_probe_device(dev);
 	put_device(dev);
 	return 0;
@@ -402,6 +406,7 @@ void lkpi_device_del(struct device *dev)
 		return;
 	}
 	lkpi_bus_notify(dev, BUS_NOTIFY_DEL_DEVICE);
+	lkpi_pm_device_removed(dev);
 	if (MAJOR(dev->devt)) {
 		lkpi_devnode_del(dev);
 		if (lkpi_devchar_kobj) {

@@ -428,4 +428,35 @@ void aurora_netif_unregister(void *handle) __asm__("lkpi_netif_unregister");
 int aurora_netif_rx(void *handle, const void *frame, size_t len) __asm__("lkpi_netif_rx");
 void aurora_netif_carrier(void *handle, int up) __asm__("lkpi_netif_carrier");
 
+
+/* iommu.h (L9): VT-d. IOMMU_ERR = ~0 */
+struct aurora_iommu_domain;
+bool aurora_iommu_active(void) __asm__("iommu_active");
+struct aurora_iommu_domain *aurora_iommu_domain_get(u16 bdf) __asm__("iommu_domain_get");
+struct aurora_iommu_domain *aurora_iommu_domain_find(u16 bdf) __asm__("iommu_domain_find");
+void aurora_iommu_domain_release(u16 bdf) __asm__("iommu_domain_release");
+u64 aurora_iommu_dma_map(struct aurora_iommu_domain *d, u64 phys, u64 size, unsigned prot, u64 mask)
+	__asm__("iommu_dma_map");
+void aurora_iommu_dma_unmap(struct aurora_iommu_domain *d, u64 iova, u64 size) __asm__("iommu_dma_unmap");
+u64 aurora_iommu_iova_to_phys(struct aurora_iommu_domain *d, u64 iova) __asm__("iommu_iova_to_phys");
+int aurora_iommu_fault_poll(void) __asm__("iommu_fault_poll");
+int aurora_iommu_suspend(void) __asm__("iommu_suspend");
+int aurora_iommu_resume(void) __asm__("iommu_resume");
+struct aurora_iommu_domain_stats {
+	u64 maps, unmaps, pages_live, faults, last_fault_iova;
+	u8 last_fault_reason;
+	u8 quarantined;
+	u16 bdf, did;
+};
+struct aurora_iommu_stats {
+	int units, domains;
+	u64 faults, unattributed_faults;
+};
+void aurora_iommu_domain_get_stats(const struct aurora_iommu_domain *d,
+				   struct aurora_iommu_domain_stats *o) __asm__("iommu_domain_get_stats");
+void aurora_iommu_get_stats(struct aurora_iommu_stats *o) __asm__("iommu_get_stats");
+#define AURORA_IOMMU_R 1u
+#define AURORA_IOMMU_W 2u
+#define AURORA_IOMMU_ERR (~0ULL)
+
 #endif

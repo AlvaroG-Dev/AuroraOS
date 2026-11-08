@@ -298,7 +298,8 @@ static void test_dma_edu(void)
 		msleep(10);
 	dma_unmap_single(&pdev->dev, d, EDU_DMA_SIZE, DMA_FROM_DEVICE);
 	KT_ASSERT(kt_check(buf, EDU_DMA_SIZE, 21), "edu: datos de vuelta por el bounce");
-	KT_EQ(atomic64_read(&lkpi_dma_stats.bounces), bounces + 2);
+	/* Con IOMMU el mapeo es por IOVA bajo la mascara: no hay rebote. */
+	KT_EQ(atomic64_read(&lkpi_dma_stats.bounces), bounces + (device_iommu_mapped(&pdev->dev) ? 0 : 2));
 out_pages:
 	while (n--)
 		__free_pages(pg[n], 9);

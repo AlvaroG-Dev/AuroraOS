@@ -63,9 +63,20 @@ struct dev_pm_info {
 	spinlock_t lock;
 	bool runtime_auto;
 	int runtime_status;
+	/* L9.2: pm_runtime real (kernel/linuxkpi/base/pm.c) */
+	bool use_autosuspend;
+	bool no_callbacks;
+	bool irq_safe;
+	int runtime_error;
+	unsigned int autosuspend_delay;	/* ms */
+	unsigned long last_busy;		/* jiffies */
+	unsigned int rpm_suspends, rpm_resumes;
+	void *rpm;				/* struct lkpi_rpm (perezoso) */
 };
 #define RPM_ACTIVE 0
+#define RPM_RESUMING 1
 #define RPM_SUSPENDED 2
+#define RPM_SUSPENDING 3
 
 struct dev_pm_domain {
 	struct dev_pm_ops ops;

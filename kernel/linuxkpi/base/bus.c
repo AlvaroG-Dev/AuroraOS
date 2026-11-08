@@ -138,9 +138,9 @@ static int lkpi_really_probe(struct device *dev, struct device_driver *drv)
 	return 1;
 
 fail:
-	if (dev->bus->dma_cleanup)
-		dev->bus->dma_cleanup(dev);
 	lkpi_devres_release_all(dev);
+	if (dev->bus->dma_cleanup)	/* despues de devres: dmam_* aun usa el dominio */
+		dev->bus->dma_cleanup(dev);
 	lkpi_driver_sysfs_remove(dev);
 	dev->driver = NULL;
 	dev_set_drvdata(dev, NULL);
@@ -271,9 +271,9 @@ void lkpi_device_release_driver(struct device *dev)
 			dev->bus->remove(dev);
 		else if (drv->remove)
 			drv->remove(dev);
+		lkpi_devres_release_all(dev);
 		if (dev->bus && dev->bus->dma_cleanup)
 			dev->bus->dma_cleanup(dev);
-		lkpi_devres_release_all(dev);
 		lkpi_driver_sysfs_remove(dev);
 		mutex_lock(&lkpi_dev_mutex);
 		list_del_init(&dev->lkpi_drv_node);

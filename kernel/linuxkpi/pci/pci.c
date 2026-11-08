@@ -17,6 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/pci.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -434,6 +435,11 @@ static struct pci_dev *lkpi_pci_dev_create(u8 bus, u8 slot, u8 func)
 	pdev->dev.parent = lkpi_pci_root;
 	dev_set_name(&pdev->dev, "0000:%02x:%02x.%d", bus, slot, func);
 	INIT_LIST_HEAD(&pdev->bus_list);
+	/* Como pci_pm_init de Linux: el dispositivo nace sin permiso para dormir
+	 * (power/control = on); el driver o el usuario lo conceden. */
+	pm_runtime_forbid(&pdev->dev);
+	pm_runtime_set_active(&pdev->dev);
+	pm_runtime_enable(&pdev->dev);
 
 	pdev->vendor = cfg16(pdev, PCI_VENDOR_ID);
 	pdev->device = cfg16(pdev, PCI_DEVICE_ID);
@@ -1157,14 +1163,38 @@ int lkpi_pcie_flr(struct pci_dev *dev)
 }
 EXPORT_SYMBOL(lkpi_pcie_flr);
 
+/*
+ * Reset por gestion de energia (D3hot -> D0), como pci_pm_reset de Linux:
+ * solo si el dispositivo tiene la capability PM y declara que D3hot->D0 hace
+ * un reset de software (bit NoSoftRst a 0).
+ */
+static int lkpi_pci_pm_reset(struct pci_dev *dev)
+{
+	u16 csr;
+
+	if (!dev->pm_cap)
+		return -ENOTTY;
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &csr);
+	if (csr & PCI_PM_CTRL_NO_SOFT_RESET)
+		return -ENOTTY;
+	pci_set_power_state(dev, PCI_D3hot);
+	pci_set_power_state(dev, PCI_D0);
+	return 0;
+}
+
 int lkpi_pci_reset_function_locked(struct pci_dev *dev)
 {
 	int rc;
 
-	if (!lkpi_pcie_has_flr(dev))
-		return -ENOTTY;		/* reset de bus o por PM: pendiente */
+	/* FLR primero; si no hay, reset por PM. Reset de bus: pendiente. */
+	if (lkpi_pcie_has_flr(dev)) {
+		pci_save_state(dev);
+		rc = lkpi_pcie_flr(dev);
+		pci_restore_state(dev);
+		return rc;
+	}
 	pci_save_state(dev);
-	rc = lkpi_pcie_flr(dev);
+	rc = lkpi_pci_pm_reset(dev);
 	pci_restore_state(dev);
 	return rc;
 }
@@ -1229,7 +1259,15 @@ static struct attribute *lkpi_pci_dev_attrs[] = {
 	&dev_attr_subsystem_vendor.attr, &dev_attr_subsystem_device.attr, &dev_attr_revision.attr,
 	&dev_attr_irq.attr, &dev_attr_enable.attr, NULL,
 };
-ATTRIBUTE_GROUPS(lkpi_pci_dev);
+static const struct attribute_group lkpi_pci_dev_group = {
+	.attrs = lkpi_pci_dev_attrs,
+};
+extern const struct attribute_group lkpi_power_attr_group;	/* base/pm.c: power/ */
+static const struct attribute_group *lkpi_pci_dev_groups[] = {
+	&lkpi_pci_dev_group,
+	&lkpi_power_attr_group,
+	NULL,
+};
 
 /* /sys/.../config: libdrm (drmParsePciDeviceInfo) saca de aqui vendor, device,
  * subsistema y revision; sin el, Mesa no puede elegir driver (crocus) y cae a swrast. */
@@ -1322,6 +1360,158 @@ static void lkpi_pci_bus_shutdown(struct device *dev)
 		pdev->driver->shutdown(pdev);
 }
 
+/* ------------------------------------------------ energia (L9.2 / L9.3) */
+
+/*
+ * Capa de PCI bajo el pm del driver, como pci_pm_ops de Linux: el driver
+ * guarda lo suyo y el bus guarda la config PCI y lleva el dispositivo a
+ * D3hot (y de vuelta a D0 con la config restaurada). Solo se toca lo que
+ * tiene un driver de LinuxKPI enlazado; el resto lo gestiona Aurora.
+ */
+static const struct dev_pm_ops *lkpi_pci_drv_pm(struct device *dev)
+{
+	return dev->driver ? dev->driver->pm : NULL;
+}
+
+static int lkpi_pci_pm_runtime_suspend(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+	int rc;
+
+	if (!dev->driver || !pm || !pm->runtime_suspend)
+		return -ENOSYS;		/* sin soporte del driver no se apaga */
+	pdev->state_saved = false;
+	rc = pm->runtime_suspend(dev);
+	if (rc)
+		return rc;
+	if (!pdev->state_saved)
+		pci_save_state(pdev);
+	pci_set_power_state(pdev, PCI_D3hot);
+	return 0;
+}
+
+static int lkpi_pci_pm_runtime_resume(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	pci_set_power_state(pdev, PCI_D0);
+	pci_restore_state(pdev);
+	return pm && pm->runtime_resume ? pm->runtime_resume(dev) : 0;
+}
+
+static int lkpi_pci_pm_runtime_idle(struct device *dev)
+{
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	return pm && pm->runtime_idle ? pm->runtime_idle(dev) : 0;
+}
+
+static int lkpi_pci_pm_prepare(struct device *dev)
+{
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	return pm && pm->prepare ? pm->prepare(dev) : 0;
+}
+
+static void lkpi_pci_pm_complete(struct device *dev)
+{
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	if (pm && pm->complete)
+		(pm->complete)(dev);
+}
+
+static int lkpi_pci_pm_suspend(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct pci_driver *drv = pdev->driver;
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	if (!drv)
+		return 0;
+	pdev->state_saved = false;
+	if (pm && pm->suspend)
+		return pm->suspend(dev);
+	if (drv->suspend)
+		return drv->suspend(pdev, PMSG_SUSPEND);
+	return 0;
+}
+
+static int lkpi_pci_pm_suspend_late(struct device *dev)
+{
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	return pm && pm->suspend_late ? pm->suspend_late(dev) : 0;
+}
+
+static int lkpi_pci_pm_suspend_noirq(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+	int rc = 0;
+
+	if (!pdev->driver)
+		return 0;
+	if (pm && pm->suspend_noirq)
+		rc = pm->suspend_noirq(dev);
+	if (rc)
+		return rc;
+	if (!pdev->state_saved)
+		pci_save_state(pdev);
+	pci_set_power_state(pdev, PCI_D3hot);
+	return 0;
+}
+
+static int lkpi_pci_pm_resume_noirq(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	if (!pdev->driver)
+		return 0;
+	pci_set_power_state(pdev, PCI_D0);
+	pci_restore_state(pdev);
+	return pm && pm->resume_noirq ? pm->resume_noirq(dev) : 0;
+}
+
+static int lkpi_pci_pm_resume_early(struct device *dev)
+{
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	return pm && pm->resume_early ? pm->resume_early(dev) : 0;
+}
+
+static int lkpi_pci_pm_resume(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct pci_driver *drv = pdev->driver;
+	const struct dev_pm_ops *pm = lkpi_pci_drv_pm(dev);
+
+	if (!drv)
+		return 0;
+	if (pm && pm->resume)
+		return pm->resume(dev);
+	if (drv->resume)
+		return drv->resume(pdev);
+	return 0;
+}
+
+static const struct dev_pm_ops lkpi_pci_pm_ops = {
+	.prepare = lkpi_pci_pm_prepare,
+	.complete = lkpi_pci_pm_complete,
+	.suspend = lkpi_pci_pm_suspend,
+	.resume = lkpi_pci_pm_resume,
+	.suspend_late = lkpi_pci_pm_suspend_late,
+	.resume_early = lkpi_pci_pm_resume_early,
+	.suspend_noirq = lkpi_pci_pm_suspend_noirq,
+	.resume_noirq = lkpi_pci_pm_resume_noirq,
+	.runtime_suspend = lkpi_pci_pm_runtime_suspend,
+	.runtime_resume = lkpi_pci_pm_runtime_resume,
+	.runtime_idle = lkpi_pci_pm_runtime_idle,
+};
+
 const struct bus_type lkpi_pci_bus_type = {
 	.name = "pci",
 	.dev_groups = lkpi_pci_dev_groups,
@@ -1330,6 +1520,9 @@ const struct bus_type lkpi_pci_bus_type = {
 	.probe = lkpi_pci_bus_probe,
 	.remove = lkpi_pci_bus_remove,
 	.shutdown = lkpi_pci_bus_shutdown,
+	.dma_configure = lkpi_dma_dev_attach,	/* L9: dominio VT-d privado */
+	.dma_cleanup = lkpi_dma_dev_detach,
+	.pm = &lkpi_pci_pm_ops,
 };
 EXPORT_SYMBOL(lkpi_pci_bus_type);
 
