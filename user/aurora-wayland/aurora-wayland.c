@@ -4311,6 +4311,13 @@ static void xwm_spawn(void) {
       execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
             "-nolock", "-verbose", "10", "-wm", wmfd,
             (char *)NULL);
+    if (getenv("AW_XGLAMOR") || access("/etc/aurora-xglamor", F_OK) == 0) { /* experimental: GLX acelerado (glamor+DRI3) con la GPU NVIDIA */
+      setenv("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 0);
+      setenv("GBM_BACKENDS_PATH", "/usr/lib/x86_64-linux-gnu/gbm", 0);
+      setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
+      execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-glamor", "gl", "-noreset",
+            "-nolock", "-wm", wmfd, (char *)NULL);
+    }
     execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
           "-nolock", "-wm", wmfd, (char *)NULL);
     _exit(127);

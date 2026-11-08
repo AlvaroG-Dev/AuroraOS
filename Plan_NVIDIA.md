@@ -330,3 +330,6 @@ Explicit sync: el kernel ya tiene syncobj timeline (kernel/drm/drm_syncobj.c) y 
 
 ### N5b paso 5: techo de ~55 fps (2026-11-08)
 Causa: `surface_commit` armaba el timer de frame callbacks a 16 ms *desde el commit*, asi que el periodo real era 16 ms + latencia del cliente + redondeo del timer (~55 fps). Ahora el tick cae en una rejilla fija de 16.667 ms (~60 Hz). Esperado: ~60 fps a 480x360 y algo menos a 720p (lectura ~2 ms). Prueba: `vkcube.sh 15` y `vkcube.sh 15 0 1280 720`. Resultado (Alvaro, 2026-11-08, ya en main 3908e1c9): 480x360 = 59.1 fps medios (primer tramo 53, resto 60); 1280x720 = 60 fps. El techo de ~55 era el temporizador de frame callbacks; ahora vsync de 60 Hz estable, tambien a 720p.
+
+### N5c: glxgears vía Xwayland+glamor (experimental, 2026-11-08)
+El compositor lanza Xwayland con `-glamor gl` (en vez de `-shm`) si existe `/etc/aurora-xglamor` o la variable `AW_XGLAMOR`, con `__EGL_VENDOR_LIBRARY_FILENAMES` (10_nvidia.json), `GBM_BACKENDS_PATH` y `__GLX_VENDOR_LIBRARY_NAME=nvidia`. Esta rama incluye `precompiled/etc/aurora-xglamor` para poder probar: **si glamor da problemas con las apps X11 normales, borrar ese fichero antes de fusionar**. Prueba: `glx.sh 15` (glxinfo -B + glxgears). Sin verificar en hardware; no se puede probar la 4060 fuera del PC de Alvaro.
