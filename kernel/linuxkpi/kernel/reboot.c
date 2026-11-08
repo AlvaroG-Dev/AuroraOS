@@ -22,6 +22,9 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/workqueue.h>
+#include <linux/kthread.h>
+#include <linux/completion.h>
+#include <linux/jiffies.h>
 
 #include "../aurora.h"
 #include "../lkpi_internal.h"
@@ -251,6 +254,38 @@ EXPORT_SYMBOL(kernel_can_power_off);
 /* ------------------------------------------------------------------------ */
 /* Enganche con power.c                                                     */
 /* ------------------------------------------------------------------------ */
+/*
+ * device_shutdown() en un hilo propio con tope de tiempo: un shutdown de driver
+ * que se cuelga (p. ej. i915 esperando a una GPU o un panel en hardware real)
+ * no debe impedir el paso final (S5 ACPI). Si vence el tiempo se sigue sin el:
+ * las interrupciones se desactivan y los APs paran justo despues.
+ */
+#define LKPI_SHUTDOWN_TIMEOUT_MS 4000
+static DECLARE_COMPLETION(lkpi_shutdown_done);
+
+static int lkpi_shutdown_thread(void *arg)
+{
+	device_shutdown();
+	complete(&lkpi_shutdown_done);
+	return 0;
+}
+
+static void lkpi_devices_shutdown(void)
+{
+	struct task_struct *t;
+
+	reinit_completion(&lkpi_shutdown_done);
+	t = kthread_run(lkpi_shutdown_thread, NULL, "lkpi-shutdown");
+	if (IS_ERR(t)) {
+		device_shutdown();
+		return;
+	}
+	if (!wait_for_completion_timeout(&lkpi_shutdown_done,
+					 msecs_to_jiffies(LKPI_SHUTDOWN_TIMEOUT_MS)))
+		pr_err("linuxkpi: device_shutdown no termino en %d ms (driver colgado, ver la ultima linea 'shutdown de'); se sigue con el apagado\n",
+		       LKPI_SHUTDOWN_TIMEOUT_MS);
+}
+
 static void lkpi_power_notify(int action, int phase, void *ctx)
 {
 	unsigned long ev = action == AURORA_POWER_OFF ? SYS_POWER_OFF :
@@ -274,7 +309,7 @@ static void lkpi_power_notify(int action, int phase, void *ctx)
 		}
 		break;
 	case AURORA_POWER_PHASE_DEVICES:
-		device_shutdown();
+		lkpi_devices_shutdown();
 		break;
 	case AURORA_POWER_PHASE_FINAL:
 		if (action == AURORA_POWER_OFF) {
