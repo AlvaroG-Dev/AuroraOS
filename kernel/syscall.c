@@ -13,7 +13,10 @@
 #include "cpu.h"
 #include "epoll.h"
 #include "kmod_sys.h"
+#include "ext2.h"
 #include "fat32.h"
+#include "iso9660.h"
+#include "tmpfs.h"
 #include "futex.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
@@ -41,10 +44,12 @@
 #include "ptimer.h"
 #include "timerfd.h"
 #include "pidfd_inotify.h"
+#include "mutex.h"
 #include "spinlock.h"
 #include "string.h"
 #include "swap.h"
 #include "uaccess.h"
+#include "tmpfs.h"
 #include "vfs.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -55,8 +60,11 @@
 #define EISCONN 106
 #endif
 
-#define SPAWN_ARGS_MAX PROCESS_ARGV_MAX
-#define SPAWN_ARG_STR_MAX PROCESS_ARG_STR_MAX
+// spawn: limites fijos pequeños (buffers planos); execve usa un pool (PROCESS_ARGENV_POOL).
+#define SPAWN_ARGS_MAX 16
+#define SPAWN_ARG_STR_MAX 1024
+#define SPAWN_ENVP_MAX 64
+#define SPAWN_ENV_STR_MAX 256
 
 extern void syscall_entry(void);
 
@@ -342,19 +350,19 @@ static void vfs_to_linux_stat(const vfs_stat_t *vs, uint64_t size, uint64_t dev,
   }
   out->st_dev = (int64_t)dev;
   out->st_ino = vs->inode;
-  out->st_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
+  out->st_nlink = vs->nlink ? vs->nlink : ((vs->flags & VFS_DIRECTORY) ? 2 : 1);
   out->st_mode = mode;
   out->st_uid = vs->uid;
   out->st_gid = vs->gid;
   out->st_rdev = (int64_t)vs->rdev;
   out->st_size = (int64_t)size;
   out->st_blksize = 512;
-  out->st_blocks = (int64_t)((size + 511) / 512);
+  out->st_blocks = vs->blocks ? (int64_t)vs->blocks : (int64_t)((size + 511) / 512);
   out->st_mtime_sec = vs->mtime_sec;
   out->st_mtime_nsec = 0;
-  out->st_atime_sec = vs->mtime_sec;
+  out->st_atime_sec = vs->atime_sec ? vs->atime_sec : vs->mtime_sec;
   out->st_atime_nsec = 0;
-  out->st_ctime_sec = vs->mtime_sec;
+  out->st_ctime_sec = vs->ctime_sec ? vs->ctime_sec : vs->mtime_sec;
   out->st_ctime_nsec = 0;
 }
 
@@ -475,20 +483,26 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
   if (want_dir || no_follow) {
     vfs_node_t *probe =
         no_follow ? vfs_lookup_nofollow(kpath) : vfs_lookup(kpath);
-    if (!probe)
-      return -ENOENT;
-    int is_dir = (probe->flags & VFS_DIRECTORY) != 0;
-    int is_sym = probe->is_symlink;
-    vfs_node_free(probe);
+    // Con O_CREAT un fichero que aun no existe es normal (glibc sem_open /
+    // shm_open: O_CREAT|O_EXCL|O_NOFOLLOW): se crea mas abajo.
+    if (!probe && !want_dir && (linux_flags & LINUX_O_CREAT)) {
+      // nada que comprobar
+    } else {
+      if (!probe)
+        return -ENOENT;
+      int is_dir = (probe->flags & VFS_DIRECTORY) != 0;
+      int is_sym = probe->is_symlink;
+      vfs_node_free(probe);
 
-    if (no_follow && is_sym) {
-      // O_PATH|O_NOFOLLOW: el fd apunta al propio symlink (systemd/libudev).
-      if (linux_flags & 0x200000)
-        return vfs_open_nofollow_for_proc(proc, kpath, O_RDONLY);
-      return -ELOOP;
+      if (no_follow && is_sym) {
+        // O_PATH|O_NOFOLLOW: el fd apunta al propio symlink (systemd/libudev).
+        if (linux_flags & 0x200000)
+          return vfs_open_nofollow_for_proc(proc, kpath, O_RDONLY);
+        return -ELOOP;
+      }
+      if (want_dir && !is_dir)
+        return -ENOTDIR;
     }
-    if (want_dir && !is_dir)
-      return -ENOTDIR;
   }
 
   int aflags;
@@ -526,6 +540,8 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
 
   // O_NONBLOCK viaja hasta ops->open y queda en fd->flags (F_GETFL).
   aflags |= (linux_flags & LINUX_O_NONBLOCK);
+  if (linux_flags & 010000) // O_DSYNC (incluido en O_SYNC)
+    aflags |= VFS_O_SYNC;
   int fd = vfs_open_for_proc(proc, kpath, aflags);
   if (fd < 0) {
     // git/coreutils sondean ENOENT constantemente (buscan un objeto
@@ -548,8 +564,10 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
   }
   if (linux_flags & LINUX_O_APPEND) {
     file_descriptor_t *f = proc->fds[fd];
-    if (f && f->node)
+    if (f && f->node) {
       f->offset = f->node->size;
+      f->flags |= VFS_O_APPEND; // write() reposiciona al final en cada llamada
+    }
   }
   return fd;
 }
@@ -716,6 +734,10 @@ static int64_t do_stat_path(process_t *proc, const char *upath,
       .uid = node->uid,
       .gid = node->gid,
       .rdev = node->rdev,
+      .nlink = node->nlink,
+      .atime_sec = node->atime_sec,
+      .ctime_sec = node->ctime_sec,
+      .blocks = node->blocks,
   };
   // [df] Capturar el device ANTES de liberar el nodo.
   uint64_t dev = fs_dev_id(node->fs);
@@ -821,6 +843,10 @@ static int64_t k_fstatat(uint64_t dfd, uint64_t path, uint64_t statbuf,
       .uid = node->uid,
       .gid = node->gid,
       .rdev = node->rdev,
+      .nlink = node->nlink,
+      .atime_sec = node->atime_sec,
+      .ctime_sec = node->ctime_sec,
+      .blocks = node->blocks,
   };
   // [df] Capturar el device ANTES de liberar el nodo.
   uint64_t dev = fs_dev_id(node->fs);
@@ -855,7 +881,7 @@ static int64_t k_access(uint64_t path, uint64_t mode, uint64_t a3, uint64_t a4,
   // [3.4.d] access(2) usa REAL uid/gid, no efectivos. Como hoy no hay
   // setuid activo, euid == uid siempre; cuando lo haya, habrá que
   // cambiar vfs_check_access para aceptar un flag.
-  int acc = vfs_check_access(node, (int)mode);
+  int acc = vfs_check_access_real(node, (int)mode);
   vfs_node_free(node);
   return acc;
 }
@@ -981,14 +1007,8 @@ static int64_t k_unlink(uint64_t path, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
-    return -EFAULT;
-  char p[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path, p, sizeof(p));
-  if (rc != 0)
-    return rc;
-  return vfs_unlink(p);
+  // unlink(2) = unlinkat(AT_FDCWD, path, 0): un directorio da -EISDIR.
+  return k_unlinkat((uint64_t)AT_FDCWD, path, 0, 0, 0);
 }
 
 static int64_t k_rename(uint64_t oldp, uint64_t newp, uint64_t a3, uint64_t a4,
@@ -1147,6 +1167,34 @@ static int64_t k_madvise(uint64_t addr, uint64_t len, uint64_t advice,
   if (!proc)
     return -EFAULT;
   return sys_madvise(proc, addr, len, advice);
+}
+
+// msync(addr, len, flags): vuelca los ficheros respaldados por MAP_SHARED que
+// toquen [addr, addr+len). Siempre síncrono (MS_ASYNC/MS_SYNC dan igual).
+static int64_t k_msync(uint64_t addr, uint64_t len, uint64_t flags, uint64_t a4,
+                       uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((addr & 0xFFF) || (flags & ~7ULL))
+    return -EINVAL;
+  uint64_t end = addr + len;
+  if (end < addr)
+    return -ENOMEM;
+  int rc = 0;
+  for (vma_t *v = proc->vma_list; v; v = v->next) {
+    if (v->end <= addr || v->start >= end)
+      continue;
+    if (v->type == VMA_SHARED && v->file_fd && v->file_fd->node &&
+        v->file_fd->node->ops && v->file_fd->node->ops->fsync) {
+      int r = v->file_fd->node->ops->fsync(v->file_fd->node);
+      if (r != 0)
+        rc = r;
+    }
+  }
+  return rc;
 }
 
 static int64_t k_brk(uint64_t addr, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -1317,7 +1365,7 @@ static int64_t k_getegid(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 //   - root: uid = euid = suid = uid_new
 //   - no-root, uid_new == uid || euid || suid: euid = uid_new
 //   - no-root, otro: EPERM
-static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
+static int64_t k_setuid_raw(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a2;
   (void)a3;
@@ -1327,7 +1375,7 @@ static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
   if (!p)
     return -EFAULT;
   uint32_t u = (uint32_t)uid;
-  if (p->euid == 0) {
+  if (cap_raised(p, CAP_SETUID)) {
     p->uid = u;
     p->euid = u;
     p->suid = u;
@@ -1342,6 +1390,16 @@ static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
   return -EPERM;
 }
 
+static int64_t k_setuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  process_t *p = process_current();
+  uint32_t ou = p ? p->uid : 0, oe = p ? p->euid : 0, os = p ? p->suid : 0;
+  int64_t rc = k_setuid_raw(uid, a2, a3, a4, a5);
+  if (rc == 0 && p)
+    process_caps_after_setuid(p, ou, oe, os);
+  return rc;
+}
+
 static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a2;
@@ -1352,7 +1410,7 @@ static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
   if (!p)
     return -EFAULT;
   uint32_t g = (uint32_t)gid;
-  if (p->euid == 0) {
+  if (cap_raised(p, CAP_SETGID)) {
     p->gid = g;
     p->egid = g;
     p->sgid = g;
@@ -1368,7 +1426,7 @@ static int64_t k_setgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
 }
 
 // setreuid(ruid, euid). -1 significa "no cambiar".
-static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
+static int64_t k_setreuid_raw(uint64_t ruid, uint64_t euid, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
@@ -1378,7 +1436,7 @@ static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
     return -EFAULT;
   int32_t r = (int32_t)ruid;
   int32_t e = (int32_t)euid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETUID));
 
   if (r != -1) {
     if (!was_root && (uint32_t)r != p->uid && (uint32_t)r != p->euid)
@@ -1398,6 +1456,16 @@ static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
   return 0;
 }
 
+static int64_t k_setreuid(uint64_t ruid, uint64_t euid, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  process_t *p = process_current();
+  uint32_t ou = p ? p->uid : 0, oe = p ? p->euid : 0, os = p ? p->suid : 0;
+  int64_t rc = k_setreuid_raw(ruid, euid, a3, a4, a5);
+  if (rc == 0 && p)
+    process_caps_after_setuid(p, ou, oe, os);
+  return rc;
+}
+
 static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
   (void)a3;
@@ -1408,7 +1476,7 @@ static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
     return -EFAULT;
   int32_t r = (int32_t)rgid;
   int32_t e = (int32_t)egid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETGID));
 
   if (r != -1) {
     if (!was_root && (uint32_t)r != p->gid && (uint32_t)r != p->egid)
@@ -1430,7 +1498,7 @@ static int64_t k_setregid(uint64_t rgid, uint64_t egid, uint64_t a3,
 // setresuid(ruid, euid, suid). -1 = no cambiar.
 // Linux: si el proceso no es root, cada valor solo puede ir a uid/euid/suid
 // actuales. Si lo es, puede ir a cualquier valor.
-static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
+static int64_t k_setresuid_raw(uint64_t ruid, uint64_t euid, uint64_t suid,
                            uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
@@ -1438,7 +1506,7 @@ static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
   if (!p)
     return -EFAULT;
   int32_t r = (int32_t)ruid, e = (int32_t)euid, s = (int32_t)suid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETUID));
 
   if (!was_root) {
     // Cada valor debe estar entre los uid/euid/suid actuales.
@@ -1463,6 +1531,16 @@ static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
   return 0;
 }
 
+static int64_t k_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid,
+                           uint64_t a4, uint64_t a5) {
+  process_t *p = process_current();
+  uint32_t ou = p ? p->uid : 0, oe = p ? p->euid : 0, os = p ? p->suid : 0;
+  int64_t rc = k_setresuid_raw(ruid, euid, suid, a4, a5);
+  if (rc == 0 && p)
+    process_caps_after_setuid(p, ou, oe, os);
+  return rc;
+}
+
 static int64_t k_setresgid(uint64_t rgid, uint64_t egid, uint64_t sgid,
                            uint64_t a4, uint64_t a5) {
   (void)a4;
@@ -1471,7 +1549,7 @@ static int64_t k_setresgid(uint64_t rgid, uint64_t egid, uint64_t sgid,
   if (!p)
     return -EFAULT;
   int32_t r = (int32_t)rgid, e = (int32_t)egid, s = (int32_t)sgid;
-  int was_root = (p->euid == 0);
+  int was_root = (cap_raised(p, CAP_SETGID));
 
   if (!was_root) {
     if (r != -1 && (uint32_t)r != p->gid && (uint32_t)r != p->egid &&
@@ -1550,9 +1628,19 @@ static int64_t k_setfsuid(uint64_t uid, uint64_t a2, uint64_t a3, uint64_t a4,
     return -EFAULT;
   uint32_t old = p->fsuid;
   uint32_t u = (uint32_t)uid;
-  if (p->euid == 0 || u == p->uid || u == p->euid || u == p->suid ||
+  if (cap_raised(p, CAP_SETUID) || u == p->uid || u == p->euid || u == p->suid ||
       u == p->fsuid)
     p->fsuid = u;
+  {
+    // [U6] Capacidades "de sistema de ficheros" siguen a fsuid (Linux).
+    const uint64_t fsmask = (1ULL << CAP_CHOWN) | (1ULL << CAP_DAC_OVERRIDE) |
+                            (1ULL << CAP_DAC_READ_SEARCH) | (1ULL << CAP_FOWNER) |
+                            (1ULL << CAP_FSETID);
+    if (old == 0 && p->fsuid != 0)
+      p->cap_eff &= ~fsmask;
+    else if (old != 0 && p->fsuid == 0)
+      p->cap_eff |= (p->cap_prm & fsmask);
+  }
   return (int64_t)old; // Linux devuelve el valor anterior
 }
 
@@ -1567,7 +1655,7 @@ static int64_t k_setfsgid(uint64_t gid, uint64_t a2, uint64_t a3, uint64_t a4,
     return -EFAULT;
   uint32_t old = p->fsgid;
   uint32_t g = (uint32_t)gid;
-  if (p->euid == 0 || g == p->gid || g == p->egid || g == p->sgid ||
+  if (cap_raised(p, CAP_SETGID) || g == p->gid || g == p->egid || g == p->sgid ||
       g == p->fsgid)
     p->fsgid = g;
   return (int64_t)old;
@@ -1606,7 +1694,7 @@ static int64_t k_setgroups(uint64_t size, uint64_t list, uint64_t a3,
   process_t *p = process_current();
   if (!p)
     return -EFAULT;
-  if (p->euid != 0)
+  if (!cap_raised(p, CAP_SETGID))
     return -EPERM;
   if (size > NGROUPS_MAX)
     return -EINVAL;
@@ -1770,15 +1858,75 @@ static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
 //   4  PR_SET_DUMPABLE    → ignorar
 //   15 PR_SET_NAME        → ignorar
 //   16 PR_GET_NAME        → escribir "" en el buffer del usuario
-//   38 PR_SET_NO_NEW_PRIVS → ignorar
+//   38/39 PR_SET/GET_NO_NEW_PRIVS → real (execve ya no concede setuid)
 static int64_t k_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
                        uint64_t arg4, uint64_t arg5) {
-  (void)arg3;
-  (void)arg4;
-  (void)arg5;
   switch (option) {
   case 3: /* PR_GET_DUMPABLE */
     return 1;
+  case 8: /* PR_SET_KEEPCAPS */ {
+    process_t *pp = process_current();
+    if (!pp || arg2 > 1)
+      return -EINVAL;
+    pp->keepcaps = (uint8_t)arg2;
+    return 0;
+  }
+  case 7: /* PR_GET_KEEPCAPS */ {
+    process_t *pp = process_current();
+    return pp ? pp->keepcaps : 0;
+  }
+  case 23: /* PR_CAPBSET_READ */ {
+    process_t *pp = process_current();
+    if (!pp || arg2 > CAP_LAST_CAP)
+      return -EINVAL;
+    return (pp->cap_bnd >> arg2) & 1;
+  }
+  case 24: /* PR_CAPBSET_DROP */ {
+    process_t *pp = process_current();
+    if (!pp || arg2 > CAP_LAST_CAP)
+      return -EINVAL;
+    if (!cap_raised(pp, CAP_SETPCAP))
+      return -EPERM;
+    pp->cap_bnd &= ~(1ULL << arg2);
+    return 0;
+  }
+  case 47: /* PR_CAP_AMBIENT: 1=IS_SET 2=RAISE 3=LOWER 4=CLEAR_ALL */ {
+    process_t *pp = process_current();
+    if (!pp)
+      return -EINVAL;
+    if (arg2 == 4) {
+      pp->cap_amb = 0;
+      return 0;
+    }
+    if (arg3 > CAP_LAST_CAP)
+      return -EINVAL;
+    uint64_t bit = 1ULL << arg3;
+    if (arg2 == 1)
+      return (pp->cap_amb & bit) != 0;
+    if (arg2 == 3) {
+      pp->cap_amb &= ~bit;
+      return 0;
+    }
+    if (arg2 == 2) {
+      if (!(pp->cap_prm & bit) || !(pp->cap_inh & bit))
+        return -EPERM;
+      pp->cap_amb |= bit;
+      return 0;
+    }
+    return -EINVAL;
+  }
+  case 38: /* PR_SET_NO_NEW_PRIVS: solo 1, irreversible */ {
+    if (arg2 != 1 || arg3 || arg4 || arg5)
+      return -EINVAL;
+    process_t *pp = process_current();
+    if (pp)
+      pp->no_new_privs = 1;
+    return 0;
+  }
+  case 39: /* PR_GET_NO_NEW_PRIVS */ {
+    process_t *pp = process_current();
+    return pp ? pp->no_new_privs : 0;
+  }
   case 16: /* PR_GET_NAME */ {
     if (arg2 && access_ok((void *)arg2, 16)) {
       // Copiamos 16 bytes de ceros (Linux pone el nombre del proceso
@@ -1805,8 +1953,12 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
 
   // Señal 0 = comprobar existencia, sin enviar. Linux la acepta.
   if (ksig == 0) {
-    if (kpid > 0)
-      return process_find_by_pid((uint32_t)kpid) ? 0 : -ESRCH;
+    if (kpid > 0) {
+      process_t *tp = process_find_by_pid((uint32_t)kpid);
+      if (!tp)
+        return -ESRCH;
+      return process_may_signal(process_current(), tp) ? 0 : -EPERM;
+    }
     if (kpid == 0)
       return process_current() ? 0 : -ESRCH;
     return process_pgrp_exists((uint32_t)(-kpid)) ? 0 : -ESRCH;
@@ -1816,6 +1968,10 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     return -EINVAL;
 
   if (kpid > 0) {
+    // [U1.3] Permisos de kill(2).
+    process_t *tp = process_find_by_pid((uint32_t)kpid);
+    if (tp && !process_may_signal(process_current(), tp))
+      return -EPERM;
     int r = process_kill((uint32_t)kpid, ksig);
     if (r == -ESRCH) {
       // Como Linux, kill() con el tid de un hilo secundario va a su proceso.
@@ -1833,13 +1989,13 @@ static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
     process_t *self = process_current();
     if (!self)
       return -ESRCH;
-    int n = process_signal_pgrp(self->pgid, 1ULL << ksig);
+    int n = process_signal_pgrp_checked(self->pgid, 1ULL << ksig, self);
     return n < 0 ? n : 0;
   }
 
   // kpid < 0: enviar a todos los procesos del grupo -kpid.
   uint32_t grp = (uint32_t)(-kpid);
-  int n = process_signal_pgrp(grp, 1ULL << ksig);
+  int n = process_signal_pgrp_checked(grp, 1ULL << ksig, process_current());
   return n < 0 ? n : 0;
 }
 
@@ -2180,8 +2336,8 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     return -EFAULT;
 
   // Buffer en pila para un linux_dirent64 con nombre de hasta
-  // VFS_PATH_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 128 + padding ≈ 160.
-  uint8_t kbuf[256];
+  // VFS_NAME_MAX-1 bytes. sizeof(linux_dirent64_t)=19 + 255 + NUL + padding ≈ 280.
+  uint8_t kbuf[320]; // 19 + 255 + NUL, alineado a 8
   size_t pos = 0;
   uint64_t index = f->offset;
   uint64_t start_index = index;
@@ -2215,6 +2371,12 @@ static int64_t k_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
       d->d_type = DT_CHR;
     else if (ent.type == VFS_SYMLINK_ENT)
       d->d_type = 10; // DT_LNK
+    else if (ent.type == VFS_FIFO_ENT)
+      d->d_type = 1; // DT_FIFO
+    else if (ent.type == VFS_SOCK_ENT)
+      d->d_type = 12; // DT_SOCK
+    else if (ent.type == VFS_BLK_ENT)
+      d->d_type = 6; // DT_BLK
     else
       d->d_type = DT_REG;
     memcpy(d->d_name, ent.name, namelen);
@@ -2333,10 +2495,24 @@ static int64_t k_symlinkat(uint64_t target_ptr, uint64_t newdfd,
                            uint64_t linkpath_ptr, uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  // Aurora no soporta dirfd != AT_FDCWD todavía. Fallback a k_symlink.
-  if ((int)newdfd != AT_FDCWD)
+  if ((int)newdfd == AT_FDCWD)
+    return k_symlink(target_ptr, linkpath_ptr, 0, 0, 0);
+  // dirfd real (GNU tar crea los symlinks con symlinkat(dirfd)).
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  char target[VFS_PATH_MAX];
+  long tl = strncpy_from_user(target, (const char *)target_ptr, sizeof(target));
+  if (tl < 0)
+    return -EFAULT;
+  if (tl == 0)
     return -EINVAL;
-  return k_symlink(target_ptr, linkpath_ptr, 0, 0, 0);
+  char linkpath[VFS_PATH_MAX];
+  int rc = resolve_at_path(proc, (int)newdfd, (const char *)linkpath_ptr,
+                           linkpath, sizeof(linkpath));
+  if (rc != 0)
+    return rc;
+  return vfs_symlink(target, linkpath);
 }
 
 // ---------- sigaltstack (131) ----------
@@ -2435,6 +2611,21 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
 // tkill(tid, sig): señal dirigida a un hilo concreto (tid del hilo
 // principal = pid). BusyBox ash lo usa en job control; musl en raise() y
 // pthread_kill().
+// [U1.3] Permisos de tkill/tgkill: el hilo `tid` pertenece a un proceso cuyo
+// uid debe ser señalable por el llamante.
+static int tid_signal_allowed(uint32_t tid) {
+  process_t *target = NULL;
+  task_t *t = sched_find_tid_get(tid);
+  if (t) {
+    target = t->proc;
+    int ok = target ? process_may_signal(process_current(), target) : 1;
+    task_put(t);
+    return ok;
+  }
+  target = process_find_by_pid(tid);
+  return target ? process_may_signal(process_current(), target) : 1;
+}
+
 static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
                        uint64_t a5) {
   (void)a3;
@@ -2452,6 +2643,8 @@ static int64_t k_tkill(uint64_t tid, uint64_t sig, uint64_t a3, uint64_t a4,
   }
   if (sig >= SIG_MAX)
     return -EINVAL;
+  if (!tid_signal_allowed((uint32_t)tid))
+    return -EPERM;
   return signal_send_tid((uint32_t)tid, (int)sig);
 }
 
@@ -2478,6 +2671,8 @@ static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
   }
   if (owner == 0 || owner != (uint32_t)tgid)
     return -ESRCH;
+  if (!tid_signal_allowed((uint32_t)tid))
+    return -EPERM;
   if (sig == 0)
     return 0;
   return signal_send_tid((uint32_t)tid, (int)sig);
@@ -2880,6 +3075,8 @@ static int64_t k_ioctl_netif(uint64_t fd, unsigned long req, uint64_t arg) {
 }
 
 // ---------- ioctl ----------
+static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                       uint64_t a5);
 static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
                        uint64_t a5) {
   (void)a4;
@@ -2892,6 +3089,16 @@ static int64_t k_ioctl(uint64_t fd, uint64_t req, uint64_t arg, uint64_t a4,
     return -EBADF;
 
   unsigned long kreq = (unsigned long)(uint32_t)req;
+
+  // FIONBIO (os.set_blocking de Python, muchos programas): O_NONBLOCK on/off.
+  if (kreq == 0x5421UL) {
+    int v = 0;
+    if (copy_from_user(&v, (void *)arg, sizeof(v)) < 0)
+      return -EFAULT;
+    int cur = proc->fds[kfd]->flags;
+    int nf = v ? (cur | LINUX_O_NONBLOCK) : (cur & ~LINUX_O_NONBLOCK);
+    return k_fcntl(fd, 4 /* F_SETFL */, (uint64_t)nf, 0, 0);
+  }
 
   // [NET] Intentar ioctls de interfaz de red. Si no aplica, fallback
   // al nodo VFS.
@@ -3284,6 +3491,8 @@ static int64_t k_clock_settime(uint64_t clockid, uint64_t tp, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_TIME))
+    return -EPERM;
   // Solo soportamos CLOCK_REALTIME (0). El resto son inmutables
   // (MONOTONIC, BOOTTIME) o por-proceso (CPUTIME).
   if (clockid != 0)
@@ -3306,6 +3515,8 @@ static int64_t k_settimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (tv_ptr && !capable(CAP_SYS_TIME))
+    return -EPERM;
   if (tv_ptr) {
     if (!access_ok((void *)tv_ptr, sizeof(struct k_timeval)))
       return -EFAULT;
@@ -3383,6 +3594,235 @@ static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
   return (int64_t)buflen;
 }
 
+// ---------- fcntl: locks de registro (F_GETLK/F_SETLK/F_SETLKW + OFD) ----------
+//
+// apt/dpkg/sqlite/etc. toman locks con fcntl(F_SETLK[W]) o F_OFD_SETLK[W].
+// Antes caían en `default: -EINVAL` ("no se pudo adquirir el lock", -22).
+//
+// Tabla global de rangos [start,end) (end=UINT64_MAX = hasta EOF). Clave del
+// dueño: POSIX → pid del proceso; OFD → puntero a la open file description.
+// Los locks POSIX se sueltan al cerrar cualquier fd del fichero y al salir
+// el proceso (posix_lock_release_*); los OFD, al morir la descripción.
+#define PLOCK_MAX 512
+#define PL_RD 0
+#define PL_WR 1
+#define PL_UN 2
+struct k_flock64 {
+  int16_t l_type;
+  int16_t l_whence;
+  int32_t _pad0;
+  int64_t l_start;
+  int64_t l_len;
+  int32_t l_pid;
+  int32_t _pad1;
+};
+_Static_assert(sizeof(struct k_flock64) == 32, "struct flock x86_64");
+
+struct plock {
+  void *fs;
+  uint64_t ino;
+  uint64_t owner;
+  uint32_t pid;
+  uint64_t start, end;
+  int type; // PL_RD / PL_WR
+  int used;
+};
+static struct plock g_plocks[PLOCK_MAX];
+static spinlock_t g_plock_lock;
+
+static int plock_overlap(const struct plock *l, uint64_t s, uint64_t e) {
+  return l->start < e && s < l->end;
+}
+
+// Busca un lock ajeno que choque. Llamar con g_plock_lock tomado.
+static struct plock *plock_find_conflict(void *fs, uint64_t ino,
+                                         uint64_t owner, int type, uint64_t s,
+                                         uint64_t e) {
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (!l->used || l->fs != fs || l->ino != ino || l->owner == owner)
+      continue;
+    if (!plock_overlap(l, s, e))
+      continue;
+    if (type == PL_WR || l->type == PL_WR)
+      return l;
+  }
+  return NULL;
+}
+
+// Quita [s,e) de los locks del dueño (recorta/parte). 0 ok, -ENOLCK sin hueco.
+// Llamar con g_plock_lock tomado.
+static int plock_remove_range(void *fs, uint64_t ino, uint64_t owner,
+                              uint64_t s, uint64_t e) {
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (!l->used || l->fs != fs || l->ino != ino || l->owner != owner ||
+        !plock_overlap(l, s, e))
+      continue;
+    int left = l->start < s, right = l->end > e;
+    if (left && right) {
+      int j;
+      for (j = 0; j < PLOCK_MAX; j++)
+        if (!g_plocks[j].used)
+          break;
+      if (j == PLOCK_MAX)
+        return -ENOLCK;
+      g_plocks[j] = *l;
+      g_plocks[j].start = e;
+      l->end = s;
+    } else if (left) {
+      l->end = s;
+    } else if (right) {
+      l->start = e;
+    } else {
+      l->used = 0;
+    }
+  }
+  return 0;
+}
+
+static int plock_insert(void *fs, uint64_t ino, uint64_t owner, uint32_t pid,
+                        int type, uint64_t s, uint64_t e) {
+  int rc = plock_remove_range(fs, ino, owner, s, e);
+  if (rc < 0)
+    return rc;
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (l->used)
+      continue;
+    l->fs = fs;
+    l->ino = ino;
+    l->owner = owner;
+    l->pid = pid;
+    l->start = s;
+    l->end = e;
+    l->type = type;
+    l->used = 1;
+    return 0;
+  }
+  return -ENOLCK;
+}
+
+// Cierre de un fd (POSIX: suelta todos los locks del proceso sobre el fichero).
+void posix_lock_release_file(uint32_t pid, void *fs, uint64_t ino) {
+  unsigned long fl = spin_lock_irqsave(&g_plock_lock);
+  for (int i = 0; i < PLOCK_MAX; i++) {
+    struct plock *l = &g_plocks[i];
+    if (l->used && l->pid == pid && l->owner == (uint64_t)pid && l->fs == fs &&
+        l->ino == ino)
+      l->used = 0;
+  }
+  spin_unlock_irqrestore(&g_plock_lock, fl);
+}
+
+void posix_lock_release_pid(uint32_t pid) {
+  unsigned long fl = spin_lock_irqsave(&g_plock_lock);
+  for (int i = 0; i < PLOCK_MAX; i++)
+    if (g_plocks[i].used && g_plocks[i].pid == pid &&
+        g_plocks[i].owner == (uint64_t)pid)
+      g_plocks[i].used = 0;
+  spin_unlock_irqrestore(&g_plock_lock, fl);
+}
+
+// La descripción OFD muere: soltar sus locks.
+void posix_lock_release_ofd(void *desc) {
+  unsigned long fl = spin_lock_irqsave(&g_plock_lock);
+  for (int i = 0; i < PLOCK_MAX; i++)
+    if (g_plocks[i].used && g_plocks[i].owner == (uint64_t)desc &&
+        g_plocks[i].pid == 0)
+      g_plocks[i].used = 0;
+  spin_unlock_irqrestore(&g_plock_lock, fl);
+}
+
+static int64_t k_fcntl_lock(process_t *proc, file_descriptor_t *f, uint64_t cmd,
+                            uint64_t arg) {
+  int ofd = (cmd >= 36 && cmd <= 38);       // F_OFD_GETLK/SETLK/SETLKW
+  int getlk = (cmd == 5 || cmd == 36);      // F_GETLK
+  int wait = (cmd == 7 || cmd == 38);       // F_SETLKW
+  if (!f->node)
+    return -EBADF;
+  if (!arg || !access_ok((void *)arg, sizeof(struct k_flock64)))
+    return -EFAULT;
+  struct k_flock64 fl;
+  if (copy_from_user(&fl, (void *)arg, sizeof(fl)) < 0)
+    return -EFAULT;
+  if (fl.l_type != PL_RD && fl.l_type != PL_WR && fl.l_type != PL_UN)
+    return -EINVAL;
+  if (ofd && fl.l_pid != 0)
+    return -EINVAL;
+  if (fl.l_type == PL_RD && (f->flags & 3) == 1)
+    return -EBADF; // RDLCK sobre fd O_WRONLY
+  if (fl.l_type == PL_WR && (f->flags & 3) == 0)
+    return -EBADF; // WRLCK sobre fd O_RDONLY
+
+  int64_t base;
+  switch (fl.l_whence) {
+  case 0: base = 0; break;
+  case 1: base = (int64_t)f->offset; break;
+  case 2: base = (int64_t)f->node->size; break;
+  default: return -EINVAL;
+  }
+  int64_t st = base + fl.l_start;
+  uint64_t s, e;
+  if (fl.l_len >= 0) {
+    if (st < 0)
+      return -EINVAL;
+    s = (uint64_t)st;
+    e = fl.l_len == 0 ? UINT64_MAX : s + (uint64_t)fl.l_len;
+  } else { // len negativo: [st+len, st)
+    int64_t b = st + fl.l_len;
+    if (b < 0)
+      return -EINVAL;
+    s = (uint64_t)b;
+    e = (uint64_t)st;
+  }
+  if (e <= s && e != UINT64_MAX)
+    return -EINVAL;
+
+  void *fs = (void *)f->node->fs;
+  uint64_t ino = (uint64_t)f->node->inode;
+  uint64_t owner = ofd ? (uint64_t)(uintptr_t)f : (uint64_t)proc->pid;
+  uint32_t pid = ofd ? 0 : proc->pid;
+
+  if (getlk) {
+    unsigned long fx = spin_lock_irqsave(&g_plock_lock);
+    struct plock *c = plock_find_conflict(
+        fs, ino, owner, fl.l_type == PL_UN ? PL_RD : fl.l_type, s, e);
+    if (c) {
+      fl.l_type = (int16_t)c->type;
+      fl.l_whence = 0;
+      fl.l_start = (int64_t)c->start;
+      fl.l_len = c->end == UINT64_MAX ? 0 : (int64_t)(c->end - c->start);
+      fl.l_pid = ofd ? -1 : (int32_t)c->pid;
+    } else {
+      fl.l_type = PL_UN;
+    }
+    spin_unlock_irqrestore(&g_plock_lock, fx);
+    if (copy_to_user((void *)arg, &fl, sizeof(fl)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+
+  for (;;) {
+    unsigned long fx = spin_lock_irqsave(&g_plock_lock);
+    int rc;
+    if (fl.l_type == PL_UN) {
+      rc = plock_remove_range(fs, ino, owner, s, e);
+    } else if (plock_find_conflict(fs, ino, owner, fl.l_type, s, e)) {
+      rc = -EAGAIN;
+    } else {
+      rc = plock_insert(fs, ino, owner, pid, fl.l_type, s, e);
+    }
+    spin_unlock_irqrestore(&g_plock_lock, fx);
+    if (rc != -EAGAIN || !wait)
+      return rc;
+    wait_queue_t wq;
+    wait_queue_init(&wq);
+    if (wait_event_interruptible_timeout(&wq, sleep_never_true, NULL, 10) < 0)
+      return -EINTR;
+  }
+}
+
 // ---------- fcntl ----------
 //
 // musl lo usa en __stdio_init_file (F_GETFD, F_GETFL) y en las rutas de
@@ -3392,6 +3832,9 @@ static int64_t k_getrandom(uint64_t buf, uint64_t buflen, uint64_t flags,
 // Comandos Linux x86_64:
 //   F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4,
 //   F_DUPFD_CLOEXEC=1030.
+static int64_t k_flock(uint64_t fd, uint64_t operation, uint64_t a3,
+                       uint64_t a4, uint64_t a5);
+
 static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
                        uint64_t a5) {
   (void)a4;
@@ -3470,6 +3913,13 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     return 0;
   case 9: /* F_GETOWN */
     return f->owner;
+  case 5:  /* F_GETLK */
+  case 6:  /* F_SETLK */
+  case 7:  /* F_SETLKW */
+  case 36: /* F_OFD_GETLK */
+  case 37: /* F_OFD_SETLK */
+  case 38: /* F_OFD_SETLKW */
+    return k_fcntl_lock(proc, f, cmd, arg);
   case 1033: /* F_ADD_SEALS */
     if (!f->node || !memfd_is_node(f->node))
       return -EINVAL;
@@ -3839,16 +4289,16 @@ static void vfs_to_statx(const vfs_stat_t *vs, uint64_t size, uint64_t dev,
 
   out->stx_mask = STATX_BASIC_STATS;
   out->stx_blksize = 512;
-  out->stx_nlink = (vs->flags & VFS_DIRECTORY) ? 2 : 1;
+  out->stx_nlink = vs->nlink ? vs->nlink : ((vs->flags & VFS_DIRECTORY) ? 2 : 1);
   out->stx_uid = vs->uid;
   out->stx_gid = vs->gid;
   out->stx_mode = (uint16_t)(mode & 0xFFFF);
   out->stx_ino = vs->inode;
   out->stx_size = size;
-  out->stx_blocks = (size + 511) / 512;
-  out->stx_atime.tv_sec = vs->mtime_sec;
+  out->stx_blocks = vs->blocks ? vs->blocks : (size + 511) / 512;
+  out->stx_atime.tv_sec = vs->atime_sec ? vs->atime_sec : vs->mtime_sec;
   out->stx_mtime.tv_sec = vs->mtime_sec;
-  out->stx_ctime.tv_sec = vs->mtime_sec;
+  out->stx_ctime.tv_sec = vs->ctime_sec ? vs->ctime_sec : vs->mtime_sec;
 
   uint32_t ftype = mode & S_IFMT;
   if (ftype == S_IFCHR || ftype == S_IFBLK) {
@@ -3968,6 +4418,10 @@ static int64_t k_statx(uint64_t dfd, uint64_t path_uptr, uint64_t flags,
       .uid = node->uid,
       .gid = node->gid,
       .rdev = node->rdev,
+      .nlink = node->nlink,
+      .atime_sec = node->atime_sec,
+      .ctime_sec = node->ctime_sec,
+      .blocks = node->blocks,
   };
   uint64_t dev = fs_dev_id(node->fs);
   vfs_node_free(node);
@@ -3998,10 +4452,9 @@ static int64_t k_fork(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 // y el spawn de ash para ahorrar la copia de memoria en el caso
 // "fork + execve inmediato".
 //
-// Aquí lo implementamos como fork(). El hijo tendrá su propia copia
-// del espacio, lo cual es correcto y algo más lento pero sin efectos
-// observables para el patrón fork+execve: el hijo llama a execve
-// justo después y descarta su copia.
+// Aquí lo implementamos como fork(), que ahora es copy-on-write: no se copia
+// memoria hasta que alguien escribe, así que el patrón fork+execve cuesta casi
+// lo mismo que un vfork real (solo se clonan las tablas de páginas).
 //
 // La diferencia real (padre bloqueado hasta execve) la omitimos por
 // ahora: busybox `time` espera con wait4 inmediatamente después, así
@@ -4023,6 +4476,8 @@ static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -4086,6 +4541,7 @@ static int64_t k_pivot_root(uint64_t new_root_uptr, uint64_t put_old_uptr,
 #define CLONE_PARENT_SETTID 0x00100000ULL
 #define CLONE_CHILD_CLEARTID 0x00200000ULL
 #define CLONE_DETACHED 0x00400000ULL
+#define CLONE_VFORK 0x00004000ULL
 #define CLONE_CHILD_SETTID 0x01000000ULL
 
 static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
@@ -4100,15 +4556,18 @@ static int64_t k_clone(uint64_t flags, uint64_t stack, uint64_t ptid,
   uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
                        CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |
                        CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
-                       CLONE_CHILD_CLEARTID | CLONE_DETACHED;
+                       CLONE_CHILD_CLEARTID | CLONE_DETACHED | CLONE_VFORK;
   uint64_t unknown = flags & ~(supported | 0xffULL);
   if (unknown) {
     LOG_WARN("[CLONE] flags no soportados: 0x%lx", (unsigned long)unknown);
     return -EINVAL;
   }
 
+  // posix_spawn de glibc: clone(CLONE_VM|CLONE_VFORK|SIGCHLD, pila_nueva).
+  // Se emula con fork COW arrancando el hijo en la pila indicada (el padre no
+  // se bloquea; si el exec del hijo falla, sale con 127 como en vfork).
   if (!(flags & CLONE_THREAD))
-    return sys_fork();
+    return sys_fork_ex((flags & CLONE_VFORK) ? stack : 0);
   if (!(flags & CLONE_VM))
     return -EINVAL;
 
@@ -4284,7 +4743,12 @@ static int64_t k_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
 // ruta. El lock se inicializa estáticamente: NO puede haber un "lazy init"
 // concurrente que reinicialice el spinlock mientras otra CPU ya lo está
 // usando.
-static spinlock_t g_execve_lock = {0};
+// [Plan_GCC] MUTEX, no spinlock: process_execve_prepare lee el ELF del disco
+// (ext2 -> driver AHCI de usuario) y duerme. Con un spinlock con IRQs
+// desactivadas, dos CPUs hacian execve a la vez, la segunda giraba sin
+// interrupciones y el que dormia con el cerrojo nunca despertaba: cuelgue total
+// (visto en `./configure`, que lanza muchos procesos).
+static mutex_t g_execve_lock = {0};
 
 static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
                         uint64_t a4, uint64_t a5) {
@@ -4294,7 +4758,7 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   if (!proc)
     return -EFAULT;
 
-  unsigned long exec_flags = spin_lock_irqsave(&g_execve_lock);
+  mutex_lock(&g_execve_lock);
   int64_t ret = -EFAULT;
 
   char path[VFS_PATH_MAX];
@@ -4306,24 +4770,25 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   process_set_exe_path(proc, path); // ← NUEVO
   LOG_INFO("[EXECVE] pid=%u path=%s", proc->pid, path);
 
-  // Buffers en heap: 16*128 + 32*256 = 10 KB no caben cómodos en el
-  // stack de kernel sin disparar -Wframe-larger-than.
-  enum {
-    ARGV_BYTES = PROCESS_ARGV_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
-  };
-  char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
+  // [Plan_GCC] argv/envp en un pool compacto de heap (antes: 16 argumentos
+  // fijos de 1 KiB y 64 variables de 256 B, truncados EN SILENCIO: gcc llama a
+  // cc1/as/ld con decenas de argumentos y llegaban cortados). Limites: hasta
+  // PROCESS_ARGV_MAX/PROCESS_ENVP_MAX entradas y PROCESS_ARGENV_POOL bytes en
+  // total (E2BIG si se superan, como Linux).
+  size_t ptr_bytes = (size_t)(PROCESS_ARGV_MAX + PROCESS_ENVP_MAX) * sizeof(char *);
+  char *buf = (char *)kmalloc(ptr_bytes + PROCESS_ARGENV_POOL);
   if (!buf) {
     ret = -ENOMEM;
     goto out;
   }
-  char *argv_storage = buf;
-  char *env_storage = buf + ARGV_BYTES;
+  const char **kargv = (const char **)buf;
+  const char **kenvp = kargv + PROCESS_ARGV_MAX;
+  char *pool = buf + ptr_bytes;
+  size_t pool_used = 0;
 
-  const char *kargv[PROCESS_ARGV_MAX];
   int argc = 0;
   if (argv_ptr) {
-    for (int i = 0; i < PROCESS_ARGV_MAX; i++) {
+    for (int i = 0;; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(argv_ptr + (uint64_t)i * 8)) <
           0) {
@@ -4333,27 +4798,35 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&argv_storage[i * SPAWN_ARG_STR_MAX],
-                                 (const char *)uptr, SPAWN_ARG_STR_MAX);
+      if (i >= PROCESS_ARGV_MAX) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      size_t room = PROCESS_ARGENV_POOL - pool_used;
+      if (room > PROCESS_ARG_STR_MAX)
+        room = PROCESS_ARG_STR_MAX;
+      long m = room ? strncpy_from_user(&pool[pool_used], (const char *)uptr, room)
+                    : (long)room;
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
         goto out;
       }
-      if (m >= SPAWN_ARG_STR_MAX) { // antes se truncaba en silencio (128 B)
+      if ((size_t)m >= room) { // sin sitio (o cadena demasiado larga)
         kfree(buf);
         ret = -E2BIG;
         goto out;
       }
-      kargv[i] = &argv_storage[i * SPAWN_ARG_STR_MAX];
+      kargv[i] = &pool[pool_used];
+      pool_used += (size_t)m + 1;
       argc++;
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0;; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -4363,16 +4836,115 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      if (i >= PROCESS_ENVP_MAX - 1) { // deja hueco al NULL de process_set_envp
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      size_t room = PROCESS_ARGENV_POOL - pool_used;
+      if (room > PROCESS_ENV_STR_MAX)
+        room = PROCESS_ENV_STR_MAX;
+      long m = room ? strncpy_from_user(&pool[pool_used], (const char *)uptr, room)
+                    : (long)room;
       if (m < 0) {
         kfree(buf);
         ret = -EFAULT;
         goto out;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      if ((size_t)m >= room) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      kenvp[i] = &pool[pool_used];
+      pool_used += (size_t)m + 1;
       envc++;
     }
+  }
+
+  // Scripts "#!interprete [arg]" (como binfmt_script de Linux): hasta 4 niveles.
+  // argv pasa a [interprete, arg?, ruta_del_script, argv[1..]].
+  for (int depth = 0; depth < 4; depth++) {
+    char hdr[256];
+    int hn = 0;
+    vfs_node_t *sn = vfs_lookup(path);
+    if (sn) {
+      if (!(sn->flags & VFS_DIRECTORY) && sn->ops && sn->ops->read) {
+        int64_t rd = sn->ops->read(sn, 0, sizeof(hdr) - 1, hdr);
+        hn = rd > 0 ? (int)rd : 0;
+      }
+      vfs_node_free(sn);
+    }
+    if (hn < 3 || hdr[0] != '#' || hdr[1] != '!')
+      break;
+    hdr[hn] = '\0';
+    char *nl = (char *)memchr(hdr, '\n', (size_t)hn);
+    if (nl)
+      *nl = '\0';
+    char *ip = hdr + 2;
+    while (*ip == ' ' || *ip == '\t')
+      ip++;
+    char *ie = ip;
+    while (*ie && *ie != ' ' && *ie != '\t')
+      ie++;
+    char *oa = NULL;
+    if (*ie) {
+      *ie++ = '\0';
+      while (*ie == ' ' || *ie == '\t')
+        ie++;
+      if (*ie) {
+        oa = ie;
+        size_t ol = strlen(oa);
+        while (ol && (oa[ol - 1] == ' ' || oa[ol - 1] == '\t' ||
+                      oa[ol - 1] == '\r'))
+          oa[--ol] = '\0';
+        if (!ol)
+          oa = NULL;
+      }
+    }
+    size_t il = strlen(ip);
+    while (il && ip[il - 1] == '\r')
+      ip[--il] = '\0';
+    if (il == 0 || ip[0] != '/' || il >= VFS_PATH_MAX) {
+      kfree(buf);
+      ret = -ENOENT;
+      goto out;
+    }
+    int extra = oa ? 2 : 1; // interprete (+ arg) delante de la ruta del script
+    size_t pl = strlen(path), ol2 = oa ? strlen(oa) : 0;
+    if (argc + extra > PROCESS_ARGV_MAX ||
+        pool_used + pl + 1 + il + 1 + ol2 + 1 > PROCESS_ARGENV_POOL) {
+      kfree(buf);
+      ret = -E2BIG;
+      goto out;
+    }
+    char *spath = &pool[pool_used];
+    memcpy(spath, path, pl + 1);
+    pool_used += pl + 1;
+    char *ipool = &pool[pool_used];
+    memcpy(ipool, ip, il + 1);
+    pool_used += il + 1;
+    char *opool = NULL;
+    if (oa) {
+      opool = &pool[pool_used];
+      memcpy(opool, oa, ol2 + 1);
+      pool_used += ol2 + 1;
+    }
+    if (argc == 0) {
+      argc = 1; // argv[0] inexistente: se rellena con la ruta del script
+      kargv[0] = spath;
+    } else {
+      kargv[0] = spath;
+    }
+    for (int i = argc - 1; i >= 0; i--)
+      kargv[i + extra] = kargv[i];
+    kargv[0] = ipool;
+    if (opool)
+      kargv[1] = opool;
+    argc += extra;
+    memcpy(path, ip, il + 1);
+    process_set_exe_path(proc, path);
+    LOG_INFO("[EXECVE] #! -> %s", path);
   }
 
   uint64_t new_entry = 0, new_rsp = 0;
@@ -4402,13 +4974,22 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
   }
   regs->rip = new_entry;
   regs->rsp = new_rsp;
+  // [Plan_GCC] Como en Linux (start_thread), el programa nuevo arranca con los
+  // registros a cero. Antes conservaba los del execve: rdx = envp del padre
+  // (un puntero a su heap). El ABI x86-64 dice que rdx en _start es el
+  // "rtld_fini" que debe registrarse con atexit; un binario ESTATICO de glibc
+  // lo llamaba al salir (rip = puntero al heap, NX) y moria con SIGSEGV tras
+  // imprimir. Los dinamicos no lo notaban: ld.so pone su propio rdx.
+  regs->r15 = regs->r14 = regs->r13 = regs->r12 = regs->r11 = regs->r10 = 0;
+  regs->r9 = regs->r8 = regs->rdi = regs->rsi = regs->rbp = regs->rbx = 0;
+  regs->rdx = regs->rcx = 0;
   LOG_INFO("[EXECVE-IRET] pid=%u rip=%p rsp=%p", proc->pid, (void *)regs->rip,
            (void *)regs->rsp);
 
   ret = 0;
 
 out:
-  spin_unlock_irqrestore(&g_execve_lock, exec_flags);
+  mutex_unlock(&g_execve_lock);
   return ret;
 }
 
@@ -4541,9 +5122,33 @@ static int64_t k_fchmodat(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
                           uint64_t flags, uint64_t a5) {
   (void)flags;
   (void)a5;
-  if ((int)dfd != AT_FDCWD)
-    return -EINVAL;
+  if ((int)dfd != AT_FDCWD) {
+    // [Plan_GCC] dirfd real + ruta relativa (GNU tar, coreutils/gnulib).
+    process_t *proc = process_current();
+    if (!proc)
+      return -EFAULT;
+    char path[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)dfd, (const char *)path_ptr, path,
+                             sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_chmod(path, (uint32_t)mode);
+  }
   return k_chmod(path_ptr, mode, 0, 0, 0);
+}
+
+// fchmodat2(dfd, path, mode, flags) [452]: glibc >= 2.39 lo usa para
+// fchmodat(..., AT_SYMLINK_NOFOLLOW) (GNU tar lo llama en cada directorio).
+// Sin esta syscall el fallback de glibc (open O_PATH + /proc/self/fd) daba EINVAL.
+static int64_t k_fchmodat2(uint64_t dfd, uint64_t path_ptr, uint64_t mode,
+                           uint64_t flags, uint64_t a5) {
+  if (flags & ~0x1100ULL) // AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    return -EINVAL;
+  char c = 0;
+  if ((flags & 0x1000) && path_ptr &&
+      copy_from_user(&c, (const void *)path_ptr, 1) == 0 && c == '\0')
+    return k_fchmod(dfd, mode, 0, 0, 0);
+  return k_fchmodat(dfd, path_ptr, mode, 0, a5);
 }
 
 // ---------- chown / fchown / lchown ----------
@@ -4583,6 +5188,31 @@ static int64_t k_lchown(uint64_t path_ptr, uint64_t uid, uint64_t gid,
   return k_chown(path_ptr, uid, gid, a4, a5);
 }
 
+// fchownat(dfd, path, uid, gid, flags): AT_FDCWD o ruta absoluta; con
+// AT_EMPTY_PATH y ruta vacia equivale a fchown(dfd).
+static int64_t k_fchownat(uint64_t dfd, uint64_t path_ptr, uint64_t uid,
+                          uint64_t gid, uint64_t flags) {
+  if (flags & ~0x1100ULL) // AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    return -EINVAL;
+  char c = 0;
+  if ((flags & 0x1000) && path_ptr && copy_from_user(&c, (const void *)path_ptr, 1) == 0 &&
+      c == '\0')
+    return k_fchown(dfd, uid, gid, 0, 0);
+  if ((int)dfd != AT_FDCWD) {
+    // [Plan_GCC] dirfd real + ruta relativa (antes: EINVAL).
+    process_t *proc = process_current();
+    if (!proc)
+      return -EFAULT;
+    char path[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)dfd, (const char *)path_ptr, path,
+                             sizeof(path));
+    if (rc != 0)
+      return rc;
+    return vfs_chown(path, (uint32_t)uid, (uint32_t)gid);
+  }
+  return k_chown(path_ptr, uid, gid, 0, 0);
+}
+
 // ---------- [4.2] utimensat ----------
 #define UTIME_NOW 0x3FFFFFFFLL
 #define UTIME_OMIT 0x3FFFFFFELL
@@ -4591,6 +5221,16 @@ struct k_ts64 {
   int64_t tv_sec;
   int64_t tv_nsec;
 };
+
+// [U1] utimensat: hora concreta = dueño o root; NULL/UTIME_NOW = dueño, root
+// o con permiso de escritura.
+static int utimes_permitted(process_t *proc, vfs_node_t *node, int explicit_time) {
+  if (cap_raised(proc, CAP_FOWNER) || proc->fsuid == node->uid)
+    return 0;
+  if (explicit_time)
+    return -EPERM;
+  return vfs_check_access(node, 2) == 0 ? 0 : -EACCES;
+}
 
 static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
                            uint64_t times_uptr, uint64_t flags, uint64_t a5) {
@@ -4602,6 +5242,7 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     return -EINVAL; // solo AT_SYMLINK_NOFOLLOW
 
   int64_t mtime_sec = 0;
+  int ut_explicit = 0; // hora concreta: solo dueño/root (Linux); si no, basta escribir
   if (times_uptr) {
     struct k_ts64 times[2];
     if (!access_ok((void *)times_uptr, sizeof(times)))
@@ -4612,8 +5253,10 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
       return 0;
     if (times[1].tv_nsec == UTIME_NOW)
       mtime_sec = rtc_get_epoch();
-    else
+    else {
       mtime_sec = times[1].tv_sec;
+      ut_explicit = 1;
+    }
   } else {
     mtime_sec = rtc_get_epoch();
   }
@@ -4621,15 +5264,18 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
   // [4.2] futimens(fd, times) → utimensat(fd, NULL, times, 0).
   // BusyBox touch abre el fichero con O_CREAT y luego aplica futimens.
   // Sin este path, dfd != AT_FDCWD → EINVAL → mtime se queda en 1980.
-  if ((int)dfd != AT_FDCWD) {
-    if (path_uptr != 0)
-      return -EINVAL; // path relativo a dfd: no soportado todavía
+  if ((int)dfd != AT_FDCWD && path_uptr == 0) {
     int kfd = (int)dfd;
     if (kfd < 0 || kfd >= MAX_PROCESS_FDS || !proc->fds[kfd])
       return -EBADF;
     vfs_node_t *node = proc->fds[kfd]->node;
     if (!node)
       return -EBADF;
+    {
+      int prc = utimes_permitted(proc, node, ut_explicit);
+      if (prc)
+        return prc;
+    }
     if (node->ops && node->ops->utimes)
       return node->ops->utimes(node, mtime_sec);
     return 0;
@@ -4639,9 +5285,20 @@ static int64_t k_utimensat(uint64_t dfd, uint64_t path_uptr,
     return -EINVAL;
 
   char path[VFS_PATH_MAX];
-  int rc = resolve_user_path(proc, (const char *)path_uptr, path, sizeof(path));
+  // [Plan_GCC] ruta relativa a dfd (tar/gnulib usan utimensat(dirfd, nombre)).
+  int rc = resolve_at_path(proc, (int)dfd, (const char *)path_uptr, path,
+                           sizeof(path));
   if (rc != 0) {
     return rc;
+  }
+  {
+    vfs_node_t *un = vfs_lookup(path);
+    if (un) {
+      int prc = utimes_permitted(proc, un, ut_explicit);
+      vfs_node_free(un);
+      if (prc)
+        return prc;
+    }
   }
   return vfs_utimes(path, mtime_sec);
 }
@@ -4752,7 +5409,8 @@ static int64_t k_truncate(uint64_t path_uptr, uint64_t length, uint64_t a3,
 static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
                         uint64_t mode, uint64_t dev) {
   int type = (int)(mode & S_IFMT);
-  if (type != 0 && type != S_IFREG && type != S_IFCHR)
+  if (type != 0 && type != S_IFREG && type != S_IFCHR && type != S_IFIFO &&
+      type != S_IFSOCK)
     return -EPERM;
   char path[VFS_PATH_MAX];
   int rc = resolve_at_path(proc, dfd, (const char *)path_uptr, path,
@@ -4762,7 +5420,7 @@ static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
   uint32_t perm = ((uint32_t)mode & 0777) & ~proc->umask;
 
   if (type == S_IFCHR) {
-    if (proc->euid != 0)
+    if (!cap_raised(proc, CAP_MKNOD))
       return -EPERM;
     uint64_t maj = ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfffULL);
     uint64_t min = (dev & 0xff) | ((dev >> 12) & ~0xffULL);
@@ -4770,6 +5428,8 @@ static int64_t do_mknod(process_t *proc, int dfd, uint64_t path_uptr,
       return -EINVAL;
     return vfs_mknod(path, perm, (uint32_t)((maj << 8) | min));
   }
+  if (type == S_IFIFO || type == S_IFSOCK) // nodo sin datos (tar, cp -a, mkfifo)
+    return vfs_mknod_raw(path, (uint32_t)type | perm, 0);
   // [3.4.c] mknod(PATH, mode) usa `mode & 0777` filtrado por umask.
   if (perm == 0)
     perm = 0666 & ~proc->umask;
@@ -4865,6 +5525,10 @@ static int64_t k_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_uptr,
       if (nr.rlim_max > MAX_PROCESS_FDS)
         nr.rlim_max = MAX_PROCESS_FDS;
     }
+    // [U6] subir el limite duro exige CAP_SYS_RESOURCE.
+    if (nr.rlim_max > self->rlimits[resource].rlim_max &&
+        !cap_raised(self, CAP_SYS_RESOURCE))
+      return -EPERM;
     self->rlimits[resource].rlim_cur = nr.rlim_cur;
     self->rlimits[resource].rlim_max = nr.rlim_max;
   }
@@ -4898,6 +5562,8 @@ static int64_t k_sethostname(uint64_t name_uptr, uint64_t len, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   if (len > sizeof(g_hostname) - 1)
     return -EINVAL;
   if (len == 0)
@@ -5059,6 +5725,8 @@ static int64_t k_setdomainname(uint64_t name_uptr, uint64_t len, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   if (len >= sizeof(g_domainname))
     return -EINVAL;
   if (len == 0) {
@@ -5377,6 +6045,8 @@ static int64_t k_bind(uint64_t fd, uint64_t addr, uint64_t addrlen, uint64_t a4,
   int rc = copy_sockaddr_in_from_user(addr, addrlen, &ip, &port);
   if (rc != 0)
     return rc;
+  if (port != 0 && port < 1024 && !cap_raised(proc, CAP_NET_BIND_SERVICE))
+    return -EACCES;
   return socket_bind(s, ip, port);
 }
 
@@ -6122,10 +6792,13 @@ struct k_cap_hdr {
   int32_t pid;
 };
 struct k_cap_data {
-  uint32_t effective, permitted, inheritable;
-  uint32_t pad;
+  uint32_t effective, permitted, inheritable; // 12 bytes, como Linux
 };
 #define _LINUX_CAPABILITY_VERSION_3 0x20080522u
+static void cap_split(uint64_t v, uint32_t out[2]) {
+  out[0] = (uint32_t)v;
+  out[1] = (uint32_t)(v >> 32);
+}
 static int64_t k_capget(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
   (void)a3;
@@ -6139,26 +6812,42 @@ static int64_t k_capget(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
   if (copy_from_user(&h, (void *)hdr, sizeof(h)) < 0)
     return -EFAULT;
   if (h.version != _LINUX_CAPABILITY_VERSION_3) {
-    // Devolvemos la versión soportada; Linux hace lo mismo y el caller
-    // reintenta.
     h.version = _LINUX_CAPABILITY_VERSION_3;
     if (copy_to_user((void *)hdr, &h, sizeof(h)) < 0)
       return -EFAULT;
     return -EINVAL;
   }
+  process_t *self = process_current();
+  process_t *t = self;
+  if (h.pid < 0)
+    return -EINVAL;
+  if (h.pid != 0 && self && (uint32_t)h.pid != self->pid)
+    t = process_find_by_pid((uint32_t)h.pid);
+  if (!t)
+    return -ESRCH;
   if (data) {
-    if (access_ok((void *)data, 2 * sizeof(struct k_cap_data))) {
-      struct k_cap_data z[2];
-      memset(z, 0, sizeof(z));
-      (void)copy_to_user((void *)data, z, sizeof(z));
+    if (!access_ok((void *)data, 2 * sizeof(struct k_cap_data)))
+      return -EFAULT;
+    struct k_cap_data d[2];
+    uint32_t e[2], p2[2], i2[2];
+    cap_split(t->cap_eff, e);
+    cap_split(t->cap_prm, p2);
+    cap_split(t->cap_inh, i2);
+    for (int k = 0; k < 2; k++) {
+      d[k].effective = e[k];
+      d[k].permitted = p2[k];
+      d[k].inheritable = i2[k];
     }
+    if (copy_to_user((void *)data, d, sizeof(d)) < 0)
+      return -EFAULT;
   }
   return 0;
 }
 
+// capset: solo el propio proceso. Reglas de Linux: eff ⊆ prm, prm nuevo ⊆
+// prm actual, inh nuevo ⊆ (inh | prm) salvo con CAP_SETPCAP y ⊆ bounding.
 static int64_t k_capset(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
                         uint64_t a5) {
-  (void)data;
   (void)a3;
   (void)a4;
   (void)a5;
@@ -6169,8 +6858,39 @@ static int64_t k_capset(uint64_t hdr, uint64_t data, uint64_t a3, uint64_t a4,
   struct k_cap_hdr h;
   if (copy_from_user(&h, (void *)hdr, sizeof(h)) < 0)
     return -EFAULT;
-  if (h.version != _LINUX_CAPABILITY_VERSION_3)
+  if (h.version != _LINUX_CAPABILITY_VERSION_3) {
+    h.version = _LINUX_CAPABILITY_VERSION_3;
+    (void)copy_to_user((void *)hdr, &h, sizeof(h));
     return -EINVAL;
+  }
+  process_t *p = process_current();
+  if (!p)
+    return -EFAULT;
+  if (h.pid != 0 && (uint32_t)h.pid != p->pid)
+    return -EPERM;
+  if (!data || !access_ok((void *)data, 2 * sizeof(struct k_cap_data)))
+    return -EFAULT;
+  struct k_cap_data d[2];
+  if (copy_from_user(d, (void *)data, sizeof(d)) < 0)
+    return -EFAULT;
+  uint64_t ne = (uint64_t)d[0].effective | ((uint64_t)d[1].effective << 32);
+  uint64_t np = (uint64_t)d[0].permitted | ((uint64_t)d[1].permitted << 32);
+  uint64_t ni = (uint64_t)d[0].inheritable | ((uint64_t)d[1].inheritable << 32);
+  ne &= CAP_FULL_MASK;
+  np &= CAP_FULL_MASK;
+  ni &= CAP_FULL_MASK;
+  if (np & ~p->cap_prm)
+    return -EPERM;
+  if (ne & ~np)
+    return -EPERM;
+  if (!cap_raised(p, CAP_SETPCAP) && (ni & ~(p->cap_inh | p->cap_prm)))
+    return -EPERM;
+  if (ni & ~(p->cap_inh | p->cap_bnd))
+    return -EPERM;
+  p->cap_eff = ne;
+  p->cap_prm = np;
+  p->cap_inh = ni;
+  p->cap_amb &= (np & ni);
   return 0;
 }
 
@@ -6190,11 +6910,151 @@ static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a3;
   (void)a4;
   (void)a5;
-  // No tenemos write-back cache: FAT32 sincroniza en cada write,
-  // tarfs es RO, procfs/sysfs/devfs no escriben a disco. No hay nada
-  // que volcar. Devolver 0 es correcto (Linux también lo hace en
-  // sistemas sin dirty pages).
+  etc_persist_flush(); // [U2.3] passwd/group/shadow -> /data/etc
+  // Vuelca todos los FS con caché propia (FAT32 difiere las escrituras; ext2
+  // también lo hará). tarfs/procfs/sysfs/devfs/tmpfs no tienen ops->sync.
+  vfs_sync_all();
   return 0;
+}
+
+// ---------- mount(2) / umount2(2) ----------
+// Valores MS_* de Linux (coinciden con VFS_MS_* en los bits que usamos).
+#define K_MS_REMOUNT 32
+#define K_MS_BIND 4096
+#define K_MS_KNOWN_FLAGS                                                       \
+  (VFS_MS_RDONLY | VFS_MS_NOSUID | VFS_MS_NODEV | VFS_MS_NOEXEC |              \
+   VFS_MS_SYNCHRONOUS | VFS_MS_NOATIME | K_MS_REMOUNT | K_MS_BIND)
+
+// mount(source, target, fstype, flags, data). Solo root.
+// Tipos: vfat/msdos (FAT32), iso9660, tmpfs; MS_BIND; MS_REMOUNT (solo flags).
+static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
+                       uint64_t mflags, uint64_t data_ptr) {
+  (void)data_ptr;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (proc->euid != 0)
+    return -EPERM;
+
+  char target[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)tgt_ptr, target, sizeof(target));
+  if (rc != 0)
+    return rc;
+
+  unsigned long fl = (unsigned long)mflags & K_MS_KNOWN_FLAGS;
+
+  if (fl & K_MS_REMOUNT) {
+    if (!vfs_get_mount_ops(target))
+      return -EINVAL;
+    unsigned long nf = fl & ~(unsigned long)(K_MS_REMOUNT | K_MS_BIND);
+    {
+      struct vfs_fs_ops *ro_ops = vfs_get_mount_ops(target);
+      if (ro_ops && ro_ops->name && strcmp(ro_ops->name, "ext2") == 0) {
+        int erc = ext2_remount(vfs_get_mount_priv(target), !(nf & VFS_MS_RDONLY));
+        if (erc != 0)
+          return erc;
+      }
+    }
+    if (nf & VFS_MS_RDONLY) { // rw -> ro: volcar antes de cerrar la puerta
+      struct vfs_fs_ops *o = vfs_get_mount_ops(target);
+      void *pv = vfs_get_mount_priv(target);
+      if (o && o->sync && pv)
+        o->sync(pv);
+    }
+    return vfs_set_mount_flags(target, nf);
+  }
+
+  char src[VFS_PATH_MAX];
+  src[0] = '\0';
+  if (src_ptr) {
+    long n = strncpy_from_user(src, (const char *)src_ptr, sizeof(src));
+    if (n < 0)
+      return -EFAULT;
+    if ((size_t)n >= sizeof(src))
+      return -ENAMETOOLONG;
+  }
+
+  if (fl & K_MS_BIND) {
+    char sp[VFS_PATH_MAX];
+    rc = resolve_user_path(proc, (const char *)src_ptr, sp, sizeof(sp));
+    if (rc != 0)
+      return rc;
+    return vfs_mount_bind(target, sp);
+  }
+
+  char type[16];
+  long tn = strncpy_from_user(type, (const char *)type_ptr, sizeof(type));
+  if (tn < 0)
+    return -EFAULT;
+  if ((size_t)tn >= sizeof(type))
+    return -ENODEV;
+
+  // Debe existir el punto de montaje y ser un directorio.
+  vfs_node_t *mp = vfs_lookup(target);
+  if (!mp)
+    return -ENOENT;
+  int is_dir = (mp->flags & VFS_DIRECTORY) != 0;
+  vfs_node_free(mp);
+  if (!is_dir)
+    return -ENOTDIR;
+
+  unsigned long keep = fl & ~(unsigned long)(K_MS_REMOUNT | K_MS_BIND);
+
+  if (strcmp(type, "tmpfs") == 0) {
+    void *priv = tmpfs_new(64 * 1024 * 1024);
+    if (!priv)
+      return -ENOMEM;
+    rc = vfs_mount(target, tmpfs_get_vfs_ops(), priv);
+    if (rc == 0)
+      vfs_set_mount_flags(target, keep);
+    return rc;
+  }
+
+  int is_vfat = strcmp(type, "vfat") == 0 || strcmp(type, "msdos") == 0;
+  int is_iso = strcmp(type, "iso9660") == 0;
+  // ext3/ext4 se aceptan como nombre: el driver rechaza lo que no soporta.
+  int is_ext2 = strcmp(type, "ext2") == 0 || strcmp(type, "ext3") == 0 ||
+                strcmp(type, "ext4") == 0;
+  if (!is_vfat && !is_iso && !is_ext2)
+    return -ENODEV;
+
+  // "/dev/sda1" -> "sda1"
+  const char *bn = src;
+  for (const char *c = src; *c; c++)
+    if (*c == '/')
+      bn = c + 1;
+  if (!*bn)
+    return -EINVAL;
+
+  rc = is_vfat  ? fat32_mount_bdev(bn, target)
+       : is_ext2 ? ext2_mount_bdev_rw(bn, target, !(keep & VFS_MS_RDONLY))
+                 : iso9660_mount_bdev(bn, target);
+  if (rc == 0) {
+    if (is_iso)
+      keep |= VFS_MS_RDONLY;
+    vfs_set_mount_flags(target, keep);
+  }
+  return rc;
+}
+
+#define K_MNT_FORCE 1
+#define K_MNT_DETACH 2
+static int64_t k_umount2(uint64_t path_ptr, uint64_t uflags, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)uflags; // FORCE/DETACH no soportados: se comporta como umount normal
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (proc->euid != 0)
+    return -EPERM;
+  char path[VFS_PATH_MAX];
+  int rc = resolve_user_path(proc, (const char *)path_ptr, path, sizeof(path));
+  if (rc != 0)
+    return rc;
+  return vfs_umount_fs(path);
 }
 
 #define LINUX_REBOOT_MAGIC1 0xfee1dead
@@ -6215,7 +7075,7 @@ static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
        m2 != 537993216))
     return -EINVAL;
   process_t *proc = process_current();
-  if (!proc || proc->euid != 0)
+  if (!proc || !cap_raised(proc, CAP_SYS_BOOT))
     return -EPERM;
   switch ((uint32_t)cmd) {
   case LINUX_REBOOT_CMD_RESTART:
@@ -6226,8 +7086,11 @@ static int64_t k_reboot(uint64_t m1, uint64_t m2, uint64_t cmd, uint64_t arg,
   case LINUX_REBOOT_CMD_POWER_OFF:
     power_request(POWER_ACTION_OFF, "reboot(2)");
   case LINUX_REBOOT_CMD_CAD_ON:
+    power_cad_set(1); // Ctrl-Alt-Supr reinicia directamente
+    return 0;
   case LINUX_REBOOT_CMD_CAD_OFF:
-    return 0; // Ctrl-Alt-Del no esta enlazado todavia
+    power_cad_set(0); // Ctrl-Alt-Supr manda SIGINT a init
+    return 0;
   default:
     return -EINVAL;
   }
@@ -6239,6 +7102,8 @@ static int64_t k_swapon(uint64_t path_uptr, uint64_t flags, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
   process_t *proc = process_current();
   if (!proc)
     return -EFAULT;
@@ -6474,7 +7339,7 @@ static int64_t a_aur_info(uint64_t pid, uint64_t buf, uint64_t a3, uint64_t a4,
 
   process_t *target = self;
   if (pid != 0 && (uint32_t)pid != self->pid) {
-    if (self->euid != 0)
+    if (!cap_raised(self, CAP_SYS_PTRACE))
       return -EPERM;
     target = process_find_by_pid((uint32_t)pid);
     if (!target)
@@ -6548,7 +7413,7 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
 
   enum {
     ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+    ENVP_BYTES = SPAWN_ENVP_MAX * SPAWN_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
   if (!buf)
@@ -6587,10 +7452,10 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
+  const char *kenvp[SPAWN_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0; i < SPAWN_ENVP_MAX; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -6599,13 +7464,13 @@ static int64_t a_spawn_args(uint64_t path, uint64_t argv, uint64_t argc,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      long m = strncpy_from_user(&env_storage[i * SPAWN_ENV_STR_MAX],
+                                 (const char *)uptr, SPAWN_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
         return -EFAULT;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      kenvp[i] = &env_storage[i * SPAWN_ENV_STR_MAX];
       envc++;
     }
   }
@@ -6651,7 +7516,7 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
 
   enum {
     ARGV_BYTES = SPAWN_ARGS_MAX * SPAWN_ARG_STR_MAX,
-    ENVP_BYTES = PROCESS_ENVP_MAX * PROCESS_ENV_STR_MAX
+    ENVP_BYTES = SPAWN_ENVP_MAX * SPAWN_ENV_STR_MAX
   };
   char *buf = (char *)kmalloc(ARGV_BYTES + ENVP_BYTES);
   if (!buf)
@@ -6690,10 +7555,10 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
     }
   }
 
-  const char *kenvp[PROCESS_ENVP_MAX];
+  const char *kenvp[SPAWN_ENVP_MAX];
   int envc = 0;
   if (envp_ptr) {
-    for (int i = 0; i < PROCESS_ENVP_MAX; i++) {
+    for (int i = 0; i < SPAWN_ENVP_MAX; i++) {
       uint64_t uptr;
       if (get_user_u64(&uptr, (const uint64_t *)(envp_ptr + (uint64_t)i * 8)) <
           0) {
@@ -6702,13 +7567,13 @@ static int64_t a_spawn_args_fds(uint64_t path, uint64_t argv, uint64_t argc,
       }
       if (uptr == 0)
         break;
-      long m = strncpy_from_user(&env_storage[i * PROCESS_ENV_STR_MAX],
-                                 (const char *)uptr, PROCESS_ENV_STR_MAX);
+      long m = strncpy_from_user(&env_storage[i * SPAWN_ENV_STR_MAX],
+                                 (const char *)uptr, SPAWN_ENV_STR_MAX);
       if (m < 0) {
         kfree(buf);
         return -EFAULT;
       }
-      kenvp[i] = &env_storage[i * PROCESS_ENV_STR_MAX];
+      kenvp[i] = &env_storage[i * SPAWN_ENV_STR_MAX];
       envc++;
     }
   }
@@ -6875,6 +7740,13 @@ static int64_t a_theme_get(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
   return (int64_t)(((uint64_t)theme_generation() << 1) |
                    (uint64_t)theme_is_light());
+}
+
+extern uint32_t fb_width, fb_height;
+static int64_t a_screen_size(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                             uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  return (int64_t)(((uint64_t)fb_width << 16) | (fb_height & 0xFFFF));
 }
 
 static int64_t a_sysinfo(uint64_t uptr, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -7228,11 +8100,13 @@ static const syscall_entry_t linux_table[] = {
     [SYS_STAT] = {k_stat, "stat"},
     [SYS_FSTAT] = {k_fstat, "fstat"},
     [SYS_FCHMODAT] = {k_fchmodat, "fchmodat"},
+    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_LSTAT] = {k_lstat, "lstat"},
     [SYS_LSEEK] = {k_lseek, "lseek"},
     [SYS_MMAP] = {k_mmap, "mmap"},
     [SYS_MREMAP] = {k_mremap, "mremap"},
     [SYS_MPROTECT] = {k_mprotect, "mprotect"},
+    [SYS_MSYNC] = {k_msync, "msync"},
     [SYS_MADVISE] = {k_madvise, "madvise"},
     [SYS_FSTATFS] = {k_fstatfs, "fstatfs"},
     [SYS_STATFS] = {k_statfs, "statfs"},
@@ -7240,6 +8114,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CHMOD] = {k_chmod, "chmod"},
     [SYS_FCHMOD] = {k_fchmod, "fchmod"},
     [SYS_CHOWN] = {k_chown, "chown"},
+    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_FCHOWN] = {k_fchown, "fchown"},
     [SYS_LCHOWN] = {k_lchown, "lchown"},
     [SYS_GETRUSAGE] = {k_getrusage, "getrusage"},
@@ -7396,6 +8271,8 @@ static const syscall_entry_t linux_table[] = {
     [SYS_EVENTFD] = {k_eventfd, "eventfd"},
     [SYS_EVENTFD2] = {k_eventfd2, "eventfd2"},
     [SYS_SYNC] = {k_sync, "sync"},
+    [SYS_MOUNT] = {k_mount, "mount"},
+    [SYS_UMOUNT2] = {k_umount2, "umount2"},
     [SYS_REBOOT] = {k_reboot, "reboot"},
     [SYS_SWAPON] = {k_swapon, "swapon"},
     [SYS_SWAPOFF] = {k_swapoff, "swapoff"},
@@ -7415,7 +8292,7 @@ static const syscall_entry_t linux_table[] = {
     [SYS_SIGNALFD4] = {k_signalfd4, "signalfd4"},
     [303] = {k_name_to_handle_at, "name_to_handle_at"},
     [439] = {k_faccessat, "faccessat2"},
-    [439] = {k_faccessat, "faccessat2"},
+    [452] = {k_fchmodat2, "fchmodat2"},
     [SYS_TRUNCATE] = {k_truncate, "truncate"},
     [SYS_FTRUNCATE] = {k_ftruncate, "ftruncate"},
     [SYS_FALLOCATE] = {k_fallocate, "fallocate"},
@@ -7462,6 +8339,7 @@ static const syscall_entry_t aurora_table[] = {
     [ASYS_THEME_GET - ASYS_BASE] = {a_theme_get, "asys_theme_get"},
     [ASYS_SYSINFO - ASYS_BASE] = {a_sysinfo, "asys_sysinfo"},
     [ASYS_PROCLIST - ASYS_BASE] = {a_proclist, "asys_proclist"},
+    [ASYS_SCREEN_SIZE - ASYS_BASE] = {a_screen_size, "asys_screen_size"},
     [ASYS_WIN_SET_RAW_INPUT -
         ASYS_BASE] = {a_win_set_raw_input, "asys_win_set_raw_input"},
     [ASYS_WIN_CREATE_EX - ASYS_BASE] = {a_win_create_ex, "asys_win_create_ex"},

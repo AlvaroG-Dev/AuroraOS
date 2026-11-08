@@ -12,7 +12,7 @@ O=build/linuxkpi_src/nvidia-open/src/nvidia/_out/Linux_x86_64/nv-kernel.o
 [ -f "$O" ] || { echo "falta $O (compila src/nvidia primero)" >&2; exit 1; }
 mkdir -p "$NV"
 CC=${KUR_CC:-gcc}
-CF="-fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel"
+CF="-std=gnu11 -fcf-protection=none -ffreestanding -O2 -mcmodel=kernel -mno-red-zone -fno-stack-protector -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -I. -Ikernel"
 
 # 1) Simbolos sin resolver de nv-kernel.o -> stubs. Cada stub registra (una vez)
 #    su nombre en el log la primera vez que se llama y devuelve 0 (NV_OK/NULL/false).

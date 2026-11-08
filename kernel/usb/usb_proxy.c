@@ -451,6 +451,8 @@ static int uproxy_hcd_interrupt_xfer(usb_device_t *dev, usb_endpoint_t *ep,
     total += act;
     if (act < n)
       break; // paquete corto: fin de la transferencia
+    if (ep->type == USB_EP_INTERRUPT && (ep->addr & 0x80))
+      break; // interrupt IN: una petición = varios informes ya completos
   }
   if (out_actual_len)
     *out_actual_len = total;

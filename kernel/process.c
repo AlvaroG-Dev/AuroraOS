@@ -334,6 +334,9 @@ typedef struct {
   uint16_t phnum;
   uint16_t phent;
   uint64_t vdso_base; // ← NUEVO
+  // [U1.4] Credenciales que verá el proceso tras execve (AT_UID.. y AT_SECURE).
+  uint32_t uid, euid, gid, egid;
+  int secure;
 } proc_auxv_info_t;
 
 // ---------------------------------------------------------------------------
@@ -492,13 +495,13 @@ static uint64_t setup_arg_block(uint64_t *pml4, uint64_t stack_top, int argc,
   PUSH_AUXV(33, ai ? ai->vdso_base : 0);      // AT_SYSINFO_EHDR ← NUEVO
   PUSH_AUXV(8, 0);                            // AT_FLAGS
   PUSH_AUXV(9, ai ? ai->entry : 0);           // AT_ENTRY
-  PUSH_AUXV(11, 0);                           // AT_UID
-  PUSH_AUXV(12, 0);                           // AT_EUID
-  PUSH_AUXV(13, 0);                           // AT_GID
-  PUSH_AUXV(14, 0);                           // AT_EGID
+  PUSH_AUXV(11, ai ? (uint64_t)ai->uid : 0);   // AT_UID
+  PUSH_AUXV(12, ai ? (uint64_t)ai->euid : 0);   // AT_EUID
+  PUSH_AUXV(13, ai ? (uint64_t)ai->gid : 0);   // AT_GID
+  PUSH_AUXV(14, ai ? (uint64_t)ai->egid : 0);   // AT_EGID
   PUSH_AUXV(16, 0);                           // AT_HWCAP
   PUSH_AUXV(17, 100);                         // AT_CLKTCK
-  PUSH_AUXV(23, 0);                           // AT_SECURE
+  PUSH_AUXV(23, ai ? (uint64_t)(ai->secure != 0) : 0); // AT_SECURE
   PUSH_AUXV(25, random_va);                   // AT_RANDOM
   PUSH_AUXV(26, 0);                           // AT_HWCAP2
   PUSH_AUXV(31, execfn_va);                   // AT_EXECFN
@@ -560,6 +563,9 @@ static void process_init_creds(process_t *proc) {
   proc->sgid = 0;
   proc->fsgid = 0;
   proc->umask = 022;
+  proc->cap_eff = proc->cap_prm = proc->cap_bnd = CAP_FULL_MASK;
+  proc->cap_inh = proc->cap_amb = 0;
+  proc->keepcaps = 0;
   // [5.1] Coherente con Linux: el proceso inicial arranca con el grupo
   // root como suplementario. Sin esto, `id` omite `groups=` y algunos
   // applets que iteran getgroups() ven una lista vacía.
@@ -1673,6 +1679,10 @@ void process_exit(process_t *proc, int exit_code) {
 
   signalfd_cleanup(proc);
   ptimer_exit(proc->pid);
+  {
+    extern void posix_lock_release_pid(uint32_t pid);
+    posix_lock_release_pid(proc->pid); // [fcntl POSIX locks]
+  }
 
   process_clear_envp(proc);
   process_clear_argv(proc);
@@ -1925,8 +1935,9 @@ void *process_sbrk(process_t *proc, int64_t increment) {
 }
 
 // ---------------------------------------------------------------------------
-// [fork] Clonar el espacio de usuario: copia cada PTE presente del padre
-// a páginas físicas nuevas en el hijo. Sin COW — lento pero simple.
+// [fork] Clonar el espacio de usuario con copy-on-write: cada PTE presente
+// del padre se comparte con el hijo (solo lectura + PTE_COW, refcount en el
+// PMM). Las paginas de swap, MMIO y objetos compartidos siguen su regla propia.
 //
 // Se hace con walk manual (no paging_get_phys_in por VA, que sería
 // 256*512*512 iteraciones): recorremos las tablas directamente y
@@ -1996,7 +2007,9 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           // phys_to_virt(BAR) (p.ej. 0x810a0000 del e1000e) cae FUERA
           // de la ventana física de 512MB → #PF en el memcpy.
           // Paginas de objetos compartidos (memfd MAP_SHARED): mismo fisico.
-          if (pte & PTE_SHARED_OBJ) {
+          // PTE_SPECIAL (vDSO, buffers DMA de usuario): frame ajeno al proceso,
+          // tampoco se copia ni se libera en exit.
+          if (pte & (PTE_SHARED_OBJ | PTE_SPECIAL)) {
             if (paging_map_page_in(child_pml4, virt, pte & PTE_FRAME,
                                    pte & (0xFFF | PTE_NX)) != 0)
               return -1;
@@ -2016,6 +2029,32 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
           }
 
           uint64_t old_phys = pte & PTE_FRAME;
+
+          // [COW] Pagina privada de RAM: padre e hijo comparten el frame, de
+          // solo lectura y marcado PTE_COW. La primera escritura de cualquiera
+          // de los dos cae en pf_handle_cow(), que copia (o, si el otro ya
+          // salio, devuelve la escritura sin copiar). El refcount del frame
+          // lo lleva el PMM. Se marcan tambien las paginas no escribibles
+          // (codigo): un mprotect(PROT_WRITE) posterior no debe poder escribir
+          // en un frame compartido.
+          if (pmm_page_share(old_phys) == 0) {
+            uint64_t cow_pte = (pte & ~(uint64_t)PTE_WRITABLE) | PTE_COW;
+            if (paging_map_page_in(child_pml4, virt, old_phys, cow_pte) != 0) {
+              pmm_free_page(old_phys); // suelta la referencia recien tomada
+              LOG_ERR("[FORK] paging_map_page_in (COW) falló en %p",
+                      (void *)virt);
+              return -1;
+            }
+            if (cow_pte != pte) {
+              // Degradar el PTE del padre. El flush de TLB (todas las CPUs,
+              // por si hay hilos del padre en otras) lo hace sys_fork una
+              // sola vez al terminar el recorrido.
+              __atomic_store_n(&pt_parent[l], cow_pte, __ATOMIC_RELEASE);
+            }
+            continue;
+          }
+
+          // Sin refcount disponible (saturado o sin tabla): copia completa.
           uint64_t new_phys = pmm_alloc_page();
           if (!new_phys) {
             LOG_ERR("[FORK] sin memoria clonando página");
@@ -2090,11 +2129,40 @@ static int clone_vmas(process_t *parent, process_t *child) {
 // ---------------------------------------------------------------------------
 extern registers_t *syscall_current_regs(void);
 
-int64_t sys_fork(void) {
+struct nproc_ctx {
+  uint32_t uid;
+  int n;
+};
+static int nproc_count_cb(process_t *p, void *arg) {
+  struct nproc_ctx *c = (struct nproc_ctx *)arg;
+  if (p->uid == c->uid)
+    c->n++;
+  return 0;
+}
+
+int64_t sys_fork_ex(uint64_t child_rsp);
+int64_t sys_fork(void) { return sys_fork_ex(0); }
+
+// child_rsp != 0: el hijo arranca con esa pila (clone(CLONE_VM|CLONE_VFORK, stack)
+// de posix_spawn de glibc, emulado con fork COW: el hijo ve una copia de la
+// memoria del padre, incluida la pila que el padre preparo con fn/arg).
+int64_t sys_fork_ex(uint64_t child_rsp) {
   process_t *parent = process_current();
   if (!parent) {
     LOG_ERR("[FORK] sin proceso actual");
     return -EINVAL;
+  }
+
+  // [U7.2] RLIMIT_NPROC por usuario (anti fork-bomb). Root y CAP_SYS_RESOURCE
+  // quedan exentos, como en Linux.
+  if (!cap_raised(parent, CAP_SYS_RESOURCE) && !cap_raised(parent, CAP_SYS_ADMIN)) {
+    struct nproc_ctx c = {parent->uid, 0};
+    process_for_each(nproc_count_cb, &c);
+    if ((uint64_t)c.n >= parent->rlimits[RLIMIT_NPROC].rlim_cur) {
+      LOG_INFO("[AUDIT] fork denegado: uid=%u alcanza RLIMIT_NPROC (%d)",
+               (unsigned)parent->uid, c.n);
+      return -EAGAIN;
+    }
   }
 
   registers_t *regs = syscall_current_regs();
@@ -2118,14 +2186,22 @@ int64_t sys_fork(void) {
   uint64_t *child_pml4 = (uint64_t *)phys_to_virt(child_pml4_phys);
 
   // 2. Copiar user space.
-  if (clone_user_space(parent_pml4, child_pml4) != 0) {
+  int cu_rc = clone_user_space(parent_pml4, child_pml4);
+  // [COW] Los PTE del padre pasaron a solo lectura: ninguna CPU puede seguir
+  // escribiendo por un TLB viejo. Un solo shootdown para todo el espacio
+  // (tambien si el clon fallo a medias).
+  paging_invalidate_tlb_global(0);
+  if (cu_rc != 0) {
     paging_free_user_space(child_pml4_phys);
     mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
 
   // 3. Crear tarea del hijo con los regs del padre.
-  task_t *child_task = sched_create_forked_user_task(regs, child_pml4_phys);
+  registers_t fork_regs = *regs;
+  if (child_rsp)
+    fork_regs.rsp = child_rsp;
+  task_t *child_task = sched_create_forked_user_task(&fork_regs, child_pml4_phys);
   if (!child_task) {
     LOG_ERR("[FORK] sched_create_forked_user_task falló");
     paging_free_user_space(child_pml4_phys);
@@ -2231,6 +2307,13 @@ int64_t sys_fork(void) {
   child->sgid = parent->sgid;
   child->fsgid = parent->fsgid;
   child->umask = parent->umask;
+  child->no_new_privs = parent->no_new_privs;
+  child->cap_eff = parent->cap_eff;
+  child->cap_prm = parent->cap_prm;
+  child->cap_inh = parent->cap_inh;
+  child->cap_bnd = parent->cap_bnd;
+  child->cap_amb = parent->cap_amb;
+  child->keepcaps = parent->keepcaps;
   child->ngroups = parent->ngroups;
   for (int i = 0; i < NGROUPS_MAX; i++)
     child->groups[i] = parent->groups[i];
@@ -2409,6 +2492,10 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
     vfs_node_free(exe_node);
     return -EACCES;
   }
+  if (vfs_mount_flags(path) & VFS_MS_NOEXEC) { // mount -o noexec
+    vfs_node_free(exe_node);
+    return -EACCES;
+  }
   if ((exe_node->mode & 0111) == 0) {
     vfs_node_free(exe_node);
     return -EACCES;
@@ -2417,6 +2504,23 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   uint32_t new_mode = exe_node->mode;
   uint32_t new_uid = exe_node->uid;
   uint32_t new_gid = exe_node->gid;
+  // [U1.4] Credenciales resultantes (Linux): el bit setuid/setgid fija
+  // euid/suid (egid/sgid) al dueño del fichero, salvo no_new_privs. El uid
+  // real no cambia. Se calculan aquí para que el auxv (AT_UID.., AT_SECURE)
+  // ya refleje los valores finales.
+  uint32_t x_euid = proc->euid, x_egid = proc->egid;
+  // [U2] nosuid: los volúmenes FAT32 (/data, USB) nunca conceden setuid/setgid.
+  int nosuid = (exe_node->fs && exe_node->fs->name &&
+                strcmp(exe_node->fs->name, "fat32") == 0) ||
+               (vfs_mount_flags(path) & VFS_MS_NOSUID); // mount -o nosuid
+  if (!proc->no_new_privs && !nosuid) {
+    if (new_mode & S_ISUID)
+      x_euid = new_uid;
+    if (new_mode & S_ISGID)
+      x_egid = new_gid;
+  }
+  int x_secure = (x_euid != proc->uid) || (x_egid != proc->gid) ||
+                 (x_euid != proc->euid) || (x_egid != proc->egid);
 
   uint64_t new_pml4_phys = paging_clone_kernel_space();
   if (!new_pml4_phys) {
@@ -2536,6 +2640,11 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
       .phnum = phnum,
       .phent = phent,
       .vdso_base = vdso_base,
+      .uid = proc->uid,
+      .euid = x_euid,
+      .gid = proc->gid,
+      .egid = x_egid,
+      .secure = x_secure,
   };
   uint64_t user_rsp = setup_arg_block(new_pml4, stack_top, argc, argv, envc,
                                       envp, &ai, path, at_base);
@@ -2578,23 +2687,24 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   // execve borra los temporizadores POSIX; los de setitimer/alarm siguen.
   ptimer_exec(proc->pid);
 
-  int was_root = (proc->euid == 0);
-  if (new_mode & S_ISUID) {
-    proc->euid = new_uid;
-    proc->fsuid = new_uid;
-    if (was_root) {
-      proc->uid = new_uid;
-      proc->suid = new_uid;
-    }
+  {
+    // [U6] Capacidades tras execve (Linux, sin caps de fichero): un proceso
+    // "root" (uid o euid 0) gana permitidas = bounding; el resto, solo ambient.
+    uint64_t fp = (proc->uid == 0 || x_euid == 0) ? CAP_FULL_MASK : 0;
+    uint64_t fe = (x_euid == 0) ? CAP_FULL_MASK : 0;
+    uint64_t amb = (x_euid != proc->euid || x_egid != proc->egid) ? 0 : proc->cap_amb;
+    uint64_t prm = (proc->cap_inh & fp) | (fp & proc->cap_bnd) | amb;
+    proc->cap_amb = amb;
+    proc->cap_prm = prm;
+    proc->cap_eff = fe ? prm : amb;
+    proc->keepcaps = 0;
   }
-  if (new_mode & S_ISGID) {
-    proc->egid = new_gid;
-    proc->fsgid = new_gid;
-    if (was_root) {
-      proc->gid = new_gid;
-      proc->sgid = new_gid;
-    }
-  }
+  proc->euid = x_euid;
+  proc->suid = x_euid;
+  proc->fsuid = x_euid;
+  proc->egid = x_egid;
+  proc->sgid = x_egid;
+  proc->fsgid = x_egid;
 
   proc->fs_base = 0;
   if (proc->task)
@@ -2699,7 +2809,70 @@ int process_is_in_pgrp(process_t *p, uint32_t pgid) {
   return p->pgid == pgid;
 }
 
+// [U1.3] Regla de kill(2) de Linux: root puede todo; el resto solo si su uid
+// real o efectivo coincide con el uid real o guardado del destino.
+int capable(int cap) {
+  process_t *p = process_current();
+  if (!p)
+    return 1;
+  return (p->cap_eff >> cap) & 1;
+}
+
+void process_caps_after_setuid(process_t *p, uint32_t ouid, uint32_t oeuid,
+                               uint32_t osuid) {
+  if ((ouid == 0 || oeuid == 0 || osuid == 0) && p->uid != 0 && p->euid != 0 &&
+      p->suid != 0) {
+    if (!p->keepcaps) {
+      p->cap_prm = 0;
+      p->cap_eff = 0;
+    }
+    p->cap_amb = 0;
+  }
+  if (oeuid == 0 && p->euid != 0)
+    p->cap_eff = 0;
+  if (oeuid != 0 && p->euid == 0)
+    p->cap_eff = p->cap_prm;
+}
+
+int process_may_signal(const process_t *sender, const process_t *target) {
+  if (!sender || !target || sender == target)
+    return 1;
+  if (sender->cap_eff & (1ULL << CAP_KILL))
+    return 1;
+  return sender->uid == target->uid || sender->uid == target->suid ||
+         sender->euid == target->uid || sender->euid == target->suid;
+}
+
+static int process_signal_pgrp_as(uint32_t pgid_arg, uint64_t signal_mask,
+                                  const process_t *sender);
+
+// Como process_signal_pgrp pero respetando permisos de `sender`.
+// -ESRCH si el grupo no existe, -EPERM si existe pero no se puede señalar a nadie.
+int process_signal_pgrp_checked(uint32_t pgid_arg, uint64_t signal_mask,
+                                const process_t *sender) {
+  int members = 0, allowed = 0;
+  unsigned long fl = spin_lock_irqsave(&process_lock);
+  for (process_t *q = process_list; q; q = q->next) {
+    if (q->pgid == pgid_arg && !q->is_zombie && q->task) {
+      members++;
+      if (process_may_signal(sender, q))
+        allowed++;
+    }
+  }
+  spin_unlock_irqrestore(&process_lock, fl);
+  if (!members)
+    return -ESRCH;
+  if (!allowed)
+    return -EPERM;
+  return process_signal_pgrp_as(pgid_arg, signal_mask, sender);
+}
+
 int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
+  return process_signal_pgrp_as(pgid_arg, signal_mask, NULL);
+}
+
+static int process_signal_pgrp_as(uint32_t pgid_arg, uint64_t signal_mask,
+                                  const process_t *sender) {
   if (pgid_arg == 0)
     return -ESRCH;
 
@@ -2713,7 +2886,8 @@ int process_signal_pgrp(uint32_t pgid_arg, uint64_t signal_mask) {
   unsigned long flags = spin_lock_irqsave(&process_lock);
   process_t *p = process_list;
   while (p && n < SIGPGRP_MAX) {
-    if (p->pgid == pgid_arg && !p->is_zombie && p->task) {
+    if (p->pgid == pgid_arg && !p->is_zombie && p->task &&
+        (!sender || process_may_signal(sender, p))) {
       task_t *t = p->task;
       task_get(t);
 

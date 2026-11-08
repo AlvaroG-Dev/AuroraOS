@@ -63,6 +63,7 @@ static inline void put_page(struct page *page)
 }
 static inline void page_ref_inc(struct page *page) { atomic_inc(&page->_refcount); }
 static inline void page_ref_dec(struct page *page) { atomic_dec(&page->_refcount); }
+static inline void page_ref_add(struct page *page, int nr) { atomic_add(nr, &page->_refcount); }
 static inline int page_mapcount(struct page *page) { return atomic_read(&page->_mapcount) + 1; }
 static inline struct page *compound_head(const struct page *page)
 {
@@ -325,4 +326,5 @@ static inline long get_user_pages(unsigned long start, unsigned long nr, unsigne
 #define __phys_to_pfn(p) ((unsigned long)(p) >> PAGE_SHIFT)
 unsigned long lkpi_totalram_pages(void);
 #define get_num_physpages() lkpi_totalram_pages()
+#define virt_to_head_page(x) virt_to_page(x)
 #endif

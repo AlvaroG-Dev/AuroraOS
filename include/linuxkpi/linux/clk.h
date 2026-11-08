@@ -20,4 +20,5 @@ static inline int clk_enable(struct clk *clk) { return 0; }
 static inline void clk_disable(struct clk *clk) { }
 static inline unsigned long clk_get_rate(struct clk *clk) { return 0; }
 
+static inline struct clk *devm_clk_get_optional_enabled(struct device *dev, const char *id) { return NULL; }
 #endif

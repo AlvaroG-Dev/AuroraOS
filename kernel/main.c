@@ -1,6 +1,7 @@
 // kernel/main.c
 // Punto de entrada del kernel Aurora OS.
 
+#include "power.h"
 #include "../bootloader/include/kernel_boot_info.h"
 #include "cmdline.h"
 #include "plog.h"
@@ -27,7 +28,10 @@
 #include "cpu.h"
 #include "driver.h"
 #include "elf.h"
+#include "bcache.h"
+#include "ext2.h"
 #include "fat32.h"
+#include "fsprobe.h"
 #include "gdt.h"
 #include "gfx/compositor.h"
 #include "gfx/theme.h"
@@ -79,6 +83,7 @@
 #include "tty.h"
 #include "vdso.h"
 #include "workqueue.h"
+#include "tmpfs.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -289,6 +294,7 @@ static int acpi_init_task(void *arg) {
   LOG_INFO("[INIT] ACPI PM (P-states, S-states)...");
   acpi_pm_init();
   acpi_button_init();
+  power_cad_init();
 
   LOG_INFO("[INIT] PM: aplicar política...");
   cpu_apply_pm_policy();
@@ -374,6 +380,8 @@ static int vfs_init_task(void *arg) {
 
   LOG_INFO("[INIT] VFS...");
   vfs_init();
+  bc_init();
+  bc_autosize();
 
   LOG_INFO("[INIT] IPC...");
   ipc_init();
@@ -480,12 +488,28 @@ static int drivers_init_task(void *arg) {
 // ARPs espontáneos si QEMU emite alguno (no debería, pero mejor
 // prevenir).
 // ---------------------------------------------------------------------------
+// Plan_Red.md N0: deja en el log cada NIC PCI (clase 0x02) para saber qué
+// driver hace falta en cada máquina real sin necesitar lspci.
+static void net_log_pci_nics(void) {
+  uint8_t bus = 0, slot = 0, func = 0;
+  pci_device_t d;
+  int n = 0;
+  while (pci_find_next_device(0x02, 0xFF, &bus, &slot, &func, &d) == 0) {
+    LOG_INFO("[NET] pci %02x:%02x.%u %04x:%04x subclase=%02x irq=%u", bus, slot,
+             func, d.vendor_id, d.device_id, d.subclass_id, d.irq_line);
+    n++;
+  }
+  if (n == 0)
+    LOG_WARN("[NET] no hay ninguna NIC PCI (clase 0x02)");
+}
+
 static int net_init_task(void *arg) {
   (void)arg;
   if (wait_for_completion_timeout(&g_vfs_done, 5000) == 0)
     LOG_WARN("[INIT] VFS timeout, red puede fallar");
 
   LOG_INFO("[INIT] Networking...");
+  net_log_pci_nics();
   net_init();
   loopback_init();
   ip_init();
@@ -628,6 +652,24 @@ static void save_prev_log_to_data(void) {
   kfree(buf);
 }
 
+// Registra una sola vez el tipo detectado de cada dispositivo. Devuelve 1 si
+// es ext2/3/4: aún no hay driver, así que no se prueba como FAT32 (daría un
+// aviso de BPB inválido en cada reintento).
+static int boot_probe_is_ext2(block_device_t *b) {
+  static char seen[16][16];
+  enum fs_kind k = fs_probe(b);
+  for (int i = 0; i < 16; i++)
+    if (strcmp(seen[i], b->name) == 0)
+      return k == FS_EXT2;
+  for (int i = 0; i < 16; i++)
+    if (!seen[i][0]) {
+      strncpy(seen[i], b->name, sizeof(seen[i]) - 1);
+      LOG_INFO("[FSPROBE] %s: %s", b->name, fs_kind_name(k));
+      break;
+    }
+  return k == FS_EXT2;
+}
+
 // Ultimo resultado de fat32_mount_bdev por dispositivo (para el resumen
 // [DIAG] en pantalla cuando /data no se monta).
 #define MOUNT_RC_MAX 12
@@ -662,11 +704,38 @@ static int mount_rc_of(const char *name, int *rc) {
 }
 
 static int try_mount_data(block_device_t *b) {
+  if (boot_probe_is_ext2(b)) { // ext2/3/4: solo lectura al arrancar (D9)
+    // Solo la partición etiquetada AURORADATA se monta para escribir (la que
+    // crea el Makefile con USB_DATA_FS=ext2); cualquier otro ext2, solo lectura.
+    // Si el FS no se desmontó limpio el driver rechaza escribir y se cae a ro.
+    char label[17] = "";
+    int want_rw = ext2_read_label(b, label) == 0 &&
+                  strcmp(label, "AURORADATA") == 0;
+    int erc = -EROFS;
+    int is_rw = 0;
+    if (want_rw) {
+      erc = ext2_mount_bdev_rw(b->name, "/data", 1);
+      is_rw = erc == 0;
+      if (erc == -EROFS)
+        LOG_WARN("[INIT] %s (AURORADATA) no se puede montar rw: se monta solo "
+                 "lectura (ejecuta e2fsck en el host)", b->name);
+    }
+    if (!is_rw)
+      erc = ext2_mount_bdev(b->name, "/data");
+    note_mount_rc(b->name, erc);
+    if (erc == 0) {
+      LOG_INFO("[INIT] Montado %s (ext2, %s) en /data", b->name,
+               is_rw ? "lectura/escritura" : "solo lectura");
+      g_data_mounted = 1;
+    }
+    return erc;
+  }
   int rc = fat32_mount_bdev(b->name, "/data");
   note_mount_rc(b->name, rc);
   if (rc == 0) {
     LOG_INFO("[INIT] Montado %s en /data", b->name);
     g_data_mounted = 1;
+    etc_persist_on_data_mount(); // [U2.3]
   }
   return rc;
 }
@@ -717,21 +786,53 @@ static void boot_media_diag(const char *why, uint64_t secs) {
   if (n == 0)
     LOG_WARN("[DIAG]  ningun block device: el USB no se enumero como disco "
              "(buscar [xHCI]/[USB-STG] en el log)");
-  boot_console_overlay_enable(1);
+  { /* quiosco (instalador): sin overlay de logs sobre la UI; F12 lo muestra */
+    extern int aurora_kiosk(void);
+    if (!aurora_kiosk())
+      boot_console_overlay_enable(1);
+  }
   compositor_invalidate_rect((rect_t){0, 0, 16384, 16384});
+}
+
+// Al arrancar solo se monta el USB (y volumenes etiquetados AURORADATA, que son
+// los de datos de Aurora): los demas discos quedan con su nombre (/dev/sdX,
+// visibles en lsblk/blkid) pero sin montar. cmdline automount=all lo desactiva.
+static int boot_may_automount(block_device_t *b) {
+  static int all = -1;
+  if (all < 0) {
+    char v[8];
+    all = cmdline_get("automount", v, sizeof(v)) && strcmp(v, "all") == 0;
+  }
+  if (all || b->is_usb)
+    return 1;
+  char label[17] = "";
+  if (ext2_read_label(b, label) == 0 && strcmp(label, "AURORADATA") == 0)
+    return 1;
+  static char noted[16][16];
+  for (int i = 0; i < 16; i++) {
+    if (strcmp(noted[i], b->name) == 0)
+      return 0;
+    if (!noted[i][0]) {
+      strncpy(noted[i], b->name, sizeof(noted[i]) - 1);
+      LOG_INFO("[INIT] %s: disco no USB, no se monta al arrancar (automount=all "
+               "o mount a mano)", b->name);
+      break;
+    }
+  }
+  return 0;
 }
 
 static void mount_boot_media(void) {
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || b->is_partition || b->is_read_only)
+    if (!b || b->is_partition || b->is_read_only || !boot_may_automount(b))
       continue;
     try_mount_data(b);
   }
   // Particiones FAT32 (p. ej. la de datos AURORADATA al final del USB).
   for (int i = 0; i < blk_count() && !g_data_mounted; i++) {
     block_device_t *b = blk_get_by_index(i);
-    if (!b || !b->is_partition || b->is_read_only)
+    if (!b || !b->is_partition || b->is_read_only || !boot_may_automount(b))
       continue;
     try_mount_data(b);
   }
@@ -1128,6 +1229,15 @@ void kmain(struct kernel_boot_info *kinfo) {
         max_phys_addr = end;
     }
   }
+  // La ventana fisica debe cubrir tambien el initrd: el bootloader UEFI lo
+  // deja en EfiLoaderData, que puede quedar POR ENCIMA de la ultima region
+  // CONVENTIONAL (PCs reales con >4 GiB sin hueco bajo 4 GiB para un initrd de
+  // ~1,8 GB). Sin esto, tarfs_init() leia fuera de la ventana -> #PF.
+  if (boot.initrd_base && boot.initrd_size) {
+    uint64_t iend = boot.initrd_base + boot.initrd_size;
+    if (iend > boot.initrd_base && iend > max_phys_addr)
+      max_phys_addr = iend;
+  }
   parse_memmap();
   efi_rt_collect(boot.efi_runtime_services, (const void *)boot.memmap,
                  boot.memmap_size, boot.memmap_desc_size);
@@ -1172,6 +1282,16 @@ void kmain(struct kernel_boot_info *kinfo) {
 
   pmm_relocate_bitmap();
   uaccess_init();
+  {
+    // [COW] CR0.WP: el kernel tambien respeta las paginas de solo lectura, asi
+    // un copy_to_user sobre una pagina COW provoca #PF en vez de escribir en
+    // el frame compartido. Despues de uaccess_init (que parchea .text) y antes
+    // de arrancar los APs (que lo activan en smp_boot.c).
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1ULL << 16);
+    __asm__ volatile("movq %0, %%cr0" : : "r"(cr0));
+  }
   heap_init();
   vmap_init(); // [LinuxKPI L4] antes del primer proceso
   klog_boot_ok();

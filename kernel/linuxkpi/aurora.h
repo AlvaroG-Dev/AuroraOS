@@ -257,11 +257,11 @@ struct aurora_vma;
 #define AURORA_S_IFCHR 0020000
 #define AURORA_S_IFREG 0100000
 struct aurora_vfs_dirent {
-	char name[128];
+	char name[256];
 	u32 type;			/* AURORA_VFS_FILE / _DIRECTORY */
 	u64 size;
 };
-_Static_assert(sizeof(struct aurora_vfs_dirent) == 144, "vfs_dirent_t de Aurora");
+_Static_assert(sizeof(struct aurora_vfs_dirent) == 272, "vfs_dirent_t de Aurora");
 struct aurora_vfs_ops {
 	s64 (*read)(struct aurora_vfs_node *n, u64 off, size_t size, void *buf);
 	s64 (*write)(struct aurora_vfs_node *n, u64 off, size_t size, const void *buf);
@@ -288,6 +288,8 @@ struct aurora_vfs_fs_ops {
 	struct aurora_vfs_node *(*lookup)(void *fs_priv, const char *path);
 	const char *name;
 	void *statfs;
+	void *umount;
+	void *sync;
 };
 struct aurora_vma_dev_ops {
 	int (*fault)(struct aurora_vma *vma, u64 addr, int write);
@@ -412,5 +414,18 @@ struct aurora_firmware {
 int aurora_request_firmware(const struct aurora_firmware **fw, const char *name)
 	__asm__("request_firmware");
 void aurora_release_firmware(const struct aurora_firmware *fw) __asm__("release_firmware");
+
+/* kernel/net/netif_lkpi.c: puente de red (Plan_Red.md). La capa registra una
+ * NIC en la pila de Aurora; el kernel llama a open/stop/xmit con el cookie. */
+struct aurora_netif_ops {
+	int (*open)(void *cookie);
+	int (*stop)(void *cookie);
+	int (*xmit)(void *cookie, const void *frame, size_t len);	/* 0 = enviado */
+};
+void *aurora_netif_register(const u8 mac[6], void *cookie, const struct aurora_netif_ops *ops,
+			    char name_out[8]) __asm__("lkpi_netif_register");
+void aurora_netif_unregister(void *handle) __asm__("lkpi_netif_unregister");
+int aurora_netif_rx(void *handle, const void *frame, size_t len) __asm__("lkpi_netif_rx");
+void aurora_netif_carrier(void *handle, int up) __asm__("lkpi_netif_carrier");
 
 #endif

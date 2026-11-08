@@ -103,6 +103,14 @@ struct kt_job {
 	int expected_order;
 	int exec_order;
 	int err;
+	/*
+	 * Referencias al job: la del planificador (se suelta en free_job) y la
+	 * del motor mientras lo ejecuta. Antes el motor usaba `j` sin
+	 * referencia propia: si drm_sched daba el job por colgado y llamaba a
+	 * free_job con el motor aun en medio, el kfree dejaba al motor sobre
+	 * memoria liberada (veneno de lista, #GP/#PF).
+	 */
+	atomic_t ref;
 };
 
 struct kt_dev {
@@ -277,6 +285,12 @@ static void kt_do_copy(struct kt_job *j)
 	}
 }
 
+static void kt_job_put(struct kt_job *j)
+{
+	if (atomic_dec_and_test(&j->ref))
+		kfree(j);
+}
+
 static void kt_engine_work(struct work_struct *w)
 {
 	struct kt_engine *e = container_of(to_delayed_work(w), struct kt_engine, work);
@@ -292,10 +306,11 @@ static void kt_engine_work(struct work_struct *w)
 		spin_unlock_irq(&e->lock);
 		if (!hw)
 			return;
-		j = hw->job;
+		j = hw->job;		/* el motor tiene su referencia (kt_run_job) */
 		if (atomic_cmpxchg(&e->hang_next, 1, 0)) {
 			/* "Cuelga": no senala; el temporizador del planificador actua. */
 			dma_fence_put(&hw->f);
+			kt_job_put(j);
 			continue;
 		}
 		j->exec_order = atomic_inc_return(&e->order);
@@ -308,6 +323,7 @@ static void kt_engine_work(struct work_struct *w)
 		atomic_inc(&e->executed);
 		dma_fence_signal(&hw->f);
 		dma_fence_put(&hw->f);
+		kt_job_put(j);
 	}
 }
 
@@ -322,6 +338,7 @@ static struct dma_fence *kt_run_job(struct drm_sched_job *sj)
 	spin_lock_init(&hw->lock);
 	INIT_LIST_HEAD(&hw->node);
 	hw->job = j;
+	atomic_inc(&j->ref);		/* la del motor; la suelta kt_engine_work */
 	dma_fence_init(&hw->f, &kt_hw_ops, &hw->lock, e->ctx, atomic64_inc_return(&e->seqno));
 	dma_fence_get(&hw->f);		/* la del motor */
 	spin_lock_irq(&e->lock);
@@ -356,7 +373,7 @@ static void kt_free_job(struct drm_sched_job *sj)
 	struct kt_job *j = container_of(sj, struct kt_job, base);
 
 	drm_sched_job_cleanup(sj);
-	kfree(j);
+	kt_job_put(j);
 }
 
 static const struct drm_sched_backend_ops kt_sched_ops = {
@@ -372,6 +389,7 @@ static struct kt_job *kt_job_new(struct kt_dev *kd)
 	if (!j)
 		return NULL;
 	j->kd = kd;
+	atomic_set(&j->ref, 1);
 	if (drm_sched_job_init(&j->base, &kd->ent, 1, NULL, 0)) {
 		kfree(j);
 		return NULL;
@@ -651,7 +669,15 @@ static int kt_setup(void)
 			.num_rqs = DRM_SCHED_PRIORITY_COUNT,
 			.credit_limit = 16,
 			.hang_limit = 0,
-			.timeout = msecs_to_jiffies(200),
+			/*
+			 * Con la maquina cargada (forks, otros tests, CPUs
+			 * compartidas) el motor puede tardar mas de 200 ms en
+			 * ejecutar un trabajo; el temporizador lo daba entonces
+			 * por colgado y liberaba el job mientras el motor aun lo
+			 * usaba (use-after-free -> #GP con veneno de lista). El
+			 * unico test que necesita el timeout espera 5 s.
+			 */
+			.timeout = msecs_to_jiffies(2000),
 			.name = "kt_gfx",
 			.dev = kd->drm.dev,
 		};

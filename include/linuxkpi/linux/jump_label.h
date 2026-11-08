@@ -23,6 +23,8 @@ struct static_key_false {
 
 #define STATIC_KEY_INIT_TRUE	{ .enabled = ATOMIC_INIT(1) }
 #define STATIC_KEY_INIT_FALSE	{ .enabled = ATOMIC_INIT(0) }
+#define DECLARE_STATIC_KEY_TRUE(name)	extern struct static_key_true name
+#define DECLARE_STATIC_KEY_FALSE(name)	extern struct static_key_false name
 #define DEFINE_STATIC_KEY_TRUE(name)	struct static_key_true name = { .key = STATIC_KEY_INIT_TRUE }
 #define DEFINE_STATIC_KEY_FALSE(name)	struct static_key_false name = { .key = STATIC_KEY_INIT_FALSE }
 

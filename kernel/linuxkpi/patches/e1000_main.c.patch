@@ -1,0 +1,23 @@
+--- e1000_main.c.orig
++++ e1000_main.c
+@@ -254,6 +254,12 @@
+ 	int irq_flags = IRQF_SHARED;
+ 	int err;
+ 
++	/* AuroraOS: la INTx se declara a la capa con pci_alloc_irq_vectors */
++	err = pci_alloc_irq_vectors(adapter->pdev, 1, 1, PCI_IRQ_INTX);
++	if (err < 0) {
++		e_err(probe, "Unable to allocate INTx Error: %d\n", err);
++		return err;
++	}
+ 	err = request_irq(adapter->pdev->irq, handler, irq_flags, netdev->name,
+ 			  netdev);
+ 	if (err) {
+@@ -268,6 +274,7 @@
+ 	struct net_device *netdev = adapter->netdev;
+ 
+ 	free_irq(adapter->pdev->irq, netdev);
++	pci_free_irq_vectors(adapter->pdev);
+ }
+ 
+ /**

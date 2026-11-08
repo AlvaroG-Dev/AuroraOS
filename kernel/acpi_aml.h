@@ -106,6 +106,19 @@ aml_object_t *aml_eval_int_args(const char *path, const uint64_t *args,
 // Registra en el log los dispositivos de boton/EC/tapa y los metodos de GPE
 // del espacio de nombres (diagnostico del boton de encendido).
 void aml_diag_power(void);
+// Controlador embebido (PNP0C09): puertos de datos/comandos (de _CRS, o
+// 0x62/0x66 si no se pueden leer) y el mapa de consultas _Qxx cuyo cuerpo
+// hace Notify(<PNP0C0C>, 0x80), es decir, las que son el boton de encendido.
+typedef struct {
+  int found;
+  uint16_t data_port, cmd_port;
+  int crs_ok;            // puertos leidos de _CRS
+  int nq;                // numero de metodos _Qxx
+  uint8_t power_q[32];   // bitmap de consultas que notifican al boton
+  int power_q_count;
+} aml_ec_info_t;
+int aml_find_ec(aml_ec_info_t *out);
+
 // 1 si `path` existe y es un metodo.
 int aml_method_exists(const char *path);
 

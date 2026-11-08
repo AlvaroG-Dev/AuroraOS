@@ -545,11 +545,11 @@ void evdev_init(void) {
   spin_init(&g_mouse.lock);
 
   // major 13 = input; event0 = minor 64.
-  devtmpfs_register("input/event0", DEVT_MKDEV(13, 64), 0660, 0, 0,
+  devtmpfs_register("input/event0", DEVT_MKDEV(13, 64), 0660, 0, 104,
                     &evdev_ops, &g_kbd);
   extern void vt_init(void);
   vt_init();
-  devtmpfs_register("input/event1", DEVT_MKDEV(13, 65), 0660, 0, 0,
+  devtmpfs_register("input/event1", DEVT_MKDEV(13, 65), 0660, 0, 104,
                     &evdev_ops, &g_mouse);
   evdev_publish_sysfs(); // solo memoria: no depende del orden de init del VFS
 }

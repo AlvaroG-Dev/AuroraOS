@@ -54,6 +54,7 @@ static inline s64 ktime_get_seconds(void) { return lkpi_ktime_get_ns() / NSEC_PE
 static inline ktime_t ktime_get(void) { return lkpi_ktime_get_ns(); }
 static inline ktime_t ktime_get_raw(void) { return lkpi_ktime_get_ns(); }
 static inline ktime_t ktime_get_boottime(void) { return lkpi_ktime_get_ns(); }
+static inline ktime_t ktime_get_clocktai(void) { return lkpi_ktime_get_real_ns(); }
 static inline ktime_t ktime_get_real(void) { return lkpi_ktime_get_real_ns(); }
 static inline u64 ktime_get_ns(void) { return lkpi_ktime_get_ns(); }
 static inline u64 ktime_get_raw_ns(void) { return lkpi_ktime_get_ns(); }
@@ -67,4 +68,11 @@ static inline void ktime_get_real_ts64(struct timespec64 *ts) { *ts = ns_to_time
 static inline void ktime_get_raw_ts64(struct timespec64 *ts) { *ts = ns_to_timespec64(lkpi_ktime_get_ns()); }
 #define local_clock() lkpi_ktime_get_ns()
 
+#endif
+
+#ifndef _LKPI_TS64_COMPARE
+#define _LKPI_TS64_COMPARE
+static inline int timespec64_compare(const struct timespec64 *a, const struct timespec64 *b)
+{ if (a->tv_sec != b->tv_sec) return a->tv_sec < b->tv_sec ? -1 : 1; return a->tv_nsec < b->tv_nsec ? -1 : a->tv_nsec > b->tv_nsec; }
+static inline time64_t ktime_get_boottime_seconds(void) { return lkpi_ktime_get_ns() / NSEC_PER_SEC; }
 #endif

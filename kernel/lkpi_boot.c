@@ -17,9 +17,12 @@
 #include "lkpi_boot.h"
 #include "cmdline.h"
 #include "klog.h"
+#include "aur_bus.h"
 #include "pci.h"
 #include "kur_loader.h"
 #include "string.h"
+
+#include "lkpi_nic_ids.h" // PCI ID de NIC -> modulo (scripts/gen-lkpi-nic-ids.py)
 
 #define LKPI_BOOT_DIR "/lib/modules/linuxkpi/"
 
@@ -106,22 +109,103 @@ static void lkpi_fix_mismatch(char *list, size_t cap) {
   snprintf(list, cap, "%s", LKPI_AUTO_INTEL);
 }
 
+// ¿`list` (modulos separados por comas) ya nombra exactamente `name`?
+static bool list_has_module(const char *list, const char *name) {
+  size_t n = strlen(name);
+  for (const char *p = list; *p;) {
+    const char *e = p;
+    while (*e && *e != ',')
+      e++;
+    if ((size_t)(e - p) == n && !strncmp(p, name, n))
+      return true;
+    p = *e ? e + 1 : e;
+  }
+  return false;
+}
+
+static void list_add_one(char *list, size_t cap, const char *name) {
+  if (list_has_module(list, name))
+    return;
+  size_t l = strlen(list);
+  if (l + strlen(name) + 2 > cap) {
+    LOG_WARN("[LKPI] lista de modulos llena, %s omitido", name);
+    return;
+  }
+  snprintf(list + l, cap - l, "%s%s", l ? "," : "", name);
+}
+
+// `name` puede ser una lista "a,b,c" (pila Wi-Fi: cfg80211,mac80211,...).
+static void list_add_module(char *list, size_t cap, const char *name) {
+  char one[48];
+  for (const char *p = name; *p;) {
+    const char *e = p;
+    while (*e && *e != ',')
+      e++;
+    size_t n = (size_t)(e - p);
+    if (n >= sizeof(one))
+      n = sizeof(one) - 1;
+    memcpy(one, p, n);
+    one[n] = 0;
+    list_add_one(list, cap, one);
+    p = *e ? e + 1 : e;
+  }
+}
+
+// Anade a `list` el driver de Linux de cada NIC PCI conocida. Devuelve cuantas.
+static int lkpi_autodetect_nics(char *list, size_t cap) {
+  char v[16];
+  if ((cmdline_get("net.auto", v, sizeof(v)) && !strcmp(v, "off")) ||
+      (cmdline_get("lkpi.auto", v, sizeof(v)) && !strcmp(v, "off")))
+    return 0;
+  uint8_t bus = 0, slot = 0, func = 0;
+  pci_device_t dev;
+  int found = 0;
+  while (pci_find_next_device(0x02, 0xFF, &bus, &slot, &func, &dev) == 0) {
+    for (unsigned i = 0; i < sizeof(lkpi_nic_ids) / sizeof(lkpi_nic_ids[0]); i++) {
+      if (lkpi_nic_ids[i].vendor != dev.vendor_id ||
+          lkpi_nic_ids[i].device != dev.device_id)
+        continue;
+      if (lkpi_nic_ids[i].native) {
+        char skip[128];
+        if (!cmdline_get("aur.skip", skip, sizeof(skip)) ||
+            !aur_bus_skip_match(skip, dev.vendor_id, dev.device_id))
+          break; // lo atiende el .aur nativo
+      }
+      LOG_INFO("[LKPI] NIC %02x:%02x.%x %04x:%04x: driver de Linux %s", bus, slot,
+               func, dev.vendor_id, dev.device_id, lkpi_nic_ids[i].module);
+      if (!list_has_module(list, "linuxkpi")) {
+        // la capa va siempre la primera
+        char tmp[320];
+        snprintf(tmp, sizeof(tmp), "linuxkpi%s%s", list[0] ? "," : "", list);
+        snprintf(list, cap, "%s", tmp);
+      }
+      list_add_module(list, cap, lkpi_nic_ids[i].module);
+      found++;
+      break;
+    }
+  }
+  return found;
+}
+
 static int boot_loaded;
 
 int lkpi_boot_loaded(void) { return boot_loaded; }
 
 int lkpi_boot_load(void) {
-  char list[256];
+  char list[320];
   if (!cmdline_get("lkpi.load", list, sizeof(list)) || !list[0]) {
     const char *auto_list = drm_native_only() ? NULL : lkpi_autodetect();
-    if (!auto_list)
-      return 0;
-    snprintf(list, sizeof(list), "%s", auto_list);
+    list[0] = '\0';
+    if (auto_list)
+      snprintf(list, sizeof(list), "%s", auto_list);
   } else {
     LOG_INFO("[LKPI] lkpi.load explicito: %s", list);
     if (!drm_native_only())
       lkpi_fix_mismatch(list, sizeof(list));
   }
+  lkpi_autodetect_nics(list, sizeof(list));
+  if (!list[0])
+    return 0;
 
   int loaded = 0;
   for (char *p = list; *p;) {

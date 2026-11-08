@@ -10,6 +10,7 @@
 // resto.
 
 #include "vfs.h"
+#include "part.h"
 #include "block.h" // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "cpu.h"
 #include "devtmpfs.h"
@@ -93,6 +94,7 @@ struct vfs_mount {
   vfs_fs_ops_t *ops;
   void *fs_priv;
   int is_bind;
+  unsigned long mflags; // VFS_MS_*
   char bind_source[VFS_PATH_MAX];
   struct vfs_mount *next;
 };
@@ -459,6 +461,147 @@ void *vfs_get_mount_priv(const char *path) {
   return ret;
 }
 
+
+// ---------------------------------------------------------------------------
+// [ext2 E0.1] Banderas de montaje, umount con comprobación de uso, sync global.
+// ---------------------------------------------------------------------------
+unsigned long vfs_mount_flags(const char *path) {
+  if (!path)
+    return 0;
+  char norm[VFS_PATH_MAX];
+  if (normalize_path(path, norm, sizeof(norm)) != 0)
+    return 0;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  unsigned long ret = 0;
+  size_t best_len = 0, norm_len = strlen(norm);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next) {
+    size_t ml = strlen(m->path);
+    if (ml <= best_len)
+      continue;
+    int match = (ml == 1 && m->path[0] == '/') ||
+                (ml <= norm_len && strncmp(norm, m->path, ml) == 0 &&
+                 (norm[ml] == '\0' || norm[ml] == '/'));
+    if (match) {
+      best_len = ml;
+      ret = m->mflags;
+    }
+  }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  return ret;
+}
+
+int vfs_set_mount_flags(const char *path, unsigned long mflags) {
+  if (!path)
+    return -EINVAL;
+  char norm[VFS_PATH_MAX];
+  int rc = normalize_path(path, norm, sizeof(norm));
+  if (rc != 0)
+    return rc;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  rc = -EINVAL;
+  for (struct vfs_mount *m = g_mounts; m; m = m->next)
+    if (strcmp(m->path, norm) == 0) {
+      m->mflags = mflags;
+      rc = 0;
+      break;
+    }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  return rc;
+}
+
+int vfs_sync_all(void) {
+  struct {
+    vfs_fs_ops_t *ops;
+    void *priv;
+  } snap[32];
+  int n = 0;
+  unsigned long flags = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m && n < 32; m = m->next)
+    if (!m->is_bind && m->ops && m->ops->sync) {
+      snap[n].ops = m->ops;
+      snap[n].priv = m->fs_priv;
+      n++;
+    }
+  spin_unlock_irqrestore(&g_mounts_lock, flags);
+  int worst = 0;
+  for (int i = 0; i < n; i++) {
+    int rc = snap[i].ops->sync(snap[i].priv);
+    if (rc != 0)
+      worst = rc;
+  }
+  return worst;
+}
+
+struct umount_busy_arg {
+  const char *path;
+  size_t len;
+  int busy;
+};
+
+static int path_is_under(const char *p, const char *mp, size_t mlen) {
+  if (mlen == 1) // "/" : todo cuelga de ahí
+    return p[0] == '/';
+  return strncmp(p, mp, mlen) == 0 && (p[mlen] == '\0' || p[mlen] == '/');
+}
+
+static int umount_busy_cb(process_t *p, void *argp) {
+  struct umount_busy_arg *a = (struct umount_busy_arg *)argp;
+  if (path_is_under(p->cwd, a->path, a->len)) {
+    a->busy = 1;
+    return 1;
+  }
+  for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+    file_descriptor_t *f = p->fds[i];
+    if (f && f->node && path_is_under(f->node->name, a->path, a->len)) {
+      a->busy = 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int vfs_umount_fs(const char *path) {
+  if (!path)
+    return -EINVAL;
+  char norm[VFS_PATH_MAX];
+  int rc = normalize_path(path, norm, sizeof(norm));
+  if (rc != 0)
+    return rc;
+  if (strcmp(norm, "/") == 0)
+    return -EBUSY;
+
+  // Solo cuentan los mounts con FS propio; un bind no tiene estado que liberar.
+  vfs_fs_ops_t *ops = NULL;
+  void *priv = NULL;
+  int is_bind = 0, found = 0;
+  unsigned long fl = spin_lock_irqsave(&g_mounts_lock);
+  for (struct vfs_mount *m = g_mounts; m; m = m->next)
+    if (strcmp(m->path, norm) == 0) {
+      ops = m->ops;
+      priv = m->fs_priv;
+      is_bind = m->is_bind;
+      found = 1;
+      break;
+    }
+  spin_unlock_irqrestore(&g_mounts_lock, fl);
+  if (!found)
+    return -ENOENT;
+
+  struct umount_busy_arg ba = {.path = norm, .len = strlen(norm), .busy = 0};
+  process_for_each(umount_busy_cb, &ba);
+  if (ba.busy)
+    return -EBUSY;
+
+  if (!is_bind && ops && ops->sync)
+    ops->sync(priv);
+  rc = vfs_umount(norm); // -EBUSY si hay mounts anidados
+  if (rc != 0)
+    return rc;
+  if (!is_bind && ops && ops->umount)
+    ops->umount(priv);
+  return 0;
+}
+
 // ===========================================================================
 // Lookup
 // ===========================================================================
@@ -632,7 +775,8 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
     node->ref_count = 1;
   }
 
-  if (!node && ops->name && strcmp(ops->name, "sysfs") == 0) {
+  if (!node && ops->name &&
+      (strcmp(ops->name, "sysfs") == 0 || strcmp(ops->name, "ext2") == 0)) {
     char expanded[VFS_PATH_MAX];
     if (expand_mid_symlink(norm, expanded, sizeof(expanded)))
       return vfs_lookup_rec(expanded, depth + 1, no_follow);
@@ -744,6 +888,12 @@ static vfs_node_t *resolve_parent(const char *path, char *base_out,
     *rc_out = -ENOTDIR;
     return NULL;
   }
+  // Mounts con VFS_MS_RDONLY: ninguna modificación del espacio de nombres.
+  if (vfs_mount_flags(dir_path) & VFS_MS_RDONLY) {
+    vfs_node_free(parent);
+    *rc_out = -EROFS;
+    return NULL;
+  }
   *rc_out = 0;
   return parent;
 }
@@ -834,6 +984,8 @@ int vfs_mkdir(const char *path, uint32_t mode) {
   return rc;
 }
 
+static int sticky_check(vfs_node_t *parent, const char *path);
+
 int vfs_unlink(const char *path) {
   if (!path)
     return -EINVAL;
@@ -855,6 +1007,11 @@ int vfs_unlink(const char *path) {
     vfs_node_free(parent);
     return -EROFS;
   }
+  acc = sticky_check(parent, path);
+  if (acc != 0) {
+    vfs_node_free(parent);
+    return acc;
+  }
   rc = parent->ops->unlink(parent, base);
   vfs_node_free(parent);
   return rc;
@@ -863,6 +1020,8 @@ int vfs_unlink(const char *path) {
 int vfs_truncate(const char *path, uint64_t new_size) {
   if (!path)
     return -EINVAL;
+  if (vfs_mount_flags(path) & VFS_MS_RDONLY)
+    return -EROFS;
 
   vfs_node_t *node = vfs_lookup(path);
   if (!node)
@@ -1113,6 +1272,20 @@ int vfs_rename(const char *oldpath, const char *newpath) {
     return -EROFS;
   }
 
+  // [U1.2] Permisos de directorio y sticky (origen y, si existe, destino).
+  rc = vfs_check_access(src_parent, VFS_W_OK | VFS_X_OK);
+  if (rc == 0 && dst_parent != src_parent)
+    rc = vfs_check_access(dst_parent, VFS_W_OK | VFS_X_OK);
+  if (rc == 0)
+    rc = sticky_check(src_parent, oldpath);
+  if (rc == 0)
+    rc = sticky_check(dst_parent, newpath);
+  if (rc != 0) {
+    vfs_node_free(src_parent);
+    vfs_node_free(dst_parent);
+    return rc;
+  }
+
   rc = src_parent->ops->rename(src_parent, src_base, dst_parent, dst_base);
   vfs_node_free(src_parent);
   vfs_node_free(dst_parent);
@@ -1155,6 +1328,8 @@ int vfs_readlink(const char *path, char *buf, size_t bufsize) {
 int vfs_utimes(const char *path, int64_t mtime_sec) {
   if (!path)
     return -EINVAL;
+  if (vfs_mount_flags(path) & VFS_MS_RDONLY)
+    return -EROFS;
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node) {
     return -ENOENT;
@@ -1252,12 +1427,14 @@ int vfs_chmod(const char *path, uint32_t mode) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
+  if (path && (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
 
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node)
     return -ENOENT;
 
-  int is_root = (proc->euid == 0);
+  int is_root = cap_raised(proc, CAP_FOWNER);
   int is_owner = (proc->euid == node->uid);
 
   if (!is_root && !is_owner) {
@@ -1286,18 +1463,56 @@ int vfs_chmod(const char *path, uint32_t mode) {
   return rc;
 }
 
+// [U1.5] Reglas de chown(2) de Linux sin capabilities: root puede todo; el
+// dueño solo puede cambiar el grupo a uno al que pertenece (uid sin cambio).
+static int chown_permitted(process_t *proc, vfs_node_t *node, uint32_t uid,
+                           uint32_t gid) {
+  if (cap_raised(proc, CAP_CHOWN))
+    return 0;
+  if (proc->fsuid != node->uid)
+    return -EPERM;
+  if (uid != (uint32_t)-1 && uid != node->uid)
+    return -EPERM;
+  if (gid != (uint32_t)-1 && gid != node->gid) {
+    int ok = (gid == proc->fsgid || gid == proc->egid || gid == proc->gid);
+    for (int i = 0; !ok && i < proc->ngroups; i++)
+      ok = (proc->groups[i] == gid);
+    if (!ok)
+      return -EPERM;
+  }
+  return 0;
+}
+
+// Un chown con éxito sobre un fichero regular borra setuid (y setgid si hay
+// bit de ejecución de grupo), como Linux.
+static void chown_clear_suid(vfs_node_t *node) {
+  if ((node->mode & S_IFMT) != S_IFREG)
+    return;
+  uint32_t clear = S_ISUID;
+  if (node->mode & 0010)
+    clear |= S_ISGID;
+  if (!(node->mode & clear))
+    return;
+  uint32_t nm = node->mode & 07777 & ~clear;
+  if (node->ops && node->ops->chmod && node->ops->chmod(node, nm) == 0)
+    node->mode = (node->mode & S_IFMT) | nm;
+}
+
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
   process_t *proc = process_current();
   if (!proc)
     return -EPERM;
-
-  // Solo root puede cambiar el owner en Aurora (sin CAP_CHOWN por ahora).
-  if (proc->euid != 0)
-    return -EPERM;
+  if (path && (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
 
   vfs_node_t *node = vfs_lookup_nofollow(path);
   if (!node)
     return -ENOENT;
+  int perm = chown_permitted(proc, node, uid, gid);
+  if (perm != 0) {
+    vfs_node_free(node);
+    return perm;
+  }
 
   if (!node->ops || !node->ops->chown) {
     vfs_node_free(node);
@@ -1309,6 +1524,7 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
       node->uid = uid;
     if (gid != (uint32_t)-1)
       node->gid = gid;
+    chown_clear_suid(node);
   }
   vfs_node_free(node);
   return rc;
@@ -1321,7 +1537,7 @@ int vfs_fchmod(file_descriptor_t *f, uint32_t mode) {
   if (!proc)
     return -EPERM;
 
-  int is_root = (proc->euid == 0);
+  int is_root = cap_raised(proc, CAP_FOWNER);
   int is_owner = (proc->euid == f->node->uid);
   if (!is_root && !is_owner)
     return -EPERM;
@@ -1345,8 +1561,11 @@ int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
   if (!f || !f->node)
     return -EBADF;
   process_t *proc = process_current();
-  if (!proc || proc->euid != 0)
+  if (!proc)
     return -EPERM;
+  int perm = chown_permitted(proc, f->node, uid, gid);
+  if (perm != 0)
+    return perm;
 
   if (!f->node->ops || !f->node->ops->chown)
     return -EROFS;
@@ -1356,6 +1575,7 @@ int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
       f->node->uid = uid;
     if (gid != (uint32_t)-1)
       f->node->gid = gid;
+    chown_clear_suid(f->node);
   }
   return rc;
 }
@@ -1372,7 +1592,8 @@ int vfs_fchown(file_descriptor_t *f, uint32_t uid, uint32_t gid) {
 //
 // No sigue symlinks: se llama con el nodo ya resuelto por vfs_lookup.
 // ---------------------------------------------------------------------------
-int vfs_check_access(vfs_node_t *node, int mask) {
+static int check_access_ids(vfs_node_t *node, int mask, uint32_t uid,
+                            uint32_t gid) {
   if (!node)
     return -EINVAL;
   if (mask == VFS_F_OK)
@@ -1383,22 +1604,18 @@ int vfs_check_access(vfs_node_t *node, int mask) {
   if (!proc)
     return 0;
 
-  // Root bypasea todo.
-  if (proc->euid == 0)
+  // CAP_DAC_OVERRIDE (root la tiene siempre salvo que la suelte).
+  if (uid == 0 && cap_raised(proc, CAP_DAC_OVERRIDE))
     return 0;
 
   uint32_t bits;
-  if (proc->euid == node->uid) {
+  if (uid == node->uid) {
     bits = (node->mode >> 6) & 7;
-  } else if (proc->egid == node->gid) {
-    bits = (node->mode >> 3) & 7;
   } else {
-    int in_group = 0;
-    for (int i = 0; i < proc->ngroups; i++) {
-      if (proc->groups[i] == node->gid) {
+    int in_group = (gid == node->gid);
+    for (int i = 0; !in_group && i < proc->ngroups; i++) {
+      if (proc->groups[i] == node->gid)
         in_group = 1;
-        break;
-      }
     }
     bits = in_group ? ((node->mode >> 3) & 7) : (node->mode & 7);
   }
@@ -1413,7 +1630,54 @@ int vfs_check_access(vfs_node_t *node, int mask) {
 
   if ((bits & need) == need)
     return 0;
+  // [U6] DAC por capacidad para no-root (y root sin DAC_OVERRIDE).
+  {
+    int is_dir = (node->flags & VFS_DIRECTORY) != 0;
+    uint32_t rest = need & ~(bits & need);
+    if (cap_raised(proc, CAP_DAC_OVERRIDE)) {
+      if (!(rest & 1) || is_dir || (node->mode & 0111))
+        return 0;
+    }
+    if (cap_raised(proc, CAP_DAC_READ_SEARCH)) {
+      if ((rest & ~5u) == 0 && (!(rest & 1) || is_dir))
+        return 0;
+    }
+  }
   return -EACCES;
+}
+
+// [U1.1] Acceso del sistema de ficheros: Linux usa fsuid/fsgid (que siguen
+// al euid/egid salvo que se use setfsuid/setfsgid).
+int vfs_check_access(vfs_node_t *node, int mask) {
+  process_t *proc = process_current();
+  if (!proc)
+    return node ? 0 : -EINVAL;
+  return check_access_ids(node, mask, proc->fsuid, proc->fsgid);
+}
+
+// [U1.1] access(2)/faccessat(2): usan el uid/gid REAL.
+int vfs_check_access_real(vfs_node_t *node, int mask) {
+  process_t *proc = process_current();
+  if (!proc)
+    return node ? 0 : -EINVAL;
+  return check_access_ids(node, mask, proc->uid, proc->gid);
+}
+
+// [U1.2] Bit sticky: en un directorio con S_ISVTX solo el dueño del fichero,
+// el dueño del directorio o root pueden borrar/renombrar la entrada.
+// Devuelve 0 si se permite, -EPERM si no. `path` es la entrada afectada.
+static int sticky_check(vfs_node_t *parent, const char *path) {
+  process_t *proc = process_current();
+  if (!proc || !parent || !(parent->mode & S_ISVTX))
+    return 0;
+  if (cap_raised(proc, CAP_FOWNER) || proc->fsuid == parent->uid)
+    return 0;
+  vfs_node_t *child = vfs_lookup_nofollow(path);
+  if (!child)
+    return 0; // no existe: lo resolverá la operación (ENOENT)
+  int owner = (child->uid == proc->fsuid);
+  vfs_node_free(child);
+  return owner ? 0 : -EPERM;
 }
 
 // ===========================================================================
@@ -2067,6 +2331,7 @@ static const devfs_entry_t devfs_entries[] = {
 // ===========================================================================
 
 #define BLKGETSIZE 0x1260
+#define BLKRRPART 0x125f
 #define BLKSSZGET 0x1268
 #define BLKGETSIZE64 0x80081272
 
@@ -2223,6 +2488,14 @@ static int64_t devfs_block_ioctl(vfs_node_t *node, unsigned long req,
       return -EFAULT;
     if (copy_to_user((void *)arg, &sz, sizeof(sz)) < 0)
       return -EFAULT;
+    return 0;
+  }
+  if (req == BLKRRPART) {
+    // Relee la tabla de particiones (fdisk/aurora-install tras escribirla). Solo
+    // sobre un disco entero; part_scan no vuelve a registrar lo ya escaneado.
+    if (bdev->is_partition)
+      return -EINVAL;
+    part_scan(bdev);
     return 0;
   }
   if (req == BLKSSZGET) {
@@ -2740,6 +3013,11 @@ static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
   if (free_fd == -1)
     return -EMFILE;
 
+  // Escritura/creación/truncado en un mount de solo lectura.
+  if ((flags & (O_WRONLY | O_RDWR | O_CREAT | 0x200 /*O_TRUNC*/)) &&
+      (vfs_mount_flags(path) & VFS_MS_RDONLY))
+    return -EROFS;
+
   // /dev/ptmx y /dev/pts/N crean recursos frescos en cada open. La
   // firma de ops->open no permite pasar contexto por-open, así que
   // interceptamos aquí.
@@ -2771,6 +3049,16 @@ static int vfs_open_impl(void *proc_ptr, const char *path, int flags,
     LOG_TRACE("[VFS-OPEN-FAIL] lookup('%s')=NULL", path);
     return -ENOENT;
   }
+
+  unsigned long mflags = vfs_mount_flags(path);
+  if ((mflags & VFS_MS_NODEV) &&
+      ((node->flags & VFS_CHARDEVICE) || (node->mode & S_IFMT) == S_IFCHR ||
+       (node->mode & S_IFMT) == S_IFBLK)) { // mount -o nodev
+    vfs_node_free(node);
+    return -EACCES;
+  }
+  if (mflags & VFS_MS_SYNCHRONOUS)
+    flags |= VFS_O_SYNC;
 
   // [3.4.d] Comprobar permiso según los flags de apertura.
   int acc_mask = (flags & (O_WRONLY | O_RDWR)) ? VFS_W_OK : VFS_R_OK;
@@ -2814,6 +3102,9 @@ int vfs_open_nofollow_for_proc(void *proc_ptr, const char *path, int flags) {
   return vfs_open_impl(proc_ptr, path, flags, 1);
 }
 
+void posix_lock_release_ofd(void *desc);
+void posix_lock_release_file(uint32_t pid, void *fs, uint64_t ino);
+
 static file_descriptor_t *fd_get_for_proc(process_t *proc, int fd) {
   if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS)
     return NULL;
@@ -2830,6 +3121,7 @@ static void fd_put(file_descriptor_t *f) {
     return;
   int new_rc = __atomic_sub_fetch(&f->ref_count, 1, __ATOMIC_ACQ_REL);
   if (new_rc == 0) {
+    posix_lock_release_ofd(f); // [fcntl OFD locks]
     vfs_node_free(f->node);
     kfree(f);
   }
@@ -2849,6 +3141,9 @@ int vfs_close_for_proc(void *proc_ptr, int fd) {
   proc->fds[fd] = NULL;
   mutex_unlock(&proc->fd_lock);
 
+  // [fcntl POSIX locks] cerrar cualquier fd suelta los locks del proceso.
+  if (f->node)
+    posix_lock_release_file(proc->pid, (void *)f->node->fs, f->node->inode);
   fd_put(f);
   return 0;
 }
@@ -3024,7 +3319,12 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       break;
     }
 
-    int64_t bytes = f->node->ops->write(f->node, f->offset, chunk, kbuf);
+    // O_APPEND: dos fds sobre el mismo fichero deben añadir al final real,
+    // no a su copia del tamaño. ext2 acepta (uint64_t)-1 como "al final".
+    int append_ext2 = (f->flags & VFS_O_APPEND) && f->node->fs &&
+                      f->node->fs->name && strcmp(f->node->fs->name, "ext2") == 0;
+    int64_t bytes = f->node->ops->write(
+        f->node, append_ext2 ? (uint64_t)-1 : f->offset, chunk, kbuf);
     if (bytes < 0) {
       if (total == 0) {
         kfree(kbuf);
@@ -3041,13 +3341,16 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
       return total > 0 ? (int64_t)total : -EIO;
     }
 
-    f->offset += (uint64_t)bytes;
+    f->offset = append_ext2 ? (uint64_t)f->node->size : f->offset + (uint64_t)bytes;
     total += (size_t)bytes;
     if ((size_t)bytes < chunk)
       break;
   }
 
   kfree(kbuf);
+  if (total > 0 && (f->flags & VFS_O_SYNC) && f->node && f->node->ops &&
+      f->node->ops->fsync)
+    f->node->ops->fsync(f->node); // O_SYNC / mount -o sync
   mutex_unlock(&f->lock);
   fd_put(f);
   return (int64_t)total;
@@ -3205,6 +3508,9 @@ int64_t vfs_pwrite_for_proc(void *proc_ptr, int fd, const void *buf,
   }
 
   kfree(kbuf);
+  if (total > 0 && (f->flags & VFS_O_SYNC) && f->node && f->node->ops &&
+      f->node->ops->fsync)
+    f->node->ops->fsync(f->node); // O_SYNC / mount -o sync
   mutex_unlock(&f->lock);
   fd_put(f);
   return (int64_t)total;
@@ -3274,12 +3580,39 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
     // vuelve al principio del ring. dmesg lo usa para posicionarse
     // antes de leer el log completo. NO saltar al final.
     if (!f->node->offset_is_index) {
+      // Ficheros normales: sin huecos, todo es dato (como ext4 sin extents
+      // dispersos). cp/tar/rsync lo usan para detectar ficheros dispersos.
+      if (offset < 0) {
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -EINVAL;
+      }
+      if ((uint64_t)offset >= f->node->size) {
+        mutex_unlock(&f->lock);
+        fd_put(f);
+        return -ENXIO;
+      }
+      new_off = (uint64_t)offset;
+      f->offset = new_off;
       mutex_unlock(&f->lock);
       fd_put(f);
-      return -1;
+      return (int64_t)new_off;
     }
     extern uint64_t klog_lines_gone(void);
     new_off = klog_lines_gone();
+  } else if (whence == 4 /* SEEK_HOLE */ && !f->node->offset_is_index) {
+    // El unico "hueco" es el que hay justo en EOF.
+    if (offset < 0) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -EINVAL;
+    }
+    if ((uint64_t)offset >= f->node->size) {
+      mutex_unlock(&f->lock);
+      fd_put(f);
+      return -ENXIO;
+    }
+    new_off = f->node->size;
   } else {
     mutex_unlock(&f->lock);
     fd_put(f);
@@ -3309,6 +3642,10 @@ int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st) {
   st->uid = f->node->uid;
   st->gid = f->node->gid;
   st->rdev = f->node->rdev;
+  st->nlink = f->node->nlink;
+  st->atime_sec = f->node->atime_sec;
+  st->ctime_sec = f->node->ctime_sec;
+  st->blocks = f->node->blocks;
   clac();
   return 0;
 }

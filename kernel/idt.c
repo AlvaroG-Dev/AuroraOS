@@ -105,6 +105,7 @@ extern int handle_page_fault(registers_t *regs);
 
 extern void ipi_stub_resched(void);
 extern void ipi_stub_tlb(void);
+extern void ipi_stub_halt(void);
 
 extern void ioapic_mask_irq(uint8_t irq, int masked);
 
@@ -279,6 +280,7 @@ void idt_init(void) {
   // [SMP 4.4] IPIs. Vectores 0xFB (resched) y 0xFC (TLB).
   idt_set_gate(IPI_VECTOR_RESCHED, (uint64_t)ipi_stub_resched, 0x08, 0x8E);
   idt_set_gate(IPI_VECTOR_TLB, (uint64_t)ipi_stub_tlb, 0x08, 0x8E);
+  idt_set_gate(IPI_VECTOR_HALT, (uint64_t)ipi_stub_halt, 0x08, 0x8E);
 
   // Vector 0xFF: espurio del LAPIC.
   idt_set_gate(0xFF, (uint64_t)isr_spurious, 0x08, 0x8E);

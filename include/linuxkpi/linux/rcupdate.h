@@ -105,4 +105,7 @@ bool lkpi_poll_state_synchronize_rcu(unsigned long oldstate);
 
 DEFINE_LOCK_GUARD_0(rcu, rcu_read_lock(), rcu_read_unlock())
 
+#ifndef rcu_dereference_rtnl
+#define rcu_dereference_rtnl(p) READ_ONCE(p)
+#endif
 #endif

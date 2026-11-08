@@ -11,7 +11,7 @@
 #include <string.h>
 
 #if defined(__x86_64__) || defined(__amd64__)
-#include <immintrin.h>
+#include "x86_intrin.h"
 #define HAVE_X86_SIMD 1
 #else
 #define HAVE_X86_SIMD 0

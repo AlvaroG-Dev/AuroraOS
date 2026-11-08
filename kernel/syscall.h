@@ -47,6 +47,7 @@
 #define SYS_SELECT 23
 #define SYS_SCHED_YIELD 24
 #define SYS_MREMAP 25
+#define SYS_MSYNC 26
 #define SYS_MADVISE 28
 #define SYS_DUP 32
 #define SYS_DUP2 33
@@ -96,6 +97,7 @@
 #define SYS_CHMOD 90
 #define SYS_FCHMOD 91
 #define SYS_CHOWN 92
+#define SYS_FCHOWNAT 260
 #define SYS_FCHOWN 93
 #define SYS_LCHOWN 94
 #define SYS_UMASK 95
@@ -143,6 +145,8 @@
 #define SYS_ADJTIMEX 159
 #define SYS_SETRLIMIT 160
 #define SYS_SYNC 162
+#define SYS_MOUNT 165
+#define SYS_UMOUNT2 166
 #define SYS_SETTIMEOFDAY 164
 #define SYS_SWAPON 167
 #define SYS_SWAPOFF 168
@@ -189,6 +193,7 @@
 #define SYS_LINKAT 265
 #define SYS_SYMLINKAT 266
 #define SYS_READLINKAT 267
+#define SYS_FCHOWNAT 260
 #define SYS_FCHMODAT 268
 #define SYS_FACCESSAT 269
 #define SYS_PSELECT6 270
@@ -259,6 +264,7 @@
 #define ASYS_THEME_GET (ASYS_BASE + 0x70)
 #define ASYS_SYSINFO (ASYS_BASE + 0x71)
 #define ASYS_PROCLIST (ASYS_BASE + 0x72)
+#define ASYS_SCREEN_SIZE (ASYS_BASE + 0x73) /* (ancho << 16) | alto */
 #define ASYS_WIN_SET_RAW_INPUT (ASYS_BASE + 0x16)
 #define ASYS_WIN_CREATE_EX (ASYS_BASE + 0x17)
 #define ASYS_WIN_SET_TITLE (ASYS_BASE + 0x18)

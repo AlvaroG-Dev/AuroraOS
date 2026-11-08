@@ -48,7 +48,7 @@
 #include "theme.h"
 #include "window.h"
 #include "winsrv.h"
-#include <emmintrin.h>
+#include "x86_intrin.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -359,8 +359,18 @@ static void draw_resize_outline(uint32_t *dst, int stride, rect_t clip) {
 /* =========================================================================
  * Zona útil
  * =======================================================================*/
+int aurora_kiosk(void) {
+  static int v = -1;
+  if (v < 0) {
+    char b[8];
+    v = cmdline_get("aur.kiosk", b, sizeof(b)) && b[0] == '1';
+  }
+  return v;
+}
+#define MBAR_H (aurora_kiosk() ? 0 : AURORA_MENUBAR_H)
+
 rect_t compositor_work_area(void) {
-  int top = AURORA_MENUBAR_H;
+  int top = MBAR_H;
   int h = (int)fb_height - top - dock_reserved_height();
   return (rect_t){0, top, (int)fb_width, h > 0 ? h : 0};
 }
@@ -650,8 +660,8 @@ static void do_attach(window_t *win) {
   if (!win)
     return;
   /* La barra de título nunca debe quedar bajo la barra de menús. */
-  if (win->y < AURORA_MENUBAR_H)
-    win->y = AURORA_MENUBAR_H;
+  if (win->y < MBAR_H)
+    win->y = MBAR_H;
 
   win->next = window_stack;
   win->prev = NULL;
@@ -1052,6 +1062,13 @@ static void exec_cmd(const comp_cmd_t *c) {
 /* API pública: encola y despierta. */
 window_t *compositor_create_window(int x, int y, int w, int h,
                                    const char *title, uint32_t flags) {
+  if (aurora_kiosk()) { /* instalador: sin marco, centrada en la pantalla */
+    flags |= WIN_FLAGS_NODECORATION;
+    x = ((int)fb_width - w) / 2;
+    y = ((int)fb_height - h) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+  }
   window_t *win = window_create(x, y, w, h, title, flags);
   if (!win)
     return NULL;
@@ -1217,7 +1234,7 @@ static void update_cursor_shape(void) {
   if (resize_window) {
     s = shape_for_edges(resize_edge);
   } else if (!drag_window && !pressed_win && !menubar_is_open() &&
-             cursor_y >= AURORA_MENUBAR_H &&
+             cursor_y >= MBAR_H &&
              !dock_hit_test(cursor_x, cursor_y)) {
     win_hit_t h;
     window_t *w = window_at_cursor(&h);
@@ -1299,8 +1316,8 @@ static rect_t resize_proposal(void) {
   int y = f.y;
   if (resize_edge & RESIZE_EDGE_TOP) {
     y = f.y + f.h - h;
-    if (y < AURORA_MENUBAR_H) { /* el borde superior no pasa la barra */
-      y = AURORA_MENUBAR_H;
+    if (y < MBAR_H) { /* el borde superior no pasa la barra */
+      y = MBAR_H;
       h = f.y + f.h - y;
     }
   }
@@ -1552,7 +1569,7 @@ static void compositor_handle_mouse(int dx, int dy, uint8_t buttons) {
   if (pressed && drag_window) {
     int new_x = cursor_x - drag_offset_x;
     int new_y = cursor_y - drag_offset_y;
-    new_y = imax(new_y, AURORA_MENUBAR_H);    /* no bajo la barra */
+    new_y = imax(new_y, MBAR_H);    /* no bajo la barra */
     new_y = imin(new_y, (int)fb_height - 40); /* siempre agarrable */
     if (new_x != drag_window->x || new_y != drag_window->y) {
       drag_window->x = new_x;
@@ -1849,8 +1866,10 @@ static void render_rect(rect_t clip) {
   uint64_t t2 = comp_rdtsc();
 
   /* 3. Dock, barra de menús y marco de resize */
-  dock_render(backbuffer, fb_width, clip);
-  menubar_render(backbuffer, fb_width, clip);
+  if (!aurora_kiosk()) {
+    dock_render(backbuffer, fb_width, clip);
+    menubar_render(backbuffer, fb_width, clip);
+  }
   if (resize_window)
     draw_resize_outline(backbuffer, fb_width, clip);
   /* Overlay de logs del kernel, sobre todo lo demás (solo si está

@@ -44,6 +44,8 @@ $(D)/%.o: $(LKPI_DRV_SRCDIR)/%.c $(HDRS) $(LKPI_DRV_DESC) $(wildcard kernel/linu
 	@mkdir -p $(dir $@)
 	@echo "[LKPI-DRV] $(DRV): $<"
 	@src=$<; \
+	if [ -n "$(LKPI_DRV_SEDEXPR)" ]; then \
+		mkdir -p $(D)/sed; sed -e '$(LKPI_DRV_SEDEXPR)' $< > $(D)/sed/$(notdir $<); src=$(D)/sed/$(notdir $<); fi; \
 	if [ -f kernel/linuxkpi/patches/$(notdir $<).patch ]; then \
 		mkdir -p $(D)/src; cp $< $(D)/src/$(notdir $<); \
 		echo "[LKPI-PATCH] $(notdir $<)"; \

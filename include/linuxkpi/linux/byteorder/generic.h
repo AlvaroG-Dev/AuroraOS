@@ -48,6 +48,7 @@
 #define le16_to_cpus(p) do { (void)(p); } while (0)
 #define cpu_to_le32s(p) do { (void)(p); } while (0)
 #define cpu_to_le16s(p) do { (void)(p); } while (0)
+#define cpu_to_be16s(p) swab16s((u16 *)(p))
 #define be32_to_cpus(p) swab32s((u32 *)(p))
 #define cpu_to_be32s(p) swab32s((u32 *)(p))
 
@@ -68,4 +69,7 @@ static inline void be32_to_cpu_array(u32 *dst, const __be32 *src, size_t len)
 	for (size_t i = 0; i < len; i++) dst[i] = be32_to_cpu(src[i]);
 }
 
+#define __le32_to_cpup(p) le32_to_cpup(p)
+#define __le16_to_cpup(p) le16_to_cpup(p)
+#define be16_to_cpus(p) do { *(p) = be16_to_cpu(*(p)); } while (0)
 #endif

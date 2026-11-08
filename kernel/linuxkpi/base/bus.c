@@ -940,10 +940,11 @@ void device_shutdown(void)
 				struct device *dev = snaps[i].devs[j];
 
 				if (dev->bus && dev->bus->shutdown) {
-					dev_dbg(dev, "shutdown (bus)\n");
+					if (dev->driver)
+						dev_info(dev, "shutdown de %s\n", dev->driver->name);
 					dev->bus->shutdown(dev);
 				} else if (dev->driver && dev->driver->shutdown) {
-					dev_dbg(dev, "shutdown (driver)\n");
+					dev_info(dev, "shutdown de %s\n", dev->driver->name);
 					dev->driver->shutdown(dev);
 				}
 			}

@@ -776,9 +776,11 @@ static vfs_node_t *tarfs_make_vfs_node(tar_node_t *tn) {
       tlen = sizeof(node->link_target) - 1;
     memcpy(node->link_target, tn->linkname, tlen);
     node->link_target[tlen] = '\0';
-    node->mode = S_IFLNK | 07777;
+    node->mode = S_IFLNK | 0777;
   } else if (tn->is_dir) {
-    node->mode = S_IFDIR | (tn->mode & 07777);
+    // [U5] raiz y directorios sinteticos sin modo en el tar: 0755 (con modo 0
+    // un usuario normal no podia hacer chdir("/") ni ejecutar por ruta).
+    node->mode = S_IFDIR | ((tn->mode & 0777) ? (tn->mode & 07777) : 0755);
   } else {
     node->mode = S_IFREG | (tn->mode & 07777);
   }

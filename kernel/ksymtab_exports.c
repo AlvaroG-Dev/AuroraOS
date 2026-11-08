@@ -157,6 +157,7 @@ KEXPORT_SYMBOL(test_fail);
 // vma_dev_ops_t y task_info_t (kernel/linuxkpi/aurora.h).
 #include "devtmpfs.h"
 #include "nl_uevent.h"
+#include "net/netif_lkpi.h"
 #include "aur_bus.h"
 #include "drm/drm.h"
 #include "drm/kms_present.h"
@@ -169,6 +170,10 @@ KEXPORT_SYMBOL(test_fail);
 #include "vmap.h"
 KEXPORT_SYMBOL(aur_bus_launch_skipped);
 KEXPORT_SYMBOL(nl_uevent_broadcast);
+KEXPORT_SYMBOL(lkpi_netif_register);
+KEXPORT_SYMBOL(lkpi_netif_unregister);
+KEXPORT_SYMBOL(lkpi_netif_rx);
+KEXPORT_SYMBOL(lkpi_netif_carrier);
 KEXPORT_SYMBOL(drm_backend_claim);
 KEXPORT_SYMBOL(drm_backend_release);
 KEXPORT_SYMBOL(drm_lx_scanout_open);
@@ -238,10 +243,10 @@ _Static_assert(sizeof(vfs_ops_t) == 29 * 8 && offsetof(vfs_ops_t, read) == 0 &&
                    offsetof(vfs_ops_t, read_fd) == 192 &&
                    offsetof(vfs_ops_t, mmap_dev) == 224,
                "vfs_ops_t cambio: actualizar struct aurora_vfs_ops");
-_Static_assert(sizeof(vfs_dirent_t) == 144 && offsetof(vfs_dirent_t, type) == 128 &&
-                   offsetof(vfs_dirent_t, size) == 136,
+_Static_assert(sizeof(vfs_dirent_t) == 272 && offsetof(vfs_dirent_t, type) == 256 &&
+                   offsetof(vfs_dirent_t, size) == 264,
                "vfs_dirent_t cambio: actualizar struct aurora_vfs_dirent");
-_Static_assert(sizeof(vfs_fs_ops_t) == 24, "vfs_fs_ops_t cambio: actualizar aurora.h");
+_Static_assert(sizeof(vfs_fs_ops_t) == 40, "vfs_fs_ops_t cambio: actualizar aurora.h");
 _Static_assert(offsetof(vma_t, start) == 0 && offsetof(vma_t, end) == 8 &&
                    offsetof(vma_t, flags) == 16 && offsetof(vma_t, file_offset) == 48 &&
                    offsetof(vma_t, dev_ops) == 64 && offsetof(vma_t, dev_priv) == 72 &&

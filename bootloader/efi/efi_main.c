@@ -700,10 +700,58 @@ static EFI_STATUS load_kernel(EFI_FILE *file, VOID **entry_point,
   return EFI_SUCCESS;
 }
 
+/* Nombre legible de un EFI_STATUS (el %r de efi_print solo da el hex). */
+static const CHAR16 *efi_status_name(EFI_STATUS st) {
+  switch (st) {
+  case EFI_SUCCESS:
+    return L"SUCCESS";
+  case EFI_LOAD_ERROR:
+    return L"LOAD_ERROR";
+  case EFI_INVALID_PARAMETER:
+    return L"INVALID_PARAMETER";
+  case EFI_UNSUPPORTED:
+    return L"UNSUPPORTED";
+  case EFI_BAD_BUFFER_SIZE:
+    return L"BAD_BUFFER_SIZE";
+  case EFI_BUFFER_TOO_SMALL:
+    return L"BUFFER_TOO_SMALL";
+  case EFI_NOT_READY:
+    return L"NOT_READY";
+  case EFI_DEVICE_ERROR:
+    return L"DEVICE_ERROR";
+  case EFI_WRITE_PROTECTED:
+    return L"WRITE_PROTECTED";
+  case EFI_OUT_OF_RESOURCES:
+    return L"OUT_OF_RESOURCES";
+  case EFI_VOLUME_CORRUPTED:
+    return L"VOLUME_CORRUPTED";
+  case EFI_NOT_FOUND:
+    return L"NOT_FOUND";
+  case EFI_ACCESS_DENIED:
+    return L"ACCESS_DENIED";
+  case EFI_NO_MEDIA:
+    return L"NO_MEDIA";
+  case EFI_MEDIA_CHANGED:
+    return L"MEDIA_CHANGED";
+  case EFI_TIMEOUT:
+    return L"TIMEOUT";
+  case EFI_ABORTED:
+    return L"ABORTED";
+  default:
+    return L"(otro)";
+  }
+}
+
 /* Carga un initrd ya abierto. Cierra el fichero siempre (éxito o
- * fallo). Aloja la memoria con AllocateMaxAddress(0xFFFFFFFF) para
- * garantizar < 4 GiB, que es lo que el kernel necesita para
- * phys_to_virt(). */
+ * fallo). Devuelve el EFI_STATUS REAL del paso que falló (GetInfo,
+ * AllocatePages o Read) y deja en el log la causa con tamaño y
+ * direcciones, para que "initrd no cargado" nunca vuelva a ser mudo.
+ *
+ * Memoria: primero por debajo de 4 GiB (AllocateMaxAddress); si el
+ * firmware no tiene un hueco contiguo de ese tamaño ahí (en PCs reales el
+ * 1.er GiB-4 GiB está lleno de MMIO/PCI y de reservas del firmware), se
+ * reintenta en cualquier dirección: la ventana física del kernel
+ * (PHYS_MAP_BASE, hasta 512 GiB) cubre toda la RAM, no hace falta <4 GiB. */
 static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
                                         EFI_PHYSICAL_ADDRESS *out_addr,
                                         UINTN *out_size) {
@@ -715,13 +763,16 @@ static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
   EFI_STATUS st =
       file->GetInfo(file, (EFI_GUID *)&gEfiFileInfoGuid, &info_size, info_buf);
   if (EFI_ERROR(st) || info_size < sizeof(EFI_FILE_INFO)) {
+    efi_print(L"[BOOT] initrd: GetInfo fallo (%s, %r) info_size=%lu\n",
+              efi_status_name(st), (UINT64)st, (UINT64)info_size);
     file->Close(file);
-    return EFI_LOAD_ERROR;
+    return EFI_ERROR(st) ? st : EFI_LOAD_ERROR;
   }
 
   EFI_FILE_INFO *info = (EFI_FILE_INFO *)info_buf;
   UINTN fsize = (UINTN)info->FileSize;
   if (fsize == 0) {
+    efi_print(L"[BOOT] initrd: el fichero mide 0 bytes\n");
     file->Close(file);
     return EFI_LOAD_ERROR;
   }
@@ -730,14 +781,34 @@ static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
   EFI_PHYSICAL_ADDRESS addr = 0xFFFFFFFF;
   st = gBS->AllocatePages(AllocateMaxAddress, EfiLoaderData, npages, &addr);
   if (EFI_ERROR(st)) {
+    efi_print(L"[BOOT] initrd: sin hueco <4GiB para %lu bytes (%s, %r); "
+              L"reintento en cualquier direccion\n",
+              (UINT64)fsize, efi_status_name(st), (UINT64)st);
+    addr = 0;
+    st = gBS->AllocatePages(AllocateAnyPages, EfiLoaderData, npages, &addr);
+  }
+  if (EFI_ERROR(st)) {
+    efi_print(L"[BOOT] initrd: AllocatePages fallo (%s, %r) para %lu bytes "
+              L"(%lu paginas): falta RAM contigua\n",
+              efi_status_name(st), (UINT64)st, (UINT64)fsize, (UINT64)npages);
     file->Close(file);
     return st;
   }
+  if (addr + (UINT64)npages * 0x1000 > (512ULL << 30)) {
+    efi_print(L"[BOOT] initrd: @0x%lx queda fuera de la ventana de 512 GiB "
+              L"del kernel\n",
+              (UINT64)addr);
+    gBS->FreePages(addr, npages);
+    file->Close(file);
+    return EFI_UNSUPPORTED;
+  }
 
-  /* --- LECTURA TROCEADA PARA QUE LA ANIMACION NO SE CONGELE --- */
-  // Reducido de 4MB a 256KB para asegurar 60FPS en la animación
-  UINTN chunk_size = 1024 * 1024; // 256 KB por chunk
+  /* Lectura troceada (la animacion no se congela). Si el firmware/driver
+   * USB falla con trozos grandes, se reintenta desde el mismo offset con
+   * trozos cada vez menores: 1 MiB -> 256 KiB -> 64 KiB -> 16 KiB. */
+  UINTN chunk_size = 1024 * 1024;
   UINTN total_read = 0;
+  int retries = 0;
 
   while (total_read < fsize) {
     UINTN to_read = fsize - total_read;
@@ -747,9 +818,25 @@ static EFI_STATUS load_initrd_from_file(EFI_FILE *file,
 
     st = file->Read(file, &read_size, (VOID *)(addr + total_read));
     if (EFI_ERROR(st) || read_size == 0) {
+      efi_print(L"[BOOT] initrd: Read fallo (%s, %r) en offset %lu/%lu "
+                L"(trozo %lu, leido %lu)\n",
+                efi_status_name(st), (UINT64)st, (UINT64)total_read,
+                (UINT64)fsize, (UINT64)to_read, (UINT64)read_size);
+      if (chunk_size > 16 * 1024 && retries < 8) {
+        chunk_size /= 4;
+        retries++;
+        EFI_STATUS ps = file->SetPosition(file, total_read);
+        if (!EFI_ERROR(ps)) {
+          efi_print(L"[BOOT] initrd: reintento con trozos de %lu KiB\n",
+                    (UINT64)(chunk_size / 1024));
+          continue;
+        }
+        efi_print(L"[BOOT] initrd: SetPosition fallo (%s, %r)\n",
+                  efi_status_name(ps), (UINT64)ps);
+      }
       file->Close(file);
       gBS->FreePages(addr, npages);
-      return EFI_LOAD_ERROR;
+      return EFI_ERROR(st) ? st : EFI_LOAD_ERROR;
     }
     total_read += read_size;
 
@@ -1385,6 +1472,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
    * --------------------------------------------------------------------- */
   EFI_PHYSICAL_ADDRESS initrd_phys = 0;
   UINTN initrd_size = 0;
+  int initrd_failed = 0;
 
   if (kernel_root) {
     EFI_FILE *initrd_file = NULL;
@@ -1392,8 +1480,13 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     if (cfg.have_initrd) {
       status = kernel_root->Open(kernel_root, &initrd_file, cfg.initrd_path,
                                  EFI_FILE_MODE_READ, 0);
-      if (EFI_ERROR(status) || !initrd_file)
+      if (EFI_ERROR(status) || !initrd_file) {
+        efi_print(L"[BOOT] initrd: Open(%s) fallo (%s, %r)\n", cfg.initrd_path,
+                  efi_status_name(status), (UINT64)status);
         initrd_file = NULL;
+      } else {
+        efi_print(L"[BOOT] initrd: abierto %s\n", cfg.initrd_path);
+      }
     }
 
     if (!initrd_file) {
@@ -1407,21 +1500,42 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         EFI_STATUS s = kernel_root->Open(kernel_root, &initrd_file,
                                          (CHAR16 *)initrd_candidates[i],
                                          EFI_FILE_MODE_READ, 0);
-        if (EFI_ERROR(s) || !initrd_file)
+        if (EFI_ERROR(s) || !initrd_file) {
+          efi_print(L"[BOOT] initrd: Open(%s) fallo (%s, %r)\n",
+                    initrd_candidates[i], efi_status_name(s), (UINT64)s);
           initrd_file = NULL;
+        } else {
+          efi_print(L"[BOOT] initrd: abierto %s\n", initrd_candidates[i]);
+        }
       }
     }
 
     if (initrd_file) {
       status = load_initrd_from_file(initrd_file, &initrd_phys, &initrd_size);
       if (EFI_ERROR(status)) {
-        efi_print(L"[BOOT] WARN: initrd no cargado (%r)\n", status);
+        efi_print(L"[BOOT] ERROR: initrd NO cargado (%s, %r). El sistema "
+                  L"arrancara sin init.\n",
+                  efi_status_name(status), (UINT64)status);
         initrd_phys = 0;
         initrd_size = 0;
+        initrd_failed = 1;
       }
     } else {
-      efi_print(L"[BOOT] WARN: initrd.tar no encontrado en el volumen\n");
+      efi_print(L"[BOOT] ERROR: initrd.tar no encontrado en el volumen del "
+                L"kernel\n");
+      initrd_failed = 1;
     }
+  }
+
+  /* Si el initrd fallo, dejar el motivo en pantalla unos segundos (sin
+   * serie ni pendrive de log no hay otra forma de leerlo). */
+  if (initrd_failed) {
+    if (splash_on) {
+      efi_splash_done();
+      splash_on = 0;
+    }
+    efi_print(L"[BOOT] Continuando en 10 s (motivo arriba y en prev.log)...\n");
+    gBS->Stall(10 * 1000000);
   }
 
   /* Si la splash está activa, darla un mínimo de vida visual. */

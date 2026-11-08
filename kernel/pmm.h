@@ -13,6 +13,13 @@ void pmm_relocate_bitmap(void);
 uint64_t pmm_alloc_page(void);
 void pmm_free_page(uint64_t phys_addr);
 
+// [COW] Refcount por frame. pmm_page_share añade una referencia (0 / -1 si no
+// se puede: sin tabla o saturado). pmm_free_page suelta una referencia y solo
+// libera el frame con la última. pmm_page_is_shared: hay más de un dueño.
+int pmm_page_share(uint64_t phys);
+int pmm_page_is_shared(uint64_t phys);
+uint64_t pmm_cow_extra_total(void); // suma de referencias extra (diagnostico)
+
 // Reservar/liberar múltiples páginas contiguas
 uint64_t pmm_alloc_pages(uint64_t count);
 void pmm_free_pages(uint64_t phys_addr, uint64_t count);

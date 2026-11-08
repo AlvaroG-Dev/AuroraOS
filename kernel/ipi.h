@@ -20,6 +20,10 @@ void ipi_send(uint32_t apic_id, uint8_t vector);
 // Envía una IPI a todos los CPUs menos al actual.
 void ipi_send_allbutself(uint8_t vector);
 
+// Para los demas CPUs (IPI_VECTOR_HALT: cli; hlt para siempre). Para el
+// apagado/reinicio; no hace nada si no hay APs en marcha.
+void ipi_halt_others(void);
+
 // Envía una IPI a todos los CPUs.
 void ipi_send_all(uint8_t vector);
 

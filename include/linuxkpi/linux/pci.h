@@ -122,6 +122,7 @@ struct pci_bus {
 struct lkpi_pci_irqs;			/* vectores de la capa (pci/msi.c) */
 
 struct pci_dev {
+	unsigned int dev_flags;
 	struct list_head bus_list;
 	struct pci_bus *bus;
 	struct pci_bus *subordinate;
@@ -153,6 +154,7 @@ struct pci_dev {
 	unsigned int is_busmaster:1;
 	unsigned int no_msi:1;
 	unsigned int msi_enabled:1;
+	unsigned int pme_poll:1;
 	unsigned int ats_enabled:1;
 	unsigned int msix_enabled:1;
 	unsigned int is_managed:1;
@@ -424,9 +426,7 @@ static inline struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int dev
 }
 
 struct msix_entry { u32 vector; u16 entry; };
-static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minv, int maxv) { return -ENOSYS; }
-static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec) { return -ENOSYS; }
-static inline void pci_disable_msix(struct pci_dev *dev) {}
+
 static inline void pci_stop_and_remove_bus_device(struct pci_dev *dev) {}
 static inline dma_addr_t pci_bus_address(struct pci_dev *pdev, int bar) { return pci_resource_start(pdev, bar); }
 
@@ -465,12 +465,22 @@ int lkpi_pci_msix_vec_count(struct pci_dev *dev);
 #define pci_irq_get_affinity(d, v) lkpi_pci_irq_get_affinity(d, v)
 #define pci_msi_vec_count(d) lkpi_pci_msi_vec_count(d)
 #define pci_msix_vec_count(d) lkpi_pci_msix_vec_count(d)
+/* Como en Linux, tras pci_disable_msi() la INTx sigue disponible para
+ * request_irq(pdev->irq): la capa deja un descriptor INTx vivo; pci_enable_msi()
+ * lo suelta antes de pedir el MSI. */
 static inline int pci_enable_msi(struct pci_dev *dev)
 {
-	int rc = pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI);
+	int rc;
+	if (dev->lkpi_irqs)
+		pci_free_irq_vectors(dev);
+	rc = pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI);
 	return rc < 0 ? rc : 0;
 }
-static inline void pci_disable_msi(struct pci_dev *dev) { pci_free_irq_vectors(dev); }
+static inline void pci_disable_msi(struct pci_dev *dev)
+{
+	pci_free_irq_vectors(dev);
+	pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_INTX);
+}
 static inline bool pci_msix_can_alloc_dyn(struct pci_dev *dev) { return false; }
 
 /* Mensajes */
@@ -513,6 +523,11 @@ struct pci_dev *lkpi_pcie_find_root_port(struct pci_dev *dev);
 /* Sin reasignacion de recursos PCI (resize BAR, ROM, reserva de ventanas): fallan con -ENOSYS / NULL. */
 static inline void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size) { return NULL; }
 static inline void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom) {}
+static inline int pci_assign_resource(struct pci_dev *dev, int i) { return -ENOSYS; }
+static inline bool pci_pme_capable(struct pci_dev *dev, int state) { return false; }
+static inline void pci_lock_rescan_remove(void) { }
+static inline void pci_unlock_rescan_remove(void) { }
+static inline struct pci_bus *pci_rescan_bus(struct pci_bus *bus) { return bus; }
 static inline int pci_resize_resource(struct pci_dev *dev, int i, int size, int exclude_bars) { return -ENOSYS; }
 static inline void pci_release_resource(struct pci_dev *dev, int resno) {}
 static inline u32 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar) { return 0; }
@@ -537,4 +552,59 @@ static inline const char *pci_power_name(pci_power_t state)
 }
 #define pci_bus_for_each_resource(bus, res, ...) for ((res) = NULL; (res); )
 static inline void pci_assign_unassigned_bus_resources(struct pci_bus *bus) {}
+/* --- drivers de red (Plan_Red.md) --- */
+#ifndef PCIE_LINK_STATE_L0S
+#define PCIE_LINK_STATE_L0S	(1 << 0)
+#define PCIE_LINK_STATE_L1	(1 << 1)
+#define PCIE_LINK_STATE_CLKPM	(1 << 2)
+#define PCIE_LINK_STATE_L1_1	(1 << 3)
+#define PCIE_LINK_STATE_L1_2	(1 << 4)
+#endif
+#ifndef PCI_EXP_LNKCTL_CLKREQ_EN
+#define PCI_EXP_LNKCTL_CLKREQ_EN 0x0100
+#endif
+/* ASPM nunca se activa en la capa: no hay nada que desactivar. */
+static inline int pci_disable_link_state(struct pci_dev *dev, int state) { return 0; }
+static inline int pci_disable_link_state_locked(struct pci_dev *dev, int state) { return 0; }
+static inline int pcie_set_readrq(struct pci_dev *dev, int rq) { return 0; }
+static inline int pcie_get_readrq(struct pci_dev *dev) { return 512; }
+static inline int pci_reset_bus(struct pci_dev *dev) { return -ENOTTY; }
+static inline bool pci_dev_msi_enabled(struct pci_dev *dev) { return dev->msi_enabled; }
+static inline int pci_prepare_to_sleep(struct pci_dev *dev) { return 0; }
+static inline bool pci_dev_run_wake(struct pci_dev *dev) { return false; }
+static inline int pcim_set_mwi(struct pci_dev *dev) { return 0; }
+static inline int pci_set_mwi(struct pci_dev *dev) { return 0; }
+static inline void pci_clear_mwi(struct pci_dev *dev) { }
+u16 pci_status_get_and_clear_errors(struct pci_dev *pdev);
+#ifndef PCI_EXP_LNKCTL_ASPM_L0S
+#define PCI_EXP_LNKCTL_ASPM_L0S 0x0001
+#define PCI_EXP_LNKCTL_ASPM_L1 0x0002
+#define PCI_EXP_LNKCTL_ASPMC 0x0003
+#endif
+#define pci_request_mem_regions(d, n) lkpi_pci_request_selected_regions(d, pci_select_bars(d, IORESOURCE_MEM), n)
+static inline void pcie_print_link_status(struct pci_dev *pdev) { }
+static inline void pci_disable_ptm(struct pci_dev *pdev) { }
+static inline void pci_release_mem_regions(struct pci_dev *pdev) { pci_release_regions(pdev); }
+static inline int pci_pcie_cap(struct pci_dev *dev) { return dev->pcie_cap; }
+/* MSI-X "antiguo": la capa asigna 0..n-1 y se devuelven sus IRQ en e[].vector. */
+static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minv, int maxv)
+{
+	int i, n = lkpi_pci_alloc_irq_vectors_affinity(dev, minv, maxv, PCI_IRQ_MSIX, NULL);
+
+	if (n < 0)
+		return n;
+	for (i = 0; i < n; i++)
+		e[i].vector = lkpi_pci_irq_vector(dev, i);
+	return n;
+}
+static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec)
+{
+	int n = pci_enable_msix_range(dev, e, nvec, nvec);
+	return n < 0 ? n : 0;
+}
+static inline void pci_disable_msix(struct pci_dev *dev) { pci_free_irq_vectors(dev); pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_INTX); }
+#define pci_ioremap_bar(d, b) pci_iomap(d, b, 0)
+static inline int pcix_get_mmrbc(struct pci_dev *dev) { return 512; }
+static inline int pcix_set_mmrbc(struct pci_dev *dev, int mmrbc) { return 0; }
+#define PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG (1u << 9)
 #endif

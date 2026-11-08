@@ -68,6 +68,18 @@ static inline void bitmap_clear_safe(uint8_t *bmp, uint64_t bit) {
 
 static spinlock_t pmm_lock;
 
+// ---------------------------------------------------------------------------
+// [COW] Refcount por frame. Guarda las referencias EXTRA de cada frame (0 =
+// un solo dueño, que es lo normal), así un array a cero significa "nada
+// compartido". Vive en memoria obtenida de pmm_alloc_pages tras buddy_init;
+// si no se pudo reservar, pmm_page_share() devuelve -1 y fork copia.
+//
+// pmm_free_page() solo libera el frame cuando no quedan referencias extra,
+// de modo que munmap/exit/brk/madvise funcionan sin cambios con páginas
+// compartidas por fork.
+// ---------------------------------------------------------------------------
+static uint16_t *page_extra = 0;
+
 void pmm_init(uint64_t memmap, uint64_t memmap_size,
               uint64_t memmap_desc_size) {
   if (!memmap || memmap_size == 0)
@@ -245,6 +257,53 @@ void pmm_relocate_bitmap(void) {
 
   extern void buddy_init(uint64_t total_pages, uint8_t *bitmap_ptr);
   buddy_init(max_blocks, bitmap);
+
+  // [COW] Array de referencias extra por frame (2 bytes/página).
+  uint64_t bytes = max_blocks * sizeof(uint16_t);
+  uint64_t npages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  uint64_t phys = pmm_alloc_pages(npages);
+  if (phys) {
+    memset(phys_to_virt(phys), 0, npages * PAGE_SIZE);
+    page_extra = (uint16_t *)phys_to_virt(phys);
+    LOG_INFO("[PMM] Refcount por frame (COW): %lu KB",
+             (unsigned long)(npages * PAGE_SIZE / 1024));
+  } else {
+    LOG_WARN("[PMM] sin memoria para el refcount por frame: fork copiará");
+  }
+}
+
+int pmm_page_share(uint64_t phys) {
+  uint64_t bit = phys / PAGE_SIZE;
+  if (!page_extra || !bitmap_in_range(bit))
+    return -1;
+  uint16_t v = __atomic_load_n(&page_extra[bit], __ATOMIC_RELAXED);
+  while (v != 0xFFFF) {
+    if (__atomic_compare_exchange_n(&page_extra[bit], &v, v + 1, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+      return 0;
+  }
+  return -1;
+}
+
+int pmm_page_is_shared(uint64_t phys) {
+  uint64_t bit = phys / PAGE_SIZE;
+  if (!page_extra || !bitmap_in_range(bit))
+    return 0;
+  return __atomic_load_n(&page_extra[bit], __ATOMIC_ACQUIRE) != 0;
+}
+
+// Quita una referencia extra si la hay. 1 = quitada, 0 = era la única.
+static int pmm_page_unshare(uint64_t phys) {
+  uint64_t bit = phys / PAGE_SIZE;
+  if (!page_extra || !bitmap_in_range(bit))
+    return 0;
+  uint16_t v = __atomic_load_n(&page_extra[bit], __ATOMIC_RELAXED);
+  while (v != 0) {
+    if (__atomic_compare_exchange_n(&page_extra[bit], &v, v - 1, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+      return 1;
+  }
+  return 0;
 }
 
 uint64_t pmm_alloc_page(void) {
@@ -380,6 +439,9 @@ uint64_t pmm_alloc_pages_below(uint64_t count, uint64_t limit) {
 
 void pmm_free_page(uint64_t phys_addr) {
   if (phys_addr == 0 || !bitmap)
+    return;
+  // [COW] Frame compartido: solo suelta una referencia.
+  if (pmm_page_unshare(phys_addr))
     return;
   unsigned long flags = spin_lock_irqsave(&pmm_lock);
   uint64_t bit = phys_addr / PAGE_SIZE;
@@ -521,4 +583,12 @@ void pmm_for_each_usable(void (*cb)(uint64_t start, uint64_t end, void *ctx),
   for (int i = 0; i < usable_ranges_count; i++) {
     cb(usable_ranges[i].start, usable_ranges[i].end, ctx);
   }
+}
+uint64_t pmm_cow_extra_total(void) {
+  uint64_t t = 0;
+  if (!page_extra)
+    return 0;
+  for (uint64_t i = 0; i < max_blocks; i++)
+    t += page_extra[i];
+  return t;
 }

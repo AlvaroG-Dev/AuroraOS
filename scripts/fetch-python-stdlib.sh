@@ -18,11 +18,34 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SYSROOT="$ROOT/sysroot"
 
-# Detectar versión del host.
-HOST_PY="$(command -v python3 || true)"
+# Version de Python del GUEST: la del binario precompilado (python3.X). El
+# stdlib debe ser de esa misma version; si el host trae otra (p. ej. 3.14 en
+# Kali), se busca un python3.X en el host y, si no hay, se omite sin romper
+# la build (la ISO arranca igual, solo sin stdlib de Python).
+GUEST_VER=""
+for f in "$ROOT"/precompiled/usr/bin/python3.[0-9]*; do
+    [ -e "$f" ] || continue
+    GUEST_VER="${f##*/python}"
+    break
+done
+
+HOST_PY=""
+if [ -n "$GUEST_VER" ]; then
+    HOST_PY="$(command -v "python$GUEST_VER" || true)"
+fi
 if [ -z "$HOST_PY" ]; then
-    echo "!! no encuentro python3 en el host" >&2
-    exit 1
+    CAND="$(command -v python3 || true)"
+    if [ -n "$CAND" ]; then
+        CAND_VER="$("$CAND" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+        if [ -z "$GUEST_VER" ] || [ "$CAND_VER" = "$GUEST_VER" ]; then
+            HOST_PY="$CAND"
+        fi
+    fi
+fi
+if [ -z "$HOST_PY" ]; then
+    echo "!! aviso: el guest usa Python ${GUEST_VER:-?} y el host no tiene esa version;" >&2
+    echo "   se omite el stdlib de Python (instala python${GUEST_VER:-3} en el host para incluirlo)." >&2
+    exit 0
 fi
 
 HOST_VER="$("$HOST_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
@@ -30,7 +53,7 @@ SRC="$("$HOST_PY" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
 
 if [ ! -d "$SRC" ]; then
     echo "!! stdlib del host no encontrado en $SRC" >&2
-    exit 1
+    exit 0
 fi
 
 DST="$SYSROOT/usr/lib/python${HOST_VER}"
@@ -54,6 +77,7 @@ mkdir -p "$DST"
 
 # rsync con exclusiones: tests, GUI, herramientas de dev, cache.
 # --delete deja el sysroot idéntico al host para esta versión.
+if command -v rsync >/dev/null 2>&1; then
 rsync -a --delete \
   --exclude 'test/' \
   --exclude 'tests/' \
@@ -68,6 +92,12 @@ rsync -a --delete \
   --exclude '*.pyo' \
   --exclude 'site-packages/' \
   "$SRC/" "$DST/"
+else
+  # Sin rsync (p. ej. compilando dentro de AuroraOS): tar con las mismas
+  # exclusiones; se vacia DST para igualar el efecto de --delete.
+  rm -rf "$DST"; mkdir -p "$DST"
+  tar -C "$SRC" --exclude 'test/' --exclude 'tests/' --exclude 'tkinter/' --exclude 'idlelib/' --exclude 'lib2to3/' --exclude 'ensurepip/' --exclude 'distutils/' --exclude 'venv/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.pyo' --exclude 'site-packages/' -cf - . | tar -C "$DST" -xf -
+fi
 
 # Precompilar .py → .pyc. Reduce el arranque de Python ~5x y evita que
 # Python intente escribir __pycache__ en el rootfs RO.
@@ -75,12 +105,20 @@ rsync -a --delete \
 # así que repetir make image no recompila nada.
 echo
 echo "Precompilando stdlib a .pyc (unchecked-hash)..."
+# -j 0 usa multiprocessing (semaforos POSIX); si no funciona (p. ej. dentro de
+# AuroraOS) se reintenta en un solo proceso.
 "$HOST_PY" -m compileall \
     --invalidation-mode unchecked-hash \
     -q -j 0 \
-    "$DST" || {
-    echo "!! compileall falló" >&2
-    exit 1
+    "$DST" 2>/tmp/compileall.err || {
+    echo "   compileall -j 0 fallo; reintentando con -j 1"
+    "$HOST_PY" -m compileall \
+        --invalidation-mode unchecked-hash \
+        -q -j 1 \
+        "$DST" || {
+        echo "!! compileall falló" >&2
+        exit 1
+    }
 }
 PYC_COUNT="$(find "$DST" -name '*.pyc' | wc -l)"
 echo "  .pyc generados: $PYC_COUNT"

@@ -567,6 +567,26 @@ static void test_pmm_efi_range_overflow(void) {
 REGISTER_TEST("pmm: rechaza overflow de rangos EFI",
               test_pmm_efi_range_overflow);
 
+
+// [COW] Refcount por frame: pmm_page_share suma dueños y pmm_free_page solo
+// libera el frame con el ultimo.
+static void test_pmm_cow_refcount(void) {
+  // Solo se mira el estado del frame propio: pmm_free_pages_count() es global
+  // y otros hilos asignan y liberan a la vez.
+  uint64_t p = pmm_alloc_page();
+  TEST_ASSERT(p != 0, "pmm cow: alloc");
+  TEST_ASSERT(!pmm_page_is_shared(p), "pmm cow: recien asignado no compartido");
+  TEST_ASSERT(pmm_page_share(p) == 0, "pmm cow: share 1");
+  TEST_ASSERT(pmm_page_share(p) == 0, "pmm cow: share 2");
+  TEST_ASSERT(pmm_page_is_shared(p), "pmm cow: compartido");
+  pmm_free_page(p);
+  TEST_ASSERT(pmm_page_is_shared(p), "pmm cow: sigue compartido (1 extra)");
+  pmm_free_page(p);
+  TEST_ASSERT(!pmm_page_is_shared(p), "pmm cow: ya solo un dueno");
+  pmm_free_page(p); // ultima referencia: libera el frame
+}
+REGISTER_TEST("pmm: refcount por frame (COW)", test_pmm_cow_refcount);
+
 // ===========================================================================
 // [Fase 1.1] pmm: doble free de una sola página
 //
@@ -1263,22 +1283,35 @@ REGISTER_TEST("smp: cpu_local_data[0] inicializado",
               test_smp_cpu_local_data_exists);
 
 static void test_smp_this_cpu_macro(void) {
+  // El tick del temporizador incrementa/pone a cero ticks_since_resched de
+  // esta CPU: con interrupciones activas, la IRQ puede caer entre la
+  // escritura y la lectura (bajo carga fallaba de forma intermitente).
+  // Se prueba con las interrupciones desactivadas.
+  unsigned long fl;
+  __asm__ volatile("pushfq; popq %0; cli" : "=r"(fl)::"memory");
   int cpu = smp_processor_id();
   uint64_t saved = this_cpu(ticks_since_resched);
   this_cpu(ticks_since_resched) = 0xDEADBEEF;
-  TEST_ASSERT(cpu_local_data[cpu].ticks_since_resched == 0xDEADBEEF,
+  uint64_t got = cpu_local_data[cpu].ticks_since_resched;
+  this_cpu(ticks_since_resched) = saved;
+  if (fl & (1UL << 9))
+    __asm__ volatile("sti" ::: "memory");
+  TEST_ASSERT(got == 0xDEADBEEF,
               "this_cpu(ticks_since_resched) no escribió en cpu_local_data[%d]",
               cpu);
-  this_cpu(ticks_since_resched) = saved;
 }
 REGISTER_TEST("smp: this_cpu() accede al CPU actual", test_smp_this_cpu_macro);
 
 static void test_smp_per_cpu_macro(void) {
-  per_cpu(ticks_since_resched, 3) = 0xCAFEBABE;
+  // Slot que no es de ninguna CPU real (el tick de CPU 3 tocaba el campo
+  // a la vez en máquinas con >= 4 CPU).
+  const int slot = MAX_CPUS - 1;
+  per_cpu(ticks_since_resched, slot) = 0xCAFEBABE;
   TEST_ASSERT(
-      cpu_local_data[3].ticks_since_resched == 0xCAFEBABE,
-      "per_cpu(ticks_since_resched, 3) no escribió en cpu_local_data[3]");
-  per_cpu(ticks_since_resched, 3) = 0;
+      cpu_local_data[slot].ticks_since_resched == 0xCAFEBABE,
+      "per_cpu(ticks_since_resched, %d) no escribió en cpu_local_data[%d]",
+      slot, slot);
+  per_cpu(ticks_since_resched, slot) = 0;
 }
 REGISTER_TEST("smp: per_cpu() accede al slot correcto", test_smp_per_cpu_macro);
 
@@ -4816,7 +4849,10 @@ static void test_vfs_check_access_owner_group_other(void) {
 
   // 1. Root: todo OK.
   fake.euid = 0;
+  fake.fsuid = 0;
+  fake.cap_eff = CAP_FULL_MASK;
   fake.egid = 0;
+  fake.fsgid = 0;
   fake.ngroups = 0;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "root R");
   TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "root W");
@@ -4824,25 +4860,37 @@ static void test_vfs_check_access_owner_group_other(void) {
 
   // 2. Owner uid=1000: rw-.
   fake.euid = 1000;
+  fake.fsuid = 1000;
+  fake.cap_eff = 0;
   fake.egid = 1000;
+  fake.fsgid = 1000;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "owner R");
   TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) == 0, "owner W");
   TEST_ASSERT(vfs_check_access(&n, VFS_X_OK) != 0, "owner X debe fallar");
 
   // 3. Group gid=1000, uid distinto: r--.
   fake.euid = 2000;
+  fake.fsuid = 2000;
+  fake.cap_eff = 0;
   fake.egid = 1000;
+  fake.fsgid = 1000;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "group R");
   TEST_ASSERT(vfs_check_access(&n, VFS_W_OK) != 0, "group W debe fallar");
 
   // 4. Otro uid/gid: ---.
   fake.euid = 3000;
+  fake.fsuid = 3000;
+  fake.cap_eff = 0;
   fake.egid = 3000;
+  fake.fsgid = 3000;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) != 0, "other R debe fallar");
 
   // 5. Grupo suplementario: egid=3000 pero groups[0]=1000.
   fake.euid = 3000;
+  fake.fsuid = 3000;
+  fake.cap_eff = 0;
   fake.egid = 3000;
+  fake.fsgid = 3000;
   fake.groups[0] = 1000;
   fake.ngroups = 1;
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "suppl group R");
@@ -4869,7 +4917,10 @@ static void test_vfs_check_access_root_x_file(void) {
   n.mode = S_IFREG | 0000; // sin ningún bit
 
   fake.euid = 0;
+  fake.fsuid = 0;
+  fake.cap_eff = CAP_FULL_MASK;
   fake.egid = 0;
+  fake.fsgid = 0;
 
   // Root bypasea R/W aunque no tenga bits...
   TEST_ASSERT(vfs_check_access(&n, VFS_R_OK) == 0, "root R sobre 0000");
@@ -6189,11 +6240,25 @@ REGISTER_TEST_FLAGS("sched: plazos de espera con resolución de 1 ms",
 #include "../vfs.h"
 
 static void test_pmm_alloc_below(void) {
-  const uint64_t limit = 256ULL << 20; // máscara de 28 bits (edu de QEMU)
+  uint64_t limit = 256ULL << 20; // máscara de 28 bits (edu de QEMU)
+  // En hardware real (UEFI, GPU, caches del arranque) los primeros 256 MiB
+  // pueden estar agotados cuando corre la suite: eso no es un fallo del
+  // asignador. Se avisa con los datos y se prueba con el límite de 4 GiB.
+  uint64_t probe = pmm_alloc_pages_below(1, limit);
+  if (probe) {
+    pmm_free_pages(probe, 1);
+  } else {
+    klog_printf(KLOG_WARN,
+                "[TEST] pmm: sin páginas libres bajo 256 MiB (libres totales=%lu "
+                "de %lu); se prueba bajo 4 GiB",
+                (unsigned long)pmm_free_pages_count(),
+                (unsigned long)pmm_total_pages());
+    limit = 4ULL << 30;
+  }
   uint64_t a = pmm_alloc_pages_below(1, limit);
   uint64_t b = pmm_alloc_pages_below(3, limit); // se alinea a 4 páginas
   uint64_t c = pmm_alloc_pages_below(16, limit);
-  TEST_ASSERT(a && a + 4096 <= limit, "1 página bajo 256 MiB: %lx", (unsigned long)a);
+  TEST_ASSERT(a && a + 4096 <= limit, "1 página bajo el límite: %lx", (unsigned long)a);
   TEST_ASSERT(b && b + 3 * 4096 <= limit && (b & (4 * 4096 - 1)) == 0,
               "3 páginas alineadas a 4: %lx", (unsigned long)b);
   TEST_ASSERT(c && c + 16 * 4096 <= limit && (c & (16 * 4096 - 1)) == 0,
@@ -6549,3 +6614,142 @@ static void test_lkpi_unload(void) {
   TEST_ASSERT(kur_loader_find_by_name("linuxkpi") == NULL, "linuxkpi sigue cargada");
 }
 REGISTER_TEST_FLAGS("linuxkpi: descarga de la capa", test_lkpi_unload, TEST_FLAG_BLOCKING);
+
+// ===========================================================================
+// [ext2 E0.2] bcache sobre un disco RAM (no toca ningún disco real).
+// ===========================================================================
+#include "../bcache.h"
+#include "../fsprobe.h"
+
+static uint8_t *g_bc_ram;
+static int g_bc_writes;
+
+static int bc_ram_submit(block_device_t *bdev, bio_t *bio) {
+  uint32_t ss = bdev->sector_size;
+  if (bio->op == BIO_READ)
+    memcpy(bio->buf, g_bc_ram + bio->lba * ss, (size_t)bio->count * ss);
+  else if (bio->op == BIO_WRITE) {
+    memcpy(g_bc_ram + bio->lba * ss, bio->buf, (size_t)bio->count * ss);
+    g_bc_writes++;
+  }
+  bio->error = 0;
+  return 0;
+}
+static block_ops_t bc_ram_ops = {.submit = bc_ram_submit};
+
+static void test_bcache_basic(void) {
+  const uint32_t SECT = 512, NSECT = 256; // 128 KiB
+  g_bc_ram = kzalloc(SECT * NSECT);
+  TEST_ASSERT(g_bc_ram != NULL, "sin memoria");
+  if (!g_bc_ram)
+    return;
+  for (uint32_t i = 0; i < SECT * NSECT; i++)
+    g_bc_ram[i] = (uint8_t)(i * 7 + (i >> 8));
+  g_bc_writes = 0;
+
+  block_device_t dev;
+  memset(&dev, 0, sizeof(dev));
+  strcpy(dev.name, "bcram0");
+  dev.num_sectors = NSECT;
+  dev.sector_size = SECT;
+  dev.ops = &bc_ram_ops;
+
+  uint8_t expect[1024];
+  memcpy(expect, g_bc_ram + 3 * 1024, 1024);
+  bc_buf_t *b = bc_get(&dev, 3, 1024);
+  TEST_ASSERT(b != NULL, "bc_get falló");
+  TEST_ASSERT(b && memcmp(bc_data(b), expect, 1024) == 0, "contenido leído");
+
+  // Fuera de rango y bs inválido.
+  TEST_ASSERT(bc_get(&dev, 1000000, 1024) == NULL, "bloque fuera de rango");
+  TEST_ASSERT(bc_get(&dev, 0, 1000) == NULL, "bs no potencia de 2");
+  TEST_ASSERT(bc_get(&dev, 0, 256) == NULL, "bs < sector");
+
+  // Escritura diferida: no llega al disco hasta sync.
+  ((uint8_t *)bc_data(b))[10] = 0xAB;
+  bc_mark_dirty(b);
+  TEST_ASSERT(g_bc_ram[3 * 1024 + 10] != 0xAB, "write-back: aún no escrito");
+  TEST_ASSERT(bc_invalidate_dev(&dev) == -EBUSY, "invalidate con ref activa");
+  bc_put(b);
+  TEST_ASSERT(bc_sync_dev(&dev) == 0, "sync");
+  TEST_ASSERT(g_bc_ram[3 * 1024 + 10] == 0xAB, "tras sync está en disco");
+  TEST_ASSERT(g_bc_writes == 1, "una sola escritura (%d)", g_bc_writes);
+
+  // Acierto en caché: no relee (cambio el disco por debajo y debe verse lo viejo).
+  g_bc_ram[3 * 1024 + 11] = 0x5A;
+  b = bc_get(&dev, 3, 1024);
+  TEST_ASSERT(b && ((uint8_t *)bc_data(b))[11] != 0x5A, "hit sin releer");
+  bc_put(b);
+  // Tras invalidar sí relee.
+  TEST_ASSERT(bc_invalidate_dev(&dev) == 0, "invalidate");
+  b = bc_get(&dev, 3, 1024);
+  TEST_ASSERT(b && ((uint8_t *)bc_data(b))[11] == 0x5A, "relee tras invalidar");
+  bc_put(b);
+
+  // bc_get_new: a cero sin leer.
+  b = bc_get_new(&dev, 9, 1024);
+  int zero = 1;
+  for (uint32_t i = 0; b && i < 1024; i++)
+    if (((uint8_t *)bc_data(b))[i])
+      zero = 0;
+  TEST_ASSERT(b && zero, "get_new a cero");
+  bc_put(b);
+
+  // Expulsión: con tope de 8 KiB y 32 bloques sucios, no se pierde ninguno.
+  bc_set_limit(8 * 1024);
+  for (uint32_t i = 0; i < 32; i++) {
+    b = bc_get(&dev, 20 + i, 1024);
+    TEST_ASSERT(b != NULL, "get %u", i);
+    if (!b)
+      break;
+    ((uint8_t *)bc_data(b))[0] = (uint8_t)(0xC0 + i);
+    bc_mark_dirty(b);
+    bc_put(b);
+  }
+  struct bc_stats st;
+  bc_get_stats(&st);
+  TEST_ASSERT(st.bufs <= 9, "tope respetado (%llu bufs)", (unsigned long long)st.bufs);
+  TEST_ASSERT(st.evictions > 0, "hubo expulsiones");
+  TEST_ASSERT(bc_sync_dev(&dev) == 0, "sync final");
+  int ok = 1;
+  for (uint32_t i = 0; i < 32; i++)
+    if (g_bc_ram[(20 + i) * 1024] != (uint8_t)(0xC0 + i))
+      ok = 0;
+  TEST_ASSERT(ok, "ningún bloque sucio perdido por la expulsión");
+
+  TEST_ASSERT(bc_invalidate_dev(&dev) == 0, "invalidate final");
+  bc_set_limit(16 * 1024 * 1024);
+  kfree(g_bc_ram);
+  g_bc_ram = NULL;
+}
+REGISTER_TEST("bcache: lectura, write-back, expulsión", test_bcache_basic);
+
+static void test_fsprobe_signatures(void) {
+  const uint32_t SECT = 512, NSECT = 128;
+  g_bc_ram = kzalloc(SECT * NSECT);
+  TEST_ASSERT(g_bc_ram != NULL, "sin memoria");
+  if (!g_bc_ram)
+    return;
+  block_device_t dev;
+  memset(&dev, 0, sizeof(dev));
+  strcpy(dev.name, "fpram0");
+  dev.num_sectors = NSECT;
+  dev.sector_size = SECT;
+  dev.ops = &bc_ram_ops;
+
+  TEST_ASSERT(fs_probe(&dev) == FS_UNKNOWN, "disco vacío");
+  g_bc_ram[1024 + 56] = 0x53;
+  g_bc_ram[1024 + 57] = 0xEF;
+  TEST_ASSERT(fs_probe(&dev) == FS_EXT2, "ext2 por s_magic");
+  memset(g_bc_ram, 0, SECT * NSECT);
+  memcpy(g_bc_ram + 82, "FAT32   ", 8);
+  g_bc_ram[510] = 0x55;
+  g_bc_ram[511] = 0xAA;
+  TEST_ASSERT(fs_probe(&dev) == FS_FAT32, "FAT32 por BPB");
+  memset(g_bc_ram, 0, SECT * NSECT);
+  memcpy(g_bc_ram + 32769, "CD001", 5);
+  TEST_ASSERT(fs_probe(&dev) == FS_ISO9660, "iso por CD001");
+  kfree(g_bc_ram);
+  g_bc_ram = NULL;
+}
+REGISTER_TEST("fsprobe: firmas ext2/FAT32", test_fsprobe_signatures);

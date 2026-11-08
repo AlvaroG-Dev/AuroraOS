@@ -1,5 +1,6 @@
 // kernel/swap.c
 #include "swap.h"
+#include "bcache.h"
 #include "block.h"
 #include "heap.h"
 #include "klog.h"
@@ -682,7 +683,10 @@ int swap_reclaim_one(void) {
   // escribió, el PF handler ya marcó el PTE como RW. Abortamos el
   // reclaim (el slot se libera, la página se queda donde estaba).
   if (!paging_get_pte_in(pml4, c.vaddr, &check) ||
-      (check & PTE_FRAME) != phys || (check & PTE_WRITABLE)) {
+      (check & PTE_FRAME) != phys || (check & PTE_WRITABLE) ||
+      (check & PTE_COW) || pmm_page_is_shared(phys)) {
+    // [COW] Si un fork compartio el frame mientras escribiamos, no se
+    // intercambia (el PTE ya lo gestiona el COW).
     swap_free_slot((uint32_t)type, slot);
     return 0;
   }
@@ -722,6 +726,14 @@ void kswapd_main(void) {
   while (1) {
     // Dormir ~0.5 segundos (nunca despierta por condición, solo por timeout)
     wait_event_interruptible_timeout(&wq, kswapd_never, NULL, 500);
+
+    // Poca memoria libre: primero se devuelve la caché de bloques (es lo más
+    // barato de reponer), con o sin swap.
+    {
+      uint64_t fp = pmm_free_pages_count();
+      if (g_swap_high_wm && fp < g_swap_high_wm)
+        bc_reclaim((size_t)(g_swap_high_wm - fp) * 4096);
+    }
 
     if (swap_device_count() == 0)
       continue;

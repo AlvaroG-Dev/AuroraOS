@@ -2362,6 +2362,154 @@ void aml_diag_power(void) {
   diag_walk(g_root, 0);
 }
 
+
+// ---------------------------------------------------------------------------
+// Controlador embebido: puertos y consultas _Qxx que pulsan el boton.
+// Sin ejecutar AML (el interprete no tiene campos de EC): se busca en el
+// cuerpo de cada _Qxx un Notify (0x86) cuyo objetivo sea un dispositivo
+// PNP0C0C y el valor 0x80.
+// ---------------------------------------------------------------------------
+static int node_is_kind(const aml_node_t *n, const char *prefix) {
+  const char *k = NULL;
+  return diag_hid_kind(n, &k) && !strncmp(k, prefix, 7);
+}
+
+static const aml_node_t *find_kind(const aml_node_t *n, const char *prefix,
+                                   int depth) {
+  if (depth > 12)
+    return NULL;
+  if (n != g_root && node_is_kind(n, prefix))
+    return n;
+  for (const aml_node_t *c = n->children; c; c = c->sibling) {
+    const aml_node_t *r = find_kind(c, prefix, depth + 1);
+    if (r)
+      return r;
+  }
+  return NULL;
+}
+
+// Recoge los nombres (4 letras) de todos los PNP0C0C.
+static int collect_buttons(const aml_node_t *n, char (*names)[4], int max,
+                           int cnt, int depth) {
+  if (depth > 12)
+    return cnt;
+  if (n != g_root && node_is_kind(n, "PNP0C0C") && cnt < max)
+    memcpy(names[cnt++], n->name, 4);
+  for (const aml_node_t *c = n->children; c; c = c->sibling)
+    cnt = collect_buttons(c, names, max, cnt, depth + 1);
+  return cnt;
+}
+
+// Lee los puertos de E/S de un _CRS (descriptores 0x47 y 0x4B).
+static int crs_ports(aml_object_t *crs, uint16_t *ports, int max) {
+  uint32_t len = 0;
+  uint8_t *b = aml_to_buffer(crs, &len);
+  int n = 0;
+  uint32_t i = 0;
+  while (b && i < len && n < max) {
+    uint8_t tag = b[i];
+    if (tag & 0x80) {
+      if (i + 3 > len)
+        break;
+      i += 3u + (b[i + 1] | (b[i + 2] << 8));
+      continue;
+    }
+    uint8_t type = (tag >> 3) & 0xF, sl = tag & 7;
+    if (type == 0xF)
+      break;
+    if (i + 1u + sl > len)
+      break;
+    if (type == 0x8 && sl >= 7)
+      ports[n++] = (uint16_t)(b[i + 2] | (b[i + 3] << 8));
+    else if (type == 0x9 && sl >= 3)
+      ports[n++] = (uint16_t)(b[i + 1] | (b[i + 2] << 8));
+    i += 1u + sl;
+  }
+  return n;
+}
+
+static int hexv(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+// 1 si el cuerpo contiene Notify(<alguno de names>, 0x80).
+static int body_notifies_button(const uint8_t *code, uint32_t len,
+                                char (*names)[4], int nnames) {
+  for (uint32_t i = 0; i + 6 < len; i++) {
+    if (code[i] != 0x86)
+      continue;
+    uint32_t p = i + 1;
+    while (p < len && (code[p] == '\\' || code[p] == '^'))
+      p++;
+    uint32_t segs = 1;
+    if (p < len && code[p] == 0x2E) { segs = 2; p++; }
+    else if (p < len && code[p] == 0x2F) { if (p + 1 >= len) break; segs = code[p + 1]; p += 2; }
+    else if (p < len && code[p] == 0x00) continue;
+    if (segs == 0 || p + 4u * segs + 2 > len)
+      continue;
+    const uint8_t *last = code + p + 4 * (segs - 1);
+    uint32_t v = p + 4 * segs;
+    int val = -1;
+    if (code[v] == 0x0A)
+      val = code[v + 1];
+    if (val != 0x80)
+      continue;
+    for (int k = 0; k < nnames; k++)
+      if (!memcmp(last, names[k], 4))
+        return 1;
+  }
+  return 0;
+}
+
+int aml_find_ec(aml_ec_info_t *out) {
+  if (!out)
+    return -1;
+  memset(out, 0, sizeof(*out));
+  if (!g_ready || !g_root)
+    return -1;
+  const aml_node_t *ec = find_kind(g_root, "PNP0C09", 0);
+  if (!ec)
+    return -1;
+  out->found = 1;
+  out->data_port = 0x62;
+  out->cmd_port = 0x66;
+
+  char path[96], crs_path[110];
+  diag_path(ec, path, sizeof(path));
+  size_t pl = strlen(path);
+  memcpy(crs_path, path, pl);
+  memcpy(crs_path + pl, "._CRS", 6);
+  uint16_t ports[4];
+  int np = crs_ports(aml_eval(crs_path), ports, 4);
+  if (np >= 2) {
+    out->data_port = ports[0];
+    out->cmd_port = ports[1];
+    out->crs_ok = 1;
+  }
+
+  char names[8][4];
+  int nb = collect_buttons(g_root, names, 8, 0, 0);
+  for (const aml_node_t *c = ec->children; c; c = c->sibling) {
+    if (c->name[0] != '_' || c->name[1] != 'Q' || !c->value ||
+        c->value->type != AML_METHOD)
+      continue;
+    int h = hexv(c->name[2]), l = hexv(c->name[3]);
+    if (h < 0 || l < 0)
+      continue;
+    out->nq++;
+    unsigned q = (unsigned)(h * 16 + l);
+    if (body_notifies_button(c->value->method.code, c->value->method.code_len,
+                             names, nb)) {
+      out->power_q[q >> 3] |= (uint8_t)(1u << (q & 7));
+      out->power_q_count++;
+    }
+  }
+  return 0;
+}
+
 int aml_method_exists(const char *path) {
   if (!g_ready || !g_root || !path)
     return 0;

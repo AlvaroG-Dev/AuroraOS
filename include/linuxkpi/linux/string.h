@@ -96,6 +96,7 @@ void lkpi_argv_free(char **argv);
 #define kstrdup(s, g) lkpi_kstrdup(s, g)
 #define kstrndup(s, m, g) lkpi_kstrndup(s, m, g)
 #define kmemdup(s, l, g) lkpi_kmemdup(s, l, g)
+#define kmemdup_noprof(s, l, g) lkpi_kmemdup(s, l, g)
 #define kmemdup_nul(s, l, g) lkpi_kmemdup_nul(s, l, g)
 #define kstrdup_const(s, g) lkpi_kstrdup_const(s, g)
 #define kfree_const(x) lkpi_kfree_const(x)
@@ -188,4 +189,6 @@ static inline bool mem_is_zero(const void *s, size_t n)
 	return true;
 }
 
+static inline void *kvmemdup(const void *src, size_t len, gfp_t gfp) { return kmemdup(src, len, gfp); }
+#define request_module_nowait(...) (0)
 #endif

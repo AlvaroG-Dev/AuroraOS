@@ -23,6 +23,9 @@
 #include "heap.h"
 #include "klog.h"
 #include "mutex.h"
+#include "paging.h"
+#include "pmm.h"
+#include "process.h"
 #include "rtc.h"
 #include "string.h"
 #include "uaccess.h"
@@ -34,7 +37,7 @@
 // Estructuras
 // ---------------------------------------------------------------------------
 typedef struct tmpfs_node {
-  char name[VFS_PATH_MAX];
+  char name[VFS_NAME_MAX];
   uint32_t mode; // S_IF* | perms
   uint32_t uid;
   uint32_t gid;
@@ -45,8 +48,14 @@ typedef struct tmpfs_node {
   int nlink;
   int vfs_refs;
 
-  uint8_t *data;   // files: contenido; symlinks: target sin NUL
-  size_t capacity; // bytes reservados en data (>= size)
+  // symlinks: data = target sin NUL (kmalloc contiguo), capacity = su longitud.
+  // ficheros: data = tabla de punteros a paginas de 4 KB (uint8_t **) tomadas
+  //           del PMM (sin limite del heap del kernel), capacity = bytes en
+  //           paginas (multiplo de 4096), tab_cap = entradas de la tabla.
+  uint8_t *data;
+  size_t capacity;
+  size_t tab_cap;
+  int mapped; // alguna pagina se ha entregado a un mmap(MAP_SHARED): no liberarlas al truncar
 
   struct tmpfs_fs *fs;
   struct tmpfs_node *parent;
@@ -97,6 +106,104 @@ static void unlink_child_locked(tmpfs_node_t *dir, tmpfs_node_t *child) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Almacenamiento paginado de ficheros (permite /tmp de GBs; antes un unico
+// krealloc contiguo limitado por el heap de 256 MB / 64 MB por bloque).
+// ---------------------------------------------------------------------------
+#define TMPFS_PG 4096UL
+
+static inline int node_paged(const tmpfs_node_t *n) {
+  return (n->mode & S_IFMT) != S_IFLNK;
+}
+
+static void file_free_pages(tmpfs_node_t *n) {
+  if (!n->data)
+    return;
+  uint8_t **tab = (uint8_t **)n->data;
+  size_t np = n->capacity / TMPFS_PG;
+  for (size_t i = 0; i < np; i++)
+    if (tab[i])
+      pmm_free_page(virt_to_phys(tab[i]));
+  kfree(n->data);
+  n->data = NULL;
+  n->capacity = 0;
+  n->tab_cap = 0;
+}
+
+// Garantiza paginas (a cero) hasta cubrir `end` bytes. No toca used_bytes.
+static int file_reserve(tmpfs_node_t *n, size_t end) {
+  size_t want = (end + TMPFS_PG - 1) / TMPFS_PG;
+  size_t have = n->capacity / TMPFS_PG;
+  if (want <= have)
+    return 0;
+  if (want > n->tab_cap) {
+    size_t nc = n->tab_cap ? n->tab_cap : 16;
+    while (nc < want)
+      nc *= 2;
+    uint8_t **nt = (uint8_t **)krealloc(n->data, nc * sizeof(uint8_t *));
+    if (!nt)
+      return -ENOMEM;
+    memset(nt + n->tab_cap, 0, (nc - n->tab_cap) * sizeof(uint8_t *));
+    n->data = (uint8_t *)nt;
+    n->tab_cap = nc;
+  }
+  uint8_t **tab = (uint8_t **)n->data;
+  size_t i;
+  for (i = have; i < want; i++) {
+    uint64_t ph = pmm_alloc_page();
+    if (!ph)
+      break;
+    tab[i] = (uint8_t *)phys_to_virt(ph);
+    memset(tab[i], 0, TMPFS_PG);
+  }
+  if (i < want) {
+    for (size_t j = have; j < i; j++) {
+      pmm_free_page(virt_to_phys(tab[j]));
+      tab[j] = NULL;
+    }
+    return -ENOMEM;
+  }
+  n->capacity = want * TMPFS_PG;
+  return 0;
+}
+
+static void file_copy_out(const tmpfs_node_t *n, size_t off, void *buf,
+                          size_t len) {
+  uint8_t **tab = (uint8_t **)n->data;
+  uint8_t *d = (uint8_t *)buf;
+  while (len) {
+    size_t po = off % TMPFS_PG, c = TMPFS_PG - po;
+    if (c > len)
+      c = len;
+    memcpy(d, tab[off / TMPFS_PG] + po, c);
+    d += c; off += c; len -= c;
+  }
+}
+
+static void file_copy_in(tmpfs_node_t *n, size_t off, const void *buf,
+                         size_t len) {
+  uint8_t **tab = (uint8_t **)n->data;
+  const uint8_t *sp = (const uint8_t *)buf;
+  while (len) {
+    size_t po = off % TMPFS_PG, c = TMPFS_PG - po;
+    if (c > len)
+      c = len;
+    memcpy(tab[off / TMPFS_PG] + po, sp, c);
+    sp += c; off += c; len -= c;
+  }
+}
+
+static void file_zero(tmpfs_node_t *n, size_t from, size_t to) {
+  uint8_t **tab = (uint8_t **)n->data;
+  while (from < to) {
+    size_t po = from % TMPFS_PG, c = TMPFS_PG - po;
+    if (c > to - from)
+      c = to - from;
+    memset(tab[from / TMPFS_PG] + po, 0, c);
+    from += c;
+  }
+}
+
 static void free_node_locked(tmpfs_fs_t *fs, tmpfs_node_t *n) {
   if (!n)
     return;
@@ -105,10 +212,24 @@ static void free_node_locked(tmpfs_fs_t *fs, tmpfs_node_t *n) {
       fs->used_bytes -= n->capacity;
     else
       fs->used_bytes = 0;
-    kfree(n->data);
-    n->data = NULL;
+    if (node_paged(n))
+      file_free_pages(n);
+    else {
+      kfree(n->data);
+      n->data = NULL;
+    }
   }
   kfree(n);
+}
+
+// [U1] Propietario de lo que crea el proceso actual: fsuid/fsgid (Linux).
+static inline uint32_t creator_uid(void) {
+  process_t *p = process_current();
+  return p ? p->fsuid : 0;
+}
+static inline uint32_t creator_gid(void) {
+  process_t *p = process_current();
+  return p ? p->fsgid : 0;
 }
 
 static vfs_node_t *wrap_locked(tmpfs_node_t *n) {
@@ -168,8 +289,18 @@ static int64_t tmpfs_read_op(vfs_node_t *vn, uint64_t off, size_t sz,
   }
   size_t avail = (size_t)(n->size - off);
   size_t n_copy = (sz < avail) ? sz : avail;
-  if (n_copy > 0 && n->data)
-    memcpy(buf, n->data + off, n_copy);
+  if (n_copy > 0 && n->data) {
+    if (node_paged(n)) {
+      size_t cap_end = n->capacity;
+      size_t c1 = (off < cap_end) ? ((cap_end - off) < n_copy ? (cap_end - off) : n_copy) : 0;
+      if (c1)
+        file_copy_out(n, (size_t)off, buf, c1);
+      if (c1 < n_copy)
+        memset((uint8_t *)buf + c1, 0, n_copy - c1);
+    } else {
+      memcpy(buf, n->data + off, n_copy);
+    }
+  }
   mutex_unlock(&fs->lock);
   return (int64_t)n_copy;
 }
@@ -197,34 +328,23 @@ static int64_t tmpfs_write_op(vfs_node_t *vn, uint64_t off, size_t sz,
   size_t end = (size_t)off + sz;
 
   if (end > n->capacity) {
-    size_t new_cap = n->capacity ? n->capacity : 4096;
-    while (new_cap < end) {
-      if (new_cap > SIZE_MAX / 2) {
-        mutex_unlock(&fs->lock);
-        return -ENOMEM;
-      }
-      new_cap *= 2;
-    }
+    size_t new_cap = (end + TMPFS_PG - 1) & ~(TMPFS_PG - 1);
     size_t delta = new_cap - n->capacity;
     if (fs->used_bytes + delta > fs->max_bytes) {
       mutex_unlock(&fs->lock);
       return -ENOSPC;
     }
-    uint8_t *nd = (uint8_t *)krealloc(n->data, new_cap);
-    if (!nd) {
+    if (file_reserve(n, end) != 0) {
       mutex_unlock(&fs->lock);
       return -ENOMEM;
     }
-    memset(nd + n->capacity, 0, delta);
-    n->data = nd;
-    n->capacity = new_cap;
     fs->used_bytes += delta;
   }
 
   if (off > n->size)
-    memset(n->data + n->size, 0, (size_t)off - n->size);
+    file_zero(n, (size_t)n->size, (size_t)off);
 
-  memcpy(n->data + off, buf, sz);
+  file_copy_in(n, (size_t)off, buf, sz);
   if (end > n->size)
     n->size = end;
   n->mtime = rtc_get_epoch();
@@ -233,6 +353,30 @@ static int64_t tmpfs_write_op(vfs_node_t *vn, uint64_t off, size_t sz,
 
   mutex_unlock(&fs->lock);
   return (int64_t)sz;
+}
+
+// mmap(MAP_SHARED) por demanda (glibc sem_open/shm_open sobre /dev/shm, Python
+// multiprocessing): entrega la pagina fisica del fichero. Los PTE van marcados
+// PTE_SPECIAL|PTE_SHARED_OBJ: el fichero es el dueño de la pagina.
+static int tmpfs_get_page_op(vfs_node_t *vn, uint64_t pgoff,
+                             uint64_t *phys_out) {
+  tmpfs_node_t *n = vn ? (tmpfs_node_t *)vn->priv : NULL;
+  if (!n || !n->fs || !phys_out)
+    return -EINVAL;
+  if ((n->mode & S_IFMT) != S_IFREG)
+    return -ENODEV;
+  tmpfs_fs_t *fs = n->fs;
+  mutex_lock(&fs->lock);
+  int rc = 0;
+  if (pgoff * TMPFS_PG >= n->size || !n->data || pgoff >= n->capacity / TMPFS_PG) {
+    rc = -EFAULT;
+  } else {
+    uint8_t **tab = (uint8_t **)n->data;
+    *phys_out = virt_to_phys(tab[pgoff]);
+    n->mapped = 1;
+  }
+  mutex_unlock(&fs->lock);
+  return rc;
 }
 
 static int tmpfs_open_op(vfs_node_t *vn, int flags) {
@@ -269,32 +413,28 @@ static int tmpfs_truncate_op(vfs_node_t *vn, uint64_t new_size) {
   mutex_lock(&fs->lock);
 
   if (new_size == 0) {
-    if (n->data) {
+    if (n->data && n->mapped) {
+      // Hay mapeos compartidos vivos: se conservan las paginas (a cero).
+      file_zero(n, 0, n->capacity);
+    } else if (n->data) {
       fs->used_bytes -= n->capacity;
-      kfree(n->data);
-      n->data = NULL;
-      n->capacity = 0;
+      file_free_pages(n);
     }
   } else if (new_size > n->capacity) {
-    size_t new_cap = new_size;
-    if (new_cap < 4096)
-      new_cap = 4096;
+    size_t new_cap = (new_size + TMPFS_PG - 1) & ~(TMPFS_PG - 1);
     size_t delta = new_cap - n->capacity;
     if (fs->used_bytes + delta > fs->max_bytes) {
       mutex_unlock(&fs->lock);
       return -ENOSPC;
     }
-    uint8_t *nd = (uint8_t *)krealloc(n->data, new_cap);
-    if (!nd) {
+    if (file_reserve(n, new_size) != 0) {
       mutex_unlock(&fs->lock);
       return -ENOMEM;
     }
-    memset(nd + n->capacity, 0, delta);
-    n->data = nd;
-    n->capacity = new_cap;
     fs->used_bytes += delta;
+    file_zero(n, (size_t)n->size, (size_t)new_size);
   } else if (new_size > n->size) {
-    memset(n->data + n->size, 0, (size_t)new_size - n->size);
+    file_zero(n, (size_t)n->size, (size_t)new_size);
   }
 
   n->size = new_size;
@@ -315,7 +455,7 @@ static int tmpfs_create_op(vfs_node_t *dir_vn, const char *name,
     return -EINVAL;
   if ((dir->mode & S_IFMT) != S_IFDIR)
     return -ENOTDIR;
-  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+  if (!name || !name[0] || strlen(name) >= VFS_NAME_MAX)
     return -EINVAL;
 
   tmpfs_fs_t *fs = dir->fs;
@@ -335,8 +475,8 @@ static int tmpfs_create_op(vfs_node_t *dir_vn, const char *name,
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFREG | (mode & 07777);
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -378,7 +518,7 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
     return -EINVAL;
   if ((dir->mode & S_IFMT) != S_IFDIR)
     return -ENOTDIR;
-  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+  if (!name || !name[0] || strlen(name) >= VFS_NAME_MAX)
     return -EINVAL;
 
   tmpfs_fs_t *fs = dir->fs;
@@ -398,8 +538,8 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFDIR | (mode & 07777);
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -409,6 +549,70 @@ static int tmpfs_mkdir_op(vfs_node_t *dir_vn, const char *name, uint32_t mode) {
   link_child_locked(dir, n);
   dir->mtime = n->mtime;
 
+  mutex_unlock(&fs->lock);
+  return 0;
+}
+
+// link(2): tmpfs no comparte nodos entre nombres, asi que el enlace duro de un
+// fichero regular se emula con una COPIA (nlink=1, sin identidad compartida).
+// Basta para el patron habitual link(tmp, lock) + unlink(tmp) (locks de X11).
+static int tmpfs_link_op(vfs_node_t *dir_vn, const char *name,
+                         vfs_node_t *target) {
+  tmpfs_node_t *dir = (tmpfs_node_t *)dir_vn->priv;
+  tmpfs_node_t *src = target ? (tmpfs_node_t *)target->priv : NULL;
+  if (!dir || !dir->fs || !src || src->fs != dir->fs)
+    return -EXDEV;
+  if ((dir->mode & S_IFMT) != S_IFDIR)
+    return -ENOTDIR;
+  if ((src->mode & S_IFMT) != S_IFREG)
+    return -EPERM;
+  if (!name || !name[0] || strlen(name) >= VFS_PATH_MAX)
+    return -EINVAL;
+  tmpfs_fs_t *fs = dir->fs;
+  mutex_lock(&fs->lock);
+  if (lookup_child_locked(dir, name)) {
+    mutex_unlock(&fs->lock);
+    return -EEXIST;
+  }
+  if (src->capacity && fs->used_bytes + src->capacity > fs->max_bytes) {
+    mutex_unlock(&fs->lock);
+    return -ENOSPC;
+  }
+  tmpfs_node_t *n = (tmpfs_node_t *)kzalloc(sizeof(*n));
+  if (!n) {
+    mutex_unlock(&fs->lock);
+    return -ENOMEM;
+  }
+  if (src->capacity) {
+    n->mode = S_IFREG;
+    if (file_reserve(n, src->capacity) != 0) {
+      file_free_pages(n);
+      kfree(n);
+      mutex_unlock(&fs->lock);
+      return -ENOMEM;
+    }
+    for (size_t o = 0; o < src->size;) {
+      size_t c = TMPFS_PG - (o % TMPFS_PG);
+      if (c > src->size - o)
+        c = src->size - o;
+      file_copy_in(n, o, ((uint8_t **)src->data)[o / TMPFS_PG] + (o % TMPFS_PG), c);
+      o += c;
+    }
+    fs->used_bytes += src->capacity;
+  }
+  size_t l = strlen(name);
+  memcpy(n->name, name, l);
+  n->name[l] = '\0';
+  n->mode = src->mode;
+  n->uid = src->uid;
+  n->gid = src->gid;
+  n->size = src->size;
+  n->mtime = rtc_get_epoch();
+  n->inode = fs->next_inode++;
+  n->nlink = 1;
+  n->fs = fs;
+  link_child_locked(dir, n);
+  dir->mtime = n->mtime;
   mutex_unlock(&fs->lock);
   return 0;
 }
@@ -552,8 +756,8 @@ static int tmpfs_symlink_op(vfs_node_t *dir_vn, const char *name,
   memcpy(n->name, name, nl);
   n->name[nl] = '\0';
   n->mode = S_IFLNK | 0777;
-  n->uid = 0;
-  n->gid = 0;
+  n->uid = creator_uid();
+  n->gid = creator_gid();
   n->mtime = rtc_get_epoch();
   n->inode = fs->next_inode++;
   n->nlink = 1;
@@ -661,6 +865,7 @@ static vfs_ops_t tmpfs_file_ops = {
     .open = tmpfs_open_op,
     .close = tmpfs_close_op,
     .truncate = tmpfs_truncate_op,
+    .get_page = tmpfs_get_page_op,
     .utimes = tmpfs_utimes_op,
     .chmod = tmpfs_chmod_op,
     .chown = tmpfs_chown_op,
@@ -674,6 +879,7 @@ static vfs_ops_t tmpfs_dir_ops = {
     .mknod = tmpfs_mknod_op,
     .mkdir = tmpfs_mkdir_op,
     .unlink = tmpfs_unlink_op,
+    .link = tmpfs_link_op,
     .rename = tmpfs_rename_op,
     .symlink = tmpfs_symlink_op,
     .readdir = tmpfs_readdir_op,
@@ -707,7 +913,7 @@ static vfs_node_t *tmpfs_lookup_impl(void *fs_priv, const char *path) {
 
     if (seg_len == 0)
       continue;
-    if (seg_len >= VFS_PATH_MAX) {
+    if (seg_len >= VFS_NAME_MAX) {
       mutex_unlock(&fs->lock);
       return NULL;
     }
@@ -715,7 +921,7 @@ static vfs_node_t *tmpfs_lookup_impl(void *fs_priv, const char *path) {
       mutex_unlock(&fs->lock);
       return NULL;
     }
-    char name[VFS_PATH_MAX];
+    char name[VFS_NAME_MAX];
     memcpy(name, seg, seg_len);
     name[seg_len] = '\0';
 
@@ -746,7 +952,7 @@ static int tmpfs_statfs_impl(void *fs_priv, struct vfs_statfs *out) {
   out->f_bavail = out->f_bfree;
   out->f_files = 0;
   out->f_ffree = 0;
-  out->f_namelen = VFS_PATH_MAX - 1;
+  out->f_namelen = VFS_NAME_MAX - 1;
   mutex_unlock(&fs->lock);
   return 0;
 }
@@ -764,6 +970,12 @@ struct vfs_fs_ops *tmpfs_get_vfs_ops(void) {
 // ---------------------------------------------------------------------------
 // API publica
 // ---------------------------------------------------------------------------
+void tmpfs_set_root_mode(void *fsp, uint32_t mode) {
+  tmpfs_fs_t *fs = (tmpfs_fs_t *)fsp;
+  if (fs && fs->root)
+    fs->root->mode = S_IFDIR | (mode & 07777);
+}
+
 void *tmpfs_new(size_t max_bytes) {
   tmpfs_fs_t *fs = (tmpfs_fs_t *)kzalloc(sizeof(*fs));
   if (!fs)
@@ -802,8 +1014,12 @@ static void free_tree_recursive(tmpfs_fs_t *fs, tmpfs_node_t *n) {
       c = next;
     }
   }
-  if (n->data)
-    kfree(n->data);
+  if (n->data) {
+    if (node_paged(n))
+      file_free_pages(n);
+    else
+      kfree(n->data);
+  }
   kfree(n);
 }
 
@@ -909,6 +1125,10 @@ typedef struct {
 static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n", NULL, 0},
     {"/etc/group", "root:x:0:\n", NULL, 0},
+    {"/etc/shadow", "root:*:19000:0:99999:7:::\n", NULL, 0},
+    {"/etc/shells", "/bin/sh\n/bin/bash\n", NULL, 0},
+    {"/etc/sudo-nopasswd", "# sudo sin contrasena para wheel (LiveUSB)\n", NULL, 0},
+    {"/etc/skel/.profile", "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n", NULL, 0},
     {"/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n", NULL, 0},
     {"/etc/resolv.conf", "", NULL, 0},
     {"/etc/profile", "# /etc/profile\n", NULL, 0},
@@ -920,9 +1140,104 @@ static tmpfs_seed_t g_etc_seeds[] = {
     {"/etc/bash.bashrc", NULL, NULL, 0},
     {"/etc/ld.so.cache", NULL, NULL, 0},
     {"/etc/localtime", NULL, NULL, 0},
+    {"/etc/fstab", NULL, NULL, 0},
+    {"/etc/mke2fs.conf", NULL, NULL, 0},
     {"/etc/ssl/certs/ca-certificates.crt", NULL, NULL, 0},
 };
 #define N_ETC_SEEDS (sizeof(g_etc_seeds) / sizeof(g_etc_seeds[0]))
+
+// ---------------------------------------------------------------------------
+// [U2.3] /etc persistente: passwd, group y shadow viven en /data/etc cuando
+// /data está montado. /etc es un tmpfs sembrado en cada arranque, así que:
+//   - al montarse /data: si existen en /data/etc se copian a /etc; si no,
+//     se crean allí a partir de lo que haya en /etc (primera vez);
+//   - en sync(2)/apagado (etc_persist_flush): si /etc/X difiere de
+//     /data/etc/X se reescribe en /data/etc.
+// ---------------------------------------------------------------------------
+static const char *const k_etc_acct[] = {"passwd", "group", "shadow"};
+#define N_ETC_ACCT 3
+
+static int etc_write_file(const char *path, const char *data, size_t len,
+                          uint32_t mode) {
+  int rc = vfs_create(path, mode);
+  if (rc != 0 && rc != -EEXIST)
+    return rc;
+  vfs_node_t *n = vfs_lookup(path);
+  if (!n)
+    return -ENOENT;
+  if (!n->ops || !n->ops->write) {
+    vfs_node_free(n);
+    return -EINVAL;
+  }
+  rc = 0;
+  if (n->ops->truncate)
+    rc = n->ops->truncate(n, 0);
+  if (rc == 0 && len && n->ops->write(n, 0, len, data) != (int64_t)len)
+    rc = -EIO;
+  if (rc == 0 && n->ops->chmod && (n->mode & 07777) != mode) {
+    if (n->ops->chmod(n, mode) == 0)
+      n->mode = (n->mode & S_IFMT) | mode;
+  }
+  vfs_node_free(n);
+  return rc;
+}
+
+static uint32_t etc_acct_mode(int i) { return i == 2 ? 0600 : 0644; }
+
+// Ejecuta con fsuid/fsgid = 0 (el que llama a sync() puede no ser root).
+static void etc_persist_run(int on_mount) {
+  vfs_node_t *dd = vfs_lookup("/data");
+  if (!dd)
+    return;
+  vfs_node_free(dd);
+
+  process_t *p = process_current();
+  uint32_t su = 0, sg = 0;
+  if (p) {
+    su = p->fsuid;
+    sg = p->fsgid;
+    p->fsuid = 0;
+    p->fsgid = 0;
+  }
+  int rc = vfs_mkdir("/data/etc", 0755);
+  if (rc == 0 || rc == -EEXIST) {
+    for (int i = 0; i < N_ETC_ACCT; i++) {
+      char pe[48], pd[48];
+      size_t ne = 0, nd = 0;
+      pe[0] = pd[0] = '\0';
+      strcpy(pe, "/etc/");
+      strcpy(pe + 5, k_etc_acct[i]);
+      strcpy(pd, "/data/etc/");
+      strcpy(pd + 10, k_etc_acct[i]);
+      char *be = tmpfs_read_file(pe, &ne);
+      char *bd = tmpfs_read_file(pd, &nd);
+      if (on_mount && bd) {
+        // /data manda: cargar en /etc.
+        etc_write_file(pe, bd, nd, etc_acct_mode(i));
+      } else if (be && (!bd || nd != ne || memcmp(bd, be, ne) != 0)) {
+        // /etc cambió (o primera vez): guardar en /data.
+        int wr = etc_write_file(pd, be, ne, etc_acct_mode(i));
+        if (wr != 0)
+          LOG_WARN("[ETC] no se pudo guardar %s (rc=%d)", pd, wr);
+      }
+      if (be)
+        kfree(be);
+      if (bd)
+        kfree(bd);
+    }
+  }
+  if (p) {
+    p->fsuid = su;
+    p->fsgid = sg;
+  }
+}
+
+void etc_persist_on_data_mount(void) {
+  etc_persist_run(1);
+  LOG_INFO("[ETC] passwd/group/shadow sincronizados con /data/etc");
+}
+
+void etc_persist_flush(void) { etc_persist_run(0); }
 
 // ---------------------------------------------------------------------------
 // tmpfs_init: monta /etc, /tmp, /var, /run, /dev/shm y pre-popula /etc.
@@ -963,6 +1278,7 @@ void tmpfs_init(void) {
       // tmpfs_create no crea directorios padre. Los seeds anidados
       // (hoy solo /etc/ssl/certs/ca-certificates.crt) necesitan que
       // su cadena de padres exista antes del loop.
+      vfs_mkdir("/etc/skel", 0755);
       vfs_mkdir("/etc/ssl", 0755);
       vfs_mkdir("/etc/ssl/certs", 0755);
       int seeded = 0, from_tar = 0;
@@ -998,23 +1314,39 @@ void tmpfs_init(void) {
   // ---------------------------------------------------------------------
   // [2] /tmp
   // ---------------------------------------------------------------------
-  void *tmp = tmpfs_new(64 * 1024 * 1024);
+  // [Plan_GCC K4] /tmp = 1/2 de la RAM (las paginas se piden al usarlas), entre 64 MB y 2 GB (antes fijo a
+  // 64 MB: cc1, ld, ar y tar de un build real no cabian).
+  uint64_t tmp_mb = (pmm_total_usable_pages() * 4096ULL / 2) >> 20;
+  if (tmp_mb < 64)
+    tmp_mb = 64;
+  if (tmp_mb > 2048)
+    tmp_mb = 2048;
+  void *tmp = tmpfs_new((size_t)tmp_mb * 1024 * 1024);
   if (!tmp) {
     LOG_ERR("[TMPFS] sin memoria para /tmp");
   } else {
+    tmpfs_set_root_mode(tmp, 01777); // [U1.2] /tmp: sticky + rwx para todos
     int rc = vfs_mount("/tmp", tmpfs_get_vfs_ops(), tmp);
     if (rc != 0) {
       LOG_ERR("[TMPFS] mount /tmp: %d", rc);
       tmpfs_destroy(tmp);
     } else {
-      LOG_INFO("[TMPFS] /tmp montado (64 MB)");
+      LOG_INFO("[TMPFS] /tmp montado (%llu MB)", (unsigned long long)tmp_mb);
     }
   }
 
   // ---------------------------------------------------------------------
   // [3] /var + subdirs
   // ---------------------------------------------------------------------
-  void *var = tmpfs_new(16 * 1024 * 1024);
+  // [apt] /var = 1/4 de la RAM (las paginas se piden al usarlas), entre 64 MB y
+  // 1 GB. Con 16 MB fijos `apt-get update` fallaba con ENOSPC (write 28):
+  // /var/lib/apt/lists y /var/cache/apt/*.bin de Ubuntu suman cientos de MB.
+  uint64_t var_mb = (pmm_total_usable_pages() * 4096ULL / 4) >> 20;
+  if (var_mb < 64)
+    var_mb = 64;
+  if (var_mb > 1024)
+    var_mb = 1024;
+  void *var = tmpfs_new((size_t)var_mb * 1024 * 1024);
   if (!var) {
     LOG_ERR("[TMPFS] sin memoria para /var");
   } else {
@@ -1026,7 +1358,7 @@ void tmpfs_init(void) {
       vfs_mkdir("/var/tmp", 01777);
       vfs_mkdir("/var/log", 0755);
       vfs_mkdir("/var/run", 0755);
-      LOG_INFO("[TMPFS] /var montado (16 MB)");
+      LOG_INFO("[TMPFS] /var montado (%llu MB)", (unsigned long long)var_mb);
     }
   }
 
@@ -1044,7 +1376,7 @@ void tmpfs_init(void) {
     } else {
       // XDG_RUNTIME_DIR=/run/user/<uid> (Wayland: socket y locks).
       vfs_mkdir("/run/user", 0755);
-      vfs_mkdir("/run/user/0", 0700);
+      vfs_mkdir("/run/user/0", 0711); // [U5] traversable: los sockets llevan su propio modo
       LOG_INFO("[TMPFS] /run montado (4 MB)");
     }
   }
@@ -1056,6 +1388,7 @@ void tmpfs_init(void) {
   if (!shm) {
     LOG_ERR("[TMPFS] sin memoria para /dev/shm");
   } else {
+    tmpfs_set_root_mode(shm, 01777);
     int rc = vfs_mount("/dev/shm", tmpfs_get_vfs_ops(), shm);
     if (rc != 0) {
       LOG_ERR("[TMPFS] mount /dev/shm: %d", rc);

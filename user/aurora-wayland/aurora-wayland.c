@@ -12,6 +12,7 @@
 // No es Weston ni un escritorio aparte: no hay scanout propio (no toca DRM).
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <pwd.h>
 #include <errno.h>
 #include <fnmatch.h>
 #include <fcntl.h>
@@ -4917,6 +4918,27 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[aurora-wayland] no se pudo crear el socket '%s' (XDG_RUNTIME_DIR=%s)\n",
             sock, getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(null)");
     return 1;
+  }
+  /* [U5] Sesiones de usuarios no root: enlaza el socket en cada
+   * /run/user/<uid> existente (el compositor sigue como root; /run/user/0 es
+   * 0711, asi que los clientes lo atraviesan sin poder listarlo). */
+  if (geteuid() == 0) {
+    struct passwd *pw;
+    setpwent();
+    while ((pw = getpwent())) {
+      if (pw->pw_uid < 1000 || pw->pw_uid >= 60000)
+        continue;
+      char rtd[64], lnk[320], tgt[320];
+      snprintf(rtd, sizeof(rtd), "/run/user/%u", pw->pw_uid);
+      if (mkdir(rtd, 0700) == 0)
+        (void)chown(rtd, pw->pw_uid, pw->pw_gid);
+      snprintf(lnk, sizeof(lnk), "%s/%s", rtd, g_sockname);
+      snprintf(tgt, sizeof(tgt), "/run/user/0/%s", g_sockname);
+      unlink(lnk);
+      if (symlink(tgt, lnk) != 0)
+        fprintf(stderr, "[aurora-wayland] aviso: symlink %s: %s\n", lnk, strerror(errno));
+    }
+    endpwent();
   }
   xwm_init();
 

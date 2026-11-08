@@ -9,7 +9,7 @@
 #include "skb.h"
 #include <stddef.h>
 
-#define PROXY_QUEUE_MAX 64
+#define PROXY_QUEUE_MAX 256
 
 extern void dhcp_start(netif_t *n);
 #define DHCP_RESTART 0x200
@@ -24,6 +24,7 @@ typedef struct {
 } proxy_queue_t;
 
 static netif_t g_proxy_netif;
+static int g_proxy_claimed; // un driver de usuario fijó su MAC
 static proxy_queue_t g_tx_queue; // Kernel -> Userland
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,7 @@ static int64_t net_proxy_ioctl(vfs_node_t *node, unsigned long req,
     if ((mac[0] & 1) || !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]))
       return -EINVAL; // multicast o todo ceros
     memcpy(g_proxy_netif.mac, mac, 6);
+    g_proxy_claimed = 1;
     LOG_INFO("[NET-PROXY] MAC del driver: %02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return 0;
@@ -171,6 +173,11 @@ static netif_ops_t g_proxy_ops = {
     .open = NULL,
     .close = NULL,
 };
+
+netif_t *net_proxy_netif(void) { return &g_proxy_netif; }
+
+// ¿Ha fijado un driver de usuario (.aur) su MAC? (NETP_SET_MAC)
+int net_proxy_claimed(void) { return g_proxy_claimed; }
 
 void net_proxy_init(void) {
   spin_init(&g_tx_queue.lock);
