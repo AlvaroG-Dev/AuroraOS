@@ -1777,10 +1777,19 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
   // instante (un cliente que anima y repinta al recibir el frame saturaria la
   // CPU en un bucle commit -> frame -> commit sin fin).
   if (!s->fq && (!wl_list_empty(&s->frames) || !wl_list_empty(&s->pfb))) {
+    int was_empty = wl_list_empty(&g_frame_q);
     s->fq = 1;
     wl_list_insert(g_frame_q.prev, &s->flink);
-    if (g_frame_timer)
-      wl_event_source_timer_update(g_frame_timer, FRAME_MS);
+    /* Rejilla fija de ~60 Hz: el siguiente tick cae en el siguiente multiplo de 16.67 ms y no
+     * "16 ms despues del commit" (eso sumaba la latencia del cliente y dejaba el ritmo en ~55). */
+    if (g_frame_timer && was_empty) {
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      uint64_t us = (uint64_t)ts.tv_sec * 1000000ull + ts.tv_nsec / 1000;
+      uint64_t period = 16667, next = (us / period + 1) * period;
+      int delay = (int)((next - us + 999) / 1000);
+      wl_event_source_timer_update(g_frame_timer, delay < 1 ? 1 : delay);
+    }
   }
 }
 
