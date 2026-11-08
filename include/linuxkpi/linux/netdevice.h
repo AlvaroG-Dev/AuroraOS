@@ -160,6 +160,7 @@ struct napi_struct {
 	struct net_device *dev;
 	int napi_id;
 	int lkpi_scheduled;
+	unsigned int lkpi_spins;
 	struct tasklet_struct lkpi_tl;
 	struct sk_buff *skb;
 };
