@@ -66,4 +66,8 @@ int netlink_broadcast_filtered(struct sock *ssk, struct sk_buff *skb, __u32 port
 			       gfp_t allocation, netlink_filter_fn filter, void *filter_data);
 struct nlmsghdr *__nlmsg_put(struct sk_buff *skb, u32 portid, u32 seq, int type, int len, int flags);
 struct sk_buff *netlink_alloc_large_skb(unsigned int size, int broadcast);
+int netlink_set_err(struct sock *ssk, __u32 portid, __u32 group, int code);
+int netlink_has_listeners(struct sock *sk, unsigned int group);
+bool netlink_strict_get_check(struct sk_buff *skb);
+void netlink_ack(struct sk_buff *in_skb, struct nlmsghdr *nlh, int err, const struct netlink_ext_ack *extack);
 #endif
