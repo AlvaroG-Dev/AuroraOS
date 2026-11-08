@@ -1,0 +1,22 @@
+--- iwl-drv.c
++++ iwl-drv.c
+@@ -1560,6 +1560,10 @@
+ 
+ 		op_mode = ops->start(drv->trans, drv->trans->cfg,
+ 				     &drv->fw, dbgfs_dir);
++		/* Aurora: la salida de start() era muda en los fallos tempranos */
++		IWL_INFO(drv, "op_mode %s start -> %s (%ld)\n", op->name,
++			 IS_ERR(op_mode) ? "ERROR" : "ok",
++			 IS_ERR(op_mode) ? PTR_ERR(op_mode) : 0L);
+ 
+ 		if (!IS_ERR(op_mode))
+ 			return op_mode;
+@@ -2045,6 +2049,8 @@
+ 		if (strcmp(op->name, name))
+ 			continue;
+ 		op->ops = ops;
++		pr_info("iwlwifi: op_mode %s registrado, dispositivos en espera: %d\n",
++			name, !list_empty(&op->drv));
+ 		/* TODO: need to handle exceptional case */
+ 		list_for_each_entry(drv, &op->drv, list)
+ 			drv->op_mode = _iwl_op_mode_start(drv, op);
