@@ -596,6 +596,29 @@ void lkpi_netif_wifi_link(struct net_device *dev, bool up)
 }
 EXPORT_SYMBOL(lkpi_netif_wifi_link);
 
+/* Wi-Fi: mac80211 crea la interfaz con register_netdevice (sin interfaz de Aurora).
+ * aurora_wifi la da de alta aqui al primer uso y la levanta (dev_open ->
+ * ieee80211_open). Con el rtnl tomado. */
+static const struct aurora_netif_ops lkpi_nic_ops;
+
+int lkpi_netif_wifi_attach(struct net_device *dev)
+{
+	char nm[8];
+	void *h;
+
+	if (NDX(dev)->handle)
+		return netif_running(dev) ? 0 : dev_open(dev, NULL);
+	h = aurora_netif_register(dev->dev_addr, dev, &lkpi_nic_ops, nm);
+	if (!h)
+		return -ENOMEM;
+	NDX(dev)->handle = h;
+	strscpy(dev->name, nm, sizeof(dev->name));
+	dev->lkpi_registered = 1;
+	pr_info("%s: interfaz Wi-Fi registrada (%pM)\n", dev->name, dev->dev_addr);
+	return netif_running(dev) ? 0 : dev_open(dev, NULL);
+}
+EXPORT_SYMBOL(lkpi_netif_wifi_attach);
+
 void netif_carrier_on(struct net_device *dev)
 {
 	if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &dev->state) && NDX(dev)->handle &&
