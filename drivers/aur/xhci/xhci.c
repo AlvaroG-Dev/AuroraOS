@@ -1123,8 +1123,12 @@ static struct stream *stream_start(unsigned slot, unsigned dci, uint32_t len) {
     return NULL;
   if (!s->vbuf) {
     uint64_t ph = 0;
-    uint8_t *v = dma_alloc(STREAM_TDS * STREAM_RLEN, &ph);
-    if (!v || !dma_low_ok(ph, STREAM_TDS * STREAM_RLEN)) {
+    // /dev/dma solo admite tamaños múltiplos de 4 KiB (512 B daba -EINVAL y
+    // el stream quedaba desactivado en silencio: teclas retenidas en lotes).
+    size_t sz = (STREAM_TDS * STREAM_RLEN + 4095) & ~(size_t)4095;
+    uint8_t *v = dma_alloc(sz, &ph);
+    if (!v || !dma_low_ok(ph, sz)) {
+      fprintf(stderr, "[xhci.aur] stream: sin buffer DMA, camino clásico\n");
       stream_disabled = 1; // sin DMA bajo 4 GiB: camino clásico
       return NULL;
     }
