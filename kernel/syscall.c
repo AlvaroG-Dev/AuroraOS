@@ -8461,7 +8461,7 @@ uint64_t syscall_handler_c(registers_t *regs) {
       LOG_WARN("[PREEMPT] syscall %lu dejo preempt_count %d -> %d",
                (unsigned long)num, pc_entry, cur->preempt_count);
     }
-    cur->preempt_count = pc_entry;
+    sched_preempt_fix(pc_entry, "syscall");
   }
 
   if (tracing && (num == 46 || num == 47))
