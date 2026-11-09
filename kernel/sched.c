@@ -146,6 +146,8 @@ void preempt_enable(void) {
 // modulos, probe, syscalls, trabajos diferidos). Un preempt_disable() sin su
 // enable deja a la tarea sin poder ser expulsada para siempre: la CPU queda
 // fuera de servicio y RCU se atasca. Devuelve la diferencia corregida.
+void (*sched_preempt_leak_hook)(const char *what, int now, int expected);
+
 int sched_preempt_fix(int expected, const char *what) {
   task_t *cur = sched_current();
   if (!cur)
@@ -159,6 +161,8 @@ int sched_preempt_fix(int expected, const char *what) {
     LOG_WARN("[PREEMPT] %s dejo preempt_count=%d (esperado %d): corregido", what,
              now, expected);
   }
+  if (sched_preempt_leak_hook)
+    sched_preempt_leak_hook(what, now, expected);
   cur->preempt_count = expected;
   return now - expected;
 }

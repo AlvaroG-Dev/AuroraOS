@@ -87,6 +87,9 @@ void aurora_sched_set_blocked_deadline(struct aurora_task *t, u64 deadline)
 	__asm__("sched_set_blocked_deadline");
 u64 aurora_sched_rcu_qs_count(int cpu) __asm__("sched_rcu_qs_count");
 int aurora_preempt_count(void) __asm__("preempt_count");
+int aurora_kur_symbolize(u64 addr, char *buf, size_t len) __asm__("kur_symbolize");
+extern void (*aurora_preempt_leak_hook)(const char *what, int now, int expected)
+	__asm__("sched_preempt_leak_hook");
 int aurora_preempt_fix(int expected, const char *what) __asm__("sched_preempt_fix");
 void aurora_wait_queue_init(struct aurora_wait_queue *wq) __asm__("wait_queue_init");
 void aurora_wait_queue_add_locked(struct aurora_wait_queue *wq, struct aurora_task *t)
