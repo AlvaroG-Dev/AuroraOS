@@ -36,6 +36,7 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 
+#include "../aurora.h"
 #include "../lkpi_internal.h"
 
 #define LKPI_WORK_QUEUED 0x1	/* en alguna lista */
@@ -268,8 +269,13 @@ static void lkpi_wq_process_one(struct lkpi_worker *me, struct work_struct *w,
 	lkpi_work_clear_pending(w);
 	lkpi_wq_unlock(*flags);
 
-	fn(w);
-	WARN_ONCE(lkpi_preempt_count(), "workqueue: %ps volvio con la expulsion desactivada\n", fn);
+	{
+		int pc0 = aurora_preempt_count();
+
+		fn(w);
+		if (aurora_preempt_fix(pc0, "trabajo diferido"))
+			pr_warn("workqueue: %ps volvio con la expulsion cambiada\n", fn);
+	}
 
 	lkpi_wq_lock(flags);
 	me->current_work = NULL;

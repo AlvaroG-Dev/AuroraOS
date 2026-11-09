@@ -26,6 +26,7 @@
 #include <linux/timer.h>
 #include <linux/wait.h>
 
+#include "../aurora.h"
 #include "../lkpi_internal.h"
 
 static DEFINE_RAW_SPINLOCK(lkpi_sq_lock);
@@ -160,9 +161,11 @@ static volatile int lkpi_cb_cpu;
  * no puede dejar sin servicio a tasklets/NAPI ni al resto de timers. */
 #define LKPI_SQ_BATCH 4096
 
-#define LKPI_CB_ENTER(f) do { lkpi_cb_start = jiffies; lkpi_cb_cpu = smp_processor_id(); \
+static int lkpi_cb_pc;
+#define LKPI_CB_ENTER(f) do { lkpi_cb_pc = aurora_preempt_count(); lkpi_cb_start = jiffies; lkpi_cb_cpu = smp_processor_id(); \
 	smp_store_release(&lkpi_cb_cur, (void *)(f)); } while (0)
-#define LKPI_CB_LEAVE() smp_store_release(&lkpi_cb_cur, NULL)
+#define LKPI_CB_LEAVE() do { aurora_preempt_fix(lkpi_cb_pc, "callback de softirqd"); \
+	smp_store_release(&lkpi_cb_cur, NULL); } while (0)
 
 /* Ejecuta los vencidos; devuelve los jiffies hasta el siguiente (o MAX). */
 static long lkpi_run_timers(void)

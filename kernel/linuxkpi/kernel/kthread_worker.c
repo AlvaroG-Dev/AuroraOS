@@ -8,6 +8,7 @@
 #include <linux/export.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
+#include "../aurora.h"
 
 static int lkpi_kworker_fn(void *arg)
 {
@@ -32,7 +33,12 @@ static int lkpi_kworker_fn(void *arg)
 		w->current_work = work;
 		raw_spin_unlock_irqrestore(&w->lock, flags);
 
-		work->func(work);
+		{
+			int pc0 = aurora_preempt_count();
+
+			work->func(work);
+			aurora_preempt_fix(pc0, "kthread_work");
+		}
 
 		raw_spin_lock_irqsave(&w->lock, flags);
 		w->current_work = NULL;

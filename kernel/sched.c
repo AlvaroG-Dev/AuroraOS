@@ -142,6 +142,27 @@ void preempt_enable(void) {
   __asm__ volatile("" ::: "memory");
 }
 
+// Restaura preempt_count al valor esperado tras llamar a codigo ajeno (init de
+// modulos, probe, syscalls, trabajos diferidos). Un preempt_disable() sin su
+// enable deja a la tarea sin poder ser expulsada para siempre: la CPU queda
+// fuera de servicio y RCU se atasca. Devuelve la diferencia corregida.
+int sched_preempt_fix(int expected, const char *what) {
+  task_t *cur = sched_current();
+  if (!cur)
+    return 0;
+  int now = cur->preempt_count;
+  if (now == expected)
+    return 0;
+  static uint32_t reports;
+  if (reports < 64) {
+    reports++;
+    LOG_WARN("[PREEMPT] %s dejo preempt_count=%d (esperado %d): corregido", what,
+             now, expected);
+  }
+  cur->preempt_count = expected;
+  return now - expected;
+}
+
 int preempt_count(void) {
   task_t *cur = sched_current();
   return cur ? cur->preempt_count : 0;
