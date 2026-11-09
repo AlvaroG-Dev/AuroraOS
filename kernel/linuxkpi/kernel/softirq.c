@@ -17,7 +17,9 @@
 #include <linux/interrupt.h>
 #include <linux/irq_work.h>
 #include <linux/kthread.h>
+#include <linux/delay.h>
 #include <linux/llist.h>
+#include <linux/smp.h>
 #include <linux/math64.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
@@ -149,17 +151,36 @@ int lkpi_timer_delete_sync(struct timer_list *t, bool shutdown)
 }
 EXPORT_SYMBOL(lkpi_timer_delete_sync);
 
+/* Callback en curso en lkpi_softirqd: lo lee el vigilante para delatar bucles. */
+static struct task_struct *lkpi_sq_wd;
+static void *volatile lkpi_cb_cur;
+static volatile unsigned long lkpi_cb_start;
+static volatile int lkpi_cb_cpu;
+/* Tope de callbacks de un mismo tipo por pasada: un timer que se rearma a "ya"
+ * no puede dejar sin servicio a tasklets/NAPI ni al resto de timers. */
+#define LKPI_SQ_BATCH 4096
+
+#define LKPI_CB_ENTER(f) do { lkpi_cb_start = jiffies; lkpi_cb_cpu = smp_processor_id(); \
+	smp_store_release(&lkpi_cb_cur, (void *)(f)); } while (0)
+#define LKPI_CB_LEAVE() smp_store_release(&lkpi_cb_cur, NULL)
+
 /* Ejecuta los vencidos; devuelve los jiffies hasta el siguiente (o MAX). */
 static long lkpi_run_timers(void)
 {
 	unsigned long flags;
 	long next = MAX_SCHEDULE_TIMEOUT;
+	int batch = LKPI_SQ_BATCH;
 
 	raw_spin_lock_irqsave(&lkpi_sq_lock, flags);
 	while (!list_empty(&lkpi_timers)) {
 		struct timer_list *t = list_first_entry(&lkpi_timers, struct timer_list, entry);
 		void (*fn)(struct timer_list *) = t->function;
 		unsigned long now = jiffies;
+
+		if (!batch--) {
+			next = 1;	/* vuelve pronto; que corran tasklets y demas */
+			break;
+		}
 
 		if (time_before(now, t->expires)) {
 			next = (long)(t->expires - now);
@@ -170,7 +191,9 @@ static long lkpi_run_timers(void)
 		raw_spin_unlock_irqrestore(&lkpi_sq_lock, flags);
 
 		preempt_disable();
+		LKPI_CB_ENTER(fn);
 		fn(t);
+		LKPI_CB_LEAVE();
 		preempt_enable();
 
 		raw_spin_lock_irqsave(&lkpi_sq_lock, flags);
@@ -301,6 +324,7 @@ static long lkpi_run_hrtimers(void)
 {
 	unsigned long flags;
 	long next = MAX_SCHEDULE_TIMEOUT;
+	int batch = LKPI_SQ_BATCH;
 
 	raw_spin_lock_irqsave(&lkpi_sq_lock, flags);
 	while (!list_empty(&lkpi_hrtimers)) {
@@ -313,13 +337,19 @@ static long lkpi_run_hrtimers(void)
 			next = (long)nsecs_to_jiffies(t->node.expires - now);
 			break;
 		}
+		if (!batch--) {
+			next = 1;
+			break;
+		}
 		lkpi_hrtimer_dequeue(t);
 		lkpi_running_hrtimer = t;
 		raw_spin_unlock_irqrestore(&lkpi_sq_lock, flags);
 
 		if (fn) {
 			preempt_disable();
+			LKPI_CB_ENTER(fn);
 			r = fn(t);
+			LKPI_CB_LEAVE();
 			preempt_enable();
 		}
 
@@ -396,10 +426,12 @@ static bool lkpi_run_tasklets(void)
 			if (!atomic_read(&t->count)) {
 				clear_bit(TASKLET_STATE_SCHED, &t->state);
 				preempt_disable();
+				LKPI_CB_ENTER(t->use_callback ? (void *)t->callback : (void *)t->func);
 				if (t->use_callback)
 					t->callback(t);
 				else
 					t->func(t->data);
+				LKPI_CB_LEAVE();
 				preempt_enable();
 				tasklet_unlock(t);
 				lkpi_sq_done_wake();
@@ -448,7 +480,9 @@ static void lkpi_run_irq_works(void)
 		int flags = atomic_fetch_andnot(IRQ_WORK_PENDING, &w->flags) & ~IRQ_WORK_PENDING;
 
 		preempt_disable();
+		LKPI_CB_ENTER(w->func);
 		w->func(w);
+		LKPI_CB_LEAVE();
 		preempt_enable();
 		/* BUSY fuera, salvo que se haya vuelto a encolar entretanto. */
 		atomic_cmpxchg(&w->flags, flags, flags & ~IRQ_WORK_BUSY);
@@ -486,14 +520,41 @@ static int lkpi_softirqd_fn(void *unused)
 	return 0;
 }
 
+/* Vigilante: avisa cuando un callback de lkpi_softirqd lleva demasiado (la CPU
+ * queda sin expulsion y todo lo que va por softirqd, incluidos NAPI y timers,
+ * se para). Dice cual es para poder arreglarlo. */
+static int lkpi_sq_watchdog_fn(void *unused)
+{
+	unsigned long last_warn = 0;
+
+	while (!kthread_should_stop()) {
+		void *fn = smp_load_acquire(&lkpi_cb_cur);
+		unsigned long st = lkpi_cb_start;
+
+		if (fn && time_after(jiffies, st + 3 * HZ) &&
+		    (!last_warn || time_after(jiffies, last_warn + 5 * HZ))) {
+			last_warn = jiffies;
+			pr_warn("linuxkpi: callback de softirqd %pS lleva %u ms en la CPU %d\n",
+				fn, jiffies_to_msecs(jiffies - st), lkpi_cb_cpu);
+		}
+		msleep(500);
+	}
+	return 0;
+}
+
 int lkpi_softirq_init(void)
 {
+	struct task_struct *wd;
+
 	struct task_struct *p = lkpi_kthread_create_internal(lkpi_softirqd_fn, NULL,
 							     "lkpi_softirqd");
 
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 	smp_store_release(&lkpi_softirqd, p);
+	wd = lkpi_kthread_create_internal(lkpi_sq_watchdog_fn, NULL, "lkpi_sq_wd");
+	if (!IS_ERR(wd))
+		lkpi_sq_wd = wd;
 	return 0;
 }
 
@@ -505,4 +566,8 @@ void lkpi_softirq_exit(void)
 	     "linuxkpi: quedan timers o tasklets al descargar\n");
 	lkpi_softirqd = NULL;
 	kthread_stop(p);
+	if (lkpi_sq_wd) {
+		kthread_stop(lkpi_sq_wd);
+		lkpi_sq_wd = NULL;
+	}
 }
