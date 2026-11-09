@@ -147,17 +147,69 @@ EXPORT_SYMBOL(lkpi_dump_stack);
 
 /* ------------------------------------------------------- planificador */
 
+/*
+ * Diagnostico de fugas de preempt_count: pila (por tarea) de quien llamo a
+ * preempt_disable() y aun no lo ha deshecho. Cuando el kernel corrige un
+ * contador que ha vuelto distinto, imprime los ultimos que quedaron abiertos.
+ */
+#define LKPI_PCD_SLOTS 1024
+#define LKPI_PCD_DEPTH 24
+static struct lkpi_pcd {
+	void *task;
+	int depth;
+	void *rets[LKPI_PCD_DEPTH];
+} lkpi_pcd[LKPI_PCD_SLOTS];
+
+static inline struct lkpi_pcd *lkpi_pcd_get(void)
+{
+	void *t = aurora_sched_current();
+	struct lkpi_pcd *d = &lkpi_pcd[((unsigned long)t >> 6) % LKPI_PCD_SLOTS];
+
+	if (unlikely(d->task != t)) {
+		d->task = t;
+		d->depth = 0;
+	}
+	return d;
+}
+
 void lkpi_preempt_disable(void)
 {
+	struct lkpi_pcd *d = lkpi_pcd_get();
+
+	if (d->depth >= 0 && d->depth < LKPI_PCD_DEPTH)
+		d->rets[d->depth] = __builtin_return_address(0);
+	d->depth++;
 	aurora_preempt_disable();
 }
 EXPORT_SYMBOL(lkpi_preempt_disable);
 
 void lkpi_preempt_enable(void)
 {
+	struct lkpi_pcd *d = lkpi_pcd_get();
+
+	if (d->depth > 0)
+		d->depth--;
 	aurora_preempt_enable();
 }
 EXPORT_SYMBOL(lkpi_preempt_enable);
+
+static void lkpi_preempt_leak_report(const char *what, int now, int expected)
+{
+	struct lkpi_pcd *d = lkpi_pcd_get();
+	int n = d->depth < LKPI_PCD_DEPTH ? d->depth : LKPI_PCD_DEPTH;
+	int i, shown = 0;
+
+	pr_warn("[PREEMPT] %s: pila de preempt_disable sin cerrar (%d, ultimos primero):\n",
+		what, d->depth);
+	for (i = n - 1; i >= 0 && shown < 6; i--, shown++)
+		pr_warn("[PREEMPT]   %pS\n", d->rets[i]);
+	d->depth = 0;
+}
+
+void lkpi_preempt_diag_init(void)
+{
+	aurora_preempt_leak_hook = lkpi_preempt_leak_report;
+}
 
 /* ------------------------------------------------------------- tiempo */
 
@@ -173,10 +225,12 @@ EXPORT_SYMBOL(lkpi_jiffies);
 
 int kur_init(void);
 void kur_exit(void);
+void lkpi_preempt_diag_init(void);
 
 int kur_init(void)
 {
 	lkpi_cpu_init();
+	lkpi_preempt_diag_init();
 	int rc = lkpi_mm_init();
 	if (rc)
 		return rc;
@@ -261,6 +315,7 @@ err_mm:
 
 void kur_exit(void)
 {
+	aurora_preempt_leak_hook = NULL;
 	lkpi_reboot_exit();
 	/* El modelo de dispositivos antes que las workqueues y RCU que usa. */
 	lkpi_backlight_exit();
