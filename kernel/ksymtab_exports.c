@@ -83,6 +83,7 @@ KEXPORT_SYMBOL(sched_yield);
 KEXPORT_SYMBOL(sched_set_blocked_deadline);
 KEXPORT_SYMBOL(sched_rcu_qs_count);
 KEXPORT_SYMBOL(preempt_count);
+KEXPORT_SYMBOL(sched_preempt_fix);
 KEXPORT_SYMBOL(wait_queue_init);
 KEXPORT_SYMBOL(wait_queue_add_locked);
 KEXPORT_SYMBOL(wait_queue_remove_locked);

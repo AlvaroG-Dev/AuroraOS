@@ -32,6 +32,7 @@
 #include "ksymtab.h"
 #include "paging.h"
 #include "pmm.h"
+#include "sched.h"
 #include "sha256.h"
 #include "spinlock.h"
 #include "string.h"
@@ -690,7 +691,9 @@ static int kur_load_internal(const void *data, size_t size, int slot,
       (void *)(base + sec_off[init_sym->st_shndx] + init_sym->st_value);
   LOG_INFO("[KUR] llamando %s en %p", KUR_SYM_INIT, init_addr);
   int (*init_fn)(void) = (int (*)(void))init_addr;
+  int pc_before = preempt_count();
   int irc = init_fn();
+  sched_preempt_fix(pc_before, "kur_init");
   if (irc != 0) {
     LOG_ERR("[KUR] %s devolvió %d", KUR_SYM_INIT, irc);
     rc = (irc < 0) ? irc : -ENOEXEC;
