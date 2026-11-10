@@ -471,9 +471,9 @@ Detalle en `docs/LinuxKPI_Sesion_L7.md` §12. Decisiones:
 - **Ramas revisadas:** `power-acpi-apm-plan`, `fix-compositor-hang`, `project-thread-n05hn0` y `project-thread-v3dezm` ya estaban contenidas en `main`. **No se toca** `claude/project-thread-tuxtci` (NVIDIA N0, 4 commits propios).
 - **Verificacion:** `make` del kernel OK tras los merges. La regresion QEMU (`scripts/lkpi-regress.sh`) no se pudo ejecutar en el contenedor de la sesion (faltan las fuentes de Linux para `make image`); queda por pasar en la maquina de Alvaro.
 
-## L9: resultados (2026-11-08)
+## L9: resultados (2026-11-10)
 
-- **Hecho:** IOMMU Intel VT-d (`kernel/iommu.c`: DMAR/DRHD/RMRR, pass-through por omisión, dominio privado solo para dispositivos que usan la API DMA de LinuxKPI, IOVA top-down, cuarentena por fallos), `pm_runtime` real y suspend/resume por fases (`kernel/linuxkpi/base/pm.c`), D3hot/reset por PM en PCI y TDR genérico (`linux/lkpi_tdr.h`). Detalle en `docs/LinuxKPI_Sesion_L9.md`.
-- **Por omisión apagado:** `iommu=on` y `lkpi.runtime_pm=on` en la línea de comandos. Sin ellos el comportamiento es el de antes (la i915 de la Portégé no cambia).
-- **Probado:** solo QEMU (212/213 con IOMMU, igual que la base). **Sin probar en hardware real.**
-- **Pendiente:** límites de memoria por cliente, entrada real a S3, IR/ATS/PASID, conectar el TDR a i915/NVIDIA, probar en la Portégé (`iommu=on iommu.igfx=off` primero). L8 sigue sin empezar.
+- **Hecho:** IOMMU Intel VT-d (`kernel/iommu.c`: DMAR/DRHD/RMRR, pass-through por omisión, dominio privado solo para dispositivos que usan la API DMA de LinuxKPI, IOVA top-down, cuarentena por fallos), `pm_runtime` real y suspend/resume por fases (`kernel/linuxkpi/base/pm.c`), D3hot/reset por PM en PCI, `pci_disable_link_state` real (ASPM), estado PCIe en `pci_save_state`, TDR genérico (`linux/lkpi_tdr.h`) y límite de memoria shmem por proceso cliente (`lkpi.client_mem`, por omisión media RAM). Detalle y revisión del 10-nov en `docs/LinuxKPI_Sesion_L9.md`.
+- **Por omisión apagado:** `iommu=on` y `lkpi.runtime_pm=on` en la línea de comandos. Sin ellos el comportamiento es el de antes (la i915 de la Portégé no cambia). Con runtime PM activo cada dispositivo sigue en `power/control=on` hasta que se escriba `auto`.
+- **Probado:** solo QEMU. **Sin probar en hardware real.**
+- **Fuera de L9 / pendiente:** entrada real a S3 (Plan_Power.md), IR/ATS/PASID/QI, PME/wakeup, límites para TTM/NVIDIA, conectar el TDR a un driver real, probar en la Portégé (`iommu=on iommu.igfx=off` primero). L8 sigue sin empezar.

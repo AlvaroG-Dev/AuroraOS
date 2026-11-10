@@ -1057,10 +1057,19 @@ EXPORT_SYMBOL(lkpi_pcim_iomap_region);
 
 /* ---------------------------------------------- estado, energia, FLR */
 
+static const u8 lkpi_pcie_saved_regs[] = {
+	PCI_EXP_DEVCTL, PCI_EXP_LNKCTL, PCI_EXP_SLTCTL, PCI_EXP_RTCTL,
+	PCI_EXP_DEVCTL2, PCI_EXP_LNKCTL2, 0x38 /* SLTCTL2 */,
+};
+
 int lkpi_pci_save_state(struct pci_dev *dev)
 {
 	for (int i = 0; i < 16; i++)
 		pci_read_config_dword(dev, i * 4, &dev->saved_config_space[i]);
+	/* Controles de PCIe: se pierden en D3hot->D0 y en S3. */
+	if (pci_is_pcie(dev))
+		for (int i = 0; i < ARRAY_SIZE(lkpi_pcie_saved_regs); i++)
+			pcie_capability_read_word(dev, lkpi_pcie_saved_regs[i], &dev->saved_pcie[i]);
 	dev->state_saved = true;
 	return 0;
 }
@@ -1070,6 +1079,9 @@ void lkpi_pci_restore_state(struct pci_dev *dev)
 {
 	if (!dev->state_saved)
 		return;
+	if (pci_is_pcie(dev))
+		for (int i = 0; i < ARRAY_SIZE(lkpi_pcie_saved_regs); i++)
+			pcie_capability_write_word(dev, lkpi_pcie_saved_regs[i], dev->saved_pcie[i]);
 	/* De arriba abajo: el registro de comando (0x04) se escribe al final. */
 	for (int i = 15; i >= 0; i--) {
 		u32 cur = cfg32(dev, i * 4);
@@ -1104,6 +1116,65 @@ int lkpi_pci_set_power_state(struct pci_dev *dev, pci_power_t state)
 	return 0;
 }
 EXPORT_SYMBOL(lkpi_pci_set_power_state);
+
+/* ------------------------------------------------------------- ASPM */
+
+/* Quita ASPM (y CLKREQ) de una funcion por config cruda. Sin L1 en LNKCTL
+ * tampoco se entra en sus subestados (L1.1/L1.2). */
+static void lkpi_aspm_clear_raw(u8 bus, u8 slot, u8 fn, u16 clear)
+{
+	u8 pos, guard = 48;
+
+	if (!(aurora_pci_read_config_word(bus, slot, fn, PCI_STATUS) & PCI_STATUS_CAP_LIST))
+		return;
+	pos = aurora_pci_read_config_byte(bus, slot, fn, PCI_CAPABILITY_LIST) & ~3;
+	while (pos >= 0x40 && guard--) {
+		if (aurora_pci_read_config_byte(bus, slot, fn, pos) == PCI_CAP_ID_EXP) {
+			u16 v = aurora_pci_read_config_word(bus, slot, fn, pos + PCI_EXP_LNKCTL);
+
+			if (v & clear)
+				aurora_pci_write_config_word(bus, slot, fn, pos + PCI_EXP_LNKCTL,
+							     v & ~clear);
+			break;
+		}
+		pos = aurora_pci_read_config_byte(bus, slot, fn, pos + 1) & ~3;
+	}
+}
+
+int lkpi_pci_disable_link_state(struct pci_dev *dev, int state)
+{
+	const struct aurora_pci_device *devs;
+	u16 clear = 0;
+	u8 bus = dev->bus->number;
+	int n = 0, i;
+
+	if (!pci_is_pcie(dev))
+		return -EINVAL;
+	if (state & PCIE_LINK_STATE_L0S)
+		clear |= PCI_EXP_LNKCTL_ASPM_L0S;
+	if (state & PCIE_LINK_STATE_L1)
+		clear |= PCI_EXP_LNKCTL_ASPM_L1;
+	if (state & PCIE_LINK_STATE_CLKPM)
+		clear |= PCI_EXP_LNKCTL_CLKREQ_EN;
+	/* Primero el lado de abajo (todas las funciones del dispositivo) y
+	 * despues el puerto de arriba, como manda la especificacion. */
+	devs = aurora_pci_get_devices(&n);
+	for (i = 0; i < n; i++)
+		if (devs[i].bus == bus && devs[i].slot == PCI_SLOT(dev->devfn))
+			lkpi_aspm_clear_raw(bus, devs[i].slot, devs[i].func, clear);
+	for (i = 0; i < n; i++) {
+		u8 b = devs[i].bus, s = devs[i].slot, f = devs[i].func;
+
+		if ((aurora_pci_read_config_byte(b, s, f, PCI_HEADER_TYPE) & 0x7f) != 1)
+			continue;
+		if (aurora_pci_read_config_byte(b, s, f, PCI_SECONDARY_BUS) != bus || !bus)
+			continue;
+		lkpi_aspm_clear_raw(b, s, f, clear);
+		break;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(lkpi_pci_disable_link_state);
 
 bool lkpi_pci_device_is_present(struct pci_dev *pdev)
 {
@@ -1325,8 +1396,12 @@ static int lkpi_pci_bus_probe(struct device *dev)
 		return -ENODEV;
 	pci_dev_get(pdev);
 	pdev->driver = drv;
+	/* Como local_pci_probe: una referencia de runtime PM mientras hay driver
+	 * (el driver que sabe dormir la suelta con pm_runtime_put_noidle). */
+	pm_runtime_get_sync(dev);
 	rc = drv->probe(pdev, id);
 	if (rc) {
+		pm_runtime_put_sync(dev);
 		pdev->driver = NULL;
 		lkpi_pci_free_irq_vectors(pdev);
 		pci_dev_put(pdev);
@@ -1339,8 +1414,12 @@ static void lkpi_pci_bus_remove(struct device *dev)
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct pci_driver *drv = pdev->driver;
 
-	if (drv && drv->remove)
+	if (drv && drv->remove) {
+		pm_runtime_get_sync(dev);	/* despierto durante el remove */
 		drv->remove(pdev);
+		pm_runtime_put_noidle(dev);
+	}
+	pm_runtime_put_sync(dev);		/* la de lkpi_pci_bus_probe */
 	/* Lo que el driver no libero (como hace Linux, con aviso). */
 	if (pdev->lkpi_irqs) {
 		pci_warn(pdev, "el driver no libero sus vectores de IRQ\n");
@@ -1431,6 +1510,9 @@ static int lkpi_pci_pm_suspend(struct device *dev)
 
 	if (!drv)
 		return 0;
+	/* Un dispositivo dormido por runtime PM se despierta antes: el driver
+	 * suspende siempre desde D0 (sin "smart suspend"). */
+	pm_runtime_resume(dev);
 	pdev->state_saved = false;
 	if (pm && pm->suspend)
 		return pm->suspend(dev);
@@ -1460,7 +1542,10 @@ static int lkpi_pci_pm_suspend_noirq(struct device *dev)
 		return rc;
 	if (!pdev->state_saved)
 		pci_save_state(pdev);
-	pci_set_power_state(pdev, PCI_D3hot);
+	/* Como Linux: solo se apaga (D3hot) lo que tiene un driver con soporte
+	 * de energia; al resto se le guarda la config y se deja en D0. */
+	if (pm || pdev->driver->suspend)
+		pci_set_power_state(pdev, PCI_D3hot);
 	return 0;
 }
 

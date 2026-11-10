@@ -62,6 +62,9 @@ static void tdr_work(struct work_struct *w)
 		t->wedged = true;
 		dev_err(t->dev, "TDR[%s]: %u reinicios en %u ms; dispositivo dado por perdido\n",
 			t->name ? t->name : "?", t->window_resets, t->window_ms);
+		/* Un dispositivo perdido no debe seguir haciendo DMA. */
+		if (dev_is_pci(t->dev))
+			pci_clear_master(to_pci_dev(t->dev));
 		tdr_uevent(t, "WEDGED");
 		return;
 	}
@@ -107,6 +110,8 @@ EXPORT_SYMBOL(lkpi_tdr_register);
 
 void lkpi_tdr_unregister(struct lkpi_tdr *t)
 {
+	if (!t || !t->work.work.func)
+		return;		/* nunca se registro */
 	t->active = false;
 	cancel_delayed_work_sync(&t->work);
 }

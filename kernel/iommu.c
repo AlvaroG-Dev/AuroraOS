@@ -101,6 +101,7 @@ typedef struct iommu_unit {
   uint64_t ctx_phys[256]; // por bus; 0 = sin tabla
   spinlock_t reg_lock;
   spinlock_t did_lock;
+  spinlock_t fault_lock; // serializa la IRQ de fallos con iommu_fault_poll
   uint8_t *did_map; // bitmap de DID usados
   unsigned did_max;
   int nscopes;
@@ -133,6 +134,7 @@ struct iommu_domain {
   volatile uint64_t last_fault_iova;
   volatile uint8_t last_fault_reason;
   volatile uint8_t quarantined;
+  uint8_t bm_parked; // iommu_suspend le quito el bus master
 };
 
 static iommu_unit_t g_units[MAX_UNITS];
@@ -141,6 +143,7 @@ static rmrr_t g_rmrr[MAX_RMRR];
 static int g_nrmrr;
 static iommu_domain_t **g_dom; // por bdf (65536 punteros)
 static spinlock_t g_dom_lock;
+static spinlock_t g_create_lock; // una sola creacion de dominio a la vez
 static bool g_initialized;
 static bool g_active;
 static bool g_igfx_off;
@@ -500,6 +503,15 @@ static int unit_setup(iommu_unit_t *u) {
   u->ecap = rd64(u, R_ECAP);
   u->iro = (uint64_t)ECAP_IRO(u->ecap) * 16;
   u->coherent = ECAP_C(u->ecap);
+  // Solo se mapea una pagina de registros: los de IOTLB y de fallos deben
+  // caer dentro.
+  if (u->iro + 16 > 0x1000 ||
+      (uint64_t)CAP_FRO(u->cap) * 16 + (uint64_t)CAP_NFR(u->cap) * 16 > 0x1000) {
+    LOG_WARN("[IOMMU] DRHD%d: registros fuera de la primera pagina (cap=0x%llx "
+             "ecap=0x%llx), se ignora",
+             u->idx, (unsigned long long)u->cap, (unsigned long long)u->ecap);
+    return -1;
+  }
   unsigned sagaw = CAP_SAGAW(u->cap);
   if (sagaw & 4) {
     u->levels = 4;
@@ -534,6 +546,7 @@ static int unit_setup(iommu_unit_t *u) {
   u->did_map[0] |= 0x3; // DID 0 reservado, DID 1 compartido (pass-through)
   spin_init(&u->reg_lock);
   spin_init(&u->did_lock);
+  spin_init(&u->fault_lock);
   u->root_phys = alloc_zeroed_page();
   if (!u->root_phys)
     return -1;
@@ -553,6 +566,18 @@ static void unit_fill_passthrough(iommu_unit_t *u) {
   int count = 0;
   const pci_device_t *devs = pci_get_devices(&count);
   bool bus_done[256] = {0};
+  if (u->pci_all) {
+    // La unidad "resto de PCI" cubre tambien lo que aparezca mas tarde
+    // (hotplug, buses que Aurora no enumero): todos los buses (1 MiB).
+    for (int b = 0; b < 256; b++) {
+      ctx_entry_t *t = ctx_table_for_bus(u, (uint8_t)b, true);
+      if (!t)
+        continue;
+      for (int d = 0; d < 256; d++)
+        ctx_set_passthrough(u, &t[d], 1);
+    }
+    return;
+  }
   for (int i = 0; i < count; i++) {
     uint8_t bus = devs[i].bus;
     uint16_t bdf = (uint16_t)((bus << 8) | (devs[i].slot << 3) | devs[i].func);
@@ -573,9 +598,12 @@ static void unit_fill_passthrough(iommu_unit_t *u) {
 static int unit_fault_poll(iommu_unit_t *u) {
   if (!u->enabled)
     return 0;
+  unsigned long ffl = spin_lock_irqsave(&u->fault_lock);
   uint32_t fsts = rd32(u, R_FSTS);
-  if (!(fsts & 0xFF))
+  if (!(fsts & 0xFF)) {
+    spin_unlock_irqrestore(&u->fault_lock, ffl);
     return 0;
+  }
   int handled = 0;
   unsigned nfr = CAP_NFR(u->cap);
   volatile uint8_t *frcd = u->reg + CAP_FRO(u->cap) * 16;
@@ -593,6 +621,8 @@ static int unit_fault_poll(iommu_unit_t *u) {
     *(volatile uint32_t *)(rec + 12) = 1u << 31; // limpiar F
     handled++;
     __atomic_add_fetch(&g_faults, 1, __ATOMIC_RELAXED);
+    // Con g_dom_lock el dominio no se puede liberar mientras se usa.
+    unsigned long dfl = spin_lock_irqsave(&g_dom_lock);
     iommu_domain_t *d = g_dom ? g_dom[sid] : NULL;
     if (d) {
       __atomic_add_fetch(&d->faults, 1, __ATOMIC_RELAXED);
@@ -612,6 +642,7 @@ static int unit_fault_poll(iommu_unit_t *u) {
     } else {
       __atomic_add_fetch(&g_unattributed, 1, __ATOMIC_RELAXED);
     }
+    spin_unlock_irqrestore(&g_dom_lock, dfl);
     if (g_fault_log_budget > 0) {
       g_fault_log_budget--;
       LOG_WARN("[IOMMU] DRHD%d: fallo DMA %s dev %02x:%02x.%x iova=0x%llx "
@@ -624,6 +655,7 @@ static int unit_fault_poll(iommu_unit_t *u) {
     }
   }
   wr32(u, R_FSTS, fsts & 0xFF);
+  spin_unlock_irqrestore(&u->fault_lock, ffl);
   return handled;
 }
 
@@ -816,6 +848,9 @@ iommu_domain_t *iommu_domain_find(uint16_t bdf) {
   return g_dom ? g_dom[bdf] : NULL;
 }
 
+static iommu_domain_t *iommu_domain_create_locked(iommu_unit_t *u,
+                                                  uint16_t bdf);
+
 iommu_domain_t *iommu_domain_get(uint16_t bdf) {
   if (!g_active || !g_dom)
     return NULL;
@@ -828,14 +863,18 @@ iommu_domain_t *iommu_domain_get(uint16_t bdf) {
   if (!u || !u->enabled)
     return NULL;
 
-  unsigned long fl = spin_lock_irqsave(&g_dom_lock);
-  if (g_dom[bdf]) { // otro hilo gano la carrera
-    d = g_dom[bdf];
-    spin_unlock_irqrestore(&g_dom_lock, fl);
-    return d;
-  }
-  spin_unlock_irqrestore(&g_dom_lock, fl);
+  unsigned long cfl = spin_lock_irqsave(&g_create_lock);
+  d = iommu_domain_create_locked(u, bdf);
+  spin_unlock_irqrestore(&g_create_lock, cfl);
+  return d;
+}
 
+static iommu_domain_t *iommu_domain_create_locked(iommu_unit_t *u,
+                                                  uint16_t bdf) {
+  iommu_domain_t *d = g_dom[bdf];
+  if (d) // otro hilo gano la carrera
+    return d;
+  unsigned long fl;
   int did = did_alloc(u);
   if (did < 0) {
     LOG_WARN("[IOMMU] sin dominios libres para %02x:%02x.%x", bdf >> 8,
@@ -902,14 +941,17 @@ iommu_domain_t *iommu_domain_get(uint16_t bdf) {
 void iommu_domain_release(uint16_t bdf) {
   if (!g_dom)
     return;
+  unsigned long cfl = spin_lock_irqsave(&g_create_lock);
   unsigned long fl = spin_lock_irqsave(&g_dom_lock);
   iommu_domain_t *d = g_dom[bdf];
   g_dom[bdf] = NULL;
   if (d)
     g_ndomains--;
   spin_unlock_irqrestore(&g_dom_lock, fl);
-  if (!d)
+  if (!d) {
+    spin_unlock_irqrestore(&g_create_lock, cfl);
     return;
+  }
   iommu_unit_t *u = d->unit;
   ctx_entry_t *t = ctx_table_for_bus(u, bdf >> 8, false);
   if (t) {
@@ -925,6 +967,7 @@ void iommu_domain_release(uint16_t bdf) {
   }
   did_free(u, d->did);
   kfree(d);
+  spin_unlock_irqrestore(&g_create_lock, cfl);
 }
 
 // ---------------------------------------------------------------------------
@@ -980,6 +1023,16 @@ void iommu_dma_unmap(iommu_domain_t *d, uint64_t iova, uint64_t size) {
   uint64_t start = iova & ~0xFFFULL;
   uint64_t bytes = (off + size + 0xFFF) & ~0xFFFULL;
   unsigned long fl = spin_lock_irqsave(&d->lock);
+  // Un unmap de algo que no esta mapeado (doble unmap, direccion inventada)
+  // no debe devolver al asignador zonas reservadas (MSI, RMRR).
+  uint64_t *first = pt_leaf(d, start, false);
+  if (!first || !(*first & 3) ||
+      (start < MSI_HOLE_END && start + bytes > MSI_BASE_ADDR)) {
+    spin_unlock_irqrestore(&d->lock, fl);
+    LOG_WARN("[IOMMU] %02x:%02x.%x: unmap de IOVA no mapeada 0x%llx", d->bdf >> 8,
+             (d->bdf >> 3) & 0x1F, d->bdf & 7, (unsigned long long)iova);
+    return;
+  }
   for (uint64_t k = 0; k < bytes; k += 4096)
     dom_unmap_page(d, start + k);
   d->unmaps++;
@@ -1069,6 +1122,7 @@ int iommu_init(void) {
   if (!g_dom)
     return 0;
   spin_init(&g_dom_lock);
+  spin_init(&g_create_lock);
 
   // Vector de fallos compartido por todas las unidades.
   g_fault_vector = msi_vector_alloc();
@@ -1111,7 +1165,37 @@ int iommu_init(void) {
   return g_active;
 }
 
+// Con la traduccion apagada una IOVA se usaria como direccion fisica. Antes
+// de apagarla, a todo dispositivo con dominio privado que siga con bus
+// master (driver sin soporte de suspension) se le quita; vuelve al reanudar.
+static void park_bus_masters(bool park) {
+  if (!g_dom)
+    return;
+  unsigned long fl = spin_lock_irqsave(&g_dom_lock);
+  for (unsigned bdf = 0; bdf < 65536 && g_ndomains; bdf++) {
+    iommu_domain_t *d = g_dom[bdf];
+    if (!d)
+      continue;
+    uint8_t b = bdf >> 8, dv = (bdf >> 3) & 0x1F, fn = bdf & 7;
+    uint16_t cmd = pci_read_config_word(b, dv, fn, 0x04);
+    if (park) {
+      if (cmd != 0xFFFF && (cmd & PCI_CMD_BUS_MASTER)) {
+        pci_write_config_word(b, dv, fn, 0x04,
+                              (uint16_t)(cmd & ~PCI_CMD_BUS_MASTER));
+        d->bm_parked = 1;
+      }
+    } else if (d->bm_parked) {
+      d->bm_parked = 0;
+      if (cmd != 0xFFFF && !d->quarantined)
+        pci_write_config_word(b, dv, fn, 0x04,
+                              (uint16_t)(cmd | PCI_CMD_BUS_MASTER));
+    }
+  }
+  spin_unlock_irqrestore(&g_dom_lock, fl);
+}
+
 int iommu_suspend(void) {
+  park_bus_masters(true);
   for (int i = 0; i < g_nunits; i++)
     unit_hw_disable(&g_units[i]);
   return 0;
@@ -1126,5 +1210,9 @@ int iommu_resume(void) {
     if (unit_hw_enable(u))
       rc = -1;
   }
+  // Si alguna unidad no vuelve, sus dispositivos se quedan sin bus master:
+  // mejor un dispositivo parado que DMA sin traducir.
+  if (!rc)
+    park_bus_masters(false);
   return rc;
 }

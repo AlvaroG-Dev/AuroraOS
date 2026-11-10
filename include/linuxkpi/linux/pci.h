@@ -166,6 +166,7 @@ struct pci_dev {
 	atomic_t enable_cnt;
 	u32 saved_config_space[16];
 	bool state_saved;
+	u16 saved_pcie[7];	/* DEVCTL, LNKCTL, SLTCTL, RTCTL, DEVCTL2, LNKCTL2, SLTCTL2 */
 	struct device dev;
 	/* capa */
 	void *lkpi_adev;		/* struct aurora_device del bus de Aurora */
@@ -563,9 +564,11 @@ static inline void pci_assign_unassigned_bus_resources(struct pci_bus *bus) {}
 #ifndef PCI_EXP_LNKCTL_CLKREQ_EN
 #define PCI_EXP_LNKCTL_CLKREQ_EN 0x0100
 #endif
-/* ASPM nunca se activa en la capa: no hay nada que desactivar. */
-static inline int pci_disable_link_state(struct pci_dev *dev, int state) { return 0; }
-static inline int pci_disable_link_state_locked(struct pci_dev *dev, int state) { return 0; }
+/* La capa nunca activa ASPM, pero el firmware si puede haberlo dejado
+ * activo: se apaga en el dispositivo y en el puerto de arriba (L9.2). */
+int lkpi_pci_disable_link_state(struct pci_dev *dev, int state);
+#define pci_disable_link_state(d, s) lkpi_pci_disable_link_state(d, s)
+#define pci_disable_link_state_locked(d, s) lkpi_pci_disable_link_state(d, s)
 static inline int pcie_set_readrq(struct pci_dev *dev, int rq) { return 0; }
 static inline int pcie_get_readrq(struct pci_dev *dev) { return 512; }
 static inline int pci_reset_bus(struct pci_dev *dev) { return -ENOTTY; }

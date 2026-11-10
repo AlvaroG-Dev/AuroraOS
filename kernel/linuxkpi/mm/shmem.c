@@ -14,6 +14,127 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
+#include <linux/sched.h>
+#include <linux/kstrtox.h>
+#include <linux/printk.h>
+#include "../aurora.h"
+
+/* ------------------------------------------ limite por cliente (L9.4)
+ *
+ * Cada fichero shmem (los objetos GEM de i915 y drm_gem_shmem) se cobra al
+ * proceso de usuario que lo creo. Un proceso no puede tener mas de
+ * `lkpi.client_mem=<MiB>` en paginas shmem de la capa (por omision la mitad de
+ * la RAM; 0 = sin limite): un cliente de GPU descontrolado recibe -ENOMEM en
+ * vez de dejar el sistema sin memoria. Lo creado desde hilos del kernel no
+ * se cobra.
+ */
+#define SHMEM_ACCT_SLOTS 128
+static struct {
+	pid_t owner;
+	unsigned long pages;
+} shmem_acct[SHMEM_ACCT_SLOTS];
+static DEFINE_SPINLOCK(shmem_acct_lock);
+static unsigned long shmem_limit_pages = ~0UL;	/* ~0 = sin leer */
+struct lkpi_shmem_stats lkpi_shmem_stats;
+EXPORT_SYMBOL(lkpi_shmem_stats);
+
+static unsigned long shmem_client_limit(void)
+{
+	char v[24];
+	unsigned long mb;
+
+	if (shmem_limit_pages != ~0UL)
+		return shmem_limit_pages;
+	if (aurora_cmdline_get("lkpi.client_mem", v, sizeof(v)) && !kstrtoul(v, 10, &mb))
+		shmem_limit_pages = mb << (20 - PAGE_SHIFT);	/* 0 = sin limite */
+	else
+		shmem_limit_pages = aurora_pmm_total_pages() / 2;
+	return shmem_limit_pages;
+}
+
+/* Para pruebas: fija el limite en paginas (0 = sin limite); devuelve el anterior. */
+unsigned long lkpi_shmem_set_client_limit(unsigned long pages)
+{
+	unsigned long old = shmem_client_limit();
+
+	shmem_limit_pages = pages;
+	return old;
+}
+EXPORT_SYMBOL(lkpi_shmem_set_client_limit);
+
+unsigned long lkpi_shmem_client_pages(pid_t owner)
+{
+	unsigned long flags, n = 0;
+	int i;
+
+	spin_lock_irqsave(&shmem_acct_lock, flags);
+	for (i = 0; i < SHMEM_ACCT_SLOTS; i++)
+		if (shmem_acct[i].owner == owner && shmem_acct[i].pages)
+			n = shmem_acct[i].pages;
+	spin_unlock_irqrestore(&shmem_acct_lock, flags);
+	return n;
+}
+EXPORT_SYMBOL(lkpi_shmem_client_pages);
+
+/* Para pruebas; solo antes de que el fichero tenga paginas. */
+void lkpi_shmem_set_owner(struct file *f, pid_t owner)
+{
+	f->f_mapping->__lkpi_owner = owner;
+}
+EXPORT_SYMBOL(lkpi_shmem_set_owner);
+
+/* Cobra una pagina a `owner`; false si supera su limite. */
+static bool shmem_charge(pid_t owner)
+{
+	unsigned long flags, limit = shmem_client_limit();
+	int i, slot = -1;
+	bool ok = true;
+
+	if (!owner)
+		return true;
+	spin_lock_irqsave(&shmem_acct_lock, flags);
+	for (i = 0; i < SHMEM_ACCT_SLOTS; i++) {
+		if (shmem_acct[i].pages && shmem_acct[i].owner == owner) {
+			slot = i;
+			break;
+		}
+		if (!shmem_acct[i].pages && slot < 0)
+			slot = i;
+	}
+	if (slot >= 0) {	/* tabla llena: ese cliente queda sin cobrar */
+		if (shmem_acct[slot].owner != owner || !shmem_acct[slot].pages) {
+			shmem_acct[slot].owner = owner;
+			shmem_acct[slot].pages = 0;
+		}
+		if (limit && shmem_acct[slot].pages >= limit)
+			ok = false;
+		else
+			shmem_acct[slot].pages++;
+	}
+	spin_unlock_irqrestore(&shmem_acct_lock, flags);
+	if (!ok) {
+		lkpi_shmem_stats.denied++;
+		pr_warn_ratelimited("linuxkpi: el proceso %d supera su limite de memoria shmem (%lu MiB)\n",
+				    owner, limit >> (20 - PAGE_SHIFT));
+	}
+	return ok;
+}
+
+static void shmem_uncharge(pid_t owner)
+{
+	unsigned long flags;
+	int i;
+
+	if (!owner)
+		return;
+	spin_lock_irqsave(&shmem_acct_lock, flags);
+	for (i = 0; i < SHMEM_ACCT_SLOTS; i++)
+		if (shmem_acct[i].pages && shmem_acct[i].owner == owner) {
+			shmem_acct[i].pages--;
+			break;
+		}
+	spin_unlock_irqrestore(&shmem_acct_lock, flags);
+}
 
 static void shmem_drop_range(struct address_space *m, pgoff_t first, pgoff_t last)
 {
@@ -27,6 +148,7 @@ static void shmem_drop_range(struct address_space *m, pgoff_t first, pgoff_t las
 			continue;
 		m->__lkpi_pages[i] = NULL;
 		m->nrpages--;
+		shmem_uncharge(m->__lkpi_owner);
 		put_page(p);
 	}
 	mutex_unlock(&m->__lkpi_pages_lock);
@@ -53,8 +175,16 @@ struct folio *lkpi_shmem_read_folio(struct address_space *m, pgoff_t index)
 	}
 	p = m->__lkpi_pages[index];
 	if (!p) {
+		bool charged = m->__lkpi_owner && shmem_charge(m->__lkpi_owner);
+
+		if (m->__lkpi_owner && !charged) {
+			mutex_unlock(&m->__lkpi_pages_lock);
+			return ERR_PTR(-ENOMEM);
+		}
 		p = alloc_page(GFP_KERNEL | __GFP_ZERO);
 		if (!p) {
+			if (charged)
+				shmem_uncharge(m->__lkpi_owner);
 			mutex_unlock(&m->__lkpi_pages_lock);
 			return ERR_PTR(-ENOMEM);
 		}
@@ -131,6 +261,8 @@ struct file *lkpi_shmem_file_setup(const char *name, loff_t size, unsigned long 
 		return f;
 	f->f_mode |= FMODE_LSEEK;
 	f->f_inode->i_size = size;
+	/* Se cobra al proceso de usuario que lo crea (el cliente de DRM). */
+	f->f_mapping->__lkpi_owner = current->mm ? task_tgid_nr(current) : 0;
 	return f;
 }
 EXPORT_SYMBOL(lkpi_shmem_file_setup);

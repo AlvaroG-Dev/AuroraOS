@@ -24,8 +24,8 @@ omisión**:
 * `iommu=on` activa VT-d. Sin él Aurora no toca el hardware (`[IOMMU] desactivado`).
 * `lkpi.runtime_pm=on` activa el runtime PM real. Sin él `pm_runtime_*` se comporta
   exactamente como antes de L9 (solo cuenta usos; i915 sigue viendo el dispositivo
-  siempre activo). i915 define `CONFIG_PM=1`, por lo que activarlo en la Portégé haría que
-  i915 pase a D3 tras 10 s de reposo: probar con el cable del ratón a mano.
+  siempre activo). Aun activado, cada dispositivo PCI nace con `power/control=on` (como
+  Linux): i915 solo pasará a D3 si además se escribe `auto` en su `power/control`.
 * `iommu.igfx=off` deja la iGPU Intel en pass-through aunque `iommu=on`.
 * `iommu.fault_limit=N` (por omisión 10000, 0 = sin límite): cuarentena del dispositivo.
 
@@ -87,8 +87,13 @@ Cuando Alvaro lo haya probado en la Portégé conviene cambiar el valor por omis
   dispositivos en orden de registro (hijos primero al dormir). Un fallo deshace lo hecho.
   `echo devices > /sys/power/state` hace un ciclo sin dormir (como `pm_test=devices`),
   `cat /sys/power/pm_stats` da contadores.
-* **Pendiente**: la entrada real en S3 (`acpi_pm_suspend`) no tiene reanudación en Aurora
-  todavía (Plan_Power.md); la fase `noirq` corre con las IRQ habilitadas.
+* **ASPM**: `pci_disable_link_state()` es real: quita L0s/L1/CLKREQ del dispositivo y del
+  puerto de arriba (el firmware puede haberlos dejado activos; la capa nunca los activa).
+* **Estado PCIe**: `pci_save_state/restore_state` guardan también los controles de PCIe
+  (DEVCTL, LNKCTL, SLTCTL, RTCTL y los «2»), que se pierden en D3hot→D0.
+* **Fuera de L9**: la entrada real en S3 (`acpi_pm_suspend`) no tiene reanudación en Aurora
+  (vector de despertar, CPUs, drivers propios): es de Plan_Power.md. La fase `noirq` corre
+  con las IRQ habilitadas. Sin PME/wakeup.
 
 ## 5. Endurecimiento (L9.4)
 
@@ -99,8 +104,12 @@ Cuando Alvaro lo haya probado en la Portégé conviene cambiar el valor por omis
   mantienen su propio hangcheck; no se han conectado.
 * **Cuarentena por fallos de DMA** (arriba).
 * **Fuzz de ioctls DRM**: ya existía (`tests/wayland/guest/fuzz.sh`); no se ha repetido.
-* **No hecho**: límites de memoria por cliente (necesita contabilidad por proceso en
-  `shmem`/GEM; ver «Pendiente»).
+* **Límite de memoria por cliente** (`mm/shmem.c`): cada fichero shmem de la capa (objetos
+  GEM de i915 y `drm_gem_shmem`) se cobra al proceso de usuario que lo creó; un proceso no
+  pasa de `lkpi.client_mem=<MiB>` (por omisión la mitad de la RAM; `0` = sin límite) y
+  recibe `-ENOMEM`. Lo creado desde hilos del kernel no se cobra. No cubre TTM ni la
+  memoria propia de NVIDIA.
+* Un TDR que da el dispositivo por perdido le quita además el bus master.
 
 ## 6. Pruebas / Resultados
 
@@ -121,3 +130,55 @@ lkpi.runtime_pm=on`). **Nada probado en hardware real.**
   bajo la máscara de 28 bits).
 * La escritura sobre una página de solo lectura no cambia la memoria; QEMU registra el
   fallo con retraso, así que la prueba solo lo comprueba de forma blanda (se ve en el log).
+
+## 7. Revisión del 10-nov-2026 («Termina de implementar L9 y revísalo»)
+
+Rama puesta al día con `main` (02c5c855). Revisión completa del código de L9; corregido:
+
+**IOMMU**
+* Carrera IRQ de fallos ↔ `iommu_domain_release` (uso tras liberar) y IRQ ↔ sondeo: ahora
+  con cerrojos (`fault_lock`, `g_dom_lock`).
+* Dos hilos podían crear dos dominios para el mismo dispositivo: creación serializada.
+* `iommu_dma_unmap` de una IOVA no mapeada devolvía al asignador zonas reservadas (MSI):
+  ahora avisa y no hace nada.
+* Se comprueba que los registros de IOTLB/fallos caen en la página mapeada.
+* La unidad `INCLUDE_PCI_ALL` rellena los 256 buses en pass-through (hotplug y buses que
+  Aurora no enumeró ya no quedan bloqueados).
+* **Suspensión**: al apagar la traducción, un dispositivo con dominio privado y bus master
+  (driver sin soporte de suspensión) habría usado sus IOVA como direcciones físicas.
+  Ahora se le quita el bus master antes y se le devuelve al reanudar.
+* DMA: un dispositivo hijo no PCI usa el dominio de su padre PCI; `dma_free` de una
+  dirección ajena ya no libera la página 0.
+
+**Energía**
+* El bus PCI toma una referencia de runtime PM mientras hay driver (como
+  `local_pci_probe`): sin ella el `pm_runtime_put` de i915 dejaba el contador a 0 y, con
+  `lkpi.runtime_pm=on`, i915 se habría dormido sin que nadie lo pidiera.
+* Un padre no se duerme con hijos despiertos; `-ENOSYS` ya no se registra como error.
+* Durante el ciclo de suspensión nadie duerme por runtime PM y un dispositivo dormido se
+  despierta antes de suspender (como Linux).
+* `suspend_noirq` solo lleva a D3hot lo que tiene driver con soporte de energía (antes
+  apagaba cualquier dispositivo enlazado).
+* Se libera el estado de runtime PM al quitar el dispositivo (fuga).
+
+**TDR**: `lkpi_tdr_unregister` de algo nunca registrado ya no toca memoria sin iniciar.
+
+**Pruebas**: `test_pm` añade límite por cliente, ASPM y estado PCIe; en q35
+`qemu-drive.py` cuelga el virtio-rng de un puerto raíz PCIe.
+
+**Resultados (QEMU, compilación limpia con `make linuxkpi-clean`; nada en hardware real)**
+
+| Configuración | Resultado |
+|---|---|
+| q35 + `intel-iommu`, `iommu=on lkpi.runtime_pm=on` | 213 pruebas: 212 bien, 1 fallo (`test_k5.c:43`, anterior a L9) |
+| q35 sin IOMMU (3 pasadas) | 2 × 212/213 (mismo fallo); 1 pasada con fallos intermitentes y pánico (abajo) |
+| pc (i440fx) sin IOMMU | 213/213 |
+| `main` 02c5c855 limpio, q35 (3 pasadas) | 2 × 210/211; 1 pasada con el mismo tipo de pánico |
+
+**Pánico intermitente, también en `main`:** tras descargar un módulo de prueba (DRM/KMS
+de L5, o K7 cuando le quedan fences sin liberar) algo sigue llamando a su memoria: un
+proceso de usuario con `/dev/dri/cardN` abierto hace un ioctl, o llega tarde un callback.
+No pasa por código de L9, pero deja la batería inestable; está sin arreglar.
+
+Ojo: las reglas de `linuxkpi` no siguen las dependencias de cabeceras. Tras cambiar de
+rama o tocar `include/linuxkpi`, `make linuxkpi-clean` antes de compilar.

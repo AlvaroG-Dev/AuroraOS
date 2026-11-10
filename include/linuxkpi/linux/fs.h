@@ -94,6 +94,7 @@ struct address_space {
 	struct page **__lkpi_pages;	/* shmem: paginas por indice (NULL = hueco) */
 	unsigned long __lkpi_cap;
 	struct mutex __lkpi_pages_lock;
+	pid_t __lkpi_owner;		/* shmem: proceso al que se le cobran (0 = kernel) */
 };
 
 struct inode {

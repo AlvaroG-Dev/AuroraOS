@@ -43,9 +43,20 @@ struct iommu_domain lkpi_iommu_dummy_domain = { .type = IOMMU_DOMAIN_DMA };
 EXPORT_SYMBOL(lkpi_iommu_dummy_domain);
 static int lkpi_iommu_group_marker;
 
+/* Dominio con el que traduce el DMA de `dev`. Un dispositivo hijo que no es
+ * PCI (auxiliar, plataforma, mfd) hace su DMA con el RID del padre PCI: usa el
+ * dominio de este. */
 static inline struct aurora_iommu_domain *lkpi_dev_dom(struct device *dev)
 {
-	return dev ? dev->lkpi_iommu_dom : NULL;
+	int depth = 0;
+
+	for (; dev && depth < 8; dev = dev->parent, depth++) {
+		if (dev->lkpi_iommu_dom)
+			return dev->lkpi_iommu_dom;
+		if (dev_is_pci(dev))
+			break;
+	}
+	return NULL;
 }
 
 int lkpi_dma_dev_attach(struct device *dev)
@@ -203,6 +214,8 @@ void lkpi_dma_free_attrs(struct device *dev, size_t size, void *cpu_addr, dma_ad
 		return;
 	if (lkpi_dev_dom(dev)) {
 		phys = aurora_iommu_iova_to_phys(lkpi_dev_dom(dev), dma_handle);
+		if (WARN_ON(!phys))	/* IOVA que no es de este dispositivo */
+			return;
 		aurora_iommu_dma_unmap(lkpi_dev_dom(dev), dma_handle, count << PAGE_SHIFT);
 	}
 	if (lkpi_is_vmap_addr(cpu_addr))

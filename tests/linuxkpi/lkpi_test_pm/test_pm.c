@@ -9,6 +9,10 @@
 #include <linux/pm_runtime.h>
 #include <linux/delay.h>
 #include <linux/lkpi_tdr.h>
+#include <linux/shmem_fs.h>
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/pagemap.h>
 #include "lkpi_test.h"
 
 extern int kt_pm_cycle(void) __asm__("lkpi_pm_cycle_devices");
@@ -251,9 +255,15 @@ static const struct dev_pm_ops kt_pci_ops = {
 };
 static int kt_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	return pcim_enable_device(pdev);
+	int rc = pcim_enable_device(pdev);
+
+	/* Como un driver real con runtime PM: suelta la referencia que el bus
+	 * toma durante el enlace (y la recupera en remove). */
+	if (!rc)
+		pm_runtime_put_noidle(&pdev->dev);
+	return rc;
 }
-static void kt_pci_remove(struct pci_dev *pdev) {}
+static void kt_pci_remove(struct pci_dev *pdev) { pm_runtime_get_noresume(&pdev->dev); }
 static const struct pci_device_id kt_pci_ids[] = {
 	{ PCI_DEVICE(0x1af4, 0x1005) },	/* virtio-rng (transitional) */
 	{ PCI_DEVICE(0x1af4, 0x1044) },	/* virtio-rng (moderno) */
@@ -277,10 +287,16 @@ static u16 pm_state(struct pci_dev *pdev)
 
 static void test_pci_d3(void)
 {
-	struct pci_dev *pdev = pci_get_device(0x1af4, 0x1044, NULL);
+	struct pci_dev *pdev = NULL;
 	u32 bar0, bar0b;
 	u16 cmd, cmdb;
 
+	/* Preferir un virtio-rng con capability PM (el que cuelga de un puerto PCIe). */
+	while ((pdev = pci_get_device(0x1af4, 0x1044, pdev)))
+		if (pdev->pm_cap)
+			break;
+	if (!pdev)
+		pdev = pci_get_device(0x1af4, 0x1044, NULL);
 	if (!pdev)
 		pdev = pci_get_device(0x1af4, 0x1005, NULL);
 	if (!pdev) {
@@ -342,6 +358,86 @@ put:
 	pci_dev_put(pdev);
 }
 
+/* ------------------------------------ limite de memoria por cliente */
+
+static void test_client_mem(void)
+{
+	const pid_t owner = 0x7fff0001;		/* pid inventado: nadie mas lo usa */
+	struct file *f = shmem_file_setup("kt_client", 64 * PAGE_SIZE, 0);
+	unsigned long old, denied = lkpi_shmem_stats.denied;
+	struct folio *fo[8] = { NULL };
+	int i;
+
+	KT_ASSERT(!IS_ERR(f), "shmem_file_setup");
+	if (IS_ERR(f))
+		return;
+	lkpi_shmem_set_owner(f, owner);
+	old = lkpi_shmem_set_client_limit(4);
+	for (i = 0; i < 4; i++) {
+		fo[i] = shmem_read_folio(f->f_mapping, i);
+		KT_ASSERT(!IS_ERR(fo[i]), "pagina %d dentro del limite", i);
+	}
+	KT_EQ(lkpi_shmem_client_pages(owner), 4UL);
+	fo[4] = shmem_read_folio(f->f_mapping, 4);
+	KT_ASSERT(IS_ERR(fo[4]) && PTR_ERR(fo[4]) == -ENOMEM, "la quinta pagina se niega");
+	KT_EQ(lkpi_shmem_stats.denied, denied + 1);
+	/* Una pagina ya presente no se vuelve a cobrar. */
+	fo[5] = shmem_read_folio(f->f_mapping, 0);
+	KT_ASSERT(!IS_ERR(fo[5]), "releer una pagina existente");
+	KT_EQ(lkpi_shmem_client_pages(owner), 4UL);
+	/* Truncar devuelve el credito. */
+	shmem_truncate_range(f->f_inode, 0, 2 * PAGE_SIZE - 1);
+	KT_EQ(lkpi_shmem_client_pages(owner), 2UL);
+	fo[6] = shmem_read_folio(f->f_mapping, 5);
+	KT_ASSERT(!IS_ERR(fo[6]), "tras truncar vuelve a caber");
+	/* Sin limite (0) todo cabe. */
+	lkpi_shmem_set_client_limit(0);
+	fo[7] = shmem_read_folio(f->f_mapping, 6);
+	KT_ASSERT(!IS_ERR(fo[7]), "sin limite");
+	for (i = 0; i < 8; i++)
+		if (fo[i] && !IS_ERR(fo[i]))
+			folio_put(fo[i]);
+	fput(f);
+	KT_EQ(lkpi_shmem_client_pages(owner), 0UL);	/* cerrar lo devuelve todo */
+	lkpi_shmem_set_client_limit(old);
+}
+
+/* ------------------------------------------ ASPM y estado PCIe */
+
+static void test_pcie_state(void)
+{
+	/* Solo el virtio-rng moderno de QEMU: nunca un dispositivo real. */
+	struct pci_dev *pdev = NULL;
+	u16 ctl, ctl2, lnk;
+
+	while ((pdev = pci_get_device(0x1af4, 0x1044, pdev)))
+		if (pci_is_pcie(pdev))
+			break;
+	if (!pdev) {
+		pr_info("kt_pm: sin virtio-rng PCIe; prueba de ASPM omitida\n");
+		return;
+	}
+	/* pci_save_state / pci_restore_state conservan los controles de PCIe. */
+	pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &ctl);
+	pci_save_state(pdev);
+	pcie_capability_write_word(pdev, PCI_EXP_DEVCTL, ctl ^ PCI_EXP_DEVCTL_CERE);
+	pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &ctl2);
+	if (ctl2 != ctl) {
+		pci_restore_state(pdev);
+		pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &ctl2);
+		KT_EQ(ctl2, ctl);
+	} else {
+		pci_restore_state(pdev);
+	}
+	/* pci_disable_link_state quita ASPM del enlace si estaba puesto. */
+	pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &lnk);
+	pcie_capability_write_word(pdev, PCI_EXP_LNKCTL, lnk | PCI_EXP_LNKCTL_ASPMC);
+	KT_EQ(pci_disable_link_state(pdev, PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1), 0);
+	pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &lnk);
+	KT_EQ(lnk & PCI_EXP_LNKCTL_ASPMC, 0);
+	pci_dev_put(pdev);
+}
+
 static int __init kt_pm_init(void)
 {
 	int rc;
@@ -361,6 +457,8 @@ static int __init kt_pm_init(void)
 	test_system_sleep();
 	test_pci_d3();
 	test_tdr();
+	test_client_mem();
+	test_pcie_state();
 	device_del(&kt_dev);
 	put_device(&kt_dev);
 	return 0;

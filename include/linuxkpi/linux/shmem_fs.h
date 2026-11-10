@@ -38,4 +38,13 @@ static inline int shmem_writeout(struct folio *folio, struct writeback_control *
 }
 #define shmem_read_mapping_page(m, i) shmem_read_mapping_page_gfp(m, i, 0)
 
+/* L9.4: limite de memoria shmem por proceso cliente (kernel/linuxkpi/mm/shmem.c). */
+struct lkpi_shmem_stats {
+	unsigned long denied;	/* paginas negadas por superar el limite */
+};
+extern struct lkpi_shmem_stats lkpi_shmem_stats;
+unsigned long lkpi_shmem_set_client_limit(unsigned long pages);
+unsigned long lkpi_shmem_client_pages(pid_t owner);
+void lkpi_shmem_set_owner(struct file *f, pid_t owner);
+
 #endif

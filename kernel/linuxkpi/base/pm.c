@@ -154,6 +154,12 @@ static int rpm_resume_dev(struct device *dev)
 
 /* ---------------------------------------------------- motor: suspender */
 
+/* Un hijo con runtime PM habilitado y sin dormir impide dormir al padre. */
+static int rpm_child_awake(struct device *child, void *data)
+{
+	return !child->power.disable_depth && child->power.runtime_status != RPM_SUSPENDED;
+}
+
 static int rpm_suspend_dev(struct device *dev, bool autosuspend)
 {
 	struct lkpi_rpm *r;
@@ -188,6 +194,10 @@ static int rpm_suspend_dev(struct device *dev, bool autosuspend)
 		mutex_unlock(&r->lock);
 		return -EAGAIN;
 	}
+	if (device_for_each_child(dev, NULL, rpm_child_awake)) {
+		mutex_unlock(&r->lock);
+		return -EBUSY;
+	}
 	if (dev->power.no_callbacks) {
 		dev->power.runtime_status = RPM_SUSPENDED;
 		mutex_unlock(&r->lock);
@@ -199,8 +209,9 @@ static int rpm_suspend_dev(struct device *dev, bool autosuspend)
 		rc = ops->runtime_suspend(dev);
 	if (rc) {
 		dev->power.runtime_status = RPM_ACTIVE;
-		/* -EAGAIN / -EBUSY: el driver no quiere dormir ahora; no es un error. */
-		if (rc != -EAGAIN && rc != -EBUSY) {
+		/* -EAGAIN / -EBUSY: el driver no quiere dormir ahora; -ENOSYS: no
+		 * sabe dormir. No son errores. */
+		if (rc != -EAGAIN && rc != -EBUSY && rc != -ENOSYS) {
 			dev->power.runtime_error = rc;
 			dev_err(dev, "runtime_suspend fallo: %d\n", rc);
 		}
@@ -648,9 +659,24 @@ void lkpi_pm_device_added(struct device *dev)
 
 void lkpi_pm_device_removed(struct device *dev)
 {
+	struct lkpi_rpm *r;
+	unsigned long flags;
+
 	mutex_lock(&lkpi_dpm_mutex);
 	list_del_init(&dev->lkpi_pm_node);
 	mutex_unlock(&lkpi_dpm_mutex);
+
+	/* El dispositivo se va: nada de runtime PM pendiente ni estado suelto. */
+	spin_lock_irqsave(&lkpi_rpm_alloc_lock, flags);
+	r = dev->power.rpm;
+	spin_unlock_irqrestore(&lkpi_rpm_alloc_lock, flags);
+	if (r) {
+		cancel_delayed_work_sync(&r->work);
+		spin_lock_irqsave(&lkpi_rpm_alloc_lock, flags);
+		dev->power.rpm = NULL;
+		spin_unlock_irqrestore(&lkpi_rpm_alloc_lock, flags);
+		kfree(r);
+	}
 }
 
 /* Instantanea de los dispositivos con referencia (el recorrido llama a
@@ -758,6 +784,7 @@ static void dpm_resume_all(void)
 			if (ops && ops->complete)
 				(ops->complete)(dpm_devs[i]);
 			dpm_devs[i]->power.is_prepared = false;
+			pm_runtime_put(dpm_devs[i]);
 		}
 	}
 	dpm_snapshot_put(dpm_devs, dpm_ndevs);
@@ -778,9 +805,6 @@ int lkpi_pm_suspend_devices(void)
 		return -EBUSY;
 	}
 	dpm_devs = dpm_snapshot(&dpm_ndevs);
-	if (!dpm_devs && dpm_ndevs == 0) {
-		/* snapshot vacio o sin memoria */
-	}
 	dpm_done = kzalloc(dpm_ndevs ? dpm_ndevs : 1, GFP_KERNEL);
 	if (!dpm_devs || !dpm_done) {
 		kfree(dpm_done);
@@ -803,6 +827,9 @@ int lkpi_pm_suspend_devices(void)
 			dev_err(dpm_devs[i], "prepare fallo: %d\n", rc);
 			break;
 		}
+		/* Como Linux: durante el ciclo nadie duerme por runtime PM. */
+		pm_runtime_get_noresume(dpm_devs[i]);
+		pm_runtime_barrier(dpm_devs[i]);
 		dpm_devs[i]->power.is_prepared = true;
 		dpm_done[i] |= DPM_DONE_PREPARE;
 	}
