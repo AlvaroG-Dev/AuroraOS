@@ -20,6 +20,7 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
+#include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/rtnetlink.h>
@@ -63,10 +64,28 @@ static struct {
 	size_t snap_len;
 } aw;
 
+/* rtnl con tope de tiempo: si otro hilo lo retiene (p. ej. un driver colgado) el
+ * comando devuelve -EBUSY y deja en el log quien lo tiene, en vez de colgar al usuario. */
+static int aw_rtnl_lock(void)
+{
+	int i, pid;
+	void *ra;
+
+	for (i = 0; i < 80; i++) {
+		if (rtnl_trylock())
+			return 0;
+		msleep(50);
+	}
+	lkpi_rtnl_owner(&pid, &ra);
+	pr_warn("aurora-wifi: rtnl ocupado >4 s (dueno pid=%d desde %pS)\n", pid, ra);
+	return -EBUSY;
+}
+
 static void aw_fail(const char *why)
 {
 	snprintf(aw.err, sizeof(aw.err), "%s", why);
 	aw.state = AW_FAILED;
+	pr_info("aurora-wifi: fallo: %s\n", why);
 }
 
 /* ------------------------------------------------------------------ */
@@ -198,15 +217,18 @@ static int aw_scan(void)
 	int i, n_channels, err;
 	enum nl80211_band band;
 
-	rtnl_lock();
+	if (aw_rtnl_lock())
+		return -EBUSY;
 	rdev = aw_find_iface(&dev);
 	if (!rdev) {
 		rtnl_unlock();
 		return -ENODEV;
 	}
-	if (!netif_running(dev)) {
+	err = lkpi_netif_wifi_attach(dev);
+	if (err || !netif_running(dev)) {
+		pr_info("aurora-wifi: no se pudo levantar %s (%d)\n", dev->name, err);
 		rtnl_unlock();
-		return -ENETDOWN;
+		return err ? err : -ENETDOWN;
 	}
 	wiphy = &rdev->wiphy;
 	wiphy_lock(wiphy);
@@ -252,7 +274,9 @@ static int aw_scan(void)
 			creq->req.rates[i] = (1 << wiphy->bands[i]->n_bitrates) - 1;
 	eth_broadcast_addr(creq->req.bssid);
 	rdev->scan_req = creq;
+	pr_info("aurora-wifi: scan en %s, %d canales\n", dev->name, creq->req.n_channels);
 	err = rdev_scan(rdev, creq);
+	pr_info("aurora-wifi: scan: rdev_scan=%d\n", err);
 	if (err) {
 		rdev->scan_req = NULL;
 		kfree(creq);
@@ -288,11 +312,19 @@ static int aw_connect(const char *ssid, size_t ssid_len, const char *pass)
 	if (want_secure && (strlen(pass) < 8 || strlen(pass) > 63))
 		return -EINVAL;
 
-	rtnl_lock();
+	pr_info("aurora-wifi: connect '%.*s'\n", (int)ssid_len, ssid);
+	if (aw_rtnl_lock())
+		return -EBUSY;
 	rdev = aw_find_iface(&dev);
 	if (!rdev) {
 		rtnl_unlock();
 		return -ENODEV;
+	}
+	err = lkpi_netif_wifi_attach(dev);
+	pr_info("aurora-wifi: connect: attach=%d\n", err);
+	if (err) {
+		rtnl_unlock();
+		return err;
 	}
 	spin_lock_bh(&rdev->bss_lock);
 	list_for_each_entry(ib, &rdev->bss_list, list) {
@@ -313,9 +345,10 @@ static int aw_connect(const char *ssid, size_t ssid_len, const char *pass)
 			best_group = group;
 		}
 	}
+	spin_unlock_bh(&rdev->bss_lock);
+	/* cfg80211_ref_bss() toma bss_lock: no se puede llamar con el tomado (autobloqueo). */
 	if (best)
 		cfg80211_ref_bss(&rdev->wiphy, &best->pub);
-	spin_unlock_bh(&rdev->bss_lock);
 	if (!best) {
 		rtnl_unlock();
 		return -ENOENT;
@@ -370,9 +403,11 @@ static int aw_connect(const char *ssid, size_t ssid_len, const char *pass)
 	aw.state = AW_CONNECTING;
 	mutex_unlock(&aw.lock);
 
+	pr_info("aurora-wifi: connect: cfg80211_connect...\n");
 	wiphy_lock(&rdev->wiphy);
 	err = cfg80211_connect(rdev, dev, &cp, NULL, NULL);
 	wiphy_unlock(&rdev->wiphy);
+	pr_info("aurora-wifi: connect: cfg80211_connect=%d\n", err);
 	cfg80211_put_bss(&rdev->wiphy, &best->pub);
 	rtnl_unlock();
 	if (err) {
@@ -389,7 +424,8 @@ static int aw_disconnect(void)
 	struct net_device *dev;
 	int err = 0;
 
-	rtnl_lock();
+	if (aw_rtnl_lock())
+		return -EBUSY;
 	rdev = aw_find_iface(&dev);
 	if (!rdev) {
 		rtnl_unlock();
@@ -635,7 +671,10 @@ static void aw_snapshot(void)
 	char *b = aw.snap;
 	enum aw_state st;
 
-	rtnl_lock();
+	if (aw_rtnl_lock()) {
+		aw.snap_len = scnprintf(aw.snap, SNAP_MAX, "state busy\niface none\n");
+		return;
+	}
 	mutex_lock(&aw.lock);
 	rdev = aw_find_iface(&dev);
 	st = aw.state;
@@ -675,6 +714,19 @@ static void aw_snapshot(void)
 done:
 	aw.snap_len = n;
 	aw.snap[n] = 0;
+	{
+		/* traza en el log solo cuando el estado cambia (diagnostico en hardware real) */
+		static unsigned long last_hash;
+		unsigned long h = 5381;
+		size_t i;
+
+		for (i = 0; i < n; i++)
+			h = h * 33 + (unsigned char)b[i];
+		if (h != last_hash) {
+			last_hash = h;
+			pr_info("aurora-wifi: estado:\n%s", aw.snap);
+		}
+	}
 }
 
 static ssize_t aw_read(struct file *f, char __user *to, size_t count, loff_t *ppos)

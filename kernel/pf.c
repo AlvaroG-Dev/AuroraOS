@@ -1311,27 +1311,58 @@ int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
   if (!(flags & MREMAP_MAYMOVE))
     return -ENOMEM;
 
-  int prot = 0;
+  // Solo se sabe mover VMAs anonimos y respaldados por fichero.
+  if (v->type != VMA_ANON && v->type != VMA_FILE && v->type != VMA_SHARED)
+    return -ENOMEM;
+
+  int prot = MMAP_PROT_READ;
   if (v->flags & PTE_WRITABLE)
     prot |= MMAP_PROT_WRITE;
-  prot |= MMAP_PROT_READ;
-  // Los VMAs siempre son legibles en Aurora, aunque no haya bit.
 
   int64_t dst = sys_mmap(proc, 0, new_size, prot,
                          MMAP_MAP_PRIVATE | MMAP_MAP_ANONYMOUS, -1, 0);
   if (dst < 0)
     return dst;
 
-  // Copiar el contenido página a página. Las páginas no presentes se
-  // quedan a cero en el destino (equivalente a "no estaban").
+  // [mremap] El VMA nuevo hereda tipo, flags y respaldo del viejo (antes era
+  // siempre anonimo: un MAP_SHARED de fichero, como el pkgcache.bin de apt,
+  // perdia su fichero y los datos al crecer).
+  vma_t *nv = vma_find(proc, (uint64_t)dst);
+  if (!nv) {
+    (void)sys_munmap(proc, (uint64_t)dst, new_size);
+    return -ENOMEM;
+  }
+  nv->type = v->type;
+  nv->flags = v->flags;
+  vma_inherit_backing(nv, v, old_addr - v->start);
+
+  // Mover los PTE (presentes y de swap) en vez de copiar paginas: antes solo
+  // se copiaba lo que ya estaba mapeado en el destino (nada: es por demanda),
+  // asi que el contenido se perdia. Las paginas no presentes se vuelven a
+  // pedir por demanda al VMA nuevo (fichero) o salen a cero (anonimo).
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
   for (uint64_t off = 0; off < old_size; off += PAGE_SIZE) {
-    uint64_t sp = paging_get_phys_in(pml4, old_addr + off);
-    uint64_t dp = paging_get_phys_in(pml4, (uint64_t)dst + off);
-    if (sp && dp)
-      memcpy(phys_to_virt(dp), phys_to_virt(sp), PAGE_SIZE);
+    uint64_t raw = 0;
+    if (!paging_get_pte_in(pml4, old_addr + off, &raw) || raw == 0)
+      continue;
+    if (pte_is_swap(raw)) {
+      if (paging_set_pte_in(pml4, (uint64_t)dst + off, raw) != 0) {
+        swap_free_slot(pte_swap_type(raw), pte_swap_offset(raw));
+        LOG_WARN("[MREMAP] pid=%u: pagina en swap perdida en %p", proc->pid,
+                 (void *)(old_addr + off));
+      }
+      paging_set_pte_in(pml4, old_addr + off, 0);
+      continue;
+    }
+    if (!(raw & PTE_PRESENT))
+      continue;
+    paging_map_page_in(pml4, (uint64_t)dst + off, raw & PTE_FRAME,
+                       raw & ~(uint64_t)PTE_FRAME);
+    paging_set_pte_in(pml4, old_addr + off, 0);
   }
+  paging_invalidate_tlb_global(0);
 
+  // Los PTE ya estan vacios: munmap solo retira el VMA viejo y su respaldo.
   (void)sys_munmap(proc, old_addr, old_size);
   return dst;
 }

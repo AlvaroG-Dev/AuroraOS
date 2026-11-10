@@ -25,6 +25,7 @@
 #include <linux/spinlock.h>
 #include <linux/smp.h>
 #include <linux/device.h>
+#include <linux/jiffies.h>
 #include "../aurora.h"
 #include "../lkpi_internal.h"
 
@@ -221,6 +222,20 @@ static int lkpi_irq_entry(int irq, void *data)
 			goto out;
 		}
 		raw_spin_unlock(&d->lock);
+	}
+	/* Tormenta: >100000 IRQ en ~1 s. Se enmascara la linea y se avisa una vez
+	 * (un driver que no atiende la causa dejaria la CPU 0 saturada y sin planificar). */
+	if (time_after(jiffies, d->storm_t0 + HZ)) {
+		d->storm_t0 = jiffies;
+		d->storm_cnt = 0;
+	}
+	if (!d->storm && ++d->storm_cnt > 100000) {
+		d->storm = true;
+		raw_spin_lock(&d->lock);
+		lkpi_irq_mask(d);
+		raw_spin_unlock(&d->lock);
+		pr_warn("linuxkpi: tormenta de IRQ %u (%s): >100000/s, linea enmascarada\n", d->irq, d->name);
+		goto out;
 	}
 	lkpi_irq_run_handlers(d);
 	d->count++;

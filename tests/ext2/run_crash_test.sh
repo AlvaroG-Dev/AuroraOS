@@ -16,10 +16,11 @@ if [ ! -f $BASE ] || [ -n "${REBASE:-}" ]; then
   head -c 3000000 /dev/urandom > $W/tree/stable/s0/blob
   [ -f $W/src.tar ] && cp $W/src.tar $W/tree/stable/
   mkdir -p $W/tree/w
-  rm -f $BASE; mke2fs -q -F -t ext2 -b $BS -I 256 -d $W/tree $BASE ${SIZE:-128M} || exit 2
+  rm -f $BASE; mke2fs -q -F -t ${FSTYPE:-ext2} ${MKOPTS:-} -b $BS -I 256 -d $W/tree $BASE ${SIZE:-128M} || exit 2
+  [ -n "${JCSUM:-}" ] && printf 'jo -c\njc\n' | debugfs -w -f - $BASE >/dev/null 2>&1
   (cd $W/tree/stable && find . -type f -exec sha256sum {} \; | LC_ALL=C sort -k2) > $W/stable.sha
 fi
-export WITH_NVIDIA=${WITH_NVIDIA:-0}
+export WITH_NVIDIA=${WITH_NVIDIA:-0} QEMU_MEM=${QEMU_MEM:-4G}
 cp tests/ext2/${LOADFILE:-crash_load.sh} sysroot/system/crash_load.sh
 trap 'rm -f sysroot/system/crash_load.sh' EXIT
 LOAD='bash /system/crash_load.sh'
@@ -32,7 +33,7 @@ for it in $(seq 1 $N); do
   [ $first = 1 ] || export SKIP_BUILD=1; first=0
   rm -f $LOG
   bash scripts/qemu-boot-test.sh -t 900 \
-    "sleep 25" 'umount /data; mount -t ext2 /dev/sda /data; echo @@MOUNT rc=$?' "$LOAD" >/dev/null 2>&1 &
+    "sleep 25" 'umount /data; mount -t ${FSTYPE:-ext2} /dev/sda /data; echo @@MOUNT rc=$?' "$LOAD" >/dev/null 2>&1 &
   BG=$!
   # esperar al montaje rw (la velocidad de TCG varia mucho) y cortar tras un retardo aleatorio
   until pgrep -f "qemu-system-x86_64.*$(basename $W)/it.img" >/dev/null; do sleep 2; done  # (la 1a vez hay 'make iso')
@@ -42,6 +43,7 @@ for it in $(seq 1 $N); do
   pkill -KILL -f "qemu-system-x86_64.*$(basename $W)/it.img"
   wait $BG 2>/dev/null
   mounted=$(tr -d '\r' < $LOG | grep -a -c '@@MOUNT rc=0')
+  jr=-; if [ "${FSTYPE:-ext2}" != ext2 ]; then cp $IMG $W/jr.img; debugfs -w -R jr $W/jr.img >/dev/null 2>&1; e2fsck -fn $W/jr.img > $W/jr.txt 2>&1; jr=$?; fi
   e2fsck -fy $IMG > $W/fsck1.txt 2>&1; rc1=$?
   e2fsck -fn $IMG > $W/fsck2.txt 2>&1; rc2=$?
   dup=$(grep -a -c -i 'multiply-claimed\|duplicate' $W/fsck1.txt)
@@ -53,7 +55,7 @@ for it in $(seq 1 $N); do
   [ $rc2 -eq 0 ] || verdict="FSCK2=$rc2"
   [ $dup -eq 0 ] || verdict="$verdict DUPLICADOS=$dup"
   [ $st = OK ] || verdict="$verdict STABLE-$st"
-  echo "it=$it kill=+${KT}s mount=$mounted fsck1_rc=$rc1 fsck2_rc=$rc2 dup=$dup stable=$st -> $verdict"
-  if [ "$verdict" != OK ]; then fail=1; cp $IMG $W/fail_$it.img; cp $W/fsck1.txt $W/fail_$it.fsck1; fi
+  echo "it=$it kill=+${KT}s mount=$mounted jr_only_rc=$jr fsck1_rc=$rc1 fsck2_rc=$rc2 dup=$dup stable=$st -> $verdict"
+  if [ "$verdict" != OK ]; then fail=1; cp $IMG $W/fail_$it.img; cp $LOG $W/fail_$it.log; cp $W/fsck1.txt $W/fail_$it.fsck1; fi
 done
 exit $fail

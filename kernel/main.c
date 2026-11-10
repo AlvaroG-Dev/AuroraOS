@@ -1233,6 +1233,15 @@ void kmain(struct kernel_boot_info *kinfo) {
         max_phys_addr = end;
     }
   }
+  // La ventana fisica debe cubrir tambien el initrd: el bootloader UEFI lo
+  // deja en EfiLoaderData, que puede quedar POR ENCIMA de la ultima region
+  // CONVENTIONAL (PCs reales con >4 GiB sin hueco bajo 4 GiB para un initrd de
+  // ~1,8 GB). Sin esto, tarfs_init() leia fuera de la ventana -> #PF.
+  if (boot.initrd_base && boot.initrd_size) {
+    uint64_t iend = boot.initrd_base + boot.initrd_size;
+    if (iend > boot.initrd_base && iend > max_phys_addr)
+      max_phys_addr = iend;
+  }
   parse_memmap();
   efi_rt_collect(boot.efi_runtime_services, (const void *)boot.memmap,
                  boot.memmap_size, boot.memmap_desc_size);

@@ -16,6 +16,7 @@
 #include <linux/notifier.h>
 #include <linux/reboot.h>
 #include "base.h"
+#include "../aurora.h"
 #include "../lkpi_internal.h"
 
 static LIST_HEAD(lkpi_buses);
@@ -111,12 +112,17 @@ static int lkpi_really_probe(struct device *dev, struct device_driver *drv)
 		if (rc)
 			goto fail;
 	}
-	if (dev->bus->probe)
-		rc = dev->bus->probe(dev);
-	else if (drv->probe)
-		rc = drv->probe(dev);
-	else
-		rc = 0;
+	{
+		int pc0 = aurora_preempt_count();
+
+		if (dev->bus->probe)
+			rc = dev->bus->probe(dev);
+		else if (drv->probe)
+			rc = drv->probe(dev);
+		else
+			rc = 0;
+		aurora_preempt_fix(pc0, drv->name);
+	}
 	if (rc)
 		goto fail;
 	rc = device_add_groups(dev, drv->dev_groups);
@@ -940,10 +946,11 @@ void device_shutdown(void)
 				struct device *dev = snaps[i].devs[j];
 
 				if (dev->bus && dev->bus->shutdown) {
-					dev_dbg(dev, "shutdown (bus)\n");
+					if (dev->driver)
+						dev_info(dev, "shutdown de %s\n", dev->driver->name);
 					dev->bus->shutdown(dev);
 				} else if (dev->driver && dev->driver->shutdown) {
-					dev_dbg(dev, "shutdown (driver)\n");
+					dev_info(dev, "shutdown de %s\n", dev->driver->name);
 					dev->driver->shutdown(dev);
 				}
 			}

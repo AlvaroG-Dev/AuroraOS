@@ -32,6 +32,47 @@ static bc_buf_t *g_lru_head, *g_lru_tail;
 static size_t g_bytes, g_limit = BC_DEFAULT_LIMIT;
 static struct bc_stats g_stats;
 
+#define BC_MAX_JNL 4
+static struct {
+  block_device_t *bdev;
+  bc_commit_fn commit;
+  bc_done_fn done;
+  void *priv;
+  uint32_t max_blocks;
+} g_jnl[BC_MAX_JNL];
+
+static int bc_jnl_slot(block_device_t *bdev) {
+  for (int i = 0; i < BC_MAX_JNL; i++)
+    if (g_jnl[i].bdev == bdev && g_jnl[i].commit)
+      return i;
+  return -1;
+}
+
+void bc_set_journal(block_device_t *bdev, bc_commit_fn commit, bc_done_fn done,
+                    void *priv, uint32_t max_blocks) {
+  mutex_lock(&g_bc_lock);
+  int s = -1;
+  for (int i = 0; i < BC_MAX_JNL; i++)
+    if (g_jnl[i].bdev == bdev) {
+      s = i;
+      break;
+    }
+  if (s < 0)
+    for (int i = 0; i < BC_MAX_JNL; i++)
+      if (!g_jnl[i].bdev) {
+        s = i;
+        break;
+      }
+  if (s >= 0) {
+    g_jnl[s].bdev = commit ? bdev : NULL;
+    g_jnl[s].commit = commit;
+    g_jnl[s].done = done;
+    g_jnl[s].priv = priv;
+    g_jnl[s].max_blocks = max_blocks;
+  }
+  mutex_unlock(&g_bc_lock);
+}
+
 static inline uint32_t bc_hash(block_device_t *bdev, uint64_t blk) {
   uint64_t h = (uint64_t)(uintptr_t)bdev * 11400714819323198485ULL;
   h ^= blk * 2654435761ULL;
@@ -119,7 +160,7 @@ static void bc_shrink_locked(size_t extra) {
   bc_buf_t *b = g_lru_tail;
   while (b && g_bytes + extra > g_limit) {
     bc_buf_t *prev = b->prev;
-    if (b->refs == 0) {
+    if (b->refs == 0 && !(b->dirty && !b->datablk && bc_jnl_slot(b->bdev) >= 0)) {
       if (!b->dirty || bc_write_locked(b) == 0) {
         bc_free_locked(b);
         g_stats.evictions++;
@@ -300,6 +341,7 @@ int bc_readahead(block_device_t *bdev, uint64_t blk, uint32_t count,
 
 void *bc_data(bc_buf_t *b) { return b ? b->data : NULL; }
 uint32_t bc_size(const bc_buf_t *b) { return b ? b->bs : 0; }
+uint64_t bc_block_no(const bc_buf_t *b) { return b ? b->blk : 0; }
 
 void bc_mark_dirty(bc_buf_t *b) {
   if (!b)
@@ -367,18 +409,55 @@ static int bc_sync_locked(block_device_t *bdev) {
     kfree(arr);
     kfree(tmp);
     for (bc_buf_t *b = g_lru_tail; b; b = b->prev)
-      if (b->dirty && (!bdev || b->bdev == bdev))
+      if (b->dirty && (!bdev || b->bdev == bdev) &&
+          !(!b->datablk && bc_jnl_slot(b->bdev) >= 0))
         if (bc_write_locked(b) != 0)
           rc = -EIO;
     return rc;
   }
   for (int phase = 0; phase < 2; phase++) {
    int wrote_data = 0;
+   if (phase == 1)
+     for (int ji = 0; ji < BC_MAX_JNL; ji++) {
+       if (!g_jnl[ji].commit || (bdev && g_jnl[ji].bdev != bdev))
+         continue;
+       block_device_t *jd = g_jnl[ji].bdev;
+       for (;;) {
+         uint32_t n = 0, cap = g_jnl[ji].max_blocks;
+         if (cap > BC_SYNC_BATCH)
+           cap = BC_SYNC_BATCH;
+         for (bc_buf_t *b = g_lru_tail; b && n < cap; b = b->prev)
+           if (b->dirty && !b->datablk && b->bdev == jd)
+             arr[n++] = b;
+         if (n == 0)
+           break;
+         bc_sort_dirty(arr, n);
+         if (g_jnl[ji].commit(g_jnl[ji].priv, arr, n) != 0) {
+           rc = -EIO;
+           break;
+         }
+         int werr = 0;
+         for (uint32_t k = 0; k < n; k++)
+           if (bc_write_locked(arr[k]) != 0)
+             werr = 1;
+         if (werr) {
+           rc = -EIO;
+           break;
+         }
+         if (bdev_flush(jd) != 0) {
+           rc = -EIO;
+           break;
+         }
+         if (g_jnl[ji].done)
+           g_jnl[ji].done(g_jnl[ji].priv);
+       }
+     }
    block_device_t *flush_dev[4] = {0};
    for (;;) {
     uint32_t n = 0;
     for (bc_buf_t *b = g_lru_tail; b && n < BC_SYNC_BATCH; b = b->prev)
-      if (b->dirty && (!bdev || b->bdev == bdev) && (phase == 0) == (b->datablk != 0))
+      if (b->dirty && (!bdev || b->bdev == bdev) && (phase == 0) == (b->datablk != 0) &&
+          !(phase == 1 && bc_jnl_slot(b->bdev) >= 0))
         arr[n++] = b;
     if (n == 0)
       break;

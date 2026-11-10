@@ -9,6 +9,8 @@
 // el prototipo extern justo antes del KEXPORT.
 
 #include "ksymtab.h"
+int kur_symbolize(uint64_t addr, char *buf, size_t len);
+extern void (*sched_preempt_leak_hook)(const char *what, int now, int expected);
 #include "bus.h"     // bus_register, device_register, bus_add_driver,
                      // drivers_probe_all (Fase 2.1b: API para .kur)
 #include "heap.h"    // kmalloc, kfree
@@ -83,6 +85,9 @@ KEXPORT_SYMBOL(sched_yield);
 KEXPORT_SYMBOL(sched_set_blocked_deadline);
 KEXPORT_SYMBOL(sched_rcu_qs_count);
 KEXPORT_SYMBOL(preempt_count);
+KEXPORT_SYMBOL(sched_preempt_fix);
+KEXPORT_SYMBOL(kur_symbolize);
+KEXPORT_SYMBOL(sched_preempt_leak_hook);
 KEXPORT_SYMBOL(wait_queue_init);
 KEXPORT_SYMBOL(wait_queue_add_locked);
 KEXPORT_SYMBOL(wait_queue_remove_locked);
