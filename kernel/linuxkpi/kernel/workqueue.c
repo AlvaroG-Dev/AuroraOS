@@ -214,11 +214,23 @@ static void __lkpi_queue_work(struct workqueue_struct *wq, struct work_struct *w
 	lkpi_wq_unlock(flags);
 }
 
+/*
+ * Entre tomar PENDING y dejar el trabajo encolado (o con su timer armado) el
+ * hilo no puede ser expulsado: quien cancela (lkpi_grab_pending) ve PENDING sin
+ * COLA y reintenta; si el que lo tiene hubiera sido expulsado en esa CPU y el
+ * que reintenta lleva la expulsion desactivada (cancel_delayed_work con un
+ * spinlock tomado), yield() no cede y la CPU se quedaba atascada para siempre
+ * (visto en la bateria de pruebas: [SPIN] en lkpi_try_to_grab_pending).
+ */
 bool lkpi_queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
-	if (!lkpi_work_claim(work))
+	preempt_disable();
+	if (!lkpi_work_claim(work)) {
+		preempt_enable();
 		return false;
+	}
 	__lkpi_queue_work(wq, work);
+	preempt_enable();
 	return true;
 }
 EXPORT_SYMBOL(lkpi_queue_work);
@@ -541,9 +553,13 @@ static void __lkpi_queue_delayed_work(struct workqueue_struct *wq, struct delaye
 bool lkpi_queue_delayed_work(struct workqueue_struct *wq, struct delayed_work *dw,
 			     unsigned long delay)
 {
-	if (!lkpi_work_claim(&dw->work))
+	preempt_disable();
+	if (!lkpi_work_claim(&dw->work)) {
+		preempt_enable();
 		return false;
+	}
 	__lkpi_queue_delayed_work(wq, dw, delay);
+	preempt_enable();
 	return true;
 }
 EXPORT_SYMBOL(lkpi_queue_delayed_work);
@@ -584,21 +600,29 @@ static int lkpi_grab_pending(struct work_struct *w, bool is_dwork)
 {
 	int ret;
 
-	while ((ret = lkpi_try_to_grab_pending(w, is_dwork)) == -EAGAIN)
-		yield();
+	while ((ret = lkpi_try_to_grab_pending(w, is_dwork)) == -EAGAIN) {
+		if (preempt_count())
+			cpu_relax();	/* yield() no cede con la expulsion desactivada */
+		else
+			yield();
+	}
 	return ret;
 }
 
 bool lkpi_mod_delayed_work(struct workqueue_struct *wq, struct delayed_work *dw,
 			   unsigned long delay)
 {
-	int ret = lkpi_grab_pending(&dw->work, true);
+	int ret;
 
+	preempt_disable();	/* ver lkpi_queue_work */
+	ret = lkpi_grab_pending(&dw->work, true);
 	if (unlikely(atomic_read(&dw->work.__lkpi_disable))) {
 		lkpi_work_clear_pending(&dw->work);	/* desactivado: queda cancelado */
+		preempt_enable();
 		return false;
 	}
 	__lkpi_queue_delayed_work(wq, dw, delay);
+	preempt_enable();
 	return ret == 1;
 }
 EXPORT_SYMBOL(lkpi_mod_delayed_work);

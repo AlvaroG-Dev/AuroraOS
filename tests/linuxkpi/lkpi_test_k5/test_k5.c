@@ -40,9 +40,19 @@ static void test_pci_lookup(struct pci_dev *pdev)
 	KT_EQ(pdev->device, EDU_DEVICE);
 	KT_EQ(pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor), PCIBIOS_SUCCESSFUL);
 	KT_EQ(vendor, EDU_VENDOR);
-	KT_EQ(pci_read_config_dword(pdev, 0x100, &v), PCIBIOS_BAD_REGISTER_NUMBER);
-	KT_EQ(v, 0xffffffff);
-	KT_ASSERT(PCI_POSSIBLE_ERROR(v) && !PCI_POSSIBLE_ERROR(vendor), "PCI_POSSIBLE_ERROR");
+	/* Fuera de los 256 bytes: sin ECAM (pc/i440fx) es un error y v = ~0; con
+	 * ECAM (q35 y equipos reales) la lectura extendida es valida. */
+	{
+		int rc = pci_read_config_dword(pdev, 0x100, &v);
+
+		KT_ASSERT(rc == PCIBIOS_BAD_REGISTER_NUMBER || rc == PCIBIOS_SUCCESSFUL,
+			  "lectura extendida: %d", rc);
+		if (rc == PCIBIOS_BAD_REGISTER_NUMBER) {
+			KT_EQ(v, 0xffffffff);
+			KT_ASSERT(PCI_POSSIBLE_ERROR(v) && !PCI_POSSIBLE_ERROR(vendor),
+				  "PCI_POSSIBLE_ERROR");
+		}
+	}
 	KT_ASSERT(pdev->msi_cap && !pdev->msix_cap, "edu: MSI si, MSI-X no");
 	KT_EQ(pci_msi_vec_count(pdev), 1);
 	KT_EQ(pci_msix_vec_count(pdev), -EINVAL);

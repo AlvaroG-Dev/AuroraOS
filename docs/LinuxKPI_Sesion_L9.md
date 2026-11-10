@@ -170,15 +170,30 @@ Rama puesta al día con `main` (02c5c855). Revisión completa del código de L9;
 
 | Configuración | Resultado |
 |---|---|
-| q35 + `intel-iommu`, `iommu=on lkpi.runtime_pm=on` | 213 pruebas: 212 bien, 1 fallo (`test_k5.c:43`, anterior a L9) |
-| q35 sin IOMMU (3 pasadas) | 2 × 212/213 (mismo fallo); 1 pasada con fallos intermitentes y pánico (abajo) |
-| pc (i440fx) sin IOMMU | 213/213 |
+| q35 + `intel-iommu`, `iommu=on lkpi.runtime_pm=on` | antes del arreglo 212/213; con él: 1 pasada 213/213 y 1 pasada con pánico en la prueba TTM SMP (abajo) |
+| q35 sin IOMMU (antes del arreglo del workqueue) | 2 × 212/213; 1 pasada con fallos intermitentes y pánico |
 | `main` 02c5c855 limpio, q35 (3 pasadas) | 2 × 210/211; 1 pasada con el mismo tipo de pánico |
+| q35 sin IOMMU (con el arreglo, 3 pasadas) | 3 × 213/213 |
+| pc (i440fx) sin IOMMU (con el arreglo) | 213/213 |
 
-**Pánico intermitente, también en `main`:** tras descargar un módulo de prueba (DRM/KMS
-de L5, o K7 cuando le quedan fences sin liberar) algo sigue llamando a su memoria: un
-proceso de usuario con `/dev/dri/cardN` abierto hace un ioctl, o llega tarde un callback.
-No pasa por código de L9, pero deja la batería inestable; está sin arreglar.
+**Inestabilidad de la batería (10-nov, tras la revisión): dos causas, ninguna de L9**
+
+1. **Bloqueo de CPU en `lkpi_try_to_grab_pending`** (workqueue). Entre tomar `PENDING` y
+   dejar el trabajo encolado o con el timer armado, el hilo podía ser expulsado; quien
+   cancelaba con la expulsión desactivada reintentaba con `yield()`, que no cede con
+   `preempt_count > 0`, y la CPU quedaba atascada ([SPIN] de 3 s y fallos en K2/K7).
+   Arreglado: esa ventana ya no es expulsable y el reintento usa `cpu_relax()` cuando no
+   puede ceder. Con el arreglo, q35 pasó 213/213 tres veces seguidas.
+2. **`test_k5.c:43`** esperaba un error al leer config PCI en 0x100; con ECAM (q35 y equipos
+   reales) esa lectura es válida. La prueba admite las dos cosas.
+
+**Sigue abierto:** la prueba L6 «TTM estrés SMP» (`kt_engine_work` en
+`tests/linuxkpi/lkpi_test_ttm/test_ttm.c`) entra a veces en pánico por `LIST_POISON`: el
+fence de hardware de la ruta de «cuelgue» se saca de la lista dos veces. Pasa sin IOMMU
+(visto también en `main`) y con ella; es un fallo de la propia prueba o del scheduler de
+GPU de L6, no de L9. Antes de este arreglo también se vio un pánico tras descargar un
+módulo de prueba (una entrada `cdev` colgada en una lista apuntando a memoria liberada);
+no se ha vuelto a ver y no está localizado.
 
 Ojo: las reglas de `linuxkpi` no siguen las dependencias de cabeceras. Tras cambiar de
 rama o tocar `include/linuxkpi`, `make linuxkpi-clean` antes de compilar.
