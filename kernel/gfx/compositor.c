@@ -619,6 +619,9 @@ static void run_menu_action(menu_action_t act) {
   case MENU_ACT_LAUNCH_TASKMGR:
     launch_app("/usr/bin/taskmgr");
     break;
+  case MENU_ACT_LAUNCH_CALC:
+    launch_app("/usr/bin/calculadora");
+    break;
   case MENU_ACT_RESTART:
     kthread_run(power_thread, (void *)(uintptr_t)POWER_ACTION_RESTART,
                 "power");
