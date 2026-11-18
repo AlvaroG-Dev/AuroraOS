@@ -39,6 +39,7 @@ static const item_t k_apps[] = {
     {"Terminal", MENU_ACT_LAUNCH_TERMINAL, 0},
     {"Monitor de rendimiento", MENU_ACT_LAUNCH_TASKMGR, 0},
     {"Calculadora", MENU_ACT_LAUNCH_CALC, 0},
+    {"Notas", MENU_ACT_LAUNCH_NOTAS, 0},
     {NULL, MENU_ACT_NONE, 0},
     {"Acerca de AuroraOS", MENU_ACT_ABOUT, 0}};
 static const item_t k_app[] = {{"Minimizar", MENU_ACT_MINIMIZE, 1},
