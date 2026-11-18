@@ -33,6 +33,12 @@ void compositor_dock_pin(const char *name, const char *app_id,
                          tar_node_t *icon);
 // La ventana pertenece a `app_id`: cuelga del lanzador fijado de esa app.
 void compositor_set_app_id(window_t *win, const char *app_id);
+// Cambia el modo claro (1) / oscuro (0) y lo guarda en /data (ASYS_THEME_SET).
+void compositor_request_theme(int light);
+// Fondo de escritorio: ruta de un BMP 24/32 bits ("" o NULL = el del modo).
+// Se recuerda en /data/aurora-wallpaper. Contexto de proceso.
+int compositor_set_wallpaper(const char *path);
+int compositor_get_wallpaper(char *out, size_t cap);
 // Cursor (cursor_shape_t) que se muestra sobre el area de cliente de `win`.
 void compositor_set_cursor(window_t *win, int shape);
 /* El cliente pide mover (edges=0) o redimensionar (RESIZE_EDGE_*) su ventana. */

@@ -5,8 +5,9 @@
 //   - Lista de la carpeta: carpetas primero y por nombre, con tamaño y tipo;
 //     los ocultos (".x") no se muestran.
 //   - Clic selecciona; doble clic o Intro abre: una carpeta entra en ella y un
-//     fichero de texto se abre en Notas. Retroceso o el botón ^ suben un
-//     nivel; < vuelve a la carpeta anterior. Flechas y rueda para moverse.
+//     fichero de texto se abre en Notas y una imagen en Imágenes. Retroceso
+//     o el botón ^ suben un nivel; < vuelve a la carpeta anterior. Flechas
+//     y rueda para moverse.
 // Colores sólidos; el azul de su icono como color propio; sigue el modo
 // claro/oscuro (sys_theme_get).
 
@@ -20,6 +21,7 @@
 #include "../../../lib/malloc.h"
 #include "../../../lib/process.h"
 #include "../../../lib/string.h"
+#include "../../../lib/image_dec.h"
 #include "../../../lib/text_aa.h"
 #include "../../../syscall.h"
 #include <stdlib.h>
@@ -235,7 +237,7 @@ static const char *type_of(const entry_t *e) {
   const char *x = ext_of(e->name);
   if (!name_cmp(x, "txt") || !name_cmp(x, "md"))
     return "Texto";
-  if (!name_cmp(x, "png") || !name_cmp(x, "bmp") || !name_cmp(x, "jpg") || !name_cmp(x, "ppm"))
+  if (img_is_image_name(e->name))
     return "Imagen";
   if (!name_cmp(x, "c") || !name_cmp(x, "h") || !name_cmp(x, "py") || !name_cmp(x, "sh"))
     return "Código";
@@ -265,7 +267,13 @@ static void open_entry(int i) {
     go(full, 1);
     return;
   }
-  if (is_text_name(g_ent[i].name) && g_ent[i].size < 256 * 1024) {
+  if (img_is_image_name(g_ent[i].name)) {
+    char *argv[] = {"/usr/bin/imagenes", full, NULL};
+    if (spawn_args("/usr/bin/imagenes", argv, 2) < 0)
+      snprintf(g_msg, sizeof(g_msg), "No se pudo abrir Imágenes");
+    else if (++g_children)
+      snprintf(g_msg, sizeof(g_msg), "Abriendo %s en Imágenes", g_ent[i].name);
+  } else if (is_text_name(g_ent[i].name) && g_ent[i].size < 256 * 1024) {
     char *argv[] = {"/usr/bin/notas", full, NULL};
     if (spawn_args("/usr/bin/notas", argv, 2) < 0)
       snprintf(g_msg, sizeof(g_msg), "No se pudo abrir Notas");

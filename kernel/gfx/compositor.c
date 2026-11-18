@@ -35,6 +35,7 @@
 #include "../simd.h"
 #include "../spinlock.h"
 #include "../tarfs.h"
+#include "../uaccess.h" /* códigos de error */
 #include "../time.h"
 #include "../wait.h"
 #include "about.h"
@@ -223,7 +224,9 @@ typedef enum {
   CMD_WIN_RESIZE, /* win + value = (ancho << 16) | alto exteriores (peticion del
                      cliente) */
   CMD_WIN_CURSOR, /* win + value = cursor_shape_t sobre el area de cliente */
-  CMD_THEME_SET   /* value: 1 = claro, 0 = oscuro (restaurado de /data) */
+  CMD_THEME_SET,  /* value: 1 = claro, 0 = oscuro (restaurado de /data) */
+  CMD_WALLPAPER   /* node: BMP en memoria (kmalloc, lo libera el compositor) o
+                     NULL = el del modo; title: ruta (para recordarla) */
 } cmd_type_t;
 
 typedef struct {
@@ -514,22 +517,100 @@ static void reload_wallpaper(void);
  * tarde (USB): un hilo de arranque reintenta durante ~2 min hasta que haya
  * fichero. cmdline `theme=light|dark` manda sobre el fichero. */
 #define THEME_FILE "/data/aurora-theme"
+#define HOSTNAME_FILE "/data/aurora-hostname"
 
-static void theme_save(void) {
-  const char *txt = theme_is_light() ? "light\n" : "dark\n";
-  vfs_node_t *n = vfs_lookup(THEME_FILE);
+/* Escribe un fichero de ajuste pequeño en /data (lo crea o lo trunca). */
+static void setting_save(const char *path, const char *txt) {
+  vfs_node_t *n = vfs_lookup(path);
   if (!n) {
-    if (vfs_create(THEME_FILE, 0644) != 0)
-      return; /* sin /data: el modo solo dura esta sesion */
-    n = vfs_lookup(THEME_FILE);
+    if (vfs_create(path, 0644) != 0)
+      return; /* sin /data: el ajuste solo dura esta sesion */
+    n = vfs_lookup(path);
     if (!n)
       return;
+  } else {
+    vfs_truncate(path, 0);
   }
   if (n->ops && n->ops->write)
     n->ops->write(n, 0, strlen(txt), (void *)txt);
   if (n->ops && n->ops->fsync)
     n->ops->fsync(n);
   vfs_node_free(n);
+}
+
+static void theme_save(void) {
+  setting_save(THEME_FILE, theme_is_light() ? "light\n" : "dark\n");
+}
+
+/* ---- Fondo de escritorio elegido (Configuracion / Imagenes) ------------
+ * /data/aurora-wallpaper guarda la ruta de un BMP (24/32 bits) o queda vacio
+ * para el fondo del modo (alba claro / noche oscuro). */
+#define WALLPAPER_FILE "/data/aurora-wallpaper"
+static tar_node_t *custom_wall;   /* BMP elegido, en memoria; NULL = del modo */
+static char custom_wall_path[192];
+static spinlock_t wall_path_lock;
+
+/* Lee y valida el BMP de `path` (contexto de proceso: puede bloquear). */
+static tar_node_t *wallpaper_load(const char *path) {
+  void *buf = NULL;
+  size_t len = 0;
+  if (vfs_read_all(path, &buf, &len) != 0 || !buf)
+    return NULL;
+  const uint8_t *d = (const uint8_t *)buf;
+  int bpp = len >= 30 ? (d[28] | (d[29] << 8)) : 0;
+  if (len < 54 || d[0] != 'B' || d[1] != 'M' || (bpp != 24 && bpp != 32)) {
+    kfree(buf);
+    return NULL;
+  }
+  tar_node_t *n = (tar_node_t *)kmalloc(sizeof(*n));
+  if (!n) {
+    kfree(buf);
+    return NULL;
+  }
+  memset(n, 0, sizeof(*n));
+  strncpy(n->name, path, sizeof(n->name) - 1);
+  n->data = (uint8_t *)buf;
+  n->size = len;
+  return n;
+}
+
+static void wallpaper_free(tar_node_t *n) {
+  if (!n)
+    return;
+  kfree(n->data);
+  kfree(n);
+}
+
+int compositor_set_wallpaper(const char *path) {
+  tar_node_t *n = NULL;
+  if (path && path[0]) {
+    n = wallpaper_load(path);
+    if (!n)
+      return -EINVAL;
+  }
+  comp_cmd_t c = {.type = CMD_WALLPAPER, .node = n};
+  if (path)
+    strncpy(c.title, path, sizeof(c.title) - 1);
+  cmd_post(&c);
+  /* Recordarlo (aquí, en el proceso que lo pide, no en el compositor). */
+  char line[200];
+  snprintf(line, sizeof(line), "%s\n", path && path[0] ? path : "");
+  setting_save(WALLPAPER_FILE, line);
+  unsigned long f = spin_lock_irqsave(&wall_path_lock);
+  strncpy(custom_wall_path, path ? path : "", sizeof(custom_wall_path) - 1);
+  custom_wall_path[sizeof(custom_wall_path) - 1] = 0;
+  spin_unlock_irqrestore(&wall_path_lock, f);
+  return 0;
+}
+
+int compositor_get_wallpaper(char *out, size_t cap) {
+  if (!cap)
+    return -EINVAL;
+  unsigned long f = spin_lock_irqsave(&wall_path_lock);
+  strncpy(out, custom_wall_path, cap - 1);
+  out[cap - 1] = 0;
+  spin_unlock_irqrestore(&wall_path_lock, f);
+  return 0;
 }
 
 /* Hilo de arranque: espera a /data (hasta ~2 min) y pide al compositor el
@@ -540,21 +621,67 @@ static int theme_restore_thread(void *arg) {
   completion_init(&never);
   char val[16] = {0};
   int have = cmdline_get("theme", val, sizeof(val));
-  for (int i = 0; !have && i < 120; i++) {
+  int got_host = 0;
+  for (int i = 0; i < 120 && (!have || !got_host); i++) {
     void *buf = NULL;
     size_t len = 0;
-    if (vfs_read_all(THEME_FILE, &buf, &len) == 0 && buf) {
+    if (!have && vfs_read_all(THEME_FILE, &buf, &len) == 0 && buf) {
       size_t n = len < sizeof(val) - 1 ? len : sizeof(val) - 1;
       memcpy(val, buf, n);
       kfree(buf);
       have = 1;
-      break;
     }
+    /* Nombre del equipo elegido en Configuracion (/data/aurora-hostname). */
+    buf = NULL;
+    if (!got_host && vfs_read_all(HOSTNAME_FILE, &buf, &len) == 0 && buf) {
+      extern char g_hostname[64];
+      size_t n = 0;
+      const char *h = (const char *)buf;
+      while (n < len && n < 63 && h[n] != '\n' && h[n] != '\r' && h[n])
+        n++;
+      if (n) {
+        memcpy(g_hostname, h, n);
+        g_hostname[n] = 0;
+      }
+      kfree(buf);
+      got_host = 1;
+    }
+    if (have && got_host)
+      break;
+    /* Con /data ya montado (se ve el tema o el nombre) no hace falta esperar
+     * al que falte: no existe. */
+    if ((have || got_host) && i > 0)
+      break;
+    if (have || got_host)
+      continue;
     wait_for_completion_timeout(&never, 1000);
   }
   if (have) {
     comp_cmd_t c = {.type = CMD_THEME_SET, .value = !strncmp(val, "light", 5)};
     cmd_post(&c);
+  }
+  /* Fondo elegido en Configuracion. */
+  void *wb = NULL;
+  size_t wl = 0;
+  if ((have || got_host) && vfs_read_all(WALLPAPER_FILE, &wb, &wl) == 0 && wb) {
+    char wp[192];
+    size_t n = 0;
+    const char *t = (const char *)wb;
+    while (n < wl && n < sizeof(wp) - 1 && t[n] != '\n' && t[n] != '\r' && t[n])
+      n++;
+    memcpy(wp, t, n);
+    wp[n] = 0;
+    kfree(wb);
+    if (wp[0]) {
+      tar_node_t *node = wallpaper_load(wp);
+      if (node) {
+        comp_cmd_t c = {.type = CMD_WALLPAPER, .node = node};
+        cmd_post(&c);
+        unsigned long f = spin_lock_irqsave(&wall_path_lock);
+        strncpy(custom_wall_path, wp, sizeof(custom_wall_path) - 1);
+        spin_unlock_irqrestore(&wall_path_lock, f);
+      }
+    }
   }
   return 0;
 }
@@ -624,6 +751,12 @@ static void run_menu_action(menu_action_t act) {
     break;
   case MENU_ACT_LAUNCH_ARCHIVOS:
     launch_app("/usr/bin/archivos");
+    break;
+  case MENU_ACT_LAUNCH_CONFIG:
+    launch_app("/usr/bin/configuracion");
+    break;
+  case MENU_ACT_LAUNCH_IMAGENES:
+    launch_app("/usr/bin/imagenes");
     break;
   case MENU_ACT_LAUNCH_NOTAS:
     launch_app("/usr/bin/notas");
@@ -1015,11 +1148,23 @@ static void exec_cmd(const comp_cmd_t *c) {
     do_dock_pin(c);
     break;
   case CMD_THEME_SET:
-    if (!!c->value != theme_is_light()) {
-      theme_set_light(c->value);
+    if (!!(c->value & 1) != theme_is_light()) {
+      theme_set_light(c->value & 1);
       apply_theme_change();
     }
+    if (c->value & 2) /* pedido por una app (Configuracion): recordarlo */
+      theme_save();
     break;
+  case CMD_WALLPAPER: {
+    tar_node_t *old_wall = custom_wall;
+    custom_wall = c->node;
+    reload_wallpaper();
+    if (bg_wallpaper_node == old_wall)
+      bg_wallpaper_node = NULL;
+    wallpaper_free(old_wall);
+    compositor_invalidate_rect(screen_rect());
+    break;
+  }
   case CMD_WIN_APP:
     if (stack_contains(c->win))
       do_win_app(c->win, c->app_id);
@@ -1117,6 +1262,10 @@ void compositor_dock_pin(const char *name, const char *app_id,
   strncpy(c.title, name, sizeof(c.title) - 1);
   strncpy(c.app_id, app_id, sizeof(c.app_id) - 1);
   strncpy(c.symbol, symbol, sizeof(c.symbol) - 1);
+  cmd_post(&c);
+}
+void compositor_request_theme(int light) {
+  comp_cmd_t c = {.type = CMD_THEME_SET, .value = (light ? 1 : 0) | 2};
   cmd_post(&c);
 }
 void compositor_set_app_id(window_t *win, const char *app_id) {
@@ -2153,6 +2302,13 @@ void compositor_init(void) {
 /* Vuelve a pintar el fondo según el modo actual. Si falta el BMP se deja el
  * anterior. */
 static void reload_wallpaper(void) {
+  rect_t clip = {0, 0, (int)fb_width, (int)fb_height};
+  if (custom_wall && wallpaper_cache &&
+      bmp_draw_scaled(custom_wall, wallpaper_cache, fb_width, clip, 0, 0,
+                      fb_width, fb_height) == 0) {
+    bg_wallpaper_node = custom_wall;
+    return;
+  }
   tar_node_t *n = tar_find_file(theme_is_light()
                                     ? "system/wallpapers/aurora-alba.bmp"
                                     : "system/wallpapers/aurora-noche.bmp");

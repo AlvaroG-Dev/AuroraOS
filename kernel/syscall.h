@@ -265,6 +265,9 @@
 #define ASYS_SYSINFO (ASYS_BASE + 0x71)
 #define ASYS_PROCLIST (ASYS_BASE + 0x72)
 #define ASYS_SCREEN_SIZE (ASYS_BASE + 0x73) /* (ancho << 16) | alto */
+#define ASYS_THEME_SET (ASYS_BASE + 0x74)   /* a1: 1 = claro, 0 = oscuro */
+#define ASYS_WALLPAPER_SET (ASYS_BASE + 0x75) /* a1: ruta BMP o 0 = del modo */
+#define ASYS_WALLPAPER_GET (ASYS_BASE + 0x76) /* a1: buf, a2: tam -> ruta o "" */
 #define ASYS_WIN_SET_RAW_INPUT (ASYS_BASE + 0x16)
 #define ASYS_WIN_CREATE_EX (ASYS_BASE + 0x17)
 #define ASYS_WIN_SET_TITLE (ASYS_BASE + 0x18)

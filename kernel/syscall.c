@@ -2417,7 +2417,11 @@ static int64_t k_uname(uint64_t buf, uint64_t a2, uint64_t a3, uint64_t a4,
   } u;
   memset(&u, 0, sizeof(u));
   strcpy(u.sysname, "Aurora");
-  strcpy(u.nodename, "aurora");
+  extern char g_hostname[64];
+  size_t hnl = strlen(g_hostname);
+  if (hnl >= sizeof(u.nodename))
+    hnl = sizeof(u.nodename) - 1;
+  memcpy(u.nodename, g_hostname, hnl); // sethostname se refleja en uname
   strcpy(u.release, "0.1.0");
   strcpy(u.version, "Aurora OS v0.1.0");
   strcpy(u.machine, "x86_64");
@@ -7742,6 +7746,47 @@ static int64_t a_theme_get(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                    (uint64_t)theme_is_light());
 }
 
+static int64_t a_theme_set(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  if (a1 > 1)
+    return -EINVAL;
+  compositor_request_theme((int)a1);
+  return 0;
+}
+
+static int64_t a_wallpaper_set(uint64_t a1, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  char path[192];
+  path[0] = 0;
+  if (a1) {
+    long n = strncpy_from_user(path, (const char *)a1, sizeof(path));
+    if (n < 0)
+      return -EFAULT;
+    if (n >= (long)sizeof(path))
+      return -ENAMETOOLONG;
+    if (path[0] && path[0] != '/')
+      return -EINVAL;
+  }
+  return compositor_set_wallpaper(path);
+}
+
+static int64_t a_wallpaper_get(uint64_t a1, uint64_t a2, uint64_t a3,
+                               uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  char path[192];
+  if (!a2)
+    return -EINVAL;
+  compositor_get_wallpaper(path, sizeof(path));
+  size_t n = strlen(path) + 1;
+  if (n > a2)
+    return -ERANGE;
+  if (!access_ok((void *)a1, n) || copy_to_user((void *)a1, path, n) < 0)
+    return -EFAULT;
+  return (int64_t)(n - 1);
+}
+
 extern uint32_t fb_width, fb_height;
 static int64_t a_screen_size(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                              uint64_t a5) {
@@ -8337,6 +8382,9 @@ static const syscall_entry_t aurora_table[] = {
         ASYS_BASE] = {a_win_register_console, "asys_win_register_console"},
     [ASYS_WIN_SET_ICON - ASYS_BASE] = {a_win_set_icon, "asys_win_set_icon"},
     [ASYS_THEME_GET - ASYS_BASE] = {a_theme_get, "asys_theme_get"},
+    [ASYS_THEME_SET - ASYS_BASE] = {a_theme_set, "asys_theme_set"},
+    [ASYS_WALLPAPER_SET - ASYS_BASE] = {a_wallpaper_set, "asys_wallpaper_set"},
+    [ASYS_WALLPAPER_GET - ASYS_BASE] = {a_wallpaper_get, "asys_wallpaper_get"},
     [ASYS_SYSINFO - ASYS_BASE] = {a_sysinfo, "asys_sysinfo"},
     [ASYS_PROCLIST - ASYS_BASE] = {a_proclist, "asys_proclist"},
     [ASYS_SCREEN_SIZE - ASYS_BASE] = {a_screen_size, "asys_screen_size"},

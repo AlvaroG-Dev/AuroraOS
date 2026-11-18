@@ -404,6 +404,9 @@ typedef struct {
 #define ASYS_SYSINFO (ASYS_BASE + 0x71)
 #define ASYS_PROCLIST (ASYS_BASE + 0x72)
 #define ASYS_SCREEN_SIZE (ASYS_BASE + 0x73)
+#define ASYS_THEME_SET (ASYS_BASE + 0x74)
+#define ASYS_WALLPAPER_SET (ASYS_BASE + 0x75)
+#define ASYS_WALLPAPER_GET (ASYS_BASE + 0x76)
 static inline int sys_sysinfo(aurora_sysinfo_t *si) {
   return (int)syscall(ASYS_SYSINFO, (uint64_t)si, 0, 0, 0, 0);
 }
@@ -413,6 +416,19 @@ static inline int sys_proclist(aurora_procinfo_t *out, int max) {
 
 static inline uint32_t sys_screen_size(void) {
   return (uint32_t)syscall(ASYS_SCREEN_SIZE, 0, 0, 0, 0, 0);
+}
+// Cambia el modo del escritorio (1 = claro, 0 = oscuro) y lo recuerda.
+static inline int sys_theme_set(int light) {
+  return (int)syscall(ASYS_THEME_SET, (uint64_t)light, 0, 0, 0, 0);
+}
+// Fondo de escritorio: ruta absoluta de un BMP de 24/32 bits, o NULL / ""
+// para el del modo claro/oscuro. Se recuerda entre arranques.
+static inline int sys_wallpaper_set(const char *path) {
+  return (int)syscall(ASYS_WALLPAPER_SET, (uint64_t)path, 0, 0, 0, 0);
+}
+// Ruta del fondo elegido ("" si es el del modo). Devuelve su longitud.
+static inline int sys_wallpaper_get(char *buf, int cap) {
+  return (int)syscall(ASYS_WALLPAPER_GET, (uint64_t)buf, (uint64_t)cap, 0, 0, 0);
 }
 static inline uint32_t sys_theme_get(void) {
   return (uint32_t)syscall(ASYS_THEME_GET, 0, 0, 0, 0, 0);

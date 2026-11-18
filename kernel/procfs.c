@@ -22,6 +22,7 @@
 #include "process.h"
 #include "pty.h"
 #include "sched.h"
+#include "smp_boot.h"
 #include "string.h"
 #include "swap.h"
 #include "sysctl.h"
@@ -266,7 +267,7 @@ static char *gen_uptime(size_t *out_len) {
 
 static char *gen_version(size_t *out_len) {
   static const char v[] = "Aurora OS version 0.1.0 (x86_64) "
-                          "(built with aurora-gcc, musl userland)\n";
+                          "(built with aurora-gcc, glibc userland)\n";
   size_t n = sizeof(v) - 1;
   char *buf = (char *)kmalloc(n + 1);
   if (!buf)
@@ -274,6 +275,96 @@ static char *gen_version(size_t *out_len) {
   memcpy(buf, v, n);
   buf[n] = '\0';
   *out_len = n;
+  return buf;
+}
+
+// /proc/cpuinfo: un bloque por CPU en línea, con el formato de Linux (lo leen
+// lscpu, htop, neofetch, Python os.cpu_count() en algunos casos, Configuración).
+static char *gen_cpuinfo(size_t *out_len) {
+  uint32_t a, b, c, d;
+  char vendor[13];
+  cpuid(0, 0, &a, &b, &c, &d);
+  uint32_t max_leaf = a;
+  memcpy(vendor, &b, 4);
+  memcpy(vendor + 4, &d, 4);
+  memcpy(vendor + 8, &c, 4);
+  vendor[12] = 0;
+  uint32_t f1a = 0, f1b = 0, f1c = 0, f1d = 0, f7b = 0;
+  if (max_leaf >= 1)
+    cpuid(1, 0, &f1a, &f1b, &f1c, &f1d);
+  if (max_leaf >= 7)
+    cpuid(7, 0, &a, &f7b, &c, &d);
+  uint32_t family = (f1a >> 8) & 0xF, model = (f1a >> 4) & 0xF;
+  if (family == 0xF)
+    family += (f1a >> 20) & 0xFF;
+  if (family == 0x6 || family >= 0xF)
+    model |= ((f1a >> 16) & 0xF) << 4;
+  char brand[49] = "CPU x86_64";
+  cpuid(0x80000000u, 0, &a, &b, &c, &d);
+  if (a >= 0x80000004u) {
+    uint32_t r[12];
+    for (uint32_t i = 0; i < 3; i++)
+      cpuid(0x80000002u + i, 0, &r[i * 4], &r[i * 4 + 1], &r[i * 4 + 2],
+            &r[i * 4 + 3]);
+    memcpy(brand, r, 48);
+    brand[48] = 0;
+  }
+  const char *bp = brand;
+  while (*bp == ' ')
+    bp++;
+  uint64_t mhz = klog_get_tsc_freq() / 1000000ull;
+
+  // Banderas más consultadas (no la lista completa de Linux).
+  static const struct {
+    uint8_t reg, bit;
+    const char *name;
+  } fl[] = {{0, 0, "fpu"},     {0, 4, "tsc"},      {0, 5, "msr"},
+            {0, 6, "pae"},     {0, 8, "cx8"},      {0, 9, "apic"},
+            {0, 15, "cmov"},   {0, 19, "clflush"}, {0, 23, "mmx"},
+            {0, 24, "fxsr"},   {0, 25, "sse"},     {0, 26, "sse2"},
+            {0, 28, "ht"},     {1, 0, "pni"},      {1, 1, "pclmulqdq"},
+            {1, 9, "ssse3"},   {1, 12, "fma"},     {1, 13, "cx16"},
+            {1, 19, "sse4_1"}, {1, 20, "sse4_2"},  {1, 22, "movbe"},
+            {1, 23, "popcnt"}, {1, 25, "aes"},     {1, 26, "xsave"},
+            {1, 28, "avx"},    {1, 29, "f16c"},    {1, 30, "rdrand"},
+            {1, 31, "hypervisor"}, {2, 3, "bmi1"}, {2, 5, "avx2"},
+            {2, 8, "bmi2"},    {2, 9, "erms"},     {2, 16, "avx512f"},
+            {2, 18, "rdseed"}, {2, 19, "adx"},     {2, 29, "sha_ni"}};
+  char flags[400];
+  size_t fo = 0;
+  flags[0] = 0;
+  for (unsigned i = 0; i < sizeof(fl) / sizeof(fl[0]); i++) {
+    uint32_t reg = fl[i].reg == 0 ? f1d : fl[i].reg == 1 ? f1c : f7b;
+    if (reg & (1u << fl[i].bit))
+      fo += (size_t)snprintf(flags + fo, sizeof(flags) - fo, "%s%s",
+                             fo ? " " : "", fl[i].name);
+    if (fo >= sizeof(flags) - 1)
+      break;
+  }
+
+  int ncpu = smp_online_cpus();
+  if (ncpu < 1)
+    ncpu = 1;
+  size_t cap = (size_t)ncpu * 900 + 64;
+  char *buf = (char *)kmalloc(cap);
+  if (!buf)
+    return NULL;
+  size_t o = 0;
+  for (int i = 0; i < ncpu && o < cap; i++)
+    o += (size_t)snprintf(
+        buf + o, cap - o,
+        "processor\t: %d\nvendor_id\t: %s\ncpu family\t: %u\nmodel\t\t: %u\n"
+        "model name\t: %s\nstepping\t: %u\ncpu MHz\t\t: %lu.000\n"
+        "physical id\t: 0\nsiblings\t: %d\ncore id\t\t: %d\ncpu cores\t: %d\n"
+        "apicid\t\t: %d\nfpu\t\t: yes\nwp\t\t: yes\nflags\t\t: %s\n"
+        "bogomips\t: %lu.00\nclflush size\t: 64\ncache_alignment\t: 64\n"
+        "address sizes\t: 48 bits physical, 48 bits virtual\n\n",
+        i, vendor, family, model, bp, f1a & 0xF, (unsigned long)mhz, ncpu, i,
+        ncpu, i, flags, (unsigned long)(mhz * 2));
+  if (o >= cap)
+    o = cap - 1;
+  buf[o] = 0;
+  *out_len = o;
   return buf;
 }
 
@@ -2183,7 +2274,7 @@ static char *gen_mounts(size_t *out_len) {
 // readdir: /proc raíz, /proc/bus/*, /proc/<pid>/ y /proc/<pid>/fd/.
 // ===========================================================================
 static const char *procfs_root_entries[] = {
-    "uptime", "version", "meminfo",     "stat",       "self",
+    "uptime", "version", "cpuinfo", "meminfo",     "stat",       "self",
     "mounts", "loadavg", "bus",         "partitions", "swaps",
     "sys",    "vmstat",  "filesystems", "net", // ← AÑADIR
     "modules", "cmdline", "last_kmsg",
@@ -2957,6 +3048,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *b = gen_uptime(&len);
     return make_file_node("uptime", b, len);
+  }
+  if (strcmp(name, "cpuinfo") == 0) {
+    size_t len = 0;
+    char *b = gen_cpuinfo(&len);
+    return make_file_node("cpuinfo", b, len);
   }
   if (strcmp(name, "version") == 0) {
     size_t len = 0;
