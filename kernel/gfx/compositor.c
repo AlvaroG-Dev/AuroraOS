@@ -622,6 +622,9 @@ static void run_menu_action(menu_action_t act) {
   case MENU_ACT_LAUNCH_CALC:
     launch_app("/usr/bin/calculadora");
     break;
+  case MENU_ACT_LAUNCH_ARCHIVOS:
+    launch_app("/usr/bin/archivos");
+    break;
   case MENU_ACT_LAUNCH_NOTAS:
     launch_app("/usr/bin/notas");
     break;
