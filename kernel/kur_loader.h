@@ -24,6 +24,13 @@ struct kur_module {
   // `n_imports_from[b]`: cuántos símbolos de g_modules[b] usa este módulo.
   // En unload se resta de g_modules[b].n_dependents.
   uint32_t n_imports_from[KUR_MAX_MODULES];
+
+  // `__this_module` del propio módulo (NULL si no lo define): referencias
+  // de try_module_get(); unload devuelve -EBUSY mientras haya alguna.
+  struct kur_module_ref *ref;
+
+  // Cargado al arrancar por lkpi_boot (lkpi.load o autodeteccion).
+  int boot;
 };
 
 void kur_loader_init(void);

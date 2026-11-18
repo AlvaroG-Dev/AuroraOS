@@ -90,6 +90,7 @@ for t in musl-gcc qemu-system-x86_64 xorriso nasm rsync; do
 done
 [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ] || warn "falta OVMF (paquete ovmf)"
 say "listo. ISO: make iso MUSL_CC=/usr/bin/musl-gcc KUR_CC=gcc"
-say "pruebas: python3 scripts/qemu-drive.py -m 6G --done 'passed, '   (suite del kernel)"
-say "         python3 scripts/qemu-drive.py -t 1200 -m 6G --boot-test /usr/bin/lkpi_test --done 'LKPI-TEST:'"
+say "pruebas: python3 scripts/qemu-drive.py -m 6G --cmdline lkpi.auto=off --done 'passed, '   (suite del kernel)"
+say "         python3 scripts/qemu-drive.py -t 1200 -m 6G --cmdline lkpi.auto=off --boot-test /usr/bin/lkpi_test --done 'LKPI-TEST:'"
+say "         (sin lkpi.auto=off la e1000 de QEMU carga lkpi_e1000 al arrancar y la suite omite las pruebas de LinuxKPI)"
 exit 0

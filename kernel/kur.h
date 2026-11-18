@@ -20,6 +20,24 @@
 #define KUR_SYM_INIT     "kur_init"
 #define KUR_SYM_EXIT     "kur_exit"
 #define KUR_SYM_MANIFEST "__kur_manifest"
+#define KUR_SYM_THIS_MODULE "__this_module"
+
+// ---------------------------------------------------------------------------
+// Referencias al módulo (try_module_get/module_put de LinuxKPI). Si el .kur
+// define `__this_module` (lo hace include/linuxkpi/linux/export.h), su
+// comienzo tiene esta forma: el cargador pone magic y nombre al cargar, y
+// kur_loader_unload() solo descarga si refcnt pasa de 0 a KUR_REF_GOING (un
+// fichero abierto, un dma-buf exportado... sujetan el código del módulo).
+// Desde KUR_REF_GOING, try_module_get() falla.
+// ---------------------------------------------------------------------------
+#define KUR_REF_MAGIC 0x4D524546u  // "FERM"
+#define KUR_REF_GOING (-0x40000000)
+
+struct kur_module_ref {
+  int32_t  refcnt;
+  uint32_t magic;
+  char     name[KUR_MAX_NAME];
+};
 
 // Manifest flags
 #define KUR_FLAG_HASHED  0x0001u  // hash[] contiene SHA-256 válido

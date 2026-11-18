@@ -116,10 +116,16 @@ EXPORT_SYMBOL(lkpi_iput);
 
 struct file *lkpi_file_alloc(const struct file_operations *fops, unsigned int flags)
 {
-	struct file *f = kzalloc(sizeof(*f), GFP_KERNEL);
+	struct file *f;
 
-	if (!f)
+	/* El fichero sujeta el modulo de sus fops hasta lkpi_file_free(). */
+	if (fops && !fops_get(fops))
+		return NULL;	/* modulo descargandose */
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (!f) {
+		fops_put(fops);
 		return NULL;
+	}
 	f->f_op = fops;
 	f->f_flags = flags & ~O_CLOEXEC;
 	f->f_mode = lkpi_fmode(flags);	/* FMODE_LSEEK: lo ajusta quien abre */
@@ -136,6 +142,9 @@ struct file *lkpi_file_alloc(const struct file_operations *fops, unsigned int fl
 
 void lkpi_file_free(struct file *f)
 {
+	if (!f)
+		return;
+	fops_put(f->f_op);	/* las fops actuales (replace_fops cambia la referencia) */
 	kfree(f);
 }
 

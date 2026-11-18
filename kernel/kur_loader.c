@@ -684,6 +684,22 @@ static int kur_load_internal(const void *data, size_t size, int slot,
     }
   }
 
+  // -- 7b. __this_module (referencias de try_module_get) -----------------
+  {
+    const Elf64_Sym *ts = sym_find(&e, KUR_SYM_THIS_MODULE);
+    if (ts && ts->st_shndx != SHN_UNDEF && ts->st_shndx < e.shnum &&
+        sec_off[ts->st_shndx] != KUR_NOT_LOADED &&
+        ts->st_size >= sizeof(struct kur_module_ref)) {
+      struct kur_module_ref *r =
+          (struct kur_module_ref *)(base + sec_off[ts->st_shndx] + ts->st_value);
+      r->refcnt = 0;
+      r->magic = KUR_REF_MAGIC;
+      for (int k = 0; k < KUR_MAX_NAME - 1 && mf->name[k]; k++)
+        r->name[k] = mf->name[k];
+      out->ref = r;
+    }
+  }
+
   // -- 8. Constructores y kur_init ----------------------------------------
   run_array_sections(&e, sec_off, base, SHT_PREINIT_ARRAY);
   run_array_sections(&e, sec_off, base, SHT_INIT_ARRAY);
@@ -939,6 +955,17 @@ int kur_loader_unload(struct kur_module *mod) {
              mod->name, mod->n_dependents);
     __atomic_store_n(&g_load_in_progress, 0, __ATOMIC_RELEASE);
     return -EBUSY;
+  }
+
+  if (mod->ref) {
+    int32_t zero = 0;
+    if (!__atomic_compare_exchange_n(&mod->ref->refcnt, &zero, KUR_REF_GOING,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      LOG_WARN("[KUR] '%s' en uso (%d referencias: ficheros abiertos, dma-buf...)",
+               mod->name, zero);
+      __atomic_store_n(&g_load_in_progress, 0, __ATOMIC_RELEASE);
+      return -EBUSY;
+    }
   }
 
   LOG_INFO("[KUR] descargando '%s' (slot %d)", mod->name, mod->index);

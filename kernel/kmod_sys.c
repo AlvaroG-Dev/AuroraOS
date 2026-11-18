@@ -165,8 +165,12 @@ char *kmod_gen_proc_modules(size_t *out_len) {
     struct kur_module *m = kur_loader_get(i);
     if (!m)
       continue;
+    // refcnt como Linux: dependientes + referencias de try_module_get()
+    // (ficheros abiertos, dma-buf exportados...).
+    int32_t r = m->ref ? __atomic_load_n(&m->ref->refcnt, __ATOMIC_RELAXED) : 0;
     len += (size_t)snprintf(buf + len, cap - len, "%s %lu %u ", m->name,
-                            (unsigned long)m->base_size, m->n_dependents);
+                            (unsigned long)m->base_size,
+                            m->n_dependents + (r > 0 ? (uint32_t)r : 0u));
     int any = 0;
     for (int j = 0; j < KUR_MAX_MODULES; j++) {
       struct kur_module *u = kur_loader_get(j);
@@ -177,8 +181,11 @@ char *kmod_gen_proc_modules(size_t *out_len) {
     }
     if (!any)
       len += (size_t)snprintf(buf + len, cap - len, "-");
-    len += (size_t)snprintf(buf + len, cap - len, " Live 0x%016lx\n",
-                            (unsigned long)m->base_va);
+    // (B): cargado al arrancar (como las marcas de taint de Linux, que lsmod
+    // ignora).
+    len += (size_t)snprintf(buf + len, cap - len, " %s 0x%016lx%s\n",
+                            r < 0 ? "Unloading" : "Live",
+                            (unsigned long)m->base_va, m->boot ? " (B)" : "");
   }
   *out_len = len;
   return buf;

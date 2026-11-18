@@ -36,6 +36,21 @@ struct lkpi_kur_export_entry {
 #define EXPORT_SYMBOL_FOR_TESTS_ONLY(sym) __LKPI_EXPORT(sym)
 #define EXPORT_SYMBOL_IF_KUNIT(sym)
 #define MODULE_IMPORT_NS(ns)
-#define THIS_MODULE ((struct module *)0)
+
+/*
+ * struct module: solo lo que usa la capa. Su comienzo es struct
+ * kur_module_ref de kernel/kur.h (el cargador .kur pone magic y nombre y
+ * consulta refcnt al descargar). Cada .kur tiene su propio __this_module:
+ * definicion debil y oculta en cada unidad, que `ld -r` funde en una.
+ */
+#define LKPI_MODULE_NAME_LEN 64
+struct module {
+	int refcnt;		/* >= 0 referencias; < 0 descargando */
+	unsigned int magic;
+	char name[LKPI_MODULE_NAME_LEN];
+};
+extern struct module __this_module;
+struct module __this_module __attribute__((weak, visibility("hidden")));
+#define THIS_MODULE (&__this_module)
 
 #endif

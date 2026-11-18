@@ -390,9 +390,11 @@ void wait_queue_wake_timeout_task(wait_queue_t *wq, task_t *task,
   if (removed) {
     sched_make_ready(task);
     task_put(task);
-  } else {
-    // [DIAG] Plazo vencido que no desperto a nadie: normal si otro evento se
-    // adelanto; si una tarea se queda dormida para siempre, aqui queda el rastro.
+  } else if (seq_now == wait_seq) {
+    // [DIAG] Plazo vencido que no desperto a nadie en la MISMA espera: si una
+    // tarea se queda dormida para siempre, aqui queda el rastro. Si seq ya
+    // avanzo, otro evento se adelanto y la tarea esta en una espera nueva
+    // (lo normal: no se avisa, llenaba el log de hilos del kernel).
     static volatile int g_nomatch_logs;
     if (__atomic_fetch_add(&g_nomatch_logs, 1, __ATOMIC_RELAXED) < 40)
       LOG_WARN("[WAIT] timeout sin efecto: pid=%u state=%d en_cola=%d "

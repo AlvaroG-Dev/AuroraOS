@@ -95,12 +95,43 @@ static int layer_loaded(void)
 	return !strncmp(buf, "linuxkpi ", 9) || strstr(buf, "\nlinuxkpi ") != NULL;
 }
 
+/*
+ * Capa "del arranque": un driver de la capa (lkpi_e1000 en QEMU, iwlwifi en
+ * un PC...) la cargo al arrancar (marca "(B)" en /proc/modules). La suite del kernel entonces no la
+ * descarga (lkpi_boot_owned) y aqui no se puede esperar a verla descargada
+ * ni descargarla al final.
+ */
+static int g_boot_owned;
+
+static int layer_boot_owned(void)
+{
+	char buf[4096];
+	int fd = open("/proc/modules", O_RDONLY);
+	ssize_t n;
+
+	if (fd < 0)
+		return 0;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n < 0)
+		return 0;
+	buf[n] = '\0';
+	/* El kernel marca (B) en /proc/modules lo que cargo lkpi_boot al arrancar. */
+	return strstr(buf, " (B)\n") != NULL;
+}
+
 static void wait_kernel_suite(void)
 {
 	long t0 = now_ms();
 	int seen = 0, r;
 
 	while (now_ms() - t0 < 900000) {
+		if (layer_boot_owned()) {
+			g_boot_owned = 1;
+			printf("lkpi_test: la capa la cargo un driver al arrancar; no se espera a la suite\n");
+			sleep(20);	/* margen para la suite del kernel (que no la toca) */
+			return;
+		}
 		r = layer_loaded();
 		if (r < 0) {
 			printf("lkpi_test: sin /proc/modules, no se espera a la suite\n");
@@ -113,6 +144,32 @@ static void wait_kernel_suite(void)
 		usleep(200000);
 	}
 	printf("lkpi_test: la suite del kernel no termino en 15 min\n");
+}
+
+/* Columna refcnt de /proc/modules para `name` (-1 si no esta). */
+static int module_refs(const char *name)
+{
+	char buf[4096], *l;
+	int fd = open("/proc/modules", O_RDONLY);
+	size_t len = strlen(name);
+	ssize_t n;
+
+	if (fd < 0)
+		return -1;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n < 0)
+		return -1;
+	buf[n] = '\0';
+	for (l = buf; l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
+		unsigned long size;
+		int refs;
+
+		if (!strncmp(l, name, len) && l[len] == ' ' &&
+		    sscanf(l + len, " %lu %d", &size, &refs) == 2)
+			return refs;
+	}
+	return -1;
 }
 
 static int load(const char *path)
@@ -716,6 +773,12 @@ int main(void)
 		test_dmabuf(fd);
 		test_implicit_fence(fd);
 		test_debugfs();
+		/* Un fichero abierto sujeta el modulo de sus fops: no se descarga. */
+		errno = 0;
+		check(syscall(SYS_delete_module, "lkpi_test_dev", O_NONBLOCK) == -1 && errno == EBUSY,
+		      "descargar lkpi_test_dev con /dev/lkpi_test abierto: EBUSY");
+		check(module_refs("lkpi_test_dev") >= 1, "/proc/modules cuenta la referencia del fichero (%d)",
+		      module_refs("lkpi_test_dev"));
 		a = info(fd);
 		close(fd);
 		fd = open(LKPI_TEST_DEV, O_RDONLY);
@@ -729,7 +792,10 @@ int main(void)
 	      "descargar lkpi_test_dev");
 	check(stat(LKPI_TEST_DEV, &st) == -1 && errno == ENOENT, "/dev/lkpi_test desaparece");
 	test_ttm_user();
-	check(syscall(SYS_delete_module, "linuxkpi", O_NONBLOCK) == 0, "descargar linuxkpi");
+	if (g_boot_owned)
+		skip("descargar linuxkpi (la usa un driver cargado al arrancar)");
+	else
+		check(syscall(SYS_delete_module, "linuxkpi", O_NONBLOCK) == 0, "descargar linuxkpi");
 	if (g_fail)
 		printf("LKPI-TEST: FAIL %d de %d (%d omitidas)\n", g_fail, g_pass + g_fail, g_skip);
 	else

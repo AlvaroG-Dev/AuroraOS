@@ -222,6 +222,7 @@ int lkpi_boot_load(void) {
       struct kur_module *m = NULL;
       int rc = kur_loader_load_file(path, &m);
       if (rc == 0) {
+        m->boot = 1; // /proc/modules lo marca (B): lkpi_test no lo descarga
         LOG_INFO("[LKPI] %s cargado", p);
         loaded++;
       } else {

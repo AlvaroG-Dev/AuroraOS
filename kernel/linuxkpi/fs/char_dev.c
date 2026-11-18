@@ -435,14 +435,15 @@ static int lkpi_misc_open(struct inode *inode, struct file *file)
 	list_for_each_entry(it, &lkpi_misc_list, list)
 		if (it->minor == minor) {
 			c = it;
-			new_fops = it->fops;
+			new_fops = fops_get(it->fops);
 			break;
 		}
 	if (!new_fops)
 		goto out;
-	/* Como Linux: private_data = la miscdevice, y las fops del driver. */
+	/* Como Linux: private_data = la miscdevice, y las fops del driver
+	 * (el fichero pasa a sujetar el modulo del driver). */
 	file->private_data = c;
-	file->f_op = new_fops;
+	replace_fops(file, new_fops);
 	rc = 0;
 	if (file->f_op->open)
 		rc = file->f_op->open(inode, file);

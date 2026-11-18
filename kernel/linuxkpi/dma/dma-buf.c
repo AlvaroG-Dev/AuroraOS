@@ -17,6 +17,7 @@
  */
 #include <linux/kernel.h>
 #include <linux/export.h>
+#include <linux/module.h>
 #include <linux/anon_inodes.h>
 #include <linux/device.h>
 #include <linux/dma-buf.h>
@@ -93,9 +94,14 @@ struct dma_buf *lkpi_dma_buf_export(const struct dma_buf_export_info *exp_info)
 	if (WARN_ON(!exp_info->priv || !exp_info->ops || !exp_info->ops->map_dma_buf ||
 		    !exp_info->ops->unmap_dma_buf || !exp_info->ops->release || !exp_info->size))
 		return ERR_PTR(-EINVAL);
+	/* El dma-buf sujeta el modulo exportador hasta liberarse (como Linux). */
+	if (!try_module_get(exp_info->owner))
+		return ERR_PTR(-ENOENT);
 	dmabuf = kzalloc(sizeof(*dmabuf), GFP_KERNEL);
-	if (!dmabuf)
+	if (!dmabuf) {
+		module_put(exp_info->owner);
 		return ERR_PTR(-ENOMEM);
+	}
 	dmabuf->priv = exp_info->priv;
 	dmabuf->ops = exp_info->ops;
 	dmabuf->size = exp_info->size;
@@ -114,6 +120,7 @@ struct dma_buf *lkpi_dma_buf_export(const struct dma_buf_export_info *exp_info)
 	file = lkpi_anon_inode_getfile("dmabuf", &lkpi_dma_buf_fops, dmabuf,
 				       exp_info->flags | O_RDWR);
 	if (IS_ERR(file)) {
+		module_put(exp_info->owner);
 		kfree(dmabuf);
 		return ERR_CAST(file);
 	}
@@ -126,6 +133,8 @@ EXPORT_SYMBOL(lkpi_dma_buf_export);
 
 static void lkpi_dma_buf_destroy(struct dma_buf *dmabuf)
 {
+	struct module *owner = dmabuf->owner;
+
 	if (dmabuf->__lkpi_cpu_sgt)
 		lkpi_dma_buf_unmap_attachment_unlocked(dmabuf->__lkpi_cpu_attach,
 						       dmabuf->__lkpi_cpu_sgt, DMA_BIDIRECTIONAL);
@@ -137,6 +146,7 @@ static void lkpi_dma_buf_destroy(struct dma_buf *dmabuf)
 	if (dmabuf->resv == &dmabuf->__lkpi_resv)
 		dma_resv_fini(&dmabuf->__lkpi_resv);
 	kfree(dmabuf);
+	module_put(owner);
 }
 
 void lkpi_dma_buf_put(struct dma_buf *dmabuf)
