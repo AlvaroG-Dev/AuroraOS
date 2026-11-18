@@ -429,6 +429,14 @@ void lkpi_device_del(struct device *dev)
 	lkpi_class_remove_device(dev);
 	lkpi_device_remove_attrs(dev);
 	lkpi_bus_remove_device(dev);
+	/*
+	 * Como Linux: un dispositivo sin driver (platform_device_register_simple
+	 * + devm_drm_dev_alloc) suelta aqui su devres. Si se esperase al
+	 * release, no llegaria nunca: la accion devm (drm_dev_put) es la que
+	 * suelta la referencia que el drm_device tiene sobre el padre, y el
+	 * drm_device y todo lo drmm_* se perdian en cada descarga.
+	 */
+	lkpi_devres_release_all(dev);
 	kobject_uevent(&dev->kobj, KOBJ_REMOVE);
 	kobject_del(&dev->kobj);
 	lkpi_bus_notify(dev, BUS_NOTIFY_REMOVED_DEVICE);

@@ -23,6 +23,7 @@
 struct rhash_head { struct rhash_head __rcu *next; };
 struct rhlist_head { struct rhash_head rhead; struct rhlist_head __rcu *next; };
 struct rhashtable;
+struct rhashtable_compare_arg;
 typedef u32 (*rht_hashfn_t)(const void *data, u32 len, u32 seed);
 typedef u32 (*rht_obj_hashfn_t)(const void *data, u32 len, u32 seed);
 typedef int (*rht_obj_cmpfn_t)(struct rhashtable_compare_arg *arg, const void *obj);

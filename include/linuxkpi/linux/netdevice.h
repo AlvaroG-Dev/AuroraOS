@@ -28,6 +28,7 @@
 #include <linux/smp.h>
 #include <linux/delay.h>
 
+struct inet6_dev;	/* iwlwifi mvm.h lo usa en prototipos (net/if_inet6.h en Linux) */
 struct phy_device;
 struct mii_bus;
 struct ethtool_ops;

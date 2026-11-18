@@ -944,6 +944,11 @@ int kur_loader_load_buffer(const void *data, size_t size,
   return 0;
 }
 
+// Aviso tras kur_exit de un modulo, con su codigo y sus simbolos aun
+// presentes (LinuxKPI lo usa con lkpi.slab_track=1 para listar lo que el
+// modulo dejo asignado).
+void (*kur_unload_hook)(const char *name, uint64_t base, uint64_t size);
+
 int kur_loader_unload(struct kur_module *mod) {
   if (!mod || !mod->in_use) return -EINVAL;
   if (__atomic_exchange_n(&g_load_in_progress, 1, __ATOMIC_ACQ_REL)) {
@@ -984,6 +989,9 @@ int kur_loader_unload(struct kur_module *mod) {
         ((void (*)(void))fns[k - 1])();
     }
   }
+
+  if (kur_unload_hook)
+    kur_unload_hook(mod->name, mod->base_va, mod->base_size);
 
   // Eliminar dynsym entries de este módulo.
   int removed = dynsym_remove_owner(mod->index);

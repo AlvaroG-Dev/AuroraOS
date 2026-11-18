@@ -91,6 +91,8 @@ int aurora_kur_symbolize(u64 addr, char *buf, size_t len) __asm__("kur_symbolize
 extern void (*aurora_preempt_leak_hook)(const char *what, int now, int expected)
 	__asm__("sched_preempt_leak_hook");
 int aurora_preempt_fix(int expected, const char *what) __asm__("sched_preempt_fix");
+extern void (*aurora_kur_unload_hook)(const char *name, u64 base, u64 size)
+	__asm__("kur_unload_hook");
 void aurora_wait_queue_init(struct aurora_wait_queue *wq) __asm__("wait_queue_init");
 void aurora_wait_queue_add_locked(struct aurora_wait_queue *wq, struct aurora_task *t)
 	__asm__("wait_queue_add_locked");

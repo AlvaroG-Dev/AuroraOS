@@ -168,6 +168,161 @@ static void slab_free(struct kmem_cache *s, struct page *page, void *obj)
 	}
 }
 
+/* ------------------------------------------- rastreo de asignaciones */
+/*
+ * lkpi.slab_track=1: cada kmalloc/kmem_cache_alloc apunta quien lo pidio
+ * (direccion de retorno) en una tabla hash, y kfree lo borra. Al descargar
+ * un .kur (kur_unload_hook, con sus simbolos aun cargados) se listan las
+ * asignaciones vivas hechas desde su codigo: fugas de su init/exit. Al
+ * descargar la capa, las que queden. Sin el parametro no cuesta nada.
+ */
+#define LKPI_TRACK_BITS 14
+#define LKPI_TRACK_N (1U << LKPI_TRACK_BITS)
+#define LKPI_TRACK_DEAD ((const void *)1)
+struct lkpi_track_ent {
+	const void *p;
+	unsigned long caller;
+};
+static struct lkpi_track_ent lkpi_track_tab[LKPI_TRACK_N];
+static bool lkpi_track_on;
+static bool lkpi_track_full_warned;
+static DEFINE_SPINLOCK(lkpi_track_lock);
+
+static unsigned int lkpi_track_hash(const void *p)
+{
+	return (unsigned int)(((unsigned long)p >> 3) * 0x9E3779B97F4A7C15ULL >>
+			      (64 - LKPI_TRACK_BITS));
+}
+
+static void lkpi_track_add(const void *p, unsigned long caller)
+{
+	unsigned long flags;
+	unsigned int i, n;
+
+	if (likely(!lkpi_track_on) || ZERO_OR_NULL_PTR(p))
+		return;
+	spin_lock_irqsave(&lkpi_track_lock, flags);
+	i = lkpi_track_hash(p);
+	for (n = 0; n < LKPI_TRACK_N; n++, i = (i + 1) & (LKPI_TRACK_N - 1)) {
+		const void *q = lkpi_track_tab[i].p;
+
+		if (!q || q == LKPI_TRACK_DEAD || q == p) {
+			lkpi_track_tab[i].p = p;
+			lkpi_track_tab[i].caller = caller;
+			break;
+		}
+	}
+	if (n == LKPI_TRACK_N && !lkpi_track_full_warned) {
+		lkpi_track_full_warned = true;
+		pr_warn("linuxkpi: slab_track: tabla llena (%u), se dejan de apuntar\n",
+			LKPI_TRACK_N);
+	}
+	spin_unlock_irqrestore(&lkpi_track_lock, flags);
+}
+
+static void lkpi_track_del(const void *p)
+{
+	unsigned long flags;
+	unsigned int i, n;
+
+	if (likely(!lkpi_track_on) || ZERO_OR_NULL_PTR(p))
+		return;
+	spin_lock_irqsave(&lkpi_track_lock, flags);
+	i = lkpi_track_hash(p);
+	for (n = 0; n < LKPI_TRACK_N && lkpi_track_tab[i].p; n++,
+	     i = (i + 1) & (LKPI_TRACK_N - 1)) {
+		if (lkpi_track_tab[i].p == p) {
+			lkpi_track_tab[i].p = LKPI_TRACK_DEAD;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&lkpi_track_lock, flags);
+}
+
+/* Lista (agrupadas por llamante) las asignaciones vivas pedidas desde
+ * [lo, hi). Devuelve cuantas hay. */
+static unsigned int lkpi_track_report(const char *what, unsigned long lo, unsigned long hi)
+{
+	struct {
+		unsigned long caller;
+		unsigned int count;
+	} top[16];
+	unsigned int ntop = 0, total = 0, i, j;
+	unsigned long flags;
+	char sym[96];
+
+	spin_lock_irqsave(&lkpi_track_lock, flags);
+	for (i = 0; i < LKPI_TRACK_N; i++) {
+		const void *p = lkpi_track_tab[i].p;
+		unsigned long c = lkpi_track_tab[i].caller;
+
+		if (!p || p == LKPI_TRACK_DEAD || c < lo || c >= hi)
+			continue;
+		total++;
+		for (j = 0; j < ntop && top[j].caller != c; j++)
+			;
+		if (j < ntop)
+			top[j].count++;
+		else if (ntop < ARRAY_SIZE(top)) {
+			top[ntop].caller = c;
+			top[ntop++].count = 1;
+		}
+	}
+	spin_unlock_irqrestore(&lkpi_track_lock, flags);
+	if (!total)
+		return 0;
+	pr_err("linuxkpi: slab_track: %s deja %u asignaciones vivas:\n", what, total);
+	for (j = 0; j < ntop; j++) {
+		if (aurora_kur_symbolize(top[j].caller, sym, sizeof(sym)) <= 0)
+			snprintf(sym, sizeof(sym), "0x%lx", top[j].caller);
+		pr_err("linuxkpi: slab_track:   %4u desde %s\n", top[j].count, sym);
+	}
+	return total;
+}
+
+static void lkpi_track_unload(const char *name, u64 base, u64 size)
+{
+	char what[80];
+
+	unsigned int i, live = 0;
+	unsigned long flags;
+
+	snprintf(what, sizeof(what), "'%s' al descargarse", name);
+	lkpi_track_report(what, (unsigned long)base, (unsigned long)(base + size));
+	/* Total vivo tras la descarga: la diferencia entre dos descargas
+	 * delata fugas dentro de la capa provocadas por un modulo. */
+	spin_lock_irqsave(&lkpi_track_lock, flags);
+	for (i = 0; i < LKPI_TRACK_N; i++)
+		if (lkpi_track_tab[i].p && lkpi_track_tab[i].p != LKPI_TRACK_DEAD)
+			live++;
+	spin_unlock_irqrestore(&lkpi_track_lock, flags);
+	pr_info("linuxkpi: slab_track: tras descargar '%s': %u asignaciones vivas en total\n",
+		name, live);
+}
+
+static void lkpi_track_init(void)
+{
+	char v[8];
+
+	if (aurora_cmdline_get("lkpi.slab_track", v, sizeof(v)) && v[0] == '1') {
+		memset(lkpi_track_tab, 0, sizeof(lkpi_track_tab));
+		lkpi_track_full_warned = false;
+		lkpi_track_on = true;
+		aurora_kur_unload_hook = lkpi_track_unload;
+		pr_info("linuxkpi: slab_track activo (%u entradas)\n", LKPI_TRACK_N);
+	}
+}
+
+static void lkpi_track_exit(void)
+{
+	if (!lkpi_track_on)
+		return;
+	if (aurora_kur_unload_hook == lkpi_track_unload)
+		aurora_kur_unload_hook = NULL;
+	lkpi_track_report("la capa", 0, ~0UL);
+	lkpi_track_on = false;
+}
+
 /* Cabeza de la asignacion a la que pertenece p (o NULL si no es nuestra). */
 static struct page *obj_head_page(const void *p)
 {
@@ -185,20 +340,30 @@ static struct kmem_cache *kmalloc_cache_for(size_t size)
 	return &kmalloc_caches[shift - KMALLOC_MIN_SHIFT];
 }
 
-void *lkpi_kmalloc(size_t size, gfp_t gfp)
+static void *__lkpi_kmalloc(size_t size, gfp_t gfp, unsigned long caller)
 {
 	struct page *page;
+	void *p;
 
 	if (unlikely(!size))
 		return ZERO_SIZE_PTR;
-	if (size <= (1U << KMALLOC_MAX_SMALL_SHIFT))
-		return slab_alloc(kmalloc_cache_for(size), gfp);
-	if (size > KMALLOC_MAX_SIZE) {
-		WARN_ON_ONCE(!(gfp & __GFP_NOWARN));
-		return NULL;
+	if (size <= (1U << KMALLOC_MAX_SMALL_SHIFT)) {
+		p = slab_alloc(kmalloc_cache_for(size), gfp);
+	} else {
+		if (size > KMALLOC_MAX_SIZE) {
+			WARN_ON_ONCE(!(gfp & __GFP_NOWARN));
+			return NULL;
+		}
+		page = lkpi_alloc_pages(gfp, get_order(size));
+		p = page ? page_address(page) : NULL;
 	}
-	page = lkpi_alloc_pages(gfp, get_order(size));
-	return page ? page_address(page) : NULL;
+	lkpi_track_add(p, caller);
+	return p;
+}
+
+void *lkpi_kmalloc(size_t size, gfp_t gfp)
+{
+	return __lkpi_kmalloc(size, gfp, (unsigned long)__builtin_return_address(0));
 }
 EXPORT_SYMBOL(lkpi_kmalloc);
 
@@ -211,6 +376,7 @@ void lkpi_kfree(const void *p)
 	head = obj_head_page(p);
 	if (WARN(!head || !(head->lkpi_flags & LKPI_PAGE_OWNED), "kfree de un puntero ajeno: %px\n", p))
 		return;
+	lkpi_track_del(p);
 	if (head->slab_cache) {
 		slab_free(head->slab_cache, head, (void *)p);
 		return;
@@ -251,7 +417,7 @@ void *lkpi_krealloc(const void *p, size_t new_size, gfp_t gfp)
 			memset((char *)p + new_size, 0, old_size - new_size);
 		return (void *)p;
 	}
-	n = lkpi_kmalloc(new_size, gfp);
+	n = __lkpi_kmalloc(new_size, gfp, (unsigned long)__builtin_return_address(0));
 	if (!n)
 		return NULL;
 	if (!ZERO_OR_NULL_PTR(p)) {
@@ -342,7 +508,10 @@ EXPORT_SYMBOL(lkpi_kmem_cache_create);
 
 void *lkpi_kmem_cache_alloc(struct kmem_cache *s, gfp_t gfp)
 {
-	return slab_alloc(s, gfp);
+	void *p = slab_alloc(s, gfp);
+
+	lkpi_track_add(p, (unsigned long)__builtin_return_address(0));
+	return p;
 }
 EXPORT_SYMBOL(lkpi_kmem_cache_alloc);
 
@@ -356,6 +525,7 @@ void lkpi_kmem_cache_free(struct kmem_cache *s, void *p)
 	if (WARN(!head || head->slab_cache != s, "kmem_cache_free(%s): objeto ajeno %px\n",
 		 s->name, p))
 		return;
+	lkpi_track_del(p);
 	slab_free(s, head, p);
 }
 EXPORT_SYMBOL(lkpi_kmem_cache_free);
@@ -402,11 +572,13 @@ int lkpi_slab_init(void)
 		cache_setup(&kmalloc_caches[i], kmalloc_names[i], sz, sz, 0, NULL);
 	}
 	slab_ready = true;
+	lkpi_track_init();
 	return 0;
 }
 
 void lkpi_slab_exit(void)
 {
+	lkpi_track_exit();
 	for (unsigned int i = 0; i < KMALLOC_NR; i++)
 		cache_release_slabs(&kmalloc_caches[i]);
 	slab_ready = false;

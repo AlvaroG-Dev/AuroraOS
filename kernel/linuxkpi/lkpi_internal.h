@@ -123,6 +123,7 @@ void lkpi_display_shadow_exit(void);
 void lkpi_display_shadow_probe(void);
 
 /* base/core.c: uevent de un dispositivo hacia netlink (lib/kobject.c) */
+#include <linux/kobject.h>
 int lkpi_device_uevent_send(struct kobject *kobj, enum kobject_action action, char *extra[]);
 
 #endif
