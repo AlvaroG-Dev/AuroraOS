@@ -2428,7 +2428,7 @@ static void seat_get_keyboard(struct wl_client *c, struct wl_resource *r,
     wl_keyboard_send_keymap(k, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, g_keymap_fd,
                             (uint32_t)g_keymap_size);
   if (wl_resource_get_version(k) >= 4)
-    wl_keyboard_send_repeat_info(k, 25, 400);
+    wl_keyboard_send_repeat_info(k, 25, 600);
   // Si ya habia foco en la ventana de este cliente, entra ahora tambien.
   if (g_kbd_focus && g_kbd_focus->client == c &&
       g_kbd_focus->xs->surface) {

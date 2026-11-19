@@ -136,12 +136,24 @@ static void make_ev(struct linux_input_event *e, uint16_t type, uint16_t code,
 // ---------------------------------------------------------------------------
 // API para drivers
 // ---------------------------------------------------------------------------
+#define KBD_DEBOUNCE_MS 25
+
 void evdev_kbd_key(uint16_t key, int value) {
   if (key == 0 || key >= KEY_BITS_BYTES * 8)
     return;
   evdev_dev_t *d = &g_kbd;
   unsigned long fl = spin_lock_irqsave(&d->lock);
   int down = bit_get(d->keystate, key);
+  // Antirrebote: una pulsacion de la misma tecla a menos de KBD_DEBOUNCE_MS de
+  // soltarla es rebote del interruptor (o informe duplicado), no una pulsacion.
+  static uint64_t last_up[KEY_BITS_BYTES * 8];
+  uint64_t now = tick_count;
+  if (value && !down && now - last_up[key] < KBD_DEBOUNCE_MS) {
+    spin_unlock_irqrestore(&d->lock, fl);
+    return;
+  }
+  if (!value && down)
+    last_up[key] = now;
   if (value) {
     value = down ? 2 : 1; // autorepeat si ya estaba pulsada
     bit_set(d->keystate, key);

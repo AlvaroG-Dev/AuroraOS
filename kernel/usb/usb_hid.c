@@ -19,7 +19,7 @@ extern uint32_t fb_height;
 #define HID_KIND_MOUSE 2
 #define MAX_HID 8
 
-#define REPEAT_DELAY_MS 500
+#define REPEAT_DELAY_MS 600
 #define REPEAT_INTERVAL_MS 32
 
 typedef struct usb_hid_dev {
@@ -373,7 +373,20 @@ static void usb_hid_process_kbd_full(usb_hid_dev_t *h, const uint8_t *data,
     if (val == 0 || val >= 128)
       continue;
 
-    uint32_t was = hid_field_bits(h, h->prev_data, f);
+    // Presencia por conjunto, no por casilla: muchos teclados reordenan el
+    // array al soltar una tecla (la de la casilla 1 pasa a la 0) y por
+    // casilla se tomaba por tecla nueva -> letra doble.
+    uint32_t was = 0;
+    for (int j = 0; j < h->report.num_fields; j++) {
+      hid_field_t *g = &h->report.fields[j];
+      if (g->usage_page != 0x07 || g->is_variable || g->report_size != 8)
+        continue;
+      if (hid_field_matches_report(h, h->prev_data, g) &&
+          hid_field_bits(h, h->prev_data, g) == val) {
+        was = val;
+        break;
+      }
+    }
     if (was == val) {
       // Sigue pulsada en el mismo slot → auto-repeat.
       if (val == h->repeat_key &&
