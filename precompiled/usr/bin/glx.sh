@@ -5,8 +5,9 @@ export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 S=${1:-15}
 { echo "== xdpyinfo/glxinfo"; timeout 30 glxinfo -B 2>&1 | head -25; } >/tmp/glx.info 2>&1
-timeout $S glxgears >/tmp/glx.out 2>&1
+# stdout a fichero = bloque completo: si timeout mata glxgears se pierde todo. stdbuf -oL lo evita.
+if [ -x /usr/bin/stdbuf ]; then timeout $S stdbuf -oL glxgears >/tmp/glx.out 2>&1; else timeout $S glxgears >/tmp/glx.out 2>&1; fi
 echo "GLX rc=$?" > /dev/kmsg
 echo "GLX info: $(head -c 2500 /tmp/glx.info | tr '\n' '|')" > /dev/kmsg
 echo "GLX out: $(head -c 1500 /tmp/glx.out | tr '\n' '|')" > /dev/kmsg
-head -30 /tmp/glx.info; head -12 /tmp/glx.out
+head -12 /tmp/glx.info; echo "== glxgears (/tmp/glx.out)"; head -12 /tmp/glx.out

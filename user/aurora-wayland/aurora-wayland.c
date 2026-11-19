@@ -4852,6 +4852,9 @@ static int on_term(int sig, void *data) {
 }
 
 int main(int argc, char **argv) {
+  /* Xwayland con glamor: GLX de las apps X11 por la GPU NVIDIA (libglvnd elegiria Mesa/llvmpipe). */
+  if (access("/etc/aurora-xglamor", F_OK) == 0)
+    setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
   const char *sock = argc > 1 ? argv[1] : "wayland-0";
   g_sockname = sock;
   signal(SIGPIPE, SIG_IGN);
