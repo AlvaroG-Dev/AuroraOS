@@ -767,6 +767,8 @@ static int path_lookup(const char *name, char *out, size_t n) {
   return 0;
 }
 
+#define RUNNER "/usr/bin/aurora-run"
+
 static void launch(const app_t *a) {
   char buf[256];
   snprintf(buf, sizeof(buf), "%s", a->exec);
@@ -789,12 +791,16 @@ static void launch(const app_t *a) {
     pid = spawn_args(path, argv, ac);
   } else if (a->terminal) {
     // Terminal=true: dentro del Terminal de Aurora ("terminal -e orden").
-    char *targv[18];
+    char *targv[20];
     int tc = 0;
     targv[tc++] = "/usr/bin/terminal";
     targv[tc++] = "-e";
+    if (file_exists(RUNNER)) { // el lanzador de Aurora decide (Linux, Wine...)
+      targv[tc++] = RUNNER;
+      targv[tc++] = "--";
+    }
     targv[tc++] = path;
-    for (int i = 1; i < ac && tc < 17; i++)
+    for (int i = 1; i < ac && tc < 19; i++)
       targv[tc++] = argv[i];
     targv[tc] = NULL;
     pid = spawn_args("/usr/bin/terminal", targv, tc);
@@ -833,12 +839,29 @@ static void launch(const app_t *a) {
             (uint64_t)"/tmp/.config/gtk-4.0/gtk.css", 0, 0, 0);
     int nul = (int)syscall(SYS_OPENAT, (uint64_t)(int64_t)AT_FDCWD, (uint64_t)"/dev/null",
                            (uint64_t)O_RDWR, 0, 0);
+    // El lanzador de Aurora decide si es Linux o Windows (Wine) y con que.
+    char *rargv[20];
+    int rc = 0;
+    const char *prog = path;
+    if (file_exists(RUNNER)) {
+      rargv[rc++] = RUNNER;
+      rargv[rc++] = "--";
+      rargv[rc++] = path;
+      for (int i = 1; i < ac && rc < 19; i++)
+        rargv[rc++] = argv[i];
+      rargv[rc] = NULL;
+      prog = RUNNER;
+    } else {
+      for (int i = 0; i < ac && rc < 19; i++)
+        rargv[rc++] = argv[i];
+      rargv[rc] = NULL;
+    }
     if (nul >= 0) {
       spawn_fds_t fds = {nul, nul, nul};
-      pid = spawn_args_fds_env(path, argv, ac, &fds, env);
+      pid = spawn_args_fds_env(prog, rargv, rc, &fds, env);
       syscall(SYS_CLOSE, (uint64_t)nul, 0, 0, 0, 0);
     } else {
-      pid = spawn_args_env(path, argv, ac, env);
+      pid = spawn_args_env(prog, rargv, rc, env);
     }
   }
   char m[160];

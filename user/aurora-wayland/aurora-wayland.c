@@ -4787,7 +4787,18 @@ static void launch_app(int idx) {
                   : "/usr/share/aurora/xdg/gtk-4.0/gtk.css",
             "/tmp/.config/gtk-4.0/gtk.css");
   }
-  execvp(argv[0], argv); /* ruta absoluta o nombre en PATH (.desktop) */
+  /* El lanzador de Aurora decide si es app nativa, Linux o Windows (Wine). */
+  {
+    char *rargv[18];
+    int rc = 0;
+    rargv[rc++] = "/usr/bin/aurora-run";
+    rargv[rc++] = "--";
+    for (int k = 0; k < ac && rc < 17; k++)
+      rargv[rc++] = argv[k];
+    rargv[rc] = NULL;
+    execv(rargv[0], rargv);
+  }
+  execvp(argv[0], argv); /* sin aurora-run: ruta absoluta o nombre en PATH */
   _exit(127);
 }
 

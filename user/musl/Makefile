@@ -24,12 +24,14 @@ install: $(MUSL_APPS)
 		file $(SYSDIR)/$$app | sed 's/^/  /'; \
 	done
 
-$(MUSL_APPS): %: apps/%/main.c
+# Cada app lleva la nota .note.aurora (aurora-note.c): aurora-run la reconoce
+# como app nativa de Aurora y no como app Linux.
+$(MUSL_APPS): %: apps/%/main.c aurora-note.c
 	@if [ ! -x "$(MUSL_CC)" ]; then \
 		echo "SKIP: falta toolchain musl en $(MUSL_CC)"; exit 1; \
 	fi
 	@mkdir -p $(SYSDIR)
-	$(MUSL_CC) $(MUSL_CFLAGS) -o $@ $<
+	$(MUSL_CC) $(MUSL_CFLAGS) -o $@ $< aurora-note.c -Wl,-u,aurora_app_note
 
 clean:
 	rm -f $(MUSL_APPS)

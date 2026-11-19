@@ -5331,6 +5331,48 @@ static int64_t k_execve(uint64_t path_ptr, uint64_t argv_ptr, uint64_t envp_ptr,
       }
       vfs_node_free(sn);
     }
+    // Programas Windows (MZ/PE), como binfmt_misc de Linux: los abre el
+    // lanzador de Aurora, que decide con que (Wine, mini-VM...). argv pasa a
+    // [aurora-run, --binfmt, ruta, argv[1..]].
+    if (hn >= 2 && hdr[0] == 'M' && hdr[1] == 'Z') {
+      static const char runner[] = "/usr/bin/aurora-run";
+      static const char flag[] = "--binfmt";
+      vfs_node_t *rn = vfs_lookup(runner);
+      if (!rn) {
+        kfree(buf);
+        ret = -ENOEXEC;
+        goto out;
+      }
+      vfs_node_free(rn);
+      size_t pl = strlen(path);
+      if (argc + 2 > PROCESS_ARGV_MAX ||
+          pool_used + pl + 1 + sizeof(runner) + sizeof(flag) > PROCESS_ARGENV_POOL) {
+        kfree(buf);
+        ret = -E2BIG;
+        goto out;
+      }
+      char *spath = &pool[pool_used];
+      memcpy(spath, path, pl + 1);
+      pool_used += pl + 1;
+      char *rpool = &pool[pool_used];
+      memcpy(rpool, runner, sizeof(runner));
+      pool_used += sizeof(runner);
+      char *fpool = &pool[pool_used];
+      memcpy(fpool, flag, sizeof(flag));
+      pool_used += sizeof(flag);
+      if (argc == 0)
+        argc = 1;
+      kargv[0] = spath; // argv[0] original -> ruta real del .exe
+      for (int i = argc - 1; i >= 0; i--)
+        kargv[i + 2] = kargv[i];
+      kargv[0] = rpool;
+      kargv[1] = fpool;
+      argc += 2;
+      memcpy(path, runner, sizeof(runner));
+      process_set_exe_path(proc, path);
+      LOG_INFO("[EXECVE] MZ -> %s", path);
+      break; // aurora-run es ELF
+    }
     if (hn < 3 || hdr[0] != '#' || hdr[1] != '!')
       break;
     hdr[hn] = '\0';

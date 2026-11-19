@@ -544,6 +544,11 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		install -m 755 installer/apt/aurora-pkg sysroot/usr/bin/aurora-pkg; \
 	fi
 
+# aurora-run (user/musl/apps/aurora-run): el lanzador que decide si un programa
+# es de Aurora, Linux o Windows. Sus reglas por programa: /etc/aurora/run.conf.
+	@mkdir -p sysroot/etc/aurora
+	@install -m 644 installer/aurora-run/run.conf sysroot/etc/aurora/run.conf
+
 # ---------------------------------------------------------------------------
 # Wine 11 de Arch (WoW64: programas Windows de 32 y 64 bits con un solo ntdll.so
 # de 64 bits) + librerias opcionales de Ubuntu 24.04: scripts/fetch-wine.sh.

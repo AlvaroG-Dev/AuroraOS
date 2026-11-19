@@ -231,10 +231,40 @@ static int is_text_name(const char *name) {
   return !strcmp(name, "Makefile") || !strcmp(name, "README");
 }
 
+static int is_windows_name(const char *name) {
+  const char *x = ext_of(name);
+  return !name_cmp(x, "exe") || !name_cmp(x, "msi") || !name_cmp(x, "lnk") ||
+         !name_cmp(x, "bat") || !name_cmp(x, "cmd") || !name_cmp(x, "com");
+}
+
+// ¿Es un programa? ELF, PE (MZ), .exe/.msi/.lnk/.bat, o un .desktop de app.
+// Los scripts #! solo si son ejecutables (si no, se abren en Notas).
+static int is_runnable(const char *full) {
+  const char *name = strrchr(full, '/');
+  name = name ? name + 1 : full;
+  if (is_windows_name(name) || !name_cmp(ext_of(name), "desktop"))
+    return 1;
+  int fd = (int)syscall(SYS_OPENAT, (uint64_t)(int64_t)AT_FDCWD, (uint64_t)full, (uint64_t)O_RDONLY, 0, 0);
+  if (fd < 0)
+    return 0;
+  unsigned char h[4] = {0};
+  long n = syscall(SYS_READ, (uint64_t)fd, (uint64_t)h, 4, 0, 0);
+  syscall(SYS_CLOSE, (uint64_t)fd, 0, 0, 0, 0);
+  if (n >= 4 && h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F')
+    return 1;
+  if (n >= 2 && h[0] == 'M' && h[1] == 'Z')
+    return 1;
+  if (n >= 2 && h[0] == '#' && h[1] == '!')
+    return syscall(21 /* access */, (uint64_t)full, 1 /* X_OK */, 0, 0, 0) == 0;
+  return 0;
+}
+
 static const char *type_of(const entry_t *e) {
   if (e->is_dir)
     return "Carpeta";
   const char *x = ext_of(e->name);
+  if (is_windows_name(e->name))
+    return "App Windows";
   if (!name_cmp(x, "txt") || !name_cmp(x, "md"))
     return "Texto";
   if (img_is_image_name(e->name))
@@ -267,7 +297,15 @@ static void open_entry(int i) {
     go(full, 1);
     return;
   }
-  if (img_is_image_name(g_ent[i].name)) {
+  if (is_runnable(full)) {
+    // Programas (Aurora, Linux, Windows .exe/.msi, .desktop): los abre el
+    // lanzador de Aurora, que decide con que.
+    char *argv[] = {"/usr/bin/aurora-run", "--", full, NULL};
+    if (spawn_args("/usr/bin/aurora-run", argv, 3) < 0)
+      snprintf(g_msg, sizeof(g_msg), "No se pudo abrir %s", g_ent[i].name);
+    else if (++g_children)
+      snprintf(g_msg, sizeof(g_msg), "Abriendo %s...", g_ent[i].name);
+  } else if (img_is_image_name(g_ent[i].name)) {
     char *argv[] = {"/usr/bin/imagenes", full, NULL};
     if (spawn_args("/usr/bin/imagenes", argv, 2) < 0)
       snprintf(g_msg, sizeof(g_msg), "No se pudo abrir Imágenes");
