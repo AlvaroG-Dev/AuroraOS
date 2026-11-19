@@ -167,7 +167,7 @@ char *kmod_gen_proc_modules(size_t *out_len) {
       continue;
     // refcnt como Linux: dependientes + referencias de try_module_get()
     // (ficheros abiertos, dma-buf exportados...).
-    int32_t r = m->ref ? __atomic_load_n(&m->ref->refcnt, __ATOMIC_RELAXED) : 0;
+    int32_t r = kur_loader_refcnt(i);
     len += (size_t)snprintf(buf + len, cap - len, "%s %lu %u ", m->name,
                             (unsigned long)m->base_size,
                             m->n_dependents + (r > 0 ? (uint32_t)r : 0u));

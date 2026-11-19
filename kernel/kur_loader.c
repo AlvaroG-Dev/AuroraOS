@@ -1010,6 +1010,13 @@ int kur_loader_unload(struct kur_module *mod) {
     }
   }
 
+  // __this_module vive en las páginas del módulo: que nadie (p. ej.
+  // /proc/modules en otra CPU) lo lea después de liberarlas.
+  {
+    unsigned long fl = spin_lock_irqsave(&g_kur_lock);
+    mod->ref = NULL;
+    spin_unlock_irqrestore(&g_kur_lock, fl);
+  }
   uint64_t npages = (mod->base_size + PAGE_SIZE - 1) / PAGE_SIZE;
   vmm_free_pages(mod->base_va, npages);
   LOG_INFO("[KUR] '%s' descargado (%d exports removidos)", mod->name, removed);
@@ -1150,6 +1157,17 @@ int kur_loader_count(void) {
   for (int i = 0; i < KUR_MAX_MODULES; i++)
     if (g_modules[i].in_use) n++;
   return n;
+}
+
+int32_t kur_loader_refcnt(int index) {
+  if (index < 0 || index >= KUR_MAX_MODULES)
+    return 0;
+  int32_t r = 0;
+  unsigned long fl = spin_lock_irqsave(&g_kur_lock);
+  if (g_modules[index].in_use && g_modules[index].ref)
+    r = __atomic_load_n(&g_modules[index].ref->refcnt, __ATOMIC_RELAXED);
+  spin_unlock_irqrestore(&g_kur_lock, fl);
+  return r;
 }
 
 struct kur_module *kur_loader_get(int index) {

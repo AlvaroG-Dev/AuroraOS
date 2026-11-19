@@ -42,6 +42,9 @@ int kur_loader_unload(struct kur_module *mod);
 
 int kur_loader_count(void);
 struct kur_module *kur_loader_get(int index);
+// Referencias de try_module_get() del slot (0 si no hay módulo; < 0 si se
+// está descargando). Seguro frente a una descarga en otra CPU.
+int32_t kur_loader_refcnt(int index);
 struct kur_module *kur_loader_find_by_name(const char *name);
 
 // Introspección de la tabla dinámica de símbolos (para /proc y tests).
