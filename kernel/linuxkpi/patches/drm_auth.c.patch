@@ -1,0 +1,27 @@
+--- drm_auth.c.orig
++++ drm_auth.c
+@@ -324,7 +324,23 @@
+ 	 */
+ 	guard(mutex)(&dev->master_mutex);
+ 	if (!dev->master) {
+-		ret = drm_new_set_master(dev, file_priv);
++		/*
++		 * AuroraOS: el escritorio lo pinta el compositor del kernel (un
++		 * cliente DRM interno, nunca maestro). Si el primer proceso que abre
++		 * /dev/dri/cardN se quedara de maestro (Wine, Mesa, el ICD de
++		 * Vulkan...), drm_client_modeset_commit() daria -EBUSY y la pantalla
++		 * se congelaria mientras ese proceso viva. Queda como tras un
++		 * DROP_MASTER: con su objeto maestro y autenticado, pero sin serlo;
++		 * quien quiera KMS propio lo pide con DRM_IOCTL_SET_MASTER.
++		 */
++		struct drm_master *m = drm_master_create(dev);
++
++		if (!m)
++			return -ENOMEM;
++		spin_lock(&file_priv->master_lookup_lock);
++		file_priv->master = m;
++		spin_unlock(&file_priv->master_lookup_lock);
++		file_priv->authenticated = 1;
+ 	} else {
+ 		spin_lock(&file_priv->master_lookup_lock);
+ 		file_priv->master = drm_master_get(dev->master);
