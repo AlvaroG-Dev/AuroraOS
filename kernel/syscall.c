@@ -2283,6 +2283,317 @@ static int64_t k_readv(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
   return total;
 }
 
+// ---------- preadv / pwritev (+ v2) ----------
+// Como readv/writev pero con offset explícito (sin mover el del fd). En los
+// v2, offset -1 = el offset actual (readv/writev); los flags RWF_* se aceptan
+// sin efecto (RWF_NOWAIT, RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_APPEND).
+static int64_t do_prwv(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
+                       uint64_t offset, int write) {
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if ((int64_t)offset < 0)
+    return -EINVAL;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return -EINVAL;
+  if (!access_ok((void *)iov_uptr, iovcnt * sizeof(struct k_iovec)))
+    return -EFAULT;
+  int64_t total = 0;
+  for (uint64_t i = 0; i < iovcnt; i++) {
+    struct k_iovec v;
+    if (copy_from_user(&v, (void *)(iov_uptr + i * sizeof(v)), sizeof(v)) < 0)
+      return total > 0 ? total : -EFAULT;
+    if (v.iov_len == 0)
+      continue;
+    if (!access_ok((void *)v.iov_base, (size_t)v.iov_len))
+      return total > 0 ? total : -EFAULT;
+    int64_t r = write ? vfs_pwrite_for_proc(proc, (int)fd, (const void *)v.iov_base,
+                                            (size_t)v.iov_len, offset + (uint64_t)total)
+                      : vfs_pread_for_proc(proc, (int)fd, (void *)v.iov_base,
+                                           (size_t)v.iov_len, offset + (uint64_t)total);
+    if (r < 0)
+      return total > 0 ? total : r;
+    total += r;
+    if ((uint64_t)r < v.iov_len)
+      break; // corto o EOF
+  }
+  return total;
+}
+
+static int64_t k_readv(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
+                       uint64_t a4, uint64_t a5);
+static int64_t k_writev(uint64_t fd, uint64_t iov_uptr, uint64_t iovcnt,
+                        uint64_t a4, uint64_t a5);
+
+static int64_t k_preadv(uint64_t fd, uint64_t iov, uint64_t cnt, uint64_t off,
+                        uint64_t a5) {
+  (void)a5;
+  return do_prwv(fd, iov, cnt, off, 0);
+}
+static int64_t k_pwritev(uint64_t fd, uint64_t iov, uint64_t cnt, uint64_t off,
+                         uint64_t a5) {
+  (void)a5;
+  return do_prwv(fd, iov, cnt, off, 1);
+}
+// preadv2/pwritev2: (fd, iov, cnt, pos_l, pos_h, flags); en x86_64 pos_l
+// lleva el offset entero. El 6.º argumento (flags) no llega aquí: se ignora.
+static int64_t k_preadv2(uint64_t fd, uint64_t iov, uint64_t cnt, uint64_t off,
+                         uint64_t a5) {
+  (void)a5;
+  if ((int64_t)off == -1)
+    return k_readv(fd, iov, cnt, 0, 0);
+  return do_prwv(fd, iov, cnt, off, 0);
+}
+static int64_t k_pwritev2(uint64_t fd, uint64_t iov, uint64_t cnt, uint64_t off,
+                          uint64_t a5) {
+  (void)a5;
+  if ((int64_t)off == -1)
+    return k_writev(fd, iov, cnt, 0, 0);
+  return do_prwv(fd, iov, cnt, off, 1);
+}
+
+// ---------- fdatasync (75) / syncfs (306) ----------
+static int64_t k_fsync(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                       uint64_t a5);
+static int64_t k_sync(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                      uint64_t a5);
+static int64_t k_fdatasync(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                           uint64_t a5) {
+  return k_fsync(fd, a2, a3, a4, a5); // sin distinguir metadatos
+}
+static int64_t k_syncfs(uint64_t fd, uint64_t a2, uint64_t a3, uint64_t a4,
+                        uint64_t a5) {
+  process_t *proc = process_current();
+  if (!proc || (int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+    return -EBADF;
+  return k_sync(0, a2, a3, a4, a5); // todos los FS (Linux: solo el del fd)
+}
+
+// ---------- close_range (436) ----------
+// close_range(first, last, flags): CLOSE_RANGE_CLOEXEC (4) marca en vez de
+// cerrar; CLOSE_RANGE_UNSHARE (2) no hace falta (no hay tablas compartidas
+// entre procesos). Lo usan systemd, glib (g_spawn), Python subprocess y
+// OpenSSH para no filtrar fds al hijo.
+static int64_t k_close_range(uint64_t first, uint64_t last, uint64_t flags,
+                             uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  process_t *proc = process_current();
+  if (!proc)
+    return -EFAULT;
+  if (flags & ~6ULL)
+    return -EINVAL;
+  if ((uint32_t)first > (uint32_t)last)
+    return -EINVAL;
+  uint64_t hi = (uint32_t)last;
+  if (hi >= MAX_PROCESS_FDS)
+    hi = MAX_PROCESS_FDS - 1;
+  for (uint64_t i = (uint32_t)first; i <= hi; i++) {
+    if (!proc->fds[i])
+      continue;
+    if (flags & 4)
+      fd_cloexec_set(proc, (int)i);
+    else
+      vfs_close_for_proc(proc, (int)i);
+  }
+  return 0;
+}
+
+// ---------- renameat2 (316) ----------
+// RENAME_NOREPLACE (1): EEXIST si el destino existe. RENAME_EXCHANGE (2) y
+// RENAME_WHITEOUT (4) no existen aquí: EINVAL, y glibc/coreutils caen a
+// rename normal (mv lo hace así en kernels sin soporte).
+static int64_t k_renameat2(uint64_t odfd, uint64_t oldp, uint64_t ndfd,
+                           uint64_t newp, uint64_t flags) {
+  if (flags & ~1ULL)
+    return -EINVAL;
+  if (flags & 1) {
+    process_t *proc = process_current();
+    if (!proc)
+      return -EFAULT;
+    char np[VFS_PATH_MAX];
+    int rc = resolve_at_path(proc, (int)ndfd, (const char *)newp, np, sizeof(np));
+    if (rc != 0)
+      return rc;
+    vfs_node_t *n = vfs_lookup_nofollow(np);
+    if (n) {
+      vfs_node_free(n);
+      return -EEXIST;
+    }
+  }
+  return k_renameat(odfd, oldp, ndfd, newp, 0);
+}
+
+// ---------- planificador: prioridades y políticas ----------
+// Un solo planificador (round-robin con nice): SCHED_OTHER/BATCH/IDLE se
+// aceptan; SCHED_FIFO/RR (tiempo real) solo con prioridad 1..99 y se
+// tratan como OTHER. Antes: ENOSYS, y PipeWire, JACK o los hilos de audio
+// de Chrome/Firefox se quejaban.
+#define K_SCHED_OTHER 0
+#define K_SCHED_FIFO 1
+#define K_SCHED_RR 2
+#define K_SCHED_BATCH 3
+#define K_SCHED_IDLE 5
+static int64_t k_sched_get_priority_max(uint64_t pol, uint64_t a2, uint64_t a3,
+                                        uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  pol &= ~0x40000000ULL; // SCHED_RESET_ON_FORK
+  if (pol == K_SCHED_FIFO || pol == K_SCHED_RR)
+    return 99;
+  if (pol == K_SCHED_OTHER || pol == K_SCHED_BATCH || pol == K_SCHED_IDLE)
+    return 0;
+  return -EINVAL;
+}
+static int64_t k_sched_get_priority_min(uint64_t pol, uint64_t a2, uint64_t a3,
+                                        uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  pol &= ~0x40000000ULL;
+  if (pol == K_SCHED_FIFO || pol == K_SCHED_RR)
+    return 1;
+  if (pol == K_SCHED_OTHER || pol == K_SCHED_BATCH || pol == K_SCHED_IDLE)
+    return 0;
+  return -EINVAL;
+}
+static int64_t k_sched_setscheduler(uint64_t pid, uint64_t pol, uint64_t param,
+                                    uint64_t a4, uint64_t a5) {
+  (void)a4; (void)a5;
+  if ((int64_t)pid < 0)
+    return -EINVAL;
+  if (pid && !process_find_by_pid((uint32_t)pid)) {
+    task_t *t = sched_find_tid_get((uint32_t)pid);
+    if (!t)
+      return -ESRCH;
+    task_put(t);
+  }
+  int prio = 0;
+  if (!param || copy_from_user(&prio, (void *)param, sizeof(prio)) < 0)
+    return -EFAULT;
+  pol &= ~0x40000000ULL;
+  if (pol == K_SCHED_FIFO || pol == K_SCHED_RR)
+    return (prio >= 1 && prio <= 99) ? 0 : -EINVAL;
+  if (pol == K_SCHED_OTHER || pol == K_SCHED_BATCH || pol == K_SCHED_IDLE)
+    return prio == 0 ? 0 : -EINVAL;
+  return -EINVAL;
+}
+static int64_t k_sched_setparam(uint64_t pid, uint64_t param, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  int prio = 0;
+  if (!param || copy_from_user(&prio, (void *)param, sizeof(prio)) < 0)
+    return -EFAULT;
+  (void)pid;
+  return prio == 0 ? 0 : -EINVAL; // política OTHER: prioridad 0
+}
+static int64_t k_sched_rr_get_interval(uint64_t pid, uint64_t tp, uint64_t a3,
+                                       uint64_t a4, uint64_t a5) {
+  (void)pid; (void)a3; (void)a4; (void)a5;
+  int64_t ts[2] = {0, 10 * 1000 * 1000}; // cuanto de 10 ms
+  if (!tp || copy_to_user((void *)tp, ts, sizeof(ts)) < 0)
+    return -EFAULT;
+  return 0;
+}
+
+// ---------- mlock & co. (149-152, 325) ----------
+// No hay swap a disco de páginas anónimas: la memoria ya está "bloqueada".
+// Se valida lo básico y se devuelve éxito (gpg, ssh-agent, PipeWire,
+// navegadores lo piden y abortan o avisan con ENOSYS).
+static int64_t k_mlock(uint64_t addr, uint64_t len, uint64_t a3, uint64_t a4,
+                       uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  if (addr + len < addr)
+    return -EINVAL;
+  return 0;
+}
+static int64_t k_mlockall(uint64_t flags, uint64_t a2, uint64_t a3, uint64_t a4,
+                          uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  if (!flags || (flags & ~7ULL)) // MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT
+    return -EINVAL;
+  return 0;
+}
+static int64_t k_munlockall(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  return 0;
+}
+
+// ---------- personality (135) ----------
+// Solo PER_LINUX (0). 0xffffffff = consultar.
+static int64_t k_personality(uint64_t persona, uint64_t a2, uint64_t a3,
+                             uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  if ((uint32_t)persona == 0xffffffffu || (uint32_t)persona == 0)
+    return 0;
+  // ADDR_NO_RANDOMIZE (0x0040000) y similares: aceptados (sin ASLR que quitar).
+  if (((uint32_t)persona & 0xff) == 0)
+    return 0;
+  return -EINVAL;
+}
+
+// ---------- readahead (187) / ioprio (251-252) ----------
+static int64_t k_readahead(uint64_t fd, uint64_t off, uint64_t cnt, uint64_t a4,
+                           uint64_t a5) {
+  (void)off; (void)cnt; (void)a4; (void)a5;
+  process_t *proc = process_current();
+  if (!proc || (int)fd < 0 || (int)fd >= MAX_PROCESS_FDS || !proc->fds[fd])
+    return -EBADF;
+  return 0; // pista: la caché de bloques ya lee por adelantado
+}
+static int64_t k_ioprio_set(uint64_t which, uint64_t who, uint64_t prio,
+                            uint64_t a4, uint64_t a5) {
+  (void)who; (void)prio; (void)a4; (void)a5;
+  return (which >= 1 && which <= 3) ? 0 : -EINVAL;
+}
+static int64_t k_ioprio_get(uint64_t which, uint64_t who, uint64_t a3,
+                            uint64_t a4, uint64_t a5) {
+  (void)who; (void)a3; (void)a4; (void)a5;
+  if (which < 1 || which > 3)
+    return -EINVAL;
+  return (2 << 13) | 4; // IOPRIO_CLASS_BE, nivel 4 (el de Linux por omisión)
+}
+
+// ---------- mincore (27) ----------
+// Todo lo mapeado cuenta como residente (las páginas que aún no se han
+// tocado también: se traen en el primer acceso sin E/S casi siempre).
+static int64_t k_mincore(uint64_t addr, uint64_t len, uint64_t vec, uint64_t a4,
+                         uint64_t a5) {
+  (void)a4; (void)a5;
+  if (addr & 0xFFF)
+    return -EINVAL;
+  uint64_t pages = (len + 0xFFF) >> 12;
+  if (addr + len < addr || addr + len > 0x0000800000000000ULL)
+    return -ENOMEM;
+  uint8_t ones[64];
+  memset(ones, 1, sizeof(ones));
+  for (uint64_t i = 0; i < pages; i += sizeof(ones)) {
+    uint64_t n = pages - i < sizeof(ones) ? pages - i : sizeof(ones);
+    if (copy_to_user((void *)(vec + i), ones, n) < 0)
+      return -EFAULT;
+  }
+  return 0;
+}
+
+// ---------- rt_sigqueueinfo (129) / rt_tgsigqueueinfo (297) ----------
+// Se entrega la señal; el siginfo propio (si_value de sigqueue) no viaja.
+static int64_t k_kill(uint64_t pid, uint64_t sig, uint64_t a3, uint64_t a4,
+                      uint64_t a5);
+static int64_t k_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a4,
+                        uint64_t a5);
+static int64_t k_rt_sigqueueinfo(uint64_t pid, uint64_t sig, uint64_t info,
+                                 uint64_t a4, uint64_t a5) {
+  (void)info; (void)a4; (void)a5;
+  if ((int64_t)pid <= 0)
+    return -EINVAL;
+  return k_kill(pid, sig, 0, 0, 0);
+}
+static int64_t k_rt_tgsigqueueinfo(uint64_t tgid, uint64_t tid, uint64_t sig,
+                                   uint64_t info, uint64_t a5) {
+  (void)info; (void)a5;
+  return k_tgkill(tgid, tid, sig, 0, 0);
+}
+
 // ---------- sched_yield ----------
 static int64_t k_sched_yield(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                              uint64_t a5) {
@@ -8383,6 +8694,31 @@ static const syscall_entry_t linux_table[] = {
     [SYS_STATX] = {k_statx, "statx"}, // 332
     [SYS_UNLINKAT] = {k_unlinkat, "unlinkat"},
     [SYS_RENAMEAT] = {k_renameat, "renameat"},
+    [27] = {k_mincore, "mincore"},
+    [75] = {k_fdatasync, "fdatasync"},
+    [129] = {k_rt_sigqueueinfo, "rt_sigqueueinfo"},
+    [135] = {k_personality, "personality"},
+    [142] = {k_sched_setparam, "sched_setparam"},
+    [144] = {k_sched_setscheduler, "sched_setscheduler"},
+    [146] = {k_sched_get_priority_max, "sched_get_priority_max"},
+    [147] = {k_sched_get_priority_min, "sched_get_priority_min"},
+    [148] = {k_sched_rr_get_interval, "sched_rr_get_interval"},
+    [149] = {k_mlock, "mlock"},
+    [150] = {k_mlock, "munlock"},
+    [151] = {k_mlockall, "mlockall"},
+    [152] = {k_munlockall, "munlockall"},
+    [187] = {k_readahead, "readahead"},
+    [251] = {k_ioprio_set, "ioprio_set"},
+    [252] = {k_ioprio_get, "ioprio_get"},
+    [295] = {k_preadv, "preadv"},
+    [296] = {k_pwritev, "pwritev"},
+    [297] = {k_rt_tgsigqueueinfo, "rt_tgsigqueueinfo"},
+    [306] = {k_syncfs, "syncfs"},
+    [316] = {k_renameat2, "renameat2"},
+    [325] = {k_mlock, "mlock2"},
+    [327] = {k_preadv2, "preadv2"},
+    [328] = {k_pwritev2, "pwritev2"},
+    [436] = {k_close_range, "close_range"},
     [SYS_SET_ROBUST_LIST] = {k_set_robust_list, "set_robust_list"},
     [SYS_PRLIMIT64] = {k_prlimit64, "prlimit64"},
     [SYS_GETRLIMIT] = {k_getrlimit, "getrlimit"},

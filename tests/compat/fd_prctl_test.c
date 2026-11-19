@@ -1,4 +1,5 @@
-// tests/compat/fd_prctl_test.c — capa Linux: pipe2, fcntl, O_APPEND, prctl.
+// tests/compat/fd_prctl_test.c — capa Linux: pipe2, fcntl, O_APPEND, prctl
+// y syscalls sueltas (preadv, close_range, renameat2, sched_*, mlock...).
 // Programa Linux normal (glibc estática): en AuroraOS como boot-test, o en
 // Linux para comparar. Escribe "COMPAT-TEST: N/M OK" al final.
 #define _GNU_SOURCE
@@ -9,7 +10,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <sys/personality.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -140,6 +146,77 @@ int main(void) {
   read(sync[0], &res, 1);
   CHECK(WIFEXITED(stv) && WEXITSTATUS(stv) == 0 && res == 'S',
         "PR_SET_PDEATHSIG: SIGUSR1 al morir el padre (%c)", res ? res : '?');
+
+  // preadv / pwritev con offset, sin mover el del fd.
+  {
+    const char *pf = "/tmp/compat-prwv.txt";
+    int fd = open(pf, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    char a1[] = "hola ", a2[] = "mundo";
+    struct iovec w[2] = {{a1, 5}, {a2, 5}};
+    CHECK(pwritev(fd, w, 2, 3) == 10, "pwritev 10 bytes en el offset 3");
+    char b1[4] = {0}, b2[8] = {0};
+    struct iovec r[2] = {{b1, 3}, {b2, 7}};
+    CHECK(preadv(fd, r, 2, 4) == 9 && !memcmp(b1, "ola", 3) && !memcmp(b2, " mundo", 6),
+          "preadv lee '%s|%s'", b1, b2);
+    CHECK(lseek(fd, 0, SEEK_CUR) == 0, "el offset del fd no se mueve");
+    CHECK(fdatasync(fd) == 0, "fdatasync");
+    CHECK(syncfs(fd) == 0, "syncfs");
+    CHECK(readahead(fd, 0, 4096) == 0, "readahead");
+    close(fd);
+    // renameat2(RENAME_NOREPLACE)
+    const char *pf2 = "/tmp/compat-prwv2.txt";
+    close(open(pf2, O_WRONLY | O_CREAT, 0644));
+    errno = 0;
+    long rr = syscall(SYS_renameat2, AT_FDCWD, pf, AT_FDCWD, pf2, 1 /* RENAME_NOREPLACE */);
+    CHECK(rr == -1 && errno == EEXIST, "renameat2 NOREPLACE con destino -> EEXIST (errno %d)",
+          errno);
+    unlink(pf2);
+    CHECK(syscall(SYS_renameat2, AT_FDCWD, pf, AT_FDCWD, pf2, 1) == 0 && access(pf2, F_OK) == 0,
+          "renameat2 NOREPLACE sin destino renombra");
+    unlink(pf2);
+  }
+
+  // close_range
+  {
+    int base = open("/dev/null", O_RDONLY);
+    int f1 = dup(base), f2 = dup(base);
+    CHECK(syscall(SYS_close_range, f1, f2, 4 /* CLOEXEC */) == 0 &&
+              fcntl(f1, F_GETFD) == FD_CLOEXEC && fcntl(f2, F_GETFD) == FD_CLOEXEC,
+          "close_range(CLOSE_RANGE_CLOEXEC)");
+    CHECK(syscall(SYS_close_range, f1, ~0U, 0) == 0 && fcntl(f1, F_GETFD) == -1 &&
+              fcntl(f2, F_GETFD) == -1 && fcntl(base, F_GETFD) == 0,
+          "close_range cierra solo su rango");
+    close(base);
+  }
+
+  // planificador, mlock, personality, mincore, ioprio
+  CHECK(sched_get_priority_max(SCHED_FIFO) == 99 && sched_get_priority_min(SCHED_RR) == 1 &&
+            sched_get_priority_max(SCHED_OTHER) == 0,
+        "sched_get_priority_max/min");
+  struct sched_param sp = {0};
+  CHECK(sched_setscheduler(0, SCHED_OTHER, &sp) == 0, "sched_setscheduler(SCHED_OTHER)");
+  struct timespec q = {0};
+  CHECK(sched_rr_get_interval(0, &q) == 0, "sched_rr_get_interval");
+  static char lockbuf[8192];
+  CHECK(mlock(lockbuf, sizeof(lockbuf)) == 0 && munlock(lockbuf, sizeof(lockbuf)) == 0,
+        "mlock/munlock");
+  CHECK(mlockall(MCL_CURRENT) == 0 && munlockall() == 0, "mlockall/munlockall");
+  CHECK(personality(0xffffffff) == 0, "personality = PER_LINUX");
+  void *mp = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  unsigned char mv[2] = {9, 9};
+  CHECK(mp != MAP_FAILED && mincore(mp, 8192, mv) == 0 && mv[0] <= 1, "mincore");
+  CHECK(syscall(SYS_ioprio_get, 1, 0) >= 0, "ioprio_get");
+
+  // sigqueue
+  {
+    got_usr1 = 0;
+    signal(SIGUSR1, on_usr1);
+    union sigval v = {.sival_int = 7};
+    CHECK(sigqueue(getpid(), SIGUSR1, v) == 0, "sigqueue");
+    for (int i = 0; i < 100 && !got_usr1; i++)
+      usleep(1000);
+    CHECK(got_usr1, "sigqueue entrega la señal");
+  }
 
   printf("COMPAT-TEST: %d/%d %s\n", pass, total, pass == total ? "OK" : "FALLOS");
   return pass == total ? 0 : 1;
