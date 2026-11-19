@@ -12,12 +12,20 @@ export WINEPREFIX
 [ -n "$XDG_RUNTIME_DIR" ] || export XDG_RUNTIME_DIR=/run/user/$(id -u 2>/dev/null || echo 0)
 # Mono/Gecko no vienen en la ISO: que wineboot no pregunte por ellos.
 case ",$WINEDLLOVERRIDES," in *mscoree*) ;; *) export WINEDLLOVERRIDES="mscoree,mshtml=${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}" ;; esac
-# GPU: dentro de los procesos de Wine, las bibliotecas de usuario de NVIDIA
-# (libGLX_nvidia, que es también el driver de Vulkan) acaban en un puntero
-# nulo y Wine se queda colgado (wineboot no termina, winecfg no se abre).
-# Mientras no esté resuelto, Wine usa Mesa (llvmpipe). AURORA_WINE_GPU=1
-# deja usar la GPU para probarlo.
-if [ "${AURORA_WINE_GPU:-0}" != 1 ]; then
+# GPU. Al arrancar, win32u enumera los dispositivos EGL (EGL_EXT_device_
+# enumeration) y los inicializa. Si /dev/dri/card0 no tiene driver 3D de Mesa
+# (nvidia-drm, el DRM nativo de Aurora, bochs...), Mesa con
+# LIBGL_ALWAYS_SOFTWARE=1 toma el camino swrast sin loader de swrast y cae en
+# drisw_init_screen (puntero nulo); Wine se queda colgado. Con kms_swrast ese
+# dispositivo se abre bien. Las GPUs con driver de Mesa no cambian, y la
+# NVIDIA sigue sirviendo GLX/Vulkan por sus bibliotecas.
+drv=$(sed -n 's/^DRIVER=//p' /sys/class/drm/card0/device/uevent 2>/dev/null)
+case "$drv" in
+    i915|xe|amdgpu|radeon|nouveau) ;;
+    *) : "${MESA_LOADER_DRIVER_OVERRIDE:=kms_swrast}"; export MESA_LOADER_DRIVER_OVERRIDE ;;
+esac
+# AURORA_WINE_GPU=0: Wine solo por software (Mesa), sin las bibliotecas de NVIDIA.
+if [ "${AURORA_WINE_GPU:-1}" = 0 ]; then
     export VK_LOADER_DRIVERS_DISABLE='*nvidia*'
     export __GLX_VENDOR_LIBRARY_NAME=mesa
     export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json

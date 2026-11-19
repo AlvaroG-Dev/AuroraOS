@@ -18,6 +18,10 @@ ls -la /run/user/0 /tmp/.X11-unix 2>&1 | head
 export AURORA_WINE_LOG=/tmp/wine-setup.log
 t0=$(date +%s)
 timeout 900 aurora-wine --setup > /tmp/wine-setup.log 2>&1; echo "WINE-GUI: setup rc=$? en $(( $(date +%s) - t0 )) s"
+# Lo mismo que pone aurora-wine (los `wine` de abajo van directos).
+case "$(sed -n 's/^DRIVER=//p' /sys/class/drm/card0/device/uevent 2>/dev/null)" in
+  i915|xe|amdgpu|radeon|nouveau) ;; *) export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast ;;
+esac
 grep -v ":fixme" /tmp/wine-setup.log | sort | uniq -c | sort -rn | head -40
 ls "$WINEPREFIX/drive_c/windows/system32" 2>/dev/null | wc -l
 grep -c . "$WINEPREFIX/user.reg" 2>/dev/null

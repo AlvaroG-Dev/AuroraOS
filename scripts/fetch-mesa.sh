@@ -40,9 +40,22 @@ while read -r f; do
     b="$(basename "$f")"
     [ -e "$LIBDIR/$b" ] || [ -L "$LIBDIR/$b" ] || cp -a "$f" "$LIBDIR/$b"
 done
-# libgallium (el DRI de Mesa 25 vive en una libreria propia) y los .so DRI.
+# Las de Mesa SI se pisan: libEGL_mesa, libGLX_mesa, libgbm y los DRI enlazan
+# contra libgallium-<version exacta>.so, con simbolos versionados por ese
+# nombre. Si Ubuntu sube Mesa (p. ej. 0ubuntu0.24.04.4 -> .5) y se mezclan,
+# EGL/GLX de Mesa no cargan ("libgallium-...4.so: cannot open shared object").
+for f in "$X/$MULTI"/libEGL_mesa.so* "$X/$MULTI"/libGLX_mesa.so* "$X/$MULTI"/libgbm.so* \
+         "$X/$MULTI"/libglapi.so* "$X/$MULTI"/libgallium-*.so; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    rm -f "$LIBDIR/$(basename "$f")"
+    cp -a "$f" "$LIBDIR/"
+done
+# libgallium de versiones anteriores: fuera.
+for f in "$LIBDIR"/libgallium-*.so; do
+    [ -e "$X/$MULTI/$(basename "$f")" ] || rm -f "$f"
+done
+# Los .so DRI.
 mkdir -p "$PRE/$MULTI/dri"
-cp -af "$X/$MULTI"/libgallium-*.so "$LIBDIR/" 2>/dev/null || true
 [ -d "$X/$MULTI/dri" ] && cp -a "$X/$MULTI/dri/." "$PRE/$MULTI/dri/" || true
 # EGL/vendor de glvnd y plugins de GBM.
 for d in usr/share/glvnd usr/share/drirc.d "$MULTI/gbm"; do
