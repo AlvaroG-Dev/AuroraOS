@@ -4845,6 +4845,21 @@ static int on_term(int sig, void *data) {
 }
 
 int main(int argc, char **argv) {
+  // aurora-wayland --icono CLAVE NOMBRE...: convierte el icono del tema (PNG o
+  // SVG) a la cache BMP /tmp/aurora-icons/CLAVE.bmp y escribe la ruta. Lo usa
+  // la app Aplicaciones para las apps de Linux que solo traen SVG.
+  if (argc > 3 && !strcmp(argv[1], "--icono")) {
+    char out[256];
+    if (!aw_icon_for(argv[2], (const char *const *)argv + 3, argc - 3, out, sizeof(out))) {
+      fprintf(stderr, "aurora-wayland --icono: sin icono para %s (", argv[2]);
+      for (int i = 3; i < argc; i++)
+        fprintf(stderr, "%s%s", i > 3 ? ", " : "", argv[i]);
+      fprintf(stderr, ")\n");
+      return 1;
+    }
+    printf("%s\n", out);
+    return 0;
+  }
   const char *sock = argc > 1 ? argv[1] : "wayland-0";
   g_sockname = sock;
   signal(SIGPIPE, SIG_IGN);

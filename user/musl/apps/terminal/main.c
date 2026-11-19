@@ -21,6 +21,8 @@
 #include "../../../lib/font_system.c"
 #include "terminal.c"
 
+extern int access(const char *path, int mode); // sin <unistd.h> (choca con lib/)
+
 extern void _exit(int status) __attribute__((noreturn));
 
 // ---------------------------------------------------------------------------
@@ -233,8 +235,19 @@ static char *find_sub(char *hay, const char *needle) {
 }
 
 int main(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
+  // terminal -e ORDEN [ARGS...]: ejecuta ORDEN en lugar del shell (apps de
+  // Linux con Terminal=true en su .desktop, p. ej. htop o vim).
+  static char run_cmd[1024];
+  if (argc > 2 && argv[1][0] == '-' && argv[1][1] == 'e' && !argv[1][2]) {
+    size_t o = 0;
+    for (int i = 2; i < argc; i++) {
+      if (i > 2 && o + 1 < sizeof(run_cmd))
+        run_cmd[o++] = ' ';
+      for (const char *c = argv[i]; *c && o + 1 < sizeof(run_cmd); c++)
+        run_cmd[o++] = *c;
+    }
+    run_cmd[o] = 0;
+  }
 
   const font_aa_t *font = font_system_mono();
   if (font) {
@@ -376,11 +389,14 @@ int main(int argc, char **argv) {
   char *sh_argv[] = {"/usr/bin/sh", NULL};
   char *login_auto_argv[] = {"/usr/bin/aurora-login", "-f", login_user, NULL};
   char *login_prompt_argv[] = {"/usr/bin/aurora-login", NULL};
+  char *run_argv[] = {"/usr/bin/sh", "-c", run_cmd, NULL};
   char **child_argv = sh_argv;
   if (login_mode && access("/usr/bin/aurora-login", 1) == 0)
     child_argv = login_mode == 1 ? login_auto_argv : login_prompt_argv;
+  if (run_cmd[0])
+    child_argv = run_argv;
   spawn_fds_t fds = {slave, slave, slave};
-  int child_argc = (child_argv == login_auto_argv) ? 3 : 1;
+  int child_argc = (child_argv == login_auto_argv || child_argv == run_argv) ? 3 : 1;
   int child = spawn_args_fds(child_argv[0], child_argv, child_argc, &fds);
   close(slave);
   if (child < 0)
@@ -564,8 +580,13 @@ int main(int argc, char **argv) {
     // 6. Reap child.
     if (g_child > 0) {
       int st = 0;
-      if (waitpid(g_child, &st, WNOHANG) == g_child)
+      if (waitpid(g_child, &st, WNOHANG) == g_child) {
         g_child = -1;
+        if (run_cmd[0]) { // -e: la ventana queda abierta con lo que escribió
+          static const char fin[] = "\r\n\033[2m[Proceso terminado]\033[0m";
+          terminal_feed(&g_term, (const uint8_t *)fin, sizeof(fin) - 1);
+        }
+      }
     }
 
     // 7. Esperar 16 ms.

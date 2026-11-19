@@ -8,10 +8,19 @@
 // Origen de la lista:
 //   - Apps de Aurora: /usr/share/aurora/apps/*.desktop (Exec, Icon BMP,
 //     X-Aurora-Color, X-Aurora-Order).
-//   - Apps de Linux: /usr/share/aurora/dock.conf y
-//     /usr/share/applications/*.desktop, con las mismas reglas que
-//     aurora-wayland (Terminal=true / NoDisplay=true no salen). Se lanzan con
-//     el entorno de Wayland/X11 y el tema claro/oscuro, como desde el Dock.
+//   - Apps de Linux: /usr/share/aurora/dock.conf y los .desktop de la
+//     especificación XDG: $XDG_DATA_HOME (~/.local/share)/applications, cada
+//     $XDG_DATA_DIRS/applications (/usr/local/share, /usr/share) y los de
+//     Flatpak, con subcarpetas (id kde-foo.desktop) y prioridad por id de
+//     fichero (el primero gana; Hidden=true en ~/.local oculta el del sistema).
+//     NoDisplay=true y TryExec sin binario no salen. Se lanzan con el entorno
+//     de Wayland/X11 y el tema claro/oscuro, como desde el Dock; las de
+//     Terminal=true (htop, vim...) se abren en el Terminal de Aurora (-e).
+//   - La lista se vigila: cada 2 s se comprueba nombre, tamaño y fecha de los
+//     .desktop; si algo cambia (apt install, dpkg -r, un .desktop copiado a
+//     mano) se recarga al momento sin perder la búsqueda ni la selección.
+//   - Iconos SVG (muchas apps de Linux solo traen eso): se convierten con
+//     "aurora-wayland --icono" (librsvg) a la misma caché BMP que usa el Dock.
 //
 // Uso: un clic (o Intro) abre la app. Escribir filtra por nombre (sin
 // distinguir mayúsculas ni tildes); Esc borra la búsqueda. Flechas para
@@ -76,6 +85,7 @@ typedef struct {
   uint32_t color;
   int order;
   int linux_app; // 1: app Linux (entorno Wayland/X11)
+  int terminal;  // 1: Terminal=true, se abre dentro del Terminal de Aurora
   uint32_t *pix; // ICON x ICON ARGB (NULL = baldosa con iniciales)
   int icon_tried;
   int backing;   // icono que no llena su cuadro: 1 = baldosa del tema,
@@ -101,6 +111,7 @@ static int g_scroll;      // píxeles
 static char g_msg[160];
 static uint64_t g_msg_until;
 static int g_children;
+static uint64_t g_fp_loaded; // huella de los .desktop cargados
 
 static uint64_t now_ms(void) {
   struct timespec ts;
@@ -163,29 +174,93 @@ struct linux_dirent64 {
   char d_name[];
 };
 
-// Llama a fn(ruta) para cada fichero *.desktop de dir.
-static void for_each_desktop(const char *dir, void (*fn)(const char *path)) {
+// Llama a fn(ruta, id) para cada *.desktop de dir y de sus subcarpetas (hasta
+// 2 niveles). id = "id de fichero" XDG: ruta relativa con '/' -> '-'.
+static void walk_desktops(const char *dir, const char *prefix, int depth,
+                          void (*fn)(const char *path, const char *id)) {
   int fd = (int)syscall(SYS_OPENAT, (uint64_t)(int64_t)AT_FDCWD, (uint64_t)dir,
                         (uint64_t)(O_RDONLY | 0x10000), 0, 0);
   if (fd < 0)
     return;
-  static char buf[8192];
-  for (;;) {
-    long n = syscall(SYS_GETDENTS64, (uint64_t)fd, (uint64_t)buf, sizeof(buf), 0, 0);
+  char *buf = (char *)malloc(8192);
+  // Los nombres se copian antes de bajar a una subcarpeta (buf es por nivel).
+  char subs[8][128];
+  int nsubs = 0;
+  for (; buf;) {
+    long n = syscall(SYS_GETDENTS64, (uint64_t)fd, (uint64_t)buf, 8192, 0, 0);
     if (n <= 0)
       break;
     for (long off = 0; off < n;) {
       struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + off);
       off += d->d_reclen;
-      size_t ln = strlen(d->d_name);
-      if (d->d_name[0] == '.' || ln < 9 || strcmp(d->d_name + ln - 8, ".desktop"))
+      if (d->d_name[0] == '.')
         continue;
-      char p[512];
+      size_t ln = strlen(d->d_name);
+      char p[512], id[128];
       snprintf(p, sizeof(p), "%s/%s", dir, d->d_name);
-      fn(p);
+      if (d->d_type == 4 /* DT_DIR */) {
+        if (depth > 0 && nsubs < 8 && ln < 100)
+          snprintf(subs[nsubs++], sizeof(subs[0]), "%s", d->d_name);
+        continue;
+      }
+      if (ln < 9 || strcmp(d->d_name + ln - 8, ".desktop"))
+        continue;
+      snprintf(id, sizeof(id), "%s%s", prefix, d->d_name);
+      fn(p, id);
     }
   }
+  free(buf);
   syscall(SYS_CLOSE, (uint64_t)fd, 0, 0, 0, 0);
+  for (int i = 0; i < nsubs; i++) {
+    char p[512], pre[128];
+    snprintf(p, sizeof(p), "%s/%s", dir, subs[i]);
+    snprintf(pre, sizeof(pre), "%s%s-", prefix, subs[i]);
+    walk_desktops(p, pre, depth - 1, fn);
+  }
+}
+
+static void for_each_desktop(const char *dir, void (*fn)(const char *path, const char *id)) {
+  walk_desktops(dir, "", 2, fn);
+}
+
+// Carpetas de .desktop de Linux, por prioridad (XDG Base Directory).
+#define MAX_DIRS 12
+static char g_dirs[MAX_DIRS][256];
+static int g_ndirs;
+
+static void dir_add(const char *base, const char *suffix) {
+  if (!base || base[0] != '/' || g_ndirs >= MAX_DIRS)
+    return;
+  char p[256];
+  snprintf(p, sizeof(p), "%s%s", base, suffix);
+  size_t l = strlen(p);
+  while (l > 1 && p[l - 1] == '/')
+    p[--l] = 0;
+  for (int i = 0; i < g_ndirs; i++)
+    if (!strcmp(g_dirs[i], p))
+      return;
+  snprintf(g_dirs[g_ndirs++], sizeof(g_dirs[0]), "%s", p);
+}
+
+static void build_dirs(void) {
+  g_ndirs = 0;
+  const char *home = getenv("HOME");
+  const char *dh = getenv("XDG_DATA_HOME");
+  if (dh && dh[0] == '/')
+    dir_add(dh, "/applications");
+  else if (home && home[0] == '/')
+    dir_add(home, "/.local/share/applications");
+  const char *dd = getenv("XDG_DATA_DIRS");
+  if (!dd || !dd[0])
+    dd = "/usr/local/share:/usr/share";
+  char tmp[512];
+  snprintf(tmp, sizeof(tmp), "%s", dd);
+  for (char *tok = strtok(tmp, ":"); tok; tok = strtok(NULL, ":"))
+    dir_add(tok, "/applications");
+  dir_add("/usr/share", "/applications"); // siempre, aunque XDG_DATA_DIRS no lo diga
+  if (home && home[0] == '/')
+    dir_add(home, "/.local/share/flatpak/exports/share/applications");
+  dir_add("/var/lib/flatpak/exports/share", "/applications");
 }
 
 static char *trim(char *s) {
@@ -239,18 +314,36 @@ static uint32_t name_color(const char *s) { // mismo color que el Dock (FNV-1a)
 }
 
 static int g_parsing_native;
+static int path_lookup(const char *name, char *out, size_t n);
 
-static void add_desktop(const char *path) {
+// Ids de fichero ya vistos: el primero (carpeta de más prioridad) gana, también
+// si está oculto (así un Hidden=true en ~/.local tapa el del sistema).
+#define MAX_SEEN 384
+static char g_seen[MAX_SEEN][64];
+static int g_nseen;
+
+static int seen_id(const char *id) {
+  for (int i = 0; i < g_nseen; i++)
+    if (!strcmp(g_seen[i], id))
+      return 1;
+  if (g_nseen < MAX_SEEN)
+    snprintf(g_seen[g_nseen++], sizeof(g_seen[0]), "%s", id);
+  return 0;
+}
+
+static void add_desktop(const char *path, const char *id) {
   if (g_napps >= MAX_APPS)
+    return;
+  if (!g_parsing_native && seen_id(id))
     return;
   size_t n = 0;
   char *txt = (char *)read_all(path, &n);
   if (!txt)
     return;
   char name[48] = "", name_es[48] = "", comment[96] = "", comment_es[96] = "", exec[256] = "",
-       icon[256] = "", wmclass[64] = "";
+       icon[256] = "", wmclass[64] = "", tryexec[256] = "";
   uint32_t color = 0;
-  int order = 1000, in_entry = 0, hidden = 0, is_app = 0;
+  int order = 1000, in_entry = 0, hidden = 0, is_app = 0, terminal = 0;
   for (char *line = txt, *nl; line && *line; line = nl) {
     nl = strchr(line, '\n');
     if (nl)
@@ -280,15 +373,21 @@ static void add_desktop(const char *path) {
       color = 0xFF000000u | (uint32_t)strtoul(t + 15, NULL, 16);
     else if (!strncmp(t, "X-Aurora-Order=", 15))
       order = atoi(t + 15);
-    else if (!strcmp(t, "NoDisplay=true") || !strcmp(t, "Hidden=true") ||
-             (!g_parsing_native && !strcmp(t, "Terminal=true")))
+    else if (!strncmp(t, "TryExec=", 8))
+      snprintf(tryexec, sizeof(tryexec), "%s", trim(t + 8));
+    else if (!strcmp(t, "NoDisplay=true") || !strcmp(t, "Hidden=true"))
       hidden = 1;
+    else if (!strcmp(t, "Terminal=true"))
+      terminal = 1;
     else if (!strcmp(t, "Type=Application"))
       is_app = 1;
   }
   free(txt);
   if (!is_app || hidden || !name[0] || !exec[0])
     return;
+  char tp[256];
+  if (tryexec[0] && !path_lookup(tryexec, tp, sizeof(tp)))
+    return; // TryExec: el programa ya no está instalado
   char app_id[64];
   if (wmclass[0])
     snprintf(app_id, sizeof(app_id), "%s", wmclass);
@@ -306,6 +405,7 @@ static void add_desktop(const char *path) {
   a->color = color ? color : name_color(app_id);
   a->order = order;
   a->linux_app = !g_parsing_native;
+  a->terminal = terminal && !g_parsing_native;
 }
 
 // dock.conf: Nombre | app_id | símbolo | color | icono BMP | orden
@@ -407,14 +507,56 @@ static int app_cmp(const void *pa, const void *pb) {
   return nx - ny;
 }
 
+#define NATIVE_DIR "/usr/share/aurora/apps"
+#define DOCK_CONF "/usr/share/aurora/dock.conf"
+
 static void load_apps(void) {
+  for (int i = 0; i < g_napps; i++)
+    free(g_apps[i].pix);
   g_napps = 0;
+  g_nseen = 0;
+  build_dirs();
   g_parsing_native = 1;
-  for_each_desktop("/usr/share/aurora/apps", add_desktop);
+  for_each_desktop(NATIVE_DIR, add_desktop);
   g_parsing_native = 0;
   add_dock_conf();
-  for_each_desktop("/usr/share/applications", add_desktop);
+  for (int i = 0; i < g_ndirs; i++)
+    for_each_desktop(g_dirs[i], add_desktop);
   qsort(g_apps, (size_t)g_napps, sizeof(app_t), app_cmp);
+}
+
+// ---- Vigilancia de la lista ----
+// Huella de todas las carpetas: id, tamaño y fecha de cada .desktop. Sin
+// inotify: un recorrido cada 2 s de unas decenas de entradas es barato.
+static uint64_t g_fp;
+
+static void fp_mix(const void *p, size_t n) {
+  const uint8_t *b = (const uint8_t *)p;
+  for (size_t i = 0; i < n; i++)
+    g_fp = (g_fp ^ b[i]) * 1099511628211ull;
+}
+
+static void fp_file(const char *path, const char *id) {
+  stat_t st;
+  memset(&st, 0, sizeof(st));
+  syscall(SYS_FSTATAT, (uint64_t)(int64_t)AT_FDCWD, (uint64_t)path, (uint64_t)&st, 0, 0);
+  fp_mix(path, strlen(path) + 1);
+  fp_mix(id, strlen(id) + 1);
+  fp_mix(&st.st_size, sizeof(st.st_size));
+  fp_mix(&st.st_mtime_sec, sizeof(st.st_mtime_sec));
+  fp_mix(&st.st_mtime_nsec, sizeof(st.st_mtime_nsec));
+}
+
+static uint64_t fingerprint(void) {
+  g_fp = 1469598103934665603ull;
+  build_dirs();
+  for_each_desktop(NATIVE_DIR, fp_file);
+  fp_file(DOCK_CONF, "dock.conf");
+  for (int i = 0; i < g_ndirs; i++) {
+    fp_mix(g_dirs[i], strlen(g_dirs[i]) + 1);
+    for_each_desktop(g_dirs[i], fp_file);
+  }
+  return g_fp;
 }
 
 static void refilter(void) {
@@ -529,6 +671,58 @@ static uint32_t *find_icon(const app_t *a) {
   return NULL;
 }
 
+// Conversión de iconos SVG en segundo plano (uno a la vez) con
+// "aurora-wayland --icono", que deja el BMP en la caché /tmp/aurora-icons.
+#define ICON_TOOL "/usr/bin/aurora-wayland"
+static int g_conv_pid = -1;
+static char g_conv_id[64];
+static char g_conv_done[MAX_APPS][64]; // ya intentados (no repetir)
+static int g_nconv_done;
+
+static void icon_convert(const app_t *a) {
+  if (g_conv_pid > 0 || !a->linux_app || !file_exists(ICON_TOOL))
+    return;
+  for (int i = 0; i < g_nconv_done; i++)
+    if (!strcmp(g_conv_done[i], a->app_id))
+      return;
+  if (g_nconv_done < MAX_APPS)
+    snprintf(g_conv_done[g_nconv_done++], sizeof(g_conv_done[0]), "%s", a->app_id);
+  static char key[80], n1[256], n2[64], n3[64];
+  char *argv[8];
+  int ac = 0;
+  snprintf(key, sizeof(key), "app-%s", a->app_id);
+  argv[ac++] = ICON_TOOL;
+  argv[ac++] = "--icono";
+  argv[ac++] = key;
+  if (a->icon[0] && a->icon[0] != '/') {
+    snprintf(n1, sizeof(n1), "%s", a->icon);
+    argv[ac++] = n1;
+  }
+  snprintf(n2, sizeof(n2), "%s", a->app_id);
+  argv[ac++] = n2;
+  exec_base(a->exec, n3, sizeof(n3));
+  if (strcmp(n3, n2))
+    argv[ac++] = n3;
+  argv[ac] = NULL;
+  int nul = (int)syscall(SYS_OPENAT, (uint64_t)(int64_t)AT_FDCWD, (uint64_t)"/dev/null",
+                         (uint64_t)O_RDWR, 0, 0);
+  if (nul < 0)
+    return;
+  // Los errores (librsvg, fontconfig...) a un registro, para diagnosticar.
+  int log = (int)syscall(SYS_OPENAT, (uint64_t)(int64_t)AT_FDCWD, (uint64_t)"/tmp/aurora-icono.log",
+                         (uint64_t)(O_WRONLY | O_CREAT | 0x400 /* O_APPEND */), 0644, 0);
+  spawn_fds_t fds = {nul, log >= 0 ? log : nul, log >= 0 ? log : nul};
+  int pid = spawn_args_fds(ICON_TOOL, argv, ac, &fds);
+  syscall(SYS_CLOSE, (uint64_t)nul, 0, 0, 0, 0);
+  if (log >= 0)
+    syscall(SYS_CLOSE, (uint64_t)log, 0, 0, 0, 0);
+  if (pid > 0) {
+    g_conv_pid = pid;
+    snprintf(g_conv_id, sizeof(g_conv_id), "%s", a->app_id);
+    g_children++;
+  }
+}
+
 // Prepara un icono pendiente de los visibles; 1 si hizo trabajo.
 static int icon_step(void) {
   for (int k = 0; k < g_nvis; k++) {
@@ -537,6 +731,8 @@ static int icon_step(void) {
       continue;
     a->icon_tried = 1;
     a->pix = find_icon(a);
+    if (!a->pix)
+      icon_convert(a); // p. ej. solo SVG: se reintenta cuando acabe
     if (a->pix) { // como el Dock: baldosa detrás de los iconos "sueltos"
       int opaque = 0;
       uint64_t lum = 0;
@@ -591,6 +787,17 @@ static void launch(const app_t *a) {
   int pid;
   if (!a->linux_app) {
     pid = spawn_args(path, argv, ac);
+  } else if (a->terminal) {
+    // Terminal=true: dentro del Terminal de Aurora ("terminal -e orden").
+    char *targv[18];
+    int tc = 0;
+    targv[tc++] = "/usr/bin/terminal";
+    targv[tc++] = "-e";
+    targv[tc++] = path;
+    for (int i = 1; i < ac && tc < 17; i++)
+      targv[tc++] = argv[i];
+    targv[tc] = NULL;
+    pid = spawn_args("/usr/bin/terminal", targv, tc);
   } else {
     if (!file_exists(WAYLAND_SOCK)) {
       flash("Las apps de Linux necesitan el escritorio Wayland (aurora-wayland)");
@@ -645,9 +852,68 @@ static void launch(const app_t *a) {
 }
 
 static void reap(void) {
-  int st;
-  while (g_children > 0 && waitpid(-1, &st, WNOHANG) > 0)
+  int st, pid;
+  while (g_children > 0 && (pid = waitpid(-1, &st, WNOHANG)) > 0) {
     g_children--;
+    if (pid == g_conv_pid) { // icono convertido (o no): reintentar la caché
+      g_conv_pid = -1;
+      for (int i = 0; i < g_napps; i++)
+        if (!strcmp(g_apps[i].app_id, g_conv_id) && !g_apps[i].pix)
+          g_apps[i].icon_tried = 0;
+    }
+  }
+}
+
+// Recarga la lista si cambió algo, conservando búsqueda, selección y scroll,
+// y avisa de las apps nuevas.
+static void clamp_scroll(void);
+static void rescan(void) {
+  uint64_t fp = fingerprint();
+  if (fp == g_fp_loaded)
+    return;
+  g_fp_loaded = fp;
+  static char old_ids[MAX_APPS][64];
+  int nold = g_napps;
+  for (int i = 0; i < g_napps; i++)
+    snprintf(old_ids[i], sizeof(old_ids[0]), "%s", g_apps[i].app_id);
+  char sel_id[64] = "";
+  if (g_sel >= 0 && g_sel < g_nvis)
+    snprintf(sel_id, sizeof(sel_id), "%s", g_apps[g_vis[g_sel]].app_id);
+  int scroll = g_scroll;
+  load_apps();
+  refilter();
+  g_sel = -1;
+  for (int k = 0; k < g_nvis; k++)
+    if (sel_id[0] && !strcmp(g_apps[g_vis[k]].app_id, sel_id))
+      g_sel = k;
+  if (g_sel < 0 && g_search[0] && g_nvis > 0)
+    g_sel = 0;
+  g_scroll = scroll;
+  clamp_scroll();
+  int added = 0;
+  const char *first = NULL;
+  for (int i = 0; i < g_napps; i++) {
+    int found = 0;
+    for (int j = 0; j < nold && !found; j++)
+      found = !strcmp(old_ids[j], g_apps[i].app_id);
+    if (!found) {
+      if (!first)
+        first = g_apps[i].name;
+      added++;
+    }
+  }
+  char m[160];
+  if (added == 1)
+    snprintf(m, sizeof(m), "Nueva app: %s", first);
+  else if (added > 1)
+    snprintf(m, sizeof(m), "%d apps nuevas (%s...)", added, first);
+  else if (g_napps < nold)
+    snprintf(m, sizeof(m), "Lista actualizada: %d apps", g_napps);
+  else
+    m[0] = 0;
+  if (m[0])
+    flash(m);
+  g_dirty = 1;
 }
 
 // ---- Dibujo ----
@@ -1089,11 +1355,14 @@ int main(int argc, char **argv) {
   g_font = font_system_mono();
   if (!g_font)
     return 1;
+  g_fp_loaded = fingerprint();
   load_apps();
   // aplicaciones --lista: escribe las apps encontradas y sale (pruebas).
   if (argc > 1 && !strcmp(argv[1], "--lista")) {
     for (int i = 0; i < g_napps; i++)
-      printf("%s|%s|%s|%s\n", g_apps[i].linux_app ? "linux" : "aurora", g_apps[i].name,
+      printf("%s|%s|%s|%s\n",
+             g_apps[i].terminal ? "terminal" : g_apps[i].linux_app ? "linux" : "aurora",
+             g_apps[i].name,
              g_apps[i].app_id, g_apps[i].exec);
     return 0;
   }
@@ -1161,6 +1430,11 @@ int main(int argc, char **argv) {
       }
     }
     reap();
+    static uint64_t next_scan;
+    if (now_ms() >= next_scan) {
+      next_scan = now_ms() + 2000;
+      rescan();
+    }
     uint32_t th = sys_theme_get();
     if (th != g_theme_seen) {
       g_theme_seen = th;
