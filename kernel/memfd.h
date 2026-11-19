@@ -18,4 +18,8 @@ int memfd_fcntl_get_seals(struct vfs_node *node, uint32_t *out);
 // ¿El nodo es un memfd? (comparación de ops->).
 int memfd_is_node(struct vfs_node *node);
 
+// [SysV shm] memfd interno (sin fd de usuario) de `size` bytes; una ref.
+struct file_descriptor;
+struct file_descriptor *memfd_new_kernel(const char *name, uint64_t size);
+
 #endif

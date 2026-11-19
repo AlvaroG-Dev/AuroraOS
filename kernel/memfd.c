@@ -423,3 +423,46 @@ int64_t k_memfd_create(uint64_t name_uptr, uint64_t flags, uint64_t a3,
             (unsigned long)flags);
   return (int64_t)free_fd;
 }
+// [SysV shm] memfd sin fd de usuario: lo usa sysvshm.c como memoria de cada
+// segmento. Devuelve un file_descriptor_t con una referencia (la del
+// segmento) ya del tamaño pedido, o NULL.
+file_descriptor_t *memfd_new_kernel(const char *name, uint64_t size) {
+  memfd_ctx_t *ctx = (memfd_ctx_t *)kzalloc(sizeof(*ctx));
+  if (!ctx)
+    return NULL;
+  spin_init(&ctx->lock);
+  wait_queue_init(&ctx->wq);
+  size_t nl = strlen(name);
+  if (nl > MFD_NAME_MAX)
+    nl = MFD_NAME_MAX;
+  memcpy(ctx->name, name, nl);
+  ctx->name[nl] = '\0';
+  vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+  file_descriptor_t *fd = (file_descriptor_t *)kzalloc(sizeof(file_descriptor_t));
+  if (!vnode || !fd) {
+    kfree(ctx);
+    kfree(vnode);
+    kfree(fd);
+    return NULL;
+  }
+  if (nl >= sizeof(vnode->name))
+    nl = sizeof(vnode->name) - 1;
+  memcpy(vnode->name, name, nl);
+  vnode->name[nl] = '\0';
+  vnode->flags = VFS_FILE;
+  vnode->ops = &memfd_node_ops;
+  vnode->priv = ctx;
+  vnode->mode = S_IFREG | 0600;
+  vnode->ref_count = 1;
+  fd->node = vnode;
+  fd->flags = O_RDWR;
+  fd->ref_count = 1;
+  mutex_init(&fd->lock);
+  wait_queue_init(&fd->read_wq);
+  wait_queue_init(&fd->write_wq);
+  if (memfd_truncate_op(vnode, size) != 0) {
+    vfs_fd_put_ref(fd);
+    return NULL;
+  }
+  return fd;
+}

@@ -36,6 +36,11 @@
 #include "pf.h"
 #include "pmm.h"
 #include "pipe.h"
+// [SysV shm] kernel/sysvshm.c
+int64_t k_shmget(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t k_shmat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t k_shmdt(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t k_shmctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 #include "process.h"
 #include "rtc.h"
 #include "sched.h"
@@ -8695,6 +8700,10 @@ static const syscall_entry_t linux_table[] = {
     [SYS_UNLINKAT] = {k_unlinkat, "unlinkat"},
     [SYS_RENAMEAT] = {k_renameat, "renameat"},
     [27] = {k_mincore, "mincore"},
+    [29] = {k_shmget, "shmget"},
+    [30] = {k_shmat, "shmat"},
+    [31] = {k_shmctl, "shmctl"},
+    [67] = {k_shmdt, "shmdt"},
     [75] = {k_fdatasync, "fdatasync"},
     [129] = {k_rt_sigqueueinfo, "rt_sigqueueinfo"},
     [135] = {k_personality, "personality"},
