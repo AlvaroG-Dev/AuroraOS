@@ -7,7 +7,12 @@
 #include <uapi/linux/rfkill.h>
 struct rfkill;
 struct rfkill_ops { void (*poll)(struct rfkill *rfkill, void *data); void (*query)(struct rfkill *rfkill, void *data); int (*set_block)(void *data, bool blocked); };
-static inline struct rfkill *rfkill_alloc(const char *name, struct device *parent, const enum rfkill_type type, const struct rfkill_ops *ops, void *ops_data) { return NULL; }
+/* Un objeto ficticio no nulo: cfg80211 trata NULL como fallo de memoria y wiphy_new() no registraria el adaptador. */
+static inline struct rfkill *rfkill_alloc(const char *name, struct device *parent, const enum rfkill_type type, const struct rfkill_ops *ops, void *ops_data)
+{
+	static char lkpi_rfkill_dummy;
+	return (struct rfkill *)&lkpi_rfkill_dummy;
+}
 static inline int __must_check rfkill_register(struct rfkill *rfkill) { return 0; }
 static inline void rfkill_pause_polling(struct rfkill *rfkill) { }
 static inline void rfkill_resume_polling(struct rfkill *rfkill) { }

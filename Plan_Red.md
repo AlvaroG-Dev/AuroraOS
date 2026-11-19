@@ -101,3 +101,9 @@ Riesgo alto: es el mayor porte hasta ahora. Se hace por fases y sin tocar el cam
 | cfg80211, mac80211, iwlwifi, iwlmvm | cargan en QEMU; asociación AX201 pendiente de hardware (WPA2-PSK/abierta, `aurora-wifi scan/connect/status`) |
 | tg3, btusb | pendientes (tg3 necesita stubs de phylib) |
 Limitaciones: e1000 sin jumbo frames; Wi-Fi sin WPA3/TKIP/WEP/802.1X; DHCP solo en el primer carrier-up.
+
+## Prueba sin hardware: lkpi_wlansim (2026-11-08)
+`lkpi.load=linuxkpi,lkpi_cfg80211,lkpi_mac80211,lkpi_wlansim` carga un adaptador Wi-Fi simulado (3 redes: abierta, WPA2 y otra abierta). Verificado en QEMU: scan, auth/assoc con la abierta, estado connected y DHCP en la interfaz Wi-Fi. Encontró: rfkill_alloc NULL (wiphy_new fallaba con -ENOMEM en el AX201), interfaz sin alta en Aurora, autobloqueo de bss_lock en connect. No cubre WPA2 real ni el firmware de iwlmvm.
+
+## Arreglos de skb en la ruta RX (2026-11-08)
+iwlwifi entrega las tramas como skb con cabecera lineal mas fragmentos de pagina; la capa los trataba como lineales (pskb_may_pull/skb_linearize/__pskb_pull_tail eran no-op, skb_copy copiaba el struct y el shinfo, __pskb_trim ignoraba data_len). Ahora: skb_add_rx_frag copia al area lineal y suelta la pagina, skb_linearize/__pskb_pull_tail/__pskb_trim reales, skb_copy_bits/skb_header_pointer_slow recorren fragmentos, skb_copy crea un skb nuevo. Ademas: detectores de tormenta de IRQ y de NAPI, y rtnl acotado en aurora-wifi. Sin probar en el AX201 real.

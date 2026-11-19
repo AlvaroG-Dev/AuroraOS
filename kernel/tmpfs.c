@@ -1365,7 +1365,7 @@ void tmpfs_init(void) {
   // ---------------------------------------------------------------------
   // [4] /run
   // ---------------------------------------------------------------------
-  void *run = tmpfs_new(4 * 1024 * 1024);
+  void *run = tmpfs_new(64 * 1024 * 1024); // paginas bajo demanda
   if (!run) {
     LOG_ERR("[TMPFS] sin memoria para /run");
   } else {
@@ -1377,7 +1377,7 @@ void tmpfs_init(void) {
       // XDG_RUNTIME_DIR=/run/user/<uid> (Wayland: socket y locks).
       vfs_mkdir("/run/user", 0755);
       vfs_mkdir("/run/user/0", 0711); // [U5] traversable: los sockets llevan su propio modo
-      LOG_INFO("[TMPFS] /run montado (4 MB)");
+      LOG_INFO("[TMPFS] /run montado (64 MB)");
     }
   }
 

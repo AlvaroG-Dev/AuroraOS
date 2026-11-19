@@ -8461,7 +8461,19 @@ uint64_t syscall_handler_c(registers_t *regs) {
     strace_path(num, arg1, arg2, tr_path, sizeof(tr_path));
   }
 
+  int pc_entry = cur ? cur->preempt_count : 0;
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
+  if (cur && cur->preempt_count != pc_entry) {
+    // Una syscall no puede volver con la expulsion cambiada: lo corregimos y
+    // decimos cual es (solo la primera vez por numero).
+    static uint8_t pc_seen[512];
+    if (num < 512 && !pc_seen[num]) {
+      pc_seen[num] = 1;
+      LOG_WARN("[PREEMPT] syscall %lu dejo preempt_count %d -> %d",
+               (unsigned long)num, pc_entry, cur->preempt_count);
+    }
+    sched_preempt_fix(pc_entry, "syscall");
+  }
 
   if (tracing && (num == 46 || num == 47))
     strace_msg_dump(num == 46 ? "sendmsg" : "recvmsg", arg2, (int64_t)ret);
@@ -8516,7 +8528,7 @@ uint64_t syscall_handler_c(registers_t *regs) {
     LOG_TRACE("[SYSCALL-PIPE] num=%lu a1=%p a2=%lx ret=%ld", (unsigned long)num,
               (void *)arg1, (unsigned long)arg2, (long)ret);
   } else if (!boring_enoent && !expected_would_block && (int64_t)ret < 0 &&
-             (int64_t)ret > -4096) {
+             (int64_t)ret > -4096 && (int64_t)ret != -4 /* EINTR: ruido */) {
     LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
   }
 

@@ -32,6 +32,7 @@
 #include "ksymtab.h"
 #include "paging.h"
 #include "pmm.h"
+#include "sched.h"
 #include "sha256.h"
 #include "spinlock.h"
 #include "string.h"
@@ -83,6 +84,10 @@ static volatile int g_loader_ready = 0;
 static volatile int g_load_in_progress = 0;
 static uint64_t g_module_cursor = 0;
 static struct kur_module g_modules[KUR_MAX_MODULES];
+static void fsyms_free(int slot);
+static void fsyms_build(int slot, uint64_t base, uint64_t size, const Elf64_Sym *syms,
+                        size_t n_syms, const char *strs, size_t strs_size,
+                        const uint64_t *sym_addrs);
 static struct kur_dynsym *g_dynsym[DYNSYM_BUCKETS];
 static int g_dynsym_count = 0;
 
@@ -686,11 +691,15 @@ static int kur_load_internal(const void *data, size_t size, int slot,
     LOG_ERR("[KUR] %s en sección no cargada", KUR_SYM_INIT);
     goto fail;
   }
+  fsyms_build(out->index, base, total, syms, n_syms, strs, strtab_hdr->sh_size,
+              sym_addrs);
   void *init_addr =
       (void *)(base + sec_off[init_sym->st_shndx] + init_sym->st_value);
   LOG_INFO("[KUR] llamando %s en %p", KUR_SYM_INIT, init_addr);
   int (*init_fn)(void) = (int (*)(void))init_addr;
+  int pc_before = preempt_count();
   int irc = init_fn();
+  sched_preempt_fix(pc_before, "kur_init");
   if (irc != 0) {
     LOG_ERR("[KUR] %s devolvió %d", KUR_SYM_INIT, irc);
     rc = (irc < 0) ? irc : -ENOEXEC;
@@ -742,6 +751,7 @@ fail:
   }
   // Rollback de exports (por si register_module_exports falló a medias).
   dynsym_remove_owner(out->index);
+  fsyms_free(out->index);
 out_free:
   if (npages)
     vmm_free_pages(base, npages);
@@ -749,6 +759,116 @@ out_free:
   kfree(sym_addrs);
   kfree(got_slot);
   return rc ? rc : -ENOEXEC;
+}
+
+// ---------------------------------------------------------------------------
+// Simbolos de funciones de cada modulo, para poder escribir direcciones como
+// `modulo: funcion+0xoff` en los avisos (%pS, [PREEMPT], watchdogs...).
+// Se construye antes de llamar a kur_init (los fallos ocurren ahi) y se libera
+// al descargar o fallar.
+// ---------------------------------------------------------------------------
+#ifndef STT_FUNC
+#define STT_FUNC 2
+#endif
+#define FSYM_TYPE(info) ((info) & 0xf)
+static size_t fsym_nlen(const char *p, size_t max) {
+  size_t n = 0;
+  while (n < max && p[n]) n++;
+  return n;
+}
+struct kur_fsym {
+  uint64_t addr;
+  uint32_t name;
+};
+static struct {
+  uint64_t base, size;
+  struct kur_fsym *syms;
+  uint32_t n;
+  char *names;
+} g_fsyms[KUR_MAX_MODULES];
+
+static void fsyms_free(int slot) {
+  if (slot < 0 || slot >= KUR_MAX_MODULES) return;
+  g_fsyms[slot].size = 0;
+  if (g_fsyms[slot].syms) kfree(g_fsyms[slot].syms);
+  if (g_fsyms[slot].names) kfree(g_fsyms[slot].names);
+  g_fsyms[slot].syms = NULL;
+  g_fsyms[slot].names = NULL;
+  g_fsyms[slot].n = 0;
+}
+
+static void fsyms_build(int slot, uint64_t base, uint64_t size,
+                        const Elf64_Sym *syms, size_t n_syms, const char *strs,
+                        size_t strs_size, const uint64_t *sym_addrs) {
+  if (slot < 0 || slot >= KUR_MAX_MODULES) return;
+  fsyms_free(slot);
+  size_t cnt = 0, name_bytes = 0;
+  for (size_t i = 0; i < n_syms; i++) {
+    const Elf64_Sym *s = &syms[i];
+    if (FSYM_TYPE(s->st_info) != STT_FUNC || s->st_shndx == SHN_UNDEF ||
+        s->st_shndx >= SHN_LORESERVE || s->st_name >= strs_size || !strs[s->st_name])
+      continue;
+    cnt++;
+    name_bytes += fsym_nlen(strs + s->st_name, 96) + 1;
+  }
+  if (!cnt) return;
+  struct kur_fsym *tab = kmalloc(cnt * sizeof(*tab));
+  char *names = kmalloc(name_bytes);
+  if (!tab || !names) {
+    if (tab) kfree(tab);
+    if (names) kfree(names);
+    return;
+  }
+  size_t k = 0, off = 0;
+  for (size_t i = 0; i < n_syms && k < cnt; i++) {
+    const Elf64_Sym *s = &syms[i];
+    if (FSYM_TYPE(s->st_info) != STT_FUNC || s->st_shndx == SHN_UNDEF ||
+        s->st_shndx >= SHN_LORESERVE || s->st_name >= strs_size || !strs[s->st_name])
+      continue;
+    size_t l = fsym_nlen(strs + s->st_name, 96);
+    memcpy(names + off, strs + s->st_name, l);
+    names[off + l] = 0;
+    tab[k].addr = sym_addrs[i];
+    tab[k].name = (uint32_t)off;
+    off += l + 1;
+    k++;
+  }
+  // Orden por direccion (shell sort).
+  for (size_t gap = k / 2; gap > 0; gap /= 2)
+    for (size_t i = gap; i < k; i++) {
+      struct kur_fsym t = tab[i];
+      size_t j = i;
+      while (j >= gap && tab[j - gap].addr > t.addr) {
+        tab[j] = tab[j - gap];
+        j -= gap;
+      }
+      tab[j] = t;
+    }
+  g_fsyms[slot].syms = tab;
+  g_fsyms[slot].names = names;
+  g_fsyms[slot].n = (uint32_t)k;
+  g_fsyms[slot].base = base;
+  g_fsyms[slot].size = size;
+}
+
+// Escribe "modulo:funcion+0xoff" en buf; devuelve 1 si addr cae en un modulo.
+int kur_symbolize(uint64_t addr, char *buf, size_t len) {
+  for (int m = 0; m < KUR_MAX_MODULES; m++) {
+    if (!g_fsyms[m].size || addr < g_fsyms[m].base ||
+        addr >= g_fsyms[m].base + g_fsyms[m].size || !g_fsyms[m].n)
+      continue;
+    uint32_t lo = 0, hi = g_fsyms[m].n;
+    while (hi - lo > 1) {
+      uint32_t mid = (lo + hi) / 2;
+      if (g_fsyms[m].syms[mid].addr <= addr) lo = mid; else hi = mid;
+    }
+    if (g_fsyms[m].syms[lo].addr > addr) return 0;
+    const char *mn = g_modules[m].in_use ? g_modules[m].name : "mod";
+    snprintf(buf, len, "%s:%s+0x%lx", mn, g_fsyms[m].names + g_fsyms[m].syms[lo].name,
+             (unsigned long)(addr - g_fsyms[m].syms[lo].addr));
+    return 1;
+  }
+  return 0;
 }
 
 void kur_loader_init(void) {
@@ -840,6 +960,7 @@ int kur_loader_unload(struct kur_module *mod) {
 
   // Eliminar dynsym entries de este módulo.
   int removed = dynsym_remove_owner(mod->index);
+  fsyms_free(mod->index);
 
   // Decrementar refcounts en módulos que nos importaban.
   for (int b = 0; b < KUR_MAX_MODULES; b++) {

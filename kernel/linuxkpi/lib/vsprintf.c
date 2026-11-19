@@ -19,6 +19,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include "../aurora.h"
+
 const char *lkpi_errname(int err);
 
 #define F_LEFT 0x01
@@ -218,6 +220,14 @@ static const char *put_pointer(struct out *o, const char *fmt, void *ptr,
 	case 'f':
 		if (fmt[1] == 'R' || fmt[1] == 'b')
 			fmt++;
+		{
+			char sym[160];
+
+			if (aurora_kur_symbolize((unsigned long)ptr, sym, sizeof(sym))) {
+				put_str(o, sym, -1, -1, 0);
+				return fmt;
+			}
+		}
 		put_num(o, (unsigned long)ptr, 16, 0, -1, F_SPECIAL);
 		return fmt;
 	case 'x':

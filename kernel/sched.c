@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "gdt.h"
 #include "heap.h"
+#include "idt.h"
 #include "ipi.h"
 #include "klog.h"
 #include "panic.h"
@@ -139,6 +140,31 @@ void preempt_enable(void) {
     cur->preempt_count--;
   }
   __asm__ volatile("" ::: "memory");
+}
+
+// Restaura preempt_count al valor esperado tras llamar a codigo ajeno (init de
+// modulos, probe, syscalls, trabajos diferidos). Un preempt_disable() sin su
+// enable deja a la tarea sin poder ser expulsada para siempre: la CPU queda
+// fuera de servicio y RCU se atasca. Devuelve la diferencia corregida.
+void (*sched_preempt_leak_hook)(const char *what, int now, int expected);
+
+int sched_preempt_fix(int expected, const char *what) {
+  task_t *cur = sched_current();
+  if (!cur)
+    return 0;
+  int now = cur->preempt_count;
+  if (now == expected)
+    return 0;
+  static uint32_t reports;
+  if (reports < 64) {
+    reports++;
+    LOG_WARN("[PREEMPT] %s dejo preempt_count=%d (esperado %d): corregido", what,
+             now, expected);
+  }
+  if (sched_preempt_leak_hook)
+    sched_preempt_leak_hook(what, now, expected);
+  cur->preempt_count = expected;
+  return now - expected;
 }
 
 int preempt_count(void) {
@@ -423,6 +449,57 @@ uint64_t sched_cpu_idle_ticks(int cpu) {
   if (cpu < 0 || cpu >= MAX_CPUS)
     return 0;
   return __atomic_load_n(&g_cpu_idle_ticks[cpu], __ATOMIC_RELAXED);
+}
+
+// [DIAG] Detector de tarea que no suelta la CPU: si en cada tick la misma tarea
+// lleva la expulsion desactivada (preempt_count > 0) durante unos 3 s, la CPU
+// esta atascada en un bucle (o con la cuenta filtrada) y nada mas corre alli.
+// Imprime quien es, en que modo estaba y la cadena de retornos por rbp.
+// Lo llama el tick del LAPIC con el marco de la interrupcion.
+static struct {
+  task_t *t;
+  uint32_t n;
+} g_spin_watch[MAX_CPUS];
+
+void sched_spin_check(registers_t *regs) {
+  int cpu = smp_processor_id();
+  task_t *c = (task_t *)this_cpu_current_task();
+
+  if (cpu < 0 || cpu >= MAX_CPUS)
+    return;
+  if (!c || c->is_idle || c->preempt_count <= 0) {
+    g_spin_watch[cpu].t = NULL;
+    g_spin_watch[cpu].n = 0;
+    return;
+  }
+  if (g_spin_watch[cpu].t != c) {
+    g_spin_watch[cpu].t = c;
+    g_spin_watch[cpu].n = 0;
+  }
+  uint32_t n = ++g_spin_watch[cpu].n;
+  if (n != 3000 && (n < 3000 || (n % 30000) != 0))
+    return;
+
+  uint64_t ra[10];
+  int k = 0;
+  uint64_t rbp = regs->rbp;
+  for (; k < 10; k++) {
+    if (rbp < 0xffff800000000000ULL || (rbp & 7))
+      break;
+    uint64_t *f = (uint64_t *)rbp;
+    ra[k] = f[1];
+    rbp = f[0];
+  }
+  for (int i = k; i < 10; i++)
+    ra[i] = 0;
+  extern char __text_start;
+  LOG_WARN("[SPIN] CPU %d: tarea id=%u '%s' con preempt_count=%d lleva %u ms sin soltar la CPU; "
+           "cs=%lx rip=%lx rsp=%lx text=%lx",
+           cpu, c->id, c->proc ? c->proc->name : "(kernel)", c->preempt_count, n,
+           (unsigned long)regs->cs, (unsigned long)regs->rip,
+           (unsigned long)regs->rsp, (unsigned long)&__text_start);
+  LOG_WARN("[SPIN]   cadena: %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx",
+           ra[0], ra[1], ra[2], ra[3], ra[4], ra[5], ra[6], ra[7], ra[8], ra[9]);
 }
 
 void sched_tick(void) {

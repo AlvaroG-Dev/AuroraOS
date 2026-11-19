@@ -401,6 +401,10 @@ void irq_handler(registers_t *regs) {
     extern void lapic_timer_handler(void);
     extern void lapic_eoi(void);
     lapic_eoi();
+    {
+      extern void sched_spin_check(registers_t *);
+      sched_spin_check(regs);
+    }
     lapic_timer_handler();
     irq_try_deliver_signals(regs);
     return;

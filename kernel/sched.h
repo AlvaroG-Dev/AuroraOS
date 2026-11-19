@@ -149,6 +149,7 @@ task_t *sched_create_forked_user_task_ex(registers_t *regs, uint64_t cr3,
 void preempt_disable(void);
 void preempt_enable(void);
 int preempt_count(void);
+int sched_preempt_fix(int expected, const char *what);
 
 void task_get(task_t *t);
 void task_put(task_t *t);

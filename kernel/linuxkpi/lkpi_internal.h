@@ -73,6 +73,9 @@ struct lkpi_irq_desc {
 	int cpu;			/* destino efectivo */
 	struct cpumask affinity;
 	u64 count;
+	unsigned long storm_t0;		/* deteccion de tormentas de IRQ */
+	unsigned int storm_cnt;
+	bool storm;
 	char name[16];
 };
 struct lkpi_irq_desc *lkpi_irq_desc_alloc(unsigned int irq, const struct lkpi_irq_chip *chip,

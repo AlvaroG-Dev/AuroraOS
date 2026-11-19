@@ -17,7 +17,12 @@ wait_not() { # espera a que el estado deje de ser "$1", maximo $2 s
 case "$1" in
 scan)
     if ! (printf 'scan\n' > "$D") 2>/dev/null; then
-        echo "aurora-wifi: no hay interfaz Wi-Fi activa (el driver no tomo el adaptador; mira 'iwlwifi' en el log: suele faltar firmware)" >&2
+        ifc=$(sed -n 's/^iface //p' "$D")
+        if [ "$ifc" = none ] || [ -z "$ifc" ]; then
+            echo "aurora-wifi: no hay interfaz Wi-Fi (el driver no tomo el adaptador: mira 'iwlwifi' en el log, suele faltar firmware)" >&2
+        else
+            echo "aurora-wifi: no se pudo iniciar el escaneo en $ifc (ocupado o interfaz caida; mira el log)" >&2
+        fi
         exit 1
     fi
     sleep 1
