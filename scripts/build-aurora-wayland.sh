@@ -27,6 +27,7 @@ gen "$PROTO/stable/presentation-time/presentation-time.xml" presentation-time
 gen "$PROTO/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml" idle-inhibit-unstable-v1
 gen "$PROTO/staging/xdg-activation/xdg-activation-v1.xml" xdg-activation-v1
 gen "$PROTO/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml" linux-dmabuf-unstable-v1
+gen "$PROTO/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml" linux-drm-syncobj-v1
 gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora-wayland" \
     "$ROOT/user/aurora-wayland/aurora-wayland.c" "$ROOT/user/aurora-wayland/icons.c" "$ROOT/user/aurora-wayland/gpuimp.c" "$GEN/xdg-shell-protocol.c" \
     "$GEN/xdg-decoration-unstable-v1-protocol.c" \
@@ -36,7 +37,7 @@ gcc -O2 -Wall -Wextra -Wno-unused-parameter -o "$ROOT/precompiled/usr/bin/aurora
     "$GEN/cursor-shape-v1-protocol.c" "$GEN/tablet-v2-protocol.c" \
     "$GEN/xdg-output-unstable-v1-protocol.c" "$GEN/presentation-time-protocol.c" \
     "$GEN/idle-inhibit-unstable-v1-protocol.c" "$GEN/xdg-activation-v1-protocol.c" \
-    "$GEN/linux-dmabuf-unstable-v1-protocol.c" \
+    "$GEN/linux-dmabuf-unstable-v1-protocol.c" "$GEN/linux-drm-syncobj-v1-protocol.c" \
     -I"$GEN" -I"$ST/include" -L"$ST/lib/x86_64-linux-gnu" \
     -lwayland-server -l:libxkbcommon.so.0 -lxcb -lxcb-composite -lxcb-xfixes -lpthread -lpng16 -ldl -lm -Wl,-rpath-link,"$ST/lib/x86_64-linux-gnu"
 echo "OK: precompiled/usr/bin/aurora-wayland"

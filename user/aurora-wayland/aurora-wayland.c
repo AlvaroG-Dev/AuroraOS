@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <drm/drm.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -48,6 +50,7 @@
 #include "viewporter-server-protocol.h"
 #include "idle-inhibit-unstable-v1-server-protocol.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
+#include "linux-drm-syncobj-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
 #include "xdg-activation-v1-server-protocol.h"
 #include "xdg-output-unstable-v1-server-protocol.h"
@@ -327,6 +330,9 @@ struct surface {
   struct wl_list pfb;     /* wp_presentation_feedback pendientes (del siguiente commit) */
   struct wl_list flink;   /* en g_frame_q mientras espera su "vsync" */
   int fq;                 /* 1 = en g_frame_q */
+  struct wl_resource *sync_res;           /* wp_linux_drm_syncobj_surface_v1 (explicit sync) */
+  struct sync_tl *sync_acq, *sync_rel;    /* puntos pendientes del siguiente commit */
+  uint64_t sync_acq_pt, sync_rel_pt;
   // Subsuperficies
   struct wl_list stack;   /* struct subsurf.link; incluye `self` */
   struct subsurf self;
@@ -1657,6 +1663,179 @@ static rc_t surface_ingest(struct surface *s, const uint8_t *src, int w, int h,
   return d;
 }
 
+
+/* ---- wp_linux_drm_syncobj_v1 (explicit sync) ----
+ * Opt-in: solo se anuncia con /usr/share/aurora/explicit-sync o AW_EXPLICIT_SYNC (los clientes que lo
+ * ven lo usan, y el camino de fences de la GPU no esta verificado en todo el hardware).
+ * Acquire: se espera el punto (TIMELINE_WAIT, WAIT_FOR_SUBMIT, 100 ms) antes de leer el buffer.
+ * Release: se senala el punto cuando la copia termino (wl_buffer.release se sigue enviando). */
+static int g_sync_fd = -1;
+struct sync_tl {
+  uint32_t handle;
+  int refs;
+};
+static int sync_open(void) {
+  if (g_sync_fd < 0)
+    g_sync_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+  return g_sync_fd;
+}
+static struct sync_tl *sync_tl_ref(struct sync_tl *t) {
+  if (t)
+    t->refs++;
+  return t;
+}
+static void sync_tl_unref(struct sync_tl *t) {
+  if (!t || --t->refs > 0)
+    return;
+  struct drm_syncobj_destroy d = {.handle = t->handle};
+  ioctl(g_sync_fd, DRM_IOCTL_SYNCOBJ_DESTROY, &d);
+  free(t);
+}
+static void sync_wait_point(struct sync_tl *t, uint64_t pt) {
+  static int logged;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  int64_t abs_ns = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec + 100000000ll;
+  struct drm_syncobj_timeline_wait w = {.handles = (uintptr_t)&t->handle, .points = (uintptr_t)&pt,
+                                        .timeout_nsec = abs_ns, .count_handles = 1,
+                                        .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT};
+  int rc = ioctl(g_sync_fd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &w);
+  if (logged < 20 && (logged++ < 3 || rc != 0))
+    fprintf(stderr, "[aurora-wayland] explicit sync: espera acquire h=%u pt=%llu -> %d (errno %d)\n",
+            t->handle, (unsigned long long)pt, rc, rc ? errno : 0);
+}
+static void sync_signal_point(struct sync_tl *t, uint64_t pt) {
+  static int logged;
+  struct drm_syncobj_timeline_array a = {.handles = (uintptr_t)&t->handle, .points = (uintptr_t)&pt,
+                                         .count_handles = 1};
+  int rc = ioctl(g_sync_fd, DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, &a);
+  if (logged < 20 && (logged++ < 3 || rc != 0))
+    fprintf(stderr, "[aurora-wayland] explicit sync: release h=%u pt=%llu -> %d (errno %d)\n",
+            t->handle, (unsigned long long)pt, rc, rc ? errno : 0);
+}
+
+static void sync_tl_destroy_req(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static void sync_tl_res_destroy(struct wl_resource *r) {
+  sync_tl_unref(wl_resource_get_user_data(r));
+}
+static const struct wp_linux_drm_syncobj_timeline_v1_interface sync_tl_impl = {
+    .destroy = sync_tl_destroy_req,
+};
+
+static void sync_surf_destroy_req(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static void sync_surf_set_point(struct wl_resource *r, struct wl_resource *tlr, uint32_t hi, uint32_t lo,
+                                int acquire) {
+  struct surface *s = wl_resource_get_user_data(r);
+  if (!s) {
+    wl_resource_post_error(r, WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_SURFACE, "superficie destruida");
+    return;
+  }
+  struct sync_tl *t = sync_tl_ref(wl_resource_get_user_data(tlr));
+  uint64_t pt = ((uint64_t)hi << 32) | lo;
+  if (acquire) {
+    sync_tl_unref(s->sync_acq);
+    s->sync_acq = t;
+    s->sync_acq_pt = pt;
+  } else {
+    sync_tl_unref(s->sync_rel);
+    s->sync_rel = t;
+    s->sync_rel_pt = pt;
+  }
+}
+static void sync_surf_set_acquire(struct wl_client *c, struct wl_resource *r, struct wl_resource *tl,
+                                  uint32_t hi, uint32_t lo) {
+  (void)c;
+  sync_surf_set_point(r, tl, hi, lo, 1);
+}
+static void sync_surf_set_release(struct wl_client *c, struct wl_resource *r, struct wl_resource *tl,
+                                  uint32_t hi, uint32_t lo) {
+  (void)c;
+  sync_surf_set_point(r, tl, hi, lo, 0);
+}
+static void sync_surf_res_destroy(struct wl_resource *r) {
+  struct surface *s = wl_resource_get_user_data(r);
+  if (!s)
+    return;
+  s->sync_res = NULL;
+  sync_tl_unref(s->sync_acq);
+  sync_tl_unref(s->sync_rel);
+  s->sync_acq = s->sync_rel = NULL;
+}
+static const struct wp_linux_drm_syncobj_surface_v1_interface sync_surf_impl = {
+    .destroy = sync_surf_destroy_req,
+    .set_acquire_point = sync_surf_set_acquire,
+    .set_release_point = sync_surf_set_release,
+};
+
+static void sync_mgr_destroy_req(struct wl_client *c, struct wl_resource *r) {
+  (void)c;
+  wl_resource_destroy(r);
+}
+static void sync_mgr_get_surface(struct wl_client *c, struct wl_resource *mgr, uint32_t id,
+                                 struct wl_resource *surf) {
+  struct surface *s = wl_resource_get_user_data(surf);
+  if (s->sync_res) {
+    wl_resource_post_error(mgr, WP_LINUX_DRM_SYNCOBJ_MANAGER_V1_ERROR_SURFACE_EXISTS,
+                           "la superficie ya tiene un wp_linux_drm_syncobj_surface_v1");
+    return;
+  }
+  struct wl_resource *r = wl_resource_create(c, &wp_linux_drm_syncobj_surface_v1_interface,
+                                             wl_resource_get_version(mgr), id);
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &sync_surf_impl, s, sync_surf_res_destroy);
+  s->sync_res = r;
+  fprintf(stderr, "[aurora-wayland] explicit sync: get_surface s=%p\n", (void *)s);
+}
+static void sync_mgr_import_timeline(struct wl_client *c, struct wl_resource *mgr, uint32_t id, int32_t fd) {
+  struct drm_syncobj_handle a = {.fd = fd};
+  int dfd = sync_open();
+  int rc = dfd < 0 ? -1 : ioctl(dfd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &a);
+  close(fd);
+  if (rc != 0) {
+    fprintf(stderr, "[aurora-wayland] explicit sync: import_timeline fallo (errno %d)\n", errno);
+    wl_resource_post_error(mgr, WP_LINUX_DRM_SYNCOBJ_MANAGER_V1_ERROR_INVALID_TIMELINE,
+                           "no se pudo importar la timeline");
+    return;
+  }
+  struct sync_tl *t = calloc(1, sizeof(*t));
+  struct wl_resource *r = t ? wl_resource_create(c, &wp_linux_drm_syncobj_timeline_v1_interface,
+                                                 wl_resource_get_version(mgr), id) : NULL;
+  if (!r) {
+    free(t);
+    wl_client_post_no_memory(c);
+    return;
+  }
+  t->handle = a.handle;
+  t->refs = 1;
+  fprintf(stderr, "[aurora-wayland] explicit sync: timeline importada h=%u\n", a.handle);
+  wl_resource_set_implementation(r, &sync_tl_impl, t, sync_tl_res_destroy);
+}
+static const struct wp_linux_drm_syncobj_manager_v1_interface sync_mgr_impl = {
+    .destroy = sync_mgr_destroy_req,
+    .get_surface = sync_mgr_get_surface,
+    .import_timeline = sync_mgr_import_timeline,
+};
+static void sync_mgr_bind(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
+  (void)data;
+  struct wl_resource *r = wl_resource_create(c, &wp_linux_drm_syncobj_manager_v1_interface, 1, id);
+  (void)ver;
+  fprintf(stderr, "[aurora-wayland] explicit sync: un cliente enlazo el manager\n");
+  if (!r) {
+    wl_client_post_no_memory(c);
+    return;
+  }
+  wl_resource_set_implementation(r, &sync_mgr_impl, NULL, NULL);
+}
+
 static void surface_commit(struct wl_client *c, struct wl_resource *r) {
   (void)c;
   struct surface *s = wl_resource_get_user_data(r);
@@ -1692,6 +1871,39 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     need_all = 1;
   }
 
+  /* Explicit sync: validar y tomar los puntos pendientes de este commit. */
+  struct sync_tl *sx_acq = NULL, *sx_rel = NULL;
+  uint64_t sx_apt = 0, sx_rpt = 0;
+  if (s->sync_res) {
+    int has_buf = s->has_attach && s->buffer;
+    if (has_buf && !dmabuf_buf_from(s->buffer)) {
+      wl_resource_post_error(s->sync_res, WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_UNSUPPORTED_BUFFER,
+                             "buffer sin soporte de explicit sync");
+      return;
+    }
+    if (!has_buf && (s->sync_acq || s->sync_rel)) {
+      wl_resource_post_error(s->sync_res, WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_BUFFER, "sin buffer");
+      return;
+    }
+    if (has_buf && !s->sync_acq) {
+      wl_resource_post_error(s->sync_res, WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_ACQUIRE_POINT,
+                             "falta el punto de acquire");
+      return;
+    }
+    if (has_buf && !s->sync_rel) {
+      wl_resource_post_error(s->sync_res, WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_NO_RELEASE_POINT,
+                             "falta el punto de release");
+      return;
+    }
+    if (has_buf && s->sync_acq->handle == s->sync_rel->handle && s->sync_acq_pt >= s->sync_rel_pt) {
+      wl_resource_post_error(s->sync_res, WP_LINUX_DRM_SYNCOBJ_SURFACE_V1_ERROR_CONFLICTING_POINTS,
+                             "acquire >= release en la misma timeline");
+      return;
+    }
+    sx_acq = s->sync_acq; sx_apt = s->sync_acq_pt;
+    sx_rel = s->sync_rel; sx_rpt = s->sync_rel_pt;
+    s->sync_acq = s->sync_rel = NULL;
+  }
   int old_dw = s->dw, old_dh = s->dh;
   int tree_member = s->sub || (xs && (tl || xs->is_popup));
   int ingested = 0;
@@ -1699,6 +1911,8 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
   if (s->has_attach) {
     s->has_attach = 0;
     if (s->buffer) {
+      if (sx_acq)
+        sync_wait_point(sx_acq, sx_apt);
       struct wl_shm_buffer *shm = wl_shm_buffer_get(s->buffer);
       struct dmabuf_buf *db = dmabuf_buf_from(s->buffer);
       if (shm && tree_member) {
@@ -1737,6 +1951,10 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
       need_all = 1;
     }
   }
+  if (sx_rel)
+    sync_signal_point(sx_rel, sx_rpt);
+  sync_tl_unref(sx_acq);
+  sync_tl_unref(sx_rel);
   surface_calc_size(s);
   if (s->dw != old_dw || s->dh != old_dh)
     need_all = 1;
@@ -1828,6 +2046,13 @@ static const struct wl_surface_interface surface_impl = {
 
 static void surface_resource_destroy(struct wl_resource *r) {
   struct surface *s = wl_resource_get_user_data(r);
+  if (s->sync_res) { /* el objeto de explicit sync sobrevive sin superficie */
+    wl_resource_set_user_data(s->sync_res, NULL);
+    sync_tl_unref(s->sync_acq);
+    sync_tl_unref(s->sync_rel);
+    s->sync_acq = s->sync_rel = NULL;
+    s->sync_res = NULL;
+  }
   if (s->fq) {
     wl_list_remove(&s->flink);
     s->fq = 0;
@@ -4198,6 +4423,9 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
 }
 
 static void xwm_ready(void);
+static void xwm_spawn(void);
+static int g_x_glamor_cur;    /* 1 = el Xwayland lanzado usa glamor (sin -shm) */
+static int g_x_glamor_failed; /* glamor fallo: reintentar y quedarse con -shm */
 static int g_xwm_fd = -1; /* extremo nuestro del socket -wm */
 static int g_xready_pipe[2] = {-1, -1};
 static xcb_connection_t *g_xthread_conn;
@@ -4232,6 +4460,12 @@ static void xwm_ready(void) {
     if (g_xpid > 0)
       kill(g_xpid, SIGTERM);
     g_xpid = 0;
+    if (g_x_glamor_cur) { /* glamor no arranco: volver al modo -shm (siempre funciono) */
+      g_x_glamor_failed = 1;
+      g_x_glamor_cur = 0;
+      fprintf(stderr, "[aurora-wayland] Xwayland con glamor fallo: reintento con -shm\n");
+      xwm_spawn();
+    }
     return;
   }
   const xcb_setup_t *setup = xcb_get_setup(g_xc);
@@ -4269,23 +4503,11 @@ static void xwm_ready(void) {
 }
 
 
-/* El driver de /dev/dri/card0 es el de NVIDIA (nvidia-drm). */
-static int card0_is_nvidia(void) {
-  char buf[512];
-  int fd = open("/sys/class/drm/card0/device/uevent", O_RDONLY);
-  if (fd < 0)
-    return 0;
-  ssize_t n = read(fd, buf, sizeof(buf) - 1);
-  close(fd);
-  if (n <= 0)
-    return 0;
-  buf[n] = '\0';
-  const char *d = strstr(buf, "DRIVER=");
-  return d && !strncmp(d + 7, "nvidia", 6);
-}
 
 static void xwm_spawn(void) {
   int sv[2];
+  int want_glamor = !g_x_glamor_failed && (getenv("AW_XGLAMOR") || access("/usr/share/aurora/xglamor", F_OK) == 0);
+  g_x_glamor_cur = want_glamor;
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
     perror("[aurora-wayland] xwm socketpair");
     return;
@@ -4319,12 +4541,6 @@ static void xwm_spawn(void) {
     setenv("WAYLAND_DISPLAY", wsock, 1);
     setenv("XDG_RUNTIME_DIR", "/tmp", 1);
     unsetenv("DISPLAY");
-    /* NVIDIA: Xwayland montaba glamor sobre EGL/GBM de NVIDIA y ofrecia DRI3,
-     * pero los clientes X11 usan Mesa (llvmpipe), que con ese DRI3 cae en un
-     * puntero nulo dentro de libgallium (Wine no llegaba a abrir). Sin glamor
-     * no hay DRI3 y Mesa presenta por MIT-SHM. AW_XGLAMOR=1 lo deja activo. */
-    if (!getenv("AW_XGLAMOR") && (getenv("AW_XNOGLAMOR") || card0_is_nvidia()))
-      setenv("XWAYLAND_NO_GLAMOR", "1", 1);
     if (getenv("AW_XSTRACE")) /* depuracion: traza de syscalls de Xwayland */
       execl("/usr/bin/strace", "strace", "-D", "-f", "-o", getenv("AW_XSTRACE"),
             "/usr/bin/Xwayland", disp, "-rootless", "-shm", "-noreset", "-nolock",
@@ -4333,6 +4549,14 @@ static void xwm_spawn(void) {
       execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
             "-nolock", "-verbose", "10", "-wm", wmfd,
             (char *)NULL);
+    if (want_glamor) { /* experimental: GLX acelerado (glamor+DRI3) con la GPU NVIDIA */
+      setenv("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 0);
+      setenv("GBM_BACKENDS_PATH", "/usr/lib/x86_64-linux-gnu/gbm", 0);
+      setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
+      /* Xwayland 23: glamor es el modo por defecto; solo -shm lo desactiva. */
+      execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-noreset",
+            "-nolock", "-wm", wmfd, (char *)NULL);
+    }
     execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
           "-nolock", "-wm", wmfd, (char *)NULL);
     _exit(127);
@@ -4893,6 +5117,9 @@ int main(int argc, char **argv) {
     printf("%s\n", out);
     return 0;
   }
+  /* Xwayland con glamor: GLX de las apps X11 por la GPU NVIDIA (libglvnd elegiria Mesa/llvmpipe). */
+  if (access("/usr/share/aurora/xglamor", F_OK) == 0)
+    setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
   const char *sock = argc > 1 ? argv[1] : "wayland-0";
   g_sockname = sock;
   signal(SIGPIPE, SIG_IGN);
@@ -4927,6 +5154,10 @@ int main(int argc, char **argv) {
   wl_global_create(g_display, &zwp_primary_selection_device_manager_v1_interface, 1,
                    NULL, psm_bind);
   wl_global_create(g_display, &zwp_linux_dmabuf_v1_interface, 4, NULL, dmabuf_bind);
+  if (getenv("AW_EXPLICIT_SYNC") || access("/usr/share/aurora/explicit-sync", F_OK) == 0) {
+    wl_global_create(g_display, &wp_linux_drm_syncobj_manager_v1_interface, 1, NULL, sync_mgr_bind);
+    fprintf(stderr, "[aurora-wayland] explicit sync (wp_linux_drm_syncobj_v1) anunciado\n");
+  }
   wl_global_create(g_display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
   wl_global_create(g_display, &wp_fractional_scale_manager_v1_interface, 1, NULL,
                    fsm_bind);
