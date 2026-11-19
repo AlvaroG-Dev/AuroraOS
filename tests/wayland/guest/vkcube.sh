@@ -3,7 +3,8 @@
 export XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=wayland-0
 export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-export __NV_DISABLE_EXPLICIT_SYNC=${VK_NOSYNC:-1}
+# VK_NOSYNC=0 vkcube.sh ... -> prueba explicit sync (la variable debe NO existir, no valer 0)
+if [ "${VK_NOSYNC:-1}" = 0 ]; then unset __NV_DISABLE_EXPLICIT_SYNC; else export __NV_DISABLE_EXPLICIT_SYNC=1; fi
 export VK_LOADER_DEBUG=${VK_LOADER_DEBUG:-error,warn}
 S=${1:-15}
 timeout $((S+40)) /usr/bin/aw_vkcube $S ${2:-0} ${3:-480} ${4:-360} >/tmp/vkcube.out 2>&1

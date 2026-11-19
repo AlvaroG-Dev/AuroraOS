@@ -66,6 +66,9 @@ static char *default_envp[] = {
     "EGL_PLATFORM=wayland",
     "LIBGL_ALWAYS_SOFTWARE=1",
     "MESA_SHADER_CACHE_DISABLE=true",
+    // GLX de las apps X11 (Xwayland+glamor) por la GPU NVIDIA: libglvnd elegiria
+    // Mesa/llvmpipe. gpu_env_setup() quita esta linea si card0 no es NVIDIA.
+    "__GLX_VENDOR_LIBRARY_NAME=nvidia",
     // GTK3 / Qt5: sin dconf ni bus de accesibilidad, datos en /usr/share y
     // configuracion de GTK en /usr/share/aurora/xdg (ver settings.ini).
     // Apps X11: Xwayland (lo arranca aurora-wayland) escucha en :0.
@@ -119,7 +122,32 @@ static int gpu_has_hw_3d(void) {
   return 0;
 }
 
+// ¿card0 es una GPU NVIDIA (vendor PCI 0x10de)?
+static int gpu_is_nvidia(void) {
+  char buf[32];
+  int fd = open("/sys/class/drm/card0/device/vendor", O_RDONLY);
+  if (fd < 0)
+    return 0;
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return 0;
+  buf[n] = '\0';
+  return strtoul(buf, NULL, 16) == 0x10de;
+}
+
 static void gpu_env_setup(void) {
+  if (!gpu_is_nvidia()) {
+    for (int i = 0; default_envp[i]; i++) {
+      if (!strncmp(default_envp[i], "__GLX_VENDOR_LIBRARY_NAME=", 26)) {
+        for (int j = i; default_envp[j]; j++)
+          default_envp[j] = default_envp[j + 1];
+        break;
+      }
+    }
+  } else {
+    printf("init: GPU NVIDIA, GLX por libGLX_nvidia\n");
+  }
   if (!gpu_has_hw_3d())
     return;
   for (int i = 0; default_envp[i]; i++) {
