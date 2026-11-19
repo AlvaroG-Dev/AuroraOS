@@ -4268,6 +4268,22 @@ static void xwm_ready(void) {
           g_xdisplay_num);
 }
 
+
+/* El driver de /dev/dri/card0 es el de NVIDIA (nvidia-drm). */
+static int card0_is_nvidia(void) {
+  char buf[512];
+  int fd = open("/sys/class/drm/card0/device/uevent", O_RDONLY);
+  if (fd < 0)
+    return 0;
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return 0;
+  buf[n] = '\0';
+  const char *d = strstr(buf, "DRIVER=");
+  return d && !strncmp(d + 7, "nvidia", 6);
+}
+
 static void xwm_spawn(void) {
   int sv[2];
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
@@ -4303,6 +4319,12 @@ static void xwm_spawn(void) {
     setenv("WAYLAND_DISPLAY", wsock, 1);
     setenv("XDG_RUNTIME_DIR", "/tmp", 1);
     unsetenv("DISPLAY");
+    /* NVIDIA: Xwayland montaba glamor sobre EGL/GBM de NVIDIA y ofrecia DRI3,
+     * pero los clientes X11 usan Mesa (llvmpipe), que con ese DRI3 cae en un
+     * puntero nulo dentro de libgallium (Wine no llegaba a abrir). Sin glamor
+     * no hay DRI3 y Mesa presenta por MIT-SHM. AW_XGLAMOR=1 lo deja activo. */
+    if (!getenv("AW_XGLAMOR") && (getenv("AW_XNOGLAMOR") || card0_is_nvidia()))
+      setenv("XWAYLAND_NO_GLAMOR", "1", 1);
     if (getenv("AW_XSTRACE")) /* depuracion: traza de syscalls de Xwayland */
       execl("/usr/bin/strace", "strace", "-D", "-f", "-o", getenv("AW_XSTRACE"),
             "/usr/bin/Xwayland", disp, "-rootless", "-shm", "-noreset", "-nolock",
