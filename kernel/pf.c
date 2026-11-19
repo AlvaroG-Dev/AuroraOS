@@ -714,6 +714,16 @@ static int handle_page_fault_inner(registers_t *regs) {
       LOG_ERR("[PF]   rsp=%p ret=%p rdi=%p rsi=%p rax=%p rdx=%p",
               (void *)regs->rsp, (void *)ret, (void *)regs->rdi,
               (void *)regs->rsi, (void *)regs->rax, (void *)regs->rdx);
+      // En que fichero estan rip y la direccion de retorno (biblioteca +
+      // offset dentro del fichero, para buscar el simbolo con nm/objdump).
+      uint64_t where[2] = {regs->rip, ret};
+      for (int i = 0; i < 2; i++) {
+        vma_t *cv = where[i] ? vma_find(proc, where[i]) : NULL;
+        if (cv && cv->file_node)
+          LOG_ERR("[PF]   %s en %s+0x%lx", i ? "ret" : "rip",
+                  cv->file_node->name,
+                  (unsigned long)(where[i] - cv->start + cv->file_offset));
+      }
     }
     signal_force_fault(SIGSEGV, 1 /* SEGV_MAPERR */, cr2, regs);
     return 1;

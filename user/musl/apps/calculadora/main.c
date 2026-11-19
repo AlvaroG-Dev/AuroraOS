@@ -26,6 +26,7 @@
 #include <stdio.h>
 
 #include "../../../lib/font_system.c"
+#include "calc_fonts.h"
 
 extern void _exit(int status) __attribute__((noreturn));
 
@@ -317,50 +318,34 @@ static void blend(int xx, int yy, uint32_t col, uint32_t a) {
   g_px[yy * WIN_W + xx] = 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-// Texto escalado (x num/den) con muestreo bilineal del alfa de cada glifo: la
-// fuente del sistema es de 14 px y el visor necesita cifras grandes.
-static int text_w_scaled(const char *s, int num, int den) {
-  int adv = g_font->glyphs['M'].advance;
-  return (int)strlen(s) * adv * num / den;
+// Texto con fuentes ya rasterizadas a su tamaño (calc_fonts.h, Inter): sin
+// escalar, las cifras salen nítidas.
+static int text_w(const font_aa_t *f, const char *s) {
+  int w = 0;
+  for (; *s; s++)
+    if ((unsigned char)*s < 128)
+      w += f->glyphs[(unsigned char)*s].advance;
+  return w;
 }
 
-static uint32_t glyph_alpha(const glyph_aa_t *g, int i, int j) {
-  if (i < 0 || j < 0 || i >= g->width || j >= g->height)
-    return 0;
-  return g->bitmap[j * g->width + i];
-}
+// Altura y posición de las cifras (de '0'): para centrar en vertical.
+static int digit_top(const font_aa_t *f) { return f->height - f->glyphs['0'].bearing_y; }
+static int digit_h(const font_aa_t *f) { return f->glyphs['0'].height; }
 
-static void text_scaled(int x, int y, const char *s, uint32_t col, int num, int den) {
-  int adv = g_font->glyphs['M'].advance;
-  int base = g_font->height - 3;
-  for (int k = 0; s[k]; k++) {
-    unsigned char ch = (unsigned char)s[k];
-    int ox = x + k * adv * num / den;
+// y es la parte de arriba de la celda de la fuente.
+static void text_draw(const font_aa_t *f, int x, int y, const char *s, uint32_t col) {
+  for (; *s; s++) {
+    unsigned char ch = (unsigned char)*s;
     if (ch >= 128)
       continue;
-    const glyph_aa_t *g = &g_font->glyphs[ch];
-    if (!g->bitmap || !g->width || !g->height)
-      continue;
-    // Origen del glifo en coordenadas de la fuente sin escalar.
-    int gx0 = (adv - g->width) / 2 + g->bearing_x;
-    int gy0 = base - g->bearing_y;
-    int x0 = ox + gx0 * num / den, y0 = y + gy0 * num / den;
-    int w = g->width * num / den + 2, h = g->height * num / den + 2;
-    for (int j = 0; j < h; j++)
-      for (int i = 0; i < w; i++) {
-        // Posición en el glifo (sin escalar) del centro del píxel.
-        float fx = ((float)i + 0.5f) * (float)den / (float)num - 0.5f;
-        float fy = ((float)j + 0.5f) * (float)den / (float)num - 0.5f;
-        int ix = (int)floorf(fx), iy = (int)floorf(fy);
-        uint32_t ax = (uint32_t)((fx - (float)ix) * 256.0f);
-        uint32_t ay = (uint32_t)((fy - (float)iy) * 256.0f);
-        uint32_t a00 = glyph_alpha(g, ix, iy), a10 = glyph_alpha(g, ix + 1, iy);
-        uint32_t a01 = glyph_alpha(g, ix, iy + 1), a11 = glyph_alpha(g, ix + 1, iy + 1);
-        uint32_t top = (a00 * (256 - ax) + a10 * ax) >> 8;
-        uint32_t bot = (a01 * (256 - ax) + a11 * ax) >> 8;
-        uint32_t a = (top * (256 - ay) + bot * ay) >> 8;
-        blend(x0 + i, y0 + j, col, a > 255 ? 255 : a);
-      }
+    const glyph_aa_t *g = &f->glyphs[ch];
+    if (g->bitmap && g->width && g->height) {
+      int x0 = x + g->bearing_x, y0 = y + f->height - g->bearing_y;
+      for (int j = 0; j < g->height; j++)
+        for (int i = 0; i < g->width; i++)
+          blend(x0 + i, y0 + j, col, g->bitmap[j * g->width + i]);
+    }
+    x += g->advance;
   }
 }
 
@@ -368,25 +353,24 @@ static void draw_display(void) {
   // Expresión (pequeña) y número (grande), alineados a la derecha.
   int right = WIN_W - PAD - 6;
   if (g_expr[0])
-    text_scaled(right - text_w_scaled(g_expr, 1, 1), PAD + 2, g_expr, P->dim, 1, 1);
+    text_draw(&calc_expr, right - text_w(&calc_expr, g_expr), PAD, g_expr, P->dim);
   char shown[ENTRY_MAX + 2];
   snprintf(shown, sizeof(shown), "%s", g_entry);
   for (char *c = shown; *c; c++)
     if (*c == '.')
       *c = ','; // coma decimal, como en español
-  // Escala que quepa: 3x para números cortos, luego 2,5x, 2x y 1,5x.
-  static const int k_num[] = {3, 5, 2, 3}, k_den[] = {1, 2, 1, 2};
-  int num = 3, den = 1;
+  // El tamaño más grande que quepa.
+  static const font_aa_t *const k_disp[] = {&calc_disp44, &calc_disp36, &calc_disp30, &calc_disp24};
+  const font_aa_t *f = k_disp[3];
   int avail = WIN_W - 2 * PAD - 12;
-  for (int i = 0; i < 4; i++) {
-    num = k_num[i];
-    den = k_den[i];
-    if (text_w_scaled(shown, num, den) <= avail)
+  for (int i = 0; i < 4; i++)
+    if (text_w(k_disp[i], shown) <= avail) {
+      f = k_disp[i];
       break;
-  }
-  int th = g_font->height * num / den;
-  text_scaled(right - text_w_scaled(shown, num, den), DISP_H - th - 6, shown,
-              P->disp_text, num, den);
+    }
+  // Base de las cifras a 14 px del borde de abajo del visor.
+  int y = DISP_H - 14 - digit_h(f) - digit_top(f);
+  text_draw(f, right - text_w(f, shown), y, shown, P->disp_text);
 }
 
 static void draw_keys(void) {
@@ -413,10 +397,10 @@ static void draw_keys(void) {
       bg = P->pressed;
     fill_round(x, y, w, h, 12, bg);
     const char *lab = k->kind == K_AC && (g_typing && strcmp(g_entry, "0")) ? "C" : k->label;
-    int tw = text_w_scaled(lab, 3, 2);
-    int th = g_font->height * 3 / 2;
+    const font_aa_t *f = &calc_key;
+    int tw = text_w(f, lab);
     int lx = k->span > 1 ? x + BTN_W / 2 - tw / 2 : x + (w - tw) / 2;
-    text_scaled(lx, y + (h - th) / 2 + 1, lab, fg, 3, 2);
+    text_draw(f, lx, y + (h - digit_h(f)) / 2 - digit_top(f), lab, fg);
   }
 }
 

@@ -12,6 +12,16 @@ export WINEPREFIX
 [ -n "$XDG_RUNTIME_DIR" ] || export XDG_RUNTIME_DIR=/run/user/$(id -u 2>/dev/null || echo 0)
 # Mono/Gecko no vienen en la ISO: que wineboot no pregunte por ellos.
 case ",$WINEDLLOVERRIDES," in *mscoree*) ;; *) export WINEDLLOVERRIDES="mscoree,mshtml=${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}" ;; esac
+# GPU: dentro de los procesos de Wine, las bibliotecas de usuario de NVIDIA
+# (libGLX_nvidia, que es también el driver de Vulkan) acaban en un puntero
+# nulo y Wine se queda colgado (wineboot no termina, winecfg no se abre).
+# Mientras no esté resuelto, Wine usa Mesa (llvmpipe). AURORA_WINE_GPU=1
+# deja usar la GPU para probarlo.
+if [ "${AURORA_WINE_GPU:-0}" != 1 ]; then
+    export VK_LOADER_DRIVERS_DISABLE='*nvidia*'
+    export __GLX_VENDOR_LIBRARY_NAME=mesa
+    export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+fi
 : "${WINEDEBUG:=-all}"
 export WINEDEBUG
 
