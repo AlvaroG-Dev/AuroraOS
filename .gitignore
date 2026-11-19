@@ -88,3 +88,6 @@ build/inst_vars.fd
 build/install-test.img
 build/installer-disk.img
 build/installer_vars.fd
+
+# Wine descargado por scripts/fetch-wine.sh
+build/wine/

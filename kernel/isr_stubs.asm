@@ -1,8 +1,12 @@
 ; kernel/isr_stubs.asm
 ; Stubs de ISR/IRQ que empujan estado y llaman a handlers en C.
 ;
-; No usamos swapgs ni GS. El acceso a cpu_local se hace por dirección
-; absoluta / RIP-relative (kernel mapeado en todas las tareas).
+; swapgs: en userland %gs lleva la base del usuario (ARCH_SET_GS, el TEB de
+; Wine) y la del kernel (cpu_local_data) espera en MSR_KERNEL_GS_BASE. Las
+; IRQ/MSI/IPI miran el CS guardado (de ring 3 -> swapgs al entrar y al salir).
+; Las excepciones (isr_common) son "paranoicas": leen MSR_GS_BASE, porque un
+; NMI/#MC/#DB puede llegar en el kernel justo antes del swapgs de la entrada
+; de syscall o tras el de la salida.
 ;
 ; Alineación ABI System V: antes de cada CALL, RSP debe ser ≡ 0 (mod 16).
 ; Con 15 pushes queda ≡ 8; añadimos un push dummy al final (16 pushes)
@@ -34,6 +38,10 @@ irq%1:
     push %2
     jmp irq_common
 %endmacro
+
+; int 0x80: syscalls de 32 bits (Wine WoW64 pide así su %fs con
+; set_thread_area, como en Linux).
+ISR_NOERR 128
 
 ; Excepciones CPU (0-31)
 ISR_NOERR 0
@@ -116,6 +124,18 @@ isr_common:
     push r13
     push r14
     push r15
+
+    ; Paranoico: ¿%gs ya es la del kernel (dirección alta)? Si no, swapgs.
+    ; ebx (callee-saved, se conserva en isr_handler) recuerda si hubo que
+    ; hacerlo para deshacerlo a la salida.
+    mov ecx, 0xC0000101              ; MSR_GS_BASE
+    rdmsr
+    xor ebx, ebx
+    test edx, edx
+    js .gs_kernel
+    swapgs
+    mov ebx, 1
+.gs_kernel:
     push r15                         ; dummy: 16 pushes → alineación a 16
 
     mov rdi, rsp
@@ -123,6 +143,10 @@ isr_common:
     call isr_handler
 
     add rsp, 8                       ; quitar dummy
+    test ebx, ebx
+    jz .gs_keep
+    swapgs
+.gs_keep:
     pop r15
     pop r14
     pop r13
@@ -160,6 +184,10 @@ irq_common:
     push r13
     push r14
     push r15
+    test qword [rsp + 144], 3        ; CS guardado: ¿venía de ring 3?
+    jz .irq_common_k_in
+    swapgs
+.irq_common_k_in:
     push r15                         ; dummy: 16 pushes → alineación a 16
 
     mov rdi, rsp
@@ -183,6 +211,10 @@ irq_common:
     pop rcx
     pop rax
     add rsp, 16                      ; limpiar int_num + error_code
+    test qword [rsp + 8], 3          ; CS al que volvemos
+    jz .irq_common_k_out
+    swapgs
+.irq_common_k_out:
     iretq
 
 
@@ -208,7 +240,15 @@ ipi_stub_resched:
     push r9
     push r10
     push r11
+    test qword [rsp + 96], 3         ; CS guardado (9 regs + 2 = 88 bytes, +8 rip)
+    jz .ipi_stub_resched_k_in
+    swapgs
+.ipi_stub_resched_k_in:
     call ipi_handler_resched
+    test qword [rsp + 96], 3
+    jz .ipi_stub_resched_k_out
+    swapgs
+.ipi_stub_resched_k_out:
     pop r11
     pop r10
     pop r9
@@ -242,7 +282,15 @@ ipi_stub_tlb:
     push r9
     push r10
     push r11
+    test qword [rsp + 96], 3         ; CS guardado (9 regs + 2 = 88 bytes, +8 rip)
+    jz .ipi_stub_tlb_k_in
+    swapgs
+.ipi_stub_tlb_k_in:
     call ipi_handler_tlb
+    test qword [rsp + 96], 3
+    jz .ipi_stub_tlb_k_out
+    swapgs
+.ipi_stub_tlb_k_out:
     pop r11
     pop r10
     pop r9
@@ -329,6 +377,10 @@ msi_common:
     push r13
     push r14
     push r15
+    test qword [rsp + 144], 3        ; CS guardado: ¿venía de ring 3?
+    jz .msi_common_k_in
+    swapgs
+.msi_common_k_in:
     push r15                         ; dummy: alineación a 16
 
     mov rdi, rsp
@@ -352,6 +404,10 @@ msi_common:
     pop rcx
     pop rax
     add rsp, 16                      ; limpiar int_num + error_code
+    test qword [rsp + 8], 3          ; CS al que volvemos
+    jz .msi_common_k_out
+    swapgs
+.msi_common_k_out:
     iretq
 
 ; ---------------------------------------------------------------------------

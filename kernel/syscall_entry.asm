@@ -1,7 +1,8 @@
 ; kernel/syscall_entry.asm
 ;
 ; Entrada desde Ring 3 vía SYSCALL.
-; %gs: base apunta a cpu_local_data[cpu] de la CPU actual.
+; Al entrar, swapgs: %gs pasa a cpu_local_data[cpu] (la del usuario queda en
+; MSR_KERNEL_GS_BASE) y al salir otro swapgs la devuelve.
 ;
 ; Construimos un frame que coincide EXACTAMENTE con registers_t:
 ;
@@ -46,11 +47,14 @@ extern syscall_handler_c
 global syscall_entry
 
 ; Constantes de selectores (deben coincidir con gdt.h):
-;   USER_CS_RING3 = 0x1B
-;   USER_DS_RING3 = 0x23
+;   USER_CS_RING3 = 0x33
+;   USER_DS_RING3 = 0x2B
 ;   SYSCALL_INT_NUM = 0xFFFFFFFFFFFFFFFF
 
 syscall_entry:
+    ; Desde userland %gs tiene la base del usuario (ARCH_SET_GS); la del
+    ; kernel (cpu_local_data) está en MSR_KERNEL_GS_BASE. SFMASK ya quitó IF.
+    swapgs
     cli
 
     ; --- Guardar RSP del usuario y cargar kernel stack ---
@@ -60,10 +64,10 @@ syscall_entry:
 
     ; --- Construir el frame de registers_t ---
     ; Hardware frame para iretq.
-    push qword 0x23
+    push qword 0x2B
     push qword [gs:8]
     push r11
-    push qword 0x1B
+    push qword 0x33
     push rcx
 
     ; int_num + error_code.
@@ -132,6 +136,7 @@ syscall_entry:
     ; Forzar IF=1 para que el userland reciba interrupciones.
     or  qword [rsp + 0x10], 0x200
 
+    swapgs
     iretq
 
 section .note.GNU-stack noalloc noexec nowrite progbits

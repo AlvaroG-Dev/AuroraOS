@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Bloc de notas
+Comment=Editor de texto de Windows (Wine)
+Exec=aurora-wine notepad
+Icon=wine
+Terminal=false
+Categories=Wine;
+StartupWMClass=notepad.exe

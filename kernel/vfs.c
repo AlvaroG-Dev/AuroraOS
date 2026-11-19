@@ -776,8 +776,9 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
     node->ref_count = 1;
   }
 
-  if (!node && ops->name &&
-      (strcmp(ops->name, "sysfs") == 0 || strcmp(ops->name, "ext2") == 0)) {
+  // Symlinks en medio de la ruta en cualquier FS (antes solo sysfs y ext2:
+  // en tmpfs fallaba p. ej. el z: -> / de los prefijos de Wine).
+  if (!node && strcmp(norm, "/") != 0) {
     char expanded[VFS_PATH_MAX];
     if (expand_mid_symlink(norm, expanded, sizeof(expanded)))
       return vfs_lookup_rec(expanded, depth + 1, no_follow);

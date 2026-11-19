@@ -18,6 +18,10 @@
 // paginas compartidas (PTE_SPECIAL|PTE_SHARED_OBJ): ni se liberan al
 // desmapear ni se copian en fork.
 #define VMA_SHARED 5
+// vma->pad: VMA_SHARED que en realidad es MAP_PRIVATE de fichero (tmpfs/
+// memfd). Ve las paginas del fichero como Linux ve la page cache: los cambios
+// del fichero se ven hasta que el proceso escribe la pagina (COW).
+#define VMA_F_PRIVRO 0x1
 // [LinuxKPI L4] mmap de un fichero de dispositivo con vm_operations_struct
 // (vfs_ops.mmap_dev). Las paginas son del driver (PTE_SPECIAL|PTE_SHARED_OBJ):
 // ni se liberan al desmapear ni se copian en fork (se comparten). El VMA lleva

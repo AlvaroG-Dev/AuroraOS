@@ -1,0 +1,45 @@
+Windows Registry Editor Version 5.00
+
+; Aspecto de Aurora para Wine (installer/wine). Lo aplica aurora-wine.
+
+[HKEY_CURRENT_USER\Control Panel\Colors]
+"ActiveBorder"="230 235 233"
+"ActiveTitle"="230 235 233"
+"AppWorkSpace"="221 228 225"
+"Background"="244 247 245"
+"ButtonAlternateFace"="233 238 236"
+"ButtonDkShadow"="160 166 163"
+"ButtonFace"="244 247 245"
+"ButtonHilight"="255 255 255"
+"ButtonLight"="233 238 236"
+"ButtonShadow"="205 210 208"
+"ButtonText"="20 33 27"
+"GradientActiveTitle"="230 235 233"
+"GradientInactiveTitle"="244 247 245"
+"GrayText"="140 148 144"
+"Hilight"="62 232 155"
+"HilightText"="4 38 26"
+"HotTrackingColor"="28 138 92"
+"InactiveBorder"="244 247 245"
+"InactiveTitle"="244 247 245"
+"InactiveTitleText"="115 120 118"
+"InfoText"="255 255 255"
+"InfoWindow"="46 46 46"
+"Menu"="255 255 255"
+"MenuBar"="244 247 245"
+"MenuHilight"="62 232 155"
+"MenuText"="20 33 27"
+"Scrollbar"="233 238 236"
+"TitleText"="20 33 27"
+"Window"="255 255 255"
+"WindowFrame"="205 210 208"
+"WindowText"="20 33 27"
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize]
+"AppsUseLightTheme"=dword:00000001
+"SystemUsesLightTheme"=dword:00000001
+
+; Sin estilo visual msstyles: los controles usan esta paleta (solida, sin degradados)
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\ThemeManager]
+"ThemeActive"="0"
+

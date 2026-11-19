@@ -67,6 +67,28 @@ typedef struct task {
   volatile int yield_requested;
 
   uint64_t fs_base;
+  // Base de %gs de userland (arch_prctl ARCH_SET_GS: Wine guarda ahí el TEB).
+  // En el kernel vive en MSR_KERNEL_GS_BASE (swapgs al entrar/salir);
+  // task_switch la guarda y la carga.
+  uint64_t gs_base;
+  // Selector de %fs al salir de la CPU (0 o el TLS de 32 bits de WoW64) y las
+  // entradas TLS de la GDT de esta tarea (set_thread_area). switch.asm guarda
+  // y recarga fs_sel; gdt_load_tls() copia tls_desc a la GDT de la CPU.
+  uint16_t fs_sel;
+  uint16_t fs_pad[3];
+  uint64_t tls_desc[3];
+  // sigaltstack(2) es del hilo (Wine da a cada hilo su pila de señales).
+  uint64_t ss_sp;
+  uint64_t ss_size;
+  int32_t ss_flags; // SS_DISABLE (2) | SS_AUTODISARM (1<<31)
+  // Excepción de CPU que provoca la señal en curso (trapno/err/cr2 en
+  // sigcontext y si_code/si_addr en siginfo: Wine distingue así un fallo
+  // de página de lectura/escritura/ejecución, un #GP, un int3...).
+  int32_t fault_valid;
+  uint64_t fault_trapno;
+  uint64_t fault_err;
+  uint64_t fault_addr;
+  int32_t fault_code;
   registers_t *syscall_regs;
 
   uint32_t *clear_child_tid;
@@ -190,6 +212,8 @@ _Static_assert(offsetof(task_t, fpu_raw) + sizeof(((task_t *)0)->fpu_raw) +
                    sizeof(task_t),
                "fpu_raw demasiado cerca del final de task_t");
 _Static_assert(offsetof(task_t, fs_base) == 0x2A0, "switch.asm: fs_base");
+_Static_assert(offsetof(task_t, gs_base) == 0x2A8, "switch.asm: gs_base");
+_Static_assert(offsetof(task_t, fs_sel) == 0x2B0, "switch.asm: fs_sel");
 // sched_task_ptr_valid() exige que las task_t salgan del SLAB (<= 2048 bytes,
 // SLAB_MAX_SIZE). Si crece por encima, kmalloc la sirve del heap grande y
 // sched_kick_idle_cpu() deja de despertar CPUs ociosas.

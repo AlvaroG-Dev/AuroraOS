@@ -2,6 +2,7 @@
 #include "process.h"
 #include "aur_loader.h"   // [FASE 4.2] struct aur_module_info + parse
 #include "cpu.h"
+#include "gdt.h"
 #include "elf.h"
 #include "futex.h"
 #include "gfx/winsrv.h"
@@ -34,6 +35,7 @@
 
 #define USER_HEAP_BASE 0x0000000040000000ULL
 #define USER_HEAP_MAX 0x0000000048000000ULL // 128 MB max
+#define USER_MMAP_BASE 0x00007e0000000000ULL
 
 static uint32_t next_pid = 1;
 static process_t *process_list = NULL;
@@ -585,6 +587,23 @@ static void process_init_creds(process_t *proc) {
 // Si no hay ninguno, deja 0. Se usa para /proc/<pid>/stat campos 26/27
 // y 45/46.
 // ---------------------------------------------------------------------------
+// Como Linux: el brk empieza justo detrás del ejecutable (antes era fijo en
+// 0x40000000, dentro de los 4 GiB bajos que Wine reserva para Windows) y
+// los mmap sin dirección van altos (USER_MMAP_BASE).
+static void set_brk_after_exe(process_t *proc, const elf_segment_t *segs,
+                              int n) {
+  uint64_t end = 0;
+  for (int i = 0; i < n; i++)
+    if (segs[i].vaddr_end > end)
+      end = segs[i].vaddr_end;
+  if (!end)
+    return;
+  end = (end + 0xFFFULL) & ~0xFFFULL;
+  proc->heap_start = end;
+  proc->heap_end = end;
+  proc->heap_max = end + (USER_HEAP_MAX - USER_HEAP_BASE);
+}
+
 static void calc_elf_code_data_ranges(const elf_segment_t *segs, int n,
                                       uint64_t *sc, uint64_t *ec, uint64_t *sd,
                                       uint64_t *ed) {
@@ -1024,7 +1043,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->heap_start = USER_HEAP_BASE;
   proc->heap_end = USER_HEAP_BASE;
   proc->heap_max = USER_HEAP_MAX;
-  proc->next_mmap_addr = 0x0000000060000000ULL;
+  proc->next_mmap_addr = USER_MMAP_BASE;
 
   proc->vma_list = NULL;
   proc->stack_base = stack_base;
@@ -1168,6 +1187,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   calc_elf_code_data_ranges(exe_segs, n_exe_segs, &proc->start_code,
                             &proc->end_code, &proc->start_data,
                             &proc->end_data);
+  set_brk_after_exe(proc, exe_segs, n_exe_segs);
 
   // [2.3] arg/env en el stack: layout de setup_arg_block.
   //   +0                    argc
@@ -2110,7 +2130,7 @@ static int clone_vmas(process_t *parent, process_t *child) {
     nv->end = v->end;
     nv->flags = v->flags;
     nv->type = v->type;
-    nv->pad = 0;
+    nv->pad = v->pad;
     nv->next = NULL;
 
     // [2.4] Hereda file_fd + file_node con refs propias.
@@ -2218,7 +2238,27 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
     mutex_unlock(&parent->mm_lock);
     return -ENOMEM;
   }
-  child_task->fs_base = parent->fs_base;
+  {
+    // TLS del hilo que llama a fork (puede no ser el principal: el hijo es
+    // una copia de ESE hilo) y su %gs de usuario (Wine: el TEB).
+    task_t *ct = sched_current();
+    child_task->fs_base = (ct && ct->proc == parent) ? ct->fs_base : parent->fs_base;
+    child_task->gs_base = (ct && ct->proc == parent) ? ct->gs_base : 0;
+    if (ct && ct->proc == parent) {
+      // TLS de 32 bits, %fs y altstack: del hilo que hace fork.
+      uint16_t fsel;
+      __asm__ volatile("mov %%fs, %0" : "=r"(fsel));
+      child_task->fs_sel = fsel;
+      if (fsel) {
+        child_task->fs_base = rdmsr(0xC0000100);
+      }
+      for (int i = 0; i < 3; i++)
+        child_task->tls_desc[i] = ct->tls_desc[i];
+      child_task->ss_sp = ct->ss_sp;
+      child_task->ss_size = ct->ss_size;
+      child_task->ss_flags = ct->ss_flags;
+    }
+  }
 
   // 4. process_t del hijo.
   process_t *child = (process_t *)kzalloc(sizeof(process_t));
@@ -2406,7 +2446,19 @@ task_t *process_clone_thread(process_t *parent, registers_t *regs,
     return NULL;
   }
 
-  child_task->fs_base = tls ? tls : parent->fs_base;
+  {
+    task_t *ct = sched_current();
+    uint64_t cur_fs = (ct && ct->proc == parent) ? ct->fs_base : parent->fs_base;
+    child_task->fs_base = tls ? tls : cur_fs;
+    // %gs de usuario: el hilo nuevo hereda la del que lo crea (Wine pone la
+    // suya en cuanto arranca el hilo).
+    child_task->gs_base = (ct && ct->proc == parent) ? ct->gs_base : 0;
+    // Entradas TLS de 32 bits: se copian (Linux copia tls_array en clone).
+    // La altstack no: un hilo nuevo empieza sin ella.
+    if (ct && ct->proc == parent)
+      for (int i = 0; i < 3; i++)
+        child_task->tls_desc[i] = ct->tls_desc[i];
+  }
   child_task->cpu_affinity = smp_processor_id();
 
   task_get(child_task);
@@ -2681,7 +2733,7 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   proc->heap_start = USER_HEAP_BASE;
   proc->heap_end = USER_HEAP_BASE;
   proc->heap_max = USER_HEAP_MAX;
-  proc->next_mmap_addr = 0x0000000060000000ULL;
+  proc->next_mmap_addr = USER_MMAP_BASE;
   proc->stack_base = stack_base;
   proc->stack_low = stack_base - MAX_STACK_GROWTH;
   proc->stack_top = stack_top;
@@ -2720,6 +2772,27 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   proc->fs_base = 0;
   if (proc->task)
     proc->task->fs_base = 0;
+  {
+    // execve: sin %gs de usuario (la del programa anterior no vale).
+    task_t *ct = sched_current();
+    if (ct && ct->proc == proc) {
+      ct->gs_base = 0;
+      wrmsr(MSR_KERNEL_GS_BASE, 0);
+      // Ni TLS de 32 bits ni altstack del programa anterior.
+      __asm__ volatile("mov %0, %%fs" ::"r"((uint32_t)0));
+      wrmsr(0xC0000100, 0);
+      ct->fs_sel = 0;
+      ct->fs_base = 0;
+      for (int i = 0; i < 3; i++)
+        ct->tls_desc[i] = 0;
+      gdt_load_tls(ct);
+      ct->ss_sp = 0;
+      ct->ss_size = 0;
+      ct->ss_flags = 2;
+    }
+    if (proc->task)
+      proc->task->gs_base = 0;
+  }
 
   {
     const char *base = path;
@@ -2798,6 +2871,7 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
   calc_elf_code_data_ranges(exe_segs, n_exe_segs, &proc->start_code,
                             &proc->end_code, &proc->start_data,
                             &proc->end_data);
+  set_brk_after_exe(proc, exe_segs, n_exe_segs);
   proc->arg_start = user_rsp + 8;
   proc->arg_end = user_rsp + 8 + 8ULL * (uint64_t)(argc + 1);
   proc->env_start = proc->arg_end;

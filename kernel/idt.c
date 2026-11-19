@@ -2,6 +2,7 @@
 // IDT, ISR handlers y PIC
 
 #include "idt.h"
+#include "gdt.h"
 #include "rseq.h"
 #include "ipi.h"
 #include "irq_threaded.h"
@@ -273,9 +274,17 @@ void idt_init(void) {
   for (uint8_t i = 0; i < 48; i++) {
     idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
   }
+  // int3 / into desde userland (DPL 3), como Linux: SIGTRAP en vez de #GP.
+  idt_set_gate(3, isr_stub_table[3], 0x08, 0xEE);
+  idt_set_gate(4, isr_stub_table[4], 0x08, 0xEE);
 
   // Vector 48: LAPIC timer.
   idt_set_gate(48, (uint64_t)irq48, 0x08, 0x8E);
+  {
+    extern void isr128(void);
+    // DPL 3: int 0x80 desde userland (ABI i386 de Linux).
+    idt_set_gate(0x80, (uint64_t)isr128, 0x08, 0xEE);
+  }
 
   // [SMP 4.4] IPIs. Vectores 0xFB (resched) y 0xFC (TLB).
   idt_set_gate(IPI_VECTOR_RESCHED, (uint64_t)ipi_stub_resched, 0x08, 0x8E);
@@ -325,7 +334,48 @@ void isr_handler(registers_t *regs) {
     }
   }
 
+  if (regs->int_num == 0x80 && (regs->cs & 3) == 3) {
+    // ABI i386: eax = número, ebx/ecx/edx/esi/edi/ebp = argumentos.
+    // Solo lo que usa Wine desde 64 bits (TLS de 32 bits); punteros de
+    // 32 bits como en Linux.
+    uint32_t nr = (uint32_t)regs->rax;
+    void *arg = (void *)(uint64_t)(uint32_t)regs->rbx;
+    int64_t r;
+    if (nr == 243)
+      r = gdt_set_thread_area(sched_current(), arg);
+    else if (nr == 244)
+      r = gdt_get_thread_area(sched_current(), arg);
+    else {
+      LOG_WARN("[SYSCALL-GAP] int 0x80 nr=%u (i386) no implementada", nr);
+      r = -38; // ENOSYS
+    }
+    regs->rax = (uint64_t)r;
+    return;
+  }
+
   if ((regs->cs & 3) == 3) {
+    // Como Linux: la excepción llega al proceso como señal (Wine las
+    // convierte en excepciones de Windows: SEH).
+    int sig = 0, code = 0x80; // SI_KERNEL
+    switch (regs->int_num) {
+    case 0: sig = SIGFPE; code = 1; break;   // FPE_INTDIV
+    case 1: sig = SIGTRAP; code = 2; break;  // TRAP_TRACE
+    case 3: sig = SIGTRAP; break;            // int3
+    case 4: case 5: case 10: case 11: case 12: case 13:
+      sig = SIGSEGV; break;
+    case 6: sig = SIGILL; code = 2; break;   // ILL_ILLOPN
+    case 16: case 19: sig = SIGFPE; code = 0; break;
+    case 17: sig = SIGBUS; code = 1; break;  // BUS_ADRALN
+    default: break;
+    }
+    if (sig) {
+      LOG_INFO("[ISR] excepción #%lu (%s) en userspace: rip=%p err=0x%lx -> señal %d",
+               (unsigned long)regs->int_num,
+               (regs->int_num < 32) ? exception_names[regs->int_num] : "?",
+               (void *)regs->rip, (unsigned long)regs->error_code, sig);
+      signal_force_fault(sig, code, (regs->int_num == 3) ? 0 : regs->rip, regs);
+      return;
+    }
     LOG_ERR("[ISR] excepción #%lu (%s) en userspace: rip=%p rsp=%p err=0x%lx",
             (unsigned long)regs->int_num,
             (regs->int_num < 32) ? exception_names[regs->int_num] : "?",

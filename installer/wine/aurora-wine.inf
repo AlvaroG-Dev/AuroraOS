@@ -1,0 +1,50 @@
+
+; ---- AuroraOS: aspecto de Aurora para cada prefijo nuevo (fetch-wine.sh) ----
+[AuroraTheme]
+HKCU,"Control Panel\Colors","ActiveBorder",,"38 38 40"
+HKCU,"Control Panel\Colors","ActiveTitle",,"38 38 40"
+HKCU,"Control Panel\Colors","AppWorkSpace",,"20 20 20"
+HKCU,"Control Panel\Colors","Background",,"10 10 10"
+HKCU,"Control Panel\Colors","ButtonAlternateFace",,"36 36 36"
+HKCU,"Control Panel\Colors","ButtonDkShadow",,"20 20 20"
+HKCU,"Control Panel\Colors","ButtonFace",,"30 30 30"
+HKCU,"Control Panel\Colors","ButtonHilight",,"58 58 58"
+HKCU,"Control Panel\Colors","ButtonLight",,"46 46 46"
+HKCU,"Control Panel\Colors","ButtonShadow",,"58 58 58"
+HKCU,"Control Panel\Colors","ButtonText",,"255 255 255"
+HKCU,"Control Panel\Colors","GradientActiveTitle",,"38 38 40"
+HKCU,"Control Panel\Colors","GradientInactiveTitle",,"30 30 30"
+HKCU,"Control Panel\Colors","GrayText",,"115 115 115"
+HKCU,"Control Panel\Colors","Hilight",,"62 232 155"
+HKCU,"Control Panel\Colors","HilightText",,"4 38 26"
+HKCU,"Control Panel\Colors","HotTrackingColor",,"62 232 155"
+HKCU,"Control Panel\Colors","InactiveBorder",,"30 30 30"
+HKCU,"Control Panel\Colors","InactiveTitle",,"30 30 30"
+HKCU,"Control Panel\Colors","InactiveTitleText",,"163 163 163"
+HKCU,"Control Panel\Colors","InfoText",,"255 255 255"
+HKCU,"Control Panel\Colors","InfoWindow",,"46 46 46"
+HKCU,"Control Panel\Colors","Menu",,"36 36 36"
+HKCU,"Control Panel\Colors","MenuBar",,"30 30 30"
+HKCU,"Control Panel\Colors","MenuHilight",,"62 232 155"
+HKCU,"Control Panel\Colors","MenuText",,"255 255 255"
+HKCU,"Control Panel\Colors","Scrollbar",,"30 30 30"
+HKCU,"Control Panel\Colors","TitleText",,"255 255 255"
+HKCU,"Control Panel\Colors","Window",,"26 26 26"
+HKCU,"Control Panel\Colors","WindowFrame",,"58 58 58"
+HKCU,"Control Panel\Colors","WindowText",,"255 255 255"
+HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","AppsUseLightTheme",0x10001,0
+HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","SystemUsesLightTheme",0x10001,0
+; Sin estilo visual msstyles: los controles clásicos usan la paleta de arriba (sólida, sin degradados)
+HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ThemeActive",,"0"
+; Tipografía de Aurora (Inter) en los diálogos
+HKCU,"Software\Wine\Fonts\Replacements","Tahoma",,"Inter"
+HKCU,"Software\Wine\Fonts\Replacements","MS Shell Dlg",,"Inter"
+HKCU,"Software\Wine\Fonts\Replacements","MS Shell Dlg 2",,"Inter"
+HKCU,"Software\Wine\Fonts\Replacements","Segoe UI",,"Inter"
+HKCU,"Software\Wine\Fonts\Replacements","Microsoft Sans Serif",,"Inter"
+HKCU,"Software\Wine\Fonts\Replacements","MS Sans Serif",,"Inter"
+; Ventanas gestionadas por aurora-wayland (barra de título de Aurora)
+HKCU,"Software\Wine\X11 Driver","Managed",,"Y"
+HKCU,"Software\Wine\X11 Driver","Decorated",,"Y"
+; Sin degradados en los títulos que dibuja Wine (MDI, ventanas sin gestor)
+HKCU,"Control Panel\Desktop","UserPreferencesMask",0x1,8e,1e,07,80,12,00,00,00

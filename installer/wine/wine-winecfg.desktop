@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Configuración de Wine
+Comment=Ajustes de Wine para las aplicaciones Windows
+Exec=aurora-wine winecfg
+Icon=wine
+Terminal=false
+Categories=Wine;
+StartupWMClass=winecfg.exe

@@ -265,8 +265,8 @@ __attribute__((noreturn)) static void panic_v(registers_t *regs,
 
   uint64_t star = rdmsr(MSR_STAR);
   uint16_t r3_cs = (uint16_t)((star >> 48) & 0xFFFF);
-  LOG_PANIC("STAR R3_CS=0x%x (expected USER_CS=0x%x)", r3_cs, USER_CS);
-  LOG_PANIC("sysret will load CS=0x%x SS=0x%x", r3_cs | 3, (r3_cs + 8) | 3);
+  LOG_PANIC("STAR R3_CS=0x%x (expected USER_STAR_BASE=0x%x)", r3_cs, USER_STAR_BASE);
+  LOG_PANIC("sysret will load CS=0x%x SS=0x%x", (r3_cs + 16) | 3, (r3_cs + 8) | 3);
 
   if (regs) {
     serial_puts("\n--- Backtrace ---");

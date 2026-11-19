@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Archivos de Windows
+Comment=Explorador de archivos de Wine
+Exec=aurora-wine winefile
+Icon=wine
+Terminal=false
+Categories=Wine;
+StartupWMClass=winefile.exe

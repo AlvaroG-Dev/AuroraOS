@@ -11,6 +11,7 @@
 #include "sched.h"
 #include "serial.h"
 #include "signal.h"
+#include "memfd.h"
 #include "string.h"
 #include "swap.h"
 #include "uaccess.h"
@@ -285,6 +286,28 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     uint64_t sphys = 0;
     if (sf->node->ops->get_page(sf->node, pgoff, &sphys) != 0 || !sphys)
       return 0;
+    if (vma->pad & VMA_F_PRIVRO) {
+      // MAP_PRIVATE de fichero: leer comparte la pagina del fichero (sin
+      // escritura); escribir la copia (COW, como la page cache de Linux).
+      if (is_write) {
+        uint64_t np = pmm_alloc_page();
+        if (!np)
+          return 0;
+        memcpy(phys_to_virt(np), phys_to_virt(sphys), PAGE_SIZE);
+        if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), spage,
+                               np, vma->flags | PTE_PRESENT) != 0) {
+          pmm_free_page(np);
+          return 0;
+        }
+        return 1;
+      }
+      if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), spage,
+                             sphys,
+                             (vma->flags & ~(uint64_t)PTE_WRITABLE) |
+                                 PTE_PRESENT | PTE_SPECIAL | PTE_SHARED_OBJ) != 0)
+        return 0;
+      return 1;
+    }
     if (paging_map_page_in((uint64_t *)phys_to_virt(proc->pml4_phys), spage,
                            sphys,
                            vma->flags | PTE_PRESENT | PTE_SPECIAL |
@@ -389,6 +412,45 @@ static int pf_try_demand_paging(struct process *proc, uint64_t cr2,
 // Tambien cubre el fallo "espurio" de un TLB viejo: el PTE ya es escribible
 // y solo hay que invalidar la entrada local.
 // ---------------------------------------------------------------------------
+// Escritura sobre una pagina de fichero compartida en un MAP_PRIVATE
+// (VMA_SHARED + VMA_F_PRIVRO): se copia a una pagina propia del proceso.
+// 1 resuelto, 0 no es el caso, -1 sin memoria.
+static int pf_privfile_cow(struct process *proc, uint64_t cr2) {
+  uint64_t page_va = cr2 & ~0xFFFULL;
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  uint64_t pte;
+  mutex_lock(&proc->mm_lock);
+  vma_t *vma = vma_find(proc, page_va);
+  if (!vma || vma->type != VMA_SHARED || !(vma->pad & VMA_F_PRIVRO) ||
+      !(vma->flags & PTE_WRITABLE) || !paging_get_pte_in(pml4, page_va, &pte) ||
+      !(pte & PTE_PRESENT)) {
+    mutex_unlock(&proc->mm_lock);
+    return 0;
+  }
+  if (pte & PTE_WRITABLE) { // otro hilo ya la copio
+    mutex_unlock(&proc->mm_lock);
+    paging_invalidate_tlb(page_va);
+    return 1;
+  }
+  if (!(pte & PTE_SHARED_OBJ)) {
+    mutex_unlock(&proc->mm_lock);
+    return 0;
+  }
+  uint64_t np = pmm_alloc_page();
+  if (!np) {
+    mutex_unlock(&proc->mm_lock);
+    return -1;
+  }
+  memcpy(phys_to_virt(np), phys_to_virt(pte & PTE_FRAME), PAGE_SIZE);
+  paging_map_page_in(pml4, page_va, np, vma->flags | PTE_PRESENT);
+  mutex_unlock(&proc->mm_lock);
+  if (proc->team_size > 1)
+    paging_invalidate_tlb_global(page_va);
+  else
+    paging_invalidate_tlb(page_va);
+  return 1;
+}
+
 static int pf_handle_cow(struct process *proc, uint64_t cr2) {
   uint64_t page_va = cr2 & ~0xFFFULL;
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
@@ -494,6 +556,15 @@ static int handle_page_fault_inner(registers_t *regs) {
       if ((err & 0x02) != 0) {
         struct process *cproc = process_current();
         if (cproc) {
+          int fcrc = pf_privfile_cow(cproc, cr2);
+          if (fcrc > 0) {
+            pf_resolved++;
+            return 1;
+          }
+          if (fcrc < 0) {
+            kill_current_process(regs, "out of memory (COW)");
+            return 1;
+          }
           int crc = pf_handle_cow(cproc, cr2);
           if (crc > 0) {
             pf_resolved++;
@@ -528,11 +599,19 @@ static int handle_page_fault_inner(registers_t *regs) {
       // Página presente + cualquier fallo = violación de permisos.
       {
         struct process *dp = process_current();
-        LOG_WARN("[PF] violacion de permisos: PID=%u rip=%p cr2=%p err=0x%lx",
+        vma_t *dv = dp ? vma_find(dp, cr2) : NULL;
+        uint64_t dpte = 0;
+        if (dp)
+          paging_get_pte_in((uint64_t *)phys_to_virt(dp->pml4_phys),
+                            cr2 & ~0xFFFULL, &dpte);
+        LOG_WARN("[PF] violacion de permisos: PID=%u rip=%p cr2=%p err=0x%lx "
+                 "pte=0x%lx vma=[%p-%p) flags=0x%lx",
                  dp ? dp->pid : 0, (void *)regs->rip, (void *)cr2,
-                 (unsigned long)err);
+                 (unsigned long)err, (unsigned long)dpte,
+                 dv ? (void *)dv->start : 0, dv ? (void *)dv->end : 0,
+                 dv ? (unsigned long)dv->flags : 0UL);
       }
-      signal_deliver_from_exception(SIGSEGV, regs);
+      signal_force_fault(SIGSEGV, 2 /* SEGV_ACCERR */, cr2, regs);
       pf_resolved++;
       return 1;
     }
@@ -609,13 +688,20 @@ static int handle_page_fault_inner(registers_t *regs) {
                 proc->pid, (void *)cr2);
         kill_current_process(regs, "out of memory");
       } else {
-        kill_current_process(regs, "VMA permission violation");
+        LOG_WARN("[PF] PID=%u rip=%p cr2=%p err=0x%lx: acceso no permitido "
+                 "por el VMA [%p-%p) flags=0x%lx -> SIGSEGV",
+                 proc->pid, (void *)regs->rip, (void *)cr2,
+                 (unsigned long)err, (void *)vma->start, (void *)vma->end,
+                 (unsigned long)vma->flags);
+        signal_force_fault(SIGSEGV, 2 /* SEGV_ACCERR */, cr2, regs);
       }
       return 1;
     }
 
     if (cr2 >= proc->stack_guard && cr2 < proc->stack_guard + PAGE_SIZE) {
-      kill_current_process(regs, "stack overflow (guard page)");
+      LOG_WARN("[PF] PID=%u: desbordamiento de pila (guarda) -> SIGSEGV",
+               proc->pid);
+      signal_force_fault(SIGSEGV, 1 /* SEGV_MAPERR */, cr2, regs);
       return 1;
     }
     LOG_ERR("[PF] PID=%u addr=%p rip=%p cr2=%p - not in any VMA",
@@ -629,7 +715,7 @@ static int handle_page_fault_inner(registers_t *regs) {
               (void *)regs->rsp, (void *)ret, (void *)regs->rdi,
               (void *)regs->rsi, (void *)regs->rax, (void *)regs->rdx);
     }
-    kill_current_process(regs, "address not in any VMA");
+    signal_force_fault(SIGSEGV, 1 /* SEGV_MAPERR */, cr2, regs);
     return 1;
   }
 
@@ -644,6 +730,11 @@ static int handle_page_fault_inner(registers_t *regs) {
 
   // [COW] El kernel (copy_to_user, etc.) escribio sobre una pagina compartida
   // por fork. Con CR0.WP llega aqui como fallo de proteccion.
+  if ((err & 0x03) == 0x03 && proc && proc->pml4_phys &&
+      pf_privfile_cow(proc, cr2) > 0) {
+    pf_resolved++;
+    return 1;
+  }
   if ((err & 0x03) == 0x03 && proc && proc->pml4_phys) {
     int crc = pf_handle_cow(proc, cr2);
     if (crc > 0) {
@@ -741,7 +832,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
       right->end = v->end;
       right->flags = v->flags;
       right->type = v->type;
-      right->pad = 0;
+      right->pad = v->pad;
       right->next = NULL;
       vma_inherit_backing(right, v, end - v->start);
       *new_vmas_tail = right;
@@ -773,9 +864,15 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
 
       uint64_t phys = paging_get_phys_in(pml4, p);
       if (phys) {
+        uint64_t praw = 0;
+        paging_get_pte_in(pml4, p, &praw);
         paging_unmap_page_in(pml4, p);
         // [FASE 4.3] No liberar física de VMA_MMIO (BAR PCI)
         if (v->type != VMA_MMIO && v->type != VMA_SHARED && v->type != VMA_DEV)
+          pmm_free_page(phys);
+        // MAP_PRIVATE de fichero: las copias propias (COW) si son del proceso.
+        else if (v->type == VMA_SHARED && (v->pad & VMA_F_PRIVRO) &&
+                 !(praw & (PTE_SPECIAL | PTE_SHARED_OBJ)))
           pmm_free_page(phys);
       }
     }
@@ -939,7 +1036,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->end = v->end;
       right->flags = v->flags;
       right->type = v->type;
-      right->pad = 0;
+      right->pad = v->pad;
       right->next = v->next;
       vma_inherit_backing(right, v, end - v->start);
       vma_dev_inherit(right, v, proc);
@@ -955,7 +1052,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->end = v->end;
       mid->flags = new_flags;
       mid->type = v->type;
-      mid->pad = 0;
+      mid->pad = v->pad;
       mid->next = v->next;
       vma_inherit_backing(mid, v, addr - v->start);
       vma_dev_inherit(mid, v, proc);
@@ -973,7 +1070,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       mid->end = end;
       mid->flags = new_flags;
       mid->type = v->type;
-      mid->pad = 0;
+      mid->pad = v->pad;
       mid->next = right;
       vma_inherit_backing(mid, v, addr - v->start);
       vma_dev_inherit(mid, v, proc);
@@ -982,7 +1079,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       right->end = v->end;
       right->flags = v->flags;
       right->type = v->type;
-      right->pad = 0;
+      right->pad = v->pad;
       right->next = v->next;
       vma_inherit_backing(right, v, end - v->start);
       vma_dev_inherit(right, v, proc);
@@ -1015,6 +1112,13 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
       // escribible aqui: la primera escritura la copiara en pf_handle_cow.
       if (raw & PTE_COW)
         pflags &= ~(uint64_t)PTE_WRITABLE;
+      // Pagina del fichero en un MAP_PRIVATE: sigue de solo lectura, la
+      // primera escritura la copia (pf_privfile_cow).
+      if ((raw & PTE_SHARED_OBJ) && (pflags & PTE_WRITABLE)) {
+        vma_t *fv = vma_find(proc, p);
+        if (fv && fv->type == VMA_SHARED && (fv->pad & VMA_F_PRIVRO))
+          pflags &= ~(uint64_t)PTE_WRITABLE;
+      }
       paging_map_page_in(pml4, p, raw & PTE_FRAME, pflags);
       if (multi)
         need_global = 1;
@@ -1134,8 +1238,11 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
     }
     if (base == 0) {
       uint64_t next = proc->next_mmap_addr;
-      if (next < 0x0000000040000000ULL)
-        next = 0x0000000060000000ULL;
+      int low32 = (flags & 0x40) != 0; // MAP_32BIT: por debajo de 2 GiB
+      if (low32)
+        next = 0x0000000040000000ULL;
+      else if (next < 0x0000000040000000ULL)
+        next = 0x00007e0000000000ULL;
       uint64_t candidate = (next + 0xFFFULL) & ~0xFFFULL;
       // Saltar los VMAs que ya ocupen el hueco (mapeos con hint, MAP_FIXED,
       // mremap...): la lista esta ordenada por direccion creciente.
@@ -1152,13 +1259,34 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
         candidate = (hit->end + 0xFFFULL) & ~0xFFFULL;
       }
       uint64_t end = candidate + len;
-      if (end < candidate || end > 0x00007F0000000000ULL)
+      if (end < candidate || end > 0x00007F0000000000ULL ||
+          (low32 && end > 0x0000000080000000ULL))
         return -ENOMEM;
       base = candidate;
-      proc->next_mmap_addr = end;
+      if (!low32)
+        proc->next_mmap_addr = end;
     }
   }
 
+  if (is_anon && (flags & MMAP_MAP_SHARED)) {
+    // MAP_SHARED|MAP_ANONYMOUS: memoria que fork comparte (no COW). Va sobre
+    // un memfd interno, como shmat (sysvshm.c), y hereda su MAP_SHARED.
+    file_descriptor_t *mf = memfd_new_kernel("dev/zero", len);
+    if (!mf)
+      return -ENOMEM;
+    int tfd = vfs_fd_install_ref(proc, mf, 1);
+    if (tfd < 0) {
+      vfs_fd_put_ref(mf);
+      return tfd;
+    }
+    int64_t r = sys_mmap(proc, base, len, prot,
+                         (flags & ~(uint64_t)(MMAP_MAP_ANONYMOUS |
+                                              MMAP_MAP_FIXED_NOREPLACE)) |
+                             MMAP_MAP_FIXED,
+                         tfd, 0);
+    vfs_close_for_proc(proc, tfd);
+    return r;
+  }
   if (is_anon) {
     vma_t *v = vma_create(proc, base, base + len, pte_flags, VMA_ANON);
     if (!v)
@@ -1220,6 +1348,23 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
       if (!v)
         return -ENOMEM;
       v->type = VMA_SHARED;
+      return (int64_t)base;
+    }
+    // MAP_PRIVATE de solo lectura sobre tmpfs/memfd: comparte las paginas del
+    // fichero (como la page cache de Linux), asi ve lo que otro proceso
+    // escribe despues. Wine mapea asi la memoria de sesion de wineserver
+    // (vistas PAGE_READONLY): con una copia al primer fallo los clientes
+    // leian objetos viejos ("Session object id doesn't match").
+    if (!(flags & MMAP_MAP_SHARED) &&
+        (f->node->flags & VFS_FILE) && f->node->ops && f->node->ops->get_page &&
+        !(f->node->fs && f->node->fs->name &&
+          strcmp(f->node->fs->name, "ext2") == 0) &&
+        !(offset & 0xFFFULL)) {
+      vma_t *v = vma_create_file(proc, base, base + len, pte_flags, f, offset);
+      if (!v)
+        return -ENOMEM;
+      v->type = VMA_SHARED;
+      v->pad = VMA_F_PRIVRO;
       return (int64_t)base;
     }
     // MAP_SHARED escribible sobre un FS sin get_page no se puede honrar. De
@@ -1333,6 +1478,7 @@ int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
     return -ENOMEM;
   }
   nv->type = v->type;
+  nv->pad = v->pad;
   nv->flags = v->flags;
   vma_inherit_backing(nv, v, old_addr - v->start);
 

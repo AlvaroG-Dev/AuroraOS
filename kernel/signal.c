@@ -1,4 +1,5 @@
 #include "signal.h"
+#include "gdt.h"
 #include "klog.h"
 #include "process.h"
 #include "sched.h"
@@ -116,6 +117,23 @@ sig_action_t signal_default_action(int sig) {
 #define G_TRAPNO 0xa0
 #define G_OLDMASK 0xa8
 #define G_CR2 0xb0
+#define G_FPSTATE 0xb8
+#define SF_FPSTATE 0x1b8 // 16-alineado: frame_va % 16 == 8
+
+// MXCSR_MASK de la CPU (bits de MXCSR que fxrstor acepta).
+static uint32_t g_mxcsr_mask;
+static uint32_t mxcsr_mask(void) {
+  if (!g_mxcsr_mask) {
+    uint8_t raw[512 + 16];
+    uint8_t *buf = (uint8_t *)(((uintptr_t)raw + 15) & ~(uintptr_t)15);
+    memset(buf, 0, 512);
+    __asm__ volatile("fxsave64 (%0)" ::"r"(buf) : "memory");
+    uint32_t m;
+    memcpy(&m, buf + 28, 4);
+    g_mxcsr_mask = m ? m : 0xFFBF;
+  }
+  return g_mxcsr_mask;
+}
 
 static int w_u64(uint64_t va, uint64_t v) {
   return copy_to_user((void *)va, &v, 8);
@@ -182,16 +200,40 @@ static int build_frame(uint64_t frame_va, int sig, const k_sigaction_t *act,
     return -1;
   if (w_u64(mc + G_EFL, regs->rflags) < 0)
     return -1;
-  if (w_u64(mc + G_CSGSFS, (uint64_t)regs->cs) < 0)
+  task_t *ft = sched_current();
+  int fv = ft && ft->fault_valid;
+  {
+    // cs | gs<<16 | fs<<32 | ss<<48, como Linux (Wine mira cs y fs para
+    // saber si el hilo estaba en código de 32 bits).
+    uint16_t fsel = 0;
+    __asm__ volatile("mov %%fs, %0" : "=r"(fsel));
+    uint64_t csgsfs = (uint64_t)(uint16_t)regs->cs |
+                      ((uint64_t)fsel << 32) |
+                      ((uint64_t)(uint16_t)regs->ss << 48);
+    if (w_u64(mc + G_CSGSFS, csgsfs) < 0)
+      return -1;
+  }
+  if (w_u64(mc + G_ERR, fv ? ft->fault_err : 0) < 0)
     return -1;
-  if (w_u64(mc + G_ERR, 0) < 0)
-    return -1;
-  if (w_u64(mc + G_TRAPNO, (uint64_t)sig) < 0)
+  if (w_u64(mc + G_TRAPNO, fv ? ft->fault_trapno : 0) < 0)
     return -1;
   if (w_u64(mc + G_OLDMASK, sigset_to_user(old_mask)) < 0)
     return -1;
-  if (w_u64(mc + G_CR2, 0) < 0)
+  if (w_u64(mc + G_CR2, fv ? ft->fault_addr : 0) < 0)
     return -1;
+  {
+    // Estado FPU/SSE del código interrumpido: el manejador puede usar SSE
+    // y rt_sigreturn lo restaura (Wine además lo lee para el CONTEXT).
+    // La pila del kernel no siempre está alineada a 16 (fxsave lo exige).
+    uint8_t raw[512 + 16];
+    uint8_t *fx = (uint8_t *)(((uintptr_t)raw + 15) & ~(uintptr_t)15);
+    memset(fx, 0, 512);
+    __asm__ volatile("fxsave64 (%0)" ::"r"(fx) : "memory");
+    if (copy_to_user((void *)(frame_va + SF_FPSTATE), fx, 512) < 0)
+      return -1;
+    if (w_u64(mc + G_FPSTATE, frame_va + SF_FPSTATE) < 0)
+      return -1;
+  }
 
   // uc_sigmask
   if (w_u64(frame_va + SF_UC_SIGMASK, sigset_to_user(old_mask)) < 0)
@@ -203,8 +245,13 @@ static int build_frame(uint64_t frame_va, int sig, const k_sigaction_t *act,
     return -1; // si_signo
   if (w_u32(si + 0x04, 0) < 0)
     return -1; // si_errno
-  if (w_u32(si + 0x08, 0) < 0)
-    return -1; // si_code = SI_USER
+  if (w_u32(si + 0x08, fv ? (uint32_t)ft->fault_code : 0) < 0)
+    return -1; // si_code (SI_USER o el de la excepción)
+  if (fv) {
+    if (w_u64(si + 0x10, ft->fault_addr) < 0)
+      return -1; // si_addr
+    ft->fault_valid = 0;
+  }
 
   return 0;
 }
@@ -244,10 +291,14 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   // ss_flags == SS_DISABLE (2) significa "sin altstack".
   uint64_t sp_base = regs->rsp;
   int on_altstack = 0;
-  if ((act->flags & SA_ONSTACK) && proc->sigaltstack_sp != 0 &&
-      proc->sigaltstack_flags != 2 /* SS_DISABLE */ &&
-      proc->sigaltstack_size >= SF_SIZE) {
-    sp_base = proc->sigaltstack_sp + proc->sigaltstack_size;
+  task_t *st = sched_current();
+  // Ya sobre la altstack (señal anidada): seguir debajo de rsp, como Linux.
+  int already_on = st && st->ss_sp && !(st->ss_flags & 2) &&
+                   regs->rsp > st->ss_sp && regs->rsp <= st->ss_sp + st->ss_size;
+  if ((act->flags & SA_ONSTACK) && st && st->ss_sp != 0 &&
+      !(st->ss_flags & 2) /* SS_DISABLE */ && st->ss_size >= SF_SIZE &&
+      !already_on) {
+    sp_base = st->ss_sp + st->ss_size;
     on_altstack = 1;
   } else {
     // [FIX] Reservar 128 B de redzone. La ABI x86_64 permite al código
@@ -301,6 +352,10 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
 
   regs->rip = (uint64_t)act->handler;
   regs->rsp = frame_va;
+  // El manejador es código de 64 bits aunque la señal llegara en código de
+  // 32 bits (WoW64).
+  regs->cs = USER_CS_RING3;
+  regs->ss = USER_DS_RING3;
   regs->rdi = (uint64_t)sig;
   regs->rsi = frame_va + SF_SIGINFO;
   regs->rdx = frame_va + SF_UCONTEXT;
@@ -308,7 +363,7 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   if (on_altstack) {
     LOG_TRACE("[SIG] PID=%u SIG %d entregada en altstack %p (size=%lu)",
               proc->pid, sig, (void *)frame_va,
-              (unsigned long)proc->sigaltstack_size);
+              (unsigned long)st->ss_size);
   }
 
   return 1;
@@ -473,6 +528,36 @@ int signal_deliver_from_exception(int sig, registers_t *regs) {
   return deliver(proc, sig, regs);
 }
 
+// Señal síncrona de una excepción de CPU en userland (como force_sig_fault
+// de Linux): si está bloqueada o ignorada, vuelve a la acción por omisión
+// (repetir la instrucción en bucle no tiene sentido).
+int signal_force_fault(int sig, int code, uint64_t addr, registers_t *regs) {
+  process_t *proc = process_current();
+  task_t *t = sched_current();
+  if (!proc || !regs || !t)
+    return 0;
+  if (sig <= 0 || sig >= SIG_MAX)
+    return 0;
+  uint64_t bit = 1ULL << sig;
+  if ((t->sig_blocked & bit) || proc->sigactions[sig].handler == SIG_IGN) {
+    t->sig_blocked &= ~bit;
+    proc->sigactions[sig].handler = SIG_DFL;
+  }
+  if (proc->sigactions[sig].handler != SIG_DFL &&
+      !proc->sigactions[sig].restorer) {
+    proc->term_signal = sig;
+    process_exit_group_current(128 + sig);
+  }
+  t->fault_valid = 1;
+  t->fault_trapno = regs->int_num;
+  t->fault_err = regs->error_code;
+  t->fault_addr = addr;
+  t->fault_code = code;
+  int r = deliver(proc, sig, regs);
+  t->fault_valid = 0;
+  return r;
+}
+
 // ---------------------------------------------------------------------------
 // Syscalls
 // ---------------------------------------------------------------------------
@@ -599,9 +684,26 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   regs->rsp = g[15];
   regs->rip = g[16];
   regs->rflags = g[17];
-  // g[18..22] = cs/gs/fs, err, trapno, oldmask, cr2 → ignorar
-  regs->cs = 0x1B;
-  regs->ss = 0x23;
+  // g[18] = cs | gs<<16 | fs<<32 | ss<<48. Como Linux: se acepta volver a
+  // código de 32 bits (Wine WoW64: 0x23); cualquier otro valor, 64 bits.
+  // El resto (err, trapno, oldmask, cr2) se ignora.
+  regs->cs = ((uint16_t)g[18] == USER32_CS_RING3) ? USER32_CS_RING3
+                                                   : USER_CS_RING3;
+  regs->ss = USER_DS_RING3;
+  {
+    uint64_t fpp = 0;
+    if (copy_from_user(&fpp, (void *)(mc + G_FPSTATE), 8) == 0 && fpp) {
+      uint8_t raw[512 + 16];
+      uint8_t *fx = (uint8_t *)(((uintptr_t)raw + 15) & ~(uintptr_t)15);
+      if (copy_from_user(fx, (void *)fpp, 512) == 0) {
+        uint32_t mx;
+        memcpy(&mx, fx + 24, 4);
+        mx &= mxcsr_mask();
+        memcpy(fx + 24, &mx, 4);
+        __asm__ volatile("fxrstor64 (%0)" ::"r"(fx) : "memory");
+      }
+    }
+  }
 
   uint64_t mask = 0;
   if (copy_from_user(&mask, (void *)(rsp + 0x128), 8) < 0)

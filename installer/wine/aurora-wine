@@ -1,0 +1,35 @@
+#!/bin/sh
+# aurora-wine — lanza un programa Windows con Wine y el aspecto de Aurora.
+#   aurora-wine programa.exe [args...]    (o un .msi, .lnk, .bat)
+#   aurora-wine --setup                   (solo preparar el prefijo)
+# Prefijo: $WINEPREFIX o ~/.wine. Un prefijo nuevo ya nace con la paleta de
+# Aurora (wine.inf); aquí se sigue el modo claro/oscuro del sistema
+# (/data/aurora-theme, el mismo que usan GTK y Qt) cada vez que se lanza.
+: "${WINEPREFIX:=${HOME:-/root}/.wine}"
+export WINEPREFIX
+# Sin pantalla Wayland/X propia: la sesión de Aurora (aurora-wayland + Xwayland).
+[ -n "$DISPLAY" ] || export DISPLAY=:0
+[ -n "$XDG_RUNTIME_DIR" ] || export XDG_RUNTIME_DIR=/run/user/$(id -u 2>/dev/null || echo 0)
+# Mono/Gecko no vienen en la ISO: que wineboot no pregunte por ellos.
+case ",$WINEDLLOVERRIDES," in *mscoree*) ;; *) export WINEDLLOVERRIDES="mscoree,mshtml=${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}" ;; esac
+: "${WINEDEBUG:=-all}"
+export WINEDEBUG
+
+SHARE=/usr/share/aurora/wine
+mode=dark
+[ "${AURORA_THEME:-$(cat /data/aurora-theme 2>/dev/null)}" = light ] && mode=light
+
+if [ ! -f "$WINEPREFIX/system.reg" ]; then
+    echo "aurora-wine: creando el prefijo de Wine en $WINEPREFIX (la primera vez tarda un poco)..." >&2
+    wineboot -i >>"${AURORA_WINE_LOG:-/dev/null}" 2>&1
+fi
+if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
+    wine regedit /S "$SHARE/aurora-$mode.reg" >>"${AURORA_WINE_LOG:-/dev/null}" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
+fi
+[ "$1" = "--setup" ] && exit 0
+[ $# -eq 0 ] && set -- winecfg
+case "$1" in
+    *.msi|*.MSI) exec wine msiexec /i "$@" ;;
+    *.lnk|*.LNK|*.bat|*.BAT|*.cmd|*.CMD) exec wine start /unix "$@" ;;
+esac
+exec wine "$@"

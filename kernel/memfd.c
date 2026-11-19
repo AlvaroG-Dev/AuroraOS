@@ -336,6 +336,11 @@ int64_t k_memfd_create(uint64_t name_uptr, uint64_t flags, uint64_t a3,
   (void)a4;
   (void)a5;
 
+  // MFD_NOEXEC_SEAL (0x8) / MFD_EXEC (0x10), Linux 6.3: aquí no hay
+  // permiso de ejecución distinto en un memfd, se aceptan sin más.
+  if ((flags & 0x18) == 0x18)
+    return -EINVAL;
+  flags &= ~(uint64_t)0x18;
   if (flags & ~(uint64_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING))
     return -EINVAL;
 

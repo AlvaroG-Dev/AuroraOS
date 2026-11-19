@@ -6,8 +6,12 @@
 %define TASK_OFF_CR3        0x20
 %define TASK_OFF_ON_CPU     0x274
 %define TASK_OFF_FS_BASE    0x2A0
+%define TASK_OFF_GS_BASE    0x2A8
+%define TASK_OFF_FS_SEL     0x2B0
+%define USER_DS_RING3       0x2B
 
 %define MSR_FS_BASE 0xC0000100
+%define MSR_KERNEL_GS_BASE 0xC0000102
 
 section .text
 bits 64
@@ -24,6 +28,30 @@ task_switch:
     push r15
 
     mov [rdi + TASK_OFF_RSP], rsp
+
+    ; [gs_base] La base de %gs de userland de old_task está en
+    ; MSR_KERNEL_GS_BASE mientras estamos en el kernel (swapgs): guardarla.
+    push rdx
+    mov ecx, MSR_KERNEL_GS_BASE
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    mov [rdi + TASK_OFF_GS_BASE], rax
+    ; [fs_sel] Selector de %fs de userland (WoW64 carga el TLS de 32 bits con
+    ; set_thread_area + mov %fs). Si no es 0, la base efectiva es la del
+    ; descriptor: guardarla de MSR_FS_BASE para restaurarla igual.
+    xor eax, eax
+    mov ax, fs
+    mov [rdi + TASK_OFF_FS_SEL], ax
+    test ax, ax
+    jz .fs_sel_saved
+    mov ecx, MSR_FS_BASE
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    mov [rdi + TASK_OFF_FS_BASE], rax
+.fs_sel_saved:
+    pop rdx
 
     mov rax, [rdi + TASK_OFF_FPU_STATE]
     test rax, rax
@@ -116,6 +144,11 @@ task_switch:
     xor edx, edx
     mov [rsi + TASK_OFF_FS_BASE], rdx
 .fs_ts_ok:
+    ; Selector de %fs de new_task (gdt_load_tls ya puso sus TLS en la GDT de
+    ; esta CPU y lo validó). Antes de escribir la base: cargar el selector
+    ; la pisa.
+    mov ax, [rsi + TASK_OFF_FS_SEL]
+    mov fs, ax
     mov rax, rdx
     shr rdx, 32
     mov ecx, MSR_FS_BASE
@@ -139,6 +172,14 @@ task_switch:
     pop rdx
     pop rax
 .fs_ok:
+
+    ; [gs_base] La de new_task, para cuando vuelva a userland (swapgs).
+    ; ARCH_SET_GS solo acepta direcciones de usuario canónicas.
+    mov rax, [rsi + TASK_OFF_GS_BASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, MSR_KERNEL_GS_BASE
+    wrmsr
 
     pop r15
     pop r14
@@ -196,9 +237,17 @@ task_jump_to:
     xor edx, edx
     mov [rdi + TASK_OFF_FS_BASE], rdx
 .fs_j_ok:
+    xor eax, eax
+    mov fs, ax
     mov rax, rdx
     shr rdx, 32
     mov ecx, MSR_FS_BASE
+    wrmsr
+
+    mov rax, [rdi + TASK_OFF_GS_BASE]
+    mov rdx, rax
+    shr rdx, 32
+    mov ecx, MSR_KERNEL_GS_BASE
     wrmsr
 
     pop r15
@@ -226,7 +275,7 @@ global user_fork_return
 ; Continúa la ejecución en userland a partir del frame construido por
 ; sched_create_forked_user_task().
 user_fork_return:
-    mov ax, 0x23
+    mov ax, USER_DS_RING3
     mov ds, ax
     mov es, ax
 
@@ -240,12 +289,13 @@ user_fork_return:
     pop rsi
     pop rdi
 
+    swapgs                    ; %gs de userland (gs_base de la tarea)
     iretq
 
 global user_trampoline
 
 user_trampoline:
-    mov ax, 0x23
+    mov ax, USER_DS_RING3
     mov ds, ax
     mov es, ax
 
@@ -265,6 +315,7 @@ user_trampoline:
     xor r14, r14
     xor r15, r15
 
+    swapgs                    ; %gs de userland (gs_base de la tarea)
     iretq
 
 section .note.GNU-stack noalloc noexec nowrite progbits

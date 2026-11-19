@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Abrir con Wine
+Comment=Ejecutar un programa de Windows
+Exec=aurora-wine %f
+Icon=wine
+Terminal=false
+NoDisplay=true
+MimeType=application/x-ms-dos-executable;application/x-msi;application/x-ms-shortcut;application/x-msdownload;

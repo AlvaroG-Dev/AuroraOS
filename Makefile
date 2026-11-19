@@ -85,6 +85,8 @@ WITH_MESA ?= 1
 WITH_DEVTOOLS ?= 1
 # APT/dpkg de Ubuntu 24.04 (misma glibc) para instalar paquetes con red: aurora-pkg.
 WITH_APT ?= 1
+# Wine 11 (WoW64) para aplicaciones Windows: scripts/fetch-wine.sh (+680 MB).
+WITH_WINE ?= 1
 export WITH_NVIDIA
 export WITH_MESA
 
@@ -540,6 +542,23 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		mkdir -p $$A/etc/trusted.gpg.d $$A/etc/sources.list.d $$A/etc/apt.conf.d $$A/etc/preferences.d; touch $$A/etc/apt.conf.d/.keep $$A/etc/sources.list.d/.keep $$A/etc/preferences.d/.keep; cp -f build/apt/root/etc/apt/trusted.gpg.d/*.gpg $$A/etc/trusted.gpg.d/ 2>/dev/null || true; \
 		install -m 644 installer/apt/status $$A/dpkg/status; : > $$A/dpkg/available; mkdir -p $$A/dpkg/info $$A/dpkg/updates $$A/dpkg/alternatives; \
 		install -m 755 installer/apt/aurora-pkg sysroot/usr/bin/aurora-pkg; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Wine 11 de Arch (WoW64: programas Windows de 32 y 64 bits con un solo ntdll.so
+# de 64 bits) + librerias opcionales de Ubuntu 24.04: scripts/fetch-wine.sh.
+# installer/wine: envoltorio que crea el prefijo con la estetica de Aurora
+# (aurora-wine + aurora-{dark,light}.reg) y las entradas de Aplicaciones.
+# ---------------------------------------------------------------------------
+	@if [ "$(WITH_WINE)" = "1" ]; then \
+		bash scripts/fetch-wine.sh || exit 1; \
+		echo "[Makefile] Instalando Wine..."; \
+		cp -a build/wine/root/usr/. sysroot/usr/; \
+		rm -f sysroot/usr/share/applications/wine.desktop; \
+		mkdir -p sysroot/usr/share/aurora/wine sysroot/usr/share/aurora/apps; \
+		cp -f installer/wine/*.reg sysroot/usr/share/aurora/wine/ 2>/dev/null || true; \
+		for f in installer/wine/*.desktop; do if [ -e "$$f" ]; then install -m 644 "$$f" sysroot/usr/share/applications/; fi; done; \
+		for f in installer/wine/aurora-wine; do if [ -e "$$f" ]; then install -m 755 "$$f" sysroot/usr/bin/; fi; done; \
 	fi
 
 # ---------------------------------------------------------------------------

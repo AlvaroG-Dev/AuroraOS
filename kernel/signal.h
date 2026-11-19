@@ -132,6 +132,8 @@ bool signal_is_ignored(struct process *p, int sig);
 
 // [4.3] Entrega una señal al proceso actual usando los regs del fault.
 int signal_deliver_from_exception(int sig, registers_t *regs);
+// Excepción de CPU en userland -> señal con trapno/err/cr2 y si_code/si_addr.
+int signal_force_fault(int sig, int code, uint64_t addr, registers_t *regs);
 
 // Las mascaras internas (blocked_signals, pending_signals, sa_mask...) usan
 // el bit `sig`; el sigset_t de Linux usa el bit `sig - 1`. Toda mascara que

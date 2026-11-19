@@ -195,6 +195,13 @@ static void task_init_common(task_t *task, uint64_t *sp, uint64_t cr3) {
   task->syscall_regs = NULL;
 
   task->fs_base = 0;
+  task->gs_base = 0;
+  task->fs_sel = 0;
+  task->tls_desc[0] = task->tls_desc[1] = task->tls_desc[2] = 0;
+  task->ss_sp = 0;
+  task->ss_size = 0;
+  task->ss_flags = 2; // SS_DISABLE
+  task->fault_valid = 0;
   task->clear_child_tid = NULL;
   task->rseq_ptr = 0;
   task->rseq_len = task->rseq_sig = 0;
@@ -626,6 +633,7 @@ void sched_tick(void) {
   }
 
   old->rseq_sw++; // rseq: la tarea sale de la CPU (preemption/migracion)
+  gdt_load_tls(next); // TLS de 32 bits (set_thread_area) de next en esta GDT
   task_switch(old, next, &sched_lock);
 
   __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory");

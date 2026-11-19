@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Editor del registro
+Comment=Registro de Windows (Wine)
+Exec=aurora-wine regedit
+Icon=wine
+Terminal=false
+Categories=Wine;
+StartupWMClass=regedit.exe

@@ -250,7 +250,7 @@ void syscall_init(void) {
   efer |= EFER_SCE;
   wrmsr(MSR_EFER, efer);
 
-  uint64_t star = ((uint64_t)KERNEL_CS << 32) | ((uint64_t)USER_CS << 48);
+  uint64_t star = ((uint64_t)KERNEL_CS << 32) | ((uint64_t)USER_STAR_BASE << 48);
   wrmsr(MSR_STAR, star);
 
   wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
@@ -264,7 +264,7 @@ void syscall_init_ap(void) {
   efer |= EFER_SCE;
   wrmsr(MSR_EFER, efer);
 
-  uint64_t star = ((uint64_t)KERNEL_CS << 32) | ((uint64_t)USER_CS << 48);
+  uint64_t star = ((uint64_t)KERNEL_CS << 32) | ((uint64_t)USER_STAR_BASE << 48);
   wrmsr(MSR_STAR, star);
   wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
   wrmsr(MSR_SFMASK, MSR_SFMASK_BITS);
@@ -2644,14 +2644,24 @@ static int64_t k_arch_prctl(uint64_t code, uint64_t addr, uint64_t a3,
                (void *)addr);
       return -EPERM;
     }
-    proc->fs_base = addr;
-    if (proc->task)
-      proc->task->fs_base = addr;
+    {
+      // Como Linux: %fs vuelve al selector nulo (si el hilo tenía cargado
+      // un TLS de 32 bits, su base dejaría de valer).
+      __asm__ volatile("mov %0, %%fs" ::"r"((uint32_t)0));
+      // Del hilo que llama (antes se ponía en el principal aunque llamara
+      // otro hilo).
+      task_t *ct = sched_current();
+      if (ct && ct->proc == proc)
+        ct->fs_base = addr;
+      if (!ct || ct == proc->task)
+        proc->fs_base = addr;
+    }
     wrmsr(0xC0000100, addr);
     return 0;
 
   case ARCH_GET_FS: {
-    uint64_t val = proc->fs_base;
+    task_t *ct = sched_current();
+    uint64_t val = (ct && ct->proc == proc) ? ct->fs_base : proc->fs_base;
     if (!access_ok((void *)addr, sizeof(uint64_t)))
       return -EFAULT;
     if (copy_to_user((void *)addr, &val, sizeof(val)) < 0)
@@ -2659,9 +2669,27 @@ static int64_t k_arch_prctl(uint64_t code, uint64_t addr, uint64_t a3,
     return 0;
   }
 
-  case ARCH_SET_GS:
-  case ARCH_GET_GS:
-    return -EINVAL;
+  // %gs de userland (Wine x86_64 guarda ahí el TEB: %gs:0x30). En el kernel
+  // está en MSR_KERNEL_GS_BASE; el swapgs de la vuelta la pone en %gs.
+  case ARCH_SET_GS: {
+    if (!paging_is_canonical(addr) || addr >= 0x0000800000000000ULL)
+      return -EPERM;
+    task_t *ct = sched_current();
+    if (!ct)
+      return -EFAULT;
+    ct->gs_base = addr;
+    wrmsr(MSR_KERNEL_GS_BASE, addr);
+    return 0;
+  }
+  case ARCH_GET_GS: {
+    task_t *ct = sched_current();
+    uint64_t val = ct ? ct->gs_base : 0;
+    if (!access_ok((void *)addr, sizeof(uint64_t)))
+      return -EFAULT;
+    if (copy_to_user((void *)addr, &val, sizeof(val)) < 0)
+      return -EFAULT;
+    return 0;
+  }
 
   default:
     return -EINVAL;
@@ -2914,19 +2942,26 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_t *proc = process_current();
-  if (!proc)
+  task_t *t = sched_current();
+  if (!t || !t->proc)
     return -EFAULT;
+  // SS_ONSTACK: el hilo está ejecutando sobre su altstack (no se puede
+  // cambiar mientras tanto).
+  int onstack = 0;
+  if (t->ss_sp && !(t->ss_flags & SS_DISABLE) && t->syscall_regs) {
+    uint64_t usp = t->syscall_regs->rsp;
+    onstack = usp > t->ss_sp && usp <= t->ss_sp + t->ss_size;
+  }
 
   // 1) Devolver estado actual (antes de tocar nada).
   if (oss_uptr) {
     if (!access_ok((void *)oss_uptr, sizeof(struct k_stack_t)))
       return -EFAULT;
     struct k_stack_t old = {
-        .ss_sp = proc->sigaltstack_sp,
-        .ss_flags = proc->sigaltstack_flags,
+        .ss_sp = t->ss_sp,
+        .ss_flags = onstack ? SS_ONSTACK : t->ss_flags,
         ._pad = 0,
-        .ss_size = proc->sigaltstack_size,
+        .ss_size = t->ss_size,
     };
     if (copy_to_user((void *)oss_uptr, &old, sizeof(old)) < 0)
       return -EFAULT;
@@ -2942,9 +2977,10 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
   if (copy_from_user(&nss, (void *)ss_uptr, sizeof(nss)) < 0)
     return -EFAULT;
 
-  // SS_ONSTACK no es user-settable.
-  if (nss.ss_flags & SS_ONSTACK)
+  if (onstack)
     return -EPERM;
+  // SS_ONSTACK (1) lo aceptan Linux y glibc como "activar" (igual que 0).
+  nss.ss_flags &= ~SS_ONSTACK;
 
   // Solo SS_DISABLE y SS_AUTODISARM son válidos del user.
   if (nss.ss_flags & ~(SS_DISABLE | (int32_t)SS_AUTODISARM))
@@ -2954,15 +2990,15 @@ static int64_t k_sigaltstack(uint64_t ss_uptr, uint64_t oss_uptr, uint64_t a3,
     // Linux exige ss_size == 0 con SS_DISABLE.
     if (nss.ss_size != 0 || nss.ss_sp != 0)
       return -EINVAL;
-    proc->sigaltstack_sp = 0;
-    proc->sigaltstack_size = 0;
-    proc->sigaltstack_flags = SS_DISABLE;
+    t->ss_sp = 0;
+    t->ss_size = 0;
+    t->ss_flags = SS_DISABLE;
   } else {
     if (nss.ss_size < MINSIGSTKSZ)
       return -ENOMEM;
-    proc->sigaltstack_sp = nss.ss_sp;
-    proc->sigaltstack_size = nss.ss_size;
-    proc->sigaltstack_flags = nss.ss_flags & (int32_t)SS_AUTODISARM;
+    t->ss_sp = nss.ss_sp;
+    t->ss_size = nss.ss_size;
+    t->ss_flags = nss.ss_flags & (int32_t)SS_AUTODISARM;
   }
   return 0;
 }
@@ -9021,7 +9057,9 @@ uint64_t syscall_handler_c(registers_t *regs) {
               (void *)arg1, (unsigned long)arg2, (long)ret);
   } else if (!boring_enoent && !expected_would_block && (int64_t)ret < 0 &&
              (int64_t)ret > -4096 && (int64_t)ret != -4 /* EINTR: ruido */) {
-    LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld", (unsigned long)num, (long)ret);
+    LOG_INFO("[SYSCALL-ERR] num=%lu ret=%ld a1=%lx a2=%lx a3=%lx a4=%lx",
+             (unsigned long)num, (long)ret, (unsigned long)arg1,
+             (unsigned long)arg2, (unsigned long)arg3, (unsigned long)arg4);
   }
 
   // Devolvemos regs->rax (que pudo cambiar si k_rt_sigreturn restauró

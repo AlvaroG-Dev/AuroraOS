@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Buscaminas
+Comment=Juego de Windows (Wine)
+Exec=aurora-wine winemine
+Icon=wine
+Terminal=false
+Categories=Wine;
+StartupWMClass=winemine.exe
