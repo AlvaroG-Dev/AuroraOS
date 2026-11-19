@@ -1722,6 +1722,9 @@ void process_exit(process_t *proc, int exit_code) {
   const uint32_t my_ppid = proc->ppid;
 
   int reparented = 0;
+  // prctl(PR_SET_PDEATHSIG): hijos a avisar, fuera del cerrojo.
+  uint32_t pdeath_pid[16];
+  int pdeath_sig[16], npdeath = 0;
   process_t *p = process_list;
   while (p) {
     if (p->pid == my_ppid) {
@@ -1735,6 +1738,10 @@ void process_exit(process_t *proc, int exit_code) {
     if (my_pid != 1 && p->ppid == my_pid && p->pid != my_pid) {
       p->ppid = 1;
       reparented = 1;
+      if (p->pdeath_sig > 0 && !p->is_zombie && npdeath < 16) {
+        pdeath_pid[npdeath] = p->pid;
+        pdeath_sig[npdeath++] = p->pdeath_sig;
+      }
     }
     p = p->next;
   }
@@ -1756,6 +1763,9 @@ void process_exit(process_t *proc, int exit_code) {
   }
 
   spin_unlock_irqrestore(&process_lock, flags);
+
+  for (int i = 0; i < npdeath; i++)
+    signal_send_tid(pdeath_pid[i], pdeath_sig[i]);
 
   pidfd_notify_exit();
 
@@ -2224,6 +2234,7 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
 
   child->pid = __sync_add_and_fetch(&next_pid, 1) - 1;
   child->ppid = parent->pid;
+  memcpy(child->comm, parent->comm, sizeof(child->comm)); // pdeath_sig no se hereda
   child->pgid = parent->pgid;
   child->sid = parent->sid;
   child->exit_code = 0;
@@ -2721,6 +2732,7 @@ int process_execve_prepare(const char *path, int argc, const char *const *argv,
       n++;
     }
     proc->name[n] = '\0';
+    proc->comm[0] = '\0'; // execve: el comm vuelve a ser el del binario
   }
 
   // [2.4] Un VMA_ELF por PT_LOAD del binario y del intérprete.

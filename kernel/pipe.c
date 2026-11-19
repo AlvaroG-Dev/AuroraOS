@@ -335,3 +335,6 @@ int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end) {
   *write_end = wn;
   return 0;
 }
+int vfs_node_is_pipe(const vfs_node_t *n) {
+  return n && (n->ops == &pipe_read_ops || n->ops == &pipe_write_ops);
+}

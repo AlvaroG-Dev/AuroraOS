@@ -321,6 +321,10 @@ static int64_t tmpfs_write_op(vfs_node_t *vn, uint64_t off, size_t sz,
   tmpfs_fs_t *fs = n->fs;
   mutex_lock(&fs->lock);
 
+  // O_APPEND (el VFS pasa -1, como a ext2): al final real, que puede haber
+  // crecido por otro fd (cada fd tiene su vfs_node con su copia de size).
+  if (off == (uint64_t)-1)
+    off = n->size;
   if (off > SIZE_MAX - sz) {
     mutex_unlock(&fs->lock);
     return -EINVAL;
@@ -1397,4 +1401,15 @@ void tmpfs_init(void) {
       LOG_INFO("[TMPFS] /dev/shm montado (16 MB)");
     }
   }
+}
+void tmpfs_refresh_node(vfs_node_t *vn) {
+  if (!vn || vn->ops != &tmpfs_file_ops)
+    return;
+  tmpfs_node_t *n = (tmpfs_node_t *)vn->priv;
+  if (!n || !n->fs)
+    return;
+  mutex_lock(&n->fs->lock);
+  vn->size = n->size;
+  vn->mtime_sec = n->mtime;
+  mutex_unlock(&n->fs->lock);
 }

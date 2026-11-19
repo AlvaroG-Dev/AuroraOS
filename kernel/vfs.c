@@ -10,6 +10,7 @@
 // resto.
 
 #include "vfs.h"
+#include "pipe.h"
 #include "part.h"
 #include "block.h" // [FIX] devfs: blk_lookup, blk_count, blk_get_by_index
 #include "cpu.h"
@@ -3321,8 +3322,29 @@ int64_t vfs_write_for_proc(void *proc_ptr, int fd, const void *buf,
 
     // O_APPEND: dos fds sobre el mismo fichero deben añadir al final real,
     // no a su copia del tamaño. ext2 acepta (uint64_t)-1 como "al final".
-    int append_ext2 = (f->flags & VFS_O_APPEND) && f->node->fs &&
-                      f->node->fs->name && strcmp(f->node->fs->name, "ext2") == 0;
+    // ext2 y tmpfs aceptan (uint64_t)-1 como "al final" (bajo su cerrojo).
+    int append_ext2 = (f->flags & VFS_O_APPEND) && f->node->fs && f->node->fs->name &&
+                      (strcmp(f->node->fs->name, "ext2") == 0 ||
+                       strcmp(f->node->fs->name, "tmpfs") == 0);
+    // El resto (tmpfs, FAT...): al final según el tamaño de ahora, no el que
+    // había al abrir (dos procesos añadiendo al mismo log se pisaban).
+    if ((f->flags & VFS_O_APPEND) && !append_ext2 && (f->node->flags & VFS_FILE))
+      f->offset = f->node->size;
+    // O_NONBLOCK en un pipe lleno: EAGAIN en vez de dormir. Solo pipes: otros
+    // nodos (tty...) no siempre saben contestar POLLOUT en su poll.
+    if ((f->flags & 0x800 /* O_NONBLOCK */) && vfs_node_is_pipe(f->node) &&
+        f->node->ops->poll) {
+      int rev = f->node->ops->poll(f->node, 4 /* POLLOUT */);
+      if (!(rev & (4 | 0x8 | 0x10))) {
+        if (total == 0) {
+          kfree(kbuf);
+          mutex_unlock(&f->lock);
+          fd_put(f);
+          return -EAGAIN;
+        }
+        break;
+      }
+    }
     int64_t bytes = f->node->ops->write(
         f->node, append_ext2 ? (uint64_t)-1 : f->offset, chunk, kbuf);
     if (bytes < 0) {
@@ -3556,6 +3578,7 @@ int64_t vfs_seek_for_proc(void *proc_ptr, int fd, int64_t offset, int whence) {
     }
     new_off = f->offset + offset;
   } else if (whence == SEEK_END) {
+    tmpfs_refresh_node(f->node); // el final real, no el de cuando se abrió
     // [dmesg] Para /dev/kmsg (offset_is_index), END = fin del ring.
     if (f->node->offset_is_index) {
       extern uint64_t klog_line_count(void);
@@ -3632,6 +3655,7 @@ int vfs_fstat_for_proc(void *proc_ptr, int fd, vfs_stat_t *st) {
   file_descriptor_t *f = proc->fds[fd];
   if (!f->node)
     return -1;
+  tmpfs_refresh_node(f->node); // tamaño real si otro fd lo ha cambiado
 
   stac();
   st->flags = f->node->flags;

@@ -35,6 +35,7 @@
 #include "paging.h"
 #include "pf.h"
 #include "pmm.h"
+#include "pipe.h"
 #include "process.h"
 #include "rtc.h"
 #include "sched.h"
@@ -1848,16 +1849,15 @@ static int64_t k_getsid(uint64_t pid, uint64_t a2, uint64_t a3, uint64_t a4,
 
 // ---------- prctl ----------
 //
-// Multiplexado. Aurora no tiene namespaces, capabilities, core dumps
-// ni nombres de thread. Aceptamos todo con 0 (éxito), salvo
-// PR_GET_DUMPABLE (3) que devolvemos 1 como hace Linux por defecto.
+// Multiplexado. Aurora no tiene namespaces ni core dumps: lo desconocido
+// se acepta con 0 (éxito), como antes.
 //
-// Opciones que musl/busybox usan realmente:
-//   1  PR_SET_PDEATHSIG   → ignorar
+//   1/2 PR_SET/GET_PDEATHSIG → real (señal al morir el padre)
 //   3  PR_GET_DUMPABLE    → devolver 1
 //   4  PR_SET_DUMPABLE    → ignorar
-//   15 PR_SET_NAME        → ignorar
-//   16 PR_GET_NAME        → escribir "" en el buffer del usuario
+//   15 PR_SET_NAME        → real en el hilo principal (comm: ps, top,
+//                           /proc/PID/comm); en los demás hilos se ignora
+//   16 PR_GET_NAME        → comm del proceso
 //   38/39 PR_SET/GET_NO_NEW_PRIVS → real (execve ya no concede setuid)
 static int64_t k_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
                        uint64_t arg4, uint64_t arg5) {
@@ -1927,14 +1927,55 @@ static int64_t k_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
     process_t *pp = process_current();
     return pp ? pp->no_new_privs : 0;
   }
-  case 16: /* PR_GET_NAME */ {
-    if (arg2 && access_ok((void *)arg2, 16)) {
-      // Copiamos 16 bytes de ceros (Linux pone el nombre del proceso
-      // ahí, 16 bytes con terminador).
-      char empty[16] = {0};
-      if (copy_to_user((void *)arg2, empty, 16) < 0)
+  case 1: /* PR_SET_PDEATHSIG */ {
+    process_t *pp = process_current();
+    if (arg2 >= 65)
+      return -EINVAL;
+    if (pp)
+      pp->pdeath_sig = (int)arg2;
+    return 0;
+  }
+  case 2: /* PR_GET_PDEATHSIG */ {
+    process_t *pp = process_current();
+    int v = pp ? pp->pdeath_sig : 0;
+    if (!arg2 || copy_to_user((void *)arg2, &v, sizeof(v)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  case 15: /* PR_SET_NAME */ {
+    process_t *pp = process_current();
+    task_t *t = sched_current();
+    char nm[16];
+    if (!arg2)
+      return -EFAULT;
+    // Hasta 16 bytes; Linux trunca a 15 + terminador.
+    if (copy_from_user(nm, (void *)arg2, sizeof(nm)) < 0) {
+      // Puede acabar cerca del final de una página: byte a byte.
+      size_t i = 0;
+      for (; i < sizeof(nm); i++)
+        if (copy_from_user(&nm[i], (void *)(arg2 + i), 1) < 0 || !nm[i])
+          break;
+      if (i == 0)
         return -EFAULT;
+      if (i == sizeof(nm))
+        i--;
+      nm[i] = 0;
     }
+    nm[15] = 0;
+    if (pp && t && t->tid == 0)
+      memcpy(pp->comm, nm, sizeof(nm));
+    return 0;
+  }
+  case 16: /* PR_GET_NAME */ {
+    process_t *pp = process_current();
+    char nm[16] = {0};
+    if (pp) {
+      const char *src = pp->comm[0] ? pp->comm : pp->name;
+      for (int i = 0; i < 15 && src[i]; i++)
+        nm[i] = src[i];
+    }
+    if (!arg2 || copy_to_user((void *)arg2, nm, sizeof(nm)) < 0)
+      return -EFAULT;
     return 0;
   }
   default:
@@ -2769,15 +2810,19 @@ static int64_t k_faccessat(uint64_t dirfd, uint64_t path, uint64_t mode,
 // fork()+execve() no puede conservar accidentalmente un extremo del pipe
 // y retrasar el EOF del lector.
 //
-// O_NONBLOCK todavía no está implementado por el pipe/VFS; devolver EINVAL
-// es preferible a fingir que la operación es no bloqueante.
+// O_NONBLOCK: lo mismo que fcntl(F_SETFL) en los dos extremos (read y
+// write devuelven EAGAIN en vez de dormir).
+static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
+                       uint64_t a5);
 static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
                        uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
 
-  const uint64_t supported = LINUX_O_CLOEXEC;
+  // O_NONBLOCK y O_DIRECT (modo paquete, aquí sin efecto) también: Qt, libuv,
+  // Rust (mio) y Wayland piden pipe2(O_CLOEXEC | O_NONBLOCK); antes EINVAL.
+  const uint64_t supported = LINUX_O_CLOEXEC | LINUX_O_NONBLOCK | 0x4000 /* O_DIRECT */;
   if (flags & ~supported)
     return -EINVAL;
 
@@ -2790,9 +2835,16 @@ static int64_t k_pipe2(uint64_t fds_ptr, uint64_t flags, uint64_t a3,
   if (rc < 0)
     return rc;
 
-  if (flags & LINUX_O_CLOEXEC)
+  // Antes faltaban las llaves: el extremo de escritura salía SIEMPRE con
+  // FD_CLOEXEC y pipe2(fds, 0) + exec perdía la escritura del pipe.
+  if (flags & LINUX_O_CLOEXEC) {
     fd_cloexec_set(proc, rd);
     fd_cloexec_set(proc, wr);
+  }
+  if (flags & LINUX_O_NONBLOCK) {
+    k_fcntl((uint64_t)rd, F_SETFL, LINUX_O_NONBLOCK, 0, 0);
+    k_fcntl((uint64_t)wr, F_SETFL, LINUX_O_NONBLOCK, 0, 0);
+  }
 
   return 0;
 }
@@ -3885,14 +3937,30 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     else
       fd_cloexec_clr(proc, kfd);
     return 0;
-  case F_GETFL:
-    return (int64_t)f->flags;
+  case F_GETFL: {
+    // Sin los bits internos de Aurora (VFS_O_*): en su lugar los de Linux.
+    int64_t v = (int64_t)(f->flags & ~(VFS_O_APPEND | VFS_O_SYNC));
+    if (f->flags & VFS_O_APPEND)
+      v |= LINUX_O_APPEND;
+    if (f->flags & VFS_O_SYNC)
+      v |= 0x101000; // O_SYNC
+    return v;
+  }
   case F_SETFL: {
     int newflags = (int)arg;
     // [LinuxKPI L4] O_ASYNC (SIGIO al dueño de F_SETOWN): solo en ficheros
     // que lo implementan (setfl); el resto lo ignora, como antes.
-    int want = (f->flags & ~(LINUX_O_NONBLOCK | LINUX_O_ASYNC)) |
-               (newflags & (LINUX_O_NONBLOCK | LINUX_O_ASYNC));
+    // Como Linux, F_SETFL también cambia O_APPEND (y acepta O_DIRECT y
+    // O_NOATIME, que aquí no hacen nada); antes O_APPEND se perdía y un
+    // fcntl(fd, F_SETFL, fl | O_APPEND) seguía escribiendo encima.
+    const int settable = LINUX_O_NONBLOCK | LINUX_O_ASYNC | LINUX_O_APPEND |
+                         0x4000 /* O_DIRECT */ | 0x40000 /* O_NOATIME */;
+    int want = (f->flags & ~(settable | VFS_O_APPEND)) | (newflags & settable);
+    if (newflags & LINUX_O_APPEND) { // bit interno que mira write()
+      want |= VFS_O_APPEND;
+      if (f->node && (f->node->flags & VFS_FILE))
+        f->offset = f->node->size;
+    }
     if (f->node && f->node->ops && f->node->ops->setfl) {
       int rc = f->node->ops->setfl(f, want);
       if (rc < 0)
@@ -3917,6 +3985,38 @@ static int64_t k_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a4,
     return 0;
   case 9: /* F_GETOWN */
     return f->owner;
+  case 15: /* F_SETOWN_EX: struct f_owner_ex {int type; pid_t pid;} */ {
+    int ex[2];
+    if (copy_from_user(ex, (void *)arg, sizeof(ex)) < 0)
+      return -EFAULT;
+    if (ex[0] < 0 || ex[0] > 2) // F_OWNER_TID / PID / PGRP
+      return -EINVAL;
+    f->owner = ex[0] == 2 ? -ex[1] : ex[1];
+    if (f->node && f->node->ops && f->node->ops->setfl)
+      f->node->ops->setfl(f, f->flags);
+    return 0;
+  }
+  case 16: /* F_GETOWN_EX */ {
+    int ex[2] = {f->owner < 0 ? 2 : 1, f->owner < 0 ? -f->owner : f->owner};
+    if (copy_to_user((void *)arg, ex, sizeof(ex)) < 0)
+      return -EFAULT;
+    return 0;
+  }
+  case 10: /* F_SETSIG: SIGIO es la única señal de E/S asíncrona aquí */
+    return (arg == 0 || arg == 29 /* SIGIO */) ? 0 : -EINVAL;
+  case 11: /* F_GETSIG */
+    return 0;
+  case 1025: /* F_GETLEASE: sin leases */
+    return 2; /* F_UNLCK */
+  case 1024: /* F_SETLEASE */
+    return arg == 2 ? 0 : -EAGAIN;
+  case 1031: /* F_SETPIPE_SZ: tamaño fijo, informa del real */
+  case 1032: /* F_GETPIPE_SZ */
+    if (!vfs_node_is_pipe(f->node))
+      return -EBADF;
+    if (cmd == 1031 && arg > PIPE_BUF_SIZE)
+      return -EPERM; // como Linux por encima de pipe-max-size sin CAP
+    return PIPE_BUF_SIZE;
   case 5:  /* F_GETLK */
   case 6:  /* F_SETLK */
   case 7:  /* F_SETLKW */
@@ -8159,7 +8259,6 @@ static const syscall_entry_t linux_table[] = {
     [SYS_CHMOD] = {k_chmod, "chmod"},
     [SYS_FCHMOD] = {k_fchmod, "fchmod"},
     [SYS_CHOWN] = {k_chown, "chown"},
-    [SYS_FCHOWNAT] = {k_fchownat, "fchownat"},
     [SYS_FCHOWN] = {k_fchown, "fchown"},
     [SYS_LCHOWN] = {k_lchown, "lchown"},
     [SYS_GETRUSAGE] = {k_getrusage, "getrusage"},

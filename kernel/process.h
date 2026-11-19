@@ -207,6 +207,12 @@ typedef struct process {
   // [U6] Capabilities (Linux): root las tiene todas; el resto, solo las que reciba.
   uint64_t cap_eff, cap_prm, cap_inh, cap_bnd, cap_amb;
   uint8_t keepcaps; // prctl(PR_SET_KEEPCAPS)
+  // prctl(PR_SET_NAME) del hilo principal: nombre visible (comm de Linux,
+  // /proc/PID/comm y stat). Vacio = el del binario (name). No sustituye a
+  // name, que el kernel usa para identificar (p. ej. los drivers .aur).
+  char comm[16];
+  // prctl(PR_SET_PDEATHSIG): senal al morir el padre (0 = ninguna).
+  int pdeath_sig;
   uint32_t groups[NGROUPS_MAX];
   int ngroups;
 

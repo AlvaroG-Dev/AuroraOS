@@ -623,11 +623,12 @@ static int gen_pid_stat_cb(process_t *p, void *arg) {
 
   // ---- 2. comm ----
   buf[o++] = '(';
-  size_t nl = strlen(p->name);
+  const char *cm = p->comm[0] ? p->comm : p->name; // prctl(PR_SET_NAME)
+  size_t nl = strlen(cm);
   if (nl > 15)
     nl = 15;
   for (size_t i = 0; i < nl && o + 2 < cap; i++)
-    buf[o++] = p->name[i];
+    buf[o++] = cm[i];
   buf[o++] = ')';
   o = kappend(buf, o, cap, " ");
 
@@ -1062,7 +1063,7 @@ static int gen_pid_status_cb(process_t *p, void *arg) {
 
   // ===== Name / Umask =====
   o = kappend(buf, o, cap, "Name:\t");
-  o = kappend(buf, o, cap, p->name);
+  o = kappend(buf, o, cap, p->comm[0] ? p->comm : p->name);
   buf[o++] = '\n';
 
   o = kappend(buf, o, cap, "Umask:\t");
@@ -1285,12 +1286,13 @@ static int gen_pid_comm_cb(process_t *p, void *arg) {
   if (p->pid != c->target_pid)
     return 0;
 
-  size_t n = strlen(p->name);
+  const char *nm = p->comm[0] ? p->comm : p->name; // prctl(PR_SET_NAME)
+  size_t n = strlen(nm);
   if (n > 15)
     n = 15;
   if (n + 1 > c->cap)
     n = c->cap - 1;
-  memcpy(c->buf, p->name, n);
+  memcpy(c->buf, nm, n);
   c->buf[n] = '\n';
   c->len = n + 1;
   c->found = 1;

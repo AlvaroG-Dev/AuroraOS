@@ -28,6 +28,11 @@ struct vfs_fs_ops *tmpfs_get_vfs_ops(void);
 // Estadisticas: bytes usados actualmente.
 size_t tmpfs_bytes_used(void *priv);
 
+// Si vn es un fichero de tmpfs, refresca vn->size/mtime_sec con los del
+// fichero (otro fd puede haberlo cambiado). Sin efecto en otros nodos.
+struct vfs_node;
+void tmpfs_refresh_node(struct vfs_node *vn);
+
 // Inicializa todas las instancias tmpfs del sistema: /etc, /tmp, /var,
 // /run. Las monta con vfs_mount() y pre-popula /etc con los ficheros
 // minimos que glibc espera (passwd, group, hosts, resolv.conf).

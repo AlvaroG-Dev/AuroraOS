@@ -14,4 +14,7 @@
 // Errores: -EINVAL, -ENOMEM.
 int vfs_pipe_create(vfs_node_t **read_end, vfs_node_t **write_end);
 
+// 1 si el nodo es un extremo de pipe (fcntl F_GETPIPE_SZ).
+int vfs_node_is_pipe(const vfs_node_t *n);
+
 #endif
