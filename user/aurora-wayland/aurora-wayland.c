@@ -1665,7 +1665,7 @@ static rc_t surface_ingest(struct surface *s, const uint8_t *src, int w, int h,
 
 
 /* ---- wp_linux_drm_syncobj_v1 (explicit sync) ----
- * Opt-in: solo se anuncia con /etc/aurora-explicit-sync o AW_EXPLICIT_SYNC (los clientes que lo
+ * Opt-in: solo se anuncia con /usr/share/aurora/explicit-sync o AW_EXPLICIT_SYNC (los clientes que lo
  * ven lo usan, y el camino de fences de la GPU no esta verificado en todo el hardware).
  * Acquire: se espera el punto (TIMELINE_WAIT, WAIT_FOR_SUBMIT, 100 ms) antes de leer el buffer.
  * Release: se senala el punto cuando la copia termino (wl_buffer.release se sigue enviando). */
@@ -1793,6 +1793,7 @@ static void sync_mgr_get_surface(struct wl_client *c, struct wl_resource *mgr, u
   }
   wl_resource_set_implementation(r, &sync_surf_impl, s, sync_surf_res_destroy);
   s->sync_res = r;
+  fprintf(stderr, "[aurora-wayland] explicit sync: get_surface s=%p\n", (void *)s);
 }
 static void sync_mgr_import_timeline(struct wl_client *c, struct wl_resource *mgr, uint32_t id, int32_t fd) {
   struct drm_syncobj_handle a = {.fd = fd};
@@ -1815,6 +1816,7 @@ static void sync_mgr_import_timeline(struct wl_client *c, struct wl_resource *mg
   }
   t->handle = a.handle;
   t->refs = 1;
+  fprintf(stderr, "[aurora-wayland] explicit sync: timeline importada h=%u\n", a.handle);
   wl_resource_set_implementation(r, &sync_tl_impl, t, sync_tl_res_destroy);
 }
 static const struct wp_linux_drm_syncobj_manager_v1_interface sync_mgr_impl = {
@@ -1826,6 +1828,7 @@ static void sync_mgr_bind(struct wl_client *c, void *data, uint32_t ver, uint32_
   (void)data;
   struct wl_resource *r = wl_resource_create(c, &wp_linux_drm_syncobj_manager_v1_interface, 1, id);
   (void)ver;
+  fprintf(stderr, "[aurora-wayland] explicit sync: un cliente enlazo el manager\n");
   if (!r) {
     wl_client_post_no_memory(c);
     return;
@@ -4533,7 +4536,7 @@ static void xwm_spawn(void) {
       execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
             "-nolock", "-verbose", "10", "-wm", wmfd,
             (char *)NULL);
-    if (getenv("AW_XGLAMOR") || access("/etc/aurora-xglamor", F_OK) == 0) { /* experimental: GLX acelerado (glamor+DRI3) con la GPU NVIDIA */
+    if (getenv("AW_XGLAMOR") || access("/usr/share/aurora/xglamor", F_OK) == 0) { /* experimental: GLX acelerado (glamor+DRI3) con la GPU NVIDIA */
       setenv("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 0);
       setenv("GBM_BACKENDS_PATH", "/usr/lib/x86_64-linux-gnu/gbm", 0);
       setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
@@ -5075,7 +5078,7 @@ static int on_term(int sig, void *data) {
 
 int main(int argc, char **argv) {
   /* Xwayland con glamor: GLX de las apps X11 por la GPU NVIDIA (libglvnd elegiria Mesa/llvmpipe). */
-  if (access("/etc/aurora-xglamor", F_OK) == 0)
+  if (access("/usr/share/aurora/xglamor", F_OK) == 0)
     setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
   const char *sock = argc > 1 ? argv[1] : "wayland-0";
   g_sockname = sock;
@@ -5111,7 +5114,7 @@ int main(int argc, char **argv) {
   wl_global_create(g_display, &zwp_primary_selection_device_manager_v1_interface, 1,
                    NULL, psm_bind);
   wl_global_create(g_display, &zwp_linux_dmabuf_v1_interface, 4, NULL, dmabuf_bind);
-  if (getenv("AW_EXPLICIT_SYNC") || access("/etc/aurora-explicit-sync", F_OK) == 0) {
+  if (getenv("AW_EXPLICIT_SYNC") || access("/usr/share/aurora/explicit-sync", F_OK) == 0) {
     wl_global_create(g_display, &wp_linux_drm_syncobj_manager_v1_interface, 1, NULL, sync_mgr_bind);
     fprintf(stderr, "[aurora-wayland] explicit sync (wp_linux_drm_syncobj_v1) anunciado\n");
   }
