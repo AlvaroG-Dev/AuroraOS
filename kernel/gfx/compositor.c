@@ -404,6 +404,7 @@ static void do_minimize_window(window_t *win);
 static void do_close_begin(window_t *win);
 static void do_toggle_maximize(window_t *win);
 static void open_about_window(void);
+static void launch_app(const char *path);
 
 /* Clic en un icono del Dock, como en macOS: activa la app (trae su ventana
  * al frente) o la restaura si estaba minimizada. Nunca minimiza. */
@@ -445,6 +446,12 @@ static void taskbar_item_on_click(taskbar_item_t *item) {
     }
   }
   /* Lanzador fijado sin ventanas: abrir la app. */
+  if (item->pinned && item->launch_path && !item->launching) {
+    item->launching = 8000;
+    launch_app(item->launch_path);
+    dock_bounce(item);
+    return;
+  }
   if (item->pinned && item->launch_id && !item->launching) {
     item->launching = 8000; /* hasta que aparezca su ventana (o 8 s) */
     launch_request(item->launch_id);
@@ -700,6 +707,7 @@ static int launch_thread(void *arg) {
 static void launch_app(const char *path) {
   kthread_run(launch_thread, (void *)path, "launch");
 }
+#define APLICACIONES_APP_ID "aurora.aplicaciones"
 
 /* Aplica el modo (claro/oscuro) a todo lo que dibuja el kernel y avisa a los
  * clientes (la terminal consulta theme_generation() por syscall). */
@@ -754,6 +762,9 @@ static void run_menu_action(menu_action_t act) {
     break;
   case MENU_ACT_LAUNCH_CONFIG:
     launch_app("/usr/bin/configuracion");
+    break;
+  case MENU_ACT_LAUNCH_APLICACIONES:
+    launch_app("/usr/bin/aplicaciones");
     break;
   case MENU_ACT_LAUNCH_IMAGENES:
     launch_app("/usr/bin/imagenes");
@@ -1056,6 +1067,8 @@ static void do_dock_pin(const comp_cmd_t *c) {
       it = i;
       break;
     }
+  if (it && it->fixed)
+    return; /* los lanzadores del sistema no se tocan desde userspace */
   if (!it) {
     it = taskbar_add_item(TASKBAR_ITEM_APP_ICON, c->title, c->symbol, c->color,
                           taskbar_item_on_click);
@@ -2216,6 +2229,20 @@ void compositor_init(void) {
   dock_init((int)fb_width, (int)fb_height);
   menubar_init((int)fb_width, (int)fb_height);
   menubar_set_provider(&k_menu_provider);
+  /* Aplicaciones: primer icono del Dock, fijo (no se puede quitar). Abre la
+   * app que muestra y lanza todas las apps instaladas; su ventana se agrupa
+   * en este icono por el app_id. */
+  {
+    taskbar_item_t *it = taskbar_add_item(TASKBAR_ITEM_APP_ICON, "Aplicaciones",
+                                          "::", 0xFFD63FA8, taskbar_item_on_click);
+    if (it) {
+      it->pinned = 1;
+      it->fixed = 1;
+      it->launch_path = "/usr/bin/aplicaciones";
+      strncpy(it->app_id, APLICACIONES_APP_ID, sizeof(it->app_id) - 1);
+      it->icon_bmp_node = tar_find_file("system/icons/app-aplicaciones.bmp");
+    }
+  }
   taskbar_refresh_clock();
   kthread_run(theme_restore_thread, NULL, "theme-restore");
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Imágenes
+Comment=Visor de PNG, JPEG, BMP y PPM
+Exec=/usr/bin/imagenes
+Icon=/system/icons/app-imagenes.bmp
+X-Aurora-Color=F2545B
+X-Aurora-Order=60

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Línea de órdenes
+Exec=/usr/bin/terminal
+Icon=/system/icons/app-terminal.bmp
+X-Aurora-Color=1E2124
+X-Aurora-Order=20

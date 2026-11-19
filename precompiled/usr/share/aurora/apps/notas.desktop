@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Notas
+Comment=Bloc de texto con guardado automático
+Exec=/usr/bin/notas
+Icon=/system/icons/app-notas.bmp
+X-Aurora-Color=FFC82E
+X-Aurora-Order=50

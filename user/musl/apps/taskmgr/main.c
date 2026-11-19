@@ -31,7 +31,7 @@ extern void _exit(int status) __attribute__((noreturn));
 
 #define WIN_W 760
 #define WIN_H 520
-#define TITLEBAR_H 32
+#define TITLEBAR_H 38 // = AURORA_TITLEBAR_HEIGHT (kernel/gfx/theme.h)
 #define HIST_N 60
 #define MAX_PROCS 256
 #define ROW_H 24

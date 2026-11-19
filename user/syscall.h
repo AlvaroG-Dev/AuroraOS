@@ -405,6 +405,7 @@ typedef struct {
 #define ASYS_PROCLIST (ASYS_BASE + 0x72)
 #define ASYS_SCREEN_SIZE (ASYS_BASE + 0x73)
 #define ASYS_THEME_SET (ASYS_BASE + 0x74)
+#define ASYS_WIN_SET_APP_ID (ASYS_BASE + 0x1C) /* agrupa la ventana en el icono del Dock de esa app */
 #define ASYS_WALLPAPER_SET (ASYS_BASE + 0x75)
 #define ASYS_WALLPAPER_GET (ASYS_BASE + 0x76)
 static inline int sys_sysinfo(aurora_sysinfo_t *si) {

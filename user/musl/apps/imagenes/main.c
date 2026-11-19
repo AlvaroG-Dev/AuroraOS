@@ -39,7 +39,7 @@
 extern void _exit(int status) __attribute__((noreturn));
 char *strstr(const char *haystack, const char *needle);
 
-#define TITLEBAR_H 32
+#define TITLEBAR_H 38 // = AURORA_TITLEBAR_HEIGHT (kernel/gfx/theme.h)
 #define BAR_H 46
 #define MAX_FILES 1024
 #define PATH_MAX_I 512

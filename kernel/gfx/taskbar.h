@@ -68,6 +68,9 @@ typedef struct taskbar_item {
   char app_id[48];
   int win_count;      /* ventanas que cuelgan de este item */
   int launching;      /* ms restantes de "abriendose" (rebote), 0 = no */
+  int fixed;          /* del sistema (Aplicaciones): no se puede quitar ni
+                         sustituir desde userspace */
+  const char *launch_path; /* app nativa que lanza el kernel (o NULL) */
 } taskbar_item_t;
 
 // API de abstracción de la Taskbar

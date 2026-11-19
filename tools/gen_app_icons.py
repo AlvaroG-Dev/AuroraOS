@@ -36,3 +36,15 @@ for i, c in enumerate(((0xFF, 0x6A, 0x3D), (0x4D, 0xA3, 0xFF), (0x3E, 0xE8, 0x9B
 g = g.resize((128, 128), Image.LANCZOS)
 save_bmp32(g, os.path.join(os.path.dirname(__file__), "..", "assets", "system", "icons", "app-generic.bmp"))
 print("OK app-generic")
+
+# ---- Aplicaciones (lanzador fijo del Dock): rejilla 3x3 en magenta ----
+a = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+d = ImageDraw.Draw(a)
+d.rounded_rectangle((16, 16, S - 16, S - 16), radius=112, fill=(0xD6, 0x3F, 0xA8, 255))
+for i in range(3):
+    for j in range(3):
+        x, y = 112 + i * 104, 112 + j * 104
+        d.rounded_rectangle((x, y, x + 80, y + 80), radius=24, fill=(255, 255, 255, 255))
+a = a.resize((128, 128), Image.LANCZOS)
+save_bmp32(a, os.path.join(os.path.dirname(__file__), "..", "assets", "system", "icons", "app-aplicaciones.bmp"))
+print("OK app-aplicaciones")

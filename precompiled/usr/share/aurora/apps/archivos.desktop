@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Archivos
+Comment=Explora carpetas y abre ficheros
+Exec=/usr/bin/archivos
+Icon=/system/icons/app-archivos.bmp
+X-Aurora-Color=3D8BFF
+X-Aurora-Order=10

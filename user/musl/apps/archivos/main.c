@@ -38,7 +38,7 @@ char *strstr(const char *haystack, const char *needle);
 
 #define WIN_W 780
 #define WIN_H 500
-#define TITLEBAR_H 32
+#define TITLEBAR_H 38 // = AURORA_TITLEBAR_HEIGHT (kernel/gfx/theme.h)
 #define SIDE_W 168
 #define TOP_H 44
 #define HEAD_H 26

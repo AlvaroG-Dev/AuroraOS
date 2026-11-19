@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Monitor de rendimiento
+Comment=Procesos, CPU y memoria
+Exec=/usr/bin/taskmgr
+Icon=/system/icons/app-monitor.bmp
+X-Aurora-Color=7C6CFF
+X-Aurora-Order=30

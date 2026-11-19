@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Configuración
+Comment=Modo, fondo, red, almacenamiento
+Exec=/usr/bin/configuracion
+Icon=/system/icons/app-configuracion.bmp
+X-Aurora-Color=59606B
+X-Aurora-Order=70

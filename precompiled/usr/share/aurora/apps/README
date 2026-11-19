@@ -1,0 +1,4 @@
+Apps nativas de Aurora que muestra la app Aplicaciones (formato .desktop de
+freedesktop). Las apps Linux salen de /usr/share/applications y de
+/usr/share/aurora/dock.conf. Campos propios: X-Aurora-Color=RRGGBB (color de
+la app) y X-Aurora-Order (posición; las de menor número primero).

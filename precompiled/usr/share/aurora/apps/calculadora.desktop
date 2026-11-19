@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Calculadora
+Comment=Cuentas rápidas
+Exec=/usr/bin/calculadora
+Icon=/system/icons/app-calculadora.bmp
+X-Aurora-Color=FF8A3D
+X-Aurora-Order=40
