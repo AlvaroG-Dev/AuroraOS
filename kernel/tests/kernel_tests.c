@@ -6155,17 +6155,47 @@ static void test_evdev_keyboard_events(void) {
   }
 
   // Autorepeat: segunda pulsacion sin soltar -> value 2.
-  evdev_kbd_key(30, 1);
-  evdev_kbd_key(30, 1);
-  evdev_kbd_key(30, 0);
+  // (otra tecla que la anterior: la misma volveria a pulsarse dentro del
+  // antirrebote de 25 ms y se ignoraria)
+  evdev_kbd_key(48, 1);
+  evdev_kbd_key(48, 1);
+  evdev_kbd_key(48, 0);
   r = n->ops->read(n, 0, sizeof(ev), ev);
   TEST_ASSERT(r >= 4 * (int64_t)sizeof(struct t_input_event) && ev[2].value == 2,
               "autorepeat value=2");
+
+  // Antirrebote: soltar y pulsar la misma tecla al instante es rebote.
+  evdev_kbd_key(31, 1);
+  evdev_kbd_key(31, 0);
+  evdev_kbd_key(31, 1); // dentro de 25 ms de soltarla: se ignora
+  evdev_kbd_key(31, 0);
+  r = n->ops->read(n, 0, sizeof(ev), ev);
+  TEST_ASSERT(r == 4 * (int64_t)sizeof(struct t_input_event),
+              "antirrebote: esperaba 4 eventos (down/SYN/up/SYN), leyo %ld bytes",
+              (long)r);
 
   vfs_node_free(n);
 }
 REGISTER_TEST("evdev: teclado, SYN, autorepeat, ioctl",
               test_evdev_keyboard_events);
+
+// mini-VM: solo comprueba que la sonda de capacidades no cuelga y es coherente
+// (las baterias QEMU sin KVM no tienen VMX: se acepta y se salta).
+#include "../vmx.h"
+static void test_vmx_caps(void) {
+  struct avm_caps c;
+  bool ok = vmx_probe(&c);
+  TEST_ASSERT(ok == ((c.flags & AVM_CAP_USABLE) != 0), "usable coherente");
+  if (c.flags & AVM_CAP_USABLE)
+    TEST_ASSERT((c.flags & AVM_CAP_VMX) && (c.flags & AVM_CAP_EPT) &&
+                    (c.flags & AVM_CAP_UNRESTRICTED),
+                "USABLE implica VMX+EPT+unrestricted");
+  vfs_node_t *n = vfs_lookup("/dev/aurora-vm");
+  TEST_ASSERT(n != NULL, "/dev/aurora-vm registrado");
+  if (n)
+    vfs_node_free(n);
+}
+REGISTER_TEST("vmx: sonda de capacidades y /dev/aurora-vm", test_vmx_caps);
 
 // --- Plazos de espera con resolución de 1 ms ---------------------------------
 // sched_wake_expired() corre también en el tick en que vence el plazo más

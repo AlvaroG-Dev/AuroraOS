@@ -20,6 +20,7 @@ install: $(MUSL_APPS)
 	@for app in $(MUSL_APPS); do \
 		cp -f $$app $(SYSDIR)/$$app; \
 	done
+	@if [ -x aurora-vm ]; then mkdir -p $(SYSDIR)/../libexec/aurora && cp -f aurora-vm $(SYSDIR)/../libexec/aurora/aurora-vm; fi
 	@for app in $(MUSL_APPS); do \
 		file $(SYSDIR)/$$app | sed 's/^/  /'; \
 	done

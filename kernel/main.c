@@ -39,6 +39,7 @@
 #include "vmap.h"
 #include "idt.h"
 #include "evdev.h"
+#include "vmx.h"
 #include "drm/drm.h"
 #include "input.h"
 #include "ipc.h"
@@ -443,6 +444,7 @@ static int drivers_init_task(void *arg) {
   LOG_INFO("[INIT] Input...");
   input_init();
   evdev_init();
+  vmx_init();
   drm_init();
 
   LOG_INFO("[INIT] Buses...");
