@@ -4423,6 +4423,9 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
 }
 
 static void xwm_ready(void);
+static void xwm_spawn(void);
+static int g_x_glamor_cur;    /* 1 = el Xwayland lanzado usa glamor (sin -shm) */
+static int g_x_glamor_failed; /* glamor fallo: reintentar y quedarse con -shm */
 static int g_xwm_fd = -1; /* extremo nuestro del socket -wm */
 static int g_xready_pipe[2] = {-1, -1};
 static xcb_connection_t *g_xthread_conn;
@@ -4457,6 +4460,12 @@ static void xwm_ready(void) {
     if (g_xpid > 0)
       kill(g_xpid, SIGTERM);
     g_xpid = 0;
+    if (g_x_glamor_cur) { /* glamor no arranco: volver al modo -shm (siempre funciono) */
+      g_x_glamor_failed = 1;
+      g_x_glamor_cur = 0;
+      fprintf(stderr, "[aurora-wayland] Xwayland con glamor fallo: reintento con -shm\n");
+      xwm_spawn();
+    }
     return;
   }
   const xcb_setup_t *setup = xcb_get_setup(g_xc);
@@ -4495,6 +4504,8 @@ static void xwm_ready(void) {
 
 static void xwm_spawn(void) {
   int sv[2];
+  int want_glamor = !g_x_glamor_failed && (getenv("AW_XGLAMOR") || access("/usr/share/aurora/xglamor", F_OK) == 0);
+  g_x_glamor_cur = want_glamor;
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
     perror("[aurora-wayland] xwm socketpair");
     return;
@@ -4536,11 +4547,12 @@ static void xwm_spawn(void) {
       execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
             "-nolock", "-verbose", "10", "-wm", wmfd,
             (char *)NULL);
-    if (getenv("AW_XGLAMOR") || access("/usr/share/aurora/xglamor", F_OK) == 0) { /* experimental: GLX acelerado (glamor+DRI3) con la GPU NVIDIA */
+    if (want_glamor) { /* experimental: GLX acelerado (glamor+DRI3) con la GPU NVIDIA */
       setenv("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 0);
       setenv("GBM_BACKENDS_PATH", "/usr/lib/x86_64-linux-gnu/gbm", 0);
       setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
-      execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-glamor", "gl", "-noreset",
+      /* Xwayland 23: glamor es el modo por defecto; solo -shm lo desactiva. */
+      execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-noreset",
             "-nolock", "-wm", wmfd, (char *)NULL);
     }
     execl("/usr/bin/Xwayland", "Xwayland", disp, "-rootless", "-shm", "-noreset",
