@@ -1,0 +1,25 @@
+#!/bin/sh
+# aurora-wine-diag — diagnostico de Wine para mandar a quien lo depura.
+# Borra el prefijo (/data/.wine o $WINEPREFIX), lo crea de nuevo y prueba
+# winecfg con la GPU y solo por software. Todo queda en /data/wine-diag.
+D=${1:-/data/wine-diag}
+P=${WINEPREFIX:-${HOME:-/root}/.wine}
+mkdir -p "$D" || exit 1
+rm -rf "$P"
+echo "aurora-wine-diag: resultados en $D (si se abre winecfg, ciérralo)"
+{ echo "kms_swrast en aurora-wine: $(grep -c kms_swrast /usr/bin/aurora-wine)"
+  cat /sys/class/drm/card0/device/uevent; ls -la /dev/dri; env | sort; } > "$D/0-info.txt" 2>&1
+export WINEDEBUG=err+all,fixme-all,+loaddll
+echo "1/3: creando el prefijo (hasta 400 s)..."
+AURORA_WINE_LOG="$D/1-setup.txt" timeout 400 aurora-wine --setup
+echo "setup rc=$?" >> "$D/0-info.txt"
+echo "2/3: winecfg con la GPU (hasta 120 s)..."
+timeout 120 aurora-wine winecfg > "$D/2-winecfg.txt" 2>&1
+echo "winecfg rc=$?" >> "$D/0-info.txt"
+wineserver -k 2>/dev/null; sleep 3
+echo "3/3: winecfg solo por software (hasta 120 s)..."
+AURORA_WINE_GPU=0 timeout 120 aurora-wine winecfg > "$D/3-winecfg-sw.txt" 2>&1
+echo "sw rc=$?" >> "$D/0-info.txt"
+wineserver -k 2>/dev/null
+cp /data/aurora.log "$D/" 2>/dev/null
+echo "aurora-wine-diag: hecho. Manda la carpeta $D"
