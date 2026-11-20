@@ -17,6 +17,8 @@ static void pic_lower(int irq);
 static int g_plat; // 1 = modo BIOS: activa PCI, CMOS completo, i8042
 static int g_bios_log;
 static int g_reset_req;
+static char g_dbgbuf[16384];
+static size_t g_dbgbuf_n;
 
 // ---------------------------------------------------------------------------
 // CMOS / RTC
@@ -971,7 +973,10 @@ static int plat_out(uint16_t port, uint32_t v, int size) {
     if (port == 0x4D0 || port == 0x4D1) return 1;
   }
   if (port == 0x402 || port == 0xE9) {
-    if (g_bios_log) { fputc((int)(v & 0xFF), stderr); }
+    if (g_bios_log)
+      fputc((int)(v & 0xFF), stderr);
+    else if (g_dbgbuf_n < sizeof(g_dbgbuf))
+      g_dbgbuf[g_dbgbuf_n++] = (char)v; // se enseña si el arranque falla
     return 1;
   }
   if (port == 0x80 || port <= 0x0F || (port >= 0x81 && port <= 0x8F) ||

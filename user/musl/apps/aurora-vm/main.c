@@ -264,6 +264,14 @@ static void serial_out(uint8_t c) {
   }
 }
 
+// Ultimos accesos de E/S del huesped (para el diagnostico de los cuelgues).
+static struct { uint16_t port; uint8_t size, w; uint32_t v; } g_iolog[24];
+static unsigned g_iolog_n;
+static void iolog(uint16_t port, int size, int w, uint32_t v) {
+  g_iolog[g_iolog_n % 24] = (typeof(g_iolog[0])){port, (uint8_t)size, (uint8_t)w, v};
+  g_iolog_n++;
+}
+
 static uint32_t io_in(uint16_t port, int size) {
   uint32_t v = 0xFFFFFFFFu;
   if (plat_in(port, size, &v))
@@ -284,10 +292,13 @@ static uint32_t io_in(uint16_t port, int size) {
     v &= 0xFF;
   else if (size == 2)
     v &= 0xFFFF;
+  iolog(port, size, 0, v);
   return v;
 }
 
 static void io_out(uint16_t port, uint32_t v, int size) {
+  if (port != 0x402 && port != 0xE9)
+    iolog(port, size, 1, v);
   if (plat_out(port, v, size))
     return;
   if (port == 0x3F8)
@@ -567,6 +578,24 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
   for (unsigned n = 0; n < max_iter; n++) {
     if (deadline_ns && (n & 63) == 0 && now_ns() > deadline_ns) {
       fprintf(stderr, "aurora-vm: tiempo agotado\n");
+      {
+        struct avm_regs tr;
+        if (ioctl(g_vm, AVM_GET_REGS, &tr) == 0)
+          fprintf(stderr, "  cs=%x:%llx (base %llx) rflags=%llx cr0=%llx ax=%llx bx=%llx cx=%llx dx=%llx\n",
+                  tr.cs.selector, (unsigned long long)tr.rip, (unsigned long long)tr.cs.base,
+                  (unsigned long long)tr.rflags, (unsigned long long)tr.cr0,
+                  (unsigned long long)tr.rax, (unsigned long long)tr.rbx,
+                  (unsigned long long)tr.rcx, (unsigned long long)tr.rdx);
+        fprintf(stderr, "  ultimos accesos de E/S (%u en total):\n", g_iolog_n);
+        unsigned n = g_iolog_n < 24 ? g_iolog_n : 24;
+        for (unsigned i = 0; i < n; i++) {
+          unsigned k = (g_iolog_n - n + i) % 24;
+          fprintf(stderr, "    %s 0x%04x/%u = 0x%x\n", g_iolog[k].w ? "OUT" : "IN ", g_iolog[k].port,
+                  g_iolog[k].size, g_iolog[k].v);
+        }
+        if (g_dbgbuf_n)
+          fprintf(stderr, "--- log de SeaBIOS ---\n%.*s\n", (int)g_dbgbuf_n, g_dbgbuf);
+      }
       return 5;
     }
     if (g_reset_req) {
@@ -810,6 +839,8 @@ static int run_bios(const char *bios_path, const char *disk_path, const char *id
   g_exit_code = -1;
   g_reset_req = 0;
   g_out_n = 0;
+  g_dbgbuf_n = 0;
+  g_iolog_n = 0;
   g_ram_size = (uint64_t)mem_mb << 20;
   cmos_init(g_ram_size);
   g_plat = 1;
