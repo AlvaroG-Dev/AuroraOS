@@ -639,7 +639,16 @@ static void vmcs_read_guest(struct avm_vm *vm) {
   r->rflags = vmread(F_GUEST_RFLAGS);
   r->cr3 = vmread(F_GUEST_CR3);
   r->efer = vmread(F_GUEST_EFER);
-  // CR0/CR4 los lleva el software (sombra + valor real); no se leen de vuelta.
+  // CR0/CR4: los bits que VMX no posee (PE, PG, PAE...) los cambia el huesped
+  // directamente en el VMCS sin salir; los poseidos por VMX (NE...) viven en la
+  // sombra. Hay que releer los primeros o la siguiente entrada los desharia.
+  {
+    uint64_t o0 = cr0_owned(), o4 = cr4_owned();
+    r->cr0 = (vm->cr0_shadow & o0) | (vmread(F_GUEST_CR0) & ~o0);
+    vm->cr0_shadow = r->cr0;
+    r->cr4 = (vm->cr4_shadow & o4) | (vmread(F_GUEST_CR4) & ~o4);
+    vm->cr4_shadow = r->cr4;
+  }
   read_seg(F_GUEST_ES_SEL, F_GUEST_ES_BASE, F_GUEST_ES_LIM, F_GUEST_ES_AR, &r->es);
   read_seg(F_GUEST_CS_SEL, F_GUEST_CS_BASE, F_GUEST_CS_LIM, F_GUEST_CS_AR, &r->cs);
   read_seg(F_GUEST_SS_SEL, F_GUEST_SS_BASE, F_GUEST_SS_LIM, F_GUEST_SS_AR, &r->ss);
