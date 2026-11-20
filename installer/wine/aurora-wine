@@ -24,25 +24,55 @@ case "$drv" in
     i915|xe|amdgpu|radeon|nouveau) ;;
     *) : "${MESA_LOADER_DRIVER_OVERRIDE:=kms_swrast}"; export MESA_LOADER_DRIVER_OVERRIDE ;;
 esac
-# AURORA_WINE_GPU=0: Wine solo por software (Mesa), sin las bibliotecas de NVIDIA.
-if [ "${AURORA_WINE_GPU:-1}" = 0 ]; then
+# GPU NVIDIA: con sus bibliotecas cargadas (GLX/EGL/Vulkan), los procesos de
+# Wine se quedan esperando para siempre al crear el prefijo (PC con RTX 4060,
+# 2026-11-20). Por omisión Wine va por software (Mesa) con una NVIDIA;
+# AURORA_WINE_GPU=1 la usa. AURORA_WINE_GPU=0 fuerza software con cualquier GPU.
+case "$drv" in nvidia*) gpu_def=0 ;; *) gpu_def=1 ;; esac
+wine_sw() {
     export VK_LOADER_DRIVERS_DISABLE='*nvidia*'
     export __GLX_VENDOR_LIBRARY_NAME=mesa
     export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+    export LIBGL_ALWAYS_SOFTWARE=1
+}
+[ "${AURORA_WINE_GPU:-$gpu_def}" = 0 ] && wine_sw
+# Registro: errores de Wine en /data/aurora-wine.log (si /data se puede escribir).
+if [ -z "$AURORA_WINE_LOG" ]; then
+    AURORA_WINE_LOG=/dev/null
+    if [ -d /data ] && touch /data/aurora-wine.log 2>/dev/null; then
+        AURORA_WINE_LOG=/data/aurora-wine.log
+        : "${WINEDEBUG:=err+all,fixme-all}"
+    fi
 fi
 : "${WINEDEBUG:=-all}"
 export WINEDEBUG
+log() { echo "[$(date '+%F %T')] aurora-wine: $*" >>"$AURORA_WINE_LOG"; }
 
 SHARE=/usr/share/aurora/wine
 mode=dark
 [ "${AURORA_THEME:-$(cat /data/aurora-theme 2>/dev/null)}" = light ] && mode=light
 
+log "$* (GPU ${AURORA_WINE_GPU:-$gpu_def}, card0=${drv:-?}, prefijo $WINEPREFIX)"
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
+    # Crear el prefijo no necesita la GPU: siempre por software, y con tope de
+    # tiempo para que un proceso colgado no deje a Wine parado para siempre.
     echo "aurora-wine: creando el prefijo de Wine en $WINEPREFIX (la primera vez tarda un poco)..." >&2
-    wineboot -i >>"${AURORA_WINE_LOG:-/dev/null}" 2>&1
+    log "creando el prefijo"
+    wineserver -k 2>/dev/null
+    ( wine_sw; timeout 600 wineboot -i ) >>"$AURORA_WINE_LOG" 2>&1
+    rc=$?
+    # 124/137: el tope de tiempo lo paro (system.reg puede tardar unos
+    # segundos más en escribirse: no sirve para saber si fue bien).
+    if [ $rc = 124 ] || [ $rc = 137 ]; then
+        log "wineboot no termino (rc=$rc)"
+        wineserver -k 2>/dev/null
+        echo "aurora-wine: no se pudo crear el prefijo (rc=$rc); detalles en $AURORA_WINE_LOG" >&2
+        exit 1
+    fi
+    log "prefijo creado"
 fi
 if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
-    wine regedit /S "$SHARE/aurora-$mode.reg" >>"${AURORA_WINE_LOG:-/dev/null}" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
+    wine regedit /S "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
 fi
 [ "$1" = "--setup" ] && exit 0
 [ $# -eq 0 ] && set -- winecfg
