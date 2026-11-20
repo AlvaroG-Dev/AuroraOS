@@ -59,6 +59,9 @@
 #define PIN_EXT_INTR (1u << 0)
 #define PROC_INTR_WINDOW (1u << 2)
 #define PROC_HLT (1u << 7)
+#define PROC_MWAIT (1u << 10)
+#define PROC_MOV_DR (1u << 23)
+#define PROC_MONITOR (1u << 29)
 #define PROC_UNCOND_IO (1u << 24)
 #define PROC_SECONDARY (1u << 31)
 #define PROC2_EPT (1u << 1)
@@ -120,6 +123,8 @@ enum {
 // Motivos de salida (basic exit reason)
 enum {
   XR_EXC_NMI = 0, XR_EXT_INTR = 1, XR_TRIPLE_FAULT = 2, XR_INTR_WINDOW = 7,
+  XR_GETSEC = 11, XR_INVD = 13, XR_RSM = 17, XR_VMX_FIRST = 18, XR_VMX_LAST = 27,
+  XR_MWAIT = 36, XR_MONITOR = 39, XR_MOV_DR = 29, XR_XSETBV = 55,
   XR_CPUID = 10, XR_HLT = 12, XR_CR_ACCESS = 28, XR_IO = 30, XR_RDMSR = 31,
   XR_WRMSR = 32, XR_INVALID_GUEST = 33, XR_MSR_LOAD_FAIL = 34,
   XR_EPT_VIOLATION = 48, XR_EPT_MISCONFIG = 49,
@@ -159,6 +164,7 @@ struct avm_vm {
   uint32_t interruptibility, activity;
   int32_t pending_irq; // -1 = ninguna
   uint32_t timeout_ms;
+  uint64_t dr[8];
   uint32_t debug, exc_logged;
   uint64_t last_exc_rip;
   uint32_t exc_repeat;
@@ -529,7 +535,8 @@ static void gdt_sidt(uint64_t *gbase, uint16_t *glim, uint64_t *ibase,
 static void vmcs_setup_static(struct avm_vm *vm) {
   vm->pinbased = adjust_ctl(PIN_EXT_INTR, g_vmx.true_ctls ? MSR_VMX_TRUE_PIN
                                                           : MSR_VMX_PINBASED);
-  vm->procbased = adjust_ctl(PROC_HLT | PROC_UNCOND_IO | PROC_SECONDARY,
+  vm->procbased = adjust_ctl(PROC_HLT | PROC_UNCOND_IO | PROC_SECONDARY |
+                                 PROC_MOV_DR | PROC_MWAIT | PROC_MONITOR,
                              g_vmx.true_ctls ? MSR_VMX_TRUE_PROC
                                              : MSR_VMX_PROCBASED);
   vm->procbased &= ~PROC_INTR_WINDOW;
@@ -675,9 +682,17 @@ static void vmcs_read_guest(struct avm_vm *vm) {
 // ---------------------------------------------------------------------------
 // Inyeccion y emulacion rapida
 // ---------------------------------------------------------------------------
-static void inject_gp(void) {
-  vmwrite(F_ENTRY_ERRCODE, 0);
-  vmwrite(F_ENTRY_INTR_INFO, 13 | (3u << 8) | (1u << 11) | (1u << 31));
+// #GP(0). En modo real (CR0.PE=0) VM-entry exige NO entregar codigo de error.
+static void inject_gp(struct avm_vm *vm) {
+  if (vm->cr0_shadow & 1) {
+    vmwrite(F_ENTRY_ERRCODE, 0);
+    vmwrite(F_ENTRY_INTR_INFO, 13 | (3u << 8) | (1u << 11) | (1u << 31));
+  } else {
+    vmwrite(F_ENTRY_INTR_INFO, 13 | (3u << 8) | (1u << 31));
+  }
+}
+static void inject_ud(void) {
+  vmwrite(F_ENTRY_INTR_INFO, 6 | (3u << 8) | (1u << 31));
 }
 
 static void skip_insn(struct avm_vm *vm) {
@@ -730,7 +745,7 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
       a = b = c = d = 0;
     }
     break;
-  case 0xB: case 0xD: case 0x12: case 0x14: case 0x1F:
+  case 0x6: case 0xA: case 0xB: case 0xD: case 0x12: case 0x14: case 0x1F:
     a = b = c = d = 0;
     break;
   case 0x80000001:
@@ -762,6 +777,10 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
   switch (idx) {
   case MSR_EFER:
     if (write) {
+      if (val & ~(EFER_SCE | (1ULL << 8) | EFER_NXE)) { // solo SCE, LME, NXE
+        ok = false;
+        break;
+      }
       uint64_t keep = vm->regs.efer & (1ULL << 10); // LMA lo decide CR0.PG
       vm->regs.efer = (val & ~(1ULL << 10)) | keep;
       vmwrite(F_GUEST_EFER, vm->regs.efer);
@@ -861,7 +880,7 @@ static bool emu_cr_access(struct avm_vm *vm, struct gregs *g) {
   uint64_t v = *rp;
   switch (cr) {
   case 0:
-    if (((v >> 31) & 1) && !((v >> 0) & 1)) { inject_gp(); return true; }
+    if ((v >> 32) || (((v >> 31) & 1) && !((v >> 0) & 1))) { inject_gp(vm); return true; }
     vm->cr0_shadow = v | (1ULL << 4); // ET siempre
     vm->regs.cr0 = vm->cr0_shadow;
     vmwrite(F_CR0_SHADOW, vm->cr0_shadow);
@@ -872,7 +891,7 @@ static bool emu_cr_access(struct avm_vm *vm, struct gregs *g) {
     vmwrite(F_GUEST_CR3, v);
     break;
   case 4:
-    if (v & ~CR4_ALLOWED) { inject_gp(); return true; }
+    if (v & ~CR4_ALLOWED) { inject_gp(vm); return true; }
     vm->cr4_shadow = v;
     vm->regs.cr4 = v;
     vmwrite(F_CR4_SHADOW, v);
@@ -1036,12 +1055,15 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       emu_cpuid(vm, &g);
       skip_insn(vm);
       continue;
+    case XR_VMX_FIRST ... XR_VMX_LAST: // VMCALL, VMCLEAR, ... VMXON
+      inject_ud();
+      continue;
     case XR_RDMSR:
     case XR_WRMSR:
       if (emu_msr(vm, &g, reason == XR_WRMSR))
         skip_insn(vm);
       else
-        inject_gp();
+        inject_gp(vm);
       continue;
     case XR_CR_ACCESS:
       if (emu_cr_access(vm, &g))
@@ -1101,6 +1123,33 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       }
       ret = 1;
       goto leave;
+    }
+    case XR_INVD: // sin invalidar cachés: el huésped no puede tocar las del host
+    case XR_MWAIT:
+    case XR_MONITOR:
+      skip_insn(vm);
+      continue;
+    case XR_GETSEC:
+    case XR_RSM:
+      inject_ud();
+      continue;
+    case XR_XSETBV: // XSAVE no se anuncia por CPUID
+      inject_gp(vm);
+      continue;
+    case XR_MOV_DR: {
+      uint64_t q = vmread(F_EXIT_QUAL);
+      int dr = (int)(q & 7), r = (int)((q >> 8) & 0xF);
+      uint64_t *rp = gpr(&g, vm, r);
+      if (r == 4)
+        vm->regs.rsp = vmread(F_GUEST_RSP);
+      if (q & 0x10) {
+        *rp = dr == 6 ? (vm->dr[6] | 0xFFFF0FF0ULL)
+              : dr == 7 ? 0x400ULL | vm->dr[7] : vm->dr[dr];
+      } else {
+        vm->dr[dr] = *rp; // solo se recuerda: los DR del host no se tocan
+      }
+      skip_insn(vm);
+      continue;
     }
     case XR_HLT:
       skip_insn(vm);
@@ -1163,7 +1212,10 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
     }
     uint32_t mask = vm->pending_in_size == 4 ? 0xFFFFFFFFu
                                              : (1u << (8 * vm->pending_in_size)) - 1;
-    vm->regs.rax = (vm->regs.rax & ~(uint64_t)mask) | (prev.io.data & mask);
+    if (vm->pending_in_size == 4)
+      vm->regs.rax = prev.io.data; // IN de 32 bits: extiende a cero
+    else
+      vm->regs.rax = (vm->regs.rax & ~(uint64_t)mask) | (prev.io.data & mask);
     vm->regs.rip += vm->pending_in_len;
     vm->pending_in = false;
   }

@@ -32,6 +32,7 @@
 #define MMIO_TEST_BASE 0xE0000000ULL
 
 static int g_vm = -1;
+static int g_mfd = -1;
 static uint8_t *g_ram;
 static uint64_t g_ram_size;
 static char g_out[512];
@@ -486,7 +487,7 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
   if (g_vm < 0)
     return 1;
   g_ram_size = (uint64_t)mem_mb << 20;
-  int mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
+  int mfd = g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
   if (mfd < 0 || ftruncate(mfd, (off_t)g_ram_size) < 0) {
     perror("memfd");
     return 1;
@@ -626,6 +627,7 @@ static int autotest(void) {
     }
     close(g_vm);
     munmap(g_ram, g_ram_size);
+    close(g_mfd);
   }
   return bad ? 1 : 0;
 }
