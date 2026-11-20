@@ -373,6 +373,8 @@ static uint32_t vb_in(unsigned off, int size) {
   uint32_t cyl = (uint32_t)(g_disk_sectors / (16 * 63));
   if (cyl > 16383)
     cyl = 16383;
+  if (cyl < 1)
+    cyl = 1; // discos diminutos (pruebas): SeaBIOS rechaza 0 cilindros
   put32(b + 0x00, vb_host_features());
   put32(b + 0x04, g_vb.guest_features);
   put32(b + 0x08, g_vb.pfn);
@@ -584,6 +586,8 @@ static void ide_identify(struct ide_chan *c) {
   uint32_t cyl = (uint32_t)(sec / (16 * 63));
   if (cyl > 16383)
     cyl = 16383;
+  if (cyl < 1)
+    cyl = 1; // discos diminutos (pruebas): SeaBIOS rechaza 0 cilindros
   w[0] = 0x0040;
   w[1] = (uint16_t)cyl;
   w[3] = 16;
