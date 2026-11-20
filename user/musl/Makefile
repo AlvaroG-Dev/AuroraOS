@@ -21,7 +21,7 @@ install: $(MUSL_APPS)
 		cp -f $$app $(SYSDIR)/$$app; \
 	done
 	@if [ -x aurora-vm ]; then mkdir -p $(SYSDIR)/../libexec/aurora && cp -f aurora-vm $(SYSDIR)/../libexec/aurora/aurora-vm; fi
-	@mkdir -p $(SYSDIR)/../share/aurora/vm && cp -f ../../third_party/seabios/bios.bin $(SYSDIR)/../share/aurora/vm/bios.bin
+	@mkdir -p $(SYSDIR)/../share/aurora/vm && cp -f ../../third_party/seabios/bios.bin ../../third_party/seabios/vgabios.bin $(SYSDIR)/../share/aurora/vm/
 	@for app in $(MUSL_APPS); do \
 		file $(SYSDIR)/$$app | sed 's/^/  /'; \
 	done

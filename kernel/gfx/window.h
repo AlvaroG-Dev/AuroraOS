@@ -16,6 +16,8 @@
 /* Menu/popup de un cliente: sin Dock, sin tomar el foco ni al crearse ni al
  * hacer clic (el cliente sigue recibiendo el puntero). */
 #define WIN_FLAGS_POPUP (1 << 7)
+/* El cliente quiere teclas crudas: tambien soltar (WINSRV_EV_KEY con y=0). */
+#define WIN_FLAGS_RAW_KEYS (1 << 8)
 
 #define ALIGN_LEFT (1 << 0)
 #define ALIGN_RIGHT (1 << 1)

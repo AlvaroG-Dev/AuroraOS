@@ -12,4 +12,6 @@ cp "$here/config" .config
 make olddefconfig >/dev/null
 make -j"$(nproc)"
 cp out/bios.bin "$here/bios.bin"
+cp out/vgabios.bin "$here/vgabios.bin"
+echo "vgabios.bin: $(wc -c < "$here/vgabios.bin") bytes"
 echo "bios.bin actualizado ($(wc -c < "$here/bios.bin") bytes)"

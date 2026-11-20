@@ -1423,8 +1423,12 @@ static void update_cursor_shape(void) {
  * Entrada
  * =======================================================================*/
 static void compositor_handle_key(uint8_t scancode, int pressed) {
-  if (!pressed)
+  if (!pressed) {
+    window_t *rw = focused_window();
+    if (rw && (rw->flags & WIN_FLAGS_RAW_KEYS))
+      winsrv_post_event(rw, WINSRV_EV_KEY, (int32_t)scancode, 0, 0);
     return;
+  }
   if (menubar_is_open() && scancode == 0x01) { /* Esc cierra el menú */
     menubar_close();
     return;

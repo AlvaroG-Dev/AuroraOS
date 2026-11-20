@@ -12,6 +12,12 @@
 #define BIOS_ALIAS_GPA 0xFFFE0000ULL
 
 static void pic_raise(int irq);
+static int g_vga_on;
+static uint8_t vga_cfg_get(unsigned off);
+static void vga_cfg_put(unsigned off, uint8_t v);
+static int vga_in(uint16_t port, int size, uint32_t *v);
+static int vga_out(uint16_t port, uint32_t v, int size);
+static uint8_t g_vga_cfg[256];
 static void pic_lower(int irq);
 
 static int g_plat; // 1 = modo BIOS: activa PCI, CMOS completo, i8042
@@ -273,6 +279,7 @@ static uint8_t *pci_cfg_for(unsigned dev, unsigned fn) {
   if (dev == 1 && fn == 0 && (g_ide_on || g_acpi_on)) return g_isa_cfg;
   if (dev == 1 && fn == 3 && g_acpi_on) return g_pm_cfg;
   if (dev == 1 && fn == 1 && g_ide_on) return g_ide_cfg;
+  if (dev == 2 && fn == 0 && g_vga_on) return g_vga_cfg;
   if (dev == 3 && fn == 0 && g_disk_fd >= 0) return g_blk_cfg;
   return NULL;
 }
@@ -281,6 +288,8 @@ static uint8_t pci_cfg_get(unsigned dev, unsigned fn, unsigned off) {
   uint8_t *c = pci_cfg_for(dev, fn);
   if (!c)
     return 0xFF;
+  if (c == g_vga_cfg)
+    return vga_cfg_get(off);
   if (c == g_blk_cfg) {
     if (off >= 0x10 && off < 0x14)
       return (uint8_t)((((g_blk_bar0 & ~(VIO_BAR_SIZE - 1)) | 1u) >> ((off - 0x10) * 8)) & 0xFF);
@@ -299,6 +308,10 @@ static void pci_cfg_put(unsigned dev, unsigned fn, unsigned off, uint8_t v) {
   uint8_t *c = pci_cfg_for(dev, fn);
   if (!c)
     return;
+  if (c == g_vga_cfg) {
+    vga_cfg_put(off, v);
+    return;
+  }
   if (c == g_host_cfg) {
     if (off >= 0x40 || off == 0x04 || off == 0x05 || off == 0x0C || off == 0x0D)
       g_host_cfg[off] = v;
@@ -1018,6 +1031,7 @@ static void pm_out(unsigned off, uint32_t v, int size) {
 static int plat_in(uint16_t port, int size, uint32_t *v) {
   if (!g_plat)
     return 0;
+  if (g_vga_on && vga_in(port, size, v)) return 1;
   if (port == 0x71) { *v = cmos_read(g_cmos_idx); return 1; }
   if (port == 0x60) { *v = kbc_pop(); return 1; }
   if (port == 0x64) { *v = kbc_status(); return 1; }
@@ -1052,6 +1066,7 @@ static int plat_in(uint16_t port, int size, uint32_t *v) {
 static int plat_out(uint16_t port, uint32_t v, int size) {
   if (!g_plat)
     return 0;
+  if (g_vga_on && vga_out(port, v, size)) return 1;
   if (port == 0x70) { g_cmos_idx = (uint8_t)(v & 0x7F); return 1; }
   if (port == 0x71) { g_cmos[g_cmos_idx & 0x7F] = (uint8_t)v; return 1; }
   if (port == 0x60) { kbc_data((uint8_t)v); return 1; }

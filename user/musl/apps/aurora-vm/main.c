@@ -45,6 +45,8 @@ static int g_debug = 1; // intercepta excepciones del huesped y las registra (dm
 
 #include "platform.h"
 #include "apic.h"
+#include "vga.h"
+#include "vgawin.h"
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -616,6 +618,43 @@ static int string_io(const struct avm_exit *x) {
   return 0;
 }
 
+// Ventana de la VM: dibuja ~30 veces por segundo y lleva el teclado al i8042.
+static int g_want_vga, g_want_win;
+static const char *g_vga_rom_path;
+static uint64_t g_vga_t_draw, g_vga_t_ev;
+
+static void vga_poll(uint64_t t) {
+  if (!g_vga_on || !g_want_win)
+    return;
+  if (t - g_vga_t_ev >= 8000000ULL) {
+    g_vga_t_ev = t;
+    if (g_vw >= 0) {
+      struct aw_event ev;
+      int guard = 0;
+      while (guard++ < 64 && aw_sys(AW_WIN_POLL, (uint64_t)g_vw, (uint64_t)&ev, 0, 0, 0) > 0) {
+        if (ev.type == AWEV_CLOSE) {
+          g_vw_closed = 1;
+        } else if (ev.type == AWEV_RESIZE) {
+          g_vw_cw = ev.x;
+          g_vw_ch = ev.y;
+        } else if (ev.type == AWEV_KEY) {
+          uint8_t sc = (uint8_t)ev.x;
+          kbc_push(ev.y ? sc : (uint8_t)(sc | 0x80), 0);
+        }
+      }
+    }
+    if (g_kbc.n && (g_kbc.cfg & 1) && !g_kbc.qaux[0])
+      pic_pulse(1);
+  }
+  if (t - g_vga_t_draw >= 33000000ULL) {
+    g_vga_t_draw = t;
+    int w = 0, h = 0;
+    uint32_t *px = vga_render(&w, &h);
+    if (px)
+      vw_present(px, w, h);
+  }
+}
+
 static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
   ioctl(g_vm, AVM_SET_TIMEOUT, 2);
   ioctl(g_vm, AVM_SET_DEBUG, g_debug);
@@ -656,6 +695,11 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
       pit_poll(tnow);
       if (g_apic_on)
         lapic_poll(tnow);
+      vga_poll(tnow);
+      if (g_vw_closed) {
+        fprintf(stderr, "aurora-vm: ventana cerrada\n");
+        return 0;
+      }
     }
     if (g_poweroff) {
       fprintf(stderr, "aurora-vm: el huesped se apago (ACPI)\n");
@@ -698,7 +742,9 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
       if (!(hr.rflags & (1u << 9)))
         return 0; // HLT con IF=0: el huesped termino
       uint64_t wake = ~0ULL;
-      if (g_pit.running)
+      if (g_vga_on && g_want_win)
+        wake = now_ns() + 8000000ULL;
+      if (g_pit.running && g_pit.next_ns < wake)
         wake = g_pit.next_ns;
       if (g_apic_on && g_lt_running && g_lt_deadline < wake)
         wake = g_lt_deadline;
@@ -841,6 +887,7 @@ static int autotest(void) {
 // F3a: arranque con SeaBIOS y un disco virtio-blk
 // ---------------------------------------------------------------------------
 #define DEFAULT_BIOS "/usr/share/aurora/vm/bios.bin"
+#define DEFAULT_VGABIOS "/usr/share/aurora/vm/vgabios.bin"
 
 static int run_bios(const char *bios_path, const char *disk_path, const char *ide_path,
                     unsigned mem_mb, unsigned timeout_s, int acpi) {
@@ -950,6 +997,23 @@ static int run_bios(const char *bios_path, const char *disk_path, const char *id
     perror("AVM_SET_MEMORY");
     return 1;
   }
+  g_vga_on = 0;
+  if (g_want_vga) {
+    static uint8_t vrom[VGA_ROM_SIZE];
+    size_t vn = 0;
+    FILE *vf = fopen(g_vga_rom_path ? g_vga_rom_path : DEFAULT_VGABIOS, "rb");
+    if (vf) {
+      vn = fread(vrom, 1, sizeof(vrom), vf);
+      fclose(vf);
+    }
+    if (vn < 512) {
+      fprintf(stderr, "aurora-vm: no encuentro la ROM de VGA %s (se arranca sin VGA)\n",
+              g_vga_rom_path ? g_vga_rom_path : DEFAULT_VGABIOS);
+    } else if (vga_setup(vrom, vn) < 0) {
+      perror("aurora-vm: VGA");
+      return 1;
+    }
+  }
   struct avm_regs r;
   if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
     perror("AVM_GET_REGS");
@@ -972,7 +1036,7 @@ static int run_bios(const char *bios_path, const char *disk_path, const char *id
   return run_loop(0xFFFFFFFFu, deadline);
 }
 
-static int bios_test(int acpi) {
+static int bios_test(int acpi, int vga) {
   char path[] = "/tmp/aurora-vm-f3-XXXXXX";
   int fd = mkstemp(path);
   if (fd < 0) {
@@ -995,14 +1059,25 @@ static int bios_test(int acpi) {
     perror("ftruncate");
   close(fd);
   g_echo = 0;
+  g_want_vga = vga;
+  g_want_win = 0;
+  if (vga && getenv("AURORA_VM_VGABIOS"))
+    g_vga_rom_path = getenv("AURORA_VM_VGABIOS");
   int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, NULL, 32, 60, acpi);
   unlink(path);
   g_out[g_out_n] = 0;
   const char *expect = "MBR arrancado desde SeaBIOS\nDisco OK\n";
   int ok = rc == 0 && strcmp(g_out, expect) == 0;
-  printf("[%s] SeaBIOS + virtio-blk + sector de arranque%s\n", ok ? "OK" : "FALLA", acpi ? " + ACPI/LAPIC/IOAPIC" : "");
-  if (!ok)
+  int vok = !vga || (g_vga_on && vga_text_contains("SeaBIOS"));
+  printf("[%s] SeaBIOS + virtio-blk + sector de arranque%s%s\n", ok && vok ? "OK" : "FALLA",
+         acpi ? " + ACPI/LAPIC/IOAPIC" : "", vga ? " + VGA (texto)" : "");
+  if (!ok || !vok)
     printf("   rc=%d salida=\"%s\"\n", rc, g_out);
+  if (vga && g_vga_on && (!vok || getenv("AURORA_VM_DUMP"))) {
+    printf("--- pantalla de texto del huesped ---\n");
+    vga_dump_text(stdout);
+  }
+  ok = ok && vok;
   return ok ? 0 : 1;
 }
 
@@ -1017,19 +1092,27 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "--autotest"))
     return autotest();
   if (!strcmp(argv[1], "--bios-test"))
-    return bios_test(0);
+    return bios_test(0, 0);
   if (!strcmp(argv[1], "--bios-test-acpi"))
-    return bios_test(1);
+    return bios_test(1, 0);
+  if (!strcmp(argv[1], "--bios-test-vga"))
+    return bios_test(1, 1);
   if (!strcmp(argv[1], "--bios")) {
     const char *rom = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS;
     const char *disk = NULL, *ide = NULL;
     unsigned mem = 128, tmo = 0;
-    int acpi = 1;
+    int acpi = 1, vga = 1, win = 1;
     for (int i = 2; i < argc; i++) {
       if (!strcmp(argv[i], "--log-bios"))
         g_bios_log = 1;
       else if (!strcmp(argv[i], "--sin-acpi"))
         acpi = 0;
+      else if (!strcmp(argv[i], "--sin-vga"))
+        vga = 0;
+      else if (!strcmp(argv[i], "--sin-ventana"))
+        win = 0;
+      else if (i + 1 < argc && !strcmp(argv[i], "--vgarom"))
+        g_vga_rom_path = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--rom"))
         rom = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--disco"))
@@ -1045,7 +1128,14 @@ int main(int argc, char **argv) {
         return 2;
       }
     }
-    return run_bios(rom, disk, ide, mem, tmo, acpi);
+    g_want_vga = vga;
+    g_want_win = vga && win;
+    if (getenv("AURORA_VM_VGABIOS") && !g_vga_rom_path)
+      g_vga_rom_path = getenv("AURORA_VM_VGABIOS");
+    int vrc = run_bios(rom, disk, ide, mem, tmo, acpi);
+    if (g_vga_on && !g_want_win && vrc != 0)
+      vga_dump_text(stderr);
+    return vrc;
   }
   if (!strcmp(argv[1], "--plano") && argc >= 3) {
     uint64_t at = 0x1000;
