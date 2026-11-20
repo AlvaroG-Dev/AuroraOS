@@ -17,6 +17,8 @@
 #define AVM_INJECT_IRQ (AVM_IOC_BASE + 6)  // uint32_t vector (por valor); -EBUSY si ya hay una pendiente
 #define AVM_SET_TIMEOUT (AVM_IOC_BASE + 7) // ms (por valor): AVM_RUN devuelve AVM_EXIT_SIGNAL tras ese tiempo; 0 = sin limite
 
+#define AVM_SET_DEBUG (AVM_IOC_BASE + 8)   // flags (por valor): bit0 = interceptar #UD/#DF/#GP/#PF y registrarlos en el log del kernel
+
 #define AVM_CAP_VMX (1u << 0)
 #define AVM_CAP_EPT (1u << 1)
 #define AVM_CAP_UNRESTRICTED (1u << 2) // modo real / paginacion sin sombras

@@ -37,6 +37,7 @@ static uint64_t g_ram_size;
 static char g_out[512];
 static size_t g_out_n;
 static int g_echo = 1;
+static int g_debug = 1; // intercepta excepciones del huesped y las registra (dmesg [VMX])
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -522,6 +523,7 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
     return 1;
   }
   ioctl(g_vm, AVM_SET_TIMEOUT, 2);
+  ioctl(g_vm, AVM_SET_DEBUG, g_debug);
   struct avm_exit x;
   memset(&x, 0, sizeof(x));
   for (unsigned n = 0; n < 20000000; n++) {
@@ -561,7 +563,20 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
     case AVM_EXIT_SIGNAL:
       break;
     case AVM_EXIT_SHUTDOWN:
-      fprintf(stderr, "aurora-vm: el huesped se apago (triple fallo)\n");
+    {
+      struct avm_regs sr;
+      ioctl(g_vm, AVM_GET_REGS, &sr);
+      fprintf(stderr,
+              "aurora-vm: el huesped se apago (triple fallo)\n"
+              "  rip=%llx rsp=%llx rflags=%llx cs=%x(base %llx ar %x) cr0=%llx cr3=%llx cr4=%llx efer=%llx\n"
+              "  gdt=%llx/%x idt=%llx/%x\n",
+              (unsigned long long)sr.rip, (unsigned long long)sr.rsp,
+              (unsigned long long)sr.rflags, sr.cs.selector,
+              (unsigned long long)sr.cs.base, sr.cs.ar, (unsigned long long)sr.cr0,
+              (unsigned long long)sr.cr3, (unsigned long long)sr.cr4,
+              (unsigned long long)sr.efer, (unsigned long long)sr.gdt_base,
+              sr.gdt_limit, (unsigned long long)sr.idt_base, sr.idt_limit);
+    }
       return 2;
     case AVM_EXIT_MMIO: {
       struct avm_regs mr;

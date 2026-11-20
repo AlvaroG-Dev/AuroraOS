@@ -159,6 +159,7 @@ struct avm_vm {
   uint32_t interruptibility, activity;
   int32_t pending_irq; // -1 = ninguna
   uint32_t timeout_ms;
+  uint32_t debug, exc_logged;
   // IN pendiente de completar en el siguiente AVM_RUN
   bool pending_in;
   uint8_t pending_in_size;
@@ -545,7 +546,7 @@ static void vmcs_write_controls_and_host(struct avm_vm *vm) {
   vmwrite(F_PROC, vm->procbased);
   vmwrite(F_PROC2, vm->procbased2);
   vmwrite(F_EXIT_CTLS, vm->exitctl);
-  vmwrite(F_EXC_BITMAP, 0);
+  vmwrite(F_EXC_BITMAP, vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0);
   vmwrite(F_PF_MASK, 0);
   vmwrite(F_PF_MATCH, 0);
   vmwrite(F_CR3_COUNT, 0);
@@ -977,9 +978,32 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       goto leave;
     case XR_INTR_WINDOW:
       continue;
-    case XR_EXC_NMI:
-      __asm__ volatile("int $2"); // NMI del host que salto en el huesped
+    case XR_EXC_NMI: {
+      uint32_t info = (uint32_t)vmread(F_EXIT_INTR_INFO);
+      if (((info >> 8) & 7) == 2) {
+        __asm__ volatile("int $2"); // NMI del host que salto en el huesped
+        continue;
+      }
+      if (!(info & (1u << 31)))
+        continue;
+      uint32_t vec = info & 0xFF;
+      uint64_t err = (info & (1u << 11)) ? vmread(0x4406) : 0;
+      uint64_t q = vmread(F_EXIT_QUAL);
+      if (vm->exc_logged < 16) {
+        vm->exc_logged++;
+        LOG_WARN("[VMX] excepcion del huesped #%u err=%lx qual=%lx rip=%lx rsp=%lx "
+                 "cs=%lx cr0=%lx cr4=%lx efer=%lx cr3=%lx",
+                 vec, err, q, vmread(F_GUEST_RIP), vmread(F_GUEST_RSP),
+                 vmread(F_GUEST_CS_SEL), vmread(F_GUEST_CR0),
+                 vmread(F_GUEST_CR4), vmread(F_GUEST_EFER), vmread(F_GUEST_CR3));
+      }
+      if (vec == 14)
+        vm->regs.cr2 = q;
+      vmwrite(F_ENTRY_INTR_INFO, info & ~(1u << 12)); // reinyectar tal cual
+      if (info & (1u << 11))
+        vmwrite(F_ENTRY_ERRCODE, err);
       continue;
+    }
     case XR_CPUID:
       vm->regs.rsp = vmread(F_GUEST_RSP);
       emu_cpuid(vm, &g);
@@ -1057,6 +1081,11 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       ret = 1;
       goto leave;
     case XR_TRIPLE_FAULT:
+      LOG_WARN("[VMX] triple fallo: rip=%lx rsp=%lx cs=%lx cr0=%lx cr4=%lx efer=%lx "
+               "cr3=%lx idtr=%lx/%lx", vmread(F_GUEST_RIP), vmread(F_GUEST_RSP),
+               vmread(F_GUEST_CS_SEL), vmread(F_GUEST_CR0), vmread(F_GUEST_CR4),
+               vmread(F_GUEST_EFER), vmread(F_GUEST_CR3),
+               vmread(F_GUEST_IDTR_BASE), vmread(F_GUEST_IDTR_LIM));
       x->reason = AVM_EXIT_SHUTDOWN;
       ret = 1;
       goto leave;
@@ -1295,6 +1324,10 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     if (vm->pending_irq >= 0)
       return -EBUSY;
     vm->pending_irq = (int32_t)arg;
+    return 0;
+  case AVM_SET_DEBUG:
+    vm->debug = (uint32_t)arg & 1;
+    vm->exc_logged = 0;
     return 0;
   case AVM_SET_TIMEOUT:
     vm->timeout_ms = (uint32_t)arg;
