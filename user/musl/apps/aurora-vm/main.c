@@ -916,6 +916,10 @@ static int bios_test(void) {
     unlink(path);
     return 1;
   }
+  // SeaBIOS traduce la geometria en LBA (sectores / (16*63)): con menos de 1008
+  // sectores saldrian 0 cilindros y rechazaria toda lectura CHS.
+  if (ftruncate(fd, 1 << 20) < 0)
+    perror("ftruncate");
   close(fd);
   g_echo = 0;
   int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, NULL, 32, 60);
