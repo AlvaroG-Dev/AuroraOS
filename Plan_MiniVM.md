@@ -95,7 +95,7 @@ Salidas: `AVM_EXIT_IO` (puerto, tamano, direccion, dato), `AVM_EXIT_MMIO`,
 |---|---|---|
 | F0 | Este plan | - |
 | F1 | VMX + EPT + `/dev/aurora-vm`; VMM que ejecuta un binario plano en modo real con serie en 0x3F8 | `aurora-vm --plano tests/vm/hola.bin` imprime "Hola desde la VM" |
-| F2 | Dispositivos basicos: PIT, PIC 8259, LAPIC/IOAPIC virtual, reloj CMOS, PS/2, serie 16550 | SeaBIOS llega al menu de arranque |
+| F2 | (a, hecha) serie, PIC x2, PIT, CMOS, decodificador MMIO (MOV/MOVZX/MOVSX) y temporizador `AVM_SET_TIMEOUT`; `aurora-vm --autotest` corre 3 guests (real, modo largo+MMIO, PIT+IRQ). (b, falta) LAPIC/IOAPIC, XSAVE. Dispositivos basicos: PIT, PIC 8259, LAPIC/IOAPIC virtual, reloj CMOS, PS/2, serie 16550 | SeaBIOS llega al menu de arranque |
 | F3 | Firmware (SeaBIOS/OVMF en `third_party`, licencias aparte) + virtio-blk con imagen en archivo; arranque de ReactOS | ReactOS llega al escritorio |
 | F4 | Pantalla: VGA/VBE y luego virtio-gpu 2D en una ventana Aurora; teclado/raton (virtio-input o tableta USB) | Se puede usar el huesped con el raton |
 | F5 | Red (virtio-net sobre la pila de Aurora, NAT en el VMM) y carpeta compartida (virtio-fs o 9p) para pasar el `.exe` | `aurora-vm Juego.exe` lo ejecuta en el huesped |

@@ -14,7 +14,8 @@
 #define AVM_SET_REGS (AVM_IOC_BASE + 3)    // const struct avm_regs *
 #define AVM_GET_REGS (AVM_IOC_BASE + 4)    // struct avm_regs *
 #define AVM_RUN (AVM_IOC_BASE + 5)         // struct avm_exit *
-#define AVM_INJECT_IRQ (AVM_IOC_BASE + 6)  // uint32_t vector (por valor)
+#define AVM_INJECT_IRQ (AVM_IOC_BASE + 6)  // uint32_t vector (por valor); -EBUSY si ya hay una pendiente
+#define AVM_SET_TIMEOUT (AVM_IOC_BASE + 7) // ms (por valor): AVM_RUN devuelve AVM_EXIT_SIGNAL tras ese tiempo; 0 = sin limite
 
 #define AVM_CAP_VMX (1u << 0)
 #define AVM_CAP_EPT (1u << 1)

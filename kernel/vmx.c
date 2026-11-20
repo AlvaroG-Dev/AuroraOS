@@ -24,6 +24,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "sched.h"
+#include "time.h"
 #include "signal.h"
 #include "string.h"
 #include "uaccess.h"
@@ -157,6 +158,7 @@ struct avm_vm {
   uint64_t pat, tsc_aux_unused;
   uint32_t interruptibility, activity;
   int32_t pending_irq; // -1 = ninguna
+  uint32_t timeout_ms;
   // IN pendiente de completar en el siguiente AVM_RUN
   bool pending_in;
   uint8_t pending_in_size;
@@ -1084,6 +1086,7 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
     return -EBUSY;
   int64_t rc = 0;
   memset(&x, 0, sizeof(x));
+  uint64_t t_start = tick_count;
 
   if (vm->pending_in) { // el VMM rellena io.data del IN anterior
     struct avm_exit prev;
@@ -1100,7 +1103,8 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
 
   for (;;) {
     task_t *cur = sched_current();
-    if (cur && signal_unblocked_of(cur)) {
+    if ((cur && signal_unblocked_of(cur)) ||
+        (vm->timeout_ms && tick_count - t_start >= vm->timeout_ms)) {
       x.reason = AVM_EXIT_SIGNAL;
       break;
     }
@@ -1277,7 +1281,12 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   case AVM_INJECT_IRQ:
     if (arg < 32 || arg > 255)
       return -EINVAL;
+    if (vm->pending_irq >= 0)
+      return -EBUSY;
     vm->pending_irq = (int32_t)arg;
+    return 0;
+  case AVM_SET_TIMEOUT:
+    vm->timeout_ms = (uint32_t)arg;
     return 0;
   }
   return -ENOTTY;
