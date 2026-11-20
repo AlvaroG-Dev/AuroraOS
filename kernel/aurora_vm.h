@@ -79,8 +79,17 @@ struct avm_exit {
       uint16_t port;
       uint8_t size;     // 1, 2 o 4
       uint8_t is_write; // 1 = OUT
-      uint32_t count;   // 1 salvo INS/OUTS con REP (F2)
+      uint32_t count;   // 1 salvo INS/OUTS con REP
       uint32_t data;    // OUT: valor. IN: el VMM lo rellena antes del siguiente AVM_RUN
+      // INS/OUTS (string=1): el VMM transfiere `count` elementos de `size` bytes
+      // desde/hacia la direccion lineal `linear` (ES:rDI en INS, DS:rSI en OUTS) y
+      // luego ajusta RSI/RDI y RCX (si rep) con AVM_SET_REGS. RIP ya avanzo.
+      // asize: 0 = direcciones de 16 bits, 1 = 32, 2 = 64.
+      uint8_t string;
+      uint8_t asize;
+      uint8_t rep;
+      uint8_t pad2;
+      uint64_t linear;
     } io;
     struct {
       uint64_t gpa;

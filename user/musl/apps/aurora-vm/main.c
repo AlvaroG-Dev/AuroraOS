@@ -11,7 +11,7 @@
 //   aurora-vm --autotest             tres guests incorporados (real, modo largo+MMIO, temporizador)
 //   aurora-vm --plano FICH [--en DIR] [--mem MiB]
 //   aurora-vm --bios-test            SeaBIOS + virtio-blk + sector de arranque incorporado (F3a)
-//   aurora-vm --bios [--rom FICH] [--disco IMG] [--mem MiB] [--tiempo S] [--log-bios]
+//   aurora-vm --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios]
 //   aurora-vm PROGRAMA.exe           (aurora-run lo llama asi; aun sin huesped)
 // Puertos: 0x3F8 serie -> stdout, 0xF4 termina con el codigo escrito.
 #define _GNU_SOURCE
@@ -80,6 +80,13 @@ static void pic_raise(int irq) {
     g_pic[0].irr |= (uint8_t)(1u << irq);
   else
     g_pic[1].irr |= (uint8_t)(1u << (irq - 8));
+}
+
+static void pic_lower(int irq) {
+  if (irq < 8)
+    g_pic[0].irr &= (uint8_t)~(1u << irq);
+  else
+    g_pic[1].irr &= (uint8_t)~(1u << (irq - 8));
 }
 
 // Vector de la IRQ pendiente (sin aceptarla) o -1.
@@ -512,6 +519,46 @@ static int cmd_caps(void) {
   return (c.flags & AVM_CAP_USABLE) ? 0 : 1;
 }
 
+// INS/OUTS: el kernel solo describe la instruccion; aqui se mueven los datos
+// y se ajustan RSI/RDI y RCX (RIP ya avanzo).
+static int string_io(const struct avm_exit *x) {
+  struct avm_regs r;
+  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
+    return -1;
+  int dir = (r.rflags & (1u << 10)) ? -1 : 1;
+  uint32_t size = x->io.size, n = x->io.count, done = 0;
+  uint64_t lin = x->io.linear;
+  for (; done < n; done++) {
+    uint64_t gpa;
+    if (gva_to_gpa(&r, lin, &gpa) < 0 || gpa + size > g_ram_size)
+      break;
+    if (x->io.is_write) {
+      uint32_t v = 0;
+      memcpy(&v, g_ram + gpa, size);
+      io_out(x->io.port, v, (int)size);
+    } else {
+      uint32_t v = io_in(x->io.port, (int)size);
+      memcpy(g_ram + gpa, &v, size);
+    }
+    lin += (uint64_t)(int64_t)dir * size;
+  }
+  uint64_t mask = x->io.asize == 0 ? 0xFFFFULL : x->io.asize == 1 ? 0xFFFFFFFFULL : ~0ULL;
+  uint64_t *reg = x->io.is_write ? &r.rsi : &r.rdi;
+  int64_t delta = (int64_t)dir * (int64_t)size * (int64_t)done;
+  *reg = x->io.asize == 0 ? ((*reg & ~mask) | ((uint64_t)((int64_t)*reg + delta) & mask))
+                          : (uint64_t)((int64_t)*reg + delta) & mask;
+  if (x->io.rep)
+    r.rcx = x->io.asize == 0 ? ((r.rcx & ~mask) | ((r.rcx - done) & mask)) : (r.rcx - done) & mask;
+  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0)
+    return -1;
+  if (done < n) {
+    fprintf(stderr, "aurora-vm: INS/OUTS fallo en la direccion 0x%llx (puerto 0x%x)\n",
+            (unsigned long long)lin, x->io.port);
+    return -1;
+  }
+  return 0;
+}
+
 static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
   ioctl(g_vm, AVM_SET_TIMEOUT, 2);
   ioctl(g_vm, AVM_SET_DEBUG, g_debug);
@@ -537,6 +584,13 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
     }
     switch (x.reason) {
     case AVM_EXIT_IO:
+      if (x.io.string) {
+        if (string_io(&x) < 0)
+          return 2;
+        if (g_exit_code >= 0)
+          return g_exit_code;
+        break;
+      }
       if (x.io.is_write) {
         io_out(x.io.port, x.io.data, x.io.size);
         if (g_exit_code >= 0)
@@ -690,8 +744,8 @@ static int autotest(void) {
 // ---------------------------------------------------------------------------
 #define DEFAULT_BIOS "/usr/share/aurora/vm/bios.bin"
 
-static int run_bios(const char *bios_path, const char *disk_path, unsigned mem_mb,
-                    unsigned timeout_s) {
+static int run_bios(const char *bios_path, const char *disk_path, const char *ide_path,
+                    unsigned mem_mb, unsigned timeout_s) {
   if (mem_mb < 16 || mem_mb > 3072) {
     fprintf(stderr, "aurora-vm: --mem debe estar entre 16 y 3072 MiB\n");
     return 1;
@@ -729,10 +783,30 @@ static int run_bios(const char *bios_path, const char *disk_path, unsigned mem_m
     if (g_disk_ro)
       fprintf(stderr, "aurora-vm: aviso: disco abierto solo lectura\n");
   }
+  g_ide_on = 0;
+  if (ide_path) {
+    g_ide_ro = 0;
+    g_ide_fd = open(ide_path, O_RDWR | O_CLOEXEC);
+    if (g_ide_fd < 0) {
+      g_ide_ro = 1;
+      g_ide_fd = open(ide_path, O_RDONLY | O_CLOEXEC);
+    }
+    struct stat ist;
+    if (g_ide_fd < 0 || fstat(g_ide_fd, &ist) < 0 || ist.st_size < 512) {
+      fprintf(stderr, "aurora-vm: no puedo usar el disco IDE %s: %s\n", ide_path,
+              g_ide_fd < 0 ? strerror(errno) : "vacio");
+      return 1;
+    }
+    g_ide_sectors = (uint64_t)ist.st_size / 512;
+    g_ide_on = 1;
+    if (g_ide_ro)
+      fprintf(stderr, "aurora-vm: aviso: disco IDE abierto solo lectura\n");
+  }
   pic_reset();
   pit_reset();
   kbc_reset();
   pci_init();
+  ide_init();
   g_exit_code = -1;
   g_reset_req = 0;
   g_out_n = 0;
@@ -803,7 +877,7 @@ static int bios_test(void) {
   }
   close(fd);
   g_echo = 0;
-  int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, 32, 60);
+  int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, NULL, 32, 60);
   unlink(path);
   g_out[g_out_n] = 0;
   const char *expect = "MBR arrancado desde SeaBIOS\nDisco OK\n";
@@ -817,7 +891,7 @@ static int bios_test(void) {
 int main(int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr, "Uso: aurora-vm --caps | --autotest | --bios-test | --plano FICH [--en DIR] [--mem MiB] |\n"
-          "       --bios [--rom FICH] [--disco IMG] [--mem MiB] [--tiempo S] [--log-bios] | PROGRAMA.exe\n");
+          "       --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios] | PROGRAMA.exe\n");
     return 2;
   }
   if (!strcmp(argv[1], "--caps"))
@@ -828,7 +902,7 @@ int main(int argc, char **argv) {
     return bios_test();
   if (!strcmp(argv[1], "--bios")) {
     const char *rom = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS;
-    const char *disk = NULL;
+    const char *disk = NULL, *ide = NULL;
     unsigned mem = 128, tmo = 0;
     for (int i = 2; i < argc; i++) {
       if (!strcmp(argv[i], "--log-bios"))
@@ -837,6 +911,8 @@ int main(int argc, char **argv) {
         rom = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--disco"))
         disk = argv[++i];
+      else if (i + 1 < argc && !strcmp(argv[i], "--ide"))
+        ide = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--mem"))
         mem = (unsigned)strtoul(argv[++i], NULL, 0);
       else if (i + 1 < argc && !strcmp(argv[i], "--tiempo"))
@@ -846,7 +922,7 @@ int main(int argc, char **argv) {
         return 2;
       }
     }
-    return run_bios(rom, disk, mem, tmo);
+    return run_bios(rom, disk, ide, mem, tmo);
   }
   if (!strcmp(argv[1], "--plano") && argc >= 3) {
     uint64_t at = 0x1000;

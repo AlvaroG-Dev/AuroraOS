@@ -94,7 +94,7 @@ enum {
   F_ENTRY_INTR_INFO = 0x4016, F_ENTRY_ERRCODE = 0x4018,
   F_ENTRY_INSTR_LEN = 0x401A, F_PROC2 = 0x401E,
   F_VM_INSTR_ERROR = 0x4400, F_EXIT_REASON = 0x4402, F_EXIT_INTR_INFO = 0x4404,
-  F_IDTV_INFO = 0x4408, F_IDTV_ERR = 0x440A, F_EXIT_INSTR_LEN = 0x440C,
+  F_IDTV_INFO = 0x4408, F_IDTV_ERR = 0x440A, F_EXIT_INSTR_LEN = 0x440C, F_EXIT_INSTR_INFO = 0x440E, F_GUEST_LINEAR = 0x640A,
   F_GUEST_ES_LIM = 0x4800, F_GUEST_CS_LIM = 0x4802, F_GUEST_SS_LIM = 0x4804,
   F_GUEST_DS_LIM = 0x4806, F_GUEST_FS_LIM = 0x4808, F_GUEST_GS_LIM = 0x480A,
   F_GUEST_LDTR_LIM = 0x480C, F_GUEST_TR_LIM = 0x480E, F_GUEST_GDTR_LIM = 0x4810,
@@ -1101,8 +1101,27 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       uint32_t size = (uint32_t)(q & 7) + 1;
       bool in = (q >> 3) & 1;
       bool string = (q >> 4) & 1;
-      if (string) { // INS/OUTS: F2
-        fail_exit(x, reason, 0x10, q);
+      if (string) { // INS/OUTS: el VMM mueve los datos (F3b); aqui solo se describe
+        uint64_t info = vmread(F_EXIT_INSTR_INFO);
+        unsigned asz = (unsigned)(info >> 7) & 7; // 0=16, 1=32, 2=64 bits
+        uint64_t amask = asz == 0 ? 0xFFFFULL : asz == 1 ? 0xFFFFFFFFULL : ~0ULL;
+        bool rep = (q >> 5) & 1;
+        uint64_t cnt = rep ? (g.rcx & amask) : 1;
+        uint64_t slen = vmread(F_EXIT_INSTR_LEN);
+        vm->regs.rip = vmread(F_GUEST_RIP) + slen; // se completa ya; el VMM ajusta RSI/RDI/RCX
+        vmwrite(F_GUEST_RIP, vm->regs.rip);
+        if (!cnt)
+          continue; // REP con RCX=0: no hace nada
+        x->reason = AVM_EXIT_IO;
+        x->io.port = (uint16_t)(q >> 16);
+        x->io.size = (uint8_t)size;
+        x->io.is_write = !in;
+        x->io.count = cnt > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)cnt;
+        x->io.data = 0;
+        x->io.string = 1;
+        x->io.asize = (uint8_t)asz;
+        x->io.rep = rep;
+        x->io.linear = vmread(F_GUEST_LINEAR);
         ret = 1;
         goto leave;
       }

@@ -11,6 +11,9 @@
 #define BIOS_SIZE (128u * 1024)
 #define BIOS_ALIAS_GPA 0xFFFE0000ULL
 
+static void pic_raise(int irq);
+static void pic_lower(int irq);
+
 static int g_plat; // 1 = modo BIOS: activa PCI, CMOS completo, i8042
 static int g_bios_log;
 static int g_reset_req;
@@ -177,8 +180,13 @@ static void kbc_data(uint8_t v) {
 static uint32_t g_pci_addr;
 static uint8_t g_host_cfg[256];
 static uint8_t g_blk_cfg[256];
+static uint8_t g_isa_cfg[256];
+static uint8_t g_ide_cfg[256];
 static uint32_t g_blk_bar0;
 static uint16_t g_blk_cmd;
+static uint32_t g_ide_bar4;
+static uint16_t g_ide_cmd;
+static int g_ide_on; // IDE PIIX (00:01.1) + puente ISA PIIX3 (00:01.0)
 
 static int g_disk_fd = -1;
 static uint64_t g_disk_sectors;
@@ -198,6 +206,8 @@ static void pci_init(void) {
   g_pci_addr = 0;
   memset(g_host_cfg, 0, sizeof(g_host_cfg));
   memset(g_blk_cfg, 0, sizeof(g_blk_cfg));
+  memset(g_isa_cfg, 0, sizeof(g_isa_cfg));
+  memset(g_ide_cfg, 0, sizeof(g_ide_cfg));
   put16(g_host_cfg + 0x00, 0x8086);
   put16(g_host_cfg + 0x02, 0x1237);
   put16(g_host_cfg + 0x04, 0x0006);
@@ -215,29 +225,80 @@ static void pci_init(void) {
   g_blk_cfg[0x3D] = 1;              // INTA#
   g_blk_bar0 = 0;
   g_blk_cmd = 0;
+  // PIIX3: puente ISA (00:01.0), multifuncion
+  put16(g_isa_cfg + 0x00, 0x8086);
+  put16(g_isa_cfg + 0x02, 0x7000);
+  put16(g_isa_cfg + 0x04, 0x0007);
+  g_isa_cfg[0x0A] = 0x01;
+  g_isa_cfg[0x0B] = 0x06;
+  g_isa_cfg[0x0E] = 0x80;
+  memset(g_isa_cfg + 0x60, 0x80, 4); // PIRQ A-D desactivadas
+  put16(g_isa_cfg + 0x2C, 0x1AF4);
+  put16(g_isa_cfg + 0x2E, 0x1100);
+  // PIIX3 IDE (00:01.1): modo heredado, con maestro de bus
+  put16(g_ide_cfg + 0x00, 0x8086);
+  put16(g_ide_cfg + 0x02, 0x7010);
+  put16(g_ide_cfg + 0x06, 0x0280);
+  g_ide_cfg[0x09] = 0x80;
+  g_ide_cfg[0x0A] = 0x01;
+  g_ide_cfg[0x0B] = 0x01;
+  put16(g_ide_cfg + 0x40, 0x8000);  // IDETIM primario/secundario: decodificacion activa
+  put16(g_ide_cfg + 0x42, 0x8000);
+  put16(g_ide_cfg + 0x2C, 0x1AF4);
+  put16(g_ide_cfg + 0x2E, 0x1100);
+  g_ide_bar4 = 0;
+  g_ide_cmd = 0;
   memset(&g_vb, 0, sizeof(g_vb));
 }
 
-static uint8_t pci_cfg_get(unsigned dev, unsigned off) {
-  if (dev == 0)
-    return g_host_cfg[off];
-  if (dev == 3 && g_disk_fd >= 0) {
+static uint8_t *pci_cfg_for(unsigned dev, unsigned fn) {
+  if (dev == 0 && fn == 0) return g_host_cfg;
+  if (dev == 1 && fn == 0 && g_ide_on) return g_isa_cfg;
+  if (dev == 1 && fn == 1 && g_ide_on) return g_ide_cfg;
+  if (dev == 3 && fn == 0 && g_disk_fd >= 0) return g_blk_cfg;
+  return NULL;
+}
+
+static uint8_t pci_cfg_get(unsigned dev, unsigned fn, unsigned off) {
+  uint8_t *c = pci_cfg_for(dev, fn);
+  if (!c)
+    return 0xFF;
+  if (c == g_blk_cfg) {
     if (off >= 0x10 && off < 0x14)
       return (uint8_t)((((g_blk_bar0 & ~(VIO_BAR_SIZE - 1)) | 1u) >> ((off - 0x10) * 8)) & 0xFF);
     if (off == 0x04 || off == 0x05)
       return (uint8_t)(g_blk_cmd >> ((off - 4) * 8));
-    return g_blk_cfg[off];
+  } else if (c == g_ide_cfg) {
+    if (off >= 0x20 && off < 0x24)
+      return (uint8_t)((((g_ide_bar4 & ~15u) | 1u) >> ((off - 0x20) * 8)) & 0xFF);
+    if (off == 0x04 || off == 0x05)
+      return (uint8_t)(g_ide_cmd >> ((off - 4) * 8));
   }
-  return 0xFF;
+  return c[off];
 }
 
-static void pci_cfg_put(unsigned dev, unsigned off, uint8_t v) {
-  if (dev == 0) {
+static void pci_cfg_put(unsigned dev, unsigned fn, unsigned off, uint8_t v) {
+  uint8_t *c = pci_cfg_for(dev, fn);
+  if (!c)
+    return;
+  if (c == g_host_cfg) {
     if (off >= 0x40 || off == 0x04 || off == 0x05 || off == 0x0C || off == 0x0D)
       g_host_cfg[off] = v;
-    return;
-  }
-  if (dev == 3 && g_disk_fd >= 0) {
+  } else if (c == g_isa_cfg) {
+    if (off >= 0x40 || off == 0x04 || off == 0x05)
+      g_isa_cfg[off] = v;
+  } else if (c == g_ide_cfg) {
+    if (off >= 0x20 && off < 0x24) {
+      unsigned sh = (off - 0x20) * 8;
+      g_ide_bar4 = (g_ide_bar4 & ~(0xFFu << sh)) | ((uint32_t)v << sh);
+    } else if (off == 0x04 || off == 0x05) {
+      unsigned sh = (off - 4) * 8;
+      g_ide_cmd = (uint16_t)((g_ide_cmd & ~(0xFFu << sh)) | ((unsigned)v << sh));
+      g_ide_cmd &= 0x0405;
+    } else if (off >= 0x40 || off == 0x3C || off == 0x0C || off == 0x0D) {
+      g_ide_cfg[off] = v;
+    }
+  } else { // virtio-blk
     if (off >= 0x10 && off < 0x14) {
       unsigned sh = (off - 0x10) * 8;
       g_blk_bar0 = (g_blk_bar0 & ~(0xFFu << sh)) | ((uint32_t)v << sh);
@@ -258,7 +319,7 @@ static uint32_t pci_data_in(unsigned port, int size) {
            fn = (g_pci_addr >> 8) & 7, reg = (g_pci_addr & 0xFC) + (port - 0xCFC);
   uint32_t v = 0;
   for (int i = 0; i < size; i++) {
-    uint8_t b = (bus || fn || reg + (unsigned)i > 0xFF) ? 0xFF : pci_cfg_get(dev, reg + (unsigned)i);
+    uint8_t b = (bus || reg + (unsigned)i > 0xFF) ? 0xFF : pci_cfg_get(dev, fn, reg + (unsigned)i);
     v |= (uint32_t)b << (8 * i);
   }
   return v;
@@ -269,10 +330,10 @@ static void pci_data_out(unsigned port, uint32_t v, int size) {
     return;
   unsigned bus = (g_pci_addr >> 16) & 0xFF, dev = (g_pci_addr >> 11) & 31,
            fn = (g_pci_addr >> 8) & 7, reg = (g_pci_addr & 0xFC) + (port - 0xCFC);
-  if (bus || fn)
+  if (bus)
     return;
   for (int i = 0; i < size && reg + (unsigned)i <= 0xFF; i++)
-    pci_cfg_put(dev, reg + (unsigned)i, (uint8_t)(v >> (8 * i)));
+    pci_cfg_put(dev, fn, reg + (unsigned)i, (uint8_t)(v >> (8 * i)));
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +502,430 @@ static void vb_out(unsigned off, uint32_t v, int size) {
 }
 
 // ---------------------------------------------------------------------------
+// IDE ATA (PIIX3, modo heredado): canal 0 con un maestro; canal 1 vacio.
+// PIO (incluye MULTIPLE y LBA48) y DMA de bus maestro con tabla PRD.
+// ---------------------------------------------------------------------------
+#define ATA_BSY 0x80
+#define ATA_DRDY 0x40
+#define ATA_DSC 0x10
+#define ATA_DRQ 0x08
+#define ATA_ERR 0x01
+#define IDE_BUF_SECT 16
+
+static int g_ide_fd = -1;
+static uint64_t g_ide_sectors;
+static int g_ide_ro;
+
+struct ide_chan {
+  int present;
+  uint8_t err, feat, sc, sn, cl, ch, dh, status, ctl;
+  uint8_t hsc, hsn, hcl, hch, hfeat; // valores anteriores (LBA48)
+  uint8_t heads, spt;
+  uint8_t multi;
+  uint8_t buf[IDE_BUF_SECT * 512];
+  unsigned pos, len;        // bytes del bloque PIO actual
+  uint64_t lba;             // siguiente sector
+  uint32_t left;            // sectores que faltan tras el bloque actual
+  unsigned blk;             // sectores por bloque DRQ
+  int write;                // transferencia PIO/DMA de escritura
+  int dma_pending;
+  uint32_t dma_count;
+  uint8_t bm_cmd, bm_status;
+  uint32_t bm_prd;
+  int irq;                  // 14 / 15
+};
+static struct ide_chan g_ide[2];
+
+static void ide_reset(struct ide_chan *c) {
+  c->err = 1;
+  c->sc = c->sn = 1;
+  c->cl = c->ch = 0;
+  c->dh = 0;
+  c->status = c->present ? (ATA_DRDY | ATA_DSC) : 0;
+  c->pos = c->len = 0;
+  c->left = 0;
+  c->dma_pending = 0;
+}
+
+static void ide_init(void) {
+  memset(g_ide, 0, sizeof(g_ide));
+  for (int i = 0; i < 2; i++) {
+    g_ide[i].irq = 14 + i;
+    g_ide[i].heads = 16;
+    g_ide[i].spt = 63;
+    g_ide[i].multi = 16;
+  }
+  g_ide[0].present = g_ide_fd >= 0;
+  g_ide[0].bm_status = g_ide[0].present ? 0x20 : 0;
+  for (int i = 0; i < 2; i++)
+    ide_reset(&g_ide[i]);
+}
+
+static void ide_irq(struct ide_chan *c) {
+  if (!(c->ctl & 2))
+    pic_raise(c->irq);
+}
+
+static void ide_put_str(uint16_t *w, int first, int words, const char *s) {
+  size_t n = strlen(s);
+  for (int i = 0; i < words; i++) {
+    char a = (size_t)(2 * i) < n ? s[2 * i] : ' ';
+    char b = (size_t)(2 * i + 1) < n ? s[2 * i + 1] : ' ';
+    w[first + i] = (uint16_t)(((uint8_t)a << 8) | (uint8_t)b);
+  }
+}
+
+static void ide_identify(struct ide_chan *c) {
+  uint16_t w[256];
+  memset(w, 0, sizeof(w));
+  uint64_t sec = g_ide_sectors;
+  uint32_t cyl = (uint32_t)(sec / (16 * 63));
+  if (cyl > 16383)
+    cyl = 16383;
+  w[0] = 0x0040;
+  w[1] = (uint16_t)cyl;
+  w[3] = 16;
+  w[6] = 63;
+  ide_put_str(w, 10, 10, "AURORA0000001");
+  ide_put_str(w, 23, 4, "1.0");
+  ide_put_str(w, 27, 20, "AURORA VM DISK");
+  w[47] = 0x8000 | IDE_BUF_SECT;
+  w[49] = 0x0300;            // LBA + DMA
+  w[53] = 0x0007;
+  w[54] = (uint16_t)cyl;
+  w[55] = 16;
+  w[56] = 63;
+  uint32_t cur = (uint32_t)(cyl * 16 * 63);
+  w[57] = (uint16_t)cur;
+  w[58] = (uint16_t)(cur >> 16);
+  w[59] = 0x0100 | c->multi;
+  uint32_t l28 = sec > 0x0FFFFFFF ? 0x0FFFFFFF : (uint32_t)sec;
+  w[60] = (uint16_t)l28;
+  w[61] = (uint16_t)(l28 >> 16);
+  w[63] = 0x0007;            // DMA multiword 0-2
+  w[64] = 0x0003;            // PIO 3-4
+  w[65] = w[66] = w[67] = w[68] = 120;
+  w[80] = 0x00F0;            // ATA-4..7
+  w[83] = 0x7400;            // FLUSH CACHE (+EXT), LBA48
+  w[84] = 0x4000;
+  w[85] = 0x0000;
+  w[86] = 0x7400;
+  w[87] = 0x4000;
+  w[88] = 0x003F;            // UDMA 0-5
+  w[100] = (uint16_t)sec;
+  w[101] = (uint16_t)(sec >> 16);
+  w[102] = (uint16_t)(sec >> 32);
+  w[103] = (uint16_t)(sec >> 48);
+  memcpy(c->buf, w, 512);
+}
+
+static uint64_t ide_lba(struct ide_chan *c, int ext) {
+  if (ext)
+    return ((uint64_t)c->hch << 40) | ((uint64_t)c->hcl << 32) | ((uint64_t)c->hsn << 24) |
+           ((uint64_t)c->ch << 16) | ((uint64_t)c->cl << 8) | c->sn;
+  if (c->dh & 0x40)
+    return ((uint64_t)(c->dh & 0x0F) << 24) | ((uint64_t)c->ch << 16) | ((uint64_t)c->cl << 8) | c->sn;
+  uint64_t cyl = ((uint64_t)c->ch << 8) | c->cl;
+  return (cyl * c->heads + (c->dh & 0x0F)) * c->spt + (c->sn ? c->sn - 1u : 0);
+}
+
+static void ide_abort(struct ide_chan *c) {
+  c->status = ATA_DRDY | ATA_DSC | ATA_ERR;
+  c->err = 0x04;
+  c->left = 0;
+  ide_irq(c);
+}
+
+// Carga el siguiente bloque de lectura PIO en el buffer. Devuelve 0 si va bien.
+static int ide_load_block(struct ide_chan *c) {
+  unsigned n = c->left < c->blk ? c->left : c->blk;
+  if (c->lba + n > g_ide_sectors ||
+      pread(g_ide_fd, c->buf, (size_t)n * 512, (off_t)(c->lba * 512)) != (ssize_t)n * 512) {
+    ide_abort(c);
+    return -1;
+  }
+  c->lba += n;
+  c->left -= n;
+  c->pos = 0;
+  c->len = n * 512;
+  c->status = ATA_DRDY | ATA_DSC | ATA_DRQ;
+  ide_irq(c);
+  return 0;
+}
+
+static void ide_dma_run(struct ide_chan *c) {
+  uint32_t total = c->dma_count * 512;
+  uint64_t off = c->lba * 512;
+  int fail = 0;
+  if (c->lba + c->dma_count > g_ide_sectors || (c->write && g_ide_ro))
+    fail = 1;
+  uint32_t prd = c->bm_prd & ~3u;
+  while (!fail && total) {
+    if (!guest_ok(prd, 8)) { fail = 1; break; }
+    uint32_t base; uint16_t cnt, fl;
+    memcpy(&base, g_ram + prd, 4); memcpy(&cnt, g_ram + prd + 4, 2); memcpy(&fl, g_ram + prd + 6, 2);
+    uint32_t n = cnt ? cnt : 65536;
+    if (n > total) n = total;
+    if (!guest_ok(base, n)) { fail = 1; break; }
+    ssize_t r = c->write ? pwrite(g_ide_fd, g_ram + base, n, (off_t)off)
+                         : pread(g_ide_fd, g_ram + base, n, (off_t)off);
+    if (r != (ssize_t)n) { fail = 1; break; }
+    off += n;
+    total -= n;
+    prd += 8;
+    if (fl & 0x8000) break;
+  }
+  if (total)
+    fail = 1;
+  c->dma_pending = 0;
+  c->bm_status &= (uint8_t)~1;
+  if (fail) {
+    c->bm_status |= 2;
+    c->status = ATA_DRDY | ATA_DSC | ATA_ERR;
+    c->err = 0x04;
+  } else {
+    c->status = ATA_DRDY | ATA_DSC;
+  }
+  c->bm_status |= 4;
+  ide_irq(c);
+}
+
+static void ide_command(struct ide_chan *c, uint8_t cmd) {
+  if (!c->present || (c->dh & 0x10))
+    return;
+  c->err = 0;
+  c->status = ATA_DRDY | ATA_DSC;
+  uint32_t cnt8 = c->sc ? c->sc : 256;
+  uint32_t cnt48 = ((uint32_t)c->hsc << 8) | c->sc;
+  if (!cnt48) cnt48 = 65536;
+  switch (cmd) {
+  case 0xEC: // IDENTIFY DEVICE
+    ide_identify(c);
+    c->pos = 0; c->len = 512; c->left = 0;
+    c->status = ATA_DRDY | ATA_DSC | ATA_DRQ;
+    ide_irq(c);
+    break;
+  case 0x20: case 0x21: case 0x24: case 0xC4: case 0x29: {
+    int ext = cmd == 0x24 || cmd == 0x29;
+    c->write = 0;
+    c->lba = ide_lba(c, ext);
+    c->left = ext ? cnt48 : cnt8;
+    c->blk = (cmd == 0xC4 || cmd == 0x29) ? c->multi : 1;
+    ide_load_block(c);
+    break;
+  }
+  case 0x30: case 0x31: case 0x34: case 0xC5: case 0x39: {
+    int ext = cmd == 0x34 || cmd == 0x39;
+    if (g_ide_ro) { ide_abort(c); break; }
+    c->write = 1;
+    c->lba = ide_lba(c, ext);
+    c->left = ext ? cnt48 : cnt8;
+    c->blk = (cmd == 0xC5 || cmd == 0x39) ? c->multi : 1;
+    unsigned n = c->left < c->blk ? c->left : c->blk;
+    if (c->lba + c->left > g_ide_sectors) { ide_abort(c); break; }
+    c->pos = 0;
+    c->len = n * 512;
+    c->status = ATA_DRDY | ATA_DSC | ATA_DRQ;
+    break;
+  }
+  case 0xC8: case 0x25: case 0xCA: case 0x35: {
+    int ext = cmd == 0x25 || cmd == 0x35;
+    c->write = cmd == 0xCA || cmd == 0x35;
+    c->lba = ide_lba(c, ext);
+    c->dma_count = ext ? cnt48 : cnt8;
+    c->dma_pending = 1;
+    c->status = ATA_DRDY | ATA_DSC | ATA_BSY; // hasta que el maestro de bus arranque
+    c->bm_status |= 1;
+    if (c->bm_cmd & 1)
+      ide_dma_run(c);
+    break;
+  }
+  case 0xC6: // SET MULTIPLE MODE
+    if (c->sc && c->sc <= IDE_BUF_SECT && !(c->sc & (c->sc - 1)))
+      c->multi = c->sc;
+    else { ide_abort(c); break; }
+    ide_irq(c);
+    break;
+  case 0x91: // INITIALIZE DEVICE PARAMETERS
+    c->heads = (uint8_t)((c->dh & 0x0F) + 1);
+    c->spt = c->sc ? c->sc : 63;
+    ide_irq(c);
+    break;
+  case 0xE7: case 0xEA: // FLUSH CACHE (+EXT)
+    if (!g_ide_ro)
+      fsync(g_ide_fd);
+    ide_irq(c);
+    break;
+  case 0xEF: case 0x40: case 0x41: case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE6:
+  case 0xE8: case 0x10: case 0x70:
+    ide_irq(c);
+    break;
+  case 0xE5: // CHECK POWER MODE: activo
+    c->sc = 0xFF;
+    ide_irq(c);
+    break;
+  case 0xF8: { // READ NATIVE MAX ADDRESS
+    uint64_t m = g_ide_sectors - 1;
+    c->sn = (uint8_t)m; c->cl = (uint8_t)(m >> 8); c->ch = (uint8_t)(m >> 16);
+    c->dh = (uint8_t)((c->dh & 0xF0) | ((m >> 24) & 0x0F));
+    ide_irq(c);
+    break;
+  }
+  case 0x27: { // READ NATIVE MAX ADDRESS EXT
+    uint64_t m = g_ide_sectors - 1;
+    c->sn = (uint8_t)m; c->cl = (uint8_t)(m >> 8); c->ch = (uint8_t)(m >> 16);
+    c->hsn = (uint8_t)(m >> 24); c->hcl = (uint8_t)(m >> 32); c->hch = (uint8_t)(m >> 40);
+    ide_irq(c);
+    break;
+  }
+  default: // IDENTIFY PACKET, DEVICE RESET, SMART...: no soportado
+    ide_abort(c);
+    break;
+  }
+}
+
+static uint32_t ide_data_in(struct ide_chan *c, int size) {
+  if (!c->present || !(c->status & ATA_DRQ) || c->write)
+    return 0xFFFFFFFFu;
+  uint32_t v = 0;
+  for (int i = 0; i < size && c->pos < c->len; i++)
+    v |= (uint32_t)c->buf[c->pos++] << (8 * i);
+  if (c->pos >= c->len) {
+    c->status = ATA_DRDY | ATA_DSC;
+    if (c->left)
+      ide_load_block(c);
+  }
+  return v;
+}
+
+static void ide_data_out(struct ide_chan *c, uint32_t v, int size) {
+  if (!c->present || !(c->status & ATA_DRQ) || !c->write)
+    return;
+  for (int i = 0; i < size && c->pos < c->len; i++)
+    c->buf[c->pos++] = (uint8_t)(v >> (8 * i));
+  if (c->pos >= c->len) {
+    unsigned n = c->len / 512;
+    if (pwrite(g_ide_fd, c->buf, c->len, (off_t)(c->lba * 512)) != (ssize_t)c->len) {
+      ide_abort(c);
+      return;
+    }
+    c->lba += n;
+    c->left -= n;
+    c->status = ATA_DRDY | ATA_DSC;
+    if (c->left) {
+      unsigned m = c->left < c->blk ? c->left : c->blk;
+      c->pos = 0;
+      c->len = m * 512;
+      c->status |= ATA_DRQ;
+    }
+    ide_irq(c);
+  }
+}
+
+// Registros 0..7 (a partir de la base) y control (nr == 8)
+static uint32_t ide_reg_in(struct ide_chan *c, unsigned nr, int size) {
+  if (nr == 0)
+    return ide_data_in(c, size);
+  int absent = !c->present || ((c->dh & 0x10) && nr != 6);
+  if (nr == 8 || nr == 7) {
+    uint8_t st = (!c->present || (c->dh & 0x10)) ? 0 : c->status;
+    if (nr == 7)
+      pic_lower(c->irq);
+    return st;
+  }
+  if (absent)
+    return 0;
+  int hob = c->ctl & 0x80;
+  switch (nr) {
+  case 1: return c->err;
+  case 2: return hob ? c->hsc : c->sc;
+  case 3: return hob ? c->hsn : c->sn;
+  case 4: return hob ? c->hcl : c->cl;
+  case 5: return hob ? c->hch : c->ch;
+  case 6: return c->dh;
+  default: return 0;
+  }
+}
+
+static void ide_reg_out(struct ide_chan *c, unsigned nr, uint32_t v, int size) {
+  uint8_t b = (uint8_t)v;
+  if (nr == 0) {
+    ide_data_out(c, v, size);
+    return;
+  }
+  if (nr == 8) { // control: SRST (bit 2), nIEN (bit 1), HOB (bit 7)
+    int was = c->ctl & 4;
+    c->ctl = b;
+    if (was && !(b & 4))
+      ide_reset(c);
+    return;
+  }
+  switch (nr) {
+  case 1: c->hfeat = c->feat; c->feat = b; break;
+  case 2: c->hsc = c->sc; c->sc = b; break;
+  case 3: c->hsn = c->sn; c->sn = b; break;
+  case 4: c->hcl = c->cl; c->cl = b; break;
+  case 5: c->hch = c->ch; c->ch = b; break;
+  case 6: c->dh = b; break;
+  case 7:
+    pic_lower(c->irq);
+    ide_command(c, b);
+    break;
+  default: break;
+  }
+}
+
+// Maestro de bus (BAR4, 16 bytes): canal 0 en +0..+7, canal 1 en +8..+15
+static int ide_bm_ok(unsigned port) {
+  if (!g_ide_on || !(g_ide_cmd & 1))
+    return 0;
+  unsigned base = g_ide_bar4 & ~15u & ~3u;
+  return base && port >= base && port < base + 16;
+}
+static unsigned ide_bm_base(void) { return g_ide_bar4 & ~15u & ~3u; }
+
+static uint32_t ide_bm_in(unsigned off, int size) {
+  struct ide_chan *c = &g_ide[(off >> 3) & 1];
+  unsigned r = off & 7;
+  uint32_t v = 0;
+  for (int i = 0; i < size; i++) {
+    unsigned k = r + (unsigned)i;
+    uint8_t b = 0;
+    if (k == 0) b = c->bm_cmd;
+    else if (k == 2) b = c->bm_status;
+    else if (k >= 4 && k < 8) b = (uint8_t)(c->bm_prd >> (8 * (k - 4)));
+    v |= (uint32_t)b << (8 * i);
+  }
+  return v;
+}
+
+static void ide_bm_out(unsigned off, uint32_t v, int size) {
+  struct ide_chan *c = &g_ide[(off >> 3) & 1];
+  unsigned r = off & 7;
+  for (int i = 0; i < size; i++) {
+    unsigned k = r + (unsigned)i;
+    uint8_t b = (uint8_t)(v >> (8 * i));
+    if (k == 0) {
+      uint8_t was = c->bm_cmd;
+      c->bm_cmd = b & 9;
+      if (!(was & 1) && (b & 1) && c->dma_pending)
+        ide_dma_run(c);
+      if ((was & 1) && !(b & 1))
+        c->bm_status &= (uint8_t)~1;
+    } else if (k == 2) {
+      c->bm_status = (uint8_t)((c->bm_status & ~(b & 6)) & ~0x60);
+      c->bm_status |= (uint8_t)(b & 0x60);
+      if (c->present)
+        c->bm_status |= 0x20;
+    } else if (k >= 4 && k < 8) {
+      unsigned sh = 8 * (k - 4);
+      c->bm_prd = (c->bm_prd & ~(0xFFu << sh)) | ((uint32_t)b << sh);
+      c->bm_prd &= ~3u;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Puertos de la plataforma. Devuelve 1 si el puerto es de la plataforma.
 // ---------------------------------------------------------------------------
 static int plat_in(uint16_t port, int size, uint32_t *v) {
@@ -453,6 +938,14 @@ static int plat_in(uint16_t port, int size, uint32_t *v) {
   if (port == 0xCF8) { *v = g_pci_addr; return 1; }
   if (port >= 0xCFC && port <= 0xCFF) { *v = pci_data_in(port, size); return 1; }
   if (vb_io_base_ok(port)) { *v = vb_in(port - vb_base(), size); return 1; }
+  if (g_ide_on) {
+    if (port >= 0x1F0 && port <= 0x1F7) { *v = ide_reg_in(&g_ide[0], port - 0x1F0, size); return 1; }
+    if (port == 0x3F6) { *v = ide_reg_in(&g_ide[0], 8, size); return 1; }
+    if (port >= 0x170 && port <= 0x177) { *v = ide_reg_in(&g_ide[1], port - 0x170, size); return 1; }
+    if (port == 0x376) { *v = ide_reg_in(&g_ide[1], 8, size); return 1; }
+    if (ide_bm_ok(port)) { *v = ide_bm_in(port - ide_bm_base(), size); return 1; }
+    if (port == 0x4D0 || port == 0x4D1) { *v = 0; return 1; }
+  }
   if (port == 0x402 || port == 0xE9) { *v = 0xE9; return 1; }
   return 0;
 }
@@ -469,6 +962,14 @@ static int plat_out(uint16_t port, uint32_t v, int size) {
   if (port == 0xCF9) { if (v & 4) g_reset_req = 1; return 1; }
   if (port >= 0xCFC && port <= 0xCFF) { pci_data_out(port, v, size); return 1; }
   if (vb_io_base_ok(port)) { vb_out(port - vb_base(), v, size); return 1; }
+  if (g_ide_on) {
+    if (port >= 0x1F0 && port <= 0x1F7) { ide_reg_out(&g_ide[0], port - 0x1F0, v, size); return 1; }
+    if (port == 0x3F6) { ide_reg_out(&g_ide[0], 8, v, size); return 1; }
+    if (port >= 0x170 && port <= 0x177) { ide_reg_out(&g_ide[1], port - 0x170, v, size); return 1; }
+    if (port == 0x376) { ide_reg_out(&g_ide[1], 8, v, size); return 1; }
+    if (ide_bm_ok(port)) { ide_bm_out(port - ide_bm_base(), v, size); return 1; }
+    if (port == 0x4D0 || port == 0x4D1) return 1;
+  }
   if (port == 0x402 || port == 0xE9) {
     if (g_bios_log) { fputc((int)(v & 0xFF), stderr); }
     return 1;
