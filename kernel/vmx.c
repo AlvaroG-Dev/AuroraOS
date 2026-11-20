@@ -160,6 +160,8 @@ struct avm_vm {
   int32_t pending_irq; // -1 = ninguna
   uint32_t timeout_ms;
   uint32_t debug, exc_logged;
+  uint64_t last_exc_rip;
+  uint32_t exc_repeat;
   // IN pendiente de completar en el siguiente AVM_RUN
   bool pending_in;
   uint8_t pending_in_size;
@@ -679,7 +681,9 @@ static void inject_gp(void) {
 }
 
 static void skip_insn(struct avm_vm *vm) {
-  vm->regs.rip += vmread(F_EXIT_INSTR_LEN);
+  // OJO: el RIP vivo esta en el VMCS; vm->regs.rip solo se actualiza al salir
+  // de la ventana (usarlo aqui hacia retroceder al huesped al inicio).
+  vm->regs.rip = vmread(F_GUEST_RIP) + vmread(F_EXIT_INSTR_LEN);
   vmwrite(F_GUEST_RIP, vm->regs.rip);
   vmwrite(F_GUEST_INTERRUPTIBILITY,
           vmread(F_GUEST_INTERRUPTIBILITY) & ~3ULL); // fin de STI/MOV SS shadow
@@ -925,8 +929,16 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])(fx + 512)) : "memory");
   // Los MSR del huesped (SYSCALL...) los carga y guarda el hardware.
   bool need_intr_window = false;
+  unsigned inner_exits = 0;
 
   for (;;) {
+    // Nunca quedarse en la ventana (IRQ del host apagadas) mas de unas salidas
+    // rapidas seguidas: un huesped que falla en bucle colgaria la CPU. No se
+    // sale con un evento ya preparado para inyectar (se perderia).
+    if (++inner_exits > 256 && !(vmread(F_ENTRY_INTR_INFO) & (1u << 31))) {
+      ret = 0;
+      goto leave;
+    }
     // Interrupcion pendiente del VMM: inyectar si el huesped puede recibirla.
     uint32_t proc = vm->procbased;
     if (vm->pending_irq >= 0) {
@@ -996,6 +1008,21 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
                  vec, err, q, vmread(F_GUEST_RIP), vmread(F_GUEST_RSP),
                  vmread(F_GUEST_CS_SEL), vmread(F_GUEST_CR0),
                  vmread(F_GUEST_CR4), vmread(F_GUEST_EFER), vmread(F_GUEST_CR3));
+      }
+      {
+        uint64_t rip_now = vmread(F_GUEST_RIP);
+        if (rip_now == vm->last_exc_rip) {
+          if (++vm->exc_repeat > 64) { // el huesped se ha atascado fallando
+            LOG_WARN("[VMX] excepcion #%u repetida en rip=%lx: se da por apagado",
+                     vec, rip_now);
+            x->reason = AVM_EXIT_SHUTDOWN;
+            ret = 1;
+            goto leave;
+          }
+        } else {
+          vm->last_exc_rip = rip_now;
+          vm->exc_repeat = 0;
+        }
       }
       if (vec == 14)
         vm->regs.cr2 = q;
