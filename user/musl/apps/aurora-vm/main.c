@@ -836,6 +836,13 @@ static int run_bios(const char *bios_path, const char *disk_path, const char *id
   }
   pic_reset();
   pit_reset();
+  // El PIT cuenta solo desde el encendido (65536 ciclos): SeaBIOS lo lee como
+  // temporizador antes de programarlo; si no avanza, sus esperas no terminan.
+  g_pit.reload = 65536;
+  g_pit.period_ns = 65536ULL * 1000000000ULL / PIT_HZ;
+  g_pit.start_ns = now_ns();
+  g_pit.next_ns = g_pit.start_ns + g_pit.period_ns;
+  g_pit.running = 1;
   kbc_reset();
   pci_init();
   ide_init();
