@@ -10,6 +10,8 @@
 //   aurora-vm --caps                 que ofrece la CPU (VMX, EPT, ...)
 //   aurora-vm --autotest             tres guests incorporados (real, modo largo+MMIO, temporizador)
 //   aurora-vm --plano FICH [--en DIR] [--mem MiB]
+//   aurora-vm --bios-test            SeaBIOS + virtio-blk + sector de arranque incorporado (F3a)
+//   aurora-vm --bios [--rom FICH] [--disco IMG] [--mem MiB] [--tiempo S] [--log-bios]
 //   aurora-vm PROGRAMA.exe           (aurora-run lo llama asi; aun sin huesped)
 // Puertos: 0x3F8 serie -> stdout, 0xF4 termina con el codigo escrito.
 #define _GNU_SOURCE
@@ -39,6 +41,8 @@ static char g_out[512];
 static size_t g_out_n;
 static int g_echo = 1;
 static int g_debug = 1; // intercepta excepciones del huesped y las registra (dmesg [VMX])
+
+#include "platform.h"
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -159,12 +163,34 @@ static struct {
   uint8_t lo_latch;
   uint64_t period_ns, next_ns, start_ns;
   uint8_t port61;
+  // canal 2 (calibracion del TSC de SeaBIOS: modo 0, puerta por 0x61 bit 0)
+  uint8_t c2_access, c2_mode, c2_hi, c2_lo, c2_armed;
+  uint32_t c2_reload;
+  uint64_t c2_start_ns;
 } g_pit;
 
 static void pit_reset(void) { memset(&g_pit, 0, sizeof(g_pit)); }
 
 static void pit_write(uint16_t port, uint8_t v) {
-  if (port == 0x43) {
+  if (port == 0x43 && (v >> 6) == 2) {
+    g_pit.c2_access = (v >> 4) & 3;
+    g_pit.c2_mode = (v >> 1) & 7;
+    g_pit.c2_hi = 0;
+    g_pit.c2_armed = 0;
+  } else if (port == 0x42) {
+    if (g_pit.c2_access == 3 && !g_pit.c2_hi) {
+      g_pit.c2_lo = v;
+      g_pit.c2_hi = 1;
+      return;
+    }
+    uint32_t cnt = g_pit.c2_access == 2 ? ((uint32_t)v << 8)
+                   : g_pit.c2_access == 1 ? v
+                                          : ((uint32_t)v << 8) | g_pit.c2_lo;
+    g_pit.c2_hi = 0;
+    g_pit.c2_reload = cnt ? cnt : 65536;
+    g_pit.c2_start_ns = now_ns();
+    g_pit.c2_armed = 1;
+  } else if (port == 0x43) {
     if ((v >> 6) == 0) {
       g_pit.access = (v >> 4) & 3;
       g_pit.mode = (v >> 1) & 7;
@@ -192,7 +218,13 @@ static void pit_write(uint16_t port, uint8_t v) {
 
 static uint8_t pit_read(uint16_t port) {
   if (port == 0x61)
-    return (uint8_t)((g_pit.port61 & 0x0F) | (((now_ns() / 15000) & 1) << 4));
+  {
+    uint8_t out2 = 0;
+    if (g_pit.c2_armed && (g_pit.port61 & 1) &&
+        (now_ns() - g_pit.c2_start_ns) * PIT_HZ / 1000000000ULL >= g_pit.c2_reload)
+      out2 = 1;
+    return (uint8_t)((g_pit.port61 & 0x0F) | (((now_ns() / 15000) & 1) << 4) | (out2 << 5));
+  }
   if (port == 0x40 && g_pit.running) {
     uint64_t t = (now_ns() - g_pit.start_ns) * PIT_HZ / 1000000000ULL;
     uint32_t cnt = g_pit.reload - (uint32_t)(t % g_pit.reload);
@@ -214,7 +246,6 @@ static void pit_poll(uint64_t now) {
 // E/S y MMIO
 // ---------------------------------------------------------------------------
 static uint8_t g_mmio_test[4096];
-static uint8_t g_cmos_idx;
 static int g_exit_code = -1;
 
 static void serial_out(uint8_t c) {
@@ -228,7 +259,9 @@ static void serial_out(uint8_t c) {
 
 static uint32_t io_in(uint16_t port, int size) {
   uint32_t v = 0xFFFFFFFFu;
-  if (port == 0x3FD)
+  if (plat_in(port, size, &v))
+    ;
+  else if (port == 0x3FD)
     v = 0x60;
   else if (port >= 0x3F8 && port <= 0x3FF)
     v = 0;
@@ -236,7 +269,7 @@ static uint32_t io_in(uint16_t port, int size) {
     v = pic_read(0, port & 1);
   else if (port == 0xA0 || port == 0xA1)
     v = pic_read(1, port & 1);
-  else if (port == 0x40 || port == 0x61)
+  else if (port == 0x40 || port == 0x42 || port == 0x61)
     v = pit_read(port);
   else if (port == 0x71)
     v = 0;
@@ -247,7 +280,9 @@ static uint32_t io_in(uint16_t port, int size) {
   return v;
 }
 
-static void io_out(uint16_t port, uint32_t v) {
+static void io_out(uint16_t port, uint32_t v, int size) {
+  if (plat_out(port, v, size))
+    return;
   if (port == 0x3F8)
     serial_out((uint8_t)v);
   else if (port == 0xF4)
@@ -256,7 +291,7 @@ static void io_out(uint16_t port, uint32_t v) {
     pic_write(0, port & 1, (uint8_t)v);
   else if (port == 0xA0 || port == 0xA1)
     pic_write(1, port & 1, (uint8_t)v);
-  else if (port == 0x40 || port == 0x43 || port == 0x61)
+  else if (port == 0x40 || port == 0x42 || port == 0x43 || port == 0x61)
     pit_write(port, (uint8_t)v);
   else if (port == 0x70)
     g_cmos_idx = (uint8_t)v;
@@ -477,57 +512,20 @@ static int cmd_caps(void) {
   return (c.flags & AVM_CAP_USABLE) ? 0 : 1;
 }
 
-static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_mb) {
-  pic_reset();
-  pit_reset();
-  memset(g_mmio_test, 0, sizeof(g_mmio_test));
-  g_exit_code = -1;
-  g_out_n = 0;
-  g_vm = open_vm();
-  if (g_vm < 0)
-    return 1;
-  g_ram_size = (uint64_t)mem_mb << 20;
-  int mfd = g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
-  if (mfd < 0 || ftruncate(mfd, (off_t)g_ram_size) < 0) {
-    perror("memfd");
-    return 1;
-  }
-  g_ram = mmap(NULL, g_ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
-  if (g_ram == MAP_FAILED) {
-    perror("mmap");
-    return 1;
-  }
-  if (at + len > g_ram_size) {
-    fprintf(stderr, "aurora-vm: el binario no cabe en la RAM del huesped\n");
-    return 1;
-  }
-  memcpy(g_ram + at, code, len);
-  struct avm_memory m = {.fd = mfd, .slot = 0, .gpa = 0, .size = g_ram_size, .offset = 0};
-  if (ioctl(g_vm, AVM_SET_MEMORY, &m) < 0) {
-    perror("AVM_SET_MEMORY");
-    return 1;
-  }
-  struct avm_regs r;
-  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
-    perror("AVM_GET_REGS");
-    return 1;
-  }
-  struct avm_seg cs = {.base = 0, .limit = 0xFFFF, .selector = 0, .ar = 0x9B};
-  struct avm_seg ds = {.base = 0, .limit = 0xFFFF, .selector = 0, .ar = 0x93};
-  r.cs = cs;
-  r.ds = r.es = r.fs = r.gs = r.ss = ds;
-  r.rip = at;
-  r.rsp = 0x8000;
-  r.rflags = 2;
-  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0) {
-    perror("AVM_SET_REGS");
-    return 1;
-  }
+static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
   ioctl(g_vm, AVM_SET_TIMEOUT, 2);
   ioctl(g_vm, AVM_SET_DEBUG, g_debug);
   struct avm_exit x;
   memset(&x, 0, sizeof(x));
-  for (unsigned n = 0; n < 20000000; n++) {
+  for (unsigned n = 0; n < max_iter; n++) {
+    if (deadline_ns && (n & 63) == 0 && now_ns() > deadline_ns) {
+      fprintf(stderr, "aurora-vm: tiempo agotado\n");
+      return 5;
+    }
+    if (g_reset_req) {
+      fprintf(stderr, "aurora-vm: el huesped pidio reiniciar\n");
+      return 0;
+    }
     pit_poll(now_ns());
     int which, line;
     int vec = pic_peek(&which, &line);
@@ -540,7 +538,7 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
     switch (x.reason) {
     case AVM_EXIT_IO:
       if (x.io.is_write) {
-        io_out(x.io.port, x.io.data);
+        io_out(x.io.port, x.io.data, x.io.size);
         if (g_exit_code >= 0)
           return g_exit_code;
       } else {
@@ -552,8 +550,14 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
       ioctl(g_vm, AVM_GET_REGS, &hr);
       if (!(hr.rflags & (1u << 9)))
         return 0; // HLT con IF=0: el huesped termino
-      if (!g_pit.running)
+      if (!g_pit.running) {
+        if (g_plat) { // BIOS: puede estar esperando una E/S del VMM; no terminar
+          struct timespec ts = {0, 1000000};
+          nanosleep(&ts, NULL);
+          break;
+        }
         return 0; // nada puede despertarlo
+      }
       uint64_t t = now_ns();
       if (g_pit.next_ns > t) {
         struct timespec ts = {0, (long)(g_pit.next_ns - t)};
@@ -603,6 +607,55 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
   return 4;
 }
 
+static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_mb) {
+  pic_reset();
+  pit_reset();
+  memset(g_mmio_test, 0, sizeof(g_mmio_test));
+  g_exit_code = -1;
+  g_out_n = 0;
+  g_vm = open_vm();
+  if (g_vm < 0)
+    return 1;
+  g_ram_size = (uint64_t)mem_mb << 20;
+  int mfd = g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
+  if (mfd < 0 || ftruncate(mfd, (off_t)g_ram_size) < 0) {
+    perror("memfd");
+    return 1;
+  }
+  g_ram = mmap(NULL, g_ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+  if (g_ram == MAP_FAILED) {
+    perror("mmap");
+    return 1;
+  }
+  if (at + len > g_ram_size) {
+    fprintf(stderr, "aurora-vm: el binario no cabe en la RAM del huesped\n");
+    return 1;
+  }
+  memcpy(g_ram + at, code, len);
+  struct avm_memory m = {.fd = mfd, .slot = 0, .gpa = 0, .size = g_ram_size, .offset = 0};
+  if (ioctl(g_vm, AVM_SET_MEMORY, &m) < 0) {
+    perror("AVM_SET_MEMORY");
+    return 1;
+  }
+  struct avm_regs r;
+  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
+    perror("AVM_GET_REGS");
+    return 1;
+  }
+  struct avm_seg cs = {.base = 0, .limit = 0xFFFF, .selector = 0, .ar = 0x9B};
+  struct avm_seg ds = {.base = 0, .limit = 0xFFFF, .selector = 0, .ar = 0x93};
+  r.cs = cs;
+  r.ds = r.es = r.fs = r.gs = r.ss = ds;
+  r.rip = at;
+  r.rsp = 0x8000;
+  r.rflags = 2;
+  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0) {
+    perror("AVM_SET_REGS");
+    return 1;
+  }
+  return run_loop(20000000, 0);
+}
+
 static int autotest(void) {
   struct {
     const char *name;
@@ -632,15 +685,169 @@ static int autotest(void) {
   return bad ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------
+// F3a: arranque con SeaBIOS y un disco virtio-blk
+// ---------------------------------------------------------------------------
+#define DEFAULT_BIOS "/usr/share/aurora/vm/bios.bin"
+
+static int run_bios(const char *bios_path, const char *disk_path, unsigned mem_mb,
+                    unsigned timeout_s) {
+  if (mem_mb < 16 || mem_mb > 3072) {
+    fprintf(stderr, "aurora-vm: --mem debe estar entre 16 y 3072 MiB\n");
+    return 1;
+  }
+  FILE *f = fopen(bios_path, "rb");
+  if (!f) {
+    fprintf(stderr, "aurora-vm: no encuentro la BIOS %s: %s\n", bios_path, strerror(errno));
+    return 1;
+  }
+  static uint8_t bios[256 * 1024];
+  size_t bn = fread(bios, 1, sizeof(bios), f);
+  fclose(f);
+  if (bn < 64 * 1024 || bn > sizeof(bios) || (bn & 0xFFFF)) {
+    fprintf(stderr, "aurora-vm: %s: tamano de BIOS no valido (%zu bytes; se esperan 64..256 KiB multiplo de 64 KiB)\n",
+            bios_path, bn);
+    return 1;
+  }
+  if (disk_path) {
+    g_disk_ro = 0;
+    g_disk_fd = open(disk_path, O_RDWR | O_CLOEXEC);
+    if (g_disk_fd < 0) {
+      g_disk_ro = 1;
+      g_disk_fd = open(disk_path, O_RDONLY | O_CLOEXEC);
+    }
+    if (g_disk_fd < 0) {
+      fprintf(stderr, "aurora-vm: no puedo abrir el disco %s: %s\n", disk_path, strerror(errno));
+      return 1;
+    }
+    struct stat st;
+    if (fstat(g_disk_fd, &st) < 0 || st.st_size < 512) {
+      fprintf(stderr, "aurora-vm: el disco %s esta vacio\n", disk_path);
+      return 1;
+    }
+    g_disk_sectors = (uint64_t)st.st_size / 512;
+    if (g_disk_ro)
+      fprintf(stderr, "aurora-vm: aviso: disco abierto solo lectura\n");
+  }
+  pic_reset();
+  pit_reset();
+  kbc_reset();
+  pci_init();
+  g_exit_code = -1;
+  g_reset_req = 0;
+  g_out_n = 0;
+  g_ram_size = (uint64_t)mem_mb << 20;
+  cmos_init(g_ram_size);
+  g_plat = 1;
+  g_vm = open_vm();
+  if (g_vm < 0)
+    return 1;
+  int mfd = g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
+  if (mfd < 0 || ftruncate(mfd, (off_t)(g_ram_size + bn)) < 0) {
+    perror("memfd");
+    return 1;
+  }
+  g_ram = mmap(NULL, g_ram_size + bn, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+  if (g_ram == MAP_FAILED) {
+    perror("mmap");
+    return 1;
+  }
+  // La BIOS aparece arriba de los 4 GiB (vector de reinicio) y en 0xE0000-0xFFFFF
+  // (SeaBIOS se copia a si misma a esa zona). Aqui ambas son RAM del huesped.
+  size_t low = bn < BIOS_SIZE ? bn : BIOS_SIZE;
+  memcpy(g_ram + 0x100000 - low, bios + (bn - low), low);
+  memcpy(g_ram + g_ram_size, bios, bn);
+  struct avm_memory m0 = {.fd = mfd, .slot = 0, .gpa = 0, .size = g_ram_size, .offset = 0};
+  struct avm_memory m1 = {.fd = mfd, .slot = 1, .gpa = 0x100000000ULL - bn, .size = bn,
+                          .offset = g_ram_size};
+  if (ioctl(g_vm, AVM_SET_MEMORY, &m0) < 0 || ioctl(g_vm, AVM_SET_MEMORY, &m1) < 0) {
+    perror("AVM_SET_MEMORY");
+    return 1;
+  }
+  struct avm_regs r;
+  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
+    perror("AVM_GET_REGS");
+    return 1;
+  }
+  struct avm_seg ds = {.base = 0, .limit = 0xFFFF, .selector = 0, .ar = 0x93};
+  struct avm_seg cs = {.base = 0xFFFF0000ULL, .limit = 0xFFFF, .selector = 0xF000, .ar = 0x9B};
+  r.cs = cs;
+  r.ds = r.es = r.fs = r.gs = r.ss = ds;
+  r.rip = 0xFFF0;
+  r.rsp = 0;
+  r.rflags = 2;
+  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0) {
+    perror("AVM_SET_REGS");
+    return 1;
+  }
+  uint64_t deadline = timeout_s ? now_ns() + (uint64_t)timeout_s * 1000000000ULL : 0;
+  return run_loop(0xFFFFFFFFu, deadline);
+}
+
+static int bios_test(void) {
+  char path[] = "/tmp/aurora-vm-f3-XXXXXX";
+  int fd = mkstemp(path);
+  if (fd < 0) {
+    perror("mkstemp");
+    return 1;
+  }
+  uint8_t img[4096];
+  memset(img, 0, sizeof(img));
+  memcpy(img, guest_mbr, sizeof(guest_mbr) < 512 ? sizeof(guest_mbr) : 512);
+  memcpy(img + 512, "AURORA-F3", 9);
+  if (write(fd, img, sizeof(img)) != (ssize_t)sizeof(img)) {
+    perror("write");
+    close(fd);
+    unlink(path);
+    return 1;
+  }
+  close(fd);
+  g_echo = 0;
+  int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, 32, 60);
+  unlink(path);
+  g_out[g_out_n] = 0;
+  const char *expect = "MBR arrancado desde SeaBIOS\nDisco OK\n";
+  int ok = rc == 0 && strcmp(g_out, expect) == 0;
+  printf("[%s] SeaBIOS + virtio-blk + sector de arranque\n", ok ? "OK" : "FALLA");
+  if (!ok)
+    printf("   rc=%d salida=\"%s\"\n", rc, g_out);
+  return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "Uso: aurora-vm --caps | --autotest | --plano FICH [--en DIR] [--mem MiB] | PROGRAMA.exe\n");
+    fprintf(stderr, "Uso: aurora-vm --caps | --autotest | --bios-test | --plano FICH [--en DIR] [--mem MiB] |\n"
+          "       --bios [--rom FICH] [--disco IMG] [--mem MiB] [--tiempo S] [--log-bios] | PROGRAMA.exe\n");
     return 2;
   }
   if (!strcmp(argv[1], "--caps"))
     return cmd_caps();
   if (!strcmp(argv[1], "--autotest"))
     return autotest();
+  if (!strcmp(argv[1], "--bios-test"))
+    return bios_test();
+  if (!strcmp(argv[1], "--bios")) {
+    const char *rom = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS;
+    const char *disk = NULL;
+    unsigned mem = 128, tmo = 0;
+    for (int i = 2; i < argc; i++) {
+      if (!strcmp(argv[i], "--log-bios"))
+        g_bios_log = 1;
+      else if (i + 1 < argc && !strcmp(argv[i], "--rom"))
+        rom = argv[++i];
+      else if (i + 1 < argc && !strcmp(argv[i], "--disco"))
+        disk = argv[++i];
+      else if (i + 1 < argc && !strcmp(argv[i], "--mem"))
+        mem = (unsigned)strtoul(argv[++i], NULL, 0);
+      else if (i + 1 < argc && !strcmp(argv[i], "--tiempo"))
+        tmo = (unsigned)strtoul(argv[++i], NULL, 0);
+      else {
+        fprintf(stderr, "aurora-vm: opcion desconocida: %s\n", argv[i]);
+        return 2;
+      }
+    }
+    return run_bios(rom, disk, mem, tmo);
+  }
   if (!strcmp(argv[1], "--plano") && argc >= 3) {
     uint64_t at = 0x1000;
     unsigned mem = 16;
