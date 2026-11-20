@@ -472,6 +472,20 @@ static int emulate_mmio(struct avm_regs *r, uint64_t gpa, int is_write) {
     if (rex & 8) opsz = 8;
   }
   uint8_t op = b[i++];
+  if (op >= 0xA0 && op <= 0xA3) { // MOV AL/AX/EAX <-> [moffs]
+    int sz = (op & 1) ? opsz : 1;
+    int al = lm && !p67 ? 8 : addr16 ? 2 : 4;
+    if (lm && p67) al = 4;
+    i += al;
+    if (is_write != (op >= 0xA2))
+      return -1;
+    if (is_write)
+      mmio_write(gpa, sz, reg_get(r, 0, sz, rex));
+    else
+      reg_set(r, 0, sz, rex, mmio_read(gpa, sz));
+    r->rip += (uint64_t)i;
+    return 0;
+  }
   int kind; // 0 mov rm<-reg, 1 mov reg<-rm, 2 mov rm<-imm, 3 movzx, 4 movsx
   int size = opsz, srcsz = 0;
   if (op == 0x88 || op == 0x89) { kind = 0; if (op == 0x88) size = 1; }
