@@ -492,7 +492,9 @@ static uint64_t fixed_cr4(uint64_t want) {
 static uint64_t cr0_owned(void) {
   uint64_t f0 = rdmsr(MSR_VMX_CR0_FIXED0), f1 = rdmsr(MSR_VMX_CR0_FIXED1);
   f0 &= ~((1ULL << 0) | (1ULL << 31));
-  return f0 | ~f1;
+  // PE y PG tambien se interceptan: el kernel decide EFER.LMA y el control
+  // IA-32e al activar la paginacion (el hardware no lo hace dentro del VMX).
+  return f0 | ~f1 | (1ULL << 0) | (1ULL << 31);
 }
 static uint64_t cr4_owned(void) {
   return rdmsr(MSR_VMX_CR4_FIXED0) | ~rdmsr(MSR_VMX_CR4_FIXED1);
@@ -1288,7 +1290,7 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   case AVM_RUN:
     return vm_run(vm, arg);
   case AVM_INJECT_IRQ:
-    if (arg < 32 || arg > 255)
+    if (arg > 255)
       return -EINVAL;
     if (vm->pending_irq >= 0)
       return -EBUSY;
