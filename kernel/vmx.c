@@ -340,9 +340,13 @@ static int vmx_enable_this_cpu(void) {
     *(uint32_t *)phys_to_virt(p) = g_vmx.caps.vmcs_revision;
     g_vmxon_phys[cpu] = p;
   }
-  uint64_t cr0 = read_cr0(), cr4 = read_cr4() | CR4_VMXE;
   uint64_t c0f0 = rdmsr(MSR_VMX_CR0_FIXED0), c0f1 = rdmsr(MSR_VMX_CR0_FIXED1);
   uint64_t c4f0 = rdmsr(MSR_VMX_CR4_FIXED0), c4f1 = rdmsr(MSR_VMX_CR4_FIXED1);
+  // El kernel corre con CR0.NE=0; VMX lo exige a 1 (como hace Linux): se
+  // suben los bits que piden los MSR fijos antes de comprobar.
+  uint64_t cr0 = read_cr0() | c0f0, cr4 = read_cr4() | CR4_VMXE | c4f0;
+  if (cr0 != read_cr0())
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
   if ((cr0 & c0f0) != c0f0 || (cr0 & ~c0f1) || (cr4 & c4f0) != c4f0 ||
       (cr4 & ~c4f1)) {
     LOG_ERR("[VMX] CR0/CR4 no cumplen los bits fijos (cr0=%lx cr4=%lx)", cr0,
