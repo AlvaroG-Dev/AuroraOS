@@ -593,8 +593,11 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
           fprintf(stderr, "    %s 0x%04x/%u = 0x%x\n", g_iolog[k].w ? "OUT" : "IN ", g_iolog[k].port,
                   g_iolog[k].size, g_iolog[k].v);
         }
-        if (g_dbgbuf_n)
-          fprintf(stderr, "--- log de SeaBIOS ---\n%.*s\n", (int)g_dbgbuf_n, g_dbgbuf);
+        if (g_dbgbuf_n) {
+          size_t from = g_dbgbuf_n > 5000 ? g_dbgbuf_n - 5000 : 0;
+          fprintf(stderr, "--- log de SeaBIOS (final) ---\n%.*s\n", (int)(g_dbgbuf_n - from),
+                  g_dbgbuf + from);
+        }
       }
       return 5;
     }
