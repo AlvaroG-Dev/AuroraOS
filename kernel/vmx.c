@@ -166,6 +166,7 @@ struct avm_vm {
   uint32_t timeout_ms;
   uint64_t dr[8];
   uint32_t debug, exc_logged;
+  uint32_t vmflags; // AVM_VMF_*
   uint64_t last_exc_rip;
   uint32_t exc_repeat;
   // IN pendiente de completar en el siguiente AVM_RUN
@@ -725,8 +726,9 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
            (1u << 7) | (1u << 8) | (1u << 12) | (1u << 15) | (1u << 17) |
            (1u << 21) | (1u << 24) | (1u << 26) | (1u << 27) | (1u << 28) |
            (1u << 29) | (1u << 31));
-    d &= ~((1u << 9) | (1u << 21) | (1u << 22) | (1u << 28) | (1u << 29) |
-           (1u << 31));
+    d &= ~((1u << 21) | (1u << 22) | (1u << 28) | (1u << 29) | (1u << 31));
+    if (!(vm->vmflags & AVM_VMF_APIC))
+      d &= ~(1u << 9); // APIC local: solo si el VMM lo emula (AVM_SET_FLAGS)
     b = (b & 0x0000FFFFu) | (1u << 16); // sin APIC id, 1 logico
     break;
   case 4:
@@ -810,7 +812,10 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
   case 0x277: // PAT: se recuerda pero no se aplica (F2: PAT del huesped)
     if (write) vm->pat = val; else out = vm->pat;
     break;
-  case 0x1B:  // APIC_BASE: sin APIC en F1
+  case 0x1B:  // APIC_BASE: el VMM emula el LAPIC en 0xFEE00000 (BSP, activado)
+    if (!write && (vm->vmflags & AVM_VMF_APIC))
+      out = 0xFEE00900ULL;
+    break;
   case 0x3A:  // FEATURE_CONTROL
   case 0x8B:  // microcode
   case 0x1A0: // MISC_ENABLE
@@ -1429,6 +1434,9 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     return 0;
   case AVM_SET_TIMEOUT:
     vm->timeout_ms = (uint32_t)arg;
+    return 0;
+  case AVM_SET_FLAGS:
+    vm->vmflags = (uint32_t)arg & AVM_VMF_ALL;
     return 0;
   }
   return -ENOTTY;

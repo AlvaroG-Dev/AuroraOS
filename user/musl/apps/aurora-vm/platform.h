@@ -189,6 +189,9 @@ static uint16_t g_blk_cmd;
 static uint32_t g_ide_bar4;
 static uint16_t g_ide_cmd;
 static int g_ide_on; // IDE PIIX (00:01.1) + puente ISA PIIX3 (00:01.0)
+static int g_acpi_on; // PM PIIX4 (00:01.3) + puente ISA: SeaBIOS genera las tablas ACPI
+static int g_poweroff;
+static uint8_t g_pm_cfg[256];
 
 static int g_disk_fd = -1;
 static uint64_t g_disk_sectors;
@@ -250,12 +253,25 @@ static void pci_init(void) {
   put16(g_ide_cfg + 0x2E, 0x1100);
   g_ide_bar4 = 0;
   g_ide_cmd = 0;
+  // PIIX4 PM (00:01.3): reloj, eventos ACPI y apagado
+  memset(g_pm_cfg, 0, sizeof(g_pm_cfg));
+  put16(g_pm_cfg + 0x00, 0x8086);
+  put16(g_pm_cfg + 0x02, 0x7113);
+  put16(g_pm_cfg + 0x04, 0x0000);
+  g_pm_cfg[0x08] = 0x03;
+  g_pm_cfg[0x0A] = 0x80;
+  g_pm_cfg[0x0B] = 0x06;
+  g_pm_cfg[0x3D] = 0x01;
+  g_pm_cfg[0x3C] = 0x09;
+  put16(g_pm_cfg + 0x2C, 0x1AF4);
+  put16(g_pm_cfg + 0x2E, 0x1100);
   memset(&g_vb, 0, sizeof(g_vb));
 }
 
 static uint8_t *pci_cfg_for(unsigned dev, unsigned fn) {
   if (dev == 0 && fn == 0) return g_host_cfg;
-  if (dev == 1 && fn == 0 && g_ide_on) return g_isa_cfg;
+  if (dev == 1 && fn == 0 && (g_ide_on || g_acpi_on)) return g_isa_cfg;
+  if (dev == 1 && fn == 3 && g_acpi_on) return g_pm_cfg;
   if (dev == 1 && fn == 1 && g_ide_on) return g_ide_cfg;
   if (dev == 3 && fn == 0 && g_disk_fd >= 0) return g_blk_cfg;
   return NULL;
@@ -289,6 +305,9 @@ static void pci_cfg_put(unsigned dev, unsigned fn, unsigned off, uint8_t v) {
   } else if (c == g_isa_cfg) {
     if (off >= 0x40 || off == 0x04 || off == 0x05)
       g_isa_cfg[off] = v;
+  } else if (c == g_pm_cfg) {
+    if (off >= 0x40 || off == 0x04 || off == 0x05 || off == 0x3C)
+      g_pm_cfg[off] = v;
   } else if (c == g_ide_cfg) {
     if (off >= 0x20 && off < 0x24) {
       unsigned sh = (off - 0x20) * 8;
@@ -932,6 +951,68 @@ static void ide_bm_out(unsigned off, uint32_t v, int size) {
 }
 
 // ---------------------------------------------------------------------------
+// PIIX4 PM (ACPI): PM1 (estado/habilitacion/control), temporizador de 3,58 MHz,
+// GPE0, SMI_CMD (0xB2: 0xF1 activa ACPI, 0xF0 lo desactiva) y apagado S5.
+// ---------------------------------------------------------------------------
+#define PM_REGS 0x40u
+static struct { uint16_t sts, en, cnt, gpe_sts, gpe_en; int sci; } g_pm;
+
+static unsigned pm_base(void) {
+  if (!g_acpi_on || !(g_pm_cfg[0x80] & 1))
+    return 0;
+  uint32_t b;
+  memcpy(&b, g_pm_cfg + 0x40, 4);
+  return b & 0xFFC0u;
+}
+
+static void pm_sci_update(void) {
+  int want = (g_pm.cnt & 1) && ((g_pm.sts & g_pm.en) || (g_pm.gpe_sts & g_pm.gpe_en));
+  if (want != g_pm.sci) {
+    g_pm.sci = want;
+    if (want)
+      pic_raise(9);
+    else
+      pic_lower(9);
+  }
+}
+
+static uint32_t pm_tmr(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  __uint128_t ns = (__uint128_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+  return (uint32_t)((ns * 3579545u / 1000000000ULL) & 0xFFFFFF);
+}
+
+static uint32_t pm_in(unsigned off, int size) {
+  uint8_t b[PM_REGS];
+  memset(b, 0, sizeof(b));
+  put16(b + 0, g_pm.sts);
+  put16(b + 2, g_pm.en);
+  put16(b + 4, g_pm.cnt);
+  put32(b + 8, pm_tmr());
+  uint32_t v = 0;
+  if (off + (unsigned)size <= sizeof(b))
+    memcpy(&v, b + off, (size_t)size);
+  return v;
+}
+
+static void pm_out(unsigned off, uint32_t v, int size) {
+  if (off == 0 && size >= 2) {
+    g_pm.sts &= (uint16_t)~v; // escribir 1 limpia
+  } else if (off == 2 && size >= 2) {
+    g_pm.en = (uint16_t)v;
+  } else if (off == 4 && size >= 2) {
+    g_pm.cnt = (uint16_t)(v & ~0x2000u);
+    if (v & 0x2000) { // SLP_EN
+      unsigned typ = (v >> 10) & 7;
+      if (typ == 0 || typ == 5) // _S5 (QEMU usa SLP_TYP=0)
+        g_poweroff = 1;
+    }
+  }
+  pm_sci_update();
+}
+
+// ---------------------------------------------------------------------------
 // Puertos de la plataforma. Devuelve 1 si el puerto es de la plataforma.
 // ---------------------------------------------------------------------------
 static int plat_in(uint16_t port, int size, uint32_t *v) {
@@ -944,13 +1025,25 @@ static int plat_in(uint16_t port, int size, uint32_t *v) {
   if (port == 0xCF8) { *v = g_pci_addr; return 1; }
   if (port >= 0xCFC && port <= 0xCFF) { *v = pci_data_in(port, size); return 1; }
   if (vb_io_base_ok(port)) { *v = vb_in(port - vb_base(), size); return 1; }
+  if (g_acpi_on) {
+    unsigned pb = pm_base();
+    if (pb && port >= pb && port < pb + PM_REGS) { *v = pm_in(port - pb, size); return 1; }
+    if (port >= 0xAFE0 && port <= 0xAFE3) {
+      uint32_t w = (uint32_t)g_pm.gpe_sts | ((uint32_t)g_pm.gpe_en << 16);
+      *v = (w >> (8 * (port - 0xAFE0))) & (size == 1 ? 0xFFu : size == 2 ? 0xFFFFu : 0xFFFFFFFFu);
+      return 1;
+    }
+    if ((port >= 0xAE00 && port <= 0xAE17) || port == 0xB2 || port == 0xB3) { *v = 0; return 1; }
+  }
+  if (g_ide_on || g_acpi_on) {
+    if (port == 0x4D0 || port == 0x4D1) { *v = 0; return 1; }
+  }
   if (g_ide_on) {
     if (port >= 0x1F0 && port <= 0x1F7) { *v = ide_reg_in(&g_ide[0], port - 0x1F0, size); return 1; }
     if (port == 0x3F6) { *v = ide_reg_in(&g_ide[0], 8, size); return 1; }
     if (port >= 0x170 && port <= 0x177) { *v = ide_reg_in(&g_ide[1], port - 0x170, size); return 1; }
     if (port == 0x376) { *v = ide_reg_in(&g_ide[1], 8, size); return 1; }
     if (ide_bm_ok(port)) { *v = ide_bm_in(port - ide_bm_base(), size); return 1; }
-    if (port == 0x4D0 || port == 0x4D1) { *v = 0; return 1; }
   }
   if (port == 0x402 || port == 0xE9) { *v = 0xE9; return 1; }
   return 0;
@@ -968,13 +1061,31 @@ static int plat_out(uint16_t port, uint32_t v, int size) {
   if (port == 0xCF9) { if (v & 4) g_reset_req = 1; return 1; }
   if (port >= 0xCFC && port <= 0xCFF) { pci_data_out(port, v, size); return 1; }
   if (vb_io_base_ok(port)) { vb_out(port - vb_base(), v, size); return 1; }
+  if (g_acpi_on) {
+    unsigned pb = pm_base();
+    if (pb && port >= pb && port < pb + PM_REGS) { pm_out(port - pb, v, size); return 1; }
+    if (port == 0xAFE0 || port == 0xAFE1 || port == 0xAFE2) {
+      if (size >= 2 && port == 0xAFE0) g_pm.gpe_sts &= (uint16_t)~v;
+      if (port == 0xAFE2) g_pm.gpe_en = (uint16_t)v;
+      pm_sci_update();
+      return 1;
+    }
+    if (port == 0xB2) {
+      if ((v & 0xFF) == 0xF1) g_pm.cnt |= 1;
+      else if ((v & 0xFF) == 0xF0) g_pm.cnt &= (uint16_t)~1;
+      pm_sci_update();
+      return 1;
+    }
+  }
+  if (g_ide_on || g_acpi_on) {
+    if (port == 0x4D0 || port == 0x4D1) return 1;
+  }
   if (g_ide_on) {
     if (port >= 0x1F0 && port <= 0x1F7) { ide_reg_out(&g_ide[0], port - 0x1F0, v, size); return 1; }
     if (port == 0x3F6) { ide_reg_out(&g_ide[0], 8, v, size); return 1; }
     if (port >= 0x170 && port <= 0x177) { ide_reg_out(&g_ide[1], port - 0x170, v, size); return 1; }
     if (port == 0x376) { ide_reg_out(&g_ide[1], 8, v, size); return 1; }
     if (ide_bm_ok(port)) { ide_bm_out(port - ide_bm_base(), v, size); return 1; }
-    if (port == 0x4D0 || port == 0x4D1) return 1;
   }
   if (port == 0x402 || port == 0xE9) {
     if (g_bios_log)

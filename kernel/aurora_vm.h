@@ -19,6 +19,10 @@
 
 #define AVM_SET_DEBUG (AVM_IOC_BASE + 8)   // flags (por valor): bit0 = interceptar #UD/#DF/#GP/#PF y registrarlos en el log del kernel
 
+#define AVM_SET_FLAGS (AVM_IOC_BASE + 9)   // AVM_VMF_* (por valor)
+#define AVM_VMF_APIC (1u << 0)             // CPUID anuncia el APIC local y IA32_APIC_BASE = 0xFEE00900 (el VMM emula el LAPIC por MMIO)
+#define AVM_VMF_ALL (AVM_VMF_APIC)
+
 #define AVM_CAP_VMX (1u << 0)
 #define AVM_CAP_EPT (1u << 1)
 #define AVM_CAP_UNRESTRICTED (1u << 2) // modo real / paginacion sin sombras

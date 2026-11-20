@@ -10,8 +10,9 @@
 //   aurora-vm --caps                 que ofrece la CPU (VMX, EPT, ...)
 //   aurora-vm --autotest             tres guests incorporados (real, modo largo+MMIO, temporizador)
 //   aurora-vm --plano FICH [--en DIR] [--mem MiB]
+//   aurora-vm --bios-test-acpi       igual con ACPI + LAPIC/IOAPIC (F3c)
 //   aurora-vm --bios-test            SeaBIOS + virtio-blk + sector de arranque incorporado (F3a)
-//   aurora-vm --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios]
+//   aurora-vm --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios] [--sin-acpi]
 //   aurora-vm PROGRAMA.exe           (aurora-run lo llama asi; aun sin huesped)
 // Puertos: 0x3F8 serie -> stdout, 0xF4 termina con el codigo escrito.
 #define _GNU_SOURCE
@@ -43,6 +44,7 @@ static int g_echo = 1;
 static int g_debug = 1; // intercepta excepciones del huesped y las registra (dmesg [VMX])
 
 #include "platform.h"
+#include "apic.h"
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -75,11 +77,27 @@ static int pic_pending(const struct pic *p) {
   return -1;
 }
 
-static void pic_raise(int irq) {
+static void pic_set_irr(int irq) {
   if (irq < 8)
     g_pic[0].irr |= (uint8_t)(1u << irq);
   else
     g_pic[1].irr |= (uint8_t)(1u << (irq - 8));
+}
+
+// Linea ISA que se activa (nivel alto) y se mantiene hasta pic_lower.
+static void pic_raise(int irq) {
+  pic_set_irr(irq);
+  if (g_apic_on)
+    ioapic_line(irq, 1);
+}
+
+// Pulso (fuentes por flanco, como el PIT).
+static void pic_pulse(int irq) {
+  pic_set_irr(irq);
+  if (g_apic_on) {
+    ioapic_line(irq, 1);
+    ioapic_line(irq, 0);
+  }
 }
 
 static void pic_lower(int irq) {
@@ -87,6 +105,8 @@ static void pic_lower(int irq) {
     g_pic[0].irr &= (uint8_t)~(1u << irq);
   else
     g_pic[1].irr &= (uint8_t)~(1u << (irq - 8));
+  if (g_apic_on)
+    ioapic_line(irq, 0);
 }
 
 // Vector de la IRQ pendiente (sin aceptarla) o -1.
@@ -245,7 +265,7 @@ static uint8_t pit_read(uint16_t port) {
 static void pit_poll(uint64_t now) {
   if (!g_pit.running || now < g_pit.next_ns)
     return;
-  pic_raise(0);
+  pic_pulse(0);
   g_pit.next_ns += g_pit.period_ns * (1 + (now - g_pit.next_ns) / g_pit.period_ns);
 }
 
@@ -316,9 +336,15 @@ static void io_out(uint16_t port, uint32_t v, int size) {
 }
 
 static int mmio_known(uint64_t gpa) {
+  if (g_plat) // BIOS: lo que no es RAM ni LAPIC/IOAPIC se lee como 1s y se ignora
+    return gpa >= g_ram_size;
   return gpa >= MMIO_TEST_BASE && gpa < MMIO_TEST_BASE + sizeof(g_mmio_test);
 }
 static uint64_t mmio_read(uint64_t gpa, int size) {
+  if (apic_mmio_hit(gpa))
+    return apic_mmio_read(gpa, size);
+  if (g_plat)
+    return size == 1 ? 0xFF : size == 2 ? 0xFFFF : size == 4 ? 0xFFFFFFFFULL : ~0ULL;
   uint64_t off = gpa - MMIO_TEST_BASE, v = 0;
   if (off == 0)
     return 0xA0A0A0A0ULL;
@@ -326,6 +352,12 @@ static uint64_t mmio_read(uint64_t gpa, int size) {
   return v;
 }
 static void mmio_write(uint64_t gpa, int size, uint64_t v) {
+  if (apic_mmio_hit(gpa)) {
+    apic_mmio_write(gpa, size, v);
+    return;
+  }
+  if (g_plat)
+    return;
   uint64_t off = gpa - MMIO_TEST_BASE;
   if (off + (uint64_t)size <= sizeof(g_mmio_test) && off >= 4)
     memcpy(g_mmio_test + off, &v, (size_t)size);
@@ -605,11 +637,26 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
       fprintf(stderr, "aurora-vm: el huesped pidio reiniciar\n");
       return 0;
     }
-    pit_poll(now_ns());
-    int which, line;
-    int vec = pic_peek(&which, &line);
-    if (vec >= 0 && ioctl(g_vm, AVM_INJECT_IRQ, vec) == 0)
-      pic_accept(which, line);
+    {
+      uint64_t tnow = now_ns();
+      pit_poll(tnow);
+      if (g_apic_on)
+        lapic_poll(tnow);
+    }
+    if (g_poweroff) {
+      fprintf(stderr, "aurora-vm: el huesped se apago (ACPI)\n");
+      return 0;
+    }
+    int which = 0, line = 0, vec = -1;
+    int lv = g_apic_on ? lapic_deliverable() : -1;
+    if (lv >= 0) {
+      if (ioctl(g_vm, AVM_INJECT_IRQ, lv) == 0)
+        lapic_accept(lv);
+    } else {
+      vec = pic_peek(&which, &line);
+      if (vec >= 0 && ioctl(g_vm, AVM_INJECT_IRQ, vec) == 0)
+        pic_accept(which, line);
+    }
     if (ioctl(g_vm, AVM_RUN, &x) < 0) {
       perror("AVM_RUN");
       return 1;
@@ -636,7 +683,12 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
       ioctl(g_vm, AVM_GET_REGS, &hr);
       if (!(hr.rflags & (1u << 9)))
         return 0; // HLT con IF=0: el huesped termino
-      if (!g_pit.running) {
+      uint64_t wake = ~0ULL;
+      if (g_pit.running)
+        wake = g_pit.next_ns;
+      if (g_apic_on && g_lt_running && g_lt_deadline < wake)
+        wake = g_lt_deadline;
+      if (wake == ~0ULL) {
         if (g_plat) { // BIOS: puede estar esperando una E/S del VMM; no terminar
           struct timespec ts = {0, 1000000};
           nanosleep(&ts, NULL);
@@ -645,8 +697,8 @@ static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
         return 0; // nada puede despertarlo
       }
       uint64_t t = now_ns();
-      if (g_pit.next_ns > t) {
-        struct timespec ts = {0, (long)(g_pit.next_ns - t)};
+      if (wake > t) {
+        struct timespec ts = {0, (long)(wake - t)};
         nanosleep(&ts, NULL);
       }
       break;
@@ -777,7 +829,7 @@ static int autotest(void) {
 #define DEFAULT_BIOS "/usr/share/aurora/vm/bios.bin"
 
 static int run_bios(const char *bios_path, const char *disk_path, const char *ide_path,
-                    unsigned mem_mb, unsigned timeout_s) {
+                    unsigned mem_mb, unsigned timeout_s, int acpi) {
   if (mem_mb < 16 || mem_mb > 3072) {
     fprintf(stderr, "aurora-vm: --mem debe estar entre 16 y 3072 MiB\n");
     return 1;
@@ -834,6 +886,11 @@ static int run_bios(const char *bios_path, const char *disk_path, const char *id
     if (g_ide_ro)
       fprintf(stderr, "aurora-vm: aviso: disco IDE abierto solo lectura\n");
   }
+  g_acpi_on = g_apic_on = acpi;
+  g_poweroff = 0;
+  memset(&g_pm, 0, sizeof(g_pm));
+  lapic_reset();
+  ioapic_reset();
   pic_reset();
   pit_reset();
   // El PIT cuenta solo desde el encendido (65536 ciclos): SeaBIOS lo lee como
@@ -895,11 +952,13 @@ static int run_bios(const char *bios_path, const char *disk_path, const char *id
     perror("AVM_SET_REGS");
     return 1;
   }
+  if (acpi && ioctl(g_vm, AVM_SET_FLAGS, AVM_VMF_APIC) < 0)
+    perror("AVM_SET_FLAGS (kernel antiguo sin soporte de APIC?)");
   uint64_t deadline = timeout_s ? now_ns() + (uint64_t)timeout_s * 1000000000ULL : 0;
   return run_loop(0xFFFFFFFFu, deadline);
 }
 
-static int bios_test(void) {
+static int bios_test(int acpi) {
   char path[] = "/tmp/aurora-vm-f3-XXXXXX";
   int fd = mkstemp(path);
   if (fd < 0) {
@@ -922,12 +981,12 @@ static int bios_test(void) {
     perror("ftruncate");
   close(fd);
   g_echo = 0;
-  int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, NULL, 32, 60);
+  int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, NULL, 32, 60, acpi);
   unlink(path);
   g_out[g_out_n] = 0;
   const char *expect = "MBR arrancado desde SeaBIOS\nDisco OK\n";
   int ok = rc == 0 && strcmp(g_out, expect) == 0;
-  printf("[%s] SeaBIOS + virtio-blk + sector de arranque\n", ok ? "OK" : "FALLA");
+  printf("[%s] SeaBIOS + virtio-blk + sector de arranque%s\n", ok ? "OK" : "FALLA", acpi ? " + ACPI/LAPIC/IOAPIC" : "");
   if (!ok)
     printf("   rc=%d salida=\"%s\"\n", rc, g_out);
   return ok ? 0 : 1;
@@ -936,7 +995,7 @@ static int bios_test(void) {
 int main(int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr, "Uso: aurora-vm --caps | --autotest | --bios-test | --plano FICH [--en DIR] [--mem MiB] |\n"
-          "       --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios] | PROGRAMA.exe\n");
+          "       --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios] [--sin-acpi] | PROGRAMA.exe\n");
     return 2;
   }
   if (!strcmp(argv[1], "--caps"))
@@ -944,14 +1003,19 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "--autotest"))
     return autotest();
   if (!strcmp(argv[1], "--bios-test"))
-    return bios_test();
+    return bios_test(0);
+  if (!strcmp(argv[1], "--bios-test-acpi"))
+    return bios_test(1);
   if (!strcmp(argv[1], "--bios")) {
     const char *rom = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS;
     const char *disk = NULL, *ide = NULL;
     unsigned mem = 128, tmo = 0;
+    int acpi = 1;
     for (int i = 2; i < argc; i++) {
       if (!strcmp(argv[i], "--log-bios"))
         g_bios_log = 1;
+      else if (!strcmp(argv[i], "--sin-acpi"))
+        acpi = 0;
       else if (i + 1 < argc && !strcmp(argv[i], "--rom"))
         rom = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--disco"))
@@ -967,7 +1031,7 @@ int main(int argc, char **argv) {
         return 2;
       }
     }
-    return run_bios(rom, disk, ide, mem, tmo);
+    return run_bios(rom, disk, ide, mem, tmo, acpi);
   }
   if (!strcmp(argv[1], "--plano") && argc >= 3) {
     uint64_t at = 0x1000;
