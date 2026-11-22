@@ -1,57 +1,82 @@
-// vga.h — tarjeta VGA estandar (Bochs/QEMU "stdvga", 1234:1111) de la mini-VM (F3d).
+// vga.h — tarjeta VGA estandar (Bochs/QEMU "stdvga", PCI 1234:1111) de la mini-VM.
 //
-// SeaVGABIOS (third_party/seabios/vgabios.bin) se carga desde la ROM de expansion
-// del dispositivo PCI (00:02.0) y da el int 10h. Modelo deliberadamente simple:
-//   - 0xA0000-0xBFFFF es RAM normal del huesped (sin salidas): sirve el texto
-//     (0xB8000, la fuente va en 0xA0000 + car*32, como el plano 2) y el modo 13h.
-//     Los modos graficos planares de 16 colores NO estan soportados todavia.
-//   - Modos VBE por el BAR0 (lineal, 16 MiB, un memfd mapeado por el EPT): 8/15/16/24/32
-//     bits, con los registros Bochs (puertos 0x1CE/0x1CF).
-//   - El VMM dibuja el fotograma leyendo esa memoria (vga_render).
+// Reproduce el comportamiento de la VGA de QEMU (hw/display/vga.c), que es lo que
+// esperan SeaVGABIOS, el bootvid de Windows/ReactOS y sus drivers VGA/VBE:
+//   - VRAM de 16 MiB = el memfd del BAR0 (LFB). En modo planar el byte del plano p
+//     de la direccion a esta en vram[a*4 + p] (como QEMU).
+//   - 0xA0000-0xBFFFF nunca es RAM: cada acceso sale al VMM (insn.h) y pasa por
+//     vga_mem_readb/writeb: chain4, par/impar, modos de escritura 0-3, operaciones
+//     logicas, set/reset, mascara de bits, latches, modos de lectura 0/1, banco VBE.
+//   - Puertos 0x3B4/0x3B5/0x3BA, 0x3C0-0x3CF, 0x3D4/0x3D5/0x3DA (por bytes) y los
+//     registros Bochs VBE en 0x1CE/0x1CF.
+//   - Dibujo: texto (fuente del plano 2, atributos, cursor), graficos de 2/4/8 bits
+//     planares o encadenados (CGA, doble escaneo, line compare) y VBE de 4/8/15/16/24/32.
 #ifndef AVM_VGA_H
 #define AVM_VGA_H
 
-#define VGA_LFB_SIZE (16u << 20)
+#define VGA_LFB_SIZE (16u << 20) // = VRAM
 #define VGA_ROM_SIZE 0x10000u
+#define VBE_MAX_XRES 16000
+#define VBE_MAX_YRES 12000
 
 static int g_vga_on;
 static uint8_t g_vga_cfg[256];
 static uint32_t g_vga_bar0, g_vga_rom;
 static uint16_t g_vga_cmd;
-static uint8_t *g_lfb;
+static uint8_t *g_lfb; // VRAM
 static uint8_t *g_vrom;
 static int g_vga_lfb_fd = -1, g_vga_rom_fd = -1;
 static uint64_t g_vga_lfb_gpa, g_vga_rom_gpa;
 
-static uint8_t v_crtc[0x19], v_seq[5], v_gc[9], v_atc[0x15], v_misc;
-static unsigned v_crtc_i, v_seq_i, v_gc_i, v_atc_i, v_atc_ff;
-static uint8_t v_dac[256][3];
-static unsigned v_dac_rd, v_dac_wr, v_dac_rsub, v_dac_wsub;
-static uint8_t v_dac_mask;
-static uint16_t v_dispi[11], v_dispi_idx;
-static uint64_t v_retrace_t0;
+static struct {
+  uint8_t sr[8], sr_vbe[8], gr[16], ar[0x15], cr[256];
+  uint8_t sr_index, gr_index, ar_index, cr_index, ar_flip_flop;
+  uint8_t msr, fcr, st00, st01;
+  uint8_t dac_state, dac_sub_index, dac_read_index, dac_write_index, dac_cache[3], dac_8bit;
+  uint8_t palette[768];
+  uint32_t latch;
+  uint32_t bank_offset;
+  uint16_t vbe_index, vbe_regs[10];
+  uint32_t vbe_start_addr, vbe_line_offset;
+} V;
+
+static const uint8_t vga_sr_mask[8] = {0x03, 0x3d, 0x0f, 0x3f, 0x0e, 0x00, 0x00, 0xff};
+static const uint8_t vga_gr_mask[16] = {0x0f, 0x0f, 0x0f, 0x1f, 0x03, 0x7b, 0x0f, 0x0f,
+                                        0xff, 0, 0, 0, 0, 0, 0, 0};
+static const uint32_t vga_mask16[16] = {
+    0x00000000, 0x000000ff, 0x0000ff00, 0x0000ffff, 0x00ff0000, 0x00ff00ff, 0x00ffff00, 0x00ffffff,
+    0xff000000, 0xff0000ff, 0xff00ff00, 0xff00ffff, 0xffff0000, 0xffff00ff, 0xffffff00, 0xffffffff};
+static uint32_t vga_expand4[256];
+static uint16_t vga_expand2[256];
+static uint8_t vga_expand4to8[16];
 
 static void vga_remap(void);
 
+static int vbe_enabled(void) { return V.vbe_regs[4] & 1; }
+static uint8_t vga_sr(int i) { return vbe_enabled() ? V.sr_vbe[i] : V.sr[i]; }
+
 static void vga_reset(void) {
-  memset(v_crtc, 0, sizeof(v_crtc));
-  memset(v_seq, 0, sizeof(v_seq));
-  memset(v_gc, 0, sizeof(v_gc));
-  memset(v_atc, 0, sizeof(v_atc));
-  memset(v_dac, 0, sizeof(v_dac));
-  v_misc = 0;
-  v_crtc_i = v_seq_i = v_gc_i = v_atc_i = v_atc_ff = 0;
-  v_dac_rd = v_dac_wr = v_dac_rsub = v_dac_wsub = 0;
-  v_dac_mask = 0xFF;
-  memset(v_dispi, 0, sizeof(v_dispi));
-  v_dispi[0] = 0xB0C5;
-  v_dispi[1] = 640;
-  v_dispi[2] = 480;
-  v_dispi[3] = 8;
-  v_dispi[6] = 640;
-  v_dispi[7] = 480;
-  v_dispi[0xA] = (uint16_t)(VGA_LFB_SIZE >> 16);
-  v_dispi_idx = 0;
+  memset(&V, 0, sizeof(V));
+  V.vbe_regs[0] = 0xB0C5;
+  for (int i = 0; i < 256; i++) {
+    uint32_t v = 0;
+    for (int j = 0; j < 8; j++)
+      v |= (uint32_t)((i >> j) & 1) << (j * 4);
+    vga_expand4[i] = v;
+    v = 0;
+    for (int j = 0; j < 4; j++)
+      v |= (uint32_t)((i >> (2 * j)) & 3) << (j * 4);
+    vga_expand2[i] = (uint16_t)v;
+  }
+  for (int i = 0; i < 16; i++) {
+    unsigned v = 0;
+    for (int j = 0; j < 4; j++) {
+      unsigned b = (i >> j) & 1;
+      v |= b << (2 * j);
+      v |= b << (2 * j + 1);
+    }
+    vga_expand4to8[i] = (uint8_t)v;
+  }
   g_vga_lfb_gpa = g_vga_rom_gpa = 0;
   g_vga_bar0 = g_vga_rom = 0;
   g_vga_cmd = 0;
@@ -119,153 +144,440 @@ static void vga_remap(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Puertos
+// Registros Bochs VBE
 // ---------------------------------------------------------------------------
-static int vga_dac8(void) { return v_dispi[4] & 0x20; }
-
-static int vga_port_ours(uint16_t p) {
-  return (p >= 0x3C0 && p <= 0x3CF) || p == 0x3B4 || p == 0x3B5 || p == 0x3BA || p == 0x3D4 ||
-         p == 0x3D5 || p == 0x3DA || p == 0x1CE || p == 0x1CF;
+static void vbe_fixup_regs(void) {
+  uint16_t *r = V.vbe_regs;
+  uint32_t bits, linelength, maxy, offset;
+  if (!vbe_enabled())
+    return;
+  switch (r[3]) {
+  case 4: case 8: case 16: case 24: case 32: bits = r[3]; break;
+  case 15: bits = 16; break;
+  default: bits = r[3] = 8; break;
+  }
+  r[1] &= (uint16_t)~7u;
+  if (!r[1]) r[1] = 8;
+  if (r[1] > VBE_MAX_XRES) r[1] = VBE_MAX_XRES;
+  r[6] &= (uint16_t)~7u;
+  if (r[6] > VBE_MAX_XRES) r[6] = VBE_MAX_XRES;
+  if (r[6] < r[1]) r[6] = r[1];
+  linelength = (uint32_t)r[6] * bits / 8;
+  maxy = VGA_LFB_SIZE / linelength;
+  if (!r[2]) r[2] = 1;
+  if (r[2] > VBE_MAX_YRES) r[2] = VBE_MAX_YRES;
+  if (r[2] > maxy) r[2] = (uint16_t)maxy;
+  if (r[8] > VBE_MAX_XRES) r[8] = VBE_MAX_XRES;
+  if (r[9] > VBE_MAX_YRES) r[9] = VBE_MAX_YRES;
+  offset = (uint32_t)r[8] * bits / 8 + (uint32_t)r[9] * linelength;
+  if (offset + (uint32_t)r[2] * linelength > VGA_LFB_SIZE) {
+    r[9] = 0;
+    offset = (uint32_t)r[8] * bits / 8;
+    if (offset + (uint32_t)r[2] * linelength > VGA_LFB_SIZE) {
+      r[8] = 0;
+      offset = 0;
+    }
+  }
+  r[7] = (uint16_t)(maxy > 0xFFFF ? 0xFFFF : maxy);
+  V.vbe_line_offset = linelength;
+  V.vbe_start_addr = offset / 4;
 }
 
-static void vga_out1(uint16_t port, uint8_t v) {
-  switch (port) {
-  case 0x3C0:
-    if (!v_atc_ff) {
-      v_atc_i = v & 0x1F;
-    } else if (v_atc_i < sizeof(v_atc)) {
-      v_atc[v_atc_i] = v;
+static void vbe_update_vgaregs(void) {
+  if (!vbe_enabled())
+    return;
+  V.gr[6] = (uint8_t)((V.gr[6] & ~0x0c) | 0x04 | 1);
+  V.cr[0x17] |= 3;
+  V.cr[0x13] = (uint8_t)(V.vbe_line_offset >> 3);
+  V.cr[0x01] = (uint8_t)((V.vbe_regs[1] >> 3) - 1);
+  int h = V.vbe_regs[2] - 1;
+  V.cr[0x12] = (uint8_t)h;
+  V.cr[0x07] = (uint8_t)((V.cr[0x07] & ~0x42) | ((h >> 7) & 0x02) | ((h >> 3) & 0x40));
+  V.cr[0x18] = 0xff;
+  V.cr[0x07] |= 0x10;
+  V.cr[0x09] |= 0x40;
+  int shift_control;
+  if (V.vbe_regs[3] == 4) {
+    shift_control = 0;
+    V.sr_vbe[1] &= (uint8_t)~8;
+  } else {
+    shift_control = 2;
+    V.sr_vbe[4] |= 0x08; // chain 4
+    V.sr_vbe[2] |= 0x0F; // todos los planos
+  }
+  V.gr[5] = (uint8_t)((V.gr[5] & ~0x60) | (shift_control << 5));
+  V.cr[0x09] &= (uint8_t)~0x9f;
+}
+
+static uint16_t vbe_read_data(void) {
+  unsigned i = V.vbe_index;
+  if (i < 10) {
+    if (V.vbe_regs[4] & 2) {
+      if (i == 1) return VBE_MAX_XRES;
+      if (i == 2) return VBE_MAX_YRES;
+      if (i == 3) return 32;
     }
-    v_atc_ff ^= 1;
+    return V.vbe_regs[i];
+  }
+  if (i == 10)
+    return (uint16_t)(VGA_LFB_SIZE >> 16);
+  return 0;
+}
+
+static void vbe_write_data(uint16_t val) {
+  unsigned i = V.vbe_index;
+  if (i > 10)
+    return;
+  switch (i) {
+  case 0:
+    if (val >= 0xB0C0 && val <= 0xB0C5)
+      V.vbe_regs[0] = val;
     break;
-  case 0x3C2: v_misc = v; break;
-  case 0x3C4: v_seq_i = v; break;
-  case 0x3C5: if (v_seq_i < sizeof(v_seq)) v_seq[v_seq_i] = v; break;
-  case 0x3C6: v_dac_mask = v; break;
-  case 0x3C7: v_dac_rd = v; v_dac_rsub = 0; break;
-  case 0x3C8: v_dac_wr = v; v_dac_wsub = 0; break;
-  case 0x3C9: {
-    uint8_t c = vga_dac8() ? v : (uint8_t)(((v & 0x3F) << 2) | ((v & 0x3F) >> 4));
-    v_dac[v_dac_wr & 0xFF][v_dac_wsub] = c;
-    if (++v_dac_wsub == 3) { v_dac_wsub = 0; v_dac_wr++; }
+  case 1: case 2: case 3: case 6: case 8: case 9:
+    V.vbe_regs[i] = val;
+    vbe_fixup_regs();
+    vbe_update_vgaregs();
+    break;
+  case 5:
+    val &= (uint16_t)((VGA_LFB_SIZE >> 16) - 1);
+    V.vbe_regs[5] = val;
+    V.bank_offset = (uint32_t)val << 16;
+    break;
+  case 4:
+    if ((val & 1) && !(V.vbe_regs[4] & 1)) {
+      V.vbe_regs[6] = 0;
+      V.vbe_regs[8] = 0;
+      V.vbe_regs[9] = 0;
+      V.vbe_regs[4] |= 1;
+      vbe_fixup_regs();
+      vbe_update_vgaregs();
+      if (!(val & 0x80) && g_lfb) {
+        size_t n = (size_t)V.vbe_regs[2] * V.vbe_line_offset;
+        memset(g_lfb, 0, n > VGA_LFB_SIZE ? VGA_LFB_SIZE : n);
+      }
+    } else {
+      V.bank_offset = 0;
+    }
+    V.dac_8bit = (val & 0x20) != 0;
+    V.vbe_regs[4] = val;
+    break;
+  default:
     break;
   }
-  case 0x3CE: v_gc_i = v; break;
-  case 0x3CF: if (v_gc_i < sizeof(v_gc)) v_gc[v_gc_i] = v; break;
-  case 0x3B4: case 0x3D4: v_crtc_i = v; break;
-  case 0x3B5: case 0x3D5: if (v_crtc_i < sizeof(v_crtc)) v_crtc[v_crtc_i] = v; break;
+}
+
+// ---------------------------------------------------------------------------
+// Puertos VGA (por bytes, como QEMU)
+// ---------------------------------------------------------------------------
+static int vga_port_invalid(uint16_t a) {
+  if (V.msr & 1)
+    return a >= 0x3b0 && a <= 0x3bf; // color: los puertos mono no responden
+  return a >= 0x3d0 && a <= 0x3df;
+}
+
+static uint8_t vga_ioport_read(uint16_t a) {
+  if (vga_port_invalid(a))
+    return 0xff;
+  switch (a) {
+  case 0x3c0: return V.ar_flip_flop == 0 ? V.ar_index : 0;
+  case 0x3c1: { unsigned i = V.ar_index & 0x1f; return i < 0x15 ? V.ar[i] : 0; }
+  case 0x3c2: return V.st00;
+  case 0x3c4: return V.sr_index;
+  case 0x3c5: return V.sr[V.sr_index];
+  case 0x3c7: return V.dac_state;
+  case 0x3c8: return V.dac_write_index;
+  case 0x3c9: {
+    uint8_t v = V.palette[V.dac_read_index * 3 + V.dac_sub_index];
+    if (++V.dac_sub_index == 3) {
+      V.dac_sub_index = 0;
+      V.dac_read_index++;
+    }
+    return v;
+  }
+  case 0x3ca: return V.fcr;
+  case 0x3cc: return V.msr;
+  case 0x3ce: return V.gr_index;
+  case 0x3cf: return V.gr[V.gr_index];
+  case 0x3b4: case 0x3d4: return V.cr_index;
+  case 0x3b5: case 0x3d5: return V.cr[V.cr_index];
+  case 0x3ba: case 0x3da:
+    V.st01 ^= 0x09; // retrazo vertical / pantalla: alterna en cada lectura
+    V.ar_flip_flop = 0;
+    return V.st01;
+  default: return 0x00;
+  }
+}
+
+static void vga_ioport_write(uint16_t a, uint8_t val) {
+  if (vga_port_invalid(a))
+    return;
+  switch (a) {
+  case 0x3c0:
+    if (V.ar_flip_flop == 0) {
+      V.ar_index = val & 0x3f;
+    } else {
+      unsigned i = V.ar_index & 0x1f;
+      if (i <= 0x0f) V.ar[i] = val & 0x3f;
+      else if (i == 0x10) V.ar[i] = val & ~0x10;
+      else if (i == 0x11) V.ar[i] = val;
+      else if (i == 0x12) V.ar[i] = val & ~0xc0;
+      else if (i == 0x13) V.ar[i] = val & ~0xf0;
+      else if (i == 0x14) V.ar[i] = val & ~0xf0;
+    }
+    V.ar_flip_flop ^= 1;
+    break;
+  case 0x3c2: V.msr = val & ~0x10; break;
+  case 0x3c4: V.sr_index = val & 7; break;
+  case 0x3c5: V.sr[V.sr_index] = val & vga_sr_mask[V.sr_index]; break;
+  case 0x3c7: V.dac_read_index = val; V.dac_sub_index = 0; V.dac_state = 3; break;
+  case 0x3c8: V.dac_write_index = val; V.dac_sub_index = 0; V.dac_state = 0; break;
+  case 0x3c9:
+    V.dac_cache[V.dac_sub_index] = val;
+    if (++V.dac_sub_index == 3) {
+      memcpy(&V.palette[V.dac_write_index * 3], V.dac_cache, 3);
+      V.dac_sub_index = 0;
+      V.dac_write_index++;
+    }
+    break;
+  case 0x3ce: V.gr_index = val & 0x0f; break;
+  case 0x3cf:
+    V.gr[V.gr_index] = val & vga_gr_mask[V.gr_index];
+    vbe_update_vgaregs();
+    break;
+  case 0x3b4: case 0x3d4: V.cr_index = val; break;
+  case 0x3b5: case 0x3d5:
+    if ((V.cr[0x11] & 0x80) && V.cr_index <= 7) { // CR0-7 protegidos
+      if (V.cr_index == 7) {
+        V.cr[7] = (uint8_t)((V.cr[7] & ~0x10) | (val & 0x10));
+        vbe_update_vgaregs();
+      }
+      return;
+    }
+    V.cr[V.cr_index] = val;
+    vbe_update_vgaregs();
+    break;
+  case 0x3ba: case 0x3da: V.fcr = val & 0x10; break;
   default: break;
   }
 }
 
-static uint8_t vga_in1(uint16_t port) {
-  switch (port) {
-  case 0x3C0: return (uint8_t)v_atc_i;
-  case 0x3C1: return v_atc_i < sizeof(v_atc) ? v_atc[v_atc_i] : 0;
-  case 0x3C2: return 0;
-  case 0x3C4: return (uint8_t)v_seq_i;
-  case 0x3C5: return v_seq_i < sizeof(v_seq) ? v_seq[v_seq_i] : 0;
-  case 0x3C6: return v_dac_mask;
-  case 0x3C7: return 0;
-  case 0x3C8: return (uint8_t)v_dac_wr;
-  case 0x3C9: {
-    uint8_t c = v_dac[v_dac_rd & 0xFF][v_dac_rsub];
-    if (!vga_dac8()) c >>= 2;
-    if (++v_dac_rsub == 3) { v_dac_rsub = 0; v_dac_rd++; }
-    return c;
-  }
-  case 0x3CC: return v_misc;
-  case 0x3CE: return (uint8_t)v_gc_i;
-  case 0x3CF: return v_gc_i < sizeof(v_gc) ? v_gc[v_gc_i] : 0;
-  case 0x3B4: case 0x3D4: return (uint8_t)v_crtc_i;
-  case 0x3B5: case 0x3D5: return v_crtc_i < sizeof(v_crtc) ? v_crtc[v_crtc_i] : 0;
-  case 0x3BA: case 0x3DA: {
-    v_atc_ff = 0;
-    // Alterna retrazo vertical / pantalla activa: las esperas de la BIOS terminan.
-    uint64_t t = (now_ns() - v_retrace_t0) / 4000; // ~4 us por fase
-    return (uint8_t)(((t & 1) ? 1 : 0) | (((t >> 3) & 1) ? 8 : 0));
-  }
-  default: return 0;
-  }
+static int vga_port_ours(uint16_t p) {
+  return (p >= 0x3B4 && p <= 0x3B5) || p == 0x3BA || (p >= 0x3C0 && p <= 0x3CF) ||
+         (p >= 0x3D4 && p <= 0x3D5) || p == 0x3DA;
 }
 
-static void vga_dispi_write(uint16_t val) {
-  unsigned i = v_dispi_idx;
-  if (i > 10)
-    return;
-  switch (i) {
-  case 0: return; // ID solo lectura
-  case 1: case 2: case 6: case 7:
-    v_dispi[i] = val;
-    break;
-  case 3:
-    if (val == 4 || val == 8 || val == 15 || val == 16 || val == 24 || val == 32)
-      v_dispi[3] = val;
-    break;
-  case 4:
-    if ((val & 1) && !(val & 0x80)) { // al activar, limpia la memoria de video
-      size_t bytes = (size_t)v_dispi[2] * v_dispi[6] * ((v_dispi[3] + 7u) / 8u);
-      if (g_lfb && bytes > VGA_LFB_SIZE) bytes = VGA_LFB_SIZE;
-      if (g_lfb) memset(g_lfb, 0, bytes);
-    }
-    if (val & 1) { // la pantalla virtual por omision es la visible
-      if (!v_dispi[6] || v_dispi[6] < v_dispi[1]) v_dispi[6] = v_dispi[1];
-      if (!v_dispi[7] || v_dispi[7] < v_dispi[2]) v_dispi[7] = v_dispi[2];
-    }
-    v_dispi[4] = val;
-    break;
-  default:
-    v_dispi[i] = val;
-  }
-}
-
-static uint16_t vga_dispi_read(void) {
-  unsigned i = v_dispi_idx;
-  if (i > 10)
-    return 0;
-  if (v_dispi[4] & 2) { // GETCAPS: maximos
-    if (i == 1) return 2560;
-    if (i == 2) return 1600;
-    if (i == 3) return 32;
-  }
-  return v_dispi[i];
-}
-
+// Accesos de 16/32 bits: un byte por puerto consecutivo (como QEMU).
 static int vga_out(uint16_t port, uint32_t v, int size) {
-  if (!g_vga_on || !vga_port_ours(port))
+  if (!g_vga_on)
     return 0;
-  if (port == 0x1CE) { v_dispi_idx = (uint16_t)v; return 1; }
-  if (port == 0x1CF) { vga_dispi_write((uint16_t)v); return 1; }
-  vga_out1(port, (uint8_t)v);
-  if (size >= 2 && (port == 0x3C4 || port == 0x3CE || port == 0x3D4 || port == 0x3B4))
-    vga_out1((uint16_t)(port + 1), (uint8_t)(v >> 8));
+  if (port == 0x1CE || port == 0x1CF) {
+    if (port == 0x1CE)
+      V.vbe_index = (uint16_t)v;
+    else
+      vbe_write_data((uint16_t)v);
+    return 1;
+  }
+  if (!vga_port_ours(port))
+    return 0;
+  for (int i = 0; i < size; i++)
+    if (vga_port_ours((uint16_t)(port + i)))
+      vga_ioport_write((uint16_t)(port + i), (uint8_t)(v >> (8 * i)));
   return 1;
 }
 
 static int vga_in(uint16_t port, int size, uint32_t *v) {
-  if (!g_vga_on || !vga_port_ours(port))
+  if (!g_vga_on)
     return 0;
-  if (port == 0x1CE) { *v = v_dispi_idx; return 1; }
-  if (port == 0x1CF) { *v = vga_dispi_read(); return 1; }
-  *v = vga_in1(port);
-  if (size >= 2 && (port == 0x3C4 || port == 0x3CE || port == 0x3D4 || port == 0x3B4))
-    *v |= (uint32_t)vga_in1((uint16_t)(port + 1)) << 8;
+  if (port == 0x1CE || port == 0x1CF) {
+    *v = port == 0x1CE ? V.vbe_index : vbe_read_data();
+    return 1;
+  }
+  if (!vga_port_ours(port))
+    return 0;
+  uint32_t r = 0;
+  for (int i = 0; i < size; i++) {
+    uint8_t b = vga_port_ours((uint16_t)(port + i)) ? vga_ioport_read((uint16_t)(port + i)) : 0xff;
+    r |= (uint32_t)b << (8 * i);
+  }
+  *v = r;
   return 1;
 }
 
 // ---------------------------------------------------------------------------
-// Dibujo
+// Memoria 0xA0000-0xBFFFF
+// ---------------------------------------------------------------------------
+static uint8_t vga_mem_readb(uint32_t addr) {
+  int map = (V.gr[6] >> 2) & 3;
+  addr &= 0x1ffff;
+  switch (map) {
+  case 0: break;
+  case 1:
+    if (addr >= 0x10000) return 0xff;
+    addr += V.bank_offset;
+    break;
+  case 2:
+    addr -= 0x10000;
+    if (addr >= 0x8000) return 0xff;
+    break;
+  default:
+    addr -= 0x18000;
+    if (addr >= 0x8000) return 0xff;
+    break;
+  }
+  if (vga_sr(4) & 0x08) // chain 4
+    return addr < VGA_LFB_SIZE ? g_lfb[addr] : 0xff;
+  if (V.gr[5] & 0x10) { // par/impar (texto)
+    unsigned plane = (V.gr[4] & 2) | (addr & 1);
+    addr = ((addr & ~1u) << 1) | plane;
+    return addr < VGA_LFB_SIZE ? g_lfb[addr] : 0xff;
+  }
+  if ((uint64_t)addr * 4 >= VGA_LFB_SIZE)
+    return 0xff;
+  memcpy(&V.latch, g_lfb + (size_t)addr * 4, 4);
+  if (!(V.gr[5] & 0x08)) // modo de lectura 0
+    return (uint8_t)(V.latch >> ((V.gr[4] & 3) * 8));
+  uint32_t r = (V.latch ^ vga_mask16[V.gr[2]]) & vga_mask16[V.gr[7]]; // modo 1: comparacion
+  r |= r >> 16;
+  r |= r >> 8;
+  return (uint8_t)~r;
+}
+
+static void vga_mem_writeb(uint32_t addr, uint8_t v8) {
+  int map = (V.gr[6] >> 2) & 3;
+  addr &= 0x1ffff;
+  switch (map) {
+  case 0: break;
+  case 1:
+    if (addr >= 0x10000) return;
+    addr += V.bank_offset;
+    break;
+  case 2:
+    addr -= 0x10000;
+    if (addr >= 0x8000) return;
+    break;
+  default:
+    addr -= 0x18000;
+    if (addr >= 0x8000) return;
+    break;
+  }
+  if (vga_sr(4) & 0x08) { // chain 4
+    unsigned mask = 1u << (addr & 3);
+    if ((vga_sr(2) & mask) && addr < VGA_LFB_SIZE)
+      g_lfb[addr] = v8;
+    return;
+  }
+  if (V.gr[5] & 0x10) { // par/impar
+    unsigned plane = (V.gr[4] & 2) | (addr & 1);
+    if (vga_sr(2) & (1u << plane)) {
+      addr = ((addr & ~1u) << 1) | plane;
+      if (addr < VGA_LFB_SIZE)
+        g_lfb[addr] = v8;
+    }
+    return;
+  }
+  uint32_t val = v8, bit_mask = 0;
+  int b;
+  switch (V.gr[5] & 3) {
+  default:
+  case 0:
+    b = V.gr[3] & 7;
+    val = ((val >> b) | (val << (8 - b))) & 0xff;
+    val |= val << 8;
+    val |= val << 16;
+    {
+      uint32_t set_mask = vga_mask16[V.gr[1]];
+      val = (val & ~set_mask) | (vga_mask16[V.gr[0]] & set_mask);
+    }
+    bit_mask = V.gr[8];
+    break;
+  case 1:
+    val = V.latch;
+    goto do_write;
+  case 2:
+    val = vga_mask16[val & 0x0f];
+    bit_mask = V.gr[8];
+    break;
+  case 3:
+    b = V.gr[3] & 7;
+    val = (val >> b) | (val << (8 - b));
+    bit_mask = V.gr[8] & val;
+    val = vga_mask16[V.gr[0]];
+    break;
+  }
+  switch (V.gr[3] >> 3) {
+  case 1: val &= V.latch; break;
+  case 2: val |= V.latch; break;
+  case 3: val ^= V.latch; break;
+  default: break;
+  }
+  bit_mask &= 0xff;
+  bit_mask |= bit_mask << 8;
+  bit_mask |= bit_mask << 16;
+  val = (val & bit_mask) | (V.latch & ~bit_mask);
+do_write:;
+  uint32_t write_mask = vga_mask16[vga_sr(2) & 0x0f];
+  if ((uint64_t)addr * 4 >= VGA_LFB_SIZE)
+    return;
+  uint32_t old;
+  memcpy(&old, g_lfb + (size_t)addr * 4, 4);
+  old = (old & ~write_mask) | (val & write_mask);
+  memcpy(g_lfb + (size_t)addr * 4, &old, 4);
+}
+
+// Accesos del huesped a 0xA0000-0xBFFFF (gpa absoluta): byte a byte, en orden.
+static void vga_mmio_read(uint64_t gpa, uint8_t *dst, unsigned n) {
+  for (unsigned i = 0; i < n; i++)
+    dst[i] = g_vga_on ? vga_mem_readb((uint32_t)(gpa + i - 0xA0000)) : 0xff;
+}
+static void vga_mmio_write(uint64_t gpa, const uint8_t *src, unsigned n) {
+  if (!g_vga_on)
+    return;
+  for (unsigned i = 0; i < n; i++)
+    vga_mem_writeb((uint32_t)(gpa + i - 0xA0000), src[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Dibujo (como vga_update_display de QEMU, siempre completo)
 // ---------------------------------------------------------------------------
 static uint32_t *g_vga_px;
 static size_t g_vga_px_cap;
-static const char *g_vga_unsup; // motivo si el modo actual no se puede dibujar
+static int g_vga_last_w, g_vga_last_h;
+static uint32_t g_pal[256];
+static uint64_t g_cursor_t0;
+static int g_vga_cursor_hide; // las comparaciones pixel a pixel no dibujan el cursor
 
-static uint32_t dac_argb(unsigned i) {
-  return 0xFF000000u | ((uint32_t)v_dac[i & 0xFF][0] << 16) | ((uint32_t)v_dac[i & 0xFF][1] << 8) |
-         v_dac[i & 0xFF][2];
+static int c6_to_8(int v) {
+  v &= 0x3f;
+  int b = v & 1;
+  return (v << 2) | (b << 1) | b;
+}
+static uint32_t rgb32(unsigned r, unsigned g, unsigned b) {
+  return 0xFF000000u | ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+}
+
+static void vga_palette16(void) {
+  for (int i = 0; i < 16; i++) {
+    unsigned v = V.ar[i];
+    if (V.ar[0x10] & 0x80)
+      v = ((V.ar[0x14] & 0xf) << 4) | (v & 0xf);
+    else
+      v = ((V.ar[0x14] & 0xc) << 4) | (v & 0x3f);
+    v *= 3;
+    g_pal[i] = rgb32((unsigned)c6_to_8(V.palette[v]), (unsigned)c6_to_8(V.palette[v + 1]),
+                     (unsigned)c6_to_8(V.palette[v + 2]));
+  }
+}
+static void vga_palette256(void) {
+  for (int i = 0; i < 256; i++) {
+    const uint8_t *p = &V.palette[i * 3];
+    g_pal[i] = V.dac_8bit ? rgb32(p[0], p[1], p[2])
+                          : rgb32((unsigned)c6_to_8(p[0]), (unsigned)c6_to_8(p[1]), (unsigned)c6_to_8(p[2]));
+  }
 }
 
 static int vga_alloc(int w, int h) {
+  if (w <= 0 || h <= 0 || w > 4096 || h > 4096)
+    return -1;
   size_t need = (size_t)w * (size_t)h;
   if (need > g_vga_px_cap) {
     uint32_t *n = realloc(g_vga_px, need * 4);
@@ -274,158 +586,295 @@ static int vga_alloc(int w, int h) {
     g_vga_px = n;
     g_vga_px_cap = need;
   }
+  g_vga_last_w = w;
+  g_vga_last_h = h;
   return 0;
 }
 
-static unsigned vga_text_cols(void) { return (unsigned)v_crtc[1] + 1; }
-static unsigned vga_text_char_h(void) { return (unsigned)(v_crtc[9] & 0x1F) + 1; }
-static unsigned vga_text_rows(void) {
-  unsigned vde = v_crtc[0x12] | ((unsigned)(v_crtc[7] & 2) << 7) | ((unsigned)(v_crtc[7] & 0x40) << 3);
-  return (vde + 1) / vga_text_char_h();
-}
-static uint32_t vga_text_base(void) {
-  switch ((v_gc[6] >> 2) & 3) {
-  case 0: case 1: return 0xA0000; // el modo texto normal usa 0xB8000, pero 0/1 son validos
-  case 2: return 0xB0000;
-  default: return 0xB8000;
+static void vga_offsets(uint32_t *line_offset, uint32_t *start_addr, uint32_t *line_compare) {
+  if (vbe_enabled()) {
+    *line_offset = V.vbe_line_offset;
+    *start_addr = V.vbe_start_addr;
+    *line_compare = 65535;
+  } else {
+    *line_offset = (uint32_t)V.cr[0x13] << 3;
+    *start_addr = V.cr[0x0d] | ((uint32_t)V.cr[0x0c] << 8);
+    *line_compare = V.cr[0x18] | ((uint32_t)(V.cr[0x07] & 0x10) << 4) | ((uint32_t)(V.cr[0x09] & 0x40) << 3);
   }
+}
+
+static void vga_text_res(int *pw, int *ph, int *pcw, int *pch) {
+  int ch = (V.cr[0x09] & 0x1f) + 1;
+  int cw = 8;
+  if (!(vga_sr(1) & 1)) cw = 9;
+  if (vga_sr(1) & 0x08) cw = 16;
+  int w = V.cr[0x01] + 1, h;
+  if (V.cr[0x06] == 100) {
+    h = 100;
+  } else {
+    h = V.cr[0x12] | ((V.cr[0x07] & 0x02) << 7) | ((V.cr[0x07] & 0x40) << 3);
+    h = (h + 1) / ch;
+  }
+  *pw = w; *ph = h; *pcw = cw; *pch = ch;
+}
+
+static uint8_t vram8(uint32_t a) { return g_lfb[a & (VGA_LFB_SIZE - 1)]; }
+static uint32_t vram32(uint32_t a) {
+  uint32_t v;
+  memcpy(&v, g_lfb + (a & (VGA_LFB_SIZE - 1) & ~3u), 4);
+  return v;
+}
+
+static void glyph_line(uint32_t *d, unsigned bits, int cw, uint32_t fg, uint32_t bg, int dup9) {
+  if (cw == 16) {
+    unsigned hi = vga_expand4to8[(bits >> 4) & 0xf], lo = vga_expand4to8[bits & 0xf];
+    for (int x = 0; x < 8; x++) d[x] = ((hi >> (7 - x)) & 1) ? fg : bg;
+    for (int x = 0; x < 8; x++) d[8 + x] = ((lo >> (7 - x)) & 1) ? fg : bg;
+    return;
+  }
+  for (int x = 0; x < 8; x++)
+    d[x] = ((bits >> (7 - x)) & 1) ? fg : bg;
+  if (cw == 9)
+    d[8] = dup9 ? d[7] : bg;
+}
+
+static int vga_draw_text(void) {
+  int width, height, cw, cheight;
+  vga_text_res(&width, &height, &cw, &cheight);
+  if (height * width <= 1 || height * width > 160 * 100)
+    return -1;
+  unsigned v = vga_sr(3);
+  uint32_t font_off[2] = {(((v >> 4) & 1) | ((v << 1) & 6)) * 8192u * 4 + 2,
+                          (((v >> 5) & 1) | ((v >> 1) & 6)) * 8192u * 4 + 2};
+  uint32_t line_offset, start_addr, line_compare;
+  vga_offsets(&line_offset, &start_addr, &line_compare);
+  if (vga_alloc(width * cw, height * cheight) < 0)
+    return -1;
+  vga_palette16();
+  uint32_t cursor_offset = (((uint32_t)V.cr[0x0e] << 8) | V.cr[0x0f]) - start_addr;
+  uint32_t cursor_addr = (start_addr + cursor_offset) * 4;
+  int cursor_vis = !g_vga_cursor_hide && (((now_ns() - g_cursor_t0) / 66666666ULL) & 1) == 0;
+  int stride = width * cw;
+  uint32_t offset = start_addr * 4;
+  int line = 0;
+  for (int cy = 0; cy < height; cy++) {
+    uint32_t src = offset;
+    for (int cx = 0; cx < width; cx++) {
+      if ((uint64_t)src + 2 > VGA_LFB_SIZE)
+        break;
+      unsigned ch = g_lfb[src], at = g_lfb[src + 1];
+      uint32_t font = font_off[(at >> 3) & 1] + 32 * 4 * ch;
+      uint32_t bg = g_pal[at >> 4], fg = g_pal[at & 0x0f];
+      int dup9 = cw == 9 && ch >= 0xb0 && ch <= 0xdf && (V.ar[0x10] & 0x04);
+      uint32_t *d = g_vga_px + (size_t)cy * cheight * stride + (size_t)cx * cw;
+      for (int y = 0; y < cheight; y++)
+        glyph_line(d + (size_t)y * stride, vram8(font + (uint32_t)y * 4), cw, fg, bg, dup9);
+      if (src == cursor_addr && !(V.cr[0x0a] & 0x20) && cursor_vis) {
+        int ls = V.cr[0x0a] & 0x1f, ll = V.cr[0x0b] & 0x1f;
+        if (ll > cheight - 1)
+          ll = cheight - 1;
+        if (ll >= ls && ls < cheight)
+          for (int y = ls; y <= ll; y++)
+            glyph_line(d + (size_t)y * stride, 0xff, cw, fg, bg, 1);
+      }
+      src += 4;
+    }
+    int line1 = line + cheight;
+    offset += line_offset;
+    if ((uint32_t)line < line_compare && (uint32_t)line1 >= line_compare)
+      offset = 0;
+    line = line1;
+  }
+  return 0;
+}
+
+static void vga_line(uint32_t *d, uint32_t addr, int width, int kind, int bpp) {
+  uint32_t pm = vga_mask16[V.ar[0x12] & 0xf];
+  switch (kind) {
+  case 0: case 1: { // LINE4 / LINE4D2
+    int dbl = kind == 1;
+    for (int x = 0; x < (width >> 3); x++) {
+      uint32_t data = vram32(addr) & pm;
+      uint32_t v = vga_expand4[data & 0xff] | (vga_expand4[(data >> 8) & 0xff] << 1) |
+                   (vga_expand4[(data >> 16) & 0xff] << 2) | (vga_expand4[data >> 24] << 3);
+      for (int k = 0; k < 8; k++) {
+        uint32_t c = g_pal[(v >> (28 - 4 * k)) & 0xf];
+        if (dbl) { d[2 * k] = d[2 * k + 1] = c; } else d[k] = c;
+      }
+      d += dbl ? 16 : 8;
+      addr += 4;
+    }
+    break;
+  }
+  case 2: case 3: { // LINE2 / LINE2D2 (CGA)
+    int dbl = kind == 3;
+    for (int x = 0; x < (width >> 3); x++) {
+      uint32_t data = vram32(addr) & pm;
+      uint32_t v = vga_expand2[data & 0xff] | ((uint32_t)vga_expand2[(data >> 16) & 0xff] << 2);
+      uint32_t w = vga_expand2[(data >> 8) & 0xff] | ((uint32_t)vga_expand2[data >> 24] << 2);
+      uint32_t px[8] = {g_pal[v >> 12], g_pal[(v >> 8) & 0xf], g_pal[(v >> 4) & 0xf], g_pal[v & 0xf],
+                        g_pal[w >> 12], g_pal[(w >> 8) & 0xf], g_pal[(w >> 4) & 0xf], g_pal[w & 0xf]};
+      for (int k = 0; k < 8; k++) {
+        if (dbl) { d[2 * k] = d[2 * k + 1] = px[k]; } else d[k] = px[k];
+      }
+      d += dbl ? 16 : 8;
+      addr += 4;
+    }
+    break;
+  }
+  case 4: // LINE8D2 (modo 13h)
+    for (int x = 0; x < (width >> 3); x++) {
+      for (int k = 0; k < 4; k++)
+        d[2 * k] = d[2 * k + 1] = g_pal[vram8(addr + (uint32_t)k)];
+      d += 8;
+      addr += 4;
+    }
+    break;
+  case 5: // LINE8
+    for (int x = 0; x < (width >> 3); x++) {
+      for (int k = 0; k < 8; k++)
+        d[k] = g_pal[vram8(addr + (uint32_t)k)];
+      d += 8;
+      addr += 8;
+    }
+    break;
+  default: // 15/16/24/32 bits
+    for (int x = 0; x < width; x++) {
+      uint32_t c;
+      if (bpp == 15 || bpp == 16) {
+        uint32_t off = addr & (VGA_LFB_SIZE - 1) & ~1u;
+        unsigned p = g_lfb[off] | (g_lfb[off + 1] << 8);
+        if (bpp == 15)
+          c = rgb32((p >> 7) & 0xf8, (p >> 2) & 0xf8, (p << 3) & 0xf8);
+        else
+          c = rgb32((p >> 8) & 0xf8, (p >> 3) & 0xfc, (p << 3) & 0xf8);
+        addr += 2;
+      } else if (bpp == 24) {
+        c = rgb32(vram8(addr + 2), vram8(addr + 1), vram8(addr));
+        addr += 3;
+      } else {
+        c = rgb32(vram8(addr + 2), vram8(addr + 1), vram8(addr));
+        addr += 4;
+      }
+      d[x] = c;
+    }
+    break;
+  }
+}
+
+static int vga_draw_graphic(void) {
+  uint32_t line_offset, start_addr, line_compare;
+  vga_offsets(&line_offset, &start_addr, &line_compare);
+  int width, height;
+  if (vbe_enabled()) {
+    width = V.vbe_regs[1];
+    height = V.vbe_regs[2];
+  } else {
+    width = (V.cr[0x01] + 1) * 8;
+    height = (V.cr[0x12] | ((V.cr[0x07] & 0x02) << 7) | ((V.cr[0x07] & 0x40) << 3)) + 1;
+  }
+  int disp_width = width;
+  int shift_control = (V.gr[5] >> 5) & 3;
+  int double_scan = V.cr[0x09] >> 7;
+  int multi_scan;
+  if (V.cr[0x17] & 1)
+    multi_scan = (((V.cr[0x09] & 0x1f) + 1) << double_scan) - 1;
+  else
+    multi_scan = double_scan;
+  int multi_run = multi_scan;
+  if ((shift_control == 0 || shift_control == 1) && (vga_sr(1) & 8))
+    disp_width <<= 1;
+  int kind, bpp = vbe_enabled() ? V.vbe_regs[3] : 0;
+  if (shift_control == 0) {
+    vga_palette16();
+    kind = (vga_sr(1) & 8) ? 1 : 0;
+  } else if (shift_control == 1) {
+    vga_palette16();
+    kind = (vga_sr(1) & 8) ? 3 : 2;
+  } else if (bpp == 0) {
+    vga_palette256();
+    kind = 4;
+  } else if (bpp == 8) {
+    vga_palette256();
+    kind = 5;
+  } else {
+    kind = 6;
+  }
+  if (vga_alloc(disp_width, height) < 0)
+    return -1;
+  uint32_t addr1 = start_addr * 4;
+  int y1 = 0;
+  for (int y = 0; y < height; y++) {
+    uint32_t addr = addr1;
+    if (!(V.cr[0x17] & 1)) {
+      int shift = 14 + ((V.cr[0x17] >> 6) & 1);
+      addr = (addr & ~(1u << shift)) | ((uint32_t)(y1 & 1) << shift);
+    }
+    if (!(V.cr[0x17] & 2))
+      addr = (addr & ~0x8000u) | ((uint32_t)(y1 & 2) << 14);
+    vga_line(g_vga_px + (size_t)y * disp_width, addr, width, kind, bpp);
+    if (!multi_run) {
+      int mask = (V.cr[0x17] & 3) ^ 3;
+      if ((y1 & mask) == mask)
+        addr1 += line_offset;
+      y1++;
+      multi_run = multi_scan;
+    } else {
+      multi_run--;
+    }
+    if ((uint32_t)y == line_compare)
+      addr1 = 0;
+  }
+  return 0;
 }
 
 // Devuelve el fotograma (ARGB) o NULL si no hay nada que dibujar.
 static uint32_t *vga_render(int *pw, int *ph) {
-  g_vga_unsup = NULL;
-  if (v_dispi[4] & 1) { // modo VBE lineal
-    int w = v_dispi[1], h = v_dispi[2], bpp = v_dispi[3];
-    if (w <= 0 || h <= 0 || w > 2560 || h > 1600 || !g_lfb)
-      return NULL;
-    if (bpp == 4) {
-      g_vga_unsup = "VBE de 4 bits";
-      return NULL;
-    }
-    if (vga_alloc(w, h) < 0)
-      return NULL;
-    unsigned bpl = (unsigned)((bpp + 7) / 8);
-    size_t stride = (size_t)(v_dispi[6] ? v_dispi[6] : w) * bpl;
-    size_t base = (size_t)v_dispi[9] * stride + (size_t)v_dispi[8] * bpl;
-    for (int y = 0; y < h; y++) {
-      size_t row = base + (size_t)y * stride;
-      uint32_t *o = g_vga_px + (size_t)y * w;
-      if (row + (size_t)w * bpl > VGA_LFB_SIZE) {
-        memset(o, 0, (size_t)w * 4);
-        continue;
-      }
-      const uint8_t *s = g_lfb + row;
-      for (int x = 0; x < w; x++) {
-        uint32_t c;
-        switch (bpp) {
-        case 8: c = dac_argb(s[x]); break;
-        case 15: {
-          unsigned p = s[2 * x] | (s[2 * x + 1] << 8);
-          c = 0xFF000000u | (((p >> 10) & 31) * 255 / 31) << 16 | (((p >> 5) & 31) * 255 / 31) << 8 |
-              ((p & 31) * 255 / 31);
-          break;
-        }
-        case 16: {
-          unsigned p = s[2 * x] | (s[2 * x + 1] << 8);
-          c = 0xFF000000u | (((p >> 11) & 31) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 |
-              ((p & 31) * 255 / 31);
-          break;
-        }
-        case 24: c = 0xFF000000u | (uint32_t)s[3 * x + 2] << 16 | (uint32_t)s[3 * x + 1] << 8 | s[3 * x]; break;
-        default: c = 0xFF000000u | (uint32_t)s[4 * x + 2] << 16 | (uint32_t)s[4 * x + 1] << 8 | s[4 * x]; break;
-        }
-        o[x] = c;
-      }
-    }
-    *pw = w;
-    *ph = h;
-    return g_vga_px;
-  }
-  if (v_gc[6] & 1) { // modo grafico
-    if (v_gc[5] & 0x40) { // 256 colores (modo 13h), doble escaneo y reloj/2 -> 320x200
-      int w = (int)(vga_text_cols() * 8) / ((v_seq[1] & 8) ? 2 : 1);
-      int vde = (int)(v_crtc[0x12] | ((unsigned)(v_crtc[7] & 2) << 7) | ((unsigned)(v_crtc[7] & 0x40) << 3)) + 1;
-      int h = vde / ((v_crtc[9] & 0x80) ? 2 : 1);
-      if (w < 8 || h < 8 || w > 1024 || h > 768)
-        return NULL;
-      int sc = w <= 400 ? 2 : 1;
-      if (vga_alloc(w * sc, h * sc) < 0)
-        return NULL;
-      for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-          size_t a = 0xA0000 + (size_t)y * (size_t)w + (size_t)x;
-          uint32_t c = a < g_ram_size ? dac_argb(g_ram[a]) : 0xFF000000u;
-          for (int dy = 0; dy < sc; dy++)
-            for (int dx = 0; dx < sc; dx++)
-              g_vga_px[(size_t)(y * sc + dy) * (size_t)(w * sc) + (size_t)(x * sc + dx)] = c;
-        }
-      *pw = w * sc;
-      *ph = h * sc;
-      return g_vga_px;
-    }
-    g_vga_unsup = "modo grafico planar de 16 colores";
+  if (!g_vga_on || !g_lfb)
     return NULL;
+  int rc;
+  if (!(V.ar_index & 0x20)) { // pantalla apagada (PAS = 0): negro con el ultimo tamano
+    if (g_vga_last_w <= 0 || g_vga_last_h <= 0 || !g_vga_px)
+      return NULL;
+    memset(g_vga_px, 0, (size_t)g_vga_last_w * g_vga_last_h * 4);
+    rc = 0;
+  } else if (V.gr[6] & 1) {
+    rc = vga_draw_graphic();
+  } else {
+    rc = vga_draw_text();
   }
-  // Modo texto
-  unsigned cols = vga_text_cols(), rows = vga_text_rows(), ch = vga_text_char_h();
-  unsigned cw = (v_seq[1] & 1) ? 8 : 9;
-  if (cols < 20 || cols > 200 || rows < 4 || rows > 100 || ch < 4 || ch > 32)
+  if (rc < 0)
     return NULL;
-  int w = (int)(cols * cw), h = (int)(rows * ch);
-  if (vga_alloc(w, h) < 0)
-    return NULL;
-  uint32_t tbase = vga_text_base() + 2u * (((unsigned)v_crtc[0xC] << 8) | v_crtc[0xD]);
-  uint32_t fbase = 0xA0000;
-  int blink_en = v_atc[0x10] & 8;
-  int blink_ph = (int)((now_ns() / 500000000ULL) & 1);
-  unsigned curpos = ((unsigned)v_crtc[0xE] << 8) | v_crtc[0xF];
-  int cur_on = !(v_crtc[0xA] & 0x20) && blink_ph;
-  unsigned cs = v_crtc[0xA] & 0x1F, ce = v_crtc[0xB] & 0x1F;
-  for (unsigned r = 0; r < rows; r++) {
-    for (unsigned c = 0; c < cols; c++) {
-      size_t a = tbase + 2u * (r * cols + c);
-      uint8_t chr = 0, at = 0x07;
-      if (a + 1 < g_ram_size) {
-        chr = g_ram[a];
-        at = g_ram[a + 1];
-      }
-      unsigned fg = at & 0x0F, bg = (at >> 4) & 0x0F;
-      if (blink_en) {
-        bg &= 7;
-        if ((at & 0x80) && blink_ph) fg = bg;
-      }
-      uint32_t fgc = dac_argb(v_atc[fg & 0xF] & 0x3F), bgc = dac_argb(v_atc[bg & 0xF] & 0x3F);
-      int is_cur = cur_on && (r * cols + c) == curpos;
-      for (unsigned y = 0; y < ch; y++) {
-        uint8_t bits = fbase + (size_t)chr * 32 + y < g_ram_size ? g_ram[fbase + (size_t)chr * 32 + y] : 0;
-        if (is_cur && y >= cs && y <= ce) bits = 0xFF;
-        uint32_t *o = g_vga_px + (size_t)(r * ch + y) * (size_t)w + (size_t)(c * cw);
-        for (unsigned x = 0; x < cw; x++) {
-          int on = x < 8 ? (bits >> (7 - x)) & 1 : (chr >= 0xC0 && chr <= 0xDF && (v_atc[0x10] & 4)) ? (bits & 1) : 0;
-          o[x] = on ? fgc : bgc;
-        }
-      }
-    }
-  }
-  *pw = w;
-  *ph = h;
+  *pw = g_vga_last_w;
+  *ph = g_vga_last_h;
   return g_vga_px;
 }
 
-// Pantalla de texto como ASCII (pruebas sin ventana).
-static void vga_dump_text(FILE *f) {
-  unsigned cols = vga_text_cols(), rows = vga_text_rows();
-  if (cols < 20 || cols > 200 || rows < 4 || rows > 100) {
-    cols = 80;
-    rows = 25;
+// Texto de la pantalla (pruebas sin ventana): caracteres del plano 0.
+static int vga_text_cell(unsigned r, unsigned c) {
+  uint32_t lo, sa, lc;
+  vga_offsets(&lo, &sa, &lc);
+  uint64_t a = (uint64_t)sa * 4 + (uint64_t)r * lo + (uint64_t)c * 4;
+  return a < VGA_LFB_SIZE ? g_lfb[a] : ' ';
+}
+
+static void vga_text_dims(int *cols, int *rows) {
+  int cw, ch;
+  vga_text_res(cols, rows, &cw, &ch);
+  if (*cols < 20 || *cols > 200 || *rows < 4 || *rows > 100) {
+    *cols = 80;
+    *rows = 25;
   }
-  uint32_t tbase = vga_text_base() + 2u * (((unsigned)v_crtc[0xC] << 8) | v_crtc[0xD]);
-  for (unsigned r = 0; r < rows; r++) {
+}
+
+static void vga_dump_text(FILE *f) {
+  int cols, rows;
+  vga_text_dims(&cols, &rows);
+  for (int r = 0; r < rows; r++) {
     char line[256];
-    unsigned n = 0;
-    for (unsigned c = 0; c < cols; c++) {
-      size_t a = tbase + 2u * (r * cols + c);
-      uint8_t chr = a < g_ram_size ? g_ram[a] : ' ';
+    int n = 0;
+    for (int c = 0; c < cols && n < 255; c++) {
+      int chr = vga_text_cell((unsigned)r, (unsigned)c);
       line[n++] = (chr >= 32 && chr < 127) ? (char)chr : ' ';
     }
     while (n && line[n - 1] == ' ') n--;
@@ -435,27 +884,20 @@ static void vga_dump_text(FILE *f) {
 }
 
 static int vga_text_contains(const char *s) {
-  unsigned cols = vga_text_cols(), rows = vga_text_rows();
-  if (cols < 20 || cols > 200 || rows < 4 || rows > 100) {
-    cols = 80;
-    rows = 25;
-  }
-  uint32_t tbase = vga_text_base() + 2u * (((unsigned)v_crtc[0xC] << 8) | v_crtc[0xD]);
-  size_t n = strlen(s);
-  for (unsigned r = 0; r < rows; r++)
-    for (unsigned c = 0; c + n <= cols; c++) {
-      size_t k = 0;
-      while (k < n) {
-        size_t a = tbase + 2u * (r * cols + c + k);
-        if (a >= g_ram_size || g_ram[a] != (uint8_t)s[k]) break;
+  int cols, rows;
+  vga_text_dims(&cols, &rows);
+  int n = (int)strlen(s);
+  for (int r = 0; r < rows; r++)
+    for (int c = 0; c + n <= cols; c++) {
+      int k = 0;
+      while (k < n && vga_text_cell((unsigned)r, (unsigned)(c + k)) == (uint8_t)s[k])
         k++;
-      }
       if (k == n) return 1;
     }
   return 0;
 }
 
-// Memorias del dispositivo (LFB y ROM). rom/rom_n pueden ser NULL.
+// Memorias del dispositivo (VRAM/LFB y ROM). rom/rom_n pueden ser NULL.
 static int vga_setup(const uint8_t *rom, size_t rom_n) {
   vga_reset();
   g_vga_lfb_fd = memfd_create("aurora-vm-lfb", MFD_CLOEXEC);
@@ -477,7 +919,8 @@ static int vga_setup(const uint8_t *rom, size_t rom_n) {
   memset(g_vrom, 0, VGA_ROM_SIZE);
   if (rom && rom_n)
     memcpy(g_vrom, rom, rom_n > VGA_ROM_SIZE ? VGA_ROM_SIZE : rom_n);
-  v_retrace_t0 = now_ns();
+  g_cursor_t0 = now_ns();
+  g_vga_last_w = g_vga_last_h = 0;
   g_vga_on = 1;
   return 0;
 }

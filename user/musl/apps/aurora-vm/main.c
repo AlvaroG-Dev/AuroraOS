@@ -1,20 +1,23 @@
 // aurora-vm — VMM de la mini-VM de AuroraOS (Plan_MiniVM.md).
 //
-// F1: ejecuta un binario plano en modo real sobre /dev/aurora-vm.
-// F2: dispositivos (serie 16550, PIC 8259 x2, PIT 8254, CMOS, dispositivo MMIO
-//     de prueba), decodificador MMIO x86 (MOV/MOVZX/MOVSX, 16/32/64 bits con
-//     paginacion) e inyeccion de IRQ con temporizador. Los .exe necesitan un
-//     huesped completo (F3 en adelante): por ahora se avisa.
+// Un PC "pc" de QEMU (i440FX + PIIX3) sobre /dev/aurora-vm (VT-x + EPT):
+//   SeaBIOS + SeaVGABIOS, PIC 8259 x2 + ELCR, PIT 8254, RTC/CMOS, teclado y raton
+//   PS/2 (i8042), IDE PIIX3 con DMA (disco y CD-ROM ATAPI), VGA estandar con VBE,
+//   ACPI (PM PIIX4), LAPIC + IOAPIC y virtio-blk heredado. Los dispositivos copian
+//   la semantica de QEMU (ver cada .h). Los accesos a memoria de dispositivo los
+//   ejecuta insn.h; las interrupciones se inyectan con AVM_INJECT_IRQ.
 //
 // Uso:
 //   aurora-vm --caps                 que ofrece la CPU (VMX, EPT, ...)
 //   aurora-vm --autotest             tres guests incorporados (real, modo largo+MMIO, temporizador)
+//   aurora-vm --bios-test[-acpi|-vga] SeaBIOS + virtio-blk + sector de arranque incorporado
 //   aurora-vm --plano FICH [--en DIR] [--mem MiB]
-//   aurora-vm --bios-test-acpi       igual con ACPI + LAPIC/IOAPIC (F3c)
-//   aurora-vm --bios-test            SeaBIOS + virtio-blk + sector de arranque incorporado (F3a)
-//   aurora-vm --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios] [--sin-acpi]
+//   aurora-vm --bios [--ide IMG] [--cd ISO] [--disco IMG] [--mem MiB] [--arranque cd|disco]
+//                    [--rom FICH] [--vgarom FICH] [--tiempo S] [--log-bios] [--sin-acpi]
+//                    [--sin-vga] [--sin-ventana]
 //   aurora-vm PROGRAMA.exe           (aurora-run lo llama asi; aun sin huesped)
-// Puertos: 0x3F8 serie -> stdout, 0xF4 termina con el codigo escrito.
+// Puertos de depuracion: 0x3F8 serie -> stdout; 0xF4 termina con el codigo escrito
+// (solo en las pruebas y en --plano).
 #define _GNU_SOURCE
 #include "../../../../kernel/aurora_vm.h"
 #include "guests.h"
@@ -27,26 +30,28 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #define DEV "/dev/aurora-vm"
-#define PIT_HZ 1193182ULL
 #define MMIO_TEST_BASE 0xE0000000ULL
+#define VGA_HOLE_LO 0xA0000ULL
+#define VGA_HOLE_HI 0xC0000ULL
+#define BIOS_MAX (256u * 1024)
 
 static int g_vm = -1;
 static int g_mfd = -1;
-static uint8_t *g_ram;
-static uint64_t g_ram_size;
+static uint8_t *g_ram;      // RAM del huesped y, detras, la copia alta de la BIOS
+static uint64_t g_ram_size; // bytes de RAM (sin la BIOS)
+static uint8_t g_bios_img[BIOS_MAX]; // imagen original (para los reinicios)
+static size_t g_bios_n;
+static uint64_t g_bios_gpa; // 4 GiB - tamano
 static char g_out[512];
 static size_t g_out_n;
 static int g_echo = 1;
-static int g_debug = 1; // intercepta excepciones del huesped y las registra (dmesg [VMX])
-
-#include "platform.h"
-#include "apic.h"
-#include "vga.h"
-#include "vgawin.h"
+static int g_debug = 1;     // intercepta excepciones del huesped y las registra (dmesg [VMX])
+static int g_exit_port;     // 0xF4 termina la VM (pruebas)
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -54,227 +59,159 @@ static uint64_t now_ns(void) {
   return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+static void irq_set(int irq, int level);
+static int irq_edge_pending(int irq);
+static uint8_t *dma_ptr(uint64_t gpa, uint64_t len);
+
+#include "pic.h"
+#include "pit.h"
+#include "rtc.h"
+#include "ps2.h"
+#include "apic.h"
+#include "ide.h"
+#include "platform.h"
+#include "vga.h"
+#include "vgawin.h"
+#include "insn.h"
+
 // ---------------------------------------------------------------------------
-// PIC 8259 (maestro + esclavo)
+// Lineas de interrupcion: ISA n -> PIC (n < 16) e IOAPIC pin n (la MADT de
+// SeaBIOS no redirige el IRQ0; las PCI 5/9/10/11 son de nivel, activas en alto).
 // ---------------------------------------------------------------------------
-struct pic {
-  uint8_t irr, isr, imr, base, step, icw4, read_isr;
-};
-static struct pic g_pic[2];
-
-static void pic_reset(void) {
-  memset(g_pic, 0, sizeof(g_pic));
-  g_pic[0].base = 0x08;
-  g_pic[1].base = 0x70;
-  g_pic[0].imr = g_pic[1].imr = 0xFF;
-}
-
-static int pic_pending(const struct pic *p) {
-  for (int i = 0; i < 8; i++) {
-    if (p->isr & (1u << i))
-      break;
-    if ((p->irr & ~p->imr) & (1u << i))
-      return i;
-  }
-  return -1;
-}
-
-static void pic_set_irr(int irq) {
-  if (irq < 8)
-    g_pic[0].irr |= (uint8_t)(1u << irq);
-  else
-    g_pic[1].irr |= (uint8_t)(1u << (irq - 8));
-}
-
-// Linea ISA que se activa (nivel alto) y se mantiene hasta pic_lower.
-static void pic_raise(int irq) {
-  pic_set_irr(irq);
-  if (g_apic_on)
-    ioapic_line(irq, 1);
-}
-
-// Pulso (fuentes por flanco, como el PIT).
-static void pic_pulse(int irq) {
-  pic_set_irr(irq);
-  if (g_apic_on) {
-    ioapic_line(irq, 1);
-    ioapic_line(irq, 0);
-  }
-}
-
-static void pic_lower(int irq) {
-  if (irq < 8)
-    g_pic[0].irr &= (uint8_t)~(1u << irq);
-  else
-    g_pic[1].irr &= (uint8_t)~(1u << (irq - 8));
-  if (g_apic_on)
-    ioapic_line(irq, 0);
-}
-
-// Vector de la IRQ pendiente (sin aceptarla) o -1.
-static int pic_peek(int *which, int *line) {
-  if (pic_pending(&g_pic[1]) >= 0)
-    g_pic[0].irr |= 4;
-  else
-    g_pic[0].irr &= (uint8_t)~4;
-  int m = pic_pending(&g_pic[0]);
-  if (m < 0)
-    return -1;
-  if (m == 2) {
-    int s = pic_pending(&g_pic[1]);
-    if (s < 0)
-      return -1;
-    *which = 1;
-    *line = s;
-    return g_pic[1].base + s;
-  }
-  *which = 0;
-  *line = m;
-  return g_pic[0].base + m;
-}
-
-static void pic_accept(int which, int line) {
-  g_pic[which].irr &= (uint8_t)~(1u << line);
-  g_pic[which].isr |= (uint8_t)(1u << line);
-  if (which == 1) {
-    g_pic[0].irr &= (uint8_t)~4;
-    g_pic[0].isr |= 4;
-  }
-}
-
-static void pic_write(int n, int port1, uint8_t v) {
-  struct pic *p = &g_pic[n];
-  if (!port1) {
-    if (v & 0x10) { // ICW1
-      p->imr = 0;
-      p->isr = p->irr = 0;
-      p->icw4 = v & 1;
-      p->step = 1;
-    } else if ((v & 0x18) == 0x08) { // OCW3
-      if ((v & 3) == 3)
-        p->read_isr = 1;
-      else if ((v & 3) == 2)
-        p->read_isr = 0;
-    } else if (v & 0x20) { // EOI
-      if ((v & 0xE0) == 0x60) {
-        p->isr &= (uint8_t)~(1u << (v & 7));
-      } else {
-        for (int i = 0; i < 8; i++)
-          if (p->isr & (1u << i)) {
-            p->isr &= (uint8_t)~(1u << i);
-            break;
-          }
-      }
-    }
+static void irq_set(int irq, int level) {
+  if (irq < 0 || irq >= IOAPIC_PINS)
     return;
-  }
-  switch (p->step) {
-  case 1: p->base = v & 0xF8; p->step = 2; break;
-  case 2: p->step = p->icw4 ? 3 : 0; break;
-  case 3: p->step = 0; break;
-  default: p->imr = v; break;
-  }
+  if (irq < 16)
+    pic_set_irq(irq, level);
+  if (g_apic_on)
+    ioapic_line(irq, level);
 }
 
-static uint8_t pic_read(int n, int port1) {
-  struct pic *p = &g_pic[n];
-  if (port1)
-    return p->imr;
-  return p->read_isr ? p->isr : p->irr;
-}
-
-// ---------------------------------------------------------------------------
-// PIT 8254 (canal 0 con IRQ0; canal 2 y puerto 0x61 solo lo justo)
-// ---------------------------------------------------------------------------
-static struct {
-  uint32_t reload;
-  uint8_t access, mode, wr_hi, rd_hi, running;
-  uint8_t lo_latch;
-  uint64_t period_ns, next_ns, start_ns;
-  uint8_t port61;
-  // canal 2 (calibracion del TSC de SeaBIOS: modo 0, puerta por 0x61 bit 0)
-  uint8_t c2_access, c2_mode, c2_hi, c2_lo, c2_armed;
-  uint32_t c2_reload;
-  uint64_t c2_start_ns;
-} g_pit;
-
-static void pit_reset(void) { memset(&g_pit, 0, sizeof(g_pit)); }
-
-static void pit_write(uint16_t port, uint8_t v) {
-  if (port == 0x43 && (v >> 6) == 2) {
-    g_pit.c2_access = (v >> 4) & 3;
-    g_pit.c2_mode = (v >> 1) & 7;
-    g_pit.c2_hi = 0;
-    g_pit.c2_armed = 0;
-  } else if (port == 0x42) {
-    if (g_pit.c2_access == 3 && !g_pit.c2_hi) {
-      g_pit.c2_lo = v;
-      g_pit.c2_hi = 1;
-      return;
-    }
-    uint32_t cnt = g_pit.c2_access == 2 ? ((uint32_t)v << 8)
-                   : g_pit.c2_access == 1 ? v
-                                          : ((uint32_t)v << 8) | g_pit.c2_lo;
-    g_pit.c2_hi = 0;
-    g_pit.c2_reload = cnt ? cnt : 65536;
-    g_pit.c2_start_ns = now_ns();
-    g_pit.c2_armed = 1;
-  } else if (port == 0x43) {
-    if ((v >> 6) == 0) {
-      g_pit.access = (v >> 4) & 3;
-      g_pit.mode = (v >> 1) & 7;
-      g_pit.wr_hi = g_pit.rd_hi = 0;
-    }
-  } else if (port == 0x40) {
-    if (g_pit.access == 3 && !g_pit.wr_hi) {
-      g_pit.lo_latch = v;
-      g_pit.wr_hi = 1;
-      return;
-    }
-    uint32_t cnt = g_pit.access == 2 ? ((uint32_t)v << 8)
-                   : g_pit.access == 1 ? v
-                                       : ((uint32_t)v << 8) | g_pit.lo_latch;
-    g_pit.wr_hi = 0;
-    g_pit.reload = cnt ? cnt : 65536;
-    g_pit.period_ns = (uint64_t)g_pit.reload * 1000000000ULL / PIT_HZ;
-    g_pit.start_ns = now_ns();
-    g_pit.next_ns = g_pit.start_ns + g_pit.period_ns;
-    g_pit.running = 1;
-  } else if (port == 0x61) {
-    g_pit.port61 = v;
+// Un flanco anterior de la linea aun no lo ha aceptado nadie (para no perder
+// ticks del PIT: se reinyectan cuando el anterior ya se entrego).
+static int irq_edge_pending(int irq) {
+  if (irq < 16) {
+    const struct i8259 *s = &g_pic[irq >> 3];
+    int m = 1 << (irq & 7);
+    if ((s->irr & m) && !(s->imr & m))
+      return 1;
   }
-}
-
-static uint8_t pit_read(uint16_t port) {
-  if (port == 0x61)
-  {
-    uint8_t out2 = 0;
-    if (g_pit.c2_armed && (g_pit.port61 & 1) &&
-        (now_ns() - g_pit.c2_start_ns) * PIT_HZ / 1000000000ULL >= g_pit.c2_reload)
-      out2 = 1;
-    return (uint8_t)((g_pit.port61 & 0x0F) | (((now_ns() / 15000) & 1) << 4) | (out2 << 5));
-  }
-  if (port == 0x40 && g_pit.running) {
-    uint64_t t = (now_ns() - g_pit.start_ns) * PIT_HZ / 1000000000ULL;
-    uint32_t cnt = g_pit.reload - (uint32_t)(t % g_pit.reload);
-    uint8_t b = g_pit.rd_hi ? (uint8_t)(cnt >> 8) : (uint8_t)cnt;
-    g_pit.rd_hi ^= 1;
-    return b;
+  if (g_apic_on && irq < IOAPIC_PINS) {
+    uint64_t e = g_io_red[irq];
+    int v = (int)(e & 0xFF);
+    if (!(e & 0x10000) && v >= 16 && ((g_irr[v >> 5] >> (v & 31)) & 1))
+      return 1;
   }
   return 0;
 }
 
-static void pit_poll(uint64_t now) {
-  if (!g_pit.running || now < g_pit.next_ns)
-    return;
-  pic_pulse(0);
-  g_pit.next_ns += g_pit.period_ns * (1 + (now - g_pit.next_ns) / g_pit.period_ns);
+// Memoria del huesped para DMA y colas: solo RAM (nunca el hueco VGA).
+static uint8_t *dma_ptr(uint64_t gpa, uint64_t len) {
+  if (len > g_ram_size || gpa > g_ram_size - len)
+    return NULL;
+  if (g_plat && gpa < VGA_HOLE_HI && gpa + len > VGA_HOLE_LO)
+    return NULL;
+  return g_ram + gpa;
 }
 
 // ---------------------------------------------------------------------------
-// E/S y MMIO
+// Memoria fisica del huesped (para insn.h): RAM, hueco VGA, BIOS, LFB/ROM de la
+// VGA, LAPIC/IOAPIC y el dispositivo MMIO de prueba de --autotest.
 // ---------------------------------------------------------------------------
 static uint8_t g_mmio_test[4096];
+
+static void apic_access(uint64_t gpa, uint8_t *buf, unsigned n, int write) {
+  while (n) {
+    unsigned c = n >= 4 && !(gpa & 3) ? 4 : n >= 2 && !(gpa & 1) ? 2 : 1;
+    if (write) {
+      uint64_t v = 0;
+      memcpy(&v, buf, c);
+      apic_mmio_write(gpa, (int)c, v);
+    } else {
+      uint64_t v = apic_mmio_read(gpa, (int)c);
+      memcpy(buf, &v, c);
+    }
+    gpa += c;
+    buf += c;
+    n -= c;
+  }
+}
+
+static int gmem_access(uint64_t gpa, uint8_t *buf, unsigned n, int write) {
+  while (n) {
+    unsigned c = 1;
+    if (gpa < g_ram_size && !(g_plat && gpa >= VGA_HOLE_LO && gpa < VGA_HOLE_HI)) {
+      uint64_t lim = (g_plat && gpa < VGA_HOLE_LO) ? VGA_HOLE_LO : g_ram_size;
+      c = (unsigned)(lim - gpa < n ? lim - gpa : n);
+      if (write)
+        memcpy(g_ram + gpa, buf, c);
+      else
+        memcpy(buf, g_ram + gpa, c);
+    } else if (g_plat && gpa >= VGA_HOLE_LO && gpa < VGA_HOLE_HI) {
+      c = (unsigned)(VGA_HOLE_HI - gpa < n ? VGA_HOLE_HI - gpa : n);
+      if (write)
+        vga_mmio_write(gpa, buf, c);
+      else
+        vga_mmio_read(gpa, buf, c);
+    } else if (g_plat && g_bios_n && gpa >= g_bios_gpa && gpa < 0x100000000ULL) {
+      c = (unsigned)(0x100000000ULL - gpa < n ? 0x100000000ULL - gpa : n);
+      uint8_t *p = g_ram + g_ram_size + (gpa - g_bios_gpa);
+      if (write)
+        memcpy(p, buf, c);
+      else
+        memcpy(buf, p, c);
+    } else if (g_vga_on && g_lfb && g_vga_lfb_gpa && gpa >= g_vga_lfb_gpa &&
+               gpa < g_vga_lfb_gpa + VGA_LFB_SIZE) {
+      uint64_t left = g_vga_lfb_gpa + VGA_LFB_SIZE - gpa;
+      c = (unsigned)(left < n ? left : n);
+      if (write)
+        memcpy(g_lfb + (gpa - g_vga_lfb_gpa), buf, c);
+      else
+        memcpy(buf, g_lfb + (gpa - g_vga_lfb_gpa), c);
+    } else if (g_vga_on && g_vrom && g_vga_rom_gpa && gpa >= g_vga_rom_gpa &&
+               gpa < g_vga_rom_gpa + VGA_ROM_SIZE) {
+      uint64_t left = g_vga_rom_gpa + VGA_ROM_SIZE - gpa;
+      c = (unsigned)(left < n ? left : n);
+      if (!write)
+        memcpy(buf, g_vrom + (gpa - g_vga_rom_gpa), c);
+    } else if (apic_mmio_hit(gpa)) {
+      uint64_t left = 0x1000 - (gpa & 0xFFF);
+      c = (unsigned)(left < n ? left : n);
+      apic_access(gpa, buf, c, write);
+    } else if (!g_plat && gpa >= MMIO_TEST_BASE && gpa < MMIO_TEST_BASE + sizeof(g_mmio_test)) {
+      uint64_t off = gpa - MMIO_TEST_BASE;
+      if (write) {
+        if (off >= 4)
+          g_mmio_test[off] = *buf;
+      } else {
+        *buf = off < 4 ? 0xA0 : g_mmio_test[off];
+      }
+    } else if (!write) {
+      *buf = 0xFF; // nada: bus flotante
+    }
+    gpa += c;
+    buf += c;
+    n -= c;
+  }
+  return 0;
+}
+
+static int gmem_read(uint64_t gpa, void *dst, unsigned n) { return gmem_access(gpa, (uint8_t *)dst, n, 0); }
+static int gmem_write(uint64_t gpa, const void *src, unsigned n) {
+  return gmem_access(gpa, (uint8_t *)(uintptr_t)src, n, 1);
+}
+// Tablas de paginas: solo en RAM.
+static int gpt_read(uint64_t gpa, void *dst, unsigned n) {
+  uint8_t *p = dma_ptr(gpa, n);
+  if (!p)
+    return -1;
+  memcpy(dst, p, n);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Puertos de E/S
+// ---------------------------------------------------------------------------
 static int g_exit_code = -1;
 
 static void serial_out(uint8_t c) {
@@ -287,10 +224,14 @@ static void serial_out(uint8_t c) {
 }
 
 // Ultimos accesos de E/S del huesped (para el diagnostico de los cuelgues).
-static struct { uint16_t port; uint8_t size, w; uint32_t v; } g_iolog[24];
+#define IOLOG_N 32
+static struct { uint16_t port; uint8_t size, w; uint32_t v; } g_iolog[IOLOG_N];
 static unsigned g_iolog_n;
 static void iolog(uint16_t port, int size, int w, uint32_t v) {
-  g_iolog[g_iolog_n % 24] = (typeof(g_iolog[0])){port, (uint8_t)size, (uint8_t)w, v};
+  g_iolog[g_iolog_n % IOLOG_N].port = port;
+  g_iolog[g_iolog_n % IOLOG_N].size = (uint8_t)size;
+  g_iolog[g_iolog_n % IOLOG_N].w = (uint8_t)w;
+  g_iolog[g_iolog_n % IOLOG_N].v = v;
   g_iolog_n++;
 }
 
@@ -298,258 +239,498 @@ static uint32_t io_in(uint16_t port, int size) {
   uint32_t v = 0xFFFFFFFFu;
   if (plat_in(port, size, &v))
     ;
-  else if (port == 0x3FD)
-    v = 0x60;
-  else if (port >= 0x3F8 && port <= 0x3FF)
-    v = 0;
-  else if (port == 0x20 || port == 0x21)
-    v = pic_read(0, port & 1);
-  else if (port == 0xA0 || port == 0xA1)
-    v = pic_read(1, port & 1);
-  else if (port == 0x40 || port == 0x42 || port == 0x61)
+  else if (!g_plat && pic_port(port))
+    v = pic_in(port);
+  else if (!g_plat && port >= 0x40 && port <= 0x43)
     v = pit_read(port);
-  else if (port == 0x71)
+  else if (!g_plat && port == 0x61)
+    v = port61_read();
+  else if (port == 0x3FD)
+    v = 0x60; // LSR: transmisor vacio
+  else if (port >= 0x3F8 && port <= 0x3FF)
     v = 0;
   if (size == 1)
     v &= 0xFF;
   else if (size == 2)
     v &= 0xFFFF;
-  iolog(port, size, 0, v);
+  if (port != 0x1F0 && port != 0x170) // los datos de IDE llenarian el registro
+    iolog(port, size, 0, v);
   return v;
 }
 
 static void io_out(uint16_t port, uint32_t v, int size) {
-  if (port != 0x402 && port != 0xE9)
+  if (size == 1)
+    v &= 0xFF;
+  else if (size == 2)
+    v &= 0xFFFF;
+  if (port != 0x402 && port != 0xE9 && port != 0x1F0 && port != 0x170)
     iolog(port, size, 1, v);
   if (plat_out(port, v, size))
     return;
-  if (port == 0x3F8)
-    serial_out((uint8_t)v);
-  else if (port == 0xF4)
-    g_exit_code = (int)(v & 0xFF);
-  else if (port == 0x20 || port == 0x21)
-    pic_write(0, port & 1, (uint8_t)v);
-  else if (port == 0xA0 || port == 0xA1)
-    pic_write(1, port & 1, (uint8_t)v);
-  else if (port == 0x40 || port == 0x42 || port == 0x43 || port == 0x61)
+  if (!g_plat && pic_port(port))
+    pic_out(port, (uint8_t)v);
+  else if (!g_plat && port >= 0x40 && port <= 0x43)
     pit_write(port, (uint8_t)v);
-  else if (port == 0x70)
-    g_cmos_idx = (uint8_t)v;
+  else if (!g_plat && port == 0x61)
+    port61_write((uint8_t)v);
+  else if (port == 0x3F8)
+    serial_out((uint8_t)v);
+  else if (port == 0xF4 && g_exit_port)
+    g_exit_code = (int)(v & 0xFF);
 }
 
-static int mmio_known(uint64_t gpa) {
-  if (g_plat) // BIOS: lo que no es RAM ni LAPIC/IOAPIC se lee como 1s y se ignora
-    return gpa >= g_ram_size;
-  return gpa >= MMIO_TEST_BASE && gpa < MMIO_TEST_BASE + sizeof(g_mmio_test);
-}
-static uint64_t mmio_read(uint64_t gpa, int size) {
-  if (apic_mmio_hit(gpa))
-    return apic_mmio_read(gpa, size);
-  if (g_plat)
-    return size == 1 ? 0xFF : size == 2 ? 0xFFFF : size == 4 ? 0xFFFFFFFFULL : ~0ULL;
-  uint64_t off = gpa - MMIO_TEST_BASE, v = 0;
-  if (off == 0)
-    return 0xA0A0A0A0ULL;
-  memcpy(&v, g_mmio_test + off, (size_t)size);
-  return v;
-}
-static void mmio_write(uint64_t gpa, int size, uint64_t v) {
-  if (apic_mmio_hit(gpa)) {
-    apic_mmio_write(gpa, size, v);
-    return;
-  }
-  if (g_plat)
-    return;
-  uint64_t off = gpa - MMIO_TEST_BASE;
-  if (off + (uint64_t)size <= sizeof(g_mmio_test) && off >= 4)
-    memcpy(g_mmio_test + off, &v, (size_t)size);
-}
-
-// ---------------------------------------------------------------------------
-// Memoria del huesped: lectura virtual (recorrido de tablas) para decodificar
-// ---------------------------------------------------------------------------
-static int gpa_read(uint64_t gpa, void *dst, size_t n) {
-  if (gpa + n > g_ram_size)
+// INS/OUTS: el kernel solo describe la instruccion (RIP ya avanzo); aqui se mueven
+// los datos y se ajustan RSI/RDI y RCX, con el ajuste de 16/32 bits del registro.
+static int string_io(const struct avm_exit *x) {
+  struct avm_regs r;
+  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
     return -1;
-  memcpy(dst, g_ram + gpa, n);
-  return 0;
-}
-
-static int gva_to_gpa(const struct avm_regs *r, uint64_t gva, uint64_t *gpa) {
-  if (!(r->cr0 & (1ULL << 31))) {
-    *gpa = gva;
-    return 0;
-  }
-  uint64_t e;
-  if (r->efer & (1ULL << 10)) { // 4 niveles
-    uint64_t t = r->cr3 & ~0xFFFULL;
-    for (int lvl = 3; lvl >= 0; lvl--) {
-      uint64_t idx = (gva >> (12 + 9 * lvl)) & 0x1FF;
-      if (gpa_read(t + idx * 8, &e, 8) < 0 || !(e & 1))
-        return -1;
-      if (lvl > 0 && lvl < 3 && (e & 0x80)) {
-        uint64_t sz = 1ULL << (12 + 9 * lvl);
-        *gpa = (e & 0x000FFFFFFFFFF000ULL & ~(sz - 1)) | (gva & (sz - 1));
-        return 0;
+  int dir = (r.rflags & (1u << 10)) ? -1 : 1;
+  uint32_t size = x->io.size, n = x->io.count, done = 0;
+  uint64_t mask = x->io.asize == 0 ? 0xFFFFULL : x->io.asize == 1 ? 0xFFFFFFFFULL : ~0ULL;
+  uint64_t *ireg = x->io.is_write ? &r.rsi : &r.rdi;
+  uint64_t off0 = *ireg & mask;
+  uint64_t base = x->io.linear - off0; // base del segmento (lineal = base + desplazamiento)
+  int lm = (r.efer & (1ULL << 10)) && (r.cs.ar & (1u << 13));
+  for (; done < n; done++) {
+    uint64_t off = (off0 + (uint64_t)((int64_t)dir * (int64_t)size * (int64_t)done)) & mask;
+    uint64_t lin = base + off;
+    if (!lm)
+      lin &= 0xFFFFFFFFULL;
+    uint32_t v = 0;
+    if (x->io.is_write) {
+      if (lin_read(&r, lin, &v, size) < 0)
+        break;
+      io_out(x->io.port, v, (int)size);
+      if (g_exit_code >= 0) {
+        done++;
+        break;
       }
-      if (lvl == 0) {
-        *gpa = (e & 0x000FFFFFFFFFF000ULL) | (gva & 0xFFF);
-        return 0;
-      }
-      t = e & 0x000FFFFFFFFFF000ULL;
+    } else {
+      v = io_in(x->io.port, (int)size);
+      if (lin_write(&r, lin, &v, size) < 0)
+        break;
     }
+  }
+  uint64_t noff = (off0 + (uint64_t)((int64_t)dir * (int64_t)size * (int64_t)done)) & mask;
+  *ireg = (*ireg & ~mask) | noff;
+  if (x->io.rep)
+    r.rcx = (r.rcx & ~mask) | ((r.rcx - done) & mask);
+  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0)
+    return -1;
+  if (done < n && g_exit_code < 0) {
+    fprintf(stderr, "aurora-vm: INS/OUTS fallo en el elemento %u de %u (puerto 0x%x, lineal 0x%llx)\n",
+            done, n, x->io.port, (unsigned long long)x->io.linear);
     return -1;
   }
-  if (r->cr4 & 0x20)
-    return -1; // PAE de 32 bits: no soportado en F2
-  uint32_t d;
-  if (gpa_read((r->cr3 & ~0xFFFULL) + ((gva >> 22) & 0x3FF) * 4, &d, 4) < 0 || !(d & 1))
-    return -1;
-  if ((d & 0x80) && (r->cr4 & 0x10)) {
-    *gpa = ((uint64_t)(d & 0xFFC00000u)) | (gva & 0x3FFFFF);
-    return 0;
-  }
-  uint32_t t;
-  if (gpa_read((d & ~0xFFFu) + ((gva >> 12) & 0x3FF) * 4, &t, 4) < 0 || !(t & 1))
-    return -1;
-  *gpa = (t & ~0xFFFu) | (gva & 0xFFF);
   return 0;
 }
 
 // ---------------------------------------------------------------------------
-// Decodificador MMIO: MOV 88/89/8A/8B/C6/C7, MOVZX 0F B6/B7, MOVSX 0F BE/BF
+// Ventana de la VM y entrada del anfitrion
 // ---------------------------------------------------------------------------
-static uint64_t *reg_ptr(struct avm_regs *r, int n) {
-  uint64_t *tab[16] = {&r->rax, &r->rcx, &r->rdx, &r->rbx, &r->rsp, &r->rbp,
-                       &r->rsi, &r->rdi, &r->r8,  &r->r9,  &r->r10, &r->r11,
-                       &r->r12, &r->r13, &r->r14, &r->r15};
-  return tab[n & 15];
-}
+static int g_want_vga, g_want_win;
+static const char *g_vga_rom_path;
+static uint64_t g_vga_t_draw, g_vga_t_ev;
 
-static uint64_t reg_get(struct avm_regs *r, int n, int size, int rex) {
-  if (size == 1 && !rex && n >= 4 && n < 8)
-    return (*reg_ptr(r, n - 4) >> 8) & 0xFF;
-  uint64_t v = *reg_ptr(r, n);
-  return size == 1 ? v & 0xFF : size == 2 ? v & 0xFFFF : size == 4 ? v & 0xFFFFFFFFULL : v;
-}
-static void reg_set(struct avm_regs *r, int n, int size, int rex, uint64_t v) {
-  if (size == 1 && !rex && n >= 4 && n < 8) {
-    uint64_t *p = reg_ptr(r, n - 4);
-    *p = (*p & ~0xFF00ULL) | ((v & 0xFF) << 8);
+static void vga_poll(uint64_t t) {
+  if (!g_vga_on || !g_want_win)
     return;
+  if (t - g_vga_t_ev >= 8000000ULL) {
+    g_vga_t_ev = t;
+    if (g_vw >= 0) {
+      struct aw_event ev;
+      int guard = 0;
+      while (guard++ < 256 && aw_sys(AW_WIN_POLL, (uint64_t)g_vw, (uint64_t)&ev, 0, 0, 0) > 0) {
+        switch (ev.type) {
+        case AWEV_CLOSE: g_vw_closed = 1; break;
+        case AWEV_RESIZE: g_vw_cw = ev.x; g_vw_ch = ev.y; break;
+        case AWEV_FOCUS: host_focus(1); break;
+        case AWEV_BLUR: host_focus(0); break;
+        case AWEV_KEY: host_window_key((uint8_t)ev.x, 1); break;
+        case AWEV_PTR: host_pointer(ev.x, ev.y, (int)(ev.data & 7), 0); break;
+        case AWEV_PTR_LEAVE: host_pointer(0, 0, 0, 1); break;
+        default: break;
+        }
+      }
+    }
+    host_input_poll();
   }
-  uint64_t *p = reg_ptr(r, n);
-  switch (size) {
-  case 1: *p = (*p & ~0xFFULL) | (v & 0xFF); break;
-  case 2: *p = (*p & ~0xFFFFULL) | (v & 0xFFFF); break;
-  case 4: *p = v & 0xFFFFFFFFULL; break; // 32 bits ponen a cero la mitad alta
-  default: *p = v;
+  if (t - g_vga_t_draw >= 33000000ULL) {
+    g_vga_t_draw = t;
+    int w = 0, h = 0;
+    uint32_t *px = vga_render(&w, &h);
+    if (px)
+      vw_present(px, w, h);
   }
 }
 
-// 0 = emulado (regs actualizados, rip avanzado); <0 = no se pudo
-static int emulate_mmio(struct avm_regs *r, uint64_t gpa, int is_write) {
-  uint64_t rip_lin = r->cs.base + r->rip, rip_gpa;
+// ---------------------------------------------------------------------------
+// Interrupciones hacia el vCPU
+//
+// Como cpu_get_pic_interrupt de QEMU: primero el LAPIC (si el TPR lo deja), luego
+// el 8259 por LINT0 (ExtINT) y, si no, el vector del LAPIC bloqueado por el TPR
+// (el kernel lo retiene hasta que CR8 baje). Lo que se pide al kernel puede no
+// entregarse en esa vuelta: solo cuando x.irq_pending == -1 se hace el INTA
+// (pic_intack_vector / lapic_accept). Si lo que toca cambia antes de entregarse,
+// se retira y se pide lo nuevo.
+// ---------------------------------------------------------------------------
+static int g_inflight = -1; // valor pedido a AVM_INJECT_IRQ y aun sin entregar
+
+static int irq_want(void) {
+  int cand = g_apic_on ? lapic_candidate() : -1;
+  if (cand >= 0 && ((uint32_t)cand & 0xF0) > (LREG(L_TPR) & 0xF0))
+    return cand | (int)AVM_IRQ_TPR;
+  if ((!g_apic_on || lapic_accept_pic()) && pic_output()) {
+    int v = pic_peek_vector();
+    if (v >= 0)
+      return v;
+  }
+  if (cand >= 0)
+    return cand | (int)AVM_IRQ_TPR;
+  return -1;
+}
+
+static void irq_after_exit(const struct avm_exit *x) {
+  if (g_apic_on)
+    LREG(L_TPR) = x->tpr & 0xFF;
+  if (g_inflight >= 0 && x->irq_pending < 0) { // entregada
+    if (g_inflight & (int)AVM_IRQ_TPR) {
+      lapic_accept(g_inflight & 0xFF);
+    } else {
+      int v = pic_intack_vector();
+      if (v != (g_inflight & 0xFF) && g_debug > 1)
+        fprintf(stderr, "aurora-vm: INTA del 8259 dio 0x%x (se entrego 0x%x)\n", v, g_inflight & 0xFF);
+    }
+    g_inflight = -1;
+  }
+}
+
+static void irq_withdraw(void) {
+  if (g_inflight >= 0) {
+    ioctl(g_vm, AVM_WITHDRAW_IRQ, 0);
+    g_inflight = -1;
+  }
+}
+
+static void irq_before_run(void) {
+  if (g_apic_on && g_tpr_dirty) {
+    ioctl(g_vm, AVM_SET_TPR, (unsigned long)(LREG(L_TPR) & 0xFF));
+    g_tpr_dirty = 0;
+  }
+  int want = irq_want();
+  if (want == g_inflight)
+    return;
+  irq_withdraw();
+  if (want >= 0) {
+    if (ioctl(g_vm, AVM_INJECT_IRQ, (unsigned long)want) == 0)
+      g_inflight = want;
+    else if (g_debug > 1)
+      fprintf(stderr, "aurora-vm: AVM_INJECT_IRQ 0x%x: %s\n", want, strerror(errno));
+  }
+}
+
+// ¿La interrupcion pedida entraria ya (sin contar IF)?
+static int irq_deliverable_now(void) {
+  if (g_inflight < 0)
+    return 0;
+  if (!(g_inflight & (int)AVM_IRQ_TPR))
+    return 1;
+  return ((uint32_t)g_inflight & 0xF0) > (LREG(L_TPR) & 0xF0);
+}
+
+// Dispositivos con tiempo: genera lo que toque y devuelve el proximo instante.
+static uint64_t devices_poll(uint64_t now) {
+  uint64_t next = pit_poll(now), t;
+  if (g_plat) {
+    t = rtc_poll(now);
+    if (t < next) next = t;
+    t = pm_poll(now);
+    if (t < next) next = t;
+  }
+  if (g_apic_on) {
+    lapic_poll(now);
+    if (g_lt_running && g_lt_deadline < next)
+      next = g_lt_deadline;
+  }
+  vga_poll(now);
+  if (g_vga_on && g_want_win) {
+    uint64_t w = g_vga_t_ev + 8000000ULL;
+    if (w < next) next = w;
+  }
+  return next;
+}
+
+static unsigned g_cur_timeout;
+static void set_run_timeout(uint64_t now, uint64_t next) {
+  uint64_t ms = next <= now ? 1 : (next - now + 999999ULL) / 1000000ULL;
+  if (ms < 1) ms = 1;
+  if (ms > 10) ms = 10;
+  if (ms != g_cur_timeout) {
+    ioctl(g_vm, AVM_SET_TIMEOUT, (unsigned long)ms);
+    g_cur_timeout = (unsigned)ms;
+  }
+}
+
+static void sleep_until(uint64_t t) {
+  uint64_t n = now_ns();
+  if (t <= n)
+    return;
+  uint64_t d = t - n;
+  struct timespec ts = {(time_t)(d / 1000000000ULL), (long)(d % 1000000000ULL)};
+  nanosleep(&ts, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostico
+// ---------------------------------------------------------------------------
+static void dump_regs(const char *why) {
+  struct avm_regs r;
+  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
+    return;
+  fprintf(stderr,
+          "aurora-vm: %s\n"
+          "  rip=%llx rsp=%llx rflags=%llx cs=%x(base %llx ar %x) ss=%x\n"
+          "  rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx rbp=%llx\n"
+          "  cr0=%llx cr2=%llx cr3=%llx cr4=%llx efer=%llx gdt=%llx/%x idt=%llx/%x tpr=%x\n",
+          why, (unsigned long long)r.rip, (unsigned long long)r.rsp,
+          (unsigned long long)r.rflags, r.cs.selector, (unsigned long long)r.cs.base, r.cs.ar,
+          r.ss.selector, (unsigned long long)r.rax, (unsigned long long)r.rbx,
+          (unsigned long long)r.rcx, (unsigned long long)r.rdx, (unsigned long long)r.rsi,
+          (unsigned long long)r.rdi, (unsigned long long)r.rbp, (unsigned long long)r.cr0,
+          (unsigned long long)r.cr2, (unsigned long long)r.cr3, (unsigned long long)r.cr4,
+          (unsigned long long)r.efer, (unsigned long long)r.gdt_base, r.gdt_limit,
+          (unsigned long long)r.idt_base, r.idt_limit, LREG(L_TPR));
   uint8_t b[16];
-  if (gva_to_gpa(r, rip_lin, &rip_gpa) < 0 || gpa_read(rip_gpa, b, sizeof(b)) < 0)
+  int n = insn_bytes(&r, b, 16);
+  fprintf(stderr, "  bytes en rip:");
+  for (int i = 0; i < n; i++)
+    fprintf(stderr, " %02x", b[i]);
+  fprintf(stderr, "\n");
+}
+
+static void dump_io(void) {
+  unsigned n = g_iolog_n < IOLOG_N ? g_iolog_n : IOLOG_N;
+  fprintf(stderr, "  ultimos accesos de E/S (%u en total):\n", g_iolog_n);
+  for (unsigned i = 0; i < n; i++) {
+    unsigned k = (g_iolog_n - n + i) % IOLOG_N;
+    fprintf(stderr, "    %s 0x%04x/%u = 0x%x\n", g_iolog[k].w ? "OUT" : "IN ", g_iolog[k].port,
+            g_iolog[k].size, g_iolog[k].v);
+  }
+  fprintf(stderr, "  PIC: irr %02x/%02x imr %02x/%02x isr %02x/%02x  IRQ pedida: %x\n",
+          g_pic[0].irr, g_pic[1].irr, g_pic[0].imr, g_pic[1].imr, g_pic[0].isr, g_pic[1].isr,
+          (unsigned)g_inflight);
+  if (g_dbgbuf_n) {
+    size_t from = g_dbgbuf_n > 5000 ? g_dbgbuf_n - 5000 : 0;
+    fprintf(stderr, "--- log de SeaBIOS (final) ---\n%.*s\n", (int)(g_dbgbuf_n - from), g_dbgbuf + from);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Encendido / reinicio de la plataforma
+// ---------------------------------------------------------------------------
+static struct avm_regs g_reset_regs; // CPU recien encendida (modo real, F000:FFF0)
+static int g_boot_cd;
+
+static void bios_load_copies(void) {
+  size_t low = g_bios_n < BIOS_SIZE ? g_bios_n : BIOS_SIZE;
+  memcpy(g_ram + 0x100000 - low, g_bios_img + (g_bios_n - low), low);
+  memcpy(g_ram + g_ram_size, g_bios_img, g_bios_n);
+}
+
+static void platform_reset_devices(void) {
+  g_poweroff = 0;
+  memset(&g_pm, 0, sizeof(g_pm));
+  g_port92 = 0x02;
+  g_reset_req = 0;
+  pic_reset();
+  pit_reset();
+  cmos_init(g_ram_size, g_boot_cd);
+  i8042_reset();
+  lapic_reset();
+  ioapic_reset();
+  pci_init();
+  ide_reset_all();
+  if (g_vga_on) {
+    // LFB y ROM vuelven a estar sin mapear hasta que la BIOS programe los BAR
+    struct avm_memory m = {.fd = -1, .slot = 2, .gpa = 0, .size = 0, .offset = 0};
+    ioctl(g_vm, AVM_SET_MEMORY, &m);
+    m.slot = 3;
+    ioctl(g_vm, AVM_SET_MEMORY, &m);
+    vga_reset();
+  }
+}
+
+static int g_resets;
+static uint64_t g_reset_t0;
+
+// Reinicio del huesped (0xCF9, 0x64 FE, 0x92, triple fallo): todo como al encender
+// (la BIOS se recarga entera; SeaBIOS hace un arranque en frio).
+static int guest_reset(const char *why) {
+  uint64_t t = now_ns();
+  if (t - g_reset_t0 > 30000000000ULL) {
+    g_reset_t0 = t;
+    g_resets = 0;
+  }
+  if (++g_resets > 5) {
+    fprintf(stderr, "aurora-vm: el huesped se reinicia en bucle (%s); se para\n", why);
     return -1;
-  bool lm = (r->efer & (1ULL << 10)) && (r->cs.ar & (1u << 13));
-  bool d32 = (r->cs.ar & (1u << 14)) != 0;
-  int opsz = lm || d32 ? 4 : 2;
-  bool addr16 = !lm && !d32;
-  int i = 0, rex = 0;
-  bool p66 = false, p67 = false;
-  for (;; i++) {
-    if (b[i] == 0x66) p66 = true;
-    else if (b[i] == 0x67) p67 = true;
-    else if (b[i] == 0x2E || b[i] == 0x36 || b[i] == 0x3E || b[i] == 0x26 ||
-             b[i] == 0x64 || b[i] == 0x65 || b[i] == 0xF3 || b[i] == 0xF2)
-      ;
-    else break;
   }
-  if (p66) opsz = opsz == 4 ? 2 : 4;
-  if (p67) addr16 = !addr16;
-  if (lm && (b[i] & 0xF0) == 0x40) {
-    rex = b[i++];
-    if (rex & 8) opsz = 8;
-  }
-  uint8_t op = b[i++];
-  if (op >= 0xA0 && op <= 0xA3) { // MOV AL/AX/EAX <-> [moffs]
-    int sz = (op & 1) ? opsz : 1;
-    int al = lm && !p67 ? 8 : addr16 ? 2 : 4;
-    if (lm && p67) al = 4;
-    i += al;
-    if (is_write != (op >= 0xA2))
-      return -1;
-    if (is_write)
-      mmio_write(gpa, sz, reg_get(r, 0, sz, rex));
-    else
-      reg_set(r, 0, sz, rex, mmio_read(gpa, sz));
-    r->rip += (uint64_t)i;
-    return 0;
-  }
-  int kind; // 0 mov rm<-reg, 1 mov reg<-rm, 2 mov rm<-imm, 3 movzx, 4 movsx
-  int size = opsz, srcsz = 0;
-  if (op == 0x88 || op == 0x89) { kind = 0; if (op == 0x88) size = 1; }
-  else if (op == 0x8A || op == 0x8B) { kind = 1; if (op == 0x8A) size = 1; }
-  else if (op == 0xC6 || op == 0xC7) { kind = 2; if (op == 0xC6) size = 1; }
-  else if (op == 0x0F && (b[i] == 0xB6 || b[i] == 0xB7 || b[i] == 0xBE || b[i] == 0xBF)) {
-    uint8_t o2 = b[i++];
-    kind = (o2 < 0xB8) ? 3 : 4;
-    srcsz = (o2 & 1) ? 2 : 1;
-  } else {
-    fprintf(stderr, "aurora-vm: instruccion MMIO no soportada: %02x %02x %02x %02x\n",
-            b[0], b[1], b[2], b[3]);
+  fprintf(stderr, "aurora-vm: reinicio del huesped (%s)\n", why);
+  irq_withdraw();
+  bios_load_copies();
+  platform_reset_devices();
+  g_dbgbuf_n = 0;
+  if (ioctl(g_vm, AVM_SET_REGS, &g_reset_regs) < 0) {
+    perror("AVM_SET_REGS");
     return -1;
   }
-  uint8_t modrm = b[i++];
-  int mod = modrm >> 6, reg = ((modrm >> 3) & 7) | ((rex & 4) ? 8 : 0), rm = modrm & 7;
-  if (mod == 3)
-    return -1;
-  // longitud de SIB/desplazamiento
-  if (addr16) {
-    if (mod == 0 && rm == 6) i += 2;
-    else if (mod == 1) i += 1;
-    else if (mod == 2) i += 2;
-  } else {
-    if (rm == 4) {
-      uint8_t sib = b[i++];
-      if (mod == 0 && (sib & 7) == 5) i += 4;
-    } else if (mod == 0 && rm == 5) {
-      i += 4;
-    }
-    if (mod == 1) i += 1;
-    else if (mod == 2) i += 4;
-  }
-  uint64_t val = 0;
-  int msize = (kind == 3 || kind == 4) ? srcsz : size;
-  if (kind == 2) {
-    int isz = size == 1 ? 1 : size == 2 ? 2 : 4;
-    memcpy(&val, b + i, (size_t)isz);
-    if (size == 8 && (val & 0x80000000ULL)) val |= 0xFFFFFFFF00000000ULL;
-    i += isz;
-  }
-  if (is_write != (kind == 0 || kind == 2)) // el tipo de acceso no encaja con la instruccion
-    return -1;
-  if (kind == 0) {
-    val = reg_get(r, reg, size, rex);
-    mmio_write(gpa, msize, val);
-  } else if (kind == 2) {
-    mmio_write(gpa, msize, val);
-  } else {
-    uint64_t v = mmio_read(gpa, msize);
-    if (kind == 4) {
-      if (msize == 1) v = (uint64_t)(int64_t)(int8_t)v;
-      else v = (uint64_t)(int64_t)(int16_t)v;
-    }
-    reg_set(r, reg, size, rex, v);
-  }
-  r->rip += (uint64_t)i;
+  ioctl(g_vm, AVM_SET_TPR, 0UL);
+  g_tpr_dirty = 0;
   return 0;
 }
 
 // ---------------------------------------------------------------------------
-// Ejecucion
+// Bucle principal
+// ---------------------------------------------------------------------------
+static int run_loop(uint64_t deadline_ns) {
+  ioctl(g_vm, AVM_SET_DEBUG, (unsigned long)(g_debug ? 1 : 0));
+  g_cur_timeout = 0;
+  g_inflight = -1;
+  struct avm_exit x;
+  memset(&x, 0, sizeof(x));
+  for (unsigned long n = 0;; n++) {
+    uint64_t tnow = now_ns();
+    if (deadline_ns && tnow > deadline_ns) {
+      fprintf(stderr, "aurora-vm: tiempo agotado\n");
+      dump_regs("estado al agotarse el tiempo");
+      dump_io();
+      return 5;
+    }
+    if (g_reset_req) {
+      g_reset_req = 0;
+      if (!g_plat) {
+        fprintf(stderr, "aurora-vm: el huesped pidio reiniciar\n");
+        return 0;
+      }
+      if (guest_reset("peticion del huesped") < 0)
+        return 2;
+      memset(&x, 0, sizeof(x));
+      continue;
+    }
+    if (g_poweroff) {
+      fprintf(stderr, "aurora-vm: el huesped se apago (ACPI)\n");
+      return 0;
+    }
+    if (g_vw_closed) {
+      fprintf(stderr, "aurora-vm: ventana cerrada\n");
+      return 0;
+    }
+    uint64_t next = devices_poll(tnow);
+    irq_before_run();
+    set_run_timeout(tnow, next);
+    if (ioctl(g_vm, AVM_RUN, &x) < 0) {
+      perror("AVM_RUN");
+      return 1;
+    }
+    irq_after_exit(&x);
+    switch (x.reason) {
+    case AVM_EXIT_IO:
+      if (x.io.string) {
+        if (string_io(&x) < 0) {
+          dump_regs("fallo en INS/OUTS");
+          return 2;
+        }
+      } else if (x.io.is_write) {
+        io_out(x.io.port, x.io.data, x.io.size);
+      } else {
+        x.io.data = io_in(x.io.port, x.io.size);
+      }
+      if (g_exit_code >= 0)
+        return g_exit_code;
+      break;
+    case AVM_EXIT_MMIO: {
+      struct avm_regs r;
+      if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
+        perror("AVM_GET_REGS");
+        return 1;
+      }
+      if (insn_emulate(&r, x.mmio.gpa) < 0) {
+        char why[160];
+        snprintf(why, sizeof(why), "acceso a memoria de dispositivo sin emular en 0x%llx: %s",
+                 (unsigned long long)x.mmio.gpa, g_insn_err ? g_insn_err : "?");
+        dump_regs(why);
+        dump_io();
+        return 2;
+      }
+      if (ioctl(g_vm, AVM_SET_REGS, &r) < 0) {
+        perror("AVM_SET_REGS");
+        return 1;
+      }
+      break;
+    }
+    case AVM_EXIT_HLT: {
+      struct avm_regs r;
+      if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
+        return 1;
+      if (!(r.rflags & (1u << 9))) { // HLT con IF=0: solo un NMI lo despertaria
+        if (!g_plat)
+          return 0;
+        dump_regs("el huesped se detuvo (HLT con interrupciones desactivadas)");
+        if (g_vga_on && g_want_win) { // dejar la pantalla (p. ej. pantalla azul) hasta cerrar
+          while (!g_vw_closed) {
+            vga_poll(now_ns());
+            struct timespec ts = {0, 20000000};
+            nanosleep(&ts, NULL);
+          }
+          return 0;
+        }
+        if (g_vga_on)
+          vga_dump_text(stderr);
+        return 3;
+      }
+      // Dormir hasta el proximo evento de un dispositivo, salvo que ya haya algo
+      // que entregar.
+      uint64_t t = now_ns();
+      uint64_t nx = devices_poll(t);
+      irq_before_run();
+      if (irq_deliverable_now())
+        break;
+      if (!g_plat && nx == ~0ULL && g_inflight < 0)
+        return 0; // nada puede despertarlo
+      if (nx > t + 10000000ULL)
+        nx = t + 10000000ULL;
+      sleep_until(nx);
+      break;
+    }
+    case AVM_EXIT_SIGNAL:
+    case AVM_EXIT_TPR:
+    case AVM_EXIT_INTR_WINDOW:
+      break;
+    case AVM_EXIT_SHUTDOWN:
+      dump_regs("triple fallo del huesped");
+      if (!g_plat)
+        return 2;
+      if (guest_reset("triple fallo") < 0) {
+        dump_io();
+        return 2;
+      }
+      memset(&x, 0, sizeof(x));
+      break;
+    default:
+      fprintf(stderr,
+              "aurora-vm: fallo de VMX (salida %u, motivo %u, codigo %llu, qual 0x%llx); "
+              "mira dmesg: lineas [VMX]\n",
+              x.reason, x.hw_reason, (unsigned long long)x.fail.code,
+              (unsigned long long)x.fail.qual);
+      dump_regs("estado del huesped");
+      return 3;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Creacion de la VM
 // ---------------------------------------------------------------------------
 static int open_vm(void) {
   int fd = open(DEV, O_RDWR | O_CLOEXEC);
@@ -578,236 +759,46 @@ static int cmd_caps(void) {
   return (c.flags & AVM_CAP_USABLE) ? 0 : 1;
 }
 
-// INS/OUTS: el kernel solo describe la instruccion; aqui se mueven los datos
-// y se ajustan RSI/RDI y RCX (RIP ya avanzo).
-static int string_io(const struct avm_exit *x) {
-  struct avm_regs r;
-  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
-    return -1;
-  int dir = (r.rflags & (1u << 10)) ? -1 : 1;
-  uint32_t size = x->io.size, n = x->io.count, done = 0;
-  uint64_t lin = x->io.linear;
-  for (; done < n; done++) {
-    uint64_t gpa;
-    if (gva_to_gpa(&r, lin, &gpa) < 0 || gpa + size > g_ram_size)
-      break;
-    if (x->io.is_write) {
-      uint32_t v = 0;
-      memcpy(&v, g_ram + gpa, size);
-      io_out(x->io.port, v, (int)size);
-    } else {
-      uint32_t v = io_in(x->io.port, (int)size);
-      memcpy(g_ram + gpa, &v, size);
-    }
-    lin += (uint64_t)(int64_t)dir * size;
-  }
-  uint64_t mask = x->io.asize == 0 ? 0xFFFFULL : x->io.asize == 1 ? 0xFFFFFFFFULL : ~0ULL;
-  uint64_t *reg = x->io.is_write ? &r.rsi : &r.rdi;
-  int64_t delta = (int64_t)dir * (int64_t)size * (int64_t)done;
-  *reg = x->io.asize == 0 ? ((*reg & ~mask) | ((uint64_t)((int64_t)*reg + delta) & mask))
-                          : (uint64_t)((int64_t)*reg + delta) & mask;
-  if (x->io.rep)
-    r.rcx = x->io.asize == 0 ? ((r.rcx & ~mask) | ((r.rcx - done) & mask)) : (r.rcx - done) & mask;
-  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0)
-    return -1;
-  if (done < n) {
-    fprintf(stderr, "aurora-vm: INS/OUTS fallo en la direccion 0x%llx (puerto 0x%x)\n",
-            (unsigned long long)lin, x->io.port);
+static int set_slot(uint32_t slot, uint64_t gpa, uint64_t size, uint64_t offset) {
+  struct avm_memory m = {.fd = g_mfd, .slot = slot, .gpa = gpa, .size = size, .offset = offset};
+  if (ioctl(g_vm, AVM_SET_MEMORY, &m) < 0) {
+    fprintf(stderr, "aurora-vm: AVM_SET_MEMORY (slot %u, 0x%llx+0x%llx): %s\n", slot,
+            (unsigned long long)gpa, (unsigned long long)size, strerror(errno));
     return -1;
   }
   return 0;
 }
 
-// Ventana de la VM: dibuja ~30 veces por segundo y lleva el teclado al i8042.
-static int g_want_vga, g_want_win;
-static const char *g_vga_rom_path;
-static uint64_t g_vga_t_draw, g_vga_t_ev;
-
-static void vga_poll(uint64_t t) {
-  if (!g_vga_on || !g_want_win)
-    return;
-  if (t - g_vga_t_ev >= 8000000ULL) {
-    g_vga_t_ev = t;
-    if (g_vw >= 0) {
-      struct aw_event ev;
-      int guard = 0;
-      while (guard++ < 64 && aw_sys(AW_WIN_POLL, (uint64_t)g_vw, (uint64_t)&ev, 0, 0, 0) > 0) {
-        if (ev.type == AWEV_CLOSE) {
-          g_vw_closed = 1;
-        } else if (ev.type == AWEV_RESIZE) {
-          g_vw_cw = ev.x;
-          g_vw_ch = ev.y;
-        } else if (ev.type == AWEV_KEY) {
-          uint8_t sc = (uint8_t)ev.x;
-          kbc_push(ev.y ? sc : (uint8_t)(sc | 0x80), 0);
-        }
-      }
-    }
-    if (g_kbc.n && (g_kbc.cfg & 1) && !g_kbc.qaux[0])
-      pic_pulse(1);
+static void vm_close(void) {
+  if (g_vw >= 0) {
+    aw_sys(AW_WIN_DESTROY, (uint64_t)g_vw, 0, 0, 0, 0);
+    g_vw = -1;
   }
-  if (t - g_vga_t_draw >= 33000000ULL) {
-    g_vga_t_draw = t;
-    int w = 0, h = 0;
-    uint32_t *px = vga_render(&w, &h);
-    if (px)
-      vw_present(px, w, h);
-  }
-}
-
-static int run_loop(unsigned max_iter, uint64_t deadline_ns) {
-  ioctl(g_vm, AVM_SET_TIMEOUT, 2);
-  ioctl(g_vm, AVM_SET_DEBUG, g_debug);
-  struct avm_exit x;
-  memset(&x, 0, sizeof(x));
-  for (unsigned n = 0; n < max_iter; n++) {
-    if (deadline_ns && (n & 63) == 0 && now_ns() > deadline_ns) {
-      fprintf(stderr, "aurora-vm: tiempo agotado\n");
-      {
-        struct avm_regs tr;
-        if (ioctl(g_vm, AVM_GET_REGS, &tr) == 0)
-          fprintf(stderr, "  cs=%x:%llx (base %llx) rflags=%llx cr0=%llx ax=%llx bx=%llx cx=%llx dx=%llx\n",
-                  tr.cs.selector, (unsigned long long)tr.rip, (unsigned long long)tr.cs.base,
-                  (unsigned long long)tr.rflags, (unsigned long long)tr.cr0,
-                  (unsigned long long)tr.rax, (unsigned long long)tr.rbx,
-                  (unsigned long long)tr.rcx, (unsigned long long)tr.rdx);
-        fprintf(stderr, "  ultimos accesos de E/S (%u en total):\n", g_iolog_n);
-        unsigned n = g_iolog_n < 24 ? g_iolog_n : 24;
-        for (unsigned i = 0; i < n; i++) {
-          unsigned k = (g_iolog_n - n + i) % 24;
-          fprintf(stderr, "    %s 0x%04x/%u = 0x%x\n", g_iolog[k].w ? "OUT" : "IN ", g_iolog[k].port,
-                  g_iolog[k].size, g_iolog[k].v);
-        }
-        if (g_dbgbuf_n) {
-          size_t from = g_dbgbuf_n > 5000 ? g_dbgbuf_n - 5000 : 0;
-          fprintf(stderr, "--- log de SeaBIOS (final) ---\n%.*s\n", (int)(g_dbgbuf_n - from),
-                  g_dbgbuf + from);
-        }
-      }
-      return 5;
-    }
-    if (g_reset_req) {
-      fprintf(stderr, "aurora-vm: el huesped pidio reiniciar\n");
-      return 0;
-    }
-    {
-      uint64_t tnow = now_ns();
-      pit_poll(tnow);
-      if (g_apic_on)
-        lapic_poll(tnow);
-      vga_poll(tnow);
-      if (g_vw_closed) {
-        fprintf(stderr, "aurora-vm: ventana cerrada\n");
-        return 0;
-      }
-    }
-    if (g_poweroff) {
-      fprintf(stderr, "aurora-vm: el huesped se apago (ACPI)\n");
-      return 0;
-    }
-    int which = 0, line = 0, vec = -1;
-    int lv = g_apic_on ? lapic_deliverable() : -1;
-    if (lv >= 0) {
-      if (ioctl(g_vm, AVM_INJECT_IRQ, lv) == 0)
-        lapic_accept(lv);
-    } else {
-      vec = pic_peek(&which, &line);
-      if (vec >= 0 && ioctl(g_vm, AVM_INJECT_IRQ, vec) == 0)
-        pic_accept(which, line);
-    }
-    if (ioctl(g_vm, AVM_RUN, &x) < 0) {
-      perror("AVM_RUN");
-      return 1;
-    }
-    switch (x.reason) {
-    case AVM_EXIT_IO:
-      if (x.io.string) {
-        if (string_io(&x) < 0)
-          return 2;
-        if (g_exit_code >= 0)
-          return g_exit_code;
-        break;
-      }
-      if (x.io.is_write) {
-        io_out(x.io.port, x.io.data, x.io.size);
-        if (g_exit_code >= 0)
-          return g_exit_code;
-      } else {
-        x.io.data = io_in(x.io.port, x.io.size);
-      }
-      break;
-    case AVM_EXIT_HLT: {
-      struct avm_regs hr;
-      ioctl(g_vm, AVM_GET_REGS, &hr);
-      if (!(hr.rflags & (1u << 9)))
-        return 0; // HLT con IF=0: el huesped termino
-      uint64_t wake = ~0ULL;
-      if (g_vga_on && g_want_win)
-        wake = now_ns() + 8000000ULL;
-      if (g_pit.running && g_pit.next_ns < wake)
-        wake = g_pit.next_ns;
-      if (g_apic_on && g_lt_running && g_lt_deadline < wake)
-        wake = g_lt_deadline;
-      if (wake == ~0ULL) {
-        if (g_plat) { // BIOS: puede estar esperando una E/S del VMM; no terminar
-          struct timespec ts = {0, 1000000};
-          nanosleep(&ts, NULL);
-          break;
-        }
-        return 0; // nada puede despertarlo
-      }
-      uint64_t t = now_ns();
-      if (wake > t) {
-        struct timespec ts = {0, (long)(wake - t)};
-        nanosleep(&ts, NULL);
-      }
-      break;
-    }
-    case AVM_EXIT_SIGNAL:
-      break;
-    case AVM_EXIT_SHUTDOWN:
-    {
-      struct avm_regs sr;
-      ioctl(g_vm, AVM_GET_REGS, &sr);
-      fprintf(stderr,
-              "aurora-vm: el huesped se apago (triple fallo)\n"
-              "  rip=%llx rsp=%llx rflags=%llx cs=%x(base %llx ar %x) cr0=%llx cr3=%llx cr4=%llx efer=%llx\n"
-              "  gdt=%llx/%x idt=%llx/%x\n",
-              (unsigned long long)sr.rip, (unsigned long long)sr.rsp,
-              (unsigned long long)sr.rflags, sr.cs.selector,
-              (unsigned long long)sr.cs.base, sr.cs.ar, (unsigned long long)sr.cr0,
-              (unsigned long long)sr.cr3, (unsigned long long)sr.cr4,
-              (unsigned long long)sr.efer, (unsigned long long)sr.gdt_base,
-              sr.gdt_limit, (unsigned long long)sr.idt_base, sr.idt_limit);
-    }
-      return 2;
-    case AVM_EXIT_MMIO: {
-      struct avm_regs mr;
-      if (!mmio_known(x.mmio.gpa) || ioctl(g_vm, AVM_GET_REGS, &mr) < 0 ||
-          emulate_mmio(&mr, x.mmio.gpa, x.mmio.is_write) < 0 ||
-          ioctl(g_vm, AVM_SET_REGS, &mr) < 0) {
-        fprintf(stderr, "aurora-vm: acceso MMIO sin resolver en 0x%llx\n",
-                (unsigned long long)x.mmio.gpa);
-        return 2;
-      }
-      break;
-    }
-    default:
-      fprintf(stderr,
-              "aurora-vm: fallo de VMX (salida %u, motivo %u, codigo %llu, qual 0x%llx); "
-              "mira dmesg: lineas [VMX]\n",
-              x.reason, x.hw_reason, (unsigned long long)x.fail.code,
-              (unsigned long long)x.fail.qual);
-      return 3;
-    }
-  }
-  fprintf(stderr, "aurora-vm: demasiadas salidas sin terminar\n");
-  return 4;
+  if (g_vm >= 0)
+    close(g_vm);
+  g_vm = -1;
+  if (g_ram && g_ram != MAP_FAILED)
+    munmap(g_ram, g_ram_size + (g_plat ? g_bios_n : 0));
+  g_ram = NULL;
+  if (g_mfd >= 0)
+    close(g_mfd);
+  g_mfd = -1;
 }
 
 static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_mb) {
+  g_plat = 0;
+  g_apic_on = 0;
+  g_vga_on = 0;
+  g_exit_port = 1;
+  g_bios_n = 0;
   pic_reset();
   pit_reset();
+  // Como una BIOS: 8259 en 0x08 / 0x70, todo enmascarado.
+  static const uint8_t init[][2] = {{0x20, 0x11}, {0x21, 0x08}, {0x21, 0x04}, {0x21, 0x01},
+                                    {0xA0, 0x11}, {0xA1, 0x70}, {0xA1, 0x02}, {0xA1, 0x01},
+                                    {0xA1, 0xFF}, {0x21, 0xFF}};
+  for (size_t i = 0; i < sizeof(init) / sizeof(init[0]); i++)
+    pic_out(init[i][0], init[i][1]);
   memset(g_mmio_test, 0, sizeof(g_mmio_test));
   g_exit_code = -1;
   g_out_n = 0;
@@ -815,13 +806,14 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
   if (g_vm < 0)
     return 1;
   g_ram_size = (uint64_t)mem_mb << 20;
-  int mfd = g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
-  if (mfd < 0 || ftruncate(mfd, (off_t)g_ram_size) < 0) {
+  g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
+  if (g_mfd < 0 || ftruncate(g_mfd, (off_t)g_ram_size) < 0) {
     perror("memfd");
     return 1;
   }
-  g_ram = mmap(NULL, g_ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+  g_ram = mmap(NULL, g_ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_mfd, 0);
   if (g_ram == MAP_FAILED) {
+    g_ram = NULL;
     perror("mmap");
     return 1;
   }
@@ -830,11 +822,8 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
     return 1;
   }
   memcpy(g_ram + at, code, len);
-  struct avm_memory m = {.fd = mfd, .slot = 0, .gpa = 0, .size = g_ram_size, .offset = 0};
-  if (ioctl(g_vm, AVM_SET_MEMORY, &m) < 0) {
-    perror("AVM_SET_MEMORY");
+  if (set_slot(0, 0, g_ram_size, 0) < 0)
     return 1;
-  }
   struct avm_regs r;
   if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
     perror("AVM_GET_REGS");
@@ -851,7 +840,7 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
     perror("AVM_SET_REGS");
     return 1;
   }
-  return run_loop(20000000, 0);
+  return run_loop(now_ns() + 30000000000ULL);
 }
 
 static int autotest(void) {
@@ -876,164 +865,169 @@ static int autotest(void) {
       printf("   rc=%d salida=\"%s\"\n", rc, g_out);
       bad++;
     }
-    close(g_vm);
-    munmap(g_ram, g_ram_size);
-    close(g_mfd);
+    vm_close();
   }
   return bad ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
-// F3a: arranque con SeaBIOS y un disco virtio-blk
+// PC completo con SeaBIOS
 // ---------------------------------------------------------------------------
 #define DEFAULT_BIOS "/usr/share/aurora/vm/bios.bin"
 #define DEFAULT_VGABIOS "/usr/share/aurora/vm/vgabios.bin"
 
-static int run_bios(const char *bios_path, const char *disk_path, const char *ide_path,
-                    unsigned mem_mb, unsigned timeout_s, int acpi) {
-  if (mem_mb < 16 || mem_mb > 3072) {
+struct bios_opts {
+  const char *bios, *disk, *ide, *cd;
+  unsigned mem_mb, timeout_s;
+  int acpi, boot_cd;
+};
+
+static int open_virtio_disk(const char *path) {
+  g_disk_ro = 0;
+  g_disk_fd = open(path, O_RDWR | O_CLOEXEC);
+  if (g_disk_fd < 0) {
+    g_disk_ro = 1;
+    g_disk_fd = open(path, O_RDONLY | O_CLOEXEC);
+  }
+  if (g_disk_fd < 0) {
+    fprintf(stderr, "aurora-vm: no puedo abrir el disco %s: %s\n", path, strerror(errno));
+    return -1;
+  }
+  struct stat st;
+  uint64_t bytes = 0;
+  if (fstat(g_disk_fd, &st) == 0) {
+    bytes = (uint64_t)st.st_size;
+    if (S_ISBLK(st.st_mode)) {
+      off_t e = lseek(g_disk_fd, 0, SEEK_END);
+      bytes = e > 0 ? (uint64_t)e : 0;
+    }
+  }
+  if (bytes < 512) {
+    fprintf(stderr, "aurora-vm: el disco %s esta vacio\n", path);
+    return -1;
+  }
+  g_disk_sectors = bytes / 512;
+  if (g_disk_ro)
+    fprintf(stderr, "aurora-vm: aviso: disco abierto solo lectura\n");
+  return 0;
+}
+
+static int run_bios(const struct bios_opts *o) {
+  if (o->mem_mb < 16 || o->mem_mb > 3072) {
     fprintf(stderr, "aurora-vm: --mem debe estar entre 16 y 3072 MiB\n");
     return 1;
   }
-  FILE *f = fopen(bios_path, "rb");
+  FILE *f = fopen(o->bios, "rb");
   if (!f) {
-    fprintf(stderr, "aurora-vm: no encuentro la BIOS %s: %s\n", bios_path, strerror(errno));
+    fprintf(stderr, "aurora-vm: no encuentro la BIOS %s: %s\n", o->bios, strerror(errno));
     return 1;
   }
-  static uint8_t bios[256 * 1024];
-  size_t bn = fread(bios, 1, sizeof(bios), f);
+  size_t bn = fread(g_bios_img, 1, sizeof(g_bios_img), f);
+  int more = fgetc(f) != EOF;
   fclose(f);
-  if (bn < 64 * 1024 || bn > sizeof(bios) || (bn & 0xFFFF)) {
-    fprintf(stderr, "aurora-vm: %s: tamano de BIOS no valido (%zu bytes; se esperan 64..256 KiB multiplo de 64 KiB)\n",
-            bios_path, bn);
+  if (more || bn < 64 * 1024 || (bn & 0xFFFF)) {
+    fprintf(stderr, "aurora-vm: %s: tamano de BIOS no valido (se esperan 64..256 KiB, multiplo de 64 KiB)\n",
+            o->bios);
     return 1;
   }
-  if (disk_path) {
-    g_disk_ro = 0;
-    g_disk_fd = open(disk_path, O_RDWR | O_CLOEXEC);
-    if (g_disk_fd < 0) {
-      g_disk_ro = 1;
-      g_disk_fd = open(disk_path, O_RDONLY | O_CLOEXEC);
-    }
-    if (g_disk_fd < 0) {
-      fprintf(stderr, "aurora-vm: no puedo abrir el disco %s: %s\n", disk_path, strerror(errno));
-      return 1;
-    }
-    struct stat st;
-    if (fstat(g_disk_fd, &st) < 0 || st.st_size < 512) {
-      fprintf(stderr, "aurora-vm: el disco %s esta vacio\n", disk_path);
-      return 1;
-    }
-    g_disk_sectors = (uint64_t)st.st_size / 512;
-    if (g_disk_ro)
-      fprintf(stderr, "aurora-vm: aviso: disco abierto solo lectura\n");
-  }
+  g_bios_n = bn;
+  g_bios_gpa = 0x100000000ULL - bn;
+
+  // Discos
+  g_disk_fd = -1;
+  g_disk_sectors = 0;
+  if (o->disk && open_virtio_disk(o->disk) < 0)
+    return 1;
+  memset(g_ide, 0, sizeof(g_ide));
   g_ide_on = 0;
-  if (ide_path) {
-    g_ide_ro = 0;
-    g_ide_fd = open(ide_path, O_RDWR | O_CLOEXEC);
-    if (g_ide_fd < 0) {
-      g_ide_ro = 1;
-      g_ide_fd = open(ide_path, O_RDONLY | O_CLOEXEC);
-    }
-    struct stat ist;
-    if (g_ide_fd < 0 || fstat(g_ide_fd, &ist) < 0 || ist.st_size < 512) {
-      fprintf(stderr, "aurora-vm: no puedo usar el disco IDE %s: %s\n", ide_path,
-              g_ide_fd < 0 ? strerror(errno) : "vacio");
-      return 1;
-    }
-    g_ide_sectors = (uint64_t)ist.st_size / 512;
-    g_ide_on = 1;
-    if (g_ide_ro)
-      fprintf(stderr, "aurora-vm: aviso: disco IDE abierto solo lectura\n");
-  }
-  g_acpi_on = g_apic_on = acpi;
-  g_poweroff = 0;
-  memset(&g_pm, 0, sizeof(g_pm));
-  lapic_reset();
-  ioapic_reset();
-  pic_reset();
-  pit_reset();
-  // El PIT cuenta solo desde el encendido (65536 ciclos): SeaBIOS lo lee como
-  // temporizador antes de programarlo; si no avanza, sus esperas no terminan.
-  g_pit.reload = 65536;
-  g_pit.period_ns = 65536ULL * 1000000000ULL / PIT_HZ;
-  g_pit.start_ns = now_ns();
-  g_pit.next_ns = g_pit.start_ns + g_pit.period_ns;
-  g_pit.running = 1;
-  kbc_reset();
-  pci_init();
+  if (o->ide && ide_attach(0, 0, IDE_HD, o->ide) < 0)
+    return 1;
+  if (o->cd && ide_attach(1, 0, IDE_CD, o->cd) < 0)
+    return 1;
   ide_init();
+  g_boot_cd = o->boot_cd;
+
+  g_acpi_on = g_apic_on = o->acpi;
+  g_plat = 1;
   g_exit_code = -1;
-  g_reset_req = 0;
   g_out_n = 0;
   g_dbgbuf_n = 0;
   g_iolog_n = 0;
-  g_ram_size = (uint64_t)mem_mb << 20;
-  cmos_init(g_ram_size);
-  g_plat = 1;
+  g_resets = 0;
+  g_ram_size = (uint64_t)o->mem_mb << 20;
+
   g_vm = open_vm();
   if (g_vm < 0)
     return 1;
-  int mfd = g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
-  if (mfd < 0 || ftruncate(mfd, (off_t)(g_ram_size + bn)) < 0) {
+  g_mfd = memfd_create("aurora-vm-ram", MFD_CLOEXEC);
+  if (g_mfd < 0 || ftruncate(g_mfd, (off_t)(g_ram_size + bn)) < 0) {
     perror("memfd");
     return 1;
   }
-  g_ram = mmap(NULL, g_ram_size + bn, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+  g_ram = mmap(NULL, g_ram_size + bn, PROT_READ | PROT_WRITE, MAP_SHARED, g_mfd, 0);
   if (g_ram == MAP_FAILED) {
+    g_ram = NULL;
     perror("mmap");
     return 1;
   }
-  // La BIOS aparece arriba de los 4 GiB (vector de reinicio) y en 0xE0000-0xFFFFF
-  // (SeaBIOS se copia a si misma a esa zona). Aqui ambas son RAM del huesped.
-  size_t low = bn < BIOS_SIZE ? bn : BIOS_SIZE;
-  memcpy(g_ram + 0x100000 - low, bios + (bn - low), low);
-  memcpy(g_ram + g_ram_size, bios, bn);
-  struct avm_memory m0 = {.fd = mfd, .slot = 0, .gpa = 0, .size = g_ram_size, .offset = 0};
-  struct avm_memory m1 = {.fd = mfd, .slot = 1, .gpa = 0x100000000ULL - bn, .size = bn,
-                          .offset = g_ram_size};
-  if (ioctl(g_vm, AVM_SET_MEMORY, &m0) < 0 || ioctl(g_vm, AVM_SET_MEMORY, &m1) < 0) {
-    perror("AVM_SET_MEMORY");
+  bios_load_copies();
+  // RAM en dos trozos alrededor del hueco VGA (0xA0000-0xBFFFF, siempre MMIO) y la
+  // BIOS en lo alto de los 4 GiB (vector de reinicio). SeaBIOS se copia a si misma
+  // a 0xE0000-0xFFFFF, que aqui es RAM (y ya lleva la copia).
+  if (set_slot(0, 0, VGA_HOLE_LO, 0) < 0 ||
+      set_slot(4, VGA_HOLE_HI, g_ram_size - VGA_HOLE_HI, VGA_HOLE_HI) < 0 ||
+      set_slot(1, g_bios_gpa, bn, g_ram_size) < 0)
     return 1;
-  }
+
   g_vga_on = 0;
   if (g_want_vga) {
     static uint8_t vrom[VGA_ROM_SIZE];
     size_t vn = 0;
-    FILE *vf = fopen(g_vga_rom_path ? g_vga_rom_path : DEFAULT_VGABIOS, "rb");
+    const char *vp = g_vga_rom_path ? g_vga_rom_path : DEFAULT_VGABIOS;
+    FILE *vf = fopen(vp, "rb");
     if (vf) {
       vn = fread(vrom, 1, sizeof(vrom), vf);
       fclose(vf);
     }
     if (vn < 512) {
-      fprintf(stderr, "aurora-vm: no encuentro la ROM de VGA %s (se arranca sin VGA)\n",
-              g_vga_rom_path ? g_vga_rom_path : DEFAULT_VGABIOS);
+      fprintf(stderr, "aurora-vm: no encuentro la ROM de VGA %s (se arranca sin VGA)\n", vp);
     } else if (vga_setup(vrom, vn) < 0) {
       perror("aurora-vm: VGA");
       return 1;
     }
   }
-  struct avm_regs r;
-  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
+  platform_reset_devices();
+  if (g_want_win && g_vga_on)
+    host_input_open();
+
+  // CPU recien encendida
+  if (ioctl(g_vm, AVM_GET_REGS, &g_reset_regs) < 0) {
     perror("AVM_GET_REGS");
     return 1;
   }
+  struct avm_regs *r = &g_reset_regs;
   struct avm_seg ds = {.base = 0, .limit = 0xFFFF, .selector = 0, .ar = 0x93};
   struct avm_seg cs = {.base = 0xFFFF0000ULL, .limit = 0xFFFF, .selector = 0xF000, .ar = 0x9B};
-  r.cs = cs;
-  r.ds = r.es = r.fs = r.gs = r.ss = ds;
-  r.rip = 0xFFF0;
-  r.rsp = 0;
-  r.rflags = 2;
-  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0) {
+  r->cs = cs;
+  r->ds = r->es = r->fs = r->gs = r->ss = ds;
+  r->rip = 0xFFF0;
+  r->rsp = 0;
+  r->rflags = 2;
+  r->rax = r->rbx = r->rcx = r->rsi = r->rdi = r->rbp = 0;
+  r->rdx = 0x600; // firma de la CPU (familia 6)
+  r->r8 = r->r9 = r->r10 = r->r11 = r->r12 = r->r13 = r->r14 = r->r15 = 0;
+  r->cr0 = 0x60000010;
+  r->cr2 = r->cr3 = r->cr4 = r->efer = 0;
+  r->gdt_base = r->idt_base = 0;
+  r->gdt_limit = r->idt_limit = 0xFFFF;
+  if (ioctl(g_vm, AVM_SET_REGS, r) < 0) {
     perror("AVM_SET_REGS");
     return 1;
   }
-  if (acpi && ioctl(g_vm, AVM_SET_FLAGS, AVM_VMF_APIC) < 0)
+  if (o->acpi && ioctl(g_vm, AVM_SET_FLAGS, (unsigned long)AVM_VMF_APIC) < 0)
     perror("AVM_SET_FLAGS (kernel antiguo sin soporte de APIC?)");
-  uint64_t deadline = timeout_s ? now_ns() + (uint64_t)timeout_s * 1000000000ULL : 0;
-  return run_loop(0xFFFFFFFFu, deadline);
+  uint64_t deadline = o->timeout_s ? now_ns() + (uint64_t)o->timeout_s * 1000000000ULL : 0;
+  return run_loop(deadline);
 }
 
 static int bios_test(int acpi, int vga) {
@@ -1063,7 +1057,11 @@ static int bios_test(int acpi, int vga) {
   g_want_win = 0;
   if (vga && getenv("AURORA_VM_VGABIOS"))
     g_vga_rom_path = getenv("AURORA_VM_VGABIOS");
-  int rc = run_bios(getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS, path, NULL, 32, 60, acpi);
+  struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,
+                        .disk = path, .mem_mb = 32, .timeout_s = 60, .acpi = acpi};
+  g_exit_port = 1; // el sector de arranque de prueba termina por el puerto 0xF4
+  int rc = run_bios(&o);
+  vm_close();
   unlink(path);
   g_out[g_out_n] = 0;
   const char *expect = "MBR arrancado desde SeaBIOS\nDisco OK\n";
@@ -1077,36 +1075,43 @@ static int bios_test(int acpi, int vga) {
     printf("--- pantalla de texto del huesped ---\n");
     vga_dump_text(stdout);
   }
-  ok = ok && vok;
-  return ok ? 0 : 1;
+  return ok && vok ? 0 : 1;
+}
+
+static void usage(void) {
+  fprintf(stderr,
+          "Uso: aurora-vm --caps | --autotest | --bios-test[-acpi|-vga] |\n"
+          "       --plano FICH [--en DIR] [--mem MiB] |\n"
+          "       --bios [--ide IMG] [--cd ISO] [--disco IMG] [--mem MiB] [--arranque cd|disco]\n"
+          "              [--rom FICH] [--vgarom FICH] [--tiempo S] [--log-bios] [--sin-acpi]\n"
+          "              [--sin-vga] [--sin-ventana] | PROGRAMA.exe\n"
+          "  Ejemplo (instalar Windows):\n"
+          "    aurora-vm --bios --ide win.img --cd windows.iso --mem 2048\n");
 }
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "Uso: aurora-vm --caps | --autotest | --bios-test | --plano FICH [--en DIR] [--mem MiB] |\n"
-          "       --bios [--rom FICH] [--disco IMG] [--ide IMG] [--mem MiB] [--tiempo S] [--log-bios] [--sin-acpi] | PROGRAMA.exe\n");
+    usage();
     return 2;
   }
   if (!strcmp(argv[1], "--caps"))
     return cmd_caps();
   if (!strcmp(argv[1], "--autotest"))
     return autotest();
-  if (!strcmp(argv[1], "--bios-test"))
-    return bios_test(0, 0);
-  if (!strcmp(argv[1], "--bios-test-acpi"))
-    return bios_test(1, 0);
-  if (!strcmp(argv[1], "--bios-test-vga"))
-    return bios_test(1, 1);
+  if (!strcmp(argv[1], "--bios-test") || !strcmp(argv[1], "--bios-test-acpi") ||
+      !strcmp(argv[1], "--bios-test-vga")) {
+    int acpi = strcmp(argv[1], "--bios-test") != 0, vga = !strcmp(argv[1], "--bios-test-vga");
+    return bios_test(acpi, vga);
+  }
   if (!strcmp(argv[1], "--bios")) {
-    const char *rom = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS;
-    const char *disk = NULL, *ide = NULL;
-    unsigned mem = 128, tmo = 0;
-    int acpi = 1, vga = 1, win = 1;
+    struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,
+                          .mem_mb = 1024, .acpi = 1, .boot_cd = -1};
+    int vga = 1, win = 1;
     for (int i = 2; i < argc; i++) {
       if (!strcmp(argv[i], "--log-bios"))
         g_bios_log = 1;
       else if (!strcmp(argv[i], "--sin-acpi"))
-        acpi = 0;
+        o.acpi = 0;
       else if (!strcmp(argv[i], "--sin-vga"))
         vga = 0;
       else if (!strcmp(argv[i], "--sin-ventana"))
@@ -1114,28 +1119,48 @@ int main(int argc, char **argv) {
       else if (i + 1 < argc && !strcmp(argv[i], "--vgarom"))
         g_vga_rom_path = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--rom"))
-        rom = argv[++i];
+        o.bios = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--disco"))
-        disk = argv[++i];
+        o.disk = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--ide"))
-        ide = argv[++i];
+        o.ide = argv[++i];
+      else if (i + 1 < argc && !strcmp(argv[i], "--cd"))
+        o.cd = argv[++i];
       else if (i + 1 < argc && !strcmp(argv[i], "--mem"))
-        mem = (unsigned)strtoul(argv[++i], NULL, 0);
+        o.mem_mb = (unsigned)strtoul(argv[++i], NULL, 0);
       else if (i + 1 < argc && !strcmp(argv[i], "--tiempo"))
-        tmo = (unsigned)strtoul(argv[++i], NULL, 0);
-      else {
+        o.timeout_s = (unsigned)strtoul(argv[++i], NULL, 0);
+      else if (i + 1 < argc && !strcmp(argv[i], "--arranque")) {
+        const char *a = argv[++i];
+        if (!strcmp(a, "cd"))
+          o.boot_cd = 1;
+        else if (!strcmp(a, "disco"))
+          o.boot_cd = 0;
+        else {
+          fprintf(stderr, "aurora-vm: --arranque cd|disco\n");
+          return 2;
+        }
+      } else {
         fprintf(stderr, "aurora-vm: opcion desconocida: %s\n", argv[i]);
+        usage();
         return 2;
       }
     }
+    if (o.boot_cd < 0)
+      o.boot_cd = o.cd != NULL; // con CD se arranca de el (y si no arranca, del disco)
     g_want_vga = vga;
     g_want_win = vga && win;
     if (getenv("AURORA_VM_VGABIOS") && !g_vga_rom_path)
       g_vga_rom_path = getenv("AURORA_VM_VGABIOS");
-    int vrc = run_bios(rom, disk, ide, mem, tmo, acpi);
-    if (g_vga_on && !g_want_win && vrc != 0)
+    g_exit_port = 0;
+    if (g_want_win && access("/dev/input/event0", R_OK) != 0)
+      fprintf(stderr, "aurora-vm: aviso: sin acceso a /dev/input/event0 (grupo input): "
+                      "el teclado solo enviara pulsaciones sueltas\n");
+    int rc = run_bios(&o);
+    if (g_vga_on && !g_want_win && rc != 0)
       vga_dump_text(stderr);
-    return vrc;
+    vm_close();
+    return rc;
   }
   if (!strcmp(argv[1], "--plano") && argc >= 3) {
     uint64_t at = 0x1000;
@@ -1158,12 +1183,13 @@ int main(int argc, char **argv) {
       fprintf(stderr, "aurora-vm: %s vacio o ilegible\n", argv[2]);
       return 1;
     }
-    return run_flat(buf, n, at, mem);
+    int rc = run_flat(buf, n, at, mem);
+    vm_close();
+    return rc;
   }
   fprintf(stderr,
-          "aurora-vm: %s: ejecutar programas Windows necesita un huesped completo "
-          "(ReactOS/Windows en una imagen), que llega en las fases F3-F5 de "
-          "Plan_MiniVM.md. Por ahora solo --caps, --autotest y --plano.\n",
+          "aurora-vm: %s: para programas Windows hace falta un Windows instalado en una imagen.\n"
+          "  Arranca uno con: aurora-vm --bios --ide win.img [--cd instalador.iso]\n",
           argv[1]);
   return 126;
 }

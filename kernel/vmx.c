@@ -57,10 +57,13 @@
 
 // Controles
 #define PIN_EXT_INTR (1u << 0)
+#define PIN_NMI (1u << 3)
 #define PROC_INTR_WINDOW (1u << 2)
 #define PROC_HLT (1u << 7)
 #define PROC_MWAIT (1u << 10)
 #define PROC_MOV_DR (1u << 23)
+#define PROC_CR8_LOAD (1u << 19)
+#define PROC_CR8_STORE (1u << 20)
 #define PROC_MONITOR (1u << 29)
 #define PROC_UNCOND_IO (1u << 24)
 #define PROC_SECONDARY (1u << 31)
@@ -85,6 +88,7 @@ enum {
   F_EXIT_MSR_STORE_ADDR = 0x2006, F_EXIT_MSR_LOAD_ADDR = 0x2008,
   F_ENTRY_MSR_LOAD_ADDR = 0x200A, F_EPT_POINTER = 0x201A,
   F_GUEST_PHYS_ADDR = 0x2400,
+  F_GUEST_PDPTE0 = 0x280A,
   F_VMCS_LINK = 0x2800, F_GUEST_DEBUGCTL = 0x2802, F_GUEST_EFER = 0x2806,
   F_HOST_EFER = 0x2C02,
   F_PIN = 0x4000, F_PROC = 0x4002, F_EXC_BITMAP = 0x4004, F_PF_MASK = 0x4006,
@@ -128,6 +132,8 @@ enum {
   XR_CPUID = 10, XR_HLT = 12, XR_CR_ACCESS = 28, XR_IO = 30, XR_RDMSR = 31,
   XR_WRMSR = 32, XR_INVALID_GUEST = 33, XR_MSR_LOAD_FAIL = 34,
   XR_EPT_VIOLATION = 48, XR_EPT_MISCONFIG = 49,
+  XR_INIT = 3, XR_SIPI = 4, XR_TASK_SWITCH = 9, XR_INVLPG = 14, XR_RDPMC = 15,
+  XR_INVEPT = 50, XR_INVVPID = 53, XR_WBINVD = 54, XR_VMFUNC = 59,
 };
 
 // ---------------------------------------------------------------------------
@@ -142,11 +148,14 @@ struct msr_ent {
   uint32_t index, reserved;
   uint64_t value;
 };
-// MSRs del huesped que el VMCS no guarda (SYSCALL y KERNEL_GS_BASE): se cargan
-// y se guardan con las listas de MSR de VM-entry/VM-exit.
-#define NGMSR 5
-static const uint32_t guest_msr_idx[NGMSR] = {
-    MSR_STAR, MSR_LSTAR, MSR_CSTAR, MSR_SFMASK, MSR_KERNEL_GS_BASE};
+// MSRs del huesped que el VMCS no guarda (SYSCALL, KERNEL_GS_BASE y TSC_AUX):
+// se cargan y se guardan con las listas de MSR de VM-entry/VM-exit. TSC_AUX
+// solo si la CPU tiene RDTSCP (si no, leerlo en el host daria #GP).
+#define NGMSR_MAX 6
+#define MSR_TSC_AUX 0xC0000103u
+static const uint32_t guest_msr_idx[NGMSR_MAX] = {
+    MSR_STAR, MSR_LSTAR, MSR_CSTAR, MSR_SFMASK, MSR_KERNEL_GS_BASE, MSR_TSC_AUX};
+static int g_ngmsr = 5;
 
 struct slot {
   bool used;
@@ -162,7 +171,14 @@ struct avm_vm {
   uint64_t sysenter_cs, sysenter_esp, sysenter_eip;
   uint64_t pat, tsc_aux_unused;
   uint32_t interruptibility, activity;
-  int32_t pending_irq; // -1 = ninguna
+  int32_t pending_irq; // -1 = ninguna; vector | AVM_IRQ_TPR
+  uint32_t tpr;        // TPR del LAPIC (registro 0x80); CR8 = tpr >> 4
+  uint32_t tpr_wait;   // clase bloqueada por el TPR en el VMM (0 = ninguna)
+  // Evento que se estaba entregando cuando hubo una salida (IDT-vectoring):
+  // se vuelve a inyectar en la siguiente entrada o se perderia.
+  bool reinj;
+  uint32_t reinj_info, reinj_err, reinj_len;
+  uint32_t msr_logged;
   uint32_t timeout_ms;
   uint64_t dr[8];
   uint32_t debug, exc_logged;
@@ -176,13 +192,15 @@ struct avm_vm {
   struct slot slots[AVM_MAX_SLOTS];
   // EPT
   uint64_t ept_pml4; // fisica
+  bool ept_dirty;    // el EPT cambio: INVEPT antes de la siguiente entrada
+  int last_cpu;      // CPU de la ultima ventana (-1 = ninguna)
   uint64_t *ept_tables;
   size_t ept_ntables, ept_cap;
   // VMCS + listas de MSR (una pagina)
   uint64_t vmcs_phys;
   uint64_t msr_page_phys;
-  struct msr_ent *gmsr; // NGMSR: carga al entrar / guarda al salir
-  struct msr_ent *hmsr; // NGMSR: carga al salir (valores del host)
+  struct msr_ent *gmsr; // g_ngmsr: carga al entrar / guarda al salir
+  struct msr_ent *hmsr; // g_ngmsr: carga al salir (valores del host)
   uint64_t fx_page_phys; // 2 x 512 B: fxsave host (0) y huesped (512)
   bool launched;
   volatile int busy;
@@ -420,15 +438,25 @@ static int ept_map_4k(struct avm_vm *vm, uint64_t gpa, uint64_t hpa) {
   return 0;
 }
 
-static void invept_all(void) {
-  if (!(g_vmx.caps.ept_vpid_cap & (1ULL << 20)))
+// Invalida en ESTA CPU las traducciones cacheadas del EPT de la VM (fisicas del
+// huesped y combinadas). INVEPT solo afecta a la CPU que lo ejecuta: se llama al
+// empezar cada ventana si el EPT cambio o la VM viene de otra CPU.
+static void invept_ctx(uint64_t eptp) {
+  uint64_t cap = g_vmx.caps.ept_vpid_cap;
+  if (!(cap & (1ULL << 20)))
     return;
-  struct { uint64_t eptp, rsvd; } desc = {0, 0};
-  uint64_t type = (g_vmx.caps.ept_vpid_cap & (1ULL << 26)) ? 2 : 1;
-  if (type == 1) // sin global: no sabemos el EPTP aqui; los slots nuevos no lo necesitan
+  struct { uint64_t eptp, rsvd; } desc = {eptp, 0};
+  uint64_t type;
+  if (cap & (1ULL << 25))
+    type = 1; // un contexto
+  else if (cap & (1ULL << 26))
+    type = 2; // todos
+  else
     return;
   __asm__ volatile("invept %0, %1" : : "m"(desc), "r"(type) : "cc", "memory");
 }
+
+static uint64_t vm_eptp(struct avm_vm *vm) { return vm->ept_pml4 | (3ULL << 3) | 6ULL; }
 
 static struct slot *find_slot(struct avm_vm *vm, uint64_t gpa) {
   for (int i = 0; i < AVM_MAX_SLOTS; i++) {
@@ -534,10 +562,13 @@ static void gdt_sidt(uint64_t *gbase, uint16_t *glim, uint64_t *ibase,
 }
 
 static void vmcs_setup_static(struct avm_vm *vm) {
-  vm->pinbased = adjust_ctl(PIN_EXT_INTR, g_vmx.true_ctls ? MSR_VMX_TRUE_PIN
+  vm->pinbased = adjust_ctl(PIN_EXT_INTR | PIN_NMI, g_vmx.true_ctls ? MSR_VMX_TRUE_PIN
                                                           : MSR_VMX_PINBASED);
+  // CR8 siempre intercepta: sin esto (y sin TPR shadow) MOV CR8 del huesped
+  // escribiria el TPR del APIC REAL del host.
   vm->procbased = adjust_ctl(PROC_HLT | PROC_UNCOND_IO | PROC_SECONDARY |
-                                 PROC_MOV_DR | PROC_MWAIT | PROC_MONITOR,
+                                 PROC_MOV_DR | PROC_MWAIT | PROC_MONITOR |
+                                 PROC_CR8_LOAD | PROC_CR8_STORE,
                              g_vmx.true_ctls ? MSR_VMX_TRUE_PROC
                                              : MSR_VMX_PROCBASED);
   vm->procbased &= ~PROC_INTR_WINDOW;
@@ -560,7 +591,7 @@ static void vmcs_write_controls_and_host(struct avm_vm *vm) {
   vmwrite(F_PF_MASK, 0);
   vmwrite(F_PF_MATCH, 0);
   vmwrite(F_CR3_COUNT, 0);
-  vmwrite(F_EPT_POINTER, vm->ept_pml4 | (3ULL << 3) | 6ULL);
+  vmwrite(F_EPT_POINTER, vm_eptp(vm));
   vmwrite(F_VMCS_LINK, ~0ULL);
   vmwrite(F_CR0_MASK, cr0_owned());
   vmwrite(F_CR4_MASK, cr4_owned());
@@ -568,10 +599,10 @@ static void vmcs_write_controls_and_host(struct avm_vm *vm) {
   vmwrite(F_ENTRY_MSR_LOAD_ADDR, vm->msr_page_phys);
   vmwrite(F_EXIT_MSR_STORE_ADDR, vm->msr_page_phys);
   vmwrite(F_EXIT_MSR_LOAD_ADDR, vm->msr_page_phys + 256);
-  vmwrite(F_ENTRY_MSR_LOAD_CNT, NGMSR);
-  vmwrite(F_EXIT_MSR_STORE_CNT, NGMSR);
-  vmwrite(F_EXIT_MSR_LOAD_CNT, NGMSR);
-  for (int i = 0; i < NGMSR; i++)
+  vmwrite(F_ENTRY_MSR_LOAD_CNT, g_ngmsr);
+  vmwrite(F_EXIT_MSR_STORE_CNT, g_ngmsr);
+  vmwrite(F_EXIT_MSR_LOAD_CNT, g_ngmsr);
+  for (int i = 0; i < g_ngmsr; i++)
     vm->hmsr[i].value = rdmsr(guest_msr_idx[i]);
 
   // Estado del host (la CPU puede haber cambiado desde la ultima entrada).
@@ -726,7 +757,9 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
            (1u << 7) | (1u << 8) | (1u << 12) | (1u << 15) | (1u << 17) |
            (1u << 21) | (1u << 24) | (1u << 26) | (1u << 27) | (1u << 28) |
            (1u << 29) | (1u << 31));
-    d &= ~((1u << 21) | (1u << 22) | (1u << 28) | (1u << 29) | (1u << 31));
+    // Sin MCE/MCA (no hay bancos de machine check: Windows leeria MCG_CAP...).
+    d &= ~((1u << 7) | (1u << 14) | (1u << 21) | (1u << 22) | (1u << 28) |
+           (1u << 29) | (1u << 31));
     if (!(vm->vmflags & AVM_VMF_APIC))
       d &= ~(1u << 9); // APIC local: solo si el VMM lo emula (AVM_SET_FLAGS)
     b = (b & 0x0000FFFFu) | (1u << 16); // sin APIC id, 1 logico
@@ -737,8 +770,9 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
   case 7:
     if (sub == 0) {
       uint32_t invpcid = b & (1u << 10);
-      b &= (1u << 0) | (1u << 3) | (1u << 7) | (1u << 8) | (1u << 9) |
-           (1u << 18) | (1u << 19);
+      // Sin XSAVE/AVX no puede haber nada con prefijo VEX (BMI1/BMI2 lo son: el
+      // huesped las usaria y daria #UD). FSGSBASE tampoco (CR4.FSGSBASE no se deja).
+      b &= (1u << 7) | (1u << 9) | (1u << 18) | (1u << 19);
       if (vm->procbased2 & PROC2_INVPCID)
         b |= invpcid; // solo si el host lo tiene
       c = 0;
@@ -768,7 +802,7 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
   uint64_t val = ((g->rdx & 0xFFFFFFFFULL) << 32) | (g->rax & 0xFFFFFFFFULL);
   uint64_t out = 0;
   bool ok = true;
-  for (int i = 0; i < NGMSR; i++)
+  for (int i = 0; i < g_ngmsr; i++)
     if (idx == guest_msr_idx[i]) {
       if (write)
         vm->gmsr[i].value = val;
@@ -816,16 +850,25 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
     if (!write && (vm->vmflags & AVM_VMF_APIC))
       out = 0xFEE00900ULL;
     break;
-  case 0x3A:  // FEATURE_CONTROL
-  case 0x8B:  // microcode
-  case 0x1A0: // MISC_ENABLE
-  case 0xFE: case 0x2FF:               // MTRR cap / def type
-  case 0x200 ... 0x20F: case 0x250: case 0x258: case 0x259:
-  case 0x268 ... 0x26F:                // MTRR
-    out = 0;
+  case 0x3A:  // FEATURE_CONTROL: bloqueado, sin VMX/SMX
+    out = 1;
+    break;
+  case 0x35:  // CORE_THREAD_COUNT: 1 nucleo, 1 hilo
+    out = 0x00010001;
+    break;
+  case 0x1A0: // MISC_ENABLE: cadenas rapidas
+    out = 1;
     break;
   default:
-    ok = false;
+    // Como KVM con ignore_msrs: lectura 0 y escritura ignorada. Un #GP en un
+    // MSR que Windows lee sin proteger es una pantalla azul.
+    if (vm->msr_logged < 32) {
+      vm->msr_logged++;
+      LOG_INFO("[VMX] MSR %x %s sin emular (%s)", idx, write ? "escrito" : "leido",
+               write ? "se ignora" : "da 0");
+    }
+    out = 0;
+    break;
   }
 done:
   if (ok && !write) {
@@ -833,6 +876,35 @@ done:
     g->rdx = out >> 32;
   }
   return ok;
+}
+
+// Lee memoria fisica del huesped (dentro de una sola pagina). 0 o -1.
+static int guest_phys_read(struct avm_vm *vm, uint64_t gpa, void *buf, size_t len) {
+  struct slot *s = find_slot(vm, gpa);
+  if (!s || !s->node->ops || !s->node->ops->get_page ||
+      (gpa & (PAGE_SIZE - 1)) + len > PAGE_SIZE)
+    return -1;
+  uint64_t pgoff = (s->offset + ((gpa & ~(uint64_t)(PAGE_SIZE - 1)) - s->gpa)) / PAGE_SIZE;
+  uint64_t phys = 0;
+  if (s->node->ops->get_page(s->node, pgoff, &phys) < 0)
+    return -1;
+  memcpy(buf, (uint8_t *)phys_to_virt(phys & PTE_FRAME) + (gpa & (PAGE_SIZE - 1)), len);
+  return 0;
+}
+
+// Paginacion PAE de 32 bits: con EPT, VM-entry carga los PDPTE desde el VMCS (no
+// desde CR3). Cuando el kernel emula MOV CR0/CR3 tiene que cargarlos el.
+static void load_pdptes(struct avm_vm *vm) {
+  bool pae = (vm->cr4_shadow >> 5) & 1, pg = (vm->cr0_shadow >> 31) & 1;
+  bool lma = (vm->regs.efer >> 10) & 1;
+  if (!pae || !pg || lma)
+    return;
+  uint64_t pd[4] = {0, 0, 0, 0};
+  uint64_t base = vmread(F_GUEST_CR3) & 0xFFFFFFE0ULL;
+  if (guest_phys_read(vm, base, pd, sizeof(pd)) < 0)
+    memset(pd, 0, sizeof(pd));
+  for (int i = 0; i < 4; i++)
+    vmwrite(F_GUEST_PDPTE0 + 2 * i, pd[i]);
 }
 
 // Recalcula EFER.LMA y el control IA-32e tras tocar CR0.PG / EFER.LME.
@@ -849,7 +921,9 @@ static void update_long_mode(struct avm_vm *vm) {
 
 #define CR4_ALLOWED 0x1007FFULL
 
-static bool emu_cr_access(struct avm_vm *vm, struct gregs *g) {
+// 0 = emulado (seguir), 1 = emulado y hay que salir al VMM (AVM_EXIT_TPR),
+// -1 = no se sabe emular.
+static int emu_cr_access(struct avm_vm *vm, struct gregs *g) {
   uint64_t q = vmread(F_EXIT_QUAL);
   int cr = (int)(q & 0xF), type = (int)((q >> 4) & 3), reg = (int)((q >> 8) & 0xF);
   if (type == 2) { // CLTS
@@ -858,7 +932,7 @@ static bool emu_cr_access(struct avm_vm *vm, struct gregs *g) {
     vmwrite(F_CR0_SHADOW, vm->cr0_shadow);
     vmwrite(F_GUEST_CR0, fixed_cr0(vm, vm->regs.cr0));
     skip_insn(vm);
-    return true;
+    return 0;
   }
   if (type == 3) { // LMSW: solo los 4 bits bajos
     uint64_t v = (q >> 16) & 0xF;
@@ -867,7 +941,7 @@ static bool emu_cr_access(struct avm_vm *vm, struct gregs *g) {
     vmwrite(F_CR0_SHADOW, vm->cr0_shadow);
     vmwrite(F_GUEST_CR0, fixed_cr0(vm, vm->regs.cr0));
     skip_insn(vm);
-    return true;
+    return 0;
   }
   uint64_t *rp = gpr(g, vm, reg);
   if (reg == 4)
@@ -877,36 +951,53 @@ static bool emu_cr_access(struct avm_vm *vm, struct gregs *g) {
     case 0: *rp = vm->cr0_shadow; break;
     case 3: *rp = vmread(F_GUEST_CR3); break;
     case 4: *rp = vm->cr4_shadow; break;
-    default: return false;
+    case 8: *rp = (vm->tpr >> 4) & 0xF; break;
+    default: return -1;
     }
     skip_insn(vm);
-    return true;
+    return 0;
   }
   uint64_t v = *rp;
   switch (cr) {
   case 0:
-    if ((v >> 32) || (((v >> 31) & 1) && !((v >> 0) & 1))) { inject_gp(vm); return true; }
+    if ((v >> 32) || (((v >> 31) & 1) && !((v >> 0) & 1))) { inject_gp(vm); return 0; }
     vm->cr0_shadow = v | (1ULL << 4); // ET siempre
     vm->regs.cr0 = vm->cr0_shadow;
     vmwrite(F_CR0_SHADOW, vm->cr0_shadow);
     vmwrite(F_GUEST_CR0, fixed_cr0(vm, vm->regs.cr0));
     update_long_mode(vm);
+    load_pdptes(vm);
     break;
   case 3:
     vmwrite(F_GUEST_CR3, v);
+    load_pdptes(vm);
     break;
   case 4:
-    if (v & ~CR4_ALLOWED) { inject_gp(vm); return true; }
+    if (v & ~CR4_ALLOWED) { inject_gp(vm); return 0; }
     vm->cr4_shadow = v;
     vm->regs.cr4 = v;
     vmwrite(F_CR4_SHADOW, v);
     vmwrite(F_GUEST_CR4, fixed_cr4(v));
     break;
+  case 8: {
+    if (v & ~0xFULL) { inject_gp(vm); return 0; }
+    uint32_t old = vm->tpr;
+    vm->tpr = (uint32_t)v << 4;
+    skip_insn(vm);
+    // Subir: la interrupcion del LAPIC aun sin entregar puede no caber ya.
+    if (vm->tpr > old && vm->pending_irq >= 0 && (vm->pending_irq & AVM_IRQ_TPR) &&
+        ((uint32_t)vm->pending_irq & 0xF0) <= vm->tpr)
+      return 1;
+    // Bajar por debajo de lo que el VMM tiene bloqueado: que la entregue.
+    if (vm->tpr < old && vm->tpr_wait && vm->tpr_wait > (vm->tpr >> 4))
+      return 1;
+    return 0;
+  }
   default:
-    return false;
+    return -1;
   }
   skip_insn(vm);
-  return true;
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -941,6 +1032,14 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     return 1;
   }
   vm->launched = false; // tras VMCLEAR hay que usar VMLAUNCH
+  {
+    int cpu = smp_processor_id();
+    if (vm->ept_dirty || cpu != vm->last_cpu) {
+      invept_ctx(vm_eptp(vm));
+      vm->ept_dirty = false;
+      vm->last_cpu = cpu;
+    }
+  }
   vmcs_write_controls_and_host(vm);
   vmcs_write_guest(vm);
   memset(&g, 0, sizeof(g));
@@ -963,14 +1062,29 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       ret = 0;
       goto leave;
     }
-    // Interrupcion pendiente del VMM: inyectar si el huesped puede recibirla.
     uint32_t proc = vm->procbased;
+    // Primero el evento que una salida interrumpio a medio entregar.
+    if (vm->reinj && !(vmread(F_ENTRY_INTR_INFO) & (1u << 31))) {
+      uint32_t t = (vm->reinj_info >> 8) & 7;
+      vmwrite(F_ENTRY_INTR_INFO, vm->reinj_info & ~(1u << 12));
+      if (vm->reinj_info & (1u << 11))
+        vmwrite(F_ENTRY_ERRCODE, vm->reinj_err);
+      if (t == 4 || t == 5 || t == 6) // INT n / INT3 / INTO: longitud de la instruccion
+        vmwrite(F_ENTRY_INSTR_LEN, vm->reinj_len);
+      vm->reinj = false;
+    }
+    // Interrupcion pendiente del VMM: inyectar si el huesped puede recibirla.
     if (vm->pending_irq >= 0) {
       uint64_t rfl = vmread(F_GUEST_RFLAGS);
       uint64_t intr = vmread(F_GUEST_INTERRUPTIBILITY);
       uint64_t info = vmread(F_ENTRY_INTR_INFO);
-      if ((rfl & (1u << 9)) && !(intr & 3) && !(info & (1u << 31))) {
-        vmwrite(F_ENTRY_INTR_INFO, (uint32_t)vm->pending_irq | (1u << 31));
+      bool tpr_ok = !(vm->pending_irq & AVM_IRQ_TPR) ||
+                    ((uint32_t)vm->pending_irq & 0xF0) > (vm->tpr & 0xF0);
+      if (!tpr_ok) {
+        // Bloqueada por CR8: no se pide ventana (saldria en bucle); al bajar
+        // CR8 hay salida y se reevalua aqui.
+      } else if ((rfl & (1u << 9)) && !(intr & 3) && !(info & (1u << 31))) {
+        vmwrite(F_ENTRY_INTR_INFO, ((uint32_t)vm->pending_irq & 0xFF) | (1u << 31));
         vm->pending_irq = -1;
       } else {
         proc |= PROC_INTR_WINDOW;
@@ -1004,8 +1118,16 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     }
     x->hw_reason = reason;
 
-    // Reinyectar el evento que se estaba entregando cuando salimos.
+    // Evento que se estaba entregando cuando salimos (interrupcion inyectada,
+    // excepcion, INT n): hay que volver a inyectarlo o se pierde. Las salidas
+    // por excepcion (solo con depuracion) reinyectan la suya y no este.
     uint64_t idtv = vmread(F_IDTV_INFO);
+    if ((idtv & (1u << 31)) && reason != XR_EXC_NMI) {
+      vm->reinj = true;
+      vm->reinj_info = (uint32_t)idtv;
+      vm->reinj_err = (idtv & (1u << 11)) ? (uint32_t)vmread(F_IDTV_ERR) : 0;
+      vm->reinj_len = (uint32_t)vmread(F_EXIT_INSTR_LEN);
+    }
 
     switch (reason) {
     case XR_EXT_INTR:
@@ -1039,6 +1161,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
           if (++vm->exc_repeat > 64) { // el huesped se ha atascado fallando
             LOG_WARN("[VMX] excepcion #%u repetida en rip=%lx: se da por apagado",
                      vec, rip_now);
+            vm->reinj = false; // el VMM reinicia la CPU: no reinyectar nada viejo
             x->reason = AVM_EXIT_SHUTDOWN;
             ret = 1;
             goto leave;
@@ -1061,7 +1184,20 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       skip_insn(vm);
       continue;
     case XR_VMX_FIRST ... XR_VMX_LAST: // VMCALL, VMCLEAR, ... VMXON
+    case XR_INVEPT:
+    case XR_INVVPID:
+    case XR_VMFUNC:
       inject_ud();
+      continue;
+    case XR_INVLPG: // sin VPID cada entrada/salida vacia la TLB del huesped
+    case XR_WBINVD:
+      skip_insn(vm);
+      continue;
+    case XR_RDPMC:
+      inject_gp(vm);
+      continue;
+    case XR_INIT:
+    case XR_SIPI:
       continue;
     case XR_RDMSR:
     case XR_WRMSR:
@@ -1070,24 +1206,25 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       else
         inject_gp(vm);
       continue;
-    case XR_CR_ACCESS:
-      if (emu_cr_access(vm, &g))
+    case XR_CR_ACCESS: {
+      int cr_rc = emu_cr_access(vm, &g);
+      if (cr_rc == 0)
         continue;
+      if (cr_rc == 1) {
+        x->reason = AVM_EXIT_TPR;
+        ret = 1;
+        goto leave;
+      }
       fail_exit(x, reason, 0xC0, vmread(F_EXIT_QUAL));
       ret = 1;
       goto leave;
+    }
     case XR_EPT_VIOLATION: {
       uint64_t gpa = vmread(F_GUEST_PHYS_ADDR);
       uint64_t qual = vmread(F_EXIT_QUAL);
       int r2 = ept_fault(vm, gpa);
-      if (r2 == 0) {
-        if (idtv & (1u << 31)) {
-          vmwrite(F_ENTRY_INTR_INFO, idtv);
-          if (idtv & (1u << 11))
-            vmwrite(F_ENTRY_ERRCODE, vmread(F_IDTV_ERR));
-        }
-        continue;
-      }
+      if (r2 == 0)
+        continue; // el evento interrumpido (si lo habia) lo reinyecta la cabecera del bucle
       if (r2 < 0) {
         fail_exit(x, reason, (uint64_t)(-r2), gpa);
         ret = 1;
@@ -1186,6 +1323,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
                vmread(F_GUEST_CS_SEL), vmread(F_GUEST_CR0), vmread(F_GUEST_CR4),
                vmread(F_GUEST_EFER), vmread(F_GUEST_CR3),
                vmread(F_GUEST_IDTR_BASE), vmread(F_GUEST_IDTR_LIM));
+      vm->reinj = false; // el VMM reinicia la CPU: no reinyectar nada viejo
       x->reason = AVM_EXIT_SHUTDOWN;
       ret = 1;
       goto leave;
@@ -1222,6 +1360,8 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
     return -ENODEV;
   if (!access_ok((void *)uarg, sizeof(x)))
     return -EFAULT;
+  if (!vm->ept_pml4) // ept_reset sin memoria
+    return -ENOMEM;
   if (__atomic_exchange_n(&vm->busy, 1, __ATOMIC_ACQUIRE))
     return -EBUSY;
   int64_t rc = 0;
@@ -1261,6 +1401,8 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
       break;
     sched_yield(); // salida por IRQ del host: dejar que el planificador mande
   }
+  x.irq_pending = vm->pending_irq;
+  x.tpr = vm->tpr;
   if (copy_to_user((void *)uarg, &x, sizeof(x)) < 0)
     rc = -EFAULT;
 out:
@@ -1274,6 +1416,15 @@ out:
 static struct avm_vm *node_vm(vfs_node_t *node) {
   struct avm_vm *vm = (struct avm_vm *)node->priv;
   return (vm && vm->magic == VM_MAGIC) ? vm : NULL;
+}
+
+// Tira el EPT entero (se rellena por demanda). Las CPU con traducciones viejas
+// las invalidan al empezar la siguiente ventana (ept_dirty / cambio de CPU).
+static int ept_reset(struct avm_vm *vm) {
+  ept_free_all(vm);
+  vm->ept_pml4 = ept_new_table(vm);
+  vm->ept_dirty = true;
+  return vm->ept_pml4 ? 0 : -ENOMEM;
 }
 
 static void slot_release(struct slot *s) {
@@ -1308,7 +1459,7 @@ static int avm_open(vfs_node_t *node, int flags) {
   vm->fx_page_phys = fxp;
   vm->gmsr = (struct msr_ent *)phys_to_virt(msrp);
   vm->hmsr = (struct msr_ent *)((uint8_t *)phys_to_virt(msrp) + 256);
-  for (int i = 0; i < NGMSR; i++) {
+  for (int i = 0; i < g_ngmsr; i++) {
     vm->gmsr[i].index = guest_msr_idx[i];
     vm->hmsr[i].index = guest_msr_idx[i];
   }
@@ -1316,6 +1467,8 @@ static int avm_open(vfs_node_t *node, int flags) {
   uint8_t *fx = (uint8_t *)phys_to_virt(fxp) + 512;
   *(uint16_t *)fx = 0x37F;
   *(uint32_t *)(fx + 24) = 0x1F80;
+  vm->last_cpu = -1;
+  vm->ept_dirty = true;
   vm->ept_pml4 = ept_new_table(vm);
   if (!vm->ept_pml4) {
     pmm_free_page(vmcs); pmm_free_page(msrp); pmm_free_page(fxp);
@@ -1365,10 +1518,17 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
         copy_from_user(&m, (void *)arg, sizeof(m)) < 0)
       return -EFAULT;
     if (m.slot >= AVM_MAX_SLOTS || (m.gpa | m.size | m.offset) & (PAGE_SIZE - 1) ||
-        !m.size || m.gpa + m.size < m.gpa || m.gpa + m.size > (1ULL << 40))
+        m.gpa + m.size < m.gpa || m.gpa + m.size > (1ULL << 40))
       return -EINVAL;
     if (vm->busy)
       return -EBUSY;
+    if (!m.size) { // tamano 0: quitar el slot
+      struct slot *s0 = &vm->slots[m.slot];
+      if (!s0->used)
+        return 0;
+      slot_release(s0);
+      return ept_reset(vm);
+    }
     file_descriptor_t *f = vfs_fd_get_current(m.fd);
     if (!f)
       return -EBADF;
@@ -1393,13 +1553,8 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     s->used = true;
     s->gpa = m.gpa; s->size = m.size; s->offset = m.offset;
     s->fd = f; s->node = n;
-    if (replace) { // las paginas ya mapeadas del slot viejo ya no valen
-      ept_free_all(vm);
-      vm->ept_pml4 = ept_new_table(vm);
-      if (!vm->ept_pml4)
-        return -ENOMEM;
-      invept_all();
-    }
+    if (replace) // las paginas ya mapeadas del slot viejo ya no valen
+      return ept_reset(vm);
     return 0;
   }
   case AVM_SET_REGS: {
@@ -1422,11 +1577,26 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   case AVM_RUN:
     return vm_run(vm, arg);
   case AVM_INJECT_IRQ:
-    if (arg > 255)
+    if ((arg & 0xFF) < 16 && (arg & AVM_IRQ_TPR)) // vectores 0-15 no son del LAPIC
+      return -EINVAL;
+    if (arg & ~(0xFFUL | AVM_IRQ_TPR))
       return -EINVAL;
     if (vm->pending_irq >= 0)
       return -EBUSY;
     vm->pending_irq = (int32_t)arg;
+    return 0;
+  case AVM_WITHDRAW_IRQ: {
+    if (vm->busy)
+      return -EBUSY;
+    int32_t p = vm->pending_irq;
+    vm->pending_irq = -1;
+    return p;
+  }
+  case AVM_SET_TPR:
+    vm->tpr = (uint32_t)arg & 0xFF;
+    return 0;
+  case AVM_SET_TPR_WAIT:
+    vm->tpr_wait = (uint32_t)arg & 0xF;
     return 0;
   case AVM_SET_DEBUG:
     vm->debug = (uint32_t)arg & 1;
@@ -1453,6 +1623,16 @@ void vmx_init(void) {
   g_vmx.basic = g_vmx.caps.flags & AVM_CAP_VMX ? rdmsr(MSR_VMX_BASIC) : 0;
   g_vmx.true_ctls = (g_vmx.basic >> 55) & 1;
   g_vmx.probed = true;
+  {
+    uint32_t a, b, c, d;
+    cpuid(0x80000000, 0, &a, &b, &c, &d);
+    g_ngmsr = 5;
+    if (a >= 0x80000001) {
+      cpuid(0x80000001, 0, &a, &b, &c, &d);
+      if (d & (1u << 27))
+        g_ngmsr = 6; // RDTSCP: TSC_AUX del huesped
+    }
+  }
   LOG_INFO("[VMX] caps=%x ept_vpid=%lx usable=%d", g_vmx.caps.flags,
            g_vmx.caps.ept_vpid_cap, (int)g_vmx.usable);
   devtmpfs_register("aurora-vm", DEVT_MKDEV(10, 233), 0660, 0, 0, &avm_ops, NULL);

@@ -445,13 +445,10 @@ int winsrv_set_raw_input(task_t *owner, int win_id, int enable) {
     spin_unlock_irqrestore(&winsrv_lock, flags);
     return -1;
   }
-  if (enable == 2) { // teclas crudas (pulsar y soltar), sin puntero crudo
-    e->win->flags |= WIN_FLAGS_RAW_KEYS;
-  } else if (enable) {
+  if (enable)
     e->win->flags |= WIN_FLAGS_RAW_INPUT;
-  } else {
-    e->win->flags &= ~(WIN_FLAGS_RAW_INPUT | WIN_FLAGS_RAW_KEYS);
-  }
+  else
+    e->win->flags &= ~WIN_FLAGS_RAW_INPUT;
   spin_unlock_irqrestore(&winsrv_lock, flags);
   return 0;
 }

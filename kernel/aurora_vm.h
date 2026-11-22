@@ -14,7 +14,12 @@
 #define AVM_SET_REGS (AVM_IOC_BASE + 3)    // const struct avm_regs *
 #define AVM_GET_REGS (AVM_IOC_BASE + 4)    // struct avm_regs *
 #define AVM_RUN (AVM_IOC_BASE + 5)         // struct avm_exit *
-#define AVM_INJECT_IRQ (AVM_IOC_BASE + 6)  // uint32_t vector (por valor); -EBUSY si ya hay una pendiente
+#define AVM_INJECT_IRQ (AVM_IOC_BASE + 6)  // vector | AVM_IRQ_* (por valor); -EBUSY si ya hay una pendiente.
+// La interrupcion queda pendiente en el kernel hasta que el huesped puede recibirla
+// (IF=1, sin sombra de STI/MOV SS y, si lleva AVM_IRQ_TPR, vector por encima del TPR).
+// Cada salida dice en avm_exit.irq_pending si sigue pendiente (-1 = ya entregada):
+// el VMM solo debe pasarla al ISR de su PIC/LAPIC cuando el kernel la entrego.
+#define AVM_IRQ_TPR (1u << 8)              // viene del LAPIC: respeta el TPR (CR8)
 #define AVM_SET_TIMEOUT (AVM_IOC_BASE + 7) // ms (por valor): AVM_RUN devuelve AVM_EXIT_SIGNAL tras ese tiempo; 0 = sin limite
 
 #define AVM_SET_DEBUG (AVM_IOC_BASE + 8)   // flags (por valor): bit0 = interceptar #UD/#DF/#GP/#PF y registrarlos en el log del kernel
@@ -22,6 +27,15 @@
 #define AVM_SET_FLAGS (AVM_IOC_BASE + 9)   // AVM_VMF_* (por valor)
 #define AVM_VMF_APIC (1u << 0)             // CPUID anuncia el APIC local y IA32_APIC_BASE = 0xFEE00900 (el VMM emula el LAPIC por MMIO)
 #define AVM_VMF_ALL (AVM_VMF_APIC)
+
+// TPR del LAPIC (registro 0x80; CR8 = TPR >> 4). El kernel lo mantiene porque
+// MOV CR8 (Windows de 64 bits, en cada cambio de IRQL) se resuelve sin salir al VMM.
+#define AVM_SET_TPR (AVM_IOC_BASE + 10)      // valor del registro TPR (por valor): escrituras MMIO del huesped
+// Clase (1..15) del vector que el LAPIC del VMM tiene bloqueado por el TPR; 0 = ninguno.
+// Cuando el huesped baja CR8 por debajo, AVM_RUN sale con AVM_EXIT_TPR.
+#define AVM_SET_TPR_WAIT (AVM_IOC_BASE + 11)
+// Retira la interrupcion pendiente sin entregar. Devuelve su valor (vector | flags) o -1.
+#define AVM_WITHDRAW_IRQ (AVM_IOC_BASE + 12)
 
 #define AVM_CAP_VMX (1u << 0)
 #define AVM_CAP_EPT (1u << 1)
@@ -37,7 +51,7 @@ struct avm_caps {
   uint32_t reserved;
 };
 
-// Mapea [gpa, gpa+size) del huesped sobre un memfd del VMM. El kernel rellena el
+// Mapea [gpa, gpa+size) del huesped sobre un memfd del VMM (size = 0 quita el slot). El kernel rellena el
 // EPT por demanda. gpa/size/offset: multiplos de 4 KiB.
 struct avm_memory {
   int32_t fd;
@@ -74,6 +88,7 @@ struct avm_regs {
 #define AVM_EXIT_INTR_WINDOW 5
 #define AVM_EXIT_SIGNAL 6    // el VMM tiene una senal o un plazo
 #define AVM_EXIT_FAIL 7      // fail.* (error de VMX; hay detalle en el log del kernel)
+#define AVM_EXIT_TPR 8       // el huesped cambio CR8: reevaluar interrupciones (y retirar la pendiente si ya no cabe)
 
 struct avm_exit {
   uint32_t reason; // AVM_EXIT_*
@@ -108,6 +123,8 @@ struct avm_exit {
     } fail;
     uint64_t raw[4];
   };
+  int32_t irq_pending; // AVM_INJECT_IRQ aun sin entregar (vector | flags) o -1
+  uint32_t tpr;        // TPR actual del huesped (formato del registro 0x80)
 };
 
 #endif

@@ -1,8 +1,9 @@
 // apic.h — LAPIC (un solo vCPU) e IOAPIC virtuales de la mini-VM (F3c).
 //
 // El LAPIC vive en 0xFEE00000 y el IOAPIC en 0xFEC00000; los accesos llegan al
-// VMM como salidas MMIO (fallo EPT) y los resuelve emulate_mmio. Las
-// interrupciones se entregan con AVM_INJECT_IRQ.
+// VMM como salidas MMIO (fallo EPT) y los resuelve insn_emulate. Las
+// interrupciones se entregan con AVM_INJECT_IRQ; el TPR lo lleva el kernel (CR8
+// no sale al VMM): se copia en cada salida y las escrituras MMIO se le pasan.
 #ifndef AVM_APIC_H
 #define AVM_APIC_H
 
@@ -21,6 +22,7 @@ static uint32_t g_lreg[0x400 / 4]; // registros por indice (offset / 4)
 static uint32_t g_irr[8], g_isr[8], g_tmr[8];
 static int g_lt_running;
 static uint64_t g_lt_start, g_lt_deadline;
+static int g_tpr_dirty; // el huesped escribio el TPR por MMIO: avisar al kernel
 
 #define LREG(off) g_lreg[(off) >> 2]
 #define L_TPR 0x80
@@ -29,6 +31,15 @@ static uint64_t g_lt_start, g_lt_deadline;
 #define L_TMICT 0x380
 #define L_TMCCT 0x390
 #define L_TDCR 0x3E0
+
+static int bm_hi(const uint32_t *bm) {
+  for (int i = 7; i >= 0; i--)
+    if (bm[i])
+      return i * 32 + 31 - __builtin_clz(bm[i]);
+  return -1;
+}
+static void bm_set(uint32_t *bm, int v) { bm[v >> 5] |= 1u << (v & 31); }
+static void bm_clr(uint32_t *bm, int v) { bm[v >> 5] &= ~(1u << (v & 31)); }
 
 static void lapic_reset(void) {
   memset(g_lreg, 0, sizeof(g_lreg));
@@ -41,16 +52,25 @@ static void lapic_reset(void) {
   LREG(L_SVR) = 0xFF;      // desactivado por software
   for (unsigned o = 0x2F0; o <= 0x370; o += 0x10)
     LREG(o) = 0x10000;     // LVT enmascaradas
+  LREG(0x350) = 0x700;     // LINT0 en ExtINT (como QEMU en el BSP): llega el 8259
+  g_tpr_dirty = 1;
 }
 
-static int bm_hi(const uint32_t *bm) {
-  for (int i = 7; i >= 0; i--)
-    if (bm[i])
-      return i * 32 + 31 - __builtin_clz(bm[i]);
-  return -1;
+// El 8259 llega a la CPU (apic_accept_pic_intr de QEMU): LINT0 sin mascara.
+static int lapic_accept_pic(void) { return !(LREG(0x350) & 0x10000); }
+
+// Vector mas alto del IRR que el ISR deja pasar (el TPR lo aplica el kernel), o -1.
+static int lapic_candidate(void) {
+  if (!(LREG(L_SVR) & 0x100))
+    return -1;
+  int ir = bm_hi(g_irr);
+  if (ir < 0)
+    return -1;
+  int is = bm_hi(g_isr);
+  uint32_t isc = is < 0 ? 0 : (uint32_t)is & 0xF0;
+  return ((uint32_t)ir & 0xF0) > isc ? ir : -1;
 }
-static void bm_set(uint32_t *bm, int v) { bm[v >> 5] |= 1u << (v & 31); }
-static void bm_clr(uint32_t *bm, int v) { bm[v >> 5] &= ~(1u << (v & 31)); }
+
 
 static void lapic_set_irr(int vec, int level) {
   if (vec < 16 || vec > 255)
@@ -66,16 +86,6 @@ static uint32_t lapic_ppr(void) {
   int is = bm_hi(g_isr);
   uint32_t a = LREG(L_TPR) & 0xF0, b = is < 0 ? 0 : (uint32_t)is & 0xF0;
   return a > b ? a : b;
-}
-
-// Vector entregable ahora (o -1).
-static int lapic_deliverable(void) {
-  if (!(LREG(L_SVR) & 0x100))
-    return -1;
-  int ir = bm_hi(g_irr);
-  if (ir < 0)
-    return -1;
-  return ((uint32_t)ir & 0xF0) > lapic_ppr() ? ir : -1;
 }
 
 static void lapic_accept(int vec) {
@@ -137,7 +147,7 @@ static void lapic_write(uint32_t off, uint32_t v) {
   case 0x350: case 0x360: case 0x370:
     LREG(off) = v;
     break;
-  case L_TPR: LREG(off) = v & 0xFF; break;
+  case L_TPR: LREG(off) = v & 0xFF; g_tpr_dirty = 1; break;
   case L_SVR: LREG(off) = v & 0x3FF; break;
   case 0xB0: { // EOI
     int is = bm_hi(g_isr);
@@ -150,10 +160,26 @@ static void lapic_write(uint32_t off, uint32_t v) {
     break;
   }
   case 0x280: LREG(off) = 0; break;
-  case 0x300: { // ICR: sin otros procesadores; solo IPI propias
+  case 0x300: { // ICR: un solo procesador; solo cuentan las IPI que le llegan a el
     LREG(off) = v & ~0x1000u;
-    unsigned sh = (v >> 18) & 3, mode = (v >> 8) & 7;
-    if ((sh == 1 || sh == 2) && mode == 0)
+    unsigned sh = (v >> 18) & 3, mode = (v >> 8) & 7, dest = LREG(0x310) >> 24;
+    int me;
+    if (sh == 1 || sh == 2) {
+      me = 1;
+    } else if (sh == 3) {
+      me = 0;
+    } else if (!(v & 0x800)) { // fisico
+      me = dest == 0xFF || dest == (LREG(0x20) >> 24);
+    } else { // logico: plano (DFR 0xF) o por grupos (0x0)
+      uint32_t ldr = LREG(0xD0) >> 24;
+      if (dest == 0xFF)
+        me = 1;
+      else if ((LREG(0xE0) >> 28) == 0xF)
+        me = (dest & ldr) != 0;
+      else
+        me = (dest >> 4) == (ldr >> 4) && (dest & ldr & 0xF) != 0;
+    }
+    if (me && (mode == 0 || mode == 1))
       lapic_set_irr((int)(v & 0xFF), 0);
     break;
   }

@@ -28,7 +28,9 @@ install: $(MUSL_APPS)
 
 # Cada app lleva la nota .note.aurora (aurora-note.c): aurora-run la reconoce
 # como app nativa de Aurora y no como app Linux.
-$(MUSL_APPS): %: apps/%/main.c aurora-note.c
+# Las cabeceras de cada app (p. ej. los dispositivos de aurora-vm) tambien cuentan.
+.SECONDEXPANSION:
+$(MUSL_APPS): %: apps/%/main.c $$(wildcard apps/$$*/*.h) aurora-note.c
 	@if [ ! -x "$(MUSL_CC)" ]; then \
 		echo "SKIP: falta toolchain musl en $(MUSL_CC)"; exit 1; \
 	fi

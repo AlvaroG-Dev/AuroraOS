@@ -22,8 +22,12 @@ struct aw_blit {
   uint32_t *pixels;
 };
 #define AWEV_CLOSE 1
+#define AWEV_FOCUS 2
+#define AWEV_BLUR 3
 #define AWEV_KEY 5
 #define AWEV_RESIZE 9
+#define AWEV_PTR 10       // x, y dentro del area de cliente; data = botones (bit0 izq, bit1 der, bit2 medio)
+#define AWEV_PTR_LEAVE 11
 
 static long aw_sys(uint64_t n, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
   long ret;
@@ -48,7 +52,7 @@ static void vw_open(int w, int h) {
   g_vw = (int)aw_sys(AW_WIN_CREATE, 120, 80, (uint64_t)w, (uint64_t)(h + AW_TITLEBAR_H),
                      (uint64_t)"aurora-vm");
   if (g_vw >= 0) {
-    aw_sys(AW_WIN_RAW, (uint64_t)g_vw, 2, 0, 0, 0); // teclas crudas: pulsar y soltar
+    aw_sys(AW_WIN_RAW, (uint64_t)g_vw, 1, 0, 0, 0); // puntero crudo (AWEV_PTR / AWEV_PTR_LEAVE)
     g_vw_w = g_vw_cw = w;
     g_vw_h = g_vw_ch = h;
   }
