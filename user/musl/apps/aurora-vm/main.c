@@ -695,6 +695,32 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
   for (int i = 0; i < 8 && nport[i]; i++)
     fprintf(stderr, " %x:%lu", port[i], nport[i]);
   fprintf(stderr, "\n");
+  // Rendimiento: donde se va el tiempo (kernel vs VMM, preparar ventana vs huesped)
+  static struct avm_stats ps;
+  static uint64_t ptsc, pns;
+  struct avm_stats st;
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t tsc = ((uint64_t)hi << 32) | lo;
+  if (ioctl(g_vm, AVM_GET_STATS, &st) == 0) {
+    if (pns && tsc > ptsc) {
+      double hz = (double)(tsc - ptsc) * 1e9 / (double)(tnow - pns); // ciclos por segundo
+      double us = 1e6 / hz;
+      uint64_t runs = st.runs - ps.runs, win = st.windows - ps.windows, ex = st.exits - ps.exits;
+      double trun = (double)(st.tsc_run - ps.tsc_run), tall = (double)(tsc - ptsc);
+      fprintf(stderr, "[rend] RUN=%llu (%.0f us c/u) ventanas=%llu (preparar %.0f us, salir %.0f us) "
+                      "salidas=%llu ext=%llu ept=%llu | huesped %.0f%% kernel %.0f%% VMM %.0f%%\n",
+              (unsigned long long)runs, runs ? trun * us / (double)runs : 0.0, (unsigned long long)win,
+              win ? (double)(st.tsc_setup - ps.tsc_setup) * us / (double)win : 0.0,
+              win ? (double)(st.tsc_leave - ps.tsc_leave) * us / (double)win : 0.0, (unsigned long long)ex,
+              (unsigned long long)(st.ext_exits - ps.ext_exits), (unsigned long long)(st.ept_maps - ps.ept_maps),
+              100.0 * (double)(st.tsc_guest - ps.tsc_guest) / tall,
+              100.0 * (trun - (double)(st.tsc_guest - ps.tsc_guest)) / tall, 100.0 * (tall - trun) / tall);
+    }
+    ps = st;
+    ptsc = tsc;
+    pns = tnow;
+  }
   memset(nr, 0, sizeof(nr));
   memset(nport, 0, sizeof(nport));
 }

@@ -37,6 +37,21 @@
 // Retira la interrupcion pendiente sin entregar. Devuelve su valor (vector | flags) o -1.
 #define AVM_WITHDRAW_IRQ (AVM_IOC_BASE + 12)
 
+// Estadisticas de rendimiento acumuladas (struct avm_stats *). Los tiempos van
+// en ciclos de TSC: el VMM los pasa a microsegundos comparando con su reloj.
+#define AVM_GET_STATS (AVM_IOC_BASE + 13)
+struct avm_stats {
+  uint64_t runs;      // llamadas a AVM_RUN
+  uint64_t windows;   // ventanas (VMCLEAR/VMPTRLD + estado completo + VMLAUNCH)
+  uint64_t exits;     // salidas de VM (todas)
+  uint64_t ext_exits; // por IRQ del host
+  uint64_t ept_maps;  // violaciones EPT resueltas en el kernel
+  uint64_t tsc_run;   // dentro de AVM_RUN
+  uint64_t tsc_setup; // preparando cada ventana (hasta la primera entrada)
+  uint64_t tsc_guest; // entre VMLAUNCH/VMRESUME y la salida
+  uint64_t tsc_leave; // al salir de la ventana (leer estado, VMCLEAR)
+};
+
 #define AVM_CAP_VMX (1u << 0)
 #define AVM_CAP_EPT (1u << 1)
 #define AVM_CAP_UNRESTRICTED (1u << 2) // modo real / paginacion sin sombras

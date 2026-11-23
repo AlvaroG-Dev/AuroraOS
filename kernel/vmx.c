@@ -179,6 +179,7 @@ struct avm_vm {
   bool reinj;
   uint32_t reinj_info, reinj_err, reinj_len;
   uint32_t stuck_logged; // avisos de "256 salidas inyectando" ya escritos
+  struct avm_stats st;
   uint32_t msr_logged;
   uint32_t timeout_ms;
   uint64_t dr[8];
@@ -518,25 +519,33 @@ static void vm_reset_regs(struct avm_vm *vm) {
 // ---------------------------------------------------------------------------
 // Estado -> VMCS (con el VMCS cargado en esta CPU)
 // ---------------------------------------------------------------------------
+// MSR de VMX leidos una vez: con KVM anidado cada RDMSR de estos es una salida
+// al hipervisor de fuera, y se leian unas 16 veces por ventana.
+static uint64_t g_c0f0, g_c0f1, g_c4f0, g_c4f1;
+static inline uint64_t rdtsc_k(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
 static uint64_t fixed_cr0(struct avm_vm *vm, uint64_t want) {
-  uint64_t f0 = rdmsr(MSR_VMX_CR0_FIXED0), f1 = rdmsr(MSR_VMX_CR0_FIXED1);
+  uint64_t f0 = g_c0f0, f1 = g_c0f1;
   (void)vm;
   f0 &= ~((1ULL << 0) | (1ULL << 31)); // unrestricted guest: PE y PG libres
   return (want | f0) & f1;
 }
 static uint64_t fixed_cr4(uint64_t want) {
-  return (want | rdmsr(MSR_VMX_CR4_FIXED0)) & rdmsr(MSR_VMX_CR4_FIXED1);
+  return (want | g_c4f0) & g_c4f1;
 }
 // Bits que el huesped no controla (los fuerza VMX): el huesped ve la sombra.
 static uint64_t cr0_owned(void) {
-  uint64_t f0 = rdmsr(MSR_VMX_CR0_FIXED0), f1 = rdmsr(MSR_VMX_CR0_FIXED1);
+  uint64_t f0 = g_c0f0, f1 = g_c0f1;
   f0 &= ~((1ULL << 0) | (1ULL << 31));
   // PE y PG tambien se interceptan: el kernel decide EFER.LMA y el control
   // IA-32e al activar la paginacion (el hardware no lo hace dentro del VMX).
   return f0 | ~f1 | (1ULL << 0) | (1ULL << 31);
 }
 static uint64_t cr4_owned(void) {
-  return rdmsr(MSR_VMX_CR4_FIXED0) | ~rdmsr(MSR_VMX_CR4_FIXED1);
+  return g_c4f0 | ~g_c4f1;
 }
 
 static void write_seg(uint64_t sel_f, uint64_t base_f, uint64_t lim_f,
@@ -1015,6 +1024,8 @@ static void fail_exit(struct avm_exit *x, uint32_t reason, uint64_t code,
 // Ejecuta una ventana. Devuelve 1 si hay que volver a espacio de usuario
 // (x relleno), 0 si hay que repetir (tras ceder la CPU), <0 error.
 static int run_window(struct avm_vm *vm, struct avm_exit *x) {
+  uint64_t t_win0 = rdtsc_k();
+  bool first_entry = true;
   struct gregs g;
   uint8_t *fx = (uint8_t *)phys_to_virt(vm->fx_page_phys);
   int ret = 0;
@@ -1107,7 +1118,15 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     vmwrite(F_PROC, proc);
 
     __asm__ volatile("mov %0, %%cr2" : : "r"(vm->regs.cr2) : "memory");
+    uint64_t t_e0 = rdtsc_k();
+    if (first_entry) {
+      first_entry = false;
+      vm->st.windows++;
+      vm->st.tsc_setup += t_e0 - t_win0;
+    }
     int fail = vmx_enter(&g, vm->launched);
+    vm->st.tsc_guest += rdtsc_k() - t_e0;
+    vm->st.exits++;
     __asm__ volatile("mov %%cr2, %0" : "=r"(vm->regs.cr2));
     if (fail) {
       uint64_t err = vmread(F_VM_INSTR_ERROR);
@@ -1145,6 +1164,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     switch (reason) {
     case XR_EXT_INTR:
       // La IRQ del host queda pendiente: se sirve al restaurar IF. Ceder la CPU.
+      vm->st.ext_exits++;
       ret = 0;
       goto leave;
     case XR_INTR_WINDOW:
@@ -1242,8 +1262,10 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       uint64_t gpa = vmread(F_GUEST_PHYS_ADDR);
       uint64_t qual = vmread(F_EXIT_QUAL);
       int r2 = ept_fault(vm, gpa);
-      if (r2 == 0)
-        continue; // el evento interrumpido (si lo habia) lo reinyecta la cabecera del bucle
+      if (r2 == 0) {
+        vm->st.ept_maps++;
+        continue;
+      } // el evento interrumpido (si lo habia) lo reinyecta la cabecera del bucle
       if (r2 < 0) {
         fail_exit(x, reason, (uint64_t)(-r2), gpa);
         ret = 1;
@@ -1379,7 +1401,8 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     }
   }
 
-leave:
+leave:;
+  uint64_t t_lv0 = rdtsc_k();
   // Evento preparado para la siguiente entrada que no llego a entrar: el VMCS se
   // reescribe en la proxima ventana (ENTRY_INTR_INFO = 0), asi que se guarda.
   {
@@ -1401,6 +1424,7 @@ leave:
   __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])(fx + 512)) : : "memory");
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])fx) : "memory");
   vmclear(vm->vmcs_phys);
+  vm->st.tsc_leave += rdtsc_k() - t_lv0;
   irq_restore(fl);
   preempt_enable();
   return ret;
@@ -1419,6 +1443,8 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
   int64_t rc = 0;
   memset(&x, 0, sizeof(x));
   uint64_t t_start = tick_count;
+  uint64_t tsc_run0 = rdtsc_k();
+  vm->st.runs++;
 
   if (vm->pending_in) { // el VMM rellena io.data del IN anterior
     struct avm_exit prev;
@@ -1458,6 +1484,7 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
   if (copy_to_user((void *)uarg, &x, sizeof(x)) < 0)
     rc = -EFAULT;
 out:
+  vm->st.tsc_run += rdtsc_k() - tsc_run0;
   __atomic_store_n(&vm->busy, 0, __ATOMIC_RELEASE);
   return rc;
 }
@@ -1660,6 +1687,10 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   case AVM_SET_FLAGS:
     vm->vmflags = (uint32_t)arg & AVM_VMF_ALL;
     return 0;
+  case AVM_GET_STATS:
+    if (!access_ok((void *)arg, sizeof(vm->st)))
+      return -EFAULT;
+    return copy_to_user((void *)arg, &vm->st, sizeof(vm->st)) < 0 ? -EFAULT : 0;
   }
   return -ENOTTY;
 }
@@ -1674,6 +1705,12 @@ void vmx_init(void) {
   g_vmx.usable = vmx_probe(&g_vmx.caps);
   g_vmx.basic = g_vmx.caps.flags & AVM_CAP_VMX ? rdmsr(MSR_VMX_BASIC) : 0;
   g_vmx.true_ctls = (g_vmx.basic >> 55) & 1;
+  if (g_vmx.caps.flags & AVM_CAP_VMX) {
+    g_c0f0 = rdmsr(MSR_VMX_CR0_FIXED0);
+    g_c0f1 = rdmsr(MSR_VMX_CR0_FIXED1);
+    g_c4f0 = rdmsr(MSR_VMX_CR4_FIXED0);
+    g_c4f1 = rdmsr(MSR_VMX_CR4_FIXED1);
+  }
   g_vmx.probed = true;
   {
     uint32_t a, b, c, d;
