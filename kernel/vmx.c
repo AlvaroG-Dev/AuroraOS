@@ -180,6 +180,18 @@ struct avm_vm {
   uint32_t reinj_info, reinj_err, reinj_len;
   uint32_t stuck_logged; // avisos de "256 salidas inyectando" ya escritos
   struct avm_stats st;
+  // VMCS incremental: el contenido del VMCS sobrevive a VMCLEAR/VMPTRLD, asi que
+  // cada ventana solo escribe lo que cambio. `snap` es lo que el VMCS tiene (en
+  // los campos que el kernel copia); `regs_stale`: tras una ventana solo RIP,
+  // RSP, RFLAGS, CR0/CR3/CR4, EFER e interrumpibilidad estan al dia en `regs`
+  // (el resto se lee del VMCS al pedirlo: AVM_GET_REGS/SET_REGS).
+  struct avm_regs snap;
+  uint64_t snap_cr0_shadow, snap_cr4_shadow;
+  bool vmcs_full;      // hay que escribir todo (VMCS nuevo)
+  bool vmcs_cleared;   // ya se hizo el VMCLEAR inicial
+  bool regs_stale;
+  int ctl_cpu;         // CPU para la que se escribio el estado del host (-1 = ninguna)
+  uint32_t ctl_debug;  // vm->debug con el que se escribio el bitmap de excepciones
   uint32_t msr_logged;
   uint32_t timeout_ms;
   uint64_t dr[8];
@@ -721,6 +733,96 @@ static void vmcs_read_guest(struct avm_vm *vm) {
   vm->interruptibility = (uint32_t)vmread(F_GUEST_INTERRUPTIBILITY);
 }
 
+// Lo minimo al salir de cada ventana: lo que usan el kernel y el VMM en todas
+// las salidas. El resto se lee bajo demanda (vm_sync_regs).
+static void vmcs_read_hot(struct avm_vm *vm) {
+  struct avm_regs *r = &vm->regs;
+  r->rsp = vmread(F_GUEST_RSP);
+  r->rip = vmread(F_GUEST_RIP);
+  r->rflags = vmread(F_GUEST_RFLAGS);
+  r->cr3 = vmread(F_GUEST_CR3);
+  r->efer = vmread(F_GUEST_EFER);
+  uint64_t o0 = cr0_owned(), o4 = cr4_owned();
+  r->cr0 = (vm->cr0_shadow & o0) | (vmread(F_GUEST_CR0) & ~o0);
+  vm->cr0_shadow = r->cr0;
+  r->cr4 = (vm->cr4_shadow & o4) | (vmread(F_GUEST_CR4) & ~o4);
+  vm->cr4_shadow = r->cr4;
+  vm->interruptibility = (uint32_t)vmread(F_GUEST_INTERRUPTIBILITY);
+  vm->snap.rsp = r->rsp; vm->snap.rip = r->rip; vm->snap.rflags = r->rflags;
+  vm->snap.cr3 = r->cr3; vm->snap.efer = r->efer;
+  vm->snap.cr0 = r->cr0; vm->snap.cr4 = r->cr4;
+  vm->snap_cr0_shadow = vm->cr0_shadow;
+  vm->snap_cr4_shadow = vm->cr4_shadow;
+}
+
+static bool seg_eq(const struct avm_seg *a, const struct avm_seg *b) {
+  return a->base == b->base && a->limit == b->limit && a->selector == b->selector && a->ar == b->ar;
+}
+
+// Escribe en el VMCS solo los campos de `regs` que difieren de `snap`.
+static void vmcs_write_guest_diff(struct avm_vm *vm) {
+  struct avm_regs *r = &vm->regs, *o = &vm->snap;
+  if (r->cr0 != o->cr0 || vm->cr0_shadow != vm->snap_cr0_shadow) {
+    vmwrite(F_GUEST_CR0, fixed_cr0(vm, r->cr0));
+    vmwrite(F_CR0_SHADOW, vm->cr0_shadow);
+  }
+  if (r->cr4 != o->cr4 || vm->cr4_shadow != vm->snap_cr4_shadow) {
+    vmwrite(F_GUEST_CR4, fixed_cr4(r->cr4));
+    vmwrite(F_CR4_SHADOW, vm->cr4_shadow);
+  }
+  if (r->cr3 != o->cr3) vmwrite(F_GUEST_CR3, r->cr3);
+  if (r->rsp != o->rsp) vmwrite(F_GUEST_RSP, r->rsp);
+  if (r->rip != o->rip) vmwrite(F_GUEST_RIP, r->rip);
+  if (r->rflags != o->rflags) vmwrite(F_GUEST_RFLAGS, r->rflags | 2);
+  if (r->efer != o->efer) {
+    vmwrite(F_GUEST_EFER, r->efer);
+    bool lma = (r->efer >> 10) & 1;
+    vmwrite(F_ENTRY_CTLS, lma ? (vm->entryctl | ENTRY_IA32E) : (vm->entryctl & ~ENTRY_IA32E));
+  }
+#define SEGW(n, N)                                                                         \
+  if (!seg_eq(&r->n, &o->n))                                                               \
+    write_seg(F_GUEST_##N##_SEL, F_GUEST_##N##_BASE, F_GUEST_##N##_LIM, F_GUEST_##N##_AR, &r->n);
+  SEGW(es, ES) SEGW(cs, CS) SEGW(ss, SS) SEGW(ds, DS) SEGW(fs, FS) SEGW(gs, GS)
+  SEGW(tr, TR) SEGW(ldtr, LDTR)
+#undef SEGW
+  if (r->gdt_base != o->gdt_base) vmwrite(F_GUEST_GDTR_BASE, r->gdt_base);
+  if (r->gdt_limit != o->gdt_limit) vmwrite(F_GUEST_GDTR_LIM, r->gdt_limit);
+  if (r->idt_base != o->idt_base) vmwrite(F_GUEST_IDTR_BASE, r->idt_base);
+  if (r->idt_limit != o->idt_limit) vmwrite(F_GUEST_IDTR_LIM, r->idt_limit);
+}
+
+static void snap_take(struct avm_vm *vm) {
+  vm->snap = vm->regs;
+  vm->snap_cr0_shadow = vm->cr0_shadow;
+  vm->snap_cr4_shadow = vm->cr4_shadow;
+}
+
+static int vmx_enable_this_cpu(void);
+// Trae a `regs` todo el estado del VMCS (cargandolo un momento en esta CPU).
+static int vm_sync_regs(struct avm_vm *vm) {
+  if (!vm->regs_stale)
+    return 0;
+  preempt_disable();
+  int rc = vmx_enable_this_cpu();
+  if (rc < 0) {
+    preempt_enable();
+    return rc;
+  }
+  unsigned long fl = irq_save();
+  if (!vmptrld(vm->vmcs_phys)) {
+    irq_restore(fl);
+    preempt_enable();
+    return -EIO;
+  }
+  vmcs_read_guest(vm);
+  snap_take(vm);
+  vmclear(vm->vmcs_phys);
+  irq_restore(fl);
+  preempt_enable();
+  vm->regs_stale = false;
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Inyeccion y emulacion rapida
 // ---------------------------------------------------------------------------
@@ -1023,8 +1125,9 @@ static void fail_exit(struct avm_exit *x, uint32_t reason, uint64_t code,
 
 // Ejecuta una ventana. Devuelve 1 si hay que volver a espacio de usuario
 // (x relleno), 0 si hay que repetir (tras ceder la CPU), <0 error.
-static int run_window(struct avm_vm *vm, struct avm_exit *x) {
+static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_tick) {
   uint64_t t_win0 = rdtsc_k();
+  uint64_t win_tick0 = tick_count;
   bool first_entry = true;
   struct gregs g;
   uint8_t *fx = (uint8_t *)phys_to_virt(vm->fx_page_phys);
@@ -1037,23 +1140,54 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     return rc;
   }
   unsigned long fl = irq_save();
-  if (!vmclear(vm->vmcs_phys) || !vmptrld(vm->vmcs_phys)) {
+  // El VMCS queda limpio (VMCLEAR) al final de cada ventana; su contenido se
+  // conserva, asi que solo hace falta VMPTRLD y escribir lo que cambio.
+  if ((!vm->vmcs_cleared && !vmclear(vm->vmcs_phys)) || !vmptrld(vm->vmcs_phys)) {
     irq_restore(fl);
     preempt_enable();
     fail_exit(x, 0, 0xFFFF, 0);
     return 1;
   }
+  vm->vmcs_cleared = true;
   vm->launched = false; // tras VMCLEAR hay que usar VMLAUNCH
-  {
-    int cpu = smp_processor_id();
-    if (vm->ept_dirty || cpu != vm->last_cpu) {
-      invept_ctx(vm_eptp(vm));
-      vm->ept_dirty = false;
-      vm->last_cpu = cpu;
-    }
+  int cpu = smp_processor_id();
+  if (vm->ept_dirty || cpu != vm->last_cpu) {
+    invept_ctx(vm_eptp(vm));
+    vm->ept_dirty = false;
+    vm->last_cpu = cpu;
   }
-  vmcs_write_controls_and_host(vm);
-  vmcs_write_guest(vm);
+  if (vm->vmcs_full) {
+    if (vm->regs_stale) { // no perder lo que solo esta en el VMCS
+      vmcs_read_guest(vm);
+      vm->regs_stale = false;
+    }
+    vmcs_write_controls_and_host(vm);
+    vmcs_write_guest(vm);
+    snap_take(vm);
+    vm->ctl_cpu = cpu;
+    vm->ctl_debug = vm->debug;
+    vm->vmcs_full = false;
+  } else {
+    if (vm->ctl_cpu != cpu) { // estado del host de otra CPU (GDT, TSS, GS...)
+      vmcs_write_controls_and_host(vm);
+      vm->ctl_cpu = cpu;
+      vm->ctl_debug = vm->debug;
+    } else {
+      vmwrite(F_HOST_CR0, read_cr0()); // TS puede cambiar (FPU perezosa)
+      vmwrite(F_HOST_CR3, read_cr3());
+      vmwrite(F_HOST_FS_BASE, rdmsr(MSR_FS_BASE));
+      for (int i = 0; i < g_ngmsr; i++)
+        vm->hmsr[i].value = rdmsr(guest_msr_idx[i]);
+      if (vm->ctl_debug != vm->debug) {
+        vmwrite(F_EXC_BITMAP, vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0);
+        vm->ctl_debug = vm->debug;
+      }
+    }
+    vmcs_write_guest_diff(vm);
+    snap_take(vm);
+    vmwrite(F_ENTRY_INTR_INFO, 0);
+    vmwrite(F_GUEST_PENDING_DBG, 0);
+  }
   memset(&g, 0, sizeof(g));
   g.rax = vm->regs.rax; g.rbx = vm->regs.rbx; g.rcx = vm->regs.rcx;
   g.rdx = vm->regs.rdx; g.rsi = vm->regs.rsi; g.rdi = vm->regs.rdi;
@@ -1130,6 +1264,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     __asm__ volatile("mov %%cr2, %0" : "=r"(vm->regs.cr2));
     if (fail) {
       uint64_t err = vmread(F_VM_INSTR_ERROR);
+      vm->vmcs_full = true; // reescribir todo en la siguiente ventana
       LOG_ERR("[VMX] VM-entry fallo: VM-instruction error %lu (%s)", err,
               vm->launched ? "VMRESUME" : "VMLAUNCH");
       fail_exit(x, 0, err, 0);
@@ -1142,6 +1277,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     uint32_t reason = reason_full & 0xFFFF;
     if (reason_full & (1u << 31)) { // fallo de entrada
       uint64_t qual = vmread(F_EXIT_QUAL);
+      vm->vmcs_full = true; // reescribir todo en la siguiente ventana
       LOG_ERR("[VMX] VM-entry invalida: motivo %u qual=%lx (estado del huesped "
               "no valido o fallo al cargar MSR)", reason, qual);
       fail_exit(x, reason_full, reason, qual);
@@ -1162,11 +1298,23 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     }
 
     switch (reason) {
-    case XR_EXT_INTR:
-      // La IRQ del host queda pendiente: se sirve al restaurar IF. Ceder la CPU.
+    case XR_EXT_INTR: {
+      // La IRQ del host se sirve aqui mismo (IF un instante) y se vuelve a
+      // entrar sin rehacer la ventana: rehacerla (VMCLEAR, VMPTRLD y todo el
+      // estado) cuesta ~0,5 ms con KVM anidado y habia una por cada IRQ del host.
+      // Se sale para ceder la CPU, por una senal, por el plazo del VMM o cada
+      // 2 ticks como mucho.
       vm->st.ext_exits++;
-      ret = 0;
-      goto leave;
+      irq_restore(fl);
+      fl = irq_save();
+      task_t *cur = sched_current();
+      if (tick_count >= deadline_tick || tick_count - win_tick0 >= 2 ||
+          (cur && (cur->need_resched || signal_unblocked_of(cur)))) {
+        ret = 0;
+        goto leave;
+      }
+      continue;
+    }
     case XR_INTR_WINDOW:
       continue;
     case XR_EXC_NMI: {
@@ -1420,7 +1568,20 @@ leave:;
   vm->regs.rbp = g.rbp; vm->regs.r8 = g.r8; vm->regs.r9 = g.r9;
   vm->regs.r10 = g.r10; vm->regs.r11 = g.r11; vm->regs.r12 = g.r12;
   vm->regs.r13 = g.r13; vm->regs.r14 = g.r14; vm->regs.r15 = g.r15;
-  vmcs_read_guest(vm);
+  // Salidas tras las que el VMM siempre pide los registros (MMIO, INS/OUTS, HLT,
+  // apagado): se leen ya, con el VMCS cargado. En las demas (E/S simple, plazo,
+  // TPR) basta lo minimo y el resto se lee si se pide.
+  if (ret == 1 && (x->reason == AVM_EXIT_MMIO || x->reason == AVM_EXIT_HLT ||
+                   x->reason == AVM_EXIT_SHUTDOWN || x->reason == AVM_EXIT_FAIL ||
+                   (x->reason == AVM_EXIT_IO && x->io.string))) {
+    vmcs_read_guest(vm);
+    snap_take(vm);
+    vm->regs_stale = false;
+  } else {
+    vmcs_read_hot(vm);
+    vm->regs_stale = true;
+  }
+  vmwrite(F_ENTRY_INTR_INFO, 0); // lo pendiente ya esta en reinj
   __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])(fx + 512)) : : "memory");
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])fx) : "memory");
   vmclear(vm->vmcs_phys);
@@ -1444,6 +1605,7 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
   memset(&x, 0, sizeof(x));
   uint64_t t_start = tick_count;
   uint64_t tsc_run0 = rdtsc_k();
+  uint64_t last_pp = tick_count;
   vm->st.runs++;
 
   if (vm->pending_in) { // el VMM rellena io.data del IN anterior
@@ -1470,14 +1632,20 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
       break;
     }
     memset(&x, 0, sizeof(x));
-    int r = run_window(vm, &x);
+    int r = run_window(vm, &x, vm->timeout_ms ? t_start + vm->timeout_ms : ~0ULL);
     if (r < 0) {
       rc = r;
       goto out;
     }
     if (r == 1)
       break;
-    sched_yield(); // salida por IRQ del host: dejar que el planificador mande
+    // Ventana cortada (IRQ del host, plazo, cada 2 ticks): ceder solo si hay
+    // otra tarea lista. sched_yield saltaba al idle aunque no la hubiera y la
+    // VM perdia un tick entero cada vez (~2 ms por salida con ReactOS).
+    if (tick_count - last_pp >= 10 || (cur && cur->need_resched)) {
+      last_pp = tick_count;
+      sched_preempt_point();
+    }
   }
   x.irq_pending = vm->pending_irq;
   x.tpr = vm->tpr;
@@ -1557,6 +1725,8 @@ static int avm_open(vfs_node_t *node, int flags) {
   vm->magic = VM_MAGIC;
   vmcs_setup_static(vm);
   vm_reset_regs(vm);
+  vm->vmcs_full = true;
+  vm->ctl_cpu = -1;
   node->priv = vm;
   return 0;
 }
@@ -1644,14 +1814,24 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     struct avm_regs r;
     if (copy_from_user(&r, (void *)arg, sizeof(r)) < 0)
       return -EFAULT;
+    int src = vm_sync_regs(vm); // snap = VMCS: la siguiente ventana escribe la diferencia
+    if (src < 0)
+      vm->vmcs_full = true;
     vm->regs = r;
     vm->cr0_shadow = r.cr0;
     vm->cr4_shadow = r.cr4;
+    vm->regs_stale = false;
     return 0;
   }
-  case AVM_GET_REGS:
+  case AVM_GET_REGS: {
     if (!access_ok((void *)arg, sizeof(vm->regs)))
       return -EFAULT;
+    if (vm->busy)
+      return -EBUSY;
+    int src = vm_sync_regs(vm);
+    if (src < 0)
+      return src;
+  }
     return copy_to_user((void *)arg, &vm->regs, sizeof(vm->regs)) < 0 ? -EFAULT : 0;
   case AVM_RUN:
     return vm_run(vm, arg);

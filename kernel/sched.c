@@ -661,6 +661,18 @@ void sched_yield(void) {
 // contador de otra tarea.
 task_t *sched_current(void) { return (task_t *)this_cpu_current_task(); }
 
+// Punto de expulsion para bucles largos en el kernel (p. ej. la VM de aurora-vm):
+// cede la CPU solo si hay otra tarea lista; si no, sigue la actual. A diferencia
+// de sched_yield no salta al idle (eso costaba un tick entero en cada llamada).
+void sched_preempt_point(void) {
+  task_t *cur = sched_current();
+  if (!cur || cur->preempt_count)
+    return;
+  cur->yield_requested = 0;
+  __atomic_store_n((int *)&cur->need_resched, 1, __ATOMIC_RELEASE);
+  sched_tick();
+}
+
 // ---------------------------------------------------------------------------
 // [SMP 4.4] Marcar need_resched en la tarea actual.
 // ---------------------------------------------------------------------------

@@ -156,6 +156,7 @@ uint64_t sched_get_ticks(void);
 
 void sched_make_ready(task_t *t);
 void sched_mark_need_resched(void);
+void sched_preempt_point(void);
 void sched_publish_task(task_t *t);
 
 void sched_stop_task(task_t *t);
