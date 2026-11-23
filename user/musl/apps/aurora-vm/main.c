@@ -658,6 +658,47 @@ static void platform_reset_devices(void) {
 static int g_resets;
 static uint64_t g_reset_t0;
 
+// AURORA_VM_TRAZA=1: cada 2 s una linea con donde esta el huesped y que salidas
+// produjo (para ver si un cuelgue es un bucle de E/S, un HLT esperando una IRQ...).
+static int g_traza;
+static void traza(uint64_t tnow, const struct avm_exit *x) {
+  static unsigned long nr[16], nport[8];
+  static uint16_t port[8];
+  static uint64_t t0, mmio_last;
+  if (x) {
+    nr[x->reason & 15]++;
+    if (x->reason == AVM_EXIT_IO) {
+      int i;
+      for (i = 0; i < 8 && nport[i] && port[i] != x->io.port; i++)
+        ;
+      if (i < 8) {
+        port[i] = x->io.port;
+        nport[i] += x->io.string ? x->io.count : 1;
+      }
+    } else if (x->reason == AVM_EXIT_MMIO) {
+      mmio_last = x->mmio.gpa;
+    }
+    return;
+  }
+  if (!t0)
+    t0 = tnow;
+  if (tnow - t0 < 2000000000ULL)
+    return;
+  t0 = tnow;
+  struct avm_regs r;
+  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
+    return;
+  fprintf(stderr, "[traza] cs=%x:%llx cr0=%llx cr3=%llx if=%d | io=%lu mmio=%lu(%llx) hlt=%lu sig=%lu tpr=%lu win=%lu | puertos:",
+          r.cs.selector, (unsigned long long)r.rip, (unsigned long long)r.cr0, (unsigned long long)r.cr3,
+          (int)((r.rflags >> 9) & 1), nr[AVM_EXIT_IO], nr[AVM_EXIT_MMIO], (unsigned long long)mmio_last,
+          nr[AVM_EXIT_HLT], nr[AVM_EXIT_SIGNAL], nr[AVM_EXIT_TPR], nr[AVM_EXIT_INTR_WINDOW]);
+  for (int i = 0; i < 8 && nport[i]; i++)
+    fprintf(stderr, " %x:%lu", port[i], nport[i]);
+  fprintf(stderr, "\n");
+  memset(nr, 0, sizeof(nr));
+  memset(nport, 0, sizeof(nport));
+}
+
 // Reinicio del huesped (0xCF9, 0x64 FE, 0x92, triple fallo): todo como al encender
 // (la BIOS se recarga entera; SeaBIOS hace un arranque en frio).
 static int guest_reset(const char *why) {
@@ -718,8 +759,14 @@ static int run_loop(uint64_t deadline_ns) {
     }
     if (g_vw_closed) {
       fprintf(stderr, "aurora-vm: ventana cerrada\n");
+      if (g_plat) { // si el huesped estaba colgado, esto dice donde
+        dump_regs("estado al cerrar la ventana");
+        dump_io();
+      }
       return 0;
     }
+    if (g_traza)
+      traza(tnow, NULL);
     uint64_t next = devices_poll(tnow);
     irq_before_run();
     set_run_timeout(tnow, next);
@@ -728,6 +775,8 @@ static int run_loop(uint64_t deadline_ns) {
       return 1;
     }
     irq_after_exit(&x);
+    if (g_traza)
+      traza(0, &x);
     switch (x.reason) {
     case AVM_EXIT_IO:
       if (x.io.string) {
@@ -1233,6 +1282,7 @@ int main(int argc, char **argv) {
     return bios_test(acpi, vga);
   }
   g_capture = getenv("AURORA_VM_CAPTURA");
+  g_traza = getenv("AURORA_VM_TRAZA") != NULL;
   if (!strcmp(argv[1], "--bios")) {
     struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,
                           .mem_mb = 1024, .acpi = 1, .boot_cd = -1};
