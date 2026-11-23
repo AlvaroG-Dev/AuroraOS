@@ -153,6 +153,13 @@ FORCE:
 # Imagenes de disco de prueba: las crea scripts/setup-env.sh.
 tests/test_disk.img tests/extra_disk.img: | env
 
+# Disco de 45 GB para la mini-VM: sda3 en ext4 con windows.iso y win.img.
+#   make vm-disk ISO=~/Descargas/Win10_x64.iso
+.PHONY: vm-disk
+vm-disk:
+	@if [ -z "$(ISO)" ]; then echo "uso: make vm-disk ISO=ruta/a/windows.iso"; exit 1; fi
+	@bash scripts/mk_vm_disk.sh "$(ISO)" $(VM_DISK_SIZE) $(VM_GUEST_DISK)
+
 # ---------------------------------------------------------------------------
 # Userland: nativo (user/) + musl (user/musl/).
 # ---------------------------------------------------------------------------
