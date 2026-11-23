@@ -336,7 +336,34 @@ static int g_want_vga, g_want_win;
 static const char *g_vga_rom_path;
 static uint64_t g_vga_t_draw, g_vga_t_ev;
 
+// AURORA_VM_CAPTURA=fichero.ppm: guarda la pantalla del huesped cada 2 s (tambien
+// con --sin-ventana). Sirve para diagnosticar un arranque sin mirar la ventana.
+static const char *g_capture;
+static uint64_t g_capture_t;
+static void vga_capture(void) {
+  int w = 0, h = 0;
+  uint32_t *px = vga_render(&w, &h);
+  if (!px || w <= 0 || h <= 0)
+    return;
+  char tmp[512];
+  snprintf(tmp, sizeof(tmp), "%s.tmp", g_capture);
+  FILE *f = fopen(tmp, "wb");
+  if (!f)
+    return;
+  fprintf(f, "P6\n%d %d\n255\n", w, h);
+  for (int i = 0; i < w * h; i++) {
+    uint8_t rgb[3] = {(uint8_t)(px[i] >> 16), (uint8_t)(px[i] >> 8), (uint8_t)px[i]};
+    fwrite(rgb, 1, 3, f);
+  }
+  fclose(f);
+  rename(tmp, g_capture);
+}
+
 static void vga_poll(uint64_t t) {
+  if (g_vga_on && g_capture && t - g_capture_t >= 2000000000ULL) {
+    g_capture_t = t;
+    vga_capture();
+  }
   if (!g_vga_on || !g_want_win)
     return;
   if (t - g_vga_t_ev >= 8000000ULL) {
@@ -1141,6 +1168,7 @@ int main(int argc, char **argv) {
     int acpi = strcmp(argv[1], "--bios-test") != 0, vga = !strcmp(argv[1], "--bios-test-vga");
     return bios_test(acpi, vga);
   }
+  g_capture = getenv("AURORA_VM_CAPTURA");
   if (!strcmp(argv[1], "--bios")) {
     struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,
                           .mem_mb = 1024, .acpi = 1, .boot_cd = -1};

@@ -138,3 +138,20 @@ Salidas: `AVM_EXIT_IO` (puerto, tamano, direccion, dato), `AVM_EXIT_MMIO`,
   `AVM_GET_CAPS` no cuelga; se salta sin VMX, es el caso de las baterias QEMU sin
   KVM).
 - Bateria QEMU: sigue necesitando `lkpi.auto=off` (`auroraos-bateria-qemu.md`).
+- `user/musl/apps/aurora-vm/tests/replay.c`: reproduce una traza de QEMU
+  (`-trace memory_region_ops_*`) contra los modelos de dispositivo y compara cada
+  lectura (IDE, bus maestro, VGA, VBE, i8042 cuadran con el arranque de ReactOS).
+- `user/musl/apps/aurora-vm/tests/uc_backend.c` + `uc_shim.h`: `/dev/aurora-vm`
+  falso sobre Unicorn 2.1 (CPU emulada) para probar el VMM entero sin VT-x:
+  ```
+  U=<unicorn: include/ y lib/libunicorn.so.2>; A=user/musl/apps/aurora-vm
+  gcc -O1 -include $A/tests/uc_shim.h -c -o m.o $A/main.c
+  gcc -I$U/include -c -o b.o $A/tests/uc_backend.c
+  gcc -o vm-uc m.o b.o $U/lib/libunicorn.so.2 -Wl,-rpath,$U/lib -lpthread
+  ./vm-uc --autotest; AURORA_VM_BIOS=.../bios.bin AURORA_VM_VGABIOS=.../vgabios.bin ./vm-uc --bios-test-vga
+  AURORA_VM_CAPTURA=pantalla.ppm ./vm-uc --bios --sin-ventana --cd reactos.iso --ide hd.img --mem 256 --tiempo 3000
+  ```
+  Pasan autotest 3/3 y los tres `--bios-test*`; el CD de ReactOS 0.4.15 arranca
+  (SeaBIOS, freeldr, ntoskrnl/hal). Es ~1000 veces mas lento que VT-x. No cubre:
+  salidas INS/OUTS en bloque del kernel, EPT, CR8/TPR ni CPUID/MSR del kernel, ni
+  #GP/#PF del huesped en modo protegido (Unicorn no da el codigo de error).

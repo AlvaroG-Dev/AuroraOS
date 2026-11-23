@@ -45,7 +45,7 @@ static uint32_t g_reply;
 static uint64_t g_mmio_addr;
 static int g_mmio_write, g_mmio_size;
 static int g_mmio_hit, g_stop_req;
-static unsigned long g_stat_io, g_stat_mmio, g_stat_irq, g_stat_int;
+static unsigned long g_stat_io, g_stat_mmio, g_stat_irq, g_stat_int, g_stat_pf;
 
 static uint64_t mono_us(void) {
   struct timespec t;
@@ -64,6 +64,117 @@ static uint64_t rreg(int id) {
 static void wreg(int id, uint64_t v) { uc_reg_write(uc, id, &v); }
 
 static int pm(void) { return rreg(UC_X86_REG_CR0) & 1; }
+
+// Lineal -> fisica con las tablas del huesped (32 bits, PAE y modo largo). Unicorn
+// solo lee y escribe memoria fisica.
+static int g_walk_rw, g_walk_us, g_walk_nx, g_walk_present;
+// Recorre las tablas; con set_ad marca A (y D si write) como la CPU.
+static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad);
+static int lin2phys(uint64_t lin, uint64_t *phys) { return walk(lin, phys, 0, 0); }
+static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
+  g_walk_rw = g_walk_us = 1;
+  g_walk_nx = 0;
+  g_walk_present = 0;
+  uint64_t cr0 = rreg(UC_X86_REG_CR0), cr4 = rreg(UC_X86_REG_CR4), cr3 = rreg(UC_X86_REG_CR3);
+  if (!(cr0 & 0x80000000u)) {
+    *phys = lin & 0xFFFFFFFFu;
+    return 0;
+  }
+  uc_x86_msr efer = {0xC0000080u, 0};
+  uc_reg_read(uc, UC_X86_REG_MSR, &efer);
+  if (!(cr4 & 0x20)) { // 32 bits
+    uint32_t pde = 0, pte = 0;
+    uint64_t pdea = (cr3 & 0xFFFFF000u) + ((lin >> 22) & 0x3FF) * 4;
+    uc_mem_read(uc, pdea, &pde, 4);
+    if (!(pde & 1))
+      return -1;
+    g_walk_rw &= (pde >> 1) & 1;
+    g_walk_us &= (pde >> 2) & 1;
+    if ((pde & 0x80) && (cr4 & 0x10)) {
+      g_walk_present = 1;
+      if (set_ad) {
+        uint32_t n = pde | 0x20 | (write ? 0x40 : 0);
+        if (n != pde)
+          uc_mem_write(uc, pdea, &n, 4);
+      }
+      *phys = (pde & 0xFFC00000u) | (lin & 0x3FFFFF);
+      return 0;
+    }
+    if (set_ad && !(pde & 0x20)) {
+      uint32_t n = pde | 0x20;
+      uc_mem_write(uc, pdea, &n, 4);
+    }
+    uint64_t ptea = (pde & 0xFFFFF000u) + ((lin >> 12) & 0x3FF) * 4;
+    uc_mem_read(uc, ptea, &pte, 4);
+    if (!(pte & 1))
+      return -1;
+    g_walk_present = 1;
+    g_walk_rw &= (pte >> 1) & 1;
+    g_walk_us &= (pte >> 2) & 1;
+    if (set_ad) {
+      uint32_t n = pte | 0x20 | (write ? 0x40 : 0);
+      if (n != pte)
+        uc_mem_write(uc, ptea, &n, 4);
+    }
+    *phys = (pte & 0xFFFFF000u) | (lin & 0xFFF);
+    return 0;
+  }
+  const uint64_t M = 0x000FFFFFFFFFF000ULL;
+  uint64_t e = 0, tbl;
+  int lvl;
+  if (efer.value & (1ULL << 10)) {
+    tbl = cr3 & M;
+    lvl = 4;
+  } else {
+    uc_mem_read(uc, (cr3 & 0xFFFFFFE0u) + ((lin >> 30) & 3) * 8, &e, 8);
+    if (!(e & 1))
+      return -1;
+    tbl = e & M;
+    lvl = 2;
+  }
+  for (; lvl >= 1; lvl--) {
+    int sh = 12 + 9 * (lvl - 1);
+    uint64_t ea = tbl + ((lin >> sh) & 0x1FF) * 8;
+    uc_mem_read(uc, ea, &e, 8);
+    if (!(e & 1))
+      return -1;
+    g_walk_rw &= (int)((e >> 1) & 1);
+    g_walk_us &= (int)((e >> 2) & 1);
+    g_walk_nx |= (int)(e >> 63);
+    int leaf = lvl == 1 || (e & 0x80);
+    if (set_ad) {
+      uint64_t n = e | 0x20 | (leaf && write ? 0x40 : 0);
+      if (n != e)
+        uc_mem_write(uc, ea, &n, 8);
+    }
+    if (lvl > 1 && (e & 0x80)) {
+      g_walk_present = 1;
+      *phys = (e & M & ~((1ULL << sh) - 1)) | (lin & ((1ULL << sh) - 1));
+      return 0;
+    }
+    tbl = e & M;
+  }
+  g_walk_present = 1;
+  *phys = tbl | (lin & 0xFFF);
+  return 0;
+}
+static int lin_rw(uint64_t lin, void *buf, size_t n, int write) {
+  uint8_t *b = buf;
+  while (n) {
+    uint64_t ph;
+    size_t c = 4096 - (lin & 4095);
+    if (c > n)
+      c = n;
+    if (lin2phys(lin, &ph) < 0)
+      return -1;
+    if (write ? uc_mem_write(uc, ph, b, c) : uc_mem_read(uc, ph, b, c))
+      return -1;
+    lin += c;
+    b += c;
+    n -= c;
+  }
+  return 0;
+}
 
 static void seg_info(int id, struct avm_seg *s) {
   uint16_t sel = (uint16_t)rreg(id);
@@ -84,7 +195,7 @@ static void seg_info(int id, struct avm_seg *s) {
     tbase = ldtr.base;
   }
   uint8_t d[8] = {0};
-  uc_mem_read(uc, tbase + (sel & ~7u), d, 8);
+  lin_rw(tbase + (sel & ~7u), d, 8, 0);
   s->base = (uint32_t)(d[2] | d[3] << 8 | d[4] << 16 | (uint32_t)d[7] << 24);
   uint32_t lim = d[0] | d[1] << 8 | (d[6] & 0xF) << 16;
   if (d[6] & 0x80)
@@ -98,7 +209,9 @@ static void seg_info(int id, struct avm_seg *s) {
 // ---------------------------------------------------------------------------
 // Entrega de interrupciones (lo que haria la CPU)
 // ---------------------------------------------------------------------------
-static int deliver(int vec, int is_soft) {
+static int deliver_err(int vec, int has_err, uint32_t err);
+static int deliver(int vec, int is_soft) { (void)is_soft; return deliver_err(vec, 0, 0); }
+static int deliver_err(int vec, int has_err, uint32_t errc) {
   uint64_t fl = rreg(UC_X86_REG_EFLAGS);
   uint16_t cs = (uint16_t)rreg(UC_X86_REG_CS);
   uint32_t eip = (uint32_t)rreg(UC_X86_REG_EIP);
@@ -116,12 +229,12 @@ static int deliver(int vec, int is_soft) {
     wreg(UC_X86_REG_EIP, iv[0]);
     return 0;
   }
-  if ((cs & 3) || (fl & (1u << 17)))
-    return -1; // anillo 3 / V86: no lo hace esta prueba
+  if (fl & (1u << 17))
+    return -1; // V86: no lo hace esta prueba
   uc_x86_mmr idtr;
   uc_reg_read(uc, UC_X86_REG_IDTR, &idtr);
   uint8_t g[8];
-  if ((uint32_t)vec * 8 + 7 > idtr.limit || uc_mem_read(uc, idtr.base + (uint64_t)vec * 8, g, 8))
+  if ((uint32_t)vec * 8 + 7 > idtr.limit || lin_rw(idtr.base + (uint64_t)vec * 8, g, 8, 0))
     return -1;
   uint32_t off = g[0] | g[1] << 8 | (uint32_t)g[6] << 16 | (uint32_t)g[7] << 24;
   uint16_t nsel = (uint16_t)(g[2] | g[3] << 8);
@@ -129,10 +242,36 @@ static int deliver(int vec, int is_soft) {
   if (!(g[5] & 0x80) || (type != 0xE && type != 0xF))
     return -1;
   struct avm_seg ss;
+  uint32_t fr[6];
+  int n = 0;
+  uint32_t esp;
+  if ((cs & 3) && !(nsel & 3)) { // de anillo 3 a 0: pila del TSS
+    uc_x86_mmr tr;
+    uc_reg_read(uc, UC_X86_REG_TR, &tr);
+    uint32_t t[2];
+    if (lin_rw(tr.base + 4, t, 8, 0))
+      return -1;
+    uint32_t oss = (uint32_t)rreg(UC_X86_REG_SS), oesp = (uint32_t)rreg(UC_X86_REG_ESP);
+    wreg(UC_X86_REG_SS, t[1] & 0xFFFF);
+    esp = t[0];
+    fr[n++] = oesp;
+    fr[n++] = oss;
+  } else {
+    esp = (uint32_t)rreg(UC_X86_REG_ESP);
+  }
   seg_info(UC_X86_REG_SS, &ss);
-  uint32_t esp = (uint32_t)rreg(UC_X86_REG_ESP) - 12;
-  uint32_t fr[3] = {eip, cs, (uint32_t)fl};
-  uc_mem_write(uc, ss.base + esp, fr, 12);
+  fr[n++] = (uint32_t)fl;
+  fr[n++] = cs;
+  fr[n++] = eip;
+  if (has_err)
+    fr[n++] = errc;
+  // fr esta en orden de empuje: en memoria va al reves (error en la cima)
+  uint32_t mem[6];
+  for (int i = 0; i < n; i++)
+    mem[i] = fr[n - 1 - i];
+  esp -= (uint32_t)n * 4;
+  if (lin_rw(ss.base + esp, mem, (size_t)n * 4, 1))
+    return -1;
   wreg(UC_X86_REG_ESP, esp);
   fl &= ~((1u << 8) | (1u << 14) | (1u << 16) | (1u << 17));
   if (type == 0xE)
@@ -140,7 +279,6 @@ static int deliver(int vec, int is_soft) {
   wreg(UC_X86_REG_EFLAGS, fl);
   wreg(UC_X86_REG_CS, nsel);
   wreg(UC_X86_REG_EIP, off);
-  (void)is_soft;
   return 0;
 }
 
@@ -149,8 +287,11 @@ static void pc_dump(void);
 static void intr_hook(uc_engine *u, uint32_t intno, void *ud) {
   (void)u; (void)ud;
   g_stat_int++;
-  // INT n en modo real (BIOS): por la IVT. Excepciones en modo protegido: fin.
-  if (pm()) {
+  // INT n en modo real (BIOS): por la IVT. En modo protegido, INT n y las excepciones
+  // sin codigo de error van por la IDT; las demas (#GP, #PF...) necesitarian el codigo
+  // de error y CR2, que Unicorn no da: fin de la prueba.
+  int errc = intno == 8 || (intno >= 10 && intno <= 14) || intno == 17;
+  if (pm() && (errc || deliver((int)intno, 1) < 0)) {
     pc_dump();
     fprintf(stderr, "[uc] excepcion/INT 0x%x en modo protegido en cs=%x eip=%x: fin de la prueba\n",
             intno, (unsigned)rreg(UC_X86_REG_CS), (unsigned)rreg(UC_X86_REG_EIP));
@@ -158,7 +299,8 @@ static void intr_hook(uc_engine *u, uint32_t intno, void *ud) {
     uc_emu_stop(uc);
     return;
   }
-  deliver((int)intno, 1);
+  if (!pm())
+    deliver((int)intno, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,10 +323,11 @@ static uint32_t io_exit(uint32_t port, int size, int write, uint32_t v) {
   g_reply_ready = 0;
   g_state = ST_RUNNING;
   uint32_t r = g_reply;
-  int stop = g_pending >= 0 || g_stop_req;
+  // No se para aqui aunque haya una IRQ pendiente: uc_emu_stop dentro de un REP INS
+  // aborta la iteracion y la repite (el puerto ya se leyo: se perderia un dato y,
+  // con IF=0 y la IRQ esperando, el REP no terminaria nunca). La IRQ entra en la
+  // siguiente vuelta (el tiempo maximo de cada RUN es de 10 ms).
   pthread_mutex_unlock(&mu);
-  if (stop) // hay una IRQ que entregar: parar al final del bloque
-    uc_emu_stop(uc);
   g_stat_io++;
   return r;
 }
@@ -202,8 +345,16 @@ static uint64_t g_last_pc, g_pc_ring[64];
 static uint32_t g_last_size;
 static unsigned g_pc_n;
 static uint64_t g_expect_pc = ~0ULL;
+// Fin de cada RUN: se para entre instrucciones desde aqui y no con el tiempo maximo
+// de uc_emu_start: ese para en mitad de un REP INSW, Unicorn repite la iteracion y
+// el dato ya leido del puerto se pierde (se vio en el IDENTIFY: faltaba una palabra).
+static uint64_t g_run_deadline_us;
+static unsigned g_insn_tick;
+static uint64_t mono_us(void);
 static void code_hook(uc_engine *u, uint64_t a, uint32_t size, void *ud) {
-  (void)u; (void)ud;
+  (void)ud;
+  if ((++g_insn_tick & 1023) == 0 && mono_us() > g_run_deadline_us)
+    uc_emu_stop(u);
   if (g_expect_pc != ~0ULL) {
     if (a != g_expect_pc)
       fprintf(stderr, "[uc] arranque en %llx, se esperaba %llx (cs=%x eip=%x)\n", (unsigned long long)a,
@@ -222,7 +373,36 @@ static void pc_dump(void) {
             (unsigned long long)(g_pc_ring[i & 63] & 0xFFFFFFFFu));
   fprintf(stderr, "\n");
 }
+// Unicorn (UC_TLB_CPU) se traga los fallos de pagina y repite la instruccion para
+// siempre: con UC_TLB_VIRTUAL la traduccion la hace este gancho y, si falla, se
+// entrega #PF por la IDT como haria la CPU.
+static int g_pf, g_pf_err, g_until_fill;
+static uint64_t g_pf_addr;
+static bool tlb_hook(uc_engine *u, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *ud) {
+  (void)u; (void)ud;
+  if (va >= 0xFFFFFFFFFFFFF000ULL) { // al parar (HLT...) Unicorn mira la direccion "until" (~0)
+    g_until_fill = 1;
+    return false;
+  }
+  int write = t == UC_MEM_WRITE, fetch = t == UC_MEM_FETCH;
+  uint64_t ph;
+  int user = (rreg(UC_X86_REG_CS) & 3) == 3;
+  int r = walk(va, &ph, write, 1);
+  uint64_t cr0 = rreg(UC_X86_REG_CR0);
+  int bad = r < 0 || (user && !g_walk_us) || (write && !g_walk_rw && (user || (cr0 & 0x10000)));
+  if (bad) {
+    if (getenv("UCPF")) fprintf(stderr, "[uc] tlb fallo va=%llx t=%d r=%d\n", (unsigned long long)va, t, r);
+    g_pf = 1;
+    g_pf_addr = va;
+    g_pf_err = (g_walk_present ? 1 : 0) | (write ? 2 : 0) | (user ? 4 : 0) | (fetch && g_walk_nx ? 16 : 0);
+    return false;
+  }
+  e->paddr = ph & ~0xFFFULL;
+  e->perms = UC_PROT_READ | UC_PROT_EXEC | (g_walk_rw || !(cr0 & 0x10000) ? UC_PROT_WRITE : 0);
+  return true;
+}
 static bool unmapped_hook(uc_engine *u, uc_mem_type t, uint64_t a, int size, int64_t v, void *ud) {
+  if (getenv("UCPF")) fprintf(stderr, "[uc] unmapped a=%llx t=%d\n", (unsigned long long)a, t);
   (void)u; (void)v; (void)ud;
   g_mmio_addr = a;
   g_mmio_size = size;
@@ -261,15 +441,42 @@ static void *cpu_thread(void *arg) {
       seg_info(UC_X86_REG_CS, &c);
       g_expect_pc = c.base + rreg(UC_X86_REG_EIP); // comprobacion: el CPU arranca donde debe
     }
-    int err = uc_emu_start(uc, pc_begin(), ~0ULL, (uint64_t)tmo * 1000, 0);
+    g_run_deadline_us = t0 + (uint64_t)tmo * 1000;
+    int err;
+    for (;;) {
+      g_pf = 0;
+      g_until_fill = 0;
+      err = uc_emu_start(uc, pc_begin(), ~0ULL, 0, 0);
+      if (err == UC_ERR_EXCEPTION && g_until_fill && !g_pf && !g_mmio_hit)
+        err = UC_ERR_OK;
+      if (!g_pf || g_shutdown || g_mmio_hit)
+        break;
+      // fallo de pagina: EIP en la instruccion, CR2 y codigo de error
+      struct avm_seg c;
+      seg_info(UC_X86_REG_CS, &c);
+      wreg(UC_X86_REG_EIP, (uint32_t)(g_last_pc - c.base));
+      wreg(UC_X86_REG_CR2, g_pf_addr);
+      g_stat_pf++;
+      if (deliver_err(14, 1, (uint32_t)g_pf_err) < 0) {
+        fprintf(stderr, "[uc] no se pudo entregar #PF en %llx\n", (unsigned long long)g_pf_addr);
+        g_shutdown = 1;
+        break;
+      }
+      g_mmio_hit = 0;
+      if (mono_us() > g_run_deadline_us) {
+        err = UC_ERR_OK;
+        break;
+      }
+    }
     uint64_t dt = mono_us() - t0;
     pthread_mutex_lock(&mu);
     memset(&g_ev, 0, sizeof(g_ev));
     if (g_shutdown) {
       g_ev.reason = AVM_EXIT_SHUTDOWN;
-    } else if (g_mmio_hit == 1 && (err == UC_ERR_READ_UNMAPPED || err == UC_ERR_WRITE_UNMAPPED)) {
+    } else if (g_mmio_hit == 1 && (err == UC_ERR_READ_UNMAPPED || err == UC_ERR_WRITE_UNMAPPED ||
+                                   err == UC_ERR_EXCEPTION)) { // EXCEPTION: con UC_TLB_VIRTUAL
       g_ev.reason = AVM_EXIT_MMIO;
-      g_ev.mmio.gpa = g_mmio_addr; // sin paginacion: lineal = fisica
+      g_ev.mmio.gpa = g_mmio_addr; // el gancho ya da la direccion fisica
       g_ev.mmio.size = (uint8_t)g_mmio_size;
       g_ev.mmio.is_write = (uint8_t)g_mmio_write;
       g_stat_mmio++;
@@ -288,7 +495,7 @@ static void *cpu_thread(void *arg) {
       uint8_t b = 0;
       struct avm_seg cs;
       seg_info(UC_X86_REG_CS, &cs);
-      uc_mem_read(uc, cs.base + rreg(UC_X86_REG_EIP) - 1, &b, 1);
+      lin_rw(cs.base + rreg(UC_X86_REG_EIP) - 1, &b, 1, 0);
       if (b == 0xF4 && dt < (uint64_t)tmo * 1000 * 9 / 10)
         g_ev.reason = AVM_EXIT_HLT;
       else
@@ -353,6 +560,12 @@ static void set_regs(const struct avm_regs *r) {
   wreg(UC_X86_REG_ESI, r->rsi & 0xFFFFFFFF); wreg(UC_X86_REG_EDI, r->rdi & 0xFFFFFFFF);
   wreg(UC_X86_REG_EBP, r->rbp & 0xFFFFFFFF); wreg(UC_X86_REG_ESP, r->rsp & 0xFFFFFFFF);
   wreg(UC_X86_REG_EFLAGS, r->rflags);
+  if (g_regs_set_once && pm() && !(r->cr0 & 1)) { // reinicio del huesped: vuelta a modo real
+    wreg(UC_X86_REG_CR0, r->cr0);
+    wreg(UC_X86_REG_CR3, 0);
+    wreg(UC_X86_REG_CR4, 0);
+    g_regs_set_once = 0;
+  }
   if (!g_regs_set_once || !pm()) { // estado inicial (o reinicio): segmentos en modo real
     if (r->cr0 & 1) {
       fprintf(stderr, "[uc] SET_REGS en modo protegido no soportado\n");
@@ -422,14 +635,18 @@ static void uc_init(void) {
   uc_hook_add(uc, &h, UC_HOOK_INSN, (void *)out_hook, NULL, 1, 0, UC_X86_INS_OUT);
   uc_hook_add(uc, &h, UC_HOOK_INTR, (void *)intr_hook, NULL, 1, 0);
   uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, (void *)unmapped_hook, NULL, 1, 0);
+  uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL);
+  uc_hook_add(uc, &h, UC_HOOK_TLB_FILL, (void *)tlb_hook, NULL, 1, 0);
   uc_hook_add(uc, &h, UC_HOOK_CODE, (void *)code_hook, NULL, 1, 0);
   if (!g_thread)
     pthread_create(&g_thread, NULL, cpu_thread, NULL);
 }
 
 static void stats(void) {
-  fprintf(stderr, "[uc] E/S %lu, MMIO %lu, IRQ entregadas %lu, INT n %lu\n", g_stat_io, g_stat_mmio,
-          g_stat_irq, g_stat_int);
+  fprintf(stderr, "[uc] E/S %lu, MMIO %lu, IRQ entregadas %lu, INT n %lu, #PF %lu\n", g_stat_io,
+          g_stat_mmio, g_stat_irq, g_stat_int, g_stat_pf);
+  fprintf(stderr, "[uc] instrucciones/bloques vistos: %u\n", g_insn_tick);
+  pc_dump();
 }
 
 int avm_test_open(const char *path, int flags, ...) {
