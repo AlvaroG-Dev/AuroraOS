@@ -15,13 +15,18 @@
 # Requiere gdisk (sgdisk) y e2fsprogs.
 set -e
 
-ISO="$1"
+ISO="${1/#\~/$HOME}" # por si llega "~/..." sin expandir
 SIZE="${2:-45G}"
 VMDISK="${3:-40G}"
 IMG="tests/test_disk.img"
 
-if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
+if [ -z "$ISO" ]; then
   echo "uso: $0 RUTA/A/windows.iso [tamano imagen, 45G] [tamano disco VM, 40G]" >&2
+  exit 1
+fi
+if [ ! -f "$ISO" ]; then
+  echo "no encuentro la ISO: $ISO" >&2
+  ls "$(dirname "$ISO")"/*.iso 2>/dev/null | sed 's/^/  hay: /' >&2
   exit 1
 fi
 for t in sgdisk mkfs.ext4; do
