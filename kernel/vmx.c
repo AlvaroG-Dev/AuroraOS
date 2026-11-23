@@ -183,8 +183,8 @@ struct avm_vm {
   uint64_t dr[8];
   uint32_t debug, exc_logged;
   uint32_t vmflags; // AVM_VMF_*
-  uint64_t last_exc_rip;
-  uint32_t exc_repeat;
+  uint64_t last_exc_rip, last_exc_qual;
+  uint32_t last_exc_vec, exc_repeat;
   // IN pendiente de completar en el siguiente AVM_RUN
   bool pending_in;
   uint8_t pending_in_size;
@@ -1156,8 +1156,11 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
                  vmread(F_GUEST_CR4), vmread(F_GUEST_EFER), vmread(F_GUEST_CR3));
       }
       {
+        // Atasco = la MISMA excepcion en el mismo sitio y con la misma direccion
+        // (un REP MOVS que recorre paginas ausentes falla en el mismo RIP con
+        // CR2 distinto: eso es normal).
         uint64_t rip_now = vmread(F_GUEST_RIP);
-        if (rip_now == vm->last_exc_rip) {
+        if (rip_now == vm->last_exc_rip && vec == vm->last_exc_vec && q == vm->last_exc_qual) {
           if (++vm->exc_repeat > 64) { // el huesped se ha atascado fallando
             LOG_WARN("[VMX] excepcion #%u repetida en rip=%lx: se da por apagado",
                      vec, rip_now);
@@ -1168,6 +1171,8 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
           }
         } else {
           vm->last_exc_rip = rip_now;
+          vm->last_exc_vec = vec;
+          vm->last_exc_qual = q;
           vm->exc_repeat = 0;
         }
       }

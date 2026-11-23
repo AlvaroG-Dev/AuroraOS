@@ -12,13 +12,16 @@
 //   aurora-vm --autotest             tres guests incorporados (real, modo largo+MMIO, temporizador)
 //   aurora-vm --bios-test[-acpi|-vga] SeaBIOS + virtio-blk + sector de arranque incorporado
 //   aurora-vm --plano FICH [--en DIR] [--mem MiB]
+//   aurora-vm --crear-disco IMG TAM  disco vacio (disperso) de TAM (20G, 512M...)
 //   aurora-vm --bios [--ide IMG] [--cd ISO] [--disco IMG] [--mem MiB] [--arranque cd|disco]
 //                    [--rom FICH] [--vgarom FICH] [--tiempo S] [--log-bios] [--sin-acpi]
-//                    [--sin-vga] [--sin-ventana]
+//                    [--sin-vga] [--sin-ventana] [--depurar]
 //   aurora-vm PROGRAMA.exe           (aurora-run lo llama asi; aun sin huesped)
 // Puertos de depuracion: 0x3F8 serie -> stdout; 0xF4 termina con el codigo escrito
 // (solo en las pruebas y en --plano).
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "../../../../kernel/aurora_vm.h"
 #include "guests.h"
 #include <errno.h>
@@ -1078,14 +1081,47 @@ static int bios_test(int acpi, int vga) {
   return ok && vok ? 0 : 1;
 }
 
+// Disco vacio (fichero disperso) para instalar un sistema.
+static int create_disk(const char *path, const char *size) {
+  char *end;
+  unsigned long long n = strtoull(size, &end, 10);
+  if (*end == 'G' || *end == 'g')
+    n <<= 30;
+  else if (*end == 'M' || *end == 'm')
+    n <<= 20;
+  else if (*end) {
+    fprintf(stderr, "aurora-vm: tamano no valido: %s (p. ej. 20G o 512M)\n", size);
+    return 2;
+  }
+  if (n < (1ULL << 20)) {
+    fprintf(stderr, "aurora-vm: el disco debe tener al menos 1M\n");
+    return 2;
+  }
+  int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    fprintf(stderr, "aurora-vm: no puedo crear %s: %s\n", path, strerror(errno));
+    return 1;
+  }
+  if (ftruncate(fd, (off_t)(n & ~511ULL)) < 0) {
+    fprintf(stderr, "aurora-vm: %s: %s\n", path, strerror(errno));
+    close(fd);
+    unlink(path);
+    return 1;
+  }
+  close(fd);
+  printf("%s: %llu MiB\n", path, n >> 20);
+  return 0;
+}
+
 static void usage(void) {
   fprintf(stderr,
-          "Uso: aurora-vm --caps | --autotest | --bios-test[-acpi|-vga] |\n"
+          "Uso: aurora-vm --caps | --autotest | --bios-test[-acpi|-vga] | --crear-disco IMG 20G |\n"
           "       --plano FICH [--en DIR] [--mem MiB] |\n"
           "       --bios [--ide IMG] [--cd ISO] [--disco IMG] [--mem MiB] [--arranque cd|disco]\n"
           "              [--rom FICH] [--vgarom FICH] [--tiempo S] [--log-bios] [--sin-acpi]\n"
-          "              [--sin-vga] [--sin-ventana] | PROGRAMA.exe\n"
+          "              [--sin-vga] [--sin-ventana] [--depurar] | PROGRAMA.exe\n"
           "  Ejemplo (instalar Windows):\n"
+          "    aurora-vm --crear-disco win.img 20G\n"
           "    aurora-vm --bios --ide win.img --cd windows.iso --mem 2048\n");
 }
 
@@ -1098,6 +1134,8 @@ int main(int argc, char **argv) {
     return cmd_caps();
   if (!strcmp(argv[1], "--autotest"))
     return autotest();
+  if (!strcmp(argv[1], "--crear-disco") && argc == 4)
+    return create_disk(argv[2], argv[3]);
   if (!strcmp(argv[1], "--bios-test") || !strcmp(argv[1], "--bios-test-acpi") ||
       !strcmp(argv[1], "--bios-test-vga")) {
     int acpi = strcmp(argv[1], "--bios-test") != 0, vga = !strcmp(argv[1], "--bios-test-vga");
@@ -1107,8 +1145,11 @@ int main(int argc, char **argv) {
     struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,
                           .mem_mb = 1024, .acpi = 1, .boot_cd = -1};
     int vga = 1, win = 1;
+    g_debug = 0; // interceptar #PF/#GP cuesta mucho con un Windows: solo si se pide
     for (int i = 2; i < argc; i++) {
-      if (!strcmp(argv[i], "--log-bios"))
+      if (!strcmp(argv[i], "--depurar"))
+        g_debug = 1;
+      else if (!strcmp(argv[i], "--log-bios"))
         g_bios_log = 1;
       else if (!strcmp(argv[i], "--sin-acpi"))
         o.acpi = 0;

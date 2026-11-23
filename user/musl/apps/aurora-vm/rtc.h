@@ -160,7 +160,11 @@ static void cmos_init(uint64_t ram_bytes, int boot_cd) {
   c[REG_D] = 0x80; // bateria buena
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
-  g_rtc.base_rtc = ts.tv_sec;
+  // Hora LOCAL (Windows espera el reloj CMOS en hora local, como "-rtc base=localtime").
+  struct tm lt;
+  time_t now_s = ts.tv_sec;
+  long gmtoff = localtime_r(&now_s, &lt) ? lt.tm_gmtoff : 0;
+  g_rtc.base_rtc = ts.tv_sec + gmtoff;
   g_rtc.offset = ts.tv_nsec;
   g_rtc.last_update = now_ns();
   g_rtc.last_sec = -1;
