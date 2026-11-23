@@ -1249,8 +1249,21 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
       bool in = (q >> 3) & 1;
       bool string = (q >> 4) & 1;
       if (string) { // INS/OUTS: el VMM mueve los datos (F3b); aqui solo se describe
+        // Tamano de direccion y segmento: de la informacion de instruccion si la
+        // CPU la da (VMX_BASIC bit 54); si no, el tamano por omision del codigo y
+        // DS para OUTS (sin mirar prefijos de segmento, rarisimos con OUTS).
+        bool lm64 = (vmread(F_GUEST_EFER) & (1ULL << 10)) && (vmread(F_GUEST_CS_AR) & (1u << 13));
         uint64_t info = vmread(F_EXIT_INSTR_INFO);
-        unsigned asz = (unsigned)(info >> 7) & 7; // 0=16, 1=32, 2=64 bits
+        unsigned asz, seg;
+        if ((g_vmx.basic >> 54) & 1) {
+          asz = (unsigned)(info >> 7) & 7; // 0=16, 1=32, 2=64 bits
+          seg = (unsigned)(info >> 15) & 7;
+        } else {
+          asz = lm64 ? 2 : (vmread(F_GUEST_CS_AR) & (1u << 14)) ? 1 : 0;
+          seg = 3;
+        }
+        if (in || seg > 5)
+          seg = 0; // INS escribe siempre en ES:(E)DI
         uint64_t amask = asz == 0 ? 0xFFFFULL : asz == 1 ? 0xFFFFFFFFULL : ~0ULL;
         bool rep = (q >> 5) & 1;
         uint64_t cnt = rep ? (g.rcx & amask) : 1;
@@ -1268,7 +1281,14 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
         x->io.string = 1;
         x->io.asize = (uint8_t)asz;
         x->io.rep = rep;
-        x->io.linear = vmread(F_GUEST_LINEAR);
+        // Lineal = base del segmento + (E)SI/(E)DI. No se usa el campo "guest-linear
+        // address" de la salida: con KVM anidado puede llegar a 0, y entonces los
+        // datos de un REP INSW acababan en la IVT (disco IDE de 0 MiB y triple fallo).
+        static const uint32_t seg_base[6] = {F_GUEST_ES_BASE, F_GUEST_CS_BASE, F_GUEST_SS_BASE,
+                                             F_GUEST_DS_BASE, F_GUEST_FS_BASE, F_GUEST_GS_BASE};
+        uint64_t sbase = (lm64 && seg < 4) ? 0 : vmread(seg_base[seg]);
+        uint64_t lin = sbase + ((in ? g.rdi : g.rsi) & amask);
+        x->io.linear = lm64 ? lin : (lin & 0xFFFFFFFFULL);
         ret = 1;
         goto leave;
       }
