@@ -178,6 +178,7 @@ struct avm_vm {
   // se vuelve a inyectar en la siguiente entrada o se perderia.
   bool reinj;
   uint32_t reinj_info, reinj_err, reinj_len;
+  uint32_t stuck_logged; // avisos de "256 salidas inyectando" ya escritos
   uint32_t msr_logged;
   uint32_t timeout_ms;
   uint64_t dr[8];
@@ -1058,7 +1059,19 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
     // Nunca quedarse en la ventana (IRQ del host apagadas) mas de unas salidas
     // rapidas seguidas: un huesped que falla en bucle colgaria la CPU. No se
     // sale con un evento ya preparado para inyectar (se perderia).
-    if (++inner_exits > 256 && !(vmread(F_ENTRY_INTR_INFO) & (1u << 31))) {
+    // Un evento ya preparado (p. ej. una excepcion que inyecto el manejador de la
+    // ultima salida) se guarda en reinj al salir de la ventana (ver `leave`): asi
+    // la ventana termina siempre. Antes un huesped que provocaba en bucle salidas
+    // con inyeccion dejaba esta CPU con las IRQ apagadas para siempre (la VM no
+    // volvia al VMM: ventana congelada y sin poder cerrarla).
+    if (++inner_exits > 256 && (!(vmread(F_ENTRY_INTR_INFO) & (1u << 31)) || !vm->reinj)) {
+      if ((vmread(F_ENTRY_INTR_INFO) & (1u << 31)) && vm->stuck_logged < 4) {
+        vm->stuck_logged++;
+        LOG_WARN("[VMX] 256 salidas seguidas inyectando eventos: info=%lx ultima salida %u "
+                 "rip=%lx cs=%lx cr0=%lx rflags=%lx", vmread(F_ENTRY_INTR_INFO),
+                 (unsigned)vmread(F_EXIT_REASON), vmread(F_GUEST_RIP), vmread(F_GUEST_CS_SEL),
+                 vmread(F_GUEST_CR0), vmread(F_GUEST_RFLAGS));
+      }
       ret = 0;
       goto leave;
     }
@@ -1165,6 +1178,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
             LOG_WARN("[VMX] excepcion #%u repetida en rip=%lx: se da por apagado",
                      vec, rip_now);
             vm->reinj = false; // el VMM reinicia la CPU: no reinyectar nada viejo
+            vmwrite(F_ENTRY_INTR_INFO, 0);
             x->reason = AVM_EXIT_SHUTDOWN;
             ret = 1;
             goto leave;
@@ -1350,6 +1364,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
                vmread(F_GUEST_EFER), vmread(F_GUEST_CR3),
                vmread(F_GUEST_IDTR_BASE), vmread(F_GUEST_IDTR_LIM));
       vm->reinj = false; // el VMM reinicia la CPU: no reinyectar nada viejo
+      vmwrite(F_ENTRY_INTR_INFO, 0);
       x->reason = AVM_EXIT_SHUTDOWN;
       ret = 1;
       goto leave;
@@ -1365,6 +1380,17 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
   }
 
 leave:
+  // Evento preparado para la siguiente entrada que no llego a entrar: el VMCS se
+  // reescribe en la proxima ventana (ENTRY_INTR_INFO = 0), asi que se guarda.
+  {
+    uint64_t ei = vmread(F_ENTRY_INTR_INFO);
+    if ((ei & (1u << 31)) && !vm->reinj) {
+      vm->reinj = true;
+      vm->reinj_info = (uint32_t)ei;
+      vm->reinj_err = (ei & (1u << 11)) ? (uint32_t)vmread(F_ENTRY_ERRCODE) : 0;
+      vm->reinj_len = (uint32_t)vmread(F_ENTRY_INSTR_LEN);
+    }
+  }
   // Estado del huesped de vuelta a software.
   vm->regs.rax = g.rax; vm->regs.rbx = g.rbx; vm->regs.rcx = g.rcx;
   vm->regs.rdx = g.rdx; vm->regs.rsi = g.rsi; vm->regs.rdi = g.rdi;
