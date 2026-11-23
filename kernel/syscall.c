@@ -7508,7 +7508,9 @@ static int64_t k_mount(uint64_t src_ptr, uint64_t tgt_ptr, uint64_t type_ptr,
     return rc;
   }
 
-  int is_vfat = strcmp(type, "vfat") == 0 || strcmp(type, "msdos") == 0;
+  // "fat32" es el nombre que da fsprobe (mount sin -t lo pasa tal cual)
+  int is_vfat = strcmp(type, "vfat") == 0 || strcmp(type, "msdos") == 0 ||
+                strcmp(type, "fat32") == 0;
   int is_iso = strcmp(type, "iso9660") == 0;
   // ext3/ext4 se aceptan como nombre: el driver rechaza lo que no soporta.
   int is_ext2 = strcmp(type, "ext2") == 0 || strcmp(type, "ext3") == 0 ||
