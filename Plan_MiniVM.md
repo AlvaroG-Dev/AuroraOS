@@ -152,6 +152,9 @@ Salidas: `AVM_EXIT_IO` (puerto, tamano, direccion, dato), `AVM_EXIT_MMIO`,
   AURORA_VM_CAPTURA=pantalla.ppm ./vm-uc --bios --sin-ventana --cd reactos.iso --ide hd.img --mem 256 --tiempo 3000
   ```
   Pasan autotest 3/3 y los tres `--bios-test*`; el CD de ReactOS 0.4.15 arranca
-  (SeaBIOS, freeldr, ntoskrnl/hal). Es ~1000 veces mas lento que VT-x. No cubre:
+  (SeaBIOS, freeldr, ntoskrnl/hal, "BOOT DRIVERS LOADED": PCI, ATAPI con DMA,
+  i8042, modo usuario/smss). `UC_DBGPRINT=1` muestra los DbgPrint del huesped.
+  Se para en una llamada V86 a la BIOS de video (#PF en 0:F31C dentro del banco;
+  con VT-x el V86 lo hace la CPU). Es ~1000 veces mas lento que VT-x (~25 min). No cubre:
   salidas INS/OUTS en bloque del kernel, EPT, CR8/TPR ni CPUID/MSR del kernel, ni
   #GP/#PF del huesped en modo protegido (Unicorn no da el codigo de error).

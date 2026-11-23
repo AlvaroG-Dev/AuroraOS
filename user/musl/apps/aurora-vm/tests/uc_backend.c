@@ -342,6 +342,17 @@ static void intr_hook(uc_engine *u, uint32_t intno, void *ud) {
   g_int_log[g_int_n & 31][1] = (uint32_t)rreg(UC_X86_REG_CS);
   g_int_log[g_int_n & 31][2] = (uint32_t)rreg(UC_X86_REG_EIP);
   g_int_n++;
+  if (intno == 0x2d && pm() && rreg(UC_X86_REG_EAX) == 1 && getenv("UC_DBGPRINT")) {
+    // DbgPrint de NT (BREAKPOINT_PRINT): ECX = texto, EDX = longitud
+    char buf[512];
+    uint32_t n = (uint32_t)rreg(UC_X86_REG_EDX);
+    if (n > sizeof(buf) - 1)
+      n = sizeof(buf) - 1;
+    if (lin_rw(rreg(UC_X86_REG_ECX), buf, n, 0) == 0) {
+      buf[n] = 0;
+      fprintf(stderr, "[huesped] %s%s", buf, n && buf[n - 1] == '\n' ? "" : "\n");
+    }
+  }
   if (!pm()) { // modo real (BIOS): por la IVT
     deliver((int)intno, 1);
     return;
@@ -358,6 +369,10 @@ static void intr_hook(uc_engine *u, uint32_t intno, void *ud) {
   uint32_t eip = (uint32_t)rreg(UC_X86_REG_EIP);
   uint8_t ib[2] = {0, 0};
   lin_rw(c.base + eip - 2, ib, 2, 0);
+  if ((fl & (1u << 17)) && getenv("UC_DBGPRINT"))
+    fprintf(stderr, "[uc] V86 int %x en %x:%x bytes %02x %02x ss:sp %x:%x eax=%x\n", intno,
+            (unsigned)rreg(UC_X86_REG_CS), eip, ib[0], ib[1], (unsigned)rreg(UC_X86_REG_SS),
+            (unsigned)rreg(UC_X86_REG_ESP), (unsigned)rreg(UC_X86_REG_EAX));
   int soft = (ib[0] == 0xCD && ib[1] == intno) || (intno == 3 && ib[1] == 0xCC) ||
              (intno == 4 && ib[1] == 0xCE);
   if (soft) {
@@ -476,6 +491,18 @@ static bool tlb_hook(uc_engine *u, uint64_t va, uc_mem_type t, uc_tlb_entry *e, 
   // y el gancho no distingue esos accesos implicitos (un #PF ahi rompe Unicorn).
   int bad = r < 0 || (write && !g_walk_rw && (user || (cr0 & 0x10000)));
   dbg_tlb(va, (int)t, !bad);
+  if (bad && getenv("UC_DBGPRINT")) {
+    static int nlog;
+    uint64_t cr3 = rreg(UC_X86_REG_CR3);
+    uint32_t pde = 0, pte = 0;
+    pt_read((cr3 & 0xFFFFF000u) + ((va >> 22) & 0x3FF) * 4, &pde, 4);
+    if (pde & 1)
+      pt_read((pde & 0xFFFFF000u) + ((va >> 12) & 0x3FF) * 4, &pte, 4);
+    if (nlog++ < 400 || (rreg(UC_X86_REG_EFLAGS) & (1u << 17)))
+      fprintf(stderr, "[uc] #PF va=%llx t=%d vm=%d cs=%x eip=%x pde=%x pte=%x\n", (unsigned long long)va, t,
+              (int)((rreg(UC_X86_REG_EFLAGS) >> 17) & 1), (unsigned)rreg(UC_X86_REG_CS),
+              (unsigned)rreg(UC_X86_REG_EIP), pde, pte);
+  }
   if (bad) {
     if (getenv("UCPF")) fprintf(stderr, "[uc] tlb fallo va=%llx t=%d r=%d\n", (unsigned long long)va, t, r);
     g_pf = 1;
