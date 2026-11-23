@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,6 +72,27 @@ static int g_walk_rw, g_walk_us, g_walk_nx, g_walk_present;
 // Recorre las tablas; con set_ad marca A (y D si write) como la CPU.
 static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad);
 static int lin2phys(uint64_t lin, uint64_t *phys) { return walk(lin, phys, 0, 0); }
+// Las tablas se leen y escriben por el puntero del anfitrion, no con uc_mem_*: el
+// recorrido corre dentro del gancho de TLB y uc_mem_write ahi invalida bloques y
+// hace longjmp desde dentro de Unicorn (se vio como SIGSEGV en __longjmp).
+static uint8_t *phys_ptr(uint64_t pa, size_t n) {
+  for (int i = 0; i < AVM_MAX_SLOTS; i++)
+    if (g_slots[i].used && pa >= g_slots[i].gpa && pa + n <= g_slots[i].gpa + g_slots[i].size)
+      return (uint8_t *)g_slots[i].host + (pa - g_slots[i].gpa);
+  return NULL;
+}
+static void pt_read(uint64_t pa, void *v, size_t n) {
+  uint8_t *p = phys_ptr(pa, n);
+  if (p)
+    memcpy(v, p, n);
+  else
+    memset(v, 0, n);
+}
+static void pt_write(uint64_t pa, const void *v, size_t n) {
+  uint8_t *p = phys_ptr(pa, n);
+  if (p)
+    memcpy(p, v, n);
+}
 static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
   g_walk_rw = g_walk_us = 1;
   g_walk_nx = 0;
@@ -85,7 +107,7 @@ static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
   if (!(cr4 & 0x20)) { // 32 bits
     uint32_t pde = 0, pte = 0;
     uint64_t pdea = (cr3 & 0xFFFFF000u) + ((lin >> 22) & 0x3FF) * 4;
-    uc_mem_read(uc, pdea, &pde, 4);
+    pt_read(pdea, &pde, 4);
     if (!(pde & 1))
       return -1;
     g_walk_rw &= (pde >> 1) & 1;
@@ -95,17 +117,17 @@ static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
       if (set_ad) {
         uint32_t n = pde | 0x20 | (write ? 0x40 : 0);
         if (n != pde)
-          uc_mem_write(uc, pdea, &n, 4);
+          pt_write(pdea, &n, 4);
       }
       *phys = (pde & 0xFFC00000u) | (lin & 0x3FFFFF);
       return 0;
     }
     if (set_ad && !(pde & 0x20)) {
       uint32_t n = pde | 0x20;
-      uc_mem_write(uc, pdea, &n, 4);
+      pt_write(pdea, &n, 4);
     }
     uint64_t ptea = (pde & 0xFFFFF000u) + ((lin >> 12) & 0x3FF) * 4;
-    uc_mem_read(uc, ptea, &pte, 4);
+    pt_read(ptea, &pte, 4);
     if (!(pte & 1))
       return -1;
     g_walk_present = 1;
@@ -114,7 +136,7 @@ static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
     if (set_ad) {
       uint32_t n = pte | 0x20 | (write ? 0x40 : 0);
       if (n != pte)
-        uc_mem_write(uc, ptea, &n, 4);
+        pt_write(ptea, &n, 4);
     }
     *phys = (pte & 0xFFFFF000u) | (lin & 0xFFF);
     return 0;
@@ -126,7 +148,7 @@ static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
     tbl = cr3 & M;
     lvl = 4;
   } else {
-    uc_mem_read(uc, (cr3 & 0xFFFFFFE0u) + ((lin >> 30) & 3) * 8, &e, 8);
+    pt_read((cr3 & 0xFFFFFFE0u) + ((lin >> 30) & 3) * 8, &e, 8);
     if (!(e & 1))
       return -1;
     tbl = e & M;
@@ -135,7 +157,7 @@ static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
   for (; lvl >= 1; lvl--) {
     int sh = 12 + 9 * (lvl - 1);
     uint64_t ea = tbl + ((lin >> sh) & 0x1FF) * 8;
-    uc_mem_read(uc, ea, &e, 8);
+    pt_read(ea, &e, 8);
     if (!(e & 1))
       return -1;
     g_walk_rw &= (int)((e >> 1) & 1);
@@ -145,7 +167,7 @@ static int walk(uint64_t lin, uint64_t *phys, int write, int set_ad) {
     if (set_ad) {
       uint64_t n = e | 0x20 | (leaf && write ? 0x40 : 0);
       if (n != e)
-        uc_mem_write(uc, ea, &n, 8);
+        pt_write(ea, &n, 8);
     }
     if (lvl > 1 && (e & 0x80)) {
       g_walk_present = 1;
@@ -229,8 +251,7 @@ static int deliver_err(int vec, int has_err, uint32_t errc) {
     wreg(UC_X86_REG_EIP, iv[0]);
     return 0;
   }
-  if (fl & (1u << 17))
-    return -1; // V86: no lo hace esta prueba
+  int v86 = (fl >> 17) & 1; // V86 (ReactOS llama asi a la BIOS de video)
   uc_x86_mmr idtr;
   uc_reg_read(uc, UC_X86_REG_IDTR, &idtr);
   uint8_t g[8];
@@ -242,20 +263,37 @@ static int deliver_err(int vec, int has_err, uint32_t errc) {
   if (!(g[5] & 0x80) || (type != 0xE && type != 0xF))
     return -1;
   struct avm_seg ss;
-  uint32_t fr[6];
+  uint32_t fr[10];
   int n = 0;
   uint32_t esp;
-  if ((cs & 3) && !(nsel & 3)) { // de anillo 3 a 0: pila del TSS
+  if (v86 && (nsel & 3))
+    return -1;
+  if ((v86 || (cs & 3)) && !(nsel & 3)) { // de anillo 3 (o V86) a 0: pila del TSS
     uc_x86_mmr tr;
     uc_reg_read(uc, UC_X86_REG_TR, &tr);
     uint32_t t[2];
     if (lin_rw(tr.base + 4, t, 8, 0))
       return -1;
     uint32_t oss = (uint32_t)rreg(UC_X86_REG_SS), oesp = (uint32_t)rreg(UC_X86_REG_ESP);
+    uint32_t ogs = (uint32_t)rreg(UC_X86_REG_GS), ofs = (uint32_t)rreg(UC_X86_REG_FS);
+    uint32_t ods = (uint32_t)rreg(UC_X86_REG_DS), oes = (uint32_t)rreg(UC_X86_REG_ES);
+    if (v86) { // se sale de V86 antes de tocar segmentos
+      wreg(UC_X86_REG_EFLAGS, fl & ~(1ULL << 17));
+      fr[n++] = ogs;
+      fr[n++] = ofs;
+      fr[n++] = ods;
+      fr[n++] = oes;
+    }
+    // Unicorn no deja cargar SS con RPL != CPL y el CPL sale del DPL de SS: se baja
+    // a 0 cargando SS un instante sin PE (sin comprobaciones) y luego en serio.
+    uint64_t cr0 = rreg(UC_X86_REG_CR0);
+    wreg(UC_X86_REG_CR0, cr0 & ~0x80000001ULL);
+    wreg(UC_X86_REG_SS, t[1] & 0xFFFF);
+    wreg(UC_X86_REG_CR0, cr0);
     wreg(UC_X86_REG_SS, t[1] & 0xFFFF);
     esp = t[0];
+    fr[n++] = oss; // orden de empuje: SS, ESP, EFLAGS, CS, EIP, error
     fr[n++] = oesp;
-    fr[n++] = oss;
   } else {
     esp = (uint32_t)rreg(UC_X86_REG_ESP);
   }
@@ -266,7 +304,7 @@ static int deliver_err(int vec, int has_err, uint32_t errc) {
   if (has_err)
     fr[n++] = errc;
   // fr esta en orden de empuje: en memoria va al reves (error en la cima)
-  uint32_t mem[6];
+  uint32_t mem[10];
   for (int i = 0; i < n; i++)
     mem[i] = fr[n - 1 - i];
   esp -= (uint32_t)n * 4;
@@ -277,30 +315,74 @@ static int deliver_err(int vec, int has_err, uint32_t errc) {
   if (type == 0xE)
     fl &= ~(1u << 9);
   wreg(UC_X86_REG_EFLAGS, fl);
+  if (v86) {
+    wreg(UC_X86_REG_DS, 0); wreg(UC_X86_REG_ES, 0);
+    wreg(UC_X86_REG_FS, 0); wreg(UC_X86_REG_GS, 0);
+  }
   wreg(UC_X86_REG_CS, nsel);
   wreg(UC_X86_REG_EIP, off);
+  if ((uint16_t)rreg(UC_X86_REG_CS) != nsel) {
+    static int warned;
+    if (!warned++)
+      fprintf(stderr, "[uc] no se pudo cargar CS=%x (queda %x) al entregar el vector %d\n", nsel,
+              (unsigned)rreg(UC_X86_REG_CS), vec);
+    return -1;
+  }
   return 0;
 }
 
 static int g_shutdown;
 static void pc_dump(void);
+static uint32_t g_int_log[32][3];
+static unsigned g_int_n;
 static void intr_hook(uc_engine *u, uint32_t intno, void *ud) {
   (void)u; (void)ud;
   g_stat_int++;
-  // INT n en modo real (BIOS): por la IVT. En modo protegido, INT n y las excepciones
-  // sin codigo de error van por la IDT; las demas (#GP, #PF...) necesitarian el codigo
-  // de error y CR2, que Unicorn no da: fin de la prueba.
-  int errc = intno == 8 || (intno >= 10 && intno <= 14) || intno == 17;
-  if (pm() && (errc || deliver((int)intno, 1) < 0)) {
+  g_int_log[g_int_n & 31][0] = intno;
+  g_int_log[g_int_n & 31][1] = (uint32_t)rreg(UC_X86_REG_CS);
+  g_int_log[g_int_n & 31][2] = (uint32_t)rreg(UC_X86_REG_EIP);
+  g_int_n++;
+  if (!pm()) { // modo real (BIOS): por la IVT
+    deliver((int)intno, 1);
+    return;
+  }
+  // Modo protegido. INT n (CD nn / CC / CE detras de EIP): si el DPL de la puerta es
+  // menor que el CPL (anillo 3 o V86) la CPU da #GP(n*8+2): es como ReactOS/Windows
+  // llevan las llamadas a la BIOS de video en V86. Excepciones con codigo de error:
+  // Unicorn no lo da; se entrega 0 (lo habitual en #GP de V86 y anillo 3).
+  int rc = -1;
+  uint64_t fl = rreg(UC_X86_REG_EFLAGS);
+  int cpl = (fl & (1u << 17)) ? 3 : (int)(rreg(UC_X86_REG_CS) & 3);
+  struct avm_seg c;
+  seg_info(UC_X86_REG_CS, &c);
+  uint32_t eip = (uint32_t)rreg(UC_X86_REG_EIP);
+  uint8_t ib[2] = {0, 0};
+  lin_rw(c.base + eip - 2, ib, 2, 0);
+  int soft = (ib[0] == 0xCD && ib[1] == intno) || (intno == 3 && ib[1] == 0xCC) ||
+             (intno == 4 && ib[1] == 0xCE);
+  if (soft) {
+    uc_x86_mmr idtr;
+    uc_reg_read(uc, UC_X86_REG_IDTR, &idtr);
+    uint8_t g[8] = {0};
+    lin_rw(idtr.base + (uint64_t)intno * 8, g, 8, 0);
+    int dpl = (g[5] >> 5) & 3;
+    if (dpl < cpl) {
+      wreg(UC_X86_REG_EIP, eip - (ib[0] == 0xCD ? 2 : 1));
+      rc = deliver_err(13, 1, intno * 8 + 2);
+    } else {
+      rc = deliver((int)intno, 1);
+    }
+  } else {
+    int errc = intno == 8 || (intno >= 10 && intno <= 14) || intno == 17;
+    rc = errc ? deliver_err((int)intno, 1, 0) : deliver((int)intno, 1);
+  }
+  if (rc < 0) {
     pc_dump();
-    fprintf(stderr, "[uc] excepcion/INT 0x%x en modo protegido en cs=%x eip=%x: fin de la prueba\n",
+    fprintf(stderr, "[uc] excepcion/INT 0x%x en modo protegido en cs=%x eip=%x: no se pudo entregar\n",
             intno, (unsigned)rreg(UC_X86_REG_CS), (unsigned)rreg(UC_X86_REG_EIP));
     g_shutdown = 1;
     uc_emu_stop(uc);
-    return;
   }
-  if (!pm())
-    deliver((int)intno, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +459,7 @@ static void pc_dump(void) {
 // siempre: con UC_TLB_VIRTUAL la traduccion la hace este gancho y, si falla, se
 // entrega #PF por la IDT como haria la CPU.
 static int g_pf, g_pf_err, g_until_fill;
+static void dbg_tlb(uint64_t va, int t, int ok);
 static uint64_t g_pf_addr;
 static bool tlb_hook(uc_engine *u, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *ud) {
   (void)u; (void)ud;
@@ -389,7 +472,10 @@ static bool tlb_hook(uc_engine *u, uint64_t va, uc_mem_type t, uc_tlb_entry *e, 
   int user = (rreg(UC_X86_REG_CS) & 3) == 3;
   int r = walk(va, &ph, write, 1);
   uint64_t cr0 = rreg(UC_X86_REG_CR0);
-  int bad = r < 0 || (user && !g_walk_us) || (write && !g_walk_rw && (user || (cr0 & 0x10000)));
+  // U/S no se comprueba: la CPU lee la GDT/IDT/TSS como supervisor aunque CPL sea 3
+  // y el gancho no distingue esos accesos implicitos (un #PF ahi rompe Unicorn).
+  int bad = r < 0 || (write && !g_walk_rw && (user || (cr0 & 0x10000)));
+  dbg_tlb(va, (int)t, !bad);
   if (bad) {
     if (getenv("UCPF")) fprintf(stderr, "[uc] tlb fallo va=%llx t=%d r=%d\n", (unsigned long long)va, t, r);
     g_pf = 1;
@@ -455,7 +541,12 @@ static void *cpu_thread(void *arg) {
       struct avm_seg c;
       seg_info(UC_X86_REG_CS, &c);
       wreg(UC_X86_REG_EIP, (uint32_t)(g_last_pc - c.base));
-      wreg(UC_X86_REG_CR2, g_pf_addr);
+      {
+        uint64_t cr3 = rreg(UC_X86_REG_CR3);
+        wreg(UC_X86_REG_CR2, g_pf_addr); // Unicorn 2.1.1 lo escribe tambien en CR3
+        if (rreg(UC_X86_REG_CR3) != cr3)
+          wreg(UC_X86_REG_CR3, cr3);
+      }
       g_stat_pf++;
       if (deliver_err(14, 1, (uint32_t)g_pf_err) < 0) {
         fprintf(stderr, "[uc] no se pudo entregar #PF en %llx\n", (unsigned long long)g_pf_addr);
@@ -642,10 +733,26 @@ static void uc_init(void) {
     pthread_create(&g_thread, NULL, cpu_thread, NULL);
 }
 
+static uint64_t g_dbg_va[16];
+static int g_dbg_t[16], g_dbg_ok[16];
+static unsigned g_dbg_n;
+static void segv(int sig) {
+  (void)sig;
+  fprintf(stderr, "[uc] SIGSEGV; #PF entregados %lu; ultimas traducciones:", g_stat_pf);
+  for (unsigned i = g_dbg_n > 16 ? g_dbg_n - 16 : 0; i < g_dbg_n; i++)
+    fprintf(stderr, " %llx/%d/%d", (unsigned long long)g_dbg_va[i & 15], g_dbg_t[i & 15], g_dbg_ok[i & 15]);
+  fprintf(stderr, "\n");
+  pc_dump();
+  _exit(139);
+}
 static void stats(void) {
   fprintf(stderr, "[uc] E/S %lu, MMIO %lu, IRQ entregadas %lu, INT n %lu, #PF %lu\n", g_stat_io,
           g_stat_mmio, g_stat_irq, g_stat_int, g_stat_pf);
   fprintf(stderr, "[uc] instrucciones/bloques vistos: %u\n", g_insn_tick);
+  fprintf(stderr, "[uc] ultimas INT/excepciones (vector cs:eip):");
+  for (unsigned i = g_int_n > 32 ? g_int_n - 32 : 0; i < g_int_n; i++)
+    fprintf(stderr, " %x@%x:%x", g_int_log[i & 31][0], g_int_log[i & 31][1], g_int_log[i & 31][2]);
+  fprintf(stderr, "\n");
   pc_dump();
 }
 
@@ -656,8 +763,10 @@ int avm_test_open(const char *path, int flags, ...) {
   va_end(ap);
   if (!strcmp(path, "/dev/aurora-vm")) {
     g_fake_fd = open("/dev/null", O_RDWR | O_CLOEXEC, 0);
-    if (!uc)
+    if (!uc) {
       atexit(stats);
+      signal(SIGSEGV, segv);
+    }
     uc_init();
     return g_fake_fd;
   }
@@ -702,4 +811,11 @@ int avm_test_ioctl(int fd, unsigned long req, ...) {
     return -1;
   }
   return rc;
+}
+
+static void dbg_tlb(uint64_t va, int t, int ok) {
+  g_dbg_va[g_dbg_n & 15] = va;
+  g_dbg_t[g_dbg_n & 15] = t;
+  g_dbg_ok[g_dbg_n & 15] = ok;
+  g_dbg_n++;
 }
