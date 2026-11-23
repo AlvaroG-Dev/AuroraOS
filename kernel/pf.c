@@ -390,14 +390,14 @@ static int pf_try_demand_paging(struct process *proc, uint64_t cr2,
   if (!proc)
     return 0;
 
-  if (try_stack_growth(proc, cr2, err))
-    return 1;
-
-  vma_t *vma = vma_find(proc, cr2);
-  if (vma && try_vma_demand(proc, vma, cr2, err))
-    return 1;
-
-  return 0;
+  mm_lock(proc);
+  int ok = try_stack_growth(proc, cr2, err);
+  if (!ok) {
+    vma_t *vma = vma_find(proc, cr2);
+    ok = vma && try_vma_demand(proc, vma, cr2, err);
+  }
+  mm_unlock(proc);
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -419,31 +419,31 @@ static int pf_privfile_cow(struct process *proc, uint64_t cr2) {
   uint64_t page_va = cr2 & ~0xFFFULL;
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
   uint64_t pte;
-  mutex_lock(&proc->mm_lock);
+  mm_lock(proc);
   vma_t *vma = vma_find(proc, page_va);
   if (!vma || vma->type != VMA_SHARED || !(vma->pad & VMA_F_PRIVRO) ||
       !(vma->flags & PTE_WRITABLE) || !paging_get_pte_in(pml4, page_va, &pte) ||
       !(pte & PTE_PRESENT)) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return 0;
   }
   if (pte & PTE_WRITABLE) { // otro hilo ya la copio
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     paging_invalidate_tlb(page_va);
     return 1;
   }
   if (!(pte & PTE_SHARED_OBJ)) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return 0;
   }
   uint64_t np = pmm_alloc_page();
   if (!np) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return -1;
   }
   memcpy(phys_to_virt(np), phys_to_virt(pte & PTE_FRAME), PAGE_SIZE);
   paging_map_page_in(pml4, page_va, np, vma->flags | PTE_PRESENT);
-  mutex_unlock(&proc->mm_lock);
+  mm_unlock(proc);
   if (proc->team_size > 1)
     paging_invalidate_tlb_global(page_va);
   else
@@ -456,27 +456,27 @@ static int pf_handle_cow(struct process *proc, uint64_t cr2) {
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
   uint64_t pte;
 
-  mutex_lock(&proc->mm_lock);
+  mm_lock(proc);
   if (!paging_get_pte_in(pml4, page_va, &pte) || !(pte & PTE_PRESENT) ||
       !(pte & PTE_USER)) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return 0;
   }
   if (pte & PTE_WRITABLE) {
     // Otra CPU (u otro hilo) ya resolvio este COW: TLB desfasado.
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     paging_invalidate_tlb(page_va);
     return 1;
   }
   if (!(pte & PTE_COW)) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return 0;
   }
   // Una pagina COW solo se hace escribible si el VMA lo permite. Sin VMA
   // (region brk, pila) las paginas siempre fueron de lectura/escritura.
   vma_t *vma = vma_find(proc, page_va);
   if (vma && !(vma->flags & PTE_WRITABLE)) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return 0;
   }
 
@@ -486,18 +486,18 @@ static int pf_handle_cow(struct process *proc, uint64_t cr2) {
   if (!pmm_page_is_shared(old_phys)) {
     // Ultimo dueño: sin copia.
     paging_set_pte_in(pml4, page_va, keep | old_phys | PTE_WRITABLE);
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return 1;
   }
 
   uint64_t new_phys = pmm_alloc_page();
   if (!new_phys) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return -1;
   }
   memcpy(phys_to_virt(new_phys), phys_to_virt(old_phys), PAGE_SIZE);
   paging_set_pte_in(pml4, page_va, keep | new_phys | PTE_WRITABLE);
-  mutex_unlock(&proc->mm_lock);
+  mm_unlock(proc);
   // Otro hilo del proceso en otra CPU puede conservar la traduccion vieja
   // (solo lectura, al frame viejo): hay que invalidarla en todas antes de
   // soltar el frame, o podria leer un frame ya reutilizado.
@@ -626,7 +626,7 @@ static int handle_page_fault_inner(registers_t *regs) {
     // [SWAP] ¿La PTE es una swap entry?
     {
       uint64_t page_va = cr2 & ~0xFFFULL;
-      mutex_lock(&proc->mm_lock);
+      mm_lock(proc);
       uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
       uint64_t raw_pte;
 
@@ -636,14 +636,14 @@ static int handle_page_fault_inner(registers_t *regs) {
 
         uint64_t new_phys = pmm_alloc_page();
         if (!new_phys) {
-          mutex_unlock(&proc->mm_lock);
+          mm_unlock(proc);
           kill_current_process(regs, "swap-in: sin memoria física");
           return 1;
         }
 
         if (swap_read_page(sw_type, sw_slot, new_phys) != 0) {
           pmm_free_page(new_phys);
-          mutex_unlock(&proc->mm_lock);
+          mm_unlock(proc);
           kill_current_process(regs, "swap-in: error de E/S");
           return 1;
         }
@@ -651,7 +651,7 @@ static int handle_page_fault_inner(registers_t *regs) {
         vma_t *vma = vma_find(proc, page_va);
         if (!vma) {
           pmm_free_page(new_phys);
-          mutex_unlock(&proc->mm_lock);
+          mm_unlock(proc);
           kill_current_process(regs, "swap-in: VMA desaparecida");
           return 1;
         }
@@ -659,20 +659,24 @@ static int handle_page_fault_inner(registers_t *regs) {
 
         if (paging_map_page_in(pml4, page_va, new_phys, map_flags) != 0) {
           pmm_free_page(new_phys);
-          mutex_unlock(&proc->mm_lock);
+          mm_unlock(proc);
           kill_current_process(regs, "swap-in: fallo al mapear");
           return 1;
         }
 
         swap_free_slot(sw_type, sw_slot);
-        mutex_unlock(&proc->mm_lock);
+        mm_unlock(proc);
         pf_resolved++;
         return 1;
       }
-      mutex_unlock(&proc->mm_lock);
+      mm_unlock(proc);
     }
 
+    // Bajo mm_lock: otro hilo puede estar haciendo munmap/mmap del mismo
+    // rango a la vez y el VMA dejaria de existir mientras lo usamos.
+    mm_lock(proc);
     if (try_stack_growth(proc, cr2, err)) {
+      mm_unlock(proc);
       pf_resolved++;
       return 1;
     }
@@ -680,9 +684,13 @@ static int handle_page_fault_inner(registers_t *regs) {
     vma_t *vma = vma_find(proc, cr2);
     if (vma) {
       if (try_vma_demand(proc, vma, cr2, err)) {
+        mm_unlock(proc);
         pf_resolved++;
         return 1;
       }
+      vma_t vcopy = *vma;
+      mm_unlock(proc);
+      vma = &vcopy;
       if (pmm_free_pages_count() < 64) {
         LOG_ERR("[PF] PID=%u addr=%p: OOM (sin páginas libres ni swap)",
                 proc->pid, (void *)cr2);
@@ -697,6 +705,7 @@ static int handle_page_fault_inner(registers_t *regs) {
       }
       return 1;
     }
+    mm_unlock(proc);
 
     if (cr2 >= proc->stack_guard && cr2 < proc->stack_guard + PAGE_SIZE) {
       LOG_WARN("[PF] PID=%u: desbordamiento de pila (guarda) -> SIGSEGV",
@@ -979,7 +988,16 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
 // caso: incorrecto y rompía el patrón "reserva con mmap, libera
 // parcialmente" que usa musl al final de algunas rutas.
 // ---------------------------------------------------------------------------
-int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
+// [MM] Todas las operaciones sobre el espacio de direcciones se serializan
+// con mm_lock (reentrante): sin esto, dos hilos haciendo mmap/munmap a la vez
+// corrompian la lista de VMAs y next_mmap_addr (Wine: fallos "not in any VMA").
+static int64_t sys_munmap_nolock(struct process *proc, uint64_t addr, uint64_t length);
+static int64_t sys_mprotect_nolock(struct process *proc, uint64_t addr, uint64_t length, uint64_t prot);
+static int64_t sys_mmap_nolock(struct process *proc, uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags, int fd, uint64_t offset);
+static int64_t sys_mremap_nolock(struct process *proc, uint64_t old_addr, uint64_t old_size, uint64_t new_size, uint64_t flags, uint64_t new_addr);
+static int64_t sys_madvise_nolock(struct process *proc, uint64_t addr, uint64_t len, uint64_t advice);
+
+static int64_t sys_munmap_nolock(struct process *proc, uint64_t addr, uint64_t length) {
   if (!proc || length == 0)
     return -EINVAL;
   if (length > UINT64_MAX - 0xFFFULL)
@@ -1014,7 +1032,7 @@ int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
 // No crea páginas nuevas. Las páginas no presentes se demand-page-arán
 // con los flags del VMA cuando se toquen.
 // ---------------------------------------------------------------------------
-int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
+static int64_t sys_mprotect_nolock(struct process *proc, uint64_t addr, uint64_t length,
                      uint64_t prot) {
   if (!proc)
     return -EINVAL;
@@ -1226,7 +1244,7 @@ int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length,
 // ---------------------------------------------------------------------------
 #define MMAP_MAP_FIXED_NOREPLACE 0x100000ULL
 
-int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
+static int64_t sys_mmap_nolock(struct process *proc, uint64_t addr, uint64_t length,
                  uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
   if (!proc || length == 0)
     return -EINVAL;
@@ -1448,7 +1466,7 @@ int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length,
 #define MREMAP_MAYMOVE 1
 #define MREMAP_FIXED 2
 
-int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
+static int64_t sys_mremap_nolock(struct process *proc, uint64_t old_addr, uint64_t old_size,
                    uint64_t new_size, uint64_t flags, uint64_t new_addr) {
   if (!proc || old_size == 0)
     return -EINVAL;
@@ -1589,7 +1607,7 @@ int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size,
 // tenemos presión de memoria diferida, lo tratamos igual que
 // DONTNEED. El observable (próximo acceso da 0 o re-lee) es idéntico.
 // ---------------------------------------------------------------------------
-int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len,
+static int64_t sys_madvise_nolock(struct process *proc, uint64_t addr, uint64_t len,
                     uint64_t advice) {
   if (!proc)
     return -EINVAL;
@@ -1710,4 +1728,49 @@ void vma_dev_zap(vma_t *vma, uint64_t start, uint64_t end) {
   // la traduccion en su TLB.
   if (any)
     paging_invalidate_tlb_global(0);
+}
+
+int64_t sys_munmap(struct process *proc, uint64_t addr, uint64_t length) {
+  if (!proc)
+    return -EINVAL;
+  mm_lock(proc);
+  int64_t r = sys_munmap_nolock(proc, addr, length);
+  mm_unlock(proc);
+  return r;
+}
+
+int64_t sys_mprotect(struct process *proc, uint64_t addr, uint64_t length, uint64_t prot) {
+  if (!proc)
+    return -EINVAL;
+  mm_lock(proc);
+  int64_t r = sys_mprotect_nolock(proc, addr, length, prot);
+  mm_unlock(proc);
+  return r;
+}
+
+int64_t sys_mmap(struct process *proc, uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
+  if (!proc)
+    return -EINVAL;
+  mm_lock(proc);
+  int64_t r = sys_mmap_nolock(proc, addr, length, prot, flags, fd, offset);
+  mm_unlock(proc);
+  return r;
+}
+
+int64_t sys_mremap(struct process *proc, uint64_t old_addr, uint64_t old_size, uint64_t new_size, uint64_t flags, uint64_t new_addr) {
+  if (!proc)
+    return -EINVAL;
+  mm_lock(proc);
+  int64_t r = sys_mremap_nolock(proc, old_addr, old_size, new_size, flags, new_addr);
+  mm_unlock(proc);
+  return r;
+}
+
+int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len, uint64_t advice) {
+  if (!proc)
+    return -EINVAL;
+  mm_lock(proc);
+  int64_t r = sys_madvise_nolock(proc, addr, len, advice);
+  mm_unlock(proc);
+  return r;
 }

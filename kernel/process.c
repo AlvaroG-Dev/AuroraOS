@@ -835,6 +835,8 @@ static process_t *process_spawn_with_ppid(const char *name,
   fd_cloexec_clear_all(proc);
 
   mutex_init(&proc->mm_lock);
+  proc->mm_owner = NULL;
+  proc->mm_depth = 0;
   mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
 
@@ -1175,6 +1177,8 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   }
 
   mutex_init(&proc->mm_lock);
+  proc->mm_owner = NULL;
+  proc->mm_depth = 0;
   mutex_init(&proc->fd_lock);
   wait_queue_init(&proc->child_wq);
 
@@ -1899,17 +1903,17 @@ void *process_sbrk(process_t *proc, int64_t increment) {
   if (!proc)
     return (void *)-1;
 
-  mutex_lock(&proc->mm_lock);
+  mm_lock(proc);
   uint64_t old_brk = proc->heap_end;
   if (increment == 0) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return (void *)old_brk;
   }
 
   if (increment > 0) {
     uint64_t new_brk = old_brk + (uint64_t)increment;
     if (new_brk > proc->heap_max || new_brk < old_brk) {
-      mutex_unlock(&proc->mm_lock);
+      mm_unlock(proc);
       return (void *)-1;
     }
 
@@ -1922,7 +1926,7 @@ void *process_sbrk(process_t *proc, int64_t increment) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
           LOG_ERR("[PROC] sbrk: sin memoria física libre");
-          mutex_unlock(&proc->mm_lock);
+          mm_unlock(proc);
           return (void *)-1;
         }
         if (paging_map_page_in(pml4, page, phys,
@@ -1930,7 +1934,7 @@ void *process_sbrk(process_t *proc, int64_t increment) {
                                    PTE_NX) != 0) {
           pmm_free_page(phys);
           LOG_ERR("[PROC] sbrk: error mapeando página");
-          mutex_unlock(&proc->mm_lock);
+          mm_unlock(proc);
           return (void *)-1;
         }
         memset(phys_to_virt(phys), 0, PAGE_SIZE);
@@ -1938,13 +1942,13 @@ void *process_sbrk(process_t *proc, int64_t increment) {
     }
 
     proc->heap_end = new_brk;
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return (void *)old_brk;
   }
 
   uint64_t decr = (uint64_t)(-(increment + 1)) + 1;
   if (decr > (old_brk - proc->heap_start)) {
-    mutex_unlock(&proc->mm_lock);
+    mm_unlock(proc);
     return (void *)-1;
   }
 
@@ -1981,7 +1985,7 @@ void *process_sbrk(process_t *proc, int64_t increment) {
   }
 
   proc->heap_end = new_brk;
-  mutex_unlock(&proc->mm_lock);
+  mm_unlock(proc);
   return (void *)old_brk;
 }
 
@@ -2224,13 +2228,13 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
 
   // 1. Freeze the parent's address space while its page tables and VMA list
   // are cloned. The lock is sleepable because swapped pages may need I/O.
-  mutex_lock(&parent->mm_lock);
+  mm_lock(parent);
 
   // 2. Clonar PML4 (kernel half compartido).
   uint64_t child_pml4_phys = paging_clone_kernel_space();
   if (!child_pml4_phys) {
     LOG_ERR("[FORK] paging_clone_kernel_space falló");
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
   uint64_t *parent_pml4 = (uint64_t *)phys_to_virt(parent->pml4_phys);
@@ -2244,7 +2248,7 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
   paging_invalidate_tlb_global(0);
   if (cu_rc != 0) {
     paging_free_user_space(child_pml4_phys);
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
 
@@ -2257,7 +2261,7 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
   if (!child_task) {
     LOG_ERR("[FORK] sched_create_forked_user_task falló");
     paging_free_user_space(child_pml4_phys);
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
   {
@@ -2290,7 +2294,7 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
     if (child_task->stack)
       kfree(child_task->stack);
     kfree(child_task);
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
 
@@ -2398,7 +2402,7 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
 
@@ -2410,7 +2414,7 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
 
@@ -2424,11 +2428,11 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
       kfree(child_task->stack);
     kfree(child_task);
     kfree(child);
-    mutex_unlock(&parent->mm_lock);
+    mm_unlock(parent);
     return -ENOMEM;
   }
 
-  mutex_unlock(&parent->mm_lock);
+  mm_unlock(parent);
 
   for (int f = 0; f < MAX_PROCESS_FDS; f++) {
     child->fds[f] = parent->fds[f];
@@ -2438,6 +2442,8 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
   child->fd_cloexec_mask = parent->fd_cloexec_mask;
 
   mutex_init(&child->mm_lock);
+  child->mm_owner = NULL;
+  child->mm_depth = 0;
   mutex_init(&child->fd_lock);
   wait_queue_init(&child->child_wq);
   child_task->proc = child;

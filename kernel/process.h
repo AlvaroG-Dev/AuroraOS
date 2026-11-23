@@ -303,7 +303,32 @@ typedef struct process {
   // de capabilities viven en 4.3+; aquí solo parseamos y guardamos.
   struct aur_module_info aur;
 
+  // Dueño actual de mm_lock (tarea) y profundidad: mm_lock es reentrante
+  // para la misma tarea (sys_mmap -> ops->mmap -> fallo de página, etc.).
+  task_t *mm_owner;
+  int mm_depth;
+
 } process_t;
+
+// Serializa los cambios del espacio de direcciones (VMAs, next_mmap_addr,
+// PTEs de demanda) entre los hilos de un proceso. Reentrante por tarea.
+static inline void mm_lock(process_t *p) {
+  task_t *me = sched_current();
+  if (me && __atomic_load_n(&p->mm_owner, __ATOMIC_ACQUIRE) == me) {
+    p->mm_depth++;
+    return;
+  }
+  mutex_lock(&p->mm_lock);
+  __atomic_store_n(&p->mm_owner, me, __ATOMIC_RELEASE);
+  p->mm_depth = 1;
+}
+
+static inline void mm_unlock(process_t *p) {
+  if (--p->mm_depth > 0)
+    return;
+  __atomic_store_n(&p->mm_owner, (task_t *)0, __ATOMIC_RELEASE);
+  mutex_unlock(&p->mm_lock);
+}
 
 void process_init(void);
 
