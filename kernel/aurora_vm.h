@@ -103,11 +103,13 @@ struct avm_exit {
       // INS/OUTS (string=1): el VMM transfiere `count` elementos de `size` bytes
       // desde/hacia la direccion lineal `linear` (ES:rDI en INS, DS:rSI en OUTS) y
       // luego ajusta RSI/RDI y RCX (si rep) con AVM_SET_REGS. RIP ya avanzo.
-      // asize: 0 = direcciones de 16 bits, 1 = 32, 2 = 64.
+      // asize: 0 = direcciones de 16 bits, 1 = 32, 2 = 64. ilen: longitud de la
+      // instruccion (RIP - ilen = la propia INS/OUTS). Con KVM anidado asize y
+      // linear pueden llegar mal: el VMM decodifica los prefijos y los rehace.
       uint8_t string;
       uint8_t asize;
       uint8_t rep;
-      uint8_t pad2;
+      uint8_t ilen;
       uint64_t linear;
     } io;
     struct {

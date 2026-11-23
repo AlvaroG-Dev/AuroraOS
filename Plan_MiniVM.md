@@ -155,6 +155,8 @@ Salidas: `AVM_EXIT_IO` (puerto, tamano, direccion, dato), `AVM_EXIT_MMIO`,
   (SeaBIOS, freeldr, ntoskrnl/hal, "BOOT DRIVERS LOADED": PCI, ATAPI con DMA,
   i8042, modo usuario/smss). `UC_DBGPRINT=1` muestra los DbgPrint del huesped.
   Se para en una llamada V86 a la BIOS de video (#PF en 0:F31C dentro del banco;
-  con VT-x el V86 lo hace la CPU). Es ~1000 veces mas lento que VT-x (~25 min). No cubre:
-  salidas INS/OUTS en bloque del kernel, EPT, CR8/TPR ni CPUID/MSR del kernel, ni
+  con VT-x el V86 lo hace la CPU). Es ~1000 veces mas lento que VT-x (~25 min).
+  `UC_STRIO=1` hace salir REP INS/OUTS en bloque como VT-x; `UC_STRIO=2` ademas
+  manda asize/linear erroneos, como KVM anidado (ahi el VMM decodifica los
+  prefijos; asi fallaba el IDENTIFY: disco de 0 MiB). No cubre: EPT, CR8/TPR ni CPUID/MSR del kernel, ni
   #GP/#PF del huesped en modo protegido (Unicorn no da el codigo de error).

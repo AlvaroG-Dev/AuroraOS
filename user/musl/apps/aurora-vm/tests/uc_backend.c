@@ -448,8 +448,70 @@ static uint64_t g_expect_pc = ~0ULL;
 static uint64_t g_run_deadline_us;
 static unsigned g_insn_tick;
 static uint64_t mono_us(void);
+// UC_STRIO=1: REP INS/OUTS sale al VMM en bloque como en VT-x (salida "string"
+// con RIP ya avanzado). UC_STRIO=2: ademas asize y linear llegan mal, como con
+// KVM anidado (el VMM tiene que decodificar los prefijos).
+static int g_str_mode = -1, g_str_hit;
+static struct avm_exit g_str_ev;
+static int str_check(uint64_t a, uint32_t size) {
+  if (g_str_mode < 0)
+    g_str_mode = getenv("UC_STRIO") ? atoi(getenv("UC_STRIO")) : 0;
+  if (!g_str_mode || size == 0 || size > 15)
+    return 0;
+  uint8_t b[15];
+  if (lin_rw(a, b, size, 0) < 0)
+    return 0;
+  uint8_t op = b[size - 1];
+  if (op < 0x6C || op > 0x6F)
+    return 0;
+  struct avm_seg cs;
+  seg_info(UC_X86_REG_CS, &cs);
+  int d = pm() && (cs.ar & (1u << 14)) ? 1 : 0, asz = d, osz32 = d, rep = 0, seg = -1;
+  for (uint32_t i = 0; i + 1 < size; i++) {
+    switch (b[i]) {
+    case 0x67: asz = !d; break;
+    case 0x66: osz32 = !d; break;
+    case 0xF2: case 0xF3: rep = 1; break;
+    case 0x26: seg = 0; break;
+    case 0x2E: seg = 1; break;
+    case 0x36: seg = 2; break;
+    case 0x3E: seg = 3; break;
+    case 0x64: seg = 4; break;
+    case 0x65: seg = 5; break;
+    case 0xF0: break;
+    default: return 0; // no es una INS/OUTS
+    }
+  }
+  int in = op <= 0x6D;
+  if (in || seg < 0)
+    seg = in ? 0 : 3;
+  uint64_t mask = asz ? 0xFFFFFFFFULL : 0xFFFFULL;
+  uint64_t cnt = rep ? (rreg(UC_X86_REG_ECX) & mask) : 1;
+  static const int sid[6] = {UC_X86_REG_ES, UC_X86_REG_CS, UC_X86_REG_SS, UC_X86_REG_DS, UC_X86_REG_FS, UC_X86_REG_GS};
+  struct avm_seg sg;
+  seg_info(sid[seg], &sg);
+  uint64_t off = rreg(in ? UC_X86_REG_EDI : UC_X86_REG_ESI) & mask;
+  memset(&g_str_ev, 0, sizeof(g_str_ev));
+  g_str_ev.reason = AVM_EXIT_IO;
+  g_str_ev.io.port = (uint16_t)rreg(UC_X86_REG_EDX);
+  g_str_ev.io.size = (op & 1) ? (osz32 ? 4 : 2) : 1;
+  g_str_ev.io.is_write = !in;
+  g_str_ev.io.count = (uint32_t)cnt;
+  g_str_ev.io.string = 1;
+  g_str_ev.io.rep = (uint8_t)rep;
+  g_str_ev.io.ilen = (uint8_t)size;
+  g_str_ev.io.asize = g_str_mode == 2 ? (uint8_t)!asz : (uint8_t)asz;
+  g_str_ev.io.linear = g_str_mode == 2 ? 0xBEEF000ULL : ((sg.base + off) & 0xFFFFFFFFULL);
+  g_str_hit = cnt ? 1 : 2; // 2: REP con CX=0, no hace nada
+  wreg(UC_X86_REG_EIP, (a - cs.base + size) & 0xFFFFFFFFULL); // se salta (como el kernel)
+  uc_emu_stop(uc);
+  return 1;
+}
+
 static void code_hook(uc_engine *u, uint64_t a, uint32_t size, void *ud) {
   (void)ud;
+  if (str_check(a, size))
+    return;
   if ((++g_insn_tick & 1023) == 0 && mono_us() > g_run_deadline_us)
     uc_emu_stop(u);
   if (g_expect_pc != ~0ULL) {
@@ -556,10 +618,15 @@ static void *cpu_thread(void *arg) {
     }
     g_run_deadline_us = t0 + (uint64_t)tmo * 1000;
     int err;
+    g_str_hit = 0;
     for (;;) {
       g_pf = 0;
       g_until_fill = 0;
       err = uc_emu_start(uc, pc_begin(), ~0ULL, 0, 0);
+      if (g_str_hit) {
+        err = UC_ERR_OK;
+        break;
+      }
       if (err == UC_ERR_EXCEPTION && g_until_fill && !g_pf && !g_mmio_hit)
         err = UC_ERR_OK;
       if (!g_pf || g_shutdown || g_mmio_hit)
@@ -591,6 +658,12 @@ static void *cpu_thread(void *arg) {
     memset(&g_ev, 0, sizeof(g_ev));
     if (g_shutdown) {
       g_ev.reason = AVM_EXIT_SHUTDOWN;
+    } else if (g_str_hit) {
+      if (g_str_hit == 1)
+        g_ev = g_str_ev;
+      else
+        g_ev.reason = AVM_EXIT_SIGNAL;
+      g_stat_io++;
     } else if (g_mmio_hit == 1 && (err == UC_ERR_READ_UNMAPPED || err == UC_ERR_WRITE_UNMAPPED ||
                                    err == UC_ERR_EXCEPTION)) { // EXCEPTION: con UC_TLB_VIRTUAL
       g_ev.reason = AVM_EXIT_MMIO;

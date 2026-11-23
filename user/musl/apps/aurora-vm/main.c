@@ -282,6 +282,49 @@ static void io_out(uint16_t port, uint32_t v, int size) {
     g_exit_code = (int)(v & 0xFF);
 }
 
+// Decodifica los prefijos de la INS/OUTS (RIP - ilen): tamano de direccion
+// (0=16, 1=32, 2=64) y segmento (0=ES 1=CS 2=SS 3=DS 4=FS 5=GS, codificacion de
+// VT-x). -1 si no se puede leer o no es INS/OUTS. Hace falta porque con KVM
+// anidado la informacion de instruccion y la direccion lineal de la salida
+// llegan obsoletas: los datos de REP INSW acababan fuera del bufer.
+static int string_io_decode(const struct avm_regs *r, unsigned ilen, int lm, int *asz, int *seg) {
+  uint8_t b[15];
+  if (ilen == 0 || ilen > sizeof(b))
+    return -1;
+  uint64_t lin = r->cs.base + r->rip - ilen;
+  if (!lm)
+    lin &= 0xFFFFFFFFULL;
+  if (lin_read(r, lin, b, ilen) < 0)
+    return -1;
+  int def = lm ? 2 : (int)((r->cs.ar >> 14) & 1), a = def, sg = -1;
+  for (unsigned i = 0; i < ilen; i++) {
+    uint8_t c = b[i];
+    if (c == 0x67)
+      a = lm ? 1 : (def ^ 1);
+    else if (c == 0x26)
+      sg = 0;
+    else if (c == 0x2E)
+      sg = 1;
+    else if (c == 0x36)
+      sg = 2;
+    else if (c == 0x3E)
+      sg = 3;
+    else if (c == 0x64)
+      sg = 4;
+    else if (c == 0x65)
+      sg = 5;
+    else if (c == 0xF0 || c == 0xF2 || c == 0xF3 || c == 0x66 || (lm && (c & 0xF0) == 0x40))
+      ;
+    else if (c >= 0x6C && c <= 0x6F && i == ilen - 1) {
+      *asz = a;
+      *seg = c <= 0x6D ? 0 : sg < 0 ? 3 : sg; // INS: siempre ES
+      return 0;
+    } else
+      return -1;
+  }
+  return -1;
+}
+
 // INS/OUTS: el kernel solo describe la instruccion (RIP ya avanzo); aqui se mueven
 // los datos y se ajustan RSI/RDI y RCX, con el ajuste de 16/32 bits del registro.
 static int string_io(const struct avm_exit *x) {
@@ -289,12 +332,33 @@ static int string_io(const struct avm_exit *x) {
   if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
     return -1;
   int dir = (r.rflags & (1u << 10)) ? -1 : 1;
+  int lm = (r.efer & (1ULL << 10)) && (r.cs.ar & (1u << 13));
   uint32_t size = x->io.size, n = x->io.count, done = 0;
-  uint64_t mask = x->io.asize == 0 ? 0xFFFFULL : x->io.asize == 1 ? 0xFFFFFFFFULL : ~0ULL;
+  int asz = x->io.asize, seg = -1;
+  if (string_io_decode(&r, x->io.ilen, lm, &asz, &seg) < 0)
+    seg = -1;
+  uint64_t mask = asz == 0 ? 0xFFFFULL : asz == 1 ? 0xFFFFFFFFULL : ~0ULL;
   uint64_t *ireg = x->io.is_write ? &r.rsi : &r.rdi;
   uint64_t off0 = *ireg & mask;
-  uint64_t base = x->io.linear - off0; // base del segmento (lineal = base + desplazamiento)
-  int lm = (r.efer & (1ULL << 10)) && (r.cs.ar & (1u << 13));
+  uint64_t base;
+  if (seg >= 0) {
+    const struct avm_seg *sr[6] = {&r.es, &r.cs, &r.ss, &r.ds, &r.fs, &r.gs};
+    base = (lm && seg < 4) ? 0 : sr[seg]->base;
+    if (x->io.rep) {
+      uint64_t c = r.rcx & mask;
+      n = c > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)c;
+    }
+    static int warned;
+    uint64_t want = lm ? base + off0 : ((base + off0) & 0xFFFFFFFFULL);
+    if (!warned && (asz != x->io.asize || want != x->io.linear)) {
+      warned = 1;
+      fprintf(stderr, "aurora-vm: aviso: INS/OUTS del kernel con asize=%u lineal=0x%llx; "
+                      "decodificado asize=%d lineal=0x%llx (se usa este)\n",
+              x->io.asize, (unsigned long long)x->io.linear, asz, (unsigned long long)want);
+    }
+  } else {
+    base = x->io.linear - off0; // base del segmento (lineal = base + desplazamiento)
+  }
   for (; done < n; done++) {
     uint64_t off = (off0 + (uint64_t)((int64_t)dir * (int64_t)size * (int64_t)done)) & mask;
     uint64_t lin = base + off;

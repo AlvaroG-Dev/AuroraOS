@@ -1270,8 +1270,8 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
         uint64_t slen = vmread(F_EXIT_INSTR_LEN);
         vm->regs.rip = vmread(F_GUEST_RIP) + slen; // se completa ya; el VMM ajusta RSI/RDI/RCX
         vmwrite(F_GUEST_RIP, vm->regs.rip);
-        if (!cnt)
-          continue; // REP con RCX=0: no hace nada
+        // REP con RCX=0 tambien sale: el VMM recalcula la cuenta decodificando los
+        // prefijos (asz puede venir mal con KVM anidado) y no hace nada si es 0.
         x->reason = AVM_EXIT_IO;
         x->io.port = (uint16_t)(q >> 16);
         x->io.size = (uint8_t)size;
@@ -1281,6 +1281,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x) {
         x->io.string = 1;
         x->io.asize = (uint8_t)asz;
         x->io.rep = rep;
+        x->io.ilen = (uint8_t)slen;
         // Lineal = base del segmento + (E)SI/(E)DI. No se usa el campo "guest-linear
         // address" de la salida: con KVM anidado puede llegar a 0, y entonces los
         // datos de un REP INSW acababan en la IVT (disco IDE de 0 MiB y triple fallo).
