@@ -1236,6 +1236,9 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])(fx + 512)) : "memory");
   // Los MSR del huesped (SYSCALL...) los carga y guarda el hardware.
   bool need_intr_window = false;
+  // Tras un fallo de entrada el estado de lanzamiento del VMCS es dudoso: VMCLEAR
+  // al salir de la ventana y la siguiente empieza con VMPTRLD + VMLAUNCH.
+  bool clear_at_leave = false;
   unsigned inner_exits = 0;
 
   for (;;) {
@@ -1303,6 +1306,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
     if (fail) {
       uint64_t err = vmread(F_VM_INSTR_ERROR);
       vm->vmcs_full = true; // reescribir todo en la siguiente ventana
+      clear_at_leave = true;
       LOG_ERR("[VMX] VM-entry fallo: VM-instruction error %lu (%s)", err,
               vm->launched ? "VMRESUME" : "VMLAUNCH");
       fail_exit(x, 0, err, 0);
@@ -1316,6 +1320,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
     if (reason_full & (1u << 31)) { // fallo de entrada
       uint64_t qual = vmread(F_EXIT_QUAL);
       vm->vmcs_full = true; // reescribir todo en la siguiente ventana
+      clear_at_leave = true;
       LOG_ERR("[VMX] VM-entry invalida: motivo %u qual=%lx (estado del huesped "
               "no valido o fallo al cargar MSR)", reason, qual);
       fail_exit(x, reason_full, reason, qual);
@@ -1624,6 +1629,10 @@ leave:;
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])fx) : "memory");
   // Sin VMCLEAR: el VMCS queda activo en esta CPU (vmx_sched_out lo limpia si
   // la tarea sale de ella).
+  if (clear_at_leave) {
+    vmclear(vm->vmcs_phys);
+    g_loaded_vmcs[cpu] = 0;
+  }
   vm->st.tsc_leave += rdtsc_k() - t_lv0;
   irq_restore(fl);
   preempt_enable();
