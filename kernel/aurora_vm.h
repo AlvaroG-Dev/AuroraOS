@@ -39,6 +39,13 @@
 
 // Estadisticas de rendimiento acumuladas (struct avm_stats *). Los tiempos van
 // en ciclos de TSC: el VMM los pasa a microsegundos comparando con su reloj.
+// Como GET/SET_REGS pero sin leer todo el VMCS (con KVM anidado cuesta ~130 us):
+// GET_REGS_LITE garantiza al dia los registros generales, RIP, RSP, RFLAGS,
+// CR0/CR3/CR4, EFER, CS/SS (AR y base) y las bases de ES/DS/FS/GS; el resto puede
+// estar viejo. SET_REGS_LITE solo aplica los generales, RSP, RIP y RFLAGS. Para
+// emular MMIO e INS/OUTS. Un kernel sin ellas devuelve error: usar GET/SET_REGS.
+#define AVM_GET_REGS_LITE (AVM_IOC_BASE + 14)
+#define AVM_SET_REGS_LITE (AVM_IOC_BASE + 15)
 #define AVM_GET_STATS (AVM_IOC_BASE + 13)
 struct avm_stats {
   uint64_t runs;      // llamadas a AVM_RUN

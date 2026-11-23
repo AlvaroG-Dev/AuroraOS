@@ -56,10 +56,63 @@ static int g_echo = 1;
 static int g_debug = 1;     // intercepta excepciones del huesped y las registra (dmesg [VMX])
 static int g_exit_port;     // 0xF4 termina la VM (pruebas)
 
-static uint64_t now_ns(void) {
+static uint64_t coarse_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+// Reloj de los dispositivos (PIT, LAPIC, RTC, temporizador ACPI). CLOCK_MONOTONIC
+// de AuroraOS avanza a saltos de 1 ms: con el el temporizador ACPI y el contador
+// del PIT del huesped se quedaban quietos 1 ms y cualquier espera corta (udelay,
+// calibraciones de Windows) duraba un tick entero. Se interpola con el TSC,
+// calibrado al arrancar contra dos cambios de tick (AURORA_VM_RELOJ_TICK=1 lo
+// desactiva).
+static uint64_t g_clk_tsc0, g_clk_ns0, g_clk_mult, g_clk_last; // mult = ns por ciclo << 32
+static inline uint64_t rdtsc_u(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+static uint64_t now_ns(void) {
+  if (!g_clk_mult)
+    return coarse_ns();
+  uint64_t d = rdtsc_u() - g_clk_tsc0;
+  uint64_t t = g_clk_ns0 + (uint64_t)(((__uint128_t)d * g_clk_mult) >> 32);
+  if (t < g_clk_last) // nunca hacia atras (TSC de otra CPU un poco por detras)
+    t = g_clk_last;
+  g_clk_last = t;
+  return t;
+}
+// Espera al siguiente cambio del reloj grueso y devuelve (ns, tsc) en ese instante.
+static void clk_edge(uint64_t *ns, uint64_t *tsc) {
+  uint64_t c0 = coarse_ns(), c;
+  while ((c = coarse_ns()) == c0)
+    ;
+  *ns = c;
+  *tsc = rdtsc_u();
+}
+static void clock_init(void) {
+  const char *e = getenv("AURORA_VM_RELOJ_TICK");
+  if (e && *e == '1')
+    return;
+  uint64_t n0, t0, n1, t1;
+  clk_edge(&n0, &t0);
+  struct timespec ts = {0, 100000000L}; // ~100 ms
+  nanosleep(&ts, NULL);
+  clk_edge(&n1, &t1);
+  if (n1 <= n0 || t1 <= t0)
+    return;
+  uint64_t hz = (uint64_t)((__uint128_t)(t1 - t0) * 1000000000ULL / (n1 - n0));
+  if (hz < 100000000ULL || hz > 20000000000ULL) { // TSC raro: reloj de ticks
+    fprintf(stderr, "aurora-vm: TSC de %llu Hz no creible; se usa el reloj de 1 ms\n",
+            (unsigned long long)hz);
+    return;
+  }
+  g_clk_tsc0 = t1;
+  g_clk_ns0 = n1;
+  g_clk_mult = (uint64_t)(((__uint128_t)1000000000ULL << 32) / hz);
+  g_clk_last = n1;
 }
 
 static void irq_set(int irq, int level);
@@ -287,6 +340,26 @@ static void io_out(uint16_t port, uint32_t v, int size) {
 // VT-x). -1 si no se puede leer o no es INS/OUTS. Hace falta porque con KVM
 // anidado la informacion de instruccion y la direccion lineal de la salida
 // llegan obsoletas: los datos de REP INSW acababan fuera del bufer.
+// Registros para emular una instruccion (MMIO, INS/OUTS, HLT): sin leer todo el
+// VMCS (ver AVM_GET_REGS_LITE). Con un kernel sin estas ordenes, las completas.
+static int g_regs_lite = 1;
+static int get_regs_lite(struct avm_regs *r) {
+  if (g_regs_lite) {
+    if (ioctl(g_vm, AVM_GET_REGS_LITE, r) == 0)
+      return 0;
+    if (errno != ENOTTY && errno != EINVAL)
+      return -1;
+    g_regs_lite = 0;
+  }
+  return ioctl(g_vm, AVM_GET_REGS, r);
+}
+// Solo cambia registros generales, RSP, RIP y RFLAGS de lo leido con get_regs_lite.
+static int set_regs_lite(const struct avm_regs *r) {
+  if (g_regs_lite)
+    return ioctl(g_vm, AVM_SET_REGS_LITE, r);
+  return ioctl(g_vm, AVM_SET_REGS, r);
+}
+
 static int string_io_decode(const struct avm_regs *r, unsigned ilen, int lm, int *asz, int *seg) {
   uint8_t b[15];
   if (ilen == 0 || ilen > sizeof(b))
@@ -329,7 +402,7 @@ static int string_io_decode(const struct avm_regs *r, unsigned ilen, int lm, int
 // los datos y se ajustan RSI/RDI y RCX, con el ajuste de 16/32 bits del registro.
 static int string_io(const struct avm_exit *x) {
   struct avm_regs r;
-  if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
+  if (get_regs_lite(&r) < 0)
     return -1;
   int dir = (r.rflags & (1u << 10)) ? -1 : 1;
   int lm = (r.efer & (1ULL << 10)) && (r.cs.ar & (1u << 13));
@@ -383,7 +456,7 @@ static int string_io(const struct avm_exit *x) {
   *ireg = (*ireg & ~mask) | noff;
   if (x->io.rep)
     r.rcx = (r.rcx & ~mask) | ((r.rcx - done) & mask);
-  if (ioctl(g_vm, AVM_SET_REGS, &r) < 0)
+  if (set_regs_lite(&r) < 0)
     return -1;
   if (done < n && g_exit_code < 0) {
     fprintf(stderr, "aurora-vm: INS/OUTS fallo en el elemento %u de %u (puerto 0x%x, lineal 0x%llx)\n",
@@ -820,7 +893,7 @@ static int run_loop(uint64_t deadline_ns) {
       break;
     case AVM_EXIT_MMIO: {
       struct avm_regs r;
-      if (ioctl(g_vm, AVM_GET_REGS, &r) < 0) {
+      if (get_regs_lite(&r) < 0) {
         perror("AVM_GET_REGS");
         return 1;
       }
@@ -832,7 +905,7 @@ static int run_loop(uint64_t deadline_ns) {
         dump_io();
         return 2;
       }
-      if (ioctl(g_vm, AVM_SET_REGS, &r) < 0) {
+      if (set_regs_lite(&r) < 0) {
         perror("AVM_SET_REGS");
         return 1;
       }
@@ -840,7 +913,7 @@ static int run_loop(uint64_t deadline_ns) {
     }
     case AVM_EXIT_HLT: {
       struct avm_regs r;
-      if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
+      if (get_regs_lite(&r) < 0)
         return 1;
       if (!(r.rflags & (1u << 9))) { // HLT con IF=0: solo un NMI lo despertaria
         if (!g_plat)
@@ -1309,6 +1382,7 @@ int main(int argc, char **argv) {
   }
   g_capture = getenv("AURORA_VM_CAPTURA");
   g_traza = getenv("AURORA_VM_TRAZA") != NULL;
+  clock_init();
   if (!strcmp(argv[1], "--bios")) {
     struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,
                           .mem_mb = 1024, .acpi = 1, .boot_cd = -1};

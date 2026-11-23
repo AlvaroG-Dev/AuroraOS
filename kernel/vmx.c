@@ -191,6 +191,13 @@ struct avm_vm {
   bool vmcs_full;      // hay que escribir todo (VMCS nuevo)
   bool vmcs_cleared;   // ya se hizo el VMCLEAR inicial
   bool regs_stale;
+  // Con regs_stale: ademas de lo anterior, CS/SS (AR y base) y las bases de
+  // ES/DS/FS/GS estan al dia (lo que usan la emulacion MMIO e INS/OUTS del VMM:
+  // AVM_GET_REGS_LITE). Con KVM anidado leer el resto del VMCS (selectores,
+  // limites, GDTR/IDTR, TR/LDTR, SYSENTER) cuesta una salida al hipervisor de
+  // fuera por campo, ~130 us en cada salida MMIO.
+  bool regs_lite_ok;
+  uint64_t host_cr0_c, host_cr3_c; // ultimos HOST_CR0/CR3 escritos en el VMCS
   int ctl_cpu;         // CPU para la que se escribio el estado del host (-1 = ninguna)
   uint32_t ctl_debug;  // vm->debug con el que se escribio el bitmap de excepciones
   uint32_t msr_logged;
@@ -440,8 +447,10 @@ static uint64_t ept_new_table(struct avm_vm *vm) {
   return p;
 }
 
-// Mapea una pagina de 4 KiB gpa -> hpa (RWX, WB).
-static int ept_map_4k(struct avm_vm *vm, uint64_t gpa, uint64_t hpa) {
+#define EPT_CLUSTER 64 // paginas (256 KiB) que se mapean por cada fallo EPT
+
+// Tabla de ultimo nivel (PT) del EPT que cubre gpa; la crea si falta.
+static uint64_t *ept_get_pt(struct avm_vm *vm, uint64_t gpa) {
   uint64_t table = vm->ept_pml4;
   for (int level = 3; level >= 1; level--) {
     uint64_t *t = (uint64_t *)phys_to_virt(table);
@@ -449,14 +458,12 @@ static int ept_map_4k(struct avm_vm *vm, uint64_t gpa, uint64_t hpa) {
     if (!(t[idx] & EPT_RWX)) {
       uint64_t n = ept_new_table(vm);
       if (!n)
-        return -ENOMEM;
+        return NULL;
       t[idx] = n | EPT_RWX;
     }
     table = t[idx] & PTE_FRAME;
   }
-  uint64_t *pt = (uint64_t *)phys_to_virt(table);
-  pt[(gpa >> 12) & 0x1FF] = (hpa & PTE_FRAME) | EPT_RWX | EPT_WB;
-  return 0;
+  return (uint64_t *)phys_to_virt(table);
 }
 
 // Invalida en ESTA CPU las traducciones cacheadas del EPT de la VM (fisicas del
@@ -494,14 +501,35 @@ static int ept_fault(struct avm_vm *vm, uint64_t gpa) {
   if (!s)
     return 1;
   gpa &= ~(uint64_t)(PAGE_SIZE - 1);
-  uint64_t pgoff = (s->offset + (gpa - s->gpa)) / PAGE_SIZE;
-  uint64_t phys = 0;
   if (!s->node->ops || !s->node->ops->get_page)
     return -EINVAL;
-  int rc = s->node->ops->get_page(s->node, pgoff, &phys);
-  if (rc < 0)
-    return rc;
-  return ept_map_4k(vm, gpa, phys);
+  // Se mapea el bloque alineado de EPT_CLUSTER paginas que contiene gpa (dentro
+  // del slot): un fallo EPT por bloque en vez de uno por pagina. Cada fallo es
+  // una salida de la VM (con KVM anidado, decenas de us) y Windows/ReactOS
+  // tocan toda la RAM al ponerla a cero. Las paginas ya mapeadas no se tocan.
+  uint64_t c0 = gpa & ~(uint64_t)(EPT_CLUSTER * PAGE_SIZE - 1);
+  uint64_t c1 = c0 + EPT_CLUSTER * PAGE_SIZE;
+  if (c0 < s->gpa)
+    c0 = s->gpa;
+  if (c1 > s->gpa + s->size)
+    c1 = s->gpa + s->size;
+  uint64_t *pt = ept_get_pt(vm, gpa); // EPT_CLUSTER <= 512: el bloque cae en una sola PT
+  if (!pt)
+    return -ENOMEM;
+  for (uint64_t g = c0; g < c1; g += PAGE_SIZE) {
+    uint64_t *e = &pt[(g >> 12) & 0x1FF];
+    if (*e & EPT_RWX)
+      continue;
+    uint64_t phys = 0;
+    int rc = s->node->ops->get_page(s->node, (s->offset + (g - s->gpa)) / PAGE_SIZE, &phys);
+    if (rc < 0) {
+      if (g == gpa)
+        return rc; // la pagina que fallo si hace falta; las vecinas no
+      continue;
+    }
+    *e = (phys & PTE_FRAME) | EPT_RWX | EPT_WB;
+  }
+  return 0;
 }
 
 static void ept_free_all(struct avm_vm *vm) {
@@ -635,8 +663,10 @@ static void vmcs_write_controls_and_host(struct avm_vm *vm) {
     vm->hmsr[i].value = rdmsr(guest_msr_idx[i]);
 
   // Estado del host (la CPU puede haber cambiado desde la ultima entrada).
-  vmwrite(F_HOST_CR0, read_cr0());
-  vmwrite(F_HOST_CR3, read_cr3());
+  vm->host_cr0_c = read_cr0();
+  vm->host_cr3_c = read_cr3();
+  vmwrite(F_HOST_CR0, vm->host_cr0_c);
+  vmwrite(F_HOST_CR3, vm->host_cr3_c);
   vmwrite(F_HOST_CR4, read_cr4());
   uint16_t cs, ss, tr;
   __asm__ volatile("mov %%cs, %0" : "=r"(cs));
@@ -762,6 +792,25 @@ static void vmcs_read_hot(struct avm_vm *vm) {
   vm->snap_cr4_shadow = vm->cr4_shadow;
 }
 
+// Lo que usa el VMM para emular MMIO e INS/OUTS, ademas de lo de vmcs_read_hot:
+// AR y base de CS/SS y bases de ES/DS/FS/GS (con KVM anidado son campos del VMCS
+// en sombra: leerlos no sale al hipervisor de fuera).
+static void vmcs_read_lite(struct avm_vm *vm) {
+  struct avm_regs *r = &vm->regs;
+  r->cs.ar = (uint32_t)vmread(F_GUEST_CS_AR);
+  r->cs.base = vmread(F_GUEST_CS_BASE);
+  r->ss.ar = (uint32_t)vmread(F_GUEST_SS_AR);
+  r->ss.base = vmread(F_GUEST_SS_BASE);
+  r->es.base = vmread(F_GUEST_ES_BASE);
+  r->ds.base = vmread(F_GUEST_DS_BASE);
+  r->fs.base = vmread(F_GUEST_FS_BASE);
+  r->gs.base = vmread(F_GUEST_GS_BASE);
+  vm->snap.cs.ar = r->cs.ar; vm->snap.cs.base = r->cs.base;
+  vm->snap.ss.ar = r->ss.ar; vm->snap.ss.base = r->ss.base;
+  vm->snap.es.base = r->es.base; vm->snap.ds.base = r->ds.base;
+  vm->snap.fs.base = r->fs.base; vm->snap.gs.base = r->gs.base;
+}
+
 static bool seg_eq(const struct avm_seg *a, const struct avm_seg *b) {
   return a->base == b->base && a->limit == b->limit && a->selector == b->selector && a->ar == b->ar;
 }
@@ -859,6 +908,7 @@ static int vm_sync_regs(struct avm_vm *vm) {
   irq_restore(fl);
   preempt_enable();
   vm->regs_stale = false;
+  vm->regs_lite_ok = true;
   return 0;
 }
 
@@ -1211,11 +1261,21 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       vm->ctl_cpu = cpu;
       vm->ctl_debug = vm->debug;
     } else {
-      vmwrite(F_HOST_CR0, read_cr0()); // TS puede cambiar (FPU perezosa)
-      vmwrite(F_HOST_CR3, read_cr3());
+      // Solo lo que puede cambiar entre ventanas en la misma CPU y la misma
+      // tarea (cada VMWRITE de un campo del host es una salida con KVM anidado).
+      uint64_t c0 = read_cr0(), c3 = read_cr3();
+      if (c0 != vm->host_cr0_c) { // TS puede cambiar (FPU perezosa)
+        vmwrite(F_HOST_CR0, c0);
+        vm->host_cr0_c = c0;
+      }
+      if (c3 != vm->host_cr3_c) {
+        vmwrite(F_HOST_CR3, c3);
+        vm->host_cr3_c = c3;
+      }
       vmwrite(F_HOST_FS_BASE, rdmsr(MSR_FS_BASE));
-      for (int i = 0; i < g_ngmsr; i++)
-        vm->hmsr[i].value = rdmsr(guest_msr_idx[i]);
+      // STAR/LSTAR/CSTAR/SFMASK y TSC_AUX son fijos en cada CPU (se leyeron al
+      // escribir el estado del host para esta CPU); KERNEL_GS_BASE es de la tarea.
+      vm->hmsr[4].value = rdmsr(MSR_KERNEL_GS_BASE);
       if (vm->ctl_debug != vm->debug) {
         vmwrite(F_EXC_BITMAP, vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0);
         vm->ctl_debug = vm->debug;
@@ -1614,15 +1674,21 @@ leave:;
   // Salidas tras las que el VMM siempre pide los registros (MMIO, INS/OUTS, HLT,
   // apagado): se leen ya, con el VMCS cargado. En las demas (E/S simple, plazo,
   // TPR) basta lo minimo y el resto se lee si se pide.
-  if (ret == 1 && (x->reason == AVM_EXIT_MMIO || x->reason == AVM_EXIT_HLT ||
-                   x->reason == AVM_EXIT_SHUTDOWN || x->reason == AVM_EXIT_FAIL ||
-                   (x->reason == AVM_EXIT_IO && x->io.string))) {
+  if (ret == 1 && (x->reason == AVM_EXIT_SHUTDOWN || x->reason == AVM_EXIT_FAIL)) {
     vmcs_read_guest(vm);
     snap_take(vm);
     vm->regs_stale = false;
+    vm->regs_lite_ok = true;
+  } else if (ret == 1 && (x->reason == AVM_EXIT_MMIO || x->reason == AVM_EXIT_HLT ||
+                          (x->reason == AVM_EXIT_IO && x->io.string))) {
+    vmcs_read_hot(vm);
+    vmcs_read_lite(vm);
+    vm->regs_stale = true;
+    vm->regs_lite_ok = true;
   } else {
     vmcs_read_hot(vm);
     vm->regs_stale = true;
+    vm->regs_lite_ok = false;
   }
   vmwrite(F_ENTRY_INTR_INFO, 0); // lo pendiente ya esta en reinj
   __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])(fx + 512)) : : "memory");
@@ -1893,6 +1959,35 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     vm->cr0_shadow = r.cr0;
     vm->cr4_shadow = r.cr4;
     vm->regs_stale = false;
+    return 0;
+  }
+  case AVM_GET_REGS_LITE: { // ver struct avm_vm.regs_lite_ok
+    if (!access_ok((void *)arg, sizeof(vm->regs)))
+      return -EFAULT;
+    if (vm->busy)
+      return -EBUSY;
+    if (vm->regs_stale && !vm->regs_lite_ok) {
+      int src = vm_sync_regs(vm);
+      if (src < 0)
+        return src;
+    }
+    return copy_to_user((void *)arg, &vm->regs, sizeof(vm->regs)) < 0 ? -EFAULT : 0;
+  }
+  case AVM_SET_REGS_LITE: { // solo registros generales, RIP y RFLAGS
+    if (vm->busy)
+      return -EBUSY;
+    if (!access_ok((void *)arg, sizeof(vm->regs)))
+      return -EFAULT;
+    struct avm_regs r;
+    if (copy_from_user(&r, (void *)arg, sizeof(r)) < 0)
+      return -EFAULT;
+    struct avm_regs *d = &vm->regs;
+    d->rax = r.rax; d->rbx = r.rbx; d->rcx = r.rcx; d->rdx = r.rdx;
+    d->rsi = r.rsi; d->rdi = r.rdi; d->rbp = r.rbp; d->rsp = r.rsp;
+    d->r8 = r.r8; d->r9 = r.r9; d->r10 = r.r10; d->r11 = r.r11;
+    d->r12 = r.r12; d->r13 = r.r13; d->r14 = r.r14; d->r15 = r.r15;
+    d->rip = r.rip;
+    d->rflags = r.rflags;
     return 0;
   }
   case AVM_GET_REGS: {

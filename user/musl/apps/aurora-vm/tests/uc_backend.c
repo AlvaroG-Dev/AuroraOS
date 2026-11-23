@@ -891,6 +891,32 @@ int avm_test_ioctl(int fd, unsigned long req, ...) {
   case AVM_SET_MEMORY: rc = set_memory((const struct avm_memory *)arg); break;
   case AVM_GET_REGS: get_regs((struct avm_regs *)arg); break;
   case AVM_SET_REGS: set_regs((const struct avm_regs *)arg); break;
+  case AVM_GET_REGS_LITE: { // como el kernel: lo que no garantiza va envenenado
+    struct avm_regs *r = (struct avm_regs *)arg;
+    get_regs(r);
+    struct avm_seg *sg[6] = {&r->es, &r->cs, &r->ss, &r->ds, &r->fs, &r->gs};
+    for (int i = 0; i < 6; i++) {
+      sg[i]->selector = 0xDEAD;
+      sg[i]->limit = 0x5A5A5A5A;
+      if (i != 1 && i != 2)
+        sg[i]->ar = 0xBAD;
+    }
+    r->tr.base = r->ldtr.base = r->gdt_base = r->idt_base = 0xDEADBEEFULL;
+    r->gdt_limit = r->idt_limit = 0x1234;
+    break;
+  }
+  case AVM_SET_REGS_LITE: { // solo generales, RSP, RIP y RFLAGS
+    const struct avm_regs *n = (const struct avm_regs *)arg;
+    struct avm_regs r;
+    get_regs(&r);
+    r.rax = n->rax; r.rbx = n->rbx; r.rcx = n->rcx; r.rdx = n->rdx;
+    r.rsi = n->rsi; r.rdi = n->rdi; r.rbp = n->rbp; r.rsp = n->rsp;
+    r.r8 = n->r8; r.r9 = n->r9; r.r10 = n->r10; r.r11 = n->r11;
+    r.r12 = n->r12; r.r13 = n->r13; r.r14 = n->r14; r.r15 = n->r15;
+    r.rip = n->rip; r.rflags = n->rflags;
+    set_regs(&r);
+    break;
+  }
   case AVM_RUN: rc = vm_run((struct avm_exit *)arg); break;
   case AVM_INJECT_IRQ:
     if (g_pending >= 0)
