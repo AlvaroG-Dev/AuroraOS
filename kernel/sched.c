@@ -11,6 +11,7 @@
 #include "panic.h"
 #include "process.h"
 #include "serial.h"
+#include "vmx.h"
 #include "spinlock.h"
 #include "string.h"
 #include <stddef.h>
@@ -633,6 +634,7 @@ void sched_tick(void) {
   }
 
   old->rseq_sw++; // rseq: la tarea sale de la CPU (preemption/migracion)
+  vmx_sched_out(); // VMCLEAR del VMCS que aurora-vm dejo activo en esta CPU
   gdt_load_tls(next); // TLS de 32 bits (set_thread_area) de next en esta GDT
   task_switch(old, next, &sched_lock);
 

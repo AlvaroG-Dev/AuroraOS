@@ -10,7 +10,8 @@
 //  * El estado del huesped vive en `vm->regs` (software). Cada entrada lo
 //    escribe entero en el VMCS y al salir de la "ventana" se lee de vuelta.
 //  * Ventana = preempt_disable + IRQs del host apagadas, con el VMCS cargado en
-//    ESTA cpu. Al salir se hace VMCLEAR, asi el vCPU puede migrar entre CPUs.
+//    ESTA cpu. Queda activo entre ventanas; al cambiar de tarea se hace VMCLEAR
+//    (vmx_sched_out), asi el vCPU puede migrar entre CPUs.
 //  * Salidas rapidas (CPUID, MSR, CR, fallos EPT de RAM, HLT sin pendientes no)
 //    se resuelven dentro de la ventana; las que necesitan un dispositivo salen
 //    a espacio de usuario.
@@ -234,6 +235,12 @@ static struct {
 
 static uint64_t g_vmxon_phys[MAX_CPUS];
 static bool g_vmxon_active[MAX_CPUS];
+// VMCS que una ventana dejo activo y actual en cada CPU (sin VMCLEAR). Mientras
+// la tarea no sale de la CPU, la siguiente ventana entra con VMRESUME sin
+// VMCLEAR/VMPTRLD (con KVM anidado cada uno obliga a resincronizar el VMCS
+// entero). Al cambiar de tarea, vmx_sched_out() hace el VMCLEAR: asi un VMCS
+// nunca queda activo en una CPU distinta de la que lo va a usar.
+static uint64_t g_loaded_vmcs[MAX_CPUS];
 
 static inline uint64_t vmread(uint64_t field) {
   uint64_t v;
@@ -798,6 +805,39 @@ static void snap_take(struct avm_vm *vm) {
 }
 
 static int vmx_enable_this_cpu(void);
+
+// Deja el VMCS de `vm` actual en esta CPU (IRQ apagadas). Si ya lo estaba (lo
+// dejo la ventana anterior y la tarea no salio de la CPU) no toca nada y se
+// conserva el estado de lanzamiento (VMRESUME).
+static bool vmcs_make_current(struct avm_vm *vm, int cpu) {
+  if (g_loaded_vmcs[cpu] == vm->vmcs_phys)
+    return true;
+  if (g_loaded_vmcs[cpu]) { // otro VM de esta misma tarea
+    vmclear(g_loaded_vmcs[cpu]);
+    g_loaded_vmcs[cpu] = 0;
+  }
+  if (!vm->vmcs_cleared) {
+    if (!vmclear(vm->vmcs_phys))
+      return false;
+    vm->vmcs_cleared = true;
+  }
+  if (!vmptrld(vm->vmcs_phys))
+    return false;
+  vm->launched = false; // estaba limpio (VMCLEAR): hay que usar VMLAUNCH
+  g_loaded_vmcs[cpu] = vm->vmcs_phys;
+  return true;
+}
+
+// Llamada desde sched.c justo antes de cambiar de tarea (IRQ apagadas, en la
+// CPU que la tarea abandona): guarda en memoria el VMCS que quedo activo.
+void vmx_sched_out(void) {
+  int cpu = smp_processor_id();
+  if (g_loaded_vmcs[cpu]) {
+    vmclear(g_loaded_vmcs[cpu]);
+    g_loaded_vmcs[cpu] = 0;
+  }
+}
+
 // Trae a `regs` todo el estado del VMCS (cargandolo un momento en esta CPU).
 static int vm_sync_regs(struct avm_vm *vm) {
   if (!vm->regs_stale)
@@ -809,14 +849,13 @@ static int vm_sync_regs(struct avm_vm *vm) {
     return rc;
   }
   unsigned long fl = irq_save();
-  if (!vmptrld(vm->vmcs_phys)) {
+  if (!vmcs_make_current(vm, smp_processor_id())) {
     irq_restore(fl);
     preempt_enable();
     return -EIO;
   }
   vmcs_read_guest(vm);
   snap_take(vm);
-  vmclear(vm->vmcs_phys);
   irq_restore(fl);
   preempt_enable();
   vm->regs_stale = false;
@@ -1140,17 +1179,16 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
     return rc;
   }
   unsigned long fl = irq_save();
-  // El VMCS queda limpio (VMCLEAR) al final de cada ventana; su contenido se
-  // conserva, asi que solo hace falta VMPTRLD y escribir lo que cambio.
-  if ((!vm->vmcs_cleared && !vmclear(vm->vmcs_phys)) || !vmptrld(vm->vmcs_phys)) {
+  // El VMCS sigue activo en esta CPU si la tarea no salio de ella desde la
+  // ventana anterior; si no, VMPTRLD. Su contenido se conserva siempre, asi que
+  // solo se escribe lo que cambio.
+  int cpu = smp_processor_id();
+  if (!vmcs_make_current(vm, cpu)) {
     irq_restore(fl);
     preempt_enable();
     fail_exit(x, 0, 0xFFFF, 0);
     return 1;
   }
-  vm->vmcs_cleared = true;
-  vm->launched = false; // tras VMCLEAR hay que usar VMLAUNCH
-  int cpu = smp_processor_id();
   if (vm->ept_dirty || cpu != vm->last_cpu) {
     invept_ctx(vm_eptp(vm));
     vm->ept_dirty = false;
@@ -1584,7 +1622,8 @@ leave:;
   vmwrite(F_ENTRY_INTR_INFO, 0); // lo pendiente ya esta en reinj
   __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])(fx + 512)) : : "memory");
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])fx) : "memory");
-  vmclear(vm->vmcs_phys);
+  // Sin VMCLEAR: el VMCS queda activo en esta CPU (vmx_sched_out lo limpia si
+  // la tarea sale de ella).
   vm->st.tsc_leave += rdtsc_k() - t_lv0;
   irq_restore(fl);
   preempt_enable();
@@ -1736,10 +1775,34 @@ static int avm_close(vfs_node_t *node) {
   if (!vm)
     return 0;
   node->priv = NULL;
+  // El VMCS puede seguir activo en esta CPU (lo dejo la ultima ventana): VMCLEAR
+  // antes de liberar la pagina. Si estuviera activo en otra CPU (otro hilo del
+  // proceso corriendo alli) no se libera: un VMCLEAR posterior escribiria en ella.
+  bool vmcs_busy = false;
+  preempt_disable();
+  {
+    unsigned long fl = irq_save();
+    int cpu = smp_processor_id();
+    for (int c = 0; c < MAX_CPUS; c++) {
+      if (g_loaded_vmcs[c] != vm->vmcs_phys)
+        continue;
+      if (c == cpu) {
+        vmclear(vm->vmcs_phys);
+        g_loaded_vmcs[c] = 0;
+      } else {
+        vmcs_busy = true;
+      }
+    }
+    irq_restore(fl);
+  }
+  preempt_enable();
   for (int i = 0; i < AVM_MAX_SLOTS; i++)
     slot_release(&vm->slots[i]);
   ept_free_all(vm);
-  pmm_free_page(vm->vmcs_phys);
+  if (vmcs_busy)
+    LOG_WARN("[VMX] VMCS activo en otra CPU al cerrar: se deja sin liberar");
+  else
+    pmm_free_page(vm->vmcs_phys);
   pmm_free_page(vm->msr_page_phys);
   pmm_free_page(vm->fx_page_phys);
   vm->magic = 0;

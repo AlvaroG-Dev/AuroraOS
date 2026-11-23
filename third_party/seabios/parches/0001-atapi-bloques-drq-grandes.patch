@@ -1,0 +1,88 @@
+--- a/src/hw/ata.c
++++ b/src/hw/ata.c
+@@ -582,6 +582,52 @@
+
+ #define CDROM_CDB_SIZE 12
+
++// aurora-vm: lectura ATAPI en bloques DRQ grandes (hasta 0xF800 bytes).
++// Cada bloque cuesta pocas salidas de la VM en vez de ~4 por sector de 2 KiB.
++// El tamano real de cada bloque lo da el dispositivo en los registros de cilindro.
++static int
++atapi_pio_read(struct disk_op_s *op, int blocksize)
++{
++    struct atadrive_s *adrive_gf = container_of(
++        op->drive_fl, struct atadrive_s, drive);
++    struct ata_channel_s *chan_gf = GET_GLOBALFLAT(adrive_gf->chan_gf);
++    u16 iobase1 = GET_GLOBALFLAT(chan_gf->iobase1);
++    u16 iobase2 = GET_GLOBALFLAT(chan_gf->iobase2);
++    u32 total = op->count * blocksize, done = 0;
++    void *buf_fl = op->buf_fl;
++    int status;
++    for (;;) {
++        u32 bc = inb(iobase1 + ATA_CB_CL) | (inb(iobase1 + ATA_CB_CH) << 8);
++        if (!bc || (bc & 1) || bc > total - done) {
++            dprintf(6, "atapi_pio_read : bloque raro %x (%x/%x)\n", bc, done, total);
++            op->count = done / blocksize;
++            return -8;
++        }
++        insw_fl(iobase1, buf_fl, bc / 2);
++        buf_fl += bc;
++        done += bc;
++        status = pause_await_not_bsy(iobase1, iobase2);
++        if (status < 0) {
++            op->count = done / blocksize;
++            return status;
++        }
++        if (done >= total)
++            break;
++        status &= (ATA_CB_STAT_BSY | ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR);
++        if (status != ATA_CB_STAT_DRQ) {
++            dprintf(6, "atapi_pio_read : faltan datos (status %02x)\n", status);
++            op->count = done / blocksize;
++            return -6;
++        }
++    }
++    status &= (ATA_CB_STAT_BSY | ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR);
++    if (status != 0) {
++        dprintf(6, "atapi_pio_read : sobran datos (status %02x)\n", status);
++        return -7;
++    }
++    return 0;
++}
++
+ // Low-level atapi command transmit function.
+ int
+ ata_atapi_process_op(struct disk_op_s *op)
+@@ -604,8 +650,18 @@
+
+     struct ata_pio_command cmd;
+     memset(&cmd, 0, sizeof(cmd));
+-    cmd.lba_mid = blocksize;
+-    cmd.lba_high = blocksize >> 8;
++    // Limite de bytes por bloque DRQ: varios sectores a la vez en lecturas.
++    u32 bcl = blocksize;
++    if (op->command == CMD_READ && blocksize > 0 && blocksize <= 0xF800
++        && !(blocksize & 1)) {
++        u32 n = 0xF800 / blocksize;
++        if (n > op->count)
++            n = op->count;
++        if (n > 1)
++            bcl = n * blocksize;
++    }
++    cmd.lba_mid = bcl;
++    cmd.lba_high = bcl >> 8;
+     cmd.command = ATA_CMD_PACKET;
+
+     // Disable interrupts
+@@ -643,7 +699,10 @@
+             goto fail;
+         }
+
+-        ret = ata_pio_transfer(op, 0, blocksize);
++        if (bcl != blocksize)
++            ret = atapi_pio_read(op, blocksize);
++        else
++            ret = ata_pio_transfer(op, 0, blocksize);
+     }
+
+ fail:

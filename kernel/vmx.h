@@ -14,4 +14,8 @@ void vmx_init(void);
 // un huesped (VMX + EPT + unrestricted guest). No activa VMX.
 bool vmx_probe(struct avm_caps *out);
 
+// sched.c, antes de cambiar de tarea (IRQ apagadas): VMCLEAR del VMCS que una
+// ventana dejo activo en esta CPU.
+void vmx_sched_out(void);
+
 #endif

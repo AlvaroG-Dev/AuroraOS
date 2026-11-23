@@ -1,5 +1,5 @@
 #!/bin/sh
-# Reconstruye bios.bin (SeaBIOS 1.16.3, sin parches) con la configuracion de ./config.
+# Reconstruye bios.bin (SeaBIOS 1.16.3 + parches/*.patch) con la configuracion de ./config.
 # Uso: third_party/seabios/build.sh   (necesita gcc, binutils, python3, make)
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -8,6 +8,7 @@ cd "$work"
 curl -fsSL -o sb.tgz https://www.seabios.org/downloads/seabios-1.16.3.tar.gz
 tar xzf sb.tgz
 cd seabios-1.16.3
+for p in "$here"/parches/*.patch; do patch -p1 < "$p"; done
 cp "$here/config" .config
 make olddefconfig >/dev/null
 make -j"$(nproc)"

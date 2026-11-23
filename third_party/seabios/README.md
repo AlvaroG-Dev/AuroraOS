@@ -1,8 +1,12 @@
 # SeaBIOS para la mini-VM
 
-`bios.bin` es SeaBIOS 1.16.3 **sin parches**, compilado con `config` (128 KiB).
+`bios.bin` es SeaBIOS 1.16.3 con los parches de `parches/`, compilado con `config` (128 KiB).
+`parches/0001-atapi-bloques-drq-grandes.patch`: las lecturas de CD/DVD por la BIOS
+(INT 13h) piden bloques DRQ de hasta 0xF800 bytes en vez de uno por sector de 2 KiB,
+asi cada bloque cuesta unas pocas salidas de la VM (Windows carga boot.wim, ~500 MB,
+asi). `vgabios.bin` no cambia.
 Licencia: LGPL-3.0-or-later. Codigo fuente: https://www.seabios.org/downloads/seabios-1.16.3.tar.gz
-(`build.sh` lo descarga y reconstruye el binario identico).
+(`build.sh` lo descarga, aplica `parches/*.patch` y reconstruye el binario).
 
 Lo usa `aurora-vm --bios` / `--bios-test`: se instala en `/usr/share/aurora/vm/bios.bin`.
 Opciones relevantes de `config`: modo QEMU (el VMM imita el puente i440FX), virtio-blk,
