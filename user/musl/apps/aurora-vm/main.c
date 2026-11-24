@@ -1097,7 +1097,9 @@ static int guest_reset(const char *why) {
     return -1;
   }
   ioctl(g_vm, AVM_SET_TPR, 0UL);
+  ioctl(g_vm, AVM_RESET_CPU, 0UL); // eventos pendientes, FPU, CR2 (si el kernel lo tiene)
   g_tpr_dirty = 0;
+  g_inflight = -1;
   return 0;
 }
 

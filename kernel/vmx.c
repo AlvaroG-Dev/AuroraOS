@@ -906,7 +906,15 @@ static void vmcs_write_guest_diff(struct avm_vm *vm) {
   }
   if (r->cr3 != o->cr3) vmwrite(F_GUEST_CR3, r->cr3);
   if (r->rsp != o->rsp) vmwrite(F_GUEST_RSP, r->rsp);
-  if (r->rip != o->rip) vmwrite(F_GUEST_RIP, r->rip);
+  if (r->rip != o->rip) {
+    vmwrite(F_GUEST_RIP, r->rip);
+    // El VMM completo la instruccion (MMIO, IN): la sombra de STI/MOV SS acaba
+    // con ella, como en skip_insn. Si no, la interrupcion esperaria una mas.
+    if (vm->interruptibility & 3) {
+      vm->interruptibility &= ~3u;
+      vmwrite(F_GUEST_INTERRUPTIBILITY, vm->interruptibility);
+    }
+  }
   if (r->rflags != o->rflags) vmwrite(F_GUEST_RFLAGS, r->rflags | 2);
   if (r->efer != o->efer) {
     vmwrite(F_GUEST_EFER, r->efer);
@@ -2370,6 +2378,24 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
       return -EBUSY;
     vm->pending_irq = (int32_t)arg;
     return 0;
+  case AVM_RESET_CPU: {
+    if (vm->busy)
+      return -EBUSY;
+    vm->reinj = false;
+    vm->pending_in = false;
+    vm->pending_irq = -1;
+    vm->tpr = 0;
+    vm->tpr_wait = 0;
+    vm->interruptibility = 0;
+    vm->regs.cr2 = 0;
+    memset(&vm->fast, 0, sizeof(vm->fast));
+    uint8_t *gfx = (uint8_t *)phys_to_virt(vm->fx_page_phys) + 512;
+    memset(gfx, 0, 512);
+    *(uint16_t *)gfx = 0x37F;
+    *(uint32_t *)(gfx + 24) = 0x1F80;
+    vm->vmcs_full = true; // reescribir todo (incluida la interrumpibilidad)
+    return 0;
+  }
   case AVM_WITHDRAW_IRQ: {
     if (vm->busy)
       return -EBUSY;

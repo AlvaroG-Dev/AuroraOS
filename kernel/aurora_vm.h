@@ -66,6 +66,11 @@ struct avm_stats {
   uint32_t pad0;
 };
 
+// Reinicio de la CPU virtual (tras AVM_SET_REGS con el estado de encendido):
+// descarta el evento a medio entregar, el IN pendiente, la interrupcion
+// pedida, el TPR y su espera, la sombra de STI/MOV SS, CR2 y el estado FPU/SSE.
+#define AVM_RESET_CPU (AVM_IOC_BASE + 17)
+
 // Auditoria del EPT (struct avm_ept_check *): recorre todas las paginas mapeadas
 // y comprueba que cada una apunta a la pagina del memfd de su slot (una pagina
 // mapeada a la fisica equivocada corromperia la RAM del huesped en silencio).
