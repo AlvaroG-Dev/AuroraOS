@@ -1020,8 +1020,28 @@ static void fast_before_run(struct avm_exit *x) {
       f->rtc_next_tsc = ns_to_tsc(g_rtc.next_periodic);
     }
   }
-  if (g_apic_on)
-    f->flags |= AVM_FAST_EOI;
+  // EOI: solo si se sabe a que vector ira (el inyectado, una vez entregado, o
+  // el mas alto del ISR) y ese vector es de flanco (sin EOI al IOAPIC), y no hay
+  // nada mas esperando en el IRR (tras el EOI tendria que entrar sin esperar).
+  if (g_apic_on) {
+    int v = -1;
+    if (g_inflight >= 0) {
+      if (g_inflight & (int)AVM_IRQ_TPR)
+        v = g_inflight & 0xFF;
+    } else {
+      v = bm_hi(g_isr);
+    }
+    int otra = 0;
+    for (int i = 0; i < 8; i++) {
+      uint32_t w = g_irr[i];
+      if (v >= 0 && (v >> 5) == i)
+        w &= ~(1u << (v & 31));
+      if (w)
+        otra = 1;
+    }
+    if (v >= 0 && !otra && !((g_tmr[v >> 5] >> (v & 31)) & 1) && !pic_output())
+      f->flags |= AVM_FAST_EOI;
+  }
 }
 static void fast_after_exit(struct avm_exit *x) {
   struct avm_fast *f = &x->fast;
@@ -1039,9 +1059,12 @@ static void fast_after_exit(struct avm_exit *x) {
     }
     rtc_irq_update();
   }
-  for (uint32_t i = 0; i < f->eoi_count; i++)
+}
+// Despues de irq_after_exit (que pasa al ISR la interrupcion entregada).
+static void fast_eoi_apply(const struct avm_exit *x) {
+  for (uint32_t i = 0; i < x->fast.eoi_count; i++)
     lapic_write(0xB0, 0);
-  g_fast_eoi_total += f->eoi_count;
+  g_fast_eoi_total += x->fast.eoi_count;
 }
 
 static int run_loop(uint64_t deadline_ns) {
@@ -1093,6 +1116,7 @@ static int run_loop(uint64_t deadline_ns) {
     }
     fast_after_exit(&x);
     irq_after_exit(&x);
+    fast_eoi_apply(&x);
     if (g_traza)
       traza(0, &x);
     switch (x.reason) {

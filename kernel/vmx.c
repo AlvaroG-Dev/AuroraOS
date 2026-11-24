@@ -977,12 +977,16 @@ static bool fast_rtc_io(struct avm_vm *vm, struct gregs *g, uint16_t port, uint3
   if (port == 0x71 && in && (f->rtc_index & 0x7F) == 0x0C) {
     if (f->rtc_period_tsc) {
       uint64_t now = rdtsc_k();
+      // Con PIE el cruce de periodo es un flanco de IRQ8 que el IOAPIC/PIC tiene
+      // que latchear aunque la lectura borre C enseguida (Windows espera ese tick
+      // de reloj mientras sondea C: perderlo daba 0x5C/0x110 en vm17). Eso lo
+      // hace el VMM: se le deja esta lectura.
+      if (now >= f->rtc_next_tsc && f->rtc_pie)
+        return false;
       if (now >= f->rtc_next_tsc) {
         uint64_t n = (now - f->rtc_next_tsc) / f->rtc_period_tsc + 1;
         f->rtc_next_tsc += n * f->rtc_period_tsc;
-        f->rtc_c |= 0x40;
-        if (f->rtc_pie)
-          f->rtc_c |= 0x80;
+        f->rtc_c |= 0x40; // sin PIE: solo PF, sin interrupcion
       }
     }
     g->rax = (g->rax & ~0xFFULL) | f->rtc_c;
@@ -1018,7 +1022,9 @@ static int guest_lin_to_phys(struct avm_vm *vm, uint64_t lin, uint64_t *gpa) {
 // y con MOV r/m32, r32 (89) o MOV r/m32, imm32 (C7 /0), que es como lo hacen
 // Windows y Linux; cualquier otra cosa sigue yendo al VMM.
 static bool fast_eoi(struct avm_vm *vm, uint64_t gpa) {
-  if (!(vm->fast.flags & AVM_FAST_EOI) || gpa != 0xFEE000B0ULL)
+  // Una por vuelta y solo con la interrupcion inyectada ya entregada: el VMM
+  // activa el atajo cuando sabe a que vector ira ese EOI (y que es de flanco).
+  if (!(vm->fast.flags & AVM_FAST_EOI) || gpa != 0xFEE000B0ULL || vm->pending_irq >= 0)
     return false;
   if (!(vmread(F_GUEST_EFER) & (1ULL << 10)) || !(vmread(F_GUEST_CS_AR) & (1u << 13)))
     return false;
@@ -1714,6 +1720,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       }
       if (((qual >> 1) & 1) && fast_eoi(vm, gpa)) {
         vm->fast.eoi_count++;
+        vm->fast.flags &= ~AVM_FAST_EOI;
         continue;
       }
       x->reason = AVM_EXIT_MMIO; // F1: sin decodificar la instruccion
