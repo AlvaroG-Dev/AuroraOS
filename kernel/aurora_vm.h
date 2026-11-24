@@ -57,6 +57,8 @@ struct avm_stats {
   uint64_t tsc_setup; // preparando cada ventana (hasta la primera entrada)
   uint64_t tsc_guest; // entre VMLAUNCH/VMRESUME y la salida
   uint64_t tsc_leave; // al salir de la ventana (leer estado, VMCLEAR)
+  uint64_t bp_skipped; // INT3 del huesped en anillo 0 saltados (sin depurador)
+  uint64_t bp_rip;     // RIP del ultimo
 };
 
 #define AVM_CAP_VMX (1u << 0)

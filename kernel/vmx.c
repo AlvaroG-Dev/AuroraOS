@@ -650,7 +650,7 @@ static void vmcs_write_controls_and_host(struct avm_vm *vm) {
   vmwrite(F_PROC, vm->procbased);
   vmwrite(F_PROC2, vm->procbased2);
   vmwrite(F_EXIT_CTLS, vm->exitctl);
-  vmwrite(F_EXC_BITMAP, vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0);
+  vmwrite(F_EXC_BITMAP, (1u << 3) | (vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0));
   vmwrite(F_PF_MASK, 0);
   vmwrite(F_PF_MATCH, 0);
   vmwrite(F_CR3_COUNT, 0);
@@ -1311,7 +1311,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       // escribir el estado del host para esta CPU); KERNEL_GS_BASE es de la tarea.
       vm->hmsr[4].value = rdmsr(MSR_KERNEL_GS_BASE);
       if (vm->ctl_debug != vm->debug) {
-        vmwrite(F_EXC_BITMAP, vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0);
+        vmwrite(F_EXC_BITMAP, (1u << 3) | (vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0));
         vm->ctl_debug = vm->debug;
       }
     }
@@ -1463,6 +1463,20 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       if (!(info & (1u << 31)))
         continue;
       uint32_t vec = info & 0xFF;
+      // INT3 en anillo 0 sin depurador: se hace lo que haria un depurador
+      // conectado ("g"), seguir tras la instruccion. Windows 10 x64 ejecuta un
+      // DbgBreakPoint al arrancar en esta VM y, sin depurador, eso es la
+      // pantalla azul 0x1E (80000003). Los INT3 de anillo 3 van al huesped.
+      if (vec == 3 && ((info >> 8) & 7) == 6 && (vmread(F_GUEST_CR0) & 1) &&
+          !(vmread(F_GUEST_SS_AR) & 0x60)) { // modo protegido/largo y CPL 0
+        uint64_t rip_bp = vmread(F_GUEST_RIP);
+        vm->st.bp_skipped++;
+        vm->st.bp_rip = rip_bp;
+        if (vm->st.bp_skipped <= 8)
+          LOG_WARN("[VMX] INT3 del huesped en anillo 0 rip=%lx: se salta (sin depurador)", rip_bp);
+        skip_insn(vm);
+        continue;
+      }
       uint64_t err = (info & (1u << 11)) ? vmread(0x4406) : 0;
       uint64_t q = vmread(F_EXIT_QUAL);
       if (vm->exc_logged < 16) {

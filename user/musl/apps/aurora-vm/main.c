@@ -902,6 +902,17 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
               100.0 * (double)(st.tsc_guest - ps.tsc_guest) / tall,
               100.0 * (trun - (double)(st.tsc_guest - ps.tsc_guest)) / tall, 100.0 * (tall - trun) / tall);
     }
+    if (st.bp_skipped != ps.bp_skipped) {
+      // INT3 de anillo 0 que el kernel salto (Windows sin depurador): de donde
+      // vienen, para reconocer la funcion.
+      uint8_t cb[64];
+      int m = dbg_lin_read(&r, st.bp_rip - 32, cb, 64);
+      fprintf(stderr, "[traza] INT3 del huesped saltados: %llu, ultimo en %llx:",
+              (unsigned long long)st.bp_skipped, (unsigned long long)st.bp_rip);
+      for (int k = 0; k < m; k++)
+        fprintf(stderr, k == 32 ? " |%02x" : " %02x", cb[k]);
+      fprintf(stderr, "\n");
+    }
     ps = st;
     ptsc = tsc;
     pns = tnow;
