@@ -985,6 +985,13 @@ task_t *sched_create_forked_user_task_ex(registers_t *regs, uint64_t cr3,
 
   task_init_common(task, sp, cr3);
   task->stack = (uint64_t *)kstack;
+  // El hijo hereda XMM/MXCSR/x87 del padre (los carga task_switch/jump_to
+  // desde fpu_state al primer cambio de contexto).
+  {
+    void *parent = fpu_regs_area(regs);
+    if (parent)
+      memcpy((void *)task->fpu_state, parent, 512);
+  }
   return task;
 }
 

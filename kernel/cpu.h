@@ -188,6 +188,19 @@ extern cpu_features_t g_cpu_features;
 
 void cpu_simd_init(void);
 
+// Area de estado FPU/SSE/AVX que las entradas al kernel dejan en la pila (ver
+// isr_stubs.asm). El puntero esta en el slot justo debajo del registers_t.
+extern volatile uint32_t fpu_use_xsave, fpu_xsave_lo, fpu_xsave_hi,
+    fpu_area_size;
+// Bytes validos del area (sin la holgura de alineacion).
+static inline uint32_t fpu_state_bytes(void) { return fpu_area_size - 64; }
+static inline void *fpu_regs_area(const void *regs) {
+  uint64_t p = ((const uint64_t *)regs)[-1];
+  if (p < 0xFFFF800000000000ULL || (p & 63))
+    return 0;
+  return (void *)p;
+}
+
 // ---------------------------------------------------------------------------
 // [Power Management] Split detección / aplicación:
 //

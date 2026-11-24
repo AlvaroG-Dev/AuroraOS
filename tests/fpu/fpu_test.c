@@ -122,7 +122,59 @@ static u64 run(unsigned seed, int avx, int rounds) {
   return bad;
 }
 
+// --- Senales: el handler no debe pisar XMM del codigo interrumpido ---
+static void on_sig(int n) {
+  (void)n;
+  __asm__ volatile("pxor %%xmm0,%%xmm0\n pxor %%xmm1,%%xmm1\n"
+                   "pcmpeqd %%xmm5,%%xmm5\n" ::: "xmm0", "xmm1", "xmm5");
+}
+__asm__(".text\n.globl sig_restorer\nsig_restorer:\n mov $15,%eax\n syscall\n");
+extern void sig_restorer(void);
+struct ksa { void *h; u64 flags; void *restorer; u64 mask; };
+
+static int sig_test(void) {
+  struct ksa sa = {(void *)on_sig, 0x04000000, (void *)sig_restorer, 0};
+  register i64 r10 __asm__("r10") = 8;
+  i64 rr;
+  __asm__ volatile("syscall" : "=a"(rr) : "a"(13), "D"(10), "S"(&sa), "d"(0), "r"(r10) : "rcx", "r11", "memory");
+  if (rr) return 1;
+  for (int i = 0; i < 16; i++) pat[i] = 0x11 * (i + 1);
+  for (int i = 0; i < 16; i++) pat[16 + i] = 0xA5 ^ i;
+  i64 pid = sc(39, 0, 0, 0);
+  __asm__ volatile(
+      "movdqa 0(%[p]), %%xmm0\n movdqa 16(%[p]), %%xmm5\n"
+      "mov $62, %%eax\n mov %[pid], %%rdi\n mov $10, %%esi\n syscall\n"
+      "movdqa %%xmm0, 0(%[r])\n movdqa %%xmm5, 16(%[r])\n"
+      :
+      : [p] "r"(pat), [r] "r"(res), [pid] "r"(pid)
+      : "rax", "rcx", "rdx", "rsi", "rdi", "r11", "memory", "xmm0", "xmm5");
+  for (int i = 0; i < 32; i++)
+    if (res[i] != pat[i]) return 1;
+  return 0;
+}
+
+// --- fork: el hijo hereda XMM del padre ---
+static int fork_inherit(void) {
+  for (int i = 0; i < 16; i++) pat[i] = 0x30 + i;
+  i64 pid;
+  __asm__ volatile(
+      "movdqa 0(%[p]), %%xmm9\n"
+      "mov $57, %%eax\n syscall\n"
+      "movdqa %%xmm9, 0(%[r])\n"
+      : "=&a"(pid)
+      : [p] "r"(pat), [r] "r"(res)
+      : "rcx", "rdx", "rsi", "rdi", "r11", "memory", "xmm9");
+  int bad = 0;
+  for (int i = 0; i < 16; i++) if (res[i] != pat[i]) bad = 1;
+  if (pid == 0) sc(60, bad, 0, 0);
+  i64 st = 0;
+  sc(61, pid, (i64)&st, 0);
+  return bad || (st != 0);
+}
+
 void _start(void) {
+  if (sig_test()) out("FPU-TEST: FAIL senal pisa XMM\n"); else out("FPU-TEST: senal ok\n");
+  if (fork_inherit()) out("FPU-TEST: FAIL fork no hereda XMM\n"); else out("FPU-TEST: fork ok\n");
   int avx = has_avx();
   outnum("FPU-TEST: avx=", avx);
   i64 pid = sc(57, 0, 0, 0); // fork

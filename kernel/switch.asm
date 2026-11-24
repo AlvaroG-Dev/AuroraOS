@@ -221,11 +221,17 @@ task_trampoline:
     hlt
     jmp .hang
 
+extern fpu_use_xsave
 global user_fork_return
 
 ; Continúa la ejecución en userland a partir del frame construido por
 ; sched_create_forked_user_task().
 user_fork_return:
+    ; Mitades altas de YMM a cero: no heredar las de otra tarea.
+    cmp dword [rel fpu_use_xsave], 0
+    je .no_vzu
+    vzeroupper
+.no_vzu:
     mov ax, 0x23
     mov ds, ax
     mov es, ax

@@ -9,6 +9,7 @@
 #include "uaccess.h"
 #include "wait.h"
 #include "rseq.h"
+#include "cpu.h"
 #include <stdbool.h>
 
 extern registers_t *syscall_current_regs(void);
@@ -246,7 +247,7 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   int on_altstack = 0;
   if ((act->flags & SA_ONSTACK) && proc->sigaltstack_sp != 0 &&
       proc->sigaltstack_flags != 2 /* SS_DISABLE */ &&
-      proc->sigaltstack_size >= SF_SIZE) {
+      proc->sigaltstack_size >= SF_SIZE + fpu_state_bytes() + 128) {
     sp_base = proc->sigaltstack_sp + proc->sigaltstack_size;
     on_altstack = 1;
   } else {
@@ -273,7 +274,12 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   // k_rt_sigreturn lee mc = rsp + 0x28; al haber bajado el frame 8 bytes,
   // rsp tras el `ret` del handler vale frame_va+8, y mc = frame_va+0x30
   // = SF_UC_MCONTEXT, consistente con la nueva base.
-  uint64_t frame_va = ((sp_base - SF_SIZE) & ~0xFULL) - 8;
+  // Estado FPU/SSE/AVX del contexto interrumpido: va debajo del frame (a 64 B)
+  // y mc.fpstate lo apunta; sigreturn lo restaura. Sin esto el handler
+  // pisaba XMM/YMM del codigo interrumpido.
+  uint64_t fsz = fpu_state_bytes();
+  uint64_t fpu_va = (sp_base - fsz) & ~63ULL;
+  uint64_t frame_va = ((fpu_va - SF_SIZE) & ~0xFULL) - 8;
   task_t *cur = sched_current();
   uint64_t old_mask = cur->sig_blocked;
   if (cur->sig_suspend_active) { // el handler vuelve a la mascara previa a sigsuspend
@@ -284,6 +290,20 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   if (build_frame(frame_va, sig, act, regs, old_mask) < 0) {
     LOG_ERR("[SIG] PID=%u SIG %d: fallo al construir frame", proc->pid, sig);
     process_exit_group_current(128 + sig);
+  }
+  {
+    void *area = fpu_regs_area(regs);
+    if (area) {
+      if (copy_to_user((void *)fpu_va, area, fsz) < 0 ||
+          w_u64(frame_va + SF_UC_MCONTEXT + 0xb8, fpu_va) < 0)
+        process_exit_group_current(128 + sig);
+      // El handler arranca con estado FPU por omision (como Linux).
+      memset(area, 0, fsz);
+      *(uint16_t *)area = 0x37f;       // FCW
+      *(uint32_t *)((char *)area + 24) = 0x1F80; // MXCSR
+    } else if (w_u64(frame_va + SF_UC_MCONTEXT + 0xb8, 0) < 0) {
+      process_exit_group_current(128 + sig);
+    }
   }
   // Senal de un temporizador POSIX: si_code = SI_TIMER con id, overrun y
   // valor (la libc monta SIGEV_THREAD sobre esto).
@@ -575,10 +595,10 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   // en RSP. uc_mcontext está a offset 0x28 desde ahí.
   uint64_t rsp = regs->rsp;
   uint64_t mc = rsp + 0x28;
-  uint64_t g[23];
-  if (!access_ok((void *)mc, 23 * 8))
+  uint64_t g[24];
+  if (!access_ok((void *)mc, 24 * 8))
     return -EFAULT;
-  if (copy_from_user(g, (void *)mc, 23 * 8) < 0)
+  if (copy_from_user(g, (void *)mc, 24 * 8) < 0)
     return -EFAULT;
 
   regs->r8 = g[0];
@@ -602,6 +622,31 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   // g[18..22] = cs/gs/fs, err, trapno, oldmask, cr2 → ignorar
   regs->cs = 0x1B;
   regs->ss = 0x23;
+
+  // Restaurar XMM/YMM/MXCSR del contexto interrumpido (g[23] = fpstate).
+  if (g[23]) {
+    void *area = fpu_regs_area(regs);
+    uint32_t fsz = fpu_state_bytes();
+    if (area && access_ok((void *)g[23], fsz)) {
+      uint8_t tmp[512 + 64];
+      uint8_t *a = (uint8_t *)area;
+      // Primero el area legacy y la cabecera, luego el resto directo.
+      if (copy_from_user(tmp, (void *)g[23],
+                         fsz < sizeof(tmp) ? fsz : sizeof(tmp)) < 0)
+        return -EFAULT;
+      uint64_t bv = *(uint64_t *)(tmp + 512);
+      if (fpu_use_xsave) {
+        bv &= ((uint64_t)fpu_xsave_hi << 32) | fpu_xsave_lo;
+        memset(tmp + 512, 0, 64);
+        *(uint64_t *)(tmp + 512) = bv;
+      }
+      *(uint32_t *)(tmp + 24) &= 0xFFFF; // MXCSR: sin bits reservados
+      memcpy(a, tmp, 512 + (fpu_use_xsave ? 64 : 0));
+      if (fpu_use_xsave && fsz > 576 &&
+          copy_from_user(a + 576, (void *)(g[23] + 576), fsz - 576) < 0)
+        return -EFAULT;
+    }
+  }
 
   uint64_t mask = 0;
   if (copy_from_user(&mask, (void *)(rsp + 0x128), 8) < 0)
