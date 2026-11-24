@@ -959,6 +959,18 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
   uint32_t a, b, c, d;
   cpuid(leaf, sub, &a, &b, &c, &d);
   switch (leaf) {
+  case 0:
+    // Hoja basica maxima 0xD, como QEMU. Sobre todo sin la 0x15/0x16: con
+    // ellas Windows toma la frecuencia del cristal como la del temporizador
+    // del LAPIC y la del TSC, que no son las de los dispositivos emulados (el
+    // LAPIC virtual va a 1 GHz), y rechaza los temporizadores (0x5C, 0x110).
+    if (a > 0xD)
+      a = 0xD;
+    break;
+  case 6:
+    a = 1u << 2; // solo ARAT: el temporizador del LAPIC no se para (como QEMU)
+    b = c = d = 0;
+    break;
   case 1:
     c &= ~((1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) |
            (1u << 7) | (1u << 8) | (1u << 12) | (1u << 15) | (1u << 17) |
@@ -990,7 +1002,7 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
       a = b = c = d = 0;
     }
     break;
-  case 0x6: case 0xA: case 0xB: case 0xD: case 0x12: case 0x14: case 0x1F:
+  case 0xA: case 0xB: case 0xD:
     a = b = c = d = 0;
     break;
   case 0x80000001:
@@ -1002,7 +1014,7 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
       d &= ~(1u << 27);
     break;
   default:
-    if (leaf >= 0x40000000 && leaf < 0x50000000)
+    if ((leaf > 0xD && leaf < 0x80000000) || (leaf >= 0x40000000 && leaf < 0x50000000))
       a = b = c = d = 0;
     break;
   }

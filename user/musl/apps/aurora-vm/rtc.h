@@ -6,13 +6,12 @@
 // alarma (AF, con "no importa" 0xC0). La linea IRQ8 sube con IRQF y baja al leer
 // el registro C (como el chip real: si el SO no lee C, no hay mas interrupciones).
 //
-// Las interrupciones periodicas perdidas (el VMM solo mira el reloj entre salidas)
-// se recuperan como la politica "slew" de QEMU, con un tope: Windows sin HPET usa
-// esta interrupcion como reloj del sistema.
+// Periodos que pasan sin que nadie lea C se funden en uno (como el chip y como
+// QEMU sin driftfix): Windows calibra sus temporizadores sondeando PF contra el
+// TSC y una rafaga de periodos "recuperados" le hacia rechazar el reloj (pantalla
+// azul 0x5C, 0x110). PF se activa aunque PIE este apagado; IRQF solo con PIE.
 #ifndef AVM_RTC_H
 #define AVM_RTC_H
-
-#define RTC_MAX_BACKLOG 200
 
 static void irq_set(int irq, int level);
 
@@ -127,7 +126,7 @@ static void rtc_irq_update(void) {
 }
 
 static uint32_t rtc_period_ticks(void) {
-  if (!(g_rtc.cmos[REG_B] & 0x40))
+  if (!rtc_running())
     return 0;
   int code = g_rtc.cmos[REG_A] & 0x0f;
   if (!code)
@@ -192,6 +191,7 @@ static void cmos_init(uint64_t ram_bytes, int boot_cd) {
   // 0x38 alto; 2 = disco, 3 = CD. Bit 0 de 0x38 = no comprobar firma de disquete.
   c[0x3D] = boot_cd ? 0x23 : 0x32;
   c[0x38] = 0x01;
+  rtc_periodic_restart(); // A = 0x26: PF ya late a 1024 Hz desde el encendido
 }
 
 static void rtc_check_alarm_update(void) {
@@ -240,16 +240,14 @@ static uint64_t rtc_poll(uint64_t now) {
       pns = 1;
     uint64_t n = (now - g_rtc.next_periodic) / pns + 1;
     g_rtc.next_periodic += n * pns;
-    g_rtc.backlog = g_rtc.backlog + n > RTC_MAX_BACKLOG ? RTC_MAX_BACKLOG : g_rtc.backlog + (unsigned)n;
-  }
-  // Entregar un tick si el anterior ya se reconocio (registro C leido).
-  if (g_rtc.backlog && !g_rtc.irq_level) {
-    g_rtc.backlog--;
-    g_rtc.cmos[REG_C] |= 0x40 | 0x80; // PF | IRQF (PIE esta activo: period != 0)
+    g_rtc.cmos[REG_C] |= 0x40; // PF
+    if (g_rtc.cmos[REG_B] & 0x40)
+      g_rtc.cmos[REG_C] |= 0x80; // IRQF
     rtc_irq_update();
   }
-  if (g_rtc.backlog)
-    return now;
+  // Sin PIE el VMM no se despierta por PF: se calcula al leer C.
+  if (!(g_rtc.cmos[REG_B] & 0x40))
+    return next;
   return g_rtc.next_periodic < next ? g_rtc.next_periodic : next;
 }
 
@@ -269,6 +267,7 @@ static uint8_t rtc_read(void) {
       ret |= 0x80;
     return ret;
   case REG_C:
+    rtc_poll(now_ns()); // PF/UF/AF al dia en el momento de la lectura
     ret = g_rtc.cmos[REG_C];
     g_rtc.cmos[REG_C] = 0;
     rtc_irq_update();
@@ -294,7 +293,7 @@ static void rtc_write(uint8_t data) {
       rtc_set_time();
     break;
   case REG_A: {
-    int upd = ((c[REG_A] ^ data) & 0x0f) != 0;
+    int upd = ((c[REG_A] ^ data) & 0x7f) != 0; // tasa o divisor
     if ((data & 0x60) == 0x60) {
       if (rtc_running())
         rtc_update_time();
@@ -311,7 +310,7 @@ static void rtc_write(uint8_t data) {
     break;
   }
   case REG_B: {
-    int upd = ((c[REG_B] ^ data) & 0x40) != 0;
+    int upd = ((c[REG_B] ^ data) & 0xC0) != 0; // PIE o SET
     if (data & 0x80) {
       if (rtc_running())
         rtc_update_time();
