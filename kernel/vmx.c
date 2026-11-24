@@ -965,6 +965,22 @@ void vmx_sched_out(void) {
   }
 }
 
+// Lee todo el estado del huesped del VMCS sin perder lo que el VMM cambio con
+// AVM_SET_REGS_LITE desde la ultima salida: RIP, RSP y RFLAGS ya estaban al dia
+// en `regs` (vmcs_read_hot) y lo que haya ahi manda sobre el VMCS. Antes un
+// AVM_GET_REGS (la traza lo pide cada 2 s) despues de emular un MMIO devolvia el
+// RIP viejo y la instruccion se repetia con el registro destino ya escrito:
+// Windows releia el IRR del LAPIC con la base = valor leido (0x8000) y daba
+// IRQL_NOT_LESS_OR_EQUAL en 0x8210 (vm19, vm22).
+static void vmcs_read_guest_keep(struct avm_vm *vm) {
+  uint64_t rip = vm->regs.rip, rsp = vm->regs.rsp, rfl = vm->regs.rflags;
+  vmcs_read_guest(vm);
+  snap_take(vm); // snap = VMCS: la siguiente ventana escribe la diferencia
+  vm->regs.rip = rip;
+  vm->regs.rsp = rsp;
+  vm->regs.rflags = rfl;
+}
+
 // Trae a `regs` todo el estado del VMCS (cargandolo un momento en esta CPU).
 static int vm_sync_regs(struct avm_vm *vm) {
   if (!vm->regs_stale)
@@ -981,8 +997,7 @@ static int vm_sync_regs(struct avm_vm *vm) {
     preempt_enable();
     return -EIO;
   }
-  vmcs_read_guest(vm);
-  snap_take(vm);
+  vmcs_read_guest_keep(vm);
   irq_restore(fl);
   preempt_enable();
   vm->regs_stale = false;
@@ -1519,7 +1534,7 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
   }
   if (vm->vmcs_full) {
     if (vm->regs_stale) { // no perder lo que solo esta en el VMCS
-      vmcs_read_guest(vm);
+      vmcs_read_guest_keep(vm);
       vm->regs_stale = false;
     }
     vmcs_write_controls_and_host(vm);
