@@ -743,6 +743,11 @@ static void dump_guest_mem(const struct avm_regs *r) {
               (unsigned long long)r9v, (unsigned long long)rp);
     if (!(rc && rc < 0x400))
       continue;
+    if (rc == 0xEF) { // CRITICAL_PROCESS_DIED: nombre del proceso (EPROCESS+0x5A8 en 19041)
+      char nm[16] = {0};
+      if (dbg_lin_read(r, rd + 0x5A8, (uint8_t *)nm, 15) == 15)
+        fprintf(stderr, "    proceso: %.15s\n", nm);
+    }
     // Cuarto parametro (en la pila de la llamada) y, si es la direccion de una
     // instruccion (0xA, 0xD1, 0x50...), el KTRAP_FRAME de KiPageFault que la
     // contiene (Rip en +0x168): registros y la cadena de llamadas de esa funcion.

@@ -1513,8 +1513,13 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
   g.rbp = vm->regs.rbp; g.r8 = vm->regs.r8; g.r9 = vm->regs.r9;
   g.r10 = vm->regs.r10; g.r11 = vm->regs.r11; g.r12 = vm->regs.r12;
   g.r13 = vm->regs.r13; g.r14 = vm->regs.r14; g.r15 = vm->regs.r15;
+  // FPU/SSE: el estado del huesped solo esta en los registros entre fxrstor y
+  // fxsave, pegados a cada VMLAUNCH/VMRESUME. Dentro de la ventana corre codigo
+  // del kernel que usa XMM (gcc los usa para poner estructuras a cero; las IRQ
+  // del host que se sirven aqui, como el raton o el compositor, tambien) y
+  // antes les pisaba los XMM al huesped: procesos de Windows que morian sin
+  // motivo (CRITICAL_PROCESS_DIED en vm20).
   __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])fx) : : "memory");
-  __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])(fx + 512)) : "memory");
   // Los MSR del huesped (SYSCALL...) los carga y guarda el hardware.
   bool need_intr_window = false;
   // Tras un fallo de entrada el estado de lanzamiento del VMCS es dudoso: VMCLEAR
@@ -1593,7 +1598,10 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       vm->st.windows++;
       vm->st.tsc_setup += t_e0 - t_win0;
     }
+    __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])(fx + 512)) : "memory");
     int fail = vmx_enter(&g, vm->launched);
+    __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])(fx + 512)) : : "memory");
+    __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])fx) : "memory");
     vm->st.tsc_guest += rdtsc_k() - t_e0;
     vm->st.exits++;
     __asm__ volatile("mov %%cr2, %0" : "=r"(vm->regs.cr2));
@@ -1960,7 +1968,7 @@ leave:;
     vm->regs_lite_ok = false;
   }
   vmwrite(F_ENTRY_INTR_INFO, 0); // lo pendiente ya esta en reinj
-  __asm__ volatile("fxsave %0" : "=m"(*(uint8_t(*)[512])(fx + 512)) : : "memory");
+  // El del huesped ya se guardo tras la ultima salida: solo volver al del VMM.
   __asm__ volatile("fxrstor %0" : : "m"(*(uint8_t(*)[512])fx) : "memory");
   // Sin VMCLEAR: el VMCS queda activo en esta CPU (vmx_sched_out lo limpia si
   // la tarea sale de ella).
