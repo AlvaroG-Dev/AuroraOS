@@ -992,6 +992,10 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
     a = b = c = d = 0;
     break;
   case 0x80000001:
+    // LAHF/SAHF en 64 bits y PREFETCHW: Windows 8.1+ x64 los exige (si no,
+    // UNSUPPORTED_PROCESSOR). Toda CPU Intel de 64 bits ejecuta ambos (PREFETCHW
+    // es un NOP en las que no lo anuncian), pero un L1 virtualizado puede ocultarlos.
+    c |= (1u << 0) | (1u << 8);
     if (!(vm->procbased2 & PROC2_RDTSCP))
       d &= ~(1u << 27);
     break;

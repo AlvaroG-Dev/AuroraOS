@@ -677,6 +677,46 @@ static void sleep_until(uint64_t t) {
 // ---------------------------------------------------------------------------
 // Diagnostico
 // ---------------------------------------------------------------------------
+// Lee memoria lineal del huesped (por bytes, cruzando paginas). Bytes leidos.
+static int dbg_lin_read(const struct avm_regs *r, uint64_t lin, uint8_t *out, int n) {
+  int k = 0;
+  for (; k < n; k++) {
+    uint64_t pa;
+    if (gva_to_gpa(r, lin + (uint64_t)k, &pa) < 0 || gmem_read(pa, &out[k], 1) < 0)
+      break;
+  }
+  return k;
+}
+
+// Para diagnosticar un huesped parado (p. ej. Windows en KeBugCheckEx): codigo
+// antes de rip, la pila y las bases de segmento. Con esto se saca el codigo de
+// la pantalla azul aunque no llegue a dibujarse.
+static void dump_guest_mem(const struct avm_regs *r) {
+  uint64_t rip_lin = r->cs.base + r->rip;
+  uint8_t c[64];
+  int n = dbg_lin_read(r, rip_lin - 48, c, 48);
+  fprintf(stderr, "  codigo antes de rip (%d):", n);
+  for (int i = 0; i < n; i++)
+    fprintf(stderr, " %02x", c[i]);
+  fprintf(stderr, "\n  fs=%llx gs=%llx tr=%x(base %llx) ss=%x(ar %x)\n",
+          (unsigned long long)r->fs.base, (unsigned long long)r->gs.base, r->tr.selector,
+          (unsigned long long)r->tr.base, r->ss.selector, r->ss.ar);
+  int l64 = (r->efer & (1ULL << 10)) && (r->cs.ar & 0x2000);
+  uint64_t sp = r->ss.base + (l64 ? r->rsp : (r->rsp & 0xFFFFFFFFULL));
+  int w = l64 ? 8 : 4;
+  static uint8_t st[0x600];
+  int got = dbg_lin_read(r, sp, st, (int)sizeof(st));
+  fprintf(stderr, "  pila en %llx (%d bytes):", (unsigned long long)sp, got);
+  for (int i = 0; i + w <= got; i += w) {
+    if (i % (w * 4) == 0)
+      fprintf(stderr, "\n    +%03x:", i);
+    uint64_t v = 0;
+    memcpy(&v, st + i, (size_t)w);
+    fprintf(stderr, w == 8 ? " %016llx" : " %08llx", (unsigned long long)v);
+  }
+  fprintf(stderr, "\n");
+}
+
 static void dump_regs(const char *why) {
   struct avm_regs r;
   if (ioctl(g_vm, AVM_GET_REGS, &r) < 0)
@@ -700,6 +740,7 @@ static void dump_regs(const char *why) {
   for (int i = 0; i < n; i++)
     fprintf(stderr, " %02x", b[i]);
   fprintf(stderr, "\n");
+  dump_guest_mem(&r);
 }
 
 static void dump_io(void) {
@@ -794,6 +835,16 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
   for (int i = 0; i < 8 && nport[i]; i++)
     fprintf(stderr, " %x:%lu", port[i], nport[i]);
   fprintf(stderr, "\n");
+  // Huesped muerto en "jmp $" con IF=0 (Windows tras KeBugCheckEx, sin pantalla
+  // azul): volcado una sola vez, sin esperar a que se cierre la ventana.
+  static int parado_dump;
+  if (!parado_dump && !(r.rflags & (1ULL << 9))) {
+    uint8_t b[2];
+    if (insn_bytes(&r, b, 2) == 2 && b[0] == 0xEB && b[1] == 0xFE) {
+      parado_dump = 1;
+      dump_regs("huesped parado en jmp $ con interrupciones cortadas");
+    }
+  }
   // Rendimiento: donde se va el tiempo (kernel vs VMM, preparar ventana vs huesped)
   static struct avm_stats ps;
   static uint64_t ptsc, pns;
