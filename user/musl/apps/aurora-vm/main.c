@@ -715,6 +715,41 @@ static void dump_guest_mem(const struct avm_regs *r) {
     fprintf(stderr, w == 8 ? " %016llx" : " %08llx", (unsigned long long)v);
   }
   fprintf(stderr, "\n");
+  if (!l64)
+    return;
+  // Codigo alrededor de las direcciones del nucleo que hay en la pila (retornos,
+  // la direccion de la excepcion en un CONTEXT...): con eso se reconoce la funcion.
+  uint64_t seen[24];
+  int ns = 0;
+  for (int i = 0; i + 8 <= got && i < 0x400 && ns < 24; i += 8) {
+    uint64_t v;
+    memcpy(&v, st + i, 8);
+    if ((v >> 47) != 0x1FFFF || (v >= sp - 0x20000 && v < sp + 0x20000))
+      continue;
+    int dup = 0;
+    for (int k = 0; k < ns; k++)
+      dup |= seen[k] == v;
+    if (dup)
+      continue;
+    seen[ns++] = v;
+    uint8_t cb[64];
+    int m = dbg_lin_read(r, v - 32, cb, 64);
+    if (m < 64)
+      continue;
+    fprintf(stderr, "  [%llx-20]:", (unsigned long long)v);
+    for (int k = 0; k < 64; k++)
+      fprintf(stderr, k == 32 ? " |%02x" : " %02x", cb[k]);
+    fprintf(stderr, "\n");
+  }
+  // KUSER_SHARED_DATA (Windows x64): NtBuildNumber (+0x260) y KdDebuggerEnabled
+  // (+0x2D4), para saber si el nucleo cree tener depurador.
+  uint8_t ku[0x2D8];
+  if (dbg_lin_read(r, 0xFFFFF78000000000ULL, ku, (int)sizeof(ku)) == (int)sizeof(ku)) {
+    uint32_t build;
+    memcpy(&build, ku + 0x260, 4);
+    fprintf(stderr, "  windows: compilacion %u, KdDebuggerEnabled=%02x\n", build & 0xFFFF,
+            ku[0x2D4]);
+  }
 }
 
 static void dump_regs(const char *why) {
