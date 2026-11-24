@@ -250,17 +250,18 @@ void ap_entry(void) {
   // Cargar idt_load() justo después de GDT y antes de cualquier escritura
   // de MSR garantiza que un fallo sea capturable.
   // ---------------------------------------------------------------------
+  // SIMD per-core ANTES de cargar la IDT: las entradas al kernel guardan el
+  // estado con xsave y necesitan CR4.OSXSAVE/XCR0 ya puestos en este AP.
+  extern void cpu_simd_init(void);
+  cpu_simd_init();
+  DIAG('s');
+
   idt_load();
   DIAG('G');
 
   extern void syscall_init_ap(void);
   syscall_init_ap();
   DIAG('S');
-
-  // SIMD per-core (OSXSAVE + XCR0).
-  extern void cpu_simd_init(void);
-  cpu_simd_init();
-  DIAG('s');
 
   // Power management per-core. Repite la política que eligió el BSP.
   extern void cpu_hwp_init_ap(void);

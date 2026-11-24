@@ -41,7 +41,16 @@
 
 [BITS 64]
 
+section .rodata
+align 4
+kernel_mxcsr: dd 0x1F80
+section .text
+
 extern syscall_handler_c
+extern fpu_use_xsave
+extern fpu_xsave_lo
+extern fpu_xsave_hi
+extern fpu_area_size
 
 global syscall_entry
 
@@ -87,7 +96,34 @@ syscall_entry:
     push r14
     push r15
 
-    mov rdi, rsp
+    ; Estado FPU/SSE/AVX del usuario: el kernel usa XMM (gcc) y SYSCALL debe
+    ; conservarlos. Guardar con xsave/fxsave en la pila (ver isr_stubs.asm).
+    ; El slot [regs-8] guarda el puntero al area.
+    push qword 0
+    mov r12, rsp
+    mov eax, [rel fpu_area_size]
+    sub rsp, rax
+    and rsp, -64
+    cmp dword [rel fpu_use_xsave], 0
+    je .fx_save
+    mov qword [rsp + 512], 0
+    mov qword [rsp + 520], 0
+    mov qword [rsp + 528], 0
+    mov qword [rsp + 536], 0
+    mov qword [rsp + 544], 0
+    mov qword [rsp + 552], 0
+    mov qword [rsp + 560], 0
+    mov qword [rsp + 568], 0
+    mov eax, [rel fpu_xsave_lo]
+    mov edx, [rel fpu_xsave_hi]
+    xsave64 [rsp]
+    jmp .fpu_saved
+.fx_save:
+    fxsave64 [rsp]
+.fpu_saved:
+    ldmxcsr [rel kernel_mxcsr]
+    mov [r12], rsp
+    lea rdi, [r12 + 8]
 
     ; El frame ya está completo y la pila del proceso es estable. Permitir
     ; interrupciones durante el manejador C: SYSCALL entra con IF=0 por
@@ -99,7 +135,19 @@ syscall_entry:
     cli
 
     ; RAX = retorno de la syscall.
-    mov [rsp + 0x70], rax
+    mov [r12 + 8 + 0x70], rax
+
+    ; Restaurar FPU/SSE/AVX del usuario (r12 sobrevive a la llamada C).
+    cmp dword [rel fpu_use_xsave], 0
+    je .fx_rest
+    mov eax, [rel fpu_xsave_lo]
+    mov edx, [rel fpu_xsave_hi]
+    xrstor64 [rsp]
+    jmp .fpu_restored
+.fx_rest:
+    fxrstor64 [rsp]
+.fpu_restored:
+    lea rsp, [r12 + 8]               ; quitar area FPU y slot
 
     ; ------------------------------------------------------------------
     ; Restaurar el contexto GPR del userland.
