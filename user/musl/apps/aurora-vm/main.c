@@ -741,6 +741,54 @@ static void dump_guest_mem(const struct avm_regs *r) {
       fprintf(stderr, "  PANTALLA AZUL de Windows: 0x%llX (%llx, %llx, %llx) [rip del CONTEXT %llx]\n",
               (unsigned long long)rc, (unsigned long long)rd, (unsigned long long)r8v,
               (unsigned long long)r9v, (unsigned long long)rp);
+    if (!(rc && rc < 0x400))
+      continue;
+    // Cuarto parametro (en la pila de la llamada) y, si es la direccion de una
+    // instruccion (0xA, 0xD1, 0x50...), el KTRAP_FRAME de KiPageFault que la
+    // contiene (Rip en +0x168): registros y la cadena de llamadas de esa funcion.
+    uint64_t crsp, a4 = 0;
+    memcpy(&crsp, st + i + 0x98, 8);
+    if (dbg_lin_read(r, crsp + 0x28, (uint8_t *)&a4, 8) == 8)
+      fprintf(stderr, "    parametro 4: %llx\n", (unsigned long long)a4);
+    if ((a4 >> 47) != 0x1FFFF)
+      continue;
+    uint8_t cb[96];
+    int m = dbg_lin_read(r, a4 - 64, cb, 96);
+    fprintf(stderr, "    [%llx-40]:", (unsigned long long)a4);
+    for (int k = 0; k < m; k++)
+      fprintf(stderr, k == 64 ? " |%02x" : " %02x", cb[k]);
+    fprintf(stderr, "\n");
+    for (int j = i + 0x100; j + 8 <= got; j += 8) {
+      uint64_t v;
+      memcpy(&v, st + j, 8);
+      if (v != a4 || j < 0x168)
+        continue;
+      const uint8_t *tf = st + j - 0x168;
+      static const char *nm[] = {"rax", "rcx", "rdx", "r8", "r9", "r10", "r11"};
+      fprintf(stderr, "    KTRAP_FRAME:");
+      for (int k = 0; k < 7; k++) {
+        uint64_t q;
+        memcpy(&q, tf + 0x30 + 8 * k, 8);
+        fprintf(stderr, " %s=%llx", nm[k], (unsigned long long)q);
+      }
+      uint64_t trsp, tfl;
+      memcpy(&tfl, tf + 0x178, 8);
+      memcpy(&trsp, tf + 0x180, 8);
+      fprintf(stderr, " rflags=%llx rsp=%llx\n", (unsigned long long)tfl, (unsigned long long)trsp);
+      uint64_t q[32];
+      int qn = dbg_lin_read(r, trsp, (uint8_t *)q, (int)sizeof(q)) / 8, shown = 0;
+      for (int k = 0; k < qn && shown < 8; k++) {
+        if ((q[k] >> 47) != 0x1FFFF || (q[k] >= sp - 0x20000 && q[k] < sp + 0x20000))
+          continue;
+        shown++;
+        int mm = dbg_lin_read(r, q[k] - 48, cb, 64);
+        fprintf(stderr, "    llamada [rsp+%x] %llx:", k * 8, (unsigned long long)q[k]);
+        for (int t = 0; t < mm; t++)
+          fprintf(stderr, t == 48 ? " |%02x" : " %02x", cb[t]);
+        fprintf(stderr, "\n");
+      }
+      break;
+    }
   }
   // Codigo alrededor de las direcciones del nucleo que hay en la pila (retornos,
   // la direccion de la excepcion en un CONTEXT...): con eso se reconoce la funcion.
@@ -927,6 +975,14 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
               (unsigned long long)(st.ext_exits - ps.ext_exits), (unsigned long long)(st.ept_maps - ps.ept_maps),
               100.0 * (double)(st.tsc_guest - ps.tsc_guest) / tall,
               100.0 * (trun - (double)(st.tsc_guest - ps.tsc_guest)) / tall, 100.0 * (tall - trun) / tall);
+    }
+    if (st.msr_unk != ps.msr_unk || st.msr_gp != ps.msr_gp) {
+      fprintf(stderr, "[traza] MSR sin emular: %llu (", (unsigned long long)st.msr_unk);
+      for (int k = 0; k < 8 && st.msr_unk_list[k]; k++)
+        fprintf(stderr, "%s%s%x", k ? " " : "", (st.msr_unk_list[k] >> 31) ? "w" : "r",
+                st.msr_unk_list[k] & 0x7FFFFFFFu);
+      fprintf(stderr, ") | con #GP: %llu (ultimo %s%x)\n", (unsigned long long)st.msr_gp,
+              (st.msr_gp_last >> 31) ? "w" : "r", st.msr_gp_last & 0x7FFFFFFFu);
     }
     if (st.bp_skipped != ps.bp_skipped) {
       // INT3 de anillo 0 que el kernel salto (Windows sin depurador): de donde

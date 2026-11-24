@@ -1221,8 +1221,18 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
     if (write) vm->pat = val; else out = vm->pat;
     break;
   case 0x1B:  // APIC_BASE: el VMM emula el LAPIC en 0xFEE00000 (BSP, activado)
+    if (write && (val & (1ULL << 10))) { // EXTD: sin x2APIC (CPUID.1:ECX[21]=0)
+      ok = false;
+      break;
+    }
     if (!write && (vm->vmflags & AVM_VMF_APIC))
       out = 0xFEE00900ULL;
+    break;
+  case 0x800 ... 0x8FF: // x2APIC: con el APIC en modo xAPIC el hardware da #GP.
+    // Devolver 0 aqui hacia creer a Windows que el x2APIC funcionaba: el HAL
+    // quedaba a medias (base 0x8000 = 0x800 << 4) y leia el IRR en la direccion
+    // 0x8210 con IF=0 (IRQL_NOT_LESS_OR_EQUAL 0xA en vm18/vm19).
+    ok = false;
     break;
   case 0x3A:  // FEATURE_CONTROL: bloqueado, sin VMX/SMX
     out = 1;
@@ -1264,6 +1274,16 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
   default:
     // Como KVM con ignore_msrs: lectura 0 y escritura ignorada. Un #GP en un
     // MSR que Windows lee sin proteger es una pantalla azul.
+    vm->st.msr_unk++;
+    for (int i = 0; i < 8; i++) {
+      uint32_t key = idx | (write ? 0x80000000u : 0);
+      if (vm->st.msr_unk_list[i] == key)
+        break;
+      if (!vm->st.msr_unk_list[i]) {
+        vm->st.msr_unk_list[i] = key;
+        break;
+      }
+    }
     if (vm->msr_logged < 32) {
       vm->msr_logged++;
       LOG_INFO("[VMX] MSR %x %s sin emular (%s)", idx, write ? "escrito" : "leido",
@@ -1728,10 +1748,13 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       continue;
     case XR_RDMSR:
     case XR_WRMSR:
-      if (emu_msr(vm, &g, reason == XR_WRMSR))
+      if (emu_msr(vm, &g, reason == XR_WRMSR)) {
         skip_insn(vm);
-      else
+      } else {
+        vm->st.msr_gp++;
+        vm->st.msr_gp_last = (uint32_t)g.rcx | (reason == XR_WRMSR ? 0x80000000u : 0);
         inject_gp(vm);
+      }
       continue;
     case XR_CR_ACCESS: {
       int cr_rc = emu_cr_access(vm, &g);

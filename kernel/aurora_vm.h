@@ -59,6 +59,11 @@ struct avm_stats {
   uint64_t tsc_leave; // al salir de la ventana (leer estado, VMCLEAR)
   uint64_t bp_skipped; // INT3 del huesped en anillo 0 saltados (sin depurador)
   uint64_t bp_rip;     // RIP del ultimo
+  uint64_t msr_unk;    // RDMSR/WRMSR de MSR sin emular (lectura 0 / escritura ignorada)
+  uint32_t msr_unk_list[8]; // los primeros distintos: indice | bit 31 = escritura
+  uint64_t msr_gp;     // RDMSR/WRMSR que dieron #GP
+  uint32_t msr_gp_last;
+  uint32_t pad0;
 };
 
 #define AVM_CAP_VMX (1u << 0)
