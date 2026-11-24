@@ -967,6 +967,13 @@ static int guest_reset(const char *why) {
     return -1;
   }
   fprintf(stderr, "aurora-vm: reinicio del huesped (%s)\n", why);
+  // Windows se reinicia solo tras una pantalla azul (sin depurador): el volcado
+  // busca en la pila el CONTEXT de KeBugCheckEx y dice el codigo.
+  static int dumps;
+  if (g_plat && dumps < 3) {
+    dumps++;
+    dump_regs("estado antes del reinicio");
+  }
   irq_withdraw();
   bios_load_copies();
   platform_reset_devices();

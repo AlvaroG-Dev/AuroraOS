@@ -65,6 +65,7 @@
 #define PROC_MOV_DR (1u << 23)
 #define PROC_CR8_LOAD (1u << 19)
 #define PROC_CR8_STORE (1u << 20)
+#define PROC_TPR_SHADOW (1u << 21)
 #define PROC_MONITOR (1u << 29)
 #define PROC_UNCOND_IO (1u << 24)
 #define PROC_SECONDARY (1u << 31)
@@ -97,7 +98,8 @@ enum {
   F_EXIT_MSR_STORE_CNT = 0x400E, F_EXIT_MSR_LOAD_CNT = 0x4010,
   F_ENTRY_CTLS = 0x4012, F_ENTRY_MSR_LOAD_CNT = 0x4014,
   F_ENTRY_INTR_INFO = 0x4016, F_ENTRY_ERRCODE = 0x4018,
-  F_ENTRY_INSTR_LEN = 0x401A, F_PROC2 = 0x401E,
+  F_ENTRY_INSTR_LEN = 0x401A, F_PROC2 = 0x401E, F_TPR_THRESHOLD = 0x401C,
+  F_VAPIC_ADDR = 0x2012,
   F_VM_INSTR_ERROR = 0x4400, F_EXIT_REASON = 0x4402, F_EXIT_INTR_INFO = 0x4404,
   F_IDTV_INFO = 0x4408, F_IDTV_ERR = 0x440A, F_EXIT_INSTR_LEN = 0x440C, F_EXIT_INSTR_INFO = 0x440E, F_GUEST_LINEAR = 0x640A,
   F_GUEST_ES_LIM = 0x4800, F_GUEST_CS_LIM = 0x4802, F_GUEST_SS_LIM = 0x4804,
@@ -134,7 +136,7 @@ enum {
   XR_WRMSR = 32, XR_INVALID_GUEST = 33, XR_MSR_LOAD_FAIL = 34,
   XR_EPT_VIOLATION = 48, XR_EPT_MISCONFIG = 49,
   XR_INIT = 3, XR_SIPI = 4, XR_TASK_SWITCH = 9, XR_INVLPG = 14, XR_RDPMC = 15,
-  XR_INVEPT = 50, XR_INVVPID = 53, XR_WBINVD = 54, XR_VMFUNC = 59,
+  XR_TPR_BELOW = 43, XR_INVEPT = 50, XR_INVVPID = 53, XR_WBINVD = 54, XR_VMFUNC = 59,
 };
 
 // ---------------------------------------------------------------------------
@@ -178,6 +180,7 @@ struct avm_vm {
   int32_t pending_irq; // -1 = ninguna; vector | AVM_IRQ_TPR
   uint32_t tpr;        // TPR del LAPIC (registro 0x80); CR8 = tpr >> 4
   uint32_t tpr_wait;   // clase bloqueada por el TPR en el VMM (0 = ninguna)
+  uint32_t tpr_thr;    // TPR_THRESHOLD escrito en el VMCS (TPR shadow)
   // Evento que se estaba entregando cuando hubo una salida (IDT-vectoring):
   // se vuelve a inyectar en la siguiente entrada o se perderia.
   bool reinj;
@@ -228,6 +231,8 @@ struct avm_vm {
   struct msr_ent *gmsr; // g_ngmsr: carga al entrar / guarda al salir
   struct msr_ent *hmsr; // g_ngmsr: carga al salir (valores del host)
   uint64_t fx_page_phys; // 2 x 512 B: fxsave host (0) y huesped (512)
+  uint64_t vapic_phys;   // pagina APIC virtual (TPR shadow); 0 = CR8 intercepta
+  volatile uint8_t *vapic;
   bool launched;
   volatile int busy;
   uint32_t procbased, procbased2, pinbased, exitctl, entryctl;
@@ -628,13 +633,22 @@ static void gdt_sidt(uint64_t *gbase, uint16_t *glim, uint64_t *ibase,
 static void vmcs_setup_static(struct avm_vm *vm) {
   vm->pinbased = adjust_ctl(PIN_EXT_INTR | PIN_NMI, g_vmx.true_ctls ? MSR_VMX_TRUE_PIN
                                                           : MSR_VMX_PINBASED);
-  // CR8 siempre intercepta: sin esto (y sin TPR shadow) MOV CR8 del huesped
-  // escribiria el TPR del APIC REAL del host.
-  vm->procbased = adjust_ctl(PROC_HLT | PROC_UNCOND_IO | PROC_SECONDARY |
-                                 PROC_MOV_DR | PROC_MWAIT | PROC_MONITOR |
-                                 PROC_CR8_LOAD | PROC_CR8_STORE,
-                             g_vmx.true_ctls ? MSR_VMX_TRUE_PROC
-                                             : MSR_VMX_PROCBASED);
+  // CR8: con TPR shadow, MOV CR8 lee/escribe el TPR de la pagina APIC virtual
+  // sin salir (Windows sube y baja el IRQL miles de veces por segundo y cada
+  // salida cuesta decenas de us con KVM anidado); solo sale al bajar por debajo
+  // del umbral (una interrupcion bloqueada que ya cabe). Sin TPR shadow, CR8
+  // intercepta siempre: si no, escribiria el TPR del APIC REAL del host.
+  uint32_t procmsr = g_vmx.true_ctls ? MSR_VMX_TRUE_PROC : MSR_VMX_PROCBASED;
+  uint32_t base = PROC_HLT | PROC_UNCOND_IO | PROC_SECONDARY | PROC_MOV_DR | PROC_MWAIT |
+                  PROC_MONITOR;
+  if (vm->vapic_phys && ctl_supported(PROC_TPR_SHADOW, procmsr)) {
+    vm->procbased = adjust_ctl(base | PROC_TPR_SHADOW, procmsr);
+    if (vm->procbased & (PROC_CR8_LOAD | PROC_CR8_STORE)) // obligatorios: no sirve
+      vm->procbased = adjust_ctl(base | PROC_CR8_LOAD | PROC_CR8_STORE, procmsr) &
+                      ~PROC_TPR_SHADOW;
+  } else {
+    vm->procbased = adjust_ctl(base | PROC_CR8_LOAD | PROC_CR8_STORE, procmsr);
+  }
   vm->procbased &= ~PROC_INTR_WINDOW;
   vm->procbased2 = adjust_ctl(PROC2_EPT | PROC2_UNRESTRICTED | PROC2_RDTSCP |
                                   PROC2_INVPCID,
@@ -651,6 +665,11 @@ static void vmcs_write_controls_and_host(struct avm_vm *vm) {
   vmwrite(F_PROC, vm->procbased);
   vmwrite(F_PROC2, vm->procbased2);
   vmwrite(F_EXIT_CTLS, vm->exitctl);
+  if (vm->procbased & PROC_TPR_SHADOW) {
+    vmwrite(F_VAPIC_ADDR, vm->vapic_phys);
+    vmwrite(F_TPR_THRESHOLD, 0);
+    vm->tpr_thr = 0;
+  }
   vmwrite(F_EXC_BITMAP, (1u << 3) | (vm->debug ? ((1u << 6) | (1u << 8) | (1u << 13) | (1u << 14)) : 0));
   vmwrite(F_PF_MASK, 0);
   vmwrite(F_PF_MATCH, 0);
@@ -1533,6 +1552,19 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
     }
     (void)need_intr_window;
     vmwrite(F_PROC, proc);
+    if (proc & PROC_TPR_SHADOW) {
+      uint32_t cur = (vm->tpr >> 4) & 0xF, thr = 0;
+      vm->vapic[0x80] = (uint8_t)(vm->tpr & 0xF0);
+      if (vm->pending_irq >= 0 && (vm->pending_irq & AVM_IRQ_TPR) &&
+          (((uint32_t)vm->pending_irq >> 4) & 0xF) <= cur)
+        thr = ((uint32_t)vm->pending_irq >> 4) & 0xF;
+      if (vm->tpr_wait && vm->tpr_wait <= cur && vm->tpr_wait > thr)
+        thr = vm->tpr_wait;
+      if (thr != vm->tpr_thr) {
+        vmwrite(F_TPR_THRESHOLD, thr);
+        vm->tpr_thr = thr;
+      }
+    }
 
     __asm__ volatile("mov %0, %%cr2" : : "r"(vm->regs.cr2) : "memory");
     uint64_t t_e0 = rdtsc_k();
@@ -1556,6 +1588,8 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       break;
     }
     vm->launched = true;
+    if (vm->procbased & PROC_TPR_SHADOW)
+      vm->tpr = vm->vapic[0x80] & 0xF0;
 
     uint32_t reason_full = (uint32_t)vmread(F_EXIT_REASON);
     uint32_t reason = reason_full & 0xFFFF;
@@ -1602,6 +1636,13 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
     }
     case XR_INTR_WINDOW:
       continue;
+    case XR_TPR_BELOW: // TPR shadow: el huesped bajo CR8 por debajo del umbral
+      if (vm->tpr_wait && vm->tpr_wait > (vm->tpr >> 4)) {
+        x->reason = AVM_EXIT_TPR; // el VMM tiene una bloqueada que ya cabe
+        ret = 1;
+        goto leave;
+      }
+      continue; // la pendiente del kernel se inyecta en la cabecera
     case XR_EXC_NMI: {
       uint32_t info = (uint32_t)vmread(F_EXIT_INTR_INFO);
       if (((info >> 8) & 7) == 2) {
@@ -2014,13 +2055,19 @@ static int avm_open(vfs_node_t *node, int flags) {
   if (!vm)
     return -ENOMEM;
   uint64_t vmcs = pmm_alloc_page(), msrp = pmm_alloc_page(),
-           fxp = pmm_alloc_page();
+           fxp = pmm_alloc_page(), vap = pmm_alloc_page();
   if (!vmcs || !msrp || !fxp) {
     if (vmcs) pmm_free_page(vmcs);
     if (msrp) pmm_free_page(msrp);
     if (fxp) pmm_free_page(fxp);
+    if (vap) pmm_free_page(vap);
     kfree(vm);
     return -ENOMEM;
+  }
+  if (vap) {
+    memset(phys_to_virt(vap), 0, PAGE_SIZE);
+    vm->vapic_phys = vap;
+    vm->vapic = (volatile uint8_t *)phys_to_virt(vap);
   }
   memset(phys_to_virt(vmcs), 0, PAGE_SIZE);
   memset(phys_to_virt(msrp), 0, PAGE_SIZE);
@@ -2044,6 +2091,7 @@ static int avm_open(vfs_node_t *node, int flags) {
   vm->ept_pml4 = ept_new_table(vm);
   if (!vm->ept_pml4) {
     pmm_free_page(vmcs); pmm_free_page(msrp); pmm_free_page(fxp);
+    if (vap) pmm_free_page(vap);
     kfree(vm);
     return -ENOMEM;
   }
@@ -2091,6 +2139,8 @@ static int avm_close(vfs_node_t *node) {
     pmm_free_page(vm->vmcs_phys);
   pmm_free_page(vm->msr_page_phys);
   pmm_free_page(vm->fx_page_phys);
+  if (vm->vapic_phys)
+    pmm_free_page(vm->vapic_phys);
   vm->magic = 0;
   kfree(vm);
   return 0;
