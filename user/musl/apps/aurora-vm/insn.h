@@ -19,6 +19,7 @@
 static int gmem_read(uint64_t gpa, void *dst, unsigned n);
 static int gmem_write(uint64_t gpa, const void *src, unsigned n);
 static int gpt_read(uint64_t gpa, void *dst, unsigned n);
+static void gpt_setbits(uint64_t gpa, uint64_t bits, unsigned n); // OR en una entrada (RAM)
 
 static const char *g_insn_err; // motivo del ultimo fallo (diagnostico)
 
@@ -35,7 +36,14 @@ static const char *g_insn_err; // motivo del ultimo fallo (diagnostico)
 #define RFL_ARITH (RFL_CF | RFL_PF | RFL_AF | RFL_ZF | RFL_SF | RFL_OF)
 
 // Lineal -> fisica con las tablas del huesped. 0 o -1 (no presente).
+// write: ademas marca Accedida en cada nivel y Sucia en la entrada final, como
+// haria la CPU. Sin la marca de sucia, Windows puede tirar una pagina que el VMM
+// escribio (por una instruccion emulada o por INS) creyendola sin cambios.
+static int gva_walk(const struct avm_regs *r, uint64_t gva, uint64_t *gpa, int write);
 static int gva_to_gpa(const struct avm_regs *r, uint64_t gva, uint64_t *gpa) {
+  return gva_walk(r, gva, gpa, 0);
+}
+static int gva_walk(const struct avm_regs *r, uint64_t gva, uint64_t *gpa, int write) {
   if (!(r->cr0 & (1ULL << 31))) { // sin paginacion
     *gpa = (r->efer & (1ULL << 10)) ? gva : (gva & 0xFFFFFFFFULL);
     return 0;
@@ -47,6 +55,9 @@ static int gva_to_gpa(const struct avm_regs *r, uint64_t gva, uint64_t *gpa) {
       uint64_t idx = (gva >> (12 + 9 * lvl)) & 0x1FF;
       if (gpt_read(t + idx * 8, &e, 8) < 0 || !(e & 1))
         return -1;
+      int leaf = lvl == 0 || ((lvl == 1 || lvl == 2) && (e & 0x80));
+      if (write)
+        gpt_setbits(t + idx * 8, leaf ? 0x60 : 0x20, 8);
       if ((lvl == 1 || lvl == 2) && (e & 0x80)) { // 2 MiB / 1 GiB
         uint64_t sz = 1ULL << (12 + 9 * lvl);
         *gpa = ((e & AMASK) & ~(sz - 1)) | (gva & (sz - 1));
@@ -68,6 +79,8 @@ static int gva_to_gpa(const struct avm_regs *r, uint64_t gva, uint64_t *gpa) {
     uint64_t t = e & AMASK;
     if (gpt_read(t + ((gva >> 21) & 0x1FF) * 8, &e, 8) < 0 || !(e & 1))
       return -1;
+    if (write)
+      gpt_setbits(t + ((gva >> 21) & 0x1FF) * 8, (e & 0x80) ? 0x60 : 0x20, 8);
     if (e & 0x80) {
       *gpa = ((e & AMASK) & ~0x1FFFFFULL) | (gva & 0x1FFFFF);
       return 0;
@@ -75,19 +88,26 @@ static int gva_to_gpa(const struct avm_regs *r, uint64_t gva, uint64_t *gpa) {
     t = e & AMASK;
     if (gpt_read(t + ((gva >> 12) & 0x1FF) * 8, &e, 8) < 0 || !(e & 1))
       return -1;
+    if (write)
+      gpt_setbits(t + ((gva >> 12) & 0x1FF) * 8, 0x60, 8);
     *gpa = (e & AMASK) | (gva & 0xFFF);
     return 0;
   }
   uint32_t d;
   if (gpt_read((r->cr3 & 0xFFFFF000ULL) + ((gva >> 22) & 0x3FF) * 4, &d, 4) < 0 || !(d & 1))
     return -1;
-  if ((d & 0x80) && (r->cr4 & 0x10)) { // 4 MiB (PSE; PSE-36 en los bits 13-20)
+  int big = (d & 0x80) && (r->cr4 & 0x10);
+  if (write)
+    gpt_setbits((r->cr3 & 0xFFFFF000ULL) + ((gva >> 22) & 0x3FF) * 4, big ? 0x60 : 0x20, 4);
+  if (big) { // 4 MiB (PSE; PSE-36 en los bits 13-20)
     *gpa = ((uint64_t)(d & 0xFFC00000u)) | ((uint64_t)((d >> 13) & 0xFF) << 32) | (gva & 0x3FFFFF);
     return 0;
   }
   uint32_t t;
   if (gpt_read((d & 0xFFFFF000u) + ((gva >> 12) & 0x3FF) * 4, &t, 4) < 0 || !(t & 1))
     return -1;
+  if (write)
+    gpt_setbits((d & 0xFFFFF000u) + ((gva >> 12) & 0x3FF) * 4, 0x60, 4);
   *gpa = (t & 0xFFFFF000u) | (gva & 0xFFF);
   return 0;
 }
@@ -114,7 +134,7 @@ static int lin_write(const struct avm_regs *r, uint64_t lin, const void *src, un
   const uint8_t *s = (const uint8_t *)src;
   while (n) {
     uint64_t gpa;
-    if (gva_to_gpa(r, lin, &gpa) < 0)
+    if (gva_walk(r, lin, &gpa, 1) < 0)
       return -1;
     unsigned chunk = 4096 - (unsigned)(lin & 0xFFF);
     if (chunk > n)

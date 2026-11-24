@@ -121,6 +121,7 @@ static void clock_init(void) {
 static void irq_set(int irq, int level);
 static int irq_edge_pending(int irq);
 static uint8_t *dma_ptr(uint64_t gpa, uint64_t len);
+static void ept_check(const char *donde);
 
 #include "pic.h"
 #include "pit.h"
@@ -266,6 +267,26 @@ static int gpt_read(uint64_t gpa, void *dst, unsigned n) {
     return -1;
   memcpy(dst, p, n);
   return 0;
+}
+static void gpt_setbits(uint64_t gpa, uint64_t bits, unsigned n) {
+  uint8_t *p = dma_ptr(gpa, n);
+  if (!p)
+    return;
+  if (n == 8) {
+    uint64_t v;
+    memcpy(&v, p, 8);
+    if ((v & bits) != bits) {
+      v |= bits;
+      memcpy(p, &v, 8);
+    }
+  } else {
+    uint32_t v;
+    memcpy(&v, p, 4);
+    if ((v & (uint32_t)bits) != (uint32_t)bits) {
+      v |= (uint32_t)bits;
+      memcpy(p, &v, 4);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +474,7 @@ static int string_io(const struct avm_exit *x) {
       bytes -= bytes % size;
       uint64_t gpa;
       uint8_t *hp;
-      if (!bytes || gva_to_gpa(&r, lin, &gpa) < 0 || !(hp = dma_ptr(gpa, bytes)))
+      if (!bytes || gva_walk(&r, lin, &gpa, 1) < 0 || !(hp = dma_ptr(gpa, bytes)))
         break;
       unsigned got = ide_data_read_bulk(x->io.port, hp, (unsigned)bytes, (int)size);
       done += got / size;
@@ -743,6 +764,7 @@ static void dump_guest_mem(const struct avm_regs *r) {
               (unsigned long long)r9v, (unsigned long long)rp);
     if (!(rc && rc < 0x400))
       continue;
+    ept_check("pantalla azul");
     if (rc == 0xEF) { // CRITICAL_PROCESS_DIED: nombre del proceso (EPROCESS+0x5A8 en 19041)
       char nm[16] = {0};
       if (dbg_lin_read(r, rd + 0x5A8, (uint8_t *)nm, 15) == 15)
@@ -914,6 +936,28 @@ static uint64_t g_reset_t0;
 // AURORA_VM_TRAZA=1: cada 2 s una linea con donde esta el huesped y que salidas
 // produjo (para ver si un cuelgue es un bucle de E/S, un HLT esperando una IRQ...).
 static int g_traza;
+// Auditoria del EPT en el kernel (AVM_EPT_CHECK). Solo dice algo si hay fallos
+// (o la primera vez, para saber que se hizo).
+static void ept_check(const char *donde) {
+  static int first = 1, bad_dumps;
+  struct avm_ept_check c;
+  if (ioctl(g_vm, AVM_EPT_CHECK, &c) < 0) {
+    if (first)
+      fprintf(stderr, "[ept] el kernel no tiene AVM_EPT_CHECK (%s)\n", strerror(errno));
+    first = 0;
+    return;
+  }
+  if (first || c.bad || c.orphan) {
+    fprintf(stderr, "[ept] %s: %llu paginas mapeadas, %llu mal mapeadas, %llu fuera de slot\n", donde,
+            (unsigned long long)c.mapped, (unsigned long long)c.bad, (unsigned long long)c.orphan);
+    if ((c.bad || c.orphan) && bad_dumps++ < 5)
+      for (int k = 0; k < 4 && (uint64_t)k < c.bad + c.orphan; k++)
+        fprintf(stderr, "[ept]   gpa %llx -> entrada %llx (deberia ser %llx)\n", (unsigned long long)c.gpa[k],
+                (unsigned long long)c.have[k], (unsigned long long)c.want[k]);
+  }
+  first = 0;
+}
+
 static void traza(uint64_t tnow, const struct avm_exit *x) {
   static unsigned long nr[16], nport[8];
   static uint16_t port[8];
@@ -947,8 +991,17 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
           nr[AVM_EXIT_HLT], nr[AVM_EXIT_SIGNAL], nr[AVM_EXIT_TPR], nr[AVM_EXIT_INTR_WINDOW]);
   for (int i = 0; i < 8 && nport[i]; i++)
     fprintf(stderr, " %x:%lu", port[i], nport[i]);
-  fprintf(stderr, " | atajos rtc=%llu eoi=%llu\n", (unsigned long long)g_fast_rtc_total,
+  fprintf(stderr, " | atajos rtc=%llu eoi=%llu", (unsigned long long)g_fast_rtc_total,
           (unsigned long long)g_fast_eoi_total);
+  if (g_dchk)
+    fprintf(stderr, " | disco: %llu sectores comprobados, %llu fallos", (unsigned long long)g_dchk_sect,
+            (unsigned long long)g_dchk_bad);
+  fputc('\n', stderr);
+  // Cada 10 s: el EPT entero contra los memfd (una pagina mal mapeada corromperia
+  // la RAM del huesped sin dejar rastro).
+  static unsigned ept_n;
+  if (ept_n++ % 5 == 0)
+    ept_check("traza");
   // Huesped muerto en "jmp $" con IF=0 (Windows tras KeBugCheckEx, sin pantalla
   // azul): volcado una sola vez, sin esperar a que se cierre la ventana.
   static int parado_dump;
@@ -1498,6 +1551,7 @@ static int run_bios(const struct bios_opts *o) {
   if (o->cd && ide_attach(1, 0, IDE_CD, o->cd) < 0)
     return 1;
   ide_init();
+  dchk_init();
   g_boot_cd = o->boot_cd;
 
   g_acpi_on = g_apic_on = o->acpi;
@@ -1693,6 +1747,7 @@ int main(int argc, char **argv) {
   }
   g_capture = getenv("AURORA_VM_CAPTURA");
   g_traza = getenv("AURORA_VM_TRAZA") != NULL;
+  g_dchk_on = g_traza || getenv("AURORA_VM_DISCO_CHECK") != NULL;
   clock_init();
   if (!strcmp(argv[1], "--bios")) {
     struct bios_opts o = {.bios = getenv("AURORA_VM_BIOS") ? getenv("AURORA_VM_BIOS") : DEFAULT_BIOS,

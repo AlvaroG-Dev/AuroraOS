@@ -66,6 +66,17 @@ struct avm_stats {
   uint32_t pad0;
 };
 
+// Auditoria del EPT (struct avm_ept_check *): recorre todas las paginas mapeadas
+// y comprueba que cada una apunta a la pagina del memfd de su slot (una pagina
+// mapeada a la fisica equivocada corromperia la RAM del huesped en silencio).
+#define AVM_EPT_CHECK (AVM_IOC_BASE + 16)
+struct avm_ept_check {
+  uint64_t mapped; // paginas presentes en el EPT
+  uint64_t bad;    // apuntan a otra fisica que la del memfd
+  uint64_t orphan; // presentes pero fuera de todo slot
+  uint64_t gpa[4], have[4], want[4]; // las primeras malas (want = 0: huerfana)
+};
+
 #define AVM_CAP_VMX (1u << 0)
 #define AVM_CAP_EPT (1u << 1)
 #define AVM_CAP_UNRESTRICTED (1u << 2) // modo real / paginacion sin sombras

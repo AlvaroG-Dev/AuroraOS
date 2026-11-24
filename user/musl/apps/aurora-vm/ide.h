@@ -90,6 +90,95 @@ struct ide_bus {
   int cur_prd_last, dma_cb;
 };
 static struct ide_bus g_ide[2];
+
+// ---------------------------------------------------------------------------
+// Comprobacion de integridad del disco (AURORA_VM_TRAZA o AURORA_VM_DISCO_CHECK):
+// se guarda un resumen de cada sector de 512 bytes escrito o leido (tabla de
+// acceso directo de 4M entradas, 32 MiB; las viejas se pisan) y cada lectura se
+// compara con lo ultimo visto de ese sector. Si el sistema de ficheros del
+// anfitrion devolviera algo distinto de lo que se escribio (o la ISO, que es de
+// solo lectura, cambiara entre dos lecturas), aqui se ve.
+// ---------------------------------------------------------------------------
+#define DCHK_BITS 22
+static uint64_t *g_dchk;
+static int g_dchk_on;
+static uint64_t g_dchk_bad, g_dchk_sect;
+static uint8_t g_dchk_stage[512];
+static unsigned g_dchk_fill;
+static uint64_t g_dchk_cur; // clave del sector que se esta juntando
+
+static uint32_t dchk_hash(const uint8_t *p) {
+  uint64_t h = 0x9E3779B97F4A7C15ULL;
+  for (int i = 0; i < 512; i += 8) {
+    uint64_t w;
+    memcpy(&w, p + i, 8);
+    h = (h ^ w) * 0xFF51AFD7ED558CCDULL;
+    h ^= h >> 29;
+  }
+  return (uint32_t)(h >> 40) & 0xFFFFFF;
+}
+
+static int dchk_dev(const struct ide_if *s) { return (int)(s->bus - g_ide) * 2 + s->unit; }
+
+static void dchk_sector(uint64_t key, const uint8_t *p, int write) {
+  g_dchk_sect++;
+  uint32_t h = dchk_hash(p);
+  uint64_t idx = (key * 0x9E3779B97F4A7C15ULL) >> (64 - DCHK_BITS);
+  uint64_t e = g_dchk[idx], tag = (key + 1) << 24;
+  if (!write && (e & ~0xFFFFFFULL) == tag && (uint32_t)(e & 0xFFFFFF) != h) {
+    g_dchk_bad++;
+    if (g_dchk_bad <= 20) {
+      int zero = 1;
+      for (int i = 0; i < 512 && zero; i++)
+        zero = p[i] == 0;
+      fprintf(stderr, "[disco] FALLO DE INTEGRIDAD: unidad %d sector %llu: lo leido no es lo "
+                      "ultimo escrito/leido (resumen %06x, esperado %06x)%s\n",
+              (int)(key >> 39), (unsigned long long)(key & ((1ULL << 39) - 1)), h,
+              (unsigned)(e & 0xFFFFFF), zero ? " [leido a ceros]" : "");
+    }
+  }
+  g_dchk[idx] = tag | h;
+}
+
+// Pasa len bytes contiguos del disco (desde el byte off, multiplo de 512).
+static void dchk_begin(const struct ide_if *s, uint64_t off) {
+  g_dchk_cur = ((uint64_t)dchk_dev(s) << 39) | (off >> 9);
+  g_dchk_fill = 0;
+}
+static void dchk_feed(const uint8_t *p, uint64_t len, int write) {
+  while (len) {
+    if (!g_dchk_fill && len >= 512) {
+      dchk_sector(g_dchk_cur++, p, write);
+      p += 512;
+      len -= 512;
+      continue;
+    }
+    unsigned c = 512 - g_dchk_fill;
+    if (c > len)
+      c = (unsigned)len;
+    memcpy(g_dchk_stage + g_dchk_fill, p, c);
+    g_dchk_fill += c;
+    p += c;
+    len -= c;
+    if (g_dchk_fill == 512) {
+      dchk_sector(g_dchk_cur++, g_dchk_stage, write);
+      g_dchk_fill = 0;
+    }
+  }
+}
+static void dchk_buf(const struct ide_if *s, uint64_t off, const uint8_t *p, uint64_t len, int write) {
+  if (!g_dchk)
+    return;
+  dchk_begin(s, off);
+  dchk_feed(p, len, write);
+}
+static void dchk_init(void) {
+  if (!g_dchk_on || g_dchk)
+    return;
+  g_dchk = calloc((size_t)1 << DCHK_BITS, sizeof(uint64_t));
+  if (!g_dchk)
+    fprintf(stderr, "aurora-vm: sin memoria para comprobar el disco\n");
+}
 static int g_ide_on;
 
 static void put_be16(uint8_t *p, unsigned v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
@@ -329,6 +418,7 @@ static void ide_sector_read(struct ide_if *s) {
     ide_rw_error(s);
     return;
   }
+  dchk_buf(s, (uint64_t)sn * 512, s->io_buffer, (uint64_t)n * 512, 0);
   // ide_sector_read_cb
   ide_set_sector(s, sn + n);
   s->nsector -= n;
@@ -347,6 +437,7 @@ static void ide_sector_write(struct ide_if *s) {
     ide_rw_error(s);
     return;
   }
+  dchk_buf(s, (uint64_t)sn * 512, s->io_buffer, (uint64_t)n * 512, 1);
   // ide_sector_write_cb
   s->status &= ~BUSY_STAT;
   s->nsector -= n;
@@ -475,6 +566,7 @@ static void ide_dma_error(struct ide_if *s) {
 
 // Transfiere la lista de segmentos entre el disco y la RAM del huesped.
 static int ide_sg_io(struct ide_if *s, uint64_t off, int write) {
+  uint64_t off0 = off;
   for (int i = 0; i < g_sg_n; i++) {
     uint8_t *g = dma_ptr(g_sg[i].addr, g_sg[i].len);
     if (!g)
@@ -483,6 +575,11 @@ static int ide_sg_io(struct ide_if *s, uint64_t off, int write) {
     if (r != (ssize_t)g_sg[i].len)
       return -1;
     off += g_sg[i].len;
+  }
+  if (g_dchk) {
+    dchk_begin(s, off0);
+    for (int i = 0; i < g_sg_n; i++)
+      dchk_feed(dma_ptr(g_sg[i].addr, g_sg[i].len), g_sg[i].len, write);
   }
   return 0;
 }
@@ -613,6 +710,7 @@ static int cd_read_sector(struct ide_if *s) {
     return -1;
   if (pread(s->fd, dst, 2048, (off_t)s->lba * 2048) != 2048)
     return -1;
+  dchk_buf(s, (uint64_t)s->lba * 2048, dst, 2048, 0);
   if (s->cd_sector_size == 2352)
     cd_data_to_raw(s->io_buffer, s->lba);
   s->lba++;
@@ -767,6 +865,7 @@ static void ide_atapi_cmd_read_dma_cb(struct ide_if *s) {
       ide_set_inactive(s, 0);
       return;
     }
+    dchk_buf(s, (uint64_t)s->lba * 2048, s->io_buffer + off, (uint64_t)n * 2048, 0);
   }
 }
 

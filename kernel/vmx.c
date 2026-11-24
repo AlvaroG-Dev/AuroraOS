@@ -541,6 +541,58 @@ static int ept_fault(struct avm_vm *vm, uint64_t gpa) {
   return 0;
 }
 
+// Auditoria del EPT (AVM_EPT_CHECK). Solo lectura; el EPT no cambia mientras
+// tanto (la VM no corre: vm->busy lo comprueba el ioctl).
+static void ept_audit(struct avm_vm *vm, struct avm_ept_check *c) {
+  memset(c, 0, sizeof(*c));
+  if (!vm->ept_pml4)
+    return;
+  uint64_t *l4 = (uint64_t *)phys_to_virt(vm->ept_pml4);
+  for (unsigned i = 0; i < 512; i++) {
+    if (!(l4[i] & EPT_RWX))
+      continue;
+    uint64_t *l3 = (uint64_t *)phys_to_virt(l4[i] & PTE_FRAME);
+    for (unsigned j = 0; j < 512; j++) {
+      if (!(l3[j] & EPT_RWX))
+        continue;
+      uint64_t *l2 = (uint64_t *)phys_to_virt(l3[j] & PTE_FRAME);
+      for (unsigned k = 0; k < 512; k++) {
+        if (!(l2[k] & EPT_RWX))
+          continue;
+        uint64_t *pt = (uint64_t *)phys_to_virt(l2[k] & PTE_FRAME);
+        for (unsigned l = 0; l < 512; l++) {
+          uint64_t e = pt[l];
+          if (!(e & EPT_RWX))
+            continue;
+          uint64_t gpa = ((uint64_t)i << 39) | ((uint64_t)j << 30) | ((uint64_t)k << 21) |
+                         ((uint64_t)l << 12);
+          c->mapped++;
+          struct slot *s = find_slot(vm, gpa);
+          uint64_t want = 0;
+          bool bad;
+          if (!s) {
+            c->orphan++;
+            bad = true;
+          } else {
+            int rc = s->node->ops->get_page(s->node, (s->offset + (gpa - s->gpa)) / PAGE_SIZE, &want);
+            bad = rc < 0 || (want & PTE_FRAME) != (e & PTE_FRAME);
+            if (bad)
+              c->bad++;
+          }
+          if (bad) {
+            uint64_t nb = c->bad + c->orphan - 1;
+            if (nb < 4) {
+              c->gpa[nb] = gpa;
+              c->have[nb] = e;
+              c->want[nb] = want;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 static void ept_free_all(struct avm_vm *vm) {
   for (size_t i = 0; i < vm->ept_ntables; i++)
     pmm_free_page(vm->ept_tables[i]);
@@ -2326,6 +2378,15 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   case AVM_SET_FLAGS:
     vm->vmflags = (uint32_t)arg & AVM_VMF_ALL;
     return 0;
+  case AVM_EPT_CHECK: {
+    if (vm->busy)
+      return -EBUSY;
+    struct avm_ept_check c;
+    ept_audit(vm, &c);
+    if (!access_ok((void *)arg, sizeof(c)))
+      return -EFAULT;
+    return copy_to_user((void *)arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
+  }
   case AVM_GET_STATS:
     if (!access_ok((void *)arg, sizeof(vm->st)))
       return -EFAULT;
