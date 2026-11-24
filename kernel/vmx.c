@@ -210,6 +210,7 @@ struct avm_vm {
   uint32_t vmflags; // AVM_VMF_*
   uint64_t last_exc_rip, last_exc_qual;
   uint32_t last_exc_vec, exc_repeat;
+  struct avm_fast fast; // atajos de dispositivos (ver aurora_vm.h)
   // IN pendiente de completar en el siguiente AVM_RUN
   bool pending_in;
   uint8_t pending_in_size;
@@ -954,6 +955,120 @@ static uint64_t *gpr(struct gregs *g, struct avm_vm *vm, int n) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Atajos de dispositivos en el kernel (struct avm_fast)
+// ---------------------------------------------------------------------------
+static int guest_phys_read(struct avm_vm *vm, uint64_t gpa, void *buf, size_t len);
+// ---------------------------------------------------------------------------
+// RTC: OUT 0x70 (indice) e IN 0x71 del registro C, el que la interrupcion de
+// reloj de Windows lee en cada tick. PF avanza sobre el TSC con la misma rejilla
+// que el VMM (rtc_next_tsc/rtc_period_tsc); los periodos sin leer se funden en
+// uno como en el chip. true = hecho (el llamador salta la instruccion).
+static bool fast_rtc_io(struct avm_vm *vm, struct gregs *g, uint16_t port, uint32_t size,
+                        bool in) {
+  struct avm_fast *f = &vm->fast;
+  if (!(f->flags & AVM_FAST_RTC) || size != 1)
+    return false;
+  if (port == 0x70 && !in) {
+    f->rtc_index = (uint8_t)g->rax;
+    f->rtc_dirty |= 1;
+    return true;
+  }
+  if (port == 0x71 && in && (f->rtc_index & 0x7F) == 0x0C) {
+    if (f->rtc_period_tsc) {
+      uint64_t now = rdtsc_k();
+      if (now >= f->rtc_next_tsc) {
+        uint64_t n = (now - f->rtc_next_tsc) / f->rtc_period_tsc + 1;
+        f->rtc_next_tsc += n * f->rtc_period_tsc;
+        f->rtc_c |= 0x40;
+        if (f->rtc_pie)
+          f->rtc_c |= 0x80;
+      }
+    }
+    g->rax = (g->rax & ~0xFFULL) | f->rtc_c;
+    f->rtc_c = 0;
+    f->rtc_dirty |= 2;
+    return true;
+  }
+  return false;
+}
+
+// Lineal -> fisica del huesped en modo largo (4 niveles). -1 si no se puede.
+static int guest_lin_to_phys(struct avm_vm *vm, uint64_t lin, uint64_t *gpa) {
+  if (vmread(F_GUEST_CR4) & (1ULL << 12)) // LA57: no
+    return -1;
+  uint64_t t = vmread(F_GUEST_CR3) & 0x000FFFFFFFFFF000ULL, e;
+  for (int lvl = 3; lvl >= 0; lvl--) {
+    uint64_t idx = (lin >> (12 + 9 * lvl)) & 0x1FF;
+    if (guest_phys_read(vm, t + idx * 8, &e, 8) < 0 || !(e & 1))
+      return -1;
+    if ((lvl == 1 || lvl == 2) && (e & 0x80)) {
+      uint64_t sz = 1ULL << (12 + 9 * lvl);
+      *gpa = ((e & 0x000FFFFFFFFFF000ULL) & ~(sz - 1)) | (lin & (sz - 1));
+      return 0;
+    }
+    t = e & 0x000FFFFFFFFFF000ULL;
+  }
+  *gpa = t | (lin & 0xFFF);
+  return 0;
+}
+
+// EOI del LAPIC (escritura en 0xFEE000B0): se cuenta y el VMM lo aplica en la
+// siguiente vuelta (antes de elegir la proxima interrupcion). Solo en modo largo
+// y con MOV r/m32, r32 (89) o MOV r/m32, imm32 (C7 /0), que es como lo hacen
+// Windows y Linux; cualquier otra cosa sigue yendo al VMM.
+static bool fast_eoi(struct avm_vm *vm, uint64_t gpa) {
+  if (!(vm->fast.flags & AVM_FAST_EOI) || gpa != 0xFEE000B0ULL)
+    return false;
+  if (!(vmread(F_GUEST_EFER) & (1ULL << 10)) || !(vmread(F_GUEST_CS_AR) & (1u << 13)))
+    return false;
+  uint64_t rip = vmread(F_GUEST_RIP);
+  uint8_t b[15] = {0};
+  int avail = 0;
+  while (avail < 15) { // hasta 15 bytes, como mucho dos paginas
+    uint64_t lin = rip + (uint64_t)avail, pa;
+    int n = (int)(0x1000 - (lin & 0xFFF));
+    if (n > 15 - avail)
+      n = 15 - avail;
+    if (guest_lin_to_phys(vm, lin, &pa) < 0 || guest_phys_read(vm, pa, &b[avail], (size_t)n) < 0)
+      break;
+    avail += n;
+  }
+  if (!avail)
+    return false;
+  int k = 0;
+  if (b[k] == 0x3E || b[k] == 0x2E) // DS/CS (inofensivos)
+    k++;
+  if ((b[k] & 0xF0) == 0x40) {
+    if (b[k] & 8) // REX.W: escritura de 64 bits, no
+      return false;
+    k++;
+  }
+  uint8_t op = b[k++];
+  if (op != 0x89 && op != 0xC7)
+    return false;
+  uint8_t modrm = b[k++];
+  unsigned mod = modrm >> 6, reg = (modrm >> 3) & 7, rm = modrm & 7;
+  if (mod == 3 || (op == 0xC7 && reg != 0))
+    return false;
+  if (rm == 4) {
+    uint8_t sib = b[k++];
+    if (mod == 0 && (sib & 7) == 5)
+      k += 4;
+  } else if (mod == 0 && rm == 5) {
+    k += 4; // relativo a RIP
+  }
+  k += mod == 1 ? 1 : mod == 2 ? 4 : 0;
+  if (op == 0xC7)
+    k += 4;
+  if (k > avail)
+    return false;
+  vm->regs.rip = rip + (uint64_t)k;
+  vmwrite(F_GUEST_RIP, vm->regs.rip);
+  vmwrite(F_GUEST_INTERRUPTIBILITY, vmread(F_GUEST_INTERRUPTIBILITY) & ~3ULL);
+  return true;
+}
+
 static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
   uint32_t leaf = (uint32_t)g->rax, sub = (uint32_t)g->rcx;
   uint32_t a, b, c, d;
@@ -1597,6 +1712,10 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
         ret = 1;
         goto leave;
       }
+      if (((qual >> 1) & 1) && fast_eoi(vm, gpa)) {
+        vm->fast.eoi_count++;
+        continue;
+      }
       x->reason = AVM_EXIT_MMIO; // F1: sin decodificar la instruccion
       x->mmio.gpa = gpa;
       x->mmio.size = 0;
@@ -1654,6 +1773,10 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
         x->io.linear = lm64 ? lin : (lin & 0xFFFFFFFFULL);
         ret = 1;
         goto leave;
+      }
+      if (fast_rtc_io(vm, &g, (uint16_t)(q >> 16), size, in)) {
+        skip_insn(vm);
+        continue;
       }
       x->reason = AVM_EXIT_IO;
       x->io.port = (uint16_t)(q >> 16);
@@ -1797,20 +1920,25 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
   uint64_t last_pp = tick_count;
   vm->st.runs++;
 
-  if (vm->pending_in) { // el VMM rellena io.data del IN anterior
+  {
     struct avm_exit prev;
     if (copy_from_user(&prev, (void *)uarg, sizeof(prev)) < 0) {
       rc = -EFAULT;
       goto out;
     }
-    uint32_t mask = vm->pending_in_size == 4 ? 0xFFFFFFFFu
-                                             : (1u << (8 * vm->pending_in_size)) - 1;
-    if (vm->pending_in_size == 4)
-      vm->regs.rax = prev.io.data; // IN de 32 bits: extiende a cero
-    else
-      vm->regs.rax = (vm->regs.rax & ~(uint64_t)mask) | (prev.io.data & mask);
-    vm->regs.rip += vm->pending_in_len;
-    vm->pending_in = false;
+    vm->fast = prev.fast;
+    vm->fast.eoi_count = 0;
+    vm->fast.rtc_dirty = 0;
+    if (vm->pending_in) { // el VMM rellena io.data del IN anterior
+      uint32_t mask = vm->pending_in_size == 4 ? 0xFFFFFFFFu
+                                               : (1u << (8 * vm->pending_in_size)) - 1;
+      if (vm->pending_in_size == 4)
+        vm->regs.rax = prev.io.data; // IN de 32 bits: extiende a cero
+      else
+        vm->regs.rax = (vm->regs.rax & ~(uint64_t)mask) | (prev.io.data & mask);
+      vm->regs.rip += vm->pending_in_len;
+      vm->pending_in = false;
+    }
   }
 
   for (;;) {
@@ -1838,6 +1966,7 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
   }
   x.irq_pending = vm->pending_irq;
   x.tpr = vm->tpr;
+  x.fast = vm->fast;
   if (copy_to_user((void *)uarg, &x, sizeof(x)) < 0)
     rc = -EFAULT;
 out:

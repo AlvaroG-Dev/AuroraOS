@@ -69,6 +69,8 @@ static uint64_t coarse_ns(void) {
 // calibrado al arrancar contra dos cambios de tick (AURORA_VM_RELOJ_TICK=1 lo
 // desactiva).
 static uint64_t g_clk_tsc0, g_clk_ns0, g_clk_mult, g_clk_last; // mult = ns por ciclo << 32
+static uint64_t g_clk_hz;
+static uint64_t g_fast_eoi_total, g_fast_rtc_total; // atajos del kernel (traza)
 static inline uint64_t rdtsc_u(void) {
   uint32_t lo, hi;
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -113,6 +115,7 @@ static void clock_init(void) {
   g_clk_ns0 = n1;
   g_clk_mult = (uint64_t)(((__uint128_t)1000000000ULL << 32) / hz);
   g_clk_last = n1;
+  g_clk_hz = hz;
 }
 
 static void irq_set(int irq, int level);
@@ -891,7 +894,8 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
           nr[AVM_EXIT_HLT], nr[AVM_EXIT_SIGNAL], nr[AVM_EXIT_TPR], nr[AVM_EXIT_INTR_WINDOW]);
   for (int i = 0; i < 8 && nport[i]; i++)
     fprintf(stderr, " %x:%lu", port[i], nport[i]);
-  fprintf(stderr, "\n");
+  fprintf(stderr, " | atajos rtc=%llu eoi=%llu\n", (unsigned long long)g_fast_rtc_total,
+          (unsigned long long)g_fast_eoi_total);
   // Huesped muerto en "jmp $" con IF=0 (Windows tras KeBugCheckEx, sin pantalla
   // azul): volcado una sola vez, sin esperar a que se cierre la ventana.
   static int parado_dump;
@@ -979,6 +983,67 @@ static int guest_reset(const char *why) {
 // ---------------------------------------------------------------------------
 // Bucle principal
 // ---------------------------------------------------------------------------
+// Atajos en el kernel (struct avm_fast): el reloj de Windows (IRQ8 del RTC a
+// 1024 Hz) lee el registro C y manda EOI en cada tick; en KVM anidado cada
+// vuelta al VMM cuesta ~170 us, asi que eso se resuelve dentro de AVM_RUN y aqui
+// solo se sincroniza el estado antes y despues. Con el backend de pruebas
+// (Unicorn) los campos vuelven tal cual y no cambia nada.
+static uint64_t ns_to_tsc(uint64_t ns) {
+  if (ns <= g_clk_ns0)
+    return g_clk_tsc0;
+  return g_clk_tsc0 + (uint64_t)((__uint128_t)(ns - g_clk_ns0) * g_clk_hz / 1000000000ULL);
+}
+static uint64_t tsc_to_ns(uint64_t t) {
+  if (t <= g_clk_tsc0)
+    return g_clk_ns0;
+  return g_clk_ns0 + (uint64_t)(((__uint128_t)(t - g_clk_tsc0) * g_clk_mult) >> 32);
+}
+static int g_fast_off = -1;
+static void fast_before_run(struct avm_exit *x) {
+  if (g_fast_off < 0) {
+    const char *e = getenv("AURORA_VM_SIN_ATAJOS");
+    g_fast_off = e && *e == '1';
+  }
+  struct avm_fast *f = &x->fast;
+  memset(f, 0, sizeof(*f));
+  if (g_fast_off)
+    return;
+  if (g_plat && g_clk_mult && g_clk_hz) {
+    f->flags |= AVM_FAST_RTC;
+    f->rtc_index = g_rtc.index;
+    f->rtc_c = g_rtc.cmos[REG_C];
+    f->rtc_pie = (g_rtc.cmos[REG_B] & 0x40) != 0;
+    if (g_rtc.period) {
+      f->rtc_period_tsc = ns_to_tsc(g_clk_ns0 + rtc_ticks_to_ns(g_rtc.period)) - g_clk_tsc0;
+      if (!f->rtc_period_tsc)
+        f->rtc_period_tsc = 1;
+      f->rtc_next_tsc = ns_to_tsc(g_rtc.next_periodic);
+    }
+  }
+  if (g_apic_on)
+    f->flags |= AVM_FAST_EOI;
+}
+static void fast_after_exit(struct avm_exit *x) {
+  struct avm_fast *f = &x->fast;
+  if (!f->flags)
+    return;
+  if (f->rtc_dirty & 1)
+    g_rtc.index = f->rtc_index & 0x7f;
+  if (f->rtc_dirty & 2) {
+    g_fast_rtc_total++;
+    g_rtc.cmos[REG_C] = f->rtc_c;
+    if (g_rtc.period && f->rtc_next_tsc) {
+      uint64_t nn = tsc_to_ns(f->rtc_next_tsc);
+      if (nn > g_rtc.next_periodic)
+        g_rtc.next_periodic = nn;
+    }
+    rtc_irq_update();
+  }
+  for (uint32_t i = 0; i < f->eoi_count; i++)
+    lapic_write(0xB0, 0);
+  g_fast_eoi_total += f->eoi_count;
+}
+
 static int run_loop(uint64_t deadline_ns) {
   ioctl(g_vm, AVM_SET_DEBUG, (unsigned long)(g_debug ? 1 : 0));
   g_cur_timeout = 0;
@@ -1021,10 +1086,12 @@ static int run_loop(uint64_t deadline_ns) {
     uint64_t next = devices_poll(tnow);
     irq_before_run();
     set_run_timeout(tnow, next);
+    fast_before_run(&x);
     if (ioctl(g_vm, AVM_RUN, &x) < 0) {
       perror("AVM_RUN");
       return 1;
     }
+    fast_after_exit(&x);
     irq_after_exit(&x);
     if (g_traza)
       traza(0, &x);

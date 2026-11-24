@@ -151,6 +151,23 @@ struct avm_exit {
   };
   int32_t irq_pending; // AVM_INJECT_IRQ aun sin entregar (vector | flags) o -1
   uint32_t tpr;        // TPR actual del huesped (formato del registro 0x80)
+  // Atajos en el kernel (sin volver al VMM). Con KVM anidado cada vuelta al VMM
+  // cuesta ~150 us y la interrupcion de reloj de Windows (RTC a 1024 Hz) hacia
+  // ~5 por tick: el huesped no avanzaba. El VMM los rellena antes de cada
+  // AVM_RUN y recoge lo que el kernel cambio.
+  struct avm_fast {
+    uint32_t flags;          // VMM -> kernel: AVM_FAST_*
+    uint32_t eoi_count;      // kernel -> VMM: EOI del LAPIC absorbidos (aplicarlos)
+    uint8_t rtc_index;       // E/S: indice del puerto 0x70 (con el bit 7 = NMI)
+    uint8_t rtc_c;           // E/S: registro C
+    uint8_t rtc_pie;         // VMM -> kernel: PIE (registro B bit 6)
+    uint8_t rtc_dirty;       // kernel -> VMM: bit0 = cambio el indice, bit1 = se leyo C
+    uint32_t pad;
+    uint64_t rtc_next_tsc;   // E/S: proximo PF en el TSC
+    uint64_t rtc_period_tsc; // VMM -> kernel: periodo en ciclos de TSC (0 = sin PF)
+  } fast;
 };
+#define AVM_FAST_RTC (1u << 0) // OUT 0x70 e IN 0x71 del registro C en el kernel
+#define AVM_FAST_EOI (1u << 1) // escritura del EOI del LAPIC (0xFEE000B0) en el kernel
 
 #endif

@@ -716,6 +716,7 @@ static int vm_run(struct avm_exit *x) {
     pthread_cond_wait(&cv, &mu);
   g_event_ready = 0;
   *x = g_ev;
+  memset(&x->fast, 0, sizeof(x->fast)); // sin atajos de kernel: todo lo hace el VMM
   x->irq_pending = g_pending;
   x->tpr = g_tpr;
   pthread_mutex_unlock(&mu);
