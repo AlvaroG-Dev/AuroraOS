@@ -130,6 +130,28 @@ Salidas: `AVM_EXIT_IO` (puerto, tamano, direccion, dato), `AVM_EXIT_MMIO`,
 - Licencias: SeaBIOS (LGPLv3), OVMF (BSD-2), ReactOS (GPL), virtio (BSD). Windows,
   la imagen del usuario.
 
+## 5b. Rendimiento (medido con KVM anidado, 2026-11-23/24)
+
+Con KVM anidado cada VMREAD/VMWRITE de un campo que no esta en el VMCS en sombra
+de KVM, cada VMPTRLD/VMCLEAR y cada RDMSR de un MSR interceptado es una salida al
+hipervisor de fuera (unos us). Lo que se hizo para no pagarlo en cada salida:
+
+- El VMCS queda activo en la CPU entre ventanas (VMRESUME); `vmx_sched_out()`
+  (desde `sched_tick`) hace el VMCLEAR al cambiar de tarea.
+- Tras MMIO, INS/OUTS y HLT solo se leen RIP/RSP/RFLAGS/CR/EFER + AR y base de
+  CS/SS + bases de ES/DS/FS/GS (`AVM_GET/SET_REGS_LITE`); el VMM usa esas ordenes
+  para emular y cae a GET/SET_REGS con un kernel viejo. Leer todo el VMCS costaba
+  ~130 us por salida MMIO.
+- HOST_CR0/CR3 solo si cambian; MSR del host leidos una vez por CPU.
+- EPT: cada fallo mapea 64 paginas (256 KiB) alineadas del slot.
+- SeaBIOS (`third_party/seabios/parches/`, `config`): CD por INT 13h en bloques
+  DRQ de hasta 31 sectores; disco duro por DMA de bus maestro (CONFIG_ATA_DMA).
+  Antes ~4 salidas por sector.
+- VMM: reloj de dispositivos interpolado con el TSC (`CLOCK_MONOTONIC` de AuroraOS
+  va a saltos de 1 ms); `AURORA_VM_RELOJ_TICK=1` vuelve al de ticks.
+- `AURORA_VM_TRAZA=1`: lineas `[traza]` y `[rend]` cada 2 s (salidas, puertos,
+  tiempo en huesped/kernel/VMM, coste de preparar y salir de cada ventana).
+
 ## 6. Pruebas
 
 - `tests/vm/hola.asm` / `hola.bin`: 16 bits, escribe una cadena por el puerto

@@ -24,7 +24,7 @@ CONFIG_ROM_SIZE=128
 # Hardware support
 #
 CONFIG_ATA=y
-# CONFIG_ATA_DMA is not set
+CONFIG_ATA_DMA=y
 # CONFIG_ATA_PIO32 is not set
 # CONFIG_AHCI is not set
 CONFIG_SDCARD=y

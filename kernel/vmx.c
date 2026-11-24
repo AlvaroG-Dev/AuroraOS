@@ -171,6 +171,9 @@ struct avm_vm {
   uint64_t cr0_shadow, cr4_shadow;
   uint64_t sysenter_cs, sysenter_esp, sysenter_eip;
   uint64_t pat, tsc_aux_unused;
+  // MTRR virtuales (como KVM): solo se guardan. Con EPT el tipo de memoria lo
+  // decide el EPT (WB) con el PAT del huesped; los MTRR del huesped no se aplican.
+  uint64_t mtrr_def, mtrr_fix[11], mtrr_var[16];
   uint32_t interruptibility, activity;
   int32_t pending_irq; // -1 = ninguna; vector | AVM_IRQ_TPR
   uint32_t tpr;        // TPR del LAPIC (registro 0x80); CR8 = tpr >> 4
@@ -559,6 +562,9 @@ static void vm_reset_regs(struct avm_vm *vm) {
   vm->cr0_shadow = r->cr0;
   vm->cr4_shadow = 0;
   vm->pat = 0x0007040600070406ULL;
+  vm->mtrr_def = 0;
+  memset(vm->mtrr_fix, 0, sizeof(vm->mtrr_fix));
+  memset(vm->mtrr_var, 0, sizeof(vm->mtrr_var));
   vm->pending_irq = -1;
   vm->interruptibility = 0;
 }
@@ -1057,6 +1063,21 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
   case 0x35:  // CORE_THREAD_COUNT: 1 nucleo, 1 hilo
     out = 0x00010001;
     break;
+  case 0xFE: // MTRRcap: 8 rangos variables, fijos y WC (como QEMU)
+    if (write) { ok = false; break; }
+    out = 0x508;
+    break;
+  case 0x2FF: // MTRRdefType
+    if (write) vm->mtrr_def = val & 0xCFF; else out = vm->mtrr_def;
+    break;
+  case 0x200 ... 0x20F: // MTRRphysBase/Mask 0-7
+    if (write) vm->mtrr_var[idx - 0x200] = val; else out = vm->mtrr_var[idx - 0x200];
+    break;
+  case 0x250: case 0x258: case 0x259: case 0x268 ... 0x26F: { // fijos
+    int k = idx == 0x250 ? 0 : idx == 0x258 ? 1 : idx == 0x259 ? 2 : 3 + (int)(idx - 0x268);
+    if (write) vm->mtrr_fix[k] = val; else out = vm->mtrr_fix[k];
+    break;
+  }
   case 0x1A0: // MISC_ENABLE: cadenas rapidas
     out = 1;
     break;
