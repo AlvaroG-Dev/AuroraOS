@@ -704,24 +704,46 @@ static void dump_guest_mem(const struct avm_regs *r) {
   int l64 = (r->efer & (1ULL << 10)) && (r->cs.ar & 0x2000);
   uint64_t sp = r->ss.base + (l64 ? r->rsp : (r->rsp & 0xFFFFFFFFULL));
   int w = l64 ? 8 : 4;
-  static uint8_t st[0x600];
+  static uint8_t st[0x2000];
   int got = dbg_lin_read(r, sp, st, (int)sizeof(st));
-  fprintf(stderr, "  pila en %llx (%d bytes):", (unsigned long long)sp, got);
-  for (int i = 0; i + w <= got; i += w) {
-    if (i % (w * 4) == 0)
-      fprintf(stderr, "\n    +%03x:", i);
-    uint64_t v = 0;
-    memcpy(&v, st + i, (size_t)w);
-    fprintf(stderr, w == 8 ? " %016llx" : " %08llx", (unsigned long long)v);
+  fprintf(stderr, "  pila en %llx (%d bytes, sin las filas a cero):", (unsigned long long)sp, got);
+  for (int i = 0; i + w * 4 <= got; i += w * 4) {
+    static const uint8_t z[32];
+    if (!memcmp(st + i, z, (size_t)w * 4))
+      continue;
+    fprintf(stderr, "\n    +%03x:", i);
+    for (int k = 0; k < 4; k++) {
+      uint64_t v = 0;
+      memcpy(&v, st + i + k * w, (size_t)w);
+      fprintf(stderr, w == 8 ? " %016llx" : " %08llx", (unsigned long long)v);
+    }
   }
   fprintf(stderr, "\n");
   if (!l64)
     return;
+  // Pantalla azul de Windows x64: KeBugCheckEx guarda un CONTEXT (ContextFlags
+  // 0x10000F en +0x30) con el codigo en RCX y los parametros en RDX, R8 y R9.
+  for (int i = 0; i + 0x100 <= got; i += 8) {
+    uint32_t cf;
+    memcpy(&cf, st + i + 0x30, 4);
+    if (cf != 0x0010000F)
+      continue;
+    uint64_t rc, rd, r8v, r9v, rp;
+    memcpy(&rc, st + i + 0x80, 8);
+    memcpy(&rd, st + i + 0x88, 8);
+    memcpy(&r8v, st + i + 0xB8, 8);
+    memcpy(&r9v, st + i + 0xC0, 8);
+    memcpy(&rp, st + i + 0xF8, 8);
+    if (rc && rc < 0x400)
+      fprintf(stderr, "  PANTALLA AZUL de Windows: 0x%llX (%llx, %llx, %llx) [rip del CONTEXT %llx]\n",
+              (unsigned long long)rc, (unsigned long long)rd, (unsigned long long)r8v,
+              (unsigned long long)r9v, (unsigned long long)rp);
+  }
   // Codigo alrededor de las direcciones del nucleo que hay en la pila (retornos,
   // la direccion de la excepcion en un CONTEXT...): con eso se reconoce la funcion.
   uint64_t seen[24];
   int ns = 0;
-  for (int i = 0; i + 8 <= got && i < 0x400 && ns < 24; i += 8) {
+  for (int i = 0; i + 8 <= got && ns < 24; i += 8) {
     uint64_t v;
     memcpy(&v, st + i, 8);
     if ((v >> 47) != 0x1FFFF || (v >= sp - 0x20000 && v < sp + 0x20000))
@@ -912,6 +934,13 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
       for (int k = 0; k < m; k++)
         fprintf(stderr, k == 32 ? " |%02x" : " %02x", cb[k]);
       fprintf(stderr, "\n");
+      // Miles por intervalo = Windows en KiBugCheckDebugBreak (pantalla azul sin
+      // depurador): volcado completo una vez.
+      static int bsod_dump;
+      if (!bsod_dump && st.bp_skipped - ps.bp_skipped > 1000) {
+        bsod_dump = 1;
+        dump_regs("el huesped repite INT3 sin parar (pantalla azul de Windows?)");
+      }
     }
     ps = st;
     ptsc = tsc;

@@ -964,9 +964,11 @@ static void emu_cpuid(struct avm_vm *vm, struct gregs *g) {
            (1u << 7) | (1u << 8) | (1u << 12) | (1u << 15) | (1u << 17) |
            (1u << 21) | (1u << 24) | (1u << 26) | (1u << 27) | (1u << 28) |
            (1u << 29) | (1u << 31));
-    // Sin MCE/MCA (no hay bancos de machine check: Windows leeria MCG_CAP...).
-    d &= ~((1u << 7) | (1u << 14) | (1u << 21) | (1u << 22) | (1u << 28) |
-           (1u << 29) | (1u << 31));
+    // MCE y MCA se anuncian: Windows 10 x64 los exige (sin ellos, pantalla azul
+    // 0x5D UNSUPPORTED_PROCESSOR con CPUID.1:EDX de primer parametro). Los
+    // bancos se emulan vacios (MCG_CAP y MCi_* en emu_msr).
+    d &= ~((1u << 21) | (1u << 22) | (1u << 28) | (1u << 29) | (1u << 31));
+    d |= (1u << 7) | (1u << 14);
     if (!(vm->vmflags & AVM_VMF_APIC))
       d &= ~(1u << 9); // APIC local: solo si el VMM lo emula (AVM_SET_FLAGS)
     b = (b & 0x0000FFFFu) | (1u << 16); // sin APIC id, 1 logico
@@ -1091,6 +1093,19 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
     if (write) vm->mtrr_fix[k] = val; else out = vm->mtrr_fix[k];
     break;
   }
+  case 0x179: // MCG_CAP: 10 bancos, con MCG_CTL (como QEMU)
+    if (write) { ok = false; break; }
+    out = 10 | (1ULL << 8);
+    break;
+  case 0x17A: // MCG_STATUS
+  case 0x17B: // MCG_CTL
+  case 0x400 ... 0x427: // MCi_CTL/STATUS/ADDR/MISC de los 10 bancos: sin errores
+    if (!write)
+      out = (idx >= 0x400 && (idx & 3) == 0) || idx == 0x17B ? ~0ULL : 0;
+    break;
+  case 0x280 ... 0x289: // MCi_CTL2
+    out = 0;
+    break;
   case 0x1A0: // MISC_ENABLE: cadenas rapidas
     out = 1;
     break;
