@@ -432,6 +432,32 @@ static int string_io(const struct avm_exit *x) {
   } else {
     base = x->io.linear - off0; // base del segmento (lineal = base + desplazamiento)
   }
+  // Camino rapido: REP INSW/INSD del puerto de datos IDE hacia RAM, de pagina en
+  // pagina con memcpy (el CD/disco por PIO de la BIOS: millones de palabras).
+  if (!x->io.is_write && dir == 1 && (size == 2 || size == 4) && g_ide_on &&
+      (x->io.port == 0x1F0 || x->io.port == 0x170)) {
+    while (done < n) {
+      uint64_t off = (off0 + (uint64_t)size * done) & mask;
+      uint64_t lin = base + off;
+      if (!lm)
+        lin &= 0xFFFFFFFFULL;
+      uint64_t bytes = (uint64_t)(n - done) * size;
+      uint64_t room = 4096 - (lin & 0xFFF);   // hasta el final de la pagina
+      if (bytes > room)
+        bytes = room;
+      if (mask != ~0ULL && bytes > mask + 1 - off) // sin dar la vuelta al registro
+        bytes = mask + 1 - off;
+      bytes -= bytes % size;
+      uint64_t gpa;
+      uint8_t *hp;
+      if (!bytes || gva_to_gpa(&r, lin, &gpa) < 0 || !(hp = dma_ptr(gpa, bytes)))
+        break;
+      unsigned got = ide_data_read_bulk(x->io.port, hp, (unsigned)bytes, (int)size);
+      done += got / size;
+      if (got < bytes)
+        break;
+    }
+  }
   for (; done < n; done++) {
     uint64_t off = (off0 + (uint64_t)((int64_t)dir * (int64_t)size * (int64_t)done)) & mask;
     uint64_t lin = base + off;

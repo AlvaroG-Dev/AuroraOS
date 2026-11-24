@@ -1020,11 +1020,20 @@ static bool emu_msr(struct avm_vm *vm, struct gregs *g, bool write) {
   switch (idx) {
   case MSR_EFER:
     if (write) {
-      if (val & ~(EFER_SCE | (1ULL << 8) | EFER_NXE)) { // solo SCE, LME, NXE
+      // SCE, LME, NXE; LMA (bit 10) es de solo lectura: escribirlo se ignora (no
+      // es #GP). Windows lee EFER, le pone NXE y lo vuelve a escribir con LMA=1;
+      // con #GP el cargador daba triple fallo justo tras el logo.
+      if (val & ~(EFER_SCE | (1ULL << 8) | (1ULL << 10) | EFER_NXE)) {
         ok = false;
         break;
       }
-      uint64_t keep = vm->regs.efer & (1ULL << 10); // LMA lo decide CR0.PG
+      uint64_t cur = vmread(F_GUEST_EFER);
+      // Cambiar LME con la paginacion activa es #GP, como en el hardware.
+      if (((val ^ cur) & (1ULL << 8)) && (vm->cr0_shadow & (1ULL << 31))) {
+        ok = false;
+        break;
+      }
+      uint64_t keep = cur & (1ULL << 10); // LMA lo decide CR0.PG
       vm->regs.efer = (val & ~(1ULL << 10)) | keep;
       vmwrite(F_GUEST_EFER, vm->regs.efer);
     } else {

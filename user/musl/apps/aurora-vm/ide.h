@@ -1547,6 +1547,34 @@ static uint32_t ide_data_read(struct ide_bus *b, int size) {
   return v;
 }
 
+// REP INSW/INSD del puerto de datos en bloque: copia a dst hasta n bytes (en
+// elementos de `size`) mientras el dispositivo tenga datos (DRQ), cruzando
+// sectores igual que ide_data_read elemento a elemento. Devuelve los bytes
+// copiados; lo que falte lo hace el camino lento (que da 0 sin DRQ).
+static unsigned ide_data_read_bulk(uint16_t port, uint8_t *dst, unsigned n, int size) {
+  struct ide_bus *b = &g_ide[(port & 0x1F0) == 0x170];
+  unsigned done = 0;
+  while (n - done >= (unsigned)size) {
+    struct ide_if *s = ide_active(b);
+    if (!(s->status & DRQ_STAT) || !ide_is_pio_out(s) || s->data_ptr + size > s->data_end)
+      break;
+    unsigned c = (unsigned)(s->data_end - s->data_ptr);
+    if (c > n - done)
+      c = n - done;
+    c -= c % (unsigned)size;
+    if (!c)
+      break;
+    memcpy(dst + done, s->io_buffer + s->data_ptr, c);
+    s->data_ptr += (int)c;
+    done += c;
+    if (s->data_ptr >= s->data_end) {
+      s->status &= ~DRQ_STAT;
+      ide_end_transfer(s);
+    }
+  }
+  return done;
+}
+
 static void ide_data_write(struct ide_bus *b, uint32_t v, int size) {
   struct ide_if *s = ide_active(b);
   if (!(s->status & DRQ_STAT) || ide_is_pio_out(s))
