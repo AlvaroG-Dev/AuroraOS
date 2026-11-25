@@ -414,7 +414,7 @@ static void ide_sector_read(struct ide_if *s) {
   if (n > s->req_nb_sectors)
     n = s->req_nb_sectors;
   if (!ide_sect_range_ok(s, (uint64_t)sn, (uint64_t)n) ||
-      pread(s->fd, s->io_buffer, (size_t)n * 512, (off_t)sn * 512) != (ssize_t)n * 512) {
+      vm_pread(s->fd, s->io_buffer, (size_t)n * 512, (off_t)sn * 512) != (ssize_t)n * 512) {
     ide_rw_error(s);
     return;
   }
@@ -433,7 +433,7 @@ static void ide_sector_write(struct ide_if *s) {
   if (n > s->req_nb_sectors)
     n = s->req_nb_sectors;
   if (!ide_sect_range_ok(s, (uint64_t)sn, (uint64_t)n) || s->ro ||
-      pwrite(s->fd, s->io_buffer, (size_t)n * 512, (off_t)sn * 512) != (ssize_t)n * 512) {
+      vm_pwrite(s->fd, s->io_buffer, (size_t)n * 512, (off_t)sn * 512) != (ssize_t)n * 512) {
     ide_rw_error(s);
     return;
   }
@@ -576,7 +576,7 @@ static int ide_sg_io(struct ide_if *s, uint64_t off, int write) {
     uint8_t *g = dma_ptr(g_sg[i].addr, g_sg[i].len);
     if (!g)
       return -1;
-    ssize_t r = write ? pwrite(s->fd, g, g_sg[i].len, (off_t)off) : pread(s->fd, g, g_sg[i].len, (off_t)off);
+    ssize_t r = write ? vm_pwrite(s->fd, g, g_sg[i].len, (off_t)off) : vm_pread(s->fd, g, g_sg[i].len, (off_t)off);
     if (r != (ssize_t)g_sg[i].len)
       return -1;
     if (g_dchk)
@@ -710,7 +710,7 @@ static int cd_read_sector(struct ide_if *s) {
     dst = s->io_buffer + 16;
   else
     return -1;
-  if (pread(s->fd, dst, 2048, (off_t)s->lba * 2048) != 2048)
+  if (vm_pread(s->fd, dst, 2048, (off_t)s->lba * 2048) != 2048)
     return -1;
   dchk_buf(s, (uint64_t)s->lba * 2048, dst, 2048, 0);
   if (s->cd_sector_size == 2352)
@@ -862,7 +862,7 @@ static void ide_atapi_cmd_read_dma_cb(struct ide_if *s) {
       s->io_buffer_size = n * 2048;
       off = 0;
     }
-    if (pread(s->fd, s->io_buffer + off, (size_t)n * 2048, (off_t)s->lba * 2048) != (ssize_t)n * 2048) {
+    if (vm_pread(s->fd, s->io_buffer + off, (size_t)n * 2048, (off_t)s->lba * 2048) != (ssize_t)n * 2048) {
       ide_atapi_io_error(s);
       ide_set_inactive(s, 0);
       return;

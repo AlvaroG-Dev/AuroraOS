@@ -340,7 +340,7 @@ static uint32_t vb_request(uint16_t head) {
       if (!(s->flags & 2)) { status = 1; break; }
       if (type == 0) {
         if (off + s->len > g_disk_sectors * 512) { status = 1; break; }
-        ssize_t r = pread(g_disk_fd, g, s->len, (off_t)off);
+        ssize_t r = vm_pread(g_disk_fd, g, s->len, (off_t)off);
         if (r != (ssize_t)s->len) { status = 1; break; }
         off += s->len;
       } else {
@@ -351,7 +351,7 @@ static uint32_t vb_request(uint16_t head) {
       written += s->len;
     } else if (type == 1) { // OUT: el dispositivo lee
       if ((s->flags & 2) || g_disk_ro || off + s->len > g_disk_sectors * 512) { status = 1; break; }
-      if (pwrite(g_disk_fd, g, s->len, (off_t)off) != (ssize_t)s->len) { status = 1; break; }
+      if (vm_pwrite(g_disk_fd, g, s->len, (off_t)off) != (ssize_t)s->len) { status = 1; break; }
       off += s->len;
     } else if (type != 4) {
       status = 2;

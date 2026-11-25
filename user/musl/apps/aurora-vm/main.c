@@ -124,6 +124,38 @@ static int irq_edge_pending(int irq);
 static uint8_t *dma_ptr(uint64_t gpa, uint64_t len);
 static void ept_check(const char *donde);
 
+
+// E/S del disco/CD del huesped que no se rinde a la primera: un pread/pwrite
+// puede volver corto, con EINTR o con un error pasajero (la primera lectura
+// tras montar /data fallaba y la BIOS decia "could not read the boot disk";
+// al repetir, iba). Reintenta lo que falte hasta 8 veces antes de dar error.
+static ssize_t vm_xfer(int fd, void *buf, size_t n, off_t off, int write) {
+  size_t done = 0;
+  int tries = 0;
+  while (done < n) {
+    ssize_t r = write ? pwrite(fd, (const uint8_t *)buf + done, n - done, off + (off_t)done)
+                      : pread(fd, (uint8_t *)buf + done, n - done, off + (off_t)done);
+    if (r > 0) {
+      done += (size_t)r;
+      continue;
+    }
+    if (r == 0 && !write)
+      break; // fin del fichero
+    if (++tries > 8) {
+      fprintf(stderr, "aurora-vm: %s de %zu bytes en %lld fallo: %s\n", write ? "escritura" : "lectura",
+              n, (long long)off, r < 0 ? strerror(errno) : "sin avance");
+      return done ? (ssize_t)done : -1;
+    }
+    if (tries == 1)
+      fprintf(stderr, "aurora-vm: aviso: %s en %lld: %s; reintento\n", write ? "escritura" : "lectura",
+              (long long)off, r < 0 ? strerror(errno) : "sin avance");
+    struct timespec ts = {0, 20 * 1000000L * tries};
+    nanosleep(&ts, NULL);
+  }
+  return (ssize_t)done;
+}
+#define vm_pread(fd, b, n, o) vm_xfer((fd), (b), (n), (o), 0)
+#define vm_pwrite(fd, b, n, o) vm_xfer((fd), (void *)(b), (n), (o), 1)
 #include "pic.h"
 #include "pit.h"
 #include "rtc.h"
