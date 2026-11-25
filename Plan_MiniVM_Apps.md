@@ -118,6 +118,20 @@ y se arranca en frío, nunca a medias. Los punteros (`ide_if.bus`) y los fd se r
   el agente lo conecta como `Z:` al arrancar. Así, abrir un .docx desde Archivos
   de Aurora lanza la app de Windows con `Z:\ruta\fichero.docx`, y lo guardado
   aparece al momento en Aurora.
+- **Carpetas del usuario unificadas:** Descargas, Documentos, Escritorio,
+  Imágenes, Música y Vídeos de Windows son las mismas que las de Aurora, no copias.
+  El agente redirige las carpetas del perfil de Windows a la carpeta compartida,
+  igual que hace la redirección de carpetas de las empresas. Escribe en
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`
+  las claves `{374DE290-123F-4565-9164-39C4925E467B}` (Descargas), `Personal`,
+  `Desktop`, `My Pictures`, `My Music` y `My Video`, apuntando a `Z:\Descargas`, etc.
+  Los nombres reales los pide a aurora-vm, que los lee de `~/.config/user-dirs.dirs`.
+  Lo que una app de Windows descarga cae directamente en `~/Descargas` de Aurora,
+  y lo que pones ahí desde Aurora se ve en el explorador de archivos de Windows.
+- **Avisos de cambios:** Samba avisa a Windows de los cambios (inotify en AuroraOS),
+  así que las carpetas abiertas se refrescan solas.
+- **Tras reanudar:** la unidad `Z:` se reconecta sola. El agente comprueba que está
+  conectada antes de lanzar ninguna app.
 - **Velocidad del disco (más adelante):** cambiar el IDE emulado por AHCI
   (Windows trae el driver) para tener colas de órdenes y menos salidas por operación.
 
