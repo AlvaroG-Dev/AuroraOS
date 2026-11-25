@@ -559,9 +559,11 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		bash scripts/fetch-wine.sh || exit 1; \
 		echo "[Makefile] Instalando Wine..."; \
 		cp -a build/wine/root/usr/. sysroot/usr/; \
+		python3 -I scripts/patch-wine.py sysroot || exit 1; \
 		rm -f sysroot/usr/share/applications/wine.desktop; \
 		mkdir -p sysroot/usr/share/aurora/wine sysroot/usr/share/aurora/apps; \
 		cp -f installer/wine/*.reg sysroot/usr/share/aurora/wine/ 2>/dev/null || true; \
+		cp -f installer/wine/desktop-wait/aurora-desktop.exe sysroot/usr/share/aurora/wine/ 2>/dev/null || true; \
 		for f in installer/wine/*.desktop; do if [ -e "$$f" ]; then install -m 644 "$$f" sysroot/usr/share/applications/; fi; done; \
 		for f in installer/wine/aurora-wine installer/wine/aurora-wine-diag; do if [ -e "$$f" ]; then install -m 755 "$$f" sysroot/usr/bin/; fi; done; \
 	fi

@@ -2,7 +2,7 @@
 Type=Application
 Name=Símbolo del sistema
 Comment=Consola de Windows (Wine)
-Exec=wineconsole cmd
+Exec=aurora-wine wineconsole cmd
 Icon=wine
 Terminal=false
 Categories=Wine;

@@ -111,6 +111,26 @@ fi
 rm -rf "$lock"; trap - EXIT INT TERM
 [ "$1" = "--setup" ] && exit 0
 [ $# -eq 0 ] && set -- winecfg
+# Escritorio de Wine (explorer.exe). La primera app lo arranca y solo le da un
+# momento para cargar el driver grafico; si aun no esta, la app falla con "The
+# explorer process failed to start" y no sale ninguna ventana (el icono del
+# Dock salta y nada mas). aurora-desktop.exe lo arranca, espera a que este
+# listo de verdad y lo mantiene vivo mientras arranca la app.
+if [ -f "$SHARE/aurora-desktop.exe" ] && ! grep -qai 'explorer\.exe' /proc/[0-9]*/cmdline 2>/dev/null; then
+    listo=$(mktemp /tmp/aurora-desktop.XXXXXX)
+    wine "$SHARE/aurora-desktop.exe" >"$listo" 2>>"$AURORA_WINE_LOG" &
+    dpid=$!
+    t0=$(date +%s)
+    while [ $(( $(date +%s) - t0 )) -lt 130 ] && kill -0 $dpid 2>/dev/null && [ ! -s "$listo" ]; do
+        sleep 0.3
+    done
+    log "escritorio: $(head -n 1 "$listo" 2>/dev/null) ($(( $(date +%s) - t0 )) s)"
+    rm -f "$listo"
+fi
+# Lanzado desde el Dock (sin terminal): la salida de Wine al registro, que si
+# no se pierde y no hay forma de saber por que no sale la ventana.
+log "lanzo: wine $*"
+if [ ! -t 2 ] && [ "$AURORA_WINE_LOG" != /dev/null ]; then exec >>"$AURORA_WINE_LOG" 2>&1; fi
 case "$1" in
     *.msi|*.MSI) exec wine msiexec /i "$@" ;;
     *.lnk|*.LNK|*.bat|*.BAT|*.cmd|*.CMD) exec wine start /unix "$@" ;;
