@@ -658,6 +658,10 @@ int swap_reclaim_one(void) {
   uint64_t ro_pte = pte & ~(uint64_t)PTE_WRITABLE;
   if (paging_set_pte_in(pml4, c.vaddr, ro_pte) != 0)
     return 0;
+  // La CPU donde corre el proceso (u otro de sus hilos) puede conservar la
+  // traduccion escribible en su TLB: sin invalidarla seguiria escribiendo sin
+  // pasar por el #PF, y luego en un frame ya liberado (paso 6).
+  paging_invalidate_tlb_global(c.vaddr);
 
   // Paso 3: re-verificar que el PTE es el mismo RO (nadie lo tocó)
   uint64_t check;
@@ -699,6 +703,7 @@ int swap_reclaim_one(void) {
     return 0;
   }
 
+  paging_invalidate_tlb_global(c.vaddr);
   pmm_free_page(phys);
   return 1;
 }

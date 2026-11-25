@@ -20,6 +20,24 @@ int pmm_page_share(uint64_t phys);
 int pmm_page_is_shared(uint64_t phys);
 uint64_t pmm_cow_extra_total(void); // suma de referencias extra (diagnostico)
 
+// Paginas fijadas (las de los memfd): solo su dueno las libera, tras
+// pmm_page_pin(p, 0). Un free o una reasignacion por otro camino se rechaza y
+// se anota aqui (diagnostico de la RAM corrupta de la mini-VM).
+#define PMM_PIN_FRAMES 6
+struct pmm_pin_stats {
+  uint64_t bad_free;  // frees rechazados de paginas fijadas
+  uint64_t bad_alloc; // paginas fijadas que el asignador iba a entregar
+  uint64_t last_phys;
+  uint32_t last_kind; // 0 = free, 1 = asignacion, 2 = memfd cerrado en uso
+  uint32_t pad;
+  uint64_t callers[PMM_PIN_FRAMES]; // direcciones de retorno del ultimo
+};
+void pmm_page_pin(uint64_t phys, int on);
+void pmm_pin_get_stats(struct pmm_pin_stats *out);
+// Anota un uso indebido detectado fuera de pmm (kind 2 = memfd cerrado con una
+// VM aun usandolo).
+void pmm_pin_report(int kind, uint64_t phys);
+
 // Reservar/liberar múltiples páginas contiguas
 uint64_t pmm_alloc_pages(uint64_t count);
 void pmm_free_pages(uint64_t phys_addr, uint64_t count);

@@ -80,6 +80,11 @@ struct avm_ept_check {
   uint64_t bad;    // apuntan a otra fisica que la del memfd
   uint64_t orphan; // presentes pero fuera de todo slot
   uint64_t gpa[4], have[4], want[4]; // las primeras malas (want = 0: huerfana)
+  // Paginas de memfd (la RAM del huesped) que otro camino del kernel intento
+  // liberar o volver a entregar (rechazado; ver pmm.c, paginas fijadas).
+  uint64_t pin_bad_free, pin_bad_alloc, pin_phys;
+  uint32_t pin_kind, pin_pad; // 0 = free, 1 = asignacion
+  uint64_t pin_callers[6];    // direcciones de retorno en el kernel del ultimo
 };
 
 #define AVM_CAP_VMX (1u << 0)

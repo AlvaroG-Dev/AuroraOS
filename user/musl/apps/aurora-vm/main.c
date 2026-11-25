@@ -1126,6 +1126,18 @@ static void ept_check(const char *donde) {
     first = 0;
     return;
   }
+  static uint64_t pin_seen;
+  if (c.pin_bad_free + c.pin_bad_alloc != pin_seen) {
+    pin_seen = c.pin_bad_free + c.pin_bad_alloc;
+    fprintf(stderr, "[ept] %s: PAGINAS DE LA RAM DEL HUESPED LIBERADAS POR OTRO CAMINO DEL KERNEL: "
+                    "%llu frees y %llu asignaciones rechazados; ultimo %s phys %llx, llamadas:",
+            donde, (unsigned long long)c.pin_bad_free, (unsigned long long)c.pin_bad_alloc,
+            c.pin_kind == 2 ? "memfd cerrado en uso" : c.pin_kind ? "asignacion" : "free",
+            (unsigned long long)c.pin_phys);
+    for (int k = 0; k < 6; k++)
+      fprintf(stderr, " %llx", (unsigned long long)c.pin_callers[k]);
+    fprintf(stderr, "\n");
+  }
   if (first || c.bad || c.orphan) {
     fprintf(stderr, "[ept] %s: %llu paginas mapeadas, %llu mal mapeadas, %llu fuera de slot\n", donde,
             (unsigned long long)c.mapped, (unsigned long long)c.bad, (unsigned long long)c.orphan);

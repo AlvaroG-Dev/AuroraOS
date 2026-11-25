@@ -1953,10 +1953,31 @@ void *process_sbrk(process_t *proc, int64_t increment) {
   uint64_t new_end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
   uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
 
+  // Con varios hilos, otra CPU puede tener aun la traduccion en su TLB: se
+  // quitan las PTE de un lote, se invalida en todas y despues se liberan.
+  int multi = proc->team_size > 1;
+  uint64_t batch[64];
+  int nb = 0;
   for (uint64_t page = new_end_page; page < old_end_page; page += PAGE_SIZE) {
     uint64_t phys = paging_get_phys_in(pml4, page);
-    if (phys && paging_unmap_page_in(pml4, page) == 0)
+    if (!phys || paging_unmap_page_in(pml4, page) != 0)
+      continue;
+    if (!multi) {
       pmm_free_page(phys);
+      continue;
+    }
+    batch[nb++] = phys;
+    if (nb == 64 || page + PAGE_SIZE >= old_end_page) {
+      paging_invalidate_tlb_global(0);
+      for (int k = 0; k < nb; k++)
+        pmm_free_page(batch[k]);
+      nb = 0;
+    }
+  }
+  if (nb) {
+    paging_invalidate_tlb_global(0);
+    for (int k = 0; k < nb; k++)
+      pmm_free_page(batch[k]);
   }
 
   proc->heap_end = new_brk;

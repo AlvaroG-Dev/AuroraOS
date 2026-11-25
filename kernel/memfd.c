@@ -49,6 +49,7 @@ typedef struct memfd_ctx {
   int allow_sealing;
   char name[MFD_NAME_MAX + 1];
   wait_queue_t wq;
+  int vm_holds; // slots de mini-VM (EPT) que apuntan a estas paginas
 } memfd_ctx_t;
 
 #define MFD_MAX_PAGES (1u << 20) // 4 GiB de espacio de direcciones por memfd
@@ -85,6 +86,7 @@ static uint64_t memfd_page_locked(memfd_ctx_t *ctx, size_t idx, int alloc) {
     if (!p)
       return 0;
     memset(phys_to_virt(p), 0, PAGE_SIZE);
+    pmm_page_pin(p, 1); // solo memfd_close la suelta (ver pmm.c, paginas fijadas)
     ctx->pages[idx] = p;
   }
   return ctx->pages[idx];
@@ -256,10 +258,20 @@ static int memfd_close_op(vfs_node_t *node) {
   memfd_ctx_t *ctx = (memfd_ctx_t *)node->priv;
   if (!ctx)
     return 0;
+  // Una VM aun tiene estas paginas en su EPT: el recuento de referencias del
+  // nodo se descuadro. Liberarlas haria que el huesped escribiera en memoria
+  // ajena (y otro la suya): se pierden y queda anotado.
+  if (__atomic_load_n(&ctx->vm_holds, __ATOMIC_ACQUIRE) > 0) {
+    pmm_pin_report(2, ctx->pages && ctx->pages_cap ? ctx->pages[0] : 0);
+    node->priv = NULL;
+    return 0;
+  }
   if (ctx->pages) {
     for (size_t i = 0; i < ctx->pages_cap; i++)
-      if (ctx->pages[i])
+      if (ctx->pages[i]) {
+        pmm_page_pin(ctx->pages[i], 0);
         pmm_free_page(ctx->pages[i]);
+      }
     kfree(ctx->pages);
   }
   kfree(ctx);
@@ -295,6 +307,13 @@ static vfs_ops_t memfd_node_ops = {
 
 int memfd_is_node(struct vfs_node *node) {
   return node && node->ops == &memfd_node_ops;
+}
+
+void memfd_vm_hold(struct vfs_node *node, int delta) {
+  if (!node || !memfd_is_node(node) || !node->priv)
+    return;
+  memfd_ctx_t *ctx = (memfd_ctx_t *)node->priv;
+  __atomic_add_fetch(&ctx->vm_holds, delta, __ATOMIC_ACQ_REL);
 }
 
 int memfd_fcntl_add_seals(struct vfs_node *node, uint32_t seals) {

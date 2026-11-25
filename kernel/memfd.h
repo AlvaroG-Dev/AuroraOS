@@ -18,6 +18,10 @@ int memfd_fcntl_get_seals(struct vfs_node *node, uint32_t *out);
 // ¿El nodo es un memfd? (comparación de ops->).
 int memfd_is_node(struct vfs_node *node);
 
+// La mini-VM mapea las paginas del memfd en su EPT (+1 al crear el slot, -1 al
+// soltarlo). Si el nodo se cerrara con alguna aun puesta, no se liberan.
+void memfd_vm_hold(struct vfs_node *node, int delta);
+
 // [SysV shm] memfd interno (sin fd de usuario) de `size` bytes; una ref.
 struct file_descriptor;
 struct file_descriptor *memfd_new_kernel(const char *name, uint64_t size);

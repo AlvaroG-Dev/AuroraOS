@@ -2203,6 +2203,7 @@ static int ept_reset(struct avm_vm *vm) {
 static void slot_release(struct slot *s) {
   if (!s->used)
     return;
+  memfd_vm_hold(s->node, -1);
   vfs_fd_put_ref(s->fd);
   memset(s, 0, sizeof(*s));
 }
@@ -2361,6 +2362,7 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     s->used = true;
     s->gpa = m.gpa; s->size = m.size; s->offset = m.offset;
     s->fd = f; s->node = n;
+    memfd_vm_hold(n, 1);
     if (replace) // las paginas ya mapeadas del slot viejo ya no valen
       return ept_reset(vm);
     return 0;
@@ -2479,6 +2481,14 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
       return -EBUSY;
     struct avm_ept_check c;
     ept_audit(vm, &c);
+    struct pmm_pin_stats ps;
+    pmm_pin_get_stats(&ps);
+    c.pin_bad_free = ps.bad_free;
+    c.pin_bad_alloc = ps.bad_alloc;
+    c.pin_phys = ps.last_phys;
+    c.pin_kind = ps.last_kind;
+    for (int i = 0; i < 6 && i < PMM_PIN_FRAMES; i++)
+      c.pin_callers[i] = ps.callers[i];
     if (!access_ok((void *)arg, sizeof(c)))
       return -EFAULT;
     return copy_to_user((void *)arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;

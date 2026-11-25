@@ -80,6 +80,75 @@ static spinlock_t pmm_lock;
 // ---------------------------------------------------------------------------
 static uint16_t *page_extra = 0;
 
+// ---------------------------------------------------------------------------
+// Paginas "fijadas": las de un memfd (la RAM de la mini-VM, entre otras). Su
+// unico dueno es el memfd y solo memfd_close las suelta (tras quitar la marca).
+// Si otro camino del kernel las libera, o el asignador las vuelve a entregar,
+// la pagina acabaria con dos usos a la vez: la RAM del huesped se llenaria de
+// datos del anfitrion (pantallazos de Windows con pool corrupto, vm24-vm34).
+// Aqui ese free se rechaza (la pagina se pierde, pero nadie la pisa) y queda
+// anotado con la cadena de llamadas para encontrar al culpable.
+// ---------------------------------------------------------------------------
+static uint8_t *page_pin = 0;
+static struct pmm_pin_stats pin_st;
+
+static inline int page_pinned(uint64_t bit) {
+  return page_pin && bitmap_in_range(bit) &&
+         (__atomic_load_n(&page_pin[bit / 8], __ATOMIC_ACQUIRE) & (1u << (bit % 8)));
+}
+
+void pmm_page_pin(uint64_t phys, int on) {
+  uint64_t bit = phys / PAGE_SIZE;
+  if (!page_pin || !bitmap_in_range(bit))
+    return;
+  uint8_t m = (uint8_t)(1u << (bit % 8));
+  if (on)
+    __atomic_or_fetch(&page_pin[bit / 8], m, __ATOMIC_ACQ_REL);
+  else
+    __atomic_and_fetch(&page_pin[bit / 8], (uint8_t)~m, __ATOMIC_ACQ_REL);
+}
+
+// Anota un uso indebido de una pagina fijada (kind 0 = free, 1 = asignacion).
+static void pin_violation(int kind, uint64_t phys) {
+  uint64_t n = kind == 1 ? ++pin_st.bad_alloc : ++pin_st.bad_free;
+  pin_st.last_phys = phys;
+  pin_st.last_kind = (uint32_t)kind;
+  uint64_t rbp;
+  __asm__ volatile("mov %%rbp, %0" : "=r"(rbp));
+  for (int i = 0; i < PMM_PIN_FRAMES; i++) {
+    uint64_t ret = 0;
+    if (rbp >= 0xffff800000000000ULL && !(rbp & 7)) {
+      ret = ((uint64_t *)rbp)[1];
+      rbp = ((uint64_t *)rbp)[0];
+    } else {
+      rbp = 0;
+    }
+    pin_st.callers[i] = ret;
+  }
+  if (n <= 8)
+    LOG_ERR("[PMM] %s de una pagina fijada (memfd) phys=%p: llamadas %lx %lx %lx %lx",
+            kind == 2 ? "cierre en uso" : kind ? "asignacion" : "free", (void *)phys, (unsigned long)pin_st.callers[0],
+            (unsigned long)pin_st.callers[1], (unsigned long)pin_st.callers[2],
+            (unsigned long)pin_st.callers[3]);
+}
+
+void pmm_pin_report(int kind, uint64_t phys) { pin_violation(kind, phys); }
+
+void pmm_pin_get_stats(struct pmm_pin_stats *out) {
+  if (out)
+    *out = pin_st;
+}
+
+// Alguna pagina fijada en [first, first+count)?
+static int range_has_pinned(uint64_t first, uint64_t count) {
+  if (!page_pin)
+    return 0;
+  for (uint64_t i = 0; i < count; i++)
+    if (page_pinned(first + i))
+      return 1;
+  return 0;
+}
+
 void pmm_init(uint64_t memmap, uint64_t memmap_size,
               uint64_t memmap_desc_size) {
   if (!memmap || memmap_size == 0)
@@ -270,6 +339,16 @@ void pmm_relocate_bitmap(void) {
   } else {
     LOG_WARN("[PMM] sin memoria para el refcount por frame: fork copiará");
   }
+
+  uint64_t pbytes = (max_blocks + 7) / 8;
+  uint64_t ppages = (pbytes + PAGE_SIZE - 1) / PAGE_SIZE;
+  uint64_t pphys = pmm_alloc_pages(ppages);
+  if (pphys) {
+    memset(phys_to_virt(pphys), 0, ppages * PAGE_SIZE);
+    page_pin = (uint8_t *)phys_to_virt(pphys);
+  } else {
+    LOG_WARN("[PMM] sin memoria para el mapa de paginas fijadas");
+  }
 }
 
 int pmm_page_share(uint64_t phys) {
@@ -306,7 +385,7 @@ static int pmm_page_unshare(uint64_t phys) {
   return 0;
 }
 
-uint64_t pmm_alloc_page(void) {
+static uint64_t pmm_alloc_page_raw(void) {
   if (!bitmap || max_blocks == 0)
     return 0;
 
@@ -348,7 +427,7 @@ uint64_t pmm_alloc_page(void) {
   return 0;
 }
 
-uint64_t pmm_alloc_pages(uint64_t count) {
+static uint64_t pmm_alloc_pages_raw(uint64_t count) {
   if (count == 0 || !bitmap || max_blocks == 0)
     return 0;
 
@@ -410,7 +489,7 @@ uint64_t pmm_alloc_pages(uint64_t count) {
   return 0;
 }
 
-uint64_t pmm_alloc_pages_below(uint64_t count, uint64_t limit) {
+static uint64_t pmm_alloc_pages_below_raw(uint64_t count, uint64_t limit) {
   if (count == 0 || !bitmap || max_blocks == 0)
     return 0;
   uint64_t align = 1;
@@ -437,12 +516,49 @@ uint64_t pmm_alloc_pages_below(uint64_t count, uint64_t limit) {
   return 0;
 }
 
+// Una pagina fijada nunca deberia estar libre en el mapa: si el asignador la
+// entrega, alguien la libero por otro camino. Se queda marcada como usada (es
+// del memfd) y se busca otra.
+uint64_t pmm_alloc_page(void) {
+  for (int tries = 0; tries < 64; tries++) {
+    uint64_t p = pmm_alloc_page_raw();
+    if (!p || !page_pinned(p / PAGE_SIZE))
+      return p;
+    pin_violation(1, p);
+  }
+  return 0;
+}
+
+uint64_t pmm_alloc_pages(uint64_t count) {
+  for (int tries = 0; tries < 16; tries++) {
+    uint64_t p = pmm_alloc_pages_raw(count);
+    if (!p || !range_has_pinned(p / PAGE_SIZE, count))
+      return p;
+    pin_violation(1, p);
+  }
+  return 0;
+}
+
+uint64_t pmm_alloc_pages_below(uint64_t count, uint64_t limit) {
+  for (int tries = 0; tries < 16; tries++) {
+    uint64_t p = pmm_alloc_pages_below_raw(count, limit);
+    if (!p || !range_has_pinned(p / PAGE_SIZE, count))
+      return p;
+    pin_violation(1, p);
+  }
+  return 0;
+}
+
 void pmm_free_page(uint64_t phys_addr) {
   if (phys_addr == 0 || !bitmap)
     return;
   // [COW] Frame compartido: solo suelta una referencia.
   if (pmm_page_unshare(phys_addr))
     return;
+  if (page_pinned(phys_addr / PAGE_SIZE)) {
+    pin_violation(0, phys_addr);
+    return;
+  }
   unsigned long flags = spin_lock_irqsave(&pmm_lock);
   uint64_t bit = phys_addr / PAGE_SIZE;
 
@@ -465,6 +581,10 @@ void pmm_free_page(uint64_t phys_addr) {
 void pmm_free_pages(uint64_t phys_addr, uint64_t count) {
   if (phys_addr == 0 || count == 0 || !bitmap)
     return;
+  if (range_has_pinned(phys_addr / PAGE_SIZE, count)) {
+    pin_violation(0, phys_addr);
+    return;
+  }
   unsigned long flags = spin_lock_irqsave(&pmm_lock);
 
   extern int32_t pages_to_order(uint64_t pages);

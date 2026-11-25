@@ -816,6 +816,40 @@ void pf_init(void) {
 //         es error: MAP_FIXED sobre hueco es lo normal).
 //   < 0   -ENOMEM si falla el split de un VMA (nada se modifica).
 // ---------------------------------------------------------------------------
+// Frees diferidos de paginas de usuario ya desmapeadas. Con varios hilos, otro
+// hilo en otra CPU puede conservar en su TLB la traduccion vieja (escribible):
+// si la fisica se liberara antes de invalidarla alli, ese hilo seguiria
+// escribiendo en una pagina que el asignador ya entrego a otro (la RAM de la
+// mini-VM se llenaba de pixeles y datos ajenos). Se juntan, se invalida el TLB
+// de todas las CPUs y despues se liberan. Con un solo hilo basta el invlpg
+// local de paging_unmap_page_in (sin PCID, cambiar de CR3 vacia el TLB).
+#define DEFER_FREE_N 64
+struct defer_free {
+  int multi, n;
+  int unmapped; // PTE quitadas desde la ultima invalidacion global
+  uint64_t phys[DEFER_FREE_N];
+};
+
+static void defer_free_flush(struct defer_free *d) {
+  if (!d->multi || (!d->n && !d->unmapped))
+    return;
+  paging_invalidate_tlb_global(0);
+  for (int i = 0; i < d->n; i++)
+    pmm_free_page(d->phys[i]);
+  d->n = 0;
+  d->unmapped = 0;
+}
+
+static void defer_free_page(struct defer_free *d, uint64_t phys) {
+  if (!d->multi) {
+    pmm_free_page(phys);
+    return;
+  }
+  if (d->n == DEFER_FREE_N)
+    defer_free_flush(d);
+  d->phys[d->n++] = phys;
+}
+
 int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
   if (!proc || start >= end)
     return -EINVAL;
@@ -851,6 +885,10 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
   }
 
   int touched = 0;
+  struct defer_free df;
+  df.multi = proc->team_size > 1;
+  df.n = 0;
+  df.unmapped = 0;
   vma_t **pp = &proc->vma_list;
   while (*pp) {
     vma_t *v = *pp;
@@ -877,18 +915,22 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
         uint64_t praw = 0;
         paging_get_pte_in(pml4, p, &praw);
         paging_unmap_page_in(pml4, p);
+        df.unmapped++;
         // [FASE 4.3] No liberar física de VMA_MMIO (BAR PCI)
         if (v->type != VMA_MMIO && v->type != VMA_SHARED && v->type != VMA_DEV)
-          pmm_free_page(phys);
+          defer_free_page(&df, phys);
         // MAP_PRIVATE de fichero: las copias propias (COW) si son del proceso.
         else if (v->type == VMA_SHARED && (v->pad & VMA_F_PRIVRO) &&
                  !(praw & (PTE_SPECIAL | PTE_SHARED_OBJ)))
-          pmm_free_page(phys);
+          defer_free_page(&df, phys);
       }
     }
 
     if (start <= v->start && end >= v->end) {
       *pp = v->next;
+      // Un memfd/fichero puede soltar aqui sus paginas (ultima referencia):
+      // antes, ningun otro hilo debe poder seguir escribiendo en ellas.
+      defer_free_flush(&df);
       vma_release_backing(v);
       kfree(v);
       touched++;
@@ -919,6 +961,7 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
     pp = &right->next;
   }
 
+  defer_free_flush(&df);
   while (new_vmas) {
     vma_t *next = new_vmas->next;
     vma_release_backing(new_vmas);
@@ -1576,6 +1619,10 @@ int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len,
   case MADV_FREE: {
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
     uint64_t freed = 0, skipped = 0;
+    struct defer_free df;
+    df.multi = proc->team_size > 1;
+    df.n = 0;
+    df.unmapped = 0;
     for (uint64_t p = start; p < end; p += PAGE_SIZE) {
       // Páginas fuera de VMA (brk, principalmente): intocables.
       if (!vma_find(proc, p)) {
@@ -1590,13 +1637,30 @@ int64_t sys_madvise(struct process *proc, uint64_t addr, uint64_t len,
         freed++;
         continue;
       }
+      // Solo se sueltan las paginas propias del proceso (como munmap en
+      // vma_unmap_range). Antes se liberaba cualquier fisica mapeada: un
+      // DONTNEED sobre un mmap compartido de memfd/tmpfs o sobre la pagina de
+      // un fichero en MAP_PRIVATE devolvia al asignador una pagina que el
+      // fichero seguia usando (dos duenos a la vez: memoria corrupta, como la
+      // RAM de la mini-VM). Un BAR (VMA_MMIO) se queda mapeado.
+      vma_t *mv = vma_find(proc, p);
+      if (mv->type == VMA_MMIO)
+        continue;
       uint64_t phys = paging_get_phys_in(pml4, p);
       if (phys) {
+        uint64_t praw = 0;
+        paging_get_pte_in(pml4, p, &praw);
         paging_unmap_page_in(pml4, p);
-        pmm_free_page(phys);
+        df.unmapped++;
+        bool own = !(praw & (PTE_SPECIAL | PTE_SHARED_OBJ)) &&
+                   (mv->type != VMA_SHARED || (mv->pad & VMA_F_PRIVRO)) &&
+                   mv->type != VMA_DEV;
+        if (own)
+          defer_free_page(&df, phys);
         freed++;
       }
     }
+    defer_free_flush(&df);
     LOG_TRACE("[MADV] pid=%u [%p,%p) advice=%lu free=%lu skip=%lu", proc->pid,
               (void *)start, (void *)end, (unsigned long)advice,
               (unsigned long)freed, (unsigned long)skipped);
