@@ -1269,11 +1269,18 @@ static uint64_t tsc_to_ns(uint64_t t) {
     return g_clk_ns0;
   return g_clk_ns0 + (uint64_t)(((__uint128_t)(t - g_clk_tsc0) * g_clk_mult) >> 32);
 }
-static int g_fast_off = -1;
+static int g_fast_off = -1, g_tick_kernel, g_out_off;
 static void fast_before_run(struct avm_exit *x) {
   if (g_fast_off < 0) {
     const char *e = getenv("AURORA_VM_SIN_ATAJOS");
     g_fast_off = e && *e == '1';
+    // vm30: 0x139 a los ~2 min con el tick del RTC en el kernel y los OUT diferidos
+    // (vm24, sin ellos, aguanto 2 horas). El tick apenas actuaba (20/s): queda
+    // apagado salvo AURORA_VM_TICK_KERNEL=1; los OUT se quitan con AURORA_VM_SIN_OUT=1.
+    e = getenv("AURORA_VM_TICK_KERNEL");
+    g_tick_kernel = e && *e == '1';
+    e = getenv("AURORA_VM_SIN_OUT");
+    g_out_off = e && *e == '1';
   }
   struct avm_fast *f = &x->fast;
   memset(f, 0, sizeof(*f));
@@ -1318,7 +1325,7 @@ static void fast_before_run(struct avm_exit *x) {
   // en vuelo ni el propio vector pendiente o en servicio. El vector tiene que
   // poder interrumpir lo que haya en servicio (si no, el EOI no seria suyo).
 #ifndef AVM_SIN_TICK_KERNEL
-  if ((f->flags & AVM_FAST_RTC) && f->rtc_pie && f->rtc_period_tsc && g_apic_on &&
+  if (g_tick_kernel && (f->flags & AVM_FAST_RTC) && f->rtc_pie && f->rtc_period_tsc && g_apic_on &&
       g_inflight < 0 && (LREG(L_SVR) & 0x100) &&
       (!lapic_accept_pic() || (g_pic[1].imr & 1) || (g_pic[0].imr & 4))) {
     uint64_t e = g_io_red[8];
@@ -1334,7 +1341,7 @@ static void fast_before_run(struct avm_exit *x) {
   // unidad) y del bus maestro (estado, direccion de la tabla PRD). Cada orden de
   // disco de Windows escribe ~8 de estos; antes cada uno era una vuelta al VMM.
   // La orden (0x1F7) y el arranque del DMA (base+0) siguen saliendo.
-  if (g_ide_on) {
+  if (g_ide_on && !g_out_off) {
     int k = 0;
     for (uint16_t p = 1; p <= 6; p++) {
       f->post_port[k++] = (uint16_t)(0x1F0 + p);
