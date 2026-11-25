@@ -16,6 +16,72 @@
 section .text
 bits 64
 
+; ---------------------------------------------------------------------------
+; Estado FPU/SSE/AVX del contexto interrumpido.
+;
+; El kernel se compila con SSE (gcc usa XMM para poner structs a cero, copiar,
+; etc.), asi que cualquier entrada al kernel pisaba los XMM del usuario (o del
+; propio kernel interrumpido). Cada entrada guarda el estado con xsave (o
+; fxsave si no hay XSAVE) en la pila y lo restaura antes de volver.
+;
+;   FPU_SAVE    r12 = rsp al entrar (frame base, callee-saved: sobrevive a la
+;               llamada C y a task_switch). Deja rsp alineado a 64 apuntando
+;               al area. Clobbera rax, rdx (ya salvados en el frame).
+;   FPU_RESTORE vuelve a rsp = r12.
+;
+; fpu_use_xsave / fpu_xsave_lo/hi / fpu_area_size los fija cpu_simd_init()
+; con las interrupciones cortadas, antes de que haya ningun frame vivo.
+; ---------------------------------------------------------------------------
+extern fpu_use_xsave
+extern fpu_xsave_lo
+extern fpu_xsave_hi
+extern fpu_area_size
+
+%macro FPU_SAVE 0
+    mov r12, rsp
+    mov eax, [rel fpu_area_size]
+    sub rsp, rax
+    and rsp, -64
+    cmp dword [rel fpu_use_xsave], 0
+    je %%fx
+    ; Cabecera XSAVE entera a cero: xsave conserva los bits de XSTATE_BV fuera de RFBM
+    ; (basura de la pila) y xrstor da #GP si hay bits fuera de XCR0 o xcomp_bv != 0.
+    mov qword [rsp + 512], 0
+    mov qword [rsp + 520], 0
+    mov qword [rsp + 528], 0
+    mov qword [rsp + 536], 0
+    mov qword [rsp + 544], 0
+    mov qword [rsp + 552], 0
+    mov qword [rsp + 560], 0
+    mov qword [rsp + 568], 0
+    mov eax, [rel fpu_xsave_lo]
+    mov edx, [rel fpu_xsave_hi]
+    xsave64 [rsp]
+    jmp %%done
+%%fx:
+    fxsave64 [rsp]
+%%done:
+    ldmxcsr [rel kernel_mxcsr]      ; el kernel corre con MXCSR por omision
+%endmacro
+
+%macro FPU_RESTORE 0
+    cmp dword [rel fpu_use_xsave], 0
+    je %%fx
+    mov eax, [rel fpu_xsave_lo]
+    mov edx, [rel fpu_xsave_hi]
+    xrstor64 [rsp]
+    jmp %%done
+%%fx:
+    fxrstor64 [rsp]
+%%done:
+    mov rsp, r12
+%endmacro
+
+section .rodata
+align 4
+kernel_mxcsr: dd 0x1F80
+section .text
+
 %macro ISR_NOERR 1
 global isr%1
 isr%1:
@@ -136,13 +202,15 @@ isr_common:
     swapgs
     mov ebx, 1
 .gs_kernel:
-    push r15                         ; dummy: 16 pushes → alineación a 16
+    push r15                         ; slot: puntero al area FPU
 
-    mov rdi, rsp
-    add rdi, 8                       ; saltar el dummy
+    FPU_SAVE
+    mov [r12], rsp                   ; slot [regs-8] = area FPU (ver signal/fork)
+    lea rdi, [r12 + 8]               ; registers_t* (saltando el slot)
     call isr_handler
+    FPU_RESTORE
 
-    add rsp, 8                       ; quitar dummy
+    add rsp, 8                       ; quitar slot
     test ebx, ebx
     jz .gs_keep
     swapgs
@@ -188,13 +256,15 @@ irq_common:
     jz .irq_common_k_in
     swapgs
 .irq_common_k_in:
-    push r15                         ; dummy: 16 pushes → alineación a 16
+    push r15                         ; slot: puntero al area FPU
 
-    mov rdi, rsp
-    add rdi, 8                       ; saltar el dummy
+    FPU_SAVE
+    mov [r12], rsp                   ; slot [regs-8] = area FPU (ver signal/fork)
+    lea rdi, [r12 + 8]               ; registers_t* (saltando el slot)
     call irq_handler
+    FPU_RESTORE
 
-    add rsp, 8                       ; quitar dummy
+    add rsp, 8                       ; quitar slot
     pop r15
     pop r14
     pop r13
@@ -244,7 +314,11 @@ ipi_stub_resched:
     jz .ipi_stub_resched_k_in
     swapgs
 .ipi_stub_resched_k_in:
+    push r12
+    FPU_SAVE
     call ipi_handler_resched
+    FPU_RESTORE
+    pop r12
     test qword [rsp + 96], 3
     jz .ipi_stub_resched_k_out
     swapgs
@@ -286,7 +360,11 @@ ipi_stub_tlb:
     jz .ipi_stub_tlb_k_in
     swapgs
 .ipi_stub_tlb_k_in:
+    push r12
+    FPU_SAVE
     call ipi_handler_tlb
+    FPU_RESTORE
+    pop r12
     test qword [rsp + 96], 3
     jz .ipi_stub_tlb_k_out
     swapgs
@@ -381,13 +459,15 @@ msi_common:
     jz .msi_common_k_in
     swapgs
 .msi_common_k_in:
-    push r15                         ; dummy: alineación a 16
+    push r15                         ; slot: puntero al area FPU
 
-    mov rdi, rsp
-    add rdi, 8                       ; saltar el dummy
+    FPU_SAVE
+    mov [r12], rsp                   ; slot [regs-8] = area FPU (ver signal/fork)
+    lea rdi, [r12 + 8]               ; registers_t* (saltando el slot)
     call msi_handler
+    FPU_RESTORE
 
-    add rsp, 8                       ; quitar dummy
+    add rsp, 8                       ; quitar slot
     pop r15
     pop r14
     pop r13

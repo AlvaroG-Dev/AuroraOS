@@ -4,6 +4,14 @@
 
 cpu_features_t g_cpu_features = {0};
 
+// Estado FPU/SIMD que guardan las entradas al kernel (isr_stubs.asm y
+// syscall_entry.asm). Por omision fxsave (512 B); cpu_simd_init() pasa a xsave
+// cuando XCR0 incluye AVX, para no perder las mitades altas de YMM/ZMM.
+volatile uint32_t fpu_use_xsave = 0;
+volatile uint32_t fpu_xsave_lo = 0;
+volatile uint32_t fpu_xsave_hi = 0;
+volatile uint32_t fpu_area_size = 512 + 64; // fxsave + holgura de cabecera
+
 // ============================================================================
 // CPUID + SIMD
 // ============================================================================
@@ -76,6 +84,26 @@ void cpu_simd_init(void) {
     g_cpu_features.osxsave = now_osxsave;
     g_cpu_features.xsave_enabled = now_osxsave;
     g_cpu_features.avx512_enabled = want_avx512 && now_osxsave;
+
+    if (now_osxsave) {
+      // Tamano del area XSAVE para el XCR0 actual (CPUID.0D.0:EBX) y mascara.
+      uint32_t xlo, xhi, a, b, c, d;
+      __asm__ volatile("xgetbv" : "=a"(xlo), "=d"(xhi) : "c"(0));
+      cpuid(0xD, 0, &a, &b, &c, &d);
+      if (b >= 576 && b <= 8192) {
+        unsigned long fl;
+        __asm__ volatile("pushfq; popq %0; cli" : "=r"(fl)::"memory");
+        fpu_xsave_lo = xlo;
+        fpu_xsave_hi = xhi;
+        if (b + 64 > fpu_area_size)
+          fpu_area_size = b + 64; // +64: alineacion a 64 en la pila
+        __sync_synchronize();
+        fpu_use_xsave = 1;
+        __asm__ volatile("pushq %0; popfq" ::"r"(fl) : "memory", "cc");
+        LOG_INFO("[CPU] Estado FPU en entradas: XSAVE %u B (XCR0=0x%x)", b,
+                 xlo);
+      }
+    }
 
     if (!now_osxsave) {
       LOG_ERR("[CPU] CR4.OSXSAVE no se aplicó. Dejando AVX deshabilitado.");
@@ -313,4 +341,4 @@ void cpu_hwp_init_ap(void) {
       wrmsr(MSR_IA32_PERF_CTL, ctl);
     }
   }
-}
+}

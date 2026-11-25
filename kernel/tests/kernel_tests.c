@@ -6783,3 +6783,85 @@ static void test_fsprobe_signatures(void) {
   g_bc_ram = NULL;
 }
 REGISTER_TEST("fsprobe: firmas ext2/FAT32", test_fsprobe_signatures);
+
+// ---------------------------------------------------------------------------
+// FPU/SSE/AVX: una IRQ (timer) no debe pisar XMM/YMM del contexto interrumpido.
+// Todo en un solo bloque asm para que gcc no toque XMM entre medias. Antes de
+// guardar el estado en las entradas al kernel, el handler en C (compilado con
+// SSE) los corrompia de vez en cuando.
+// ---------------------------------------------------------------------------
+static void test_fpu_preserved_across_irq(void) {
+  static uint8_t buf[64 + 32 * 16 + 64] __attribute__((aligned(64)));
+  uint8_t *out = buf; // xmm0..xmm15 (16 B cada uno) tras la espera
+  uint64_t pat[4] __attribute__((aligned(16)));
+  pat[0] = 0x1122334455667788ULL;
+  pat[1] = 0x99AABBCCDDEEFF00ULL;
+  pat[2] = 0;
+  pat[3] = 0;
+  uint64_t start = tick_count;
+  uint64_t flags;
+  __asm__ volatile("pushfq; popq %0" : "=r"(flags));
+  __asm__ volatile(
+      "sti\n"
+      "movdqu (%[p]), %%xmm0\n"
+      "movdqa %%xmm0, %%xmm1\n"
+      "pxor %%xmm0, %%xmm1\n" // xmm1 = 0
+      "movdqa %%xmm0, %%xmm7\n"
+      "movdqa %%xmm0, %%xmm13\n"
+      "1:\n"
+      "pause\n"
+      "movq %[t], %%rax\n"
+      "movq (%%rax), %%rax\n"
+      "subq %[s], %%rax\n"
+      "cmpq $5, %%rax\n"
+      "jb 1b\n"
+      "movdqu %%xmm0, 0(%[o])\n"
+      "movdqu %%xmm1, 16(%[o])\n"
+      "movdqu %%xmm7, 32(%[o])\n"
+      "movdqu %%xmm13, 48(%[o])\n"
+      :
+      : [p] "r"(pat), [o] "r"(out), [t] "r"(&tick_count), [s] "r"(start)
+      : "rax", "memory", "xmm0", "xmm1", "xmm7", "xmm13");
+  if (!(flags & 0x200))
+    __asm__ volatile("cli");
+  TEST_ASSERT(memcmp(out, pat, 16) == 0, "xmm0 intacto tras IRQ de timer");
+  TEST_ASSERT(((uint64_t *)(out + 16))[0] == 0 && ((uint64_t *)(out + 16))[1] == 0,
+              "xmm1 (cero) intacto tras IRQ de timer");
+  TEST_ASSERT(memcmp(out + 32, pat, 16) == 0, "xmm7 intacto tras IRQ de timer");
+  TEST_ASSERT(memcmp(out + 48, pat, 16) == 0, "xmm13 intacto tras IRQ de timer");
+}
+REGISTER_TEST("fpu: XMM se conserva en IRQ", test_fpu_preserved_across_irq);
+
+static void test_fpu_ymm_upper_preserved(void) {
+  if (!g_cpu_features.xsave_enabled || !g_cpu_features.avx) {
+    TEST_ASSERT(1, "sin AVX: omitido");
+    return;
+  }
+  static uint8_t buf[128] __attribute__((aligned(32)));
+  static uint8_t pat[32] __attribute__((aligned(32)));
+  for (int i = 0; i < 32; i++)
+    pat[i] = (uint8_t)(0xA0 + i);
+  uint64_t start = tick_count;
+  uint64_t flags;
+  __asm__ volatile("pushfq; popq %0" : "=r"(flags));
+  __asm__ volatile(
+      "sti\n"
+      "vmovdqu (%[p]), %%ymm3\n"
+      "1:\n"
+      "pause\n"
+      "movq %[t], %%rax\n"
+      "movq (%%rax), %%rax\n"
+      "subq %[s], %%rax\n"
+      "cmpq $5, %%rax\n"
+      "jb 1b\n"
+      "vmovdqu %%ymm3, (%[o])\n"
+      "vzeroupper\n"
+      :
+      : [p] "r"(pat), [o] "r"(buf), [t] "r"(&tick_count), [s] "r"(start)
+      : "rax", "memory", "xmm3");
+  if (!(flags & 0x200))
+    __asm__ volatile("cli");
+  TEST_ASSERT(memcmp(buf, pat, 32) == 0, "ymm3 (mitad alta incluida) intacto");
+}
+REGISTER_TEST("fpu: YMM completo se conserva en IRQ",
+              test_fpu_ymm_upper_preserved);

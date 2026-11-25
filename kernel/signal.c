@@ -10,6 +10,7 @@
 #include "uaccess.h"
 #include "wait.h"
 #include "rseq.h"
+#include "cpu.h"
 #include <stdbool.h>
 
 extern registers_t *syscall_current_regs(void);
@@ -221,20 +222,6 @@ static int build_frame(uint64_t frame_va, int sig, const k_sigaction_t *act,
     return -1;
   if (w_u64(mc + G_CR2, fv ? ft->fault_addr : 0) < 0)
     return -1;
-  {
-    // Estado FPU/SSE del código interrumpido: el manejador puede usar SSE
-    // y rt_sigreturn lo restaura (Wine además lo lee para el CONTEXT).
-    // La pila del kernel no siempre está alineada a 16 (fxsave lo exige).
-    uint8_t raw[512 + 16];
-    uint8_t *fx = (uint8_t *)(((uintptr_t)raw + 15) & ~(uintptr_t)15);
-    memset(fx, 0, 512);
-    __asm__ volatile("fxsave64 (%0)" ::"r"(fx) : "memory");
-    if (copy_to_user((void *)(frame_va + SF_FPSTATE), fx, 512) < 0)
-      return -1;
-    if (w_u64(mc + G_FPSTATE, frame_va + SF_FPSTATE) < 0)
-      return -1;
-  }
-
   // uc_sigmask
   if (w_u64(frame_va + SF_UC_SIGMASK, sigset_to_user(old_mask)) < 0)
     return -1;
@@ -296,8 +283,8 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   int already_on = st && st->ss_sp && !(st->ss_flags & 2) &&
                    regs->rsp > st->ss_sp && regs->rsp <= st->ss_sp + st->ss_size;
   if ((act->flags & SA_ONSTACK) && st && st->ss_sp != 0 &&
-      !(st->ss_flags & 2) /* SS_DISABLE */ && st->ss_size >= SF_SIZE &&
-      !already_on) {
+      !(st->ss_flags & 2) /* SS_DISABLE */ &&
+      st->ss_size >= SF_SIZE + fpu_state_bytes() + 128 && !already_on) {
     sp_base = st->ss_sp + st->ss_size;
     on_altstack = 1;
   } else {
@@ -324,7 +311,12 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   // k_rt_sigreturn lee mc = rsp + 0x28; al haber bajado el frame 8 bytes,
   // rsp tras el `ret` del handler vale frame_va+8, y mc = frame_va+0x30
   // = SF_UC_MCONTEXT, consistente con la nueva base.
-  uint64_t frame_va = ((sp_base - SF_SIZE) & ~0xFULL) - 8;
+  // Estado FPU/SSE/AVX del contexto interrumpido: va debajo del frame (a 64 B)
+  // y mc.fpstate lo apunta; sigreturn lo restaura. Sin esto el handler
+  // pisaba XMM/YMM del codigo interrumpido.
+  uint64_t fsz = fpu_state_bytes();
+  uint64_t fpu_va = (sp_base - fsz) & ~63ULL;
+  uint64_t frame_va = ((fpu_va - SF_SIZE) & ~0xFULL) - 8;
   task_t *cur = sched_current();
   uint64_t old_mask = cur->sig_blocked;
   if (cur->sig_suspend_active) { // el handler vuelve a la mascara previa a sigsuspend
@@ -335,6 +327,20 @@ static int deliver(process_t *proc, int sig, registers_t *regs) {
   if (build_frame(frame_va, sig, act, regs, old_mask) < 0) {
     LOG_ERR("[SIG] PID=%u SIG %d: fallo al construir frame", proc->pid, sig);
     process_exit_group_current(128 + sig);
+  }
+  {
+    void *area = fpu_regs_area(regs);
+    if (area) {
+      if (copy_to_user((void *)fpu_va, area, fsz) < 0 ||
+          w_u64(frame_va + SF_UC_MCONTEXT + G_FPSTATE, fpu_va) < 0)
+        process_exit_group_current(128 + sig);
+      // El handler arranca con estado FPU por omision (como Linux).
+      memset(area, 0, fsz);
+      *(uint16_t *)area = 0x37f;       // FCW
+      *(uint32_t *)((char *)area + 24) = 0x1F80; // MXCSR
+    } else if (w_u64(frame_va + SF_UC_MCONTEXT + G_FPSTATE, 0) < 0) {
+      process_exit_group_current(128 + sig);
+    }
   }
   // Senal de un temporizador POSIX: si_code = SI_TIMER con id, overrun y
   // valor (la libc monta SIGEV_THREAD sobre esto).
@@ -660,10 +666,10 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   // en RSP. uc_mcontext está a offset 0x28 desde ahí.
   uint64_t rsp = regs->rsp;
   uint64_t mc = rsp + 0x28;
-  uint64_t g[23];
-  if (!access_ok((void *)mc, 23 * 8))
+  uint64_t g[24];
+  if (!access_ok((void *)mc, 24 * 8))
     return -EFAULT;
-  if (copy_from_user(g, (void *)mc, 23 * 8) < 0)
+  if (copy_from_user(g, (void *)mc, 24 * 8) < 0)
     return -EFAULT;
 
   regs->r8 = g[0];
@@ -690,18 +696,28 @@ int64_t k_rt_sigreturn(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
   regs->cs = ((uint16_t)g[18] == USER32_CS_RING3) ? USER32_CS_RING3
                                                    : USER_CS_RING3;
   regs->ss = USER_DS_RING3;
-  {
-    uint64_t fpp = 0;
-    if (copy_from_user(&fpp, (void *)(mc + G_FPSTATE), 8) == 0 && fpp) {
-      uint8_t raw[512 + 16];
-      uint8_t *fx = (uint8_t *)(((uintptr_t)raw + 15) & ~(uintptr_t)15);
-      if (copy_from_user(fx, (void *)fpp, 512) == 0) {
-        uint32_t mx;
-        memcpy(&mx, fx + 24, 4);
-        mx &= mxcsr_mask();
-        memcpy(fx + 24, &mx, 4);
-        __asm__ volatile("fxrstor64 (%0)" ::"r"(fx) : "memory");
+  // Restaurar XMM/YMM/MXCSR del contexto interrumpido (g[23] = fpstate).
+  if (g[23]) {
+    void *area = fpu_regs_area(regs);
+    uint32_t fsz = fpu_state_bytes();
+    if (area && access_ok((void *)g[23], fsz)) {
+      uint8_t tmp[512 + 64];
+      uint8_t *a = (uint8_t *)area;
+      // Primero el area legacy y la cabecera, luego el resto directo.
+      if (copy_from_user(tmp, (void *)g[23],
+                         fsz < sizeof(tmp) ? fsz : sizeof(tmp)) < 0)
+        return -EFAULT;
+      uint64_t bv = *(uint64_t *)(tmp + 512);
+      if (fpu_use_xsave) {
+        bv &= ((uint64_t)fpu_xsave_hi << 32) | fpu_xsave_lo;
+        memset(tmp + 512, 0, 64);
+        *(uint64_t *)(tmp + 512) = bv;
       }
+      *(uint32_t *)(tmp + 24) &= mxcsr_mask(); // MXCSR: sin bits reservados
+      memcpy(a, tmp, 512 + (fpu_use_xsave ? 64 : 0));
+      if (fpu_use_xsave && fsz > 576 &&
+          copy_from_user(a + 576, (void *)(g[23] + 576), fsz - 576) < 0)
+        return -EFAULT;
     }
   }
 
