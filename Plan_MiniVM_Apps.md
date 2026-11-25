@@ -14,6 +14,16 @@ entero en un fichero (`/data/win.snap`, junto al disco). La siguiente vez
 reanuda desde ahí, como un portátil que hiberna. El disco queda coherente porque
 cada sesión continúa la anterior; si no hay snapshot, se arranca en frío.
 
+El fichero vive en el disco, así que sobrevive a apagar el PC. Caso típico:
+enciendes AuroraOS por la mañana, abres una app de Windows y aurora-vm reanuda
+el Windows que se quedó suspendido ayer, sin volver a arrancarlo. Solo el primer
+arranque de todos (tras instalar) es en frío. Opcional: al iniciar sesión en
+Aurora, `aurora-vm --precargar` lee el snapshot en segundo plano para que la
+primera app abra todavía antes.
+
+Si Windows necesita reiniciarse de verdad (actualizaciones), se hace en segundo
+plano y se vuelve a suspender al terminar, sin que el usuario lo espere.
+
 ### Qué se guarda
 
 | Parte | Cómo |
