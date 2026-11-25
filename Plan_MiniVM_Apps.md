@@ -100,6 +100,27 @@ y se arranca en frío, nunca a medias. Los punteros (`ide_if.bus`) y los fd se r
 - **Rendimiento:** en hardware real sin QEMU por debajo, las salidas de VM
   cuestan ~1 µs en vez de ~150-600 µs, y Windows va mucho más fluido.
 
+## Disco y datos
+
+- **Disco de Windows:** `C:` es un fichero de imagen en bruto en la partición de
+  datos de AuroraOS (`/data/win.img`, creado con `aurora-vm --crear-disco`). Es
+  disperso: solo ocupa lo que Windows ha escrito. Dentro va NTFS, con Windows,
+  los programas instalados y la carpeta del usuario.
+- **Suspensión:** `/data/win.snap`, al lado del disco, es la RAM y el estado de la
+  CPU. Disco y snapshot van siempre juntos: copiar los dos con Windows suspendido
+  es una copia de seguridad completa. Si se borra el snapshot, Windows arranca en
+  frío con el disco tal cual, como tras un corte de luz.
+- **Un solo uso:** aurora-vm bloquea el disco (flock) para que dos instancias no lo
+  abran a la vez, porque eso corrompería NTFS.
+- **Archivos compartidos con Aurora (fase D):** tarjeta de red virtual Intel
+  e1000 (Windows trae el driver) con NAT, que también da Internet a las apps.
+  AuroraOS sirve `/home/<usuario>` por SMB (Samba de los paquetes de Ubuntu) y
+  el agente lo conecta como `Z:` al arrancar. Así, abrir un .docx desde Archivos
+  de Aurora lanza la app de Windows con `Z:\ruta\fichero.docx`, y lo guardado
+  aparece al momento en Aurora.
+- **Velocidad del disco (más adelante):** cambiar el IDE emulado por AHCI
+  (Windows trae el driver) para tener colas de órdenes y menos salidas por operación.
+
 ## Orden y pruebas
 
 1. **A1:** desfase del reloj + TSC_OFFSET y guardado/carga del estado. Prueba en
