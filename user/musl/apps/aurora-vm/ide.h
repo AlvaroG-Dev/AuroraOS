@@ -566,7 +566,12 @@ static void ide_dma_error(struct ide_if *s) {
 
 // Transfiere la lista de segmentos entre el disco y la RAM del huesped.
 static int ide_sg_io(struct ide_if *s, uint64_t off, int write) {
-  uint64_t off0 = off;
+  // El resumen de integridad se toma justo despues de cada segmento: Windows
+  // apunta varios segmentos de una lectura a la misma pagina (su "pagina
+  // ficticia" para lo que no necesita) y, resumiendo al final, todos salian con
+  // el contenido del ultimo -> falsos FALLO DE INTEGRIDAD (87.000 en vm33).
+  if (g_dchk)
+    dchk_begin(s, off);
   for (int i = 0; i < g_sg_n; i++) {
     uint8_t *g = dma_ptr(g_sg[i].addr, g_sg[i].len);
     if (!g)
@@ -574,12 +579,9 @@ static int ide_sg_io(struct ide_if *s, uint64_t off, int write) {
     ssize_t r = write ? pwrite(s->fd, g, g_sg[i].len, (off_t)off) : pread(s->fd, g, g_sg[i].len, (off_t)off);
     if (r != (ssize_t)g_sg[i].len)
       return -1;
+    if (g_dchk)
+      dchk_feed(g, g_sg[i].len, write);
     off += g_sg[i].len;
-  }
-  if (g_dchk) {
-    dchk_begin(s, off0);
-    for (int i = 0; i < g_sg_n; i++)
-      dchk_feed(dma_ptr(g_sg[i].addr, g_sg[i].len), g_sg[i].len, write);
   }
   return 0;
 }

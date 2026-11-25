@@ -2228,10 +2228,11 @@ int64_t sys_fork_ex(uint64_t child_rsp) {
   }
 
   // 3. Crear tarea del hijo con los regs del padre.
-  registers_t fork_regs = *regs;
-  if (child_rsp)
-    fork_regs.rsp = child_rsp;
-  task_t *child_task = sched_create_forked_user_task(&fork_regs, child_pml4_phys);
+  // Con los regs originales (no una copia): justo debajo de ellos está el
+  // puntero al estado FPU/SSE que el hijo hereda (fpu_regs_area). Una copia
+  // en la pila leía basura ahí y podía hacer un memcpy desde 0xffff...0000.
+  task_t *child_task =
+      sched_create_forked_user_task_ex(regs, child_pml4_phys, child_rsp);
   if (!child_task) {
     LOG_ERR("[FORK] sched_create_forked_user_task falló");
     paging_free_user_space(child_pml4_phys);
