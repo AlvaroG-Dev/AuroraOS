@@ -182,13 +182,38 @@ struct avm_exit {
     uint8_t rtc_index;       // E/S: indice del puerto 0x70 (con el bit 7 = NMI)
     uint8_t rtc_c;           // E/S: registro C
     uint8_t rtc_pie;         // VMM -> kernel: PIE (registro B bit 6)
-    uint8_t rtc_dirty;       // kernel -> VMM: bit0 = cambio el indice, bit1 = se leyo C
-    uint32_t pad;
+    uint8_t rtc_dirty;       // kernel -> VMM: bit0 = cambio el indice, bit1 = se leyo C,
+                             // bit2 = el kernel genero ticks (C y rtc_next_tsc al dia)
+    // Ticks del RTC en el kernel: con rtc_vec != 0 (IRQ8 por el IOAPIC, de flanco,
+    // a ese vector; nada pendiente en el VMM) el kernel inyecta el tick del reloj
+    // de Windows y absorbe su EOI sin volver al VMM (antes: una vuelta por tick, a
+    // 1024 Hz). Al salir, rtc_kstate dice si se quedo un tick a medias: 1 =
+    // pedido sin entregar (sigue en irq_pending), 2 = en servicio (falta su EOI).
+    uint8_t rtc_vec;         // VMM -> kernel
+    uint8_t rtc_kstate;      // kernel -> VMM
+    uint16_t rtc_ticks;      // kernel -> VMM: ticks completos (inyectado + EOI)
     uint64_t rtc_next_tsc;   // E/S: proximo PF en el TSC
     uint64_t rtc_period_tsc; // VMM -> kernel: periodo en ciclos de TSC (0 = sin PF)
+    // Escrituras OUT diferidas (AVM_FAST_POST): a los puertos de post_port (0 =
+    // hueco) el kernel no sale; las apunta en post[] y sigue. El VMM las aplica en
+    // orden nada mas volver AVM_RUN, antes de atender la salida: como cualquier
+    // otro acceso al dispositivo (una lectura) sale al VMM, el huesped nunca ve el
+    // dispositivo sin ellas. Solo para registros sin efecto inmediato (los de
+    // parametros del IDE, la direccion de la tabla PRD...).
+    uint16_t post_port[16];  // VMM -> kernel
+    uint32_t npost;          // kernel -> VMM
+    uint32_t pad2;
+    struct avm_post {
+      uint16_t port;
+      uint8_t size;
+      uint8_t pad;
+      uint32_t val;
+    } post[32];
   } fast;
 };
 #define AVM_FAST_RTC (1u << 0) // OUT 0x70 e IN 0x71 del registro C en el kernel
 #define AVM_FAST_EOI (1u << 1) // escritura del EOI del LAPIC (0xFEE000B0) en el kernel
+#define AVM_FAST_POST (1u << 2) // OUT diferidos a los puertos de post_port
+#define AVM_POST_MAX 32
 
 #endif

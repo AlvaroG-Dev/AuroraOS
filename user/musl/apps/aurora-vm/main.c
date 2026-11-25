@@ -70,7 +70,8 @@ static uint64_t coarse_ns(void) {
 // desactiva).
 static uint64_t g_clk_tsc0, g_clk_ns0, g_clk_mult, g_clk_last; // mult = ns por ciclo << 32
 static uint64_t g_clk_hz;
-static uint64_t g_fast_eoi_total, g_fast_rtc_total; // atajos del kernel (traza)
+static uint64_t g_fast_eoi_total, g_fast_rtc_total, g_fast_post_total, g_fast_tick_total; // atajos del kernel (traza)
+static int g_rtc_insvc; // vector del tick del kernel que quedo en servicio
 static inline uint64_t rdtsc_u(void) {
   uint32_t lo, hi;
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -561,7 +562,7 @@ static void vga_poll(uint64_t t) {
       while (guard++ < 256 && aw_sys(AW_WIN_POLL, (uint64_t)g_vw, (uint64_t)&ev, 0, 0, 0) > 0) {
         switch (ev.type) {
         case AWEV_CLOSE: g_vw_closed = 1; break;
-        case AWEV_RESIZE: g_vw_cw = ev.x; g_vw_ch = ev.y; break;
+        case AWEV_RESIZE: g_vw_cw = ev.x; g_vw_ch = ev.y; g_vw_force = 1; break;
         case AWEV_FOCUS: host_focus(1); break;
         case AWEV_BLUR: host_focus(0); break;
         case AWEV_KEY: host_window_key((uint8_t)ev.x, 1); break;
@@ -573,7 +574,7 @@ static void vga_poll(uint64_t t) {
     }
     host_input_poll();
   }
-  if (t - g_vga_t_draw >= 33000000ULL) {
+  if (t - g_vga_t_draw >= 16000000ULL) { // ~60 Hz: solo se copia lo que cambia
     g_vga_t_draw = t;
     int w = 0, h = 0;
     uint32_t *px = vga_render(&w, &h);
@@ -657,24 +658,32 @@ static int irq_deliverable_now(void) {
 }
 
 // Dispositivos con tiempo: genera lo que toque y devuelve el proximo instante.
+static uint64_t g_next_nopf; // como lo que devuelve devices_poll, sin el tick del RTC
 static uint64_t devices_poll(uint64_t now) {
   uint64_t next = pit_poll(now), t;
+  uint64_t nopf = next;
   if (g_plat) {
     t = rtc_poll(now);
     if (t < next) next = t;
+    if (g_rtc_next_nopf < nopf) nopf = g_rtc_next_nopf;
     t = pm_poll(now);
+    if (t < nopf) nopf = t;
     if (t < next) next = t;
   }
   if (g_apic_on) {
     lapic_poll(now);
     if (g_lt_running && g_lt_deadline < next)
       next = g_lt_deadline;
+    if (g_lt_running && g_lt_deadline < nopf)
+      nopf = g_lt_deadline;
   }
   vga_poll(now);
   if (g_vga_on && g_want_win) {
     uint64_t w = g_vga_t_ev + 8000000ULL;
     if (w < next) next = w;
+    if (w < nopf) nopf = w;
   }
+  g_next_nopf = nopf;
   return next;
 }
 
@@ -1129,8 +1138,9 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
           nr[AVM_EXIT_HLT], nr[AVM_EXIT_SIGNAL], nr[AVM_EXIT_TPR], nr[AVM_EXIT_INTR_WINDOW]);
   for (int i = 0; i < 8 && nport[i]; i++)
     fprintf(stderr, " %x:%lu", port[i], nport[i]);
-  fprintf(stderr, " | atajos rtc=%llu eoi=%llu", (unsigned long long)g_fast_rtc_total,
-          (unsigned long long)g_fast_eoi_total);
+  fprintf(stderr, " | atajos rtc=%llu eoi=%llu out=%llu ticks=%llu", (unsigned long long)g_fast_rtc_total,
+          (unsigned long long)g_fast_eoi_total, (unsigned long long)g_fast_post_total,
+          (unsigned long long)g_fast_tick_total);
   if (g_dchk)
     fprintf(stderr, " | disco: %llu sectores comprobados, %llu fallos", (unsigned long long)g_dchk_sect,
             (unsigned long long)g_dchk_bad);
@@ -1303,6 +1313,52 @@ static void fast_before_run(struct avm_exit *x) {
     if (v >= 0 && !otra && !((g_tmr[v >> 5] >> (v & 31)) & 1) && !pic_output())
       f->flags |= AVM_FAST_EOI;
   }
+  // Tick del RTC en el kernel: solo en el caso limpio de Windows con APIC (IRQ8
+  // por el IOAPIC, de flanco y fija, el 8259 sin entregarla) y sin nada del VMM
+  // en vuelo ni el propio vector pendiente o en servicio. El vector tiene que
+  // poder interrumpir lo que haya en servicio (si no, el EOI no seria suyo).
+#ifndef AVM_SIN_TICK_KERNEL
+  if ((f->flags & AVM_FAST_RTC) && f->rtc_pie && f->rtc_period_tsc && g_apic_on &&
+      g_inflight < 0 && (LREG(L_SVR) & 0x100) &&
+      (!lapic_accept_pic() || (g_pic[1].imr & 1) || (g_pic[0].imr & 4))) {
+    uint64_t e = g_io_red[8];
+    int v = (int)(e & 0xFF), is = bm_hi(g_isr);
+    unsigned mode = (unsigned)(e >> 8) & 7;
+    if (!(e & 0x10000) && !((e >> 15) & 1) && (mode == 0 || mode == 1) && v >= 32 &&
+        !((g_irr[v >> 5] >> (v & 31)) & 1) && !((g_isr[v >> 5] >> (v & 31)) & 1) &&
+        (is < 0 || ((unsigned)v & 0xF0) > ((unsigned)is & 0xF0)))
+      f->rtc_vec = (uint8_t)v;
+  }
+#endif
+  // OUT diferidos: registros de parametros del IDE (caracteristica, cuenta, LBA,
+  // unidad) y del bus maestro (estado, direccion de la tabla PRD). Cada orden de
+  // disco de Windows escribe ~8 de estos; antes cada uno era una vuelta al VMM.
+  // La orden (0x1F7) y el arranque del DMA (base+0) siguen saliendo.
+  if (g_ide_on) {
+    int k = 0;
+    for (uint16_t p = 1; p <= 6; p++) {
+      f->post_port[k++] = (uint16_t)(0x1F0 + p);
+      f->post_port[k++] = (uint16_t)(0x170 + p);
+    }
+    unsigned bm = g_ide_bar4 & ~15u;
+    if (ide_bm_ok(bm) && bm + 0xC < 0x10000) {
+      f->post_port[k++] = (uint16_t)(bm + 2);
+      f->post_port[k++] = (uint16_t)(bm + 4);
+      f->post_port[k++] = (uint16_t)(bm + 0xA);
+      f->post_port[k++] = (uint16_t)(bm + 0xC);
+    }
+    f->flags |= AVM_FAST_POST;
+  }
+}
+// Nada mas volver AVM_RUN y antes de todo lo demas: los OUT que el kernel apunto.
+static void fast_post_apply(struct avm_exit *x) {
+  uint32_t n = x->fast.npost;
+  if (n > AVM_POST_MAX)
+    n = AVM_POST_MAX;
+  for (uint32_t i = 0; i < n; i++)
+    io_out(x->fast.post[i].port, x->fast.post[i].val, x->fast.post[i].size);
+  g_fast_post_total += n;
+  x->fast.npost = 0;
 }
 static void fast_after_exit(struct avm_exit *x) {
   struct avm_fast *f = &x->fast;
@@ -1310,7 +1366,33 @@ static void fast_after_exit(struct avm_exit *x) {
     return;
   if (f->rtc_dirty & 1)
     g_rtc.index = f->rtc_index & 0x7f;
-  if (f->rtc_dirty & 2) {
+  if (f->rtc_dirty & 4) {
+    // El kernel genero ticks y ya los entrego (o los deja en rtc_kstate): copiar
+    // C y el proximo instante sin volver a disparar la IRQ8 (seria un tick doble).
+    g_fast_tick_total += f->rtc_ticks;
+    g_rtc.cmos[REG_C] = f->rtc_c;
+    if (g_rtc.period && f->rtc_next_tsc) {
+      uint64_t nn = tsc_to_ns(f->rtc_next_tsc);
+      if (nn > g_rtc.next_periodic)
+        g_rtc.next_periodic = nn;
+    }
+    int lvl = (g_rtc.cmos[REG_C] & 0x80) != 0;
+    if (lvl != g_rtc.irq_level) {
+      g_rtc.irq_level = lvl;
+      pic_set_irq(8, lvl); // el 8259 no la entrega (condicion de rtc_vec)
+      if (lvl)
+        g_io_level |= 1u << 8;
+      else
+        g_io_level &= ~(1u << 8);
+    }
+    int v = f->rtc_vec;
+    if (v && f->rtc_kstate == 1) { // pedido sin entregar: sigue como del VMM
+      lapic_set_irr(v, 0);
+      g_inflight = x->irq_pending;
+    } else if (v && f->rtc_kstate == 2) { // en servicio: su EOI llega al LAPIC del VMM
+      g_rtc_insvc = v; // despues de los EOI absorbidos (son de vectores anteriores)
+    }
+  } else if (f->rtc_dirty & 2) {
     g_fast_rtc_total++;
     g_rtc.cmos[REG_C] = f->rtc_c;
     if (g_rtc.period && f->rtc_next_tsc) {
@@ -1326,6 +1408,11 @@ static void fast_eoi_apply(const struct avm_exit *x) {
   for (uint32_t i = 0; i < x->fast.eoi_count; i++)
     lapic_write(0xB0, 0);
   g_fast_eoi_total += x->fast.eoi_count;
+  if (g_rtc_insvc) { // tick del kernel aun en servicio
+    bm_clr(g_tmr, g_rtc_insvc);
+    bm_set(g_isr, g_rtc_insvc);
+    g_rtc_insvc = 0;
+  }
 }
 
 static int run_loop(uint64_t deadline_ns) {
@@ -1369,12 +1456,14 @@ static int run_loop(uint64_t deadline_ns) {
       traza(tnow, NULL);
     uint64_t next = devices_poll(tnow);
     irq_before_run();
-    set_run_timeout(tnow, next);
     fast_before_run(&x);
+    // Con el tick del RTC en el kernel no hace falta despertar al VMM por el.
+    set_run_timeout(tnow, x.fast.rtc_vec ? g_next_nopf : next);
     if (ioctl(g_vm, AVM_RUN, &x) < 0) {
       perror("AVM_RUN");
       return 1;
     }
+    fast_post_apply(&x);
     fast_after_exit(&x);
     irq_after_exit(&x);
     fast_eoi_apply(&x);

@@ -11,5 +11,6 @@ int avm_test_open(const char *path, int flags, ...);
 int avm_test_ioctl(int fd, unsigned long req, ...);
 #define open avm_test_open
 #define ioctl avm_test_ioctl
+#define AVM_SIN_TICK_KERNEL 1 // el backend de pruebas no genera ticks del RTC
 #endif
 #endif

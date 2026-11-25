@@ -225,6 +225,9 @@ static void rtc_check_alarm_update(void) {
 }
 
 // Llamada en cada vuelta del bucle. Devuelve el proximo instante de interes.
+// Proximo instante de rtc_poll sin contar el tick periodico (lo genera el kernel
+// cuando puede: avm_fast.rtc_vec).
+static uint64_t g_rtc_next_nopf = ~0ULL;
 static uint64_t rtc_poll(uint64_t now) {
   rtc_check_alarm_update();
   uint64_t next = ~0ULL;
@@ -232,6 +235,7 @@ static uint64_t rtc_poll(uint64_t now) {
     int64_t ns = rtc_guest_ns() % 1000000000LL;
     next = now + (uint64_t)(1000000000LL - ns);
   }
+  g_rtc_next_nopf = next;
   if (!g_rtc.period)
     return next;
   if (now >= g_rtc.next_periodic) {
@@ -245,6 +249,7 @@ static uint64_t rtc_poll(uint64_t now) {
       g_rtc.cmos[REG_C] |= 0x80; // IRQF
     rtc_irq_update();
   }
+  g_rtc_next_nopf = next;
   // Sin PIE el VMM no se despierta por PF: se calcula al leer C.
   if (!(g_rtc.cmos[REG_B] & 0x40))
     return next;

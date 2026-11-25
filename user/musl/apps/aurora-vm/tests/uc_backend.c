@@ -403,8 +403,26 @@ static void intr_hook(uc_engine *u, uint32_t intno, void *ud) {
 // ---------------------------------------------------------------------------
 // E/S: el hilo de la CPU espera la respuesta del VMM (como pending_in del kernel)
 // ---------------------------------------------------------------------------
+// OUT diferidos (AVM_FAST_POST), como el kernel: se apuntan sin salir.
+static struct avm_fast g_uc_fast;
+static uint32_t g_uc_npost;
+static struct avm_post g_uc_post[AVM_POST_MAX];
+
 static uint32_t io_exit(uint32_t port, int size, int write, uint32_t v) {
   pthread_mutex_lock(&mu);
+  if (write && (g_uc_fast.flags & AVM_FAST_POST) && g_uc_npost < AVM_POST_MAX && port) {
+    for (int i = 0; i < 16; i++) {
+      if (g_uc_fast.post_port[i] != port)
+        continue;
+      struct avm_post *p = &g_uc_post[g_uc_npost++];
+      p->port = (uint16_t)port;
+      p->size = (uint8_t)size;
+      p->pad = 0;
+      p->val = size == 4 ? v : v & ((1u << (8 * size)) - 1);
+      pthread_mutex_unlock(&mu);
+      return 0;
+    }
+  }
   memset(&g_ev, 0, sizeof(g_ev));
   g_ev.reason = AVM_EXIT_IO;
   g_ev.io.port = (uint16_t)port;
@@ -705,6 +723,8 @@ static void *cpu_thread(void *arg) {
 // ---------------------------------------------------------------------------
 static int vm_run(struct avm_exit *x) {
   pthread_mutex_lock(&mu);
+  g_uc_fast = x->fast;
+  g_uc_fast.flags &= AVM_FAST_POST; // los demas atajos no se emulan aqui
   if (g_state == ST_IN_HOOK) {
     g_reply = x->io.data;
     g_reply_ready = 1;
@@ -717,6 +737,9 @@ static int vm_run(struct avm_exit *x) {
   g_event_ready = 0;
   *x = g_ev;
   memset(&x->fast, 0, sizeof(x->fast)); // sin atajos de kernel: todo lo hace el VMM
+  x->fast.npost = g_uc_npost; // salvo los OUT diferidos
+  memcpy(x->fast.post, g_uc_post, sizeof(g_uc_post[0]) * g_uc_npost);
+  g_uc_npost = 0;
   x->irq_pending = g_pending;
   x->tpr = g_tpr;
   pthread_mutex_unlock(&mu);

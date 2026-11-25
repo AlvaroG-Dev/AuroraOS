@@ -739,6 +739,13 @@ static void vga_line(uint32_t *d, uint32_t addr, int width, int kind, int bpp) {
     }
     break;
   default: // 15/16/24/32 bits
+    if (bpp == 32 && !(addr & 3) && (uint64_t)addr + (uint64_t)width * 4 <= VGA_LFB_SIZE) {
+      // Lo normal con Windows (VBE 32 bits): la linea ya es XRGB; solo falta el alfa.
+      const uint32_t *s = (const uint32_t *)(g_lfb + addr);
+      for (int x = 0; x < width; x++)
+        d[x] = s[x] | 0xFF000000u;
+      break;
+    }
     for (int x = 0; x < width; x++) {
       uint32_t c;
       if (bpp == 15 || bpp == 16) {

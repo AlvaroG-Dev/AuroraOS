@@ -216,6 +216,7 @@ struct avm_vm {
   struct avm_fast fast; // atajos de dispositivos (ver aurora_vm.h)
   // IN pendiente de completar en el siguiente AVM_RUN
   bool pending_in;
+  uint8_t rtc_k; // tick del RTC del kernel: 0 nada, 1 pedido (pending_irq), 2 en servicio
   uint8_t pending_in_size;
   uint8_t pending_in_len;
   struct slot slots[AVM_MAX_SLOTS];
@@ -1058,6 +1059,25 @@ static int guest_phys_read(struct avm_vm *vm, uint64_t gpa, void *buf, size_t le
 // reloj de Windows lee en cada tick. PF avanza sobre el TSC con la misma rejilla
 // que el VMM (rtc_next_tsc/rtc_period_tsc); los periodos sin leer se funden en
 // uno como en el chip. true = hecho (el llamador salta la instruccion).
+// OUT diferido (AVM_FAST_POST): se apunta y el huesped sigue sin salir al VMM.
+// Con la lista llena sale como siempre (el VMM aplica antes las apuntadas).
+static bool fast_post_out(struct avm_vm *vm, uint16_t port, uint32_t size, uint64_t rax) {
+  struct avm_fast *f = &vm->fast;
+  if (!(f->flags & AVM_FAST_POST) || f->npost >= AVM_POST_MAX || !port)
+    return false;
+  for (int i = 0; i < 16; i++) {
+    if (f->post_port[i] != port)
+      continue;
+    struct avm_post *p = &f->post[f->npost++];
+    p->port = port;
+    p->size = (uint8_t)size;
+    p->pad = 0;
+    p->val = (uint32_t)(rax & (size == 4 ? 0xFFFFFFFFu : (1u << (8 * size)) - 1));
+    return true;
+  }
+  return false;
+}
+
 static bool fast_rtc_io(struct avm_vm *vm, struct gregs *g, uint16_t port, uint32_t size,
                         bool in) {
   struct avm_fast *f = &vm->fast;
@@ -1118,7 +1138,8 @@ static int guest_lin_to_phys(struct avm_vm *vm, uint64_t lin, uint64_t *gpa) {
 static bool fast_eoi(struct avm_vm *vm, uint64_t gpa) {
   // Una por vuelta y solo con la interrupcion inyectada ya entregada: el VMM
   // activa el atajo cuando sabe a que vector ira ese EOI (y que es de flanco).
-  if (!(vm->fast.flags & AVM_FAST_EOI) || gpa != 0xFEE000B0ULL || vm->pending_irq >= 0)
+  bool rtc = vm->rtc_k == 2;
+  if ((!rtc && !(vm->fast.flags & AVM_FAST_EOI)) || gpa != 0xFEE000B0ULL || vm->pending_irq >= 0)
     return false;
   if (!(vmread(F_GUEST_EFER) & (1ULL << 10)) || !(vmread(F_GUEST_CS_AR) & (1u << 13)))
     return false;
@@ -1633,6 +1654,21 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
         vmwrite(F_ENTRY_INSTR_LEN, vm->reinj_len);
       vm->reinj = false;
     }
+    // Tick del reloj (RTC con PIE) generado aqui mismo: ver avm_fast.rtc_vec.
+    // Con IRQF aun puesto (C sin leer) la linea sigue alta: no hay flanco nuevo.
+    if (vm->fast.rtc_vec && !vm->rtc_k && vm->pending_irq < 0 && vm->fast.rtc_pie &&
+        vm->fast.rtc_period_tsc && (vm->fast.flags & AVM_FAST_RTC) && !(vm->fast.rtc_c & 0x80)) {
+      struct avm_fast *f = &vm->fast;
+      uint64_t now = rdtsc_k();
+      if (now >= f->rtc_next_tsc) {
+        uint64_t n = (now - f->rtc_next_tsc) / f->rtc_period_tsc + 1;
+        f->rtc_next_tsc += n * f->rtc_period_tsc;
+        f->rtc_c |= 0xC0; // PF + IRQF
+        f->rtc_dirty |= 6;
+        vm->pending_irq = (int32_t)(f->rtc_vec | AVM_IRQ_TPR);
+        vm->rtc_k = 1;
+      }
+    }
     // Interrupcion pendiente del VMM: inyectar si el huesped puede recibirla.
     if (vm->pending_irq >= 0) {
       uint64_t rfl = vmread(F_GUEST_RFLAGS);
@@ -1646,6 +1682,8 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
       } else if ((rfl & (1u << 9)) && !(intr & 3) && !(info & (1u << 31))) {
         vmwrite(F_ENTRY_INTR_INFO, ((uint32_t)vm->pending_irq & 0xFF) | (1u << 31));
         vm->pending_irq = -1;
+        if (vm->rtc_k == 1)
+          vm->rtc_k = 2; // si la entrega se corta, reinj la repite
       } else {
         proc |= PROC_INTR_WINDOW;
       }
@@ -1870,8 +1908,13 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
         goto leave;
       }
       if (((qual >> 1) & 1) && fast_eoi(vm, gpa)) {
-        vm->fast.eoi_count++;
-        vm->fast.flags &= ~AVM_FAST_EOI;
+        if (vm->rtc_k == 2) { // EOI del tick del kernel (es el de mas prioridad en servicio)
+          vm->rtc_k = 0;
+          vm->fast.rtc_ticks++;
+        } else {
+          vm->fast.eoi_count++;
+          vm->fast.flags &= ~AVM_FAST_EOI;
+        }
         continue;
       }
       x->reason = AVM_EXIT_MMIO; // F1: sin decodificar la instruccion
@@ -1932,7 +1975,8 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
         ret = 1;
         goto leave;
       }
-      if (fast_rtc_io(vm, &g, (uint16_t)(q >> 16), size, in)) {
+      if (fast_rtc_io(vm, &g, (uint16_t)(q >> 16), size, in) ||
+          (!in && fast_post_out(vm, (uint16_t)(q >> 16), size, g.rax))) {
         skip_insn(vm);
         continue;
       }
@@ -2087,6 +2131,10 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
     vm->fast = prev.fast;
     vm->fast.eoi_count = 0;
     vm->fast.rtc_dirty = 0;
+    vm->fast.npost = 0; // el VMM ya aplico las anteriores
+    vm->fast.rtc_kstate = 0;
+    vm->fast.rtc_ticks = 0;
+    vm->rtc_k = 0;
     if (vm->pending_in) { // el VMM rellena io.data del IN anterior
       uint32_t mask = vm->pending_in_size == 4 ? 0xFFFFFFFFu
                                                : (1u << (8 * vm->pending_in_size)) - 1;
@@ -2124,6 +2172,8 @@ static int64_t vm_run(struct avm_vm *vm, uint64_t uarg) {
   }
   x.irq_pending = vm->pending_irq;
   x.tpr = vm->tpr;
+  vm->fast.rtc_kstate = vm->rtc_k; // el tick a medias pasa a ser del VMM
+  vm->rtc_k = 0;
   x.fast = vm->fast;
   if (copy_to_user((void *)uarg, &x, sizeof(x)) < 0)
     rc = -EFAULT;
@@ -2393,6 +2443,7 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
     vm->interruptibility = 0;
     vm->regs.cr2 = 0;
     memset(&vm->fast, 0, sizeof(vm->fast));
+    vm->rtc_k = 0;
     uint8_t *gfx = (uint8_t *)phys_to_virt(vm->fx_page_phys) + 512;
     memset(gfx, 0, 512);
     *(uint16_t *)gfx = 0x37F;

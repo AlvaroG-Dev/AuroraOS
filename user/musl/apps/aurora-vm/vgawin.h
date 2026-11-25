@@ -58,14 +58,47 @@ static void vw_open(int w, int h) {
   }
 }
 
+// Copia a la ventana solo las filas que cambiaron desde el ultimo fotograma (el
+// cursor de Windows, un texto que se escribe...): antes iban los 3 MB de un
+// 1024x768 en cada fotograma y el VMM no hacia correr al huesped mientras tanto.
+static uint32_t *g_vw_prev;
+static size_t g_vw_prev_n;
+static int g_vw_force = 1;
 static void vw_present(const uint32_t *px, int w, int h) {
-  if (g_vw < 0 || w != g_vw_w || h != g_vw_h)
+  if (g_vw < 0 || w != g_vw_w || h != g_vw_h) {
     vw_open(w, h);
+    g_vw_force = 1;
+  }
   if (g_vw < 0)
     return;
-  struct aw_blit b = {.win_id = g_vw, .x = 0, .y = 0,
-                      .w = w < g_vw_cw ? w : g_vw_cw, .h = h < g_vw_ch ? h : g_vw_ch,
-                      .src_x = 0, .src_y = 0, .src_stride = w, .pixels = (uint32_t *)px};
+  size_t n = (size_t)w * (size_t)h;
+  if (n > g_vw_prev_n) {
+    uint32_t *p = realloc(g_vw_prev, n * 4);
+    if (!p)
+      return;
+    g_vw_prev = p;
+    g_vw_prev_n = n;
+    g_vw_force = 1;
+  }
+  int y0 = 0, y1 = h; // [y0, y1)
+  if (!g_vw_force) {
+    while (y0 < h && !memcmp(px + (size_t)y0 * w, g_vw_prev + (size_t)y0 * w, (size_t)w * 4))
+      y0++;
+    if (y0 == h)
+      return; // nada nuevo
+    while (y1 > y0 && !memcmp(px + (size_t)(y1 - 1) * w, g_vw_prev + (size_t)(y1 - 1) * w, (size_t)w * 4))
+      y1--;
+  }
+  memcpy(g_vw_prev + (size_t)y0 * w, px + (size_t)y0 * w, (size_t)(y1 - y0) * w * 4);
+  g_vw_force = 0;
+  int ch = h < g_vw_ch ? h : g_vw_ch;
+  if (y1 > ch)
+    y1 = ch;
+  if (y1 <= y0)
+    return;
+  struct aw_blit b = {.win_id = g_vw, .x = 0, .y = y0,
+                      .w = w < g_vw_cw ? w : g_vw_cw, .h = y1 - y0,
+                      .src_x = 0, .src_y = y0, .src_stride = w, .pixels = (uint32_t *)px};
   aw_sys(AW_WIN_BLIT, (uint64_t)&b, 0, 0, 0, 0);
 }
 
