@@ -712,6 +712,137 @@ static int dbg_lin_read(const struct avm_regs *r, uint64_t lin, uint8_t *out, in
   return k;
 }
 
+// Modulo de Windows que contiene `a`: busca hacia atras la cabecera MZ/PE (hasta
+// 32 MiB) y saca el nombre del PDB del directorio de depuracion (registro RSDS,
+// lo llevan todos los binarios de Microsoft). Escribe "nombre.pdb+desplazamiento".
+static void dbg_module(const struct avm_regs *r, uint64_t a, char *out, int on) {
+  snprintf(out, (size_t)on, "?");
+  if ((a >> 47) != 0x1FFFF)
+    return;
+  for (uint64_t b = a & ~0xFFFULL, k = 0; k < 8192; k++, b -= 0x1000) {
+    uint8_t mz[2];
+    if (dbg_lin_read(r, b, mz, 2) != 2)
+      continue; // pagina ausente: seguir buscando
+    if (mz[0] != 'M' || mz[1] != 'Z')
+      continue;
+    uint32_t lfa, pe, nd, dbg_rva, dbg_sz, img;
+    if (dbg_lin_read(r, b + 0x3C, (uint8_t *)&lfa, 4) != 4 || lfa > 0x1000 ||
+        dbg_lin_read(r, b + lfa, (uint8_t *)&pe, 4) != 4 || pe != 0x4550)
+      continue;
+    dbg_lin_read(r, b + lfa + 0x50, (uint8_t *)&img, 4); // SizeOfImage (PE32+)
+    if (a - b >= img)
+      return; // la cabecera de otro modulo: `a` no esta en ninguno conocido
+    snprintf(out, (size_t)on, "base %llx+%llx", (unsigned long long)b, (unsigned long long)(a - b));
+    if (dbg_lin_read(r, b + lfa + 0x84, (uint8_t *)&nd, 4) != 4 || nd < 7 ||
+        dbg_lin_read(r, b + lfa + 0x88 + 6 * 8, (uint8_t *)&dbg_rva, 4) != 4 ||
+        dbg_lin_read(r, b + lfa + 0x88 + 6 * 8 + 4, (uint8_t *)&dbg_sz, 4) != 4)
+      return;
+    for (uint32_t e = 0; e + 28 <= dbg_sz && e < 28 * 8; e += 28) {
+      uint32_t d[7];
+      if (dbg_lin_read(r, b + dbg_rva + e, (uint8_t *)d, 28) != 28)
+        return;
+      if (d[3] != 2 || d[4] < 25) // IMAGE_DEBUG_TYPE_CODEVIEW
+        continue;
+      char cv[160] = {0};
+      int m = dbg_lin_read(r, b + d[5], (uint8_t *)cv, (int)sizeof(cv) - 1);
+      if (m < 25 || memcmp(cv, "RSDS", 4))
+        return;
+      cv[m] = 0;
+      const char *nm = cv + 24, *sl = strrchr(nm, '\\');
+      snprintf(out, (size_t)on, "%.60s+%llx", sl ? sl + 1 : nm, (unsigned long long)(a - b));
+      return;
+    }
+    return;
+  }
+}
+
+static void dbg_code(const struct avm_regs *r, const char *what, uint64_t a) {
+  char mod[96];
+  uint8_t cb[64];
+  dbg_module(r, a, mod, (int)sizeof(mod));
+  int m = dbg_lin_read(r, a - 32, cb, 64);
+  fprintf(stderr, "    %s %llx (%s):", what, (unsigned long long)a, mod);
+  for (int k = 0; k < m; k++)
+    fprintf(stderr, k == 32 ? " |%02x" : " %02x", cb[k]);
+  fprintf(stderr, "\n");
+}
+
+// Windows x64 en la pila: CONTEXT (ContextFlags 0x1000xx en +0x30, CS 0x10/0x33
+// en +0x38) y EXCEPTION_RECORD (codigo NTSTATUS de error y direccion del codigo).
+// Con eso se ve la excepcion original aunque la pantalla azul sea de otra cosa
+// (p. ej. un fallo de pagina mientras se despachaba la primera).
+static void dbg_win_records(const struct avm_regs *r, const uint8_t *st, int got, uint64_t sp) {
+  int shown = 0;
+  for (int i = 0; i + 0x100 <= got && shown < 8; i += 8) {
+    uint32_t cf;
+    uint16_t cs;
+    memcpy(&cf, st + i + 0x30, 4);
+    memcpy(&cs, st + i + 0x38, 2);
+    if ((cf & 0xFFFFFF00u) != 0x00100000u || !(cf & 1) || (cs != 0x10 && cs != 0x33))
+      continue;
+    uint64_t rip, rsp, rax, rcx, rdx;
+    uint32_t efl;
+    memcpy(&efl, st + i + 0x44, 4);
+    memcpy(&rax, st + i + 0x78, 8);
+    memcpy(&rcx, st + i + 0x80, 8);
+    memcpy(&rdx, st + i + 0x88, 8);
+    memcpy(&rsp, st + i + 0x98, 8);
+    memcpy(&rip, st + i + 0xF8, 8);
+    shown++;
+    fprintf(stderr, "  CONTEXT en +%x (flags %x): rip=%llx rsp=%llx eflags=%x (IF=%d) rax=%llx rcx=%llx rdx=%llx\n",
+            i, cf, (unsigned long long)rip, (unsigned long long)rsp, efl, (efl >> 9) & 1,
+            (unsigned long long)rax, (unsigned long long)rcx, (unsigned long long)rdx);
+    dbg_code(r, "codigo en rip", rip);
+  }
+  shown = 0;
+  for (int i = 0; i + 0x28 <= got && shown < 6; i += 8) {
+    uint32_t code, flags, np;
+    uint64_t addr, p0, p1;
+    memcpy(&code, st + i, 4);
+    memcpy(&flags, st + i + 4, 4);
+    memcpy(&addr, st + i + 0x10, 8);
+    memcpy(&np, st + i + 0x18, 4);
+    if ((code & 0xF0000000u) != 0xC0000000u && code != 0x80000003u && code != 0x80000004u)
+      continue;
+    if ((code & 0x0FFF0000u) != 0 || flags > 0xFF || np > 15 || (addr >> 47) != 0x1FFFF)
+      continue;
+    memcpy(&p0, st + i + 0x20, 8);
+    p1 = 0;
+    if (i + 0x30 <= got)
+      memcpy(&p1, st + i + 0x28, 8);
+    shown++;
+    fprintf(stderr, "  EXCEPTION_RECORD en %llx: codigo %08x flags %x direccion %llx params %u [%llx %llx]\n",
+            (unsigned long long)(sp + (uint64_t)i), code, flags, (unsigned long long)addr, np,
+            (unsigned long long)p0, (unsigned long long)p1);
+    dbg_code(r, "codigo de la excepcion", addr);
+  }
+  // TSS (RSP0, IST1-7) e IDT de los vectores con pila propia: para saber en que
+  // pila (y por tanto en que manejador) estaba la CPU.
+  uint8_t tss[0x5C];
+  if (dbg_lin_read(r, r->tr.base, tss, (int)sizeof(tss)) == (int)sizeof(tss)) {
+    fprintf(stderr, "  TSS:");
+    uint64_t v;
+    memcpy(&v, tss + 4, 8);
+    fprintf(stderr, " rsp0=%llx", (unsigned long long)v);
+    for (int k = 0; k < 7; k++) {
+      memcpy(&v, tss + 0x24 + 8 * k, 8);
+      fprintf(stderr, " ist%d=%llx", k + 1, (unsigned long long)v);
+    }
+    fprintf(stderr, "\n");
+  }
+  static const int vecs[] = {1, 2, 3, 8, 13, 14, 18, 0x2C, 0x2F, 0xD1, 0xE1};
+  fprintf(stderr, "  IDT:");
+  for (unsigned k = 0; k < sizeof(vecs) / sizeof(vecs[0]); k++) {
+    uint8_t g[16];
+    if (dbg_lin_read(r, r->idt_base + (uint64_t)vecs[k] * 16, g, 16) != 16)
+      continue;
+    uint64_t h = (uint64_t)(g[0] | g[1] << 8) | ((uint64_t)(g[6] | g[7] << 8) << 16) |
+                 ((uint64_t)(g[8] | g[9] << 8 | g[10] << 16 | (uint32_t)g[11] << 24) << 32);
+    fprintf(stderr, " %x=%llx/ist%d", vecs[k], (unsigned long long)h, g[4] & 7);
+  }
+  fprintf(stderr, "\n");
+}
+
 // Para diagnosticar un huesped parado (p. ej. Windows en KeBugCheckEx): codigo
 // antes de rip, la pila y las bases de segmento. Con esto se saca el codigo de
 // la pantalla azul aunque no llegue a dibujarse.
@@ -765,6 +896,7 @@ static void dump_guest_mem(const struct avm_regs *r) {
     if (!(rc && rc < 0x400))
       continue;
     ept_check("pantalla azul");
+    dbg_win_records(r, st, got, sp);
     if (rc == 0xEF) { // CRITICAL_PROCESS_DIED: nombre del proceso (EPROCESS+0x5A8 en 19041)
       char nm[16] = {0};
       if (dbg_lin_read(r, rd + 0x5A8, (uint8_t *)nm, 15) == 15)
@@ -791,6 +923,10 @@ static void dump_guest_mem(const struct avm_regs *r) {
       if (v != a4 || j < 0x168)
         continue;
       const uint8_t *tf = st + j - 0x168;
+      uint16_t tcs;
+      memcpy(&tcs, tf + 0x170, 2);
+      if (tcs != 0x10 && tcs != 0x33) // SegCs: si no, no es un KTRAP_FRAME
+        continue;
       static const char *nm[] = {"rax", "rcx", "rdx", "r8", "r9", "r10", "r11"};
       fprintf(stderr, "    KTRAP_FRAME:");
       for (int k = 0; k < 7; k++) {
@@ -819,9 +955,9 @@ static void dump_guest_mem(const struct avm_regs *r) {
   }
   // Codigo alrededor de las direcciones del nucleo que hay en la pila (retornos,
   // la direccion de la excepcion en un CONTEXT...): con eso se reconoce la funcion.
-  uint64_t seen[24];
+  uint64_t seen[48];
   int ns = 0;
-  for (int i = 0; i + 8 <= got && ns < 24; i += 8) {
+  for (int i = 0; i + 8 <= got && ns < 48; i += 8) {
     uint64_t v;
     memcpy(&v, st + i, 8);
     if ((v >> 47) != 0x1FFFF || (v >= sp - 0x20000 && v < sp + 0x20000))
@@ -836,7 +972,9 @@ static void dump_guest_mem(const struct avm_regs *r) {
     int m = dbg_lin_read(r, v - 32, cb, 64);
     if (m < 64)
       continue;
-    fprintf(stderr, "  [%llx-20]:", (unsigned long long)v);
+    char mod[96];
+    dbg_module(r, v, mod, (int)sizeof(mod));
+    fprintf(stderr, "  [%llx-20] (%s):", (unsigned long long)v, mod);
     for (int k = 0; k < 64; k++)
       fprintf(stderr, k == 32 ? " |%02x" : " %02x", cb[k]);
     fprintf(stderr, "\n");

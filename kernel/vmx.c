@@ -1711,8 +1711,12 @@ static int run_window(struct avm_vm *vm, struct avm_exit *x, uint64_t deadline_t
     // Evento que se estaba entregando cuando salimos (interrupcion inyectada,
     // excepcion, INT n): hay que volver a inyectarlo o se pierde. Las salidas
     // por excepcion (solo con depuracion) reinyectan la suya y no este.
+    // Un NMI del host (salida por NMI, tipo 2) no es del huesped: si llego en
+    // mitad de una entrega (una interrupcion inyectada empujandose en la pila del
+    // huesped), esa entrega hay que repetirla o el huesped la pierde.
     uint64_t idtv = vmread(F_IDTV_INFO);
-    if ((idtv & (1u << 31)) && reason != XR_EXC_NMI) {
+    bool host_nmi = reason == XR_EXC_NMI && (((uint32_t)vmread(F_EXIT_INTR_INFO) >> 8) & 7) == 2;
+    if ((idtv & (1u << 31)) && (reason != XR_EXC_NMI || host_nmi)) {
       vm->reinj = true;
       vm->reinj_info = (uint32_t)idtv;
       vm->reinj_err = (idtv & (1u << 11)) ? (uint32_t)vmread(F_IDTV_ERR) : 0;
