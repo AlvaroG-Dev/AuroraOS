@@ -87,23 +87,55 @@ while ! mkdir "$lock" 2>/dev/null; do
 done
 echo $$ > "$lock/pid"
 trap 'rm -rf "$lock"' EXIT INT TERM
-if [ ! -f "$WINEPREFIX/system.reg" ]; then
-    # Crear el prefijo no necesita la GPU: siempre por software, y con tope de
-    # tiempo para que un proceso colgado no deje a Wine parado para siempre.
-    echo "aurora-wine: creando el prefijo de Wine en $WINEPREFIX (la primera vez tarda un poco)..." >&2
-    log "creando el prefijo"
+# Prefijo completo: las DLL de sistema que casi todo programa importa
+# (comctl32 de winsxs, la de los controles comunes). Un prefijo a medias
+# (wineboot cortado por un apagado o un cuelgue) tiene system.reg pero no
+# estas, y todo falla con "Library comctl32.dll ... not found".
+pfx_completo() {
+    ls -d "$WINEPREFIX"/drive_c/windows/winsxs/amd64_microsoft.windows.common-controls_*/comctl32.dll >/dev/null 2>&1 &&
+    [ -e "$WINEPREFIX/drive_c/windows/system32/comdlg32.dll" ]
+}
+# wineboot sin GPU (siempre por software) y con tope de tiempo, para que un
+# proceso colgado no deje a Wine parado para siempre.
+wineboot_aurora() {  # $1 = -i (crear) o -u (actualizar/reparar)
     wineserver -k 2>/dev/null
-    ( wine_sw; timeout 600 wineboot -i ) >>"$AURORA_WINE_LOG" 2>&1
+    ( wine_sw; timeout 600 wineboot "$1" ) >>"$AURORA_WINE_LOG" 2>&1
     rc=$?
-    # 124/137: el tope de tiempo lo paro (system.reg puede tardar unos
-    # segundos más en escribirse: no sirve para saber si fue bien).
+    timeout 60 wineserver -w 2>/dev/null
+    # 124/137: el tope de tiempo lo paro.
     if [ $rc = 124 ] || [ $rc = 137 ]; then
-        log "wineboot no termino (rc=$rc)"
+        log "wineboot $1 no termino (rc=$rc)"
         wineserver -k 2>/dev/null
-        echo "aurora-wine: no se pudo crear el prefijo (rc=$rc); detalles en $AURORA_WINE_LOG" >&2
+        return 1
+    fi
+    return 0
+}
+ok="$WINEPREFIX/.aurora-prefijo"
+if [ ! -f "$ok" ] || ! pfx_completo; then
+    if [ -f "$WINEPREFIX/system.reg" ] && ! pfx_completo; then
+        echo "aurora-wine: el prefijo de Wine esta incompleto; reparandolo (tarda un poco)..." >&2
+        log "prefijo incompleto: wineboot -u"
+        wineboot_aurora -u
+        if ! pfx_completo; then
+            viejo="$WINEPREFIX.roto-$(date +%Y%m%d-%H%M%S)"
+            log "sigue incompleto: lo aparto en $viejo y creo uno nuevo"
+            mv "$WINEPREFIX" "$viejo"
+            rm -f "$WINEPREFIX/.aurora-theme"
+        fi
+    fi
+    if [ ! -f "$WINEPREFIX/system.reg" ]; then
+        echo "aurora-wine: creando el prefijo de Wine en $WINEPREFIX (la primera vez tarda un poco)..." >&2
+        log "creando el prefijo"
+        wineboot_aurora -i
+    fi
+    if pfx_completo; then
+        touch "$ok"
+        log "prefijo listo"
+    else
+        log "no se pudo dejar el prefijo completo"
+        echo "aurora-wine: no se pudo preparar el prefijo de Wine; detalles en $AURORA_WINE_LOG" >&2
         exit 1
     fi
-    log "prefijo creado"
 fi
 if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
     wine regedit /S "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
