@@ -6,6 +6,18 @@
 # Aurora (wine.inf); aquí se sigue el modo claro/oscuro del sistema
 # (/data/aurora-theme, el mismo que usan GTK y Qt) cada vez que se lanza.
 : "${WINEPREFIX:=${HOME:-/root}/.wine}"
+# Si el prefijo no se puede escribir (en el live, /data sin montar: HOME es de
+# solo lectura), Wine salía con código 1 sin decir nada. Entonces se usa un
+# prefijo en RAM, que se pierde al apagar.
+pfx_ok() {
+    if [ -d "$1" ]; then [ -w "$1" ]; else d=$(dirname "$1"); mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; fi
+}
+pfx_aviso=
+if ! pfx_ok "$WINEPREFIX"; then
+    pfx_aviso="$WINEPREFIX no se puede escribir; uso /tmp/aurora-wine/.wine (en RAM)"
+    WINEPREFIX=/tmp/aurora-wine/.wine
+    mkdir -p /tmp/aurora-wine
+fi
 export WINEPREFIX
 # Sin pantalla Wayland/X propia: la sesión de Aurora (aurora-wayland + Xwayland).
 [ -n "$DISPLAY" ] || export DISPLAY=:0
@@ -36,13 +48,17 @@ wine_sw() {
     export LIBGL_ALWAYS_SOFTWARE=1
 }
 [ "${AURORA_WINE_GPU:-$gpu_def}" = 0 ] && wine_sw
-# Registro: errores de Wine en /data/aurora-wine.log (si /data se puede escribir).
+# Registro: errores de Wine en /data/aurora-wine.log, o en /tmp si /data no
+# se puede escribir.
 if [ -z "$AURORA_WINE_LOG" ]; then
     AURORA_WINE_LOG=/dev/null
-    if [ -d /data ] && touch /data/aurora-wine.log 2>/dev/null; then
-        AURORA_WINE_LOG=/data/aurora-wine.log
-        : "${WINEDEBUG:=err+all,fixme-all}"
-    fi
+    for f in /data/aurora-wine.log /tmp/aurora-wine.log; do
+        if [ -d "$(dirname $f)" ] && touch "$f" 2>/dev/null; then
+            AURORA_WINE_LOG=$f
+            : "${WINEDEBUG:=err+all,fixme-all}"
+            break
+        fi
+    done
 fi
 : "${WINEDEBUG:=-all}"
 export WINEDEBUG
@@ -53,6 +69,24 @@ mode=dark
 [ "${AURORA_THEME:-$(cat /data/aurora-theme 2>/dev/null)}" = light ] && mode=light
 
 log "$* (GPU ${AURORA_WINE_GPU:-$gpu_def}, card0=${drv:-?}, prefijo $WINEPREFIX)"
+[ -n "$pfx_aviso" ] && log "$pfx_aviso" && echo "aurora-wine: $pfx_aviso" >&2
+
+# Dos lanzamientos a la vez (p. ej. dos iconos del Dock seguidos) creaban el
+# prefijo o aplicaban el tema los dos a la vez. Se hace uno detrás de otro.
+lock="$WINEPREFIX.aurora-lock"
+mkdir -p "$(dirname "$WINEPREFIX")" 2>/dev/null
+while ! mkdir "$lock" 2>/dev/null; do
+    # El cerrojo de una ejecución que ya no existe (o de antes de apagar) se quita.
+    dueno=$(cat "$lock/pid" 2>/dev/null)
+    if [ -z "$dueno" ] || ! kill -0 "$dueno" 2>/dev/null; then
+        sleep 1
+        [ "$(cat "$lock/pid" 2>/dev/null)" = "$dueno" ] && rm -rf "$lock"
+        continue
+    fi
+    sleep 1
+done
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT INT TERM
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
     # Crear el prefijo no necesita la GPU: siempre por software, y con tope de
     # tiempo para que un proceso colgado no deje a Wine parado para siempre.
@@ -74,6 +108,7 @@ fi
 if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
     wine regedit /S "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
 fi
+rm -rf "$lock"; trap - EXIT INT TERM
 [ "$1" = "--setup" ] && exit 0
 [ $# -eq 0 ] && set -- winecfg
 case "$1" in
