@@ -64,7 +64,12 @@ static void vw_open(int w, int h) {
 static uint32_t *g_vw_prev;
 static size_t g_vw_prev_n;
 static int g_vw_force = 1;
+static unsigned g_vw_frames;
 static void vw_present(const uint32_t *px, int w, int h) {
+  // Cada ~2 s (120 fotogramas) se repinta entero: si el compositor perdio
+  // alguna franja (quedaban bandas negras), se recupera sola.
+  if (++g_vw_frames % 120 == 0)
+    g_vw_force = 1;
   if (g_vw < 0 || w != g_vw_w || h != g_vw_h) {
     vw_open(w, h);
     g_vw_force = 1;
@@ -99,7 +104,8 @@ static void vw_present(const uint32_t *px, int w, int h) {
   struct aw_blit b = {.win_id = g_vw, .x = 0, .y = y0,
                       .w = w < g_vw_cw ? w : g_vw_cw, .h = y1 - y0,
                       .src_x = 0, .src_y = y0, .src_stride = w, .pixels = (uint32_t *)px};
-  aw_sys(AW_WIN_BLIT, (uint64_t)&b, 0, 0, 0, 0);
+  if (aw_sys(AW_WIN_BLIT, (uint64_t)&b, 0, 0, 0, 0) < 0)
+    g_vw_force = 1; // no llego: la proxima vez, todo
 }
 
 #endif
