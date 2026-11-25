@@ -60,6 +60,11 @@ long strncpy_from_user(char *dst, const char *src, size_t max) {
   // No validamos max bytes porque la string puede terminar antes; el
   // asm hace las lecturas byte a byte y cada una tiene su fixup.
   long n = raw_strncpy_from_user(dst, src, max);
+  // Como en Linux, n == max significa "sin terminar". Varios llamantes usan
+  // dst como cadena sin mirarlo (memfd_create con un nombre largo hacia strlen
+  // por la pila del kernel): se deja terminada igualmente (truncada).
+  if (n >= (long)max)
+    dst[max - 1] = '\0';
   return n; // >=0 OK, -EFAULT si falló
 }
 

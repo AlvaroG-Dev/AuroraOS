@@ -373,6 +373,7 @@ int64_t k_memfd_create(uint64_t name_uptr, uint64_t flags, uint64_t a3,
     return -EFAULT;
   if (n == 0)
     name[0] = '\0';
+  name[sizeof(name) - 1] = '\0'; // un nombre de 249+ bytes llega sin terminar
 
   int free_fd = -1;
   for (int i = 0; i < MAX_PROCESS_FDS; i++) {
