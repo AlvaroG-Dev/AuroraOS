@@ -1276,11 +1276,13 @@ static void fast_before_run(struct avm_exit *x) {
     g_fast_off = e && *e == '1';
     // vm30: 0x139 a los ~2 min con el tick del RTC en el kernel y los OUT diferidos
     // (vm24, sin ellos, aguanto 2 horas). El tick apenas actuaba (20/s): queda
-    // apagado salvo AURORA_VM_TICK_KERNEL=1; los OUT se quitan con AURORA_VM_SIN_OUT=1.
+    // apagado salvo AURORA_VM_TICK_KERNEL=1. Los OUT diferidos del IDE tambien van
+    // apagados salvo AURORA_VM_OUT=1: con ellos Windows caia dos veces seguidas en
+    // el mismo punto del instalador (vm30/vm31) y sin ellos paso de largo (vm32).
     e = getenv("AURORA_VM_TICK_KERNEL");
     g_tick_kernel = e && *e == '1';
-    e = getenv("AURORA_VM_SIN_OUT");
-    g_out_off = e && *e == '1';
+    e = getenv("AURORA_VM_OUT");
+    g_out_off = !(e && *e == '1');
   }
   struct avm_fast *f = &x->fast;
   memset(f, 0, sizeof(*f));
