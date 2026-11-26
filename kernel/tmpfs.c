@@ -60,6 +60,11 @@ typedef struct tmpfs_node {
   struct tmpfs_fs *fs;
   struct tmpfs_node *parent;
   struct tmpfs_node *children_head;
+  // readdir por indice: ultimo hijo devuelto, para no recorrer la lista
+  // desde el principio en cada entrada (getdents de un directorio de N
+  // entradas era O(N^2); system32 de Wine tiene cientos).
+  struct tmpfs_node *rd_node;
+  uint64_t rd_index;
   struct tmpfs_node *sibling_next;
 } tmpfs_node_t;
 
@@ -90,11 +95,13 @@ static tmpfs_node_t *lookup_child_locked(tmpfs_node_t *dir, const char *name) {
 static void link_child_locked(tmpfs_node_t *dir, tmpfs_node_t *child) {
   child->sibling_next = dir->children_head;
   dir->children_head = child;
+  dir->rd_node = NULL;
   child->parent = dir;
 }
 
 static void unlink_child_locked(tmpfs_node_t *dir, tmpfs_node_t *child) {
   tmpfs_node_t **pp = &dir->children_head;
+  dir->rd_node = NULL;
   while (*pp) {
     if (*pp == child) {
       *pp = child->sibling_next;
@@ -797,8 +804,15 @@ static int tmpfs_readdir_op(vfs_node_t *dir_vn, uint64_t index,
   mutex_lock(&fs->lock);
 
   tmpfs_node_t *c = dir->children_head;
-  for (uint64_t i = 0; c && i < index; i++)
+  uint64_t i = 0;
+  if (dir->rd_node && dir->rd_index <= index) {
+    c = dir->rd_node;
+    i = dir->rd_index;
+  }
+  for (; c && i < index; i++)
     c = c->sibling_next;
+  dir->rd_node = c;
+  dir->rd_index = index;
 
   if (!c) {
     mutex_unlock(&fs->lock);

@@ -103,10 +103,18 @@ static void vma_release_backing(vma_t *v) {
 vma_t *vma_find(struct process *proc, uint64_t addr) {
   if (!proc)
     return NULL;
+  // Wine tiene miles de VMAs y la lista no esta ordenada por uso: casi todos
+  // los fallos seguidos caen en el mismo VMA (cargar una DLL, recorrer un
+  // buffer). Se prueba primero el ultimo encontrado.
+  vma_t *c = proc->vma_cache;
+  if (c && addr >= c->start && addr < c->end)
+    return c;
   vma_t *v = proc->vma_list;
   while (v) {
-    if (addr >= v->start && addr < v->end)
+    if (addr >= v->start && addr < v->end) {
+      proc->vma_cache = v;
       return v;
+    }
     v = v->next;
   }
   return NULL;
@@ -204,6 +212,7 @@ void vma_destroy_all(struct process *proc) {
     v = next;
   }
   proc->vma_list = NULL;
+  proc->vma_cache = NULL;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,10 +267,49 @@ static int try_stack_growth(struct process *proc, uint64_t fault_addr,
 }
 
 // ---------------------------------------------------------------------------
+// Heap de brk bajo demanda: process_sbrk ya no reserva ni pone a cero las
+// paginas al crecer (glibc pide de 132 KiB en 132 KiB y Wine mucho mas, y
+// cada brk costaba decenas de ms); se asignan al primer acceso.
+// ---------------------------------------------------------------------------
+static int try_heap_demand(struct process *proc, uint64_t fault_addr) {
+  if (!proc || fault_addr < proc->heap_start || fault_addr >= proc->heap_end)
+    return 0;
+  uint64_t page = fault_addr & ~0xFFFULL;
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  if (paging_get_phys_in(pml4, page))
+    return 0; // presente: no es un fallo de demanda (permisos)
+  uint64_t phys = alloc_user_page_zeroed();
+  if (!phys)
+    return 0;
+  if (paging_map_page_in(pml4, page, phys,
+                         PTE_USER | PTE_WRITABLE | PTE_PRESENT | PTE_NX) != 0) {
+    pmm_free_page(phys);
+    return 0;
+  }
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
 // Demanda paging sobre una VMA existente
 // ---------------------------------------------------------------------------
+// Perfil de fallos de pagina por tipo de VMA (/proc/aurora-prof).
+uint64_t g_prof_pf_cnt[8], g_prof_pf_cyc[8];
+static int try_vma_demand_impl(struct process *proc, vma_t *vma, uint64_t fault_addr,
+                               uint64_t err_code);
 static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
                           uint64_t err_code) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  uint64_t t0 = ((uint64_t)hi << 32) | lo;
+  int r = try_vma_demand_impl(proc, vma, fault_addr, err_code);
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  unsigned t = (unsigned)vma->type & 7;
+  __atomic_fetch_add(&g_prof_pf_cyc[t], (((uint64_t)hi << 32) | lo) - t0, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g_prof_pf_cnt[t], 1, __ATOMIC_RELAXED);
+  return r;
+}
+static int try_vma_demand_impl(struct process *proc, vma_t *vma, uint64_t fault_addr,
+                               uint64_t err_code) {
   // [FASE 4.3] VMA_MMIO: las páginas ya están mapeadas por ops->mmap.
   // Un #PF aquí significa acceso fuera del rango o munmap del usuario.
   if (vma->type == VMA_MMIO)
@@ -284,8 +332,13 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     uint64_t spage = fault_addr & ~0xFFFULL;
     uint64_t pgoff = (vma->file_offset + (spage - vma->start)) / PAGE_SIZE;
     uint64_t sphys = 0;
-    if (sf->node->ops->get_page(sf->node, pgoff, &sphys) != 0 || !sphys)
-      return 0;
+    if (sf->node->ops->get_page(sf->node, pgoff, &sphys) != 0 || !sphys) {
+      // MAP_PRIVATE: sin pagina compartible (tras el final del fichero, o la
+      // cache de tarfs sin memoria) se hace una copia propia como antes.
+      if (!(vma->pad & VMA_F_PRIVRO) || !sf->node->ops->read)
+        return 0;
+      goto private_copy;
+    }
     if (vma->pad & VMA_F_PRIVRO) {
       // MAP_PRIVATE de fichero: leer comparte la pagina del fichero (sin
       // escritura); escribir la copia (COW, como la page cache de Linux).
@@ -316,6 +369,7 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
     return 1;
   }
 
+private_copy:;
   uint64_t page = fault_addr & ~0xFFFULL;
   uint32_t lo, hi;
   uint64_t freq = klog_get_tsc_freq();
@@ -335,7 +389,9 @@ static int try_vma_demand(struct process *proc, vma_t *vma, uint64_t fault_addr,
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   uint64_t t2 = ((uint64_t)hi << 32) | lo;
 
-  if (vma->type == VMA_FILE && vma->file_fd) {
+  if ((vma->type == VMA_FILE ||
+       (vma->type == VMA_SHARED && (vma->pad & VMA_F_PRIVRO))) &&
+      vma->file_fd) {
     file_descriptor_t *f = vma->file_fd;
     if (!f->node || !f->node->ops || !f->node->ops->read) {
       pmm_free_page(phys);
@@ -391,7 +447,7 @@ static int pf_try_demand_paging(struct process *proc, uint64_t cr2,
     return 0;
 
   mm_lock(proc);
-  int ok = try_stack_growth(proc, cr2, err);
+  int ok = try_stack_growth(proc, cr2, err) || try_heap_demand(proc, cr2);
   if (!ok) {
     vma_t *vma = vma_find(proc, cr2);
     ok = vma && try_vma_demand(proc, vma, cr2, err);
@@ -675,7 +731,7 @@ static int handle_page_fault_inner(registers_t *regs) {
     // Bajo mm_lock: otro hilo puede estar haciendo munmap/mmap del mismo
     // rango a la vez y el VMA dejaria de existir mientras lo usamos.
     mm_lock(proc);
-    if (try_stack_growth(proc, cr2, err)) {
+    if (try_stack_growth(proc, cr2, err) || try_heap_demand(proc, cr2)) {
       mm_unlock(proc);
       pf_resolved++;
       return 1;
@@ -898,6 +954,8 @@ int64_t vma_unmap_range(struct process *proc, uint64_t start, uint64_t end) {
 
     if (start <= v->start && end >= v->end) {
       *pp = v->next;
+      if (proc->vma_cache == v)
+        proc->vma_cache = NULL;
       vma_release_backing(v);
       kfree(v);
       touched++;
@@ -1367,6 +1425,14 @@ static int64_t sys_mmap_nolock(struct process *proc, uint64_t addr, uint64_t len
         return -EINVAL;
       // ext2: MAP_SHARED + PROT_WRITE exige el fichero abierto en O_RDWR y un
       // montaje escribible (como Linux); si no, EACCES.
+      // tarfs (el initrd) es de solo lectura y sus paginas son el propio
+      // initrd: nunca escribibles; se mapea como MAP_PRIVATE (identico al
+      // leer, y un mprotect posterior a escritura copia en vez de escribir
+      // en el initrd).
+      int tarfs = f->node->fs && f->node->fs->name &&
+                  strcmp(f->node->fs->name, "tarfs") == 0;
+      if (tarfs && (prot & MMAP_PROT_WRITE))
+        return -EACCES;
       if ((prot & MMAP_PROT_WRITE) && f->node->fs && f->node->fs->name &&
           strcmp(f->node->fs->name, "ext2") == 0 &&
           ((f->flags & 3) != O_RDWR ||
@@ -1376,6 +1442,8 @@ static int64_t sys_mmap_nolock(struct process *proc, uint64_t addr, uint64_t len
       if (!v)
         return -ENOMEM;
       v->type = VMA_SHARED;
+      if (tarfs)
+        v->pad = VMA_F_PRIVRO;
       return (int64_t)base;
     }
     // MAP_PRIVATE de solo lectura sobre tmpfs/memfd: comparte las paginas del

@@ -265,6 +265,94 @@ static char *gen_uptime(size_t *out_len) {
   return buf;
 }
 
+// /proc/aurora-prof: syscalls con mas tiempo acumulado y fallos de pagina
+// por tipo de VMA, en microsegundos. Escribir no hace falta: se compara
+// leyendo antes y despues.
+extern uint64_t g_prof_sys_cyc[512], g_prof_sys_cnt[512];
+extern uint64_t g_prof_pf_cnt[8], g_prof_pf_cyc[8];
+static char *gen_aurora_prof(size_t *out_len) {
+  size_t cap = 32768, o = 0;
+  char *buf = (char *)kmalloc(cap);
+  if (!buf)
+    return NULL;
+  uint64_t f = klog_get_tsc_freq();
+  if (!f)
+    f = 1;
+  o = kappend(buf, o, cap, "syscall llamadas us\n");
+  for (int i = 0; i < 512 && o < cap - 80; i++) {
+    if (!g_prof_sys_cnt[i])
+      continue;
+    o += kfmt_u64(buf + o, cap - o, (uint64_t)i);
+    o = kappend(buf, o, cap, " ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_sys_cnt[i]);
+    o = kappend(buf, o, cap, " ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_sys_cyc[i] / (f / 1000000 ? f / 1000000 : 1));
+    o = kappend(buf, o, cap, "\n");
+  }
+  {
+    extern uint64_t g_prof_ticks_user, g_prof_ticks_sys, g_prof_ticks_idle,
+        g_prof_ticks_kthread;
+    o = kappend(buf, o, cap, "ticks_usuario 1 ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_ticks_user);
+    o = kappend(buf, o, cap, "\nticks_syscall 1 ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_ticks_sys);
+    o = kappend(buf, o, cap, "\nticks_kthread 1 ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_ticks_kthread);
+    o = kappend(buf, o, cap, "\nticks_idle 1 ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_ticks_idle);
+    o = kappend(buf, o, cap, "\n");
+    // Ticks de CPU dentro de cada syscall (muestreo del temporizador): el
+    // tiempo que de verdad gasta el kernel, sin contar las esperas.
+    extern uint64_t g_prof_sys_ticks[512];
+    for (int i = 0; i < 512 && o < cap - 80; i++) {
+      if (!g_prof_sys_ticks[i])
+        continue;
+      o = kappend(buf, o, cap, "t");
+      o += kfmt_u64(buf + o, cap - o, (uint64_t)i);
+      o = kappend(buf, o, cap, " ");
+      o += kfmt_u64(buf + o, cap - o, g_prof_sys_ticks[i]);
+      o = kappend(buf, o, cap, " ");
+      o += kfmt_u64(buf + o, cap - o, g_prof_sys_ticks[i]);
+      o = kappend(buf, o, cap, "\n");
+    }
+  }
+  {
+    extern uint64_t g_prof_ep_cyc, g_prof_ep_cnt;
+    o = kappend(buf, o, cap, "epoll_eval ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_ep_cnt);
+    o = kappend(buf, o, cap, " ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_ep_cyc / (f / 1000000 ? f / 1000000 : 1));
+    o = kappend(buf, o, cap, "\n");
+    extern uint64_t g_prof_lk_cyc[9], g_prof_lk_cnt[9];
+    for (int i = 0; i < 9; i++) {
+      if (!g_prof_lk_cnt[i])
+        continue;
+      o = kappend(buf, o, cap, "lk");
+      o += kfmt_u64(buf + o, cap - o, (uint64_t)i);
+      o = kappend(buf, o, cap, " ");
+      o += kfmt_u64(buf + o, cap - o, g_prof_lk_cnt[i]);
+      o = kappend(buf, o, cap, " ");
+      o += kfmt_u64(buf + o, cap - o, g_prof_lk_cyc[i] / (f / 1000000 ? f / 1000000 : 1));
+      o = kappend(buf, o, cap, "\n");
+    }
+  }
+  o = kappend(buf, o, cap, "pf_tipo fallos us\n");
+  for (int i = 0; i < 8 && o < cap - 80; i++) {
+    if (!g_prof_pf_cnt[i])
+      continue;
+    o = kappend(buf, o, cap, "pf");
+    o += kfmt_u64(buf + o, cap - o, (uint64_t)i);
+    o = kappend(buf, o, cap, " ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_pf_cnt[i]);
+    o = kappend(buf, o, cap, " ");
+    o += kfmt_u64(buf + o, cap - o, g_prof_pf_cyc[i] / (f / 1000000 ? f / 1000000 : 1));
+    o = kappend(buf, o, cap, "\n");
+  }
+  buf[o] = '\0';
+  *out_len = o;
+  return buf;
+}
+
 static char *gen_version(size_t *out_len) {
   static const char v[] = "Aurora OS version 0.1.0 (x86_64) "
                           "(built with aurora-gcc, glibc userland)\n";
@@ -2279,7 +2367,7 @@ static const char *procfs_root_entries[] = {
     "uptime", "version", "cpuinfo", "meminfo",     "stat",       "self",
     "mounts", "loadavg", "bus",         "partitions", "swaps",
     "sys",    "vmstat",  "filesystems", "net", // ← AÑADIR
-    "modules", "cmdline", "last_kmsg",
+    "modules", "cmdline", "last_kmsg", "aurora-prof",
 };
 #define PROCFS_N_ROOT_ENTRIES                                                  \
   (sizeof(procfs_root_entries) / sizeof(procfs_root_entries[0]))
@@ -3090,6 +3178,11 @@ static vfs_node_t *procfs_lookup(void *fs_priv, const char *path) {
     size_t len = 0;
     char *b = gen_mounts(&len);
     return make_file_node("mounts", b, len);
+  }
+  if (strcmp(name, "aurora-prof") == 0) {
+    size_t len = 0;
+    char *b = gen_aurora_prof(&len);
+    return make_file_node("aurora-prof", b, len);
   }
   if (strcmp(name, "loadavg") == 0) {
     size_t len = 0;

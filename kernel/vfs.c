@@ -650,6 +650,11 @@ static int resolve_symlink_target(const char *symlink_path, const char *target,
 // Recorre la mount table buscando el mount más específico, delega el
 // path relativo al FS, y sigue symlinks si no estamos en no_follow.
 static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow);
+// Perfil (/proc/aurora-prof): lookups por FS (0 tarfs, 1 tmpfs, 2 ext2,
+// 3 otros; +4 los que no encuentran nada) y 8 = vfs_lookup completo.
+uint64_t g_prof_lk_cyc[9], g_prof_lk_cnt[9];
+static vfs_node_t *vfs_lookup_x(const char *path, int depth, int no_follow,
+                                int expand);
 
 // Symlinks en componentes INTERMEDIOS (sysfs: /sys/class/input/event0/dev, con
 // event0 -> ../../devices/...). Solo se intenta cuando el lookup directo falla,
@@ -658,12 +663,32 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow);
 static int expand_mid_symlink(const char *norm, char *out, size_t outlen) {
   size_t len = strlen(norm);
   char prefix[VFS_PATH_MAX];
+  // Atajo: si el directorio padre se resuelve directamente y no es un
+  // symlink, ningun componente intermedio lo es: el ultimo simplemente no
+  // existe (lo normal en las sondas ENOENT de Wine/glibc). Antes se
+  // buscaba cada prefijo, y cada prefijo que fallaba repetia lo mismo.
+  size_t last = len;
+  while (last > 0 && norm[last] != '/')
+    last--;
+  if (last > 0 && last < sizeof(prefix)) {
+    memcpy(prefix, norm, last);
+    prefix[last] = 0;
+    vfs_node_t *pn = vfs_lookup_x(prefix, 1, 1, 0);
+    if (pn) {
+      int sym = pn->is_symlink;
+      vfs_node_free(pn);
+      if (!sym)
+        return 0;
+    }
+  }
   for (size_t i = 1; i < len; i++) {
     if (norm[i] != '/')
       continue;
     memcpy(prefix, norm, i);
     prefix[i] = 0;
-    vfs_node_t *n = vfs_lookup_rec(prefix, 1, 1);
+    // Sin expandir: los prefijos anteriores ya se comprobaron en orden, asi
+    // que si este falla es que de verdad no existe.
+    vfs_node_t *n = vfs_lookup_x(prefix, 1, 1, 0);
     if (!n)
       return 0;
     if (n->is_symlink) {
@@ -686,6 +711,18 @@ static int expand_mid_symlink(const char *norm, char *out, size_t outlen) {
 }
 
 static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
+  uint64_t t0 = __builtin_ia32_rdtsc();
+  vfs_node_t *n = vfs_lookup_x(path, depth, no_follow, 1);
+  if (depth == 0) {
+    __atomic_fetch_add(&g_prof_lk_cyc[8], __builtin_ia32_rdtsc() - t0,
+                       __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_prof_lk_cnt[8], 1, __ATOMIC_RELAXED);
+  }
+  return n;
+}
+
+static vfs_node_t *vfs_lookup_x(const char *path, int depth, int no_follow,
+                                int expand) {
   if (depth > 8)
     return NULL;
   if (!path)
@@ -758,8 +795,24 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
   }
 
   vfs_node_t *node = NULL;
-  if (ops->lookup)
+  if (ops->lookup) {
+    uint64_t t0 = __builtin_ia32_rdtsc();
     node = ops->lookup(fs_priv, rel);
+    int k = 3;
+    if (ops->name) {
+      if (ops->name[0] == 't' && ops->name[1] == 'a')
+        k = 0; // tarfs
+      else if (ops->name[0] == 't' && ops->name[1] == 'm')
+        k = 1; // tmpfs
+      else if (ops->name[0] == 'e')
+        k = 2; // ext2
+    }
+    if (!node)
+      k += 4; // fallidos aparte
+    __atomic_fetch_add(&g_prof_lk_cyc[k], __builtin_ia32_rdtsc() - t0,
+                       __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_prof_lk_cnt[k], 1, __ATOMIC_RELAXED);
+  }
 
   // [3.3.c] El nodo debe llevar el path COMPLETO...
   if (node) {
@@ -778,7 +831,7 @@ static vfs_node_t *vfs_lookup_rec(const char *path, int depth, int no_follow) {
 
   // Symlinks en medio de la ruta en cualquier FS (antes solo sysfs y ext2:
   // en tmpfs fallaba p. ej. el z: -> / de los prefijos de Wine).
-  if (!node && strcmp(norm, "/") != 0) {
+  if (!node && expand && strcmp(norm, "/") != 0) {
     char expanded[VFS_PATH_MAX];
     if (expand_mid_symlink(norm, expanded, sizeof(expanded)))
       return vfs_lookup_rec(expanded, depth + 1, no_follow);
@@ -1075,11 +1128,13 @@ static size_t collect_child_mounts(const char *norm,
     if (has_slash)
       continue;
 
-    size_t bl = strlen(base);
-    if (bl >= VFS_PATH_MAX)
-      bl = VFS_PATH_MAX - 1;
-    memcpy(out_names[count], base, bl);
-    out_names[count][bl] = '\0';
+    if (out_names) { // NULL: solo contar
+      size_t bl = strlen(base);
+      if (bl >= VFS_PATH_MAX)
+        bl = VFS_PATH_MAX - 1;
+      memcpy(out_names[count], base, bl);
+      out_names[count][bl] = '\0';
+    }
     count++;
   }
   spin_unlock_irqrestore(&g_mounts_lock, flags);
@@ -1136,6 +1191,18 @@ int vfs_readdir_node_c(vfs_node_t *node, uint64_t index, vfs_rd_cursor_t *cur,
     return -EINVAL;
   if (!(node->flags & VFS_DIRECTORY))
     return -ENOTDIR;
+
+  // Lo normal (sin mounts hijas): delegar sin reservar 8 KiB del heap por
+  // cada entrada, que era lo que hacia lento getdents64.
+  if (collect_child_mounts(node->name, NULL, MAX_SYNTH_MOUNTS) == 0) {
+    if (!node->ops || !node->ops->readdir) {
+      out->name[0] = '\0';
+      out->type = 0;
+      out->size = 0;
+      return 0;
+    }
+    return node->ops->readdir(node, index, out);
+  }
 
   char (*mount_names)[VFS_PATH_MAX] =
       (char (*)[VFS_PATH_MAX])kmalloc(MAX_SYNTH_MOUNTS * VFS_PATH_MAX);
@@ -3131,14 +3198,16 @@ static void fd_put(file_descriptor_t *f) {
 
 int vfs_close_for_proc(void *proc_ptr, int fd) {
   process_t *proc = (process_t *)proc_ptr;
+  // close() de un fd invalido es EBADF (antes -1 = EPERM, que no es lo que
+  // Linux devuelve y que glibc/Wine no esperan).
   if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS)
-    return -1;
+    return -EBADF;
 
   mutex_lock(&proc->fd_lock);
   file_descriptor_t *f = proc->fds[fd];
   if (!f) {
     mutex_unlock(&proc->fd_lock);
-    return -1;
+    return -EBADF;
   }
   proc->fds[fd] = NULL;
   mutex_unlock(&proc->fd_lock);

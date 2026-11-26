@@ -424,7 +424,7 @@ int64_t k_memfd_create(uint64_t name_uptr, uint64_t flags, uint64_t a3,
   if (flags & MFD_CLOEXEC)
     fd_cloexec_set(proc, free_fd);
 
-  LOG_DEBUG("[MEMFD] fd=%d name='%s' flags=0x%lx", free_fd, ctx->name,
+  LOG_TRACE("[MEMFD] fd=%d name='%s' flags=0x%lx", free_fd, ctx->name,
             (unsigned long)flags);
   return (int64_t)free_fd;
 }

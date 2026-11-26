@@ -38,6 +38,9 @@ typedef struct __attribute__((aligned(16))) block_header {
 #define HEAP_MAX_SINGLE_ALLOC (64 * 1024 * 1024)
 
 static block_header_t *heap_head = NULL; // Primer bloque
+static block_header_t *heap_tail = NULL; // Ultimo bloque
+// Cota inferior del primer bloque libre: todo lo anterior esta ocupado.
+static block_header_t *heap_first_free = NULL;
 static uint64_t heap_top = 0;            // Próxima dirección virtual libre
 static spinlock_t heap_lock;             // Protege heap_head / heap_top
 
@@ -81,25 +84,15 @@ static block_header_t *heap_grow_locked(size_t pages) {
   if (!heap_head) {
     heap_head = blk;
   } else {
-    block_header_t *cur = heap_head;
+    block_header_t *cur = heap_tail ? heap_tail : heap_head;
     while (cur->next)
       cur = cur->next;
     cur->next = blk;
   }
+  heap_tail = blk;
   return blk;
 }
 
-static void coalesce(void) {
-  block_header_t *cur = heap_head;
-  while (cur && cur->next) {
-    if (cur->is_free && cur->next->is_free) {
-      cur->size += HEADER_SIZE + cur->next->size;
-      cur->next = cur->next->next;
-    } else {
-      cur = cur->next;
-    }
-  }
-}
 
 static void *kmalloc_locked(size_t size) {
   // [FIX] Rechazar peticiones absurdas antes de tocar el PMM.
@@ -109,8 +102,22 @@ static void *kmalloc_locked(size_t size) {
     return NULL;
   }
 
-  block_header_t *cur = heap_head;
+  // Empieza en el primer bloque libre conocido (todos los anteriores estan
+  // ocupados) y une al vuelo los libres contiguos (kfree solo une hacia
+  // delante). Antes cada kmalloc y cada kfree recorrian el heap entero.
+  block_header_t *cur = heap_first_free ? heap_first_free : heap_head;
+  heap_first_free = NULL;
   while (cur) {
+    if (cur->is_free) {
+      while (cur->next && cur->next->is_free) {
+        cur->size += HEADER_SIZE + cur->next->size;
+        if (heap_tail == cur->next)
+          heap_tail = cur;
+        cur->next = cur->next->next;
+      }
+      if (!heap_first_free)
+        heap_first_free = cur;
+    }
     if (cur->is_free && cur->size >= size) {
       if (cur->size >= size + HEADER_SIZE + 16) {
         block_header_t *split =
@@ -121,9 +128,13 @@ static void *kmalloc_locked(size_t size) {
         split->next = cur->next;
         cur->size = size;
         cur->next = split;
+        if (heap_tail == cur)
+          heap_tail = split;
       }
       cur->is_free = 0;
       cur->magic = HEAP_MAGIC;
+      if (heap_first_free == cur)
+        heap_first_free = cur->next; // cota inferior: puede estar ocupado
       return (void *)((uint8_t *)cur + HEADER_SIZE);
     }
     cur = cur->next;
@@ -146,6 +157,8 @@ static void *kmalloc_locked(size_t size) {
     split->next = new_blk->next;
     new_blk->size = size;
     new_blk->next = split;
+    if (heap_tail == new_blk)
+      heap_tail = split;
   }
   new_blk->is_free = 0;
   new_blk->magic = HEAP_MAGIC;
@@ -173,7 +186,19 @@ static void kfree_locked(void *ptr) {
   }
 
   blk->is_free = 1;
-  coalesce();
+  // Une solo con los libres que le siguen (O(1) normalmente); los que le
+  // preceden se unen al pasar kmalloc por encima.
+  while (blk->next && blk->next->is_free) {
+    if (heap_tail == blk->next)
+      heap_tail = blk;
+    if (heap_first_free == blk->next)
+      heap_first_free = blk;
+    blk->size += HEADER_SIZE + blk->next->size;
+    blk->next = blk->next->next;
+  }
+  // NULL = "desconocido, empezar por el principio": no se toca.
+  if (heap_first_free && blk < heap_first_free)
+    heap_first_free = blk;
 }
 
 // ---------------------------------------------------------------------------

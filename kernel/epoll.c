@@ -255,6 +255,7 @@ static void epoll_entry_arm(epoll_entry_t *e) {
 // Evalúa una entrada y devuelve los eventos a reportar (0 = nada). Con
 // consume=true aplica los efectos de haber reportado (ET / ONESHOT).
 // Llamar con ep->lock cogido.
+uint64_t g_prof_ep_cyc, g_prof_ep_cnt; // /proc/aurora-prof
 static uint32_t epoll_entry_eval(epoll_entry_t *e, bool consume) {
   if (e->disabled || !e->target || !e->target->node)
     return 0;
@@ -268,7 +269,10 @@ static uint32_t epoll_entry_eval(epoll_entry_t *e, bool consume) {
     req |= 4;
   if (e->events & EPOLLPRI)
     req |= 2;
+  uint64_t t0 = __builtin_ia32_rdtsc();
   int rev = vfs_node_poll(e->target->node, req);
+  __atomic_fetch_add(&g_prof_ep_cyc, __builtin_ia32_rdtsc() - t0, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g_prof_ep_cnt, 1, __ATOMIC_RELAXED);
   if (rev == 0)
     return 0;
   uint32_t reported = 0;

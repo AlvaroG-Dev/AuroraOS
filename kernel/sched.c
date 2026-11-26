@@ -509,6 +509,33 @@ void sched_spin_check(registers_t *regs) {
            ra[0], ra[1], ra[2], ra[3], ra[4], ra[5], ra[6], ra[7], ra[8], ra[9]);
 }
 
+uint64_t g_prof_sys_ticks[512];
+uint64_t g_prof_ticks_user, g_prof_ticks_sys, g_prof_ticks_idle, g_prof_ticks_kthread;
+
+// Perfil (/proc/aurora-prof): solo desde el tick del temporizador (no desde
+// sched_yield, que tambien llama a sched_tick al bloquearse).
+void sched_prof_tick(void) {
+  task_t *curr = sched_current();
+  if (!curr)
+    return;
+  // Ticks de procesos en modo usuario frente a
+  // dentro de una syscall. Los fallos de pagina cuentan como usuario.
+  if (curr->proc && !curr->is_idle) {
+    if (curr->syscall_regs) {
+      __atomic_fetch_add(&g_prof_ticks_sys, 1, __ATOMIC_RELAXED);
+      __atomic_fetch_add(&g_prof_sys_ticks[curr->syscall_regs->rax & 511], 1,
+                         __ATOMIC_RELAXED);
+    }
+    else
+      __atomic_fetch_add(&g_prof_ticks_user, 1, __ATOMIC_RELAXED);
+  } else if (curr->is_idle) {
+    __atomic_fetch_add(&g_prof_ticks_idle, 1, __ATOMIC_RELAXED);
+  } else {
+    __atomic_fetch_add(&g_prof_ticks_kthread, 1, __ATOMIC_RELAXED);
+  }
+
+}
+
 void sched_tick(void) {
   // Lectura atomica: sched_yield() llega aqui con las IRQ activas.
   task_t *curr = (task_t *)this_cpu_current_task();
@@ -530,7 +557,6 @@ void sched_tick(void) {
   }
 
   process_account_tick(curr);
-
   this_cpu(ticks_since_resched)++;
 
   // [BLOCK-ASYNC POLL] Cada ~10 ms (100 Hz) en el BSP, revisar si algún

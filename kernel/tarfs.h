@@ -22,6 +22,10 @@ typedef struct {
   uint32_t mode; // bits rwx (sin S_IF*)
   uint32_t uid;
   uint32_t gid;
+
+  // Paginas de un mmap (get_page): las alineadas son el propio initrd; el
+  // resto (y la ultima, con ceros tras el final) se copian una vez aqui.
+  uint64_t *pcache;
 } tar_node_t;
 
 void tarfs_init(const void *tar_addr, size_t tar_size);

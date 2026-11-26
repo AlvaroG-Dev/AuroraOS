@@ -16,6 +16,8 @@
 #include "string.h"
 #include "uaccess.h" // EISDIR, EROFS, ENOTDIR, EINVAL, ENAMETOOLONG
 #include "vfs.h"     // vfs_node_t, vfs_ops_t, vfs_fs_ops_t, vfs_dirent_t
+#include "paging.h"
+#include "pmm.h"
 
 // ===========================================================================
 // Parsing del tar
@@ -579,6 +581,69 @@ static int64_t tar_vfs_read(vfs_node_t *node, uint64_t offset, size_t size,
   return (int64_t)to_read;
 }
 
+// get_page para mmap: Wine y ld.so mapean cientos de MB de bibliotecas del
+// initrd. Antes cada fallo de pagina de cada proceso copiaba 4 KiB a una
+// pagina nueva; ahora todos comparten la misma (MAP_PRIVATE copia solo al
+// escribir). Si los datos ya estan alineados a pagina en el initrd se usan
+// tal cual; si no, se copian una sola vez a una cache por fichero que vive
+// mientras viva el initrd (tarfs es de solo lectura).
+static uint64_t g_tarfs_cache_pages;
+#define TARFS_CACHE_MIN_FREE 32768u // no cachear con menos de 128 MiB libres
+
+static int tar_vfs_get_page(vfs_node_t *node, uint64_t pgoff, uint64_t *phys_out) {
+  tar_node_t *tn = node ? (tar_node_t *)node->priv : NULL;
+  if (!tn || tn->is_dir || tn->is_symlink || !tn->data || !phys_out)
+    return -EINVAL;
+  uint64_t off = pgoff * PAGE_SIZE;
+  if (off >= tn->size)
+    return -EFAULT;
+  uint8_t *src = tn->data + off;
+  if (!((uintptr_t)src & 0xFFF) && off + PAGE_SIZE <= tn->size) {
+    *phys_out = virt_to_phys(src);
+    return 0;
+  }
+  size_t npages = (tn->size + PAGE_SIZE - 1) / PAGE_SIZE;
+  uint64_t *tab = __atomic_load_n(&tn->pcache, __ATOMIC_ACQUIRE);
+  if (!tab) {
+    uint64_t *nt = (uint64_t *)kzalloc(npages * sizeof(uint64_t));
+    if (!nt)
+      return -ENOMEM;
+    uint64_t *expect = NULL;
+    if (!__atomic_compare_exchange_n(&tn->pcache, &expect, nt, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      kfree(nt);
+      tab = expect;
+    } else {
+      tab = nt;
+    }
+  }
+  uint64_t ph = __atomic_load_n(&tab[pgoff], __ATOMIC_ACQUIRE);
+  if (ph) {
+    *phys_out = ph;
+    return 0;
+  }
+  if (pmm_free_pages_count() < TARFS_CACHE_MIN_FREE)
+    return -ENOMEM; // quien falla hace una copia privada
+  uint64_t np = pmm_alloc_page();
+  if (!np)
+    return -ENOMEM;
+  size_t n = tn->size - off < PAGE_SIZE ? tn->size - off : PAGE_SIZE;
+  uint8_t *dst = (uint8_t *)phys_to_virt(np);
+  memcpy(dst, src, n);
+  if (n < PAGE_SIZE)
+    memset(dst + n, 0, PAGE_SIZE - n);
+  uint64_t expect = 0;
+  if (!__atomic_compare_exchange_n(&tab[pgoff], &expect, np, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    pmm_free_page(np);
+    np = expect;
+  } else {
+    __atomic_fetch_add(&g_tarfs_cache_pages, 1, __ATOMIC_RELAXED);
+  }
+  *phys_out = np;
+  return 0;
+}
+
 static int64_t tar_vfs_write(vfs_node_t *node, uint64_t offset, size_t size,
                              const void *buf) {
   (void)node;
@@ -725,6 +790,7 @@ static vfs_ops_t tar_file_ops = {
     .write = tar_vfs_write,
     .open = tar_vfs_open,
     .close = tar_vfs_close,
+    .get_page = tar_vfs_get_page,
     .readable = NULL,
     // [3.4.c] RO: chmod/chown devuelven -EROFS.
     .chmod = NULL,

@@ -724,6 +724,7 @@ static process_t *process_spawn_with_ppid(const char *name,
   proc->heap_max = USER_HEAP_MAX;
 
   proc->vma_list = NULL;
+  proc->vma_cache = NULL;
   proc->stack_base = stack_base;
   proc->stack_low = stack_base - MAX_STACK_GROWTH;
   proc->stack_top = stack_top;
@@ -1048,6 +1049,7 @@ static process_t *process_spawn_streaming_with_ppid_args_cwd_fds(
   proc->next_mmap_addr = USER_MMAP_BASE;
 
   proc->vma_list = NULL;
+  proc->vma_cache = NULL;
   proc->stack_base = stack_base;
   proc->stack_low = stack_base - MAX_STACK_GROWTH;
   proc->stack_top = stack_top;
@@ -1917,30 +1919,9 @@ void *process_sbrk(process_t *proc, int64_t increment) {
       return (void *)-1;
     }
 
-    uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-    uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~0xFFFULL;
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
-
-    for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
-      if (!paging_get_phys_in(pml4, page)) {
-        uint64_t phys = pmm_alloc_page();
-        if (!phys) {
-          LOG_ERR("[PROC] sbrk: sin memoria física libre");
-          mm_unlock(proc);
-          return (void *)-1;
-        }
-        if (paging_map_page_in(pml4, page, phys,
-                               PTE_USER | PTE_WRITABLE | PTE_PRESENT |
-                                   PTE_NX) != 0) {
-          pmm_free_page(phys);
-          LOG_ERR("[PROC] sbrk: error mapeando página");
-          mm_unlock(proc);
-          return (void *)-1;
-        }
-        memset(phys_to_virt(phys), 0, PAGE_SIZE);
-      }
-    }
-
+    // Las paginas nuevas se asignan al primer acceso (try_heap_demand en
+    // pf.c): antes se reservaban y ponian a cero aqui, y cada brk de glibc o
+    // Wine costaba decenas de ms aunque no se tocara la memoria.
     proc->heap_end = new_brk;
     mm_unlock(proc);
     return (void *)old_brk;
@@ -2115,6 +2096,7 @@ static int clone_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
 // ---------------------------------------------------------------------------
 static int clone_vmas(process_t *parent, process_t *child) {
   child->vma_list = NULL;
+  child->vma_cache = NULL;
   vma_t **tail = &child->vma_list;
 
   for (vma_t *v = parent->vma_list; v; v = v->next) {

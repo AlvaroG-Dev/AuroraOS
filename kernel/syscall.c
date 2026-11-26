@@ -558,6 +558,13 @@ static int64_t do_open_resolved(process_t *proc, const char *kpath,
     int boring =
         (fd == -ENOENT &&
          !(linux_flags & (LINUX_O_CREAT | LINUX_O_WRONLY | LINUX_O_RDWR)));
+    // Wine/glibc ponen nombre a cada hilo en /proc/<pid>/task/<tid>/comm.
+    if (fd == -ENOENT && strncmp(kpath, "/proc/", 6) == 0) {
+      const char *t = kpath + 6;
+      while (*t && *t != '/') t++;
+      if (strncmp(t, "/task/", 6) == 0)
+        boring = 1;
+    }
     if (!boring)
       LOG_INFO("[OPEN-FAIL] path='%s' flags=0x%x rc=%d", kpath, linux_flags,
                fd);
@@ -2121,7 +2128,7 @@ static int64_t k_pipe_impl(uint64_t fds_ptr, int *out_rd, int *out_wr) {
     return -EFAULT;
   }
 
-  LOG_INFO("[PIPE] OK rd=%d wr=%d", rd, wr);
+  LOG_TRACE("[PIPE] OK rd=%d wr=%d", rd, wr);
   if (out_rd)
     *out_rd = rd;
   if (out_wr)
@@ -2571,13 +2578,43 @@ static int64_t k_mincore(uint64_t addr, uint64_t len, uint64_t vec, uint64_t a4,
   uint64_t pages = (len + 0xFFF) >> 12;
   if (addr + len < addr || addr + len > 0x0000800000000000ULL)
     return -ENOMEM;
-  uint8_t ones[64];
-  memset(ones, 1, sizeof(ones));
-  for (uint64_t i = 0; i < pages; i += sizeof(ones)) {
-    uint64_t n = pages - i < sizeof(ones) ? pages - i : sizeof(ones);
-    if (copy_to_user((void *)(vec + i), ones, n) < 0)
+  // Como Linux: ENOMEM si alguna pagina del rango no esta mapeada (sin VMA).
+  // Wine y libunwind sondean asi si una direccion esta libre; con "todo
+  // mapeado" Wine recorria 2^25 paginas una a una en cada proceso.
+  process_t *proc = process_current();
+  if (!proc)
+    return -ENOMEM;
+  uint8_t buf[64];
+  mm_lock(proc);
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->pml4_phys);
+  for (uint64_t i = 0; i < pages;) {
+    uint64_t va = addr + (i << 12);
+    vma_t *v = vma_find(proc, va);
+    uint64_t lim;
+    if (v) {
+      lim = v->end;
+    } else if (va >= proc->heap_start && va < proc->heap_end) {
+      lim = (proc->heap_end + 0xFFF) & ~0xFFFULL; // heap de brk (bajo demanda)
+    } else if (proc->stack_low && va >= proc->stack_low && va < proc->stack_base) {
+      lim = proc->stack_base; // pila (crece por fallos, sin VMA propio)
+    } else if (paging_get_phys_in(pml4, va)) {
+      lim = va + 0x1000; // mapeada sin VMA (heap de brk, ELF antiguo...)
+    } else {
+      mm_unlock(proc);
+      return -ENOMEM;
+    }
+    uint64_t n = 0;
+    while (n < sizeof(buf) && i + n < pages && addr + ((i + n) << 12) < lim) {
+      buf[n] = paging_get_phys_in(pml4, addr + ((i + n) << 12)) ? 1 : 0;
+      n++;
+    }
+    mm_unlock(proc);
+    if (copy_to_user((void *)(vec + i), buf, n) < 0)
       return -EFAULT;
+    mm_lock(proc);
+    i += n;
   }
+  mm_unlock(proc);
   return 0;
 }
 
@@ -8993,6 +9030,16 @@ static void strace_msg_dump(const char *what, uint64_t msg, int64_t ret) {
            w[6], w[7]);
 }
 
+// Perfil de syscalls (/proc/aurora-prof): ciclos TSC y llamadas por numero.
+// Incluye el tiempo bloqueado (read de un pipe vacio, futex...).
+#define PROF_NSYS 512
+uint64_t g_prof_sys_cyc[PROF_NSYS], g_prof_sys_cnt[PROF_NSYS];
+static inline uint64_t prof_rdtsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+
 uint64_t syscall_handler_c(registers_t *regs) {
   uint64_t num = regs->rax;
   uint64_t arg1 = regs->rdi;
@@ -9038,7 +9085,12 @@ uint64_t syscall_handler_c(registers_t *regs) {
   }
 
   int pc_entry = cur ? cur->preempt_count : 0;
+  uint64_t prof_t0 = prof_rdtsc();
   uint64_t ret = (uint64_t)fn(arg1, arg2, arg3, arg4, arg5);
+  if (num < PROF_NSYS) {
+    __atomic_fetch_add(&g_prof_sys_cyc[num], prof_rdtsc() - prof_t0, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_prof_sys_cnt[num], 1, __ATOMIC_RELAXED);
+  }
   if (cur && cur->preempt_count != pc_entry) {
     // Una syscall no puede volver con la expulsion cambiada: lo corregimos y
     // decimos cual es (solo la primera vez por numero).
@@ -9100,7 +9152,15 @@ uint64_t syscall_handler_c(registers_t *regs) {
     if (((num == SYS_READLINK || num == SYS_READLINKAT) && r == -22) ||
         (num >= 188 && num <= 199 && (r == -95 || r == -61)) ||
         (num == SYS_IOCTL && r == -25) || (num == SYS_CLOSE && r == -9) ||
-        (num == SYS_KILL && r == -3))
+        (num == SYS_KILL && r == -3) ||
+        // rt_sigreturn devuelve el rax restaurado del contexto: no es error.
+        num == SYS_RT_SIGRETURN ||
+        // futex: plazo vencido / valor cambiado son resultados normales.
+        (num == SYS_FUTEX && (r == -110 || r == -11)) ||
+        // mmap con pista alta: Wine sondea el tope del espacio de usuario.
+        (num == SYS_MMAP && r == -22 && arg1 >= 0x800000000000ULL) ||
+        // pread/read sobre un directorio (EISDIR): sondas de existencia.
+        ((num == SYS_PREAD64 || num == SYS_READ) && r == -21))
       boring_enoent = 1;
   }
   int expected_would_block = 0;

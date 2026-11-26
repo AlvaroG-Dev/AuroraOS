@@ -104,6 +104,8 @@ void time_tick(void) {
     }
   }
 
+  extern void sched_prof_tick(void);
+  sched_prof_tick();
   sched_tick();
 }
 

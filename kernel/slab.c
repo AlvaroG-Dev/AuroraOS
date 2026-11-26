@@ -103,6 +103,7 @@ static void cache_init(slab_cache_t *c, size_t obj_size, const char *name) {
     c->objs_per_slab = 1;
   c->slabs = NULL;
   c->empty_slabs = NULL;
+  c->full_slabs = NULL;
   c->slabs_count = 0;
   c->empty_count = 0;
   c->used_count = 0;
@@ -267,6 +268,24 @@ static slab_header_t *slab_grow(slab_cache_t *c) {
 // ---------------------------------------------------------------------------
 // Alloc
 // ---------------------------------------------------------------------------
+static void slab_list_del(slab_header_t **head, slab_header_t *hdr) {
+  if (hdr->prev)
+    hdr->prev->next = hdr->next;
+  else
+    *head = hdr->next;
+  if (hdr->next)
+    hdr->next->prev = hdr->prev;
+  hdr->next = hdr->prev = NULL;
+}
+
+static void slab_list_push(slab_header_t **head, slab_header_t *hdr) {
+  hdr->prev = NULL;
+  hdr->next = *head;
+  if (*head)
+    (*head)->prev = hdr;
+  *head = hdr;
+}
+
 void *slab_alloc(size_t size) {
   if (!slab_ready || size == 0)
     return NULL;
@@ -278,7 +297,7 @@ void *slab_alloc(size_t size) {
   for (;;) {
     unsigned long flags = spin_lock_irqsave(&c->lock);
 
-    // Buscar un slab con hueco.
+    // c->slabs solo tiene slabs con hueco (los llenos van a c->full_slabs).
     slab_header_t *hdr = c->slabs;
     while (hdr && hdr->objs_free == 0)
       hdr = hdr->next;
@@ -296,6 +315,10 @@ void *slab_alloc(size_t size) {
       hdr->freelist = *(void **)obj;
       hdr->objs_free--;
       c->used_count++;
+      if (hdr->objs_free == 0) {
+        slab_list_del(&c->slabs, hdr);
+        slab_list_push(&c->full_slabs, hdr);
+      }
       spin_unlock_irqrestore(&c->lock, flags);
       return obj;
     }
@@ -349,6 +372,11 @@ void slab_free(void *ptr) {
     LOG_ERR("[SLAB] kfree con objeto ya libre (slab vacío): %p", ptr);
     spin_unlock_irqrestore(&c->lock, flags);
     return;
+  }
+
+  if (hdr->objs_free == 0) { // estaba lleno: vuelve a la lista con hueco
+    slab_list_del(&c->full_slabs, hdr);
+    slab_list_push(&c->slabs, hdr);
   }
 
   // Devolver el objeto al freelist.

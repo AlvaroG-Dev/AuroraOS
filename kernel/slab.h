@@ -21,6 +21,9 @@ typedef struct slab_cache {
 
   slab_header_t *slabs;       // slabs con al menos 1 objeto en uso
   slab_header_t *empty_slabs; // slabs vacíos, listos para reuso rápido
+  // Slabs sin hueco. Fuera de c->slabs para que slab_alloc no los recorra
+  // (con miles de slabs llenos cada kmalloc tardaba cientos de us).
+  slab_header_t *full_slabs;
 
   size_t slabs_count; // entradas en c->slabs
   size_t empty_count; // entradas en c->empty_slabs
