@@ -85,6 +85,12 @@ struct avm_ept_check {
   uint64_t pin_bad_free, pin_bad_alloc, pin_phys;
   uint32_t pin_kind, pin_pad; // 0 = free, 1 = asignacion
   uint64_t pin_callers[6];    // direcciones de retorno en el kernel del ultimo
+  // Entrada: donde tiene el VMM mapeado el memfd de la RAM (offset 0). Si uva
+  // no es 0, el kernel comprueba que cada pagina presente de ese mapeo es la
+  // misma fisica que la del memfd (la que ve el huesped por el EPT). Si el VMM
+  // escribiera en otra (copia COW, TLB o PTE viejo), el huesped no veria el DMA.
+  uint64_t uva, ulen;
+  uint64_t uchecked, ubad, uoff, uhave, uwant;
 };
 
 #define AVM_CAP_VMX (1u << 0)

@@ -537,8 +537,10 @@ static int bm_rw_buf(struct ide_bus *b, struct ide_if *s, int to_guest) {
     if (l > 0) {
       uint8_t *g = dma_ptr(b->cur_prd_addr, (uint64_t)l);
       if (g) {
-        if (to_guest)
+        if (to_guest) {
           memcpy(g, s->io_buffer + s->io_buffer_index, (size_t)l);
+          gw_note(b->cur_prd_addr, (uint64_t)l, GW_ATAPI);
+        }
         else
           memcpy(s->io_buffer + s->io_buffer_index, g, (size_t)l);
       }
@@ -577,6 +579,8 @@ static int ide_sg_io(struct ide_if *s, uint64_t off, int write) {
     if (!g)
       return -1;
     ssize_t r = write ? vm_pwrite(s->fd, g, g_sg[i].len, (off_t)off) : vm_pread(s->fd, g, g_sg[i].len, (off_t)off);
+    if (!write)
+      gw_note(g_sg[i].addr, g_sg[i].len, GW_DMA);
     if (r != (ssize_t)g_sg[i].len)
       return -1;
     if (g_dchk)

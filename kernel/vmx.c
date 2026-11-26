@@ -24,6 +24,7 @@
 #include "memfd.h"
 #include "paging.h"
 #include "pmm.h"
+#include "process.h"
 #include "sched.h"
 #include "time.h"
 #include "signal.h"
@@ -590,6 +591,33 @@ static void ept_audit(struct avm_vm *vm, struct avm_ept_check *c) {
           }
         }
       }
+    }
+  }
+}
+
+// Mapeo del VMM contra el memfd de la RAM (ver avm_ept_check.uva). Solo se
+// miran las paginas presentes: las que el VMM aun no toco no se pueden desviar.
+static void uva_audit(struct avm_vm *vm, struct avm_ept_check *c) {
+  struct slot *s0 = find_slot(vm, 0);
+  process_t *p = process_current();
+  if (!s0 || !s0->node || !p || !p->pml4_phys || !c->uva || (c->uva & 0xFFF))
+    return;
+  uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+  vfs_node_t *node = s0->node;
+  for (uint64_t off = 0; off < c->ulen; off += PAGE_SIZE) {
+    uint64_t pte;
+    if (!paging_get_pte_in(pml4, c->uva + off, &pte) || !(pte & PTE_PRESENT))
+      continue;
+    uint64_t want = 0;
+    if (node->ops->get_page(node, off / PAGE_SIZE, &want) < 0)
+      continue;
+    c->uchecked++;
+    if ((want & PTE_FRAME) == (pte & PTE_FRAME))
+      continue;
+    if (!c->ubad++) {
+      c->uoff = off;
+      c->uhave = pte;
+      c->uwant = want;
     }
   }
 }
@@ -2479,8 +2507,18 @@ static int64_t avm_ioctl(vfs_node_t *node, unsigned long req, uint64_t arg) {
   case AVM_EPT_CHECK: {
     if (vm->busy)
       return -EBUSY;
-    struct avm_ept_check c;
+    struct avm_ept_check c, in;
+    if (copy_from_user(&in, (void *)arg, sizeof(in)) < 0)
+      return -EFAULT;
     ept_audit(vm, &c);
+    c.uva = in.uva;
+    c.ulen = in.ulen > (1ULL << 40) ? 0 : in.ulen;
+    process_t *cp = process_current();
+    if (cp) {
+      mm_lock(cp);
+      uva_audit(vm, &c);
+      mm_unlock(cp);
+    }
     struct pmm_pin_stats ps;
     pmm_pin_get_stats(&ps);
     c.pin_bad_free = ps.bad_free;

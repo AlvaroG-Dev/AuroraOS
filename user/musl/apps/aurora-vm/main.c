@@ -124,6 +124,25 @@ static int irq_edge_pending(int irq);
 static uint8_t *dma_ptr(uint64_t gpa, uint64_t len);
 static void ept_check(const char *donde);
 
+// Ultimas escrituras del VMM en la RAM del huesped (DMA del disco/CD, INS,
+// instrucciones emuladas, bits A/D). Si aparece una tabla de paginas del
+// huesped rota, se buscan aqui las escrituras que cayeron en esa pagina.
+enum { GW_DMA = 1, GW_ATAPI, GW_INS, GW_EMU, GW_AD, GW_VIRTIO };
+struct gw_rec { uint64_t gpa; uint64_t t; uint32_t len; uint32_t src; };
+#define GW_N 65536
+static struct gw_rec g_gw[GW_N];
+static uint64_t g_gw_n;
+static uint64_t now_ns(void);
+static void gw_note(uint64_t gpa, uint64_t len, int src) {
+  struct gw_rec *w = &g_gw[g_gw_n++ % GW_N];
+  w->gpa = gpa;
+  w->len = len > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)len;
+  w->src = (uint32_t)src;
+  w->t = now_ns();
+}
+static uint64_t g_ram_maplen; // bytes del mmap del memfd (RAM + copia de la BIOS)
+
+
 
 // E/S del disco/CD del huesped que no se rinde a la primera: un pread/pwrite
 // puede volver corto, con EINTR o con un error pasajero (la primera lectura
@@ -236,8 +255,10 @@ static int gmem_access(uint64_t gpa, uint8_t *buf, unsigned n, int write) {
     if (gpa < g_ram_size && !(g_plat && gpa >= VGA_HOLE_LO && gpa < VGA_HOLE_HI)) {
       uint64_t lim = (g_plat && gpa < VGA_HOLE_LO) ? VGA_HOLE_LO : g_ram_size;
       c = (unsigned)(lim - gpa < n ? lim - gpa : n);
-      if (write)
+      if (write) {
         memcpy(g_ram + gpa, buf, c);
+        gw_note(gpa, c, GW_EMU);
+      }
       else
         memcpy(buf, g_ram + gpa, c);
     } else if (g_plat && gpa >= VGA_HOLE_LO && gpa < VGA_HOLE_HI) {
@@ -311,6 +332,7 @@ static void gpt_setbits(uint64_t gpa, uint64_t bits, unsigned n) {
     if ((v & bits) != bits) {
       v |= bits;
       memcpy(p, &v, 8);
+      gw_note(gpa, 8, GW_AD);
     }
   } else {
     uint32_t v;
@@ -318,6 +340,7 @@ static void gpt_setbits(uint64_t gpa, uint64_t bits, unsigned n) {
     if ((v & (uint32_t)bits) != (uint32_t)bits) {
       v |= (uint32_t)bits;
       memcpy(p, &v, 4);
+      gw_note(gpa, 4, GW_AD);
     }
   }
 }
@@ -510,6 +533,7 @@ static int string_io(const struct avm_exit *x) {
       if (!bytes || gva_walk(&r, lin, &gpa, 1) < 0 || !(hp = dma_ptr(gpa, bytes)))
         break;
       unsigned got = ide_data_read_bulk(x->io.port, hp, (unsigned)bytes, (int)size);
+      gw_note(gpa, got, GW_INS);
       done += got / size;
       if (got < bytes)
         break;
@@ -884,6 +908,199 @@ static void dbg_win_records(const struct avm_regs *r, const uint8_t *st, int got
   fprintf(stderr, "\n");
 }
 
+// ---------------------------------------------------------------------------
+// Tablas de paginas del huesped (x86-64, 4 niveles): bits reservados
+// ---------------------------------------------------------------------------
+// MAXPHYADDR de la CPU en la que corre el huesped (la que comprueba los bits).
+static unsigned g_maxphy;
+static unsigned maxphy(void) {
+  if (!g_maxphy) {
+    uint32_t a = 0, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000u), "c"(0));
+    g_maxphy = 36;
+    if (a >= 0x80000008u) {
+      __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000008u), "c"(0));
+      if ((a & 0xFF) >= 32 && (a & 0xFF) <= 52)
+        g_maxphy = a & 0xFF;
+    }
+  }
+  return g_maxphy;
+}
+// Bits reservados puestos en una entrada presente del nivel lvl (3 = PML4).
+static uint64_t pt_rsvd(uint64_t e, int lvl, int nxe) {
+  uint64_t m = ((1ULL << 52) - 1) & ~((1ULL << maxphy()) - 1);
+  if (!nxe)
+    m |= 1ULL << 63;
+  if (lvl == 3)
+    m |= 1ULL << 7;
+  else if (lvl == 2 && (e & 0x80))
+    m |= 0x3FFFE000ULL; // pagina de 1 GiB: bits 29:13
+  else if (lvl == 1 && (e & 0x80))
+    m |= 0x1FE000ULL; // pagina de 2 MiB: bits 20:13
+  return e & m;
+}
+static const char *gw_src_name(uint32_t s) {
+  static const char *n[] = {"?", "DMA disco", "DMA CD", "INS", "emulada", "bits A/D", "virtio"};
+  return s < sizeof(n) / sizeof(n[0]) ? n[s] : "?";
+}
+// Escrituras recientes del VMM en la pagina gpa (4 KiB).
+static void gw_dump_page(uint64_t gpa, const char *what) {
+  uint64_t pg = gpa & ~0xFFFULL, t = now_ns();
+  uint64_t n = g_gw_n < GW_N ? g_gw_n : GW_N;
+  int shown = 0, total = 0;
+  for (uint64_t k = 0; k < n; k++) {
+    const struct gw_rec *w = &g_gw[(g_gw_n - 1 - k) % GW_N];
+    if (w->gpa + w->len <= pg || w->gpa >= pg + 4096)
+      continue;
+    total++;
+    if (shown++ < 6)
+      fprintf(stderr, "      escritura del VMM en %s (%llx): %s gpa %llx+%x hace %.1f s\n", what,
+              (unsigned long long)pg, gw_src_name(w->src), (unsigned long long)w->gpa, w->len,
+              (double)(t - w->t) / 1e9);
+  }
+  if (!total)
+    fprintf(stderr, "      ninguna escritura del VMM en %s (%llx) en las ultimas %llu\n", what,
+            (unsigned long long)pg, (unsigned long long)n);
+  else if (total > shown)
+    fprintf(stderr, "      ... %d en total\n", total);
+}
+static void pt_dump_bytes(uint64_t gpa, unsigned n) {
+  uint64_t q[8];
+  if (n > sizeof(q) || gpt_read(gpa, q, n) < 0)
+    return;
+  fprintf(stderr, "      [%llx]:", (unsigned long long)gpa);
+  for (unsigned i = 0; i < n / 8; i++)
+    fprintf(stderr, " %016llx", (unsigned long long)q[i]);
+  fputc('\n', stderr);
+}
+// Camino de traduccion de va con cr3: cada nivel, y si alguna entrada tiene bits
+// reservados (#PF con RSVD: pantalla azul 0x1A/61941), sus vecinas y quien
+// escribio en esa pagina.
+static void pt_walk_dump(const struct avm_regs *r, uint64_t va, const char *why) {
+  if (!(r->efer & (1ULL << 10)) || !(r->cr0 & (1ULL << 31)))
+    return;
+  int nxe = (r->efer >> 11) & 1;
+  const uint64_t AM = 0x000FFFFFFFFFF000ULL;
+  uint64_t t = r->cr3 & AM;
+  fprintf(stderr, "  tablas de paginas para %llx (%s, cr3 %llx, MAXPHYADDR %u):\n", (unsigned long long)va, why,
+          (unsigned long long)r->cr3, maxphy());
+  static const char *ln[] = {"PTE", "PDE", "PDPTE", "PML4E"};
+  for (int lvl = 3; lvl >= 0; lvl--) {
+    uint64_t idx = (va >> (12 + 9 * lvl)) & 0x1FF, e;
+    if (gpt_read(t + idx * 8, &e, 8) < 0) {
+      fprintf(stderr, "    %s: tabla %llx fuera de la RAM\n", ln[lvl], (unsigned long long)t);
+      return;
+    }
+    uint64_t rs = (e & 1) ? pt_rsvd(e, lvl, nxe) : 0;
+    fprintf(stderr, "    %s tabla %llx [%3llu] = %016llx%s", ln[lvl], (unsigned long long)t,
+            (unsigned long long)idx, (unsigned long long)e, (e & 1) ? "" : " (no presente)");
+    if (rs)
+      fprintf(stderr, " BITS RESERVADOS %llx", (unsigned long long)rs);
+    fputc('\n', stderr);
+    if (rs) {
+      uint64_t lo = idx >= 4 ? idx - 4 : 0;
+      pt_dump_bytes(t + lo * 8, 64);
+      int np = 0, nr = 0;
+      for (unsigned k = 0; k < 512; k++) {
+        uint64_t q;
+        if (gpt_read(t + k * 8, &q, 8) < 0)
+          break;
+        if (q & 1) {
+          np++;
+          nr += pt_rsvd(q, lvl, nxe) != 0;
+        }
+      }
+      fprintf(stderr, "      en esa tabla: %d presentes, %d con bits reservados\n", np, nr);
+      gw_dump_page(t, "la tabla");
+    }
+    if (!(e & 1))
+      return;
+    if (lvl == 0 || ((lvl == 1 || lvl == 2) && (e & 0x80))) {
+      uint64_t sz = 1ULL << (12 + 9 * lvl);
+      uint64_t pa = ((e & AM) & ~(sz - 1)) | (va & (sz - 1));
+      fprintf(stderr, "    -> gpa %llx\n", (unsigned long long)pa);
+      if (lvl == 0)
+        gw_dump_page(pa, "la pagina de datos");
+      return;
+    }
+    t = e & AM;
+  }
+}
+
+// Cada 10 s con la traza: todas las tablas de paginas de cr3 en busca de
+// entradas presentes con bits reservados (una corrupcion de la RAM del huesped
+// suele caer antes en datos que en tablas, pero en tablas se ve en el acto).
+static void pt_scan(const struct avm_regs *r) {
+  if (!(r->efer & (1ULL << 10)) || !(r->cr0 & (1ULL << 31)))
+    return;
+  static uint64_t seen[64];
+  static int nseen;
+  int nxe = (r->efer >> 11) & 1;
+  const uint64_t AM = 0x000FFFFFFFFFF000ULL;
+  uint64_t root = r->cr3 & AM, tables = 0, bad = 0;
+  uint64_t l4[512];
+  if (gpt_read(root, l4, sizeof(l4)) < 0)
+    return;
+  // Pila explicita: (tabla, nivel, va base)
+  struct { uint64_t t, va; int lvl; } st[2048];
+  int sp = 0;
+  for (int i = 511; i >= 0; i--) {
+    uint64_t e = l4[i];
+    if (!(e & 1) || (e & AM) == root) // la entrada que apunta a si misma (Windows)
+      continue;
+    uint64_t va = (uint64_t)i << 39;
+    if (va & (1ULL << 47))
+      va |= 0xFFFF000000000000ULL;
+    if (pt_rsvd(e, 3, nxe)) {
+      bad++;
+      continue;
+    }
+    if (sp < 2048)
+      st[sp++] = (typeof(st[0])){e & AM, va, 2};
+  }
+  while (sp > 0 && tables < 200000) {
+    typeof(st[0]) c = st[--sp];
+    uint64_t tb[512];
+    if (gpt_read(c.t, tb, sizeof(tb)) < 0)
+      continue;
+    tables++;
+    for (int i = 0; i < 512; i++) {
+      uint64_t e = tb[i];
+      if (!(e & 1))
+        continue;
+      uint64_t va = c.va | ((uint64_t)i << (12 + 9 * c.lvl));
+      uint64_t rs = pt_rsvd(e, c.lvl, nxe);
+      if (rs) {
+        bad++;
+        uint64_t key = c.t + (uint64_t)i * 8;
+        int dup = 0;
+        for (int k = 0; k < nseen; k++)
+          dup |= seen[k] == key;
+        if (!dup && nseen < 64) {
+          seen[nseen++] = key;
+          static const char *ln[] = {"PTE", "PDE", "PDPTE"};
+          fprintf(stderr, "[pt] ENTRADA ROTA en las tablas del huesped: %s tabla %llx [%d] = %016llx (bits "
+                          "reservados %llx), va %llx\n",
+                  ln[c.lvl], (unsigned long long)c.t, i, (unsigned long long)e, (unsigned long long)rs,
+                  (unsigned long long)va);
+          pt_dump_bytes(c.t + (uint64_t)(i >= 4 ? i - 4 : 0) * 8, 64);
+          gw_dump_page(c.t, "la tabla");
+          ept_check("tabla rota");
+        }
+        continue;
+      }
+      if (c.lvl > 0 && !(e & 0x80) && sp < 2048)
+        st[sp++] = (typeof(st[0])){e & AM, va, c.lvl - 1};
+    }
+  }
+  static int first = 1;
+  if (first) {
+    fprintf(stderr, "[pt] tablas del huesped: %llu revisadas, %llu entradas con bits reservados\n",
+            (unsigned long long)tables, (unsigned long long)bad);
+    first = 0;
+  }
+}
+
 // Para diagnosticar un huesped parado (p. ej. Windows en KeBugCheckEx): codigo
 // antes de rip, la pila y las bases de segmento. Con esto se saca el codigo de
 // la pantalla azul aunque no llegue a dibujarse.
@@ -917,6 +1134,7 @@ static void dump_guest_mem(const struct avm_regs *r) {
   fprintf(stderr, "\n");
   if (!l64)
     return;
+  pt_walk_dump(r, r->cr2, "cr2");
   // Pantalla azul de Windows x64: KeBugCheckEx guarda un CONTEXT (ContextFlags
   // 0x10000F en +0x30) con el codigo en RCX y los parametros en RDX, R8 y R9.
   for (int i = 0; i + 0x100 <= got; i += 8) {
@@ -937,6 +1155,8 @@ static void dump_guest_mem(const struct avm_regs *r) {
     if (!(rc && rc < 0x400))
       continue;
     ept_check("pantalla azul");
+    if (rc == 0x1A && rd == 0x61941 && r8v != r->cr2) // tabla de paginas rota: la direccion
+      pt_walk_dump(r, r8v, "parametro 2 de 0x1A");
     dbg_win_records(r, st, got, sp);
     if (rc == 0xEF) { // CRITICAL_PROCESS_DIED: nombre del proceso (EPROCESS+0x5A8 en 19041)
       char nm[16] = {0};
@@ -1120,6 +1340,11 @@ static int g_traza;
 static void ept_check(const char *donde) {
   static int first = 1, bad_dumps;
   struct avm_ept_check c;
+  memset(&c, 0, sizeof(c));
+  if (g_ram && g_ram_maplen) {
+    c.uva = (uint64_t)(uintptr_t)g_ram;
+    c.ulen = g_ram_maplen;
+  }
   if (ioctl(g_vm, AVM_EPT_CHECK, &c) < 0) {
     if (first)
       fprintf(stderr, "[ept] el kernel no tiene AVM_EPT_CHECK (%s)\n", strerror(errno));
@@ -1137,6 +1362,16 @@ static void ept_check(const char *donde) {
     for (int k = 0; k < 6; k++)
       fprintf(stderr, " %llx", (unsigned long long)c.pin_callers[k]);
     fprintf(stderr, "\n");
+  }
+  static uint64_t ubad_seen;
+  if (first || c.ubad != ubad_seen) {
+    fprintf(stderr, "[ept] %s: mapeo del VMM: %llu paginas comprobadas, %llu con otra fisica que el huesped",
+            donde, (unsigned long long)c.uchecked, (unsigned long long)c.ubad);
+    if (c.ubad)
+      fprintf(stderr, " (primera: offset %llx pte %llx, memfd %llx) -> EL DMA DEL VMM NO LLEGA AL HUESPED",
+              (unsigned long long)c.uoff, (unsigned long long)c.uhave, (unsigned long long)c.uwant);
+    fputc('\n', stderr);
+    ubad_seen = c.ubad;
   }
   if (first || c.bad || c.orphan) {
     fprintf(stderr, "[ept] %s: %llu paginas mapeadas, %llu mal mapeadas, %llu fuera de slot\n", donde,
@@ -1192,8 +1427,10 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
   // Cada 10 s: el EPT entero contra los memfd (una pagina mal mapeada corromperia
   // la RAM del huesped sin dejar rastro).
   static unsigned ept_n;
-  if (ept_n++ % 5 == 0)
+  if (ept_n++ % 5 == 0) {
     ept_check("traza");
+    pt_scan(&r);
+  }
   // Huesped muerto en "jmp $" con IF=0 (Windows tras KeBugCheckEx, sin pantalla
   // azul): volcado una sola vez, sin esperar a que se cierre la ventana.
   static int parado_dump;
@@ -1700,6 +1937,7 @@ static int run_flat(const uint8_t *code, size_t len, uint64_t at, unsigned mem_m
     return 1;
   }
   g_ram = mmap(NULL, g_ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_mfd, 0);
+  g_ram_maplen = g_ram_size;
   if (g_ram == MAP_FAILED) {
     g_ram = NULL;
     perror("mmap");
@@ -1854,6 +2092,7 @@ static int run_bios(const struct bios_opts *o) {
     return 1;
   }
   g_ram = mmap(NULL, g_ram_size + bn, PROT_READ | PROT_WRITE, MAP_SHARED, g_mfd, 0);
+  g_ram_maplen = g_ram_size + bn;
   if (g_ram == MAP_FAILED) {
     g_ram = NULL;
     perror("mmap");
