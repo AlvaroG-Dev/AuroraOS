@@ -154,6 +154,13 @@ struct aur_sup {
 };
 
 static struct aur_sup g_sup[AUR_SUP_MAX];
+// Dispositivos de una instancia que salio dejando a otra del mismo .aur a
+// cargo (ver aur_sup_thread): se apagan cuando se va la ultima.
+static struct {
+  int used;
+  char path[VFS_PATH_MAX];
+  char arg[32];
+} g_handoff[AUR_SUP_MAX];
 static spinlock_t g_sup_lock = {.locked = 0};
 static int g_sup_thread_started;
 static wait_queue_t g_sup_wq;
@@ -284,12 +291,46 @@ static int aur_sup_thread(void *arg) {
       int gone = state == SUP_RUNNING && reap != -EBUSY &&
                  (s->state == SUP_FREE || s->state == SUP_GIVEN_UP);
       char gone_arg[sizeof(s->arg)];
-      if (gone)
+      // BDFs a los que hay que apagar el bus master (el propio y los que
+      // otra instancia del mismo .aur dejo a cargo de esta).
+      char quiesce[AUR_SUP_MAX][sizeof(s->arg)];
+      int nq = 0;
+      if (gone) {
         memcpy(gone_arg, s->arg, sizeof(gone_arg));
+        // Algunos .aur (ahci.aur) se lanzan uno por controlador, pero solo
+        // uno se queda y lleva TODOS los controladores; los demas salen con
+        // codigo 0. Apagar el bus master del BDF de una instancia que se fue
+        // dejaba sin DMA un controlador que la otra estaba usando (QEMU con
+        // dos AHCI: "Failed to start DMA engine: bad command list buffer
+        // address" y no se podia montar el disco, segun quien ganara).
+        int sibling = 0;
+        for (int j = 0; j < AUR_SUP_MAX; j++)
+          if (j != i &&
+              (g_sup[j].state == SUP_RUNNING || g_sup[j].state == SUP_BACKOFF) &&
+              strcmp(g_sup[j].path, s->path) == 0)
+            sibling = 1;
+        if (sibling) {
+          for (int k = 0; k < AUR_SUP_MAX; k++)
+            if (!g_handoff[k].used) {
+              g_handoff[k].used = 1;
+              memcpy(g_handoff[k].path, s->path, sizeof(g_handoff[k].path));
+              memcpy(g_handoff[k].arg, s->arg, sizeof(g_handoff[k].arg));
+              break;
+            }
+        } else {
+          memcpy(quiesce[nq++], gone_arg, sizeof(gone_arg));
+          for (int k = 0; k < AUR_SUP_MAX; k++)
+            if (g_handoff[k].used && strcmp(g_handoff[k].path, s->path) == 0) {
+              if (nq < AUR_SUP_MAX)
+                memcpy(quiesce[nq++], g_handoff[k].arg, sizeof(gone_arg));
+              g_handoff[k].used = 0;
+            }
+        }
+      }
       spin_unlock_irqrestore(&g_sup_lock, fl);
 
-      if (gone)
-        aur_quiesce_pci(gone_arg);
+      for (int k = 0; k < nq; k++)
+        aur_quiesce_pci(quiesce[k]);
       if (act != SUP_RESTART_NOW)
         continue;
       process_t *p = aur_spawn(path, arg);
