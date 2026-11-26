@@ -1037,10 +1037,24 @@ static void pt_scan(const struct avm_regs *r) {
   static int nseen;
   int nxe = (r->efer >> 11) & 1;
   const uint64_t AM = 0x000FFFFFFFFFF000ULL;
-  uint64_t root = r->cr3 & AM, tables = 0, bad = 0;
+  uint64_t root = r->cr3 & AM, tables = 0, bad = 0, dup_skip = 0, t_start = now_ns();
   uint64_t l4[512];
   if (gpt_read(root, l4, sizeof(l4)) < 0)
     return;
+  // Cada tabla una sola vez: en vm36 el recorrido sin esto llego al tope de
+  // 200.000 tablas (Windows apunta varias entradas a las mismas tablas) y paraba
+  // la VM medio segundo cada 10 s.
+  static uint8_t *visited;
+  static uint64_t vis_bytes;
+  uint64_t need = (g_ram_size >> 15) + 1;
+  if (vis_bytes != need) {
+    free(visited);
+    visited = calloc(1, need);
+    vis_bytes = visited ? need : 0;
+  }
+  if (!visited)
+    return;
+  memset(visited, 0, vis_bytes);
   // Pila explicita: (tabla, nivel, va base)
   struct { uint64_t t, va; int lvl; } st[2048];
   int sp = 0;
@@ -1060,6 +1074,14 @@ static void pt_scan(const struct avm_regs *r) {
   }
   while (sp > 0 && tables < 200000) {
     typeof(st[0]) c = st[--sp];
+    uint64_t pn = c.t >> 12;
+    if ((pn >> 3) >= vis_bytes)
+      continue;
+    if (visited[pn >> 3] & (1u << (pn & 7))) {
+      dup_skip++;
+      continue;
+    }
+    visited[pn >> 3] |= (uint8_t)(1u << (pn & 7));
     uint64_t tb[512];
     if (gpt_read(c.t, tb, sizeof(tb)) < 0)
       continue;
@@ -1095,8 +1117,10 @@ static void pt_scan(const struct avm_regs *r) {
   }
   static int first = 1;
   if (first) {
-    fprintf(stderr, "[pt] tablas del huesped: %llu revisadas, %llu entradas con bits reservados\n",
-            (unsigned long long)tables, (unsigned long long)bad);
+    fprintf(stderr, "[pt] tablas del huesped: %llu revisadas (%llu repetidas sin mirar), %llu entradas con bits "
+                    "reservados, %.1f ms\n",
+            (unsigned long long)tables, (unsigned long long)dup_skip, (unsigned long long)bad,
+            (double)(now_ns() - t_start) / 1e6);
     first = 0;
   }
 }
@@ -1430,6 +1454,26 @@ static void traza(uint64_t tnow, const struct avm_exit *x) {
   if (ept_n++ % 5 == 0) {
     ept_check("traza");
     pt_scan(&r);
+  }
+  // Huesped en modo largo que no hace ninguna E/S en 6 s (vm36: Windows girando
+  // a IRQL alto con el TPR en 0xF0): volcado una vez con el codigo alrededor de
+  // RIP para ver en que bucle esta.
+  static int quieto, quieto_dump;
+  if (!quieto_dump && (r.efer & (1ULL << 10)) && !nr[AVM_EXIT_IO] && !nr[AVM_EXIT_MMIO] &&
+      !nr[AVM_EXIT_HLT]) {
+    if (++quieto >= 3) {
+      quieto_dump = 1;
+      dump_regs("huesped sin E/S desde hace 6 s");
+      uint8_t cb[128];
+      int m = dbg_lin_read(&r, r.cs.base + r.rip - 64, cb, 128);
+      fprintf(stderr, "  codigo [rip-40 .. rip+40]:");
+      for (int k = 0; k < m; k++)
+        fprintf(stderr, k == 64 ? " |%02x" : " %02x", cb[k]);
+      fputc('\n', stderr);
+      ept_check("huesped quieto");
+    }
+  } else {
+    quieto = 0;
   }
   // Huesped muerto en "jmp $" con IF=0 (Windows tras KeBugCheckEx, sin pantalla
   // azul): volcado una sola vez, sin esperar a que se cierre la ventana.
