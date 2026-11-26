@@ -11,6 +11,31 @@
 section .text
 
 ; ---------------------------------------------------------------------------
+; long raw_cmpxchg_user_u32(uint32_t *uaddr, uint32_t old, uint32_t new,
+;                           uint32_t *cur)
+; CAS atomico sobre memoria de usuario (futex PI). *cur = valor que habia.
+; 0 = hecho (mirar *cur == old para saber si se cambio), -EFAULT si falla.
+; ---------------------------------------------------------------------------
+global raw_cmpxchg_user_u32
+global raw_cmpxchg_user_u32_fault
+global raw_cmpxchg_user_u32_fixup
+
+raw_cmpxchg_user_u32:
+    mov eax, esi
+    stac
+raw_cmpxchg_user_u32_fault:
+    lock cmpxchg [rdi], edx
+    clac
+    mov [rcx], eax
+    xor eax, eax
+    ret
+
+raw_cmpxchg_user_u32_fixup:
+    clac
+    mov rax, -14
+    ret
+
+; ---------------------------------------------------------------------------
 ; long raw_copy_from_user(void *dst, const void *src, size_t n)
 ; ---------------------------------------------------------------------------
 global raw_copy_from_user

@@ -17,6 +17,10 @@ static struct vdso_vvar *g_vvar = NULL;
 static int g_vdso_ready = 0;
 static int64_t g_epoch_offset_ns = 0;
 
+// Mismo ancla que la pagina vvar: gettimeofday del vDSO y las syscalls de
+// tiempo real deben coincidir (futex LOCK_PI convierte plazos absolutos).
+int64_t vdso_realtime_offset_ms(void) { return g_epoch_offset_ns / 1000000LL; }
+
 void vdso_init(void) {
   if (g_vdso_ready)
     return;

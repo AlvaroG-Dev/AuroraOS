@@ -12,4 +12,7 @@ uint64_t vdso_map_in(uint64_t *pml4);
 // [C] Actualiza la pagina vvar. Llamar desde time_tick en CPU0.
 void vdso_update_clock(void);
 
+// [C] Desplazamiento realtime-monotonico (ms) usado por el vDSO; 0 si no hay RTC.
+int64_t vdso_realtime_offset_ms(void);
+
 #endif

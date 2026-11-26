@@ -7,6 +7,7 @@
 
 #include "power.h"
 #include "syscall.h"
+#include "vdso.h"
 #include "gfx/theme.h"
 #include "rseq.h"
 #include "smp_boot.h"
@@ -3542,10 +3543,15 @@ static int64_t realtime_now_ms(void) {
     uint32_t expected = 0;
     if (__atomic_compare_exchange_n(&g_realtime_offset_state, &expected, 1, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-      uint64_t ticks = sched_get_ticks();
-      int64_t epoch = rtc_get_epoch();
-      g_realtime_offset_ms =
-          (epoch > 0) ? (epoch * 1000LL - (int64_t)ticks) : 0;
+      int64_t vo = vdso_realtime_offset_ms();
+      if (vo > 0) {
+        g_realtime_offset_ms = vo;
+      } else {
+        uint64_t ticks = sched_get_ticks();
+        int64_t epoch = rtc_get_epoch();
+        g_realtime_offset_ms =
+            (epoch > 0) ? (epoch * 1000LL - (int64_t)ticks) : 0;
+      }
       __atomic_store_n(&g_realtime_offset_state, 2, __ATOMIC_RELEASE);
     } else {
       while (__atomic_load_n(&g_realtime_offset_state, __ATOMIC_ACQUIRE) != 2)

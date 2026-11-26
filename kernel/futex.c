@@ -8,6 +8,12 @@
 #include "uaccess.h"
 #include "wait.h"
 #include <stddef.h>
+#include "signal.h"
+#include "idt.h"
+
+#ifndef EDEADLK
+#define EDEADLK 35
+#endif
 
 #define FUTEX_HASH_BITS 8
 #define FUTEX_HASH_SIZE (1u << FUTEX_HASH_BITS)
@@ -258,6 +264,125 @@ static int64_t futex_wake_op(uint64_t uaddr, uint32_t nr_wake, uint64_t uaddr2,
   return woken;
 }
 
+// ---------------------------------------------------------------------------
+// Futex PI (LOCK_PI / UNLOCK_PI / TRYLOCK_PI / LOCK_PI2).
+//
+// glibc los usa para los mutex PTHREAD_PRIO_INHERIT (Mesa, Wine...). La
+// palabra vale TID del dueno | FUTEX_WAITERS | FUTEX_OWNER_DIED. Sin ellos
+// (antes: -ENOSYS) el que soltaba un mutex con esperadores no despertaba a
+// nadie y los demas hilos se quedaban esperando para siempre.
+//
+// Sin herencia de prioridad (el planificador no la tiene): LOCK_PI marca
+// FUTEX_WAITERS y duerme en la cola del futex; UNLOCK_PI deja la palabra a 0
+// y despierta a todos, que vuelven a competir (el que pierde vuelve a marcar
+// FUTEX_WAITERS antes de dormir, asi nadie se queda sin despertar).
+// ---------------------------------------------------------------------------
+#define FUTEX_PI_WAITERS 0x80000000u
+#define FUTEX_PI_OWNER_DIED 0x40000000u
+#define FUTEX_PI_TID_MASK 0x3fffffffu
+
+extern long raw_cmpxchg_user_u32(uint32_t *uaddr, uint32_t old, uint32_t nv,
+                                 uint32_t *cur);
+extern registers_t *syscall_current_regs(void);
+extern int64_t kernel_realtime_ms(void);
+
+// 0 = cambiado; 1 = el valor no era `old` (*cur lo trae); <0 error.
+static int futex_cas_user(uint64_t uaddr, uint32_t old, uint32_t nv,
+                          uint32_t *cur) {
+  if (!access_ok((void *)uaddr, 4) || (uaddr & 3))
+    return -EFAULT;
+  uint32_t c = 0;
+  if (raw_cmpxchg_user_u32((uint32_t *)uaddr, old, nv, &c) != 0)
+    return -EFAULT;
+  *cur = c;
+  return c == old ? 0 : 1;
+}
+
+static int64_t futex_lock_pi(uint64_t uaddr, int64_t abs_ns, int realtime,
+                             int trylock, uint64_t pml4) {
+  (void)pml4;
+  task_t *self = sched_current();
+  if (!self)
+    return -EINVAL;
+  uint32_t tid = task_tid(self) & FUTEX_PI_TID_MASK;
+  for (;;) {
+    uint32_t v;
+    if (get_user_u32(&v, (const uint32_t *)uaddr) < 0)
+      return -EFAULT;
+    if ((v & FUTEX_PI_TID_MASK) == 0) {
+      uint32_t nv = tid | (v & (FUTEX_PI_WAITERS | FUTEX_PI_OWNER_DIED));
+      uint32_t c;
+      int r = futex_cas_user(uaddr, v, nv, &c);
+      if (r < 0)
+        return r;
+      if (r == 0)
+        return 0;
+      continue;
+    }
+    if ((v & FUTEX_PI_TID_MASK) == tid)
+      return -EDEADLK;
+    if (trylock)
+      return -EAGAIN;
+    if (!(v & FUTEX_PI_WAITERS)) {
+      uint32_t c;
+      int r = futex_cas_user(uaddr, v, v | FUTEX_PI_WAITERS, &c);
+      if (r < 0)
+        return r;
+      if (r == 1)
+        continue;
+      v |= FUTEX_PI_WAITERS;
+    }
+    // Espera hasta que la palabra cambie (UNLOCK_PI despierta).
+    int64_t rel = -1;
+    if (abs_ns >= 0) {
+      int64_t now_ns = realtime ? kernel_realtime_ms() * 1000000LL
+                                : (int64_t)sched_get_ticks() * 1000000LL;
+      rel = abs_ns - now_ns;
+      if (rel <= 0)
+        return -ETIMEDOUT;
+    }
+    int64_t w = futex_do_wait_impl(uaddr, v, rel, /*absolute=*/0);
+    if (w == -ETIMEDOUT)
+      return -ETIMEDOUT;
+    if (w == -EINTR) {
+      // Linux reinicia LOCK_PI tras el manejador (nunca devuelve EINTR:
+      // glibc lo trataria como error fatal). Rebobinamos la syscall: al
+      // volver del manejador se ejecuta otra vez con los mismos argumentos.
+      registers_t *regs = syscall_current_regs();
+      if (regs) {
+        regs->rip -= 2;
+        return 202; /* SYS_futex: rax para repetir la syscall */
+      }
+      return -EINTR;
+    }
+    if (w == -EFAULT)
+      return -EFAULT;
+    // 0 o -EAGAIN (la palabra ya habia cambiado): reintentar.
+  }
+}
+
+static int64_t futex_unlock_pi(uint64_t uaddr, uint64_t pml4) {
+  task_t *self = sched_current();
+  if (!self)
+    return -EINVAL;
+  uint32_t tid = task_tid(self) & FUTEX_PI_TID_MASK;
+  for (;;) {
+    uint32_t v;
+    if (get_user_u32(&v, (const uint32_t *)uaddr) < 0)
+      return -EFAULT;
+    if ((v & FUTEX_PI_TID_MASK) != tid)
+      return -EPERM;
+    uint32_t c;
+    int r = futex_cas_user(uaddr, v, 0, &c);
+    if (r < 0)
+      return r;
+    if (r == 0)
+      break;
+  }
+  futex_do_wake(uaddr, 0x7fffffff, pml4);
+  return 0;
+}
+
 int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
                   uint64_t timeout_uptr, uint64_t uaddr2, uint64_t val3) {
   process_t *proc = process_current();
@@ -353,6 +478,31 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
       total = 0x7fffffff;
     return futex_do_wake(uaddr, (uint32_t)total, pml4);
   }
+
+  case FUTEX_LOCK_PI:
+  case FUTEX_LOCK_PI2:
+  case FUTEX_TRYLOCK_PI: {
+    // Timeout absoluto: LOCK_PI siempre CLOCK_REALTIME; LOCK_PI2 MONOTONIC
+    // salvo FUTEX_CLOCK_REALTIME.
+    int64_t abs_ns = -1;
+    if (cmd != FUTEX_TRYLOCK_PI && timeout_uptr) {
+      struct {
+        int64_t sec;
+        int64_t nsec;
+      } ts;
+      if (copy_from_user(&ts, (void *)timeout_uptr, sizeof(ts)) < 0)
+        return -EFAULT;
+      if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1000000000LL)
+        return -EINVAL;
+      abs_ns = ts.sec * 1000000000LL + ts.nsec;
+    }
+    int realtime = cmd == FUTEX_LOCK_PI || (op & FUTEX_CLOCK_REALTIME);
+    return futex_lock_pi(uaddr, abs_ns, realtime, cmd == FUTEX_TRYLOCK_PI,
+                         pml4);
+  }
+
+  case FUTEX_UNLOCK_PI:
+    return futex_unlock_pi(uaddr, pml4);
 
   default:
     return -ENOSYS;
