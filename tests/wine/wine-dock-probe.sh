@@ -13,11 +13,14 @@ if [ ! -S /run/user/0/wayland-0 ]; then
   /usr/bin/aurora-wayland > /tmp/aw.log 2>&1 &
   sleep 8
 fi
+# WINE_FRESH=1: sin prefijo, la primera app lo crea (como el PC de Alvaro).
+if [ "${WINE_FRESH:-0}" != 1 ]; then
 t0=$(date +%s)
 timeout 900 aurora-wine --setup </dev/null >/dev/null 2>&1; echo "WINE-DOCK: setup rc=$? en $(( $(date +%s) - t0 )) s"
 ls -d $WINEPREFIX/drive_c/windows/winsxs/amd64_microsoft.windows.common-controls_*/comctl32.dll $WINEPREFIX/.aurora-prefijo
 # Prefijo a medias (como tras un apagado durante wineboot): aurora-wine lo repara.
 rm -rf $WINEPREFIX/drive_c/windows/winsxs/amd64_microsoft.windows.common-controls_* $WINEPREFIX/drive_c/windows/system32/comdlg32.dll
+fi
 wineserver -k 2>/dev/null; sleep 5
 t0=$(date +%s)
 WINEDEBUG=${DOCK_DEBUG:-err+all,fixme-all} aurora-wine winemine </dev/null >/dev/null 2>&1 &

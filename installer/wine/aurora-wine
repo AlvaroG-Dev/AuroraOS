@@ -101,7 +101,14 @@ wineboot_aurora() {  # $1 = -i (crear) o -u (actualizar/reparar)
     wineserver -k 2>/dev/null
     ( wine_sw; timeout 600 wineboot "$1" ) >>"$AURORA_WINE_LOG" 2>&1
     rc=$?
-    timeout 60 wineserver -w 2>/dev/null
+    # Si algo de wineboot se queda colgado (explorer, winedevice...), sigue
+    # siendo duenio del escritorio y el explorer de la app sale enseguida sin
+    # ventana (EXPLORER-SALIO). Se cierra la sesion de wineboot entera.
+    if ! timeout 60 wineserver -w 2>/dev/null; then
+        log "wineboot $1: quedaban procesos de Wine ($(cat /proc/[0-9]*/comm 2>/dev/null | grep -i 'exe\|wine' | tr '\n' ' ')); los cierro"
+        wineserver -k 2>/dev/null
+        timeout 20 wineserver -w 2>/dev/null
+    fi
     # 124/137: el tope de tiempo lo paro.
     if [ $rc = 124 ] || [ $rc = 137 ]; then
         log "wineboot $1 no termino (rc=$rc)"
@@ -138,8 +145,16 @@ if [ ! -f "$ok" ] || ! pfx_completo; then
     fi
 fi
 if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
-    wine regedit /S "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
+    # reg.exe (de consola) y no regedit: regedit es una app grafica y arranca
+    # su propio explorer.exe, que luego le quita el escritorio al de
+    # aurora-desktop.exe (EXPLORER-SALIO) y se cierra al acabar regedit.
+    wine reg import "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
 fi
+# Wine cambia el nombre de sus procesos con prctl: explorer.exe sale en comm.
+hay_explorer() {
+    grep -qai 'explorer\.exe' /proc/[0-9]*/cmdline 2>/dev/null ||
+        cat /proc/[0-9]*/comm 2>/dev/null | grep -qi '^explorer'
+}
 rm -rf "$lock"; trap - EXIT INT TERM
 [ "$1" = "--setup" ] && exit 0
 [ $# -eq 0 ] && set -- winecfg
@@ -148,7 +163,10 @@ rm -rf "$lock"; trap - EXIT INT TERM
 # explorer process failed to start" y no sale ninguna ventana (el icono del
 # Dock salta y nada mas). aurora-desktop.exe lo arranca, espera a que este
 # listo de verdad y lo mantiene vivo mientras arranca la app.
-if [ -f "$SHARE/aurora-desktop.exe" ] && ! grep -qai 'explorer\.exe' /proc/[0-9]*/cmdline 2>/dev/null; then
+# Si otro explorer (de wineboot, de una app que ya se cerro) todavia esta
+# arrancando o cerrandose, el nuestro sale enseguida (EXPLORER-SALIO): se
+# espera a que ese desaparezca y se vuelve a intentar.
+escritorio() {
     listo=$(mktemp /tmp/aurora-desktop.XXXXXX)
     wine "$SHARE/aurora-desktop.exe" >"$listo" 2>>"$AURORA_WINE_LOG" &
     dpid=$!
@@ -156,8 +174,24 @@ if [ -f "$SHARE/aurora-desktop.exe" ] && ! grep -qai 'explorer\.exe' /proc/[0-9]
     while [ $(( $(date +%s) - t0 )) -lt 130 ] && kill -0 $dpid 2>/dev/null && [ ! -s "$listo" ]; do
         sleep 0.3
     done
-    log "escritorio: $(head -n 1 "$listo" 2>/dev/null) ($(( $(date +%s) - t0 )) s)"
+    res=$(head -n 1 "$listo" 2>/dev/null)
+    log "escritorio: ${res:-sin respuesta} ($(( $(date +%s) - t0 )) s)"
     rm -f "$listo"
+}
+if [ -f "$SHARE/aurora-desktop.exe" ] && ! hay_explorer; then
+    for intento in 1 2 3; do
+        escritorio
+        [ "$res" = EXPLORER-SALIO ] || break
+        t1=$(date +%s)
+        while hay_explorer && [ $(( $(date +%s) - t1 )) -lt 60 ]; do sleep 0.5; done
+        hay_explorer && { log "escritorio: hay otro explorer.exe vivo; sigo con el"; break; }
+        # Sin explorer vivo y aun asi el nuestro sale: el escritorio de esta
+        # sesion de Wine se quedo roto (sin explorer no hay ventanas). Se
+        # cierra la sesion y se empieza de cero.
+        log "escritorio: sesion de Wine sin escritorio ($(cat /proc/[0-9]*/comm 2>/dev/null | grep -i 'exe\|wine' | tr '\n' ' ')); wineserver -k"
+        wineserver -k 2>/dev/null
+        timeout 20 wineserver -w 2>/dev/null
+    done
 fi
 # Lanzado desde el Dock (sin terminal): la salida de Wine al registro, que si
 # no se pierde y no hay forma de saber por que no sale la ventana.
