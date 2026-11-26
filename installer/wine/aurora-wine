@@ -171,7 +171,7 @@ escritorio() {
     wine "$SHARE/aurora-desktop.exe" >"$listo" 2>>"$AURORA_WINE_LOG" &
     dpid=$!
     t0=$(date +%s)
-    while [ $(( $(date +%s) - t0 )) -lt 130 ] && kill -0 $dpid 2>/dev/null && [ ! -s "$listo" ]; do
+    while [ $(( $(date +%s) - t0 )) -lt 310 ] && kill -0 $dpid 2>/dev/null && [ ! -s "$listo" ]; do
         sleep 0.3
     done
     res=$(head -n 1 "$listo" 2>/dev/null)
@@ -196,6 +196,9 @@ fi
 # Lanzado desde el Dock (sin terminal): la salida de Wine al registro, que si
 # no se pierde y no hay forma de saber por que no sale la ventana.
 log "lanzo: wine $*"
+# AURORA_WINE_APP_DEBUG: canales de depuracion solo para la app (no para el
+# escritorio ni wineboot).
+[ -n "$AURORA_WINE_APP_DEBUG" ] && export WINEDEBUG="$AURORA_WINE_APP_DEBUG"
 if [ ! -t 2 ] && [ "$AURORA_WINE_LOG" != /dev/null ]; then exec >>"$AURORA_WINE_LOG" 2>&1; fi
 case "$1" in
     *.msi|*.MSI) exec wine msiexec /i "$@" ;;

@@ -9089,6 +9089,20 @@ uint64_t syscall_handler_c(registers_t *regs) {
       break;
     }
   }
+  // Errores que Linux tambien devuelve a diario y que los programas
+  // esperan (Wine los provoca a miles al arrancar): readlink de algo que no
+  // es enlace (EINVAL), xattr sin soporte (EOPNOTSUPP/ENODATA), ioctl de
+  // terminal sobre lo que no lo es (ENOTTY), close(-1) (EBADF), kill a un
+  // pid que ya no existe (ESRCH). Cada linea por serie cuesta ~3 ms: con
+  // ellas Wine tardaba decenas de segundos mas en abrir una ventana.
+  {
+    int64_t r = (int64_t)ret;
+    if (((num == SYS_READLINK || num == SYS_READLINKAT) && r == -22) ||
+        (num >= 188 && num <= 199 && (r == -95 || r == -61)) ||
+        (num == SYS_IOCTL && r == -25) || (num == SYS_CLOSE && r == -9) ||
+        (num == SYS_KILL && r == -3))
+      boring_enoent = 1;
+  }
   int expected_would_block = 0;
   if ((int64_t)ret == -11 /* EAGAIN */) {
     switch ((int)num) {

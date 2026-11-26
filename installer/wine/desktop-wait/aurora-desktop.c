@@ -48,7 +48,7 @@ typedef struct {
 } STARTUPINFOW;
 typedef struct { HANDLE hProcess, hThread; DWORD dwProcessId, dwThreadId; } PROCESS_INFORMATION;
 
-#define WAIT_MS 120000u
+#define WAIT_MS 300000u
 #define HOLD_MS 60000u
 
 static void say(const char *s, DWORD n) {

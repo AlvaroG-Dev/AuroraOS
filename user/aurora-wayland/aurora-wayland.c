@@ -3605,6 +3605,7 @@ struct xwin {
   int or_;       /* override-redirect */
   int mapped;
   int delete_proto;
+  int take_focus; /* WM_TAKE_FOCUS en WM_PROTOCOLS (Wine, Java...) */
   uint32_t surf_id;
   struct xsurf *xs;
 };
@@ -3615,7 +3616,50 @@ static pid_t g_xpid;
 static struct wl_event_source *g_xwm_src;
 static const char *g_xdisplay_num = "0";
 static xcb_atom_t A_SURF_ID, A_WM_PROTOCOLS, A_DELETE, A_NET_WM_NAME, A_UTF8,
-    A_WM_CLASS, A_ALLOW_COMMITS, A_NET_WM_ICON;
+    A_WM_CLASS, A_ALLOW_COMMITS, A_NET_WM_ICON, A_WM_STATE, A_TAKE_FOCUS,
+    A_NET_WM_STATE, A_NET_ACTIVE_WINDOW;
+
+// ICCCM 4.1.3.1: el WM pone WM_STATE en cada ventana gestionada al mapearla
+// (NormalState = 1) y al retirarla (WithdrawnState = 0). Wine 10+ espera ese
+// cambio tras XMapWindow; sin el, la ventana queda "en cambio de WM_STATE"
+// para siempre: ignora el foco (FocusIn) y aplaza sus cambios de estado.
+static void xwm_set_wm_state(xcb_window_t w, uint32_t state) {
+  uint32_t v[2] = {state, XCB_WINDOW_NONE};
+  xcb_change_property(g_xc, XCB_PROP_MODE_REPLACE, w, A_WM_STATE, A_WM_STATE, 32, 2, v);
+}
+
+// _NET_WM_STATE pedido por el cliente (mensaje a la raiz): el WM confirma
+// actualizando la propiedad, que es lo que el cliente espera ver.
+static void xwm_net_wm_state(xcb_client_message_event_t *e) {
+  uint32_t action = e->data.data32[0];
+  xcb_atom_t req[2] = {e->data.data32[1], e->data.data32[2]};
+  xcb_atom_t cur[16];
+  int n = 0;
+  xcb_get_property_reply_t *r = xcb_get_property_reply(
+      g_xc, xcb_get_property(g_xc, 0, e->window, A_NET_WM_STATE, XCB_ATOM_ATOM, 0, 16), NULL);
+  if (r) {
+    int len = xcb_get_property_value_length(r) / 4;
+    xcb_atom_t *a = xcb_get_property_value(r);
+    for (int i = 0; i < len && n < 16; i++)
+      cur[n++] = a[i];
+    free(r);
+  }
+  for (int k = 0; k < 2; k++) {
+    if (!req[k])
+      continue;
+    int at = -1;
+    for (int i = 0; i < n; i++)
+      if (cur[i] == req[k])
+        at = i;
+    int want = action == 1 || (action == 2 && at < 0);
+    if (want && at < 0 && n < 16)
+      cur[n++] = req[k];
+    else if (!want && at >= 0)
+      cur[at] = cur[--n];
+  }
+  xcb_change_property(g_xc, XCB_PROP_MODE_REPLACE, e->window, A_NET_WM_STATE,
+                      XCB_ATOM_ATOM, 32, (uint32_t)n, cur);
+}
 
 static xcb_atom_t xatom(const char *name) {
   xcb_intern_atom_cookie_t c = xcb_intern_atom(g_xc, 0, (uint16_t)strlen(name), name);
@@ -3732,12 +3776,16 @@ static void xwin_read_props(struct xwin *xw) {
       xcb_get_property(g_xc, 0, xw->id, A_WM_PROTOCOLS, XCB_ATOM_ATOM, 0, 32);
   xcb_get_property_reply_t *pr = xcb_get_property_reply(g_xc, pc, NULL);
   xw->delete_proto = 0;
+  xw->take_focus = 0;
   if (pr) {
     xcb_atom_t *at = xcb_get_property_value(pr);
     int na = xcb_get_property_value_length(pr) / (int)sizeof(xcb_atom_t);
-    for (int i = 0; i < na; i++)
+    for (int i = 0; i < na; i++) {
       if (at[i] == A_DELETE)
         xw->delete_proto = 1;
+      if (at[i] == A_TAKE_FOCUS)
+        xw->take_focus = 1;
+    }
     free(pr);
   }
 }
@@ -3862,8 +3910,23 @@ static void xwm_toplevel_configure(struct toplevel *tl, int w, int h) {
     xw->w = w;
     xw->h = h;
   }
-  if (tl->activated)
+  if (tl->activated) {
+    // Clientes con WM_TAKE_FOCUS (Wine pone input=False en WM_HINTS) solo se
+    // activan cuando el WM se lo ofrece con ese mensaje.
+    if (xw->take_focus) {
+      xcb_client_message_event_t ev = {0};
+      ev.response_type = XCB_CLIENT_MESSAGE;
+      ev.format = 32;
+      ev.window = xw->id;
+      ev.type = A_WM_PROTOCOLS;
+      ev.data.data32[0] = A_TAKE_FOCUS;
+      ev.data.data32[1] = XCB_CURRENT_TIME;
+      xcb_send_event(g_xc, 0, xw->id, XCB_EVENT_MASK_NO_EVENT, (const char *)&ev);
+    }
     xcb_set_input_focus(g_xc, XCB_INPUT_FOCUS_POINTER_ROOT, xw->id, XCB_CURRENT_TIME);
+    xcb_change_property(g_xc, XCB_PROP_MODE_REPLACE, g_xroot, A_NET_ACTIVE_WINDOW,
+                        XCB_ATOM_WINDOW, 32, 1, &xw->id);
+  }
   xcb_flush(g_xc);
 }
 
@@ -4350,6 +4413,7 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
     case XCB_MAP_REQUEST: {
       xcb_map_request_event_t *e = (void *)ev;
       xcb_map_window(g_xc, e->window);
+      xwm_set_wm_state(e->window, 1 /* NormalState */);
       /* Xwayland retiene los commits de la ventana hasta que el WM lo permite. */
       uint32_t one = 1;
       xcb_change_property(g_xc, XCB_PROP_MODE_REPLACE, e->window, A_ALLOW_COMMITS,
@@ -4373,8 +4437,11 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
     case XCB_UNMAP_NOTIFY: {
       xcb_unmap_notify_event_t *e = (void *)ev;
       struct xwin *xw = xwin_find(e->window);
-      if (xw)
+      if (xw) {
+        if (!xw->or_)
+          xwm_set_wm_state(xw->id, 0 /* WithdrawnState */);
         xwin_unmap(xw);
+      }
       break;
     }
     case XCB_DESTROY_NOTIFY: {
@@ -4386,7 +4453,9 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
     }
     case XCB_CLIENT_MESSAGE: {
       xcb_client_message_event_t *e = (void *)ev;
-      if (e->type == A_SURF_ID) {
+      if (e->type == A_NET_WM_STATE && e->format == 32) {
+        xwm_net_wm_state(e);
+      } else if (e->type == A_SURF_ID) {
         struct xwin *xw = xwin_find(e->window);
         if (xw) {
           xw->surf_id = e->data.data32[0];
@@ -4495,6 +4564,10 @@ static void xwm_ready(void) {
   A_UTF8 = xatom("UTF8_STRING");
   A_WM_CLASS = xatom("WM_CLASS");
   A_ALLOW_COMMITS = xatom("_XWAYLAND_ALLOW_COMMITS");
+  A_WM_STATE = xatom("WM_STATE");
+  A_TAKE_FOCUS = xatom("WM_TAKE_FOCUS");
+  A_NET_WM_STATE = xatom("_NET_WM_STATE");
+  A_NET_ACTIVE_WINDOW = xatom("_NET_ACTIVE_WINDOW");
   xsel_init();
   xcb_flush(g_xc);
   g_xwm_src = wl_event_loop_add_fd(g_loop, g_xwm_fd, WL_EVENT_READABLE, xwm_event, NULL);
