@@ -563,6 +563,7 @@ initrd.tar: sysroot user elf_malformed python-stdlib drivers $(NVIDIA_DEP) asset
 		rm -f sysroot/usr/share/applications/wine.desktop; \
 		mkdir -p sysroot/usr/share/aurora/wine sysroot/usr/share/aurora/apps; \
 		cp -f installer/wine/*.reg sysroot/usr/share/aurora/wine/ 2>/dev/null || true; \
+		for f in installer/wine/*.msstyles.xz; do xz -dc "$$f" > sysroot/usr/share/aurora/wine/$$(basename "$$f" .xz) || exit 1; done; \
 		cp -f installer/wine/desktop-wait/aurora-desktop.exe sysroot/usr/share/aurora/wine/ 2>/dev/null || true; \
 		for f in installer/wine/*.desktop; do if [ -e "$$f" ]; then install -m 644 "$$f" sysroot/usr/share/applications/; fi; done; \
 		for f in installer/wine/aurora-wine installer/wine/aurora-wine-diag; do if [ -e "$$f" ]; then install -m 755 "$$f" sysroot/usr/bin/; fi; done; \

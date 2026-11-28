@@ -144,11 +144,13 @@ if [ ! -f "$ok" ] || ! pfx_completo; then
         exit 1
     fi
 fi
-if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
+# "-2": estilo visual aurora-*.msstyles (los prefijos anteriores solo tenian la
+# paleta y se vuelven a importar).
+if [ "$(cat "$WINEPREFIX/.aurora-theme" 2>/dev/null)" != "$mode-2" ] && [ -f "$SHARE/aurora-$mode.reg" ]; then
     # reg.exe (de consola) y no regedit: regedit es una app grafica y arranca
     # su propio explorer.exe, que luego le quita el escritorio al de
     # aurora-desktop.exe (EXPLORER-SALIO) y se cierra al acabar regedit.
-    wine reg import "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode" > "$WINEPREFIX/.aurora-theme"
+    wine reg import "$SHARE/aurora-$mode.reg" >>"$AURORA_WINE_LOG" 2>&1 && echo "$mode-2" > "$WINEPREFIX/.aurora-theme"
 fi
 # Wine cambia el nombre de sus procesos con prctl: explorer.exe sale en comm.
 hay_explorer() {

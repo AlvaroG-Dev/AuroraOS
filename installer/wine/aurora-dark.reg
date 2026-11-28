@@ -39,7 +39,10 @@ Windows Registry Editor Version 5.00
 "AppsUseLightTheme"=dword:00000000
 "SystemUsesLightTheme"=dword:00000000
 
-; Sin estilo visual msstyles: los controles usan esta paleta (solida, sin degradados)
+; Estilo visual de Aurora (tools/gen-wine-aurora-theme.py): controles con la
+; paleta de Aurora y el verde aurora en vez del azul de Wine.
 [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\ThemeManager]
-"ThemeActive"="0"
-
+"ThemeActive"="1"
+"DllName"="Z:\\usr\\share\\aurora\\wine\\aurora-dark.msstyles"
+"ColorName"="Aurora"
+"SizeName"="NormalSize"

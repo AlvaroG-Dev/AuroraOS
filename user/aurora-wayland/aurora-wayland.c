@@ -4410,6 +4410,32 @@ static int xwm_event(int fd, uint32_t mask, void *data) {
       }
       break;
     }
+    case XCB_CONFIGURE_NOTIFY: {
+      // Las override-redirect (menus, tooltips, listas desplegables) no piden
+      // permiso al WM: se colocan solas con XMoveWindow y solo nos llega este
+      // aviso. Sin seguirlo, un menu de Wine se quedaba donde se creo (0,0,
+      // arriba a la izquierda) en vez de bajo su barra de menus.
+      xcb_configure_notify_event_t *e = (void *)ev;
+      struct xwin *xw = xwin_find(e->window);
+      if (!xw || !xw->or_)
+        break;
+      int moved = xw->x != e->x || xw->y != e->y;
+      xw->x = e->x;
+      xw->y = e->y;
+      xw->w = e->width;
+      xw->h = e->height;
+      struct xsurf *xs = xw->xs;
+      if (xs && moved) {
+        xs->wx = xw->x;
+        xs->wy = xw->y;
+        // Ya en pantalla: se vuelve a crear en la posicion nueva.
+        if (xs->win_id >= 0 && xs->surface && xs->surface->has_content) {
+          xs_unmap(xs);
+          root_update(xs->surface, (rc_t){0, 0, xs->surface->dw, xs->surface->dh});
+        }
+      }
+      break;
+    }
     case XCB_MAP_REQUEST: {
       xcb_map_request_event_t *e = (void *)ev;
       xcb_map_window(g_xc, e->window);

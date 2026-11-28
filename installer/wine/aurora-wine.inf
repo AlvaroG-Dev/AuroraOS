@@ -34,8 +34,11 @@ HKCU,"Control Panel\Colors","WindowFrame",,"58 58 58"
 HKCU,"Control Panel\Colors","WindowText",,"255 255 255"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","AppsUseLightTheme",0x10001,0
 HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","SystemUsesLightTheme",0x10001,0
-; Sin estilo visual msstyles: los controles clásicos usan la paleta de arriba (sólida, sin degradados)
-HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ThemeActive",,"0"
+; Estilo visual de Aurora (aurora-wine lo cambia a claro u oscuro)
+HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ThemeActive",,"1"
+HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","DllName",,"Z:\usr\share\aurora\wine\aurora-dark.msstyles"
+HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ColorName",,"Aurora"
+HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","SizeName",,"NormalSize"
 ; Tipografía de Aurora (Inter) en los diálogos
 HKCU,"Software\Wine\Fonts\Replacements","Tahoma",,"Inter"
 HKCU,"Software\Wine\Fonts\Replacements","MS Shell Dlg",,"Inter"
